@@ -15,6 +15,7 @@ from routes.lit import router as lit_router
 from routes.idea import router as idea_router
 from routes.algo import router as algo_router
 from routes.agent import router as agent_router
+from routes.obsidian import router as obsidian_router
 
 
 @asynccontextmanager
@@ -38,6 +39,7 @@ app.include_router(lit_router)
 app.include_router(idea_router)
 app.include_router(algo_router)
 app.include_router(agent_router)
+app.include_router(obsidian_router)
 
 # 2. 只用 FileResponse 返回首页，不用 StaticFiles
 @app.get("/")

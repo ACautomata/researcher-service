@@ -26,6 +26,9 @@ class Config:
     ANTHROPIC_MODEL: str = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-20250514")
     AGENT_AUTO_APPROVE: bool = os.getenv("AGENT_AUTO_APPROVE", "true").lower() == "true"
 
+    # Obsidian Vault
+    OBSIDIAN_VAULT_PATH: str = os.getenv("OBSIDIAN_VAULT_PATH", "")
+
     @classmethod
     def ai_headers(cls) -> dict:
         return {
@@ -47,3 +50,4 @@ ANTHROPIC_API_KEY = cfg.ANTHROPIC_API_KEY or cfg.AI_API_KEY
 ANTHROPIC_BASE_URL = cfg.ANTHROPIC_BASE_URL
 ANTHROPIC_MODEL = cfg.ANTHROPIC_MODEL
 AGENT_AUTO_APPROVE = cfg.AGENT_AUTO_APPROVE
+OBSIDIAN_VAULT_PATH = cfg.OBSIDIAN_VAULT_PATH
