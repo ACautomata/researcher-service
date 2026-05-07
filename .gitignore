@@ -1,0 +1,17 @@
+# 敏感配置（包含 API 密钥）
+.env
+
+# 运行时产物
+pipeline.db
+__pycache__/
+*.pyc
+*.pyo
+
+# 用户上传
+uploads/*
+
+# IDE
+.idea/
+
+# 临时文件
+*.log

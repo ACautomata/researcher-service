@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI Research Pipeline</title>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Noto+Sans+SC:wght@400;500;700;900&display=swap" rel="stylesheet" crossorigin>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css" crossorigin>
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+
+<div class="bg-glow bg-1"></div>
+<div class="bg-glow bg-2"></div>
+<div class="bg-grid"></div>
+<div class="tbox" id="tbox"></div>
+
+<div class="auth-shell" id="authShell">
+  <div class="auth-bg" id="authBg" onclick="onAuthBgClick(event)"></div>
+  <div class="auth-panel">
+    <button type="button" class="auth-close" id="authCloseBtn" onclick="closeOptionalAuth()" aria-label="关闭"><i class="fa-solid fa-xmark"></i></button>
+    <div class="auth-card">
+      <div class="auth-brand">
+        <div class="auth-logo"><i class="fa-solid fa-brain"></i></div>
+        <div>
+          <div class="auth-brand-t">AI Research Pipeline</div>
+          <div class="auth-brand-s">登录后可同步会话；在 .env 中设置 AUTH_ENABLED=true 可强制全站鉴权</div>
+        </div>
+      </div>
+      <div class="auth-tabs">
+        <button type="button" class="auth-tab on" id="tabLogin" onclick="showAuthTab('login')">登录</button>
+        <button type="button" class="auth-tab" id="tabReg" onclick="showAuthTab('register')">注册</button>
+      </div>
+      <div id="authErr" class="err-box" style="display:none;margin-bottom:14px"></div>
+      <div id="formLogin" class="auth-form on">
+        <div class="auth-field">
+          <label class="auth-lbl" for="loginUser">用户名</label>
+          <input class="inp" id="loginUser" autocomplete="username" placeholder="用户名">
+        </div>
+        <div class="auth-field">
+          <label class="auth-lbl" for="loginPass">密码</label>
+          <input class="inp" id="loginPass" type="password" autocomplete="current-password" placeholder="密码">
+        </div>
+        <button type="button" class="auth-submit" onclick="submitLogin()"><i class="fa-solid fa-right-to-bracket" style="margin-right:8px"></i>进入工作台</button>
+      </div>
+      <div id="formReg" class="auth-form">
+        <div class="auth-field">
+          <label class="auth-lbl" for="regUser">用户名</label>
+          <input class="inp" id="regUser" autocomplete="username" placeholder="2–32 位，字母数字下划线或中文">
+        </div>
+        <div class="auth-field">
+          <label class="auth-lbl" for="regPass">密码</label>
+          <input class="inp" id="regPass" type="password" autocomplete="new-password" placeholder="至少 8 位">
+        </div>
+        <div class="auth-field">
+          <label class="auth-lbl" for="regPass2">确认密码</label>
+          <input class="inp" id="regPass2" type="password" autocomplete="new-password" placeholder="再次输入密码">
+        </div>
+        <button type="button" class="auth-submit" onclick="submitRegister()"><i class="fa-solid fa-user-plus" style="margin-right:8px"></i>创建账户</button>
+      </div>
+      <div class="auth-foot" id="authFootNote">注册即创建本地账户，数据仍保存在本机 SQLite。</div>
+    </div>
+  </div>
+</div>
+
+<div class="app" id="appMain">
+  <aside class="sidebar" id="sideEl"></aside>
+  <div class="main">
+    <header class="topbar" id="topEl"></header>
+    <div class="content" id="ctnEl"></div>
+  </div>
+</div>
+
+<script async src="https://cdn.jsdelivr.net/npm/marked@15.0.6/marked.min.js" crossorigin="anonymous"></script>
+<script async src="https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js" crossorigin="anonymous"></script>
+
+<script src="/js/core.js"></script>
+<script src="/js/pages/home.js"></script>
+<script src="/js/pages/profile.js"></script>
+<script src="/js/pages/kb.js"></script>
+<script src="/js/pages/lit.js"></script>
+<script src="/js/pages/idea.js"></script>
+<script src="/js/pages/algo.js"></script>
+<script src="/js/pages/agent.js"></script>
+<script src="/js/pages/obs.js"></script>
+<script src="/js/pages/doc.js"></script>
+<script src="/js/app.js"></script>
+</body>
+</html>
