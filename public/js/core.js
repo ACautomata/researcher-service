@@ -11,6 +11,7 @@ var P_GUEST = [
   { id: 'doc', name: '需求与API文档', icon: 'fa-book', color: '#7d849a', step: 0, desc: '规范与接口定义' }
 ];
 var P_FULL = [
+  { id: 'dashboard', name: '任务状态', icon: 'fa-chart-line', color: '#00E5A0', step: 0, desc: '任务状态与资源监控', navBreak: '监控' },
   { id: 'kb', name: '知识库构建与更新', icon: 'fa-database', color: '#00E5A0', step: 1, desc: '上传文献，解析关键字' },
   { id: 'lit', name: '文献问题发现与验证', icon: 'fa-magnifying-glass-chart', color: '#F5A623', step: 2, desc: '分析验证文献问题' },
   { id: 'idea', name: 'Idea生成与验证分析', icon: 'fa-lightbulb', color: '#A78BFA', step: 3, desc: '生成评价研究创意' },
@@ -188,6 +189,7 @@ function buildTop(){
 
 async function go(id){
   if(pI){clearInterval(pI);pI=null}
+  if(typeof stopDashboardPoll === 'function') stopDashboardPoll();
   var np = navPages();
   if (!np.some(function(x){ return x.id === id; })) id = np[0].id;
   cur = id;
@@ -209,6 +211,7 @@ async function buildContent(){
   if(cur==='kb') setTimeout(setupDrag, 60);
   if(cur==='obs') setTimeout(function(){ loadObsTree(''); loadObsStats(); }, 100);
   if(cur==='profile') setTimeout(function(){ loadProfilePage(); }, 50);
+  if(cur==='dashboard') setTimeout(function(){ loadDashboard(); startDashboardPoll(); }, 50);
 }
 
 /* ===== Auth ===== */
