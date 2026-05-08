@@ -1,8 +1,6 @@
 /* ===== Profile Page ===== */
 pages.profile = async function() {
-  var h = '<div class="stats" id="profStats"><div class="st-card"><div class="st-v" style="color:#484f6e">-</div><div class="st-l">加载中...</div></div></div>';
-  h += '<div class="card mb24" id="profCard"><div class="card-t"><i class="fa-solid fa-sliders"></i>个人配置 <span class="api-t api-g" style="margin-left:auto">GET/PUT /user/settings</span></div><div id="profInner" style="color:#7d849a;font-size:13px">加载中…</div></div>';
-  h += '<div class="card mb24"><div class="card-t"><i class="fa-solid fa-microchip"></i>系统资源使用 <span class="api-t api-g" style="margin-left:auto">GET /dashboard/stats</span></div><div id="profSysStats" style="color:#7d849a;font-size:13px">加载中…</div></div>';
+  var h = '<div class="card mb24" id="profCard"><div class="card-t"><i class="fa-solid fa-sliders"></i>个人配置 <span class="api-t api-g" style="margin-left:auto">GET/PUT /user/settings</span></div><div id="profInner" style="color:#7d849a;font-size:13px">加载中…</div></div>';
   h += '<div class="card"><div class="card-t"><i class="fa-solid fa-coins"></i>Token 使用情况 <span class="api-t api-g" style="margin-left:auto">GET /dashboard/usage</span></div><div id="profTokenStats" style="color:#7d849a;font-size:13px">加载中…</div></div>';
   return h;
 };
@@ -90,47 +88,9 @@ async function setTheme(name) {
 
 async function loadProfileStats() {
   try {
-    await Promise.all([loadProfileSysStats(), loadProfileTokenStats()]);
+    await loadProfileTokenStats();
   } catch (e) {
     toast('加载统计信息失败: ' + e.message, 'fa-exclamation-circle', '#FF6B81');
-  }
-}
-
-async function loadProfileSysStats() {
-  var el = document.getElementById('profSysStats');
-  if (!el) return;
-  try {
-    var stats = await api('GET', '/dashboard/stats');
-    var h = '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px">';
-
-    h += '<div style="padding:16px;border-radius:12px;background:rgba(0,229,160,.05);border:1px solid rgba(0,229,160,.1)">';
-    h += '<div style="font-size:11px;color:#484f6e;margin-bottom:8px">CPU 使用率</div>';
-    h += '<div style="display:flex;align-items:center;gap:8px">';
-    h += '<div style="font-family:\'Space Grotesk\';font-size:24px;font-weight:700;color:#00E5A0">'+stats.cpu.percent+'%</div>';
-    h += '<div style="flex:1;height:6px;background:rgba(255,255,255,.06);border-radius:3px;overflow:hidden">';
-    h += '<div style="width:'+Math.min(stats.cpu.percent,100)+'%;height:100%;background:#00E5A0;transition:width .5s ease"></div></div></div>';
-    h += '<div style="font-size:10px;color:#6e768a;margin-top:4px">'+stats.cpu.cores+' 核心</div></div>';
-
-    h += '<div style="padding:16px;border-radius:12px;background:rgba(167,139,250,.05);border:1px solid rgba(167,139,250,.1)">';
-    h += '<div style="font-size:11px;color:#484f6e;margin-bottom:8px">内存使用</div>';
-    h += '<div style="display:flex;align-items:center;gap:8px">';
-    h += '<div style="font-family:\'Space Grotesk\';font-size:24px;font-weight:700;color:#A78BFA">'+stats.memory.percent+'%</div>';
-    h += '<div style="flex:1;height:6px;background:rgba(255,255,255,.06);border-radius:3px;overflow:hidden">';
-    h += '<div style="width:'+Math.min(stats.memory.percent,100)+'%;height:100%;background:#A78BFA;transition:width .5s ease"></div></div></div>';
-    h += '<div style="font-size:10px;color:#6e768a;margin-top:4px">'+stats.memory.used_gb+'GB / '+stats.memory.total_gb+'GB</div></div>';
-
-    h += '<div style="padding:16px;border-radius:12px;background:rgba(245,166,35,.05);border:1px solid rgba(245,166,35,.1)">';
-    h += '<div style="font-size:11px;color:#484f6e;margin-bottom:8px">磁盘使用</div>';
-    h += '<div style="display:flex;align-items:center;gap:8px">';
-    h += '<div style="font-family:\'Space Grotesk\';font-size:24px;font-weight:700;color:#F5A623">'+stats.disk.percent+'%</div>';
-    h += '<div style="flex:1;height:6px;background:rgba(255,255,255,.06);border-radius:3px;overflow:hidden">';
-    h += '<div style="width:'+Math.min(stats.disk.percent,100)+'%;height:100%;background:#F5A623;transition:width .5s ease"></div></div></div>';
-    h += '<div style="font-size:10px;color:#6e768a;margin-top:4px">'+stats.disk.used_gb+'GB / '+stats.disk.total_gb+'GB</div></div>';
-
-    h += '</div>';
-    el.innerHTML = h;
-  } catch (e) {
-    el.innerHTML = '<div class="err-box">加载失败: '+esc(e.message)+'</div>';
   }
 }
 

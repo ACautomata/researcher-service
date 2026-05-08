@@ -409,7 +409,6 @@ async function loadSystemStats() {
     });
   }
 }
-}
 
 function startDashboardPoll() {
   if (dashInterval) clearInterval(dashInterval);
