@@ -90,7 +90,7 @@ async def build_settings_public_dict(user_id: int) -> dict:
         "anthropic_model": (row.get("anthropic_model") or "").strip(),
         "anthropic_api_key_set": bool(ak2),
         "anthropic_api_key_masked": mask_secret(ak2) if ak2 else None,
-        "theme_color": (row.get("theme_color") or "emerald").strip(),
+        "theme_color": (row.get("theme_color") or "aurora").strip(),
     }
 
 
@@ -119,7 +119,7 @@ async def apply_user_settings_patch(user_id: int, patch: dict) -> None:
         vals.append((patch["anthropic_model"] or "").strip())
     if "theme_color" in patch:
         cols.append("theme_color = ?")
-        vals.append((patch["theme_color"] or "emerald").strip())
+        vals.append((patch["theme_color"] or "aurora").strip())
     if not cols:
         return
     cols.append("updated_at = datetime('now','localtime')")

@@ -11,13 +11,14 @@ var P_GUEST = [
   { id: 'doc', name: '需求与API文档', icon: 'fa-book', color: '#7d849a', step: 0, desc: '规范与接口定义' }
 ];
 var P_FULL = [
-  { id: 'dashboard', name: '任务状态', icon: 'fa-chart-line', color: '#00E5A0', step: 0, desc: '任务状态与资源监控', navBreak: '监控' },
-  { id: 'kb', name: '知识库构建与更新', icon: 'fa-database', color: '#00E5A0', step: 1, desc: '上传文献，解析关键字' },
-  { id: 'lit', name: '文献问题发现与验证', icon: 'fa-magnifying-glass-chart', color: '#F5A623', step: 2, desc: '分析验证文献问题' },
-  { id: 'idea', name: 'Idea生成与验证分析', icon: 'fa-lightbulb', color: '#A78BFA', step: 3, desc: '生成评价研究创意' },
-  { id: 'algo', name: '算法自动实现与优化', icon: 'fa-code', color: '#FF6B81', step: 4, desc: '输出算法代码' },
-  { id: 'agent', name: 'Agent 终端控制台', icon: 'fa-terminal', color: '#00D4FF', step: 5, desc: 'Claude Agent 交互', navBreak: '工具与扩展' },
-  { id: 'obs', name: 'Obsidian Vault', icon: 'fa-note-sticky', color: '#C084FC', step: 6, desc: '笔记浏览·编辑·图谱' },
+  { id: 'dashboard', name: '任务状态', icon: 'fa-chart-line', color: '#00E5A0', step: 0, desc: '任务状态与资源监控', navBreak: '步骤' },
+  { id: 'kb', name: '知识库构建与更新', icon: 'fa-database', color: '#00E5A0', step: 0, desc: '上传文献，解析关键字' },
+  { id: 'lit', name: '文献问题发现与验证', icon: 'fa-magnifying-glass-chart', color: '#F5A623', step: 0, desc: '分析验证文献问题' },
+  { id: 'idea', name: 'Idea生成与验证分析', icon: 'fa-lightbulb', color: '#A78BFA', step: 0, desc: '生成评价研究创意' },
+  { id: 'algo', name: '算法自动实现', icon: 'fa-code', color: '#FF6B81', step: 0, desc: '代码浏览与编辑' },
+  { id: 'param', name: '参数优化', icon: 'fa-sliders', color: '#F5A623', step: 0, desc: '参数组对比与曲线' },
+  { id: 'agent', name: 'Agent 终端控制台', icon: 'fa-terminal', color: '#00D4FF', step: 0, desc: 'Claude Agent 交互', navBreak: '工具与扩展' },
+  { id: 'obs', name: 'Obsidian Vault', icon: 'fa-note-sticky', color: '#C084FC', step: 0, desc: '笔记浏览·编辑·图谱' },
   { id: 'profile', name: '个人配置', icon: 'fa-sliders', color: '#34D399', step: 0, desc: 'API 密钥与模型', navBreak: '账户' },
   { id: 'doc', name: '需求与API文档', icon: 'fa-book', color: '#7d849a', step: 0, desc: '规范与接口定义' }
 ];
@@ -146,7 +147,7 @@ async function loadAlgos() {
 /* ===== Navigation ===== */
 function buildNav(){
   var items = navPages();
-  var secTitle = authUser ? 'Pipeline 步骤' : '入门';
+  var secTitle = authUser ? '步骤' : '入门';
   var h='<div class="sb-head"><div class="sb-logo"><i class="fa-solid fa-brain"></i></div><div><div class="sb-name">AI Pipeline</div><div class="sb-sub">Research Automation</div></div></div><div class="sb-nav"><div class="sb-sec">'+secTitle+'</div>';
   for(var i=0;i<items.length;i++){
     var p=items[i], act=cur===p.id;
@@ -428,8 +429,8 @@ async function bootstrap() {
 // 8 套预设主题：每套定义 accent（强调色）、rgb（RGB 逗号值）、
 // mode（dark/light）、bg/bgRgb/bgAlt（背景色）、glow1/glow2（环境光晕）
 var THEMES = {
-  emerald: { name:'翡翠绿', mode:'dark', accent:'#00E5A0', rgb:'0,229,160', bg:'#05070d', bgRgb:'5,7,13', bgAlt:'#0a0e17', glow1:'#00E5A0', glow2:'#A78BFA' },
   aurora:  { name:'极光蓝', mode:'light', accent:'#3B82F6', rgb:'59,130,246', bg:'#f0f4ff', bgRgb:'240,244,255', bgAlt:'#e4ebfa', glow1:'#3B82F6', glow2:'#60A5FA' },
+  emerald: { name:'翡翠绿', mode:'dark', accent:'#00E5A0', rgb:'0,229,160', bg:'#05070d', bgRgb:'5,7,13', bgAlt:'#0a0e17', glow1:'#00E5A0', glow2:'#A78BFA' },
   flame:   { name:'烈焰橙', mode:'dark', accent:'#F97316', rgb:'249,115,22', bg:'#0d0805', bgRgb:'13,8,5', bgAlt:'#140c07', glow1:'#F97316', glow2:'#DC2626' },
   nebula:  { name:'星云紫', mode:'dark', accent:'#A78BFA', rgb:'167,139,250', bg:'#0a0510', bgRgb:'10,5,16', bgAlt:'#10081a', glow1:'#A78BFA', glow2:'#EC4899' },
   ocean:   { name:'海洋青', mode:'light', accent:'#0891B2', rgb:'8,145,178', bg:'#eef9ff', bgRgb:'238,249,255', bgAlt:'#e0f2fe', glow1:'#0891B2', glow2:'#06B6D4' },
@@ -441,7 +442,7 @@ var THEMES = {
 /* 注入 :root CSS 变量覆盖默认主题 */
 function applyTheme(name) {
   var theme = THEMES[name];
-  if (!theme) { name = 'emerald'; theme = THEMES.emerald; }
+  if (!theme) { name = 'aurora'; theme = THEMES.aurora; }
   var dark = theme.mode !== 'light';
   var text = dark ? '#c9d1d9' : '#1f2937';
   var textMuted = dark ? '#484f6e' : '#6b7280';

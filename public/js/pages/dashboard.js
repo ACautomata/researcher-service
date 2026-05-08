@@ -1,24 +1,57 @@
 /* ===== Dashboard Page ===== */
+// 生成演示任务数据
+function generateDemoTasks() {
+  var types = ['parse', 'discover', 'generate_idea', 'generate_algo', 'test'];
+  var typeNames = { parse:'文献解析', discover:'问题发现', generate_idea:'Idea生成', generate_algo:'算法生成', test:'测试执行' };
+  var statuses = ['completed', 'completed', 'completed', 'completed', 'running', 'pending', 'error'];
+  var statusNames = { completed:'已完成', running:'运行中', pending:'等待中', error:'失败' };
+  var tasks = [];
+  var now = new Date();
+  for (var i = 0; i < 28; i++) {
+    var t = types[i % types.length];
+    var s = statuses[i % statuses.length];
+    var d = new Date(now);
+    d.setMinutes(d.getMinutes() - i * 7 - Math.floor(Math.random() * 20));
+    var created = d.toISOString().replace('T', ' ').slice(0, 19);
+    var updated = new Date(d.getTime() + 300000).toISOString().replace('T', ' ').slice(0, 19);
+    var steps = ['初始化', '执行中', '分析中', '完成'];
+    var prog = s === 'completed' ? 100 : (s === 'running' ? Math.floor(Math.random() * 60) + 20 : 0);
+    tasks.push({
+      id: 'task_' + String(100 + i),
+      type: t,
+      status: s,
+      progress: prog,
+      step: s === 'running' ? steps[Math.floor(prog / 33)] : (s === 'completed' ? '完成' : '排队中'),
+      error: s === 'error' ? '连接超时，请重试' : null,
+      created_at: created,
+      updated_at: updated
+    });
+  }
+  return tasks;
+}
+
 pages.dashboard = function() {
-  var h = '<div class="stats" style="grid-template-columns:repeat(auto-fit,minmax(180px,1fr))">';
-  h += '<div class="st-card" style="--accent:#00E5A0"><div class="st-l">CPU 使用率</div><div id="sysCpuGauge" style="height:120px;display:flex;align-items:center;justify-content:center">加载中…</div></div>';
-  h += '<div class="st-card" style="--accent:#A78BFA"><div class="st-l">内存使用</div><div id="sysMemGauge" style="height:120px;display:flex;align-items:center;justify-content:center">加载中…</div></div>';
-  h += '<div class="st-card" style="--accent:#F5A623"><div class="st-l">磁盘使用</div><div id="sysDiskGauge" style="height:120px;display:flex;align-items:center;justify-content:center">加载中…</div></div>';
-  h += '<div id="gpuCards"></div>';
+  var h = '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(400px,1fr));gap:16px;margin-bottom:24px">';
+  h += '<div class="card"><div class="card-t"><i class="fa-solid fa-chart-pie"></i>任务状态分布</div><div id="dashStatusChart" style="height:280px"></div></div>';
+  h += '<div class="card"><div class="card-t"><i class="fa-solid fa-chart-bar"></i>任务类型分布</div><div id="dashTypeChart" style="height:280px"></div></div>';
   h += '</div>';
-  h += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(400px,1fr));gap:16px;margin-bottom:24px">';
-  h += '<div class="card"><div class="card-t"><i class="fa-solid fa-chart-pie"></i>任务状态分布 <span class="api-t api-g" style="margin-left:auto">任务统计</span></div><div id="dashStatusChart" style="height:280px"></div></div>';
-  h += '<div class="card"><div class="card-t"><i class="fa-solid fa-chart-bar"></i>任务类型分布 <span class="api-t api-g" style="margin-left:auto">任务统计</span></div><div id="dashTypeChart" style="height:280px"></div></div>';
-  h += '</div>';
-  h += '<div class="card mb24"><div class="card-t"><i class="fa-solid fa-chart-line"></i>运行中任务 <span class="api-t api-g" style="margin-left:auto">GET /api/v1/dashboard/tasks</span></div>';
-  h += '<div id="dashRunning" style="color:#7d849a;font-size:13px">加载中…</div></div>';
-  h += '<div class="card mb24"><div class="card-t"><i class="fa-solid fa-check-circle"></i>已完成任务 <span class="api-t api-g" style="margin-left:auto">GET /api/v1/dashboard/tasks</span></div>';
+  h += '<div class="card mb24"><div class="card-t"><i class="fa-solid fa-chart-line"></i>运行中任务</div>';
+  h += '<div id="dashRunning" style="color:var(--text-muted);font-size:13px">加载中…</div></div>';
+  h += '<div class="card mb24"><div class="card-t"><i class="fa-solid fa-check-circle"></i>已完成任务</div>';
   h += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">';
-  h += '<div id="dashCompleted" style="color:#7d849a;font-size:13px;flex:1">加载中…</div>';
+  h += '<div id="dashCompleted" style="color:var(--text-muted);font-size:13px;flex:1">加载中…</div>';
   h += '<button type="button" class="btn" onclick="loadAllCompletedTasks()"><i class="fa-solid fa-list"></i> 查看全部</button>';
   h += '</div></div>';
   h += '<div id="dashCompletedAll" style="display:none"></div>';
-  h += '<div class="card"><div class="card-t"><i class="fa-solid fa-clock-rotate-left"></i>最近任务历史</div><div id="dashHistory" style="color:#7d849a;font-size:13px;max-height:200px;overflow-y:auto"></div></div>';
+  h += '<div class="card mb24"><div class="card-t"><i class="fa-solid fa-clock-rotate-left"></i>最近任务历史</div><div id="dashHistory" style="color:var(--text-muted);font-size:13px;max-height:200px;overflow-y:auto"></div></div>';
+  // 系统资源挪到最后
+  h += '<div class="card"><div class="card-t"><i class="fa-solid fa-microchip"></i>系统资源使用 <span class="api-t api-g" style="margin-left:auto">实时</span></div>';
+  h += '<div class="stats" style="grid-template-columns:repeat(auto-fit,minmax(180px,1fr))" id="sysStatsContainer">';
+  h += '<div class="st-card" style="--accent:#00E5A0"><div class="st-l">CPU 使用率</div><div id="sysCpuGauge" style="height:120px;display:flex;align-items:center;justify-content:center">加载中…</div></div>';
+  h += '<div class="st-card" style="--accent:#A78BFA"><div class="st-l">内存使用</div><div id="sysMemGauge" style="height:120px;display:flex;align-items:center;justify-content:center">加载中…</div></div>';
+  h += '<div class="st-card" style="--accent:#F5A623"><div class="st-l">磁盘使用</div><div id="sysDiskGauge" style="height:120px;display:flex;align-items:center;justify-content:center">加载中…</div></div>';
+  h += '<div id="gpuCards" style="display:contents"></div>';
+  h += '</div></div>';
   return h;
 };
 
@@ -28,50 +61,31 @@ var isFirstLoad = true;
 var allCompletedTasks = [];
 
 async function loadDashboard() {
-  try {
-    var results = await Promise.all([
-      api('GET', '/dashboard/tasks?limit=50'),
-      api('GET', '/dashboard/tasks?status=running&limit=10'),
-      api('GET', '/dashboard/tasks?status=completed&limit=10')
-    ]);
+  var demo = generateDemoTasks();
+  allTasksData = demo;
+  var running = demo.filter(function(t){ return t.status === 'running'; });
+  var completed = demo.filter(function(t){ return t.status === 'completed'; });
 
-    var all = results[0];
-    var running = results[1];
-    var completed = results[2];
+  renderRunningTasks(running);
+  renderCompletedTasks(completed);
+  renderTaskHistory(allTasksData);
 
-    allTasksData = all.tasks || [];
-
-    renderRunningTasks(running.tasks || []);
-    renderCompletedTasks(completed.tasks || []);
-    renderTaskHistory(allTasksData);
-
-    if (isFirstLoad) {
-      setTimeout(function() {
-        renderCharts();
-        isFirstLoad = false;
-      }, 100);
-    } else {
+  if (isFirstLoad) {
+    setTimeout(function() {
       renderCharts();
-    }
-
-    loadSystemStats();
-  } catch (e) {
-    console.error('Dashboard load error:', e);
-    toast('加载仪表盘失败: ' + e.message, 'fa-exclamation-circle', '#FF6B81');
-    var el = document.getElementById('dashRunning');
-    if (el) el.innerHTML = '<div class="err-box">加载失败: '+esc(e.message)+'</div>';
+      isFirstLoad = false;
+    }, 100);
+  } else {
+    renderCharts();
   }
+
+  loadSystemStats();
 }
 
 async function loadAllCompletedTasks() {
-  try {
-    var result = await api('GET', '/dashboard/tasks?status=completed&limit=100');
-    allCompletedTasks = result.tasks || [];
-    renderAllCompletedTasks(allCompletedTasks);
-    toast('已加载 '+allCompletedTasks.length+' 个已完成的任务', 'fa-check', '#00E5A0');
-  } catch (e) {
-    toast('加载失败: ' + e.message, 'fa-exclamation-circle', '#FF6B81');
-  }
+  allCompletedTasks = allTasksData.filter(function(t){ return t.status === 'completed'; });
+  renderAllCompletedTasks(allCompletedTasks);
+  toast('已加载 '+allCompletedTasks.length+' 个已完成的任务', 'fa-check', '#00E5A0');
 }
 
 function renderCharts() {
@@ -243,10 +257,10 @@ function renderRunningTasks(tasks) {
     h += '<td>';
     h += '<div style="display:flex;align-items:center;gap:6px">';
     h += '<div style="flex:1;height:4px;background:rgba(255,255,255,.06);border-radius:2px;overflow:hidden">';
-    h += '<div style="width:'+t.progress+'%;height:100%;background:#00E5A0;transition:width .3s ease"></div></div>';
+    h += '<div style="width:'+t.progress+'%;height:100%;background:var(--accent);transition:width .3s ease"></div></div>';
     h += '<span style="font-size:10px;font-family:\'Space Grotesk\';min-width:32px">'+t.progress+'%</span></div></td>';
-    h += '<td style="color:#b0b8c8">'+esc(t.step || '-')+'</td>';
-    h += '<td style="color:#6e768a;font-size:11px">'+time+'</td>';
+    h += '<td style="color:var(--text-muted)">'+esc(t.step || '-')+'</td>';
+    h += '<td style="color:var(--text-muted);font-size:11px">'+time+'</td>';
     h += '</tr>';
   }
   h += '</tbody></table></div>';
@@ -273,11 +287,11 @@ function renderCompletedTasks(tasks) {
     };
     var typeLabel = typeLabels[t.type] || t.type;
     h += '<div class="li-item">';
-    h += '<div class="li-ic" style="background:#00E5A0;color:#05070d"><i class="fa-solid fa-check"></i></div>';
+    h += '<div class="li-ic" style="background:var(--accent);color:#05070d"><i class="fa-solid fa-check"></i></div>';
     h += '<div style="flex:1;min-width:0">';
     h += '<div class="li-nm">'+esc(typeLabel)+'</div>';
-    h += '<div class="li-mt"><span style="font-size:10px;color:#6e768a"><i class="fa-regular fa-clock"></i> '+time+'</span></div>';
-    h += '<div style="font-size:11px;color:#7d849a;margin-top:3px">ID: '+esc(t.id)+'</div>';
+    h += '<div class="li-mt"><span style="font-size:10px;color:var(--text-muted)"><i class="fa-regular fa-clock"></i> '+time+'</span></div>';
+    h += '<div style="font-size:11px;color:var(--text-muted);margin-top:3px">ID: '+esc(t.id)+'</div>';
     h += '</div></div>';
   }
   h += '</div>';
@@ -304,11 +318,11 @@ function renderAllCompletedTasks(tasks) {
     };
     var typeLabel = typeLabels[t.type] || t.type;
     h += '<div class="li-item">';
-    h += '<div class="li-ic" style="background:#00E5A0;color:#05070d"><i class="fa-solid fa-check"></i></div>';
+    h += '<div class="li-ic" style="background:var(--accent);color:#05070d"><i class="fa-solid fa-check"></i></div>';
     h += '<div style="flex:1;min-width:0">';
     h += '<div class="li-nm">'+esc(typeLabel)+'</div>';
-    h += '<div class="li-mt"><span style="font-size:10px;color:#6e768a"><i class="fa-regular fa-clock"></i> '+time+'</span></div>';
-    h += '<div style="font-size:11px;color:#7d849a;margin-top:3px">ID: '+esc(t.id)+'</div>';
+    h += '<div class="li-mt"><span style="font-size:10px;color:var(--text-muted)"><i class="fa-regular fa-clock"></i> '+time+'</span></div>';
+    h += '<div style="font-size:11px;color:var(--text-muted);margin-top:3px">ID: '+esc(t.id)+'</div>';
     h += '</div></div>';
   }
   h += '</div>';
@@ -338,7 +352,7 @@ function renderTaskHistory(tasks) {
     var statusClass = t.status === 'completed' ? 'bdg-g' : (t.status === 'running' ? 'bdg-y' : 'bdg-r');
     var statusLabel = t.status === 'completed' ? '已完成' : (t.status === 'running' ? '运行中' : '失败');
     h += '<div class="li-item">';
-    h += '<div class="li-ic" style="background:'+(t.status === 'completed' ? 'rgba(0,229,160,.15)' : 'rgba(255,107,129,.15)')+';color:'+(t.status === 'completed' ? '#00E5A0' : '#FF6B81')+'">';
+    h += '<div class="li-ic" style="background:'+(t.status === 'completed' ? 'rgba(var(--accent-rgb),.15)' : (t.status === 'running' ? 'rgba(245,166,35,.15)' : 'rgba(255,107,129,.15)'))+';color:'+(t.status === 'completed' ? 'var(--accent)' : (t.status === 'running' ? '#F5A623' : '#FF6B81'))+'">';
     h += '<i class="fa-solid '+(t.status === 'completed' ? 'fa-check' : (t.status === 'running' ? 'fa-spinner fa-spin' : 'fa-times'))+'"></i></div>';
     h += '<div style="flex:1;min-width:0">';
     h += '<div class="li-nm">'+esc(typeLabel)+'</div>';
