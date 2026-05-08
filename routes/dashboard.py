@@ -1,7 +1,6 @@
 """Dashboard 路由 - 任务状态、系统资源、Token 使用统计"""
 import psutil
-import platform
-import os
+import subprocess
 from datetime import datetime
 from typing import Optional
 from fastapi import APIRouter, Depends
@@ -10,6 +9,45 @@ from database import db_query
 from routes.auth import _current_user
 
 router = APIRouter(prefix="/api/v1/dashboard", tags=["Dashboard"])
+
+
+def _get_gpu_info() -> list:
+    """通过 nvidia-smi 获取 NVIDIA GPU 信息（支持多卡）"""
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=index,name,memory.total,memory.used,utilization.gpu",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=10
+        )
+        if result.returncode != 0:
+            return []
+        gpus = []
+        for line in result.stdout.strip().split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) < 5:
+                continue
+            try:
+                idx = int(parts[0])
+                name = parts[1]
+                mem_total = float(parts[2])
+                mem_used = float(parts[3])
+                util = float(parts[4])
+                gpus.append({
+                    "index": idx,
+                    "name": name,
+                    "memory_total_mb": mem_total,
+                    "memory_used_mb": mem_used,
+                    "memory_percent": round((mem_used / mem_total * 100) if mem_total > 0 else 0, 1),
+                    "utilization_percent": util
+                })
+            except (ValueError, IndexError):
+                continue
+        return gpus
+    except (FileNotFoundError, subprocess.TimeoutExpired, Exception):
+        return []
 
 
 @router.get("/tasks")
@@ -37,40 +75,24 @@ async def get_tasks(status: Optional[str] = None, limit: int = 20):
 
 @router.get("/stats")
 async def get_system_stats():
-    """获取系统资源使用情况（CPU/内存/磁盘/操作系统/主机名）"""
+    """获取系统资源使用情况（CPU/内存/磁盘/GPU）"""
     try:
-        # CPU 使用率
         cpu_percent = psutil.cpu_percent(interval=0.5)
-
-        # 内存使用
         mem = psutil.virtual_memory()
         mem_total_gb = mem.total / (1024**3)
         mem_used_gb = mem.used / (1024**3)
         mem_percent = mem.percent
-
-        # 磁盘使用
         disk = psutil.disk_usage('/')
         disk_total_gb = disk.total / (1024**3)
         disk_used_gb = disk.used / (1024**3)
         disk_percent = disk.percent
+        gpus = _get_gpu_info()
 
         return {
-            "cpu": {
-                "percent": cpu_percent,
-                "cores": psutil.cpu_count(logical=True)
-            },
-            "memory": {
-                "total_gb": round(mem_total_gb, 2),
-                "used_gb": round(mem_used_gb, 2),
-                "percent": mem_percent
-            },
-            "disk": {
-                "total_gb": round(disk_total_gb, 2),
-                "used_gb": round(disk_used_gb, 2),
-                "percent": disk_percent
-            },
-            "os": f"{platform.system()} {platform.release()}",
-            "hostname": platform.node(),
+            "cpu": {"percent": cpu_percent, "cores": psutil.cpu_count(logical=True)},
+            "memory": {"total_gb": round(mem_total_gb, 2), "used_gb": round(mem_used_gb, 2), "percent": mem_percent},
+            "disk": {"total_gb": round(disk_total_gb, 2), "used_gb": round(disk_used_gb, 2), "percent": disk_percent},
+            "gpus": gpus,
             "timestamp": datetime.now().isoformat()
         }
     except Exception as e:
@@ -78,6 +100,7 @@ async def get_system_stats():
             "cpu": {"percent": 0, "cores": 0},
             "memory": {"total_gb": 0, "used_gb": 0, "percent": 0},
             "disk": {"total_gb": 0, "used_gb": 0, "percent": 0},
+            "gpus": [],
             "error": str(e)
         }
 

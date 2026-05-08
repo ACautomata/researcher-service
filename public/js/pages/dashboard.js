@@ -4,7 +4,7 @@ pages.dashboard = function() {
   h += '<div class="st-card" style="--accent:#00E5A0"><div class="st-l">CPU 使用率</div><div id="sysCpuGauge" style="height:120px;display:flex;align-items:center;justify-content:center">加载中…</div></div>';
   h += '<div class="st-card" style="--accent:#A78BFA"><div class="st-l">内存使用</div><div id="sysMemGauge" style="height:120px;display:flex;align-items:center;justify-content:center">加载中…</div></div>';
   h += '<div class="st-card" style="--accent:#F5A623"><div class="st-l">磁盘使用</div><div id="sysDiskGauge" style="height:120px;display:flex;align-items:center;justify-content:center">加载中…</div></div>';
-  h += '<div class="st-card" style="--accent:#00D4FF"><div class="st-l">操作系统</div><div id="sysInfo" style="height:120px;display:flex;flex-direction:column;align-items:center;justify-content:center">加载中…</div></div>';
+  h += '<div id="gpuCards"></div>';
   h += '</div>';
   h += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(400px,1fr));gap:16px;margin-bottom:24px">';
   h += '<div class="card"><div class="card-t"><i class="fa-solid fa-chart-pie"></i>任务状态分布 <span class="api-t api-g" style="margin-left:auto">任务统计</span></div><div id="dashStatusChart" style="height:280px"></div></div>';
@@ -365,9 +365,34 @@ function renderGauge(el, percent, label, sublabel, color) {
   el.innerHTML = svg;
 }
 
-function renderSysInfo(el, cpuCores, osName, hostname) {
-  if (!el) return;
-  el.innerHTML = '<div style="text-align:center;font-size:13px;font-weight:700;color:var(--text-bold);font-family:\'Space Grotesk\'">'+cpuCores+' 核</div><div style="text-align:center;font-size:10px;color:var(--text-muted);margin-top:2px">'+esc(osName)+'</div>';
+function renderGpuCards(gpus) {
+  var container = document.getElementById('gpuCards');
+  if (!container) return;
+  if (!gpus || gpus.length === 0) {
+    container.innerHTML = '<div class="st-card" style="--accent:#00D4FF"><div class="st-l">GPU</div><div id="sysInfo" style="height:120px;display:flex;flex-direction:column;align-items:center;justify-content:center"><span style="color:var(--text-muted);font-size:11px">未检测到 NVIDIA GPU</span></div></div>';
+    return;
+  }
+  var h = '';
+  for (var i = 0; i < gpus.length; i++) {
+    var g = gpus[i];
+    var utilColor = g.utilization_percent > 80 ? '#FF6B81' : (g.utilization_percent > 50 ? '#F5A623' : '#00E5A0');
+    var memColor = g.memory_percent > 80 ? '#FF6B81' : (g.memory_percent > 50 ? '#F5A623' : '#A78BFA');
+    h += '<div class="st-card" style="--accent:'+utilColor+';grid-column:span 2">';
+    h += '<div class="st-l" style="margin-bottom:4px"><i class="fa-solid fa-microchip"></i> GPU ' + g.index + ' · ' + esc(g.name) + '</div>';
+    h += '<div style="display:flex;gap:8px">';
+    h += '<div style="flex:1"><div id="gpuUtilGauge_'+i+'" style="height:100px"></div></div>';
+    h += '<div style="flex:1"><div id="gpuMemGauge_'+i+'" style="height:100px"></div></div>';
+    h += '</div></div>';
+  }
+  container.innerHTML = h;
+  // Render each GPU's gauges
+  for (var i = 0; i < gpus.length; i++) {
+    var g = gpus[i];
+    var uc = g.utilization_percent > 80 ? '#FF6B81' : (g.utilization_percent > 50 ? '#F5A623' : '#00E5A0');
+    var mc = g.memory_percent > 80 ? '#FF6B81' : (g.memory_percent > 50 ? '#F5A623' : '#A78BFA');
+    renderGauge(document.getElementById('gpuUtilGauge_'+i), g.utilization_percent, '利用率', g.utilization_percent+'%', uc);
+    renderGauge(document.getElementById('gpuMemGauge_'+i), g.memory_percent, '显存', Math.round(g.memory_used_mb)+'/'+Math.round(g.memory_total_mb)+' MB', mc);
+  }
 }
 
 async function loadSystemStats() {
@@ -376,13 +401,14 @@ async function loadSystemStats() {
     renderGauge(document.getElementById('sysCpuGauge'), s.cpu.percent, 'CPU', s.cpu.cores+' 核', '#00E5A0');
     renderGauge(document.getElementById('sysMemGauge'), s.memory.percent, '内存', s.memory.used_gb.toFixed(1)+'/'+s.memory.total_gb.toFixed(1)+' GB', '#A78BFA');
     renderGauge(document.getElementById('sysDiskGauge'), s.disk.percent, '磁盘', s.disk.used_gb.toFixed(1)+'/'+s.disk.total_gb.toFixed(1)+' GB', '#F5A623');
-    renderSysInfo(document.getElementById('sysInfo'), s.cpu.cores, s.os||'Windows', s.hostname||'');
+    renderGpuCards(s.gpus);
   } catch (e) {
     ['sysCpuGauge','sysMemGauge','sysDiskGauge'].forEach(function(id){
       var el = document.getElementById(id);
       if (el) el.innerHTML = '<span style="color:var(--text-muted);font-size:11px">无法获取</span>';
     });
   }
+}
 }
 
 function startDashboardPoll() {
