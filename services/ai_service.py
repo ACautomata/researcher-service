@@ -36,7 +36,19 @@ async def chat(messages, temperature=0.7, max_tokens=4096):
                 print(f"[AI 错误] Model: {model}")
                 print(f"[AI 错误] 响应: {resp.text[:500]}\n")
                 resp.raise_for_status()
-            return resp.json()["choices"][0]["message"]["content"].strip()
+
+            data = resp.json()
+            # 兼容不同的 API 响应格式
+            if "choices" in data and len(data["choices"]) > 0:
+                return data["choices"][0]["message"]["content"].strip()
+            elif "output" in data:
+                return data["output"]
+            elif "content" in data:
+                return data["content"]
+            elif "message" in data:
+                return data["message"]
+            else:
+                raise RuntimeError(f"无法解析 API 响应: {json.dumps(data)[:200]}")
 
 
 async def chat_json(messages, temperature=0.3):

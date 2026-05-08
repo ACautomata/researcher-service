@@ -1,53 +1,213 @@
 /* ===== Dashboard Page ===== */
 pages.dashboard = function() {
-  var h = '<div class="stats" id="dashStats"><div class="st-card"><div class="st-v" style="color:#484f6e">-</div><div class="st-l">加载中...</div></div></div>';
+  var h = '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(400px,1fr));gap:16px;margin-bottom:24px">';
+  h += '<div class="card"><div class="card-t"><i class="fa-solid fa-chart-pie"></i>任务状态分布 <span class="api-t api-g" style="margin-left:auto">任务统计</span></div><div id="dashStatusChart" style="height:280px"></div></div>';
+  h += '<div class="card"><div class="card-t"><i class="fa-solid fa-chart-bar"></i>任务类型分布 <span class="api-t api-g" style="margin-left:auto">任务统计</span></div><div id="dashTypeChart" style="height:280px"></div></div>';
+  h += '</div>';
   h += '<div class="card mb24"><div class="card-t"><i class="fa-solid fa-chart-line"></i>运行中任务 <span class="api-t api-g" style="margin-left:auto">GET /api/v1/dashboard/tasks</span></div>';
   h += '<div id="dashRunning" style="color:#7d849a;font-size:13px">加载中…</div></div>';
   h += '<div class="card mb24"><div class="card-t"><i class="fa-solid fa-check-circle"></i>已完成任务 <span class="api-t api-g" style="margin-left:auto">GET /api/v1/dashboard/tasks</span></div>';
-  h += '<div id="dashCompleted" style="color:#7d849a;font-size:13px">加载中…</div></div>';
-  h += '<div class="card"><div class="card-t"><i class="fa-solid fa-clock-rotate-left"></i>最近任务历史</div>';
-  h += '<div id="dashHistory" style="color:#7d849a;font-size:13px">加载中…</div></div>';
+  h += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">';
+  h += '<div id="dashCompleted" style="color:#7d849a;font-size:13px;flex:1">加载中…</div>';
+  h += '<button type="button" class="btn" onclick="loadAllCompletedTasks()"><i class="fa-solid fa-list"></i> 查看全部</button>';
+  h += '</div></div>';
+  h += '<div id="dashCompletedAll" style="display:none"></div>';
+  h += '<div class="card"><div class="card-t"><i class="fa-solid fa-clock-rotate-left"></i>最近任务历史</div><div id="dashHistory" style="color:#7d849a;font-size:13px;max-height:200px;overflow-y:auto"></div></div>';
   return h;
 };
 
 var dashInterval = null;
+var allTasksData = [];
+var isFirstLoad = true;
+var allCompletedTasks = [];
 
 async function loadDashboard() {
   try {
-    await Promise.all([loadDashStats(), loadDashTasks()]);
-  } catch (e) {
-    toast('加载仪表盘失败: ' + e.message, 'fa-exclamation-circle', '#FF6B81');
-  }
-}
+    var results = await Promise.all([
+      api('GET', '/dashboard/tasks?limit=50'),
+      api('GET', '/dashboard/tasks?status=running&limit=10'),
+      api('GET', '/dashboard/tasks?status=completed&limit=10')
+    ]);
 
-async function loadDashStats() {
-  try {
-    var stats = await api('GET', '/dashboard/stats');
-    var h = '';
-    h += '<div class="st-card" style="--accent:#00E5A0"><div class="st-v">'+stats.cpu.percent+'%</div><div class="st-l">CPU 使用</div></div>';
-    h += '<div class="st-card" style="--accent:#A78BFA"><div class="st-v">'+stats.memory.percent+'%</div><div class="st-l">内存使用 ('+stats.memory.used_gb+'GB)</div></div>';
-    h += '<div class="st-card" style="--accent:#F5A623"><div class="st-v">'+stats.disk.percent+'%</div><div class="st-l">磁盘使用 ('+stats.disk.used_gb+'GB)</div></div>';
-    h += '<div class="st-card" style="--accent:#00D4FF"><div class="st-v">'+stats.cpu.cores+'</div><div class="st-l">CPU 核心</div></div>';
-    var el = document.getElementById('dashStats');
-    if (el) el.innerHTML = h;
-  } catch (e) {
-    var el = document.getElementById('dashStats');
-    if (el) el.innerHTML = '<div class="st-card"><div class="st-v" style="color:#FF6B81">!</div><div class="st-l">系统状态获取失败</div></div>';
-  }
-}
+    var all = results[0];
+    var running = results[1];
+    var completed = results[2];
 
-async function loadDashTasks() {
-  try {
-    var running = await api('GET', '/dashboard/tasks?status=running&limit=10');
-    var completed = await api('GET', '/dashboard/tasks?status=completed&limit=10');
-    var all = await api('GET', '/dashboard/tasks?limit=20');
+    allTasksData = all.tasks || [];
 
     renderRunningTasks(running.tasks || []);
     renderCompletedTasks(completed.tasks || []);
-    renderTaskHistory(all.tasks || []);
+    renderTaskHistory(allTasksData);
+
+    if (isFirstLoad) {
+      setTimeout(function() {
+        renderCharts();
+        isFirstLoad = false;
+      }, 100);
+    } else {
+      renderCharts();
+    }
+
   } catch (e) {
-    document.getElementById('dashRunning').innerHTML = '<div class="err-box">加载失败: '+esc(e.message)+'</div>';
+    console.error('Dashboard load error:', e);
+    toast('加载仪表盘失败: ' + e.message, 'fa-exclamation-circle', '#FF6B81');
+    var el = document.getElementById('dashRunning');
+    if (el) el.innerHTML = '<div class="err-box">加载失败: '+esc(e.message)+'</div>';
   }
+}
+
+async function loadAllCompletedTasks() {
+  try {
+    var result = await api('GET', '/dashboard/tasks?status=completed&limit=100');
+    allCompletedTasks = result.tasks || [];
+    renderAllCompletedTasks(allCompletedTasks);
+    toast('已加载 '+allCompletedTasks.length+' 个已完成的任务', 'fa-check', '#00E5A0');
+  } catch (e) {
+    toast('加载失败: ' + e.message, 'fa-exclamation-circle', '#FF6B81');
+  }
+}
+
+function renderCharts() {
+  renderStatusChart(allTasksData);
+  renderTypeChart(allTasksData);
+}
+
+function renderStatusChart(tasks) {
+  var el = document.getElementById('dashStatusChart');
+  if (!el) return;
+
+  var statusCounts = {};
+  var taskCount = Array.isArray(tasks) ? tasks.length : 0;
+
+  for (var i = 0; i < taskCount; i++) {
+    var s = tasks[i].status || 'unknown';
+    statusCounts[s] = (statusCounts[s] || 0) + 1;
+  }
+
+  var statusLabels = { 'completed': '已完成', 'running': '运行中', 'pending': '等待中', 'error': '失败', 'unknown': '未知' };
+  var statusColors = { 'completed': '#00E5A0', 'running': '#F5A623', 'pending': '#484f6e', 'error': '#FF6B81', 'unknown': '#7d849a' };
+
+  var data = [];
+  for (var key in statusCounts) {
+    data.push({ label: statusLabels[key] || key, value: statusCounts[key], color: statusColors[key] || '#7d849a' });
+  }
+
+  var total = data.reduce(function(sum, d) { return sum + d.value; }, 0);
+
+  var legendHtml = '<div style="position:absolute;top:10px;right:10px;background:rgba(5,7,13,0.9);padding:12px;border-radius:10px;border:1px solid rgba(255,255,255,0.05);font-size:10px">';
+  for (var j = 0; j < data.length; j++) {
+    legendHtml += '<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">';
+    legendHtml += '<div style="width:10px;height:10px;border-radius:2px;background:'+data[j].color+'"></div>';
+    legendHtml += '<span style="color:#b0b8c8">'+data[j].label+' ('+data[j].value+')</span></div>';
+  }
+  legendHtml += '</div>';
+
+  if (taskCount === 0) {
+    el.innerHTML = '<div style="position:relative;height:100%;display:flex;align-items:center;justify-content:center;flex-direction:column">' +
+      '<svg width="280" height="280" viewBox="0 0 280 280" style="background:transparent">' +
+      '<circle cx="140" cy="140" r="90" fill="none" stroke="rgba(255,255,255,0.1)" stroke-width="1" stroke-dasharray="4,4"/>' +
+      '<text x="140" y="144" text-anchor="middle" fill="#484f6e" font-size="14" font-family="sans-serif">暂无任务</text>' +
+      '</svg>' + legendHtml + '</div>';
+    return;
+  }
+
+  var width = 280;
+  var height = 280;
+  var radius = 90;
+  var centerX = width / 2;
+  var centerY = height / 2;
+  var currentAngle = -Math.PI / 2;
+
+  var svg = '<svg width="280" height="280" viewBox="0 0 '+width+' '+height+'" style="background:transparent">';
+
+  for (var i = 0; i < data.length; i++) {
+    var angle = (data[i].value / total) * 2 * Math.PI;
+    var x1 = centerX + radius * Math.cos(currentAngle);
+    var y1 = centerY + radius * Math.sin(currentAngle);
+    var x2 = centerX + radius * Math.cos(currentAngle + angle);
+    var y2 = centerY + radius * Math.sin(currentAngle + angle);
+
+    var largeArc = angle > Math.PI ? 1 : 0;
+    var sweepFlag = 1;
+
+    svg += '<path d="M '+centerX+' '+centerY+' L '+x1+' '+y1+' A '+radius+' '+radius+' 0 '+largeArc+' '+sweepFlag+' '+x2+' '+y2+' Z" fill="'+data[i].color+'" stroke="rgba(5,7,13,0.3)" stroke-width="2"/>';
+
+    var midAngle = currentAngle + angle / 2;
+    var labelRadius = radius + 25;
+    var labelX = centerX + labelRadius * Math.cos(midAngle);
+    var labelY = centerY + labelRadius * Math.sin(midAngle);
+    var textAnchor = midAngle > -Math.PI / 2 && midAngle < Math.PI / 2 ? 'start' : 'end';
+
+    svg += '<text x="'+labelX+'" y="'+labelY+'" text-anchor="'+textAnchor+'" fill="#e6edf3" font-size="10" font-family="sans-serif">'+data[i].label+'</text>';
+
+    currentAngle += angle;
+  }
+  svg += '</svg>';
+
+  el.innerHTML = '<div style="position:relative;height:100%;display:flex;align-items:center;justify-content:center">' + svg + legendHtml + '</div>';
+}
+
+function renderTypeChart(tasks) {
+  var el = document.getElementById('dashTypeChart');
+  if (!el) return;
+
+  var typeCounts = {};
+  var taskCount = Array.isArray(tasks) ? tasks.length : 0;
+
+  for (var i = 0; i < taskCount; i++) {
+    var t = tasks[i].type || 'unknown';
+    typeCounts[t] = (typeCounts[t] || 0) + 1;
+  }
+
+  var typeLabels = {
+    'parse': '文献解析',
+    'discover': '问题发现',
+    'generate_idea': 'Idea生成',
+    'generate_algo': '算法生成',
+    'test': '测试执行',
+    'unknown': '未知'
+  };
+
+  var typeColors = {
+    'parse': '#00E5A0',
+    'discover': '#A78BFA',
+    'generate_idea': '#F5A623',
+    'generate_algo': '#FF6B81',
+    'test': '#00D4FF',
+    'unknown': '#7d849a'
+  };
+
+  var data = [];
+  for (var key in typeCounts) {
+    data.push({ label: typeLabels[key] || key, value: typeCounts[key], color: typeColors[key] || '#7d849a' });
+  }
+
+  var width = 400;
+  var height = 280;
+  var barHeight = 24;
+  var barGap = 12;
+  var maxBarWidth = width - 160;
+  var maxValue = 1;
+
+  var svg = '<svg width="100%" height="100%" viewBox="0 0 '+width+' '+height+'" style="background:transparent">';
+  if (taskCount > 0) {
+    for (var m = 0; m < data.length; m++) {
+      if (data[m].value > maxValue) maxValue = data[m].value;
+    }
+    for (var i = 0; i < data.length; i++) {
+      var y = 20 + i * (barHeight + barGap);
+      var barWidth = (data[i].value / maxValue) * maxBarWidth;
+
+      svg += '<rect x="140" y="'+y+'" width="'+barWidth+'" height="'+barHeight+'" fill="'+data[i].color+'" rx="4" opacity="0.8"/>';
+      svg += '<text x="130" y="'+(y + barHeight/2 + 4)+'" text-anchor="end" fill="#b0b8c8" font-size="11" font-family="sans-serif">'+data[i].label+'</text>';
+      svg += '<text x="'+(140 + barWidth + 8)+'" y="'+(y + barHeight/2 + 4)+'" fill="#e6edf3" font-size="11" font-family="sans-serif" font-weight="700">'+data[i].value+'</text>';
+    }
+  } else {
+    svg += '<text x="'+(width/2)+'" y="'+(height/2)+'" text-anchor="middle" fill="#484f6e" font-size="11" font-family="sans-serif">暂无任务数据</text>';
+  }
+  svg += '</svg>';
+
+  el.innerHTML = svg;
 }
 
 function renderRunningTasks(tasks) {
@@ -65,7 +225,7 @@ function renderRunningTasks(tasks) {
     var typeLabels = {
       'parse': '文献解析',
       'discover': '问题发现',
-      'generate_idea': 'Idea 生成',
+      'generate_idea': 'Idea生成',
       'generate_algo': '算法生成',
       'test': '测试执行'
     };
@@ -100,7 +260,7 @@ function renderCompletedTasks(tasks) {
     var typeLabels = {
       'parse': '文献解析',
       'discover': '问题发现',
-      'generate_idea': 'Idea 生成',
+      'generate_idea': 'Idea生成',
       'generate_algo': '算法生成',
       'test': '测试执行'
     };
@@ -117,6 +277,38 @@ function renderCompletedTasks(tasks) {
   el.innerHTML = h;
 }
 
+function renderAllCompletedTasks(tasks) {
+  var el = document.getElementById('dashCompletedAll');
+  if (!el) return;
+  if (!tasks || tasks.length === 0) {
+    el.innerHTML = '<div style="padding:20px;text-align:center;color:#484f6e"><i class="fa-solid fa-inbox" style="font-size:24px;margin-bottom:8px"></i><p>暂无已完成的任务</p></div>';
+    return;
+  }
+  var h = '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px;max-height:400px;overflow-y:auto">';
+  for (var i = 0; i < tasks.length; i++) {
+    var t = tasks[i];
+    var time = t.updated_at ? t.updated_at.substring(0, 16) : '-';
+    var typeLabels = {
+      'parse': '文献解析',
+      'discover': '问题发现',
+      'generate_idea': 'Idea生成',
+      'generate_algo': '算法生成',
+      'test': '测试执行'
+    };
+    var typeLabel = typeLabels[t.type] || t.type;
+    h += '<div class="li-item">';
+    h += '<div class="li-ic" style="background:#00E5A0;color:#05070d"><i class="fa-solid fa-check"></i></div>';
+    h += '<div style="flex:1;min-width:0">';
+    h += '<div class="li-nm">'+esc(typeLabel)+'</div>';
+    h += '<div class="li-mt"><span style="font-size:10px;color:#6e768a"><i class="fa-regular fa-clock"></i> '+time+'</span></div>';
+    h += '<div style="font-size:11px;color:#7d849a;margin-top:3px">ID: '+esc(t.id)+'</div>';
+    h += '</div></div>';
+  }
+  h += '</div>';
+  h += '<div style="text-align:center;padding-top:16px;color:#484f6e;font-size:11px">共 '+tasks.length+' 个已完成任务</div>';
+  el.innerHTML = h;
+}
+
 function renderTaskHistory(tasks) {
   var el = document.getElementById('dashHistory');
   if (!el) return;
@@ -125,13 +317,13 @@ function renderTaskHistory(tasks) {
     return;
   }
   var h = '<div style="display:flex;flex-direction:column;gap:8px">';
-  for (var i = 0; i < Math.min(tasks.length, 10); i++) {
+  for (var i = 0; i < Math.min(tasks.length, 8); i++) {
     var t = tasks[i];
     var time = t.created_at ? t.created_at.substring(0, 16) : '-';
     var typeLabels = {
       'parse': '文献解析',
       'discover': '问题发现',
-      'generate_idea': 'Idea 生成',
+      'generate_idea': 'Idea生成',
       'generate_algo': '算法生成',
       'test': '测试执行'
     };
