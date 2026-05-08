@@ -1,6 +1,12 @@
 /* ===== Dashboard Page ===== */
 pages.dashboard = function() {
-  var h = '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(400px,1fr));gap:16px;margin-bottom:24px">';
+  var h = '<div class="stats" style="grid-template-columns:repeat(auto-fit,minmax(180px,1fr))">';
+  h += '<div class="st-card" style="--accent:#00E5A0"><div class="st-l">CPU 使用率</div><div id="sysCpuGauge" style="height:120px;display:flex;align-items:center;justify-content:center">加载中…</div></div>';
+  h += '<div class="st-card" style="--accent:#A78BFA"><div class="st-l">内存使用</div><div id="sysMemGauge" style="height:120px;display:flex;align-items:center;justify-content:center">加载中…</div></div>';
+  h += '<div class="st-card" style="--accent:#F5A623"><div class="st-l">磁盘使用</div><div id="sysDiskGauge" style="height:120px;display:flex;align-items:center;justify-content:center">加载中…</div></div>';
+  h += '<div class="st-card" style="--accent:#00D4FF"><div class="st-l">操作系统</div><div id="sysInfo" style="height:120px;display:flex;flex-direction:column;align-items:center;justify-content:center">加载中…</div></div>';
+  h += '</div>';
+  h += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(400px,1fr));gap:16px;margin-bottom:24px">';
   h += '<div class="card"><div class="card-t"><i class="fa-solid fa-chart-pie"></i>任务状态分布 <span class="api-t api-g" style="margin-left:auto">任务统计</span></div><div id="dashStatusChart" style="height:280px"></div></div>';
   h += '<div class="card"><div class="card-t"><i class="fa-solid fa-chart-bar"></i>任务类型分布 <span class="api-t api-g" style="margin-left:auto">任务统计</span></div><div id="dashTypeChart" style="height:280px"></div></div>';
   h += '</div>';
@@ -48,6 +54,7 @@ async function loadDashboard() {
       renderCharts();
     }
 
+    loadSystemStats();
   } catch (e) {
     console.error('Dashboard load error:', e);
     toast('加载仪表盘失败: ' + e.message, 'fa-exclamation-circle', '#FF6B81');
@@ -106,7 +113,7 @@ function renderStatusChart(tasks) {
     el.innerHTML = '<div style="position:relative;height:100%;display:flex;align-items:center;justify-content:center;flex-direction:column">' +
       '<svg width="280" height="280" viewBox="0 0 280 280" style="background:transparent">' +
       '<circle cx="140" cy="140" r="90" fill="none" stroke="rgba(255,255,255,0.1)" stroke-width="1" stroke-dasharray="4,4"/>' +
-      '<text x="140" y="144" text-anchor="middle" fill="#484f6e" font-size="14" font-family="sans-serif">暂无任务</text>' +
+      '<text x="140" y="144" text-anchor="middle" style="fill:var(--text-muted)" font-size="14" font-family="sans-serif">暂无任务</text>' +
       '</svg>' + legendHtml + '</div>';
     return;
   }
@@ -138,7 +145,7 @@ function renderStatusChart(tasks) {
     var labelY = centerY + labelRadius * Math.sin(midAngle);
     var textAnchor = midAngle > -Math.PI / 2 && midAngle < Math.PI / 2 ? 'start' : 'end';
 
-    svg += '<text x="'+labelX+'" y="'+labelY+'" text-anchor="'+textAnchor+'" fill="#e6edf3" font-size="10" font-family="sans-serif">'+data[i].label+'</text>';
+    svg += '<text x="'+labelX+'" y="'+labelY+'" text-anchor="'+textAnchor+'" style="fill:var(--text)" font-size="10" font-family="sans-serif">'+data[i].label+'</text>';
 
     currentAngle += angle;
   }
@@ -199,11 +206,11 @@ function renderTypeChart(tasks) {
       var barWidth = (data[i].value / maxValue) * maxBarWidth;
 
       svg += '<rect x="140" y="'+y+'" width="'+barWidth+'" height="'+barHeight+'" fill="'+data[i].color+'" rx="4" opacity="0.8"/>';
-      svg += '<text x="130" y="'+(y + barHeight/2 + 4)+'" text-anchor="end" fill="#b0b8c8" font-size="11" font-family="sans-serif">'+data[i].label+'</text>';
-      svg += '<text x="'+(140 + barWidth + 8)+'" y="'+(y + barHeight/2 + 4)+'" fill="#e6edf3" font-size="11" font-family="sans-serif" font-weight="700">'+data[i].value+'</text>';
+      svg += '<text x="130" y="'+(y + barHeight/2 + 4)+'" text-anchor="end" style="fill:var(--text-muted)" font-size="11" font-family="sans-serif">'+data[i].label+'</text>';
+      svg += '<text x="'+(140 + barWidth + 8)+'" y="'+(y + barHeight/2 + 4)+'" style="fill:var(--text)" font-size="11" font-family="sans-serif" font-weight="700">'+data[i].value+'</text>';
     }
   } else {
-    svg += '<text x="'+(width/2)+'" y="'+(height/2)+'" text-anchor="middle" fill="#484f6e" font-size="11" font-family="sans-serif">暂无任务数据</text>';
+    svg += '<text x="'+(width/2)+'" y="'+(height/2)+'" text-anchor="middle" style="fill:var(--text-muted)" font-size="11" font-family="sans-serif">暂无任务数据</text>';
   }
   svg += '</svg>';
 
@@ -214,7 +221,7 @@ function renderRunningTasks(tasks) {
   var el = document.getElementById('dashRunning');
   if (!el) return;
   if (!tasks || tasks.length === 0) {
-    el.innerHTML = '<div style="padding:20px;text-align:center;color:#484f6e"><i class="fa-solid fa-check-circle" style="font-size:24px;margin-bottom:8px"></i><p>当前没有运行中的任务</p></div>';
+    el.innerHTML = '<div style="padding:20px;text-align:center;color:var(--text-muted)"><i class="fa-solid fa-check-circle" style="font-size:24px;margin-bottom:8px"></i><p>当前没有运行中的任务</p></div>';
     return;
   }
   var h = '<div class="tbl-w"><table>';
@@ -250,7 +257,7 @@ function renderCompletedTasks(tasks) {
   var el = document.getElementById('dashCompleted');
   if (!el) return;
   if (!tasks || tasks.length === 0) {
-    el.innerHTML = '<div style="padding:20px;text-align:center;color:#484f6e"><i class="fa-solid fa-inbox" style="font-size:24px;margin-bottom:8px"></i><p>暂无已完成的任务</p></div>';
+    el.innerHTML = '<div style="padding:20px;text-align:center;color:var(--text-muted)"><i class="fa-solid fa-inbox" style="font-size:24px;margin-bottom:8px"></i><p>暂无已完成的任务</p></div>';
     return;
   }
   var h = '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px">';
@@ -281,7 +288,7 @@ function renderAllCompletedTasks(tasks) {
   var el = document.getElementById('dashCompletedAll');
   if (!el) return;
   if (!tasks || tasks.length === 0) {
-    el.innerHTML = '<div style="padding:20px;text-align:center;color:#484f6e"><i class="fa-solid fa-inbox" style="font-size:24px;margin-bottom:8px"></i><p>暂无已完成的任务</p></div>';
+    el.innerHTML = '<div style="padding:20px;text-align:center;color:var(--text-muted)"><i class="fa-solid fa-inbox" style="font-size:24px;margin-bottom:8px"></i><p>暂无已完成的任务</p></div>';
     return;
   }
   var h = '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px;max-height:400px;overflow-y:auto">';
@@ -305,7 +312,7 @@ function renderAllCompletedTasks(tasks) {
     h += '</div></div>';
   }
   h += '</div>';
-  h += '<div style="text-align:center;padding-top:16px;color:#484f6e;font-size:11px">共 '+tasks.length+' 个已完成任务</div>';
+  h += '<div style="text-align:center;padding-top:16px;color:var(--text-muted);font-size:11px">共 '+tasks.length+' 个已完成任务</div>';
   el.innerHTML = h;
 }
 
@@ -313,7 +320,7 @@ function renderTaskHistory(tasks) {
   var el = document.getElementById('dashHistory');
   if (!el) return;
   if (!tasks || tasks.length === 0) {
-    el.innerHTML = '<div style="padding:20px;text-align:center;color:#484f6e"><i class="fa-solid fa-inbox" style="font-size:24px;margin-bottom:8px"></i><p>暂无任务记录</p></div>';
+    el.innerHTML = '<div style="padding:20px;text-align:center;color:var(--text-muted)"><i class="fa-solid fa-inbox" style="font-size:24px;margin-bottom:8px"></i><p>暂无任务记录</p></div>';
     return;
   }
   var h = '<div style="display:flex;flex-direction:column;gap:8px">';
@@ -341,6 +348,41 @@ function renderTaskHistory(tasks) {
   }
   h += '</div>';
   el.innerHTML = h;
+}
+
+/* ===== System Stats (CPU/Memory/Disk Gauges) ===== */
+// SVG 环形仪表：percent=数值, label=标题, sublabel=详情, color=强调色
+function renderGauge(el, percent, label, sublabel, color) {
+  if (!el) return;
+  var r = 42, cx = 60, cy = 65, stroke = 6, circ = 2 * Math.PI * r;
+  var offset = circ * (1 - Math.min(percent, 100) / 100);
+  var svg = '<svg width="120" height="120" viewBox="0 0 120 120">';
+  svg += '<circle cx="'+cx+'" cy="'+cy+'" r="'+r+'" fill="none" style="stroke:var(--border)" stroke-width="'+stroke+'"/>';
+  svg += '<circle cx="'+cx+'" cy="'+cy+'" r="'+r+'" fill="none" stroke="'+color+'" stroke-width="'+stroke+'" stroke-dasharray="'+circ+'" stroke-dashoffset="'+offset+'" stroke-linecap="round" transform="rotate(-90,'+cx+','+cy+')" style="transition:stroke-dashoffset .8s cubic-bezier(.4,0,.2,1)"/>';
+  svg += '<text x="'+cx+'" y="'+(cy+1)+'" text-anchor="middle" style="fill:var(--text-bold)" font-size="18" font-weight="700" font-family="\'Space Grotesk\'">'+Math.round(percent)+'%</text>';
+  svg += '<text x="'+cx+'" y="'+(cy+16)+'" text-anchor="middle" style="fill:var(--text-muted)" font-size="9" font-family="sans-serif">'+esc(sublabel)+'</text>';
+  svg += '</svg>';
+  el.innerHTML = svg;
+}
+
+function renderSysInfo(el, cpuCores, osName, hostname) {
+  if (!el) return;
+  el.innerHTML = '<div style="text-align:center;font-size:13px;font-weight:700;color:var(--text-bold);font-family:\'Space Grotesk\'">'+cpuCores+' 核</div><div style="text-align:center;font-size:10px;color:var(--text-muted);margin-top:2px">'+esc(osName)+'</div>';
+}
+
+async function loadSystemStats() {
+  try {
+    var s = await api('GET', '/dashboard/stats');
+    renderGauge(document.getElementById('sysCpuGauge'), s.cpu.percent, 'CPU', s.cpu.cores+' 核', '#00E5A0');
+    renderGauge(document.getElementById('sysMemGauge'), s.memory.percent, '内存', s.memory.used_gb.toFixed(1)+'/'+s.memory.total_gb.toFixed(1)+' GB', '#A78BFA');
+    renderGauge(document.getElementById('sysDiskGauge'), s.disk.percent, '磁盘', s.disk.used_gb.toFixed(1)+'/'+s.disk.total_gb.toFixed(1)+' GB', '#F5A623');
+    renderSysInfo(document.getElementById('sysInfo'), s.cpu.cores, s.os||'Windows', s.hostname||'');
+  } catch (e) {
+    ['sysCpuGauge','sysMemGauge','sysDiskGauge'].forEach(function(id){
+      var el = document.getElementById(id);
+      if (el) el.innerHTML = '<span style="color:var(--text-muted);font-size:11px">无法获取</span>';
+    });
+  }
 }
 
 function startDashboardPoll() {

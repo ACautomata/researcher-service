@@ -84,11 +84,17 @@ async def init_db():
                 anthropic_api_key TEXT DEFAULT '',
                 anthropic_base_url TEXT DEFAULT '',
                 anthropic_model TEXT DEFAULT '',
+                theme_color TEXT DEFAULT 'emerald',
                 updated_at TEXT DEFAULT (datetime('now','localtime')),
                 FOREIGN KEY(user_id) REFERENCES users(id)
             );
         """)
         await db.commit()
+        try:
+            await db.execute("ALTER TABLE user_settings ADD COLUMN theme_color TEXT DEFAULT 'emerald'")
+            await db.commit()
+        except Exception:
+            pass
 
 
 async def db_query(sql, params=()):

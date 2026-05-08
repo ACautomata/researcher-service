@@ -33,6 +33,7 @@ class UserSettingsUpdate(BaseModel):
     anthropic_api_key: Optional[str] = None
     anthropic_base_url: Optional[str] = None
     anthropic_model: Optional[str] = None
+    theme_color: Optional[str] = None  # 用户主题配色：emerald/aurora/flame/nebula/ocean/mint/sunset/sakura
 
 
 def _validate_username(username: str) -> None:
@@ -89,6 +90,7 @@ async def build_settings_public_dict(user_id: int) -> dict:
         "anthropic_model": (row.get("anthropic_model") or "").strip(),
         "anthropic_api_key_set": bool(ak2),
         "anthropic_api_key_masked": mask_secret(ak2) if ak2 else None,
+        "theme_color": (row.get("theme_color") or "emerald").strip(),
     }
 
 
@@ -115,6 +117,9 @@ async def apply_user_settings_patch(user_id: int, patch: dict) -> None:
     if "anthropic_model" in patch:
         cols.append("anthropic_model = ?")
         vals.append((patch["anthropic_model"] or "").strip())
+    if "theme_color" in patch:
+        cols.append("theme_color = ?")
+        vals.append((patch["theme_color"] or "emerald").strip())
     if not cols:
         return
     cols.append("updated_at = datetime('now','localtime')")

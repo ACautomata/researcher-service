@@ -34,6 +34,7 @@ async function loadProfilePage() {
   if (!inner) return;
   try {
     var s = await fetchUserSettings();
+    applyTheme(s.theme_color || 'emerald');
     var h = '<p class="mb16" style="font-size:12px;color:#464d65">以下配置仅对当前登录用户生效。密钥类字段留空表示不修改；在输入框中清空后点「清除主模型 Key」等按钮可删除已保存的值并回退到服务器环境变量。</p>';
     h += '<div class="auth-field mb12"><label class="auth-lbl">主模型 API Base URL</label><input class="inp" id="pf_ai_base" placeholder="https://open.bigmodel.cn/api/paas/v4" value="'+esc(s.ai_api_base||'')+'"></div>';
     h += '<div class="auth-field mb12"><label class="auth-lbl">主模型名称 (Model)</label><input class="inp" id="pf_ai_model" placeholder="glm-4" value="'+esc(s.ai_model||'')+'"></div>';
@@ -47,12 +48,44 @@ async function loadProfilePage() {
     h += '<input class="inp" type="password" id="pf_ant_key" placeholder="'+(s.anthropic_api_key_set ? '已保存 · 留空不修改 · '+esc(s.anthropic_api_key_masked||'***') : '未设置，可与主模型 Key 不同')+'"></div>';
     h += '<div class="mb16"><button type="button" class="btn bdr" style="font-size:11px" onclick="document.getElementById(\'pf_ant_key\').value=\'\';saveProfileField(\'anthropic_api_key\',\'\')">清除 Agent Key</button></div>';
     h += '<button type="button" class="btn bp" onclick="saveProfileForm()"><i class="fa-solid fa-floppy-disk"></i> 保存配置</button>';
+
+    // 主题配色选择器
+    h += '<div style="height:1px;background:rgba(255,255,255,.06);margin:20px 0"></div>';
+    h += '<label class="auth-lbl" style="margin-bottom:12px"><i class="fa-solid fa-palette"></i> 主题配色</label>';
+    h += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(90px,1fr));gap:8px" id="themePicker">';
+    for (var key in THEMES) {
+      var t = THEMES[key];
+      var active = s.theme_color === key;
+      h += '<div class="theme-opt" data-theme="'+key+'" onclick="setTheme(\''+key+'\')" style="cursor:pointer;border-radius:10px;padding:10px 8px;text-align:center;border:2px solid '+(active ? t.accent : 'rgba(255,255,255,.05)')+';background:'+(active ? 'rgba(var(--accent-rgb),.08)' : 'transparent')+';transition:all .2s ease">';
+      h += '<div style="width:24px;height:24px;border-radius:50%;margin:0 auto 6px;background:'+t.accent+';box-shadow:0 2px 8px rgba('+t.rgb+',.3)"></div>';
+      h += '<div style="font-size:10px;color:#b0b8c8">'+t.name+'</div></div>';
+    }
+    h += '</div>';
+
     inner.innerHTML = h;
   } catch (e) {
     inner.innerHTML = '<div class="err-box">无法加载：'+esc(e.message)+'</div>';
   }
 
   await loadProfileStats();
+}
+
+/* 切换主题：实时预览 → 保存到后端 → 更新选择器 UI */
+async function setTheme(name) {
+  applyTheme(name);
+  try {
+    await putUserSettings({ theme_color: name });
+    var opts = document.querySelectorAll('#themePicker .theme-opt');
+    for (var i = 0; i < opts.length; i++) {
+      var o = opts[i];
+      var isActive = o.getAttribute('data-theme') === name;
+      o.style.borderColor = isActive ? 'var(--accent)' : 'rgba(255,255,255,.05)';
+      o.style.background = isActive ? 'rgba(var(--accent-rgb),.08)' : 'transparent';
+    }
+    toast('主题已切换为 ' + (THEMES[name] ? THEMES[name].name : name), 'fa-check', 'var(--accent)');
+  } catch (e) {
+    toast('保存主题失败: ' + e.message, 'fa-exclamation-circle', '#FF6B81');
+  }
 }
 
 async function loadProfileStats() {
