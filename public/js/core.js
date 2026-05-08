@@ -16,8 +16,7 @@ var P_FULL = [
   { id: 'lit', name: '文献问题发现与验证', icon: 'fa-magnifying-glass-chart', color: '#F5A623', step: 2, desc: '分析验证文献问题' },
   { id: 'idea', name: 'Idea生成与验证分析', icon: 'fa-lightbulb', color: '#A78BFA', step: 3, desc: '生成评价研究创意' },
   { id: 'algo', name: '算法自动实现与优化', icon: 'fa-code', color: '#FF6B81', step: 4, desc: '输出算法代码' },
-  { id: 'dash', name: '任务状态', icon: 'fa-chart-pie', color: '#00D4FF', step: 0, desc: '系统资源与任务监控', navBreak: '工具与扩展' },
-  { id: 'agent', name: 'Agent 终端控制台', icon: 'fa-terminal', color: '#00D4FF', step: 5, desc: 'Claude Agent 交互' },
+  { id: 'agent', name: 'Agent 终端控制台', icon: 'fa-terminal', color: '#00D4FF', step: 5, desc: 'Claude Agent 交互', navBreak: '工具与扩展' },
   { id: 'obs', name: 'Obsidian Vault', icon: 'fa-note-sticky', color: '#C084FC', step: 6, desc: '笔记浏览·编辑·图谱' },
   { id: 'profile', name: '个人配置', icon: 'fa-sliders', color: '#34D399', step: 0, desc: 'API 密钥与模型', navBreak: '账户' },
   { id: 'doc', name: '需求与API文档', icon: 'fa-book', color: '#7d849a', step: 0, desc: '规范与接口定义' }
