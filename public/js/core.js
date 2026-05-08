@@ -146,6 +146,13 @@ async function loadAlgos() {
 
 /* ===== Navigation ===== */
 function buildNav(){
+  var sideEl = document.getElementById('sideEl');
+  if (!sideEl) return;
+  if (!authUser) {
+    sideEl.style.display = 'none';
+    return;
+  }
+  sideEl.style.display = '';
   var items = navPages();
   var secTitle = authUser ? '步骤' : '入门';
   var h='<div class="sb-head"><div class="sb-logo"><i class="fa-solid fa-brain"></i></div><div><div class="sb-name">AI Pipeline</div><div class="sb-sub">Research Automation</div></div></div><div class="sb-nav"><div class="sb-sec">'+secTitle+'</div>';
@@ -179,6 +186,13 @@ function navFindItem(items, id) {
 }
 
 function buildTop(){
+  var topEl = document.getElementById('topEl');
+  if (!topEl) return;
+  if (!authUser) {
+    topEl.style.display = 'none';
+    return;
+  }
+  topEl.style.display = '';
   var items = navPages();
   var p = navFindItem(items, cur) || items[0];
   var h='<div class="top-l"><span class="top-ico" style="background:'+p.color+'18;color:'+p.color+'"><i class="fa-solid '+p.icon+'"></i></span><span class="top-ti">'+p.name+'</span></div><div class="top-fl">';
@@ -190,7 +204,7 @@ function buildTop(){
 
 async function go(id){
   if(pI){clearInterval(pI);pI=null}
-  if(typeof stopDashboardPoll === 'function') stopDashboardPoll();
+  if(typeof heroTimer !== 'undefined'){clearInterval(heroTimer);heroTimer=undefined}
   var np = navPages();
   if (!np.some(function(x){ return x.id === id; })) id = np[0].id;
   cur = id;
@@ -213,6 +227,7 @@ async function buildContent(){
   if(cur==='obs') setTimeout(function(){ loadObsTree(''); loadObsStats(); }, 100);
   if(cur==='profile') setTimeout(function(){ loadProfilePage(); }, 50);
   if(cur==='dashboard') setTimeout(function(){ loadDashboard(); startDashboardPoll(); }, 50);
+  if(cur==='home' && !authUser) { heroTimer = setInterval(function() { if(typeof heroJumpTo === 'function') heroJumpTo((heroIdx + 1) % heroImgs.length); }, 4000); }
 }
 
 /* ===== Auth ===== */
