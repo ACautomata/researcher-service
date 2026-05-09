@@ -29,6 +29,12 @@ class Config:
     # Obsidian Vault
     OBSIDIAN_VAULT_PATH: str = os.getenv("OBSIDIAN_VAULT_PATH", "")
 
+    # 用户认证（.env 设置 AUTH_ENABLED=true 时，除 /api/v1/auth/* 外所有 API 需携带 Bearer token）
+    AUTH_ENABLED: bool = os.getenv("AUTH_ENABLED", "false").lower() == "true"
+    AUTH_SESSION_DAYS: int = int(os.getenv("AUTH_SESSION_DAYS", "30"))
+    # 流水线相关 API 是否必须登录（true 时未登录无法调用 kb/lit/idea/algo/agent/obsidian）
+    PIPELINE_REQUIRES_LOGIN: bool = os.getenv("PIPELINE_REQUIRES_LOGIN", "false").lower() == "true"
+
     @classmethod
     def ai_headers(cls) -> dict:
         return {
@@ -51,3 +57,6 @@ ANTHROPIC_BASE_URL = cfg.ANTHROPIC_BASE_URL
 ANTHROPIC_MODEL = cfg.ANTHROPIC_MODEL
 AGENT_AUTO_APPROVE = cfg.AGENT_AUTO_APPROVE
 OBSIDIAN_VAULT_PATH = cfg.OBSIDIAN_VAULT_PATH
+AUTH_ENABLED = cfg.AUTH_ENABLED
+AUTH_SESSION_DAYS = cfg.AUTH_SESSION_DAYS
+PIPELINE_REQUIRES_LOGIN = cfg.PIPELINE_REQUIRES_LOGIN

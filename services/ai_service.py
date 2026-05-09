@@ -2,14 +2,10 @@
 import json
 import asyncio
 import httpx
-from config import AI_API_BASE, AI_API_KEY, AI_MODEL
+from services.user_credentials import get_effective_llm
 
 _sem = asyncio.Semaphore(5)
 _timeout = httpx.Timeout(120.0, connect=10.0)
-
-
-def _headers():
-    return {"Authorization": f"Bearer {AI_API_KEY}", "Content-Type": "application/json"}
 
 
 async def chat(messages, temperature=0.7, max_tokens=4096):
@@ -17,28 +13,42 @@ async def chat(messages, temperature=0.7, max_tokens=4096):
     调用 AI API，返回文本。
     注意：不发送 response_format 参数，兼容所有 AI 提供商
     """
-    if not AI_API_KEY or AI_API_KEY == "sk-your-key":
-        raise RuntimeError("请先在 .env 文件中配置 AI_API_KEY")
+    base, key, model = await get_effective_llm()
+    if not key or key == "sk-your-key":
+        raise RuntimeError("请先在「个人配置」页面或 .env 中配置 API Key（SK）")
 
-    url = f"{AI_API_BASE.rstrip('/')}/chat/completions"
+    url = f"{base.rstrip('/')}/chat/completions"
     payload = {
-        "model": AI_MODEL,
+        "model": model,
         "messages": messages,
         "temperature": temperature,
         "max_tokens": max_tokens,
     }
+    headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
 
     async with _sem:
         async with httpx.AsyncClient(timeout=_timeout) as c:
-            resp = await c.post(url, headers=_headers(), json=payload)
+            resp = await c.post(url, headers=headers, json=payload)
             # 打印真实错误，方便排查
             if resp.status_code != 200:
                 print(f"\n[AI 错误] HTTP {resp.status_code}")
                 print(f"[AI 错误] URL: {url}")
-                print(f"[AI 错误] Model: {AI_MODEL}")
+                print(f"[AI 错误] Model: {model}")
                 print(f"[AI 错误] 响应: {resp.text[:500]}\n")
                 resp.raise_for_status()
-            return resp.json()["choices"][0]["message"]["content"].strip()
+
+            data = resp.json()
+            # 兼容不同的 API 响应格式
+            if "choices" in data and len(data["choices"]) > 0:
+                return data["choices"][0]["message"]["content"].strip()
+            elif "output" in data:
+                return data["output"]
+            elif "content" in data:
+                return data["content"]
+            elif "message" in data:
+                return data["message"]
+            else:
+                raise RuntimeError(f"无法解析 API 响应: {json.dumps(data)[:200]}")
 
 
 async def chat_json(messages, temperature=0.3):

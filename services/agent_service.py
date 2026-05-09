@@ -13,14 +13,21 @@ from config import ANTHROPIC_API_KEY, ANTHROPIC_BASE_URL, ANTHROPIC_MODEL, AGENT
 async def run_agent(
     prompt: str,
     cwd: str = ".",
-    event_queue: asyncio.Queue | None = None,
+    event_queue: Optional[asyncio.Queue] = None,
     max_turns: int = 15,
     system_prompt: Optional[str] = None,
+    anthropic_api_key: Optional[str] = None,
+    anthropic_base_url: Optional[str] = None,
+    anthropic_model: Optional[str] = None,
 ):
     queue = event_queue or asyncio.Queue()
 
-    if not ANTHROPIC_API_KEY:
-        await queue.put({"type": "error", "text": "请先在 .env 中配置 AI_API_KEY"})
+    eff_key = anthropic_api_key if anthropic_api_key is not None else ANTHROPIC_API_KEY
+    eff_base = anthropic_base_url if anthropic_base_url is not None else (ANTHROPIC_BASE_URL or "")
+    eff_model = anthropic_model if anthropic_model is not None else ANTHROPIC_MODEL
+
+    if not eff_key:
+        await queue.put({"type": "error", "text": "请先在「个人配置」或 .env 中配置 Agent（Anthropic）API Key"})
         await queue.put({"type": "done"})
         return
 
@@ -31,11 +38,11 @@ async def run_agent(
         return
 
     cli_env = {
-        "ANTHROPIC_API_KEY": ANTHROPIC_API_KEY,
+        "ANTHROPIC_API_KEY": eff_key,
     }
-    if ANTHROPIC_BASE_URL:
-        cli_env["ANTHROPIC_BASE_URL"] = ANTHROPIC_BASE_URL
-        cli_env["ANTHROPIC_API_URL"] = ANTHROPIC_BASE_URL
+    if eff_base:
+        cli_env["ANTHROPIC_BASE_URL"] = eff_base
+        cli_env["ANTHROPIC_API_URL"] = eff_base
 
     bridge = thread_queue.Queue()
 
@@ -54,7 +61,7 @@ async def run_agent(
         options = ClaudeAgentOptions(
             cwd=abs_cwd,
             max_turns=max_turns,
-            model=ANTHROPIC_MODEL,
+            model=eff_model,
             permission_mode="bypassPermissions" if AGENT_AUTO_APPROVE else "default",
             system_prompt=system_prompt or "",
             stderr=_on_stderr,

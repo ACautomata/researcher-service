@@ -63,8 +63,38 @@ async def init_db():
                 created_at TEXT DEFAULT (datetime('now','localtime')),
                 updated_at TEXT DEFAULT (datetime('now','localtime'))
             );
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT NOT NULL UNIQUE,
+                password_hash TEXT NOT NULL,
+                created_at TEXT DEFAULT (datetime('now','localtime'))
+            );
+            CREATE TABLE IF NOT EXISTS sessions (
+                token TEXT PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                created_at TEXT DEFAULT (datetime('now','localtime')),
+                expires_at TEXT NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES users(id)
+            );
+            CREATE TABLE IF NOT EXISTS user_settings (
+                user_id INTEGER PRIMARY KEY,
+                ai_api_base TEXT DEFAULT '',
+                ai_api_key TEXT DEFAULT '',
+                ai_model TEXT DEFAULT '',
+                anthropic_api_key TEXT DEFAULT '',
+                anthropic_base_url TEXT DEFAULT '',
+                anthropic_model TEXT DEFAULT '',
+                theme_color TEXT DEFAULT 'aurora',
+                updated_at TEXT DEFAULT (datetime('now','localtime')),
+                FOREIGN KEY(user_id) REFERENCES users(id)
+            );
         """)
         await db.commit()
+        try:
+            await db.execute("ALTER TABLE user_settings ADD COLUMN theme_color TEXT DEFAULT 'aurora'")
+            await db.commit()
+        except Exception:
+            pass
 
 
 async def db_query(sql, params=()):
