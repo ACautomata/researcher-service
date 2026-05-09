@@ -36,7 +36,7 @@ function navPages() {
 }
 
 /* ===== Utilities ===== */
-function toast(m,i,c){i=i||'fa-check-circle';c=c||'#00E5A0';var t=document.createElement('div');t.className='tst';t.innerHTML='<i class="fa-solid '+i+'" style="color:'+c+'"></i>'+m;document.getElementById('tbox').appendChild(t);setTimeout(function(){if(t.parentNode)t.remove()},3000)}
+function toast(m,i,c){i=i||'fa-check-circle';c=c||'';var t=document.createElement('div');t.className='tst';t.innerHTML='<i class="fa-solid '+i+'"'+(c?' style="color:'+c+'"':'')+'></i>'+m;document.getElementById('tbox').appendChild(t);setTimeout(function(){if(t.parentNode)t.remove()},3000)}
 function esc(s){return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
 function cc(cat){return{'深度学习':'#00E5A0','表征学习':'#A78BFA','图学习':'#F5A623','生成模型':'#FF6B81','强化学习':'#00D4FF','多模态':'#34D399','NLP':'#F9A8D4'}[cat]||'#7d849a'}
 

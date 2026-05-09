@@ -274,3 +274,27 @@ async def kb_paper_reparse(paper_id: int):
         return {"success": True, "md_length": len(md_text)}
     except Exception as e:
         raise HTTPException(500, str(e))
+
+
+@router.put("/paper/{paper_id}")
+async def kb_paper_save(paper_id: int, body: dict):
+    """保存编辑后的 markdown 内容到 DB 和文件"""
+    rows = await db_query("SELECT * FROM papers WHERE id=?", (paper_id,))
+    if not rows:
+        raise HTTPException(404)
+    p = rows[0]
+    md_text = body.get("content", "")
+    await db_execute(
+        "UPDATE papers SET markdown_content=?,status='parsed' WHERE id=?",
+        (md_text, paper_id))
+    # 同时写一份 .md 到 vault/kb/ 目录
+    vault_dir = os.environ.get("OBSIDIAN_VAULT_PATH", "./vault/kb")
+    if vault_dir:
+        try:
+            vault_path = os.path.join(os.path.abspath(vault_dir), p["original_name"] + ".md")
+            os.makedirs(os.path.dirname(vault_path), exist_ok=True)
+            with open(vault_path, "w", encoding="utf-8") as f:
+                f.write(md_text)
+        except Exception:
+            pass
+    return {"success": True, "md_length": len(md_text)}

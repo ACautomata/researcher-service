@@ -128,12 +128,19 @@ async def extract_keywords(entries):
     return await chat_json(messages, temperature=0.2)
 
 
-async def discover_problems(entries, depth="deep"):
+async def discover_problems(entries, depth="deep", extra_texts=None):
     """从知识条目中发现研究问题"""
-    entries_text = "\n".join(
-        f"- [{e['category']}] {e['title']}"
-        for e in entries
-    )
+    if extra_texts:
+        combined = "\n\n".join([
+            f"--- 文献 {i+1} ---\n{text[:3000]}"
+            for i, text in enumerate(extra_texts) if text
+        ])
+        entries_text = f"以下为文献的文本内容，请基于此分析研究问题：\n\n{combined[:10000]}"
+    else:
+        entries_text = "\n".join(
+            f"- [{e['category']}] {e['title']}"
+            for e in entries
+        )
     depth_hint = {
         "quick": "快速扫描，只找最明显的问题",
         "deep": "深入分析每个条目的方法论述、实验结论、局限性声明",

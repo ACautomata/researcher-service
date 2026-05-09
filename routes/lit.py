@@ -16,6 +16,7 @@ router = APIRouter(prefix="/api/v1/lit", tags=["文献分析"])
 class DiscoverReq(BaseModel):
     entry_ids: list = []
     deep_analysis: str = "deep"
+    extra_texts: list = []
 
 
 class ValidateReq(BaseModel):
@@ -25,7 +26,10 @@ class ValidateReq(BaseModel):
 
 @router.post("/auto-discover")
 async def lit_discover(req: DiscoverReq):
-    if req.entry_ids:
+    if req.extra_texts:
+        entries = [{"title": f"文献片段 {i+1}", "category": "文献", "keywords": [], "source": "知识库"}
+                   for i in range(len(req.extra_texts))]
+    elif req.entry_ids:
         ph = ",".join("?" * len(req.entry_ids))
         entries = await db_query(f"SELECT * FROM entries WHERE id IN ({ph})", req.entry_ids)
     else:
@@ -39,7 +43,7 @@ async def lit_discover(req: DiscoverReq):
             e["keywords"] = []
     tid = f"disc_{uuid.uuid4().hex[:8]}"
     await db_execute("INSERT INTO tasks(id,type,status,progress,step) VALUES(?,'discover','running',0,'扫描条目')", (tid,))
-    asyncio.create_task(_do_discover(tid, entries, req.deep_analysis))
+    asyncio.create_task(_do_discover(tid, entries, req.deep_analysis, req.extra_texts))
     return {"task_id": tid, "status": "running"}
 
 
@@ -104,12 +108,12 @@ async def _task_resp(tid):
     }
 
 
-async def _do_discover(tid, entries, depth):
+async def _do_discover(tid, entries, depth, extra_texts=None):
     try:
         await update_task(tid, 25, "扫描关键字与条目结构")
         await asyncio.sleep(0.2)
         await update_task(tid, 50, "提取方法论述与结论断言")
-        result = await discover_problems(entries, depth)
+        result = await discover_problems(entries, depth, extra_texts)
         await update_task(tid, 80, "识别局限性、矛盾与空白")
         count = 0
         for p in result.get("problems", []):
