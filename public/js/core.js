@@ -18,6 +18,7 @@ var P_FULL = [
   { id: 'algo', name: '算法自动实现', icon: 'fa-code', color: '#FF6B81', step: 0, desc: '代码浏览与编辑' },
   { id: 'param', name: '参数优化', icon: 'fa-sliders', color: '#F5A623', step: 0, desc: '参数组对比与曲线' },
   { id: 'agent', name: 'Agent 终端控制台', icon: 'fa-terminal', color: '#00D4FF', step: 0, desc: 'Claude Agent 交互', navBreak: '工具与扩展' },
+  { id: 'chat', name: 'AI 对话', icon: 'fa-comment-dots', color: '#34D399', step: 0, desc: '与 AI 直接对话' },
   { id: 'obs', name: 'Obsidian Vault', icon: 'fa-note-sticky', color: '#C084FC', step: 0, desc: '笔记浏览·编辑·图谱' },
   { id: 'profile', name: '个人配置', icon: 'fa-sliders', color: '#34D399', step: 0, desc: 'API 密钥与模型', navBreak: '账户' },
   { id: 'doc', name: '需求与API文档', icon: 'fa-book', color: '#7d849a', step: 0, desc: '规范与接口定义' }

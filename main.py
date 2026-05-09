@@ -17,6 +17,7 @@ from routes.idea import router as idea_router
 from routes.algo import router as algo_router
 from routes.agent import router as agent_router
 from routes.obsidian import router as obsidian_router
+from routes.chat import router as chat_router
 from routes.auth import router as auth_router, session_user
 from routes.user_settings import router as user_settings_router
 from routes.dashboard import router as dashboard_router
@@ -64,6 +65,7 @@ app.include_router(idea_router)
 app.include_router(algo_router)
 app.include_router(agent_router)
 app.include_router(obsidian_router)
+app.include_router(chat_router)
 app.include_router(auth_router)
 app.include_router(user_settings_router)
 app.include_router(dashboard_router)
