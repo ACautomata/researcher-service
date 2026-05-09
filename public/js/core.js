@@ -7,7 +7,7 @@ var __PIPELINE_REQUIRES_LOGIN = false;
 var cur = 'home', pI = null;
 var cache = { papers:[], entries:[], keywords:[], problems:[], ideas:[], algos:[] };
 var P_GUEST = [
-  { id: 'home', name: '欢迎', icon: 'fa-house', color: '#00E5A0', step: 0, desc: '登录后解锁完整流水线' },
+  { id: 'home', name: '欢迎', icon: 'fa-house', color: '#00E5A0', step: 0, desc: '登录后解锁全部功能' },
   { id: 'doc', name: '需求与API文档', icon: 'fa-book', color: '#7d849a', step: 0, desc: '规范与接口定义' }
 ];
 var P_FULL = [

@@ -7,7 +7,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from database import db_query, db_execute, update_task
-from services.ai_service import generate_algorithm
+from services.ai_service import generate_algorithm, generate_code_project, suggest_params
 
 router = APIRouter(prefix="/api/v1/algo", tags=["算法"])
 
@@ -15,6 +15,33 @@ router = APIRouter(prefix="/api/v1/algo", tags=["算法"])
 class AlgoReq(BaseModel):
     idea_id: str
     language: str = "Python"
+
+
+class SuggestReq(BaseModel):
+    description: str
+
+
+class GenFromDescReq(BaseModel):
+    description: str
+    language: str = "Python"
+
+
+@router.post("/generate-from-desc")
+async def algo_generate_from_desc(req: GenFromDescReq):
+    try:
+        result = await generate_code_project(req.description, req.language)
+        return {"success": True, "result": result}
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+@router.post("/suggest-params")
+async def algo_suggest_params(req: SuggestReq):
+    try:
+        result = await suggest_params(req.description)
+        return {"success": True, "result": result}
+    except Exception as e:
+        raise HTTPException(500, str(e))
 
 
 @router.post("/generate")

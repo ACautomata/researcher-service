@@ -88,10 +88,27 @@ async def init_db():
                 updated_at TEXT DEFAULT (datetime('now','localtime')),
                 FOREIGN KEY(user_id) REFERENCES users(id)
             );
+            CREATE TABLE IF NOT EXISTS domains (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                description TEXT DEFAULT '',
+                created_at TEXT DEFAULT (datetime('now','localtime')),
+                updated_at TEXT DEFAULT (datetime('now','localtime'))
+            );
         """)
         await db.commit()
         try:
             await db.execute("ALTER TABLE user_settings ADD COLUMN theme_color TEXT DEFAULT 'aurora'")
+            await db.commit()
+        except Exception:
+            pass
+        try:
+            await db.execute("ALTER TABLE papers ADD COLUMN domain_id INTEGER DEFAULT NULL")
+            await db.commit()
+        except Exception:
+            pass
+        try:
+            await db.execute("ALTER TABLE papers ADD COLUMN markdown_content TEXT DEFAULT ''")
             await db.commit()
         except Exception:
             pass

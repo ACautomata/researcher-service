@@ -156,6 +156,7 @@ async def kb_clear_all():
     await db_execute("DELETE FROM keywords")
     await db_execute("DELETE FROM tasks")
     await db_execute("DELETE FROM papers")
+    await db_execute("DELETE FROM domains")
     # 清空上传文件夹里的文件
     import shutil
     if os.path.exists(UPLOAD_DIR):
@@ -164,3 +165,112 @@ async def kb_clear_all():
             if os.path.isfile(fp):
                 os.remove(fp)
     return {"success": True, "message": "已清空全部数据"}
+
+
+# ===== 领域管理 =====
+
+class DomainReq(BaseModel):
+    name: str
+    description: str = ""
+
+
+@router.post("/domain")
+async def kb_create_domain(req: DomainReq):
+    try:
+        rid = await db_execute(
+            "INSERT INTO domains(name,description) VALUES(?,?)",
+            (req.name, req.description))
+        return {"success": True, "domain_id": rid, "name": req.name}
+    except Exception as e:
+        raise HTTPException(400, f"创建失败（可能已存在同名领域）: {str(e)}")
+
+
+@router.get("/domains")
+async def kb_list_domains():
+    rows = await db_query("SELECT * FROM domains ORDER BY updated_at DESC")
+    # 统计每个领域的论文数
+    for r in rows:
+        cnt = await db_query(
+            "SELECT COUNT(*) as c FROM papers WHERE domain_id=?", (r["id"],))
+        r["paper_count"] = cnt[0]["c"] if cnt else 0
+    return {"domains": rows}
+
+
+@router.delete("/domain/{domain_id}")
+async def kb_delete_domain(domain_id: int):
+    await db_execute("UPDATE papers SET domain_id=NULL WHERE domain_id=?", (domain_id,))
+    await db_execute("DELETE FROM domains WHERE id=?", (domain_id,))
+    return {"success": True}
+
+
+@router.put("/domain/{domain_id}")
+async def kb_update_domain(domain_id: int, req: DomainReq):
+    await db_execute(
+        "UPDATE domains SET name=?,description=?,updated_at=datetime('now','localtime') WHERE id=?",
+        (req.name, req.description, domain_id))
+    return {"success": True}
+
+
+# ===== 领域内论文管理 =====
+
+@router.post("/domain/{domain_id}/upload")
+async def kb_domain_upload(domain_id: int, files: list[UploadFile] = File(...)):
+    domains = await db_query("SELECT * FROM domains WHERE id=?", (domain_id,))
+    if not domains:
+        raise HTTPException(404, "领域不存在")
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+    uploaded = []
+    for f in files:
+        ext = f.filename.rsplit(".", 1)[-1].lower() if "." in f.filename else ""
+        save = os.path.join(UPLOAD_DIR, f"{uuid.uuid4().hex[:12]}_{f.filename}")
+        content = await f.read()
+        with open(save, "wb") as fp:
+            fp.write(content)
+        # 解析 PDF 为 markdown
+        md_text = ""
+        if ext in ("pdf", "docx", "doc", "txt", "md", "tex"):
+            try:
+                md_text = extract_text(save, ext)
+            except Exception:
+                pass
+        rid = await db_execute(
+            "INSERT INTO papers(filename,original_name,ext,size_bytes,status,domain_id,markdown_content) VALUES(?,?,?,?,?,?,?)",
+            (save, f.filename, ext, len(content), "uploaded", domain_id, md_text))
+        uploaded.append({
+            "paper_id": rid, "filename": f.filename,
+            "size": len(content), "md_length": len(md_text)})
+    return {"success": True, "uploaded": uploaded}
+
+
+@router.get("/domain/{domain_id}/papers")
+async def kb_domain_papers(domain_id: int):
+    rows = await db_query(
+        "SELECT * FROM papers WHERE domain_id=? ORDER BY created_at DESC", (domain_id,))
+    return {"papers": rows, "domain_id": domain_id}
+
+
+@router.get("/paper/{paper_id}")
+async def kb_paper_detail(paper_id: int):
+    rows = await db_query("SELECT * FROM papers WHERE id=?", (paper_id,))
+    if not rows:
+        raise HTTPException(404)
+    return rows[0]
+
+
+@router.post("/paper/{paper_id}/reparse")
+async def kb_paper_reparse(paper_id: int):
+    """重新解析论文为 markdown"""
+    rows = await db_query("SELECT * FROM papers WHERE id=?", (paper_id,))
+    if not rows:
+        raise HTTPException(404)
+    p = rows[0]
+    if not os.path.exists(p["filename"]):
+        raise HTTPException(400, "文件不存在")
+    try:
+        md_text = extract_text(p["filename"], p["ext"] or "")
+        await db_execute(
+            "UPDATE papers SET markdown_content=?,status='parsed' WHERE id=?",
+            (md_text, paper_id))
+        return {"success": True, "md_length": len(md_text)}
+    except Exception as e:
+        raise HTTPException(500, str(e))

@@ -220,6 +220,33 @@ async def generate_ideas(problems, direction=None):
     return await chat_json(messages, temperature=0.7)
 
 
+async def suggest_params(task_description: str) -> dict:
+    """根据任务描述生成推荐参数组合"""
+    messages = [
+        {"role": "system", "content": "你是一位深度学习调参专家。根据用户描述的任务，推荐一组合理的超参数搜索范围。"},
+        {"role": "user", "content": f"""用户任务描述：{task_description}
+
+请推荐深度学习模型的超参数搜索网格，输出 JSON 格式。
+
+参考参数：d_model(隐藏层维度)、nhead(注意力头数)、num_layers(层数)、dropout(丢弃率)、lr(学习率)、batch_size(批次大小)。
+
+返回格式（每个参数给出 2-3 个推荐值）：
+{{
+  "task_name": "简短的任务名称",
+  "description": "参数设计说明",
+  "params": {{
+    "d_model": [256, 512],
+    "nhead": [4, 8],
+    "num_layers": [3, 6],
+    "dropout": [0.1, 0.3],
+    "lr": ["3e-4", "1e-3"],
+    "batch_size": [32, 64]
+  }}
+}}"""}
+    ]
+    return await chat_json(messages, temperature=0.3)
+
+
 async def generate_algorithm(idea, language="Python"):
     """基于Idea生成算法代码"""
     messages = [
@@ -235,6 +262,35 @@ Idea标题：{idea['title']}
   "code": "完整可运行的 {language} 代码，包含 import、类定义、forward/run 方法、基本注释",
   "test_cases": [
     {{"name": "测试用例名称", "input": "输入描述", "expected": "预期输出描述"}}
+  ]
+}}"""}
+    ]
+    return await chat_json(messages, temperature=0.3)
+
+
+async def generate_code_project(description: str, language: str = "Python") -> dict:
+    """根据用户描述生成完整的代码项目（多文件）"""
+    messages = [
+        {"role": "system", "content": "你是一位资深算法工程师。根据用户描述生成完整的代码项目，包含多个文件。"},
+        {"role": "user", "content": f"""根据以下描述生成代码项目：
+
+描述：{description}
+语言：{language}
+
+要求：生成完整的可运行项目，包含模型定义、训练脚本、配置文件、README。
+
+返回 JSON 格式（至少 3 个文件）：
+{{
+  "name": "项目英文名",
+  "files": [
+    {{"path": "src/model.py", "content": "完整的 Python 代码"}},
+    {{"path": "src/train.py", "content": "完整的训练脚本"}},
+    {{"path": "config.py", "content": "配置文件"}},
+    {{"path": "README.md", "content": "项目说明"}}
+  ],
+  "test_summary": "测试方法简述",
+  "test_cases": [
+    {{"name": "测试1", "input": "输入", "expected": "预期输出"}}
   ]
 }}"""}
     ]

@@ -1,14 +1,14 @@
 /* ===== Welcome Page (Guest) ===== */
 var heroImgs = ['1.png','2.png','3.png','4.png','5.png','6.png'];
-var heroLabels = ['Knowledge Base','Literature Discovery','Idea Generation','Algorithm Coding','Agent Console','Parameter Optimization'];
+var heroLabels = ['知识库构建','文献问题发现','Idea 生成','算法实现','Agent 终端','参数优化'];
 var heroIdx = 0;
 
 pages.home = function() {
   var h = '<div style="min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:24px;text-align:center;position:relative;overflow:hidden">';
   h += '<div style="position:absolute;inset:0;background:radial-gradient(ellipse 70% 55% at 50% 45%,rgba(59,130,246,.07),transparent 65%),radial-gradient(ellipse 50% 40% at 30% 65%,rgba(0,229,160,.04),transparent 65%),radial-gradient(ellipse 50% 40% at 70% 65%,rgba(167,139,250,.05),transparent 65%);pointer-events:none"></div>';
-  h += '<div style="position:relative;z-index:2;font-size:clamp(30px,4.5vw,50px);font-weight:800;line-height:1.12;background:linear-gradient(135deg,#e6edf3 0%,#60A5FA 45%,#A78BFA 75%,#e6edf3 100%);-webkit-background-clip:text;-webkit-text-fill-color:transparent;max-width:700px;margin-bottom:10px">Your Agentic Workspace<br>for Research</div>';
-  h += '<div style="position:relative;z-index:2;font-size:15px;color:var(--text-muted);max-width:420px;line-height:1.6;margin-bottom:28px">Upload papers, discover problems, generate ideas, and produce algorithm code.</div>';
-  h += '<button type="button" onclick="openAccountPanel()" style="position:relative;z-index:2;padding:14px 40px;border-radius:14px;border:none;background:linear-gradient(135deg,#3B82F6,#8B5CF6);color:#fff;font-size:15px;font-weight:700;cursor:pointer;box-shadow:0 8px 32px rgba(59,130,246,.2);margin-bottom:24px;display:inline-flex;align-items:center;gap:8px;transition:transform .3s,box-shadow .3s" onmouseover="this.style.transform=\'translateY(-2px)\';this.style.boxShadow=\'0 12px 40px rgba(59,130,246,.3)\'" onmouseout="this.style.transform=\'\';this.style.boxShadow=\'0 8px 32px rgba(59,130,246,.2)\'"><i class="fa-solid fa-right-to-bracket"></i> Get Started</button>';
+  h += '<div style="position:relative;z-index:2;font-size:clamp(30px,4.5vw,50px);font-weight:800;line-height:1.12;background:linear-gradient(135deg,#e6edf3 0%,#60A5FA 45%,#A78BFA 75%,#e6edf3 100%);-webkit-background-clip:text;-webkit-text-fill-color:transparent;max-width:700px;margin-bottom:10px">AI 学术研究<br>自动化流水线</div>';
+  h += '<div style="position:relative;z-index:2;font-size:15px;color:var(--text-muted);max-width:420px;line-height:1.6;margin-bottom:28px">上传论文、发现问题、生成 Idea、输出算法代码，全流程 AI 驱动</div>';
+  h += '<button type="button" onclick="openAccountPanel()" style="position:relative;z-index:2;padding:14px 40px;border-radius:14px;border:none;background:linear-gradient(135deg,#3B82F6,#8B5CF6);color:#fff;font-size:15px;font-weight:700;cursor:pointer;box-shadow:0 8px 32px rgba(59,130,246,.2);margin-bottom:24px;display:inline-flex;align-items:center;gap:8px;transition:transform .3s,box-shadow .3s" onmouseover="this.style.transform=\'translateY(-2px)\';this.style.boxShadow=\'0 12px 40px rgba(59,130,246,.3)\'" onmouseout="this.style.transform=\'\';this.style.boxShadow=\'0 8px 32px rgba(59,130,246,.2)\'"><i class="fa-solid fa-right-to-bracket"></i> 开始使用</button>';
 
   // Coverflow deck — images resized to 1280x620
   h += '<div style="position:relative;z-index:1;width:100%;max-width:760px;aspect-ratio:64/31;perspective:1100px" id="heroDeck">';
