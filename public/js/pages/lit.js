@@ -4,6 +4,26 @@ var litActiveTask = null;
 
 pages.lit = async function() {
   litActiveTask = null;
+  LIT_TASKS = [];
+  try {
+    var data = await api('GET', '/lit/history');
+    LIT_TASKS = (data.history || []).map(function(t) {
+      return {
+        id: t.id,
+        task_id: t.task_id || '',
+        kbId: t.kb_id,
+        kbId2: t.kb_id2,
+        kbName: t.kb_name,
+        kbName2: t.kb_name2,
+        displayName: t.display_name,
+        depth: t.depth,
+        status: t.status,
+        progress: t.progress,
+        count: t.count,
+        created_at: t.created_at
+      };
+    });
+  } catch(e) {}
   return renderLitTaskList();
 };
 
@@ -23,8 +43,9 @@ function renderLitTaskList() {
   h += '<div class="card mb24"><div class="card-t"><i class="fa-solid fa-magnifying-glass-chart"></i>新建文献分析</div>';
   h += '<div id="litKbSelect" style="font-size:12px;color:var(--text-muted);margin-bottom:12px">正在加载知识库列表...</div>';
   h += '<div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px">';
-  h += '<div style="flex:1;min-width:200px"><label style="font-size:10px;color:var(--text-muted);display:block;margin-bottom:3px">选择知识库</label><select class="inp" id="litKbId" style="font-size:12px"></select></div>';
-  h += '<div style="flex:0 0 auto;min-width:140px"><label style="font-size:10px;color:var(--text-muted);display:block;margin-bottom:3px">分析深度</label><select class="inp" id="litDepth" style="font-size:12px"><option value="quick">快速扫描</option><option value="deep" selected>深度分析</option><option value="cross">交叉引用</option></select></div>';
+  h += '<div style="flex:1;min-width:200px"><label style="font-size:10px;color:var(--text-muted);display:block;margin-bottom:3px">知识库 A</label><select class="inp" id="litKbId" style="font-size:12px"></select></div>';
+  h += '<div style="flex:1;min-width:200px;display:none" id="litKb2Wrap"><label style="font-size:10px;color:var(--text-muted);display:block;margin-bottom:3px">知识库 B（交叉对比）</label><select class="inp" id="litKbId2" style="font-size:12px"></select></div>';
+  h += '<div style="flex:0 0 auto;min-width:140px"><label style="font-size:10px;color:var(--text-muted);display:block;margin-bottom:3px">分析深度</label><select class="inp" id="litDepth" style="font-size:12px" onchange="onLitDepthChange()"><option value="quick">快速扫描</option><option value="deep" selected>深度分析</option><option value="cross">交叉引用</option></select></div>';
   h += '<div style="align-self:flex-end"><button class="btn bp" onclick="startLitAnalysis()" id="litStartBtn"><i class="fa-solid fa-play"></i> 开始分析</button></div></div></div>';
 
   // 异步加载知识库列表
@@ -41,7 +62,7 @@ function renderLitTaskList() {
       var ic = t.status === 'completed' ? 'rgba(0,229,160,.12);color:#00E5A0' : 'rgba(59,130,246,.12);color:#3B82F6';
       var ico = t.status === 'completed' ? 'fa-check-circle' : 'fa-spinner fa-spin';
       h += '<div class="li-ic" style="background:' + ic + '"><i class="fa-solid ' + ico + '"></i></div>';
-      h += '<div style="flex:1;min-width:0"><div class="li-nm">' + esc(t.kbName || t.id) + '</div>';
+      h += '<div style="flex:1;min-width:0"><div class="li-nm">' + esc(t.displayName || t.kbName || t.id) + '</div>';
       h += '<div class="li-mt"><span class="badge ' + (t.status === 'completed' ? 'bdg-g' : 'bdg-m') + '">' + (t.status === 'completed' ? '已完成' : (t.status === 'failed' ? '失败' : '运行中')) + '</span>';
       if (t.depth) h += ' <span class="badge bdg-m">' + t.depth + '</span>';
       if (t.status === 'completed' && t.count != null) h += ' <span style="color:#A78BFA">' + t.count + ' 个问题</span>';
@@ -60,6 +81,7 @@ function renderLitTaskList() {
 
 async function loadLitKbOptions() {
   var sel = document.getElementById('litKbId');
+  var sel2 = document.getElementById('litKbId2');
   var msg = document.getElementById('litKbSelect');
   if (!sel) return;
   try {
@@ -69,6 +91,7 @@ async function loadLitKbOptions() {
     if (!domains.length) {
       sel.innerHTML = '<option value="">-- 暂无知识库，请先在知识库页面创建 --</option>';
       sel.disabled = true;
+      if (sel2) { sel2.innerHTML = ''; sel2.disabled = true; }
       if (msg) msg.innerHTML = '';
       return;
     }
@@ -80,11 +103,29 @@ async function loadLitKbOptions() {
       opt.textContent = d.name + ' (' + (d.paper_count || 0) + ' 篇)';
       sel.appendChild(opt);
     }
+    if (sel2) {
+      sel2.innerHTML = '';
+      sel2.disabled = false;
+      for (var i = 0; i < domains.length; i++) {
+        var d = domains[i];
+        var opt = document.createElement('option');
+        opt.value = d.id;
+        opt.textContent = d.name + ' (' + (d.paper_count || 0) + ' 篇)';
+        if (i === 1 && domains.length > 1) opt.selected = true;
+        sel2.appendChild(opt);
+      }
+    }
     if (msg) msg.innerHTML = '';
   } catch(e) {
     sel.innerHTML = '<option value="">-- 加载失败 --</option>';
     if (msg) msg.innerHTML = '<div style="color:#FF6B81;font-size:11px">加载失败: ' + e.message + '</div>';
   }
+}
+
+function onLitDepthChange() {
+  var depth = document.getElementById('litDepth');
+  var wrap = document.getElementById('litKb2Wrap');
+  if (wrap) wrap.style.display = depth && depth.value === 'cross' ? '' : 'none';
 }
 
 async function startLitAnalysis() {
@@ -95,22 +136,51 @@ async function startLitAnalysis() {
   var depthVal = depth ? depth.value : 'deep';
   var kbName = sel.options[sel.selectedIndex].text;
 
+  // 交叉分析：获取第二个知识库
+  var kbId2 = null, kbName2 = '';
+  if (depthVal === 'cross') {
+    var sel2 = document.getElementById('litKbId2');
+    if (sel2 && sel2.value) {
+      kbId2 = sel2.value;
+      kbName2 = sel2.options[sel2.selectedIndex].text;
+    }
+  }
+
+  var displayName = kbId2 ? kbName + ' ↔ ' + kbName2 : kbName;
   var tid = 'lit_' + Date.now().toString(36);
-  LIT_TASKS.unshift({ id: tid, kbId: kbId, kbName: kbName, depth: depthVal, status: 'running', progress: 5, count: 0, created_at: new Date().toLocaleString() });
+  LIT_TASKS.unshift({ id: tid, kbId: kbId, kbId2: kbId2, kbName: kbName, kbName2: kbName2, displayName: displayName, depth: depthVal, status: 'running', progress: 5, count: 0, created_at: new Date().toLocaleString() });
+  // 保存到数据库
+  api('POST', '/lit/history', {
+    id: tid, kb_id: parseInt(kbId),
+    kb_id2: kbId2 ? parseInt(kbId2) : 0,
+    kb_name: kbName, kb_name2: kbName2,
+    display_name: displayName, depth: depthVal,
+    status: 'running', progress: 5, count: 0
+  }).catch(function(){});
   var btn = document.getElementById('litStartBtn');
   btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> 分析中...';
   go('lit');
 
   try {
-    // 获取该知识库下的论文条目
-    var papers = await api('GET', '/kb/domain/' + kbId + '/papers');
+    // 获取知识库 A 的论文
+    var papersA = await api('GET', '/kb/domain/' + kbId + '/papers');
     var entryTexts = [];
-    (papers.papers || []).forEach(function(p) {
-      if (p.markdown_content) entryTexts.push(p.markdown_content.slice(0, 2000));
+    (papersA.papers || []).forEach(function(p) {
+      if (p.markdown_content) entryTexts.push('【知识库A】' + p.markdown_content.slice(0, 2000));
     });
+
+    // 如果是交叉分析，也获取知识库 B 的论文
+    if (kbId2) {
+      var papersB = await api('GET', '/kb/domain/' + kbId2 + '/papers');
+      (papersB.papers || []).forEach(function(p) {
+        if (p.markdown_content) entryTexts.push('【知识库B】' + p.markdown_content.slice(0, 2000));
+      });
+    }
+
     if (!entryTexts.length) {
       var t = LIT_TASKS.find(function(x){return x.id === tid;});
       if (t) { t.status = 'failed'; t.progress = 0; }
+      api('PUT', '/lit/history/' + tid, {status: 'failed', progress: 0, count: 0}).catch(function(){});
       toast('该知识库暂无已解析的论文', 'fa-exclamation-circle', '#F5A623');
       go('lit');
       return;
@@ -127,6 +197,7 @@ async function startLitAnalysis() {
   } catch(e) {
     var t = LIT_TASKS.find(function(x){return x.id === tid;});
     if (t) { t.status = 'failed'; }
+    api('PUT', '/lit/history/' + tid, {status: 'failed', progress: 0, count: 0}).catch(function(){});
     toast('分析失败: ' + e.message, 'fa-exclamation-circle', '#FF6B81');
     go('lit');
   }
@@ -144,11 +215,13 @@ function simulateLitProgress(tid, taskId) {
       if (data.status === 'completed') {
         clearInterval(iv);
         if (t) { t.status = 'completed'; t.progress = 100; t.count = (data.result && data.result.problems_count) || 0; }
+        api('PUT', '/lit/history/' + tid, {status: 'completed', progress: 100, count: t.count || 0}).catch(function(){});
         toast('分析完成，发现 ' + (data.result && data.result.problems_count || 0) + ' 个问题', 'fa-check-circle', '#F5A623');
         go('lit');
       } else if (data.status === 'error') {
         clearInterval(iv);
         if (t) { t.status = 'failed'; }
+        api('PUT', '/lit/history/' + tid, {status: 'failed', progress: 0, count: 0}).catch(function(){});
         toast('分析失败: ' + (data.error || ''), 'fa-exclamation-circle', '#FF6B81');
         go('lit');
       }
@@ -168,7 +241,7 @@ async function loadLitProblems(task) {
     await loadProblems();
     var problems = cache.problems || [];
     var h = '<div class="flex-b mb16"><button class="btn" onclick="go(\'lit\')" style="padding:6px 14px;font-size:11px"><i class="fa-solid fa-arrow-left"></i> 返回分析列表</button>';
-    h += '<span style="font-size:13px;font-weight:700;color:var(--text)">' + esc(task.kbName || '') + '</span>';
+    h += '<span style="font-size:13px;font-weight:700;color:var(--text)">' + esc(task.displayName || task.kbName || '') + '</span>';
     h += '<span class="badge bdg-g">' + problems.length + ' 个问题</span></div>';
 
     var hiP = problems.filter(function(p){return p.sv==='high'}).length;

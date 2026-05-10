@@ -24,6 +24,42 @@ class ValidateReq(BaseModel):
     method: str = "cross_reference"
 
 
+class LitHistoryReq(BaseModel):
+    id: str = ""
+    kb_id: int = 0
+    kb_id2: int = 0
+    kb_name: str = ""
+    kb_name2: str = ""
+    display_name: str = ""
+    depth: str = "deep"
+    status: str = "pending"
+    progress: int = 0
+    count: int = 0
+
+
+@router.get("/history")
+async def lit_history():
+    rows = await db_query("SELECT * FROM lit_analyses ORDER BY created_at DESC")
+    return {"history": rows}
+
+
+@router.post("/history")
+async def lit_history_create(req: LitHistoryReq):
+    aid = req.id or f"lit_{uuid.uuid4().hex[:10]}"
+    await db_execute(
+        "INSERT INTO lit_analyses(id,kb_id,kb_id2,kb_name,kb_name2,display_name,depth,status,progress,count) VALUES(?,?,?,?,?,?,?,?,?,?)",
+        (aid, req.kb_id, req.kb_id2, req.kb_name, req.kb_name2, req.display_name, req.depth, req.status, req.progress, req.count))
+    return {"id": aid}
+
+
+@router.put("/history/{aid}")
+async def lit_history_update(aid: str, req: LitHistoryReq):
+    await db_execute(
+        "UPDATE lit_analyses SET status=?,progress=?,count=? WHERE id=?",
+        (req.status, req.progress, req.count, aid))
+    return {"ok": True}
+
+
 @router.post("/auto-discover")
 async def lit_discover(req: DiscoverReq):
     if req.extra_texts:

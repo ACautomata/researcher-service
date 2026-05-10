@@ -20,7 +20,7 @@ pages.home = function() {
 
   h += '<div style="display:flex;gap:12px;margin-top:18px;position:relative;z-index:2">';
   for (var i = 0; i < heroImgs.length; i++) {
-    h += '<div onclick="heroJumpTo('+i+')" id="deckDot'+i+'" style="width:12px;height:12px;border-radius:50%;border:2px solid '+(i===heroIdx?'var(--accent,#60A5FA)':'rgba(255,255,255,.2)')+';background:'+(i===heroIdx?'var(--accent,#60A5FA)':'transparent')+';cursor:pointer;transition:all .3s;box-shadow:'+(i===heroIdx?'0 0 16px rgba(96,165,250,.4)':'none')+'"></div>';
+    h += '<div onclick="heroJumpTo('+i+')" id="deckDot'+i+'" style="width:12px;height:12px;border-radius:50%;border:2px solid '+(i===heroIdx?'var(--accent,#60A5FA)':'rgba(107,114,128,.35)')+';background:'+(i===heroIdx?'var(--accent,#60A5FA)':'rgba(107,114,128,.15)')+';cursor:pointer;transition:all .3s;box-shadow:'+(i===heroIdx?'0 0 16px rgba(96,165,250,.4)':'none')+'"></div>';
   }
   h += '</div></div>';
   return h;
@@ -49,8 +49,8 @@ function heroJumpTo(idx) {
     var dot = document.getElementById('deckDot'+i);
     if (card) card.setAttribute('style', 'position:absolute;left:50%;top:50%;width:88%;aspect-ratio:64/31;border-radius:14px;overflow:hidden;border:1px solid rgba(255,255,255,.06);cursor:pointer;box-shadow:0 8px 40px rgba(0,0,0,.25);transition:all .6s cubic-bezier(.22,1,.36,1);' + getCardStyles(i, idx));
     if (dot) {
-      dot.style.background = i === idx ? 'var(--accent,#60A5FA)' : 'transparent';
-      dot.style.borderColor = i === idx ? 'var(--accent,#60A5FA)' : 'rgba(255,255,255,.2)';
+      dot.style.background = i === idx ? 'var(--accent,#60A5FA)' : 'rgba(107,114,128,.15)';
+      dot.style.borderColor = i === idx ? 'var(--accent,#60A5FA)' : 'rgba(107,114,128,.35)';
       dot.style.boxShadow = i === idx ? '0 0 16px rgba(96,165,250,.4)' : 'none';
     }
   }

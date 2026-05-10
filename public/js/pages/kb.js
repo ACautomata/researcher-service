@@ -13,7 +13,7 @@ async function renderDomainList() {
   var domains = [];
   try { var d = await api('GET', '/kb/domains'); domains = d.domains || []; } catch(e) {}
   var total = domains.length;
-  var hasDocs = domains.filter(function(x){return x.paper_count > 0;}).length;
+  var hasDocs = domains.reduce(function(s, x){ return s + (x.paper_count || 0); }, 0);
 
   var h = '<div class="stats">';
   h += '<div class="st-card"><div class="st-v" style="color:#00E5A0">' + total + '</div><div class="st-l">知识库数</div></div>';

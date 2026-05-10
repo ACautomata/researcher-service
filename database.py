@@ -95,6 +95,20 @@ async def init_db():
                 created_at TEXT DEFAULT (datetime('now','localtime')),
                 updated_at TEXT DEFAULT (datetime('now','localtime'))
             );
+            CREATE TABLE IF NOT EXISTS lit_analyses (
+                id TEXT PRIMARY KEY,
+                task_id TEXT DEFAULT '',
+                kb_id INTEGER DEFAULT 0,
+                kb_id2 INTEGER DEFAULT 0,
+                kb_name TEXT DEFAULT '',
+                kb_name2 TEXT DEFAULT '',
+                display_name TEXT DEFAULT '',
+                depth TEXT DEFAULT 'deep',
+                status TEXT DEFAULT 'pending',
+                progress INTEGER DEFAULT 0,
+                count INTEGER DEFAULT 0,
+                created_at TEXT DEFAULT (datetime('now','localtime'))
+            );
         """)
         await db.commit()
         try:

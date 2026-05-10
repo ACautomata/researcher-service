@@ -1,5 +1,7 @@
 # AGENTS.md
 
+This file provides guidance to Qoder (qoder.com) when working with code in this repository.
+
 ## Project overview
 
 FastAPI backend + single-file vanilla-JS frontend. An "AI Research Pipeline" that automates academic research: upload papers → extract knowledge → discover problems → generate ideas → output algorithm code. All AI calls go through an OpenAI-compatible API.
@@ -35,19 +37,21 @@ config.py                — dotenv loader, Config class, module-level exports
 database.py              — aiosqlite: async init_db(), db_query(), db_execute(), update_task()
 models.py                — Pydantic models (⚠ largely unused — routes define their own)
 routes/kb.py             — /api/v1/kb/*    upload, parse, entries, keywords, clear-all
-routes/lit.py            — /api/v1/lit/*   auto-discover, search-external, validate, problems
+routes/lit.py            — /api/v1/lit/*   auto-discover, search-external, validate, problems, history CRUD
 routes/idea.py           — /api/v1/idea/*  generate, list
 routes/algo.py           — /api/v1/algo/*  generate, test, optimize, list
 routes/agent.py          — /api/v1/agent/* Claude Agent chat (SSE streaming, not polling)
+routes/chat.py            — /api/v1/chat/*  direct AI chat (stream and non-stream, unprotected)
 routes/obsidian.py       — /api/v1/obsidian/* vault tree, file CRUD, graph, search, tags
 routes/auth.py           — /api/v1/auth/* register, login, session, user-level API settings
 routes/user_settings.py  — /api/v1/user/*  per-user AI credentials (mirrors /auth/settings)
+routes/dashboard.py       — /api/v1/dashboard/* task list, system stats (CPU/RAM/disk/GPU), unprotected
 services/ai_service.py        — chat(), chat_json(), prompt templates; uses per-user creds
 services/parser_service.py    — extract_text() for PDF/DOCX/TXT/MD/TeX
 services/external_service.py  — arXiv + Semantic Scholar search
 services/agent_service.py     — Claude Agent SDK wrapper (thread pool → SSE)
 services/obsidian_service.py  — vault file I/O, graph scanning, tag extraction
-services/auth_crypto.py       — bcrypt hashing, session token generation
+services/auth_crypto.py       — PBKDF2-SHA256 password hashing, session token generation
 services/request_context.py   — ContextVar[int] for user_id propagation to AI calls
 services/user_credentials.py  — per-user credential resolution with fallback to global .env
 public/index.html             — thin HTML shell, loads external CSS/JS
@@ -56,10 +60,12 @@ public/js/core.js             — globals, auth, API client, nav, routing, boots
 public/js/pages/home.js       — home/welcome page
 public/js/pages/profile.js    — user settings / personal config page
 public/js/pages/kb.js         — knowledge base (upload, parse, entries, keywords)
-public/js/pages/lit.js        — literature (auto-discover, search, validate)
+public/js/pages/lit.js        — literature (auto-discover, search, validate, cross-analysis, history persistence)
 public/js/pages/idea.js       — idea generation & scoring
 public/js/pages/algo.js       — algorithm generation, test, optimize
+public/js/pages/param.js      — parameter optimization/suggestion
 public/js/pages/agent.js      — Claude Agent console (SSE streaming)
+public/js/pages/chat.js       — direct AI chat interface (SSE streaming)
 public/js/pages/obs.js        — Obsidian vault (tree, editor, graph, search)
 public/js/pages/doc.js        — API documentation page
 public/js/app.js              — event listeners + bootstrap() call
@@ -74,7 +80,9 @@ vault/                        — example Obsidian vault
 
 Each step depends on data produced by the previous step. The frontend enforces this visually.
 
-Agent and Obsidian are supplementary tools outside the main pipeline.
+Lit analysis supports 3 depths: **quick** (single-KB scan), **deep** (thorough single-KB), **cross** (dual-KB cross-reference, requires 2 domain selections). Analysis history is persisted to the `lit_analyses` table and survives page refresh.
+
+Agent, Chat, Obsidian, and Dashboard are supplementary tools outside the main pipeline.
 
 ## API pattern
 
@@ -87,10 +95,32 @@ Exception: Agent chat (`/api/v1/agent/chat`) uses **SSE streaming**—POST start
 
 Task state is tracked in the `tasks` table in SQLite.
 
+## Database schema (SQLite via aiosqlite)
+
+Core pipeline tables (auto-created in `init_db()`):
+- `papers` — uploaded files (filename, original_name, ext, domain_id, markdown_content)
+- `keywords` — extracted keywords with weight, category, source_paper_id
+- `entries` — KB entries from parsed papers (title, category, keywords_json, paper_id)
+- `problems` — research problems discovered from entries (severity, validated, validation_score)
+- `ideas` — generated ideas referencing problems (novelty, feasibility, impact, overall_score)
+- `algorithms` — generated code (language, from_idea, test metrics, perf timings)
+- `tasks` — async task tracking (type, status, progress, step, result_json, error)
+- `domains` — research domain grouping for papers
+- `lit_analyses` — literature analysis history (kb_id, kb_id2 for cross-analysis, depth, status, progress, count)
+
+Auth tables (only populated if AUTH_ENABLED or PIPELINE_REQUIRES_LOGIN):
+- `users` — username + PBKDF2-SHA256 password hash
+- `sessions` — session tokens with expiry, FK→users
+- `user_settings` — per-user AI credentials (ai_api_base, ai_api_key, ai_model, anthropic_*, theme_color)
+
+Migrations run as ALTER TABLE in `init_db()` — failing gracefully if column already exists. Current migrations: `user_settings.theme_color`, `papers.domain_id`, `papers.markdown_content`.
+
 ## Auth & credential resolution (important for AI calls)
 
 - Auth is **optional**: controlled by `AUTH_ENABLED` and `PIPELINE_REQUIRES_LOGIN` in `.env`.
 - Middleware (`main.py:70`) always attempts to parse a Bearer token. If valid, `request.state.user` is set and `ctx_user_id` (ContextVar) is propagated for the request's duration.
+- `_pipeline_api_path()` defines which routes require login when `PIPELINE_REQUIRES_LOGIN=true`: `/api/v1/kb`, `/lit`, `/idea`, `/algo`, `/agent`, `/obsidian`. Routes `/chat`, `/dashboard`, `/auth`, and `/user` are **always excluded** from pipeline auth enforcement.
+- Agent SSE streams also accept token via `?access_token=` query param (for EventSource which doesn't support custom headers).
 - **Per-user credential override**: `ai_service.py` calls `get_effective_llm()` which checks `ctx_user_id` → queries `user_settings` table → falls back to global `.env` values. Same pattern for agent credentials via `get_effective_agent()`.
 - When modifying AI-calling code, always resolve credentials through `user_credentials.py`, never read `AI_API_KEY` directly from config.
 
@@ -109,10 +139,12 @@ Task state is tracked in the `tasks` table in SQLite.
 
 ## Frontend notes
 
-- Frontend split across 12 files: thin `index.html` + `css/style.css` + `js/core.js` + 9 page JS files + `js/app.js`. No framework, no npm, no bundler.
+- Frontend split across 14 files: thin `index.html` + `css/style.css` + `js/core.js` + 11 page JS files + `js/app.js`. No framework, no npm, no bundler.
 - `main.py` mounts `StaticFiles` at `/` (root) to serve everything under `public/`. API routes take precedence.
 - JS files share global scope — they are loaded in order: core → pages → app.
 - API base = `/api/v1` (hardcoded JS var).
 - Drag-and-drop upload supported on the KB page.
 - All pages share a `cache` object populated by `loadPapers()`, `loadKeywords()`, `loadProblems()`, `loadIdeas()`, `loadAlgos()`.
-- Nav pages: kb, lit, idea, algo, agent. Auth/obsidian are accessed within those pages.
+- Nav pages: kb, lit, idea, algo, agent, chat, obs, dashboard. Inline doc page available via `doc.js`.
+- KB stats card "含文献" counts total papers across all domains (sum of paper_count), not domain count.
+- Lit page fetches analysis history from `GET /lit/history` on each navigation; new tasks are POSTed and status updates PUT to the backend.
