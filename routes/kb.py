@@ -357,3 +357,28 @@ async def kb_paper_save(paper_id: int, body: dict):
         except Exception:
             pass
     return {"success": True, "md_length": len(md_text)}
+
+
+@router.delete("/paper/{paper_id}")
+async def kb_delete_paper(paper_id: int):
+    """删除论文及其关联的 entries、keywords 和磁盘文件"""
+    uid = current_user_id()
+    role = current_user_role()
+    rows = await db_query("SELECT * FROM papers WHERE id=?", (paper_id,))
+    if not rows:
+        raise HTTPException(404, "论文不存在")
+    p = rows[0]
+    # 权限检查：admin 可删所有，普通用户只能删自己的或 legacy 数据
+    if role != "admin" and p.get("user_id") is not None and p.get("user_id") != uid:
+        raise HTTPException(403, "无权删除此论文")
+    # 删除关联数据
+    await db_execute("DELETE FROM entries WHERE paper_id=?", (paper_id,))
+    await db_execute("DELETE FROM keywords WHERE source_paper_id=?", (paper_id,))
+    # 删除磁盘文件
+    if p.get("filename") and os.path.exists(p["filename"]):
+        try:
+            os.remove(p["filename"])
+        except Exception:
+            pass
+    await db_execute("DELETE FROM papers WHERE id=?", (paper_id,))
+    return {"success": True, "deleted": p["original_name"]}

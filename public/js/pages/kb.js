@@ -98,7 +98,7 @@ async function loadDomainView(id) {
       var f = kbPaperFiles[n];
       var active = n === kbCurFile;
       var hasMd = f.paper.markdown_content ? 1 : 0;
-      h += '<div style="cursor:pointer;padding:2px 4px;border-radius:4px;' + (active ? 'background:rgba(0,229,160,.15);color:var(--text);font-weight:600' : 'color:var(--text)') + '" onclick="kbOpenFile(\'' + n + '\')"><i class="fa-regular ' + (hasMd ? 'fa-file-lines' : 'fa-file') + '" style="color:' + (hasMd ? '#00E5A0' : 'var(--text-muted)') + ';margin-right:6px;font-size:10px"></i> ' + n + '</div>';
+      h += '<div style="cursor:pointer;padding:2px 4px;border-radius:4px;display:flex;align-items:center;justify-content:space-between;' + (active ? 'background:rgba(0,229,160,.15);color:var(--text);font-weight:600' : 'color:var(--text)') + '" onclick="kbOpenFile(\'' + n + '\')"><span><i class="fa-regular ' + (hasMd ? 'fa-file-lines' : 'fa-file') + '" style="color:' + (hasMd ? '#00E5A0' : 'var(--text-muted)') + ';margin-right:6px;font-size:10px"></i> ' + n + '</span><span style="color:#FF6B81;font-size:10px;opacity:.3;flex-shrink:0;margin-left:6px" onclick="event.stopPropagation();deletePaper(' + f.paper.id + ',\'' + esc(n) + '\')" title="删除论文"><i class="fa-solid fa-xmark"></i></span></div>';
     });
   }
   h += '</div></div>';
@@ -154,7 +154,7 @@ function kbOpenFile(name) {
       var active = n === name;
       var ff = kbPaperFiles[n];
       var hasMd = ff.paper.markdown_content ? 1 : 0;
-      tree.innerHTML += '<div style="cursor:pointer;padding:2px 4px;border-radius:4px;' + (active ? 'background:rgba(0,229,160,.15);color:var(--text);font-weight:600' : 'color:var(--text)') + '" onclick="kbOpenFile(\'' + n + '\')"><i class="fa-regular ' + (hasMd ? 'fa-file-lines' : 'fa-file') + '" style="color:' + (hasMd ? '#00E5A0' : 'var(--text-muted)') + ';margin-right:6px;font-size:10px"></i> ' + n + '</div>';
+      tree.innerHTML += '<div style="cursor:pointer;padding:2px 4px;border-radius:4px;display:flex;align-items:center;justify-content:space-between;' + (active ? 'background:rgba(0,229,160,.15);color:var(--text);font-weight:600' : 'color:var(--text)') + '" onclick="kbOpenFile(\'' + n + '\')"><span><i class="fa-regular ' + (hasMd ? 'fa-file-lines' : 'fa-file') + '" style="color:' + (hasMd ? '#00E5A0' : 'var(--text-muted)') + ';margin-right:6px;font-size:10px"></i> ' + n + '</span><span style="color:#FF6B81;font-size:10px;opacity:.3;flex-shrink:0;margin-left:6px" onclick="event.stopPropagation();deletePaper(' + ff.paper.id + ',\'' + esc(n) + '\')" title="删除论文"><i class="fa-solid fa-xmark"></i></span></div>';
     });
   }
   if (kbObsTab === 'preview') kbRenderPreview();
@@ -330,6 +330,16 @@ function deleteDomain(id, name) {
   api('DELETE', '/kb/domain/' + id).then(function() {
     toast('已删除', 'fa-check-circle', '#00E5A0');
     go('kb');
+  }).catch(function(e) {
+    toast('删除失败: ' + e.message, 'fa-exclamation-circle', '#FF6B81');
+  });
+}
+
+function deletePaper(id, name) {
+  if (!confirm('确定要删除论文「' + name + '」吗？\n该操作不可撤销，论文文件及关联的知识条目都将被删除。')) return;
+  api('DELETE', '/kb/paper/' + id).then(function() {
+    toast('已删除', 'fa-check-circle', '#00E5A0');
+    loadDomainView(kbDomainId);
   }).catch(function(e) {
     toast('删除失败: ' + e.message, 'fa-exclamation-circle', '#FF6B81');
   });
