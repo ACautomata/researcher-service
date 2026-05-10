@@ -8,7 +8,7 @@ from typing import Optional
 
 from database import db_query, db_execute, update_task
 from services.ai_service import generate_ideas
-from services.data_filter import user_filter, current_user_id
+from services.data_filter import user_filter, current_user_id, current_user_role
 
 router = APIRouter(prefix="/api/v1/idea", tags=["Idea"])
 
@@ -49,7 +49,7 @@ async def idea_gen_progress(tid: str):
 
 
 @router.get("/list")
-async def idea_list(min_score: float = None, domain_id: int = None, page: int = 1, page_size: int = 50):
+async def idea_list(min_score: float = None, domain_id: int = None, problem_id: int = None, page: int = 1, page_size: int = 50):
     conds, params = [], []
     uf, up = user_filter("i")
     if uf:
@@ -61,12 +61,26 @@ async def idea_list(min_score: float = None, domain_id: int = None, page: int = 
     if domain_id is not None:
         conds.append("i.domain_id=?")
         params.append(domain_id)
+    if problem_id is not None:
+        conds.append("i.problem_ids LIKE ?")
+        params.append(f'%"{problem_id}"%')
     w = "WHERE " + " AND ".join(conds) if conds else ""
     total = await db_query(f"SELECT COUNT(*) as cnt FROM ideas i {w}", params)
     rows = await db_query(
         f"SELECT i.*, d.name as domain_name FROM ideas i LEFT JOIN domains d ON i.domain_id=d.id {w} ORDER BY i.overall_score DESC LIMIT ? OFFSET ?",
         params + [page_size, (page - 1) * page_size])
     return {"ideas": rows, "total": total[0]["cnt"], "page": page}
+
+
+@router.delete("/{iid}")
+async def idea_delete(iid: str):
+    uid = current_user_id()
+    role = current_user_role()
+    if role == "admin":
+        await db_execute("DELETE FROM ideas WHERE id=?", (iid,))
+    else:
+        await db_execute("DELETE FROM ideas WHERE id=? AND (user_id IS NULL OR user_id=?)", (iid, uid))
+    return {"ok": True}
 
 
 async def _task_resp(tid):

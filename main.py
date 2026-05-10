@@ -21,6 +21,7 @@ from routes.chat import router as chat_router
 from routes.auth import router as auth_router, session_user
 from routes.user_settings import router as user_settings_router
 from routes.dashboard import router as dashboard_router
+from routes.param import router as param_router
 from services.request_context import ctx_user_id, ctx_user_role
 
 
@@ -36,6 +37,7 @@ def _pipeline_api_path(path: str) -> bool:
         "/api/v1/algo",
         "/api/v1/agent",
         "/api/v1/obsidian",
+        "/api/v1/param",
     ):
         if path == prefix or path.startswith(prefix + "/"):
             return True
@@ -69,6 +71,7 @@ app.include_router(chat_router)
 app.include_router(auth_router)
 app.include_router(user_settings_router)
 app.include_router(dashboard_router)
+app.include_router(param_router)
 
 
 @app.middleware("http")

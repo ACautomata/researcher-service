@@ -294,7 +294,7 @@ function enterApp() {
   var app = document.getElementById('appMain');
   if (app) app.style.display = 'flex';
   if (authUser) {
-    if (!navPages().some(function(x) { return x.id === cur; })) cur = 'kb';
+    if (!navPages().some(function(x) { return x.id === cur; })) cur = 'dashboard';
   } else {
     if (!navPages().some(function(x) { return x.id === cur; })) cur = 'home';
   }
@@ -319,7 +319,7 @@ async function submitLogin() {
     if (__AUTH_REQUIRED) enterApp();
     else {
       closeOptionalAuth();
-      cur = 'kb';
+      cur = 'dashboard';
       enterApp();
       toast('登录成功', 'fa-check-circle', '#00E5A0');
     }
@@ -348,7 +348,7 @@ async function submitRegister() {
     if (__AUTH_REQUIRED) enterApp();
     else {
       closeOptionalAuth();
-      cur = 'kb';
+      cur = 'dashboard';
       enterApp();
       toast('注册并登录成功', 'fa-check-circle', '#00E5A0');
     }

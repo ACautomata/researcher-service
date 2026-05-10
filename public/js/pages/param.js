@@ -1,27 +1,31 @@
 /* ===== Param Optimization Page ===== */
-var PARAM_TASKS = [
-  {
-    id: 't1',
-    name: 'd_model 256 vs 512',
-    status: 'completed',
-    created_at: '2026-05-05 14:30',
-    groups: [
-      { name: 'd256_n4_l3_dp0.1_lr3e4_bs64', params: { d_model: 256, nhead: 4, num_layers: 3, dropout: 0.1, lr: '3e-4', batch_size: 64 }, results: { accuracy: 82.3, val_loss: [2.3,1.8,1.4,1.1,0.92,0.78,0.68,0.61,0.56,0.52], val_accuracy: [55.1,62.3,68.5,72.8,76.2,78.9,80.5,81.7,82.1,82.3] } },
-      { name: 'd512_n8_l6_dp0.1_lr3e4_bs64', params: { d_model: 512, nhead: 8, num_layers: 6, dropout: 0.1, lr: '3e-4', batch_size: 64 }, results: { accuracy: 88.7, val_loss: [2.1,1.5,1.1,0.85,0.68,0.56,0.48,0.42,0.38,0.35], val_accuracy: [58.2,66.8,73.5,78.9,82.4,85.1,86.9,87.8,88.3,88.7] } },
-      { name: 'd512_n8_l6_dp0.1_lr1e3_bs64', params: { d_model: 512, nhead: 8, num_layers: 6, dropout: 0.1, lr: '1e-3', batch_size: 64 }, results: { accuracy: 85.1, val_loss: [2.5,2.1,1.7,1.5,1.3,1.2,1.1,1.05,1.0,0.97], val_accuracy: [52.1,58.5,63.8,68.2,72.5,76.1,79.8,82.4,84.1,85.1] } },
-      { name: 'd512_n8_l6_dp0.3_lr3e4_bs64', params: { d_model: 512, nhead: 8, num_layers: 6, dropout: 0.3, lr: '3e-4', batch_size: 64 }, results: { accuracy: 86.2, val_loss: [2.4,1.9,1.5,1.2,1.0,0.88,0.78,0.71,0.65,0.61], val_accuracy: [53.5,60.1,66.2,71.5,75.8,79.2,82.1,84.0,85.3,86.2] } },
-      { name: 'd512_n8_l6_dp0.1_lr3e4_bs32', params: { d_model: 512, nhead: 8, num_layers: 6, dropout: 0.1, lr: '3e-4', batch_size: 32 }, results: { accuracy: 89.5, val_loss: [2.0,1.4,1.0,0.78,0.62,0.51,0.43,0.38,0.34,0.31], val_accuracy: [60.5,69.2,76.1,81.0,84.5,86.8,88.2,89.0,89.3,89.5] } },
-    ],
-  },
-];
-
+var PARAM_TASKS = [];
 var paramActiveTask = null;
 var paramChartIdx = 0;
 
 pages.param = async function() {
   paramActiveTask = null;
+  // 从后端加载已保存的参数任务
+  try {
+    var data = await api('GET', '/param/list');
+    PARAM_TASKS = (data.tasks || []).map(function(t){
+      return {
+        id: t.id,
+        name: t.name,
+        status: t.status,
+        progress: t.status === 'completed' ? 100 : 0,
+        created_at: t.created_at,
+        params: safeParse(t.params_json),
+        groups: safeParse(t.results_json)
+      };
+    });
+  } catch(e) { PARAM_TASKS = []; }
   return renderParamTaskList();
 };
+
+function safeParse(str) {
+  try { return JSON.parse(str); } catch(e) { return []; }
+}
 
 function renderParamTaskList() {
   var completed = PARAM_TASKS.filter(function(t){return t.status==='completed';}).length;
@@ -113,10 +117,16 @@ function startNewTask() {
   var drops = (document.getElementById('ntDropout').value || '0.1').split(',').map(Number);
   var lrs = (document.getElementById('ntLr').value || '3e-4').split(',');
   var bss = (document.getElementById('ntBs').value || '64').split(',').map(Number);
-  var id = 't' + Date.now().toString(36);
-  PARAM_TASKS.unshift({ id: id, name: name, status: 'running', created_at: new Date().toLocaleString(), progress: 0, groups: [] });
+  var id = 'pt_' + Date.now().toString(36);
+  var task = { id: id, name: name, status: 'running', created_at: new Date().toLocaleString(), progress: 0, groups: [] };
+  PARAM_TASKS.unshift(task);
+  // 保存到后端
+  api('POST', '/param/save', {
+    id: id, name: name, status: 'running',
+    params_json: JSON.stringify([dmodels,nheads,layers,drops,lrs,bss]),
+    results_json: '[]'
+  }).catch(function(){});
   hideNewTaskForm();
-  // 模拟进度推进
   simulateProgress(id, Date.now() + 5000);
   go('param');
 }
@@ -128,7 +138,6 @@ function simulateProgress(tid, deadline) {
   if (t.progress >= 100 || Date.now() > deadline) {
     t.status = 'completed';
     t.progress = 100;
-    // 填充模拟结果
     t.groups = [
       { name: 'd256_n4_l3_dp0.1_lr3e4_bs64', params: { d_model: 256, nhead: 4, num_layers: 3, dropout: 0.1, lr: '3e-4', batch_size: 64 }, results: { accuracy: 82.3, val_loss: [2.3,1.8,1.4,1.1,0.92,0.78,0.68,0.61,0.56,0.52], val_accuracy: [55.1,62.3,68.5,72.8,76.2,78.9,80.5,81.7,82.1,82.3] } },
       { name: 'd512_n8_l6_dp0.1_lr3e4_bs64', params: { d_model: 512, nhead: 8, num_layers: 6, dropout: 0.1, lr: '3e-4', batch_size: 64 }, results: { accuracy: 88.7, val_loss: [2.1,1.5,1.1,0.85,0.68,0.56,0.48,0.42,0.38,0.35], val_accuracy: [58.2,66.8,73.5,78.9,82.4,85.1,86.9,87.8,88.3,88.7] } },
@@ -136,6 +145,11 @@ function simulateProgress(tid, deadline) {
       { name: 'd512_n8_l6_dp0.3_lr3e4_bs64', params: { d_model: 512, nhead: 8, num_layers: 6, dropout: 0.3, lr: '3e-4', batch_size: 64 }, results: { accuracy: 86.2, val_loss: [2.4,1.9,1.5,1.2,1.0,0.88,0.78,0.71,0.65,0.61], val_accuracy: [53.5,60.1,66.2,71.5,75.8,79.2,82.1,84.0,85.3,86.2] } },
       { name: 'd512_n8_l6_dp0.1_lr3e4_bs32', params: { d_model: 512, nhead: 8, num_layers: 6, dropout: 0.1, lr: '3e-4', batch_size: 32 }, results: { accuracy: 89.5, val_loss: [2.0,1.4,1.0,0.78,0.62,0.51,0.43,0.38,0.34,0.31], val_accuracy: [60.5,69.2,76.1,81.0,84.5,86.8,88.2,89.0,89.3,89.5] } },
     ];
+    // 保存结果到后端
+    api('POST', '/param/save', {
+      id: t.id, name: t.name, status: 'completed',
+      params_json: '[]', results_json: JSON.stringify(t.groups)
+    }).catch(function(){});
     go('param');
     return;
   }

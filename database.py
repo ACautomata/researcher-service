@@ -193,6 +193,20 @@ async def init_db():
         except Exception:
             pass
 
+        # ===== 参数优化表 =====
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS param_tasks (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                status TEXT DEFAULT 'running',
+                params_json TEXT DEFAULT '[]',
+                results_json TEXT DEFAULT '[]',
+                created_at TEXT DEFAULT (datetime('now','localtime')),
+                user_id INTEGER DEFAULT NULL
+            )
+        """)
+        await db.commit()
+
 
 async def db_query(sql, params=()):
     async with aiosqlite.connect(DB_PATH) as db:

@@ -72,6 +72,19 @@ async def lit_history_update(aid: str, req: LitHistoryReq):
     return {"ok": True}
 
 
+@router.delete("/history/{aid}")
+async def lit_history_delete(aid: str):
+    uid = current_user_id()
+    role = current_user_role()
+    if role == "admin":
+        await db_execute("DELETE FROM lit_analyses WHERE id=?", (aid,))
+    else:
+        await db_execute("DELETE FROM lit_analyses WHERE id=? AND (user_id IS NULL OR user_id=?)", (aid, uid))
+    # 解除关联问题的分析绑定
+    await db_execute("UPDATE problems SET source_analysis=NULL WHERE source_analysis=?", (aid,))
+    return {"ok": True}
+
+
 @router.post("/auto-discover")
 async def lit_discover(req: DiscoverReq):
     uid = current_user_id()

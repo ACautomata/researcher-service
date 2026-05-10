@@ -72,6 +72,7 @@ function renderLitTaskList() {
       if (t.status === 'running' && t.progress != null) {
         h += '<div style="width:60px"><div style="height:4px;border-radius:2px;background:rgba(255,255,255,.05);overflow:hidden"><div style="width:' + t.progress + '%;height:100%;background:#3B82F6;border-radius:2px"></div></div></div>';
       }
+      h += '<button class="btn" style="padding:4px 8px;font-size:10px;flex-shrink:0;margin-left:6px;opacity:.35" onclick="event.stopPropagation();deleteLitTask(\'' + t.id + '\')" title="删除分析记录"><i class="fa-solid fa-trash"></i></button>';
       h += '</div>';
     }
   }
@@ -353,4 +354,13 @@ async function searchExt() {
     if (!results.length) h = '<div style="text-align:center;padding:16px;color:var(--text-muted)">未找到结果</div>';
     el.innerHTML = h;
   } catch(e) { el.innerHTML = '<div class="err-box" style="font-size:11px">' + esc(e.message) + '</div>'; }
+}
+
+async function deleteLitTask(aid) {
+  if (!confirm('确定删除此分析记录吗？关联的问题将保留但解除绑定。')) return;
+  try {
+    await api('DELETE', '/lit/history/' + aid);
+    toast('已删除', 'fa-check-circle', '#00E5A0');
+    go('lit');
+  } catch(e) { toast('删除失败: ' + e.message, 'fa-exclamation-circle', '#FF6B81'); }
 }
