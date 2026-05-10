@@ -182,6 +182,16 @@ async def init_db():
             await db.commit()
         except Exception:
             pass
+        try:
+            await db.execute("ALTER TABLE ideas ADD COLUMN domain_id INTEGER DEFAULT NULL")
+            await db.commit()
+        except Exception:
+            pass
+        try:
+            await db.execute("ALTER TABLE ideas ADD COLUMN problem_ids TEXT DEFAULT NULL")
+            await db.commit()
+        except Exception:
+            pass
 
 
 async def db_query(sql, params=()):

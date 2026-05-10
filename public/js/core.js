@@ -139,7 +139,8 @@ async function loadIdeas() {
   try {
     var data = await api('GET', '/idea/list?min_score=0');
     cache.ideas = (data.ideas || []).map(function(i){
-      return { id:i.id, title:i.title, desc:i.description, fp:i.from_problem, nv:i.novelty, fb:i.feasibility, im:i.impact, os:i.overall_score };
+      return { id:i.id, title:i.title, desc:i.description, fp:i.from_problem, nv:i.novelty, fb:i.feasibility, im:i.impact, os:i.overall_score,
+               domainId:i.domain_id, domainName:i.domain_name, problemIds:i.problem_ids };
     });
   } catch(e) { cache.ideas=[]; }
 }

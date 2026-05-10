@@ -49,19 +49,23 @@ async def idea_gen_progress(tid: str):
 
 
 @router.get("/list")
-async def idea_list(min_score: float = None, page: int = 1, page_size: int = 50):
+async def idea_list(min_score: float = None, domain_id: int = None, page: int = 1, page_size: int = 50):
     conds, params = [], []
-    uf, up = user_filter()
+    uf, up = user_filter("i")
     if uf:
         conds.append(uf)
         params.extend(up)
     if min_score is not None:
-        conds.append("overall_score>=?")
+        conds.append("i.overall_score>=?")
         params.append(min_score)
+    if domain_id is not None:
+        conds.append("i.domain_id=?")
+        params.append(domain_id)
     w = "WHERE " + " AND ".join(conds) if conds else ""
-    total = await db_query(f"SELECT COUNT(*) as cnt FROM ideas {w}", params)
-    rows = await db_query(f"SELECT * FROM ideas {w} ORDER BY overall_score DESC LIMIT ? OFFSET ?",
-                           params + [page_size, (page - 1) * page_size])
+    total = await db_query(f"SELECT COUNT(*) as cnt FROM ideas i {w}", params)
+    rows = await db_query(
+        f"SELECT i.*, d.name as domain_name FROM ideas i LEFT JOIN domains d ON i.domain_id=d.id {w} ORDER BY i.overall_score DESC LIMIT ? OFFSET ?",
+        params + [page_size, (page - 1) * page_size])
     return {"ideas": rows, "total": total[0]["cnt"], "page": page}
 
 
@@ -80,6 +84,18 @@ async def _task_resp(tid):
 
 async def _do_ideas(tid, problems, direction, uid):
     try:
+        # 从问题中推导 domain_id
+        domain_id = None
+        analysis_ids = set(p.get("source_analysis") for p in problems if p.get("source_analysis"))
+        if analysis_ids:
+            ph = ",".join("?" * len(analysis_ids))
+            la_rows = await db_query(
+                f"SELECT DISTINCT kb_id FROM lit_analyses WHERE id IN ({ph})",
+                list(analysis_ids))
+            if la_rows:
+                domain_id = la_rows[0]["kb_id"]
+        problem_ids = [p["id"] for p in problems]
+
         await update_task(tid, 30, "生成研究思路")
         result = await generate_ideas(problems, direction)
         await update_task(tid, 70, "评价与排序")
@@ -89,9 +105,9 @@ async def _do_ideas(tid, problems, direction, uid):
             nv, fb, im = idea.get("novelty", 5), idea.get("feasibility", 5), idea.get("impact", 5)
             os_ = round((nv + fb + im) / 3, 1)
             await db_execute(
-                "INSERT INTO ideas(id,title,description,from_problem,novelty,feasibility,impact,overall_score,user_id) VALUES(?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO ideas(id,title,description,from_problem,novelty,feasibility,impact,overall_score,user_id,domain_id,problem_ids) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                 (iid, idea["title"], idea.get("description", ""), idea.get("from_problem", ""),
-                 nv, fb, im, os_, uid))
+                 nv, fb, im, os_, uid, domain_id, json.dumps(problem_ids, ensure_ascii=False)))
             count += 1
         await update_task(tid, 100, "完成", "completed", result={"ideas_count": count})
     except Exception as e:
