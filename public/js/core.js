@@ -120,10 +120,13 @@ async function loadKeywords() {
   } catch(e) { cache.keywords=[]; }
 }
 
-async function loadProblems(analysisId) {
+async function loadProblems(analysisId, domainId) {
   try {
     var url = '/lit/problems';
-    if (analysisId) url += '?analysis_id=' + encodeURIComponent(analysisId);
+    var parts = [];
+    if (analysisId) parts.push('analysis_id=' + encodeURIComponent(analysisId));
+    if (domainId != null) parts.push('domain_id=' + domainId);
+    if (parts.length) url += '?' + parts.join('&');
     var data = await api('GET', url);
     cache.problems = (data.problems || []).map(function(p){
       return { id:p.id, title:p.title, desc:p.description, src:p.source, srcType:p.source_type,

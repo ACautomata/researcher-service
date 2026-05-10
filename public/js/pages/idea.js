@@ -1,23 +1,29 @@
 /* ===== Idea Page ===== */
+var ideaDomains = [];
 pages.idea = async function(){
-  await Promise.all([loadProblems(), loadIdeas()]);
+  await loadIdeas();
+
+  // 加载知识库列表
+  ideaDomains = [];
+  try { var d = await api('GET', '/kb/domains'); ideaDomains = d.domains || []; } catch(e) {}
+
   var c='#A78BFA';
-  var okP=cache.problems.filter(function(p){return p.ok});
   var hiI=cache.ideas.filter(function(ii){return ii.os>=7}).length;
 
   var h='<div class="stats">';
-  h+='<div class="st-card"><div class="st-v" style="color:'+c+'">'+okP.length+'</div><div class="st-l">可分析问题</div></div>';
+  h+='<div class="st-card"><div class="st-v" style="color:'+c+'" id="ideaOkCount">--</div><div class="st-l">可分析问题</div></div>';
   h+='<div class="st-card"><div class="st-v" style="color:'+c+'">'+cache.ideas.length+'</div><div class="st-l">已生成Idea</div></div>';
   h+='<div class="st-card"><div class="st-v" style="color:#00E5A0">'+hiI+'</div><div class="st-l">高分Idea</div></div></div>';
 
   h+='<div class="card mb24"><div class="card-t"><i class="fa-solid fa-lightbulb"></i>AI 生成研究 Idea <span class="api-t api-p" style="margin-left:auto">POST /idea/generate</span></div>';
-  if(okP.length===0){
-    h+='<div class="err-box"><i class="fa-solid fa-triangle-exclamation"></i>暂无已验证问题，请先在页面2完成问题验证</div>';
+  if(ideaDomains.length===0){
+    h+='<div class="err-box"><i class="fa-solid fa-triangle-exclamation"></i>暂无知识库，请先在知识库页面创建知识库并完成问题发现与验证</div>';
   } else {
     h+='<div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px">';
-    h+='<div style="flex:1;min-width:180px"><label style="font-size:10px;color:#464d65;display:block;margin-bottom:3px">基于问题</label><select class="inp" id="idp"><option value="all">全部已验证 ('+okP.length+')</option>';
-    okP.forEach(function(p){h+='<option value="'+p.id+'">'+p.title.slice(0,24)+'</option>';});
+    h+='<div style="flex:1;min-width:180px"><label style="font-size:10px;color:#464d65;display:block;margin-bottom:3px">知识库</label><select class="inp" id="ideaDomain" onchange="onIdeaDomainChange()" style="font-size:12px"><option value="">-- 选择知识库 --</option>';
+    ideaDomains.forEach(function(d){ h+='<option value="'+d.id+'">'+esc(d.name)+' ('+(d.paper_count||0)+' 篇)</option>'; });
     h+='</select></div>';
+    h+='<div style="flex:1;min-width:180px"><label style="font-size:10px;color:#464d65;display:block;margin-bottom:3px">基于问题</label><select class="inp" id="idp" style="font-size:12px"><option value="">请先选择知识库</option></select></div>';
     h+='<div style="flex:1;min-width:180px"><label style="font-size:10px;color:#464d65;display:block;margin-bottom:3px">创新方向</label><input class="inp" id="idd" placeholder="如：探索高效的序列建模方法"></div>';
     h+='<div style="align-self:flex-end"><button class="btn bp" onclick="genIdeas()"><i class="fa-solid fa-wand-magic-sparkles"></i>AI 生成</button></div></div>';
   }
@@ -45,12 +51,45 @@ pages.idea = async function(){
   return h;
 };
 
+async function onIdeaDomainChange(){
+  var sel = document.getElementById('ideaDomain');
+  var probSel = document.getElementById('idp');
+  var okCount = document.getElementById('ideaOkCount');
+  if(!sel || !probSel) return;
+  var domainId = sel.value;
+  if(!domainId) {
+    probSel.innerHTML = '<option value="">请先选择知识库</option>';
+    if(okCount) okCount.textContent = '--';
+    return;
+  }
+  probSel.innerHTML = '<option value="">加载中...</option>';
+  probSel.disabled = true;
+  try {
+    await loadProblems(null, parseInt(domainId));
+    var okP = cache.problems.filter(function(p){return p.ok});
+    if(okCount) okCount.textContent = okP.length;
+    probSel.innerHTML = '';
+    if(okP.length===0){
+      probSel.innerHTML = '<option value="">该知识库暂无可分析问题，请先完成问题发现与验证</option>';
+    } else {
+      probSel.innerHTML = '<option value="all">全部已验证 ('+okP.length+')</option>';
+      okP.forEach(function(p){
+        probSel.innerHTML += '<option value="'+p.id+'">'+esc(p.title.slice(0,30))+'</option>';
+      });
+    }
+  } catch(e){
+    probSel.innerHTML = '<option value="">加载失败: '+esc(e.message)+'</option>';
+  }
+  probSel.disabled = false;
+}
+
 async function genIdeas(){
+  var sel = document.getElementById('idp');
+  if(!sel || !sel.value || sel.value==='' || sel.disabled){ toast('请先选择知识库和问题','fa-exclamation-circle','#F5A623'); return; }
   toast('AI 生成中…','fa-wand-magic-sparkles','#A78BFA');
   try{
     var body={direction:document.getElementById('idd')?document.getElementById('idd').value:null};
-    var sel=document.getElementById('idp');
-    if(sel&&sel.value!=='all') body.problem_ids=[sel.value];
+    if(sel.value!=='all') body.problem_ids=[sel.value];
     var res=await api('POST','/idea/generate',body);
     pollTask(res.task_id,'/idea/generate/{task_id}/progress',[],'none',function(result){
       if(result) toast('生成了 '+result.ideas_count+' 个 Idea','fa-check-circle','#A78BFA');

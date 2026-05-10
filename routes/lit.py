@@ -141,7 +141,7 @@ async def lit_val_progress(tid: str):
 
 
 @router.get("/problems")
-async def lit_problems(status: str = None, severity: str = None, analysis_id: str = None):
+async def lit_problems(status: str = None, severity: str = None, analysis_id: str = None, domain_id: int = None):
     conds, params = [], []
     uf, up = user_filter()
     if uf:
@@ -157,6 +157,10 @@ async def lit_problems(status: str = None, severity: str = None, analysis_id: st
     if analysis_id:
         conds.append("source_analysis=?")
         params.append(analysis_id)
+    if domain_id is not None:
+        conds.append("source_analysis IN (SELECT id FROM lit_analyses WHERE kb_id=? OR kb_id2=?)")
+        params.append(domain_id)
+        params.append(domain_id)
     w = "WHERE " + " AND ".join(conds) if conds else ""
     rows = await db_query(f"SELECT * FROM problems {w} ORDER BY created_at DESC", params)
     return {"problems": rows, "total": len(rows)}
