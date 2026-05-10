@@ -216,6 +216,19 @@ function buildTop(){
 async function go(id){
   if(pI){clearInterval(pI);pI=null}
   if(typeof heroTimer !== 'undefined'){clearInterval(heroTimer);heroTimer=undefined}
+  // 清理离开页面的轮询 interval
+  if(cur === 'lit' && typeof litRunningTaskIds !== 'undefined') {
+    for (var k in litRunningTaskIds) {
+      if (litRunningTaskIds[k] && litRunningTaskIds[k].intervalId) clearInterval(litRunningTaskIds[k].intervalId);
+    }
+    litRunningTaskIds = {};
+  }
+  if(cur === 'algo' && typeof algoRunningTaskIds !== 'undefined') {
+    for (var k in algoRunningTaskIds) {
+      if (algoRunningTaskIds[k] && algoRunningTaskIds[k].intervalId) clearInterval(algoRunningTaskIds[k].intervalId);
+    }
+    algoRunningTaskIds = {};
+  }
   var np = navPages();
   if (!np.some(function(x){ return x.id === id; })) id = np[0].id;
   cur = id;

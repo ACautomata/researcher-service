@@ -109,6 +109,20 @@ async def init_db():
                 count INTEGER DEFAULT 0,
                 created_at TEXT DEFAULT (datetime('now','localtime'))
             );
+            CREATE TABLE IF NOT EXISTS algo_analyses (
+                id TEXT PRIMARY KEY,
+                task_id TEXT DEFAULT '',
+                idea_id TEXT DEFAULT '',
+                idea_title TEXT DEFAULT '',
+                kb_name TEXT DEFAULT '',
+                language TEXT DEFAULT 'Python',
+                status TEXT DEFAULT 'pending',
+                progress INTEGER DEFAULT 0,
+                name TEXT DEFAULT '',
+                algo_id TEXT DEFAULT '',
+                created_at TEXT DEFAULT (datetime('now','localtime')),
+                user_id INTEGER DEFAULT NULL
+            );
         """)
         await db.commit()
         try:
@@ -189,6 +203,11 @@ async def init_db():
             pass
         try:
             await db.execute("ALTER TABLE ideas ADD COLUMN problem_ids TEXT DEFAULT NULL")
+            await db.commit()
+        except Exception:
+            pass
+        try:
+            await db.execute("ALTER TABLE algo_analyses ADD COLUMN user_id INTEGER DEFAULT NULL")
             await db.commit()
         except Exception:
             pass

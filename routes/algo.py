@@ -8,7 +8,7 @@ from pydantic import BaseModel
 
 from database import db_query, db_execute, update_task
 from services.ai_service import generate_algorithm, generate_code_project, suggest_params
-from services.data_filter import user_filter, current_user_id
+from services.data_filter import user_filter, current_user_id, current_user_role
 
 router = APIRouter(prefix="/api/v1/algo", tags=["算法"])
 
@@ -25,6 +25,19 @@ class SuggestReq(BaseModel):
 class GenFromDescReq(BaseModel):
     description: str
     language: str = "Python"
+
+
+class AlgoHistoryReq(BaseModel):
+    id: str = ""
+    task_id: str = ""
+    idea_id: str = ""
+    idea_title: str = ""
+    kb_name: str = ""
+    language: str = "Python"
+    status: str = "pending"
+    progress: int = 0
+    name: str = ""
+    algo_id: str = ""
 
 
 @router.post("/generate-from-desc")
@@ -70,6 +83,65 @@ async def algo_list():
     where = "WHERE " + uf if uf else ""
     rows = await db_query(f"SELECT * FROM algorithms {where} ORDER BY created_at DESC", up)
     return {"algorithms": rows, "total": len(rows)}
+
+
+# ===== 历史记录 CRUD =====
+@router.get("/history")
+async def algo_history():
+    uf, up = user_filter()
+    where = "WHERE " + uf if uf else ""
+    rows = await db_query(f"SELECT * FROM algo_analyses {where} ORDER BY created_at DESC", up)
+    return {"history": rows}
+
+
+@router.post("/history")
+async def algo_history_create(req: AlgoHistoryReq):
+    uid = current_user_id()
+    aid = req.id or f"algo_{uuid.uuid4().hex[:10]}"
+    await db_execute(
+        "INSERT INTO algo_analyses(id,task_id,idea_id,idea_title,kb_name,language,status,progress,name,algo_id,user_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+        (aid, req.task_id, req.idea_id, req.idea_title, req.kb_name, req.language, req.status, req.progress, req.name, req.algo_id, uid))
+    return {"id": aid}
+
+
+@router.put("/history/{aid}")
+async def algo_history_update(aid: str, req: AlgoHistoryReq):
+    role = current_user_role()
+    uid = current_user_id()
+    sets = []
+    params = []
+    if req.status:
+        sets.append("status=?"); params.append(req.status)
+    if req.progress is not None:
+        sets.append("progress=?"); params.append(req.progress)
+    if req.name:
+        sets.append("name=?"); params.append(req.name)
+    if req.algo_id:
+        sets.append("algo_id=?"); params.append(req.algo_id)
+    if req.task_id:
+        sets.append("task_id=?"); params.append(req.task_id)
+    if not sets:
+        return {"ok": True}
+    if role == "admin":
+        await db_execute(f"UPDATE algo_analyses SET {', '.join(sets)} WHERE id=?", params + [aid])
+    else:
+        await db_execute(f"UPDATE algo_analyses SET {', '.join(sets)} WHERE id=? AND (user_id IS NULL OR user_id=?)", params + [aid, uid])
+    return {"ok": True}
+
+
+@router.delete("/history/{aid}")
+async def algo_history_delete(aid: str):
+    uid = current_user_id()
+    role = current_user_role()
+    # 清理关联的 tasks 行
+    rows = await db_query("SELECT task_id FROM algo_analyses WHERE id=?", (aid,))
+    if rows and rows[0].get("task_id"):
+        await db_execute("DELETE FROM tasks WHERE id=?", (rows[0]["task_id"],))
+    if role == "admin":
+        await db_execute("DELETE FROM algo_analyses WHERE id=?", (aid,))
+    else:
+        await db_execute("DELETE FROM algo_analyses WHERE id=? AND (user_id IS NULL OR user_id=?)", (aid, uid))
+    return {"ok": True}
 
 
 @router.post("/test/{algo_id}")
