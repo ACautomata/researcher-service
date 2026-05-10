@@ -11,14 +11,14 @@ var P_GUEST = [
   { id: 'doc', name: '需求与API文档', icon: 'fa-book', color: '#7d849a', step: 0, desc: '规范与接口定义' }
 ];
 var P_FULL = [
-  { id: 'agent', name: 'Agent 终端控制台', icon: 'fa-terminal', color: '#00D4FF', step: 0, desc: 'Claude Agent 交互' },
-  { id: 'dashboard', name: '任务状态', icon: 'fa-chart-line', color: '#00E5A0', step: 0, desc: '任务状态与资源监控', navBreak: '核心流程' },
+  { id: 'dashboard', name: '任务状态', icon: 'fa-chart-line', color: '#00E5A0', step: 0, desc: '任务状态与资源监控' },
   { id: 'kb', name: '知识库构建与更新', icon: 'fa-database', color: '#00E5A0', step: 0, desc: '上传文献，解析关键字' },
   { id: 'lit', name: '文献问题发现与验证', icon: 'fa-magnifying-glass-chart', color: '#F5A623', step: 0, desc: '分析验证文献问题' },
   { id: 'idea', name: 'Idea生成与验证分析', icon: 'fa-lightbulb', color: '#A78BFA', step: 0, desc: '生成评价研究创意' },
   { id: 'algo', name: '算法自动实现', icon: 'fa-code', color: '#FF6B81', step: 0, desc: '代码浏览与编辑' },
   { id: 'param', name: '参数优化', icon: 'fa-sliders', color: '#F5A623', step: 0, desc: '参数组对比与曲线' },
-  { id: 'chat', name: 'AI 对话', icon: 'fa-comment-dots', color: '#34D399', step: 0, desc: '与 AI 直接对话', navBreak: '工具与扩展' },
+  { id: 'agent', name: 'Agent 终端控制台', icon: 'fa-terminal', color: '#00D4FF', step: 0, desc: 'Claude Agent 交互', navBreak: '工具与扩展' },
+  { id: 'chat', name: 'AI 对话', icon: 'fa-comment-dots', color: '#34D399', step: 0, desc: '与 AI 直接对话' },
   { id: 'obs', name: 'Obsidian Vault', icon: 'fa-note-sticky', color: '#C084FC', step: 0, desc: '笔记浏览·编辑·图谱' },
   { id: 'profile', name: '个人配置', icon: 'fa-sliders', color: '#34D399', step: 0, desc: 'API 密钥与模型', navBreak: '账户' },
   { id: 'admin', name: '用户管理', icon: 'fa-user-gear', color: '#A78BFA', step: 0, desc: '管理用户和权限', adminOnly: true },
@@ -120,9 +120,11 @@ async function loadKeywords() {
   } catch(e) { cache.keywords=[]; }
 }
 
-async function loadProblems() {
+async function loadProblems(analysisId) {
   try {
-    var data = await api('GET', '/lit/problems');
+    var url = '/lit/problems';
+    if (analysisId) url += '?analysis_id=' + encodeURIComponent(analysisId);
+    var data = await api('GET', url);
     cache.problems = (data.problems || []).map(function(p){
       return { id:p.id, title:p.title, desc:p.description, src:p.source, srcType:p.source_type,
                cat:p.category, sv:p.severity, ok:!!p.validated, ing:!!p.validating, vs:p.validation_score, vm:p.validation_method };

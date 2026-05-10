@@ -18,6 +18,7 @@ class DiscoverReq(BaseModel):
     entry_ids: list = []
     deep_analysis: str = "deep"
     extra_texts: list = []
+    analysis_id: str = ""
 
 
 class ValidateReq(BaseModel):
@@ -97,7 +98,7 @@ async def lit_discover(req: DiscoverReq):
     await db_execute(
         "INSERT INTO tasks(id,type,status,progress,step,user_id) VALUES(?,'discover','running',0,'扫描条目',?)",
         (tid, uid))
-    asyncio.create_task(_do_discover(tid, entries, req.deep_analysis, req.extra_texts, uid))
+    asyncio.create_task(_do_discover(tid, entries, req.deep_analysis, req.extra_texts, uid, req.analysis_id))
     return {"task_id": tid, "status": "running"}
 
 
@@ -140,7 +141,7 @@ async def lit_val_progress(tid: str):
 
 
 @router.get("/problems")
-async def lit_problems(status: str = None, severity: str = None):
+async def lit_problems(status: str = None, severity: str = None, analysis_id: str = None):
     conds, params = [], []
     uf, up = user_filter()
     if uf:
@@ -153,6 +154,9 @@ async def lit_problems(status: str = None, severity: str = None):
     if severity:
         conds.append("severity=?")
         params.append(severity)
+    if analysis_id:
+        conds.append("source_analysis=?")
+        params.append(analysis_id)
     w = "WHERE " + " AND ".join(conds) if conds else ""
     rows = await db_query(f"SELECT * FROM problems {w} ORDER BY created_at DESC", params)
     return {"problems": rows, "total": len(rows)}
@@ -171,7 +175,7 @@ async def _task_resp(tid):
     }
 
 
-async def _do_discover(tid, entries, depth, extra_texts=None, uid=None):
+async def _do_discover(tid, entries, depth, extra_texts=None, uid=None, analysis_id=None):
     try:
         await update_task(tid, 25, "扫描关键字与条目结构")
         await asyncio.sleep(0.2)
@@ -182,10 +186,10 @@ async def _do_discover(tid, entries, depth, extra_texts=None, uid=None):
         for p in result.get("problems", []):
             pid = f"p_{uuid.uuid4().hex[:10]}"
             await db_execute(
-                "INSERT INTO problems(id,title,description,source,source_type,category,severity,user_id) VALUES(?,?,?,?,?,?,?,?)",
+                "INSERT INTO problems(id,title,description,source,source_type,category,severity,user_id,source_analysis) VALUES(?,?,?,?,?,?,?,?,?)",
                 (pid, p["title"], p.get("description", ""),
                  entries[0].get("source", "") if entries else "",
-                 "kb", p.get("category", "未分类"), p.get("severity", "medium"), uid))
+                 "kb", p.get("category", "未分类"), p.get("severity", "medium"), uid, analysis_id))
             count += 1
         await update_task(tid, 100, "完成", "completed", result={"problems_count": count})
     except Exception as e:

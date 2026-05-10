@@ -189,7 +189,8 @@ async function startLitAnalysis() {
     var res = await api('POST', '/lit/auto-discover', {
       entry_ids: [],
       deep_analysis: depthVal,
-      extra_texts: entryTexts
+      extra_texts: entryTexts,
+      analysis_id: tid
     });
 
     // 模拟进度推进
@@ -238,7 +239,11 @@ function openLitTask(tid) {
 
 async function loadLitProblems(task) {
   try {
-    await loadProblems();
+    await loadProblems(task.id);
+    // 旧数据没有 source_analysis，过滤后可能为空，回退到加载全部问题
+    if (!cache.problems || !cache.problems.length) {
+      await loadProblems();
+    }
     var problems = cache.problems || [];
     var h = '<div class="flex-b mb16"><button class="btn" onclick="go(\'lit\')" style="padding:6px 14px;font-size:11px"><i class="fa-solid fa-arrow-left"></i> 返回分析列表</button>';
     h += '<span style="font-size:13px;font-weight:700;color:var(--text)">' + esc(task.displayName || task.kbName || '') + '</span>';
@@ -275,7 +280,21 @@ async function loadLitProblems(task) {
         h += '<span class="src-t ' + srcCls + '">' + srcLb + '</span><span>分类：' + p.cat + '</span>';
         if (p.vs != null && p.vs !== undefined) h += '<span style="color:#00E5A0;font-weight:600;font-family:Space Grotesk">' + p.vs + '/10</span>';
         h += '</div>';
-        if (!p.ok && !p.ing) h += '<button class="btn" style="padding:3px 10px;font-size:10px;margin-top:6px" onclick="val1(\'' + p.id + '\')"><i class="fa-solid fa-flask"></i> 验证</button>';
+        if (p.ok) {
+          h += '<button class="btn" style="padding:3px 10px;font-size:10px;margin-top:6px" onclick="event.stopPropagation();toggleProblemDetail(\'' + p.id + '\')"><i class="fa-solid fa-info-circle"></i> 查看详情</button>';
+          h += '<div id="prob-detail-' + p.id + '" style="display:none;margin-top:10px;padding:12px;background:rgba(255,255,255,.02);border-radius:6px;border:1px solid rgba(255,255,255,.06)">';
+          h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:11px">';
+          h += '<div><span style="color:var(--text-muted)">验证方式：</span><span style="color:var(--text)">' + esc(p.vm || '—') + '</span></div>';
+          h += '<div><span style="color:var(--text-muted)">验证分数：</span><span style="color:#00E5A0;font-weight:600">' + (p.vs != null ? p.vs + '/10' : '—') + '</span></div>';
+          h += '<div><span style="color:var(--text-muted)">数据来源：</span><span style="color:var(--text)">' + srcLb + '</span></div>';
+          h += '<div><span style="color:var(--text-muted)">分类：</span><span style="color:var(--text)">' + esc(p.cat) + '</span></div>';
+          h += '</div>';
+          h += '<div style="font-size:11px;color:var(--text-muted);margin-top:8px">完整描述：</div>';
+          h += '<div style="font-size:11px;color:#7d849a;margin-top:3px;line-height:1.6">' + esc(p.desc) + '</div>';
+          h += '</div>';
+        } else if (!p.ing) {
+          h += '<button class="btn" style="padding:3px 10px;font-size:10px;margin-top:6px" onclick="val1(\'' + p.id + '\')"><i class="fa-solid fa-flask"></i> 验证</button>';
+        }
         h += '</div>';
       });
       h += '</div>';
@@ -293,9 +312,16 @@ async function val1(id) {
   try {
     var res = await api('POST', '/lit/validate', {problem_ids: [id], method: 'cross_reference'});
     pollTask(res.task_id, '/lit/validate/{task_id}/progress', [], 'none', function() {
-      go('lit'); toast('验证完成', 'fa-check-circle', '#00E5A0');
+      if (litActiveTask) loadLitProblems(litActiveTask);
+      else go('lit');
+      toast('验证完成', 'fa-check-circle', '#00E5A0');
     });
   } catch(e) { toast('失败: ' + e.message, 'fa-exclamation-circle', '#FF6B81'); }
+}
+
+function toggleProblemDetail(id) {
+  var el = document.getElementById('prob-detail-' + id);
+  if (el) { el.style.display = el.style.display === 'none' ? 'block' : 'none'; }
 }
 
 async function batchV() {
@@ -306,7 +332,9 @@ async function batchV() {
     var ids = pending.map(function(p){return p.id});
     var res = await api('POST', '/lit/validate', {problem_ids: ids, method: 'cross_reference'});
     pollTask(res.task_id, '/lit/validate/{task_id}/progress', [], 'none', function() {
-      go('lit'); toast('批量验证完成', 'fa-check-circle', '#00E5A0');
+      if (litActiveTask) loadLitProblems(litActiveTask);
+      else go('lit');
+      toast('批量验证完成', 'fa-check-circle', '#00E5A0');
     });
   } catch(e) { toast('失败: ' + e.message, 'fa-exclamation-circle', '#FF6B81'); }
 }

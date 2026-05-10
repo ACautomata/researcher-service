@@ -40,7 +40,7 @@ pages.idea = async function(){
       h+='</div></div>';
     });
   } else {
-    h+='<div class="card" style="text-align:center;padding:40px;color:#464d65"><i class="fa-solid fa-lightbulb" style="font-size:30px;display:block;margin-bottom:10px;opacity:.2"></i><p style="font-size:13px">完成页面2的问题验证后可生成 Idea</p></div>';
+    h+='<div class="card" style="text-align:center;padding:40px;color:#464d65"><i class="fa-solid fa-lightbulb" style="font-size:30px;display:block;margin-bottom:10px;opacity:.2"></i></div>';
   }
   return h;
 };

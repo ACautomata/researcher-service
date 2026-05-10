@@ -31,7 +31,15 @@ function generateDemoTasks() {
 }
 
 pages.dashboard = function() {
-  var h = '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(400px,1fr));gap:16px;margin-bottom:24px">';
+  var h = '<div class="card mb24"><div class="card-t"><i class="fa-solid fa-diagram-project"></i>系统数据流</div>';
+  h += '<div style="display:flex;align-items:center;justify-content:center;gap:0;padding:20px 0;flex-wrap:wrap">';
+  var ns = [{n:'知识库',s:'上传·解析·领域',c:'#00E5A0'},{n:'问题发现',s:'AI发现·验证·搜索',c:'#F5A623'},{n:'Idea生成',s:'AI创意·评分排序',c:'#A78BFA'},{n:'算法实现',s:'代码·测试·优化',c:'#FF6B81'},{n:'参数优化',s:'超参建议',c:'#F97316'}];
+  for (var i = 0; i < ns.length; i++) {
+    h += '<div style="text-align:center;padding:16px 22px;border-radius:12px;border:2px solid ' + ns[i].c + '30;background:' + ns[i].c + '0a;min-width:90px"><div style="font-size:11px;font-weight:700;color:' + ns[i].c + '">' + ns[i].n + '</div><div style="font-size:10px;color:#464d65;margin-top:2px">' + ns[i].s + '</div></div>';
+    if (i < ns.length - 1) h += '<div style="display:flex;flex-direction:column;align-items:center;width:48px;padding:0 4px"><div style="font-size:9px;color:#464d65;margin-bottom:2px">产出</div><i class="fa-solid fa-arrow-right" style="font-size:12px;color:#464d65"></i></div>';
+  }
+  h += '</div></div>';
+  h += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(400px,1fr));gap:16px;margin-bottom:24px">';
   h += '<div class="card"><div class="card-t"><i class="fa-solid fa-chart-pie"></i>任务状态分布</div><div id="dashStatusChart" style="height:280px"></div></div>';
   h += '<div class="card"><div class="card-t"><i class="fa-solid fa-chart-bar"></i>任务类型分布</div><div id="dashTypeChart" style="height:280px"></div></div>';
   h += '</div>';

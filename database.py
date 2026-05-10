@@ -177,6 +177,11 @@ async def init_db():
             await db.commit()
         except Exception:
             pass
+        try:
+            await db.execute("ALTER TABLE problems ADD COLUMN source_analysis TEXT DEFAULT NULL")
+            await db.commit()
+        except Exception:
+            pass
 
 
 async def db_query(sql, params=()):
