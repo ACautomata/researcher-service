@@ -165,7 +165,7 @@ async def register(body: RegisterBody):
 async def login(body: LoginBody):
     u = body.username.strip()
     rows = await db_query(
-        "SELECT id, username, password_hash FROM users WHERE username = ?",
+        "SELECT id, username, role, password_hash FROM users WHERE username = ?",
         (u,),
     )
     if not rows or not verify_password(body.password, rows[0]["password_hash"]):
@@ -208,6 +208,25 @@ async def put_settings(body: UserSettingsUpdate, user: dict = Depends(_current_u
     patch = body.model_dump(exclude_unset=True)
     await apply_user_settings_patch(user["id"], patch)
     return {"success": True}
+
+
+class ChangePasswordBody(BaseModel):
+    current_password: str = Field(..., min_length=1)
+    new_password: str = Field(..., min_length=8, max_length=128)
+
+
+@router.put("/password")
+async def change_own_password(body: ChangePasswordBody, user: dict = Depends(_current_user)):
+    """当前登录用户修改自己的密码"""
+    rows = await db_query("SELECT password_hash FROM users WHERE id=?", (user["id"],))
+    if not rows or not verify_password(body.current_password, rows[0]["password_hash"]):
+        raise HTTPException(status_code=400, detail="当前密码不正确")
+    if body.current_password == body.new_password:
+        raise HTTPException(status_code=400, detail="新密码不能与当前密码相同")
+    ph = hash_password(body.new_password)
+    await db_execute("UPDATE users SET password_hash=? WHERE id=?", (ph, user["id"]))
+    await db_execute("DELETE FROM sessions WHERE user_id=?", (user["id"],))
+    return {"success": True, "message": "密码已修改，请重新登录"}
 
 
 # ===== Admin 用户管理 =====

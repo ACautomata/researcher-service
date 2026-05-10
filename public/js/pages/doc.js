@@ -2,7 +2,7 @@
 pages.doc = function(){
   var h='<div class="card mb24"><div class="card-t"><i class="fa-solid fa-diagram-project"></i>系统数据流</div>';
   h+='<div style="display:flex;align-items:center;justify-content:center;gap:0;padding:20px 0;flex-wrap:wrap">';
-  var ns=[{n:'知识库',s:'上传·解析·领域',c:'#00E5A0'},{n:'问题发现',s:'AI发现·验证·搜索',c:'#F5A623'},{n:'Idea生成',s:'AI创意·评分排序',c:'#A78BFA'},{n:'算法实现',s:'代码·测试·优化',c:'#FF6B81'},{n:'Agent终端',s:'Claude智能体',c:'#3B82F6'},{n:'参数优化',s:'超参建议',c:'#F97316'}];
+  var ns=[{n:'知识库',s:'上传·解析·领域',c:'#00E5A0'},{n:'问题发现',s:'AI发现·验证·搜索',c:'#F5A623'},{n:'Idea生成',s:'AI创意·评分排序',c:'#A78BFA'},{n:'算法实现',s:'代码·测试·优化',c:'#FF6B81'},{n:'参数优化',s:'超参建议',c:'#F97316'}];
   for(var i=0;i<ns.length;i++){
     h+='<div style="text-align:center;padding:16px 22px;border-radius:12px;border:2px solid '+ns[i].c+'30;background:'+ns[i].c+'0a;min-width:90px"><div style="font-size:11px;font-weight:700;color:'+ns[i].c+'">'+ns[i].n+'</div><div style="font-size:10px;color:#464d65;margin-top:2px">'+ns[i].s+'</div></div>';
     if(i<ns.length-1) h+='<div style="display:flex;flex-direction:column;align-items:center;width:48px;padding:0 4px"><div style="font-size:9px;color:#464d65;margin-bottom:2px">产出</div><i class="fa-solid fa-arrow-right" style="font-size:12px;color:#464d65"></i></div>';
@@ -19,7 +19,6 @@ pages.doc = function(){
     {t:'文献分析 (Lit)', items:['AI 自动发现问题（3种深度）','交叉分析：双知识库对比','问题验证与评分（AI）','外部文献搜索：arXiv/Semantic Scholar','分析历史持久化存储','批量验证']},
     {t:'Idea 生成', items:['AI 生成研究思路（基于问题）','三维评分：新颖性/可行性/影响力','关键词过滤与方向引导','排序与筛选']},
     {t:'算法工程 (Algo)', items:['AI 生成代码（从 Idea 或描述）','参数优化建议','语法检查（AST）','Mock 测试与性能对比']},
-    {t:'Agent 终端', items:['Claude Agent SSE 流式交互','可配置最大轮次（默认15）','自动审批模式']},
     {t:'对话交互 & 其他', items:['AI 直接对话（流式/非流式）','Obsidian Vault 集成','Dashboard 系统监控','用户认证（可选启用）']}
   ];
   for(var r=0;r<reqs.length;r++){

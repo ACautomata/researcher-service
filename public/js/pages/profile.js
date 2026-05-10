@@ -1,6 +1,11 @@
 /* ===== Profile Page ===== */
 pages.profile = async function() {
   var h = '<div class="card mb24" id="profCard"><div class="card-t"><i class="fa-solid fa-sliders"></i>个人配置 <span class="api-t api-g" style="margin-left:auto">GET/PUT /user/settings</span></div><div id="profInner" style="color:#7d849a;font-size:13px">加载中…</div></div>';
+  h += '<div class="card mb24"><div class="card-t"><i class="fa-solid fa-lock"></i>修改密码 <span class="api-t api-g" style="margin-left:auto">PUT /auth/password</span></div>';
+  h += '<div class="auth-field mb12"><label class="auth-lbl">当前密码</label><input class="inp" type="password" id="pf_cur_pwd" placeholder="输入当前密码"></div>';
+  h += '<div class="auth-field mb12"><label class="auth-lbl">新密码（至少 8 位）</label><input class="inp" type="password" id="pf_new_pwd" placeholder="输入新密码"></div>';
+  h += '<div class="auth-field mb12"><label class="auth-lbl">确认新密码</label><input class="inp" type="password" id="pf_new_pwd2" placeholder="再次输入新密码"></div>';
+  h += '<button type="button" class="btn bp" onclick="changePassword()"><i class="fa-solid fa-key"></i> 修改密码</button></div>';
   h += '<div class="card"><div class="card-t"><i class="fa-solid fa-coins"></i>Token 使用情况 <span class="api-t api-g" style="margin-left:auto">GET /dashboard/usage</span></div><div id="profTokenStats" style="color:#7d849a;font-size:13px">加载中…</div></div>';
   return h;
 };
@@ -134,6 +139,26 @@ async function saveProfileField(field, val) {
     await loadProfilePage();
   } catch (e) {
     toast('保存失败: ' + e.message, 'fa-exclamation-circle', '#FF6B81');
+  }
+}
+
+async function changePassword() {
+  var cur = document.getElementById('pf_cur_pwd');
+  var nu = document.getElementById('pf_new_pwd');
+  var nu2 = document.getElementById('pf_new_pwd2');
+  if (!cur || !nu || !nu2) return;
+  var cv = cur.value, nv = nu.value, nv2 = nu2.value;
+  if (!cv) { toast('请输入当前密码', 'fa-exclamation-circle', '#F5A623'); return; }
+  if (!nv || nv.length < 8) { toast('新密码至少 8 位', 'fa-exclamation-circle', '#F5A623'); return; }
+  if (nv !== nv2) { toast('两次输入的新密码不一致', 'fa-exclamation-circle', '#F5A623'); return; }
+  if (cv === nv) { toast('新密码不能与当前密码相同', 'fa-exclamation-circle', '#F5A623'); return; }
+  try {
+    var data = await api('PUT', '/auth/password', { current_password: cv, new_password: nv });
+    cur.value = ''; nu.value = ''; nu2.value = '';
+    toast(data.message || '密码已修改', 'fa-check-circle', '#00E5A0');
+    setTimeout(function() { doLogout(); }, 1200);
+  } catch (e) {
+    toast('修改失败: ' + e.message, 'fa-exclamation-circle', '#FF6B81');
   }
 }
 
