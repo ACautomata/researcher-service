@@ -8,6 +8,7 @@ from pydantic import BaseModel
 
 from database import db_query, db_execute, update_task
 from services.ai_service import generate_algorithm, generate_code_project, suggest_params
+from services.data_filter import user_filter, current_user_id
 
 router = APIRouter(prefix="/api/v1/algo", tags=["算法"])
 
@@ -46,12 +47,15 @@ async def algo_suggest_params(req: SuggestReq):
 
 @router.post("/generate")
 async def algo_generate(req: AlgoReq):
+    uid = current_user_id()
     ideas = await db_query("SELECT * FROM ideas WHERE id=?", (req.idea_id,))
     if not ideas:
         raise HTTPException(404, "Idea 不存在")
     tid = f"algo_{uuid.uuid4().hex[:8]}"
-    await db_execute("INSERT INTO tasks(id,type,status,progress,step) VALUES(?,'algo','running',0,'分析需求')", (tid,))
-    asyncio.create_task(_do_algo(tid, ideas[0], req.language))
+    await db_execute(
+        "INSERT INTO tasks(id,type,status,progress,step,user_id) VALUES(?,'algo','running',0,'分析需求',?)",
+        (tid, uid))
+    asyncio.create_task(_do_algo(tid, ideas[0], req.language, uid))
     return {"task_id": tid, "status": "running", "algo_id": tid}
 
 
@@ -62,19 +66,24 @@ async def algo_gen_progress(tid: str):
 
 @router.get("/list")
 async def algo_list():
-    rows = await db_query("SELECT * FROM algorithms ORDER BY created_at DESC")
+    uf, up = user_filter()
+    where = "WHERE " + uf if uf else ""
+    rows = await db_query(f"SELECT * FROM algorithms {where} ORDER BY created_at DESC", up)
     return {"algorithms": rows, "total": len(rows)}
 
 
 @router.post("/test/{algo_id}")
 async def algo_test(algo_id: str):
+    uid = current_user_id()
     algos = await db_query("SELECT * FROM algorithms WHERE id=?", (algo_id,))
     if not algos:
         raise HTTPException(404)
     if not algos[0].get("code"):
         raise HTTPException(400, "代码为空")
     tid = f"test_{uuid.uuid4().hex[:8]}"
-    await db_execute("INSERT INTO tasks(id,type,status,progress,step) VALUES(?,'test','running',0,'执行测试')", (tid,))
+    await db_execute(
+        "INSERT INTO tasks(id,type,status,progress,step,user_id) VALUES(?,'test','running',0,'执行测试',?)",
+        (tid, uid))
     asyncio.create_task(_do_test(tid, algos[0]))
     return {"task_id": tid, "status": "running"}
 
@@ -111,7 +120,7 @@ async def _task_resp(tid):
     }
 
 
-async def _do_algo(tid, idea, language):
+async def _do_algo(tid, idea, language, uid):
     try:
         await update_task(tid, 30, "设计算法架构")
         result = await generate_algorithm(idea, language)
@@ -119,8 +128,8 @@ async def _do_algo(tid, idea, language):
         aid = f"a_{uuid.uuid4().hex[:10]}"
         tc = result.get("test_cases", [])
         await db_execute(
-            "INSERT INTO algorithms(id,name,code,language,from_idea,test_total) VALUES(?,?,?,?,?,?)",
-            (aid, result.get("name", "Unnamed"), result.get("code", ""), language, idea["title"], len(tc)))
+            "INSERT INTO algorithms(id,name,code,language,from_idea,test_total,user_id) VALUES(?,?,?,?,?,?,?)",
+            (aid, result.get("name", "Unnamed"), result.get("code", ""), language, idea["title"], len(tc), uid))
         await update_task(tid, 100, "完成", "completed",
                           result={"algo_id": aid, "name": result.get("name"), "test_cases_count": len(tc)})
     except Exception as e:

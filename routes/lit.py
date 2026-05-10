@@ -9,6 +9,7 @@ from typing import Optional
 from database import db_query, db_execute, update_task
 from services.ai_service import discover_problems, validate_problem
 from services.external_service import search_external
+from services.data_filter import user_filter, current_user_id, current_user_role
 
 router = APIRouter(prefix="/api/v1/lit", tags=["文献分析"])
 
@@ -39,37 +40,52 @@ class LitHistoryReq(BaseModel):
 
 @router.get("/history")
 async def lit_history():
-    rows = await db_query("SELECT * FROM lit_analyses ORDER BY created_at DESC")
+    uf, up = user_filter()
+    where = "WHERE " + uf if uf else ""
+    rows = await db_query(f"SELECT * FROM lit_analyses {where} ORDER BY created_at DESC", up)
     return {"history": rows}
 
 
 @router.post("/history")
 async def lit_history_create(req: LitHistoryReq):
+    uid = current_user_id()
     aid = req.id or f"lit_{uuid.uuid4().hex[:10]}"
     await db_execute(
-        "INSERT INTO lit_analyses(id,kb_id,kb_id2,kb_name,kb_name2,display_name,depth,status,progress,count) VALUES(?,?,?,?,?,?,?,?,?,?)",
-        (aid, req.kb_id, req.kb_id2, req.kb_name, req.kb_name2, req.display_name, req.depth, req.status, req.progress, req.count))
+        "INSERT INTO lit_analyses(id,kb_id,kb_id2,kb_name,kb_name2,display_name,depth,status,progress,count,user_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+        (aid, req.kb_id, req.kb_id2, req.kb_name, req.kb_name2, req.display_name, req.depth, req.status, req.progress, req.count, uid))
     return {"id": aid}
 
 
 @router.put("/history/{aid}")
 async def lit_history_update(aid: str, req: LitHistoryReq):
-    await db_execute(
-        "UPDATE lit_analyses SET status=?,progress=?,count=? WHERE id=?",
-        (req.status, req.progress, req.count, aid))
+    role = current_user_role()
+    uid = current_user_id()
+    if role == "admin":
+        await db_execute(
+            "UPDATE lit_analyses SET status=?,progress=?,count=? WHERE id=?",
+            (req.status, req.progress, req.count, aid))
+    else:
+        await db_execute(
+            "UPDATE lit_analyses SET status=?,progress=?,count=? WHERE id=? AND (user_id IS NULL OR user_id=?)",
+            (req.status, req.progress, req.count, aid, uid))
     return {"ok": True}
 
 
 @router.post("/auto-discover")
 async def lit_discover(req: DiscoverReq):
+    uid = current_user_id()
     if req.extra_texts:
         entries = [{"title": f"文献片段 {i+1}", "category": "文献", "keywords": [], "source": "知识库"}
                    for i in range(len(req.extra_texts))]
     elif req.entry_ids:
         ph = ",".join("?" * len(req.entry_ids))
-        entries = await db_query(f"SELECT * FROM entries WHERE id IN ({ph})", req.entry_ids)
+        uf, up = user_filter()
+        extra_cond = (" AND " + uf) if uf else ""
+        entries = await db_query(f"SELECT * FROM entries WHERE id IN ({ph}){extra_cond}", req.entry_ids + up)
     else:
-        entries = await db_query("SELECT * FROM entries LIMIT 100")
+        uf, up = user_filter()
+        where = "WHERE " + uf if uf else ""
+        entries = await db_query(f"SELECT * FROM entries {where} LIMIT 100", up)
     if not entries:
         raise HTTPException(400, "知识库为空")
     for e in entries:
@@ -78,8 +94,10 @@ async def lit_discover(req: DiscoverReq):
         except Exception:
             e["keywords"] = []
     tid = f"disc_{uuid.uuid4().hex[:8]}"
-    await db_execute("INSERT INTO tasks(id,type,status,progress,step) VALUES(?,'discover','running',0,'扫描条目')", (tid,))
-    asyncio.create_task(_do_discover(tid, entries, req.deep_analysis, req.extra_texts))
+    await db_execute(
+        "INSERT INTO tasks(id,type,status,progress,step,user_id) VALUES(?,'discover','running',0,'扫描条目',?)",
+        (tid, uid))
+    asyncio.create_task(_do_discover(tid, entries, req.deep_analysis, req.extra_texts, uid))
     return {"task_id": tid, "status": "running"}
 
 
@@ -96,6 +114,7 @@ async def lit_search(keyword: str = Query(...), source: str = Query("arxiv")):
 
 @router.post("/validate")
 async def lit_validate(req: ValidateReq):
+    uid = current_user_id()
     problems = []
     for pid in req.problem_ids:
         rows = await db_query("SELECT * FROM problems WHERE id=?", (pid,))
@@ -104,8 +123,12 @@ async def lit_validate(req: ValidateReq):
     if not problems:
         raise HTTPException(400, "未找到问题")
     tid = f"val_{uuid.uuid4().hex[:8]}"
-    await db_execute("INSERT INTO tasks(id,type,status,progress,step) VALUES(?,'validate','running',0,'验证中')", (tid,))
-    entries = await db_query("SELECT title,category FROM entries LIMIT 200")
+    await db_execute(
+        "INSERT INTO tasks(id,type,status,progress,step,user_id) VALUES(?,'validate','running',0,'验证中',?)",
+        (tid, uid))
+    uf, up = user_filter()
+    where = "WHERE " + uf if uf else ""
+    entries = await db_query(f"SELECT title,category FROM entries {where} LIMIT 200", up)
     ml = {"cross_reference": "交叉引用", "experiment": "实验验证", "expert": "专家审核"}
     asyncio.create_task(_do_validate(tid, problems, entries, ml.get(req.method, "交叉引用")))
     return {"task_id": tid, "status": "running"}
@@ -119,6 +142,10 @@ async def lit_val_progress(tid: str):
 @router.get("/problems")
 async def lit_problems(status: str = None, severity: str = None):
     conds, params = [], []
+    uf, up = user_filter()
+    if uf:
+        conds.append(uf)
+        params.extend(up)
     if status == "validated":
         conds.append("validated=1")
     elif status == "pending":
@@ -144,7 +171,7 @@ async def _task_resp(tid):
     }
 
 
-async def _do_discover(tid, entries, depth, extra_texts=None):
+async def _do_discover(tid, entries, depth, extra_texts=None, uid=None):
     try:
         await update_task(tid, 25, "扫描关键字与条目结构")
         await asyncio.sleep(0.2)
@@ -155,10 +182,10 @@ async def _do_discover(tid, entries, depth, extra_texts=None):
         for p in result.get("problems", []):
             pid = f"p_{uuid.uuid4().hex[:10]}"
             await db_execute(
-                "INSERT INTO problems(id,title,description,source,source_type,category,severity) VALUES(?,?,?,?,?,?,?)",
+                "INSERT INTO problems(id,title,description,source,source_type,category,severity,user_id) VALUES(?,?,?,?,?,?,?,?)",
                 (pid, p["title"], p.get("description", ""),
                  entries[0].get("source", "") if entries else "",
-                 "kb", p.get("category", "未分类"), p.get("severity", "medium")))
+                 "kb", p.get("category", "未分类"), p.get("severity", "medium"), uid))
             count += 1
         await update_task(tid, 100, "完成", "completed", result={"problems_count": count})
     except Exception as e:

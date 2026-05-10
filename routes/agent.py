@@ -11,6 +11,7 @@ from pydantic import BaseModel
 from database import db_execute, db_query, update_task
 from services.agent_service import run_agent
 from services.user_credentials import get_effective_agent
+from services.data_filter import current_user_id
 
 router = APIRouter(prefix="/api/v1/agent", tags=["Agent"])
 
@@ -26,11 +27,12 @@ class ChatRequest(BaseModel):
 
 @router.post("/chat")
 async def agent_chat(req: ChatRequest):
+    uid = current_user_id()
     tid = f"agent_{uuid.uuid4().hex[:8]}"
     _sessions[tid] = asyncio.Queue()
     await db_execute(
-        "INSERT INTO tasks(id,type,status,progress,step) VALUES(?,'agent','running',0,'初始化Agent')",
-        (tid,),
+        "INSERT INTO tasks(id,type,status,progress,step,user_id) VALUES(?,'agent','running',0,'初始化Agent',?)",
+        (tid, uid),
     )
     akey, abase, amodel = await get_effective_agent()
     asyncio.create_task(

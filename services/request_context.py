@@ -3,3 +3,4 @@ from contextvars import ContextVar
 from typing import Optional
 
 ctx_user_id: ContextVar[Optional[int]] = ContextVar("ctx_user_id", default=None)
+ctx_user_role: ContextVar[Optional[str]] = ContextVar("ctx_user_role", default=None)

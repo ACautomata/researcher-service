@@ -126,6 +126,57 @@ async def init_db():
             await db.commit()
         except Exception:
             pass
+        # ===== 多租户数据隔离迁移 =====
+        try:
+            await db.execute("ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'user'")
+            await db.commit()
+        except Exception:
+            pass
+        try:
+            await db.execute("ALTER TABLE papers ADD COLUMN user_id INTEGER DEFAULT NULL")
+            await db.commit()
+        except Exception:
+            pass
+        try:
+            await db.execute("ALTER TABLE keywords ADD COLUMN user_id INTEGER DEFAULT NULL")
+            await db.commit()
+        except Exception:
+            pass
+        try:
+            await db.execute("ALTER TABLE entries ADD COLUMN user_id INTEGER DEFAULT NULL")
+            await db.commit()
+        except Exception:
+            pass
+        try:
+            await db.execute("ALTER TABLE problems ADD COLUMN user_id INTEGER DEFAULT NULL")
+            await db.commit()
+        except Exception:
+            pass
+        try:
+            await db.execute("ALTER TABLE ideas ADD COLUMN user_id INTEGER DEFAULT NULL")
+            await db.commit()
+        except Exception:
+            pass
+        try:
+            await db.execute("ALTER TABLE algorithms ADD COLUMN user_id INTEGER DEFAULT NULL")
+            await db.commit()
+        except Exception:
+            pass
+        try:
+            await db.execute("ALTER TABLE tasks ADD COLUMN user_id INTEGER DEFAULT NULL")
+            await db.commit()
+        except Exception:
+            pass
+        try:
+            await db.execute("ALTER TABLE domains ADD COLUMN user_id INTEGER DEFAULT NULL")
+            await db.commit()
+        except Exception:
+            pass
+        try:
+            await db.execute("ALTER TABLE lit_analyses ADD COLUMN user_id INTEGER DEFAULT NULL")
+            await db.commit()
+        except Exception:
+            pass
 
 
 async def db_query(sql, params=()):

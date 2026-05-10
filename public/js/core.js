@@ -21,6 +21,7 @@ var P_FULL = [
   { id: 'chat', name: 'AI 对话', icon: 'fa-comment-dots', color: '#34D399', step: 0, desc: '与 AI 直接对话' },
   { id: 'obs', name: 'Obsidian Vault', icon: 'fa-note-sticky', color: '#C084FC', step: 0, desc: '笔记浏览·编辑·图谱' },
   { id: 'profile', name: '个人配置', icon: 'fa-sliders', color: '#34D399', step: 0, desc: 'API 密钥与模型', navBreak: '账户' },
+  { id: 'admin', name: '用户管理', icon: 'fa-user-gear', color: '#A78BFA', step: 0, desc: '管理用户和权限', adminOnly: true },
   { id: 'doc', name: '需求与API文档', icon: 'fa-book', color: '#7d849a', step: 0, desc: '规范与接口定义' }
 ];
 
@@ -32,7 +33,10 @@ function saveToken(t) {
 }
 
 function navPages() {
-  if (authUser) return P_FULL;
+  if (authUser) {
+    var isAdmin = authUser.role === 'admin';
+    return P_FULL.filter(function(p) { return !p.adminOnly || isAdmin; });
+  }
   return P_GUEST;
 }
 
@@ -227,6 +231,7 @@ async function buildContent(){
   if(cur==='kb') setTimeout(setupDrag, 60);
   if(cur==='obs') setTimeout(function(){ loadObsTree(''); loadObsStats(); }, 100);
   if(cur==='profile') setTimeout(function(){ loadProfilePage(); }, 50);
+  if(cur==='admin') setTimeout(function(){ loadAdminPage(); }, 50);
   if(cur==='dashboard') setTimeout(function(){ loadDashboard(); startDashboardPoll(); }, 50);
   if(cur==='home' && !authUser) { heroTimer = setInterval(function() { if(typeof heroJumpTo === 'function') heroJumpTo((heroIdx + 1) % heroImgs.length); }, 4000); }
 }

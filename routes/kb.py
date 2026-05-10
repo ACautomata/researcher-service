@@ -11,6 +11,7 @@ from config import UPLOAD_DIR
 from database import db_query, db_execute, update_task
 from services.ai_service import extract_entries, extract_keywords
 from services.parser_service import extract_text
+from services.data_filter import user_filter, current_user_id, current_user_role
 
 router = APIRouter(prefix="/api/v1/kb", tags=["知识库"])
 
@@ -21,6 +22,7 @@ class ParseReq(BaseModel):
 
 @router.post("/upload")
 async def kb_upload(files: list[UploadFile] = File(...)):
+    uid = current_user_id()
     os.makedirs(UPLOAD_DIR, exist_ok=True)
     uploaded = []
     for f in files:
@@ -30,20 +32,23 @@ async def kb_upload(files: list[UploadFile] = File(...)):
         with open(save, "wb") as fp:
             fp.write(content)
         rid = await db_execute(
-            "INSERT INTO papers(filename,original_name,ext,size_bytes,status) VALUES(?,?,?,?,?)",
-            (save, f.filename, ext, len(content), "uploaded"))
+            "INSERT INTO papers(filename,original_name,ext,size_bytes,status,user_id) VALUES(?,?,?,?,?,?)",
+            (save, f.filename, ext, len(content), "uploaded", uid))
         uploaded.append({"upload_id": rid, "filename": f.filename, "size": len(content)})
     return {"success": True, "uploaded": uploaded}
 
 
 @router.post("/parse")
 async def kb_parse(req: ParseReq):
+    uid = current_user_id()
     papers = await db_query("SELECT * FROM papers WHERE id=? AND status!='parsed'", (req.upload_id,))
     if not papers:
         raise HTTPException(404, "文件不存在或已解析")
     tid = f"parse_{uuid.uuid4().hex[:8]}"
-    await db_execute("INSERT INTO tasks(id,type,status,progress,step) VALUES(?,'parse','running',0,'校验文件')", (tid,))
-    asyncio.create_task(_do_parse(tid, req.upload_id))
+    await db_execute(
+        "INSERT INTO tasks(id,type,status,progress,step,user_id) VALUES(?,'parse','running',0,'校验文件',?)",
+        (tid, uid))
+    asyncio.create_task(_do_parse(tid, req.upload_id, uid))
     return {"task_id": tid, "status": "running"}
 
 
@@ -55,6 +60,10 @@ async def kb_parse_progress(tid: str):
 @router.get("/entries")
 async def kb_entries(keyword: str = None, category: str = None, page: int = 1, page_size: int = 50):
     conds, params = [], []
+    uf, up = user_filter()
+    if uf:
+        conds.append(uf)
+        params.extend(up)
     if keyword:
         conds += ["(title LIKE ? OR keywords_json LIKE ?)"]
         params += [f"%{keyword}%", f"%{keyword}%"]
@@ -76,6 +85,10 @@ async def kb_entries(keyword: str = None, category: str = None, page: int = 1, p
 @router.get("/keywords")
 async def kb_keywords(category: str = None, limit: int = 100):
     conds, params = [], []
+    uf, up = user_filter()
+    if uf:
+        conds.append(uf)
+        params.extend(up)
     if category:
         conds += ["category=?"]
         params.append(category)
@@ -89,8 +102,15 @@ async def kb_delete(body: dict):
     ids = body.get("ids", [])
     if not ids:
         return {"success": True}
+    uid = current_user_id()
+    role = current_user_role()
     ph = ",".join("?" * len(ids))
-    await db_execute(f"DELETE FROM entries WHERE id IN ({ph})", ids)
+    if role == "admin":
+        await db_execute(f"DELETE FROM entries WHERE id IN ({ph})", ids)
+    else:
+        await db_execute(
+            f"DELETE FROM entries WHERE id IN ({ph}) AND (user_id IS NULL OR user_id = ?)",
+            ids + [uid])
     return {"success": True, "message": f"删除 {len(ids)} 条"}
 
 
@@ -107,7 +127,7 @@ async def _task_resp(tid):
     }
 
 
-async def _do_parse(tid, paper_id):
+async def _do_parse(tid, paper_id, uid):
     try:
         paper = (await db_query("SELECT * FROM papers WHERE id=?", (paper_id,)))[0]
         await update_task(tid, 25, "文件接收与格式校验")
@@ -125,19 +145,19 @@ async def _do_parse(tid, paper_id):
         kl = kd.get("keywords", [])
         for e in el:
             await db_execute(
-                "INSERT INTO entries(title,category,source,status,paper_id,keywords_json) VALUES(?,?,?,?,?,?)",
+                "INSERT INTO entries(title,category,source,status,paper_id,keywords_json,user_id) VALUES(?,?,?,?,?,?,?)",
                 (e["title"], e.get("category", "未分类"), paper["original_name"],
                  e.get("status", "draft"), paper_id,
-                 json.dumps(e.get("keywords", []), ensure_ascii=False)))
+                 json.dumps(e.get("keywords", []), ensure_ascii=False), uid))
         for kw in kl:
-            ex = await db_query("SELECT id,weight FROM keywords WHERE word=? AND category=?",
-                                (kw["word"], kw.get("category")))
+            ex = await db_query("SELECT id,weight FROM keywords WHERE word=? AND category=? AND (user_id IS NULL OR user_id=?)",
+                                (kw["word"], kw.get("category"), uid))
             if ex:
                 await db_execute("UPDATE keywords SET weight=?,source_paper_id=? WHERE id=?",
                                  (max(ex[0]["weight"], kw.get("weight", 5)), paper_id, ex[0]["id"]))
             else:
-                await db_execute("INSERT INTO keywords(word,weight,category,source_paper_id) VALUES(?,?,?,?)",
-                                 (kw["word"], kw.get("weight", 5), kw.get("category"), paper_id))
+                await db_execute("INSERT INTO keywords(word,weight,category,source_paper_id,user_id) VALUES(?,?,?,?,?)",
+                                 (kw["word"], kw.get("weight", 5), kw.get("category"), paper_id, uid))
         await db_execute("UPDATE papers SET status='parsed' WHERE id=?", (paper_id,))
         await update_task(tid, 100, "完成", "completed",
                           result={"entries_count": len(el), "keywords_count": len(kl)})
@@ -148,15 +168,29 @@ async def _do_parse(tid, paper_id):
 
 @router.post("/clear-all")
 async def kb_clear_all():
-    """清空所有数据，重新开始"""
-    await db_execute("DELETE FROM algorithms")
-    await db_execute("DELETE FROM ideas")
-    await db_execute("DELETE FROM problems")
-    await db_execute("DELETE FROM entries")
-    await db_execute("DELETE FROM keywords")
-    await db_execute("DELETE FROM tasks")
-    await db_execute("DELETE FROM papers")
-    await db_execute("DELETE FROM domains")
+    """清空所有数据（仅 admin 可操作，普通用户只清自己的数据）"""
+    role = current_user_role()
+    uid = current_user_id()
+    if role == "admin":
+        await db_execute("DELETE FROM algorithms")
+        await db_execute("DELETE FROM ideas")
+        await db_execute("DELETE FROM problems")
+        await db_execute("DELETE FROM entries")
+        await db_execute("DELETE FROM keywords")
+        await db_execute("DELETE FROM tasks")
+        await db_execute("DELETE FROM papers")
+        await db_execute("DELETE FROM domains")
+    elif uid:
+        await db_execute("DELETE FROM algorithms WHERE user_id IS NULL OR user_id=?", (uid,))
+        await db_execute("DELETE FROM ideas WHERE user_id IS NULL OR user_id=?", (uid,))
+        await db_execute("DELETE FROM problems WHERE user_id IS NULL OR user_id=?", (uid,))
+        await db_execute("DELETE FROM entries WHERE user_id IS NULL OR user_id=?", (uid,))
+        await db_execute("DELETE FROM keywords WHERE user_id IS NULL OR user_id=?", (uid,))
+        await db_execute("DELETE FROM tasks WHERE user_id IS NULL OR user_id=?", (uid,))
+        await db_execute("DELETE FROM papers WHERE user_id IS NULL OR user_id=?", (uid,))
+        await db_execute("DELETE FROM domains WHERE user_id IS NULL OR user_id=?", (uid,))
+    else:
+        raise HTTPException(401, "请先登录")
     # 清空上传文件夹里的文件
     import shutil
     if os.path.exists(UPLOAD_DIR):
@@ -164,7 +198,7 @@ async def kb_clear_all():
             fp = os.path.join(UPLOAD_DIR, f)
             if os.path.isfile(fp):
                 os.remove(fp)
-    return {"success": True, "message": "已清空全部数据"}
+    return {"success": True, "message": "已清空数据"}
 
 
 # ===== 领域管理 =====
@@ -176,10 +210,11 @@ class DomainReq(BaseModel):
 
 @router.post("/domain")
 async def kb_create_domain(req: DomainReq):
+    uid = current_user_id()
     try:
         rid = await db_execute(
-            "INSERT INTO domains(name,description) VALUES(?,?)",
-            (req.name, req.description))
+            "INSERT INTO domains(name,description,user_id) VALUES(?,?,?)",
+            (req.name, req.description, uid))
         return {"success": True, "domain_id": rid, "name": req.name}
     except Exception as e:
         raise HTTPException(400, f"创建失败（可能已存在同名领域）: {str(e)}")
@@ -187,27 +222,47 @@ async def kb_create_domain(req: DomainReq):
 
 @router.get("/domains")
 async def kb_list_domains():
-    rows = await db_query("SELECT * FROM domains ORDER BY updated_at DESC")
-    # 统计每个领域的论文数
+    uf, up = user_filter()
+    where = "WHERE " + uf if uf else ""
+    rows = await db_query(f"SELECT * FROM domains {where} ORDER BY updated_at DESC", up)
+    # 统计每个领域的论文数（也需要按用户过滤）
     for r in rows:
+        puf, pup = user_filter("p")
+        pw = " AND " + puf if puf else ""
         cnt = await db_query(
-            "SELECT COUNT(*) as c FROM papers WHERE domain_id=?", (r["id"],))
+            f"SELECT COUNT(*) as c FROM papers p WHERE p.domain_id=?{pw}",
+            [r["id"]] + pup)
         r["paper_count"] = cnt[0]["c"] if cnt else 0
     return {"domains": rows}
 
 
 @router.delete("/domain/{domain_id}")
 async def kb_delete_domain(domain_id: int):
-    await db_execute("UPDATE papers SET domain_id=NULL WHERE domain_id=?", (domain_id,))
-    await db_execute("DELETE FROM domains WHERE id=?", (domain_id,))
+    uid = current_user_id()
+    role = current_user_role()
+    if role == "admin":
+        await db_execute("UPDATE papers SET domain_id=NULL WHERE domain_id=?", (domain_id,))
+        await db_execute("DELETE FROM domains WHERE id=?", (domain_id,))
+    else:
+        await db_execute("UPDATE papers SET domain_id=NULL WHERE domain_id=? AND (user_id IS NULL OR user_id=?)",
+                         (domain_id, uid))
+        await db_execute("DELETE FROM domains WHERE id=? AND (user_id IS NULL OR user_id=?)",
+                         (domain_id, uid))
     return {"success": True}
 
 
 @router.put("/domain/{domain_id}")
 async def kb_update_domain(domain_id: int, req: DomainReq):
-    await db_execute(
-        "UPDATE domains SET name=?,description=?,updated_at=datetime('now','localtime') WHERE id=?",
-        (req.name, req.description, domain_id))
+    uid = current_user_id()
+    role = current_user_role()
+    if role == "admin":
+        await db_execute(
+            "UPDATE domains SET name=?,description=?,updated_at=datetime('now','localtime') WHERE id=?",
+            (req.name, req.description, domain_id))
+    else:
+        await db_execute(
+            "UPDATE domains SET name=?,description=?,updated_at=datetime('now','localtime') WHERE id=? AND (user_id IS NULL OR user_id=?)",
+            (req.name, req.description, domain_id, uid))
     return {"success": True}
 
 
@@ -215,6 +270,7 @@ async def kb_update_domain(domain_id: int, req: DomainReq):
 
 @router.post("/domain/{domain_id}/upload")
 async def kb_domain_upload(domain_id: int, files: list[UploadFile] = File(...)):
+    uid = current_user_id()
     domains = await db_query("SELECT * FROM domains WHERE id=?", (domain_id,))
     if not domains:
         raise HTTPException(404, "领域不存在")
@@ -234,8 +290,8 @@ async def kb_domain_upload(domain_id: int, files: list[UploadFile] = File(...)):
             except Exception:
                 pass
         rid = await db_execute(
-            "INSERT INTO papers(filename,original_name,ext,size_bytes,status,domain_id,markdown_content) VALUES(?,?,?,?,?,?,?)",
-            (save, f.filename, ext, len(content), "uploaded", domain_id, md_text))
+            "INSERT INTO papers(filename,original_name,ext,size_bytes,status,domain_id,markdown_content,user_id) VALUES(?,?,?,?,?,?,?,?)",
+            (save, f.filename, ext, len(content), "uploaded", domain_id, md_text, uid))
         uploaded.append({
             "paper_id": rid, "filename": f.filename,
             "size": len(content), "md_length": len(md_text)})
@@ -244,8 +300,11 @@ async def kb_domain_upload(domain_id: int, files: list[UploadFile] = File(...)):
 
 @router.get("/domain/{domain_id}/papers")
 async def kb_domain_papers(domain_id: int):
+    uf, up = user_filter()
+    where = f"domain_id=?{(' AND ' + uf) if uf else ''}"
+    params = [domain_id] + up
     rows = await db_query(
-        "SELECT * FROM papers WHERE domain_id=? ORDER BY created_at DESC", (domain_id,))
+        f"SELECT * FROM papers WHERE {where} ORDER BY created_at DESC", params)
     return {"papers": rows, "domain_id": domain_id}
 
 

@@ -8,6 +8,7 @@ from typing import Optional
 
 from database import db_query, db_execute, update_task
 from services.ai_service import generate_ideas
+from services.data_filter import user_filter, current_user_id
 
 router = APIRouter(prefix="/api/v1/idea", tags=["Idea"])
 
@@ -19,16 +20,26 @@ class IdeaReq(BaseModel):
 
 @router.post("/generate")
 async def idea_generate(req: IdeaReq):
+    uid = current_user_id()
+    uf, up = user_filter()
+    validate_cond = "validated=1"
+    if uf:
+        validate_cond += " AND " + uf
     if req.problem_ids:
         ph = ",".join("?" * len(req.problem_ids))
-        problems = await db_query(f"SELECT * FROM problems WHERE id IN ({ph}) AND validated=1", req.problem_ids)
+        problems = await db_query(
+            f"SELECT * FROM problems WHERE id IN ({ph}) AND {validate_cond}",
+            req.problem_ids + up)
     else:
-        problems = await db_query("SELECT * FROM problems WHERE validated=1 LIMIT 20")
+        problems = await db_query(
+            f"SELECT * FROM problems WHERE {validate_cond} LIMIT 20", up)
     if not problems:
         return {"success": False, "message": "暂无已验证问题"}
     tid = f"idea_{uuid.uuid4().hex[:8]}"
-    await db_execute("INSERT INTO tasks(id,type,status,progress,step) VALUES(?,'idea','running',0,'分析问题')", (tid,))
-    asyncio.create_task(_do_ideas(tid, problems, req.direction))
+    await db_execute(
+        "INSERT INTO tasks(id,type,status,progress,step,user_id) VALUES(?,'idea','running',0,'分析问题',?)",
+        (tid, uid))
+    asyncio.create_task(_do_ideas(tid, problems, req.direction, uid))
     return {"task_id": tid, "status": "running"}
 
 
@@ -40,6 +51,10 @@ async def idea_gen_progress(tid: str):
 @router.get("/list")
 async def idea_list(min_score: float = None, page: int = 1, page_size: int = 50):
     conds, params = [], []
+    uf, up = user_filter()
+    if uf:
+        conds.append(uf)
+        params.extend(up)
     if min_score is not None:
         conds.append("overall_score>=?")
         params.append(min_score)
@@ -63,7 +78,7 @@ async def _task_resp(tid):
     }
 
 
-async def _do_ideas(tid, problems, direction):
+async def _do_ideas(tid, problems, direction, uid):
     try:
         await update_task(tid, 30, "生成研究思路")
         result = await generate_ideas(problems, direction)
@@ -74,9 +89,9 @@ async def _do_ideas(tid, problems, direction):
             nv, fb, im = idea.get("novelty", 5), idea.get("feasibility", 5), idea.get("impact", 5)
             os_ = round((nv + fb + im) / 3, 1)
             await db_execute(
-                "INSERT INTO ideas(id,title,description,from_problem,novelty,feasibility,impact,overall_score) VALUES(?,?,?,?,?,?,?,?)",
+                "INSERT INTO ideas(id,title,description,from_problem,novelty,feasibility,impact,overall_score,user_id) VALUES(?,?,?,?,?,?,?,?,?)",
                 (iid, idea["title"], idea.get("description", ""), idea.get("from_problem", ""),
-                 nv, fb, im, os_))
+                 nv, fb, im, os_, uid))
             count += 1
         await update_task(tid, 100, "完成", "completed", result={"ideas_count": count})
     except Exception as e:

@@ -39,6 +39,7 @@ async function renderDomainList() {
       h += '<div class="li-mt"><span class="badge bdg-g">' + (d.paper_count || 0) + ' 篇论文</span>';
       if (d.description) h += ' <span style="color:var(--text-muted)">' + esc(d.description) + '</span>';
       h += ' <span style="color:var(--text-muted)">' + (d.updated_at || '') + '</span></div></div>';
+      h += '<span style="font-size:14px;color:#FF6B81;cursor:pointer;opacity:.4;margin-right:10px" onclick="event.stopPropagation();deleteDomain(' + d.id + ',\'' + esc(d.name) + '\')" title="删除知识库"><i class="fa-solid fa-trash-can"></i></span>';
       h += '<span style="font-size:16px;color:var(--text-muted);opacity:.3"><i class="fa-solid fa-chevron-right"></i></span></div>';
     }
   }
@@ -322,6 +323,16 @@ async function createDomain() {
   } catch(e) {
     toast('创建失败: ' + e.message, 'fa-exclamation-circle', '#FF6B81');
   }
+}
+
+function deleteDomain(id, name) {
+  if (!confirm('确定要删除知识库「' + name + '」吗？\n该操作不可撤销，知识库下的论文不会被删除，但会移出该知识库。')) return;
+  api('DELETE', '/kb/domain/' + id).then(function() {
+    toast('已删除', 'fa-check-circle', '#00E5A0');
+    go('kb');
+  }).catch(function(e) {
+    toast('删除失败: ' + e.message, 'fa-exclamation-circle', '#FF6B81');
+  });
 }
 
 async function domainUpload(domainId, files) {

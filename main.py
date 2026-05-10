@@ -21,7 +21,7 @@ from routes.chat import router as chat_router
 from routes.auth import router as auth_router, session_user
 from routes.user_settings import router as user_settings_router
 from routes.dashboard import router as dashboard_router
-from services.request_context import ctx_user_id
+from services.request_context import ctx_user_id, ctx_user_role
 
 
 def _pipeline_api_path(path: str) -> bool:
@@ -86,9 +86,11 @@ async def user_and_auth_middleware(request: Request, call_next):
 
     user = await session_user(token) if token else None
     ctx_reset = None
+    ctx_role_reset = None
     if user:
         request.state.user = user
         ctx_reset = ctx_user_id.set(user["id"])
+        ctx_role_reset = ctx_user_role.set(user.get("role", "user"))
     try:
         if request.method == "OPTIONS":
             return await call_next(request)
@@ -108,10 +110,12 @@ async def user_and_auth_middleware(request: Request, call_next):
     finally:
         if ctx_reset is not None:
             ctx_user_id.reset(ctx_reset)
+        if ctx_role_reset is not None:
+            ctx_user_role.reset(ctx_role_reset)
 
 app.mount("/", StaticFiles(directory="public", html=True), name="static")
 
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host=HOST, port=PORT, reload=True, log_level="info")
+    uvicorn.run("main:app", host=HOST, port=PORT, reload=False, log_level="info")

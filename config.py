@@ -34,6 +34,8 @@ class Config:
     AUTH_SESSION_DAYS: int = int(os.getenv("AUTH_SESSION_DAYS", "30"))
     # 流水线相关 API 是否必须登录（true 时未登录无法调用 kb/lit/idea/algo/agent/obsidian）
     PIPELINE_REQUIRES_LOGIN: bool = os.getenv("PIPELINE_REQUIRES_LOGIN", "false").lower() == "true"
+    # 指定 admin 用户名（注册时如果匹配则自动设为 admin 角色，留空则第一个注册用户为 admin）
+    ADMIN_USERNAME: str = os.getenv("ADMIN_USERNAME", "admin")
 
     @classmethod
     def ai_headers(cls) -> dict:
@@ -60,3 +62,4 @@ OBSIDIAN_VAULT_PATH = cfg.OBSIDIAN_VAULT_PATH
 AUTH_ENABLED = cfg.AUTH_ENABLED
 AUTH_SESSION_DAYS = cfg.AUTH_SESSION_DAYS
 PIPELINE_REQUIRES_LOGIN = cfg.PIPELINE_REQUIRES_LOGIN
+ADMIN_USERNAME = cfg.ADMIN_USERNAME

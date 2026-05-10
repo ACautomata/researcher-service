@@ -1,4 +1,4 @@
-"""用户注册、登录、会话校验与个人 API 配置"""
+"""用户注册、登录、会话校验、个人 API 配置与 admin 用户管理"""
 import re
 from typing import Optional
 
@@ -47,7 +47,7 @@ def _validate_username(username: str) -> None:
 async def session_user(token: str) -> Optional[dict]:
     rows = await db_query(
         """
-        SELECT u.id, u.username
+        SELECT u.id, u.username, u.role
         FROM sessions s
         JOIN users u ON u.id = s.user_id
         WHERE s.token = ? AND datetime(s.expires_at) > datetime('now')
@@ -146,9 +146,11 @@ async def register(body: RegisterBody):
     if exists:
         raise HTTPException(status_code=400, detail="该用户名已被注册")
     ph = hash_password(body.password)
+    # 所有新注册账号默认均为普通用户
+    role = "user"
     uid = await db_execute(
-        "INSERT INTO users(username, password_hash) VALUES(?, ?)",
-        (u, ph),
+        "INSERT INTO users(username, password_hash, role) VALUES(?, ?, ?)",
+        (u, ph, role),
     )
     await db_execute("INSERT INTO user_settings (user_id) VALUES (?)", (uid,))
     token = new_session_token()
@@ -156,7 +158,7 @@ async def register(body: RegisterBody):
         "INSERT INTO sessions(token, user_id, expires_at) VALUES(?, ?, datetime('now', ?))",
         (token, uid, f"+{AUTH_SESSION_DAYS} days"),
     )
-    return {"access_token": token, "token_type": "bearer", "user": {"id": uid, "username": u}}
+    return {"access_token": token, "token_type": "bearer", "user": {"id": uid, "username": u, "role": role}}
 
 
 @router.post("/login")
@@ -174,7 +176,7 @@ async def login(body: LoginBody):
         "INSERT INTO sessions(token, user_id, expires_at) VALUES(?, ?, datetime('now', ?))",
         (token, row["id"], f"+{AUTH_SESSION_DAYS} days"),
     )
-    return {"access_token": token, "token_type": "bearer", "user": {"id": row["id"], "username": row["username"]}}
+    return {"access_token": token, "token_type": "bearer", "user": {"id": row["id"], "username": row["username"], "role": row.get("role", "user")}}
 
 
 @router.get("/me")
@@ -206,3 +208,69 @@ async def put_settings(body: UserSettingsUpdate, user: dict = Depends(_current_u
     patch = body.model_dump(exclude_unset=True)
     await apply_user_settings_patch(user["id"], patch)
     return {"success": True}
+
+
+# ===== Admin 用户管理 =====
+
+class AdminPasswordBody(BaseModel):
+    password: str = Field(..., min_length=8, max_length=128)
+
+
+class AdminRoleBody(BaseModel):
+    role: str = Field(..., pattern="^(admin|user)$")
+
+
+async def require_admin(user: dict = Depends(_current_user)) -> dict:
+    """当前用户必须为 admin 角色，否则 403。"""
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="仅 admin 可执行此操作")
+    return user
+
+
+@router.get("/admin/users")
+async def admin_list_users(_: dict = Depends(require_admin)):
+    """列出所有用户（不暴露密码哈希）。"""
+    rows = await db_query(
+        "SELECT id, username, role, created_at FROM users ORDER BY id"
+    )
+    return {"users": rows}
+
+
+@router.put("/admin/users/{user_id}/password")
+async def admin_reset_password(user_id: int, body: AdminPasswordBody, _: dict = Depends(require_admin)):
+    """admin 重置指定用户的密码，同时清除其会话强制重新登录。"""
+    user = await db_query("SELECT id FROM users WHERE id = ?", (user_id,))
+    if not user:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    ph = hash_password(body.password)
+    await db_execute("UPDATE users SET password_hash = ? WHERE id = ?", (ph, user_id))
+    await db_execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+    return {"success": True}
+
+
+@router.put("/admin/users/{user_id}/role")
+async def admin_change_role(user_id: int, body: AdminRoleBody, admin: dict = Depends(require_admin)):
+    """admin 修改指定用户的角色（不可修改自己）。"""
+    user = await db_query("SELECT id, role FROM users WHERE id = ?", (user_id,))
+    if not user:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    if user[0]["id"] == admin["id"]:
+        raise HTTPException(status_code=400, detail="不能修改自己的角色")
+    await db_execute("UPDATE users SET role = ? WHERE id = ?", (body.role, user_id))
+    return {"success": True, "previous_role": user[0]["role"], "new_role": body.role}
+
+
+@router.delete("/admin/users/{user_id}")
+async def admin_delete_user(user_id: int, admin: dict = Depends(require_admin)):
+    """admin 删除指定用户（关联 pipeline 数据置为 NULL 后删除账号）。"""
+    user = await db_query("SELECT id, username FROM users WHERE id = ?", (user_id,))
+    if not user:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    if user[0]["id"] == admin["id"]:
+        raise HTTPException(status_code=400, detail="不能删除自己的账号")
+    for table in ("papers", "keywords", "entries", "problems", "ideas", "algorithms", "tasks", "domains", "lit_analyses"):
+        await db_execute(f"UPDATE {table} SET user_id = NULL WHERE user_id = ?", (user_id,))
+    await db_execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+    await db_execute("DELETE FROM user_settings WHERE user_id = ?", (user_id,))
+    await db_execute("DELETE FROM users WHERE id = ?", (user_id,))
+    return {"success": True, "deleted_username": user[0]["username"]}
