@@ -1,6 +1,15 @@
 /* ===== Literature Page: Task-Based Problem Discovery ===== */
 var LIT_TASKS = [];
 var litActiveTask = null;
+var litRunningTaskIds = {}; // { tid: { taskId: string, intervalId: number } } 支持并行分析
+
+function getLitStepLabel(progress) {
+  var p = progress || 0;
+  if (p < 25) return '加载知识库论文…';
+  if (p < 50) return 'AI 语义分析…';
+  if (p < 75) return '问题发现与提取…';
+  return '保存分析结果…';
+}
 
 pages.lit = async function() {
   litActiveTask = null;
@@ -46,7 +55,8 @@ function renderLitTaskList() {
   h += '<div style="flex:1;min-width:200px"><label style="font-size:10px;color:var(--text-muted);display:block;margin-bottom:3px">知识库 A</label><select class="inp" id="litKbId" style="font-size:12px"></select></div>';
   h += '<div style="flex:1;min-width:200px;display:none" id="litKb2Wrap"><label style="font-size:10px;color:var(--text-muted);display:block;margin-bottom:3px">知识库 B（交叉对比）</label><select class="inp" id="litKbId2" style="font-size:12px"></select></div>';
   h += '<div style="flex:0 0 auto;min-width:140px"><label style="font-size:10px;color:var(--text-muted);display:block;margin-bottom:3px">分析深度</label><select class="inp" id="litDepth" style="font-size:12px" onchange="onLitDepthChange()"><option value="quick">快速扫描</option><option value="deep" selected>深度分析</option><option value="cross">交叉引用</option></select></div>';
-  h += '<div style="align-self:flex-end"><button class="btn bp" onclick="startLitAnalysis()" id="litStartBtn"><i class="fa-solid fa-play"></i> 开始分析</button></div></div></div>';
+  h += '<div style="align-self:flex-end"><button class="btn bp" onclick="startLitAnalysis()" id="litStartBtn"><i class="fa-solid fa-play"></i> 开始分析</button></div></div>';
+  h += '</div>';
 
   // 异步加载知识库列表
   setTimeout(function(){ loadLitKbOptions(); }, 50);
@@ -58,20 +68,28 @@ function renderLitTaskList() {
   } else {
     for (var i = 0; i < LIT_TASKS.length; i++) {
       var t = LIT_TASKS[i];
+      var isRunning = t.status === 'running';
       h += '<div class="li-item" style="' + (t.status === 'completed' ? 'cursor:pointer' : '') + '" onclick="' + (t.status === 'completed' ? 'openLitTask(\'' + t.id + '\')' : '') + '">';
-      var ic = t.status === 'completed' ? 'rgba(0,229,160,.12);color:#00E5A0' : 'rgba(59,130,246,.12);color:#3B82F6';
-      var ico = t.status === 'completed' ? 'fa-check-circle' : 'fa-spinner fa-spin';
+      var ic = t.status === 'completed' ? 'rgba(0,229,160,.12);color:#00E5A0' : isRunning ? 'rgba(59,130,246,.12);color:#3B82F6' : 'rgba(255,107,129,.12);color:#FF6B81';
+      var ico = t.status === 'completed' ? 'fa-check-circle' : isRunning ? 'fa-spinner fa-spin' : 'fa-times-circle';
       h += '<div class="li-ic" style="background:' + ic + '"><i class="fa-solid ' + ico + '"></i></div>';
       h += '<div style="flex:1;min-width:0"><div class="li-nm">' + esc(t.displayName || t.kbName || t.id) + '</div>';
-      h += '<div class="li-mt"><span class="badge ' + (t.status === 'completed' ? 'bdg-g' : 'bdg-m') + '">' + (t.status === 'completed' ? '已完成' : (t.status === 'failed' ? '失败' : '运行中')) + '</span>';
+      h += '<div class="li-mt"><span class="badge ' + (t.status === 'completed' ? 'bdg-g' : isRunning ? 'bdg-m' : 'bdg-r') + '">' + (t.status === 'completed' ? '已完成' : (t.status === 'failed' ? '失败' : '运行中')) + '</span>';
       if (t.depth) h += ' <span class="badge bdg-m">' + t.depth + '</span>';
       if (t.status === 'completed' && t.count != null) h += ' <span style="color:#A78BFA">' + t.count + ' 个问题</span>';
       if (t.created_at) h += ' <span style="color:var(--text-muted)">' + t.created_at + '</span>';
-      if (t.status === 'running' && t.progress != null) h += ' <span style="color:#3B82F6">' + t.progress + '%</span>';
-      h += '</div></div>';
-      if (t.status === 'running' && t.progress != null) {
-        h += '<div style="width:60px"><div style="height:4px;border-radius:2px;background:rgba(255,255,255,.05);overflow:hidden"><div style="width:' + t.progress + '%;height:100%;background:#3B82F6;border-radius:2px"></div></div></div>';
+      if (isRunning && t.progress != null) h += ' <span id="litStepText_' + t.id + '" style="color:#3B82F6;font-size:11px">' + getLitStepLabel(t.progress) + '</span>';
+      h += '</div>';
+      // 运行中任务的内联进度条
+      if (isRunning) {
+        h += '<div style="margin-top:6px;display:flex;align-items:center;gap:8px;width:100%">';
+        h += '<div style="flex:1;height:6px;border-radius:3px;background:rgba(255,255,255,.06);overflow:hidden">';
+        h += '<div id="litProgress_' + t.id + '" style="width:' + (t.progress || 0) + '%;height:100%;background:#3B82F6;border-radius:3px;transition:width .3s ease"></div>';
+        h += '</div>';
+        h += '<span id="litProgressPct_' + t.id + '" style="font-size:10px;color:var(--text-muted);min-width:30px;text-align:right">' + (t.progress || 0) + '%</span>';
+        h += '</div>';
       }
+      h += '</div>';
       h += '<button class="btn" style="padding:4px 8px;font-size:10px;flex-shrink:0;margin-left:6px;opacity:.35" onclick="event.stopPropagation();deleteLitTask(\'' + t.id + '\')" title="删除分析记录"><i class="fa-solid fa-trash"></i></button>';
       h += '</div>';
     }
@@ -150,17 +168,21 @@ async function startLitAnalysis() {
   var displayName = kbId2 ? kbName + ' ↔ ' + kbName2 : kbName;
   var tid = 'lit_' + Date.now().toString(36);
   LIT_TASKS.unshift({ id: tid, kbId: kbId, kbId2: kbId2, kbName: kbName, kbName2: kbName2, displayName: displayName, depth: depthVal, status: 'running', progress: 5, count: 0, created_at: new Date().toLocaleString() });
-  // 保存到数据库
-  api('POST', '/lit/history', {
+
+  // 加入运行追踪 map，支持并行
+  litRunningTaskIds[tid] = { taskId: null, intervalId: null };
+
+  // 同步保存到数据库（确保重新渲染时能查到）
+  await api('POST', '/lit/history', {
     id: tid, kb_id: parseInt(kbId),
     kb_id2: kbId2 ? parseInt(kbId2) : 0,
     kb_name: kbName, kb_name2: kbName2,
     display_name: displayName, depth: depthVal,
     status: 'running', progress: 5, count: 0
-  }).catch(function(){});
-  var btn = document.getElementById('litStartBtn');
-  btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> 分析中...';
-  go('lit');
+  });
+
+  // 重新渲染页面——任务立即出现在列表中
+  await go('lit');
 
   try {
     // 获取知识库 A 的论文
@@ -181,9 +203,10 @@ async function startLitAnalysis() {
     if (!entryTexts.length) {
       var t = LIT_TASKS.find(function(x){return x.id === tid;});
       if (t) { t.status = 'failed'; t.progress = 0; }
-      api('PUT', '/lit/history/' + tid, {status: 'failed', progress: 0, count: 0}).catch(function(){});
+      await api('PUT', '/lit/history/' + tid, {status: 'failed', progress: 0, count: 0});
+      delete litRunningTaskIds[tid];
       toast('该知识库暂无已解析的论文', 'fa-exclamation-circle', '#F5A623');
-      go('lit');
+      await go('lit');
       return;
     }
     // 调 AI 发现问题
@@ -194,41 +217,62 @@ async function startLitAnalysis() {
       analysis_id: tid
     });
 
-    // 模拟进度推进
+    // 记录 backend taskId
+    if (litRunningTaskIds[tid]) litRunningTaskIds[tid].taskId = res.task_id;
+
+    // 开始轮询进度
     simulateLitProgress(tid, res.task_id);
   } catch(e) {
     var t = LIT_TASKS.find(function(x){return x.id === tid;});
     if (t) { t.status = 'failed'; }
-    api('PUT', '/lit/history/' + tid, {status: 'failed', progress: 0, count: 0}).catch(function(){});
+    await api('PUT', '/lit/history/' + tid, {status: 'failed', progress: 0, count: 0});
+    delete litRunningTaskIds[tid];
     toast('分析失败: ' + e.message, 'fa-exclamation-circle', '#FF6B81');
-    go('lit');
+    await go('lit');
   }
-  btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-play"></i> 开始分析';
 }
 
 function simulateLitProgress(tid, taskId) {
   var t = LIT_TASKS.find(function(x){return x.id === tid;});
   if (!t) return;
-  // 轮询任务进度
+
   var iv = setInterval(async function() {
     try {
       var data = await api('GET', '/lit/auto-discover/' + taskId + '/progress');
       if (t) t.progress = data.progress || t.progress;
+
+      // 通过唯一 ID 直接更新 DOM
+      var p = t.progress || 0;
+      var barEl = document.getElementById('litProgress_' + tid);
+      var pctEl = document.getElementById('litProgressPct_' + tid);
+      var stepEl = document.getElementById('litStepText_' + tid);
+      if (barEl) barEl.style.width = p + '%';
+      if (pctEl) pctEl.textContent = p + '%';
+      if (stepEl) stepEl.textContent = getLitStepLabel(p);
+
       if (data.status === 'completed') {
         clearInterval(iv);
         if (t) { t.status = 'completed'; t.progress = 100; t.count = (data.result && data.result.problems_count) || 0; }
-        api('PUT', '/lit/history/' + tid, {status: 'completed', progress: 100, count: t.count || 0}).catch(function(){});
+        await api('PUT', '/lit/history/' + tid, {status: 'completed', progress: 100, count: t.count || 0});
+        delete litRunningTaskIds[tid];
         toast('分析完成，发现 ' + (data.result && data.result.problems_count || 0) + ' 个问题', 'fa-check-circle', '#F5A623');
-        go('lit');
+        await go('lit');
       } else if (data.status === 'error') {
         clearInterval(iv);
         if (t) { t.status = 'failed'; }
-        api('PUT', '/lit/history/' + tid, {status: 'failed', progress: 0, count: 0}).catch(function(){});
+        await api('PUT', '/lit/history/' + tid, {status: 'failed', progress: 0, count: 0});
+        delete litRunningTaskIds[tid];
         toast('分析失败: ' + (data.error || ''), 'fa-exclamation-circle', '#FF6B81');
-        go('lit');
+        await go('lit');
       }
-    } catch(e) { clearInterval(iv); }
+    } catch(e) {
+      clearInterval(iv);
+      delete litRunningTaskIds[tid];
+    }
   }, 1500);
+
+  // 保存 interval ID 以便取消
+  if (litRunningTaskIds[tid]) litRunningTaskIds[tid].intervalId = iv;
 }
 
 function openLitTask(tid) {
@@ -358,6 +402,11 @@ async function searchExt() {
 
 async function deleteLitTask(aid) {
   if (!confirm('确定删除此分析记录吗？关联的问题将保留但解除绑定。')) return;
+  // 清理运行中任务的 interval
+  if (litRunningTaskIds[aid]) {
+    clearInterval(litRunningTaskIds[aid].intervalId);
+    delete litRunningTaskIds[aid];
+  }
   try {
     await api('DELETE', '/lit/history/' + aid);
     toast('已删除', 'fa-check-circle', '#00E5A0');
