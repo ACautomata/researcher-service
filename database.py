@@ -211,6 +211,11 @@ async def init_db():
             await db.commit()
         except Exception:
             pass
+        try:
+            await db.execute("ALTER TABLE algorithms ADD COLUMN intermediates TEXT DEFAULT '{}'")
+            await db.commit()
+        except Exception:
+            pass
 
         # ===== 参数优化表 =====
         await db.execute("""

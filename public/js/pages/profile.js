@@ -1,4 +1,58 @@
 /* ===== Profile Page ===== */
+var AI_PROVIDERS = [
+  {
+    id: 'deepseek',
+    name: 'DeepSeek',
+    base_url: 'https://api.deepseek.com',
+    models: ['deepseek-chat', 'deepseek-reasoner', 'deepseek-v3', 'deepseek-r1']
+  },
+  {
+    id: 'zhipu',
+    name: '智谱 GLM',
+    base_url: 'https://open.bigmodel.cn/api/paas/v4',
+    models: ['glm-4', 'glm-4-flash', 'glm-4v', 'glm-4-plus']
+  },
+  {
+    id: 'openai',
+    name: 'OpenAI',
+    base_url: 'https://api.openai.com/v1',
+    models: ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo', 'o1', 'o3-mini']
+  },
+  {
+    id: 'qwen',
+    name: '通义千问 (Qwen)',
+    base_url: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+    models: ['qwen-turbo', 'qwen-plus', 'qwen-max', 'qwen-max-longcontext']
+  },
+  {
+    id: 'moonshot',
+    name: 'Moonshot (Kimi)',
+    base_url: 'https://api.moonshot.cn/v1',
+    models: ['moonshot-v1-8k', 'moonshot-v1-32k', 'moonshot-v1-128k']
+  },
+  {
+    id: 'custom',
+    name: '自定义 (Custom)',
+    base_url: '',
+    models: []
+  }
+];
+
+function findProviderByUrl(url) {
+  if (!url) return null;
+  var clean = url.replace(/\/+$/, '').toLowerCase();
+  for (var i = 0; i < AI_PROVIDERS.length; i++) {
+    var p = AI_PROVIDERS[i];
+    if (p.base_url && p.base_url.replace(/\/+$/, '').toLowerCase() === clean) return p;
+  }
+  // 模糊匹配
+  if (clean.indexOf('deepseek') >= 0) return AI_PROVIDERS[0];
+  if (clean.indexOf('bigmodel') >= 0) return AI_PROVIDERS[1];
+  if (clean.indexOf('openai') >= 0) return AI_PROVIDERS[2];
+  if (clean.indexOf('dashscope') >= 0 || clean.indexOf('aliyun') >= 0) return AI_PROVIDERS[3];
+  if (clean.indexOf('moonshot') >= 0) return AI_PROVIDERS[4];
+  return null;
+}
 pages.profile = async function() {
   var h = '<div class="card mb24" id="profCard"><div class="card-t"><i class="fa-solid fa-sliders"></i>个人配置 <span class="api-t api-g" style="margin-left:auto">GET/PUT /user/settings</span></div><div id="profInner" style="color:#7d849a;font-size:13px">加载中…</div></div>';
   h += '<div class="card mb24"><div class="card-t"><i class="fa-solid fa-lock"></i>修改密码 <span class="api-t api-g" style="margin-left:auto">PUT /auth/password</span></div>';
@@ -39,8 +93,46 @@ async function loadProfilePage() {
     var s = await fetchUserSettings();
     applyTheme(s.theme_color || 'aurora');
     var h = '<p class="mb16" style="font-size:12px;color:#464d65">以下配置仅对当前登录用户生效。密钥类字段留空表示不修改；在输入框中清空后点「清除主模型 Key」等按钮可删除已保存的值并回退到服务器环境变量。</p>';
-    h += '<div class="auth-field mb12"><label class="auth-lbl">主模型 API Base URL</label><input class="inp" id="pf_ai_base" placeholder="https://open.bigmodel.cn/api/paas/v4" value="'+esc(s.ai_api_base||'')+'"></div>';
-    h += '<div class="auth-field mb12"><label class="auth-lbl">主模型名称 (Model)</label><input class="inp" id="pf_ai_model" placeholder="glm-4" value="'+esc(s.ai_model||'')+'"></div>';
+
+    // 检测当前保存的 URL 是否匹配某个预设厂商
+    var currentProvider = findProviderByUrl(s.ai_api_base || '');
+    var providerId = currentProvider ? currentProvider.id : 'custom';
+    var isCustom = providerId === 'custom';
+
+    // 厂商选择器
+    h += '<div class="auth-field mb12"><label class="auth-lbl">API 厂商</label>';
+    h += '<select class="inp" id="pf_provider" onchange="onProviderChange()" style="font-size:12px">';
+    for (var pi = 0; pi < AI_PROVIDERS.length; pi++) {
+      var pv = AI_PROVIDERS[pi];
+      h += '<option value="' + pv.id + '"' + (pv.id === providerId ? ' selected' : '') + '>' + pv.name + (pv.id !== 'custom' ? '  (' + pv.base_url + ')' : '') + '</option>';
+    }
+    h += '</select></div>';
+
+    // Base URL（预设时隐藏，自定义时显示）
+    h += '<div class="auth-field mb12" id="pf_base_url_group" style="display:' + (isCustom ? 'block' : 'none') + '">';
+    h += '<label class="auth-lbl">自定义 API Base URL</label>';
+    h += '<input class="inp" id="pf_ai_base" placeholder="https://api.example.com/v1" value="' + esc(s.ai_api_base || '') + '"></div>';
+    h += '<input type="hidden" id="pf_ai_base_preset" value="' + (currentProvider ? esc(currentProvider.base_url) : '') + '">';
+
+    // 模型名称
+    h += '<div class="auth-field mb12"><label class="auth-lbl">主模型名称 (Model)</label>';
+    var models = (currentProvider && !isCustom) ? currentProvider.models : [];
+    var currentModel = s.ai_model || '';
+    var modelInList = models.indexOf(currentModel) >= 0;
+    if (models.length) {
+      h += '<select class="inp" id="pf_ai_model_sel" onchange="onModelSelectChange()" style="font-size:12px">';
+      for (var mi = 0; mi < models.length; mi++) {
+        h += '<option value="' + models[mi] + '"' + (models[mi] === currentModel ? ' selected' : '') + '>' + models[mi] + '</option>';
+      }
+      if (!modelInList && currentModel) {
+        h += '<option value="' + esc(currentModel) + '" selected>' + esc(currentModel) + ' (已保存)</option>';
+      }
+      h += '</select>';
+      h += '<input type="hidden" id="pf_ai_model" value="' + esc(currentModel || (models.length ? models[0] : '')) + '">';
+    } else {
+      h += '<input class="inp" id="pf_ai_model" placeholder="如 glm-4 / deepseek-chat" value="' + esc(currentModel) + '">';
+    }
+    h += '</div>';
     h += '<div class="auth-field mb12"><label class="auth-lbl">主模型 API Key（SK）</label>';
     h += '<input class="inp" type="password" id="pf_ai_key" placeholder="'+(s.ai_api_key_set ? '已保存 · 留空不修改 · 当前：'+esc(s.ai_api_key_masked||'***') : '未设置，填写后保存')+'"></div>';
     h += '<div style="margin-bottom:20px"><button type="button" class="btn bdr" style="font-size:11px" onclick="document.getElementById(\'pf_ai_key\').value=\'\';saveProfileField(\'ai_api_key\',\'\')">清除主模型 Key</button></div>';
@@ -71,6 +163,60 @@ async function loadProfilePage() {
   }
 
   await loadProfileStats();
+}
+
+/* ===== 厂商选择切换逻辑 ===== */
+function onProviderChange() {
+  var sel = document.getElementById('pf_provider');
+  if (!sel) return;
+  var pid = sel.value;
+  var provider = null;
+  for (var i = 0; i < AI_PROVIDERS.length; i++) {
+    if (AI_PROVIDERS[i].id === pid) { provider = AI_PROVIDERS[i]; break; }
+  }
+  if (!provider) return;
+
+  var isCustom = provider.id === 'custom';
+  var baseGroup = document.getElementById('pf_base_url_group');
+  var basePreset = document.getElementById('pf_ai_base_preset');
+
+  // 切换 Base URL 显示
+  if (isCustom) {
+    if (baseGroup) baseGroup.style.display = 'block';
+    if (basePreset) basePreset.value = '';
+  } else {
+    if (baseGroup) baseGroup.style.display = 'none';
+    if (basePreset) basePreset.value = provider.base_url;
+  }
+
+  // 重建模型选择器
+  var modelField = document.getElementById('pf_ai_model');
+  var modelSel = document.getElementById('pf_ai_model_sel');
+  var parent = (modelSel || modelField).parentNode;
+
+  if (!isCustom && provider.models.length) {
+    // 用 select 替换
+    var h = '<label class="auth-lbl">主模型名称 (Model)</label>';
+    h += '<select class="inp" id="pf_ai_model_sel" onchange="onModelSelectChange()" style="font-size:12px">';
+    for (var mi = 0; mi < provider.models.length; mi++) {
+      h += '<option value="' + provider.models[mi] + '">' + provider.models[mi] + '</option>';
+    }
+    h += '</select>';
+    h += '<input type="hidden" id="pf_ai_model" value="' + provider.models[0] + '">';
+    parent.innerHTML = h;
+  } else {
+    // 用 input 替换
+    var curVal = modelField ? modelField.value : '';
+    parent.innerHTML = '<label class="auth-lbl">主模型名称 (Model)</label><input class="inp" id="pf_ai_model" placeholder="如 glm-4 / deepseek-chat" value="' + esc(curVal) + '">';
+  }
+}
+
+function onModelSelectChange() {
+  var sel = document.getElementById('pf_ai_model_sel');
+  var hid = document.getElementById('pf_ai_model');
+  if (sel && hid) {
+    hid.value = sel.value;
+  }
 }
 
 /* 切换主题：实时预览 → 保存到后端 → 更新选择器 UI */
@@ -164,9 +310,14 @@ async function changePassword() {
 
 async function saveProfileForm() {
   try {
+    // Base URL: 预设厂商优先，其次手动输入（自定义模式）
+    var presetBase = document.getElementById('pf_ai_base_preset');
+    var manualBase = document.getElementById('pf_ai_base');
+    var apiBase = (presetBase && presetBase.value) ? presetBase.value : ((manualBase && manualBase.value.trim()) || '');
+    var apiModel = (document.getElementById('pf_ai_model') && document.getElementById('pf_ai_model').value.trim()) || '';
     var body = {
-      ai_api_base: (document.getElementById('pf_ai_base') && document.getElementById('pf_ai_base').value.trim()) || '',
-      ai_model: (document.getElementById('pf_ai_model') && document.getElementById('pf_ai_model').value.trim()) || ''
+      ai_api_base: apiBase,
+      ai_model: apiModel
     };
     var ab = document.getElementById('pf_ant_base');
     var am = document.getElementById('pf_ant_model');

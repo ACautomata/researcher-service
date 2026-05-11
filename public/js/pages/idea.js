@@ -6,6 +6,10 @@ var ideaEvalProbFilter = 0; // problem filter, 0=all
 pages.idea = async function(){
   await loadIdeas();
 
+  // 加载全部已验证问题数量（跨所有知识库的总数）
+  var totalOk = 0;
+  try { await loadProblems(); totalOk = cache.problems.filter(function(p){return p.ok}).length; } catch(e) {}
+
   // 加载知识库列表
   ideaDomains = [];
   try { var d = await api('GET', '/kb/domains'); ideaDomains = d.domains || []; } catch(e) {}
@@ -15,7 +19,7 @@ pages.idea = async function(){
 
   // ── 统计卡片 ──
   var h='<div class="stats">';
-  h+='<div class="st-card"><div class="st-v" style="color:'+c+'" id="ideaOkCount">--</div><div class="st-l">可分析问题</div></div>';
+  h+='<div class="st-card"><div class="st-v" style="color:'+c+'" id="ideaOkCount">'+totalOk+'</div><div class="st-l">可分析问题</div></div>';
   h+='<div class="st-card"><div class="st-v" style="color:'+c+'">'+cache.ideas.length+'</div><div class="st-l">已生成Idea</div></div>';
   h+='<div class="st-card"><div class="st-v" style="color:#00E5A0">'+hiI+'</div><div class="st-l">高分Idea</div></div></div>';
 
@@ -166,12 +170,10 @@ pages.idea = async function(){
 async function onIdeaDomainChange(){
   var sel = document.getElementById('ideaDomain');
   var probSel = document.getElementById('idp');
-  var okCount = document.getElementById('ideaOkCount');
   if(!sel || !probSel) return;
   var domainId = sel.value;
   if(!domainId) {
     probSel.innerHTML = '<option value="">请先选择知识库</option>';
-    if(okCount) okCount.textContent = '--';
     return;
   }
   probSel.innerHTML = '<option value="">加载中...</option>';
@@ -179,7 +181,6 @@ async function onIdeaDomainChange(){
   try {
     await loadProblems(null, parseInt(domainId));
     var okP = cache.problems.filter(function(p){return p.ok});
-    if(okCount) okCount.textContent = okP.length;
     probSel.innerHTML = '';
     if(okP.length===0){
       probSel.innerHTML = '<option value="">该知识库暂无可分析问题，请先完成问题发现与验证</option>';

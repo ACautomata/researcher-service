@@ -255,18 +255,20 @@ async def suggest_params(task_description: str) -> dict:
 
 
 async def generate_algorithm(idea, language="Python"):
-    """基于Idea生成算法代码"""
+    """基于Idea生成算法代码（含中间态：架构设计、伪代码、最终代码）"""
     messages = [
-        {"role": "system", "content": "你是一位算法研究工程师。根据研究思路描述，生成完整的算法实现代码。要求：代码可运行、包含完整 import、包含类型标注和注释。"},
-        {"role": "user", "content": f"""根据以下研究思路，用 {language} 实现完整算法。
+        {"role": "system", "content": f"你是一位资深算法工程师。根据研究思路，分三步输出：1)架构设计 2)伪代码 3)完整{language}代码。每一步都要详尽、可执行。"},
+        {"role": "user", "content": f"""根据以下研究思路，分三个阶段输出算法实现：
 
 Idea标题：{idea['title']}
 描述：{idea['description']}
 
-返回 JSON：
+返回 JSON（三个阶段都必须包含）：
 {{
-  "name": "算法类/函数名称（英文，如 SSMLinearAttention）",
-  "code": "完整可运行的 {language} 代码，包含 import、类定义、forward/run 方法、基本注释",
+  "name": "算法名称（英文）",
+  "architecture": "架构设计描述：1.算法整体流程 2.核心模块及作用 3.数据流图说明 4.关键技术选型理由（200-400字）",
+  "pseudocode": "详细伪代码：1.主函数流程 2.每个核心函数的输入输出 3.关键步骤的数学公式 4.复杂度分析",
+  "code": "完整可运行的 {language} 代码，包含所有 import、类型标注、docstring 注释",
   "test_cases": [
     {{"name": "测试用例名称", "input": "输入描述", "expected": "预期输出描述"}}
   ]

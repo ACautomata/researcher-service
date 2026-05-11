@@ -196,12 +196,24 @@ async def _do_algo(tid, idea, language, uid):
     try:
         await update_task(tid, 30, "设计算法架构")
         result = await generate_algorithm(idea, language)
+        await update_task(tid, 60, "编写伪代码")
+        architecture = result.get("architecture", "")
+        pseudocode = result.get("pseudocode", "")
         await update_task(tid, 80, "生成代码与测试用例")
         aid = f"a_{uuid.uuid4().hex[:10]}"
         tc = result.get("test_cases", [])
+        intermediates = json.dumps({
+            "architecture": architecture,
+            "pseudocode": pseudocode,
+            "generation_steps": [
+                {"progress": 30, "step": "设计算法架构", "output": architecture},
+                {"progress": 60, "step": "编写伪代码", "output": pseudocode},
+                {"progress": 80, "step": "生成最终代码", "output": result.get("code", "")},
+            ]
+        }, ensure_ascii=False)
         await db_execute(
-            "INSERT INTO algorithms(id,name,code,language,from_idea,test_total,user_id) VALUES(?,?,?,?,?,?,?)",
-            (aid, result.get("name", "Unnamed"), result.get("code", ""), language, idea["title"], len(tc), uid))
+            "INSERT INTO algorithms(id,name,code,language,from_idea,test_total,user_id,intermediates) VALUES(?,?,?,?,?,?,?,?)",
+            (aid, result.get("name", "Unnamed"), result.get("code", ""), language, idea["title"], len(tc), uid, intermediates))
         await update_task(tid, 100, "完成", "completed",
                           result={"algo_id": aid, "name": result.get("name"), "test_cases_count": len(tc)})
     except Exception as e:

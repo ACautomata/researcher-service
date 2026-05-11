@@ -1,9 +1,8 @@
 /* ===== Algo Page: Code Generation from Ideas ===== */
 var ALGO_TASKS = [];
-var algoActiveTask = null;
 var algoRunningTaskIds = {}; // { aid: { taskId: string, intervalId: number } } 支持并行生成
-var algoCurFile = '';
-var algoFilesFlat = {};
+var algoExpandData = {};   // { aid: { algo, inter, loaded } } 缓存已加载的算法详情
+var algoExpandTab = {};    // { aid: 'architecture' } 每项当前活跃 Tab
 
 function getAlgoStepLabel(progress) {
   var p = progress || 0;
@@ -14,7 +13,6 @@ function getAlgoStepLabel(progress) {
 }
 
 pages.algo = async function() {
-  algoActiveTask = null;
   ALGO_TASKS = [];
   try {
     var data = await api('GET', '/algo/history');
@@ -84,14 +82,22 @@ function renderAlgoTaskList() {
       var t = ALGO_TASKS[i];
       var isRunning = t.status === 'running';
       var isFailed = t.status === 'failed';
-      h += '<div class="li-item" style="' + (t.status === 'completed' ? 'cursor:pointer' : '') + '" onclick="' + (t.status === 'completed' ? 'openAlgoTask(\'' + t.id + '\')' : '') + '">';
-      var ic = t.status === 'completed' ? 'rgba(0,229,160,.12);color:#00E5A0' : isRunning ? 'rgba(59,130,246,.12);color:#3B82F6' : 'rgba(255,107,129,.12);color:#FF6B81';
-      var ico = t.status === 'completed' ? 'fa-check-circle' : isRunning ? 'fa-spinner fa-spin' : 'fa-times-circle';
+      var isCompleted = t.status === 'completed';
+      var canExpand = isCompleted;
+      var isExpanded = algoExpandData[t.id] && algoExpandData[t.id]._visible;
+
+      h += '<div class="li-item" style="' + (canExpand ? 'cursor:pointer' : '') + '" onclick="' + (canExpand ? 'toggleAlgoExpand(\'' + t.id + '\')' : '') + '">';
+      // 展开箭头
+      if (canExpand) {
+        h += '<div style="width:16px;flex-shrink:0;display:grid;place-items:center;font-size:10px;color:var(--text-muted)" id="algoExpandArrow_' + t.id + '"><i class="fa-solid fa-chevron-' + (isExpanded ? 'down' : 'right') + '"></i></div>';
+      }
+      var ic = isCompleted ? 'rgba(0,229,160,.12);color:#00E5A0' : isRunning ? 'rgba(59,130,246,.12);color:#3B82F6' : 'rgba(255,107,129,.12);color:#FF6B81';
+      var ico = isCompleted ? 'fa-check-circle' : isRunning ? 'fa-spinner fa-spin' : 'fa-times-circle';
       h += '<div class="li-ic" style="background:' + ic + '"><i class="fa-solid ' + ico + '"></i></div>';
       h += '<div style="flex:1;min-width:0">';
       h += '<div class="li-nm">' + esc(t.name || t.idea_title || t.id) + '</div>';
       h += '<div class="li-mt">';
-      h += '<span class="badge ' + (t.status === 'completed' ? 'bdg-g' : isRunning ? 'bdg-m' : 'bdg-r') + '">' + (t.status === 'completed' ? '已完成' : (isFailed ? '失败' : '运行中')) + '</span>';
+      h += '<span class="badge ' + (isCompleted ? 'bdg-g' : isRunning ? 'bdg-m' : 'bdg-r') + '">' + (isCompleted ? '已完成' : (isFailed ? '失败' : '运行中')) + '</span>';
       if (t.language) h += ' <span class="badge bdg-m">' + t.language + '</span>';
       if (t.kb_name) h += ' <span style="color:var(--text-muted)">' + esc(t.kb_name) + '</span>';
       if (t.created_at) h += ' <span style="color:var(--text-muted)">' + t.created_at + '</span>';
@@ -109,6 +115,14 @@ function renderAlgoTaskList() {
       h += '</div>';
       h += '<button class="btn" style="padding:4px 8px;font-size:10px;flex-shrink:0;margin-left:6px;opacity:.35" onclick="event.stopPropagation();deleteAlgoTask(\'' + t.id + '\')" title="删除记录"><i class="fa-solid fa-trash"></i></button>';
       h += '</div>';
+      // 展开内容区
+      if (canExpand) {
+        h += '<div id="algoExpandBody_' + t.id + '" class="algo-expand-body" style="display:' + (isExpanded ? 'block' : 'none') + ';border-left:3px solid rgba(0,229,160,.12);margin-left:8px;padding-left:0">';
+        if (isExpanded) {
+          h += renderAlgoExpandContent(t.id);
+        }
+        h += '</div>';
+      }
     }
   }
   h += '</div>';
@@ -296,142 +310,201 @@ async function deleteAlgoTask(aid) {
   } catch(e) { toast('删除失败: ' + e.message, 'fa-exclamation-circle', '#FF6B81'); }
 }
 
-/* ===== 详情查看 ===== */
-async function openAlgoTask(aid) {
+/* ===== 行内展开：架构/伪代码/代码/测试/性能 ===== */
+
+async function toggleAlgoExpand(aid) {
   var t = ALGO_TASKS.find(function(x){return x.id === aid;});
   if (!t || t.status !== 'completed') return;
-  algoActiveTask = t;
-  algoFilesFlat = {};
-  algoCurFile = '';
 
-  // 加载算法详情
-  var algo = null;
-  try {
-    var data = await api('GET', '/algo/list');
-    var algos = data.algorithms || [];
-    algo = algos.find(function(a){ return a.id === t.algo_id; });
-  } catch(e) {}
+  var bodyEl = document.getElementById('algoExpandBody_' + aid);
+  if (!bodyEl) return;
 
-  // 构建文件树
-  if (algo && algo.code) {
-    var extMap = { 'Python': '.py', 'C++': '.cpp', 'JavaScript': '.js' };
-    var ext = extMap[algo.language] || extMap[t.language] || '.py';
-    var files = [];
-    files.push({ name: 'main' + ext, type: 'file', content: algo.code });
-    if (algo.name) {
-      var readme = '# ' + algo.name + '\n\nAI 生成的算法项目。\n\n';
-      if (algo.test_total != null) readme += '## 测试\n- 通过: ' + (algo.test_passed || 0) + '/' + algo.test_total + '\n';
-      files.push({ name: 'README.md', type: 'file', content: readme });
+  // 如果已展开 → 折叠
+  if (algoExpandData[aid] && algoExpandData[aid]._visible) {
+    bodyEl.style.display = 'none';
+    algoExpandData[aid]._visible = false;
+    var arrow = document.getElementById('algoExpandArrow_' + aid);
+    if (arrow) arrow.innerHTML = '<i class="fa-solid fa-chevron-right"></i>';
+    return;
+  }
+
+  // 展开：加载数据（如未缓存）
+  if (!algoExpandData[aid] || !algoExpandData[aid].loaded) {
+    bodyEl.style.display = 'block';
+    bodyEl.innerHTML = '<div style="padding:20px;text-align:center;color:var(--text-muted)"><i class="fa-solid fa-spinner fa-spin"></i> 加载中...</div>';
+
+    var algo = null;
+    try {
+      var data = await api('GET', '/algo/list');
+      var algos = data.algorithms || [];
+      algo = algos.find(function(a){ return a.id === t.algo_id; });
+    } catch(e) {}
+
+    var inter = {};
+    if (algo && algo.intermediates) {
+      try { inter = typeof algo.intermediates === 'string' ? JSON.parse(algo.intermediates) : algo.intermediates; } catch(e) {}
     }
-    t._algo = algo;
-    t.files = files;
-  } else {
-    var extMap2 = { 'Python': '.py', 'C++': '.cpp', 'JavaScript': '.js' };
-    var ext2 = extMap2[t.language] || '.py';
-    t._algo = algo || {};
-    t.files = [{ name: 'main' + ext2, type: 'file', content: '// 代码暂不可用\n// 请等待生成完成后再查看' }];
+
+    algoExpandData[aid] = { algo: algo || {}, inter: inter, loaded: true, _visible: false };
   }
 
-  flattenAlgoFiles(t.files, '');
-  for (var p in algoFilesFlat) { algoCurFile = p; break; }
+  if (!algoExpandTab[aid]) algoExpandTab[aid] = 'architecture';
 
-  document.getElementById('ctnEl').innerHTML = renderAlgoDetail(t);
-  renderAlgoTree();
-  renderAlgoFile();
+  algoExpandData[aid]._visible = true;
+  bodyEl.style.display = 'block';
+  bodyEl.innerHTML = renderAlgoExpandContent(aid);
+
+  var arrow = document.getElementById('algoExpandArrow_' + aid);
+  if (arrow) arrow.innerHTML = '<i class="fa-solid fa-chevron-down"></i>';
 }
 
-function renderAlgoDetail(task) {
-  var algo = task._algo || {};
-  var fc = countFiles(task.files);
-  var lines = 0;
-  for (var p in algoFilesFlat) lines += (algoFilesFlat[p] || '').split('\n').length;
+function renderAlgoExpandContent(aid) {
+  var d = algoExpandData[aid] || {};
+  var algo = d.algo || {};
+  var inter = d.inter || {};
+  var activeTab = algoExpandTab[aid] || 'architecture';
+  var code = algo.code || '';
+  var lines = code ? code.split('\n').length : 0;
 
-  var h = '<div class="flex-b mb16"><button class="btn" onclick="go(\'algo\')" style="padding:6px 14px;font-size:11px"><i class="fa-solid fa-arrow-left"></i> 返回任务列表</button>';
-  h += '<span style="font-size:13px;font-weight:700;color:var(--text)">' + esc(algo.name || task.name || task.idea_title || '算法') + '</span>';
-  h += '<span class="badge bdg-g">已完成</span></div>';
-
-  h += '<div class="stats" style="margin-bottom:16px">';
-  h += '<div class="st-card"><div class="st-v" style="color:#FF6B81">' + fc + '</div><div class="st-l">文件数</div></div>';
-  h += '<div class="st-card"><div class="st-v" style="color:#A78BFA">' + lines + '</div><div class="st-l">代码行数</div></div>';
-  h += '<div class="st-card"><div class="st-v" style="color:#00E5A0">' + (algo.test_passed || '?') + '/' + (algo.test_total || '?') + '</div><div class="st-l">测试通过</div></div>';
-  h += '<div class="st-card"><div class="st-v" style="color:#F5A623">' + esc(algo.language || task.language || '') + '</div><div class="st-l">语言</div></div>';
-  h += '</div>';
-
-  // 文件树 + 代码
-  h += '<div style="display:flex;gap:16px;align-items:flex-start">';
-  h += '<div class="card" style="width:220px;flex-shrink:0;padding:12px;overflow-y:auto;max-height:55vh">';
-  h += '<div style="font-size:11px;font-weight:600;color:var(--text-muted);margin-bottom:8px"><i class="fa-solid fa-folder-tree"></i> 文件</div>';
-  h += '<div id="algoFileTree" style="font-size:11px;line-height:1.9"></div></div>';
-  h += '<div style="flex:1;min-width:0"><div id="algoFileContent"></div></div>';
-  h += '</div>';
-
-  // 性能信息
-  if (algo.perf_before_ms != null || algo.perf_after_ms != null) {
-    h += '<details class="card" style="margin-top:16px"><summary style="cursor:pointer;padding:8px 0;font-size:12px;color:var(--text-muted);font-weight:600"><i class="fa-solid fa-gauge-high" style="margin-right:6px"></i>性能基准</summary>';
-    h += '<div style="display:flex;gap:16px;margin-top:8px;font-size:12px">';
-    if (algo.perf_before_ms != null) h += '<div><span style="color:var(--text-muted)">优化前: </span><span style="color:#FF6B81;font-family:Space Grotesk">' + algo.perf_before_ms + 'ms</span></div>';
-    if (algo.perf_after_ms != null) h += '<div><span style="color:var(--text-muted)">优化后: </span><span style="color:#00E5A0;font-family:Space Grotesk">' + algo.perf_after_ms + 'ms</span></div>';
-    h += '</div></details>';
-  }
-
-  return h;
-}
-
-function countFiles(nodes) {
-  var c = 0;
-  for (var i = 0; i < nodes.length; i++) {
-    if (nodes[i].type === 'file') c++;
-    if (nodes[i].children) c += countFiles(nodes[i].children);
-  }
-  return c;
-}
-
-function flattenAlgoFiles(nodes, prefix) {
-  prefix = prefix || '';
-  for (var i = 0; i < nodes.length; i++) {
-    var n = nodes[i];
-    var path = prefix + '/' + n.name;
-    if (n.type === 'file') algoFilesFlat[path] = n.content;
-    if (n.children) flattenAlgoFiles(n.children, path);
-  }
-}
-
-function renderAlgoTree() {
-  var el = document.getElementById('algoFileTree');
-  if (!el || !algoActiveTask || !algoActiveTask.files) return;
-  el.innerHTML = buildTreeHtml(algoActiveTask.files, '');
-}
-
-function buildTreeHtml(nodes, prefix) {
   var h = '';
-  for (var i = 0; i < nodes.length; i++) {
-    var n = nodes[i], p = prefix + '/' + n.name;
-    if (n.type === 'dir') {
-      h += '<div style="margin-left:12px"><div class="algo-ti" style="cursor:pointer;padding:1px 4px;border-radius:3px;color:var(--text-muted)" onclick="algoToggleDir(this)"><i class="fa-solid fa-chevron-right" style="font-size:7px;margin-right:4px;transition:transform .2s"></i><i class="fa-solid fa-folder" style="color:#F5A623;margin-right:4px;font-size:10px"></i> ' + n.name + '</div><div class="algo-tc" style="display:none">' + buildTreeHtml(n.children, p) + '</div></div>';
-    } else {
-      var active = algoCurFile === p ? ' style="color:var(--accent);font-weight:600"' : ' style="color:var(--text)"';
-      h += '<div class="algo-ti" style="cursor:pointer;padding:1px 4px;border-radius:3px' + (algoCurFile === p ? ';background:rgba(var(--accent-rgb),.15)' : '') + '" onclick="algoOpenDetailFile(\'' + p + '\')"><i class="fa-regular fa-file-code" style="color:#7d849a;margin-right:4px;font-size:10px"></i> ' + n.name + '</div>';
-    }
+
+  // 统计卡片（紧凑）
+  h += '<div style="display:flex;gap:8px;padding:8px 12px;flex-wrap:wrap">';
+  h += '<span class="badge" style="background:rgba(167,139,250,.12);color:#A78BFA">' + lines + ' 行代码</span>';
+  h += '<span class="badge" style="background:rgba(0,229,160,.12);color:#00E5A0">' + (algo.test_passed || '?') + '/' + (algo.test_total || '?') + ' 测试通过</span>';
+  h += '<span class="badge" style="background:rgba(245,166,35,.12);color:#F5A623">' + esc(algo.language || 'Python') + '</span>';
+  if (algo.perf_before_ms != null && algo.perf_after_ms != null) {
+    var impr = Math.round((1 - algo.perf_after_ms / algo.perf_before_ms) * 100);
+    h += '<span class="badge" style="background:rgba(0,212,255,.12);color:#00D4FF">' + impr + '% 性能提升</span>';
   }
+  h += '</div>';
+
+  // Tab 导航（紧凑 chips）
+  h += '<div style="display:flex;gap:2px;padding:6px 8px;flex-wrap:wrap;border-top:1px solid var(--border);border-bottom:1px solid var(--border)">';
+  var tabs = [
+    { id: 'architecture', icon: 'fa-sitemap', label: '架构设计', color: '#A78BFA' },
+    { id: 'pseudocode', icon: 'fa-code-branch', label: '伪代码', color: '#F5A623' },
+    { id: 'code', icon: 'fa-code', label: '最终代码', color: '#00E5A0' },
+    { id: 'tests', icon: 'fa-flask', label: '测试', color: '#FF6B81' },
+    { id: 'perf', icon: 'fa-gauge-high', label: '性能', color: '#00D4FF' }
+  ];
+  for (var ti = 0; ti < tabs.length; ti++) {
+    var tb = tabs[ti];
+    var isActive = activeTab === tb.id;
+    h += '<div style="cursor:pointer;padding:3px 9px;border-radius:5px;font-size:10px;font-weight:600;display:flex;align-items:center;gap:3px;' + (isActive ? 'background:rgba(255,255,255,.1);color:var(--text)' : 'color:var(--text-muted)') + '" onclick="event.stopPropagation();algoSwitchExpandTab(\'' + aid + '\',\'' + tb.id + '\')">';
+    h += '<i class="fa-solid ' + tb.icon + '" style="font-size:9px;color:' + tb.color + '"></i>' + tb.label;
+    h += '</div>';
+  }
+  // 复制代码按钮（仅代码 tab 显示在右侧）
+  if (activeTab === 'code' && code) {
+    h += '<div style="margin-left:auto"><button class="btn" style="padding:2px 8px;font-size:9px" onclick="event.stopPropagation();algoCopyExpandCode(\'' + aid + '\')"><i class="fa-regular fa-copy"></i> 复制</button></div>';
+  }
+  h += '</div>';
+
+  // Tab 内容
+  h += '<div id="algoExpandTabBody_' + aid + '" style="padding:0">';
+  h += renderAlgoTabBody(activeTab, algo, inter, aid);
+  h += '</div>';
+
   return h;
 }
 
-function algoToggleDir(el) {
-  var c = el.nextElementSibling;
-  var icon = el.querySelector('.fa-chevron-right');
-  if (c) { c.style.display = c.style.display === 'block' ? 'none' : 'block'; if (icon) icon.style.transform = c.style.display === 'block' ? 'rotate(90deg)' : ''; }
+function renderAlgoTabBody(tabId, algo, inter, aid) {
+  var code = algo.code || '';
+
+  switch (tabId) {
+    case 'architecture':
+      var arch = inter.architecture || '';
+      if (!arch) return '<div style="padding:30px;text-align:center;color:var(--text-muted);font-size:11px"><i class="fa-solid fa-sitemap" style="font-size:22px;opacity:.2;display:block;margin-bottom:8px"></i>架构设计数据不可用（旧版算法无此信息）</div>';
+      return '<pre class="code-blk" style="margin:2px 4px;border-radius:6px;max-height:40vh;overflow-y:auto;font-size:11px;line-height:1.6;white-space:pre-wrap;background:rgba(0,0,0,.2)">' + esc(arch) + '</pre>';
+
+    case 'pseudocode':
+      var pseudo = inter.pseudocode || '';
+      if (!pseudo) return '<div style="padding:30px;text-align:center;color:var(--text-muted);font-size:11px"><i class="fa-solid fa-code-branch" style="font-size:22px;opacity:.2;display:block;margin-bottom:8px"></i>伪代码数据不可用（旧版算法无此信息）</div>';
+      return '<pre class="code-blk" style="margin:2px 4px;border-radius:6px;max-height:40vh;overflow-y:auto;font-size:11px;line-height:1.6;white-space:pre-wrap;background:rgba(0,0,0,.2)">' + esc(pseudo) + '</pre>';
+
+    case 'code':
+      if (!code) return '<div style="padding:30px;text-align:center;color:var(--text-muted);font-size:11px">代码不可用</div>';
+      return '<pre class="code-blk" id="algoCodeBlock_' + aid + '" style="margin:2px 4px;border-radius:6px;max-height:40vh;overflow-y:auto;font-size:11px;line-height:1.6;white-space:pre-wrap;background:rgba(0,0,0,.2)">' + esc(code) + '</pre>';
+
+    case 'tests':
+      var th = '<div style="padding:10px 14px">';
+      th += '<div class="stats" style="margin-bottom:10px;gap:6px">';
+      th += '<div class="st-card" style="padding:6px 10px"><div class="st-v" style="font-size:16px;color:#00E5A0">' + (algo.test_passed || '?') + '</div><div class="st-l" style="font-size:9px">通过</div></div>';
+      th += '<div class="st-card" style="padding:6px 10px"><div class="st-v" style="font-size:16px;color:#FF6B81">' + ((algo.test_total || 0) - (algo.test_passed || 0)) + '</div><div class="st-l" style="font-size:9px">失败</div></div>';
+      th += '<div class="st-card" style="padding:6px 10px"><div class="st-v" style="font-size:16px;color:#F5A623">' + (algo.test_total || '?') + '</div><div class="st-l" style="font-size:9px">总计</div></div>';
+      th += '</div>';
+      if (algo.test_passed != null && algo.test_total != null && algo.test_total > 0) {
+        var passPct = Math.round(algo.test_passed / algo.test_total * 100);
+        th += '<div style="margin-bottom:8px"><div style="font-size:10px;color:var(--text-muted);margin-bottom:3px">通过率 ' + passPct + '%</div>';
+        th += '<div style="height:5px;border-radius:3px;background:rgba(255,255,255,.06);overflow:hidden"><div style="width:' + passPct + '%;height:100%;background:#00E5A0;border-radius:3px"></div></div></div>';
+      }
+      th += '<div style="font-size:10px;color:#7d849a;line-height:1.5">测试覆盖核心功能路径、边界条件和典型使用场景。性能数据通过基准测试采集。</div>';
+      th += '</div>';
+      return th;
+
+    case 'perf':
+      var ph = '<div style="padding:10px 14px">';
+      if (algo.perf_before_ms != null || algo.perf_after_ms != null) {
+        ph += '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">';
+        if (algo.perf_before_ms != null) {
+          ph += '<div class="st-card" style="flex:1;min-width:90px;padding:6px 10px"><div class="st-v" style="font-size:16px;color:#FF6B81">' + algo.perf_before_ms + 'ms</div><div class="st-l" style="font-size:9px">优化前</div></div>';
+        }
+        if (algo.perf_after_ms != null) {
+          ph += '<div class="st-card" style="flex:1;min-width:90px;padding:6px 10px"><div class="st-v" style="font-size:16px;color:#00E5A0">' + algo.perf_after_ms + 'ms</div><div class="st-l" style="font-size:9px">优化后</div></div>';
+        }
+        ph += '</div>';
+        if (algo.perf_before_ms && algo.perf_after_ms) {
+          var maxMs = Math.max(algo.perf_before_ms, algo.perf_after_ms);
+          var beforeW = Math.round(algo.perf_before_ms / maxMs * 100);
+          var afterW = Math.round(algo.perf_after_ms / maxMs * 100);
+          ph += '<div style="margin-bottom:6px"><div style="font-size:9px;color:var(--text-muted);margin-bottom:2px">优化前</div><div style="height:6px;border-radius:3px;background:rgba(255,255,255,.06);overflow:hidden"><div style="width:' + beforeW + '%;height:100%;background:#FF6B81;border-radius:3px"></div></div></div>';
+          ph += '<div><div style="font-size:9px;color:var(--text-muted);margin-bottom:2px">优化后</div><div style="height:6px;border-radius:3px;background:rgba(255,255,255,.06);overflow:hidden"><div style="width:' + afterW + '%;height:100%;background:#00E5A0;border-radius:3px"></div></div></div>';
+        }
+      } else {
+        ph += '<div style="text-align:center;padding:24px;color:var(--text-muted);font-size:11px">暂无性能数据</div>';
+      }
+      ph += '</div>';
+      return ph;
+
+    default:
+      return '<div style="padding:24px;text-align:center;color:var(--text-muted);font-size:11px">请选择上方标签查看内容</div>';
+  }
 }
 
-function algoOpenDetailFile(path) {
-  algoCurFile = path;
-  renderAlgoTree();
-  renderAlgoFile();
+function algoSwitchExpandTab(aid, tabId) {
+  algoExpandTab[aid] = tabId;
+  var bodyEl = document.getElementById('algoExpandTabBody_' + aid);
+  if (!bodyEl) return;
+  var d = algoExpandData[aid] || {};
+  bodyEl.innerHTML = renderAlgoTabBody(tabId, d.algo || {}, d.inter || {}, aid);
+
+  // 重新渲染整个展开区以更新 tab 高亮
+  var expandEl = document.getElementById('algoExpandBody_' + aid);
+  if (expandEl) {
+    expandEl.innerHTML = renderAlgoExpandContent(aid);
+  }
 }
 
-function renderAlgoFile() {
-  var el = document.getElementById('algoFileContent');
-  if (!el) return;
-  var content = algoFilesFlat[algoCurFile] || '// 无法加载文件';
-  var name = algoCurFile.split('/').pop();
-  el.innerHTML = '<div class="card" style="padding:0;overflow:hidden"><div style="padding:10px 16px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px;font-size:12px;font-weight:600;color:var(--text)"><i class="fa-regular fa-file-code"></i> ' + algoCurFile.slice(1) + '</div><pre class="code-blk" style="border:none;border-radius:0;max-height:400px;overflow-y:auto;background:rgba(0,0,0,.25);margin:0;font-size:11px;line-height:1.6;white-space:pre-wrap">' + esc(content) + '</pre></div>';
+function algoCopyExpandCode(aid) {
+  var codeEl = document.getElementById('algoCodeBlock_' + aid);
+  if (!codeEl) return;
+  var text = codeEl.textContent || codeEl.innerText || '';
+  if (!text) return;
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(function() {
+      toast('代码已复制到剪贴板', 'fa-check-circle', '#00E5A0');
+    }).catch(function() {
+      fallbackCopy(text);
+    });
+  } else {
+    fallbackCopy(text);
+  }
+  function fallbackCopy(tx) {
+    var ta = document.createElement('textarea');
+    ta.value = tx; ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.select();
+    try { document.execCommand('copy'); toast('代码已复制', 'fa-check-circle', '#00E5A0'); } catch(e) { toast('复制失败', 'fa-exclamation-circle', '#FF6B81'); }
+    document.body.removeChild(ta);
+  }
 }
