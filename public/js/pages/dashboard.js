@@ -114,13 +114,12 @@ async function loadDashboard() {
     allTasksData = [];
   }
 
-  if (isFirstLoad) {
-    try {
-      var usage = await api('GET', '/dashboard/usage');
-      renderPipelineStats(usage);
-      renderTaskStats(usage);
-    } catch(e) {}
-  }
+  // 始终渲染管道统计（导航回来时 DOM 已重建）
+  try {
+    var usage = await api('GET', '/dashboard/usage');
+    renderPipelineStats(usage);
+    renderTaskStats(usage);
+  } catch(e) {}
 
   var running = allTasksData.filter(function(t){ return t.status === 'running'; });
   var completed = allTasksData.filter(function(t){ return t.status === 'completed'; });
@@ -187,8 +186,10 @@ function setNum(id, val) {
 
 function animateNumber(el, target) {
   if (!el) return;
-  var current = parseInt(el.textContent) || 0;
-  if (current === target) return;
+  var curText = el.textContent;
+  if (curText === '--') curText = '0';
+  var current = parseInt(curText) || 0;
+  if (current === target && el.textContent !== '--') { el.textContent = target; return; }
   var steps = 15;
   var step = (target - current) / steps;
   var count = 0;

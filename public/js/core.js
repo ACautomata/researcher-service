@@ -229,6 +229,9 @@ async function go(id){
     }
     algoRunningTaskIds = {};
   }
+  if(cur === 'dashboard' && typeof stopDashboardPoll === 'function') {
+    stopDashboardPoll();
+  }
   var np = navPages();
   if (!np.some(function(x){ return x.id === id; })) id = np[0].id;
   cur = id;
@@ -251,7 +254,7 @@ async function buildContent(){
   if(cur==='obs') setTimeout(function(){ loadObsTree(''); loadObsStats(); }, 100);
   if(cur==='profile') setTimeout(function(){ loadProfilePage(); }, 50);
   if(cur==='admin') setTimeout(function(){ loadAdminPage(); }, 50);
-  if(cur==='dashboard') setTimeout(function(){ loadDashboard(); startDashboardPoll(); }, 50);
+  if(cur==='dashboard') { isFirstLoad = true; setTimeout(function(){ loadDashboard(); startDashboardPoll(); }, 50); }
   if(cur==='home' && !authUser) { heroTimer = setInterval(function() { if(typeof heroJumpTo === 'function') heroJumpTo((heroIdx + 1) % heroImgs.length); }, 4000); }
 }
 
