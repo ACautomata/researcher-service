@@ -260,8 +260,13 @@ function kbRenderGraph() {
     .force('charge', d3.forceManyBody().strength(-250))
     .force('center', d3.forceCenter(W/2, H/2));
 
+  // 读取主题 CSS 变量，适配亮色/暗色主题
+  var rootStyle = getComputedStyle(document.documentElement);
+  var edgeColor = rootStyle.getPropertyValue('--border').trim() || 'rgba(255,255,255,.06)';
+  var textColor = rootStyle.getPropertyValue('--text-muted').trim() || '#7d849a';
+
   g.append('g').selectAll('line').data(links).join('line')
-    .attr('stroke', 'rgba(255,255,255,.06)').attr('stroke-width', 1);
+    .attr('stroke', edgeColor).attr('stroke-width', 1.2);
   var node = g.append('g').selectAll('circle').data(nodes).join('circle')
     .attr('r', function(d){return d.size === 0 ? 3 : Math.min(4 + d.size/2000, 10)})
     .attr('fill', function(d){return d.path ? '#00E5A0' : 'rgba(255,107,129,.4)'})
@@ -269,7 +274,7 @@ function kbRenderGraph() {
     .on('click', function(_, d){ if (d.path) kbOpenFile(d.path); });
   g.append('g').selectAll('text').data(nodes).join('text')
     .text(function(d){return d.label.slice(0, 12)})
-    .attr('font-size', 9).attr('fill', '#7d849a').attr('dx', 8).attr('dy', 3);
+    .attr('font-size', 9).attr('fill', textColor).attr('dx', 8).attr('dy', 3);
 
   sim.on('tick', function(){
     g.selectAll('line').attr('x1',function(d){return d.source.x}).attr('y1',function(d){return d.source.y})
