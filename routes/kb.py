@@ -46,7 +46,7 @@ async def kb_parse(req: ParseReq):
         papers = await db_query("SELECT * FROM papers WHERE id=? AND status!='parsed'", (req.upload_id,))
     elif uid is not None:
         papers = await db_query(
-            "SELECT * FROM papers WHERE id=? AND status!='parsed' AND (user_id IS NULL OR user_id=?)",
+            "SELECT * FROM papers WHERE id=? AND status!='parsed' AND (user_id=?)",
             (req.upload_id, uid))
     else:
         papers = await db_query("SELECT * FROM papers WHERE id=? AND status!='parsed'", (req.upload_id,))
@@ -117,14 +117,14 @@ async def kb_delete(body: dict):
         await db_execute(f"DELETE FROM entries WHERE id IN ({ph})", ids)
     else:
         await db_execute(
-            f"DELETE FROM entries WHERE id IN ({ph}) AND (user_id IS NULL OR user_id = ?)",
+            f"DELETE FROM entries WHERE id IN ({ph}) AND (user_id = ?)",
             ids + [uid])
     return {"success": True, "message": f"删除 {len(ids)} 条"}
 
 
 async def _task_resp(tid, uid=None):
     if uid is not None:
-        rows = await db_query("SELECT * FROM tasks WHERE id=? AND (user_id IS NULL OR user_id=?)", (tid, uid))
+        rows = await db_query("SELECT * FROM tasks WHERE id=? AND (user_id=?)", (tid, uid))
     else:
         rows = await db_query("SELECT * FROM tasks WHERE id=?", (tid,))
     if not rows:
@@ -143,7 +143,7 @@ async def _do_parse(tid, paper_id, uid, role=None):
         if role == "admin":
             paper = (await db_query("SELECT * FROM papers WHERE id=?", (paper_id,)))[0]
         elif uid is not None:
-            paper = (await db_query("SELECT * FROM papers WHERE id=? AND (user_id IS NULL OR user_id=?)", (paper_id, uid)))[0]
+            paper = (await db_query("SELECT * FROM papers WHERE id=? AND (user_id=?)", (paper_id, uid)))[0]
         else:
             paper = (await db_query("SELECT * FROM papers WHERE id=?", (paper_id,)))[0]
         await update_task(tid, 25, "文件接收与格式校验")
@@ -166,7 +166,7 @@ async def _do_parse(tid, paper_id, uid, role=None):
                  e.get("status", "draft"), paper_id,
                  json.dumps(e.get("keywords", []), ensure_ascii=False), uid))
         for kw in kl:
-            ex = await db_query("SELECT id,weight FROM keywords WHERE word=? AND category=? AND (user_id IS NULL OR user_id=?)",
+            ex = await db_query("SELECT id,weight FROM keywords WHERE word=? AND category=? AND (user_id=?)",
                                 (kw["word"], kw.get("category"), uid))
             if ex:
                 await db_execute("UPDATE keywords SET weight=?,source_paper_id=? WHERE id=?",
@@ -177,7 +177,7 @@ async def _do_parse(tid, paper_id, uid, role=None):
         if role == "admin":
             await db_execute("UPDATE papers SET status='parsed' WHERE id=?", (paper_id,))
         elif uid is not None:
-            await db_execute("UPDATE papers SET status='parsed' WHERE id=? AND (user_id IS NULL OR user_id=?)", (paper_id, uid))
+            await db_execute("UPDATE papers SET status='parsed' WHERE id=? AND (user_id=?)", (paper_id, uid))
         else:
             await db_execute("UPDATE papers SET status='parsed' WHERE id=?", (paper_id,))
         await update_task(tid, 100, "完成", "completed",
@@ -202,14 +202,14 @@ async def kb_clear_all():
         await db_execute("DELETE FROM papers")
         await db_execute("DELETE FROM domains")
     elif uid:
-        await db_execute("DELETE FROM algorithms WHERE user_id IS NULL OR user_id=?", (uid,))
-        await db_execute("DELETE FROM ideas WHERE user_id IS NULL OR user_id=?", (uid,))
-        await db_execute("DELETE FROM problems WHERE user_id IS NULL OR user_id=?", (uid,))
-        await db_execute("DELETE FROM entries WHERE user_id IS NULL OR user_id=?", (uid,))
-        await db_execute("DELETE FROM keywords WHERE user_id IS NULL OR user_id=?", (uid,))
-        await db_execute("DELETE FROM tasks WHERE user_id IS NULL OR user_id=?", (uid,))
-        await db_execute("DELETE FROM papers WHERE user_id IS NULL OR user_id=?", (uid,))
-        await db_execute("DELETE FROM domains WHERE user_id IS NULL OR user_id=?", (uid,))
+        await db_execute("DELETE FROM algorithms WHERE user_id=?", (uid,))
+        await db_execute("DELETE FROM ideas WHERE user_id=?", (uid,))
+        await db_execute("DELETE FROM problems WHERE user_id=?", (uid,))
+        await db_execute("DELETE FROM entries WHERE user_id=?", (uid,))
+        await db_execute("DELETE FROM keywords WHERE user_id=?", (uid,))
+        await db_execute("DELETE FROM tasks WHERE user_id=?", (uid,))
+        await db_execute("DELETE FROM papers WHERE user_id=?", (uid,))
+        await db_execute("DELETE FROM domains WHERE user_id=?", (uid,))
     else:
         raise HTTPException(401, "请先登录")
     # 清空上传文件夹里的文件
@@ -265,9 +265,9 @@ async def kb_delete_domain(domain_id: int):
         await db_execute("UPDATE papers SET domain_id=NULL WHERE domain_id=?", (domain_id,))
         await db_execute("DELETE FROM domains WHERE id=?", (domain_id,))
     else:
-        await db_execute("UPDATE papers SET domain_id=NULL WHERE domain_id=? AND (user_id IS NULL OR user_id=?)",
+        await db_execute("UPDATE papers SET domain_id=NULL WHERE domain_id=? AND (user_id=?)",
                          (domain_id, uid))
-        await db_execute("DELETE FROM domains WHERE id=? AND (user_id IS NULL OR user_id=?)",
+        await db_execute("DELETE FROM domains WHERE id=? AND (user_id=?)",
                          (domain_id, uid))
     return {"success": True}
 
@@ -282,7 +282,7 @@ async def kb_update_domain(domain_id: int, req: DomainReq):
             (req.name, req.description, domain_id))
     else:
         await db_execute(
-            "UPDATE domains SET name=?,description=?,updated_at=datetime('now','localtime') WHERE id=? AND (user_id IS NULL OR user_id=?)",
+            "UPDATE domains SET name=?,description=?,updated_at=datetime('now','localtime') WHERE id=? AND (user_id=?)",
             (req.name, req.description, domain_id, uid))
     return {"success": True}
 
@@ -296,7 +296,7 @@ async def kb_domain_upload(domain_id: int, files: list[UploadFile] = File(...)):
     if role == "admin":
         domains = await db_query("SELECT * FROM domains WHERE id=?", (domain_id,))
     elif uid is not None:
-        domains = await db_query("SELECT * FROM domains WHERE id=? AND (user_id IS NULL OR user_id=?)", (domain_id, uid))
+        domains = await db_query("SELECT * FROM domains WHERE id=? AND (user_id=?)", (domain_id, uid))
     else:
         domains = await db_query("SELECT * FROM domains WHERE id=?", (domain_id,))
     if not domains:
@@ -342,7 +342,7 @@ async def kb_paper_detail(paper_id: int):
     if role == "admin":
         rows = await db_query("SELECT * FROM papers WHERE id=?", (paper_id,))
     elif uid is not None:
-        rows = await db_query("SELECT * FROM papers WHERE id=? AND (user_id IS NULL OR user_id=?)", (paper_id, uid))
+        rows = await db_query("SELECT * FROM papers WHERE id=? AND (user_id=?)", (paper_id, uid))
     else:
         rows = await db_query("SELECT * FROM papers WHERE id=?", (paper_id,))
     if not rows:
@@ -358,7 +358,7 @@ async def kb_paper_reparse(paper_id: int):
     if role == "admin":
         rows = await db_query("SELECT * FROM papers WHERE id=?", (paper_id,))
     elif uid is not None:
-        rows = await db_query("SELECT * FROM papers WHERE id=? AND (user_id IS NULL OR user_id=?)", (paper_id, uid))
+        rows = await db_query("SELECT * FROM papers WHERE id=? AND (user_id=?)", (paper_id, uid))
     else:
         rows = await db_query("SELECT * FROM papers WHERE id=?", (paper_id,))
     if not rows:
@@ -371,7 +371,7 @@ async def kb_paper_reparse(paper_id: int):
         if role == "admin":
             await db_execute("UPDATE papers SET markdown_content=?,status='parsed' WHERE id=?", (md_text, paper_id))
         elif uid is not None:
-            await db_execute("UPDATE papers SET markdown_content=?,status='parsed' WHERE id=? AND (user_id IS NULL OR user_id=?)", (md_text, paper_id, uid))
+            await db_execute("UPDATE papers SET markdown_content=?,status='parsed' WHERE id=? AND (user_id=?)", (md_text, paper_id, uid))
         else:
             await db_execute("UPDATE papers SET markdown_content=?,status='parsed' WHERE id=?", (md_text, paper_id))
         return {"success": True, "md_length": len(md_text)}
@@ -387,7 +387,7 @@ async def kb_paper_save(paper_id: int, body: dict):
     if role == "admin":
         rows = await db_query("SELECT * FROM papers WHERE id=?", (paper_id,))
     elif uid is not None:
-        rows = await db_query("SELECT * FROM papers WHERE id=? AND (user_id IS NULL OR user_id=?)", (paper_id, uid))
+        rows = await db_query("SELECT * FROM papers WHERE id=? AND (user_id=?)", (paper_id, uid))
     else:
         rows = await db_query("SELECT * FROM papers WHERE id=?", (paper_id,))
     if not rows:
@@ -397,7 +397,7 @@ async def kb_paper_save(paper_id: int, body: dict):
     if role == "admin":
         await db_execute("UPDATE papers SET markdown_content=?,status='parsed' WHERE id=?", (md_text, paper_id))
     elif uid is not None:
-        await db_execute("UPDATE papers SET markdown_content=?,status='parsed' WHERE id=? AND (user_id IS NULL OR user_id=?)", (md_text, paper_id, uid))
+        await db_execute("UPDATE papers SET markdown_content=?,status='parsed' WHERE id=? AND (user_id=?)", (md_text, paper_id, uid))
     else:
         await db_execute("UPDATE papers SET markdown_content=?,status='parsed' WHERE id=?", (md_text, paper_id))
     # 同时写一份 .md 到 vault/kb/ 目录

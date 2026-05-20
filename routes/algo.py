@@ -65,7 +65,7 @@ async def algo_generate(req: AlgoReq):
     if role == "admin":
         ideas = await db_query("SELECT * FROM ideas WHERE id=?", (req.idea_id,))
     elif uid is not None:
-        ideas = await db_query("SELECT * FROM ideas WHERE id=? AND (user_id IS NULL OR user_id=?)", (req.idea_id, uid))
+        ideas = await db_query("SELECT * FROM ideas WHERE id=? AND (user_id=?)", (req.idea_id, uid))
     else:
         ideas = await db_query("SELECT * FROM ideas WHERE id=?", (req.idea_id,))
     if not ideas:
@@ -131,7 +131,7 @@ async def algo_history_update(aid: str, req: AlgoHistoryReq):
     if role == "admin":
         await db_execute(f"UPDATE algo_analyses SET {', '.join(sets)} WHERE id=?", params + [aid])
     else:
-        await db_execute(f"UPDATE algo_analyses SET {', '.join(sets)} WHERE id=? AND (user_id IS NULL OR user_id=?)", params + [aid, uid])
+        await db_execute(f"UPDATE algo_analyses SET {', '.join(sets)} WHERE id=? AND (user_id=?)", params + [aid, uid])
     return {"ok": True}
 
 
@@ -143,13 +143,13 @@ async def algo_history_delete(aid: str):
     if role == "admin":
         rows = await db_query("SELECT task_id FROM algo_analyses WHERE id=?", (aid,))
     else:
-        rows = await db_query("SELECT task_id FROM algo_analyses WHERE id=? AND (user_id IS NULL OR user_id=?)", (aid, uid))
+        rows = await db_query("SELECT task_id FROM algo_analyses WHERE id=? AND (user_id=?)", (aid, uid))
     if rows and rows[0].get("task_id"):
         await db_execute("DELETE FROM tasks WHERE id=?", (rows[0]["task_id"],))
     if role == "admin":
         await db_execute("DELETE FROM algo_analyses WHERE id=?", (aid,))
     else:
-        await db_execute("DELETE FROM algo_analyses WHERE id=? AND (user_id IS NULL OR user_id=?)", (aid, uid))
+        await db_execute("DELETE FROM algo_analyses WHERE id=? AND (user_id=?)", (aid, uid))
     return {"ok": True}
 
 
@@ -160,7 +160,7 @@ async def algo_test(algo_id: str):
     if role == "admin":
         algos = await db_query("SELECT * FROM algorithms WHERE id=?", (algo_id,))
     elif uid is not None:
-        algos = await db_query("SELECT * FROM algorithms WHERE id=? AND (user_id IS NULL OR user_id=?)", (algo_id, uid))
+        algos = await db_query("SELECT * FROM algorithms WHERE id=? AND (user_id=?)", (algo_id, uid))
     else:
         algos = await db_query("SELECT * FROM algorithms WHERE id=?", (algo_id,))
     if not algos:
@@ -187,7 +187,7 @@ async def algo_optimize(algo_id: str):
     if role == "admin":
         algos = await db_query("SELECT * FROM algorithms WHERE id=?", (algo_id,))
     elif uid is not None:
-        algos = await db_query("SELECT * FROM algorithms WHERE id=? AND (user_id IS NULL OR user_id=?)", (algo_id, uid))
+        algos = await db_query("SELECT * FROM algorithms WHERE id=? AND (user_id=?)", (algo_id, uid))
     else:
         algos = await db_query("SELECT * FROM algorithms WHERE id=?", (algo_id,))
     if not algos:
@@ -198,7 +198,7 @@ async def algo_optimize(algo_id: str):
     if role == "admin":
         await db_execute("UPDATE algorithms SET perf_before_ms=?,perf_after_ms=? WHERE id=?", (before, after, algo_id))
     elif uid is not None:
-        await db_execute("UPDATE algorithms SET perf_before_ms=?,perf_after_ms=? WHERE id=? AND (user_id IS NULL OR user_id=?)", (before, after, algo_id, uid))
+        await db_execute("UPDATE algorithms SET perf_before_ms=?,perf_after_ms=? WHERE id=? AND (user_id=?)", (before, after, algo_id, uid))
     else:
         await db_execute("UPDATE algorithms SET perf_before_ms=?,perf_after_ms=? WHERE id=?", (before, after, algo_id))
     pct = round((1 - after / before) * 100, 1) if before > 0 else 0
@@ -207,7 +207,7 @@ async def algo_optimize(algo_id: str):
 
 async def _task_resp(tid, uid=None):
     if uid is not None:
-        rows = await db_query("SELECT * FROM tasks WHERE id=? AND (user_id IS NULL OR user_id=?)", (tid, uid))
+        rows = await db_query("SELECT * FROM tasks WHERE id=? AND (user_id=?)", (tid, uid))
     else:
         rows = await db_query("SELECT * FROM tasks WHERE id=?", (tid,))
     if not rows:

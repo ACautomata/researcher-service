@@ -79,13 +79,13 @@ async def idea_delete(iid: str):
     if role == "admin":
         await db_execute("DELETE FROM ideas WHERE id=?", (iid,))
     else:
-        await db_execute("DELETE FROM ideas WHERE id=? AND (user_id IS NULL OR user_id=?)", (iid, uid))
+        await db_execute("DELETE FROM ideas WHERE id=? AND (user_id=?)", (iid, uid))
     return {"ok": True}
 
 
 async def _task_resp(tid, uid=None):
     if uid is not None:
-        rows = await db_query("SELECT * FROM tasks WHERE id=? AND (user_id IS NULL OR user_id=?)", (tid, uid))
+        rows = await db_query("SELECT * FROM tasks WHERE id=? AND (user_id=?)", (tid, uid))
     else:
         rows = await db_query("SELECT * FROM tasks WHERE id=?", (tid,))
     if not rows:

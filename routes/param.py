@@ -35,7 +35,7 @@ async def param_save(req: ParamTaskReq):
     if role == "admin":
         existing = await db_query("SELECT id FROM param_tasks WHERE id=?", (pid,))
     elif uid is not None:
-        existing = await db_query("SELECT id FROM param_tasks WHERE id=? AND (user_id IS NULL OR user_id=?)", (pid, uid))
+        existing = await db_query("SELECT id FROM param_tasks WHERE id=? AND (user_id=?)", (pid, uid))
     else:
         existing = await db_query("SELECT id FROM param_tasks WHERE id=?", (pid,))
     if existing:
@@ -45,7 +45,7 @@ async def param_save(req: ParamTaskReq):
                 (req.name, req.status, req.params_json, req.results_json, pid))
         elif uid is not None:
             await db_execute(
-                "UPDATE param_tasks SET name=?,status=?,params_json=?,results_json=? WHERE id=? AND (user_id IS NULL OR user_id=?)",
+                "UPDATE param_tasks SET name=?,status=?,params_json=?,results_json=? WHERE id=? AND (user_id=?)",
                 (req.name, req.status, req.params_json, req.results_json, pid, uid))
         else:
             await db_execute(
@@ -65,5 +65,5 @@ async def param_delete(pid: str):
     if role == "admin":
         await db_execute("DELETE FROM param_tasks WHERE id=?", (pid,))
     else:
-        await db_execute("DELETE FROM param_tasks WHERE id=? AND (user_id IS NULL OR user_id=?)", (pid, uid))
+        await db_execute("DELETE FROM param_tasks WHERE id=? AND (user_id=?)", (pid, uid))
     return {"ok": True}

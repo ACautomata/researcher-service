@@ -67,7 +67,7 @@ async def lit_history_update(aid: str, req: LitHistoryReq):
             (req.status, req.progress, req.count, aid))
     else:
         await db_execute(
-            "UPDATE lit_analyses SET status=?,progress=?,count=? WHERE id=? AND (user_id IS NULL OR user_id=?)",
+            "UPDATE lit_analyses SET status=?,progress=?,count=? WHERE id=? AND (user_id=?)",
             (req.status, req.progress, req.count, aid, uid))
     return {"ok": True}
 
@@ -79,12 +79,12 @@ async def lit_history_delete(aid: str):
     if role == "admin":
         await db_execute("DELETE FROM lit_analyses WHERE id=?", (aid,))
     else:
-        await db_execute("DELETE FROM lit_analyses WHERE id=? AND (user_id IS NULL OR user_id=?)", (aid, uid))
+        await db_execute("DELETE FROM lit_analyses WHERE id=? AND (user_id=?)", (aid, uid))
     # 解除关联问题的分析绑定
     if role == "admin":
         await db_execute("UPDATE problems SET source_analysis=NULL WHERE source_analysis=?", (aid,))
     else:
-        await db_execute("UPDATE problems SET source_analysis=NULL WHERE source_analysis=? AND (user_id IS NULL OR user_id=?)", (aid, uid))
+        await db_execute("UPDATE problems SET source_analysis=NULL WHERE source_analysis=? AND (user_id=?)", (aid, uid))
     return {"ok": True}
 
 
@@ -138,7 +138,7 @@ async def lit_validate(req: ValidateReq):
         if role == "admin":
             rows = await db_query("SELECT * FROM problems WHERE id=?", (pid,))
         elif uid is not None:
-            rows = await db_query("SELECT * FROM problems WHERE id=? AND (user_id IS NULL OR user_id=?)", (pid, uid))
+            rows = await db_query("SELECT * FROM problems WHERE id=? AND (user_id=?)", (pid, uid))
         else:
             rows = await db_query("SELECT * FROM problems WHERE id=?", (pid,))
         if rows:
@@ -190,7 +190,7 @@ async def lit_problems(status: str = None, severity: str = None, analysis_id: st
 
 async def _task_resp(tid, uid=None):
     if uid is not None:
-        rows = await db_query("SELECT * FROM tasks WHERE id=? AND (user_id IS NULL OR user_id=?)", (tid, uid))
+        rows = await db_query("SELECT * FROM tasks WHERE id=? AND (user_id=?)", (tid, uid))
     else:
         rows = await db_query("SELECT * FROM tasks WHERE id=?", (tid,))
     if not rows:
