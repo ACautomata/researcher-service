@@ -81,7 +81,10 @@ async def lit_history_delete(aid: str):
     else:
         await db_execute("DELETE FROM lit_analyses WHERE id=? AND (user_id IS NULL OR user_id=?)", (aid, uid))
     # 解除关联问题的分析绑定
-    await db_execute("UPDATE problems SET source_analysis=NULL WHERE source_analysis=?", (aid,))
+    if role == "admin":
+        await db_execute("UPDATE problems SET source_analysis=NULL WHERE source_analysis=?", (aid,))
+    else:
+        await db_execute("UPDATE problems SET source_analysis=NULL WHERE source_analysis=? AND (user_id IS NULL OR user_id=?)", (aid, uid))
     return {"ok": True}
 
 
@@ -117,7 +120,7 @@ async def lit_discover(req: DiscoverReq):
 
 @router.get("/auto-discover/{tid}/progress")
 async def lit_disc_progress(tid: str):
-    return await _task_resp(tid)
+    return await _task_resp(tid, current_user_id())
 
 
 @router.get("/search-external")
@@ -129,9 +132,15 @@ async def lit_search(keyword: str = Query(...), source: str = Query("arxiv")):
 @router.post("/validate")
 async def lit_validate(req: ValidateReq):
     uid = current_user_id()
+    role = current_user_role()
     problems = []
     for pid in req.problem_ids:
-        rows = await db_query("SELECT * FROM problems WHERE id=?", (pid,))
+        if role == "admin":
+            rows = await db_query("SELECT * FROM problems WHERE id=?", (pid,))
+        elif uid is not None:
+            rows = await db_query("SELECT * FROM problems WHERE id=? AND (user_id IS NULL OR user_id=?)", (pid, uid))
+        else:
+            rows = await db_query("SELECT * FROM problems WHERE id=?", (pid,))
         if rows:
             problems.append(rows[0])
     if not problems:
@@ -150,7 +159,7 @@ async def lit_validate(req: ValidateReq):
 
 @router.get("/validate/{tid}/progress")
 async def lit_val_progress(tid: str):
-    return await _task_resp(tid)
+    return await _task_resp(tid, current_user_id())
 
 
 @router.get("/problems")
@@ -179,8 +188,11 @@ async def lit_problems(status: str = None, severity: str = None, analysis_id: st
     return {"problems": rows, "total": len(rows)}
 
 
-async def _task_resp(tid):
-    rows = await db_query("SELECT * FROM tasks WHERE id=?", (tid,))
+async def _task_resp(tid, uid=None):
+    if uid is not None:
+        rows = await db_query("SELECT * FROM tasks WHERE id=? AND (user_id IS NULL OR user_id=?)", (tid, uid))
+    else:
+        rows = await db_query("SELECT * FROM tasks WHERE id=?", (tid,))
     if not rows:
         raise HTTPException(404)
     t = rows[0]

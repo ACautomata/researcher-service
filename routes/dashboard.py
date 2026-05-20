@@ -52,7 +52,7 @@ def _get_gpu_info() -> list:
 
 
 @router.get("/tasks")
-async def get_tasks(status: Optional[str] = None, limit: int = 20):
+async def get_tasks(status: Optional[str] = None, limit: int = 20, user: dict = Depends(_current_user)):
     """获取任务列表（按用户隔离）"""
     conds, params = [], []
     uf, up = user_filter()

@@ -1,5 +1,6 @@
 """用户注册、登录、会话校验、个人 API 配置与 admin 用户管理"""
 import re
+import secrets
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException
@@ -19,6 +20,7 @@ _USERNAME_RE = re.compile(r"^[a-zA-Z0-9_\u4e00-\u9fff]{2,32}$")
 class RegisterBody(BaseModel):
     username: str = Field(..., min_length=2, max_length=32)
     password: str = Field(..., min_length=8, max_length=128)
+    invite_code: str = Field(..., min_length=1)
 
 
 class LoginBody(BaseModel):
@@ -34,6 +36,12 @@ class UserSettingsUpdate(BaseModel):
     anthropic_base_url: Optional[str] = None
     anthropic_model: Optional[str] = None
     theme_color: Optional[str] = None  # 用户主题配色：emerald/aurora/flame/nebula/ocean/mint/sunset/sakura
+
+
+class GenerateInviteCodesBody(BaseModel):
+    count: int = Field(default=1, ge=1, le=100)
+    prefix: Optional[str] = Field(default=None, max_length=8)
+    expires_in_days: Optional[int] = Field(default=None, ge=1)
 
 
 def _validate_username(username: str) -> None:
@@ -71,7 +79,7 @@ async def _current_user(
 async def _ensure_user_settings(user_id: int) -> dict:
     rows = await db_query("SELECT * FROM user_settings WHERE user_id = ?", (user_id,))
     if not rows:
-        await db_execute("INSERT INTO user_settings (user_id) VALUES (?)", (user_id,))
+        await db_execute("INSERT INTO user_settings (user_id, theme_color) VALUES (?, 'aurora')", (user_id,))
         rows = await db_query("SELECT * FROM user_settings WHERE user_id = ?", (user_id,))
     return rows[0]
 
@@ -145,6 +153,19 @@ async def register(body: RegisterBody):
     exists = await db_query("SELECT id FROM users WHERE username = ?", (u,))
     if exists:
         raise HTTPException(status_code=400, detail="该用户名已被注册")
+
+    # 验证邀请码
+    code_rows = await db_query(
+        "SELECT id, used_by FROM invite_codes WHERE code=? AND is_active=1 "
+        "AND (expires_at IS NULL OR expires_at > datetime('now'))",
+        (body.invite_code.strip(),),
+    )
+    if not code_rows:
+        raise HTTPException(status_code=400, detail="邀请码无效或已过期")
+    if code_rows[0]["used_by"] is not None:
+        raise HTTPException(status_code=400, detail="该邀请码已被使用")
+    valid_invite_id = code_rows[0]["id"]
+
     ph = hash_password(body.password)
     # 所有新注册账号默认均为普通用户
     role = "user"
@@ -152,7 +173,12 @@ async def register(body: RegisterBody):
         "INSERT INTO users(username, password_hash, role) VALUES(?, ?, ?)",
         (u, ph, role),
     )
-    await db_execute("INSERT INTO user_settings (user_id) VALUES (?)", (uid,))
+    # 标记邀请码已被使用
+    await db_execute(
+        "UPDATE invite_codes SET used_by=?, used_at=datetime('now','localtime') WHERE id=? AND used_by IS NULL",
+        (uid, valid_invite_id),
+    )
+    await db_execute("INSERT INTO user_settings (user_id, theme_color) VALUES (?, 'aurora')", (uid,))
     token = new_session_token()
     await db_execute(
         "INSERT INTO sessions(token, user_id, expires_at) VALUES(?, ?, datetime('now', ?))",
@@ -293,3 +319,67 @@ async def admin_delete_user(user_id: int, admin: dict = Depends(require_admin)):
     await db_execute("DELETE FROM user_settings WHERE user_id = ?", (user_id,))
     await db_execute("DELETE FROM users WHERE id = ?", (user_id,))
     return {"success": True, "deleted_username": user[0]["username"]}
+
+
+# ════════════ 邀请码管理（admin） ════════════
+
+@router.get("/admin/invite-codes")
+async def admin_list_invite_codes(_: dict = Depends(require_admin)):
+    """列出所有邀请码（含创建者和使用者用户名）。"""
+    rows = await db_query("""
+        SELECT ic.id, ic.code, ic.created_by, cu.username as created_by_username,
+               ic.created_at, ic.used_by, uu.username as used_by_username,
+               ic.used_at, ic.is_active, ic.expires_at
+        FROM invite_codes ic
+        LEFT JOIN users cu ON cu.id = ic.created_by
+        LEFT JOIN users uu ON uu.id = ic.used_by
+        ORDER BY ic.id DESC
+    """)
+    return {"invite_codes": rows}
+
+
+@router.post("/admin/invite-codes")
+async def admin_generate_invite_codes(body: GenerateInviteCodesBody, admin: dict = Depends(require_admin)):
+    """管理员生成邀请码。"""
+    codes = []
+    for _ in range(body.count):
+        token = secrets.token_hex(8)
+        code_str = f"{body.prefix}_{token}" if body.prefix else token
+        if body.expires_in_days:
+            cid = await db_execute(
+                "INSERT INTO invite_codes(code, created_by, expires_at) "
+                "VALUES(?, ?, datetime('now', ?))",
+                (code_str, admin["id"], f"+{body.expires_in_days} days"),
+            )
+        else:
+            cid = await db_execute(
+                "INSERT INTO invite_codes(code, created_by) VALUES(?, ?)",
+                (code_str, admin["id"]),
+            )
+        codes.append({"id": cid, "code": code_str})
+    return {"invite_codes": codes, "count": len(codes)}
+
+
+@router.put("/admin/invite-codes/{code_id}/toggle")
+async def admin_toggle_invite_code(code_id: int, _: dict = Depends(require_admin)):
+    """停用/启停邀请码（仅限未使用的码）。"""
+    row = await db_query("SELECT is_active, used_by FROM invite_codes WHERE id=?", (code_id,))
+    if not row:
+        raise HTTPException(status_code=404, detail="邀请码不存在")
+    if row[0]["used_by"] is not None:
+        raise HTTPException(status_code=400, detail="该邀请码已被使用，无法修改状态")
+    new_state = 0 if row[0]["is_active"] else 1
+    await db_execute("UPDATE invite_codes SET is_active=? WHERE id=?", (new_state, code_id))
+    return {"success": True, "is_active": bool(new_state)}
+
+
+@router.delete("/admin/invite-codes/{code_id}")
+async def admin_delete_invite_code(code_id: int, _: dict = Depends(require_admin)):
+    """删除邀请码（仅限未使用的码，保留审计记录）。"""
+    row = await db_query("SELECT id, used_by FROM invite_codes WHERE id=?", (code_id,))
+    if not row:
+        raise HTTPException(status_code=404, detail="邀请码不存在")
+    if row[0]["used_by"] is not None:
+        raise HTTPException(status_code=400, detail="该邀请码已被使用，无法删除（保留审计记录）")
+    await db_execute("DELETE FROM invite_codes WHERE id=?", (code_id,))
+    return {"success": True}

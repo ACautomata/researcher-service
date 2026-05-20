@@ -15,3 +15,6 @@ uploads/*
 
 # 临时文件
 *.log
+
+# 服务器凭据
+.server_pass

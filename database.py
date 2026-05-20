@@ -123,6 +123,18 @@ async def init_db():
                 created_at TEXT DEFAULT (datetime('now','localtime')),
                 user_id INTEGER DEFAULT NULL
             );
+            CREATE TABLE IF NOT EXISTS invite_codes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                code TEXT NOT NULL UNIQUE,
+                created_by INTEGER DEFAULT NULL,
+                created_at TEXT DEFAULT (datetime('now','localtime')),
+                used_by INTEGER DEFAULT NULL,
+                used_at TEXT DEFAULT NULL,
+                is_active INTEGER DEFAULT 1,
+                expires_at TEXT DEFAULT NULL,
+                FOREIGN KEY(created_by) REFERENCES users(id),
+                FOREIGN KEY(used_by) REFERENCES users(id)
+            );
         """)
         await db.commit()
         try:

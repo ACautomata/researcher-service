@@ -41,20 +41,28 @@ async def kb_upload(files: list[UploadFile] = File(...)):
 @router.post("/parse")
 async def kb_parse(req: ParseReq):
     uid = current_user_id()
-    papers = await db_query("SELECT * FROM papers WHERE id=? AND status!='parsed'", (req.upload_id,))
+    role = current_user_role()
+    if role == "admin":
+        papers = await db_query("SELECT * FROM papers WHERE id=? AND status!='parsed'", (req.upload_id,))
+    elif uid is not None:
+        papers = await db_query(
+            "SELECT * FROM papers WHERE id=? AND status!='parsed' AND (user_id IS NULL OR user_id=?)",
+            (req.upload_id, uid))
+    else:
+        papers = await db_query("SELECT * FROM papers WHERE id=? AND status!='parsed'", (req.upload_id,))
     if not papers:
         raise HTTPException(404, "文件不存在或已解析")
     tid = f"parse_{uuid.uuid4().hex[:8]}"
     await db_execute(
         "INSERT INTO tasks(id,type,status,progress,step,user_id) VALUES(?,'parse','running',0,'校验文件',?)",
         (tid, uid))
-    asyncio.create_task(_do_parse(tid, req.upload_id, uid))
+    asyncio.create_task(_do_parse(tid, req.upload_id, uid, role))
     return {"task_id": tid, "status": "running"}
 
 
 @router.get("/parse/{tid}/progress")
 async def kb_parse_progress(tid: str):
-    return await _task_resp(tid)
+    return await _task_resp(tid, current_user_id())
 
 
 @router.get("/entries")
@@ -114,8 +122,11 @@ async def kb_delete(body: dict):
     return {"success": True, "message": f"删除 {len(ids)} 条"}
 
 
-async def _task_resp(tid):
-    rows = await db_query("SELECT * FROM tasks WHERE id=?", (tid,))
+async def _task_resp(tid, uid=None):
+    if uid is not None:
+        rows = await db_query("SELECT * FROM tasks WHERE id=? AND (user_id IS NULL OR user_id=?)", (tid, uid))
+    else:
+        rows = await db_query("SELECT * FROM tasks WHERE id=?", (tid,))
     if not rows:
         raise HTTPException(404)
     t = rows[0]
@@ -127,9 +138,14 @@ async def _task_resp(tid):
     }
 
 
-async def _do_parse(tid, paper_id, uid):
+async def _do_parse(tid, paper_id, uid, role=None):
     try:
-        paper = (await db_query("SELECT * FROM papers WHERE id=?", (paper_id,)))[0]
+        if role == "admin":
+            paper = (await db_query("SELECT * FROM papers WHERE id=?", (paper_id,)))[0]
+        elif uid is not None:
+            paper = (await db_query("SELECT * FROM papers WHERE id=? AND (user_id IS NULL OR user_id=?)", (paper_id, uid)))[0]
+        else:
+            paper = (await db_query("SELECT * FROM papers WHERE id=?", (paper_id,)))[0]
         await update_task(tid, 25, "文件接收与格式校验")
         if not os.path.exists(paper["filename"]):
             return await update_task(tid, 0, "失败", "error", error="文件不存在")
@@ -158,7 +174,12 @@ async def _do_parse(tid, paper_id, uid):
             else:
                 await db_execute("INSERT INTO keywords(word,weight,category,source_paper_id,user_id) VALUES(?,?,?,?,?)",
                                  (kw["word"], kw.get("weight", 5), kw.get("category"), paper_id, uid))
-        await db_execute("UPDATE papers SET status='parsed' WHERE id=?", (paper_id,))
+        if role == "admin":
+            await db_execute("UPDATE papers SET status='parsed' WHERE id=?", (paper_id,))
+        elif uid is not None:
+            await db_execute("UPDATE papers SET status='parsed' WHERE id=? AND (user_id IS NULL OR user_id=?)", (paper_id, uid))
+        else:
+            await db_execute("UPDATE papers SET status='parsed' WHERE id=?", (paper_id,))
         await update_task(tid, 100, "完成", "completed",
                           result={"entries_count": len(el), "keywords_count": len(kl)})
     except Exception as e:
@@ -271,7 +292,13 @@ async def kb_update_domain(domain_id: int, req: DomainReq):
 @router.post("/domain/{domain_id}/upload")
 async def kb_domain_upload(domain_id: int, files: list[UploadFile] = File(...)):
     uid = current_user_id()
-    domains = await db_query("SELECT * FROM domains WHERE id=?", (domain_id,))
+    role = current_user_role()
+    if role == "admin":
+        domains = await db_query("SELECT * FROM domains WHERE id=?", (domain_id,))
+    elif uid is not None:
+        domains = await db_query("SELECT * FROM domains WHERE id=? AND (user_id IS NULL OR user_id=?)", (domain_id, uid))
+    else:
+        domains = await db_query("SELECT * FROM domains WHERE id=?", (domain_id,))
     if not domains:
         raise HTTPException(404, "领域不存在")
     os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -310,7 +337,14 @@ async def kb_domain_papers(domain_id: int):
 
 @router.get("/paper/{paper_id}")
 async def kb_paper_detail(paper_id: int):
-    rows = await db_query("SELECT * FROM papers WHERE id=?", (paper_id,))
+    uid = current_user_id()
+    role = current_user_role()
+    if role == "admin":
+        rows = await db_query("SELECT * FROM papers WHERE id=?", (paper_id,))
+    elif uid is not None:
+        rows = await db_query("SELECT * FROM papers WHERE id=? AND (user_id IS NULL OR user_id=?)", (paper_id, uid))
+    else:
+        rows = await db_query("SELECT * FROM papers WHERE id=?", (paper_id,))
     if not rows:
         raise HTTPException(404)
     return rows[0]
@@ -319,7 +353,14 @@ async def kb_paper_detail(paper_id: int):
 @router.post("/paper/{paper_id}/reparse")
 async def kb_paper_reparse(paper_id: int):
     """重新解析论文为 markdown"""
-    rows = await db_query("SELECT * FROM papers WHERE id=?", (paper_id,))
+    uid = current_user_id()
+    role = current_user_role()
+    if role == "admin":
+        rows = await db_query("SELECT * FROM papers WHERE id=?", (paper_id,))
+    elif uid is not None:
+        rows = await db_query("SELECT * FROM papers WHERE id=? AND (user_id IS NULL OR user_id=?)", (paper_id, uid))
+    else:
+        rows = await db_query("SELECT * FROM papers WHERE id=?", (paper_id,))
     if not rows:
         raise HTTPException(404)
     p = rows[0]
@@ -327,9 +368,12 @@ async def kb_paper_reparse(paper_id: int):
         raise HTTPException(400, "文件不存在")
     try:
         md_text = extract_text(p["filename"], p["ext"] or "")
-        await db_execute(
-            "UPDATE papers SET markdown_content=?,status='parsed' WHERE id=?",
-            (md_text, paper_id))
+        if role == "admin":
+            await db_execute("UPDATE papers SET markdown_content=?,status='parsed' WHERE id=?", (md_text, paper_id))
+        elif uid is not None:
+            await db_execute("UPDATE papers SET markdown_content=?,status='parsed' WHERE id=? AND (user_id IS NULL OR user_id=?)", (md_text, paper_id, uid))
+        else:
+            await db_execute("UPDATE papers SET markdown_content=?,status='parsed' WHERE id=?", (md_text, paper_id))
         return {"success": True, "md_length": len(md_text)}
     except Exception as e:
         raise HTTPException(500, str(e))
@@ -338,14 +382,24 @@ async def kb_paper_reparse(paper_id: int):
 @router.put("/paper/{paper_id}")
 async def kb_paper_save(paper_id: int, body: dict):
     """保存编辑后的 markdown 内容到 DB 和文件"""
-    rows = await db_query("SELECT * FROM papers WHERE id=?", (paper_id,))
+    uid = current_user_id()
+    role = current_user_role()
+    if role == "admin":
+        rows = await db_query("SELECT * FROM papers WHERE id=?", (paper_id,))
+    elif uid is not None:
+        rows = await db_query("SELECT * FROM papers WHERE id=? AND (user_id IS NULL OR user_id=?)", (paper_id, uid))
+    else:
+        rows = await db_query("SELECT * FROM papers WHERE id=?", (paper_id,))
     if not rows:
         raise HTTPException(404)
     p = rows[0]
     md_text = body.get("content", "")
-    await db_execute(
-        "UPDATE papers SET markdown_content=?,status='parsed' WHERE id=?",
-        (md_text, paper_id))
+    if role == "admin":
+        await db_execute("UPDATE papers SET markdown_content=?,status='parsed' WHERE id=?", (md_text, paper_id))
+    elif uid is not None:
+        await db_execute("UPDATE papers SET markdown_content=?,status='parsed' WHERE id=? AND (user_id IS NULL OR user_id=?)", (md_text, paper_id, uid))
+    else:
+        await db_execute("UPDATE papers SET markdown_content=?,status='parsed' WHERE id=?", (md_text, paper_id))
     # 同时写一份 .md 到 vault/kb/ 目录
     vault_dir = os.environ.get("OBSIDIAN_VAULT_PATH", "./vault/kb")
     if vault_dir:

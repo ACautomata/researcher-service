@@ -45,7 +45,7 @@ async def idea_generate(req: IdeaReq):
 
 @router.get("/generate/{tid}/progress")
 async def idea_gen_progress(tid: str):
-    return await _task_resp(tid)
+    return await _task_resp(tid, current_user_id())
 
 
 @router.get("/list")
@@ -83,8 +83,11 @@ async def idea_delete(iid: str):
     return {"ok": True}
 
 
-async def _task_resp(tid):
-    rows = await db_query("SELECT * FROM tasks WHERE id=?", (tid,))
+async def _task_resp(tid, uid=None):
+    if uid is not None:
+        rows = await db_query("SELECT * FROM tasks WHERE id=? AND (user_id IS NULL OR user_id=?)", (tid, uid))
+    else:
+        rows = await db_query("SELECT * FROM tasks WHERE id=?", (tid,))
     if not rows:
         raise HTTPException(404)
     t = rows[0]

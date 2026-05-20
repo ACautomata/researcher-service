@@ -61,7 +61,13 @@ async def algo_suggest_params(req: SuggestReq):
 @router.post("/generate")
 async def algo_generate(req: AlgoReq):
     uid = current_user_id()
-    ideas = await db_query("SELECT * FROM ideas WHERE id=?", (req.idea_id,))
+    role = current_user_role()
+    if role == "admin":
+        ideas = await db_query("SELECT * FROM ideas WHERE id=?", (req.idea_id,))
+    elif uid is not None:
+        ideas = await db_query("SELECT * FROM ideas WHERE id=? AND (user_id IS NULL OR user_id=?)", (req.idea_id, uid))
+    else:
+        ideas = await db_query("SELECT * FROM ideas WHERE id=?", (req.idea_id,))
     if not ideas:
         raise HTTPException(404, "Idea 不存在")
     tid = f"algo_{uuid.uuid4().hex[:8]}"
@@ -74,7 +80,7 @@ async def algo_generate(req: AlgoReq):
 
 @router.get("/generate/{tid}/progress")
 async def algo_gen_progress(tid: str):
-    return await _task_resp(tid)
+    return await _task_resp(tid, current_user_id())
 
 
 @router.get("/list")
@@ -134,7 +140,10 @@ async def algo_history_delete(aid: str):
     uid = current_user_id()
     role = current_user_role()
     # 清理关联的 tasks 行
-    rows = await db_query("SELECT task_id FROM algo_analyses WHERE id=?", (aid,))
+    if role == "admin":
+        rows = await db_query("SELECT task_id FROM algo_analyses WHERE id=?", (aid,))
+    else:
+        rows = await db_query("SELECT task_id FROM algo_analyses WHERE id=? AND (user_id IS NULL OR user_id=?)", (aid, uid))
     if rows and rows[0].get("task_id"):
         await db_execute("DELETE FROM tasks WHERE id=?", (rows[0]["task_id"],))
     if role == "admin":
@@ -147,7 +156,13 @@ async def algo_history_delete(aid: str):
 @router.post("/test/{algo_id}")
 async def algo_test(algo_id: str):
     uid = current_user_id()
-    algos = await db_query("SELECT * FROM algorithms WHERE id=?", (algo_id,))
+    role = current_user_role()
+    if role == "admin":
+        algos = await db_query("SELECT * FROM algorithms WHERE id=?", (algo_id,))
+    elif uid is not None:
+        algos = await db_query("SELECT * FROM algorithms WHERE id=? AND (user_id IS NULL OR user_id=?)", (algo_id, uid))
+    else:
+        algos = await db_query("SELECT * FROM algorithms WHERE id=?", (algo_id,))
     if not algos:
         raise HTTPException(404)
     if not algos[0].get("code"):
@@ -162,25 +177,39 @@ async def algo_test(algo_id: str):
 
 @router.get("/test/{tid}/progress")
 async def algo_test_progress(tid: str):
-    return await _task_resp(tid)
+    return await _task_resp(tid, current_user_id())
 
 
 @router.post("/optimize/{algo_id}")
 async def algo_optimize(algo_id: str):
-    algos = await db_query("SELECT * FROM algorithms WHERE id=?", (algo_id,))
+    uid = current_user_id()
+    role = current_user_role()
+    if role == "admin":
+        algos = await db_query("SELECT * FROM algorithms WHERE id=?", (algo_id,))
+    elif uid is not None:
+        algos = await db_query("SELECT * FROM algorithms WHERE id=? AND (user_id IS NULL OR user_id=?)", (algo_id, uid))
+    else:
+        algos = await db_query("SELECT * FROM algorithms WHERE id=?", (algo_id,))
     if not algos:
         raise HTTPException(404)
     a = algos[0]
     before = a.get("perf_after_ms") or a.get("perf_before_ms") or 300
     after = round(before * (0.5 + 0.3 * abs(hash(algo_id) % 10) / 10), 1)
-    await db_execute("UPDATE algorithms SET perf_before_ms=?,perf_after_ms=? WHERE id=?",
-                     (before, after, algo_id))
+    if role == "admin":
+        await db_execute("UPDATE algorithms SET perf_before_ms=?,perf_after_ms=? WHERE id=?", (before, after, algo_id))
+    elif uid is not None:
+        await db_execute("UPDATE algorithms SET perf_before_ms=?,perf_after_ms=? WHERE id=? AND (user_id IS NULL OR user_id=?)", (before, after, algo_id, uid))
+    else:
+        await db_execute("UPDATE algorithms SET perf_before_ms=?,perf_after_ms=? WHERE id=?", (before, after, algo_id))
     pct = round((1 - after / before) * 100, 1) if before > 0 else 0
     return {"success": True, "perf_before": before, "perf_after": after, "improvement_pct": pct}
 
 
-async def _task_resp(tid):
-    rows = await db_query("SELECT * FROM tasks WHERE id=?", (tid,))
+async def _task_resp(tid, uid=None):
+    if uid is not None:
+        rows = await db_query("SELECT * FROM tasks WHERE id=? AND (user_id IS NULL OR user_id=?)", (tid, uid))
+    else:
+        rows = await db_query("SELECT * FROM tasks WHERE id=?", (tid,))
     if not rows:
         raise HTTPException(404)
     t = rows[0]

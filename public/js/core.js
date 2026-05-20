@@ -348,16 +348,19 @@ async function submitRegister() {
   var u = document.getElementById('regUser').value.trim();
   var p = document.getElementById('regPass').value;
   var p2 = document.getElementById('regPass2').value;
+  var ic = document.getElementById('regInviteCode').value.trim();
   if (!u || !p) { showAuthErr('请填写用户名和密码'); return; }
+  if (!ic) { showAuthErr('请输入邀请码'); return; }
   if (p !== p2) { showAuthErr('两次输入的密码不一致'); return; }
   if (p.length < 8) { showAuthErr('密码至少 8 位'); return; }
   showAuthErr('');
   try {
-    var data = await api('POST', '/auth/register', { username: u, password: p });
+    var data = await api('POST', '/auth/register', { username: u, password: p, invite_code: ic });
     saveToken(data.access_token);
     authUser = data.user || null;
     document.getElementById('regPass').value = '';
     document.getElementById('regPass2').value = '';
+    document.getElementById('regInviteCode').value = '';
     if (authUser) {
       try { var s = await api('GET', '/user/settings'); applyTheme(s.theme_color); } catch(e) {}
     }

@@ -2,6 +2,8 @@
 pages.admin = async function() {
   var h = '<div class="card mb24"><div class="card-t"><i class="fa-solid fa-user-gear"></i> 用户管理 <span class="api-t api-g" style="margin-left:auto">GET/PUT/DELETE /auth/admin/users</span></div>';
   h += '<div id="adminInner" style="font-size:13px">加载中…</div></div>';
+  h += '<div class="card mb24"><div class="card-t"><i class="fa-solid fa-ticket"></i> 邀请码管理 <span class="api-t api-g" style="margin-left:auto">GET/POST /auth/admin/invite-codes</span></div>';
+  h += '<div id="inviteInner" style="font-size:13px">加载中…</div></div>';
   return h;
 };
 
@@ -59,6 +61,7 @@ async function loadAdminPage() {
     h += '</tbody></table></div>';
 
     inner.innerHTML = h;
+    setTimeout(function() { loadInviteCodesPage(); }, 20);
   } catch (e) {
     inner.innerHTML = '<div class="err-box">加载失败：' + esc(e.message) + '</div>';
   }
@@ -196,5 +199,140 @@ function adminCloseModal() {
     overlay.style.opacity = '0';
     overlay.style.pointerEvents = 'none';
     setTimeout(function() { if (overlay && overlay.parentNode) overlay.parentNode.removeChild(overlay); }, 300);
+  }
+}
+
+/* ===== 邀请码管理 ===== */
+async function loadInviteCodesPage() {
+  var inner = document.getElementById('inviteInner');
+  if (!inner) return;
+  try {
+    var data = await api('GET', '/auth/admin/invite-codes');
+    var codes = data.invite_codes || [];
+    
+    var unused = codes.filter(function(c){ return !c.used_by && c.is_active; }).length;
+    var used = codes.filter(function(c){ return c.used_by; }).length;
+    var disabled = codes.filter(function(c){ return !c.used_by && !c.is_active; }).length;
+
+    var h = '';
+    // 汇总栏
+    h += '<div style="display:flex;gap:12px;margin-bottom:12px;flex-wrap:wrap">';
+    h += '<div class="stat-chip"><span class="stat-num">' + codes.length + '</span> 总计</div>';
+    h += '<div class="stat-chip" style="border-color:rgba(0,229,160,.3)"><span class="stat-num" style="color:#00E5A0">' + unused + '</span> 未使用</div>';
+    h += '<div class="stat-chip" style="border-color:rgba(167,139,250,.3)"><span class="stat-num" style="color:#A78BFA">' + used + '</span> 已使用</div>';
+    h += '<div class="stat-chip" style="border-color:rgba(109,113,128,.3)"><span class="stat-num" style="color:#6d7180">' + disabled + '</span> 已停用</div>';
+    h += '<button type="button" class="btn bp" style="margin-left:auto;font-size:11px" onclick="inviteOpenGenModal()"><i class="fa-solid fa-plus"></i> 生成邀请码</button>';
+    h += '</div>';
+
+    if (!codes.length) {
+      h += '<div style="text-align:center;padding:28px;color:var(--text-muted)"><i class="fa-solid fa-ticket" style="font-size:24px;margin-bottom:8px;display:block;opacity:.3"></i>暂无邀请码，点击「生成邀请码」创建</div>';
+    } else {
+      h += '<div style="overflow-x:auto">';
+      h += '<table class="admin-tbl" style="width:100%;border-collapse:collapse;font-size:12px">';
+      h += '<thead><tr style="background:rgba(255,255,255,.03);text-align:left">';
+      h += '<th style="padding:10px 12px;border-bottom:1px solid var(--border);color:#6e768a;font-weight:500">邀请码</th>';
+      h += '<th style="padding:10px 12px;border-bottom:1px solid var(--border);color:#6e768a;font-weight:500">状态</th>';
+      h += '<th style="padding:10px 12px;border-bottom:1px solid var(--border);color:#6e768a;font-weight:500">创建人</th>';
+      h += '<th style="padding:10px 12px;border-bottom:1px solid var(--border);color:#6e768a;font-weight:500">创建时间</th>';
+      h += '<th style="padding:10px 12px;border-bottom:1px solid var(--border);color:#6e768a;font-weight:500">过期时间</th>';
+      h += '<th style="padding:10px 12px;border-bottom:1px solid var(--border);color:#6e768a;font-weight:500">操作</th>';
+      h += '</tr></thead><tbody>';
+
+      for (var i = 0; i < codes.length; i++) {
+        var c = codes[i];
+        var isUsed = !!c.used_by;
+        var isActive = !!c.is_active;
+        var statusLabel = isUsed ? '已使用' : (isActive ? '未使用' : '已停用');
+        var statusBadge = isUsed ? 'bdg-p' : (isActive ? 'bdg-g' : 'bdg-d');
+        var rowBg = i % 2 === 0 ? 'transparent' : 'rgba(255,255,255,.015)';
+        var expiresLabel = c.expires_at ? c.expires_at.substring(0, 19) : '永不过期';
+        var usedByText = isUsed ? ' · ' + esc(c.used_by_username || '') : '';
+        
+        h += '<tr style="background:' + rowBg + '">';
+        h += '<td style="padding:10px 12px;border-bottom:1px solid var(--border-light)"><code style="font-size:11px;color:var(--accent);cursor:pointer" onclick="navigator.clipboard.writeText(\'' + esc(c.code) + '\');toast(\'已复制\',\'fa-copy\',\'#00E5A0\')" title="点击复制">' + esc(c.code) + '</code></td>';
+        h += '<td style="padding:10px 12px;border-bottom:1px solid var(--border-light)"><span class="badge ' + statusBadge + '">' + statusLabel + usedByText + '</span></td>';
+        h += '<td style="padding:10px 12px;border-bottom:1px solid var(--border-light);color:#6e768a">' + esc(c.created_by_username || 'CLI') + '</td>';
+        h += '<td style="padding:10px 12px;border-bottom:1px solid var(--border-light);color:#6e768a">' + (c.created_at || '-') + '</td>';
+        h += '<td style="padding:10px 12px;border-bottom:1px solid var(--border-light);color:#6e768a">' + expiresLabel + '</td>';
+        h += '<td style="padding:10px 12px;border-bottom:1px solid var(--border-light)">';
+        h += '<div style="display:flex;gap:6px;flex-wrap:wrap">';
+        if (!isUsed) {
+          h += '<button type="button" class="btn bdr" style="font-size:10px;padding:3px 10px" onclick="inviteDoToggle(' + c.id + ')"><i class="fa-solid fa-' + (isActive ? 'ban' : 'check') + '"></i> ' + (isActive ? '停用' : '启停') + '</button>';
+          h += '<button type="button" class="btn bdr" style="font-size:10px;padding:3px 10px;color:#FF6B81;border-color:rgba(255,107,129,.2)" onclick="inviteDoDelete(' + c.id + ')"><i class="fa-solid fa-trash-can"></i> 删除</button>';
+        }
+        h += '</div></td></tr>';
+      }
+      h += '</tbody></table></div>';
+    }
+
+    inner.innerHTML = h;
+  } catch (e) {
+    inner.innerHTML = '<div class="err-box">加载失败：' + esc(e.message) + '</div>';
+  }
+}
+
+function inviteOpenGenModal() {
+  var overlay = document.getElementById('adminModalOverlay');
+  if (!overlay) {
+    overlay = document.createElement('div');
+    overlay.id = 'adminModalOverlay';
+    overlay.style.cssText = 'position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.55);backdrop-filter:blur(6px);opacity:0;transition:opacity .25s ease';
+    overlay.onclick = function(e) { if (e.target === overlay) adminCloseModal(); };
+    document.body.appendChild(overlay);
+  }
+  overlay.innerHTML = '<div class="card" style="width:420px;max-width:90vw;animation:fadeIn .25s ease" onclick="event.stopPropagation()">' +
+    '<div class="card-t" style="border:none;padding-bottom:6px"><i class="fa-solid fa-ticket"></i> 生成邀请码</div>' +
+    '<div style="padding:4px 0 16px">' +
+    '<div class="auth-field mb12"><label class="auth-lbl">数量</label><input class="inp" id="inviteGenCount" type="number" min="1" max="100" value="1" style="font-size:12px"></div>' +
+    '<div class="auth-field mb12"><label class="auth-lbl">前缀（可选）</label><input class="inp" id="inviteGenPrefix" type="text" maxlength="8" placeholder="如：VIP" style="font-size:12px"></div>' +
+    '<div class="auth-field mb12"><label class="auth-lbl">有效期（天，0=永不过期）</label><input class="inp" id="inviteGenExpire" type="number" min="0" value="0" style="font-size:12px"></div>' +
+    '<div id="inviteGenErr" style="color:#FF6B81;font-size:11px;margin-bottom:10px;display:none"></div>' +
+    '<div style="display:flex;gap:8px;justify-content:flex-end">' +
+    '<button type="button" class="btn" onclick="adminCloseModal()">取消</button>' +
+    '<button type="button" class="btn bp" onclick="inviteDoGenerate()"><i class="fa-solid fa-wand-magic-sparkles"></i> 生成</button>' +
+    '</div></div></div>';
+  overlay.style.opacity = '1';
+  overlay.style.pointerEvents = 'auto';
+}
+
+async function inviteDoGenerate() {
+  var count = parseInt(document.getElementById('inviteGenCount').value) || 1;
+  var prefix = document.getElementById('inviteGenPrefix').value.trim();
+  var expire = parseInt(document.getElementById('inviteGenExpire').value) || 0;
+  var errEl = document.getElementById('inviteGenErr');
+  if (count < 1 || count > 100) { errEl.textContent = '数量 1-100'; errEl.style.display = ''; return; }
+  errEl.style.display = 'none';
+  try {
+    var body = { count: count };
+    if (prefix) body.prefix = prefix;
+    if (expire > 0) body.expires_in_days = expire;
+    var res = await api('POST', '/auth/admin/invite-codes', body);
+    toast('已生成 ' + res.count + ' 个邀请码', 'fa-check-circle', '#00E5A0');
+    adminCloseModal();
+    loadInviteCodesPage();
+  } catch (e) {
+    errEl.textContent = e.message;
+    errEl.style.display = '';
+  }
+}
+
+async function inviteDoToggle(cid) {
+  try {
+    var res = await api('PUT', '/auth/admin/invite-codes/' + cid + '/toggle');
+    toast(res.is_active ? '已启停' : '已停用', 'fa-check-circle', '#00E5A0');
+    loadInviteCodesPage();
+  } catch (e) {
+    toast(e.message, 'fa-exclamation-circle', '#FF6B81');
+  }
+}
+
+async function inviteDoDelete(cid) {
+  if (!confirm('确定要删除这个邀请码吗？\n已使用的码无法删除。')) return;
+  try {
+    await api('DELETE', '/auth/admin/invite-codes/' + cid);
+    toast('已删除', 'fa-check-circle', '#00E5A0');
+    loadInviteCodesPage();
+  } catch (e) {
+    toast(e.message, 'fa-exclamation-circle', '#FF6B81');
   }
 }
