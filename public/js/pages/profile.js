@@ -136,12 +136,13 @@ async function loadProfilePage() {
     h += '<div class="auth-field mb12"><label class="auth-lbl">主模型 API Key（SK）</label>';
     h += '<input class="inp" type="password" id="pf_ai_key" placeholder="'+(s.ai_api_key_set ? '已保存 · 留空不修改 · 当前：'+esc(s.ai_api_key_masked||'***') : '未设置，填写后保存')+'"></div>';
     h += '<div style="margin-bottom:20px"><button type="button" class="btn bdr" style="font-size:11px" onclick="document.getElementById(\'pf_ai_key\').value=\'\';saveProfileField(\'ai_api_key\',\'\')">清除主模型 Key</button></div>';
-    h += '<div style="height:1px;background:var(--border);margin:18px 0"></div>';
-    h += '<div class="auth-field mb12"><label class="auth-lbl">Agent · Anthropic Base URL（可选）</label><input class="inp" id="pf_ant_base" placeholder="留空使用 .env" value="'+esc(s.anthropic_base_url||'')+'"></div>';
-    h += '<div class="auth-field mb12"><label class="auth-lbl">Agent · 模型 ID</label><input class="inp" id="pf_ant_model" placeholder="claude-sonnet-4-20250514" value="'+esc(s.anthropic_model||'')+'"></div>';
-    h += '<div class="auth-field mb12"><label class="auth-lbl">Agent · Anthropic API Key（SK）</label>';
-    h += '<input class="inp" type="password" id="pf_ant_key" placeholder="'+(s.anthropic_api_key_set ? '已保存 · 留空不修改 · '+esc(s.anthropic_api_key_masked||'***') : '未设置，可与主模型 Key 不同')+'"></div>';
-    h += '<div class="mb16"><button type="button" class="btn bdr" style="font-size:11px" onclick="document.getElementById(\'pf_ant_key\').value=\'\';saveProfileField(\'anthropic_api_key\',\'\')">清除 Agent Key</button></div>';
+    // Agent 配置暂时注释（2025-05）
+    // h += '<div style="height:1px;background:var(--border);margin:18px 0"></div>';
+    // h += '<div class="auth-field mb12"><label class="auth-lbl">Agent · Anthropic Base URL（可选）</label><input class="inp" id="pf_ant_base" placeholder="留空使用 .env" value="'+esc(s.anthropic_base_url||'')+'"></div>';
+    // h += '<div class="auth-field mb12"><label class="auth-lbl">Agent · 模型 ID</label><input class="inp" id="pf_ant_model" placeholder="claude-sonnet-4-20250514" value="'+esc(s.anthropic_model||'')+'"></div>';
+    // h += '<div class="auth-field mb12"><label class="auth-lbl">Agent · Anthropic API Key（SK）</label>';
+    // h += '<input class="inp" type="password" id="pf_ant_key" placeholder="'+(s.anthropic_api_key_set ? '已保存 · 留空不修改 · '+esc(s.anthropic_api_key_masked||'***') : '未设置，可与主模型 Key 不同')+'"></div>';
+    // h += '<div class="mb16"><button type="button" class="btn bdr" style="font-size:11px" onclick="document.getElementById(\'pf_ant_key\').value=\'\';saveProfileField(\'anthropic_api_key\',\'\')">清除 Agent Key</button></div>';
     h += '<button type="button" class="btn bp" onclick="saveProfileForm()"><i class="fa-solid fa-floppy-disk"></i> 保存配置</button>';
 
     // 主题配色选择器
@@ -326,14 +327,15 @@ async function saveProfileForm() {
       ai_api_base: apiBase,
       ai_model: apiModel
     };
-    var ab = document.getElementById('pf_ant_base');
-    var am = document.getElementById('pf_ant_model');
-    if (ab) body.anthropic_base_url = ab.value.trim();
-    if (am) body.anthropic_model = am.value.trim();
+    // Agent 配置暂时注释（2025-05）
+    // var ab = document.getElementById('pf_ant_base');
+    // var am = document.getElementById('pf_ant_model');
+    // if (ab) body.anthropic_base_url = ab.value.trim();
+    // if (am) body.anthropic_model = am.value.trim();
     var k = document.getElementById('pf_ai_key');
     if (k && k.value) body.ai_api_key = k.value;
-    var ak = document.getElementById('pf_ant_key');
-    if (ak && ak.value) body.anthropic_api_key = ak.value;
+    // var ak = document.getElementById('pf_ant_key');
+    // if (ak && ak.value) body.anthropic_api_key = ak.value;
     await putUserSettings(body);
     toast('配置已保存', 'fa-check-circle', '#00E5A0');
     await loadProfilePage();
