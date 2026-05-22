@@ -1,4 +1,4 @@
-/* ===== Dashboard Page — 天研 AI for Science ===== */
+/* ===== 科技价值分析 — 多维度评估科技价值，支撑决策与成果转化 ===== */
 
 pages.dashboard = function() {
   var h = '';

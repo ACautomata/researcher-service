@@ -1,4 +1,4 @@
-/* ===== AI Chat Page ===== */
+/* ===== 论文辅助写作 — 从内容构思到语言润色，全面辅助论文写作 ===== */
 var chatHistory = [];
 var chatStreaming = false;
 var chatEvtSource = null;

@@ -12,16 +12,16 @@ var P_GUEST = [
 ];
 var P_FULL = [
   { id: 'home', name: '首页', icon: 'fa-house', color: '#3b6df0', step: 0, desc: 'AI 驱动科研创新' },
-  { id: 'dashboard', name: '任务状态', icon: 'fa-chart-line', color: '#3b6df0', step: 0, desc: '系统任务与资源监控' },
-  { id: 'kb', name: '知识库', icon: 'fa-database', color: '#10b981', step: 0, desc: '上传文献，构建知识库' },
-  { id: 'lit', name: '文献分析', icon: 'fa-magnifying-glass-chart', color: '#f59e0b', step: 0, desc: '发现与验证研究问题' },
-  { id: 'idea', name: 'Idea 生成', icon: 'fa-lightbulb', color: '#8b5cf6', step: 0, desc: '生成评价研究创意', navBreak: '工具与扩展' },
-  { id: 'algo', name: '算法实现', icon: 'fa-code', color: '#ef4444', step: 0, desc: '代码生成与测试' },
-  { id: 'param', name: '参数优化', icon: 'fa-sliders', color: '#f97316', step: 0, desc: '参数组对比与优化' },
-  { id: 'agent', name: 'Agent 终端', icon: 'fa-terminal', color: '#06b6d4', step: 0, desc: 'Claude Agent 交互' },
-  { id: 'chat', name: 'AI 对话', icon: 'fa-comment-dots', color: '#10b981', step: 0, desc: '与 AI 直接对话' },
-  { id: 'obs', name: '笔记管理', icon: 'fa-note-sticky', color: '#8b5cf6', step: 0, desc: 'Obsidian Vault', navBreak: '账户' },
-  { id: 'profile', name: '个人配置', icon: 'fa-user-cog', color: '#64748b', step: 0, desc: 'API 密钥与偏好' },
+  { id: 'kb', name: '文献知识库', icon: 'fa-book-open', color: '#3b6df0', step: 1, desc: '自动收集、管理与构建专属领域知识库' },
+  { id: 'lit', name: '文献深度理解', icon: 'fa-magnifying-glass-chart', color: '#10b981', step: 2, desc: '深度解读文献内容，提炼关键信息与知识点' },
+  { id: 'discover', name: '研究动机发现', icon: 'fa-lightbulb', color: '#f59e0b', step: 3, desc: '挖掘研究空白与趋势，发现有价值的研究方向' },
+  { id: 'idea', name: '科学假说', icon: 'fa-flask', color: '#8b5cf6', step: 4, desc: '基于知识与数据，智能生成创新的科学假说' },
+  { id: 'algo', name: '实验设计与执行', icon: 'fa-flask-vial', color: '#ef4444', step: 5, desc: '智能设计实验方案，辅助实验执行与记录' },
+  { id: 'param', name: '结果分析与优化', icon: 'fa-chart-line', color: '#06b6d4', step: 6, desc: '分析实验结果，优化研究方法，提升科研效率' },
+  { id: 'dashboard', name: '科技价值分析', icon: 'fa-chart-pie', color: '#f97316', step: 7, desc: '多维度评估科技价值，支撑决策与成果转化' },
+  { id: 'chat', name: '论文辅助写作', icon: 'fa-file-pen', color: '#6366f1', step: 8, desc: '从内容构思到语言润色，全面辅助论文写作' },
+  { id: 'obs', name: '科研绘图', icon: 'fa-chart-diagram', color: '#ec4899', step: 9, desc: '智能生成高质量科研图表，提升表达效果' },
+  { id: 'profile', name: '个人配置', icon: 'fa-user-cog', color: '#64748b', step: 0, desc: 'API 密钥与偏好', navBreak: '账户' },
   { id: 'admin', name: '用户管理', icon: 'fa-user-gear', color: '#8b5cf6', step: 0, desc: '管理用户和权限', adminOnly: true },
   { id: 'doc', name: 'API 文档', icon: 'fa-book', color: '#64748b', step: 0, desc: '规范与接口定义' }
 ];

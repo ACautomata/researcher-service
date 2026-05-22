@@ -1,4 +1,4 @@
-/* ===== Obsidian Page ===== */
+/* ===== 科研绘图 — 智能生成高质量科研图表，提升表达效果 ===== */
 var obsCurPath = '', obsTab = 'edit', obsTreeCache = {};
 
 pages.obs = async function(){

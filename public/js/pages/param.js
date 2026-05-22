@@ -1,4 +1,4 @@
-/* ===== Param Optimization Page ===== */
+/* ===== 结果分析与优化 — 分析实验结果，优化研究方法 ===== */
 var PARAM_TASKS = [];
 var paramActiveTask = null;
 var paramChartIdx = 0;

@@ -1,4 +1,4 @@
-/* ===== KB Page: Domain-Based Knowledge Base ===== */
+/* ===== 文献知识库 — 自动收集、管理与构建专属领域知识库 ===== */
 var kbMode = 'list'; // list | domain | paper
 var kbActiveDomain = null;
 var kbActivePaper = null;

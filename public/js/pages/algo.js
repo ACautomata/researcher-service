@@ -1,4 +1,4 @@
-/* ===== Algo Page: Code Generation from Ideas ===== */
+/* ===== 实验设计与执行 — 智能设计实验方案，辅助实验执行与记录 ===== */
 var ALGO_TASKS = [];
 var algoRunningTaskIds = {}; // { aid: { taskId: string, intervalId: number } } 支持并行生成
 var algoExpandData = {};   // { aid: { algo, inter, loaded } } 缓存已加载的算法详情

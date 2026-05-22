@@ -1,4 +1,4 @@
-/* ===== Literature Page: Task-Based Problem Discovery ===== */
+/* ===== 文献深度理解 — 深度解读文献内容，提炼关键信息与知识点 ===== */
 var LIT_TASKS = [];
 var litActiveTask = null;
 var litRunningTaskIds = {}; // { tid: { taskId: string, intervalId: number } } 支持并行分析

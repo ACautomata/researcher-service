@@ -1,4 +1,4 @@
-/* ===== Idea Page ===== */
+/* ===== 科学假说 — 基于知识与数据，智能生成创新的科学假说 ===== */
 var ideaDomains = [];
 var ideaEvalFilter = 0; // domain filter, 0=all
 var ideaEvalProbFilter = 0; // problem filter, 0=all

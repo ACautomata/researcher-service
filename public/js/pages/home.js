@@ -5,7 +5,7 @@ var featureCards = [
     title:'文献知识库自动构建', desc:'自动收集、管理与构建专属领域知识库' },
   { id:'lit', icon:'fa-magnifying-glass', color:'#10b981', bg:'rgba(16,185,129,.08)',
     title:'文献深度理解', desc:'深度解读文献内容，提炼关键信息与知识点' },
-  { id:'lit', icon:'fa-lightbulb', color:'#f59e0b', bg:'rgba(245,158,11,.08)',
+  { id:'discover', icon:'fa-lightbulb', color:'#f59e0b', bg:'rgba(245,158,11,.08)',
     title:'研究动机发现', desc:'挖掘研究空白与趋势，发现有价值的研究方向' },
   { id:'idea', icon:'fa-flask', color:'#8b5cf6', bg:'rgba(139,92,246,.08)',
     title:'科学假设形成', desc:'基于知识与数据，智能生成创新的科学假说' },
