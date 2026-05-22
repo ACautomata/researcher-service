@@ -43,7 +43,7 @@ pages.tasks = function() {
   h += '<div class="flex-b mb16">';
   h += '<div style="display:flex;align-items:center;gap:8px"><span style="font-size:16px;font-weight:700;color:var(--text-bold)">任务管理中心</span><i class="fa-solid fa-circle-info" style="color:var(--text-muted);font-size:14px;cursor:help" title="集中查看和管理所有异步任务、研究流程与系统资源"></i></div>';
   h += '<div style="display:flex;gap:8px">';
-  h += '<button type="button" class="btn" onclick="toast(\'报告导出功能开发中\',\'fa-info-circle\',\'#f59e0b\')"><i class="fa-solid fa-download"></i> 导出报告</button>';
+  h += '<button type="button" class="btn" onclick="exportTasksReport()"><i class="fa-solid fa-download"></i> 导出报告</button>';
   h += '<button type="button" class="btn bp" onclick="go(\'kb\')"><i class="fa-solid fa-plus"></i> 新建任务</button>';
   h += '</div></div>';
 
@@ -614,5 +614,177 @@ function stopTasksPoll() {
   if (tasksInterval) {
     clearInterval(tasksInterval);
     tasksInterval = null;
+  }
+}
+
+/* ===== Export Report ===== */
+async function exportTasksReport() {
+  toast('正在生成报告...', 'fa-circle-info', '#3b6df0');
+
+  // Fetch fresh data
+  var results = await Promise.allSettled([
+    api('GET', '/dashboard/tasks?limit=50'),
+    api('GET', '/dashboard/usage'),
+    api('GET', '/dashboard/stats')
+  ]);
+
+  var tasks = results[0].status === 'fulfilled' ? (results[0].value.tasks || []) : [];
+  var usage = results[1].status === 'fulfilled' ? (results[1].value || {}) : null;
+  var stats = results[2].status === 'fulfilled' ? (results[2].value || {}) : null;
+
+  var usageData = (usage && usage.data) || {};
+  var usageTasks = (usage && usage.tasks) || {};
+
+  var now = new Date();
+  var dateStr = now.toLocaleDateString('zh-CN') + ' ' + now.toLocaleTimeString('zh-CN');
+
+  // Compute stats
+  var total = tasks.length;
+  var running = tasks.filter(function(t){ return t.status === 'running'; }).length;
+  var completed = tasks.filter(function(t){ return t.status === 'completed'; }).length;
+  var failed = tasks.filter(function(t){ return t.status === 'error'; }).length;
+  var pending = tasks.filter(function(t){ return t.status === 'pending'; }).length;
+
+  var statusLabels = { 'running': '运行中', 'completed': '已完成', 'error': '失败', 'pending': '待开始' };
+
+  // Build HTML report
+  var h = '<!DOCTYPE html><html lang="zh"><head><meta charset="UTF-8">';
+  h += '<title>任务管理报告 - ' + dateStr + '</title>';
+  h += '<style>';
+  h += '*{margin:0;padding:0;box-sizing:border-box}';
+  h += 'body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;color:#333;background:#f5f6fa;padding:32px}';
+  h += '.page{max-width:960px;margin:0 auto;background:#fff;border-radius:12px;padding:40px;box-shadow:0 1px 6px rgba(0,0,0,.06)}';
+  h += 'h1{font-size:22px;color:#111;margin-bottom:4px}';
+  h += '.sub{font-size:12px;color:#94a3b8;margin-bottom:28px}';
+  h += 'h2{font-size:15px;color:#333;margin:24px 0 12px;display:flex;align-items:center;gap:8px}';
+  h += '.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:8px}';
+  h += '.stat-card{padding:16px;border-radius:8px;background:#f8fafc;text-align:center;border:1px solid #e2e8f0}';
+  h += '.stat-card .num{font-size:28px;font-weight:700;font-family:"Space Grotesk",monospace}';
+  h += '.stat-card .lbl{font-size:11px;color:#94a3b8;margin-top:2px}';
+  h += '.usage-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-bottom:8px}';
+  h += '.usage-item{padding:12px;border-radius:6px;background:#f8fafc;text-align:center;border:1px solid #e2e8f0}';
+  h += '.usage-item .num{font-size:20px;font-weight:700;font-family:"Space Grotesk",monospace}';
+  h += '.usage-item .lbl{font-size:10px;color:#94a3b8;margin-top:2px}';
+  h += 'table{width:100%;border-collapse:collapse;font-size:12px;margin-top:8px}';
+  h += 'th{text-align:left;padding:8px 10px;background:#f1f5f9;color:#64748b;font-weight:600;border-bottom:2px solid #e2e8f0}';
+  h += 'td{padding:7px 10px;border-bottom:1px solid #f1f5f9;color:#333}';
+  h += 'tr:hover td{background:#fafbfc}';
+  h += '.tag{display:inline-block;padding:1px 8px;border-radius:99px;font-size:10px;font-weight:500}';
+  h += '.tag-r{background:#fef2f2;color:#ef4444}';
+  h += '.tag-g{background:#f0fdf4;color:#10b981}';
+  h += '.tag-b{background:#eff6ff;color:#3b6df0}';
+  h += '.tag-y{background:#fefce8;color:#f59e0b}';
+  h += '.sys-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:8px}';
+  h += '.sys-card{padding:14px;border-radius:8px;background:#f8fafc;text-align:center;border:1px solid #e2e8f0}';
+  h += '.sys-card .val{font-size:18px;font-weight:700;color:#333}';
+  h += '.sys-card .lbl{font-size:10px;color:#94a3b8;margin-top:2px}';
+  h += '.footer{text-align:center;font-size:10px;color:#cbd5e1;margin-top:36px;padding-top:16px;border-top:1px solid #e2e8f0}';
+  h += '@media print{body{padding:0}.page{box-shadow:none;padding:24px}}';
+  h += '</style></head><body>';
+  h += '<div class="page"><h1>📋 任务管理报告</h1>';
+  h += '<div class="sub">生成时间：' + dateStr;
+
+  // User info
+  if (authUser && authUser.username) {
+    h += ' &nbsp;|&nbsp; 用户：' + esc(authUser.username);
+  }
+  h += '</div>';
+
+  // ── Task Stats ──
+  h += '<h2>📊 任务统计</h2>';
+  h += '<div class="stats">';
+  h += '<div class="stat-card"><div class="num" style="color:#64748b">' + total + '</div><div class="lbl">总任务</div></div>';
+  h += '<div class="stat-card"><div class="num" style="color:#3b6df0">' + running + '</div><div class="lbl">运行中</div></div>';
+  h += '<div class="stat-card"><div class="num" style="color:#10b981">' + completed + '</div><div class="lbl">已完成</div></div>';
+  h += '<div class="stat-card"><div class="num" style="color:#ef4444">' + failed + '</div><div class="lbl">失败</div></div>';
+  h += '</div>';
+
+  // ── Pipeline Data ──
+  h += '<h2>🔬 流水线数据</h2>';
+  h += '<div class="usage-grid">';
+  var pipeKeys = [
+    {key:'papers', label:'文献', color:'#3b6df0'},
+    {key:'entries', label:'知识条目', color:'#10b981'},
+    {key:'problems', label:'研究问题', color:'#f59e0b'},
+    {key:'ideas', label:'科学假说', color:'#8b5cf6'},
+    {key:'algorithms', label:'算法代码', color:'#ef4444'}
+  ];
+  for (var i = 0; i < pipeKeys.length; i++) {
+    var p = pipeKeys[i];
+    h += '<div class="usage-item"><div class="num" style="color:'+p.color+'">' + ((usageData[p.key] != null) ? usageData[p.key] : 0) + '</div><div class="lbl">'+p.label+'</div></div>';
+  }
+  h += '</div>';
+
+  // ── Task List ──
+  h += '<h2>📝 任务列表</h2>';
+  if (tasks.length === 0) {
+    h += '<div style="text-align:center;padding:24px;color:#94a3b8;font-size:12px">暂无任务记录</div>';
+  } else {
+    h += '<table>';
+    h += '<tr><th>类型</th><th>状态</th><th>进度</th><th>步骤</th><th>创建时间</th><th>更新时间</th></tr>';
+    for (var i = 0; i < tasks.length; i++) {
+      var t = tasks[i];
+      var typeLabel = taskTypeLabels[t.type] || (t.type || '未知');
+      var sTag = '';
+      var tagClass = '';
+      if (t.status === 'completed') tagClass = 'tag-g';
+      else if (t.status === 'error') tagClass = 'tag-r';
+      else if (t.status === 'running') tagClass = 'tag-b';
+      else tagClass = 'tag-y';
+      sTag = '<span class="tag ' + tagClass + '">' + (statusLabels[t.status] || t.status) + '</span>';
+      var step = t.step || '-';
+      var progress = t.progress != null ? t.progress + '%' : '-';
+      var created = t.created_at ? t.created_at.substring(0, 19).replace('T', ' ') : '-';
+      var updated = t.updated_at ? t.updated_at.substring(0, 19).replace('T', ' ') : '-';
+      h += '<tr><td>' + esc(typeLabel) + '</td><td>' + sTag + '</td><td>' + progress + '</td><td>' + esc(step) + '</td><td>' + created + '</td><td>' + updated + '</td></tr>';
+    }
+    h += '</table>';
+  }
+
+  // ── System Stats ──
+  h += '<h2>💻 系统资源</h2>';
+  if (stats) {
+    var cpuPct = stats.cpu ? stats.cpu.percent : 0;
+    var memPct = stats.memory ? stats.memory.percent : 0;
+    var diskPct = stats.disk ? stats.disk.percent : 0;
+    var memStr = stats.memory ? (stats.memory.used_gb.toFixed(1) + '/' + stats.memory.total_gb.toFixed(1) + ' GB') : '-';
+    var diskStr = stats.disk ? (stats.disk.used_gb.toFixed(1) + '/' + stats.disk.total_gb.toFixed(1) + ' GB') : '-';
+    h += '<div class="sys-grid">';
+    h += '<div class="sys-card"><div class="val" style="color:' + (cpuPct > 80 ? '#ef4444' : '#3b6df0') + '">' + cpuPct + '%</div><div class="lbl">CPU</div></div>';
+    h += '<div class="sys-card"><div class="val" style="color:' + (memPct > 80 ? '#ef4444' : '#10b981') + '">' + memStr + '</div><div class="lbl">内存</div></div>';
+    h += '<div class="sys-card"><div class="val" style="color:' + (diskPct > 80 ? '#ef4444' : '#f59e0b') + '">' + diskStr + '</div><div class="lbl">磁盘</div></div>';
+    h += '</div>';
+    if (stats.gpus && stats.gpus.length > 0) {
+      h += '<div style="margin-top:8px;font-size:11px;color:#94a3b8">GPU: ';
+      for (var i = 0; i < stats.gpus.length; i++) {
+        if (i > 0) h += '&nbsp;|&nbsp;';
+        h += esc(stats.gpus[i].name) + ' (' + stats.gpus[i].utilization_percent + '%)';
+      }
+      h += '</div>';
+    }
+  } else {
+    h += '<div style="text-align:center;padding:16px;color:#94a3b8;font-size:12px">系统资源信息不可用</div>';
+  }
+
+  // Footer
+  h += '<div class="footer">AI Research Pipeline — 天研 · 自动生成报告</div>';
+  h += '</div></body></html>';
+
+  // Open in new window for print / save
+  var win = window.open('', '_blank');
+  if (win) {
+    win.document.write(h);
+    win.document.close();
+    toast('报告已打开，可使用 Ctrl+P 打印或保存为 PDF', 'fa-check-circle', '#10b981');
+  } else {
+    // Fallback: download as HTML
+    var blob = new Blob([h], { type: 'text/html;charset=utf-8' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = 'task_report_' + now.toISOString().slice(0, 10) + '.html';
+    a.click();
+    URL.revokeObjectURL(url);
+    toast('报告已下载', 'fa-check-circle', '#10b981');
   }
 }
