@@ -21,10 +21,9 @@ var featureCards = [
     title:'科研绘图工具', desc:'智能生成高质量科研图表，提升表达效果' }
 ];
 
-/* ===== Home Chat State ===== */
-var homeChatActive = false;
-var homeChatMsgs = [];
-var homeChatStreaming = false;
+/* ===== Home Search State ===== */
+var homeSearchResult = null;   /* { query, reply } or null */
+var homeSearchLoading = false;
 
 pages.home = function() {
   var isLoggedIn = !!authUser;
@@ -34,64 +33,49 @@ pages.home = function() {
   h += '<div class="hero">';
   h += '<h1 class="hero-title">智能驱动 · 科研无界</h1>';
   h += '<p class="hero-sub">从想法到发现，让 AI 与科研同行</p>';
+  h += '<form class="hero-search" onsubmit="event.preventDefault(); handleHeroSearch()">';
+  h += '<input class="inp" id="heroSearchInput" placeholder="输入问题或关键词，探索科研可能性…" value="' + esc(homeSearchResult ? homeSearchResult.query : '') + '">';
+  h += '<button type="submit" class="hero-search-btn" id="heroSearchBtn"><i class="fa-solid fa-magnifying-glass"></i> 探索</button>';
+  h += '</form>';
+  h += '</div>';
 
-  if (homeChatActive) {
-    // ── Chat Mode: input ──
-    h += '<div class="hero-search">';
-    h += '<input class="inp" id="homeChatInput" placeholder="输入问题，与 AI 科研助手对话…" onkeydown="if(event.key===\'Enter\'&&!homeChatStreaming)sendHomeChat()">';
-    h += '<button class="hero-search-btn" id="homeChatSendBtn" onclick="sendHomeChat()"><i class="fa-solid fa-paper-plane"></i> 发送</button>';
+  // ── Search Result Panel ──
+  if (homeSearchResult) {
+    h += '<div id="homeResultPanel" class="card mb16" style="padding:16px;border-left:3px solid var(--accent)">';
+    h += '<div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:10px">';
+    h += '<div style="display:flex;align-items:center;gap:8px"><i class="fa-solid fa-robot" style="color:var(--accent);font-size:16px"></i><span style="font-size:13px;font-weight:600;color:var(--text-bold)">搜索结果</span></div>';
+    h += '<button class="btn" onclick="clearHomeSearch()" style="font-size:10px;padding:4px 10px"><i class="fa-solid fa-xmark"></i> 清除</button>';
+    h += '</div>';
+    h += '<div style="display:flex;align-items:flex-start;gap:10px;margin-bottom:10px">';
+    h += '<div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:8px 12px;font-size:12px;color:var(--text-muted);flex:1"><i class="fa-solid fa-magnifying-glass" style="margin-right:6px;color:var(--accent)"></i>' + esc(homeSearchResult.query) + '</div>';
+    h += '</div>';
+    h += '<div id="homeResultBody" style="font-size:13px;line-height:1.7;color:var(--text);white-space:pre-wrap;word-break:break-word">' + esc(homeSearchResult.reply) + '</div>';
+    h += '<div style="margin-top:12px;padding-top:10px;border-top:1px solid var(--border-light);display:flex;gap:8px;flex-wrap:wrap">';
+    h += '<button class="btn" onclick="go(\'chat\')" style="font-size:11px;padding:6px 14px"><i class="fa-solid fa-comment-dots"></i> 继续对话</button>';
+    h += '<button class="btn" onclick="clearHomeSearch()" style="font-size:11px;padding:6px 14px"><i class="fa-solid fa-arrow-left"></i> 返回浏览</button>';
     h += '</div>';
     h += '</div>';
+  }
 
-    // ── Chat Messages ──
-    h += '<div id="homeChatWrap" style="padding:0 4px 16px;max-height:55vh;overflow-y:auto;scrollbar-width:thin;scrollbar-color:#464d65 transparent;display:flex;flex-direction:column;gap:4px">';
-    if (homeChatMsgs.length === 0) {
-      h += '<div id="homeChatEmpty" style="flex:1;display:flex;align-items:center;justify-content:center;color:var(--text-muted);font-size:13px;min-height:200px">';
-      h += '<div style="text-align:center;max-width:400px">';
-      h += '<i class="fa-solid fa-robot" style="font-size:36px;display:block;margin-bottom:12px;opacity:.15"></i>';
-      h += '<p style="font-weight:600;margin-bottom:8px">开始与 AI 科研助手对话</p>';
-      h += '<p style="font-size:11px;line-height:1.6">提出你的科研问题，AI 助手将为你提供专业解答与建议。</p>';
-      h += '</div></div>';
-    } else {
-      for (var i = 0; i < homeChatMsgs.length; i++) {
-        h += renderHomeChatMsg(homeChatMsgs[i].role, homeChatMsgs[i].content);
-      }
-    }
+  // ── Feature Cards Grid ──
+  h += '<div class="feature-grid">';
+  for (var i = 0; i < featureCards.length; i++) {
+    var fc = featureCards[i];
+    h += '<div class="feature-card" onclick="handleFeatureClick(\''+fc.id+'\')" style="cursor:pointer">';
+    h += '<div class="fc-icon" style="background:'+fc.bg+';color:'+fc.color+'"><i class="fa-solid '+fc.icon+'"></i></div>';
+    h += '<div class="fc-body">';
+    h += '<div class="fc-title">'+fc.title+'</div>';
+    h += '<div class="fc-desc">'+fc.desc+'</div>';
+    h += '</div></div>';
+  }
+  h += '</div>';
+
+  // ── CTA (Guest only) ──
+  if (!isLoggedIn) {
+    h += '<div style="text-align:center;padding:16px 0 32px">';
+    h += '<button type="button" onclick="openAccountPanel()" style="padding:12px 36px;border-radius:8px;border:none;background:var(--accent-gradient);color:#fff;font-size:14px;font-weight:700;cursor:pointer;display:inline-flex;align-items:center;gap:8px;transition:transform .15s,box-shadow .15s;font-family:inherit" onmouseover="this.style.transform=\'translateY(-1px)\';this.style.boxShadow=\'0 4px 12px rgba(var(--accent-rgb),.3)\'" onmouseout="this.style.transform=\'\';this.style.boxShadow=\'none\'"><i class="fa-solid fa-right-to-bracket"></i> 开始使用</button>';
+    h += '<p style="font-size:11px;color:var(--text-muted);margin-top:10px">登录后解锁全部科研工具</p>';
     h += '</div>';
-
-    // ── Back Button ──
-    h += '<div style="text-align:center;padding:0 0 16px">';
-    h += '<button class="btn" onclick="closeHomeChat()" style="font-size:12px;padding:7px 18px"><i class="fa-solid fa-arrow-left"></i> 返回功能卡片</button>';
-    h += '</div>';
-
-  } else {
-    // ── Search Mode ──
-    h += '<form class="hero-search" onsubmit="event.preventDefault(); handleHeroSearch()">';
-    h += '<input class="inp" id="heroSearchInput" placeholder="输入问题或关键词，探索科研可能性…">';
-    h += '<button type="submit" class="hero-search-btn"><i class="fa-solid fa-magnifying-glass"></i> 探索</button>';
-    h += '</form>';
-    h += '</div>';
-
-    // ── Feature Cards Grid ──
-    h += '<div class="feature-grid">';
-    for (var i = 0; i < featureCards.length; i++) {
-      var fc = featureCards[i];
-      h += '<div class="feature-card" onclick="handleFeatureClick(\''+fc.id+'\')" style="cursor:pointer">';
-      h += '<div class="fc-icon" style="background:'+fc.bg+';color:'+fc.color+'"><i class="fa-solid '+fc.icon+'"></i></div>';
-      h += '<div class="fc-body">';
-      h += '<div class="fc-title">'+fc.title+'</div>';
-      h += '<div class="fc-desc">'+fc.desc+'</div>';
-      h += '</div></div>';
-    }
-    h += '</div>';
-
-    // ── CTA (Guest only) ──
-    if (!isLoggedIn) {
-      h += '<div style="text-align:center;padding:16px 0 32px">';
-      h += '<button type="button" onclick="openAccountPanel()" style="padding:12px 36px;border-radius:8px;border:none;background:var(--accent-gradient);color:#fff;font-size:14px;font-weight:700;cursor:pointer;display:inline-flex;align-items:center;gap:8px;transition:transform .15s,box-shadow .15s;font-family:inherit" onmouseover="this.style.transform=\'translateY(-1px)\';this.style.boxShadow=\'0 4px 12px rgba(var(--accent-rgb),.3)\'" onmouseout="this.style.transform=\'\';this.style.boxShadow=\'none\'"><i class="fa-solid fa-right-to-bracket"></i> 开始使用</button>';
-      h += '<p style="font-size:11px;color:var(--text-muted);margin-top:10px">登录后解锁全部科研工具</p>';
-      h += '</div>';
-    }
   }
 
   return h;
@@ -115,41 +99,57 @@ function handleHeroSearch() {
     toast('请先登录后再探索', 'fa-info-circle', '#f59e0b');
     return;
   }
+  if (homeSearchLoading) return;
 
-  // Switch to chat mode
-  homeChatActive = true;
-  homeChatMsgs = [];
+  homeSearchLoading = true;
+  var btn = document.getElementById('heroSearchBtn');
+  if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> 搜索中'; }
 
+  // Show loading state immediately
+  homeSearchResult = { query: val, reply: '正在搜索…' };
   var ctn = document.getElementById('ctnEl');
-  if (!ctn) return;
-  pages.home().then(function(html) {
-    ctn.innerHTML = html;
-    // Send the query after DOM is ready
-    setTimeout(function() {
-      sendHomeChatMessage(val);
-    }, 50);
-  });
+  if (ctn) {
+    pages.home().then(function(html) {
+      ctn.innerHTML = html;
+      doSearch(val);
+    });
+  } else {
+    doSearch(val);
+  }
 }
 
-/* ── Home Chat: Render Message ── */
-function renderHomeChatMsg(role, content) {
-  var isUser = role === 'user';
-  var align = isUser ? 'flex-end' : 'flex-start';
-  var bg = isUser ? 'rgba(59,109,240,.08)' : 'var(--bg)';
-  var border = isUser ? 'rgba(59,109,240,.15)' : 'var(--border)';
-  var name = isUser ? '你' : 'AI 科研助手';
-  var ic = isUser ? 'fa-user' : 'fa-robot';
+async function doSearch(query) {
+  try {
+    var res = await api('POST', '/chat/send', {message: '请简要回答以下科研相关问题：' + query});
+    var reply = res.response || '(无回复)';
+    homeSearchResult = { query: query, reply: reply };
+  } catch (e) {
+    homeSearchResult = { query: query, reply: '抱歉，搜索服务暂时不可用。请稍后重试或前往「论文辅助写作」页面直接提问。' };
+  }
 
-  var h = '<div style="display:flex;flex-direction:column;align-items:' + align + ';max-width:85%;margin-bottom:10px">';
-  h += '<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;font-size:11px;color:var(--text-muted);font-weight:600"><i class="fa-solid ' + ic + '"></i> ' + name + '</div>';
-  h += '<div style="background:' + bg + ';border:1px solid ' + border + ';border-radius:12px;padding:12px 16px;font-size:13px;line-height:1.7;color:var(--text);word-break:break-word;white-space:pre-wrap">' + esc(content) + '</div>';
-  h += '</div>';
-  return h;
+  homeSearchLoading = false;
+  var btn = document.getElementById('heroSearchBtn');
+  if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-magnifying-glass"></i> 探索'; }
+
+  // Update result panel body in-place
+  var body = document.getElementById('homeResultBody');
+  if (body) {
+    body.textContent = homeSearchResult.reply;
+  } else {
+    // Re-render if panel was removed (edge case)
+    var ctn = document.getElementById('ctnEl');
+    if (ctn) pages.home().then(function(html) { ctn.innerHTML = html; });
+  }
 }
 
-/* ── Home Chat: Send Message (internal, called after UI is ready) ── */
-async function sendHomeChatMessage(text) {
-  homeChatMsgs.push({role: 'user', content: text});
+function clearHomeSearch() {
+  homeSearchResult = null;
+  homeSearchLoading = false;
+  var ctn = document.getElementById('ctnEl');
+  if (ctn && pages.home) {
+    pages.home().then(function(html) { ctn.innerHTML = html; });
+  }
+}
   homeChatStreaming = true;
 
   var wrap = document.getElementById('homeChatWrap');

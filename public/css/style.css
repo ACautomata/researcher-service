@@ -1431,6 +1431,19 @@ details[open] summary { margin-bottom: 4px; }
   background: rgba(255,255,255,.02);
 }
 
+.dark-theme .api-row:hover { background: rgba(255,255,255,.02); }
+
+.dark-theme .li-item {
+  background: var(--card-bg);
+}
+
+.dark-theme .li-item:hover {
+  background: rgba(255,255,255,.02);
+}
+
+.dark-theme ::selection {
+  background: rgba(59,109,240,.25);
+}
 .dark-theme .li-item {
   background: var(--card-bg);
 }
