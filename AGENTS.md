@@ -65,9 +65,11 @@ public/js/pages/lit.js        — literature (auto-discover, search, validate, c
 public/js/pages/idea.js       — idea generation & scoring
 public/js/pages/algo.js       — algorithm generation, test, optimize
 public/js/pages/param.js      — parameter optimization/suggestion
-public/js/pages/agent.js      — Claude Agent console (SSE streaming)
-public/js/pages/chat.js       — direct AI chat interface (SSE streaming)
-public/js/pages/obs.js        — Obsidian vault (tree, editor, graph, search)
+public/js/pages/discover.js   — research motivation discovery (problem browser, severity filter)
+public/js/pages/chat.js       — paper writing assistant (section selector, writing templates, AI chat)
+public/js/pages/obs.js        — scientific chart generator (AI Smart Generate, Data Viz, Code Editor)
+public/js/pages/dashboard.js  — scientific value analysis (Idea quality, problem validation, algo perf, pipeline funnel)
+public/js/pages/tasks.js      — task management hub (3 tabs: Pipeline/Center/System, polling)
 public/js/pages/doc.js        — API documentation page
 public/js/pages/admin.js      — admin user management (list users, reset passwords, change roles, delete)
 public/js/app.js              — event listeners + bootstrap() call
@@ -84,7 +86,7 @@ Each step depends on data produced by the previous step. The frontend enforces t
 
 Lit analysis supports 3 depths: **quick** (single-KB scan), **deep** (thorough single-KB), **cross** (dual-KB cross-reference, requires 2 domain selections). Analysis history is persisted to the `lit_analyses` table and survives page refresh.
 
-Agent, Chat, Obsidian, and Dashboard are supplementary tools outside the main pipeline.
+Chat (论文辅助写作), Obs (科研绘图), Dashboard (科技价值分析), and Tasks (任务管理) are supplementary tools outside the main pipeline.
 
 ## API pattern
 
@@ -155,19 +157,21 @@ Every core pipeline table has a `user_id INTEGER DEFAULT NULL` column. The `serv
 - **Database is auto-created** in `lifespan` on startup via `init_db()`. SQLite WAL mode is not explicitly enabled.
 - **File encoding:** The plain-text parser tries `utf-8`, `gbk`, `gb2312`, `latin-1` in that order (relevant for Chinese-language papers).
 - **Uploaded filenames** are prefixed with a UUID fragment (`uuid4().hex[:12]_`).
-- **Obsidian vault** requires `OBSIDIAN_VAULT_PATH` in `.env`; all vault endpoints return 400 if not configured.
+- **Obsidian vault** requires `OBSIDIAN_VAULT_PATH` in `.env`; all vault endpoints return 400 if not configured. Obsidian backend routes are retained but the frontend page (科研绘图) no longer uses them.
+- **Chart generation** uses the `/chat/send` AI endpoint to generate ECharts HTML. The AI response is parsed for code blocks and rendered in a sandboxed iframe.
+- **Dashboard → Tasks migration** in progress: all task management, workflow visualization, and system resource monitoring moved from dashboard.js to tasks.js. Dashboard.js now serves as a scientific value analysis page.
 - **Agent SDK** runs synchronously in a `threading.Thread` (Windows) or subprocess (Linux/macOS), feeding events into an `asyncio.Queue` for SSE streaming.
 - **ContextVar does not propagate to background tasks.** `asyncio.create_task()` coroutines run outside the request context. Always capture `uid` from `current_user_id()` at request time and pass it as a function argument to background coroutines.
 - **Windows process management:** `uvicorn.run(reload=True)` has known issues with stale bytecode on Windows. If the server doesn't reflect code changes, clear `__pycache__` and restart. Use `powershell "Get-Process python* | Stop-Process -Force"` to kill orphaned server processes that `git-bash kill` can't terminate.
 
 ## Frontend notes
 
-- Frontend split across 15 files: thin `index.html` + `css/style.css` + `js/core.js` + 12 page JS files + `js/app.js`. No framework, no npm, no bundler.
+- Frontend split across 16 files: thin `index.html` + `css/style.css` + `js/core.js` + 13 page JS files + `js/app.js`. No framework, no npm, no bundler.
 - `main.py` mounts `StaticFiles` at `/` (root) to serve everything under `public/`. API routes take precedence.
 - JS files share global scope — they are loaded in order: core → pages → app.
 - API base = `/api/v1` (hardcoded JS var).
 - Drag-and-drop upload supported on the KB page.
 - All pages share a `cache` object populated by `loadPapers()`, `loadKeywords()`, `loadProblems()`, `loadIdeas()`, `loadAlgos()`.
-- Nav pages: kb, lit, idea, algo, agent, chat, obs, dashboard. Inline doc page via `doc.js`; admin page via `admin.js` (only visible to admin users via `adminOnly` flag).
+- Nav pages (P_FULL): home, kb, lit, discover, idea, algo, param, dashboard, chat, obs, tasks, profile, doc, admin. Agent page was removed during the nine-task redesign. discover.js is "研究动机发现", tasks.js task management hub replaces old dashboard task views.
 - KB stats card "含文献" counts total papers across all domains (sum of paper_count), not domain count.
 - Lit page fetches analysis history from `GET /lit/history` on each navigation; new tasks are POSTed and status updates PUT to the backend.
