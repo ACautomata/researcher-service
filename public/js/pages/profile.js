@@ -4,31 +4,31 @@ var AI_PROVIDERS = [
     id: 'deepseek',
     name: 'DeepSeek',
     base_url: 'https://api.deepseek.com',
-    models: ['deepseek-chat', 'deepseek-reasoner', 'deepseek-v3', 'deepseek-r1']
+    models: ['deepseek-chat', 'deepseek-reasoner', 'deepseek-v4-flash', 'deepseek-v4-pro']
   },
   {
     id: 'zhipu',
     name: '智谱 GLM',
     base_url: 'https://open.bigmodel.cn/api/paas/v4',
-    models: ['glm-4', 'glm-4-flash', 'glm-4v', 'glm-4-plus']
+    models: ['GLM-5.1', 'GLM-5', 'GLM-4.7-Flash', 'GLM-4-Long', 'GLM-4-Flash']
   },
   {
     id: 'openai',
     name: 'OpenAI',
     base_url: 'https://api.openai.com/v1',
-    models: ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo', 'o1', 'o3-mini']
+    models: ['gpt-5.5', 'gpt-5.5-pro', 'gpt-5.4-mini', 'gpt-4.1', 'gpt-4.1-mini', 'o4-mini']
   },
   {
     id: 'qwen',
     name: '通义千问 (Qwen)',
     base_url: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-    models: ['qwen-turbo', 'qwen-plus', 'qwen-max', 'qwen-max-longcontext']
+    models: ['qwen3.7-max', 'qwen3.6-plus', 'qwen3.6-flash', 'qwen-max', 'qwen-plus']
   },
   {
     id: 'moonshot',
     name: 'Moonshot (Kimi)',
     base_url: 'https://api.moonshot.cn/v1',
-    models: ['moonshot-v1-8k', 'moonshot-v1-32k', 'moonshot-v1-128k']
+    models: ['kimi-k2.6', 'kimi-k2.5', 'kimi-k2-thinking', 'moonshot-v1-128k', 'moonshot-v1-32k', 'moonshot-v1-8k']
   },
   {
     id: 'custom',
