@@ -171,7 +171,7 @@ function buildNav(){
     var p=items[i], act=cur===p.id;
     if (p.navBreak) h+='<div class="sb-div"></div><div class="sb-sec">'+p.navBreak+'</div>';
     h+='<button class="sb-btn'+(act?' on':'')+'" onclick="go(\''+p.id+'\')">';
-    h+='<span class="sb-ico" style="background:'+(act?'rgba(59,109,240,.15)':'rgba(255,255,255,.04)')+';color:'+(act?'#e2e8f0':p.color)+'"><i class="fa-solid '+p.icon+'"></i></span>';
+    h+='<span class="sb-ico"><i class="fa-solid '+p.icon+'"></i></span>';
     h+='<span class="sb-lb">'+p.name+'<small>'+p.desc+'</small></span>';
     if(p.step) h+='<span class="sb-sn" style="'+(act?'background:var(--accent);color:#fff':'')+'">'+p.step+'</span>';
     h+='</button>';
@@ -179,11 +179,11 @@ function buildNav(){
   h+='</div><div class="sb-ft">';
   h+='<span class="sb-dot"></span>';
   if (authUser && authUser.username) {
-    h+='<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:10px" title="'+esc(authUser.username)+'">'+esc(authUser.username)+'</span>';
-    h+='<button type="button" class="btn bp" style="padding:3px 10px;font-size:10px;flex-shrink:0" onclick="doLogout()"><i class="fa-solid fa-right-from-bracket"></i></button>';
+    h+='<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+esc(authUser.username)+'">'+esc(authUser.username)+'</span>';
+    h+='<button type="button" class="btn bp" style="padding:4px 10px;font-size:11px;flex-shrink:0" onclick="doLogout()"><i class="fa-solid fa-right-from-bracket"></i></button>';
   } else {
-    h+='<span style="flex:1;font-size:10px">天津大学</span>';
-    h+='<button type="button" class="btn bp" style="padding:3px 10px;font-size:10px;flex-shrink:0" onclick="openAccountPanel()"><i class="fa-solid fa-user"></i></button>';
+    h+='<span style="flex:1">天津大学</span>';
+    h+='<button type="button" class="btn bp" style="padding:4px 10px;font-size:11px;flex-shrink:0" onclick="openAccountPanel()"><i class="fa-solid fa-user"></i></button>';
   }
   h+='</div>';
   document.getElementById('sideEl').innerHTML=h;
