@@ -31,7 +31,7 @@ pages.dashboard = function() {
     {n:6, icon:'fa-chart-line', color:'#06b6d4', bg:'#cffafe', title:'结果分析与优化', desc:'优化研究方法' },
     {n:7, icon:'fa-chart-pie', color:'#f97316', bg:'#ffedd5', title:'科技价值分析', desc:'多维评估价值' },
     {n:8, icon:'fa-file-pen', color:'#6366f1', bg:'#e0e7ff', title:'论文辅助写作', desc:'内容到润色' },
-    {n:9, icon:'fa-chart-diagram', color:'#ec4899', bg:'#fce7f3', title:'科研绘图', desc:'生成高质量图表' }
+    {n:9, icon:'fa-diagram-project', color:'#ec4899', bg:'#fce7f3', title:'科研绘图', desc:'生成高质量图表' }
   ];
   for (var i = 0; i < steps.length; i++) {
     var s = steps[i];

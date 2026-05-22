@@ -20,7 +20,8 @@ var P_FULL = [
   { id: 'param', name: '结果分析与优化', icon: 'fa-chart-line', color: '#06b6d4', step: 6, desc: '分析实验结果，优化研究方法，提升科研效率' },
   { id: 'dashboard', name: '科技价值分析', icon: 'fa-chart-pie', color: '#f97316', step: 7, desc: '多维度评估科技价值，支撑决策与成果转化' },
   { id: 'chat', name: '论文辅助写作', icon: 'fa-file-pen', color: '#6366f1', step: 8, desc: '从内容构思到语言润色，全面辅助论文写作' },
-  { id: 'obs', name: '科研绘图', icon: 'fa-chart-diagram', color: '#ec4899', step: 9, desc: '智能生成高质量科研图表，提升表达效果' },
+  { id: 'obs', name: '科研绘图', icon: 'fa-diagram-project', color: '#ec4899', step: 9, desc: '智能生成高质量科研图表，提升表达效果' },
+  { id: 'tasks', name: '任务管理', icon: 'fa-list-check', color: '#64748b', step: 0, desc: '集中查看和管理所有异步任务', navBreak: '工具' },
   { id: 'profile', name: '个人配置', icon: 'fa-user-cog', color: '#64748b', step: 0, desc: 'API 密钥与偏好', navBreak: '账户' },
   { id: 'admin', name: '用户管理', icon: 'fa-user-gear', color: '#8b5cf6', step: 0, desc: '管理用户和权限', adminOnly: true },
   { id: 'doc', name: 'API 文档', icon: 'fa-book', color: '#64748b', step: 0, desc: '规范与接口定义' }
@@ -166,7 +167,7 @@ function buildNav(){
   }
   sideEl.style.display = '';
   var items = navPages();
-  var h='<div class="sb-head"><div class="sb-logo"><i class="fa-solid fa-hexagon-nodes"></i></div><div><div class="sb-name">天研</div><div class="sb-sub">AI for Science</div></div></div><div class="sb-nav">';
+  var h='<div class="sb-head"><div class="sb-logo"><i class="fa-solid fa-cubes"></i></div><div><div class="sb-name">天研</div><div class="sb-sub">AI for Science</div></div></div><div class="sb-nav">';
   for(var i=0;i<items.length;i++){
     var p=items[i], act=cur===p.id;
     if (p.navBreak) h+='<div class="sb-div"></div><div class="sb-sec">'+p.navBreak+'</div>';

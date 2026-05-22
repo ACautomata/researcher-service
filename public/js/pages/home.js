@@ -17,7 +17,7 @@ var featureCards = [
     title:'科技价值分析与评估', desc:'多维度评估科技价值，支撑决策与成果转化' },
   { id:'chat', icon:'fa-file-pen', color:'#6366f1', bg:'rgba(99,102,241,.08)',
     title:'论文辅助写作工具', desc:'从内容构思到语言润色，全面辅助论文写作' },
-  { id:'obs', icon:'fa-chart-diagram', color:'#ec4899', bg:'rgba(236,72,153,.08)',
+  { id:'obs', icon:'fa-diagram-project', color:'#ec4899', bg:'rgba(236,72,153,.08)',
     title:'科研绘图工具', desc:'智能生成高质量科研图表，提升表达效果' }
 ];
 
