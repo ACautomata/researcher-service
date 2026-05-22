@@ -254,7 +254,7 @@ async function buildContent(){
     }
   }
   if(cur==='kb') setTimeout(setupDrag, 60);
-  if(cur==='obs') setTimeout(function(){ loadObsTree(''); loadObsStats(); }, 100);
+  if(cur==='obs') setTimeout(function(){ initChartPage(); }, 50);
   if(cur==='profile') setTimeout(function(){ loadProfilePage(); }, 50);
   if(cur==='admin') setTimeout(function(){ loadAdminPage(); }, 50);
   if(cur==='dashboard') { setTimeout(function(){ loadValueAnalysis(); }, 50); }
