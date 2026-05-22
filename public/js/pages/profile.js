@@ -136,7 +136,7 @@ async function loadProfilePage() {
     h += '<div class="auth-field mb12"><label class="auth-lbl">主模型 API Key（SK）</label>';
     h += '<input class="inp" type="password" id="pf_ai_key" placeholder="'+(s.ai_api_key_set ? '已保存 · 留空不修改 · 当前：'+esc(s.ai_api_key_masked||'***') : '未设置，填写后保存')+'"></div>';
     h += '<div style="margin-bottom:20px"><button type="button" class="btn bdr" style="font-size:11px" onclick="document.getElementById(\'pf_ai_key\').value=\'\';saveProfileField(\'ai_api_key\',\'\')">清除主模型 Key</button></div>';
-    h += '<div style="height:1px;background:rgba(255,255,255,.06);margin:18px 0"></div>';
+    h += '<div style="height:1px;background:var(--border);margin:18px 0"></div>';
     h += '<div class="auth-field mb12"><label class="auth-lbl">Agent · Anthropic Base URL（可选）</label><input class="inp" id="pf_ant_base" placeholder="留空使用 .env" value="'+esc(s.anthropic_base_url||'')+'"></div>';
     h += '<div class="auth-field mb12"><label class="auth-lbl">Agent · 模型 ID</label><input class="inp" id="pf_ant_model" placeholder="claude-sonnet-4-20250514" value="'+esc(s.anthropic_model||'')+'"></div>';
     h += '<div class="auth-field mb12"><label class="auth-lbl">Agent · Anthropic API Key（SK）</label>';
@@ -145,15 +145,22 @@ async function loadProfilePage() {
     h += '<button type="button" class="btn bp" onclick="saveProfileForm()"><i class="fa-solid fa-floppy-disk"></i> 保存配置</button>';
 
     // 主题配色选择器
-    h += '<div style="height:1px;background:rgba(255,255,255,.06);margin:20px 0"></div>';
+    h += '<div style="height:1px;background:var(--border);margin:20px 0"></div>';
     h += '<label class="auth-lbl" style="margin-bottom:12px"><i class="fa-solid fa-palette"></i> 主题配色</label>';
-    h += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(90px,1fr));gap:8px" id="themePicker">';
+    h += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px" id="themePicker">';
     for (var key in THEMES) {
       var t = THEMES[key];
       var active = s.theme_color === key;
-      h += '<div class="theme-opt" data-theme="'+key+'" onclick="setTheme(\''+key+'\')" style="cursor:pointer;border-radius:10px;padding:10px 8px;text-align:center;border:2px solid '+(active ? t.accent : 'rgba(255,255,255,.05)')+';background:'+(active ? 'rgba(var(--accent-rgb),.08)' : 'transparent')+';transition:all .2s ease">';
-      h += '<div style="width:24px;height:24px;border-radius:50%;margin:0 auto 6px;background:'+t.accent+';box-shadow:0 2px 8px rgba('+t.rgb+',.3)"></div>';
-      h += '<div style="font-size:10px;color:#b0b8c8">'+t.name+'</div></div>';
+      var isDark = key === 'dark';
+      var previewBg = isDark ? '#1a1f2e' : '#ffffff';
+      h += '<div class="theme-opt" data-theme="'+key+'" onclick="setTheme(\''+key+'\')" style="cursor:pointer;border-radius:10px;padding:14px 10px;text-align:center;border:2px solid '+(active ? t.accent : 'var(--border)')+';background:'+(active ? 'rgba(var(--accent-rgb),.08)' : 'var(--bg)')+';transition:all .2s ease">';
+      h += '<div style="width:40px;height:28px;border-radius:6px;margin:0 auto 8px;background:'+previewBg+';border:1px solid '+(isDark ? '#2a3040' : '#e2e8f0')+';display:flex;align-items:center;justify-content:center;gap:3px;padding:4px">';
+      h += '<div style="width:6px;height:6px;border-radius:50%;background:'+t.accent+'"></div>';
+      h += '<div style="width:16px;height:2px;border-radius:1px;background:'+(isDark ? '#3a4050' : '#cbd5e1')+'"></div>';
+      h += '</div>';
+      h += '<div style="font-size:11px;font-weight:600;color:var(--text)">'+t.name+'</div>';
+      h += '<div style="font-size:9px;color:var(--text-muted);margin-top:2px">'+(isDark ? '深色护眼' : '清新明亮')+'</div>';
+      h += '</div>';
     }
     h += '</div>';
 
@@ -228,7 +235,7 @@ async function setTheme(name) {
     for (var i = 0; i < opts.length; i++) {
       var o = opts[i];
       var isActive = o.getAttribute('data-theme') === name;
-      o.style.borderColor = isActive ? 'var(--accent)' : 'rgba(255,255,255,.05)';
+      o.style.borderColor = isActive ? 'var(--accent)' : 'var(--border)';
       o.style.background = isActive ? 'rgba(var(--accent-rgb),.08)' : 'transparent';
     }
     toast('主题已切换为 ' + (THEMES[name] ? THEMES[name].name : name), 'fa-check', 'var(--accent)');
@@ -250,25 +257,25 @@ async function loadProfileTokenStats() {
   if (!el) return;
   try {
     var usage = await api('GET', '/dashboard/usage');
-    var h = '<div style="padding:16px;border-radius:12px;background:rgba(0,212,255,.05);border:1px solid rgba(0,212,255,.1);margin-bottom:16px">';
+    var h = '<div style="padding:16px;border-radius:12px;background:rgba(59,109,240,.05);border:1px solid rgba(59,109,240,.1);margin-bottom:16px">';
     h += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">';
-    h += '<div><div style="font-size:11px;color:#484f6e;margin-bottom:4px">Token 使用</div>';
-    h += '<div style="font-family:\'Space Grotesk\';font-size:28px;font-weight:700;color:#00D4FF">'+usage.tokens.estimated_used.toLocaleString()+' <span style="font-size:14px;color:#6e768a">/ '+usage.tokens.limit.toLocaleString()+'</span></div></div>';
-    h += '<div style="text-align:right"><div style="font-size:32px;font-weight:700;color:#00D4FF">'+usage.tokens.usage_percent+'%</div></div></div>';
-    h += '<div style="height:8px;background:rgba(255,255,255,.06);border-radius:4px;overflow:hidden">';
-    h += '<div style="width:'+Math.min(usage.tokens.usage_percent,100)+'%;height:100%;background:linear-gradient(90deg,#00D4FF,#00E5A0);transition:width .5s ease"></div></div>';
-    h += '<div style="display:flex;justify-content:space-between;margin-top:8px;font-size:10px;color:#6e768a">';
-    h += '<span>剩余: <strong style="color:#00D4FF">'+usage.tokens.remaining.toLocaleString()+'</strong> tokens</span>';
+    h += '<div><div style="font-size:11px;color:var(--text-muted);margin-bottom:4px">Token 使用</div>';
+    h += '<div style="font-family:\'Space Grotesk\';font-size:28px;font-weight:700;color:var(--accent)">'+usage.tokens.estimated_used.toLocaleString()+' <span style="font-size:14px;color:var(--text-muted)">/ '+usage.tokens.limit.toLocaleString()+'</span></div></div>';
+    h += '<div style="text-align:right"><div style="font-size:32px;font-weight:700;color:var(--accent)">'+usage.tokens.usage_percent+'%</div></div></div>';
+    h += '<div style="height:8px;background:var(--border-light);border-radius:4px;overflow:hidden">';
+    h += '<div style="width:'+Math.min(usage.tokens.usage_percent,100)+'%;height:100%;background:linear-gradient(90deg,var(--accent),#818cf8);transition:width .5s ease"></div></div>';
+    h += '<div style="display:flex;justify-content:space-between;margin-top:8px;font-size:10px;color:var(--text-muted)">';
+    h += '<span>剩余: <strong style="color:var(--accent)">'+usage.tokens.remaining.toLocaleString()+'</strong> tokens</span>';
     h += '<span class="badge '+(usage.tokens.usage_percent > 80 ? 'bdg-r' : (usage.tokens.usage_percent > 50 ? 'bdg-y' : 'bdg-g'))+'">'+(usage.tokens.usage_percent > 80 ? '即将耗尽' : '正常使用')+'</span></div></div>';
 
     h += '<div style="display:grid;grid-template-columns:repeat(2,1fr);gap:12px">';
-    h += '<div style="padding:12px;border-radius:10px;background:rgba(0,229,160,.03);border:1px solid rgba(0,229,160,.08)">';
-    h += '<div style="font-size:10px;color:#484f6e;margin-bottom:4px">任务统计</div>';
-    h += '<div style="font-size:13px;color:#b0b8c8">完成: <strong style="color:#00E5A0">'+usage.tasks.completed+'</strong> | 运行: <strong style="color:#F5A623">'+usage.tasks.running+'</strong></div></div>';
+    h += '<div style="padding:12px;border-radius:10px;background:rgba(16,185,129,.04);border:1px solid rgba(16,185,129,.1)">';
+    h += '<div style="font-size:10px;color:var(--text-muted);margin-bottom:4px">任务统计</div>';
+    h += '<div style="font-size:13px;color:var(--text)">完成: <strong style="color:#10b981">'+usage.tasks.completed+'</strong> | 运行: <strong style="color:#f59e0b">'+usage.tasks.running+'</strong></div></div>';
 
-    h += '<div style="padding:12px;border-radius:10px;background:rgba(167,139,250,.03);border:1px solid rgba(167,139,250,.08)">';
-    h += '<div style="font-size:10px;color:#484f6e;margin-bottom:4px">数据统计</div>';
-    h += '<div style="font-size:13px;color:#b0b8c8">Idea: <strong>'+usage.data.ideas+'</strong> | 算法: <strong>'+usage.data.algorithms+'</strong></div></div></div>';
+    h += '<div style="padding:12px;border-radius:10px;background:rgba(139,92,246,.04);border:1px solid rgba(139,92,246,.1)">';
+    h += '<div style="font-size:10px;color:var(--text-muted);margin-bottom:4px">数据统计</div>';
+    h += '<div style="font-size:13px;color:var(--text)">Idea: <strong>'+usage.data.ideas+'</strong> | 算法: <strong>'+usage.data.algorithms+'</strong></div></div></div>';
 
     el.innerHTML = h;
   } catch (e) {

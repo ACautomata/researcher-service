@@ -25,13 +25,14 @@ pages.chat = async function() {
 function renderChatMsg(role, content) {
   var isUser = role === 'user';
   var align = isUser ? 'flex-end' : 'flex-start';
-  var bg = isUser ? 'rgba(52,211,153,.15)' : 'rgba(255,255,255,.06)';
-  var color = isUser ? '#34D399' : '#d8dce6';
-  var border = isUser ? 'rgba(52,211,153,.2)' : 'rgba(255,255,255,.1)';
+  var bg = isUser ? 'rgba(59,109,240,.08)' : 'var(--bg)';
+  var color = isUser ? 'var(--accent)' : 'var(--text)';
+  var labelColor = isUser ? 'var(--accent)' : 'var(--text-muted)';
+  var border = isUser ? 'rgba(59,109,240,.15)' : 'var(--border)';
   var name = isUser ? '你' : 'AI';
   var ic = isUser ? 'fa-user' : 'fa-robot';
   var h = '<div style="display:flex;flex-direction:column;align-items:' + align + ';max-width:85%">';
-  h += '<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;font-size:11px;color:' + color + ';font-weight:600"><i class="fa-solid ' + ic + '"></i> ' + name + '</div>';
+  h += '<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;font-size:11px;color:' + labelColor + ';font-weight:600"><i class="fa-solid ' + ic + '"></i> ' + name + '</div>';
   h += '<div style="background:' + bg + ';border:1px solid ' + border + ';border-radius:12px;padding:12px 16px;font-size:13px;line-height:1.7;color:' + color + ';word-break:break-word">' + esc(content).replace(/\n/g,'<br>') + '</div>';
   h += '</div>';
   return h;
@@ -50,7 +51,7 @@ async function sendChat() {
   chatHistory.push({role: 'user', content: text});
   var msgArea = document.getElementById('chatMessages');
   msgArea.innerHTML += renderChatMsg('user', text);
-  msgArea.innerHTML += '<div id="chatLoading" style="display:flex;flex-direction:column;align-items:flex-start;max-width:85%"><div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;font-size:11px;color:#c8cdd8;font-weight:600"><i class="fa-solid fa-robot"></i> AI</div><div style="background:#151a29;border:1px solid rgba(255,255,255,.08);border-radius:12px;padding:12px 16px;color:#7d849a;font-size:13px"><i class="fa-solid fa-spinner fa-spin"></i> 思考中...</div></div>';
+  msgArea.innerHTML += '<div id="chatLoading" style="display:flex;flex-direction:column;align-items:flex-start;max-width:85%"><div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;font-size:11px;color:var(--text-muted);font-weight:600"><i class="fa-solid fa-robot"></i> AI</div><div style="background:var(--bg);border:1px solid var(--border);border-radius:12px;padding:12px 16px;color:var(--text-muted);font-size:13px"><i class="fa-solid fa-spinner fa-spin"></i> 思考中...</div></div>';
   msgArea.scrollTop = msgArea.scrollHeight;
 
   try {

@@ -106,7 +106,7 @@ async function loadDomainView(id) {
   // 右侧：编辑/预览/图谱
   h += '<div class="card" style="flex:1;padding:0;overflow:hidden;display:flex;flex-direction:column;min-width:0;min-height:70vh">';
   h += '<div style="display:flex;border-bottom:1px solid var(--border);padding:6px 14px 0;gap:2px;align-items:center">';
-  h += '<button class="btn" id="kbTabEdit" onclick="kbSwitchTab(\'edit\')" style="border-radius:6px 6px 0 0;border-bottom:none;background:rgba(255,255,255,.05);margin-bottom:-1px;padding:5px 12px;font-size:11px"><i class="fa-solid fa-pen-to-square"></i> 编辑</button>';
+  h += '<button class="btn" id="kbTabEdit" onclick="kbSwitchTab(\'edit\')" style="border-radius:6px 6px 0 0;border-bottom:none;background:var(--bg);margin-bottom:-1px;padding:5px 12px;font-size:11px"><i class="fa-solid fa-pen-to-square"></i> 编辑</button>';
   h += '<button class="btn" id="kbTabPreview" onclick="kbSwitchTab(\'preview\')" style="border-radius:6px 6px 0 0;background:transparent;padding:5px 12px;font-size:11px"><i class="fa-solid fa-eye"></i> 预览</button>';
   h += '<button class="btn" id="kbTabGraph" onclick="kbSwitchTab(\'graph\')" style="border-radius:6px 6px 0 0;background:transparent;padding:5px 12px;font-size:11px"><i class="fa-solid fa-diagram-project"></i> 图谱</button>';
   h += '<div style="flex:1"></div>';
@@ -116,8 +116,8 @@ async function loadDomainView(id) {
 
   // 编辑面板（编辑+预览分割）
   h += '<div id="kbPanelEdit" style="flex:1;display:flex;overflow:hidden">';
-  h += '<textarea id="kbEditor" class="inp" style="flex:1;resize:none;border:none;border-radius:0;font-family:Space Grotesk,monospace;font-size:12px;line-height:1.7;padding:14px;background:#0d1019;color:#b0b8c8" placeholder="选择文件开始编辑"></textarea>';
-  h += '<div id="kbPreview" style="flex:1;overflow-y:auto;padding:14px 18px;font-size:14px;line-height:1.8;color:#d4d8e0;display:none;border-left:1px solid rgba(255,255,255,.06);background:#0d1019"></div></div>';
+  h += '<textarea id="kbEditor" class="inp" style="flex:1;resize:none;border:none;border-radius:0;font-family:Space Grotesk,monospace;font-size:12px;line-height:1.7;padding:14px;background:#1e293b;color:#e2e8f0" placeholder="选择文件开始编辑"></textarea>';
+  h += '<div id="kbPreview" style="flex:1;overflow-y:auto;padding:14px 18px;font-size:14px;line-height:1.8;color:var(--text);display:none;border-left:1px solid var(--border);background:var(--card-bg)"></div></div>';
 
   // 图谱面板
   h += '<div id="kbPanelGraph" style="flex:1;overflow:hidden;display:none;background:rgba(0,0,0,.15);position:relative"><div id="kbGraphSvg" style="width:100%;height:100%"></div></div>';
@@ -170,9 +170,9 @@ function kbSwitchTab(tab) {
   var prev = document.getElementById('kbPreview');
   if (editP) editP.style.display = tab === 'edit' || tab === 'preview' ? 'flex' : 'none';
   if (graphP) graphP.style.display = tab === 'graph' ? 'flex' : 'none';
-  if (btnE) btnE.style.background = tab === 'edit' ? 'rgba(255,255,255,.05)' : 'transparent';
-  if (btnP) btnP.style.background = tab === 'preview' ? 'rgba(255,255,255,.05)' : 'transparent';
-  if (btnG) btnG.style.background = tab === 'graph' ? 'rgba(255,255,255,.05)' : 'transparent';
+  if (btnE) btnE.style.background = tab === 'edit' ? 'var(--bg)' : 'transparent';
+  if (btnP) btnP.style.background = tab === 'preview' ? 'var(--bg)' : 'transparent';
+  if (btnG) btnG.style.background = tab === 'graph' ? 'var(--bg)' : 'transparent';
   if (prev) prev.style.display = tab === 'preview' ? '' : 'none';
   if (tab === 'preview' && kbCurFile) kbRenderPreview();
   if (tab === 'graph') kbRenderGraph();

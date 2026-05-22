@@ -7,22 +7,23 @@ var __PIPELINE_REQUIRES_LOGIN = false;
 var cur = 'home', pI = null;
 var cache = { papers:[], entries:[], keywords:[], problems:[], ideas:[], algos:[] };
 var P_GUEST = [
-  { id: 'home', name: '欢迎', icon: 'fa-house', color: '#00E5A0', step: 0, desc: '登录后解锁全部功能' },
-  { id: 'doc', name: '需求与API文档', icon: 'fa-book', color: '#7d849a', step: 0, desc: '规范与接口定义' }
+  { id: 'home', name: '首页', icon: 'fa-house', color: '#3b6df0', step: 0, desc: 'AI 驱动科研创新' },
+  { id: 'doc', name: '需求与API文档', icon: 'fa-book', color: '#64748b', step: 0, desc: '规范与接口定义' }
 ];
 var P_FULL = [
-  { id: 'dashboard', name: '任务状态', icon: 'fa-chart-line', color: '#00E5A0', step: 0, desc: '任务状态与资源监控' },
-  { id: 'kb', name: '知识库构建与更新', icon: 'fa-database', color: '#00E5A0', step: 0, desc: '上传文献，解析关键字' },
-  { id: 'lit', name: '文献问题发现与验证', icon: 'fa-magnifying-glass-chart', color: '#F5A623', step: 0, desc: '分析验证文献问题' },
-  { id: 'idea', name: 'Idea生成与验证分析', icon: 'fa-lightbulb', color: '#A78BFA', step: 0, desc: '生成评价研究创意' },
-  { id: 'algo', name: '算法自动实现', icon: 'fa-code', color: '#FF6B81', step: 0, desc: '代码浏览与编辑' },
-  { id: 'param', name: '参数优化', icon: 'fa-sliders', color: '#F5A623', step: 0, desc: '参数组对比与曲线' },
-  { id: 'agent', name: 'Agent 终端控制台', icon: 'fa-terminal', color: '#00D4FF', step: 0, desc: 'Claude Agent 交互', navBreak: '工具与扩展' },
-  { id: 'chat', name: 'AI 对话', icon: 'fa-comment-dots', color: '#34D399', step: 0, desc: '与 AI 直接对话' },
-  { id: 'obs', name: 'Obsidian Vault', icon: 'fa-note-sticky', color: '#C084FC', step: 0, desc: '笔记浏览·编辑·图谱' },
-  { id: 'profile', name: '个人配置', icon: 'fa-sliders', color: '#34D399', step: 0, desc: 'API 密钥与模型', navBreak: '账户' },
-  { id: 'admin', name: '用户管理', icon: 'fa-user-gear', color: '#A78BFA', step: 0, desc: '管理用户和权限', adminOnly: true },
-  { id: 'doc', name: '需求与API文档', icon: 'fa-book', color: '#7d849a', step: 0, desc: '规范与接口定义' }
+  { id: 'home', name: '首页', icon: 'fa-house', color: '#3b6df0', step: 0, desc: 'AI 驱动科研创新' },
+  { id: 'dashboard', name: '任务状态', icon: 'fa-chart-line', color: '#3b6df0', step: 0, desc: '系统任务与资源监控' },
+  { id: 'kb', name: '知识库', icon: 'fa-database', color: '#10b981', step: 0, desc: '上传文献，构建知识库' },
+  { id: 'lit', name: '文献分析', icon: 'fa-magnifying-glass-chart', color: '#f59e0b', step: 0, desc: '发现与验证研究问题' },
+  { id: 'idea', name: 'Idea 生成', icon: 'fa-lightbulb', color: '#8b5cf6', step: 0, desc: '生成评价研究创意', navBreak: '工具与扩展' },
+  { id: 'algo', name: '算法实现', icon: 'fa-code', color: '#ef4444', step: 0, desc: '代码生成与测试' },
+  { id: 'param', name: '参数优化', icon: 'fa-sliders', color: '#f97316', step: 0, desc: '参数组对比与优化' },
+  { id: 'agent', name: 'Agent 终端', icon: 'fa-terminal', color: '#06b6d4', step: 0, desc: 'Claude Agent 交互' },
+  { id: 'chat', name: 'AI 对话', icon: 'fa-comment-dots', color: '#10b981', step: 0, desc: '与 AI 直接对话' },
+  { id: 'obs', name: '笔记管理', icon: 'fa-note-sticky', color: '#8b5cf6', step: 0, desc: 'Obsidian Vault', navBreak: '账户' },
+  { id: 'profile', name: '个人配置', icon: 'fa-user-cog', color: '#64748b', step: 0, desc: 'API 密钥与偏好' },
+  { id: 'admin', name: '用户管理', icon: 'fa-user-gear', color: '#8b5cf6', step: 0, desc: '管理用户和权限', adminOnly: true },
+  { id: 'doc', name: 'API 文档', icon: 'fa-book', color: '#64748b', step: 0, desc: '规范与接口定义' }
 ];
 
 function loadToken() { authToken = localStorage.getItem('arp_token'); }
@@ -165,27 +166,24 @@ function buildNav(){
   }
   sideEl.style.display = '';
   var items = navPages();
-  var secTitle = authUser ? '步骤' : '入门';
-  var h='<div class="sb-head"><div class="sb-logo"><i class="fa-solid fa-brain"></i></div><div><div class="sb-name">AI Pipeline</div><div class="sb-sub">Research Automation</div></div></div><div class="sb-nav"><div class="sb-sec">'+secTitle+'</div>';
+  var h='<div class="sb-head"><div class="sb-logo"><i class="fa-solid fa-hexagon-nodes"></i></div><div><div class="sb-name">天研</div><div class="sb-sub">AI for Science</div></div></div><div class="sb-nav">';
   for(var i=0;i<items.length;i++){
     var p=items[i], act=cur===p.id;
     if (p.navBreak) h+='<div class="sb-div"></div><div class="sb-sec">'+p.navBreak+'</div>';
     h+='<button class="sb-btn'+(act?' on':'')+'" onclick="go(\''+p.id+'\')">';
-    h+='<span class="sb-ico" style="background:'+(act?p.color+'20':'rgba(255,255,255,.03)')+';color:'+(act?'var(--text-inverse)':p.color)+'"><i class="fa-solid '+p.icon+'"></i></span>';
+    h+='<span class="sb-ico" style="background:'+(act?'rgba(59,109,240,.15)':'rgba(255,255,255,.04)')+';color:'+(act?'#e2e8f0':p.color)+'"><i class="fa-solid '+p.icon+'"></i></span>';
     h+='<span class="sb-lb">'+p.name+'<small>'+p.desc+'</small></span>';
-    if(p.step) h+='<span class="sb-sn" style="'+(act?'background:'+p.color+';color:var(--text-inverse)':'')+'">'+p.step+'</span>';
+    if(p.step) h+='<span class="sb-sn" style="'+(act?'background:var(--accent);color:#fff':'')+'">'+p.step+'</span>';
     h+='</button>';
   }
-  h+='</div><div class="sb-ft" style="gap:8px">';
+  h+='</div><div class="sb-ft">';
   h+='<span class="sb-dot"></span>';
   if (authUser && authUser.username) {
     h+='<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:10px" title="'+esc(authUser.username)+'">'+esc(authUser.username)+'</span>';
-    h+='<button type="button" class="btn" style="padding:4px 10px;font-size:10px;flex-shrink:0" onclick="doLogout()"><i class="fa-solid fa-right-from-bracket"></i></button>';
-  } else if (!__AUTH_REQUIRED) {
-    h+='<span style="flex:1;font-size:10px">v1.0</span>';
-    h+='<button type="button" class="btn bp" style="padding:4px 10px;font-size:10px;flex-shrink:0" onclick="openAccountPanel()"><i class="fa-solid fa-user"></i> 账户</button>';
+    h+='<button type="button" class="btn bp" style="padding:3px 10px;font-size:10px;flex-shrink:0" onclick="doLogout()"><i class="fa-solid fa-right-from-bracket"></i></button>';
   } else {
-    h+='<span style="font-size:10px">v1.0 · API 已连接</span>';
+    h+='<span style="flex:1;font-size:10px">天津大学</span>';
+    h+='<button type="button" class="btn bp" style="padding:3px 10px;font-size:10px;flex-shrink:0" onclick="openAccountPanel()"><i class="fa-solid fa-user"></i></button>';
   }
   h+='</div>';
   document.getElementById('sideEl').innerHTML=h;
@@ -206,9 +204,10 @@ function buildTop(){
   topEl.style.display = '';
   var items = navPages();
   var p = navFindItem(items, cur) || items[0];
-  var h='<div class="top-l"><span class="top-ico" style="background:'+p.color+'18;color:'+p.color+'"><i class="fa-solid '+p.icon+'"></i></span><span class="top-ti">'+p.name+'</span></div><div class="top-fl">';
-  var sp = (authUser ? P_FULL : []).filter(function(x){ return x.step > 0; });
-  for(var i=0;i<sp.length;i++){h+='<span class="fd'+(cur===sp[i].id?' on':'')+'" style="background:'+sp[i].color+';color:'+sp[i].color+'"></span>';if(i<sp.length-1)h+='<span class="fl"></span>';}
+  var h='<div class="top-l"><span class="top-ico" style="background:'+p.color+'12;color:'+p.color+'"><i class="fa-solid '+p.icon+'"></i></span><span class="top-ti">'+p.name+'</span></div>';
+  h+='<div class="top-r">';
+  h+='<button type="button" class="notif-btn" title="消息通知"><i class="fa-regular fa-bell"></i></button>';
+  h+='<span style="font-size:12px;color:var(--text-muted);font-weight:500;display:flex;align-items:center;gap:6px"><i class="fa-solid fa-building-columns" style="color:var(--text-light)"></i> 天津大学</span>';
   h+='</div>';
   document.getElementById('topEl').innerHTML=h;
 }
@@ -470,57 +469,37 @@ async function bootstrap() {
   enterApp();
 }
 
-/* ===== Theme ===== */
 /* ===== Theme System ===== */
-// 8 套预设主题：每套定义 accent（强调色）、rgb（RGB 逗号值）、
-// mode（dark/light）、bg/bgRgb/bgAlt（背景色）、glow1/glow2（环境光晕）
+// Two themes: light (亮色) and dark (暗色)
 var THEMES = {
-  aurora:  { name:'极光蓝', mode:'light', accent:'#3B82F6', rgb:'59,130,246', bg:'#f0f4ff', bgRgb:'240,244,255', bgAlt:'#e4ebfa', glow1:'#3B82F6', glow2:'#60A5FA' },
-  emerald: { name:'翡翠绿', mode:'dark', accent:'#00E5A0', rgb:'0,229,160', bg:'#05070d', bgRgb:'5,7,13', bgAlt:'#0a0e17', glow1:'#00E5A0', glow2:'#A78BFA' },
-  flame:   { name:'烈焰橙', mode:'dark', accent:'#F97316', rgb:'249,115,22', bg:'#0d0805', bgRgb:'13,8,5', bgAlt:'#140c07', glow1:'#F97316', glow2:'#DC2626' },
-  nebula:  { name:'星云紫', mode:'dark', accent:'#A78BFA', rgb:'167,139,250', bg:'#0a0510', bgRgb:'10,5,16', bgAlt:'#10081a', glow1:'#A78BFA', glow2:'#EC4899' },
-  ocean:   { name:'海洋青', mode:'light', accent:'#0891B2', rgb:'8,145,178', bg:'#eef9ff', bgRgb:'238,249,255', bgAlt:'#e0f2fe', glow1:'#0891B2', glow2:'#06B6D4' },
-  mint:    { name:'薄荷绿', mode:'light', accent:'#059669', rgb:'5,150,105', bg:'#ecfdf5', bgRgb:'236,253,245', bgAlt:'#d1fae5', glow1:'#059669', glow2:'#34D399' },
-  sunset:  { name:'落日金', mode:'dark', accent:'#F59E0B', rgb:'245,158,11', bg:'#0f0a04', bgRgb:'15,10,4', bgAlt:'#170e06', glow1:'#F59E0B', glow2:'#F97316' },
-  sakura:  { name:'樱花粉', mode:'light', accent:'#DB2777', rgb:'219,39,119', bg:'#fef2f4', bgRgb:'254,242,244', bgAlt:'#fce7ed', glow1:'#DB2777', glow2:'#F472B6' }
+  light: { name:'亮色', accent:'#3b6df0', rgb:'59,109,240' },
+  dark:  { name:'暗色', accent:'#4b7df0', rgb:'75,125,240' }
 };
 
-/* 注入 :root CSS 变量覆盖默认主题 */
 function applyTheme(name) {
   var theme = THEMES[name];
-  if (!theme) { name = 'aurora'; theme = THEMES.aurora; }
-  var dark = theme.mode !== 'light';
-  var text = dark ? '#c9d1d9' : '#1f2937';
-  var textMuted = dark ? '#484f6e' : '#6b7280';
-  var textBold = dark ? '#e6edf3' : '#111827';
-  var border = dark ? 'rgba(255,255,255,.055)' : 'rgba(0,0,0,.08)';
-  var borderLight = dark ? 'rgba(255,255,255,.03)' : 'rgba(0,0,0,.04)';
-  var borderHover = dark ? 'rgba(255,255,255,.09)' : 'rgba(0,0,0,.12)';
+  if (!theme) { name = 'light'; theme = THEMES.light; }
   var style = document.getElementById('theme-style');
   if (!style) {
     style = document.createElement('style');
     style.id = 'theme-style';
     document.head.appendChild(style);
   }
-  style.textContent = ':root{--bg:' + theme.bg
-    + ';--bg-rgb:' + theme.bgRgb
-    + ';--bg-alt:' + theme.bgAlt
-    + ';--bg-card:linear-gradient(180deg,rgba(' + theme.bgRgb + ',.95),rgba(' + theme.bgRgb + ',.9))'
-    + ';--bg-surface:rgba(' + theme.bgRgb + ',.5)'
-    + ';--text:' + text
-    + ';--text-bold:' + textBold
-    + ';--text-muted:' + textMuted
-    + ';--text-inverse:' + (dark ? '#f0f4ff' : '#05070d')
-    + ';--border:' + border
-    + ';--border-light:' + borderLight
-    + ';--border-hover:' + borderHover
-    + ';--accent:' + theme.accent
-    + ';--accent-rgb:' + theme.rgb
-    + ';--accent2:' + theme.accent
-    + ';--accent-glow:rgba(' + theme.rgb + ',.12)'
-    + ';--accent-glow-hover:rgba(' + theme.rgb + ',.22)'
-    + ';--accent-subtle:rgba(' + theme.rgb + ',.06)'
-    + ';--accent-gradient:linear-gradient(135deg,' + theme.accent + ',' + theme.accent + ')'
-    + ';--glow-1:' + theme.glow1
-    + ';--glow-2:' + theme.glow2 + '}';
+  // Inject accent overrides
+  style.textContent = ':root{'
+    + '--accent:' + theme.accent + ';'
+    + '--accent-rgb:' + theme.rgb + ';'
+    + '--accent-gradient:linear-gradient(135deg,' + theme.accent + ',' + theme.accent + ');'
+    + '--accent-light:' + 'rgba(' + theme.rgb + ',.1);'
+    + '--accent-glow:rgba(' + theme.rgb + ',.12);'
+    + '--accent-glow-hover:rgba(' + theme.rgb + ',.22);'
+    + '--accent-subtle:rgba(' + theme.rgb + ',.06);'
+    + '}';
+  // Toggle dark theme CSS class
+  var root = document.documentElement;
+  if (name === 'dark') {
+    root.classList.add('dark-theme');
+  } else {
+    root.classList.remove('dark-theme');
+  }
 }

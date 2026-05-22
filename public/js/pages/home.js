@@ -1,59 +1,89 @@
-/* ===== Welcome Page (Guest) ===== */
-var heroImgs = ['1.png','2.png','3.png','4.png','5.png','6.png'];
-var heroLabels = ['知识库构建','文献问题发现','Idea 生成','算法实现','Agent 终端','参数优化'];
-var heroIdx = 0;
+/* ===== 首页 (Home) — 天研 AI for Science ===== */
+
+var featureCards = [
+  { id:'kb', icon:'fa-book-open', color:'#3b6df0', bg:'rgba(59,109,240,.08)',
+    title:'文献知识库自动构建', desc:'自动收集、管理与构建专属领域知识库' },
+  { id:'lit', icon:'fa-magnifying-glass', color:'#10b981', bg:'rgba(16,185,129,.08)',
+    title:'文献深度理解', desc:'深度解读文献内容，提炼关键信息与知识点' },
+  { id:'lit', icon:'fa-lightbulb', color:'#f59e0b', bg:'rgba(245,158,11,.08)',
+    title:'研究动机发现', desc:'挖掘研究空白与趋势，发现有价值的研究方向' },
+  { id:'idea', icon:'fa-flask', color:'#8b5cf6', bg:'rgba(139,92,246,.08)',
+    title:'科学假设形成', desc:'基于知识与数据，智能生成创新的科学假说' },
+  { id:'algo', icon:'fa-flask-vial', color:'#ef4444', bg:'rgba(239,68,68,.08)',
+    title:'实验设计与执行', desc:'智能设计实验方案，辅助实验执行与记录' },
+  { id:'param', icon:'fa-chart-line', color:'#06b6d4', bg:'rgba(6,182,212,.08)',
+    title:'实验结果分析与优化', desc:'分析实验结果，优化研究方法，提升科研效率' },
+  { id:'dashboard', icon:'fa-chart-pie', color:'#f97316', bg:'rgba(249,115,22,.08)',
+    title:'科技价值分析与评估', desc:'多维度评估科技价值，支撑决策与成果转化' },
+  { id:'chat', icon:'fa-file-pen', color:'#6366f1', bg:'rgba(99,102,241,.08)',
+    title:'论文辅助写作工具', desc:'从内容构思到语言润色，全面辅助论文写作' },
+  { id:'obs', icon:'fa-chart-diagram', color:'#ec4899', bg:'rgba(236,72,153,.08)',
+    title:'科研绘图工具', desc:'智能生成高质量科研图表，提升表达效果' }
+];
 
 pages.home = function() {
-  var h = '<div style="min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:24px;text-align:center;position:relative;overflow:hidden">';
-  h += '<div style="position:absolute;inset:0;background:radial-gradient(ellipse 70% 55% at 50% 45%,rgba(59,130,246,.07),transparent 65%),radial-gradient(ellipse 50% 40% at 30% 65%,rgba(0,229,160,.04),transparent 65%),radial-gradient(ellipse 50% 40% at 70% 65%,rgba(167,139,250,.05),transparent 65%);pointer-events:none"></div>';
-  h += '<div style="position:relative;z-index:2;font-size:clamp(30px,4.5vw,50px);font-weight:800;line-height:1.12;background:linear-gradient(135deg,#e6edf3 0%,#60A5FA 45%,#A78BFA 75%,#e6edf3 100%);-webkit-background-clip:text;-webkit-text-fill-color:transparent;max-width:700px;margin-bottom:10px">AI 学术研究<br>自动化流水线</div>';
-  h += '<div style="position:relative;z-index:2;font-size:15px;color:var(--text-muted);max-width:420px;line-height:1.6;margin-bottom:28px">上传论文、发现问题、生成 Idea、输出算法代码，全流程 AI 驱动</div>';
-  h += '<button type="button" onclick="openAccountPanel()" style="position:relative;z-index:2;padding:14px 40px;border-radius:14px;border:none;background:linear-gradient(135deg,#3B82F6,#8B5CF6);color:#fff;font-size:15px;font-weight:700;cursor:pointer;box-shadow:0 8px 32px rgba(59,130,246,.2);margin-bottom:24px;display:inline-flex;align-items:center;gap:8px;transition:transform .3s,box-shadow .3s" onmouseover="this.style.transform=\'translateY(-2px)\';this.style.boxShadow=\'0 12px 40px rgba(59,130,246,.3)\'" onmouseout="this.style.transform=\'\';this.style.boxShadow=\'0 8px 32px rgba(59,130,246,.2)\'"><i class="fa-solid fa-right-to-bracket"></i> 开始使用</button>';
+  var isLoggedIn = !!authUser;
+  var h = '';
 
-  // Coverflow deck — images resized to 1280x620
-  h += '<div style="position:relative;z-index:1;width:100%;max-width:760px;aspect-ratio:64/31;perspective:1100px" id="heroDeck">';
-  for (var i = 0; i < heroImgs.length; i++) {
-    var s = getCardStyles(i, heroIdx);
-    h += '<div onclick="heroJumpTo('+i+')" id="deckCard'+i+'" style="position:absolute;left:50%;top:50%;width:88%;aspect-ratio:64/31;border-radius:14px;overflow:hidden;border:1px solid rgba(255,255,255,.06);cursor:pointer;box-shadow:0 8px 40px rgba(0,0,0,.25);transition:all .6s cubic-bezier(.22,1,.36,1);'+s+'"><img src="/images/'+heroImgs[i]+'" style="width:100%;height:100%;object-fit:cover;display:block"></div>';
+  // ── Hero Section ──
+  h += '<div class="hero">';
+  h += '<h1 class="hero-title">智能驱动 · 科研无界</h1>';
+  h += '<p class="hero-sub">从想法到发现，让 AI 与科研同行</p>';
+  h += '<form class="hero-search" onsubmit="event.preventDefault(); handleHeroSearch()">';
+  h += '<input class="inp" id="heroSearchInput" placeholder="输入问题或关键词，探索科研可能性…">';
+  h += '<button type="submit" class="hero-search-btn"><i class="fa-solid fa-magnifying-glass"></i> 探索</button>';
+  h += '</form>';
+  h += '</div>';
+
+  // ── Feature Cards Grid ──
+  h += '<div class="feature-grid">';
+  for (var i = 0; i < featureCards.length; i++) {
+    var fc = featureCards[i];
+    h += '<div class="feature-card" onclick="handleFeatureClick(\''+fc.id+'\')" style="cursor:pointer">';
+    h += '<div class="fc-icon" style="background:'+fc.bg+';color:'+fc.color+'"><i class="fa-solid '+fc.icon+'"></i></div>';
+    h += '<div class="fc-body">';
+    h += '<div class="fc-title">'+fc.title+'</div>';
+    h += '<div class="fc-desc">'+fc.desc+'</div>';
+    h += '</div></div>';
   }
   h += '</div>';
 
-  h += '<div style="display:flex;gap:12px;margin-top:18px;position:relative;z-index:2">';
-  for (var i = 0; i < heroImgs.length; i++) {
-    h += '<div onclick="heroJumpTo('+i+')" id="deckDot'+i+'" style="width:12px;height:12px;border-radius:50%;border:2px solid '+(i===heroIdx?'var(--accent,#60A5FA)':'rgba(107,114,128,.35)')+';background:'+(i===heroIdx?'var(--accent,#60A5FA)':'rgba(107,114,128,.15)')+';cursor:pointer;transition:all .3s;box-shadow:'+(i===heroIdx?'0 0 16px rgba(96,165,250,.4)':'none')+'"></div>';
+  // ── CTA (Guest only) ──
+  if (!isLoggedIn) {
+    h += '<div style="text-align:center;padding:16px 0 32px">';
+    h += '<button type="button" onclick="openAccountPanel()" style="padding:12px 36px;border-radius:8px;border:none;background:var(--accent-gradient);color:#fff;font-size:14px;font-weight:700;cursor:pointer;display:inline-flex;align-items:center;gap:8px;transition:transform .15s,box-shadow .15s;font-family:inherit" onmouseover="this.style.transform=\'translateY(-1px)\';this.style.boxShadow=\'0 4px 12px rgba(var(--accent-rgb),.3)\'" onmouseout="this.style.transform=\'\';this.style.boxShadow=\'none\'"><i class="fa-solid fa-right-to-bracket"></i> 开始使用</button>';
+    h += '<p style="font-size:11px;color:var(--text-muted);margin-top:10px">登录后解锁全部科研工具</p>';
+    h += '</div>';
   }
-  h += '</div></div>';
+
   return h;
 };
 
-function getCardStyles(i, idx) {
-  var offset = i - idx;
-  var absOff = Math.abs(offset);
-  if (offset === 0) return 'transform:translate(-50%,-50%) scale(1) translateZ(0);opacity:1;z-index:10';
-  var dir = offset < 0 ? -1 : 1;
-  var scale = Math.max(0.5, 1 - absOff * 0.14);
-  var translateX = dir * (75 + absOff * 35);
-  var translateZ = -absOff * 90;
-  var rotateY = dir * (4 + absOff * 2);
-  var opacity = Math.max(0.25, 1 - absOff * 0.16);
-  var z = 10 - absOff;
-  return 'transform:translate(-50%,-50%) translateX('+translateX+'px) translateZ('+translateZ+'px) scale('+scale+') rotateY('+rotateY+'deg);opacity:'+opacity+';z-index:'+z;
-}
-
-function heroJumpTo(idx) {
-  heroIdx = idx;
-  var deck = document.getElementById('heroDeck');
-  if (!deck) return;
-  for (var i = 0; i < heroImgs.length; i++) {
-    var card = document.getElementById('deckCard'+i);
-    var dot = document.getElementById('deckDot'+i);
-    if (card) card.setAttribute('style', 'position:absolute;left:50%;top:50%;width:88%;aspect-ratio:64/31;border-radius:14px;overflow:hidden;border:1px solid rgba(255,255,255,.06);cursor:pointer;box-shadow:0 8px 40px rgba(0,0,0,.25);transition:all .6s cubic-bezier(.22,1,.36,1);' + getCardStyles(i, idx));
-    if (dot) {
-      dot.style.background = i === idx ? 'var(--accent,#60A5FA)' : 'rgba(107,114,128,.15)';
-      dot.style.borderColor = i === idx ? 'var(--accent,#60A5FA)' : 'rgba(107,114,128,.35)';
-      dot.style.boxShadow = i === idx ? '0 0 16px rgba(96,165,250,.4)' : 'none';
-    }
+function handleFeatureClick(pageId) {
+  if (!authUser) {
+    openAccountPanel();
+    return;
   }
+  go(pageId);
 }
 
-var heroTimer = undefined;
+function handleHeroSearch() {
+  var q = document.getElementById('heroSearchInput');
+  if (!q) return;
+  var val = q.value.trim();
+  if (!val) return;
+  if (!authUser) {
+    openAccountPanel();
+    toast('请先登录后再探索', 'fa-info-circle', '#f59e0b');
+    return;
+  }
+  // Navigate to chat with the query pre-filled
+  go('chat');
+  setTimeout(function() {
+    var inp = document.querySelector('#ctnEl .inp, #ctnEl textarea, #ctnEl [id*="chat"]');
+    if (inp) {
+      inp.value = val;
+      inp.focus();
+    }
+  }, 300);
+}

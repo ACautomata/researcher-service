@@ -16,8 +16,8 @@ pages.obs = async function(){
   h+='<div id="obsTree" style="flex:1;overflow-y:auto;scrollbar-width:thin;scrollbar-color:#464d65 transparent;font-size:11px;line-height:1.8;color:#7d849a"><div style="color:#464d65">正在加载...</div></div></div>';
 
   h+='<div class="card" style="flex:1;padding:0;overflow:hidden;display:flex;flex-direction:column;min-width:0;min-height:70vh">';
-  h+='<div style="display:flex;border-bottom:1px solid rgba(255,255,255,.06);padding:8px 14px 0;gap:2px">';
-  h+='<button class="btn" id="obsTabEdit" onclick="switchObsTab(\'edit\')" style="border-radius:8px 8px 0 0;border-bottom:none;background:rgba(255,255,255,.05);margin-bottom:-1px;padding:6px 14px;font-size:11px"><i class="fa-solid fa-pen-to-square"></i> 编辑</button>';
+  h+='<div style="display:flex;border-bottom:1px solid var(--border);padding:8px 14px 0;gap:2px">';
+  h+='<button class="btn" id="obsTabEdit" onclick="switchObsTab(\'edit\')" style="border-radius:8px 8px 0 0;border-bottom:none;background:var(--bg);margin-bottom:-1px;padding:6px 14px;font-size:11px"><i class="fa-solid fa-pen-to-square"></i> 编辑</button>';
   h+='<button class="btn" id="obsTabPreview" onclick="switchObsTab(\'preview\')" style="border-radius:8px 8px 0 0;background:transparent;padding:6px 14px;font-size:11px"><i class="fa-solid fa-eye"></i> 预览</button>';
   h+='<button class="btn" id="obsTabGraph" onclick="switchObsTab(\'graph\')" style="border-radius:8px 8px 0 0;background:transparent;padding:6px 14px;font-size:11px"><i class="fa-solid fa-diagram-project"></i> 图谱</button>';
   h+='<div style="flex:1"></div>';
@@ -25,10 +25,10 @@ pages.obs = async function(){
   h+='<button class="btn" onclick="saveObsFile()" id="obsSaveBtn" style="padding:4px 10px;font-size:10px;margin-bottom:2px;display:none"><i class="fa-solid fa-floppy-disk"></i></button></div>';
 
   h+='<div id="obsPanelEdit" style="flex:1;display:flex;overflow:hidden">';
-  h+='<textarea id="obsEditor" class="inp" style="flex:1;resize:none;border:none;border-radius:0;font-family:Space Grotesk,monospace;font-size:12px;line-height:1.7;padding:14px;background:rgba(0,0,0,.15)" placeholder="选择左侧文件开始编辑..."></textarea>';
-  h+='<div id="obsPreview" style="flex:1;overflow-y:auto;padding:14px 18px;font-size:13px;line-height:1.8;color:#c0c5d4;scrollbar-width:thin;scrollbar-color:#464d65 transparent;display:none;border-left:1px solid rgba(255,255,255,.06)"></div></div>';
+  h+='<textarea id="obsEditor" class="inp" style="flex:1;resize:none;border:none;border-radius:0;font-family:Space Grotesk,monospace;font-size:12px;line-height:1.7;padding:14px;background:#f1f5f9;color:var(--text)" placeholder="选择左侧文件开始编辑..."></textarea>';
+  h+='<div id="obsPreview" style="flex:1;overflow-y:auto;padding:14px 18px;font-size:13px;line-height:1.8;color:var(--text);scrollbar-width:thin;scrollbar-color:#94a3b8 transparent;display:none;border-left:1px solid var(--border)"></div></div>';
 
-  h+='<div id="obsPanelGraph" style="flex:1;overflow:hidden;display:none;background:rgba(0,0,0,.15);position:relative"><div id="obsGraphSvg" style="width:100%;height:100%"></div></div>';
+  h+='<div id="obsPanelGraph" style="flex:1;overflow:hidden;display:none;background:var(--bg);position:relative"><div id="obsGraphSvg" style="width:100%;height:100%"></div></div>';
   h+='</div></div>';
   return h;
 };
@@ -42,9 +42,9 @@ function switchObsTab(tab) {
       btnG = document.getElementById('obsTabGraph');
   editP.style.display = tab === 'graph' ? 'none' : 'flex';
   graphP.style.display = tab === 'graph' ? 'flex' : 'none';
-  btnE.style.background = tab === 'edit' ? 'rgba(255,255,255,.05)' : 'transparent';
-  btnP.style.background = tab === 'preview' ? 'rgba(255,255,255,.05)' : 'transparent';
-  btnG.style.background = tab === 'graph' ? 'rgba(255,255,255,.05)' : 'transparent';
+  btnE.style.background = tab === 'edit' ? 'var(--bg)' : 'transparent';
+  btnP.style.background = tab === 'preview' ? 'var(--bg)' : 'transparent';
+  btnG.style.background = tab === 'graph' ? 'var(--bg)' : 'transparent';
   var prev = document.getElementById('obsPreview');
   prev.style.display = tab === 'preview' ? '' : 'none';
   if (tab === 'preview' && obsCurPath) renderObsPreview();
