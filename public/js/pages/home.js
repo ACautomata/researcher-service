@@ -25,7 +25,7 @@ var featureCards = [
 var homeSearchResult = null;   /* { query, reply } or null */
 var homeSearchLoading = false;
 
-pages.home = function() {
+pages.home = async function() {
   var isLoggedIn = !!authUser;
   var h = '';
 
