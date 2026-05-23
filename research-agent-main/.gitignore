@@ -1,0 +1,66 @@
+# === Sensitive: tokens & credentials ===
+.env
+secrets.json
+agents/*/agent/auth-profiles.json
+agents/*/agent/models.json
+agents/*/agent/auth-state.json
+**/*.key
+**/*.pem
+**/secrets*
+
+# === Runtime data ===
+logs/
+tasks/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.db
+*.db-shm
+*.db-wal
+lcm.db*
+
+# === QMD cache & index ===
+qmd/
+agents/*/qmd/
+
+# === Session & state ===
+agents/*/sessions/
+credentials/
+cron/
+devices/
+identity/
+feishu/
+exec-approvals.json
+
+# === Config backups ===
+openclaw.json.bak
+openclaw.json.last-good
+
+# === Internal metadata ===
+.clawhub-init-complete
+.config/
+
+# === Workspace runtime ===
+workspace/.openclaw/
+workspace-paper-review/.openclaw/
+
+# === OS / editor ===
+.DS_Store
+*.swp
+*.swo
+*~
+
+# === Managed by CLI (do not track) ===
+extensions/
+
+# === Channel runtime data ===
+qqbot/
+
+# === Dreaming runtime data ===
+workspace/memory/.dreams/
+workspace/memory/dreaming/
+workspace-paper-review/memory/.dreams/
+workspace-paper-review/memory/dreaming/
+
+# === Sensitive user data ===
+workspace/zhihu_cookies.json

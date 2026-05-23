@@ -37,6 +37,11 @@ class Config:
     # 指定 admin 用户名（注册时如果匹配则自动设为 admin 角色，留空则第一个注册用户为 admin）
     ADMIN_USERNAME: str = os.getenv("ADMIN_USERNAME", "admin")
 
+    # OpenClaw 网关（本地 Agent 平台，端口 18789）
+    OPENCLAW_GATEWAY_URL: str = os.getenv("OPENCLAW_GATEWAY_URL", "http://127.0.0.1:18789")
+    OPENCLAW_GATEWAY_TOKEN: str = os.getenv("OPENCLAW_GATEWAY_TOKEN", "")
+    OPENCLAW_ENABLED: bool = os.getenv("OPENCLAW_ENABLED", "false").lower() == "true"
+
     @classmethod
     def ai_headers(cls) -> dict:
         return {
@@ -63,3 +68,6 @@ AUTH_ENABLED = cfg.AUTH_ENABLED
 AUTH_SESSION_DAYS = cfg.AUTH_SESSION_DAYS
 PIPELINE_REQUIRES_LOGIN = cfg.PIPELINE_REQUIRES_LOGIN
 ADMIN_USERNAME = cfg.ADMIN_USERNAME
+OPENCLAW_GATEWAY_URL = cfg.OPENCLAW_GATEWAY_URL
+OPENCLAW_GATEWAY_TOKEN = cfg.OPENCLAW_GATEWAY_TOKEN
+OPENCLAW_ENABLED = cfg.OPENCLAW_ENABLED

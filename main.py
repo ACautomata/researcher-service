@@ -8,7 +8,7 @@ from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from config import HOST, PORT, AI_API_BASE, AI_MODEL, AUTH_ENABLED, PIPELINE_REQUIRES_LOGIN
+from config import HOST, PORT, AI_API_BASE, AI_MODEL, AUTH_ENABLED, PIPELINE_REQUIRES_LOGIN, OPENCLAW_ENABLED
 from database import init_db
 
 from routes.kb import router as kb_router
@@ -22,6 +22,7 @@ from routes.auth import router as auth_router, session_user
 from routes.user_settings import router as user_settings_router
 from routes.dashboard import router as dashboard_router
 from routes.param import router as param_router
+from routes.openclaw import router as openclaw_router
 from services.request_context import ctx_user_id, ctx_user_role
 
 
@@ -38,6 +39,7 @@ def _pipeline_api_path(path: str) -> bool:
         "/api/v1/agent",
         "/api/v1/obsidian",
         "/api/v1/param",
+        "/api/v1/openclaw",
     ):
         if path == prefix or path.startswith(prefix + "/"):
             return True
@@ -51,6 +53,7 @@ async def lifespan(app):
     print(f"\n  [OK] 数据库: ./pipeline.db")
     print(f"  [OK] AI API: {AI_API_BASE} / {AI_MODEL}")
     print(f"  [OK] 鉴权:   AUTH_ENABLED={'true' if AUTH_ENABLED else 'false'}  PIPELINE_REQUIRES_LOGIN={'true' if PIPELINE_REQUIRES_LOGIN else 'false'}")
+    print(f"  [OK] OpenClaw: {'已启用' if OPENCLAW_ENABLED else '未启用'}")
     print(f"  [OK] 地址:   http://localhost:{PORT}")
     print(f"  [OK] 文档:   http://localhost:{PORT}/docs\n")
     yield
@@ -72,6 +75,7 @@ app.include_router(auth_router)
 app.include_router(user_settings_router)
 app.include_router(dashboard_router)
 app.include_router(param_router)
+app.include_router(openclaw_router)
 
 
 @app.middleware("http")
@@ -84,7 +88,7 @@ async def user_and_auth_middleware(request: Request, call_next):
         token = auth[7:].strip()
     else:
         p = request.url.path
-        if p.endswith("/stream") and "/api/v1/agent/chat/" in p:
+        if p.endswith("/stream") and ("/api/v1/agent/chat/" in p or "/api/v1/openclaw/chat/" in p):
             token = (request.query_params.get("access_token") or "").strip()
 
     user = await session_user(token) if token else None
