@@ -242,6 +242,8 @@ async def openclaw_apply_config(req: ApplyConfigRequest, request: Request):
         api_protocol = "anthropic-messages"
         context_window = 131072
         max_tokens = 131072
+        if not api_base.endswith("/anthropic"):
+            api_base = api_base.rstrip("/") + "/anthropic"
     elif "openai" in base_lower:
         provider_name = "openai"
         model_id = api_model or "gpt-4o"
