@@ -208,7 +208,67 @@ async def openclaw_paper_review_progress(tid: str):
     }
 
 
-# ── 会话列表 ──────────────────────────────────────────────
+# ── 应用配置到 Docker ──────────────────────────────────────
+
+class ApplyConfigRequest(BaseModel):
+    api_key: Optional[str] = None
+    api_base: Optional[str] = None
+
+
+@router.post("/apply-config")
+async def openclaw_apply_config(req: ApplyConfigRequest, request: Request):
+    """将 API Key 写入 Docker 的 openclaw.json 并重启 OpenClaw 容器"""
+    import subprocess, tempfile, os as _os
+
+    if not OPENCLAW_ENABLED:
+        raise HTTPException(400, "OpenClaw 未启用")
+
+    try:
+        # 1. 更新 Docker .env
+        env_path = "/root/openclaw-docker-cn-im-main/.env"
+        if _os.path.exists(env_path):
+            lines = open(env_path).readlines()
+            new_lines = []
+            for line in lines:
+                if line.startswith("DEEPSEEK_API_KEY="):
+                    if req.api_key:
+                        new_lines.append(f"DEEPSEEK_API_KEY={req.api_key}\n")
+                    continue
+                new_lines.append(line)
+            open(env_path, "w").writelines(new_lines)
+
+        # 2. 更新 openclaw.json 中的模型配置
+        import json as _json
+        oc_config = "/root/.openclaw/openclaw.json"
+        if _os.path.exists(oc_config):
+            data = _json.load(open(oc_config))
+            providers = data.get("models", {}).get("providers", {})
+            # 找到 deepseek provider
+            for provider_name, provider in list(providers.items()):
+                if "deepseek" in provider_name.lower():
+                    if req.api_base:
+                        provider["baseUrl"] = req.api_base
+                    if req.api_key:
+                        provider["apiKey"] = req.api_key
+            # 确保 gateway http responses 启用
+            gw = data.setdefault("gateway", {})
+            gw_http = gw.setdefault("http", {})
+            gw_ep = gw_http.setdefault("endpoints", {})
+            gw_ep["responses"] = {"enabled": True}
+            _json.dump(data, open(oc_config, "w"), indent=2, ensure_ascii=False)
+
+        # 3. 重启 Docker 容器
+        result = subprocess.run(
+            ["docker", "compose", "restart"],
+            cwd="/root/openclaw-docker-cn-im-main",
+            capture_output=True, text=True, timeout=30
+        )
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr or "重启失败")
+
+        return {"success": True, "message": "配置已应用，OpenClaw 正在重启"}
+    except Exception as e:
+        raise HTTPException(500, f"应用配置失败: {str(e)}")
 
 @router.get("/sessions")
 async def openclaw_sessions():

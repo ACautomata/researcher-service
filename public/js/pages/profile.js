@@ -150,6 +150,10 @@ async function loadProfilePage() {
     h += '<input class="inp" id="pf_oc_base" placeholder="https://api.deepseek.com/anthropic" value="'+esc(s.openclaw_api_base||'')+'"></div>';
     h += '<div class="auth-field mb12"><label class="auth-lbl">API Key（SK）</label>';
     h += '<input class="inp" type="password" id="pf_oc_key" placeholder="'+(s.openclaw_api_key_set ? '已保存 · 当前：'+esc(s.openclaw_api_key_masked||'***') : '未设置，填写后保存')+'"></div>';
+    h += '<div style="margin-bottom:12px">';
+    h += '<button type="button" class="btn bp" style="font-size:12px;padding:8px 16px" onclick="saveAndApplyOpenClaw()"><i class="fa-solid fa-rocket"></i> 保存并应用到 OpenClaw</button>';
+    h += '<span style="font-size:10px;color:var(--text-muted);margin-left:8px">会将 Key 写入 Docker 容器并自动重启 OpenClaw</span>';
+    h += '</div>';
     h += '<button type="button" class="btn bp" onclick="saveProfileForm()"><i class="fa-solid fa-floppy-disk"></i> 保存配置</button>';
 
     // 主题配色选择器
@@ -320,6 +324,30 @@ async function changePassword() {
     setTimeout(function() { doLogout(); }, 1200);
   } catch (e) {
     toast('修改失败: ' + e.message, 'fa-exclamation-circle', '#FF6B81');
+  }
+}
+
+async function saveAndApplyOpenClaw() {
+  // 先保存 OpenClaw 配置到数据库
+  var body = {};
+  var oc_base = document.getElementById('pf_oc_base');
+  var oc_key = document.getElementById('pf_oc_key');
+  if (oc_base && oc_base.value.trim()) body.openclaw_api_base = oc_base.value.trim();
+  if (oc_key && oc_key.value) body.openclaw_api_key = oc_key.value;
+  if (!body.openclaw_api_base && !body.openclaw_api_key) {
+    toast('请填写 Base URL 或 API Key', 'fa-exclamation-circle', '#F5A623');
+    return;
+  }
+  try {
+    await putUserSettings(body);
+    toast('配置已保存，正在应用到 OpenClaw...', 'fa-spinner fa-spin', 'var(--accent)');
+    var res = await api('POST', '/openclaw/apply-config', {
+      api_key: oc_key ? oc_key.value : null,
+      api_base: oc_base ? oc_base.value.trim() : null
+    });
+    toast(res.message || '已应用', 'fa-check-circle', '#10b981');
+  } catch (e) {
+    toast('保存成功但应用失败: ' + e.message, 'fa-exclamation-circle', '#FF6B81');
   }
 }
 
