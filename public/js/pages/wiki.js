@@ -157,6 +157,7 @@ function renderWikiPaper(el, res) {
   h += '<button class="tab-btn' + (wikiTab === 'graph' ? ' on' : '') + '" onclick="wikiSwitchTab(\'graph\')" style="font-size:11px;padding:5px 12px"><i class="fa-solid fa-project-diagram"></i> 图谱</button>';
   h += '</div>';
   h += '<button class="btn bp" onclick="wikiSavePaper()" style="font-size:11px;padding:5px 12px"><i class="fa-solid fa-floppy-disk"></i> 保存</button>';
+  h += '<button class="btn" onclick="wikiDownload()" style="font-size:11px;padding:5px 12px"><i class="fa-solid fa-download"></i> 下载</button>';
   h += '</div>';
 
   // ── Source tab ──
@@ -295,6 +296,21 @@ async function wikiSavePaper() {
   } catch(e) {
     toast('保存失败: ' + e.message, 'fa-exclamation-circle', '#FF6B81');
   }
+}
+
+function wikiDownload() {
+  var key = wikiActiveDomain + '/' + wikiActivePaper;
+  var res = wikiPaperCache[key];
+  if (!res) return;
+  var blob = new Blob([res.content], { type: 'text/markdown;charset=utf-8' });
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement('a');
+  a.href = url;
+  a.download = wikiActivePaper + '.md';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
 }
 
 function wikiTag(text, color) {
