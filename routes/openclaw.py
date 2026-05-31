@@ -637,3 +637,22 @@ async def wiki_paper(domain: str, paper_id: str):
         "body": body,
         "content": content,
     }
+
+
+class WikiSaveBody(BaseModel):
+    content: str
+
+
+@router.put("/wiki/{domain}/{paper_id}")
+async def wiki_save(domain: str, paper_id: str, body: WikiSaveBody):
+    """保存 wiki 论文内容到磁盘"""
+    import os as _os
+    fpath = _os.path.join(_WIKI_ROOT, "domains", domain, "papers", paper_id + ".md")
+    if not _os.path.isfile(fpath):
+        raise HTTPException(404, f"论文不存在: {domain}/{paper_id}")
+    try:
+        with open(fpath, "w", encoding="utf-8") as f:
+            f.write(body.content)
+        return {"success": True, "path": fpath}
+    except Exception as e:
+        raise HTTPException(500, f"保存失败: {str(e)}")

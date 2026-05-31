@@ -150,15 +150,18 @@ function renderWikiPaper(el, res) {
   h += '</div>';
 
   // ── Tab bar ──
-  h += '<div class="tab-bar" style="margin-bottom:12px">';
+  h += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">';
+  h += '<div class="tab-bar" style="flex:1">';
   h += '<button class="tab-btn' + (wikiTab === 'source' ? ' on' : '') + '" onclick="wikiSwitchTab(\'source\')" style="font-size:11px;padding:5px 12px"><i class="fa-solid fa-pen"></i> 源码</button>';
   h += '<button class="tab-btn' + (wikiTab === 'preview' ? ' on' : '') + '" onclick="wikiSwitchTab(\'preview\')" style="font-size:11px;padding:5px 12px"><i class="fa-solid fa-eye"></i> 预览</button>';
   h += '<button class="tab-btn' + (wikiTab === 'graph' ? ' on' : '') + '" onclick="wikiSwitchTab(\'graph\')" style="font-size:11px;padding:5px 12px"><i class="fa-solid fa-project-diagram"></i> 图谱</button>';
   h += '</div>';
+  h += '<button class="btn bp" onclick="wikiSavePaper()" style="font-size:11px;padding:5px 12px"><i class="fa-solid fa-floppy-disk"></i> 保存</button>';
+  h += '</div>';
 
   // ── Source tab ──
   if (wikiTab === 'source') {
-    h += '<textarea id="wikiEditor" style="width:100%;min-height:50vh;max-height:55vh;font-family:monospace;font-size:12px;line-height:1.6;padding:12px;background:#1e293b;color:#e2e8f0;border:1px solid var(--border);border-radius:8px;resize:vertical;scrollbar-width:thin" readonly>' + esc(res.content) + '</textarea>';
+    h += '<textarea id="wikiEditor" style="width:100%;min-height:50vh;max-height:55vh;font-family:monospace;font-size:12px;line-height:1.6;padding:12px;background:#1e293b;color:#e2e8f0;border:1px solid var(--border);border-radius:8px;resize:vertical;scrollbar-width:thin">' + esc(res.content) + '</textarea>';
   }
 
   // ── Preview tab ──
@@ -277,6 +280,21 @@ function wikiRenderGraph(res) {
       .attr('x2', function(d) { return d.target.x; }).attr('y2', function(d) { return d.target.y; });
     node.attr('transform', function(d) { return 'translate(' + d.x + ',' + d.y + ')'; });
   });
+}
+
+/* ── Save ── */
+async function wikiSavePaper() {
+  var editor = document.getElementById('wikiEditor');
+  if (!editor) return;
+  var content = editor.value;
+  try {
+    await api('PUT', '/openclaw/wiki/' + encodeURIComponent(wikiActiveDomain) + '/' + encodeURIComponent(wikiActivePaper), { content: content });
+    var key = wikiActiveDomain + '/' + wikiActivePaper;
+    wikiPaperCache[key] = null; // invalidate cache so next load fetches fresh
+    toast('已保存', 'fa-check-circle', '#10b981');
+  } catch(e) {
+    toast('保存失败: ' + e.message, 'fa-exclamation-circle', '#FF6B81');
+  }
 }
 
 function wikiTag(text, color) {
