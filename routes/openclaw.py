@@ -249,47 +249,12 @@ async def openclaw_apply_config(req: ApplyConfigRequest, request: Request):
         api_protocol = "anthropic-messages"
         context_window = 200000
         max_tokens = 8192
-    elif "openai" in base_lower:
-        provider_name = "openai"
-        model_id = api_model or "gpt-4o"
-        model_alias = model_id
-        api_protocol = "openai-completions"
-        context_window = 128000
-        max_tokens = 16384
-    elif "dashscope" in base_lower or "aliyun" in base_lower:
-        provider_name = "qwen"
-        model_id = api_model or "qwen3.7-max"
-        model_alias = model_id
-        api_protocol = "openai-completions"
-        context_window = 131072
-        max_tokens = 8192
-    elif "bigmodel" in base_lower or "zhipu" in base_lower:
-        provider_name = "zhipu"
-        model_id = api_model or "glm-4"
-        model_alias = model_id
-        api_protocol = "openai-completions"
-        context_window = 128000
-        max_tokens = 4096
-    elif "moonshot" in base_lower:
-        provider_name = "moonshot"
-        model_id = api_model or "moonshot-v1-128k"
-        model_alias = model_id
-        api_protocol = "openai-completions"
-        context_window = 128000
-        max_tokens = 4096
-    elif "minimax" in base_lower:
-        provider_name = "minimax"
-        model_id = api_model or "MiniMax-M2.7"
-        model_alias = model_id
-        api_protocol = "anthropic-messages"
-        context_window = 204800
-        max_tokens = 131072
     else:
         provider_name = "custom"
         model_id = api_model or "default-model"
         model_alias = model_id
-        api_protocol = "openai-completions"
-        context_window = 128000
+        api_protocol = "anthropic-messages"
+        context_window = 131072
         max_tokens = 4096
 
     try:

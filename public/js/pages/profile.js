@@ -7,44 +7,14 @@ var AI_PROVIDERS = [
     models: ['deepseek-v4-pro', 'deepseek-chat', 'deepseek-reasoner', 'deepseek-v4-flash']
   },
   {
-    id: 'deepseek-openai',
-    name: 'DeepSeek（OpenAI协议）',
-    base_url: 'https://api.deepseek.com',
-    models: ['deepseek-chat', 'deepseek-reasoner', 'deepseek-v4-flash', 'deepseek-v4-pro']
-  },
-  {
-    id: 'zhipu',
-    name: '智谱 GLM',
-    base_url: 'https://open.bigmodel.cn/api/paas/v4',
-    models: ['GLM-5.1', 'GLM-5', 'GLM-4.7-Flash', 'GLM-4-Long', 'GLM-4-Flash']
-  },
-  {
-    id: 'openai',
-    name: 'OpenAI',
-    base_url: 'https://api.openai.com/v1',
-    models: ['gpt-5.5', 'gpt-5.5-pro', 'gpt-5.4-mini', 'gpt-4.1', 'gpt-4.1-mini', 'o4-mini']
-  },
-  {
     id: 'anthropic',
     name: 'Anthropic（Claude）',
     base_url: 'https://api.anthropic.com',
     models: ['claude-sonnet-4-20250514', 'claude-opus-4-20250514', 'claude-haiku-3-5']
   },
   {
-    id: 'qwen',
-    name: '通义千问 (Qwen)',
-    base_url: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-    models: ['qwen3.7-max', 'qwen3.6-plus', 'qwen3.6-flash', 'qwen-max', 'qwen-plus']
-  },
-  {
-    id: 'moonshot',
-    name: 'Moonshot (Kimi)',
-    base_url: 'https://api.moonshot.cn/v1',
-    models: ['kimi-k2.6', 'kimi-k2.5', 'kimi-k2-thinking', 'moonshot-v1-128k', 'moonshot-v1-32k', 'moonshot-v1-8k']
-  },
-  {
     id: 'custom',
-    name: '自定义 (Custom)',
+    name: '自定义（Anthropic协议）',
     base_url: '',
     models: []
   }
@@ -57,12 +27,8 @@ function findProviderByUrl(url) {
     var p = AI_PROVIDERS[i];
     if (p.base_url && p.base_url.replace(/\/+$/, '').toLowerCase() === clean) return p;
   }
-  // 模糊匹配
   if (clean.indexOf('deepseek') >= 0) return AI_PROVIDERS[0];
-  if (clean.indexOf('bigmodel') >= 0) return AI_PROVIDERS[1];
-  if (clean.indexOf('openai') >= 0) return AI_PROVIDERS[2];
-  if (clean.indexOf('dashscope') >= 0 || clean.indexOf('aliyun') >= 0) return AI_PROVIDERS[3];
-  if (clean.indexOf('moonshot') >= 0) return AI_PROVIDERS[4];
+  if (clean.indexOf('anthropic') >= 0) return AI_PROVIDERS[1];
   return null;
 }
 pages.profile = async function() {
