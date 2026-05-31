@@ -2,7 +2,13 @@
 var AI_PROVIDERS = [
   {
     id: 'deepseek',
-    name: 'DeepSeek',
+    name: 'DeepSeek（Anthropic协议）',
+    base_url: 'https://api.deepseek.com/anthropic',
+    models: ['deepseek-v4-pro', 'deepseek-chat', 'deepseek-reasoner', 'deepseek-v4-flash']
+  },
+  {
+    id: 'deepseek-openai',
+    name: 'DeepSeek（OpenAI协议）',
     base_url: 'https://api.deepseek.com',
     models: ['deepseek-chat', 'deepseek-reasoner', 'deepseek-v4-flash', 'deepseek-v4-pro']
   },
@@ -17,6 +23,12 @@ var AI_PROVIDERS = [
     name: 'OpenAI',
     base_url: 'https://api.openai.com/v1',
     models: ['gpt-5.5', 'gpt-5.5-pro', 'gpt-5.4-mini', 'gpt-4.1', 'gpt-4.1-mini', 'o4-mini']
+  },
+  {
+    id: 'anthropic',
+    name: 'Anthropic（Claude）',
+    base_url: 'https://api.anthropic.com',
+    models: ['claude-sonnet-4-20250514', 'claude-opus-4-20250514', 'claude-haiku-3-5']
   },
   {
     id: 'qwen',
