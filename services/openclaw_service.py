@@ -63,7 +63,9 @@ async def chat(
             else:
                 input_items.append({"type": "message", "role": "user", "content": [{"type": "input_text", "text": content}]})
 
+    # Build current user message content blocks
     user_content = []
+    file_descriptions = []
     if files:
         for f in files:
             fname = f.get("name", "file")
@@ -72,7 +74,13 @@ async def chat(
             if ftype and ftype.startswith("image/"):
                 user_content.append({"type": "input_image", "image_url": fdata})
             else:
-                user_content.append({"type": "input_file", "filename": fname, "file_data": fdata})
+                file_descriptions.append(fname)
+    if file_descriptions:
+        file_note = "（用户上传了附件：" + "、".join(file_descriptions) + "）"
+        if message:
+            message = file_note + "\n\n" + message
+        else:
+            message = file_note
     if message:
         user_content.append({"type": "input_text", "text": message})
     input_items.append({"type": "message", "role": "user", "content": user_content})
@@ -129,8 +137,9 @@ async def chat_stream(
             else:
                 input_items.append({"type": "message", "role": "user", "content": [{"type": "input_text", "text": content}]})
 
-    # Build current user message content blocks
+    # Build current message content
     user_content = []
+    file_descriptions = []
     if files:
         for f in files:
             fname = f.get("name", "file")
@@ -139,7 +148,13 @@ async def chat_stream(
             if ftype and ftype.startswith("image/"):
                 user_content.append({"type": "input_image", "image_url": fdata})
             else:
-                user_content.append({"type": "input_file", "filename": fname, "file_data": fdata})
+                file_descriptions.append(fname)
+    if file_descriptions:
+        file_note = "（用户上传了附件：" + "、".join(file_descriptions) + "）"
+        if message:
+            message = file_note + "\n\n" + message
+        else:
+            message = file_note
     if message:
         user_content.append({"type": "input_text", "text": message})
     input_items.append({"type": "message", "role": "user", "content": user_content})

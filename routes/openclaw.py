@@ -339,7 +339,7 @@ async def openclaw_apply_config(req: ApplyConfigRequest, request: Request):
         for sub_id in ["autoresearch", "paper-review", "idea-generate"]:
             sub_dir = f"/root/.openclaw/agents/{sub_id}/agent"
             _os.makedirs(sub_dir, exist_ok=True)
-            auth_path = os.path.join(sub_dir, "auth-profiles.json")
+            auth_path = _os.path.join(sub_dir, "auth-profiles.json")
             _json.dump(agent_auth, open(auth_path, "w"), indent=2)
 
         # ── 3. 写入容器并重启 ──
