@@ -353,18 +353,29 @@ async def openclaw_apply_config(req: ApplyConfigRequest, request: Request):
 
         _json.dump(data, open(oc_config, "w"), indent=2, ensure_ascii=False)
 
-        # ── 3. 写入容器并热重启网关（不触发 init.sh 覆盖） ──
-        # docker compose restart 会触发 init.sh 覆盖配置，改用 exec + gateway restart
+        # ── 3. 写入容器并重启 ──
+        # 策略: compose restart → init.sh 覆盖 → sleep → docker cp 回写 → 等待 gateway 重读
+        subprocess.run(
+            ["docker", "compose", "restart"],
+            cwd="/root/openclaw-docker-cn-im-main",
+            capture_output=True, text=True, timeout=30
+        )
+        # 等待容器启动完成（init.sh 此时已覆盖配置）
+        import time
+        time.sleep(18)
+        # 重新推送我们的配置
         subprocess.run(
             ["docker", "cp", oc_config, "openclaw-gateway:/home/node/.openclaw/openclaw.json"],
             capture_output=True, text=True, timeout=10
         )
-        result = subprocess.run(
-            ["docker", "exec", "openclaw-gateway", "openclaw", "gateway", "restart"],
-            capture_output=True, text=True, timeout=30
+        # 热重启网关进程（kill 后 init.sh 会重新启动它，读新配置）
+        find_result = subprocess.run(
+            ["docker", "exec", "openclaw-gateway", "sh", "-c",
+             "pkill -f 'openclaw' 2>/dev/null; echo done"],
+            capture_output=True, text=True, timeout=15
         )
-        if result.returncode != 0:
-            raise RuntimeError(result.stderr or result.stdout or "重启失败")
+        # 等待 gateway 重新启动
+        time.sleep(10)
 
         return {
             "success": True,
