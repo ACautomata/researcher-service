@@ -290,7 +290,12 @@ async function ocSend(agentId) {
           btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-paper-plane"></i> 发送';
         } else if (data.type === 'error') {
           throw new Error(data.text || '未知错误');
+        } else if (data.type === 'raw') {
+          fullResponse += data.text || '';
         }
+        // 更新 loading 文本
+        var t = document.getElementById(loadingId + '_t');
+        if (t && fullResponse) t.textContent = fullResponse;
       } catch(e) {
         if (e.message && e.message.indexOf('JSON') === -1) throw e;
       }

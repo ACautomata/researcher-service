@@ -353,6 +353,14 @@ async def openclaw_apply_config(req: ApplyConfigRequest, request: Request):
 
         _json.dump(data, open(oc_config, "w"), indent=2, ensure_ascii=False)
 
+        # ── 4. 确保 contextEngine 使用 legacy（Docker 镜像无 lossless-claw） ──
+        if "plugins" not in data:
+            data["plugins"] = {}
+        if "slots" not in data["plugins"]:
+            data["plugins"]["slots"] = {}
+        data["plugins"]["slots"]["contextEngine"] = "legacy"
+        _json.dump(data, open(oc_config, "w"), indent=2, ensure_ascii=False)
+
         # ── 3. 写入容器并重启 ──
         # 策略: compose restart → init.sh 覆盖 → sleep → docker cp 回写 → 等待 gateway 重读
         subprocess.run(
