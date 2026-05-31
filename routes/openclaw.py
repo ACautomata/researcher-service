@@ -369,13 +369,20 @@ async def openclaw_apply_config(req: ApplyConfigRequest, request: Request):
             capture_output=True, text=True, timeout=10
         )
         # 热重启网关进程（kill 后 init.sh 会重新启动它，读新配置）
-        find_result = subprocess.run(
+        # 如果 kill 导致容器重启，配置可能被覆盖，已通过上面 docker cp 处理
+        subprocess.run(
             ["docker", "exec", "openclaw-gateway", "sh", "-c",
              "pkill -f 'openclaw' 2>/dev/null; echo done"],
             capture_output=True, text=True, timeout=15
         )
-        # 等待 gateway 重新启动
-        time.sleep(10)
+        # 额外等 15 秒确保 gateway 完全就绪
+        time.sleep(15)
+        # 如果容器恰好重启了，再补一次 docker cp
+        subprocess.run(
+            ["docker", "cp", oc_config, "openclaw-gateway:/home/node/.openclaw/openclaw.json"],
+            capture_output=True, text=True, timeout=10
+        )
+        time.sleep(5)
 
         return {
             "success": True,
