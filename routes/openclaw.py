@@ -213,51 +213,147 @@ async def openclaw_paper_review_progress(tid: str):
 class ApplyConfigRequest(BaseModel):
     api_key: Optional[str] = None
     api_base: Optional[str] = None
+    api_model: Optional[str] = None
 
 
 @router.post("/apply-config")
 async def openclaw_apply_config(req: ApplyConfigRequest, request: Request):
-    """将 API Key 写入 Docker 的 openclaw.json 并重启 OpenClaw 容器"""
+    """将界面 API 配置写入 Docker 的 openclaw.json 并重启 OpenClaw 容器"""
     import subprocess, tempfile, os as _os
 
     if not OPENCLAW_ENABLED:
         raise HTTPException(400, "OpenClaw 未启用")
 
+    api_base = (req.api_base or "").strip()
+    api_key = (req.api_key or "").strip()
+    api_model = (req.api_model or "").strip()
+
+    if not api_base and not api_key:
+        raise HTTPException(400, "请提供 API Base URL 或 API Key")
+
+    # ── 自动推断 provider 名称 & 协议 ──
+    base_lower = api_base.lower()
+    if "deepseek" in base_lower:
+        provider_name = "deepseek"
+        model_id = api_model or "deepseek-v4-pro"
+        model_alias = "DeepSeek V4 Pro"
+        api_protocol = "anthropic-messages"
+        context_window = 131072
+        max_tokens = 131072
+    elif "openai" in base_lower:
+        provider_name = "openai"
+        model_id = api_model or "gpt-4o"
+        model_alias = model_id
+        api_protocol = "openai-completions"
+        context_window = 128000
+        max_tokens = 16384
+    elif "dashscope" in base_lower or "aliyun" in base_lower:
+        provider_name = "qwen"
+        model_id = api_model or "qwen3.7-max"
+        model_alias = model_id
+        api_protocol = "openai-completions"
+        context_window = 131072
+        max_tokens = 8192
+    elif "bigmodel" in base_lower or "zhipu" in base_lower:
+        provider_name = "zhipu"
+        model_id = api_model or "glm-4"
+        model_alias = model_id
+        api_protocol = "openai-completions"
+        context_window = 128000
+        max_tokens = 4096
+    elif "moonshot" in base_lower:
+        provider_name = "moonshot"
+        model_id = api_model or "moonshot-v1-128k"
+        model_alias = model_id
+        api_protocol = "openai-completions"
+        context_window = 128000
+        max_tokens = 4096
+    elif "minimax" in base_lower:
+        provider_name = "minimax"
+        model_id = api_model or "MiniMax-M2.7"
+        model_alias = model_id
+        api_protocol = "anthropic-messages"
+        context_window = 204800
+        max_tokens = 131072
+    else:
+        provider_name = "custom"
+        model_id = api_model or "default-model"
+        model_alias = model_id
+        api_protocol = "openai-completions"
+        context_window = 128000
+        max_tokens = 4096
+
     try:
-        # 1. 更新 Docker .env
+        import json as _json
+
+        # ── 1. 更新 Docker .env ──
         env_path = "/root/openclaw-docker-cn-im-main/.env"
         if _os.path.exists(env_path):
-            lines = open(env_path).readlines()
+            env_lines = open(env_path).readlines()
             new_lines = []
-            for line in lines:
-                if line.startswith("DEEPSEEK_API_KEY="):
-                    if req.api_key:
-                        new_lines.append(f"DEEPSEEK_API_KEY={req.api_key}\n")
-                    continue
-                new_lines.append(line)
+            for line in env_lines:
+                if line.startswith("DEEPSEEK_API_KEY=") and api_key:
+                    new_lines.append(f"DEEPSEEK_API_KEY={api_key}\n")
+                else:
+                    new_lines.append(line)
             open(env_path, "w").writelines(new_lines)
 
-        # 2. 更新 openclaw.json 中的模型配置
-        import json as _json
+        # ── 2. 完整替换 openclaw.json 模型配置 ──
         oc_config = "/root/.openclaw/openclaw.json"
-        if _os.path.exists(oc_config):
-            data = _json.load(open(oc_config))
-            providers = data.get("models", {}).get("providers", {})
-            # 找到 deepseek provider
-            for provider_name, provider in list(providers.items()):
-                if "deepseek" in provider_name.lower():
-                    if req.api_base:
-                        provider["baseUrl"] = req.api_base
-                    if req.api_key:
-                        provider["apiKey"] = req.api_key
-            # 确保 gateway http responses 启用
-            gw = data.setdefault("gateway", {})
-            gw_http = gw.setdefault("http", {})
-            gw_ep = gw_http.setdefault("endpoints", {})
-            gw_ep["responses"] = {"enabled": True}
-            _json.dump(data, open(oc_config, "w"), indent=2, ensure_ascii=False)
+        if not _os.path.exists(oc_config):
+            raise HTTPException(500, "openclaw.json 不存在")
 
-        # 3. 重启 Docker 容器
+        data = _json.load(open(oc_config))
+
+        # 替换 models.providers（清空旧的，写入新的）
+        data["models"]["providers"] = {
+            provider_name: {
+                "baseUrl": api_base,
+                "apiKey": api_key,
+                "api": api_protocol,
+                "authHeader": True,
+                "models": [
+                    {
+                        "id": model_id,
+                        "name": model_alias,
+                        "reasoning": True,
+                        "input": ["text"],
+                        "contextWindow": context_window,
+                        "maxTokens": max_tokens,
+                    }
+                ],
+            }
+        }
+
+        # 更新 agent 默认模型
+        if "agents" not in data:
+            data["agents"] = {}
+        if "defaults" not in data["agents"]:
+            data["agents"]["defaults"] = {}
+        data["agents"]["defaults"]["model"] = {
+            "primary": f"{provider_name}/{model_id}"
+        }
+        data["agents"]["defaults"]["models"] = {
+            f"{provider_name}/{model_id}": {"alias": model_alias}
+        }
+
+        # 更新 auth profiles
+        data["auth"]["profiles"] = {
+            f"{provider_name}:default": {
+                "provider": provider_name,
+                "mode": "api_key",
+            }
+        }
+
+        # 确保 gateway http responses 启用
+        gw = data.setdefault("gateway", {})
+        gw_http = gw.setdefault("http", {})
+        gw_ep = gw_http.setdefault("endpoints", {})
+        gw_ep["responses"] = {"enabled": True}
+
+        _json.dump(data, open(oc_config, "w"), indent=2, ensure_ascii=False)
+
+        # ── 3. 重启 Docker 容器 ──
         result = subprocess.run(
             ["docker", "compose", "restart"],
             cwd="/root/openclaw-docker-cn-im-main",
@@ -266,7 +362,13 @@ async def openclaw_apply_config(req: ApplyConfigRequest, request: Request):
         if result.returncode != 0:
             raise RuntimeError(result.stderr or "重启失败")
 
-        return {"success": True, "message": "配置已应用，OpenClaw 正在重启"}
+        return {
+            "success": True,
+            "message": f"已切换到 {model_alias} ({api_protocol})，OpenClaw 正在重启",
+            "provider": provider_name,
+            "model": model_id,
+            "protocol": api_protocol,
+        }
     except Exception as e:
         raise HTTPException(500, f"应用配置失败: {str(e)}")
 

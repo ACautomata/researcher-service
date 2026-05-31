@@ -328,6 +328,8 @@ async function applyOpenClawFromMain() {
   var apiBase = (presetBase && presetBase.value) ? presetBase.value : ((manualBase && manualBase.value.trim()) || '');
   var apiKey = document.getElementById('pf_ai_key');
   var keyVal = apiKey ? apiKey.value : '';
+  var modelEl = document.getElementById('pf_ai_model');
+  var modelVal = modelEl ? modelEl.value.trim() : '';
 
   if (!apiBase && !keyVal) {
     toast('请先填写上方的 API Base URL 或 API Key', 'fa-exclamation-circle', '#F5A623');
@@ -337,7 +339,8 @@ async function applyOpenClawFromMain() {
     toast('正在应用到 OpenClaw...', 'fa-spinner fa-spin', 'var(--accent)');
     var res = await api('POST', '/openclaw/apply-config', {
       api_key: keyVal || null,
-      api_base: apiBase || null
+      api_base: apiBase || null,
+      api_model: modelVal || null
     });
     toast(res.message || '已应用', 'fa-check-circle', '#10b981');
   } catch (e) {
