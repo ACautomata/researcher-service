@@ -155,8 +155,14 @@ function buildOcAgentPage(agentId) {
 
   // ── Input ──
   h += '<div style="display:flex;gap:10px;margin-top:14px;align-items:flex-end">';
-  h += '<div style="flex:1"><textarea class="inp" id="ocInput_' + agentId + '" rows="2" placeholder="向 ' + agent.name + ' 发送消息...（Enter 发送，Shift+Enter 换行）" style="resize:vertical;min-height:44px;font-size:13px;line-height:1.6" onkeydown="if(event.key===\'Enter\'&&!event.shiftKey){event.preventDefault();ocSend(\'' + agentId + '\')}"></textarea></div>';
-  h += '<button class="btn bp" id="ocSend_' + agentId + '" onclick="ocSend(\'' + agentId + '\')" style="padding:10px 20px;font-size:13px;flex-shrink:0;height:fit-content"><i class="fa-solid fa-paper-plane"></i> 发送</button>';
+  h += '<div style="flex:1">';
+  h += '<div id="ocFiles_' + agentId + '" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:6px"></div>';
+  h += '<textarea class="inp" id="ocInput_' + agentId + '" rows="2" placeholder="向 ' + agent.name + ' 发送消息...（Enter 发送，Shift+Enter 换行）" style="resize:vertical;min-height:44px;font-size:13px;line-height:1.6;width:100%" onkeydown="if(event.key===\'Enter\'&&!event.shiftKey){event.preventDefault();ocSend(\'' + agentId + '\')}"></textarea></div>';
+  h += '<div style="display:flex;flex-direction:column;gap:6px;flex-shrink:0">';
+  h += '<button class="btn" onclick="ocPickFile(\'' + agentId + '\')" style="padding:10px 12px;font-size:13px;height:fit-content" title="上传文件"><i class="fa-solid fa-paperclip"></i></button>';
+  h += '<button class="btn bp" id="ocSend_' + agentId + '" onclick="ocSend(\'' + agentId + '\')" style="padding:10px 12px;font-size:13px;flex-shrink:0;height:fit-content"><i class="fa-solid fa-paper-plane"></i></button>';
+  h += '</div>';
+  h += '<input type="file" id="ocFileInput_' + agentId + '" onchange="ocFileSelected(\'' + agentId + '\')" style="display:none" multiple>';
   h += '</div></div></div></div>';
 
   setTimeout(function() { ocCheckHealth(agentId); }, 100);
@@ -223,17 +229,72 @@ function renderOcMsg(msg, agent) {
 
   return '<div style="display:flex;flex-direction:column;align-items:' + align + ';max-width:85%">'
     + '<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;font-size:11px;color:var(--text-muted);font-weight:600"><i class="fa-solid ' + ic + '"></i> ' + name + '</div>'
+    + (msg.files && msg.files.length ? '<div style="margin-bottom:6px">' + msg.files.map(function(fn) { return '<span style="display:inline-block;padding:2px 8px;background:var(--accent);color:#fff;border-radius:4px;font-size:10px;margin-right:4px"><i class="fa-solid fa-paperclip" style="margin-right:3px"></i>' + esc(fn) + '</span>'; }).join('') + '</div>' : '')
     + '<div style="background:' + bg + ';border:1px solid ' + border + ';border-radius:12px;padding:12px 16px;font-size:13px;line-height:1.7;color:var(--text);word-break:break-word;white-space:pre-wrap">' + thinkingHtml + esc(msg.content) + '</div>'
     + '</div>';
+}
+
+/* ── File Upload ── */
+var ocPendingFiles = {};  // { agentId: [{name, data, type}] }
+
+function ocPickFile(agentId) {
+  var input = document.getElementById('ocFileInput_' + agentId);
+  if (input) input.click();
+}
+
+function ocFileSelected(agentId) {
+  var input = document.getElementById('ocFileInput_' + agentId);
+  if (!input || !input.files.length) return;
+  if (!ocPendingFiles[agentId]) ocPendingFiles[agentId] = [];
+  var MAX_SIZE = 20 * 1024 * 1024; // 20MB
+  var filesToRead = input.files.length;
+  var readCount = 0;
+  for (var i = 0; i < input.files.length; i++) {
+    (function(file) {
+      if (file.size > MAX_SIZE) { toast(file.name + ' 超过 20MB 限制', 'fa-exclamation-circle', '#FF6B81'); readCount++; return; }
+      var reader = new FileReader();
+      reader.onload = function() {
+        ocPendingFiles[agentId].push({ name: file.name, data: reader.result, type: file.type });
+        readCount++;
+        if (readCount >= filesToRead) ocRenderFiles(agentId);
+      };
+      reader.readAsDataURL(file);
+    })(input.files[i]);
+  }
+  input.value = '';
+}
+
+function ocRemoveFile(agentId, index) {
+  ocPendingFiles[agentId].splice(index, 1);
+  if (!ocPendingFiles[agentId].length) delete ocPendingFiles[agentId];
+  ocRenderFiles(agentId);
+}
+
+function ocRenderFiles(agentId) {
+  var el = document.getElementById('ocFiles_' + agentId);
+  if (!el) return;
+  var files = ocPendingFiles[agentId] || [];
+  var h = '';
+  for (var i = 0; i < files.length; i++) {
+    var f = files[i];
+    var isImg = f.type && f.type.startsWith('image/');
+    h += '<div style="display:inline-flex;align-items:center;gap:4px;padding:4px 8px;background:var(--accent-light);border-radius:6px;font-size:11px;color:var(--accent);max-width:200px">';
+    h += '<i class="fa-solid ' + (isImg ? 'fa-image' : 'fa-file-lines') + '"></i>';
+    h += '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(f.name) + '</span>';
+    h += '<span onclick="ocRemoveFile(\'' + agentId + '\',' + i + ')" style="cursor:pointer;margin-left:2px">&times;</span>';
+    h += '</div>';
+  }
+  el.innerHTML = h;
 }
 
 /* ── Send (SSE Streaming) ── */
 async function ocSend(agentId) {
   var input = document.getElementById('ocInput_' + agentId);
   var btn = document.getElementById('ocSend_' + agentId);
-  if (!input || !input.value.trim()) return;
-  var text = input.value.trim();
-  input.value = '';
+  var text = (input ? input.value.trim() : '');
+  var files = ocPendingFiles[agentId] || [];
+  if (!text && !files.length) return;
+  if (input) input.value = '';
 
   var activeId = ocGetActive(agentId);
   if (!activeId) return;
@@ -243,11 +304,15 @@ async function ocSend(agentId) {
 
   btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
 
-  // Add user message
-  session.history.push({ role: 'user', content: text });
+  // Add user message (include file info)
+  var userMsg = { role: 'user', content: text };
+  if (files.length) userMsg.files = files.map(function(f) { return f.name; });
+  session.history.push(userMsg);
   var msgArea = document.getElementById('ocMessages_' + agentId);
   var agent = OC_AGENTS[agentId];
-  msgArea.innerHTML += renderOcMsg({ role: 'user', content: text }, agent);
+  msgArea.innerHTML += renderOcMsg(userMsg, agent);
+  // Clear pending files
+  delete ocPendingFiles[agentId];
 
   var loadingId = 'ocLoad_' + Date.now();
   msgArea.innerHTML += '<div id="' + loadingId + '" style="display:flex;flex-direction:column;align-items:flex-start;max-width:85%"><div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;font-size:11px;color:var(--text-muted);font-weight:600"><i class="fa-solid fa-robot"></i> ' + agent.name + '</div><div style="background:var(--bg);border:1px solid var(--border);border-radius:12px;padding:12px 16px;color:var(--text-muted);font-size:13px"><span id="' + loadingId + '_t"><i class="fa-solid fa-spinner fa-spin"></i> 思考中...</span></div></div>';
@@ -262,7 +327,8 @@ async function ocSend(agentId) {
       agent_id: agentId,
       message: text,
       history: session.history.slice(0, -1),
-      temperature: 0.5
+      temperature: 0.5,
+      files: files.length ? files.map(function(f) { return {name: f.name, data: f.data, type: f.type}; }) : null
     });
     var taskId = startRes.task_id;
 

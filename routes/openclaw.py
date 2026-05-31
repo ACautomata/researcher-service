@@ -27,6 +27,7 @@ class ChatRequest(BaseModel):
     system_prompt: Optional[str] = None
     temperature: float = 0.7
     max_tokens: int = 4096
+    files: Optional[list] = None  # [{name, data, type}]
 
 
 class PaperReviewRequest(BaseModel):
@@ -92,6 +93,7 @@ async def openclaw_chat_stream_start(req: ChatRequest):
                 system_prompt=req.system_prompt,
                 temperature=req.temperature,
                 max_tokens=req.max_tokens,
+                files=req.files,
             ):
                 await _openclaw_event_queues[tid].put(sse_event)
         except Exception as e:

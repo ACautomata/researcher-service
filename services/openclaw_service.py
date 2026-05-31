@@ -47,6 +47,7 @@ async def chat(
     temperature: float = 0.7,
     max_tokens: int = 4096,
     session_key: Optional[str] = None,
+    files: Optional[list] = None,
 ) -> dict:
     """向 OpenClaw Agent 发送消息（非流式）"""
     _check_enabled()
@@ -61,7 +62,20 @@ async def chat(
                 input_items.append({"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": content}]})
             else:
                 input_items.append({"type": "message", "role": "user", "content": [{"type": "input_text", "text": content}]})
-    input_items.append({"type": "message", "role": "user", "content": [{"type": "input_text", "text": message}]})
+
+    user_content = []
+    if files:
+        for f in files:
+            fname = f.get("name", "file")
+            fdata = f.get("data", "")
+            ftype = f.get("type", "")
+            if ftype and ftype.startswith("image/"):
+                user_content.append({"type": "input_image", "image_url": fdata})
+            else:
+                user_content.append({"type": "input_file", "filename": fname, "file_data": fdata})
+    if message:
+        user_content.append({"type": "input_text", "text": message})
+    input_items.append({"type": "message", "role": "user", "content": user_content})
 
     model = "openclaw" if agent_id == "main" else f"openclaw/{agent_id}"
     payload = {
@@ -99,6 +113,7 @@ async def chat_stream(
     temperature: float = 0.7,
     max_tokens: int = 4096,
     session_key: Optional[str] = None,
+    files: Optional[list] = None,
 ) -> AsyncGenerator[str, None]:
     """向 OpenClaw Agent 发送消息（SSE 流式）—— 异步生成器，yield SSE 事件字符串"""
     _check_enabled()
@@ -113,7 +128,21 @@ async def chat_stream(
                 input_items.append({"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": content}]})
             else:
                 input_items.append({"type": "message", "role": "user", "content": [{"type": "input_text", "text": content}]})
-    input_items.append({"type": "message", "role": "user", "content": [{"type": "input_text", "text": message}]})
+
+    # Build current user message content blocks
+    user_content = []
+    if files:
+        for f in files:
+            fname = f.get("name", "file")
+            fdata = f.get("data", "")
+            ftype = f.get("type", "")
+            if ftype and ftype.startswith("image/"):
+                user_content.append({"type": "input_image", "image_url": fdata})
+            else:
+                user_content.append({"type": "input_file", "filename": fname, "file_data": fdata})
+    if message:
+        user_content.append({"type": "input_text", "text": message})
+    input_items.append({"type": "message", "role": "user", "content": user_content})
 
     model = "openclaw" if agent_id == "main" else f"openclaw/{agent_id}"
     payload = {
