@@ -22,8 +22,11 @@ var P_FULL = [
   { id: 'chat', name: '论文辅助写作', icon: 'fa-file-pen', color: '#6366f1', step: 8, desc: '从内容构思到语言润色，全面辅助论文写作' },
   { id: 'obs', name: '科研绘图', icon: 'fa-diagram-project', color: '#ec4899', step: 9, desc: '智能生成高质量科研图表，提升表达效果' },
   { id: 'tasks', name: '任务管理', icon: 'fa-list-check', color: '#64748b', step: 0, desc: '集中查看和管理所有异步任务', navBreak: '工具' },
-  { id: 'openclaw', name: 'OpenClaw Agent', icon: 'fa-robot', color: '#14b8a6', step: 0, desc: '多 Agent 协作：论文评审、文献Wiki、深度分析' },
-  { id: 'ocstatus', name: 'OpenClaw 状态', icon: 'fa-server', color: '#64748b', step: 0, desc: '网关注册状态、Agent与子Agent监控' },
+  { id: 'oc-main', name: '颖姗（主Agent）', icon: 'fa-brain', color: '#3b6df0', step: 0, desc: '主科研助手，委派子Agent', navBreak: 'OpenClaw' },
+  { id: 'oc-autoresearch', name: 'Autoresearch', icon: 'fa-database', color: '#10b981', step: 0, desc: '论文知识库维护与文献 Wiki 构建' },
+  { id: 'oc-review', name: 'Paper Review', icon: 'fa-file-magnifying-glass', color: '#8b5cf6', step: 0, desc: '5阶段论文深度评审' },
+  { id: 'oc-idea', name: 'Idea Generate', icon: 'fa-lightbulb', color: '#f59e0b', step: 0, desc: '7种策略生成创新研究思路' },
+  { id: 'ocstatus', name: 'OpenClaw 状态', icon: 'fa-server', color: '#64748b', step: 0, desc: '网关状态、Agent与子Agent监控' },
   { id: 'profile', name: '个人配置', icon: 'fa-user-cog', color: '#64748b', step: 0, desc: 'API 密钥与偏好', navBreak: '账户' },
   { id: 'admin', name: '用户管理', icon: 'fa-user-gear', color: '#8b5cf6', step: 0, desc: '管理用户和权限', adminOnly: true },
   { id: 'doc', name: 'API 文档', icon: 'fa-book', color: '#64748b', step: 0, desc: '规范与接口定义' }
