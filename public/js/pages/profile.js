@@ -143,6 +143,13 @@ async function loadProfilePage() {
     // h += '<div class="auth-field mb12"><label class="auth-lbl">Agent · Anthropic API Key（SK）</label>';
     // h += '<input class="inp" type="password" id="pf_ant_key" placeholder="'+(s.anthropic_api_key_set ? '已保存 · 留空不修改 · '+esc(s.anthropic_api_key_masked||'***') : '未设置，可与主模型 Key 不同')+'"></div>';
     // h += '<div class="mb16"><button type="button" class="btn bdr" style="font-size:11px" onclick="document.getElementById(\'pf_ant_key\').value=\'\';saveProfileField(\'anthropic_api_key\',\'\')">清除 Agent Key</button></div>';
+    h += '<div style="height:1px;background:var(--border);margin:20px 0"></div>';
+    h += '<label class="auth-lbl" style="margin-bottom:4px"><i class="fa-solid fa-robot"></i> OpenClaw Agent 模型配置</label>';
+    h += '<p style="font-size:11px;color:var(--text-muted);margin-bottom:12px">用于 OpenClaw 多 Agent 协作的 AI 模型调用，留空则使用 .env 全局配置。</p>';
+    h += '<div class="auth-field mb12"><label class="auth-lbl">API Base URL（Anthropic 协议）</label>';
+    h += '<input class="inp" id="pf_oc_base" placeholder="https://api.deepseek.com/anthropic" value="'+esc(s.openclaw_api_base||'')+'"></div>';
+    h += '<div class="auth-field mb12"><label class="auth-lbl">API Key（SK）</label>';
+    h += '<input class="inp" type="password" id="pf_oc_key" placeholder="'+(s.openclaw_api_key_set ? '已保存 · 当前：'+esc(s.openclaw_api_key_masked||'***') : '未设置，填写后保存')+'"></div>';
     h += '<button type="button" class="btn bp" onclick="saveProfileForm()"><i class="fa-solid fa-floppy-disk"></i> 保存配置</button>';
 
     // 主题配色选择器
@@ -334,8 +341,10 @@ async function saveProfileForm() {
     // if (am) body.anthropic_model = am.value.trim();
     var k = document.getElementById('pf_ai_key');
     if (k && k.value) body.ai_api_key = k.value;
-    // var ak = document.getElementById('pf_ant_key');
-    // if (ak && ak.value) body.anthropic_api_key = ak.value;
+    var oc_base = document.getElementById('pf_oc_base');
+    if (oc_base && oc_base.value.trim()) body.openclaw_api_base = oc_base.value.trim();
+    var oc_key = document.getElementById('pf_oc_key');
+    if (oc_key && oc_key.value) body.openclaw_api_key = oc_key.value;
     await putUserSettings(body);
     toast('配置已保存', 'fa-check-circle', '#00E5A0');
     await loadProfilePage();

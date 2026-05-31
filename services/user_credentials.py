@@ -8,6 +8,8 @@ from config import (
     ANTHROPIC_API_KEY,
     ANTHROPIC_BASE_URL,
     ANTHROPIC_MODEL,
+    OPENCLAW_GATEWAY_URL,
+    OPENCLAW_GATEWAY_TOKEN,
 )
 from database import db_query
 from services.request_context import ctx_user_id
@@ -53,3 +55,20 @@ def mask_secret(s: Optional[str]) -> Optional[str]:
     if not s or len(s) < 10:
         return None
     return s[:4] + "…" + s[-4:]
+
+
+async def get_effective_openclaw() -> Tuple[str, str, str]:
+    """(openclaw_api_base, openclaw_api_key, openclaw_gateway_token)"""
+    uid = ctx_user_id.get()
+    if not uid:
+        return OPENCLAW_GATEWAY_URL, OPENCLAW_GATEWAY_TOKEN, ""
+    rows = await db_query(
+        "SELECT openclaw_api_base, openclaw_api_key FROM user_settings WHERE user_id = ?",
+        (uid,),
+    )
+    if not rows:
+        return OPENCLAW_GATEWAY_URL, OPENCLAW_GATEWAY_TOKEN, ""
+    r = rows[0]
+    base = (r.get("openclaw_api_base") or "").strip() or OPENCLAW_GATEWAY_URL
+    key = (r.get("openclaw_api_key") or "").strip()
+    return base, OPENCLAW_GATEWAY_TOKEN, key

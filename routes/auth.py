@@ -36,6 +36,8 @@ class UserSettingsUpdate(BaseModel):
     anthropic_base_url: Optional[str] = None
     anthropic_model: Optional[str] = None
     theme_color: Optional[str] = None  # 用户主题配色：emerald/aurora/flame/nebula/ocean/mint/sunset/sakura
+    openclaw_api_base: Optional[str] = None
+    openclaw_api_key: Optional[str] = None
 
 
 class GenerateInviteCodesBody(BaseModel):
@@ -89,6 +91,7 @@ async def build_settings_public_dict(user_id: int) -> dict:
     row = await _ensure_user_settings(user_id)
     ak = (row.get("ai_api_key") or "").strip()
     ak2 = (row.get("anthropic_api_key") or "").strip()
+    oc_key = (row.get("openclaw_api_key") or "").strip()
     return {
         "ai_api_base": (row.get("ai_api_base") or "").strip(),
         "ai_model": (row.get("ai_model") or "").strip(),
@@ -99,6 +102,9 @@ async def build_settings_public_dict(user_id: int) -> dict:
         "anthropic_api_key_set": bool(ak2),
         "anthropic_api_key_masked": mask_secret(ak2) if ak2 else None,
         "theme_color": (row.get("theme_color") or "aurora").strip(),
+        "openclaw_api_base": (row.get("openclaw_api_base") or "").strip(),
+        "openclaw_api_key_set": bool(oc_key),
+        "openclaw_api_key_masked": mask_secret(oc_key) if oc_key else None,
     }
 
 
@@ -128,6 +134,12 @@ async def apply_user_settings_patch(user_id: int, patch: dict) -> None:
     if "theme_color" in patch:
         cols.append("theme_color = ?")
         vals.append((patch["theme_color"] or "aurora").strip())
+    if "openclaw_api_base" in patch:
+        cols.append("openclaw_api_base = ?")
+        vals.append((patch["openclaw_api_base"] or "").strip())
+    if "openclaw_api_key" in patch:
+        cols.append("openclaw_api_key = ?")
+        vals.append((patch["openclaw_api_key"] or "").strip())
     if not cols:
         return
     cols.append("updated_at = datetime('now','localtime')")

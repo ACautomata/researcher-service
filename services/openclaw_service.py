@@ -4,19 +4,26 @@ import asyncio
 import httpx
 from typing import Optional, AsyncGenerator
 
-from config import OPENCLAW_GATEWAY_URL, OPENCLAW_GATEWAY_TOKEN, OPENCLAW_ENABLED
+from config import OPENCLAW_ENABLED
+from services.user_credentials import get_effective_openclaw
 
 _timeout = httpx.Timeout(120.0, connect=10.0)
 
 
+async def _get_gateway_creds() -> tuple:
+    """(gateway_url, gateway_token, api_key) — 优先用户配置，fallback 到 .env"""
+    return await get_effective_openclaw()
+
+
 def _check_enabled():
-    if not OPENCLAW_ENABLED or not OPENCLAW_GATEWAY_TOKEN:
-        raise RuntimeError("OpenClaw 网关未启用，请在 .env 中设置 OPENCLAW_ENABLED=true 和 OPENCLAW_GATEWAY_TOKEN")
+    if not OPENCLAW_ENABLED:
+        raise RuntimeError("OpenClaw 网关未启用，请在 .env 中设置 OPENCLAW_ENABLED=true")
 
 
-def _headers() -> dict:
+async def _headers() -> dict:
+    _, token, _ = await _get_gateway_creds()
     return {
-        "Authorization": f"Bearer {OPENCLAW_GATEWAY_TOKEN}",
+        "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
     }
 
@@ -24,8 +31,9 @@ def _headers() -> dict:
 async def health() -> dict:
     """检查 OpenClaw 网关是否可达"""
     try:
+        base, _, _ = await _get_gateway_creds()
         async with httpx.AsyncClient(timeout=_timeout) as c:
-            resp = await c.get(f"{OPENCLAW_GATEWAY_URL.rstrip('/')}/health")
+            resp = await c.get(f"{base.rstrip('/')}/health")
             return {"reachable": True, "status": resp.status_code, "body": resp.text[:500]}
     except Exception as e:
         return {"reachable": False, "error": str(e)}
@@ -43,6 +51,7 @@ async def chat(
     """向 OpenClaw Agent 发送消息（非流式）"""
     _check_enabled()
 
+    base, _, _ = await _get_gateway_creds()
     input_items = []
     if history:
         for h in history[-20:]:
@@ -66,9 +75,9 @@ async def chat(
     if session_key:
         payload["user"] = session_key
 
-    url = f"{OPENCLAW_GATEWAY_URL.rstrip('/')}/v1/responses"
+    url = f"{base.rstrip('/')}/v1/responses"
     async with httpx.AsyncClient(timeout=_timeout) as c:
-        resp = await c.post(url, headers=_headers(), json=payload)
+        resp = await c.post(url, headers=await _headers(), json=payload)
         if resp.status_code != 200:
             raise RuntimeError(f"OpenClaw 网关返回错误 HTTP {resp.status_code}: {resp.text[:500]}")
         data = resp.json()
@@ -94,6 +103,7 @@ async def chat_stream(
     """向 OpenClaw Agent 发送消息（SSE 流式）—— 异步生成器，yield SSE 事件字符串"""
     _check_enabled()
 
+    base, _, _ = await _get_gateway_creds()
     input_items = []
     if history:
         for h in history[-20:]:
@@ -118,9 +128,9 @@ async def chat_stream(
     if session_key:
         payload["user"] = session_key
 
-    url = f"{OPENCLAW_GATEWAY_URL.rstrip('/')}/v1/responses"
+    url = f"{base.rstrip('/')}/v1/responses"
     async with httpx.AsyncClient(timeout=_timeout) as c:
-        async with c.stream("POST", url, headers=_headers(), json=payload) as resp:
+        async with c.stream("POST", url, headers=await _headers(), json=payload) as resp:
             if resp.status_code != 200:
                 body = await resp.aread()
                 yield f"data: {json.dumps({'type': 'error', 'text': f'HTTP {resp.status_code}: {body.decode()[:500]}'})}\n\n"

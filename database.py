@@ -229,6 +229,17 @@ async def init_db():
         except Exception:
             pass
 
+        try:
+            await db.execute("ALTER TABLE user_settings ADD COLUMN openclaw_api_base TEXT DEFAULT ''")
+            await db.commit()
+        except Exception:
+            pass
+        try:
+            await db.execute("ALTER TABLE user_settings ADD COLUMN openclaw_api_key TEXT DEFAULT ''")
+            await db.commit()
+        except Exception:
+            pass
+
         # ===== 参数优化表 =====
         await db.execute("""
             CREATE TABLE IF NOT EXISTS param_tasks (
