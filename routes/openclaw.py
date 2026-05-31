@@ -270,6 +270,92 @@ async def openclaw_apply_config(req: ApplyConfigRequest, request: Request):
     except Exception as e:
         raise HTTPException(500, f"应用配置失败: {str(e)}")
 
+
+# ── 状态面板 ──────────────────────────────────────────────
+
+@router.get("/status")
+async def openclaw_status():
+    import subprocess, os as _os, json as _json
+
+    result = {
+        "enabled": OPENCLAW_ENABLED,
+        "gateway": {"reachable": False, "version": None},
+        "container": {"running": False, "name": "openclaw-gateway"},
+        "agents": [],
+        "model_provider": None,
+        "active_sessions": len(_openclaw_event_queues),
+    }
+
+    if not OPENCLAW_ENABLED:
+        return result
+
+    # Gateway health
+    h = await health()
+    result["gateway"]["reachable"] = h.get("reachable", False)
+    if h.get("reachable"):
+        try:
+            body = _json.loads(h.get("body", "{}"))
+            result["gateway"]["status"] = body.get("status", "unknown")
+        except Exception:
+            pass
+
+    # Docker container status
+    try:
+        r = subprocess.run(
+            ["docker", "inspect", "openclaw-gateway"],
+            capture_output=True, text=True, timeout=10
+        )
+        if r.returncode == 0:
+            info = _json.loads(r.stdout)[0]
+            state = info.get("State", {})
+            result["container"]["running"] = state.get("Running", False)
+            result["container"]["status"] = state.get("Status", "unknown")
+            result["container"]["started_at"] = state.get("StartedAt", "")
+            result["container"]["image"] = info.get("Config", {}).get("Image", "")
+    except Exception:
+        pass
+
+    # Agent / sub-agent info from openclaw.json
+    oc_config = "/root/.openclaw/openclaw.json"
+    if _os.path.exists(oc_config):
+        try:
+            data = _json.load(open(oc_config))
+            agents_list = data.get("agents", {}).get("list", [])
+            subagents_config = data.get("agents", {}).get("defaults", {}).get("subagents", {})
+            allow_agents = subagents_config.get("allowAgents", [])
+
+            for agent in agents_list:
+                agent_id = agent.get("id", "unknown")
+                result["agents"].append({
+                    "id": agent_id,
+                    "name": agent.get("name", agent_id),
+                    "is_default": agent.get("default", False),
+                    "is_subagent": agent_id in allow_agents,
+                    "workspace": agent.get("workspace", ""),
+                })
+
+            # Count defined sub-agents
+            result["subagent_count"] = len(allow_agents)
+            result["agent_count"] = len(agents_list)
+
+            # Model provider
+            providers = data.get("models", {}).get("providers", {})
+            for name, p in providers.items():
+                result["model_provider"] = {
+                    "name": name,
+                    "base_url": p.get("baseUrl", ""),
+                    "api": p.get("api", ""),
+                    "models": [m.get("id") for m in p.get("models", [])],
+                }
+                break  # Just first one
+        except Exception:
+            pass
+
+    return result
+
+
+# ── 会话列表 ──────────────────────────────────────────────
+
 @router.get("/sessions")
 async def openclaw_sessions():
     return {
