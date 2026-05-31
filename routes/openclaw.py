@@ -2,9 +2,10 @@
 import json
 import uuid
 import asyncio
+import os
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Request, Query
+from fastapi import APIRouter, HTTPException, Request, Query, UploadFile, File, Form
 from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel
 
@@ -69,6 +70,43 @@ async def openclaw_chat(req: ChatRequest):
         max_tokens=req.max_tokens,
     )
     return result
+
+
+# ── 文件上传 ──────────────────────────────────────────────
+
+_AGENT_WORKSPACES = {
+    "main": "workspace",
+    "autoresearch": "workspace-autoresearch",
+    "paper-review": "workspace-paper-review",
+    "idea-generate": "workspace-idea-generate",
+}
+
+@router.post("/upload")
+async def openclaw_upload(agent_id: str = Form("main"), file: UploadFile = File(...)):
+    """上传文件到 Agent 的工作空间（同步到 Docker 容器内）"""
+    if not OPENCLAW_ENABLED:
+        raise HTTPException(400, "OpenClaw 未启用")
+
+    ws_dir = _AGENT_WORKSPACES.get(agent_id, "workspace")
+    upload_dir = f"/root/.openclaw/{ws_dir}/oc-uploads"
+    os.makedirs(upload_dir, exist_ok=True)
+
+    # 用 uuid 前缀防重名
+    ext = os.path.splitext(file.filename or "file")[1]
+    safe_name = f"{uuid.uuid4().hex[:8]}_{file.filename or 'file'}"
+    save_path = os.path.join(upload_dir, safe_name)
+
+    content = await file.read()
+    MAX_SIZE = 50 * 1024 * 1024
+    if len(content) > MAX_SIZE:
+        raise HTTPException(400, f"文件超过 50MB 限制")
+
+    with open(save_path, "wb") as f:
+        f.write(content)
+
+    # Agent 看到的路径（相对 workspace）
+    rel_path = f"oc-uploads/{safe_name}"
+    return {"filename": file.filename, "saved_as": safe_name, "path": rel_path, "size": len(content)}
 
 
 # ── SSE 流式对话 ───────────────────────────────────────────

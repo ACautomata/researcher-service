@@ -235,33 +235,42 @@ function renderOcMsg(msg, agent) {
 }
 
 /* ── File Upload ── */
-var ocPendingFiles = {};  // { agentId: [{name, data, type}] }
+var ocPendingFiles = {};  // { agentId: [{name, data, type, path}] }
 
 function ocPickFile(agentId) {
   var input = document.getElementById('ocFileInput_' + agentId);
   if (input) input.click();
 }
 
-function ocFileSelected(agentId) {
+async function ocFileSelected(agentId) {
   var input = document.getElementById('ocFileInput_' + agentId);
   if (!input || !input.files.length) return;
   if (!ocPendingFiles[agentId]) ocPendingFiles[agentId] = [];
-  var MAX_SIZE = 20 * 1024 * 1024; // 20MB
-  var filesToRead = input.files.length;
-  var readCount = 0;
+  var MAX_SIZE = 50 * 1024 * 1024;
   for (var i = 0; i < input.files.length; i++) {
-    (function(file) {
-      if (file.size > MAX_SIZE) { toast(file.name + ' 超过 20MB 限制', 'fa-exclamation-circle', '#FF6B81'); readCount++; return; }
-      var reader = new FileReader();
-      reader.onload = function() {
-        ocPendingFiles[agentId].push({ name: file.name, data: reader.result, type: file.type });
-        readCount++;
-        if (readCount >= filesToRead) ocRenderFiles(agentId);
-      };
-      reader.readAsDataURL(file);
-    })(input.files[i]);
+    var file = input.files[i];
+    if (file.size > MAX_SIZE) { toast(file.name + ' 超过 50MB 限制', 'fa-exclamation-circle', '#FF6B81'); continue; }
+    try {
+      var fd = new FormData();
+      fd.append('agent_id', agentId);
+      fd.append('file', file);
+      var res = await apiUploadFile('/openclaw/upload', fd);
+      ocPendingFiles[agentId].push({ name: file.name, path: res.path, size: file.size });
+    } catch(e) {
+      toast(file.name + ' 上传失败: ' + e.message, 'fa-exclamation-circle', '#FF6B81');
+    }
   }
   input.value = '';
+  ocRenderFiles(agentId);
+}
+
+function apiUploadFile(path, fd) {
+  var opts = { method: 'POST', body: fd };
+  if (authToken) opts.headers = { 'Authorization': 'Bearer ' + authToken };
+  return fetch(API + path, opts).then(function(r) {
+    if (!r.ok) return r.json().then(function(e) { throw new Error(e.detail || '上传失败'); });
+    return r.json();
+  });
 }
 
 function ocRemoveFile(agentId, index) {
@@ -306,13 +315,17 @@ async function ocSend(agentId) {
 
   // Add user message (include file info)
   var userMsg = { role: 'user', content: text };
-  if (files.length) userMsg.files = files.map(function(f) { return f.name; });
+  var uploadedPaths = [];
+  if (files.length) {
+    userMsg.files = files.map(function(f) { return f.name; });
+    uploadedPaths = files.map(function(f) { return f.path; });
+  }
   session.history.push(userMsg);
   var msgArea = document.getElementById('ocMessages_' + agentId);
   var agent = OC_AGENTS[agentId];
   msgArea.innerHTML += renderOcMsg(userMsg, agent);
-  // Clear pending files
   delete ocPendingFiles[agentId];
+  ocRenderFiles(agentId);
 
   var loadingId = 'ocLoad_' + Date.now();
   msgArea.innerHTML += '<div id="' + loadingId + '" style="display:flex;flex-direction:column;align-items:flex-start;max-width:85%"><div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;font-size:11px;color:var(--text-muted);font-weight:600"><i class="fa-solid fa-robot"></i> ' + agent.name + '</div><div style="background:var(--bg);border:1px solid var(--border);border-radius:12px;padding:12px 16px;color:var(--text-muted);font-size:13px"><span id="' + loadingId + '_t"><i class="fa-solid fa-spinner fa-spin"></i> 思考中...</span></div></div>';
@@ -322,13 +335,19 @@ async function ocSend(agentId) {
   var fullResponse = '';
   var thinkingText = '';
 
+  // Build message with file context
+  var requestMessage = text;
+  if (uploadedPaths.length) {
+    var fileList = files.map(function(f, i) { return '  ' + (i+1) + '. ' + f.name + '（oc-uploads/' + f.path.split('/').pop() + '）'; }).join('\n');
+    requestMessage = text + '\n\n[附件]\n' + fileList + '\n\n（用户上传了以上文件，详见对应路径）';
+  }
+
   try {
     var startRes = await api('POST', '/openclaw/chat/stream', {
       agent_id: agentId,
-      message: text,
+      message: requestMessage,
       history: session.history.slice(0, -1),
-      temperature: 0.5,
-      files: files.length ? files.map(function(f) { return {name: f.name, data: f.data, type: f.type}; }) : null
+      temperature: 0.5
     });
     var taskId = startRes.task_id;
 
