@@ -325,15 +325,22 @@ async def openclaw_apply_config(req: ApplyConfigRequest, request: Request):
         gw_ep = gw_http.setdefault("endpoints", {})
         gw_ep["responses"] = {"enabled": True}
 
-        _json.dump(data, open(oc_config, "w"), indent=2, ensure_ascii=False)
-
-        # ── 4. 确保 contextEngine 使用 legacy（Docker 镜像无 lossless-claw） ──
+        # 确保 contextEngine 使用 legacy（Docker 镜像无 lossless-claw）
         if "plugins" not in data:
             data["plugins"] = {}
         if "slots" not in data["plugins"]:
             data["plugins"]["slots"] = {}
         data["plugins"]["slots"]["contextEngine"] = "legacy"
+
         _json.dump(data, open(oc_config, "w"), indent=2, ensure_ascii=False)
+
+        # ── 5. 为每个子 Agent 创建 auth-profiles.json ──
+        agent_auth = {f"{provider_name}:default": {"api_key": api_key}}
+        for sub_id in ["autoresearch", "paper-review", "idea-generate"]:
+            sub_dir = f"/root/.openclaw/agents/{sub_id}/agent"
+            _os.makedirs(sub_dir, exist_ok=True)
+            auth_path = os.path.join(sub_dir, "auth-profiles.json")
+            _json.dump(agent_auth, open(auth_path, "w"), indent=2)
 
         # ── 3. 写入容器并重启 ──
         # 策略: compose restart → init.sh 覆盖 → sleep → docker cp 回写 → 等待 gateway 重读
@@ -350,6 +357,14 @@ async def openclaw_apply_config(req: ApplyConfigRequest, request: Request):
             ["docker", "cp", oc_config, "openclaw-gateway:/home/node/.openclaw/openclaw.json"],
             capture_output=True, text=True, timeout=10
         )
+        # 推送子 Agent auth-profiles
+        for sub_id in ["autoresearch", "paper-review", "idea-generate"]:
+            auth_path = f"/root/.openclaw/agents/{sub_id}/agent/auth-profiles.json"
+            if _os.path.exists(auth_path):
+                subprocess.run(
+                    ["docker", "cp", auth_path, f"openclaw-gateway:/home/node/.openclaw/agents/{sub_id}/agent/auth-profiles.json"],
+                    capture_output=True, text=True, timeout=10
+                )
         # 热重启网关进程（kill 后 init.sh 会重新启动它，读新配置）
         # 如果 kill 导致容器重启，配置可能被覆盖，已通过上面 docker cp 处理
         subprocess.run(
@@ -364,6 +379,13 @@ async def openclaw_apply_config(req: ApplyConfigRequest, request: Request):
             ["docker", "cp", oc_config, "openclaw-gateway:/home/node/.openclaw/openclaw.json"],
             capture_output=True, text=True, timeout=10
         )
+        for sub_id in ["autoresearch", "paper-review", "idea-generate"]:
+            auth_path = f"/root/.openclaw/agents/{sub_id}/agent/auth-profiles.json"
+            if _os.path.exists(auth_path):
+                subprocess.run(
+                    ["docker", "cp", auth_path, f"openclaw-gateway:/home/node/.openclaw/agents/{sub_id}/agent/auth-profiles.json"],
+                    capture_output=True, text=True, timeout=10
+                )
         time.sleep(5)
 
         return {
