@@ -7,7 +7,7 @@
     "checkOnStart": false
   },
   "gateway": {
-    "bind": "loopback",
+    "bind": "lan",
     "controlUi": {
       "allowInsecureAuth": true,
       "allowedOrigins": [
@@ -24,13 +24,6 @@
     "auth": {
       "mode": "token",
       "token": "${GATEWAY_TOKEN}"
-    },
-    "http": {
-      "endpoints": {
-        "responses": {
-          "enabled": true
-        }
-      }
     }
   },
   "browser": {
@@ -52,11 +45,14 @@
   "agents": {
     "defaults": {
       "model": {
-        "primary": "deepseek/deepseek-v4-pro"
+        "primary": "minimax/MiniMax-M2.7",
+        "fallbacks": [
+          "minimax/MiniMax-M2.7-highspeed"
+        ]
       },
       "models": {
-        "deepseek/deepseek-v4-pro": {
-          "alias": "DeepSeek"
+        "minimax/MiniMax-M2.7": {
+          "alias": "Minimax"
         }
       },
       "compaction": {
@@ -69,8 +65,10 @@
       "elevatedDefault": "full",
       "maxConcurrent": 4,
       "subagents": {
+        "delegationMode": "prefer",
         "maxConcurrent": 8,
-        "allowAgents": ["autoresearch", "paper-review"]
+        "maxSpawnDepth": 1,
+        "allowAgents": ["autoresearch", "paper-review", "idea-generate"]
       }
     },
     "list": [
@@ -89,6 +87,11 @@
         "id": "paper-review",
         "name": "Paper Review",
         "workspace": "~/.openclaw/workspace-paper-review"
+      },
+      {
+        "id": "idea-generate",
+        "name": "Idea Generate",
+        "workspace": "~/.openclaw/workspace-idea-generate"
       }
     ]
   },
@@ -141,7 +144,7 @@
   },
   "channels": {
     "feishu": {
-      "enabled": false,
+      "enabled": true,
       "domain": "feishu",
       "connectionMode": "websocket",
       "defaultAccount": "main",
@@ -160,7 +163,7 @@
       "requireMention": true
     },
     "discord": {
-      "enabled": false,
+      "enabled": true,
       "token": {
         "source": "env",
         "provider": "default",
@@ -172,7 +175,7 @@
   "plugins": {
     "entries": {
       "minimax": {
-        "enabled": false
+        "enabled": true
       },
       "browser": {
         "enabled": true
@@ -190,6 +193,47 @@
         "config": {
           "dreaming": {
             "enabled": true
+          }
+        }
+      },
+      "memory-wiki": {
+        "enabled": true,
+        "config": {
+          "vaultMode": "bridge",
+          "vault": {
+            "path": "~/.openclaw/wiki/main",
+            "renderMode": "obsidian"
+          },
+          "obsidian": {
+            "enabled": true,
+            "useOfficialCli": true,
+            "vaultName": "OpenClaw Wiki",
+            "openAfterWrites": false
+          },
+          "bridge": {
+            "enabled": true,
+            "readMemoryArtifacts": true,
+            "indexDreamReports": true,
+            "indexDailyNotes": true,
+            "indexMemoryRoot": true,
+            "followMemoryEvents": true
+          },
+          "ingest": {
+            "autoCompile": true,
+            "maxConcurrentJobs": 1,
+            "allowUrlIngest": true
+          },
+          "search": {
+            "backend": "shared",
+            "corpus": "all"
+          },
+          "context": {
+            "includeCompiledDigestPrompt": false
+          },
+          "render": {
+            "preserveHumanBlocks": true,
+            "createBacklinks": true,
+            "createDashboards": true
           }
         }
       }
@@ -246,23 +290,24 @@
   "models": {
     "mode": "merge",
     "providers": {
-      "deepseek": {
-        "baseUrl": "https://api.deepseek.com/anthropic",
+      "minimax": {
+        "baseUrl": "https://api.minimaxi.com/anthropic",
         "models": [
           {
-            "id": "deepseek-v4-pro",
-            "name": "DeepSeek V4 Pro",
+            "id": "MiniMax-M2.7",
+            "name": "MiniMax M2.7",
             "reasoning": true,
             "input": [
-              "text"
+              "text",
+              "image"
             ],
             "cost": {
-              "input": 0.0,
-              "output": 0.0,
-              "cacheRead": 0.0,
-              "cacheWrite": 0.0
+              "input": 0.3,
+              "output": 1.2,
+              "cacheRead": 0.06,
+              "cacheWrite": 0.375
             },
-            "contextWindow": 131072,
+            "contextWindow": 204800,
             "maxTokens": 131072
           }
         ],
@@ -273,8 +318,8 @@
   },
   "auth": {
     "profiles": {
-      "deepseek:default": {
-        "provider": "deepseek",
+      "minimax:cn": {
+        "provider": "minimax",
         "mode": "api_key"
       }
     }
