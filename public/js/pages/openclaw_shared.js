@@ -355,7 +355,14 @@ async function ocSend(agentId) {
           msgArea.scrollTop = msgArea.scrollHeight;
           btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-paper-plane"></i> 发送';
         } else if (data.type === 'error') {
-          throw new Error(data.text || '未知错误');
+          es.close();
+          delete ocEvtSources[activeId];
+          var l = document.getElementById(loadingId);
+          if (l) l.remove();
+          var errMsg = data.text || '请求失败（请检查 API Key 是否正确）';
+          session.history.push({ role: 'assistant', content: '【错误】' + errMsg, thinking: thinkingText });
+          ocSaveSessions(agentId, sessions);
+          msgArea.innerHTML += renderOcMsg({ role: 'assistant', content: '【错误】' + errMsg }, agent);
         } else if (data.type === 'raw') {
           fullResponse += data.text || '';
         }

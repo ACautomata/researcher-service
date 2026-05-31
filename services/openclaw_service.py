@@ -167,16 +167,44 @@ async def chat_stream(
             async for line in resp.aiter_lines():
                 if line.startswith("data: "):
                     data_str = line[6:]
+                    if data_str.strip() == "[DONE]":
+                        yield f"data: {json.dumps({'type': 'done'})}\n\n"
+                        break
                     try:
                         event = json.loads(data_str)
                         event_type = event.get("type", "")
-                        if "delta" in event:
+                        # response.output_text.delta → 逐字输出
+                        if event_type == "response.output_text.delta":
                             yield f"data: {json.dumps({'type': 'text', 'text': event.get('delta', '')})}\n\n"
+                        # response.output_text.done → 最终文本块
+                        elif event_type == "response.output_text.done":
+                            yield f"data: {json.dumps({'type': 'text', 'text': event.get('text', '')})}\n\n"
+                        # response.output_item.done → 消息完成
+                        elif event_type == "response.output_item.done":
+                            item = event.get("item", {})
+                            for block in item.get("content", []):
+                                if block.get("type") == "output_text":
+                                    yield f"data: {json.dumps({'type': 'text', 'text': block.get('text', '')})}\n\n"
+                        # response.completed → 结束
                         elif event_type == "response.completed":
-                            usage = event.get("response", {}).get("usage", {})
+                            resp_data = event.get("response", {})
+                            usage = resp_data.get("usage", {})
+                            status = resp_data.get("status", "")
+                            if status == "failed":
+                                # Extract error text from output
+                                output = resp_data.get("output", [])
+                                error_text = ""
+                                for item in output:
+                                    for block in item.get("content", []):
+                                        if block.get("type") == "output_text":
+                                            error_text = block.get("text", "")
+                                yield f"data: {json.dumps({'type': 'error', 'text': error_text or '请求失败'})}\n\n"
                             yield f"data: {json.dumps({'type': 'done', 'usage': usage})}\n\n"
+                        # error 事件
                         elif event_type == "error":
                             yield f"data: {json.dumps({'type': 'error', 'text': event.get('message', str(event))})}\n\n"
+                        elif "delta" in event:
+                            yield f"data: {json.dumps({'type': 'text', 'text': event.get('delta', '')})}\n\n"
                         else:
                             yield f"data: {json.dumps(event)}\n\n"
                     except json.JSONDecodeError:
