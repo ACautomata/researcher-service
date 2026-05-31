@@ -10,7 +10,7 @@ var OC_AGENTS = {
     desc: '论文知识库维护、文献 Wiki 构建、跨论文对比'
   },
   'paper-review': {
-    id: 'paper-review', name: 'Paper Review', icon: 'fa-file-magnifying-glass', color: '#8b5cf6',
+    id: 'paper-review', name: 'Paper Review', icon: 'fa-microscope', color: '#8b5cf6',
     desc: '论文深度评审 —— 5阶段分析：Wiki整理→实验提取→问题分析→验证设计→Codex提示'
   },
   'idea-generate': {
