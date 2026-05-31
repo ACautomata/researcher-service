@@ -52,14 +52,11 @@
   "agents": {
     "defaults": {
       "model": {
-        "primary": "minimax/MiniMax-M2.7",
-        "fallbacks": [
-          "minimax/MiniMax-M2.7-highspeed"
-        ]
+        "primary": "deepseek/deepseek-v4-pro"
       },
       "models": {
-        "minimax/MiniMax-M2.7": {
-          "alias": "Minimax"
+        "deepseek/deepseek-v4-pro": {
+          "alias": "DeepSeek"
         }
       },
       "compaction": {
@@ -144,7 +141,7 @@
   },
   "channels": {
     "feishu": {
-      "enabled": true,
+      "enabled": false,
       "domain": "feishu",
       "connectionMode": "websocket",
       "defaultAccount": "main",
@@ -163,7 +160,7 @@
       "requireMention": true
     },
     "discord": {
-      "enabled": true,
+      "enabled": false,
       "token": {
         "source": "env",
         "provider": "default",
@@ -175,7 +172,7 @@
   "plugins": {
     "entries": {
       "minimax": {
-        "enabled": true
+        "enabled": false
       },
       "browser": {
         "enabled": true
@@ -249,24 +246,23 @@
   "models": {
     "mode": "merge",
     "providers": {
-      "minimax": {
-        "baseUrl": "https://api.minimaxi.com/anthropic",
+      "deepseek": {
+        "baseUrl": "https://api.deepseek.com/anthropic",
         "models": [
           {
-            "id": "MiniMax-M2.7",
-            "name": "MiniMax M2.7",
+            "id": "deepseek-v4-pro",
+            "name": "DeepSeek V4 Pro",
             "reasoning": true,
             "input": [
-              "text",
-              "image"
+              "text"
             ],
             "cost": {
-              "input": 0.3,
-              "output": 1.2,
-              "cacheRead": 0.06,
-              "cacheWrite": 0.375
+              "input": 0.0,
+              "output": 0.0,
+              "cacheRead": 0.0,
+              "cacheWrite": 0.0
             },
-            "contextWindow": 204800,
+            "contextWindow": 131072,
             "maxTokens": 131072
           }
         ],
@@ -277,8 +273,8 @@
   },
   "auth": {
     "profiles": {
-      "minimax:cn": {
-        "provider": "minimax",
+      "deepseek:default": {
+        "provider": "deepseek",
         "mode": "api_key"
       }
     }
