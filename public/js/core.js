@@ -27,6 +27,7 @@ var P_FULL = [
   { id: 'oc-review', name: 'Paper Review', icon: 'fa-microscope', color: '#8b5cf6', step: 0, desc: '5阶段论文深度评审' },
   { id: 'oc-idea', name: 'Idea Generate', icon: 'fa-lightbulb', color: '#f59e0b', step: 0, desc: '7种策略生成创新研究思路' },
   { id: 'ocstatus', name: 'OpenClaw 状态', icon: 'fa-server', color: '#64748b', step: 0, desc: '网关状态、Agent与子Agent监控' },
+  { id: 'wiki', name: 'Wiki 知识库', icon: 'fa-book', color: '#10b981', step: 0, desc: 'Autoresearch 自动构建的论文知识库' },
   { id: 'profile', name: '个人配置', icon: 'fa-user-cog', color: '#64748b', step: 0, desc: 'API 密钥与偏好', navBreak: '账户' },
   { id: 'admin', name: '用户管理', icon: 'fa-user-gear', color: '#8b5cf6', step: 0, desc: '管理用户和权限', adminOnly: true },
   { id: 'doc', name: 'API 文档', icon: 'fa-book', color: '#64748b', step: 0, desc: '规范与接口定义' }

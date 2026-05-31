@@ -528,3 +528,112 @@ async def openclaw_sessions():
         "sessions": list(_openclaw_event_queues.keys()),
         "count": len(_openclaw_event_queues),
     }
+
+
+# ── Wiki 知识库 ──────────────────────────────────────────
+
+_WIKI_ROOT = "/root/.openclaw/workspace-autoresearch/wiki"
+
+
+@router.get("/wiki")
+async def wiki_list():
+    """扫描 wiki 目录，返回 domains 和 papers 列表"""
+    import os as _os
+    if not _os.path.isdir(_WIKI_ROOT):
+        return {"domains": []}
+
+    domains = []
+    domains_dir = _os.path.join(_WIKI_ROOT, "domains")
+    if _os.path.isdir(domains_dir):
+        for dname in sorted(_os.listdir(domains_dir)):
+            dp = _os.path.join(domains_dir, dname)
+            if not _os.path.isdir(dp):
+                continue
+            papers_dir = _os.path.join(dp, "papers")
+            papers = []
+            if _os.path.isdir(papers_dir):
+                for pf in sorted(_os.listdir(papers_dir)):
+                    if not pf.endswith(".md"):
+                        continue
+                    fpath = _os.path.join(papers_dir, pf)
+                    title = pf[:-3]
+                    # Try to read YAML frontmatter for richer data
+                    try:
+                        raw = open(fpath, encoding="utf-8").read(2000)
+                        if raw.startswith("---"):
+                            end = raw.find("---", 3)
+                            yaml_block = raw[3:end] if end > 0 else raw[3:]
+                            for line in yaml_block.split("\n"):
+                                if line.startswith("title:"):
+                                    t = line.split(":", 1)[1].strip().strip('"')
+                                    if t:
+                                        title = t
+                                    break
+                    except Exception:
+                        pass
+                    papers.append({
+                        "id": pf[:-3],
+                        "filename": pf,
+                        "title": title,
+                        "path": fpath,
+                    })
+            if papers:
+                domains.append({"name": dname, "papers": papers, "paper_count": len(papers)})
+
+    # Also read index.md
+    index_content = ""
+    index_path = _os.path.join(_WIKI_ROOT, "index.md")
+    if _os.path.isfile(index_path):
+        try:
+            index_content = open(index_path, encoding="utf-8").read(5000)
+        except Exception:
+            pass
+
+    return {"domains": domains, "index": index_content, "wiki_root": _WIKI_ROOT}
+
+
+@router.get("/wiki/{domain}/{paper_id}")
+async def wiki_paper(domain: str, paper_id: str):
+    """读取指定 wiki 论文的完整内容"""
+    import os as _os
+    fpath = _os.path.join(_WIKI_ROOT, "domains", domain, "papers", paper_id + ".md")
+    if not _os.path.isfile(fpath):
+        raise HTTPException(404, f"论文不存在: {domain}/{paper_id}")
+
+    try:
+        content = open(fpath, encoding="utf-8").read()
+    except Exception as e:
+        raise HTTPException(500, f"读取失败: {str(e)}")
+
+    # Parse YAML frontmatter
+    frontmatter = {}
+    body = content
+    if content.startswith("---"):
+        end = content.find("---", 3)
+        if end > 0:
+            yaml_text = content[3:end].strip()
+            body = content[end + 3:].strip()
+            # Simple YAML parser (no pyyaml dependency)
+            for line in yaml_text.split("\n"):
+                line = line.rstrip()
+                if not line or line.startswith("#"):
+                    continue
+                if ":" in line:
+                    key, _, val = line.partition(":")
+                    key = key.strip()
+                    val = val.strip()
+                    if val.startswith("[") and val.endswith("]"):
+                        val = [v.strip().strip('"').strip("'") for v in val[1:-1].split(",") if v.strip()]
+                    elif val.startswith("{") and val.endswith("}"):
+                        val = val
+                    else:
+                        val = val.strip('"').strip("'")
+                    frontmatter[key] = val
+
+    return {
+        "id": paper_id,
+        "domain": domain,
+        "frontmatter": frontmatter,
+        "body": body,
+        "content": content,
+    }
