@@ -353,14 +353,18 @@ async def openclaw_apply_config(req: ApplyConfigRequest, request: Request):
 
         _json.dump(data, open(oc_config, "w"), indent=2, ensure_ascii=False)
 
-        # ── 3. 重启 Docker 容器 ──
+        # ── 3. 写入容器并热重启网关（不触发 init.sh 覆盖） ──
+        # docker compose restart 会触发 init.sh 覆盖配置，改用 exec + gateway restart
+        subprocess.run(
+            ["docker", "cp", oc_config, "openclaw-gateway:/home/node/.openclaw/openclaw.json"],
+            capture_output=True, text=True, timeout=10
+        )
         result = subprocess.run(
-            ["docker", "compose", "restart"],
-            cwd="/root/openclaw-docker-cn-im-main",
+            ["docker", "exec", "openclaw-gateway", "openclaw", "gateway", "restart"],
             capture_output=True, text=True, timeout=30
         )
         if result.returncode != 0:
-            raise RuntimeError(result.stderr or "重启失败")
+            raise RuntimeError(result.stderr or result.stdout or "重启失败")
 
         return {
             "success": True,
