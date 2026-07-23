@@ -52,4 +52,5 @@ curl http://127.0.0.1:18789/health
 ## 与本仓库后端的衔接
 
 - 后端 `config.py` 的 `OPENCLAW_GATEWAY_URL` 指向 `http://127.0.0.1:18789`，`OPENCLAW_GATEWAY_TOKEN` = 上面的 `GATEWAY_TOKEN`。
-- 后端 apply-config 写 `RESEARCHER_CONFIG_PATH`（默认 `./deploy/openclaw.json`，即本目录这份精简配置，env 可配），随后 `docker compose restart openclaw-gateway` 生效。
+- `RESEARCHER_CONFIG_PATH`（默认 `./deploy/openclaw.json`，即本目录这份精简配置，env 可配）已加入 `config.py`。
+- ⏳ **apply-config 流程（写 `RESEARCHER_CONFIG_PATH` + `docker compose restart openclaw-gateway` 生效）属后续 #10 落地**；当前 `/openclaw/apply-config` 仍指向旧 `/root/.openclaw` 栈，本骨架阶段未迁移。
