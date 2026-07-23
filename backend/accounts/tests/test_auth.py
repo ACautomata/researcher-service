@@ -29,6 +29,14 @@ def test_register_creates_user(api):
 
 
 @pytest.mark.django_db
+def test_register_rejects_weak_password(api):
+    # 8 位纯数字：过 min_length=8，但 AUTH_PASSWORD_VALIDATORS（NumericPasswordValidator）应拒
+    resp = api.post('/api/v1/auth/register', {'username': 'eve', 'password': '12345678'})
+    assert resp.status_code == 400
+    assert not User.objects.filter(username='eve').exists()
+
+
+@pytest.mark.django_db
 def test_login_returns_jwt(api):
     bob = User.objects.create_user(username='bob', password='strong-pass-456')
     resp = api.post(

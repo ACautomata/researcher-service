@@ -1,5 +1,6 @@
 """accounts 序列化器 —— 注册入参 / 用户信息出参。"""
 from django.contrib.auth import get_user_model
+from django.contrib.auth import password_validation
 from rest_framework import serializers
 
 User = get_user_model()
@@ -11,6 +12,11 @@ class RegisterSerializer(serializers.Serializer):
     username = serializers.CharField(max_length=150)
     password = serializers.CharField(write_only=True, min_length=8)
     email = serializers.EmailField(required=False, allow_blank=True)
+
+    def validate_password(self, value):
+        # 跑 settings.AUTH_PASSWORD_VALIDATORS（spec §4 零信任；min_length 只挡短密码）
+        password_validation.validate_password(value)
+        return value
 
     def create(self, validated_data):
         return User.objects.create_user(**validated_data)
