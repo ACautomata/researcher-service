@@ -46,4 +46,33 @@ describe('router guard', () => {
     await flushPromises()
     expect(auth.token).toBe('hydrated-token')
   })
+
+  it('refreshes an expired access token via cookie on navigation', async () => {
+    // codex P2-1：内存 access 过期后，hydrate 应再用 cookie 换新而非 early-return
+    const expired = btoa(JSON.stringify({ exp: 1 })) // 1970，必过期
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ access: 'fresh-token' }),
+    } as unknown as Response)
+    const auth = useAuthStore()
+    auth.token = `header.${expired}.sig`
+    await router.push('/')
+    await flushPromises()
+    expect(auth.token).toBe('fresh-token')
+  })
+
+  it('logout calls backend to clear cookie and resets local state', async () => {
+    // codex P2-2：logout 调后端清 httpOnly cookie + 重置本地
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true } as unknown as Response)
+    global.fetch = fetchMock
+    const auth = useAuthStore()
+    auth.token = 'some-token'
+    await auth.logout()
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/v1/auth/logout',
+      expect.objectContaining({ method: 'POST' }),
+    )
+    expect(auth.token).toBe('')
+    expect(auth.refreshExhausted).toBe(true)
+  })
 })

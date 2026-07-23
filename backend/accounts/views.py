@@ -60,6 +60,26 @@ class CookieTokenRefreshView(TokenRefreshView):
 
     serializer_class = CookieTokenRefreshSerializer
 
+    @extend_schema(
+        request=None,  # refresh 走 httpOnly cookie，无 body（codex P2-4）
+        responses=AccessTokenSerializer,
+    )
+    def post(self, request, *args, **kwargs):
+        return super().post(request, *args, **kwargs)
+
+
+class LogoutView(APIView):
+    """登出：让 httpOnly refresh cookie 过期（codex P2-2，JS 无法清 httpOnly）。
+
+    受全局 IsAuthenticated 保护（需 access token）。
+    """
+
+    @extend_schema(responses={204: None})
+    def post(self, request):
+        response = Response(status=status.HTTP_204_NO_CONTENT)
+        response.delete_cookie('refresh_token', path='/api/v1/auth')
+        return response
+
 
 class MeView(APIView):
     """当前用户信息（spec §3）。受全局 IsAuthenticated 保护，不设 AllowAny。"""

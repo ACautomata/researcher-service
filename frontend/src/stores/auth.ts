@@ -7,10 +7,21 @@ interface LoginResponse {
   refresh: string
 }
 
+// codex P2-1：检查 access token 是否过期（JWT exp claim）
+function isTokenExpired(token: string): boolean {
+  try {
+    const payload = JSON.parse(atob(token.split('.')[1]))
+    return Date.now() >= payload.exp * 1000
+  } catch {
+    return true
+  }
+}
+
 export const useAuthStore = defineStore('auth', {
   state: () => ({
     token: '' as string,
-    hydrated: false as boolean,
+    // codex P2-3：cookie 确认无效（401/403）后置真，避免无意义重试；瞬时失败不置
+    refreshExhausted: false as boolean,
   }),
   getters: {
     isAuthenticated: (state): boolean => !!state.token,
@@ -27,13 +38,14 @@ export const useAuthStore = defineStore('auth', {
       }
       const data = (await resp.json()) as LoginResponse
       this.token = data.access
-      this.hydrated = true
+      this.refreshExhausted = false
     },
-    // codex P2-2：刷新页面后内存 token 丢失，用 httpOnly refresh cookie 换 access 恢复登录态。
-    // 幂等：已登录或已尝试过则跳过；失败（无 cookie / 后端不可用）静默，留给守卫重定向。
+    // codex P2-1/P2-3：进入受保护路由前恢复登录态。
+    // token 未过期 → 跳过；过期/无 → 用 cookie 换新；明确 401/403 → 标记耗尽；
+    // 瞬时失败（5xx/网络）→ 不标记，下次导航重试。
     async hydrate(): Promise<void> {
-      if (this.token || this.hydrated) return
-      this.hydrated = true
+      if (this.token && !isTokenExpired(this.token)) return
+      if (this.refreshExhausted) return
       try {
         const resp = await fetch('/api/v1/auth/token/refresh', {
           method: 'POST',
@@ -42,14 +54,29 @@ export const useAuthStore = defineStore('auth', {
         if (resp.ok) {
           const data = (await resp.json()) as { access: string }
           this.token = data.access
+        } else if (resp.status === 401 || resp.status === 403) {
+          this.refreshExhausted = true
+          this.token = ''
         }
       } catch {
-        // 无 cookie / 网络不可用：保持未认证
+        // 网络异常：瞬时失败，不标记，下次重试
       }
     },
-    logout(): void {
+    // codex P2-2：调后端清 httpOnly cookie（JS 无法清），再重置本地
+    async logout(): Promise<void> {
+      if (this.token) {
+        try {
+          await fetch('/api/v1/auth/logout', {
+            method: 'POST',
+            credentials: 'include',
+            headers: { Authorization: `Bearer ${this.token}` },
+          })
+        } catch {
+          // 后端不可达也清本地
+        }
+      }
       this.token = ''
-      this.hydrated = false
+      this.refreshExhausted = true
     },
   },
 })

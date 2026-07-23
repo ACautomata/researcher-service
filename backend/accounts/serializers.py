@@ -71,6 +71,7 @@ class CookieTokenRefreshSerializer(TokenRefreshSerializer):
 
     def validate(self, attrs):
         attrs['refresh'] = self.context['request'].COOKIES.get('refresh_token')
-        if attrs.get('refresh') is None:
+        # None（无 cookie）或空串（logout 后 delete_cookie 置空）都算无有效 refresh
+        if not attrs.get('refresh'):
             raise serializers.ValidationError({'refresh': '无 refresh cookie'})
         return super().validate(attrs)

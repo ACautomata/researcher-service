@@ -2,6 +2,8 @@
 
 出处：docs/FULLSTACK-REFACTOR-SPEC.md §4（drf-spectacular 出 OpenAPI schema 作权威契约）。
 """
+import json
+
 import pytest
 from rest_framework.test import APIClient
 
@@ -32,3 +34,11 @@ def test_schema_swagger_ui(api):
     # spec §4：Swagger UI 与 schema 并存，供前端/执行 agent 检视契约
     resp = api.get('/api/schema/swagger/')
     assert resp.status_code == 200
+
+
+def test_schema_refresh_is_cookie_only(api):
+    # codex P2-4：refresh 走 httpOnly cookie，schema 不应 advertise body refresh
+    doc = api.get('/api/schema/?format=json').json()
+    op = doc['paths']['/api/v1/auth/token/refresh']['post']
+    assert 'requestBody' not in op  # refresh 来自 cookie，无 body
+    assert 'refresh' not in json.dumps(op['responses'])  # 响应仅 access

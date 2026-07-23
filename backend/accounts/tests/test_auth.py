@@ -111,6 +111,25 @@ def test_token_refresh_from_cookie(api):
 
 
 @pytest.mark.django_db
+def test_logout_invalidates_refresh_cookie(api):
+    # codex P2-2：logout 必须让 httpOnly refresh cookie 失效，否则下次 hydrate 又登回来
+    User.objects.create_user(username='eve', password='strong-pass-1')
+    token = api.post(
+        '/api/v1/auth/login', {'username': 'eve', 'password': 'strong-pass-1'}
+    ).json()['access']
+    resp = api.post('/api/v1/auth/logout', HTTP_AUTHORIZATION=f'Bearer {token}')
+    assert resp.status_code == 204
+    # cookie 被清后，refresh 应失败（无有效 cookie）
+    assert api.post('/api/v1/auth/token/refresh').status_code == 400
+
+
+@pytest.mark.django_db
+def test_logout_rejects_without_token(api):
+    # logout 受全局 IsAuthenticated 保护（spec §3）
+    assert api.post('/api/v1/auth/logout').status_code == 401
+
+
+@pytest.mark.django_db
 def test_me_rejects_without_token(api):
     # 全局 IsAuthenticated 拦截（spec §3）：无 token → 401
     resp = api.get('/api/v1/auth/me')
