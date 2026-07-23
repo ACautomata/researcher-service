@@ -37,6 +37,17 @@ def test_register_rejects_weak_password(api):
 
 
 @pytest.mark.django_db
+def test_register_rejects_duplicate_username(api):
+    # 重复用户名应 400 而非 500（spec §4 零信任 + DB 唯一约束转校验错误）
+    User.objects.create_user(username='alice', password='strong-pass-123')
+    resp = api.post(
+        '/api/v1/auth/register',
+        {'username': 'alice', 'password': 'another-pass-1'},
+    )
+    assert resp.status_code == 400
+
+
+@pytest.mark.django_db
 def test_login_returns_jwt(api):
     bob = User.objects.create_user(username='bob', password='strong-pass-456')
     resp = api.post(
@@ -46,12 +57,36 @@ def test_login_returns_jwt(api):
     assert resp.status_code == 200
     data = resp.json()
     assert 'access' in data
-    assert 'refresh' in data
+    assert 'refresh' not in data  # refresh 走 httpOnly cookie（spec §3）
     # 解码 access：期望值（user_id）来自创建返回的实例，非用代码同样方式重算。
     # simplejwt 5.5 把 user_id claim 序列化为字符串，用 int() 容忍。
     payload = jwt.decode(data['access'], settings.SECRET_KEY, algorithms=['HS256'])
     assert payload['token_type'] == 'access'
     assert int(payload['user_id']) == bob.id
+
+
+@pytest.mark.django_db
+def test_login_sets_refresh_cookie(api):
+    # spec §3：refresh 走 httpOnly cookie，不暴露给 JS
+    User.objects.create_user(username='carol', password='strong-pass-789')
+    resp = api.post(
+        '/api/v1/auth/login',
+        {'username': 'carol', 'password': 'strong-pass-789'},
+    )
+    assert resp.status_code == 200
+    cookie = resp.cookies.get('refresh_token')
+    assert cookie is not None
+    assert cookie['httponly'] is True
+
+
+@pytest.mark.django_db
+def test_token_refresh_from_cookie(api):
+    # spec §3：用 httpOnly cookie 里的 refresh 换新 access
+    User.objects.create_user(username='dave', password='strong-pass-000')
+    api.post('/api/v1/auth/login', {'username': 'dave', 'password': 'strong-pass-000'})
+    resp = api.post('/api/v1/auth/token/refresh')
+    assert resp.status_code == 200
+    assert 'access' in resp.json()
 
 
 @pytest.mark.django_db

@@ -51,4 +51,18 @@ describe('LoginView', () => {
     expect(body).toEqual({ username: 'alice', password: 'pw123456' })
     expect(useAuthStore().isAuthenticated).toBe(true)
   })
+
+  it('shows an error message when login fails', async () => {
+    // codex P2-8：登录失败应显示错误，而非 unhandled rejection
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      json: async () => ({}),
+    } as unknown as Response)
+    const w = mountLogin()
+    await w.find('input[type="text"]').setValue('alice')
+    await w.find('input[type="password"]').setValue('wrong-pass-1')
+    await w.find('button').trigger('click')
+    await flushPromises()
+    expect(w.text()).toContain('登录失败')
+  })
 })

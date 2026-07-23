@@ -23,6 +23,6 @@ from .views import HealthView
 urlpatterns = [
     path('admin/', admin.site.urls),
     path('api/health', HealthView.as_view(), name='health'),
-    path('api/schema', SpectacularAPIView.as_view(), name='schema'),
+    path('api/schema/', SpectacularAPIView.as_view(), name='schema'),
     path('api/v1/auth/', include('accounts.urls')),
 ]

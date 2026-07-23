@@ -18,7 +18,7 @@ def test_health_returns_ok(api):
 
 
 def test_schema_returns_openapi(api):
-    resp = api.get('/api/schema?format=json')
+    resp = api.get('/api/schema/?format=json')
     assert resp.status_code == 200
     doc = resp.json()
     # 期望值来自 OpenAPI 3.x 规范，非用代码同样方式重算

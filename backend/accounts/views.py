@@ -1,11 +1,20 @@
-"""accounts views —— 注册 / 当前用户。登录与刷新走 simplejwt（见 urls）。"""
+"""accounts views —— 注册 / 登录 / 刷新 / 当前用户。"""
+from django.conf import settings
 from drf_spectacular.utils import extend_schema
 from rest_framework import status
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from rest_framework_simplejwt.tokens import RefreshToken
+from rest_framework_simplejwt.views import TokenRefreshView
 
-from .serializers import RegisterSerializer, UserSerializer
+from .serializers import (
+    AccessTokenSerializer,
+    CookieTokenRefreshSerializer,
+    LoginSerializer,
+    RegisterSerializer,
+    UserSerializer,
+)
 
 
 class RegisterView(APIView):
@@ -13,12 +22,43 @@ class RegisterView(APIView):
 
     permission_classes = [AllowAny]
 
-    @extend_schema(request=RegisterSerializer, responses=UserSerializer)
+    @extend_schema(request=RegisterSerializer, responses={201: UserSerializer})
     def post(self, request):
         ser = RegisterSerializer(data=request.data)
         ser.is_valid(raise_exception=True)
         user = ser.save()
         return Response(UserSerializer(user).data, status=status.HTTP_201_CREATED)
+
+
+class LoginView(APIView):
+    """登录：access(JSON body) + refresh(httpOnly cookie)，spec §3。"""
+
+    permission_classes = [AllowAny]
+
+    @extend_schema(request=LoginSerializer, responses=AccessTokenSerializer)
+    def post(self, request):
+        ser = LoginSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        user = ser.validated_data['user']
+        refresh = RefreshToken.for_user(user)
+        response = Response(
+            {'access': str(refresh.access_token)}, status=status.HTTP_200_OK
+        )
+        response.set_cookie(
+            'refresh_token',
+            str(refresh),
+            httponly=True,
+            samesite='Lax',
+            secure=not settings.DEBUG,
+            path='/api/v1/auth',
+        )
+        return response
+
+
+class CookieTokenRefreshView(TokenRefreshView):
+    """刷新 access：从 httpOnly cookie 读 refresh（spec §3）。"""
+
+    serializer_class = CookieTokenRefreshSerializer
 
 
 class MeView(APIView):
