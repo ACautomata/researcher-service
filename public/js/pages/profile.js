@@ -123,9 +123,9 @@ async function loadProfilePage() {
     // h += '<div class="mb16"><button type="button" class="btn bdr" style="font-size:11px" onclick="document.getElementById(\'pf_ant_key\').value=\'\';saveProfileField(\'anthropic_api_key\',\'\')">清除 Agent Key</button></div>';
     h += '<div style="height:1px;background:var(--border);margin:20px 0"></div>';
     h += '<label class="auth-lbl" style="margin-bottom:8px"><i class="fa-solid fa-robot"></i> OpenClaw Agent</label>';
-    h += '<p style="font-size:11px;color:var(--text-muted);margin-bottom:10px">将上方 API 厂商和 Key 同步到 OpenClaw Docker 容器，无需重复填写。</p>';
+    h += '<p style="font-size:11px;color:var(--text-muted);margin-bottom:10px">将上方 API 厂商和模型同步到 OpenClaw 网关（researcher openclaw.json，单 main agent），无需重复填写。</p>';
     h += '<button type="button" class="btn bp" style="font-size:12px;padding:8px 16px" onclick="applyOpenClawFromMain()"><i class="fa-solid fa-rocket"></i> 应用当前配置到 OpenClaw</button>';
-    h += '<span style="font-size:10px;color:var(--text-muted);margin-left:8px">写入 Docker 容器并自动重启 OpenClaw</span>';
+    h += '<span style="font-size:10px;color:var(--text-muted);margin-left:8px">写入 researcher openclaw.json 并重启网关生效</span>';
     h += '<div style="margin-top:20px"><button type="button" class="btn bp" onclick="saveProfileForm()"><i class="fa-solid fa-floppy-disk"></i> 保存配置</button></div>';
 
     // 主题配色选择器

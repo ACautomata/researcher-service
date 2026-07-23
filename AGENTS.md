@@ -17,11 +17,14 @@ pip install -r requirements.txt
 
 # Run dev server (with auto-reload)
 python main.py
+
+# Run seam tests (pytest; fake OpenClaw WS server stands in for the gateway)
+pytest tests/ -q
 ```
 
 The server starts at `http://localhost:8000` (configurable in `.env`). Interactive API docs at `http://localhost:8000/docs`.
 
-There are **no tests, no linters, no typechecking, no CI** configured.
+Tests use `pytest` (see `tests/`); there are no linters, no typechecking, no CI configured. To run the single-main-agent OpenClaw gateway locally: `git clone https://github.com/ACautomata/researcher ./researcher`, then `docker compose --env-file deploy/.env -f deploy/docker-compose.yml up -d` (see `deploy/README.md` and `README.md`).
 
 ## Prerequisites
 
@@ -46,10 +49,13 @@ routes/obsidian.py       — /api/v1/obsidian/* vault tree, file CRUD, graph, se
 routes/auth.py           — /api/v1/auth/* register, login, session, user-level API settings; /api/v1/auth/admin/* user management (admin only)
 routes/user_settings.py  — /api/v1/user/*  per-user AI credentials (mirrors /auth/settings)
 routes/dashboard.py       — /api/v1/dashboard/* task list, system stats (CPU/RAM/disk/GPU), unprotected
+routes/openclaw.py        — /api/v1/openclaw/* single-main-agent OpenClaw bridge: chat (WS), upload, apply-config, status, wiki
 services/ai_service.py        — chat(), chat_json(), prompt templates; uses per-user creds
 services/parser_service.py    — extract_text() for PDF/DOCX/TXT/MD/TeX
 services/external_service.py  — arXiv + Semantic Scholar search
 services/agent_service.py     — Claude Agent SDK wrapper (thread pool → SSE)
+services/openclaw_service.py  — OpenClaw SSE contract (text/done/error/raw) + WS event translation
+services/openclaw_ws.py       — process-level OpenClaw WS client singleton (handshake, reconnect, runId routing)
 services/obsidian_service.py  — vault file I/O, graph scanning, tag extraction
 services/auth_crypto.py       — PBKDF2-SHA256 password hashing, session token generation
 services/request_context.py   — ContextVar[int] for user_id, ContextVar[str] for user_role propagation
@@ -72,7 +78,13 @@ public/js/pages/dashboard.js  — scientific value analysis (Idea quality, probl
 public/js/pages/tasks.js      — task management hub (3 tabs: Pipeline/Center/System, polling)
 public/js/pages/doc.js        — API documentation page
 public/js/pages/admin.js      — admin user management (list users, reset passwords, change roles, delete)
+public/js/pages/openclaw_shared.js — OpenClaw shared module (multi-session, SSE streaming, render, upload); OC_AGENTS = main only
+public/js/pages/openclaw_main.js   — oc-main page (single line: buildOcAgentPage('main'))
+public/js/pages/wiki.js            — Wiki page (reads researcher wiki/main; five core categories + domains)
+public/js/pages/ocstatus.js        — OpenClaw status panel (gateway + container + main)
 public/js/app.js              — event listeners + bootstrap() call
+deploy/                       — slim single-service compose stack + deploy/openclaw.json (config single source, overrides researcher's)
+tests/                        — pytest seam tests (issue #16 infra; fake OpenClaw WS server for openclaw routes)
 uploads/                      — uploaded paper files (gitignored)
 pipeline.db                   — SQLite database (auto-created, gitignored)
 vault/                        — example Obsidian vault
@@ -172,7 +184,7 @@ Every core pipeline table has a `user_id INTEGER DEFAULT NULL` column. The `serv
 - API base = `/api/v1` (hardcoded JS var).
 - Drag-and-drop upload supported on the KB page.
 - All pages share a `cache` object populated by `loadPapers()`, `loadKeywords()`, `loadProblems()`, `loadIdeas()`, `loadAlgos()`.
-- Nav pages (P_FULL): home, kb, lit, discover, idea, algo, param, dashboard, chat, obs, tasks, profile, doc, admin. Agent page was removed during the nine-task redesign. discover.js is "研究动机发现", tasks.js task management hub replaces old dashboard task views.
+- Nav pages (P_FULL): home, kb, lit, discover, idea, algo, param, dashboard, chat, obs, tasks, oc-main, wiki, ocstatus, profile, doc, admin. The OpenClaw sub-agent pages (oc-autoresearch/oc-review/oc-idea) were removed in the single-main-agent refactor; only oc-main/wiki/ocstatus remain under the OpenClaw nav group. discover.js is "研究动机发现", tasks.js task management hub replaces old dashboard task views.
 - KB stats card "含文献" counts total papers across all domains (sum of paper_count), not domain count.
 - Lit page fetches analysis history from `GET /lit/history` on each navigation; new tasks are POSTed and status updates PUT to the backend.
 

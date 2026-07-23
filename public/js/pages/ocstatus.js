@@ -64,12 +64,11 @@ async function refreshOcStatus() {
     if (s.container.started_at) h += statusRow('启动时间', s.container.started_at.slice(0, 19).replace('T', ' '));
     h += '</div>';
 
-    // ── Agent / Sub-agent ──
+    // ── Agent（单 main） ──
     h += '<div class="card" style="padding:16px">';
-    h += '<div class="card-t" style="margin-bottom:12px"><i class="fa-solid fa-robot"></i> Agent</div>';
+    h += '<div class="card-t" style="margin-bottom:12px"><i class="fa-solid fa-robot"></i> 主 Agent</div>';
     h += '<div style="display:flex;gap:12px;margin-bottom:12px">';
-    h += statBox(s.agent_count || 0, 'Agent 总数', '#3b6df0');
-    h += statBox(s.subagent_count || 0, '子 Agent', '#8b5cf6');
+    h += statBox((s.agents && s.agents.length) || 0, 'Agent', '#3b6df0');
     h += statBox(s.active_sessions || 0, '活跃会话', '#10b981');
     h += '</div>';
     if (s.agents && s.agents.length) {
@@ -78,7 +77,6 @@ async function refreshOcStatus() {
         h += '<div style="display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--border-light);font-size:12px">';
         h += '<span style="flex:1;color:var(--text);font-weight:500">' + esc(a.name) + '</span>';
         if (a.is_default) h += '<span style="font-size:10px;padding:1px 6px;border-radius:4px;background:rgba(59,109,240,.1);color:#3b6df0">主</span>';
-        if (a.is_subagent) h += '<span style="font-size:10px;padding:1px 6px;border-radius:4px;background:rgba(139,92,246,.1);color:#8b5cf6">子</span>';
         h += '<span style="font-size:10px;color:var(--text-muted)">' + esc(a.id) + '</span>';
         h += '</div>';
       });

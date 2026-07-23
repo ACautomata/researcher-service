@@ -3,19 +3,7 @@
 var OC_AGENTS = {
   'main': {
     id: 'main', name: '颖姗', icon: 'fa-brain', color: '#3b6df0',
-    desc: '主科研助手 —— 负责交互、委派子Agent、论文RSS推送'
-  },
-  'autoresearch': {
-    id: 'autoresearch', name: 'Autoresearch', icon: 'fa-database', color: '#10b981',
-    desc: '论文知识库维护、文献 Wiki 构建、跨论文对比'
-  },
-  'paper-review': {
-    id: 'paper-review', name: 'Paper Review', icon: 'fa-microscope', color: '#8b5cf6',
-    desc: '论文深度评审 —— 5阶段分析：Wiki整理→实验提取→问题分析→验证设计→Codex提示'
-  },
-  'idea-generate': {
-    id: 'idea-generate', name: 'Idea Generate', icon: 'fa-lightbulb', color: '#f59e0b',
-    desc: '研究想法生成 —— 7种策略驱动的创新思路产出'
+    desc: '主科研助手 —— 负责交互、论文RSS推送'
   }
 };
 
@@ -347,6 +335,7 @@ async function ocSend(agentId) {
       agent_id: agentId,
       message: requestMessage,
       history: session.history.slice(0, -1),
+      session_key: activeId,
       temperature: 0.5
     });
     var taskId = startRes.task_id;
