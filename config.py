@@ -41,6 +41,9 @@ class Config:
     OPENCLAW_GATEWAY_URL: str = os.getenv("OPENCLAW_GATEWAY_URL", "http://127.0.0.1:18789")
     OPENCLAW_GATEWAY_TOKEN: str = os.getenv("OPENCLAW_GATEWAY_TOKEN", "")
     OPENCLAW_ENABLED: bool = os.getenv("OPENCLAW_ENABLED", "false").lower() == "true"
+    # 挂载进容器的精简版 openclaw.json 路径（配置单一来源），apply-config 写这里；
+    # compose 把它 bind-mount 覆盖到 /home/node/.openclaw/openclaw.json
+    RESEARCHER_CONFIG_PATH: str = os.getenv("RESEARCHER_CONFIG_PATH", "./deploy/openclaw.json")
 
     @classmethod
     def ai_headers(cls) -> dict:
@@ -71,3 +74,4 @@ ADMIN_USERNAME = cfg.ADMIN_USERNAME
 OPENCLAW_GATEWAY_URL = cfg.OPENCLAW_GATEWAY_URL
 OPENCLAW_GATEWAY_TOKEN = cfg.OPENCLAW_GATEWAY_TOKEN
 OPENCLAW_ENABLED = cfg.OPENCLAW_ENABLED
+RESEARCHER_CONFIG_PATH = cfg.RESEARCHER_CONFIG_PATH

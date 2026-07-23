@@ -51,9 +51,13 @@ services:
       # --- 插件加载（memory-wiki 支撑 Wiki 页需要）---
       OPENCLAW_PLUGINS_ENABLED: "true"
     volumes:
-      # researcher 仓库根 = 一份完整 OpenClaw home（openclaw.json + workspace/ + wiki/ + skills/）
+      # researcher 仓库根 = 一份完整 OpenClaw home（workspace/ + wiki/ + skills/）
       # 挂到 /home/node/.openclaw；gateway 读 /home/node/.openclaw/openclaw.json
-      - ${RESEARCHER_DIR:-./researcher}:/home/node/.openclaw
+      # 相对路径解析基准 = 本 compose 文件所在目录（deploy/），故指向仓库根的 researcher 用 ../researcher
+      - ${RESEARCHER_DIR:-../researcher}:/home/node/.openclaw
+      # 本仓库维护的精简版 openclaw.json 覆盖 researcher 的同名文件（配置单一来源在本仓库，
+      # researcher 不动；精简：删 channels/bindings/lossless-claw，留 browser/memory-core/minimax/memory-wiki）
+      - ./openclaw.json:/home/node/.openclaw/openclaw.json
       # 运行时 state/logs 用匿名卷，避免污染宿主 researcher git 树（R6 风险残留）
       - openclaw-state:/home/node/.openclaw/state
       - openclaw-logs:/home/node/.openclaw/logs
