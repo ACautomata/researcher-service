@@ -1,6 +1,7 @@
 """accounts 序列化器 —— 注册 / 登录 / 刷新 / 用户信息。"""
 from django.contrib.auth import authenticate, get_user_model
 from django.contrib.auth import password_validation
+from django.contrib.auth.validators import UnicodeUsernameValidator
 from rest_framework import serializers
 from rest_framework.validators import UniqueValidator
 from rest_framework_simplejwt.serializers import TokenRefreshSerializer
@@ -12,14 +13,20 @@ class RegisterSerializer(serializers.Serializer):
     """注册入参（spec §4：经 is_valid 校验，禁止视图裸读 request.data）。"""
 
     username = serializers.CharField(
-        max_length=150, validators=[UniqueValidator(queryset=User.objects.all())]
+        max_length=150,
+        validators=[UnicodeUsernameValidator(), UniqueValidator(queryset=User.objects.all())],
     )
     password = serializers.CharField(write_only=True, min_length=8)
     email = serializers.EmailField(required=False, allow_blank=True)
 
     def validate_password(self, value):
-        # 跑 settings.AUTH_PASSWORD_VALIDATORS（spec §4 零信任；min_length 只挡短密码）
-        password_validation.validate_password(value)
+        # 跑 settings.AUTH_PASSWORD_VALIDATORS，传 prospective user 让
+        # UserAttributeSimilarityValidator 比较 username/email（spec §4 零信任）
+        user = User(
+            username=self.initial_data.get('username', ''),
+            email=self.initial_data.get('email', ''),
+        )
+        password_validation.validate_password(value, user=user)
         return value
 
     def create(self, validated_data):

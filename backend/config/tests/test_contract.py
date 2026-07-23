@@ -26,3 +26,9 @@ def test_schema_returns_openapi(api):
     assert 'paths' in doc
     # schema 必须反映真实存在的 health 路由
     assert '/api/health' in doc['paths']
+
+
+def test_schema_swagger_ui(api):
+    # spec §4：Swagger UI 与 schema 并存，供前端/执行 agent 检视契约
+    resp = api.get('/api/schema/swagger/')
+    assert resp.status_code == 200

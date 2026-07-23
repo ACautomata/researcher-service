@@ -48,6 +48,27 @@ def test_register_rejects_duplicate_username(api):
 
 
 @pytest.mark.django_db
+def test_register_rejects_invalid_username(api):
+    # UnicodeUsernameValidator 拒含空格等非法字符（Django 标准 username 语法）
+    resp = api.post(
+        '/api/v1/auth/register',
+        {'username': 'bad user', 'password': 'strong-pass-1'},
+    )
+    assert resp.status_code == 400
+
+
+@pytest.mark.django_db
+def test_register_rejects_password_similar_to_username(api):
+    # UserAttributeSimilarityValidator 拒与用户名相似的密码（需传 prospective user）
+    # password == username 完全相同，相似度 1.0 > 默认阈值 0.7
+    resp = api.post(
+        '/api/v1/auth/register',
+        {'username': 'alicealice', 'password': 'alicealice'},
+    )
+    assert resp.status_code == 400
+
+
+@pytest.mark.django_db
 def test_login_returns_jwt(api):
     bob = User.objects.create_user(username='bob', password='strong-pass-456')
     resp = api.post(

@@ -19,9 +19,12 @@ const router = createRouter({
   routes,
 })
 
-// 守卫：受保护路由未认证 → 重定向 /login（后端 JWT 拦截的前端镜像）。
-router.beforeEach((to) => {
+// 守卫：进入受保护路由前用 httpOnly refresh cookie 恢复登录态（codex P2-2），再判重定向。
+router.beforeEach(async (to) => {
   const auth = useAuthStore()
+  if (to.meta.requiresAuth) {
+    await auth.hydrate()
+  }
   if (to.meta.requiresAuth && !auth.isAuthenticated) {
     return { name: 'login' }
   }
