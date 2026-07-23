@@ -9,3 +9,7 @@ aiosqlite==0.20.0
 pydantic==2.9.2
 claude-agent-sdk>=0.1.69
 psutil==5.9.8
+
+# 测试（issue #16 起引入的测试基建）
+pytest==9.1.1
+PyYAML==6.0.3

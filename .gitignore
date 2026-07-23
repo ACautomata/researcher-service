@@ -21,3 +21,7 @@ uploads/*
 
 # Claude Code 本地配置
 .claude/
+
+# 本地虚拟环境 / pytest 缓存
+.venv/
+.pytest_cache/
