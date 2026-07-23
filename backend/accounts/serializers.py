@@ -16,7 +16,9 @@ class RegisterSerializer(serializers.Serializer):
         max_length=150,
         validators=[UnicodeUsernameValidator(), UniqueValidator(queryset=User.objects.all())],
     )
-    password = serializers.CharField(write_only=True, min_length=8)
+    # codex round-4 F3：密码首尾空白不可裁剪（DRF CharField 默认 trim_whitespace=True），
+    # 否则 admin 等外部创建的含边界空白账号无法通过本 API 登录。
+    password = serializers.CharField(write_only=True, min_length=8, trim_whitespace=False)
     email = serializers.EmailField(required=False, allow_blank=True)
 
     def validate_password(self, value):
@@ -46,7 +48,8 @@ class LoginSerializer(serializers.Serializer):
     """登录入参：username/password + authenticate。"""
 
     username = serializers.CharField()
-    password = serializers.CharField(write_only=True)
+    # codex round-4 F3：登录密码同样不裁剪空白，与注册对称存储原值。
+    password = serializers.CharField(write_only=True, trim_whitespace=False)
 
     def validate(self, attrs):
         user = authenticate(

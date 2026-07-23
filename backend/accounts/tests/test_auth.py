@@ -74,6 +74,7 @@ def test_login_returns_jwt(api):
     resp = api.post(
         '/api/v1/auth/login',
         {'username': 'bob', 'password': 'strong-pass-456'},
+        format='json',
     )
     assert resp.status_code == 200
     data = resp.json()
@@ -93,6 +94,7 @@ def test_login_sets_refresh_cookie(api):
     resp = api.post(
         '/api/v1/auth/login',
         {'username': 'carol', 'password': 'strong-pass-789'},
+        format='json',
     )
     assert resp.status_code == 200
     cookie = resp.cookies.get('refresh_token')
@@ -104,7 +106,7 @@ def test_login_sets_refresh_cookie(api):
 def test_token_refresh_from_cookie(api):
     # spec §3：用 httpOnly cookie 里的 refresh 换新 access
     User.objects.create_user(username='dave', password='strong-pass-000')
-    api.post('/api/v1/auth/login', {'username': 'dave', 'password': 'strong-pass-000'})
+    api.post('/api/v1/auth/login', {'username': 'dave', 'password': 'strong-pass-000'}, format='json')
     resp = api.post('/api/v1/auth/token/refresh')
     assert resp.status_code == 200
     assert 'access' in resp.json()
@@ -115,7 +117,7 @@ def test_logout_invalidates_refresh_cookie(api):
     # codex P2-2：logout 必须让 httpOnly refresh cookie 失效，否则下次 hydrate 又登回来
     User.objects.create_user(username='eve', password='strong-pass-1')
     token = api.post(
-        '/api/v1/auth/login', {'username': 'eve', 'password': 'strong-pass-1'}
+        '/api/v1/auth/login', {'username': 'eve', 'password': 'strong-pass-1'}, format='json'
     ).json()['access']
     resp = api.post('/api/v1/auth/logout', HTTP_AUTHORIZATION=f'Bearer {token}')
     assert resp.status_code == 204
@@ -142,8 +144,39 @@ def test_me_returns_user_with_token(api):
     login = api.post(
         '/api/v1/auth/login',
         {'username': 'bob', 'password': 'strong-pass-456'},
+        format='json',
     )
     token = login.json()['access']
     resp = api.get('/api/v1/auth/me', HTTP_AUTHORIZATION=f'Bearer {token}')
     assert resp.status_code == 200
     assert resp.json()['username'] == 'bob'
+
+
+@pytest.mark.django_db
+def test_register_preserves_password_boundary_whitespace(api):
+    # codex round-4 F3：DRF CharField 默认 trim_whitespace=True 静默裁剪密码首尾空白。
+    # /admin/ 已挂载（config/urls.py）——admin 创建的含边界空白账号须能通过 API 登录。
+    # 直接验存储的密码原样含空白（用 ORM check_password，不依赖 register/login 对称 trim）。
+    resp = api.post(
+        '/api/v1/auth/register',
+        {'username': 'whitespace', 'password': ' strong-pass-1 '},
+    )
+    assert resp.status_code == 201
+    user = User.objects.get(username='whitespace')
+    assert user.check_password(' strong-pass-1 ') is True  # 原样保留边界空白
+    assert user.check_password('strong-pass-1') is False  # 裁剪版不应通过
+
+
+@pytest.mark.django_db
+def test_login_rejects_form_urlencoded(api):
+    # codex round-4 F4：防登录 CSRF。HTML <form> 无法发 application/json，
+    # 故禁止 application/x-www-form-urlencoded 即切断跨站表单种攻击者 refresh cookie 的向量。
+    # spec §4 line 137：settings 层收紧默认 parser。
+    User.objects.create_user(username='alice', password='strong-pass-1')
+    resp = api.post(
+        '/api/v1/auth/login',
+        data='username=alice&password=strong-pass-1',
+        content_type='application/x-www-form-urlencoded',
+    )
+    assert resp.status_code == 415
+    assert 'refresh_token' not in resp.cookies

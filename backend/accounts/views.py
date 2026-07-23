@@ -2,6 +2,7 @@
 from django.conf import settings
 from drf_spectacular.utils import extend_schema
 from rest_framework import status
+from rest_framework.parsers import JSONParser
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -34,6 +35,9 @@ class LoginView(APIView):
     """登录：access(JSON body) + refresh(httpOnly cookie)，spec §3。"""
 
     permission_classes = [AllowAny]
+    # codex round-4 F4：只接受 JSON。HTML <form> 无法发 application/json，
+    # 故切断跨站表单登录 CSRF（攻击者无法用跨站 form 在受害者浏览器种攻击者 refresh cookie）。
+    parser_classes = [JSONParser]
 
     @extend_schema(request=LoginSerializer, responses=AccessTokenSerializer)
     def post(self, request):

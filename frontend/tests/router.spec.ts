@@ -6,6 +6,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import router from '@/router'
 import { useAuthStore } from '@/stores/auth'
 
+// 合法且未过期的 JWT（exp 远在未来）：isTokenExpired 判 false → hydrate early-return。
+// 用于模拟"持有有效会话"，避免非法 token 占位被当成过期触发 refresh。
+function unexpiredJwt(): string {
+  return `header.${btoa(JSON.stringify({ exp: 9999999999 }))}.sig`
+}
+
 describe('router guard', () => {
   beforeEach(async () => {
     // 每个用例独立的 Pinia（token 默认空 = 未认证）
@@ -30,7 +36,7 @@ describe('router guard', () => {
 
   it('allows authenticated visits to the protected route', async () => {
     const auth = useAuthStore()
-    auth.token = 'fake-token' // 模拟已登录（token 来源不属守卫职责）
+    auth.token = unexpiredJwt() // 模拟已登录（token 来源不属守卫职责）
     await router.push('/')
     expect(router.currentRoute.value.name).toBe('containers')
   })
@@ -61,12 +67,30 @@ describe('router guard', () => {
     expect(auth.token).toBe('fresh-token')
   })
 
+  it('clears a stale expired token when refresh fails so the guard does not admit it (codex round-4 F1)', async () => {
+    // 过期 token + refresh 400（cookie 缺失/无效）：不应让过期 token 进入受保护路由。
+    // 修复前 hydrate 只在 401/403 清 token，400 路径漏过 → isAuthenticated 仍真 → 放行过期凭证。
+    const expired = btoa(JSON.stringify({ exp: 1 }))
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 400,
+      json: async () => ({}),
+    } as unknown as Response)
+    const auth = useAuthStore()
+    auth.token = `header.${expired}.sig`
+    await router.push('/')
+    await flushPromises()
+    expect(auth.token).toBe('')
+    expect(auth.refreshExhausted).toBe(true)
+    expect(router.currentRoute.value.name).toBe('login')
+  })
+
   it('logout calls backend to clear cookie and resets local state', async () => {
-    // codex P2-2：logout 调后端清 httpOnly cookie + 重置本地
+    // codex P2-2：有效会话 logout 直接调后端清 httpOnly cookie + 重置本地（不触发 refresh）
     const fetchMock = vi.fn().mockResolvedValue({ ok: true } as unknown as Response)
     global.fetch = fetchMock
     const auth = useAuthStore()
-    auth.token = 'some-token'
+    auth.token = unexpiredJwt()
     await auth.logout()
     expect(fetchMock).toHaveBeenCalledWith(
       '/api/v1/auth/logout',
@@ -74,5 +98,26 @@ describe('router guard', () => {
     )
     expect(auth.token).toBe('')
     expect(auth.refreshExhausted).toBe(true)
+  })
+
+  it('logout refreshes an expired access token before clearing the cookie (codex round-4 F2)', async () => {
+    // access 过期：logout 前先用 cookie 换新，否则后端 IsAuthenticated 401 清不掉 cookie → 重载又登回来
+    const expired = btoa(JSON.stringify({ exp: 1 }))
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ access: 'fresh' }),
+      } as unknown as Response)
+      .mockResolvedValueOnce({ ok: true } as unknown as Response)
+    global.fetch = fetchMock
+    const auth = useAuthStore()
+    auth.token = `header.${expired}.sig`
+    await auth.logout()
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      '/api/v1/auth/logout',
+      expect.objectContaining({ headers: { Authorization: 'Bearer fresh' } }),
+    )
+    expect(auth.token).toBe('')
   })
 })

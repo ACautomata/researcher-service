@@ -65,4 +65,17 @@ describe('LoginView', () => {
     await flushPromises()
     expect(w.text()).toContain('登录失败')
   })
+
+  it('registers a new account when switched to register mode (codex round-4 F5)', async () => {
+    // spec §9.2：登录页须含本地账号注册表单。切到注册模式提交应调 /register。
+    const w = mountLogin()
+    await w.find('[data-test="switch-register"]').trigger('click')
+    await w.find('input[type="text"]').setValue('newbie')
+    await w.find('input[type="password"]').setValue('newpass-1')
+    await w.find('button').trigger('click')
+    await flushPromises()
+    const calls = (global.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls
+    expect(calls[0][0]).toBe('/api/v1/auth/register')
+    expect(JSON.parse(calls[0][1].body)).toEqual({ username: 'newbie', password: 'newpass-1' })
+  })
 })
