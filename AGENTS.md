@@ -175,3 +175,17 @@ Every core pipeline table has a `user_id INTEGER DEFAULT NULL` column. The `serv
 - Nav pages (P_FULL): home, kb, lit, discover, idea, algo, param, dashboard, chat, obs, tasks, profile, doc, admin. Agent page was removed during the nine-task redesign. discover.js is "研究动机发现", tasks.js task management hub replaces old dashboard task views.
 - KB stats card "含文献" counts total papers across all domains (sum of paper_count), not domain count.
 - Lit page fetches analysis history from `GET /lit/history` on each navigation; new tasks are POSTed and status updates PUT to the backend.
+
+## Agent skills
+
+### Issue tracker
+
+Issues are tracked as GitHub issues on `ACautomata/researcher-service`, via the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Five canonical labels, each named as itself: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: one `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.
