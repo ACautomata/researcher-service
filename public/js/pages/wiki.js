@@ -1,21 +1,23 @@
-/* ===== Wiki 知识库 —— Autoresearch 自动构建的论文知识库 ===== */
+/* ===== Wiki 知识库 —— agent 维护的结构化知识库（wiki/main） ===== */
 var wikiData = null;
-var wikiActiveDomain = null;
-var wikiActivePaper = null;
+var wikiActiveKind = null;   // 当前展开的分组 kind
+var wikiActiveName = null;   // 当前分组的 name（domain 类为 domain 名，其余为目录名）
+var wikiActivePaper = null;  // 当前页 page_id
 var wikiTab = 'preview';
-var wikiPaperCache = {};  // { domain/paperId: { frontmatter, body, content } }
-var wikiAllPapers = [];   // [{domain, id, title}] for graph
+var wikiPaperCache = {};  // { kind/name/pageId: { frontmatter, body, content } }
+var wikiAllPapers = [];   // [{kind, name, id, title}] for graph
 
 pages.wiki = async function() {
   wikiData = null;
-  wikiActiveDomain = null;
+  wikiActiveKind = null;
+  wikiActiveName = null;
   wikiActivePaper = null;
   wikiTab = 'preview';
   wikiPaperCache = {};
 
   var h = '';
   h += '<div class="flex-b mb16">';
-  h += '<div style="display:flex;align-items:center;gap:8px"><span style="font-size:16px;font-weight:700;color:var(--text-bold)">Wiki 知识库</span><i class="fa-solid fa-circle-info" style="color:var(--text-muted);font-size:13px;cursor:help" title="Autoresearch Agent 自动构建的结构化论文知识库"></i></div>';
+  h += '<div style="display:flex;align-items:center;gap:8px"><span style="font-size:16px;font-weight:700;color:var(--text-bold)">Wiki 知识库</span><i class="fa-solid fa-circle-info" style="color:var(--text-muted);font-size:13px;cursor:help" title="agent 维护的结构化知识库（wiki/main）"></i></div>';
   h += '<button class="btn" onclick="loadWiki()" style="font-size:11px;padding:6px 12px"><i class="fa-solid fa-rotate"></i> 刷新</button>';
   h += '</div>';
   h += '<div id="wikiContent" style="min-height:60vh"><div style="text-align:center;padding:60px;color:var(--text-muted)"><i class="fa-solid fa-spinner fa-spin" style="font-size:24px;display:block;margin-bottom:12px"></i>加载中...</div></div>';
@@ -30,8 +32,8 @@ async function loadWiki() {
     var res = await api('GET', '/openclaw/wiki');
     wikiData = res;
     wikiAllPapers = [];
-    (res.domains || []).forEach(function(d) {
-      (d.papers || []).forEach(function(p) { wikiAllPapers.push({ domain: d.name, id: p.id, title: p.title }); });
+    (res.groups || []).forEach(function(g) {
+      (g.pages || []).forEach(function(p) { wikiAllPapers.push({ kind: g.kind, name: g.name, id: p.id, title: p.title }); });
     });
     renderWikiList(res);
   } catch(e) {
@@ -39,37 +41,46 @@ async function loadWiki() {
   }
 }
 
+var WIKI_KIND_LABEL = { concept: '概念', entity: '实体', source: '来源', synthesis: '综述', report: '报告', domain: '领域论文' };
+var WIKI_KIND_ICON = { concept: 'fa-lightbulb', entity: 'fa-cube', source: 'fa-file-import', synthesis: 'fa-layer-group', report: 'fa-chart-line', domain: 'fa-folder-open' };
+var WIKI_KIND_COLOR = { concept: '#f59e0b', entity: '#8b5cf6', source: '#06b6d4', synthesis: '#10b981', report: '#ef4444', domain: '#10b981' };
+
 function renderWikiList(res) {
   var el = document.getElementById('wikiContent');
   if (!el) return;
 
-  if (!res.domains || !res.domains.length) {
-    el.innerHTML = '<div style="text-align:center;padding:60px;color:var(--text-muted)"><i class="fa-solid fa-book" style="font-size:40px;display:block;margin-bottom:12px;opacity:.15"></i><p style="font-weight:600;color:var(--text)">知识库为空</p><p style="font-size:11px;margin-top:4px">Autoresearch 尚未生成 Wiki 内容</p></div>';
+  if (!res.groups || !res.groups.length) {
+    el.innerHTML = '<div style="text-align:center;padding:60px;color:var(--text-muted)"><i class="fa-solid fa-book" style="font-size:40px;display:block;margin-bottom:12px;opacity:.15"></i><p style="font-weight:600;color:var(--text)">知识库为空</p><p style="font-size:11px;margin-top:4px">agent 尚未生成 Wiki 内容</p></div>';
     return;
   }
 
   var h = '';
   var totalPapers = 0;
-  res.domains.forEach(function(d) { totalPapers += d.paper_count || 0; });
+  res.groups.forEach(function(g) { totalPapers += g.page_count || 0; });
 
   h += '<div style="display:flex;gap:16px;margin-bottom:16px">';
-  h += '<div style="flex:1;text-align:center;padding:16px;border-radius:12px;background:rgba(16,185,129,.04);border:1px solid rgba(16,185,129,.1)"><div style="font-family:\'Space Grotesk\';font-size:28px;font-weight:700;color:#10b981">' + res.domains.length + '</div><div style="font-size:11px;color:var(--text-muted);margin-top:4px">领域</div></div>';
-  h += '<div style="flex:1;text-align:center;padding:16px;border-radius:12px;background:rgba(59,109,240,.04);border:1px solid rgba(59,109,240,.1)"><div style="font-family:\'Space Grotesk\';font-size:28px;font-weight:700;color:#3b6df0">' + totalPapers + '</div><div style="font-size:11px;color:var(--text-muted);margin-top:4px">论文</div></div>';
+  h += '<div style="flex:1;text-align:center;padding:16px;border-radius:12px;background:rgba(16,185,129,.04);border:1px solid rgba(16,185,129,.1)"><div style="font-family:\'Space Grotesk\';font-size:28px;font-weight:700;color:#10b981">' + res.groups.length + '</div><div style="font-size:11px;color:var(--text-muted);margin-top:4px">分类</div></div>';
+  h += '<div style="flex:1;text-align:center;padding:16px;border-radius:12px;background:rgba(59,109,240,.04);border:1px solid rgba(59,109,240,.1)"><div style="font-family:\'Space Grotesk\';font-size:28px;font-weight:700;color:#3b6df0">' + totalPapers + '</div><div style="font-size:11px;color:var(--text-muted);margin-top:4px">页面</div></div>';
   h += '</div>';
 
   h += '<div style="display:flex;gap:16px;min-height:55vh">';
 
-  // ── Left sidebar ──
+  // ── Left sidebar（按 kind 分组） ──
   h += '<div style="width:220px;flex-shrink:0;display:flex;flex-direction:column;gap:2px;max-height:60vh;overflow-y:auto;scrollbar-width:thin">';
-  res.domains.forEach(function(d) {
-    var isActive = wikiActiveDomain === d.name;
-    h += '<div onclick="toggleWikiDomain(\'' + esc(d.name) + '\')" style="cursor:pointer;padding:10px 12px;border-radius:8px;font-size:12px;background:' + (isActive ? 'var(--accent-light)' : 'var(--bg)') + ';border:1px solid ' + (isActive ? 'var(--accent)' : 'transparent') + '">';
-    h += '<div style="display:flex;align-items:center;gap:6px"><i class="fa-solid fa-folder-open" style="color:#10b981;font-size:11px"></i><span style="font-weight:600;color:var(--text);flex:1">' + esc(d.name) + '</span><span style="font-size:10px;color:var(--text-muted)">' + d.paper_count + '</span></div>';
-    if (isActive && d.papers) {
-      d.papers.forEach(function(p) {
+  res.groups.forEach(function(g) {
+    var isActive = wikiActiveKind === g.kind;
+    var color = WIKI_KIND_COLOR[g.kind] || '#10b981';
+    var icon = WIKI_KIND_ICON[g.kind] || 'fa-folder';
+    var label = WIKI_KIND_LABEL[g.kind] || g.kind;
+    h += '<div onclick="toggleWikiDomain(\'' + esc(g.kind) + '\')" style="cursor:pointer;padding:10px 12px;border-radius:8px;font-size:12px;background:' + (isActive ? 'var(--accent-light)' : 'var(--bg)') + ';border:1px solid ' + (isActive ? 'var(--accent)' : 'transparent') + '">';
+    h += '<div style="display:flex;align-items:center;gap:6px"><i class="fa-solid ' + icon + '" style="color:' + color + ';font-size:11px"></i><span style="font-weight:600;color:var(--text);flex:1">' + esc(label) + '</span><span style="font-size:10px;color:var(--text-muted)">' + g.page_count + '</span></div>';
+    if (isActive && g.pages) {
+      g.pages.forEach(function(p) {
         var isP = wikiActivePaper === p.id;
-        h += '<div onclick="event.stopPropagation();openWikiPaper(\'' + esc(d.name) + '\',\'' + esc(p.id) + '\')" style="cursor:pointer;padding:8px 10px 8px 24px;border-radius:6px;font-size:11px;margin-top:4px;background:' + (isP ? 'rgba(59,109,240,.12)' : 'transparent') + ';color:' + (isP ? 'var(--accent)' : 'var(--text)') + ';font-weight:' + (isP ? '600' : '400') + '">';
-        h += '<i class="fa-solid fa-file-lines" style="margin-right:6px;color:' + (isP ? 'var(--accent)' : '#94a3b8') + '"></i>' + esc(p.title || p.id);
+        // domain 页 id 形如 "ml/slug"，取末段显示；其它直接显示 title/id
+        var disp = p.title || p.id.split('/').pop();
+        h += '<div onclick="event.stopPropagation();openWikiPaper(\'' + esc(g.kind) + '\',\'' + esc(g.name) + '\',\'' + esc(p.id) + '\')" style="cursor:pointer;padding:8px 10px 8px 24px;border-radius:6px;font-size:11px;margin-top:4px;background:' + (isP ? 'rgba(59,109,240,.12)' : 'transparent') + ';color:' + (isP ? 'var(--accent)' : 'var(--text)') + ';font-weight:' + (isP ? '600' : '400') + '">';
+        h += '<i class="fa-solid fa-file-lines" style="margin-right:6px;color:' + (isP ? 'var(--accent)' : '#94a3b8') + '"></i>' + esc(disp);
         h += '</div>';
       });
     }
@@ -79,40 +90,59 @@ function renderWikiList(res) {
 
   // ── Right panel ──
   h += '<div style="flex:1;min-width:0;display:flex;flex-direction:column">';
-  if (wikiActivePaper && wikiActiveDomain) {
-    h += '<div id="wikiPaperPane" style="min-height:55vh"><div style="text-align:center;padding:40px;color:var(--text-muted)"><i class="fa-solid fa-spinner fa-spin"></i> 加载论文...</div></div>';
+  if (wikiActivePaper && wikiActiveKind) {
+    h += '<div id="wikiPaperPane" style="min-height:55vh"><div style="text-align:center;padding:40px;color:var(--text-muted)"><i class="fa-solid fa-spinner fa-spin"></i> 加载页面...</div></div>';
   } else if (res.index) {
     h += '<div class="card" style="padding:20px;font-size:13px;line-height:1.8;overflow-y:auto;max-height:60vh"><div style="white-space:pre-wrap">' + esc(res.index) + '</div></div>';
   } else {
-    h += '<div style="flex:1;display:flex;align-items:center;justify-content:center;color:var(--text-muted)"><i class="fa-solid fa-arrow-left" style="font-size:24px;display:block;text-align:center;margin-bottom:12px"></i><p>选择一个论文查看</p></div>';
+    h += '<div style="flex:1;display:flex;align-items:center;justify-content:center;color:var(--text-muted)"><i class="fa-solid fa-arrow-left" style="font-size:24px;display:block;text-align:center;margin-bottom:12px"></i><p>选择一个页面查看</p></div>';
   }
   h += '</div></div>';
 
   el.innerHTML = h;
-  if (wikiActivePaper && wikiActiveDomain) loadWikiPaper(wikiActiveDomain, wikiActivePaper);
+  if (wikiActivePaper && wikiActiveKind) loadWikiPaper(wikiActiveKind, wikiActiveName, wikiActivePaper);
 }
 
-function toggleWikiDomain(domain) {
-  if (wikiActiveDomain === domain) { wikiActiveDomain = null; wikiActivePaper = null; }
-  else { wikiActiveDomain = domain; wikiActivePaper = null; }
+function toggleWikiDomain(kind) {
+  if (wikiActiveKind === kind) { wikiActiveKind = null; wikiActiveName = null; wikiActivePaper = null; }
+  else { wikiActiveKind = kind; wikiActiveName = null; wikiActivePaper = null; }
   renderWikiList(wikiData);
 }
 
-function openWikiPaper(domain, paperId) {
-  wikiActiveDomain = domain;
-  wikiActivePaper = paperId;
+// domain 页 id 形如 "ml/slug"：name=ml、page_id=slug；其它 kind：name 为目录名、page_id=id
+function openWikiPaper(kind, groupName, pageId) {
+  var name = groupName, pid = pageId;
+  if (kind === 'domain') {
+    var parts = pageId.split('/');
+    name = parts[0];
+    pid = parts.slice(1).join('/');
+  }
+  wikiActiveKind = kind;
+  wikiActiveName = name;
+  wikiActivePaper = pageId;
   wikiTab = 'preview';
   renderWikiList(wikiData);
-  loadWikiPaper(domain, paperId);
+  loadWikiPaper(kind, name, pageId);
 }
 
-async function loadWikiPaper(domain, paperId) {
-  var key = domain + '/' + paperId;
+function _wikiPageUrl(kind, name, pageId) {
+  var pid = pageId;
+  var n = name;
+  if (kind === 'domain') {
+    var parts = pageId.split('/');
+    n = parts[0];
+    pid = parts.slice(1).join('/');
+  }
+  return '/openclaw/wiki/' + encodeURIComponent(kind) + '/' + encodeURIComponent(n) + '/' + encodeURIComponent(pid);
+}
+
+async function loadWikiPaper(kind, name, pageId) {
+  var key = kind + '/' + pageId;
   if (wikiPaperCache[key]) { renderWikiPaper(document.getElementById('wikiPaperPane'), wikiPaperCache[key]); return; }
   var el = document.getElementById('wikiPaperPane');
   if (!el) return;
   try {
-    var res = await api('GET', '/openclaw/wiki/' + encodeURIComponent(domain) + '/' + encodeURIComponent(paperId));
+    var res = await api('GET', _wikiPageUrl(kind, name, pageId));
     wikiPaperCache[key] = res;
     renderWikiPaper(el, res);
   } catch(e) {
@@ -125,7 +155,7 @@ function wikiSwitchTab(tab) {
   wikiTab = tab;
   var el = document.getElementById('wikiPaperPane');
   if (el && wikiActivePaper) {
-    var key = wikiActiveDomain + '/' + wikiActivePaper;
+    var key = wikiActiveKind + '/' + wikiActivePaper;
     renderWikiPaper(el, wikiPaperCache[key]);
   }
 }
@@ -213,10 +243,10 @@ function wikiRenderGraph(res) {
 
   // Add all papers as nodes
   wikiAllPapers.forEach(function(p) {
-    var id = p.domain + '/' + p.id;
+    var id = p.kind + '/' + p.id;
     if (!nodeMap[id]) {
       nodeMap[id] = true;
-      nodes.push({ id: id, label: p.title || p.id, isActive: (id === wikiActiveDomain + '/' + wikiActivePaper) });
+      nodes.push({ id: id, label: p.title || p.id.split('/').pop(), kind: p.kind, name: p.name, pageId: p.id, isActive: (id === wikiActiveKind + '/' + wikiActivePaper) });
     }
   });
 
@@ -225,13 +255,13 @@ function wikiRenderGraph(res) {
   var match;
   while ((match = linkRe.exec(res.body || '')) !== null) {
     var target = match[1].trim();
-    var srcId = wikiActiveDomain + '/' + wikiActivePaper;
+    var srcId = wikiActiveKind + '/' + wikiActivePaper;
     var found = false;
     for (var i = 0; i < wikiAllPapers.length; i++) {
       var p = wikiAllPapers[i];
       if (p.title === target || p.id === target) {
-        var tgtId = p.domain + '/' + p.id;
-        if (!nodeMap[tgtId]) { nodeMap[tgtId] = true; nodes.push({ id: tgtId, label: p.title || p.id }); }
+        var tgtId = p.kind + '/' + p.id;
+        if (!nodeMap[tgtId]) { nodeMap[tgtId] = true; nodes.push({ id: tgtId, label: p.title || p.id.split('/').pop(), kind: p.kind, name: p.name, pageId: p.id }); }
         edges.push({ source: srcId, target: tgtId });
         found = true;
         break;
@@ -269,9 +299,8 @@ function wikiRenderGraph(res) {
     .attr('x', 12).attr('y', 4).attr('font-size', 10).attr('fill', function(d) { return d.ghost ? '#94a3b8' : '#334155'; });
 
   node.on('click', function(e, d) {
-    if (d.ghost || d.isActive) return;
-    var parts = d.id.split('/');
-    if (parts.length === 2) openWikiPaper(parts[0], parts[1]);
+    if (d.ghost || d.isActive || !d.kind) return;
+    openWikiPaper(d.kind, d.name, d.pageId);
   });
 
   var simulation = d3.forceSimulation(nodes).force('link', d3.forceLink(edges).distance(120))
@@ -289,8 +318,8 @@ async function wikiSavePaper() {
   if (!editor) return;
   var content = editor.value;
   try {
-    await api('PUT', '/openclaw/wiki/' + encodeURIComponent(wikiActiveDomain) + '/' + encodeURIComponent(wikiActivePaper), { content: content });
-    var key = wikiActiveDomain + '/' + wikiActivePaper;
+    await api('PUT', _wikiPageUrl(wikiActiveKind, wikiActiveName, wikiActivePaper), { content: content });
+    var key = wikiActiveKind + '/' + wikiActivePaper;
     wikiPaperCache[key] = null; // invalidate cache so next load fetches fresh
     toast('已保存', 'fa-check-circle', '#10b981');
   } catch(e) {
@@ -299,14 +328,14 @@ async function wikiSavePaper() {
 }
 
 function wikiDownload() {
-  var key = wikiActiveDomain + '/' + wikiActivePaper;
+  var key = wikiActiveKind + '/' + wikiActivePaper;
   var res = wikiPaperCache[key];
   if (!res) return;
   var blob = new Blob([res.content], { type: 'text/markdown;charset=utf-8' });
   var url = URL.createObjectURL(blob);
   var a = document.createElement('a');
   a.href = url;
-  a.download = wikiActivePaper + '.md';
+  a.download = wikiActivePaper.split('/').pop() + '.md';
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);

@@ -44,6 +44,13 @@ class Config:
     # 挂载进容器的精简版 openclaw.json 路径（配置单一来源），apply-config 写这里；
     # compose 把它 bind-mount 覆盖到 /home/node/.openclaw/openclaw.json
     RESEARCHER_CONFIG_PATH: str = os.getenv("RESEARCHER_CONFIG_PATH", "./deploy/openclaw.json")
+    # researcher 主 agent 的 workspace 根（main workspace），上传文件落 {root}/oc-uploads；
+    # compose 把 researcher 挂到 /home/node/.openclaw，宿主侧默认 ./researcher/workspace
+    RESEARCHER_WORKSPACE_PATH: str = os.getenv("RESEARCHER_WORKSPACE_PATH", "./researcher/workspace")
+    # researcher wiki 根（memory-wiki vault，wiki/main），Wiki 页读取这里
+    RESEARCHER_WIKI_ROOT: str = os.getenv("RESEARCHER_WIKI_ROOT", "./researcher/wiki/main")
+    # compose 栈工作目录（apply-config 写完后在此执行 docker compose restart 使配置生效）
+    RESEARCHER_COMPOSE_DIR: str = os.getenv("RESEARCHER_COMPOSE_DIR", "./deploy")
 
     @classmethod
     def ai_headers(cls) -> dict:
@@ -75,3 +82,6 @@ OPENCLAW_GATEWAY_URL = cfg.OPENCLAW_GATEWAY_URL
 OPENCLAW_GATEWAY_TOKEN = cfg.OPENCLAW_GATEWAY_TOKEN
 OPENCLAW_ENABLED = cfg.OPENCLAW_ENABLED
 RESEARCHER_CONFIG_PATH = cfg.RESEARCHER_CONFIG_PATH
+RESEARCHER_WORKSPACE_PATH = cfg.RESEARCHER_WORKSPACE_PATH
+RESEARCHER_WIKI_ROOT = cfg.RESEARCHER_WIKI_ROOT
+RESEARCHER_COMPOSE_DIR = cfg.RESEARCHER_COMPOSE_DIR

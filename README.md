@@ -1,113 +1,105 @@
-# AI Research Pipeline — OpenClaw 对接架构
+# AI Research Pipeline — 单 main-agent OpenClaw 部署
+
+FastAPI 后端 + 单文件 vanilla-JS 前端的「AI Research Pipeline」，桥接一个**单 `main` agent** 的 OpenClaw 部署。配置来源是外部仓库 [ACautomata/researcher](https://github.com/ACautomata/researcher)（已是单 main agent 的 OpenClaw home），本仓库用精简 compose 栈（`deploy/`）承载网关，传输走 **WebSocket**。
 
 ## 架构总览
 
 ```
 浏览器 (前端 JS)
-    │
-    │ POST /api/v1/openclaw/*
+    │ POST /api/v1/openclaw/*        （前端 SSE 契约 text/done/error/raw 不变）
     ▼
-FastAPI (localhost:9093)
-    │
-    │ routes/openclaw.py  →  services/openclaw_service.py
-    │
-    │ POST http://127.0.0.1:18789/v1/responses
+FastAPI (localhost:8000)
+    │ routes/openclaw.py  →  services/openclaw_service.py  →  services/openclaw_ws.py
+    │ WebSocket  ws://127.0.0.1:18789/   （chat.send，agentId=main）
     ▼
-OpenClaw 网关 (Docker 容器)
-    │
-    │ 根据 model 参数路由到 Agent
-    │ model="openclaw/main" → 颖姗
-    │ model="openclaw/autoresearch" → Autoresearch
-    │ model="openclaw/paper-review" → Paper Review
-    │ model="openclaw/idea-generate" → Idea Generate
-    │
+OpenClaw 网关 (Docker 容器，researcher 挂载为 ~/.openclaw)
+    │ agents.list 仅 main（allowAgents: []）
     ▼
-    Agent 调用底层模型 (DeepSeek / Claude 等)
-    │
+main agent 调用底层模型（models.providers，由 deploy/openclaw.json 托管）
     ▼
-    SSE 流式响应返回 → Pipeline 转发 → 前端实时渲染
+WS chat 事件（deltaText/final/error）→ Pipeline 翻译成 SSE → 前端实时渲染
 ```
 
-## 部署拓扑
+**范围约定**：仅一个 `main` agent；**不接任何消息 channel**（feishu/discord 全裁）；Wiki 页与独立的 Claude Agent SDK（`routes/agent.py`）保留不动。
 
-| 组件 | 位置 | 端口 | 说明 |
-|------|------|------|------|
-| FastAPI Pipeline | 宿主机 | 9093 | 对外提供服务，桥接前端和 OpenClaw |
-| OpenClaw 网关 | Docker 容器 | 18789 | 管理 Agent 路由、模型调用、会话 |
-| DeepSeek API | 外部 | api.deepseek.com | 底层 AI 模型（Anthropic 协议） |
+## 部署
+
+### 前置
+
+- Docker + compose plugin
+- 本仓库 `.env`：`OPENCLAW_ENABLED=true`、`OPENCLAW_GATEWAY_URL=http://127.0.0.1:18789`、`OPENCLAW_GATEWAY_TOKEN=<同 deploy/.env 的 GATEWAY_TOKEN>`
+
+### 步骤
+
+```bash
+# 1. 克隆 researcher 配置仓库（提供 workspace/ + wiki/ + skills/；其 openclaw.json 被本仓库 deploy/openclaw.json 覆盖）
+git clone https://github.com/ACautomata/researcher ./researcher
+
+# 2. 配置网关环境（GATEWAY_TOKEN 强随机 + LLM_API_KEY）
+cp deploy/.env.example deploy/.env   # 填入 GATEWAY_TOKEN 与 LLM_API_KEY
+
+# 3. 启动 OpenClaw 网关
+docker compose --env-file deploy/.env -f deploy/docker-compose.yml up -d
+curl http://127.0.0.1:18789/health
+
+# 4. 启动本仓库后端
+python main.py    # http://localhost:8000
+```
+
+**配置单一来源在本仓库**：`deploy/openclaw.json` 是精简版（删 channels/bindings/lossless-claw、contextEngine=legacy、`gateway.bind=lan`），compose 把它单独 bind-mount 覆盖 researcher 的同名文件；researcher 仓库**不动**。详见 `deploy/README.md`。
 
 ## 前端页面
 
-导航栏「OpenClaw」分组下有 5 个页面：
+导航栏「OpenClaw」分组下有 3 个页面（子 agent 页面已删除）：
 
-| 页面 ID | 名称 | Agent ID | 说明 |
-|---------|------|----------|------|
-| oc-main | 颖姗（主Agent） | main | 主科研助手，可委派子Agent |
-| oc-autoresearch | Autoresearch | autoresearch | 论文知识库维护 |
-| oc-review | Paper Review | paper-review | 5阶段论文深度评审 |
-| oc-idea | Idea Generate | idea-generate | 研究想法生成 |
-| ocstatus | OpenClaw 状态 | — | 网关/容器/Agent监控 |
+| 页面 ID | 名称 | 说明 |
+|---------|------|------|
+| oc-main | 颖姗（主Agent） | 主科研助手，多 Session 流式对话 |
+| wiki | Wiki 知识库 | 读 researcher `wiki/main`（memory-wiki vault） |
+| ocstatus | OpenClaw 状态 | 网关可达性 + 容器状态 + main |
 
 ### 页面代码结构
 
 ```
 public/js/pages/
-├── openclaw_shared.js      ← 共享模块（所有 Agent 页面的逻辑）
-├── openclaw_main.js        ← 颖姗页面（仅 1 行：调用 shared 模块）
-├── openclaw_autoresearch.js
-├── openclaw_review.js
-└── openclaw_idea.js
+├── openclaw_shared.js   ← 共享模块（多 Session、SSE 流式、消息渲染、文件上传）
+├── openclaw_main.js     ← 颖姗页面（仅 1 行：buildOcAgentPage('main')）
+├── wiki.js              ← Wiki 页（按五核心分类 + domains 分组）
+└── ocstatus.js          ← 状态面板（gateway + main）
 ```
-
-每个 Agent 页面仅一行代码，调用 `buildOcAgentPage(agentId)` 生成 UI。所有交互逻辑（多 Session、SSE 流式、消息渲染、文件上传）在 `openclaw_shared.js` 中。
-
-### 多 Session 机制
-
-- 每个 Agent 页面支持多个独立会话
-- 会话保存在 `localStorage`（`oc_sessions_{agentId}`），刷新/切页面不丢失
-- 每个会话通过 `session_key` 传给 OpenClaw 网关实现隔离
-- 用户可创建/切换/删除会话，也可清空全部
 
 ## 调用流程
 
-### 流式对话
+### 流式对话（WS）
 
 ```
-1. 用户输入消息 → 前端 ocSend(agentId)
-2. POST /api/v1/openclaw/chat/stream  { agent_id, message, history }
+1. 用户输入 → 前端 ocSend('main')
+2. POST /api/v1/openclaw/chat/stream  { agent_id, message, session_key }
 3. Pipeline 创建 task_id + asyncio.Queue
-4. 后台协程调用 OpenClaw 网关：
-   POST http://127.0.0.1:18789/v1/responses  { model, input, stream: true }
-5. 网关返回 SSE 事件流 → Pipeline 转发给前端
-6. 前端 EventSource 逐事件解析 → 实时更新聊天界面
+4. 后台协程经进程级 WS 单例向网关 chat.send：
+     ws://127.0.0.1:18789/  connect.challenge→connect(auth.token)→hello-ok
+     chat.send { sessionKey, message, idempotencyKey, agentId: "main" }
+5. 网关按 runId 推 chat 事件（delta/final/error）→ Pipeline 映射为 SSE：
+     delta→text、final→done、error→error、终态后补 done
+6. 前端 EventSource 逐事件渲染（契约 text/done/error/raw 不变）
 ```
+
+**行为差异（相对旧 HTTP 实现）**：
+- **会话记忆**复用 `session_key`（网关按 sessionKey 维护历史，不再逐条传 history）。
+- **system_prompt** 拼接到 message 前缀（WS `chat.send` 无 instructions 对等字段）。
+- **temperature / max_tokens** 不再由调用方传，由网关 `openclaw.json` 的 agent 配置托管。
+- `chat()`（非流式）复用流式路径收集 text 拼接。
 
 ### 非流式对话
 
 ```
-POST /api/v1/openclaw/chat  { agent_id, message }
-→ 等待完整响应 → 返回 { text }
+POST /api/v1/openclaw/chat  { agent_id, message, session_key }
+→ 复用流式路径收集全部 text → 返回 { text, raw }
 ```
 
-### 论文评审（已废弃，合并到对话 Session）
+## 模型配置（apply-config 去 Docker 化）
 
-原有独立论文评审功能已废弃。现直接在对话中向 Paper Review Agent 发送论文内容即可。
-
-## 模型配置
-
-### 界面配置路径
-
-个人配置页面 → OpenClaw Agent 区域，支持 3 个厂商：
-
-| 厂商 | 协议 | Base URL |
-|------|------|----------|
-| DeepSeek（Anthropic协议） | anthropic-messages | https://api.deepseek.com/anthropic |
-| Anthropic（Claude） | anthropic-messages | https://api.anthropic.com |
-| 自定义 | anthropic-messages | 用户手动输入 |
-
-选择厂商 → 填写 API Key → 点击「应用当前配置到 OpenClaw」。
-
-### 应用配置流程
+个人配置页 → OpenClaw Agent 区域，支持 3 个厂商（DeepSeek / Anthropic / 自定义，均 anthropic-messages 协议）。
 
 ```
 前端点击「应用当前配置到 OpenClaw」
@@ -115,141 +107,75 @@ POST /api/v1/openclaw/chat  { agent_id, message }
 POST /api/v1/openclaw/apply-config  { api_base, api_key, api_model }
     ↓
 Pipeline:
-  1. 根据 URL 自动识别 provider（deepseek/anthropic/custom）
-  2. 完整替换 openclaw.json 的 models.providers 段
-  3. 更新 agents.defaults.model
-  4. 更新 auth.profiles
-  5. 为每个子 Agent 创建 auth-profiles.json
-  6. docker compose restart
-  7. 等待 init.sh 完成（18s）
-  8. docker cp 回写配置（修复 init.sh 覆盖）
-  9. docker cp auth-profiles.json 到各子 Agent
-  10. pkill 网关进程（init.sh 自动重启，使用新配置）
-  11. 再等待 15s + 补写一次配置
+  1. 按 URL 推断 provider（deepseek/anthropic/custom）
+  2. 只写 RESEARCHER_CONFIG_PATH 的 models.providers + agents.defaults.model（单 main）
+     apiKey 用 SecretRef（env LLM_API_KEY），不明文写盘
+  3. docker compose restart openclaw-gateway（RESEARCHER_COMPOSE_DIR，默认 ./deploy）
+     —— sync 全关后 init 不覆盖配置，无需 docker cp/回写
 ```
+
+> 生效需后端进程有 docker/compose 权限 + 正确 compose 工作目录；失败不阻断（配置已写盘，下次重启容器生效）。
 
 ## 文件上传
 
-文件上传走独立端点，不通过 OpenClaw API：
-
 ```
-用户选文件 → POST /api/v1/openclaw/upload  (multipart, agent_id + file)
-    ↓
-Pipeline 保存到 /root/.openclaw/{workspace}/oc-uploads/
-    ↓    (Docker bind mount 自动同步)
-Docker 容器内路径：/home/node/.openclaw/{workspace}/oc-uploads/
-    ↓
-前端在消息文本中追加文件路径列表：
-  "[附件]
-   1. paper.pdf（oc-uploads/abc123_paper.pdf）
-   （用户上传了以上文件，详见对应路径）"
-    ↓
-Agent 收到消息 → 用文件系统工具读取 oc-uploads/abc123_paper.pdf
+用户选文件 → POST /api/v1/openclaw/upload  (multipart, agent_id=main + file)
+    ↓   （仅接受 main；非 main 拒绝）
+Pipeline 保存到 RESEARCHER_WORKSPACE_PATH/oc-uploads/  （默认 ./researcher/workspace/oc-uploads/，uuid 前缀防重名）
+    ↓   （researcher bind mount → 容器内 /home/node/.openclaw/workspace/oc-uploads/）
+前端在消息文本中追加文件路径，agent 用文件系统工具读取
 ```
 
-支持的 Agent 工作空间目录：
+图片文件（image/*）改经 WS `chat.send` 的 `attachments[]`（`{mimeType, fileName, content=纯base64}`，剥 data URL 前缀）传递；非图片仅上传到工作空间由 agent 自行读取。
 
-| Agent | 宿主机路径 | 容器内路径 |
-|-------|-----------|-----------|
-| main | /root/.openclaw/workspace/oc-uploads/ | /home/node/.openclaw/workspace/oc-uploads/ |
-| autoresearch | /root/.openclaw/workspace-autoresearch/oc-uploads/ | /home/node/.openclaw/workspace-autoresearch/oc-uploads/ |
-| paper-review | /root/.openclaw/workspace-paper-review/oc-uploads/ | /home/node/.openclaw/workspace-paper-review/oc-uploads/ |
-| idea-generate | /root/.openclaw/workspace-idea-generate/oc-uploads/ | /home/node/.openclaw/workspace-idea-generate/oc-uploads/ |
+## Wiki 知识库
 
-图片文件（image/*）通过 OpenClaw OpenResponses 的 `input_image` 类型发送，非图片文件仅上传到工作空间由 Agent 自行读取。
-
-## Docker 部署
-
-### 容器信息
-
-- 镜像：`justlikemaki/openclaw-docker-cn-im:latest`
-- 端口映射：`0.0.0.0:18789 → 18789`
-- 数据卷：`/root/.openclaw → /home/node/.openclaw` (bind mount)
-- 重启策略：`unless-stopped`
-
-### 管理命令
-
-```bash
-# 查看 OpenClaw 日志
-docker logs -f openclaw-gateway
-
-# 重启 OpenClaw
-cd /root/openclaw-docker-cn-im-main && docker compose restart
-
-# 进入容器
-docker exec -it openclaw-gateway bash
-
-# 查看当前模型配置
-grep -A10 providers /root/.openclaw/openclaw.json
-```
-
-## 配置目录结构
-
-```
-/root/.openclaw/                     ← Docker bind mount → /home/node/.openclaw/
-├── openclaw.json                    ← 网关主配置（会被 Docker 种子覆盖）
-├── openclaw.json.bak                ← 配置备份（init.sh 自动生成）
-├── workspace/                       ← 主 Agent（颖姗）工作空间
-│   ├── AGENTS.md
-│   ├── SOUL.md
-│   └── oc-uploads/                  ← 上传文件存放目录
-├── workspace-autoresearch/          ← Autoresearch 工作空间
-│   └── oc-uploads/
-├── workspace-paper-review/          ← Paper Review 工作空间
-│   └── oc-uploads/
-├── workspace-idea-generate/         ← Idea Generate 工作空间
-│   └── oc-uploads/
-├── agents/                          ← Agent 认证配置
-│   ├── autoresearch/agent/auth-profiles.json
-│   ├── paper-review/agent/auth-profiles.json
-│   └── idea-generate/agent/auth-profiles.json
-└── skills/                          ← 跨 Agent 共享技能
-```
-
-## 已知问题
-
-### 1. Docker 种子覆盖配置
-
-每次 `docker compose restart` 时，容器 init.sh 会生成一份种子 openclaw.json，覆盖自定义配置。`apply-config` 端点通过「写配置 → compose restart → 等待 → docker cp 回写」的方式绕过，仍可能因网络/超时问题失败。
-
-**解决思路**：修改 init.sh 或禁用种子机制。当前已验证的规避方案是 `docker compose restart` 后立即 `docker cp` 覆盖。
-
-### 2. 子 Agent 认证隔离
-
-每个子 Agent（autoresearch/paper-review/idea-generate）有自己的 `auth-profiles.json`，不继承主 Agent 的认证。
-`apply-config` 端点会自动为所有子 Agent 创建/更新认证文件。
-
-### 3. 模型 Key 丢失
-
-容器重启后，种子配置中的 `apiKey` 字段可能被清空。需通过「个人配置」页面重新应用配置。
+读 researcher 的 `wiki/main`（memory-wiki 插件 vault，render mode=obsidian）。`GET /openclaw/wiki` 按**五核心分类**（concepts/entities/sources/syntheses/reports）+ `domains/<domain>/papers/` 子树分组列出页面，跳过 `.openclaw-wiki/`（插件私有）、`_attachments/`、`_views/` 与各目录 `index.md` 占位；frontmatter 兼容插件官方（`pageType/id/title`）与 researcher 论文页（`type/domain/paper.*/evidence_level`）双 schema。`PUT` 只覆盖已存在页面，不新建、不动 `index.md` 的 `openclaw:wiki:*` 生成块。
 
 ## 后端 API 端点
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | /api/v1/openclaw/health | 网关连接状态 |
-| GET | /api/v1/openclaw/agents | 可用 Agent 列表 |
-| GET | /api/v1/openclaw/status | 网关/容器/Agent 状态面板数据 |
+| GET | /api/v1/openclaw/status | 网关可达性 + 容器 + main 状态 |
 | POST | /api/v1/openclaw/chat | 非流式对话 |
 | POST | /api/v1/openclaw/chat/stream | SSE 流式对话（返回 task_id） |
 | GET | /api/v1/openclaw/chat/{tid}/stream | 消费 SSE 事件流 |
-| POST | /api/v1/openclaw/upload | 上传文件到 Agent 工作空间 |
-| POST | /api/v1/openclaw/apply-config | 应用 API 配置到 Docker |
+| POST | /api/v1/openclaw/upload | 上传文件到 main workspace |
+| POST | /api/v1/openclaw/apply-config | 写模型配置到 researcher openclaw.json 并重启生效 |
 | GET | /api/v1/openclaw/sessions | 活跃会话列表 |
-| POST | /api/v1/openclaw/paper-review | （已废弃）论文评审 |
-| GET | /api/v1/openclaw/paper-review/{tid}/progress | （已废弃） |
+| GET | /api/v1/openclaw/wiki | Wiki 页面分组列表 |
+| GET | /api/v1/openclaw/wiki/{kind}/{name}/{page_id} | 读 Wiki 单页 |
+| PUT | /api/v1/openclaw/wiki/{kind}/{name}/{page_id} | 覆盖已有 Wiki 页 |
+
+## 配置项（.env）
+
+| 变量 | 默认 | 说明 |
+|------|------|------|
+| OPENCLAW_ENABLED | false | 启用 OpenClaw 桥接 |
+| OPENCLAW_GATEWAY_URL | http://127.0.0.1:18789 | 网关地址（WS 用 ws:// 同源） |
+| OPENCLAW_GATEWAY_TOKEN | — | = deploy/.env 的 GATEWAY_TOKEN |
+| RESEARCHER_CONFIG_PATH | ./deploy/openclaw.json | apply-config 写入的精简配置（compose 挂载覆盖源） |
+| RESEARCHER_WORKSPACE_PATH | ./researcher/workspace | main workspace 根（上传落 oc-uploads） |
+| RESEARCHER_WIKI_ROOT | ./researcher/wiki/main | Wiki 读取根（memory-wiki vault） |
+| RESEARCHER_COMPOSE_DIR | ./deploy | apply-config 后 docker compose restart 的工作目录 |
 
 ## 相关文件索引
 
 | 文件 | 说明 |
 |------|------|
-| routes/openclaw.py | 所有 OpenClaw API 路由 |
-| services/openclaw_service.py | OpenClaw 网关 HTTP 客户端 |
+| routes/openclaw.py | OpenClaw API 路由（chat/upload/apply-config/status/wiki） |
+| services/openclaw_service.py | 对前端 SSE 契约 + WS 事件翻译 |
+| services/openclaw_ws.py | 进程级 WS 客户端单例（握手/重连/runId 路由） |
 | services/user_credentials.py | 逐用户凭证解析（含 OpenClaw） |
+| deploy/ | 精简 compose 栈 + deploy/openclaw.json（配置单一来源） |
 | public/js/pages/openclaw_shared.js | 前端共享模块（Session/SSE/渲染） |
-| public/js/pages/openclaw_main.js | 颖姗页面 |
-| public/js/pages/openclaw_autoresearch.js | Autoresearch 页面 |
-| public/js/pages/openclaw_review.js | Paper Review 页面 |
-| public/js/pages/openclaw_idea.js | Idea Generate 页面 |
-| research-agent-main/openclaw.json | OpenClaw 网关配置文件模板 |
-| openclaw-docker-cn-im-main/docker-compose.yml | Docker 部署配置 |
+
+## 测试
+
+```bash
+pip install -r requirements.txt
+pytest tests/ -q
+```
+
+接缝测试（issue #15 Testing Decisions）：用 FastAPI ASGI transport 对各 openclaw 路由做集成测试，在 openclaw_service 与真实网关之间放 fake OpenClaw WS 服务器替身（`tests/fake_openclaw.py`，模拟握手 + 推送 chat 事件帧）挡下游网络，不需真实容器。

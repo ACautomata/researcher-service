@@ -12,9 +12,12 @@ from pydantic import BaseModel
 from database import db_execute, update_task
 from services.data_filter import current_user_id
 from services.openclaw_service import (
-    chat, chat_stream, health, list_agents,
+    chat, chat_stream, health,
 )
-from config import OPENCLAW_ENABLED
+from config import (
+    OPENCLAW_ENABLED, RESEARCHER_WORKSPACE_PATH, RESEARCHER_WIKI_ROOT,
+    RESEARCHER_CONFIG_PATH, RESEARCHER_COMPOSE_DIR,
+)
 
 router = APIRouter(prefix="/api/v1/openclaw", tags=["OpenClaw"])
 
@@ -28,13 +31,8 @@ class ChatRequest(BaseModel):
     system_prompt: Optional[str] = None
     temperature: float = 0.7
     max_tokens: int = 4096
+    session_key: Optional[str] = None  # 复用同一 key → 网关按 sessionKey 维护跨轮记忆
     files: Optional[list] = None  # [{name, data, type}]
-
-
-class PaperReviewRequest(BaseModel):
-    agent_id: str = "paper-review"
-    message: str
-    system_prompt: Optional[str] = None
 
 
 # ── 健康检查 ──────────────────────────────────────────────
@@ -45,15 +43,6 @@ async def openclaw_health():
         return {"enabled": False, "reachable": False}
     result = await health()
     return {"enabled": True, **result}
-
-
-# ── Agent 列表 ────────────────────────────────────────────
-
-@router.get("/agents")
-async def openclaw_agents():
-    if not OPENCLAW_ENABLED:
-        return {"agents": [], "enabled": False}
-    return {"agents": await list_agents(), "enabled": True}
 
 
 # ── 非流式对话 ────────────────────────────────────────────
@@ -68,31 +57,26 @@ async def openclaw_chat(req: ChatRequest):
         system_prompt=req.system_prompt,
         temperature=req.temperature,
         max_tokens=req.max_tokens,
+        session_key=req.session_key,
     )
     return result
 
 
 # ── 文件上传 ──────────────────────────────────────────────
 
-_AGENT_WORKSPACES = {
-    "main": "workspace",
-    "autoresearch": "workspace-autoresearch",
-    "paper-review": "workspace-paper-review",
-    "idea-generate": "workspace-idea-generate",
-}
-
 @router.post("/upload")
 async def openclaw_upload(agent_id: str = Form("main"), file: UploadFile = File(...)):
-    """上传文件到 Agent 的工作空间（同步到 Docker 容器内）"""
+    """上传文件到 main agent 的 workspace（researcher 挂载源 workspace/oc-uploads）"""
     if not OPENCLAW_ENABLED:
         raise HTTPException(400, "OpenClaw 未启用")
+    # 单 main 收敛：仅接受 main，其余（含已删子 agent）一律拒绝
+    if agent_id != "main":
+        raise HTTPException(400, f"仅支持上传到 main agent，收到: {agent_id}")
 
-    ws_dir = _AGENT_WORKSPACES.get(agent_id, "workspace")
-    upload_dir = f"/root/.openclaw/{ws_dir}/oc-uploads"
+    upload_dir = os.path.join(RESEARCHER_WORKSPACE_PATH, "oc-uploads")
     os.makedirs(upload_dir, exist_ok=True)
 
     # 用 uuid 前缀防重名
-    ext = os.path.splitext(file.filename or "file")[1]
     safe_name = f"{uuid.uuid4().hex[:8]}_{file.filename or 'file'}"
     save_path = os.path.join(upload_dir, safe_name)
 
@@ -131,6 +115,7 @@ async def openclaw_chat_stream_start(req: ChatRequest):
                 system_prompt=req.system_prompt,
                 temperature=req.temperature,
                 max_tokens=req.max_tokens,
+                session_key=req.session_key,
                 files=req.files,
             ):
                 await _openclaw_event_queues[tid].put(sse_event)
@@ -178,77 +163,10 @@ async def openclaw_chat_stream_events(tid: str, request: Request):
     )
 
 
-# ── 论文评审（异步任务模式） ──────────────────────────────
-
-@router.post("/paper-review")
-async def openclaw_paper_review(req: PaperReviewRequest):
-    """启动论文评审流水线（5阶段分析），返回 task_id"""
-    uid = current_user_id()
-    tid = f"openclaw_review_{uuid.uuid4().hex[:8]}"
-    await db_execute(
-        "INSERT INTO tasks(id,type,status,progress,step,user_id) VALUES(?,'openclaw_review','running',0,'启动论文评审',?)",
-        (tid, uid),
-    )
-
-    async def _do_review():
-        try:
-            full_response = ""
-            await update_task(tid, 5, "正在分析论文...")
-            async for sse_event in chat_stream(
-                agent_id=req.agent_id,
-                message=req.message,
-                system_prompt=req.system_prompt or (
-                    "你是一位严谨的学术论文评审专家。请对用户提供的论文执行完整的5阶段分析：\n"
-                    "1. Wiki条目整理 —— 结构化提取论文元信息、背景、方法、实验\n"
-                    "2. 实验深度提取 —— 提取实验设置、结果、消融、参数敏感性\n"
-                    "3. 评审式问题分析 —— 从新颖性、重要性、证据充分性等9个维度审视\n"
-                    "4. 验证实验设计 —— 设计可执行的验证实验\n"
-                    "5. Codex任务提示生成 —— 生成代码实现任务提示\n\n"
-                    "请逐步输出分析结果。"
-                ),
-                temperature=0.3,
-                max_tokens=8192,
-            ):
-                data_str = sse_event
-                if data_str.startswith("data: "):
-                    try:
-                        evt = json.loads(data_str[6:])
-                        if evt.get("type") == "text":
-                            full_response += evt.get("text", "")
-                            progress = min(90, 5 + len(full_response) // 100)
-                            await update_task(tid, progress, "分析中...")
-                        elif evt.get("type") == "done":
-                            break
-                    except json.JSONDecodeError:
-                        pass
-            await update_task(tid, 100, "评审完成", "completed",
-                              result={"response": full_response})
-        except Exception as e:
-            await update_task(tid, 0, str(e), "error", error=str(e))
-
-    asyncio.create_task(_do_review())
-    return {"task_id": tid, "status": "running"}
-
-
-@router.get("/paper-review/{tid}/progress")
-async def openclaw_paper_review_progress(tid: str):
-    """查询论文评审进度"""
-    from database import db_query
-    rows = await db_query("SELECT * FROM tasks WHERE id = ?", (tid,))
-    if not rows:
-        raise HTTPException(404, "任务不存在")
-    t = rows[0]
-    return {
-        "task_id": tid,
-        "status": t["status"],
-        "progress": t["progress"],
-        "step": t["step"],
-        "result": json.loads(t["result_json"]) if t["result_json"] else None,
-        "error": t["error"],
-    }
-
-
-# ── 应用配置到 Docker ──────────────────────────────────────
+# ── 应用配置到 researcher openclaw.json ────────────────────
+# 去 Docker 化（issue #22 / spec 2c）：只写 RESEARCHER_CONFIG_PATH 的
+# models.providers + agents.defaults.model（单 main）；生效 = docker compose restart
+# openclaw-gateway（compose 栈目录）。sync 全关后 init 不覆盖，无需回写/docker cp。
 
 class ApplyConfigRequest(BaseModel):
     api_key: Optional[str] = None
@@ -256,10 +174,65 @@ class ApplyConfigRequest(BaseModel):
     api_model: Optional[str] = None
 
 
+def _infer_provider(api_base: str, api_model: str) -> dict:
+    """沿用既有 deepseek/anthropic/custom 推断（单 main）。"""
+    base_lower = api_base.lower()
+    if "deepseek" in base_lower:
+        return {
+            "provider_name": "deepseek",
+            "model_id": api_model or "deepseek-v4-pro",
+            "model_alias": "DeepSeek V4 Pro",
+            "api_protocol": "anthropic-messages",
+            "context_window": 131072,
+            "max_tokens": 131072,
+        }
+    if "anthropic" in base_lower:
+        model_id = api_model or "claude-sonnet-4-20250514"
+        return {
+            "provider_name": "anthropic",
+            "model_id": model_id,
+            "model_alias": model_id,
+            "api_protocol": "anthropic-messages",
+            "context_window": 200000,
+            "max_tokens": 8192,
+        }
+    model_id = api_model or "default-model"
+    return {
+        "provider_name": "custom",
+        "model_id": model_id,
+        "model_alias": model_id,
+        "api_protocol": "anthropic-messages",
+        "context_window": 131072,
+        "max_tokens": 4096,
+    }
+
+
+def _restart_gateway() -> None:
+    """生效动作：在 compose 栈目录重启 openclaw-gateway（sync 全关后 init 不覆盖配置）。
+
+    需后端进程有 docker/compose 权限 + 正确 compose 工作目录（见 REFACTOR-SPEC 待确认项）。
+    失败不阻断——配置已写盘，下次重启容器同样生效。
+    """
+    import subprocess
+    try:
+        subprocess.run(
+            ["docker", "compose", "restart", "openclaw-gateway"],
+            cwd=RESEARCHER_COMPOSE_DIR,
+            capture_output=True, text=True, timeout=60,
+        )
+    except Exception:
+        pass
+
+
+# 可替换的重启钩子（测试注入 spy，断言「调用了重启」而非真跑 docker）
+restart_gateway_hook = _restart_gateway
+
+
 @router.post("/apply-config")
 async def openclaw_apply_config(req: ApplyConfigRequest, request: Request):
-    """将界面 API 配置写入 Docker 的 openclaw.json 并重启 OpenClaw 容器"""
-    import subprocess, tempfile, os as _os
+    """将界面模型配置写入 researcher openclaw.json（单 main）并触发容器重启生效"""
+    import json as _json
+    import os as _os
 
     if not OPENCLAW_ENABLED:
         raise HTTPException(400, "OpenClaw 未启用")
@@ -271,168 +244,56 @@ async def openclaw_apply_config(req: ApplyConfigRequest, request: Request):
     if not api_base and not api_key:
         raise HTTPException(400, "请提供 API Base URL 或 API Key")
 
-    # ── 自动推断 provider 名称 & 协议 ──
-    base_lower = api_base.lower()
-    if "deepseek" in base_lower:
-        provider_name = "deepseek"
-        model_id = api_model or "deepseek-v4-pro"
-        model_alias = "DeepSeek V4 Pro"
-        api_protocol = "anthropic-messages"
-        context_window = 131072
-        max_tokens = 131072
-    elif "anthropic" in base_lower:
-        provider_name = "anthropic"
-        model_id = api_model or "claude-sonnet-4-20250514"
-        model_alias = model_id
-        api_protocol = "anthropic-messages"
-        context_window = 200000
-        max_tokens = 8192
-    else:
-        provider_name = "custom"
-        model_id = api_model or "default-model"
-        model_alias = model_id
-        api_protocol = "anthropic-messages"
-        context_window = 131072
-        max_tokens = 4096
+    p = _infer_provider(api_base, api_model)
 
     try:
-        import json as _json
-
-        # ── 1. 更新 Docker .env ──
-        env_path = "/root/openclaw-docker-cn-im-main/.env"
-        if _os.path.exists(env_path):
-            env_lines = open(env_path).readlines()
-            new_lines = []
-            for line in env_lines:
-                if line.startswith("DEEPSEEK_API_KEY=") and api_key:
-                    new_lines.append(f"DEEPSEEK_API_KEY={api_key}\n")
-                else:
-                    new_lines.append(line)
-            open(env_path, "w").writelines(new_lines)
-
-        # ── 2. 完整替换 openclaw.json 模型配置 ──
-        oc_config = "/root/.openclaw/openclaw.json"
+        oc_config = RESEARCHER_CONFIG_PATH
         if not _os.path.exists(oc_config):
-            raise HTTPException(500, "openclaw.json 不存在")
+            raise HTTPException(500, f"openclaw.json 不存在: {oc_config}")
 
         data = _json.load(open(oc_config))
 
-        # 替换 models.providers（清空旧的，写入新的）
-        data["models"]["providers"] = {
-            provider_name: {
+        # 只写 models.providers（单 provider；apiKey 用 SecretRef 运行时读 LLM_API_KEY，不明文写盘）
+        data.setdefault("models", {})["providers"] = {
+            p["provider_name"]: {
                 "baseUrl": api_base,
-                "apiKey": api_key,
-                "api": api_protocol,
+                "apiKey": {"source": "env", "provider": "default", "id": "LLM_API_KEY"},
+                "api": p["api_protocol"],
                 "authHeader": True,
                 "models": [
                     {
-                        "id": model_id,
-                        "name": model_alias,
+                        "id": p["model_id"],
+                        "name": p["model_alias"],
                         "reasoning": True,
                         "input": ["text"],
-                        "contextWindow": context_window,
-                        "maxTokens": max_tokens,
+                        "contextWindow": p["context_window"],
+                        "maxTokens": p["max_tokens"],
                     }
                 ],
             }
         }
 
-        # 更新 agent 默认模型
-        if "agents" not in data:
-            data["agents"] = {}
-        if "defaults" not in data["agents"]:
-            data["agents"]["defaults"] = {}
-        data["agents"]["defaults"]["model"] = {
-            "primary": f"{provider_name}/{model_id}"
-        }
-        data["agents"]["defaults"]["models"] = {
-            f"{provider_name}/{model_id}": {"alias": model_alias}
-        }
-
-        # 更新 auth profiles
-        data["auth"]["profiles"] = {
-            f"{provider_name}:default": {
-                "provider": provider_name,
-                "mode": "api_key",
-            }
-        }
-
-        # 确保 gateway http responses 启用
-        gw = data.setdefault("gateway", {})
-        gw_http = gw.setdefault("http", {})
-        gw_ep = gw_http.setdefault("endpoints", {})
-        gw_ep["responses"] = {"enabled": True}
-
-        # 确保 contextEngine 使用 legacy（Docker 镜像无 lossless-claw）
-        if "plugins" not in data:
-            data["plugins"] = {}
-        if "slots" not in data["plugins"]:
-            data["plugins"]["slots"] = {}
-        data["plugins"]["slots"]["contextEngine"] = "legacy"
+        # 单 main：更新 agents.defaults.model 指向新 provider
+        agents = data.setdefault("agents", {})
+        defaults = agents.setdefault("defaults", {})
+        full_id = f"{p['provider_name']}/{p['model_id']}"
+        defaults["model"] = {"primary": full_id}
+        defaults["models"] = {full_id: {"alias": p["model_alias"]}}
 
         _json.dump(data, open(oc_config, "w"), indent=2, ensure_ascii=False)
 
-        # ── 5. 为每个子 Agent 创建 auth-profiles.json ──
-        agent_auth = {f"{provider_name}:default": {"api_key": api_key}}
-        for sub_id in ["autoresearch", "paper-review", "idea-generate"]:
-            sub_dir = f"/root/.openclaw/agents/{sub_id}/agent"
-            _os.makedirs(sub_dir, exist_ok=True)
-            auth_path = _os.path.join(sub_dir, "auth-profiles.json")
-            _json.dump(agent_auth, open(auth_path, "w"), indent=2)
-
-        # ── 3. 写入容器并重启 ──
-        # 策略: compose restart → init.sh 覆盖 → sleep → docker cp 回写 → 等待 gateway 重读
-        subprocess.run(
-            ["docker", "compose", "restart"],
-            cwd="/root/openclaw-docker-cn-im-main",
-            capture_output=True, text=True, timeout=30
-        )
-        # 等待容器启动完成（init.sh 此时已覆盖配置）
-        import time
-        time.sleep(18)
-        # 重新推送我们的配置
-        subprocess.run(
-            ["docker", "cp", oc_config, "openclaw-gateway:/home/node/.openclaw/openclaw.json"],
-            capture_output=True, text=True, timeout=10
-        )
-        # 推送子 Agent auth-profiles
-        for sub_id in ["autoresearch", "paper-review", "idea-generate"]:
-            auth_path = f"/root/.openclaw/agents/{sub_id}/agent/auth-profiles.json"
-            if _os.path.exists(auth_path):
-                subprocess.run(
-                    ["docker", "cp", auth_path, f"openclaw-gateway:/home/node/.openclaw/agents/{sub_id}/agent/auth-profiles.json"],
-                    capture_output=True, text=True, timeout=10
-                )
-        # 热重启网关进程（kill 后 init.sh 会重新启动它，读新配置）
-        # 如果 kill 导致容器重启，配置可能被覆盖，已通过上面 docker cp 处理
-        subprocess.run(
-            ["docker", "exec", "openclaw-gateway", "sh", "-c",
-             "pkill -f 'openclaw' 2>/dev/null; echo done"],
-            capture_output=True, text=True, timeout=15
-        )
-        # 额外等 15 秒确保 gateway 完全就绪
-        time.sleep(15)
-        # 如果容器恰好重启了，再补一次 docker cp
-        subprocess.run(
-            ["docker", "cp", oc_config, "openclaw-gateway:/home/node/.openclaw/openclaw.json"],
-            capture_output=True, text=True, timeout=10
-        )
-        for sub_id in ["autoresearch", "paper-review", "idea-generate"]:
-            auth_path = f"/root/.openclaw/agents/{sub_id}/agent/auth-profiles.json"
-            if _os.path.exists(auth_path):
-                subprocess.run(
-                    ["docker", "cp", auth_path, f"openclaw-gateway:/home/node/.openclaw/agents/{sub_id}/agent/auth-profiles.json"],
-                    capture_output=True, text=True, timeout=10
-                )
-        time.sleep(5)
+        # 生效：docker compose restart（经可替换钩子；测试注入 spy）
+        restart_gateway_hook()
 
         return {
             "success": True,
-            "message": f"已切换到 {model_alias} ({api_protocol})，OpenClaw 正在重启",
-            "provider": provider_name,
-            "model": model_id,
-            "protocol": api_protocol,
+            "message": f"已切换到 {p['model_alias']}，OpenClaw 正在重启生效",
+            "provider": p["provider_name"],
+            "model": p["model_id"],
+            "protocol": p["api_protocol"],
         }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(500, f"应用配置失败: {str(e)}")
 
@@ -481,14 +342,12 @@ async def openclaw_status():
     except Exception:
         pass
 
-    # Agent / sub-agent info from openclaw.json
-    oc_config = "/root/.openclaw/openclaw.json"
+    # Agent 信息（单 main）：从 researcher openclaw.json 读 agents.list
+    oc_config = RESEARCHER_CONFIG_PATH
     if _os.path.exists(oc_config):
         try:
             data = _json.load(open(oc_config))
             agents_list = data.get("agents", {}).get("list", [])
-            subagents_config = data.get("agents", {}).get("defaults", {}).get("subagents", {})
-            allow_agents = subagents_config.get("allowAgents", [])
 
             for agent in agents_list:
                 agent_id = agent.get("id", "unknown")
@@ -496,13 +355,8 @@ async def openclaw_status():
                     "id": agent_id,
                     "name": agent.get("name", agent_id),
                     "is_default": agent.get("default", False),
-                    "is_subagent": agent_id in allow_agents,
                     "workspace": agent.get("workspace", ""),
                 })
-
-            # Count defined sub-agents
-            result["subagent_count"] = len(allow_agents)
-            result["agent_count"] = len(agents_list)
 
             # Model provider
             providers = data.get("models", {}).get("providers", {})
@@ -531,81 +385,31 @@ async def openclaw_sessions():
 
 
 # ── Wiki 知识库 ──────────────────────────────────────────
+# 读 researcher 的 wiki/main（memory-wiki 插件 vault，render mode=obsidian）。
+# 列表维度 = 五核心分类（concepts/entities/sources/syntheses/reports）+ domains 子树；
+# 不再单扫 domains。frontmatter 兼容插件官方与 researcher 论文页双 schema。
+# 依据 docs/research/r7-wiki-read-mechanism.md。
 
-_WIKI_ROOT = "/root/.openclaw/workspace-autoresearch/wiki"
-
-
-@router.get("/wiki")
-async def wiki_list():
-    """扫描 wiki 目录，返回 domains 和 papers 列表"""
-    import os as _os
-    if not _os.path.isdir(_WIKI_ROOT):
-        return {"domains": []}
-
-    domains = []
-    domains_dir = _os.path.join(_WIKI_ROOT, "domains")
-    if _os.path.isdir(domains_dir):
-        for dname in sorted(_os.listdir(domains_dir)):
-            dp = _os.path.join(domains_dir, dname)
-            if not _os.path.isdir(dp):
-                continue
-            papers_dir = _os.path.join(dp, "papers")
-            papers = []
-            if _os.path.isdir(papers_dir):
-                for pf in sorted(_os.listdir(papers_dir)):
-                    if not pf.endswith(".md"):
-                        continue
-                    fpath = _os.path.join(papers_dir, pf)
-                    title = pf[:-3]
-                    # Try to read YAML frontmatter for richer data
-                    try:
-                        raw = open(fpath, encoding="utf-8").read(2000)
-                        if raw.startswith("---"):
-                            end = raw.find("---", 3)
-                            yaml_block = raw[3:end] if end > 0 else raw[3:]
-                            for line in yaml_block.split("\n"):
-                                if line.startswith("title:"):
-                                    t = line.split(":", 1)[1].strip().strip('"')
-                                    if t:
-                                        title = t
-                                    break
-                    except Exception:
-                        pass
-                    papers.append({
-                        "id": pf[:-3],
-                        "filename": pf,
-                        "title": title,
-                        "path": fpath,
-                    })
-            if papers:
-                domains.append({"name": dname, "papers": papers, "paper_count": len(papers)})
-
-    # Also read index.md
-    index_content = ""
-    index_path = _os.path.join(_WIKI_ROOT, "index.md")
-    if _os.path.isfile(index_path):
-        try:
-            index_content = open(index_path, encoding="utf-8").read(5000)
-        except Exception:
-            pass
-
-    return {"domains": domains, "index": index_content, "wiki_root": _WIKI_ROOT}
+# 分类 → 子目录相对路径（name 对非 domain 类恒为 "_"）
+_WIKI_GROUP_DIRS = {
+    "concept": "concepts",
+    "entity": "entities",
+    "source": "sources",
+    "synthesis": "syntheses",
+    "report": "reports",
+}
+# 应跳过的目录/文件（插件私有、下划线视图、占位 index）
+_WIKI_SKIP_DIRS = {".openclaw-wiki", "_attachments", "_views", "domains"}
+_WIKI_SKIP_FILES = {"index.md", "AGENTS.md", "WIKI.md", "inbox.md"}
 
 
-@router.get("/wiki/{domain}/{paper_id}")
-async def wiki_paper(domain: str, paper_id: str):
-    """读取指定 wiki 论文的完整内容"""
-    import os as _os
-    fpath = _os.path.join(_WIKI_ROOT, "domains", domain, "papers", paper_id + ".md")
-    if not _os.path.isfile(fpath):
-        raise HTTPException(404, f"论文不存在: {domain}/{paper_id}")
+def _parse_frontmatter(content: str) -> tuple:
+    """解析 YAML frontmatter（双 schema 平铺键），返回 (frontmatter, body)。
 
-    try:
-        content = open(fpath, encoding="utf-8").read()
-    except Exception as e:
-        raise HTTPException(500, f"读取失败: {str(e)}")
-
-    # Parse YAML frontmatter
+    用简易逐行解析（标量 + 行内 [a, b] 列表），与既有实现一致、不引入 pyyaml 运行时依赖。
+    插件官方 pageType/id/title/status 与 researcher type/domain/paper.*/evidence_level
+    都是平铺标量键，均可解析。claims 等嵌套结构不解析（人读浏览页不需要）。
+    """
     frontmatter = {}
     body = content
     if content.startswith("---"):
@@ -613,7 +417,6 @@ async def wiki_paper(domain: str, paper_id: str):
         if end > 0:
             yaml_text = content[3:end].strip()
             body = content[end + 3:].strip()
-            # Simple YAML parser (no pyyaml dependency)
             for line in yaml_text.split("\n"):
                 line = line.rstrip()
                 if not line or line.startswith("#"):
@@ -624,15 +427,119 @@ async def wiki_paper(domain: str, paper_id: str):
                     val = val.strip()
                     if val.startswith("[") and val.endswith("]"):
                         val = [v.strip().strip('"').strip("'") for v in val[1:-1].split(",") if v.strip()]
-                    elif val.startswith("{") and val.endswith("}"):
-                        val = val
                     else:
                         val = val.strip('"').strip("'")
                     frontmatter[key] = val
+    return frontmatter, body
 
+
+def _page_title(fpath: str, fallback: str) -> str:
+    """从 frontmatter 取 title（paper.title 优先，兼容插件 title）。"""
+    try:
+        raw = open(fpath, encoding="utf-8").read(2000)
+        fm, _ = _parse_frontmatter(raw if raw.startswith("---") else "---\n" + raw)
+        return fm.get("paper.title") or fm.get("title") or fallback
+    except Exception:
+        return fallback
+
+
+def _scan_group_dir(dirpath: str, pages_out: list, id_prefix: str = "") -> None:
+    """扫描单个目录下的 .md 页面（跳过占位/索引），追加到 pages_out。"""
+    import os as _os
+    if not _os.path.isdir(dirpath):
+        return
+    for pf in sorted(_os.listdir(dirpath)):
+        if not pf.endswith(".md") or pf in _WIKI_SKIP_FILES:
+            continue
+        fpath = _os.path.join(dirpath, pf)
+        pid = id_prefix + pf[:-3]
+        pages_out.append({
+            "id": pid,
+            "filename": pf,
+            "title": _page_title(fpath, pid),
+            "path": fpath,
+        })
+
+
+@router.get("/wiki")
+async def wiki_list():
+    """列出 wiki/main 页面：五核心分类 + domains 子树分组，跳过插件私有目录。
+
+    返回 {groups: [{kind, name, pages}], index, wiki_root}；空骨架 groups 为空（容错）。
+    index.md 的 openclaw:wiki:index 生成块内容单独作 index 字段返回（沿用前端展示）。
+    """
+    import os as _os
+    root = RESEARCHER_WIKI_ROOT
+    if not _os.path.isdir(root):
+        return {"groups": [], "index": "", "wiki_root": root}
+
+    groups = []
+    # 五核心分类
+    for kind, sub in _WIKI_GROUP_DIRS.items():
+        pages = []
+        _scan_group_dir(_os.path.join(root, sub), pages)
+        if pages:
+            groups.append({"kind": kind, "name": sub, "pages": pages, "page_count": len(pages)})
+
+    # domains 子树（researcher 论文页）：domains/<domain>/papers/*.md 归一个 domain 分组
+    domain_pages = []
+    domains_dir = _os.path.join(root, "domains")
+    if _os.path.isdir(domains_dir):
+        for dname in sorted(_os.listdir(domains_dir)):
+            _scan_group_dir(_os.path.join(domains_dir, dname, "papers"), domain_pages,
+                            id_prefix=f"{dname}/")
+    if domain_pages:
+        groups.append({"kind": "domain", "name": "domains",
+                       "pages": domain_pages, "page_count": len(domain_pages)})
+
+    # index.md 单独返回（含 openclaw:wiki:index 生成块原文）
+    index_content = ""
+    index_path = _os.path.join(root, "index.md")
+    if _os.path.isfile(index_path):
+        try:
+            index_content = open(index_path, encoding="utf-8").read(5000)
+        except Exception:
+            pass
+
+    return {"groups": groups, "index": index_content, "wiki_root": root}
+
+
+def _resolve_page_path(kind: str, name: str, page_id: str) -> Optional[str]:
+    """把 (kind, name, page_id) 映射为 wiki/main 下的 .md 绝对路径；越界返回 None。"""
+    import os as _os
+    root = _os.path.realpath(RESEARCHER_WIKI_ROOT)
+    if kind == "domain":
+        # name 为 domain 名，page_id 为论文 slug
+        rel = _os.path.join("domains", name, "papers", page_id + ".md")
+    elif kind in _WIKI_GROUP_DIRS:
+        rel = _os.path.join(_WIKI_GROUP_DIRS[kind], page_id + ".md")
+    else:
+        return None
+    fpath = _os.path.realpath(_os.path.join(root, rel))
+    # 防目录穿越
+    if not fpath.startswith(root + _os.sep):
+        return None
+    return fpath
+
+
+@router.get("/wiki/{kind}/{name}/{page_id}")
+async def wiki_paper(kind: str, name: str, page_id: str):
+    """读取指定 wiki 页面完整内容（kind: concept/entity/.../domain）。"""
+    import os as _os
+    fpath = _resolve_page_path(kind, name, page_id)
+    if not fpath or not _os.path.isfile(fpath):
+        raise HTTPException(404, f"页面不存在: {kind}/{name}/{page_id}")
+
+    try:
+        content = open(fpath, encoding="utf-8").read()
+    except Exception as e:
+        raise HTTPException(500, f"读取失败: {str(e)}")
+
+    frontmatter, body = _parse_frontmatter(content)
     return {
-        "id": paper_id,
-        "domain": domain,
+        "id": page_id,
+        "kind": kind,
+        "name": name,
         "frontmatter": frontmatter,
         "body": body,
         "content": content,
@@ -643,13 +550,19 @@ class WikiSaveBody(BaseModel):
     content: str
 
 
-@router.put("/wiki/{domain}/{paper_id}")
-async def wiki_save(domain: str, paper_id: str, body: WikiSaveBody):
-    """保存 wiki 论文内容到磁盘"""
+@router.put("/wiki/{kind}/{name}/{page_id}")
+async def wiki_save(kind: str, name: str, page_id: str, body: WikiSaveBody):
+    """保存 wiki 页面：只覆盖已存在页面，不新建、不动 index.md 生成块。
+
+    依赖 memory-wiki render.preserveHumanBlocks=true：整页覆盖写回视作人类编辑。
+    """
     import os as _os
-    fpath = _os.path.join(_WIKI_ROOT, "domains", domain, "papers", paper_id + ".md")
-    if not _os.path.isfile(fpath):
-        raise HTTPException(404, f"论文不存在: {domain}/{paper_id}")
+    # 不触碰 index 生成块与各分类 index.md（插件 managed 区）
+    if page_id == "index":
+        raise HTTPException(400, "不允许覆写 index.md（插件生成区）")
+    fpath = _resolve_page_path(kind, name, page_id)
+    if not fpath or not _os.path.isfile(fpath):
+        raise HTTPException(404, f"页面不存在: {kind}/{name}/{page_id}")
     try:
         with open(fpath, "w", encoding="utf-8") as f:
             f.write(body.content)
