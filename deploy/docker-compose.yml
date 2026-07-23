@@ -1,0 +1,67 @@
+# OpenClaw 单 main-agent 网关 —— 精简单服务栈（wayfinder #9 原型）
+#
+# 依据：docs/research/r6-docker-image-mount.md（挂载契约）
+#       docs/research/r8-channels-plugins.md（渠道/插件裁剪）
+#       docs/research/r7-wiki-read-mechanism.md（wiki 路径）
+#
+# 用法：
+#   1. cp deploy/.env.example deploy/.env 并填入 GATEWAY_TOKEN 与 LLM_API_KEY
+#   2. 把 ACautomata/researcher 克隆到 ./researcher（或设 RESEARCHER_DIR 指向它）
+#   3. docker compose --env-file deploy/.env -f deploy/docker-compose.yml up -d
+#
+# 本部署不接任何消息 channel（feishu/discord 全禁），只经本仓库 FastAPI 前端对话。
+
+services:
+  openclaw-gateway:
+    container_name: openclaw-gateway
+    image: ${OPENCLAW_IMAGE:-acautomata/openclaw-docker-cn-im:latest}   # 生产建议 pin digest（R6: latest=2026.7.1）
+    # 以 root 启动便于 init.sh chown；gateway 进程随后被降权到 node(uid 1000)
+    user: ${OPENCLAW_RUN_USER:-0:0}
+    cap_add: [CHOWN, SETUID, SETGID, DAC_OVERRIDE]
+    environment:
+      TZ: Asia/Shanghai
+      HOME: /home/node
+      TERM: xterm-256color
+      NODE_ENV: production
+      LANG: en_US.UTF-8
+      LANGUAGE: en_US:en
+      LC_ALL: en_US.UTF-8
+      # --- 关闭 init.sh 的 config/model 同步（关键：防覆写挂载的 openclaw.json / 防明文写凭证）---
+      SYNC_OPENCLAW_CONFIG: "false"
+      SYNC_EXTENSIONS_ON_START: "false"
+      SYNC_EXTENSIONS_MODE: "none"
+      SYNC_MODEL_CONFIG: "false"
+      # --- LLM 凭证（运行时经 openclaw.json 的 SecretRef 读进程 env，勿写盘）---
+      LLM_API_KEY: ${LLM_API_KEY}
+      LLM_BASE_URL: ${LLM_BASE_URL:-https://api.minimaxi.com/anthropic}
+      # --- Gateway 绑定/认证 ---
+      OPENCLAW_GATEWAY_PORT: "18789"
+      # lan：本仓库 FastAPI 跨容器/宿主经 HTTP 访问 18789 必需；同 network namespace 可改 loopback
+      OPENCLAW_GATEWAY_BIND: ${OPENCLAW_GATEWAY_BIND:-lan}
+      OPENCLAW_GATEWAY_MODE: local
+      # token 认证始终强制（WS 握手 connect.params.auth.token 必须带 GATEWAY_TOKEN）。
+      # 不设 ALLOW_INSECURE_AUTH —— 本部署只需 token 认证，insecure-auth 仅本地 Control UI 便利，省略之（安全审查 #1）。
+      GATEWAY_TOKEN: ${GATEWAY_TOKEN}                 # researcher openclaw.json 用 ${GATEWAY_TOKEN} 占位
+      # --- Workspace ---
+      OPENCLAW_WORKSPACE_ROOT: /home/node/.openclaw
+      # --- 彻底关闭外联（不接任何 IM channel）---
+      DM_POLICY: disabled
+      GROUP_POLICY: disabled
+      ALLOW_FROM: ""
+      # --- 插件加载（memory-wiki 支撑 Wiki 页需要）---
+      OPENCLAW_PLUGINS_ENABLED: "true"
+    volumes:
+      # researcher 仓库根 = 一份完整 OpenClaw home（openclaw.json + workspace/ + wiki/ + skills/）
+      # 挂到 /home/node/.openclaw；gateway 读 /home/node/.openclaw/openclaw.json
+      - ${RESEARCHER_DIR:-./researcher}:/home/node/.openclaw
+      # 运行时 state/logs 用匿名卷，避免污染宿主 researcher git 树（R6 风险残留）
+      - openclaw-state:/home/node/.openclaw/state
+      - openclaw-logs:/home/node/.openclaw/logs
+    ports:
+      # 收敛暴露面到宿主 loopback；本仓库 FastAPI 经 http://127.0.0.1:18789 访问
+      - "${DOCKER_BIND:-127.0.0.1}:18789:18789"
+    restart: unless-stopped
+
+volumes:
+  openclaw-state:
+  openclaw-logs:
