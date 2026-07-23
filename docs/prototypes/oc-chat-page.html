@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>对话页 UI 原型 — issue #33</title>
+<style>
+  :root{
+    --bg:#0f1115; --panel:#171a21; --panel2:#1d212b; --line:#262b36;
+    --text:#e6e9ef; --dim:#9aa3b2; --accent:#5b8def; --accent2:#7c5bef;
+    --ok:#3fb27f; --warn:#e0a53e; --danger:#e05e5e; --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font:14px/1.6 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif}
+  .app{display:flex;height:100vh}
+  /* 侧栏 */
+  .side{width:230px;background:var(--panel);border-right:1px solid var(--line);padding:14px;display:flex;flex-direction:column;gap:10px}
+  .side h2{font-size:12px;color:var(--dim);text-transform:uppercase;letter-spacing:.08em;margin:6px 0 4px}
+  .container-pill{background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 10px;display:flex;align-items:center;gap:8px;cursor:pointer}
+  .container-pill.active{border-color:var(--accent)}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--ok)}
+  .dot.off{background:var(--dim)}
+  .sess{padding:7px 10px;border-radius:7px;color:var(--dim);cursor:pointer;font-size:13px}
+  .sess.active,.sess:hover{background:var(--panel2);color:var(--text)}
+  /* 主对话区 */
+  .main{flex:1;display:flex;flex-direction:column}
+  .topbar{height:52px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:12px;padding:0 18px;background:var(--panel)}
+  .topbar .title{font-weight:600}
+  .tag{font-size:11px;background:var(--panel2);border:1px solid var(--line);color:var(--dim);padding:2px 8px;border-radius:20px}
+  .tag.model{color:var(--accent)}
+  .stream{flex:1;overflow-y:auto;padding:22px 26px;display:flex;flex-direction:column;gap:18px}
+  .msg{display:flex;gap:12px;max-width:840px}
+  .avatar{width:30px;height:30px;border-radius:8px;flex:none;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700}
+  .u .avatar{background:#2a3a5a;color:#bcd3ff}
+  .a .avatar{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff}
+  .body{flex:1;min-width:0}
+  .name{font-size:12px;color:var(--dim);margin-bottom:4px}
+  .bubble{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px 14px}
+  .u .bubble{background:#1b2331}
+  /* 思考链折叠 */
+  .cot{border:1px dashed #3a4a6a;background:#161b28;border-radius:10px;margin-bottom:10px;overflow:hidden}
+  .cot-head{display:flex;align-items:center;gap:8px;padding:7px 12px;cursor:pointer;color:#8fb0ff;font-size:12.5px;user-select:none}
+  .cot-head .caret{transition:transform .18s}
+  .cot.open .cot-head .caret{transform:rotate(90deg)}
+  .cot-body{display:none;padding:0 12px 10px;color:var(--dim);font-size:13px;white-space:pre-wrap}
+  .cot.open .cot-body{display:block}
+  .cot .pill{margin-left:auto;font-size:10.5px;background:#22304f;border-radius:10px;padding:1px 7px}
+  /* 工具执行（只显标题） */
+  .tool{display:flex;align-items:center;gap:9px;background:var(--panel2);border:1px solid var(--line);border-radius:9px;padding:8px 12px;margin:6px 0;font-size:13px}
+  .tool .icon{color:var(--accent)}
+  .tool .t-title{font-family:var(--mono);font-size:12.5px}
+  .tool .t-state{margin-left:auto;font-size:11px;display:flex;align-items:center;gap:5px}
+  .tool.done .t-state{color:var(--ok)}
+  .tool.running .t-state{color:var(--warn)}
+  .spinner{width:11px;height:11px;border:2px solid var(--warn);border-top-color:transparent;border-radius:50%;animation:spin 1s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  /* 权限审批卡片 */
+  .approval{border:1px solid var(--warn);background:#241d12;border-radius:11px;padding:12px 14px;margin:8px 0}
+  .approval .a-head{display:flex;align-items:center;gap:8px;color:var(--warn);font-weight:600;font-size:13px;margin-bottom:6px}
+  .approval .a-cmd{font-family:var(--mono);background:#141414;border:1px solid var(--line);border-radius:7px;padding:8px 10px;margin:8px 0;font-size:12.5px;color:#ffd9a0}
+  .approval .a-actions{display:flex;gap:9px;margin-top:8px}
+  .btn{border:none;border-radius:8px;padding:7px 16px;font-size:13px;cursor:pointer;font-weight:600}
+  .btn-approve{background:var(--ok);color:#fff}
+  .btn-deny{background:transparent;border:1px solid var(--danger);color:var(--danger)}
+  .btn-ghost{background:transparent;border:1px solid var(--line);color:var(--dim)}
+  .approval.resolved{opacity:.55;border-color:var(--line)}
+  .approval.resolved .a-actions{display:none}
+  .approval .resolved-tag{margin-left:auto;font-size:11.5px;color:var(--ok)}
+  /* 流式 */
+  .cursor{display:inline-block;width:8px;height:16px;background:var(--accent);vertical-align:-2px;animation:blink 1s steps(1) infinite}
+  @keyframes blink{50%{opacity:0}}
+  /* 输入区 */
+  .composer{border-top:1px solid var(--line);padding:14px 26px;background:var(--panel)}
+  .input-wrap{position:relative;background:var(--panel2);border:1px solid var(--line);border-radius:12px;display:flex;align-items:flex-end}
+  textarea{flex:1;background:transparent;border:none;outline:none;color:var(--text);resize:none;padding:12px 14px;font:inherit;max-height:140px}
+  .send{background:var(--accent);color:#fff;border:none;border-radius:9px;padding:8px 16px;margin:8px;cursor:pointer;font-weight:600}
+  /* 斜杠补全 */
+  .slash-menu{position:absolute;bottom:calc(100% + 6px);left:0;right:0;background:#1c2230;border:1px solid var(--line);border-radius:11px;overflow:hidden;box-shadow:0 -8px 30px rgba(0,0,0,.5);display:none}
+  .slash-menu.show{display:block}
+  .slash-item{display:flex;align-items:center;gap:10px;padding:9px 14px;cursor:pointer}
+  .slash-item.sel,.slash-item:hover{background:#26304a}
+  .slash-item .cmd{font-family:var(--mono);color:var(--accent);font-size:13px}
+  .slash-item .desc{margin-left:auto;color:var(--dim);font-size:12px}
+  .hint{font-size:11px;color:var(--dim);margin-top:7px;text-align:center}
+  .flag{font-size:10.5px;color:var(--warn);border:1px dashed var(--warn);border-radius:6px;padding:1px 6px;margin-left:6px}
+</style>
+</head>
+<body>
+<div class="app">
+  <!-- 侧栏 -->
+  <div class="side">
+    <h2>容器</h2>
+    <div class="container-pill active"><span class="dot"></span>research-main</div>
+    <div class="container-pill"><span class="dot off"></span>notes</div>
+    <div class="container-pill" style="color:var(--dim)">＋ 新建容器</div>
+    <h2>会话</h2>
+    <div class="sess active">文献综述梳理</div>
+    <div class="sess">idea 头脑风暴</div>
+    <div class="sess">＋ 新会话</div>
+  </div>
+
+  <!-- 主区 -->
+  <div class="main">
+    <div class="topbar">
+      <span class="title">文献综述梳理</span>
+      <span class="tag">research-main</span>
+      <span class="tag model">minimax/MiniMax-M3</span>
+      <span style="margin-left:auto" class="tag">operator · 已配对</span>
+    </div>
+
+    <div class="stream" id="stream">
+      <!-- 用户消息 -->
+      <div class="msg u"><div class="avatar">你</div><div class="body"><div class="name">你</div>
+        <div class="bubble">帮我在 wiki 里检索「对比学习」相关条目，并汇总成一段综述。</div></div></div>
+
+      <!-- 助手：思考链（折叠） -->
+      <div class="msg a"><div class="avatar">AI</div><div class="body"><div class="name">Research Assistant</div>
+        <div class="bubble">
+          <div class="cot" id="cot1">
+            <div class="cot-head" onclick="document.getElementById('cot1').classList.toggle('open')">
+              <span class="caret">▶</span> 思考过程 <span class="pill">3 步 · 4.2s</span>
+              <span class="flag">⚠ protocol v4 无独立 thinking 帧，待实测</span>
+            </div>
+            <div class="cot-body">1. 用户要检索 wiki 并汇总综述 → 先调 wiki.search。
+2. 关键词「对比学习」可能命中 concepts/ 与 syntheses/，需按相关度排序。
+3. 命中 3 条后，抽取要点合并成连贯段落，标注来源页。</div>
+          </div>
+
+          <!-- 工具执行（只显标题） -->
+          <div class="tool done"><span class="icon">🔍</span><span class="t-title">wiki.search</span><span style="color:var(--dim)">query="对比学习"</span><span class="t-state">✓ 完成 · 3 结果</span></div>
+          <div class="tool done"><span class="icon">📄</span><span class="t-title">fs.read</span><span style="color:var(--dim)">concepts/contrastive-learning.md</span><span class="t-state">✓ 完成</span></div>
+          <div class="tool running"><span class="icon">✏️</span><span class="t-title">wiki.compile</span><span class="t-state"><span class="spinner"></span>运行中</span></div>
+          <div style="font-size:11px;color:var(--dim);margin:2px 0 8px">工具事件确切帧名/字段待配对后实测（#36）</div>
+
+          <!-- 流式正文 -->
+          <div id="streaming">已在 wiki 中检索到 3 条「对比学习」相关条目。核心脉络：对比学习通过构造正负样本对，在表示空间中拉近同类、推远异类……<span class="cursor"></span></div>
+        </div></div></div>
+
+      <!-- 权限审批卡片 -->
+      <div class="msg a"><div class="avatar">AI</div><div class="body">
+        <div class="approval" id="ap1">
+          <div class="a-head">⚠️ 请求提升权限<span class="resolved-tag" id="ap1-tag" style="display:none">已批准</span></div>
+          <div style="color:var(--dim);font-size:13px">main agent 请求执行一条 <b>elevated</b> 命令以写入 wiki 索引：</div>
+          <div class="a-cmd">openclaw wiki compile --vault ~/.openclaw/wiki/main</div>
+          <div class="a-actions">
+            <button class="btn btn-approve" onclick="resolveAp('ap1','已批准')">批准</button>
+            <button class="btn btn-deny" onclick="resolveAp('ap1','已拒绝')">拒绝</button>
+            <button class="btn btn-ghost">查看细节</button>
+          </div>
+        </div>
+        <div style="font-size:11px;color:var(--dim)">审批经 <code>exec.approval.requested</code> 事件推送，<code>approval.resolve(id,kind,decision)</code> 回覆（需 operator.approvals，已实测 #26/#36）</div>
+      </div></div>
+    </div>
+
+    <!-- 输入区 + 斜杠补全 -->
+    <div class="composer">
+      <div class="input-wrap">
+        <div class="slash-menu" id="slashMenu">
+          <div class="slash-item sel"><span class="cmd">/wiki</span><span class="desc">在 wiki 中检索/写入</span></div>
+          <div class="slash-item"><span class="cmd">/model</span><span class="desc">切换当前模型</span></div>
+          <div class="slash-item"><span class="cmd">/compact</span><span class="desc">压缩会话上下文</span></div>
+          <div class="slash-item"><span class="cmd">/new</span><span class="desc">新建会话</span></div>
+        </div>
+        <textarea id="ta" rows="2" placeholder="发消息，输入 / 唤起命令…"></textarea>
+        <button class="send">发送</button>
+      </div>
+      <div class="hint">斜杠命令清单经 <code>commands.list</code> 拉取（需配对 scope，#36）· Enter 发送 / Shift+Enter 换行</div>
+    </div>
+  </div>
+</div>
+
+<script>
+  // 斜杠命令补全（假数据；真实清单来自 commands.list）
+  const ta=document.getElementById('ta'), menu=document.getElementById('slashMenu');
+  const items=[...menu.querySelectorAll('.slash-item')];
+  ta.addEventListener('input',()=>{
+    const v=ta.value;
+    if(v.startsWith('/') && !v.includes(' ')){
+      const q=v.slice(1).toLowerCase(); let any=false;
+      items.forEach(it=>{
+        const c=it.querySelector('.cmd').textContent.slice(1);
+        const show=c.startsWith(q); it.style.display=show?'flex':'none'; any=any||show;
+      });
+      menu.classList.toggle('show',any);
+    } else menu.classList.remove('show');
+  });
+  items.forEach(it=>it.addEventListener('click',()=>{ta.value=it.querySelector('.cmd').textContent+' ';menu.classList.remove('show');ta.focus();}));
+  // 审批卡片
+  function resolveAp(id,txt){
+    const el=document.getElementById(id); el.classList.add('resolved');
+    const tag=document.getElementById(id+'-tag'); tag.textContent=txt; tag.style.display='inline';
+    tag.style.color = txt==='已拒绝' ? 'var(--danger)' : 'var(--ok)';
+  }
+  // 模拟流式追加
+  (function(){
+    const more=" 代表性方法包括 SimCLR、MoCo 与 CLIP；在本仓库的 syntheses/ 中已有一篇对比综述可复用。";
+    let i=0; const el=document.getElementById('streaming');
+    const cur=el.querySelector('.cursor');
+    (function tick(){ if(i<more.length){ cur.insertAdjacentText('beforebegin',more[i++]); setTimeout(tick,28);} })();
+  })();
+</script>
+</body>
+</html>
