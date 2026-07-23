@@ -17,11 +17,17 @@ if REPO_ROOT not in sys.path:
 
 
 def _load_config_fresh(monkeypatch, **env):
-    """在受控 env 下重新 import config，返回模块（避免与其他测试的 import 缓存串扰）。"""
+    """在受控 env 下重新 import config，返回模块（避免与其他测试的 import 缓存串扰）。
+
+    reload 时 config.py 顶部会调 load_dotenv()，从仓库根 .env 读回本地配置，
+    使默认值断言观察到本地值（codex P2 #6）。故 patch load_dotenv 为空操作，
+    让测试只受 monkeypatch 控制的 env 影响，与开发者本地 .env 解耦。
+    """
     for key in ("RESEARCHER_CONFIG_PATH", "OPENCLAW_GATEWAY_URL", "OPENCLAW_GATEWAY_TOKEN"):
         monkeypatch.delenv(key, raising=False)
     for key, value in env.items():
         monkeypatch.setenv(key, value)
+    monkeypatch.setattr("dotenv.load_dotenv", lambda *a, **k: False)
     import config
 
     importlib.reload(config)
@@ -208,3 +214,18 @@ def test_openclaw_config_insecure_auth_disabled(openclaw_config):
 def test_openclaw_config_single_main_agent(openclaw_config):
     agents = openclaw_config["agents"]["list"]
     assert [a["id"] for a in agents] == ["main"]
+
+
+def test_openclaw_config_provider_has_llm_api_key_secretref(openclaw_config):
+    """codex P1 #2：sync 全关后 env LLM_API_KEY 须经 SecretRef 转成 provider 凭证。
+
+    参照 researcher bench env_setup.sh 与 OpenClaw SecretRef 规范：
+    models.providers.<p>.apiKey = {source: env, provider: default, id: LLM_API_KEY}。
+    缺了它，容器注入了 LLM_API_KEY 也无法转成 provider 凭证，模型请求 401。
+    """
+    provider = openclaw_config["models"]["providers"]["minimax"]
+    assert provider.get("apiKey") == {
+        "source": "env",
+        "provider": "default",
+        "id": "LLM_API_KEY",
+    }

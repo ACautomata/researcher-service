@@ -226,6 +226,11 @@
     "providers": {
       "minimax": {
         "baseUrl": "https://api.minimaxi.com/anthropic",
+        "apiKey": {
+          "source": "env",
+          "provider": "default",
+          "id": "LLM_API_KEY"
+        },
         "models": [
           {
             "id": "MiniMax-M3",
