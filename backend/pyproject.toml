@@ -1,0 +1,10 @@
+# backend 测试配置 —— pytest + pytest-django
+# spec: docs/FULLSTACK-REFACTOR-SPEC.md；issue #37 P0 骨架
+[tool.pytest.ini_options]
+DJANGO_SETTINGS_MODULE = "config.settings.dev"
+python_files = ["tests.py", "test_*.py", "*_tests.py"]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"

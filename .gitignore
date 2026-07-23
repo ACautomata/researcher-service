@@ -25,3 +25,13 @@ uploads/*
 # 本地虚拟环境 / pytest 缓存
 .venv/
 .pytest_cache/
+
+# 前端（Vite）
+node_modules/
+dist/
+.vite/
+*.local
+
+# backend 运行时数据库
+backend/db.sqlite3
+backend/db.sqlite3-journal
