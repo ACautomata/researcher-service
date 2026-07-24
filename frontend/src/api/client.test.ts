@@ -48,7 +48,9 @@ describe('api client', () => {
     ;(globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(mockResp('', 401))
     await expect(apiFetch('/api/v1/x')).rejects.toBeInstanceOf(ApiError)
     expect(auth.token).toBe('')
-    expect(auth.refreshExhausted).toBe(true)
+    // codex R1 :102：401 仅清 access token，不标 refreshExhausted——交由 hydrate 用
+    // refresh 端点真实结果决定耗尽（access 过期但 refresh cookie 仍有效时不被迫重登）
+    expect(auth.refreshExhausted).toBe(false)
   })
 
   it('apiJson returns parsed body on 2xx', async () => {

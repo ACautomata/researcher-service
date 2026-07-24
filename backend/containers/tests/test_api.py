@@ -10,6 +10,8 @@ import pytest
 from django.contrib.auth import get_user_model
 from rest_framework.test import APIClient
 
+from containers.orchestrator import InstanceCleanupError, InstanceExists
+
 User = get_user_model()
 
 
@@ -131,3 +133,30 @@ def test_delete_rejects_invalid_name(authed):
     # 路径参数也校验（spec §4）：防 URL path 注入
     resp = authed.delete('/api/v1/containers/Bad..Name')
     assert resp.status_code == 400
+
+
+# ---------------------------- codex R1 并发/清理失败转译（:84/:126） ----------------------------
+
+
+@pytest.mark.django_db
+def test_create_returns_409_on_concurrent_duplicate(authed, fleet, monkeypatch):
+    # codex R1 :84：orchestrator InstanceExists（并发绕 UniqueValidator）→ 409，非裸 500
+    def _raise(name):
+        raise InstanceExists(name)
+
+    monkeypatch.setattr(fleet['orch'], 'create', _raise)
+    resp = authed.post('/api/v1/containers/', {'name': 'demo'}, format='json')
+    assert resp.status_code == 409
+
+
+@pytest.mark.django_db
+def test_delete_returns_409_when_cleanup_fails(authed, fleet, monkeypatch):
+    # codex R1 :126：home 清理失败 → 409 + DB 行保留（可重试），非吞错 204
+    authed.post('/api/v1/containers/', {'name': 'demo'}, format='json')
+
+    def _fail(name):
+        raise InstanceCleanupError(name, str(fleet['config'].root))
+
+    monkeypatch.setattr(fleet['orch'], 'delete', _fail)
+    resp = authed.delete('/api/v1/containers/demo')
+    assert resp.status_code == 409

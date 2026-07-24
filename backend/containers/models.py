@@ -36,7 +36,8 @@ class Instance(models.Model):
     ]
 
     name = models.CharField(max_length=30, unique=True, validators=[NAME_VALIDATOR])
-    port = models.IntegerField()
+    # codex R1 :77：unique 兜底并发端口竞争（应用层 allocator 之外，DB 最后仲裁）
+    port = models.IntegerField(unique=True)
     token = models.CharField(max_length=127)
     home_dir = models.CharField(max_length=512)
     # run 前未知；空串而非 NULL（避免 null-string 反模式，Django 官方建议）

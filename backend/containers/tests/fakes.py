@@ -17,11 +17,16 @@ class FakeRuntime:
         self.stopped: list[str] = []
         self.removed: list[str] = []
         self._next = 0
+        # codex R1 :112：模拟 docker create 成功后 start 失败（端口占用等）。
+        # 设非 None 时 run() 先记录容器（模拟 create 落 daemon）再抛该异常，
+        # 用于验证 except 分支 best-effort 清理残留命名容器。
+        self.fail_after_create: Exception | None = None
 
     def run(self, spec: ContainerSpec) -> str:
         self.run_specs.append(spec)
         cid = f'fakeid-{spec.name}-{self._next}'
         self._next += 1
+        # 模拟 docker create：容器先入 daemon（Created 态），与真实 containers.run(create+start) 一致
         self.containers[spec.name] = ContainerInfo(
             container_id=cid,
             name=container_name(spec.name),
@@ -29,6 +34,10 @@ class FakeRuntime:
             status='running',
             image=spec.image,
         )
+        if self.fail_after_create is not None:
+            exc = self.fail_after_create
+            self.fail_after_create = None
+            raise exc
         return cid
 
     def list_fleet(self) -> list[ContainerInfo]:

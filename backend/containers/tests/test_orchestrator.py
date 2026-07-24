@@ -3,10 +3,19 @@
 出处：docs/FULLSTACK-REFACTOR-SPEC.md §5.4（生命周期）/§5.5（状态机 + 失败回滚）/§5.6（bind-mount home）。
 用 FakeRuntime + FakeHealthProbe 覆盖业务逻辑（CI 无 docker daemon）；真实 DockerRuntime 走 integration。
 """
+import threading
+import time
+
 import pytest
+from django.db import IntegrityError
 
 from containers.models import Instance
-from containers.orchestrator import FleetConfig, InstanceOrchestrator
+from containers.orchestrator import (
+    FleetConfig,
+    InstanceCleanupError,
+    InstanceExists,
+    InstanceOrchestrator,
+)
 from containers.tests.fakes import FakeHealthProbe, FakeRuntime
 
 
@@ -201,3 +210,122 @@ def test_list_reflects_runtime_absence_as_stopped(orch, runtime):
     runtime.containers.pop('demo')
     item = orch.list()[0]
     assert item['status'] == 'stopped'
+
+
+# ---------------------------- codex R1 并发/失败硬化 ----------------------------
+
+
+class _ConcurrencyProbe:
+    """记录 is_reachable 最大并发数，验证 list 健康探测是否并发（:156）。"""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._cur = 0
+        self.max_concurrent = 0
+
+    def is_reachable(self, port: int) -> bool:
+        with self._lock:
+            self._cur += 1
+            self.max_concurrent = max(self.max_concurrent, self._cur)
+        time.sleep(0.05)
+        with self._lock:
+            self._cur -= 1
+        return False
+
+
+# --- create：:112 run 失败清残留容器 / :84 name→InstanceExists / :77 port 冲突重试 ---
+
+
+@pytest.mark.django_db
+def test_create_removes_partial_container_when_run_fails(config, health, tmp_path):
+    # codex P1 :112：docker create 成功但 start 失败（端口占用等）→ 残留命名容器，
+    # 重试同名 docker 冲突。except 分支须 best-effort remove 残留容器。
+    _seed_template(tmp_path / 'template')
+    runtime = FakeRuntime()
+    runtime.fail_after_create = RuntimeError('port already allocated')
+    orch = InstanceOrchestrator(runtime=runtime, config=config, health_probe=health)
+    with pytest.raises(RuntimeError):
+        orch.create('demo')
+    assert 'demo' in runtime.removed          # 残留命名容器已清
+    assert 'demo' not in runtime.containers
+    assert not Instance.objects.filter(name='demo').exists()
+    assert not (config.root / 'instances' / 'demo').exists()
+
+
+@pytest.mark.django_db
+def test_create_translates_duplicate_name_to_instance_exists(orch):
+    # codex P2 :84：并发绕 UniqueValidator 时 DB 唯一约束 IntegrityError → 须转译为
+    # 领域异常 InstanceExists（view 层 409），非裸 IntegrityError（500）。
+    orch.create('demo')
+    with pytest.raises(InstanceExists):
+        orch.create('demo')
+
+
+@pytest.mark.django_db
+def test_create_retries_port_allocation_on_unique_conflict(orch, monkeypatch):
+    # codex P2 :77：并发两 create 读同快照选同 port → port unique 约束冲突。
+    # 须在保存点内重试下一个空闲 port，而非整体失败。
+    real_create = Instance.objects.create
+    state = {'calls': 0}
+
+    def flaky_create(**kwargs):
+        state['calls'] += 1
+        if state['calls'] == 1:
+            raise IntegrityError('UNIQUE constraint failed: containers_instance.port')
+        return real_create(**kwargs)
+
+    monkeypatch.setattr(Instance.objects, 'create', flaky_create)
+    inst = orch.create('demo')
+    assert state['calls'] >= 2                # 至少重试一次
+    assert inst.port == 19000                 # 最终成功占用
+    assert inst.status == Instance.STATUS_RUNNING
+
+
+# --- delete：:126 rmtree 失败保留 DB 行 + 标 REMOVING（不吞错、可重试）---
+
+
+@pytest.mark.django_db
+def test_delete_preserves_row_when_dir_cleanup_fails(config, health, runtime, tmp_path):
+    # codex P1 :126：root 容器改 home 属主 → rmtree 失败不应被 ignore_errors 吞。
+    # 须保留 DB 行（可重试）+ 标 REMOVING + raise InstanceCleanupError。
+    _seed_template(tmp_path / 'template')
+
+    def fail_rmtree(path, **kwargs):
+        raise OSError('permission denied')
+
+    orch = InstanceOrchestrator(
+        runtime=runtime, config=config, health_probe=health, dir_remover=fail_rmtree
+    )
+    orch.create('demo')
+    with pytest.raises(InstanceCleanupError):
+        orch.delete('demo')
+    assert 'demo' in runtime.removed                 # 容器已 stop+remove
+    inst = Instance.objects.get(name='demo')         # DB 行保留（可重试）
+    assert inst.status == Instance.STATUS_REMOVING
+    assert (config.root / 'instances' / 'demo').exists()   # 目录未清
+
+
+# --- list：:133 creating 瞬态透传 / :156 健康探测并发 ---
+
+
+@pytest.mark.django_db
+def test_list_shows_creating_while_provisioning(orch):
+    # codex P2 :133：creating 中（容器未起）不应被 runtime.get 缺失误判 stopped
+    Instance.objects.create(
+        name='booting', port=19005, token='t', home_dir='/h',
+        status=Instance.STATUS_CREATING, image='img:tag',
+    )
+    item = orch.list()[0]
+    assert item['status'] == 'creating'
+    assert item['health'] == 'pending'         # 未起，不探
+
+
+@pytest.mark.django_db
+def test_list_probes_health_concurrently(orch):
+    # codex P2 :156：N running 容器健康探测须并发，非 N×timeout 串行
+    probe = _ConcurrencyProbe()
+    orch._health = probe
+    for i in range(5):
+        orch.create(f'c{i}')
+    orch.list()
+    assert probe.max_concurrent > 1            # 并发执行（串行则恒为 1）

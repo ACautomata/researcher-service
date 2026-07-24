@@ -95,11 +95,12 @@ export const useAuthStore = defineStore('auth', {
       this.token = ''
       this.refreshExhausted = true
     },
-    // codex T03：API 收到 401 时清登录态（token 失效/被吊销），交由路由守卫重定向登录。
-    // 不调后端 logout（避免无效请求），直接重置本地 + 标记 cookie 耗尽。
+    // codex R1 :102：API 收到 401 时清 access token（失效/被吊销）。
+    // 不标 refreshExhausted——401 可能仅 access 过期，httpOnly refresh cookie 仍有效；
+    // 让 hydrate 用 refresh 端点真实结果决定耗尽（避免不必要的强制重登）。
+    // 主动 logout 才标 refreshExhausted（用户意图结束会话，cookie 应随之失效）。
     clearSession(): void {
       this.token = ''
-      this.refreshExhausted = true
     },
   },
 })

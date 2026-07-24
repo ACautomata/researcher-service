@@ -4,14 +4,24 @@
 业务逻辑（端口分配/预填充/渲染/run/对账/健康聚合）依赖 Protocol，测试用 FakeRuntime 覆盖。
 
 状态机（spec §5.5）：creating（先以 CREATING 预占 DB 行 + cp -a + 渲染 + run）
-→ running → stopped → removing（终态）。失败回滚 DB 行 + 目录。
+→ running → stopped → removing（终态）。失败回滚 DB 行 + 目录 + 残留容器。
+
+并发/失败硬化（codex R1）：
+- name/port 冲突由 DB 唯一约束仲裁；port 冲突在保存点内重试下一空闲端口，
+  name 冲突转译 InstanceExists（view 409），不抛裸 IntegrityError（500）。
+- run 失败（docker create 成功但 start 失败）best-effort remove 残留命名容器。
+- delete home 清理失败不吞——保留 DB 行 + 标 REMOVING + raise（可重试）。
+- list 健康探测并发（ThreadPoolExecutor），bound 总延迟（非 N×timeout 串行）。
 """
 import os
 import secrets
 import shutil
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
+
+from django.db import IntegrityError, transaction
 
 from .config_renderer import ConfigRenderer
 from .docker_runtime import DockerRuntime
@@ -24,6 +34,38 @@ from .runtime import ContainerSpec
 HEALTH_HEALTHY = 'healthy'
 HEALTH_UNHEALTHY = 'unhealthy'
 HEALTH_STOPPED = 'stopped'
+HEALTH_PENDING = 'pending'        # creating：容器未起，无 health 可探
+HEALTH_REMOVING = 'removing'      # removing：清理中
+
+# codex R1 :77：port 并发冲突的最大重试次数（port 池充足，覆盖极端并发）
+_MAX_PORT_RETRIES = 8
+# codex R1 :156：list 健康探测并发上限（避免线程爆炸）
+_MAX_HEALTH_WORKERS = 8
+
+
+class InstanceExists(Exception):
+    """并发同名插入被 DB 唯一约束拒绝（spec §10 name 唯一）；view 层转 409。"""
+
+    def __init__(self, name: str) -> None:
+        super().__init__(f'instance {name!r} already exists')
+        self.name = name
+
+
+class InstanceCleanupError(Exception):
+    """容器已停删但 home 目录清理失败（权限/属主）；保留 DB 行可重试（spec §5.5）。"""
+
+    def __init__(self, name: str, path: str) -> None:
+        super().__init__(f'cleanup failed for {name!r}: {path}')
+        self.name = name
+        self.path = path
+
+
+class PortAllocationError(Exception):
+    """端口分配重试用尽（池理论充足但持续冲突）；不可重试，view 层 503。"""
+
+    def __init__(self, name: str) -> None:
+        super().__init__(f'port allocation exhausted for {name!r}')
+        self.name = name
 
 
 @dataclass(frozen=True)
@@ -59,10 +101,12 @@ class HealthProbe:
 class InstanceOrchestrator:
     """容器实例生命周期 facade（create/delete/list）。"""
 
-    def __init__(self, runtime, config: FleetConfig, health_probe=None) -> None:
+    def __init__(self, runtime, config: FleetConfig, health_probe=None, dir_remover=None) -> None:
         self._runtime = runtime
         self._cfg = config
         self._health = health_probe or HealthProbe()
+        # codex R1 :126：注入目录删除器（默认 shutil.rmtree，不 ignore），可测清理失败
+        self._dir_remover = dir_remover or shutil.rmtree
         self._renderer = ConfigRenderer(config.template_json)
         self._provisioner = HomeProvisioner(config.template_dir)
         self._allocator = PortAllocator(
@@ -72,24 +116,44 @@ class InstanceOrchestrator:
     def _used_ports(self) -> set[int]:
         return set(Instance.objects.values_list('port', flat=True))
 
-    def create(self, name: str) -> Instance:
-        """创建并启动一个容器（spec §5.4/§5.5）。重名由 DB 唯一约束拒绝。"""
-        port = self._allocator.next_free(self._used_ports())
+    def _reserve_row(self, name: str) -> Instance:
+        """事务内占位 INSERT：name/port 冲突由 DB 唯一约束仲裁（codex R1 :77/:84）。
+
+        port 冲突（并发选同 port）→ 保存点回滚后重试下一个空闲 port；
+        name 冲突（并发同名）→ InstanceExists（view 409，不重试）。
+        预占在 mkdir 之前：DB 唯一约束先挡重名，避免误删既有实例目录。
+        """
+        home = str(self._cfg.root / 'instances' / name / 'home')
         token = secrets.token_urlsafe(32)
+        for _ in range(_MAX_PORT_RETRIES):
+            port = self._allocator.next_free(self._used_ports())
+            try:
+                with transaction.atomic():
+                    return Instance.objects.create(
+                        name=name,
+                        port=port,
+                        token=token,
+                        home_dir=home,
+                        container_id='',
+                        status=Instance.STATUS_CREATING,
+                        image=self._cfg.image,
+                    )
+            except IntegrityError:
+                if Instance.objects.filter(name=name).exists():
+                    raise InstanceExists(name) from None
+                # 否则 port 冲突 → 保存点已回滚，继续重试下一 port
+        raise PortAllocationError(name)
+
+    def create(self, name: str) -> Instance:
+        """创建并启动一个容器（spec §5.4/§5.5）。
+
+        先事务占位（挡重名/仲裁 port），再 mkdir + cp -a + 渲染 + run；
+        run 失败 best-effort 清残留命名容器 + 回滚 DB 行 + 目录。
+        """
+        inst = self._reserve_row(name)
         instance_dir = self._cfg.root / 'instances' / name
         home = instance_dir / 'home'
         config_path = instance_dir / 'openclaw.json'
-
-        # 先以 CREATING 预占 DB 行：DB 唯一约束在 mkdir 前挡重名，避免误删既有实例目录
-        inst = Instance.objects.create(
-            name=name,
-            port=port,
-            token=token,
-            home_dir=str(home),
-            container_id='',
-            status=Instance.STATUS_CREATING,
-            image=self._cfg.image,
-        )
         try:
             instance_dir.mkdir(parents=True, exist_ok=False)
             self._provisioner.provision(home)
@@ -98,17 +162,22 @@ class InstanceOrchestrator:
                 ContainerSpec(
                     name=name,
                     image=self._cfg.image,
-                    host_port=port,
-                    gateway_token=token,
+                    host_port=inst.port,
+                    gateway_token=inst.token,
                     home_dir=str(home),
                     config_path=str(config_path),
                     llm_api_key=self._cfg.llm_api_key,
                 )
             )
         except Exception:
-            # spec §5.5：失败回滚 DB 行 + 目录
+            # spec §5.5：失败回滚。codex R1 :112 best-effort remove 残留命名容器
+            # （docker create 成功但 start 失败时容器已 Created 残留，否则重试同名 docker 冲突）
+            self._runtime.remove(name)
             inst.delete()
-            shutil.rmtree(instance_dir, ignore_errors=True)
+            try:
+                self._dir_remover(instance_dir)
+            except OSError:
+                pass
             raise
         inst.container_id = container_id
         inst.status = Instance.STATUS_RUNNING
@@ -116,18 +185,47 @@ class InstanceOrchestrator:
         return inst
 
     def delete(self, name: str) -> bool:
-        """删除容器 + 连数据删（spec §5.4）。实例不存在返回 False；容器不存在幂等清理。"""
+        """删除容器 + 连数据删（spec §5.4）。
+
+        实例不存在返回 False；容器不存在幂等清理。
+        codex R1 :126：home 清理失败（root 容器改属主/权限）不吞——保留 DB 行 +
+        标 REMOVING + raise InstanceCleanupError，客户端可重试（容器已删，重试只清目录 + 删行）。
+        """
         inst = Instance.objects.filter(name=name).first()
         if inst is None:
             return False
         self._runtime.stop(name)
         self._runtime.remove(name)
-        shutil.rmtree(self._cfg.root / 'instances' / name, ignore_errors=True)
+        try:
+            self._dir_remover(self._cfg.root / 'instances' / name)
+        except OSError:
+            inst.status = Instance.STATUS_REMOVING
+            inst.save()
+            raise InstanceCleanupError(name, str(self._cfg.root / 'instances' / name)) from None
         inst.delete()
         return True
 
+    def _item(self, inst: Instance, status: str, health: str) -> dict:
+        return {
+            'name': inst.name,
+            'port': inst.port,
+            'status': status,
+            'health': health,
+            'image': inst.image,
+            'container_id': inst.container_id,
+            'created_at': inst.created_at,
+        }
+
     def _build_item(self, inst: Instance) -> dict:
-        """聚合单个 Instance 的 runtime 状态 + gateway 健康探测。"""
+        """聚合单个 Instance 的 runtime 状态 + gateway 健康探测。
+
+        codex R1 :133：creating/removing 瞬态透传（容器未起时 runtime.get 缺失
+        不应误判 stopped，否则暴露错误生命周期、诱使他方对未就绪实例操作）。
+        """
+        if inst.status == Instance.STATUS_CREATING:
+            return self._item(inst, Instance.STATUS_CREATING, HEALTH_PENDING)
+        if inst.status == Instance.STATUS_REMOVING:
+            return self._item(inst, Instance.STATUS_REMOVING, HEALTH_REMOVING)
         info = self._runtime.get(inst.name)
         running = bool(info and info.running)
         status = Instance.STATUS_RUNNING if running else Instance.STATUS_STOPPED
@@ -139,22 +237,21 @@ class InstanceOrchestrator:
             )
         else:
             health = HEALTH_STOPPED
-        return {
-            'name': inst.name,
-            'port': inst.port,
-            'status': status,
-            'health': health,
-            'image': inst.image,
-            'container_id': inst.container_id,
-            'created_at': inst.created_at,
-        }
+        return self._item(inst, status, health)
 
     def list(self) -> list[dict]:
-        """聚合 DB 记账 + runtime 实时状态 + gateway 健康探测（issue #39 列表验收）。"""
-        return [
-            self._build_item(inst)
-            for inst in Instance.objects.order_by('created_at')
-        ]
+        """聚合 DB 记账 + runtime 实时状态 + gateway 健康探测（issue #39 列表验收）。
+
+        codex R1 :156：健康探测并发（ThreadPoolExecutor），bound list 延迟
+        （非 N×timeout 串行；否则 20 不可达容器阻塞管理页约 40s）。
+        insts 先物化（主线程迭代 QuerySet），_build_item 只读已加载字段 + 线程安全 IO。
+        """
+        insts = list(Instance.objects.order_by('created_at'))
+        if not insts:
+            return []
+        workers = max(1, min(_MAX_HEALTH_WORKERS, len(insts)))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            return list(pool.map(self._build_item, insts))
 
     def detail(self, name: str) -> dict | None:
         """单个实例的聚合视图（post 响应复用）；不存在返回 None。"""
