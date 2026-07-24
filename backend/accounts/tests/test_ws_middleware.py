@@ -89,3 +89,38 @@ async def test_ws_other_secret_token_rejected():
     connected, _ = await comm.connect()
     assert connected is False
     await comm.disconnect()
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_ws_valid_token_single_subprotocol_accepted():
+    # 浏览器 new WebSocket(url, ['access_token.<jwt>']) 会把整个字符串作为一个 subprotocol
+    token = await _access('single_proto')
+    comm = WebsocketCommunicator(_app(), '/ws/chat/', subprotocols=[f'access_token.{token}'])
+    connected, _ = await comm.connect()
+    assert connected is True
+    assert await comm.receive_from() == 'single_proto'
+    await comm.disconnect()
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_ws_inactive_user_token_rejected():
+    # 已签发且未过期的 token，在用户被删除/禁用后必须被拒（与 REST get_user 行为一致）
+    token = await _access('inactive_user')
+    user = await sync_to_async(User.objects.get)(username='inactive_user')
+    await sync_to_async(user.delete)()
+    comm = WebsocketCommunicator(_app(), '/ws/chat/', subprotocols=['access_token', token])
+    connected, _ = await comm.connect()
+    assert connected is False
+    await comm.disconnect()
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_asgi_application_wired():
+    # 开发服务器 runserver 必须经 daphne 走 ASGI，WS 握手才会进入 ProtocolTypeRouter
+    from django.conf import settings
+
+    assert 'daphne' in settings.INSTALLED_APPS
+    assert settings.ASGI_APPLICATION == 'config.asgi.application'

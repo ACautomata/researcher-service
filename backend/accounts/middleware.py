@@ -11,6 +11,7 @@ access token），仅经 subprotocol 通道——握手帧不进 URL 日志。
 from channels.db import database_sync_to_async
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import AnonymousUser
+from rest_framework.exceptions import AuthenticationFailed
 from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
 
@@ -26,7 +27,7 @@ def _authenticate(token: str):
     try:
         validated = JWTAuthentication().get_validated_token(token)
         return JWTAuthentication().get_user(validated)
-    except (InvalidToken, TokenError):
+    except (InvalidToken, TokenError, AuthenticationFailed):
         return None
 
 
@@ -54,9 +55,14 @@ class JwtAuthMiddleware:
 
     @staticmethod
     def _extract_token(scope) -> str | None:
-        # Sec-WebSocket-Protocol: 客户端 new WebSocket(url, ['access_token', <jwt>])，
-        # channels 按客户端声明顺序填入 scope['subprotocols']。仅认此通道（query 会泄漏进 URL 日志）。
+        # Sec-WebSocket-Protocol 支持两种 wire format：
+        #   1) new WebSocket(url, ['access_token', <jwt>])  → subprotocols = ['access_token', <jwt>]
+        #   2) new WebSocket(url, ['access_token.<jwt>'])    → subprotocols = ['access_token.<jwt>']
+        # token 不走 URL query（会进访问日志/浏览器历史/Referer 泄漏 access token）。
         subprotocols = scope.get('subprotocols') or []
         if len(subprotocols) >= 2 and subprotocols[0] == 'access_token':
             return subprotocols[1]
+        for proto in subprotocols:
+            if isinstance(proto, str) and proto.startswith('access_token.'):
+                return proto[len('access_token.'):]
         return None
