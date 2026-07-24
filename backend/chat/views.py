@@ -68,7 +68,13 @@ class PairingView(APIView):
         except PairingRequired as e:
             # ensure_paired 已落库 pending 行；直接取（不重复 get_status 副作用）
             # 但 e.request_id 已被 _is_valid_request_id 校验过，可直接使用
-            pairing = Pairing.objects.get(instance=inst)
+            try:
+                pairing = Pairing.objects.get(instance=inst)
+            except Pairing.DoesNotExist:
+                return Response(
+                    {'detail': '容器或配对记录已被删除，请刷新列表'},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
             data = PairingStatusSerializer(pairing).data
             data['detail'] = (
                 f'设备待批准：请在宿主执行 `openclaw devices approve {e.request_id}` '
@@ -78,7 +84,13 @@ class PairingView(APIView):
         except PairingError as e:
             # 原始异常（网络/协议细节）仅记服务端日志，不外泄到响应（codex R security）
             logger.warning('pairing handshake failed for %s: %s', name, e)
-            pairing = Pairing.objects.get(instance=inst)
+            try:
+                pairing = Pairing.objects.get(instance=inst)
+            except Pairing.DoesNotExist:
+                return Response(
+                    {'detail': '容器或配对记录已被删除，请刷新列表'},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
             data = PairingStatusSerializer(pairing).data
             data['detail'] = '配对握手失败，请检查容器网关状态后重试'
             return Response(data, status=status.HTTP_502_BAD_GATEWAY)
