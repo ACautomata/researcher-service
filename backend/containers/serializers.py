@@ -5,10 +5,12 @@ UniqueValidator（DB 唯一）。name 直接进 instances/<name>/ 路径与 dock
 路径分隔符 / .. / 空格 / 大写（防目录穿越与 docker-name 注入）。
 
 InstanceSerializer：出参（list/detail），接收 orchestrator 返回的 dict（含 health/status 聚合）。
+附加 pairing 字段：每个实例的当前配对状态，避免前端每行单独轮询配对端点。
 """
 from rest_framework import serializers
 from rest_framework.validators import UniqueValidator
 
+from chat.models import Pairing
 from .models import NAME_VALIDATOR, Instance
 
 
@@ -21,8 +23,23 @@ class InstanceCreateSerializer(serializers.Serializer):
     )
 
 
+class _PairingStatusSerializer(serializers.Serializer):
+    """容器列表嵌套的配对状态快照（只读）。"""
+
+    status = serializers.CharField(read_only=True)
+    device_id = serializers.CharField(read_only=True)
+    scopes = serializers.SerializerMethodField()
+    pairing_request_id = serializers.CharField(read_only=True)
+
+    def get_scopes(self, obj: Pairing) -> list[str]:
+        return obj.scopes_list()
+
+
 class InstanceSerializer(serializers.Serializer):
-    """实例出参（read-only）；instance 可为 dict（orchestrator.list/detail 返回）。"""
+    """实例出参（read-only）；instance 可为 dict（orchestrator.list/detail 返回）。
+
+    pairing 字段由后端批量组装，替代前端 per-row 轮询。
+    """
 
     name = serializers.CharField(read_only=True)
     port = serializers.IntegerField(read_only=True)
@@ -31,3 +48,17 @@ class InstanceSerializer(serializers.Serializer):
     image = serializers.CharField(read_only=True)
     container_id = serializers.CharField(read_only=True)
     created_at = serializers.DateTimeField(read_only=True)
+    pairing = serializers.SerializerMethodField()
+
+    def get_pairing(self, obj: dict) -> dict:
+        # orchestrator.list() 返回 dict；dict 自带 pairing 时透传（测试/orchestrator 可预填充）
+        if isinstance(obj, dict):
+            pre = obj.get('pairing')
+            if pre is not None:
+                return pre
+        name = obj.get('name') if isinstance(obj, dict) else obj.name
+        pairing = Pairing.objects.filter(instance__name=name).first()
+        if pairing is None:
+            return {'status': Pairing.STATUS_UNPAIRED, 'device_id': '',
+                    'scopes': [], 'pairing_request_id': ''}
+        return _PairingStatusSerializer(pairing).data

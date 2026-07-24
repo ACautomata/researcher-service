@@ -18,6 +18,8 @@ import json
 import os
 import threading
 
+from django.db import transaction
+
 from chat.device_crypto import DeviceCrypto, DeviceIdentity
 from chat.models import Pairing
 from chat.pairing_ws import PairingError, PairingHandshake, PairingRequired, PairingResult
@@ -84,14 +86,35 @@ class PairingService:
             raise box['error']
         return box['result']
 
-    def ensure_paired(self, instance: Instance) -> Pairing:
-        """触发/重试配对。paired 返回 Pairing；pending/error 抛对应异常（行已落库）。"""
-        pairing = self._get_or_create(instance)
-        # 幂等：已配对且 token 在 → 直接复用，不重握手
-        if pairing.status == Pairing.STATUS_PAIRED and pairing.device_token:
-            return pairing
+    def ensure_paired(self, instance: Instance, force_repair: bool = False) -> Pairing:
+        """触发/重试配对。paired 返回 Pairing；pending/error 抛对应异常（行已落库）。
 
-        identity = self._load_or_create_identity(pairing)
+        force_repair=True 时忽略本地已配对状态，重新握手（用于 deviceToken 被网关撤销/重置后恢复）。
+        并发安全：用 select_for_update() 原子化「读取/创建设备身份」；握手本身不在锁内，避免长事务。
+        """
+        with transaction.atomic():
+            pairing = (
+                Pairing.objects
+                .select_for_update()
+                .select_related('instance')
+                .filter(instance=instance)
+                .first()
+            )
+            if pairing is None:
+                pairing = Pairing.objects.create(instance=instance)
+
+            if (
+                not force_repair
+                and pairing.status == Pairing.STATUS_PAIRED
+                and pairing.device_token
+            ):
+                return pairing
+
+            identity = self._load_or_create_identity(pairing)
+            # 身份必须在本事务内落库：并发请求复用同一 deviceId，避免 approve 命令与真实 key 不一致
+            pairing.save()
+
+        # 握手在事务外执行：网络超时/异常不应回滚已持久化的身份或 pending/error 状态
         url = self._ws_url_for(instance)
         try:
             result = self._run_handshake(url, instance.token, identity)

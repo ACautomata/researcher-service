@@ -10,11 +10,11 @@ import {
   removeInstance,
   type InstanceDTO,
 } from '@/api/containers'
-import { getPairing, triggerPair, type PairingDTO } from '@/api/chat'
+import { triggerPair, type PairingDTO } from '@/api/chat'
 import { ApiError } from '@/api/client'
 
 const instances = ref<InstanceDTO[]>([])
-// 配对状态：name → PairingDTO（issue #40；与实例列表同步刷新）
+// 配对状态由 listInstances 的 pairing 字段批量携带，不再单独轮询
 const pairings = ref<Record<string, PairingDTO>>({})
 const loading = ref(false)
 const errorMsg = ref('')
@@ -38,27 +38,16 @@ async function refresh(): Promise<void> {
   errorMsg.value = ''
   try {
     instances.value = await listInstances()
-    await refreshPairings()
+    // 批量同步：后端 list 已携带 pairing 快照，避免 N+1 请求
+    pairings.value = Object.fromEntries(
+      instances.value.map((inst) => [inst.name, inst.pairing]),
+    )
   } catch (e) {
     errorMsg.value = (e as Error).message
   } finally {
     loading.value = false
     refreshInFlight = false
   }
-}
-
-// 逐实例拉配对状态（issue #40）。单个失败不影响其它（配对是辅助信息，不打断列表）。
-async function refreshPairings(): Promise<void> {
-  const entries = await Promise.all(
-    instances.value.map(async (inst) => {
-      try {
-        return [inst.name, await getPairing(inst.name)] as const
-      } catch {
-        return [inst.name, { status: 'error' } as PairingDTO] as const
-      }
-    }),
-  )
-  pairings.value = Object.fromEntries(entries)
 }
 
 function pairingStatus(name: string): string {

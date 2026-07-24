@@ -1,6 +1,13 @@
 // containers API —— list/create/remove（spec §9.3 容器管理页后端契约）。
 import { apiFetch, apiJson, ApiError } from '@/api/client'
 
+export interface PairingSnapshotDTO {
+  status: string
+  device_id?: string
+  scopes?: string[]
+  pairing_request_id?: string
+}
+
 export interface InstanceDTO {
   name: string
   port: number
@@ -9,6 +16,7 @@ export interface InstanceDTO {
   image: string
   container_id: string
   created_at: string
+  pairing: PairingSnapshotDTO
 }
 
 export function listInstances(): Promise<InstanceDTO[]> {

@@ -64,7 +64,7 @@ class PairingView(APIView):
         except _InvalidName:
             return Response({'detail': '非法 name'}, status=status.HTTP_400_BAD_REQUEST)
         try:
-            pairing = PairingFleet.get().ensure_paired(inst)
+            pairing = PairingFleet.get().ensure_paired(inst, force_repair=True)
         except PairingRequired as e:
             # ensure_paired 已落库 pending 行；直接取（不重复 get_status 副作用）
             pairing = Pairing.objects.get(instance=inst)

@@ -55,12 +55,15 @@ class FakeTransport:
         self.connect_calls = 0
 
     # ---- 脚本构造器 ----
+    # 默认返回验收所需的完整 operator scopes；测试可覆盖为部分/空以验证拒绝逻辑。
+    _DEFAULT_SCOPES = ['operator.read', 'operator.write', 'operator.admin', 'operator.approvals']
+
     @classmethod
     def hello_ok(cls, scopes=None, device_token='dt-fake', **kwargs):
         return cls(
             result_frame={'type': 'res', 'ok': True,
                           'payload': {'auth': {'deviceToken': device_token, 'role': 'operator',
-                                               'scopes': scopes or ['operator.read']}}},
+                                               'scopes': scopes if scopes is not None else cls._DEFAULT_SCOPES}}},
             **kwargs,
         )
 

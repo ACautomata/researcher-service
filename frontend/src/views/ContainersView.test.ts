@@ -13,7 +13,6 @@ vi.mock('@/api/containers', () => ({
   removeInstance: vi.fn(),
 }))
 vi.mock('@/api/chat', () => ({
-  getPairing: vi.fn(),
   triggerPair: vi.fn(),
 }))
 vi.mock('element-plus', async (importOriginal) => {
@@ -27,7 +26,7 @@ vi.mock('element-plus', async (importOriginal) => {
 
 import ContainersView from '@/views/ContainersView.vue'
 import { createInstance, listInstances, removeInstance } from '@/api/containers'
-import { getPairing, triggerPair } from '@/api/chat'
+import { triggerPair } from '@/api/chat'
 
 const SAMPLE = {
   name: 'demo',
@@ -37,6 +36,7 @@ const SAMPLE = {
   image: 'img',
   container_id: 'cid',
   created_at: '2026-07-24T00:00:00Z',
+  pairing: { status: 'unpaired', device_id: '', scopes: [], pairing_request_id: '' },
 }
 
 const stubs = {
@@ -70,7 +70,6 @@ describe('ContainersView', () => {
     setActivePinia(createPinia())
     vi.clearAllMocks()
     ;(listInstances as ReturnType<typeof vi.fn>).mockResolvedValue([])
-    ;(getPairing as ReturnType<typeof vi.fn>).mockResolvedValue({ status: 'unpaired' })
   })
 
   afterEach(() => {
@@ -169,18 +168,18 @@ describe('ContainersView', () => {
 
   // ---------------------------- 配对状态（issue #40）----------------------------
 
-  it('loads pairing status for each listed instance', async () => {
-    ;(listInstances as ReturnType<typeof vi.fn>).mockResolvedValue([SAMPLE])
-    ;(getPairing as ReturnType<typeof vi.fn>).mockResolvedValue({ status: 'paired' })
+  it('loads pairing status from listInstances payload', async () => {
+    ;(listInstances as ReturnType<typeof vi.fn>).mockResolvedValue([
+      { ...SAMPLE, pairing: { status: 'paired', scopes: ['operator.read'] } },
+    ])
     const wrapper = mount(ContainersView, { global: { plugins: [createPinia()], stubs } })
     await flushPromises()
-    expect(getPairing).toHaveBeenCalledWith('demo')
+    expect(listInstances).toHaveBeenCalled()
     expect((wrapper.vm as unknown as { pairingStatus: (n: string) => string }).pairingStatus('demo')).toBe('paired')
   })
 
   it('triggerPair calls the api and refreshes pairing status', async () => {
     ;(listInstances as ReturnType<typeof vi.fn>).mockResolvedValue([SAMPLE])
-    ;(getPairing as ReturnType<typeof vi.fn>).mockResolvedValue({ status: 'unpaired' })
     ;(triggerPair as ReturnType<typeof vi.fn>).mockResolvedValue({ status: 'pending', pairing_request_id: 'r1' })
     const wrapper = mount(ContainersView, { global: { plugins: [createPinia()], stubs } })
     await flushPromises()

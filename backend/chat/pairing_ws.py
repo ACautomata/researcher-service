@@ -29,6 +29,8 @@ _ROLE = 'operator'
 # spec §8.1：operator.read/write/admin/approvals 四 scope + tool-events cap。
 _SCOPES = ['operator.read', 'operator.write', 'operator.admin', 'operator.approvals']
 _CAPS = ['tool-events']
+# 验收要求：协商 scopes 必须至少包含以下三者，否则聊天/审批调用会缺权失败。
+_REQUIRED_SCOPES = {'operator.read', 'operator.write', 'operator.approvals'}
 
 
 @dataclass(frozen=True)
@@ -152,9 +154,15 @@ class PairingHandshake:
             device_token = auth.get('deviceToken')
             if not device_token:
                 raise PairingError('hello-ok missing auth.deviceToken')
-            return PairingResult(device_token=device_token, scopes=auth.get('scopes') or [])
+            scopes = auth.get('scopes') or []
+            missing = _REQUIRED_SCOPES - set(scopes)
+            if missing:
+                raise PairingError(f'hello-ok missing required scopes: {sorted(missing)}')
+            return PairingResult(device_token=device_token, scopes=list(scopes))
         error = msg.get('error') or {}
         if error.get('code') == 'PAIRING_REQUIRED':
             request_id = (error.get('details') or {}).get('requestId', '')
+            if not isinstance(request_id, str) or not request_id:
+                raise PairingError('PAIRING_REQUIRED response missing requestId')
             raise PairingRequired(request_id)
         raise PairingError(error.get('message') or error.get('code') or 'connect failed')

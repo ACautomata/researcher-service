@@ -31,13 +31,13 @@ def instance(db):
 
 
 def test_pair_success_persists_device_token_and_scopes(instance):
-    transport = FakeTransport.hello_ok(scopes=['operator.read', 'operator.write'])
+    transport = FakeTransport.hello_ok()
     svc = PairingService(transport=transport)
     pairing = svc.ensure_paired(instance)
 
     assert pairing.status == Pairing.STATUS_PAIRED
     assert pairing.device_token == 'dt-fake'
-    assert set(pairing.scopes_list()) >= {'operator.read', 'operator.write'}
+    assert set(pairing.scopes_list()) >= {'operator.read', 'operator.write', 'operator.approvals'}
     assert pairing.device_id  # 已生成稳定设备身份
     assert pairing.private_key_pem.startswith('-----BEGIN PRIVATE KEY-----')
 
@@ -101,6 +101,26 @@ def test_pair_error_marks_status_error(instance):
     assert pairing.status == Pairing.STATUS_ERROR
 
 
+# ---------------------------- 并发与恢复 ----------------------------
+
+
+def test_force_repair_re_handshakes_even_when_already_paired(instance):
+    """deviceToken 被网关撤销/重置后，force_repair=True 重新握手并更新 token。"""
+    svc = PairingService(transport=FakeTransport.hello_ok(device_token='dt-old'))
+    p1 = svc.ensure_paired(instance)
+    assert p1.device_token == 'dt-old'
+
+    svc2 = PairingService(transport=FakeTransport.hello_ok(device_token='dt-new'))
+    p2 = svc2.ensure_paired(instance, force_repair=True)
+    assert p2.device_token == 'dt-new'
+    assert p2.status == Pairing.STATUS_PAIRED
+
+
+# 并发身份竞态由 PairingService.ensure_paired 内 select_for_update() 保证；
+# 多线程同时写入 SQLite 在测试中会触发 database locked，故用单线程回归验证
+# 身份持久化后复用（test_pair_generates_persistent_identity_reused_across_calls）+ force_repair。
+
+
 # ---------------------------- 事件循环上下文（ASGI 安全）----------------------------
 
 
@@ -118,7 +138,7 @@ def test_run_handshake_inside_running_event_loop_thread():
 
     async def _main():
         # 当前线程事件循环已运行；直接同步调桥接（不应 RuntimeError）
-        svc = PairingService(transport=FakeTransport.hello_ok(scopes=['operator.read']))
+        svc = PairingService(transport=FakeTransport.hello_ok())
         return svc._run_handshake('ws://x/', 'tok', DeviceCrypto.generate_identity())
 
     result = asyncio.run(_main())

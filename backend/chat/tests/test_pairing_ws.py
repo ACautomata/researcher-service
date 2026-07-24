@@ -48,7 +48,8 @@ async def test_sends_signed_connect_frame(identity):
                 return json.dumps({'type': 'event', 'event': 'connect.challenge',
                                    'payload': {'nonce': 'nz-9', 'ts': 1}})
             return json.dumps({'type': 'res', 'id': sent[0]['id'], 'ok': True,
-                               'payload': {'auth': {'deviceToken': 'dt', 'scopes': []}}})
+                               'payload': {'auth': {'deviceToken': 'dt',
+                                                    'scopes': ['operator.read', 'operator.write', 'operator.approvals']}}})
 
         async def close(self):
             pass
@@ -88,6 +89,38 @@ async def test_handshake_pairing_required_raises_with_request_id(identity):
 
 
 @pytest.mark.asyncio
+async def test_handshake_rejects_partial_scopes(identity):
+    """hello-ok 协商 scope 缺少 operator.read/write/approvals 任一 → PairingError。"""
+    hs = PairingHandshake(transport=FakeTransport.hello_ok(scopes=['operator.read']))
+    with pytest.raises(PairingError) as exc_info:
+        await hs.pair(url='ws://127.0.0.1:19000/', token='gw-tok', identity=identity)
+    assert 'operator.write' in str(exc_info.value)
+    assert 'operator.approvals' in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_handshake_rejects_empty_scopes(identity):
+    """hello-ok 协商空 scopes → PairingError，不能标记 paired。"""
+    hs = PairingHandshake(transport=FakeTransport.hello_ok(scopes=[]))
+    with pytest.raises(PairingError):
+        await hs.pair(url='ws://127.0.0.1:19000/', token='gw-tok', identity=identity)
+
+
+@pytest.mark.asyncio
+async def test_pairing_required_without_request_id_becomes_pairing_error(identity):
+    """PAIRING_REQUIRED 缺 requestId 是协议失败，不应让用户执行空 approve 命令。"""
+    transport = FakeTransport(
+        result_frame={'type': 'res', 'ok': False,
+                      'error': {'code': 'PAIRING_REQUIRED',
+                                'details': {'recommendedNextStep': 'wait_then_retry'}}}
+    )
+    hs = PairingHandshake(transport=transport)
+    with pytest.raises(PairingError) as exc_info:
+        await hs.pair(url='ws://127.0.0.1:19000/', token='gw-tok', identity=identity)
+    assert 'requestId' in str(exc_info.value)
+
+
+@pytest.mark.asyncio
 async def test_handshake_other_error_raises_pairing_error(identity):
     hs = PairingHandshake(transport=FakeTransport.connect_error('bad token'))
     with pytest.raises(PairingError):
@@ -101,7 +134,7 @@ async def test_handshake_other_error_raises_pairing_error(identity):
 async def test_tolerates_interleaved_event_before_challenge(identity):
     """challenge 前先收到无关 event → 忽略，继续等 challenge。"""
     transport = FakeTransport.hello_ok(
-        scopes=['operator.read'],
+        scopes=['operator.read', 'operator.write', 'operator.approvals'],
         pre_challenge_frames=[
             {'type': 'event', 'event': 'tool.start', 'payload': {}},
         ],
@@ -115,7 +148,7 @@ async def test_tolerates_interleaved_event_before_challenge(identity):
 async def test_tolerates_stray_res_before_connect_res(identity):
     """connect res 前先收到 id 不匹配的 stray res → 忽略，等真正的 connect res。"""
     transport = FakeTransport.hello_ok(
-        scopes=['operator.read', 'operator.write'],
+        scopes=['operator.read', 'operator.write', 'operator.approvals'],
         pre_result_frames=[
             {'type': 'res', 'id': 'stale-id', 'ok': False,
              'error': {'code': 'SOME_STALE', 'message': 'stale'}},

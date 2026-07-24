@@ -90,8 +90,7 @@ def test_get_unpaired_status(authed, instance):
 
 
 def test_post_pair_success(authed, instance, override_service):
-    override_service(FakeTransport.hello_ok(
-        scopes=['operator.read', 'operator.write', 'operator.approvals']))
+    override_service(FakeTransport.hello_ok())
     resp = authed.post('/api/v1/containers/demo/pairing/', {}, format='json')
     assert resp.status_code == 200
     data = resp.json()
@@ -105,6 +104,23 @@ def test_post_pair_success(authed, instance, override_service):
     # 私钥/token 不应外泄到 API 出参
     assert 'private_key_pem' not in data
     assert 'device_token' not in data
+
+
+# ---------------------------- POST 强制重配（deviceToken 撤销恢复）----------------------------
+
+
+def test_post_pair_force_repair_overwrites_revoked_token(authed, instance, override_service):
+    """Codex P1：本地已 paired 但网关侧 token 被撤销时，POST 应重新握手恢复。"""
+    override_service(FakeTransport.hello_ok(device_token='dt-old'))
+    authed.post('/api/v1/containers/demo/pairing/', {}, format='json')
+    old = Pairing.objects.get(instance=instance)
+    assert old.device_token == 'dt-old'
+
+    override_service(FakeTransport.hello_ok(device_token='dt-new'))
+    resp = authed.post('/api/v1/containers/demo/pairing/', {}, format='json')
+    assert resp.status_code == 200
+    assert resp.json()['status'] == 'paired'
+    assert Pairing.objects.get(instance=instance).device_token == 'dt-new'
 
 
 # ---------------------------- POST 待批准（验收 3）----------------------------
