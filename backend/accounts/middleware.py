@@ -2,11 +2,12 @@
 
 spec §3：WebSocket 用自定义 Channels JWT middleware 在握手时验同一 JWT
 （与 REST 同 simplejwt 后端、同 SECRET_KEY/算法）。浏览器 WS 不能自定义
-Authorization 头，token 经 query `?token=` 或 Sec-WebSocket-Protocol 携带（spec §1）。
+Authorization 头，token 经 Sec-WebSocket-Protocol（`access_token` + JWT）携带。
 有效：注入 scope['user'] 放行；无效/缺失：握手期 close(4401) 拒绝。
-"""
-from urllib.parse import parse_qs
 
+安全：token 不走 URL query（`?token=` 会进访问日志/浏览器历史/Referer，泄漏
+access token），仅经 subprotocol 通道——握手帧不进 URL 日志。
+"""
 from channels.db import database_sync_to_async
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import AnonymousUser
@@ -53,12 +54,8 @@ class JwtAuthMiddleware:
 
     @staticmethod
     def _extract_token(scope) -> str | None:
-        # 1) query ?token=（前端 useWebSocket 拼 URL）
-        query = parse_qs(scope.get('query_string', b'').decode())
-        token = query.get('token', [None])[0]
-        if token:
-            return token
-        # 2) Sec-WebSocket-Protocol: access_token.<jwt>（浏览器可携带的替代通道）
+        # Sec-WebSocket-Protocol: 客户端 new WebSocket(url, ['access_token', <jwt>])，
+        # channels 按客户端声明顺序填入 scope['subprotocols']。仅认此通道（query 会泄漏进 URL 日志）。
         subprotocols = scope.get('subprotocols') or []
         if len(subprotocols) >= 2 and subprotocols[0] == 'access_token':
             return subprotocols[1]

@@ -35,7 +35,7 @@ async def test_asgi_ws_no_token_rejected():
 async def test_asgi_ws_invalid_token_rejected():
     from config.asgi import application
 
-    comm = WebsocketCommunicator(application, '/ws/chat/?token=garbage')
+    comm = WebsocketCommunicator(application, '/ws/chat/', subprotocols=['access_token', 'garbage'])
     connected, _ = await comm.connect()
     assert connected is False
     await comm.disconnect()
@@ -44,11 +44,11 @@ async def test_asgi_ws_invalid_token_rejected():
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
 async def test_asgi_ws_valid_token_passes_middleware():
-    # 有效 JWT 握手通过 JwtAuthMiddleware；T02 无业务路由，占位 app 优雅关闭（能连上即证明握手被验通过）
+    # 有效 JWT 握手通过 JwtAuthMiddleware；T02 无业务路由，占位 app accept 即证明握手验通过
     from config.asgi import application
 
     token = await _access('asgiuser')
-    comm = WebsocketCommunicator(application, f'/ws/chat/?token={token}')
+    comm = WebsocketCommunicator(application, '/ws/chat/', subprotocols=['access_token', token])
     connected, _ = await comm.connect()
     assert connected is True
     await comm.disconnect()

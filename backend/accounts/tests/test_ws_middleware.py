@@ -38,25 +38,25 @@ def _access(username):
 
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
-async def test_ws_valid_token_query_param_accepted():
-    token = await _access('wsuser')
-    comm = WebsocketCommunicator(_app(), f'/ws/chat/?token={token}')
-    connected, _ = await comm.connect()
-    assert connected is True
-    # middleware 已把认证用户注入 scope['user']
-    assert await comm.receive_from() == 'wsuser'
-    await comm.disconnect()
-
-
-@pytest.mark.django_db(transaction=True)
-@pytest.mark.asyncio
 async def test_ws_valid_token_subprotocol_accepted():
-    # 浏览器 WS 不能自定义头，token 也可经 Sec-WebSocket-Protocol 携带（spec §1）
+    # 浏览器 WS 不能自定义头，token 经 Sec-WebSocket-Protocol 携带（spec §1）
     token = await _access('proto')
     comm = WebsocketCommunicator(_app(), '/ws/chat/', subprotocols=['access_token', token])
     connected, _ = await comm.connect()
     assert connected is True
     assert await comm.receive_from() == 'proto'
+    await comm.disconnect()
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
+async def test_ws_query_param_token_rejected():
+    # 安全：token 不走 URL query（会进访问日志/浏览器历史/Referer 泄漏 access token）。
+    # 即便 query 带合法 token，也不应被采信——握手拒绝。
+    token = await _access('wsuser')
+    comm = WebsocketCommunicator(_app(), f'/ws/chat/?token={token}')
+    connected, _ = await comm.connect()
+    assert connected is False
     await comm.disconnect()
 
 
@@ -72,7 +72,7 @@ async def test_ws_no_token_rejected():
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
 async def test_ws_garbage_token_rejected():
-    comm = WebsocketCommunicator(_app(), '/ws/chat/?token=not-a-jwt')
+    comm = WebsocketCommunicator(_app(), '/ws/chat/', subprotocols=['access_token', 'not-a-jwt'])
     connected, _ = await comm.connect()
     assert connected is False
     await comm.disconnect()
@@ -85,7 +85,7 @@ async def test_ws_other_secret_token_rejected():
     import jwt as pyjwt
 
     forged = pyjwt.encode({'user_id': 1, 'token_type': 'access'}, 'other-secret', algorithm='HS256')
-    comm = WebsocketCommunicator(_app(), f'/ws/chat/?token={forged}')
+    comm = WebsocketCommunicator(_app(), '/ws/chat/', subprotocols=['access_token', forged])
     connected, _ = await comm.connect()
     assert connected is False
     await comm.disconnect()
