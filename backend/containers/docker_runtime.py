@@ -57,12 +57,14 @@ class DockerRuntime:
         self._client_factory = client_factory or docker.from_env
         # codex R9-3：复用单 client 而非每次 docker.from_env() —— 管理页每 3s×N instance
         # 的 status 轮询会产生大量无谓 daemon 连接。lazy 构造兼容构造时不连 daemon 的约定。
-        self._client: ... = None
+        # 注意：属性名 _cached_client 区别于方法 _client()，避免 Python attribute shadow 导致
+        # self._client() 返回 None → TypeError（R10-1）。
+        self._cached_client: ... = None
 
     def _client(self):
-        if self._client is None:
-            self._client = self._client_factory()
-        return self._client
+        if self._cached_client is None:
+            self._cached_client = self._client_factory()
+        return self._cached_client
 
     def build_run_kwargs(self, spec: ContainerSpec) -> dict:
         """构造 docker-py containers.run() 的 kwargs（纯逻辑，可单测）。"""
