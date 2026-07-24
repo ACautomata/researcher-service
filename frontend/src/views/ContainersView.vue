@@ -1,6 +1,8 @@
 <script setup lang="ts">
 // 容器管理页（spec §9.3）：列表 name/status/health/port/image + 新建 + 删除（默认连数据删）。
-import { onMounted, ref } from 'vue'
+// codex R2 :78：挂载期间轮询列表（新起 gateway 由 unhealthy 转 healthy、容器被外部停止等
+// 运行时状态变化方能及时反映）；卸载即清定时器，避免泄漏/对已卸载组件发请求。
+import { onMounted, onBeforeUnmount, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   createInstance,
@@ -18,6 +20,10 @@ const errorMsg = ref('')
 const createVisible = ref(false)
 const newName = ref('')
 const creating = ref(false)
+
+// codex R2 :78：轮询间隔（3s），对齐前端既有轮询节奏；太短打满健康探测，太长状态滞后
+const POLL_INTERVAL_MS = 3000
+let pollTimer: ReturnType<typeof setInterval> | null = null
 
 async function refresh(): Promise<void> {
   loading.value = true
@@ -75,7 +81,20 @@ async function confirmRemove(name: string): Promise<void> {
   }
 }
 
-onMounted(refresh)
+onMounted(() => {
+  void refresh()
+  // codex R2 :78：周期性刷新，反映 runtime 状态/健康变化
+  pollTimer = setInterval(() => {
+    void refresh()
+  }, POLL_INTERVAL_MS)
+})
+
+onBeforeUnmount(() => {
+  if (pollTimer !== null) {
+    clearInterval(pollTimer)
+    pollTimer = null
+  }
+})
 
 // 暴露删除动作：el-table row slot 在测试 stub 下不便点击，暴露供测试与潜在父组件触发
 defineExpose({ confirmRemove })

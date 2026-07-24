@@ -12,11 +12,22 @@
 - run 失败（docker create 成功但 start 失败）best-effort remove 残留命名容器。
 - delete home 清理失败不吞——保留 DB 行 + 标 REMOVING + raise（可重试）。
 - list 健康探测并发（ThreadPoolExecutor），bound 总延迟（非 N×timeout 串行）。
+
+codex R2：
+- 端口分配并入宿主实测占用（socket bind 探测）+ fleet 容器 label 端口，
+  避免最低候选被无关进程/未跟踪容器占用导致每次 create 确定性失败。
+- run 失败回滚时 best-effort remove 自身也可能因 daemon 不可用而失败——单独兜底，
+  不阻断 DB 行 + 目录的回滚。
+- list 对 creating 行做 runtime 对账：进程在最终 save 前崩溃留下的 creating 行，
+  若容器实际已在跑则就地自愈为 running，不再永久 pending。
+- delete 时 home 目录已不存在（FileNotFoundError）视为清理成功，不再误判失败卡 REMOVING。
 """
 import os
 import secrets
 import shutil
+import socket
 import urllib.request
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -98,15 +109,40 @@ class HealthProbe:
             return False
 
 
+def _host_port_in_use(port: int) -> bool:
+    """宿主 127.0.0.1:<port> 是否已被占用（socket bind 实测；codex R2 端口分配）。
+
+    Instance.port 只反映本面板记账的容器；无关进程/未跟踪容器占用最低候选端口时
+    本探测返回 True，allocator 跳过它，避免 run() 因宿主 bind 冲突确定性失败。
+    """
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        probe.bind(('127.0.0.1', port))
+        return False
+    except OSError:
+        return True
+    finally:
+        probe.close()
+
+
 class InstanceOrchestrator:
     """容器实例生命周期 facade（create/delete/list）。"""
 
-    def __init__(self, runtime, config: FleetConfig, health_probe=None, dir_remover=None) -> None:
+    def __init__(
+        self,
+        runtime,
+        config: FleetConfig,
+        health_probe=None,
+        dir_remover=None,
+        port_in_use: Callable[[int], bool] | None = None,
+    ) -> None:
         self._runtime = runtime
         self._cfg = config
         self._health = health_probe or HealthProbe()
         # codex R1 :126：注入目录删除器（默认 shutil.rmtree，不 ignore），可测清理失败
         self._dir_remover = dir_remover or shutil.rmtree
+        # codex R2 :161：注入宿主端口占用探测（默认 socket bind 实测），可测确定性冲突
+        self._port_in_use = port_in_use or _host_port_in_use
         self._renderer = ConfigRenderer(config.template_json)
         self._provisioner = HomeProvisioner(config.template_dir)
         self._allocator = PortAllocator(
@@ -114,7 +150,25 @@ class InstanceOrchestrator:
         )
 
     def _used_ports(self) -> set[int]:
-        return set(Instance.objects.values_list('port', flat=True))
+        """已用端口 = DB 记账 ∪ fleet 容器 label 端口 ∪ 池内宿主实测占用（codex R2 :161）。
+
+        仅记账会让最低候选被无关进程/未跟踪容器占用而反复失败；并入 daemon label
+        端口与宿主 bind 实测后，allocator 跳过真实不可用端口。宿主探测只扫池区间，
+        且对池外/异常端口容错（占用即跳过该候选，不影响其余）。
+        """
+        used = set(Instance.objects.values_list('port', flat=True))
+        try:
+            for info in self._runtime.list_fleet():
+                port = getattr(info, 'port', None)
+                if isinstance(port, int):
+                    used.add(port)
+        except Exception:
+            # daemon 不可达不阻断分配：DB 记账 + 宿主实测仍可给出候选
+            pass
+        for port in range(self._cfg.port_start, self._cfg.port_end + 1):
+            if port not in used and self._port_in_use(port):
+                used.add(port)
+        return used
 
     def _reserve_row(self, name: str) -> Instance:
         """事务内占位 INSERT：name/port 冲突由 DB 唯一约束仲裁（codex R1 :77/:84）。
@@ -171,8 +225,13 @@ class InstanceOrchestrator:
             )
         except Exception:
             # spec §5.5：失败回滚。codex R1 :112 best-effort remove 残留命名容器
-            # （docker create 成功但 start 失败时容器已 Created 残留，否则重试同名 docker 冲突）
-            self._runtime.remove(name)
+            # （docker create 成功但 start 失败时容器已 Created 残留，否则重试同名 docker 冲突）。
+            # codex R2 :176：remove 自身也可能因 daemon 不可用失败——单独兜底，
+            # 不阻断 DB 行 + 目录回滚（否则残留 creating 行 + 半成品目录，恢复后仍挡同名重建）。
+            try:
+                self._runtime.remove(name)
+            except Exception:
+                pass
             inst.delete()
             try:
                 self._dir_remover(instance_dir)
@@ -198,6 +257,10 @@ class InstanceOrchestrator:
         self._runtime.remove(name)
         try:
             self._dir_remover(self._cfg.root / 'instances' / name)
+        except FileNotFoundError:
+            # codex R2 :204：目录已不存在（外部清理/建行前崩溃）视为清理成功——
+            # 否则 FileNotFoundError 落入 OSError 分支，行卡 REMOVING 且重试永远撞同一路径。
+            pass
         except OSError:
             inst.status = Instance.STATUS_REMOVING
             inst.save()
@@ -221,6 +284,7 @@ class InstanceOrchestrator:
 
         codex R1 :133：creating/removing 瞬态透传（容器未起时 runtime.get 缺失
         不应误判 stopped，否则暴露错误生命周期、诱使他方对未就绪实例操作）。
+        （creating 行的 runtime 对账/自愈在 list() 主线程完成，见 _reconcile_creating。）
         """
         if inst.status == Instance.STATUS_CREATING:
             return self._item(inst, Instance.STATUS_CREATING, HEALTH_PENDING)
@@ -239,6 +303,29 @@ class InstanceOrchestrator:
             health = HEALTH_STOPPED
         return self._item(inst, status, health)
 
+    def _reconcile_creating(self, insts: list[Instance]) -> None:
+        """主线程对账 creating 行（codex R2 :226）：进程在最终 save 前崩溃（尤其 Docker
+        已起容器后）留下的 creating 行，若容器实际已 running 则就地自愈为 running 并落盘，
+        不再永久 pending（否则名字/端口一直被占，永不收敛到 running/stopped）。
+
+        主线程串行执行（非线程池）：creating 行通常极少，且 Django ORM save 不宜在
+        worker 线程做（pytest 事务包裹下 worker 连接隔离，落盘不可见）。
+        """
+        for inst in insts:
+            if inst.status != Instance.STATUS_CREATING:
+                continue
+            info = self._runtime.get(inst.name)
+            if not (info and info.running):
+                continue
+            inst.status = Instance.STATUS_RUNNING
+            if info.container_id:
+                inst.container_id = info.container_id
+            try:
+                inst.save(update_fields=['status', 'container_id'])
+            except Exception:
+                # 落盘失败不阻断本次出参（内存对象已是 running，下次 list 再对账）
+                pass
+
     def list(self) -> list[dict]:
         """聚合 DB 记账 + runtime 实时状态 + gateway 健康探测（issue #39 列表验收）。
 
@@ -249,6 +336,8 @@ class InstanceOrchestrator:
         insts = list(Instance.objects.order_by('created_at'))
         if not insts:
             return []
+        # codex R2 :226：主线程先对账 creating 行（崩溃中断者自愈为 running），再进线程池
+        self._reconcile_creating(insts)
         workers = max(1, min(_MAX_HEALTH_WORKERS, len(insts)))
         with ThreadPoolExecutor(max_workers=workers) as pool:
             return list(pool.map(self._build_item, insts))

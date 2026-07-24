@@ -10,7 +10,12 @@ import pytest
 from django.contrib.auth import get_user_model
 from rest_framework.test import APIClient
 
-from containers.orchestrator import InstanceCleanupError, InstanceExists
+from containers.orchestrator import (
+    InstanceCleanupError,
+    InstanceExists,
+    PortAllocationError,
+)
+from containers.ports import PortPoolExhausted
 
 User = get_user_model()
 
@@ -160,3 +165,28 @@ def test_delete_returns_409_when_cleanup_fails(authed, fleet, monkeypatch):
     monkeypatch.setattr(fleet['orch'], 'delete', _fail)
     resp = authed.delete('/api/v1/containers/demo')
     assert resp.status_code == 409
+
+
+# ---------------------------- codex R2 端口耗尽转译（:40） ----------------------------
+
+
+@pytest.mark.django_db
+def test_create_returns_503_when_port_pool_exhausted(authed, fleet, monkeypatch):
+    # codex R2 :40：端口池耗尽（PortPoolExhausted）→ 503（预期容量条件），非裸 500
+    def _raise(name):
+        raise PortPoolExhausted('端口池 19000-19999 已耗尽')
+
+    monkeypatch.setattr(fleet['orch'], 'create', _raise)
+    resp = authed.post('/api/v1/containers/', {'name': 'demo'}, format='json')
+    assert resp.status_code == 503
+
+
+@pytest.mark.django_db
+def test_create_returns_503_when_port_allocation_exhausted(authed, fleet, monkeypatch):
+    # codex R2 :40：持续分配冲突（PortAllocationError，重试预算用尽）→ 503，非裸 500
+    def _raise(name):
+        raise PortAllocationError(name)
+
+    monkeypatch.setattr(fleet['orch'], 'create', _raise)
+    resp = authed.post('/api/v1/containers/', {'name': 'demo'}, format='json')
+    assert resp.status_code == 503

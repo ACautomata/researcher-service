@@ -6,6 +6,8 @@ HTTP 薄适配层：入参必经 Serializer is_valid（spec §4 零信任，禁�
 
 codex R1：orchestrator 领域异常转译为 HTTP 语义——InstanceExists→409（并发重名），
 InstanceCleanupError→409（home 清理失败，DB 行保留可重试）。
+codex R2：PortPoolExhausted/PortAllocationError→503（端口池耗尽/持续分配冲突，
+属预期容量条件，非内部缺陷——客户端可区分，不再裸 500）。
 """
 from django.core.exceptions import ValidationError
 from django.http import Http404
@@ -15,7 +17,13 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .models import NAME_VALIDATOR
-from .orchestrator import Fleet, InstanceCleanupError, InstanceExists
+from .orchestrator import (
+    Fleet,
+    InstanceCleanupError,
+    InstanceExists,
+    PortAllocationError,
+)
+from .ports import PortPoolExhausted
 from .serializers import InstanceCreateSerializer, InstanceSerializer
 
 
@@ -29,7 +37,7 @@ class InstanceListCreateView(APIView):
 
     @extend_schema(
         request=InstanceCreateSerializer,
-        responses={201: InstanceSerializer, 409: None},
+        responses={201: InstanceSerializer, 409: None, 503: None},
     )
     def post(self, request):
         ser = InstanceCreateSerializer(data=request.data)
@@ -40,6 +48,12 @@ class InstanceListCreateView(APIView):
         except InstanceExists:
             # codex R1 :84：并发绕 UniqueValidator → DB 唯一约束 → 409（非裸 IntegrityError→500）
             return Response({'detail': '实例名已存在'}, status=status.HTTP_409_CONFLICT)
+        except (PortPoolExhausted, PortAllocationError):
+            # codex R2 :40：端口池耗尽 / 持续分配冲突（预期容量条件）→ 503，非裸 500
+            return Response(
+                {'detail': '端口池已耗尽，暂无法创建容器，请稍后重试或删除闲置容器'},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
         item = Fleet.get().detail(name)
         return Response(InstanceSerializer(item).data, status=status.HTTP_201_CREATED)
 

@@ -120,12 +120,20 @@ class DockerRuntime:
     @staticmethod
     def _to_info(c) -> ContainerInfo:
         image = c.attrs.get('Config', {}).get('Image') or ''
+        # codex R2 :161：从 openclaw.port label 还原宿主映射端口（供端口分配对账）；
+        # 无 label / 非数字时为 None（未跟踪容器由宿主 bind 实测兜底）。
+        raw_port = (c.labels or {}).get(LABEL_PORT_KEY)
+        try:
+            port = int(raw_port) if raw_port is not None else None
+        except (TypeError, ValueError):
+            port = None
         return ContainerInfo(
             container_id=c.id,
             name=c.name,
             running=(c.status == 'running'),
             status=c.status,
             image=image,
+            port=port,
         )
 
 

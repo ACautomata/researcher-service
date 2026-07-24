@@ -4,7 +4,7 @@
 // （el-table row scoped slot 在 stub 下渲染脆弱，故删除走方法级 seam）。
 import { flushPromises } from '@vue/test-utils'
 import { mount } from '@vue/test-utils'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 
 vi.mock('@/api/containers', () => ({
@@ -67,6 +67,10 @@ describe('ContainersView', () => {
     ;(listInstances as ReturnType<typeof vi.fn>).mockResolvedValue([])
   })
 
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
   it('fetches and renders instances on mount', async () => {
     ;(listInstances as ReturnType<typeof vi.fn>).mockResolvedValue([SAMPLE])
     const wrapper = mount(ContainersView, { global: { plugins: [createPinia()], stubs } })
@@ -121,5 +125,24 @@ describe('ContainersView', () => {
       'demo',
     )
     expect(removeInstance).not.toHaveBeenCalled()
+  })
+
+  it('polls the list periodically while mounted and stops on unmount (codex R2 :78)', async () => {
+    // 新起 gateway 由 unhealthy 转 healthy、容器被外部停止等运行时变化须靠轮询反映。
+    vi.useFakeTimers()
+    const wrapper = mount(ContainersView, { global: { plugins: [createPinia()], stubs } })
+    await flushPromises()
+    const callsAfterMount = (listInstances as ReturnType<typeof vi.fn>).mock.calls.length
+    expect(callsAfterMount).toBeGreaterThanOrEqual(1) // mount 时已拉一次
+
+    await vi.advanceTimersByTimeAsync(3000) // 一个轮询周期
+    expect((listInstances as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThan(
+      callsAfterMount,
+    )
+
+    const callsBeforeUnmount = (listInstances as ReturnType<typeof vi.fn>).mock.calls.length
+    wrapper.unmount()
+    await vi.advanceTimersByTimeAsync(9000) // 卸载后多过一个周期也不再调
+    expect((listInstances as ReturnType<typeof vi.fn>).mock.calls.length).toBe(callsBeforeUnmount)
   })
 })

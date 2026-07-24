@@ -54,6 +54,9 @@ class ContainerInfo:
     running: bool
     status: str          # docker status 原值：running/exited/...
     image: str
+    # codex R2 :161：宿主映射端口（来自 openclaw.port label），供端口分配对账
+    # 未跟踪/无 label 时为 None（allocator 仅并入 int 端口）。
+    port: int | None = None
 
 
 class ContainerRuntime(Protocol):
