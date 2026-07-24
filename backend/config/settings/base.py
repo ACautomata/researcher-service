@@ -2,7 +2,7 @@
 
 出处：docs/FULLSTACK-REFACTOR-SPEC.md §2（目录）/§3（auth）/§4（零信任）。
 P0 骨架：5 app + DRF（全局 IsAuthenticated）+ simplejwt + drf-spectacular。
-channels 仅注册到 INSTALLED_APPS；ASGI/routing 接入留 P1 chat ticket（TDD 未测不写）。
+T02：OIDC 占位端点 + Channels JWT middleware（config.asgi 接入握手验 JWT）。
 """
 import os
 from pathlib import Path
@@ -108,3 +108,8 @@ SPECTACULAR_SETTINGS = {
     'VERSION': '0.1.0',
     'SERVE_INCLUDE_SCHEMA': False,
 }
+
+# ---- OIDC 通用登录（spec §3）----
+# provider 注册表：{<provider名>: {'issuer','client_id','scope'}}，不绑死厂商；
+# 接具体 IdP 只加配置。骨架期留空 → oauth login/callback 端点返回 501。
+OAUTH_PROVIDERS: dict = {}

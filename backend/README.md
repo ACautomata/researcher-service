@@ -32,7 +32,12 @@ python -m pytest
 | POST | `/api/v1/auth/register` | 本地账号注册 | 公开 |
 | POST | `/api/v1/auth/login` | 登录签发 access/refresh | 公开 |
 | POST | `/api/v1/auth/token/refresh` | 刷新 access | 公开 |
+| POST | `/api/v1/auth/logout` | 登出（失效 refresh cookie） | 需 JWT |
 | GET | `/api/v1/auth/me` | 当前用户 | 需 JWT |
+| GET | `/api/v1/auth/oauth/<p>/login` | OIDC 登录占位（未配置 501） | 公开 |
+| GET | `/api/v1/auth/oauth/<p>/callback` | OIDC 回调占位（未配置 501） | 公开 |
 
 全局 `DEFAULT_PERMISSION_CLASSES=[IsAuthenticated]`，上表公开端点显式 `AllowAny`。
-chat（WS 桥接）/ containers（Docker SDK 编排）/ wiki / models app 仅建骨架，留后续 ticket。
+WebSocket 握手经自定义 `accounts.middleware.JwtAuthMiddleware` 验同一 JWT
+（`config.asgi` ProtocolTypeRouter 接入）；chat consumer 路由留 P1 chat ticket。
+containers（Docker SDK 编排）/ wiki / models / chat app 仅建骨架，留后续 ticket。

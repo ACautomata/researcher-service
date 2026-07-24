@@ -13,6 +13,7 @@ from .serializers import (
     AccessTokenSerializer,
     CookieTokenRefreshSerializer,
     LoginSerializer,
+    OIDCProviderConfigSerializer,
     RegisterSerializer,
     UserSerializer,
 )
@@ -91,3 +92,49 @@ class MeView(APIView):
     @extend_schema(responses=UserSerializer)
     def get(self, request):
         return Response(UserSerializer(request.user).data)
+
+
+class _OIDCPlaceholderView(APIView):
+    """OIDC 通用端点占位基类（spec §3）。
+
+    授权码形态预留：provider 注册表 `settings.OAUTH_PROVIDERS` 按名查配置，
+    未配置 / 配置不全（经 OIDCProviderConfigSerializer 校验）→ 501。
+    骨架期真实 IdP 集成 out-of-scope（map #25），即便配置完整也仍 501「未接入」。
+    """
+
+    permission_classes = [AllowAny]
+
+    @staticmethod
+    def _provider_configured(provider: str) -> bool:
+        config = settings.OAUTH_PROVIDERS.get(provider)
+        if config is None:
+            return False
+        return OIDCProviderConfigSerializer(data=config).is_valid()
+
+    def _placeholder(self, provider: str):
+        if not self._provider_configured(provider):
+            return Response(
+                {'detail': f"OIDC provider '{provider}' 未配置"},
+                status=status.HTTP_501_NOT_IMPLEMENTED,
+            )
+        # 配置完整但真实换 token/重定向未接入（骨架占位，留后续接具体 IdP）
+        return Response(
+            {'detail': f"OIDC provider '{provider}' 已配置，但 IdP 集成尚未接入（骨架占位）"},
+            status=status.HTTP_501_NOT_IMPLEMENTED,
+        )
+
+
+class OAuthProviderLoginView(_OIDCPlaceholderView):
+    """GET /api/v1/auth/oauth/<provider>/login —— 授权码形态预留（将来 302 重定向到 IdP）。"""
+
+    @extend_schema(responses={501: None})
+    def get(self, request, provider: str):
+        return self._placeholder(provider)
+
+
+class OAuthProviderCallbackView(_OIDCPlaceholderView):
+    """GET /api/v1/auth/oauth/<provider>/callback —— 授权码换 token 占位。"""
+
+    @extend_schema(responses={501: None})
+    def get(self, request, provider: str):
+        return self._placeholder(provider)

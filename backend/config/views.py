@@ -20,3 +20,15 @@ class HealthView(APIView):
     @extend_schema(responses=HealthResponseSerializer)
     def get(self, request):
         return Response({'status': 'ok'})
+
+
+class AuthProbeView(APIView):
+    """受保护探针（T02 契约测试用，无业务 app 归属；后续 app 端点接管后删除）。
+
+    不设 AllowAny，吃全局 DEFAULT_PERMISSION_CLASSES=[IsAuthenticated]（spec §3）：
+    无 token → 401，带合法 access → 200。
+    """
+
+    @extend_schema(responses=HealthResponseSerializer)
+    def get(self, request):
+        return Response({'status': 'ok'})
