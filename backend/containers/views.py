@@ -40,11 +40,11 @@ class InstanceListCreateView(APIView):
         items = Fleet.get().list()
         # Codex P2：批量预取配对快照，避免 serializer 方法里 N+1 查询
         pairings = {
-            p.instance_id: p
+            p.instance.name: p
             for p in Pairing.objects.filter(instance__name__in=[i['name'] for i in items])
         }
         for item in items:
-            pairing = pairings.get(item.get('instance_id'))
+            pairing = pairings.get(item.get('name'))
             item['pairing'] = PairingStatusSerializer(pairing).data if pairing else {
                 'status': Pairing.STATUS_UNPAIRED,
                 'device_id': '',

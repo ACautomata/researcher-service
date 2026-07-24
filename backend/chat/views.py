@@ -19,7 +19,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from chat.models import Pairing
-from chat.pairing import PairingFleet
+from chat.pairing import PairingConcurrencyError, PairingFleet
 from chat.pairing_ws import PairingError, PairingRequired
 from chat.serializers import PairingStatusSerializer
 from containers.models import NAME_VALIDATOR, Instance
@@ -82,4 +82,10 @@ class PairingView(APIView):
             data = PairingStatusSerializer(pairing).data
             data['detail'] = '配对握手失败，请检查容器网关状态后重试'
             return Response(data, status=status.HTTP_502_BAD_GATEWAY)
+        except PairingConcurrencyError:
+            # 握手期间容器/配对行被删除
+            return Response(
+                {'detail': '容器或配对记录已被删除，请刷新列表'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
         return Response(PairingStatusSerializer(pairing).data)
