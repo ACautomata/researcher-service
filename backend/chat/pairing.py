@@ -16,6 +16,7 @@ async view/consumer 线程。两种上下文下 asyncio.run/async_to_sync 都可
 import asyncio
 import json
 import os
+import re
 import threading
 
 from django.db import transaction
@@ -24,6 +25,9 @@ from chat.device_crypto import DeviceCrypto, DeviceIdentity
 from chat.models import Pairing
 from chat.pairing_ws import PairingError, PairingHandshake, PairingRequired, PairingResult
 from containers.models import Instance
+
+# 网关 requestId 合法字符：与 openclaw 上游一致，仅允许 URL-safe base64 / UUID / 横线 / 下划线
+_REQUEST_ID_RE = re.compile(r'^[A-Za-z0-9_.~\-]+$')
 
 
 class PairingService:
@@ -86,11 +90,17 @@ class PairingService:
             raise box['error']
         return box['result']
 
+    @staticmethod
+    def _is_valid_request_id(request_id: str) -> bool:
+        """requestId 必须非空且只含安全字符，避免注入宿主 shell 命令。"""
+        return bool(request_id) and bool(_REQUEST_ID_RE.match(request_id))
+
     def ensure_paired(self, instance: Instance, force_repair: bool = False) -> Pairing:
         """触发/重试配对。paired 返回 Pairing；pending/error 抛对应异常（行已落库）。
 
         force_repair=True 时忽略本地已配对状态，重新握手（用于 deviceToken 被网关撤销/重置后恢复）。
-        并发安全：用 select_for_update() 原子化「读取/创建设备身份」；握手本身不在锁内，避免长事务。
+        并发安全：用 select_for_update() 原子化「读取/创建设备身份」并递增 attempt_version；
+        握手结果仅当 attempt_version 未变时才落库，防止并发/延迟响应覆盖更新状态。
         """
         with transaction.atomic():
             pairing = (
@@ -112,6 +122,8 @@ class PairingService:
 
             identity = self._load_or_create_identity(pairing)
             # 身份必须在本事务内落库：并发请求复用同一 deviceId，避免 approve 命令与真实 key 不一致
+            pairing.attempt_version += 1
+            attempt_version = pairing.attempt_version
             pairing.save()
 
         # 握手在事务外执行：网络超时/异常不应回滚已持久化的身份或 pending/error 状态
@@ -119,20 +131,73 @@ class PairingService:
         try:
             result = self._run_handshake(url, instance.token, identity)
         except PairingRequired as e:
-            pairing.pairing_request_id = e.request_id
-            pairing.status = Pairing.STATUS_PENDING
-            pairing.save()
+            if not self._is_valid_request_id(e.request_id):
+                pairing.status = Pairing.STATUS_ERROR
+                pairing.save()
+                raise PairingError(f'invalid pairing requestId: {e.request_id!r}') from e
+            self._apply_result(
+                pairing,
+                attempt_version=attempt_version,
+                status=Pairing.STATUS_PENDING,
+                pairing_request_id=e.request_id,
+            )
             raise
         except PairingError:
-            pairing.status = Pairing.STATUS_ERROR
-            pairing.save()
+            self._apply_result(
+                pairing,
+                attempt_version=attempt_version,
+                status=Pairing.STATUS_ERROR,
+            )
             raise
 
-        pairing.device_token = result.device_token
-        pairing.scopes_json = json.dumps(result.scopes)
-        pairing.status = Pairing.STATUS_PAIRED
-        pairing.save()
+        self._apply_result(
+            pairing,
+            attempt_version=attempt_version,
+            status=Pairing.STATUS_PAIRED,
+            device_token=result.device_token,
+            scopes_json=json.dumps(result.scopes),
+        )
         return pairing
+
+    def _apply_result(
+        self,
+        pairing: Pairing,
+        *,
+        attempt_version: int,
+        status: str,
+        device_token: str | None = None,
+        scopes_json: str | None = None,
+        pairing_request_id: str | None = None,
+    ) -> None:
+        """条件落库：仅当 DB 行 attempt_version 仍是本尝试时写入，防止并发覆盖。
+
+        使用 F() 表达式在数据库层原子更新，避免读取陈旧对象。
+        """
+        from django.db.models import F
+
+        updates: dict = {'status': status}
+        if device_token is not None:
+            updates['device_token'] = device_token
+        if scopes_json is not None:
+            updates['scopes_json'] = scopes_json
+        if pairing_request_id is not None:
+            updates['pairing_request_id'] = pairing_request_id
+        else:
+            updates['pairing_request_id'] = ''
+
+        updated = (
+            Pairing.objects
+            .filter(pk=pairing.pk, attempt_version=attempt_version)
+            .update(**updates, attempt_version=F('attempt_version') + 1)
+        )
+        if updated == 0:
+            # 本次尝试结果已被更新版本覆盖；不抛出异常，让调用方按当前 DB 状态处理
+            pairing.refresh_from_db()
+        else:
+            # 同步内存对象，便于调用方立即读取
+            for key, value in updates.items():
+                setattr(pairing, key, value)
+            pairing.attempt_version = attempt_version + 1
 
 
 class PairingFleet:

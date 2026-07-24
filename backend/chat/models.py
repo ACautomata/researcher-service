@@ -39,6 +39,7 @@ class Pairing(models.Model):
         max_length=16, choices=STATUS_CHOICES, default=STATUS_UNPAIRED
     )
     updated_at = models.DateTimeField(auto_now=True)
+    attempt_version = models.PositiveIntegerField(default=0)
 
     def scopes_list(self) -> list[str]:
         """协商 scopes（hello-ok.auth.scopes）；空则返回 []。"""

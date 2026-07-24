@@ -51,11 +51,12 @@ class InstanceSerializer(serializers.Serializer):
     pairing = serializers.SerializerMethodField()
 
     def get_pairing(self, obj: dict) -> dict:
-        # orchestrator.list() 返回 dict；dict 自带 pairing 时透传（测试/orchestrator 可预填充）
+        # view 层已批量预取并注入 pairing 快照
         if isinstance(obj, dict):
             pre = obj.get('pairing')
             if pre is not None:
                 return pre
+        # 非批量路径兜底（如测试直接序列化 Instance 对象）
         name = obj.get('name') if isinstance(obj, dict) else obj.name
         pairing = Pairing.objects.filter(instance__name=name).first()
         if pairing is None:

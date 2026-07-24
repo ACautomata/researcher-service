@@ -67,6 +67,7 @@ class PairingView(APIView):
             pairing = PairingFleet.get().ensure_paired(inst, force_repair=True)
         except PairingRequired as e:
             # ensure_paired 已落库 pending 行；直接取（不重复 get_status 副作用）
+            # 但 e.request_id 已被 _is_valid_request_id 校验过，可直接使用
             pairing = Pairing.objects.get(instance=inst)
             data = PairingStatusSerializer(pairing).data
             data['detail'] = (
