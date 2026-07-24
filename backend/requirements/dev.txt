@@ -1,7 +1,5 @@
 -r base.txt
 pytest==9.1.1
 pytest-django==4.12.0
-# channels.testing.WebsocketCommunicator 经 channels.testing.live 间接 import daphne（T02 WS 测试）
-daphne==4.2.1
 # async 测试（T02 Channels JWT middleware 握手）
 pytest-asyncio==1.3.0
