@@ -10,9 +10,12 @@ import {
   removeInstance,
   type InstanceDTO,
 } from '@/api/containers'
+import { getPairing, triggerPair, type PairingDTO } from '@/api/chat'
 import { ApiError } from '@/api/client'
 
 const instances = ref<InstanceDTO[]>([])
+// 配对状态：name → PairingDTO（issue #40；与实例列表同步刷新）
+const pairings = ref<Record<string, PairingDTO>>({})
 const loading = ref(false)
 const errorMsg = ref('')
 
@@ -35,11 +38,46 @@ async function refresh(): Promise<void> {
   errorMsg.value = ''
   try {
     instances.value = await listInstances()
+    await refreshPairings()
   } catch (e) {
     errorMsg.value = (e as Error).message
   } finally {
     loading.value = false
     refreshInFlight = false
+  }
+}
+
+// 逐实例拉配对状态（issue #40）。单个失败不影响其它（配对是辅助信息，不打断列表）。
+async function refreshPairings(): Promise<void> {
+  const entries = await Promise.all(
+    instances.value.map(async (inst) => {
+      try {
+        return [inst.name, await getPairing(inst.name)] as const
+      } catch {
+        return [inst.name, { status: 'error' } as PairingDTO] as const
+      }
+    }),
+  )
+  pairings.value = Object.fromEntries(entries)
+}
+
+function pairingStatus(name: string): string {
+  return pairings.value[name]?.status ?? 'unpaired'
+}
+
+async function pair(name: string): Promise<void> {
+  try {
+    const result = await triggerPair(name)
+    pairings.value = { ...pairings.value, [name]: result }
+    if (result.status === 'paired') {
+      ElMessage.success(`容器 ${name} 已配对`)
+    } else if (result.status === 'pending') {
+      // 验收 3：清晰错误 + 重试路径（提示宿主 approve 命令）
+      ElMessage.warning(result.detail ?? `待批准：请在宿主执行 openclaw devices approve 后重试`)
+    }
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 401) return
+    ElMessage.error((e as Error).message)
   }
 }
 
@@ -102,8 +140,8 @@ onBeforeUnmount(() => {
   }
 })
 
-// 暴露删除动作：el-table row slot 在测试 stub 下不便点击，暴露供测试与潜在父组件触发
-defineExpose({ confirmRemove })
+// 暴露删除/配对动作 + 配对状态查询：el-table row slot 在测试 stub 下不便点击，暴露供测试与潜在父组件触发
+defineExpose({ confirmRemove, pair, pairingStatus })
 </script>
 
 <template>
@@ -120,8 +158,21 @@ defineExpose({ confirmRemove })
       <el-table-column prop="health" label="健康" width="100" />
       <el-table-column prop="port" label="端口" width="80" />
       <el-table-column prop="image" label="镜像" />
+      <el-table-column label="配对" width="100">
+        <template #default="{ row }">
+          <span :data-test="`pairing-${row.name}`">{{ pairingStatus(row.name) }}</span>
+        </template>
+      </el-table-column>
       <el-table-column label="操作" width="220">
         <template #default="{ row }">
+          <el-button
+            size="small"
+            :data-test="`pair-${row.name}`"
+            :disabled="pairingStatus(row.name) === 'paired'"
+            @click="pair(row.name)"
+          >
+            配对
+          </el-button>
           <el-button
             type="danger"
             size="small"

@@ -28,4 +28,6 @@ urlpatterns = [
     path('api/schema/swagger/', SpectacularSwaggerView.as_view(), name='swagger'),
     path('api/v1/auth/', include('accounts.urls')),
     path('api/v1/containers/', include('containers.urls')),
+    # chat app 子资源（配对）：/api/v1/containers/<name>/pairing/
+    path('api/v1/', include('chat.urls')),
 ]

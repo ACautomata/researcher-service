@@ -12,6 +12,10 @@ vi.mock('@/api/containers', () => ({
   createInstance: vi.fn(),
   removeInstance: vi.fn(),
 }))
+vi.mock('@/api/chat', () => ({
+  getPairing: vi.fn(),
+  triggerPair: vi.fn(),
+}))
 vi.mock('element-plus', async (importOriginal) => {
   const actual = (await importOriginal()) as Record<string, unknown>
   return {
@@ -23,6 +27,7 @@ vi.mock('element-plus', async (importOriginal) => {
 
 import ContainersView from '@/views/ContainersView.vue'
 import { createInstance, listInstances, removeInstance } from '@/api/containers'
+import { getPairing, triggerPair } from '@/api/chat'
 
 const SAMPLE = {
   name: 'demo',
@@ -65,6 +70,7 @@ describe('ContainersView', () => {
     setActivePinia(createPinia())
     vi.clearAllMocks()
     ;(listInstances as ReturnType<typeof vi.fn>).mockResolvedValue([])
+    ;(getPairing as ReturnType<typeof vi.fn>).mockResolvedValue({ status: 'unpaired' })
   })
 
   afterEach(() => {
@@ -159,5 +165,31 @@ describe('ContainersView', () => {
     // 推进多个轮询周期：因上一次未完成，后续 tick 全被跳过，不再新增调用
     await vi.advanceTimersByTimeAsync(9000)
     expect((listInstances as ReturnType<typeof vi.fn>).mock.calls.length).toBe(1)
+  })
+
+  // ---------------------------- 配对状态（issue #40）----------------------------
+
+  it('loads pairing status for each listed instance', async () => {
+    ;(listInstances as ReturnType<typeof vi.fn>).mockResolvedValue([SAMPLE])
+    ;(getPairing as ReturnType<typeof vi.fn>).mockResolvedValue({ status: 'paired' })
+    const wrapper = mount(ContainersView, { global: { plugins: [createPinia()], stubs } })
+    await flushPromises()
+    expect(getPairing).toHaveBeenCalledWith('demo')
+    expect((wrapper.vm as unknown as { pairingStatus: (n: string) => string }).pairingStatus('demo')).toBe('paired')
+  })
+
+  it('triggerPair calls the api and refreshes pairing status', async () => {
+    ;(listInstances as ReturnType<typeof vi.fn>).mockResolvedValue([SAMPLE])
+    ;(getPairing as ReturnType<typeof vi.fn>).mockResolvedValue({ status: 'unpaired' })
+    ;(triggerPair as ReturnType<typeof vi.fn>).mockResolvedValue({ status: 'pending', pairing_request_id: 'r1' })
+    const wrapper = mount(ContainersView, { global: { plugins: [createPinia()], stubs } })
+    await flushPromises()
+
+    await (wrapper.vm as unknown as { pair: (n: string) => Promise<void> }).pair('demo')
+    await flushPromises()
+    expect(triggerPair).toHaveBeenCalledWith('demo')
+    // pending 态提示宿主 approve（验收 3 重试路径）
+    const { ElMessage } = await import('element-plus')
+    expect(ElMessage.warning).toHaveBeenCalled()
   })
 })
