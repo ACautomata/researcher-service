@@ -32,10 +32,12 @@ def _seed_template(template):
 
 @pytest.fixture
 def config(tmp_path):
+    template_file = tmp_path / 'openclaw.json'
+    template_file.write_text('{}')
     return FleetConfig(
         root=tmp_path / 'fleet',
         template_dir=tmp_path / 'template',
-        template_json='{}',
+        template_json=str(template_file),
         image='img:tag',
         port_start=19000,
         port_end=19999,
@@ -451,10 +453,16 @@ def test_delete_uses_recorded_home_dir_not_current_root(config, health, runtime,
 def test_list_reconciles_creating_row_when_container_running(orch, runtime):
     # codex P2 :226：进程在最终 save 前崩溃（Docker 已起容器）留下 creating 行。
     # list 须对账 runtime：容器实际 running 则就地自愈为 running，不再永久 pending。
-    Instance.objects.create(
+    from datetime import timedelta
+
+    from django.utils import timezone
+
+    inst = Instance.objects.create(
         name='crashed', port=19007, token='t', home_dir='/h',
         status=Instance.STATUS_CREATING, image='img:tag',
     )
+    inst.created_at = timezone.now() - timedelta(seconds=120)
+    inst.save(update_fields=['created_at'])
     # daemon 里容器实际已在跑（上次崩溃前 Docker 已 start）
     runtime.containers['crashed'] = ContainerInfo(
         container_id='realid',
@@ -648,10 +656,16 @@ def test_delete_rejects_while_create_in_flight(orch):
 def test_delete_allows_interrupted_creating_row(orch, runtime, config):
     # codex R6 :304 修正：CREATING 行受 DB 级守卫保护，跨进程安全。须先经 list()
     # 的 _reconcile_creating 收敛（runtime 无容器 → error），再 delete 清理名字/端口占用。
-    Instance.objects.create(
+    from datetime import timedelta
+
+    from django.utils import timezone
+
+    inst = Instance.objects.create(
         name='stuck', port=19011, token='t', home_dir='/h',
         status=Instance.STATUS_CREATING, image='img:tag',
     )
+    inst.created_at = timezone.now() - timedelta(seconds=120)
+    inst.save(update_fields=['created_at'])
     # CREATING 行直接 delete → 拒删
     with pytest.raises(InstanceBusy):
         orch.delete('stuck')
@@ -670,10 +684,16 @@ def test_delete_allows_interrupted_creating_row(orch, runtime, config):
 @pytest.mark.django_db
 def test_reconcile_creating_to_stopped_when_container_exited(orch, runtime):
     # codex P2 :319：中断行容器存在但未 running（created/exited）→ 收敛 stopped（非永久 pending）。
-    Instance.objects.create(
+    from datetime import timedelta
+
+    from django.utils import timezone
+
+    inst = Instance.objects.create(
         name='half', port=19012, token='t', home_dir='/h',
         status=Instance.STATUS_CREATING, image='img:tag',
     )
+    inst.created_at = timezone.now() - timedelta(seconds=120)
+    inst.save(update_fields=['created_at'])
     runtime.containers['half'] = ContainerInfo(
         container_id='halfid', name=container_name('half'),
         running=False, status='exited', image='img:tag',
@@ -686,10 +706,16 @@ def test_reconcile_creating_to_stopped_when_container_exited(orch, runtime):
 @pytest.mark.django_db
 def test_reconcile_creating_to_error_when_no_container(orch):
     # codex P2 :319：中断行无容器（崩溃在 run 之前）→ 收敛 error（provisioning 未完成）。
-    Instance.objects.create(
+    from datetime import timedelta
+
+    from django.utils import timezone
+
+    inst = Instance.objects.create(
         name='ghost', port=19013, token='t', home_dir='/h',
         status=Instance.STATUS_CREATING, image='img:tag',
     )
+    inst.created_at = timezone.now() - timedelta(seconds=120)
+    inst.save(update_fields=['created_at'])
     item = orch.list()[0]
     assert item['status'] == 'error'
     assert Instance.objects.get(name='ghost').status == Instance.STATUS_ERROR
@@ -804,28 +830,32 @@ def test_delete_preserves_unowned_container_when_container_id_mismatch(orch, run
 
 @pytest.mark.django_db
 def test_list_and_delete_work_when_template_json_is_invalid(config, health, runtime, tmp_path):
-    """codex P2 :475：模板 JSON 不存在/格式错误时 Fleet.get() 崩溃 → list/delete 500。
+    """codex R6 :475 / R7 :509：模板 JSON 不存在/格式错误时 list/delete 仍正常。
 
-    模板仅供 create() 使用；list/delete 应在渲染器尚未构造时仍正常工作。
+    模板文件仅供 create() 使用；Fleet._build_default 不再急切 IO，ConfigRenderer 惰性构造。
     """
+    _seed_template(tmp_path / 'template')
     config = FleetConfig(
         root=tmp_path / 'fleet',
         template_dir=tmp_path / 'template',
-        template_json='not valid json',  # 格式错误，但 list/delete 不应关心
+        template_json=str(tmp_path / 'no-such-template.json'),  # 文件缺失，但 list/delete 不应关心
         image='img:tag',
         port_start=19000,
         port_end=19999,
         llm_api_key='sk-fallback',
     )
-    _seed_template(tmp_path / 'template')
     orch = InstanceOrchestrator(runtime=runtime, config=config, health_probe=health)
 
-    # list 不应因模板损坏而失败
+    # list 不应因模板文件缺失而失败
     items = orch.list()
     assert items == []
 
     # delete 亦然（实例不存在 → False）
     assert orch.delete('nobody') is False
+
+    # create 在文件缺失时失败（惰性构造触发 IO）
+    with pytest.raises(FileNotFoundError):
+        orch.create('demo')
 
 
 # ◀ B (3644348313) P2 :484 —— create 应拒绝空 LLM_API_KEY ◀
@@ -837,10 +867,12 @@ def test_create_rejects_empty_llm_api_key(config, health, runtime, tmp_path):
     应在 _reserve_row() 之前抛出，避免 DB 行/端口/目录残留。
     """
     _seed_template(tmp_path / 'template')
+    tpl_file = tmp_path / 'tpl.json'
+    tpl_file.write_text('{}')
     config = FleetConfig(
         root=tmp_path / 'fleet',
         template_dir=tmp_path / 'template',
-        template_json='{}',
+        template_json=str(tpl_file),
         image='img:tag',
         port_start=19000,
         port_end=19999,
@@ -868,3 +900,121 @@ def test_delete_rejects_creating_based_on_db_status(orch):
     with pytest.raises(InstanceBusy):
         orch.delete('booting')
     assert Instance.objects.filter(name='booting').exists()
+
+
+# ───────────────────────────── codex R7 review 反证 + TDD ─────────────────────────────
+
+
+# ◀ 1 (3644601349) P1 :430 —— _reconcile_creating 靠进程内 _inflight_creates 区分活动/中断 ◀
+
+@pytest.mark.django_db
+def test_reconcile_does_not_convert_fresh_creating_to_error(orch, runtime):
+    """codex R7 P1 :430：_inflight_creates 仅本进程可见；多 worker 下另一 worker 刚创建的
+    CREATING 行（容器未起）被本进程的 _reconcile_creating 误判为中断 → 收敛 error →
+    后续 delete 的 CREATING 守卫失效。
+
+    created_at 在 _inflight_creates 不可靠时提供跨进程时间窗口保护——
+    足够新的 CREATING 行不应被收敛（允许足够时间 provisioning）。
+    """
+    from datetime import timedelta
+    from django.utils import timezone
+
+    # 刚创建的 CREATING 行（模拟另一 worker 刚刚 INSERT，_inflight_creates 不可见）
+    inst = Instance.objects.create(
+        name='fresh', port=19016, token='t', home_dir='/h',
+        status=Instance.STATUS_CREATING, image='img:tag',
+    )
+    # 强制 created_at 为「现在」（DB auto_now_add 可能略有延迟）
+    inst.created_at = timezone.now()
+    inst.save(update_fields=['created_at'])
+    # runtime 无容器（container 尚未启动）
+    # _inflight_creates 不含 'fresh'（模拟跨 worker）
+
+    orch.list()
+
+    inst.refresh_from_db()
+    # 刚创建的 CREATING 行应保持 CREATING，不被收敛为 error
+    assert inst.status == Instance.STATUS_CREATING
+
+
+@pytest.mark.django_db
+def test_reconcile_still_converts_stale_creating_to_error(orch):
+    """codex R7 P1 对照：足够旧的 CREATING 行（远超 provisioning 时间窗口）仍被收敛。
+
+    确保时间窗口保护不阻碍真正的崩溃中断行被收敛。
+    """
+    from datetime import timedelta
+    from django.utils import timezone
+
+    inst = Instance.objects.create(
+        name='stale', port=19017, token='t', home_dir='/h',
+        status=Instance.STATUS_CREATING, image='img:tag',
+    )
+    # 设为 5 分钟前——远超合理 provisioning 时间
+    inst.created_at = timezone.now() - timedelta(seconds=300)
+    inst.save(update_fields=['created_at'])
+
+    orch.list()
+
+    inst.refresh_from_db()
+    assert inst.status == Instance.STATUS_ERROR
+
+
+# ◀ 2 (3644601354) P2 :509 —— _build_default 仍急切 read_text() 模板文件 ◀
+
+@pytest.mark.django_db
+def test_fleet_get_survives_missing_template_file(tmp_path, settings):
+    """codex R7 P2 :509：Fleet._build_default() 仍急切 Path.read_text() 模板 JSON。
+    模板文件缺失时 Fleet.get() 崩溃 → list/delete 全部 500，运维无法恢复。
+    """
+    from containers.orchestrator import Fleet, InstanceOrchestrator
+
+    # 用正确的模板文件路径，但模板 JSON 本身是无效内容——模拟文件存在但格式错误
+    bad_template = tmp_path / 'broken.json'
+    bad_template.write_text('not valid json {{{')
+
+    settings.OPENCLAW_FLEET = {
+        'ROOT': str(tmp_path / 'fleet'),
+        'TEMPLATE': str(tmp_path / 'template'),
+        'TEMPLATE_JSON': str(bad_template),
+        'IMAGE': 'img:tag',
+        'PORT_POOL_START': 19000,
+        'PORT_POOL_END': 19999,
+    }
+    Fleet.reset()
+    try:
+        orch = Fleet.get()
+        # 即使模板文件缺失，Fleet 也应能构造 orchestractor
+        # 只有 create() 展开模板时才会失败
+        items = orch.list()
+        assert items == []
+    finally:
+        Fleet.reset()
+
+
+# ◀ 3 (3644601364) P2 :400 —— runtime lookup 异常传播终止整个 list 响应 ◀
+
+@pytest.mark.django_db
+def test_list_survives_runtime_lookup_failure_for_one_instance(orch, runtime):
+    """codex R7 P2 :400：_build_item 的 runtime.get() 抛非 NotFound 异常时
+    ThreadPoolExecutor.map 终止整个 list。单个容器 daemon 抖动不应让其他容器不可见。
+    """
+    # 创建两个实例：一个正常，一个模拟 runtime 异常
+    orch.create('good')
+    orch.create('bad')
+
+    class _FlakyGet:
+        def __init__(self, real_get):
+            self._real = real_get
+
+        def __call__(self, name):
+            if name == 'bad':
+                raise RuntimeError('daemon unavailable')
+            return self._real(name)
+
+    runtime.get = _FlakyGet(runtime.get)
+
+    items = orch.list()
+    names = {it['name'] for it in items}
+    assert 'good' in names, '正常实例不应被异常实例的 runtime 错误隐藏'
+    assert 'bad' in names, '异常实例应降级展示，非整个 list 500'

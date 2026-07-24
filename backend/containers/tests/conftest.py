@@ -18,12 +18,14 @@ def _seed_template(template_dir):
 def fleet(tmp_path):
     template = tmp_path / 'template'
     _seed_template(template)
+    tpl_file = tmp_path / 'openclaw.json'
+    tpl_file.write_text('{}')
     runtime = FakeRuntime()
     health = FakeHealthProbe()
     config = FleetConfig(
         root=tmp_path / 'fleet',
         template_dir=template,
-        template_json='{}',
+        template_json=str(tpl_file),
         image='img:tag',
         port_start=19000,
         port_end=19999,

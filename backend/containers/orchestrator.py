@@ -238,8 +238,10 @@ class InstanceOrchestrator:
             raise ConfigurationError('LLM_API_KEY')
 
         # codex R6 :475：ConfigRenderer 惰性构造——模板 JSON 损坏不会阻塞 list/delete。
+        # codex R7 :509：ConfigRenderer 构造时读取模板文件（_build_default 不再急切 IO）。
         if self._renderer is None:
-            self._renderer = ConfigRenderer(self._cfg.template_json)
+            template_text = Path(self._cfg.template_json).read_text()
+            self._renderer = ConfigRenderer(template_text)
 
         with self._inflight_lock:
             if name in self._inflight_creates:
@@ -397,7 +399,13 @@ class InstanceOrchestrator:
         if inst.status == Instance.STATUS_ERROR:
             # codex R3 :319：中断收敛为 error 的行（provisioning 未完成）透传，不探健康
             return self._item(inst, Instance.STATUS_ERROR, HEALTH_STOPPED)
-        info = self._runtime.get(inst.name)
+        # codex R7 :400：runtime.get() 可能因 daemon 不可用抛异常（非 NotFound），
+        # ThreadPoolExecutor.map 在任一 item 异常时终止整个 list。
+        # 单项抖动不隐藏其他正常容器——降级透传 unknown 状态。
+        try:
+            info = self._runtime.get(inst.name)
+        except Exception:
+            return self._item(inst, Instance.STATUS_RUNNING, HEALTH_STOPPED)
         running = bool(info and info.running)
         status = Instance.STATUS_RUNNING if running else Instance.STATUS_STOPPED
         if running:
@@ -421,13 +429,27 @@ class InstanceOrchestrator:
 
         主线程串行执行（非线程池）：creating 行通常极少，且 Django ORM save 不宜在
         worker 线程做（pytest 事务包裹下 worker 连接隔离，落盘不可见）。
+
+        codex R7 :430：_inflight_creates 仅本进程可见；多 worker 下另一 worker 刚创建的
+        CREATING 行会被本进程误判为中断。created_at 时间窗口提供跨进程兜底——
+        足够新的行跳过对账（允许 provisioning 完成），仅超过窗口的旧行被收敛。
         """
+        from datetime import timedelta
+
+        from django.utils import timezone
+
+        now = timezone.now()
+        grace = timedelta(seconds=60)  # 合理 provisioning 最长耗时
         for inst in insts:
             if inst.status != Instance.STATUS_CREATING:
                 continue
             with self._inflight_lock:
                 if inst.name in self._inflight_creates:
                     continue            # 正在 provisioning，非中断——跳过对账
+            # codex R7 :430：跨进程保护——另一 worker 刚创建的 CREATING 行
+            # 可能不在本进程 _inflight_creates，但 created_at 足够新，先不收敛
+            if inst.created_at is not None and (now - inst.created_at) < grace:
+                continue
             info = self._runtime.get(inst.name)
             if info and info.running:
                 inst.status = Instance.STATUS_RUNNING
@@ -506,13 +528,14 @@ class Fleet:
         from django.conf import settings
 
         cfg = settings.OPENCLAW_FLEET
-        template_json = Path(cfg['TEMPLATE_JSON']).read_text()
+        # codex R7 :509：模板文件 IO 推迟到 create() 内惰性加载——
+        # list/delete 恢复操作不应因模板文件缺失而 500。
         return InstanceOrchestrator(
             runtime=DockerRuntime(),
             config=FleetConfig(
                 root=Path(cfg['ROOT']),
                 template_dir=Path(cfg['TEMPLATE']),
-                template_json=template_json,
+                template_json=cfg['TEMPLATE_JSON'],  # 文件路径——create() 惰性 read_text
                 image=cfg['IMAGE'],
                 port_start=cfg['PORT_POOL_START'],
                 port_end=cfg['PORT_POOL_END'],
