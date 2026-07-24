@@ -11,6 +11,7 @@ from django.db import IntegrityError
 
 from containers.models import Instance
 from containers.orchestrator import (
+    Fleet,
     FleetConfig,
     InstanceBusy,
     InstanceCleanupError,
@@ -644,12 +645,20 @@ def test_delete_rejects_while_create_in_flight(orch):
 
 @pytest.mark.django_db
 def test_delete_allows_interrupted_creating_row(orch, runtime, config):
-    # codex P1 :257 对照：崩溃中断的 creating 行（非在飞）可被删除——清理名字/端口占用。
+    # codex R6 :304 修正：CREATING 行受 DB 级守卫保护，跨进程安全。须先经 list()
+    # 的 _reconcile_creating 收敛（runtime 无容器 → error），再 delete 清理名字/端口占用。
     Instance.objects.create(
         name='stuck', port=19011, token='t', home_dir='/h',
         status=Instance.STATUS_CREATING, image='img:tag',
     )
-    ok = orch.delete('stuck')                      # 不在 _inflight_creates → 可删
+    # CREATING 行直接 delete → 拒删
+    with pytest.raises(InstanceBusy):
+        orch.delete('stuck')
+    # list() 经 _reconcile_creating 收敛（无 runtime 容器 → error）
+    orch.list()
+    assert Instance.objects.get(name='stuck').status == Instance.STATUS_ERROR
+    # 收敛后 delete 可清理
+    ok = orch.delete('stuck')
     assert ok is True
     assert not Instance.objects.filter(name='stuck').exists()
 
@@ -752,3 +761,109 @@ def test_delete_cleanup_only_error_row_preserves_unowned_container(orch, runtime
     assert 'demo' in runtime.containers
     assert runtime.stopped == []
     assert runtime.removed == []
+
+
+# ───────────────────────────── codex R6 review 反证 + TDD ─────────────────────────────
+
+
+# ◀ C (3644348308) P1 :311 —— 删除前验证存活容器 ID 是否匹配 ◀
+
+@pytest.mark.django_db
+def test_delete_preserves_unowned_container_when_container_id_mismatch(orch, runtime, config):
+    """codex P1 :311：DB 行有非空 container_id 但存活容器 ID 不同 → 不得 stop/remove。
+
+    精确失败场景：
+    1. create('demo') → DB: container_id='abc123', Docker: openclaw-gw-demo id=abc123
+    2. 外部 docker rm -f openclaw-gw-demo
+    3. 外部 docker run --name openclaw-gw-demo ... → 新 ID='def456'
+    4. orch.delete('demo') → inst.container_id='abc123' 非空 → 守卫通过 → stop/remove 按名删除新容器
+    """
+    instance_dir = config.root / 'instances' / 'demo'
+    instance_dir.mkdir(parents=True)
+    Instance.objects.create(
+        name='demo', port=19020, token='t', home_dir=str(instance_dir / 'home'),
+        container_id='stale-id', status=Instance.STATUS_ERROR, image='img:tag',
+    )
+    # 存活容器 ID 与 DB 记录不同（外部重建）
+    runtime.containers['demo'] = ContainerInfo(
+        container_id='live-id-different',
+        name=container_name('demo'),
+        running=True, status='running', image='img:tag',
+    )
+
+    assert orch.delete('demo') is True
+
+    # 存活容器（非本 orch 拥有）不被删除
+    assert 'demo' in runtime.containers
+    assert runtime.stopped == []
+    assert runtime.removed == []
+
+
+# ◀ A (3644348317) P2 :475 —— list/delete 不应因模板 JSON 损坏而不可用 ◀
+
+@pytest.mark.django_db
+def test_list_and_delete_work_when_template_json_is_invalid(config, health, runtime, tmp_path):
+    """codex P2 :475：模板 JSON 不存在/格式错误时 Fleet.get() 崩溃 → list/delete 500。
+
+    模板仅供 create() 使用；list/delete 应在渲染器尚未构造时仍正常工作。
+    """
+    config = FleetConfig(
+        root=tmp_path / 'fleet',
+        template_dir=tmp_path / 'template',
+        template_json='not valid json',  # 格式错误，但 list/delete 不应关心
+        image='img:tag',
+        port_start=19000,
+        port_end=19999,
+        llm_api_key='sk-fallback',
+    )
+    _seed_template(tmp_path / 'template')
+    orch = InstanceOrchestrator(runtime=runtime, config=config, health_probe=health)
+
+    # list 不应因模板损坏而失败
+    items = orch.list()
+    assert items == []
+
+    # delete 亦然（实例不存在 → False）
+    assert orch.delete('nobody') is False
+
+
+# ◀ B (3644348313) P2 :484 —— create 应拒绝空 LLM_API_KEY ◀
+
+@pytest.mark.django_db
+def test_create_rejects_empty_llm_api_key(config, health, runtime, tmp_path):
+    """codex P2 :484：空 LLM_API_KEY 静默通过 → 外表 healthy 但永远无法调 LLM 的容器。
+
+    应在 _reserve_row() 之前抛出，避免 DB 行/端口/目录残留。
+    """
+    _seed_template(tmp_path / 'template')
+    config = FleetConfig(
+        root=tmp_path / 'fleet',
+        template_dir=tmp_path / 'template',
+        template_json='{}',
+        image='img:tag',
+        port_start=19000,
+        port_end=19999,
+        llm_api_key='',   # 未配置
+    )
+    orch = InstanceOrchestrator(runtime=runtime, config=config, health_probe=health)
+    with pytest.raises(ValueError, match='LLM_API_KEY'):
+        orch.create('demo')
+    assert not Instance.objects.filter(name='demo').exists()
+
+
+# ◀ D (3644348301) P2 :304 —— delete 应基于 DB status 而非仅进程内 set 拒绝在飞 create ◀
+
+@pytest.mark.django_db
+def test_delete_rejects_creating_based_on_db_status(orch):
+    """codex P1 :304：_inflight_creates 仅本进程可见；多 worker 下另一 worker 的 create 不可见。
+
+    delete 须基于 DB CREATING 状态拒删——跨进程安全。不依赖本进程 _inflight_creates。
+    """
+    Instance.objects.create(
+        name='booting', port=19015, token='t', home_dir='/h',
+        status=Instance.STATUS_CREATING, image='img:tag',
+    )
+    # 不加入 _inflight_creates（模拟另一 worker 的 create）
+    with pytest.raises(InstanceBusy):
+        orch.delete('booting')
+    assert Instance.objects.filter(name='booting').exists()

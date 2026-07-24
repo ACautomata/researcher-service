@@ -47,6 +47,11 @@ class InstanceListCreateView(APIView):
         name = ser.validated_data['name']
         try:
             inst = Fleet.get().create(name)
+        except ValueError as e:
+            # codex R6 :484：LLM_API_KEY 未配置 → 503，非裸 500
+            return Response(
+                {'detail': str(e)}, status=status.HTTP_503_SERVICE_UNAVAILABLE
+            )
         except InstanceExists:
             # codex R1 :84：并发绕 UniqueValidator → DB 唯一约束 → 409（非裸 IntegrityError→500）
             return Response({'detail': '实例名已存在'}, status=status.HTTP_409_CONFLICT)

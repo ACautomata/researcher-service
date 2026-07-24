@@ -155,7 +155,9 @@ class InstanceOrchestrator:
         self._dir_remover = dir_remover or shutil.rmtree
         # codex R2 :161：注入宿主端口占用探测（默认 socket bind 实测），可测确定性冲突
         self._port_in_use = port_in_use or _host_port_in_use
-        self._renderer = ConfigRenderer(config.template_json)
+        # codex R6 :475：ConfigRenderer 推迟到 create() 内惰性构造——
+        # 模板 JSON 仅供 create() 使用，list/delete 不应因其损坏而 500。
+        self._renderer = None
         self._provisioner = HomeProvisioner(config.template_dir)
         self._allocator = PortAllocator(
             config.port_start, config.port_end, config.reserved_ports
@@ -222,6 +224,15 @@ class InstanceOrchestrator:
         先以进程内 guard 覆盖完整 create，再事务占位（挡重名/仲裁 port），
         然后 mkdir + cp -a + 渲染 + run；失败时只回滚本次实际创建的资源。
         """
+        # codex R6 :484：空 LLM_API_KEY 会在 _reserve_row 前拒绝——否则后续创建外表 healthy
+        # 但永远无法调 LLM 的容器，且 LLM_API_KEY 是面板级共享的不能通过 delete 修复。
+        if not self._cfg.llm_api_key:
+            raise ValueError('LLM_API_KEY is required but not configured')
+
+        # codex R6 :475：ConfigRenderer 惰性构造——模板 JSON 损坏不会阻塞 list/delete。
+        if self._renderer is None:
+            self._renderer = ConfigRenderer(self._cfg.template_json)
+
         with self._inflight_lock:
             if name in self._inflight_creates:
                 raise InstanceExists(name)
@@ -302,17 +313,33 @@ class InstanceOrchestrator:
         inst = Instance.objects.filter(name=name).first()
         if inst is None:
             return False
-        # codex R3 :257：仅当 create 仍在飞（本进程）才拒删——防与在飞 create 竞态
-        # （create 收尾 save(running) 会 resurrect 已删行）。崩溃中断的 creating 行
-        # （非在飞）不在此列：它可被删除（也可经 _reconcile_creating 收敛，见 :319）。
+        # codex R6 :304：基于 DB status 判断 provisioning——跨进程安全。
+        # CREATEING 行（无论本进程在飞与否）表明有 create 正在或曾经 provisioning；
+        # delete 须拒删 CREATING 行以保护仍在飞的 create，崩溃中断的 CREATING 行
+        # 经 _reconcile_creating 收敛后再删。仅进程内 _inflight_creates 在多 worker
+        # 下不可见。
+        if inst.status == Instance.STATUS_CREATING:
+            raise InstanceBusy(name)
+        # codex R3 :257：本进程在飞 create 的额外保险——status 尚未落盘 CREATING
+        # 的极窄窗口（_reserve_row 前）仍由进程内标记挡。
         with self._inflight_lock:
             if name in self._inflight_creates:
                 raise InstanceBusy(name)
         # container_id 是本行拥有 runtime 容器的正向证据。ERROR + 空 id 可能只是目录清理行，
         # 同名容器可能早于本次 create，不能无条件 stop/remove。
+        # codex R6 :311：DB 记录的 container_id 可能与存活容器 ID 不匹配（外部删除后重建同名容器），
+        # 先验证再 stop/remove，否则会误删非本 orch 拥有的健康容器。
         if inst.container_id:
-            self._runtime.stop(name)
-            self._runtime.remove(name)
+            live = self._runtime.get(name)
+            if live is None or live.container_id != inst.container_id:
+                inst.container_id = ''
+                try:
+                    inst.save(update_fields=['container_id'])
+                except Exception:
+                    pass
+            else:
+                self._runtime.stop(name)
+                self._runtime.remove(name)
         # codex R4 :296：删除路径优先由 DB 记录的 home_dir 派生（创建时固化的绝对路径，
         # home_dir=<instance_dir>/home，取 parent 即 instance_dir）——OPENCLAW_FLEET_ROOT 变更后
         # 仍能删到旧 root 下的真实数据，而非用当前 cfg.root 重构（新 root 无该目录会被
