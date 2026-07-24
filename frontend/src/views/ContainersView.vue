@@ -10,9 +10,12 @@ import {
   removeInstance,
   type InstanceDTO,
 } from '@/api/containers'
+import { triggerPair, type PairingDTO } from '@/api/chat'
 import { ApiError } from '@/api/client'
 
 const instances = ref<InstanceDTO[]>([])
+// 配对状态由 listInstances 的 pairing 字段批量携带，不再单独轮询
+const pairings = ref<Record<string, PairingDTO>>({})
 const loading = ref(false)
 const errorMsg = ref('')
 
@@ -35,11 +38,35 @@ async function refresh(): Promise<void> {
   errorMsg.value = ''
   try {
     instances.value = await listInstances()
+    // 批量同步：后端 list 已携带 pairing 快照，避免 N+1 请求
+    pairings.value = Object.fromEntries(
+      instances.value.map((inst) => [inst.name, inst.pairing]),
+    )
   } catch (e) {
     errorMsg.value = (e as Error).message
   } finally {
     loading.value = false
     refreshInFlight = false
+  }
+}
+
+function pairingStatus(name: string): string {
+  return pairings.value[name]?.status ?? 'unpaired'
+}
+
+async function pair(name: string): Promise<void> {
+  try {
+    const result = await triggerPair(name)
+    pairings.value = { ...pairings.value, [name]: result }
+    if (result.status === 'paired') {
+      ElMessage.success(`容器 ${name} 已配对`)
+    } else if (result.status === 'pending') {
+      // 验收 3：清晰错误 + 重试路径（提示宿主 approve 命令）
+      ElMessage.warning(result.detail ?? `待批准：请在宿主执行 openclaw devices approve 后重试`)
+    }
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 401) return
+    ElMessage.error((e as Error).message)
   }
 }
 
@@ -102,8 +129,8 @@ onBeforeUnmount(() => {
   }
 })
 
-// 暴露删除动作：el-table row slot 在测试 stub 下不便点击，暴露供测试与潜在父组件触发
-defineExpose({ confirmRemove })
+// 暴露删除/配对动作 + 配对状态查询：el-table row slot 在测试 stub 下不便点击，暴露供测试与潜在父组件触发
+defineExpose({ confirmRemove, pair, pairingStatus })
 </script>
 
 <template>
@@ -120,8 +147,21 @@ defineExpose({ confirmRemove })
       <el-table-column prop="health" label="健康" width="100" />
       <el-table-column prop="port" label="端口" width="80" />
       <el-table-column prop="image" label="镜像" />
+      <el-table-column label="配对" width="100">
+        <template #default="{ row }">
+          <span :data-test="`pairing-${row.name}`">{{ pairingStatus(row.name) }}</span>
+        </template>
+      </el-table-column>
       <el-table-column label="操作" width="220">
         <template #default="{ row }">
+          <el-button
+            size="small"
+            :data-test="`pair-${row.name}`"
+            :disabled="pairingStatus(row.name) === 'paired'"
+            @click="pair(row.name)"
+          >
+            配对
+          </el-button>
           <el-button
             type="danger"
             size="small"

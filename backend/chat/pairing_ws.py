@@ -1,0 +1,168 @@
+"""chat.pairing_ws —— 配对握手 WS 客户端（issue #40 / spec §8.1）。
+
+一次性握手（docs/research/r40-device-pairing-protocol.md §4）：
+1. 连 ws://<host>:<port>/，等 connect.challenge（event，payload.nonce）。
+2. connect（req）：device 签名块 + auth.token(bootstrap GATEWAY_TOKEN) + role:operator +
+   scopes[operator.*] + caps[tool-events]。
+3. hello-ok = connect 的 res（ok，payload.auth.deviceToken+scopes）→ PairingResult；
+   PAIRING_REQUIRED（res not ok，error.code）→ PairingRequired(requestId)；
+   其它错误 → PairingError。
+
+transport 注入（默认 websockets.connect）以便 fake 测试，无需真网关。
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+import time
+import uuid
+from dataclasses import dataclass, field
+
+import websockets
+
+from chat.device_crypto import DeviceCrypto, DeviceIdentity
+
+# connect 帧固定常量（r13 §5.4 / r40 §3）：client/mode 用网关后端语义。
+_CLIENT_ID = 'gateway-client'
+_CLIENT_MODE = 'backend'
+_ROLE = 'operator'
+# spec §8.1：operator.read/write/admin/approvals 四 scope + tool-events cap。
+_SCOPES = ['operator.read', 'operator.write', 'operator.admin', 'operator.approvals']
+_CAPS = ['tool-events']
+# 验收要求：协商 scopes 必须至少包含以下三者，否则聊天/审批调用会缺权失败。
+_REQUIRED_SCOPES = {'operator.read', 'operator.write', 'operator.approvals'}
+
+
+@dataclass(frozen=True)
+class PairingResult:
+    """hello-ok 成功：持久化 deviceToken + 协商 scopes。"""
+
+    device_token: str
+    scopes: list[str] = field(default_factory=list)
+
+
+class PairingRequired(Exception):
+    """网关返回 PAIRING_REQUIRED：需宿主 openclaw devices approve <requestId>。"""
+
+    def __init__(self, request_id: str) -> None:
+        super().__init__(f'pairing required, approve request {request_id!r} on host')
+        self.request_id = request_id
+
+
+class PairingError(Exception):
+    """配对握手其它失败（网络/协议/认证错误）。"""
+
+
+class PairingHandshake:
+    """对单个容器网关执行一次配对握手。"""
+
+    def __init__(self, transport=None, timeout: float = 10.0) -> None:
+        # transport: connect(url) → async CM 产出 ws（send/recv/close）。默认 websockets。
+        self._connect = transport or websockets.connect
+        self._timeout = timeout
+
+    def _build_connect_frame(self, identity: DeviceIdentity, token: str, nonce: str) -> dict:
+        signed_at_ms = int(time.time() * 1000)
+        payload = DeviceCrypto.build_auth_payload_v3(
+            device_id=identity.device_id,
+            client_id=_CLIENT_ID,
+            client_mode=_CLIENT_MODE,
+            role=_ROLE,
+            scopes=_SCOPES,
+            signed_at_ms=signed_at_ms,
+            token=token,
+            nonce=nonce,
+            platform='linux',  # 面板后端语义平台（归一化后参与签名）
+            device_family='',
+        )
+        return {
+            'type': 'req',
+            'id': uuid.uuid4().hex,
+            'method': 'connect',
+            'params': {
+                'minProtocol': 4,
+                'maxProtocol': 4,
+                'client': {'id': _CLIENT_ID, 'version': '1.0',
+                           'platform': 'linux', 'mode': _CLIENT_MODE},
+                'role': _ROLE,
+                'scopes': _SCOPES,
+                'caps': _CAPS,
+                'commands': [],
+                'permissions': {},
+                'auth': {'token': token or ''},  # 与签名串 token or '' 归一化一致（codex R protocol）
+                'locale': 'zh-CN',
+                'userAgent': 'openclaw-fleet-panel/1.0',
+                'device': {
+                    'id': identity.device_id,
+                    'publicKey': identity.public_key_raw_base64url(),
+                    'signature': identity.sign(payload),
+                    'signedAt': signed_at_ms,
+                    'nonce': nonce,
+                },
+            },
+        }
+
+    async def pair(
+        self, *, url: str, token: str, identity: DeviceIdentity
+    ) -> PairingResult:
+        """执行一次配对握手。三分支：PairingResult / PairingRequired / PairingError。"""
+        try:
+            async with self._connect(url) as ws:
+                deadline = asyncio.get_event_loop().time() + self._timeout
+                # 1. 等 connect.challenge（event）取 nonce（忽略其间无关帧）
+                nonce = await self._await_nonce(ws, deadline)
+                # 2. 发 connect（device 签名 + bootstrap token），等其 res（按 id 匹配）
+                frame = self._build_connect_frame(identity, token, nonce)
+                await ws.send(json.dumps(frame))
+                return await self._await_connect_res(ws, frame['id'], deadline)
+        except (PairingRequired, PairingError):
+            raise
+        except Exception as e:  # 网络/协议/超时等一切意外 → PairingError
+            raise PairingError(str(e)) from e
+
+    async def _recv_until(self, ws, deadline: float, predicate, describe: str) -> dict:
+        """循环读帧直到 predicate 命中或超时；忽略无关帧（乱序 event/stray res 容错）。"""
+        while True:
+            remaining = deadline - asyncio.get_event_loop().time()
+            if remaining <= 0:
+                raise PairingError(f'timeout waiting for {describe}')
+            raw = await asyncio.wait_for(ws.recv(), timeout=remaining)
+            msg = json.loads(raw)
+            if predicate(msg):
+                return msg
+
+    async def _await_nonce(self, ws, deadline: float) -> str:
+        msg = await self._recv_until(
+            ws, deadline,
+            lambda m: m.get('type') == 'event' and m.get('event') == 'connect.challenge',
+            'connect.challenge',
+        )
+        nonce = (msg.get('payload') or {}).get('nonce')
+        if not nonce:
+            raise PairingError('connect.challenge missing nonce')
+        return nonce
+
+    async def _await_connect_res(self, ws, req_id: str, deadline: float) -> PairingResult:
+        # 只接受 id 匹配的 connect res；忽略 stray res / 乱序 event
+        msg = await self._recv_until(
+            ws, deadline,
+            lambda m: m.get('type') == 'res' and m.get('id') == req_id,
+            f'connect res (id={req_id})',
+        )
+        if msg.get('ok'):
+            auth = (msg.get('payload') or {}).get('auth') or {}
+            device_token = auth.get('deviceToken')
+            if not device_token:
+                raise PairingError('hello-ok missing auth.deviceToken')
+            scopes = auth.get('scopes') or []
+            missing = _REQUIRED_SCOPES - set(scopes)
+            if missing:
+                raise PairingError(f'hello-ok missing required scopes: {sorted(missing)}')
+            return PairingResult(device_token=device_token, scopes=list(scopes))
+        error = msg.get('error') or {}
+        if error.get('code') == 'PAIRING_REQUIRED':
+            request_id = (error.get('details') or {}).get('requestId', '')
+            if not isinstance(request_id, str) or not request_id:
+                raise PairingError('PAIRING_REQUIRED response missing requestId')
+            raise PairingRequired(request_id)
+        raise PairingError(error.get('message') or error.get('code') or 'connect failed')

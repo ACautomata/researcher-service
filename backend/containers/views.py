@@ -17,6 +17,8 @@ from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from chat.models import Pairing
+from chat.serializers import PairingStatusSerializer
 from .models import NAME_VALIDATOR
 from .orchestrator import (
     ConfigurationError,
@@ -36,6 +38,21 @@ class InstanceListCreateView(APIView):
     @extend_schema(responses=InstanceSerializer(many=True))
     def get(self, request):
         items = Fleet.get().list()
+        # Codex P2：批量预取配对快照，避免 serializer 方法里 N+1 查询
+        pairings = {
+            p.instance.name: p
+            for p in Pairing.objects
+            .filter(instance__name__in=[i['name'] for i in items])
+            .select_related('instance')
+        }
+        for item in items:
+            pairing = pairings.get(item.get('name'))
+            item['pairing'] = PairingStatusSerializer(pairing).data if pairing else {
+                'status': Pairing.STATUS_UNPAIRED,
+                'device_id': '',
+                'scopes': [],
+                'pairing_request_id': '',
+            }
         return Response(InstanceSerializer(items, many=True).data)
 
     @extend_schema(

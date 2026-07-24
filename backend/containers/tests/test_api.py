@@ -104,6 +104,9 @@ def test_list_shows_created_instance(authed, fleet):
     items = authed.get('/api/v1/containers/').json()
     assert len(items) == 1
     assert items[0]['name'] == 'demo'
+    # Codex P2：列表应批量携带配对状态，前端不再 per-row 轮询
+    assert 'pairing' in items[0]
+    assert items[0]['pairing']['status'] == 'unpaired'
 
 
 @pytest.mark.django_db

@@ -12,6 +12,9 @@ vi.mock('@/api/containers', () => ({
   createInstance: vi.fn(),
   removeInstance: vi.fn(),
 }))
+vi.mock('@/api/chat', () => ({
+  triggerPair: vi.fn(),
+}))
 vi.mock('element-plus', async (importOriginal) => {
   const actual = (await importOriginal()) as Record<string, unknown>
   return {
@@ -23,6 +26,7 @@ vi.mock('element-plus', async (importOriginal) => {
 
 import ContainersView from '@/views/ContainersView.vue'
 import { createInstance, listInstances, removeInstance } from '@/api/containers'
+import { triggerPair } from '@/api/chat'
 
 const SAMPLE = {
   name: 'demo',
@@ -32,6 +36,7 @@ const SAMPLE = {
   image: 'img',
   container_id: 'cid',
   created_at: '2026-07-24T00:00:00Z',
+  pairing: { status: 'unpaired', device_id: '', scopes: [], pairing_request_id: '' },
 }
 
 const stubs = {
@@ -159,5 +164,31 @@ describe('ContainersView', () => {
     // 推进多个轮询周期：因上一次未完成，后续 tick 全被跳过，不再新增调用
     await vi.advanceTimersByTimeAsync(9000)
     expect((listInstances as ReturnType<typeof vi.fn>).mock.calls.length).toBe(1)
+  })
+
+  // ---------------------------- 配对状态（issue #40）----------------------------
+
+  it('loads pairing status from listInstances payload', async () => {
+    ;(listInstances as ReturnType<typeof vi.fn>).mockResolvedValue([
+      { ...SAMPLE, pairing: { status: 'paired', scopes: ['operator.read'] } },
+    ])
+    const wrapper = mount(ContainersView, { global: { plugins: [createPinia()], stubs } })
+    await flushPromises()
+    expect(listInstances).toHaveBeenCalled()
+    expect((wrapper.vm as unknown as { pairingStatus: (n: string) => string }).pairingStatus('demo')).toBe('paired')
+  })
+
+  it('triggerPair calls the api and refreshes pairing status', async () => {
+    ;(listInstances as ReturnType<typeof vi.fn>).mockResolvedValue([SAMPLE])
+    ;(triggerPair as ReturnType<typeof vi.fn>).mockResolvedValue({ status: 'pending', pairing_request_id: 'r1' })
+    const wrapper = mount(ContainersView, { global: { plugins: [createPinia()], stubs } })
+    await flushPromises()
+
+    await (wrapper.vm as unknown as { pair: (n: string) => Promise<void> }).pair('demo')
+    await flushPromises()
+    expect(triggerPair).toHaveBeenCalledWith('demo')
+    // pending 态提示宿主 approve（验收 3 重试路径）
+    const { ElMessage } = await import('element-plus')
+    expect(ElMessage.warning).toHaveBeenCalled()
   })
 })
