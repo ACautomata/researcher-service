@@ -35,3 +35,6 @@ dist/
 # backend 运行时数据库
 backend/db.sqlite3
 backend/db.sqlite3-journal
+
+# 容器编排运行时数据（instances/<name>/ home + openclaw.json，spec §5）
+fleet/

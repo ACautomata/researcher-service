@@ -4,3 +4,4 @@ djangorestframework-simplejwt==5.5.1
 drf-spectacular==0.30.0
 channels==4.3.2
 daphne==4.2.1  # Channels 要求 daphne 在 INSTALLED_APPS 中，且 base settings 无条件注册
+docker==7.2.0  # containers 控制面：docker-py 经 docker.sock 增删查容器（spec §5.4）

@@ -95,5 +95,11 @@ export const useAuthStore = defineStore('auth', {
       this.token = ''
       this.refreshExhausted = true
     },
+    // codex T03：API 收到 401 时清登录态（token 失效/被吊销），交由路由守卫重定向登录。
+    // 不调后端 logout（避免无效请求），直接重置本地 + 标记 cookie 耗尽。
+    clearSession(): void {
+      this.token = ''
+      this.refreshExhausted = true
+    },
   },
 })

@@ -115,3 +115,21 @@ SPECTACULAR_SETTINGS = {
 # provider 注册表：{<provider名>: {'issuer','client_id','scope'}}，不绑死厂商；
 # 接具体 IdP 只加配置。骨架期留空 → oauth login/callback 端点返回 501。
 OAUTH_PROVIDERS: dict = {}
+
+# ---- 容器编排控制面（spec §5：Docker SDK 编排多 OpenClaw 容器）----
+# ROOT：instances/<name>/ 落盘根（开发默认 <repo>/fleet，生产 /srv/openclaw）
+# TEMPLATE：共享只读 researcher 模板（cp -a 预填充源，spec §5.1/§5.6）
+# TEMPLATE_JSON：openclaw.json 模板来源（deploy/openclaw.json，与单容器 compose 共用一份）
+# IMAGE：镜像 tag（生产建议 pin digest，spec §5.4 / r27 §4.1）
+# 端口池 19000–19999（避开单容器 compose 占用的 18789，spec §5.3）
+# ⚠ 安全：控制面经 docker.from_env() 挂 /var/run/docker.sock（等价 root；本地/可信部署可接受，
+#   生产应限制 Django 网络面或改用 rootless/远程 TLS daemon —— spec §5.4 明示风险）。
+FLEET_ROOT = Path(os.environ.get('OPENCLAW_FLEET_ROOT', str(BASE_DIR.parent / 'fleet')))
+OPENCLAW_FLEET = {
+    'ROOT': str(FLEET_ROOT),
+    'TEMPLATE': os.environ.get('OPENCLAW_TEMPLATE_DIR', '/srv/openclaw/template/researcher'),
+    'TEMPLATE_JSON': str(BASE_DIR.parent / 'deploy' / 'openclaw.json'),
+    'IMAGE': os.environ.get('OPENCLAW_IMAGE', 'acautomata/openclaw-docker-cn-im:latest'),
+    'PORT_POOL_START': 19000,
+    'PORT_POOL_END': 19999,
+}
