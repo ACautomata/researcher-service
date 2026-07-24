@@ -419,6 +419,29 @@ def test_delete_treats_missing_dir_as_deleted(config, health, runtime, tmp_path)
     assert not Instance.objects.filter(name='demo').exists()
 
 
+@pytest.mark.django_db
+def test_delete_uses_recorded_home_dir_not_current_root(config, health, runtime, tmp_path):
+    # codex P2 :296：OPENCLAW_FLEET_ROOT 在创建后变更时，删除路径须由 DB 记录的 home_dir
+    # 派生（创建时固化的绝对路径），而非用当前 cfg.root 重构——否则新 root 下无该目录，
+    # FileNotFoundError 被误判为清理成功，删行返回 204 而旧 root 下真实数据残留。
+    _seed_template(tmp_path / 'template')
+    orch = InstanceOrchestrator(runtime=runtime, config=config, health_probe=health)
+    orch.create('demo')
+    original_dir = config.root / 'instances' / 'demo'
+    assert original_dir.exists()
+    # 模拟 root 变更：orchestrator 切到另一个空 root（原目录仍在旧 root 下）
+    import dataclasses
+
+    new_root = tmp_path / 'fleet-moved'
+    (new_root / 'instances').mkdir(parents=True)
+    orch._cfg = dataclasses.replace(config, root=new_root)
+    ok = orch.delete('demo')
+    assert ok is True
+    # 旧 root 下的真实数据目录须被删除（由记录的 home_dir 派生，非新 root）
+    assert not original_dir.exists()
+    assert not Instance.objects.filter(name='demo').exists()
+
+
 # --- list：:226 creating 行 runtime 对账自愈 ---
 
 
@@ -496,6 +519,83 @@ def test_create_rollback_removes_when_run_attempted_and_start_fails(config, heal
         orch.create('demo')
     assert 'demo' in runtime.removed               # run 过 → 残留容器已清
     assert not Instance.objects.filter(name='demo').exists()
+
+
+# ---------------------------- codex R4 并发/失败硬化 ----------------------------
+
+
+# --- create：:238 仅 run_attempted ∧ ¬preexisting 才在回滚 remove ---
+
+
+@pytest.mark.django_db
+def test_create_rollback_preserves_preexisting_container(config, health, tmp_path):
+    # codex P1 :238：run 因同名容器已存在（DB 恢复/历史孤儿，无 DB 行）而失败时，
+    # 该容器非本次创建——回滚不得 remove（否则误删在网 gateway）。
+    _seed_template(tmp_path / 'template')
+    runtime = FakeRuntime()
+    # 历史孤儿：daemon 已有 openclaw-gw-demo，但 DB 无对应行
+    runtime.containers['demo'] = ContainerInfo(
+        container_id='orphan-id', name=container_name('demo'),
+        running=True, status='running', image='img:tag',
+    )
+
+    class _RunConflict(FakeRuntime):
+        def run(self, spec):
+            raise RuntimeError('name conflict: container already exists')
+
+    runtime.run = _RunConflict.run.__get__(runtime)   # 保留 containers，run 抛冲突
+    orch = InstanceOrchestrator(runtime=runtime, config=config, health_probe=health)
+    with pytest.raises(RuntimeError):
+        orch.create('demo')
+    assert 'demo' not in runtime.removed             # 未误删历史孤儿容器
+    assert 'demo' in runtime.containers              # 孤儿仍在（非本次创建）
+    assert not Instance.objects.filter(name='demo').exists()   # 本次行已回滚
+
+
+@pytest.mark.django_db
+def test_create_rollback_preserves_row_when_dir_cleanup_fails(config, health, runtime, tmp_path):
+    # codex P2 :265：run 失败后回滚，若目录清理也失败（root 容器改属主/权限），
+    # 不得先删行（否则目录残留挡 retry mkdir 且无 API 记录可清理）——保留行标 ERROR 可重试。
+    # 抛 InstanceCleanupError（与 delete :126 对称，view 409 + 行保留），非裸 OSError（500）。
+    _seed_template(tmp_path / 'template')
+
+    class _RunFails(FakeRuntime):
+        def run(self, spec):
+            raise RuntimeError('start failed')
+
+    def fail_rmtree(path, **kwargs):
+        raise OSError('permission denied')
+
+    orch = InstanceOrchestrator(
+        runtime=_RunFails(), config=config, health_probe=health, dir_remover=fail_rmtree
+    )
+    with pytest.raises(InstanceCleanupError):
+        orch.create('demo')
+    inst = Instance.objects.get(name='demo')         # 行保留（可经 delete 重试清理）
+    assert inst.status == Instance.STATUS_ERROR
+    assert (config.root / 'instances' / 'demo').exists()   # 目录残留未清
+
+
+@pytest.mark.django_db
+def test_create_keeps_inflight_until_final_save(orch, monkeypatch):
+    # codex P2 :269：DELETE 在 run() 返回后、最终 save() 前的窗口不得竞删——in-flight 标记
+    # 须保留到 save 之后。验证：最终 save（status=running）执行期间 'demo' 仍在 _inflight_creates；
+    # create 返回后已释放。（_reserve_row 的 INSERT 先于 add，本就不在飞，非本测试关注点。）
+    real_save = Instance.save
+    inflight_at_save = []
+
+    def spy_save(instance, *args, **kwargs):
+        if instance.name == 'demo':
+            inflight_at_save.append('demo' in orch._inflight_creates)
+        return real_save(instance, *args, **kwargs)
+
+    monkeypatch.setattr(Instance, 'save', spy_save)
+    orch.create('demo')
+    # 最终 save（reserve 的 INSERT 之后、add 之后）执行时必须仍标记在飞 → delete 会被拒删
+    assert inflight_at_save, 'create 应至少触发一次 save'
+    assert inflight_at_save[-1] is True, '最终 save 期间 in-flight 标记须仍保留（:269）'
+    # create 完整返回后标记已释放，后续 delete 可正常进行
+    assert 'demo' not in orch._inflight_creates
 
 
 # --- delete：:257 在飞 create 拒删 ---

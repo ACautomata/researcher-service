@@ -202,3 +202,30 @@ def test_delete_returns_409_while_create_in_flight(authed, fleet, monkeypatch):
     monkeypatch.setattr(fleet['orch'], 'delete', _busy)
     resp = authed.delete('/api/v1/containers/demo')
     assert resp.status_code == 409
+
+
+@pytest.mark.django_db
+def test_create_returns_409_when_rollback_dir_cleanup_fails(authed, fleet, monkeypatch):
+    # codex R4 :265：create 回滚时目录清理失败（InstanceCleanupError，行标 ERROR 保留）→ 409，
+    # 非裸 OSError→500。与 delete :126 对称（行保留可重试）。
+    def _fail(name):
+        raise InstanceCleanupError(name, str(fleet['config'].root / 'instances' / name))
+
+    monkeypatch.setattr(fleet['orch'], 'create', _fail)
+    resp = authed.post('/api/v1/containers/', {'name': 'demo'}, format='json')
+    assert resp.status_code == 409
+
+
+@pytest.mark.django_db
+def test_create_returns_201_even_if_post_create_detail_fails(authed, fleet, monkeypatch):
+    # codex R4 :60：POST 已 commit 创建并启动容器后，若随后的 detail() 二次 runtime 查询
+    # 因 daemon 抖动失败，不应让已成功的创建返回 500（客户端误判失败重试 → 撞 409 重复名）。
+    # 须由 create() 返回结果构造 201，容忍 detail 查询失败。
+    def _flaky_detail(name):
+        raise RuntimeError('daemon flaked during post-create lookup')
+
+    monkeypatch.setattr(fleet['orch'], 'detail', _flaky_detail)
+    resp = authed.post('/api/v1/containers/', {'name': 'demo'}, format='json')
+    assert resp.status_code == 201
+    assert resp.json()['name'] == 'demo'
+    assert resp.json()['status'] == 'running'

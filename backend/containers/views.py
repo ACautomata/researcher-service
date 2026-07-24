@@ -46,7 +46,7 @@ class InstanceListCreateView(APIView):
         ser.is_valid(raise_exception=True)  # spec §4：禁裸读 request.data
         name = ser.validated_data['name']
         try:
-            Fleet.get().create(name)
+            inst = Fleet.get().create(name)
         except InstanceExists:
             # codex R1 :84：并发绕 UniqueValidator → DB 唯一约束 → 409（非裸 IntegrityError→500）
             return Response({'detail': '实例名已存在'}, status=status.HTTP_409_CONFLICT)
@@ -56,7 +56,15 @@ class InstanceListCreateView(APIView):
                 {'detail': '端口池已耗尽，暂无法创建容器，请稍后重试或删除闲置容器'},
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,
             )
-        item = Fleet.get().detail(name)
+        except InstanceCleanupError:
+            # codex R4 :265：create 回滚时目录清理失败（行标 ERROR 保留可重试）→ 409，非裸 500
+            return Response(
+                {'detail': '容器创建失败且数据目录清理未完成（权限/属主），请重试或联系管理员清理'},
+                status=status.HTTP_409_CONFLICT,
+            )
+        # codex R4 :60：由 create() 返回构造 201，不再二次 detail() 查 runtime——
+        # 创建已 commit 并启动容器后，detail 的 daemon 抖动会让成功创建误返 500（重试撞 409）。
+        item = Fleet.get().created_item(inst)
         return Response(InstanceSerializer(item).data, status=status.HTTP_201_CREATED)
 
 
