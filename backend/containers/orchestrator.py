@@ -91,6 +91,14 @@ class InstanceBusy(Exception):
         self.name = name
 
 
+class ConfigurationError(Exception):
+    """面板级配置缺失——LLM_API_KEY 等必填字段未设置；view 层 503。"""
+
+    def __init__(self, field: str) -> None:
+        super().__init__(f'{field} is required but not configured')
+        self.field = field
+
+
 @dataclass(frozen=True)
 class FleetConfig:
     """编排控制面配置（来自 settings.OPENCLAW_FLEET，测试可注入 tmp 路径）。"""
@@ -227,7 +235,7 @@ class InstanceOrchestrator:
         # codex R6 :484：空 LLM_API_KEY 会在 _reserve_row 前拒绝——否则后续创建外表 healthy
         # 但永远无法调 LLM 的容器，且 LLM_API_KEY 是面板级共享的不能通过 delete 修复。
         if not self._cfg.llm_api_key:
-            raise ValueError('LLM_API_KEY is required but not configured')
+            raise ConfigurationError('LLM_API_KEY')
 
         # codex R6 :475：ConfigRenderer 惰性构造——模板 JSON 损坏不会阻塞 list/delete。
         if self._renderer is None:

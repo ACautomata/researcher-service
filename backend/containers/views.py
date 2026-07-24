@@ -19,6 +19,7 @@ from rest_framework.views import APIView
 
 from .models import NAME_VALIDATOR
 from .orchestrator import (
+    ConfigurationError,
     Fleet,
     InstanceBusy,
     InstanceCleanupError,
@@ -47,8 +48,8 @@ class InstanceListCreateView(APIView):
         name = ser.validated_data['name']
         try:
             inst = Fleet.get().create(name)
-        except ValueError as e:
-            # codex R6 :484：LLM_API_KEY 未配置 → 503，非裸 500
+        except ConfigurationError as e:
+            # codex R6 :484：LLM_API_KEY 未配置 → 503，不裸 500
             return Response(
                 {'detail': str(e)}, status=status.HTTP_503_SERVICE_UNAVAILABLE
             )

@@ -11,6 +11,7 @@ from django.db import IntegrityError
 
 from containers.models import Instance
 from containers.orchestrator import (
+    ConfigurationError,
     Fleet,
     FleetConfig,
     InstanceBusy,
@@ -846,7 +847,7 @@ def test_create_rejects_empty_llm_api_key(config, health, runtime, tmp_path):
         llm_api_key='',   # 未配置
     )
     orch = InstanceOrchestrator(runtime=runtime, config=config, health_probe=health)
-    with pytest.raises(ValueError, match='LLM_API_KEY'):
+    with pytest.raises(ConfigurationError, match='LLM_API_KEY'):
         orch.create('demo')
     assert not Instance.objects.filter(name='demo').exists()
 
