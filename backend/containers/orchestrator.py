@@ -26,6 +26,7 @@ import os
 import secrets
 import shutil
 import socket
+import threading
 import urllib.request
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -76,6 +77,17 @@ class PortAllocationError(Exception):
 
     def __init__(self, name: str) -> None:
         super().__init__(f'port allocation exhausted for {name!r}')
+        self.name = name
+
+
+class InstanceBusy(Exception):
+    """删除目标仍在 provisioning（creating 且在本次/它次 create 在飞）；view 层 409（codex R3）。
+
+    防 delete 与在飞 create 竞争：create 收尾 save(running) 会 resurrect 已被删除的行。
+    """
+
+    def __init__(self, name: str) -> None:
+        super().__init__(f'instance {name!r} is still being provisioned')
         self.name = name
 
 
@@ -148,6 +160,12 @@ class InstanceOrchestrator:
         self._allocator = PortAllocator(
             config.port_start, config.port_end, config.reserved_ports
         )
+        # codex R3：在飞 create 名字集（进程内，orchestrator 单例跨请求共享）。
+        # 区分「正在 provisioning」与「崩溃中断」的 creating 行——delete 据此拒删在飞实例（:257），
+        # _reconcile_creating 据此只对非在飞的中断行收敛（:319），create 回滚据 run_attempted
+        # 决定是否 remove 容器（:232）。
+        self._inflight_creates: set[str] = set()
+        self._inflight_lock = threading.Lock()
 
     def _used_ports(self) -> set[int]:
         """已用端口 = DB 记账 ∪ fleet 容器 label 端口 ∪ 池内宿主实测占用（codex R2 :161）。
@@ -208,10 +226,16 @@ class InstanceOrchestrator:
         instance_dir = self._cfg.root / 'instances' / name
         home = instance_dir / 'home'
         config_path = instance_dir / 'openclaw.json'
+        # codex R3 :232：仅当本次确实调过 run()（可能 create 出容器）才在回滚里 remove；
+        # mkdir/provision/render 阶段失败时同名容器可能是历史遗留（DB 无行），不应误删在网 gateway。
+        run_attempted = False
+        with self._inflight_lock:
+            self._inflight_creates.add(name)
         try:
             instance_dir.mkdir(parents=True, exist_ok=False)
             self._provisioner.provision(home)
             config_path.write_text(self._renderer.render())
+            run_attempted = True
             container_id = self._runtime.run(
                 ContainerSpec(
                     name=name,
@@ -228,16 +252,21 @@ class InstanceOrchestrator:
             # （docker create 成功但 start 失败时容器已 Created 残留，否则重试同名 docker 冲突）。
             # codex R2 :176：remove 自身也可能因 daemon 不可用失败——单独兜底，
             # 不阻断 DB 行 + 目录回滚（否则残留 creating 行 + 半成品目录，恢复后仍挡同名重建）。
-            try:
-                self._runtime.remove(name)
-            except Exception:
-                pass
+            # codex R3 :232：run_attempted 为 False 时跳过 remove，避免误删非本次创建的在网容器。
+            if run_attempted:
+                try:
+                    self._runtime.remove(name)
+                except Exception:
+                    pass
             inst.delete()
             try:
                 self._dir_remover(instance_dir)
             except OSError:
                 pass
             raise
+        finally:
+            with self._inflight_lock:
+                self._inflight_creates.discard(name)
         inst.container_id = container_id
         inst.status = Instance.STATUS_RUNNING
         inst.save()
@@ -249,10 +278,18 @@ class InstanceOrchestrator:
         实例不存在返回 False；容器不存在幂等清理。
         codex R1 :126：home 清理失败（root 容器改属主/权限）不吞——保留 DB 行 +
         标 REMOVING + raise InstanceCleanupError，客户端可重试（容器已删，重试只清目录 + 删行）。
+        codex R3 :257：目标仍在 provisioning（create 在飞）→ raise InstanceBusy（view 409），
+        防 delete 与在飞 create 竞争（create 收尾 save(running) 会 resurrect 已删行/容器数据已清）。
         """
         inst = Instance.objects.filter(name=name).first()
         if inst is None:
             return False
+        # codex R3 :257：仅当 create 仍在飞（本进程）才拒删——防与在飞 create 竞态
+        # （create 收尾 save(running) 会 resurrect 已删行）。崩溃中断的 creating 行
+        # （非在飞）不在此列：它可被删除（也可经 _reconcile_creating 收敛，见 :319）。
+        with self._inflight_lock:
+            if name in self._inflight_creates:
+                raise InstanceBusy(name)
         self._runtime.stop(name)
         self._runtime.remove(name)
         try:
@@ -290,6 +327,9 @@ class InstanceOrchestrator:
             return self._item(inst, Instance.STATUS_CREATING, HEALTH_PENDING)
         if inst.status == Instance.STATUS_REMOVING:
             return self._item(inst, Instance.STATUS_REMOVING, HEALTH_REMOVING)
+        if inst.status == Instance.STATUS_ERROR:
+            # codex R3 :319：中断收敛为 error 的行（provisioning 未完成）透传，不探健康
+            return self._item(inst, Instance.STATUS_ERROR, HEALTH_STOPPED)
         info = self._runtime.get(inst.name)
         running = bool(info and info.running)
         status = Instance.STATUS_RUNNING if running else Instance.STATUS_STOPPED
@@ -304,9 +344,13 @@ class InstanceOrchestrator:
         return self._item(inst, status, health)
 
     def _reconcile_creating(self, insts: list[Instance]) -> None:
-        """主线程对账 creating 行（codex R2 :226）：进程在最终 save 前崩溃（尤其 Docker
-        已起容器后）留下的 creating 行，若容器实际已 running 则就地自愈为 running 并落盘，
-        不再永久 pending（否则名字/端口一直被占，永不收敛到 running/stopped）。
+        """主线程对账 creating 行（codex R2 :226 / R3 :319）。
+
+        仅处理**非在飞**的 creating 行（在飞者正被本进程 create provisioning，跳过）。
+        非在飞即「崩溃中断」——按 runtime 实况收敛，不再永久 pending 占名/占端口：
+        - 容器已 running（崩溃在最终 save 前，Docker 已起）→ 自愈为 running 并落盘。
+        - 容器存在但未 running（created/exited，崩溃于 start 前后）→ 收敛为 stopped。
+        - 无容器（崩溃在 run 之前）→ 收敛为 error（provisioning 未完成；行可经 delete 清除）。
 
         主线程串行执行（非线程池）：creating 行通常极少，且 Django ORM save 不宜在
         worker 线程做（pytest 事务包裹下 worker 连接隔离，落盘不可见）。
@@ -314,16 +358,24 @@ class InstanceOrchestrator:
         for inst in insts:
             if inst.status != Instance.STATUS_CREATING:
                 continue
+            with self._inflight_lock:
+                if inst.name in self._inflight_creates:
+                    continue            # 正在 provisioning，非中断——跳过对账
             info = self._runtime.get(inst.name)
-            if not (info and info.running):
-                continue
-            inst.status = Instance.STATUS_RUNNING
-            if info.container_id:
-                inst.container_id = info.container_id
+            if info and info.running:
+                inst.status = Instance.STATUS_RUNNING
+                if info.container_id:
+                    inst.container_id = info.container_id
+            elif info is not None:
+                inst.status = Instance.STATUS_STOPPED
+                if info.container_id:
+                    inst.container_id = info.container_id
+            else:
+                inst.status = Instance.STATUS_ERROR
             try:
                 inst.save(update_fields=['status', 'container_id'])
             except Exception:
-                # 落盘失败不阻断本次出参（内存对象已是 running，下次 list 再对账）
+                # 落盘失败不阻断本次出参（内存对象已收敛，下次 list 再对账）
                 pass
 
     def list(self) -> list[dict]:

@@ -12,10 +12,12 @@ from django.db import IntegrityError
 from containers.models import Instance
 from containers.orchestrator import (
     FleetConfig,
+    InstanceBusy,
     InstanceCleanupError,
     InstanceExists,
     InstanceOrchestrator,
 )
+from containers.provisioner import HomeProvisioner
 from containers.runtime import ContainerInfo, container_name
 from containers.tests.fakes import FakeHealthProbe, FakeRuntime
 
@@ -311,11 +313,13 @@ def test_delete_preserves_row_when_dir_cleanup_fails(config, health, runtime, tm
 
 @pytest.mark.django_db
 def test_list_shows_creating_while_provisioning(orch):
-    # codex P2 :133：creating 中（容器未起）不应被 runtime.get 缺失误判 stopped
+    # codex P2 :133：creating 中（容器未起）不应被 runtime.get 缺失误判 stopped。
+    # codex R3 :319：须标记为在飞（模拟 create 正在 provisioning），否则被视为中断行收敛。
     Instance.objects.create(
         name='booting', port=19005, token='t', home_dir='/h',
         status=Instance.STATUS_CREATING, image='img:tag',
     )
+    orch._inflight_creates.add('booting')      # 模拟该名字的 create 仍在飞
     item = orch.list()[0]
     assert item['status'] == 'creating'
     assert item['health'] == 'pending'         # 未起，不探
@@ -444,11 +448,111 @@ def test_list_reconciles_creating_row_when_container_running(orch, runtime):
 
 @pytest.mark.django_db
 def test_list_keeps_creating_when_container_not_yet_running(orch):
-    # codex P2 :226 对照：容器尚未起（正常 provisioning 中）→ 仍 creating/pending，不误判。
+    # codex P2 :226 对照：容器尚未起且 create 仍在飞（正常 provisioning 中）→ 仍 creating/pending。
     Instance.objects.create(
         name='booting', port=19008, token='t', home_dir='/h',
         status=Instance.STATUS_CREATING, image='img:tag',
     )
+    orch._inflight_creates.add('booting')      # 模拟在飞，区别于崩溃中断（:319）
     item = orch.list()[0]
     assert item['status'] == 'creating'
     assert item['health'] == 'pending'
+
+
+# ---------------------------- codex R3 并发/失败硬化 ----------------------------
+
+
+# --- create：:232 仅本次 run 过才在回滚 remove ---
+
+
+@pytest.mark.django_db
+def test_create_rollback_skips_remove_when_run_not_attempted(config, health, tmp_path):
+    # codex P1 :232：mkdir/provision/render 阶段失败时，同名容器可能是历史遗留（DB 无行），
+    # 不应误删非本次创建的在网 gateway。run_attempted=False → 回滚不 remove。
+    _seed_template(tmp_path / 'template')
+
+    class _RenderFail(FakeRuntime):
+        pass  # run 正常；让失败发生在 run 之前（config 渲染）
+
+    runtime = _RenderFail()
+    orch = InstanceOrchestrator(runtime=runtime, config=config, health_probe=health)
+    # 让 config_path.write_text 之前的 provision 失败：把 template_dir 指向不存在路径
+    orch._provisioner = HomeProvisioner(tmp_path / 'no-such-template')
+    with pytest.raises(Exception):
+        orch.create('demo')
+    assert runtime.run_specs == []                 # 从未调 run
+    assert runtime.removed == []                   # 回滚未 remove（没创建任何容器）
+
+
+@pytest.mark.django_db
+def test_create_rollback_removes_when_run_attempted_and_start_fails(config, health, tmp_path):
+    # codex P1 :232 对照 + R1 :112：本次确实 run 过（docker create 成功 start 失败）
+    # → 残留命名容器须 best-effort remove（否则重试同名 docker 冲突）。
+    _seed_template(tmp_path / 'template')
+    runtime = FakeRuntime()
+    runtime.fail_after_create = RuntimeError('port already allocated')
+    orch = InstanceOrchestrator(runtime=runtime, config=config, health_probe=health)
+    with pytest.raises(RuntimeError):
+        orch.create('demo')
+    assert 'demo' in runtime.removed               # run 过 → 残留容器已清
+    assert not Instance.objects.filter(name='demo').exists()
+
+
+# --- delete：:257 在飞 create 拒删 ---
+
+
+@pytest.mark.django_db
+def test_delete_rejects_while_create_in_flight(orch):
+    # codex P1 :257：目标仍在 provisioning（create 在飞）→ InstanceBusy（view 409），
+    # 防 delete 与在飞 create 竞态（create 收尾 save(running) 会 resurrect 已删行）。
+    Instance.objects.create(
+        name='booting', port=19010, token='t', home_dir='/h',
+        status=Instance.STATUS_CREATING, image='img:tag',
+    )
+    orch._inflight_creates.add('booting')          # 模拟 create 在飞
+    with pytest.raises(InstanceBusy):
+        orch.delete('booting')
+    assert Instance.objects.filter(name='booting').exists()  # 行未被删
+
+
+@pytest.mark.django_db
+def test_delete_allows_interrupted_creating_row(orch, runtime, config):
+    # codex P1 :257 对照：崩溃中断的 creating 行（非在飞）可被删除——清理名字/端口占用。
+    Instance.objects.create(
+        name='stuck', port=19011, token='t', home_dir='/h',
+        status=Instance.STATUS_CREATING, image='img:tag',
+    )
+    ok = orch.delete('stuck')                      # 不在 _inflight_creates → 可删
+    assert ok is True
+    assert not Instance.objects.filter(name='stuck').exists()
+
+
+# --- list：:319 中断 creating 行按 runtime 实况收敛 ---
+
+
+@pytest.mark.django_db
+def test_reconcile_creating_to_stopped_when_container_exited(orch, runtime):
+    # codex P2 :319：中断行容器存在但未 running（created/exited）→ 收敛 stopped（非永久 pending）。
+    Instance.objects.create(
+        name='half', port=19012, token='t', home_dir='/h',
+        status=Instance.STATUS_CREATING, image='img:tag',
+    )
+    runtime.containers['half'] = ContainerInfo(
+        container_id='halfid', name=container_name('half'),
+        running=False, status='exited', image='img:tag',
+    )
+    item = orch.list()[0]
+    assert item['status'] == 'stopped'
+    assert Instance.objects.get(name='half').status == Instance.STATUS_STOPPED
+
+
+@pytest.mark.django_db
+def test_reconcile_creating_to_error_when_no_container(orch):
+    # codex P2 :319：中断行无容器（崩溃在 run 之前）→ 收敛 error（provisioning 未完成）。
+    Instance.objects.create(
+        name='ghost', port=19013, token='t', home_dir='/h',
+        status=Instance.STATUS_CREATING, image='img:tag',
+    )
+    item = orch.list()[0]
+    assert item['status'] == 'error'
+    assert Instance.objects.get(name='ghost').status == Instance.STATUS_ERROR

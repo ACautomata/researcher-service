@@ -24,8 +24,13 @@ const creating = ref(false)
 // codex R2 :78：轮询间隔（3s），对齐前端既有轮询节奏；太短打满健康探测，太长状态滞后
 const POLL_INTERVAL_MS = 3000
 let pollTimer: ReturnType<typeof setInterval> | null = null
+// codex R3 :89：在飞请求标记——一次 list 超过 3s（多个不可达实例串行 2s 健康探测）时
+// 跳过下一 tick，避免叠加并发 Docker/health 请求、乱序完成覆盖较新状态。
+let refreshInFlight = false
 
 async function refresh(): Promise<void> {
+  if (refreshInFlight) return // codex R3 :89：上一次未完成则跳过本次
+  refreshInFlight = true
   loading.value = true
   errorMsg.value = ''
   try {
@@ -34,6 +39,7 @@ async function refresh(): Promise<void> {
     errorMsg.value = (e as Error).message
   } finally {
     loading.value = false
+    refreshInFlight = false
   }
 }
 

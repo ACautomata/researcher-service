@@ -145,4 +145,19 @@ describe('ContainersView', () => {
     await vi.advanceTimersByTimeAsync(9000) // 卸载后多过一个周期也不再调
     expect((listInstances as ReturnType<typeof vi.fn>).mock.calls.length).toBe(callsBeforeUnmount)
   })
+
+  it('skips a poll tick while the previous refresh is still in flight (codex R3 :89)', async () => {
+    // 一次 list 超过 3s（多个不可达实例串行 2s 健康探测）时，下一 tick 须跳过，
+    // 避免叠加并发 Docker/health 请求、乱序完成覆盖较新状态。
+    vi.useFakeTimers()
+    // listInstances 一直 pending（模拟慢请求），永不 resolve
+    ;(listInstances as ReturnType<typeof vi.fn>).mockReturnValue(new Promise(() => {}))
+    mount(ContainersView, { global: { plugins: [createPinia()], stubs } })
+    await flushPromises()
+    // mount 触发的第一次 refresh 仍在飞
+    expect((listInstances as ReturnType<typeof vi.fn>).mock.calls.length).toBe(1)
+    // 推进多个轮询周期：因上一次未完成，后续 tick 全被跳过，不再新增调用
+    await vi.advanceTimersByTimeAsync(9000)
+    expect((listInstances as ReturnType<typeof vi.fn>).mock.calls.length).toBe(1)
+  })
 })

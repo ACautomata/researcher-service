@@ -8,6 +8,7 @@ codex R1：orchestrator 领域异常转译为 HTTP 语义——InstanceExists→
 InstanceCleanupError→409（home 清理失败，DB 行保留可重试）。
 codex R2：PortPoolExhausted/PortAllocationError→503（端口池耗尽/持续分配冲突，
 属预期容量条件，非内部缺陷——客户端可区分，不再裸 500）。
+codex R3：InstanceBusy→409（删除目标仍在 provisioning，防与在飞 create 竞态）。
 """
 from django.core.exceptions import ValidationError
 from django.http import Http404
@@ -19,6 +20,7 @@ from rest_framework.views import APIView
 from .models import NAME_VALIDATOR
 from .orchestrator import (
     Fleet,
+    InstanceBusy,
     InstanceCleanupError,
     InstanceExists,
     PortAllocationError,
@@ -70,6 +72,12 @@ class InstanceDetailView(APIView):
             return Response({'detail': '非法 name'}, status=status.HTTP_400_BAD_REQUEST)
         try:
             removed = Fleet.get().delete(name)
+        except InstanceBusy:
+            # codex R3 :257：目标仍在 provisioning（create 在飞）→ 409，客户端稍后再删
+            return Response(
+                {'detail': '容器正在创建中，请稍候再删除'},
+                status=status.HTTP_409_CONFLICT,
+            )
         except InstanceCleanupError:
             # codex R1 :126：容器已停删但 home 清理失败 → 409 + DB 行保留（标 REMOVING，可重试）
             return Response(

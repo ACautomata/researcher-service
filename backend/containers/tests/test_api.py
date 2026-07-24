@@ -11,6 +11,7 @@ from django.contrib.auth import get_user_model
 from rest_framework.test import APIClient
 
 from containers.orchestrator import (
+    InstanceBusy,
     InstanceCleanupError,
     InstanceExists,
     PortAllocationError,
@@ -190,3 +191,14 @@ def test_create_returns_503_when_port_allocation_exhausted(authed, fleet, monkey
     monkeypatch.setattr(fleet['orch'], 'create', _raise)
     resp = authed.post('/api/v1/containers/', {'name': 'demo'}, format='json')
     assert resp.status_code == 503
+
+
+@pytest.mark.django_db
+def test_delete_returns_409_while_create_in_flight(authed, fleet, monkeypatch):
+    # codex R3 :257：删除目标仍在 provisioning（create 在飞，InstanceBusy）→ 409，非裸 500/204
+    def _busy(name):
+        raise InstanceBusy(name)
+
+    monkeypatch.setattr(fleet['orch'], 'delete', _busy)
+    resp = authed.delete('/api/v1/containers/demo')
+    assert resp.status_code == 409
