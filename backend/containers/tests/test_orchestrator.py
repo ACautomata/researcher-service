@@ -3,8 +3,10 @@
 出处：docs/FULLSTACK-REFACTOR-SPEC.md §5.4（生命周期）/§5.5（状态机 + 失败回滚）/§5.6（bind-mount home）。
 用 FakeRuntime + FakeHealthProbe 覆盖业务逻辑（CI 无 docker daemon）；真实 DockerRuntime 走 integration。
 """
+import json
 import threading
 import time
+from pathlib import Path
 
 import pytest
 from django.db import IntegrityError
@@ -905,59 +907,115 @@ def test_delete_rejects_creating_based_on_db_status(orch):
 # ───────────────────────────── codex R7 review 反证 + TDD ─────────────────────────────
 
 
-# ◀ 1 (3644601349) P1 :430 —— _reconcile_creating 靠进程内 _inflight_creates 区分活动/中断 ◀
+# ◀ R7 1 → R8 F1 (4772692556) P1 :430 —— created_at+60s 升级为跨进程可续期 DB lease ◀
+# R7 用 created_at 时间窗口保护跨 worker 的活动 create；R8 改用 lease_expires_at
+#（_reserve_row 设置、create 在 run 前 checkpoint 续约）：lease 未过期 = 有活动 create 持有，
+# 即使 created_at 远旧、本进程 _inflight_creates 不可见也不收敛——长 create（>60s）不再被误判。
+
 
 @pytest.mark.django_db
-def test_reconcile_does_not_convert_fresh_creating_to_error(orch, runtime):
-    """codex R7 P1 :430：_inflight_creates 仅本进程可见；多 worker 下另一 worker 刚创建的
-    CREATING 行（容器未起）被本进程的 _reconcile_creating 误判为中断 → 收敛 error →
-    后续 delete 的 CREATING 守卫失效。
+def test_reconcile_protects_active_create_with_unexpired_lease(orch):
+    """codex R8 F1 (P1 :430)：跨进程 lease 替代 created_at+60s 时间窗口。
 
-    created_at 在 _inflight_creates 不可靠时提供跨进程时间窗口保护——
-    足够新的 CREATING 行不应被收敛（允许足够时间 provisioning）。
+    多 worker 下另一 worker 的合法长 create（cp -a/run > 60s）不在本进程 _inflight_creates，
+    R7 的 created_at+60s 会误收敛为 error/stopped → delete 趁虚删目录/容器、原 worker 收尾
+    save(running) 复活行。改用可续期 DB lease：lease 未过期即有活动 create 持有，即使
+    created_at 远旧、本进程不可见也不收敛。
     """
     from datetime import timedelta
+
     from django.utils import timezone
 
-    # 刚创建的 CREATING 行（模拟另一 worker 刚刚 INSERT，_inflight_creates 不可见）
+    now = timezone.now()
     inst = Instance.objects.create(
-        name='fresh', port=19016, token='t', home_dir='/h',
+        name='active', port=19016, token='t', home_dir='/h',
         status=Instance.STATUS_CREATING, image='img:tag',
+        lease_expires_at=now + timedelta(seconds=300),  # lease 未过期（活动 create 持有）
     )
-    # 强制 created_at 为「现在」（DB auto_now_add 可能略有延迟）
-    inst.created_at = timezone.now()
+    inst.created_at = now - timedelta(seconds=300)  # 远超 R7 的 60s grace
     inst.save(update_fields=['created_at'])
-    # runtime 无容器（container 尚未启动）
-    # _inflight_creates 不含 'fresh'（模拟跨 worker）
+    # runtime 无容器（长 create 仍在 cp -a，未 run）；_inflight_creates 不含（跨 worker）
 
     orch.list()
 
     inst.refresh_from_db()
-    # 刚创建的 CREATING 行应保持 CREATING，不被收敛为 error
-    assert inst.status == Instance.STATUS_CREATING
+    assert inst.status == Instance.STATUS_CREATING  # lease 保护，不收敛
 
 
 @pytest.mark.django_db
-def test_reconcile_still_converts_stale_creating_to_error(orch):
-    """codex R7 P1 对照：足够旧的 CREATING 行（远超 provisioning 时间窗口）仍被收敛。
+def test_reconcile_converges_when_lease_expired(orch):
+    """codex R8 F1 对照：lease 已过期（无活动 create 持有）= 崩溃中断 → 仍收敛为 error。
 
-    确保时间窗口保护不阻碍真正的崩溃中断行被收敛。
+    可续期 lease 不阻碍真正中断的行被收敛（lease 由 _reserve_row 设、create 续约；
+    进程崩溃后不再续约即过期，下次 list 即收敛）。
     """
     from datetime import timedelta
+
     from django.utils import timezone
 
     inst = Instance.objects.create(
         name='stale', port=19017, token='t', home_dir='/h',
         status=Instance.STATUS_CREATING, image='img:tag',
+        lease_expires_at=timezone.now() - timedelta(seconds=1),  # 已过期
     )
-    # 设为 5 分钟前——远超合理 provisioning 时间
-    inst.created_at = timezone.now() - timedelta(seconds=300)
-    inst.save(update_fields=['created_at'])
 
     orch.list()
 
     inst.refresh_from_db()
     assert inst.status == Instance.STATUS_ERROR
+
+
+@pytest.mark.django_db
+def test_reconcile_converges_when_lease_missing(orch):
+    """codex R8 F1：lease_expires_at 为 None（migration 前旧行/异常）视为无保护 → 可收敛。
+
+    保守处理无 lease 信息的行；新行经 _reserve_row 总带有 lease。
+    """
+    Instance.objects.create(
+        name='legacy', port=19018, token='t', home_dir='/h',
+        status=Instance.STATUS_CREATING, image='img:tag',
+        # lease_expires_at 留空（None）
+    )
+
+    orch.list()
+
+    assert Instance.objects.get(name='legacy').status == Instance.STATUS_ERROR
+
+
+@pytest.mark.django_db
+def test_create_sets_lease_on_reserved_row(orch):
+    """codex R8 F1：_reserve_row 为 CREATING 行设置 lease_expires_at（跨进程 lease 起点）。
+
+    lease 在未来（_LEASE_TTL 窗口内），使其它 worker 的 _reconcile_creating 在 provisioning
+    期间不误收敛本行。
+    """
+    from django.utils import timezone
+
+    orch.create('demo')
+    inst = Instance.objects.get(name='demo')
+    assert inst.lease_expires_at is not None
+    assert inst.lease_expires_at > timezone.now()
+
+
+@pytest.mark.django_db
+def test_create_renews_lease_before_run(orch, monkeypatch):
+    """codex R8 F1：create 在 render 后、run 前 checkpoint 续约 lease（覆盖随后的 docker run）。
+
+    保护续约行不被误删——若有人移除续约 save，本测试失败。续约把 lease 起点推到 run 之前；
+    run 内 image pull 受 _LEASE_TTL 约束靠 TTL 充分性 + self-heal 兜底（见 _LEASE_TTL 注释）。
+    """
+    real_save = Instance.save
+    lease_renew_saves = []
+
+    def spy_save(instance, *args, **kwargs):
+        fields = kwargs.get('update_fields') or []
+        if instance.name == 'demo' and 'lease_expires_at' in fields:
+            lease_renew_saves.append(instance.lease_expires_at)
+        return real_save(instance, *args, **kwargs)
+
+    monkeypatch.setattr(Instance, 'save', spy_save)
+    orch.create('demo')
+    assert lease_renew_saves, 'create 须在 run 前续约 lease（save update_fields 含 lease_expires_at）'
 
 
 # ◀ 2 (3644601354) P2 :509 —— _build_default 仍急切 read_text() 模板文件 ◀
@@ -1018,3 +1076,63 @@ def test_list_survives_runtime_lookup_failure_for_one_instance(orch, runtime):
     names = {it['name'] for it in items}
     assert 'good' in names, '正常实例不应被异常实例的 runtime 错误隐藏'
     assert 'bad' in names, '异常实例应降级展示，非整个 list 500'
+
+
+# ───────────────────────────── codex R8 review 反证 + TDD ─────────────────────────────
+
+
+# ◀ F4 (4772692556) P2 —— integration smoke 把 JSON 内容当 template_json 传入 ◀
+
+def test_smoke_template_json_is_a_readable_file_path():
+    """codex R8 F4：integration smoke 的 template_json 必须是 create() 可读的**文件路径**。
+
+    create() 惰性用 ``Path(template_json).read_text()`` 读模板（R7 :509）。smoke 若传
+    ``.read_text()`` 的文本内容，``Path(<json 文本>)`` 不是存在的文件路径，smoke 在触及
+    Docker 前即 FileNotFoundError，无法验证真实 create/list/delete 链路。
+    """
+    from containers.tests.test_integration import _SMOKE_TEMPLATE_JSON
+
+    path = Path(_SMOKE_TEMPLATE_JSON)
+    assert path.exists(), (
+        f'smoke template_json 须为存在的文件路径（create() 按 Path.read_text 读），'
+        f'实际传入: {_SMOKE_TEMPLATE_JSON!r}'
+    )
+    assert isinstance(json.loads(path.read_text()), dict)
+
+
+# ◀ F3 (4772692556) P2 —— reconcile creating 行时 runtime.get 无防护，daemon 抖动即整 list 500 ◀
+
+@pytest.mark.django_db
+def test_list_survives_runtime_lookup_failure_during_reconcile(orch):
+    """codex R8 F3：_reconcile_creating 的 runtime.get() 在主线程、进线程池前执行且无防护。
+
+    中断的 creating 行进入收敛路径时，若 daemon 临时不可用使 runtime.get 抛异常，整个
+    GET /api/v1/containers/ 返回 500，隐藏所有已持久化 instance。须逐行 catch 降级
+    （保持 CREATING/pending，下次 list 再对账），与 _build_item 的 R7 :400 容错对称。
+    """
+    from datetime import timedelta
+
+    from django.utils import timezone
+
+    inst = Instance.objects.create(
+        name='stuck', port=19021, token='t', home_dir='/h',
+        status=Instance.STATUS_CREATING, image='img:tag',
+    )
+    # 超过 provisioning 时间窗口 → 进入 reconcile 收敛路径（触发 runtime.get）
+    inst.created_at = timezone.now() - timedelta(seconds=120)
+    inst.save(update_fields=['created_at'])
+
+    class _FlakyGet:
+        def __call__(self, name):
+            raise RuntimeError('daemon unavailable')
+
+    orch._runtime.get = _FlakyGet()
+
+    # list 不应因 reconcile 的 runtime 异常而 500
+    items = orch.list()
+    names = {it['name'] for it in items}
+    assert 'stuck' in names, 'daemon 抖动不应隐藏已持久化实例'
+    stuck = next(it for it in items if it['name'] == 'stuck')
+    # 保守保持 creating/pending（无法判定真实状态时不误收敛）
+    assert stuck['status'] == 'creating'
+    assert stuck['health'] == 'pending'

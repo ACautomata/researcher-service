@@ -21,6 +21,11 @@ pytestmark = pytest.mark.skipif(
 
 BASE_DIR = Path(__file__).resolve().parents[3]
 
+# codex R8 F4：smoke 传给 create() 的模板来源。create() 用 Path(template_json).read_text()
+# 读模板（orchestrator 惰性构造），故此处必须是**文件路径**，不能是 .read_text() 内容——
+# 否则 Path(<json 文本>) 不存在，smoke 在触及 Docker 前即失败，无法验证真实 create/list/delete 链路。
+_SMOKE_TEMPLATE_JSON = str(BASE_DIR / 'deploy' / 'openclaw.json')
+
 
 @pytest.mark.django_db
 def test_create_list_delete_real_container(tmp_path):
@@ -35,7 +40,7 @@ def test_create_list_delete_real_container(tmp_path):
     config = FleetConfig(
         root=tmp_path / 'fleet',
         template_dir=Path(template_dir),
-        template_json=(BASE_DIR / 'deploy' / 'openclaw.json').read_text(),
+        template_json=_SMOKE_TEMPLATE_JSON,
         image=image,
         port_start=19000,
         port_end=19999,

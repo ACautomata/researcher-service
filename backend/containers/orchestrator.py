@@ -31,9 +31,11 @@ import urllib.request
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
 
 from django.db import IntegrityError, transaction
+from django.utils import timezone
 
 from .config_renderer import ConfigRenderer
 from .docker_runtime import DockerRuntime
@@ -53,6 +55,13 @@ HEALTH_REMOVING = 'removing'      # removing：清理中
 _MAX_PORT_RETRIES = 8
 # codex R1 :156：list 健康探测并发上限（避免线程爆炸）
 _MAX_HEALTH_WORKERS = 8
+# codex R8 F1：CREATING 行跨进程 lease TTL。_reserve_row 设初始 lease（覆盖随后的 cp -a 模板拷贝），
+# create 在 run 前 checkpoint 续约一次（把 lease 起点推到 run 之前，覆盖 docker create/start）。
+# cp -a（provisioner 内）与 image pull（run 内）是阻塞 IO、内部不续约——依赖 TTL 充分性：
+# 600s 覆盖典型模板拷贝 + 预拉取镜像。极端超时（巨模板/NFS、首次拉大镜像 > 600s）会让 lease 过期，
+# 由 _reconcile self-heal（容器实为 running 则自愈）或收敛 error（可重试）兜底，不致数据损坏。
+# 替代 R7 created_at+60s（无续约、窗口更短、长 create 必误判）。
+_LEASE_TTL = timedelta(seconds=600)
 
 
 class InstanceExists(Exception):
@@ -219,6 +228,9 @@ class InstanceOrchestrator:
                         container_id='',
                         status=Instance.STATUS_CREATING,
                         image=self._cfg.image,
+                        # codex R8 F1：lease 起点随预占行落盘——其它 worker 的 _reconcile_creating
+                        # 据此在 provisioning 期间不误收敛本行（created_at+60s 无法覆盖长 create）。
+                        lease_expires_at=timezone.now() + _LEASE_TTL,
                     )
             except IntegrityError:
                 if Instance.objects.filter(name=name).exists():
@@ -264,6 +276,11 @@ class InstanceOrchestrator:
             directory_created = True
             self._provisioner.provision(home)
             config_path.write_text(self._renderer.render())
+            # codex R8 F1：renewable lease——render 完成后、run 前续约，把 lease 起点推到此刻，
+            # 覆盖随后的 docker run（create+start）。run 内 image pull 仍受 _LEASE_TTL 约束
+            # （阻塞 IO 内部不续约，靠 TTL 充分性 + _reconcile self-heal 兜底，见 _LEASE_TTL）。
+            inst.lease_expires_at = timezone.now() + _LEASE_TTL
+            inst.save(update_fields=['lease_expires_at'])
             run_attempted = True
             container_id = self._runtime.run(
                 ContainerSpec(
@@ -430,27 +447,30 @@ class InstanceOrchestrator:
         主线程串行执行（非线程池）：creating 行通常极少，且 Django ORM save 不宜在
         worker 线程做（pytest 事务包裹下 worker 连接隔离，落盘不可见）。
 
-        codex R7 :430：_inflight_creates 仅本进程可见；多 worker 下另一 worker 刚创建的
-        CREATING 行会被本进程误判为中断。created_at 时间窗口提供跨进程兜底——
-        足够新的行跳过对账（允许 provisioning 完成），仅超过窗口的旧行被收敛。
+        codex R8 F1：跨进程 lease 替代 R7 的 created_at+60s。lease_expires_at 由 _reserve_row
+        设置、create 在 run 前 checkpoint 续约；lease 未过期 = 有活动 create 持有（即使本进程
+        _inflight 不可见的多 worker 长 create），不收敛。None/过期 = 无活动持有，按崩溃中断收敛。
         """
-        from datetime import timedelta
-
-        from django.utils import timezone
-
         now = timezone.now()
-        grace = timedelta(seconds=60)  # 合理 provisioning 最长耗时
         for inst in insts:
             if inst.status != Instance.STATUS_CREATING:
                 continue
             with self._inflight_lock:
                 if inst.name in self._inflight_creates:
                     continue            # 正在 provisioning，非中断——跳过对账
-            # codex R7 :430：跨进程保护——另一 worker 刚创建的 CREATING 行
-            # 可能不在本进程 _inflight_creates，但 created_at 足够新，先不收敛
-            if inst.created_at is not None and (now - inst.created_at) < grace:
+            # codex R8 F1：lease 未过期 = 有活动 create 持有（_reserve_row 设、create 续约），
+            # 即使本进程 _inflight 不可见（多 worker 另一 worker 的长 create）也不收敛。
+            # None/过期 = 无活动持有 → 按崩溃中断收敛。
+            lease = inst.lease_expires_at
+            if lease is not None and now < lease:
                 continue
-            info = self._runtime.get(inst.name)
+            # codex R8 F3：reconcile 的 runtime 查询与 _build_item（R7 :400）对称容错——
+            # daemon 临时不可用时 get() 抛异常，须逐行降级（保持 creating/pending，下次 list 再
+            # 对账），而非让整个 GET /containers/ 500 隐藏全部已持久化 instance。
+            try:
+                info = self._runtime.get(inst.name)
+            except Exception:
+                continue
             if info and info.running:
                 inst.status = Instance.STATUS_RUNNING
                 if info.container_id:

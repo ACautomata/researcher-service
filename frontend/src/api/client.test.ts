@@ -102,6 +102,29 @@ describe('api client', () => {
     expect(assignSpy).toHaveBeenCalledWith('/login')
   })
 
+  it('preserves session and stays on page on transient refresh failure (codex R8 F2)', async () => {
+    // access 401 但 refresh 请求遇 5xx（auth 服务临时中断）：httpOnly refresh cookie 仍可能有效，
+    // forceRefresh 已对 5xx/网络异常不标 refreshExhausted。apiFetch 不得因此清会话/跳登录踢人——
+    // 须区分「确认拒绝（refreshExhausted）」与「瞬态失败」，后者仅抛错保留重试机会。
+    const auth = useAuthStore()
+    auth.token = 'expired-access'
+    const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>
+    fetchMock
+      .mockResolvedValueOnce(mockResp('', 401)) // 原请求 401
+      .mockResolvedValueOnce(mockResp('', 503)) // refresh 瞬态 5xx（非 4xx 确认拒绝）
+    const assignSpy = vi.fn()
+    Object.defineProperty(window, 'location', {
+      configurable: true,
+      value: { pathname: '/', assign: assignSpy },
+    })
+
+    await expect(apiFetch('/api/v1/x')).rejects.toBeInstanceOf(ApiError)
+
+    expect(assignSpy).not.toHaveBeenCalled() // 不跳登录（会话可能仍有效）
+    expect(auth.refreshExhausted).toBe(false) // 瞬态失败不标耗尽
+    expect(fetchMock).toHaveBeenCalledTimes(2) // 原请求 + refresh；无 token 不重试
+  })
+
   it('apiJson returns parsed body on 2xx', async () => {
     ;(globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(mockResp({ a: 1 }))
     expect(await apiJson<{ a: number }>('/x')).toEqual({ a: 1 })

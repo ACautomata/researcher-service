@@ -33,10 +33,14 @@ export async function apiFetch(path: string, init: RequestInit = {}): Promise<Re
     resp = await fetch(path, { ...init, headers: buildHeaders(init, auth.token) })
     if (resp.status !== 401) return resp
   }
-  // 刷新也失败/无 refresh：清本地登录态并显式跳登录（无人观察状态变化，须主动导航）。
-  auth.clearSession()
-  if (typeof window !== 'undefined' && window.location.pathname !== '/login') {
-    window.location.assign('/login')
+  // codex R8 F2：区分「确认拒绝」与「瞬态失败」。forceRefresh 对 refresh 端点 4xx 标
+  // refreshExhausted（cookie 确认失效），对网络异常/5xx 不标（cookie 仍可能有效）。
+  // 仅确认拒绝才清会话跳登录；瞬态失败保留会话供上层重试，避免 auth 服务临时中断即踢人。
+  if (auth.refreshExhausted) {
+    auth.clearSession()
+    if (typeof window !== 'undefined' && window.location.pathname !== '/login') {
+      window.location.assign('/login')
+    }
   }
   throw new ApiError(401, '未登录或登录已过期')
 }

@@ -45,6 +45,10 @@ class Instance(models.Model):
     status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_CREATING)
     image = models.CharField(max_length=255)
     created_at = models.DateTimeField(auto_now_add=True)
+    # codex R8 F1：跨进程可续期 lease——_reserve_row 设置、create 在 run 前 checkpoint 续约，
+    # _reconcile_creating 据此判定活动 create（替代 R7 的 created_at+60s）。
+    # None 视为无保护（migration 前旧行/异常）可收敛。DB 共享态 = 多 worker 可见。
+    lease_expires_at = models.DateTimeField(null=True, blank=True)
 
     def __str__(self) -> str:
         return self.name
