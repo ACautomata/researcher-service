@@ -33,6 +33,7 @@ class FakeRuntime:
             running=True,
             status='running',
             image=spec.image,
+            instance_name=spec.name,  # codex R9-2：模拟真实 Docker 的 openclaw.instance label
         )
         if self.fail_after_create is not None:
             exc = self.fail_after_create

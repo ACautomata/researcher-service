@@ -472,6 +472,7 @@ def test_list_reconciles_creating_row_when_container_running(orch, runtime):
         running=True,
         status='running',
         image='img:tag',
+        instance_name='crashed',  # R9-2：新增字段 (label 匹配)
     )
     item = orch.list()[0]
     assert item['status'] == 'running'
@@ -699,6 +700,7 @@ def test_reconcile_creating_to_stopped_when_container_exited(orch, runtime):
     runtime.containers['half'] = ContainerInfo(
         container_id='halfid', name=container_name('half'),
         running=False, status='exited', image='img:tag',
+        instance_name='half',  # R9-2: label 匹配 (reconcile label guard)
     )
     item = orch.list()[0]
     assert item['status'] == 'stopped'
@@ -1016,6 +1018,94 @@ def test_create_renews_lease_before_run(orch, monkeypatch):
     monkeypatch.setattr(Instance, 'save', spy_save)
     orch.create('demo')
     assert lease_renew_saves, 'create 须在 run 前续约 lease（save update_fields 含 lease_expires_at）'
+
+
+# ◀ R9-2 (4773052706) P1 —— reconcile 拒绝同名但 label 不匹配的外来容器 ◀
+
+@pytest.mark.django_db
+def test_reconcile_rejects_foreign_container_without_matching_label(orch, runtime):
+    """codex R9-2 (P1)：reconcile self-heal 分支采用容器 ID 前须校验 label。
+
+    同名外来容器（openclaw.instance label 不匹配本实例名）的 container_id 不得被采纳——
+    否则后续 DELETE 的 live-ID 比对通过，误删不属于本 orch 的容器。
+    """
+    from datetime import timedelta
+
+    from django.utils import timezone
+
+    inst = Instance.objects.create(
+        name='foreign', port=19021, token='t', home_dir='/h',
+        status=Instance.STATUS_CREATING, image='img:tag',
+        lease_expires_at=timezone.now() - timedelta(seconds=1),  # 已过期 → 进入收敛
+    )
+    # 同名容器，但 instance_name label 不匹配——属于其他 orch / 手动创建
+    runtime.containers['foreign'] = ContainerInfo(
+        container_id='foreign-id',
+        name=container_name('foreign'),
+        running=True, status='running', image='img:tag',
+        instance_name='other-instance',  # ← label 不匹配！
+    )
+
+    orch.list()
+
+    inst.refresh_from_db()
+    assert inst.status == Instance.STATUS_ERROR, 'label 不匹配的外来容器应收敛 error'
+    assert inst.container_id == '', '外来容器的 ID 不得被采纳（否则后续 delete 会误删）'
+
+
+# ◀ R9-1 (4773052706) P1 —— delete 清理资源前重新校验行身份（PK guard）◀
+
+@pytest.mark.django_db
+def test_delete_skips_rmtree_when_row_gone_before_cleanup(orch, runtime, config, monkeypatch):
+    """codex R9-1 (P1)：delete 在 rmtree 前重新查行身份——若行已被另一 delete 删除，跳过 rmtree。
+
+    覆盖双 delete 竞态：delete A 完成（rmtree + inst.delete()）→ delete B（stale，在内存中
+    持有旧 Instance 对象）的 rmtree 前检查发现行已不存在 → 跳过 rmtree，保护 recreate 的
+    新目录（recreate 必须等旧行 delete 后才 INSERT，此时旧行已不在 = 旧 delete 已完成。
+    stale delete B 再前进时，行已不存在 → 跳过）。
+    """
+    orch.create('demo')
+    instance_dir = config.root / 'instances' / 'demo'
+    marker = instance_dir / 'marker.txt'
+    marker.write_text('first')
+
+    # 正常第一个 delete 完成（行已删）
+    orch.delete('demo')
+    assert not Instance.objects.filter(name='demo').exists()
+
+    # recreate —— 新行、新目录、新 PK
+    orch.create('demo')
+    inst_new = Instance.objects.get(name='demo')
+    assert (instance_dir / 'home' / 'workspace' / 'note.md').exists()  # 新 provision 已完成
+
+    # monkeypatch Instance.objects.filter：**第二次**对 name='demo' 的查询返回空
+    #（模拟 stale delete 的 re-validation；stale 对象在真实竞态中是内存中的旧对象，但
+    # 重新查行时当前行已被另一 delete 删掉或已被 recreate 替换。这里测的是
+    # 「行不存在」分支的保护 —— recreate 之前的窗口）。
+    # 为了触发代码路径：正常 `delete` 入口查行须返回非 None（否则入口 return False，
+    # 不走到 PK guard），然后 rmtree 前的检查返回 None（模拟竞态）。
+    real_filter = Instance.objects.filter
+    call_no = {'n': 0}
+
+    def fake_filter(*args, **kwargs):
+        if kwargs.get('name') == 'demo':
+            call_no['n'] += 1
+            if call_no['n'] == 1:
+                return real_filter(*args, **kwargs)  # 入口查行 → 当前行（recreate 的行）
+            # 第二次及之后 → 返回空（模拟行已被外部删除 / recreate 替换）
+            return Instance.objects.none()
+        return real_filter(*args, **kwargs)
+
+    monkeypatch.setattr(Instance.objects, 'filter', fake_filter)
+    rmtree_calls = []
+    orch._dir_remover = lambda p: rmtree_calls.append(p)
+
+    result = orch.delete('demo')
+    assert result is True
+    assert rmtree_calls == [], '行已不存在时 PK guard 须跳过 rmtree（新目录属于 recreate）'
+    assert marker.exists() or (instance_dir / 'home' / 'workspace' / 'note.md').exists(), (
+        'recreate 的新目录不应被 stale delete 删除'
+    )
 
 
 # ◀ 2 (3644601354) P2 :509 —— _build_default 仍急切 read_text() 模板文件 ◀

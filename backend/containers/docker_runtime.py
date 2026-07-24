@@ -55,9 +55,14 @@ class DockerRuntime:
 
     def __init__(self, client_factory=None) -> None:
         self._client_factory = client_factory or docker.from_env
+        # codex R9-3：复用单 client 而非每次 docker.from_env() —— 管理页每 3s×N instance
+        # 的 status 轮询会产生大量无谓 daemon 连接。lazy 构造兼容构造时不连 daemon 的约定。
+        self._client: ... = None
 
     def _client(self):
-        return self._client_factory()
+        if self._client is None:
+            self._client = self._client_factory()
+        return self._client
 
     def build_run_kwargs(self, spec: ContainerSpec) -> dict:
         """构造 docker-py containers.run() 的 kwargs（纯逻辑，可单测）。"""
@@ -134,6 +139,9 @@ class DockerRuntime:
             status=c.status,
             image=image,
             port=port,
+            # codex R9-2：按 openclaw.instance label 提取实例归属——reconcile/delete 用它
+            # 校验容器所有权（外来同名容器 instance_name 不匹配则不采纳/不删）。
+            instance_name=(c.labels or {}).get(LABEL_INSTANCE_KEY),
         )
 
 

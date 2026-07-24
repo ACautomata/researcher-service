@@ -276,6 +276,9 @@ class InstanceOrchestrator:
             directory_created = True
             self._provisioner.provision(home)
             config_path.write_text(self._renderer.render())
+            # codex R9-4：显式 chmod 0644（其它用户可读）防 umask 027/077 导致容器内 node
+            # 用户读不了 bind-mount(ro) 的 openclaw.json，gateway 无法启动。
+            os.chmod(config_path, 0o644)
             # codex R8 F1：renewable lease——render 完成后、run 前续约，把 lease 起点推到此刻，
             # 覆盖随后的 docker run（create+start）。run 内 image pull 仍受 _LEASE_TTL 约束
             # （阻塞 IO 内部不续约，靠 TTL 充分性 + _reconcile self-heal 兜底，见 _LEASE_TTL）。
@@ -340,6 +343,10 @@ class InstanceOrchestrator:
         inst = Instance.objects.filter(name=name).first()
         if inst is None:
             return False
+        # codex R9-1 (P1)：记录 claim 时的行身份。后续 rmtree 前重新查行——若行已被另一 delete
+        # 删除（None）或被 recreate 替换（pk 不同），则跳过 rmtree（资源已不属于本行）。
+        # pk 区分新旧行：recreate 必须等旧行 delete 后、name UNIQUE 阻止重复 INSERT。
+        claimed_pk = inst.pk
         # codex R6 :304：基于 DB status 判断 provisioning——跨进程安全。
         # CREATEING 行（无论本进程在飞与否）表明有 create 正在或曾经 provisioning；
         # delete 须拒删 CREATING 行以保护仍在飞的 create，崩溃中断的 CREATING 行
@@ -378,6 +385,14 @@ class InstanceOrchestrator:
             instance_dir = self._cfg.root / 'instances' / name
         else:
             instance_dir = recorded
+        # codex R9-1 (P1)：rmtree 前重新查行身份——若行已被另一 delete 删除（None）或
+        # 被 recreate 替换为新一代（pk ≠ claimed_pk），则跳过 rmtree。此时目录归新 owner，
+        # 容器已由 container_id 比对守卫保护（不匹配→skip stop/remove）。
+        current = Instance.objects.filter(name=name).first()
+        if current is None or current.pk != claimed_pk:
+            # 行已属于另一 lifecycle 代——跳过目录清理，仅删旧实例（inst 仍指向旧 pk）
+            inst.delete()
+            return True
         try:
             self._dir_remover(instance_dir)
         except FileNotFoundError:
@@ -471,11 +486,14 @@ class InstanceOrchestrator:
                 info = self._runtime.get(inst.name)
             except Exception:
                 continue
-            if info and info.running:
+            # codex R9-2 (P1)：label guard —— 仅 openclaw.instance label 匹配本行名的容器
+            # 才被采纳为「本行拥有」。同名外来容器（手动创建/恢复/旧部署无 label）的 container_id
+            # 不得写入 inst.container_id（否则后续 delete 的 live-ID 比对通过，误删外来容器）。
+            if info and info.running and info.instance_name == inst.name:
                 inst.status = Instance.STATUS_RUNNING
                 if info.container_id:
                     inst.container_id = info.container_id
-            elif info is not None:
+            elif info is not None and info.instance_name == inst.name:
                 inst.status = Instance.STATUS_STOPPED
                 if info.container_id:
                     inst.container_id = info.container_id

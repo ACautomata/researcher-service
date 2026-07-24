@@ -57,6 +57,9 @@ class ContainerInfo:
     # codex R2 :161：宿主映射端口（来自 openclaw.port label），供端口分配对账
     # 未跟踪/无 label 时为 None（allocator 仅并入 int 端口）。
     port: int | None = None
+    # codex R9-2：实例名（来自 openclaw.instance label）——reconcile/delete 用它校验
+    # 容器所有权（外来同名容器 instance_name≠本名则不采纳）。无 label 时为 None。
+    instance_name: str | None = None
 
 
 class ContainerRuntime(Protocol):
