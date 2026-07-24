@@ -27,9 +27,8 @@ export async function apiFetch(path: string, init: RequestInit = {}): Promise<Re
   let resp = await fetch(path, { ...init, headers: buildHeaders(init, auth.token) })
   if (resp.status !== 401) return resp
 
-  // codex R2 :26：access 过期但 httpOnly refresh cookie 可能仍有效——先 hydrate 换新并重试，
-  // 而非直接清会话干等用户手动刷新（单受保护路由下 guard 不会再次 hydrate，否则卡死重登）。
-  await auth.hydrate()
+  // 服务端已拒绝当前 access；即使本地 exp 尚未到期，也必须强制用 refresh cookie 换新。
+  await auth.forceRefresh()
   if (auth.token) {
     resp = await fetch(path, { ...init, headers: buildHeaders(init, auth.token) })
     if (resp.status !== 401) return resp

@@ -52,12 +52,8 @@ export const useAuthStore = defineStore('auth', {
       }
       await this.login(username, password)
     },
-    // codex P2-1/P2-3/round-4 F1：进入受保护路由前恢复登录态。
-    // token 未过期 → 跳过；过期/无 → 先清 token 再用 cookie 换新；
-    // 4xx（含 400 cookie 缺失/过期）→ 标记耗尽；5xx/网络 → 不标记，下次导航重试。
-    async hydrate(): Promise<void> {
-      if (this.token && !isTokenExpired(this.token)) return
-      // 过期/无 token：先清空，避免 refresh 失败时仍带过期 token 被 guard 放行（F1）
+    async forceRefresh(): Promise<void> {
+      // 服务端 401 优先于本地 exp 判断：先丢弃被拒 token，再用 httpOnly cookie 换新。
       this.token = ''
       if (this.refreshExhausted) return
       try {
@@ -71,10 +67,15 @@ export const useAuthStore = defineStore('auth', {
         } else if (resp.status === 400 || resp.status === 401 || resp.status === 403) {
           this.refreshExhausted = true
         }
-        // 5xx/其他：瞬时失败，token 已空，refreshExhausted 保持 false，下次导航重试
       } catch {
         // 网络异常：瞬时失败，不标记，下次重试
       }
+    },
+    // codex P2-1/P2-3/round-4 F1：进入受保护路由前恢复登录态。
+    // token 未过期 → 跳过；过期/无 → 先清 token 再用 cookie 换新。
+    async hydrate(): Promise<void> {
+      if (this.token && !isTokenExpired(this.token)) return
+      await this.forceRefresh()
     },
     // codex P2-2/round-4 F2：access 过期先 refresh 换新，再调后端清 httpOnly cookie，最后重置本地。
     async logout(): Promise<void> {

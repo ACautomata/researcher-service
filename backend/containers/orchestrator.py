@@ -219,29 +219,28 @@ class InstanceOrchestrator:
     def create(self, name: str) -> Instance:
         """创建并启动一个容器（spec §5.4/§5.5）。
 
-        先事务占位（挡重名/仲裁 port），再 mkdir + cp -a + 渲染 + run；
-        run 失败 best-effort 清残留命名容器 + 回滚 DB 行 + 目录。
+        先以进程内 guard 覆盖完整 create，再事务占位（挡重名/仲裁 port），
+        然后 mkdir + cp -a + 渲染 + run；失败时只回滚本次实际创建的资源。
         """
-        inst = self._reserve_row(name)
+        with self._inflight_lock:
+            if name in self._inflight_creates:
+                raise InstanceExists(name)
+            self._inflight_creates.add(name)
+
+        inst = None
         instance_dir = self._cfg.root / 'instances' / name
         home = instance_dir / 'home'
         config_path = instance_dir / 'openclaw.json'
-        # codex R3 :232：run_attempted 区分 run 前/后失败——mkdir/provision/render 阶段失败时
-        # 同名容器可能是历史遗留（DB 无行），不应误删在网 gateway；仅本次确实 run 过才可能留
-        # docker create 的残留命名容器，需在回滚 best-effort remove。
+        directory_created = False
         run_attempted = False
-        # codex R4 :238：preexisting 区分「run 是否因同名容器已存在而失败」——run 前 get 到同名
-        # 容器（DB 恢复/历史孤儿）时，本次 run 创建的是零个新容器，回滚 remove 会误删在网 gateway。
-        # 回滚 remove 的正向所有权证据 = run_attempted ∧ ¬preexisting（run 过且 run 前无同名）。
-        preexisting = self._runtime.get(name) is not None
-        with self._inflight_lock:
-            self._inflight_creates.add(name)
-        # codex R4 :269：success 标志区分异常/成功路径——in-flight 标记须保留到最终 save 之后
-        # （成功路径 run 返回后 status 仍为 CREATING，不能用 status 判断路径）。异常路径在
-        # except 内（回滚后）释放；成功路径在 save 后释放，防 DELETE 在 save 窗口竞删。
-        success = False
+        preexisting = False
         try:
+            # guard 必须先于预占行：DELETE 不能观察到尚未受保护的 creating 行。
+            inst = self._reserve_row(name)
+            # preflight 也在统一回滚范围内；daemon 异常不得遗留 creating 行。
+            preexisting = self._runtime.get(name) is not None
             instance_dir.mkdir(parents=True, exist_ok=False)
+            directory_created = True
             self._provisioner.provision(home)
             config_path.write_text(self._renderer.render())
             run_attempted = True
@@ -258,44 +257,38 @@ class InstanceOrchestrator:
             )
             inst.container_id = container_id
             inst.status = Instance.STATUS_RUNNING
-            # codex R4 :269：save（含失败）前不释放 in-flight——delete 的 busy 守卫须覆盖整个
-            # create（含最终 save），否则 run 返回后 save 前的窗口可被 delete 竞删再由 save 复活行。
             inst.save()
-            success = True
+            return inst
         except Exception:
-            # spec §5.5：失败回滚。
-            # codex R1 :112 best-effort remove 残留命名容器（docker create 成功但 start 失败时
-            #   容器已 Created 残留，否则重试同名 docker 冲突）。
-            # codex R2 :176：remove 自身也可能因 daemon 不可用失败——单独兜底，不阻断后续回滚。
-            # codex R4 :238：仅 run_attempted ∧ ¬preexisting 才 remove（正向所有权证据）。
+            # 仅 run 前确认不存在同名容器时，才可能清理由本次 run 留下的容器。
             if run_attempted and not preexisting:
                 try:
+                    created = self._runtime.get(name)
+                    if created is not None and created.container_id:
+                        inst.container_id = created.container_id
                     self._runtime.remove(name)
+                    inst.container_id = ''
                 except Exception:
+                    # 若清容器失败，保留刚观测到的 id，供 ERROR 行后续 delete 证明所有权。
                     pass
-            # codex R4 :265：先清目录再删行——目录清理失败（root 容器改属主/权限）时保留
-            #   DB 行（标 ERROR，可经 delete 重试清理），而非行已删、目录残留、retry 撞 mkdir。
-            #   抛 InstanceCleanupError（与 :126 对称，view 409 + 行保留），非裸 OSError（500）。
-            try:
-                self._dir_remover(instance_dir)
-            except OSError:
-                inst.status = Instance.STATUS_ERROR
+            # mkdir 成功是目录所有权的正向证据；mkdir 自身失败时保留既有数据。
+            if directory_created:
                 try:
-                    inst.save(update_fields=['status'])
-                except Exception:
-                    pass
-                raise InstanceCleanupError(name, str(instance_dir)) from None
-            inst.delete()
+                    self._dir_remover(instance_dir)
+                except OSError:
+                    if inst is not None:
+                        inst.status = Instance.STATUS_ERROR
+                        try:
+                            inst.save(update_fields=['status', 'container_id'])
+                        except Exception:
+                            pass
+                    raise InstanceCleanupError(name, str(instance_dir)) from None
+            if inst is not None:
+                inst.delete()
             raise
         finally:
-            if not success:
-                # 异常路径：回滚后释放 in-flight（成功路径在上方 save 成功后单独释放）
-                with self._inflight_lock:
-                    self._inflight_creates.discard(name)
-        # 成功路径：save 成功后释放 in-flight（codex R4 :269）
-        with self._inflight_lock:
-            self._inflight_creates.discard(name)
-        return inst
+            with self._inflight_lock:
+                self._inflight_creates.discard(name)
 
     def delete(self, name: str) -> bool:
         """删除容器 + 连数据删（spec §5.4）。
@@ -315,8 +308,11 @@ class InstanceOrchestrator:
         with self._inflight_lock:
             if name in self._inflight_creates:
                 raise InstanceBusy(name)
-        self._runtime.stop(name)
-        self._runtime.remove(name)
+        # container_id 是本行拥有 runtime 容器的正向证据。ERROR + 空 id 可能只是目录清理行，
+        # 同名容器可能早于本次 create，不能无条件 stop/remove。
+        if inst.container_id:
+            self._runtime.stop(name)
+            self._runtime.remove(name)
         # codex R4 :296：删除路径优先由 DB 记录的 home_dir 派生（创建时固化的绝对路径，
         # home_dir=<instance_dir>/home，取 parent 即 instance_dir）——OPENCLAW_FLEET_ROOT 变更后
         # 仍能删到旧 root 下的真实数据，而非用当前 cfg.root 重构（新 root 无该目录会被

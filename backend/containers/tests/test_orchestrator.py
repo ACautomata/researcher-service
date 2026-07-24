@@ -573,7 +573,34 @@ def test_create_rollback_preserves_row_when_dir_cleanup_fails(config, health, ru
         orch.create('demo')
     inst = Instance.objects.get(name='demo')         # 行保留（可经 delete 重试清理）
     assert inst.status == Instance.STATUS_ERROR
+    assert inst.container_id == ''
     assert (config.root / 'instances' / 'demo').exists()   # 目录残留未清
+
+
+@pytest.mark.django_db
+def test_create_persists_owned_container_id_when_all_cleanup_fails(config, health, tmp_path):
+    # run 已创建容器，但 remove 与目录回滚均失败：ERROR 行须持久化 id，后续 delete 才能安全清它。
+    _seed_template(tmp_path / 'template')
+    runtime = FakeRuntime()
+    runtime.fail_after_create = RuntimeError('start failed')
+
+    def fail_remove(name):
+        raise RuntimeError('daemon unavailable')
+
+    def fail_rmtree(path, **kwargs):
+        raise OSError('permission denied')
+
+    runtime.remove = fail_remove
+    orch = InstanceOrchestrator(
+        runtime=runtime, config=config, health_probe=health, dir_remover=fail_rmtree
+    )
+
+    with pytest.raises(InstanceCleanupError):
+        orch.create('demo')
+
+    inst = Instance.objects.get(name='demo')
+    assert inst.status == Instance.STATUS_ERROR
+    assert inst.container_id.startswith('fakeid-demo-')
 
 
 @pytest.mark.django_db
@@ -656,3 +683,72 @@ def test_reconcile_creating_to_error_when_no_container(orch):
     item = orch.list()[0]
     assert item['status'] == 'error'
     assert Instance.objects.get(name='ghost').status == Instance.STATUS_ERROR
+
+
+@pytest.mark.django_db
+def test_create_marks_inflight_before_reserving_row(orch, monkeypatch):
+    # codex R5 :238：DB 行一旦可见，name 必须已在 in-flight guard 中。
+    real_reserve = orch._reserve_row
+    guarded_at_reserve = []
+
+    def spy_reserve(name):
+        guarded_at_reserve.append(name in orch._inflight_creates)
+        return real_reserve(name)
+
+    monkeypatch.setattr(orch, '_reserve_row', spy_reserve)
+    orch.create('demo')
+    assert guarded_at_reserve == [True]
+    assert 'demo' not in orch._inflight_creates
+
+
+@pytest.mark.django_db
+def test_create_preserves_directory_it_did_not_create(config, health, runtime, tmp_path):
+    # codex R5 :280：mkdir 因既有目录失败时，本次请求不拥有该目录，回滚不得删除。
+    instance_dir = config.root / 'instances' / 'demo'
+    instance_dir.mkdir(parents=True)
+    marker = instance_dir / 'keep.txt'
+    marker.write_text('existing data')
+    orch = InstanceOrchestrator(runtime=runtime, config=config, health_probe=health)
+
+    with pytest.raises(FileExistsError):
+        orch.create('demo')
+
+    assert marker.read_text() == 'existing data'
+    assert not Instance.objects.filter(name='demo').exists()
+
+
+@pytest.mark.django_db
+def test_create_rolls_back_row_when_runtime_preflight_fails(config, health, tmp_path):
+    # codex R5 :236：Docker preflight 异常也必须进入统一回滚，不能遗留 creating 行。
+    _seed_template(tmp_path / 'template')
+
+    class _PreflightFails(FakeRuntime):
+        def get(self, name):
+            raise RuntimeError('daemon unavailable')
+
+    orch = InstanceOrchestrator(runtime=_PreflightFails(), config=config, health_probe=health)
+    with pytest.raises(RuntimeError):
+        orch.create('demo')
+
+    assert not Instance.objects.filter(name='demo').exists()
+    assert 'demo' not in orch._inflight_creates
+
+
+@pytest.mark.django_db
+def test_delete_cleanup_only_error_row_preserves_unowned_container(orch, runtime, config):
+    # codex R5 :319：无 container_id 的 ERROR 行没有正向容器所有权证据，delete 仅清理目录/行。
+    instance_dir = config.root / 'instances' / 'demo'
+    instance_dir.mkdir(parents=True)
+    Instance.objects.create(
+        name='demo', port=19014, token='t', home_dir=str(instance_dir / 'home'),
+        container_id='', status=Instance.STATUS_ERROR, image='img:tag',
+    )
+    runtime.containers['demo'] = ContainerInfo(
+        container_id='preexisting', name=container_name('demo'),
+        running=True, status='running', image='img:tag',
+    )
+
+    assert orch.delete('demo') is True
+    assert 'demo' in runtime.containers
+    assert runtime.stopped == []
+    assert runtime.removed == []

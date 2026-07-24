@@ -68,6 +68,25 @@ describe('api client', () => {
     expect((retryInit.headers as Headers).get('Authorization')).toBe(`Bearer ${auth.token}`)
   })
 
+  it('forces refresh before retrying a locally unexpired token rejected with 401 (codex R5 :34)', async () => {
+    const auth = useAuthStore()
+    const rejectedToken = liveToken()
+    const refreshedToken = `${liveToken()}-refreshed`
+    auth.token = rejectedToken
+    const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>
+    fetchMock
+      .mockResolvedValueOnce(mockResp('', 401))
+      .mockResolvedValueOnce(mockResp({ access: refreshedToken }, 200))
+      .mockResolvedValueOnce(mockResp('[]', 200))
+
+    const resp = await apiFetch('/api/v1/x')
+
+    expect(resp.status).toBe(200)
+    expect(fetchMock.mock.calls[1][0]).toBe('/api/v1/auth/token/refresh')
+    const retryInit = fetchMock.mock.calls[2][1] as RequestInit
+    expect((retryInit.headers as Headers).get('Authorization')).not.toBe(`Bearer ${rejectedToken}`)
+  })
+
   it('clears session, redirects, and throws when refresh also fails on 401', async () => {
     const auth = useAuthStore()
     auth.token = 'expired-access'
