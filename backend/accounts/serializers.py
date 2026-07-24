@@ -78,3 +78,14 @@ class CookieTokenRefreshSerializer(TokenRefreshSerializer):
         if not attrs.get('refresh'):
             raise serializers.ValidationError({'refresh': '无 refresh cookie'})
         return super().validate(attrs)
+
+
+class OIDCProviderConfigSerializer(serializers.Serializer):
+    """OIDC provider 注册表条目配置（spec §3：issuer/client_id/scope 走 settings.OAUTH_PROVIDERS）。
+
+    spec §4 零信任：视图不裸读配置 dict，经本 Serializer 校验完整性；缺键即判为未配置完整。
+    """
+
+    issuer = serializers.URLField()
+    client_id = serializers.CharField()
+    scope = serializers.CharField()

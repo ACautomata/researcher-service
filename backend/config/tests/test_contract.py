@@ -3,8 +3,10 @@
 出处：docs/FULLSTACK-REFACTOR-SPEC.md §4（drf-spectacular 出 OpenAPI schema 作权威契约）。
 """
 import json
+from pathlib import Path
 
 import pytest
+from django.conf import settings
 from rest_framework.test import APIClient
 
 
@@ -42,3 +44,13 @@ def test_schema_refresh_is_cookie_only(api):
     op = doc['paths']['/api/v1/auth/token/refresh']['post']
     assert 'requestBody' not in op  # refresh 来自 cookie，无 body
     assert 'refresh' not in json.dumps(op['responses'])  # 响应仅 access
+
+
+def test_daphne_is_runtime_dependency():
+    """codex #51 P1: base.INSTALLED_APPS 无条件包含 'daphne'，它必须落在 runtime 依赖里。"""
+    base_req = Path(__file__).resolve().parent.parent.parent / 'requirements' / 'base.txt'
+    lines = base_req.read_text().splitlines()
+    assert any(line.strip().startswith('daphne==') for line in lines)
+    assert 'daphne' in settings.INSTALLED_APPS
+    import daphne
+    assert daphne.__version__
