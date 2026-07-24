@@ -48,10 +48,26 @@ class JwtAuthMiddleware:
         user = await _authenticate(token) if token else None
         if user is None:
             scope['user'] = AnonymousUser()
+            # 必须先 accept 才能向客户端发送带 code 的 websocket.close 帧；
+            # 直接 close 会导致浏览器只看到 HTTP upgrade 失败/异常关闭，拿不到 4401。
+            subprotocol = self._choose_subprotocol(scope)
+            accept_msg = {'type': 'websocket.accept'}
+            if subprotocol:
+                accept_msg['subprotocol'] = subprotocol
+            await send(accept_msg)
             await send({'type': 'websocket.close', 'code': WS_CLOSE_UNAUTHORIZED})
             return
         scope['user'] = user
         return await self.app(scope, receive, send)
+
+    @staticmethod
+    def _choose_subprotocol(scope) -> str | None:
+        # 如果客户端声明了 access_token subprotocol，握手回应时选中它，
+        # 保持 wire format 一致；否则无 subprotocol 地 accept。
+        for proto in scope.get('subprotocols') or []:
+            if proto == 'access_token' or (isinstance(proto, str) and proto.startswith('access_token.')):
+                return 'access_token'
+        return None
 
     @staticmethod
     def _extract_token(scope) -> str | None:

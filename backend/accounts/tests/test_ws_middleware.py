@@ -52,11 +52,15 @@ async def test_ws_valid_token_subprotocol_accepted():
 @pytest.mark.asyncio
 async def test_ws_query_param_token_rejected():
     # 安全：token 不走 URL query（会进访问日志/浏览器历史/Referer 泄漏 access token）。
-    # 即便 query 带合法 token，也不应被采信——握手拒绝。
+    # 即便 query 带合法 token，也不应被采信——握手拒绝并返回 4401 close frame。
     token = await _access('wsuser')
     comm = WebsocketCommunicator(_app(), f'/ws/chat/?token={token}')
-    connected, _ = await comm.connect()
-    assert connected is False
+    connected, subprotocol = await comm.connect()
+    assert connected is True
+    assert subprotocol is None
+    msg = await comm.receive_output(timeout=1)
+    assert msg['type'] == 'websocket.close'
+    assert msg['code'] == 4401
     await comm.disconnect()
 
 
@@ -64,8 +68,12 @@ async def test_ws_query_param_token_rejected():
 @pytest.mark.asyncio
 async def test_ws_no_token_rejected():
     comm = WebsocketCommunicator(_app(), '/ws/chat/')
-    connected, _ = await comm.connect()
-    assert connected is False
+    connected, subprotocol = await comm.connect()
+    assert connected is True
+    assert subprotocol is None
+    msg = await comm.receive_output(timeout=1)
+    assert msg['type'] == 'websocket.close'
+    assert msg['code'] == 4401
     await comm.disconnect()
 
 
@@ -73,8 +81,12 @@ async def test_ws_no_token_rejected():
 @pytest.mark.asyncio
 async def test_ws_garbage_token_rejected():
     comm = WebsocketCommunicator(_app(), '/ws/chat/', subprotocols=['access_token', 'not-a-jwt'])
-    connected, _ = await comm.connect()
-    assert connected is False
+    connected, subprotocol = await comm.connect()
+    assert connected is True
+    assert subprotocol == 'access_token'
+    msg = await comm.receive_output(timeout=1)
+    assert msg['type'] == 'websocket.close'
+    assert msg['code'] == 4401
     await comm.disconnect()
 
 
@@ -86,8 +98,12 @@ async def test_ws_other_secret_token_rejected():
 
     forged = pyjwt.encode({'user_id': 1, 'token_type': 'access'}, 'other-secret', algorithm='HS256')
     comm = WebsocketCommunicator(_app(), '/ws/chat/', subprotocols=['access_token', forged])
-    connected, _ = await comm.connect()
-    assert connected is False
+    connected, subprotocol = await comm.connect()
+    assert connected is True
+    assert subprotocol == 'access_token'
+    msg = await comm.receive_output(timeout=1)
+    assert msg['type'] == 'websocket.close'
+    assert msg['code'] == 4401
     await comm.disconnect()
 
 
@@ -111,8 +127,12 @@ async def test_ws_inactive_user_token_rejected():
     user = await sync_to_async(User.objects.get)(username='inactive_user')
     await sync_to_async(user.delete)()
     comm = WebsocketCommunicator(_app(), '/ws/chat/', subprotocols=['access_token', token])
-    connected, _ = await comm.connect()
-    assert connected is False
+    connected, subprotocol = await comm.connect()
+    assert connected is True
+    assert subprotocol == 'access_token'
+    msg = await comm.receive_output(timeout=1)
+    assert msg['type'] == 'websocket.close'
+    assert msg['code'] == 4401
     await comm.disconnect()
 
 

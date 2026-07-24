@@ -25,8 +25,12 @@ async def test_asgi_ws_no_token_rejected():
     from config.asgi import application
 
     comm = WebsocketCommunicator(application, '/ws/chat/')
-    connected, _ = await comm.connect()
-    assert connected is False
+    connected, subprotocol = await comm.connect()
+    assert connected is True
+    assert subprotocol is None
+    msg = await comm.receive_output(timeout=1)
+    assert msg['type'] == 'websocket.close'
+    assert msg['code'] == 4401
     await comm.disconnect()
 
 
@@ -36,8 +40,12 @@ async def test_asgi_ws_invalid_token_rejected():
     from config.asgi import application
 
     comm = WebsocketCommunicator(application, '/ws/chat/', subprotocols=['access_token', 'garbage'])
-    connected, _ = await comm.connect()
-    assert connected is False
+    connected, subprotocol = await comm.connect()
+    assert connected is True
+    assert subprotocol == 'access_token'
+    msg = await comm.receive_output(timeout=1)
+    assert msg['type'] == 'websocket.close'
+    assert msg['code'] == 4401
     await comm.disconnect()
 
 
