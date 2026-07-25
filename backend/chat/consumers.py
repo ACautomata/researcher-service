@@ -9,6 +9,13 @@ T06 权限审批（issue #42 / spec §8.2）：start 后经 add_approval_subscri
 审批卡经 _on_approval 透传给前端（type:approval，无 runId）；前端发 resolve{id,kind,decision} →
 client.resolve_approval → 回执 approvalResolved{id,decision} 用网关权威 decision（first-answer-wins，
 codex P1）；start 后 list_pending_approvals 补拉断线期间积累的待审批（codex P2）。disconnect 独立退订。
+
+授权模型（安全复审 acknowledge）：容器是**全面板共享基础设施**（spec §5.2/§5.3/§5.4——共享 LLM key、
+共享端口池、Django 挂 docker.sock 统一编排），`Instance`/`Session` 均无 owner/user_id。故 start/send/
+resolve 与容器创建/删除等整个控制面一致，仅吃全局 IsAuthenticated，**无对象级归属校验**——认证用户
+即可操作任意容器。这是既定的共享信任模型，非本 diff 引入；审批的 per-user 隔离数据（sessionKey→user）
+网关不提供，后端无从绑定。若将来需要 per-user 隔离，须在 `Instance`/`Session` 加 owner 并在容器创建/
+删除/对话/审批等**所有**控制面统一加对象级门（单独给审批加门会造成与等价特权面不一致的虚假安全感）。
 """
 from __future__ import annotations
 

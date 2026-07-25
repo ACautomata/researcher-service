@@ -155,6 +155,11 @@ class ApprovalResolveView(APIView):
     - 成功 → 200 {ok:true, id, decision}
     - 缺字段/非法 decision → 400；instance 不存在 → 404；非法 name → 400
     - 未配对 → 409；网关拒绝（缺 scope 等）/连接失败 → 502（固定文案，不外泄原始异常）
+
+    授权模型（安全复审 acknowledge）：与整个容器控制面一致（见 chat/consumers.py 模块 docstring），
+    容器为全面板共享基础设施、无 owner/user_id，本端仅吃全局 IsAuthenticated，不做对象级归属校验。
+    resolve 的实际权限由**网关侧 `operator.approvals` scope** 强制（spec §8.2）——后端只是经已配对
+    长连接透传；per-user 隔离需 `Instance`/`Session` 引入 owner 并在所有控制面统一加对象级门，非本端独有。
     """
 
     def _get_instance(self, name: str) -> Instance:
