@@ -399,8 +399,12 @@ class OpenClawChatClient:
 
         网关先写压缩归档（*.jsonl.deleted.<ts>.zst）再删，可恢复。需 operator.admin scope（本连接
         已声明 admin）；权限实际由网关侧 scope 强制。REST 层文档须标注「提升权限操作」。
+
+        wire 字段是 ``key``（codex #96 P1）：上游 ``SessionsDeleteParamsSchema``（closedObject）
+        ``key`` 必填、无 ``sessionKey``；与同族 ``sessions.create``/``sessions.send`` 的 ``key`` 一致，
+        区别于 ``chat.*`` 族（``chat.send``/``chat.history`` 用 ``sessionKey``）。
         """
-        return await self._rpc('sessions.delete', {'sessionKey': session_key})
+        return await self._rpc('sessions.delete', {'key': session_key})
 
     async def send_message(self, session_key: str, message: str, *, on_event: OnEvent) -> str:
         if self._ws is None:

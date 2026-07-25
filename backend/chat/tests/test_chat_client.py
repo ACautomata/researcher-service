@@ -669,7 +669,13 @@ async def test_create_session_gateway_reject_raises():
 
 @pytest.mark.asyncio
 async def test_delete_session_builds_frame_and_returns_payload():
-    """发 sessions.delete（admin 级），返回网关 res payload（含归档路径，可恢复）。"""
+    """发 sessions.delete（admin 级），返回网关 res payload（含归档路径，可恢复）。
+
+    wire 字段是 ``key``（不是 ``sessionKey``）——上游 ``SessionsDeleteParamsSchema``
+    （packages/gateway-protocol/src/schema/sessions.ts）是 closedObject，``key`` 必填、
+    无 ``sessionKey``；与同族 ``sessions.create``/``sessions.send`` 的 ``key`` 一致。
+    区别于 ``chat.*`` 族（``chat.send``/``chat.history`` 用 ``sessionKey``）。codex #96 P1。
+    """
     payload = {'deleted': True, 'archived': 'sess-1.jsonl.deleted.123.zst'}
     t = FakeChatTransport(rpc_payloads={'sessions.delete': payload})
     c = OpenClawChatClient(URL, 'dt', transport=t)
@@ -677,7 +683,7 @@ async def test_delete_session_builds_frame_and_returns_payload():
     result = await c.delete_session('sess-1')
     assert result == payload
     req = next(f for f in t.sent if f.get('method') == 'sessions.delete')
-    assert req['params'] == {'sessionKey': 'sess-1'}
+    assert req['params'] == {'key': 'sess-1'}
     await c.aclose()
 
 
