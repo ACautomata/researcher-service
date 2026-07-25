@@ -20,11 +20,11 @@ from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from chat.models import Pairing, Session
+from chat.models import Pairing
 from chat.pairing import PairingConcurrencyError, PairingFleet
 from chat.pairing_ws import PairingError, PairingRequired
 from chat.pool import ChatFleet, NotPaired
-from chat.serializers import ApprovalResolveSerializer, PairingStatusSerializer, SessionSerializer
+from chat.serializers import ApprovalResolveSerializer, PairingStatusSerializer
 from containers.models import NAME_VALIDATOR, Instance
 
 logger = logging.getLogger(__name__)
@@ -106,10 +106,62 @@ class PairingView(APIView):
         return Response(PairingStatusSerializer(pairing).data)
 
 
-class SessionListCreateView(APIView):
-    """GET 列出容器会话 + POST 新建（后端生成 session_key）（spec §9.4）。
+def _parse_sessions(payload: dict) -> list[dict]:
+    """把网关 sessions.list payload 校准为 [{session_key, title, updated_at}]（ACL 单点校准）。
 
-    name 经 NAME_VALIDATOR；instance 不存在 → 404；非法 name → 400。
+    逐字段名「待实测」（对齐 CommandListView._parse_commands）：会话键主取 item['key']、回退
+    item['sessionKey']；标题取派生标题 item['derivedTitle']（替代旧手填 title）；时间取
+    item['updatedAt']。非 dict 项 / 缺 key 项跳过（对网关输入 0 信任）。实测后改此处即可。
+    """
+    items = (payload or {}).get('sessions')
+    if not isinstance(items, list):
+        return []
+    out = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        key = item.get('key') or item.get('sessionKey')
+        if not isinstance(key, str) or not key:
+            continue
+        title = item.get('derivedTitle')
+        updated = item.get('updatedAt')
+        out.append({
+            'session_key': key,
+            'title': title if isinstance(title, str) else '',
+            'updated_at': updated if isinstance(updated, str) else '',
+        })
+    return out
+
+
+def _parse_history(payload: dict) -> dict:
+    """把网关 chat.history payload 校准为 {messages, hasMore, nextOffset}（ACL 单点校准）。
+
+    messages 原样透传（网关已 display-normalized），非 dict 项跳过；hasMore/nextOffset 精确名
+    「待实测」——缺省回退 False / None。实测后改此处即可。
+    """
+    payload = payload or {}
+    items = payload.get('messages')
+    messages = [m for m in items if isinstance(m, dict)] if isinstance(items, list) else []
+    has_more = payload.get('hasMore')
+    next_offset = payload.get('nextOffset')
+    return {
+        'messages': messages,
+        'hasMore': has_more if isinstance(has_more, bool) else False,
+        'nextOffset': next_offset if isinstance(next_offset, (int, str)) else None,
+    }
+
+
+def _parse_created_key(payload: dict) -> str:
+    """从网关 sessions.create payload 取新建的 session key（主取 key、回退 sessionKey）。"""
+    key = (payload or {}).get('key') or (payload or {}).get('sessionKey')
+    return key if isinstance(key, str) else ''
+
+
+class _GatewaySessionsView(APIView):
+    """网关权威会话端点的公共底座：_get_instance + 取 pool client（409/502 错误语义单点）。
+
+    容器为全面板共享基础设施、无 owner/user_id，吃全局 IsAuthenticated（同 ApprovalResolveView）；
+    实际权限由网关侧 scope 强制（read/write/admin），后端只是经已配对长连接透传。
     """
 
     def _get_instance(self, name: str) -> Instance:
@@ -122,26 +174,135 @@ class SessionListCreateView(APIView):
             raise Http404
         return inst
 
-    @extend_schema(responses=SessionSerializer)
-    def get(self, request, name):
+    def _instance_or_error(self, name: str):
+        """(instance, None) 或 (None, 400 Response)。"""
         try:
-            inst = self._get_instance(name)
+            return self._get_instance(name), None
         except _InvalidName:
-            return Response({'detail': '非法 name'}, status=status.HTTP_400_BAD_REQUEST)
-        sessions = Session.objects.filter(instance=inst).order_by('-created_at')
-        return Response(SessionSerializer(sessions, many=True).data)
+            return None, Response({'detail': '非法 name'}, status=status.HTTP_400_BAD_REQUEST)
 
-    @extend_schema(request=None, responses={201: SessionSerializer})
-    def post(self, request, name):
+    def _client_or_error(self, inst, name: str):
+        """(client, None) 或 (None, 409/502 Response)：未配对 409；离线/握手失败 502。"""
         try:
-            inst = self._get_instance(name)
-        except _InvalidName:
-            return Response({'detail': '非法 name'}, status=status.HTTP_400_BAD_REQUEST)
-        title = str((request.data or {}).get('title') or '')[:128]
-        session = Session.objects.create(
-            instance=inst, session_key=uuid.uuid4().hex, title=title,
-        )
-        return Response(SessionSerializer(session).data, status=status.HTTP_201_CREATED)
+            return async_to_sync(ChatFleet.get().get_or_create)(inst), None
+        except NotPaired as e:
+            return None, Response(
+                {'detail': f'容器未配对，请先完成设备配对（status={e.status}）'},
+                status=status.HTTP_409_CONFLICT,
+            )
+        except Exception as e:
+            logger.warning('sessions pool acquire failed for %s: %s', name, e)
+            return None, Response(
+                {'detail': '连接容器失败，请稍后重试'},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+    @staticmethod
+    def _rpc_or_502(name: str, label: str, thunk):
+        """执行一次网关 RPC（thunk 为零参 async callable）；网关拒绝/超时 → 502。
+
+        固定文案不外泄原始异常（仅记服务端日志）。async_to_sync 直接包 client 的 async 方法。
+        """
+        try:
+            return async_to_sync(thunk)(), None
+        except Exception as e:
+            logger.warning('%s failed for %s: %s', label, name, e)
+            return None, Response(
+                {'detail': '会话操作失败，请稍后重试'},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+
+class SessionListCreateView(_GatewaySessionsView):
+    """GET 列出网关权威会话 + POST 新建（issue #81 / spec #76，后端零持久化）。
+
+    GET → sessions.list（agentId=main + includeDerivedTitles），派生标题替代旧 title，响应
+    {sessions:[{session_key,title,updated_at}]}；POST → sessions.create{key,label}（label 可空，
+    网关后续派生标题），201 返回 {session_key}。
+    """
+
+    @extend_schema(request=None, responses={200: None})
+    def get(self, request, name):
+        inst, err = self._instance_or_error(name)
+        if err is not None:
+            return err
+        client, err = self._client_or_error(inst, name)
+        if err is not None:
+            return err
+        payload, err = self._rpc_or_502(name, 'sessions.list', client.list_sessions)
+        if err is not None:
+            return err
+        return Response({'sessions': _parse_sessions(payload)})
+
+    @extend_schema(request=None, responses={201: None})
+    def post(self, request, name):
+        inst, err = self._instance_or_error(name)
+        if err is not None:
+            return err
+        client, err = self._client_or_error(inst, name)
+        if err is not None:
+            return err
+        label = (request.data or {}).get('label')
+        label = label.strip() if isinstance(label, str) else ''
+        key = uuid.uuid4().hex
+        payload, err = self._rpc_or_502(
+            name, 'sessions.create', lambda: client.create_session(key, label=label or None))
+        if err is not None:
+            return err
+        return Response({'session_key': _parse_created_key(payload) or key},
+                        status=status.HTTP_201_CREATED)
+
+
+class SessionHistoryView(_GatewaySessionsView):
+    """GET 读取某会话完整聊天记录（issue #81 / spec #76）：代理 chat.history。
+
+    query 可选 limit / messageId 锚点（向回翻页）；透传 messages[]（网关已 display-normalized）
+    + hasMore/nextOffset 分页字段。需 operator.read scope（网关侧强制）。
+    """
+
+    @extend_schema(request=None, responses={200: None})
+    def get(self, request, name, key):
+        inst, err = self._instance_or_error(name)
+        if err is not None:
+            return err
+        client, err = self._client_or_error(inst, name)
+        if err is not None:
+            return err
+        limit_raw = request.query_params.get('limit')
+        limit = None
+        if limit_raw is not None:
+            try:
+                limit = int(limit_raw)
+            except (TypeError, ValueError):
+                limit = None
+        message_id = request.query_params.get('messageId') or None
+        payload, err = self._rpc_or_502(
+            name, 'chat.history',
+            lambda: client.get_history(key, limit=limit, message_id=message_id))
+        if err is not None:
+            return err
+        return Response(_parse_history(payload))
+
+
+class SessionDetailView(_GatewaySessionsView):
+    """DELETE 删除某会话（issue #81 / spec #76）：代理 sessions.delete。
+
+    **提升权限（admin 级）操作**：需 operator.admin scope，实际权限由网关侧强制；网关先写压缩
+    归档（*.jsonl.deleted.<ts>.zst）再删，可恢复。成功 → 204。
+    """
+
+    @extend_schema(request=None, responses={204: None})
+    def delete(self, request, name, key):
+        inst, err = self._instance_or_error(name)
+        if err is not None:
+            return err
+        client, err = self._client_or_error(inst, name)
+        if err is not None:
+            return err
+        _, err = self._rpc_or_502(name, 'sessions.delete', lambda: client.delete_session(key))
+        if err is not None:
+            return err
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class CommandListView(APIView):
