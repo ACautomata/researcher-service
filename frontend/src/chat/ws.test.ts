@@ -60,16 +60,32 @@ describe('ChatWebSocket', () => {
     expect(MockWS.last!.protocols).toEqual(['access_token', 'jwt-abc'])
   })
 
-  it('start sends a start frame', () => {
+  it('start buffers the start frame until open, then flushes', () => {
+    // 原生 WebSocket 在 CONNECTING 态调 send() 抛 InvalidStateError → 必须缓冲到 onopen 后再发（codex P1）
     const ws = new ChatWebSocket('/ws/chat/', 'jwt', {})
     ws.start('demo')
+    expect(MockWS.last!.sent).toEqual([]) // CONNECTING 期间缓冲，未发出
+    MockWS.last!.fireOpen()
     expect(MockWS.last!.sent).toEqual([{ type: 'start', container: 'demo' }])
   })
 
-  it('send sends a send frame with sessionKey and message', () => {
+  it('send sends a send frame with sessionKey and message once open', () => {
     const ws = new ChatWebSocket('/ws/chat/', 'jwt', {})
+    MockWS.last!.fireOpen()
     ws.send('sk-1', '你好')
     expect(MockWS.last!.sent).toEqual([{ type: 'send', sessionKey: 'sk-1', message: '你好' }])
+  })
+
+  it('buffers multiple frames in order until open, then flushes', () => {
+    const ws = new ChatWebSocket('/ws/chat/', 'jwt', {})
+    ws.start('demo')
+    ws.send('sk-1', 'hi')
+    expect(MockWS.last!.sent).toEqual([])
+    MockWS.last!.fireOpen()
+    expect(MockWS.last!.sent).toEqual([
+      { type: 'start', container: 'demo' },
+      { type: 'send', sessionKey: 'sk-1', message: 'hi' },
+    ])
   })
 
   it('dispatches ready frame to onReady', () => {
@@ -93,11 +109,11 @@ describe('ChatWebSocket', () => {
     expect(onDone).toHaveBeenCalledWith('r1')
   })
 
-  it('dispatches error message to onError', () => {
+  it('dispatches error message and runId to onError', () => {
     const onError = vi.fn()
     new ChatWebSocket('/ws/chat/', 'jwt', { onError })
-    MockWS.last!.fireMessage({ type: 'error', message: '模型超时' })
-    expect(onError).toHaveBeenCalledWith('模型超时')
+    MockWS.last!.fireMessage({ type: 'error', runId: 'r1', message: '模型超时' })
+    expect(onError).toHaveBeenCalledWith('模型超时', 'r1')
   })
 
   it('fires onClose when underlying socket closes (断线)', () => {

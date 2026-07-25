@@ -123,7 +123,7 @@ class _FakeChatWs:
     async def recv(self):
         t = self._t
         connect = next((f for f in t.sent if f.get('method') == 'connect'), None)
-        if connect is not None and not t._connect_acked:
+        if connect is not None and not t._connect_acked and not t.suppress_connect_ack:
             t._connect_acked = True
             if t.connect_ok:
                 return json.dumps({'type': 'res', 'id': connect['id'], 'ok': True,
@@ -156,11 +156,12 @@ class FakeChatTransport:
     """
 
     def __init__(self, *, connect_ok=True, ack_run_id='r1', ack_error=None, events=None,
-                 suppress_ack=False):
+                 suppress_ack=False, suppress_connect_ack=False):
         self.connect_ok = connect_ok
         self.ack_run_id = ack_run_id
         self.ack_error = ack_error
         self.suppress_ack = suppress_ack
+        self.suppress_connect_ack = suppress_connect_ack
         self.events = list(events or [])
         self.sent: list = []
         self._connect_acked = False

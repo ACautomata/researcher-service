@@ -26,6 +26,11 @@ const errorMsg = ref('')
 const connecting = ref(false)
 let ws: ChatWebSocket | null = null
 let disposed = false
+// runId 路由：仅当前 run 的增量写入回复；切会话/容器时把旧 run 标记 abandoned，丢弃其迟到帧（codex P2）
+let activeRunId = ''
+let abandonedRunId = ''
+// selectContainer 的请求代：丢弃切容器途中迟到的 listSessions 响应（codex P2）
+let containerGen = 0
 
 const currentSessionTitle = computed(() => {
   const s = sessions.value.find((x) => x.session_key === selectedSession.value)
@@ -34,6 +39,12 @@ const currentSessionTitle = computed(() => {
 
 // 是否有助手消息正在流式；并发 send 会让旧 streaming 消息永久卡住光标，故流式中禁发
 const streaming = computed(() => messages.value.some((m) => m.role === 'assistant' && m.streaming))
+
+// 切会话/容器时调用：旧 run 的迟到增量/收尾帧按 runId 丢弃，不并入新会话回复
+function abandonActiveRun() {
+  if (activeRunId) abandonedRunId = activeRunId
+  activeRunId = ''
+}
 
 async function loadInstances() {
   try {
@@ -49,15 +60,22 @@ async function loadInstances() {
 
 async function selectContainer(name: string) {
   if (!name || selectedContainer.value === name) return
+  const gen = ++containerGen // 每次切换自增，await 后据此丢弃过期响应
   selectedContainer.value = name
   messages.value = []
+  abandonActiveRun()
   errorMsg.value = ''
   try {
-    sessions.value = await listSessions(name)
+    const list = await listSessions(name)
+    if (gen !== containerGen) return // 切容器途中迟到的响应：丢弃（codex P2）
+    sessions.value = list
     selectedSession.value = sessions.value[0]?.session_key ?? ''
     if (!selectedSession.value) await newSession()
+    if (gen !== containerGen) return // newSession 期间又切容器：不连
+    if (!selectedSession.value) return // 会话创建失败（newSession 已显示错误）：不连接（codex P2）
     connect()
   } catch (e) {
+    if (gen !== containerGen) return
     if (e instanceof ApiError && e.status === 401) return
     errorMsg.value = (e as Error).message
   }
@@ -65,16 +83,25 @@ async function selectContainer(name: string) {
 
 async function newSession() {
   if (!selectedContainer.value) return
+  abandonActiveRun()
+  messages.value = []
   try {
     const s = await createSession(selectedContainer.value)
     sessions.value = [s, ...sessions.value]
     selectedSession.value = s.session_key
-    messages.value = []
     errorMsg.value = ''
   } catch (e) {
     if (e instanceof ApiError && e.status === 401) return
     errorMsg.value = (e as Error).message
   }
+}
+
+function pickSession(key: string) {
+  if (!key || selectedSession.value === key) return
+  abandonActiveRun()
+  selectedSession.value = key
+  messages.value = []
+  errorMsg.value = ''
 }
 
 function connect() {
@@ -89,22 +116,31 @@ function connect() {
         errorMsg.value = ''
       }
     },
-    onText: (_runId, delta) => {
+    onText: (runId, delta) => {
       if (ws !== myWs) return  // stale guard：切换容器后旧 ws 回调不污染新会话
+      if (runId === abandonedRunId) return  // 切会话前遗留 run 的增量：丢弃
+      if (!activeRunId) activeRunId = runId // 首帧锚定当前 run
+      if (runId !== activeRunId) return  // 仅当前 run 的增量写入回复
       const last = messages.value[messages.value.length - 1]
       if (last && last.role === 'assistant' && last.streaming) last.text += delta
     },
-    onDone: () => {
+    onDone: (runId) => {
       if (ws !== myWs) return
+      if (runId === abandonedRunId) return
+      if (runId !== activeRunId) return
       const last = messages.value[messages.value.length - 1]
       if (last && last.streaming) last.streaming = false
+      activeRunId = ''
     },
-    onError: (msg) => {
+    onError: (msg, runId) => {
       if (ws !== myWs) return
+      // 消费者级错误（无 runId，如「请先选择容器」）照常显示；run 级错误按 runId 过滤
+      if (runId && (runId === abandonedRunId || (activeRunId && runId !== activeRunId))) return
       errorMsg.value = msg
       connecting.value = false
       const last = messages.value[messages.value.length - 1]
       if (last && last.streaming) last.streaming = false
+      if (runId) activeRunId = ''
     },
     onClose: () => {
       if (ws !== myWs) return
@@ -121,6 +157,7 @@ function send() {
   if (!text || !ws || !selectedSession.value || connecting.value || streaming.value) return
   messages.value.push({ role: 'user', text, streaming: false })
   messages.value.push({ role: 'assistant', text: '', streaming: true })
+  activeRunId = '' // 等首帧 onText 锚定新 run
   ws.send(selectedSession.value, text)
   input.value = ''
 }
@@ -156,7 +193,7 @@ defineExpose({ selectContainer, send, newSession })
           :key="s.session_key"
           :class="['sess', { active: s.session_key === selectedSession }]"
           :data-test="`session-${s.session_key}`"
-          @click="selectedSession = s.session_key; messages = []"
+          @click="pickSession(s.session_key)"
         >
           {{ s.title || s.session_key.slice(0, 8) }}
         </li>

@@ -42,9 +42,17 @@ class ChatConnectionPool:
         self._ws_url_for = ws_url_for or PairingService._default_ws_url
         self._transport = transport
         self._clients: dict[tuple[str, str], OpenClawChatClient] = {}
-        # 串行化 get_or_create：await client.connect() 让出事件循环期间，并发同 key 调用
-        # 会重复建 client（TOCTOU，orphan 泄漏）。全局锁足够——连接建立不频繁。
-        self._lock = asyncio.Lock()
+        # per-key 锁（Lock Strippling）：同 (url,device_token) 串行建连（TOCTOU 防重复 orphan），
+        # 异 key 并行——避免一个坏容器（建连挂起）阻塞所有其他容器的 chat（codex P1）。
+        self._locks: dict[tuple[str, str], asyncio.Lock] = {}
+
+    def _key_lock(self, key: tuple[str, str]) -> asyncio.Lock:
+        # 同步创建（无 await），单事件循环内原子；并发同 key 第一次进入会拿到同一把锁
+        lock = self._locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._locks[key] = lock
+        return lock
 
     def _default_client_factory(self, url: str, device_token: str) -> OpenClawChatClient:
         kwargs: dict = {}
@@ -53,18 +61,29 @@ class ChatConnectionPool:
         return OpenClawChatClient(url, device_token, **kwargs)
 
     async def get_or_create(self, instance) -> OpenClawChatClient:
-        async with self._lock:
-            pairing = await database_sync_to_async(self._pairing.get_status)(instance)
-            if pairing.status != Pairing.STATUS_PAIRED or not pairing.device_token:
-                raise NotPaired(pairing.status, pairing.pairing_request_id)
-            url = self._ws_url_for(instance)
-            key = (url, pairing.device_token)
-            client = self._clients.get(key)
-            if client is None:
-                client = self._client_factory(url, pairing.device_token)
-                await client.connect()
-                self._clients[key] = client
+        pairing = await database_sync_to_async(self._pairing.get_status)(instance)
+        if pairing.status != Pairing.STATUS_PAIRED or not pairing.device_token:
+            raise NotPaired(pairing.status, pairing.pairing_request_id)
+        url = self._ws_url_for(instance)
+        key = (url, pairing.device_token)
+        # 快路径：命中存活 client 直接返回（无需锁）；dead 的不复用（codex P1：连接断开后驱逐重建）
+        client = self._clients.get(key)
+        if client is not None and not client.dead:
             return client
+        # 同 key 串行建连，异 key 并行（per-key lock）；建连耗时/挂起只阻塞同 key
+        async with self._key_lock(key):
+            client = self._clients.get(key)
+            if client is not None and not client.dead:
+                return client
+            if client is not None:  # 死连接：best-effort 清理后丢弃
+                try:
+                    await client.aclose()
+                except Exception:
+                    pass
+            new_client = self._client_factory(url, pairing.device_token)
+            await new_client.connect()  # 握手有界（chat_client.connect_timeout）
+            self._clients[key] = new_client
+            return new_client
 
     async def aclose_all(self) -> None:
         for client in list(self._clients.values()):

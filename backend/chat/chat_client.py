@@ -51,18 +51,28 @@ class OpenClawChatClient:
         transport=None,
         translator: ChatEventTranslator | None = None,
         connect_frame_builder=None,
+        connect_timeout: float = 10.0,
+        ack_timeout: float = 10.0,
     ) -> None:
         self._url = url
         self._device_token = device_token
         self._connect = transport or websockets.connect
         self._translator = translator or ChatEventTranslator()
         self._build_connect = connect_frame_builder or self._default_connect_frame
+        self._connect_timeout = connect_timeout
+        self._ack_timeout = ack_timeout
         self._ws = None
         self._cm = None
         self._recv_task: asyncio.Task | None = None
         self._pending_acks: dict[str, tuple[asyncio.Future, OnEvent]] = {}
         self._routes: dict[str, OnEvent] = {}
         self._closed = False
+        self._dead = False  # recv loop 退出（连接断开）→ pool 据此驱逐重建
+
+    @property
+    def dead(self) -> bool:
+        """连接是否已不可用（recv loop 退出或被显式关闭）；pool 据此不复用。"""
+        return self._dead or self._closed
 
     @staticmethod
     def _default_connect_frame(req_id: str, device_token: str) -> dict:
@@ -86,7 +96,11 @@ class OpenClawChatClient:
             self._ws = await self._cm.__aenter__()
             req_id = uuid.uuid4().hex
             await self._ws.send(json.dumps(self._build_connect(req_id, self._device_token)))
-            await self._await_res(req_id)  # 握手期独占 recv，等 connect res
+            # 握手期独占 recv，等 connect res；有界等待，避免坏网关升级 WS 后不回 res 永久挂起
+            try:
+                await asyncio.wait_for(self._await_res(req_id), timeout=self._connect_timeout)
+            except asyncio.TimeoutError:
+                raise ChatConnectError('connect handshake timeout')
         except BaseException:
             await self.aclose()
             raise
@@ -109,6 +123,7 @@ class OpenClawChatClient:
         except asyncio.CancelledError:
             raise
         except Exception:
+            self._dead = True  # 连接断开：标记 dead 供 pool 驱逐重建
             if not self._closed:
                 await self._notify_all_error('容器连接断开')
             return
@@ -167,7 +182,11 @@ class OpenClawChatClient:
         }
         await self._ws.send(json.dumps(frame))
         try:
-            run_id = await fut
+            # 有界等待 ack：网关连着但 ack 丢失/不回时不应让 consumer 永久挂起
+            run_id = await asyncio.wait_for(fut, timeout=self._ack_timeout)
+        except asyncio.TimeoutError:
+            self._pending_acks.pop(req_id, None)
+            raise ChatSendError('chat.send ack timeout')
         except BaseException:
             self._pending_acks.pop(req_id, None)
             raise

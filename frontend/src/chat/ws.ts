@@ -14,17 +14,25 @@ export interface ChatHandlers {
   onReady?: (container: string) => void
   onText?: (runId: string, delta: string) => void
   onDone?: (runId: string) => void
-  onError?: (message: string) => void
+  onError?: (message: string, runId?: string) => void
   onClose?: () => void
 }
 
 export class ChatWebSocket {
   private readonly ws: WebSocket
   private readonly handlers: ChatHandlers
+  // CONNECTING 期间 send() 会抛 InvalidStateError → 缓冲到 onopen 后 flush（codex P1）
+  private readonly queue: Record<string, unknown>[] = []
+  private opened = false
 
   constructor(path: string, jwt: string, handlers: ChatHandlers) {
     this.handlers = handlers
     this.ws = new WebSocket(path, ['access_token', jwt])
+    this.ws.onopen = () => {
+      this.opened = true
+      for (const frame of this.queue) this.ws.send(JSON.stringify(frame))
+      this.queue.length = 0
+    }
     this.ws.onmessage = this.handleMessage.bind(this)
     this.ws.onerror = () => this.handlers.onError?.('连接错误')
     this.ws.onclose = () => this.handlers.onClose?.()
@@ -43,7 +51,11 @@ export class ChatWebSocket {
   }
 
   private sendRaw(frame: Record<string, unknown>): void {
-    this.ws.send(JSON.stringify(frame))
+    if (this.opened) {
+      this.ws.send(JSON.stringify(frame))
+    } else {
+      this.queue.push(frame) // CONNECTING 期间缓冲，onopen 后 flush
+    }
   }
 
   private handleMessage(ev: MessageEvent): void {
@@ -59,7 +71,7 @@ export class ChatWebSocket {
         this.handlers.onDone?.(frame.runId)
         break
       case 'error':
-        this.handlers.onError?.(frame.message)
+        this.handlers.onError?.(frame.message, frame.runId)
         break
     }
   }

@@ -42,6 +42,10 @@ class MockWS {
     this.onclose?.({})
   }
 
+  fireOpen(): void {
+    this.onopen?.({})
+  }
+
   fireMessage(obj: unknown): void {
     this.onmessage?.({ data: JSON.stringify(obj) })
   }
@@ -71,6 +75,7 @@ describe('ChatView', () => {
   it('renders container list and auto-connects with start frame on mount', async () => {
     const w = mount(ChatView, { global: { plugins: [createPinia()] } })
     await flushPromises()
+    MockWS.last!.fireOpen() // CONNECTING 期间缓冲的 start 帧在 onopen 后 flush
     expect(w.find('[data-test="container-demo"]').exists()).toBe(true)
     expect(MockWS.last).not.toBeNull()
     expect(MockWS.last!.sent).toContainEqual({ type: 'start', container: 'demo' })
@@ -79,6 +84,7 @@ describe('ChatView', () => {
   it('sends a message and streams the assistant reply with cursor then done', async () => {
     const w = mount(ChatView, { global: { plugins: [createPinia()] } })
     await flushPromises()
+    MockWS.last!.fireOpen()
     MockWS.last!.fireMessage({ type: 'ready', container: 'demo' })
     await nextTick()
 
@@ -125,6 +131,7 @@ describe('ChatView', () => {
   it('disables send while assistant is streaming (防止并发 send 卡住旧消息)', async () => {
     const w = mount(ChatView, { global: { plugins: [createPinia()] } })
     await flushPromises()
+    MockWS.last!.fireOpen()
     MockWS.last!.fireMessage({ type: 'ready', container: 'demo' })
     await nextTick()
 
@@ -145,12 +152,14 @@ describe('ChatView', () => {
     const w = mount(ChatView, { global: { plugins: [createPinia()] } })
     await flushPromises()
     const oldWs = MockWS.last // demo 的 ws
+    oldWs!.fireOpen()
     oldWs!.fireMessage({ type: 'ready', container: 'demo' })
     await nextTick()
 
     await w.find('[data-test="container-other"]').trigger('click')
     await flushPromises() // selectContainer → connect 新 ws
     const newWs = MockWS.last // other 的 ws
+    newWs!.fireOpen()
     newWs!.fireMessage({ type: 'ready', container: 'other' })
     await nextTick()
 
@@ -158,5 +167,71 @@ describe('ChatView', () => {
     oldWs!.fireMessage({ type: 'text', runId: 'r1', delta: 'STALE' })
     await nextTick()
     expect(w.find('[data-test="stream"]').text()).not.toContain('STALE')
+  })
+
+  it('does not merge stale run deltas after a session switch (runId routing, codex P2)', async () => {
+    // 切会话不切 ws：旧 run 的增量必须按 runId 丢弃，不能并入新 run 的回复
+    const SESS2 = { id: 2, session_key: 'sk-2', title: 'S2', created_at: '' }
+    ;(listSessions as ReturnType<typeof vi.fn>).mockResolvedValue([SESSION, SESS2])
+    const w = mount(ChatView, { global: { plugins: [createPinia()] } })
+    await flushPromises()
+    MockWS.last!.fireOpen()
+    MockWS.last!.fireMessage({ type: 'ready', container: 'demo' })
+    await nextTick()
+
+    // 会话 S1 内发消息 → run r1 流式
+    await w.find('[data-test="input"]').setValue('hi')
+    await w.find('[data-test="send"]').trigger('click')
+    MockWS.last!.fireMessage({ type: 'text', runId: 'r1', delta: 'A' })
+    await nextTick()
+
+    // 切到会话 S2，再发 → run r2
+    await w.find('[data-test="session-sk-2"]').trigger('click')
+    await nextTick()
+    await w.find('[data-test="input"]').setValue('yo')
+    await w.find('[data-test="send"]').trigger('click')
+
+    // 旧 run r1 的迟到增量应被丢弃；新 run r2 的增量应渲染
+    MockWS.last!.fireMessage({ type: 'text', runId: 'r1', delta: 'STALE' })
+    MockWS.last!.fireMessage({ type: 'text', runId: 'r2', delta: 'NEW' })
+    await nextTick()
+    const stream = w.find('[data-test="stream"]').text()
+    expect(stream).not.toContain('STALE')
+    expect(stream).toContain('NEW')
+  })
+
+  it('discards stale listSessions response after overlapping container switches (codex P2)', async () => {
+    ;(listInstances as ReturnType<typeof vi.fn>).mockResolvedValue([
+      INSTANCE,
+      { ...INSTANCE, name: 'other', port: 19001 },
+    ])
+    const resolveA: { fn: ((v: unknown[]) => void) | null } = { fn: null }
+    const resolveB: { fn: ((v: unknown[]) => void) | null } = { fn: null }
+    ;(listSessions as ReturnType<typeof vi.fn>).mockImplementation((name: string) =>
+      name === 'demo'
+        ? new Promise((r) => { resolveA.fn = r })
+        : new Promise((r) => { resolveB.fn = r }),
+    )
+    const w = mount(ChatView, { global: { plugins: [createPinia()] } })
+    await flushPromises() // demo 自动选中，listSessions('demo') pending
+    await w.find('[data-test="container-other"]').trigger('click') // 切到 other
+    await nextTick()
+    resolveB.fn!([{ id: 2, session_key: 'sk-b', title: 'B', created_at: '' }]) // other 先回
+    await flushPromises()
+    resolveA.fn!([{ id: 9, session_key: 'sk-stale', title: 'Stale', created_at: '' }]) // demo 迟到
+    await flushPromises()
+    // 当前容器是 other → 保留 B 的会话，丢弃 demo 的迟到响应
+    expect(w.find('[data-test="session-sk-b"]').exists()).toBe(true)
+    expect(w.find('[data-test="session-sk-stale"]').exists()).toBe(false)
+  })
+
+  it('does not connect when automatic session creation fails (codex P2)', async () => {
+    ;(listSessions as ReturnType<typeof vi.fn>).mockResolvedValue([]) // 容器无会话
+    ;(createSession as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('创建失败'))
+    const w = mount(ChatView, { global: { plugins: [createPinia()] } })
+    await flushPromises()
+    // newSession 失败 → selectedSession 仍空 → 不应 connect（无 ws），并保留错误提示
+    expect(MockWS.last).toBeNull()
+    expect(w.find('[data-test="error-bar"]').text()).toContain('创建失败')
   })
 })

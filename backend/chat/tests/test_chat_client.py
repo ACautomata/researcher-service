@@ -121,7 +121,7 @@ async def test_recv_ignores_stray_events_and_keeps_routing():
 async def test_error_state_completes_with_error_event():
     events = [
         {'type': 'event', 'event': 'chat', 'payload': {'runId': 'r1', 'state': 'delta', 'deltaText': 'x'}},
-        {'type': 'event', 'event': 'chat', 'payload': {'runId': 'r1', 'state': 'error', 'message': '模型错'}},
+        {'type': 'event', 'event': 'chat', 'payload': {'runId': 'r1', 'state': 'error', 'errorMessage': '模型错'}},
     ]
     t = FakeChatTransport(ack_run_id='r1', events=events)
     received = []
@@ -206,3 +206,28 @@ async def test_aclose_rejects_pending_send_message():
     await c.aclose()
     with pytest.raises(ChatClientError):
         await task
+
+
+@pytest.mark.asyncio
+async def test_connect_handshake_timeout_raises_connect_error():
+    # 网关升级 WS 后永不回 connect res → _await_res 挂起 → connect_timeout 触发 ChatConnectError
+    t = FakeChatTransport(suppress_connect_ack=True)
+    c = OpenClawChatClient(URL, 'dt', transport=t, connect_timeout=0.1)
+    with pytest.raises(ChatConnectError):
+        await c.connect()
+
+
+@pytest.mark.asyncio
+async def test_send_message_times_out_when_ack_never_arrives():
+    # 网关连着但不回 chat.send ack → send_message 不应永久挂起；超时后清理 pending 条目
+    t = FakeChatTransport(suppress_ack=True)
+    c = OpenClawChatClient(URL, 'dt', transport=t, ack_timeout=0.1)
+    await c.connect()
+
+    async def on_event(frame):
+        pass
+
+    with pytest.raises(ChatSendError):
+        await c.send_message('s', 'm', on_event=on_event)
+    assert c._pending_acks == {}
+    await c.aclose()
