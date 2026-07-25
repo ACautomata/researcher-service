@@ -10,6 +10,7 @@ import json
 from django.db import models
 
 from containers.models import Instance
+from security.fields import EncryptedTextField
 
 
 class Pairing(models.Model):
@@ -31,8 +32,8 @@ class Pairing(models.Model):
     )
     device_id = models.CharField(max_length=64, blank=True, default='')
     public_key_pem = models.TextField(blank=True, default='')
-    private_key_pem = models.TextField(blank=True, default='')
-    device_token = models.CharField(max_length=255, blank=True, default='')
+    private_key_pem = EncryptedTextField(blank=True, default='')
+    device_token = EncryptedTextField(blank=True, default='')
     scopes_json = models.TextField(blank=True, default='[]')
     pairing_request_id = models.CharField(max_length=128, blank=True, default='')
     status = models.CharField(

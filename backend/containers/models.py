@@ -10,6 +10,8 @@ name 经 RegexValidator 防路径/docker-name 注入（小写 DNS-label，禁 / 
 from django.core.validators import RegexValidator
 from django.db import models
 
+from security.fields import EncryptedTextField
+
 # spec §5.3：容器名 openclaw-gw-<name>；name 须小写 DNS-label 风格，
 # 首字母（禁纯数字/下划线开头 Docker 名），3–30 字符，仅 [a-z0-9-]，
 # 拒路径分隔符 / .. / 空格 / 大写（同时防 instances/<name>/ 目录穿越与注入）。
@@ -38,7 +40,7 @@ class Instance(models.Model):
     name = models.CharField(max_length=30, unique=True, validators=[NAME_VALIDATOR])
     # codex R1 :77：unique 兜底并发端口竞争（应用层 allocator 之外，DB 最后仲裁）
     port = models.IntegerField(unique=True)
-    token = models.CharField(max_length=127)
+    token = EncryptedTextField()
     home_dir = models.CharField(max_length=512)
     # run 前未知；空串而非 NULL（避免 null-string 反模式，Django 官方建议）
     container_id = models.CharField(max_length=128, blank=True, default='')
