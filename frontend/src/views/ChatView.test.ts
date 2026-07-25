@@ -7,7 +7,7 @@ import { nextTick } from 'vue'
 import { createPinia, setActivePinia } from 'pinia'
 
 vi.mock('@/api/containers', () => ({ listInstances: vi.fn() }))
-vi.mock('@/api/chat', () => ({ listSessions: vi.fn(), createSession: vi.fn() }))
+vi.mock('@/api/chat', () => ({ listSessions: vi.fn(), createSession: vi.fn(), listCommands: vi.fn() }))
 vi.mock('element-plus', async (importOriginal) => {
   const actual = (await importOriginal()) as Record<string, unknown>
   return { ...actual, ElMessage: { success: vi.fn(), error: vi.fn(), warning: vi.fn() } }
@@ -15,7 +15,7 @@ vi.mock('element-plus', async (importOriginal) => {
 
 import ChatView from '@/views/ChatView.vue'
 import { listInstances } from '@/api/containers'
-import { createSession, listSessions } from '@/api/chat'
+import { createSession, listCommands, listSessions } from '@/api/chat'
 import { useAuthStore } from '@/stores/auth'
 
 class MockWS {
@@ -69,6 +69,7 @@ describe('ChatView', () => {
     ;(listInstances as ReturnType<typeof vi.fn>).mockResolvedValue([INSTANCE])
     ;(listSessions as ReturnType<typeof vi.fn>).mockResolvedValue([SESSION])
     ;(createSession as ReturnType<typeof vi.fn>).mockResolvedValue(SESSION)
+    ;(listCommands as ReturnType<typeof vi.fn>).mockResolvedValue([])
   })
   afterEach(() => {
     vi.unstubAllGlobals()
@@ -505,5 +506,135 @@ describe('ChatView', () => {
     // 重新连接前按钮禁用是对的;此处断言 recover 把卡从 resolving 拉回(若仍 resolving,重连后会卡死)
     expect(w.find('[data-test="approval-ap-1"]').exists()).toBe(true)
     expect(w.find('[data-test="approval-ap-2"]').exists()).toBe(true)
+  })
+
+  // ---- T07 斜杠命令补全（issue #43 / spec §9.4）----
+  const COMMANDS = [
+    { name: 'model', description: '切换模型', aliases: ['/model', '/m'] },
+    { name: 'wiki', description: '在 wiki 中检索/写入', aliases: ['/wiki'] },
+    { name: 'compact', description: '压缩会话上下文', aliases: ['/compact'] },
+    { name: 'new', description: '新建会话', aliases: ['/new'] },
+  ]
+
+  // 真实 KeyboardEvent 派发：test-utils trigger('keydown',{key}) 在 jsdom 下对带导航逻辑的
+  // @keydown 处理器 key 传递不可靠（Enter/Escape 不生效），改 dispatch 原生事件保证处理器收到。
+  function press(el: Element, key: string) {
+    el.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true }))
+  }
+
+  it('fetches the container command list on mount (验收 1 清单来源 commands.list)', async () => {
+    ;(listCommands as ReturnType<typeof vi.fn>).mockResolvedValue(COMMANDS)
+    const w = await mountReady()
+    expect(listCommands).toHaveBeenCalledWith('demo')
+    // 菜单仅在输入 / 时弹（此处未输入，保持关闭）；清单已就绪——输入 / 即可补全
+    expect(w.find('[data-test="slash-menu"]').exists()).toBe(false)
+    await w.find('[data-test="input"]').setValue('/')
+    await nextTick()
+    expect(w.find('[data-test="slash-menu"]').exists()).toBe(true)
+  })
+
+  it('shows the slash menu with prefix filtering when typing / (验收 1)', async () => {
+    ;(listCommands as ReturnType<typeof vi.fn>).mockResolvedValue(COMMANDS)
+    const w = await mountReady()
+    await w.find('[data-test="input"]').setValue('/m')
+    await nextTick()
+    const items = w.findAll('[data-test="slash-item"]')
+    const texts = items.map((i) => i.text())
+    // 前缀过滤：/m 命中 /model 与 /m（同一 model 命令的两个别名各占一行），不含 /wiki//compact
+    expect(items.length).toBe(2)
+    expect(texts.join(' ')).toContain('/model')
+    expect(texts.join(' ')).toContain('切换模型')
+    expect(texts.join(' ')).not.toContain('/wiki')
+  })
+
+  it('hides the slash menu for plain text and closes on space (原型 oc-chat-page)', async () => {
+    ;(listCommands as ReturnType<typeof vi.fn>).mockResolvedValue(COMMANDS)
+    const w = await mountReady()
+    await w.find('[data-test="input"]').setValue('hello')
+    await nextTick()
+    expect(w.find('[data-test="slash-menu"]').exists()).toBe(false)
+    await w.find('[data-test="input"]').setValue('/model ')
+    await nextTick()
+    expect(w.find('[data-test="slash-menu"]').exists()).toBe(false)
+  })
+
+  it('clicking a slash item fills the input and sends via normal chat.send (验收 2)', async () => {
+    ;(listCommands as ReturnType<typeof vi.fn>).mockResolvedValue(COMMANDS)
+    const w = await mountReady()
+    await w.find('[data-test="input"]').setValue('/mo')
+    await nextTick()
+    // 点选（@mousedown.prevent 拦截，防 textarea 失焦；真实 mousedown 事件）
+    w.find('[data-test="slash-item"]').element.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))
+    await nextTick()
+    // 点选填入别名（含尾随空格便于续输参数），菜单关闭
+    expect((w.find('[data-test="input"]').element as HTMLTextAreaElement).value).toBe('/model ')
+    expect(w.find('[data-test="slash-menu"]').exists()).toBe(false)
+    // 经普通发送路径发 /cmd（非专用命令通道，r26 §2）
+    await w.find('[data-test="send"]').trigger('click')
+    expect(MockWS.last!.sent).toContainEqual({ type: 'send', sessionKey: 'sk-1', message: '/model' })
+  })
+
+  it('supports keyboard navigation and Enter-to-fill (补全交互)', async () => {
+    ;(listCommands as ReturnType<typeof vi.fn>).mockResolvedValue(COMMANDS)
+    const w = await mountReady()
+    const input = w.find('[data-test="input"]')
+    await input.setValue('/')
+    await nextTick()
+    const items = w.findAll('[data-test="slash-item"]')
+    expect(items.length).toBeGreaterThan(1)
+    expect(items[0].classes()).toContain('sel') // 首项默认高亮
+    press(input.element, 'ArrowDown')
+    await nextTick()
+    expect(w.findAll('[data-test="slash-item"]')[1].classes()).toContain('sel')
+    press(input.element, 'Enter')
+    await nextTick()
+    // Enter 选中高亮项（第二项 /m），填入而非发送
+    expect((input.element as HTMLTextAreaElement).value).toBe('/m ')
+    expect(w.find('[data-test="slash-menu"]').exists()).toBe(false)
+    expect(MockWS.last!.sent.filter((f) => (f as { type: string }).type === 'send').length).toBe(0)
+  })
+
+  it('dismisses the slash menu on Escape', async () => {
+    ;(listCommands as ReturnType<typeof vi.fn>).mockResolvedValue(COMMANDS)
+    const w = await mountReady()
+    const input = w.find('[data-test="input"]')
+    await input.setValue('/')
+    await nextTick()
+    expect(w.find('[data-test="slash-menu"]').exists()).toBe(true)
+    press(input.element, 'Escape')
+    await nextTick()
+    expect(w.find('[data-test="slash-menu"]').exists()).toBe(false)
+  })
+
+  it('clears the command cache when switching container (命令按容器隔离)', async () => {
+    ;(listCommands as ReturnType<typeof vi.fn>).mockResolvedValue(COMMANDS)
+    ;(listInstances as ReturnType<typeof vi.fn>).mockResolvedValue([
+      INSTANCE,
+      { ...INSTANCE, name: 'other', port: 19001 },
+    ])
+    const w = await mountReady()
+    expect(listCommands).toHaveBeenCalledWith('demo')
+    await w.find('[data-test="input"]').setValue('/')
+    await nextTick()
+    expect(w.find('[data-test="slash-menu"]').exists()).toBe(true)
+    // 切容器：清空已缓存命令 + 关闭菜单，并为新容器重新拉取
+    await w.find('[data-test="container-other"]').trigger('click')
+    await flushPromises()
+    expect(listCommands).toHaveBeenCalledWith('other')
+    expect(w.find('[data-test="slash-menu"]').exists()).toBe(false)
+  })
+
+  it('keeps the chat usable when the command list fails to load (清单失败降级)', async () => {
+    ;(listCommands as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('网关拒绝'))
+    const w = await mountReady()
+    // 清单拉取失败：不弹致命错误，输入 / 无匹配项、菜单保持隐藏
+    expect(w.find('[data-test="error-bar"]').exists()).toBe(false)
+    await w.find('[data-test="input"]').setValue('/')
+    await nextTick()
+    expect(w.find('[data-test="slash-menu"]').exists()).toBe(false)
+    // 普通对话仍可用
+    await w.find('[data-test="input"]').setValue('你好')
+    await w.find('[data-test="send"]').trigger('click')
+    expect(MockWS.last!.sent).toContainEqual({ type: 'send', sessionKey: 'sk-1', message: '你好' })
   })
 })

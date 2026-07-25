@@ -289,6 +289,36 @@ class OpenClawChatClient:
                 cards.append(card)
         return cards
 
+    async def list_commands(self) -> dict:
+        """拉取该 agent 工作区的斜杠命令清单（T07，spec §8.2）：发 commands.list，有界等 res。
+
+        与 resolve_approval 同构的「req→res 回执」RPC（复用 _pending_resolves，按 req id 分发）。
+        请求参数按 r26 §2：agentId="main"、scope="both"（text+native 全量）、includeArgs=True
+        （保留参数元数据供前端后续展示；**响应原样透传**，外层键名 `commands` 与 includeArgs
+        元数据字段名「待实测」由 REST 层解析/校准，client 不做键名假设）。
+        未连接 → 返回 {}（对齐 list_pending_approvals 的 best-effort）；网关拒绝（缺 operator.read）/
+        ack 超时 → 抛 ChatSendError（上层 REST 映射 502）。
+        """
+        if self._ws is None:
+            return {}
+        req_id = uuid.uuid4().hex
+        fut = asyncio.get_running_loop().create_future()
+        self._pending_resolves[req_id] = fut
+        frame = {
+            'type': 'req', 'id': req_id, 'method': 'commands.list',
+            'params': {'agentId': _AGENT_ID, 'scope': 'both', 'includeArgs': True},
+        }
+        try:
+            await self._ws.send(json.dumps(frame))
+            payload = await asyncio.wait_for(fut, timeout=self._ack_timeout)
+        except asyncio.TimeoutError:
+            self._pending_resolves.pop(req_id, None)
+            raise ChatSendError('commands.list ack timeout')
+        except BaseException:
+            self._pending_resolves.pop(req_id, None)
+            raise
+        return payload or {}
+
     async def send_message(self, session_key: str, message: str, *, on_event: OnEvent) -> str:
         if self._ws is None:
             raise ChatClientError('client not connected')

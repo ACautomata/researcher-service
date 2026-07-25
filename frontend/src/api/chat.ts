@@ -39,3 +39,15 @@ export function createSession(name: string, title = ''): Promise<SessionDTO> {
     body: JSON.stringify({ title }),
   })
 }
+
+// 斜杠命令清单（issue #43 / spec §8.4）：后端代理网关 commands.list，按容器隔离。
+// 前端补全契约：name（命令名）+ description（一句话描述）+ aliases（精确斜杠别名，如 /model、/m）。
+export interface CommandDTO {
+  name: string
+  description: string
+  aliases: string[]
+}
+
+export function listCommands(name: string): Promise<CommandDTO[]> {
+  return apiJson<CommandDTO[]>(`/api/v1/containers/${encodeURIComponent(name)}/chat/commands`)
+}

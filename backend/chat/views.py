@@ -144,6 +144,97 @@ class SessionListCreateView(APIView):
         return Response(SessionSerializer(session).data, status=status.HTTP_201_CREATED)
 
 
+class CommandListView(APIView):
+    """GET 拉取该容器的斜杠命令清单（T07，spec §8.4）：代理网关 commands.list（需 operator.read）。
+
+    经该容器 pool client 发 commands.list，把网关清单翻译成前端补全契约
+    [{name, description, aliases[]}]——aliases 为精确斜杠别名（textAliases，如 /model、/m）。
+
+    校准逻辑（验收 3，spec §8.2 标「待实测」外层键名/includeArgs 元数据，集中在此便于实测后单点修改）：
+    - 外层键名：主取 payload['commands']，回退兼容单数 payload['command']（与 list_pending_approvals 同策略）。
+    - 命令项：非 dict / 缺 name 跳过（对网关输入 0 信任）；aliases 取 textAliases，缺省回退 `/{name}`。
+    - includeArgs 元数据（args 等）当前**不透传**——前端 MVP 只需 name/description/aliases（cmd mono + 描述）；
+      实测确认字段名后如需展示参数再扩。
+
+    - 成功 → 200 [{name, description, aliases[]}]；instance 不存在 → 404；非法 name → 400
+    - 未配对 → 409；网关拒绝（缺 scope）/离线/握手失败 → 502（固定文案，原始异常仅记服务端日志）
+
+    授权模型同 ApprovalResolveView：容器为全面板共享基础设施、无 owner，吃全局 IsAuthenticated；
+    实际权限由网关侧 operator.read scope 强制（spec §8.2），后端只是经已配对长连接透传。
+    """
+
+    def _get_instance(self, name: str) -> Instance:
+        try:
+            NAME_VALIDATOR(name)
+        except ValidationError:
+            raise _InvalidName
+        inst = Instance.objects.filter(name=name).first()
+        if inst is None:
+            raise Http404
+        return inst
+
+    @staticmethod
+    def _parse_commands(payload: dict) -> list[dict]:
+        """把网关 commands.list payload 校准为 [{name, description, aliases[]}]（见类 docstring）。"""
+        payload = payload or {}
+        items = payload.get('commands')
+        if items is None:
+            single = payload.get('command')
+            items = [single] if isinstance(single, dict) else []
+        if not isinstance(items, list):
+            return []
+        out = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            cmd_name = item.get('name')
+            if not isinstance(cmd_name, str) or not cmd_name:
+                continue
+            aliases = item.get('textAliases')
+            if not isinstance(aliases, list):
+                aliases = []
+            aliases = [a for a in aliases if isinstance(a, str) and a]
+            if not aliases:
+                aliases = [f'/{cmd_name}']
+            description = item.get('description')
+            out.append({
+                'name': cmd_name,
+                'description': description if isinstance(description, str) else '',
+                'aliases': aliases,
+            })
+        return out
+
+    @extend_schema(request=None, responses={200: None})
+    def get(self, request, name):
+        try:
+            inst = self._get_instance(name)
+        except _InvalidName:
+            return Response({'detail': '非法 name'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            client = async_to_sync(ChatFleet.get().get_or_create)(inst)
+        except NotPaired as e:
+            return Response(
+                {'detail': f'容器未配对，请先完成设备配对（status={e.status}）'},
+                status=status.HTTP_409_CONFLICT,
+            )
+        except Exception as e:
+            logger.warning('commands.list pool acquire failed for %s: %s', name, e)
+            return Response(
+                {'detail': '连接容器失败，请稍后重试'},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+        try:
+            payload = async_to_sync(client.list_commands)()
+        except Exception as e:
+            # 原始异常（缺 operator.read/连接断开等）仅记服务端日志，不外泄到响应
+            logger.warning('commands.list failed for %s: %s', name, e)
+            return Response(
+                {'detail': '拉取命令清单失败，请稍后重试'},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+        return Response(self._parse_commands(payload))
+
+
 class ApprovalResolveView(APIView):
     """POST 回覆一次权限审批（T06，spec §8.4 回退路径；WS 路径为主）。
 

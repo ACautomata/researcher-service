@@ -14,7 +14,7 @@ vi.mock('@/api/client', () => ({
 }))
 
 import { apiJson } from '@/api/client'
-import { getPairing, triggerPair, listSessions, createSession } from '@/api/chat'
+import { getPairing, triggerPair, listSessions, createSession, listCommands } from '@/api/chat'
 
 describe('chat pairing api', () => {
   beforeEach(() => {
@@ -83,5 +83,27 @@ describe('chat sessions api', () => {
     ;(apiJson as ReturnType<typeof vi.fn>).mockResolvedValue([])
     await listSessions('a b')
     expect(apiJson).toHaveBeenCalledWith('/api/v1/containers/a%20b/chat/sessions/')
+  })
+})
+
+// T07 斜杠命令清单（issue #43 / spec §8.4）：GET 代理 commands.list。
+describe('chat commands api', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('listCommands hits the commands endpoint', async () => {
+    ;(apiJson as ReturnType<typeof vi.fn>).mockResolvedValue([
+      { name: 'model', description: '切换模型', aliases: ['/model', '/m'] },
+    ])
+    const result = await listCommands('demo')
+    expect(apiJson).toHaveBeenCalledWith('/api/v1/containers/demo/chat/commands')
+    expect(result[0].aliases).toContain('/model')
+  })
+
+  it('encodes the container name in the commands URL', async () => {
+    ;(apiJson as ReturnType<typeof vi.fn>).mockResolvedValue([])
+    await listCommands('a b')
+    expect(apiJson).toHaveBeenCalledWith('/api/v1/containers/a%20b/chat/commands')
   })
 })

@@ -4,7 +4,7 @@
 // WS 经 /ws/chat/（JWT subprotocol，复用 T02 中间件）；多容器切换 = 切 ChatWebSocket。
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { listInstances, type InstanceDTO } from '@/api/containers'
-import { createSession, listSessions, type SessionDTO } from '@/api/chat'
+import { createSession, listCommands, listSessions, type CommandDTO, type SessionDTO } from '@/api/chat'
 import { useAuthStore } from '@/stores/auth'
 import { ApiError } from '@/api/client'
 import { ChatWebSocket } from '@/chat/ws'
@@ -62,6 +62,94 @@ const visibleApprovals = computed(() =>
   approvals.value.filter((a) => !a.sessionKey || a.sessionKey === selectedSession.value),
 )
 
+// ---- T07 斜杠命令补全（issue #43 / spec §9.4，照原型 oc-chat-page.html）----
+// 清单经 listCommands（后端代理网关 commands.list）按容器拉取并缓存；输入 `/` 弹补全菜单（前缀过滤，
+// cmd mono + 描述），点选/键盘选中填入后经普通 send() 发 `/cmd`（r26 §2：命令走普通 chat.send）。
+// 拉取失败静默降级（commands 空、菜单不弹），不影响普通对话。
+interface SlashOption {
+  alias: string // 展示/填入的精确斜杠别名（含前导 /）
+  description: string
+}
+
+const commands = ref<CommandDTO[]>([])
+const slashIndex = ref(0)
+const slashDismissed = ref(false) // Esc 临时关闭：内容再变化（slashActive 重算）时自动复位
+
+// 当前斜杠前缀：仅当输入形如 `/xxx`（无空格）时激活，返回去掉前导 / 的小写查询；否则 null
+const slashQuery = computed<string | null>(() => {
+  const v = input.value
+  if (!v.startsWith('/') || v.includes(' ')) return null
+  return v.slice(1).toLowerCase()
+})
+
+const slashActive = computed(() => slashQuery.value !== null)
+
+// 把命令清单拍平为「别名×描述」选项并按当前前缀过滤（/m 命中 /model 与 /m）
+const slashMatches = computed<SlashOption[]>(() => {
+  const q = slashQuery.value
+  if (q === null) return []
+  const out: SlashOption[] = []
+  for (const c of commands.value) {
+    for (const a of c.aliases) {
+      if (a.slice(1).toLowerCase().startsWith(q)) out.push({ alias: a, description: c.description })
+    }
+  }
+  return out
+})
+
+const slashOpen = computed(
+  () => slashActive.value && !slashDismissed.value && slashMatches.value.length > 0,
+)
+
+// 拉取当前容器命令清单（随容器切换调用）；失败静默降级为空清单
+async function loadCommands(name: string) {
+  try {
+    commands.value = await listCommands(name)
+  } catch {
+    commands.value = []
+  }
+}
+
+function onComposerInput() {
+  // 内容变化：若不再是斜杠前缀（删字符/加空格），复位 Esc 关闭态，下次输 / 可再弹
+  if (!slashActive.value) slashDismissed.value = false
+  slashIndex.value = 0
+}
+
+// 点选/选中：填入别名 + 尾随空格（便于续输参数），关闭菜单并聚焦；发送仍走普通 send()
+function pickSlash(o: SlashOption) {
+  input.value = `${o.alias} `
+  slashDismissed.value = true
+}
+
+function onComposerKeydown(e: KeyboardEvent) {
+  // 菜单开启：斜杠补全导航/选中/关闭优先于发送
+  if (slashOpen.value) {
+    if (e.key === 'ArrowDown') {
+      e.preventDefault()
+      slashIndex.value = (slashIndex.value + 1) % slashMatches.value.length
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault()
+      slashIndex.value =
+        (slashIndex.value - 1 + slashMatches.value.length) % slashMatches.value.length
+    } else if (e.key === 'Enter' || e.key === 'Tab') {
+      // Enter/Tab 选中高亮项填入（不发送）；发送由菜单关闭后的 Enter 触发
+      e.preventDefault()
+      const m = slashMatches.value[slashIndex.value]
+      if (m) pickSlash(m)
+    } else if (e.key === 'Escape') {
+      e.preventDefault()
+      slashDismissed.value = true
+    }
+    return
+  }
+  // 菜单关闭：Enter（无修饰键）发送；Shift+Enter 换行（与原 @keydown.enter.exact 行为一致）
+  if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
+    e.preventDefault()
+    send()
+  }
+}
+
 // 切会话/容器时调用：旧 run（已 claim 或仍 pending）标记 abandoned，其迟到帧按 runId 丢弃
 function abandonActiveRun() {
   if (activeRunId) abandonedRunIds.add(activeRunId)
@@ -103,8 +191,12 @@ async function selectContainer(name: string) {
   sessions.value = []
   messages.value = []
   approvals.value = [] // 切容器：清空审批卡（审查 #6）
+  commands.value = [] // 切容器：清空命令缓存（命令按容器隔离，T07），随后为新容器重新拉取
+  slashDismissed.value = false
+  input.value = '' // 切容器：清空 composer 残留输入（否则旧 `/` 会让新容器菜单误弹，T07）
   abandonActiveRun()
   errorMsg.value = ''
+  void loadCommands(name) // T07：后台拉取新容器命令清单（不阻塞会话/连接主流程）
   try {
     const list = await listSessions(name)
     if (gen !== containerGen) return // 切容器途中迟到的响应：丢弃（codex P2）
@@ -288,6 +380,7 @@ function approvalSubtitle(a: ApprovalItem) {
 function send() {
   const text = input.value.trim()
   if (!text || !ws || !selectedSession.value || connecting.value || streaming.value || disconnected.value) return
+  slashDismissed.value = true // 发送后关闭补全菜单（输入已被清空，下次输 / 时经 onComposerInput 复位）
   messages.value.push({ role: 'user', text, streaming: false })
   messages.value.push({ role: 'assistant', text: '', streaming: true })
   activeRunId = '' // 等首帧 onText 锚定新 run
@@ -377,12 +470,28 @@ defineExpose({ selectContainer, send, newSession })
         </div>
       </div>
       <div class="composer">
+        <!-- T07 斜杠命令补全（spec §9.4 / 原型 oc-chat-page.html）：输入 `/` 弹菜单（前缀过滤，
+             cmd mono + 描述），点选/↑↓+Enter 选中填入后经普通 send() 发 `/cmd`。清单来自
+             listCommands（后端代理网关 commands.list），按容器隔离；拉取失败菜单不弹、不影响对话。 -->
+        <div v-if="slashOpen" class="slash-menu" data-test="slash-menu">
+          <div
+            v-for="(o, i) in slashMatches"
+            :key="o.alias"
+            class="slash-item"
+            :class="{ sel: i === slashIndex }"
+            data-test="slash-item"
+            @mousedown.prevent="pickSlash(o)"
+          >
+            <span class="cmd">{{ o.alias }}</span><span class="desc">{{ o.description }}</span>
+          </div>
+        </div>
         <textarea
           v-model="input"
           data-test="input"
           rows="2"
-          placeholder="发消息…（Enter 发送 / Shift+Enter 换行）"
-          @keydown.enter.exact.prevent="send"
+          placeholder="发消息…（Enter 发送 / Shift+Enter 换行；输 / 弹命令补全）"
+          @input="onComposerInput"
+          @keydown="onComposerKeydown"
         ></textarea>
         <button data-test="send" :disabled="connecting || streaming || disconnected" @click="send">发送</button>
       </div>
@@ -416,9 +525,16 @@ defineExpose({ selectContainer, send, newSession })
 .msg.user .bubble { background: var(--el-color-primary-light-8); }
 .cursor { display: inline-block; width: 7px; height: 14px; background: var(--el-color-primary); vertical-align: -2px; animation: blink 1s steps(1) infinite; }
 @keyframes blink { 50% { opacity: 0; } }
-.composer { display: flex; gap: 8px; padding: 12px 18px; border-top: 1px solid var(--el-border-color); }
+.composer { position: relative; display: flex; gap: 8px; padding: 12px 18px; border-top: 1px solid var(--el-border-color); }
 .composer textarea { flex: 1; resize: none; padding: 8px; border: 1px solid var(--el-border-color); border-radius: 8px; }
 .composer button { padding: 8px 16px; background: var(--el-color-primary); color: #fff; border: none; border-radius: 8px; cursor: pointer; }
+
+/* T07 斜杠补全菜单（spec §9.4 / 原型 oc-chat-page.html）：弹在输入框上方，cmd mono + 描述 */
+.slash-menu { position: absolute; bottom: calc(100% + 6px); left: 18px; right: 18px; max-height: 280px; overflow-y: auto; background: var(--el-bg-color-overlay); border: 1px solid var(--el-border-color); border-radius: 11px; box-shadow: 0 -8px 30px rgba(0, 0, 0, .18); z-index: 10; }
+.slash-item { display: flex; align-items: center; gap: 10px; padding: 9px 14px; cursor: pointer; }
+.slash-item.sel, .slash-item:hover { background: var(--el-fill-color); }
+.slash-item .cmd { font-family: ui-monospace, monospace; color: var(--el-color-primary); font-size: 13px; }
+.slash-item .desc { margin-left: auto; color: var(--el-text-color-secondary); font-size: 12px; }
 
 /* T06 权限审批卡（spec §9.4 / 原型 oc-chat-page.html）：橙边待处理，处理后变淡 */
 .approval { align-self: flex-start; border: 1px solid var(--el-color-warning); background: var(--el-color-warning-light-9); border-radius: 11px; padding: 12px 14px; margin: 4px 0; max-width: 560px; }
