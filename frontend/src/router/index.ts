@@ -5,6 +5,7 @@ import LoginView from '@/views/LoginView.vue'
 import ContainersView from '@/views/ContainersView.vue'
 import ChatView from '@/views/ChatView.vue'
 import WikiView from '@/views/WikiView.vue'
+import ModelView from '@/views/ModelView.vue'
 
 const routes: RouteRecordRaw[] = [
   { path: '/login', name: 'login', component: LoginView, meta: { public: true } },
@@ -24,6 +25,12 @@ const routes: RouteRecordRaw[] = [
     path: '/wiki',
     name: 'wiki',
     component: WikiView,
+    meta: { requiresAuth: true },
+  },
+  {
+    path: '/models',
+    name: 'models',
+    component: ModelView,
     meta: { requiresAuth: true },
   },
 ]
