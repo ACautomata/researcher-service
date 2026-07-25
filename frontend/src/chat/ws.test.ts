@@ -148,4 +148,26 @@ describe('ChatWebSocket', () => {
     expect(onError).toHaveBeenCalledWith('连接已断开，请重试或切换容器')
     expect(MockWS.last!.sent).toEqual([]) // CLOSED 态未真正发出
   })
+
+  // ---- T06 权限审批（issue #42 / spec §8.2）----
+  it('dispatches approval card to onApproval (连接级，无 runId)', () => {
+    const onApproval = vi.fn()
+    new ChatWebSocket('/ws/chat/', 'jwt', { onApproval })
+    MockWS.last!.fireMessage({ type: 'approval', id: 'ap-1', kind: 'exec', command: 'rm -rf /tmp' })
+    expect(onApproval).toHaveBeenCalledWith({ id: 'ap-1', kind: 'exec', command: 'rm -rf /tmp' })
+  })
+
+  it('dispatches approvalResolved to onApprovalResolved (回执 → 卡片标记已处理)', () => {
+    const onApprovalResolved = vi.fn()
+    new ChatWebSocket('/ws/chat/', 'jwt', { onApprovalResolved })
+    MockWS.last!.fireMessage({ type: 'approvalResolved', id: 'ap-1', decision: 'approve' })
+    expect(onApprovalResolved).toHaveBeenCalledWith('ap-1', 'approve')
+  })
+
+  it('resolve sends a resolve frame with id/kind/decision once open', () => {
+    const ws = new ChatWebSocket('/ws/chat/', 'jwt', {})
+    MockWS.last!.fireOpen()
+    ws.resolve('ap-1', 'exec', 'deny')
+    expect(MockWS.last!.sent).toEqual([{ type: 'resolve', id: 'ap-1', kind: 'exec', decision: 'deny' }])
+  })
 })

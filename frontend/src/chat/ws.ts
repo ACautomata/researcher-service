@@ -9,6 +9,15 @@ export type ChatFrame =
   | { type: 'text'; runId: string; delta: string; replace?: boolean }
   | { type: 'done'; runId: string }
   | { type: 'error'; runId?: string; message: string }
+  | { type: 'approval'; id: string; kind: string; command: string }
+  | { type: 'approvalResolved'; id: string; decision: string }
+
+// T06 审批卡数据（连接级，无 runId）
+export interface ApprovalCard {
+  id: string
+  kind: string
+  command: string
+}
 
 export interface ChatHandlers {
   onReady?: (container: string) => void
@@ -16,6 +25,8 @@ export interface ChatHandlers {
   onDone?: (runId: string) => void
   onError?: (message: string, runId?: string) => void
   onClose?: () => void
+  onApproval?: (card: ApprovalCard) => void
+  onApprovalResolved?: (id: string, decision: string) => void
 }
 
 export class ChatWebSocket {
@@ -54,6 +65,11 @@ export class ChatWebSocket {
     this.sendRaw({ type: 'send', sessionKey, message })
   }
 
+  // T06：回覆一次权限审批（spec §8.2）
+  resolve(id: string, kind: string, decision: string): void {
+    this.sendRaw({ type: 'resolve', id, kind, decision })
+  }
+
   close(): void {
     this.ws.close()
   }
@@ -86,6 +102,12 @@ export class ChatWebSocket {
         break
       case 'error':
         this.handlers.onError?.(frame.message, frame.runId)
+        break
+      case 'approval':
+        this.handlers.onApproval?.({ id: frame.id, kind: frame.kind, command: frame.command })
+        break
+      case 'approvalResolved':
+        this.handlers.onApprovalResolved?.(frame.id, frame.decision)
         break
     }
   }

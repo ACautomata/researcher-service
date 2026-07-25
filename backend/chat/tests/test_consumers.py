@@ -29,6 +29,8 @@ class FakeChatClient:
         self.sent = []  # (session_key, message)
         self._handlers = {}
         self.discarded = []
+        self.resolved = []  # (approval_id, kind, decision)
+        self._approval_handler = None
 
     async def send_message(self, session_key, message, *, on_event):
         run_id = f'run-{len(self.sent) + 1}'
@@ -44,6 +46,18 @@ class FakeChatClient:
         cb = self._handlers.get(frame.get('runId'))
         if cb is not None:
             await cb(frame)
+
+    # T06：consumer 注册/退订连接级审批回调 + 回覆
+    def set_approval_handler(self, cb):
+        self._approval_handler = cb
+
+    async def resolve_approval(self, approval_id, kind, decision):
+        self.resolved.append((approval_id, kind, decision))
+        return True
+
+    async def emit_approval(self, frame):
+        if self._approval_handler is not None:
+            await self._approval_handler(frame)
 
 
 class FakePool:
@@ -214,3 +228,70 @@ async def test_start_connect_failure_sends_error_frame(instance):
     assert resp['type'] == 'error'
     ChatFleet.reset()
     await comm.disconnect()
+
+
+# ---- T06 权限审批（issue #42 / spec §8.2）----
+# 审批卡是连接级（无 runId）：start 后 consumer 注册 client.set_approval_handler 透传给前端；
+# 前端发 resolve{id,kind,decision} → consumer 调 client.resolve_approval；disconnect 退订。
+
+
+@pytest.mark.asyncio
+async def test_approval_card_pushed_to_frontend(override_pool, instance, fake_client):
+    comm = await _connect_authed()
+    await comm.connect()
+    await comm.send_json_to({'type': 'start', 'container': 'demo'})
+    await comm.receive_json_from()  # ready
+    await fake_client.emit_approval(
+        {'type': 'approval', 'id': 'ap-1', 'kind': 'exec', 'command': 'rm -rf /tmp'})
+    frame = await comm.receive_json_from()
+    assert frame == {'type': 'approval', 'id': 'ap-1', 'kind': 'exec', 'command': 'rm -rf /tmp'}
+    await comm.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_resolve_calls_client_resolve_approval(override_pool, instance, fake_client):
+    comm = await _connect_authed()
+    await comm.connect()
+    await comm.send_json_to({'type': 'start', 'container': 'demo'})
+    await comm.receive_json_from()  # ready
+    await comm.send_json_to({'type': 'resolve', 'id': 'ap-1', 'kind': 'exec', 'decision': 'approve'})
+    resp = await comm.receive_json_from()
+    assert resp == {'type': 'approvalResolved', 'id': 'ap-1', 'decision': 'approve'}
+    assert fake_client.resolved == [('ap-1', 'exec', 'approve')]
+    await comm.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_resolve_without_start_sends_error(override_pool, instance):
+    comm = await _connect_authed()
+    await comm.connect()
+    await comm.send_json_to({'type': 'resolve', 'id': 'ap-1', 'kind': 'exec', 'decision': 'deny'})
+    resp = await comm.receive_json_from()
+    assert resp['type'] == 'error'
+    await comm.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_resolve_failure_sends_error(override_pool, instance, fake_client):
+    async def fail_resolve(*args):
+        raise ChatSendError('missing scope operator.approvals')
+    fake_client.resolve_approval = fail_resolve
+    comm = await _connect_authed()
+    await comm.connect()
+    await comm.send_json_to({'type': 'start', 'container': 'demo'})
+    await comm.receive_json_from()  # ready
+    await comm.send_json_to({'type': 'resolve', 'id': 'ap-1', 'kind': 'exec', 'decision': 'approve'})
+    resp = await comm.receive_json_from()
+    assert resp['type'] == 'error'
+    await comm.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_disconnect_unsubscribes_approval_handler(override_pool, instance, fake_client):
+    comm = await _connect_authed()
+    await comm.connect()
+    await comm.send_json_to({'type': 'start', 'container': 'demo'})
+    await comm.receive_json_from()  # ready
+    await comm.disconnect()
+    # disconnect 后 handler 退订：再 emit 不再推给已关闭连接
+    assert fake_client._approval_handler is None

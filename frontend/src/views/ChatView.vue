@@ -10,9 +10,14 @@ import { ApiError } from '@/api/client'
 import { ChatWebSocket } from '@/chat/ws'
 
 interface Msg {
-  role: 'user' | 'assistant'
+  role: 'user' | 'assistant' | 'approval'
   text: string
   streaming: boolean
+  // T06 审批卡字段（role==='approval' 时使用）
+  approvalId?: string
+  approvalKind?: string
+  resolved?: '' | 'approve' | 'deny' // '' = 待处理；处理后变淡显示结果
+  detailOpen?: boolean
 }
 
 const auth = useAuthStore()
@@ -195,9 +200,45 @@ function connect() {
       disconnected.value = true  // 意外断线：禁用发送（codex P2 #4）
       if (!disposed) errorMsg.value = '连接已断开，请重试或切换容器'
     },
+    onApproval: (card) => {
+      if (ws !== myWs) return  // stale guard：旧 ws 的审批卡不污染新会话
+      // T06 审批卡（连接级，无 runId）：作为一条消息进对话流，橙边待处理
+      messages.value.push({
+        role: 'approval',
+        text: card.command || '（网关未提供命令详情）',
+        streaming: false,
+        approvalId: card.id,
+        approvalKind: card.kind,
+        resolved: '',
+        detailOpen: false,
+      })
+    },
+    onApprovalResolved: (id, decision) => {
+      if (ws !== myWs) return
+      // 服务端回执：兜底标记（乐观更新已先置位时幂等）
+      const m = messages.value.find((x) => x.role === 'approval' && x.approvalId === id)
+      if (m) m.resolved = decision === 'deny' ? 'deny' : 'approve'
+    },
   })
   ws = myWs
   myWs.start(selectedContainer.value)
+}
+
+// T06：批准/拒绝 → 回发 resolve 帧 + 乐观标记已处理（变淡显示结果；服务端回执兜底）
+function resolveApproval(m: Msg, decision: 'approve' | 'deny') {
+  if (!ws || !m.approvalId || m.resolved) return
+  ws.resolve(m.approvalId, m.approvalKind ?? 'exec', decision)
+  m.resolved = decision
+}
+
+// 查看细节：展开/收起命令全文
+function toggleDetail(m: Msg) {
+  m.detailOpen = !m.detailOpen
+}
+
+// 审批卡副标题（说明 agent 请求执行 elevated 命令）
+function approvalSubtitle(m: Msg) {
+  return `${m.approvalKind ?? 'exec'} agent 请求执行一条 elevated 命令，请确认后批准或拒绝：`
 }
 
 function send() {
@@ -259,7 +300,33 @@ defineExpose({ selectContainer, send, newSession })
       <p v-if="errorMsg" class="error" data-test="error-bar">{{ errorMsg }}</p>
       <div class="stream" data-test="stream">
         <div v-for="(m, i) in messages" :key="i" class="msg" :class="m.role">
-          <div class="bubble">{{ m.text }}<span v-if="m.streaming" class="cursor"></span></div>
+          <!-- T06 权限审批卡（spec §9.4）：橙边内联卡，处理后变淡显示结果 -->
+          <div
+            v-if="m.role === 'approval'"
+            class="approval"
+            :class="{ resolved: !!m.resolved }"
+            :data-test="`approval-${m.approvalId}`"
+          >
+            <div class="a-head">
+              ⚠️ 请求提升权限
+              <span v-if="m.resolved" class="resolved-tag" :class="m.resolved">
+                {{ m.resolved === 'deny' ? '已拒绝' : '已批准' }}
+              </span>
+            </div>
+            <div class="a-sub">{{ approvalSubtitle(m) }}</div>
+            <div class="a-cmd">{{ m.text }}</div>
+            <div v-if="m.detailOpen" class="a-detail" :data-test="`approval-detail-${m.approvalId}`">
+              命令全文：<code>{{ m.text }}</code><br>
+              审批 id：<code>{{ m.approvalId }}</code> · 类型：<code>{{ m.approvalKind }}</code>
+              · 经 <code>exec.approval.requested</code> 推送，<code>approval.resolve</code> 回覆
+            </div>
+            <div v-if="!m.resolved" class="a-actions">
+              <button class="btn-approve" :data-test="`approve-${m.approvalId}`" @click="resolveApproval(m, 'approve')">批准</button>
+              <button class="btn-deny" :data-test="`deny-${m.approvalId}`" @click="resolveApproval(m, 'deny')">拒绝</button>
+              <button class="btn-ghost" :data-test="`detail-${m.approvalId}`" @click="toggleDetail(m)">查看细节</button>
+            </div>
+          </div>
+          <div v-else class="bubble">{{ m.text }}<span v-if="m.streaming" class="cursor"></span></div>
         </div>
       </div>
       <div class="composer">
@@ -305,4 +372,21 @@ defineExpose({ selectContainer, send, newSession })
 .composer { display: flex; gap: 8px; padding: 12px 18px; border-top: 1px solid var(--el-border-color); }
 .composer textarea { flex: 1; resize: none; padding: 8px; border: 1px solid var(--el-border-color); border-radius: 8px; }
 .composer button { padding: 8px 16px; background: var(--el-color-primary); color: #fff; border: none; border-radius: 8px; cursor: pointer; }
+
+/* T06 权限审批卡（spec §9.4 / 原型 oc-chat-page.html）：橙边待处理，处理后变淡 */
+.msg.approval { align-self: flex-start; }
+.approval { border: 1px solid var(--el-color-warning); background: var(--el-color-warning-light-9); border-radius: 11px; padding: 12px 14px; margin: 4px 0; max-width: 560px; }
+.approval .a-head { display: flex; align-items: center; gap: 8px; color: var(--el-color-warning); font-weight: 600; font-size: 13px; margin-bottom: 6px; }
+.approval .resolved-tag { margin-left: auto; font-size: 11.5px; color: var(--el-color-success); font-weight: 600; }
+.approval .resolved-tag.deny { color: var(--el-color-danger); }
+.approval .a-sub { color: var(--el-text-color-secondary); font-size: 13px; }
+.approval .a-cmd { font-family: ui-monospace, monospace; background: var(--el-fill-color-darker); border: 1px solid var(--el-border-color); border-radius: 7px; padding: 8px 10px; margin: 8px 0; font-size: 12.5px; white-space: pre-wrap; word-break: break-all; }
+.approval .a-detail { font-size: 11px; color: var(--el-text-color-secondary); margin-bottom: 6px; }
+.approval .a-detail code { background: var(--el-fill-color); border-radius: 4px; padding: 1px 4px; }
+.approval .a-actions { display: flex; gap: 9px; margin-top: 8px; }
+.approval .a-actions button { border: none; border-radius: 7px; padding: 6px 14px; cursor: pointer; font-size: 13px; }
+.approval .btn-approve { background: var(--el-color-success); color: #fff; }
+.approval .btn-deny { background: transparent; border: 1px solid var(--el-color-danger); color: var(--el-color-danger); }
+.approval .btn-ghost { background: transparent; border: 1px solid var(--el-border-color); color: var(--el-text-color-secondary); }
+.approval.resolved { opacity: .55; border-color: var(--el-border-color); }
 </style>

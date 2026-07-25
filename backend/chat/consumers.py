@@ -3,6 +3,10 @@
 握手经 JwtAuthMiddleware（scope['user'] 已验 JWT；匿名被 4401 拒）。前端发 start{container} → 经
 ChatFleet 连该容器已配对长连接 → ready；发 send{sessionKey,message} → client.chat.send，chat 事件
 经 _on_event 回推前端（text/done/error）。断开时 discard 活跃 runId，避免推已关闭连接。
+
+T06 权限审批（issue #42 / spec §8.2）：start 后注册连接级审批回调（client.set_approval_handler），
+审批卡经 _on_approval 透传给前端（type:approval，无 runId）；前端发 resolve{id,kind,decision} →
+client.resolve_approval → 回执 approvalResolved{id,decision}。disconnect 退订审批回调。
 """
 from __future__ import annotations
 
@@ -27,6 +31,8 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
             await self._handle_start(content)
         elif msg_type == 'send':
             await self._handle_send(content)
+        elif msg_type == 'resolve':
+            await self._handle_resolve(content)
 
     async def _handle_start(self, content):
         name = content.get('container')
@@ -46,8 +52,33 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
             # 连接握手失败（ChatConnectError 等）发 error 帧，不传播导致 Channels 关闭 WS
             await self.send_json({'type': 'error', 'message': '连接容器失败，请稍后重试'})
             return
+        # 切容器/重连：旧 client 的审批回调退订，避免推已失效连接
+        if self._client is not None and self._client is not client:
+            self._client.set_approval_handler(None)
         self._client = client
+        # T06：注册连接级审批回调，把审批卡透传给前端（start 后才开始收审批事件）
+        client.set_approval_handler(self._on_approval)
         await self.send_json({'type': 'ready', 'container': name})
+
+    async def _handle_resolve(self, content):
+        """T06 审批回覆（spec §8.2）：前端发 resolve{id,kind,decision} → client.resolve_approval。"""
+        if self._client is None:
+            await self.send_json({'type': 'error', 'message': '请先选择容器'})
+            return
+        approval_id = content.get('id')
+        kind = content.get('kind')
+        decision = content.get('decision')
+        if not approval_id or not kind or not decision:
+            await self.send_json({'type': 'error', 'message': '缺少 id/kind/decision'})
+            return
+        try:
+            await self._client.resolve_approval(approval_id, kind, decision)
+        except Exception:
+            # 网关拒绝（缺 operator.approvals 等）/连接已断：发 error 帧，不传播导致 WS 关闭
+            await self.send_json({'type': 'error', 'message': '审批回覆失败，请稍后重试'})
+            return
+        # 回执：前端据此把卡片标记为已处理（变淡显示结果）
+        await self.send_json({'type': 'approvalResolved', 'id': approval_id, 'decision': decision})
 
     async def _handle_send(self, content):
         if self._client is None:
@@ -74,8 +105,13 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
         if frame.get('type') in ('done', 'error'):
             self._active_runids.discard(frame.get('runId'))
 
+    async def _on_approval(self, frame):
+        # T06 审批卡：client 收到 exec/plugin.approval.requested 后经此透传给前端
+        await self.send_json(frame)
+
     async def disconnect(self, code):
         if self._client is not None:
+            self._client.set_approval_handler(None)  # T06：退订审批回调，避免推已关闭连接
             for run_id in list(self._active_runids):
                 self._client.discard(run_id)
             self._active_runids.clear()

@@ -61,13 +61,21 @@ class OpenClawChatClient:
         self._build_connect = connect_frame_builder or self._default_connect_frame
         self._connect_timeout = connect_timeout
         self._ack_timeout = ack_timeout
+        # 连接级审批回调（T06，spec §8.2）：exec/plugin.approval.requested 不挂 runId。
+        # 由 consumer start 时经 set_approval_handler 注册、disconnect 时置 None 退订（单订阅）。
+        self._approval_handler: OnEvent | None = None
         self._ws = None
         self._cm = None
         self._recv_task: asyncio.Task | None = None
         self._pending_acks: dict[str, tuple[asyncio.Future, OnEvent]] = {}
+        self._pending_resolves: dict[str, asyncio.Future] = {}
         self._routes: dict[str, OnEvent] = {}
         self._closed = False
         self._dead = False  # recv loop 退出（连接断开）→ pool 据此驱逐重建
+
+    def set_approval_handler(self, cb: OnEvent | None) -> None:
+        """注册/退订连接级审批回调（T06）：consumer start 注册、disconnect 传 None 退订。"""
+        self._approval_handler = cb
 
     @property
     def dead(self) -> bool:
@@ -136,6 +144,17 @@ class OpenClawChatClient:
         if not frames:
             return
         run_id = frames[0].get('runId')
+        if run_id is None:
+            # 连接级帧（T06 审批卡）：不挂 runId，单独上抛审批回调，不进 runId 路由
+            if self._approval_handler is not None:
+                for translated in frames:
+                    if translated.get('type') != 'approval':
+                        continue
+                    try:
+                        await self._approval_handler(translated)
+                    except Exception:
+                        pass  # 隔离审批回调失败，不杀 recv loop
+            return
         cb = self._routes.get(run_id)
         if cb is None:
             return  # route 已 discard，丢弃整批帧
@@ -151,7 +170,19 @@ class OpenClawChatClient:
             self._routes.pop(run_id, None)
 
     def _resolve_ack(self, msg: dict) -> None:
-        entry = self._pending_acks.pop(msg.get('id'), None)
+        rid = msg.get('id')
+        # approval.resolve 的回执（T06）：与 chat.send ack 用同一 res 帧，按 id 分发
+        resolve_fut = self._pending_resolves.pop(rid, None)
+        if resolve_fut is not None:
+            if not resolve_fut.done():
+                if msg.get('ok'):
+                    resolve_fut.set_result(msg.get('payload'))
+                else:
+                    err = msg.get('error') or {}
+                    resolve_fut.set_exception(
+                        ChatSendError(err.get('message') or err.get('code') or 'approval.resolve failed'))
+            return
+        entry = self._pending_acks.pop(rid, None)
         if entry is None:
             return
         fut, on_event = entry
@@ -168,6 +199,31 @@ class OpenClawChatClient:
         else:
             err = msg.get('error') or {}
             fut.set_exception(ChatSendError(err.get('message') or err.get('code') or 'chat.send failed'))
+
+    async def resolve_approval(self, approval_id: str, kind: str, decision: str) -> bool:
+        """回覆一次权限审批（T06，spec §8.2）：发 approval.resolve(id,kind,decision)，有界等 res。
+
+        需 operator.approvals scope（握手已声明，§8.1）；网关拒绝（缺 scope 等）抛 ChatSendError。
+        """
+        if self._ws is None:
+            raise ChatClientError('client not connected')
+        req_id = uuid.uuid4().hex
+        fut = asyncio.get_running_loop().create_future()
+        self._pending_resolves[req_id] = fut
+        frame = {
+            'type': 'req', 'id': req_id, 'method': 'approval.resolve',
+            'params': {'id': approval_id, 'kind': kind, 'decision': decision},
+        }
+        await self._ws.send(json.dumps(frame))
+        try:
+            await asyncio.wait_for(fut, timeout=self._ack_timeout)
+        except asyncio.TimeoutError:
+            self._pending_resolves.pop(req_id, None)
+            raise ChatSendError('approval.resolve ack timeout')
+        except BaseException:
+            self._pending_resolves.pop(req_id, None)
+            raise
+        return True
 
     async def send_message(self, session_key: str, message: str, *, on_event: OnEvent) -> str:
         if self._ws is None:
@@ -208,8 +264,16 @@ class OpenClawChatClient:
                 fut.set_exception(ChatClientError(message))
         self._pending_acks.clear()
 
+    def _fail_pending_resolves(self, message: str) -> None:
+        """连接断开/关闭：reject 所有未决 approval.resolve，避免 resolve_approval 调用方挂起。"""
+        for fut in list(self._pending_resolves.values()):
+            if not fut.done():
+                fut.set_exception(ChatClientError(message))
+        self._pending_resolves.clear()
+
     async def _notify_all_error(self, message: str) -> None:
         self._fail_pending_acks(message)
+        self._fail_pending_resolves(message)
         for run_id, cb in list(self._routes.items()):
             try:
                 await cb({'type': 'error', 'runId': run_id, 'message': message})
@@ -220,6 +284,7 @@ class OpenClawChatClient:
     async def aclose(self) -> None:
         self._closed = True
         self._fail_pending_acks('client closed')
+        self._fail_pending_resolves('client closed')
         if self._recv_task is not None:
             self._recv_task.cancel()
             try:

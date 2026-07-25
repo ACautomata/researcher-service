@@ -12,6 +12,7 @@ HTTP 薄适配层：业务委托 PairingService（PairingFleet service locator�
 import logging
 import uuid
 
+from asgiref.sync import async_to_sync
 from django.core.exceptions import ValidationError
 from django.http import Http404
 from drf_spectacular.utils import extend_schema
@@ -22,10 +23,14 @@ from rest_framework.views import APIView
 from chat.models import Pairing, Session
 from chat.pairing import PairingConcurrencyError, PairingFleet
 from chat.pairing_ws import PairingError, PairingRequired
+from chat.pool import ChatFleet, NotPaired
 from chat.serializers import PairingStatusSerializer, SessionSerializer
 from containers.models import NAME_VALIDATOR, Instance
 
 logger = logging.getLogger(__name__)
+
+# T06 decision 合法取值（前端只发这两个；网关完整取值集合待实测，r26:79）
+_APPROVAL_DECISIONS = ('approve', 'deny')
 
 
 class _InvalidName(Exception):
@@ -140,3 +145,57 @@ class SessionListCreateView(APIView):
             instance=inst, session_key=uuid.uuid4().hex, title=title,
         )
         return Response(SessionSerializer(session).data, status=status.HTTP_201_CREATED)
+
+
+class ApprovalResolveView(APIView):
+    """POST 回覆一次权限审批（T06，spec §8.4 回退路径；WS 路径为主）。
+
+    body {id, kind, decision} → 经该容器 pool client 发 approval.resolve（需 operator.approvals）。
+    与 WS 路径共用同一 ChatFleet pool（同一条已配对长连接）。
+    - 成功 → 200 {ok:true, id, decision}
+    - 缺字段/非法 decision → 400；instance 不存在 → 404；非法 name → 400
+    - 未配对 → 409；网关拒绝（缺 scope 等）/连接失败 → 502（固定文案，不外泄原始异常）
+    """
+
+    def _get_instance(self, name: str) -> Instance:
+        try:
+            NAME_VALIDATOR(name)
+        except ValidationError:
+            raise _InvalidName
+        inst = Instance.objects.filter(name=name).first()
+        if inst is None:
+            raise Http404
+        return inst
+
+    @extend_schema(request=None, responses={200: None})
+    def post(self, request, name):
+        try:
+            inst = self._get_instance(name)
+        except _InvalidName:
+            return Response({'detail': '非法 name'}, status=status.HTTP_400_BAD_REQUEST)
+        data = request.data or {}
+        approval_id = str(data.get('id') or '')
+        kind = str(data.get('kind') or '')
+        decision = str(data.get('decision') or '')
+        if not approval_id or not kind or decision not in _APPROVAL_DECISIONS:
+            return Response(
+                {'detail': '缺少 id/kind，或 decision 非法（须为 approve/deny）'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            client = async_to_sync(ChatFleet.get().get_or_create)(inst)
+        except NotPaired as e:
+            return Response(
+                {'detail': f'容器未配对，请先完成设备配对（status={e.status}）'},
+                status=status.HTTP_409_CONFLICT,
+            )
+        try:
+            async_to_sync(client.resolve_approval)(approval_id, kind, decision)
+        except Exception as e:
+            # 原始异常（缺 scope/连接断开等）仅记服务端日志，不外泄到响应
+            logger.warning('approval.resolve failed for %s id=%s: %s', name, approval_id, e)
+            return Response(
+                {'detail': '审批回覆失败，请稍后重试'},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+        return Response({'ok': True, 'id': approval_id, 'decision': decision})

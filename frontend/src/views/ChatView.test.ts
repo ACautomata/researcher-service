@@ -306,4 +306,82 @@ describe('ChatView', () => {
     resolveOther.fn!([SESSION]) // other 数据到 → 连新 ws
     await flushPromises()
   })
+
+  // ---- T06 权限审批（issue #42 / spec §9.4）----
+  async function mountReady() {
+    const w = mount(ChatView, { global: { plugins: [createPinia()] } })
+    await flushPromises()
+    MockWS.last!.fireOpen()
+    MockWS.last!.fireMessage({ type: 'ready', container: 'demo' })
+    await nextTick()
+    return w
+  }
+
+  it('renders an orange approval card when agent requests elevation (验收 1)', async () => {
+    const w = await mountReady()
+    MockWS.last!.fireMessage({ type: 'approval', id: 'ap-1', kind: 'exec', command: 'openclaw wiki compile' })
+    await nextTick()
+    const card = w.find('[data-test="approval-ap-1"]')
+    expect(card.exists()).toBe(true)
+    expect(card.classes()).toContain('approval')
+    expect(card.text()).toContain('请求提升权限')
+    expect(card.text()).toContain('openclaw wiki compile') // 待批命令
+    expect(w.find('[data-test="approve-ap-1"]').exists()).toBe(true) // 批准
+    expect(w.find('[data-test="deny-ap-1"]').exists()).toBe(true) // 拒绝
+    expect(w.find('[data-test="detail-ap-1"]').exists()).toBe(true) // 查看细节
+  })
+
+  it('approve sends resolve frame and fades the card as resolved (验收 2)', async () => {
+    const w = await mountReady()
+    MockWS.last!.fireMessage({ type: 'approval', id: 'ap-1', kind: 'exec', command: 'cmd' })
+    await nextTick()
+    await w.find('[data-test="approve-ap-1"]').trigger('click')
+    expect(MockWS.last!.sent).toContainEqual({ type: 'resolve', id: 'ap-1', kind: 'exec', decision: 'approve' })
+    await nextTick()
+    const card = w.find('[data-test="approval-ap-1"]')
+    expect(card.classes()).toContain('resolved') // 变淡
+    expect(card.text()).toContain('已批准') // 显示结果
+    expect(w.find('[data-test="approve-ap-1"]').exists()).toBe(false) // 处理后隐藏按钮
+  })
+
+  it('deny sends resolve frame with deny and shows 已拒绝', async () => {
+    const w = await mountReady()
+    MockWS.last!.fireMessage({ type: 'approval', id: 'ap-2', kind: 'exec', command: 'cmd' })
+    await nextTick()
+    await w.find('[data-test="deny-ap-2"]').trigger('click')
+    expect(MockWS.last!.sent).toContainEqual({ type: 'resolve', id: 'ap-2', kind: 'exec', decision: 'deny' })
+    await nextTick()
+    const card = w.find('[data-test="approval-ap-2"]')
+    expect(card.classes()).toContain('resolved')
+    expect(card.text()).toContain('已拒绝')
+  })
+
+  it('toggles detail view to reveal full command (查看细节)', async () => {
+    const w = await mountReady()
+    MockWS.last!.fireMessage({ type: 'approval', id: 'ap-3', kind: 'exec', command: 'very long cmd' })
+    await nextTick()
+    expect(w.find('[data-test="approval-detail-ap-3"]').exists()).toBe(false)
+    await w.find('[data-test="detail-ap-3"]').trigger('click')
+    await nextTick()
+    expect(w.find('[data-test="approval-detail-ap-3"]').exists()).toBe(true)
+    expect(w.find('[data-test="approval-detail-ap-3"]').text()).toContain('very long cmd')
+  })
+
+  it('clears approval cards when switching container (卡片随会话清空)', async () => {
+    ;(listInstances as ReturnType<typeof vi.fn>).mockResolvedValue([
+      INSTANCE,
+      { ...INSTANCE, name: 'other', port: 19001 },
+    ])
+    const w = mount(ChatView, { global: { plugins: [createPinia()] } })
+    await flushPromises()
+    MockWS.last!.fireOpen()
+    MockWS.last!.fireMessage({ type: 'ready', container: 'demo' })
+    await nextTick()
+    MockWS.last!.fireMessage({ type: 'approval', id: 'ap-1', kind: 'exec', command: 'cmd' })
+    await nextTick()
+    expect(w.find('[data-test="approval-ap-1"]').exists()).toBe(true)
+    await w.find('[data-test="container-other"]').trigger('click') // 切容器 → messages 清空
+    await flushPromises()
+    expect(w.find('[data-test="approval-ap-1"]').exists()).toBe(false)
+  })
 })
