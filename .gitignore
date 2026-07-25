@@ -2,22 +2,20 @@
 .env
 
 # 运行时产物
-pipeline.db
 __pycache__/
 *.pyc
 *.pyo
 
-# 用户上传
+# Legacy（旧 FastAPI 栈产物已从仓库删除；旧 checkout 本地仍可能残留，继续忽略防误提交）
+pipeline.db
 uploads/*
+.server_pass
 
 # IDE
 .idea/
 
 # 临时文件
 *.log
-
-# 服务器凭据
-.server_pass
 
 # Claude Code 本地配置
 .claude/
