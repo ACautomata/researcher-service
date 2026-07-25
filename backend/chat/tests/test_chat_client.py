@@ -140,9 +140,9 @@ async def test_recv_routes_tool_events_to_on_event():
     await asyncio.sleep(0.1)
     assert received == [
         {'type': 'tool', 'runId': 'r1', 'name': 'wiki.search', 'state': 'running',
-         'title': None, 'input': {'query': 'x'}, 'result': None},
+         'id': None, 'title': None, 'input': {'query': 'x'}, 'result': None},
         {'type': 'tool', 'runId': 'r1', 'name': 'wiki.search', 'state': 'done',
-         'title': None, 'input': None, 'result': {'count': 3}},
+         'id': None, 'title': None, 'input': None, 'result': {'count': 3}},
         {'type': 'done', 'runId': 'r1'},
     ]
     await c.aclose()

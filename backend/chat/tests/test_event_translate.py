@@ -195,20 +195,29 @@ def _tool(event: str, run_id: str = 'r1', **extra) -> dict:
 
 def test_tool_start_becomes_tool_running_frame(translator):
     # agent.tool.start → 工具 running 帧；name 取 payload.tool，title/input 透传，result 占位 None（统一 shape）
-    frame = _tool('agent.tool.start', tool='wiki.search', title='检索 wiki',
+    frame = _tool('agent.tool.start', tool='wiki.search', toolCallId='call-1', title='检索 wiki',
                   input={'query': '对比学习'})
     assert translator.translate(frame) == [
         {'type': 'tool', 'runId': 'r1', 'name': 'wiki.search', 'state': 'running',
-         'title': '检索 wiki', 'input': {'query': '对比学习'}, 'result': None},
+         'id': 'call-1', 'title': '检索 wiki', 'input': {'query': '对比学习'}, 'result': None},
     ]
 
 
+def test_tool_call_id_fallbacks(translator):
+    # id 取值链（codex P2，字段名待实测校准）：toolCallId → tool_call_id → callId → id；缺省 None
+    assert translator.translate(_tool('agent.tool.start', tool='x', toolCallId='c1'))[0]['id'] == 'c1'
+    assert translator.translate(_tool('agent.tool.start', tool='x', tool_call_id='c2'))[0]['id'] == 'c2'
+    assert translator.translate(_tool('agent.tool.start', tool='x', callId='c3'))[0]['id'] == 'c3'
+    assert translator.translate(_tool('agent.tool.start', tool='x', id='c4'))[0]['id'] == 'c4'
+    assert translator.translate(_tool('agent.tool.start', tool='x'))[0]['id'] is None
+
+
 def test_tool_result_becomes_tool_done_frame(translator):
-    # agent.tool.result → done 帧；result 字段透传（前端显"· N 结果"摘要）；title/input 缺省 None
+    # agent.tool.result → done 帧；result 字段透传（前端显"· N 结果"摘要）；title/input/id 缺省 None
     frame = _tool('agent.tool.result', tool='wiki.search', result={'count': 3})
     assert translator.translate(frame) == [
         {'type': 'tool', 'runId': 'r1', 'name': 'wiki.search', 'state': 'done',
-         'title': None, 'input': None, 'result': {'count': 3}},
+         'id': None, 'title': None, 'input': None, 'result': {'count': 3}},
     ]
 
 

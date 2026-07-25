@@ -185,11 +185,11 @@ describe('ChatWebSocket', () => {
     new ChatWebSocket('/ws/chat/', 'jwt', { onTool })
     MockWS.last!.fireMessage({
       type: 'tool', runId: 'r1', name: 'wiki.search', state: 'running',
-      title: '检索', input: { q: 'x' }, result: null,
+      id: 'call-1', title: '检索', input: { q: 'x' }, result: null,
     })
     expect(onTool).toHaveBeenCalledWith({
       runId: 'r1', name: 'wiki.search', state: 'running',
-      title: '检索', input: { q: 'x' }, result: null,
+      id: 'call-1', title: '检索', input: { q: 'x' }, result: null,
     })
   })
 })

@@ -166,10 +166,12 @@ class ChatEventTranslator:
 
         字段名取值链（r26 §3 标「需实测」，集中在此便于配对后单点校准）：
         - name: payload.tool → payload.name → payload.toolName；无 name → []（无法渲染工具行）
+        - id: payload.toolCallId → payload.tool_call_id → payload.callId → payload.id（缺省 None）；
+          工具调用 id，前端据此配对同名并发调用的 result（codex P2，无 id 退 name）
         - title: payload.title（缺省 None）
         - input: payload.input → payload.args（缺省 None）
         - result: payload.result → payload.output（缺省 None）
-        统一 shape（start 时 result=None）便于前端按 name 聚合 start→result。
+        统一 shape（start 时 result=None）便于前端按 id/name 聚合 start→result。
         """
         run_id = payload.get('runId')
         if not run_id:
@@ -179,6 +181,8 @@ class ChatEventTranslator:
             return []
         return [{
             'type': 'tool', 'runId': run_id, 'name': name, 'state': state,
+            'id': payload.get('toolCallId') or payload.get('tool_call_id')
+                  or payload.get('callId') or payload.get('id'),
             'title': payload.get('title'),
             'input': payload.get('input') or payload.get('args'),
             'result': payload.get('result') or payload.get('output'),
