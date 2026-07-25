@@ -21,6 +21,7 @@ import { useAuthStore } from '@/stores/auth'
 class MockWS {
   static last: MockWS | null = null
   sent: unknown[] = []
+  closed = false // 记录 close() 是否被调用（验证切容器时旧 ws 被关闭）
   onopen: ((e: unknown) => void) | null = null
   onmessage: ((e: { data: string }) => void) | null = null
   onerror: ((e: unknown) => void) | null = null
@@ -39,6 +40,7 @@ class MockWS {
   }
 
   close(): void {
+    this.closed = true
     this.onclose?.({})
   }
 
@@ -233,5 +235,75 @@ describe('ChatView', () => {
     // newSession 失败 → selectedSession 仍空 → 不应 connect（无 ws），并保留错误提示
     expect(MockWS.last).toBeNull()
     expect(w.find('[data-test="error-bar"]').text()).toContain('创建失败')
+  })
+
+  it('discards orphaned pending run when its first delta arrives after a session switch (codex #3)', async () => {
+    // 发消息后、首个 delta 到达前切会话：pending run 的 runId 未知，abandonActiveRun 按计数标记；
+    // 其迟到首帧按 FIFO 视为孤儿丢弃，新会话的 run 正常渲染
+    const SESS2 = { id: 2, session_key: 'sk-2', title: 'S2', created_at: '' }
+    ;(listSessions as ReturnType<typeof vi.fn>).mockResolvedValue([SESSION, SESS2])
+    const w = mount(ChatView, { global: { plugins: [createPinia()] } })
+    await flushPromises()
+    MockWS.last!.fireOpen()
+    MockWS.last!.fireMessage({ type: 'ready', container: 'demo' })
+    await nextTick()
+
+    await w.find('[data-test="input"]').setValue('hi')
+    await w.find('[data-test="send"]').trigger('click') // pendingSend=true，未收任何 delta
+    await w.find('[data-test="session-sk-2"]').trigger('click') // 切会话 → pendingAbandonCount=1
+    await w.find('[data-test="input"]').setValue('yo')
+    await w.find('[data-test="send"]').trigger('click') // 新会话再发
+
+    MockWS.last!.fireMessage({ type: 'text', runId: 'r-old', delta: 'STALE' }) // 孤儿首帧
+    MockWS.last!.fireMessage({ type: 'text', runId: 'r-new', delta: 'NEW' }) // 新 run 首帧
+    await nextTick()
+    const stream = w.find('[data-test="stream"]').text()
+    expect(stream).not.toContain('STALE')
+    expect(stream).toContain('NEW')
+  })
+
+  it('disables send after the ws closes unexpectedly (codex #4)', async () => {
+    const w = mount(ChatView, { global: { plugins: [createPinia()] } })
+    await flushPromises()
+    MockWS.last!.fireOpen()
+    MockWS.last!.fireMessage({ type: 'ready', container: 'demo' })
+    await nextTick()
+    const btn = () => w.find('[data-test="send"]').element as HTMLButtonElement
+    expect(btn().disabled).toBe(false)
+    MockWS.last!.onclose?.({}) // 意外断线（代理/后端重启）
+    await nextTick()
+    expect(btn().disabled).toBe(true) // disconnected 禁用发送
+    await w.find('[data-test="input"]').setValue('hi')
+    await w.find('[data-test="send"]').trigger('click') // guard 拦截，不再走 CLOSED socket
+    const sends = MockWS.last!.sent.filter((f) => (f as { type: string }).type === 'send')
+    expect(sends.length).toBe(0)
+  })
+
+  it('closes the old ws and disables composer while listSessions is pending on switch (codex #5)', async () => {
+    ;(listInstances as ReturnType<typeof vi.fn>).mockResolvedValue([
+      INSTANCE,
+      { ...INSTANCE, name: 'other', port: 19001 },
+    ])
+    const resolveOther: { fn: ((v: unknown[]) => void) | null } = { fn: null }
+    ;(listSessions as ReturnType<typeof vi.fn>).mockImplementation((name: string) =>
+      name === 'demo'
+        ? Promise.resolve([SESSION])
+        : new Promise((r) => { resolveOther.fn = r }),
+    )
+    const w = mount(ChatView, { global: { plugins: [createPinia()] } })
+    await flushPromises() // demo 自动选中并连接
+    MockWS.last!.fireOpen()
+    const demoWs = MockWS.last
+
+    await w.find('[data-test="container-other"]').trigger('click') // 切到 other，listSessions pending
+    await nextTick()
+    expect(demoWs!.closed).toBe(true) // 旧 ws 立即关闭
+    expect((w.find('[data-test="send"]').element as HTMLButtonElement).disabled).toBe(true) // connecting 禁用
+    // pending 期间发送：被 connecting 拦截，不经旧 socket 发出
+    await w.find('[data-test="input"]').setValue('hi')
+    await w.find('[data-test="send"]').trigger('click')
+    expect(demoWs!.sent.filter((f) => (f as { type: string }).type === 'send').length).toBe(0)
+    resolveOther.fn!([SESSION]) // other 数据到 → 连新 ws
+    await flushPromises()
   })
 })

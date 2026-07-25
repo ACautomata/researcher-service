@@ -6,13 +6,13 @@
 
 export type ChatFrame =
   | { type: 'ready'; container: string }
-  | { type: 'text'; runId: string; delta: string }
+  | { type: 'text'; runId: string; delta: string; replace?: boolean }
   | { type: 'done'; runId: string }
   | { type: 'error'; runId?: string; message: string }
 
 export interface ChatHandlers {
   onReady?: (container: string) => void
-  onText?: (runId: string, delta: string) => void
+  onText?: (runId: string, delta: string, replace?: boolean) => void
   onDone?: (runId: string) => void
   onError?: (message: string, runId?: string) => void
   onClose?: () => void
@@ -24,6 +24,7 @@ export class ChatWebSocket {
   // CONNECTING 期间 send() 会抛 InvalidStateError → 缓冲到 onopen 后 flush（codex P1）
   private readonly queue: Record<string, unknown>[] = []
   private opened = false
+  private closed = false // onclose 后置位：后续 send 不再调原生 send（CLOSED 态抛 InvalidStateError）
 
   constructor(path: string, jwt: string, handlers: ChatHandlers) {
     this.handlers = handlers
@@ -35,7 +36,14 @@ export class ChatWebSocket {
     }
     this.ws.onmessage = this.handleMessage.bind(this)
     this.ws.onerror = () => this.handlers.onError?.('连接错误')
-    this.ws.onclose = () => this.handlers.onClose?.()
+    this.ws.onclose = () => {
+      this.closed = true
+      this.handlers.onClose?.()
+    }
+  }
+
+  get isClosed(): boolean {
+    return this.closed
   }
 
   start(container: string): void {
@@ -51,6 +59,12 @@ export class ChatWebSocket {
   }
 
   private sendRaw(frame: Record<string, unknown>): void {
+    if (this.closed) {
+      // socket 已关（代理/后端重启）：不再调原生 send（会抛 InvalidStateError 且不触发 handler），
+      // 改走 onError 让视图提示并收尾 streaming bubble（codex P2）。
+      this.handlers.onError?.('连接已断开，请重试或切换容器')
+      return
+    }
     if (this.opened) {
       this.ws.send(JSON.stringify(frame))
     } else {
@@ -65,7 +79,7 @@ export class ChatWebSocket {
         this.handlers.onReady?.(frame.container)
         break
       case 'text':
-        this.handlers.onText?.(frame.runId, frame.delta)
+        this.handlers.onText?.(frame.runId, frame.delta, frame.replace)
         break
       case 'done':
         this.handlers.onDone?.(frame.runId)

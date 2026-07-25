@@ -99,7 +99,14 @@ describe('ChatWebSocket', () => {
     const onText = vi.fn()
     new ChatWebSocket('/ws/chat/', 'jwt', { onText })
     MockWS.last!.fireMessage({ type: 'text', runId: 'r1', delta: '你好' })
-    expect(onText).toHaveBeenCalledWith('r1', '你好')
+    expect(onText).toHaveBeenCalledWith('r1', '你好', undefined)
+  })
+
+  it('forwards replace flag on text frames', () => {
+    const onText = vi.fn()
+    new ChatWebSocket('/ws/chat/', 'jwt', { onText })
+    MockWS.last!.fireMessage({ type: 'text', runId: 'r1', delta: '你好世界', replace: true })
+    expect(onText).toHaveBeenCalledWith('r1', '你好世界', true)
   })
 
   it('dispatches done to onDone', () => {
@@ -128,5 +135,17 @@ describe('ChatWebSocket', () => {
     new ChatWebSocket('/ws/chat/', 'jwt', { onError })
     MockWS.last!.fireError()
     expect(onError).toHaveBeenCalledWith('连接错误')
+  })
+
+  it('routes send to onError after the socket has closed (no throw, codex P2)', () => {
+    // socket 关闭后原生 WebSocket.send() 会抛 InvalidStateError 且不触发 handler；
+    // wrapper 标记 closed 后改走 onError，不真正发出（codex #4）
+    const onError = vi.fn()
+    const ws = new ChatWebSocket('/ws/chat/', 'jwt', { onError })
+    MockWS.last!.fireOpen()
+    MockWS.last!.fireClose()
+    expect(() => ws.send('sk-1', 'hi')).not.toThrow()
+    expect(onError).toHaveBeenCalledWith('连接已断开，请重试或切换容器')
+    expect(MockWS.last!.sent).toEqual([]) // CLOSED 态未真正发出
   })
 })

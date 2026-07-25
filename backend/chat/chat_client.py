@@ -132,18 +132,22 @@ class OpenClawChatClient:
         if msg.get('type') == 'res':
             self._resolve_ack(msg)
             return
-        translated = self._translator.translate(msg)
-        if translated is None:
+        frames = self._translator.translate(msg)
+        if not frames:
             return
-        run_id = translated.get('runId')
+        run_id = frames[0].get('runId')
         cb = self._routes.get(run_id)
         if cb is None:
-            return
-        try:
-            await cb(translated)
-        except Exception:
-            pass  # 隔离单 route 回调失败，避免杀整个 recv loop 影响同 client 其他 route
-        if translated.get('type') in ('done', 'error'):
+            return  # route 已 discard，丢弃整批帧
+        terminal = False
+        for translated in frames:
+            try:
+                await cb(translated)
+            except Exception:
+                pass  # 隔离单 route 回调失败，避免杀整个 recv loop 影响同 client 其他 route
+            if translated.get('type') in ('done', 'error'):
+                terminal = True
+        if terminal:
             self._routes.pop(run_id, None)
 
     def _resolve_ack(self, msg: dict) -> None:

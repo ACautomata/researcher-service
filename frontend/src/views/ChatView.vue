@@ -24,11 +24,14 @@ const messages = ref<Msg[]>([])
 const input = ref('')
 const errorMsg = ref('')
 const connecting = ref(false)
+const disconnected = ref(false) // ws 意外关闭：禁用发送，提示重连/切容器（codex P2 #4）
 let ws: ChatWebSocket | null = null
 let disposed = false
 // runId 路由：仅当前 run 的增量写入回复；切会话/容器时把旧 run 标记 abandoned，丢弃其迟到帧（codex P2）
-let activeRunId = ''
-let abandonedRunId = ''
+let activeRunId = '' // 已收到首帧的当前 run
+const abandonedRunIds = new Set<string>() // 切换前遗留的 runId：迟到帧丢弃（codex P2 #3）
+let pendingSend = false // 已 send 但首帧未到（runId 未知）
+let pendingAbandonCount = 0 // 切会话时仍 pending 的 run 数；其迟到首帧按 FIFO 视为孤儿丢弃（codex P2 #3）
 // selectContainer 的请求代：丢弃切容器途中迟到的 listSessions 响应（codex P2）
 let containerGen = 0
 
@@ -40,10 +43,18 @@ const currentSessionTitle = computed(() => {
 // 是否有助手消息正在流式；并发 send 会让旧 streaming 消息永久卡住光标，故流式中禁发
 const streaming = computed(() => messages.value.some((m) => m.role === 'assistant' && m.streaming))
 
-// 切会话/容器时调用：旧 run 的迟到增量/收尾帧按 runId 丢弃，不并入新会话回复
+// 切会话/容器时调用：旧 run（已 claim 或仍 pending）标记 abandoned，其迟到帧按 runId 丢弃
 function abandonActiveRun() {
-  if (activeRunId) abandonedRunId = activeRunId
+  if (activeRunId) abandonedRunIds.add(activeRunId)
+  else if (pendingSend) pendingAbandonCount++ // 首帧未到、runId 未知：迟到首帧按 FIFO 计数丢弃
   activeRunId = ''
+  pendingSend = false
+}
+
+// 收尾最后一条 streaming 助手消息（done/error/关闭时）
+function finalizeLast() {
+  const last = messages.value[messages.value.length - 1]
+  if (last && last.streaming) last.streaming = false
 }
 
 async function loadInstances() {
@@ -62,6 +73,15 @@ async function selectContainer(name: string) {
   if (!name || selectedContainer.value === name) return
   const gen = ++containerGen // 每次切换自增，await 后据此丢弃过期响应
   selectedContainer.value = name
+  // 立即停用旧连接 + 禁用 composer + 清空 session：避免 listSessions pending 期间经旧 socket
+  // 用旧 sessionKey 发送（UI 已显示新容器）（codex P2 #5）
+  const oldWs = ws
+  ws = null
+  oldWs?.close() // 旧 ws 的 onClose 见 ws(null) !== myWs → 不报断线
+  connecting.value = true
+  disconnected.value = false
+  selectedSession.value = ''
+  sessions.value = []
   messages.value = []
   abandonActiveRun()
   errorMsg.value = ''
@@ -76,6 +96,7 @@ async function selectContainer(name: string) {
     connect()
   } catch (e) {
     if (gen !== containerGen) return
+    connecting.value = false // 出错解除 connecting（composer 解禁后用户可重试）
     if (e instanceof ApiError && e.status === 401) return
     errorMsg.value = (e as Error).message
   }
@@ -107,6 +128,7 @@ function pickSession(key: string) {
 function connect() {
   ws?.close()
   connecting.value = true
+  disconnected.value = false
   errorMsg.value = ''
   // 每个 ws 闭包捕获自身；旧 ws 的 onClose 触发时 ws 已指向新连接 → 不报误断线
   const myWs = new ChatWebSocket('/ws/chat/', auth.token, {
@@ -116,35 +138,61 @@ function connect() {
         errorMsg.value = ''
       }
     },
-    onText: (runId, delta) => {
+    onText: (runId, delta, replace) => {
       if (ws !== myWs) return  // stale guard：切换容器后旧 ws 回调不污染新会话
-      if (runId === abandonedRunId) return  // 切会话前遗留 run 的增量：丢弃
-      if (!activeRunId) activeRunId = runId // 首帧锚定当前 run
-      if (runId !== activeRunId) return  // 仅当前 run 的增量写入回复
+      if (abandonedRunIds.has(runId)) return  // 切换前遗留 run 的增量：丢弃
+      if (activeRunId && runId !== activeRunId) return  // 仅当前 run 的增量写入回复
+      if (!activeRunId) {
+        // 首帧到达：若属于切会话时仍 pending 的孤儿 run（FIFO 先到）→ 标记 abandoned 丢弃（codex P2 #3）
+        if (pendingAbandonCount > 0) {
+          pendingAbandonCount--
+          abandonedRunIds.add(runId)
+          return
+        }
+        activeRunId = runId
+        pendingSend = false
+      }
       const last = messages.value[messages.value.length - 1]
-      if (last && last.role === 'assistant' && last.streaming) last.text += delta
+      if (last && last.role === 'assistant' && last.streaming) {
+        last.text = replace ? delta : last.text + delta  // replace=true：整段替换（codex P2 #1）
+      }
     },
     onDone: (runId) => {
       if (ws !== myWs) return
-      if (runId === abandonedRunId) return
-      if (runId !== activeRunId) return
-      const last = messages.value[messages.value.length - 1]
-      if (last && last.streaming) last.streaming = false
-      activeRunId = ''
+      if (abandonedRunIds.has(runId)) { abandonedRunIds.delete(runId); return }
+      if (activeRunId && runId !== activeRunId) return
+      if (activeRunId === runId) {
+        finalizeLast()
+        activeRunId = ''
+        return
+      }
+      // activeRunId 空：run 首帧即终态（无 delta）
+      if (pendingAbandonCount > 0) { pendingAbandonCount--; return }  // 孤儿 run 终态：计数丢弃
+      if (pendingSend) { finalizeLast(); pendingSend = false }  // 当前 pending run 无 delta 收尾
     },
     onError: (msg, runId) => {
       if (ws !== myWs) return
       // 消费者级错误（无 runId，如「请先选择容器」）照常显示；run 级错误按 runId 过滤
-      if (runId && (runId === abandonedRunId || (activeRunId && runId !== activeRunId))) return
+      if (runId) {
+        if (abandonedRunIds.has(runId)) { abandonedRunIds.delete(runId); return }
+        if (activeRunId && runId !== activeRunId) return
+      }
       errorMsg.value = msg
       connecting.value = false
-      const last = messages.value[messages.value.length - 1]
-      if (last && last.streaming) last.streaming = false
-      if (runId) activeRunId = ''
+      finalizeLast()
+      if (runId) {
+        if (activeRunId === runId) activeRunId = ''
+        else if (pendingAbandonCount > 0) pendingAbandonCount--
+        else if (pendingSend) pendingSend = false
+      } else {
+        activeRunId = ''
+        pendingSend = false
+      }
     },
     onClose: () => {
-      if (ws !== myWs) return
+      if (ws !== myWs) return  // 旧 ws 的关闭（切容器）不报断线
       connecting.value = false
+      disconnected.value = true  // 意外断线：禁用发送（codex P2 #4）
       if (!disposed) errorMsg.value = '连接已断开，请重试或切换容器'
     },
   })
@@ -154,10 +202,11 @@ function connect() {
 
 function send() {
   const text = input.value.trim()
-  if (!text || !ws || !selectedSession.value || connecting.value || streaming.value) return
+  if (!text || !ws || !selectedSession.value || connecting.value || streaming.value || disconnected.value) return
   messages.value.push({ role: 'user', text, streaming: false })
   messages.value.push({ role: 'assistant', text: '', streaming: true })
   activeRunId = '' // 等首帧 onText 锚定新 run
+  pendingSend = true // 首帧未到前，切会话会按 pending 孤儿计数（codex P2 #3）
   ws.send(selectedSession.value, text)
   input.value = ''
 }
@@ -221,7 +270,7 @@ defineExpose({ selectContainer, send, newSession })
           placeholder="发消息…（Enter 发送 / Shift+Enter 换行）"
           @keydown.enter.exact.prevent="send"
         ></textarea>
-        <button data-test="send" :disabled="connecting || streaming" @click="send">发送</button>
+        <button data-test="send" :disabled="connecting || streaming || disconnected" @click="send">发送</button>
       </div>
     </main>
   </div>
