@@ -57,7 +57,7 @@ const INSTANCE = {
   name: 'demo', port: 19000, status: 'running', health: 'healthy',
   image: 'i', container_id: 'c', created_at: '', pairing: { status: 'paired' },
 }
-const SESSION = { id: 1, session_key: 'sk-1', title: '文献综述', created_at: '' }
+const SESSION = { session_key: 'sk-1', title: '文献综述', updated_at: '' }
 
 describe('ChatView', () => {
   beforeEach(() => {
@@ -68,7 +68,7 @@ describe('ChatView', () => {
     useAuthStore().$patch({ token: 'jwt-test' })
     ;(listInstances as ReturnType<typeof vi.fn>).mockResolvedValue([INSTANCE])
     ;(listSessions as ReturnType<typeof vi.fn>).mockResolvedValue([SESSION])
-    ;(createSession as ReturnType<typeof vi.fn>).mockResolvedValue(SESSION)
+    ;(createSession as ReturnType<typeof vi.fn>).mockResolvedValue({ session_key: 'sk-1' })
     ;(listCommands as ReturnType<typeof vi.fn>).mockResolvedValue([])
   })
   afterEach(() => {
@@ -174,7 +174,7 @@ describe('ChatView', () => {
 
   it('does not merge stale run deltas after a session switch (runId routing, codex P2)', async () => {
     // 切会话不切 ws：旧 run 的增量必须按 runId 丢弃，不能并入新 run 的回复
-    const SESS2 = { id: 2, session_key: 'sk-2', title: 'S2', created_at: '' }
+    const SESS2 = { session_key: 'sk-2', title: 'S2', updated_at: '' }
     ;(listSessions as ReturnType<typeof vi.fn>).mockResolvedValue([SESSION, SESS2])
     const w = mount(ChatView, { global: { plugins: [createPinia()] } })
     await flushPromises()
@@ -219,9 +219,9 @@ describe('ChatView', () => {
     await flushPromises() // demo 自动选中，listSessions('demo') pending
     await w.find('[data-test="container-other"]').trigger('click') // 切到 other
     await nextTick()
-    resolveB.fn!([{ id: 2, session_key: 'sk-b', title: 'B', created_at: '' }]) // other 先回
+    resolveB.fn!([{ session_key: 'sk-b', title: 'B', updated_at: '' }]) // other 先回
     await flushPromises()
-    resolveA.fn!([{ id: 9, session_key: 'sk-stale', title: 'Stale', created_at: '' }]) // demo 迟到
+    resolveA.fn!([{ session_key: 'sk-stale', title: 'Stale', updated_at: '' }]) // demo 迟到
     await flushPromises()
     // 当前容器是 other → 保留 B 的会话，丢弃 demo 的迟到响应
     expect(w.find('[data-test="session-sk-b"]').exists()).toBe(true)
@@ -241,7 +241,7 @@ describe('ChatView', () => {
   it('discards orphaned pending run when its first delta arrives after a session switch (codex #3)', async () => {
     // 发消息后、首个 delta 到达前切会话：pending run 的 runId 未知，abandonActiveRun 按计数标记；
     // 其迟到首帧按 FIFO 视为孤儿丢弃，新会话的 run 正常渲染
-    const SESS2 = { id: 2, session_key: 'sk-2', title: 'S2', created_at: '' }
+    const SESS2 = { session_key: 'sk-2', title: 'S2', updated_at: '' }
     ;(listSessions as ReturnType<typeof vi.fn>).mockResolvedValue([SESSION, SESS2])
     const w = mount(ChatView, { global: { plugins: [createPinia()] } })
     await flushPromises()
@@ -413,7 +413,7 @@ describe('ChatView', () => {
   })
 
   it('retains other-session cards and shows them when switching to that session (codex R2 P1)', async () => {
-    const SESS2 = { id: 2, session_key: 'sk-2', title: 'S2', created_at: '' }
+    const SESS2 = { session_key: 'sk-2', title: 'S2', updated_at: '' }
     ;(listSessions as ReturnType<typeof vi.fn>).mockResolvedValue([SESSION, SESS2])
     const w = await mountReady()
     // 属于 sk-2 的卡：当前 sk-1 不显示，但**保留**（不丢弃）
@@ -464,7 +464,7 @@ describe('ChatView', () => {
     await nextTick()
     expect(w.find('[data-test="approval-ap-keep"]').exists()).toBe(true)
     // 新建会话（不换容器）：卡须保留（agent 仍卡住,不能误清）
-    ;(createSession as ReturnType<typeof vi.fn>).mockResolvedValue({ id: 2, session_key: 'sk-new', title: 'N', created_at: '' })
+    ;(createSession as ReturnType<typeof vi.fn>).mockResolvedValue({ session_key: 'sk-new' })
     await w.find('[data-test="new-session"]').trigger('click')
     await flushPromises()
     // 新会话 sessionKey 不同 → 该卡按 sessionKey 过滤暂不显示;切回原会话 sk-1 应能再见到(证明未被误清)

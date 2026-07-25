@@ -5,7 +5,7 @@ device_token（凭证）——仅暴露 status/device_id/scopes/pairing_request_
 """
 from rest_framework import serializers
 
-from chat.models import Pairing, Session
+from chat.models import Pairing
 
 
 class ApprovalResolveSerializer(serializers.Serializer):
@@ -19,6 +19,24 @@ class ApprovalResolveSerializer(serializers.Serializer):
     decision = serializers.ChoiceField(choices=('approve', 'deny'))
 
 
+class SessionCreateSerializer(serializers.Serializer):
+    """会话新建入参（T2，issue #81）：label 可选（免标题新建，网关后续派生）。
+
+    对 request.data 强制 is_valid()：非对象 body（[]/"x"/123）→ 400（而非 .get AttributeError 500）；
+    非 str label → 400。trim 后空串视为未提供（→ None，网关派生标题）。
+    """
+
+    label = serializers.CharField(required=False, allow_blank=True, max_length=128, trim_whitespace=True)
+
+    def validate_label(self, value):
+        # 0 信任：只接受真正的 str 入参——int/bool/list 等经 CharField 会被静默 str() 强转，
+        # 违反「非法类型 → 400」边界；此处显式拒绝原始非 str 值。
+        raw = self.initial_data.get('label')
+        if raw is not None and not isinstance(raw, str):
+            raise serializers.ValidationError('label 须为字符串')
+        return value
+
+
 class PairingStatusSerializer(serializers.Serializer):
     """配对状态出参（read-only）。"""
 
@@ -30,12 +48,3 @@ class PairingStatusSerializer(serializers.Serializer):
 
     def get_scopes(self, obj: Pairing) -> list[str]:
         return obj.scopes_list()
-
-
-class SessionSerializer(serializers.ModelSerializer):
-    """会话出参（session_key/created_at 只读；title 新建时入参）。"""
-
-    class Meta:
-        model = Session
-        fields = ['id', 'session_key', 'title', 'created_at']
-        read_only_fields = ['id', 'session_key', 'created_at']

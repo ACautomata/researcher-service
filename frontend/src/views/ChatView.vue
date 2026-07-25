@@ -244,7 +244,10 @@ async function newSession() {
   // codex R3 P1：不清空审批卡——新会话不换容器，切会话特意留存的同容器卡须保留（按 sessionKey 过滤渲染），
   // 否则卡住的 agent 对应那张卡会被这里误清、再也无法回覆
   try {
-    const s = await createSession(selectedContainer.value)
+    const { session_key } = await createSession(selectedContainer.value)
+    // 网关权威新建仅回 {session_key}：本地补全占位项（title 空 → 渲染回退 key 前 8 位，
+    // 派生标题待下次 listSessions 刷新），避免引用已删除的 DB 字段（id/created_at）
+    const s: SessionDTO = { session_key, title: '', updated_at: '' }
     sessions.value = [s, ...sessions.value]
     selectedSession.value = s.session_key
     errorMsg.value = ''
