@@ -30,7 +30,9 @@ class FakeChatClient:
         self._handlers = {}
         self.discarded = []
         self.resolved = []  # (approval_id, kind, decision)
-        self._approval_handler = None
+        self.resolve_payload = {}  # resolve_approval 返回的权威 payload
+        self.pending = []  # start 时补拉的待审批卡（codex P2 断线恢复）
+        self._approval_subscribers = []
 
     async def send_message(self, session_key, message, *, on_event):
         run_id = f'run-{len(self.sent) + 1}'
@@ -47,17 +49,25 @@ class FakeChatClient:
         if cb is not None:
             await cb(frame)
 
-    # T06：consumer 注册/退订连接级审批回调 + 回覆
-    def set_approval_handler(self, cb):
-        self._approval_handler = cb
+    # T06：订阅者集合（codex P1）+ 权威 decision 回覆 + start 补拉待审批（codex P2）
+    def add_approval_subscriber(self, cb):
+        if cb not in self._approval_subscribers:
+            self._approval_subscribers.append(cb)
+
+    def remove_approval_subscriber(self, cb):
+        if cb in self._approval_subscribers:
+            self._approval_subscribers.remove(cb)
 
     async def resolve_approval(self, approval_id, kind, decision):
         self.resolved.append((approval_id, kind, decision))
-        return True
+        return self.resolve_payload
+
+    async def list_pending_approvals(self):
+        return list(self.pending)
 
     async def emit_approval(self, frame):
-        if self._approval_handler is not None:
-            await self._approval_handler(frame)
+        for cb in list(self._approval_subscribers):
+            await cb(frame)
 
 
 class FakePool:
@@ -75,9 +85,9 @@ class NotPairedPool:
         raise NotPaired('pending', 'req-9')
 
 
-async def _connect_authed():
+async def _connect_authed(username='alice'):
     user = await database_sync_to_async(User.objects.create_user)(
-        username='alice', password='strong-pass-1')
+        username=username, password='strong-pass-1')
     token = str(RefreshToken.for_user(user).access_token)
     return WebsocketCommunicator(
         application, '/ws/chat/', subprotocols=['access_token', token])
@@ -231,8 +241,10 @@ async def test_start_connect_failure_sends_error_frame(instance):
 
 
 # ---- T06 权限审批（issue #42 / spec §8.2）----
-# 审批卡是连接级（无 runId）：start 后 consumer 注册 client.set_approval_handler 透传给前端；
-# 前端发 resolve{id,kind,decision} → consumer 调 client.resolve_approval；disconnect 退订。
+# 审批卡是连接级（无 runId）：start 后 consumer add_approval_subscriber 订阅、disconnect 独立退订
+# （codex P1 订阅者集合，多 consumer 共享 client 不互伤）；前端发 resolve{id,kind,decision} →
+# client.resolve_approval → 回执用权威 decision（codex P1 first-answer-wins）；start 补拉待审批
+# （codex P2 断线恢复）。
 
 
 @pytest.mark.asyncio
@@ -249,15 +261,71 @@ async def test_approval_card_pushed_to_frontend(override_pool, instance, fake_cl
 
 
 @pytest.mark.asyncio
-async def test_resolve_calls_client_resolve_approval(override_pool, instance, fake_client):
+async def test_two_consumers_both_receive_approval(override_pool, instance, fake_client):
+    """codex P1：两个 consumer 共享同一 pooled client，审批卡 fan-out 到两者（不互相覆盖）。"""
+    comm_a = await _connect_authed('alice')
+    await comm_a.connect()
+    await comm_a.send_json_to({'type': 'start', 'container': 'demo'})
+    await comm_a.receive_json_from()  # A ready
+    comm_b = await _connect_authed('bob')
+    await comm_b.connect()
+    await comm_b.send_json_to({'type': 'start', 'container': 'demo'})
+    await comm_b.receive_json_from()  # B ready
+    await fake_client.emit_approval({'type': 'approval', 'id': 'ap-1', 'kind': 'exec', 'command': 'x'})
+    fa = await comm_a.receive_json_from()
+    fb = await comm_b.receive_json_from()
+    assert fa['id'] == 'ap-1'
+    assert fb['id'] == 'ap-1'
+    await comm_a.disconnect()
+    await comm_b.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_disconnect_one_keeps_peer_subscribed(override_pool, instance, fake_client):
+    """codex P1：A 断开退订不影响仍活跃的 B；B 之后仍收审批卡。"""
+    comm_a = await _connect_authed('alice')
+    await comm_a.connect()
+    await comm_a.send_json_to({'type': 'start', 'container': 'demo'})
+    await comm_a.receive_json_from()
+    comm_b = await _connect_authed('bob')
+    await comm_b.connect()
+    await comm_b.send_json_to({'type': 'start', 'container': 'demo'})
+    await comm_b.receive_json_from()
+    await comm_a.disconnect()  # A 断开
+    await asyncio.sleep(0.02)
+    await fake_client.emit_approval({'type': 'approval', 'id': 'ap-2', 'kind': 'exec', 'command': 'y'})
+    fb = await comm_b.receive_json_from()
+    assert fb['id'] == 'ap-2'  # B 仍收
+    await comm_b.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_resolve_calls_client_and_echoes_authoritative_decision(override_pool, instance, fake_client):
+    """codex P1：resolve 回执用网关权威 decision（first-answer-wins），非回声请求值。"""
+    fake_client.resolve_payload = {'id': 'ap-1', 'decision': 'deny'}  # 请求 approve，权威 deny
     comm = await _connect_authed()
     await comm.connect()
     await comm.send_json_to({'type': 'start', 'container': 'demo'})
     await comm.receive_json_from()  # ready
     await comm.send_json_to({'type': 'resolve', 'id': 'ap-1', 'kind': 'exec', 'decision': 'approve'})
     resp = await comm.receive_json_from()
-    assert resp == {'type': 'approvalResolved', 'id': 'ap-1', 'decision': 'approve'}
+    assert resp == {'type': 'approvalResolved', 'id': 'ap-1', 'decision': 'deny'}
     assert fake_client.resolved == [('ap-1', 'exec', 'approve')]
+    await comm.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_start_replays_pending_approvals(override_pool, instance, fake_client):
+    """codex P2：断线期间积累的待审批，start 后补拉推给前端（agent 不再卡死）。"""
+    fake_client.pending = [
+        {'type': 'approval', 'id': 'ap-old', 'kind': 'exec', 'command': 'stale cmd'},
+    ]
+    comm = await _connect_authed()
+    await comm.connect()
+    await comm.send_json_to({'type': 'start', 'container': 'demo'})
+    await comm.receive_json_from()  # ready
+    frame = await comm.receive_json_from()  # 补拉的待审批卡
+    assert frame == {'type': 'approval', 'id': 'ap-old', 'kind': 'exec', 'command': 'stale cmd'}
     await comm.disconnect()
 
 
@@ -287,11 +355,11 @@ async def test_resolve_failure_sends_error(override_pool, instance, fake_client)
 
 
 @pytest.mark.asyncio
-async def test_disconnect_unsubscribes_approval_handler(override_pool, instance, fake_client):
+async def test_disconnect_unsubscribes_approval(override_pool, instance, fake_client):
     comm = await _connect_authed()
     await comm.connect()
     await comm.send_json_to({'type': 'start', 'container': 'demo'})
     await comm.receive_json_from()  # ready
     await comm.disconnect()
-    # disconnect 后 handler 退订：再 emit 不再推给已关闭连接
-    assert fake_client._approval_handler is None
+    # disconnect 后订阅者退订：再 emit 不再推给已关闭连接
+    assert fake_client._approval_subscribers == []

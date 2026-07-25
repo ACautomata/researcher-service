@@ -106,7 +106,7 @@ def test_approval_requested_becomes_approval_card(translator):
     # 完整 payload：id/kind + systemRunPlan.rawCommand（host=node 时网关字段，r26:64）
     frame = _approval_requested(systemRunPlan={'rawCommand': 'rm -rf /tmp/x'})
     assert translator.translate(frame) == [
-        {'type': 'approval', 'id': 'ap-1', 'kind': 'exec', 'command': 'rm -rf /tmp/x'},
+        {'type': 'approval', 'id': 'ap-1', 'kind': 'exec', 'command': 'rm -rf /tmp/x', 'sessionKey': None},
     ]
 
 
@@ -122,7 +122,7 @@ def test_approval_requested_extracts_command_fallbacks(translator):
 def test_approval_requested_missing_command_tolerated(translator):
     # 无 command 字段仍出卡（前端显示占位），不吞掉事件
     out = translator.translate(_approval_requested())
-    assert out == [{'type': 'approval', 'id': 'ap-1', 'kind': 'exec', 'command': ''}]
+    assert out == [{'type': 'approval', 'id': 'ap-1', 'kind': 'exec', 'command': '', 'sessionKey': None}]
 
 
 def test_approval_requested_missing_id_returns_empty(translator):
@@ -143,7 +143,36 @@ def test_plugin_approval_requested_also_translated(translator):
     frame = {'type': 'event', 'event': 'plugin.approval.requested',
              'payload': {'id': 'ap-2', 'kind': 'plugin', 'command': 'plugin do-thing'}}
     out = translator.translate(frame)
-    assert out == [{'type': 'approval', 'id': 'ap-2', 'kind': 'plugin', 'command': 'plugin do-thing'}]
+    assert out == [{'type': 'approval', 'id': 'ap-2', 'kind': 'plugin',
+                    'command': 'plugin do-thing', 'sessionKey': None}]
+
+
+def test_approval_kind_falls_back_to_event_name_family(translator):
+    """codex/审查 P1：payload 缺 kind 时从事件名派生（exec/plugin），不可一律回退 'exec'。
+
+    r26 §1：payload 只保证稳定 id + systemRunPlan，kind 非文档字段；缺省时须按事件族派生，
+    否则 plugin 审批会以 kind='exec' 回覆 approval.resolve（类型无关审批对要求匹配 kind）。
+    """
+    frame = {'type': 'event', 'event': 'plugin.approval.requested', 'payload': {'id': 'ap-7'}}
+    out = translator.translate(frame)
+    assert out[0]['kind'] == 'plugin'
+    frame2 = {'type': 'event', 'event': 'exec.approval.requested', 'payload': {'id': 'ap-8'}}
+    assert translator.translate(frame2)[0]['kind'] == 'exec'
+
+
+def test_approval_card_carries_session_key(translator):
+    """codex P1：systemRunPlan.sessionKey 透传到卡片，前端据此把审批归属到对应会话过滤。"""
+    frame = {'type': 'event', 'event': 'exec.approval.requested',
+             'payload': {'id': 'ap-1', 'systemRunPlan': {'rawCommand': 'x', 'sessionKey': 'sess-9'}}}
+    out = translator.translate(frame)
+    assert out[0]['sessionKey'] == 'sess-9'
+
+
+def test_approval_card_session_key_absent_tolerated(translator):
+    # 无 systemRunPlan/sessionKey（连接级审批未必挂会话）→ sessionKey 为 None，前端按当前会话处理
+    frame = {'type': 'event', 'event': 'exec.approval.requested', 'payload': {'id': 'ap-1', 'command': 'x'}}
+    out = translator.translate(frame)
+    assert out[0]['sessionKey'] is None
 
 
 def test_non_chat_event_returns_empty(translator):

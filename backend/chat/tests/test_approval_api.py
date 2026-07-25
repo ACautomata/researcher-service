@@ -46,12 +46,13 @@ def instance(db):
 class _FakeClient:
     """记录 resolve_approval 的 client 替身。"""
 
-    def __init__(self):
+    def __init__(self, payload=None):
         self.resolved = []
+        self._payload = payload if payload is not None else {}
 
     async def resolve_approval(self, approval_id, kind, decision):
         self.resolved.append((approval_id, kind, decision))
-        return True
+        return self._payload
 
 
 class _FakePool:
@@ -82,6 +83,15 @@ def test_resolve_success(authed, instance, override_pool):
     assert resp.status_code == 200
     assert resp.json() == {'ok': True, 'id': 'ap-1', 'decision': 'approve'}
     assert client.resolved == [('ap-1', 'exec', 'approve')]
+
+
+def test_resolve_returns_authoritative_decision(authed, instance, override_pool):
+    """codex P1：first-answer-wins —— 响应用网关权威 decision，非回声请求值。"""
+    client = _FakeClient(payload={'id': 'ap-1', 'decision': 'deny'})
+    override_pool(_FakePool(client))
+    resp = authed.post(URL, {'id': 'ap-1', 'kind': 'exec', 'decision': 'approve'}, format='json')
+    assert resp.status_code == 200
+    assert resp.json()['decision'] == 'deny'  # 请求 approve，权威记录 deny
 
 
 def test_resolve_missing_field_400(authed, instance, override_pool):
@@ -119,6 +129,18 @@ def test_resolve_gateway_reject_502(authed, instance, override_pool):
     client.resolve_approval = fail
     override_pool(_FakePool(client))
     resp = authed.post(URL, {'id': 'a', 'kind': 'exec', 'decision': 'deny'}, format='json')
+    assert resp.status_code == 502
+
+
+def test_resolve_pool_connect_failure_502(authed, instance, override_pool):
+    """codex P2：配对有效但网关离线/握手失败时，get_or_create 抛连接异常 → 502（非 500）。"""
+    from chat.chat_client import ChatConnectError
+
+    class _ConnectFailPool:
+        async def get_or_create(self, instance):
+            raise ChatConnectError('gateway offline')
+    override_pool(_ConnectFailPool())
+    resp = authed.post(URL, {'id': 'a', 'kind': 'exec', 'decision': 'approve'}, format='json')
     assert resp.status_code == 502
 
 

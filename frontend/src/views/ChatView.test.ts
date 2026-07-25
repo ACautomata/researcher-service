@@ -319,7 +319,7 @@ describe('ChatView', () => {
 
   it('renders an orange approval card when agent requests elevation (验收 1)', async () => {
     const w = await mountReady()
-    MockWS.last!.fireMessage({ type: 'approval', id: 'ap-1', kind: 'exec', command: 'openclaw wiki compile' })
+    MockWS.last!.fireMessage({ type: 'approval', id: 'ap-1', kind: 'exec', command: 'openclaw wiki compile', sessionKey: 'sk-1' })
     await nextTick()
     const card = w.find('[data-test="approval-ap-1"]')
     expect(card.exists()).toBe(true)
@@ -331,43 +331,96 @@ describe('ChatView', () => {
     expect(w.find('[data-test="detail-ap-1"]').exists()).toBe(true) // 查看细节
   })
 
-  it('approve sends resolve frame and fades the card as resolved (验收 2)', async () => {
+  it('approve enters pending (buttons disabled, NOT yet resolved) until approvalResolved (codex P2)', async () => {
     const w = await mountReady()
-    MockWS.last!.fireMessage({ type: 'approval', id: 'ap-1', kind: 'exec', command: 'cmd' })
+    MockWS.last!.fireMessage({ type: 'approval', id: 'ap-1', kind: 'exec', command: 'cmd', sessionKey: 'sk-1' })
     await nextTick()
     await w.find('[data-test="approve-ap-1"]').trigger('click')
     expect(MockWS.last!.sent).toContainEqual({ type: 'resolve', id: 'ap-1', kind: 'exec', decision: 'approve' })
     await nextTick()
+    // pending：按钮禁用但卡片未标记 resolved（等服务端回执，不乐观假成功）
     const card = w.find('[data-test="approval-ap-1"]')
-    expect(card.classes()).toContain('resolved') // 变淡
-    expect(card.text()).toContain('已批准') // 显示结果
-    expect(w.find('[data-test="approve-ap-1"]').exists()).toBe(false) // 处理后隐藏按钮
+    expect(card.classes()).not.toContain('resolved')
+    expect((w.find('[data-test="approve-ap-1"]').element as HTMLButtonElement).disabled).toBe(true)
+    // 服务端回执到达才落定变淡
+    MockWS.last!.fireMessage({ type: 'approvalResolved', id: 'ap-1', decision: 'approve' })
+    await nextTick()
+    const card2 = w.find('[data-test="approval-ap-1"]')
+    expect(card2.classes()).toContain('resolved')
+    expect(card2.text()).toContain('已批准')
   })
 
-  it('deny sends resolve frame with deny and shows 已拒绝', async () => {
+  it('approvalResolved uses authoritative decision, not requested (codex P1)', async () => {
     const w = await mountReady()
-    MockWS.last!.fireMessage({ type: 'approval', id: 'ap-2', kind: 'exec', command: 'cmd' })
+    MockWS.last!.fireMessage({ type: 'approval', id: 'ap-1', kind: 'exec', command: 'cmd', sessionKey: 'sk-1' })
     await nextTick()
-    await w.find('[data-test="deny-ap-2"]').trigger('click')
-    expect(MockWS.last!.sent).toContainEqual({ type: 'resolve', id: 'ap-2', kind: 'exec', decision: 'deny' })
+    await w.find('[data-test="approve-ap-1"]').trigger('click') // 请求 approve
     await nextTick()
-    const card = w.find('[data-test="approval-ap-2"]')
-    expect(card.classes()).toContain('resolved')
-    expect(card.text()).toContain('已拒绝')
+    MockWS.last!.fireMessage({ type: 'approvalResolved', id: 'ap-1', decision: 'deny' }) // 权威 deny
+    await nextTick()
+    expect(w.find('[data-test="approval-ap-1"]').text()).toContain('已拒绝')
   })
 
-  it('toggles detail view to reveal full command (查看细节)', async () => {
+  it('restores buttons when resolve fails (error frame), card stays actionable (codex P2)', async () => {
     const w = await mountReady()
-    MockWS.last!.fireMessage({ type: 'approval', id: 'ap-3', kind: 'exec', command: 'very long cmd' })
+    MockWS.last!.fireMessage({ type: 'approval', id: 'ap-1', kind: 'exec', command: 'cmd', sessionKey: 'sk-1' })
     await nextTick()
-    expect(w.find('[data-test="approval-detail-ap-3"]').exists()).toBe(false)
-    await w.find('[data-test="detail-ap-3"]').trigger('click')
+    await w.find('[data-test="approve-ap-1"]').trigger('click')
     await nextTick()
-    expect(w.find('[data-test="approval-detail-ap-3"]').exists()).toBe(true)
-    expect(w.find('[data-test="approval-detail-ap-3"]').text()).toContain('very long cmd')
+    expect((w.find('[data-test="approve-ap-1"]').element as HTMLButtonElement).disabled).toBe(true) // pending
+    // 回覆失败（error 帧，无 runId）→ 恢复按钮可重试，卡片未 resolved
+    MockWS.last!.fireMessage({ type: 'error', message: '审批回覆失败' })
+    await nextTick()
+    const card = w.find('[data-test="approval-ap-1"]')
+    expect(card.classes()).not.toContain('resolved')
+    expect((w.find('[data-test="approve-ap-1"]').element as HTMLButtonElement).disabled).toBe(false)
   })
 
-  it('clears approval cards when switching container (卡片随会话清空)', async () => {
+  it('approval card does not break streaming anchor or stick the composer (审查 #5)', async () => {
+    const w = await mountReady()
+    // 先发一条消息触发助手流式
+    await w.find('[data-test="input"]').setValue('hi')
+    await w.find('[data-test="send"]').trigger('click')
+    MockWS.last!.fireMessage({ type: 'text', runId: 'r1', delta: '思考' })
+    await nextTick()
+    // 流式中途来审批卡：不应被 finalizeLast 误收尾、不应影响 streaming 光标
+    MockWS.last!.fireMessage({ type: 'approval', id: 'ap-1', kind: 'exec', command: 'cmd', sessionKey: 'sk-1' })
+    await nextTick()
+    expect(w.find('[data-test="approval-ap-1"]').exists()).toBe(true)
+    expect(w.find('.cursor').exists()).toBe(true) // 流式光标仍在
+    MockWS.last!.fireMessage({ type: 'done', runId: 'r1' })
+    await nextTick()
+    expect(w.find('.cursor').exists()).toBe(false) // done 正常收尾
+    expect(w.find('[data-test="stream"]').text()).toContain('思考')
+  })
+
+  it('filters approval cards to the owning session (codex P1 sessionKey)', async () => {
+    const SESS2 = { id: 2, session_key: 'sk-2', title: 'S2', created_at: '' }
+    ;(listSessions as ReturnType<typeof vi.fn>).mockResolvedValue([SESSION, SESS2])
+    const w = await mountReady()
+    // 属于 sk-2 的审批卡：当前会话是 sk-1，不应显示
+    MockWS.last!.fireMessage({ type: 'approval', id: 'ap-x', kind: 'exec', command: 'cmd', sessionKey: 'sk-2' })
+    await nextTick()
+    expect(w.find('[data-test="approval-ap-x"]').exists()).toBe(false)
+    // 属于当前会话 sk-1 的：显示
+    MockWS.last!.fireMessage({ type: 'approval', id: 'ap-y', kind: 'exec', command: 'cmd', sessionKey: 'sk-1' })
+    await nextTick()
+    expect(w.find('[data-test="approval-ap-y"]').exists()).toBe(true)
+  })
+
+  it('clears approval cards when switching session within same container (审查 #6)', async () => {
+    const SESS2 = { id: 2, session_key: 'sk-2', title: 'S2', created_at: '' }
+    ;(listSessions as ReturnType<typeof vi.fn>).mockResolvedValue([SESSION, SESS2])
+    const w = await mountReady()
+    MockWS.last!.fireMessage({ type: 'approval', id: 'ap-1', kind: 'exec', command: 'cmd', sessionKey: 'sk-1' })
+    await nextTick()
+    expect(w.find('[data-test="approval-ap-1"]').exists()).toBe(true)
+    await w.find('[data-test="session-sk-2"]').trigger('click') // 切会话
+    await nextTick()
+    expect(w.find('[data-test="approval-ap-1"]').exists()).toBe(false)
+  })
+
+  it('clears approval cards when switching container', async () => {
     ;(listInstances as ReturnType<typeof vi.fn>).mockResolvedValue([
       INSTANCE,
       { ...INSTANCE, name: 'other', port: 19001 },
@@ -377,11 +430,22 @@ describe('ChatView', () => {
     MockWS.last!.fireOpen()
     MockWS.last!.fireMessage({ type: 'ready', container: 'demo' })
     await nextTick()
-    MockWS.last!.fireMessage({ type: 'approval', id: 'ap-1', kind: 'exec', command: 'cmd' })
+    MockWS.last!.fireMessage({ type: 'approval', id: 'ap-1', kind: 'exec', command: 'cmd', sessionKey: 'sk-1' })
     await nextTick()
     expect(w.find('[data-test="approval-ap-1"]').exists()).toBe(true)
-    await w.find('[data-test="container-other"]').trigger('click') // 切容器 → messages 清空
+    await w.find('[data-test="container-other"]').trigger('click') // 切容器
     await flushPromises()
     expect(w.find('[data-test="approval-ap-1"]').exists()).toBe(false)
+  })
+
+  it('toggles detail view to reveal full command (查看细节)', async () => {
+    const w = await mountReady()
+    MockWS.last!.fireMessage({ type: 'approval', id: 'ap-3', kind: 'exec', command: 'very long cmd', sessionKey: 'sk-1' })
+    await nextTick()
+    expect(w.find('[data-test="approval-detail-ap-3"]').exists()).toBe(false)
+    await w.find('[data-test="detail-ap-3"]').trigger('click')
+    await nextTick()
+    expect(w.find('[data-test="approval-detail-ap-3"]').exists()).toBe(true)
+    expect(w.find('[data-test="approval-detail-ap-3"]').text()).toContain('very long cmd')
   })
 })

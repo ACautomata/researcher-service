@@ -36,8 +36,13 @@ class ChatEventTranslator:
         self._sent: dict[str, str] = {}
 
     @staticmethod
-    def _approval_card(payload: dict) -> dict | None:
-        """待审批事件 payload → 前端审批卡帧；无稳定审批 id 则返回 None（无法 resolve，不出卡）。"""
+    def _approval_card(event: str, payload: dict) -> dict | None:
+        """待审批事件 payload → 前端审批卡帧；无稳定审批 id 则返回 None（无法 resolve，不出卡）。
+
+        kind 取值（codex/审查 P1）：payload.kind 缺省时从事件名族派生（exec/plugin）——r26 §1 指出
+        kind 非文档字段，plugin 审批若一律回退 'exec' 会以错误 kind 回覆 approval.resolve（类型无关
+        审批对要求匹配 kind）。sessionKey 透传自 systemRunPlan（前端据此把审批归属到对应会话过滤）。
+        """
         approval_id = payload.get('id')
         if not approval_id:
             return None
@@ -47,8 +52,9 @@ class ChatEventTranslator:
         return {
             'type': 'approval',
             'id': approval_id,
-            'kind': payload.get('kind') or 'exec',  # decision 回覆需 id+kind+decision 三字段
+            'kind': payload.get('kind') or event.split('.')[0],  # decision 回覆需 id+kind+decision 三字段
             'command': command,
+            'sessionKey': run_plan.get('sessionKey'),  # codex P1：归属会话；无则 None（前端按当前会话处理）
         }
 
     def translate(self, frame: dict) -> list[dict]:
@@ -56,10 +62,11 @@ class ChatEventTranslator:
         if frame.get('type') != 'event':
             return []
         # 审批事件是连接级广播（不挂 chat runId，r26:88）→ 单独翻译出卡，不进 chat 分支
-        if frame.get('event') in _APPROVAL_REQUESTED_EVENTS:
-            card = self._approval_card(frame.get('payload') or {})
+        event = frame.get('event')
+        if event in _APPROVAL_REQUESTED_EVENTS:
+            card = self._approval_card(event, frame.get('payload') or {})
             return [card] if card else []
-        if frame.get('event') != 'chat':
+        if event != 'chat':
             return []
         payload = frame.get('payload') or {}
         run_id = payload.get('runId')

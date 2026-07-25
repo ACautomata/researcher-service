@@ -61,9 +61,10 @@ class OpenClawChatClient:
         self._build_connect = connect_frame_builder or self._default_connect_frame
         self._connect_timeout = connect_timeout
         self._ack_timeout = ack_timeout
-        # 连接级审批回调（T06，spec §8.2）：exec/plugin.approval.requested 不挂 runId。
-        # 由 consumer start 时经 set_approval_handler 注册、disconnect 时置 None 退订（单订阅）。
-        self._approval_handler: OnEvent | None = None
+        # 连接级审批订阅者集合（T06，spec §8.2 / codex P1）：exec/plugin.approval.requested 不挂 runId，
+        # 是连接级广播 → 多 consumer 共享同一 pooled client 时须 fan-out 到所有订阅者（不可单槽覆盖）。
+        # consumer start 时 add_approval_subscriber 注册、disconnect 时 remove_approval_subscriber 独立退订。
+        self._approval_subscribers: list[OnEvent] = []
         self._ws = None
         self._cm = None
         self._recv_task: asyncio.Task | None = None
@@ -73,9 +74,15 @@ class OpenClawChatClient:
         self._closed = False
         self._dead = False  # recv loop 退出（连接断开）→ pool 据此驱逐重建
 
-    def set_approval_handler(self, cb: OnEvent | None) -> None:
-        """注册/退订连接级审批回调（T06）：consumer start 注册、disconnect 传 None 退订。"""
-        self._approval_handler = cb
+    def add_approval_subscriber(self, cb: OnEvent) -> None:
+        """注册连接级审批订阅者（T06 / codex P1）：多 consumer 共享 client 时各自独立注册。"""
+        if cb not in self._approval_subscribers:
+            self._approval_subscribers.append(cb)
+
+    def remove_approval_subscriber(self, cb: OnEvent) -> None:
+        """退订指定订阅者（codex P1）：只移除自己，不误伤同 client 其他 consumer 的订阅。"""
+        if cb in self._approval_subscribers:
+            self._approval_subscribers.remove(cb)
 
     @property
     def dead(self) -> bool:
@@ -145,15 +152,15 @@ class OpenClawChatClient:
             return
         run_id = frames[0].get('runId')
         if run_id is None:
-            # 连接级帧（T06 审批卡）：不挂 runId，单独上抛审批回调，不进 runId 路由
-            if self._approval_handler is not None:
-                for translated in frames:
-                    if translated.get('type') != 'approval':
-                        continue
+            # 连接级帧（T06 审批卡）：不挂 runId，fan-out 到所有审批订阅者，不进 runId 路由
+            for translated in frames:
+                if translated.get('type') != 'approval':
+                    continue
+                for cb in list(self._approval_subscribers):
                     try:
-                        await self._approval_handler(translated)
+                        await cb(translated)
                     except Exception:
-                        pass  # 隔离审批回调失败，不杀 recv loop
+                        pass  # 隔离单订阅者回调失败，不影响其他订阅者 / 不杀 recv loop
             return
         cb = self._routes.get(run_id)
         if cb is None:
@@ -200,10 +207,12 @@ class OpenClawChatClient:
             err = msg.get('error') or {}
             fut.set_exception(ChatSendError(err.get('message') or err.get('code') or 'chat.send failed'))
 
-    async def resolve_approval(self, approval_id: str, kind: str, decision: str) -> bool:
+    async def resolve_approval(self, approval_id: str, kind: str, decision: str) -> dict:
         """回覆一次权限审批（T06，spec §8.2）：发 approval.resolve(id,kind,decision)，有界等 res。
 
-        需 operator.approvals scope（握手已声明，§8.1）；网关拒绝（缺 scope 等）抛 ChatSendError。
+        返回网关 res 的 payload——approval.resolve 是 first-answer-wins，权威记录的 decision 可能
+        与本请求的 decision 不同（另一 operator 已答）；调用方须用 payload 里的权威结果，不能回声
+        本请求的 decision（codex P1）。需 operator.approvals scope；网关拒绝抛 ChatSendError。
         """
         if self._ws is None:
             raise ChatClientError('client not connected')
@@ -216,14 +225,45 @@ class OpenClawChatClient:
         }
         await self._ws.send(json.dumps(frame))
         try:
-            await asyncio.wait_for(fut, timeout=self._ack_timeout)
+            payload = await asyncio.wait_for(fut, timeout=self._ack_timeout)
         except asyncio.TimeoutError:
             self._pending_resolves.pop(req_id, None)
             raise ChatSendError('approval.resolve ack timeout')
         except BaseException:
             self._pending_resolves.pop(req_id, None)
             raise
-        return True
+        return payload or {}
+
+    async def list_pending_approvals(self) -> list[dict]:
+        """查询网关当前待审批列表（codex P2 断线恢复）：发 approval.list，翻译成审批卡帧列表。
+
+        best-effort：响应缺 approvals 键/非列表/某项无 id 均容错（payload schema 待实测），
+        绝不抛异常打断 consumer 的 ready 流程。复用 _approval_card 单项翻译（kind 从事件族派生
+        此处无事件名，按 payload.kind 或缺省 exec）。
+        """
+        if self._ws is None:
+            return []
+        req_id = uuid.uuid4().hex
+        fut = asyncio.get_running_loop().create_future()
+        self._pending_resolves[req_id] = fut
+        frame = {'type': 'req', 'id': req_id, 'method': 'approval.list', 'params': {}}
+        try:
+            await self._ws.send(json.dumps(frame))
+            payload = await asyncio.wait_for(fut, timeout=self._ack_timeout)
+        except BaseException:
+            self._pending_resolves.pop(req_id, None)
+            return []
+        items = (payload or {}).get('approvals')
+        if not isinstance(items, list):
+            return []
+        cards = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            card = ChatEventTranslator._approval_card('exec.approval.requested', item)
+            if card is not None:
+                cards.append(card)
+        return cards
 
     async def send_message(self, session_key: str, message: str, *, on_event: OnEvent) -> str:
         if self._ws is None:

@@ -10,14 +10,21 @@ import { ApiError } from '@/api/client'
 import { ChatWebSocket } from '@/chat/ws'
 
 interface Msg {
-  role: 'user' | 'assistant' | 'approval'
+  role: 'user' | 'assistant'
   text: string
   streaming: boolean
-  // T06 审批卡字段（role==='approval' 时使用）
-  approvalId?: string
-  approvalKind?: string
-  resolved?: '' | 'approve' | 'deny' // '' = 待处理；处理后变淡显示结果
-  detailOpen?: boolean
+}
+
+// T06 审批卡（连接级，无 runId）：独立列表渲染，不混入 messages——避免破坏流式锚定/finalizeLast
+// （审查 #5），并可独立按 sessionKey 过滤、随会话/容器切换清空（codex P1 / 审查 #6）。
+interface ApprovalItem {
+  id: string
+  kind: string
+  command: string
+  sessionKey: string | null
+  status: 'pending' | 'resolving' | 'resolved' // pending 待处理 / resolving 已点击等回执 / resolved 已处理
+  decision: '' | 'approve' | 'deny'
+  detailOpen: boolean
 }
 
 const auth = useAuthStore()
@@ -26,6 +33,7 @@ const sessions = ref<SessionDTO[]>([])
 const selectedContainer = ref('')
 const selectedSession = ref('')
 const messages = ref<Msg[]>([])
+const approvals = ref<ApprovalItem[]>([])
 const input = ref('')
 const errorMsg = ref('')
 const connecting = ref(false)
@@ -88,6 +96,7 @@ async function selectContainer(name: string) {
   selectedSession.value = ''
   sessions.value = []
   messages.value = []
+  approvals.value = [] // 切容器：清空审批卡（审查 #6）
   abandonActiveRun()
   errorMsg.value = ''
   try {
@@ -111,6 +120,7 @@ async function newSession() {
   if (!selectedContainer.value) return
   abandonActiveRun()
   messages.value = []
+  approvals.value = [] // 新会话：清空审批卡（审查 #6）
   try {
     const s = await createSession(selectedContainer.value)
     sessions.value = [s, ...sessions.value]
@@ -127,6 +137,7 @@ function pickSession(key: string) {
   abandonActiveRun()
   selectedSession.value = key
   messages.value = []
+  approvals.value = [] // 切会话：清空审批卡（审查 #6）
   errorMsg.value = ''
 }
 
@@ -193,52 +204,69 @@ function connect() {
         activeRunId = ''
         pendingSend = false
       }
+      recoverPendingApprovals()  // resolve 失败（含连接断开）：恢复 resolving 卡片可重试（codex P2）
     },
     onClose: () => {
       if (ws !== myWs) return  // 旧 ws 的关闭（切容器）不报断线
       connecting.value = false
       disconnected.value = true  // 意外断线：禁用发送（codex P2 #4）
+      recoverPendingApprovals()  // 断线：恢复 resolving 卡片可重试
       if (!disposed) errorMsg.value = '连接已断开，请重试或切换容器'
     },
     onApproval: (card) => {
       if (ws !== myWs) return  // stale guard：旧 ws 的审批卡不污染新会话
-      // T06 审批卡（连接级，无 runId）：作为一条消息进对话流，橙边待处理
-      messages.value.push({
-        role: 'approval',
-        text: card.command || '（网关未提供命令详情）',
-        streaming: false,
-        approvalId: card.id,
-        approvalKind: card.kind,
-        resolved: '',
+      // T06 审批卡（连接级，无 runId）：独立列表，按 sessionKey 归属过滤（codex P1）
+      // 无 sessionKey（连接级审批未必挂会话）或匹配当前会话 → 显示；属于其它会话 → 不显示
+      if (card.sessionKey && card.sessionKey !== selectedSession.value) return
+      if (approvals.value.some((a) => a.id === card.id)) return  // 幂等（start 补拉 + 实时推送去重）
+      approvals.value.push({
+        id: card.id,
+        kind: card.kind,
+        command: card.command || '（网关未提供命令详情）',
+        sessionKey: card.sessionKey,
+        status: 'pending',
+        decision: '',
         detailOpen: false,
       })
     },
     onApprovalResolved: (id, decision) => {
       if (ws !== myWs) return
-      // 服务端回执：兜底标记（乐观更新已先置位时幂等）
-      const m = messages.value.find((x) => x.role === 'approval' && x.approvalId === id)
-      if (m) m.resolved = decision === 'deny' ? 'deny' : 'approve'
+      // 服务端回执：以网关权威 decision 落定（first-answer-wins，codex P1，可能与请求不同）
+      const a = approvals.value.find((x) => x.id === id)
+      if (a) {
+        a.status = 'resolved'
+        a.decision = decision === 'deny' ? 'deny' : 'approve'
+      }
     },
   })
   ws = myWs
   myWs.start(selectedContainer.value)
 }
 
-// T06：批准/拒绝 → 回发 resolve 帧 + 乐观标记已处理（变淡显示结果；服务端回执兜底）
-function resolveApproval(m: Msg, decision: 'approve' | 'deny') {
-  if (!ws || !m.approvalId || m.resolved) return
-  ws.resolve(m.approvalId, m.approvalKind ?? 'exec', decision)
-  m.resolved = decision
+// T06：批准/拒绝 → 回发 resolve 帧 + 进 resolving 态（禁用按钮等回执，不乐观假成功，codex P2）。
+// 成功由 onApprovalResolved 落定；失败由 onError 恢复 pending 让卡片可重试。
+function resolveApproval(a: ApprovalItem, decision: 'approve' | 'deny') {
+  if (!ws || a.status !== 'pending') return
+  a.status = 'resolving'
+  a.decision = decision
+  ws.resolve(a.id, a.kind ?? 'exec', decision)
+}
+
+// resolve 失败（error 帧）：恢复 resolving 卡片为 pending，按钮可重试（codex P2）
+function recoverPendingApprovals() {
+  for (const a of approvals.value) {
+    if (a.status === 'resolving') a.status = 'pending'
+  }
 }
 
 // 查看细节：展开/收起命令全文
-function toggleDetail(m: Msg) {
-  m.detailOpen = !m.detailOpen
+function toggleDetail(a: ApprovalItem) {
+  a.detailOpen = !a.detailOpen
 }
 
 // 审批卡副标题（说明 agent 请求执行 elevated 命令）
-function approvalSubtitle(m: Msg) {
-  return `${m.approvalKind ?? 'exec'} agent 请求执行一条 elevated 命令，请确认后批准或拒绝：`
+function approvalSubtitle(a: ApprovalItem) {
+  return `${a.kind ?? 'exec'} agent 请求执行一条 elevated 命令，请确认后批准或拒绝：`
 }
 
 function send() {
@@ -299,34 +327,37 @@ defineExpose({ selectContainer, send, newSession })
       </div>
       <p v-if="errorMsg" class="error" data-test="error-bar">{{ errorMsg }}</p>
       <div class="stream" data-test="stream">
-        <div v-for="(m, i) in messages" :key="i" class="msg" :class="m.role">
-          <!-- T06 权限审批卡（spec §9.4）：橙边内联卡，处理后变淡显示结果 -->
-          <div
-            v-if="m.role === 'approval'"
-            class="approval"
-            :class="{ resolved: !!m.resolved }"
-            :data-test="`approval-${m.approvalId}`"
-          >
-            <div class="a-head">
-              ⚠️ 请求提升权限
-              <span v-if="m.resolved" class="resolved-tag" :class="m.resolved">
-                {{ m.resolved === 'deny' ? '已拒绝' : '已批准' }}
-              </span>
-            </div>
-            <div class="a-sub">{{ approvalSubtitle(m) }}</div>
-            <div class="a-cmd">{{ m.text }}</div>
-            <div v-if="m.detailOpen" class="a-detail" :data-test="`approval-detail-${m.approvalId}`">
-              命令全文：<code>{{ m.text }}</code><br>
-              审批 id：<code>{{ m.approvalId }}</code> · 类型：<code>{{ m.approvalKind }}</code>
-              · 经 <code>exec.approval.requested</code> 推送，<code>approval.resolve</code> 回覆
-            </div>
-            <div v-if="!m.resolved" class="a-actions">
-              <button class="btn-approve" :data-test="`approve-${m.approvalId}`" @click="resolveApproval(m, 'approve')">批准</button>
-              <button class="btn-deny" :data-test="`deny-${m.approvalId}`" @click="resolveApproval(m, 'deny')">拒绝</button>
-              <button class="btn-ghost" :data-test="`detail-${m.approvalId}`" @click="toggleDetail(m)">查看细节</button>
-            </div>
+        <div v-for="(m, i) in messages" :key="`m-${i}`" class="msg" :class="m.role">
+          <div class="bubble">{{ m.text }}<span v-if="m.streaming" class="cursor"></span></div>
+        </div>
+        <!-- T06 权限审批卡（spec §9.4）：独立于 messages 的列表，橙边待处理，处理后变淡显示结果。
+             拆出 messages 是为不破坏流式锚定/finalizeLast（审查 #5），并可独立按 sessionKey 过滤、
+             随会话/容器切换清空（codex P1 / 审查 #6）。 -->
+        <div
+          v-for="a in approvals"
+          :key="a.id"
+          class="approval"
+          :class="{ resolved: a.status === 'resolved' }"
+          :data-test="`approval-${a.id}`"
+        >
+          <div class="a-head">
+            ⚠️ 请求提升权限
+            <span v-if="a.status === 'resolved'" class="resolved-tag" :class="a.decision">
+              {{ a.decision === 'deny' ? '已拒绝' : '已批准' }}
+            </span>
           </div>
-          <div v-else class="bubble">{{ m.text }}<span v-if="m.streaming" class="cursor"></span></div>
+          <div class="a-sub">{{ approvalSubtitle(a) }}</div>
+          <div class="a-cmd">{{ a.command }}</div>
+          <div v-if="a.detailOpen" class="a-detail" :data-test="`approval-detail-${a.id}`">
+            命令全文：<code>{{ a.command }}</code><br>
+            审批 id：<code>{{ a.id }}</code> · 类型：<code>{{ a.kind }}</code>
+            · 经 <code>exec.approval.requested</code> 推送，<code>approval.resolve</code> 回覆
+          </div>
+          <div v-if="a.status !== 'resolved'" class="a-actions">
+            <button class="btn-approve" :disabled="a.status !== 'pending'" :data-test="`approve-${a.id}`" @click="resolveApproval(a, 'approve')">批准</button>
+            <button class="btn-deny" :disabled="a.status !== 'pending'" :data-test="`deny-${a.id}`" @click="resolveApproval(a, 'deny')">拒绝</button>
+            <button class="btn-ghost" :data-test="`detail-${a.id}`" @click="toggleDetail(a)">查看细节</button>
+          </div>
         </div>
       </div>
       <div class="composer">
@@ -374,8 +405,7 @@ defineExpose({ selectContainer, send, newSession })
 .composer button { padding: 8px 16px; background: var(--el-color-primary); color: #fff; border: none; border-radius: 8px; cursor: pointer; }
 
 /* T06 权限审批卡（spec §9.4 / 原型 oc-chat-page.html）：橙边待处理，处理后变淡 */
-.msg.approval { align-self: flex-start; }
-.approval { border: 1px solid var(--el-color-warning); background: var(--el-color-warning-light-9); border-radius: 11px; padding: 12px 14px; margin: 4px 0; max-width: 560px; }
+.approval { align-self: flex-start; border: 1px solid var(--el-color-warning); background: var(--el-color-warning-light-9); border-radius: 11px; padding: 12px 14px; margin: 4px 0; max-width: 560px; }
 .approval .a-head { display: flex; align-items: center; gap: 8px; color: var(--el-color-warning); font-weight: 600; font-size: 13px; margin-bottom: 6px; }
 .approval .resolved-tag { margin-left: auto; font-size: 11.5px; color: var(--el-color-success); font-weight: 600; }
 .approval .resolved-tag.deny { color: var(--el-color-danger); }

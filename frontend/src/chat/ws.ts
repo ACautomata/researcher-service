@@ -9,14 +9,15 @@ export type ChatFrame =
   | { type: 'text'; runId: string; delta: string; replace?: boolean }
   | { type: 'done'; runId: string }
   | { type: 'error'; runId?: string; message: string }
-  | { type: 'approval'; id: string; kind: string; command: string }
+  | { type: 'approval'; id: string; kind: string; command: string; sessionKey: string | null }
   | { type: 'approvalResolved'; id: string; decision: string }
 
-// T06 审批卡数据（连接级，无 runId）
+// T06 审批卡数据（连接级，无 runId；sessionKey 标识归属会话，codex P1）
 export interface ApprovalCard {
   id: string
   kind: string
   command: string
+  sessionKey: string | null
 }
 
 export interface ChatHandlers {
@@ -104,7 +105,9 @@ export class ChatWebSocket {
         this.handlers.onError?.(frame.message, frame.runId)
         break
       case 'approval':
-        this.handlers.onApproval?.({ id: frame.id, kind: frame.kind, command: frame.command })
+        this.handlers.onApproval?.({
+          id: frame.id, kind: frame.kind, command: frame.command, sessionKey: frame.sessionKey,
+        })
         break
       case 'approvalResolved':
         this.handlers.onApprovalResolved?.(frame.id, frame.decision)

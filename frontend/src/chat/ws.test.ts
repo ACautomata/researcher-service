@@ -150,11 +150,11 @@ describe('ChatWebSocket', () => {
   })
 
   // ---- T06 权限审批（issue #42 / spec §8.2）----
-  it('dispatches approval card to onApproval (连接级，无 runId)', () => {
+  it('dispatches approval card to onApproval (连接级，无 runId，带 sessionKey)', () => {
     const onApproval = vi.fn()
     new ChatWebSocket('/ws/chat/', 'jwt', { onApproval })
-    MockWS.last!.fireMessage({ type: 'approval', id: 'ap-1', kind: 'exec', command: 'rm -rf /tmp' })
-    expect(onApproval).toHaveBeenCalledWith({ id: 'ap-1', kind: 'exec', command: 'rm -rf /tmp' })
+    MockWS.last!.fireMessage({ type: 'approval', id: 'ap-1', kind: 'exec', command: 'rm -rf /tmp', sessionKey: 'sk-1' })
+    expect(onApproval).toHaveBeenCalledWith({ id: 'ap-1', kind: 'exec', command: 'rm -rf /tmp', sessionKey: 'sk-1' })
   })
 
   it('dispatches approvalResolved to onApprovalResolved (回执 → 卡片标记已处理)', () => {

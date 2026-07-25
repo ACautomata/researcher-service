@@ -189,8 +189,15 @@ class ApprovalResolveView(APIView):
                 {'detail': f'容器未配对，请先完成设备配对（status={e.status}）'},
                 status=status.HTTP_409_CONFLICT,
             )
+        except Exception as e:
+            # codex P2：配对有效但网关离线/握手失败 → get_or_create 抛连接异常，亦映射 502（非 500）
+            logger.warning('approval.resolve pool acquire failed for %s: %s', name, e)
+            return Response(
+                {'detail': '连接容器失败，请稍后重试'},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
         try:
-            async_to_sync(client.resolve_approval)(approval_id, kind, decision)
+            payload = async_to_sync(client.resolve_approval)(approval_id, kind, decision)
         except Exception as e:
             # 原始异常（缺 scope/连接断开等）仅记服务端日志，不外泄到响应
             logger.warning('approval.resolve failed for %s id=%s: %s', name, approval_id, e)
@@ -198,4 +205,6 @@ class ApprovalResolveView(APIView):
                 {'detail': '审批回覆失败，请稍后重试'},
                 status=status.HTTP_502_BAD_GATEWAY,
             )
-        return Response({'ok': True, 'id': approval_id, 'decision': decision})
+        # first-answer-wins：以网关权威记录的 decision 为准（可能与请求不同，codex P1）
+        authoritative = (payload or {}).get('decision') or decision
+        return Response({'ok': True, 'id': approval_id, 'decision': authoritative})
