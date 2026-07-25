@@ -177,4 +177,19 @@ describe('ChatWebSocket', () => {
     ws.resolve('ap-1', 'exec', 'deny')
     expect(MockWS.last!.sent).toEqual([{ type: 'resolve', id: 'ap-1', kind: 'exec', decision: 'deny' }])
   })
+
+  // ---- T08 工具执行（issue #44 / spec §9.4 / r26 §3）----
+  // tool 帧（runId 级，挂在所属 chat run 内）→ onTool 回调；前端按 name 聚合 start→result 渲染一行标题+状态。
+  it('dispatches tool frame to onTool', () => {
+    const onTool = vi.fn()
+    new ChatWebSocket('/ws/chat/', 'jwt', { onTool })
+    MockWS.last!.fireMessage({
+      type: 'tool', runId: 'r1', name: 'wiki.search', state: 'running',
+      id: 'call-1', title: '检索', input: { q: 'x' }, result: null,
+    })
+    expect(onTool).toHaveBeenCalledWith({
+      runId: 'r1', name: 'wiki.search', state: 'running',
+      id: 'call-1', title: '检索', input: { q: 'x' }, result: null,
+    })
+  })
 })

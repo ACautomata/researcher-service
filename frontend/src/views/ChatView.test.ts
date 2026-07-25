@@ -664,4 +664,134 @@ describe('ChatView', () => {
     await w.find('[data-test="send"]').trigger('click')
     expect(MockWS.last!.sent).toContainEqual({ type: 'send', sessionKey: 'sk-1', message: '你好' })
   })
+
+  // ---- T08 工具执行 + 思考链折叠（issue #44 / spec §8.2/§8.3/§9.4 / r26 §3/§4）----
+  it('renders a tool line with running state on agent.tool.start (验收 ① 工具只显标题+状态)', async () => {
+    const w = await mountReady()
+    await w.find('[data-test="input"]').setValue('查一下')
+    await w.find('[data-test="send"]').trigger('click')
+    MockWS.last!.fireMessage({
+      type: 'tool', runId: 'r1', name: 'wiki.search', state: 'running',
+      id: 'call-1', title: null, input: { query: '对比学习' }, result: null,
+    })
+    await nextTick()
+    const tool = w.find('[data-test="tool-line"]')
+    expect(tool.exists()).toBe(true)
+    expect(tool.classes()).toContain('running')
+    expect(tool.text()).toContain('wiki.search')   // 无 title 时回退工具名（mono）
+    expect(tool.text()).toContain('运行中')         // ⟳ 运行中
+    // 不展开输入输出细节（验收 ①）：input 不逐字段渲染，仅可有一行参数摘要
+    expect(tool.text()).not.toContain('"对比学习"')
+  })
+
+  it('prefers the human-readable tool title over the internal name (codex P2 ①)', async () => {
+    const w = await mountReady()
+    await w.find('[data-test="input"]').setValue('查一下')
+    await w.find('[data-test="send"]').trigger('click')
+    MockWS.last!.fireMessage({
+      type: 'tool', runId: 'r1', name: 'wiki.search', state: 'running',
+      id: 'call-1', title: '检索 wiki', input: null, result: null,
+    })
+    await nextTick()
+    const tool = w.find('[data-test="tool-line"]')
+    expect(tool.text()).toContain('检索 wiki')           // 可见文本显示用途标题
+    expect(tool.text()).not.toContain('wiki.search')     // 内部名退到 hover
+    expect(tool.find('.t-name').attributes('title')).toBe('wiki.search')
+  })
+
+  it('updates the tool line to done on agent.tool.result (验收 ① 状态 ✓完成)', async () => {
+    const w = await mountReady()
+    await w.find('[data-test="input"]').setValue('查一下')
+    await w.find('[data-test="send"]').trigger('click')
+    MockWS.last!.fireMessage({
+      type: 'tool', runId: 'r1', name: 'wiki.search', state: 'running',
+      id: null, title: null, input: null, result: null,
+    })
+    await nextTick()
+    MockWS.last!.fireMessage({
+      type: 'tool', runId: 'r1', name: 'wiki.search', state: 'done',
+      id: null, title: null, input: null, result: { count: 3 },
+    })
+    await nextTick()
+    const tool = w.find('[data-test="tool-line"]')
+    expect(tool.classes()).toContain('done')
+    expect(tool.text()).toContain('完成')
+  })
+
+  it('pairs overlapping same-name tool results by call id, not recency (codex P2 ②)', async () => {
+    // 同名工具两次并发调用：result 必须按调用 id 落到对应行，而非「最后一个同名 running 行」
+    const w = await mountReady()
+    await w.find('[data-test="input"]').setValue('查一下')
+    await w.find('[data-test="send"]').trigger('click')
+    MockWS.last!.fireMessage({ type: 'tool', runId: 'r1', name: 'wiki.search', state: 'running',
+      id: 'c1', title: null, input: { query: '甲' }, result: null })
+    MockWS.last!.fireMessage({ type: 'tool', runId: 'r1', name: 'wiki.search', state: 'running',
+      id: 'c2', title: null, input: { query: '乙' }, result: null })
+    await nextTick()
+    // c2 的 result 先到 → 只落 c2 行，c1 仍 running
+    MockWS.last!.fireMessage({ type: 'tool', runId: 'r1', name: 'wiki.search', state: 'done',
+      id: 'c2', title: null, input: null, result: { count: 1 } })
+    await nextTick()
+    const lines = w.findAll('[data-test="tool-line"]')
+    expect(lines).toHaveLength(2)
+    expect(lines[0].classes()).toContain('running')  // c1 未完成
+    expect(lines[1].classes()).toContain('done')     // c2 完成
+  })
+
+  // ---- T08 思考链折叠（spec §8.3 (a) / r26 §4）：思考内联在 text 的 <thinking> 标签里，前端剥离独立渲染 ----
+  it('strips <thinking> from text into a collapsed card (验收 ② (a) 独立渲染)', async () => {
+    const w = await mountReady()
+    await w.find('[data-test="input"]').setValue('你好')
+    await w.find('[data-test="send"]').trigger('click')
+    MockWS.last!.fireMessage({ type: 'text', runId: 'r1', delta: '<thinking>先想</thinking>正式回答' })
+    await nextTick()
+    const bubble = w.find('.msg.assistant .bubble')
+    const cot = w.find('[data-test="cot-card"]')
+    // 正文（刨去折叠卡）不含思考内容与标签；思考进折叠卡
+    expect(bubble.text()).toContain('正式回答')
+    expect(bubble.text()).not.toContain('<thinking>')
+    expect(cot.exists()).toBe(true)
+    expect(cot.find('.cot-body').text()).toContain('先想')
+  })
+
+  it('streams thinking across chunks without leaking the tag into text', async () => {
+    const w = await mountReady()
+    await w.find('[data-test="input"]').setValue('你好')
+    await w.find('[data-test="send"]').trigger('click')
+    MockWS.last!.fireMessage({ type: 'text', runId: 'r1', delta: '<think' })  // 残片
+    await nextTick()
+    expect(w.find('.msg.assistant .bubble').text()).not.toContain('<think')
+    MockWS.last!.fireMessage({ type: 'text', runId: 'r1', delta: 'ing>推理中' })  // 未闭合 → 思考中
+    await nextTick()
+    expect(w.find('[data-test="cot-card"]').exists()).toBe(true)
+    expect(w.find('[data-test="cot-card"]').text()).toContain('思考中')
+    MockWS.last!.fireMessage({ type: 'text', runId: 'r1', delta: '</thinking>答案' })
+    await nextTick()
+    const bubble = w.find('.msg.assistant .bubble')
+    expect(bubble.text()).toContain('答案')
+    expect(w.find('[data-test="cot-card"]').find('.cot-body').text()).toContain('推理中')
+  })
+
+  it('finalizes gracefully when the stream ends with an unclosed <thinking>', async () => {
+    const w = await mountReady()
+    await w.find('[data-test="input"]').setValue('你好')
+    await w.find('[data-test="send"]').trigger('click')
+    MockWS.last!.fireMessage({ type: 'text', runId: 'r1', delta: '前言<thinking>没闭合' })
+    MockWS.last!.fireMessage({ type: 'done', runId: 'r1' })
+    await nextTick()
+    const bubble = w.find('.msg.assistant .bubble')
+    expect(bubble.text()).toContain('前言')
+    expect(bubble.text()).not.toContain('<thinking>')   // 不泄露标签
+    expect(w.find('[data-test="cot-card"]').find('.cot-body').text()).toContain('没闭合')  // 思考不丢
+  })
+
+  it('renders no thinking card for plain text without a <thinking> tag', async () => {
+    const w = await mountReady()
+    await w.find('[data-test="input"]').setValue('你好')
+    await w.find('[data-test="send"]').trigger('click')
+    MockWS.last!.fireMessage({ type: 'text', runId: 'r1', delta: '普通回答' })
+    await nextTick()
+    expect(w.find('[data-test="cot-card"]').exists()).toBe(false)
+    expect(w.find('.msg.assistant .bubble').text()).toContain('普通回答')
+  })
 })

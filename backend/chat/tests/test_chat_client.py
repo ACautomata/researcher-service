@@ -118,6 +118,37 @@ async def test_recv_ignores_stray_events_and_keeps_routing():
 
 
 @pytest.mark.asyncio
+async def test_recv_routes_tool_events_to_on_event():
+    # T08（issue #44）：agent.tool.start/result 挂在 chat run 内、带 runId → 经既有 runId 路由推给 on_event
+    # （chat_client 无需改动；translator 产 tool 帧，_handle 按 frames[0].runId 路由，tool 非终态不清 route）
+    events = [
+        {'type': 'event', 'event': 'agent.tool.start',
+         'payload': {'runId': 'r1', 'tool': 'wiki.search', 'input': {'query': 'x'}}},
+        {'type': 'event', 'event': 'agent.tool.result',
+         'payload': {'runId': 'r1', 'tool': 'wiki.search', 'result': {'count': 3}}},
+        {'type': 'event', 'event': 'chat', 'payload': {'runId': 'r1', 'state': 'final'}},
+    ]
+    t = FakeChatTransport(ack_run_id='r1', events=events)
+    received = []
+
+    async def on_event(frame):
+        received.append(frame)
+
+    c = OpenClawChatClient(URL, 'dt', transport=t)
+    await c.connect()
+    await c.send_message('s', 'm', on_event=on_event)
+    await asyncio.sleep(0.1)
+    assert received == [
+        {'type': 'tool', 'runId': 'r1', 'name': 'wiki.search', 'state': 'running',
+         'id': None, 'title': None, 'input': {'query': 'x'}, 'result': None},
+        {'type': 'tool', 'runId': 'r1', 'name': 'wiki.search', 'state': 'done',
+         'id': None, 'title': None, 'input': None, 'result': {'count': 3}},
+        {'type': 'done', 'runId': 'r1'},
+    ]
+    await c.aclose()
+
+
+@pytest.mark.asyncio
 async def test_error_state_completes_with_error_event():
     events = [
         {'type': 'event', 'event': 'chat', 'payload': {'runId': 'r1', 'state': 'delta', 'deltaText': 'x'}},
