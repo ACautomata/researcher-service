@@ -5,7 +5,7 @@ device_token（凭证）——仅暴露 status/device_id/scopes/pairing_request_
 """
 from rest_framework import serializers
 
-from chat.models import Pairing
+from chat.models import Pairing, Session
 
 
 class PairingStatusSerializer(serializers.Serializer):
@@ -19,3 +19,12 @@ class PairingStatusSerializer(serializers.Serializer):
 
     def get_scopes(self, obj: Pairing) -> list[str]:
         return obj.scopes_list()
+
+
+class SessionSerializer(serializers.ModelSerializer):
+    """会话出参（session_key/created_at 只读；title 新建时入参）。"""
+
+    class Meta:
+        model = Session
+        fields = ['id', 'session_key', 'title', 'created_at']
+        read_only_fields = ['id', 'session_key', 'created_at']

@@ -10,6 +10,7 @@ HTTP 薄适配层：业务委托 PairingService（PairingFleet service locator�
 - instance 不存在 → 404；非法 name → 400
 """
 import logging
+import uuid
 
 from django.core.exceptions import ValidationError
 from django.http import Http404
@@ -18,10 +19,10 @@ from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from chat.models import Pairing
+from chat.models import Pairing, Session
 from chat.pairing import PairingConcurrencyError, PairingFleet
 from chat.pairing_ws import PairingError, PairingRequired
-from chat.serializers import PairingStatusSerializer
+from chat.serializers import PairingStatusSerializer, SessionSerializer
 from containers.models import NAME_VALIDATOR, Instance
 
 logger = logging.getLogger(__name__)
@@ -101,3 +102,41 @@ class PairingView(APIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
         return Response(PairingStatusSerializer(pairing).data)
+
+
+class SessionListCreateView(APIView):
+    """GET 列出容器会话 + POST 新建（后端生成 session_key）（spec §9.4）。
+
+    name 经 NAME_VALIDATOR；instance 不存在 → 404；非法 name → 400。
+    """
+
+    def _get_instance(self, name: str) -> Instance:
+        try:
+            NAME_VALIDATOR(name)
+        except ValidationError:
+            raise _InvalidName
+        inst = Instance.objects.filter(name=name).first()
+        if inst is None:
+            raise Http404
+        return inst
+
+    @extend_schema(responses=SessionSerializer)
+    def get(self, request, name):
+        try:
+            inst = self._get_instance(name)
+        except _InvalidName:
+            return Response({'detail': '非法 name'}, status=status.HTTP_400_BAD_REQUEST)
+        sessions = Session.objects.filter(instance=inst).order_by('-created_at')
+        return Response(SessionSerializer(sessions, many=True).data)
+
+    @extend_schema(request=None, responses={201: SessionSerializer})
+    def post(self, request, name):
+        try:
+            inst = self._get_instance(name)
+        except _InvalidName:
+            return Response({'detail': '非法 name'}, status=status.HTTP_400_BAD_REQUEST)
+        title = str((request.data or {}).get('title') or '')[:128]
+        session = Session.objects.create(
+            instance=inst, session_key=uuid.uuid4().hex, title=title,
+        )
+        return Response(SessionSerializer(session).data, status=status.HTTP_201_CREATED)

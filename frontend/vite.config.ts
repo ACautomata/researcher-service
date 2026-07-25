@@ -12,8 +12,10 @@ export default defineConfig({
   },
   server: {
     // dev 下把 /api 代理到 Django（:8000），前端用相对路径 POST /api/v1/auth/login
+    // /ws/chat/ 经 Channels（Daphne/asgi）—— 需开 ws 代理，否则 Vite 拦截 /ws 连不上后端（codex P2）
     proxy: {
       '/api': 'http://localhost:8000',
+      '/ws': { target: 'http://localhost:8000', ws: true },
     },
   },
   test: {

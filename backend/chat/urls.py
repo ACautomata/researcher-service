@@ -1,12 +1,13 @@
-"""chat app 路由 —— 设备配对子资源，挂在 /api/v1/containers/<name>/pairing/。
+"""chat app 路由 —— 设备配对 + 对话会话子资源，挂在 /api/v1/。
 
-GET  /   —— 查询配对状态
-POST /   —— 触发/重试配对
+containers/<name>/pairing/         —— GET/POST 查询/触发配对（spec §8.1）
+containers/<name>/chat/sessions/   —— GET/POST 会话列表/新建（spec §9.4，issue #41）
 """
 from django.urls import path
 
-from chat.views import PairingView
+from chat.views import PairingView, SessionListCreateView
 
 urlpatterns = [
     path('containers/<str:name>/pairing/', PairingView.as_view(), name='pairing'),
+    path('containers/<str:name>/chat/sessions/', SessionListCreateView.as_view(), name='chat-sessions'),
 ]

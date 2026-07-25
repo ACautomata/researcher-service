@@ -6,6 +6,7 @@
 - 注入乱序帧（challenge 前/ connect res 前的无关 event/stray res），验证握手容错。
 无需真容器/真网关。
 """
+import asyncio
 import json
 
 
@@ -103,3 +104,75 @@ class _CM:
 
     async def __aexit__(self, *a):
         return False
+
+
+class _FakeChatWs:
+    """对话长连接 fake ws（issue #41 TDD）。
+
+    recv 按阶段应答（回显 req id）：① connect 握手 res ② chat.send ack res
+    ③ 预设 events ④ push 队列。events 与 push 都空时 recv 挂起在 asyncio.Queue（待 push 唤醒）。
+    """
+
+    def __init__(self, transport):
+        self._t = transport
+        self._extra = asyncio.Queue()
+
+    async def send(self, data):
+        self._t.sent.append(json.loads(data))
+
+    async def recv(self):
+        t = self._t
+        connect = next((f for f in t.sent if f.get('method') == 'connect'), None)
+        if connect is not None and not t._connect_acked and not t.suppress_connect_ack:
+            t._connect_acked = True
+            if t.connect_ok:
+                return json.dumps({'type': 'res', 'id': connect['id'], 'ok': True,
+                                   'payload': {'auth': {'deviceToken': 'dt-fake', 'role': 'operator',
+                                                        'scopes': ['operator.read', 'operator.write',
+                                                                   'operator.admin', 'operator.approvals']}}})
+            return json.dumps({'type': 'res', 'id': connect['id'], 'ok': False,
+                               'error': {'code': 'AUTH_FAILED', 'message': 'bad token'}})
+        chat_sends = [f for f in t.sent if f.get('method') == 'chat.send']
+        if not t.suppress_ack and len(chat_sends) > t._chat_ack_index:
+            cs = chat_sends[t._chat_ack_index]
+            t._chat_ack_index += 1
+            if t.ack_error is not None:
+                return json.dumps({'type': 'res', 'id': cs['id'], 'ok': False, 'error': t.ack_error})
+            return json.dumps({'type': 'res', 'id': cs['id'], 'ok': True,
+                               'payload': {'runId': t.ack_run_id}})
+        if t.events:
+            return json.dumps(t.events.pop(0))
+        return json.dumps(await self._extra.get())
+
+    async def close(self):
+        self._t._closed = True
+
+
+class FakeChatTransport:
+    """对话长连接 fake transport（issue #41）：connect(url) → async CM 产 _FakeChatWs。
+
+    构造参数：connect_ok / ack_run_id / ack_error / events（预设事件序列）。
+    push(frame) 运行时追加事件（recv 挂起时唤醒）。sent 记录所有发送帧供断言。
+    """
+
+    def __init__(self, *, connect_ok=True, ack_run_id='r1', ack_error=None, events=None,
+                 suppress_ack=False, suppress_connect_ack=False):
+        self.connect_ok = connect_ok
+        self.ack_run_id = ack_run_id
+        self.ack_error = ack_error
+        self.suppress_ack = suppress_ack
+        self.suppress_connect_ack = suppress_connect_ack
+        self.events = list(events or [])
+        self.sent: list = []
+        self._connect_acked = False
+        self._chat_ack_index = 0
+        self._closed = False
+        self._ws: _FakeChatWs | None = None
+
+    def __call__(self, url):
+        self._ws = _FakeChatWs(self)
+        return _CM(self._ws)
+
+    def push(self, frame):
+        if self._ws is not None:
+            self._ws._extra.put_nowait(frame)

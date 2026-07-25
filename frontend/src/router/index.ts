@@ -3,6 +3,7 @@ import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import LoginView from '@/views/LoginView.vue'
 import ContainersView from '@/views/ContainersView.vue'
+import ChatView from '@/views/ChatView.vue'
 
 const routes: RouteRecordRaw[] = [
   { path: '/login', name: 'login', component: LoginView, meta: { public: true } },
@@ -10,6 +11,12 @@ const routes: RouteRecordRaw[] = [
     path: '/',
     name: 'containers',
     component: ContainersView,
+    meta: { requiresAuth: true },
+  },
+  {
+    path: '/chat',
+    name: 'chat',
+    component: ChatView,
     meta: { requiresAuth: true },
   },
 ]
