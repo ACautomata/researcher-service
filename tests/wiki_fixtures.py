@@ -50,6 +50,8 @@ paper.venue: NeurIPS
 paper.arxiv: "2401.00001"
 paper.doi: "10.0000/xyz"
 evidence_level: full-paper
+related_pages:
+  - wiki/concepts/concept.example-topic.md
 ---
 
 # Attention Survey
@@ -64,11 +66,29 @@ id: concept.example-topic
 title: "Example Topic"
 status: active
 updatedAt: "2026-04-14T10:00:00.000Z"
+source_pages:
+  - wiki/domains/ml/papers/attention-survey.md
 ---
 
 # Example Topic
 
-一个抽象概念页。
+一个抽象概念页。另见 [[Example Topic|自身别名]] 与 [[不存在的页]]。
+"""
+
+# 第二篇论文页：链接回 concept 与第一篇论文（形成多跳），含别名 wikilink
+PAPER2_MD = """---
+title: Transformer Variants
+type: paper
+domain: ml
+status: active
+paper.title: Transformer Variants
+paper.year: 2025
+evidence_level: abstract
+---
+
+# Transformer Variants
+
+综述各种变体。基础见 [[concept.example-topic|示例概念]]，前置工作见 [[attention-survey]]。
 """
 
 
@@ -103,5 +123,7 @@ def build_wiki_skeleton(root: Path, empty: bool = False) -> Path:
         papers = wiki / "domains" / "ml" / "papers"
         papers.mkdir(parents=True, exist_ok=True)
         (papers / "attention-survey.md").write_text(PAPER_MD, encoding="utf-8")
+        # 第二篇论文页（含别名 wikilink 与跨页链接，构图谱多跳）
+        (papers / "transformer-variants.md").write_text(PAPER2_MD, encoding="utf-8")
 
     return wiki

@@ -7,6 +7,19 @@ var wikiTab = 'preview';
 var wikiPaperCache = {};  // { kind/name/pageId: { frontmatter, body, content } }
 var wikiAllPapers = [];   // [{kind, name, id, title}] for graph
 
+// ── 图谱状态 ──
+var wikiGraphData = null;       // 后端 GET /wiki/graph 的 {nodes, edges} 全库预解析
+var wikiGraphNetwork = null;    // vis.Network 实例
+var wikiGraphMode = 'ego';      // 'ego'（当前页 1–2 跳）| 'global'（全库）
+var wikiGraphEgoHops = 2;       // ego 图跳数
+var WIKI_GRAPH_CLUSTER_THRESHOLD = 80;  // 节点超过此值时全局图按 kind 聚类
+
+// 按 kind 着色（复用 WIKI_KIND_COLOR，dangling 灰）
+function _wikiGraphColor(kind) {
+  if (!kind) return '#94a3b8';
+  return (WIKI_KIND_COLOR && WIKI_KIND_COLOR[kind]) || '#3b6df0';
+}
+
 pages.wiki = async function() {
   wikiData = null;
   wikiActiveKind = null;
@@ -151,13 +164,17 @@ async function loadWikiPaper(kind, name, pageId) {
 }
 
 /* ── Tab system ── */
-function wikiSwitchTab(tab) {
-  wikiTab = tab;
+function _wikiRerenderPaperPane() {
   var el = document.getElementById('wikiPaperPane');
   if (el && wikiActivePaper) {
     var key = wikiActiveKind + '/' + wikiActivePaper;
     renderWikiPaper(el, wikiPaperCache[key]);
   }
+}
+
+function wikiSwitchTab(tab) {
+  wikiTab = tab;
+  _wikiRerenderPaperPane();
 }
 
 function renderWikiPaper(el, res) {
@@ -210,12 +227,22 @@ function renderWikiPaper(el, res) {
 
   // ── Graph tab ──
   if (wikiTab === 'graph') {
-    h += '<div id="wikiGraph" style="width:100%;min-height:50vh;background:var(--bg);border-radius:8px;border:1px solid var(--border)">';
-    if (typeof d3 === 'undefined') {
-      h += '<div style="text-align:center;padding:60px;color:#FF6B81">D3.js 未加载</div>';
-    } else {
-      h += '<svg id="wikiGraphSvg" width="100%" height="500"></svg>';
+    var activeId = wikiActiveKind && wikiActivePaper ? (wikiActiveKind + '/' + wikiActivePaper) : null;
+    h += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">';
+    h += '<div class="tab-bar">';
+    h += '<button class="tab-btn' + (wikiGraphMode === 'ego' ? ' on' : '') + '" onclick="wikiSetGraphMode(\'ego\')" style="font-size:11px;padding:4px 12px">局部</button>';
+    h += '<button class="tab-btn' + (wikiGraphMode === 'global' ? ' on' : '') + '" onclick="wikiSetGraphMode(\'global\')" style="font-size:11px;padding:4px 12px">全局</button>';
+    h += '</div>';
+    if (wikiGraphMode === 'ego') {
+      h += '<div class="tab-bar">';
+      h += '<button class="tab-btn' + (wikiGraphEgoHops === 1 ? ' on' : '') + '" onclick="wikiSetEgoHops(1)" style="font-size:11px;padding:4px 10px">1 跳</button>';
+      h += '<button class="tab-btn' + (wikiGraphEgoHops === 2 ? ' on' : '') + '" onclick="wikiSetEgoHops(2)" style="font-size:11px;padding:4px 10px">2 跳</button>';
+      h += '</div>';
     }
+    h += '<button class="btn" onclick="wikiRefreshGraph()" style="font-size:11px;padding:4px 12px;margin-left:auto"><i class="fa-solid fa-rotate"></i> 刷新</button>';
+    h += '</div>';
+    h += '<div id="wikiGraphNet" style="width:100%;height:55vh;background:var(--bg);border-radius:8px;border:1px solid var(--border)">';
+    h += '<div style="text-align:center;padding:60px;color:var(--text-muted)"><i class="fa-solid fa-spinner fa-spin"></i> 加载图谱...</div>';
     h += '</div>';
   }
 
@@ -223,93 +250,189 @@ function renderWikiPaper(el, res) {
   el.innerHTML = h;
 
   // Render graph if needed
-  if (wikiTab === 'graph' && typeof d3 !== 'undefined') {
-    setTimeout(function() { wikiRenderGraph(res); }, 200);
+  if (wikiTab === 'graph') {
+    wikiRenderGraph(activeId);
   }
 }
 
 /* ── Graph ── */
-function wikiRenderGraph(res) {
-  var svgEl = document.getElementById('wikiGraphSvg');
-  if (!svgEl) return;
-
-  var width = svgEl.parentElement.clientWidth || 700;
-  var height = 500;
-
-  // Nodes: all papers + current paper
-  var nodes = [];
-  var edges = [];
-  var nodeMap = {};
-
-  // Add all papers as nodes
-  wikiAllPapers.forEach(function(p) {
-    var id = p.kind + '/' + p.id;
-    if (!nodeMap[id]) {
-      nodeMap[id] = true;
-      nodes.push({ id: id, label: p.title || p.id.split('/').pop(), kind: p.kind, name: p.name, pageId: p.id, isActive: (id === wikiActiveKind + '/' + wikiActivePaper) });
-    }
+// 加载 vis-network（lazy，CDN；issue #46 指定 vis-network 渲染图谱）
+var _wikiVisLoading = null;
+function wikiLoadVis() {
+  if (typeof vis !== 'undefined' && vis.Network) return Promise.resolve();
+  if (_wikiVisLoading) return _wikiVisLoading;
+  _wikiVisLoading = new Promise(function(resolve, reject) {
+    var s = document.createElement('script');
+    s.src = 'https://cdn.jsdelivr.net/npm/vis-network@9.1.9/standalone/umd/vis-network.min.js';
+    s.onload = function() { resolve(); };
+    s.onerror = function() { reject(new Error('vis-network 加载失败')); };
+    document.head.appendChild(s);
   });
+  return _wikiVisLoading;
+}
 
-  // Parse [[wikilinks]] from current paper body
-  var linkRe = /\[\[([^\]]+)\]\]/g;
-  var match;
-  while ((match = linkRe.exec(res.body || '')) !== null) {
-    var target = match[1].trim();
-    var srcId = wikiActiveKind + '/' + wikiActivePaper;
-    var found = false;
-    for (var i = 0; i < wikiAllPapers.length; i++) {
-      var p = wikiAllPapers[i];
-      if (p.title === target || p.id === target) {
-        var tgtId = p.kind + '/' + p.id;
-        if (!nodeMap[tgtId]) { nodeMap[tgtId] = true; nodes.push({ id: tgtId, label: p.title || p.id.split('/').pop(), kind: p.kind, name: p.name, pageId: p.id }); }
-        edges.push({ source: srcId, target: tgtId });
-        found = true;
-        break;
-      }
-    }
-    if (!found) {
-      if (!nodeMap[target]) { nodeMap[target] = true; nodes.push({ id: target, label: target, ghost: true }); }
-      edges.push({ source: srcId, target: target });
-    }
+function wikiSetGraphMode(mode) { wikiGraphMode = mode; _wikiRerenderPaperPane(); }
+function wikiSetEgoHops(n) { wikiGraphEgoHops = n; _wikiRerenderPaperPane(); }
+function wikiRefreshGraph() { wikiGraphData = null; _wikiRerenderPaperPane(); }
+
+// BFS：从 centerId 出发，沿无向边取 hops 跳内节点集合
+function _wikiEgoNodes(centerId, hops, edges) {
+  var adj = {};
+  edges.forEach(function(e) {
+    (adj[e.from] = adj[e.from] || []).push(e.to);
+    (adj[e.to] = adj[e.to] || []).push(e.from);
+  });
+  var seen = {};
+  seen[centerId] = 0;
+  var queue = [centerId];
+  while (queue.length) {
+    var cur = queue.shift();
+    var d = seen[cur];
+    if (d >= hops) continue;
+    (adj[cur] || []).forEach(function(nb) {
+      if (!(nb in seen)) { seen[nb] = d + 1; queue.push(nb); }
+    });
   }
+  return seen;  // { nodeId: 距离 }
+}
 
-  if (!nodes.length) {
-    svgEl.innerHTML = '<text x="50%" y="50%" text-anchor="middle" fill="#64748b" font-size="13">无关联图谱</text>';
+async function wikiRenderGraph(activeId) {
+  if (!activeId && wikiActiveKind && wikiActivePaper) activeId = wikiActiveKind + '/' + wikiActivePaper;
+  var container = document.getElementById('wikiGraphNet');
+  if (!container) return;
+
+  try {
+    await wikiLoadVis();
+  } catch (e) {
+    container.innerHTML = '<div style="text-align:center;padding:60px;color:#FF6B81">' + esc(e.message) + '</div>';
     return;
   }
 
-  var svg = d3.select('#wikiGraphSvg');
-  svg.selectAll('*').remove();
-  svg.attr('viewBox', [0, 0, width, height]);
+  // 全库图谱数据（带缓存；wikiRefreshGraph / 保存后置 null 触发重取）
+  if (!wikiGraphData) {
+    try {
+      wikiGraphData = await api('GET', '/openclaw/wiki/graph');
+    } catch (e) {
+      container.innerHTML = '<div style="text-align:center;padding:60px;color:#FF6B81">图谱加载失败: ' + esc(e.message) + '</div>';
+      return;
+    }
+  }
+  var data = wikiGraphData || { nodes: [], edges: [] };
+  if (!data.nodes.length) {
+    container.innerHTML = '<div style="text-align:center;padding:60px;color:var(--text-muted)"><i class="fa-solid fa-circle-nodes" style="font-size:32px;display:block;margin-bottom:12px;opacity:.2"></i>暂无可视化的知识图谱</div>';
+    return;
+  }
 
-  var link = svg.append('g').selectAll('line').data(edges).enter().append('line')
-    .attr('stroke', '#cbd5e1').attr('stroke-width', 1).attr('stroke-opacity', 0.6);
+  // 选子图：ego（当前页 hops 跳）或全局
+  var nodeById = {};
+  data.nodes.forEach(function(n) { nodeById[n.id] = n; });
+  var subNodes, subEdges;
+  if (wikiGraphMode === 'ego') {
+    if (!activeId || !nodeById[activeId]) {
+      container.innerHTML = '<div style="text-align:center;padding:60px;color:var(--text-muted)">先在左侧打开一个页面，再以它为中心看局部图谱</div>';
+      return;
+    }
+    var dist = _wikiEgoNodes(activeId, wikiGraphEgoHops, data.edges);
+    subNodes = data.nodes.filter(function(n) { return n.id in dist; });
+    subEdges = data.edges.filter(function(e) { return (e.from in dist) && (e.to in dist); });
+  } else {
+    subNodes = data.nodes;
+    subEdges = data.edges;
+  }
 
-  var node = svg.append('g').selectAll('g').data(nodes).enter().append('g')
-    .style('cursor', function(d) { return d.ghost ? 'default' : 'pointer'; });
+  // 映射为 vis 节点/边
+  var nodesArr = subNodes.map(function(n) {
+    var isActive = n.id === activeId;
+    var isDangling = !!n.dangling;
+    var label = n.title || (n.pageId ? n.pageId.split('/').pop() : n.id);
+    return {
+      id: n.id,
+      label: label.length > 24 ? label.slice(0, 24) + '…' : label,
+      title: n.title || n.id,  // 悬停提示：vis-network 用 createTextNode 渲染，不解析 HTML，故不 esc（esc 会双重转义显示 &amp;）
+      kind: n.kind, name: n.name, pageId: n.pageId, dangling: isDangling,
+      color: {
+        background: isActive ? '#3b6df0' : (isDangling ? 'rgba(148,163,184,.35)' : _wikiGraphColor(n.kind)),
+        border: isActive ? '#2563eb' : (isDangling ? '#94a3b8' : _wikiGraphColor(n.kind)),
+        highlight: { background: isActive ? '#3b6df0' : _wikiGraphColor(n.kind), border: '#2563eb' },
+      },
+      font: { color: isActive ? '#3b6df0' : (isDangling ? '#94a3b8' : '#334155'), size: isActive ? 13 : 11, bold: isActive },
+      borderWidth: isActive ? 3 : 1,
+      shape: isDangling ? 'ellipse' : 'dot',
+      size: isActive ? 16 : 10,
+      opacity: isDangling ? 0.6 : 1,
+    };
+  });
+  var nodeIds = {};
+  nodesArr.forEach(function(n) { nodeIds[n.id] = true; });
+  var edgesArr = subEdges
+    .filter(function(e) { return nodeIds[e.from] && nodeIds[e.to]; })
+    .map(function(e, i) {
+      // 边类型着色：wikilink 实线灰，related 蓝虚线，source_pages 绿虚线
+      var style = { wikilink: { color: '#cbd5e1', dashes: false }, related: { color: '#3b6df0', dashes: true }, source_pages: { color: '#10b981', dashes: true } }[e.type] || { color: '#cbd5e1', dashes: false };
+      return { id: 'e' + i, from: e.from, to: e.to, color: { color: style.color, opacity: 0.55 }, dashes: style.dashes, width: 1, smooth: { type: 'continuous' } };
+    });
 
-  node.append('circle')
-    .attr('r', function(d) { return d.isActive ? 10 : d.ghost ? 4 : 8; })
-    .attr('fill', function(d) { return d.isActive ? '#3b6df0' : d.ghost ? 'rgba(255,107,129,.4)' : '#10b981'; })
-    .attr('stroke', function(d) { return d.isActive ? '#2563eb' : 'none'; })
-    .attr('stroke-width', 2);
+  // 物理布局：全局大库 Barnes-Hut + 拖拽隐边；ego 用较稳的 forceAtlas2 替代
+  var isGlobalBig = wikiGraphMode === 'global' && nodesArr.length > WIKI_GRAPH_CLUSTER_THRESHOLD;
+  var options = {
+    nodes: { shape: 'dot', scaling: { min: 8, max: 20 } },
+    edges: { smooth: { type: 'continuous' } },
+    interaction: { hover: true, hideEdgesOnDrag: true, hideEdgesOnZoom: false, tooltipDelay: 120 },
+    physics: {
+      enabled: true,
+      solver: 'barnesHut',
+      barnesHut: { gravitationalConstant: wikiGraphMode === 'global' ? -8000 : -3000, springLength: wikiGraphMode === 'global' ? 150 : 110, damping: 0.4 },
+      stabilization: { iterations: 150 },
+    },
+  };
 
-  node.append('text')
-    .text(function(d) { return d.label.length > 20 ? d.label.slice(0, 20) + '...' : d.label; })
-    .attr('x', 12).attr('y', 4).attr('font-size', 10).attr('fill', function(d) { return d.ghost ? '#94a3b8' : '#334155'; });
+  if (wikiGraphNetwork) { wikiGraphNetwork.destroy(); wikiGraphNetwork = null; }
+  var network = new vis.Network(container, { nodes: new vis.DataSet(nodesArr), edges: new vis.DataSet(edgesArr) }, options);
+  wikiGraphNetwork = network;
 
-  node.on('click', function(e, d) {
-    if (d.ghost || d.isActive || !d.kind) return;
-    openWikiPaper(d.kind, d.name, d.pageId);
+  // 大库全局图：稳定后按 kind 聚类降复杂度
+  if (isGlobalBig) {
+    network.once('stabilizationIterationsDone', function() {
+      var byKind = {};
+      nodesArr.forEach(function(n) { if (!n.dangling) (byKind[n.kind || 'other'] = byKind[n.kind || 'other'] || []).push(n.id); });
+      Object.keys(byKind).forEach(function(kind) {
+        if (byKind[kind].length < 2) return;
+        network.cluster({
+          joinCondition: function(opt) { return byKind[kind].indexOf(opt.id) >= 0; },
+          clusterNodeProperties: {
+            id: 'cluster:' + kind,
+            label: (WIKI_KIND_LABEL && WIKI_KIND_LABEL[kind] || kind) + ' (' + byKind[kind].length + ')',
+            color: { background: _wikiGraphColor(kind), border: _wikiGraphColor(kind) },
+            shape: 'database',
+            allowSingleNodeCluster: false,
+          },
+        });
+      });
+    });
+    // 双击聚类展开
+    network.on('doubleClick', function(params) {
+      if (params.nodes.length === 1 && network.isCluster(params.nodes[0])) network.openCluster(params.nodes[0]);
+    });
+  }
+
+  // 点节点直接打开对应文件进编辑器（dangling 与聚类节点除外）
+  network.on('click', function(params) {
+    if (!params.nodes.length) return;
+    var nid = params.nodes[0];
+    if (network.isCluster(nid)) { network.openCluster(nid); return; }
+    var n = nodeById[nid];
+    if (!n || n.dangling || !n.kind) return;
+    if (nid === activeId) return;
+    openWikiPaper(n.kind, n.name, n.pageId);
   });
 
-  var simulation = d3.forceSimulation(nodes).force('link', d3.forceLink(edges).distance(120))
-    .force('charge', d3.forceManyBody().strength(-300)).force('center', d3.forceCenter(width / 2, height / 2));
-  simulation.on('tick', function() {
-    link.attr('x1', function(d) { return d.source.x; }).attr('y1', function(d) { return d.source.y; })
-      .attr('x2', function(d) { return d.target.x; }).attr('y2', function(d) { return d.target.y; });
-    node.attr('transform', function(d) { return 'translate(' + d.x + ',' + d.y + ')'; });
-  });
+  // 高亮当前节点：稳定后聚焦到 activeId
+  if (activeId && nodeIds[activeId]) {
+    network.once('stabilizationIterationsDone', function() {
+      try { network.focus(activeId, { scale: wikiGraphMode === 'ego' ? 1.0 : 0.6, animation: true }); } catch (e) {}
+    });
+    network.selectNodes([activeId]);
+  }
 }
 
 /* ── Save ── */
@@ -322,6 +445,11 @@ async function wikiSavePaper() {
     var key = wikiActiveKind + '/' + wikiActivePaper;
     wikiPaperCache[key] = null; // invalidate cache so next load fetches fresh
     toast('已保存', 'fa-check-circle', '#10b981');
+    // 图谱实时刷新（issue #46）：保存的 wikilink/frontmatter 可能改变图，重拉并（若在图谱 tab）重渲
+    try {
+      wikiGraphData = await api('GET', '/openclaw/wiki/graph');
+      if (wikiTab === 'graph') wikiRenderGraph();
+    } catch (e) { wikiGraphData = null; /* 拉取失败则下次进图重取 */ }
   } catch(e) {
     toast('保存失败: ' + e.message, 'fa-exclamation-circle', '#FF6B81');
   }
