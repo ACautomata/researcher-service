@@ -20,11 +20,11 @@ class DockerCompileExecutor:
     """真实触发：容器内 exec openclaw wiki compile（best-effort，失败不阻断写操作）。"""
 
     def execute(self, instance) -> None:
+        # 经 orchestrator 公开 exec_in_container 入口（委托 runtime；codex PR #62 意见1：
+        # 不得引用 InstanceOrchestrator 不存在的 .client 属性，否则 AttributeError 被吞）。
         from containers.orchestrator import Fleet  # 局部导入避免循环依赖
         try:
-            client = Fleet.get().client  # docker-py client（orchestrator 持有）
-            container = client.containers.get(instance.container_id)
-            container.exec_run(['openclaw', 'wiki', 'compile'], detach=True)
+            Fleet.get().exec_in_container(instance.name, ['openclaw', 'wiki', 'compile'])
         except Exception:  # noqa: BLE001 — compile 滞后不影响人类视图，静默降级（r29 §2.4）
             pass
 

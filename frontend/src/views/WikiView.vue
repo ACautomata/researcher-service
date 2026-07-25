@@ -3,7 +3,7 @@
 // 版面：顶部容器切换器 + 左文件树 + 中 Milkdown 编辑器 + 右图谱（可折叠）。
 // 联动：点树/图谱节点 openPage；编辑器 update → store.edit（防抖自动保存落盘）；
 // 顶部切换容器 → store.switchContainer（切前自动落盘）。新建/删除经 store，落盘并触发 compile。
-import { onMounted, ref } from 'vue'
+import { onMounted, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { listInstances } from '@/api/containers'
@@ -15,7 +15,7 @@ import MdEditor from '@/components/MdEditor.vue'
 import WikiGraph from '@/components/WikiGraph.vue'
 
 const store = useWikiStore()
-const { current, groups, activePath, draft, dirty, saving } = storeToRefs(store)
+const { current, groups, activePath, draft, dirty, saving, saveSeq } = storeToRefs(store)
 
 const containers = ref<string[]>([])
 const graph = ref<WikiGraphDTO>({ nodes: [], edges: [] })
@@ -30,9 +30,17 @@ async function refreshGraph(): Promise<void> {
   }
 }
 
+// 自动保存成功后刷新树与图谱（codex PR #62 意见6）：title/wikilink 变更即时反映。
+watch(saveSeq, async () => {
+  await store.loadTree(current.value)
+  await refreshGraph()
+})
+
 async function selectContainer(name: string): Promise<void> {
   if (!name) return
-  await store.loadTree(name)
+  // 初始化/重挂载：经 resetForContainer 清掉 Pinia 残留的旧编辑器态（codex PR #62 意见3），
+  // 否则旧容器 draft 会在新容器下显示/被误覆盖写。
+  await store.resetForContainer(name)
   await refreshGraph()
 }
 

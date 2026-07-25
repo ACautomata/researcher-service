@@ -136,12 +136,28 @@ class WikiService:
         fpath.unlink()
 
     def _resolve(self, rel_path: str) -> Path:
-        """把相对 wiki/main 的 path 解析为绝对路径；越界（穿越/不在 root 内）→ InvalidPath。"""
+        """把相对 wiki/main 的 path 解析为绝对路径；越界（穿越/不在 root 内）→ InvalidPath。
+
+        同时拒 managed/私有路径（codex PR #62 意见4）：插件生成 index.md、保留文件
+        （AGENTS/WIKI/inbox.md）、.openclaw-wiki 等私有目录——这些不在文件树内（只读插件
+        managed 区），任何 CRUD 都不应触碰，否则越权改插件生成区。
+        """
+        self._assert_not_managed(rel_path)
         root = self._root.resolve()
         fpath = (root / rel_path).resolve()
         if root != fpath and root not in fpath.parents:
             raise InvalidPath(rel_path)
         return fpath
+
+    @staticmethod
+    def _assert_not_managed(rel_path: str) -> None:
+        parts = rel_path.split('/')
+        # 私有/插件目录（.openclaw-wiki、_attachments、_views）
+        if any(seg in SKIP_DIRS for seg in parts):
+            raise InvalidPath(rel_path)
+        # 插件 managed 文件（index.md/AGENTS.md/WIKI.md/inbox.md，含分类子目录下的 index.md）
+        if parts[-1] in SKIP_FILES:
+            raise InvalidPath(rel_path)
 
     def _scan_dir(self, dirpath: Path, rel_prefix: str, pages_out: list) -> None:
         """扫描单层目录的 .md 页面（跳过占位/索引），path 用相对 wiki/main 的 posix 路径。"""

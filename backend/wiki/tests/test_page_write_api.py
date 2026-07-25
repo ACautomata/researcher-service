@@ -105,3 +105,31 @@ def test_delete_rejects_path_injection(authed, instance, fake_compile):
     resp = authed.delete('/api/v1/containers/demo/wiki/page?path=../../secret.md')
     assert resp.status_code == 400
     assert fake_compile == []
+
+
+# ---------------------------- managed/私有路径拒绝（codex PR #62 意见4, P2）----------------------------
+
+
+@pytest.mark.parametrize('managed', [
+    'index.md',                          # 插件生成索引
+    'AGENTS.md',                         # 插件保留文件
+    'concepts/index.md',                 # 分类 index（managed 区）
+    '.openclaw-wiki/cache/foo.md',       # 插件私有目录
+])
+def test_write_rejects_managed_paths(authed, instance, wiki_home, managed):
+    resp = authed.put('/api/v1/containers/demo/wiki/page',
+                      {'path': managed, 'content': 'x'}, format='json')
+    assert resp.status_code == 400, f'managed 路径写入未被拒: {managed}'
+
+
+@pytest.mark.parametrize('managed', ['index.md', '.openclaw-wiki/cache/foo.md'])
+def test_delete_rejects_managed_paths(authed, instance, wiki_home, managed):
+    resp = authed.delete(f'/api/v1/containers/demo/wiki/page?path={managed}')
+    assert resp.status_code == 400, f'managed 路径删除未被拒: {managed}'
+
+
+def test_create_rejects_managed_path(authed, instance, fake_compile):
+    resp = authed.post('/api/v1/containers/demo/wiki/page',
+                       {'path': '.openclaw-wiki/evil.md', 'content': 'x'}, format='json')
+    assert resp.status_code == 400
+    assert fake_compile == []

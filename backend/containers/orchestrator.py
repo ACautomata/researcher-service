@@ -186,6 +186,13 @@ class InstanceOrchestrator:
         self._inflight_creates: set[str] = set()
         self._inflight_lock = threading.Lock()
 
+    def exec_in_container(self, name: str, cmd: list[str]) -> None:
+        """在运行中的实例容器内执行命令（如 wiki compile）—— 委托 runtime（codex PR #62 意见1）。
+
+        供 wiki compile 触发器等跨域调用；保持 runtime 为唯一 docker 接触面。
+        """
+        self._runtime.exec_in_container(name, cmd)
+
     def _used_ports(self) -> set[int]:
         """已用端口 = DB 记账 ∪ fleet 容器 label 端口 ∪ 池内宿主实测占用（codex R2 :161）。
 

@@ -131,3 +131,32 @@ describe('WikiView', () => {
     expect(wrapper.find('[data-test="wiki-graph"]').exists()).toBe(false)
   })
 })
+
+describe('WikiView — codex PR #62 意见6 回归', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    ;(listInstances as ReturnType<typeof vi.fn>).mockResolvedValue(INSTANCES)
+    ;(getTree as ReturnType<typeof vi.fn>).mockResolvedValue(TREE)
+    ;(getGraph as ReturnType<typeof vi.fn>).mockResolvedValue(GRAPH)
+    ;(readPage as ReturnType<typeof vi.fn>).mockResolvedValue({
+      path: 'concepts/a.md', title: 'A', content: '# A',
+    })
+  })
+
+  it('refreshes tree and graph after a successful autosave (意见6)', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+    await wrapper.findComponent({ name: 'FileTree' }).vm.$emit('open', 'concepts/a.md')
+    await flushPromises()
+    ;(getTree as ReturnType<typeof vi.fn>).mockClear()
+    ;(getGraph as ReturnType<typeof vi.fn>).mockClear()
+    // 触发一次自动保存完成
+    const s = useWikiStore()
+    s.edit('# A 改了标题')
+    await s._flush()
+    await flushPromises()
+    // 保存成功后树与图谱被刷新（title/wikilink 变更即时反映）
+    expect(getTree).toHaveBeenCalled()
+    expect(getGraph).toHaveBeenCalled()
+  })
+})

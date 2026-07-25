@@ -124,6 +124,14 @@ class DockerRuntime:
             return
         c.remove(v=True, force=True)
 
+    def exec_in_container(self, name: str, cmd: list[str]) -> None:
+        # 容器内执行命令（如 wiki compile）；NotFound 幂等（容器已停/删）
+        try:
+            c = self._client().containers.get(container_name(name))
+        except NotFound:
+            return
+        c.exec_run(cmd, detach=True)
+
     @staticmethod
     def _to_info(c) -> ContainerInfo:
         image = c.attrs.get('Config', {}).get('Image') or ''
