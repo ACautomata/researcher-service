@@ -74,7 +74,7 @@ function resetForm(): void {
   providerId.value = ''
   api.value = 'openai-completions'
   baseUrl.value = ''
-  apiKeyEnvId.value = ''
+  apiKeyEnvId.value = 'LLM_API_KEY'   // spec §5.2：面板共享单一 LLM_API_KEY（容器仅注入它）
   authHeader.value = true
   models.value = [{ id: '', name: '' }]
   editingPid.value = null
@@ -228,7 +228,7 @@ defineExpose({ selectContainer, openCreate, openEdit, save, confirmRemove })
           <el-input v-model="baseUrl" placeholder="OpenAI 系需含 /v1" data-test="field-base-url" />
         </el-form-item>
         <el-form-item label="apiKey env id">
-          <el-input v-model="apiKeyEnvId" placeholder="如 ZHIPU_API_KEY（大写_）" data-test="field-env-id" />
+          <el-input v-model="apiKeyEnvId" placeholder="LLM_API_KEY（面板共享，容器仅注入它）" data-test="field-env-id" />
         </el-form-item>
         <el-form-item label="Authorization 头">
           <el-switch v-model="authHeader" data-test="field-auth-header" />

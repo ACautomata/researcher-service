@@ -12,6 +12,7 @@ from rest_framework import serializers
 
 from models.models import (
     API_CHOICES,
+    ALLOWED_API_KEY_ENV_IDS,
     ENV_ID_VALIDATOR,
     PROVIDER_ID_VALIDATOR,
     ModelProvider,
@@ -27,6 +28,15 @@ class ModelProviderWriteSerializer(serializers.Serializer):
     api_key_env_id = serializers.CharField(max_length=128, validators=[ENV_ID_VALIDATOR])
     auth_header = serializers.BooleanField(default=True)
     models = serializers.JSONField()
+
+    def validate_api_key_env_id(self, value: str) -> str:
+        # 容器仅注入 ALLOWED_API_KEY_ENV_IDS（spec §5.2 单一共享 key）；引用未注入 env 会让
+        # OpenClaw 热加载失败、provider 不可用（#36）。regex 管格式，本处管「容器真持有」。
+        if value not in ALLOWED_API_KEY_ENV_IDS:
+            raise serializers.ValidationError(
+                f'apiKey env id 须为容器已注入的 env（当前仅：{sorted(ALLOWED_API_KEY_ENV_IDS)}）'
+            )
+        return value
 
     def validate_models(self, value):
         if not isinstance(value, list) or not value:

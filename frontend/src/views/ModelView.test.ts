@@ -46,7 +46,7 @@ const CONTAINERS = [
 
 const PROVIDER: ModelProviderDTO = {
   id: 1, provider_id: 'my-openai', api: 'openai-completions',
-  base_url: 'https://open.bigmodel.cn/api/paas/v4', api_key_env_id: 'ZHIPU_API_KEY',
+  base_url: 'https://open.bigmodel.cn/api/paas/v4', api_key_env_id: 'LLM_API_KEY',
   auth_header: true, models: [{ id: 'glm-4-plus', name: 'GLM-4 Plus' }],
   created_at: '2026-07-24T00:00:00Z',
 }
@@ -55,7 +55,7 @@ const PAYLOAD = {
   provider_id: 'my-openai',
   api: 'openai-completions' as const,
   base_url: 'https://open.bigmodel.cn/api/paas/v4',
-  api_key_env_id: 'ZHIPU_API_KEY',
+  api_key_env_id: 'LLM_API_KEY',
   auth_header: true,
   models: [{ id: 'glm-4-plus', name: 'GLM-4 Plus' }],
 }

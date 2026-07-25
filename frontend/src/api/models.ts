@@ -36,19 +36,25 @@ export interface ModelProviderWriteDTO {
   models: ModelEntryDTO[]
 }
 
-function base(name: string): string {
-  return `/api/v1/containers/${encodeURIComponent(name)}/models/providers`
+// 集合与详情 URL 都须带尾斜杠，精确匹配后端路由 providers/ 与 providers/<pid>/（CommonMiddleware
+// APPEND_SLASH 会把无尾斜杠的 POST 301 到带斜杠 URL，Fetch 随后以 GET 重发 → 创建静默失败）。
+function collection(name: string): string {
+  return `/api/v1/containers/${encodeURIComponent(name)}/models/providers/`
+}
+
+function detail(name: string, pid: string): string {
+  return `${collection(name)}${encodeURIComponent(pid)}/`
 }
 
 export function listProviders(name: string): Promise<ModelProviderDTO[]> {
-  return apiJson<ModelProviderDTO[]>(base(name))
+  return apiJson<ModelProviderDTO[]>(collection(name))
 }
 
 export function createProvider(
   name: string,
   payload: ModelProviderWriteDTO,
 ): Promise<ModelProviderDTO> {
-  return apiJson<ModelProviderDTO>(base(name), {
+  return apiJson<ModelProviderDTO>(collection(name), {
     method: 'POST',
     body: JSON.stringify(payload),
   })
@@ -59,7 +65,7 @@ export function updateProvider(
   pid: string,
   payload: ModelProviderWriteDTO,
 ): Promise<ModelProviderDTO> {
-  return apiJson<ModelProviderDTO>(`${base(name)}/${encodeURIComponent(pid)}`, {
+  return apiJson<ModelProviderDTO>(detail(name, pid), {
     method: 'PUT',
     body: JSON.stringify(payload),
   })
@@ -67,7 +73,7 @@ export function updateProvider(
 
 export async function removeProvider(name: string, pid: string): Promise<void> {
   // 删除幂等：404（他人刚删）不报错
-  const resp = await apiFetch(`${base(name)}/${encodeURIComponent(pid)}`, {
+  const resp = await apiFetch(detail(name, pid), {
     method: 'DELETE',
   })
   if (!resp.ok && resp.status !== 404) {

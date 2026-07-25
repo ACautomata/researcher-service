@@ -118,6 +118,15 @@ class InstanceNotFound(Exception):
         self.name = name
 
 
+class ConfigWriteError(Exception):
+    """重渲染 openclaw.json 写盘失败（卷只读/满/权限）；view 层 503，DB 事务回滚。"""
+
+    def __init__(self, name: str, path: str) -> None:
+        super().__init__(f'config write failed for {name!r}: {path}')
+        self.name = name
+        self.path = path
+
+
 @dataclass(frozen=True)
 class FleetConfig:
     """编排控制面配置（来自 settings.OPENCLAW_FLEET，测试可注入 tmp 路径）。"""
@@ -213,6 +222,7 @@ class InstanceOrchestrator:
         模板 base（强制 gateway 安全不变量）→ 覆盖写 instances/<name>/openclaw.json。
         #36 已证：改 models.providers 即热加载，无需 restart；SecretRef env 缺失时 reload 失败
         但 runtime 停留 last-known-good 不崩，env 补齐自动恢复。
+        原子写（tmp + os.replace）：写盘失败不污染既有 openclaw.json，DB 事务据此回滚（view 层）。
         """
         inst = Instance.objects.filter(name=name).first()
         if inst is None:
@@ -223,8 +233,17 @@ class InstanceOrchestrator:
         merged = self._provider_builder.build(self._renderer.render_dict(), specs)
         config_path = self._cfg.root / 'instances' / name / 'openclaw.json'
         config_path.parent.mkdir(parents=True, exist_ok=True)
-        config_path.write_text(json.dumps(merged, indent=2, ensure_ascii=False))
-        os.chmod(config_path, 0o644)
+        tmp = config_path.with_name(config_path.name + '.tmp')
+        try:
+            tmp.write_text(json.dumps(merged, indent=2, ensure_ascii=False))
+            os.chmod(tmp, 0o644)
+            os.replace(tmp, config_path)   # POSIX 原子：要么整体新配置生效，要么保留旧文件
+        except OSError:
+            try:
+                tmp.unlink()
+            except FileNotFoundError:
+                pass
+            raise ConfigWriteError(name, str(config_path)) from None
 
     def _used_ports(self) -> set[int]:
         """已用端口 = DB 记账 ∪ fleet 容器 label 端口 ∪ 池内宿主实测占用（codex R2 :161）。

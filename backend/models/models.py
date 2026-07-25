@@ -37,6 +37,12 @@ ENV_ID_VALIDATOR = RegexValidator(
     message='apiKey env id 须大写字母开头，仅含大写字母、数字、下划线',
 )
 
+# 容器进程实际持有的凭证 env（spec §5.2：全面板共享一个 LLM_API_KEY；DockerRuntime 仅注入它）。
+# 容器 env 在 docker run 时固定，OpenClaw watch 热加载无法新增 env（#36 已证：缺 env 则 reload
+# 失败停留 last-known-good）—— 故 SecretRef.id 只能引用已注入的 env。API 层据此收紧（builder
+# 层仍 env-agnostic，便于未来 fleet 注入更多 env 时仅放宽本集合）。
+ALLOWED_API_KEY_ENV_IDS = frozenset({'LLM_API_KEY'})
+
 
 class ModelProvider(models.Model):
     """一个容器的一个 model provider 行（DB 单一来源，spec §10）。"""

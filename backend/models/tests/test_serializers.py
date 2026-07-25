@@ -13,7 +13,7 @@ def _valid_payload(**over):
         'provider_id': 'my-openai',
         'api': 'openai-completions',
         'base_url': 'https://open.bigmodel.cn/api/paas/v4',
-        'api_key_env_id': 'ZHIPU_API_KEY',
+        'api_key_env_id': 'LLM_API_KEY',
         'auth_header': True,
         'models': [
             {'id': 'glm-4-plus', 'name': 'GLM-4 Plus', 'reasoning': False,
@@ -44,6 +44,13 @@ def test_invalid_provider_id_rejected():
 def test_invalid_api_key_env_id_rejected():
     # 小写 / 含非法字符 → 拒（env 变量名须大写起）
     ser = ModelProviderWriteSerializer(data=_valid_payload(api_key_env_id='lowercase'))
+    assert not ser.is_valid()
+    assert 'api_key_env_id' in ser.errors
+
+
+def test_disallowed_api_key_env_id_rejected():
+    # 格式合法但容器未注入（spec §5.2 仅注入 LLM_API_KEY）→ 拒，避免热加载失败、provider 不可用
+    ser = ModelProviderWriteSerializer(data=_valid_payload(api_key_env_id='ZHIPU_API_KEY'))
     assert not ser.is_valid()
     assert 'api_key_env_id' in ser.errors
 

@@ -16,7 +16,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from containers.models import NAME_VALIDATOR, Instance
-from containers.orchestrator import Fleet, InstanceNotFound
+from containers.orchestrator import ConfigWriteError, Fleet, InstanceNotFound
 from models.models import ModelProvider
 from models.serializers import ModelProviderReadSerializer, ModelProviderWriteSerializer
 
@@ -36,13 +36,23 @@ class _BaseModelsView(APIView):
             raise Http404
         return inst
 
-    def _rewrite_or_404(self, name: str) -> None:
-        # 写 DB 后重渲染该容器 openclaw.json（spec §7：经 watch 热加载生效）；
-        # 极端竞态（实例刚被并发 delete）→ InstanceNotFound 转 404。
-        try:
+    @staticmethod
+    def _save_and_rewrite(provider: ModelProvider, name: str) -> None:
+        """DB mutation + 重渲染在同一事务内：rewrite 失败 → DB 回滚，DB 与 openclaw.json 不分裂。
+
+        unique(instance, provider_id) 冲突 → IntegrityError（view 转 409）；
+        rewrite 写盘失败 → ConfigWriteError（view 转 503，DB 已回滚）；
+        并发 delete 致实例消失 → InstanceNotFound（view 转 404，DB 已回滚）。
+        """
+        with transaction.atomic():
+            provider.save()
             Fleet.get().rewrite_config(name)
-        except InstanceNotFound:
-            raise Http404
+
+    @staticmethod
+    def _delete_and_rewrite(provider: ModelProvider, name: str) -> None:
+        with transaction.atomic():
+            provider.delete()
+            Fleet.get().rewrite_config(name)
 
     @staticmethod
     def _apply(payload: dict, provider: ModelProvider) -> None:
@@ -80,15 +90,18 @@ class ModelProviderListView(_BaseModelsView):
         provider = ModelProvider(instance=inst)
         self._apply(ser.validated_data, provider)
         try:
-            with transaction.atomic():
-                provider.save()
+            self._save_and_rewrite(provider, name)
         except IntegrityError:
             # unique(instance, provider_id)：并发绕 serializer 或重复提交 → 409，非裸 500
             return Response(
                 {'detail': '该容器下 provider_id 已存在'},
                 status=status.HTTP_409_CONFLICT,
             )
-        self._rewrite_or_404(name)
+        except InstanceNotFound:
+            return Response({'detail': '容器不存在'}, status=status.HTTP_404_NOT_FOUND)
+        except ConfigWriteError as e:
+            # 写盘失败（卷只读/满）：DB 已回滚，配置停留在上一份一致状态 → 503
+            return Response({'detail': str(e)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
         return Response(
             ModelProviderReadSerializer(provider).data, status=status.HTTP_201_CREATED,
         )
@@ -127,15 +140,17 @@ class ModelProviderDetailView(_BaseModelsView):
         ser.is_valid(raise_exception=True)
         self._apply(ser.validated_data, provider)
         try:
-            with transaction.atomic():
-                provider.save()
+            self._save_and_rewrite(provider, name)
         except IntegrityError:
             # PUT 改 provider_id 撞同容器既有 pid → 409
             return Response(
                 {'detail': '该容器下 provider_id 已存在'},
                 status=status.HTTP_409_CONFLICT,
             )
-        self._rewrite_or_404(name)
+        except InstanceNotFound:
+            return Response({'detail': '容器不存在'}, status=status.HTTP_404_NOT_FOUND)
+        except ConfigWriteError as e:
+            return Response({'detail': str(e)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
         return Response(ModelProviderReadSerializer(provider).data)
 
     @extend_schema(responses={204: None, 404: None})
@@ -145,6 +160,10 @@ class ModelProviderDetailView(_BaseModelsView):
         except _InvalidName:
             return Response({'detail': '非法 name'}, status=status.HTTP_400_BAD_REQUEST)
         provider = self._get_provider(inst, pid)
-        provider.delete()
-        self._rewrite_or_404(name)  # 级联清理（重算 primary/fallbacks/aliases，无悬空引用）
+        try:
+            self._delete_and_rewrite(provider, name)  # 级联清理 + 重渲染，事务内
+        except InstanceNotFound:
+            return Response({'detail': '容器不存在'}, status=status.HTTP_404_NOT_FOUND)
+        except ConfigWriteError as e:
+            return Response({'detail': str(e)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
         return Response(status=status.HTTP_204_NO_CONTENT)
