@@ -27,11 +27,15 @@ class ConfigRenderer:
         # 构造期解析：损坏模板 fail-fast（不静默产出坏配置）
         self._template = json.loads(template_text)
 
-    def render(self) -> str:
+    def render_dict(self) -> dict:
+        """渲染并强制 spec 安全不变量，返回 dict（供 ProviderConfigBuilder 合并 model providers）。"""
         cfg = copy.deepcopy(self._template)
         gateway = cfg.setdefault('gateway', {})
         gateway['port'] = GATEWAY_PORT
         gateway['bind'] = GATEWAY_BIND
         # 强制占位：杜绝真 token 落盘（即便上游模板写错）
         gateway.setdefault('auth', {})['token'] = GATEWAY_TOKEN_PLACEHOLDER
-        return json.dumps(cfg, indent=2, ensure_ascii=False)
+        return cfg
+
+    def render(self) -> str:
+        return json.dumps(self.render_dict(), indent=2, ensure_ascii=False)

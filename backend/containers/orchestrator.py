@@ -28,6 +28,7 @@ import shutil
 import socket
 import threading
 import urllib.request
+import json
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -43,6 +44,7 @@ from .models import Instance
 from .ports import RESERVED_PORT_18789, PortAllocator
 from .provisioner import HomeProvisioner
 from .runtime import ContainerSpec
+from models.config_builder import ProviderConfigBuilder
 
 # health 字段枚举（issue #39 验收：列表显示 health 变 healthy）
 HEALTH_HEALTHY = 'healthy'
@@ -108,6 +110,23 @@ class ConfigurationError(Exception):
         self.field = field
 
 
+class InstanceNotFound(Exception):
+    """rewrite_config 找不到容器行（可能被并发 delete）；view 层 404。"""
+
+    def __init__(self, name: str) -> None:
+        super().__init__(f'instance {name!r} not found')
+        self.name = name
+
+
+class ConfigWriteError(Exception):
+    """重渲染 openclaw.json 写盘失败（卷只读/满/权限）；view 层 503，DB 事务回滚。"""
+
+    def __init__(self, name: str, path: str) -> None:
+        super().__init__(f'config write failed for {name!r}: {path}')
+        self.name = name
+        self.path = path
+
+
 @dataclass(frozen=True)
 class FleetConfig:
     """编排控制面配置（来自 settings.OPENCLAW_FLEET，测试可注入 tmp 路径）。"""
@@ -164,6 +183,7 @@ class InstanceOrchestrator:
         health_probe=None,
         dir_remover=None,
         port_in_use: Callable[[int], bool] | None = None,
+        provider_builder=None,
     ) -> None:
         self._runtime = runtime
         self._cfg = config
@@ -172,6 +192,8 @@ class InstanceOrchestrator:
         self._dir_remover = dir_remover or shutil.rmtree
         # codex R2 :161：注入宿主端口占用探测（默认 socket bind 实测），可测确定性冲突
         self._port_in_use = port_in_use or _host_port_in_use
+        # spec §7：model CRUD 重渲染合并层（默认 ProviderConfigBuilder，可注入替身）
+        self._provider_builder = provider_builder or ProviderConfigBuilder()
         # codex R6 :475：ConfigRenderer 推迟到 create() 内惰性构造——
         # 模板 JSON 仅供 create() 使用，list/delete 不应因其损坏而 500。
         self._renderer = None
@@ -192,6 +214,36 @@ class InstanceOrchestrator:
         供 wiki compile 触发器等跨域调用；保持 runtime 为唯一 docker 接触面。
         """
         self._runtime.exec_in_container(name, cmd)
+
+    def rewrite_config(self, name: str) -> None:
+        """重渲染该容器 openclaw.json（spec §7：model CRUD 后经 OpenClaw watch 热加载生效）。
+
+        DB（ModelProvider）为单一来源：读该实例全部 provider → ProviderConfigBuilder 合并进
+        模板 base（强制 gateway 安全不变量）→ 覆盖写 instances/<name>/openclaw.json。
+        #36 已证：改 models.providers 即热加载，无需 restart；SecretRef env 缺失时 reload 失败
+        但 runtime 停留 last-known-good 不崩，env 补齐自动恢复。
+        原子写（tmp + os.replace）：写盘失败不污染既有 openclaw.json，DB 事务据此回滚（view 层）。
+        """
+        inst = Instance.objects.filter(name=name).first()
+        if inst is None:
+            raise InstanceNotFound(name)
+        if self._renderer is None:
+            self._renderer = ConfigRenderer(Path(self._cfg.template_json).read_text())
+        specs = [p.as_spec() for p in inst.model_providers.all()]
+        merged = self._provider_builder.build(self._renderer.render_dict(), specs)
+        config_path = self._cfg.root / 'instances' / name / 'openclaw.json'
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = config_path.with_name(config_path.name + '.tmp')
+        try:
+            tmp.write_text(json.dumps(merged, indent=2, ensure_ascii=False))
+            os.chmod(tmp, 0o644)
+            os.replace(tmp, config_path)   # POSIX 原子：要么整体新配置生效，要么保留旧文件
+        except OSError:
+            try:
+                tmp.unlink()
+            except FileNotFoundError:
+                pass
+            raise ConfigWriteError(name, str(config_path)) from None
 
     def _used_ports(self) -> set[int]:
         """已用端口 = DB 记账 ∪ fleet 容器 label 端口 ∪ 池内宿主实测占用（codex R2 :161）。

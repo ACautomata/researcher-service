@@ -32,4 +32,6 @@ urlpatterns = [
     path('api/v1/', include('chat.urls')),
     # wiki app 子资源：/api/v1/containers/<name>/wiki/{tree,page,graph}
     path('api/v1/containers/<str:name>/wiki/', include('wiki.urls')),
+    # models app 子资源：/api/v1/containers/<name>/models/providers[/<pid>]
+    path('api/v1/containers/<str:name>/models/', include('models.urls')),
 ]
