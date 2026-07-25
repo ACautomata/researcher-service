@@ -101,11 +101,16 @@ const slashOpen = computed(
   () => slashActive.value && !slashDismissed.value && slashMatches.value.length > 0,
 )
 
-// 拉取当前容器命令清单（随容器切换调用）；失败静默降级为空清单
-async function loadCommands(name: string) {
+// 拉取当前容器命令清单（随容器切换调用）；失败静默降级为空清单。
+// codex P1：快速切容器时旧容器的迟到响应（resolve 或 catch 拒绝）不得覆盖当前容器清单——
+// 与 listSessions 同一 containerGen 守卫：await 后校验代际，过期则丢弃。
+async function loadCommands(name: string, gen: number) {
   try {
-    commands.value = await listCommands(name)
+    const list = await listCommands(name)
+    if (gen !== containerGen) return // 切容器途中迟到的响应：丢弃
+    commands.value = list
   } catch {
+    if (gen !== containerGen) return
     commands.value = []
   }
 }
@@ -196,7 +201,7 @@ async function selectContainer(name: string) {
   input.value = '' // 切容器：清空 composer 残留输入（否则旧 `/` 会让新容器菜单误弹，T07）
   abandonActiveRun()
   errorMsg.value = ''
-  void loadCommands(name) // T07：后台拉取新容器命令清单（不阻塞会话/连接主流程）
+  void loadCommands(name, gen) // T07：后台拉取新容器命令清单（不阻塞会话/连接主流程）；gen 守卫防迟到污染
   try {
     const list = await listSessions(name)
     if (gen !== containerGen) return // 切容器途中迟到的响应：丢弃（codex P2）

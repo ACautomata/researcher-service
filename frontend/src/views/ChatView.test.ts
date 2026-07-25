@@ -624,6 +624,33 @@ describe('ChatView', () => {
     expect(w.find('[data-test="slash-menu"]').exists()).toBe(false)
   })
 
+  it('discards a stale command-list response after a fast container switch (codex P1)', async () => {
+    // 快速切容器：旧容器(demo)的 listCommands 晚于新容器(other)返回，其响应必须按 containerGen 丢弃，
+    // 不得覆盖 other 的命令清单（否则菜单给出错误容器的命令并经当前 socket 发出）
+    const DEMOCMDS = [{ name: 'demo-only', description: '旧容器命令', aliases: ['/demo-only'] }]
+    const OTHERCMDS = [{ name: 'othercmd', description: '新容器命令', aliases: ['/othercmd'] }]
+    const resolveDemo: { fn: ((v: unknown) => void) | null } = { fn: null }
+    ;(listInstances as ReturnType<typeof vi.fn>).mockResolvedValue([
+      INSTANCE,
+      { ...INSTANCE, name: 'other', port: 19001 },
+    ])
+    ;(listCommands as ReturnType<typeof vi.fn>).mockImplementation((name: string) =>
+      name === 'demo'
+        ? new Promise((r) => { resolveDemo.fn = r }) // demo 挂起，后返回
+        : Promise.resolve(OTHERCMDS),
+    )
+    const w = await mountReady() // demo 自动选中，listCommands('demo') pending
+    await w.find('[data-test="container-other"]').trigger('click') // 切到 other
+    await flushPromises() // other 的 listCommands 已返回 OTHERCMDS
+    resolveDemo.fn!(DEMOCMDS) // demo 的迟到响应
+    await flushPromises()
+    await w.find('[data-test="input"]').setValue('/')
+    await nextTick()
+    const text = w.find('[data-test="slash-menu"]').text()
+    expect(text).toContain('/othercmd') // 当前容器 other 的命令
+    expect(text).not.toContain('/demo-only') // 旧容器 demo 的迟到响应被丢弃
+  })
+
   it('keeps the chat usable when the command list fails to load (清单失败降级)', async () => {
     ;(listCommands as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('网关拒绝'))
     const w = await mountReady()
