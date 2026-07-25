@@ -319,6 +319,93 @@ class OpenClawChatClient:
             raise
         return payload or {}
 
+    async def _rpc(self, method: str, params: dict) -> dict:
+        """通用 req→res 回执 RPC（issue #80 T1）：sessions.list / chat.history / sessions.create /
+        sessions.delete 共用。复用 _pending_resolves 注册表，按 req id 经 _resolve_ack 分发 res。
+
+        未连接抛 ChatClientError（会话管理是 REST 主动调用，须报错让上层映射 502/409，区别于
+        list_commands/list_pending_approvals 的 best-effort 静默返回）；网关拒绝（res not ok）/ ack
+        超时抛 ChatSendError。原样透传网关 payload，不做字段翻译（集中在 REST 解析层 T2）。
+        """
+        if self._ws is None:
+            raise ChatClientError('client not connected')
+        req_id = uuid.uuid4().hex
+        fut = asyncio.get_running_loop().create_future()
+        self._pending_resolves[req_id] = fut
+        frame = {'type': 'req', 'id': req_id, 'method': method, 'params': params}
+        try:
+            await self._ws.send(json.dumps(frame))
+            payload = await asyncio.wait_for(fut, timeout=self._ack_timeout)
+        except asyncio.TimeoutError:
+            self._pending_resolves.pop(req_id, None)
+            raise ChatSendError(f'{method} ack timeout')
+        except BaseException:
+            self._pending_resolves.pop(req_id, None)
+            raise
+        return payload or {}
+
+    async def list_sessions(
+        self,
+        agent_id: str = _AGENT_ID,
+        *,
+        include_derived_titles: bool = True,
+        limit: int | None = None,
+    ) -> dict:
+        """列出该 agent 网关中真实存在的会话（spec #76）：发 sessions.list，有界等 res。
+
+        参数（wire camelCase，对齐 r26 已证契约）：agentId（默认 main）、includeDerivedTitles=True
+        （读每会话 transcript 前 8KB 派生标题，替代旧手填 title）、可选 limit（控大 store 派生标题的
+        文件读）。原样透传 payload——sessions 列表逐字段名「待实测」由 REST 解析层校准（对齐
+        CommandListView._parse_commands 模式，issue 明示翻译集中在 T2）。
+        """
+        params: dict = {'agentId': agent_id, 'includeDerivedTitles': include_derived_titles}
+        if limit is not None:
+            params['limit'] = limit
+        return await self._rpc('sessions.list', params)
+
+    async def get_history(
+        self,
+        session_key: str,
+        *,
+        limit: int | None = None,
+        message_id: str | None = None,
+    ) -> dict:
+        """读取某会话完整聊天记录（spec #76）：发 chat.history，有界等 res。
+
+        参数（wire camelCase）：sessionKey（必传）、可选 limit、可选 messageId（分页锚点，向回翻页）。
+        网关已 display-normalized 的 messages[] 原样透传；hasMore/nextOffset/messageId 精确名「待实测」
+        由 REST 解析层校准。需 operator.read scope。
+        """
+        params: dict = {'sessionKey': session_key}
+        if limit is not None:
+            params['limit'] = limit
+        if message_id is not None:
+            params['messageId'] = message_id
+        return await self._rpc('chat.history', params)
+
+    async def create_session(self, key: str, *, label: str | None = None) -> dict:
+        """新建会话（spec #76）：发 sessions.create{key,label}，有界等 res。
+
+        「建会话即命名」路径——label 可选（免标题新建时由网关后续派生，spec 免预建选项）。需
+        operator.write scope。
+        """
+        params: dict = {'key': key}
+        if label is not None:
+            params['label'] = label
+        return await self._rpc('sessions.create', params)
+
+    async def delete_session(self, session_key: str) -> dict:
+        """删除会话（spec #76，**admin 级提升权限操作**）：发 sessions.delete，有界等 res。
+
+        网关先写压缩归档（*.jsonl.deleted.<ts>.zst）再删，可恢复。需 operator.admin scope（本连接
+        已声明 admin）；权限实际由网关侧 scope 强制。REST 层文档须标注「提升权限操作」。
+
+        wire 字段是 ``key``（codex #96 P1）：上游 ``SessionsDeleteParamsSchema``（closedObject）
+        ``key`` 必填、无 ``sessionKey``；与同族 ``sessions.create``/``sessions.send`` 的 ``key`` 一致，
+        区别于 ``chat.*`` 族（``chat.send``/``chat.history`` 用 ``sessionKey``）。
+        """
+        return await self._rpc('sessions.delete', {'key': session_key})
+
     async def send_message(self, session_key: str, message: str, *, on_event: OnEvent) -> str:
         if self._ws is None:
             raise ChatClientError('client not connected')
