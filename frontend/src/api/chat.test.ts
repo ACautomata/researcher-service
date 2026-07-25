@@ -14,7 +14,7 @@ vi.mock('@/api/client', () => ({
 }))
 
 import { apiJson } from '@/api/client'
-import { getPairing, triggerPair } from '@/api/chat'
+import { getPairing, triggerPair, listSessions, createSession } from '@/api/chat'
 
 describe('chat pairing api', () => {
   beforeEach(() => {
@@ -44,5 +44,44 @@ describe('chat pairing api', () => {
     ;(apiJson as ReturnType<typeof vi.fn>).mockResolvedValue({ status: 'unpaired' })
     await getPairing('a b')
     expect(apiJson).toHaveBeenCalledWith('/api/v1/containers/a%20b/pairing/')
+  })
+})
+
+describe('chat sessions api', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('listSessions hits the sessions endpoint', async () => {
+    ;(apiJson as ReturnType<typeof vi.fn>).mockResolvedValue([])
+    await listSessions('demo')
+    expect(apiJson).toHaveBeenCalledWith('/api/v1/containers/demo/chat/sessions/')
+  })
+
+  it('createSession posts title to the sessions endpoint', async () => {
+    ;(apiJson as ReturnType<typeof vi.fn>).mockResolvedValue({
+      id: 1, session_key: 'sk-1', title: '文献综述', created_at: 'x',
+    })
+    const result = await createSession('demo', '文献综述')
+    expect(apiJson).toHaveBeenCalledWith('/api/v1/containers/demo/chat/sessions/', {
+      method: 'POST',
+      body: JSON.stringify({ title: '文献综述' }),
+    })
+    expect(result.session_key).toBe('sk-1')
+  })
+
+  it('createSession defaults title to empty', async () => {
+    ;(apiJson as ReturnType<typeof vi.fn>).mockResolvedValue({ id: 1, session_key: 'k', title: '', created_at: '' })
+    await createSession('demo')
+    expect(apiJson).toHaveBeenCalledWith('/api/v1/containers/demo/chat/sessions/', {
+      method: 'POST',
+      body: JSON.stringify({ title: '' }),
+    })
+  })
+
+  it('encodes the container name in the sessions URL', async () => {
+    ;(apiJson as ReturnType<typeof vi.fn>).mockResolvedValue([])
+    await listSessions('a b')
+    expect(apiJson).toHaveBeenCalledWith('/api/v1/containers/a%20b/chat/sessions/')
   })
 })

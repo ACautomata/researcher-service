@@ -50,3 +50,22 @@ class Pairing(models.Model):
 
     def __str__(self) -> str:
         return f'{self.instance.name}:{self.status}'
+
+
+class Session(models.Model):
+    """一个容器实例下的对话会话记账行（spec §9.4 会话列表 / §8.2 sessionKey）。
+
+    session_key 由后端生成（uuid hex，唯一），透传给网关；会话历史由网关按 session_key 维护。
+    title 为前端展示名（可空）。无 user_id——对齐 Instance 现状，按 instance 隔离；REST 受全局
+    IsAuthenticated 保护。
+    """
+
+    instance = models.ForeignKey(
+        Instance, on_delete=models.CASCADE, related_name='sessions'
+    )
+    session_key = models.CharField(max_length=64, unique=True)
+    title = models.CharField(max_length=128, blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self) -> str:
+        return f'{self.instance.name}:{self.title or self.session_key[:8]}'

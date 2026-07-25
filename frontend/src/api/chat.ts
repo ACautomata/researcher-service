@@ -20,3 +20,22 @@ export function triggerPair(name: string): Promise<PairingDTO> {
     body: JSON.stringify({}),
   })
 }
+
+// 会话列表（issue #41 / spec §9.4）：后端持久化，按容器隔离。
+export interface SessionDTO {
+  id: number
+  session_key: string
+  title: string
+  created_at: string
+}
+
+export function listSessions(name: string): Promise<SessionDTO[]> {
+  return apiJson<SessionDTO[]>(`/api/v1/containers/${encodeURIComponent(name)}/chat/sessions/`)
+}
+
+export function createSession(name: string, title = ''): Promise<SessionDTO> {
+  return apiJson<SessionDTO>(`/api/v1/containers/${encodeURIComponent(name)}/chat/sessions/`, {
+    method: 'POST',
+    body: JSON.stringify({ title }),
+  })
+}
