@@ -19,6 +19,24 @@ class ApprovalResolveSerializer(serializers.Serializer):
     decision = serializers.ChoiceField(choices=('approve', 'deny'))
 
 
+class SessionCreateSerializer(serializers.Serializer):
+    """会话新建入参（T2，issue #81）：label 可选（免标题新建，网关后续派生）。
+
+    对 request.data 强制 is_valid()：非对象 body（[]/"x"/123）→ 400（而非 .get AttributeError 500）；
+    非 str label → 400。trim 后空串视为未提供（→ None，网关派生标题）。
+    """
+
+    label = serializers.CharField(required=False, allow_blank=True, max_length=128, trim_whitespace=True)
+
+    def validate_label(self, value):
+        # 0 信任：只接受真正的 str 入参——int/bool/list 等经 CharField 会被静默 str() 强转，
+        # 违反「非法类型 → 400」边界；此处显式拒绝原始非 str 值。
+        raw = self.initial_data.get('label')
+        if raw is not None and not isinstance(raw, str):
+            raise serializers.ValidationError('label 须为字符串')
+        return value
+
+
 class PairingStatusSerializer(serializers.Serializer):
     """配对状态出参（read-only）。"""
 

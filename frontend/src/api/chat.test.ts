@@ -52,35 +52,36 @@ describe('chat sessions api', () => {
     vi.clearAllMocks()
   })
 
-  it('listSessions hits the sessions endpoint', async () => {
-    ;(apiJson as ReturnType<typeof vi.fn>).mockResolvedValue([])
-    await listSessions('demo')
+  it('listSessions hits the sessions endpoint and unwraps the envelope', async () => {
+    ;(apiJson as ReturnType<typeof vi.fn>).mockResolvedValue({
+      sessions: [{ session_key: 'sk-1', title: '文献综述', updated_at: '2026-07-20T10:00:00Z' }],
+    })
+    const result = await listSessions('demo')
     expect(apiJson).toHaveBeenCalledWith('/api/v1/containers/demo/chat/sessions/')
+    expect(result).toEqual([{ session_key: 'sk-1', title: '文献综述', updated_at: '2026-07-20T10:00:00Z' }])
   })
 
-  it('createSession posts title to the sessions endpoint', async () => {
-    ;(apiJson as ReturnType<typeof vi.fn>).mockResolvedValue({
-      id: 1, session_key: 'sk-1', title: '文献综述', created_at: 'x',
-    })
+  it('createSession posts label to the sessions endpoint and returns session_key', async () => {
+    ;(apiJson as ReturnType<typeof vi.fn>).mockResolvedValue({ session_key: 'sk-1' })
     const result = await createSession('demo', '文献综述')
     expect(apiJson).toHaveBeenCalledWith('/api/v1/containers/demo/chat/sessions/', {
       method: 'POST',
-      body: JSON.stringify({ title: '文献综述' }),
+      body: JSON.stringify({ label: '文献综述' }),
     })
     expect(result.session_key).toBe('sk-1')
   })
 
-  it('createSession defaults title to empty', async () => {
-    ;(apiJson as ReturnType<typeof vi.fn>).mockResolvedValue({ id: 1, session_key: 'k', title: '', created_at: '' })
+  it('createSession defaults label to empty', async () => {
+    ;(apiJson as ReturnType<typeof vi.fn>).mockResolvedValue({ session_key: 'k' })
     await createSession('demo')
     expect(apiJson).toHaveBeenCalledWith('/api/v1/containers/demo/chat/sessions/', {
       method: 'POST',
-      body: JSON.stringify({ title: '' }),
+      body: JSON.stringify({ label: '' }),
     })
   })
 
   it('encodes the container name in the sessions URL', async () => {
-    ;(apiJson as ReturnType<typeof vi.fn>).mockResolvedValue([])
+    ;(apiJson as ReturnType<typeof vi.fn>).mockResolvedValue({ sessions: [] })
     await listSessions('a b')
     expect(apiJson).toHaveBeenCalledWith('/api/v1/containers/a%20b/chat/sessions/')
   })

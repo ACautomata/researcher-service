@@ -215,6 +215,29 @@ def test_create_session_without_label(authed, instance, override_pool):
     assert resp.json()['session_key'] == 'sk-auto'
 
 
+@pytest.mark.parametrize('body', [
+    '[]',          # JSON 数组 → .get AttributeError 路径（旧实现 500）
+    '"label"',     # JSON 字符串
+    '123',         # JSON 数字
+])
+def test_create_session_non_object_body_400(authed, instance, override_pool, body):
+    """codex P1：非对象 body 必须 400（DRF serializer 边界），不得 500。"""
+    client = _FakeClient(created={'key': 'sk-new'})
+    override_pool(_FakePool(client))
+    resp = authed.post(LIST_URL, body, content_type='application/json')
+    assert resp.status_code == 400
+    assert client.calls == []  # 校验失败 → 不触发网关 RPC
+
+
+def test_create_session_non_string_label_400(authed, instance, override_pool):
+    """label 非 str（如 {"label": 42}）→ 400，不静默吞掉。"""
+    client = _FakeClient(created={'key': 'sk-new'})
+    override_pool(_FakePool(client))
+    resp = authed.post(LIST_URL, {'label': 42}, format='json')
+    assert resp.status_code == 400
+    assert client.calls == []
+
+
 # ---------------------------------------------------------------------------
 # DELETE sessions/<key>/ → sessions.delete
 # ---------------------------------------------------------------------------

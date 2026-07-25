@@ -24,7 +24,11 @@ from chat.models import Pairing
 from chat.pairing import PairingConcurrencyError, PairingFleet
 from chat.pairing_ws import PairingError, PairingRequired
 from chat.pool import ChatFleet, NotPaired
-from chat.serializers import ApprovalResolveSerializer, PairingStatusSerializer
+from chat.serializers import (
+    ApprovalResolveSerializer,
+    PairingStatusSerializer,
+    SessionCreateSerializer,
+)
 from containers.models import NAME_VALIDATOR, Instance
 
 logger = logging.getLogger(__name__)
@@ -234,7 +238,7 @@ class SessionListCreateView(_GatewaySessionsView):
             return err
         return Response({'sessions': _parse_sessions(payload)})
 
-    @extend_schema(request=None, responses={201: None})
+    @extend_schema(request=SessionCreateSerializer, responses={201: None})
     def post(self, request, name):
         inst, err = self._instance_or_error(name)
         if err is not None:
@@ -242,11 +246,22 @@ class SessionListCreateView(_GatewaySessionsView):
         client, err = self._client_or_error(inst, name)
         if err is not None:
             return err
-        label = (request.data or {}).get('label')
-        label = label.strip() if isinstance(label, str) else ''
+        # 0 信任：非对象 body（[]/"x"/123/None）一律 400，不进 serializer（避免 [] or {} → 误判合法）
+        if request.data is not None and not isinstance(request.data, dict):
+            return Response(
+                {'detail': '非法请求体：须为 JSON 对象'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        ser = SessionCreateSerializer(data=request.data or {})
+        if not ser.is_valid():
+            return Response(
+                {'detail': '非法请求体：label 须为字符串（可空）'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        label = ser.validated_data.get('label') or None
         key = uuid.uuid4().hex
         payload, err = self._rpc_or_502(
-            name, 'sessions.create', lambda: client.create_session(key, label=label or None))
+            name, 'sessions.create', lambda: client.create_session(key, label=label))
         if err is not None:
             return err
         return Response({'session_key': _parse_created_key(payload) or key},

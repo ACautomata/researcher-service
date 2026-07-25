@@ -21,23 +21,27 @@ export function triggerPair(name: string): Promise<PairingDTO> {
   })
 }
 
-// 会话列表（issue #41 / spec §9.4）：后端持久化，按容器隔离。
+// 会话列表（issue #81 / spec #76）：网关权威——后端零持久化，代理容器会话 RPC。
+// 出参会话项为网关派生：session_key + title（派生标题）+ updated_at（无 DB id/created_at）。
 export interface SessionDTO {
-  id: number
   session_key: string
   title: string
-  created_at: string
+  updated_at: string
 }
 
+// GET 返回 {sessions:[...]} 信封（留分页扩展位），此处解包为数组。
 export function listSessions(name: string): Promise<SessionDTO[]> {
-  return apiJson<SessionDTO[]>(`/api/v1/containers/${encodeURIComponent(name)}/chat/sessions/`)
+  return apiJson<{ sessions: SessionDTO[] }>(
+    `/api/v1/containers/${encodeURIComponent(name)}/chat/sessions/`,
+  ).then((r) => r.sessions)
 }
 
-export function createSession(name: string, title = ''): Promise<SessionDTO> {
-  return apiJson<SessionDTO>(`/api/v1/containers/${encodeURIComponent(name)}/chat/sessions/`, {
-    method: 'POST',
-    body: JSON.stringify({ title }),
-  })
+// POST 代理 sessions.create{key,label}：label 可空（网关后续派生标题），201 返回 {session_key}。
+export function createSession(name: string, label = ''): Promise<{ session_key: string }> {
+  return apiJson<{ session_key: string }>(
+    `/api/v1/containers/${encodeURIComponent(name)}/chat/sessions/`,
+    { method: 'POST', body: JSON.stringify({ label }) },
+  )
 }
 
 // 斜杠命令清单（issue #43 / spec §8.4）：后端代理网关 commands.list，按容器隔离。
