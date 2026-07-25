@@ -1,16 +1,52 @@
-# OpenClaw 单 main-agent 网关部署
+# deploy —— OpenClaw 容器编排契约与配置单一来源
 
-本目录是重构后承载 OpenClaw 网关的精简单服务 compose 栈（wayfinder #9 原型）。
-镜像 `acautomata/openclaw-docker-cn-im`，把 [ACautomata/researcher](https://github.com/ACautomata/researcher) 仓库作为容器 `~/.openclaw` 配置卷挂载。
+本目录承载多 OpenClaw 容器面板的**编排契约**：
 
-**配置单一来源在本仓库**：`deploy/openclaw.json` 是精简版配置，compose 把它单独 bind-mount 覆盖 researcher 的同名文件。researcher 仓库**不动**（其 workspace/、wiki/、skills/ 仍照常挂载）。
+- `openclaw.json` —— **全面板共享的配置单一来源 / 模板**。Django 控制面 `ConfigRenderer`
+  （`backend/containers/config_renderer.py`）以它为底渲染每容器配置，compose 栈也单独 bind-mount 它。
+- `docker-compose.yml` —— **单容器联调 / 模板栈**。用于本地手动起一个 OpenClaw 网关做协议联调；
+  多容器 fleet 由 Django 经 Docker SDK 直接编排（不走本 compose），但镜像、env、挂载契约与此保持一致。
+- `.env.example` —— 网关环境变量模板（`GATEWAY_TOKEN` / `LLM_API_KEY` 等）。
+
+镜像 `acautomata/openclaw-docker-cn-im`，把 [ACautomata/researcher](https://github.com/ACautomata/researcher)
+仓库作为容器 `~/.openclaw` 配置卷挂载。researcher 仓库**不动**（其 workspace/、wiki/、skills/ 仍照常挂载）。
+
+## 在新架构中的位置
+
+```
+Django 控制面 (backend/containers)
+    │ 1. 以 deploy/openclaw.json 为底渲染 instances/<name>/openclaw.json（强制 port/bind/token 占位）
+    │ 2. Docker SDK 挂 /var/run/docker.sock 建/删容器 openclaw-gw-<name>
+    │ 3. 共享只读模板 OPENCLAW_TEMPLATE_DIR（researcher 克隆）cp -a 预填充实例 home
+    ▼
+OpenClaw 容器 fleet（容器内统一 18789，宿主端口池 19000–19999 取最小空闲）
+```
+
+- **配置单一来源在本目录**：`deploy/openclaw.json` 是精简版配置。每容器渲染产物落到
+  `instances/<name>/openclaw.json`，bind-mount(ro) 覆盖进容器；`GATEWAY_TOKEN` 每容器独立生成、
+  经 env 注入，JSON 内仅 `${GATEWAY_TOKEN}` 占位（真值绝不落盘，spec §5.2 安全不变量）。
+- **端口池**：宿主侧池 `19000–19999`（避开被本单容器 compose 占用的 18789），创建取最小空闲、
+  删除容器即回收。容器内统一 18789，靠 Docker 网络命名空间隔离。
+- **docker.sock 安全**：控制面挂 `/var/run/docker.sock` = 等价 root（spec §5.4 明示风险）。本地/可信
+  部署可接受；生产应限制 Django 网络面或改用 rootless / 远程 TLS daemon。
+
+## 设备配对（chat 前置）
+
+OpenClaw 的 operator scope **不在 WS connect 握手声明授予**，而来自**设备配对记录**（Ed25519 签名
+challenge → 宿主 approve → deviceToken，spec §8.1 / issue #36 已证）。因此 Django 侧对话、审批、
+斜杠补全、工具事件都须先完成一次配对：
+
+- 后端 `PairingService`（`backend/chat/pairing.py`）驱动配对状态机，幂等复用已配对连接。
+- 触发/查询：`GET|POST /api/v1/chat/containers/<name>/pairing/`；`PAIRING_REQUIRED` 时返回 202 +
+  `pairing_request_id`，需在宿主侧 approve 后重试。
 
 ## 前置
 
 - Docker + compose plugin
-- 本仓库 FastAPI 后端经 `http://127.0.0.1:18789`（或同 network 的服务名）访问网关
+- 后端 Django 经容器宿主映射端口（池 `19000–19999`）+ 每容器 `GATEWAY_TOKEN` 访问网关；本单容器栈默认
+  收敛到 `127.0.0.1:18789`。
 
-## 步骤
+## 单容器联调步骤
 
 ```bash
 # 1. 克隆 researcher 配置仓库（本仓库根下；或设 RESEARCHER_DIR 指向它）
@@ -21,7 +57,7 @@ git clone https://github.com/ACautomata/researcher ./researcher
 cp deploy/.env.example deploy/.env
 #    填入 GATEWAY_TOKEN（强随机）与 LLM_API_KEY
 
-# 3. 启动
+# 3. 启动单容器网关（联调用）
 docker compose --env-file deploy/.env -f deploy/docker-compose.yml up -d
 
 # 4. 验证
@@ -31,26 +67,33 @@ curl http://127.0.0.1:18789/health
 
 ## 配置精简（不接任何消息 channel）
 
-`deploy/openclaw.json` 已是精简好的版本，compose 挂载覆盖 researcher 的同名文件。相对 researcher 原始配置的精简点（依据 `docs/research/r8-channels-plugins.md`）：
+`deploy/openclaw.json` 已是精简好的版本，相对 researcher 原始配置的精简点（依据
+`docs/research/r8-channels-plugins.md`）：
 
 - **删** `channels`（整个块）与 `bindings`：留 `feishu.enabled=true` 会因缺 `FEISHU_*` secret 启动失败。
 - **改** `plugins.slots.contextEngine`: `"lossless-claw"` → `"legacy"`；删 `plugins.entries.lossless-claw` / `plugins.installs.lossless-claw`。
 - **留** 顶层 `browser` + `plugins.entries.browser`、`plugins.entries.memory-core`、`plugins.entries.minimax`、`plugins.entries.memory-wiki`（enabled:true）。
-- **改** `gateway.bind` → `lan`：FastAPI 在宿主/邻容器经 18789 访问网关必需（`loopback` 时 Docker 端口映射不到容器内 loopback）。sync 全关后 env 覆盖不可靠，故直接写进 JSON。
+- **改** `gateway.bind` → `lan`：跨容器/宿主经 18789 访问网关必需（`loopback` 时 Docker 端口映射不到容器内 loopback）。sync 全关后 env 覆盖不可靠，故直接写进 JSON。
 - **改** `gateway.controlUi.allowInsecureAuth` → `false`：token 认证始终强制，关掉 Control UI 的 insecure-auth 降级路径。
 - **WS 注意**：本部署走 WebSocket（见 #13），HTTP `responses.enabled` 非必需。
 
 ## 关键点（来自 R6/R7/R8）
 
-- 挂载：`${RESEARCHER_DIR:-../researcher}` → `/home/node/.openclaw`（读写）；`deploy/openclaw.json` → `/home/node/.openclaw/openclaw.json`（覆盖）。gateway 读 `/home/node/.openclaw/openclaw.json`。**相对路径解析基准 = 本目录（deploy/）**，故仓库根的 researcher 默认写作 `../researcher`；若默认写成 `./researcher` 会解析成 `deploy/researcher`（不存在时 compose 自建空目录，导致 workspace/wiki/skills 全缺失）。
+- 挂载：`${RESEARCHER_DIR:-../researcher}` → `/home/node/.openclaw`（读写）；`deploy/openclaw.json` →
+  `/home/node/.openclaw/openclaw.json`（覆盖）。gateway 读 `/home/node/.openclaw/openclaw.json`。
+  **相对路径解析基准 = 本目录（deploy/）**，故仓库根的 researcher 默认写作 `../researcher`；若默认写成
+  `./researcher` 会解析成 `deploy/researcher`（不存在时 compose 自建空目录，导致 workspace/wiki/skills 全缺失）。
 - 4 个 sync flag 全关，init.sh 不覆写挂载的 openclaw.json、不明文写凭证。
 - `LLM_API_KEY` 经 env 注入、SecretRef 运行时读，勿写盘。
-- **token 认证始终强制**：WS 握手 `connect.params.auth.token` 必须带 `GATEWAY_TOKEN`。容器不设 `ALLOW_INSECURE_AUTH` env（该镜像也未读它），且 `deploy/openclaw.json` 已把 `controlUi.allowInsecureAuth` 置 `false`，彻底关闭 insecure-auth 降级路径。端口收敛到 `127.0.0.1`。
+- **token 认证始终强制**：WS 握手 `connect.params.auth.token` 必须带 `GATEWAY_TOKEN`。容器不设
+  `ALLOW_INSECURE_AUTH` env，且 `deploy/openclaw.json` 已把 `controlUi.allowInsecureAuth` 置 `false`，
+  彻底关闭 insecure-auth 降级路径。端口收敛到 `127.0.0.1`。
 - wiki 在 `/home/node/.openclaw/wiki/main`（memory-wiki 插件），宿主侧即 `./researcher/wiki/main`。
 - 运行时 `state/`、`logs/` 用匿名卷，避免污染宿主 researcher git 树。
 
-## 与本仓库后端的衔接
+## 与后端的衔接
 
-- 后端 `config.py` 的 `OPENCLAW_GATEWAY_URL` 指向 `http://127.0.0.1:18789`，`OPENCLAW_GATEWAY_TOKEN` = 上面的 `GATEWAY_TOKEN`。
-- `RESEARCHER_CONFIG_PATH`（默认 `./deploy/openclaw.json`，即本目录这份精简配置，env 可配）已加入 `config.py`。
-- ⏳ **apply-config 流程（写 `RESEARCHER_CONFIG_PATH` + `docker compose restart openclaw-gateway` 生效）属后续 #10 落地**；当前 `/openclaw/apply-config` 仍指向旧 `/root/.openclaw` 栈，本骨架阶段未迁移。
+- 控制面配置走 `settings.OPENCLAW_FLEET`（`backend/config/settings/base.py`）：`TEMPLATE_JSON` 默认指向
+  本目录 `deploy/openclaw.json`，`ROOT` 为 `instances/<name>/` 落盘根，`IMAGE`/`PORT_POOL_*` 控制镜像与端口池。
+- model provider 的 CRUD 经后端 `models` app 重渲染每容器 `openclaw.json` 生效（热加载，无需重启，
+  spec §7 / issue #47）。
