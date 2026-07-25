@@ -79,3 +79,36 @@ class TestDocsReflectNewArchitecture:
         """不得再把「本仓库后端」描述为 FastAPI（允许提及历史/迁移背景，但不得作为当前栈）。"""
         text = self._read(rel)
         assert 'FastAPI 后端' not in text, f'{rel} 仍以 FastAPI 描述本仓库后端'
+
+
+class TestAgentsMdMatchesNewLayout:
+    """AGENTS.md 是 agent 的权威指引（CLAUDE.md 软链源），收尾后须指向新 Django 布局（codex P1）。"""
+
+    def _read(self) -> str:
+        return (REPO_ROOT / 'AGENTS.md').read_text(encoding='utf-8')
+
+    def test_mentions_django(self) -> None:
+        assert 'Django' in self._read(), 'AGENTS.md 未提及 Django'
+
+    def test_uses_manage_py_entry(self) -> None:
+        assert 'manage.py' in self._read(), 'AGENTS.md 未以 manage.py 为后端入口'
+
+    @pytest.mark.parametrize(
+        'stale',
+        [
+            'python main.py',  # 旧 FastAPI 启动命令
+            'pip install -r requirements.txt',  # 旧根级依赖安装（现为 backend/requirements/{base,dev}.txt）
+            'pytest tests/',  # 旧根级测试目录（已删）
+        ],
+    )
+    def test_no_stale_old_commands(self, stale: str) -> None:
+        assert stale not in self._read(), f'AGENTS.md 仍引用已失效命令: {stale}'
+
+
+class TestGitignoreKeepsLegacyExclusions:
+    """旧 checkout 升级后本地仍可能残留 pipeline.db/uploads/.server_pass，须继续忽略防误提交（codex P2）。"""
+
+    @pytest.mark.parametrize('entry', ['pipeline.db', 'uploads/*', '.server_pass'])
+    def test_legacy_entry_kept(self, entry: str) -> None:
+        text = (REPO_ROOT / '.gitignore').read_text(encoding='utf-8')
+        assert entry in text, f'.gitignore 缺失 legacy 忽略项: {entry}'
