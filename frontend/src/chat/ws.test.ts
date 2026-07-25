@@ -120,7 +120,14 @@ describe('ChatWebSocket', () => {
     const onError = vi.fn()
     new ChatWebSocket('/ws/chat/', 'jwt', { onError })
     MockWS.last!.fireMessage({ type: 'error', runId: 'r1', message: '模型超时' })
-    expect(onError).toHaveBeenCalledWith('模型超时', 'r1')
+    expect(onError).toHaveBeenCalledWith('模型超时', 'r1', undefined)
+  })
+
+  it('dispatches approval id on a resolve-error frame (codex R2 P2)', () => {
+    const onError = vi.fn()
+    new ChatWebSocket('/ws/chat/', 'jwt', { onError })
+    MockWS.last!.fireMessage({ type: 'error', message: '审批回覆失败', id: 'ap-1' })
+    expect(onError).toHaveBeenCalledWith('审批回覆失败', undefined, 'ap-1')
   })
 
   it('fires onClose when underlying socket closes (断线)', () => {

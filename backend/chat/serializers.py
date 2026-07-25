@@ -8,6 +8,17 @@ from rest_framework import serializers
 from chat.models import Pairing, Session
 
 
+class ApprovalResolveSerializer(serializers.Serializer):
+    """审批回覆入参（T06，spec §8.2）：定义 OpenAPI request body（codex R2 P2）。
+
+    与 ApprovalResolveView 校验一致：id/kind 必填，decision 仅 approve/deny。
+    """
+
+    id = serializers.CharField()
+    kind = serializers.CharField()
+    decision = serializers.ChoiceField(choices=('approve', 'deny'))
+
+
 class PairingStatusSerializer(serializers.Serializer):
     """配对状态出参（read-only）。"""
 

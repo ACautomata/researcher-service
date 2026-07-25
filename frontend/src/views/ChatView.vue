@@ -23,7 +23,7 @@ interface ApprovalItem {
   command: string
   sessionKey: string | null
   status: 'pending' | 'resolving' | 'resolved' // pending 待处理 / resolving 已点击等回执 / resolved 已处理
-  decision: '' | 'approve' | 'deny'
+  decision: '' | 'approve' | 'deny' | 'unknown' // codex R2 P2：未知权威值不默认批准
   detailOpen: boolean
 }
 
@@ -55,6 +55,12 @@ const currentSessionTitle = computed(() => {
 
 // 是否有助手消息正在流式；并发 send 会让旧 streaming 消息永久卡住光标，故流式中禁发
 const streaming = computed(() => messages.value.some((m) => m.role === 'assistant' && m.streaming))
+
+// codex R2 P1：审批卡按 sessionKey **留存全部**（不丢弃非当前会话的），仅渲染时按当前会话过滤——
+// 切到该会话即可看到/回覆，agent 不再因切会话而永久丢失待审批卡。无 sessionKey（连接级）任何会话可见。
+const visibleApprovals = computed(() =>
+  approvals.value.filter((a) => !a.sessionKey || a.sessionKey === selectedSession.value),
+)
 
 // 切会话/容器时调用：旧 run（已 claim 或仍 pending）标记 abandoned，其迟到帧按 runId 丢弃
 function abandonActiveRun() {
@@ -137,7 +143,7 @@ function pickSession(key: string) {
   abandonActiveRun()
   selectedSession.value = key
   messages.value = []
-  approvals.value = [] // 切会话：清空审批卡（审查 #6）
+  // codex R2 P1：不清空审批卡——同容器其它会话的卡保留，渲染时按 selectedSession 过滤即可
   errorMsg.value = ''
 }
 
@@ -186,8 +192,13 @@ function connect() {
       if (pendingAbandonCount > 0) { pendingAbandonCount--; return }  // 孤儿 run 终态：计数丢弃
       if (pendingSend) { finalizeLast(); pendingSend = false }  // 当前 pending run 无 delta 收尾
     },
-    onError: (msg, runId) => {
+    onError: (msg, runId, approvalId) => {
       if (ws !== myWs) return
+      // codex R2 P2：resolve 失败的 error 帧带 approval id → 仅复位该卡（并发 resolve 不误复位其它在途卡）
+      if (approvalId) {
+        recoverPendingApprovals(approvalId)
+        return
+      }
       // 消费者级错误（无 runId，如「请先选择容器」）照常显示；run 级错误按 runId 过滤
       if (runId) {
         if (abandonedRunIds.has(runId)) { abandonedRunIds.delete(runId); return }
@@ -204,20 +215,17 @@ function connect() {
         activeRunId = ''
         pendingSend = false
       }
-      recoverPendingApprovals()  // resolve 失败（含连接断开）：恢复 resolving 卡片可重试（codex P2）
     },
     onClose: () => {
       if (ws !== myWs) return  // 旧 ws 的关闭（切容器）不报断线
       connecting.value = false
       disconnected.value = true  // 意外断线：禁用发送（codex P2 #4）
-      recoverPendingApprovals()  // 断线：恢复 resolving 卡片可重试
+      recoverPendingApprovals()  // 连接断开：恢复所有 resolving 卡片可重试
       if (!disposed) errorMsg.value = '连接已断开，请重试或切换容器'
     },
     onApproval: (card) => {
       if (ws !== myWs) return  // stale guard：旧 ws 的审批卡不污染新会话
-      // T06 审批卡（连接级，无 runId）：独立列表，按 sessionKey 归属过滤（codex P1）
-      // 无 sessionKey（连接级审批未必挂会话）或匹配当前会话 → 显示；属于其它会话 → 不显示
-      if (card.sessionKey && card.sessionKey !== selectedSession.value) return
+      // codex R2 P1：按 id 去重后**留存全部**（含其它会话的），仅渲染时按 sessionKey 过滤（visibleApprovals）
       if (approvals.value.some((a) => a.id === card.id)) return  // 幂等（start 补拉 + 实时推送去重）
       approvals.value.push({
         id: card.id,
@@ -235,7 +243,8 @@ function connect() {
       const a = approvals.value.find((x) => x.id === id)
       if (a) {
         a.status = 'resolved'
-        a.decision = decision === 'deny' ? 'deny' : 'approve'
+        // codex R2 P2：仅识别 approve/deny，其它权威值（expired/rejected 等）显示「未知」，不默认批准
+        a.decision = decision === 'approve' ? 'approve' : decision === 'deny' ? 'deny' : 'unknown'
       }
     },
   })
@@ -252,10 +261,11 @@ function resolveApproval(a: ApprovalItem, decision: 'approve' | 'deny') {
   ws.resolve(a.id, a.kind ?? 'exec', decision)
 }
 
-// resolve 失败（error 帧）：恢复 resolving 卡片为 pending，按钮可重试（codex P2）
-function recoverPendingApprovals() {
+// resolve 失败（带 approval id 的 error 帧）或断线（无 id → 全部）：恢复 resolving 卡片为 pending 可重试
+// （codex R2 P2：仅复位匹配卡，不误复位并发在途的其它卡）
+function recoverPendingApprovals(id?: string) {
   for (const a of approvals.value) {
-    if (a.status === 'resolving') a.status = 'pending'
+    if (a.status === 'resolving' && (id === undefined || a.id === id)) a.status = 'pending'
   }
 }
 
@@ -334,7 +344,7 @@ defineExpose({ selectContainer, send, newSession })
              拆出 messages 是为不破坏流式锚定/finalizeLast（审查 #5），并可独立按 sessionKey 过滤、
              随会话/容器切换清空（codex P1 / 审查 #6）。 -->
         <div
-          v-for="a in approvals"
+          v-for="a in visibleApprovals"
           :key="a.id"
           class="approval"
           :class="{ resolved: a.status === 'resolved' }"
@@ -343,7 +353,7 @@ defineExpose({ selectContainer, send, newSession })
           <div class="a-head">
             ⚠️ 请求提升权限
             <span v-if="a.status === 'resolved'" class="resolved-tag" :class="a.decision">
-              {{ a.decision === 'deny' ? '已拒绝' : '已批准' }}
+              {{ a.decision === 'approve' ? '已批准' : a.decision === 'deny' ? '已拒绝' : '未知' }}
             </span>
           </div>
           <div class="a-sub">{{ approvalSubtitle(a) }}</div>
@@ -409,6 +419,7 @@ defineExpose({ selectContainer, send, newSession })
 .approval .a-head { display: flex; align-items: center; gap: 8px; color: var(--el-color-warning); font-weight: 600; font-size: 13px; margin-bottom: 6px; }
 .approval .resolved-tag { margin-left: auto; font-size: 11.5px; color: var(--el-color-success); font-weight: 600; }
 .approval .resolved-tag.deny { color: var(--el-color-danger); }
+.approval .resolved-tag.unknown { color: var(--el-text-color-secondary); }
 .approval .a-sub { color: var(--el-text-color-secondary); font-size: 13px; }
 .approval .a-cmd { font-family: ui-monospace, monospace; background: var(--el-fill-color-darker); border: 1px solid var(--el-border-color); border-radius: 7px; padding: 8px 10px; margin: 8px 0; font-size: 12.5px; white-space: pre-wrap; word-break: break-all; }
 .approval .a-detail { font-size: 11px; color: var(--el-text-color-secondary); margin-bottom: 6px; }

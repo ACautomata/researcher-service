@@ -62,6 +62,10 @@ class FakeChatClient:
         self.resolved.append((approval_id, kind, decision))
         return self.resolve_payload
 
+    async def broadcast_approval_resolved(self, approval_id, decision):
+        # 与真实 client 一致：fan-out approvalResolved 到全部订阅者（codex R2 P2 副本收敛）
+        await self.emit_approval({'type': 'approvalResolved', 'id': approval_id, 'decision': decision})
+
     async def list_pending_approvals(self):
         return list(self.pending)
 
@@ -308,10 +312,36 @@ async def test_resolve_calls_client_and_echoes_authoritative_decision(override_p
     await comm.send_json_to({'type': 'start', 'container': 'demo'})
     await comm.receive_json_from()  # ready
     await comm.send_json_to({'type': 'resolve', 'id': 'ap-1', 'kind': 'exec', 'decision': 'approve'})
-    resp = await comm.receive_json_from()
+    resp = await comm.receive_json_from()  # 直接回执
     assert resp == {'type': 'approvalResolved', 'id': 'ap-1', 'decision': 'deny'}
+    resp2 = await comm.receive_json_from()  # codex R2 P2：fan-out 广播（本 consumer 亦收，幂等）
+    assert resp2 == {'type': 'approvalResolved', 'id': 'ap-1', 'decision': 'deny'}
     assert fake_client.resolved == [('ap-1', 'exec', 'approve')]
     await comm.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_resolve_broadcasts_authoritative_to_peer_consumer(override_pool, instance, fake_client):
+    """codex R2 P2：A resolve 的权威结果 fan-out 给共享 client 的 B，B 的陈旧卡一致收敛。"""
+    fake_client.resolve_payload = {'id': 'ap-1', 'decision': 'approve'}
+    comm_a = await _connect_authed('alice')
+    await comm_a.connect()
+    await comm_a.send_json_to({'type': 'start', 'container': 'demo'})
+    await comm_a.receive_json_from()  # A ready
+    comm_b = await _connect_authed('bob')
+    await comm_b.connect()
+    await comm_b.send_json_to({'type': 'start', 'container': 'demo'})
+    await comm_b.receive_json_from()  # B ready
+    # A 提交 resolve → A 收直接回执 + 广播；B 收广播（收敛）
+    await comm_a.send_json_to({'type': 'resolve', 'id': 'ap-1', 'kind': 'exec', 'decision': 'approve'})
+    a1 = await comm_a.receive_json_from()  # 直接回执
+    a2 = await comm_a.receive_json_from()  # 广播
+    b1 = await comm_b.receive_json_from()  # 对等端收广播
+    assert a1 == {'type': 'approvalResolved', 'id': 'ap-1', 'decision': 'approve'}
+    assert a2 == {'type': 'approvalResolved', 'id': 'ap-1', 'decision': 'approve'}
+    assert b1 == {'type': 'approvalResolved', 'id': 'ap-1', 'decision': 'approve'}
+    await comm_a.disconnect()
+    await comm_b.disconnect()
 
 
 @pytest.mark.asyncio
@@ -351,6 +381,7 @@ async def test_resolve_failure_sends_error(override_pool, instance, fake_client)
     await comm.send_json_to({'type': 'resolve', 'id': 'ap-1', 'kind': 'exec', 'decision': 'approve'})
     resp = await comm.receive_json_from()
     assert resp['type'] == 'error'
+    assert resp['id'] == 'ap-1'  # codex R2 P2：error 帧带 approval id，前端仅复位该卡
     await comm.disconnect()
 
 

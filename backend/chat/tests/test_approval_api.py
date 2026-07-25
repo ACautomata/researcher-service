@@ -44,15 +44,19 @@ def instance(db):
 
 
 class _FakeClient:
-    """记录 resolve_approval 的 client 替身。"""
+    """记录 resolve_approval / broadcast_approval_resolved 的 client 替身。"""
 
     def __init__(self, payload=None):
         self.resolved = []
+        self.broadcasts = []  # (approval_id, decision)
         self._payload = payload if payload is not None else {}
 
     async def resolve_approval(self, approval_id, kind, decision):
         self.resolved.append((approval_id, kind, decision))
         return self._payload
+
+    async def broadcast_approval_resolved(self, approval_id, decision):
+        self.broadcasts.append((approval_id, decision))
 
 
 class _FakePool:
@@ -92,6 +96,15 @@ def test_resolve_returns_authoritative_decision(authed, instance, override_pool)
     resp = authed.post(URL, {'id': 'ap-1', 'kind': 'exec', 'decision': 'approve'}, format='json')
     assert resp.status_code == 200
     assert resp.json()['decision'] == 'deny'  # 请求 approve，权威记录 deny
+
+
+def test_resolve_broadcasts_authoritative_to_ws_subscribers(authed, instance, override_pool):
+    """codex R2 P2：REST 路径的权威回执经 pool client fan-out 给 WS 订阅者（副本收敛）。"""
+    client = _FakeClient(payload={'id': 'ap-1', 'decision': 'deny'})
+    override_pool(_FakePool(client))
+    resp = authed.post(URL, {'id': 'ap-1', 'kind': 'exec', 'decision': 'approve'}, format='json')
+    assert resp.status_code == 200
+    assert client.broadcasts == [('ap-1', 'deny')]  # 权威 decision fan-out 给 WS 订阅者
 
 
 def test_resolve_missing_field_400(authed, instance, override_pool):

@@ -24,13 +24,10 @@ from chat.models import Pairing, Session
 from chat.pairing import PairingConcurrencyError, PairingFleet
 from chat.pairing_ws import PairingError, PairingRequired
 from chat.pool import ChatFleet, NotPaired
-from chat.serializers import PairingStatusSerializer, SessionSerializer
+from chat.serializers import ApprovalResolveSerializer, PairingStatusSerializer, SessionSerializer
 from containers.models import NAME_VALIDATOR, Instance
 
 logger = logging.getLogger(__name__)
-
-# T06 decision 合法取值（前端只发这两个；网关完整取值集合待实测，r26:79）
-_APPROVAL_DECISIONS = ('approve', 'deny')
 
 
 class _InvalidName(Exception):
@@ -172,21 +169,21 @@ class ApprovalResolveView(APIView):
             raise Http404
         return inst
 
-    @extend_schema(request=None, responses={200: None})
+    @extend_schema(request=ApprovalResolveSerializer, responses={200: None})
     def post(self, request, name):
         try:
             inst = self._get_instance(name)
         except _InvalidName:
             return Response({'detail': '非法 name'}, status=status.HTTP_400_BAD_REQUEST)
-        data = request.data or {}
-        approval_id = str(data.get('id') or '')
-        kind = str(data.get('kind') or '')
-        decision = str(data.get('decision') or '')
-        if not approval_id or not kind or decision not in _APPROVAL_DECISIONS:
+        ser = ApprovalResolveSerializer(data=request.data or {})
+        if not ser.is_valid():
             return Response(
                 {'detail': '缺少 id/kind，或 decision 非法（须为 approve/deny）'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        approval_id = ser.validated_data['id']
+        kind = ser.validated_data['kind']
+        decision = ser.validated_data['decision']
         try:
             client = async_to_sync(ChatFleet.get().get_or_create)(inst)
         except NotPaired as e:
@@ -212,4 +209,10 @@ class ApprovalResolveView(APIView):
             )
         # first-answer-wins：以网关权威记录的 decision 为准（可能与请求不同，codex P1）
         authoritative = (payload or {}).get('decision') or decision
+        # codex R2 P2：REST 路径的权威回执也经 pool client fan-out 给 WS 订阅者，各渲染副本一致收敛；
+        # 失败（无订阅者/连接已断）不影响已成功的 REST 回执。
+        try:
+            async_to_sync(client.broadcast_approval_resolved)(approval_id, authoritative)
+        except Exception:
+            logger.debug('approval.resolve broadcast to subscribers failed for %s', name)
         return Response({'ok': True, 'id': approval_id, 'decision': authoritative})

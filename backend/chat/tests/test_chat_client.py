@@ -387,7 +387,7 @@ async def test_resolve_approval_timeout_raises():
 
 @pytest.mark.asyncio
 async def test_list_pending_approvals_translates_cards():
-    """codex P2：start 补拉——发 approval.list，把响应项翻译成审批卡帧列表（best-effort）。"""
+    """codex P2：start 补拉——发 approval.get（待实测校准，codex R2 P1），响应项翻译成审批卡帧。"""
     t = FakeChatTransport(list_payload={
         'approvals': [
             {'id': 'ap-1', 'kind': 'exec', 'systemRunPlan': {'rawCommand': 'cmd1', 'sessionKey': 's1'}},
@@ -401,16 +401,50 @@ async def test_list_pending_approvals_translates_cards():
         {'type': 'approval', 'id': 'ap-1', 'kind': 'exec', 'command': 'cmd1', 'sessionKey': 's1'},
         {'type': 'approval', 'id': 'ap-2', 'kind': 'exec', 'command': 'cmd2', 'sessionKey': None},
     ]
-    req = next(f for f in t.sent if f.get('method') == 'approval.list')
+    req = next(f for f in t.sent if f.get('method') == 'approval.get')
     assert req['type'] == 'req'
     await c.aclose()
 
 
 @pytest.mark.asyncio
+async def test_list_pending_approvals_single_approval_key_tolerated():
+    """approval.get 响应用单项 approval 键（待实测的另一种形态）→ 翻译成单卡列表。"""
+    t = FakeChatTransport(list_payload={'approval': {'id': 'ap-9', 'command': 'cmd'}})
+    c = OpenClawChatClient(URL, 'dt', transport=t)
+    await c.connect()
+    cards = await c.list_pending_approvals()
+    assert cards == [{'type': 'approval', 'id': 'ap-9', 'kind': 'exec', 'command': 'cmd', 'sessionKey': None}]
+    await c.aclose()
+
+
+@pytest.mark.asyncio
 async def test_list_pending_approvals_empty_or_malformed_tolerated():
-    """approval.list 响应缺 approvals 键/非列表 → 返回空列表（best-effort，不崩）。"""
+    """approval.get 响应缺 approvals/approval 键或非列表 → 返回空列表（best-effort，不崩）。"""
     t = FakeChatTransport(list_payload={})
     c = OpenClawChatClient(URL, 'dt', transport=t)
     await c.connect()
     assert await c.list_pending_approvals() == []
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_broadcast_approval_resolved_fans_out_to_all_subscribers():
+    """codex R2 P2：broadcast_approval_resolved 把权威回执 fan-out 到全部订阅者（副本一致收敛）。"""
+    t = FakeChatTransport()
+    c = OpenClawChatClient(URL, 'dt', transport=t)
+    await c.connect()
+    got_a, got_b = [], []
+
+    async def sub_a(frame):
+        got_a.append(frame)
+
+    async def sub_b(frame):
+        got_b.append(frame)
+
+    c.add_approval_subscriber(sub_a)
+    c.add_approval_subscriber(sub_b)
+    await c.broadcast_approval_resolved('ap-1', 'deny')
+    expected = {'type': 'approvalResolved', 'id': 'ap-1', 'decision': 'deny'}
+    assert got_a == [expected]
+    assert got_b == [expected]
     await c.aclose()

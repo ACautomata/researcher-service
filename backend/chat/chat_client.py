@@ -84,6 +84,23 @@ class OpenClawChatClient:
         if cb in self._approval_subscribers:
             self._approval_subscribers.remove(cb)
 
+    async def _fanout_approval(self, frame: dict) -> None:
+        """把一帧连接级审批帧 fan-out 到所有订阅者；隔离单订阅者回调失败（不杀 recv loop / 不互伤）。"""
+        for cb in list(self._approval_subscribers):
+            try:
+                await cb(frame)
+            except Exception:
+                pass
+
+    async def broadcast_approval_resolved(self, approval_id: str, decision: str) -> None:
+        """把一次权威 resolve 结果 fan-out 到全部订阅者（codex R2 P2）：共享 client 的各 consumer 卡片一致收敛。
+
+        仅广播**真实发生**的 resolve 回执（权威 decision），不伪造网关 resolved 事件；REST 路径经
+        pool client 调本方法，WS 路径由 consumer 在 resolve 成功后调，保证所有渲染副本同步落定。
+        """
+        await self._fanout_approval({'type': 'approvalResolved', 'id': approval_id, 'decision': decision})
+
+
     @property
     def dead(self) -> bool:
         """连接是否已不可用（recv loop 退出或被显式关闭）；pool 据此不复用。"""
@@ -156,11 +173,7 @@ class OpenClawChatClient:
             for translated in frames:
                 if translated.get('type') != 'approval':
                     continue
-                for cb in list(self._approval_subscribers):
-                    try:
-                        await cb(translated)
-                    except Exception:
-                        pass  # 隔离单订阅者回调失败，不影响其他订阅者 / 不杀 recv loop
+                await self._fanout_approval(translated)
             return
         cb = self._routes.get(run_id)
         if cb is None:
@@ -235,18 +248,22 @@ class OpenClawChatClient:
         return payload or {}
 
     async def list_pending_approvals(self) -> list[dict]:
-        """查询网关当前待审批列表（codex P2 断线恢复）：发 approval.list，翻译成审批卡帧列表。
+        """查询网关当前待审批列表（codex P2 断线恢复），翻译成审批卡帧列表。
 
-        best-effort：响应缺 approvals 键/非列表/某项无 id 均容错（payload schema 待实测），
-        绝不抛异常打断 consumer 的 ready 流程。复用 _approval_card 单项翻译（kind 从事件族派生
-        此处无事件名，按 payload.kind 或缺省 exec）。
+        best-effort：绝不抛异常打断 consumer 的 ready 流程。复用 _approval_card 单项翻译（kind 从事件族
+        派生，此处无事件名，按 payload.kind 或缺省 exec）。
+
+        方法名**待实测校准**（codex R2 P1 / issue 验收③）：r26 §1 表明 `approval` 类型无关族仅文档化
+        `get`/`resolve`，**无 `approval.list`**；exec/plugin 族有 `.list` 但双查合并会重复（同一审批按
+        exec+plugin 各返一次）。故用 `approval.get` 探查持久化待审批集合，响应键兼容 `approvals`（列表）
+        与 `approval`（单项）；若实测表明须用 exec/plugin 分查或另一方法名，按实测改此处与 fakes。
         """
         if self._ws is None:
             return []
         req_id = uuid.uuid4().hex
         fut = asyncio.get_running_loop().create_future()
         self._pending_resolves[req_id] = fut
-        frame = {'type': 'req', 'id': req_id, 'method': 'approval.list', 'params': {}}
+        frame = {'type': 'req', 'id': req_id, 'method': 'approval.get', 'params': {}}
         try:
             await self._ws.send(json.dumps(frame))
             payload = await asyncio.wait_for(fut, timeout=self._ack_timeout)
@@ -254,6 +271,9 @@ class OpenClawChatClient:
             self._pending_resolves.pop(req_id, None)
             return []
         items = (payload or {}).get('approvals')
+        if items is None:
+            single = (payload or {}).get('approval')
+            items = [single] if isinstance(single, dict) else []
         if not isinstance(items, list):
             return []
         cards = []

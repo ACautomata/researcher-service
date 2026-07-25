@@ -8,7 +8,7 @@ export type ChatFrame =
   | { type: 'ready'; container: string }
   | { type: 'text'; runId: string; delta: string; replace?: boolean }
   | { type: 'done'; runId: string }
-  | { type: 'error'; runId?: string; message: string }
+  | { type: 'error'; runId?: string; message: string; id?: string }
   | { type: 'approval'; id: string; kind: string; command: string; sessionKey: string | null }
   | { type: 'approvalResolved'; id: string; decision: string }
 
@@ -24,7 +24,7 @@ export interface ChatHandlers {
   onReady?: (container: string) => void
   onText?: (runId: string, delta: string, replace?: boolean) => void
   onDone?: (runId: string) => void
-  onError?: (message: string, runId?: string) => void
+  onError?: (message: string, runId?: string, approvalId?: string) => void
   onClose?: () => void
   onApproval?: (card: ApprovalCard) => void
   onApprovalResolved?: (id: string, decision: string) => void
@@ -102,7 +102,7 @@ export class ChatWebSocket {
         this.handlers.onDone?.(frame.runId)
         break
       case 'error':
-        this.handlers.onError?.(frame.message, frame.runId)
+        this.handlers.onError?.(frame.message, frame.runId, frame.id)
         break
       case 'approval':
         this.handlers.onApproval?.({

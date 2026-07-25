@@ -89,12 +89,20 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
         try:
             payload = await self._client.resolve_approval(approval_id, kind, decision)
         except Exception:
-            # 网关拒绝（缺 operator.approvals 等）/连接已断：发 error 帧，不传播导致 WS 关闭
-            await self.send_json({'type': 'error', 'message': '审批回覆失败，请稍后重试'})
+            # 网关拒绝（缺 operator.approvals 等）/连接已断：error 帧带 approval id，
+            # 前端仅复位该卡（codex R2 P2，并发 resolve 不误复位其它在途卡）
+            await self.send_json({'type': 'error', 'message': '审批回覆失败，请稍后重试', 'id': approval_id})
             return
         # 回执用网关权威 decision（first-answer-wins，可能与请求不同，codex P1）
         authoritative = (payload or {}).get('decision') or decision
-        await self.send_json({'type': 'approvalResolved', 'id': approval_id, 'decision': authoritative})
+        frame = {'type': 'approvalResolved', 'id': approval_id, 'decision': authoritative}
+        await self.send_json(frame)
+        # codex R2 P2：把权威结果 fan-out 给共享 client 的其它 consumer（含本 consumer 幂等），
+        # 各渲染副本一致收敛（对等端不再停留可点的陈旧卡）。失败不影响已回执。
+        try:
+            await self._client.broadcast_approval_resolved(approval_id, authoritative)
+        except Exception:
+            pass
 
     async def _handle_send(self, content):
         if self._client is None:
