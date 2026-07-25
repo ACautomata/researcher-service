@@ -84,3 +84,7 @@ class ContainerRuntime(Protocol):
     def remove(self, name: str) -> None:
         """删除容器（连匿名卷，force）；容器不存在则幂等。"""
         ...
+
+    def exec_in_container(self, name: str, cmd: list[str]) -> None:
+        """在运行中的实例容器内执行命令（如 wiki compile）；容器不存在则幂等。"""
+        ...

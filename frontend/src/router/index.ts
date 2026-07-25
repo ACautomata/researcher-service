@@ -4,6 +4,7 @@ import { useAuthStore } from '@/stores/auth'
 import LoginView from '@/views/LoginView.vue'
 import ContainersView from '@/views/ContainersView.vue'
 import ChatView from '@/views/ChatView.vue'
+import WikiView from '@/views/WikiView.vue'
 
 const routes: RouteRecordRaw[] = [
   { path: '/login', name: 'login', component: LoginView, meta: { public: true } },
@@ -17,6 +18,12 @@ const routes: RouteRecordRaw[] = [
     path: '/chat',
     name: 'chat',
     component: ChatView,
+    meta: { requiresAuth: true },
+  },
+  {
+    path: '/wiki',
+    name: 'wiki',
+    component: WikiView,
     meta: { requiresAuth: true },
   },
 ]

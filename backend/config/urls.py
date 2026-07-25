@@ -30,4 +30,6 @@ urlpatterns = [
     path('api/v1/containers/', include('containers.urls')),
     # chat app 子资源（配对）：/api/v1/containers/<name>/pairing/
     path('api/v1/', include('chat.urls')),
+    # wiki app 子资源：/api/v1/containers/<name>/wiki/{tree,page,graph}
+    path('api/v1/containers/<str:name>/wiki/', include('wiki.urls')),
 ]
