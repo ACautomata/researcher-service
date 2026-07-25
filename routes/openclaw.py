@@ -3,6 +3,7 @@ import json
 import uuid
 import asyncio
 import os
+import re
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Request, Query, UploadFile, File, Form
@@ -390,6 +391,9 @@ async def openclaw_sessions():
 # 不再单扫 domains。frontmatter 兼容插件官方与 researcher 论文页双 schema。
 # 依据 docs/research/r7-wiki-read-mechanism.md。
 
+# Obsidian wikilink：[[target]] / [[target|alias]] / [[target#anchor]]（取 target 段）
+_WIKILINK_RE = re.compile(r"\[\[([^\]|#]+)(?:[|#][^\]]+)?\]\]")
+
 # 分类 → 子目录相对路径（name 对非 domain 类恒为 "_"）
 _WIKI_GROUP_DIRS = {
     "concept": "concepts",
@@ -404,11 +408,14 @@ _WIKI_SKIP_FILES = {"index.md", "AGENTS.md", "WIKI.md", "inbox.md"}
 
 
 def _parse_frontmatter(content: str) -> tuple:
-    """解析 YAML frontmatter（双 schema 平铺键），返回 (frontmatter, body)。
+    """解析 YAML frontmatter（双 schema 平铺键 + 块式列表），返回 (frontmatter, body)。
 
-    用简易逐行解析（标量 + 行内 [a, b] 列表），与既有实现一致、不引入 pyyaml 运行时依赖。
-    插件官方 pageType/id/title/status 与 researcher type/domain/paper.*/evidence_level
-    都是平铺标量键，均可解析。claims 等嵌套结构不解析（人读浏览页不需要）。
+    用简易逐行解析，与既有实现一致、不引入 pyyaml 运行时依赖。支持：
+    - 平铺标量键（插件官方 pageType/id/title 与 researcher type/paper.*/evidence_level）；
+    - 行内 [a, b] 列表；
+    - 块式列表（key: 换行后跟若干 "  - item"），ingest 对 source_pages/related_pages/tags
+      的实际写法（见 researcher 的 workspace AGENTS.md 页面模板）。
+    claims 等嵌套结构不解析（人读浏览页与图谱边都不需要）。
     """
     frontmatter = {}
     body = content
@@ -417,9 +424,20 @@ def _parse_frontmatter(content: str) -> tuple:
         if end > 0:
             yaml_text = content[3:end].strip()
             body = content[end + 3:].strip()
+            last_key = None
             for line in yaml_text.split("\n"):
-                line = line.rstrip()
-                if not line or line.startswith("#"):
+                stripped = line.strip()
+                # 块式列表项：依附于上一个 key
+                if stripped.startswith("- ") and last_key:
+                    item = stripped[2:].strip().strip('"').strip("'")
+                    cur = frontmatter.get(last_key)
+                    if not isinstance(cur, list):
+                        cur = [] if not cur else [cur]
+                        frontmatter[last_key] = cur
+                    if item:
+                        cur.append(item)
+                    continue
+                if not stripped or stripped.startswith("#"):
                     continue
                 if ":" in line:
                     key, _, val = line.partition(":")
@@ -430,6 +448,7 @@ def _parse_frontmatter(content: str) -> tuple:
                     else:
                         val = val.strip('"').strip("'")
                     frontmatter[key] = val
+                    last_key = key
     return frontmatter, body
 
 
@@ -443,8 +462,11 @@ def _page_title(fpath: str, fallback: str) -> str:
         return fallback
 
 
-def _scan_group_dir(dirpath: str, pages_out: list, id_prefix: str = "") -> None:
-    """扫描单个目录下的 .md 页面（跳过占位/索引），追加到 pages_out。"""
+def _scan_group_dir(dirpath: str, pages_out: list, id_prefix: str = "", kind: str = "") -> None:
+    """扫描单个目录下的 .md 页面（跳过占位/索引），追加到 pages_out。
+
+    kind 提供时写入每条 page（图谱构建需要按 kind/domain 归属解析与分组）。
+    """
     import os as _os
     if not _os.path.isdir(dirpath):
         return
@@ -453,12 +475,17 @@ def _scan_group_dir(dirpath: str, pages_out: list, id_prefix: str = "") -> None:
             continue
         fpath = _os.path.join(dirpath, pf)
         pid = id_prefix + pf[:-3]
-        pages_out.append({
+        page = {
             "id": pid,
             "filename": pf,
             "title": _page_title(fpath, pid),
             "path": fpath,
-        })
+        }
+        if kind:
+            page["kind"] = kind
+            # name：domain 类为 domain 名，其余 kind 恒为 "_"（与列表路由约定一致）
+            page["name"] = id_prefix.rstrip("/") if kind == "domain" else "_"
+        pages_out.append(page)
 
 
 @router.get("/wiki")
@@ -569,3 +596,165 @@ async def wiki_save(kind: str, name: str, page_id: str, body: WikiSaveBody):
         return {"success": True, "path": fpath}
     except Exception as e:
         raise HTTPException(500, f"保存失败: {str(e)}")
+
+
+# ── Wiki 图谱 ──────────────────────────────────────────
+# 全库预解析：遍历五核心分类 + domains 出节点，解析正文 [[wikilink]] 与 frontmatter
+# related/source_pages 出边，供前端 vis-network 渲染 ego/全局图。
+# 节点 id 用 kind/pageId 复合键（与前端 openWikiPaper 一致，点节点直接复用打开）。
+# 解析不到目标的链接归为 dangling 占位节点（前端渲 ghost），不产生幻觉页面。
+
+# frontmatter 里作为边来源的键 → 边类型（related_pages 为 ingest 真实键，related 为兼容别名）
+_WIKI_FM_EDGE_KEYS = {"related_pages": "related", "related": "related", "source_pages": "source_pages"}
+
+# 归一化 frontmatter 路径引用：剥掉 wiki/、domains/、papers/、methods/ 等目录段与 .md 后缀，
+# 留下可作为 page_id / slug 的末段（source_pages/related_pages 的真实值是 vault 相对路径，
+# 形如 wiki/domains/<d>/papers/<slug>.md）。
+def _graph_normalize_ref(raw: str) -> str:
+    s = str(raw).strip().strip('"').strip("'")
+    if s.endswith(".md"):
+        s = s[:-3]
+    s = s.replace("\\", "/").strip("/")
+    if "/" in s:
+        s = s.split("/")[-1]
+    return s
+
+
+def _graph_resolve_target(raw: str, pages: list, exact: dict, lower: dict, slug_lower: dict) -> str:
+    """把 wikilink / frontmatter 引用解析为节点 id；解析不到返回 None。
+
+    引用形似 "concept.example-topic" / "ml/attention-survey"（=page_id）、页 title，
+    或 vault 路径（wiki/domains/<d>/papers/<slug>.md）。先归一化取末段，再
+    精确（page_id → title）→ 大小写不敏感 → domain slug 末段匹配。
+    """
+    target = _graph_normalize_ref(raw)
+    if not target:
+        return None
+    if target in exact:
+        return exact[target]
+    tl = target.lower()
+    if tl in lower:
+        return lower[tl]
+    # domain slug 末段匹配（source_pages: [attention-survey] / 路径末段 → domain/ml/attention-survey）
+    return slug_lower.get(tl)
+
+
+def _build_wiki_graph(root: str) -> dict:
+    """遍历 wiki/main 全库构建图谱 {nodes, edges}。
+
+    nodes: [{id, kind, name, pageId, title}]（dangling 占位节点为 {id, title, dangling}）；
+    edges: [{from, to, type}]，type ∈ wikilink/related/source_pages。
+    """
+    import os as _os
+    pages = []
+    for kind, sub in _WIKI_GROUP_DIRS.items():
+        _scan_group_dir(_os.path.join(root, sub), pages, id_prefix="", kind=kind)
+    domains_dir = _os.path.join(root, "domains")
+    if _os.path.isdir(domains_dir):
+        for dname in sorted(_os.listdir(domains_dir)):
+            _scan_group_dir(_os.path.join(domains_dir, dname, "papers"), pages,
+                            id_prefix=f"{dname}/", kind="domain")
+
+    nodes = []
+    for p in pages:
+        nid = f"{p['kind']}/{p['id']}"
+        p["_nid"] = nid
+        nodes.append({"id": nid, "kind": p["kind"], "name": p["name"],
+                      "pageId": p["id"], "title": p["title"]})
+
+    exact, lower, slug_lower = {}, {}, {}
+    for p in pages:
+        exact[p["id"]] = p["_nid"]
+        exact[p["title"]] = p["_nid"]
+        lower[p["id"].lower()] = p["_nid"]
+        lower[p["title"].lower()] = p["_nid"]
+        if p["kind"] == "domain":
+            slug_lower[p["id"].split("/")[-1].lower()] = p["_nid"]
+
+    edges = []
+    dangling = {}
+    seen = set()
+
+    def _add_edge(src, tgt, etype):
+        key = (src, tgt, etype)
+        if key in seen:
+            return
+        seen.add(key)
+        edges.append({"from": src, "to": tgt, "type": etype})
+
+    for p in pages:
+        try:
+            content = open(p["path"], encoding="utf-8").read()
+        except Exception:
+            continue
+        fm, body = _parse_frontmatter(content)
+        # 正文 wikilink 边
+        for m in _WIKILINK_RE.finditer(body):
+            tgt = _graph_resolve_target(m.group(1), pages, exact, lower, slug_lower)
+            if tgt is None:
+                label = _graph_normalize_ref(m.group(1))
+                tgt = f"dangling/{label}"
+                if tgt not in dangling:
+                    dangling[tgt] = True
+                    nodes.append({"id": tgt, "title": label, "dangling": True})
+            _add_edge(p["_nid"], tgt, "wikilink")
+        # frontmatter related_pages / source_pages 边
+        for key, etype in _WIKI_FM_EDGE_KEYS.items():
+            val = fm.get(key)
+            if not val:
+                continue
+            items = val if isinstance(val, list) else [val]
+            for item in items:
+                tgt = _graph_resolve_target(str(item), pages, exact, lower, slug_lower)
+                if tgt:
+                    _add_edge(p["_nid"], tgt, etype)
+
+    return {"nodes": nodes, "edges": edges}
+
+
+# 进程内图谱缓存：按 vault 内所有 .md 的最新 mtime 失效。大库（AC「大库不卡」）下避免
+# 每请求全库逐页 open×2 + 正则重建；保存/新增页面后 mtime 变化即自动重建。
+_wiki_graph_cache: dict = {"sig": None, "graph": None}
+
+
+def _wiki_vault_signature(root: str) -> float:
+    """vault 内容签名 = 所有 .md 的 (路径, mtime) 集合哈希；变化即代表图谱需重建。"""
+    import os as _os
+    sig = []
+    for kind, sub in _WIKI_GROUP_DIRS.items():
+        d = _os.path.join(root, sub)
+        if _os.path.isdir(d):
+            for f in _os.listdir(d):
+                if f.endswith(".md"):
+                    fp = _os.path.join(d, f)
+                    sig.append((fp, _os.path.getmtime(fp)))
+    domains_dir = _os.path.join(root, "domains")
+    if _os.path.isdir(domains_dir):
+        for dname in sorted(_os.listdir(domains_dir)):
+            pd = _os.path.join(domains_dir, dname, "papers")
+            if _os.path.isdir(pd):
+                for f in _os.listdir(pd):
+                    if f.endswith(".md"):
+                        fp = _os.path.join(pd, f)
+                        sig.append((fp, _os.path.getmtime(fp)))
+    return hash(tuple(sig))
+
+
+@router.get("/wiki/graph")
+async def wiki_graph():
+    """全库预解析图谱：节点（kind/pageId 复合 id + kind/title）+ 边（from/to/type）。
+
+    供前端 vis-network 渲染：默认 ego 图（当前页 1–2 跳）、可切全局；dangling 节点渲 ghost。
+    结果按 vault mtime 签名做进程内缓存，内容变化自动失效。
+    """
+    import os as _os
+    root = RESEARCHER_WIKI_ROOT
+    if not _os.path.isdir(root):
+        return {"nodes": [], "edges": []}
+    sig = _wiki_vault_signature(root)
+    if _wiki_graph_cache["sig"] == sig and _wiki_graph_cache["graph"] is not None:
+        return _wiki_graph_cache["graph"]
+    graph = _build_wiki_graph(root)
+    _wiki_graph_cache["sig"] = sig
+    _wiki_graph_cache["graph"] = graph
+    return graph
