@@ -9,7 +9,12 @@ delta 增量按 runId 累积已发文本（_sent）：
   （r13:115-127 注明非前缀替换无法追加，需传播 replacement 语义）。
 - replace=true 无快照 → 退回 deltaText 增量（追加）。
 - 普通 delta → deltaText 增量（追加）。
-error 读 errorMessage/errorKind（网关字段，r13:118）。tool/approval/cot 等非 chat 事件、delta 的 message
+error 读 errorMessage/errorKind（网关字段，r13:118）。
+
+T06 权限审批（issue #42 / spec §8.2）：`exec.approval.requested` / `plugin.approval.requested` 是
+**连接级**事件（不挂 chat runId，r26:88）→ 翻译成 `{type:approval,id,kind,command}` 审批卡帧。
+payload 字段级 schema 官方未给全（标待实测）→ 取值链集中 `_approval_card`（systemRunPlan.rawCommand
+→ systemRunPlan.command → 顶层 command）。tool/cot 等非 chat/approval 事件、delta 的 message
 变体（非 replace 快照）MVP 不处理，返回空列表（由 test_event_translate 显式断言，非静默吞错）。
 终态（final/aborted/error）清理该 runId 的累积文本。
 """
@@ -17,6 +22,16 @@ from __future__ import annotations
 
 # delta state 下增量字段；replace=true + message 快照时改发 replace 帧（整段替换）。
 _DELTA_TEXT = 'deltaText'
+
+# T06 权限审批（issue #42 / spec §8.2 / r26 §1）：待审批事件名 → 前端审批卡契约。
+# exec/plugin 两族共用同一翻译；payload 字段级 schema 官方未给全（标待实测）→ 取值链集中 _approval_card 方法。
+_APPROVAL_REQUESTED_EVENTS = ('exec.approval.requested', 'plugin.approval.requested')
+
+# codex R3 P2（收窄）：网关在他端 operator / 其它 pool 连接 resolve 后广播 `plugin.approval.resolved`
+# （r26:51 文档已证事件名）。翻译为 approvalResolved 帧，让共享 client 的 peer 卡片随之收敛（不再停留可点
+# 的陈旧卡）。注意：①exec 族**无**对应 resolved 事件（仅 plugin 族有，r26:47-52）；②payload schema 待实测，
+# 无 id 则返回 None 跳过（不伪造）。本进程内 resolve 的主收敛路径仍是 consumer 的合成 fan-out，此为低风险补充。
+_APPROVAL_RESOLVED_EVENTS = ('plugin.approval.resolved',)
 
 
 class ChatEventTranslator:
@@ -26,9 +41,58 @@ class ChatEventTranslator:
         # runId → 已发文本累积；final 尾部补发 / replace 整段替换时用于求差集或覆盖
         self._sent: dict[str, str] = {}
 
+    @staticmethod
+    def _approval_card(event: str, payload: dict) -> dict | None:
+        """待审批事件 payload → 前端审批卡帧；无稳定审批 id 则返回 None（无法 resolve，不出卡）。
+
+        kind 取值（codex/审查 P1）：payload.kind 缺省时从事件名族派生（exec/plugin）——r26 §1 指出
+        kind 非文档字段，plugin 审批若一律回退 'exec' 会以错误 kind 回覆 approval.resolve（类型无关
+        审批对要求匹配 kind）。sessionKey 透传自 systemRunPlan（前端据此把审批归属到对应会话过滤）。
+        """
+        approval_id = payload.get('id')
+        if not approval_id:
+            return None
+        # command 取值链（待实测校准）：systemRunPlan.rawCommand → systemRunPlan.command → 顶层 command
+        run_plan = payload.get('systemRunPlan') or {}
+        command = run_plan.get('rawCommand') or run_plan.get('command') or payload.get('command') or ''
+        return {
+            'type': 'approval',
+            'id': approval_id,
+            'kind': payload.get('kind') or event.split('.')[0],  # decision 回覆需 id+kind+decision 三字段
+            'command': command,
+            'sessionKey': run_plan.get('sessionKey'),  # codex P1：归属会话；无则 None（前端按当前会话处理）
+        }
+
+    @staticmethod
+    def _approval_resolved(payload: dict) -> dict | None:
+        """网关 resolved 事件 payload → 前端 approvalResolved 帧；无 id 返回 None（不伪造，跳过）。
+
+        decision 取值（待实测）：payload.decision 缺省/未知时透传原值，前端仅识别 approve/deny、
+        其它显示「未知」（ChatView onApprovalResolved），不默认批准。
+        """
+        approval_id = payload.get('id')
+        if not approval_id:
+            return None
+        return {
+            'type': 'approvalResolved',
+            'id': approval_id,
+            'decision': payload.get('decision'),  # 透传权威值；未知由前端判 unknown
+        }
+
     def translate(self, frame: dict) -> list[dict]:
         """翻译一帧网关事件；不可翻译的返回空列表（交由调用方忽略）。"""
-        if frame.get('type') != 'event' or frame.get('event') != 'chat':
+        if frame.get('type') != 'event':
+            return []
+        # 审批事件是连接级广播（不挂 chat runId，r26:88）→ 单独翻译出卡，不进 chat 分支
+        event = frame.get('event')
+        if event in _APPROVAL_REQUESTED_EVENTS:
+            card = self._approval_card(event, frame.get('payload') or {})
+            return [card] if card else []
+        # 他端 resolve 后的网关 resolved 事件（codex R3 P2）→ approvalResolved 帧收敛 peer 卡
+        if event in _APPROVAL_RESOLVED_EVENTS:
+            resolved = self._approval_resolved(frame.get('payload') or {})
+            return [resolved] if resolved else []
+        if event != 'chat':
             return []
         payload = frame.get('payload') or {}
         run_id = payload.get('runId')

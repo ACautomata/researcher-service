@@ -231,3 +231,264 @@ async def test_send_message_times_out_when_ack_never_arrives():
         await c.send_message('s', 'm', on_event=on_event)
     assert c._pending_acks == {}
     await c.aclose()
+
+
+# ---- T06 权限审批（issue #42 / spec §8.2）----
+# 审批事件是连接级（无 runId）→ 走连接级审批订阅者集合，不进 runId 路由；
+# resolve_approval 发 approval.resolve 方法帧（id+kind+decision），有界等 res，返回权威 payload。
+
+
+@pytest.mark.asyncio
+async def test_approval_event_fans_out_to_all_subscribers():
+    """codex P1：多 consumer 共享同一 client 时，两个订阅者都收到审批卡（不互相覆盖）。"""
+    t = FakeChatTransport()
+    a_received, b_received = [], []
+
+    async def a_cb(frame):
+        a_received.append(frame)
+
+    async def b_cb(frame):
+        b_received.append(frame)
+
+    c = OpenClawChatClient(URL, 'dt', transport=t)
+    c.add_approval_subscriber(a_cb)
+    c.add_approval_subscriber(b_cb)
+    await c.connect()
+    t.push({'type': 'event', 'event': 'exec.approval.requested',
+            'payload': {'id': 'ap-1', 'kind': 'exec', 'systemRunPlan': {'rawCommand': 'rm -rf /tmp'}}})
+    await asyncio.sleep(0.05)
+    expected = [{'type': 'approval', 'id': 'ap-1', 'kind': 'exec', 'command': 'rm -rf /tmp', 'sessionKey': None}]
+    assert a_received == expected
+    assert b_received == expected
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_remove_subscriber_keeps_peer_subscribed():
+    """codex P1：一个 consumer disconnect 退订不应误伤仍活跃的 peer 订阅者。"""
+    t = FakeChatTransport()
+    a_received, b_received = [], []
+
+    async def a_cb(frame):
+        a_received.append(frame)
+
+    async def b_cb(frame):
+        b_received.append(frame)
+
+    c = OpenClawChatClient(URL, 'dt', transport=t)
+    c.add_approval_subscriber(a_cb)
+    c.add_approval_subscriber(b_cb)
+    await c.connect()
+    c.remove_approval_subscriber(a_cb)  # A 断开退订
+    t.push({'type': 'event', 'event': 'exec.approval.requested', 'payload': {'id': 'ap-2'}})
+    await asyncio.sleep(0.05)
+    assert a_received == []  # A 已退订，不再收
+    assert len(b_received) == 1  # B 仍活跃，照收
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_approval_event_not_routed_to_runid_handler():
+    """审批事件不应泄漏进 chat runId 的 on_event（它是连接级，r26:88）。"""
+    events = [
+        {'type': 'event', 'event': 'chat', 'payload': {'runId': 'r1', 'state': 'final'}},
+    ]
+    t = FakeChatTransport(ack_run_id='r1', events=events)
+    chat_received = []
+    approvals = []
+
+    async def on_event(frame):
+        chat_received.append(frame)
+
+    async def on_approval(frame):
+        approvals.append(frame)
+
+    c = OpenClawChatClient(URL, 'dt', transport=t)
+    c.add_approval_subscriber(on_approval)
+    await c.connect()
+    await c.send_message('s', 'm', on_event=on_event)
+    t.push({'type': 'event', 'event': 'exec.approval.requested', 'payload': {'id': 'ap-9'}})
+    await asyncio.sleep(0.1)
+    # chat run 只收到 done；审批卡走审批订阅者，不进 chat_received
+    assert all(f.get('type') != 'approval' for f in chat_received)
+    assert any(f.get('type') == 'done' for f in chat_received)
+    assert len(approvals) == 1
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_approval_event_dropped_when_no_subscriber():
+    """无订阅者（consumer 未 start）：审批事件被丢弃，不 crash recv loop。"""
+    t = FakeChatTransport()
+    c = OpenClawChatClient(URL, 'dt', transport=t)
+    await c.connect()
+    t.push({'type': 'event', 'event': 'exec.approval.requested', 'payload': {'id': 'ap-1'}})
+    await asyncio.sleep(0.05)
+    assert not c.dead  # recv loop 存活
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_subscriber_exception_does_not_block_peers():
+    """单订阅者回调抛异常被隔离，不影响同 client 其他订阅者。"""
+    t = FakeChatTransport()
+    b_received = []
+
+    async def boom(frame):
+        raise RuntimeError('boom')
+
+    async def b_cb(frame):
+        b_received.append(frame)
+
+    c = OpenClawChatClient(URL, 'dt', transport=t)
+    c.add_approval_subscriber(boom)
+    c.add_approval_subscriber(b_cb)
+    await c.connect()
+    t.push({'type': 'event', 'event': 'exec.approval.requested', 'payload': {'id': 'ap-1'}})
+    await asyncio.sleep(0.05)
+    assert len(b_received) == 1
+    assert not c.dead
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_resolve_approval_returns_authoritative_payload():
+    """codex P1：first-answer-wins —— resolve 返回网关权威 payload（可能与请求 decision 不同）。"""
+    t = FakeChatTransport(resolve_payload={'id': 'ap-1', 'decision': 'deny', 'decidedBy': 'other-op'})
+    c = OpenClawChatClient(URL, 'dt', transport=t)
+    await c.connect()
+    result = await c.resolve_approval('ap-1', 'exec', 'approve')  # 请求 approve，权威记录 deny
+    assert result == {'id': 'ap-1', 'decision': 'deny', 'decidedBy': 'other-op'}
+    rs = next(f for f in t.sent if f.get('method') == 'approval.resolve')
+    assert rs['params'] == {'id': 'ap-1', 'kind': 'exec', 'decision': 'approve'}
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_resolve_approval_gateway_reject_raises():
+    t = FakeChatTransport(resolve_error={'code': 'FORBIDDEN', 'message': 'missing scope operator.approvals'})
+    c = OpenClawChatClient(URL, 'dt', transport=t)
+    await c.connect()
+    with pytest.raises(ChatSendError) as exc:
+        await c.resolve_approval('ap-1', 'exec', 'deny')
+    assert 'operator.approvals' in str(exc.value)
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_resolve_approval_timeout_raises():
+    t = FakeChatTransport(suppress_ack=True)  # 不回 resolve res
+    c = OpenClawChatClient(URL, 'dt', transport=t, ack_timeout=0.1)
+    await c.connect()
+    with pytest.raises(ChatSendError):
+        await c.resolve_approval('ap-1', 'exec', 'approve')
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_list_pending_approvals_translates_cards():
+    """codex P2：start 补拉——发 exec.approval.list（文档已证方法名，codex R3 P1 收窄），响应项翻译成审批卡帧。"""
+    t = FakeChatTransport(list_payload={
+        'approvals': [
+            {'id': 'ap-1', 'kind': 'exec', 'systemRunPlan': {'rawCommand': 'cmd1', 'sessionKey': 's1'}},
+            {'id': 'ap-2', 'command': 'cmd2'},
+        ],
+    })
+    c = OpenClawChatClient(URL, 'dt', transport=t)
+    await c.connect()
+    cards = await c.list_pending_approvals()
+    assert cards == [
+        {'type': 'approval', 'id': 'ap-1', 'kind': 'exec', 'command': 'cmd1', 'sessionKey': 's1'},
+        {'type': 'approval', 'id': 'ap-2', 'kind': 'exec', 'command': 'cmd2', 'sessionKey': None},
+    ]
+    req = next(f for f in t.sent if f.get('method') == 'exec.approval.list')
+    assert req['type'] == 'req'
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_list_pending_approvals_single_approval_key_tolerated():
+    """approval.get 响应用单项 approval 键（待实测的另一种形态）→ 翻译成单卡列表。"""
+    t = FakeChatTransport(list_payload={'approval': {'id': 'ap-9', 'command': 'cmd'}})
+    c = OpenClawChatClient(URL, 'dt', transport=t)
+    await c.connect()
+    cards = await c.list_pending_approvals()
+    assert cards == [{'type': 'approval', 'id': 'ap-9', 'kind': 'exec', 'command': 'cmd', 'sessionKey': None}]
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_list_pending_approvals_empty_or_malformed_tolerated():
+    """approval.get 响应缺 approvals/approval 键或非列表 → 返回空列表（best-effort，不崩）。"""
+    t = FakeChatTransport(list_payload={})
+    c = OpenClawChatClient(URL, 'dt', transport=t)
+    await c.connect()
+    assert await c.list_pending_approvals() == []
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_broadcast_approval_resolved_fans_out_to_all_subscribers():
+    """codex R2 P2：broadcast_approval_resolved 把权威回执 fan-out 到全部订阅者（副本一致收敛）。"""
+    t = FakeChatTransport()
+    c = OpenClawChatClient(URL, 'dt', transport=t)
+    await c.connect()
+    got_a, got_b = [], []
+
+    async def sub_a(frame):
+        got_a.append(frame)
+
+    async def sub_b(frame):
+        got_b.append(frame)
+
+    c.add_approval_subscriber(sub_a)
+    c.add_approval_subscriber(sub_b)
+    await c.broadcast_approval_resolved('ap-1', 'deny')
+    expected = {'type': 'approvalResolved', 'id': 'ap-1', 'decision': 'deny'}
+    assert got_a == [expected]
+    assert got_b == [expected]
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_resolve_approval_send_failure_cleans_pending_future():
+    """codex R3 P2：死连接下 send 抛异常须清理 _pending_resolves，否则重试无限累积 future（内存泄漏）。"""
+    t = FakeChatTransport()
+    c = OpenClawChatClient(URL, 'dt', transport=t)
+    await c.connect()
+
+    class _DeadWs:
+        async def send(self, data):
+            raise ConnectionError('socket dead')
+
+    c._ws = _DeadWs()  # 模拟 _ws 非 None 但已死（recv loop 尚未标 dead）
+    for _ in range(3):  # 模拟多次重试
+        with pytest.raises(ConnectionError):
+            await c.resolve_approval('ap-1', 'exec', 'approve')
+    assert c._pending_resolves == {}  # 每次失败都清理,不泄漏
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_gateway_resolved_event_fans_out_to_subscribers():
+    """codex R3 P2：网关 plugin.approval.resolved 事件（他端回覆）→ 连接级 fan-out 给所有订阅者。"""
+    t = FakeChatTransport()
+    a_received, b_received = [], []
+
+    async def a_cb(frame):
+        a_received.append(frame)
+
+    async def b_cb(frame):
+        b_received.append(frame)
+
+    c = OpenClawChatClient(URL, 'dt', transport=t)
+    c.add_approval_subscriber(a_cb)
+    c.add_approval_subscriber(b_cb)
+    await c.connect()
+    t.push({'type': 'event', 'event': 'plugin.approval.resolved',
+            'payload': {'id': 'ap-1', 'decision': 'deny'}})
+    await asyncio.sleep(0.05)
+    expected = [{'type': 'approvalResolved', 'id': 'ap-1', 'decision': 'deny'}]
+    assert a_received == expected
+    assert b_received == expected
+    await c.aclose()

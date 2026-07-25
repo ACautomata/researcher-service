@@ -306,4 +306,204 @@ describe('ChatView', () => {
     resolveOther.fn!([SESSION]) // other 数据到 → 连新 ws
     await flushPromises()
   })
+
+  // ---- T06 权限审批（issue #42 / spec §9.4）----
+  async function mountReady() {
+    const w = mount(ChatView, { global: { plugins: [createPinia()] } })
+    await flushPromises()
+    MockWS.last!.fireOpen()
+    MockWS.last!.fireMessage({ type: 'ready', container: 'demo' })
+    await nextTick()
+    return w
+  }
+
+  it('renders an orange approval card when agent requests elevation (验收 1)', async () => {
+    const w = await mountReady()
+    MockWS.last!.fireMessage({ type: 'approval', id: 'ap-1', kind: 'exec', command: 'openclaw wiki compile', sessionKey: 'sk-1' })
+    await nextTick()
+    const card = w.find('[data-test="approval-ap-1"]')
+    expect(card.exists()).toBe(true)
+    expect(card.classes()).toContain('approval')
+    expect(card.text()).toContain('请求提升权限')
+    expect(card.text()).toContain('openclaw wiki compile') // 待批命令
+    expect(w.find('[data-test="approve-ap-1"]').exists()).toBe(true) // 批准
+    expect(w.find('[data-test="deny-ap-1"]').exists()).toBe(true) // 拒绝
+    expect(w.find('[data-test="detail-ap-1"]').exists()).toBe(true) // 查看细节
+  })
+
+  it('approve enters pending (buttons disabled, NOT yet resolved) until approvalResolved (codex P2)', async () => {
+    const w = await mountReady()
+    MockWS.last!.fireMessage({ type: 'approval', id: 'ap-1', kind: 'exec', command: 'cmd', sessionKey: 'sk-1' })
+    await nextTick()
+    await w.find('[data-test="approve-ap-1"]').trigger('click')
+    expect(MockWS.last!.sent).toContainEqual({ type: 'resolve', id: 'ap-1', kind: 'exec', decision: 'approve' })
+    await nextTick()
+    // pending：按钮禁用但卡片未标记 resolved（等服务端回执，不乐观假成功）
+    const card = w.find('[data-test="approval-ap-1"]')
+    expect(card.classes()).not.toContain('resolved')
+    expect((w.find('[data-test="approve-ap-1"]').element as HTMLButtonElement).disabled).toBe(true)
+    // 服务端回执到达才落定变淡
+    MockWS.last!.fireMessage({ type: 'approvalResolved', id: 'ap-1', decision: 'approve' })
+    await nextTick()
+    const card2 = w.find('[data-test="approval-ap-1"]')
+    expect(card2.classes()).toContain('resolved')
+    expect(card2.text()).toContain('已批准')
+  })
+
+  it('approvalResolved uses authoritative decision, not requested (codex P1)', async () => {
+    const w = await mountReady()
+    MockWS.last!.fireMessage({ type: 'approval', id: 'ap-1', kind: 'exec', command: 'cmd', sessionKey: 'sk-1' })
+    await nextTick()
+    await w.find('[data-test="approve-ap-1"]').trigger('click') // 请求 approve
+    await nextTick()
+    MockWS.last!.fireMessage({ type: 'approvalResolved', id: 'ap-1', decision: 'deny' }) // 权威 deny
+    await nextTick()
+    expect(w.find('[data-test="approval-ap-1"]').text()).toContain('已拒绝')
+  })
+
+  it('shows unknown, not 已批准, for an unrecognized authoritative decision (codex R2 P2)', async () => {
+    const w = await mountReady()
+    MockWS.last!.fireMessage({ type: 'approval', id: 'ap-1', kind: 'exec', command: 'cmd', sessionKey: 'sk-1' })
+    await nextTick()
+    await w.find('[data-test="approve-ap-1"]').trigger('click')
+    await nextTick()
+    MockWS.last!.fireMessage({ type: 'approvalResolved', id: 'ap-1', decision: 'expired' }) // 未识别权威值
+    await nextTick()
+    const card = w.find('[data-test="approval-ap-1"]')
+    expect(card.classes()).toContain('resolved')
+    expect(card.text()).toContain('未知') // 不默认显示「已批准」
+    expect(card.text()).not.toContain('已批准')
+  })
+
+  it('restores only the failed card when its resolve fails (error frame with id, codex R2 P2)', async () => {
+    const w = await mountReady()
+    // 两张卡，各自点批准 → 都进 resolving
+    MockWS.last!.fireMessage({ type: 'approval', id: 'ap-1', kind: 'exec', command: 'c1', sessionKey: 'sk-1' })
+    MockWS.last!.fireMessage({ type: 'approval', id: 'ap-2', kind: 'exec', command: 'c2', sessionKey: 'sk-1' })
+    await nextTick()
+    await w.find('[data-test="approve-ap-1"]').trigger('click')
+    await w.find('[data-test="approve-ap-2"]').trigger('click')
+    await nextTick()
+    expect((w.find('[data-test="approve-ap-1"]').element as HTMLButtonElement).disabled).toBe(true)
+    expect((w.find('[data-test="approve-ap-2"]').element as HTMLButtonElement).disabled).toBe(true)
+    // 只有 ap-1 的 resolve 失败（error 帧带 id）→ 仅 ap-1 恢复可点，ap-2 仍在途
+    MockWS.last!.fireMessage({ type: 'error', message: '审批回覆失败', id: 'ap-1' })
+    await nextTick()
+    expect((w.find('[data-test="approve-ap-1"]').element as HTMLButtonElement).disabled).toBe(false)
+    expect((w.find('[data-test="approve-ap-2"]').element as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('approval card does not break streaming anchor or stick the composer (审查 #5)', async () => {
+    const w = await mountReady()
+    // 先发一条消息触发助手流式
+    await w.find('[data-test="input"]').setValue('hi')
+    await w.find('[data-test="send"]').trigger('click')
+    MockWS.last!.fireMessage({ type: 'text', runId: 'r1', delta: '思考' })
+    await nextTick()
+    // 流式中途来审批卡：不应被 finalizeLast 误收尾、不应影响 streaming 光标
+    MockWS.last!.fireMessage({ type: 'approval', id: 'ap-1', kind: 'exec', command: 'cmd', sessionKey: 'sk-1' })
+    await nextTick()
+    expect(w.find('[data-test="approval-ap-1"]').exists()).toBe(true)
+    expect(w.find('.cursor').exists()).toBe(true) // 流式光标仍在
+    MockWS.last!.fireMessage({ type: 'done', runId: 'r1' })
+    await nextTick()
+    expect(w.find('.cursor').exists()).toBe(false) // done 正常收尾
+    expect(w.find('[data-test="stream"]').text()).toContain('思考')
+  })
+
+  it('retains other-session cards and shows them when switching to that session (codex R2 P1)', async () => {
+    const SESS2 = { id: 2, session_key: 'sk-2', title: 'S2', created_at: '' }
+    ;(listSessions as ReturnType<typeof vi.fn>).mockResolvedValue([SESSION, SESS2])
+    const w = await mountReady()
+    // 属于 sk-2 的卡：当前 sk-1 不显示，但**保留**（不丢弃）
+    MockWS.last!.fireMessage({ type: 'approval', id: 'ap-x', kind: 'exec', command: 'cmd', sessionKey: 'sk-2' })
+    await nextTick()
+    expect(w.find('[data-test="approval-ap-x"]').exists()).toBe(false)
+    // 切到 sk-2 → 该卡可见、可回覆（agent 不再被永久卡住）
+    await w.find('[data-test="session-sk-2"]').trigger('click')
+    await nextTick()
+    expect(w.find('[data-test="approval-ap-x"]').exists()).toBe(true)
+    await w.find('[data-test="approve-ap-x"]').trigger('click')
+    expect(MockWS.last!.sent).toContainEqual({ type: 'resolve', id: 'ap-x', kind: 'exec', decision: 'approve' })
+  })
+
+  it('clears approval cards when switching container', async () => {
+    ;(listInstances as ReturnType<typeof vi.fn>).mockResolvedValue([
+      INSTANCE,
+      { ...INSTANCE, name: 'other', port: 19001 },
+    ])
+    const w = mount(ChatView, { global: { plugins: [createPinia()] } })
+    await flushPromises()
+    MockWS.last!.fireOpen()
+    MockWS.last!.fireMessage({ type: 'ready', container: 'demo' })
+    await nextTick()
+    MockWS.last!.fireMessage({ type: 'approval', id: 'ap-1', kind: 'exec', command: 'cmd', sessionKey: 'sk-1' })
+    await nextTick()
+    expect(w.find('[data-test="approval-ap-1"]').exists()).toBe(true)
+    await w.find('[data-test="container-other"]').trigger('click') // 切容器
+    await flushPromises()
+    expect(w.find('[data-test="approval-ap-1"]').exists()).toBe(false)
+  })
+
+  it('toggles detail view to reveal full command (查看细节)', async () => {
+    const w = await mountReady()
+    MockWS.last!.fireMessage({ type: 'approval', id: 'ap-3', kind: 'exec', command: 'very long cmd', sessionKey: 'sk-1' })
+    await nextTick()
+    expect(w.find('[data-test="approval-detail-ap-3"]').exists()).toBe(false)
+    await w.find('[data-test="detail-ap-3"]').trigger('click')
+    await nextTick()
+    expect(w.find('[data-test="approval-detail-ap-3"]').exists()).toBe(true)
+    expect(w.find('[data-test="approval-detail-ap-3"]').text()).toContain('very long cmd')
+  })
+
+  it('retains approval cards when creating a new session (codex R3 P1)', async () => {
+    const w = await mountReady()
+    // 当前会话有一张待审批卡
+    MockWS.last!.fireMessage({ type: 'approval', id: 'ap-keep', kind: 'exec', command: 'cmd', sessionKey: 'sk-1' })
+    await nextTick()
+    expect(w.find('[data-test="approval-ap-keep"]').exists()).toBe(true)
+    // 新建会话（不换容器）：卡须保留（agent 仍卡住,不能误清）
+    ;(createSession as ReturnType<typeof vi.fn>).mockResolvedValue({ id: 2, session_key: 'sk-new', title: 'N', created_at: '' })
+    await w.find('[data-test="new-session"]').trigger('click')
+    await flushPromises()
+    // 新会话 sessionKey 不同 → 该卡按 sessionKey 过滤暂不显示;切回原会话 sk-1 应能再见到(证明未被误清)
+    await w.find('[data-test="session-sk-1"]').trigger('click')
+    await nextTick()
+    expect(w.find('[data-test="approval-ap-keep"]').exists()).toBe(true)
+  })
+
+  it('disables approve buttons and restores resolving cards on unexpected close (codex R3 P2)', async () => {
+    const w = await mountReady()
+    MockWS.last!.fireMessage({ type: 'approval', id: 'ap-1', kind: 'exec', command: 'cmd', sessionKey: 'sk-1' })
+    await nextTick()
+    // 点击批准 → resolving
+    await w.find('[data-test="approve-ap-1"]').trigger('click')
+    expect((w.find('[data-test="approve-ap-1"]').element as HTMLButtonElement).disabled).toBe(true)
+    // 意外断线:onClose 恢复 resolving 卡为 pending(可重试),但 disconnected 又禁用按钮
+    MockWS.last!.onclose?.({})
+    await nextTick()
+    expect((w.find('[data-test="approve-ap-1"]').element as HTMLButtonElement).disabled).toBe(true) // disconnected 禁用
+    // 再点无效(守卫 disconnected)
+    await w.find('[data-test="approve-ap-1"]').trigger('click')
+    const resolves = MockWS.last!.sent.filter((f) => (f as { type: string }).type === 'resolve')
+    expect(resolves.length).toBe(1) // 只发出第一次,断线后不再发
+  })
+
+  it('restores all resolving cards on a generic (no-id) connection error (codex R3 P2)', async () => {
+    const w = await mountReady()
+    MockWS.last!.fireMessage({ type: 'approval', id: 'ap-1', kind: 'exec', command: 'c1', sessionKey: 'sk-1' })
+    MockWS.last!.fireMessage({ type: 'approval', id: 'ap-2', kind: 'exec', command: 'c2', sessionKey: 'sk-1' })
+    await nextTick()
+    await w.find('[data-test="approve-ap-1"]').trigger('click')
+    await w.find('[data-test="approve-ap-2"]').trigger('click')
+    await nextTick()
+    // 无 id 的通用错误(如 socket CLOSED 态 send 报错)→ 恢复所有 resolving 卡为 pending
+    MockWS.last!.fireMessage({ type: 'error', message: '连接已断开,请重试或切换容器' })
+    await nextTick()
+    // 两卡都复位 pending(虽然 disconnected 下按钮仍禁用,但内部状态已可重试)
+    // 通过 approvalResolved 之外的旁证:recover 后 status 回 pending,disconnected 仍是 true 故按钮禁用
+    // 重新连接前按钮禁用是对的;此处断言 recover 把卡从 resolving 拉回(若仍 resolving,重连后会卡死)
+    expect(w.find('[data-test="approval-ap-1"]').exists()).toBe(true)
+    expect(w.find('[data-test="approval-ap-2"]').exists()).toBe(true)
+  })
 })

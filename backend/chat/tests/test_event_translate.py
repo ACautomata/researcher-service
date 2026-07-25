@@ -86,9 +86,121 @@ def test_aborted_becomes_done(translator):
     assert translator.translate(_chat('aborted')) == [{'type': 'done', 'runId': 'r1'}]
 
 
+def test_unknown_state_returns_empty(translator):
+    # 未知 state 不猜测，留待协议实测明确后再扩展
+    assert translator.translate(_chat('streaming')) == []
+
+
+# ---- T06 权限审批（issue #42 / spec §8.2）----
+# exec.approval.requested 是**连接级**事件（不挂 chat runId，r26:88）→ 翻译成前端审批卡契约帧。
+# payload 字段级 schema 官方未给全（标待实测）→ 翻译做防御性取值，校准点集中一处。
+
+
+def _approval_requested(**extra) -> dict:
+    payload = {'id': 'ap-1', 'kind': 'exec'}
+    payload.update(extra)
+    return {'type': 'event', 'event': 'exec.approval.requested', 'payload': payload}
+
+
+def test_approval_requested_becomes_approval_card(translator):
+    # 完整 payload：id/kind + systemRunPlan.rawCommand（host=node 时网关字段，r26:64）
+    frame = _approval_requested(systemRunPlan={'rawCommand': 'rm -rf /tmp/x'})
+    assert translator.translate(frame) == [
+        {'type': 'approval', 'id': 'ap-1', 'kind': 'exec', 'command': 'rm -rf /tmp/x', 'sessionKey': None},
+    ]
+
+
+def test_approval_requested_extracts_command_fallbacks(translator):
+    # command 取值链：systemRunPlan.rawCommand → systemRunPlan.command → 顶层 command → ''（待实测校准）
+    frame = _approval_requested(systemRunPlan={'command': 'openclaw wiki compile'})
+    out = translator.translate(frame)
+    assert out[0]['command'] == 'openclaw wiki compile'
+    frame2 = _approval_requested(command='echo hi')
+    assert translator.translate(frame2)[0]['command'] == 'echo hi'
+
+
+def test_approval_requested_missing_command_tolerated(translator):
+    # 无 command 字段仍出卡（前端显示占位），不吞掉事件
+    out = translator.translate(_approval_requested())
+    assert out == [{'type': 'approval', 'id': 'ap-1', 'kind': 'exec', 'command': '', 'sessionKey': None}]
+
+
+def test_approval_requested_missing_id_returns_empty(translator):
+    # 无稳定审批 id 则无法 resolve → 不出卡（否则产生一张永远批不了的卡）
+    frame = {'type': 'event', 'event': 'exec.approval.requested', 'payload': {'command': 'x'}}
+    assert translator.translate(frame) == []
+
+
+def test_approval_requested_defaults_kind(translator):
+    # kind 缺省退 'exec'（decision 回覆需 id+kind+decision 三字段，spec §8.2）
+    frame = {'type': 'event', 'event': 'exec.approval.requested', 'payload': {'id': 'ap-9'}}
+    out = translator.translate(frame)
+    assert out[0]['kind'] == 'exec'
+
+
+def test_plugin_approval_requested_also_translated(translator):
+    # plugin.approval.requested（插件审批流，r26:51）同样翻译出卡，kind 取 payload 值
+    frame = {'type': 'event', 'event': 'plugin.approval.requested',
+             'payload': {'id': 'ap-2', 'kind': 'plugin', 'command': 'plugin do-thing'}}
+    out = translator.translate(frame)
+    assert out == [{'type': 'approval', 'id': 'ap-2', 'kind': 'plugin',
+                    'command': 'plugin do-thing', 'sessionKey': None}]
+
+
+def test_approval_kind_falls_back_to_event_name_family(translator):
+    """codex/审查 P1：payload 缺 kind 时从事件名派生（exec/plugin），不可一律回退 'exec'。
+
+    r26 §1：payload 只保证稳定 id + systemRunPlan，kind 非文档字段；缺省时须按事件族派生，
+    否则 plugin 审批会以 kind='exec' 回覆 approval.resolve（类型无关审批对要求匹配 kind）。
+    """
+    frame = {'type': 'event', 'event': 'plugin.approval.requested', 'payload': {'id': 'ap-7'}}
+    out = translator.translate(frame)
+    assert out[0]['kind'] == 'plugin'
+    frame2 = {'type': 'event', 'event': 'exec.approval.requested', 'payload': {'id': 'ap-8'}}
+    assert translator.translate(frame2)[0]['kind'] == 'exec'
+
+
+def test_approval_card_carries_session_key(translator):
+    """codex P1：systemRunPlan.sessionKey 透传到卡片，前端据此把审批归属到对应会话过滤。"""
+    frame = {'type': 'event', 'event': 'exec.approval.requested',
+             'payload': {'id': 'ap-1', 'systemRunPlan': {'rawCommand': 'x', 'sessionKey': 'sess-9'}}}
+    out = translator.translate(frame)
+    assert out[0]['sessionKey'] == 'sess-9'
+
+
+def test_approval_card_session_key_absent_tolerated(translator):
+    # 无 systemRunPlan/sessionKey（连接级审批未必挂会话）→ sessionKey 为 None，前端按当前会话处理
+    frame = {'type': 'event', 'event': 'exec.approval.requested', 'payload': {'id': 'ap-1', 'command': 'x'}}
+    out = translator.translate(frame)
+    assert out[0]['sessionKey'] is None
+
+
 def test_non_chat_event_returns_empty(translator):
-    # tool/approval/cot 事件 MVP 不处理（spec §8.3 待实测）
+    # tool/cot 事件 MVP 不处理（spec §8.3 待实测）——approval 已单列，此处用 tool 事件名
     frame = {'type': 'event', 'event': 'tool.start', 'payload': {'runId': 'r1'}}
+    assert translator.translate(frame) == []
+
+
+# ---- codex R3 P2：网关 resolved 事件（他端 operator 回覆后广播）----
+def test_plugin_approval_resolved_becomes_resolved_frame(translator):
+    # plugin.approval.resolved（r26:51 文档已证）→ approvalResolved 帧，透传权威 decision
+    frame = {'type': 'event', 'event': 'plugin.approval.resolved',
+             'payload': {'id': 'ap-1', 'decision': 'deny'}}
+    assert translator.translate(frame) == [
+        {'type': 'approvalResolved', 'id': 'ap-1', 'decision': 'deny'},
+    ]
+
+
+def test_plugin_approval_resolved_unknown_decision_passes_through(translator):
+    # 未知/待实测权威值（expired 等）透传原值，由前端判 unknown 而非默认批准（ChatView onApprovalResolved）
+    frame = {'type': 'event', 'event': 'plugin.approval.resolved',
+             'payload': {'id': 'ap-1', 'decision': 'expired'}}
+    assert translator.translate(frame)[0]['decision'] == 'expired'
+
+
+def test_plugin_approval_resolved_missing_id_returns_empty(translator):
+    # 无 id 无法定位卡片 → 跳过，不伪造 approvalResolved 帧
+    frame = {'type': 'event', 'event': 'plugin.approval.resolved', 'payload': {'decision': 'approve'}}
     assert translator.translate(frame) == []
 
 
