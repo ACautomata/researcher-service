@@ -152,6 +152,13 @@ class _FakeChatWs:
             li = lists[t._list_ack_index]
             t._list_ack_index += 1
             return json.dumps({'type': 'res', 'id': li['id'], 'ok': True, 'payload': t.list_payload})
+        cmds = [f for f in t.sent if f.get('method') == 'commands.list']
+        if not t.suppress_commands_ack and len(cmds) > t._commands_ack_index:
+            cm = cmds[t._commands_ack_index]
+            t._commands_ack_index += 1
+            if t.commands_error is not None:
+                return json.dumps({'type': 'res', 'id': cm['id'], 'ok': False, 'error': t.commands_error})
+            return json.dumps({'type': 'res', 'id': cm['id'], 'ok': True, 'payload': t.commands_payload})
         if t.events:
             return json.dumps(t.events.pop(0))
         return json.dumps(await self._extra.get())
@@ -169,7 +176,8 @@ class FakeChatTransport:
 
     def __init__(self, *, connect_ok=True, ack_run_id='r1', ack_error=None, events=None,
                  suppress_ack=False, suppress_connect_ack=False, resolve_error=None, resolve_payload=None,
-                 list_payload=None):
+                 list_payload=None, commands_payload=None, commands_error=None,
+                 suppress_commands_ack=False):
         self.connect_ok = connect_ok
         self.ack_run_id = ack_run_id
         self.ack_error = ack_error
@@ -178,12 +186,16 @@ class FakeChatTransport:
         self.resolve_error = resolve_error
         self.resolve_payload = resolve_payload if resolve_payload is not None else {}
         self.list_payload = list_payload if list_payload is not None else {}
+        self.commands_payload = commands_payload if commands_payload is not None else {}
+        self.commands_error = commands_error
+        self.suppress_commands_ack = suppress_commands_ack
         self.events = list(events or [])
         self.sent: list = []
         self._connect_acked = False
         self._chat_ack_index = 0
         self._resolve_ack_index = 0
         self._list_ack_index = 0
+        self._commands_ack_index = 0
         self._closed = False
         self._ws: _FakeChatWs | None = None
 
