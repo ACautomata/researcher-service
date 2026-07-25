@@ -10,6 +10,7 @@ import { gfm } from '@milkdown/preset-gfm'
 import { listener, listenerCtx } from '@milkdown/plugin-listener'
 import { replaceAll } from '@milkdown/utils'
 import { nord } from '@milkdown/theme-nord'
+import type { MilkdownPlugin } from '@milkdown/ctx'
 
 const props = defineProps<{ content: string }>()
 const emit = defineEmits<{ update: [markdown: string] }>()
@@ -30,7 +31,9 @@ async function build(initial: string): Promise<void> {
         emit('update', markdown)
       })
     })
-    .use(nord)
+    // 上游 @milkdown/theme-nord 把 nord 的 .d.ts 标为 (ctx)=>void，与 use() 要求的
+    // MilkdownPlugin 契约不符（其余内置插件均正确标注）；运行时已验证，断言补齐类型。
+    .use(nord as MilkdownPlugin)
     .use(commonmark)
     .use(gfm)
     .use(listener)

@@ -1,7 +1,7 @@
 // seam: FileTree 组件 —— wiki 文件树（issue #45 验收 1）。
 // 覆盖：按分组渲染 pages（五核心分类 + domains 子树）、点节点冒泡 open 进编辑器、
 // 当前页高亮、新建/删除按钮冒泡事件。
-import { flushPromises, mount } from '@vue/test-utils'
+import { mount } from '@vue/test-utils'
 import { describe, expect, it } from 'vitest'
 import FileTree from '@/components/FileTree.vue'
 import type { WikiTreeGroupDTO } from '@/api/wiki'
