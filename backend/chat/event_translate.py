@@ -27,6 +27,12 @@ _DELTA_TEXT = 'deltaText'
 # exec/plugin 两族共用同一翻译；payload 字段级 schema 官方未给全（标待实测）→ 取值链集中 _approval_card 方法。
 _APPROVAL_REQUESTED_EVENTS = ('exec.approval.requested', 'plugin.approval.requested')
 
+# codex R3 P2（收窄）：网关在他端 operator / 其它 pool 连接 resolve 后广播 `plugin.approval.resolved`
+# （r26:51 文档已证事件名）。翻译为 approvalResolved 帧，让共享 client 的 peer 卡片随之收敛（不再停留可点
+# 的陈旧卡）。注意：①exec 族**无**对应 resolved 事件（仅 plugin 族有，r26:47-52）；②payload schema 待实测，
+# 无 id 则返回 None 跳过（不伪造）。本进程内 resolve 的主收敛路径仍是 consumer 的合成 fan-out，此为低风险补充。
+_APPROVAL_RESOLVED_EVENTS = ('plugin.approval.resolved',)
+
 
 class ChatEventTranslator:
     """OpenClaw chat 事件 → 前端契约帧列表（Strategy：纯翻译；按 runId 累积 sent 支持 replace）。"""
@@ -57,6 +63,22 @@ class ChatEventTranslator:
             'sessionKey': run_plan.get('sessionKey'),  # codex P1：归属会话；无则 None（前端按当前会话处理）
         }
 
+    @staticmethod
+    def _approval_resolved(payload: dict) -> dict | None:
+        """网关 resolved 事件 payload → 前端 approvalResolved 帧；无 id 返回 None（不伪造，跳过）。
+
+        decision 取值（待实测）：payload.decision 缺省/未知时透传原值，前端仅识别 approve/deny、
+        其它显示「未知」（ChatView onApprovalResolved），不默认批准。
+        """
+        approval_id = payload.get('id')
+        if not approval_id:
+            return None
+        return {
+            'type': 'approvalResolved',
+            'id': approval_id,
+            'decision': payload.get('decision'),  # 透传权威值；未知由前端判 unknown
+        }
+
     def translate(self, frame: dict) -> list[dict]:
         """翻译一帧网关事件；不可翻译的返回空列表（交由调用方忽略）。"""
         if frame.get('type') != 'event':
@@ -66,6 +88,10 @@ class ChatEventTranslator:
         if event in _APPROVAL_REQUESTED_EVENTS:
             card = self._approval_card(event, frame.get('payload') or {})
             return [card] if card else []
+        # 他端 resolve 后的网关 resolved 事件（codex R3 P2）→ approvalResolved 帧收敛 peer 卡
+        if event in _APPROVAL_RESOLVED_EVENTS:
+            resolved = self._approval_resolved(frame.get('payload') or {})
+            return [resolved] if resolved else []
         if event != 'chat':
             return []
         payload = frame.get('payload') or {}

@@ -181,6 +181,29 @@ def test_non_chat_event_returns_empty(translator):
     assert translator.translate(frame) == []
 
 
+# ---- codex R3 P2：网关 resolved 事件（他端 operator 回覆后广播）----
+def test_plugin_approval_resolved_becomes_resolved_frame(translator):
+    # plugin.approval.resolved（r26:51 文档已证）→ approvalResolved 帧，透传权威 decision
+    frame = {'type': 'event', 'event': 'plugin.approval.resolved',
+             'payload': {'id': 'ap-1', 'decision': 'deny'}}
+    assert translator.translate(frame) == [
+        {'type': 'approvalResolved', 'id': 'ap-1', 'decision': 'deny'},
+    ]
+
+
+def test_plugin_approval_resolved_unknown_decision_passes_through(translator):
+    # 未知/待实测权威值（expired 等）透传原值，由前端判 unknown 而非默认批准（ChatView onApprovalResolved）
+    frame = {'type': 'event', 'event': 'plugin.approval.resolved',
+             'payload': {'id': 'ap-1', 'decision': 'expired'}}
+    assert translator.translate(frame)[0]['decision'] == 'expired'
+
+
+def test_plugin_approval_resolved_missing_id_returns_empty(translator):
+    # 无 id 无法定位卡片 → 跳过，不伪造 approvalResolved 帧
+    frame = {'type': 'event', 'event': 'plugin.approval.resolved', 'payload': {'decision': 'approve'}}
+    assert translator.translate(frame) == []
+
+
 def test_non_event_frame_returns_empty(translator):
     # req/res 帧不属于 chat 事件流
     assert translator.translate({'type': 'res', 'id': 'x', 'ok': True}) == []

@@ -96,13 +96,14 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
         # 回执用网关权威 decision（first-answer-wins，可能与请求不同，codex P1）
         authoritative = (payload or {}).get('decision') or decision
         frame = {'type': 'approvalResolved', 'id': approval_id, 'decision': authoritative}
-        await self.send_json(frame)
-        # codex R2 P2：把权威结果 fan-out 给共享 client 的其它 consumer（含本 consumer 幂等），
-        # 各渲染副本一致收敛（对等端不再停留可点的陈旧卡）。失败不影响已回执。
+        # codex R3 P2：先 fan-out 给共享 client 的所有 consumer（含本 consumer 幂等）再回执请求方——
+        # 若请求方在网关处理期间断开，直接 send_json 会先失败、执行不到 fan-out，导致网关已记录 decision
+        # 而其它 peer 仍停留可点的陈旧卡。_fanout 内部故障隔离，单订阅者失败不影响其余。
         try:
             await self._client.broadcast_approval_resolved(approval_id, authoritative)
         except Exception:
             pass
+        await self.send_json(frame)
 
     async def _handle_send(self, content):
         if self._client is None:

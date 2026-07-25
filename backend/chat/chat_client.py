@@ -169,9 +169,9 @@ class OpenClawChatClient:
             return
         run_id = frames[0].get('runId')
         if run_id is None:
-            # 连接级帧（T06 审批卡）：不挂 runId，fan-out 到所有审批订阅者，不进 runId 路由
+            # 连接级帧（T06 审批卡 + 网关 resolved 事件）：不挂 runId,fan-out 到所有审批订阅者,不进 runId 路由
             for translated in frames:
-                if translated.get('type') != 'approval':
+                if translated.get('type') not in ('approval', 'approvalResolved'):
                     continue
                 await self._fanout_approval(translated)
             return
@@ -236,8 +236,10 @@ class OpenClawChatClient:
             'type': 'req', 'id': req_id, 'method': 'approval.resolve',
             'params': {'id': approval_id, 'kind': kind, 'decision': decision},
         }
-        await self._ws.send(json.dumps(frame))
         try:
+            # codex R3 P2：死连接（_ws 非 None 但已断）下 send 会 raise；须与等 ack 共用清理路径，
+            # 否则重试会在 _pending_resolves 无限累积 future（内存泄漏 + 永不回执）
+            await self._ws.send(json.dumps(frame))
             payload = await asyncio.wait_for(fut, timeout=self._ack_timeout)
         except asyncio.TimeoutError:
             self._pending_resolves.pop(req_id, None)
@@ -253,17 +255,19 @@ class OpenClawChatClient:
         best-effort：绝不抛异常打断 consumer 的 ready 流程。复用 _approval_card 单项翻译（kind 从事件族
         派生，此处无事件名，按 payload.kind 或缺省 exec）。
 
-        方法名**待实测校准**（codex R2 P1 / issue 验收③）：r26 §1 表明 `approval` 类型无关族仅文档化
-        `get`/`resolve`，**无 `approval.list`**；exec/plugin 族有 `.list` 但双查合并会重复（同一审批按
-        exec+plugin 各返一次）。故用 `approval.get` 探查持久化待审批集合，响应键兼容 `approvals`（列表）
-        与 `approval`（单项）；若实测表明须用 exec/plugin 分查或另一方法名，按实测改此处与 fakes。
+        方法名（codex R3 P1 / issue 验收③）：r26 §1 文档已证 exec/plugin 族各有 `.list`（查全部待审批），
+        通用 `approval` 族仅 `get`/`resolve`、**无 `approval.list`**。故本方法用文档已证的
+        `exec.approval.list`（exec 是 elevated 命令审批主路径，本特性正针对它）。
+        **刻意不做 exec+plugin 双查合并**（收窄 codex R3 P1）：①同一审批极可能被两族各返一次致重复出卡；
+        ②`.list` 响应 schema 同样「待实测」，双查合并 + 按 id 去重是把待实测路径复杂化成另一套未经证实的
+        死扣；③plugin 审批远少于 exec。若实测表明须双查或响应键非 `approvals`，按实测改此处与 fakes。
         """
         if self._ws is None:
             return []
         req_id = uuid.uuid4().hex
         fut = asyncio.get_running_loop().create_future()
         self._pending_resolves[req_id] = fut
-        frame = {'type': 'req', 'id': req_id, 'method': 'approval.get', 'params': {}}
+        frame = {'type': 'req', 'id': req_id, 'method': 'exec.approval.list', 'params': {}}
         try:
             await self._ws.send(json.dumps(frame))
             payload = await asyncio.wait_for(fut, timeout=self._ack_timeout)

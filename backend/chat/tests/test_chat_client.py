@@ -387,7 +387,7 @@ async def test_resolve_approval_timeout_raises():
 
 @pytest.mark.asyncio
 async def test_list_pending_approvals_translates_cards():
-    """codex P2：start 补拉——发 approval.get（待实测校准，codex R2 P1），响应项翻译成审批卡帧。"""
+    """codex P2：start 补拉——发 exec.approval.list（文档已证方法名，codex R3 P1 收窄），响应项翻译成审批卡帧。"""
     t = FakeChatTransport(list_payload={
         'approvals': [
             {'id': 'ap-1', 'kind': 'exec', 'systemRunPlan': {'rawCommand': 'cmd1', 'sessionKey': 's1'}},
@@ -401,7 +401,7 @@ async def test_list_pending_approvals_translates_cards():
         {'type': 'approval', 'id': 'ap-1', 'kind': 'exec', 'command': 'cmd1', 'sessionKey': 's1'},
         {'type': 'approval', 'id': 'ap-2', 'kind': 'exec', 'command': 'cmd2', 'sessionKey': None},
     ]
-    req = next(f for f in t.sent if f.get('method') == 'approval.get')
+    req = next(f for f in t.sent if f.get('method') == 'exec.approval.list')
     assert req['type'] == 'req'
     await c.aclose()
 
@@ -447,4 +447,48 @@ async def test_broadcast_approval_resolved_fans_out_to_all_subscribers():
     expected = {'type': 'approvalResolved', 'id': 'ap-1', 'decision': 'deny'}
     assert got_a == [expected]
     assert got_b == [expected]
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_resolve_approval_send_failure_cleans_pending_future():
+    """codex R3 P2：死连接下 send 抛异常须清理 _pending_resolves，否则重试无限累积 future（内存泄漏）。"""
+    t = FakeChatTransport()
+    c = OpenClawChatClient(URL, 'dt', transport=t)
+    await c.connect()
+
+    class _DeadWs:
+        async def send(self, data):
+            raise ConnectionError('socket dead')
+
+    c._ws = _DeadWs()  # 模拟 _ws 非 None 但已死（recv loop 尚未标 dead）
+    for _ in range(3):  # 模拟多次重试
+        with pytest.raises(ConnectionError):
+            await c.resolve_approval('ap-1', 'exec', 'approve')
+    assert c._pending_resolves == {}  # 每次失败都清理,不泄漏
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_gateway_resolved_event_fans_out_to_subscribers():
+    """codex R3 P2：网关 plugin.approval.resolved 事件（他端回覆）→ 连接级 fan-out 给所有订阅者。"""
+    t = FakeChatTransport()
+    a_received, b_received = [], []
+
+    async def a_cb(frame):
+        a_received.append(frame)
+
+    async def b_cb(frame):
+        b_received.append(frame)
+
+    c = OpenClawChatClient(URL, 'dt', transport=t)
+    c.add_approval_subscriber(a_cb)
+    c.add_approval_subscriber(b_cb)
+    await c.connect()
+    t.push({'type': 'event', 'event': 'plugin.approval.resolved',
+            'payload': {'id': 'ap-1', 'decision': 'deny'}})
+    await asyncio.sleep(0.05)
+    expected = [{'type': 'approvalResolved', 'id': 'ap-1', 'decision': 'deny'}]
+    assert a_received == expected
+    assert b_received == expected
     await c.aclose()

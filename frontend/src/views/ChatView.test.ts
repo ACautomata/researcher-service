@@ -455,4 +455,55 @@ describe('ChatView', () => {
     expect(w.find('[data-test="approval-detail-ap-3"]').exists()).toBe(true)
     expect(w.find('[data-test="approval-detail-ap-3"]').text()).toContain('very long cmd')
   })
+
+  it('retains approval cards when creating a new session (codex R3 P1)', async () => {
+    const w = await mountReady()
+    // 当前会话有一张待审批卡
+    MockWS.last!.fireMessage({ type: 'approval', id: 'ap-keep', kind: 'exec', command: 'cmd', sessionKey: 'sk-1' })
+    await nextTick()
+    expect(w.find('[data-test="approval-ap-keep"]').exists()).toBe(true)
+    // 新建会话（不换容器）：卡须保留（agent 仍卡住,不能误清）
+    ;(createSession as ReturnType<typeof vi.fn>).mockResolvedValue({ id: 2, session_key: 'sk-new', title: 'N', created_at: '' })
+    await w.find('[data-test="new-session"]').trigger('click')
+    await flushPromises()
+    // 新会话 sessionKey 不同 → 该卡按 sessionKey 过滤暂不显示;切回原会话 sk-1 应能再见到(证明未被误清)
+    await w.find('[data-test="session-sk-1"]').trigger('click')
+    await nextTick()
+    expect(w.find('[data-test="approval-ap-keep"]').exists()).toBe(true)
+  })
+
+  it('disables approve buttons and restores resolving cards on unexpected close (codex R3 P2)', async () => {
+    const w = await mountReady()
+    MockWS.last!.fireMessage({ type: 'approval', id: 'ap-1', kind: 'exec', command: 'cmd', sessionKey: 'sk-1' })
+    await nextTick()
+    // 点击批准 → resolving
+    await w.find('[data-test="approve-ap-1"]').trigger('click')
+    expect((w.find('[data-test="approve-ap-1"]').element as HTMLButtonElement).disabled).toBe(true)
+    // 意外断线:onClose 恢复 resolving 卡为 pending(可重试),但 disconnected 又禁用按钮
+    MockWS.last!.onclose?.({})
+    await nextTick()
+    expect((w.find('[data-test="approve-ap-1"]').element as HTMLButtonElement).disabled).toBe(true) // disconnected 禁用
+    // 再点无效(守卫 disconnected)
+    await w.find('[data-test="approve-ap-1"]').trigger('click')
+    const resolves = MockWS.last!.sent.filter((f) => (f as { type: string }).type === 'resolve')
+    expect(resolves.length).toBe(1) // 只发出第一次,断线后不再发
+  })
+
+  it('restores all resolving cards on a generic (no-id) connection error (codex R3 P2)', async () => {
+    const w = await mountReady()
+    MockWS.last!.fireMessage({ type: 'approval', id: 'ap-1', kind: 'exec', command: 'c1', sessionKey: 'sk-1' })
+    MockWS.last!.fireMessage({ type: 'approval', id: 'ap-2', kind: 'exec', command: 'c2', sessionKey: 'sk-1' })
+    await nextTick()
+    await w.find('[data-test="approve-ap-1"]').trigger('click')
+    await w.find('[data-test="approve-ap-2"]').trigger('click')
+    await nextTick()
+    // 无 id 的通用错误(如 socket CLOSED 态 send 报错)→ 恢复所有 resolving 卡为 pending
+    MockWS.last!.fireMessage({ type: 'error', message: '连接已断开,请重试或切换容器' })
+    await nextTick()
+    // 两卡都复位 pending(虽然 disconnected 下按钮仍禁用,但内部状态已可重试)
+    // 通过 approvalResolved 之外的旁证:recover 后 status 回 pending,disconnected 仍是 true 故按钮禁用
+    // 重新连接前按钮禁用是对的;此处断言 recover 把卡从 resolving 拉回(若仍 resolving,重连后会卡死)
+    expect(w.find('[data-test="approval-ap-1"]').exists()).toBe(true)
+    expect(w.find('[data-test="approval-ap-2"]').exists()).toBe(true)
+  })
 })

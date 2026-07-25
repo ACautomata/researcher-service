@@ -126,7 +126,8 @@ async function newSession() {
   if (!selectedContainer.value) return
   abandonActiveRun()
   messages.value = []
-  approvals.value = [] // 新会话：清空审批卡（审查 #6）
+  // codex R3 P1：不清空审批卡——新会话不换容器，切会话特意留存的同容器卡须保留（按 sessionKey 过滤渲染），
+  // 否则卡住的 agent 对应那张卡会被这里误清、再也无法回覆
   try {
     const s = await createSession(selectedContainer.value)
     sessions.value = [s, ...sessions.value]
@@ -199,6 +200,9 @@ function connect() {
         recoverPendingApprovals(approvalId)
         return
       }
+      // codex R3 P2：无 approval id 的通用连接错误（如 ws.ts 在 CLOSED 态 send 报「连接已断开」）→
+      // 恢复所有 resolving 卡为 pending，避免点击后 socket 已死、错误帧无 id 导致卡片永久禁用
+      recoverPendingApprovals()
       // 消费者级错误（无 runId，如「请先选择容器」）照常显示；run 级错误按 runId 过滤
       if (runId) {
         if (abandonedRunIds.has(runId)) { abandonedRunIds.delete(runId); return }
@@ -255,7 +259,9 @@ function connect() {
 // T06：批准/拒绝 → 回发 resolve 帧 + 进 resolving 态（禁用按钮等回执，不乐观假成功，codex P2）。
 // 成功由 onApprovalResolved 落定；失败由 onError 恢复 pending 让卡片可重试。
 function resolveApproval(a: ApprovalItem, decision: 'approve' | 'deny') {
-  if (!ws || a.status !== 'pending') return
+  // codex R3 P2：socket 已断（disconnected）则不可点——否则会进 resolving 后 sendRaw 走 CLOSED 分支，
+  // 报无 id 通用错误；虽 E 的 recover 会复位，但直接禁点更清楚（按钮也经 :disabled 联动 disconnected）
+  if (!ws || disconnected.value || a.status !== 'pending') return
   a.status = 'resolving'
   a.decision = decision
   ws.resolve(a.id, a.kind ?? 'exec', decision)
@@ -364,8 +370,8 @@ defineExpose({ selectContainer, send, newSession })
             · 经 <code>exec.approval.requested</code> 推送，<code>approval.resolve</code> 回覆
           </div>
           <div v-if="a.status !== 'resolved'" class="a-actions">
-            <button class="btn-approve" :disabled="a.status !== 'pending'" :data-test="`approve-${a.id}`" @click="resolveApproval(a, 'approve')">批准</button>
-            <button class="btn-deny" :disabled="a.status !== 'pending'" :data-test="`deny-${a.id}`" @click="resolveApproval(a, 'deny')">拒绝</button>
+            <button class="btn-approve" :disabled="a.status !== 'pending' || disconnected" :data-test="`approve-${a.id}`" @click="resolveApproval(a, 'approve')">批准</button>
+            <button class="btn-deny" :disabled="a.status !== 'pending' || disconnected" :data-test="`deny-${a.id}`" @click="resolveApproval(a, 'deny')">拒绝</button>
             <button class="btn-ghost" :data-test="`detail-${a.id}`" @click="toggleDetail(a)">查看细节</button>
           </div>
         </div>
