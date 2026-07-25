@@ -664,4 +664,55 @@ describe('ChatView', () => {
     await w.find('[data-test="send"]').trigger('click')
     expect(MockWS.last!.sent).toContainEqual({ type: 'send', sessionKey: 'sk-1', message: '你好' })
   })
+
+  // ---- T08 工具执行 + 思考链折叠（issue #44 / spec §8.2/§8.3/§9.4 / r26 §3/§4）----
+  it('renders a tool line with running state on agent.tool.start (验收 ① 工具只显标题+状态)', async () => {
+    const w = await mountReady()
+    await w.find('[data-test="input"]').setValue('查一下')
+    await w.find('[data-test="send"]').trigger('click')
+    MockWS.last!.fireMessage({
+      type: 'tool', runId: 'r1', name: 'wiki.search', state: 'running',
+      title: '检索 wiki', input: { query: '对比学习' }, result: null,
+    })
+    await nextTick()
+    const tool = w.find('[data-test="tool-line"]')
+    expect(tool.exists()).toBe(true)
+    expect(tool.classes()).toContain('running')
+    expect(tool.text()).toContain('wiki.search')   // 工具名（mono）
+    expect(tool.text()).toContain('运行中')         // ⟳ 运行中
+    // 不展开输入输出细节（验收 ①）：input 不逐字段渲染，仅可有一行参数摘要
+    expect(tool.text()).not.toContain('"对比学习"')
+  })
+
+  it('updates the tool line to done on agent.tool.result (验收 ① 状态 ✓完成)', async () => {
+    const w = await mountReady()
+    await w.find('[data-test="input"]').setValue('查一下')
+    await w.find('[data-test="send"]').trigger('click')
+    MockWS.last!.fireMessage({
+      type: 'tool', runId: 'r1', name: 'wiki.search', state: 'running',
+      title: null, input: null, result: null,
+    })
+    await nextTick()
+    MockWS.last!.fireMessage({
+      type: 'tool', runId: 'r1', name: 'wiki.search', state: 'done',
+      title: null, input: null, result: { count: 3 },
+    })
+    await nextTick()
+    const tool = w.find('[data-test="tool-line"]')
+    expect(tool.classes()).toContain('done')
+    expect(tool.text()).toContain('完成')
+  })
+
+  it('renders a degraded thinking card flagged on assistant bubbles (验收 ② (b) 降级透传 + 标注)', async () => {
+    // protocol v4 无独立 thinking 帧（r26 §4 已证）→ 折叠卡标注降级，不伪造思考步骤
+    const w = await mountReady()
+    await w.find('[data-test="input"]').setValue('你好')
+    await w.find('[data-test="send"]').trigger('click')
+    MockWS.last!.fireMessage({ type: 'text', runId: 'r1', delta: '回答' })
+    await nextTick()
+    const cot = w.find('[data-test="cot-card"]')
+    expect(cot.exists()).toBe(true)
+    expect(cot.text()).toContain('思考过程')
+    expect(cot.text()).toContain('降级')   // UI 标注降级模式（spec §8.3 (b)）
+  })
 })

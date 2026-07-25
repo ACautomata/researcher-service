@@ -11,6 +11,8 @@ export type ChatFrame =
   | { type: 'error'; runId?: string; message: string; id?: string }
   | { type: 'approval'; id: string; kind: string; command: string; sessionKey: string | null }
   | { type: 'approvalResolved'; id: string; decision: string }
+  | { type: 'tool'; runId: string; name: string; state: 'running' | 'done';
+      title: string | null; input: unknown; result: unknown }
 
 // T06 审批卡数据（连接级，无 runId；sessionKey 标识归属会话，codex P1）
 export interface ApprovalCard {
@@ -18,6 +20,18 @@ export interface ApprovalCard {
   kind: string
   command: string
   sessionKey: string | null
+}
+
+// T08 工具行（issue #44 / spec §9.4 / r26 §3）：工具挂在 chat run 内，带 runId；前端按 name 聚合
+// start→result 渲染一行标题+状态。title/input/result 由网关 payload 透传（确切字段名待配对后实测校准，
+// 见后端 chat.event_translate._translate_tool）。
+export interface ToolLine {
+  runId: string
+  name: string
+  state: 'running' | 'done'
+  title: string | null
+  input: unknown
+  result: unknown
 }
 
 export interface ChatHandlers {
@@ -28,6 +42,7 @@ export interface ChatHandlers {
   onClose?: () => void
   onApproval?: (card: ApprovalCard) => void
   onApprovalResolved?: (id: string, decision: string) => void
+  onTool?: (tool: ToolLine) => void
 }
 
 export class ChatWebSocket {
@@ -111,6 +126,12 @@ export class ChatWebSocket {
         break
       case 'approvalResolved':
         this.handlers.onApprovalResolved?.(frame.id, frame.decision)
+        break
+      case 'tool':
+        this.handlers.onTool?.({
+          runId: frame.runId, name: frame.name, state: frame.state,
+          title: frame.title, input: frame.input, result: frame.result,
+        })
         break
     }
   }

@@ -13,6 +13,16 @@ interface Msg {
   role: 'user' | 'assistant'
   text: string
   streaming: boolean
+  tools: ToolRow[] // T08 工具行（仅 assistant 会有，user 恒空；保持接口统一）
+}
+
+// T08 工具行（issue #44 / spec §9.4 / r26 §3）：一行一个——工具名(mono) + 关键参数 + 状态，不展开细节。
+interface ToolRow {
+  name: string
+  state: 'running' | 'done'
+  title: string | null // 网关 toolTitles 用途短标题（待实测），有则优先显示
+  input: unknown
+  result: unknown
 }
 
 // T06 审批卡（连接级，无 runId）：独立列表渲染，不混入 messages——避免破坏流式锚定/finalizeLast
@@ -348,6 +358,35 @@ function connect() {
         a.decision = decision === 'approve' ? 'approve' : decision === 'deny' ? 'deny' : 'unknown'
       }
     },
+    onTool: (tool) => {
+      // T08 工具执行（issue #44 / spec §9.4）：工具挂在所属 chat run 内，带 runId。首帧可能是工具
+      // （agent 先调工具再回复）→ 与 onText 同款锚定当前 run；按 name 聚合 start→result 渲染一行标题+状态。
+      if (ws !== myWs) return
+      if (abandonedRunIds.has(tool.runId)) return
+      if (activeRunId && tool.runId !== activeRunId) return
+      if (!activeRunId) {
+        if (pendingAbandonCount > 0) { pendingAbandonCount--; abandonedRunIds.add(tool.runId); return }
+        activeRunId = tool.runId
+        pendingSend = false
+      }
+      const last = messages.value[messages.value.length - 1]
+      if (!last || last.role !== 'assistant') return
+      if (tool.state === 'running') {
+        last.tools.push({ name: tool.name, state: 'running', title: tool.title,
+                          input: tool.input, result: tool.result })
+        return
+      }
+      // done：匹配最后一个同名 running 行更新（容忍 start→result 配对）；找不到则追加（容忍 result 先到）
+      for (let i = last.tools.length - 1; i >= 0; i--) {
+        if (last.tools[i].name === tool.name && last.tools[i].state === 'running') {
+          last.tools[i].state = 'done'
+          last.tools[i].result = tool.result
+          return
+        }
+      }
+      last.tools.push({ name: tool.name, state: 'done', title: tool.title,
+                        input: tool.input, result: tool.result })
+    },
   })
   ws = myWs
   myWs.start(selectedContainer.value)
@@ -382,12 +421,27 @@ function approvalSubtitle(a: ApprovalItem) {
   return `${a.kind ?? 'exec'} agent 请求执行一条 elevated 命令，请确认后批准或拒绝：`
 }
 
+// T08 工具行关键参数摘要（spec §9.4）：把网关透传的 input（dict/str）压成一行短串，不逐字段展开细节。
+// 字段名待配对后实测校准（见后端 event_translate._translate_tool）；MVP 取前两个键值对，避免占满气泡。
+function formatToolInput(input: unknown): string {
+  if (input == null || input === '') return ''
+  if (typeof input === 'string') return input
+  if (typeof input === 'object') {
+    const obj = input as Record<string, unknown>
+    return Object.keys(obj)
+      .slice(0, 2)
+      .map((k) => `${k}=${typeof obj[k] === 'string' ? obj[k] : JSON.stringify(obj[k])}`)
+      .join(' ')
+  }
+  return String(input)
+}
+
 function send() {
   const text = input.value.trim()
   if (!text || !ws || !selectedSession.value || connecting.value || streaming.value || disconnected.value) return
   slashDismissed.value = true // 发送后关闭补全菜单（输入已被清空，下次输 / 时经 onComposerInput 复位）
-  messages.value.push({ role: 'user', text, streaming: false })
-  messages.value.push({ role: 'assistant', text: '', streaming: true })
+  messages.value.push({ role: 'user', text, streaming: false, tools: [] })
+  messages.value.push({ role: 'assistant', text: '', streaming: true, tools: [] })
   activeRunId = '' // 等首帧 onText 锚定新 run
   pendingSend = true // 首帧未到前，切会话会按 pending 孤儿计数（codex P2 #3）
   ws.send(selectedSession.value, text)
@@ -442,7 +496,35 @@ defineExpose({ selectContainer, send, newSession })
       <p v-if="errorMsg" class="error" data-test="error-bar">{{ errorMsg }}</p>
       <div class="stream" data-test="stream">
         <div v-for="(m, i) in messages" :key="`m-${i}`" class="msg" :class="m.role">
-          <div class="bubble">{{ m.text }}<span v-if="m.streaming" class="cursor"></span></div>
+          <div class="bubble">
+            <!-- T08 思考链折叠卡（spec §8.3 / r26 §4）：protocol v4 无独立 thinking 帧（官方文档已证）→
+                 定型 (b) 降级透传——整段按正文 text 透传（无法协议层分离），折叠卡标注降级，不伪造思考步骤。 -->
+            <details v-if="m.role === 'assistant'" class="cot" data-test="cot-card">
+              <summary class="cot-head">
+                <span class="caret">▶</span> 思考过程
+                <span class="cot-flag">⚠ protocol v4 无独立 thinking 帧 · 降级透传（待配对实测）</span>
+              </summary>
+              <div class="cot-body">
+                当前协议无法将「思考」与正文分离，思考内容已并入下方正文。待容器配对后实测确认是否存在独立
+                thinking 帧——若有则升级为独立渲染（spec §8.3 (a)）。
+              </div>
+            </details>
+            <!-- T08 工具执行（spec §9.4 / 原型 oc-chat-page）：一行一个——图标+工具名(mono)+关键参数+状态，
+                 不展开输入输出细节。事件名/payload 待配对后实测校准（r26 §3）。 -->
+            <div
+              v-for="(t, ti) in m.tools"
+              :key="`tool-${ti}`"
+              class="tool"
+              :class="t.state"
+              data-test="tool-line"
+            >
+              <span class="t-icon">🔧</span>
+              <span class="t-name" :title="t.title ?? ''">{{ t.name }}</span>
+              <span v-if="formatToolInput(t.input)" class="t-args">{{ formatToolInput(t.input) }}</span>
+              <span class="t-state">{{ t.state === 'running' ? '⟳ 运行中' : '✓ 完成' }}</span>
+            </div>
+            {{ m.text }}<span v-if="m.streaming" class="cursor"></span>
+          </div>
         </div>
         <!-- T06 权限审批卡（spec §9.4）：独立于 messages 的列表，橙边待处理，处理后变淡显示结果。
              拆出 messages 是为不破坏流式锚定/finalizeLast（审查 #5），并可独立按 sessionKey 过滤、
@@ -557,4 +639,22 @@ defineExpose({ selectContainer, send, newSession })
 .approval .btn-deny { background: transparent; border: 1px solid var(--el-color-danger); color: var(--el-color-danger); }
 .approval .btn-ghost { background: transparent; border: 1px solid var(--el-border-color); color: var(--el-text-color-secondary); }
 .approval.resolved { opacity: .55; border-color: var(--el-border-color); }
+
+/* T08 思考链折叠卡（spec §8.3/§9.4 / 原型 oc-chat-page）：(b) 降级透传，虚线卡 + flag 标注 */
+.cot { border: 1px dashed var(--el-border-color); background: var(--el-fill-color-light); border-radius: 10px; margin-bottom: 8px; }
+.cot-head { display: flex; align-items: center; gap: 8px; padding: 6px 12px; cursor: pointer; font-size: 12.5px; color: var(--el-color-primary); user-select: none; list-style: none; }
+.cot-head::-webkit-details-marker { display: none; }
+.cot .caret { display: inline-block; transition: transform .18s; }
+.cot[open] .cot-head .caret { transform: rotate(90deg); }
+.cot-flag { margin-left: auto; font-size: 10.5px; color: var(--el-color-warning); border: 1px dashed var(--el-color-warning); border-radius: 6px; padding: 1px 6px; }
+.cot-body { padding: 0 12px 8px; color: var(--el-text-color-secondary); font-size: 12.5px; }
+
+/* T08 工具执行（spec §9.4 / 原型）：一行一个——图标+工具名(mono)+参数+状态，不展开细节 */
+.tool { display: flex; align-items: center; gap: 9px; background: var(--el-fill-color); border: 1px solid var(--el-border-color); border-radius: 9px; padding: 6px 12px; margin: 4px 0; font-size: 12.5px; }
+.tool .t-icon { color: var(--el-color-primary); }
+.tool .t-name { font-family: ui-monospace, monospace; }
+.tool .t-args { color: var(--el-text-color-secondary); }
+.tool .t-state { margin-left: auto; display: flex; align-items: center; gap: 5px; }
+.tool.running .t-state { color: var(--el-color-warning); }
+.tool.done .t-state { color: var(--el-color-success); }
 </style>

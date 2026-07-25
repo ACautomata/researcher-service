@@ -14,9 +14,12 @@ error 读 errorMessage/errorKind（网关字段，r13:118）。
 T06 权限审批（issue #42 / spec §8.2）：`exec.approval.requested` / `plugin.approval.requested` 是
 **连接级**事件（不挂 chat runId，r26:88）→ 翻译成 `{type:approval,id,kind,command}` 审批卡帧。
 payload 字段级 schema 官方未给全（标待实测）→ 取值链集中 `_approval_card`（systemRunPlan.rawCommand
-→ systemRunPlan.command → 顶层 command）。tool/cot 等非 chat/approval 事件、delta 的 message
-变体（非 replace 快照）MVP 不处理，返回空列表（由 test_event_translate 显式断言，非静默吞错）。
-终态（final/aborted/error）清理该 runId 的累积文本。
+→ systemRunPlan.command → 顶层 command）。T08 工具执行（issue #44 / spec §8.2/§9.4 / r26 §3）：
+`agent.tool.start`/`agent.tool.result`（确切事件名/payload 待配对后实测校准）→ `{type:tool,runId,name,
+state,title,input,result}` 工具帧，带 runId 走所属 chat run 路由；字段取值链集中 `_translate_tool`。
+思考链 protocol v4 无独立帧（r26 §4 已证）→ 不新增 thinking 分支，整段按 text 透传（spec §8.3 (b) 降级，
+前端折叠卡标注降级模式）。delta 的 message 变体（非 replace 快照）及其它未证实事件 MVP 不处理，返回
+空列表（由 test_event_translate 显式断言，非静默吞错）。终态（final/aborted/error）清理该 runId 累积文本。
 """
 from __future__ import annotations
 
@@ -32,6 +35,13 @@ _APPROVAL_REQUESTED_EVENTS = ('exec.approval.requested', 'plugin.approval.reques
 # 的陈旧卡）。注意：①exec 族**无**对应 resolved 事件（仅 plugin 族有，r26:47-52）；②payload schema 待实测，
 # 无 id 则返回 None 跳过（不伪造）。本进程内 resolve 的主收敛路径仍是 consumer 的合成 fan-out，此为低风险补充。
 _APPROVAL_RESOLVED_EVENTS = ('plugin.approval.resolved',)
+
+# T08 工具执行（issue #44 / spec §8.2/§9.4 / r26 §3）：连接声明 caps:["tool-events"]（见 chat_client._CAPS）
+# 后网关下发结构化工具生命周期事件。**确切事件名/payload 待配对后实测校准**（r26 §0 警告 agent.* 族与
+# R13 的 chat 单事件模型冲突、未获官方证实）→ 事件名集中常量，实测后单点改。工具挂在 chat run 内
+# （r26 §3），帧带 runId 走既有 runId 路由；前端只显一行标题+状态（spec §9.4）。
+_TOOL_START_EVENTS = ('agent.tool.start',)   # r26 §3 二手线索，待实测校准
+_TOOL_END_EVENTS = ('agent.tool.result',)    # r26 §3 二手线索，待实测校准
 
 
 class ChatEventTranslator:
@@ -92,6 +102,11 @@ class ChatEventTranslator:
         if event in _APPROVAL_RESOLVED_EVENTS:
             resolved = self._approval_resolved(frame.get('payload') or {})
             return [resolved] if resolved else []
+        # T08 工具生命周期事件（runId 级，工具挂在 chat run 内，r26 §3）→ 工具帧
+        if event in _TOOL_START_EVENTS:
+            return self._translate_tool(frame.get('payload') or {}, 'running')
+        if event in _TOOL_END_EVENTS:
+            return self._translate_tool(frame.get('payload') or {}, 'done')
         if event != 'chat':
             return []
         payload = frame.get('payload') or {}
@@ -144,3 +159,27 @@ class ChatEventTranslator:
         out.append({'type': 'done', 'runId': run_id})
         self._sent.pop(run_id, None)
         return out
+
+    @staticmethod
+    def _translate_tool(payload: dict, state: str) -> list[dict]:
+        """T08 工具生命周期事件 payload → 工具帧（runId 级，路由到所属 chat run，r26 §3）。
+
+        字段名取值链（r26 §3 标「需实测」，集中在此便于配对后单点校准）：
+        - name: payload.tool → payload.name → payload.toolName；无 name → []（无法渲染工具行）
+        - title: payload.title（缺省 None）
+        - input: payload.input → payload.args（缺省 None）
+        - result: payload.result → payload.output（缺省 None）
+        统一 shape（start 时 result=None）便于前端按 name 聚合 start→result。
+        """
+        run_id = payload.get('runId')
+        if not run_id:
+            return []
+        name = payload.get('tool') or payload.get('name') or payload.get('toolName')
+        if not name:
+            return []
+        return [{
+            'type': 'tool', 'runId': run_id, 'name': name, 'state': state,
+            'title': payload.get('title'),
+            'input': payload.get('input') or payload.get('args'),
+            'result': payload.get('result') or payload.get('output'),
+        }]

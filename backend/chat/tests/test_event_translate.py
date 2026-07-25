@@ -176,9 +176,64 @@ def test_approval_card_session_key_absent_tolerated(translator):
 
 
 def test_non_chat_event_returns_empty(translator):
-    # tool/cot 事件 MVP 不处理（spec §8.3 待实测）——approval 已单列，此处用 tool 事件名
+    # 未证实的事件名（tool.start，非 agent.tool.*）不猜测处理——T08 工具事件走 agent.tool.start/result
     frame = {'type': 'event', 'event': 'tool.start', 'payload': {'runId': 'r1'}}
     assert translator.translate(frame) == []
+
+
+# ---- T08 工具执行（issue #44 / spec §8.2/§9.4 / r26 §3）----
+# agent.tool.start / agent.tool.result（r26 §3 二手线索；**确切事件名/payload 待配对后实测校准**，
+# r26 §0 警告 agent.* 族与 chat 单事件模型冲突）→ 工具帧。工具挂在 chat run 内（r26 §3），帧带 runId
+# 走既有 runId 路由；前端只显一行标题+状态（spec §9.4）。事件名集中常量便于实测后单点校准。
+
+
+def _tool(event: str, run_id: str = 'r1', **extra) -> dict:
+    payload = {'runId': run_id}
+    payload.update(extra)
+    return {'type': 'event', 'event': event, 'payload': payload}
+
+
+def test_tool_start_becomes_tool_running_frame(translator):
+    # agent.tool.start → 工具 running 帧；name 取 payload.tool，title/input 透传，result 占位 None（统一 shape）
+    frame = _tool('agent.tool.start', tool='wiki.search', title='检索 wiki',
+                  input={'query': '对比学习'})
+    assert translator.translate(frame) == [
+        {'type': 'tool', 'runId': 'r1', 'name': 'wiki.search', 'state': 'running',
+         'title': '检索 wiki', 'input': {'query': '对比学习'}, 'result': None},
+    ]
+
+
+def test_tool_result_becomes_tool_done_frame(translator):
+    # agent.tool.result → done 帧；result 字段透传（前端显"· N 结果"摘要）；title/input 缺省 None
+    frame = _tool('agent.tool.result', tool='wiki.search', result={'count': 3})
+    assert translator.translate(frame) == [
+        {'type': 'tool', 'runId': 'r1', 'name': 'wiki.search', 'state': 'done',
+         'title': None, 'input': None, 'result': {'count': 3}},
+    ]
+
+
+def test_tool_event_missing_run_id_returns_empty(translator):
+    # 工具事件必须挂 runId（r26 §3，路由到所属 chat run）；无 runId → 不投递
+    frame = {'type': 'event', 'event': 'agent.tool.start', 'payload': {'tool': 'x'}}
+    assert translator.translate(frame) == []
+
+
+def test_tool_event_missing_name_returns_empty(translator):
+    # 无工具名 → 无法渲染工具行 → []（对网关 payload 0 信任；字段名待实测校准）
+    assert translator.translate(_tool('agent.tool.start')) == []
+
+
+def test_tool_name_fallbacks(translator):
+    # name 取值链（字段名待实测校准）：payload.tool → payload.name → payload.toolName
+    assert translator.translate(_tool('agent.tool.start', name='fs.read'))[0]['name'] == 'fs.read'
+    assert translator.translate(_tool('agent.tool.start', toolName='bash'))[0]['name'] == 'bash'
+
+
+def test_tool_input_result_fallbacks(translator):
+    # input 取 input→args；result 取 result→output（字段名待实测校准）
+    out = translator.translate(_tool('agent.tool.result', tool='bash', args='ls', output='ok'))
+    assert out[0]['input'] == 'ls'
+    assert out[0]['result'] == 'ok'
 
 
 # ---- codex R3 P2：网关 resolved 事件（他端 operator 回覆后广播）----
