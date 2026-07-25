@@ -159,6 +159,18 @@ class _FakeChatWs:
             if t.commands_error is not None:
                 return json.dumps({'type': 'res', 'id': cm['id'], 'ok': False, 'error': t.commands_error})
             return json.dumps({'type': 'res', 'id': cm['id'], 'ok': True, 'payload': t.commands_payload})
+        # 通用 scripted RPC（issue #80 T1）：遍历已注册 method，回显首个未 ack 的 req id。
+        for method in set(t.rpc_payloads) | set(t.rpc_errors):
+            if method in t.rpc_suppress:
+                continue
+            sent_for_method = [f for f in t.sent if f.get('method') == method]
+            idx = t._rpc_ack_index.get(method, 0)
+            if len(sent_for_method) > idx:
+                frame = sent_for_method[idx]
+                t._rpc_ack_index[method] = idx + 1
+                if method in t.rpc_errors:
+                    return json.dumps({'type': 'res', 'id': frame['id'], 'ok': False, 'error': t.rpc_errors[method]})
+                return json.dumps({'type': 'res', 'id': frame['id'], 'ok': True, 'payload': t.rpc_payloads.get(method, {})})
         if t.events:
             return json.dumps(t.events.pop(0))
         return json.dumps(await self._extra.get())
@@ -177,7 +189,8 @@ class FakeChatTransport:
     def __init__(self, *, connect_ok=True, ack_run_id='r1', ack_error=None, events=None,
                  suppress_ack=False, suppress_connect_ack=False, resolve_error=None, resolve_payload=None,
                  list_payload=None, commands_payload=None, commands_error=None,
-                 suppress_commands_ack=False):
+                 suppress_commands_ack=False,
+                 rpc_payloads=None, rpc_errors=None, rpc_suppress=None):
         self.connect_ok = connect_ok
         self.ack_run_id = ack_run_id
         self.ack_error = ack_error
@@ -196,6 +209,14 @@ class FakeChatTransport:
         self._resolve_ack_index = 0
         self._list_ack_index = 0
         self._commands_ack_index = 0
+        # 通用 scripted RPC res（issue #80 T1）：sessions.list / chat.history / sessions.create /
+        # sessions.delete 等任意 method 的 req→res 脚本。rpc_payloads[method]=res payload、
+        # rpc_errors[method]=res error、rpc_suppress 含 method 则不回 res（测 ack timeout）。逐方法
+        # 按已发 req 顺序消费（_rpc_ack_index[method]），与上面 per-method 分发同构。
+        self.rpc_payloads = dict(rpc_payloads or {})
+        self.rpc_errors = dict(rpc_errors or {})
+        self.rpc_suppress = set(rpc_suppress or ())
+        self._rpc_ack_index: dict[str, int] = {}
         self._closed = False
         self._ws: _FakeChatWs | None = None
 

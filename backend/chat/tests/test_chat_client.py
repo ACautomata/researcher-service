@@ -523,3 +523,179 @@ async def test_gateway_resolved_event_fans_out_to_subscribers():
     assert a_received == expected
     assert b_received == expected
     await c.aclose()
+
+
+# ---- T1 会话 RPC（issue #80 / spec #76）----
+# 4 个会话管理 RPC（sessions.list / chat.history / sessions.create / sessions.delete）与 resolve_approval
+# 同构的 req→res 回执（复用 _pending_resolves）。未连接抛 ChatClientError（会话管理是 REST 主动调用，
+# 区别于 list_commands 的 best-effort 补拉），网关拒绝/超时抛 ChatSendError。client 不做字段翻译
+# （集中在 REST 解析层 T2），原样透传网关 payload。FakeChatTransport 经通用 rpc_payloads/rpc_errors/
+# rpc_suppress 脚本化任意 method 的 res。
+
+
+@pytest.mark.asyncio
+async def test_list_sessions_builds_frame_and_returns_payload():
+    """发 sessions.list（agentId/includeDerivedTitles/limit），返回网关 res payload（原样透传）。"""
+    payload = {'sessions': [{'key': 's1', 'title': '你好'}, {'key': 's2'}]}
+    t = FakeChatTransport(rpc_payloads={'sessions.list': payload})
+    c = OpenClawChatClient(URL, 'dt', transport=t)
+    await c.connect()
+    result = await c.list_sessions('main', include_derived_titles=True, limit=50)
+    assert result == payload
+    req = next(f for f in t.sent if f.get('method') == 'sessions.list')
+    assert req['type'] == 'req'
+    assert req['params'] == {'agentId': 'main', 'includeDerivedTitles': True, 'limit': 50}
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_list_sessions_not_connected_raises():
+    """未连接（_ws None）→ ChatClientError（区别于 list_commands 的 best-effort 返回 {}）。"""
+    c = OpenClawChatClient(URL, 'dt', transport=FakeChatTransport())
+    with pytest.raises(ChatClientError):
+        await c.list_sessions('main')
+
+
+@pytest.mark.asyncio
+async def test_list_sessions_gateway_reject_raises():
+    """网关拒绝（缺 operator.read scope）→ res not ok → ChatSendError（上层映射 502）。"""
+    t = FakeChatTransport(rpc_errors={
+        'sessions.list': {'code': 'FORBIDDEN', 'message': 'missing scope operator.read'}})
+    c = OpenClawChatClient(URL, 'dt', transport=t)
+    await c.connect()
+    with pytest.raises(ChatSendError) as exc:
+        await c.list_sessions('main')
+    assert 'operator.read' in str(exc.value)
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_list_sessions_ack_timeout_raises():
+    """有界等待：ack 丢失/网关不回 → ChatSendError，且 future 已从 _pending_resolves 清出（不泄漏）。"""
+    t = FakeChatTransport(rpc_suppress={'sessions.list'})
+    c = OpenClawChatClient(URL, 'dt', transport=t, ack_timeout=0.05)
+    await c.connect()
+    with pytest.raises(ChatSendError):
+        await c.list_sessions('main')
+    assert not c._pending_resolves
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_get_history_builds_frame_and_returns_payload():
+    """发 chat.history（sessionKey + 可选 limit/messageId 锚点），透传 messages[]+分页 payload。"""
+    payload = {'messages': [{'role': 'user', 'text': '你好'}], 'hasMore': True, 'nextOffset': 'msg-5'}
+    t = FakeChatTransport(rpc_payloads={'chat.history': payload})
+    c = OpenClawChatClient(URL, 'dt', transport=t)
+    await c.connect()
+    result = await c.get_history('s1', limit=20, message_id='msg-10')
+    assert result == payload
+    req = next(f for f in t.sent if f.get('method') == 'chat.history')
+    assert req['params'] == {'sessionKey': 's1', 'limit': 20, 'messageId': 'msg-10'}
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_get_history_minimal_params_omits_optionals():
+    """只传 sessionKey → 不带可选 limit/messageId（spec：两者可选，None 时不下发）。"""
+    t = FakeChatTransport(rpc_payloads={'chat.history': {'messages': []}})
+    c = OpenClawChatClient(URL, 'dt', transport=t)
+    await c.connect()
+    await c.get_history('s1')
+    req = next(f for f in t.sent if f.get('method') == 'chat.history')
+    assert req['params'] == {'sessionKey': 's1'}
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_get_history_not_connected_raises():
+    c = OpenClawChatClient(URL, 'dt', transport=FakeChatTransport())
+    with pytest.raises(ChatClientError):
+        await c.get_history('s1')
+
+
+@pytest.mark.asyncio
+async def test_get_history_gateway_reject_raises():
+    t = FakeChatTransport(rpc_errors={'chat.history': {'code': 'NOT_FOUND', 'message': 'no such session'}})
+    c = OpenClawChatClient(URL, 'dt', transport=t)
+    await c.connect()
+    with pytest.raises(ChatSendError):
+        await c.get_history('missing')
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_create_session_builds_frame_and_returns_payload():
+    """发 sessions.create{key,label}，返回网关 res payload。"""
+    payload = {'session': {'key': 'new-1', 'label': '我的会话'}}
+    t = FakeChatTransport(rpc_payloads={'sessions.create': payload})
+    c = OpenClawChatClient(URL, 'dt', transport=t)
+    await c.connect()
+    result = await c.create_session('new-1', label='我的会话')
+    assert result == payload
+    req = next(f for f in t.sent if f.get('method') == 'sessions.create')
+    assert req['params'] == {'key': 'new-1', 'label': '我的会话'}
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_create_session_without_label_omits_field():
+    """免标题新建（spec：可不带 label，由网关后续派生）→ params 只含 key。"""
+    t = FakeChatTransport(rpc_payloads={'sessions.create': {'session': {'key': 'x'}}})
+    c = OpenClawChatClient(URL, 'dt', transport=t)
+    await c.connect()
+    await c.create_session('x')
+    req = next(f for f in t.sent if f.get('method') == 'sessions.create')
+    assert req['params'] == {'key': 'x'}
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_create_session_not_connected_raises():
+    c = OpenClawChatClient(URL, 'dt', transport=FakeChatTransport())
+    with pytest.raises(ChatClientError):
+        await c.create_session('x')
+
+
+@pytest.mark.asyncio
+async def test_create_session_gateway_reject_raises():
+    t = FakeChatTransport(rpc_errors={'sessions.create': {'code': 'CONFLICT', 'message': 'session exists'}})
+    c = OpenClawChatClient(URL, 'dt', transport=t)
+    await c.connect()
+    with pytest.raises(ChatSendError):
+        await c.create_session('dup')
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_delete_session_builds_frame_and_returns_payload():
+    """发 sessions.delete（admin 级），返回网关 res payload（含归档路径，可恢复）。"""
+    payload = {'deleted': True, 'archived': 'sess-1.jsonl.deleted.123.zst'}
+    t = FakeChatTransport(rpc_payloads={'sessions.delete': payload})
+    c = OpenClawChatClient(URL, 'dt', transport=t)
+    await c.connect()
+    result = await c.delete_session('sess-1')
+    assert result == payload
+    req = next(f for f in t.sent if f.get('method') == 'sessions.delete')
+    assert req['params'] == {'sessionKey': 'sess-1'}
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_delete_session_not_connected_raises():
+    c = OpenClawChatClient(URL, 'dt', transport=FakeChatTransport())
+    with pytest.raises(ChatClientError):
+        await c.delete_session('sess-1')
+
+
+@pytest.mark.asyncio
+async def test_delete_session_gateway_reject_raises():
+    """删除是 admin 级：缺 operator.admin scope → 网关拒绝 → ChatSendError。"""
+    t = FakeChatTransport(rpc_errors={
+        'sessions.delete': {'code': 'FORBIDDEN', 'message': 'missing scope operator.admin'}})
+    c = OpenClawChatClient(URL, 'dt', transport=t)
+    await c.connect()
+    with pytest.raises(ChatSendError) as exc:
+        await c.delete_session('sess-1')
+    assert 'operator.admin' in str(exc.value)
+    await c.aclose()
