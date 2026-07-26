@@ -167,7 +167,8 @@ class FakeOpenClawWire:
 class FakeWikiFileSystem:
     """WikiFileSystem Port 的内存 fake：dict 模拟 wiki/main 文件系统。
 
-    build_tree 按路径前缀归类五分类 + domains；CRUD 异常语义对齐 BindMountWikiFileSystem
+    build_tree 按页面真实顶层目录前缀分组（issue #83 物理化，开放词表不写死目录集合）；
+    CRUD 异常语义对齐 BindMountWikiFileSystem
     （FileNotFoundError / FileExistsError / NotADirectoryError / ValueError）。
     越权防护（managed 路径/目录穿越）在构造层内联 _SKIP_DIRS/_SKIP_FILES 副本——fake
     不应 import Adapter 私有常量（契约方向守护）。
@@ -197,28 +198,23 @@ class FakeWikiFileSystem:
     # —— build_tree ——
 
     def build_tree(self) -> dict:
-        _GROUP_PREFIXES = {
-            'concept': 'concepts/',
-            'entity': 'entities/',
-            'source': 'sources/',
-            'synthesis': 'syntheses/',
-            'report': 'reports/',
-        }
-        groups = []
-        for kind, prefix in _GROUP_PREFIXES.items():
-            pages = [
-                {'path': p, 'title': self._frontmatter_title(p) or self._title_for(p)}
-                for p in sorted(self.pages) if p.startswith(prefix)
-            ]
-            groups.append({'kind': kind, 'name': prefix.rstrip('/'), 'pages': pages})
-        domain_pages = [
-            {'path': p, 'title': self._frontmatter_title(p) or self._title_for(p)}
-            for p in sorted(self.pages) if p.startswith('domains/') and not any(
-                p.startswith(prefix) for prefix in _GROUP_PREFIXES.values()
+        """照实平铺：按页面真实顶层目录分组（kind=name=目录名），对齐 BindMountWikiFileSystem。
+
+        开放词表（issue #83）：不预设五分类，出现什么顶层目录就返回什么组；跳过插件私有
+        目录与占位文件；无页的目录自然不成组（pages 中无此前缀）。
+        """
+        groups: dict[str, list] = {}
+        for p in sorted(self.pages):
+            top = p.split('/', 1)[0]
+            if '/' not in p or top in self._SKIP_DIRS:
+                continue
+            if p.rsplit('/', 1)[-1] in self._SKIP_FILES:
+                continue
+            groups.setdefault(top, []).append(
+                {'path': p, 'title': self._frontmatter_title(p) or self._title_for(p)},
             )
-        ]
-        groups.append({'kind': 'domain', 'name': 'domains', 'pages': domain_pages})
-        return {'groups': groups}
+        return {'groups': [{'kind': top, 'name': top, 'pages': pages}
+                           for top, pages in groups.items()]}
 
     @staticmethod
     def _title_for(path: str) -> str:

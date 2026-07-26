@@ -41,14 +41,6 @@ class HttpHealthProbe:
 # WikiFileSystem Port 的 bind-mount Adapter（issue #100）
 # ═══════════════════════════════════════════════════════════════════════════════
 
-# 分类 → 子目录相对路径（与插件目录约定一致，r29 §4.2）
-_GROUP_DIRS = {
-    'concept': 'concepts',
-    'entity': 'entities',
-    'source': 'sources',
-    'synthesis': 'syntheses',
-    'report': 'reports',
-}
 _SKIP_DIRS = {'.openclaw-wiki', '_attachments', '_views'}
 _SKIP_FILES = {'index.md', 'AGENTS.md', 'WIKI.md', 'inbox.md'}
 _WIKILINK_RE = re.compile(r'\[\[([^\]]+)\]\]')
@@ -90,9 +82,10 @@ class _FrontmatterParser:
 
 
 class BindMountWikiFileSystem:
-    """路径2：wiki/main 直读直写（bind-mount）。封装路径约定/五分类/越权防护。
+    """路径2：wiki/main 直读直写（bind-mount）。封装路径约定/物理树分组/越权防护。
 
     构造注入 wiki_root 路径（`<home>/wiki/main`），不依赖 Instance 模型。
+    build_tree 照实平铺磁盘真实子目录（issue #83，不写死目录集合）。
     """
 
     def __init__(self, wiki_root: str) -> None:
@@ -102,21 +95,20 @@ class BindMountWikiFileSystem:
     # —— Port: build_tree ——
 
     def build_tree(self) -> dict:
-        """遍历 wiki/main 文件树：五核心分类 + domains 子树分组。"""
-        groups = []
-        for kind, sub in _GROUP_DIRS.items():
-            pages: list = []
-            self._scan_dir(self._root / sub, f'{sub}/', pages)
-            groups.append({'kind': kind, 'name': sub, 'pages': pages})
+        """照实平铺 wiki/main 根目录真实子目录：每个含页的目录成一组（kind=name=目录名）。
 
-        domain_pages: list = []
-        domains_dir = self._root / 'domains'
-        if domains_dir.is_dir():
-            for d in sorted(domains_dir.iterdir()):
-                if not d.is_dir():
-                    continue
-                self._scan_dir(d / 'papers', f'domains/{d.name}/papers/', domain_pages)
-        groups.append({'kind': 'domain', 'name': 'domains', 'pages': domain_pages})
+        开放词表（issue #83 / #75）：不预设五分类，扫描到什么返回什么——骨架目录、开放
+        domain 子目录、任意未知目录一律平等成组；递归收该目录下全部 .md；跳过插件私有
+        目录（_SKIP_DIRS）与占位文件（_SKIP_FILES）；物理存在但无页的目录不成组。
+        """
+        groups = []
+        for d in sorted(self._root.iterdir()):
+            if not d.is_dir() or d.name in _SKIP_DIRS:
+                continue
+            pages: list = []
+            self._scan_dir(d, f'{d.name}/', pages)
+            if pages:
+                groups.append({'kind': d.name, 'name': d.name, 'pages': pages})
         return {'groups': groups}
 
     # —— Port: read_page ——
@@ -185,11 +177,13 @@ class BindMountWikiFileSystem:
             raise ValueError(rel_path)
 
     def _scan_dir(self, dirpath: Path, rel_prefix: str, pages_out: list) -> None:
-        """扫描单层目录的 .md 页面。"""
+        """递归扫描目录下全部 .md 页面（跳过插件私有子目录与占位文件）。"""
         if not dirpath.is_dir():
             return
         for f in sorted(dirpath.iterdir()):
-            if not f.is_file():
+            if f.is_dir():
+                if f.name not in _SKIP_DIRS:
+                    self._scan_dir(f, f'{rel_prefix}{f.name}/', pages_out)
                 continue
             if f.suffix != '.md' or f.name in _SKIP_FILES:
                 continue
