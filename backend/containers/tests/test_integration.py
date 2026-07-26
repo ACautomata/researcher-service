@@ -49,14 +49,43 @@ def test_create_list_delete_real_container(tmp_path):
     )
     orch = InstanceOrchestrator(runtime=DockerRuntime(), config=config)
 
+    from containers.orchestrator import InstanceCleanupError
+    from containers.tests.integration_helpers import (
+        dump_container_diagnostics,
+        force_remove_tree,
+    )
+
     inst = orch.create('smoke')
     try:
-        items = {i['name']: i for i in orch.list()}
-        assert inst.name in items
-        assert items[inst.name]['status'] == 'running'
-        assert items[inst.name]['port'] == inst.port
+        try:
+            items = {i['name']: i for i in orch.list()}
+            assert inst.name in items
+            assert items[inst.name]['status'] == 'running'
+            assert items[inst.name]['port'] == inst.port
+        except BaseException:
+            # 失败自证根因（CI runner 上无从本地复现）：dump 容器 logs/inspect 供日志诊断
+            print(dump_container_diagnostics('smoke'))
+            raise
+        try:
+            assert orch.delete('smoke') is True
+        except InstanceCleanupError:
+            # CI 加固（issue #95）：容器以 0:0 运行在 bind-mount home 写 root 文件，runner 用户
+            # rmtree EACCES——经 helper 容器以 root 强删后重试 delete（只清目录 + 删行）。
+            print(dump_container_diagnostics('smoke'))
+            force_remove_tree(tmp_path / 'fleet' / 'instances' / 'smoke')
+            assert orch.delete('smoke') is True
     finally:
-        assert orch.delete('smoke') is True
+        # 兜底：确保容器/目录/行不残留（root 文件经 helper 强删）
+        runtime = DockerRuntime()
+        try:
+            orch.delete('smoke')
+        except Exception:  # pylint: disable=broad-exception-caught
+            runtime.stop('smoke')
+            runtime.remove('smoke')
+            try:
+                force_remove_tree(tmp_path / 'fleet' / 'instances' / 'smoke')
+            except Exception:  # pylint: disable=broad-exception-caught
+                pass
 
     # issue #39 验收：删除连数据删，instances/<name>/ 清除
     assert not (tmp_path / 'fleet' / 'instances' / 'smoke').exists()
@@ -92,10 +121,16 @@ def test_pair_chat_wiki_smoke_chain(tmp_path):  # pylint: disable=too-many-local
     from chat.pairing import PairingService
     from containers.docker_runtime import DockerRuntime
     from containers.models import Instance
-    from containers.orchestrator import FleetConfig, InstanceOrchestrator
+    from containers.orchestrator import (
+        FleetConfig,
+        InstanceCleanupError,
+        InstanceOrchestrator,
+    )
     from containers.tests.integration_helpers import (
         ApprovalPairer,
         GatewayReadinessWaiter,
+        dump_container_diagnostics,
+        force_remove_tree,
     )
     from integration.openclaw.adapters import HttpHealthProbe
     from integration.openclaw.translation import format_device_approve_command
@@ -131,11 +166,16 @@ def test_pair_chat_wiki_smoke_chain(tmp_path):  # pylint: disable=too-many-local
         # —— 2. 配对（spec §8.1）：先等网关 /health 就绪（冷启动 race，codex P2），再真 Ed25519
         #         握手；遇 PAIRING_REQUIRED 经容器内 approve，轮询 ensure_paired 至 paired
         #         （detach exec 不可同步等，须独立超时轮询）——
-        GatewayReadinessWaiter(
-            HttpHealthProbe(),
-            timeout=_GATEWAY_READINESS_TIMEOUT,
-            interval=_GATEWAY_POLL_INTERVAL,
-        ).wait(inst.port)
+        try:
+            GatewayReadinessWaiter(
+                HttpHealthProbe(),
+                timeout=_GATEWAY_READINESS_TIMEOUT,
+                interval=_GATEWAY_POLL_INTERVAL,
+            ).wait(inst.port)
+        except BaseException:
+            # 网关不就绪自证根因（CI runner 无从本地复现）：dump 容器 logs/inspect 供诊断
+            print(dump_container_diagnostics(name))
+            raise
         def approve(request_id):
             cmd = format_device_approve_command(request_id).split()
             orch.exec_in_container(inst.name, cmd)
@@ -186,13 +226,24 @@ def test_pair_chat_wiki_smoke_chain(tmp_path):  # pylint: disable=too-many-local
                 assert {'path', 'title', 'category', 'excerpt'} <= set(page)
 
         # —— 5. 删除连数据删（issue #39）：instances/<name>/ 清除 + Instance 行清除 ——
-        assert orch.delete(name) is True
+        try:
+            assert orch.delete(name) is True
+        except InstanceCleanupError:
+            # CI 加固（issue #95）：容器 0:0 写在 bind-mount home 的 root 文件，runner 用户 rmtree
+            # EACCES——经 helper 容器以 root 强删后重试 delete（只清目录 + 删行）。
+            print(dump_container_diagnostics(name))
+            force_remove_tree(tmp_path / 'fleet' / 'instances' / name)
+            assert orch.delete(name) is True
         assert not (tmp_path / 'fleet' / 'instances' / name).exists()
         assert not Instance.objects.filter(name=name).exists()
     finally:
-        # 兜底：任一步骤失败时确保容器不残留（best-effort，不 assert 目录/行）
+        # 兜底：任一步骤失败时确保容器/目录/行不残留（root 文件经 helper 强删）
         try:
             orch.delete(name)
         except Exception:  # pylint: disable=broad-exception-caught
             runtime.stop(name)
             runtime.remove(name)
+            try:
+                force_remove_tree(tmp_path / 'fleet' / 'instances' / name)
+            except Exception:  # pylint: disable=broad-exception-caught
+                pass

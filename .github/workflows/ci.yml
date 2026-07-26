@@ -56,9 +56,9 @@ jobs:
         working-directory: backend
     env:
       RUN_INTEGRATION: "1"
-      # pin 具体 tag（勿用浮动 latest）；与 tests/test_ci_workflow.py 的 OPENCLAW_IMAGE 单一真值同步。
-      OPENCLAW_IMAGE: acautomata/openclaw-docker-cn-im:2026.7.1
-      LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+      # pin immutable digest（勿用浮动 latest/tag——tag 可变，供应链可被重推恶意镜像；digest 经
+      # Docker Hub API 核实，与 tests/test_ci_workflow.py 的 OPENCLAW_IMAGE 单一真值同步）。
+      OPENCLAW_IMAGE: acautomata/openclaw-docker-cn-im:2026.7.1@sha256:d66052d90733e2c054b71e32be066ade802f870bedac7a31ebaf13cd61af2624
       OPENCLAW_TEMPLATE_DIR: ${{ github.workspace }}/researcher-template
     steps:
       - uses: actions/checkout@v7
@@ -99,7 +99,10 @@ jobs:
           done
           docker save "$OPENCLAW_IMAGE" -o /tmp/openclaw-image.tar
       # 真容器全链路冒烟：一次跑透，断言失败即红（不重试）。就绪轮询（非固定 sleep）在测试内。
+      # LLM_API_KEY 收窄到本步（step 级 env）——不暴露给 checkout/cache/pull/cleanup 无关步骤。
       - name: Container smoke
+        env:
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
         run: python -m pytest containers/tests/test_integration.py -v
       # AC7：无论成败清理——按 fleet label 精准删除本 job 容器（不误删非本 job 容器）+ 回收端口/磁盘。
       - name: Cleanup smoke containers

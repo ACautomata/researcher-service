@@ -237,8 +237,13 @@ def test_backend_unit_pylint_no_django_settings_env_fallback() -> None:
 # 「不在本票引入 GitHub Secret 真实 LLM key」一条；本组断言只锚「引 secret 变量 + 不在脚本
 # 文本回显其值」，不锚密钥字面值（防 CI 日志泄露真实 key 由 GitHub secret 掩码 + 不回显双保）。
 
-# pin 具体 tag（勿用浮动 latest）。与 ci.yml 单一真值同步；digest 见 docs/research/r6-docker-image-mount.md。
-OPENCLAW_IMAGE = "acautomata/openclaw-docker-cn-im:2026.7.1"
+# pin 具体 digest（勿用浮动 latest/tag——tag 可变，供应链可被重推恶意镜像；digest immutable）。
+# 与 ci.yml 单一真值同步；digest 经 Docker Hub API 核实（2026-07-27，= latest/main-3c68ead，
+# 见 docs/research/r6-docker-image-mount.md）。
+OPENCLAW_IMAGE = (
+    "acautomata/openclaw-docker-cn-im:2026.7.1"
+    "@sha256:d66052d90733e2c054b71e32be066ade802f870bedac7a31ebaf13cd61af2624"
+)
 
 
 def _container_smoke_job(workflow: dict) -> dict:
@@ -271,18 +276,32 @@ def test_container_smoke_timeout_minutes() -> None:
 
 
 def test_container_smoke_env_contract() -> None:
-    """AC2：job env 设 RUN_INTEGRATION=1 / 非 latest 的 OPENCLAW_IMAGE / LLM_API_KEY(secret) /
-    OPENCLAW_TEMPLATE_DIR。"""
+    """AC2：job env 设 RUN_INTEGRATION=1 / digest-pin 的 OPENCLAW_IMAGE / OPENCLAW_TEMPLATE_DIR。
+    （LLM_API_KEY 的注入与收窄由 test_container_smoke_secret_scoped_to_needed_step 锚定。）"""
     env = _container_smoke_job(_load()).get("env") or {}
     assert env.get("RUN_INTEGRATION") == "1"
     image = env.get("OPENCLAW_IMAGE")
-    assert image == OPENCLAW_IMAGE, f"OPENCLAW_IMAGE 须 pin 具体 tag：{image}"
+    assert image == OPENCLAW_IMAGE, f"OPENCLAW_IMAGE 须 pin digest：{image}"
+    assert "@sha256:" in str(image), "须按 immutable digest pin（防 tag 重推供应链投毒）"
     assert not str(image).endswith(":latest"), "勿用浮动 latest"
-    llm_key = env.get("LLM_API_KEY")
-    assert llm_key == "${{ secrets.LLM_API_KEY }}", (
-        f"LLM_API_KEY 应引 GitHub Secret 变量，实际 {llm_key!r}"
-    )
     assert "OPENCLAW_TEMPLATE_DIR" in env, "env 缺 OPENCLAW_TEMPLATE_DIR"
+
+
+def test_container_smoke_secret_scoped_to_needed_step() -> None:
+    """AC8 强化（安全审查）：LLM_API_KEY 仅注入需它的 pytest 步骤（step 级 env），
+    不暴露给 checkout/cache/pull/cleanup 等无关步骤。"""
+    job = _container_smoke_job(_load())
+    job_env = job.get("env") or {}
+    assert "LLM_API_KEY" not in job_env, (
+        "LLM_API_KEY 不应放 job 级 env（应 step 级收窄暴露面）"
+    )
+    holders = [s for s in job["steps"] if "LLM_API_KEY" in (s.get("env") or {})]
+    assert len(holders) == 1, f"LLM_API_KEY 应仅注入单一步骤，实际 {len(holders)} 个"
+    holder = holders[0]
+    assert "pytest" in (holder.get("run") or ""), (
+        "LLM_API_KEY 应仅注入跑集成测试的 pytest 步骤"
+    )
+    assert holder["env"]["LLM_API_KEY"] == "${{ secrets.LLM_API_KEY }}"
 
 
 def test_container_smoke_caches_docker_image() -> None:
