@@ -5,6 +5,7 @@ integration.openclaw.wire 同对象）、集成包暴露 4 Port、集成包不�
 
 只断言**契约**（单一来源 / 依赖方向），不断言「哪个常量搬到哪」——那是测实现细节。
 """
+import inspect
 import pytest
 
 from chat import chat_client, event_translate, pairing_ws
@@ -701,6 +702,39 @@ class TestPairingAdapterImplementsWirePort:
 
         with pytest.raises(PairingError):
             asyncio.run(_run())
+
+    # ── regression: codex P1 ──────────────────────────────────────────────
+
+    def test_default_connect_is_sync_factory(self):
+        """_default_connect 是同步工厂（非 coroutine），
+        pair() 用 async with 打开连接时不 TypeError。"""
+        from integration.openclaw.adapters import OpenClawWireAdapter
+
+        assert not inspect.iscoroutinefunction(
+            OpenClawWireAdapter._default_connect
+        ), '_default_connect 应是同步工厂，返回 async context manager 而非 coroutine'
+
+    # ── regression: codex P2 ──────────────────────────────────────────────
+
+    def test_pair_accepts_positional_args(self):
+        """pair() 支持位置参数（与 OpenClawWire Port 和 FakeOpenClawWire 一致）。"""
+        import asyncio
+        from chat.device_crypto import DeviceCrypto
+        from chat.tests.fakes import FakeTransport
+        from integration.openclaw.adapters import OpenClawWireAdapter
+
+        identity = DeviceCrypto.generate_identity()
+        transport = FakeTransport.hello_ok(device_token='dt-pos')
+        adapter = OpenClawWireAdapter(transport=transport)
+
+        async def _run():
+            # 位置参数调用，非关键字
+            return await adapter.pair(
+                'ws://127.0.0.1:19000/', identity, 'gw-tok',
+            )
+
+        result = asyncio.run(_run())
+        assert result.device_token == 'dt-pos'
 
 
 class TestFakeOpenClawWirePairing:

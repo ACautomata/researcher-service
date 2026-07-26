@@ -226,13 +226,13 @@ class OpenClawWireAdapter:
         self._timeout = timeout
 
     @staticmethod
-    async def _default_connect(url: str):
+    def _default_connect(url: str):
         """默认 transport：websockets.connect（惰性 import，避免测试依赖真连接）。"""
         import websockets
 
         return websockets.connect(url)
 
-    async def pair(self, *, url: str, identity: Any, bootstrap_token: str) -> Any:
+    async def pair(self, url: str, identity: Any, bootstrap_token: str) -> Any:
         """配对握手（spec §8.1）：challenge(nonce) → connect(device 签名) → PairingResult。
 
         三分支：PairingResult(hello-ok) / PairingRequired(requestId) / PairingError。
