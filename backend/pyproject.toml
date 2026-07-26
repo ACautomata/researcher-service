@@ -10,3 +10,48 @@ asyncio_default_fixture_loop_scope = "function"
 [tool.ruff]
 line-length = 100
 target-version = "py313"
+
+# ---- pylint：语义/类型层（风格交给 ruff，见 [tool.ruff]）----
+[tool.pylint.MAIN]
+load-plugins = "pylint_django"
+django-settings-module = "config.settings.dev"
+py-version = "3.13"
+jobs = 0                      # 0 = 按 CPU 核数并行
+ignore-paths = [".*/migrations/.*"]   # migrations 由 Django 生成，不纳入语义检查
+
+[tool.pylint."MESSAGES CONTROL"]
+# 三类一并收敛：(a) 与 ruff 默认集重叠避免双报；(b) Django/DRF/pytest 已知误报；(c) 本仓 baseline 不追求的风格项
+disable = [
+    # (a) ruff 已管（pyflakes/pycodestyle 重叠，交 ruff 单一来源）
+    "line-too-long",            # ruff E501
+    "unused-import",            # ruff F401
+    "unused-variable",          # ruff F841
+    "wildcard-import",          # ruff F403（settings dev/prod 的 import * 是有意的）
+    "unused-wildcard-import",   # ruff F403
+    "wrong-import-order",       # 交给 ruff I（isort）边界，本仓未开 I 则此条静默
+    "ungrouped-imports",
+    "wrong-import-position",
+    "reimported",
+    # (b) Django/DRF/pytest 已知误报（实测命中，app 源码层面价值低）
+    "abstract-method",          # W0223 DRF Serializer.create/update 误报 ×37
+    "redefined-outer-name",     # W0621 pytest fixture 注入与外层重名 ×441（几乎全在 tests）
+    "unused-argument",          # W0613 pytest fixture 形参(db/api)不都用 ×125
+    "import-outside-toplevel",  # C0415 测试/ASGI 内局部 import 是惯例 ×49
+    "protected-access",         # W0212 测试触私有方法 _run_handshake 等 ×36
+    # (c) 本仓 baseline：不追求全开严格度
+    "missing-docstring",        # C0114/0115/0116 docstring 不强制
+    "too-few-public-methods",   # R0903 Django Model/Form/Serializer/Meta 天然触发
+    "too-many-ancestors",       # R0901 DRF generic view 继承链深是正常的
+    "fixme",                    # W0511 TODO/FIXME 注释不报警
+    "duplicate-code",           # R0801 噪音大、价值低
+]
+# 说明：no-member 不在 disable 之列 —— pylint-django 已正确抑制 ORM 误报，保留以抓真实属性错误。
+
+[tool.pylint.BASIC]
+good-names = ["i", "j", "k", "e", "f", "_", "pk", "id", "qs", "db"]
+
+[tool.pylint.DESIGN]
+max-args = 7                  # 放宽默认，减少 too-many-* 设计气味噪音
+max-locals = 20
+max-branches = 15
+max-attributes = 10
