@@ -23,7 +23,14 @@ export const useCategoriesStore = defineStore('categories', {
     async loadCategories(name: string): Promise<void> {
       const seq = ++this._loadSeq
       this.pending = name // 同步记录目标（不等响应），供早退判重
-      const cats = await getCategories(name)
+      let cats: CategoriesDTO
+      try {
+        cats = await getCategories(name)
+      } catch (e) {
+        // 失败且该次仍是最新：回滚 pending 到已提交的 current，否则重试同一容器会被早退吞掉（codex P2）
+        if (seq === this._loadSeq) this.pending = this.current
+        throw e
+      }
       if (seq !== this._loadSeq) return // 过期响应：已有更新的加载，丢弃
       this.current = name
       this._assignGroups(cats)

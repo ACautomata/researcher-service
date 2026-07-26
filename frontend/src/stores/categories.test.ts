@@ -157,4 +157,20 @@ describe('categories store', () => {
     await p
     expect(s.current).toBe('other')
   })
+
+  // codex P2（round3）：加载失败后 pending 回滚，重试同一容器不被早退吞掉
+  it('failed load rolls back pending so the same container can be retried', async () => {
+    ;(getCategories as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce(CATS) // demo 首载成功
+      .mockRejectedValueOnce(new Error('network')) // other 失败
+      .mockResolvedValueOnce({ o: [{ path: 'o.md', title: 'O', category: 'o', excerpt: '' }] }) // other 重试成功
+    const s = useCategoriesStore()
+    await s.loadCategories('demo')
+    await expect(s.switchContainer('other')).rejects.toThrow('network')
+    // 失败后 pending 不残留为 other：重试 other 不应被早退
+    await s.switchContainer('other')
+    expect(getCategories).toHaveBeenCalledTimes(3)
+    expect(s.current).toBe('other')
+    expect(Object.keys(s.groups)).toEqual(['o'])
+  })
 })
