@@ -36,6 +36,7 @@ INSTALLED_APPS = [
     'wiki',
     'models',
     'chat',
+    'security',
 ]
 
 MIDDLEWARE = [

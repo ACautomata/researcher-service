@@ -42,6 +42,26 @@ challenge → 宿主 approve → deviceToken，spec §8.1 / issue #36 已证）�
 
 ## 前置
 
+## 凭证加密与密钥轮换
+
+后端将 `Instance.token`、`Pairing.private_key_pem` 和 `Pairing.device_token` 以 AES-256-GCM 密文持久化。生产环境必须通过环境变量注入密钥，绝不能将密钥提交到 `.env.example`、镜像或日志中：
+
+```bash
+export CREDENTIAL_ENCRYPTION_KEYS="<current-base64url-key>,<previous-base64url-key>"
+```
+
+每个 key 必须是 32 字节的 base64url 编码值；第一个是当前写入 key，后续 key 仅用于读取历史密文。使用部署平台的 secret store 或受控环境注入该变量。
+
+轮换步骤：
+
+1. 备份数据库，并记录当前 key ring。
+2. 生成新 32 字节 key；将它放在 `CREDENTIAL_ENCRYPTION_KEYS` 的第一个位置，旧 key 保留在后面。
+3. 重启后端使新配置生效，执行 `cd backend && python manage.py rotate_credential_keys`。
+4. 验证命令成功、应用可读取既有实例和配对记录，并完成数据库备份校验。
+5. 从环境变量移除旧 key，再次重启后端；此时旧 key 可以安全下线。
+
+若怀疑 key 泄露：立即限制密钥访问权限，按以上流程生成并启用新 key、执行重加密、移除泄露 key；同时撤销并重新配对受影响设备、轮换网关 token，并审计部署平台与数据库访问日志。
+
 - Docker + compose plugin
 - 后端 Django 经容器宿主映射端口（池 `19000–19999`）+ 每容器 `GATEWAY_TOKEN` 访问网关；本单容器栈默认
   收敛到 `127.0.0.1:18789`。
