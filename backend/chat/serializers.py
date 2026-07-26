@@ -6,11 +6,6 @@ device_token（凭证）——仅暴露 status/device_id/scopes/pairing_request_
 from rest_framework import serializers
 
 from chat.models import Pairing
-from integration.openclaw.translation import (
-    APPROVAL_FIELD_DECISION,
-    APPROVAL_FIELD_ID,
-    APPROVAL_FIELD_KIND,
-)
 
 
 class ApprovalResolveSerializer(serializers.Serializer):

@@ -42,8 +42,8 @@
 | `F401` | `unused-import` (W0611) | pylint `disable` → ruff 单一来源 |
 | `F841` | `unused-variable` (W0612) | pylint `disable` → ruff 单一来源 |
 | `F403`/`F405` | `wildcard-import` (W0401/W0614) | pylint `disable` → ruff 单一来源 |
-| `BLE001` (ruff) | `broad-exception-caught` (W0718) | 两边都报但目的不同：ruff BLE001 打禁止盲异常标记；pylint W0718 打宽捕获标记。本仓统一在 pylint 层做局部豁免（故障隔离模式有意为之），ruff BLE001 是预存噪音（未配 `.ruff.toml` ignore）。 |
-| `S110`/`S112` (ruff, bandit) | N/A（pylint 无对应） | ruff bandit 安全规则——本仓 `except` 部分与 pylint `broad-exception-caught` 同源（故障隔离）；raise-without-from-inside-except (B904) 已由 pylint `raise-missing-from` 覆盖。 |
+| `BLE001` (ruff) | `broad-exception-caught` (W0718) | 两边都报但目的不同：ruff BLE001 打禁止盲异常标记；pylint W0718 打宽捕获标记。本仓统一在 pylint 层做局部豁免（故障隔离模式有意为之）；ruff BLE001 已在 `[tool.ruff.lint] extend-ignore` 全局收口（不再报）。 |
+| `S110`/`S112` (ruff, bandit) | N/A（pylint 无对应） | ruff bandit 安全规则——本仓 `except` 部分与 pylint `broad-exception-caught` 同源（故障隔离），已与 BLE001 一并在 `[tool.ruff.lint] extend-ignore` 收口。raise-without-from-inside-except (B904) 已由 pylint `raise-missing-from` 覆盖。 |
 
 ### 双报验证
 
@@ -61,7 +61,7 @@ python -m ruff check accounts chat config containers models wiki
 python -m pylint accounts chat config containers models wiki
 ```
 
-输出预期：ruff 仅报预存噪音（F401、RUF012 等）；pylint exit 0。
+输出预期：ruff check 退出码 0（预存噪音 F401/RUF012 等已收敛，BLE001/S110/S112 经 extend-ignore 收口、migrations 经 extend-exclude 跳过）；pylint exit 0。
 
 ## 维护约定
 
@@ -70,3 +70,4 @@ python -m pylint accounts chat config containers models wiki
 - 源码中的 `# pylint: disable=...` 一行注释是**局部豁免**（文件/函数/行级），对应异常类型各有说明
 - 新增代码若触发 pylint 新规则：优先全局 fix；若为有意的设计权衡则加局部豁免并在此文档登记
 - ruff 规则扩展只需在 `[tool.ruff.lint]` 追加 `extend-select` 条目，不干扰 pylint disable 集
+- 故障隔离异常模式（BLE001/S110/S112）在 `[tool.ruff.lint] extend-ignore` 收口；migrations 目录在 `[tool.ruff] extend-exclude` 跳过。新增同类模式/路径在此登记

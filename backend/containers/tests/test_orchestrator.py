@@ -15,7 +15,6 @@ from django.db import IntegrityError
 from containers.models import Instance
 from containers.orchestrator import (  # pylint: disable=too-many-positional-arguments
     ConfigurationError,
-    Fleet,
     FleetConfig,
     InstanceBusy,
     InstanceCleanupError,
@@ -70,7 +69,7 @@ def orch(config, runtime, health, tmp_path):
 @pytest.mark.django_db
 def test_create_provisions_home_and_renders_config(orch, config):
     # spec §5.5/§5.6：cp -a 预填充 home + 渲染 openclaw.json 落到 instances/<name>/
-    inst = orch.create('demo')
+    orch.create('demo')
     home = config.root / 'instances' / 'demo' / 'home'
     assert (home / 'workspace' / 'note.md').read_text() == 'hi'
     cfg_file = config.root / 'instances' / 'demo' / 'openclaw.json'
@@ -143,9 +142,9 @@ def test_create_rolls_back_on_runtime_failure(config, health, tmp_path):
 
 @pytest.mark.django_db
 def test_create_rejects_duplicate_name(orch):
-    # spec §10 name 唯一；DB 唯一约束 → 第二次 IntegrityError（API 层转 400，见 test_api）
+    # spec §10 name 唯一；DB 唯一约束 → _reserve_row 转译 InstanceExists（view 409）
     orch.create('demo')
-    with pytest.raises(Exception):
+    with pytest.raises(InstanceExists):
         orch.create('demo')
 
 
@@ -515,7 +514,7 @@ def test_create_rollback_skips_remove_when_run_not_attempted(config, health, tmp
     orch = InstanceOrchestrator(runtime=runtime, config=config, health_probe=health)
     # 让 config_path.write_text 之前的 provision 失败：把 template_dir 指向不存在路径
     orch._provisioner = HomeProvisioner(tmp_path / 'no-such-template')
-    with pytest.raises(Exception):
+    with pytest.raises(FileNotFoundError):
         orch.create('demo')
     assert runtime.run_specs == []                 # pylint: disable=use-implicit-booleaness-not-comparison
     assert runtime.removed == []                   # pylint: disable=use-implicit-booleaness-not-comparison
@@ -1076,7 +1075,7 @@ def test_delete_skips_rmtree_when_row_gone_before_cleanup(orch, runtime, config,
 
     # recreate —— 新行、新目录、新 PK
     orch.create('demo')
-    inst_new = Instance.objects.get(name='demo')
+    _ = Instance.objects.get(name='demo')  # 行已重建（DoesNotExist 即失败）
     assert (instance_dir / 'home' / 'workspace' / 'note.md').exists()  # 新 provision 已完成
 
     # monkeypatch Instance.objects.filter：**第二次**对 name='demo' 的查询返回空
@@ -1116,7 +1115,7 @@ def test_fleet_get_survives_missing_template_file(tmp_path, settings):
     """codex R7 P2 :509：Fleet._build_default() 仍急切 Path.read_text() 模板 JSON。
     模板文件缺失时 Fleet.get() 崩溃 → list/delete 全部 500，运维无法恢复。
     """
-    from containers.orchestrator import Fleet, InstanceOrchestrator
+    from containers.orchestrator import Fleet
 
     # 用正确的模板文件路径，但模板 JSON 本身是无效内容——模拟文件存在但格式错误
     bad_template = tmp_path / 'broken.json'

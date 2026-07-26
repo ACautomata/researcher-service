@@ -1,5 +1,5 @@
 """开发/测试环境 settings。"""
-from .base import *  # noqa: F401,F403 — Django settings 分层惯例
+from .base import *
 
 DEBUG = True
 ALLOWED_HOSTS = ['*']

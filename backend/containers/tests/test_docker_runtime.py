@@ -11,7 +11,7 @@ import pytest
 from containers.runtime import ContainerSpec
 
 pytest.importorskip('docker')  # build_run_kwargs 不需 daemon，但 docker_runtime 顶部 import docker
-from containers.docker_runtime import DockerRuntime  # noqa: E402
+from containers.docker_runtime import DockerRuntime
 
 
 def _spec() -> ContainerSpec:

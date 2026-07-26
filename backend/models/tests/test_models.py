@@ -5,6 +5,8 @@ instance(FK CASCADE) / provider_id / api / base_url / api_key_env_id / auth_head
 models_json(JSON) / created_at；unique(instance, provider_id)。
 """
 import pytest
+from django.core.exceptions import ValidationError
+from django.db.utils import IntegrityError
 
 from containers.models import Instance
 from models.config_builder import ProviderSpec
@@ -52,7 +54,7 @@ def test_create_round_trips_fields(instance):
 @pytest.mark.django_db
 def test_unique_instance_provider_id(instance):
     _provider(instance, provider_id='dup')
-    with pytest.raises(Exception):
+    with pytest.raises(IntegrityError):
         _provider(instance, provider_id='dup')
 
 
@@ -88,11 +90,11 @@ def test_as_spec_returns_provider_spec_with_parsed_models(instance):
 
 
 def test_validators_reject_invalid_shapes():
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         PROVIDER_ID_VALIDATOR('Bad/Name')      # 大写/分隔符
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         PROVIDER_ID_VALIDATOR('1starts-digit')  # 数字开头
     PROVIDER_ID_VALIDATOR('my-openai')         # 合法不抛
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         ENV_ID_VALIDATOR('lowercase')          # 必须 [A-Z] 开头
     ENV_ID_VALIDATOR('LLM_API_KEY')            # 合法不抛

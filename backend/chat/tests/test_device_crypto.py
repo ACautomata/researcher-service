@@ -9,9 +9,6 @@ import base64
 import hashlib
 
 from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric.ed25519 import (
-    Ed25519PrivateKey,
-)
 
 from chat.device_crypto import DeviceCrypto, DeviceIdentity
 

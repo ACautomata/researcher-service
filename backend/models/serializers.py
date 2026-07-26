@@ -15,7 +15,6 @@ from models.models import (
     API_CHOICES,
     ENV_ID_VALIDATOR,
     PROVIDER_ID_VALIDATOR,
-    ModelProvider,
 )
 
 

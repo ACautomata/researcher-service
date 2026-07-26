@@ -5,7 +5,7 @@ from django.core.exceptions import ImproperlyConfigured
 
 from security.credential_cipher import CredentialKeySettings
 
-from .base import *  # noqa: F401,F403 — Django settings 分层惯例
+from .base import *
 
 SECRET_KEY = os.environ['DJANGO_SECRET_KEY']  # 生产强制注入，缺失即 KeyError
 DEBUG = False

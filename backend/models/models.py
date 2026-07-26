@@ -61,13 +61,13 @@ class ModelProvider(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        constraints = [
+        constraints = (
             models.UniqueConstraint(
                 fields=['instance', 'provider_id'],
                 name='unique_instance_provider_id',
             ),
-        ]
-        ordering = ['created_at', 'id']
+        )
+        ordering = ('created_at', 'id')
 
     def __str__(self) -> str:
         return f'{self.instance_id}/{self.provider_id}'

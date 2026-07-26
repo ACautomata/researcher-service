@@ -139,7 +139,7 @@ def test_me_rejects_without_token(api):
 
 @pytest.mark.django_db
 def test_me_returns_user_with_token(api):
-    bob = User.objects.create_user(username='bob', password='strong-pass-456')
+    User.objects.create_user(username='bob', password='strong-pass-456')
     login = api.post(
         '/api/v1/auth/login',
         {'username': 'bob', 'password': 'strong-pass-456'},

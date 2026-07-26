@@ -182,8 +182,7 @@ class _WikilinkResolver:
         if t in self._ids:
             return t
         stem = t.rsplit('/', 1)[-1]
-        if stem.endswith('.md'):
-            stem = stem[:-3]
+        stem = stem.removesuffix('.md')
         if stem in self._by_stem:
             return self._by_stem[stem]
         if t in self._by_title:

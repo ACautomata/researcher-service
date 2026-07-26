@@ -22,7 +22,7 @@ from .serializers import (
 class RegisterView(APIView):
     """本地账号注册（spec §3）。公开，不参与 JWT 拦截。"""
 
-    permission_classes = [AllowAny]
+    permission_classes = (AllowAny,)
 
     @extend_schema(request=RegisterSerializer, responses={201: UserSerializer})
     def post(self, request):
@@ -35,10 +35,10 @@ class RegisterView(APIView):
 class LoginView(APIView):
     """登录：access(JSON body) + refresh(httpOnly cookie)，spec §3。"""
 
-    permission_classes = [AllowAny]
+    permission_classes = (AllowAny,)
     # codex round-4 F4：只接受 JSON。HTML <form> 无法发 application/json，
     # 故切断跨站表单登录 CSRF（攻击者无法用跨站 form 在受害者浏览器种攻击者 refresh cookie）。
-    parser_classes = [JSONParser]
+    parser_classes = (JSONParser,)
 
     @extend_schema(request=LoginSerializer, responses=AccessTokenSerializer)
     def post(self, request):
@@ -102,7 +102,7 @@ class _OIDCPlaceholderView(APIView):
     骨架期真实 IdP 集成 out-of-scope（map #25），即便配置完整也仍 501「未接入」。
     """
 
-    permission_classes = [AllowAny]
+    permission_classes = (AllowAny,)
 
     @staticmethod
     def _provider_configured(provider: str) -> bool:

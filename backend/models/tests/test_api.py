@@ -243,7 +243,7 @@ def test_rewrite_failure_leaves_existing_config_intact(fleet, demo_instance):
         api_key_env_id='LLM_API_KEY', models_json=[{'id': 'm', 'name': 'M'}],
     )
     import pytest as _pytest
-    with _pytest.raises(Exception):
+    with _pytest.raises(OSError):
         fleet['orch'].rewrite_config('demo')
     # 既有 openclaw.json 原样保留（未被截断/污染）
     assert _json.loads(cfg_path.read_text()) == good

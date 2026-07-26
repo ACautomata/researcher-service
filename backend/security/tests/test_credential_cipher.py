@@ -68,6 +68,6 @@ class TestCredentialKeySettings:
         first = base64.urlsafe_b64encode(bytes(range(32))).decode('ascii').rstrip('=')
         second = base64.urlsafe_b64encode(bytes(reversed(range(32)))).decode('ascii').rstrip('=')
         keys = CredentialKeySettings(
-            {'CREDENTIAL_ENCRYPTION_KEYS': f'{first},{second}'}
+            {'CREDENTIAL_ENCRYPTION_KEYS': f'{first},{second}'},
         ).load()
         assert keys == (bytes(range(32)), bytes(reversed(range(32))))

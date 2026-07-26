@@ -173,8 +173,8 @@ class FakeWikiFileSystem:
     不应 import Adapter 私有常量（契约方向守护）。
     """
 
-    _SKIP_DIRS = {'.openclaw-wiki', '_attachments', '_views'}
-    _SKIP_FILES = {'index.md', 'AGENTS.md', 'WIKI.md', 'inbox.md'}
+    _SKIP_DIRS = frozenset({'.openclaw-wiki', '_attachments', '_views'})
+    _SKIP_FILES = frozenset({'index.md', 'AGENTS.md', 'WIKI.md', 'inbox.md'})
 
     def __init__(self) -> None:
         self.pages: dict[str, str] = {}  # rel_path → content
@@ -223,7 +223,7 @@ class FakeWikiFileSystem:
     @staticmethod
     def _title_for(path: str) -> str:
         stem = path.rsplit('/', 1)[-1]
-        return stem[:-3] if stem.endswith('.md') else stem
+        return stem.removesuffix('.md')
 
     def _frontmatter_title(self, rel_path: str) -> str | None:
         """从页面的 frontmatter 取 paper.title / title，没有返回 None。"""

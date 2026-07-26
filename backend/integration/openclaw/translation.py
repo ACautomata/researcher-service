@@ -9,7 +9,6 @@
 """
 from typing import Any
 
-
 # ── 配对状态字段常量 ──────────────────────────────────────────────────
 
 PAIRING_FIELD_STATUS = 'status'

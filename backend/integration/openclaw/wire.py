@@ -10,7 +10,6 @@ connect 帧标识（client_id / mode / role / agent_id）、operator 权限 scop
 - 标识符（runId / sessionKey / deviceToken 等）保留 OpenClaw 原生命名、集中管理、不翻译。
 """
 import time
-import uuid
 
 # 协议版本（spec §8.1 / r13 §5.4）
 PROTOCOL = 4

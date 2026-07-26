@@ -165,7 +165,7 @@ def test_history_success(authed, instance, override_pool):
         'hasMore': True,
         'nextOffset': 42,
     }
-    method, args, kwargs = client.calls[0]
+    method, args, _kwargs = client.calls[0]
     assert method == 'get_history'
     assert args[0] == 'sk-1'
 
@@ -201,7 +201,7 @@ def test_create_session_success(authed, instance, override_pool):
     resp = authed.post(LIST_URL, {'label': '新会话'}, format='json')
     assert resp.status_code == 201
     assert resp.json()['session_key'] == 'sk-new'
-    method, args, kwargs = client.calls[0]
+    method, _args, kwargs = client.calls[0]
     assert method == 'create_session'
     assert kwargs.get('label') == '新会话'
 
@@ -248,7 +248,7 @@ def test_delete_session_success(authed, instance, override_pool):
     override_pool(_FakePool(client))
     resp = authed.delete(DELETE_URL)
     assert resp.status_code == 204
-    method, args, kwargs = client.calls[0]
+    method, args, _kwargs = client.calls[0]
     assert method == 'delete_session'
     assert args[0] == 'sk-1'
 

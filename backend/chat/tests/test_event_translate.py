@@ -291,8 +291,3 @@ def test_delta_message_variant_returns_empty(translator):
 def test_chat_event_without_state_returns_empty(translator):
     frame = {'type': 'event', 'event': 'chat', 'payload': {'runId': 'r1'}}
     assert translator.translate(frame) == []
-
-
-def test_unknown_state_returns_empty(translator):  # pylint: disable=function-redefined
-    # 未知 state 不猜测，留待协议实测明确后再扩展
-    assert translator.translate(_chat('streaming')) == []

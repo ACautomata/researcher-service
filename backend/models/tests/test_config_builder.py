@@ -110,7 +110,7 @@ def test_multiple_providers_primary_first_rest_fallbacks():
 
 def test_deleted_provider_leaves_no_dangling_references():
     # 模拟「先有两个 provider，删除第一个」：重新 build 后 primary/fallbacks/aliases 里不得出现被删 pid
-    a = _spec(pid='pa', models=[{'id': 'a1', 'name': 'A1'}])
+    _ = _spec(pid='pa', models=[{'id': 'a1', 'name': 'A1'}])
     b = _spec(pid='pb', models=[{'id': 'b1', 'name': 'B1'}])
     out = ProviderConfigBuilder().build({}, [b])  # 仅剩 b
     providers = out['models']['providers']

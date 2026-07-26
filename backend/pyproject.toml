@@ -10,6 +10,8 @@ asyncio_default_fixture_loop_scope = "function"
 [tool.ruff]
 line-length = 100
 target-version = "py313"
+# Django 自动生成的 migrations 不纳入检查（对齐 pylint ignore-paths = [".*/migrations/.*"]）
+extend-exclude = ["**/migrations"]
 
 [tool.ruff.lint]
 # 规则分配见 docs/ruff-pylint-boundary.md
@@ -18,6 +20,13 @@ extend-select = [
     "I",       # isort（import 排序）
     "COM",     # flake8-commas（尾逗号）
     "PIE",     # flake8-pie（禁止模式）
+]
+# 全局静默：被 docs/ruff-pylint-boundary.md §45/§46 定性为"故障隔离、有意为之"的异常处理模式
+# （容器编排/事件翻译等模块靠宽捕获 + 静默续命做故障隔离，改语义会破坏该不变量）
+extend-ignore = [
+    "BLE001",  # blind-except：宽捕获是故障隔离模式（文档§45）
+    "S110",    # try-except-pass：静默吞异常是故障隔离模式（文档§46）
+    "S112",    # try-except-continue：同上
 ]
 
 # I001 isort 的 known-first-party
