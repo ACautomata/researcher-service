@@ -4,13 +4,18 @@
 - HttpHealthProbe（路径3，#99）—— 构造注入 http client，http://127.0.0.1:<port>/health
 - BindMountWikiFileSystem（路径2，#100）—— 封装路径约定/五分类/越权防护，wiki/main 直读直写
 - #101 DockerContainerRuntime
-- #102-103 OpenClawWireAdapter
+- OpenClawWireAdapter（路径4，#102-103）—— 配对握手 + 长连接 Adapter
 """
 from __future__ import annotations
 
+import asyncio
+import json
 import re
 import urllib.request
 from pathlib import Path
+from typing import Any
+
+from integration.openclaw.wire import ConnectFrameBuilder, REQUIRED_SCOPES
 
 
 class HttpHealthProbe:
@@ -202,3 +207,121 @@ class BindMountWikiFileSystem:
             return fallback
         fm, _ = self._parser.parse(raw)
         return fm.get('paper.title') or fm.get('title') or fallback
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# OpenClawWire Port 的 WS Adapter（issue #102-103）
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class OpenClawWireAdapter:
+    """路径4：配对握手 + 长连接 Adapter（issue #102 配对握手；#103 长连）。
+
+    实现 OpenClawWire Port。transport 注入（默认 websockets.connect），测试用 fake。
+    握手经 ConnectFrameBuilder 单一来源构造 connect 帧。
+    """
+
+    def __init__(self, transport=None, timeout: float = 10.0) -> None:
+        self._connect = transport or self._default_connect
+        self._timeout = timeout
+
+    @staticmethod
+    def _default_connect(url: str):
+        """默认 transport：websockets.connect（惰性 import，避免测试依赖真连接）。"""
+        import websockets
+
+        return websockets.connect(url)
+
+    async def pair(self, url: str, identity: Any, bootstrap_token: str) -> Any:
+        """配对握手（spec §8.1）：challenge(nonce) → connect(device 签名) → PairingResult。
+
+        三分支：PairingResult(hello-ok) / PairingRequired(requestId) / PairingError。
+        与 PairingHandshake.pair() 功能等价，但经 ConnectFrameBuilder 构建 connect 帧。
+        """
+        from chat.pairing_ws import PairingError, PairingRequired, PairingResult
+
+        try:
+            async with self._connect(url) as ws:
+                deadline = asyncio.get_event_loop().time() + self._timeout
+                # 1. 等 connect.challenge（event）取 nonce
+                nonce = await self._await_nonce(ws, deadline)
+                # 2. 发 connect（经 ConnectFrameBuilder 单一来源构建）
+                import uuid
+
+                req_id = uuid.uuid4().hex
+                frame = ConnectFrameBuilder.pairing(
+                    req_id=req_id,
+                    identity=identity,
+                    token=bootstrap_token,
+                    nonce=nonce,
+                )
+                await ws.send(json.dumps(frame))
+                # 3. 等 connect res（按 id 匹配）
+                return await self._await_connect_res(ws, req_id, deadline)
+        except (PairingRequired, PairingError):
+            raise
+        except Exception as e:
+            raise PairingError(str(e)) from e
+
+    async def _recv_until(self, ws, deadline: float, predicate, describe: str) -> dict:
+        """循环读帧直到 predicate 命中或超时；忽略无关帧。"""
+        while True:
+            remaining = deadline - asyncio.get_event_loop().time()
+            if remaining <= 0:
+                from chat.pairing_ws import PairingError
+
+                raise PairingError(f'timeout waiting for {describe}')
+            raw = await asyncio.wait_for(ws.recv(), timeout=remaining)
+            msg = json.loads(raw)
+            if predicate(msg):
+                return msg
+
+    async def _await_nonce(self, ws, deadline: float) -> str:
+        from chat.pairing_ws import PairingError
+
+        msg = await self._recv_until(
+            ws, deadline,
+            lambda m: m.get('type') == 'event' and m.get('event') == 'connect.challenge',
+            'connect.challenge',
+        )
+        nonce = (msg.get('payload') or {}).get('nonce')
+        if not nonce:
+            raise PairingError('connect.challenge missing nonce')
+        return nonce
+
+    async def _await_connect_res(self, ws, req_id: str, deadline: float) -> Any:
+        from chat.pairing_ws import PairingError, PairingRequired, PairingResult
+
+        msg = await self._recv_until(
+            ws, deadline,
+            lambda m: m.get('type') == 'res' and m.get('id') == req_id,
+            f'connect res (id={req_id})',
+        )
+        if msg.get('ok'):
+            auth = (msg.get('payload') or {}).get('auth') or {}
+            device_token = auth.get('deviceToken')
+            if not device_token:
+                raise PairingError('hello-ok missing auth.deviceToken')
+            scopes = auth.get('scopes') or []
+            missing = REQUIRED_SCOPES - set(scopes)
+            if missing:
+                raise PairingError(f'hello-ok missing required scopes: {sorted(missing)}')
+            return PairingResult(device_token=device_token, scopes=list(scopes))
+        error = msg.get('error') or {}
+        if error.get('code') == 'PAIRING_REQUIRED':
+            request_id = (error.get('details') or {}).get('requestId', '')
+            if not isinstance(request_id, str) or not request_id:
+                raise PairingError('PAIRING_REQUIRED response missing requestId')
+            raise PairingRequired(request_id)
+        raise PairingError(error.get('message') or error.get('code') or 'connect failed')
+
+    # —— OpenClawWire Port 其余方法（#103 长连填充实现）——
+
+    async def connect(self, url: str, device_token: str) -> None:
+        raise NotImplementedError('#103 长连填充实现')
+
+    async def send(self, content: str, on_event: Any) -> str:
+        raise NotImplementedError('#103 长连填充实现')
+
+    async def close(self) -> None:
+        raise NotImplementedError('#103 长连填充实现')

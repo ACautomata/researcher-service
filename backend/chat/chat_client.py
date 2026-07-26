@@ -19,10 +19,7 @@ import websockets
 from chat.event_translate import ChatEventTranslator
 from integration.openclaw.wire import (
     AGENT_ID as _AGENT_ID,
-    CAPS as _CAPS,
-    CLIENT_ID as _CLIENT_ID,
-    PROTOCOL as _PROTOCOL,
-    SCOPES as _SCOPES,
+    ConnectFrameBuilder as _ConnectFrameBuilder,
 )
 
 # on_event 回调契约：接收翻译后的前端契约帧（text/done/error）
@@ -109,19 +106,11 @@ class OpenClawChatClient:
 
     @staticmethod
     def _default_connect_frame(req_id: str, device_token: str) -> dict:
-        # spec §8.1 step5：配对后用 deviceToken 直连（auth.token）。确切握手帧（是否仍需
-        # challenge/签名）spec 标待实测 → 可经 connect_frame_builder 注入替换。
-        return {
-            'type': 'req', 'id': req_id, 'method': 'connect',
-            'params': {
-                'minProtocol': _PROTOCOL, 'maxProtocol': _PROTOCOL,
-                'client': {'id': _CLIENT_ID, 'version': '1.0', 'platform': 'linux', 'mode': 'backend'},
-                'role': 'operator',
-                'scopes': _SCOPES,
-                'caps': _CAPS,
-                'auth': {'token': device_token},
-            },
-        }
+        """已配对长连接帧：委托给单一来源 ConnectFrameBuilder.session()（issue #102）。
+
+        spec §8.1 step5：配对后用 deviceToken 直连（auth.token），无需 device 签名块。
+        """
+        return _ConnectFrameBuilder.session(req_id=req_id, device_token=device_token)
 
     async def connect(self) -> None:
         try:

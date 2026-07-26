@@ -14,20 +14,15 @@ from __future__ import annotations
 
 import asyncio
 import json
-import time
 import uuid
 from dataclasses import dataclass, field
 
 import websockets
 
-from chat.device_crypto import DeviceCrypto, DeviceIdentity
+from chat.device_crypto import DeviceIdentity
 from integration.openclaw.wire import (
-    CAPS as _CAPS,
-    CLIENT_ID as _CLIENT_ID,
-    CLIENT_MODE as _CLIENT_MODE,
+    ConnectFrameBuilder as _ConnectFrameBuilder,
     REQUIRED_SCOPES as _REQUIRED_SCOPES,
-    ROLE as _ROLE,
-    SCOPES as _SCOPES,
 )
 
 
@@ -60,45 +55,13 @@ class PairingHandshake:
         self._timeout = timeout
 
     def _build_connect_frame(self, identity: DeviceIdentity, token: str, nonce: str) -> dict:
-        signed_at_ms = int(time.time() * 1000)
-        payload = DeviceCrypto.build_auth_payload_v3(
-            device_id=identity.device_id,
-            client_id=_CLIENT_ID,
-            client_mode=_CLIENT_MODE,
-            role=_ROLE,
-            scopes=_SCOPES,
-            signed_at_ms=signed_at_ms,
-            token=token,
-            nonce=nonce,
-            platform='linux',  # 面板后端语义平台（归一化后参与签名）
-            device_family='',
-        )
-        return {
-            'type': 'req',
-            'id': uuid.uuid4().hex,
-            'method': 'connect',
-            'params': {
-                'minProtocol': 4,
-                'maxProtocol': 4,
-                'client': {'id': _CLIENT_ID, 'version': '1.0',
-                           'platform': 'linux', 'mode': _CLIENT_MODE},
-                'role': _ROLE,
-                'scopes': _SCOPES,
-                'caps': _CAPS,
-                'commands': [],
-                'permissions': {},
-                'auth': {'token': token or ''},  # 与签名串 token or '' 归一化一致（codex R protocol）
-                'locale': 'zh-CN',
-                'userAgent': 'openclaw-fleet-panel/1.0',
-                'device': {
-                    'id': identity.device_id,
-                    'publicKey': identity.public_key_raw_base64url(),
-                    'signature': identity.sign(payload),
-                    'signedAt': signed_at_ms,
-                    'nonce': nonce,
-                },
-            },
-        }
+        """构造配对手 connect 帧，委托给单一来源 ConnectFrameBuilder.pairing()。
+
+        与 PairingHandshake.pair() 协同：pair() 负责按 id 收发握手（recv/send/res 匹配），
+        Builder 负责帧体契约（协议 v4/scopes/caps/device 签名块）——关注点分离。
+        """
+        req_id = uuid.uuid4().hex
+        return _ConnectFrameBuilder.pairing(req_id=req_id, identity=identity, token=token, nonce=nonce)
 
     async def pair(
         self, *, url: str, token: str, identity: DeviceIdentity
