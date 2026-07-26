@@ -352,3 +352,90 @@ class TestWikiFileSystemAdapterContract:
         }
         overlap = wire_const & container_const
         assert not overlap, f'wire 不应重复定义容器/编排域常量: {sorted(overlap)}'
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Issue #101: 路径1 ContainerRuntime 归属前移到集成包（strangler：接口先行、实现后迁）
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestContainerRuntimePortSingleSourced:
+    """ContainerRuntime Protocol 归属前移到集成包——issue #101 acceptance。
+
+    4 条契约：
+    - containers.runtime 不再定义 ContainerRuntime（单一来源）
+    - DockerRuntime structurally satisfies 集成包 ContainerRuntime Port
+    - FakeRuntime structurally satisfies 集成包 ContainerRuntime Port
+    - docker SDK 仍只在 DockerRuntime import docker（不变量守护）
+    """
+
+    def test_container_runtime_not_defined_in_containers_runtime_module(self):
+        """containers.runtime 不再定义 ContainerRuntime（接口已前移到集成包）。"""
+        import containers.runtime as c_runtime
+
+        names = {n for n in dir(c_runtime) if not n.startswith('_')}
+        assert 'ContainerRuntime' not in names, (
+            'containers.runtime 不应再定义 ContainerRuntime——'
+            '归属已前移到 integration.openclaw.ports'
+        )
+
+    def test_docker_runtime_satisfies_integration_port(self):
+        """DockerRuntime 结构子类型自动满足集成包 ContainerRuntime Port。"""
+        from integration.openclaw import ContainerRuntime
+
+        from containers.docker_runtime import DockerRuntime
+
+        assert isinstance(DockerRuntime(), ContainerRuntime), (
+            'DockerRuntime 应满足集成包 ContainerRuntime Port'
+        )
+
+    def test_fake_runtime_satisfies_integration_port(self):
+        """FakeRuntime 结构子类型自动满足集成包 ContainerRuntime Port。"""
+        from integration.openclaw import ContainerRuntime
+
+        from containers.tests.fakes import FakeRuntime
+
+        assert isinstance(FakeRuntime(), ContainerRuntime), (
+            'FakeRuntime 应满足集成包 ContainerRuntime Port'
+        )
+
+    def test_only_docker_runtime_imports_docker_sdk(self):
+        """docker SDK 仍只在 Adapter 处 import docker（不变量守护，spec §5.4）。"""
+        import ast
+        import sys
+        from pathlib import Path
+
+        containers_dir = Path(__file__).resolve().parent.parent.parent / 'containers'
+        offenders: dict[str, list[str]] = {}
+        # 排除 DockerRuntime 自身（唯一合法 import docker 处）
+        exempt = {'docker_runtime.py'}
+        excluded_stmts = {
+            'noqa',  # noqa 注释允许的替代导出
+        }
+
+        for f in sorted(containers_dir.glob('*.py')):
+            if f.name.startswith('test_') or f.name in exempt:
+                continue
+            tree = ast.parse(f.read_text(encoding='utf-8'), filename=f.name)
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.Import, ast.ImportFrom)):
+                    module = node.module if isinstance(node, ast.ImportFrom) else None
+                    names = [
+                        n.name if isinstance(node, ast.ImportFrom) else n.asname or n.name
+                        for n in node.names
+                    ]
+                    for name in names:
+                        # 检测 'import docker' 或 'from docker import ...'
+                        if (
+                            (isinstance(node, ast.Import) and name == 'docker')
+                            or (isinstance(node, ast.ImportFrom) and module == 'docker')
+                        ):
+                            offenders.setdefault(f.name, []).append(
+                                f'import docker' if isinstance(node, ast.Import)
+                                else f'from docker import {", ".join(n.name for n in node.names)}'
+                            )
+
+        assert not offenders, (
+            f'docker SDK 仍应只在 DockerRuntime import docker：'
+            f'{offenders}'
+        )

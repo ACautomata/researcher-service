@@ -1,7 +1,8 @@
-"""容器运行时抽象（spec §5.4 Port-Adapter）。
+"""容器运行时数据类与常量（spec §5.4）。
 
-把 docker-py 调用隔离在 docker_runtime.DockerRuntime；业务层（orchestrator）依赖
-ContainerRuntime Protocol，测试用 FakeRuntime，无需 docker daemon。
+ContainerSpec / ContainerInfo 等数据类和容器域常量。ContainerRuntime Port
+已归属前移到 integration.openclaw.ports（issue #101）；DockerRuntime 与
+FakeRuntime 通过 @runtime_checkable 结构子类型自动满足端口，无需显式继承。
 
 设计要点：
 - 业务层只传语义参数（ContainerSpec），docker-py 的 name/volumes/ports/labels/environment
@@ -11,7 +12,6 @@ ContainerRuntime Protocol，测试用 FakeRuntime，无需 docker daemon。
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol
 
 # 容器名前缀：与原 compose 栈 openclaw-gateway 隔离（spec §5.3 / r27 §3.3）
 CONTAINER_PREFIX = 'openclaw-gw-'
@@ -60,31 +60,3 @@ class ContainerInfo:
     # codex R9-2：实例名（来自 openclaw.instance label）——reconcile/delete 用它校验
     # 容器所有权（外来同名容器 instance_name≠本名则不采纳）。无 label 时为 None。
     instance_name: str | None = None
-
-
-class ContainerRuntime(Protocol):
-    """容器运行时接口（Port）：业务层依赖此接口，DockerRuntime/FakeRuntime 为 Adapter。"""
-
-    def run(self, spec: ContainerSpec) -> str:
-        """创建并启动容器，返回 container_id。"""
-        ...
-
-    def list_fleet(self) -> list[ContainerInfo]:
-        """列出所有 fleet 容器（label app=openclaw-fleet）。"""
-        ...
-
-    def get(self, name: str) -> ContainerInfo | None:
-        """取单个实例的容器状态；不存在返回 None。"""
-        ...
-
-    def stop(self, name: str) -> None:
-        """停止容器（优雅超时后 SIGKILL）。"""
-        ...
-
-    def remove(self, name: str) -> None:
-        """删除容器（连匿名卷，force）；容器不存在则幂等。"""
-        ...
-
-    def exec_in_container(self, name: str, cmd: list[str]) -> None:
-        """在运行中的实例容器内执行命令（如 wiki compile）；容器不存在则幂等。"""
-        ...
