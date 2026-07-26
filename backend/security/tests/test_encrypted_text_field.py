@@ -40,7 +40,7 @@ class TestEncryptedCredentialFields:
         assert reloaded_pairing.device_token == 'device-token'
 
     @pytest.mark.django_db
-    def test_legacy_plaintext_rows_remain_readable_during_expand(self):
+    def test_legacy_plaintext_rows_are_rejected_after_contract(self):
         instance = Instance.objects.create(
             name='legacy', port=19001, token='new-token', home_dir='/tmp/legacy',
             container_id='cid', status=Instance.STATUS_RUNNING, image='image:tag',
@@ -60,11 +60,10 @@ class TestEncryptedCredentialFields:
                 ['legacy-private-key', False, 'legacy-device-token', False, pairing.pk],
             )
 
-        reloaded_instance = Instance.objects.get(pk=instance.pk)
-        reloaded_pairing = Pairing.objects.get(pk=pairing.pk)
-        assert reloaded_instance.token == 'legacy-token'
-        assert reloaded_pairing.private_key_pem == 'legacy-private-key'
-        assert reloaded_pairing.device_token == 'legacy-device-token'
+        with pytest.raises(InvalidCredentialCiphertext):
+            Instance.objects.get(pk=instance.pk)
+        with pytest.raises(InvalidCredentialCiphertext):
+            Pairing.objects.get(pk=pairing.pk)
 
     @pytest.mark.django_db
     def test_queryset_updates_encrypt_new_credential_values(self):
@@ -86,7 +85,7 @@ class TestEncryptedCredentialFields:
         assert Pairing.objects.get(pk=pairing.pk).device_token == 'rotated-device-token'
 
     @pytest.mark.django_db
-    def test_prefix_lookalike_values_are_encrypted_and_legacy_values_remain_readable(self):
+    def test_prefix_lookalike_values_are_encrypted_and_rejected_if_corrupt(self):
         prefix_lookalike = 'enc:v1:' + ('A' * 40)
         instance = Instance.objects.create(
             name='prefixed', port=19003, token=prefix_lookalike, home_dir='/tmp/prefixed',
@@ -105,7 +104,8 @@ class TestEncryptedCredentialFields:
 
         assert stored_token != prefix_lookalike
         assert stored_token.startswith(CredentialCipher.PREFIX)
-        assert Instance.objects.get(pk=instance.pk).token == prefix_lookalike
+        with pytest.raises(InvalidCredentialCiphertext):
+            Instance.objects.get(pk=instance.pk)
 
     @pytest.mark.django_db
     def test_authenticated_ciphertext_tampering_is_not_treated_as_legacy_plaintext(self):
