@@ -106,11 +106,12 @@ def test_pyproject_has_design_thresholds():
 # ---- 行为验证 ----
 
 def _assert_pylint_booted(result: subprocess.CompletedProcess):
-    """pylint 成功启动且无 fatal 级诊断。
+    """pylint 成功启动且无 fatal/usage 级诊断。
 
     检查：
     - 进程级故障（returncode=127 / 模块未安装）；
-    - pylint fatal 诊断（F* 类消息，returncode bit 1）。
+    - pylint fatal 诊断（bit 1: F* 类消息）；
+    - pylint usage 错误（bit 32: 未知选项等配置故障）。
     """
     combined = result.stdout + result.stderr
     assert result.returncode != 127, (
@@ -120,8 +121,9 @@ def _assert_pylint_booted(result: subprocess.CompletedProcess):
         f"pylint 模块未安装:\n{combined}"
     )
     # bit 1 = fatal 消息（F0002 astroid-error 等，不含"fatal"字串）
-    assert result.returncode & 1 == 0, (
-        f"pylint 含 fatal 级诊断:\nSTDERR:\n{result.stderr}\nSTDOUT:\n{result.stdout}"
+    # bit 32 = usage 错误（未知选项/配置故障）
+    assert result.returncode & (1 | 32) == 0, (
+        f"pylint fatal/usage 级诊断:\nSTDERR:\n{result.stderr}\nSTDOUT:\n{result.stdout}"
     )
 
 
