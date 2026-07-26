@@ -140,14 +140,17 @@ def test_pylint_runs_on_all_apps_without_crash():
 def test_orm_objects_no_member_false_positive_suppressed():
     """pylint-django transform 生效：ORM Model.objects 用法不触发 no-member。
 
-    单独扫描 containers/models.py（Instance 是 Django Model），验证无 E1101。
+    扫描 containers/orchestrator.py（内部多处调用 Instance.objects），
+    验证 pylint-django 的 model transform 确实抑制了 E1101。
+    避免了只扫 models.py 时 transform 未被执行（models.py 只有声明，无 objects 调用）
+    的假阳性通过。
     """
-    models_py = _backend_root() / "containers" / "models.py"
-    result = _pylint_run(str(models_py))
+    orc_py = _backend_root() / "containers" / "orchestrator.py"
+    result = _pylint_run(str(orc_py))
     output = result.stdout + result.stderr
     _assert_pylint_booted(result)
-    # E1101 = no-member。Instance 是 Django Model，
-    # pylint-django 应将其 objects.filter/create 等识别为合法。
+    # E1101 = no-member。orchestrator.py 多处调用 Instance.objects.*，
+    # pylint-django 应将其识别为 Django Manager 的合法调用。
     assert "E1101" not in output, (
         f"pylint-django 应抑制 ORM no-member 误报，但输出含 E1101:\n{output}"
     )
