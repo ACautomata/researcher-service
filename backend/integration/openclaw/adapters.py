@@ -100,14 +100,17 @@ class BindMountWikiFileSystem:
         开放词表（issue #83 / #75）：不预设五分类，扫描到什么返回什么——骨架目录、开放
         domain 子目录、任意未知目录一律平等成组；递归收该目录下全部 .md；跳过插件私有
         目录（_SKIP_DIRS）与占位文件（_SKIP_FILES）；物理存在但无页的目录不成组。
-        wiki root 不存在（模板未初始化/被删）、root 自身是 symlink（容器把 wiki/main 换成
-        指向外部的链接，会经 iterdir 扫出宿主文件）或 root 不可读（容器 chmod 000）时一律
-        返回空树，不上抛（codex #125 P1/P2）。
+        wiki root 不存在（模板未初始化/被删）、root 路径上容器可写的两段（`<home>/wiki`
+        或 `<home>/wiki/main`）被换成 symlink（指向其它实例/宿主路径），或 root 不可读
+        （容器 chmod 000）时一律返回空树，不上抛（codex #125 P1/P2）。
         """
         groups = []
-        # root 自身是 symlink 时拒绝遍历:_resolve 的 root-containment 锚定 resolve() 后的
-        # 真实路径,若 root 指向 / 等宿主目录,扫描结果会泄外部 .md 标题/路径(codex #125 P1)。
-        if self._root.is_symlink() or not self._root.is_dir():
+        # 容器进程在自己 home 内可写 wiki/ 与 wiki/main/,能把任一段换成 symlink 指向
+        # 其它实例或宿主路径(codex #125 P1)。更上层的 <home> 是宿主路径,容器看不到,
+        # 不必检查——且 macOS /var → /private/var 这类系统级 symlink 不应误判。
+        # 检查 root 与其直接父,任一是 symlink 即拒绝遍历。
+        if (self._root.is_symlink() or self._root.parent.is_symlink()
+                or not self._root.is_dir()):
             return {'groups': groups}
         try:
             children = sorted(self._root.iterdir())
@@ -226,12 +229,20 @@ class BindMountWikiFileSystem:
                     'path': rel,
                     'title': self._page_title(f, f.stem),
                 })
+        # 栈式 DFS 弹出顺序与字典序相反(LIFO),而前端 FileTree 按数组顺序渲染不再排序;
+        # 末尾按 path 字典序重排,保持显示顺序稳定(codex #125 P2)。
+        pages_out.sort(key=lambda p: p['path'])
 
     def _page_title(self, fpath: Path, fallback: str) -> str:
-        """从 frontmatter 取标题。"""
+        """从 frontmatter 取标题。
+
+        读失败(OSError,如文件被并发删除/权限)或解码失败(UnicodeDecodeError,容器写
+        入非 UTF-8 字节的 .md)时退到文件名 fallback,不上抛——单文件不应让整棵树 500
+        (codex #125 P2)。
+        """
         try:
             raw = fpath.read_text(encoding='utf-8')[:2000]
-        except OSError:
+        except (OSError, UnicodeDecodeError):
             return fallback
         fm, _ = self._parser.parse(raw)
         return fm.get('paper.title') or fm.get('title') or fallback

@@ -170,6 +170,48 @@ def test_symlinked_wiki_root_returns_empty_tree(tmp_path):
     assert tree == {'groups': []}
 
 
+def test_symlinked_wiki_ancestor_returns_empty_tree(tmp_path):
+    """<home>/wiki 被换成指向其它 instance 的 symlink 时返回空树,不跨实例泄露(codex #125 P1)。
+
+    root 自身不是 symlink,但直接父 <home>/wiki 是。原实现仅检查 root.is_symlink() 失效。
+    """
+    import os
+
+    other = tmp_path / 'other-instance' / 'wiki'
+    (other / 'main' / 'concepts').mkdir(parents=True)
+    (other / 'main' / 'concepts' / 'secret.md').write_text('# SECRET\n', encoding='utf-8')
+    home = tmp_path / 'my-home'
+    home.mkdir()
+    os.symlink(other, home / 'wiki')
+
+    tree = BindMountWikiFileSystem(str(home / 'wiki' / 'main')).build_tree()
+    assert tree == {'groups': []}
+
+
+def test_pages_sorted_by_path(wiki_root):
+    """同一组内多子目录的页面按 path 字典序输出,前端不再排序(codex #125 P2)。"""
+    (wiki_root / 'concepts' / 'aa').mkdir()
+    (wiki_root / 'concepts' / 'bb').mkdir()
+    (wiki_root / 'concepts' / 'aa' / 'page1.md').write_text('# A1\n', encoding='utf-8')
+    (wiki_root / 'concepts' / 'bb' / 'page2.md').write_text('# B1\n', encoding='utf-8')
+
+    tree = BindMountWikiFileSystem(str(wiki_root)).build_tree()
+    by_kind = {g['kind']: g for g in tree['groups']}
+    paths = [p['path'] for p in by_kind['concepts']['pages']]
+    assert paths == sorted(paths)
+
+
+def test_non_utf8_md_falls_back_to_filename(wiki_root):
+    """非 UTF-8 字节的 .md 退到文件名 fallback,不让整棵树 500(codex #125 P2)。"""
+    (wiki_root / 'concepts' / 'bad.md').write_bytes(b'\xff\xfe\xfa invalid utf8')
+
+    tree = BindMountWikiFileSystem(str(wiki_root)).build_tree()
+    by_kind = {g['kind']: g for g in tree['groups']}
+    paths = {p['path']: p['title'] for p in by_kind['concepts']['pages']}
+    assert 'concepts/bad.md' in paths
+    assert paths['concepts/bad.md'] == 'bad'
+
+
 def test_deeply_nested_dirs_no_recursion_error(wiki_root):
     """任意深度嵌套不触发 RecursionError——_scan_dir 已改显式栈迭代(codex #125 P2)。"""
     cur = wiki_root / 'concepts'
@@ -193,33 +235,53 @@ def test_deeply_nested_dirs_no_recursion_error(wiki_root):
     assert any(p.endswith('leaf.md') for p in all_paths)
 
 
-def test_unreadable_subdir_skipped(wiki_root):
-    """子目录被 chmod 000 时跳过该子树,其它分支不受影响(codex #125 P2)。"""
-    import os
+def test_unreadable_subdir_skipped(wiki_root, monkeypatch):
+    """子目录 iterdir 抛 PermissionError 时跳过该子树,其它分支不受影响(codex #125 P2)。
+
+    用 monkeypatch 模拟 iterdir 抛错而非真 chmod——CI 容器以 root 跑时 chmod(0) 不阻止
+    root 枚举目录,真 chmod 会让本测试假失败(codex #125 P2)。
+    """
+    from pathlib import Path
 
     locked = wiki_root / 'locked'
     locked.mkdir()
     (locked / 'x.md').write_text('# X\n', encoding='utf-8')
-    os.chmod(locked, 0)
-    try:
-        tree = BindMountWikiFileSystem(str(wiki_root)).build_tree()
-        all_paths = {p['path'] for g in tree['groups'] for p in g['pages']}
-        assert 'concepts/attention.md' in all_paths
-        assert not any('locked' in p for p in all_paths)
-    finally:
-        os.chmod(locked, 0o755)
+
+    real_iterdir = Path.iterdir
+
+    def fake_iterdir(self):
+        if self == locked:
+            raise PermissionError(str(locked))
+        return real_iterdir(self)
+
+    monkeypatch.setattr(Path, 'iterdir', fake_iterdir)
+
+    tree = BindMountWikiFileSystem(str(wiki_root)).build_tree()
+    all_paths = {p['path'] for g in tree['groups'] for p in g['pages']}
+    assert 'concepts/attention.md' in all_paths
+    assert not any('locked' in p for p in all_paths)
 
 
-def test_unreadable_wiki_root_returns_empty_tree(tmp_path):
-    """wiki/main 自身不可读(chmod 000)时返回空树,不上抛(codex #125 P2)。"""
-    import os
+def test_unreadable_wiki_root_returns_empty_tree(tmp_path, monkeypatch):
+    """wiki/main 自身 iterdir 抛 PermissionError 时返回空树,不上抛(codex #125 P2)。
+
+    同 test_unreadable_subdir_skipped,用 monkeypatch 替代真 chmod 以保证 root 用户
+    下也可重现。
+    """
+    from pathlib import Path
 
     main = tmp_path / 'wiki' / 'main'
     main.mkdir(parents=True)
     (main / 'a.md').write_text('# A\n', encoding='utf-8')
-    os.chmod(main, 0)
-    try:
-        tree = BindMountWikiFileSystem(str(main)).build_tree()
-        assert tree == {'groups': []}
-    finally:
-        os.chmod(main, 0o755)
+
+    real_iterdir = Path.iterdir
+
+    def fake_iterdir(self):
+        if self == main:
+            raise PermissionError(str(main))
+        return real_iterdir(self)
+
+    monkeypatch.setattr(Path, 'iterdir', fake_iterdir)
+
+    tree = BindMountWikiFileSystem(str(main)).build_tree()
+    assert tree == {'groups': []}
