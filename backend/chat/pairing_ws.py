@@ -21,16 +21,14 @@ from dataclasses import dataclass, field
 import websockets
 
 from chat.device_crypto import DeviceCrypto, DeviceIdentity
-
-# connect 帧固定常量（r13 §5.4 / r40 §3）：client/mode 用网关后端语义。
-_CLIENT_ID = 'gateway-client'
-_CLIENT_MODE = 'backend'
-_ROLE = 'operator'
-# spec §8.1：operator.read/write/admin/approvals 四 scope + tool-events cap。
-_SCOPES = ['operator.read', 'operator.write', 'operator.admin', 'operator.approvals']
-_CAPS = ['tool-events']
-# 验收要求：协商 scopes 必须至少包含以下三者，否则聊天/审批调用会缺权失败。
-_REQUIRED_SCOPES = {'operator.read', 'operator.write', 'operator.approvals'}
+from integration.openclaw.wire import (
+    CAPS as _CAPS,
+    CLIENT_ID as _CLIENT_ID,
+    CLIENT_MODE as _CLIENT_MODE,
+    REQUIRED_SCOPES as _REQUIRED_SCOPES,
+    ROLE as _ROLE,
+    SCOPES as _SCOPES,
+)
 
 
 @dataclass(frozen=True)
