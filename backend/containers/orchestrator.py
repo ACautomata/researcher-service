@@ -44,6 +44,7 @@ from .models import Instance
 from .ports import RESERVED_PORT_18789, PortAllocator
 from .provisioner import HomeProvisioner
 from .runtime import ContainerSpec
+from integration.openclaw.adapters import HttpHealthProbe
 from models.config_builder import ProviderConfigBuilder
 
 # health 字段枚举（issue #39 验收：列表显示 health 变 healthy）
@@ -187,7 +188,7 @@ class InstanceOrchestrator:
     ) -> None:
         self._runtime = runtime
         self._cfg = config
-        self._health = health_probe or HealthProbe()
+        self._health = health_probe or HttpHealthProbe()
         # codex R1 :126：注入目录删除器（默认 shutil.rmtree，不 ignore），可测清理失败
         self._dir_remover = dir_remover or shutil.rmtree
         # codex R2 :161：注入宿主端口占用探测（默认 socket bind 实测），可测确定性冲突

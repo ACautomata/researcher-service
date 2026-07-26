@@ -7,7 +7,7 @@ import io
 import urllib.error
 import urllib.request
 
-from containers.orchestrator import HealthProbe
+from integration.openclaw.adapters import HttpHealthProbe
 
 
 class _FakeResponse(io.BytesIO):
@@ -24,7 +24,7 @@ def test_2xx_is_reachable(monkeypatch):
     resp = _FakeResponse(b'{"status":"ok"}')
     resp.status = 200
     monkeypatch.setattr(urllib.request, 'urlopen', lambda *a, **k: resp)
-    assert HealthProbe().is_reachable(19000) is True
+    assert HttpHealthProbe().is_reachable(19000) is True
 
 
 def test_connection_refused_is_unreachable(monkeypatch):
@@ -32,7 +32,7 @@ def test_connection_refused_is_unreachable(monkeypatch):
         raise urllib.error.URLError('connection refused')
 
     monkeypatch.setattr(urllib.request, 'urlopen', _boom)
-    assert HealthProbe().is_reachable(19000) is False
+    assert HttpHealthProbe().is_reachable(19000) is False
 
 
 def test_5xx_is_unreachable(monkeypatch):
@@ -40,4 +40,12 @@ def test_5xx_is_unreachable(monkeypatch):
         raise urllib.error.HTTPError('u', 503, 'Service Unavailable', {}, None)
 
     monkeypatch.setattr(urllib.request, 'urlopen', _server_error)
-    assert HealthProbe().is_reachable(19000) is False
+    assert HttpHealthProbe().is_reachable(19000) is False
+
+
+def test_timeout_is_unreachable(monkeypatch):
+    def _timeout(*a, **k):
+        raise TimeoutError('timed out')
+
+    monkeypatch.setattr(urllib.request, 'urlopen', _timeout)
+    assert HttpHealthProbe().is_reachable(19000) is False

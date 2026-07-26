@@ -92,6 +92,51 @@ class TestIntegrationProvidesFakes:
         assert isinstance(FakeHealthProbe(), HealthProbe)
 
 
+class TestAdaptersSatisfyPorts:
+    """真实 Adapter 实现 Port（issue #99 acceptance「Path3 health 探测收口」）。"""
+
+    def test_http_health_probe_satisfies_port(self):
+        """issue #99：HttpHealthProbe 实现 HealthProbe Port（构造注入 http client 不变）。"""
+        from integration.openclaw import HealthProbe
+        from integration.openclaw.adapters import HttpHealthProbe
+
+        assert isinstance(HttpHealthProbe(), HealthProbe)
+
+    def test_http_health_probe_uses_http_get_on_localhost(self, monkeypatch):
+        """issue #99 acceptance：HttpHealthProbe.is_reachable 发 HTTP GET 127.0.0.1:<port>/health。"""
+        import io
+        import urllib.request
+
+        from integration.openclaw.adapters import HttpHealthProbe
+
+        class _FakeResp(io.BytesIO):
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        resp = _FakeResp(b'{"status":"ok"}')
+        monkeypatch.setattr(urllib.request, 'urlopen', lambda url, timeout: resp)
+        probe = HttpHealthProbe(timeout=2.0)
+        assert probe.is_reachable(19000) is True
+
+    def test_http_health_probe_connection_refused_is_false(self, monkeypatch):
+        """不可达返回 False（不抛异常）。"""
+        import urllib.error
+        import urllib.request
+
+        from integration.openclaw.adapters import HttpHealthProbe
+
+        def _boom(*a, **k):
+            raise urllib.error.URLError('connection refused')
+
+        monkeypatch.setattr(urllib.request, 'urlopen', _boom)
+        assert HttpHealthProbe().is_reachable(19000) is False
+
+
 class TestWireDoesNotRedefineContainerConstants:
     """集成包不重复定义容器/编排域常量（issue #98 acceptance / spec #97 user story 19）。
 
