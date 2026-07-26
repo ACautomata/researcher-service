@@ -66,6 +66,20 @@ disable = [
     "too-many-ancestors",       # R0901 DRF generic view 继承链深是正常的
     "fixme",                    # W0511 TODO/FIXME 注释不报警
     "duplicate-code",           # R0801 噪音大、价值低
+    # (c) 类别B（issue #130）：WS 长连状态机的字段聚合是合理内聚，非坏味道。
+    #     OpenClawWireAdapter(15/10) 与其 fake(18/10) 的 ws/cm/recv_task/pending_acks/
+    #     pending_resolves/… 同属一条长连接的生命周期状态，与上面 too-many-ancestors 同策略静默。
+    "too-many-instance-attributes",  # R0902
+    # (c) 类别C（issue #130）：与 ruff 侧已静默的故障隔离模式等价，消除双标。
+    #     ruff extend-ignore 已把 BLE001(blind-except) 定性为「宽捕获是故障隔离模式(文档§45)」
+    #     全局静默；pylint 的 W0718 是同一代码模式的等价告警（含 adapters.py 475 行
+    #     BaseException），WS 适配器/事件翻译靠宽捕获+静默续命做 §45/§46 故障隔离，
+    #     改语义会破坏故障隔离不变量 → 与 BLE001 对齐在此等价静默。
+    "broad-exception-caught",   # W0718 ≡ ruff BLE001（故障隔离、有意为之）
+    # (c) 类别C（issue #130）：WS 长连手动管理异步上下文管理器（self._cm.__aenter__/
+    #     __aexit__，非 async with）是有意模式——连接需在 connect/close 两方法间跨作用域
+    #     持有 CM 句柄，无法用单个 async with 块圈定。
+    "unnecessary-dunder-call",  # C2801 __aenter__/__aexit__ 直调是长连 CM 手动管理的有意模式
 ]
 # 说明：no-member 不在 disable 之列 —— pylint-django 已正确抑制 ORM 误报，保留以抓真实属性错误。
 

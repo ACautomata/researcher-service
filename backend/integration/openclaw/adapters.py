@@ -486,9 +486,9 @@ class OpenClawWireAdapter:
         try:
             await self._ws.send(json.dumps(frame))
             run_id = await asyncio.wait_for(fut, timeout=self._ack_timeout)
-        except TimeoutError:
+        except TimeoutError as exc:
             self._pending_acks.pop(req_id, None)
-            raise ChatSendError('chat.send ack timeout')
+            raise ChatSendError('chat.send ack timeout') from exc
         except BaseException:
             self._pending_acks.pop(req_id, None)
             raise
@@ -513,9 +513,9 @@ class OpenClawWireAdapter:
         try:
             await self._ws.send(json.dumps(frame))
             payload = await asyncio.wait_for(fut, timeout=self._ack_timeout)
-        except TimeoutError:
+        except TimeoutError as exc:
             self._pending_resolves.pop(req_id, None)
-            raise ChatSendError('approval.resolve ack timeout')
+            raise ChatSendError('approval.resolve ack timeout') from exc
         except BaseException:
             self._pending_resolves.pop(req_id, None)
             raise
@@ -571,9 +571,9 @@ class OpenClawWireAdapter:
         try:
             await self._ws.send(json.dumps(frame))
             payload = await asyncio.wait_for(fut, timeout=self._ack_timeout)
-        except TimeoutError:
+        except TimeoutError as exc:
             self._pending_resolves.pop(req_id, None)
-            raise ChatSendError('commands.list ack timeout')
+            raise ChatSendError('commands.list ack timeout') from exc
         except BaseException:
             self._pending_resolves.pop(req_id, None)
             raise
@@ -594,9 +594,9 @@ class OpenClawWireAdapter:
         try:
             await self._ws.send(json.dumps(frame))
             payload = await asyncio.wait_for(fut, timeout=self._ack_timeout)
-        except TimeoutError:
+        except TimeoutError as exc:
             self._pending_resolves.pop(req_id, None)
-            raise ChatSendError(f'{method} ack timeout')
+            raise ChatSendError(f'{method} ack timeout') from exc
         except BaseException:
             self._pending_resolves.pop(req_id, None)
             raise
@@ -668,8 +668,6 @@ class OpenClawWireAdapter:
                     self._resolve_ack(msg)
                 else:
                     await self._handle_event(msg)
-        except asyncio.CancelledError:
-            raise
         except Exception:
             self._dead = True
             if not self._closed:

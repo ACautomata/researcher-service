@@ -342,14 +342,17 @@ def test_pool_connect_failure_502(authed, instance, override_pool, method, url):
 @pytest.mark.django_db(transaction=True)
 def test_session_drop_migration_reversible():
     """0004_delete_session 可正反应用：apply 后 chat_session 无表，unapply 后复有表。"""
-    executor = MigrationExecutor(connection)
+    # 每次 migrate 用新 MigrationExecutor——executor 的 loader 在构造期缓存
+    # applied_migrations，migrate() 后不刷新；复用同一实例会让第二次 migrate 按过期
+    # 的 applied 集合重复 unapply（本测试首次 unapply 0005 后，二次仍试图再 unapply
+    # 0005 → SQLite DROP 不存在列报错）。
     # 迁移到删表之后：chat_session 表不存在
-    executor.migrate([('chat', '0004_delete_session')])
+    MigrationExecutor(connection).migrate([('chat', '0004_delete_session')])
     with connection.cursor() as cur:
         tables_after = set(connection.introspection.table_names(cur))
     assert 'chat_session' not in tables_after
     # 回滚到删表之前（0003_session）：chat_session 表复存在
-    executor.migrate([('chat', '0003_session')])
+    MigrationExecutor(connection).migrate([('chat', '0003_session')])
     with connection.cursor() as cur:
         tables_before = set(connection.introspection.table_names(cur))
     assert 'chat_session' in tables_before
