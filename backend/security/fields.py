@@ -59,7 +59,12 @@ class EncryptedValuesListIterable(ValuesListIterable):
             if self.queryset._projection_flat:
                 yield result[0]
             elif self.queryset._projection_named:
-                yield create_namedtuple_class(*self.queryset._projection_visible_fields)(*result)
+                visible_fields = list(self.queryset._projection_visible_fields)
+                visible_fields.extend(
+                    name for name in self.queryset.query.annotation_select
+                    if name not in visible_fields
+                )
+                yield create_namedtuple_class(*visible_fields)(*result)
             else:
                 yield result
 
@@ -151,6 +156,8 @@ class EncryptedCredentialQuerySet(models.QuerySet):
         if not fields:
             return super().values(*fields, **expressions)
         selected, protected, added_states = self._projection_fields(fields)
+        if protected and self.query.distinct:
+            raise ValueError('distinct credential projections are not supported')
         queryset = super().values(*selected, **expressions)
         if protected:
             queryset._iterable_class = EncryptedValuesIterable
@@ -175,7 +182,7 @@ class EncryptedCredentialQuerySet(models.QuerySet):
         }
         if flat and named:
             raise TypeError("'flat' and 'named' can't be used together.")
-        if flat and len(fields) != 1:
+        if flat and len(fields) > 1:
             raise TypeError("'flat' is not valid when values_list is called with more than one field.")
         if any(
             self._expression_references_protected_field(field, protected_names)
@@ -185,7 +192,9 @@ class EncryptedCredentialQuerySet(models.QuerySet):
         self._reject_credential_annotation_aliases(fields)
         if not fields:
             fields = tuple(field.name for field in self.model._meta.concrete_fields)
-        selected, protected, _ = self._projection_fields(fields)
+        selected, protected, added_states = self._projection_fields(fields)
+        if protected and self.query.distinct:
+            raise ValueError('distinct credential projections are not supported')
         if not protected:
             return super().values_list(*fields, flat=flat, named=named)
         queryset = super().values_list(*selected)
@@ -196,7 +205,7 @@ class EncryptedCredentialQuerySet(models.QuerySet):
                 for field in protected
             ]
             queryset._projection_state_indexes = [
-                selected.index(field.state_field) for field in protected
+                selected.index(state_field) for state_field in added_states
             ]
             queryset._projection_flat = flat
             queryset._projection_named = named
@@ -296,3 +305,13 @@ class EncryptedCredentialsModel(models.Model):
         if selected_fields is not None:
             kwargs['update_fields'] = selected_fields | state_fields
         return super().save(*args, **kwargs)
+
+    def refresh_from_db(self, using=None, fields=None, from_queryset=None):
+        selected_fields = set(fields) if fields is not None else None
+        if selected_fields is not None:
+            for field in self._meta.fields:
+                if isinstance(field, EncryptedTextField) and field.attname in selected_fields:
+                    selected_fields.add(field.state_field)
+        return super().refresh_from_db(
+            using=using, fields=selected_fields, from_queryset=from_queryset,
+        )

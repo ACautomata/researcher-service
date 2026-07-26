@@ -229,6 +229,9 @@ class TestEncryptedCredentialFields:
             Pairing.objects.values('instance__token')
         with pytest.raises(ValueError):
             Instance.objects.values_list('token', flat=True).distinct()
+        with pytest.raises(ValueError):
+            Instance.objects.distinct().values_list('token', flat=True)
+        assert Instance.objects.values_list(flat=True).get(pk=instance.pk) == instance.pk
 
     @pytest.mark.django_db
     def test_projection_keeps_annotations_added_after_credentials(self):
@@ -242,6 +245,28 @@ class TestEncryptedCredentialFields:
             total=Count('id')
         ).get()
         assert projection == ('projection-token', 1)
+        named_projection = Instance.objects.filter(pk=instance.pk).values_list(
+            'token', named=True
+        ).annotate(total=Count('id')).get()
+        assert named_projection.token == 'projection-token'
+        assert named_projection.total == 1
+
+    @pytest.mark.django_db
+    def test_projection_keeps_explicit_encryption_state_columns(self):
+        instance = Instance.objects.create(
+            name='explicit-state', port=19013, token='projection-token',
+            home_dir='/tmp/explicit-state', container_id='cid',
+            status=Instance.STATUS_RUNNING, image='image:tag',
+        )
+
+        assert Instance.objects.values_list('token', 'token_is_encrypted').get(
+            pk=instance.pk
+        ) == ('projection-token', True)
+        named_projection = Instance.objects.values_list(
+            'token', 'token_is_encrypted', named=True
+        ).get(pk=instance.pk)
+        assert named_projection.token == 'projection-token'
+        assert named_projection.token_is_encrypted is True
 
     @pytest.mark.django_db
     def test_refreshing_non_credential_fields_keeps_credentials_deferred(self):
@@ -254,3 +279,16 @@ class TestEncryptedCredentialFields:
         instance.refresh_from_db(fields=['status'])
 
         assert instance.token == 'deferred-token'
+
+    @pytest.mark.django_db
+    def test_refreshing_a_credential_also_loads_its_encryption_state(self):
+        instance = Instance.objects.create(
+            name='refreshed-credential', port=19014, token='initial-token',
+            home_dir='/tmp/refreshed-credential', container_id='cid',
+            status=Instance.STATUS_RUNNING, image='image:tag',
+        )
+        Instance.objects.filter(pk=instance.pk).update(token='refreshed-token')
+
+        instance.refresh_from_db(fields=['token'])
+
+        assert instance.token == 'refreshed-token'
