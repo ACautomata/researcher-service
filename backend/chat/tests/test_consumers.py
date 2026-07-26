@@ -394,3 +394,62 @@ async def test_disconnect_unsubscribes_approval(override_pool, instance, fake_cl
     await comm.disconnect()
     # disconnect 后订阅者退订：再 emit 不再推给已关闭连接
     assert fake_client._approval_subscribers == []
+
+
+# ── issue #103: ChatConsumer 经 OpenClawWire Port 验证 ────────────────────
+
+
+class FakeWirePort(FakeChatClient):
+    """FakeChatClient 兼容 OpenClawWire Port 契约：添加 dead/sessions_rpc/connect/close。"""
+
+    def __init__(self):
+        super().__init__()
+        self.dead = False
+        self.rpc_calls: list[tuple[str, dict]] = []
+
+    async def sessions_rpc(self, method: str, params: dict) -> dict:
+        self.rpc_calls.append((method, params))
+        return {}
+
+    async def connect(self, url: str, device_token: str) -> None:
+        self.dead = False
+
+    async def close(self) -> None:
+        self.dead = True
+
+
+@pytest.mark.asyncio
+async def test_consumer_operates_via_wire_port_contract(override_pool, instance):
+    """acceptance #103：ChatConsumer 的 start/send/resolve 均经 Wire Port 合约完成。
+
+    FakeWirePort 同时实现 FakeChatClient 的语义 + OpenClawWire Port 契约。
+    consumer 不感知 Wire Port 类型差异——走同一 call 模式（send_message/resolve_approval/
+    add_approval_subscriber/remove_approval_subscriber/list_pending_approvals）。
+    """
+    wire = FakeWirePort()
+    pool = FakePool(wire)
+    ChatFleet.override(pool)
+    comm = await _connect_authed()
+    await comm.connect()
+    # start → ready
+    await comm.send_json_to({'type': 'start', 'container': 'demo'})
+    resp = await comm.receive_json_from()
+    assert resp == {'type': 'ready', 'container': 'demo'}
+    # send → text→done 流
+    await comm.send_json_to({'type': 'send', 'sessionKey': 'sk', 'message': 'hi'})
+    await asyncio.sleep(0.05)
+    await wire.emit({'type': 'text', 'runId': 'run-1', 'delta': 'hi'})
+    await wire.emit({'type': 'done', 'runId': 'run-1'})
+    text = await comm.receive_json_from()
+    assert text['type'] == 'text'
+    done = await comm.receive_json_from()
+    assert done['type'] == 'done'
+    # resolve
+    wire.resolve_payload = {'id': 'ap-1', 'decision': 'approve'}
+    await comm.send_json_to({'type': 'resolve', 'id': 'ap-1', 'kind': 'exec', 'decision': 'approve'})
+    resolved = await comm.receive_json_from()
+    assert resolved['decision'] == 'approve'
+    # disconnect → approved subscriber removed
+    await comm.disconnect()
+    assert wire._approval_subscribers == []
+    ChatFleet.reset()
