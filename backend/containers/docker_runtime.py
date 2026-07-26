@@ -8,19 +8,18 @@ client_factory 延迟注入（默认 docker.from_env）—— 构造时不连 da
 import docker
 from docker.errors import NotFound
 
-from .runtime import (
+from .constants import (
     CONFIG_BIND,
     CONTAINER_PREFIX,
+    GATEWAY_BIND,
     GATEWAY_INTERNAL_PORT,
     HOME_BIND,
     LABEL_APP_KEY,
     LABEL_APP_VALUE,
     LABEL_INSTANCE_KEY,
     LABEL_PORT_KEY,
-    ContainerInfo,
-    ContainerSpec,
-    container_name,
 )
+from .runtime import ContainerInfo, ContainerSpec, container_name
 
 # 4 个 sync flag 全关（R6 §3：防覆写挂载的 openclaw.json / 防明文写凭证）
 _SYNC_FLAGS_OFF = {
@@ -40,7 +39,7 @@ _BASE_ENV = {
     'LANGUAGE': 'en_US:en',
     'LC_ALL': 'en_US.UTF-8',
     'OPENCLAW_GATEWAY_PORT': str(GATEWAY_INTERNAL_PORT),
-    'OPENCLAW_GATEWAY_BIND': 'lan',
+    'OPENCLAW_GATEWAY_BIND': GATEWAY_BIND,
     'OPENCLAW_GATEWAY_MODE': 'local',
     'OPENCLAW_WORKSPACE_ROOT': HOME_BIND,
     'DM_POLICY': 'disabled',

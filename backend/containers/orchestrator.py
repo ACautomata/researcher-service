@@ -32,7 +32,6 @@ import urllib.request
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from datetime import timedelta
 from pathlib import Path
 
 from django.db import IntegrityError, transaction
@@ -42,6 +41,7 @@ from integration.openclaw.adapters import HttpHealthProbe
 from models.config_builder import ProviderConfigBuilder
 
 from .config_renderer import ConfigRenderer
+from .constants import LEASE_TTL, MAX_HEALTH_WORKERS, MAX_PORT_RETRIES, TOKEN_URLSAFE_BYTES
 from .docker_runtime import DockerRuntime
 from .models import Instance
 from .ports import RESERVED_PORT_18789, PortAllocator
@@ -54,18 +54,6 @@ HEALTH_UNHEALTHY = 'unhealthy'
 HEALTH_STOPPED = 'stopped'
 HEALTH_PENDING = 'pending'        # creating：容器未起，无 health 可探
 HEALTH_REMOVING = 'removing'      # removing：清理中
-
-# codex R1 :77：port 并发冲突的最大重试次数（port 池充足，覆盖极端并发）
-_MAX_PORT_RETRIES = 8
-# codex R1 :156：list 健康探测并发上限（避免线程爆炸）
-_MAX_HEALTH_WORKERS = 8
-# codex R8 F1：CREATING 行跨进程 lease TTL。_reserve_row 设初始 lease（覆盖随后的 cp -a 模板拷贝），
-# create 在 run 前 checkpoint 续约一次（把 lease 起点推到 run 之前，覆盖 docker create/start）。
-# cp -a（provisioner 内）与 image pull（run 内）是阻塞 IO、内部不续约——依赖 TTL 充分性：
-# 600s 覆盖典型模板拷贝 + 预拉取镜像。极端超时（巨模板/NFS、首次拉大镜像 > 600s）会让 lease 过期，
-# 由 _reconcile self-heal（容器实为 running 则自愈）或收敛 error（可重试）兜底，不致数据损坏。
-# 替代 R7 created_at+60s（无续约、窗口更短、长 create 必误判）。
-_LEASE_TTL = timedelta(seconds=600)
 
 
 class InstanceExists(Exception):
@@ -276,8 +264,8 @@ class InstanceOrchestrator:  # pylint: disable=too-many-instance-attributes
         预占在 mkdir 之前：DB 唯一约束先挡重名，避免误删既有实例目录。
         """
         home = str(self._cfg.root / 'instances' / name / 'home')
-        token = secrets.token_urlsafe(32)
-        for _ in range(_MAX_PORT_RETRIES):
+        token = secrets.token_urlsafe(TOKEN_URLSAFE_BYTES)
+        for _ in range(MAX_PORT_RETRIES):
             port = self._allocator.next_free(self._used_ports())
             try:
                 with transaction.atomic():
@@ -291,7 +279,7 @@ class InstanceOrchestrator:  # pylint: disable=too-many-instance-attributes
                         image=self._cfg.image,
                         # codex R8 F1：lease 起点随预占行落盘——其它 worker 的 _reconcile_creating
                         # 据此在 provisioning 期间不误收敛本行（created_at+60s 无法覆盖长 create）。
-                        lease_expires_at=timezone.now() + _LEASE_TTL,
+                        lease_expires_at=timezone.now() + LEASE_TTL,
                     )
             except IntegrityError:
                 if Instance.objects.filter(name=name).exists():
@@ -341,9 +329,9 @@ class InstanceOrchestrator:  # pylint: disable=too-many-instance-attributes
             # 用户读不了 bind-mount(ro) 的 openclaw.json，gateway 无法启动。
             os.chmod(config_path, 0o644)
             # codex R8 F1：renewable lease——render 完成后、run 前续约，把 lease 起点推到此刻，
-            # 覆盖随后的 docker run（create+start）。run 内 image pull 仍受 _LEASE_TTL 约束
-            # （阻塞 IO 内部不续约，靠 TTL 充分性 + _reconcile self-heal 兜底，见 _LEASE_TTL）。
-            inst.lease_expires_at = timezone.now() + _LEASE_TTL
+            # 覆盖随后的 docker run（create+start）。run 内 image pull 仍受 LEASE_TTL 约束
+            # （阻塞 IO 内部不续约，靠 TTL 充分性 + _reconcile self-heal 兜底，见 LEASE_TTL）。
+            inst.lease_expires_at = timezone.now() + LEASE_TTL
             inst.save(update_fields=['lease_expires_at'])
             run_attempted = True
             container_id = self._runtime.run(
@@ -578,7 +566,7 @@ class InstanceOrchestrator:  # pylint: disable=too-many-instance-attributes
             return []
         # codex R2 :226：主线程先对账 creating 行（崩溃中断者自愈为 running），再进线程池
         self._reconcile_creating(insts)
-        workers = max(1, min(_MAX_HEALTH_WORKERS, len(insts)))
+        workers = max(1, min(MAX_HEALTH_WORKERS, len(insts)))
         with ThreadPoolExecutor(max_workers=workers) as pool:
             return list(pool.map(self._build_item, insts))
 
