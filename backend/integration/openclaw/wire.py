@@ -34,7 +34,8 @@ REQUIRED_SCOPES = {'operator.read', 'operator.write', 'operator.approvals'}
 # payload 字段参考 r26:64（官方文档）；取值链集中在 Translator._approval_card。
 APPROVAL_REQUESTED_EVENTS = ('exec.approval.requested', 'plugin.approval.requested')
 # resolved 仅 plugin 族有（r26:47-52，exec 族无对应）；他端 operator 连接 resolve 后网关广播，
-# 译为 approvalResolved 帧让共享 client 的 peer 卡片收敛。payload 仅 id+decision 已证实（r26:78-79），无 id 跳过（不伪造）。
+# 译为 approvalResolved 帧让共享 client 的 peer 卡片收敛。payload schema 待配对后实测校准
+# （r26:78-79 的 approval.resolve 是 client→gateway 方法参数，非本事件 payload），无 id 跳过（不伪造）。
 APPROVAL_RESOLVED_EVENTS = ('plugin.approval.resolved',)
 # T08 工具执行（issue #44）：挂在 chat run 内（r26 §3），帧带 runId 走既有 runId 路由。
 # 事件名来自 r26 §3 二手来源，译者取值链兜底；待网关连接后抓帧验证。

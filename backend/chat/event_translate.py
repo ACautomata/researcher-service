@@ -14,7 +14,7 @@ error 读 errorMessage/errorKind（网关字段，r13:118 上游源码已证）�
 T06 权限审批（issue #42 / spec §8.2）：`exec.approval.requested` / `plugin.approval.requested`（r26 §1
 官方文档已证）是**连接级**事件（不挂 chat runId，r26:88）→ 翻译成 `{type:approval,id,kind,command}`
 审批卡帧。command 取值链：systemRunPlan.rawCommand（r26:64 官方文档已证）→ systemRunPlan.command
-→ 顶层 command → ''（防御性兜底）。decision 透传网关权威值（r26:78-79 官方文档已证）。
+→ 顶层 command → ''（防御性兜底）。decision 透传网关权威值（客户端 approval.resolve 方法已证 r26:78-79；网关事件 payload 待实测）。
 
 T08 工具执行（issue #44 / spec §8.2/§9.4 / r26 §3）：`agent.tool.start`/`agent.tool.result`（r26 §3
 二手来源，译者取值链兜底）→ `{type:tool,runId,name,state,title,input,result}` 工具帧，带 runId
@@ -70,7 +70,7 @@ class ChatEventTranslator:
     def _approval_resolved(payload: dict) -> dict | None:
         """网关 resolved 事件 payload → 前端 approvalResolved 帧；无 id 返回 None（不伪造，跳过）。
 
-        decision 取值透传网关权威值（r26:78-79 官方文档已证）；缺省/未知时前端判 unknown，不默认批准。
+        decision 取值（待实测校准）：透传网关权威值；缺省/未知时前端判 unknown，不默认批准。
         """
         approval_id = payload.get('id')
         if not approval_id:
