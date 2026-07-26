@@ -9,6 +9,9 @@ connect 帧标识（client_id / mode / role / agent_id）、operator 权限 scop
   （#88-90 后续统一到 containers/constants.py），本包不重复定义。
 - 标识符（runId / sessionKey / deviceToken 等）保留 OpenClaw 原生命名、集中管理、不翻译。
 """
+import time
+import uuid
+
 # 协议版本（spec §8.1 / r13 §5.4）
 PROTOCOL = 4
 
@@ -36,3 +39,91 @@ APPROVAL_RESOLVED_EVENTS = ('plugin.approval.resolved',)
 # T08 工具执行（issue #44）：挂在 chat run 内（r26 §3），帧带 runId 走既有 runId 路由。
 TOOL_START_EVENTS = ('agent.tool.start',)
 TOOL_END_EVENTS = ('agent.tool.result',)
+
+
+class ConnectFrameBuilder:
+    """单一 connect 帧构造器——消除 pairing_ws._build_connect_frame 与
+    chat_client._default_connect_frame 两套重复（issue #102 / spec #97）。
+
+    两种模式：
+    - pairing() — 配对握手帧（challenge/nonce/Ed25519 签名/device 块）
+    - session() — 已配对长连接帧（deviceToken 直连，无 device 块）
+    """
+
+    @staticmethod
+    def pairing(*, req_id: str, identity, token: str, nonce: str) -> dict:
+        """构造配对握手 connect 帧（spec §8.1 step 2）。
+
+        identity 为 DeviceIdentity（chat.device_crypto），调用端注入。
+        """
+        from chat.device_crypto import DeviceCrypto
+
+        signed_at_ms = int(time.time() * 1000)
+        payload = DeviceCrypto.build_auth_payload_v3(
+            device_id=identity.device_id,
+            client_id=CLIENT_ID,
+            client_mode=CLIENT_MODE,
+            role=ROLE,
+            scopes=SCOPES,
+            signed_at_ms=signed_at_ms,
+            token=token,
+            nonce=nonce,
+            platform='linux',
+            device_family='',
+        )
+        return {
+            'type': 'req',
+            'id': req_id,
+            'method': 'connect',
+            'params': {
+                'minProtocol': PROTOCOL,
+                'maxProtocol': PROTOCOL,
+                'client': {
+                    'id': CLIENT_ID,
+                    'version': '1.0',
+                    'platform': 'linux',
+                    'mode': CLIENT_MODE,
+                },
+                'role': ROLE,
+                'scopes': list(SCOPES),
+                'caps': list(CAPS),
+                'commands': [],
+                'permissions': {},
+                'auth': {'token': token or ''},
+                'locale': 'zh-CN',
+                'userAgent': 'openclaw-fleet-panel/1.0',
+                'device': {
+                    'id': identity.device_id,
+                    'publicKey': identity.public_key_raw_base64url(),
+                    'signature': identity.sign(payload),
+                    'signedAt': signed_at_ms,
+                    'nonce': nonce,
+                },
+            },
+        }
+
+    @staticmethod
+    def session(*, req_id: str, device_token: str) -> dict:
+        """构造已配对长连接 connect 帧（spec §8.1 step 5）。
+
+        deviceToken 作 auth.token 直连，无需 device 签名块。
+        """
+        return {
+            'type': 'req',
+            'id': req_id,
+            'method': 'connect',
+            'params': {
+                'minProtocol': PROTOCOL,
+                'maxProtocol': PROTOCOL,
+                'client': {
+                    'id': CLIENT_ID,
+                    'version': '1.0',
+                    'platform': 'linux',
+                    'mode': CLIENT_MODE,
+                },
+                'role': ROLE,
+                'scopes': list(SCOPES),
+                'caps': list(CAPS),
+                'auth': {'token': device_token},
+            },
+        }

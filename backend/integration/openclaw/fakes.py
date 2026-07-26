@@ -51,9 +51,13 @@ class FakeOpenClawWire:
         self.closed: bool = False
         # 测试可预设 pair() 返回值（如 PairingResult dataclass）
         self.pair_result: Any = None
+        # 测试可预设 pair() 抛异常（PairingRequired / PairingError）
+        self.pair_raise: Exception | None = None
 
     async def pair(self, url: str, identity: Any, bootstrap_token: str) -> Any:
         self.pair_calls.append((url, identity, bootstrap_token))
+        if self.pair_raise is not None:
+            raise self.pair_raise
         return self.pair_result
 
     async def connect(self, url: str, device_token: str) -> None:
