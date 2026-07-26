@@ -272,7 +272,9 @@ class FakeWikiFileSystem:
         out = []
         for p in sorted(self.pages):
             top = p.split('/', 1)[0]
-            if '/' not in p or top in self._SKIP_DIRS:
+            # 顶层散落 .md（'/' not in p）也收，对齐 BindMountWikiFileSystem.list_category_pages
+            # （codex #129 P2）；仅跳过插件私有目录下的页与占位文件。
+            if '/' in p and top in self._SKIP_DIRS:
                 continue
             if p.rsplit('/', 1)[-1] in self._SKIP_FILES:
                 continue

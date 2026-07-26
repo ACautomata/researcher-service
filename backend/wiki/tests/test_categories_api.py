@@ -110,6 +110,69 @@ def test_categories_item_fields(authed, cat_home, instance):
     assert critic['category'] == 'critic'
 
 
+def test_categories_marker_fully_case_insensitive(authed, cat_home, instance):
+    """codex #129 P2：关键字大小写不敏感是全形态（CATEGORY/cAtEgOrY 等），不只首字母。
+
+    契约自述「大小写不敏感」；全大写/混合大小写标记页也应被分组，category 值仍小写归一。
+    """
+    main = cat_home / 'wiki' / 'main'
+    (main / 'thoughts' / 'upper.md').write_text(
+        '# Upper\n\n`CATEGORY: Idea`\n\nUpper 摘录。\n', encoding='utf-8',
+    )
+    (main / 'thoughts' / 'mixed.md').write_text(
+        '# Mixed\n\n`cAtEgOrY: Idea`\n\nMixed 摘录。\n', encoding='utf-8',
+    )
+    resp = authed.get(URL)
+    assert resp.status_code == 200
+    idea_paths = {p['path'] for p in resp.json()['idea']}
+    assert 'thoughts/upper.md' in idea_paths
+    assert 'thoughts/mixed.md' in idea_paths
+
+
+def test_categories_skips_unreadable_page(authed, cat_home, instance, monkeypatch):
+    """codex #129 P2：某页正文读不出（并发删除/不可读/非法 UTF-8）时跳过该页而非 500。
+
+    port 契约要求每页必带 content；读不出的页不进响应，其余带标记页正常返回。
+    """
+    main = cat_home / 'wiki' / 'main'
+    bad = main / 'thoughts' / 'broken.md'
+    bad.write_text('# Broken\n\n`category: broken`\n\nBroken 摘录。\n', encoding='utf-8')
+
+    # 仅让 broken.md 读不出（模拟非法 UTF-8/IO 失败），其余页不受影响
+    from integration.openclaw.adapters import BindMountWikiFileSystem
+    real_read_text = BindMountWikiFileSystem._read_text
+
+    @staticmethod
+    def _patched(fpath):
+        if fpath.name == 'broken.md':
+            return None
+        return real_read_text(fpath)
+
+    monkeypatch.setattr(BindMountWikiFileSystem, '_read_text', _patched)
+
+    resp = authed.get(URL)
+    assert resp.status_code == 200  # 整请求不 500
+    data = resp.json()
+    assert 'broken' not in data  # 读不出的页被跳过
+    paths = {p['path'] for items in data.values() for p in items}
+    assert 'thoughts/broken.md' not in paths
+    assert 'thoughts/idea-1.md' in paths  # 其余带标记页正常
+
+
+def test_categories_includes_top_level_page(authed, cat_home, instance):
+    """issue #84 / codex #129 P2：顶层散落 .md（不属任何子目录）带标记也进聚合。
+
+    对齐 BindMountWikiFileSystem.list_category_pages「含顶层散落页」语义（fake 同步修复）。
+    """
+    main = cat_home / 'wiki' / 'main'
+    (main / 'root-note.md').write_text(
+        '# Root Note\n\n`category: rootcat`\n\nRoot 摘录。\n', encoding='utf-8',
+    )
+    resp = authed.get(URL)
+    assert resp.status_code == 200
+    assert [p['path'] for p in resp.json()['rootcat']] == ['root-note.md']
+
+
 def test_categories_excludes_unmarked_pages(authed, cat_home, instance):
     """无标记页（含共享骨架里的 concepts/attention、experiments/trial-1）不进响应。"""
     resp = authed.get(URL)

@@ -16,8 +16,9 @@ from integration.openclaw.ports import WikiFileSystem
 # obsidian 风格双链 [[target]] 或 [[target|别名]]
 WIKILINK_RE = re.compile(r'\[\[([^\]]+)\]\]')
 
-# category 机读标记：整行匹配、容忍大小写、剥离尾反引号（research 加固，issue #84 / spec #75）
-CATEGORY_RE = re.compile(r'^`[Cc]ategory:\s*([^`\s]+)`\s*$', re.MULTILINE)
+# category 机读标记：整行匹配、大小写不敏感（含 CATEGORY/cAtEgOrY 等全形态）、剥离尾反引号
+# （research 加固，issue #84 / spec #75；IGNORECASE 全词匹配 codex #129 P2）
+CATEGORY_RE = re.compile(r'^`category:\s*([^`\s]+)`\s*$', re.MULTILINE | re.IGNORECASE)
 # H1 / H2 标题行（界定提取窗口）
 _H1_RE = re.compile(r'^#\s', re.MULTILINE)
 _H2_RE = re.compile(r'^##\s', re.MULTILINE)

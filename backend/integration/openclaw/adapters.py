@@ -165,7 +165,9 @@ class BindMountWikiFileSystem:
                 if d.name not in _SKIP_DIRS:
                     self._scan_dir(d, f'{d.name}/', pages, with_content=True)
             elif d.is_file() and d.suffix == '.md' and d.name not in _SKIP_FILES:
-                pages.append(self._page_entry(d, d.name, with_content=True))
+                entry = self._page_entry(d, d.name, with_content=True)
+                if entry is not None:
+                    pages.append(entry)
         return pages
 
     # —— Port: write_page ——
@@ -253,22 +255,26 @@ class BindMountWikiFileSystem:
                 if f.suffix != '.md' or f.name in _SKIP_FILES:
                     continue
                 rel = f'{cur_prefix}{f.name}'
-                pages_out.append(self._page_entry(f, rel, with_content))
+                entry = self._page_entry(f, rel, with_content)
+                if entry is not None:
+                    pages_out.append(entry)
         # 栈式 DFS 弹出顺序与字典序相反(LIFO),而前端 FileTree 按数组顺序渲染不再排序;
         # 末尾按 path 字典序重排,保持显示顺序稳定(codex #125 P2)。
         pages_out.sort(key=lambda p: p['path'])
 
-    def _page_entry(self, fpath: Path, rel: str, with_content: bool) -> dict:
+    def _page_entry(self, fpath: Path, rel: str, with_content: bool) -> dict | None:
         """构造一页 entry：{path,title}（默认），with_content=True 时加 content 全文。
 
         with_content 时 title 语义对齐 read_page：frontmatter paper.title/title → H1 → 文件名
         （build_tree 的 _page_title 只读前 2000 字、不回落 H1，保持原行为不动）。
+        with_content=True 但正文读不出（并发删除/不可读/非法 UTF-8）时返回 None —— 调用方跳过
+        该页，保证 port 契约「每页必带 content」不被破坏（codex #129 P2）。
         """
         if not with_content:
             return {'path': rel, 'title': self._page_title(fpath, fpath.stem)}
         content = self._read_text(fpath)
         if content is None:
-            return {'path': rel, 'title': fpath.stem}
+            return None
         fm, body = self._parser.parse(content)
         title = fm.get('paper.title') or fm.get('title') or self._h1_title(body) or fpath.stem
         return {'path': rel, 'title': title, 'content': content}
