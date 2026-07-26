@@ -340,7 +340,11 @@ async function loadHistory(key: string) {
   try {
     const res = await getSessionHistory(cname, key)
     if (gen !== containerGen || selectedSession.value !== key) return // 切走了：丢弃迟到响应
-    messages.value = res.messages.map(translateHistoryMessage)
+    // codex P2 #108：保留 await 期间 send() 追加的进行中 turn（user + 流式 assistant 占位）。
+    // 直接整体替换会被历史快照覆盖 → WS delta 找不到 streaming 尾，整轮实时回复从 UI 消失。
+    // 历史在前、进行中 turn 留在尾，streaming 尾仍是 onText 路由的目标。
+    const inFlight = messages.value
+    messages.value = [...res.messages.map(translateHistoryMessage), ...inFlight]
     historyHasMore.value = res.hasMore
     historyAnchor.value = res.nextOffset
   } catch (e) {

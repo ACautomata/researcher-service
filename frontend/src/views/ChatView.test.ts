@@ -858,6 +858,36 @@ describe('ChatView', () => {
     expect(w.find('[data-test="stream"]').text()).not.toContain('S1回答')
   })
 
+  it('preserves a turn sent during session-switch history load (codex P2 #108)', async () => {
+    // 复现：切会话后历史未回即发送 → 整体替换 messages 会让历史快照覆盖进行中的 user/流式 assistant，
+    // WS delta 随即找不到 streaming 尾，整轮实时回复从 UI 消失。
+    let resolveHistory!: (v: unknown) => void
+    ;(getSessionHistory as ReturnType<typeof vi.fn>).mockImplementation(
+      () => new Promise((r) => { resolveHistory = r as (v: unknown) => void }),
+    )
+    const w = mount(ChatView, { global: { plugins: [createPinia()] } })
+    await flushPromises()
+    MockWS.last!.fireOpen()
+    MockWS.last!.fireMessage({ type: 'ready', container: 'demo' })
+    await nextTick()
+    // mount 自动选中 sk-1，loadHistory 已发起、messages 已清空、historyLoading=true。此时发送「你好」
+    await w.find('[data-test="input"]').setValue('你好')
+    await w.find('[data-test="send"]').trigger('click')
+    expect(MockWS.last!.sent).toContainEqual({ type: 'send', sessionKey: 'sk-1', message: '你好' })
+
+    // 历史返回（含一条旧 assistant 回答）→ 历史 prepend、进行中 turn 必须保留在尾
+    resolveHistory({ messages: [{ role: 'agent', text: '旧回答' }], hasMore: false, nextOffset: null })
+    await flushPromises()
+    const rows = w.findAll('.msg').map((r) => r.text())
+    expect(rows[0]).toContain('旧回答') // 历史在前
+    expect(rows.some((t) => t.includes('你好'))).toBe(true) // 进行中 user 消息保留
+
+    // 后续 WS delta 仍能落到 streaming 尾 → 实时回复未丢（直接验证 codex 描述的失效路径）
+    MockWS.last!.fireMessage({ type: 'text', runId: 'r1', delta: '新回复' })
+    await nextTick()
+    expect(w.find('[data-test="stream"]').text()).toContain('新回复')
+  })
+
   it('shows pairing guidance when the container is unpaired (409, 验收 未配对引导)', async () => {
     ;(listSessions as ReturnType<typeof vi.fn>).mockRejectedValue(new ApiError(409, '未配对'))
     const w = mount(ChatView, { global: { plugins: [createPinia()] } })
