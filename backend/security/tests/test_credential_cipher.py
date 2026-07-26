@@ -23,7 +23,12 @@ class TestCredentialCipher:
     def test_tampered_ciphertext_is_rejected(self):
         cipher = CredentialCipher((bytes(range(32)),))
         ciphertext = cipher.encrypt('device-token')
-        tampered = ciphertext[:-1] + ('A' if ciphertext[-1] != 'A' else 'B')
+        # 篡改首个 base64url 字符（对应 nonce 首字节）：末字符只承载最后 1 字节的
+        # 低 2 位、其余 4 位是 padding，约 25% 概率改了等于没改而令 GCM 误判通过。
+        index = len(CredentialCipher.PREFIX)
+        head = ciphertext[index]
+        replacement = 'B' if head != 'B' else 'C'
+        tampered = ciphertext[:index] + replacement + ciphertext[index + 1:]
         with pytest.raises(InvalidCredentialCiphertext):
             cipher.decrypt(tampered)
 
