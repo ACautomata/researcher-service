@@ -4,21 +4,14 @@
 gateway。结构：五核心分类 concepts/entities/sources/syntheses/reports + domains/<d>/papers/
 子树；跳过 .openclaw-wiki 等插件私有目录与占位文件。path 一律相对 wiki/main 的 posix 相对路径，
 经 realpath 校验防目录穿越（spec §4 零信任）。graph = 遍历出节点 + 解析 [[wikilink]]/related_pages 出边。
+
+构造注入 WikiFileSystem Port（issue #100）：默认为 BindMountWikiFileSystem（真实 bind-mount
+Adapter），测试注入 FakeWikiFileSystem 隔离文件系统。wiki compile 仍经 CompileFleet（不变）。
 """
 import re
 from pathlib import Path
 
-# 分类 → 子目录相对路径（与插件目录约定一致，勿自造命名 —— r29 §4.2）
-GROUP_DIRS = {
-    'concept': 'concepts',
-    'entity': 'entities',
-    'source': 'sources',
-    'synthesis': 'syntheses',
-    'report': 'reports',
-}
-# 应跳过的目录（插件私有/下划线视图；domains 单独按子树处理）
-SKIP_DIRS = {'.openclaw-wiki', '_attachments', '_views'}
-SKIP_FILES = {'index.md', 'AGENTS.md', 'WIKI.md', 'inbox.md'}
+from integration.openclaw.ports import WikiFileSystem
 
 # obsidian 风格双链 [[target]] 或 [[target|别名]]
 WIKILINK_RE = re.compile(r'\[\[([^\]]+)\]\]')
@@ -72,116 +65,62 @@ class FrontmatterParser:
 
 
 class WikiService:
-    """单个容器 wiki/main 的直读/直写（组合 FrontmatterParser，无自由函数）。"""
+    """单个容器 wiki/main 的直读/直写（构造注入 WikiFileSystem Port，组合 FrontmatterParser）。"""
 
-    def __init__(self, instance, parser: FrontmatterParser | None = None) -> None:
+    def __init__(self, instance,
+                 fs: WikiFileSystem | None = None,
+                 parser: FrontmatterParser | None = None) -> None:
         self._instance = instance
-        self._root = Path(instance.home_dir) / 'wiki' / 'main'
         self._parser = parser or FrontmatterParser()
+        if fs is None:
+            from integration.openclaw.adapters import BindMountWikiFileSystem
+
+            wiki_root = str(Path(instance.home_dir) / 'wiki' / 'main')
+            self._fs: WikiFileSystem = BindMountWikiFileSystem(wiki_root)
+        else:
+            self._fs = fs
 
     def build_tree(self) -> dict:
         """遍历 wiki/main 文件树：五核心分类 + domains 子树分组。"""
-        groups = []
-        for kind, sub in GROUP_DIRS.items():
-            pages: list = []
-            self._scan_dir(self._root / sub, f'{sub}/', pages)
-            groups.append({'kind': kind, 'name': sub, 'pages': pages})
-
-        domain_pages: list = []
-        domains_dir = self._root / 'domains'
-        if domains_dir.is_dir():
-            for d in sorted(domains_dir.iterdir()):
-                if not d.is_dir():
-                    continue
-                self._scan_dir(d / 'papers', f'domains/{d.name}/papers/', domain_pages)
-        groups.append({'kind': 'domain', 'name': 'domains', 'pages': domain_pages})
-        return {'groups': groups}
+        return self._fs.build_tree()
 
     def read_page(self, rel_path: str) -> dict:
-        """读取一页：{path, title, content}。PageNotFound / InvalidPath 上抛。"""
-        fpath = self._resolve(rel_path)
-        if not fpath.is_file():
-            raise PageNotFound(rel_path)
-        content = fpath.read_text(encoding='utf-8')
-        fm, _ = self._parser.parse(content)
-        return {
-            'path': rel_path,
-            'title': fm.get('paper.title') or fm.get('title') or fpath.stem,
-            'content': content,
-        }
+        """读一页 {path,title,content}；页不存在/越权路径上抛。"""
+        try:
+            return self._fs.read_page(rel_path)
+        except ValueError as e:
+            raise InvalidPath(str(e)) from e
+        except FileNotFoundError as e:
+            raise PageNotFound(str(e)) from e
 
     def write_page(self, rel_path: str, content: str) -> dict:
-        """覆盖已存在页（PUT）：只写已存在文件，不新建、不动 index.md。PageNotFound 上抛。"""
-        fpath = self._resolve(rel_path)
-        if not fpath.is_file():
-            raise PageNotFound(rel_path)
-        fpath.write_text(content, encoding='utf-8')
-        return {'path': rel_path}
+        """覆写已存在页（PUT）；不存在/越权上抛。"""
+        try:
+            return self._fs.write_page(rel_path, content)
+        except ValueError as e:
+            raise InvalidPath(str(e)) from e
+        except FileNotFoundError as e:
+            raise PageNotFound(str(e)) from e
 
     def create_page(self, rel_path: str, content: str) -> dict:
-        """新建一页（POST）：父目录须已存在；目标已存在 → PageExists。"""
-        fpath = self._resolve(rel_path)
-        if fpath.exists():
-            raise PageExists(rel_path)
-        if not fpath.parent.is_dir():
-            raise InvalidPath(rel_path)  # 分类目录不存在（沿用插件目录约定，不自造）
-        fpath.write_text(content, encoding='utf-8')
-        return {'path': rel_path}
+        """新建一页（POST）；已存在/越权/父目录不存在上抛。"""
+        try:
+            return self._fs.create_page(rel_path, content)
+        except ValueError as e:
+            raise InvalidPath(str(e)) from e
+        except FileExistsError as e:
+            raise PageExists(str(e)) from e
+        except NotADirectoryError as e:
+            raise InvalidPath(str(e)) from e
 
     def delete_page(self, rel_path: str) -> None:
-        """删除一页（DELETE）：PageNotFound 上抛。"""
-        fpath = self._resolve(rel_path)
-        if not fpath.is_file():
-            raise PageNotFound(rel_path)
-        fpath.unlink()
-
-    def _resolve(self, rel_path: str) -> Path:
-        """把相对 wiki/main 的 path 解析为绝对路径；越界（穿越/不在 root 内）→ InvalidPath。
-
-        同时拒 managed/私有路径（codex PR #62 意见4）：插件生成 index.md、保留文件
-        （AGENTS/WIKI/inbox.md）、.openclaw-wiki 等私有目录——这些不在文件树内（只读插件
-        managed 区），任何 CRUD 都不应触碰，否则越权改插件生成区。
-        """
-        self._assert_not_managed(rel_path)
-        root = self._root.resolve()
-        fpath = (root / rel_path).resolve()
-        if root != fpath and root not in fpath.parents:
-            raise InvalidPath(rel_path)
-        return fpath
-
-    @staticmethod
-    def _assert_not_managed(rel_path: str) -> None:
-        parts = rel_path.split('/')
-        # 私有/插件目录（.openclaw-wiki、_attachments、_views）
-        if any(seg in SKIP_DIRS for seg in parts):
-            raise InvalidPath(rel_path)
-        # 插件 managed 文件（index.md/AGENTS.md/WIKI.md/inbox.md，含分类子目录下的 index.md）
-        if parts[-1] in SKIP_FILES:
-            raise InvalidPath(rel_path)
-
-    def _scan_dir(self, dirpath: Path, rel_prefix: str, pages_out: list) -> None:
-        """扫描单层目录的 .md 页面（跳过占位/索引），path 用相对 wiki/main 的 posix 路径。"""
-        if not dirpath.is_dir():
-            return
-        for f in sorted(dirpath.iterdir()):
-            if not f.is_file():
-                continue
-            if f.suffix != '.md' or f.name in SKIP_FILES:
-                continue
-            rel = f'{rel_prefix}{f.name}'
-            pages_out.append({
-                'path': rel,
-                'title': self._page_title(f, f.stem),
-            })
-
-    def _page_title(self, fpath: Path, fallback: str) -> str:
-        """从 frontmatter 取标题（paper.title 优先，兼容插件 title）。"""
+        """删除一页；不存在/越权上抛。"""
         try:
-            raw = fpath.read_text(encoding='utf-8')[:2000]
-        except OSError:
-            return fallback
-        fm, _ = self._parser.parse(raw)
-        return fm.get('paper.title') or fm.get('title') or fallback
+            self._fs.delete_page(rel_path)
+        except ValueError as e:
+            raise InvalidPath(str(e)) from e
+        except FileNotFoundError as e:
+            raise PageNotFound(str(e)) from e
 
     def build_graph(self) -> dict:
         """全库图谱：节点=遍历树全部页；边=正文 [[wikilink]] + frontmatter related_pages。
@@ -197,10 +136,9 @@ class WikiService:
         ghosts: dict = {}
 
         for page in all_pages:
-            fpath = self._root / page['path']
             try:
-                content = fpath.read_text(encoding='utf-8')
-            except OSError:
+                content = self._fs.read_page(page['path'])['content']
+            except Exception:
                 continue
             fm, body = self._parser.parse(content)
             targets = [m.group(1).split('|')[0].strip()

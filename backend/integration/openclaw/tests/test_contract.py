@@ -137,7 +137,200 @@ class TestAdaptersSatisfyPorts:
         assert HttpHealthProbe().is_reachable(19000) is False
 
 
-class TestWireDoesNotRedefineContainerConstants:
+class TestWikiFileSystemAdapterContract:
+    """issue #100：BindMountWikiFileSystem 实现 WikiFileSystem Port + 路径约定/越权防护。
+
+    契约级别——只测 Adapter 通过 Port 的行为。不做 API 层 HTTP 编码。
+    """
+
+    @staticmethod
+    def _make_wiki_root(tmp_path):
+        """准备 wiki/main 骨架：五核心分类 + domains 子树 + 私有目录/占位文件。"""
+        from pathlib import Path
+
+        root = Path(tmp_path) / 'wiki' / 'main'
+        (root / 'concepts').mkdir(parents=True)
+        (root / 'concepts' / 'attention.md').write_text(
+            '---\ntitle: Attention\n---\n# Attention\n见 [[self-attention]]。\n',
+            encoding='utf-8',
+        )
+        (root / 'entities').mkdir(parents=True)
+        (root / 'sources').mkdir(parents=True)
+        (root / 'syntheses').mkdir(parents=True)
+        (root / 'reports').mkdir(parents=True)
+        papers = root / 'domains' / 'cv' / 'papers'
+        papers.mkdir(parents=True)
+        (papers / 'resnet.md').write_text(
+            '---\npaper:\n  title: ResNet\nrelated_pages: [attention]\n---\n# ResNet\n',
+            encoding='utf-8',
+        )
+        (root / '.openclaw-wiki').mkdir()
+        (root / '.openclaw-wiki' / 'cache.md').write_text('x', encoding='utf-8')
+        (root / 'index.md').write_text('# INDEX', encoding='utf-8')
+        return root
+
+    # —— Port compliance ——
+
+    def test_adapter_satisfies_port(self):
+        from integration.openclaw import WikiFileSystem
+        from integration.openclaw.adapters import BindMountWikiFileSystem
+
+        assert isinstance(BindMountWikiFileSystem('/tmp'), WikiFileSystem)
+
+    # —— build_tree ——
+
+    def test_build_tree_five_core_kinds(self, tmp_path):
+        from integration.openclaw.adapters import BindMountWikiFileSystem
+
+        root = self._make_wiki_root(tmp_path)
+        fs = BindMountWikiFileSystem(str(root))
+        tree = fs.build_tree()
+        kinds = {g['kind'] for g in tree['groups']}
+        assert {'concept', 'entity', 'source', 'synthesis', 'report', 'domain'} <= kinds
+
+    def test_build_tree_lists_pages(self, tmp_path):
+        from integration.openclaw.adapters import BindMountWikiFileSystem
+
+        root = self._make_wiki_root(tmp_path)
+        fs = BindMountWikiFileSystem(str(root))
+        tree = fs.build_tree()
+        concept = next(g for g in tree['groups'] if g['kind'] == 'concept')
+        paths = {p['path'] for p in concept.get('pages', [])}
+        assert 'concepts/attention.md' in paths
+
+    def test_build_tree_skips_managed_dirs_and_files(self, tmp_path):
+        from integration.openclaw.adapters import BindMountWikiFileSystem
+
+        root = self._make_wiki_root(tmp_path)
+        fs = BindMountWikiFileSystem(str(root))
+        tree = fs.build_tree()
+        all_paths = {p['path'] for g in tree['groups'] for p in g.get('pages', [])}
+        assert not any('.openclaw-wiki' in p for p in all_paths)
+        assert 'index.md' not in all_paths
+
+    # —— read_page ——
+
+    def test_read_page_returns_content_and_title(self, tmp_path):
+        from integration.openclaw.adapters import BindMountWikiFileSystem
+
+        root = self._make_wiki_root(tmp_path)
+        fs = BindMountWikiFileSystem(str(root))
+        page = fs.read_page('concepts/attention.md')
+        assert page['path'] == 'concepts/attention.md'
+        assert page['title'] == 'Attention'
+        assert '# Attention' in page['content']
+
+    def test_read_page_missing_raises(self, tmp_path):
+        import pytest
+        from integration.openclaw.adapters import BindMountWikiFileSystem
+
+        root = self._make_wiki_root(tmp_path)
+        fs = BindMountWikiFileSystem(str(root))
+        with pytest.raises(Exception):
+            fs.read_page('concepts/nope.md')
+
+    # —— write_page ——
+
+    def test_write_page_overwrites_existing(self, tmp_path):
+        from pathlib import Path
+        from integration.openclaw.adapters import BindMountWikiFileSystem
+
+        root = self._make_wiki_root(tmp_path)
+        fs = BindMountWikiFileSystem(str(root))
+        result = fs.write_page('concepts/attention.md', '# 已编辑\n')
+        assert result == {'path': 'concepts/attention.md'}
+        saved = (Path(root) / 'concepts' / 'attention.md').read_text(encoding='utf-8')
+        assert saved == '# 已编辑\n'
+
+    def test_write_page_missing_raises(self, tmp_path):
+        import pytest
+        from integration.openclaw.adapters import BindMountWikiFileSystem
+
+        root = self._make_wiki_root(tmp_path)
+        fs = BindMountWikiFileSystem(str(root))
+        with pytest.raises(Exception):
+            fs.write_page('concepts/nope.md', 'x')
+
+    # —— create_page ——
+
+    def test_create_page_writes(self, tmp_path):
+        from pathlib import Path
+        from integration.openclaw.adapters import BindMountWikiFileSystem
+
+        root = self._make_wiki_root(tmp_path)
+        fs = BindMountWikiFileSystem(str(root))
+        result = fs.create_page('concepts/transformer.md', '---\ntitle: T\n---\n# T\n')
+        assert result == {'path': 'concepts/transformer.md'}
+        assert (Path(root) / 'concepts' / 'transformer.md').exists()
+
+    def test_create_page_existing_raises(self, tmp_path):
+        import pytest
+        from integration.openclaw.adapters import BindMountWikiFileSystem
+
+        root = self._make_wiki_root(tmp_path)
+        fs = BindMountWikiFileSystem(str(root))
+        with pytest.raises(Exception):
+            fs.create_page('concepts/attention.md', 'x')
+
+    def test_create_page_no_parent_dir_raises(self, tmp_path):
+        import pytest
+        from integration.openclaw.adapters import BindMountWikiFileSystem
+
+        root = self._make_wiki_root(tmp_path)
+        fs = BindMountWikiFileSystem(str(root))
+        with pytest.raises(Exception):
+            fs.create_page('nonexistent_category/page.md', 'x')
+
+    # —— delete_page ——
+
+    def test_delete_page_removes(self, tmp_path):
+        from pathlib import Path
+        from integration.openclaw.adapters import BindMountWikiFileSystem
+
+        root = self._make_wiki_root(tmp_path)
+        fs = BindMountWikiFileSystem(str(root))
+        target = Path(root) / 'concepts' / 'attention.md'
+        assert target.exists()
+        fs.delete_page('concepts/attention.md')
+        assert not target.exists()
+
+    def test_delete_page_missing_raises(self, tmp_path):
+        import pytest
+        from integration.openclaw.adapters import BindMountWikiFileSystem
+
+        root = self._make_wiki_root(tmp_path)
+        fs = BindMountWikiFileSystem(str(root))
+        with pytest.raises(Exception):
+            fs.delete_page('concepts/nope.md')
+
+    # —— path traversal protection ——
+
+    def test_path_traversal_rejected(self, tmp_path):
+        import pytest
+        from integration.openclaw.adapters import BindMountWikiFileSystem
+
+        root = self._make_wiki_root(tmp_path)
+        fs = BindMountWikiFileSystem(str(root))
+        with pytest.raises(Exception):
+            fs.read_page('../../../etc/passwd.md')
+
+    def test_managed_path_rejected(self, tmp_path):
+        import pytest
+        from integration.openclaw.adapters import BindMountWikiFileSystem
+
+        root = self._make_wiki_root(tmp_path)
+        fs = BindMountWikiFileSystem(str(root))
+        with pytest.raises(Exception):
+            fs.read_page('.openclaw-wiki/cache.md')
+
+    def test_index_md_rejected(self, tmp_path):
+        import pytest
+        from integration.openclaw.adapters import BindMountWikiFileSystem
+
+        root = self._make_wiki_root(tmp_path)
+        fs = BindMountWikiFileSystem(str(root))
+        with pytest.raises(Exception):
+            fs.read_page('index.md')
     """集成包不重复定义容器/编排域常量（issue #98 acceptance / spec #97 user story 19）。
 
     容器/编排域常量单一来源在 containers app（#88-90 后续统一到 containers/constants.py），
