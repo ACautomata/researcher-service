@@ -10,10 +10,10 @@ import json
 from django.db import models
 
 from containers.models import Instance
-from security.fields import EncryptedTextField
+from security.fields import EncryptedCredentialsModel, EncryptedTextField
 
 
-class Pairing(models.Model):
+class Pairing(EncryptedCredentialsModel):
     """一个容器实例的设备配对记账行（spec §10 chat.Pairing）。"""
 
     STATUS_UNPAIRED = 'unpaired'
@@ -32,8 +32,10 @@ class Pairing(models.Model):
     )
     device_id = models.CharField(max_length=64, blank=True, default='')
     public_key_pem = models.TextField(blank=True, default='')
-    private_key_pem = EncryptedTextField(blank=True, default='')
-    device_token = EncryptedTextField(blank=True, default='')
+    private_key_pem = EncryptedTextField(blank=True, default='', state_field='private_key_pem_is_encrypted')
+    private_key_pem_is_encrypted = models.BooleanField(default=False)
+    device_token = EncryptedTextField(blank=True, default='', state_field='device_token_is_encrypted')
+    device_token_is_encrypted = models.BooleanField(default=False)
     scopes_json = models.TextField(blank=True, default='[]')
     pairing_request_id = models.CharField(max_length=128, blank=True, default='')
     status = models.CharField(

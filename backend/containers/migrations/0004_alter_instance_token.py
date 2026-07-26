@@ -1,6 +1,6 @@
 # Generated for issue #55.
 
-from django.db import migrations
+from django.db import migrations, models
 
 import security.fields
 
@@ -15,6 +15,11 @@ class Migration(migrations.Migration):
         migrations.AlterField(
             model_name='instance',
             name='token',
-            field=security.fields.EncryptedTextField(),
+            field=security.fields.EncryptedTextField(state_field='token_is_encrypted'),
+        ),
+        migrations.AddField(
+            model_name='instance',
+            name='token_is_encrypted',
+            field=models.BooleanField(default=False),
         ),
     ]

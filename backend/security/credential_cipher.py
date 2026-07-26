@@ -17,6 +17,10 @@ class InvalidCredentialCiphertext(ValueError):
     """凭证密文格式错误、被篡改，或无法由当前密钥环解密。"""
 
 
+class MalformedCredentialCiphertext(InvalidCredentialCiphertext):
+    """带版本前缀但不具备有效密文格式的历史明文值。"""
+
+
 class CredentialKeySettings:
     """从环境变量解析有序的 AES-256-GCM 密钥环。"""
 
@@ -31,12 +35,12 @@ class CredentialKeySettings:
         key_texts = [key.strip() for key in raw_value.split(',') if key.strip()]
         if not key_texts:
             raise CredentialConfigurationError(
-                f'{self.ENVIRONMENT_VARIABLE} must contain at least one base64url key',
+                f'{self.ENVIRONMENT_VARIABLE} must contain at least one base64url key'
             )
         keys = tuple(self._decode_key(key_text) for key_text in key_texts)
         if len(set(keys)) != len(keys):
             raise CredentialConfigurationError(
-                f'{self.ENVIRONMENT_VARIABLE} must not contain duplicate keys',
+                f'{self.ENVIRONMENT_VARIABLE} must not contain duplicate keys'
             )
         return keys
 
@@ -45,18 +49,18 @@ class CredentialKeySettings:
             key = self._decode_base64url(key_text)
         except (binascii.Error, ValueError) as error:
             raise CredentialConfigurationError(
-                f'{self.ENVIRONMENT_VARIABLE} contains an invalid base64url key',
+                f'{self.ENVIRONMENT_VARIABLE} contains an invalid base64url key'
             ) from error
         if len(key) != self.KEY_BYTES:
             raise CredentialConfigurationError(
-                f'{self.ENVIRONMENT_VARIABLE} keys must decode to {self.KEY_BYTES} bytes',
+                f'{self.ENVIRONMENT_VARIABLE} keys must decode to {self.KEY_BYTES} bytes'
             )
         return key
 
     def _decode_base64url(self, value: str) -> bytes:
         padding = '=' * (-len(value) % 4)
         return base64.b64decode(
-            (value + padding).encode('ascii'), altchars=b'-_', validate=True,
+            (value + padding).encode('ascii'), altchars=b'-_', validate=True
         )
 
 
@@ -99,9 +103,9 @@ class CredentialCipher:
         try:
             payload = self._decode_base64url(encoded_payload)
         except (binascii.Error, ValueError, UnicodeEncodeError) as error:
-            raise InvalidCredentialCiphertext('invalid credential ciphertext encoding') from error
+            raise MalformedCredentialCiphertext('invalid credential ciphertext encoding') from error
         if len(payload) <= self.NONCE_BYTES:
-            raise InvalidCredentialCiphertext('credential ciphertext is too short')
+            raise MalformedCredentialCiphertext('credential ciphertext is too short')
         return payload
 
     def _encode_base64url(self, value: bytes) -> str:
@@ -109,6 +113,9 @@ class CredentialCipher:
 
     def _decode_base64url(self, value: str) -> bytes:
         padding = '=' * (-len(value) % 4)
-        return base64.b64decode(
-            (value + padding).encode('ascii'), altchars=b'-_', validate=True,
+        decoded = base64.b64decode(
+            (value + padding).encode('ascii'), altchars=b'-_', validate=True
         )
+        if self._encode_base64url(decoded) != value:
+            raise ValueError('base64url value is not canonical')
+        return decoded

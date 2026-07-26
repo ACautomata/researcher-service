@@ -26,8 +26,9 @@ def test_admin_has_no_delete_permission():
     assert adm.has_delete_permission(None, obj=object()) is False
 
 
-def test_admin_token_still_readonly_and_hidden_from_list():
+def test_admin_token_is_excluded_from_all_admin_views():
     # token 是 gateway 凭证：列表不展示、字段只读（即便 change 被禁也保留防御纵深）
     adm = InstanceAdmin(Instance, admin.site)
-    assert 'token' in adm.readonly_fields
+    assert 'token' in adm.exclude
+    assert 'token' not in adm.readonly_fields
     assert 'token' not in adm.list_display

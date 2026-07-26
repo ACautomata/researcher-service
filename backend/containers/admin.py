@@ -13,7 +13,8 @@ from .models import Instance
 class InstanceAdmin(admin.ModelAdmin):
     list_display = ('name', 'port', 'status', 'image', 'created_at')
     search_fields = ('name',)
-    readonly_fields = ('token', 'container_id', 'created_at')
+    exclude = ('token',)
+    readonly_fields = ('container_id', 'created_at')
 
     def has_add_permission(self, request):
         return False
