@@ -1,6 +1,6 @@
-# GitHub Actions CI —— issue #91（CI skeleton + frontend job），父票 #74。
-# push 触发；frontend job 把关 vitest + vue-tsc，绿则合、红则拦。后续 job
-# （backend-unit / container-smoke）由 #74 的其余子票追加，不在本票范围。
+# GitHub Actions CI —— issue #91（skeleton + frontend job）、issue #92（backend-unit job）。
+# 父票 #74。push 触发；frontend / backend-unit 双轨并行把关（vitest + vue-tsc / pytest），
+# 任一红即拦。container-smoke 等真容器 job 由 #74 其余子票追加。
 name: CI
 
 on: push
@@ -22,3 +22,18 @@ jobs:
       - run: npm ci
       - run: npm run test
       - run: npm run build
+
+  backend-unit:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: backend/requirements/dev.txt
+      - run: pip install -r requirements/dev.txt
+      - run: python -m pytest

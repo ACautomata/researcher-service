@@ -37,6 +37,12 @@ def _frontend_job(workflow: dict) -> dict:
     return jobs["frontend"]
 
 
+def _backend_unit_job(workflow: dict) -> dict:
+    jobs = workflow["jobs"]
+    assert "backend-unit" in jobs, "缺少 backend-unit job"
+    return jobs["backend-unit"]
+
+
 def test_workflow_file_exists_and_parseable() -> None:
     """AC1：ci.yml 存在且为合法 YAML。"""
     _load()  # 缺文件 / 语法错均经 _load() 抛 fail
@@ -109,3 +115,69 @@ def test_frontend_job_runs_required_step_sequence() -> None:
     test = step_index(lambda s: "npm run test" in (s.get("run") or ""), "npm run test")
     build = step_index(lambda s: "npm run build" in (s.get("run") or ""), "npm run build")
     assert setup < ci < test < build
+
+
+def test_has_backend_unit_job_on_ubuntu_latest() -> None:
+    """AC5：backend-unit job 跑在 ubuntu-latest。"""
+    backend_unit = _backend_unit_job(_load())
+    assert backend_unit["runs-on"] == "ubuntu-latest"
+
+
+def test_backend_unit_runs_parallel_with_frontend() -> None:
+    """AC1：backend-unit 与 frontend 并行——不 needs frontend。"""
+    backend_unit = _backend_unit_job(_load())
+    needs = backend_unit.get("needs")
+    if needs is None:
+        return
+    if isinstance(needs, str):
+        needs = [needs]
+    assert "frontend" not in needs, "backend-unit 不应 needs frontend（须并行）"
+
+
+def _setup_python_step(backend_unit: dict) -> dict | None:
+    for step in backend_unit.get("steps", []):
+        if step.get("uses", "").startswith("actions/setup-python"):
+            return step
+    return None
+
+
+def test_backend_unit_runs_setup_python_with_pip_cache() -> None:
+    """AC2：``actions/setup-python``（3.13，``cache: pip``，指向 backend lockfile）。"""
+    step = _setup_python_step(_backend_unit_job(_load()))
+    assert step is not None, "缺少 actions/setup-python 步骤"
+    with_ = step.get("with") or {}
+    assert with_.get("python-version") == "3.13"
+    assert with_.get("cache") == "pip"
+    assert with_.get("cache-dependency-path") == "backend/requirements/dev.txt"
+
+
+def test_backend_unit_working_directory_is_backend() -> None:
+    """AC3/4：backend-unit 全程在 ``backend/`` 工作目录（job 或顶层 defaults）。"""
+    workflow = _load()
+    backend_unit = _backend_unit_job(workflow)
+    top_default = (workflow.get("defaults") or {}).get("run", {}).get("working-directory")
+    job_default = (backend_unit.get("defaults") or {}).get("run", {}).get("working-directory")
+    assert job_default == "backend" or top_default == "backend"
+
+
+def test_backend_unit_runs_pip_install_dev_requirements() -> None:
+    """AC3：``pip install -r requirements/dev.txt``（backend 工作目录下）。"""
+    steps = _backend_unit_job(_load())["steps"]
+    assert any(
+        "pip install" in (s.get("run") or "") and "requirements/dev.txt" in (s.get("run") or "")
+        for s in steps
+    ), "缺少 pip install -r requirements/dev.txt 步骤"
+
+
+def test_backend_unit_runs_pytest_without_run_integration() -> None:
+    """AC4：``python -m pytest`` 步骤存在，且不设 ``RUN_INTEGRATION``（真容器用例维持 skip）。"""
+    backend_unit = _backend_unit_job(_load())
+    steps = backend_unit["steps"]
+    assert any("pytest" in (s.get("run") or "") for s in steps), "缺少 python -m pytest 步骤"
+    assert "RUN_INTEGRATION" not in (backend_unit.get("env") or {}), (
+        "backend-unit 不应设 RUN_INTEGRATION"
+    )
+    for step in steps:
+        assert "RUN_INTEGRATION" not in (step.get("env") or {}), (
+            "backend-unit step 不应设 RUN_INTEGRATION"
+        )
