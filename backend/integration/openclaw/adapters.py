@@ -177,13 +177,15 @@ class BindMountWikiFileSystem:
             raise ValueError(rel_path)
 
     def _scan_dir(self, dirpath: Path, rel_prefix: str, pages_out: list) -> None:
-        """递归扫描目录下全部 .md 页面（跳过插件私有子目录、占位文件与 symlink 目录）。"""
+        """递归扫描目录下全部 .md 页面（跳过插件私有子目录、占位文件与一切 symlink）。"""
         if not dirpath.is_dir():
             return
         for f in sorted(dirpath.iterdir()):
+            # 不跟随任何 symlink（目录或文件）：防经树遍历/泄露 wiki/main 之外的文件
+            if f.is_symlink():
+                continue
             if f.is_dir():
-                # 不跟随 symlink 目录：防经树遍历/泄露 wiki/main 之外的文件（安全审查）
-                if not f.is_symlink() and f.name not in _SKIP_DIRS:
+                if f.name not in _SKIP_DIRS:
                     self._scan_dir(f, f'{rel_prefix}{f.name}/', pages_out)
                 continue
             if f.suffix != '.md' or f.name in _SKIP_FILES:

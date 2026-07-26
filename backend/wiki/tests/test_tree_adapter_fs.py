@@ -118,3 +118,18 @@ def test_symlink_dirs_not_followed(wiki_root, tmp_path):
     all_paths = {p['path'] for g in tree['groups'] for p in g['pages']}
     assert 'evil-link' not in kinds
     assert not any('evil-sub' in p or 'secret.md' in p for p in all_paths)
+
+
+def test_symlink_files_not_listed(wiki_root, tmp_path):
+    """指向 wiki/main 外的 symlink .md 文件也不进树（防经树泄露外部文件路径）。"""
+    import os
+
+    outside = tmp_path / 'outside'
+    outside.mkdir()
+    (outside / 'secret.md').write_text('# SECRET\n', encoding='utf-8')
+    # 合法组内的 symlink .md 文件 → 外部
+    os.symlink(outside / 'secret.md', wiki_root / 'concepts' / 'evil.md')
+
+    tree = BindMountWikiFileSystem(str(wiki_root)).build_tree()
+    all_paths = {p['path'] for g in tree['groups'] for p in g['pages']}
+    assert 'concepts/evil.md' not in all_paths
