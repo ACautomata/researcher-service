@@ -14,18 +14,22 @@ class CredentialKeyRotation:
 
     def _rotate_instances(self) -> int:
         count = 0
-        for instance in Instance.objects.iterator():
-            instance.token = instance.token
-            instance.save(update_fields=['token'])
+        for primary_key in Instance.objects.values_list('pk', flat=True).iterator():
+            with transaction.atomic():
+                instance = Instance.objects.select_for_update().get(pk=primary_key)
+                instance.token = instance.token
+                instance.save(update_fields=['token'])
             count += 1
         return count
 
     def _rotate_pairings(self) -> int:
         count = 0
-        for pairing in Pairing.objects.iterator():
-            pairing.private_key_pem = pairing.private_key_pem
-            pairing.device_token = pairing.device_token
-            pairing.save(update_fields=['private_key_pem', 'device_token'])
+        for primary_key in Pairing.objects.values_list('pk', flat=True).iterator():
+            with transaction.atomic():
+                pairing = Pairing.objects.select_for_update().get(pk=primary_key)
+                pairing.private_key_pem = pairing.private_key_pem
+                pairing.device_token = pairing.device_token
+                pairing.save(update_fields=['private_key_pem', 'device_token'])
             count += 1
         return count
 
@@ -33,7 +37,6 @@ class CredentialKeyRotation:
 class Command(BaseCommand):
     help = 'Re-encrypt all persisted credentials using the current key.'
 
-    @transaction.atomic
     def handle(self, *args, **options):
         instances, pairings = CredentialKeyRotation().rotate()
         self.stdout.write(
