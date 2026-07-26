@@ -7,8 +7,6 @@ import sys
 import tomllib
 from pathlib import Path
 
-import pytest
-
 # ---- 辅助 ----
 
 def _pylint_run(*extra_args: str, cwd: Path | None = None) -> subprocess.CompletedProcess:
@@ -180,3 +178,20 @@ def test_pyproject_has_ruff_isort_first_party():
     known = cfg["tool"]["ruff"]["lint"]["isort"]["known-first-party"]
     for app in ["accounts", "chat", "config", "containers", "models", "wiki"]:
         assert app in known, f"{app} 应在 known-first-party 中"
+
+
+def test_pyproject_excludes_migrations():
+    """ruff extend-exclude migrations 目录（对齐 pylint ignore-paths；migrations 由 Django 自动生成）。"""
+    with (_backend_root() / "pyproject.toml").open("rb") as f:
+        cfg = tomllib.load(f)
+    exclude = cfg["tool"]["ruff"]["extend-exclude"]
+    assert any("migrations" in p for p in exclude), "ruff 应 extend-exclude migrations 目录"
+
+
+def test_pyproject_ruff_ignores_fault_isolation_patterns():
+    """extend-ignore 收口故障隔离异常模式 BLE001/S110/S112（boundary 文档§45/§46 定性为有意为之）。"""
+    with (_backend_root() / "pyproject.toml").open("rb") as f:
+        cfg = tomllib.load(f)
+    ignore = cfg["tool"]["ruff"]["lint"]["extend-ignore"]
+    for rule in ["BLE001", "S110", "S112"]:
+        assert rule in ignore, f"{rule} 应在 ruff extend-ignore（故障隔离模式）"

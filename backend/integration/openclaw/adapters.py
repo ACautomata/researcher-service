@@ -15,7 +15,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-from integration.openclaw.wire import ConnectFrameBuilder, REQUIRED_SCOPES
+from integration.openclaw.wire import REQUIRED_SCOPES, ConnectFrameBuilder
 
 
 class HttpHealthProbe:
@@ -255,7 +255,7 @@ class OpenClawWireAdapter:
         三分支：PairingResult(hello-ok) / PairingRequired(requestId) / PairingError。
         与 PairingHandshake.pair() 功能等价，但经 ConnectFrameBuilder 构建 connect 帧。
         """
-        from chat.pairing_ws import PairingError, PairingRequired, PairingResult
+        from chat.pairing_ws import PairingError, PairingRequired
 
         try:
             async with self._connect_factory(url) as ws:
@@ -336,6 +336,7 @@ class OpenClawWireAdapter:
         """建立已配对长连接（deviceToken 作 auth.token 经 ConnectFrameBuilder.session 构建帧）。"""
         import json
         import uuid
+
         from chat.chat_client import ChatConnectError
 
         self._device_token = device_token
@@ -384,7 +385,7 @@ class OpenClawWireAdapter:
         try:
             await self._ws.send(json.dumps(frame))
             run_id = await asyncio.wait_for(fut, timeout=self._ack_timeout)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             self._pending_acks.pop(req_id, None)
             raise ChatSendError('chat.send ack timeout')
         except BaseException:
@@ -411,7 +412,7 @@ class OpenClawWireAdapter:
         try:
             await self._ws.send(json.dumps(frame))
             payload = await asyncio.wait_for(fut, timeout=self._ack_timeout)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             self._pending_resolves.pop(req_id, None)
             raise ChatSendError('approval.resolve ack timeout')
         except BaseException:
@@ -469,7 +470,7 @@ class OpenClawWireAdapter:
         try:
             await self._ws.send(json.dumps(frame))
             payload = await asyncio.wait_for(fut, timeout=self._ack_timeout)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             self._pending_resolves.pop(req_id, None)
             raise ChatSendError('commands.list ack timeout')
         except BaseException:
@@ -492,7 +493,7 @@ class OpenClawWireAdapter:
         try:
             await self._ws.send(json.dumps(frame))
             payload = await asyncio.wait_for(fut, timeout=self._ack_timeout)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             self._pending_resolves.pop(req_id, None)
             raise ChatSendError(f'{method} ack timeout')
         except BaseException:

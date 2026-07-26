@@ -18,6 +18,7 @@ import json
 import os
 import re
 import threading
+from typing import ClassVar
 
 from django.db import transaction
 
@@ -38,7 +39,7 @@ class PairingService:
     """对单个容器实例执行/查询设备配对。"""
 
     # 应用级每实例锁，补充 SQLite 下 select_for_update 无实际行锁的不足
-    _instance_locks: dict[int, threading.Lock] = {}
+    _instance_locks: ClassVar[dict[int, threading.Lock]] = {}
     _locks_mutex = threading.Lock()
 
     def __init__(self, transport=None, ws_url_for=None) -> None:
@@ -119,30 +120,29 @@ class PairingService:
         并发安全：应用级每实例锁 + select_for_update() 双重保护，确保「读取/创建设备身份」原子化；
         握手结果用 attempt_version 条件更新，防止并发/延迟响应覆盖更新状态。
         """
-        with self._lock_for(instance.pk):
-            with transaction.atomic():
-                pairing = (
-                    Pairing.objects
-                    .select_for_update()
-                    .select_related('instance')
-                    .filter(instance=instance)
-                    .first()
-                )
-                if pairing is None:
-                    pairing = Pairing.objects.create(instance=instance)
+        with self._lock_for(instance.pk), transaction.atomic():
+            pairing = (
+                Pairing.objects
+                .select_for_update()
+                .select_related('instance')
+                .filter(instance=instance)
+                .first()
+            )
+            if pairing is None:
+                pairing = Pairing.objects.create(instance=instance)
 
-                if (
-                    not force_repair
-                    and pairing.status == Pairing.STATUS_PAIRED
-                    and pairing.device_token
-                ):
-                    return pairing
+            if (
+                not force_repair
+                and pairing.status == Pairing.STATUS_PAIRED
+                and pairing.device_token
+            ):
+                return pairing
 
-                identity = self._load_or_create_identity(pairing)
-                # 身份必须在本事务内落库：并发请求复用同一 deviceId，避免 approve 命令与真实 key 不一致
-                pairing.attempt_version += 1
-                attempt_version = pairing.attempt_version
-                pairing.save()
+            identity = self._load_or_create_identity(pairing)
+            # 身份必须在本事务内落库：并发请求复用同一 deviceId，避免 approve 命令与真实 key 不一致
+            pairing.attempt_version += 1
+            attempt_version = pairing.attempt_version
+            pairing.save()
 
         # 握手在事务外执行：网络超时/异常不应回滚已持久化的身份或 pending/error 状态
         url = self._ws_url_for(instance)

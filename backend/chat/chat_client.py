@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
-from typing import Awaitable, Callable
+from collections.abc import Awaitable, Callable
 
 import websockets
 
@@ -123,7 +123,7 @@ class OpenClawChatClient:  # pylint: disable=too-many-instance-attributes
             # 握手期独占 recv，等 connect res；有界等待，避免坏网关升级 WS 后不回 res 永久挂起
             try:
                 await asyncio.wait_for(self._await_res(req_id), timeout=self._connect_timeout)
-            except asyncio.TimeoutError as exc:
+            except TimeoutError as exc:
                 raise ChatConnectError('connect handshake timeout') from exc
         except BaseException:
             await self.aclose()
@@ -233,7 +233,7 @@ class OpenClawChatClient:  # pylint: disable=too-many-instance-attributes
             # 否则重试会在 _pending_resolves 无限累积 future（内存泄漏 + 永不回执）
             await self._ws.send(json.dumps(frame))
             payload = await asyncio.wait_for(fut, timeout=self._ack_timeout)
-        except asyncio.TimeoutError as exc:
+        except TimeoutError as exc:
             self._pending_resolves.pop(req_id, None)
             raise ChatSendError('approval.resolve ack timeout') from exc
         except BaseException:
@@ -303,7 +303,7 @@ class OpenClawChatClient:  # pylint: disable=too-many-instance-attributes
         try:
             await self._ws.send(json.dumps(frame))
             payload = await asyncio.wait_for(fut, timeout=self._ack_timeout)
-        except asyncio.TimeoutError as exc:
+        except TimeoutError as exc:
             self._pending_resolves.pop(req_id, None)
             raise ChatSendError('commands.list ack timeout') from exc
         except BaseException:
@@ -328,7 +328,7 @@ class OpenClawChatClient:  # pylint: disable=too-many-instance-attributes
         try:
             await self._ws.send(json.dumps(frame))
             payload = await asyncio.wait_for(fut, timeout=self._ack_timeout)
-        except asyncio.TimeoutError as exc:
+        except TimeoutError as exc:
             self._pending_resolves.pop(req_id, None)
             raise ChatSendError(f'{method} ack timeout') from exc
         except BaseException:
@@ -417,7 +417,7 @@ class OpenClawChatClient:  # pylint: disable=too-many-instance-attributes
         try:
             # 有界等待 ack：网关连着但 ack 丢失/不回时不应让 consumer 永久挂起
             run_id = await asyncio.wait_for(fut, timeout=self._ack_timeout)
-        except asyncio.TimeoutError as exc:
+        except TimeoutError as exc:
             self._pending_acks.pop(req_id, None)
             raise ChatSendError('chat.send ack timeout') from exc
         except BaseException:

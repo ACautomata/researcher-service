@@ -19,12 +19,12 @@ class Pairing(models.Model):
     STATUS_PENDING = 'pending'
     STATUS_PAIRED = 'paired'
     STATUS_ERROR = 'error'
-    STATUS_CHOICES = [
+    STATUS_CHOICES = (
         (STATUS_UNPAIRED, 'unpaired'),
         (STATUS_PENDING, 'pending'),
         (STATUS_PAIRED, 'paired'),
         (STATUS_ERROR, 'error'),
-    ]
+    )
 
     instance = models.OneToOneField(
         Instance, on_delete=models.CASCADE, related_name='pairing',

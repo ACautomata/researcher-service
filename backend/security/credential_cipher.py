@@ -31,12 +31,12 @@ class CredentialKeySettings:
         key_texts = [key.strip() for key in raw_value.split(',') if key.strip()]
         if not key_texts:
             raise CredentialConfigurationError(
-                f'{self.ENVIRONMENT_VARIABLE} must contain at least one base64url key'
+                f'{self.ENVIRONMENT_VARIABLE} must contain at least one base64url key',
             )
         keys = tuple(self._decode_key(key_text) for key_text in key_texts)
         if len(set(keys)) != len(keys):
             raise CredentialConfigurationError(
-                f'{self.ENVIRONMENT_VARIABLE} must not contain duplicate keys'
+                f'{self.ENVIRONMENT_VARIABLE} must not contain duplicate keys',
             )
         return keys
 
@@ -45,18 +45,18 @@ class CredentialKeySettings:
             key = self._decode_base64url(key_text)
         except (binascii.Error, ValueError) as error:
             raise CredentialConfigurationError(
-                f'{self.ENVIRONMENT_VARIABLE} contains an invalid base64url key'
+                f'{self.ENVIRONMENT_VARIABLE} contains an invalid base64url key',
             ) from error
         if len(key) != self.KEY_BYTES:
             raise CredentialConfigurationError(
-                f'{self.ENVIRONMENT_VARIABLE} keys must decode to {self.KEY_BYTES} bytes'
+                f'{self.ENVIRONMENT_VARIABLE} keys must decode to {self.KEY_BYTES} bytes',
             )
         return key
 
     def _decode_base64url(self, value: str) -> bytes:
         padding = '=' * (-len(value) % 4)
         return base64.b64decode(
-            (value + padding).encode('ascii'), altchars=b'-_', validate=True
+            (value + padding).encode('ascii'), altchars=b'-_', validate=True,
         )
 
 
@@ -110,5 +110,5 @@ class CredentialCipher:
     def _decode_base64url(self, value: str) -> bytes:
         padding = '=' * (-len(value) % 4)
         return base64.b64decode(
-            (value + padding).encode('ascii'), altchars=b'-_', validate=True
+            (value + padding).encode('ascii'), altchars=b'-_', validate=True,
         )

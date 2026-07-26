@@ -20,8 +20,8 @@ os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'config.settings.prod')
 
 django_asgi_app = get_asgi_application()
 
-from accounts.middleware import JwtAuthMiddleware  # noqa: E402 — 须在 settings 就绪后 import
-from chat.consumers import ChatConsumer  # noqa: E402
+from accounts.middleware import JwtAuthMiddleware
+from chat.consumers import ChatConsumer
 
 # T05：/ws/chat/ → ChatConsumer（对话桥接）；WS 握手经 JwtAuthMiddleware 验同一 JWT（spec §3）
 websocket_routes = URLRouter([

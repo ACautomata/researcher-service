@@ -27,13 +27,13 @@ class Instance(models.Model):
     STATUS_STOPPED = 'stopped'
     STATUS_REMOVING = 'removing'
     STATUS_ERROR = 'error'
-    STATUS_CHOICES = [
+    STATUS_CHOICES = (
         (STATUS_CREATING, 'creating'),
         (STATUS_RUNNING, 'running'),
         (STATUS_STOPPED, 'stopped'),
         (STATUS_REMOVING, 'removing'),
         (STATUS_ERROR, 'error'),
-    ]
+    )
 
     name = models.CharField(max_length=30, unique=True, validators=[NAME_VALIDATOR])
     # codex R1 :77：unique 兜底并发端口竞争（应用层 allocator 之外，DB 最后仲裁）

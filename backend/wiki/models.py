@@ -1,3 +1,1 @@
-from django.db import models
-
-# Create your models here.
+"""wiki 基于容器内文件树，无数据库 model。"""

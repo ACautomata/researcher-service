@@ -14,4 +14,4 @@ from integration.openclaw.ports import (
     WikiFileSystem,
 )
 
-__all__ = ['ContainerRuntime', 'OpenClawWire', 'WikiFileSystem', 'HealthProbe']
+__all__ = ['ContainerRuntime', 'HealthProbe', 'OpenClawWire', 'WikiFileSystem']

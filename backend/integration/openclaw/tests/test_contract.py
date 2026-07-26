@@ -6,6 +6,7 @@ integration.openclaw.wire 同对象）、集成包暴露 4 Port、集成包不�
 只断言**契约**（单一来源 / 依赖方向），不断言「哪个常量搬到哪」——那是测实现细节。
 """
 import inspect
+
 import pytest
 
 from chat import chat_client, event_translate, pairing_ws
@@ -254,17 +255,19 @@ class TestWikiFileSystemAdapterContract:
 
     def test_read_page_missing_raises(self, tmp_path):
         import pytest
+
         from integration.openclaw.adapters import BindMountWikiFileSystem
 
         root = self._make_wiki_root(tmp_path)
         fs = BindMountWikiFileSystem(str(root))
-        with pytest.raises(Exception):
+        with pytest.raises(FileNotFoundError):
             fs.read_page('concepts/nope.md')
 
     # —— write_page ——
 
     def test_write_page_overwrites_existing(self, tmp_path):
         from pathlib import Path
+
         from integration.openclaw.adapters import BindMountWikiFileSystem
 
         root = self._make_wiki_root(tmp_path)
@@ -276,17 +279,19 @@ class TestWikiFileSystemAdapterContract:
 
     def test_write_page_missing_raises(self, tmp_path):
         import pytest
+
         from integration.openclaw.adapters import BindMountWikiFileSystem
 
         root = self._make_wiki_root(tmp_path)
         fs = BindMountWikiFileSystem(str(root))
-        with pytest.raises(Exception):
+        with pytest.raises(FileNotFoundError):
             fs.write_page('concepts/nope.md', 'x')
 
     # —— create_page ——
 
     def test_create_page_writes(self, tmp_path):
         from pathlib import Path
+
         from integration.openclaw.adapters import BindMountWikiFileSystem
 
         root = self._make_wiki_root(tmp_path)
@@ -297,26 +302,29 @@ class TestWikiFileSystemAdapterContract:
 
     def test_create_page_existing_raises(self, tmp_path):
         import pytest
+
         from integration.openclaw.adapters import BindMountWikiFileSystem
 
         root = self._make_wiki_root(tmp_path)
         fs = BindMountWikiFileSystem(str(root))
-        with pytest.raises(Exception):
+        with pytest.raises(FileExistsError):
             fs.create_page('concepts/attention.md', 'x')
 
     def test_create_page_no_parent_dir_raises(self, tmp_path):
         import pytest
+
         from integration.openclaw.adapters import BindMountWikiFileSystem
 
         root = self._make_wiki_root(tmp_path)
         fs = BindMountWikiFileSystem(str(root))
-        with pytest.raises(Exception):
+        with pytest.raises(NotADirectoryError):
             fs.create_page('nonexistent_category/page.md', 'x')
 
     # —— delete_page ——
 
     def test_delete_page_removes(self, tmp_path):
         from pathlib import Path
+
         from integration.openclaw.adapters import BindMountWikiFileSystem
 
         root = self._make_wiki_root(tmp_path)
@@ -328,40 +336,44 @@ class TestWikiFileSystemAdapterContract:
 
     def test_delete_page_missing_raises(self, tmp_path):
         import pytest
+
         from integration.openclaw.adapters import BindMountWikiFileSystem
 
         root = self._make_wiki_root(tmp_path)
         fs = BindMountWikiFileSystem(str(root))
-        with pytest.raises(Exception):
+        with pytest.raises(FileNotFoundError):
             fs.delete_page('concepts/nope.md')
 
     # —— path traversal protection ——
 
     def test_path_traversal_rejected(self, tmp_path):
         import pytest
+
         from integration.openclaw.adapters import BindMountWikiFileSystem
 
         root = self._make_wiki_root(tmp_path)
         fs = BindMountWikiFileSystem(str(root))
-        with pytest.raises(Exception):
+        with pytest.raises(ValueError):
             fs.read_page('../../../etc/passwd.md')
 
     def test_managed_path_rejected(self, tmp_path):
         import pytest
+
         from integration.openclaw.adapters import BindMountWikiFileSystem
 
         root = self._make_wiki_root(tmp_path)
         fs = BindMountWikiFileSystem(str(root))
-        with pytest.raises(Exception):
+        with pytest.raises(ValueError):
             fs.read_page('.openclaw-wiki/cache.md')
 
     def test_index_md_rejected(self, tmp_path):
         import pytest
+
         from integration.openclaw.adapters import BindMountWikiFileSystem
 
         root = self._make_wiki_root(tmp_path)
         fs = BindMountWikiFileSystem(str(root))
-        with pytest.raises(Exception):
+        with pytest.raises(ValueError):
             fs.read_page('index.md')
     """集成包不重复定义容器/编排域常量（issue #98 acceptance / spec #97 user story 19）。
 
@@ -370,9 +382,7 @@ class TestWikiFileSystemAdapterContract:
     """
 
     def test_wire_shares_no_constants_with_containers_domain(self):
-        import containers.config_renderer as config_renderer
-        import containers.ports as ports
-        import containers.runtime as runtime
+        from containers import config_renderer, ports, runtime
 
         wire_const = {n for n in dir(wire) if not n.startswith('_') and n.isupper()}
         container_modules = (runtime, ports, config_renderer)
@@ -413,9 +423,8 @@ class TestContainerRuntimePortSingleSourced:
 
     def test_docker_runtime_satisfies_integration_port(self):
         """DockerRuntime 结构子类型自动满足集成包 ContainerRuntime Port。"""
-        from integration.openclaw import ContainerRuntime
-
         from containers.docker_runtime import DockerRuntime
+        from integration.openclaw import ContainerRuntime
 
         assert isinstance(DockerRuntime(), ContainerRuntime), (
             'DockerRuntime 应满足集成包 ContainerRuntime Port'
@@ -423,9 +432,8 @@ class TestContainerRuntimePortSingleSourced:
 
     def test_fake_runtime_satisfies_integration_port(self):
         """FakeRuntime 结构子类型自动满足集成包 ContainerRuntime Port。"""
-        from integration.openclaw import ContainerRuntime
-
         from containers.tests.fakes import FakeRuntime
+        from integration.openclaw import ContainerRuntime
 
         assert isinstance(FakeRuntime(), ContainerRuntime), (
             'FakeRuntime 应满足集成包 ContainerRuntime Port'
@@ -434,16 +442,12 @@ class TestContainerRuntimePortSingleSourced:
     def test_only_docker_runtime_imports_docker_sdk(self):
         """docker SDK 仍只在 Adapter 处 import docker（不变量守护，spec §5.4）。"""
         import ast
-        import sys
         from pathlib import Path
 
         containers_dir = Path(__file__).resolve().parent.parent.parent.parent / 'containers'
         offenders: dict[str, list[str]] = {}
         # 排除 DockerRuntime 自身（唯一合法 import docker 处）
         exempt = {'docker_runtime.py'}
-        excluded_stmts = {
-            'noqa',  # noqa 注释允许的替代导出
-        }
 
         for f in sorted(containers_dir.glob('*.py')):
             if f.name.startswith('test_') or f.name in exempt:
@@ -463,8 +467,8 @@ class TestContainerRuntimePortSingleSourced:
                             or (isinstance(node, ast.ImportFrom) and module == 'docker')
                         ):
                             offenders.setdefault(f.name, []).append(
-                                f'import docker' if isinstance(node, ast.Import)
-                                else f'from docker import {", ".join(n.name for n in node.names)}'
+                                'import docker' if isinstance(node, ast.Import)
+                                else f'from docker import {", ".join(n.name for n in node.names)}',
                             )
 
         assert not offenders, (
@@ -541,7 +545,6 @@ class TestConnectFrameBuilderSingleSource:
     def test_pairing_connect_frame_signature_payload(self):
         """配对手帧签名串 = DeviceCrypto.build_auth_payload_v3 产物（与网关逐字节比对）。"""
         from chat.device_crypto import DeviceCrypto
-        import time
 
         identity = DeviceCrypto.generate_identity()
         frame = wire.ConnectFrameBuilder.pairing(
@@ -563,8 +566,8 @@ class TestConnectFrameBuilderSingleSource:
         )
         # 签名应对 expected_payload 有效（Ed25519 verify）
         import base64
+
         from cryptography.hazmat.primitives import serialization
-        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
         pub = serialization.load_pem_public_key(identity.public_key_pem.encode())
         sig = base64.urlsafe_b64decode(frame['params']['device']['signature'] + '==')
@@ -606,6 +609,7 @@ class TestPairingAdapterImplementsWirePort:
     def test_adapter_pair_returns_pairing_result(self):
         """配对成功返回 deviceToken + scopes（PairingResult 语义）。"""
         import asyncio
+
         from chat.device_crypto import DeviceCrypto
         from chat.tests.fakes import FakeTransport
         from integration.openclaw.adapters import OpenClawWireAdapter
@@ -631,6 +635,7 @@ class TestPairingAdapterImplementsWirePort:
     def test_adapter_pair_uses_single_connect_frame_builder(self, monkeypatch):
         """OpenClawWireAdapter.pair() 经 ConnectFrameBuilder 构建 connect 帧（非自建）。"""
         import asyncio
+
         from chat.device_crypto import DeviceCrypto
         from chat.tests.fakes import FakeTransport
         from integration.openclaw.adapters import OpenClawWireAdapter
@@ -661,6 +666,7 @@ class TestPairingAdapterImplementsWirePort:
     def test_adapter_pair_pairing_required_raises(self):
         """网关返回 PAIRING_REQUIRED → 上抛 PairingRequired(requestId)。"""
         import asyncio
+
         from chat.device_crypto import DeviceCrypto
         from chat.pairing_ws import PairingRequired
         from chat.tests.fakes import FakeTransport
@@ -684,6 +690,7 @@ class TestPairingAdapterImplementsWirePort:
     def test_adapter_pair_error_raises_pairing_error(self):
         """网关返回其它错误 → 上抛 PairingError。"""
         import asyncio
+
         from chat.device_crypto import DeviceCrypto
         from chat.pairing_ws import PairingError
         from chat.tests.fakes import FakeTransport
@@ -711,7 +718,7 @@ class TestPairingAdapterImplementsWirePort:
         from integration.openclaw.adapters import OpenClawWireAdapter
 
         assert not inspect.iscoroutinefunction(
-            OpenClawWireAdapter._default_connect
+            OpenClawWireAdapter._default_connect,
         ), '_default_connect 应是同步工厂，返回 async context manager 而非 coroutine'
 
     # ── regression: codex P2 ──────────────────────────────────────────────
@@ -719,6 +726,7 @@ class TestPairingAdapterImplementsWirePort:
     def test_pair_accepts_positional_args(self):
         """pair() 支持位置参数（与 OpenClawWire Port 和 FakeOpenClawWire 一致）。"""
         import asyncio
+
         from chat.device_crypto import DeviceCrypto
         from chat.tests.fakes import FakeTransport
         from integration.openclaw.adapters import OpenClawWireAdapter
@@ -755,6 +763,7 @@ class TestOpenClawWireAdapterLongLived:
     def test_connect_uses_connect_frame_builder(self):
         """connect() 经 ConnectFrameBuilder.session() 构建握手帧。"""
         import asyncio
+
         from chat.tests.fakes import FakeChatTransport
         from integration.openclaw.adapters import OpenClawWireAdapter
 
@@ -771,6 +780,7 @@ class TestOpenClawWireAdapterLongLived:
     def test_connect_failure_raises(self):
         """connect 握手失败上抛 ChatConnectError。"""
         import asyncio
+
         from chat.chat_client import ChatConnectError
         from chat.tests.fakes import FakeChatTransport
         from integration.openclaw.adapters import OpenClawWireAdapter
@@ -786,6 +796,7 @@ class TestOpenClawWireAdapterLongLived:
     def test_connect_timeout_raises(self):
         """connect 握手超时抛 ChatConnectError。"""
         import asyncio
+
         from chat.chat_client import ChatConnectError
         from chat.tests.fakes import FakeChatTransport
         from integration.openclaw.adapters import OpenClawWireAdapter
@@ -803,6 +814,7 @@ class TestOpenClawWireAdapterLongLived:
     def test_send_message_builds_chat_send_frame_and_returns_runid(self):
         """send_message 发 chat.send → ack(runId)，返回 runId。"""
         import asyncio
+
         from chat.tests.fakes import FakeChatTransport
         from integration.openclaw.adapters import OpenClawWireAdapter
 
@@ -822,6 +834,7 @@ class TestOpenClawWireAdapterLongLived:
     def test_send_message_not_connected_raises(self):
         """未 connect 时 send_message 抛 ChatClientError。"""
         import asyncio
+
         from chat.chat_client import ChatClientError
         from chat.tests.fakes import FakeChatTransport
         from integration.openclaw.adapters import OpenClawWireAdapter
@@ -836,6 +849,7 @@ class TestOpenClawWireAdapterLongLived:
     def test_send_message_ack_error_raises(self):
         """chat.send ack 被网关拒绝 → ChatSendError。"""
         import asyncio
+
         from chat.chat_client import ChatSendError
         from chat.tests.fakes import FakeChatTransport
         from integration.openclaw.adapters import OpenClawWireAdapter
@@ -853,6 +867,7 @@ class TestOpenClawWireAdapterLongLived:
     def test_recv_routes_events_to_on_event(self):
         """recv loop 把网关 chat 事件翻译后经 on_event 回传。"""
         import asyncio
+
         from chat.tests.fakes import FakeChatTransport
         from integration.openclaw.adapters import OpenClawWireAdapter
 
@@ -882,6 +897,7 @@ class TestOpenClawWireAdapterLongLived:
     def test_resolve_approval_returns_payload(self):
         """resolve_approval 发 approval.resolve 帧并返回网关 payload。"""
         import asyncio
+
         from chat.tests.fakes import FakeChatTransport
         from integration.openclaw.adapters import OpenClawWireAdapter
 
@@ -899,6 +915,7 @@ class TestOpenClawWireAdapterLongLived:
     def test_resolve_approval_gateway_reject_raises(self):
         """审批回覆被网关拒绝 → ChatSendError。"""
         import asyncio
+
         from chat.chat_client import ChatSendError
         from chat.tests.fakes import FakeChatTransport
         from integration.openclaw.adapters import OpenClawWireAdapter
@@ -918,6 +935,7 @@ class TestOpenClawWireAdapterLongLived:
     def test_list_commands_returns_payload(self):
         """list_commands 返回网关 payload。"""
         import asyncio
+
         from chat.tests.fakes import FakeChatTransport
         from integration.openclaw.adapters import OpenClawWireAdapter
 
@@ -938,6 +956,7 @@ class TestOpenClawWireAdapterLongLived:
     def test_sessions_rpc_returns_payload(self):
         """sessions_rpc 发任意 method→params 帧并返回 payload（透传）。"""
         import asyncio
+
         from chat.tests.fakes import FakeChatTransport
         from integration.openclaw.adapters import OpenClawWireAdapter
 
@@ -955,6 +974,7 @@ class TestOpenClawWireAdapterLongLived:
     def test_list_pending_approvals_translates_cards(self):
         """list_pending_approvals 补拉审批并翻译成卡帧。"""
         import asyncio
+
         from chat.tests.fakes import FakeChatTransport
         from integration.openclaw.adapters import OpenClawWireAdapter
 
@@ -974,6 +994,7 @@ class TestOpenClawWireAdapterLongLived:
     def test_approval_subscribers_fan_out(self):
         """add_approval_subscriber 注册后在 recv loop 中收到审批事件。"""
         import asyncio
+
         from chat.tests.fakes import FakeChatTransport
         from integration.openclaw.adapters import OpenClawWireAdapter
 
@@ -1000,6 +1021,7 @@ class TestOpenClawWireAdapterLongLived:
     def test_remove_subscriber_stops_delivery(self):
         """退订后不再收审批事件。"""
         import asyncio
+
         from chat.tests.fakes import FakeChatTransport
         from integration.openclaw.adapters import OpenClawWireAdapter
 
@@ -1030,6 +1052,7 @@ class TestOpenClawWireAdapterLongLived:
     def test_adapter_dead_after_connect_disconnect(self):
         """connect 后 dead=False；close 后 dead=True。"""
         import asyncio
+
         from chat.tests.fakes import FakeChatTransport
         from integration.openclaw.adapters import OpenClawWireAdapter
 
@@ -1046,6 +1069,7 @@ class TestOpenClawWireAdapterLongLived:
     def test_discard_removes_runid(self):
         """discard 后后续事件不回调。"""
         import asyncio
+
         from chat.tests.fakes import FakeChatTransport
         from integration.openclaw.adapters import OpenClawWireAdapter
 
@@ -1173,6 +1197,7 @@ class TestFakeOpenClawWireLongLived:
     def test_fake_send_message_returns_preset_run_id(self):
         """Fake send_message 返回预设 run_id（测试可控）。"""
         import asyncio
+
         from integration.openclaw.fakes import FakeOpenClawWire
 
         fake = FakeOpenClawWire()
@@ -1185,6 +1210,7 @@ class TestFakeOpenClawWireLongLived:
     def test_fake_send_message_records_calls(self):
         """Fake send_message 记录调用参数供断言。"""
         import asyncio
+
         from integration.openclaw.fakes import FakeOpenClawWire
 
         fake = FakeOpenClawWire()
@@ -1206,6 +1232,7 @@ class TestFakeOpenClawWireLongLived:
     def test_fake_push_events_to_on_event(self):
         """Fake 可 push 事件到 send_message 注册的 on_event 回调。"""
         import asyncio
+
         from integration.openclaw.fakes import FakeOpenClawWire
 
         fake = FakeOpenClawWire()
@@ -1238,6 +1265,7 @@ class TestFakeOpenClawWireLongLived:
     def test_fake_rpc_raises_when_preset(self):
         """Fake sessions_rpc 可模拟网关拒绝（测试注入错误）。"""
         import asyncio
+
         from chat.chat_client import ChatSendError
         from integration.openclaw.fakes import FakeOpenClawWire
 
@@ -1252,6 +1280,7 @@ class TestFakeOpenClawWireLongLived:
     def test_fake_commands_rpc_raises_when_preset(self):
         """Fake list_commands 可模拟网关拒绝。"""
         import asyncio
+
         from chat.chat_client import ChatSendError
         from integration.openclaw.fakes import FakeOpenClawWire
 
@@ -1266,6 +1295,7 @@ class TestFakeOpenClawWireLongLived:
     def test_fake_discard_removes_route(self):
         """Fake discard 后事件不再回调。"""
         import asyncio
+
         from integration.openclaw.fakes import FakeOpenClawWire
 
         fake = FakeOpenClawWire()
@@ -1285,6 +1315,7 @@ class TestFakeOpenClawWireLongLived:
     def test_fake_not_connected_send_raises(self):
         """Fake 未 connect 时 send_message 抛 ChatClientError（与真 Adapter 一致）。"""
         import asyncio
+
         from chat.chat_client import ChatClientError
         from integration.openclaw.fakes import FakeOpenClawWire
 
@@ -1297,6 +1328,7 @@ class TestFakeOpenClawWireLongLived:
     def test_fake_connect_marks_not_dead(self):
         """Fake connect 后 dead=False。"""
         import asyncio
+
         from integration.openclaw.fakes import FakeOpenClawWire
 
         fake = FakeOpenClawWire()
@@ -1324,7 +1356,7 @@ class TestCrossAppLeakPrevention:
 
     # ── AST 扫描：containers 不含配对 wire 字段字符串字面量 ────────────────
 
-    _PAIRING_WIRE_LITERALS = {'device_id', 'scopes', 'pairing_request_id'}
+    _PAIRING_WIRE_LITERALS = frozenset({'device_id', 'scopes', 'pairing_request_id'})
 
     def _collect_string_constants(self, filepath: str) -> set[str]:
         """AST 收集文件中所有字符串常量值（含 f-string 静态段）。"""
@@ -1504,6 +1536,7 @@ class TestFakeOpenClawWirePairing:
     def test_fake_pair_records_calls(self):
         """fake.pair() 记录调用参数，供断言。"""
         import asyncio
+
         from chat.device_crypto import DeviceCrypto
         from integration.openclaw.fakes import FakeOpenClawWire
 
@@ -1523,6 +1556,7 @@ class TestFakeOpenClawWirePairing:
     def test_fake_pair_returns_preset_result(self):
         """fake.pair() 返回预设 PairingResult，测试可控。"""
         import asyncio
+
         from chat.device_crypto import DeviceCrypto
         from chat.pairing_ws import PairingResult
         from integration.openclaw.fakes import FakeOpenClawWire
@@ -1544,6 +1578,7 @@ class TestFakeOpenClawWirePairing:
     def test_fake_pair_raises_when_preset(self):
         """fake 可预设异常以模拟 PairingRequired / PairingError 分支。"""
         import asyncio
+
         from chat.device_crypto import DeviceCrypto
         from chat.pairing_ws import PairingRequired
         from integration.openclaw.fakes import FakeOpenClawWire

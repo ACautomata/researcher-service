@@ -11,7 +11,7 @@ import pytest
 
 from chat.models import Pairing
 from chat.pairing import PairingService
-from chat.pairing_ws import PairingRequired
+from chat.pairing_ws import PairingError, PairingRequired
 from chat.tests.fakes import FakeTransport
 from containers.models import Instance
 
@@ -95,7 +95,7 @@ def test_pair_retry_after_approve_succeeds(instance):
 def test_pair_error_marks_status_error(instance):
     transport = FakeTransport.connect_error('bad gateway token')
     svc = PairingService(transport=transport)
-    with pytest.raises(Exception):
+    with pytest.raises(PairingError):
         svc.ensure_paired(instance)
     pairing = Pairing.objects.get(instance=instance)
     assert pairing.status == Pairing.STATUS_ERROR

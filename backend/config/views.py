@@ -1,4 +1,5 @@
 """项目级 views —— 健康检查等不属于任一 app 的端点。"""
+
 from drf_spectacular.utils import extend_schema
 from rest_framework import serializers
 from rest_framework.permissions import AllowAny
@@ -15,7 +16,7 @@ class HealthResponseSerializer(serializers.Serializer):
 class HealthView(APIView):
     """健康检查端点（spec §0.1）。公开，不参与 JWT 拦截。"""
 
-    permission_classes = [AllowAny]
+    permission_classes = (AllowAny,)
 
     @extend_schema(responses=HealthResponseSerializer)
     def get(self, request):

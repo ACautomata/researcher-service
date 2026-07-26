@@ -1,3 +1,1 @@
-from django.contrib import admin
-
-# Register your models here.
+"""accounts 暂无需要注册到 Django admin 的 model。"""
