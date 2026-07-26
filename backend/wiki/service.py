@@ -16,6 +16,50 @@ from integration.openclaw.ports import WikiFileSystem
 # obsidian 风格双链 [[target]] 或 [[target|别名]]
 WIKILINK_RE = re.compile(r'\[\[([^\]]+)\]\]')
 
+# category 机读标记：整行匹配、大小写不敏感（含 CATEGORY/cAtEgOrY 等全形态）、剥离尾反引号
+# （research 加固，issue #84 / spec #75；IGNORECASE 全词匹配 codex #129 P2）
+CATEGORY_RE = re.compile(r'^`category:\s*([^`\s]+)`\s*$', re.MULTILINE | re.IGNORECASE)
+# H1 / H2 标题行（界定提取窗口）
+_H1_RE = re.compile(r'^#\s', re.MULTILINE)
+_H2_RE = re.compile(r'^##\s', re.MULTILINE)
+
+# excerpt 摘要长度（正文开头片段，字符数）
+_EXCERPT_LEN = 200
+
+
+class CategoryMarkerExtractor:
+    """从 markdown 正文提取 `` `category:` `` 机读标记 + 摘要（issue #84 / spec #75）。
+
+    提取只在「第一个 H1 之下、首个 `##` 之前」窗口内进行：正文里行内混排的 `` `category:` ``
+    字样、H1 之前、首个 `##` 之后的标记一律不抓。开放词表：扫到什么值返回什么，不预设集合。
+    """
+
+    def extract_category(self, body: str) -> str | None:
+        """窗口内首个命中的 category 值（小写归一）；无命中返回 None。"""
+        window = self._window(body)
+        if window is None:
+            return None
+        m = CATEGORY_RE.search(window)
+        return m.group(1).lower() if m else None
+
+    def excerpt(self, body: str) -> str:
+        """正文开头片段摘要：剥掉 H1 标题行与 category 标记行，压缩空白后截断。"""
+        lines = [ln for ln in body.split('\n')
+                 if ln.strip() and not ln.startswith('# ') and not CATEGORY_RE.match(ln)]
+        text = re.sub(r'\s+', ' ', ' '.join(lines)).strip()
+        return text[:_EXCERPT_LEN]
+
+    @staticmethod
+    def _window(body: str) -> str | None:
+        """「第一个 H1 之下、首个 ## 之前」的窗口文本；无 H1 返回 None。"""
+        lines = body.split('\n')
+        h1 = next((i for i, ln in enumerate(lines) if _H1_RE.match(ln)), None)
+        if h1 is None:
+            return None
+        h2 = next((i for i, ln in enumerate(lines[h1 + 1:], h1 + 1)
+                   if _H2_RE.match(ln)), len(lines))
+        return '\n'.join(lines[h1 + 1:h2])
+
 
 class PageNotFound(Exception):
     """目标 .md 不存在。"""
@@ -69,9 +113,11 @@ class WikiService:
 
     def __init__(self, instance,
                  fs: WikiFileSystem | None = None,
-                 parser: FrontmatterParser | None = None) -> None:
+                 parser: FrontmatterParser | None = None,
+                 extractor: CategoryMarkerExtractor | None = None) -> None:
         self._instance = instance
         self._parser = parser or FrontmatterParser()
+        self._extractor = extractor or CategoryMarkerExtractor()
         if fs is None:
             from integration.openclaw.adapters import BindMountWikiFileSystem
 
@@ -83,6 +129,28 @@ class WikiService:
     def build_tree(self) -> dict:
         """遍历 wiki/main 文件树：五核心分类 + domains 子树分组。"""
         return self._fs.build_tree()
+
+    def list_categories(self) -> dict:
+        """按 category 标记分组带标记页（issue #84 / spec #75）。
+
+        返回 `{ "<category>": [ {path,title,category,excerpt}, … ], … }`；只收带标记页，
+        无标记页与插件私有目录/占位文件（fs 层已过滤）不进响应。category 开放词表，
+        扫到什么返回什么。组名按字典序、组内按 path 字典序，保证响应稳定。
+        """
+        groups: dict[str, list] = {}
+        for page in self._fs.list_category_pages():
+            _, body = self._parser.parse(page['content'])
+            category = self._extractor.extract_category(body)
+            if category is None:
+                continue
+            groups.setdefault(category, []).append({
+                'path': page['path'],
+                'title': page['title'],
+                'category': category,
+                'excerpt': self._extractor.excerpt(body),
+            })
+        return {cat: sorted(items, key=lambda p: p['path'])
+                for cat, items in sorted(groups.items())}
 
     def read_page(self, rel_path: str) -> dict:
         """读一页 {path,title,content}；页不存在/越权路径上抛。"""

@@ -77,3 +77,22 @@ def test_valid_read_still_works(fs):
 def test_valid_write_still_works(fs):
     fs.write_page('concepts/attention.md', '# edited\n')
     assert fs.pages['concepts/attention.md'] == '# edited\n'
+
+
+# —— list_category_pages 顶层页（codex #129 P2）——
+
+def test_list_category_pages_preserves_top_level(fs):
+    """顶层散落 .md（如 root.md）应被收进，对齐 BindMountWikiFileSystem.list_category_pages。"""
+    fs.pages['root.md'] = '# Root\n\n`category: idea`\n'
+    paths = [p['path'] for p in fs.list_category_pages()]
+    assert 'root.md' in paths
+    assert 'concepts/attention.md' in paths
+
+
+def test_list_category_pages_skips_private_and_placeholder(fs):
+    """插件私有目录下的页与占位文件仍被跳过（顶层页修复不改变 SKIP 防护）。"""
+    fs.pages['.openclaw-wiki/marked.md'] = '# H\n\n`category: hidden`\n'
+    fs.pages['index.md'] = '# INDEX\n\n`category: idx`\n'
+    paths = [p['path'] for p in fs.list_category_pages()]
+    assert '.openclaw-wiki/marked.md' not in paths
+    assert 'index.md' not in paths

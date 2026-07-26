@@ -141,6 +141,35 @@ class BindMountWikiFileSystem:
             'content': content,
         }
 
+    # —— Port: list_category_pages ——
+
+    def list_category_pages(self) -> list:
+        """递归扫全库 .md（含顶层散落页），返回 [{path,title,content}]（issue #84）。
+
+        与 build_tree 共享 root 防护（root/父 symlink 或不可读 → 空）与 _scan_dir 遍历防护
+        （跳过 _SKIP_DIRS/_SKIP_FILES/symlink/非 regular file）。不同点：categories 按文档内
+        标记分组、与磁盘目录无关，故平铺收全库每页全文（含顶层散落 .md，build_tree 不收顶层）。
+        """
+        if (self._root.is_symlink() or self._root.parent.is_symlink()
+                or not self._root.is_dir()):
+            return []
+        try:
+            children = sorted(self._root.iterdir())
+        except OSError:
+            return []
+        pages: list = []
+        for d in children:
+            if d.is_symlink():
+                continue
+            if d.is_dir():
+                if d.name not in _SKIP_DIRS:
+                    self._scan_dir(d, f'{d.name}/', pages, with_content=True)
+            elif d.is_file() and d.suffix == '.md' and d.name not in _SKIP_FILES:
+                entry = self._page_entry(d, d.name, with_content=True)
+                if entry is not None:
+                    pages.append(entry)
+        return pages
+
     # —— Port: write_page ——
 
     def write_page(self, rel_path: str, content: str) -> dict:
@@ -191,12 +220,13 @@ class BindMountWikiFileSystem:
         if parts[-1] in _SKIP_FILES:
             raise ValueError(rel_path)
 
-    def _scan_dir(self, dirpath: Path, rel_prefix: str, pages_out: list) -> None:
+    def _scan_dir(self, dirpath: Path, rel_prefix: str, pages_out: list,
+                  with_content: bool = False) -> None:
         """迭代扫描目录下全部 .md 页面(跳过插件私有子目录、占位文件与一切 symlink)。
 
         用显式栈替代递归,深度仅受文件系统路径上限约束,不会触发 RecursionError
         (codex #125 P2);每层 iterdir 包 OSError,单目录不可读仅跳过该子树,不影响
-        其它分支(codex #125 P2)。
+        其它分支(codex #125 P2)。with_content=True 时每页附全文 content（categories 聚合用）。
         """
         if not dirpath.is_dir():
             return
@@ -225,13 +255,45 @@ class BindMountWikiFileSystem:
                 if f.suffix != '.md' or f.name in _SKIP_FILES:
                     continue
                 rel = f'{cur_prefix}{f.name}'
-                pages_out.append({
-                    'path': rel,
-                    'title': self._page_title(f, f.stem),
-                })
+                entry = self._page_entry(f, rel, with_content)
+                if entry is not None:
+                    pages_out.append(entry)
         # 栈式 DFS 弹出顺序与字典序相反(LIFO),而前端 FileTree 按数组顺序渲染不再排序;
         # 末尾按 path 字典序重排,保持显示顺序稳定(codex #125 P2)。
         pages_out.sort(key=lambda p: p['path'])
+
+    def _page_entry(self, fpath: Path, rel: str, with_content: bool) -> dict | None:
+        """构造一页 entry：{path,title}（默认），with_content=True 时加 content 全文。
+
+        with_content 时 title 语义对齐 read_page：frontmatter paper.title/title → H1 → 文件名
+        （build_tree 的 _page_title 只读前 2000 字、不回落 H1，保持原行为不动）。
+        with_content=True 但正文读不出（并发删除/不可读/非法 UTF-8）时返回 None —— 调用方跳过
+        该页，保证 port 契约「每页必带 content」不被破坏（codex #129 P2）。
+        """
+        if not with_content:
+            return {'path': rel, 'title': self._page_title(fpath, fpath.stem)}
+        content = self._read_text(fpath)
+        if content is None:
+            return None
+        fm, body = self._parser.parse(content)
+        title = fm.get('paper.title') or fm.get('title') or self._h1_title(body) or fpath.stem
+        return {'path': rel, 'title': title, 'content': content}
+
+    @staticmethod
+    def _h1_title(body: str) -> str | None:
+        """正文首个 `# ` 标题文本（无 frontmatter 时的标题兜底）；无 H1 返回 None。"""
+        for line in body.split('\n'):
+            if line.startswith('# '):
+                return line[2:].strip() or None
+        return None
+
+    @staticmethod
+    def _read_text(fpath: Path) -> str | None:
+        """读全文；读取/解码失败返回 None（调用方决定跳过或降级）。"""
+        try:
+            return fpath.read_text(encoding='utf-8')
+        except (OSError, UnicodeDecodeError):
+            return None
 
     def _page_title(self, fpath: Path, fallback: str) -> str:
         """从 frontmatter 取标题。
