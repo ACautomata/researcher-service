@@ -13,14 +13,11 @@ renderer 强制 spec 不变量（port/bind/token）—— 即便模板漂移或�
 import copy
 import json
 
-from .constants import GATEWAY_INTERNAL_PORT
+from .constants import GATEWAY_BIND, GATEWAY_INTERNAL_PORT, GATEWAY_TOKEN_PLACEHOLDER
 
 # 容器内 gateway 固定端口（spec §5.2 / r27 §3.1：Docker 网络命名空间隔离，仅宿主侧分配映射端口）；
 # 值单一来源 = constants.GATEWAY_INTERNAL_PORT（issue #88），此处保留可读别名供调用点。
 GATEWAY_PORT = GATEWAY_INTERNAL_PORT
-GATEWAY_BIND = 'lan'
-# env 占位（gateway 进程插值，非 Jinja 变量）—— 字面量保留进 JSON
-GATEWAY_TOKEN_PLACEHOLDER = '${GATEWAY_TOKEN}'
 
 
 class ConfigRenderer:

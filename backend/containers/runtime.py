@@ -1,7 +1,8 @@
-"""容器运行时数据类与常量（spec §5.4）。
+"""容器运行时数据类（spec §5.4）。
 
-ContainerSpec / ContainerInfo 等数据类和容器域常量。ContainerRuntime Port
-已归属前移到 integration.openclaw.ports（issue #101）；DockerRuntime 与
+ContainerSpec / ContainerInfo 数据类与 container_name()。容器域纯常量（label key、容器名前缀、
+容器内 bind 路径、固定端口）已收口到 containers.constants（issue #88/#89，parent #79）。
+ContainerRuntime Port 已归属前移到 integration.openclaw.ports（issue #101）；DockerRuntime 与
 FakeRuntime 通过 @runtime_checkable 结构子类型自动满足端口，无需显式继承。
 
 设计要点：
@@ -13,20 +14,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-# re-export：docker_runtime 经 runtime 取用 GATEWAY_INTERNAL_PORT（issue #88 收口到 constants）
-from .constants import GATEWAY_INTERNAL_PORT  # noqa: F401
-
-# 容器名前缀：与原 compose 栈 openclaw-gateway 隔离（spec §5.3 / r27 §3.3）
-CONTAINER_PREFIX = 'openclaw-gw-'
-# 按 label 过滤管理生命周期（issue #39 验收 + spec §5.4）
-LABEL_APP_KEY = 'app'
-LABEL_APP_VALUE = 'openclaw-fleet'
-LABEL_INSTANCE_KEY = 'openclaw.instance'
-LABEL_PORT_KEY = 'openclaw.port'
-
-# 容器内固定路径（spec §5.2/§5.3）
-HOME_BIND = '/home/node/.openclaw'
-CONFIG_BIND = '/home/node/.openclaw/openclaw.json'
+# 容器/编排域纯常量单一来源 = containers.constants（issue #88 收口端口、#89 收口 label/
+# 前缀/bind 路径）。runtime 仅内部消费 CONTAINER_PREFIX（container_name）；GATEWAY_INTERNAL_PORT
+# 为 #88 遗留 re-export，钉住「runtime 引用 constants」单一来源契约（test_constants），消费方
+# 已直引 constants，此处保留以维持契约的可执行证据。
+from .constants import CONTAINER_PREFIX, GATEWAY_INTERNAL_PORT  # noqa: F401
 
 
 def container_name(name: str) -> str:
