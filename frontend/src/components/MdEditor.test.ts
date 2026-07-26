@@ -37,4 +37,21 @@ describe('MdEditor', () => {
     expect(wrapper.find('h1').text()).toBe('B')
     wrapper.unmount()
   })
+
+  it('is editable by default (contenteditable=true)', async () => {
+    const wrapper = mount(MdEditor, { props: { content: '# A' } })
+    await flushPromises()
+    expect(wrapper.find('.ProseMirror').attributes('contenteditable')).toBe('true')
+    wrapper.unmount()
+  })
+
+  it('readonly renders content but is not editable', async () => {
+    const wrapper = mount(MdEditor, { props: { content: '# 只读', readonly: true } })
+    await flushPromises()
+    // 内容照常渲染为 ProseMirror DOM（只读 ≠ 不渲染）
+    expect(wrapper.find('h1').exists()).toBe(true)
+    // 但 ProseMirror 编辑区不可编辑（Categories 栏目只读阅读，issue #85）
+    expect(wrapper.find('.ProseMirror').attributes('contenteditable')).toBe('false')
+    wrapper.unmount()
+  })
 })

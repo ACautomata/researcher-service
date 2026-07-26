@@ -5,6 +5,7 @@
     <router-link to="/">容器管理</router-link>
     <router-link to="/chat">对话</router-link>
     <router-link to="/wiki">Wiki</router-link>
+    <router-link to="/categories">Categories</router-link>
     <router-link to="/models">Model 配置</router-link>
   </nav>
   <router-view />
