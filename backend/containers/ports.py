@@ -34,5 +34,5 @@ class PortAllocator:
                 continue
             return port
         raise PortPoolExhausted(
-            f'端口池 {self._start}-{self._end} 已耗尽（reserved={sorted(self._reserved)}）'
+            f'端口池 {self._start}-{self._end} 已耗尽（reserved={sorted(self._reserved)}）',
         )

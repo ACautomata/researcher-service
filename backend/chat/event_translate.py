@@ -28,8 +28,14 @@ from __future__ import annotations
 
 from integration.openclaw.wire import (
     APPROVAL_REQUESTED_EVENTS as _APPROVAL_REQUESTED_EVENTS,
+)
+from integration.openclaw.wire import (
     APPROVAL_RESOLVED_EVENTS as _APPROVAL_RESOLVED_EVENTS,
+)
+from integration.openclaw.wire import (
     TOOL_END_EVENTS as _TOOL_END_EVENTS,
+)
+from integration.openclaw.wire import (
     TOOL_START_EVENTS as _TOOL_START_EVENTS,
 )
 
@@ -81,7 +87,7 @@ class ChatEventTranslator:
             'decision': payload.get('decision'),  # 透传权威值；未知由前端判 unknown
         }
 
-    def translate(self, frame: dict) -> list[dict]:
+    def translate(self, frame: dict) -> list[dict]:  # pylint: disable=too-many-return-statements
         """翻译一帧网关事件；不可翻译的返回空列表（交由调用方忽略）。"""
         if frame.get('type') != 'event':
             return []

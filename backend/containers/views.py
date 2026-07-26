@@ -20,6 +20,7 @@ from rest_framework.views import APIView
 from chat.models import Pairing
 from chat.serializers import PairingStatusSerializer
 from integration.openclaw.translation import build_pairing_status_default
+
 from .models import NAME_VALIDATOR
 from .orchestrator import (
     ConfigurationError,
@@ -64,7 +65,7 @@ class InstanceListCreateView(APIView):
         except ConfigurationError as e:
             # codex R6 :484：LLM_API_KEY 未配置 → 503，不裸 500
             return Response(
-                {'detail': str(e)}, status=status.HTTP_503_SERVICE_UNAVAILABLE
+                {'detail': str(e)}, status=status.HTTP_503_SERVICE_UNAVAILABLE,
             )
         except InstanceExists:
             # codex R1 :84：并发绕 UniqueValidator → DB 唯一约束 → 409（非裸 IntegrityError→500）

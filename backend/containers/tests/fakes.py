@@ -39,7 +39,7 @@ class FakeRuntime:
         if self.fail_after_create is not None:
             exc = self.fail_after_create
             self.fail_after_create = None
-            raise exc
+            raise exc  # pylint: disable=raising-bad-type
         return cid
 
     def list_fleet(self) -> list[ContainerInfo]:

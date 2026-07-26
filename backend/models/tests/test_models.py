@@ -11,8 +11,8 @@ from models.config_builder import ProviderSpec
 from models.models import (
     API_ANTHROPIC,
     API_OPENAI,
-    PROVIDER_ID_VALIDATOR,
     ENV_ID_VALIDATOR,
+    PROVIDER_ID_VALIDATOR,
     ModelProvider,
 )
 
@@ -27,12 +27,12 @@ def instance(db):
 
 
 def _provider(instance, **kw):
-    defaults = dict(
-        instance=instance, provider_id='my-openai', api=API_OPENAI,
-        base_url='https://open.bigmodel.cn/api/paas/v4',
-        api_key_env_id='ZHIPU_API_KEY', auth_header=True,
-        models_json=[{'id': 'glm-4-plus', 'name': 'GLM-4 Plus'}],
-    )
+    defaults = {
+        'instance': instance, 'provider_id': 'my-openai', 'api': API_OPENAI,
+        'base_url': 'https://open.bigmodel.cn/api/paas/v4',
+        'api_key_env_id': 'ZHIPU_API_KEY', 'auth_header': True,
+        'models_json': [{'id': 'glm-4-plus', 'name': 'GLM-4 Plus'}],
+    }
     defaults.update(kw)
     return ModelProvider.objects.create(**defaults)
 

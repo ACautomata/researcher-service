@@ -11,14 +11,14 @@ from docker.errors import NotFound
 from .runtime import (
     CONFIG_BIND,
     CONTAINER_PREFIX,
-    ContainerInfo,
-    ContainerSpec,
     GATEWAY_INTERNAL_PORT,
     HOME_BIND,
     LABEL_APP_KEY,
     LABEL_APP_VALUE,
     LABEL_INSTANCE_KEY,
     LABEL_PORT_KEY,
+    ContainerInfo,
+    ContainerSpec,
     container_name,
 )
 
@@ -100,7 +100,7 @@ class DockerRuntime:
 
     def list_fleet(self) -> list[ContainerInfo]:
         cs = self._client().containers.list(
-            all=True, filters={'label': [f'{LABEL_APP_KEY}={LABEL_APP_VALUE}']}
+            all=True, filters={'label': [f'{LABEL_APP_KEY}={LABEL_APP_VALUE}']},
         )
         return [self._to_info(c) for c in cs]
 

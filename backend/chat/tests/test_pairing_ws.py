@@ -112,7 +112,7 @@ async def test_pairing_required_without_request_id_becomes_pairing_error(identit
     transport = FakeTransport(
         result_frame={'type': 'res', 'ok': False,
                       'error': {'code': 'PAIRING_REQUIRED',
-                                'details': {'recommendedNextStep': 'wait_then_retry'}}}
+                                'details': {'recommendedNextStep': 'wait_then_retry'}}},
     )
     hs = PairingHandshake(transport=transport)
     with pytest.raises(PairingError) as exc_info:

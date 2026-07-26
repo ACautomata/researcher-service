@@ -26,7 +26,7 @@ _VALID = {
 
 def _config_file(fleet, name='demo'):
     return json.loads(
-        (fleet['config'].root / 'instances' / name / 'openclaw.json').read_text()
+        (fleet['config'].root / 'instances' / name / 'openclaw.json').read_text(),
     )
 
 
@@ -227,6 +227,7 @@ def test_delete_rolls_back_db_when_config_write_fails(authed, fleet, demo_instan
 def test_rewrite_failure_leaves_existing_config_intact(fleet, demo_instance):
     # 原子写：rewrite 写盘失败不污染既有 openclaw.json（先写一份合法配置，再让它「写盘失败」）
     import json as _json
+
     from containers.models import Instance
     from models.models import API_OPENAI, ModelProvider
     cfg_path = fleet['config'].root / 'instances' / 'demo' / 'openclaw.json'

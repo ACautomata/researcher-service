@@ -29,9 +29,9 @@ def test_instance_defaults_to_creating_status():
 def test_name_is_unique():
     # spec §5.3/§10：容器名作主键语义，重复应 DB 级拒绝（非 API 500）
     Instance.objects.create(
-        name='demo', port=19000, token='t1', home_dir='/h', image='img'
+        name='demo', port=19000, token='t1', home_dir='/h', image='img',
     )
     with pytest.raises(IntegrityError):
         Instance.objects.create(
-            name='demo', port=19001, token='t2', home_dir='/h2', image='img'
+            name='demo', port=19001, token='t2', home_dir='/h2', image='img',
         )

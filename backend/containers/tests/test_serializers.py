@@ -54,6 +54,6 @@ def test_too_long_rejected():
 def test_duplicate_name_rejected():
     # spec §10 name 唯一：UniqueValidator 转 400，非 DB 500
     Instance.objects.create(
-        name='demo', port=19000, token='t', home_dir='/h', image='i'
+        name='demo', port=19000, token='t', home_dir='/h', image='i',
     )
     assert not InstanceCreateSerializer(data={'name': 'demo'}).is_valid()

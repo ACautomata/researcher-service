@@ -36,7 +36,7 @@ def test_protected_endpoint_garbage_token_returns_401(api):
 def test_protected_endpoint_with_token_returns_200(api):
     User.objects.create_user(username='carol', password='strong-pass-789')
     token = api.post(
-        '/api/v1/auth/login', {'username': 'carol', 'password': 'strong-pass-789'}, format='json'
+        '/api/v1/auth/login', {'username': 'carol', 'password': 'strong-pass-789'}, format='json',
     ).json()['access']
     resp = api.get('/api/protected', HTTP_AUTHORIZATION=f'Bearer {token}')
     assert resp.status_code == 200

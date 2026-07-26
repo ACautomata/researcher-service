@@ -86,7 +86,7 @@ class PairingService:
         return self._get_or_create(instance)
 
     def _run_handshake(
-        self, url: str, token: str, identity: DeviceIdentity
+        self, url: str, token: str, identity: DeviceIdentity,
     ) -> PairingResult:
         """在独立线程跑握手协程（与调用方线程的事件循环隔离，任何上下文安全）。"""
         handshake = PairingHandshake(transport=self._transport)
@@ -95,9 +95,9 @@ class PairingService:
         def _target() -> None:
             try:
                 box['result'] = asyncio.run(
-                    handshake.pair(url=url, token=token, identity=identity)
+                    handshake.pair(url=url, token=token, identity=identity),
                 )
-            except BaseException as e:  # 透传握手异常（含 PairingRequired/PairingError）
+            except BaseException as e:  # pylint: disable=broad-exception-caught
                 box['error'] = e
 
         thread = threading.Thread(target=_target, daemon=True)

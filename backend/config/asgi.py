@@ -32,5 +32,5 @@ application = ProtocolTypeRouter(
     {
         'http': django_asgi_app,
         'websocket': JwtAuthMiddleware(websocket_routes),
-    }
+    },
 )

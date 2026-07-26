@@ -25,7 +25,7 @@ class DockerCompileExecutor:
         from containers.orchestrator import Fleet  # 局部导入避免循环依赖
         try:
             Fleet.get().exec_in_container(instance.name, ['openclaw', 'wiki', 'compile'])
-        except Exception:  # noqa: BLE001 — compile 滞后不影响人类视图，静默降级（r29 §2.4）
+        except Exception:  # pylint: disable=broad-exception-caught
             pass
 
 
@@ -72,7 +72,7 @@ class CompileFleet:
 
     @classmethod
     def trigger(cls, instance) -> None:
-        cls.get()(instance)
+        cls.get()(instance)  # pylint: disable=not-callable
 
     @classmethod
     def override(cls, trigger) -> None:

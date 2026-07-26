@@ -22,13 +22,13 @@ codex R2：
   若容器实际已在跑则就地自愈为 running，不再永久 pending。
 - delete 时 home 目录已不存在（FileNotFoundError）视为清理成功，不再误判失败卡 REMOVING。
 """
+import json
 import os
 import secrets
 import shutil
 import socket
 import threading
 import urllib.request
-import json
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -38,14 +38,15 @@ from pathlib import Path
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 
+from integration.openclaw.adapters import HttpHealthProbe
+from models.config_builder import ProviderConfigBuilder
+
 from .config_renderer import ConfigRenderer
 from .docker_runtime import DockerRuntime
 from .models import Instance
 from .ports import RESERVED_PORT_18789, PortAllocator
 from .provisioner import HomeProvisioner
 from .runtime import ContainerSpec
-from integration.openclaw.adapters import HttpHealthProbe
-from models.config_builder import ProviderConfigBuilder
 
 # health 字段枚举（issue #39 验收：列表显示 health 变 healthy）
 HEALTH_HEALTHY = 'healthy'
@@ -153,7 +154,7 @@ class HealthProbe:
         try:
             with urllib.request.urlopen(url, timeout=self._timeout) as resp:
                 return 200 <= resp.status < 300
-        except Exception:
+        except Exception:  # pylint: disable=broad-exception-caught
             # URLError（连不上）/ HTTPError（非 2xx）/ timeout —— 统一不可达
             return False
 
@@ -174,10 +175,10 @@ def _host_port_in_use(port: int) -> bool:
         probe.close()
 
 
-class InstanceOrchestrator:
+class InstanceOrchestrator:  # pylint: disable=too-many-instance-attributes
     """容器实例生命周期 facade（create/delete/list）。"""
 
-    def __init__(
+    def __init__(  # pylint: disable=too-many-positional-arguments
         self,
         runtime,
         config: FleetConfig,
@@ -200,7 +201,7 @@ class InstanceOrchestrator:
         self._renderer = None
         self._provisioner = HomeProvisioner(config.template_dir)
         self._allocator = PortAllocator(
-            config.port_start, config.port_end, config.reserved_ports
+            config.port_start, config.port_end, config.reserved_ports,
         )
         # codex R3：在飞 create 名字集（进程内，orchestrator 单例跨请求共享）。
         # 区分「正在 provisioning」与「崩溃中断」的 creating 行——delete 据此拒删在飞实例（:257），
@@ -229,7 +230,7 @@ class InstanceOrchestrator:
         if inst is None:
             raise InstanceNotFound(name)
         if self._renderer is None:
-            self._renderer = ConfigRenderer(Path(self._cfg.template_json).read_text())
+            self._renderer = ConfigRenderer(Path(self._cfg.template_json).read_text(encoding="utf-8"))
         specs = [p.as_spec() for p in inst.model_providers.all()]
         merged = self._provider_builder.build(self._renderer.render_dict(), specs)
         config_path = self._cfg.root / 'instances' / name / 'openclaw.json'
@@ -259,7 +260,7 @@ class InstanceOrchestrator:
                 port = getattr(info, 'port', None)
                 if isinstance(port, int):
                     used.add(port)
-        except Exception:
+        except Exception:  # pylint: disable=broad-exception-caught
             # daemon 不可达不阻断分配：DB 记账 + 宿主实测仍可给出候选
             pass
         for port in range(self._cfg.port_start, self._cfg.port_end + 1):
@@ -298,7 +299,7 @@ class InstanceOrchestrator:
                 # 否则 port 冲突 → 保存点已回滚，继续重试下一 port
         raise PortAllocationError(name)
 
-    def create(self, name: str) -> Instance:
+    def create(self, name: str) -> Instance:  # pylint: disable=too-many-statements
         """创建并启动一个容器（spec §5.4/§5.5）。
 
         先以进程内 guard 覆盖完整 create，再事务占位（挡重名/仲裁 port），
@@ -312,7 +313,7 @@ class InstanceOrchestrator:
         # codex R6 :475：ConfigRenderer 惰性构造——模板 JSON 损坏不会阻塞 list/delete。
         # codex R7 :509：ConfigRenderer 构造时读取模板文件（_build_default 不再急切 IO）。
         if self._renderer is None:
-            template_text = Path(self._cfg.template_json).read_text()
+            template_text = Path(self._cfg.template_json).read_text(encoding="utf-8")
             self._renderer = ConfigRenderer(template_text)
 
         with self._inflight_lock:
@@ -354,7 +355,7 @@ class InstanceOrchestrator:
                     home_dir=str(home),
                     config_path=str(config_path),
                     llm_api_key=self._cfg.llm_api_key,
-                )
+                ),
             )
             inst.container_id = container_id
             inst.status = Instance.STATUS_RUNNING
@@ -369,7 +370,7 @@ class InstanceOrchestrator:
                         inst.container_id = created.container_id
                     self._runtime.remove(name)
                     inst.container_id = ''
-                except Exception:
+                except Exception:  # pylint: disable=broad-exception-caught
                     # 若清容器失败，保留刚观测到的 id，供 ERROR 行后续 delete 证明所有权。
                     pass
             # mkdir 成功是目录所有权的正向证据；mkdir 自身失败时保留既有数据。
@@ -381,7 +382,7 @@ class InstanceOrchestrator:
                         inst.status = Instance.STATUS_ERROR
                         try:
                             inst.save(update_fields=['status', 'container_id'])
-                        except Exception:
+                        except Exception:  # pylint: disable=broad-exception-caught
                             pass
                     raise InstanceCleanupError(name, str(instance_dir)) from None
             if inst is not None:
@@ -429,7 +430,7 @@ class InstanceOrchestrator:
                 inst.container_id = ''
                 try:
                     inst.save(update_fields=['container_id'])
-                except Exception:
+                except Exception:  # pylint: disable=broad-exception-caught
                     pass
             else:
                 self._runtime.stop(name)
@@ -496,7 +497,7 @@ class InstanceOrchestrator:
         # 单项抖动不隐藏其他正常容器——降级透传 unknown 状态。
         try:
             info = self._runtime.get(inst.name)
-        except Exception:
+        except Exception:  # pylint: disable=broad-exception-caught
             return self._item(inst, Instance.STATUS_RUNNING, HEALTH_STOPPED)
         running = bool(info and info.running)
         status = Instance.STATUS_RUNNING if running else Instance.STATUS_STOPPED
@@ -544,7 +545,7 @@ class InstanceOrchestrator:
             # 对账），而非让整个 GET /containers/ 500 隐藏全部已持久化 instance。
             try:
                 info = self._runtime.get(inst.name)
-            except Exception:
+            except Exception:  # pylint: disable=broad-exception-caught
                 continue
             # codex R9-2 (P1)：label guard —— 仅 openclaw.instance label 匹配本行名的容器
             # 才被采纳为「本行拥有」。同名外来容器（手动创建/恢复/旧部署无 label）的 container_id
@@ -561,7 +562,7 @@ class InstanceOrchestrator:
                 inst.status = Instance.STATUS_ERROR
             try:
                 inst.save(update_fields=['status', 'container_id'])
-            except Exception:
+            except Exception:  # pylint: disable=broad-exception-caught
                 # 落盘失败不阻断本次出参（内存对象已收敛，下次 list 再对账）
                 pass
 

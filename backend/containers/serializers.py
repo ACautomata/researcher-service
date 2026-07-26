@@ -12,6 +12,7 @@ from rest_framework.validators import UniqueValidator
 
 from chat.models import Pairing
 from integration.openclaw.translation import build_pairing_status, build_pairing_status_default
+
 from .models import NAME_VALIDATOR, Instance
 
 
