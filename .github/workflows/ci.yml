@@ -1,0 +1,24 @@
+# GitHub Actions CI —— issue #91（CI skeleton + frontend job），父票 #74。
+# push 触发；frontend job 把关 vitest + vue-tsc，绿则合、红则拦。后续 job
+# （backend-unit / container-smoke）由 #74 的其余子票追加，不在本票范围。
+name: CI
+
+on: push
+
+jobs:
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          # 对齐 frontend/package-lock.json 的 LTS（约束 ^20.19.0||^22.12.0||>=24.0.0）
+          node-version: lts/*
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run test
+      - run: npm run build
