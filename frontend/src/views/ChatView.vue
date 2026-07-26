@@ -731,7 +731,7 @@ defineExpose({ selectContainer, send, newSession })
           <div v-if="a.detailOpen" class="a-detail" :data-test="`approval-detail-${a.id}`">
             命令全文：<code>{{ a.command }}</code><br>
             审批 id：<code>{{ a.id }}</code> · 类型：<code>{{ a.kind }}</code>
-            · 经 <code>exec.approval.requested</code> 推送，<code>approval.resolve</code> 回覆
+            · 经审批事件推送，审批接口回覆
           </div>
           <div v-if="a.status !== 'resolved'" class="a-actions">
             <button class="btn-approve" :disabled="a.status !== 'pending' || disconnected" :data-test="`approve-${a.id}`" @click="resolveApproval(a, 'approve')">批准</button>

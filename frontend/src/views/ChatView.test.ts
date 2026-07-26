@@ -691,7 +691,7 @@ describe('ChatView', () => {
   })
 
   // ---- T08 工具执行 + 思考链折叠（issue #44 / spec §8.2/§8.3/§9.4 / r26 §3/§4）----
-  it('renders a tool line with running state on agent.tool.start (验收 ① 工具只显标题+状态)', async () => {
+  it('renders a tool line with running state on tool frame (验收 ① 工具只显标题+状态)', async () => {
     const w = await mountReady()
     await w.find('[data-test="input"]').setValue('查一下')
     await w.find('[data-test="send"]').trigger('click')
@@ -724,7 +724,7 @@ describe('ChatView', () => {
     expect(tool.find('.t-name').attributes('title')).toBe('wiki.search')
   })
 
-  it('updates the tool line to done on agent.tool.result (验收 ① 状态 ✓完成)', async () => {
+  it('updates the tool line to done on tool done frame (验收 ① 状态 ✓完成)', async () => {
     const w = await mountReady()
     await w.find('[data-test="input"]').setValue('查一下')
     await w.find('[data-test="send"]').trigger('click')

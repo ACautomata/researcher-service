@@ -9,18 +9,21 @@ delta 增量按 runId 累积已发文本（_sent）：
   （r13:115-127 注明非前缀替换无法追加，需传播 replacement 语义）。
 - replace=true 无快照 → 退回 deltaText 增量（追加）。
 - 普通 delta → deltaText 增量（追加）。
-error 读 errorMessage/errorKind（网关字段，r13:118）。
+error 读 errorMessage/errorKind（网关字段，r13:118 上游源码已证）。
 
-T06 权限审批（issue #42 / spec §8.2）：`exec.approval.requested` / `plugin.approval.requested` 是
-**连接级**事件（不挂 chat runId，r26:88）→ 翻译成 `{type:approval,id,kind,command}` 审批卡帧。
-payload 字段级 schema 官方未给全（标待实测）→ 取值链集中 `_approval_card`（systemRunPlan.rawCommand
-→ systemRunPlan.command → 顶层 command）。T08 工具执行（issue #44 / spec §8.2/§9.4 / r26 §3）：
-`agent.tool.start`/`agent.tool.result`（确切事件名/payload 待配对后实测校准）→ `{type:tool,runId,name,
-state,title,input,result}` 工具帧，带 runId 走所属 chat run 路由；字段取值链集中 `_translate_tool`。
-思考链 protocol v4 无独立帧（r26 §4 已证）→ 不新增 thinking 分支，整段按 text 透传（spec §8.3 (b) 降级，
-前端折叠卡标注降级模式）。delta 的 message 变体（非 replace 快照）及其它未证实事件 MVP 不处理，返回
-空列表（由 test_event_translate 显式断言，非静默吞错）。终态（final/aborted/error）清理该 runId 累积文本。
-"""
+T06 权限审批（issue #42 / spec §8.2）：`exec.approval.requested` / `plugin.approval.requested`（r26 §1
+官方文档已证）是**连接级**事件（不挂 chat runId，r26:88）→ 翻译成 `{type:approval,id,kind,command}`
+审批卡帧。command 取值链：systemRunPlan.rawCommand（r26:64 官方文档已证）→ systemRunPlan.command
+→ 顶层 command → ''（防御性兜底）。decision 透传网关权威值（r26:78-79 官方文档已证）。
+
+T08 工具执行（issue #44 / spec §8.2/§9.4 / r26 §3）：`agent.tool.start`/`agent.tool.result`（r26 §3
+二手来源，译者取值链兜底）→ `{type:tool,runId,name,state,title,input,result}` 工具帧，带 runId
+走所属 chat run 路由。工具帧字段名取值链（name/id/input/result）集中 `_translate_tool`。
+
+思考链 protocol v4 无独立帧（r26 §4 官方文档已证）→ 不新增 thinking 分支，整段按 text 透传
+（spec §8.3 (b) 降级，前端折叠卡标注降级模式）。r13 §3 上游源码已证 chat 仅 delta/final/aborted/
+error 四 state 转发；其他事件族参见 wire 模块集中常量。终态（final/aborted/error）清理该 runId
+累积文本。"""
 from __future__ import annotations
 
 from integration.openclaw.wire import (
@@ -52,7 +55,7 @@ class ChatEventTranslator:
         approval_id = payload.get('id')
         if not approval_id:
             return None
-        # command 取值链（待实测校准）：systemRunPlan.rawCommand → systemRunPlan.command → 顶层 command
+        # command 取值链：systemRunPlan.rawCommand（r26:64 官方文档已证）→ systemRunPlan.command → 顶层 command → ''（防御性兜底）
         run_plan = payload.get('systemRunPlan') or {}
         command = run_plan.get('rawCommand') or run_plan.get('command') or payload.get('command') or ''
         return {
@@ -67,8 +70,7 @@ class ChatEventTranslator:
     def _approval_resolved(payload: dict) -> dict | None:
         """网关 resolved 事件 payload → 前端 approvalResolved 帧；无 id 返回 None（不伪造，跳过）。
 
-        decision 取值（待实测）：payload.decision 缺省/未知时透传原值，前端仅识别 approve/deny、
-        其它显示「未知」（ChatView onApprovalResolved），不默认批准。
+        decision 取值透传网关权威值（r26:78-79 官方文档已证）；缺省/未知时前端判 unknown，不默认批准。
         """
         approval_id = payload.get('id')
         if not approval_id:
@@ -154,7 +156,7 @@ class ChatEventTranslator:
     def _translate_tool(payload: dict, state: str) -> list[dict]:
         """T08 工具生命周期事件 payload → 工具帧（runId 级，路由到所属 chat run，r26 §3）。
 
-        字段名取值链（r26 §3 标「需实测」，集中在此便于配对后单点校准）：
+        字段名取值链（r26 §3 二手来源；集中于此便于单点校准）：
         - name: payload.tool → payload.name → payload.toolName；无 name → []（无法渲染工具行）
         - id: payload.toolCallId → payload.tool_call_id → payload.callId → payload.id（缺省 None）；
           工具调用 id，前端据此配对同名并发调用的 result（codex P2，无 id 退 name）
