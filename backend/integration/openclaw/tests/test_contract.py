@@ -1307,6 +1307,193 @@ class TestFakeOpenClawWireLongLived:
         assert fake.connected == [('ws://x/', 'dt-1')]
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# Issue #105: 跨 app 泄漏收口——断言非翻译层不直接持有 wire 概念
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestCrossAppLeakPrevention:
+    """跨 app 泄漏收口契约测试——issue #105 acceptance。
+
+    断言非集成包层（containers/chat app）不直接持有 wire 概念字符串字面量：
+    - containers 不含 `device_id`/`scopes`/`pairing_request_id` 字面量
+    - chat/views.py 不含 `openclaw devices approve` CLI 字面量
+    - 翻译函数行为契约（build_pairing_status_default / format_device_approve_command）
+    - approval 字段常量单一来源
+    """
+
+    # ── AST 扫描：containers 不含配对 wire 字段字符串字面量 ────────────────
+
+    _PAIRING_WIRE_LITERALS = {'device_id', 'scopes', 'pairing_request_id'}
+
+    def _collect_string_constants(self, filepath: str) -> set[str]:
+        """AST 收集文件中所有字符串常量值（含 f-string 静态段）。"""
+        import ast
+        from pathlib import Path
+
+        tree = ast.parse(Path(filepath).read_text(encoding='utf-8'), filename=filepath)
+        strings = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                strings.add(node.value)
+            elif isinstance(node, ast.JoinedStr):
+                for value in node.values:
+                    if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                        strings.add(value.value)
+        return strings
+
+    def _file_content_contains(self, filepath: str, needle: str) -> bool:
+        """原始文本内容是否包含给定字符串（用于跨行的 f-string 片段）。"""
+        from pathlib import Path
+        return needle in Path(filepath).read_text(encoding='utf-8')
+
+    def test_containers_views_no_pairing_wire_literals(self):
+        """containers/views.py 不含 device_id / scopes / pairing_request_id 字面量。"""
+        import os
+
+        views_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))),
+            'containers', 'views.py',
+        )
+        strings = self._collect_string_constants(views_path)
+        overlap = strings & self._PAIRING_WIRE_LITERALS
+        assert not overlap, (
+            f'containers/views.py 不应直接持有 pairing wire 字段字面量: {sorted(overlap)}'
+        )
+
+    def test_containers_serializers_no_pairing_wire_literals(self):
+        """containers/serializers.py 不含 device_id / scopes / pairing_request_id 字面量。"""
+        import os
+
+        serializers_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))),
+            'containers', 'serializers.py',
+        )
+        strings = self._collect_string_constants(serializers_path)
+        overlap = strings & self._PAIRING_WIRE_LITERALS
+        assert not overlap, (
+            f'containers/serializers.py 不应直接持有 pairing wire 字段字面量: {sorted(overlap)}'
+        )
+
+    # ── AST 扫描：chat/views.py 不含 CLI 字符串字面量 ─────────────────
+
+    def test_chat_views_no_openclaw_devices_approve_literal(self):
+        """chat/views.py 不含 `openclaw devices approve` CLI 字面量（原始文本扫描，含 f-string 片段）。"""
+        import os
+
+        views_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))),
+            'chat', 'views.py',
+        )
+        assert not self._file_content_contains(views_path, 'openclaw devices approve'), (
+            'chat/views.py 不应直接持有 `openclaw devices approve` CLI 字面量——'
+            '应由集成包 translation.format_device_approve_command 生成'
+        )
+
+    # ── 翻译函数行为契约 ──────────────────────────────────────────────
+
+    def test_build_pairing_status_default_returns_correct_shape(self):
+        """build_pairing_status_default 返回 unpaired 状态 dict（status + 空字段）。"""
+        from integration.openclaw.translation import build_pairing_status_default
+
+        result = build_pairing_status_default()
+        assert result == {
+            'status': 'unpaired',
+            'device_id': '',
+            'scopes': [],
+            'pairing_request_id': '',
+        }, f'unpaired 默认状态 shape 不对: {result}'
+
+    @pytest.mark.django_db
+    def test_build_pairing_status_from_pairing_object(self):
+        """build_pairing_status 从 Pairing 模型构建 dict（对齐 PairingStatusSerializer 输出）。"""
+        from chat.models import Pairing
+        from containers.models import Instance
+        from integration.openclaw.translation import build_pairing_status
+
+        inst = Instance.objects.create(name='test-leak', port=19000, image='test:1')
+        pairing = Pairing.objects.create(
+            instance=inst,
+            device_id='dev-1',
+            status=Pairing.STATUS_PAIRED,
+            scopes_json='["operator.read", "operator.write"]',
+            pairing_request_id='req-42',
+        )
+        result = build_pairing_status(pairing)
+        assert result == {
+            'status': 'paired',
+            'device_id': 'dev-1',
+            'scopes': ['operator.read', 'operator.write'],
+            'pairing_request_id': 'req-42',
+        }
+
+        pairing.delete()
+        inst.delete()
+
+    def test_format_device_approve_command(self):
+        """format_device_approve_command 生成 `openclaw devices approve <request_id>`。"""
+        from integration.openclaw.translation import format_device_approve_command
+
+        cmd = format_device_approve_command('req-abc123')
+        assert cmd == 'openclaw devices approve req-abc123'
+        assert 'openclaw' in cmd
+        assert 'devices approve' in cmd
+        assert 'req-abc123' in cmd
+
+    # ── approval 字段常量单一来源 ──────────────────────────────────────
+
+    def test_approval_field_constants_defined(self):
+        """integration.openclaw.translation 暴露 APPROVAL_FIELD_{ID,KIND,DECISION} 常量。"""
+        from integration.openclaw import translation
+
+        assert hasattr(translation, 'APPROVAL_FIELD_ID'), '缺 APPROVAL_FIELD_ID 常量'
+        assert hasattr(translation, 'APPROVAL_FIELD_KIND'), '缺 APPROVAL_FIELD_KIND 常量'
+        assert hasattr(translation, 'APPROVAL_FIELD_DECISION'), '缺 APPROVAL_FIELD_DECISION 常量'
+        assert translation.APPROVAL_FIELD_ID == 'id'
+        assert translation.APPROVAL_FIELD_KIND == 'kind'
+        assert translation.APPROVAL_FIELD_DECISION == 'decision'
+
+    def test_approval_serializer_uses_integration_constants(self):
+        """ApprovalResolveSerializer 字段名经集成包常量引用（单源）。"""
+        from chat.serializers import ApprovalResolveSerializer
+        from integration.openclaw import translation
+
+        # 用 integration 常量访问 serializer fields
+        ser = ApprovalResolveSerializer(data={
+            translation.APPROVAL_FIELD_ID: 'ap-1',
+            translation.APPROVAL_FIELD_KIND: 'exec',
+            translation.APPROVAL_FIELD_DECISION: 'approve',
+        })
+        assert ser.is_valid(), f'serializer 应接受常量键入参: {ser.errors}'
+        assert ser.validated_data[translation.APPROVAL_FIELD_ID] == 'ap-1'
+        assert ser.validated_data[translation.APPROVAL_FIELD_KIND] == 'exec'
+        assert ser.validated_data[translation.APPROVAL_FIELD_DECISION] == 'approve'
+
+    @pytest.mark.django_db
+    def test_pairing_status_serializer_uses_integration_constants(self):
+        """chat PairingStatusSerializer 的字段键与 integration 常量一致（单源 contract）。"""
+        import json
+
+        from chat.models import Pairing
+        from chat.serializers import PairingStatusSerializer
+        from containers.models import Instance
+        from integration.openclaw import translation
+
+        inst = Instance.objects.create(name='test-single', port=19001, image='test:1')
+        pairing = Pairing.objects.create(
+            instance=inst,
+            device_id='dev-x',
+            scopes_json=json.dumps(['operator.read']),
+            pairing_request_id='req-y',
+        )
+        data = PairingStatusSerializer(pairing).data
+        assert data[translation.PAIRING_FIELD_DEVICE_ID] == 'dev-x'
+        assert data[translation.PAIRING_FIELD_PAIRING_REQUEST_ID] == 'req-y'
+
+        pairing.delete()
+        inst.delete()
+
+
 class TestFakeOpenClawWirePairing:
     """FakeOpenClawWire 支持完整配对状态模拟——issue #102 acceptance。
 

@@ -6,6 +6,11 @@ device_token（凭证）——仅暴露 status/device_id/scopes/pairing_request_
 from rest_framework import serializers
 
 from chat.models import Pairing
+from integration.openclaw.translation import (
+    APPROVAL_FIELD_DECISION,
+    APPROVAL_FIELD_ID,
+    APPROVAL_FIELD_KIND,
+)
 
 
 class ApprovalResolveSerializer(serializers.Serializer):
@@ -17,6 +22,10 @@ class ApprovalResolveSerializer(serializers.Serializer):
     id = serializers.CharField()
     kind = serializers.CharField()
     decision = serializers.ChoiceField(choices=('approve', 'deny'))
+
+    # APPROVAL_FIELD_ID/KIND/DECISION 常量由集成包单源管理（issue #105），
+    # 此处字段名与常量值一致：id → APPROVAL_FIELD_ID, kind → APPROVAL_FIELD_KIND,
+    # decision → APPROVAL_FIELD_DECISION。
 
 
 class SessionCreateSerializer(serializers.Serializer):
