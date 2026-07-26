@@ -4,6 +4,7 @@ import { describe, expect, it, vi, beforeEach } from 'vitest'
 
 vi.mock('@/api/client', () => ({
   apiJson: vi.fn(),
+  apiFetch: vi.fn(),
   ApiError: class ApiError extends Error {
     status: number
     constructor(status: number, message: string) {
@@ -13,8 +14,16 @@ vi.mock('@/api/client', () => ({
   },
 }))
 
-import { apiJson } from '@/api/client'
-import { getPairing, triggerPair, listSessions, createSession, listCommands } from '@/api/chat'
+import { apiJson, apiFetch } from '@/api/client'
+import {
+  getPairing,
+  triggerPair,
+  listSessions,
+  createSession,
+  getSessionHistory,
+  deleteSession,
+  listCommands,
+} from '@/api/chat'
 
 describe('chat pairing api', () => {
   beforeEach(() => {
@@ -84,6 +93,80 @@ describe('chat sessions api', () => {
     ;(apiJson as ReturnType<typeof vi.fn>).mockResolvedValue({ sessions: [] })
     await listSessions('a b')
     expect(apiJson).toHaveBeenCalledWith('/api/v1/containers/a%20b/chat/sessions/')
+  })
+})
+
+// 会话历史回看（issue #82 / spec #76）：GET 代理 chat.history，分页锚点 messageId。
+describe('chat session history api', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('getSessionHistory hits the history endpoint and unwraps {messages,hasMore,nextOffset}', async () => {
+    ;(apiJson as ReturnType<typeof vi.fn>).mockResolvedValue({
+      messages: [{ role: 'operator', text: '你好' }],
+      hasMore: false,
+      nextOffset: null,
+    })
+    const result = await getSessionHistory('demo', 'sk-1')
+    expect(apiJson).toHaveBeenCalledWith('/api/v1/containers/demo/chat/sessions/sk-1/history')
+    expect(result).toEqual({
+      messages: [{ role: 'operator', text: '你好' }],
+      hasMore: false,
+      nextOffset: null,
+    })
+  })
+
+  it('getSessionHistory passes limit and messageId as query anchors (分页)', async () => {
+    ;(apiJson as ReturnType<typeof vi.fn>).mockResolvedValue({
+      messages: [],
+      hasMore: false,
+      nextOffset: null,
+    })
+    await getSessionHistory('demo', 'sk-1', 50, 'msg-10')
+    expect(apiJson).toHaveBeenCalledWith(
+      '/api/v1/containers/demo/chat/sessions/sk-1/history?limit=50&messageId=msg-10',
+    )
+  })
+
+  it('getSessionHistory omits query when no limit/messageId', async () => {
+    ;(apiJson as ReturnType<typeof vi.fn>).mockResolvedValue({ messages: [], hasMore: false, nextOffset: null })
+    await getSessionHistory('demo', 'sk-1')
+    expect(apiJson).toHaveBeenCalledWith('/api/v1/containers/demo/chat/sessions/sk-1/history')
+  })
+
+  it('encodes the container name and key in the history URL', async () => {
+    ;(apiJson as ReturnType<typeof vi.fn>).mockResolvedValue({ messages: [], hasMore: false, nextOffset: null })
+    await getSessionHistory('a b', 'k/x')
+    expect(apiJson).toHaveBeenCalledWith('/api/v1/containers/a%20b/chat/sessions/k%2Fx/history')
+  })
+})
+
+// 会话删除（issue #82 / spec #76）：DELETE sessions/<key>/（admin 级，网关归档可恢复）。
+// 204 空体 → 走 apiFetch（同 removeInstance/removeProvider），不经 apiJson 的 resp.json()。
+describe('chat session delete api', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    ;(apiFetch as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: true, status: 204 })
+  })
+
+  it('deleteSession issues DELETE to the session detail endpoint via apiFetch', async () => {
+    await deleteSession('demo', 'sk-1')
+    expect(apiFetch).toHaveBeenCalledWith('/api/v1/containers/demo/chat/sessions/sk-1/', {
+      method: 'DELETE',
+    })
+  })
+
+  it('encodes the container name and key in the delete URL', async () => {
+    await deleteSession('a b', 'k/x')
+    expect(apiFetch).toHaveBeenCalledWith('/api/v1/containers/a%20b/chat/sessions/k%2Fx/', {
+      method: 'DELETE',
+    })
+  })
+
+  it('treats 404 as idempotent (concurrent delete by another client)', async () => {
+    ;(apiFetch as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: false, status: 404 })
+    await expect(deleteSession('demo', 'sk-1')).resolves.toBeUndefined()
   })
 })
 

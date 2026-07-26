@@ -7,16 +7,34 @@ import { nextTick } from 'vue'
 import { createPinia, setActivePinia } from 'pinia'
 
 vi.mock('@/api/containers', () => ({ listInstances: vi.fn() }))
-vi.mock('@/api/chat', () => ({ listSessions: vi.fn(), createSession: vi.fn(), listCommands: vi.fn() }))
+vi.mock('@/api/chat', () => ({
+  listSessions: vi.fn(),
+  createSession: vi.fn(),
+  getSessionHistory: vi.fn(),
+  deleteSession: vi.fn(),
+  listCommands: vi.fn(),
+}))
 vi.mock('element-plus', async (importOriginal) => {
   const actual = (await importOriginal()) as Record<string, unknown>
-  return { ...actual, ElMessage: { success: vi.fn(), error: vi.fn(), warning: vi.fn() } }
+  return {
+    ...actual,
+    ElMessage: { success: vi.fn(), error: vi.fn(), warning: vi.fn() },
+    ElMessageBox: { confirm: vi.fn() },
+  }
 })
 
 import ChatView from '@/views/ChatView.vue'
 import { listInstances } from '@/api/containers'
-import { createSession, listCommands, listSessions } from '@/api/chat'
+import {
+  createSession,
+  deleteSession,
+  getSessionHistory,
+  listCommands,
+  listSessions,
+} from '@/api/chat'
 import { useAuthStore } from '@/stores/auth'
+import { ApiError } from '@/api/client'
+import { ElMessageBox } from 'element-plus'
 
 class MockWS {
   static last: MockWS | null = null
@@ -69,7 +87,14 @@ describe('ChatView', () => {
     ;(listInstances as ReturnType<typeof vi.fn>).mockResolvedValue([INSTANCE])
     ;(listSessions as ReturnType<typeof vi.fn>).mockResolvedValue([SESSION])
     ;(createSession as ReturnType<typeof vi.fn>).mockResolvedValue({ session_key: 'sk-1' })
+    ;(getSessionHistory as ReturnType<typeof vi.fn>).mockResolvedValue({
+      messages: [],
+      hasMore: false,
+      nextOffset: null,
+    })
+    ;(deleteSession as ReturnType<typeof vi.fn>).mockResolvedValue(undefined)
     ;(listCommands as ReturnType<typeof vi.fn>).mockResolvedValue([])
+    ;(ElMessageBox.confirm as ReturnType<typeof vi.fn>).mockResolvedValue(undefined)
   })
   afterEach(() => {
     vi.unstubAllGlobals()
@@ -793,5 +818,119 @@ describe('ChatView', () => {
     await nextTick()
     expect(w.find('[data-test="cot-card"]').exists()).toBe(false)
     expect(w.find('.msg.assistant .bubble').text()).toContain('普通回答')
+  })
+
+  // ---- T3 会话历史回看（issue #82 / spec #76）：点会话拉 history 渲染、分页、删除、未配对引导 ----
+  it('renders the gateway-derived session title in the sidebar (验收 派生标题, 无 id 字段)', async () => {
+    ;(listSessions as ReturnType<typeof vi.fn>).mockResolvedValue([
+      { session_key: 'sk-1', title: '文献综述', updated_at: '' },
+    ])
+    const w = mount(ChatView, { global: { plugins: [createPinia()] } })
+    await flushPromises()
+    expect(w.find('[data-test="session-sk-1"]').text()).toContain('文献综述')
+  })
+
+  it('loads and renders the session history when switching sessions (验收 点击会话加载历史)', async () => {
+    const S2 = { session_key: 'sk-2', title: 'S2', updated_at: '' }
+    ;(listSessions as ReturnType<typeof vi.fn>).mockResolvedValue([SESSION, S2])
+    ;(getSessionHistory as ReturnType<typeof vi.fn>).mockImplementation((_n: string, key: string) =>
+      key === 'sk-1'
+        ? Promise.resolve({
+            messages: [{ role: 'operator', text: 'S1问题' }, { role: 'agent', text: 'S1回答' }],
+            hasMore: false,
+            nextOffset: null,
+          })
+        : Promise.resolve({
+            messages: [{ role: 'operator', text: 'S2问题' }, { role: 'agent', text: 'S2回答' }],
+            hasMore: false,
+            nextOffset: null,
+          }),
+    )
+    const w = mount(ChatView, { global: { plugins: [createPinia()] } })
+    await flushPromises()
+    // 初始自动选中 sk-1，其历史渲染
+    expect(w.find('[data-test="stream"]').text()).toContain('S1回答')
+
+    // 切到 sk-2 → 加载并渲染 sk-2 历史，sk-1 历史不再显示
+    await w.find('[data-test="session-sk-2"]').trigger('click')
+    await flushPromises()
+    expect(w.find('[data-test="stream"]').text()).toContain('S2回答')
+    expect(w.find('[data-test="stream"]').text()).not.toContain('S1回答')
+  })
+
+  it('shows pairing guidance when the container is unpaired (409, 验收 未配对引导)', async () => {
+    ;(listSessions as ReturnType<typeof vi.fn>).mockRejectedValue(new ApiError(409, '未配对'))
+    const w = mount(ChatView, { global: { plugins: [createPinia()] } })
+    await flushPromises()
+    const guide = w.find('[data-test="pairing-guide"]')
+    expect(guide.exists()).toBe(true)
+    expect(guide.text()).toContain('配对') // 指引用户先完成设备配对
+    // 未配对不应连 WS（无意义，WS 握手也会失败）
+    expect(MockWS.last).toBeNull()
+  })
+
+  it('prepends older messages on load-more using nextOffset anchor (验收 历史分页)', async () => {
+    ;(getSessionHistory as ReturnType<typeof vi.fn>)
+      // 首次加载（mount 自动选中 sk-1）：最近一页，hasMore=true，nextOffset 为更旧页锚点
+      .mockResolvedValueOnce({
+        messages: [{ role: 'agent', text: '最近回答' }],
+        hasMore: true,
+        nextOffset: 'older-anchor',
+      })
+      // 加载更多：更旧一页
+      .mockResolvedValueOnce({
+        messages: [{ role: 'operator', text: '更旧问题' }],
+        hasMore: false,
+        nextOffset: null,
+      })
+    const w = mount(ChatView, { global: { plugins: [createPinia()] } })
+    await flushPromises()
+    expect(w.find('[data-test="load-more"]').exists()).toBe(true) // hasMore → 顶部「加载更多」
+    expect(w.find('[data-test="stream"]').text()).toContain('最近回答')
+
+    await w.find('[data-test="load-more"]').trigger('click')
+    await flushPromises()
+    // 更旧消息 prepend 到头部（顺序：更旧在前、最近在后）
+    const rows = w.findAll('.msg').map((r) => r.text())
+    expect(rows[0]).toContain('更旧问题')
+    expect(rows[1]).toContain('最近回答')
+    // hasMore=false → 按钮消失
+    expect(w.find('[data-test="load-more"]').exists()).toBe(false)
+    // 加载更多用 nextOffset 作 messageId 锚点向回翻页
+    expect(getSessionHistory).toHaveBeenCalledWith('demo', 'sk-1', undefined, 'older-anchor')
+  })
+
+  it('deletes a session after confirmation and removes it from the list (验收 会话可删除)', async () => {
+    const S2 = { session_key: 'sk-2', title: 'S2', updated_at: '' }
+    ;(listSessions as ReturnType<typeof vi.fn>).mockResolvedValue([SESSION, S2])
+    const w = mount(ChatView, { global: { plugins: [createPinia()] } })
+    await flushPromises()
+    expect(w.find('[data-test="delete-session-sk-2"]').exists()).toBe(true)
+    await w.find('[data-test="delete-session-sk-2"]').trigger('click')
+    await flushPromises()
+    expect(deleteSession).toHaveBeenCalledWith('demo', 'sk-2')
+    expect(w.find('[data-test="session-sk-2"]').exists()).toBe(false) // 从列表移除
+  })
+
+  it('does not delete when the user cancels the confirmation', async () => {
+    ;(ElMessageBox.confirm as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('cancel'))
+    const w = mount(ChatView, { global: { plugins: [createPinia()] } })
+    await flushPromises()
+    await w.find('[data-test="delete-session-sk-1"]').trigger('click')
+    await flushPromises()
+    expect(deleteSession).not.toHaveBeenCalled()
+    expect(w.find('[data-test="session-sk-1"]').exists()).toBe(true) // 取消则会话保留
+  })
+
+  it('appends a newly created session to the list and selects it (验收 新建加入列表)', async () => {
+    const w = mount(ChatView, { global: { plugins: [createPinia()] } })
+    await flushPromises()
+    ;(createSession as ReturnType<typeof vi.fn>).mockResolvedValue({ session_key: 'sk-new' })
+    await w.find('[data-test="new-session"]').trigger('click')
+    await flushPromises()
+    // 新会话出现在列表（派生标题占位 = key 前 8 位，无 id 字段）
+    expect(w.find('[data-test="session-sk-new"]').exists()).toBe(true)
+    expect(w.find('[data-test="session-sk-new"]').text()).toContain('sk-new'.slice(0, 8))
+    expect(w.find('[data-test="session-sk-1"]').exists()).toBe(true) // 旧会话仍在
   })
 })
