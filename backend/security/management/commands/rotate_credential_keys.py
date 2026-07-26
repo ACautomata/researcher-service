@@ -41,6 +41,6 @@ class Command(BaseCommand):
         instances, pairings = CredentialKeyRotation().rotate()
         self.stdout.write(
             self.style.SUCCESS(
-                f'Rotated credentials for {instances} instances and {pairings} pairings.'
-            )
+                f'Rotated credentials for {instances} instances and {pairings} pairings.',
+            ),
         )

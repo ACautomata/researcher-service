@@ -1,7 +1,7 @@
 """凭证密钥轮换管理命令的行为测试。"""
 import pytest
-from django.db import connection
 from django.core.management import call_command
+from django.db import connection
 from django.test import override_settings
 
 from chat.models import Pairing
