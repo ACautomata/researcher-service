@@ -1000,6 +1000,88 @@ class TestOpenClawWireAdapterLongLived:
         result = asyncio.run(_run())
         assert result == {'sessions': []}
 
+    # ── ack timeout 异常链（issue #130 类别A W0707：raise ChatSendError from TimeoutError）──
+
+    def test_send_message_ack_timeout_chains_timeout_error(self):
+        """chat.send ack 超时 → ChatSendError 且 __cause__ 为 TimeoutError（W0707 raise-missing-from）。"""
+        import asyncio
+
+        from chat.chat_client import ChatSendError
+        from chat.tests.fakes import FakeChatTransport
+        from integration.openclaw.adapters import OpenClawWireAdapter
+
+        t = FakeChatTransport(suppress_ack=True)  # 不回 chat.send ack → 超时
+        adapter = OpenClawWireAdapter(transport=t, timeout=0.1)
+
+        async def _run():
+            await adapter.connect('ws://x/', 'dt')
+            await adapter.send_message('s', 'm', on_event=lambda f: None)
+        with pytest.raises(ChatSendError) as exc:
+            asyncio.run(_run())
+        assert 'chat.send ack timeout' in str(exc.value)
+        assert isinstance(exc.value.__cause__, TimeoutError)
+
+    def test_resolve_approval_ack_timeout_chains_timeout_error(self):
+        """approval.resolve ack 超时 → ChatSendError 且 __cause__ 为 TimeoutError。"""
+        import asyncio
+
+        from chat.chat_client import ChatSendError
+        from chat.tests.fakes import FakeChatTransport
+        from integration.openclaw.adapters import OpenClawWireAdapter
+
+        t = FakeChatTransport(suppress_ack=True)  # 不回 approval.resolve ack → 超时
+        adapter = OpenClawWireAdapter(transport=t, timeout=0.1)
+
+        async def _run():
+            await adapter.connect('ws://x/', 'dt')
+            await adapter.resolve_approval('ap-1', 'exec', 'approve')
+        with pytest.raises(ChatSendError) as exc:
+            asyncio.run(_run())
+        assert 'approval.resolve ack timeout' in str(exc.value)
+        assert isinstance(exc.value.__cause__, TimeoutError)
+
+    def test_list_commands_ack_timeout_chains_timeout_error(self):
+        """commands.list ack 超时 → ChatSendError 且 __cause__ 为 TimeoutError。"""
+        import asyncio
+
+        from chat.chat_client import ChatSendError
+        from chat.tests.fakes import FakeChatTransport
+        from integration.openclaw.adapters import OpenClawWireAdapter
+
+        t = FakeChatTransport(suppress_commands_ack=True)  # 不回 commands.list ack → 超时
+        adapter = OpenClawWireAdapter(transport=t, timeout=0.1)
+
+        async def _run():
+            await adapter.connect('ws://x/', 'dt')
+            await adapter.list_commands()
+        with pytest.raises(ChatSendError) as exc:
+            asyncio.run(_run())
+        assert 'commands.list ack timeout' in str(exc.value)
+        assert isinstance(exc.value.__cause__, TimeoutError)
+
+    def test_sessions_rpc_ack_timeout_chains_timeout_error(self):
+        """sessions.* ack 超时 → ChatSendError 且 __cause__ 为 TimeoutError。"""
+        import asyncio
+
+        from chat.chat_client import ChatSendError
+        from chat.tests.fakes import FakeChatTransport
+        from integration.openclaw.adapters import OpenClawWireAdapter
+
+        # rpc_suppress 含该方法 → 不回 res → 超时（需先注册进 rpc_payloads 才会进分发循环）
+        t = FakeChatTransport(
+            rpc_payloads={'sessions.list': {'sessions': []}},
+            rpc_suppress={'sessions.list'},
+        )
+        adapter = OpenClawWireAdapter(transport=t, timeout=0.1)
+
+        async def _run():
+            await adapter.connect('ws://x/', 'dt')
+            await adapter.sessions_rpc('sessions.list', {'agentId': 'main'})
+        with pytest.raises(ChatSendError) as exc:
+            asyncio.run(_run())
+        assert 'sessions.list ack timeout' in str(exc.value)
+        assert isinstance(exc.value.__cause__, TimeoutError)
+
     # ── list_pending_approvals ────────────────────────────────────────────────
 
     def test_list_pending_approvals_translates_cards(self):
@@ -1075,7 +1157,7 @@ class TestOpenClawWireAdapterLongLived:
                     'payload': {'id': 'ap-2', 'kind': 'exec', 'systemRunPlan': {'rawCommand': 'cmd'}}})
             await asyncio.sleep(0.1)
         asyncio.run(_run())
-        assert got_a == []
+        assert not got_a
         assert len(got_b) == 1
 
     # ── dead / discard / close ────────────────────────────────────────────────
@@ -1118,7 +1200,7 @@ class TestOpenClawWireAdapterLongLived:
             t.push({'type': 'event', 'event': 'chat', 'payload': {'runId': rid, 'state': 'delta', 'deltaText': 'lost'}})
             await asyncio.sleep(0.05)
         asyncio.run(_run())
-        assert received == []
+        assert not received
 
 
 class TestOpenClawWireLongLivedPort:
@@ -1215,7 +1297,7 @@ class TestFakeOpenClawWireLongLived:
 
         # approval subscribers
         calls = []
-        fake.add_approval_subscriber(lambda f: calls.append(f))
+        fake.add_approval_subscriber(calls.append)
         assert len(fake._approval_subscribers) == 1
         fake.remove_approval_subscriber(fake._approval_subscribers[0])
         assert len(fake._approval_subscribers) == 0
@@ -1341,7 +1423,7 @@ class TestFakeOpenClawWireLongLived:
             fake.discard(rid)
             await fake.push_event(rid, {'type': 'text', 'delta': 'lost'})
         asyncio.run(_run())
-        assert received == []  # discard 后事件丢弃
+        assert not received  # discard 后事件丢弃
 
     def test_fake_not_connected_send_raises(self):
         """Fake 未 connect 时 send_message 抛 ChatClientError（与真 Adapter 一致）。"""
