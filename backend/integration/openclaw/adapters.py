@@ -100,12 +100,21 @@ class BindMountWikiFileSystem:
         开放词表（issue #83 / #75）：不预设五分类，扫描到什么返回什么——骨架目录、开放
         domain 子目录、任意未知目录一律平等成组；递归收该目录下全部 .md；跳过插件私有
         目录（_SKIP_DIRS）与占位文件（_SKIP_FILES）；物理存在但无页的目录不成组。
-        wiki root 不存在（模板未初始化/被删）时返回空树，不上抛（codex #125 P2）。
+        wiki root 不存在（模板未初始化/被删）、root 自身是 symlink（容器把 wiki/main 换成
+        指向外部的链接，会经 iterdir 扫出宿主文件）或 root 不可读（容器 chmod 000）时一律
+        返回空树，不上抛（codex #125 P1/P2）。
         """
         groups = []
-        if not self._root.is_dir():
+        # root 自身是 symlink 时拒绝遍历:_resolve 的 root-containment 锚定 resolve() 后的
+        # 真实路径,若 root 指向 / 等宿主目录,扫描结果会泄外部 .md 标题/路径(codex #125 P1)。
+        if self._root.is_symlink() or not self._root.is_dir():
             return {'groups': groups}
-        for d in sorted(self._root.iterdir()):
+        try:
+            children = sorted(self._root.iterdir())
+        except OSError:
+            # root 存在但不可读(如 chmod 000) → 空树(codex #125 P2)
+            return {'groups': groups}
+        for d in children:
             if not d.is_dir() or d.is_symlink() or d.name in _SKIP_DIRS:
                 continue
             pages: list = []
@@ -180,28 +189,43 @@ class BindMountWikiFileSystem:
             raise ValueError(rel_path)
 
     def _scan_dir(self, dirpath: Path, rel_prefix: str, pages_out: list) -> None:
-        """递归扫描目录下全部 .md 页面（跳过插件私有子目录、占位文件与一切 symlink）。"""
+        """迭代扫描目录下全部 .md 页面(跳过插件私有子目录、占位文件与一切 symlink)。
+
+        用显式栈替代递归,深度仅受文件系统路径上限约束,不会触发 RecursionError
+        (codex #125 P2);每层 iterdir 包 OSError,单目录不可读仅跳过该子树,不影响
+        其它分支(codex #125 P2)。
+        """
         if not dirpath.is_dir():
             return
-        for f in sorted(dirpath.iterdir()):
-            # 不跟随任何 symlink（目录或文件）：防经树遍历/泄露 wiki/main 之外的文件
-            if f.is_symlink():
+        # 栈元素: (待扫目录绝对路径, 该目录对应的相对前缀, 是否已展开)
+        # 经典先 push 后展开模式:遇到目录先压栈,弹出时再 iterdir,便于包 OSError。
+        stack: list[tuple[Path, str]] = [(dirpath, rel_prefix)]
+        while stack:
+            cur_dir, cur_prefix = stack.pop()
+            try:
+                entries = sorted(cur_dir.iterdir())
+            except OSError:
+                # 目录在扫描间隙被删/被 chmod → 跳过该子树(codex #125 P2)
                 continue
-            if f.is_dir():
-                if f.name not in _SKIP_DIRS:
-                    self._scan_dir(f, f'{rel_prefix}{f.name}/', pages_out)
-                continue
-            # 仅收 regular file：FIFO/socket/device 命名 .md 会让 _page_title 阻塞 worker
-            # （codex #125 P1）。
-            if not f.is_file():
-                continue
-            if f.suffix != '.md' or f.name in _SKIP_FILES:
-                continue
-            rel = f'{rel_prefix}{f.name}'
-            pages_out.append({
-                'path': rel,
-                'title': self._page_title(f, f.stem),
-            })
+            for f in entries:
+                # 不跟随任何 symlink(目录或文件):防经树遍历/泄露 wiki/main 之外的文件
+                if f.is_symlink():
+                    continue
+                if f.is_dir():
+                    if f.name not in _SKIP_DIRS:
+                        stack.append((f, f'{cur_prefix}{f.name}/'))
+                    continue
+                # 仅收 regular file:FIFO/socket/device 命名 .md 会让 _page_title 阻塞
+                # worker(codex #125 P1)。
+                if not f.is_file():
+                    continue
+                if f.suffix != '.md' or f.name in _SKIP_FILES:
+                    continue
+                rel = f'{cur_prefix}{f.name}'
+                pages_out.append({
+                    'path': rel,
+                    'title': self._page_title(f, f.stem),
+                })
 
     def _page_title(self, fpath: Path, fallback: str) -> str:
         """从 frontmatter 取标题。"""

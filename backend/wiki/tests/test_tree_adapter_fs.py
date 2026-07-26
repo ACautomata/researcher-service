@@ -151,3 +151,75 @@ def test_missing_wiki_root_returns_empty_tree(tmp_path):
     missing = tmp_path / 'wiki' / 'main'
     tree = BindMountWikiFileSystem(str(missing)).build_tree()
     assert tree == {'groups': []}
+
+
+def test_symlinked_wiki_root_returns_empty_tree(tmp_path):
+    """wiki/main 自身被换成指向外部的 symlink 时返回空树,不扫外部目录(codex #125 P1)。"""
+    import os
+
+    outside = tmp_path / 'outside'
+    outside.mkdir()
+    (outside / 'secret.md').write_text('# SECRET\n', encoding='utf-8')
+    (outside / 'sub').mkdir()
+    (outside / 'sub' / 'leak.md').write_text('# LEAK\n', encoding='utf-8')
+    root_link = tmp_path / 'wiki' / 'main'
+    root_link.parent.mkdir(parents=True)
+    os.symlink(outside, root_link)
+
+    tree = BindMountWikiFileSystem(str(root_link)).build_tree()
+    assert tree == {'groups': []}
+
+
+def test_deeply_nested_dirs_no_recursion_error(wiki_root):
+    """任意深度嵌套不触发 RecursionError——_scan_dir 已改显式栈迭代(codex #125 P2)。"""
+    cur = wiki_root / 'concepts'
+    # 深度仅受文件系统路径上限约束;mac 上 ~475 层,Linux 上 ~2000 层,均远低于旧递归
+    # 在 Python 默认 recursionlimit=1000 下的爆栈阈值。这里造 200 层即可暴露递归实现的
+    # RecursionError(降 limit 后),迭代实现则放宽到任意深度。
+    depth = 0
+    for _ in range(200):
+        cur = cur / 'a'
+        try:
+            cur.mkdir()
+            depth += 1
+        except OSError:
+            break
+    if depth < 50:
+        pytest.skip(f'filesystem path limit too shallow: {depth}')
+    (cur / 'leaf.md').write_text('# LEAF\n', encoding='utf-8')
+
+    tree = BindMountWikiFileSystem(str(wiki_root)).build_tree()
+    all_paths = {p['path'] for g in tree['groups'] for p in g['pages']}
+    assert any(p.endswith('leaf.md') for p in all_paths)
+
+
+def test_unreadable_subdir_skipped(wiki_root):
+    """子目录被 chmod 000 时跳过该子树,其它分支不受影响(codex #125 P2)。"""
+    import os
+
+    locked = wiki_root / 'locked'
+    locked.mkdir()
+    (locked / 'x.md').write_text('# X\n', encoding='utf-8')
+    os.chmod(locked, 0)
+    try:
+        tree = BindMountWikiFileSystem(str(wiki_root)).build_tree()
+        all_paths = {p['path'] for g in tree['groups'] for p in g['pages']}
+        assert 'concepts/attention.md' in all_paths
+        assert not any('locked' in p for p in all_paths)
+    finally:
+        os.chmod(locked, 0o755)
+
+
+def test_unreadable_wiki_root_returns_empty_tree(tmp_path):
+    """wiki/main 自身不可读(chmod 000)时返回空树,不上抛(codex #125 P2)。"""
+    import os
+
+    main = tmp_path / 'wiki' / 'main'
+    main.mkdir(parents=True)
+    (main / 'a.md').write_text('# A\n', encoding='utf-8')
+    os.chmod(main, 0)
+    try:
+        tree = BindMountWikiFileSystem(str(main)).build_tree()
+        assert tree == {'groups': []}
+    finally:
+        os.chmod(main, 0o755)
