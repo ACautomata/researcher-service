@@ -52,23 +52,75 @@ class OpenClawWire(Protocol):
     """路径4：单一连接生命周期（配对握手 + 配对后长连）。
 
     状态机：未配对 → 配对中 → 稳态长连（ADR 0002 合并 pairing_ws + chat_client 两套 connect 帧）。
-    方法签名待 #102（配对握手）/ #103（长连）填充实现时细化——本票仅占位骨架。
+    #102 配对握手实现；#103 长连填充实现。
     """
+
+    @property
+    def dead(self) -> bool:
+        """连接是否已不可用；pool 据此不复用。"""
+        ...
+
+    # ── 配对握手（#102）─────────────────────────────────────────
 
     async def pair(self, url: str, identity: Any, bootstrap_token: str) -> Any:
         """配对握手（challenge/nonce/Ed25519/connect 帧）→ deviceToken；未配对上抛 PairingRequired。"""
         ...
 
+    # ── 长连接（#103）───────────────────────────────────────────
+
     async def connect(self, url: str, device_token: str) -> None:
-        """建立已配对长连（deviceToken 作 auth.token）。"""
+        """建立已配对长连（deviceToken 作 auth.token 经 ConnectFrameBuilder.session 构建帧）。"""
         ...
 
-    async def send(self, content: str, on_event: Any) -> str:
-        """发 chat.send → ack(runId) → 事件流回调 on_event；返回 runId。"""
+    async def send_message(self, session_key: str, message: str, on_event: Any) -> str:
+        """发 chat.send → ack(runId) → 事件流回调 on_event；返回 runId。
+
+        Falsification: 未 connect 抛 ChatClientError；ack 超时/网关拒绝抛 ChatSendError。
+        """
         ...
 
     async def close(self) -> None:
-        """关闭长连、清理路由。"""
+        """关闭长连、清理路由与审批注册。"""
+        ...
+
+    def discard(self, run_id: str) -> None:
+        """移除某 runId 路由（consumer 断开时清理）。"""
+        ...
+
+    # ── 连接级审批（T06 / spec §8.2）────────────────────────────
+
+    def add_approval_subscriber(self, cb: Any) -> None:
+        """注册连接级审批订阅者。"""
+        ...
+
+    def remove_approval_subscriber(self, cb: Any) -> None:
+        """退订指定审批订阅者。"""
+        ...
+
+    async def broadcast_approval_resolved(self, approval_id: str, decision: str) -> None:
+        """把一次权威 resolve 结果 fan-out 到全部订阅者。
+
+        codex R2 P2：共享 client 的各 consumer 卡片一致收敛。
+        仅广播真实发生的 resolve 回执（权威 decision），不伪造网关 resolved 事件。
+        """
+        ...
+
+    async def resolve_approval(self, approval_id: str, kind: str, decision: str) -> dict:
+        """回覆一次权限审批（approval.resolve RPC），返回网关 res payload。"""
+        ...
+
+    async def list_pending_approvals(self) -> list[dict]:
+        """查询网关当前待审批列表（补拉断线期间积累）。"""
+        ...
+
+    # ── 命令/session RPC（T07 / spec §8.2 / #76）────────────────
+
+    async def list_commands(self) -> dict:
+        """拉取该 agent 工作区的斜杠命令清单（commands.list RPC），返回 payload。"""
+        ...
+
+    async def sessions_rpc(self, method: str, params: dict) -> dict:
+        """通用会话 RPC（sessions.list / chat.history / sessions.create / sessions.delete），返回 payload。"""
         ...
 
 

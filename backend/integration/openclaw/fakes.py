@@ -42,17 +42,45 @@ class FakeContainerRuntime:
 
 
 class FakeOpenClawWire:
-    """OpenClawWire Port 的内存 fake：记录 pair/connect/send/close 调用。"""
+    """OpenClawWire Port 的内存 fake：记录 pair/connect/send_message/close 调用。
+
+    完整模拟所有长连接方法——send_message（chat.send）/ resolve_approval / list_commands /
+    sessions_rpc / list_pending_approvals + 审批订阅者（add/remove） + dead / discard。
+    测试用 fake 注入，不依赖真 gateway。
+    """
 
     def __init__(self) -> None:
         self.pair_calls: list = []
         self.connected: list[tuple[str, str]] = []
         self.sent: list = []
         self.closed: bool = False
+        self._dead: bool = False
         # 测试可预设 pair() 返回值（如 PairingResult dataclass）
         self.pair_result: Any = None
         # 测试可预设 pair() 抛异常（PairingRequired / PairingError）
         self.pair_raise: Exception | None = None
+        # 长连接预设
+        self.run_id: str = 'fake-run-id'  # send_message 返回的 runId
+        self.resolve_result: dict | None = None  # resolve_approval 返回值
+        self.resolve_error: Exception | None = None  # resolve_approval 抛异常
+        self.commands_payload: dict | None = None  # list_commands 返回值
+        self.commands_error: Exception | None = None  # list_commands 抛异常
+        self.rpc_results: dict[str, dict] = {}  # sessions_rpc method→payload
+        self.rpc_errors: dict[str, Exception] = {}  # sessions_rpc method→exception
+        self.pending_approvals: list[dict] = []  # list_pending_approvals 返回
+        # 审批订阅者
+        self._approval_subscribers: list = []
+        # runId→on_event 路由（send_message 自动注册；push_event 推事件）
+        self._routes: dict[str, Any] = {}
+        self.discarded: list[str] = []
+
+    @property
+    def dead(self) -> bool:
+        return self._dead
+
+    @dead.setter
+    def dead(self, value: bool) -> None:
+        self._dead = value
 
     async def pair(self, url: str, identity: Any, bootstrap_token: str) -> Any:
         self.pair_calls.append((url, identity, bootstrap_token))
@@ -62,13 +90,78 @@ class FakeOpenClawWire:
 
     async def connect(self, url: str, device_token: str) -> None:
         self.connected.append((url, device_token))
+        self._dead = False
 
-    async def send(self, content: str, on_event: Any) -> str:
-        self.sent.append((content, on_event))
-        return 'fake-run-id'
+    async def send_message(self, session_key: str, message: str, on_event: Any) -> str:
+        from chat.chat_client import ChatClientError
+
+        if not self.connected:
+            raise ChatClientError('client not connected')
+        self.sent.append((session_key, message, on_event))
+        rid = self.run_id
+        self._routes[rid] = on_event
+        return rid
 
     async def close(self) -> None:
         self.closed = True
+        self._dead = True
+        self.connected = []
+        self._routes.clear()
+
+    def discard(self, run_id: str) -> None:
+        self._routes.pop(run_id, None)
+        self.discarded.append(run_id)
+
+    # ── 连接级审批 ──
+
+    def add_approval_subscriber(self, cb: Any) -> None:
+        if cb not in self._approval_subscribers:
+            self._approval_subscribers.append(cb)
+
+    def remove_approval_subscriber(self, cb: Any) -> None:
+        if cb in self._approval_subscribers:
+            self._approval_subscribers.remove(cb)
+
+    async def broadcast_approval_resolved(self, approval_id: str, decision: str) -> None:
+        frame = {'type': 'approvalResolved', 'id': approval_id, 'decision': decision}
+        for cb in list(self._approval_subscribers):
+            try:
+                await cb(frame)
+            except Exception:
+                pass
+
+    async def resolve_approval(self, approval_id: str, kind: str, decision: str) -> dict:
+        if self.resolve_error is not None:
+            raise self.resolve_error
+        return self.resolve_result or {}
+
+    async def list_pending_approvals(self) -> list[dict]:
+        return list(self.pending_approvals)
+
+    # ── 命令/session RPC ──
+
+    async def list_commands(self) -> dict:
+        if self.commands_error is not None:
+            raise self.commands_error
+        return self.commands_payload or {}
+
+    async def sessions_rpc(self, method: str, params: dict) -> dict:
+        if method in self.rpc_errors:
+            raise self.rpc_errors[method]
+        return self.rpc_results.get(method, {})
+
+    # ── 测试辅助 ──
+
+    async def push_event(self, run_id: str, frame: dict) -> None:
+        """推一帧事件到已注册的 runId on_event 回调。"""
+        import asyncio
+
+        cb = self._routes.get(run_id)
+        if cb is not None:
+            if asyncio.iscoroutinefunction(cb):
+                await cb(frame)
+            else:
+                cb(frame)
 
 
 class FakeWikiFileSystem:

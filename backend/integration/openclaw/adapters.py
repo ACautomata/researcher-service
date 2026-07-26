@@ -219,11 +219,28 @@ class OpenClawWireAdapter:
 
     实现 OpenClawWire Port。transport 注入（默认 websockets.connect），测试用 fake。
     握手经 ConnectFrameBuilder 单一来源构造 connect 帧。
+    长连 RPC（chat.send / approval.resolve / commands.list / sessions.* / chat.history）
+    均可 fake WS 单测，不依赖真 gateway。
     """
 
     def __init__(self, transport=None, timeout: float = 10.0) -> None:
-        self._connect = transport or self._default_connect
+        self._connect_factory = transport or self._default_connect
         self._timeout = timeout
+        self._connect_timeout = timeout
+        self._ack_timeout = timeout
+        self._device_token: str | None = None
+        # 长连状态
+        self._ws = None
+        self._cm = None
+        self._recv_task: asyncio.Task | None = None
+        self._pending_acks: dict[str, tuple[asyncio.Future, Any]] = {}
+        self._pending_resolves: dict[str, asyncio.Future] = {}
+        self._routes: dict[str, Any] = {}
+        self._closed: bool = False
+        self._dead: bool = False
+        self._translator = None  # lazy init in connect
+        # 连接级审批订阅者
+        self._approval_subscribers: list = []
 
     @staticmethod
     def _default_connect(url: str):
@@ -241,7 +258,7 @@ class OpenClawWireAdapter:
         from chat.pairing_ws import PairingError, PairingRequired, PairingResult
 
         try:
-            async with self._connect(url) as ws:
+            async with self._connect_factory(url) as ws:
                 deadline = asyncio.get_event_loop().time() + self._timeout
                 # 1. 等 connect.challenge（event）取 nonce
                 nonce = await self._await_nonce(ws, deadline)
@@ -315,13 +332,346 @@ class OpenClawWireAdapter:
             raise PairingRequired(request_id)
         raise PairingError(error.get('message') or error.get('code') or 'connect failed')
 
-    # —— OpenClawWire Port 其余方法（#103 长连填充实现）——
-
     async def connect(self, url: str, device_token: str) -> None:
-        raise NotImplementedError('#103 长连填充实现')
+        """建立已配对长连接（deviceToken 作 auth.token 经 ConnectFrameBuilder.session 构建帧）。"""
+        import json
+        import uuid
+        from chat.chat_client import ChatConnectError
 
-    async def send(self, content: str, on_event: Any) -> str:
-        raise NotImplementedError('#103 长连填充实现')
+        self._device_token = device_token
+        self._cm = self._connect_factory(url)
+        self._ws = await self._cm.__aenter__()
+        req_id = uuid.uuid4().hex
+        try:
+            await self._ws.send(
+                json.dumps(ConnectFrameBuilder.session(req_id=req_id, device_token=device_token)))
+            await asyncio.wait_for(self._await_res(req_id), timeout=self._connect_timeout)
+        except ChatConnectError:
+            await self._cleanup_ws()
+            self._ws = None
+            self._cm = None
+            raise
+        except BaseException as exc:
+            await self._cleanup_ws()
+            self._ws = None
+            self._cm = None
+            raise ChatConnectError(str(exc)) from exc
+        if self._translator is None:
+            from chat.event_translate import ChatEventTranslator
+            self._translator = ChatEventTranslator()
+        self._recv_task = asyncio.create_task(self._recv_loop())
+
+    # ── send_message ─────────────────────────────────────────────────────────
+
+    async def send_message(self, session_key: str, message: str, on_event: Any) -> str:
+        from chat.chat_client import ChatClientError, ChatSendError
+
+        if self._ws is None:
+            raise ChatClientError('client not connected')
+        import uuid
+        req_id = uuid.uuid4().hex
+        fut = asyncio.get_running_loop().create_future()
+        self._pending_acks[req_id] = (fut, on_event)
+        frame = {
+            'type': 'req', 'id': req_id, 'method': 'chat.send',
+            'params': {
+                'sessionKey': session_key,
+                'message': message,
+                'agentId': 'main',
+                'idempotencyKey': uuid.uuid4().hex,
+            },
+        }
+        try:
+            await self._ws.send(json.dumps(frame))
+            run_id = await asyncio.wait_for(fut, timeout=self._ack_timeout)
+        except asyncio.TimeoutError:
+            self._pending_acks.pop(req_id, None)
+            raise ChatSendError('chat.send ack timeout')
+        except BaseException:
+            self._pending_acks.pop(req_id, None)
+            raise
+        self._routes[run_id] = on_event
+        return run_id
+
+    # ── resolve_approval ─────────────────────────────────────────────────────
+
+    async def resolve_approval(self, approval_id: str, kind: str, decision: str) -> dict:
+        from chat.chat_client import ChatClientError, ChatSendError
+
+        if self._ws is None:
+            raise ChatClientError('client not connected')
+        import uuid
+        req_id = uuid.uuid4().hex
+        fut = asyncio.get_running_loop().create_future()
+        self._pending_resolves[req_id] = fut
+        frame = {
+            'type': 'req', 'id': req_id, 'method': 'approval.resolve',
+            'params': {'id': approval_id, 'kind': kind, 'decision': decision},
+        }
+        try:
+            await self._ws.send(json.dumps(frame))
+            payload = await asyncio.wait_for(fut, timeout=self._ack_timeout)
+        except asyncio.TimeoutError:
+            self._pending_resolves.pop(req_id, None)
+            raise ChatSendError('approval.resolve ack timeout')
+        except BaseException:
+            self._pending_resolves.pop(req_id, None)
+            raise
+        return payload or {}
+
+    # ── list_pending_approvals ────────────────────────────────────────────────
+
+    async def list_pending_approvals(self) -> list[dict]:
+        if self._ws is None:
+            return []
+        import uuid
+        req_id = uuid.uuid4().hex
+        fut = asyncio.get_running_loop().create_future()
+        self._pending_resolves[req_id] = fut
+        frame = {'type': 'req', 'id': req_id, 'method': 'exec.approval.list', 'params': {}}
+        try:
+            await self._ws.send(json.dumps(frame))
+            payload = await asyncio.wait_for(fut, timeout=self._ack_timeout)
+        except BaseException:
+            self._pending_resolves.pop(req_id, None)
+            return []
+        items = (payload or {}).get('approvals')
+        if items is None:
+            single = (payload or {}).get('approval')
+            items = [single] if isinstance(single, dict) else []
+        if not isinstance(items, list):
+            return []
+        from chat.event_translate import ChatEventTranslator
+        cards = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            card = ChatEventTranslator._approval_card('exec.approval.requested', item)
+            if card is not None:
+                cards.append(card)
+        return cards
+
+    # ── list_commands ─────────────────────────────────────────────────────────
+
+    async def list_commands(self) -> dict:
+        from chat.chat_client import ChatClientError, ChatSendError
+
+        if self._ws is None:
+            raise ChatClientError('client not connected')
+        import uuid
+        req_id = uuid.uuid4().hex
+        fut = asyncio.get_running_loop().create_future()
+        self._pending_resolves[req_id] = fut
+        frame = {
+            'type': 'req', 'id': req_id, 'method': 'commands.list',
+            'params': {'agentId': 'main', 'scope': 'both', 'includeArgs': True},
+        }
+        try:
+            await self._ws.send(json.dumps(frame))
+            payload = await asyncio.wait_for(fut, timeout=self._ack_timeout)
+        except asyncio.TimeoutError:
+            self._pending_resolves.pop(req_id, None)
+            raise ChatSendError('commands.list ack timeout')
+        except BaseException:
+            self._pending_resolves.pop(req_id, None)
+            raise
+        return payload or {}
+
+    # ── sessions_rpc ──────────────────────────────────────────────────────────
+
+    async def sessions_rpc(self, method: str, params: dict) -> dict:
+        from chat.chat_client import ChatClientError, ChatSendError
+
+        if self._ws is None:
+            raise ChatClientError('client not connected')
+        import uuid
+        req_id = uuid.uuid4().hex
+        fut = asyncio.get_running_loop().create_future()
+        self._pending_resolves[req_id] = fut
+        frame = {'type': 'req', 'id': req_id, 'method': method, 'params': params}
+        try:
+            await self._ws.send(json.dumps(frame))
+            payload = await asyncio.wait_for(fut, timeout=self._ack_timeout)
+        except asyncio.TimeoutError:
+            self._pending_resolves.pop(req_id, None)
+            raise ChatSendError(f'{method} ack timeout')
+        except BaseException:
+            self._pending_resolves.pop(req_id, None)
+            raise
+        return payload or {}
+
+    # ── approval subscribers ──────────────────────────────────────────────────
+
+    def add_approval_subscriber(self, cb: Any) -> None:
+        if cb not in self._approval_subscribers:
+            self._approval_subscribers.append(cb)
+
+    def remove_approval_subscriber(self, cb: Any) -> None:
+        if cb in self._approval_subscribers:
+            self._approval_subscribers.remove(cb)
+
+    async def broadcast_approval_resolved(self, approval_id: str, decision: str) -> None:
+        """把一次权威 resolve 结果 fan-out 到全部订阅者（codex R2 P2）。"""
+        frame = {'type': 'approvalResolved', 'id': approval_id, 'decision': decision}
+        for cb in list(self._approval_subscribers):
+            try:
+                await cb(frame)
+            except Exception:
+                pass
+
+    # ── discard / close ───────────────────────────────────────────────────────
+
+    @property
+    def dead(self) -> bool:
+        return self._dead or self._closed
+
+    def discard(self, run_id: str) -> None:
+        self._routes.pop(run_id, None)
 
     async def close(self) -> None:
-        raise NotImplementedError('#103 长连填充实现')
+        self._closed = True
+        self._fail_pending_acks('client closed')
+        self._fail_pending_resolves('client closed')
+        if self._recv_task is not None:
+            self._recv_task.cancel()
+            try:
+                await self._recv_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        await self._cleanup_ws()
+
+    async def _cleanup_ws(self) -> None:
+        """关闭 WS 连接与其 context manager（多路径复用：正常 close/握手失败/recv 死）。"""
+        if self._ws is not None:
+            try:
+                await self._ws.close()
+            except Exception:
+                pass
+            self._ws = None
+        if self._cm is not None:
+            try:
+                await self._cm.__aexit__(None, None, None)
+            except Exception:
+                pass
+            self._cm = None
+
+    # ── recv loop ─────────────────────────────────────────────────────────────
+
+    async def _recv_loop(self) -> None:
+        try:
+            while True:
+                raw = await self._ws.recv()
+                msg = json.loads(raw)
+                if msg.get('type') == 'res':
+                    self._resolve_ack(msg)
+                else:
+                    await self._handle_event(msg)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self._dead = True
+            if not self._closed:
+                self._fail_pending_acks('connection lost')
+                self._fail_pending_resolves('connection lost')
+                await self._notify_all_error('connection lost')
+
+    def _resolve_ack(self, msg: dict) -> None:
+        rid = msg.get('id')
+        # approval.resolve / commands.list / sessions_rpc 的回执
+        resolve_fut = self._pending_resolves.pop(rid, None)
+        if resolve_fut is not None:
+            if not resolve_fut.done():
+                if msg.get('ok'):
+                    resolve_fut.set_result(msg.get('payload'))
+                else:
+                    err = msg.get('error') or {}
+                    from chat.chat_client import ChatSendError
+                    resolve_fut.set_exception(
+                        ChatSendError(err.get('message') or err.get('code') or 'RPC failed'))
+            return
+        # chat.send ack
+        entry = self._pending_acks.pop(rid, None)
+        if entry is None:
+            return
+        fut, on_event = entry
+        if fut.done():
+            return
+        if msg.get('ok'):
+            run_id = (msg.get('payload') or {}).get('runId')
+            if run_id:
+                self._routes[run_id] = on_event
+                fut.set_result(run_id)
+            else:
+                from chat.chat_client import ChatSendError
+                fut.set_exception(ChatSendError('chat.send ack missing runId'))
+        else:
+            err = msg.get('error') or {}
+            from chat.chat_client import ChatSendError
+            fut.set_exception(ChatSendError(err.get('message') or err.get('code') or 'chat.send failed'))
+
+    async def _handle_event(self, msg: dict) -> None:
+        frames = self._translator.translate(msg)
+        if not frames:
+            return
+        run_id = frames[0].get('runId')
+        if run_id is None:
+            # 连接级审批帧 → fan-out
+            for translated in frames:
+                if translated.get('type') not in ('approval', 'approvalResolved'):
+                    continue
+                for cb in list(self._approval_subscribers):
+                    try:
+                        await cb(translated)
+                    except Exception:
+                        pass
+            return
+        cb = self._routes.get(run_id)
+        if cb is None:
+            return
+        terminal = False
+        for translated in frames:
+            try:
+                await cb(translated)
+            except Exception:
+                pass
+            if translated.get('type') in ('done', 'error'):
+                terminal = True
+        if terminal:
+            self._routes.pop(run_id, None)
+
+    # ── await helpers ─────────────────────────────────────────────────────────
+
+    async def _await_res(self, req_id: str) -> dict:
+        from chat.chat_client import ChatConnectError
+        while True:
+            raw = await self._ws.recv()
+            msg = json.loads(raw)
+            if msg.get('type') == 'res' and msg.get('id') == req_id:
+                if not msg.get('ok'):
+                    raise ChatConnectError('connect handshake rejected by gateway')
+                return msg
+
+    async def _notify_all_error(self, message: str) -> None:
+        self._fail_pending_acks(message)
+        self._fail_pending_resolves(message)
+        for run_id, cb in list(self._routes.items()):
+            try:
+                await cb({'type': 'error', 'runId': run_id, 'message': message})
+            except Exception:
+                pass
+        self._routes.clear()
+
+    def _fail_pending_acks(self, message: str) -> None:
+        from chat.chat_client import ChatClientError
+        for entry in list(self._pending_acks.values()):
+            fut = entry[0]
+            if not fut.done():
+                fut.set_exception(ChatClientError(message))
+        self._pending_acks.clear()
+
+    def _fail_pending_resolves(self, message: str) -> None:
+        from chat.chat_client import ChatClientError
+        for fut in list(self._pending_resolves.values()):
+            if not fut.done():
+                fut.set_exception(ChatClientError(message))
+        self._pending_resolves.clear()
