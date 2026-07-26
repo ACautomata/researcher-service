@@ -99,3 +99,22 @@ def test_domain_subtree_pages(wiki_root):
     # domain 页标题仍走 frontmatter paper.title
     resnet = next(p for p in by_kind['domains']['pages'] if p['path'].endswith('resnet.md'))
     assert resnet['title'] == 'ResNet'
+
+
+def test_symlink_dirs_not_followed(wiki_root, tmp_path):
+    """指向 wiki/main 外的 symlink 目录不进入树（防经树泄露/遍历外部文件）。"""
+    import os
+
+    outside = tmp_path / 'outside'
+    outside.mkdir()
+    (outside / 'secret.md').write_text('# SECRET\n', encoding='utf-8')
+    # 顶层 symlink 目录 → 外部
+    os.symlink(outside, wiki_root / 'evil-link')
+    # 合法组内的 symlink 子目录 → 外部
+    os.symlink(outside, wiki_root / 'concepts' / 'evil-sub')
+
+    tree = BindMountWikiFileSystem(str(wiki_root)).build_tree()
+    kinds = {g['kind'] for g in tree['groups']}
+    all_paths = {p['path'] for g in tree['groups'] for p in g['pages']}
+    assert 'evil-link' not in kinds
+    assert not any('evil-sub' in p or 'secret.md' in p for p in all_paths)
