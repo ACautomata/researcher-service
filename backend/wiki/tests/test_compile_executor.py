@@ -6,9 +6,9 @@
 """
 import pytest
 
+from containers.models import Instance
 from containers.orchestrator import Fleet, FleetConfig, InstanceOrchestrator
 from containers.tests.fakes import FakeHealthProbe, FakeRuntime
-from containers.models import Instance
 from wiki.compile import CompileFleet, DockerCompileExecutor
 
 pytestmark = pytest.mark.django_db

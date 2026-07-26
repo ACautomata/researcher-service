@@ -15,7 +15,7 @@ def api():
 
 def _configured(settings):
     settings.OAUTH_PROVIDERS = {
-        'acme': {'issuer': 'https://idp.example.com', 'client_id': 'abc', 'scope': 'openid'}
+        'acme': {'issuer': 'https://idp.example.com', 'client_id': 'abc', 'scope': 'openid'},
     }
 
 

@@ -60,5 +60,5 @@ def test_create_list_delete_real_container(tmp_path):
     # issue #39 验收：删除连数据删，instances/<name>/ 清除
     assert not (tmp_path / 'fleet' / 'instances' / 'smoke').exists()
     assert not __import__('containers.models', fromlist=['Instance']).Instance.objects.filter(
-        name='smoke'
+        name='smoke',
     ).exists()

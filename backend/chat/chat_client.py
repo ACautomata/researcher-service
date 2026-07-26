@@ -19,6 +19,8 @@ import websockets
 from chat.event_translate import ChatEventTranslator
 from integration.openclaw.wire import (
     AGENT_ID as _AGENT_ID,
+)
+from integration.openclaw.wire import (
     ConnectFrameBuilder as _ConnectFrameBuilder,
 )
 

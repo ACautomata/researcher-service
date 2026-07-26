@@ -14,7 +14,7 @@ class RelPathField(serializers.CharField):
         v = value.strip()
         if not v:
             raise serializers.ValidationError('path 不能为空')
-        if v.startswith('/') or v.startswith('\\'):
+        if v.startswith(('/', '\\')):
             raise serializers.ValidationError('path 须为相对路径')
         if '\\' in v:
             raise serializers.ValidationError('path 不允许反斜杠')

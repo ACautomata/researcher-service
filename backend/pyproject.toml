@@ -11,6 +11,19 @@ asyncio_default_fixture_loop_scope = "function"
 line-length = 100
 target-version = "py313"
 
+[tool.ruff.lint]
+# 规则分配见 docs/ruff-pylint-boundary.md
+# 现只开低噪、可自动修复的规则族；Q/B/S 为 aspirational（待后续收敛）
+extend-select = [
+    "I",       # isort（import 排序）
+    "COM",     # flake8-commas（尾逗号）
+    "PIE",     # flake8-pie（禁止模式）
+]
+
+# I001 isort 的 known-first-party
+[tool.ruff.lint.isort]
+known-first-party = ["accounts", "chat", "config", "containers", "models", "wiki"]
+
 # ---- pylint：语义/类型层（风格交给 ruff，见 [tool.ruff]）----
 [tool.pylint.MAIN]
 load-plugins = "pylint_django"

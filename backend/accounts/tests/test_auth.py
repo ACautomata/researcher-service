@@ -3,7 +3,6 @@
 出处：docs/FULLSTACK-REFACTOR-SPEC.md §3（本地账号 + JWT 签发）/§4（输入 0 信任，经 Serializer）。
 """
 import jwt
-
 import pytest
 from django.conf import settings
 from django.contrib.auth import get_user_model
@@ -117,7 +116,7 @@ def test_logout_invalidates_refresh_cookie(api):
     # codex P2-2：logout 必须让 httpOnly refresh cookie 失效，否则下次 hydrate 又登回来
     User.objects.create_user(username='eve', password='strong-pass-1')
     token = api.post(
-        '/api/v1/auth/login', {'username': 'eve', 'password': 'strong-pass-1'}, format='json'
+        '/api/v1/auth/login', {'username': 'eve', 'password': 'strong-pass-1'}, format='json',
     ).json()['access']
     resp = api.post('/api/v1/auth/logout', HTTP_AUTHORIZATION=f'Bearer {token}')
     assert resp.status_code == 204

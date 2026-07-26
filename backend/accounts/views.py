@@ -47,7 +47,7 @@ class LoginView(APIView):
         user = ser.validated_data['user']
         refresh = RefreshToken.for_user(user)
         response = Response(
-            {'access': str(refresh.access_token)}, status=status.HTTP_200_OK
+            {'access': str(refresh.access_token)}, status=status.HTTP_200_OK,
         )
         response.set_cookie(
             'refresh_token',

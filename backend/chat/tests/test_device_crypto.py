@@ -24,7 +24,7 @@ def _raw_pubkey_from_pem(public_pem: str) -> bytes:
     """独立复现：从 SPKI PEM 取 32 字节 raw 公钥（不经过被测代码）。"""
     pub = serialization.load_pem_public_key(public_pem.encode())
     der = pub.public_bytes(
-        serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo
+        serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo,
     )
     return der[-32:]  # SPKI DER 尾部 32B 即 raw key
 

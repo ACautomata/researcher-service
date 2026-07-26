@@ -21,8 +21,10 @@ import websockets
 
 from chat.device_crypto import DeviceIdentity
 from integration.openclaw.wire import (
-    ConnectFrameBuilder as _ConnectFrameBuilder,
     REQUIRED_SCOPES as _REQUIRED_SCOPES,
+)
+from integration.openclaw.wire import (
+    ConnectFrameBuilder as _ConnectFrameBuilder,
 )
 
 
@@ -64,7 +66,7 @@ class PairingHandshake:
         return _ConnectFrameBuilder.pairing(req_id=req_id, identity=identity, token=token, nonce=nonce)
 
     async def pair(
-        self, *, url: str, token: str, identity: DeviceIdentity
+        self, *, url: str, token: str, identity: DeviceIdentity,
     ) -> PairingResult:
         """执行一次配对握手。三分支：PairingResult / PairingRequired / PairingError。"""
         try:

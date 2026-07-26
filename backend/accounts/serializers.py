@@ -1,6 +1,5 @@
 """accounts 序列化器 —— 注册 / 登录 / 刷新 / 用户信息。"""
-from django.contrib.auth import authenticate, get_user_model
-from django.contrib.auth import password_validation
+from django.contrib.auth import authenticate, get_user_model, password_validation
 from django.contrib.auth.validators import UnicodeUsernameValidator
 from rest_framework import serializers
 from rest_framework.validators import UniqueValidator
@@ -53,7 +52,7 @@ class LoginSerializer(serializers.Serializer):
 
     def validate(self, attrs):
         user = authenticate(
-            username=attrs.get('username'), password=attrs.get('password')
+            username=attrs.get('username'), password=attrs.get('password'),
         )
         if user is None or not user.is_active:
             raise serializers.ValidationError('用户名或密码错误')

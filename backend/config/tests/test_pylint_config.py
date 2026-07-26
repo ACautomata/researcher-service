@@ -9,7 +9,6 @@ from pathlib import Path
 
 import pytest
 
-
 # ---- 辅助 ----
 
 def _pylint_run(*extra_args: str, cwd: Path | None = None) -> subprocess.CompletedProcess:
@@ -161,3 +160,23 @@ def test_orm_objects_no_member_false_positive_suppressed():
     assert "E1101" not in output, (
         f"pylint-django 应抑制 ORM no-member 误报，但输出含 E1101:\n{output}"
     )
+
+
+# ---- ruff 配置契约 ----
+
+def test_pyproject_has_ruff_lint_section():
+    """pyproject.toml 包含 [tool.ruff.lint] 配置节。"""
+    with (_backend_root() / "pyproject.toml").open("rb") as f:
+        cfg = tomllib.load(f)
+    extend_select = cfg["tool"]["ruff"]["lint"]["extend-select"]
+    for rule in ["I", "COM", "PIE"]:
+        assert rule in extend_select, f"{rule} 应在 ruff lint extend-select 中"
+
+
+def test_pyproject_has_ruff_isort_first_party():
+    """[tool.ruff.lint.isort].known-first-party 列出全部 6 个 Django app。"""
+    with (_backend_root() / "pyproject.toml").open("rb") as f:
+        cfg = tomllib.load(f)
+    known = cfg["tool"]["ruff"]["lint"]["isort"]["known-first-party"]
+    for app in ["accounts", "chat", "config", "containers", "models", "wiki"]:
+        assert app in known, f"{app} 应在 known-first-party 中"

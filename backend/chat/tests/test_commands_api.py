@@ -28,7 +28,7 @@ GATEWAY_PAYLOAD = {
         {'name': 'model', 'description': '切换模型', 'textAliases': ['/model', '/m'], 'nativeName': 'model'},
         {'name': 'wiki', 'description': '在 wiki 中检索/写入', 'textAliases': ['/wiki'], 'nativeName': 'wiki'},
         {'name': 'compact', 'description': '压缩会话上下文', 'textAliases': ['/compact']},
-    ]
+    ],
 }
 
 

@@ -33,7 +33,7 @@ class _FakeWs:
         if not self.sent:
             return json.dumps(
                 {'type': 'event', 'event': 'connect.challenge',
-                 'payload': {'nonce': 'nz', 'ts': 1}}
+                 'payload': {'nonce': 'nz', 'ts': 1}},
             )
         frame = dict(self._result_frame)
         if frame.get('type') == 'res':

@@ -92,7 +92,7 @@ def test_create_allocates_lowest_free_port(orch, runtime):
 def test_create_skips_used_ports(orch):
     # 已占用 19000 → 取 19001
     Instance.objects.create(
-        name='other', port=19000, token='t', home_dir='/h', image='img:tag'
+        name='other', port=19000, token='t', home_dir='/h', image='img:tag',
     )
     inst = orch.create('demo')
     assert inst.port == 19001
@@ -304,7 +304,7 @@ def test_delete_preserves_row_when_dir_cleanup_fails(config, health, runtime, tm
         raise OSError('permission denied')
 
     orch = InstanceOrchestrator(
-        runtime=runtime, config=config, health_probe=health, dir_remover=fail_rmtree
+        runtime=runtime, config=config, health_probe=health, dir_remover=fail_rmtree,
     )
     orch.create('demo')
     with pytest.raises(InstanceCleanupError):
@@ -401,7 +401,7 @@ def test_used_ports_includes_fleet_label_port(config, health, tmp_path):
     )
     # 宿主探测全空闲——只靠 label 端口排除 19000
     orch = InstanceOrchestrator(
-        runtime=runtime, config=config, health_probe=health, port_in_use=lambda p: False
+        runtime=runtime, config=config, health_probe=health, port_in_use=lambda p: False,
     )
     inst = orch.create('demo')
     assert inst.port == 19001
@@ -581,7 +581,7 @@ def test_create_rollback_preserves_row_when_dir_cleanup_fails(config, health, ru
         raise OSError('permission denied')
 
     orch = InstanceOrchestrator(
-        runtime=_RunFails(), config=config, health_probe=health, dir_remover=fail_rmtree
+        runtime=_RunFails(), config=config, health_probe=health, dir_remover=fail_rmtree,
     )
     with pytest.raises(InstanceCleanupError):
         orch.create('demo')
@@ -606,7 +606,7 @@ def test_create_persists_owned_container_id_when_all_cleanup_fails(config, healt
 
     runtime.remove = fail_remove
     orch = InstanceOrchestrator(
-        runtime=runtime, config=config, health_probe=health, dir_remover=fail_rmtree
+        runtime=runtime, config=config, health_probe=health, dir_remover=fail_rmtree,
     )
 
     with pytest.raises(InstanceCleanupError):

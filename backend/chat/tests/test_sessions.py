@@ -32,7 +32,7 @@ GATEWAY_SESSIONS = {
         {'key': 'sk-1', 'derivedTitle': '文献综述初稿', 'updatedAt': '2026-07-20T10:00:00Z'},
         {'key': 'sk-2', 'derivedTitle': '', 'updatedAt': '2026-07-19T09:00:00Z'},
         {'key': 'sk-3'},  # 无派生标题/时间 → fallback
-    ]
+    ],
 }
 GATEWAY_HISTORY = {
     'messages': [
@@ -131,7 +131,7 @@ def test_list_sessions_success(authed, instance, override_pool):
             {'session_key': 'sk-1', 'title': '文献综述初稿', 'updated_at': '2026-07-20T10:00:00Z'},
             {'session_key': 'sk-2', 'title': '', 'updated_at': '2026-07-19T09:00:00Z'},
             {'session_key': 'sk-3', 'title': '', 'updated_at': ''},
-        ]
+        ],
     }
     assert client.calls[0][0] == 'list_sessions'
 

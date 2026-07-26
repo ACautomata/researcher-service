@@ -22,13 +22,13 @@ codex R2：
   若容器实际已在跑则就地自愈为 running，不再永久 pending。
 - delete 时 home 目录已不存在（FileNotFoundError）视为清理成功，不再误判失败卡 REMOVING。
 """
+import json
 import os
 import secrets
 import shutil
 import socket
 import threading
 import urllib.request
-import json
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -38,14 +38,15 @@ from pathlib import Path
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 
+from integration.openclaw.adapters import HttpHealthProbe
+from models.config_builder import ProviderConfigBuilder
+
 from .config_renderer import ConfigRenderer
 from .docker_runtime import DockerRuntime
 from .models import Instance
 from .ports import RESERVED_PORT_18789, PortAllocator
 from .provisioner import HomeProvisioner
 from .runtime import ContainerSpec
-from integration.openclaw.adapters import HttpHealthProbe
-from models.config_builder import ProviderConfigBuilder
 
 # health 字段枚举（issue #39 验收：列表显示 health 变 healthy）
 HEALTH_HEALTHY = 'healthy'
@@ -200,7 +201,7 @@ class InstanceOrchestrator:  # pylint: disable=too-many-instance-attributes
         self._renderer = None
         self._provisioner = HomeProvisioner(config.template_dir)
         self._allocator = PortAllocator(
-            config.port_start, config.port_end, config.reserved_ports
+            config.port_start, config.port_end, config.reserved_ports,
         )
         # codex R3：在飞 create 名字集（进程内，orchestrator 单例跨请求共享）。
         # 区分「正在 provisioning」与「崩溃中断」的 creating 行——delete 据此拒删在飞实例（:257），
@@ -354,7 +355,7 @@ class InstanceOrchestrator:  # pylint: disable=too-many-instance-attributes
                     home_dir=str(home),
                     config_path=str(config_path),
                     llm_api_key=self._cfg.llm_api_key,
-                )
+                ),
             )
             inst.container_id = container_id
             inst.status = Instance.STATUS_RUNNING

@@ -23,7 +23,7 @@ def _make_provider(inst, pid='my-openai', api=API_OPENAI, **kw):
 
 def _config(fleet, name):
     return json.loads(
-        (fleet['config'].root / 'instances' / name / 'openclaw.json').read_text()
+        (fleet['config'].root / 'instances' / name / 'openclaw.json').read_text(),
     )
 
 

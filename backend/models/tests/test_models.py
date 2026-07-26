@@ -11,8 +11,8 @@ from models.config_builder import ProviderSpec
 from models.models import (
     API_ANTHROPIC,
     API_OPENAI,
-    PROVIDER_ID_VALIDATOR,
     ENV_ID_VALIDATOR,
+    PROVIDER_ID_VALIDATOR,
     ModelProvider,
 )
 

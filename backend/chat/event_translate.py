@@ -28,8 +28,14 @@ from __future__ import annotations
 
 from integration.openclaw.wire import (
     APPROVAL_REQUESTED_EVENTS as _APPROVAL_REQUESTED_EVENTS,
+)
+from integration.openclaw.wire import (
     APPROVAL_RESOLVED_EVENTS as _APPROVAL_RESOLVED_EVENTS,
+)
+from integration.openclaw.wire import (
     TOOL_END_EVENTS as _TOOL_END_EVENTS,
+)
+from integration.openclaw.wire import (
     TOOL_START_EVENTS as _TOOL_START_EVENTS,
 )
 

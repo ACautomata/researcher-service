@@ -37,14 +37,14 @@ class DeviceIdentity:
 
     def _private_key(self) -> Ed25519PrivateKey:
         return serialization.load_pem_private_key(
-            self.private_key_pem.encode(), password=None
+            self.private_key_pem.encode(), password=None,
         )
 
     def public_key_raw_base64url(self) -> str:
         """公钥线上格式：SPKI DER 尾部 32B raw key 的 base64url。"""
         pub = serialization.load_pem_public_key(self.public_key_pem.encode())
         der = pub.public_bytes(
-            serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo
+            serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo,
         )
         return self._b64url_encode(der[_SPKI_DER_PREFIX_LEN:])
 

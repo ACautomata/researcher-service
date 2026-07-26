@@ -27,7 +27,7 @@ class Pairing(models.Model):
     ]
 
     instance = models.OneToOneField(
-        Instance, on_delete=models.CASCADE, related_name='pairing'
+        Instance, on_delete=models.CASCADE, related_name='pairing',
     )
     device_id = models.CharField(max_length=64, blank=True, default='')
     public_key_pem = models.TextField(blank=True, default='')
@@ -36,7 +36,7 @@ class Pairing(models.Model):
     scopes_json = models.TextField(blank=True, default='[]')
     pairing_request_id = models.CharField(max_length=128, blank=True, default='')
     status = models.CharField(
-        max_length=16, choices=STATUS_CHOICES, default=STATUS_UNPAIRED
+        max_length=16, choices=STATUS_CHOICES, default=STATUS_UNPAIRED,
     )
     updated_at = models.DateTimeField(auto_now=True)
     attempt_version = models.PositiveIntegerField(default=0)

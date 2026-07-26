@@ -11,7 +11,7 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 
 SECRET_KEY = os.environ.get(
-    'DJANGO_SECRET_KEY', 'django-insecure-dev-only-key-change-in-prod'
+    'DJANGO_SECRET_KEY', 'django-insecure-dev-only-key-change-in-prod',
 )
 
 DEBUG = False
@@ -72,7 +72,7 @@ DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.sqlite3',
         'NAME': BASE_DIR / 'db.sqlite3',
-    }
+    },
 }
 
 AUTH_PASSWORD_VALIDATORS = [
