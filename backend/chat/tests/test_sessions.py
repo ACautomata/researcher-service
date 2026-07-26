@@ -346,13 +346,20 @@ def test_session_drop_migration_reversible():
     # applied_migrations，migrate() 后不刷新；复用同一实例会让第二次 migrate 按过期
     # 的 applied 集合重复 unapply（本测试首次 unapply 0005 后，二次仍试图再 unapply
     # 0005 → SQLite DROP 不存在列报错）。
-    # 迁移到删表之后：chat_session 表不存在
-    MigrationExecutor(connection).migrate([('chat', '0004_delete_session')])
-    with connection.cursor() as cur:
-        tables_after = set(connection.introspection.table_names(cur))
-    assert 'chat_session' not in tables_after
-    # 回滚到删表之前（0003_session）：chat_session 表复存在
-    MigrationExecutor(connection).migrate([('chat', '0003_session')])
-    with connection.cursor() as cur:
-        tables_before = set(connection.introspection.table_names(cur))
-    assert 'chat_session' in tables_before
+    try:
+        # 迁移到删表之后：chat_session 表不存在
+        MigrationExecutor(connection).migrate([('chat', '0004_delete_session')])
+        with connection.cursor() as cur:
+            tables_after = set(connection.introspection.table_names(cur))
+        assert 'chat_session' not in tables_after
+        # 回滚到删表之前（0003_session）：chat_session 表复存在
+        MigrationExecutor(connection).migrate([('chat', '0003_session')])
+        with connection.cursor() as cur:
+            tables_before = set(connection.introspection.table_names(cur))
+        assert 'chat_session' in tables_before
+    finally:
+        # 恢复共享测试库到 chat 最新 leaf——本测试把库留在 0003，pytest-django 的
+        # transactional teardown 只 flush 数据、不重放迁移；不恢复会让后续用 Pairing
+        # 模型的测试因缺 0005/0006 加密状态列而失败（codex #132 P2）。
+        chat_leaf = MigrationExecutor(connection).loader.graph.leaf_nodes('chat')
+        MigrationExecutor(connection).migrate(chat_leaf)

@@ -32,7 +32,7 @@ class HttpHealthProbe:
         try:
             with urllib.request.urlopen(url, timeout=self._timeout) as resp:
                 return 200 <= resp.status < 300
-        except Exception:
+        except Exception:  # pylint: disable=broad-exception-caught  # §45 故障隔离:连不上/非2xx/timeout 统一不可达
             # URLError（连不上）/ HTTPError（非 2xx）/ timeout —— 统一不可达
             return False
 
@@ -442,7 +442,7 @@ class OpenClawWireAdapter:
 
         self._device_token = device_token
         self._cm = self._connect_factory(url)
-        self._ws = await self._cm.__aenter__()
+        self._ws = await self._cm.__aenter__()  # pylint: disable=unnecessary-dunder-call  # C2801 长连手动管理异步 CM(跨 connect/close 持句柄),非 async with 可圈定
         req_id = uuid.uuid4().hex
         try:
             await self._ws.send(
@@ -534,7 +534,7 @@ class OpenClawWireAdapter:
         try:
             await self._ws.send(json.dumps(frame))
             payload = await asyncio.wait_for(fut, timeout=self._ack_timeout)
-        except BaseException:
+        except BaseException:  # pylint: disable=broad-exception-caught  # §45 故障隔离:list 失败仅返回空,不炸长连
             self._pending_resolves.pop(req_id, None)
             return []
         items = (payload or {}).get('approvals')
@@ -618,7 +618,7 @@ class OpenClawWireAdapter:
         for cb in list(self._approval_subscribers):
             try:
                 await cb(frame)
-            except Exception:
+            except Exception:  # pylint: disable=broad-exception-caught  # §46 故障隔离:单订阅者回调失败不阻断 fan-out
                 pass
 
     # ── discard / close ───────────────────────────────────────────────────────
@@ -638,7 +638,7 @@ class OpenClawWireAdapter:
             self._recv_task.cancel()
             try:
                 await self._recv_task
-            except (asyncio.CancelledError, Exception):
+            except (asyncio.CancelledError, Exception):  # pylint: disable=broad-exception-caught  # §46 故障隔离:close 等 recv_task 收尾失败不阻断
                 pass
         await self._cleanup_ws()
 
@@ -647,13 +647,13 @@ class OpenClawWireAdapter:
         if self._ws is not None:
             try:
                 await self._ws.close()
-            except Exception:
+            except Exception:  # pylint: disable=broad-exception-caught  # §46 故障隔离:清理路径吞异常,保 idempotent close
                 pass
             self._ws = None
         if self._cm is not None:
             try:
                 await self._cm.__aexit__(None, None, None)
-            except Exception:
+            except Exception:  # pylint: disable=broad-exception-caught  # §46 故障隔离:清理路径吞异常
                 pass
             self._cm = None
 
@@ -668,7 +668,7 @@ class OpenClawWireAdapter:
                     self._resolve_ack(msg)
                 else:
                     await self._handle_event(msg)
-        except Exception:
+        except Exception:  # pylint: disable=broad-exception-caught  # §45 故障隔离:recv 死仅标记 dead + 失败 pending,不外抛炸任务
             self._dead = True
             if not self._closed:
                 self._fail_pending_acks('connection lost')
@@ -722,7 +722,7 @@ class OpenClawWireAdapter:
                 for cb in list(self._approval_subscribers):
                     try:
                         await cb(translated)
-                    except Exception:
+                    except Exception:  # pylint: disable=broad-exception-caught  # §46 故障隔离:单订阅者失败不阻断连接级 fan-out
                         pass
             return
         cb = self._routes.get(run_id)
@@ -732,7 +732,7 @@ class OpenClawWireAdapter:
         for translated in frames:
             try:
                 await cb(translated)
-            except Exception:
+            except Exception:  # pylint: disable=broad-exception-caught  # §46 故障隔离:单回调失败不阻断后续帧路由
                 pass
             if translated.get('type') in ('done', 'error'):
                 terminal = True
@@ -757,7 +757,7 @@ class OpenClawWireAdapter:
         for run_id, cb in list(self._routes.items()):
             try:
                 await cb({'type': 'error', 'runId': run_id, 'message': message})
-            except Exception:
+            except Exception:  # pylint: disable=broad-exception-caught  # §46 故障隔离:error 通知单回调失败不阻断
                 pass
         self._routes.clear()
 

@@ -1157,7 +1157,7 @@ class TestOpenClawWireAdapterLongLived:
                     'payload': {'id': 'ap-2', 'kind': 'exec', 'systemRunPlan': {'rawCommand': 'cmd'}}})
             await asyncio.sleep(0.1)
         asyncio.run(_run())
-        assert got_a == []
+        assert not got_a
         assert len(got_b) == 1
 
     # ── dead / discard / close ────────────────────────────────────────────────
@@ -1200,7 +1200,7 @@ class TestOpenClawWireAdapterLongLived:
             t.push({'type': 'event', 'event': 'chat', 'payload': {'runId': rid, 'state': 'delta', 'deltaText': 'lost'}})
             await asyncio.sleep(0.05)
         asyncio.run(_run())
-        assert received == []
+        assert not received
 
 
 class TestOpenClawWireLongLivedPort:
@@ -1297,7 +1297,7 @@ class TestFakeOpenClawWireLongLived:
 
         # approval subscribers
         calls = []
-        fake.add_approval_subscriber(lambda f: calls.append(f))
+        fake.add_approval_subscriber(calls.append)
         assert len(fake._approval_subscribers) == 1
         fake.remove_approval_subscriber(fake._approval_subscribers[0])
         assert len(fake._approval_subscribers) == 0
@@ -1423,7 +1423,7 @@ class TestFakeOpenClawWireLongLived:
             fake.discard(rid)
             await fake.push_event(rid, {'type': 'text', 'delta': 'lost'})
         asyncio.run(_run())
-        assert received == []  # discard 后事件丢弃
+        assert not received  # discard 后事件丢弃
 
     def test_fake_not_connected_send_raises(self):
         """Fake 未 connect 时 send_message 抛 ChatClientError（与真 Adapter 一致）。"""

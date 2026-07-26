@@ -127,7 +127,7 @@ class FakeOpenClawWire:
         for cb in list(self._approval_subscribers):
             try:
                 await cb(frame)
-            except Exception:
+            except Exception:  # pylint: disable=broad-exception-caught  # §46 故障隔离:单订阅者失败不阻断 fan-out(对齐真 Adapter)
                 pass
 
     async def resolve_approval(self, approval_id: str, kind: str, decision: str) -> dict:
