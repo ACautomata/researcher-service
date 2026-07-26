@@ -106,7 +106,12 @@ def test_pyproject_has_design_thresholds():
 # ---- 行为验证 ----
 
 def _assert_pylint_booted(result: subprocess.CompletedProcess):
-    """pylint 子进程成功启动（非模块未找到等进程级失败）。"""
+    """pylint 成功启动且无 fatal 级诊断。
+
+    检查：
+    - 进程级故障（returncode=127 / 模块未安装）；
+    - pylint fatal 诊断（F* 类消息，returncode bit 1）。
+    """
     combined = result.stdout + result.stderr
     assert result.returncode != 127, (
         f"pylint 命令未找到（returncode=127）:\n{combined}"
@@ -114,26 +119,25 @@ def _assert_pylint_booted(result: subprocess.CompletedProcess):
     assert "No module named pylint" not in combined, (
         f"pylint 模块未安装:\n{combined}"
     )
+    # bit 1 = fatal 消息（F0002 astroid-error 等，不含"fatal"字串）
+    assert result.returncode & 1 == 0, (
+        f"pylint 含 fatal 级诊断:\nSTDERR:\n{result.stderr}\nSTDOUT:\n{result.stdout}"
+    )
 
 
 def test_pylint_runs_on_all_apps_without_crash():
     """pylint 扫描全部 6 个 app 不崩溃（允许 lint 告警，不允许 fatal error）。
 
     pylint 发现 lint 告警时 returncode 非零（按位掩码），那是正常的。
-    这里只验证进程级未崩溃：无 traceback、无 fatal。
+    这里只验证进程级未崩溃：无 traceback。
     """
     apps = ["accounts", "chat", "config", "containers", "models", "wiki"]
     result = _pylint_run(*apps)
     combined = result.stdout + result.stderr
     _assert_pylint_booted(result)
-    # fatal 错误（如 E0015 Unrecognized option、模块导入崩溃）→ traceback + 'fatal'
-    has_traceback = "Traceback (most recent call last)" in combined
-    has_fatal = "fatal" in combined.lower()
-    assert not has_traceback, (
+    # Python traceback（解释器层面崩溃，非 pylint 诊断）
+    assert "Traceback (most recent call last)" not in combined, (
         f"pylint 发生 Python traceback 崩溃:\n{combined}"
-    )
-    assert not has_fatal, (
-        f"pylint fatal error:\nSTDERR:\n{result.stderr}\nSTDOUT:\n{result.stdout}"
     )
 
 
