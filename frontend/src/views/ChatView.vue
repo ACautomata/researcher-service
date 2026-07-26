@@ -4,11 +4,21 @@
 // WS 经 /ws/chat/（JWT subprotocol，复用 T02 中间件）；多容器切换 = 切 ChatWebSocket。
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { listInstances, type InstanceDTO } from '@/api/containers'
-import { createSession, listCommands, listSessions, type CommandDTO, type SessionDTO } from '@/api/chat'
+import {
+  createSession,
+  deleteSession,
+  getSessionHistory,
+  listCommands,
+  listSessions,
+  type CommandDTO,
+  type HistoryMessageDTO,
+  type SessionDTO,
+} from '@/api/chat'
 import { useAuthStore } from '@/stores/auth'
 import { ApiError } from '@/api/client'
 import { ChatWebSocket } from '@/chat/ws'
 import { splitThinking } from '@/chat/thinking'
+import { ElMessage, ElMessageBox } from 'element-plus'
 
 interface Msg {
   role: 'user' | 'assistant'
@@ -62,6 +72,15 @@ let pendingSend = false // 已 send 但首帧未到（runId 未知）
 let pendingAbandonCount = 0 // 切会话时仍 pending 的 run 数；其迟到首帧按 FIFO 视为孤儿丢弃（codex P2 #3）
 // selectContainer 的请求代：丢弃切容器途中迟到的 listSessions 响应（codex P2）
 let containerGen = 0
+
+// T3 会话历史回看（issue #82 / spec #76）：分页态——hasMore 标记可向回翻更旧消息，
+// historyAnchor=nextOffset 为下一更旧页的 messageId 锚点；historyLoading 控「加载更多」禁用。
+const historyHasMore = ref(false)
+const historyAnchor = ref<string | number | null>(null)
+const historyLoading = ref(false)
+// T3 未配对引导（issue #82）：容器未完成设备配对时网关回 409，对话/历史/新建均不可用——
+// 展示引导指引用户先去「容器」页完成配对（spec §8.1 设备配对为 chat 前置）。
+const pairingNeeded = ref(false)
 
 const currentSessionTitle = computed(() => {
   const s = sessions.value.find((x) => x.session_key === selectedSession.value)
@@ -219,6 +238,7 @@ async function selectContainer(name: string) {
   input.value = '' // 切容器：清空 composer 残留输入（否则旧 `/` 会让新容器菜单误弹，T07）
   abandonActiveRun()
   errorMsg.value = ''
+  pairingNeeded.value = false // T3：切容器重置未配对引导（新容器可能已配对）
   void loadCommands(name, gen) // T07：后台拉取新容器命令清单（不阻塞会话/连接主流程）；gen 守卫防迟到污染
   try {
     const list = await listSessions(name)
@@ -228,11 +248,16 @@ async function selectContainer(name: string) {
     if (!selectedSession.value) await newSession()
     if (gen !== containerGen) return // newSession 期间又切容器：不连
     if (!selectedSession.value) return // 会话创建失败（newSession 已显示错误）：不连接（codex P2）
+    void loadHistory(selectedSession.value) // T3：加载首个会话历史（不阻塞 WS 连接）
     connect()
   } catch (e) {
     if (gen !== containerGen) return
     connecting.value = false // 出错解除 connecting（composer 解禁后用户可重试）
     if (e instanceof ApiError && e.status === 401) return
+    if (e instanceof ApiError && e.status === 409) {
+      pairingNeeded.value = true // T3：未配对 → 引导用户先去完成设备配对，不连 WS
+      return
+    }
     errorMsg.value = (e as Error).message
   }
 }
@@ -253,7 +278,42 @@ async function newSession() {
     errorMsg.value = ''
   } catch (e) {
     if (e instanceof ApiError && e.status === 401) return
+    if (e instanceof ApiError && e.status === 409) {
+      pairingNeeded.value = true // T3：未配对 → 引导（新建亦需先配对）
+      return
+    }
     errorMsg.value = (e as Error).message
+  }
+}
+
+// T3 删除会话（issue #82 / spec #76，admin 级提升权限）：二次确认后调 deleteSession，
+// 网关先写压缩归档（可恢复）再删。成功 → 从列表移除；删的是当前会话则切到剩余首个（无则新建）。
+async function removeSession(key: string) {
+  if (!key) return
+  try {
+    await ElMessageBox.confirm(
+      '确认删除该会话？网关会先归档（可恢复）再删除。',
+      '删除会话',
+      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
+    )
+  } catch {
+    return // 用户取消
+  }
+  try {
+    await deleteSession(selectedContainer.value, key)
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 401) return
+    if (e instanceof ApiError && e.status === 409) { pairingNeeded.value = true; return }
+    ElMessage.error((e as Error).message)
+    return
+  }
+  sessions.value = sessions.value.filter((s) => s.session_key !== key)
+  ElMessage.success('会话已删除')
+  // 删的是当前会话：切到剩余首个（无则新建），复用切会话/新建逻辑加载历史
+  if (selectedSession.value === key) {
+    const next = sessions.value[0]?.session_key ?? ''
+    if (next) pickSession(next)
+    else { selectedSession.value = ''; await newSession() }
   }
 }
 
@@ -261,9 +321,95 @@ function pickSession(key: string) {
   if (!key || selectedSession.value === key) return
   abandonActiveRun()
   selectedSession.value = key
-  messages.value = []
   // codex R2 P1：不清空审批卡——同容器其它会话的卡保留，渲染时按 selectedSession 过滤即可
+  void loadHistory(key) // T3：切会话加载该会话历史（loadHistory 内部清空 messages + 维护分页态）
+}
+
+// T3 会话历史回看（issue #82 / spec #76）：拉 chat.history 渲染历史消息 + 维护分页态。
+// stale 守卫：切会话/容器后迟到的 history 响应按 containerGen + selectedSession 双校验丢弃
+// （同 listSessions 的 containerGen 套路）。401 由 client 处理；其它失败落 errorMsg。
+async function loadHistory(key: string) {
+  const gen = containerGen
+  const cname = selectedContainer.value
+  messages.value = []
+  historyHasMore.value = false
+  historyAnchor.value = null
+  historyLoading.value = true
   errorMsg.value = ''
+  pairingNeeded.value = false // T3：加载新会话重置未配对引导
+  try {
+    const res = await getSessionHistory(cname, key)
+    if (gen !== containerGen || selectedSession.value !== key) return // 切走了：丢弃迟到响应
+    // codex P2 #108：保留 await 期间 send() 追加的进行中 turn（user + 流式 assistant 占位）。
+    // 直接整体替换会被历史快照覆盖 → WS delta 找不到 streaming 尾，整轮实时回复从 UI 消失。
+    // 历史在前、进行中 turn 留在尾，streaming 尾仍是 onText 路由的目标。
+    const inFlight = messages.value
+    messages.value = [...res.messages.map(translateHistoryMessage), ...inFlight]
+    historyHasMore.value = res.hasMore
+    historyAnchor.value = res.nextOffset
+  } catch (e) {
+    if (gen !== containerGen || selectedSession.value !== key) return
+    if (e instanceof ApiError && e.status === 401) return // 401 由 client 处理会话
+    if (e instanceof ApiError && e.status === 409) {
+      pairingNeeded.value = true // T3：未配对 → 引导（容器可能在会话期间被解配）
+      return
+    }
+    errorMsg.value = (e as Error).message
+  } finally {
+    if (gen === containerGen && selectedSession.value === key) historyLoading.value = false
+  }
+}
+
+// T3 历史消息翻译（防腐层，issue #82）：网关 display-normalized 消息字段名「待实测」（对齐后端
+// _parse_history 透传策略），前端单点容错——role 归一 operator/user/human→user、其余→assistant；
+// text 主取 text、回退 content/message。历史消息为终态：streaming=false、无 tools、thinking 暂不剥离。
+// 实测确认字段名后改此处即可。
+function translateHistoryMessage(m: HistoryMessageDTO): Msg {
+  const text =
+    typeof m.text === 'string' ? m.text
+    : typeof m.content === 'string' ? m.content
+    : typeof m.message === 'string' ? m.message
+    : ''
+  return {
+    role: historyRole(m.role),
+    raw: text,
+    text,
+    thinking: '',
+    thinkingOpen: false,
+    streaming: false,
+    tools: [],
+  }
+}
+
+function historyRole(role: unknown): 'user' | 'assistant' {
+  const r = typeof role === 'string' ? role.toLowerCase() : ''
+  return r === 'operator' || r === 'user' || r === 'human' ? 'user' : 'assistant'
+}
+
+// T3 历史分页（issue #82）：顶部「加载更多」向回翻更旧消息——用 historyAnchor(=nextOffset) 作
+// messageId 锚点请求更旧一页，prepend 到列表头部（消息流按时间旧→新，更旧的在上）。
+// stale 守卫同 loadHistory（containerGen + selectedSession 双校验）。
+async function loadMoreHistory() {
+  if (!historyHasMore.value || historyAnchor.value == null || historyLoading.value) return
+  const key = selectedSession.value
+  const gen = containerGen
+  const cname = selectedContainer.value
+  const anchor = String(historyAnchor.value)
+  historyLoading.value = true
+  try {
+    const res = await getSessionHistory(cname, key, undefined, anchor)
+    if (gen !== containerGen || selectedSession.value !== key) return // 切走了：丢弃迟到响应
+    messages.value = [...res.messages.map(translateHistoryMessage), ...messages.value]
+    historyHasMore.value = res.hasMore
+    historyAnchor.value = res.nextOffset
+  } catch (e) {
+    if (gen !== containerGen || selectedSession.value !== key) return
+    if (e instanceof ApiError && e.status === 401) return
+    if (e instanceof ApiError && e.status === 409) { pairingNeeded.value = true; return }
+    errorMsg.value = (e as Error).message
+  } finally {
+    if (gen === containerGen && selectedSession.value === key) historyLoading.value = false
+  }
 }
 
 function connect() {
@@ -500,7 +646,14 @@ defineExpose({ selectContainer, send, newSession })
           :data-test="`session-${s.session_key}`"
           @click="pickSession(s.session_key)"
         >
-          {{ s.title || s.session_key.slice(0, 8) }}
+          <span class="sess-title">{{ s.title || s.session_key.slice(0, 8) }}</span>
+          <!-- T3 删除会话（issue #82）：@click.stop 防止触发 li 的 pickSession；二次确认在 removeSession 内。 -->
+          <button
+            class="sess-del"
+            title="删除会话"
+            :data-test="`delete-session-${s.session_key}`"
+            @click.stop="removeSession(s.session_key)"
+          >✕</button>
         </li>
       </ul>
       <button class="ghost" data-test="new-session" @click="newSession">＋ 新会话</button>
@@ -512,8 +665,23 @@ defineExpose({ selectContainer, send, newSession })
         <span v-if="selectedContainer" class="tag">{{ selectedContainer }}</span>
         <span v-if="connecting" class="tag warn">连接中…</span>
       </div>
+      <!-- T3 未配对引导（issue #82 / spec §8.1）：容器未完成设备配对时网关回 409，
+           对话/历史/新建均不可用——指引用户先去「容器」页完成配对。 -->
+      <div v-if="pairingNeeded" class="pair-guide" data-test="pairing-guide">
+        ⚠️ 该容器尚未完成设备配对，对话与历史暂不可用。请先在「容器」页完成设备配对后再回来。
+      </div>
       <p v-if="errorMsg" class="error" data-test="error-bar">{{ errorMsg }}</p>
       <div class="stream" data-test="stream">
+        <!-- T3 历史分页（issue #82）：hasMore 时顶部「加载更多」向回翻更旧消息，prepend 到头部。 -->
+        <button
+          v-if="historyHasMore"
+          class="load-more"
+          :disabled="historyLoading"
+          data-test="load-more"
+          @click="loadMoreHistory"
+        >
+          {{ historyLoading ? '加载中…' : '加载更多' }}
+        </button>
         <div v-for="(m, i) in messages" :key="`m-${i}`" class="msg" :class="m.role">
           <div class="bubble">
             <!-- T08 思考链折叠卡（spec §8.3 (a) / r26 §4）：思考以 <thinking> 标签内联在 text 增量里，
@@ -609,7 +777,10 @@ defineExpose({ selectContainer, send, newSession })
 .list { list-style: none; padding: 0; margin: 0; }
 .pill, .sess { padding: 7px 10px; border-radius: 7px; cursor: pointer; color: var(--el-text-color-regular); }
 .pill { display: flex; align-items: center; gap: 8px; background: var(--el-fill-color-light); margin-bottom: 4px; }
-.sess { font-size: 13px; color: var(--el-text-color-secondary); }
+.sess { font-size: 13px; color: var(--el-text-color-secondary); display: flex; align-items: center; gap: 6px; }
+.sess .sess-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sess .sess-del { flex: none; background: transparent; border: none; color: var(--el-text-color-placeholder); cursor: pointer; font-size: 12px; padding: 0 2px; border-radius: 4px; }
+.sess .sess-del:hover { color: var(--el-color-danger); }
 .pill.active, .sess.active { background: var(--el-color-primary-light-8); color: var(--el-color-primary); }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--el-color-success); }
 .dot.off { background: var(--el-text-color-disabled); }
@@ -620,7 +791,10 @@ defineExpose({ selectContainer, send, newSession })
 .tag { font-size: 11px; padding: 2px 8px; border-radius: 10px; background: var(--el-fill-color-light); color: var(--el-text-color-secondary); }
 .tag.warn { color: var(--el-color-warning); }
 .error { margin: 0; padding: 8px 18px; color: var(--el-color-danger); background: var(--el-color-danger-light-9); }
+.pair-guide { margin: 0; padding: 10px 18px; color: var(--el-color-warning); background: var(--el-color-warning-light-9); border-bottom: 1px solid var(--el-color-warning-light-7); font-size: 13px; }
 .stream { flex: 1; overflow-y: auto; padding: 18px; display: flex; flex-direction: column; gap: 14px; }
+.load-more { align-self: center; background: transparent; border: 1px dashed var(--el-border-color); border-radius: 8px; padding: 5px 18px; cursor: pointer; color: var(--el-text-color-secondary); font-size: 12.5px; }
+.load-more:disabled { cursor: default; opacity: .6; }
 .msg { display: flex; max-width: 840px; }
 .msg.user { align-self: flex-end; }
 .bubble { padding: 10px 14px; border-radius: 12px; white-space: pre-wrap; word-break: break-word; }
