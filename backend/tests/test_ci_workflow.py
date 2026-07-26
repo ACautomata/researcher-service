@@ -181,3 +181,51 @@ def test_backend_unit_runs_pytest_without_run_integration() -> None:
         assert "RUN_INTEGRATION" not in (step.get("env") or {}), (
             "backend-unit step 不应设 RUN_INTEGRATION"
         )
+
+
+def _pylint_step(backend_unit: dict) -> dict | None:
+    for step in backend_unit.get("steps", []):
+        if "pylint" in (step.get("run") or ""):
+            return step
+    return None
+
+
+def test_backend_unit_runs_pylint_after_pytest() -> None:
+    """AC1（#93）：backend-unit 在 pytest 之后串行 pylint（同 job，依赖 pip install 后环境）。"""
+    steps = _backend_unit_job(_load())["steps"]
+    pytest_idx = next(
+        (i for i, s in enumerate(steps) if "pytest" in (s.get("run") or "")),
+        None,
+    )
+    assert pytest_idx is not None, "缺少 python -m pytest 步骤"
+    pylint_step = _pylint_step({"steps": steps})
+    assert pylint_step is not None, "缺少 pylint 步骤"
+    assert steps.index(pylint_step) > pytest_idx, "pylint 必须在 pytest 之后串行"
+
+
+def test_backend_unit_pylint_command_targets_six_apps() -> None:
+    """AC2（#93）：``pylint accounts chat config containers models wiki``（working-directory: backend）。"""
+    step = _pylint_step(_backend_unit_job(_load()))
+    assert step is not None, "缺少 pylint 步骤"
+    run = step.get("run") or ""
+    assert "pylint" in run, "pylint 步骤未调用 pylint"
+    for app in ("accounts", "chat", "config", "containers", "models", "wiki"):
+        assert app in run, f"pylint 目标缺少 app：{app}"
+
+
+def test_backend_unit_pylint_is_quality_gate() -> None:
+    """AC3（#93）：pylint 退出码非零即 job 红——步骤不豁免失败（无 ``continue-on-error``）。"""
+    step = _pylint_step(_backend_unit_job(_load()))
+    assert step is not None, "缺少 pylint 步骤"
+    assert step.get("continue-on-error") is not True, "pylint 步骤不应 continue-on-error（须作为质量门）"
+
+
+def test_backend_unit_pylint_no_django_settings_env_fallback() -> None:
+    """AC4（#93）：pylint 读 pyproject.toml 的 django-settings-module（#77），不设 env 兜底。"""
+    backend_unit = _backend_unit_job(_load())
+    env_sources = [backend_unit.get("env") or {}]
+    env_sources.extend(s.get("env") or {} for s in backend_unit["steps"])
+    for env in env_sources:
+        assert "DJANGO_SETTINGS_MODULE" not in env, (
+            "不应为 pylint 设 DJANGO_SETTINGS_MODULE env 兜底（配置已在 pyproject.toml）"
+        )
