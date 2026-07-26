@@ -41,14 +41,6 @@ class HttpHealthProbe:
 # WikiFileSystem Port 的 bind-mount Adapter（issue #100）
 # ═══════════════════════════════════════════════════════════════════════════════
 
-# 分类 → 子目录相对路径（与插件目录约定一致，r29 §4.2）
-_GROUP_DIRS = {
-    'concept': 'concepts',
-    'entity': 'entities',
-    'source': 'sources',
-    'synthesis': 'syntheses',
-    'report': 'reports',
-}
 _SKIP_DIRS = {'.openclaw-wiki', '_attachments', '_views'}
 _SKIP_FILES = {'index.md', 'AGENTS.md', 'WIKI.md', 'inbox.md'}
 _WIKILINK_RE = re.compile(r'\[\[([^\]]+)\]\]')
@@ -90,9 +82,10 @@ class _FrontmatterParser:
 
 
 class BindMountWikiFileSystem:
-    """路径2：wiki/main 直读直写（bind-mount）。封装路径约定/五分类/越权防护。
+    """路径2：wiki/main 直读直写（bind-mount）。封装路径约定/物理树分组/越权防护。
 
     构造注入 wiki_root 路径（`<home>/wiki/main`），不依赖 Instance 模型。
+    build_tree 照实平铺磁盘真实子目录（issue #83，不写死目录集合）。
     """
 
     def __init__(self, wiki_root: str) -> None:
@@ -102,21 +95,35 @@ class BindMountWikiFileSystem:
     # —— Port: build_tree ——
 
     def build_tree(self) -> dict:
-        """遍历 wiki/main 文件树：五核心分类 + domains 子树分组。"""
-        groups = []
-        for kind, sub in _GROUP_DIRS.items():
-            pages: list = []
-            self._scan_dir(self._root / sub, f'{sub}/', pages)
-            groups.append({'kind': kind, 'name': sub, 'pages': pages})
+        """照实平铺 wiki/main 根目录真实子目录：每个含页的目录成一组（kind=name=目录名）。
 
-        domain_pages: list = []
-        domains_dir = self._root / 'domains'
-        if domains_dir.is_dir():
-            for d in sorted(domains_dir.iterdir()):
-                if not d.is_dir():
-                    continue
-                self._scan_dir(d / 'papers', f'domains/{d.name}/papers/', domain_pages)
-        groups.append({'kind': 'domain', 'name': 'domains', 'pages': domain_pages})
+        开放词表（issue #83 / #75）：不预设五分类，扫描到什么返回什么——骨架目录、开放
+        domain 子目录、任意未知目录一律平等成组；递归收该目录下全部 .md；跳过插件私有
+        目录（_SKIP_DIRS）与占位文件（_SKIP_FILES）；物理存在但无页的目录不成组。
+        wiki root 不存在（模板未初始化/被删）、root 路径上容器可写的两段（`<home>/wiki`
+        或 `<home>/wiki/main`）被换成 symlink（指向其它实例/宿主路径），或 root 不可读
+        （容器 chmod 000）时一律返回空树，不上抛（codex #125 P1/P2）。
+        """
+        groups = []
+        # 容器进程在自己 home 内可写 wiki/ 与 wiki/main/,能把任一段换成 symlink 指向
+        # 其它实例或宿主路径(codex #125 P1)。更上层的 <home> 是宿主路径,容器看不到,
+        # 不必检查——且 macOS /var → /private/var 这类系统级 symlink 不应误判。
+        # 检查 root 与其直接父,任一是 symlink 即拒绝遍历。
+        if (self._root.is_symlink() or self._root.parent.is_symlink()
+                or not self._root.is_dir()):
+            return {'groups': groups}
+        try:
+            children = sorted(self._root.iterdir())
+        except OSError:
+            # root 存在但不可读(如 chmod 000) → 空树(codex #125 P2)
+            return {'groups': groups}
+        for d in children:
+            if not d.is_dir() or d.is_symlink() or d.name in _SKIP_DIRS:
+                continue
+            pages: list = []
+            self._scan_dir(d, f'{d.name}/', pages)
+            if pages:
+                groups.append({'kind': d.name, 'name': d.name, 'pages': pages})
         return {'groups': groups}
 
     # —— Port: read_page ——
@@ -185,25 +192,57 @@ class BindMountWikiFileSystem:
             raise ValueError(rel_path)
 
     def _scan_dir(self, dirpath: Path, rel_prefix: str, pages_out: list) -> None:
-        """扫描单层目录的 .md 页面。"""
+        """迭代扫描目录下全部 .md 页面(跳过插件私有子目录、占位文件与一切 symlink)。
+
+        用显式栈替代递归,深度仅受文件系统路径上限约束,不会触发 RecursionError
+        (codex #125 P2);每层 iterdir 包 OSError,单目录不可读仅跳过该子树,不影响
+        其它分支(codex #125 P2)。
+        """
         if not dirpath.is_dir():
             return
-        for f in sorted(dirpath.iterdir()):
-            if not f.is_file():
+        # 栈元素: (待扫目录绝对路径, 该目录对应的相对前缀, 是否已展开)
+        # 经典先 push 后展开模式:遇到目录先压栈,弹出时再 iterdir,便于包 OSError。
+        stack: list[tuple[Path, str]] = [(dirpath, rel_prefix)]
+        while stack:
+            cur_dir, cur_prefix = stack.pop()
+            try:
+                entries = sorted(cur_dir.iterdir())
+            except OSError:
+                # 目录在扫描间隙被删/被 chmod → 跳过该子树(codex #125 P2)
                 continue
-            if f.suffix != '.md' or f.name in _SKIP_FILES:
-                continue
-            rel = f'{rel_prefix}{f.name}'
-            pages_out.append({
-                'path': rel,
-                'title': self._page_title(f, f.stem),
-            })
+            for f in entries:
+                # 不跟随任何 symlink(目录或文件):防经树遍历/泄露 wiki/main 之外的文件
+                if f.is_symlink():
+                    continue
+                if f.is_dir():
+                    if f.name not in _SKIP_DIRS:
+                        stack.append((f, f'{cur_prefix}{f.name}/'))
+                    continue
+                # 仅收 regular file:FIFO/socket/device 命名 .md 会让 _page_title 阻塞
+                # worker(codex #125 P1)。
+                if not f.is_file():
+                    continue
+                if f.suffix != '.md' or f.name in _SKIP_FILES:
+                    continue
+                rel = f'{cur_prefix}{f.name}'
+                pages_out.append({
+                    'path': rel,
+                    'title': self._page_title(f, f.stem),
+                })
+        # 栈式 DFS 弹出顺序与字典序相反(LIFO),而前端 FileTree 按数组顺序渲染不再排序;
+        # 末尾按 path 字典序重排,保持显示顺序稳定(codex #125 P2)。
+        pages_out.sort(key=lambda p: p['path'])
 
     def _page_title(self, fpath: Path, fallback: str) -> str:
-        """从 frontmatter 取标题。"""
+        """从 frontmatter 取标题。
+
+        读失败(OSError,如文件被并发删除/权限)或解码失败(UnicodeDecodeError,容器写
+        入非 UTF-8 字节的 .md)时退到文件名 fallback,不上抛——单文件不应让整棵树 500
+        (codex #125 P2)。
+        """
         try:
             raw = fpath.read_text(encoding='utf-8')[:2000]
-        except OSError:
+        except (OSError, UnicodeDecodeError):
             return fallback
         fm, _ = self._parser.parse(raw)
         return fm.get('paper.title') or fm.get('title') or fallback

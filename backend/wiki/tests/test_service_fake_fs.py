@@ -26,22 +26,47 @@ def svc():
     fs.pages['domains/cv/papers/resnet.md'] = (
         '---\npaper:\n  title: ResNet\n---\n# ResNet\n'
     )
+    # 五分类之外的未知目录（issue #83 物理化）：照实成组
+    fs.pages['experiments/trial-1.md'] = (
+        '---\ntitle: Trial 1\n---\n# Trial 1\n'
+    )
     return WikiService(_FakeInstance(), fs=fs)
 
 
 # —— build_tree ——
 
-def test_build_tree_five_core_kinds(svc):
+def test_build_tree_mirrors_real_dirs(svc):
+    """分组 = 页面真实顶层目录，不写死五分类；未知目录也成组。"""
     tree = svc.build_tree()
     kinds = {g['kind'] for g in tree['groups']}
-    assert {'concept', 'entity', 'source', 'synthesis', 'report', 'domain'} <= kinds
+    assert {'concepts', 'domains', 'experiments'} <= kinds
+
+
+def test_build_tree_no_five_category_assumption(svc):
+    """五分类单数键（concept/entity/…）已废；物理无对应目录不成组。"""
+    tree = svc.build_tree()
+    kinds = {g['kind'] for g in tree['groups']}
+    assert 'concept' not in kinds
+    assert 'entity' not in kinds
+    # fixture 中物理不存在 entities/sources/syntheses/reports → 不成组
+    assert 'entities' not in kinds
+    assert 'syntheses' not in kinds
+    assert 'reports' not in kinds
 
 
 def test_build_tree_has_pages(svc):
     tree = svc.build_tree()
-    concept = next(g for g in tree['groups'] if g['kind'] == 'concept')
-    paths = {p['path'] for p in concept['pages']}
+    concepts = next(g for g in tree['groups'] if g['kind'] == 'concepts')
+    paths = {p['path'] for p in concepts['pages']}
     assert 'concepts/attention.md' in paths
+
+
+def test_build_tree_unknown_dir_grouped(svc):
+    tree = svc.build_tree()
+    experiments = next(g for g in tree['groups'] if g['kind'] == 'experiments')
+    assert experiments['name'] == 'experiments'
+    paths = {p['path'] for p in experiments['pages']}
+    assert paths == {'experiments/trial-1.md'}
 
 
 # —— read_page ——

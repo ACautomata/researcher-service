@@ -178,7 +178,7 @@ class TestWikiFileSystemAdapterContract:
 
     @staticmethod
     def _make_wiki_root(tmp_path):
-        """准备 wiki/main 骨架：五核心分类 + domains 子树 + 私有目录/占位文件。"""
+        """准备 wiki/main 骨架：若干真实子目录（含五分类之外的未知目录）+ 私有目录/占位文件。"""
         from pathlib import Path
 
         root = Path(tmp_path) / 'wiki' / 'main'
@@ -187,14 +187,16 @@ class TestWikiFileSystemAdapterContract:
             '---\ntitle: Attention\n---\n# Attention\n见 [[self-attention]]。\n',
             encoding='utf-8',
         )
-        (root / 'entities').mkdir(parents=True)
-        (root / 'sources').mkdir(parents=True)
-        (root / 'syntheses').mkdir(parents=True)
-        (root / 'reports').mkdir(parents=True)
         papers = root / 'domains' / 'cv' / 'papers'
         papers.mkdir(parents=True)
         (papers / 'resnet.md').write_text(
             '---\npaper:\n  title: ResNet\nrelated_pages: [attention]\n---\n# ResNet\n',
+            encoding='utf-8',
+        )
+        # 五分类之外的未知目录（issue #83 物理化）：照实成组
+        (root / 'experiments').mkdir(parents=True)
+        (root / 'experiments' / 'trial-1.md').write_text(
+            '---\ntitle: Trial 1\n---\n# Trial 1\n',
             encoding='utf-8',
         )
         (root / '.openclaw-wiki').mkdir()
@@ -212,14 +214,29 @@ class TestWikiFileSystemAdapterContract:
 
     # —— build_tree ——
 
-    def test_build_tree_five_core_kinds(self, tmp_path):
+    def test_build_tree_mirrors_real_subdirs(self, tmp_path):
+        """issue #83：分组 = 根目录真实子目录（开放词表），不写死五分类；未知目录也成组。"""
         from integration.openclaw.adapters import BindMountWikiFileSystem
 
         root = self._make_wiki_root(tmp_path)
         fs = BindMountWikiFileSystem(str(root))
         tree = fs.build_tree()
         kinds = {g['kind'] for g in tree['groups']}
-        assert {'concept', 'entity', 'source', 'synthesis', 'report', 'domain'} <= kinds
+        assert {'concepts', 'domains', 'experiments'} <= kinds
+
+    def test_build_tree_no_five_category_assumption(self, tmp_path):
+        """五分类单数键（concept/entity/…）已废；物理不存在的目录不成组。"""
+        from integration.openclaw.adapters import BindMountWikiFileSystem
+
+        root = self._make_wiki_root(tmp_path)
+        fs = BindMountWikiFileSystem(str(root))
+        tree = fs.build_tree()
+        kinds = {g['kind'] for g in tree['groups']}
+        assert 'concept' not in kinds
+        assert 'entity' not in kinds
+        # fixture 中物理不存在 syntheses/reports → 不成组
+        assert 'syntheses' not in kinds
+        assert 'reports' not in kinds
 
     def test_build_tree_lists_pages(self, tmp_path):
         from integration.openclaw.adapters import BindMountWikiFileSystem
@@ -227,9 +244,21 @@ class TestWikiFileSystemAdapterContract:
         root = self._make_wiki_root(tmp_path)
         fs = BindMountWikiFileSystem(str(root))
         tree = fs.build_tree()
-        concept = next(g for g in tree['groups'] if g['kind'] == 'concept')
-        paths = {p['path'] for p in concept.get('pages', [])}
+        concepts = next(g for g in tree['groups'] if g['kind'] == 'concepts')
+        paths = {p['path'] for p in concepts.get('pages', [])}
         assert 'concepts/attention.md' in paths
+
+    def test_build_tree_unknown_dir_grouped(self, tmp_path):
+        """未知目录照实成组（kind=name=目录名）。"""
+        from integration.openclaw.adapters import BindMountWikiFileSystem
+
+        root = self._make_wiki_root(tmp_path)
+        fs = BindMountWikiFileSystem(str(root))
+        tree = fs.build_tree()
+        experiments = next(g for g in tree['groups'] if g['kind'] == 'experiments')
+        assert experiments['name'] == 'experiments'
+        paths = {p['path'] for p in experiments.get('pages', [])}
+        assert paths == {'experiments/trial-1.md'}
 
     def test_build_tree_skips_managed_dirs_and_files(self, tmp_path):
         from integration.openclaw.adapters import BindMountWikiFileSystem
@@ -240,6 +269,8 @@ class TestWikiFileSystemAdapterContract:
         all_paths = {p['path'] for g in tree['groups'] for p in g.get('pages', [])}
         assert not any('.openclaw-wiki' in p for p in all_paths)
         assert 'index.md' not in all_paths
+        # 插件私有目录本身也不成组
+        assert '.openclaw-wiki' not in {g['kind'] for g in tree['groups']}
 
     # —— read_page ——
 
