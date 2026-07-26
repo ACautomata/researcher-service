@@ -405,7 +405,7 @@ class TestContainerRuntimePortSingleSourced:
         import sys
         from pathlib import Path
 
-        containers_dir = Path(__file__).resolve().parent.parent.parent / 'containers'
+        containers_dir = Path(__file__).resolve().parent.parent.parent.parent / 'containers'
         offenders: dict[str, list[str]] = {}
         # 排除 DockerRuntime 自身（唯一合法 import docker 处）
         exempt = {'docker_runtime.py'}
