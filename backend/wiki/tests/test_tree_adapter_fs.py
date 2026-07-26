@@ -133,3 +133,21 @@ def test_symlink_files_not_listed(wiki_root, tmp_path):
     tree = BindMountWikiFileSystem(str(wiki_root)).build_tree()
     all_paths = {p['path'] for g in tree['groups'] for p in g['pages']}
     assert 'concepts/evil.md' not in all_paths
+
+
+def test_non_regular_md_not_listed(wiki_root):
+    """FIFO/socket/device 命名 .md 不进树——_page_title 会 read_text() 阻塞 worker（codex #125 P1）。"""
+    import os
+
+    os.mkfifo(wiki_root / 'concepts' / 'evil.md')
+
+    tree = BindMountWikiFileSystem(str(wiki_root)).build_tree()
+    all_paths = {p['path'] for g in tree['groups'] for p in g['pages']}
+    assert 'concepts/evil.md' not in all_paths
+
+
+def test_missing_wiki_root_returns_empty_tree(tmp_path):
+    """wiki/main 不存在（模板未初始化/被删）时返回空树，不上抛（codex #125 P2）。"""
+    missing = tmp_path / 'wiki' / 'main'
+    tree = BindMountWikiFileSystem(str(missing)).build_tree()
+    assert tree == {'groups': []}

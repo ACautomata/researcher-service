@@ -100,8 +100,11 @@ class BindMountWikiFileSystem:
         开放词表（issue #83 / #75）：不预设五分类，扫描到什么返回什么——骨架目录、开放
         domain 子目录、任意未知目录一律平等成组；递归收该目录下全部 .md；跳过插件私有
         目录（_SKIP_DIRS）与占位文件（_SKIP_FILES）；物理存在但无页的目录不成组。
+        wiki root 不存在（模板未初始化/被删）时返回空树，不上抛（codex #125 P2）。
         """
         groups = []
+        if not self._root.is_dir():
+            return {'groups': groups}
         for d in sorted(self._root.iterdir()):
             if not d.is_dir() or d.is_symlink() or d.name in _SKIP_DIRS:
                 continue
@@ -187,6 +190,10 @@ class BindMountWikiFileSystem:
             if f.is_dir():
                 if f.name not in _SKIP_DIRS:
                     self._scan_dir(f, f'{rel_prefix}{f.name}/', pages_out)
+                continue
+            # 仅收 regular file：FIFO/socket/device 命名 .md 会让 _page_title 阻塞 worker
+            # （codex #125 P1）。
+            if not f.is_file():
                 continue
             if f.suffix != '.md' or f.name in _SKIP_FILES:
                 continue
