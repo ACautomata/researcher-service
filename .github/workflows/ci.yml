@@ -42,3 +42,71 @@ jobs:
       # 误用、异常规范、设计气味。退出码非零即 job 红。配置（django-settings-module、
       # pylint-django 插件、migrations 忽略）集中在 pyproject.toml（#77 落地），无需 env 兜底。
       - run: pylint accounts chat config containers models wiki
+
+  # issue #95：真容器全链路冒烟——创建→配对→chat→wiki 在 GitHub-hosted runner 的真 Docker
+  # 里闭环验证（复用 #94 落地的 containers/tests/test_integration.py 链路；就绪轮询/配对
+  # approve 轮询/删除连数据删均已内置于该测试，CI 层只负责起 daemon、拉镜像、设 env、跑测试、清理）。
+  # LLM_API_KEY：经 user 决定引真 ${{ secrets.LLM_API_KEY }}（覆盖 issue「不在本票引 secret」一条）；
+  # chat 步骤只断言连通性不发真实 prompt，GitHub secret 掩码 + 全程不回显，不在日志泄露真实 key。
+  container-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: backend
+    env:
+      RUN_INTEGRATION: "1"
+      # pin 具体 tag（勿用浮动 latest）；与 tests/test_ci_workflow.py 的 OPENCLAW_IMAGE 单一真值同步。
+      OPENCLAW_IMAGE: acautomata/openclaw-docker-cn-im:2026.7.1
+      LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+      OPENCLAW_TEMPLATE_DIR: ${{ github.workspace }}/researcher-template
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: backend/requirements/dev.txt
+      - run: pip install -r requirements/dev.txt
+      # 模板单一来源：researcher 克隆（cp -a 预填充实例 home；集成测试在模板缺失时 skip，须先备好）。
+      - name: Clone researcher template
+        run: git clone --depth 1 https://github.com/ACAutomata/researcher "$OPENCLAW_TEMPLATE_DIR"
+      # 镜像缓存：cache 命中时 docker load 免首拉；miss 时留空待 pull 后 docker save 回填。
+      - name: Cache docker image
+        uses: actions/cache@v4
+        id: image-cache
+        with:
+          path: /tmp/openclaw-image.tar
+          # key 含镜像 ref（pin tag），镜像升级自动换 key 失效旧缓存。
+          key: openclaw-image-${{ runner.os }}-${{ env.OPENCLAW_IMAGE }}
+      - name: Load cached image
+        if: steps.image-cache.outputs.cache-hit == 'true'
+        run: docker load -i /tmp/openclaw-image.tar
+      # AC5：仅对最易 flaky 的「镜像拉取」加有限重试（至多 3 次 = 1+2 次重试）；
+      # 断言（下方 pytest）不包重试循环、不 continue-on-error——避免掩盖真回归。
+      - name: Pull image (bounded retry)
+        if: steps.image-cache.outputs.cache-hit != 'true'
+        run: |
+          for attempt in 1 2 3; do
+            if docker pull "$OPENCLAW_IMAGE"; then
+              break
+            fi
+            echo "docker pull attempt $attempt failed"
+            if [ "$attempt" = "3" ]; then
+              exit 1
+            fi
+            sleep 5
+          done
+          docker save "$OPENCLAW_IMAGE" -o /tmp/openclaw-image.tar
+      # 真容器全链路冒烟：一次跑透，断言失败即红（不重试）。就绪轮询（非固定 sleep）在测试内。
+      - name: Container smoke
+        run: python -m pytest containers/tests/test_integration.py -v
+      # AC7：无论成败清理——按 fleet label 精准删除本 job 容器（不误删非本 job 容器）+ 回收端口/磁盘。
+      - name: Cleanup smoke containers
+        if: always()
+        run: |
+          ids=$(docker ps -aq --filter "label=app=openclaw-fleet" || true)
+          if [ -n "$ids" ]; then
+            docker rm -f $ids || true
+          fi
+          docker container prune -f || true

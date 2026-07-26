@@ -229,3 +229,136 @@ def test_backend_unit_pylint_no_django_settings_env_fallback() -> None:
         assert "DJANGO_SETTINGS_MODULE" not in env, (
             "不应为 pylint 设 DJANGO_SETTINGS_MODULE env 兜底（配置已在 pyproject.toml）"
         )
+
+
+# ============================ container-smoke job（issue #95）============================
+# 被测 seam 同前：.github/workflows/ci.yml。真值源：issue #95 九条验收标准。
+# 备注（user 决定的 override）：LLM_API_KEY 引真 ${{ secrets.LLM_API_KEY }}，覆盖 issue 的
+# 「不在本票引入 GitHub Secret 真实 LLM key」一条；本组断言只锚「引 secret 变量 + 不在脚本
+# 文本回显其值」，不锚密钥字面值（防 CI 日志泄露真实 key 由 GitHub secret 掩码 + 不回显双保）。
+
+# pin 具体 tag（勿用浮动 latest）。与 ci.yml 单一真值同步；digest 见 docs/research/r6-docker-image-mount.md。
+OPENCLAW_IMAGE = "acautomata/openclaw-docker-cn-im:2026.7.1"
+
+
+def _container_smoke_job(workflow: dict) -> dict:
+    jobs = workflow["jobs"]
+    assert "container-smoke" in jobs, "缺少 container-smoke job"
+    return jobs["container-smoke"]
+
+
+def _steps_text(job: dict) -> str:
+    """job 内所有 step 的 run 脚本拼接（供 grep 类断言）。"""
+    return "\n".join(s.get("run") or "" for s in job.get("steps", []))
+
+
+def test_container_smoke_exists_and_parallel() -> None:
+    """AC1：container-smoke 与 frontend / backend-unit 并行（无 needs，独立 job）。"""
+    job = _container_smoke_job(_load())
+    assert job.get("needs") is None, "container-smoke 不应 needs（须与 frontend/backend-unit 并行）"
+
+
+def test_container_smoke_on_ubuntu_latest() -> None:
+    """AC9：container-smoke 跑在 ubuntu-latest（自带 Docker daemon）。"""
+    job = _container_smoke_job(_load())
+    assert job["runs-on"] == "ubuntu-latest"
+
+
+def test_container_smoke_timeout_minutes() -> None:
+    """AC4：job 设 generous timeout-minutes 20。"""
+    job = _container_smoke_job(_load())
+    assert job.get("timeout-minutes") == 20
+
+
+def test_container_smoke_env_contract() -> None:
+    """AC2：job env 设 RUN_INTEGRATION=1 / 非 latest 的 OPENCLAW_IMAGE / LLM_API_KEY(secret) /
+    OPENCLAW_TEMPLATE_DIR。"""
+    env = _container_smoke_job(_load()).get("env") or {}
+    assert env.get("RUN_INTEGRATION") == "1"
+    image = env.get("OPENCLAW_IMAGE")
+    assert image == OPENCLAW_IMAGE, f"OPENCLAW_IMAGE 须 pin 具体 tag：{image}"
+    assert not str(image).endswith(":latest"), "勿用浮动 latest"
+    llm_key = env.get("LLM_API_KEY")
+    assert llm_key == "${{ secrets.LLM_API_KEY }}", (
+        f"LLM_API_KEY 应引 GitHub Secret 变量，实际 {llm_key!r}"
+    )
+    assert "OPENCLAW_TEMPLATE_DIR" in env, "env 缺 OPENCLAW_TEMPLATE_DIR"
+
+
+def test_container_smoke_caches_docker_image() -> None:
+    """AC3：actions/cache 缓存 docker 镜像 tar，key 含 OPENCLAW_IMAGE，命中免首拉。"""
+    job = _container_smoke_job(_load())
+    cache_steps = [s for s in job["steps"] if s.get("uses", "").startswith("actions/cache")]
+    assert cache_steps, "缺少 actions/cache 步骤"
+    found = False
+    for step in cache_steps:
+        with_ = step.get("with") or {}
+        key = str(with_.get("key", ""))
+        if "OPENCLAW_IMAGE" in key:
+            found = True
+    assert found, "cache key 应含 OPENCLAW_IMAGE（命中免首拉）"
+
+
+def test_container_smoke_docker_save_load_uses_image_env() -> None:
+    """AC3：docker save/load tar 路径与镜像 ref 均从 $OPENCLAW_IMAGE 取（与 cache key 同源）。"""
+    text = _steps_text(_container_smoke_job(_load()))
+    assert "docker save" in text, "缺 docker save 步骤"
+    assert "docker load" in text, "缺 docker load 步骤"
+    assert "$OPENCLAW_IMAGE" in text, "docker save/load 应引用 $OPENCLAW_IMAGE env"
+
+
+def test_container_smoke_pull_has_bounded_retry() -> None:
+    """AC5：镜像拉取步骤带 1–2 次有限重试（bounded retry 循环），非无限。"""
+    steps = _container_smoke_job(_load())["steps"]
+    pull_steps = [s for s in steps if "docker pull" in (s.get("run") or "")]
+    assert pull_steps, "缺少 docker pull 步骤"
+    for step in pull_steps:
+        run = step.get("run") or ""
+        assert "for" in run and "docker pull" in run, "docker pull 应在有限重试循环内"
+        assert "break" in run, "重试循环成功须 break（非无条件循环）"
+
+
+def test_container_smoke_readiness_polling_not_fixed_sleep() -> None:
+    """AC6：就绪等待走轮询（integration test 内 GatewayReadinessWaiter），CI 层无固定长 sleep 站岗。"""
+    text = _steps_text(_container_smoke_job(_load()))
+    # 关键：不能出现「docker run 后裸 sleep 等网关就绪」模式（就绪轮询已在 #94 集成测试内）。
+    # pull 重试循环里的 `sleep 5` 是重试退避、非就绪站岗，故只禁长 sleep（≥30s）。
+    assert "sleep 30" not in text and "sleep 60" not in text, "禁用固定长 sleep 代替就绪轮询"
+
+
+def test_container_smoke_cleanup_runs_always() -> None:
+    """AC7：清理步骤带 if: always()，无论成败跑，且用 fleet label 精准删除容器。"""
+    job = _container_smoke_job(_load())
+    cleanup_steps = [
+        s for s in job["steps"]
+        if "always()" in str(s.get("if", ""))
+    ]
+    assert cleanup_steps, "缺少 if: always() 清理步骤"
+    found = any("docker" in (s.get("run") or "") for s in cleanup_steps)
+    assert found, "清理步骤应包含 docker 容器清理"
+    text = "\n".join(s.get("run") or "" for s in cleanup_steps)
+    assert "app=openclaw-fleet" in text, "清理应按 fleet label 精准删除，不误删非本 job 容器"
+
+
+def test_container_smoke_no_real_llm_key_in_logs() -> None:
+    """AC8：CI 日志不输出真实 LLM key——任何 run 脚本不 echo/print $LLM_API_KEY 字面值。"""
+    job = _container_smoke_job(_load())
+    for step in job.get("steps", []):
+        run = step.get("run") or ""
+        assert "echo $LLM_API_KEY" not in run
+        assert "echo ${LLM_API_KEY}" not in run
+        assert "printenv LLM_API_KEY" not in run
+        assert "echo \"$LLM_API_KEY\"" not in run
+
+
+def test_container_smoke_runs_integration_pytest_once_no_retry() -> None:
+    """AC5：断言（集成测试）不重试——pytest 步骤无 retry 循环、无 continue-on-error。"""
+    job = _container_smoke_job(_load())
+    pytest_steps = [s for s in job["steps"] if "pytest" in (s.get("run") or "")]
+    assert pytest_steps, "缺少 python -m pytest 步骤"
+    for step in pytest_steps:
+        assert "for" not in (step.get("run") or ""), "断言步骤不应包重试循环（避免掩盖真回归）"
+        assert step.get("continue-on-error") is not True, "集成测试须作为质量门（非 continue-on-error）"
+        assert "RUN_INTEGRATION" in str(step.get("env") or {}) or "RUN_INTEGRATION" in str(job.get("env") or {}), (
+            "集成测试步骤须继承 RUN_INTEGRATION=1"
+        )
