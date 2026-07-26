@@ -30,11 +30,11 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
     """前端对话 WS：把 start/send 适配到该容器已配对长连接 client（Adapter）。"""
 
     async def connect(self):
-        self._client = None
-        self._active_runids: set[str] = set()
+        self._client = None  # pylint: disable=attribute-defined-outside-init
+        self._active_runids: set[str] = set()  # pylint: disable=attribute-defined-outside-init
         await self.accept()
 
-    async def receive_json(self, content):
+    async def receive_json(self, content):  # pylint: disable=arguments-differ
         msg_type = content.get('type')
         if msg_type == 'start':
             await self._handle_start(content)
@@ -57,14 +57,14 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
                 'message': '容器未配对，请先在容器页完成设备配对',
             })
             return
-        except Exception:
+        except Exception:  # pylint: disable=broad-exception-caught
             # 连接握手失败（ChatConnectError 等）发 error 帧，不传播导致 Channels 关闭 WS
             await self.send_json({'type': 'error', 'message': '连接容器失败，请稍后重试'})
             return
         # 切容器/重连：旧 client 的本 consumer 审批订阅退订，避免推已失效连接（codex P1 独立退订）
         if self._client is not None and self._client is not client:
             self._client.remove_approval_subscriber(self._on_approval)
-        self._client = client
+        self._client = client  # pylint: disable=attribute-defined-outside-init
         # T06：注册连接级审批订阅（codex P1 订阅者集合，多 consumer 共享 client 不互伤）
         client.add_approval_subscriber(self._on_approval)
         await self.send_json({'type': 'ready', 'container': name})
@@ -72,7 +72,7 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
         try:
             for card in await client.list_pending_approvals():
                 await self.send_json(card)
-        except Exception:
+        except Exception:  # pylint: disable=broad-exception-caught
             pass
 
     async def _handle_resolve(self, content):
@@ -88,7 +88,7 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
             return
         try:
             payload = await self._client.resolve_approval(approval_id, kind, decision)
-        except Exception:
+        except Exception:  # pylint: disable=broad-exception-caught
             # 网关拒绝（缺 operator.approvals 等）/连接已断：error 帧带 approval id，
             # 前端仅复位该卡（codex R2 P2，并发 resolve 不误复位其它在途卡）
             await self.send_json({'type': 'error', 'message': '审批回覆失败，请稍后重试', 'id': approval_id})
@@ -101,7 +101,7 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
         # 而其它 peer 仍停留可点的陈旧卡。_fanout 内部故障隔离，单订阅者失败不影响其余。
         try:
             await self._client.broadcast_approval_resolved(approval_id, authoritative)
-        except Exception:
+        except Exception:  # pylint: disable=broad-exception-caught
             pass
         await self.send_json(frame)
 
@@ -118,7 +118,7 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
             run_id = await self._client.send_message(
                 session_key, message, on_event=self._on_event,
             )
-        except Exception:
+        except Exception:  # pylint: disable=broad-exception-caught
             # chat.send 被拒/连接已断：发 error 帧，不传播导致 WS 关闭
             await self.send_json({'type': 'error', 'message': '发送失败，请稍后重试'})
             return

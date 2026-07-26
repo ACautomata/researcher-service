@@ -120,7 +120,7 @@ class _FakeChatWs:
     async def send(self, data):
         self._t.sent.append(json.loads(data))
 
-    async def recv(self):
+    async def recv(self):  # pylint: disable=too-many-return-statements
         t = self._t
         connect = next((f for f in t.sent if f.get('method') == 'connect'), None)
         if connect is not None and not t._connect_acked and not t.suppress_connect_ack:
@@ -179,14 +179,14 @@ class _FakeChatWs:
         self._t._closed = True
 
 
-class FakeChatTransport:
+class FakeChatTransport:  # pylint: disable=too-many-instance-attributes  # pylint: disable=too-many-instance-attributes
     """对话长连接 fake transport（issue #41）：connect(url) → async CM 产 _FakeChatWs。
 
     构造参数：connect_ok / ack_run_id / ack_error / events（预设事件序列）。
     push(frame) 运行时追加事件（recv 挂起时唤醒）。sent 记录所有发送帧供断言。
     """
 
-    def __init__(self, *, connect_ok=True, ack_run_id='r1', ack_error=None, events=None,
+    def __init__(self, *, connect_ok=True, ack_run_id='r1', ack_error=None, events=None,  # pylint: disable=too-many-arguments
                  suppress_ack=False, suppress_connect_ack=False, resolve_error=None, resolve_payload=None,
                  list_payload=None, commands_payload=None, commands_error=None,
                  suppress_commands_ack=False,

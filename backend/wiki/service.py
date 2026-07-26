@@ -138,7 +138,7 @@ class WikiService:
         for page in all_pages:
             try:
                 content = self._fs.read_page(page['path'])['content']
-            except Exception:
+            except Exception:  # pylint: disable=broad-exception-caught
                 continue
             fm, body = self._parser.parse(content)
             targets = [m.group(1).split('|')[0].strip()

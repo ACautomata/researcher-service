@@ -89,7 +89,7 @@ class DeviceCrypto:
         )
 
     @staticmethod
-    def build_auth_payload_v3(
+    def build_auth_payload_v3(  # pylint: disable=too-many-arguments
         *,
         device_id: str,
         client_id: str,

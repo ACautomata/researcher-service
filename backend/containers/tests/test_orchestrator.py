@@ -1,3 +1,4 @@
+# pylint: disable=too-many-lines
 """seam: InstanceOrchestrator 生命周期编排 —— issue #39 容器编排控制面。
 
 出处：docs/FULLSTACK-REFACTOR-SPEC.md §5.4（生命周期）/§5.5（状态机 + 失败回滚）/§5.6（bind-mount home）。
@@ -12,7 +13,7 @@ import pytest
 from django.db import IntegrityError
 
 from containers.models import Instance
-from containers.orchestrator import (
+from containers.orchestrator import (  # pylint: disable=too-many-positional-arguments
     ConfigurationError,
     Fleet,
     FleetConfig,
@@ -516,8 +517,8 @@ def test_create_rollback_skips_remove_when_run_not_attempted(config, health, tmp
     orch._provisioner = HomeProvisioner(tmp_path / 'no-such-template')
     with pytest.raises(Exception):
         orch.create('demo')
-    assert runtime.run_specs == []                 # 从未调 run
-    assert runtime.removed == []                   # 回滚未 remove（没创建任何容器）
+    assert runtime.run_specs == []                 # pylint: disable=use-implicit-booleaness-not-comparison
+    assert runtime.removed == []                   # pylint: disable=use-implicit-booleaness-not-comparison
 
 
 @pytest.mark.django_db
@@ -556,7 +557,7 @@ def test_create_rollback_preserves_preexisting_container(config, health, tmp_pat
         def run(self, spec):
             raise RuntimeError('name conflict: container already exists')
 
-    runtime.run = _RunConflict.run.__get__(runtime)   # 保留 containers，run 抛冲突
+    runtime.run = _RunConflict.run.__get__(runtime)   # pylint: disable=no-value-for-parameter
     orch = InstanceOrchestrator(runtime=runtime, config=config, health_probe=health)
     with pytest.raises(RuntimeError):
         orch.create('demo')
@@ -852,7 +853,7 @@ def test_list_and_delete_work_when_template_json_is_invalid(config, health, runt
 
     # list 不应因模板文件缺失而失败
     items = orch.list()
-    assert items == []
+    assert items == []  # pylint: disable=use-implicit-booleaness-not-comparison
 
     # delete 亦然（实例不存在 → False）
     assert orch.delete('nobody') is False
@@ -1098,11 +1099,11 @@ def test_delete_skips_rmtree_when_row_gone_before_cleanup(orch, runtime, config,
 
     monkeypatch.setattr(Instance.objects, 'filter', fake_filter)
     rmtree_calls = []
-    orch._dir_remover = lambda p: rmtree_calls.append(p)
+    orch._dir_remover = lambda p: rmtree_calls.append(p)  # pylint: disable=unnecessary-lambda
 
     result = orch.delete('demo')
     assert result is True
-    assert rmtree_calls == [], '行已不存在时 PK guard 须跳过 rmtree（新目录属于 recreate）'
+    assert rmtree_calls == [], '行已不存在时 PK guard 须跳过 rmtree（新目录属于 recreate）'  # pylint: disable=use-implicit-booleaness-not-comparison
     assert marker.exists() or (instance_dir / 'home' / 'workspace' / 'note.md').exists(), (
         'recreate 的新目录不应被 stale delete 删除'
     )
@@ -1187,7 +1188,7 @@ def test_smoke_template_json_is_a_readable_file_path():
         f'smoke template_json 须为存在的文件路径（create() 按 Path.read_text 读），'
         f'实际传入: {_SMOKE_TEMPLATE_JSON!r}'
     )
-    assert isinstance(json.loads(path.read_text()), dict)
+    assert isinstance(json.loads(path.read_text(encoding='utf-8')), dict)
 
 
 # ◀ F3 (4772692556) P2 —— reconcile creating 行时 runtime.get 无防护，daemon 抖动即整 list 500 ◀

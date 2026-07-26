@@ -78,7 +78,7 @@ class ChatConnectionPool:
             if client is not None:  # 死连接：best-effort 清理后丢弃
                 try:
                     await client.aclose()
-                except Exception:
+                except Exception:  # pylint: disable=broad-exception-caught
                     pass
             new_client = self._client_factory(url, pairing.device_token)
             await new_client.connect()  # 握手有界（chat_client.connect_timeout）

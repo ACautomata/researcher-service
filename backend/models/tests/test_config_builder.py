@@ -12,7 +12,7 @@ import copy
 from models.config_builder import ProviderConfigBuilder, ProviderSpec
 
 
-def _spec(pid='my-anthropic', api='anthropic-messages', base_url='https://x/anthropic',
+def _spec(pid='my-anthropic', api='anthropic-messages', base_url='https://x/anthropic',  # pylint: disable=too-many-positional-arguments
           env='LLM_API_KEY', auth=True, models=None):
     return ProviderSpec(
         provider_id=pid,

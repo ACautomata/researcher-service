@@ -29,8 +29,8 @@ class _BaseModelsView(APIView):
     def _get_instance(self, name: str) -> Instance:
         try:
             NAME_VALIDATOR(name)
-        except ValidationError:
-            raise _InvalidName
+        except ValidationError as exc:
+            raise _InvalidName from exc
         inst = Instance.objects.filter(name=name).first()
         if inst is None:
             raise Http404

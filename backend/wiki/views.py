@@ -36,8 +36,8 @@ class _BaseWikiView(APIView):
     def _get_instance(self, name: str) -> Instance:
         try:
             NAME_VALIDATOR(name)
-        except ValidationError:
-            raise _InvalidName
+        except ValidationError as exc:
+            raise _InvalidName from exc
         inst = Instance.objects.filter(name=name).first()
         if inst is None:
             raise Http404
@@ -73,8 +73,8 @@ class WikiPageView(_BaseWikiView):
             page = WikiService(inst).read_page(path)
         except InvalidPath:
             return Response({'detail': '非法 path'}, status=status.HTTP_400_BAD_REQUEST)
-        except PageNotFound:
-            raise Http404
+        except PageNotFound as exc:
+            raise Http404 from exc
         return Response(WikiPageSerializer(page).data)
 
     @extend_schema(request=WikiPageWriteSerializer, responses={200: None, 404: None})
@@ -91,8 +91,8 @@ class WikiPageView(_BaseWikiView):
             WikiService(inst).write_page(data['path'], data['content'])
         except InvalidPath:
             return Response({'detail': '非法 path'}, status=status.HTTP_400_BAD_REQUEST)
-        except PageNotFound:
-            raise Http404
+        except PageNotFound as exc:
+            raise Http404 from exc
         return Response({'path': data['path']})
 
     @extend_schema(request=WikiPageWriteSerializer, responses={201: None, 409: None})
@@ -128,8 +128,8 @@ class WikiPageView(_BaseWikiView):
             WikiService(inst).delete_page(path)
         except InvalidPath:
             return Response({'detail': '非法 path'}, status=status.HTTP_400_BAD_REQUEST)
-        except PageNotFound:
-            raise Http404
+        except PageNotFound as exc:
+            raise Http404 from exc
         CompileFleet.trigger(inst)  # 删除清索引残留需 compile（异步去抖）
         return Response(status=status.HTTP_204_NO_CONTENT)
 

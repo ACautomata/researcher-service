@@ -81,7 +81,7 @@ class ChatEventTranslator:
             'decision': payload.get('decision'),  # 透传权威值；未知由前端判 unknown
         }
 
-    def translate(self, frame: dict) -> list[dict]:
+    def translate(self, frame: dict) -> list[dict]:  # pylint: disable=too-many-return-statements
         """翻译一帧网关事件；不可翻译的返回空列表（交由调用方忽略）。"""
         if frame.get('type') != 'event':
             return []

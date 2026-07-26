@@ -86,7 +86,7 @@ def test_aborted_becomes_done(translator):
     assert translator.translate(_chat('aborted')) == [{'type': 'done', 'runId': 'r1'}]
 
 
-def test_unknown_state_returns_empty(translator):
+def test_unknown_state_returns_empty(translator):  # pylint: disable=function-redefined
     # 未知 state 不猜测，留待协议实测明确后再扩展
     assert translator.translate(_chat('streaming')) == []
 
@@ -293,6 +293,6 @@ def test_chat_event_without_state_returns_empty(translator):
     assert translator.translate(frame) == []
 
 
-def test_unknown_state_returns_empty(translator):
+def test_unknown_state_returns_empty(translator):  # pylint: disable=function-redefined
     # 未知 state 不猜测，留待协议实测明确后再扩展
     assert translator.translate(_chat('streaming')) == []

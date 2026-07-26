@@ -38,7 +38,7 @@ class ChatSendError(ChatClientError):
     """chat.send 被网关拒绝（ack not ok）或 ack 缺 runId。"""
 
 
-class OpenClawChatClient:
+class OpenClawChatClient:  # pylint: disable=too-many-instance-attributes
     """对单个已配对容器维持一条长连接，发 chat.send 并按 runId 路由 chat 事件。"""
 
     def __init__(
@@ -87,7 +87,7 @@ class OpenClawChatClient:
         for cb in list(self._approval_subscribers):
             try:
                 await cb(frame)
-            except Exception:
+            except Exception:  # pylint: disable=broad-exception-caught
                 pass
 
     async def broadcast_approval_resolved(self, approval_id: str, decision: str) -> None:
@@ -115,14 +115,14 @@ class OpenClawChatClient:
     async def connect(self) -> None:
         try:
             self._cm = self._connect(self._url)
-            self._ws = await self._cm.__aenter__()
+            self._ws = await self._cm.__aenter__()  # pylint: disable=unnecessary-dunder-call
             req_id = uuid.uuid4().hex
             await self._ws.send(json.dumps(self._build_connect(req_id, self._device_token)))
             # 握手期独占 recv，等 connect res；有界等待，避免坏网关升级 WS 后不回 res 永久挂起
             try:
                 await asyncio.wait_for(self._await_res(req_id), timeout=self._connect_timeout)
-            except asyncio.TimeoutError:
-                raise ChatConnectError('connect handshake timeout')
+            except asyncio.TimeoutError as exc:
+                raise ChatConnectError('connect handshake timeout') from exc
         except BaseException:
             await self.aclose()
             raise
@@ -142,9 +142,9 @@ class OpenClawChatClient:
             while True:
                 raw = await self._ws.recv()
                 await self._handle(json.loads(raw))
-        except asyncio.CancelledError:
+        except asyncio.CancelledError:  # pylint: disable=try-except-raise
             raise
-        except Exception:
+        except Exception:  # pylint: disable=broad-exception-caught
             self._dead = True  # 连接断开：标记 dead 供 pool 驱逐重建
             if not self._closed:
                 await self._notify_all_error('容器连接断开')
@@ -172,7 +172,7 @@ class OpenClawChatClient:
         for translated in frames:
             try:
                 await cb(translated)
-            except Exception:
+            except Exception:  # pylint: disable=broad-exception-caught
                 pass  # 隔离单 route 回调失败，避免杀整个 recv loop 影响同 client 其他 route
             if translated.get('type') in ('done', 'error'):
                 terminal = True
@@ -231,9 +231,9 @@ class OpenClawChatClient:
             # 否则重试会在 _pending_resolves 无限累积 future（内存泄漏 + 永不回执）
             await self._ws.send(json.dumps(frame))
             payload = await asyncio.wait_for(fut, timeout=self._ack_timeout)
-        except asyncio.TimeoutError:
+        except asyncio.TimeoutError as exc:
             self._pending_resolves.pop(req_id, None)
-            raise ChatSendError('approval.resolve ack timeout')
+            raise ChatSendError('approval.resolve ack timeout') from exc
         except BaseException:
             self._pending_resolves.pop(req_id, None)
             raise
@@ -261,7 +261,7 @@ class OpenClawChatClient:
         try:
             await self._ws.send(json.dumps(frame))
             payload = await asyncio.wait_for(fut, timeout=self._ack_timeout)
-        except BaseException:
+        except BaseException:  # pylint: disable=broad-exception-caught
             self._pending_resolves.pop(req_id, None)
             return []
         items = (payload or {}).get('approvals')
@@ -301,9 +301,9 @@ class OpenClawChatClient:
         try:
             await self._ws.send(json.dumps(frame))
             payload = await asyncio.wait_for(fut, timeout=self._ack_timeout)
-        except asyncio.TimeoutError:
+        except asyncio.TimeoutError as exc:
             self._pending_resolves.pop(req_id, None)
-            raise ChatSendError('commands.list ack timeout')
+            raise ChatSendError('commands.list ack timeout') from exc
         except BaseException:
             self._pending_resolves.pop(req_id, None)
             raise
@@ -326,9 +326,9 @@ class OpenClawChatClient:
         try:
             await self._ws.send(json.dumps(frame))
             payload = await asyncio.wait_for(fut, timeout=self._ack_timeout)
-        except asyncio.TimeoutError:
+        except asyncio.TimeoutError as exc:
             self._pending_resolves.pop(req_id, None)
-            raise ChatSendError(f'{method} ack timeout')
+            raise ChatSendError(f'{method} ack timeout') from exc
         except BaseException:
             self._pending_resolves.pop(req_id, None)
             raise
@@ -415,9 +415,9 @@ class OpenClawChatClient:
         try:
             # 有界等待 ack：网关连着但 ack 丢失/不回时不应让 consumer 永久挂起
             run_id = await asyncio.wait_for(fut, timeout=self._ack_timeout)
-        except asyncio.TimeoutError:
+        except asyncio.TimeoutError as exc:
             self._pending_acks.pop(req_id, None)
-            raise ChatSendError('chat.send ack timeout')
+            raise ChatSendError('chat.send ack timeout') from exc
         except BaseException:
             self._pending_acks.pop(req_id, None)
             raise
@@ -448,7 +448,7 @@ class OpenClawChatClient:
         for run_id, cb in list(self._routes.items()):
             try:
                 await cb({'type': 'error', 'runId': run_id, 'message': message})
-            except Exception:
+            except Exception:  # pylint: disable=broad-exception-caught
                 pass
         self._routes.clear()
 
@@ -460,15 +460,15 @@ class OpenClawChatClient:
             self._recv_task.cancel()
             try:
                 await self._recv_task
-            except (asyncio.CancelledError, Exception):
+            except (asyncio.CancelledError, Exception):  # pylint: disable=broad-exception-caught
                 pass
         if self._ws is not None:
             try:
                 await self._ws.close()
-            except Exception:
+            except Exception:  # pylint: disable=broad-exception-caught
                 pass
         if self._cm is not None:
             try:
                 await self._cm.__aexit__(None, None, None)
-            except Exception:
+            except Exception:  # pylint: disable=broad-exception-caught
                 pass

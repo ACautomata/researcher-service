@@ -133,7 +133,7 @@ async def test_anonymous_handshake_cannot_reach_consumer():
     await comm.connect()
     try:
         await comm.send_json_to({'type': 'start', 'container': 'demo'})
-    except Exception:
+    except Exception:  # pylint: disable=broad-exception-caught
         pass
     # 不会收到业务帧（ready/error）；receive 会拿到 close 帧 → receive_json_from 内部断言失败
     with pytest.raises(AssertionError):
@@ -451,5 +451,5 @@ async def test_consumer_operates_via_wire_port_contract(override_pool, instance)
     assert resolved['decision'] == 'approve'
     # disconnect → approved subscriber removed
     await comm.disconnect()
-    assert wire._approval_subscribers == []
+    assert wire._approval_subscribers == []  # pylint: disable=use-implicit-booleaness-not-comparison
     ChatFleet.reset()

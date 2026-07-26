@@ -226,7 +226,7 @@ def test_create_session_non_object_body_400(authed, instance, override_pool, bod
     override_pool(_FakePool(client))
     resp = authed.post(LIST_URL, body, content_type='application/json')
     assert resp.status_code == 400
-    assert client.calls == []  # 校验失败 → 不触发网关 RPC
+    assert client.calls == []  # pylint: disable=use-implicit-booleaness-not-comparison
 
 
 def test_create_session_non_string_label_400(authed, instance, override_pool):
@@ -235,7 +235,7 @@ def test_create_session_non_string_label_400(authed, instance, override_pool):
     override_pool(_FakePool(client))
     resp = authed.post(LIST_URL, {'label': 42}, format='json')
     assert resp.status_code == 400
-    assert client.calls == []
+    assert client.calls == []  # pylint: disable=use-implicit-booleaness-not-comparison
 
 
 # ---------------------------------------------------------------------------

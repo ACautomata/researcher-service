@@ -97,7 +97,7 @@ class PairingService:
                 box['result'] = asyncio.run(
                     handshake.pair(url=url, token=token, identity=identity)
                 )
-            except BaseException as e:  # 透传握手异常（含 PairingRequired/PairingError）
+            except BaseException as e:  # pylint: disable=broad-exception-caught
                 box['error'] = e
 
         thread = threading.Thread(target=_target, daemon=True)

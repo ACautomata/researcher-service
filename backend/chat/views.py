@@ -50,8 +50,8 @@ class PairingView(APIView):
     def _get_instance(self, name: str) -> Instance:
         try:
             NAME_VALIDATOR(name)
-        except ValidationError:
-            raise _InvalidName
+        except ValidationError as exc:
+            raise _InvalidName from exc
         inst = Instance.objects.filter(name=name).first()
         if inst is None:
             raise Http404
@@ -71,7 +71,7 @@ class PairingView(APIView):
         responses={200: PairingStatusSerializer, 202: PairingStatusSerializer,
                    502: PairingStatusSerializer},
     )
-    def post(self, request, name):
+    def post(self, request, name):  # pylint: disable=too-many-return-statements
         try:
             inst = self._get_instance(name)
         except _InvalidName:
@@ -177,8 +177,8 @@ class _GatewaySessionsView(APIView):
     def _get_instance(self, name: str) -> Instance:
         try:
             NAME_VALIDATOR(name)
-        except ValidationError:
-            raise _InvalidName
+        except ValidationError as exc:
+            raise _InvalidName from exc
         inst = Instance.objects.filter(name=name).first()
         if inst is None:
             raise Http404
@@ -200,7 +200,7 @@ class _GatewaySessionsView(APIView):
                 {'detail': f'容器未配对，请先完成设备配对（status={e.status}）'},
                 status=status.HTTP_409_CONFLICT,
             )
-        except Exception as e:
+        except Exception as e:  # pylint: disable=broad-exception-caught
             logger.warning('sessions pool acquire failed for %s: %s', name, e)
             return None, Response(
                 {'detail': '连接容器失败，请稍后重试'},
@@ -215,7 +215,7 @@ class _GatewaySessionsView(APIView):
         """
         try:
             return async_to_sync(thunk)(), None
-        except Exception as e:
+        except Exception as e:  # pylint: disable=broad-exception-caught
             logger.warning('%s failed for %s: %s', label, name, e)
             return None, Response(
                 {'detail': '会话操作失败，请稍后重试'},
@@ -348,8 +348,8 @@ class CommandListView(APIView):
     def _get_instance(self, name: str) -> Instance:
         try:
             NAME_VALIDATOR(name)
-        except ValidationError:
-            raise _InvalidName
+        except ValidationError as exc:
+            raise _InvalidName from exc
         inst = Instance.objects.filter(name=name).first()
         if inst is None:
             raise Http404
@@ -399,7 +399,7 @@ class CommandListView(APIView):
                 {'detail': f'容器未配对，请先完成设备配对（status={e.status}）'},
                 status=status.HTTP_409_CONFLICT,
             )
-        except Exception as e:
+        except Exception as e:  # pylint: disable=broad-exception-caught
             logger.warning('commands.list pool acquire failed for %s: %s', name, e)
             return Response(
                 {'detail': '连接容器失败，请稍后重试'},
@@ -407,7 +407,7 @@ class CommandListView(APIView):
             )
         try:
             payload = async_to_sync(client.list_commands)()
-        except Exception as e:
+        except Exception as e:  # pylint: disable=broad-exception-caught
             # 原始异常（缺 operator.read/连接断开等）仅记服务端日志，不外泄到响应
             logger.warning('commands.list failed for %s: %s', name, e)
             return Response(
@@ -435,8 +435,8 @@ class ApprovalResolveView(APIView):
     def _get_instance(self, name: str) -> Instance:
         try:
             NAME_VALIDATOR(name)
-        except ValidationError:
-            raise _InvalidName
+        except ValidationError as exc:
+            raise _InvalidName from exc
         inst = Instance.objects.filter(name=name).first()
         if inst is None:
             raise Http404
@@ -464,7 +464,7 @@ class ApprovalResolveView(APIView):
                 {'detail': f'容器未配对，请先完成设备配对（status={e.status}）'},
                 status=status.HTTP_409_CONFLICT,
             )
-        except Exception as e:
+        except Exception as e:  # pylint: disable=broad-exception-caught
             # codex P2：配对有效但网关离线/握手失败 → get_or_create 抛连接异常，亦映射 502（非 500）
             logger.warning('approval.resolve pool acquire failed for %s: %s', name, e)
             return Response(
@@ -473,7 +473,7 @@ class ApprovalResolveView(APIView):
             )
         try:
             payload = async_to_sync(client.resolve_approval)(approval_id, kind, decision)
-        except Exception as e:
+        except Exception as e:  # pylint: disable=broad-exception-caught
             # 原始异常（缺 scope/连接断开等）仅记服务端日志，不外泄到响应
             logger.warning('approval.resolve failed for %s id=%s: %s', name, approval_id, e)
             return Response(
@@ -486,6 +486,6 @@ class ApprovalResolveView(APIView):
         # 失败（无订阅者/连接已断）不影响已成功的 REST 回执。
         try:
             async_to_sync(client.broadcast_approval_resolved)(approval_id, authoritative)
-        except Exception:
+        except Exception:  # pylint: disable=broad-exception-caught
             logger.debug('approval.resolve broadcast to subscribers failed for %s', name)
         return Response({'ok': True, APPROVAL_FIELD_ID: approval_id, APPROVAL_FIELD_DECISION: authoritative})

@@ -260,7 +260,7 @@ async def test_send_message_times_out_when_ack_never_arrives():
 
     with pytest.raises(ChatSendError):
         await c.send_message('s', 'm', on_event=on_event)
-    assert c._pending_acks == {}
+    assert c._pending_acks == {}  # pylint: disable=use-implicit-booleaness-not-comparison
     await c.aclose()
 
 
@@ -313,7 +313,7 @@ async def test_remove_subscriber_keeps_peer_subscribed():
     c.remove_approval_subscriber(a_cb)  # A 断开退订
     t.push({'type': 'event', 'event': 'exec.approval.requested', 'payload': {'id': 'ap-2'}})
     await asyncio.sleep(0.05)
-    assert a_received == []  # A 已退订，不再收
+    assert a_received == []  # pylint: disable=use-implicit-booleaness-not-comparison
     assert len(b_received) == 1  # B 仍活跃，照收
     await c.aclose()
 
@@ -496,7 +496,7 @@ async def test_resolve_approval_send_failure_cleans_pending_future():
     for _ in range(3):  # 模拟多次重试
         with pytest.raises(ConnectionError):
             await c.resolve_approval('ap-1', 'exec', 'approve')
-    assert c._pending_resolves == {}  # 每次失败都清理,不泄漏
+    assert c._pending_resolves == {}  # pylint: disable=use-implicit-booleaness-not-comparison
     await c.aclose()
 
 

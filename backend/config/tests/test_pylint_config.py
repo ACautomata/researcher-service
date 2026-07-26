@@ -21,6 +21,7 @@ def _pylint_run(*extra_args: str, cwd: Path | None = None) -> subprocess.Complet
         cwd=str(cwd),
         capture_output=True,
         text=True,
+        check=False,
     )
 
 
