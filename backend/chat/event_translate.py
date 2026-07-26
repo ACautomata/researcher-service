@@ -23,25 +23,15 @@ state,title,input,result}` 工具帧，带 runId 走所属 chat run 路由；字
 """
 from __future__ import annotations
 
+from integration.openclaw.wire import (
+    APPROVAL_REQUESTED_EVENTS as _APPROVAL_REQUESTED_EVENTS,
+    APPROVAL_RESOLVED_EVENTS as _APPROVAL_RESOLVED_EVENTS,
+    TOOL_END_EVENTS as _TOOL_END_EVENTS,
+    TOOL_START_EVENTS as _TOOL_START_EVENTS,
+)
+
 # delta state 下增量字段；replace=true + message 快照时改发 replace 帧（整段替换）。
 _DELTA_TEXT = 'deltaText'
-
-# T06 权限审批（issue #42 / spec §8.2 / r26 §1）：待审批事件名 → 前端审批卡契约。
-# exec/plugin 两族共用同一翻译；payload 字段级 schema 官方未给全（标待实测）→ 取值链集中 _approval_card 方法。
-_APPROVAL_REQUESTED_EVENTS = ('exec.approval.requested', 'plugin.approval.requested')
-
-# codex R3 P2（收窄）：网关在他端 operator / 其它 pool 连接 resolve 后广播 `plugin.approval.resolved`
-# （r26:51 文档已证事件名）。翻译为 approvalResolved 帧，让共享 client 的 peer 卡片随之收敛（不再停留可点
-# 的陈旧卡）。注意：①exec 族**无**对应 resolved 事件（仅 plugin 族有，r26:47-52）；②payload schema 待实测，
-# 无 id 则返回 None 跳过（不伪造）。本进程内 resolve 的主收敛路径仍是 consumer 的合成 fan-out，此为低风险补充。
-_APPROVAL_RESOLVED_EVENTS = ('plugin.approval.resolved',)
-
-# T08 工具执行（issue #44 / spec §8.2/§9.4 / r26 §3）：连接声明 caps:["tool-events"]（见 chat_client._CAPS）
-# 后网关下发结构化工具生命周期事件。**确切事件名/payload 待配对后实测校准**（r26 §0 警告 agent.* 族与
-# R13 的 chat 单事件模型冲突、未获官方证实）→ 事件名集中常量，实测后单点改。工具挂在 chat run 内
-# （r26 §3），帧带 runId 走既有 runId 路由；前端只显一行标题+状态（spec §9.4）。
-_TOOL_START_EVENTS = ('agent.tool.start',)   # r26 §3 二手线索，待实测校准
-_TOOL_END_EVENTS = ('agent.tool.result',)    # r26 §3 二手线索，待实测校准
 
 
 class ChatEventTranslator:

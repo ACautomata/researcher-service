@@ -17,12 +17,13 @@ from typing import Awaitable, Callable
 import websockets
 
 from chat.event_translate import ChatEventTranslator
-
-_AGENT_ID = 'main'
-_PROTOCOL = 4
-_CLIENT_ID = 'gateway-client'
-_SCOPES = ['operator.read', 'operator.write', 'operator.admin', 'operator.approvals']
-_CAPS = ['tool-events']
+from integration.openclaw.wire import (
+    AGENT_ID as _AGENT_ID,
+    CAPS as _CAPS,
+    CLIENT_ID as _CLIENT_ID,
+    PROTOCOL as _PROTOCOL,
+    SCOPES as _SCOPES,
+)
 
 # on_event 回调契约：接收翻译后的前端契约帧（text/done/error）
 OnEvent = Callable[[dict], Awaitable[None]]
