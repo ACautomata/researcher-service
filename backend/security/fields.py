@@ -81,6 +81,8 @@ class EncryptedCredentialQuerySet(models.QuerySet):
         ]
 
     def only(self, *fields):
+        if not fields:
+            return super().only()
         selected = list(fields)
         for field in self.model._meta.fields:
             if isinstance(field, EncryptedTextField):
@@ -123,6 +125,7 @@ class EncryptedCredentialQuerySet(models.QuerySet):
             for expression in (*fields, *expressions.values())
         ):
             raise ValueError('credential expressions cannot be projected')
+        self._reject_credential_annotation_aliases(fields)
         if not fields and not expressions:
             fields = tuple(field.name for field in self.model._meta.concrete_fields)
         if not fields:
@@ -155,6 +158,7 @@ class EncryptedCredentialQuerySet(models.QuerySet):
             for field in fields
         ):
             raise ValueError('credential expressions cannot be projected')
+        self._reject_credential_annotation_aliases(fields)
         if not fields:
             fields = tuple(field.name for field in self.model._meta.concrete_fields)
         selected, protected, _ = self._projection_fields(fields)
@@ -170,8 +174,21 @@ class EncryptedCredentialQuerySet(models.QuerySet):
             queryset._projection_visible_count = len(fields)
             queryset._projection_flat = flat
             queryset._projection_named = named
-            queryset._projection_visible_fields = fields
+            queryset._projection_visible_fields = queryset._fields[:len(fields)]
         return queryset
+
+    def _reject_credential_annotation_aliases(self, fields):
+        protected_names = {
+            field.name for field in self.model._meta.fields
+            if isinstance(field, EncryptedTextField)
+        }
+        annotations = self.query.annotations
+        if any(
+            field in annotations
+            and self._expression_references_protected_field(annotations[field], protected_names)
+            for field in fields
+        ):
+            raise ValueError('credential expressions cannot be projected')
     def update(self, **kwargs):
         for field in self.model._meta.fields:
             if isinstance(field, EncryptedTextField) and field.name in kwargs:
@@ -198,6 +215,10 @@ class EncryptedCredentialManager(models.Manager.from_queryset(EncryptedCredentia
             for field in obj._meta.fields:
                 if isinstance(field, EncryptedTextField):
                     setattr(obj, field.state_field, True)
+                    if field.name in kwargs.get('update_fields', ()):
+                        kwargs['update_fields'] = [
+                            *kwargs['update_fields'], field.state_field,
+                        ]
         return super().bulk_create(objs, **kwargs)
 
 
