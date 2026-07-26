@@ -19,6 +19,7 @@ from rest_framework.views import APIView
 
 from chat.models import Pairing
 from chat.serializers import PairingStatusSerializer
+from integration.openclaw.translation import build_pairing_status_default
 from .models import NAME_VALIDATOR
 from .orchestrator import (
     ConfigurationError,
@@ -47,12 +48,7 @@ class InstanceListCreateView(APIView):
         }
         for item in items:
             pairing = pairings.get(item.get('name'))
-            item['pairing'] = PairingStatusSerializer(pairing).data if pairing else {
-                'status': Pairing.STATUS_UNPAIRED,
-                'device_id': '',
-                'scopes': [],
-                'pairing_request_id': '',
-            }
+            item['pairing'] = PairingStatusSerializer(pairing).data if pairing else build_pairing_status_default()
         return Response(InstanceSerializer(items, many=True).data)
 
     @extend_schema(

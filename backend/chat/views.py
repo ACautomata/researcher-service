@@ -30,6 +30,12 @@ from chat.serializers import (
     SessionCreateSerializer,
 )
 from containers.models import NAME_VALIDATOR, Instance
+from integration.openclaw.translation import (
+    APPROVAL_FIELD_DECISION,
+    APPROVAL_FIELD_ID,
+    APPROVAL_FIELD_KIND,
+    format_device_approve_command,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +90,7 @@ class PairingView(APIView):
                 )
             data = PairingStatusSerializer(pairing).data
             data['detail'] = (
-                f'设备待批准：请在宿主执行 `openclaw devices approve {e.request_id}` '
+                f'设备待批准：请在宿主执行 `{format_device_approve_command(e.request_id)}` '
                 f'后重试本接口'
             )
             return Response(data, status=status.HTTP_202_ACCEPTED)
@@ -448,9 +454,9 @@ class ApprovalResolveView(APIView):
                 {'detail': '缺少 id/kind，或 decision 非法（须为 approve/deny）'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        approval_id = ser.validated_data['id']
-        kind = ser.validated_data['kind']
-        decision = ser.validated_data['decision']
+        approval_id = ser.validated_data[APPROVAL_FIELD_ID]
+        kind = ser.validated_data[APPROVAL_FIELD_KIND]
+        decision = ser.validated_data[APPROVAL_FIELD_DECISION]
         try:
             client = async_to_sync(ChatFleet.get().get_or_create)(inst)
         except NotPaired as e:
@@ -475,11 +481,11 @@ class ApprovalResolveView(APIView):
                 status=status.HTTP_502_BAD_GATEWAY,
             )
         # first-answer-wins：以网关权威记录的 decision 为准（可能与请求不同，codex P1）
-        authoritative = (payload or {}).get('decision') or decision
+        authoritative = (payload or {}).get(APPROVAL_FIELD_DECISION) or decision
         # codex R2 P2：REST 路径的权威回执也经 pool client fan-out 给 WS 订阅者，各渲染副本一致收敛；
         # 失败（无订阅者/连接已断）不影响已成功的 REST 回执。
         try:
             async_to_sync(client.broadcast_approval_resolved)(approval_id, authoritative)
         except Exception:
             logger.debug('approval.resolve broadcast to subscribers failed for %s', name)
-        return Response({'ok': True, 'id': approval_id, 'decision': authoritative})
+        return Response({'ok': True, APPROVAL_FIELD_ID: approval_id, APPROVAL_FIELD_DECISION: authoritative})

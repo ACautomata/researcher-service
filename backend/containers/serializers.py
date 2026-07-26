@@ -11,6 +11,7 @@ from rest_framework import serializers
 from rest_framework.validators import UniqueValidator
 
 from chat.models import Pairing
+from integration.openclaw.translation import build_pairing_status, build_pairing_status_default
 from .models import NAME_VALIDATOR, Instance
 
 
@@ -23,22 +24,11 @@ class InstanceCreateSerializer(serializers.Serializer):
     )
 
 
-class _PairingStatusSerializer(serializers.Serializer):
-    """容器列表嵌套的配对状态快照（只读）。"""
-
-    status = serializers.CharField(read_only=True)
-    device_id = serializers.CharField(read_only=True)
-    scopes = serializers.SerializerMethodField()
-    pairing_request_id = serializers.CharField(read_only=True)
-
-    def get_scopes(self, obj: Pairing) -> list[str]:
-        return obj.scopes_list()
-
-
 class InstanceSerializer(serializers.Serializer):
     """实例出参（read-only）；instance 可为 dict（orchestrator.list/detail 返回）。
 
     pairing 字段由后端批量组装，替代前端 per-row 轮询。
+    配对状态 dict 由集成包 translation.build_pairing_status/build_pairing_status_default 单源构建（issue #105）。
     """
 
     name = serializers.CharField(read_only=True)
@@ -60,6 +50,5 @@ class InstanceSerializer(serializers.Serializer):
         name = obj.get('name') if isinstance(obj, dict) else obj.name
         pairing = Pairing.objects.filter(instance__name=name).first()
         if pairing is None:
-            return {'status': Pairing.STATUS_UNPAIRED, 'device_id': '',
-                    'scopes': [], 'pairing_request_id': ''}
-        return _PairingStatusSerializer(pairing).data
+            return build_pairing_status_default()
+        return build_pairing_status(pairing)
