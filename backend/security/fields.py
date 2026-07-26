@@ -52,11 +52,19 @@ class EncryptedValuesListIterable(ValuesListIterable):
             for value_index, state_index, field in self.queryset._credential_projection:
                 if values[state_index] and values[value_index] is not None:
                     values[value_index] = field.decrypt_value(values[value_index])
-            result = tuple(values[:self.queryset._projection_visible_count])
+            result = tuple(
+                value for index, value in enumerate(values)
+                if index not in self.queryset._projection_state_indexes
+            )
             if self.queryset._projection_flat:
                 yield result[0]
             elif self.queryset._projection_named:
-                yield create_namedtuple_class(*self.queryset._projection_visible_fields)(*result)
+                visible_fields = list(self.queryset._projection_visible_fields)
+                visible_fields.extend(
+                    name for name in self.queryset.query.annotation_select
+                    if name not in visible_fields
+                )
+                yield create_namedtuple_class(*visible_fields)(*result)
             else:
                 yield result
 
@@ -66,7 +74,7 @@ class EncryptedCredentialQuerySet(models.QuerySet):
         clone = super()._clone()
         for attribute in (
             '_projection_protected_fields', '_projection_added_state_fields',
-            '_credential_projection', '_projection_visible_count', '_projection_flat',
+            '_credential_projection', '_projection_state_indexes', '_projection_flat',
             '_projection_named', '_projection_visible_fields',
         ):
             if hasattr(self, attribute):
@@ -79,6 +87,23 @@ class EncryptedCredentialQuerySet(models.QuerySet):
             field for field in self.model._meta.fields
             if isinstance(field, EncryptedTextField) and field.name in requested
         ]
+
+    def _is_protected_lookup(self, field_name):
+        if not isinstance(field_name, str):
+            return False
+        model = self.model
+        path = field_name.split('__')
+        for index, part in enumerate(path):
+            try:
+                field = model._meta.get_field(part)
+            except models.FieldDoesNotExist:
+                return False
+            if index == len(path) - 1:
+                return isinstance(field, EncryptedTextField)
+            if not field.is_relation:
+                return False
+            model = field.related_model
+        return False
 
     def only(self, *fields):
         if not fields:
@@ -123,7 +148,7 @@ class EncryptedCredentialQuerySet(models.QuerySet):
         if any(
             self._expression_references_protected_field(expression, protected_names)
             for expression in (*fields, *expressions.values())
-        ):
+        ) or any('__' in field and self._is_protected_lookup(field) for field in fields if isinstance(field, str)):
             raise ValueError('credential expressions cannot be projected')
         self._reject_credential_annotation_aliases(fields)
         if not fields and not expressions:
@@ -131,6 +156,8 @@ class EncryptedCredentialQuerySet(models.QuerySet):
         if not fields:
             return super().values(*fields, **expressions)
         selected, protected, added_states = self._projection_fields(fields)
+        if protected and self.query.distinct:
+            raise ValueError('distinct credential projections are not supported')
         queryset = super().values(*selected, **expressions)
         if protected:
             queryset._iterable_class = EncryptedValuesIterable
@@ -153,15 +180,21 @@ class EncryptedCredentialQuerySet(models.QuerySet):
             field.name for field in self.model._meta.fields
             if isinstance(field, EncryptedTextField)
         }
+        if flat and named:
+            raise TypeError("'flat' and 'named' can't be used together.")
+        if flat and len(fields) > 1:
+            raise TypeError("'flat' is not valid when values_list is called with more than one field.")
         if any(
             self._expression_references_protected_field(field, protected_names)
             for field in fields
-        ):
+        ) or any('__' in field and self._is_protected_lookup(field) for field in fields if isinstance(field, str)):
             raise ValueError('credential expressions cannot be projected')
         self._reject_credential_annotation_aliases(fields)
         if not fields:
             fields = tuple(field.name for field in self.model._meta.concrete_fields)
-        selected, protected, _ = self._projection_fields(fields)
+        selected, protected, added_states = self._projection_fields(fields)
+        if protected and self.query.distinct:
+            raise ValueError('distinct credential projections are not supported')
         if not protected:
             return super().values_list(*fields, flat=flat, named=named)
         queryset = super().values_list(*selected)
@@ -171,7 +204,9 @@ class EncryptedCredentialQuerySet(models.QuerySet):
                 (fields.index(field.name), selected.index(field.state_field), field)
                 for field in protected
             ]
-            queryset._projection_visible_count = len(fields)
+            queryset._projection_state_indexes = [
+                selected.index(state_field) for state_field in added_states
+            ]
             queryset._projection_flat = flat
             queryset._projection_named = named
             queryset._projection_visible_fields = queryset._fields[:len(fields)]
@@ -208,18 +243,30 @@ class EncryptedCredentialQuerySet(models.QuerySet):
             raise ValueError('bulk_update does not support encrypted credential fields')
         return super().bulk_update(objs, fields, batch_size=batch_size)
 
-
-class EncryptedCredentialManager(models.Manager.from_queryset(EncryptedCredentialQuerySet)):
     def bulk_create(self, objs, **kwargs):
-        for obj in objs:
+        objects = list(objs)
+        update_fields = kwargs.get('update_fields')
+        state_fields = []
+        for obj in objects:
             for field in obj._meta.fields:
                 if isinstance(field, EncryptedTextField):
                     setattr(obj, field.state_field, True)
-                    if field.name in kwargs.get('update_fields', ()):
-                        kwargs['update_fields'] = [
-                            *kwargs['update_fields'], field.state_field,
-                        ]
-        return super().bulk_create(objs, **kwargs)
+                    if update_fields and field.name in update_fields:
+                        state_fields.append(field.state_field)
+        if update_fields:
+            kwargs['update_fields'] = list(dict.fromkeys([*update_fields, *state_fields]))
+        return super().bulk_create(objects, **kwargs)
+
+    def distinct(self, *field_names):
+        if getattr(self, '_projection_protected_fields', ()) or getattr(
+            self, '_credential_projection', ()
+        ):
+            raise ValueError('distinct credential projections are not supported')
+        return super().distinct(*field_names)
+
+
+class EncryptedCredentialManager(models.Manager.from_queryset(EncryptedCredentialQuerySet)):
+    pass
 
 
 class EncryptedCredentialsModel(models.Model):
@@ -234,7 +281,12 @@ class EncryptedCredentialsModel(models.Model):
     def from_db(cls, db, field_names, values):
         instance = super().from_db(db, field_names, values)
         for field in instance._meta.fields:
-            if isinstance(field, EncryptedTextField) and getattr(instance, field.state_field, False):
+            if (
+                isinstance(field, EncryptedTextField)
+                and field.attname in field_names
+                and field.state_field in field_names
+                and instance.__dict__[field.state_field]
+            ):
                 value = instance.__dict__[field.attname]
                 if value is not None:
                     instance.__dict__[field.attname] = field.decrypt_value(value)
@@ -253,3 +305,13 @@ class EncryptedCredentialsModel(models.Model):
         if selected_fields is not None:
             kwargs['update_fields'] = selected_fields | state_fields
         return super().save(*args, **kwargs)
+
+    def refresh_from_db(self, using=None, fields=None, from_queryset=None):
+        selected_fields = set(fields) if fields is not None else None
+        if selected_fields is not None:
+            for field in self._meta.fields:
+                if isinstance(field, EncryptedTextField) and field.attname in selected_fields:
+                    selected_fields.add(field.state_field)
+        return super().refresh_from_db(
+            using=using, fields=selected_fields, from_queryset=from_queryset,
+        )
