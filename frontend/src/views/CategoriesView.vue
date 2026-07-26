@@ -14,8 +14,9 @@ const store = useCategoriesStore()
 const { current, groups, activePath, content } = storeToRefs(store)
 
 const containers = ref<string[]>([])
-// 折叠状态：按 category 键记录是否折叠（默认展开）
-const collapsed = ref<Record<string, boolean>>({})
+// 折叠状态：category 键 → 是否折叠（默认展开）。开放词表键可能是 `__proto__`，
+// 用 Map 而非普通对象（普通对象赋值 `__proto__` 会走原型 setter，导致该组折叠失效 —— codex P2）。
+const collapsed = ref(new Map<string, boolean>())
 
 // hash 取色：对 category 名做稳定 hash，映射到 HSL 色相（同值同色，未知值也自动有区分色）
 function chipColor(category: string): string {
@@ -28,11 +29,11 @@ function chipColor(category: string): string {
 }
 
 function isCollapsed(category: string): boolean {
-  return collapsed.value[category] === true
+  return collapsed.value.get(category) === true
 }
 
 function toggle(category: string): void {
-  collapsed.value[category] = !isCollapsed(category)
+  collapsed.value.set(category, !isCollapsed(category))
 }
 
 async function selectContainer(name: string): Promise<void> {

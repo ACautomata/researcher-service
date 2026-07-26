@@ -132,4 +132,21 @@ describe('CategoriesView', () => {
     expect(useCategoriesStore().current).toBe('other')
     expect(getCategories).toHaveBeenCalledWith('other')
   })
+
+  // codex P2：category 是开放词表，__proto__ 也能正常折叠/展开（不能用普通对象存折叠态）
+  it('toggles a group named __proto__ (open-vocabulary safe collapse map)', async () => {
+    // 用 JSON.parse 构造真实自有键 `__proto__`（对象字面量 `{__proto__: x}` 会走原型 setter，本身不含自有键）
+    ;(getCategories as ReturnType<typeof vi.fn>).mockResolvedValue(
+      JSON.parse('{"__proto__":[{"path":"p.md","title":"P","category":"__proto__","excerpt":""}]}'),
+    )
+    const wrapper = mountView()
+    await flushPromises()
+    expect(wrapper.findAll('[data-test="cat-item"]')).toHaveLength(1)
+    await wrapper.find('[data-test="cat-toggle"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.findAll('[data-test="cat-item"]')).toHaveLength(0)
+    await wrapper.find('[data-test="cat-toggle"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.findAll('[data-test="cat-item"]')).toHaveLength(1)
+  })
 })

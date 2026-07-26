@@ -74,4 +74,53 @@ describe('categories store', () => {
     expect(s.content).toBe('')
     expect(s.current).toBe('other')
   })
+
+  // codex P2：快速连切容器时，过期响应不得覆盖最新选择（latest-wins）
+  it('ignores a stale loadCategories response that resolves after a newer switch', async () => {
+    let resolveDemo!: (v: unknown) => void
+    ;(getCategories as ReturnType<typeof vi.fn>)
+      .mockImplementationOnce(() => new Promise((res) => { resolveDemo = res }))
+      .mockResolvedValueOnce({ x: [{ path: 'x.md', title: 'X', category: 'x', excerpt: '' }] })
+    const s = useCategoriesStore()
+    const p1 = s.loadCategories('demo') // 慢请求
+    await s.loadCategories('other') // 快速完成的新请求
+    resolveDemo(CATS) // 慢的旧请求最后才返回
+    await p1
+    // 旧响应被丢弃：保留最新选择与分组
+    expect(s.current).toBe('other')
+    expect(Object.keys(s.groups)).toEqual(['x'])
+  })
+
+  // codex P2：readPage 在飞期间切容器，过期正文不得回填到阅读区
+  it('ignores a stale openItem response that resolves after switching container', async () => {
+    let resolveRead!: (v: unknown) => void
+    ;(readPage as ReturnType<typeof vi.fn>).mockImplementationOnce(
+      () => new Promise((res) => { resolveRead = res }),
+    )
+    const s = useCategoriesStore()
+    await s.loadCategories('demo')
+    const p = s.openItem('a.md') // readPage 挂起
+    await s.switchContainer('other') // 切走（清空选中）
+    resolveRead({ path: 'a.md', title: 'A', content: '# 旧容器正文' })
+    await p
+    expect(s.current).toBe('other')
+    expect(s.activePath).toBe('')
+    expect(s.content).toBe('')
+  })
+
+  // codex P2：连点两条目，旧正文不得覆盖后点的那条
+  it('shows only the most recently clicked item content (latest read wins)', async () => {
+    let resolveA!: (v: unknown) => void
+    ;(readPage as ReturnType<typeof vi.fn>)
+      .mockImplementationOnce(() => new Promise((res) => { resolveA = res }))
+      .mockResolvedValueOnce({ path: 'b.md', title: 'B', content: '# B 正文' })
+    const s = useCategoriesStore()
+    await s.loadCategories('demo')
+    const pa = s.openItem('a.md') // 慢
+    await s.openItem('b.md') // 快，后点
+    resolveA({ path: 'a.md', title: 'A', content: '# A 正文' })
+    await pa
+    expect(s.activePath).toBe('b.md')
+    expect(s.content).toBe('# B 正文')
+  })
 })
