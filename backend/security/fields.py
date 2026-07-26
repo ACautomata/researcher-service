@@ -50,7 +50,7 @@ class EncryptedValuesListIterable(ValuesListIterable):
         for row in super().__iter__():
             values = list(row)
             for value_index, state_index, field in self.queryset._credential_projection:
-                if values[state_index] and values[value_index] is not None:
+                if values[value_index] is not None:
                     values[value_index] = field.decrypt_value(values[value_index])
             result = tuple(
                 value for index, value in enumerate(values)
@@ -134,7 +134,7 @@ class EncryptedCredentialQuerySet(models.QuerySet):
 
     def _decrypt_projection_dict(self, row):
         for field in self._projection_protected_fields:
-            if row[field.state_field] and row[field.name] is not None:
+            if row[field.name] is not None:
                 row[field.name] = field.decrypt_value(row[field.name])
         for state_field in self._projection_added_state_fields:
             row.pop(state_field)
@@ -281,12 +281,7 @@ class EncryptedCredentialsModel(models.Model):
     def from_db(cls, db, field_names, values):
         instance = super().from_db(db, field_names, values)
         for field in instance._meta.fields:
-            if (
-                isinstance(field, EncryptedTextField)
-                and field.attname in field_names
-                and field.state_field in field_names
-                and instance.__dict__[field.state_field]
-            ):
+            if isinstance(field, EncryptedTextField) and field.attname in field_names:
                 value = instance.__dict__[field.attname]
                 if value is not None:
                     instance.__dict__[field.attname] = field.decrypt_value(value)
