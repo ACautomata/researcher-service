@@ -95,6 +95,72 @@ def test_delete_missing_raises(svc):
         svc.delete_page('concepts/nope.md')
 
 
+def test_create_path_traversal_raises(svc):
+    with pytest.raises(InvalidPath):
+        svc.create_page('../../evil.md', 'x')
+
+
+def test_create_managed_dir_raises(svc):
+    with pytest.raises(InvalidPath):
+        svc.create_page('.openclaw-wiki/evil.md', 'x')
+
+
+def test_create_managed_file_raises(svc):
+    with pytest.raises(InvalidPath):
+        svc.create_page('concepts/index.md', 'x')
+
+
+# —— read_page path validation ——
+
+def test_read_path_traversal_raises(svc):
+    with pytest.raises(InvalidPath):
+        svc.read_page('../../evil.md')
+
+
+def test_read_managed_dir_raises(svc):
+    with pytest.raises(InvalidPath):
+        svc.read_page('.openclaw-wiki/evil.md')
+
+
+def test_read_managed_file_raises(svc):
+    with pytest.raises(InvalidPath):
+        svc.read_page('concepts/index.md')
+
+
+# —— write_page path validation ——
+
+def test_write_path_traversal_raises(svc):
+    with pytest.raises(InvalidPath):
+        svc.write_page('../../evil.md', 'x')
+
+
+def test_write_managed_dir_raises(svc):
+    with pytest.raises(InvalidPath):
+        svc.write_page('.openclaw-wiki/evil.md', 'x')
+
+
+def test_write_managed_file_raises(svc):
+    with pytest.raises(InvalidPath):
+        svc.write_page('concepts/index.md', 'x')
+
+
+# —— delete_page path validation ——
+
+def test_delete_path_traversal_raises(svc):
+    with pytest.raises(InvalidPath):
+        svc.delete_page('../../evil.md')
+
+
+def test_delete_managed_dir_raises(svc):
+    with pytest.raises(InvalidPath):
+        svc.delete_page('.openclaw-wiki/evil.md')
+
+
+def test_delete_managed_file_raises(svc):
+    with pytest.raises(InvalidPath):
+        svc.delete_page('concepts/index.md')
+
+
 # —— build_graph ——
 
 def test_build_graph_nodes_from_tree(svc):
