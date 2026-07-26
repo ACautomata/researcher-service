@@ -168,9 +168,15 @@ def test_pair_chat_wiki_smoke_chain(tmp_path):  # pylint: disable=too-many-local
         asyncio.run(chat_smoke())
 
         # —— 4. wiki（spec #75/#84）：直读 bind-mount；build_tree 非空 + categories 结构 ——
+        # codex P2：pristine researcher clone 仅含 index.md 占位（build_tree 跳过 index.md，
+        # 见 adapters._SKIP_FILES），tree['groups'] 恒空——先种子一页真实内容进 bind-mount，
+        # 再断言 build_tree 浮现它，验证 wiki 直读链路（不依赖模板预填真实页）。
+        seed_dir = home / 'wiki' / 'main' / 'concepts'
+        seed_dir.mkdir(parents=True, exist_ok=True)
+        (seed_dir / 'smoke-seed.md').write_text('# Smoke Seed\n\nissue #94 seed page.\n')
         wiki = WikiService(inst)
         tree = wiki.build_tree()
-        assert tree['groups']                              # 预填充 wiki/main 非空
+        assert tree['groups']                              # 种子页浮现 = 直读链路通
         categories = wiki.list_categories()
         assert isinstance(categories, dict)               # 开放词表，不要求非空
         for category, pages in categories.items():
