@@ -68,26 +68,132 @@ class FakeOpenClawWire:
 
 
 class FakeWikiFileSystem:
-    """WikiFileSystem Port 的内存 fake：dict 模拟 wiki/main 文件系统。"""
+    """WikiFileSystem Port 的内存 fake：dict 模拟 wiki/main 文件系统。
+
+    build_tree 按路径前缀归类五分类 + domains；CRUD 异常语义对齐 BindMountWikiFileSystem
+    （FileNotFoundError / FileExistsError / NotADirectoryError / ValueError）。
+    越权防护（managed 路径/目录穿越）在构造层内联 _SKIP_DIRS/_SKIP_FILES 副本——fake
+    不应 import Adapter 私有常量（契约方向守护）。
+    """
+
+    _SKIP_DIRS = {'.openclaw-wiki', '_attachments', '_views'}
+    _SKIP_FILES = {'index.md', 'AGENTS.md', 'WIKI.md', 'inbox.md'}
 
     def __init__(self) -> None:
         self.pages: dict[str, str] = {}  # rel_path → content
+        # 测试可预设异常
+        self._raise_on_read: Exception | None = None
+        self._raise_on_write: Exception | None = None
+
+    # —— path validation (aligns with BindMountWikiFileSystem._resolve) ——
+
+    def _validate_path(self, rel_path: str) -> None:
+        """校验路径不穿越/不触碰 managed 区；违规抛 ValueError（对齐 adapters）。"""
+        parts = [p for p in rel_path.split('/') if p]
+        if any(p == '..' for p in parts):
+            raise ValueError(rel_path)
+        if any(p in self._SKIP_DIRS for p in parts):
+            raise ValueError(rel_path)
+        if parts and parts[-1] in self._SKIP_FILES:
+            raise ValueError(rel_path)
+
+    # —— build_tree ——
 
     def build_tree(self) -> dict:
-        return {'pages': list(self.pages)}
+        _GROUP_PREFIXES = {
+            'concept': 'concepts/',
+            'entity': 'entities/',
+            'source': 'sources/',
+            'synthesis': 'syntheses/',
+            'report': 'reports/',
+        }
+        groups = []
+        for kind, prefix in _GROUP_PREFIXES.items():
+            pages = [
+                {'path': p, 'title': self._frontmatter_title(p) or self._title_for(p)}
+                for p in sorted(self.pages) if p.startswith(prefix)
+            ]
+            groups.append({'kind': kind, 'name': prefix.rstrip('/'), 'pages': pages})
+        domain_pages = [
+            {'path': p, 'title': self._frontmatter_title(p) or self._title_for(p)}
+            for p in sorted(self.pages) if p.startswith('domains/') and not any(
+                p.startswith(prefix) for prefix in _GROUP_PREFIXES.values()
+            )
+        ]
+        groups.append({'kind': 'domain', 'name': 'domains', 'pages': domain_pages})
+        return {'groups': groups}
+
+    @staticmethod
+    def _title_for(path: str) -> str:
+        stem = path.rsplit('/', 1)[-1]
+        return stem[:-3] if stem.endswith('.md') else stem
+
+    def _frontmatter_title(self, rel_path: str) -> str | None:
+        """从页面的 frontmatter 取 paper.title / title，没有返回 None。"""
+        content = self.pages.get(rel_path, '')
+        if not content.startswith('---'):
+            return None
+        end = content.find('---', 3)
+        if end <= 0:
+            return None
+        yaml_text = content[3:end]
+        paper_title = None
+        title = None
+        for line in yaml_text.split('\n'):
+            line = line.rstrip()
+            if not line or line.startswith('#'):
+                continue
+            if ':' not in line:
+                continue
+            key, _, val = line.partition(':')
+            key = key.strip()
+            val = val.strip().strip('"').strip("'")
+            if key == 'paper.title':
+                paper_title = val if val else None
+            elif key == 'title':
+                title = val if val else None
+        return paper_title or title
+
+    # —— read_page ——
 
     def read_page(self, rel_path: str) -> dict:
-        return {'path': rel_path, 'title': rel_path, 'content': self.pages[rel_path]}
+        self._validate_path(rel_path)
+        if self._raise_on_read:
+            raise self._raise_on_read
+        if rel_path not in self.pages:
+            raise FileNotFoundError(rel_path)
+        return {
+            'path': rel_path,
+            'title': self._frontmatter_title(rel_path) or self._title_for(rel_path),
+            'content': self.pages[rel_path],
+        }
+
+    # —— write_page ——
 
     def write_page(self, rel_path: str, content: str) -> dict:
+        self._validate_path(rel_path)
+        if self._raise_on_write:
+            raise self._raise_on_write
+        if rel_path not in self.pages:
+            raise FileNotFoundError(rel_path)
         self.pages[rel_path] = content
         return {'path': rel_path}
+
+    # —— create_page ——
 
     def create_page(self, rel_path: str, content: str) -> dict:
+        self._validate_path(rel_path)
+        if rel_path in self.pages:
+            raise FileExistsError(rel_path)
         self.pages[rel_path] = content
         return {'path': rel_path}
 
+    # —— delete_page ——
+
     def delete_page(self, rel_path: str) -> None:
+        self._validate_path(rel_path)
+        if rel_path not in self.pages:
+            raise FileNotFoundError(rel_path)
         self.pages.pop(rel_path, None)
 
 
