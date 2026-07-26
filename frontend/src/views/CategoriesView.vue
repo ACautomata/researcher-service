@@ -43,7 +43,8 @@ async function selectContainer(name: string): Promise<void> {
 }
 
 async function onSwitch(name: string): Promise<void> {
-  if (name === current.value) return
+  // 早退判 pending（含在飞的目标容器）而非 current：加载在飞时再选回 current 必须推进作废旧请求
+  if (name === store.pending) return
   await store.switchContainer(name)
 }
 

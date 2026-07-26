@@ -123,4 +123,38 @@ describe('categories store', () => {
     expect(s.activePath).toBe('b.md')
     expect(s.content).toBe('# B 正文')
   })
+
+  // codex P2（round2）：加载 other 在飞时又切回 demo，other 的过期响应不得覆盖最终选择 demo
+  it('switching back to current container while a load is pending invalidates the pending one', async () => {
+    let resolveOther!: (v: unknown) => void
+    ;(getCategories as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce(CATS) // demo 首载
+      .mockImplementationOnce(() => new Promise((res) => { resolveOther = res })) // other 慢
+      .mockResolvedValueOnce({ d: [{ path: 'd.md', title: 'D', category: 'd', excerpt: '' }] }) // demo 重载
+    const s = useCategoriesStore()
+    await s.loadCategories('demo')
+    const pOther = s.switchContainer('other') // other 在飞
+    await s.switchContainer('demo') // other 未回，又切回 demo
+    resolveOther({ o: [{ path: 'o.md', title: 'O', category: 'o', excerpt: '' }] })
+    await pOther
+    // 最终选择是 demo：other 的过期响应被丢弃
+    expect(s.current).toBe('demo')
+    expect(Object.keys(s.groups)).toEqual(['d'])
+  })
+
+  // codex P2（round2）：目标 pending 时重复选同一容器不重复发请求
+  it('treats selecting the pending container as a no-op (no duplicate request)', async () => {
+    let resolveOther!: (v: unknown) => void
+    ;(getCategories as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce(CATS)
+      .mockImplementationOnce(() => new Promise((res) => { resolveOther = res }))
+    const s = useCategoriesStore()
+    await s.loadCategories('demo')
+    const p = s.switchContainer('other')
+    await s.switchContainer('other') // other 已在飞 → 早退
+    expect(getCategories).toHaveBeenCalledTimes(2) // demo + other 各一次
+    resolveOther({ o: [] })
+    await p
+    expect(s.current).toBe('other')
+  })
 })

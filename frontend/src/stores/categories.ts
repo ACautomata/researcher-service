@@ -9,7 +9,10 @@ import { getCategories, readPage, type CategoriesDTO, type CategoryItemDTO } fro
 
 export const useCategoriesStore = defineStore('categories', {
   state: () => ({
-    current: '' as string, // 当前容器名
+    current: '' as string, // 当前容器名（最近一次已提交的）
+    // 正在加载/已选定的目标容器（含在飞）。早退判重看 pending 而非 current——否则加载 other
+    // 在飞时再选回 demo 会因 current 仍是 demo 被误判 no-op，让 other 过期响应覆盖最终选择（codex P2）。
+    pending: '' as string,
     groups: {} as Record<string, CategoryItemDTO[]>, // 按 category 动态分组（开放词表）
     activePath: '' as string, // 右侧只读打开的页 path（空=未打开）
     content: '' as string, // 只读正文
@@ -19,6 +22,7 @@ export const useCategoriesStore = defineStore('categories', {
   actions: {
     async loadCategories(name: string): Promise<void> {
       const seq = ++this._loadSeq
+      this.pending = name // 同步记录目标（不等响应），供早退判重
       const cats = await getCategories(name)
       if (seq !== this._loadSeq) return // 过期响应：已有更新的加载，丢弃
       this.current = name
@@ -37,7 +41,9 @@ export const useCategoriesStore = defineStore('categories', {
     },
 
     async switchContainer(name: string): Promise<void> {
-      if (name === this.current) return
+      // 早退判 pending 而非 current：pending 才是用户已选定的目标（含在飞），重复选它=no-op；
+      // 选别的（含在飞期间选回 current）必须推进以作废旧请求。
+      if (name === this.pending) return
       this.activePath = ''
       this.content = ''
       this._readSeq += 1 // 使在飞的 readPage 响应失效（不得回填到已清空的阅读区）
