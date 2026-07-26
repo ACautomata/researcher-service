@@ -1276,10 +1276,10 @@ class TestFakeOpenClawWireLongLived:
 
         async def _run():
             await fake.connect('ws://x/', 'dt')
-            return await fake.send_message('s', 'm', on_event=cb)
-        run_id = asyncio.run(_run())
-        fake.discard(run_id)
-        fake.push_event(run_id, {'type': 'text', 'delta': 'lost'})
+            rid = await fake.send_message('s', 'm', on_event=cb)
+            fake.discard(rid)
+            await fake.push_event(rid, {'type': 'text', 'delta': 'lost'})
+        asyncio.run(_run())
         assert received == []  # discard 后事件丢弃
 
     def test_fake_not_connected_send_raises(self):

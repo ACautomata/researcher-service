@@ -97,6 +97,14 @@ class OpenClawWire(Protocol):
         """退订指定审批订阅者。"""
         ...
 
+    async def broadcast_approval_resolved(self, approval_id: str, decision: str) -> None:
+        """把一次权威 resolve 结果 fan-out 到全部订阅者。
+
+        codex R2 P2：共享 client 的各 consumer 卡片一致收敛。
+        仅广播真实发生的 resolve 回执（权威 decision），不伪造网关 resolved 事件。
+        """
+        ...
+
     async def resolve_approval(self, approval_id: str, kind: str, decision: str) -> dict:
         """回覆一次权限审批（approval.resolve RPC），返回网关 res payload。"""
         ...

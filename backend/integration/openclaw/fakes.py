@@ -105,6 +105,7 @@ class FakeOpenClawWire:
     async def close(self) -> None:
         self.closed = True
         self._dead = True
+        self.connected = []
         self._routes.clear()
 
     def discard(self, run_id: str) -> None:
@@ -120,6 +121,14 @@ class FakeOpenClawWire:
     def remove_approval_subscriber(self, cb: Any) -> None:
         if cb in self._approval_subscribers:
             self._approval_subscribers.remove(cb)
+
+    async def broadcast_approval_resolved(self, approval_id: str, decision: str) -> None:
+        frame = {'type': 'approvalResolved', 'id': approval_id, 'decision': decision}
+        for cb in list(self._approval_subscribers):
+            try:
+                await cb(frame)
+            except Exception:
+                pass
 
     async def resolve_approval(self, approval_id: str, kind: str, decision: str) -> dict:
         if self.resolve_error is not None:

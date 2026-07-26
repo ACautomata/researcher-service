@@ -342,12 +342,20 @@ class OpenClawWireAdapter:
         self._cm = self._connect_factory(url)
         self._ws = await self._cm.__aenter__()
         req_id = uuid.uuid4().hex
-        await self._ws.send(
-            json.dumps(ConnectFrameBuilder.session(req_id=req_id, device_token=device_token)))
         try:
+            await self._ws.send(
+                json.dumps(ConnectFrameBuilder.session(req_id=req_id, device_token=device_token)))
             await asyncio.wait_for(self._await_res(req_id), timeout=self._connect_timeout)
-        except asyncio.TimeoutError:
-            raise ChatConnectError('connect handshake timeout')
+        except ChatConnectError:
+            await self._cleanup_ws()
+            self._ws = None
+            self._cm = None
+            raise
+        except BaseException as exc:
+            await self._cleanup_ws()
+            self._ws = None
+            self._cm = None
+            raise ChatConnectError(str(exc)) from exc
         if self._translator is None:
             from chat.event_translate import ChatEventTranslator
             self._translator = ChatEventTranslator()
@@ -502,6 +510,15 @@ class OpenClawWireAdapter:
         if cb in self._approval_subscribers:
             self._approval_subscribers.remove(cb)
 
+    async def broadcast_approval_resolved(self, approval_id: str, decision: str) -> None:
+        """把一次权威 resolve 结果 fan-out 到全部订阅者（codex R2 P2）。"""
+        frame = {'type': 'approvalResolved', 'id': approval_id, 'decision': decision}
+        for cb in list(self._approval_subscribers):
+            try:
+                await cb(frame)
+            except Exception:
+                pass
+
     # ── discard / close ───────────────────────────────────────────────────────
 
     @property
@@ -521,16 +538,22 @@ class OpenClawWireAdapter:
                 await self._recv_task
             except (asyncio.CancelledError, Exception):
                 pass
+        await self._cleanup_ws()
+
+    async def _cleanup_ws(self) -> None:
+        """关闭 WS 连接与其 context manager（多路径复用：正常 close/握手失败/recv 死）。"""
         if self._ws is not None:
             try:
                 await self._ws.close()
             except Exception:
                 pass
+            self._ws = None
         if self._cm is not None:
             try:
                 await self._cm.__aexit__(None, None, None)
             except Exception:
                 pass
+            self._cm = None
 
     # ── recv loop ─────────────────────────────────────────────────────────────
 
@@ -548,6 +571,8 @@ class OpenClawWireAdapter:
         except Exception:
             self._dead = True
             if not self._closed:
+                self._fail_pending_acks('connection lost')
+                self._fail_pending_resolves('connection lost')
                 await self._notify_all_error('connection lost')
 
     def _resolve_ack(self, msg: dict) -> None:
@@ -627,6 +652,8 @@ class OpenClawWireAdapter:
                 return msg
 
     async def _notify_all_error(self, message: str) -> None:
+        self._fail_pending_acks(message)
+        self._fail_pending_resolves(message)
         for run_id, cb in list(self._routes.items()):
             try:
                 await cb({'type': 'error', 'runId': run_id, 'message': message})
