@@ -61,3 +61,12 @@ class WikiTreeGroupSerializer(serializers.Serializer):
 
 class WikiTreeSerializer(serializers.Serializer):
     groups = WikiTreeGroupSerializer(many=True, read_only=True)
+
+
+class WikiCategoryItemSerializer(serializers.Serializer):
+    """categories 条目出参（issue #84）：path/title/category/excerpt。"""
+
+    path = serializers.CharField(read_only=True)
+    title = serializers.CharField(read_only=True)
+    category = serializers.CharField(read_only=True)
+    excerpt = serializers.CharField(read_only=True)

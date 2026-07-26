@@ -261,6 +261,38 @@ class FakeWikiFileSystem:
             'content': self.pages[rel_path],
         }
 
+    # —— list_category_pages ——
+
+    def list_category_pages(self) -> list:
+        """全库 {path,title,content}（跳过私有目录/占位文件），供 categories 聚合（issue #84）。
+
+        title 语义对齐 BindMountWikiFileSystem：frontmatter paper.title/title → H1 → 文件名。
+        与 build_tree 不同：平铺收全库每页全文（含顶层散落页），不按目录分组。
+        """
+        out = []
+        for p in sorted(self.pages):
+            top = p.split('/', 1)[0]
+            if '/' not in p or top in self._SKIP_DIRS:
+                continue
+            if p.rsplit('/', 1)[-1] in self._SKIP_FILES:
+                continue
+            content = self.pages[p]
+            out.append({
+                'path': p,
+                'title': (self._frontmatter_title(p) or self._h1_title(content)
+                          or self._title_for(p)),
+                'content': content,
+            })
+        return out
+
+    @staticmethod
+    def _h1_title(content: str) -> str | None:
+        """正文首个 `# ` 标题文本；无 H1 返回 None。"""
+        for line in content.split('\n'):
+            if line.startswith('# '):
+                return line[2:].strip() or None
+        return None
+
     # —— write_page ——
 
     def write_page(self, rel_path: str, content: str) -> dict:

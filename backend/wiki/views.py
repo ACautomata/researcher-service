@@ -18,12 +18,33 @@ from rest_framework.views import APIView
 from containers.models import NAME_VALIDATOR, Instance
 from wiki.compile import CompileFleet
 from wiki.serializers import (
+    WikiCategoryItemSerializer,
     WikiPageSerializer,
     WikiPageWriteSerializer,
     WikiPathSerializer,
     WikiTreeSerializer,
 )
 from wiki.service import InvalidPath, PageExists, PageNotFound, WikiService
+
+# categories 聚合响应的 OpenAPI 契约（issue #84）：键是动态 category 值（开放词表，
+# 扫到什么返回什么，不预设集合），值是条目数组 → object additionalProperties。
+_CATEGORY_ITEM_SCHEMA = {
+    'type': 'object',
+    'properties': {
+        'path': {'type': 'string'},
+        'title': {'type': 'string'},
+        'category': {'type': 'string'},
+        'excerpt': {'type': 'string'},
+    },
+    'required': ['path', 'title', 'category', 'excerpt'],
+}
+WIKI_CATEGORIES_RESPONSE_SCHEMA = {
+    'type': 'object',
+    'additionalProperties': {
+        'type': 'array',
+        'items': _CATEGORY_ITEM_SCHEMA,
+    },
+}
 
 logger = logging.getLogger(__name__)
 
@@ -145,3 +166,17 @@ class WikiGraphView(_BaseWikiView):
             return Response({'detail': '非法 name'}, status=status.HTTP_400_BAD_REQUEST)
         # service 输出已是规范 dict（nodes[{id,title,ghost?}], edges[{from,to}]），直接返回
         return Response(WikiService(inst).build_graph())
+
+
+class WikiCategoriesView(_BaseWikiView):
+    """GET categories 聚合（按 `category:` 标记分组带标记页）—— issue #84 / spec #75。"""
+
+    @extend_schema(responses={200: WIKI_CATEGORIES_RESPONSE_SCHEMA})
+    def get(self, request, name):
+        try:
+            inst = self._get_instance(name)
+        except _InvalidName:
+            return Response({'detail': '非法 name'}, status=status.HTTP_400_BAD_REQUEST)
+        categories = WikiService(inst).list_categories()
+        return Response({cat: WikiCategoryItemSerializer(items, many=True).data
+                         for cat, items in categories.items()})

@@ -136,6 +136,14 @@ class WikiFileSystem(Protocol):
         """读一页 {path,title,content}；越权路径上抛 InvalidPath。"""
         ...
 
+    def list_category_pages(self) -> list:
+        """递归扫全库 .md（跳过插件私有/占位目录文件），返回 [{path,title,content}]。
+
+        供 categories 聚合（issue #84）：title 取 frontmatter/H1/文件名兜底，content 为
+        原文全文（提取 `` `category:` `` 标记与摘要在 service 层做，不在本层）。
+        """
+        ...
+
     def write_page(self, rel_path: str, content: str) -> dict:
         """覆写已存在页；越权路径上抛 InvalidPath。"""
         ...
