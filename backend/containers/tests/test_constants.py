@@ -109,6 +109,22 @@ def test_config_renderer_token_placeholder_is_constants_reference():
     assert config_renderer.GATEWAY_TOKEN_PLACEHOLDER is constants.GATEWAY_TOKEN_PLACEHOLDER
 
 
+# --- GATEWAY_BIND 跨模块同源（issue #90，3/3） ---
+
+
+def test_config_renderer_gateway_bind_equals_constants():
+    # spec §5.2：config_renderer.GATEWAY_BIND 来源于 constants.GATEWAY_BIND。
+    # 'lan' 为标识符形态（CPython intern），is/== 均为恒真；此处钉值以对未来值变更
+    # 保持防御（若 GATEWAY_BIND 改为非标识符值如 '0.0.0.0'，可区分独立定义）。
+    assert config_renderer.GATEWAY_BIND == constants.GATEWAY_BIND
+
+
+def test_docker_runtime_base_env_gateway_bind_equals_constants():
+    # spec §5.2 / issue #90：_BASE_ENV['OPENCLAW_GATEWAY_BIND'] 应来源于
+    # constants.GATEWAY_BIND，非独立硬编码字符串（单一来源契约）。
+    assert docker_runtime._BASE_ENV['OPENCLAW_GATEWAY_BIND'] == constants.GATEWAY_BIND
+
+
 # --- orchestrator 域：编排私有常量提升为共享 + 消除内联魔法数字（原散落 orchestrator.py） ---
 
 
