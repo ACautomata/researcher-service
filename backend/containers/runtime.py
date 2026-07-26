@@ -13,6 +13,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+# re-export：docker_runtime 经 runtime 取用 GATEWAY_INTERNAL_PORT（issue #88 收口到 constants）
+from .constants import GATEWAY_INTERNAL_PORT  # noqa: F401
+
 # 容器名前缀：与原 compose 栈 openclaw-gateway 隔离（spec §5.3 / r27 §3.3）
 CONTAINER_PREFIX = 'openclaw-gw-'
 # 按 label 过滤管理生命周期（issue #39 验收 + spec §5.4）
@@ -21,8 +24,7 @@ LABEL_APP_VALUE = 'openclaw-fleet'
 LABEL_INSTANCE_KEY = 'openclaw.instance'
 LABEL_PORT_KEY = 'openclaw.port'
 
-# 容器内固定（spec §5.2/§5.3）
-GATEWAY_INTERNAL_PORT = 18789
+# 容器内固定路径（spec §5.2/§5.3）
 HOME_BIND = '/home/node/.openclaw'
 CONFIG_BIND = '/home/node/.openclaw/openclaw.json'
 

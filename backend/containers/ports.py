@@ -9,8 +9,11 @@
 """
 from collections.abc import Iterable
 
-# 单容器 compose 栈占用（deploy/docker-compose.yml:66 127.0.0.1:18789:18789）
-RESERVED_PORT_18789 = 18789
+from .constants import GATEWAY_INTERNAL_PORT
+
+# 单容器 compose 栈占用（deploy/docker-compose.yml:66 127.0.0.1:18789:18789）；
+# 端口值单一来源 = constants.GATEWAY_INTERNAL_PORT（issue #88）。
+RESERVED_PORT_18789 = GATEWAY_INTERNAL_PORT
 
 
 class PortPoolExhausted(Exception):
