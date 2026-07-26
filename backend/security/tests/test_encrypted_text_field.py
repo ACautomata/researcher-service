@@ -142,6 +142,35 @@ class TestEncryptedCredentialFields:
         assert Instance.objects.get(name='bulk-created').token == 'bulk-token'
 
     @pytest.mark.django_db
+    def test_bulk_create_accepts_generators_and_marks_credentials_as_encrypted(self):
+        instances = (
+            Instance(
+                name='generator-created', port=19008, token='generator-token',
+                home_dir='/tmp/generator', container_id='cid',
+                status=Instance.STATUS_RUNNING, image='image:tag',
+            )
+            for _ in range(1)
+        )
+
+        Instance.objects.bulk_create(instances)
+
+        assert Instance.objects.get(name='generator-created').token == 'generator-token'
+
+    @pytest.mark.django_db(transaction=True)
+    @pytest.mark.asyncio
+    async def test_async_bulk_create_marks_credentials_as_encrypted(self):
+        await Instance.objects.abulk_create([
+            Instance(
+                name='async-bulk-created', port=19009, token='async-bulk-token',
+                home_dir='/tmp/async-bulk', container_id='cid',
+                status=Instance.STATUS_RUNNING, image='image:tag',
+            ),
+        ])
+
+        instance = await Instance.objects.aget(name='async-bulk-created')
+        assert instance.token == 'async-bulk-token'
+
+    @pytest.mark.django_db
     def test_expression_and_bulk_updates_of_credentials_are_rejected(self):
         instance = Instance.objects.create(
             name='bulk-updated', port=19006, token='initial-token', home_dir='/tmp/bulk-update',
@@ -169,7 +198,7 @@ class TestEncryptedCredentialFields:
         token_index = [field.name for field in Instance._meta.concrete_fields].index('token')
         assert Instance.objects.values_list().get(pk=instance.pk)[token_index] == 'projection-token'
         assert Instance.objects.values_list('token', named=True).get(pk=instance.pk).token == 'projection-token'
-        assert Instance.objects.values(total=Count('id')).get()['total'] >= 1
+        assert Instance.objects.filter(pk=instance.pk).values(total=Count('id')).get()['total'] == 1
         assert Instance.objects.only('token').get(pk=instance.pk).token == 'projection-token'
         assert Instance.objects.only('name').get(pk=instance.pk).token == 'projection-token'
         with pytest.raises(ValueError):
@@ -182,3 +211,46 @@ class TestEncryptedCredentialFields:
             Instance.objects.values(F('token'))
         with pytest.raises(ValueError):
             Instance.objects.values_list(F('token'))
+
+    @pytest.mark.django_db
+    def test_credential_projections_reject_invalid_or_unsupported_combinations(self):
+        instance = Instance.objects.create(
+            name='projection-rules', port=19010, token='projection-token',
+            home_dir='/tmp/projection-rules', container_id='cid',
+            status=Instance.STATUS_RUNNING, image='image:tag',
+        )
+        Pairing.objects.create(instance=instance)
+
+        with pytest.raises(TypeError):
+            Instance.objects.values_list('name', 'token', flat=True)
+        with pytest.raises(TypeError):
+            Instance.objects.values_list('token', flat=True, named=True)
+        with pytest.raises(ValueError):
+            Pairing.objects.values('instance__token')
+        with pytest.raises(ValueError):
+            Instance.objects.values_list('token', flat=True).distinct()
+
+    @pytest.mark.django_db
+    def test_projection_keeps_annotations_added_after_credentials(self):
+        instance = Instance.objects.create(
+            name='annotated-projection', port=19011, token='projection-token',
+            home_dir='/tmp/annotated-projection', container_id='cid',
+            status=Instance.STATUS_RUNNING, image='image:tag',
+        )
+
+        projection = Instance.objects.filter(pk=instance.pk).values_list('token').annotate(
+            total=Count('id')
+        ).get()
+        assert projection == ('projection-token', 1)
+
+    @pytest.mark.django_db
+    def test_refreshing_non_credential_fields_keeps_credentials_deferred(self):
+        instance = Instance.objects.create(
+            name='deferred-credential', port=19012, token='deferred-token',
+            home_dir='/tmp/deferred-credential', container_id='cid',
+            status=Instance.STATUS_RUNNING, image='image:tag',
+        )
+
+        instance.refresh_from_db(fields=['status'])
+
+        assert instance.token == 'deferred-token'
