@@ -40,6 +40,17 @@ export interface WikiGraphDTO {
   edges: WikiGraphEdgeDTO[]
 }
 
+// categories 聚合条目（issue #84 / #85）：path/title/category/excerpt。
+export interface CategoryItemDTO {
+  path: string
+  title: string
+  category: string
+  excerpt: string
+}
+
+// categories 聚合响应：键为动态 category 值（开放词表），值为该组带标记页列表。
+export type CategoriesDTO = Record<string, CategoryItemDTO[]>
+
 function base(name: string): string {
   return `/api/v1/containers/${encodeURIComponent(name)}/wiki`
 }
@@ -78,4 +89,8 @@ export async function deletePage(name: string, path: string): Promise<void> {
 
 export function getGraph(name: string): Promise<WikiGraphDTO> {
   return apiJson<WikiGraphDTO>(`${base(name)}/graph`)
+}
+
+export function getCategories(name: string): Promise<CategoriesDTO> {
+  return apiJson<CategoriesDTO>(`${base(name)}/categories`)
 }
