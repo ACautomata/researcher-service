@@ -52,3 +52,45 @@ class ApprovalPairer:
                         f'pairing not paired after {self._timeout}s',
                     ) from e
                 self._sleep(self._interval)
+
+
+class GatewayNotReady(Exception):
+    """网关 /health 轮询至独立 deadline 仍未就绪（容器启动失败/网关崩溃/端口不通）。"""
+
+
+class GatewayReadinessWaiter:
+    """轮询容器网关 /health 至就绪，带独立 deadline（codex P2：网关冷启动 race）。
+
+    InstanceOrchestrator.create() 在 docker start 后即返回，网关 WS server 仍需数秒 boot；
+    list() 的健康探针只单次探测记 unhealthy 不等待。若此时直接配对，WS connect 撞 connection
+    refused → PairingHandshake 把一切网络异常包成 PairingError，而 ApprovalPairer 仅重试
+    PairingRequired、不重试 PairingError——链路在到达 approve 前即失败。smoke 在调 pair() 前
+    先用它轮询 /health 至就绪。probe/sleep/clock 可注入，便于用假探针 + 假时钟确定性单测
+    （不真睡、不真连）。
+    """
+
+    def __init__(
+        self,
+        probe,
+        *,
+        timeout,
+        interval,
+        sleep=time.sleep,
+        clock=time.monotonic,
+    ) -> None:
+        self._probe = probe
+        self._timeout = timeout
+        self._interval = interval
+        self._sleep = sleep
+        self._clock = clock
+
+    def wait(self, port):
+        deadline = self._clock() + self._timeout
+        while True:
+            if self._probe.is_reachable(port):
+                return
+            if self._clock() >= deadline:
+                raise GatewayNotReady(
+                    f'gateway not ready after {self._timeout}s on port {port}',
+                )
+            self._sleep(self._interval)

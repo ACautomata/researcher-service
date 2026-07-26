@@ -8,7 +8,12 @@ PairingError 立即传播。
 import pytest
 
 from chat.pairing_ws import PairingError, PairingRequired
-from containers.tests.integration_helpers import ApprovalPairer, PairingApprovalTimeout
+from containers.tests.integration_helpers import (
+    ApprovalPairer,
+    GatewayNotReady,
+    GatewayReadinessWaiter,
+    PairingApprovalTimeout,
+)
 
 # 已配对的 Pairing 占位（helper 只透传 ensure_paired 返回值，不读其字段）
 _PAIRED = object()
@@ -119,3 +124,62 @@ def test_propagates_pairing_error_without_retry():
 
     assert not approved             # PairingError 不 approve
     assert service.calls == 1
+
+
+# —— GatewayReadinessWaiter：网关冷启动就绪轮询（codex P2，配对前等 /health）——
+
+
+class _FakeProbe:
+    """按脚本返回 is_reachable；calls 超过脚本长度后重复最后一个 outcome（覆盖持续未就绪）。"""
+
+    def __init__(self, outcomes):
+        self._outcomes = outcomes
+        self.calls = 0
+
+    def is_reachable(self, port):
+        self.calls += 1
+        idx = min(self.calls - 1, len(self._outcomes) - 1)
+        return self._outcomes[idx]
+
+
+def _make_waiter(probe, *, timeout=5.0, interval=1.0, start=100.0):
+    clock = _FakeClock(start)
+    waiter = GatewayReadinessWaiter(
+        probe,
+        timeout=timeout,
+        interval=interval,
+        sleep=clock.sleep,
+        clock=clock,
+    )
+    return waiter, clock
+
+
+def test_wait_returns_immediately_when_already_ready():
+    probe = _FakeProbe([True])
+    waiter, clock = _make_waiter(probe)
+
+    waiter.wait(port=9999)
+
+    assert probe.calls == 1           # 已就绪：一次探测即返回，不 sleep
+    assert clock.now == 100.0
+
+
+def test_wait_polls_until_ready():
+    probe = _FakeProbe([False, False, True])
+    waiter, clock = _make_waiter(probe)
+
+    waiter.wait(port=9999)
+
+    assert probe.calls == 3           # 第 3 次探测命中 True → 返回
+    assert clock.now == 102.0         # 前两次 False 各 sleep(1)：100→101→102
+
+
+def test_wait_times_out_when_never_ready():
+    probe = _FakeProbe([False])
+    waiter, _ = _make_waiter(probe, timeout=5.0, interval=1.0)
+
+    with pytest.raises(GatewayNotReady):
+        waiter.wait(port=9999)
+
+    # deadline=100+5=105；每次 sleep(1) 推进，至 now>=105 终止（不依赖全程 timeout）
+    assert probe.calls == 6

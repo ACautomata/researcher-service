@@ -70,6 +70,12 @@ def test_create_list_delete_real_container(tmp_path):
 _PAIRING_APPROVAL_TIMEOUT = 60.0
 _PAIRING_POLL_INTERVAL = 1.0
 
+# 网关冷启动就绪轮询（codex P2）：create() 在 docker start 后即返回，网关 WS server 仍需
+# 数秒 boot；不等就绪直接配对会 connection refused → PairingError（ApprovalPairer 不重试），
+# 链路在到达 approve 前即失败。上限覆盖慢机/镜像冷启动，1s 轮询间隔（与 approve 轮询对齐）。
+_GATEWAY_READINESS_TIMEOUT = 60.0
+_GATEWAY_POLL_INTERVAL = 1.0
+
 
 @pytest.mark.django_db
 def test_pair_chat_wiki_smoke_chain(tmp_path):  # pylint: disable=too-many-locals,too-many-statements
@@ -87,7 +93,11 @@ def test_pair_chat_wiki_smoke_chain(tmp_path):  # pylint: disable=too-many-local
     from containers.docker_runtime import DockerRuntime
     from containers.models import Instance
     from containers.orchestrator import FleetConfig, InstanceOrchestrator
-    from containers.tests.integration_helpers import ApprovalPairer
+    from containers.tests.integration_helpers import (
+        ApprovalPairer,
+        GatewayReadinessWaiter,
+    )
+    from integration.openclaw.adapters import HttpHealthProbe
     from integration.openclaw.translation import format_device_approve_command
     from wiki.service import WikiService
 
@@ -118,8 +128,14 @@ def test_pair_chat_wiki_smoke_chain(tmp_path):  # pylint: disable=too-many-local
         home = Path(inst.home_dir)
         assert home.is_dir() and any(home.iterdir())      # cp -a 预填充 home 落盘
 
-        # —— 2. 配对（spec §8.1）：真 Ed25519 握手；遇 PAIRING_REQUIRED 经容器内 approve，
-        #         轮询 ensure_paired 至 paired（detach exec 不可同步等，须独立超时轮询）——
+        # —— 2. 配对（spec §8.1）：先等网关 /health 就绪（冷启动 race，codex P2），再真 Ed25519
+        #         握手；遇 PAIRING_REQUIRED 经容器内 approve，轮询 ensure_paired 至 paired
+        #         （detach exec 不可同步等，须独立超时轮询）——
+        GatewayReadinessWaiter(
+            HttpHealthProbe(),
+            timeout=_GATEWAY_READINESS_TIMEOUT,
+            interval=_GATEWAY_POLL_INTERVAL,
+        ).wait(inst.port)
         def approve(request_id):
             cmd = format_device_approve_command(request_id).split()
             orch.exec_in_container(inst.name, cmd)
