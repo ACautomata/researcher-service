@@ -304,25 +304,24 @@ async def test_disconnect_one_keeps_peer_subscribed(override_pool, instance, fak
 
 
 @pytest.mark.asyncio
-async def test_resolve_calls_client_and_echoes_authoritative_decision(override_pool, instance, fake_client):
-    """codex P1：resolve 回执用网关权威 decision（first-answer-wins），非回声请求值。"""
-    fake_client.resolve_payload = {'id': 'ap-1', 'decision': 'deny'}  # 请求 approve，权威 deny
+async def test_resolve_echoes_requested_decision(override_pool, instance, fake_client):
+    """codex P1/P2 #163：resolve 回执用请求值（非 authoritative——ack payload 无 decision 字段），
+    权威值由网关 resolved 事件广播。"""
+    fake_client.resolve_payload = {'id': 'ap-1', 'decision': 'deny'}  # 模拟 ack payload（ADR 0003 无 decision）
     comm = await _connect_authed()
     await comm.connect()
     await comm.send_json_to({'type': 'start', 'container': 'demo'})
     await comm.receive_json_from()  # ready
     await comm.send_json_to({'type': 'resolve', 'id': 'ap-1', 'kind': 'exec', 'decision': 'approve'})
-    resp = await comm.receive_json_from()  # 直接回执
-    assert resp == {'type': 'approvalResolved', 'id': 'ap-1', 'decision': 'deny'}
-    resp2 = await comm.receive_json_from()  # codex R2 P2：fan-out 广播（本 consumer 亦收，幂等）
-    assert resp2 == {'type': 'approvalResolved', 'id': 'ap-1', 'decision': 'deny'}
+    resp = await comm.receive_json_from()  # 直接回执（immediate feedback，用请求值）
+    assert resp == {'type': 'approvalResolved', 'id': 'ap-1', 'decision': 'approve'}
     assert fake_client.resolved == [('ap-1', 'exec', 'approve')]
     await comm.disconnect()
 
 
 @pytest.mark.asyncio
-async def test_resolve_broadcasts_authoritative_to_peer_consumer(override_pool, instance, fake_client):
-    """codex R2 P2：A resolve 的权威结果 fan-out 给共享 client 的 B，B 的陈旧卡一致收敛。"""
+async def test_resolve_no_broadcast_from_ack(override_pool, instance, fake_client):
+    """codex P2 #163：resolve ack 不应广播——权威值由 resolved 事件 fan-out。"""
     fake_client.resolve_payload = {'id': 'ap-1', 'decision': 'approve'}
     comm_a = await _connect_authed('alice')
     await comm_a.connect()
@@ -332,14 +331,13 @@ async def test_resolve_broadcasts_authoritative_to_peer_consumer(override_pool, 
     await comm_b.connect()
     await comm_b.send_json_to({'type': 'start', 'container': 'demo'})
     await comm_b.receive_json_from()  # B ready
-    # A 提交 resolve → A 收直接回执 + 广播；B 收广播（收敛）
+    # A 提交 resolve → A 仅收直接回执（无广播）；B 无任何消息
     await comm_a.send_json_to({'type': 'resolve', 'id': 'ap-1', 'kind': 'exec', 'decision': 'approve'})
     a1 = await comm_a.receive_json_from()  # 直接回执
-    a2 = await comm_a.receive_json_from()  # 广播
-    b1 = await comm_b.receive_json_from()  # 对等端收广播
     assert a1 == {'type': 'approvalResolved', 'id': 'ap-1', 'decision': 'approve'}
-    assert a2 == {'type': 'approvalResolved', 'id': 'ap-1', 'decision': 'approve'}
-    assert b1 == {'type': 'approvalResolved', 'id': 'ap-1', 'decision': 'approve'}
+    # B 不应收到任何来自 ack 的消息
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(comm_b.receive_json_from(), timeout=0.5)
     await comm_a.disconnect()
     await comm_b.disconnect()
 

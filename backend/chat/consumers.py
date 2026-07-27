@@ -90,23 +90,17 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
             await self.send_json({'type': 'error', 'message': f'非法 kind（{kind}），仅允许 exec/plugin'})
             return
         try:
-            payload = await self._client.resolve_approval(approval_id, kind, decision)
+            await self._client.resolve_approval(approval_id, kind, decision)
         except Exception:  # pylint: disable=broad-exception-caught
             # 网关拒绝（缺 operator.approvals 等）/连接已断：error 帧带 approval id，
             # 前端仅复位该卡（codex R2 P2，并发 resolve 不误复位其它在途卡）
             await self.send_json({'type': 'error', 'message': '审批回覆失败，请稍后重试', 'id': approval_id})
             return
-        # 回执用网关权威 decision（first-answer-wins，可能与请求不同，codex P1）
-        authoritative = (payload or {}).get('decision') or decision
-        frame = {'type': 'approvalResolved', 'id': approval_id, 'decision': authoritative}
-        # codex R3 P2：先 fan-out 给共享 client 的所有 consumer（含本 consumer 幂等）再回执请求方——
-        # 若请求方在网关处理期间断开，直接 send_json 会先失败、执行不到 fan-out，导致网关已记录 decision
-        # 而其它 peer 仍停留可点的陈旧卡。_fanout 内部故障隔离，单订阅者失败不影响其余。
-        try:
-            await self._client.broadcast_approval_resolved(approval_id, authoritative)
-        except Exception:  # pylint: disable=broad-exception-caught
-            pass
-        await self.send_json(frame)
+        # 不回送权威 decision——RPC ack payload 无 decision 字段（ADR 0003），
+        # 实际权威值由网关经 exec/plugin.approval.resolved 事件广播。
+        # 此处仅向请求方发 immediate feedback（usedecision），
+        # resolved 事件的 _fanout_approval 负责对全部订阅者发出 authoritative 覆盖（codex P2 #163）。
+        await self.send_json({'type': 'approvalResolved', 'id': approval_id, 'decision': decision})
 
     async def _handle_send(self, content):
         if self._client is None:

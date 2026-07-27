@@ -85,26 +85,27 @@ def test_resolve_success(authed, instance, override_pool):
     override_pool(_FakePool(client))
     resp = authed.post(URL, {'id': 'ap-1', 'kind': 'exec', 'decision': 'allow-once'}, format='json')
     assert resp.status_code == 200
-    assert resp.json() == {'ok': True, 'id': 'ap-1', 'decision': 'allow-once'}
+    # codex P2 #163：resolve ack 只返回 ok:true（无 decision——权威值由 resolved 事件广播）
+    assert resp.json() == {'ok': True, 'id': 'ap-1'}
     assert client.resolved == [('ap-1', 'exec', 'allow-once')]
 
 
-def test_resolve_returns_authoritative_decision(authed, instance, override_pool):
-    """codex P1：first-answer-wins —— 响应用网关权威 decision，非回声请求值。"""
+def test_resolve_returns_ok(authed, instance, override_pool):
+    """codex P1/P2 #163：REST resolve 不回送权威 decision——ack payload 无 decision 字段。"""
     client = _FakeClient(payload={'id': 'ap-1', 'decision': 'deny'})
     override_pool(_FakePool(client))
     resp = authed.post(URL, {'id': 'ap-1', 'kind': 'exec', 'decision': 'allow-once'}, format='json')
     assert resp.status_code == 200
-    assert resp.json()['decision'] == 'deny'  # 请求 allow-once，权威记录 deny
+    assert 'decision' not in resp.json()
 
 
-def test_resolve_broadcasts_authoritative_to_ws_subscribers(authed, instance, override_pool):
-    """codex R2 P2：REST 路径的权威回执经 pool client fan-out 给 WS 订阅者（副本收敛）。"""
+def test_resolve_no_broadcast_to_ws_subscribers(authed, instance, override_pool):
+    """codex P2 #163：REST resolve 不应广播——权威值由 resolved 事件 fan-out。"""
     client = _FakeClient(payload={'id': 'ap-1', 'decision': 'deny'})
     override_pool(_FakePool(client))
     resp = authed.post(URL, {'id': 'ap-1', 'kind': 'exec', 'decision': 'allow-once'}, format='json')
     assert resp.status_code == 200
-    assert client.broadcasts == [('ap-1', 'deny')]  # 权威 decision fan-out 给 WS 订阅者
+    assert client.broadcasts == []  # 无广播
 
 
 def test_resolve_missing_field_400(authed, instance, override_pool):
