@@ -53,7 +53,7 @@ class FakePairingService:
         device_id='dev-1',
         public_key_pem='PUBKEY',
         private_key_pem='PRIVKEY',
-        scopes_json='["operator.read","operator.write"]',
+        scopes_json='["operator.read","operator.write","operator.approvals"]',
     ):
         self._status = status
         self._device_token = device_token
@@ -283,7 +283,7 @@ async def test_identity_and_scopes_are_passed_from_pairing_to_client():
             device_id='did-1',
             public_key_pem='PUB',
             private_key_pem='PRIV',
-            scopes_json='["operator.read","operator.write"]',
+            scopes_json='["operator.read","operator.write","operator.approvals"]',
         ),
         client_factory=StubClient,
         ws_url_for=_url_for,
@@ -294,7 +294,7 @@ async def test_identity_and_scopes_are_passed_from_pairing_to_client():
     assert c.identity.device_id == 'did-1'
     assert c.identity.public_key_pem == 'PUB'
     assert c.identity.private_key_pem == 'PRIV'
-    assert c.scopes == ['operator.read', 'operator.write']
+    assert c.scopes == ['operator.read', 'operator.write', 'operator.approvals']
 
 
 @pytest.mark.asyncio
@@ -346,32 +346,28 @@ async def test_non_string_elements_with_identity_raises_not_paired():
 
 
 @pytest.mark.asyncio
-async def test_empty_scopes_json_without_identity_passes():
-    """scopes_json 为空且 identity 不完整 → 不抛 NotPaired（unsigned 路径，不需要 scopes）。"""
+async def test_incomplete_device_identity_raises_not_paired():
+    """PAIRED 且身份字段缺失 → NotPaired（配对材料不完整，路由重新配对）。"""
     pool = ChatConnectionPool(
         pairing_service=FakePairingService(
-            scopes_json='[]',
             device_id='', public_key_pem='', private_key_pem='',
         ),
         client_factory=StubClient,
         ws_url_for=_url_for,
     )
-    c = await pool.get_or_create(_instance('x', 19105))
-    assert c.scopes == []
-    assert c.identity is None
+    with pytest.raises(NotPaired):
+        await pool.get_or_create(_instance('x', 19105))
 
 
 @pytest.mark.asyncio
-async def test_non_list_scopes_without_identity_passes():
-    """scopes_json 非 list 且 identity 不完整 → 不抛 NotPaired（unsigned 路径）。"""
+async def test_scopes_missing_required_permissions_raises_not_paired():
+    """scopes_json 合法但缺少 REQUIRED_SCOPES → NotPaired（scopes 不足，路由重新配对）。"""
     pool = ChatConnectionPool(
         pairing_service=FakePairingService(
-            scopes_json='"operator.read"',
-            device_id='', public_key_pem='', private_key_pem='',
+            scopes_json='["operator.read","operator.write"]',  # 缺 operator.approvals
         ),
         client_factory=StubClient,
         ws_url_for=_url_for,
     )
-    c = await pool.get_or_create(_instance('x', 19106))
-    assert c.scopes == []
-    assert c.identity is None
+    with pytest.raises(NotPaired):
+        await pool.get_or_create(_instance('x', 19106))

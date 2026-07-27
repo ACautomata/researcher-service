@@ -17,6 +17,7 @@ from chat.chat_client import OpenClawChatClient
 from chat.device_crypto import DeviceIdentity
 from chat.models import Pairing
 from chat.pairing import PairingService
+from integration.openclaw.wire import REQUIRED_SCOPES
 
 
 class NotPaired(Exception):
@@ -92,8 +93,14 @@ class ChatConnectionPool:
             # #141：从 Pairing 行重建 DeviceIdentity + 解析 scopes，传 factory
             identity = self._build_identity(pairing)
             scopes = self._pairing_scopes(pairing)
+            # codex #151 P2：PAIRED 但 identity 不完整 → 配对材料损坏，路由重新配对
+            if pairing.status == Pairing.STATUS_PAIRED and identity is None:
+                raise NotPaired(pairing.status, pairing.pairing_request_id)
             # codex #151 P2：identity 非空但 scopes 为空 → 配对材料不完整，路由重新配对
             if identity is not None and not scopes:
+                raise NotPaired(pairing.status, pairing.pairing_request_id)
+            # codex #151 P2：identity 非空但缺少 REQUIRED_SCOPES → scopes 损坏/不足，路由重新配对
+            if identity is not None and not REQUIRED_SCOPES.issubset(set(scopes)):
                 raise NotPaired(pairing.status, pairing.pairing_request_id)
             new_client = self._client_factory(
                 url, pairing.device_token, identity=identity, scopes=scopes,
