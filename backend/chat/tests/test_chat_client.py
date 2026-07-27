@@ -19,14 +19,9 @@ _IDENTITY = DeviceCrypto.generate_identity()
 _SCOPES = ['operator.read', 'operator.write', 'operator.approvals']
 
 
-# issue #139：session connect 帧 device 签名块所需，注入共享假值（这些测试关注路由/ack，不验签）。
-_IDENTITY = DeviceCrypto.generate_identity()
-_SCOPES = ['operator.read', 'operator.write', 'operator.approvals']
-
-
 def _client(url=URL, device_token='dt', **kwargs):
     """构造 OpenClawChatClient，默认注入假 identity/scopes 走 #140 签名路径（贴合 #141 生产注入）；
-    配套 fake 须下发 connect.challenge（nonce 由其提取），见下方 _client 调用处统一配 challenge。"""
+    配套 FakeChatTransport 默认下发 connect.challenge（nonce 由其提取），无需逐测试另配。"""
     return OpenClawChatClient(
         url, device_token,
         identity=_IDENTITY, scopes=_SCOPES, **kwargs,
