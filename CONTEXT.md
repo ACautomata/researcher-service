@@ -8,6 +8,12 @@
 面板编排的单位。每个容器内跑一个 `main` agent、一个 gateway（WS，容器内 18789）、以及独立的 home / wiki / openclaw.json。它是本系统唯一的外部 bounded context。
 _Avoid_: 实例——"实例"指面板侧的 `Instance` 数据模型，是 OpenClaw 容器在控制面的投影，二者不等同。
 
+**镜像谱系 (image lineage)**:
+承载 OpenClaw 容器的镜像有两个互不兼容的变体，决定容器的能力边界与挂载契约：
+- **cn-im fork**（`acautomata/openclaw-docker-cn-im`）：历史部署镜像，启动时自带配置同步与权限降权（init 脚本），预装中国 IM 渠道插件，**不含 browser 运行时**（researcher 配置的 browser 插件在此镜像上无效）。
+- **官方原版**（`ghcr.io/openclaw/openclaw`，分 `-browser`/`-slim` 变体）：OpenClaw 官方镜像，不自带配置同步逻辑；`-browser` 变体预装 Playwright，browser 能力可用。
+_Avoid_: 「OpenClaw 镜像」——掩盖两谱系在 browser 能力、挂载契约依赖、启动方式上的本质差异；讨论迁移/换镜像时必须指明谱系。
+
 **接触路径 (contact path)**:
 backend 与 OpenClaw 容器交互的四条通道：(1) Docker SDK 编排（增删查容器）、(2) 宿主文件 bind-mount 直读写（wiki / openclaw.json）、(3) HTTP `/health` 探测、(4) WebSocket（协议 v4 + 设备配对 + 事件流）。
 _Avoid_: 集成点——过于笼统，无法区分这四条性质不同的通道。
