@@ -1,17 +1,15 @@
-"""chat wire schema 集成测试（issue #155/#156）：真实 ghcr 2026.6.34 镜像验证 wire 假设。
+"""chat wire schema 集成测试（issue #155/#156/#157）：真实 ghcr 2026.6.34 镜像验证 wire 假设。
 
-靠 docker daemon 自动探测门控（DockerDaemonProbe）+ 用例内 env skip（OPENCLAW_TEMPLATE_DIR/
-LLM_API_KEY）双保险。T1（#156）：fixture 工厂 + chat.send 冒烟。
+无门控/无 skip——依赖缺失时直接报错，强制环境就绪。T1（#156）：fixture 工厂 + chat.send
+冒烟。T2（#157）：chat.send 事件流 wire schema 断言。
 
-手动验证：
-  export OPENCLAW_TEMPLATE_DIR=/path/to/researcher
-  export OPENCLAW_IMAGE=ghcr.io/openclaw/openclaw:2026.6.34-browser
-  export LLM_API_KEY=sk-...
-  uv run python -m pytest chat/tests/test_integration_wire.py -v
+运行（须 source .envrc 保证 env）：
+  source .envrc
+  cd backend && uv run python -m pytest chat/tests/test_integration_wire.py -v --timeout=300
 
 Colima virtiofs 只共享 $HOME，pytest 默认 tmp_path（/var/folders/… 在 $HOME 外）
 bind-mount 退化为空目录 → 网关报 Missing config。用 --basetemp 覆盖到 $HOME 下：
-  uv run python -m pytest chat/tests/test_integration_wire.py -v --basetemp=$HOME/.cache/pytest-wire
+  uv run python -m pytest chat/tests/ -v --basetemp=$HOME/.cache/pytest-wire
 """
 import asyncio
 import json
@@ -20,13 +18,6 @@ from pathlib import Path
 
 import pytest
 import websockets
-
-from containers.tests.integration_helpers import DockerDaemonProbe
-
-pytestmark = pytest.mark.skipif(
-    not DockerDaemonProbe.is_available(),
-    reason='需 docker daemon（自动探测；Colima/Docker Desktop 本地 VM 均可）',
-)
 
 BASE_DIR = Path(__file__).resolve().parents[3]
 
@@ -42,15 +33,6 @@ _GATEWAY_POLL_INTERVAL = 1.0
 # 配对 approve 轮询独立超时（对齐 #94 smoke）
 _PAIRING_APPROVAL_TIMEOUT = 60.0
 _PAIRING_POLL_INTERVAL = 1.0
-
-
-def _check_env_deps():
-    """检查集成测试所需的环境依赖；缺任一则 skip。"""
-    template_dir = os.environ.get('OPENCLAW_TEMPLATE_DIR')
-    if not template_dir or not Path(template_dir).is_dir():
-        pytest.skip('需 OPENCLAW_TEMPLATE_DIR 指向 researcher clone')
-    if not os.environ.get('LLM_API_KEY'):
-        pytest.skip('需 LLM_API_KEY')
 
 
 def _build_orchestrator(tmp_path):
@@ -222,8 +204,6 @@ def test_send_message_ack_has_run_id(tmp_path):
 
     证明 fixture 可用：容器 running + 配对 STATUS_PAIRED + WS 连通 + ack 协议正确。
     """
-    pytest.importorskip('docker')
-    _check_env_deps()
 
     from chat.pairing import PairingService
     from integration.openclaw.adapters import HttpHealthProbe
@@ -273,8 +253,6 @@ def test_chat_send_event_stream_wire_schema(tmp_path):
     - final.message 是 dict {role, content:[{type:text,text}], timestamp}（非字符串，#152 回归防护）
     - final 含 stopReason 字段
     """
-    pytest.importorskip('docker')
-    _check_env_deps()
 
     from chat.pairing import PairingService
     from integration.openclaw.adapters import HttpHealthProbe
@@ -314,9 +292,9 @@ def test_chat_send_event_stream_wire_schema(tmp_path):
                     pass
             finally:
                 await client.aclose()
-            return translated_events
+            return translated_events, run_id
 
-        translated = asyncio.run(_send())
+        translated, acknowledged_run_id = asyncio.run(_send())
 
     # 翻译后事件流：text（流式 delta） + done（final）
     text_events = [e for e in translated if e.get('type') == 'text']
@@ -325,9 +303,11 @@ def test_chat_send_event_stream_wire_schema(tmp_path):
     assert done_events, '应收到 done 事件（final 翻译产物）'
 
     # Wire schema 断言：原始帧（非翻译后契约帧）
+    # 按 runId 精确匹配（r13-ws-protocol.md:135），防同连接其它会话事件干扰
     chat_events = [
         f for f in capturer.captured
         if f.get('type') == 'event' and f.get('event') == 'chat'
+        and (f.get('payload') or {}).get('runId') == acknowledged_run_id
     ]
     assert chat_events, '应收到 chat 事件流（state delta + final）'
 
