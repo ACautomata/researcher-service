@@ -40,7 +40,7 @@ class ChatSendError(ChatClientError):
     """chat.send 被网关拒绝（ack not ok）或 ack 缺 runId。"""
 
 
-class OpenClawChatClient:  # pylint: disable=too-many-instance-attributes
+class OpenClawChatClient:  # pylint: disable=too-many-instance-attributes,too-many-arguments
     """对单个已配对容器维持一条长连接，发 chat.send 并按 runId 路由 chat 事件。"""
 
     def __init__(
@@ -48,6 +48,9 @@ class OpenClawChatClient:  # pylint: disable=too-many-instance-attributes
         url: str,
         device_token: str,
         *,
+        identity,
+        nonce: str,
+        scopes,
         transport=None,
         translator: ChatEventTranslator | None = None,
         connect_frame_builder=None,
@@ -56,6 +59,11 @@ class OpenClawChatClient:  # pylint: disable=too-many-instance-attributes
     ) -> None:
         self._url = url
         self._device_token = device_token
+        # session connect 帧 device 签名块所需（issue #139）：identity 为 DeviceIdentity，
+        # nonce 来自 connect.challenge（#140 接入），scopes 为配对时网关批准的 scopes（#141 pool 从 Pairing 注入）。
+        self._identity = identity
+        self._nonce = nonce
+        self._scopes = scopes
         self._connect = transport or websockets.connect
         self._translator = translator or ChatEventTranslator()
         self._build_connect = connect_frame_builder or self._default_connect_frame
@@ -106,13 +114,16 @@ class OpenClawChatClient:  # pylint: disable=too-many-instance-attributes
         """连接是否已不可用（recv loop 退出或被显式关闭）；pool 据此不复用。"""
         return self._dead or self._closed
 
-    @staticmethod
-    def _default_connect_frame(req_id: str, device_token: str) -> dict:
-        """已配对长连接帧：委托给单一来源 ConnectFrameBuilder.session()（issue #102）。
+    def _default_connect_frame(self, req_id: str, device_token: str) -> dict:
+        """已配对长连接帧：委托给单一来源 ConnectFrameBuilder.session()（issue #102 / #139）。
 
-        spec §8.1 step5：配对后用 deviceToken 直连（auth.token），无需 device 签名块。
+        spec §8.1 step5 + #139：配对后用 deviceToken 直连（auth.token）并附 Ed25519 device 签名块
+        （identity/nonce/scopes 由构造期注入；nonce 等 challenge、scopes 读 Pairing 由 #140/#141 接入）。
         """
-        return _ConnectFrameBuilder.session(req_id=req_id, device_token=device_token)
+        return _ConnectFrameBuilder.session(
+            req_id=req_id, identity=self._identity, device_token=device_token,
+            nonce=self._nonce, scopes=self._scopes,
+        )
 
     async def connect(self) -> None:
         try:

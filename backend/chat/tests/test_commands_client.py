@@ -7,9 +7,23 @@ commands.list 是与 approval.resolve 同构的「req→res 回执」WS RPC（�
 import pytest
 
 from chat.chat_client import ChatSendError, OpenClawChatClient
+from chat.device_crypto import DeviceCrypto
 from chat.tests.fakes import FakeChatTransport
 
 URL = 'ws://127.0.0.1:19000/'
+
+# issue #139：session connect 帧 device 签名块所需，注入共享假值。
+_IDENTITY = DeviceCrypto.generate_identity()
+_NONCE = 'nz-cmd'
+_SCOPES = ['operator.read', 'operator.write', 'operator.approvals']
+
+
+def _client(device_token='dt', **kwargs):
+    """构造 OpenClawChatClient，默认注入假 identity/nonce/scopes（issue #139）。"""
+    return OpenClawChatClient(
+        URL, device_token,
+        identity=_IDENTITY, nonce=_NONCE, scopes=_SCOPES, **kwargs,
+    )
 
 
 @pytest.mark.asyncio
@@ -18,7 +32,7 @@ async def test_list_commands_builds_frame_and_returns_payload():
     payload = {'commands': [{'name': 'model', 'description': '切换模型',
                              'textAliases': ['/model', '/m'], 'nativeName': 'model'}]}
     t = FakeChatTransport(commands_payload=payload)
-    c = OpenClawChatClient(URL, 'dt', transport=t)
+    c = _client(transport=t)
     await c.connect()
     result = await c.list_commands()
     assert result == payload
@@ -33,7 +47,7 @@ async def test_list_commands_builds_frame_and_returns_payload():
 async def test_list_commands_not_connected_returns_empty():
     """未连接（_ws None）→ 返回 {}（对齐 list_pending_approvals 的 best-effort 契约）。"""
     t = FakeChatTransport()
-    c = OpenClawChatClient(URL, 'dt', transport=t)
+    c = _client(transport=t)
     assert await c.list_commands() == {}
 
 
@@ -41,7 +55,7 @@ async def test_list_commands_not_connected_returns_empty():
 async def test_list_commands_gateway_reject_raises():
     """网关拒绝（缺 operator.read scope）→ res not ok → 抛 ChatSendError（上层映射 502）。"""
     t = FakeChatTransport(commands_error={'code': 'FORBIDDEN', 'message': 'missing scope operator.read'})
-    c = OpenClawChatClient(URL, 'dt', transport=t)
+    c = _client(transport=t)
     await c.connect()
     with pytest.raises(ChatSendError):
         await c.list_commands()
@@ -52,7 +66,7 @@ async def test_list_commands_gateway_reject_raises():
 async def test_list_commands_ack_timeout_raises():
     """有界等待：ack 丢失/网关不回 → ChatSendError（不永久挂起），且 future 已从 _pending_resolves 清出。"""
     t = FakeChatTransport(suppress_commands_ack=True)
-    c = OpenClawChatClient(URL, 'dt', transport=t, ack_timeout=0.05)
+    c = _client(transport=t, ack_timeout=0.05)
     await c.connect()
     with pytest.raises(ChatSendError):
         await c.list_commands()

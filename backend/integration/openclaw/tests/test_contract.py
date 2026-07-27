@@ -19,6 +19,12 @@ def _fake_identity():
     return DeviceCrypto.generate_identity()
 
 
+# issue #139 session device 块：长连握手测试注入用的共享假值（identity/nonce/已批准 scopes）。
+_SESSION_IDENTITY = _fake_identity()
+_SESSION_NONCE = 'nz-contract'
+_SESSION_SCOPES = ['operator.read', 'operator.write', 'operator.approvals']
+
+
 class TestWireConstantsSingleSource:
     """wire 域常量单一来源：chat 三处与 integration.openclaw.wire 同对象（#90 范式）。"""
 
@@ -29,20 +35,27 @@ class TestWireConstantsSingleSource:
         assert pairing_ws._ConnectFrameBuilder is wire.ConnectFrameBuilder
 
     def test_scopes_is_single_sourced(self):
-        # chat_client/pairing_ws 不再直接 import SCOPES —— 由 ConnectFrameBuilder 单源消费
+        # chat_client/pairing_ws 不再直接 import SCOPES —— 由 ConnectFrameBuilder 单源消费。
+        # pairing 仍单源 wire.SCOPES；session（#139）的 scopes 改由调用端传入（配对时已批准 scopes）。
         pairwise_frame = wire.ConnectFrameBuilder.pairing(
             req_id='r', identity=_fake_identity(), token='t', nonce='n',
         )
-        session_frame = wire.ConnectFrameBuilder.session(req_id='r', device_token='dt')
+        approved = ['operator.read', 'operator.write']
+        session_frame = wire.ConnectFrameBuilder.session(
+            req_id='r', identity=_fake_identity(), device_token='dt', nonce='n', scopes=approved,
+        )
         assert pairwise_frame['params']['scopes'] == wire.SCOPES
-        assert session_frame['params']['scopes'] == wire.SCOPES
+        assert session_frame['params']['scopes'] == approved
 
     def test_caps_is_single_sourced(self):
         # chat_client/pairing_ws 不再直接 import CAPS —— 由 ConnectFrameBuilder 单源消费
         pairwise_frame = wire.ConnectFrameBuilder.pairing(
             req_id='r', identity=_fake_identity(), token='t', nonce='n',
         )
-        session_frame = wire.ConnectFrameBuilder.session(req_id='r', device_token='dt')
+        session_frame = wire.ConnectFrameBuilder.session(
+            req_id='r', identity=_fake_identity(), device_token='dt', nonce='n',
+            scopes=['operator.read'],
+        )
         assert pairwise_frame['params']['caps'] == wire.CAPS
         assert session_frame['params']['caps'] == wire.CAPS
 
@@ -51,7 +64,10 @@ class TestWireConstantsSingleSource:
         pairwise_frame = wire.ConnectFrameBuilder.pairing(
             req_id='r', identity=_fake_identity(), token='t', nonce='n',
         )
-        session_frame = wire.ConnectFrameBuilder.session(req_id='r', device_token='dt')
+        session_frame = wire.ConnectFrameBuilder.session(
+            req_id='r', identity=_fake_identity(), device_token='dt', nonce='n',
+            scopes=['operator.read'],
+        )
         assert pairwise_frame['params']['client']['id'] == wire.CLIENT_ID
         assert session_frame['params']['client']['id'] == wire.CLIENT_ID
 
@@ -607,18 +623,46 @@ class TestConnectFrameBuilderSingleSource:
     # —— Slice 2: session connect 帧（已配对长连接）——
 
     def test_session_connect_frame_minimum_fields(self):
-        """已配对长连接帧用 deviceToken 直连（无需 device 块）。"""
+        """已配对长连接帧基本字段（device 块/scopes 语义见 #139 专项测试）。"""
         frame = wire.ConnectFrameBuilder.session(
-            req_id='req-2', device_token='dt-abc',
+            req_id='req-2', identity=_fake_identity(), device_token='dt-abc',
+            nonce='nz-9', scopes=['operator.read', 'operator.write'],
         )
         assert frame['type'] == 'req'
         assert frame['method'] == 'connect'
         assert frame['params']['auth']['token'] == 'dt-abc'
-        assert 'device' not in frame['params']
         assert frame['params']['minProtocol'] == wire.PROTOCOL
+        assert frame['params']['maxProtocol'] == wire.PROTOCOL
         assert frame['params']['role'] == wire.ROLE
-        assert frame['params']['scopes'] == wire.SCOPES
         assert frame['params']['caps'] == wire.CAPS
+
+    # —— Slice 2b: session connect 帧加 device 签名块（issue #139，与 pairing 同构）——
+
+    def test_session_frame_has_device_block(self):
+        """issue #139：session 帧含完整 device 签名块（与 pairing() 字段一致）。"""
+        identity = _fake_identity()
+        frame = wire.ConnectFrameBuilder.session(
+            req_id='req-2', identity=identity, device_token='dt-abc',
+            nonce='nz-9', scopes=['operator.read', 'operator.write'],
+        )
+        dev = frame['params']['device']
+        assert dev['id'] == identity.device_id
+        assert dev['publicKey'] == identity.public_key_raw_base64url()
+        assert dev['nonce'] == 'nz-9'
+        assert isinstance(dev['signedAt'], int)
+        assert dev['signature']  # 非空签名
+
+    def test_session_frame_uses_device_token_and_stored_scopes(self):
+        """issue #139：session 帧 auth.token=device_token、scopes=传入的已批准 scopes（非 wire.SCOPES）。"""
+        identity = _fake_identity()
+        approved = ['operator.read', 'operator.write']  # 明显少于 wire.SCOPES 全量
+        frame = wire.ConnectFrameBuilder.session(
+            req_id='req-3', identity=identity, device_token='dt-9',
+            nonce='nz-9', scopes=approved,
+        )
+        assert frame['params']['auth']['token'] == 'dt-9'  # device_token，非 gateway token
+        assert frame['params']['scopes'] == approved
+        assert frame['params']['scopes'] != wire.SCOPES
 
 
 class TestPairingAdapterImplementsWirePort:
@@ -792,7 +836,7 @@ class TestOpenClawWireAdapterLongLived:
     # ── connect ───────────────────────────────────────────────────────────────
 
     def test_connect_uses_connect_frame_builder(self):
-        """connect() 经 ConnectFrameBuilder.session() 构建握手帧。"""
+        """connect() 经 ConnectFrameBuilder.session() 构建握手帧（issue #139：含 device 签名块）。"""
         import asyncio
 
         from chat.tests.fakes import FakeChatTransport
@@ -802,11 +846,15 @@ class TestOpenClawWireAdapterLongLived:
         adapter = OpenClawWireAdapter(transport=t)
 
         async def _run():
-            await adapter.connect('ws://x/', 'dt-xyz')
+            await adapter.connect(
+                'ws://x/', 'dt-xyz',
+                identity=_SESSION_IDENTITY, nonce=_SESSION_NONCE, scopes=_SESSION_SCOPES,
+            )
         asyncio.run(_run())
         connect_frame = next(f for f in t.sent if f.get('method') == 'connect')
         assert connect_frame['params']['auth']['token'] == 'dt-xyz'
-        assert 'device' not in connect_frame['params']
+        assert connect_frame['params']['device']['id'] == _SESSION_IDENTITY.device_id
+        assert connect_frame['params']['device']['signature']  # 非空签名
 
     def test_connect_failure_raises(self):
         """connect 握手失败上抛 ChatConnectError。"""
@@ -820,7 +868,10 @@ class TestOpenClawWireAdapterLongLived:
         adapter = OpenClawWireAdapter(transport=t)
 
         async def _run():
-            await adapter.connect('ws://x/', 'dt')
+            await adapter.connect(
+                'ws://x/', 'dt',
+                identity=_SESSION_IDENTITY, nonce=_SESSION_NONCE, scopes=_SESSION_SCOPES,
+            )
         with pytest.raises(ChatConnectError):
             asyncio.run(_run())
 
@@ -836,7 +887,10 @@ class TestOpenClawWireAdapterLongLived:
         adapter = OpenClawWireAdapter(transport=t, timeout=0.1)
 
         async def _run():
-            await adapter.connect('ws://x/', 'dt')
+            await adapter.connect(
+                'ws://x/', 'dt',
+                identity=_SESSION_IDENTITY, nonce=_SESSION_NONCE, scopes=_SESSION_SCOPES,
+            )
         with pytest.raises(ChatConnectError):
             asyncio.run(_run())
 
@@ -853,7 +907,10 @@ class TestOpenClawWireAdapterLongLived:
         adapter = OpenClawWireAdapter(transport=t)
 
         async def _run():
-            await adapter.connect('ws://x/', 'dt')
+            await adapter.connect(
+                'ws://x/', 'dt',
+                identity=_SESSION_IDENTITY, nonce=_SESSION_NONCE, scopes=_SESSION_SCOPES,
+            )
             return await adapter.send_message('sess-1', 'hello', on_event=lambda f: None)
         run_id = asyncio.run(_run())
         assert run_id == 'run-9'
@@ -889,7 +946,10 @@ class TestOpenClawWireAdapterLongLived:
         adapter = OpenClawWireAdapter(transport=t)
 
         async def _run():
-            await adapter.connect('ws://x/', 'dt')
+            await adapter.connect(
+                'ws://x/', 'dt',
+                identity=_SESSION_IDENTITY, nonce=_SESSION_NONCE, scopes=_SESSION_SCOPES,
+            )
             await adapter.send_message('s', 'm', on_event=lambda f: None)
         with pytest.raises(ChatSendError) as exc:
             asyncio.run(_run())
@@ -914,7 +974,10 @@ class TestOpenClawWireAdapterLongLived:
             received.append(frame)
 
         async def _run():
-            await adapter.connect('ws://x/', 'dt')
+            await adapter.connect(
+                'ws://x/', 'dt',
+                identity=_SESSION_IDENTITY, nonce=_SESSION_NONCE, scopes=_SESSION_SCOPES,
+            )
             await adapter.send_message('s', 'm', on_event=cb)
             await asyncio.sleep(0.1)
         asyncio.run(_run())
@@ -936,7 +999,10 @@ class TestOpenClawWireAdapterLongLived:
         adapter = OpenClawWireAdapter(transport=t)
 
         async def _run():
-            await adapter.connect('ws://x/', 'dt')
+            await adapter.connect(
+                'ws://x/', 'dt',
+                identity=_SESSION_IDENTITY, nonce=_SESSION_NONCE, scopes=_SESSION_SCOPES,
+            )
             return await adapter.resolve_approval('ap-1', 'exec', 'approve')
         result = asyncio.run(_run())
         assert result == {'id': 'ap-1', 'decision': 'approve'}
@@ -955,7 +1021,10 @@ class TestOpenClawWireAdapterLongLived:
         adapter = OpenClawWireAdapter(transport=t)
 
         async def _run():
-            await adapter.connect('ws://x/', 'dt')
+            await adapter.connect(
+                'ws://x/', 'dt',
+                identity=_SESSION_IDENTITY, nonce=_SESSION_NONCE, scopes=_SESSION_SCOPES,
+            )
             await adapter.resolve_approval('ap-1', 'exec', 'approve')
         with pytest.raises(ChatSendError) as exc:
             asyncio.run(_run())
@@ -975,7 +1044,10 @@ class TestOpenClawWireAdapterLongLived:
         adapter = OpenClawWireAdapter(transport=t)
 
         async def _run():
-            await adapter.connect('ws://x/', 'dt')
+            await adapter.connect(
+                'ws://x/', 'dt',
+                identity=_SESSION_IDENTITY, nonce=_SESSION_NONCE, scopes=_SESSION_SCOPES,
+            )
             return await adapter.list_commands()
         result = asyncio.run(_run())
         assert result == payload
@@ -995,7 +1067,10 @@ class TestOpenClawWireAdapterLongLived:
         adapter = OpenClawWireAdapter(transport=t)
 
         async def _run():
-            await adapter.connect('ws://x/', 'dt')
+            await adapter.connect(
+                'ws://x/', 'dt',
+                identity=_SESSION_IDENTITY, nonce=_SESSION_NONCE, scopes=_SESSION_SCOPES,
+            )
             return await adapter.sessions_rpc('sessions.list', {'agentId': 'main'})
         result = asyncio.run(_run())
         assert result == {'sessions': []}
@@ -1014,7 +1089,10 @@ class TestOpenClawWireAdapterLongLived:
         adapter = OpenClawWireAdapter(transport=t, timeout=0.1)
 
         async def _run():
-            await adapter.connect('ws://x/', 'dt')
+            await adapter.connect(
+                'ws://x/', 'dt',
+                identity=_SESSION_IDENTITY, nonce=_SESSION_NONCE, scopes=_SESSION_SCOPES,
+            )
             await adapter.send_message('s', 'm', on_event=lambda f: None)
         with pytest.raises(ChatSendError) as exc:
             asyncio.run(_run())
@@ -1033,7 +1111,10 @@ class TestOpenClawWireAdapterLongLived:
         adapter = OpenClawWireAdapter(transport=t, timeout=0.1)
 
         async def _run():
-            await adapter.connect('ws://x/', 'dt')
+            await adapter.connect(
+                'ws://x/', 'dt',
+                identity=_SESSION_IDENTITY, nonce=_SESSION_NONCE, scopes=_SESSION_SCOPES,
+            )
             await adapter.resolve_approval('ap-1', 'exec', 'approve')
         with pytest.raises(ChatSendError) as exc:
             asyncio.run(_run())
@@ -1052,7 +1133,10 @@ class TestOpenClawWireAdapterLongLived:
         adapter = OpenClawWireAdapter(transport=t, timeout=0.1)
 
         async def _run():
-            await adapter.connect('ws://x/', 'dt')
+            await adapter.connect(
+                'ws://x/', 'dt',
+                identity=_SESSION_IDENTITY, nonce=_SESSION_NONCE, scopes=_SESSION_SCOPES,
+            )
             await adapter.list_commands()
         with pytest.raises(ChatSendError) as exc:
             asyncio.run(_run())
@@ -1075,7 +1159,10 @@ class TestOpenClawWireAdapterLongLived:
         adapter = OpenClawWireAdapter(transport=t, timeout=0.1)
 
         async def _run():
-            await adapter.connect('ws://x/', 'dt')
+            await adapter.connect(
+                'ws://x/', 'dt',
+                identity=_SESSION_IDENTITY, nonce=_SESSION_NONCE, scopes=_SESSION_SCOPES,
+            )
             await adapter.sessions_rpc('sessions.list', {'agentId': 'main'})
         with pytest.raises(ChatSendError) as exc:
             asyncio.run(_run())
@@ -1097,7 +1184,10 @@ class TestOpenClawWireAdapterLongLived:
         adapter = OpenClawWireAdapter(transport=t)
 
         async def _run():
-            await adapter.connect('ws://x/', 'dt')
+            await adapter.connect(
+                'ws://x/', 'dt',
+                identity=_SESSION_IDENTITY, nonce=_SESSION_NONCE, scopes=_SESSION_SCOPES,
+            )
             return await adapter.list_pending_approvals()
         cards = asyncio.run(_run())
         assert cards == [{'type': 'approval', 'id': 'ap-1', 'kind': 'exec', 'command': 'cmd1', 'sessionKey': None}]
@@ -1123,7 +1213,10 @@ class TestOpenClawWireAdapterLongLived:
             got.append(frame)
 
         async def _run():
-            await adapter.connect('ws://x/', 'dt')
+            await adapter.connect(
+                'ws://x/', 'dt',
+                identity=_SESSION_IDENTITY, nonce=_SESSION_NONCE, scopes=_SESSION_SCOPES,
+            )
             adapter.add_approval_subscriber(sub)
             await asyncio.sleep(0.1)
         asyncio.run(_run())
@@ -1149,7 +1242,10 @@ class TestOpenClawWireAdapterLongLived:
             got_b.append(frame)
 
         async def _run():
-            await adapter.connect('ws://x/', 'dt')
+            await adapter.connect(
+                'ws://x/', 'dt',
+                identity=_SESSION_IDENTITY, nonce=_SESSION_NONCE, scopes=_SESSION_SCOPES,
+            )
             adapter.add_approval_subscriber(sub_a)
             adapter.add_approval_subscriber(sub_b)
             adapter.remove_approval_subscriber(sub_a)
@@ -1173,7 +1269,10 @@ class TestOpenClawWireAdapterLongLived:
         adapter = OpenClawWireAdapter(transport=t)
 
         async def _run():
-            await adapter.connect('ws://x/', 'dt')
+            await adapter.connect(
+                'ws://x/', 'dt',
+                identity=_SESSION_IDENTITY, nonce=_SESSION_NONCE, scopes=_SESSION_SCOPES,
+            )
             assert not adapter.dead
             await adapter.close()
             assert adapter.dead
@@ -1194,7 +1293,10 @@ class TestOpenClawWireAdapterLongLived:
             received.append(frame)
 
         async def _run():
-            await adapter.connect('ws://x/', 'dt')
+            await adapter.connect(
+                'ws://x/', 'dt',
+                identity=_SESSION_IDENTITY, nonce=_SESSION_NONCE, scopes=_SESSION_SCOPES,
+            )
             rid = await adapter.send_message('s', 'm', on_event=cb)
             adapter.discard(rid)
             t.push({'type': 'event', 'event': 'chat', 'payload': {'runId': rid, 'state': 'delta', 'deltaText': 'lost'}})

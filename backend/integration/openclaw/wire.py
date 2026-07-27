@@ -104,11 +104,28 @@ class ConnectFrameBuilder:
         }
 
     @staticmethod
-    def session(*, req_id: str, device_token: str) -> dict:
-        """构造已配对长连接 connect 帧（spec §8.1 step 5）。
+    def session(*, req_id: str, identity, device_token: str, nonce: str, scopes) -> dict:
+        """构造已配对长连接 connect 帧（spec §8.1 step 5 / issue #139）。
 
-        deviceToken 作 auth.token 直连，无需 device 签名块。
+        与 pairing() 同构——复用 DeviceCrypto.build_auth_payload_v3 构造 Ed25519 device 签名块。
+        区别：auth.token 用 device_token（非 gateway token）、scopes 用配对时网关批准并存储的 scopes
+        （非全量 SCOPES 常量）。identity 为 DeviceIdentity（chat.device_crypto），调用端注入。
         """
+        from chat.device_crypto import DeviceCrypto
+
+        signed_at_ms = int(time.time() * 1000)
+        payload = DeviceCrypto.build_auth_payload_v3(
+            device_id=identity.device_id,
+            client_id=CLIENT_ID,
+            client_mode=CLIENT_MODE,
+            role=ROLE,
+            scopes=scopes,
+            signed_at_ms=signed_at_ms,
+            token=device_token,
+            nonce=nonce,
+            platform='linux',
+            device_family='',
+        )
         return {
             'type': 'req',
             'id': req_id,
@@ -123,8 +140,15 @@ class ConnectFrameBuilder:
                     'mode': CLIENT_MODE,
                 },
                 'role': ROLE,
-                'scopes': list(SCOPES),
+                'scopes': list(scopes),
                 'caps': list(CAPS),
                 'auth': {'token': device_token},
+                'device': {
+                    'id': identity.device_id,
+                    'publicKey': identity.public_key_raw_base64url(),
+                    'signature': identity.sign(payload),
+                    'signedAt': signed_at_ms,
+                    'nonce': nonce,
+                },
             },
         }
