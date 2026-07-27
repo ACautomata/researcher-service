@@ -304,25 +304,25 @@ async def test_disconnect_one_keeps_peer_subscribed(override_pool, instance, fak
 
 
 @pytest.mark.asyncio
-async def test_resolve_echoes_requested_decision(override_pool, instance, fake_client):
-    """codex P1/P2 #163：resolve 回执用请求值（非 authoritative——ack payload 无 decision 字段），
-    权威值由网关 resolved 事件广播。"""
-    fake_client.resolve_payload = {'id': 'ap-1', 'decision': 'deny'}  # 模拟 ack payload（ADR 0003 无 decision）
+async def test_resolve_awaits_resolved_event(override_pool, instance, fake_client):
+    """codex P2 #163：resolve ack 不应回送 approvalResolved——权威值由 resolved 事件负责。"""
+    fake_client.resolve_payload = {'id': 'ap-1'}
     comm = await _connect_authed()
     await comm.connect()
     await comm.send_json_to({'type': 'start', 'container': 'demo'})
     await comm.receive_json_from()  # ready
-    await comm.send_json_to({'type': 'resolve', 'id': 'ap-1', 'kind': 'exec', 'decision': 'approve'})
-    resp = await comm.receive_json_from()  # 直接回执（immediate feedback，用请求值）
-    assert resp == {'type': 'approvalResolved', 'id': 'ap-1', 'decision': 'approve'}
-    assert fake_client.resolved == [('ap-1', 'exec', 'approve')]
+    await comm.send_json_to({'type': 'resolve', 'id': 'ap-1', 'kind': 'exec', 'decision': 'allow-once'})
+    # resolve 应静默成功，不应发送 approvalResolved（权威值由 resolved 事件 broadcast）
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(comm.receive_json_from(), timeout=0.5)
+    assert fake_client.resolved == [('ap-1', 'exec', 'allow-once')]
     await comm.disconnect()
 
 
 @pytest.mark.asyncio
-async def test_resolve_no_broadcast_from_ack(override_pool, instance, fake_client):
-    """codex P2 #163：resolve ack 不应广播——权威值由 resolved 事件 fan-out。"""
-    fake_client.resolve_payload = {'id': 'ap-1', 'decision': 'approve'}
+async def test_resolve_peer_receives_nothing_from_ack(override_pool, instance, fake_client):
+    """codex P2 #163：resolve ack 无广播——对等端不应收到任何帧。"""
+    fake_client.resolve_payload = {'id': 'ap-1'}
     comm_a = await _connect_authed('alice')
     await comm_a.connect()
     await comm_a.send_json_to({'type': 'start', 'container': 'demo'})
@@ -331,11 +331,12 @@ async def test_resolve_no_broadcast_from_ack(override_pool, instance, fake_clien
     await comm_b.connect()
     await comm_b.send_json_to({'type': 'start', 'container': 'demo'})
     await comm_b.receive_json_from()  # B ready
-    # A 提交 resolve → A 仅收直接回执（无广播）；B 无任何消息
-    await comm_a.send_json_to({'type': 'resolve', 'id': 'ap-1', 'kind': 'exec', 'decision': 'approve'})
-    a1 = await comm_a.receive_json_from()  # 直接回执
-    assert a1 == {'type': 'approvalResolved', 'id': 'ap-1', 'decision': 'approve'}
-    # B 不应收到任何来自 ack 的消息
+    # A 提交 resolve
+    await comm_a.send_json_to({'type': 'resolve', 'id': 'ap-1', 'kind': 'exec', 'decision': 'allow-once'})
+    # A 不应收到任何 immediate feedback
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(comm_a.receive_json_from(), timeout=0.5)
+    # B 不应收到任何广播
     with pytest.raises(asyncio.TimeoutError):
         await asyncio.wait_for(comm_b.receive_json_from(), timeout=0.5)
     await comm_a.disconnect()
@@ -395,6 +396,21 @@ async def test_resolve_rejects_invalid_kind(override_pool, instance, fake_client
     assert resp['type'] == 'error'
     assert '非法 kind' in resp.get('message', '')
     # resolve_approval 应未被调用（在消费端即被拒绝）
+    assert fake_client.resolved == []
+    await comm.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_resolve_rejects_invalid_decision(override_pool, instance, fake_client):
+    """codex P2 #163：非法 decision 应在消费端拒绝，不转发到网关。"""
+    comm = await _connect_authed()
+    await comm.connect()
+    await comm.send_json_to({'type': 'start', 'container': 'demo'})
+    await comm.receive_json_from()  # ready
+    await comm.send_json_to({'type': 'resolve', 'id': 'ap-1', 'kind': 'exec', 'decision': 'approve'})
+    resp = await comm.receive_json_from()
+    assert resp['type'] == 'error'
+    assert '非法 decision' in resp.get('message', '')
     assert fake_client.resolved == []
     await comm.disconnect()
 

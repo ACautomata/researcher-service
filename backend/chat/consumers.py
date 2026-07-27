@@ -89,6 +89,9 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
         if kind not in ('exec', 'plugin'):
             await self.send_json({'type': 'error', 'message': f'非法 kind（{kind}），仅允许 exec/plugin'})
             return
+        if decision not in ('allow-once', 'allow-always', 'deny'):
+            await self.send_json({'type': 'error', 'message': f'非法 decision（{decision}），仅允许 allow-once/allow-always/deny'})
+            return
         try:
             await self._client.resolve_approval(approval_id, kind, decision)
         except Exception:  # pylint: disable=broad-exception-caught
@@ -96,11 +99,10 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
             # 前端仅复位该卡（codex R2 P2，并发 resolve 不误复位其它在途卡）
             await self.send_json({'type': 'error', 'message': '审批回覆失败，请稍后重试', 'id': approval_id})
             return
-        # 不回送权威 decision——RPC ack payload 无 decision 字段（ADR 0003），
-        # 实际权威值由网关经 exec/plugin.approval.resolved 事件广播。
-        # 此处仅向请求方发 immediate feedback（usedecision），
-        # resolved 事件的 _fanout_approval 负责对全部订阅者发出 authoritative 覆盖（codex P2 #163）。
-        await self.send_json({'type': 'approvalResolved', 'id': approval_id, 'decision': decision})
+        # 不回送 approvalResolved——RPC ack payload 无 decision 字段（ADR 0003），
+        # 且 resolved 事件可能在 ack 之前到达。权威 decision 仅由网关经
+        # exec/plugin.approval.resolved 事件广播（codex P2 #163）。
+        # 前端在 resolving 态等 resolved 事件落定。此处静默成功，不干扰权威结果。
 
     async def _handle_send(self, content):
         if self._client is None:
