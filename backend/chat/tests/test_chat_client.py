@@ -9,7 +9,7 @@ import asyncio
 import pytest
 
 from chat.chat_client import ChatClientError, ChatConnectError, ChatSendError, OpenClawChatClient
-from chat.device_crypto import DeviceCrypto
+from chat.device_crypto import DeviceCrypto, DeviceIdentity
 from chat.tests.fakes import FakeChatTransport
 
 URL = 'ws://127.0.0.1:19000/'
@@ -26,6 +26,33 @@ def _client(url=URL, device_token='dt', **kwargs):
         url, device_token,
         identity=_IDENTITY, nonce=_NONCE, scopes=_SCOPES, **kwargs,
     )
+
+
+@pytest.mark.asyncio
+async def test_client_from_persisted_identity_builds_signed_device_block():
+    """回归 (codex #149 P2)：从持久化材料重建 DeviceIdentity 构造 client 不 TypeError，
+    且 connect 帧 device 块（id/publicKey/signature）源自该 identity、scopes 源自传入值。
+    锁定 test_integration smoke 与 #141 pool 注入共用的「从 Pairing 记录构造 client」契约。"""
+    persisted = DeviceIdentity(
+        device_id=_IDENTITY.device_id,
+        public_key_pem=_IDENTITY.public_key_pem,
+        private_key_pem=_IDENTITY.private_key_pem,
+    )
+    approved = ['operator.read', 'operator.write']  # 模拟 pairing.scopes_list()，少于全量 SCOPES
+    t = FakeChatTransport()
+    c = OpenClawChatClient(
+        URL, 'dt', identity=persisted, nonce='', scopes=approved, transport=t,
+    )
+    await c.connect()
+    connect = next(f for f in t.sent if f.get('method') == 'connect')
+    dev = connect['params']['device']
+    assert dev['id'] == persisted.device_id
+    assert dev['publicKey'] == persisted.public_key_raw_base64url()
+    assert dev['signature']  # 持久化私钥可签（非空）
+    assert dev['nonce'] == ''  # #140 接入前空 nonce 占位（smoke 同款）
+    assert connect['params']['scopes'] == approved
+    assert connect['params']['auth']['token'] == 'dt'
+    await c.aclose()
 
 
 @pytest.mark.asyncio
