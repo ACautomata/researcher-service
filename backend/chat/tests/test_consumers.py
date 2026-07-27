@@ -377,7 +377,7 @@ async def test_resolve_failure_sends_error(override_pool, instance, fake_client)
     await comm.connect()
     await comm.send_json_to({'type': 'start', 'container': 'demo'})
     await comm.receive_json_from()  # ready
-    await comm.send_json_to({'type': 'resolve', 'id': 'ap-1', 'kind': 'exec', 'decision': 'approve'})
+    await comm.send_json_to({'type': 'resolve', 'id': 'ap-1', 'kind': 'exec', 'decision': 'allow-once'})
     resp = await comm.receive_json_from()
     assert resp['type'] == 'error'
     assert resp['id'] == 'ap-1'  # codex R2 P2：error 帧带 approval id，前端仅复位该卡
@@ -475,10 +475,13 @@ async def test_consumer_operates_via_wire_port_contract(override_pool, instance)
     done = await comm.receive_json_from()
     assert done['type'] == 'done'
     # resolve
-    wire.resolve_payload = {'id': 'ap-1', 'decision': 'approve'}
-    await comm.send_json_to({'type': 'resolve', 'id': 'ap-1', 'kind': 'exec', 'decision': 'approve'})
+    wire.resolve_payload = {}
+    await comm.send_json_to({'type': 'resolve', 'id': 'ap-1', 'kind': 'exec', 'decision': 'allow-once'})
+    # resolve ack 是静默的（权威值由 resolved 事件落地，codex P2 #163）
+    # 模拟网关广播 resolved 事件
+    await wire.emit_approval({'type': 'approvalResolved', 'id': 'ap-1', 'decision': 'allow-once'})
     resolved = await comm.receive_json_from()
-    assert resolved['decision'] == 'approve'
+    assert resolved == {'type': 'approvalResolved', 'id': 'ap-1', 'decision': 'allow-once'}
     # disconnect → approved subscriber removed
     await comm.disconnect()
     assert wire._approval_subscribers == []  # pylint: disable=use-implicit-booleaness-not-comparison
