@@ -14,6 +14,7 @@ bind-mount 退化为空目录 → 网关报 Missing config。用 --basetemp 覆�
 import asyncio
 import json
 import os
+import uuid
 from pathlib import Path
 
 import pytest
@@ -368,3 +369,117 @@ def test_chat_send_event_stream_wire_schema(tmp_path):  # pylint: disable=too-ma
         payload = f_payload.get('payload') or {}
         assert 'stopReason' in payload, \
             f'final 应含 stopReason，got keys={sorted(payload.keys())}'
+
+
+@pytest.mark.django_db
+def test_readonly_rpc_wire_schema(tmp_path):  # pylint: disable=too-many-locals,too-many-statements
+    """T3（#158）：只读 RPC wire schema 断言（sessions/history/commands）。
+
+    起容器+配对后，按依赖顺序跑 4 个只读 RPC，断言响应 payload schema（ADR 0003 实测确认假设对，
+    应通过）：sessions.create（返回 key=agent:main:<raw> 前缀）、sessions.list（sessions[].key/
+    derivedTitle/updatedAt）、chat.history（messages[].content 多态 user=str/assistant=list）、
+    commands.list（commands[].name/textAliases/description）。
+    """
+
+    from chat.pairing import PairingService
+    from integration.openclaw.adapters import HttpHealthProbe
+
+    orch, runtime = _build_orchestrator(tmp_path)
+
+    name = 'wire-readonly'
+    with WireTestContext(
+        orch=orch, runtime=runtime,
+        pairing_service=PairingService(),
+        health_probe=HttpHealthProbe(),
+        name=name,
+    ) as (client, _inst, _pairing):
+        async def _run():
+            await client.connect()
+            try:
+                # 1. commands.list —— 无依赖，先验连接通 + 命令清单 schema
+                commands = await client.list_commands()
+
+                # 2. sessions.create —— 入参 raw key，返回 agent:main:<raw> 完整格式
+                raw_key = uuid.uuid4().hex
+                created = await client.create_session(raw_key)
+                session_key = created.get('key')
+
+                # 3. chat.send —— 在新会话发消息，造 history（user+assistant）+ list 数据
+                done_event = asyncio.Event()
+
+                async def collect(event):
+                    if event.get('type') in ('done', 'error'):
+                        done_event.set()
+
+                send_run_id = await client.send_message(
+                    session_key, 'Say hello in one short sentence.',
+                    on_event=collect,
+                )
+                assert send_run_id, 'chat.send 应返回 runId'
+                try:
+                    await asyncio.wait_for(done_event.wait(), timeout=120.0)
+                except TimeoutError:
+                    pass
+
+                # 4. sessions.list —— 断言 sessions[].key/derivedTitle/updatedAt
+                listed = await client.list_sessions()
+
+                # 5. chat.history —— 断言 messages[].content 多态
+                history = await client.get_history(session_key)
+            finally:
+                await client.aclose()
+            return commands, created, listed, history, raw_key
+
+        commands, created, listed, history, raw_key = asyncio.run(_run())
+
+    # ---- sessions.create：返回 key=agent:main:<raw> 前缀格式 ----
+    created_key = created.get('key')
+    assert created_key, 'sessions.create 应返回 key 字段'
+    assert isinstance(created_key, str)
+    assert created_key.startswith('agent:main:'), \
+        f'sessions.create key 应为 agent:main: 前缀格式，got {created_key!r}'
+    assert created_key.endswith(raw_key), \
+        f'sessions.create key 应以入参 raw key 结尾，got {created_key!r}（raw={raw_key!r}）'
+
+    # ---- commands.list：commands[].name/textAliases/description ----
+    cmd_list = commands.get('commands')
+    assert isinstance(cmd_list, list) and cmd_list, \
+        'commands.list 应返回非空 commands 数组'
+    for cmd in cmd_list:
+        assert isinstance(cmd, dict), f'command 项应为 dict，got {type(cmd).__name__}'
+        assert 'name' in cmd, f'command 应含 name，keys={sorted(cmd.keys())}'
+        assert 'textAliases' in cmd, f'command 应含 textAliases，keys={sorted(cmd.keys())}'
+        assert 'description' in cmd, f'command 应含 description，keys={sorted(cmd.keys())}'
+
+    # ---- sessions.list：sessions[].key/derivedTitle/updatedAt，含刚建会话 ----
+    sessions = listed.get('sessions')
+    assert isinstance(sessions, list), \
+        f'sessions.list 应返回 sessions 数组，got {type(sessions).__name__}'
+    matched = [
+        s for s in sessions
+        if isinstance(s, dict) and s.get('key') == created_key
+    ]
+    assert matched, \
+        f'sessions.list 应含刚建会话 {created_key!r}，' \
+        f'got keys={[s.get("key") for s in sessions if isinstance(s, dict)]}'
+    for s in matched:
+        assert 'key' in s
+        assert 'derivedTitle' in s, \
+            f'session 应含 derivedTitle，keys={sorted(s.keys())}'
+        assert 'updatedAt' in s, \
+            f'session 应含 updatedAt，keys={sorted(s.keys())}'
+
+    # ---- chat.history：messages[].content 多态（user=str, assistant=list）----
+    messages = history.get('messages')
+    assert isinstance(messages, list) and messages, \
+        'chat.history 应返回非空 messages 数组'
+    user_msgs = [m for m in messages if isinstance(m, dict) and m.get('role') == 'user']
+    asst_msgs = [m for m in messages if isinstance(m, dict) and m.get('role') == 'assistant']
+    assert user_msgs, 'history 应含 user 消息（刚发的 prompt）'
+    assert asst_msgs, 'history 应含 assistant 消息（LLM 回复）'
+    for m in user_msgs:
+        assert isinstance(m.get('content'), str), \
+            f'user message.content 应为 str，got {type(m.get("content")).__name__}'
+    for m in asst_msgs:
+        assert isinstance(m.get('content'), list), \
+            f'assistant message.content 应为 list，got {type(m.get("content")).__name__}'
