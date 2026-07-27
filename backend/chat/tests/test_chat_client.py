@@ -612,6 +612,32 @@ async def test_list_pending_approvals_empty_or_malformed_tolerated():
 
 
 @pytest.mark.asyncio
+async def test_list_pending_approvals_payload_list_translates_cards():
+    """实测校准（spike ghcr 2026.6.34-browser, 2026-07-27）：exec.approval.list 的 payload
+    直接是 list（非空 [{...}]），非 {approvals:[...]} dict。旧代码 list.get 会 AttributeError。"""
+    t = FakeChatTransport(list_payload=[
+        {'id': 'ap-1', 'kind': 'exec', 'systemRunPlan': {'rawCommand': 'cmd1'}},
+    ])
+    c = _client(transport=t)
+    await c.connect()
+    cards = await c.list_pending_approvals()
+    assert cards == [
+        {'type': 'approval', 'id': 'ap-1', 'kind': 'exec', 'command': 'cmd1', 'sessionKey': None},
+    ]
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_list_pending_approvals_payload_empty_list_returns_empty():
+    """实测：payload 直接是空列表 → 空卡列表（best-effort）。"""
+    t = FakeChatTransport(list_payload=[])
+    c = _client(transport=t)
+    await c.connect()
+    assert await c.list_pending_approvals() == []
+    await c.aclose()
+
+
+@pytest.mark.asyncio
 async def test_broadcast_approval_resolved_fans_out_to_all_subscribers():
     """codex R2 P2：broadcast_approval_resolved 把权威回执 fan-out 到全部订阅者（副本一致收敛）。"""
     t = FakeChatTransport()

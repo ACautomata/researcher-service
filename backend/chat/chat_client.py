@@ -334,10 +334,17 @@ class OpenClawChatClient:  # pylint: disable=too-many-instance-attributes,too-ma
         except BaseException:  # pylint: disable=broad-exception-caught
             self._pending_resolves.pop(req_id, None)
             return []
-        items = (payload or {}).get('approvals')
-        if items is None:
-            single = (payload or {}).get('approval')
-            items = [single] if isinstance(single, dict) else []
+        # 实测校准（spike ghcr 2026.6.34-browser, 2026-07-27）：payload 可能直接是 list
+        # （空 [] / 非空 [{...}]），也可能是 dict {approvals:[...]}。list 上调 .get 会崩，先判类型。
+        if isinstance(payload, list):
+            items = payload
+        elif isinstance(payload, dict):
+            items = payload.get('approvals')
+            if items is None:
+                single = payload.get('approval')
+                items = [single] if isinstance(single, dict) else []
+        else:
+            items = []
         if not isinstance(items, list):
             return []
         cards = []
