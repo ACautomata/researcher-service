@@ -543,8 +543,12 @@ def test_list_pending_approvals_returns_list(tmp_path):
     """T4（#159 验收#1）：list_pending_approvals payload=list 防回归（PR #152）。
 
     exec.approval.list 响应 payload 直接是 list（空 []/非空 [{...}]），非 {approvals:[...]}
-    dict。PR #152 修了假设 dict 取 .approvals、在非空 list 上 list.get 崩的 bug。本测试起真容器
-    调 RPC，断言返回 list 类型不崩——空 list（无待审批）也通过，验证 payload=list 类型分支。
+    dict。PR #152 修了假设 dict 取 .approvals、在非空 list 上 list.get 崩的 bug。
+
+    list_pending_approvals() 是 best-effort（RPC 拒/超时/解析失败返回 []），单断言
+    isinstance(cards, list) 无法区分「RPC 成功返回 list」与「RPC 坏了返回空 []」（codex P2）。
+    故捕获 exec.approval.list 原始 res 帧，断言 payload 真为 list——验证网关 list-shaped 响应，
+    RPC/schema 路径坏（超时无 res / res not ok）时测试 red。
     """
 
     from chat.pairing import PairingService
@@ -552,12 +556,13 @@ def test_list_pending_approvals_returns_list(tmp_path):
 
     orch, runtime = _build_orchestrator(tmp_path)
 
+    capturer = _RawCaptureTransport()
     name = 'wire-approval-list'
     with WireTestContext(
         orch=orch, runtime=runtime,
         pairing_service=PairingService(),
         health_probe=HttpHealthProbe(),
-        name=name,
+        name=name, transport=capturer,
     ) as (client, _inst, _pairing):
         async def _run():
             await client.connect()
@@ -569,9 +574,22 @@ def test_list_pending_approvals_returns_list(tmp_path):
 
         cards = asyncio.run(_run())
 
-    # PR #152 防回归：payload 直接是 list 时不崩，翻译成 list[card]（此处无待审批→空 list）
+    # 翻译后 cards 是 list（弱信号：best-effort 在 RPC 坏时也返回 []）
     assert isinstance(cards, list), \
         f'list_pending_approvals 应返回 list（payload=list 防回归），got {type(cards).__name__}'
+
+    # codex P2：断言原始 res payload 真为 list（验证网关 list-shaped 响应，非 best-effort 空 []）
+    list_req = next(
+        f for f in capturer.sent if f.get('method') == 'exec.approval.list'
+    )
+    list_res = next(
+        f for f in capturer.captured
+        if f.get('type') == 'res' and f.get('id') == list_req.get('id')
+    )
+    raw_payload = list_res.get('payload')
+    assert isinstance(raw_payload, list), \
+        f'exec.approval.list res payload 应为 list（PR #152 防回归），' \
+        f'got {type(raw_payload).__name__}={raw_payload!r}'
 
 
 @pytest.mark.django_db
