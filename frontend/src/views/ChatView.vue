@@ -518,7 +518,7 @@ function connect() {
       if (a) {
         a.status = 'resolved'
         // codex P1 (issue #154)：识别 allow-once/allow-always/deny，其它权威值显示「未知」
-        a.decision = ['allow-once', 'allow-always', 'deny'].includes(decision) ? decision : 'unknown'
+        a.decision = decision === 'allow-once' || decision === 'allow-always' || decision === 'deny' ? decision : 'unknown'
       }
     },
     onTool: (tool) => {
