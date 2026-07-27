@@ -17,7 +17,7 @@ class ApprovalResolveSerializer(serializers.Serializer):
     """
 
     id = serializers.CharField()
-    kind = serializers.CharField()
+    kind = serializers.ChoiceField(choices=('exec', 'plugin'))
     decision = serializers.ChoiceField(choices=('allow-once', 'allow-always', 'deny'))
 
     # APPROVAL_FIELD_ID/KIND/DECISION 常量由集成包单源管理（issue #105），

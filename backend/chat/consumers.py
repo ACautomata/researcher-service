@@ -86,6 +86,9 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
         if not approval_id or not kind or not decision:
             await self.send_json({'type': 'error', 'message': '缺少 id/kind/decision'})
             return
+        if kind not in ('exec', 'plugin'):
+            await self.send_json({'type': 'error', 'message': f'非法 kind（{kind}），仅允许 exec/plugin'})
+            return
         try:
             payload = await self._client.resolve_approval(approval_id, kind, decision)
         except Exception:  # pylint: disable=broad-exception-caught

@@ -119,6 +119,13 @@ def test_resolve_invalid_decision_400(authed, instance, override_pool):
     assert resp.status_code == 400
 
 
+def test_resolve_invalid_kind_400(authed, instance, override_pool):
+    """codex P2：非法 kind 应为 400，不转发到网关。"""
+    override_pool(_FakePool(_FakeClient()))
+    resp = authed.post(URL, {'id': 'ap-1', 'kind': 'typo', 'decision': 'allow-once'}, format='json')
+    assert resp.status_code == 400
+
+
 def test_resolve_unknown_container_404(authed, override_pool):
     override_pool(_FakePool(_FakeClient()))
     resp = authed.post(URL, {'id': 'a', 'kind': 'exec', 'decision': 'allow-once'}, format='json')

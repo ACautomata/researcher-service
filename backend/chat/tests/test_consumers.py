@@ -386,6 +386,22 @@ async def test_resolve_failure_sends_error(override_pool, instance, fake_client)
 
 
 @pytest.mark.asyncio
+async def test_resolve_rejects_invalid_kind(override_pool, instance, fake_client):
+    """codex P2：非法 kind 应在消费端拒绝，不转发到网关。"""
+    comm = await _connect_authed()
+    await comm.connect()
+    await comm.send_json_to({'type': 'start', 'container': 'demo'})
+    await comm.receive_json_from()  # ready
+    await comm.send_json_to({'type': 'resolve', 'id': 'ap-1', 'kind': 'typo', 'decision': 'deny'})
+    resp = await comm.receive_json_from()
+    assert resp['type'] == 'error'
+    assert '非法 kind' in resp.get('message', '')
+    # resolve_approval 应未被调用（在消费端即被拒绝）
+    assert fake_client.resolved == []
+    await comm.disconnect()
+
+
+@pytest.mark.asyncio
 async def test_disconnect_unsubscribes_approval(override_pool, instance, fake_client):
     comm = await _connect_authed()
     await comm.connect()
