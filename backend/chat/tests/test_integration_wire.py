@@ -5,7 +5,7 @@
 
 运行（须 source .envrc 保证 env）：
   source .envrc
-  cd backend && uv run python -m pytest chat/tests/test_integration_wire.py -v --timeout=300
+  cd backend && uv run python -m pytest chat/tests/test_integration_wire.py -v
 
 Colima virtiofs 只共享 $HOME，pytest 默认 tmp_path（/var/folders/… 在 $HOME 外）
 bind-mount 退化为空目录 → 网关报 Missing config。用 --basetemp 覆盖到 $HOME 下：
@@ -18,6 +18,10 @@ from pathlib import Path
 
 import pytest
 import websockets
+
+# 真容器集成测试（issue #157）：CI integration job env 齐备时真跑；backend-unit job 经
+# `-m "not integration"` 排除。无 skip 门控——环境缺失直接 fail，强制齐备（不靠 skip 兜底）。
+pytestmark = pytest.mark.integration
 
 BASE_DIR = Path(__file__).resolve().parents[3]
 
@@ -244,7 +248,7 @@ def test_send_message_ack_has_run_id(tmp_path):
 
 
 @pytest.mark.django_db
-def test_chat_send_event_stream_wire_schema(tmp_path):
+def test_chat_send_event_stream_wire_schema(tmp_path):  # pylint: disable=too-many-locals,too-many-statements
     """T2（#157）：chat.send 事件流 wire schema 断言。
 
     起容器+配对后 chat.send 一条消息，收集原始 wire 帧，断言：
