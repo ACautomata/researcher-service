@@ -15,6 +15,7 @@ import base64
 import hashlib
 from dataclasses import dataclass
 
+from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
@@ -35,6 +36,11 @@ class DeviceIdentity:
         """标准 base64url、去 padding（上游 Buffer.toString('base64url') 无 padding）。"""
         return base64.urlsafe_b64encode(raw).decode().rstrip('=')
 
+    @staticmethod
+    def _b64url_decode(value: str) -> bytes:
+        """_b64url_encode 逆运算：补回 padding 后 base64url 解码。"""
+        return base64.urlsafe_b64decode(value + '=' * (-len(value) % 4))
+
     def _private_key(self) -> Ed25519PrivateKey:
         return serialization.load_pem_private_key(
             self.private_key_pem.encode(), password=None,
@@ -52,6 +58,22 @@ class DeviceIdentity:
         """对 payload 的 UTF-8 字节做 Ed25519 签名，输出 base64url。"""
         signature = self._private_key().sign(payload.encode('utf-8'))
         return self._b64url_encode(signature)
+
+    @staticmethod
+    def verify(identity: DeviceIdentity, payload: str, signature_b64url: str) -> bool:
+        """用 identity 公钥验签 payload 的 Ed25519 签名（base64url）；签名非法/不匹配返回 False。
+
+        测试与自检的独立真值来源：connect.challenge 流程（#140）断言签名真的覆盖了 challenge
+        nonce 时，不轻信 sign() 自证，而用公钥独立验签。
+        """
+        pub = serialization.load_pem_public_key(identity.public_key_pem.encode())
+        try:
+            pub.verify(
+                DeviceIdentity._b64url_decode(signature_b64url), payload.encode('utf-8'),
+            )
+        except InvalidSignature:
+            return False
+        return True
 
 
 class DeviceCrypto:
