@@ -16,15 +16,15 @@ URL = 'ws://127.0.0.1:19000/'
 
 # issue #139：session connect 帧 device 签名块所需，注入共享假值（这些测试关注路由/ack，不验签）。
 _IDENTITY = DeviceCrypto.generate_identity()
-_NONCE = 'nz-chat'
 _SCOPES = ['operator.read', 'operator.write', 'operator.approvals']
 
 
 def _client(url=URL, device_token='dt', **kwargs):
-    """构造 OpenClawChatClient，默认注入假 identity/nonce/scopes（issue #139 session device 块）。"""
+    """构造 OpenClawChatClient，默认注入假 identity/scopes 走 #140 签名路径（贴合 #141 生产注入）；
+    配套 FakeChatTransport 默认下发 connect.challenge（nonce 由其提取），无需逐测试另配。"""
     return OpenClawChatClient(
         url, device_token,
-        identity=_IDENTITY, nonce=_NONCE, scopes=_SCOPES, **kwargs,
+        identity=_IDENTITY, scopes=_SCOPES, **kwargs,
     )
 
 
@@ -39,9 +39,9 @@ async def test_client_from_persisted_identity_builds_signed_device_block():
         private_key_pem=_IDENTITY.private_key_pem,
     )
     approved = ['operator.read', 'operator.write']  # 模拟 pairing.scopes_list()，少于全量 SCOPES
-    t = FakeChatTransport()
+    t = FakeChatTransport(challenge_nonce='nz-persisted')  # #140：签名路径先等 challenge
     c = OpenClawChatClient(
-        URL, 'dt', identity=persisted, nonce='', scopes=approved, transport=t,
+        URL, 'dt', identity=persisted, scopes=approved, transport=t,
     )
     await c.connect()
     connect = next(f for f in t.sent if f.get('method') == 'connect')
@@ -49,7 +49,7 @@ async def test_client_from_persisted_identity_builds_signed_device_block():
     assert dev['id'] == persisted.device_id
     assert dev['publicKey'] == persisted.public_key_raw_base64url()
     assert dev['signature']  # 持久化私钥可签（非空）
-    assert dev['nonce'] == ''  # #140 接入前空 nonce 占位（smoke 同款）
+    assert dev['nonce'] == 'nz-persisted'  # #140：nonce 取自 connect.challenge
     assert connect['params']['scopes'] == approved
     assert connect['params']['auth']['token'] == 'dt'
     await c.aclose()
@@ -63,6 +63,118 @@ async def test_connect_sends_connect_frame_with_device_token():
     connect = next(f for f in t.sent if f.get('method') == 'connect')
     assert connect['params']['auth']['token'] == 'dt-xyz'
     await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_connect_waits_for_challenge_and_signs():
+    """issue #140：connect() 先等网关 connect.challenge 提取 nonce，用 DeviceIdentity 签名后才发
+    connect 帧——帧 device 块 nonce 来自 challenge（非构造注入），且签名是把该 nonce 混入 v3
+    payload 后的有效 Ed25519 签名（独立真值验签，非仅断言字段相等）。"""
+    challenge_nonce = 'nonce-from-challenge'
+    t = FakeChatTransport(challenge_nonce=challenge_nonce)
+    c = OpenClawChatClient(URL, 'dt', identity=_IDENTITY, scopes=_SCOPES, transport=t)
+    await c.connect()
+    connect = next(f for f in t.sent if f.get('method') == 'connect')
+    dev = connect['params']['device']
+    assert dev['nonce'] == challenge_nonce  # nonce 来自 challenge，非构造期占位
+    assert connect['params']['scopes'] == _SCOPES
+    assert connect['params']['auth']['token'] == 'dt'
+    # 用 challenge nonce 独立重建 v3 签名串，验签 device.signature（证明签名真的覆盖了 challenge nonce）
+    payload = DeviceCrypto.build_auth_payload_v3(
+        device_id=_IDENTITY.device_id, client_id='gateway-client', client_mode='backend',
+        role='operator', scopes=_SCOPES, signed_at_ms=dev['signedAt'], token='dt',
+        nonce=challenge_nonce, platform='linux', device_family='',
+    )
+    assert DeviceIdentity.verify(_IDENTITY, payload, dev['signature'])
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_connect_challenge_missing_nonce_raises():
+    """issue #140 边界：challenge 事件缺 nonce → ChatConnectError（对齐 pairing_ws 防御，不签空 nonce）。"""
+    t = FakeChatTransport(challenge_nonce='')  # 下发 challenge 但 payload.nonce 为空
+    c = OpenClawChatClient(URL, 'dt', identity=_IDENTITY, scopes=_SCOPES, transport=t)
+    with pytest.raises(ChatConnectError):
+        await c.connect()
+
+
+@pytest.mark.asyncio
+async def test_connect_without_identity_ignores_challenge_legacy_path():
+    """issue #140 向后兼容：device_identity 为 None 时走旧路径——不等 challenge、立即发帧、不签名。"""
+    t = FakeChatTransport(challenge_nonce=None)  # 不下发 challenge（旧网关）
+    c = OpenClawChatClient(URL, 'dt', transport=t)  # 不传 identity/scopes
+    await c.connect()
+    connect = next(f for f in t.sent if f.get('method') == 'connect')
+    assert connect['params']['auth']['token'] == 'dt'
+    assert 'device' not in connect['params']  # 旧路径无 device 签名块
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_identity_without_scopes_raises_at_construction():
+    """回归 (codex #150 P2 #1)：identity 与 scopes 是签名路径一体前提——给 identity 但 scopes
+    缺省/为空时，构造期 fail-fast ValueError，而非连上网关后 `','.join(None)` TypeError 半途崩。"""
+    t = FakeChatTransport(challenge_nonce='nz')
+    with pytest.raises(ValueError, match='non-empty scopes'):
+        OpenClawChatClient(URL, 'dt', identity=_IDENTITY, scopes=None, transport=t)
+    with pytest.raises(ValueError, match='non-empty scopes'):
+        OpenClawChatClient(URL, 'dt', identity=_IDENTITY, scopes=[], transport=t)
+
+
+@pytest.mark.asyncio
+async def test_connect_accepts_legacy_two_arg_frame_builder():
+    """回归 (codex #150 P2 #3)：注入的 connect_frame_builder 保持 (req_id, device_token) 两参契约——
+    签名路径提取的 nonce 经实例态传给默认 builder，不向自定义两参 builder 多传第三参。"""
+    seen = {}
+
+    def legacy_builder(req_id, device_token):  # 两参 seam（#140 前唯一契约）
+        seen['req_id'] = req_id
+        seen['token'] = device_token
+        return {'type': 'req', 'id': req_id, 'method': 'connect',
+                'params': {'auth': {'token': device_token}}}
+
+    t = FakeChatTransport(challenge_nonce='nz')
+    c = OpenClawChatClient(URL, 'dt', identity=_IDENTITY, scopes=_SCOPES,
+                           transport=t, connect_frame_builder=legacy_builder)
+    await c.connect()  # 不 TypeError
+    assert seen['token'] == 'dt'
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_connect_shares_single_timeout_budget_across_challenge_and_res():
+    """回归 (codex #150 P2 #2)：challenge 与 connect res 共享一份 connect_timeout——challenge 耗时
+    逼近预算后，res 只剩余量，总握手不超过 connect_timeout（而非两段各拿整份 ~2×）。"""
+    import json
+    import time
+
+    # pylint: disable=attribute-defined-outside-init
+    class _SlowWs:  # 网关：challenge 拖 0.8s，之后永不回 res
+        async def send(self, _f):
+            pass
+
+        async def recv(self):
+            if not getattr(self, '_ch', False):
+                self._ch = True
+                await asyncio.sleep(0.8)
+                return json.dumps({'type': 'event', 'event': 'connect.challenge',
+                                   'payload': {'nonce': 'nz'}})
+            await asyncio.sleep(60)
+    # pylint: enable=attribute-defined-outside-init
+
+    class _Cm:
+        async def __aenter__(self):
+            return _SlowWs()
+
+        async def __aexit__(self, *a):
+            return False
+
+    c = OpenClawChatClient(URL, 'dt', identity=_IDENTITY, scopes=_SCOPES,
+                           transport=lambda _url: _Cm(), connect_timeout=1.0)
+    t0 = time.monotonic()
+    with pytest.raises(ChatConnectError):
+        await c.connect()
+    assert time.monotonic() - t0 < 1.4  # 共享预算 ~1.0s，非 0.8+1.0=1.8s
 
 
 @pytest.mark.asyncio

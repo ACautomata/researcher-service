@@ -55,8 +55,8 @@ class ChatConnectionPool:
         return lock
 
     def _default_client_factory(self, url: str, device_token: str) -> OpenClawChatClient:
-        # TODO #141: 从 Pairing 重建 DeviceIdentity、读 scopes_json；nonce 等 connect.challenge（#140）。
-        # 在 #141 接入前用占位（throwaway identity / 全量 SCOPES / 空 nonce）保持构造可调用；pool 测试注入
+        # TODO #141: 从 Pairing 重建 DeviceIdentity、读 scopes_json；nonce 由 #140 connect.challenge 提取。
+        # 在 #141 接入前用占位（throwaway identity / 全量 SCOPES）保持构造可调用；pool 测试注入
         # client_factory=StubClient 不触达本路径，生产真连由 #141 修正。
         from chat.device_crypto import DeviceCrypto
         from integration.openclaw.wire import SCOPES
@@ -66,7 +66,7 @@ class ChatConnectionPool:
             kwargs['transport'] = self._transport
         return OpenClawChatClient(
             url, device_token,
-            identity=DeviceCrypto.generate_identity(), nonce='', scopes=list(SCOPES),
+            identity=DeviceCrypto.generate_identity(), scopes=list(SCOPES),
             **kwargs,
         )
 

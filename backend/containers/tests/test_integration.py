@@ -152,9 +152,9 @@ def test_pair_chat_wiki_smoke_chain(tmp_path):  # pylint: disable=too-many-local
         assert device_token
 
         # —— 3. chat（spec #76）：经 client 建会话/拿历史，断言链路连通，不验内容质量 ——
-        # issue #139：session connect 帧必填 device 签名块（identity/nonce/scopes）。smoke 刚完成
+        # issue #139：session connect 帧必填 device 签名块（identity/scopes）。smoke 刚完成
         # Ed25519 配对，从 Pairing 记录读回真实 DeviceIdentity + 已批准 scopes（#141 pool 注入前，
-        # smoke 路径先验契约）；nonce 等 connect.challenge 由 #140 接入，当前空 nonce 占位。
+        # smoke 路径先验契约）；nonce 由 #140 connect() 等 connect.challenge 提取（真网关会下发）。
         identity = DeviceIdentity(
             device_id=pairing.device_id,
             public_key_pem=pairing.public_key_pem,
@@ -162,7 +162,7 @@ def test_pair_chat_wiki_smoke_chain(tmp_path):  # pylint: disable=too-many-local
         )
         client = OpenClawChatClient(
             f'ws://127.0.0.1:{inst.port}/', device_token,
-            identity=identity, nonce='', scopes=pairing.scopes_list(),
+            identity=identity, scopes=pairing.scopes_list(),
         )
         session_key = f'smoke-{inst.name}-{inst.port}'
 

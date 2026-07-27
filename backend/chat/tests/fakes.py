@@ -122,7 +122,13 @@ class _FakeChatWs:
 
     async def recv(self):  # pylint: disable=too-many-return-statements
         t = self._t
+        # issue #140：脚本化 challenge 时，网关在 connect 前先下发 connect.challenge（payload.nonce），
+        # client 提取 nonce 签名后才发 connect 帧。默认 None（不下发）→ 旧路径立即发帧。
         connect = next((f for f in t.sent if f.get('method') == 'connect'), None)
+        if connect is None and t.challenge_nonce is not None and not t._challenge_sent:
+            t._challenge_sent = True
+            return json.dumps({'type': 'event', 'event': 'connect.challenge',
+                               'payload': {'nonce': t.challenge_nonce, 'ts': 1}})
         if connect is not None and not t._connect_acked and not t.suppress_connect_ack:
             t._connect_acked = True
             if t.connect_ok:
@@ -186,16 +192,24 @@ class FakeChatTransport:  # pylint: disable=too-many-instance-attributes  # pyli
     push(frame) 运行时追加事件（recv 挂起时唤醒）。sent 记录所有发送帧供断言。
     """
 
+    # 默认下发 connect.challenge（issue #140：签名路径 client 先等 challenge 提取 nonce）；
+    # 显式传 challenge_nonce=None 关闭（旧路径/不签名 client 用，网关不下发、client 立即发帧）。
+    _DEFAULT_CHALLENGE_NONCE = 'nz-fake'
+
     def __init__(self, *, connect_ok=True, ack_run_id='r1', ack_error=None, events=None,  # pylint: disable=too-many-arguments
                  suppress_ack=False, suppress_connect_ack=False, resolve_error=None, resolve_payload=None,
                  list_payload=None, commands_payload=None, commands_error=None,
                  suppress_commands_ack=False,
-                 rpc_payloads=None, rpc_errors=None, rpc_suppress=None):
+                 rpc_payloads=None, rpc_errors=None, rpc_suppress=None,
+                 challenge_nonce=_DEFAULT_CHALLENGE_NONCE):
         self.connect_ok = connect_ok
         self.ack_run_id = ack_run_id
         self.ack_error = ack_error
         self.suppress_ack = suppress_ack
         self.suppress_connect_ack = suppress_connect_ack
+        # issue #140：脚本化 connect.challenge 的 nonce；None = 不下发（旧路径立即发帧）。
+        self.challenge_nonce = challenge_nonce
+        self._challenge_sent = False
         self.resolve_error = resolve_error
         self.resolve_payload = resolve_payload if resolve_payload is not None else {}
         self.list_payload = list_payload if list_payload is not None else {}

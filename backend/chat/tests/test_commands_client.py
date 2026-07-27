@@ -14,15 +14,15 @@ URL = 'ws://127.0.0.1:19000/'
 
 # issue #139：session connect 帧 device 签名块所需，注入共享假值。
 _IDENTITY = DeviceCrypto.generate_identity()
-_NONCE = 'nz-cmd'
 _SCOPES = ['operator.read', 'operator.write', 'operator.approvals']
 
 
 def _client(device_token='dt', **kwargs):
-    """构造 OpenClawChatClient，默认注入假 identity/nonce/scopes（issue #139）。"""
+    """构造 OpenClawChatClient，默认注入假 identity/scopes 走 #140 签名路径（fake 默认下发 challenge，
+    nonce 由其提取）。"""
     return OpenClawChatClient(
         URL, device_token,
-        identity=_IDENTITY, nonce=_NONCE, scopes=_SCOPES, **kwargs,
+        identity=_IDENTITY, scopes=_SCOPES, **kwargs,
     )
 
 
