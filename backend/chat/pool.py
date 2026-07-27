@@ -1,9 +1,11 @@
-"""chat.pool —— 每容器已配对长连接的连接池（issue #41 / spec §8.2）。
+"""chat.pool —— 每容器已配对长连接的连接池（issue #41 / spec §8.2 / #141 identity+scopes 传递）。
 
 dict[(url,device_token)→OpenClawChatClient]：同容器复用、异容器隔离。get_or_create 读 Pairing 行
 （PairingService.get_status，database_sync_to_async 包，供 async consumer 调 sync ORM），未 paired /
-无 deviceToken → NotPaired（上层提示先配对，spec §8.1）；已 paired 则按 (url,device_token) 复用或
-新建 client 并 connect。ChatFleet service locator（对齐 chat.pairing.PairingFleet）。
+无 deviceToken → NotPaired（上层提示先配对，spec §8.1）；已 paired 则从 Pairing 重建 DeviceIdentity
++ 解析 scopes，传 factory 创建 client 并按 (url,device_token) 复用或 connect。#141 移除 gateway_token
+依赖（gateway_token 仅配对握手需要，session 重连不需要）。ChatFleet service locator（对齐
+chat.pairing.PairingFleet）。
 """
 from __future__ import annotations
 
@@ -12,8 +14,10 @@ import asyncio
 from channels.db import database_sync_to_async
 
 from chat.chat_client import OpenClawChatClient
+from chat.device_crypto import DeviceIdentity
 from chat.models import Pairing
 from chat.pairing import PairingService
+from integration.openclaw.wire import REQUIRED_SCOPES
 
 
 class NotPaired(Exception):
@@ -54,20 +58,16 @@ class ChatConnectionPool:
             self._locks[key] = lock
         return lock
 
-    def _default_client_factory(self, url: str, device_token: str) -> OpenClawChatClient:
-        # TODO #141: 从 Pairing 重建 DeviceIdentity、读 scopes_json；nonce 由 #140 connect.challenge 提取。
-        # 在 #141 接入前用占位（throwaway identity / 全量 SCOPES）保持构造可调用；pool 测试注入
-        # client_factory=StubClient 不触达本路径，生产真连由 #141 修正。
-        from chat.device_crypto import DeviceCrypto
-        from integration.openclaw.wire import SCOPES
-
+    def _default_client_factory(
+        self, url: str, device_token: str, *, identity, scopes,
+    ) -> OpenClawChatClient:
+        """生产 client factory：签名对齐 #141，identity+scopes 由 get_or_create 从 Pairing 注入。
+        nonce 由 connect() 等 connect.challenge 提取（#140）。transport 注入（测试用 FakeTransport）。"""
         kwargs: dict = {}
         if self._transport is not None:
             kwargs['transport'] = self._transport
         return OpenClawChatClient(
-            url, device_token,
-            identity=DeviceCrypto.generate_identity(), scopes=list(SCOPES),
-            **kwargs,
+            url, device_token, identity=identity, scopes=scopes, **kwargs,
         )
 
     async def get_or_create(self, instance) -> OpenClawChatClient:
@@ -90,7 +90,21 @@ class ChatConnectionPool:
                     await client.aclose()
                 except Exception:  # pylint: disable=broad-exception-caught
                     pass
-            new_client = self._client_factory(url, pairing.device_token)
+            # #141：从 Pairing 行重建 DeviceIdentity + 解析 scopes，传 factory
+            identity = self._build_identity(pairing)
+            scopes = self._pairing_scopes(pairing)
+            # codex #151 P2：PAIRED 但 identity 不完整 → 配对材料损坏，路由重新配对
+            if pairing.status == Pairing.STATUS_PAIRED and identity is None:
+                raise NotPaired(pairing.status, pairing.pairing_request_id)
+            # codex #151 P2：identity 非空但 scopes 为空 → 配对材料不完整，路由重新配对
+            if identity is not None and not scopes:
+                raise NotPaired(pairing.status, pairing.pairing_request_id)
+            # codex #151 P2：identity 非空但缺少 REQUIRED_SCOPES → scopes 损坏/不足，路由重新配对
+            if identity is not None and not REQUIRED_SCOPES.issubset(set(scopes)):
+                raise NotPaired(pairing.status, pairing.pairing_request_id)
+            new_client = self._client_factory(
+                url, pairing.device_token, identity=identity, scopes=scopes,
+            )
             await new_client.connect()  # 握手有界（chat_client.connect_timeout）
             self._clients[key] = new_client
             return new_client
@@ -99,6 +113,31 @@ class ChatConnectionPool:
         for client in list(self._clients.values()):
             await client.aclose()
         self._clients.clear()
+
+    @staticmethod
+    def _build_identity(pairing) -> DeviceIdentity | None:
+        """从 Pairing 行重建 DeviceIdentity。三要素缺一不可——缺任意一个返回 None
+        （防御：配对握手可能未写满身份字段；safe-default 不签名的旧路径）。"""
+        if not (pairing.device_id and pairing.public_key_pem and pairing.private_key_pem):
+            return None
+        return DeviceIdentity(
+            device_id=pairing.device_id,
+            public_key_pem=pairing.public_key_pem,
+            private_key_pem=pairing.private_key_pem,
+        )
+
+    @staticmethod
+    def _pairing_scopes(pairing) -> list[str]:
+        """从 Pairing 行解析 scopes_json → list[str]；损坏/缺失返回 []。"""
+        import json
+
+        try:
+            decoded = json.loads(pairing.scopes_json)
+        except (ValueError, TypeError):
+            return []
+        if not isinstance(decoded, list) or not all(isinstance(s, str) for s in decoded):
+            return []
+        return decoded
 
 
 class ChatFleet:

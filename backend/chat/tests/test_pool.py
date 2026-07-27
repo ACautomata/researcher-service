@@ -1,8 +1,8 @@
-"""seam: chat.pool —— 连接池 + ChatFleet（issue #41 / spec §8.2）。
+"""seam: chat.pool —— 连接池 + ChatFleet（issue #41 / spec §8.2 / #141 identity+scopes 传递）。
 
 注入 FakePairingService（get_status 可控）+ StubClient（记录 connect/aclose）。覆盖：
 同容器复用、异容器隔离、未配对 NotPaired（pending/error + request_id）、paired 但缺 token、aclose_all、ChatFleet locator、
-死连接驱逐重建、per-key 锁（坏容器不阻塞其他容器）。
+死连接驱逐重建、per-key 锁（坏容器不阻塞其他容器）、#141 factory 传递 DeviceIdentity 和 scopes。
 """
 import asyncio
 import contextlib
@@ -22,9 +22,11 @@ class StubClient:
 
     dead = False  # pool 据此判断存活；StubClient 恒存活（dead 场景由 _DeadAwareClient 覆盖）
 
-    def __init__(self, url, device_token):
+    def __init__(self, url, device_token, *, identity, scopes):
         self.url = url
         self.device_token = device_token
+        self.identity = identity
+        self.scopes = scopes
         self.connect_calls = 0
         self.closed = False
         self.discarded = []
@@ -42,16 +44,34 @@ class StubClient:
 class FakePairingService:
     """get_status 返回可控 Pairing 快照（不触 DB/握手）。"""
 
-    def __init__(self, *, status='paired', device_token='dt-1', request_id=''):
+    def __init__(
+        self,
+        *,
+        status='paired',
+        device_token='dt-1',
+        request_id='',
+        device_id='dev-1',
+        public_key_pem='PUBKEY',
+        private_key_pem='PRIVKEY',
+        scopes_json='["operator.read","operator.write","operator.approvals"]',
+    ):
         self._status = status
         self._device_token = device_token
         self._request_id = request_id
+        self._device_id = device_id
+        self._public_key_pem = public_key_pem
+        self._private_key_pem = private_key_pem
+        self._scopes_json = scopes_json
 
     def get_status(self, instance):
         return SimpleNamespace(
             status=self._status,
             device_token=self._device_token,
             pairing_request_id=self._request_id,
+            device_id=self._device_id,
+            public_key_pem=self._public_key_pem,
+            private_key_pem=self._private_key_pem,
+            scopes_json=self._scopes_json,
         )
 
 
@@ -71,6 +91,8 @@ def pool():
         ws_url_for=_url_for,
     )
 
+
+# ── 基础复用/隔离 ──────────────────────────────────────────
 
 @pytest.mark.asyncio
 async def test_same_instance_reuses_same_client(pool):
@@ -98,6 +120,8 @@ async def test_concurrent_get_or_create_same_key_returns_single_client(pool):
     assert c1 is c2
     assert c1.connect_calls == 1
 
+
+# ── 未配对 / 缺 token ──────────────────────────────────────
 
 @pytest.mark.asyncio
 async def test_unpaired_pending_raises_not_paired():
@@ -133,6 +157,8 @@ async def test_paired_status_but_empty_token_raises_not_paired():
         await p.get_or_create(_instance('a', 19001))
 
 
+# ── 清理 / locator ─────────────────────────────────────────
+
 @pytest.mark.asyncio
 async def test_aclose_all_closes_clients_and_clears(pool):
     c = await pool.get_or_create(_instance('a', 19001))
@@ -157,12 +183,16 @@ def test_fleet_singleton_and_override():
     ChatFleet.reset()  # 清理单例，避免跨测试污染
 
 
+# ── 死连接驱逐 ─────────────────────────────────────────────
+
 class _DeadAwareClient:
     """带 dead 标志的 client 替身：模拟 recv loop 死掉后 pool 的驱逐重建。"""
 
-    def __init__(self, url, device_token):
+    def __init__(self, url, device_token, *, identity, scopes):
         self.url = url
         self.device_token = device_token
+        self.identity = identity
+        self.scopes = scopes
         self.dead = False
         self.connect_calls = 0
         self.closed = False
@@ -196,6 +226,8 @@ async def test_dead_client_is_evicted_and_recreated():
     assert c1.closed  # 旧死连接 best-effort aclose 清理
 
 
+# ── per-key 锁隔离 ─────────────────────────────────────────
+
 @pytest.mark.asyncio
 async def test_slow_container_does_not_block_other_containers():
     # 容器 A 建连挂起（永不回握手）；异 key 的 B 应不被 A 阻塞（per-key lock）。
@@ -204,9 +236,11 @@ async def test_slow_container_does_not_block_other_containers():
     started_a = asyncio.Event()
 
     class HangingClient:
-        def __init__(self, url, device_token):
+        def __init__(self, url, device_token, *, identity, scopes):
             self.url = url
             self.device_token = device_token
+            self.identity = identity
+            self.scopes = scopes
             self.dead = False
             self.connect_calls = 0
             self.closed = False
@@ -236,3 +270,104 @@ async def test_slow_container_does_not_block_other_containers():
     task_a.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await task_a
+
+
+# ── #141: DeviceIdentity + scopes 传递 ─────────────────────
+
+@pytest.mark.asyncio
+async def test_identity_and_scopes_are_passed_from_pairing_to_client():
+    """get_or_create 从 Pairing 行提取 device_id/pub/priv 重建 DeviceIdentity，解析 scopes_json → list[str]，传给 factory。"""
+    pool = ChatConnectionPool(
+        pairing_service=FakePairingService(
+            device_token='tok-9',
+            device_id='did-1',
+            public_key_pem='PUB',
+            private_key_pem='PRIV',
+            scopes_json='["operator.read","operator.write","operator.approvals"]',
+        ),
+        client_factory=StubClient,
+        ws_url_for=_url_for,
+    )
+    c = await pool.get_or_create(_instance('x', 19100))
+    assert c.device_token == 'tok-9'
+    assert c.identity is not None
+    assert c.identity.device_id == 'did-1'
+    assert c.identity.public_key_pem == 'PUB'
+    assert c.identity.private_key_pem == 'PRIV'
+    assert c.scopes == ['operator.read', 'operator.write', 'operator.approvals']
+
+
+@pytest.mark.asyncio
+async def test_empty_scopes_json_with_identity_raises_not_paired():
+    """scopes_json='[]' 且 identity 完整 → NotPaired（配对材料不完整，路由重新配对）。"""
+    pool = ChatConnectionPool(
+        pairing_service=FakePairingService(scopes_json='[]'),
+        client_factory=StubClient,
+        ws_url_for=_url_for,
+    )
+    with pytest.raises(NotPaired):
+        await pool.get_or_create(_instance('x', 19101))
+
+
+@pytest.mark.asyncio
+async def test_malformed_scopes_json_with_identity_raises_not_paired():
+    """scopes_json 损坏且 identity 完整 → NotPaired（配对材料不完整，路由重新配对）。"""
+    pool = ChatConnectionPool(
+        pairing_service=FakePairingService(scopes_json='{bad'),
+        client_factory=StubClient,
+        ws_url_for=_url_for,
+    )
+    with pytest.raises(NotPaired):
+        await pool.get_or_create(_instance('x', 19102))
+
+
+@pytest.mark.asyncio
+async def test_non_list_scopes_with_identity_raises_not_paired():
+    """scopes_json 是合法 JSON 但非 list（如 str "op.read" / dict {}）→ NotPaired。"""
+    pool = ChatConnectionPool(
+        pairing_service=FakePairingService(scopes_json='"operator.read"'),
+        client_factory=StubClient,
+        ws_url_for=_url_for,
+    )
+    with pytest.raises(NotPaired):
+        await pool.get_or_create(_instance('x', 19103))
+
+
+@pytest.mark.asyncio
+async def test_non_string_elements_with_identity_raises_not_paired():
+    """scopes_json 是 list 但含有非字符串元素 → NotPaired。"""
+    pool = ChatConnectionPool(
+        pairing_service=FakePairingService(scopes_json='["op.read", 123]'),
+        client_factory=StubClient,
+        ws_url_for=_url_for,
+    )
+    with pytest.raises(NotPaired):
+        await pool.get_or_create(_instance('x', 19104))
+
+
+@pytest.mark.asyncio
+async def test_incomplete_device_identity_raises_not_paired():
+    """PAIRED 且身份字段缺失 → NotPaired（配对材料不完整，路由重新配对）。"""
+    pool = ChatConnectionPool(
+        pairing_service=FakePairingService(
+            device_id='', public_key_pem='', private_key_pem='',
+        ),
+        client_factory=StubClient,
+        ws_url_for=_url_for,
+    )
+    with pytest.raises(NotPaired):
+        await pool.get_or_create(_instance('x', 19105))
+
+
+@pytest.mark.asyncio
+async def test_scopes_missing_required_permissions_raises_not_paired():
+    """scopes_json 合法但缺少 REQUIRED_SCOPES → NotPaired（scopes 不足，路由重新配对）。"""
+    pool = ChatConnectionPool(
+        pairing_service=FakePairingService(
+            scopes_json='["operator.read","operator.write"]',  # 缺 operator.approvals
+        ),
+        client_factory=StubClient,
+        ws_url_for=_url_for,
+    )
+    with pytest.raises(NotPaired):
+        await pool.get_or_create(_instance('x', 19106))
