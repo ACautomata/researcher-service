@@ -785,6 +785,49 @@ class TestPairingAdapterImplementsWirePort:
             asyncio.run(_run())
         assert exc_info.value.request_id == 'req-999'
 
+    def test_adapter_pair_nested_not_paired_raises_pairing_required(self):
+        """回归 (codex #164 P2)：网关返回嵌套 NOT_PAIRED/details.code=PAIRING_REQUIRED →
+        上抛 PairingRequired(requestId)。ghcr 2026.6.34 官方镜像用嵌套码，旧
+        adapters.py 只检外层 error.code 遗漏。
+        """
+        import asyncio
+
+        from chat.device_crypto import DeviceCrypto
+        from chat.pairing_ws import PairingRequired
+        from chat.tests.fakes import _CM, _FakeWs
+        from integration.openclaw.adapters import OpenClawWireAdapter
+
+        identity = DeviceCrypto.generate_identity()
+
+        class _NestedNotPairedTransport:
+            """模拟 ghcr 2026.6.34 官方镜像的两段嵌套错误应答。"""
+            connect_calls = 0
+
+            def __call__(self, url):
+                self.connect_calls += 1
+                ws = _FakeWs(
+                    pre_challenge_frames=[],
+                    result_frame={'type': 'res', 'ok': False,
+                                  'error': {'code': 'NOT_PAIRED',
+                                            'details': {'code': 'PAIRING_REQUIRED',
+                                                        'requestId': 'req-nested'}}},
+                    pre_result_frames=[],
+                )
+                return _CM(ws)
+
+        adapter = OpenClawWireAdapter(transport=_NestedNotPairedTransport())
+
+        async def _run():
+            return await adapter.pair(
+                url='ws://127.0.0.1:19000/',
+                identity=identity,
+                bootstrap_token='gw-tok',
+            )
+
+        with pytest.raises(PairingRequired) as exc_info:
+            asyncio.run(_run())
+        assert exc_info.value.request_id == 'req-nested'
+
     def test_adapter_pair_error_raises_pairing_error(self):
         """网关返回其它错误 → 上抛 PairingError。"""
         import asyncio

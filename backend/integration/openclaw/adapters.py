@@ -426,8 +426,14 @@ class OpenClawWireAdapter:
                 raise PairingError(f'hello-ok missing required scopes: {sorted(missing)}')
             return PairingResult(device_token=device_token, scopes=list(scopes))
         error = msg.get('error') or {}
-        if error.get('code') == 'PAIRING_REQUIRED':
-            request_id = (error.get('details') or {}).get('requestId', '')
+        # ghcr 2026.6.34 官方镜像（ADR 0003）返回两段嵌套 code：外层 NOT_PAIRED，
+        # 内层 details.code=PAIRING_REQUIRED（requestId 也在 details 内）。先按内层码
+        # 判，兼容外层码直接是 PAIRING_REQUIRED 的旧实现与 fork 镜像。
+        code = error.get('code', '')
+        details = error.get('details') or {}
+        inner_code = details.get('code', '') if isinstance(details, dict) else ''
+        if code == 'PAIRING_REQUIRED' or inner_code == 'PAIRING_REQUIRED':
+            request_id = details.get('requestId', '')
             if not isinstance(request_id, str) or not request_id:
                 raise PairingError('PAIRING_REQUIRED response missing requestId')
             raise PairingRequired(request_id)

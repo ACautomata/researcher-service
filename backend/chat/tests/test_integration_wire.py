@@ -16,6 +16,7 @@ bind-mount 退化为空目录 → 网关报 Missing config。用 --basetemp 覆�
 import asyncio
 import os
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 
@@ -79,39 +80,52 @@ class WireTestContext:
         # 1. 创建容器
         self._inst = self._orch.create(self._name)
 
-        # 2. 等网关 /health 就绪（冷启动 race）
-        GatewayReadinessWaiter(
-            self._health_probe,
-            timeout=_GATEWAY_READINESS_TIMEOUT,
-            interval=_GATEWAY_POLL_INTERVAL,
-        ).wait(self._inst.port)
+        try:
+            # 2. 等网关 /health 就绪（冷启动 race）
+            GatewayReadinessWaiter(
+                self._health_probe,
+                timeout=_GATEWAY_READINESS_TIMEOUT,
+                interval=_GATEWAY_POLL_INTERVAL,
+            ).wait(self._inst.port)
 
-        # 3. Ed25519 配对：遇 PAIRING_REQUIRED 经容器内 approve，轮询至 paired
-        def approve(request_id):
-            cmd = format_device_approve_command(request_id).split()
-            self._orch.exec_in_container(self._inst.name, cmd)
+            # 3. Ed25519 配对：遇 PAIRING_REQUIRED 经容器内 approve，轮询至 paired
+            def approve(request_id):
+                cmd = format_device_approve_command(request_id).split()
+                self._orch.exec_in_container(self._inst.name, cmd)
 
-        pairing = ApprovalPairer(
-            self._pairing,
-            approve,
-            timeout=_PAIRING_APPROVAL_TIMEOUT,
-            interval=_PAIRING_POLL_INTERVAL,
-        ).pair(self._inst)
-        assert pairing.status == Pairing.STATUS_PAIRED
-        assert pairing.device_token
+            pairing = ApprovalPairer(
+                self._pairing,
+                approve,
+                timeout=_PAIRING_APPROVAL_TIMEOUT,
+                interval=_PAIRING_POLL_INTERVAL,
+            ).pair(self._inst)
+            assert pairing.status == Pairing.STATUS_PAIRED
+            assert pairing.device_token
 
-        # 4. 构造已配对 client（Ed25519 签名路径：identity + scopes 从 Pairing 读取）
-        identity = DeviceIdentity(
-            device_id=pairing.device_id,
-            public_key_pem=pairing.public_key_pem,
-            private_key_pem=pairing.private_key_pem,
-        )
-        client = OpenClawChatClient(
-            f'ws://127.0.0.1:{self._inst.port}/', pairing.device_token,
-            identity=identity, scopes=pairing.scopes_list(),
-        )
+            # 4. 构造已配对 client（Ed25519 签名路径：identity + scopes 从 Pairing 读取）
+            identity = DeviceIdentity(
+                device_id=pairing.device_id,
+                public_key_pem=pairing.public_key_pem,
+                private_key_pem=pairing.private_key_pem,
+            )
+            client = OpenClawChatClient(
+                f'ws://127.0.0.1:{self._inst.port}/', pairing.device_token,
+                identity=identity, scopes=pairing.scopes_list(),
+            )
 
-        return (client, self._inst, pairing)
+            return (client, self._inst, pairing)
+        except BaseException:
+            # __enter__ 失败时不调用 __exit__，须手动清理已创建容器（codex #164 P2）
+            try:
+                self._orch.delete(self._name)
+            except Exception:  # pylint: disable=broad-exception-caught
+                try:
+                    self._runtime.stop(self._name)
+                    self._runtime.remove(self._name)
+                except Exception:  # pylint: disable=broad-exception-caught
+                    pass
+            self._inst = None
+            raise
 
     def __exit__(self, *args):
         if self._inst is not None:
@@ -181,3 +195,48 @@ def test_send_message_ack_has_runId(tmp_path):
                 await client.aclose()
 
         asyncio.run(_send())
+
+
+class TestWireTestContextCleanup:
+    """回归 (codex #164 P2)：__enter__ 在 create 后失败时清理已创建容器。
+
+    Python CM 协议在 __enter__ 抛异常时不调用 __exit__，此前 self._inst 已设则
+    容器泄漏。验证 cleanup-on-error 后再抛。
+    """
+
+    pytestmark: ClassVar[list] = []  # 覆盖 module 级 docker skip；此 class 纯单元测试，不依赖 docker
+
+    def test_enter_failure_after_create_cleans_up_container(self, monkeypatch):
+        """__enter__ 在步骤 1 成功后失败 → orch.delete() 被调用 + _inst 清零。"""
+        from unittest.mock import MagicMock
+
+        from containers.tests.integration_helpers import GatewayReadinessWaiter
+
+        class _RaisingWaiter(GatewayReadinessWaiter):
+            def wait(self, port):
+                raise TimeoutError('gateway not ready (simulated)')
+
+        monkeypatch.setattr(
+            'containers.tests.integration_helpers.GatewayReadinessWaiter',
+            _RaisingWaiter,
+        )
+
+        orch = MagicMock()
+        fake_inst = MagicMock()
+        fake_inst.port = 19000
+        fake_inst.name = 'test-cleanup-leak'
+        orch.create.return_value = fake_inst
+
+        ctx = WireTestContext(
+            orch=orch,
+            runtime=MagicMock(),
+            pairing_service=MagicMock(),
+            health_probe=MagicMock(),
+            name='test-cleanup-leak',
+        )
+
+        with pytest.raises(TimeoutError, match='gateway not ready'):
+            ctx.__enter__()
+
+        orch.delete.assert_called_once_with('test-cleanup-leak')
+        assert ctx._inst is None  # 防止 __exit__ 二次清理
