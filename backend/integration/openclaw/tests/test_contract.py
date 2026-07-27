@@ -1215,6 +1215,29 @@ class TestOpenClawWireAdapterLongLived:
         cards = asyncio.run(_run())
         assert cards == [{'type': 'approval', 'id': 'ap-1', 'kind': 'exec', 'command': 'cmd1', 'sessionKey': None}]
 
+    def test_list_pending_approvals_payload_list_translates_cards(self):
+        """实测校准（spike ghcr 2026.6.34-browser, 2026-07-27）：exec.approval.list 的 payload
+        直接是 list（非空 [{...}]），非 {approvals:[...]} dict。wire adapter 旧代码 list.get 会
+        AttributeError（codex P2：与 OpenClawChatClient 同源 dispatch，两实现不可漂移）。"""
+        import asyncio
+
+        from chat.tests.fakes import FakeChatTransport
+        from integration.openclaw.adapters import OpenClawWireAdapter
+
+        t = FakeChatTransport(list_payload=[
+            {'id': 'ap-1', 'kind': 'exec', 'systemRunPlan': {'rawCommand': 'cmd1'}},
+        ])
+        adapter = OpenClawWireAdapter(transport=t)
+
+        async def _run():
+            await adapter.connect(
+                'ws://x/', 'dt',
+                identity=_SESSION_IDENTITY, nonce=_SESSION_NONCE, scopes=_SESSION_SCOPES,
+            )
+            return await adapter.list_pending_approvals()
+        cards = asyncio.run(_run())
+        assert cards == [{'type': 'approval', 'id': 'ap-1', 'kind': 'exec', 'command': 'cmd1', 'sessionKey': None}]
+
     # ── approval subscribers ──────────────────────────────────────────────────
 
     def test_approval_subscribers_fan_out(self):

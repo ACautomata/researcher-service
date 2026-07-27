@@ -1,11 +1,28 @@
-"""集成测试编排 helper（issue #94）：配对 approve 轮询等纯编排逻辑。
+"""集成测试编排 helper（issue #94）：配对 approve 轮询 + daemon 探测。
 
-独立于 RUN_INTEGRATION 门控的 test_integration.py——helper 是无 daemon 可确定性单测的
-编排逻辑，供集成测试本体与自身单测（test_integration_helpers.py）共用。非生产业务代码。
+集成测试本体靠 DockerDaemonProbe.is_available() 门控（docker daemon 自动探测，替代
+RUN_INTEGRATION env）；helper 自身是无 daemon 可确定性单测的编排逻辑，供集成测试本体
+与自身单测（test_integration_helpers.py）共用。非生产业务代码。
 """
 import time
 
 from chat.pairing_ws import PairingRequired
+
+
+class DockerDaemonProbe:
+    """docker daemon 可用性探测（集成测试门控，替代 RUN_INTEGRATION env）。
+
+    CI runner 即便装了 docker，也因缺 OPENCLAW_TEMPLATE_DIR/LLM_API_KEY 在用例内 skip，
+    故 daemon 探测 + 数据 env skip 双保险，无需 RUN_INTEGRATION 显式门控。
+    """
+
+    @staticmethod
+    def is_available() -> bool:
+        try:
+            import docker  # pylint: disable=import-outside-toplevel
+            return bool(docker.from_env().ping())
+        except Exception:  # pylint: disable=broad-exception-caught
+            return False
 
 
 class PairingApprovalTimeout(Exception):

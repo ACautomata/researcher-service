@@ -543,10 +543,18 @@ class OpenClawWireAdapter:
         except BaseException:  # pylint: disable=broad-exception-caught  # §45 故障隔离:list 失败仅返回空,不炸长连
             self._pending_resolves.pop(req_id, None)
             return []
-        items = (payload or {}).get('approvals')
-        if items is None:
-            single = (payload or {}).get('approval')
-            items = [single] if isinstance(single, dict) else []
+        # 实测校准（spike ghcr 2026.6.34-browser, 2026-07-27）：payload 可能直接是 list
+        # （空 [] / 非空 [{...}]），也可能是 dict {approvals:[...]}。list 上调 .get 会崩，先判类型。
+        # 与 OpenClawChatClient.list_pending_approvals 同源 dispatch（codex P2：两实现不可漂移）。
+        if isinstance(payload, list):
+            items = payload
+        elif isinstance(payload, dict):
+            items = payload.get('approvals')
+            if items is None:
+                single = payload.get('approval')
+                items = [single] if isinstance(single, dict) else []
+        else:
+            items = []
         if not isinstance(items, list):
             return []
         from chat.event_translate import ChatEventTranslator

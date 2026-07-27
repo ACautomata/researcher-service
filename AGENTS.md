@@ -103,7 +103,7 @@ settings 分 `config/settings/{base,dev,prod}.py` 三分。ASGI 入口 `config/a
 - **凭证**：LLM key 全面板共享（`LLM_API_KEY` env 注入容器，不落盘）。
 - **测试**：
   - backend：`cd backend && python -m pytest`（pytest + pytest-django + pytest-asyncio；`asyncio_mode=auto`）。
-    容器编排集成 smoke 默认 skip，需真 daemon + `RUN_INTEGRATION=1`（见 `backend/README.md`）。
+    容器编排集成 smoke 默认 skip，需真 docker daemon（自动探测门控；详见 `backend/README.md`）。
   - frontend：`cd frontend && npm run test`（vitest）；`npm run build` 跑 vue-tsc 类型检查。
 
 ## Issue tracker / triage

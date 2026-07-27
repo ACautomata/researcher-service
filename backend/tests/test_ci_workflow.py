@@ -169,18 +169,23 @@ def test_backend_unit_runs_pip_install_dev_requirements() -> None:
     ), "缺少 pip install -r requirements/dev.txt 步骤"
 
 
-def test_backend_unit_runs_pytest_without_run_integration() -> None:
-    """AC4：``python -m pytest`` 步骤存在，且不设 ``RUN_INTEGRATION``（真容器用例维持 skip）。"""
+def test_backend_unit_runs_pytest_without_integration_data() -> None:
+    """AC4：``python -m pytest`` 步骤存在，且不设集成测试数据 env（OPENCLAW_TEMPLATE_DIR/LLM_API_KEY）。
+
+    真容器用例靠 docker daemon 探测 + 数据 env 缺失双 skip（不再用 RUN_INTEGRATION 门控），
+    故 CI backend-unit 即使装了 docker，也会因缺数据 env 在用例内 skip。
+    """
     backend_unit = _backend_unit_job(_load())
     steps = backend_unit["steps"]
     assert any("pytest" in (s.get("run") or "") for s in steps), "缺少 python -m pytest 步骤"
-    assert "RUN_INTEGRATION" not in (backend_unit.get("env") or {}), (
-        "backend-unit 不应设 RUN_INTEGRATION"
-    )
-    for step in steps:
-        assert "RUN_INTEGRATION" not in (step.get("env") or {}), (
-            "backend-unit step 不应设 RUN_INTEGRATION"
+    for key in ("OPENCLAW_TEMPLATE_DIR", "LLM_API_KEY"):
+        assert key not in (backend_unit.get("env") or {}), (
+            f"backend-unit 不应设 {key}（集成测试数据，CI 不跑真容器）"
         )
+        for step in steps:
+            assert key not in (step.get("env") or {}), (
+                f"backend-unit step 不应设 {key}（集成测试数据，CI 不跑真容器）"
+            )
 
 
 def _pylint_step(backend_unit: dict) -> dict | None:
