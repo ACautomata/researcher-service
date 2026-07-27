@@ -139,7 +139,7 @@ class WireTestContext:
 
 
 @pytest.mark.django_db
-def test_send_message_ack_has_runId(tmp_path):
+def test_send_message_ack_has_run_id(tmp_path):
     """T1 冒烟（#156）：起容器+配对后 chat.send 收到 ack 含 runId。
 
     证明 fixture 可用：容器 running + 配对 STATUS_PAIRED + WS 连通 + ack 协议正确。
@@ -171,7 +171,7 @@ def test_send_message_ack_has_runId(tmp_path):
         pairing_service=PairingService(),
         health_probe=HttpHealthProbe(),
         name=name,
-    ) as (client, inst, pairing):
+    ) as (client, inst, _pairing):
         assert inst.name == name
 
         async def _send():
