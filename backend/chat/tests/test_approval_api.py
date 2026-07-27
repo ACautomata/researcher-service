@@ -105,7 +105,7 @@ def test_resolve_no_broadcast_to_ws_subscribers(authed, instance, override_pool)
     override_pool(_FakePool(client))
     resp = authed.post(URL, {'id': 'ap-1', 'kind': 'exec', 'decision': 'allow-once'}, format='json')
     assert resp.status_code == 200
-    assert client.broadcasts == []  # 无广播
+    assert not client.broadcasts  # 无广播
 
 
 def test_resolve_missing_field_400(authed, instance, override_pool):
