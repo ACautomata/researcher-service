@@ -111,6 +111,71 @@ async def test_connect_without_identity_ignores_challenge_legacy_path():
 
 
 @pytest.mark.asyncio
+async def test_identity_without_scopes_raises_at_construction():
+    """回归 (codex #150 P2 #1)：identity 与 scopes 是签名路径一体前提——给 identity 但 scopes
+    缺省/为空时，构造期 fail-fast ValueError，而非连上网关后 `','.join(None)` TypeError 半途崩。"""
+    t = FakeChatTransport(challenge_nonce='nz')
+    with pytest.raises(ValueError, match='non-empty scopes'):
+        OpenClawChatClient(URL, 'dt', identity=_IDENTITY, scopes=None, transport=t)
+    with pytest.raises(ValueError, match='non-empty scopes'):
+        OpenClawChatClient(URL, 'dt', identity=_IDENTITY, scopes=[], transport=t)
+
+
+@pytest.mark.asyncio
+async def test_connect_accepts_legacy_two_arg_frame_builder():
+    """回归 (codex #150 P2 #3)：注入的 connect_frame_builder 保持 (req_id, device_token) 两参契约——
+    签名路径提取的 nonce 经实例态传给默认 builder，不向自定义两参 builder 多传第三参。"""
+    seen = {}
+
+    def legacy_builder(req_id, device_token):  # 两参 seam（#140 前唯一契约）
+        seen['req_id'] = req_id
+        seen['token'] = device_token
+        return {'type': 'req', 'id': req_id, 'method': 'connect',
+                'params': {'auth': {'token': device_token}}}
+
+    t = FakeChatTransport(challenge_nonce='nz')
+    c = OpenClawChatClient(URL, 'dt', identity=_IDENTITY, scopes=_SCOPES,
+                           transport=t, connect_frame_builder=legacy_builder)
+    await c.connect()  # 不 TypeError
+    assert seen['token'] == 'dt'
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_connect_shares_single_timeout_budget_across_challenge_and_res():
+    """回归 (codex #150 P2 #2)：challenge 与 connect res 共享一份 connect_timeout——challenge 耗时
+    逼近预算后，res 只剩余量，总握手不超过 connect_timeout（而非两段各拿整份 ~2×）。"""
+    import json
+    import time
+
+    class _SlowWs:  # 网关：challenge 拖 0.8s，之后永不回 res
+        async def send(self, _f):
+            pass
+
+        async def recv(self):
+            if not getattr(self, '_ch', False):
+                self._ch = True
+                await asyncio.sleep(0.8)
+                return json.dumps({'type': 'event', 'event': 'connect.challenge',
+                                   'payload': {'nonce': 'nz'}})
+            await asyncio.sleep(60)
+
+    class _Cm:
+        async def __aenter__(self):
+            return _SlowWs()
+
+        async def __aexit__(self, *a):
+            return False
+
+    c = OpenClawChatClient(URL, 'dt', identity=_IDENTITY, scopes=_SCOPES,
+                           transport=lambda _url: _Cm(), connect_timeout=1.0)
+    t0 = time.monotonic()
+    with pytest.raises(ChatConnectError):
+        await c.connect()
+    assert time.monotonic() - t0 < 1.4  # 共享预算 ~1.0s，非 0.8+1.0=1.8s
+
+
+@pytest.mark.asyncio
 async def test_connect_failure_raises():
     t = FakeChatTransport(connect_ok=False)
     c = _client(transport=t)

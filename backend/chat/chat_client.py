@@ -59,11 +59,17 @@ class OpenClawChatClient:  # pylint: disable=too-many-instance-attributes,too-ma
         self._url = url
         self._device_token = device_token
         # session connect 帧 device 签名块所需（issue #139/#140）：identity 为 DeviceIdentity、
-        # scopes 为配对时网关批准的 scopes（#141 pool 从 Pairing 注入）。两者可选——缺省（None）
+        # scopes 为配对时网关批准的 scopes（#141 pool 从 Pairing 注入）。两者可选——缺省（identity=None）
         # 走旧路径：不签名，仅 gateway_token + device_token（向后兼容）。nonce 不再构造注入，
         # 由 connect() 等 connect.challenge 动态提取（#140）。
+        # codex #150 P2：identity 与 scopes 是签名路径的**一体**前提——给了 identity 就必须给非空
+        # scopes，否则 ConnectFrameBuilder.session() 会在握手半途 `','.join(None)` TypeError。
+        # 构造期 fail-fast 校验（优于让坏配置连上网关后才崩），与「identity=None 才走旧路径」对齐。
+        if identity is not None and not scopes:
+            raise ValueError('signed connect path requires non-empty scopes when identity is provided')
         self._identity = identity
         self._scopes = scopes
+        self._nonce = ''  # #140：connect() 等 challenge 提取后填入，供默认 builder 读（seam 保持 2 参）
         self._connect = transport or websockets.connect
         self._translator = translator or ChatEventTranslator()
         self._build_connect = connect_frame_builder or self._default_connect_frame
@@ -114,13 +120,17 @@ class OpenClawChatClient:  # pylint: disable=too-many-instance-attributes,too-ma
         """连接是否已不可用（recv loop 退出或被显式关闭）；pool 据此不复用。"""
         return self._dead or self._closed
 
-    def _default_connect_frame(self, req_id: str, device_token: str, nonce: str = '') -> dict:
+    def _default_connect_frame(self, req_id: str, device_token: str) -> dict:
         """已配对长连接帧：委托给单一来源 ConnectFrameBuilder.session()（issue #102 / #139 / #140）。
 
         spec §8.1 step5 + #139：配对后用 deviceToken 直连（auth.token）并附 Ed25519 device 签名块
-        （identity/scopes 构造期注入；nonce 由 connect() 等 connect.challenge 提取后传入，#140）。
+        （identity/scopes 构造期注入；nonce 由 connect() 等 connect.challenge 提取后写入 self._nonce，#140）。
         identity 为 None（未配对/旧路径）时不签名——返回仅 gateway_token + device_token 的
         connect 帧（无 device 块，向后兼容）。
+
+        codex #150 P2：本 builder 与注入的 connect_frame_builder 共用 (req_id, device_token) 两参契约
+        ——nonce 经 self._nonce 实例态传入（connect() 提取后填），不在 seam 上加第三参，保持自定义
+        两参 builder 可继续注入。
         """
         if self._identity is None:
             return {
@@ -131,7 +141,7 @@ class OpenClawChatClient:  # pylint: disable=too-many-instance-attributes,too-ma
             }
         return _ConnectFrameBuilder.session(
             req_id=req_id, identity=self._identity, device_token=device_token,
-            nonce=nonce, scopes=self._scopes,
+            nonce=self._nonce, scopes=self._scopes,
         )
 
     async def connect(self) -> None:
@@ -139,26 +149,35 @@ class OpenClawChatClient:  # pylint: disable=too-many-instance-attributes,too-ma
             self._cm = self._connect(self._url)
             self._ws = await self._cm.__aenter__()  # pylint: disable=unnecessary-dunder-call
             req_id = uuid.uuid4().hex
-            # 握手期独占 recv，challenge(可选) + connect res 都在 connect_timeout 内有界等待，
-            # 避免坏网关升级 WS 后不下发/不回永久挂起。
+            # 握手期独占 recv。codex #150 P2：challenge + connect res 共享**一份** connect_timeout
+            # 预算——算一个 deadline，两段各用剩余时长，避免 challenge 卡到边界后 res 又拿整份
+            # 预算（最坏 ~2× connect_timeout），拖慢 pool.get_or_create() 对慢/坏网关的感知。
+            deadline = asyncio.get_running_loop().time() + self._connect_timeout
             try:
                 if self._identity is not None:
                     # issue #140：先等 connect.challenge 提取 nonce，用 DeviceIdentity 签名后才发帧
-                    nonce = await asyncio.wait_for(
-                        self._await_challenge(), timeout=self._connect_timeout,
+                    self._nonce = await asyncio.wait_for(
+                        self._await_challenge(), timeout=self._remaining(deadline),
                     )
-                    frame = self._build_connect(req_id, self._device_token, nonce)
-                else:
-                    # 向后兼容：无 device_identity 走旧路径——不等 challenge、不签名、立即发帧
-                    frame = self._build_connect(req_id, self._device_token)
+                # 向后兼容：无 device_identity 走旧路径——不等 challenge、不签名、立即发帧。
+                # 统一两参调用（builder seam 契约）；签名所需 nonce 已由默认 builder 读 self._nonce。
+                frame = self._build_connect(req_id, self._device_token)
                 await self._ws.send(json.dumps(frame))
-                await asyncio.wait_for(self._await_res(req_id), timeout=self._connect_timeout)
+                await asyncio.wait_for(
+                    self._await_res(req_id), timeout=self._remaining(deadline),
+                )
             except TimeoutError as exc:
                 raise ChatConnectError('connect handshake timeout') from exc
         except BaseException:
             await self.aclose()
             raise
         self._recv_task = asyncio.create_task(self._recv_loop())
+
+    @staticmethod
+    def _remaining(deadline: float) -> float:
+        """deadline 前剩余秒数（codex #150 P2 共享预算）。已过期时返回 0——wait_for(0) 立即
+        TimeoutError → connect() 归一为 ChatConnectError，而非对负 timeout 抛 ValueError。"""
+        return max(0.0, deadline - asyncio.get_running_loop().time())
 
     async def _recv_until(self, predicate, describe: str) -> dict:
         """循环读帧直到 predicate 命中；忽略无关帧（乱序 event/stray res 容错，对齐 pairing_ws）。"""
