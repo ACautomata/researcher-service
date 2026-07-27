@@ -304,26 +304,25 @@ async def test_disconnect_one_keeps_peer_subscribed(override_pool, instance, fak
 
 
 @pytest.mark.asyncio
-async def test_resolve_calls_client_and_echoes_authoritative_decision(override_pool, instance, fake_client):
-    """codex P1：resolve 回执用网关权威 decision（first-answer-wins），非回声请求值。"""
-    fake_client.resolve_payload = {'id': 'ap-1', 'decision': 'deny'}  # 请求 approve，权威 deny
+async def test_resolve_awaits_resolved_event(override_pool, instance, fake_client):
+    """codex P2 #163：resolve ack 不应回送 approvalResolved——权威值由 resolved 事件负责。"""
+    fake_client.resolve_payload = {'id': 'ap-1'}
     comm = await _connect_authed()
     await comm.connect()
     await comm.send_json_to({'type': 'start', 'container': 'demo'})
     await comm.receive_json_from()  # ready
-    await comm.send_json_to({'type': 'resolve', 'id': 'ap-1', 'kind': 'exec', 'decision': 'approve'})
-    resp = await comm.receive_json_from()  # 直接回执
-    assert resp == {'type': 'approvalResolved', 'id': 'ap-1', 'decision': 'deny'}
-    resp2 = await comm.receive_json_from()  # codex R2 P2：fan-out 广播（本 consumer 亦收，幂等）
-    assert resp2 == {'type': 'approvalResolved', 'id': 'ap-1', 'decision': 'deny'}
-    assert fake_client.resolved == [('ap-1', 'exec', 'approve')]
+    await comm.send_json_to({'type': 'resolve', 'id': 'ap-1', 'kind': 'exec', 'decision': 'allow-once'})
+    # resolve 应静默成功，不应发送 approvalResolved（权威值由 resolved 事件 broadcast）
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(comm.receive_json_from(), timeout=0.5)
+    assert fake_client.resolved == [('ap-1', 'exec', 'allow-once')]
     await comm.disconnect()
 
 
 @pytest.mark.asyncio
-async def test_resolve_broadcasts_authoritative_to_peer_consumer(override_pool, instance, fake_client):
-    """codex R2 P2：A resolve 的权威结果 fan-out 给共享 client 的 B，B 的陈旧卡一致收敛。"""
-    fake_client.resolve_payload = {'id': 'ap-1', 'decision': 'approve'}
+async def test_resolve_peer_receives_nothing_from_ack(override_pool, instance, fake_client):
+    """codex P2 #163：resolve ack 无广播——对等端不应收到任何帧。"""
+    fake_client.resolve_payload = {'id': 'ap-1'}
     comm_a = await _connect_authed('alice')
     await comm_a.connect()
     await comm_a.send_json_to({'type': 'start', 'container': 'demo'})
@@ -332,14 +331,14 @@ async def test_resolve_broadcasts_authoritative_to_peer_consumer(override_pool, 
     await comm_b.connect()
     await comm_b.send_json_to({'type': 'start', 'container': 'demo'})
     await comm_b.receive_json_from()  # B ready
-    # A 提交 resolve → A 收直接回执 + 广播；B 收广播（收敛）
-    await comm_a.send_json_to({'type': 'resolve', 'id': 'ap-1', 'kind': 'exec', 'decision': 'approve'})
-    a1 = await comm_a.receive_json_from()  # 直接回执
-    a2 = await comm_a.receive_json_from()  # 广播
-    b1 = await comm_b.receive_json_from()  # 对等端收广播
-    assert a1 == {'type': 'approvalResolved', 'id': 'ap-1', 'decision': 'approve'}
-    assert a2 == {'type': 'approvalResolved', 'id': 'ap-1', 'decision': 'approve'}
-    assert b1 == {'type': 'approvalResolved', 'id': 'ap-1', 'decision': 'approve'}
+    # A 提交 resolve
+    await comm_a.send_json_to({'type': 'resolve', 'id': 'ap-1', 'kind': 'exec', 'decision': 'allow-once'})
+    # A 不应收到任何 immediate feedback
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(comm_a.receive_json_from(), timeout=0.5)
+    # B 不应收到任何广播
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(comm_b.receive_json_from(), timeout=0.5)
     await comm_a.disconnect()
     await comm_b.disconnect()
 
@@ -378,10 +377,41 @@ async def test_resolve_failure_sends_error(override_pool, instance, fake_client)
     await comm.connect()
     await comm.send_json_to({'type': 'start', 'container': 'demo'})
     await comm.receive_json_from()  # ready
-    await comm.send_json_to({'type': 'resolve', 'id': 'ap-1', 'kind': 'exec', 'decision': 'approve'})
+    await comm.send_json_to({'type': 'resolve', 'id': 'ap-1', 'kind': 'exec', 'decision': 'allow-once'})
     resp = await comm.receive_json_from()
     assert resp['type'] == 'error'
     assert resp['id'] == 'ap-1'  # codex R2 P2：error 帧带 approval id，前端仅复位该卡
+    await comm.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_resolve_rejects_invalid_kind(override_pool, instance, fake_client):
+    """codex P2：非法 kind 应在消费端拒绝，不转发到网关。"""
+    comm = await _connect_authed()
+    await comm.connect()
+    await comm.send_json_to({'type': 'start', 'container': 'demo'})
+    await comm.receive_json_from()  # ready
+    await comm.send_json_to({'type': 'resolve', 'id': 'ap-1', 'kind': 'typo', 'decision': 'deny'})
+    resp = await comm.receive_json_from()
+    assert resp['type'] == 'error'
+    assert '非法 kind' in resp.get('message', '')
+    # resolve_approval 应未被调用（在消费端即被拒绝）
+    assert fake_client.resolved == []
+    await comm.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_resolve_rejects_invalid_decision(override_pool, instance, fake_client):
+    """codex P2 #163：非法 decision 应在消费端拒绝，不转发到网关。"""
+    comm = await _connect_authed()
+    await comm.connect()
+    await comm.send_json_to({'type': 'start', 'container': 'demo'})
+    await comm.receive_json_from()  # ready
+    await comm.send_json_to({'type': 'resolve', 'id': 'ap-1', 'kind': 'exec', 'decision': 'approve'})
+    resp = await comm.receive_json_from()
+    assert resp['type'] == 'error'
+    assert '非法 decision' in resp.get('message', '')
+    assert fake_client.resolved == []
     await comm.disconnect()
 
 
@@ -445,10 +475,13 @@ async def test_consumer_operates_via_wire_port_contract(override_pool, instance)
     done = await comm.receive_json_from()
     assert done['type'] == 'done'
     # resolve
-    wire.resolve_payload = {'id': 'ap-1', 'decision': 'approve'}
-    await comm.send_json_to({'type': 'resolve', 'id': 'ap-1', 'kind': 'exec', 'decision': 'approve'})
+    wire.resolve_payload = {}
+    await comm.send_json_to({'type': 'resolve', 'id': 'ap-1', 'kind': 'exec', 'decision': 'allow-once'})
+    # resolve ack 是静默的（权威值由 resolved 事件落地，codex P2 #163）
+    # 模拟网关广播 resolved 事件
+    await wire.emit_approval({'type': 'approvalResolved', 'id': 'ap-1', 'decision': 'allow-once'})
     resolved = await comm.receive_json_from()
-    assert resolved['decision'] == 'approve'
+    assert resolved == {'type': 'approvalResolved', 'id': 'ap-1', 'decision': 'allow-once'}
     # disconnect → approved subscriber removed
     await comm.disconnect()
     assert wire._approval_subscribers == []  # pylint: disable=use-implicit-booleaness-not-comparison

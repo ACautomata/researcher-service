@@ -11,12 +11,14 @@ from chat.models import Pairing
 class ApprovalResolveSerializer(serializers.Serializer):
     """审批回覆入参（T06，spec §8.2）：定义 OpenAPI request body（codex R2 P2）。
 
-    与 ApprovalResolveView 校验一致：id/kind 必填，decision 仅 approve/deny。
+    与 ApprovalResolveView 校验一致：id/kind 必填，decision 为 allow-once/allow-always/deny。
+    issue #154 实测（ghcr 2026.6.34）：decision 值已校准为 allow-once/allow-always/deny（非 approve/deny）。
+    kind 仅用于派生 method 名（{kind}.approval.resolve），不放入 params。
     """
 
     id = serializers.CharField()
-    kind = serializers.CharField()
-    decision = serializers.ChoiceField(choices=('approve', 'deny'))
+    kind = serializers.ChoiceField(choices=('exec', 'plugin'))
+    decision = serializers.ChoiceField(choices=('allow-once', 'allow-always', 'deny'))
 
     # APPROVAL_FIELD_ID/KIND/DECISION 常量由集成包单源管理（issue #105），
     # 此处字段名与常量值一致：id → APPROVAL_FIELD_ID, kind → APPROVAL_FIELD_KIND,

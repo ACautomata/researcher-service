@@ -451,7 +451,7 @@ class ApprovalResolveView(APIView):
         ser = ApprovalResolveSerializer(data=request.data or {})
         if not ser.is_valid():
             return Response(
-                {'detail': '缺少 id/kind，或 decision 非法（须为 approve/deny）'},
+                {'detail': '缺少 id/kind，或 decision 非法（须为 allow-once/allow-always/deny）'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         approval_id = ser.validated_data[APPROVAL_FIELD_ID]
@@ -472,7 +472,7 @@ class ApprovalResolveView(APIView):
                 status=status.HTTP_502_BAD_GATEWAY,
             )
         try:
-            payload = async_to_sync(client.resolve_approval)(approval_id, kind, decision)
+            async_to_sync(client.resolve_approval)(approval_id, kind, decision)
         except Exception as e:  # pylint: disable=broad-exception-caught
             # 原始异常（缺 scope/连接断开等）仅记服务端日志，不外泄到响应
             logger.warning('approval.resolve failed for %s id=%s: %s', name, approval_id, e)
@@ -480,12 +480,6 @@ class ApprovalResolveView(APIView):
                 {'detail': '审批回覆失败，请稍后重试'},
                 status=status.HTTP_502_BAD_GATEWAY,
             )
-        # first-answer-wins：以网关权威记录的 decision 为准（可能与请求不同，codex P1）
-        authoritative = (payload or {}).get(APPROVAL_FIELD_DECISION) or decision
-        # codex R2 P2：REST 路径的权威回执也经 pool client fan-out 给 WS 订阅者，各渲染副本一致收敛；
-        # 失败（无订阅者/连接已断）不影响已成功的 REST 回执。
-        try:
-            async_to_sync(client.broadcast_approval_resolved)(approval_id, authoritative)
-        except Exception:  # pylint: disable=broad-exception-caught
-            logger.debug('approval.resolve broadcast to subscribers failed for %s', name)
-        return Response({'ok': True, APPROVAL_FIELD_ID: approval_id, APPROVAL_FIELD_DECISION: authoritative})
+        # 不回送权威 decision——RPC ack payload 无 decision 字段（ADR 0003），
+        # 实际权威值由网关经 exec/plugin.approval.resolved 事件广播。
+        return Response({'ok': True, APPROVAL_FIELD_ID: approval_id})

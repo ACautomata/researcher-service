@@ -32,10 +32,11 @@ REQUIRED_SCOPES = {'operator.read', 'operator.write', 'operator.approvals'}
 # T06 权限审批（issue #42）：exec/plugin 两族共用同一翻译；连接级事件（不挂 chat runId，r26:88）；
 # payload 字段参考 r26:64（官方文档）；取值链集中在 Translator._approval_card。
 APPROVAL_REQUESTED_EVENTS = ('exec.approval.requested', 'plugin.approval.requested')
-# resolved 仅 plugin 族有（r26:47-52，exec 族无对应）；他端 operator 连接 resolve 后网关广播，
+# resolved 为 exec+plugin 双族（issue #154 实测 ghcr 2026.6.34：网关 resolve 后广播
+# exec.approval.resolved 非仅 plugin.approval.resolved）；他端 operator 连接 resolve 后网关广播，
 # 译为 approvalResolved 帧让共享 client 的 peer 卡片收敛。payload schema 待配对后实测校准
 # （r26:78-79 的 approval.resolve 是 client→gateway 方法参数，非本事件 payload），无 id 跳过（不伪造）。
-APPROVAL_RESOLVED_EVENTS = ('plugin.approval.resolved',)
+APPROVAL_RESOLVED_EVENTS = ('plugin.approval.resolved', 'exec.approval.resolved')
 # T08 工具执行（issue #44 / #153）：挂在 chat run 内（r26 §3），帧带 runId 走既有 runId 路由。
 # 实测校准（ghcr 2026.6.34 / ADR 0003 / PR #152 深挖 #3）：工具事件是 event:"agent" +
 # payload.stream:"tool" + data.phase:"start"/"update"/"result"，非独立 agent.tool.start/result。

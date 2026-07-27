@@ -83,28 +83,29 @@ def override_pool():
 def test_resolve_success(authed, instance, override_pool):
     client = _FakeClient()
     override_pool(_FakePool(client))
-    resp = authed.post(URL, {'id': 'ap-1', 'kind': 'exec', 'decision': 'approve'}, format='json')
+    resp = authed.post(URL, {'id': 'ap-1', 'kind': 'exec', 'decision': 'allow-once'}, format='json')
     assert resp.status_code == 200
-    assert resp.json() == {'ok': True, 'id': 'ap-1', 'decision': 'approve'}
-    assert client.resolved == [('ap-1', 'exec', 'approve')]
+    # codex P2 #163：resolve ack 只返回 ok:true（无 decision——权威值由 resolved 事件广播）
+    assert resp.json() == {'ok': True, 'id': 'ap-1'}
+    assert client.resolved == [('ap-1', 'exec', 'allow-once')]
 
 
-def test_resolve_returns_authoritative_decision(authed, instance, override_pool):
-    """codex P1：first-answer-wins —— 响应用网关权威 decision，非回声请求值。"""
+def test_resolve_returns_ok(authed, instance, override_pool):
+    """codex P1/P2 #163：REST resolve 不回送权威 decision——ack payload 无 decision 字段。"""
     client = _FakeClient(payload={'id': 'ap-1', 'decision': 'deny'})
     override_pool(_FakePool(client))
-    resp = authed.post(URL, {'id': 'ap-1', 'kind': 'exec', 'decision': 'approve'}, format='json')
+    resp = authed.post(URL, {'id': 'ap-1', 'kind': 'exec', 'decision': 'allow-once'}, format='json')
     assert resp.status_code == 200
-    assert resp.json()['decision'] == 'deny'  # 请求 approve，权威记录 deny
+    assert 'decision' not in resp.json()
 
 
-def test_resolve_broadcasts_authoritative_to_ws_subscribers(authed, instance, override_pool):
-    """codex R2 P2：REST 路径的权威回执经 pool client fan-out 给 WS 订阅者（副本收敛）。"""
+def test_resolve_no_broadcast_to_ws_subscribers(authed, instance, override_pool):
+    """codex P2 #163：REST resolve 不应广播——权威值由 resolved 事件 fan-out。"""
     client = _FakeClient(payload={'id': 'ap-1', 'decision': 'deny'})
     override_pool(_FakePool(client))
-    resp = authed.post(URL, {'id': 'ap-1', 'kind': 'exec', 'decision': 'approve'}, format='json')
+    resp = authed.post(URL, {'id': 'ap-1', 'kind': 'exec', 'decision': 'allow-once'}, format='json')
     assert resp.status_code == 200
-    assert client.broadcasts == [('ap-1', 'deny')]  # 权威 decision fan-out 给 WS 订阅者
+    assert not client.broadcasts  # 无广播
 
 
 def test_resolve_missing_field_400(authed, instance, override_pool):
@@ -115,13 +116,20 @@ def test_resolve_missing_field_400(authed, instance, override_pool):
 
 def test_resolve_invalid_decision_400(authed, instance, override_pool):
     override_pool(_FakePool(_FakeClient()))
-    resp = authed.post(URL, {'id': 'ap-1', 'kind': 'exec', 'decision': 'maybe'}, format='json')
+    resp = authed.post(URL, {'id': 'ap-1', 'kind': 'exec', 'decision': 'approve'}, format='json')
+    assert resp.status_code == 400
+
+
+def test_resolve_invalid_kind_400(authed, instance, override_pool):
+    """codex P2：非法 kind 应为 400，不转发到网关。"""
+    override_pool(_FakePool(_FakeClient()))
+    resp = authed.post(URL, {'id': 'ap-1', 'kind': 'typo', 'decision': 'allow-once'}, format='json')
     assert resp.status_code == 400
 
 
 def test_resolve_unknown_container_404(authed, override_pool):
     override_pool(_FakePool(_FakeClient()))
-    resp = authed.post(URL, {'id': 'a', 'kind': 'exec', 'decision': 'approve'}, format='json')
+    resp = authed.post(URL, {'id': 'a', 'kind': 'exec', 'decision': 'allow-once'}, format='json')
     assert resp.status_code == 404
 
 
@@ -130,7 +138,7 @@ def test_resolve_unpaired_409(authed, instance, override_pool):
         async def get_or_create(self, instance):
             raise NotPaired('pending', 'req-9')
     override_pool(_NotPairedPool())
-    resp = authed.post(URL, {'id': 'a', 'kind': 'exec', 'decision': 'approve'}, format='json')
+    resp = authed.post(URL, {'id': 'a', 'kind': 'exec', 'decision': 'allow-once'}, format='json')
     assert resp.status_code == 409
 
 
@@ -153,11 +161,11 @@ def test_resolve_pool_connect_failure_502(authed, instance, override_pool):
         async def get_or_create(self, instance):
             raise ChatConnectError('gateway offline')
     override_pool(_ConnectFailPool())
-    resp = authed.post(URL, {'id': 'a', 'kind': 'exec', 'decision': 'approve'}, format='json')
+    resp = authed.post(URL, {'id': 'a', 'kind': 'exec', 'decision': 'allow-once'}, format='json')
     assert resp.status_code == 502
 
 
 def test_resolve_requires_auth(api, instance, override_pool):
     override_pool(_FakePool(_FakeClient()))
-    resp = api.post(URL, {'id': 'a', 'kind': 'exec', 'decision': 'approve'}, format='json')
+    resp = api.post(URL, {'id': 'a', 'kind': 'exec', 'decision': 'allow-once'}, format='json')
     assert resp.status_code in (401, 403)

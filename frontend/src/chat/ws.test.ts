@@ -167,8 +167,8 @@ describe('ChatWebSocket', () => {
   it('dispatches approvalResolved to onApprovalResolved (回执 → 卡片标记已处理)', () => {
     const onApprovalResolved = vi.fn()
     new ChatWebSocket('/ws/chat/', 'jwt', { onApprovalResolved })
-    MockWS.last!.fireMessage({ type: 'approvalResolved', id: 'ap-1', decision: 'approve' })
-    expect(onApprovalResolved).toHaveBeenCalledWith('ap-1', 'approve')
+    MockWS.last!.fireMessage({ type: 'approvalResolved', id: 'ap-1', decision: 'allow-once' })
+    expect(onApprovalResolved).toHaveBeenCalledWith('ap-1', 'allow-once')
   })
 
   it('resolve sends a resolve frame with id/kind/decision once open', () => {

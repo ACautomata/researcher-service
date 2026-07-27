@@ -48,7 +48,7 @@ interface ApprovalItem {
   command: string
   sessionKey: string | null
   status: 'pending' | 'resolving' | 'resolved' // pending 待处理 / resolving 已点击等回执 / resolved 已处理
-  decision: '' | 'approve' | 'deny' | 'unknown' // codex R2 P2：未知权威值不默认批准
+  decision: '' | 'allow-once' | 'allow-always' | 'deny' | 'unknown' // codex P1 (issue #154)：网关权威值 allow-once/allow-always/deny
   detailOpen: boolean
 }
 
@@ -517,8 +517,8 @@ function connect() {
       const a = approvals.value.find((x) => x.id === id)
       if (a) {
         a.status = 'resolved'
-        // codex R2 P2：仅识别 approve/deny，其它权威值（expired/rejected 等）显示「未知」，不默认批准
-        a.decision = decision === 'approve' ? 'approve' : decision === 'deny' ? 'deny' : 'unknown'
+        // codex P1 (issue #154)：识别 allow-once/allow-always/deny，其它权威值显示「未知」
+        a.decision = decision === 'allow-once' || decision === 'allow-always' || decision === 'deny' ? decision : 'unknown'
       }
     },
     onTool: (tool) => {
@@ -559,7 +559,7 @@ function connect() {
 
 // T06：批准/拒绝 → 回发 resolve 帧 + 进 resolving 态（禁用按钮等回执，不乐观假成功，codex P2）。
 // 成功由 onApprovalResolved 落定；失败由 onError 恢复 pending 让卡片可重试。
-function resolveApproval(a: ApprovalItem, decision: 'approve' | 'deny') {
+function resolveApproval(a: ApprovalItem, decision: 'allow-once' | 'deny') {
   // codex R3 P2：socket 已断（disconnected）则不可点——否则会进 resolving 后 sendRaw 走 CLOSED 分支，
   // 报无 id 通用错误；虽 E 的 recover 会复位，但直接禁点更清楚（按钮也经 :disabled 联动 disconnected）
   if (!ws || disconnected.value || a.status !== 'pending') return
@@ -723,7 +723,7 @@ defineExpose({ selectContainer, send, newSession })
           <div class="a-head">
             ⚠️ 请求提升权限
             <span v-if="a.status === 'resolved'" class="resolved-tag" :class="a.decision">
-              {{ a.decision === 'approve' ? '已批准' : a.decision === 'deny' ? '已拒绝' : '未知' }}
+              {{ a.decision === 'allow-once' ? '已批准' : a.decision === 'allow-always' ? '已批准（始终）' : a.decision === 'deny' ? '已拒绝' : '未知' }}
             </span>
           </div>
           <div class="a-sub">{{ approvalSubtitle(a) }}</div>
@@ -734,7 +734,7 @@ defineExpose({ selectContainer, send, newSession })
             · 经审批事件推送，审批接口回覆
           </div>
           <div v-if="a.status !== 'resolved'" class="a-actions">
-            <button class="btn-approve" :disabled="a.status !== 'pending' || disconnected" :data-test="`approve-${a.id}`" @click="resolveApproval(a, 'approve')">批准</button>
+            <button class="btn-approve" :disabled="a.status !== 'pending' || disconnected" :data-test="`approve-${a.id}`" @click="resolveApproval(a, 'allow-once')">批准</button>
             <button class="btn-deny" :disabled="a.status !== 'pending' || disconnected" :data-test="`deny-${a.id}`" @click="resolveApproval(a, 'deny')">拒绝</button>
             <button class="btn-ghost" :data-test="`detail-${a.id}`" @click="toggleDetail(a)">查看细节</button>
           </div>
