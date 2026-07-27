@@ -71,6 +71,10 @@ class DockerRuntime:
             **_BASE_ENV,
             **_SYNC_FLAGS_OFF,
             'GATEWAY_TOKEN': spec.gateway_token,
+            # ADR 0003 / issue #156：容器内 sidecar CLI（approve/exec 审批注册）自连
+            # gateway 须 OPENCLAW_GATEWAY_TOKEN = GATEWAY_TOKEN 同值；spike 实测
+            # 不一致时 CLI 自连报 1008 token mismatch。
+            'OPENCLAW_GATEWAY_TOKEN': spec.gateway_token,
             'LLM_API_KEY': spec.llm_api_key,
         }
         return {
