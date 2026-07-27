@@ -182,8 +182,9 @@ def test_send_message_ack_has_runId(tmp_path):
                 async def collect(event):
                     events.append(event)
 
+                # ghcr 2026.6.34-browser 要求完整 agent:<agentId>:<key> 格式
                 run_id = await client.send_message(
-                    'wire-smoke-session',
+                    'agent:main:wire-smoke-session',
                     'Hello, just acknowledge this message.',
                     on_event=collect,
                 )
