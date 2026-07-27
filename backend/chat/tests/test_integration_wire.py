@@ -539,68 +539,15 @@ def _dump_capture_for_diagnosis(capturer) -> str:
 
 
 @pytest.mark.django_db
-def test_list_pending_approvals_returns_list(tmp_path):
-    """T4（#159 验收#1）：list_pending_approvals payload=list 防回归（PR #152）。
-
-    exec.approval.list 响应 payload 直接是 list（空 []/非空 [{...}]），非 {approvals:[...]}
-    dict。PR #152 修了假设 dict 取 .approvals、在非空 list 上 list.get 崩的 bug。
-
-    list_pending_approvals() 是 best-effort（RPC 拒/超时/解析失败返回 []），单断言
-    isinstance(cards, list) 无法区分「RPC 成功返回 list」与「RPC 坏了返回空 []」（codex P2）。
-    故捕获 exec.approval.list 原始 res 帧，断言 payload 真为 list——验证网关 list-shaped 响应，
-    RPC/schema 路径坏（超时无 res / res not ok）时测试 red。
-    """
-
-    from chat.pairing import PairingService
-    from integration.openclaw.adapters import HttpHealthProbe
-
-    orch, runtime = _build_orchestrator(tmp_path)
-
-    capturer = _RawCaptureTransport()
-    name = 'wire-approval-list'
-    with WireTestContext(
-        orch=orch, runtime=runtime,
-        pairing_service=PairingService(),
-        health_probe=HttpHealthProbe(),
-        name=name, transport=capturer,
-    ) as (client, _inst, _pairing):
-        async def _run():
-            await client.connect()
-            try:
-                cards = await client.list_pending_approvals()
-            finally:
-                await client.aclose()
-            return cards
-
-        cards = asyncio.run(_run())
-
-    # 翻译后 cards 是 list（弱信号：best-effort 在 RPC 坏时也返回 []）
-    assert isinstance(cards, list), \
-        f'list_pending_approvals 应返回 list（payload=list 防回归），got {type(cards).__name__}'
-
-    # codex P2：断言原始 res payload 真为 list（验证网关 list-shaped 响应，非 best-effort 空 []）
-    list_req = next(
-        f for f in capturer.sent if f.get('method') == 'exec.approval.list'
-    )
-    list_res = next(
-        f for f in capturer.captured
-        if f.get('type') == 'res' and f.get('id') == list_req.get('id')
-    )
-    raw_payload = list_res.get('payload')
-    assert isinstance(raw_payload, list), \
-        f'exec.approval.list res payload 应为 list（PR #152 防回归），' \
-        f'got {type(raw_payload).__name__}={raw_payload!r}'
-
-
-@pytest.mark.django_db
 def test_exec_approval_request_resolve_wire_schema(tmp_path):  # pylint: disable=too-many-locals,too-many-statements
-    """T4（#159 验收#2-5）：exec approval 路径 wire schema 断言（#154 已修，全 green）。
+    """T4（#159）：exec approval 路径 wire schema 断言 + list_pending 非空防回归（#154 已修，全 green）。
 
-    发 prompt 让 agent 调 exec（配置 elevatedDefault:full → 网关发 approval.requested），捕获
-    原始 wire 帧断言 #154 实测校准的 schema：
-    - 验收#3：approval.requested 的 command 在 payload.request.command（非 systemRunPlan.*）
-    - 验收#4：resolve 走 {kind}.approval.resolve（按族，非通用 approval.resolve）+ params {id, decision}
-    - 验收#5：网关广播 {kind}.approval.resolved（APPROVAL_RESOLVED_EVENTS 补 exec 族）
+    发 prompt 让 agent 调 exec（curl 网络命令，elevatedDefault:full → 网关发 approval.requested），
+    捕获原始 wire 帧断言 #154 实测校准的 schema（含 #159 验收#1-5）：
+    - 验收#1：list_pending_approvals 非空 list 翻译防回归（PR #152 / codex P2 #168）
+    - 验收#3：approval.requested command 在 payload.request.command（非 systemRunPlan.*，#154）
+    - 验收#4：resolve {kind}.approval.resolve + params {id, decision}（非 approval.resolve，#154）
+    - 验收#5：网关广播 {kind}.approval.resolved（APPROVAL_RESOLVED_EVENTS 补 exec，#154）
     """
 
     from chat.pairing import PairingService
@@ -655,6 +602,10 @@ def test_exec_approval_request_resolve_wire_schema(tmp_path):  # pylint: disable
             approval_id = approval['id']
             kind = approval.get('kind', 'exec')
 
+            # 验收#1：审批 pending 时调 list_pending_approvals，exercise 非空 list 翻译
+            # （codex P2 #168：fresh container 空 [] 永不触发 PR #152 的 list.get 崩分支）
+            cards = await client.list_pending_approvals()
+
             # 验收#4：resolve（#154 method={kind}.approval.resolve, params={id,decision}）
             resolve_res = await client.resolve_approval(approval_id, kind, 'allow-once')
 
@@ -670,9 +621,27 @@ def test_exec_approval_request_resolve_wire_schema(tmp_path):  # pylint: disable
                 pass
 
             await client.aclose()
-            return approval_id, kind, resolve_res, resolved_frame
+            return cards, approval_id, kind, resolve_res, resolved_frame
 
-        approval_id, kind, resolve_res, resolved_frame = asyncio.run(_run())
+        cards, approval_id, kind, resolve_res, resolved_frame = asyncio.run(_run())
+
+    # ---- 验收#1（list_pending_approvals 非空 list 翻译防回归，PR #152 / codex P2 #168）----
+    # codex P2：fresh container 空 [] 不触发 PR #152 的 list.get 崩分支；审批 pending 时调 list
+    # 验证非空 list → translated card 完整链路。回归时 best-effort catch 崩返回 []，断言 red。
+    assert isinstance(cards, list), \
+        f'list_pending_approvals 应返回 list，got {type(cards).__name__}'
+    matched = [c for c in cards if isinstance(c, dict) and c.get('id') == approval_id]
+    assert matched, \
+        f'list_pending_approvals 应含刚触发的审批 {approval_id}（非空 list 翻译防回归），' \
+        f'got {len(cards)} cards'
+    # 原始 res payload 是 list（验证网关 list-shaped 响应，非 best-effort 空 []）
+    list_req = next(f for f in capturer.sent if f.get('method') == 'exec.approval.list')
+    list_res = next(
+        f for f in capturer.captured
+        if f.get('type') == 'res' and f.get('id') == list_req.get('id')
+    )
+    assert isinstance(list_res.get('payload'), list), \
+        f'exec.approval.list res payload 应为 list，got {type(list_res.get("payload")).__name__}'
 
     # ---- 验收#4（resolve RPC 成功）：网关接受 {kind}.approval.resolve，res payload.ok=true ----
     assert resolve_res.get('ok') is True, \
