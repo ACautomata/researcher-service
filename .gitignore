@@ -1,5 +1,6 @@
 # 敏感配置（包含 API 密钥）
 .env
+.envrc
 
 # 运行时产物
 __pycache__/
@@ -36,3 +37,4 @@ backend/db.sqlite3-journal
 
 # 容器编排运行时数据（instances/<name>/ home + openclaw.json，spec §5）
 fleet/
+

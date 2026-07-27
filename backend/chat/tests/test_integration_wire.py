@@ -14,10 +14,12 @@ bind-mount 退化为空目录 → 网关报 Missing config。用 --basetemp 覆�
   uv run python -m pytest chat/tests/test_integration_wire.py -v --basetemp=$HOME/.cache/pytest-wire
 """
 import asyncio
+import json
 import os
 from pathlib import Path
 
 import pytest
+import websockets
 
 from containers.tests.integration_helpers import DockerDaemonProbe
 
@@ -51,6 +53,61 @@ def _check_env_deps():
         pytest.skip('需 LLM_API_KEY')
 
 
+class _RawCaptureTransport:
+    """包装 websockets.connect，从 recv() 捕获原始 JSON 帧供 wire schema 断言。
+
+    OpenClawChatClient 的 transport 注入 seam 允许传入 callable(url) → async CM。
+    本类代理真实 websockets.connect，在 recv() 上插捕获逻辑，每条原始 JSON 行追加
+    到 captured 列表，供测试事后断言 wire 协议字段形状（非内部翻译后的文本帧）。
+    """
+
+    def __init__(self):
+        self.captured: list[dict] = []
+
+    def __call__(self, url):
+        return _CaptureCM(url, self.captured)
+
+
+class _CaptureCM:
+    """async context manager：代理 websockets.connect 的 __aenter__/__aexit__。"""
+
+    def __init__(self, url, captured):
+        self._url = url
+        self._captured = captured
+        self._ws = None
+        self._cm = None
+
+    async def __aenter__(self):
+        self._cm = websockets.connect(self._url)
+        self._ws = await self._cm.__aenter__()
+        return _CaptureWs(self._ws, self._captured)
+
+    async def __aexit__(self, *a):
+        if self._cm is not None:
+            await self._cm.__aexit__(*a)
+        return False
+
+
+class _CaptureWs:
+    """代理 ws 对象，recv() 在 JSON 解析后捕获原始帧。"""
+
+    def __init__(self, ws, captured):
+        self._ws = ws
+        self._captured = captured
+
+    async def send(self, data):
+        return await self._ws.send(data)
+
+    async def recv(self):
+        raw = await self._ws.recv()
+        frame = json.loads(raw)
+        self._captured.append(frame)
+        return raw
+
+    async def close(self):
+        await self._ws.close()
+
+
 class WireTestContext:
     """每测试独立的容器+配对上下文（fixture 工厂，#156）。
 
@@ -58,12 +115,14 @@ class WireTestContext:
     Instance + Pairing。__exit__ 兜底删容器。
     """
 
-    def __init__(self, orch, runtime, pairing_service, health_probe, name):
+    def __init__(self, orch, runtime, pairing_service, health_probe, name,
+                 *, transport=None):
         self._orch = orch
         self._runtime = runtime
         self._pairing = pairing_service
         self._health_probe = health_probe
         self._name = name
+        self._transport = transport
         self._inst = None
 
     def __enter__(self):
@@ -110,6 +169,7 @@ class WireTestContext:
             client = OpenClawChatClient(
                 f'ws://127.0.0.1:{self._inst.port}/', pairing.device_token,
                 identity=identity, scopes=pairing.scopes_list(),
+                transport=self._transport,
             )
 
             return (client, self._inst, pairing)
@@ -195,3 +255,130 @@ def test_send_message_ack_has_run_id(tmp_path):
                 await client.aclose()
 
         asyncio.run(_send())
+
+
+@pytest.mark.django_db
+def test_chat_send_event_stream_wire_schema(tmp_path):
+    """T2（#157）：chat.send 事件流 wire schema 断言。
+
+    起容器+配对后 chat.send 一条消息，收集原始 wire 帧，断言：
+    - chat 事件流到达（state:delta + state:final）
+    - delta 含 deltaText 字段
+    - final.message 是 dict {role, content:[{type:text,text}], timestamp}（非字符串，#152 回归防护）
+    - final 含 stopReason 字段
+    """
+    pytest.importorskip('docker')
+    _check_env_deps()
+
+    from chat.pairing import PairingService
+    from containers.docker_runtime import DockerRuntime
+    from containers.orchestrator import FleetConfig, InstanceOrchestrator
+    from integration.openclaw.adapters import HttpHealthProbe
+
+    config = FleetConfig(
+        root=tmp_path / 'fleet',
+        template_dir=Path(os.environ['OPENCLAW_TEMPLATE_DIR']),
+        template_json=_WIRE_TEMPLATE_JSON,
+        image=_WIRE_IMAGE,
+        port_start=19000,
+        port_end=19999,
+        llm_api_key=os.environ['LLM_API_KEY'],
+    )
+    runtime = DockerRuntime()
+    orch = InstanceOrchestrator(runtime=runtime, config=config)
+
+    capturer = _RawCaptureTransport()
+    name = 'wire-schema'
+    with WireTestContext(
+        orch=orch, runtime=runtime,
+        pairing_service=PairingService(),
+        health_probe=HttpHealthProbe(),
+        name=name, transport=capturer,
+    ) as (client, inst, _pairing):
+        assert inst.name == name
+
+        async def _send():
+            await client.connect()
+            try:
+                done_event = asyncio.Event()
+                translated_events: list[dict] = []
+
+                async def collect(event):
+                    translated_events.append(event)
+                    if event.get('type') in ('done', 'error'):
+                        done_event.set()
+
+                run_id = await client.send_message(
+                    'agent:main:wire-schema-session',
+                    'Count from 1 to 3 in English. Just output the numbers.',
+                    on_event=collect,
+                )
+                assert run_id
+                try:
+                    await asyncio.wait_for(done_event.wait(), timeout=120.0)
+                except TimeoutError:
+                    pass
+            finally:
+                await client.aclose()
+            return translated_events
+
+        translated = asyncio.run(_send())
+
+    # 翻译后事件流：text（流式 delta） + done（final）
+    text_events = [e for e in translated if e.get('type') == 'text']
+    done_events = [e for e in translated if e.get('type') == 'done']
+    assert text_events, '应收到 text 事件（流式 delta 翻译产物）'
+    assert done_events, '应收到 done 事件（final 翻译产物）'
+
+    # Wire schema 断言：原始帧（非翻译后契约帧）
+    chat_events = [
+        f for f in capturer.captured
+        if f.get('type') == 'event' and f.get('event') == 'chat'
+    ]
+    assert chat_events, '应收到 chat 事件流（state delta + final）'
+
+    deltas = [
+        e for e in chat_events
+        if (e.get('payload') or {}).get('state') == 'delta'
+    ]
+    finals = [
+        e for e in chat_events
+        if (e.get('payload') or {}).get('state') == 'final'
+    ]
+    assert deltas, '应收到至少一个 state:delta 事件'
+    assert finals, '应收到至少一个 state:final 事件'
+
+    # delta 含 deltaText 字段
+    for d in deltas:
+        payload = d.get('payload') or {}
+        if payload.get('replace') and payload.get('message'):
+            # replace + message 快照模式：含完整 message dict，非 deltaText
+            continue
+        assert 'deltaText' in payload, \
+            f'delta 应含 deltaText 字段，got keys={sorted(payload.keys())}'
+
+    # final.message 是 dict（非字符串）—— #152 _extract_text 回归防护
+    for f_payload in finals:
+        payload = f_payload.get('payload') or {}
+        message = payload.get('message')
+        assert message is not None, 'final 应含 message 字段'
+        assert isinstance(message, dict), \
+            f'final.message 应为 dict，got {type(message).__name__}'
+        assert 'role' in message, \
+            f'message dict 应含 role，got keys={sorted(message.keys())}'
+        assert 'content' in message, \
+            f'message dict 应含 content，got keys={sorted(message.keys())}'
+        content = message.get('content')
+        assert isinstance(content, list), \
+            f'message.content 应为 list，got {type(content).__name__}'
+        text_blocks = [
+            b for b in content
+            if isinstance(b, dict) and b.get('type') == 'text'
+        ]
+        assert text_blocks, 'message.content 应至少含一条 type:text 块'
+
+    # final 含 stopReason 字段
+    for f_payload in finals:
+        payload = f_payload.get('payload') or {}
+        assert 'stopReason' in payload, \
+            f'final 应含 stopReason，got keys={sorted(payload.keys())}'
