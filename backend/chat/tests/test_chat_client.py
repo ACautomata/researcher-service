@@ -148,6 +148,7 @@ async def test_connect_shares_single_timeout_budget_across_challenge_and_res():
     import json
     import time
 
+    # pylint: disable=attribute-defined-outside-init
     class _SlowWs:  # 网关：challenge 拖 0.8s，之后永不回 res
         async def send(self, _f):
             pass
@@ -159,6 +160,7 @@ async def test_connect_shares_single_timeout_budget_across_challenge_and_res():
                 return json.dumps({'type': 'event', 'event': 'connect.challenge',
                                    'payload': {'nonce': 'nz'}})
             await asyncio.sleep(60)
+    # pylint: enable=attribute-defined-outside-init
 
     class _Cm:
         async def __aenter__(self):
