@@ -53,6 +53,24 @@ def _check_env_deps():
         pytest.skip('需 LLM_API_KEY')
 
 
+def _build_orchestrator(tmp_path):
+    """构建 FleetConfig + InstanceOrchestrator（每测试共享的配置逻辑）。"""
+    from containers.docker_runtime import DockerRuntime
+    from containers.orchestrator import FleetConfig, InstanceOrchestrator
+
+    config = FleetConfig(
+        root=tmp_path / 'fleet',
+        template_dir=Path(os.environ['OPENCLAW_TEMPLATE_DIR']),
+        template_json=_WIRE_TEMPLATE_JSON,
+        image=_WIRE_IMAGE,
+        port_start=19000,
+        port_end=19999,
+        llm_api_key=os.environ['LLM_API_KEY'],
+    )
+    runtime = DockerRuntime()
+    return InstanceOrchestrator(runtime=runtime, config=config), runtime
+
+
 class _RawCaptureTransport:
     """包装 websockets.connect，从 recv() 捕获原始 JSON 帧供 wire schema 断言。
 
@@ -208,21 +226,9 @@ def test_send_message_ack_has_run_id(tmp_path):
     _check_env_deps()
 
     from chat.pairing import PairingService
-    from containers.docker_runtime import DockerRuntime
-    from containers.orchestrator import FleetConfig, InstanceOrchestrator
     from integration.openclaw.adapters import HttpHealthProbe
 
-    config = FleetConfig(
-        root=tmp_path / 'fleet',
-        template_dir=Path(os.environ['OPENCLAW_TEMPLATE_DIR']),
-        template_json=_WIRE_TEMPLATE_JSON,
-        image=_WIRE_IMAGE,
-        port_start=19000,
-        port_end=19999,
-        llm_api_key=os.environ['LLM_API_KEY'],
-    )
-    runtime = DockerRuntime()
-    orch = InstanceOrchestrator(runtime=runtime, config=config)
+    orch, runtime = _build_orchestrator(tmp_path)
 
     name = 'wire-smoke'
     with WireTestContext(
@@ -271,21 +277,9 @@ def test_chat_send_event_stream_wire_schema(tmp_path):
     _check_env_deps()
 
     from chat.pairing import PairingService
-    from containers.docker_runtime import DockerRuntime
-    from containers.orchestrator import FleetConfig, InstanceOrchestrator
     from integration.openclaw.adapters import HttpHealthProbe
 
-    config = FleetConfig(
-        root=tmp_path / 'fleet',
-        template_dir=Path(os.environ['OPENCLAW_TEMPLATE_DIR']),
-        template_json=_WIRE_TEMPLATE_JSON,
-        image=_WIRE_IMAGE,
-        port_start=19000,
-        port_end=19999,
-        llm_api_key=os.environ['LLM_API_KEY'],
-    )
-    runtime = DockerRuntime()
-    orch = InstanceOrchestrator(runtime=runtime, config=config)
+    orch, runtime = _build_orchestrator(tmp_path)
 
     capturer = _RawCaptureTransport()
     name = 'wire-schema'
