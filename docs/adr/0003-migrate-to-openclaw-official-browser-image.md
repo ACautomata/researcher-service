@@ -37,6 +37,12 @@
   - `commands.list`：`commands[].name/textAliases/description` 假设**全对**（实测还含 `nativeName`/`category`/`source`/`scope`/`acceptsArgs`，当前未透传）。
   - `exec.approval.list`：**payload 直接是 list（空 `[]`），非 `{approvals:[...]}` dict** → 第二个被真实集成发现的 fake 盲区 bug：`chat_client.list_pending_approvals` 假设 dict 取 `.approvals`，非空 list 会 `list.get` 崩。修：加 payload 类型分支（list 直用 / dict 取 approvals），TDD 2 新测试，chat 216 测试全绿。
   - **两次 bug 都印证 ADR 动机**：fake 用 dict/字符串假设掩盖了 wire schema 真相，只有真实集成才暴露。`chat_client.py` 中所有"待实测"注释现均已实测坐实或修复。
+- **深挖边缘实测：`agent.tool.*` + `approval.resolve` 非空**（spike 同容器，2026-07-27，token 对齐后）—— 又发现 7 个 wire schema 假设错误（累计 9 个，强证真实集成是唯一能补的洞）：
+  - **工具事件结构**：网关发 `event:"agent" + payload.stream:"tool" + data.phase:"start"/"update"/"result"`（`data.name/toolCallId/args/partialResult/result/isError`），**非** `wire.py` 假设的独立 `agent.tool.start`/`agent.tool.result` 事件 → `event_translate._translate_tool` 整条路径永不触发，**前端工具帧（T08）从不产生**。还含 `stream:"item"`（`kind:"tool"/"command"`,`status`）、`stream:"command_output"`（命令输出流）等更细粒度事件未覆盖。
+  - **approval.requested 字段路径**：`payload.request.command` / `payload.request.sessionKey`（非 `systemRunPlan.rawCommand`/`systemRunPlan.sessionKey`，实测 systemRunPlan=null）→ `_approval_card` command/sessionKey 取空。payload **无 kind 字段**（事件名派生 exec/plugin 正确）。`allowedDecisions:["allow-once","allow-always","deny"]`。
+  - **resolve 方法名/params**：`exec.approval.resolve`（按族，非通用 `approval.resolve` —— 后者网关报 `unknown method`），params `{id, decision}`（无 kind），decision 取 `allow-once`/`allow-always`/`deny`（非 `approve`）。res `payload:{ok:true}`，网关广播 `exec.approval.resolved`（含 `decision`/`resolvedBy`/`request`）。
+  - **`APPROVAL_RESOLVED_EVENTS` 漏 exec 族**：`wire.py` 仅列 `plugin.approval.resolved`，漏 `exec.approval.resolved`。
+  - **拆 ticket 后续回写**（避免本 PR 膨胀）：工具翻译重构、approval card 字段路径、resolve 方法名/params、`APPROVAL_RESOLVED_EVENTS` 补 exec —— 每项一个 TDD fix。
 - **browser 免 SYS_ADMIN**：官方 browser 变体用 Playwright + Xvfb + `noSandbox`，hardened compose 已 drop `NET_RAW`/`NET_ADMIN`，**不需要 `SYS_ADMIN` cap**（与 fork 的 caps 设计无关，是独立利好）。
 - **历史实测文档须重验**：R6（挂载契约）、`r26`（ws 协议/operator scope 来自配对）、`r28`（热加载不重启）均基于 fork + init.sh，迁移后须在新镜像上重新验证回填。
 - **配置小坑**：`openclaw.json:33` `browser.executablePath:"/usr/bin/chromium"` 需对齐 Playwright 路径（`/home/node/.cache/ms-playwright`）或删除让其自解析。
