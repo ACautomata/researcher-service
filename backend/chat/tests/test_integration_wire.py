@@ -1,7 +1,7 @@
-"""chat wire schema 集成测试（issue #155/#156/#157）：真实 ghcr 2026.6.34 镜像验证 wire 假设。
+"""chat wire schema 集成测试（issue #155-#159）：真实 ghcr 2026.6.34 镜像验证 wire 假设。
 
 无门控/无 skip——依赖缺失时直接报错，强制环境就绪。T1（#156）：fixture 工厂 + chat.send
-冒烟。T2（#157）：chat.send 事件流 wire schema 断言。
+冒烟。T2（#157）：chat.send 事件流。T3（#158）：只读 RPC。T4（#159）：approval 路径。
 
 运行（须 source .envrc 保证 env）：
   source .envrc
@@ -14,6 +14,7 @@ bind-mount 退化为空目录 → 网关报 Missing config。用 --basetemp 覆�
 import asyncio
 import json
 import os
+import time
 import uuid
 from pathlib import Path
 
@@ -59,7 +60,7 @@ def _build_orchestrator(tmp_path):
 
 
 class _RawCaptureTransport:
-    """包装 websockets.connect，从 recv() 捕获原始 JSON 帧供 wire schema 断言。
+    """包装 websockets.connect，捕获 recv()/send() 原始 JSON 帧供 wire schema 断言。
 
     OpenClawChatClient 的 transport 注入 seam 允许传入 callable(url) → async CM。
     本类代理真实 websockets.connect，在 recv() 上插捕获逻辑，每条原始 JSON 行追加
@@ -67,25 +68,28 @@ class _RawCaptureTransport:
     """
 
     def __init__(self):
-        self.captured: list[dict] = []
+        self.captured: list[dict] = []  # recv 原始 JSON 帧（网关→客户端）
+        # send 原始 JSON 帧（客户端→网关）：T4 审批 resolve 方法/params 断言需查发送侧
+        self.sent: list[dict] = []
 
     def __call__(self, url):
-        return _CaptureCM(url, self.captured)
+        return _CaptureCM(url, self.captured, self.sent)
 
 
 class _CaptureCM:
     """async context manager：代理 websockets.connect 的 __aenter__/__aexit__。"""
 
-    def __init__(self, url, captured):
+    def __init__(self, url, captured, sent):
         self._url = url
         self._captured = captured
+        self._sent = sent
         self._ws = None
         self._cm = None
 
     async def __aenter__(self):
         self._cm = websockets.connect(self._url)
         self._ws = await self._cm.__aenter__()
-        return _CaptureWs(self._ws, self._captured)
+        return _CaptureWs(self._ws, self._captured, self._sent)
 
     async def __aexit__(self, *a):
         if self._cm is not None:
@@ -96,11 +100,17 @@ class _CaptureCM:
 class _CaptureWs:
     """代理 ws 对象，recv() 在 JSON 解析后捕获原始帧。"""
 
-    def __init__(self, ws, captured):
+    def __init__(self, ws, captured, sent):
         self._ws = ws
         self._captured = captured
+        self._sent = sent
 
     async def send(self, data):
+        # 捕获客户端→网关的原始 req 帧（T4：审批 resolve 方法 + params 断言）；非 JSON 容错跳过
+        try:
+            self._sent.append(json.loads(data))
+        except (ValueError, TypeError):
+            pass
         return await self._ws.send(data)
 
     async def recv(self):
@@ -483,3 +493,200 @@ def test_readonly_rpc_wire_schema(tmp_path):  # pylint: disable=too-many-locals,
     for m in asst_msgs:
         assert isinstance(m.get('content'), list), \
             f'assistant message.content 应为 list，got {type(m.get("content")).__name__}'
+
+
+async def _wait_for_event_frame(capturer, event_name, *, timeout, interval=0.5):
+    """轮询 capturer.captured，返回首个 type=event 且 event=event_name 的原始帧；超时返回 None。
+
+    审批 resolved 事件在 resolve RPC 回执后由网关异步广播，须轮询捕获列表而非单次读取。
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        for frame in capturer.captured:
+            if frame.get('type') == 'event' and frame.get('event') == event_name:
+                return frame
+        await asyncio.sleep(interval)
+    return None
+
+
+def _dump_capture_for_diagnosis(capturer) -> str:
+    """构造超时诊断：agent 工具事件 + chat 状态 + approval 事件，判断审批为何没触发。
+
+    T4 触发审批依赖 LLM 实际调 exec（非确定性）；超时时需看清 agent 是否调了 exec、
+    调的是否是 exec、以及有无任何 approval* 事件，据此区分 prompt / 配置 / schema 问题。
+    """
+    agent_payloads = [f.get('payload') or {} for f in capturer.captured
+                      if f.get('event') == 'agent']
+    tool_events = [
+        (p.get('stream'),
+         (p.get('data') or {}).get('phase'),
+         (p.get('data') or {}).get('name'),
+         (p.get('data') or {}).get('args'))
+        for p in agent_payloads
+    ]
+    chat_states = sorted({(f.get('payload') or {}).get('state')
+                          for f in capturer.captured if f.get('event') == 'chat'})
+    approval_events = sorted({f.get('event') for f in capturer.captured
+                              if 'approval' in (f.get('event') or '')})
+    return (
+        'agent 未在 120s 内触发 exec 审批。诊断：\n'
+        f'  chat states: {chat_states}\n'
+        f'  approval events: {approval_events}\n'
+        f'  agent tool events (stream, phase, name, args) 全部: {tool_events}\n'
+        '  → tool_events 空/无 exec name：prompt 未让 agent 调 exec\n'
+        '  → 有 exec name 但无 approval events：elevatedDefault 或命令类型未触发审批'
+    )
+
+
+@pytest.mark.django_db
+def test_list_pending_approvals_returns_list(tmp_path):
+    """T4（#159 验收#1）：list_pending_approvals payload=list 防回归（PR #152）。
+
+    exec.approval.list 响应 payload 直接是 list（空 []/非空 [{...}]），非 {approvals:[...]}
+    dict。PR #152 修了假设 dict 取 .approvals、在非空 list 上 list.get 崩的 bug。本测试起真容器
+    调 RPC，断言返回 list 类型不崩——空 list（无待审批）也通过，验证 payload=list 类型分支。
+    """
+
+    from chat.pairing import PairingService
+    from integration.openclaw.adapters import HttpHealthProbe
+
+    orch, runtime = _build_orchestrator(tmp_path)
+
+    name = 'wire-approval-list'
+    with WireTestContext(
+        orch=orch, runtime=runtime,
+        pairing_service=PairingService(),
+        health_probe=HttpHealthProbe(),
+        name=name,
+    ) as (client, _inst, _pairing):
+        async def _run():
+            await client.connect()
+            try:
+                cards = await client.list_pending_approvals()
+            finally:
+                await client.aclose()
+            return cards
+
+        cards = asyncio.run(_run())
+
+    # PR #152 防回归：payload 直接是 list 时不崩，翻译成 list[card]（此处无待审批→空 list）
+    assert isinstance(cards, list), \
+        f'list_pending_approvals 应返回 list（payload=list 防回归），got {type(cards).__name__}'
+
+
+@pytest.mark.django_db
+def test_exec_approval_request_resolve_wire_schema(tmp_path):  # pylint: disable=too-many-locals,too-many-statements
+    """T4（#159 验收#2-5）：exec approval 路径 wire schema 断言（#154 已修，全 green）。
+
+    发 prompt 让 agent 调 exec（配置 elevatedDefault:full → 网关发 approval.requested），捕获
+    原始 wire 帧断言 #154 实测校准的 schema：
+    - 验收#3：approval.requested 的 command 在 payload.request.command（非 systemRunPlan.*）
+    - 验收#4：resolve 走 {kind}.approval.resolve（按族，非通用 approval.resolve）+ params {id, decision}
+    - 验收#5：网关广播 {kind}.approval.resolved（APPROVAL_RESOLVED_EVENTS 补 exec 族）
+    """
+
+    from chat.pairing import PairingService
+    from integration.openclaw.adapters import HttpHealthProbe
+
+    orch, runtime = _build_orchestrator(tmp_path)
+
+    capturer = _RawCaptureTransport()
+    name = 'wire-approval-schema'
+    with WireTestContext(
+        orch=orch, runtime=runtime,
+        pairing_service=PairingService(),
+        health_probe=HttpHealthProbe(),
+        name=name, transport=capturer,
+    ) as (client, _inst, _pairing):
+        async def _run():
+            await client.connect()
+            approval_seen = asyncio.Event()
+            approval: dict = {}  # 翻译后 card：id + kind（resolve 入参）
+
+            async def on_approval(card):
+                if card.get('type') == 'approval' and card.get('id'):
+                    approval.update(card)
+                    approval_seen.set()
+
+            client.add_approval_subscriber(on_approval)
+
+            # 触发 agent 调 exec（elevatedDefault:full → 网关发 exec.approval.requested）
+            chat_done = asyncio.Event()
+
+            async def on_chat(event):
+                if event.get('type') in ('done', 'error'):
+                    chat_done.set()
+
+            session_key = 'agent:main:wire-approval-schema'
+            run_id = await client.send_message(
+                session_key,
+                # 网络命令触发 elevated 审批（spec #159 验收#2）：echo 等无害命令 exec 直接执行
+                # 不触发审批；curl 这类网络命令才走 exec.approval.requested（ADR 0003 spike 实测）
+                'Use the exec tool to run this network command exactly: '
+                'curl -sL http://example.com',
+                on_event=on_chat,
+            )
+            assert run_id
+
+            # 等 approval.requested（agent 必须调 exec；LLM 行为不确定，给足超时 + 诊断）
+            try:
+                await asyncio.wait_for(approval_seen.wait(), timeout=120.0)
+            except TimeoutError:
+                pytest.fail(_dump_capture_for_diagnosis(capturer))
+
+            approval_id = approval['id']
+            kind = approval.get('kind', 'exec')
+
+            # 验收#4：resolve（#154 method={kind}.approval.resolve, params={id,decision}）
+            resolve_res = await client.resolve_approval(approval_id, kind, 'allow-once')
+
+            # 验收#5：等网关广播 resolved（#154 APPROVAL_RESOLVED_EVENTS 补 exec 族）
+            resolved_frame = await _wait_for_event_frame(
+                capturer, f'{kind}.approval.resolved', timeout=30.0,
+            )
+
+            # chat.done 不强制（审批链已断言）；容许它后到
+            try:
+                await asyncio.wait_for(chat_done.wait(), timeout=10.0)
+            except TimeoutError:
+                pass
+
+            await client.aclose()
+            return approval_id, kind, resolve_res, resolved_frame
+
+        approval_id, kind, resolve_res, resolved_frame = asyncio.run(_run())
+
+    # ---- 验收#4（resolve RPC 成功）：网关接受 {kind}.approval.resolve，res payload.ok=true ----
+    assert resolve_res.get('ok') is True, \
+        f'resolve RPC res.ok 应为 true（网关接受 {kind}.approval.resolve），got {resolve_res}'
+
+    # ---- 验收#3：approval.requested payload.request.command 路径（#154 实测，非 systemRunPlan.*）----
+    requested = next(
+        f for f in capturer.captured
+        if f.get('type') == 'event' and f.get('event') == f'{kind}.approval.requested'
+    )
+    payload = requested.get('payload') or {}
+    assert payload.get('id') == approval_id, 'requested payload.id 应匹配审批 id'
+    req = payload.get('request')
+    assert isinstance(req, dict), \
+        f'requested payload 应含 request 子对象（#154 实测路径），got keys={sorted(payload.keys())}'
+    assert isinstance(req.get('command'), str) and req['command'], \
+        f'request.command 应为非空字符串（#154 路径，非 systemRunPlan.*），got {req.get("command")!r}'
+
+    # ---- 验收#4：resolve 方法 {kind}.approval.resolve + params {id, decision}（#154）----
+    sent_resolve = next(
+        f for f in capturer.sent
+        if f.get('type') == 'req' and f.get('method') == f'{kind}.approval.resolve'
+    )
+    assert sent_resolve.get('params') == {'id': approval_id, 'decision': 'allow-once'}, \
+        f'resolve params 应为 {{id, decision}}（无 kind，#154），got {sent_resolve.get("params")}'
+
+    # ---- 验收#5：网关广播 {kind}.approval.resolved（#154 APPROVAL_RESOLVED_EVENTS 补 exec 族）----
+    assert resolved_frame is not None, \
+        f'网关应广播 {kind}.approval.resolved（#154 补 exec 族），未收到'
+    resolved_payload = resolved_frame.get('payload') or {}
+    assert resolved_payload.get('id') == approval_id, \
+        f'resolved payload.id 应匹配审批 id，got {resolved_payload.get("id")!r}'
+    assert resolved_payload.get('decision') == 'allow-once', \
+        f'resolved decision 应为 allow-once（first-answer-wins 权威值），' \
+        f'got {resolved_payload.get("decision")!r}'
