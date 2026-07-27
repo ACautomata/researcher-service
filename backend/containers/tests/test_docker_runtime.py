@@ -68,6 +68,7 @@ def test_sync_flags_off_and_credentials_in_env():
     assert env['SYNC_MODEL_CONFIG'] == 'false'
     # 凭证经 env 注入（SecretRef 运行时读进程 env，不写盘）
     assert env['GATEWAY_TOKEN'] == 'tok-DO-NOT-LEAK'
+    assert env['OPENCLAW_GATEWAY_TOKEN'] == 'tok-DO-NOT-LEAK'
     assert env['LLM_API_KEY'] == 'sk-test'
     # 容器内统一 18789 + lan（跨容器访问必需）
     assert env['OPENCLAW_GATEWAY_PORT'] == '18789'

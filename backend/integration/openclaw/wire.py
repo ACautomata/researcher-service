@@ -146,7 +146,11 @@ class ConnectFrameBuilder:
                 'role': ROLE,
                 'scopes': list(scopes),
                 'caps': list(CAPS),
+                'commands': [],
+                'permissions': {},
                 'auth': {'token': device_token},
+                'locale': 'zh-CN',
+                'userAgent': 'openclaw-fleet-panel/1.0',
                 'device': {
                     'id': identity.device_id,
                     'publicKey': identity.public_key_raw_base64url(),
