@@ -298,48 +298,80 @@ async def test_identity_and_scopes_are_passed_from_pairing_to_client():
 
 
 @pytest.mark.asyncio
-async def test_empty_scopes_json_passes_empty_list():
-    """scopes_json='[]' 时传空 list（不抛异常、不传 None）。"""
+async def test_empty_scopes_json_with_identity_raises_not_paired():
+    """scopes_json='[]' 且 identity 完整 → NotPaired（配对材料不完整，路由重新配对）。"""
     pool = ChatConnectionPool(
         pairing_service=FakePairingService(scopes_json='[]'),
         client_factory=StubClient,
         ws_url_for=_url_for,
     )
-    c = await pool.get_or_create(_instance('x', 19101))
-    assert c.scopes == []
+    with pytest.raises(NotPaired):
+        await pool.get_or_create(_instance('x', 19101))
 
 
 @pytest.mark.asyncio
-async def test_malformed_scopes_json_passes_empty_list():
-    """scopes_json 损坏时传空 list（防御：不崩 get_or_create）。"""
+async def test_malformed_scopes_json_with_identity_raises_not_paired():
+    """scopes_json 损坏且 identity 完整 → NotPaired（配对材料不完整，路由重新配对）。"""
     pool = ChatConnectionPool(
         pairing_service=FakePairingService(scopes_json='{bad'),
         client_factory=StubClient,
         ws_url_for=_url_for,
     )
-    c = await pool.get_or_create(_instance('x', 19102))
-    assert c.scopes == []
+    with pytest.raises(NotPaired):
+        await pool.get_or_create(_instance('x', 19102))
 
 
 @pytest.mark.asyncio
-async def test_non_list_scopes_returns_empty():
-    """scopes_json 是合法 JSON 但非 list（如 str "op.read" / dict {}）→ 返回 []。"""
+async def test_non_list_scopes_with_identity_raises_not_paired():
+    """scopes_json 是合法 JSON 但非 list（如 str "op.read" / dict {}）→ NotPaired。"""
     pool = ChatConnectionPool(
         pairing_service=FakePairingService(scopes_json='"operator.read"'),
         client_factory=StubClient,
         ws_url_for=_url_for,
     )
-    c = await pool.get_or_create(_instance('x', 19103))
-    assert c.scopes == []
+    with pytest.raises(NotPaired):
+        await pool.get_or_create(_instance('x', 19103))
 
 
 @pytest.mark.asyncio
-async def test_list_with_non_string_elements_returns_empty():
-    """scopes_json 是 list 但含有非字符串元素 → 返回 []。"""
+async def test_non_string_elements_with_identity_raises_not_paired():
+    """scopes_json 是 list 但含有非字符串元素 → NotPaired。"""
     pool = ChatConnectionPool(
         pairing_service=FakePairingService(scopes_json='["op.read", 123]'),
         client_factory=StubClient,
         ws_url_for=_url_for,
     )
-    c = await pool.get_or_create(_instance('x', 19104))
+    with pytest.raises(NotPaired):
+        await pool.get_or_create(_instance('x', 19104))
+
+
+@pytest.mark.asyncio
+async def test_empty_scopes_json_without_identity_passes():
+    """scopes_json 为空且 identity 不完整 → 不抛 NotPaired（unsigned 路径，不需要 scopes）。"""
+    pool = ChatConnectionPool(
+        pairing_service=FakePairingService(
+            scopes_json='[]',
+            device_id='', public_key_pem='', private_key_pem='',
+        ),
+        client_factory=StubClient,
+        ws_url_for=_url_for,
+    )
+    c = await pool.get_or_create(_instance('x', 19105))
     assert c.scopes == []
+    assert c.identity is None
+
+
+@pytest.mark.asyncio
+async def test_non_list_scopes_without_identity_passes():
+    """scopes_json 非 list 且 identity 不完整 → 不抛 NotPaired（unsigned 路径）。"""
+    pool = ChatConnectionPool(
+        pairing_service=FakePairingService(
+            scopes_json='"operator.read"',
+            device_id='', public_key_pem='', private_key_pem='',
+        ),
+        client_factory=StubClient,
+        ws_url_for=_url_for,
+    )
+    c = await pool.get_or_create(_instance('x', 19106))
+    assert c.scopes == []
+    assert c.identity is None
