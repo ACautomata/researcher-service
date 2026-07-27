@@ -1,6 +1,6 @@
 """ApprovalPairer 编排逻辑单测（issue #94 配对 approve 轮询）。
 
-集成测试本体需真 daemon（RUN_INTEGRATION=1 门控），无法在 CI 红→绿；把配对 approve
+集成测试本体需真 daemon（DockerDaemonProbe 门控），无法在 CI 红→绿；把配对 approve
 轮询的纯编排逻辑抽成 ApprovalPairer（integration_helpers.py），此处用 fake pairing
 service + 假时钟确定性驱动其正确性：approve 只触发一次、轮询至 paired、独立超时、
 PairingError 立即传播。

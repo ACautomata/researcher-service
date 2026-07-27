@@ -67,10 +67,9 @@ JSON 内仅 `${GATEWAY_TOKEN}` 占位（不落盘）。
 
 ### integration smoke（需真 daemon）
 
-默认 skip。手动验证建/删容器真实链路：
+靠 docker daemon 自动探测门控（有 daemon 即 collect，无则 skip）；CI 即便有 daemon，也因缺 `OPENCLAW_TEMPLATE_DIR`/`LLM_API_KEY` 在用例内 skip。手动验证建/删容器真实链路：
 
 ```bash
-export RUN_INTEGRATION=1
 export OPENCLAW_TEMPLATE_DIR=/path/to/researcher     # git clone ACautomata/researcher
 export OPENCLAW_IMAGE=acautomata/openclaw-docker-cn-im:latest
 export LLM_API_KEY=sk-...

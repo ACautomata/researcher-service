@@ -1,7 +1,8 @@
 """integration: 真实 docker daemon 端到端 smoke —— issue #39 验收闭环。
 
-默认 skip（CI 无 daemon / 无模板 / 无镜像）。手动验证 spec §5 真实链路：
-  export RUN_INTEGRATION=1
+靠 docker daemon 自动探测门控（DockerDaemonProbe.is_available，替代 RUN_INTEGRATION env）；
+CI runner 即便有 daemon，也因缺 OPENCLAW_TEMPLATE_DIR/LLM_API_KEY 在用例内 skip。
+手动验证 spec §5 真实链路：
   export OPENCLAW_TEMPLATE_DIR=/path/to/researcher   # git clone ACautomata/researcher
   export OPENCLAW_IMAGE=acautomata/openclaw-docker-cn-im:latest
   export LLM_API_KEY=sk-...
@@ -15,9 +16,13 @@ from pathlib import Path
 
 import pytest
 
+from containers.tests.integration_helpers import DockerDaemonProbe
+
+# daemon 自动探测门控（替代 RUN_INTEGRATION env）：有 daemon 才 collect 真容器用例；
+# 无 daemon 整体 skip。OPENCLAW_TEMPLATE_DIR/LLM_API_KEY 仍由各用例内 skip（数据依赖）。
 pytestmark = pytest.mark.skipif(
-    not os.environ.get('RUN_INTEGRATION'),
-    reason='需真 docker daemon + researcher 模板 + 镜像；设 RUN_INTEGRATION=1 启用',
+    not DockerDaemonProbe.is_available(),
+    reason='需 docker daemon（自动探测；Colima/Docker Desktop 本地 VM 均可）',
 )
 
 BASE_DIR = Path(__file__).resolve().parents[3]
@@ -79,7 +84,7 @@ _GATEWAY_POLL_INTERVAL = 1.0
 
 @pytest.mark.django_db
 def test_pair_chat_wiki_smoke_chain(tmp_path):  # pylint: disable=too-many-locals,too-many-statements
-    """issue #94：创建→配对→chat→wiki→删除 全链路 smoke（RUN_INTEGRATION=1）。
+    """issue #94：创建→配对→chat→wiki→删除 全链路 smoke（docker daemon 探测门控）。
 
     全程经控制面对象直调（InstanceOrchestrator/PairingService/OpenClawChatClient/WikiService），
     不走 HTTP、不 runserver。覆盖 spec §5/§8 真实链路：Ed25519 配对握手 + 容器内 approve 轮询
