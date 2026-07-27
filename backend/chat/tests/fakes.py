@@ -146,7 +146,7 @@ class _FakeChatWs:
                 return json.dumps({'type': 'res', 'id': cs['id'], 'ok': False, 'error': t.ack_error})
             return json.dumps({'type': 'res', 'id': cs['id'], 'ok': True,
                                'payload': {'runId': t.ack_run_id}})
-        resolves = [f for f in t.sent if f.get('method') == 'approval.resolve']
+        resolves = [f for f in t.sent if f.get('method', '').endswith('.approval.resolve')]
         if not t.suppress_ack and len(resolves) > t._resolve_ack_index:
             rs = resolves[t._resolve_ack_index]
             t._resolve_ack_index += 1

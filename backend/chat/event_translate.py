@@ -59,19 +59,36 @@ class ChatEventTranslator:
         kind 取值（codex/审查 P1）：payload.kind 缺省时从事件名族派生（exec/plugin）——r26 §1 指出
         kind 非文档字段，plugin 审批若一律回退 'exec' 会以错误 kind 回覆 approval.resolve（类型无关
         审批对要求匹配 kind）。sessionKey 透传自 systemRunPlan（前端据此把审批归属到对应会话过滤）。
+
+        issue #154 实测校准（ghcr 2026.6.34 / ADR 0003）：systemRunPlan 实测为 null；command 在
+        payload.request.command、sessionKey 在 payload.request.sessionKey。取值链：
+        request.command → systemRunPlan.rawCommand → systemRunPlan.command → 顶层 command → ''
+        request.sessionKey → systemRunPlan.sessionKey → None
         """
         approval_id = payload.get('id')
         if not approval_id:
             return None
-        # command 取值链：systemRunPlan.rawCommand（r26:64 官方文档已证）→ systemRunPlan.command → 顶层 command → ''（防御性兜底）
+        # issue #154：实测 systemRunPlan=null，command/sessionKey 在 payload.request 下；
+        # request 存在时取 request 字段（不退 systemRunPlan）；request 缺失时退 systemRunPlan（向后兼容）
+        req = payload.get('request') or {}
         run_plan = payload.get('systemRunPlan') or {}
-        command = run_plan.get('rawCommand') or run_plan.get('command') or payload.get('command') or ''
+        if req:
+            command = req.get('command') or ''
+            session_key = req.get('sessionKey')
+        else:
+            command = (
+                run_plan.get('rawCommand')
+                or run_plan.get('command')
+                or payload.get('command')
+                or ''
+            )
+            session_key = run_plan.get('sessionKey')
         return {
             'type': 'approval',
             'id': approval_id,
             'kind': payload.get('kind') or event.split('.')[0],  # decision 回覆需 id+kind+decision 三字段
             'command': command,
-            'sessionKey': run_plan.get('sessionKey'),  # codex P1：归属会话；无则 None（前端按当前会话处理）
+            'sessionKey': session_key,  # codex P1：归属会话；无则 None（前端按当前会话处理）
         }
 
     @staticmethod

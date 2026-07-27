@@ -199,6 +199,41 @@ def test_approval_card_session_key_absent_tolerated(translator):
     assert out[0]['sessionKey'] is None
 
 
+# ---- issue #154：实测 ghcr 2026.6.34 校准 ----
+
+def test_approval_card_reads_command_from_request_subobject(translator):
+    """issue #154 实测（ADR 0003 / PR #152）：systemRunPlan=null，command 在
+    payload.request.command，非 systemRunPlan.rawCommand。取值链：
+    request.command → request.sessionKey（非 systemRunPlan.*）。"""
+    frame = {'type': 'event', 'event': 'exec.approval.requested',
+             'payload': {'id': 'ap-1', 'kind': 'exec',
+                         'request': {'command': 'rm -rf /tmp/x', 'sessionKey': 'sess-9'}}}
+    out = translator.translate(frame)
+    assert out == [{'type': 'approval', 'id': 'ap-1', 'kind': 'exec',
+                    'command': 'rm -rf /tmp/x', 'sessionKey': 'sess-9'}]
+
+
+def test_approval_card_request_fallback_to_system_run_plan(translator):
+    """issue #154：payload.request 缺失时退 systemRunPlan（向后兼容旧网关）。"""
+    frame = {'type': 'event', 'event': 'exec.approval.requested',
+             'payload': {'id': 'ap-1', 'kind': 'exec',
+                         'systemRunPlan': {'rawCommand': 'legacy-cmd', 'sessionKey': 'old-sess'}}}
+    out = translator.translate(frame)
+    assert out[0]['command'] == 'legacy-cmd'
+    assert out[0]['sessionKey'] == 'old-sess'
+
+
+def test_approval_card_request_preferred_over_system_run_plan(translator):
+    """issue #154：payload.request 优先于 systemRunPlan（新网关两字段都发时 request 为准）。"""
+    frame = {'type': 'event', 'event': 'exec.approval.requested',
+             'payload': {'id': 'ap-1', 'kind': 'exec',
+                         'request': {'command': 'new-cmd'},
+                         'systemRunPlan': {'rawCommand': 'old-cmd', 'sessionKey': 'old-sess'}}}
+    out = translator.translate(frame)
+    assert out[0]['command'] == 'new-cmd'
+    assert out[0]['sessionKey'] is None  # request 无 sessionKey，不退 systemRunPlan
+
+
 def test_non_chat_event_returns_empty(translator):
     # 未证实的事件名（tool.start，非 agent.tool.*）不猜测处理——T08 工具事件走 agent.tool.start/result
     frame = {'type': 'event', 'event': 'tool.start', 'payload': {'runId': 'r1'}}
@@ -296,6 +331,16 @@ def test_plugin_approval_resolved_becomes_resolved_frame(translator):
              'payload': {'id': 'ap-1', 'decision': 'deny'}}
     assert translator.translate(frame) == [
         {'type': 'approvalResolved', 'id': 'ap-1', 'decision': 'deny'},
+    ]
+
+
+def test_exec_approval_resolved_becomes_resolved_frame(translator):
+    """issue #154 实测（ghcr 2026.6.34）：网关 resolve 后广播 exec.approval.resolved
+    （非仅 plugin.approval.resolved），须同样翻译为 approvalResolved 帧。"""
+    frame = {'type': 'event', 'event': 'exec.approval.resolved',
+             'payload': {'id': 'ap-2', 'decision': 'allow-once'}}
+    assert translator.translate(frame) == [
+        {'type': 'approvalResolved', 'id': 'ap-2', 'decision': 'allow-once'},
     ]
 
 

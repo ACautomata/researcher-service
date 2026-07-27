@@ -281,7 +281,11 @@ class OpenClawChatClient:  # pylint: disable=too-many-instance-attributes,too-ma
             fut.set_exception(ChatSendError(err.get('message') or err.get('code') or 'chat.send failed'))
 
     async def resolve_approval(self, approval_id: str, kind: str, decision: str) -> dict:
-        """回覆一次权限审批（T06，spec §8.2）：发 approval.resolve(id,kind,decision)，有界等 res。
+        """回覆一次权限审批（T06，spec §8.2）：发 {kind}.approval.resolve(id,decision)，有界等 res。
+
+        issue #154 实测（ghcr 2026.6.34 / ADR 0003）：method 按族为 exec.approval.resolve /
+        plugin.approval.resolve（非通用 approval.resolve，后者 unknown method）。
+        params 为 {id, decision}（无 kind），decision 值 allow-once/allow-always/deny。
 
         返回网关 res 的 payload——approval.resolve 是 first-answer-wins，权威记录的 decision 可能
         与本请求的 decision 不同（另一 operator 已答）；调用方须用 payload 里的权威结果，不能回声
@@ -293,8 +297,8 @@ class OpenClawChatClient:  # pylint: disable=too-many-instance-attributes,too-ma
         fut = asyncio.get_running_loop().create_future()
         self._pending_resolves[req_id] = fut
         frame = {
-            'type': 'req', 'id': req_id, 'method': 'approval.resolve',
-            'params': {'id': approval_id, 'kind': kind, 'decision': decision},
+            'type': 'req', 'id': req_id, 'method': f'{kind}.approval.resolve',
+            'params': {'id': approval_id, 'decision': decision},
         }
         try:
             # codex R3 P2：死连接（_ws 非 None 但已断）下 send 会 raise；须与等 ack 共用清理路径，

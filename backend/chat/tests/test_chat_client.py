@@ -543,10 +543,24 @@ async def test_resolve_approval_returns_authoritative_payload():
     t = FakeChatTransport(resolve_payload={'id': 'ap-1', 'decision': 'deny', 'decidedBy': 'other-op'})
     c = _client(transport=t)
     await c.connect()
-    result = await c.resolve_approval('ap-1', 'exec', 'approve')  # 请求 approve，权威记录 deny
+    result = await c.resolve_approval('ap-1', 'exec', 'allow-once')  # 请求 allow-once，权威记录 deny
     assert result == {'id': 'ap-1', 'decision': 'deny', 'decidedBy': 'other-op'}
-    rs = next(f for f in t.sent if f.get('method') == 'approval.resolve')
-    assert rs['params'] == {'id': 'ap-1', 'kind': 'exec', 'decision': 'approve'}
+    # issue #154：method 格式是 {kind}.approval.resolve（如 exec.approval.resolve），非通用 approval.resolve
+    rs = next(f for f in t.sent if f.get('method') == 'exec.approval.resolve')
+    # issue #154：params 为 {id, decision}（无 kind），decision=allow-once/allow-always/deny
+    assert rs['params'] == {'id': 'ap-1', 'decision': 'allow-once'}
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_resolve_approval_plugin_kind_uses_plugin_prefix():
+    """issue #154：kind='plugin' 时 method 为 plugin.approval.resolve。"""
+    t = FakeChatTransport(resolve_payload={'id': 'ap-1', 'decision': 'allow-once'})
+    c = _client(transport=t)
+    await c.connect()
+    await c.resolve_approval('ap-1', 'plugin', 'allow-once')
+    rs = next(f for f in t.sent if f.get('method') == 'plugin.approval.resolve')
+    assert rs is not None
     await c.aclose()
 
 

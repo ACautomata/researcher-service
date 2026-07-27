@@ -513,8 +513,8 @@ class OpenClawWireAdapter:
         fut = asyncio.get_running_loop().create_future()
         self._pending_resolves[req_id] = fut
         frame = {
-            'type': 'req', 'id': req_id, 'method': 'approval.resolve',
-            'params': {'id': approval_id, 'kind': kind, 'decision': decision},
+            'type': 'req', 'id': req_id, 'method': f'{kind}.approval.resolve',
+            'params': {'id': approval_id, 'decision': decision},
         }
         try:
             await self._ws.send(json.dumps(frame))

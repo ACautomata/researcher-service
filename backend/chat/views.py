@@ -451,7 +451,7 @@ class ApprovalResolveView(APIView):
         ser = ApprovalResolveSerializer(data=request.data or {})
         if not ser.is_valid():
             return Response(
-                {'detail': '缺少 id/kind，或 decision 非法（须为 approve/deny）'},
+                {'detail': '缺少 id/kind，或 decision 非法（须为 allow-once/allow-always/deny）'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         approval_id = ser.validated_data[APPROVAL_FIELD_ID]

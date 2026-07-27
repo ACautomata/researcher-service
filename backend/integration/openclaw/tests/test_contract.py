@@ -1012,13 +1012,13 @@ class TestOpenClawWireAdapterLongLived:
     # ── resolve_approval ──────────────────────────────────────────────────────
 
     def test_resolve_approval_returns_payload(self):
-        """resolve_approval 发 approval.resolve 帧并返回网关 payload。"""
+        """resolve_approval 发 {kind}.approval.resolve 帧并返回网关 payload。"""
         import asyncio
 
         from chat.tests.fakes import FakeChatTransport
         from integration.openclaw.adapters import OpenClawWireAdapter
 
-        t = FakeChatTransport(resolve_payload={'id': 'ap-1', 'decision': 'approve'})
+        t = FakeChatTransport(resolve_payload={'id': 'ap-1', 'decision': 'allow-once'})
         adapter = OpenClawWireAdapter(transport=t)
 
         async def _run():
@@ -1026,11 +1026,11 @@ class TestOpenClawWireAdapterLongLived:
                 'ws://x/', 'dt',
                 identity=_SESSION_IDENTITY, nonce=_SESSION_NONCE, scopes=_SESSION_SCOPES,
             )
-            return await adapter.resolve_approval('ap-1', 'exec', 'approve')
+            return await adapter.resolve_approval('ap-1', 'exec', 'allow-once')
         result = asyncio.run(_run())
-        assert result == {'id': 'ap-1', 'decision': 'approve'}
-        rs = next(f for f in t.sent if f.get('method') == 'approval.resolve')
-        assert rs['params'] == {'id': 'ap-1', 'kind': 'exec', 'decision': 'approve'}
+        assert result == {'id': 'ap-1', 'decision': 'allow-once'}
+        rs = next(f for f in t.sent if f.get('method') == 'exec.approval.resolve')
+        assert rs['params'] == {'id': 'ap-1', 'decision': 'allow-once'}
 
     def test_resolve_approval_gateway_reject_raises(self):
         """审批回覆被网关拒绝 → ChatSendError。"""
@@ -1048,7 +1048,7 @@ class TestOpenClawWireAdapterLongLived:
                 'ws://x/', 'dt',
                 identity=_SESSION_IDENTITY, nonce=_SESSION_NONCE, scopes=_SESSION_SCOPES,
             )
-            await adapter.resolve_approval('ap-1', 'exec', 'approve')
+            await adapter.resolve_approval('ap-1', 'exec', 'deny')
         with pytest.raises(ChatSendError) as exc:
             asyncio.run(_run())
         assert 'missing scope' in str(exc.value)
@@ -1773,12 +1773,12 @@ class TestCrossAppLeakPrevention:
         ser = ApprovalResolveSerializer(data={
             translation.APPROVAL_FIELD_ID: 'ap-1',
             translation.APPROVAL_FIELD_KIND: 'exec',
-            translation.APPROVAL_FIELD_DECISION: 'approve',
+            translation.APPROVAL_FIELD_DECISION: 'allow-once',
         })
         assert ser.is_valid(), f'serializer 应接受常量键入参: {ser.errors}'
         assert ser.validated_data[translation.APPROVAL_FIELD_ID] == 'ap-1'
         assert ser.validated_data[translation.APPROVAL_FIELD_KIND] == 'exec'
-        assert ser.validated_data[translation.APPROVAL_FIELD_DECISION] == 'approve'
+        assert ser.validated_data[translation.APPROVAL_FIELD_DECISION] == 'allow-once'
 
     @pytest.mark.django_db
     def test_pairing_status_serializer_uses_integration_constants(self):
