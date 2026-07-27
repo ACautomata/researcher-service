@@ -227,7 +227,8 @@ def test_agent_tool_start_becomes_tool_running_frame(translator):
                         args={'query': '对比学习'})
     assert translator.translate(frame) == [
         {'type': 'tool', 'runId': 'r1', 'name': 'wiki.search', 'state': 'running',
-         'id': 'call-1', 'title': None, 'input': {'query': '对比学习'}, 'result': None},
+         'id': 'call-1', 'title': None, 'input': {'query': '对比学习'}, 'result': None,
+         'isError': False},
     ]
 
 
@@ -237,7 +238,19 @@ def test_agent_tool_result_becomes_tool_done_frame(translator):
                         result={'count': 3}, isError=False)
     assert translator.translate(frame) == [
         {'type': 'tool', 'runId': 'r1', 'name': 'wiki.search', 'state': 'done',
-         'id': 'call-2', 'title': None, 'input': None, 'result': {'count': 3}},
+         'id': 'call-2', 'title': None, 'input': None, 'result': {'count': 3},
+         'isError': False},
+    ]
+
+
+def test_agent_tool_result_is_error_becomes_tool_error_frame(translator):
+    """phase:result + isError=true → tool error 帧；state=error, isError=true。（codex #162 P2）"""
+    frame = _agent_tool('result', name='bash', toolCallId='call-4',
+                        result={'stdout': '', 'exitCode': 1}, isError=True)
+    assert translator.translate(frame) == [
+        {'type': 'tool', 'runId': 'r1', 'name': 'bash', 'state': 'error',
+         'id': 'call-4', 'title': None, 'input': None,
+         'result': {'stdout': '', 'exitCode': 1}, 'isError': True},
     ]
 
 
@@ -260,13 +273,10 @@ def test_agent_tool_missing_name_returns_empty(translator):
     assert translator.translate(_agent_tool('start')) == []
 
 
-def test_agent_tool_phase_update_emits_running(translator):
-    """phase:update（partial result 增量）→ 工具 running 帧，前端保持工具行状态。"""
+def test_agent_tool_phase_update_returns_empty(translator):
+    """phase:update 跳过（partial result 中间增量；前端已有 start 帧的 running 行，codex #162 P2）。"""
     frame = _agent_tool('update', name='bash', toolCallId='call-3')
-    assert translator.translate(frame) == [
-        {'type': 'tool', 'runId': 'r1', 'name': 'bash', 'state': 'running',
-         'id': 'call-3', 'title': None, 'input': None, 'result': None},
-    ]
+    assert translator.translate(frame) == []
 
 
 def test_agent_tool_event_not_tool_stream_returns_empty(translator):

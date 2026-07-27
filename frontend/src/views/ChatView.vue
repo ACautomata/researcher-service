@@ -705,7 +705,7 @@ defineExpose({ selectContainer, send, newSession })
               <span class="t-icon">🔧</span>
               <span class="t-name" :title="t.title ? t.name : ''">{{ t.title ?? t.name }}</span>
               <span v-if="formatToolInput(t.input)" class="t-args">{{ formatToolInput(t.input) }}</span>
-              <span class="t-state">{{ t.state === 'running' ? '⟳ 运行中' : '✓ 完成' }}</span>
+              <span class="t-state">{{ t.state === 'running' ? '⟳ 运行中' : t.state === 'error' ? '✗ 失败' : '✓ 完成' }}</span>
             </div>
             {{ m.text }}<span v-if="m.streaming" class="cursor"></span>
           </div>
@@ -847,5 +847,6 @@ defineExpose({ selectContainer, send, newSession })
 .tool .t-args { color: var(--el-text-color-secondary); }
 .tool .t-state { margin-left: auto; display: flex; align-items: center; gap: 5px; }
 .tool.running .t-state { color: var(--el-color-warning); }
+.tool.error .t-state { color: var(--el-color-danger); }
 .tool.done .t-state { color: var(--el-color-success); }
 </style>

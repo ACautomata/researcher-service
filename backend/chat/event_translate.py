@@ -187,12 +187,15 @@ class ChatEventTranslator:
 
         phase mapping:
         - start → 'running'（工具开始）
-        - update → 'running'（partial result 增量，前端保持工具行状态）
-        - result → 'done'（工具完成）
+        - update → 跳过（partial result 中间增量；前端已从 start 知工具运行中，不投新帧
+          避免前端重复行，codex #162 P2）
+        - result → 'done'（工具完成）或 'error'（isError=true）
         - 未知 phase → []（0 信任，不猜测）
         """
         if phase not in ('start', 'update', 'result'):
             return []
+        if phase == 'update':
+            return []  # 跳过中间增量；前端已有 start 帧的 running 行
         run_id = payload.get('runId')
         if not run_id:
             return []
@@ -200,11 +203,16 @@ class ChatEventTranslator:
         name = data.get('name')
         if not name:
             return []
-        state = 'done' if phase == 'result' else 'running'
+        if phase == 'start':
+            state, is_error = 'running', False
+        else:
+            is_error = bool(data.get('isError'))
+            state = 'error' if is_error else 'done'
         return [{
             'type': 'tool', 'runId': run_id, 'name': name, 'state': state,
             'id': data.get('toolCallId'),
             'title': data.get('title'),
             'input': data.get('args'),
             'result': data.get('result'),
+            'isError': is_error,
         }]
