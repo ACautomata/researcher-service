@@ -128,7 +128,7 @@ class ChatEventTranslator:
 
     def _translate_delta(self, run_id: str, payload: dict) -> list[dict]:
         if payload.get('replace'):
-            snapshot = payload.get('message') or ''
+            snapshot = self._extract_text(payload.get('message'))
             if snapshot:
                 # replace=true + 快照：整段替换（前缀/非前缀均正确）。前端按 replace 标志 set 而非 append
                 self._sent[run_id] = snapshot
@@ -145,9 +145,25 @@ class ChatEventTranslator:
         self._sent[run_id] = self._sent.get(run_id, '') + delta
         return [{'type': 'text', 'runId': run_id, 'delta': delta}]
 
+    @staticmethod
+    def _extract_text(message) -> str:
+        """从 final/delta 的 message 提取文本（实测校准 spike ghcr 2026.6.34-browser, 2026-07-27）：
+        message 实测是 dict {role, content:[{type:text,text}], timestamp}，旧代码误当字符串致
+        .startswith 崩。str 直返；dict 拼 content 中 type=text 的 text；None/空 → ''。"""
+        if not message:
+            return ''
+        if isinstance(message, str):
+            return message
+        if isinstance(message, dict):
+            return ''.join(
+                b.get('text', '') for b in (message.get('content') or [])
+                if isinstance(b, dict) and b.get('type') == 'text'
+            )
+        return ''
+
     def _translate_final(self, run_id: str, payload: dict) -> list[dict]:
         out: list[dict] = []
-        message = payload.get('message') or ''
+        message = self._extract_text(payload.get('message'))
         sent = self._sent.get(run_id, '')
         # final.message 可能含此前未在 delta 投递的尾部文本 → 先补 text 再 done（r13:128-129）
         if message and message.startswith(sent) and len(message) > len(sent):

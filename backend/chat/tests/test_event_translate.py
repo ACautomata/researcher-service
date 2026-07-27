@@ -41,6 +41,30 @@ def test_final_forwards_unseen_tail_then_done(translator):
     ]
 
 
+def test_final_message_dict_extracts_content_text(translator):
+    """实测校准（spike ghcr 2026.6.34-browser, 2026-07-27）：final.message 是 dict
+    {role, content:[{type:text,text}], timestamp}，非字符串。translator 须从 content[].text 提取，
+    否则在 dict 上调 .startswith 会 AttributeError。印证 fake 测试用字符串 message 掩盖了 wire schema
+    假设错误（#94 smoke 未测 send_message 事件流，bug 一直潜伏）。"""
+    translator.translate(_chat('delta', deltaText='你好'))
+    msg = {'role': 'assistant',
+           'content': [{'type': 'text', 'text': '你好世界'}],
+           'timestamp': 1785148522491}
+    out = translator.translate(_chat('final', message=msg))
+    assert out == [
+        {'type': 'text', 'runId': 'r1', 'delta': '世界'},
+        {'type': 'done', 'runId': 'r1'},
+    ]
+
+
+def test_delta_replace_dict_snapshot_extracts_text(translator):
+    """delta replace=true + message dict 快照：与 final 同源，从 content[].text 提取。"""
+    translator.translate(_chat('delta', deltaText='你好'))
+    msg = {'role': 'assistant', 'content': [{'type': 'text', 'text': '你好世界'}], 'timestamp': 1}
+    out = translator.translate(_chat('delta', message=msg, replace=True))
+    assert out == [{'type': 'text', 'runId': 'r1', 'delta': '你好世界', 'replace': True}]
+
+
 def test_final_without_message_emits_only_done(translator):
     translator.translate(_chat('delta', deltaText='你好'))
     assert translator.translate(_chat('final')) == [{'type': 'done', 'runId': 'r1'}]
