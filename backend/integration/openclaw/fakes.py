@@ -40,6 +40,9 @@ class FakeContainerRuntime:
     def exec_in_container(self, name: str, cmd: list[str]) -> None:
         self.exec_calls.append((name, cmd))
 
+    def exec_sync(self, name: str, cmd: list[str]) -> None:
+        self.exec_calls.append((name, cmd))
+
 
 class FakeOpenClawWire:
     """OpenClawWire Port 的内存 fake：记录 pair/connect/send_message/close 调用。

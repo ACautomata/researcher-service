@@ -135,6 +135,17 @@ class DockerRuntime:
             return
         c.exec_run(cmd, detach=True)
 
+    def exec_sync(self, name: str, cmd: list[str]) -> None:
+        # 同步等命令完成（exec_run 默认 detach=False）；区别于 exec_in_container 的
+        # fire-and-forget（detach=True，wiki compile）。供 delete cleanup：容器以 root 跑，
+        # bind-mount home 内由容器写入的文件属主为 root，须容器还在（root 权限）同步 chown 给
+        # host uid 后再 stop/remove/rmtree——否则 host 非 root rmtree PermissionError（A3）。
+        try:
+            c = self._client().containers.get(container_name(name))
+        except NotFound:
+            return
+        c.exec_run(cmd)
+
     @staticmethod
     def _to_info(c) -> ContainerInfo:
         image = c.attrs.get('Config', {}).get('Image') or ''
