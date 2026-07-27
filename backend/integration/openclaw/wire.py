@@ -36,10 +36,13 @@ APPROVAL_REQUESTED_EVENTS = ('exec.approval.requested', 'plugin.approval.request
 # 译为 approvalResolved 帧让共享 client 的 peer 卡片收敛。payload schema 待配对后实测校准
 # （r26:78-79 的 approval.resolve 是 client→gateway 方法参数，非本事件 payload），无 id 跳过（不伪造）。
 APPROVAL_RESOLVED_EVENTS = ('plugin.approval.resolved',)
-# T08 工具执行（issue #44）：挂在 chat run 内（r26 §3），帧带 runId 走既有 runId 路由。
-# 事件名来自 r26 §3 二手来源，译者取值链兜底；待网关连接后抓帧验证。
-TOOL_START_EVENTS = ('agent.tool.start',)
-TOOL_END_EVENTS = ('agent.tool.result',)
+# T08 工具执行（issue #44 / #153）：挂在 chat run 内（r26 §3），帧带 runId 走既有 runId 路由。
+# 实测校准（ghcr 2026.6.34 / ADR 0003 / PR #152 深挖 #3）：工具事件是 event:"agent" +
+# payload.stream:"tool" + data.phase:"start"/"update"/"result"，非独立 agent.tool.start/result。
+# 字段在 data 子对象下：name/toolCallId/args（start）、partialResult（update）、
+# result/isError/meta（result）。
+TOOL_AGENT_EVENT = 'agent'
+TOOL_STREAM = 'tool'
 
 
 class ConnectFrameBuilder:

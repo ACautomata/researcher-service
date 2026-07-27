@@ -539,17 +539,17 @@ function connect() {
                           input: tool.input, result: tool.result })
         return
       }
-      // done：优先按工具调用 id 配对（codex P2：同名并发调用不错配）；无 id 退 name 匹配最后一个 running 行
+      // running/error/done：优先按工具调用 id 配对；无 id 退 name 匹配最后一个 running 行
       for (let i = last.tools.length - 1; i >= 0; i--) {
         const row = last.tools[i]
         const match = tool.id ? row.id === tool.id : row.name === tool.name && row.state === 'running'
         if (match && row.state === 'running') {
-          row.state = 'done'
+          row.state = tool.state
           row.result = tool.result
           return
         }
       }
-      last.tools.push({ id: tool.id, name: tool.name, state: 'done', title: tool.title,
+      last.tools.push({ id: tool.id, name: tool.name, state: tool.state, title: tool.title,
                         input: tool.input, result: tool.result })
     },
   })
@@ -847,5 +847,6 @@ defineExpose({ selectContainer, send, newSession })
 .tool .t-args { color: var(--el-text-color-secondary); }
 .tool .t-state { margin-left: auto; display: flex; align-items: center; gap: 5px; }
 .tool.running .t-state { color: var(--el-color-warning); }
+.tool.error .t-state { color: var(--el-color-danger); }
 .tool.done .t-state { color: var(--el-color-success); }
 </style>

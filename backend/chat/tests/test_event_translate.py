@@ -206,67 +206,87 @@ def test_non_chat_event_returns_empty(translator):
 
 
 # ---- T08 工具执行（issue #44 / spec §8.2/§9.4 / r26 §3）----
-# agent.tool.start / agent.tool.result（r26 §3 二手线索；**确切事件名/payload 待配对后实测校准**，
-# r26 §0 警告 agent.* 族与 chat 单事件模型冲突）→ 工具帧。工具挂在 chat run 内（r26 §3），帧带 runId
-# 走既有 runId 路由；前端只显一行标题+状态（spec §9.4）。事件名集中常量便于实测后单点校准。
+# 实测校准（issue #153 / PR #152 深挖发现 #3）：网关工具事件为 event:"agent" + payload.stream:"tool"
+# + data.phase:"start"/"update"/"result"——非独立 agent.tool.start/agent.tool.result 事件（旧假设，#44）。
+# 字段在 data 子对象下：name/toolCallId/args（start）、partialResult（update）、result/isError/meta（result）。
 
 
-def _tool(event: str, run_id: str = 'r1', **extra) -> dict:
-    payload = {'runId': run_id}
-    payload.update(extra)
-    return {'type': 'event', 'event': event, 'payload': payload}
+def _agent_tool(phase: str, run_id: str = 'r1', **extra) -> dict:
+    """实测 wire schema (ghcr 2026.6.34)：event:"agent" + stream:"tool" + data.phase。"""
+    data = {'phase': phase}
+    data.update(extra)
+    return {
+        'type': 'event', 'event': 'agent',
+        'payload': {'runId': run_id, 'stream': 'tool', 'data': data},
+    }
 
 
-def test_tool_start_becomes_tool_running_frame(translator):
-    # agent.tool.start → 工具 running 帧；name 取 payload.tool，title/input 透传，result 占位 None（统一 shape）
-    frame = _tool('agent.tool.start', tool='wiki.search', toolCallId='call-1', title='检索 wiki',
-                  input={'query': '对比学习'})
+def test_agent_tool_start_becomes_tool_running_frame(translator):
+    """phase:start → tool running 帧；data.name/id/args 映射到 name/id/input。"""
+    frame = _agent_tool('start', name='wiki.search', toolCallId='call-1',
+                        args={'query': '对比学习'})
     assert translator.translate(frame) == [
         {'type': 'tool', 'runId': 'r1', 'name': 'wiki.search', 'state': 'running',
-         'id': 'call-1', 'title': '检索 wiki', 'input': {'query': '对比学习'}, 'result': None},
+         'id': 'call-1', 'title': None, 'input': {'query': '对比学习'}, 'result': None,
+         'isError': False},
     ]
 
 
-def test_tool_call_id_fallbacks(translator):
-    # id 取值链（codex P2，字段名待实测校准）：toolCallId → tool_call_id → callId → id；缺省 None
-    assert translator.translate(_tool('agent.tool.start', tool='x', toolCallId='c1'))[0]['id'] == 'c1'
-    assert translator.translate(_tool('agent.tool.start', tool='x', tool_call_id='c2'))[0]['id'] == 'c2'
-    assert translator.translate(_tool('agent.tool.start', tool='x', callId='c3'))[0]['id'] == 'c3'
-    assert translator.translate(_tool('agent.tool.start', tool='x', id='c4'))[0]['id'] == 'c4'
-    assert translator.translate(_tool('agent.tool.start', tool='x'))[0]['id'] is None
-
-
-def test_tool_result_becomes_tool_done_frame(translator):
-    # agent.tool.result → done 帧；result 字段透传（前端显"· N 结果"摘要）；title/input/id 缺省 None
-    frame = _tool('agent.tool.result', tool='wiki.search', result={'count': 3})
+def test_agent_tool_result_becomes_tool_done_frame(translator):
+    """phase:result → tool done 帧；data.result/isError/meta 透传。"""
+    frame = _agent_tool('result', name='wiki.search', toolCallId='call-2',
+                        result={'count': 3}, isError=False)
     assert translator.translate(frame) == [
         {'type': 'tool', 'runId': 'r1', 'name': 'wiki.search', 'state': 'done',
-         'id': None, 'title': None, 'input': None, 'result': {'count': 3}},
+         'id': 'call-2', 'title': None, 'input': None, 'result': {'count': 3},
+         'isError': False},
     ]
 
 
-def test_tool_event_missing_run_id_returns_empty(translator):
-    # 工具事件必须挂 runId（r26 §3，路由到所属 chat run）；无 runId → 不投递
-    frame = {'type': 'event', 'event': 'agent.tool.start', 'payload': {'tool': 'x'}}
+def test_agent_tool_result_is_error_becomes_tool_error_frame(translator):
+    """phase:result + isError=true → tool error 帧；state=error, isError=true。（codex #162 P2）"""
+    frame = _agent_tool('result', name='bash', toolCallId='call-4',
+                        result={'stdout': '', 'exitCode': 1}, isError=True)
+    assert translator.translate(frame) == [
+        {'type': 'tool', 'runId': 'r1', 'name': 'bash', 'state': 'error',
+         'id': 'call-4', 'title': None, 'input': None,
+         'result': {'stdout': '', 'exitCode': 1}, 'isError': True},
+    ]
+
+
+def test_agent_tool_name_falls_back_compat(translator):
+    """name 仍取 data.name（优先）+ 兼容 payload 级 tool → payload 级 name → payload 级 toolName。"""
+    assert translator.translate(_agent_tool('start', name='fs.read'))[0]['name'] == 'fs.read'
+
+
+def test_agent_tool_missing_run_id_returns_empty(translator):
+    """无 runId 无法路由 → 不投递工具帧。"""
+    frame = {
+        'type': 'event', 'event': 'agent',
+        'payload': {'stream': 'tool', 'data': {'phase': 'start', 'name': 'x'}},
+    }
     assert translator.translate(frame) == []
 
 
-def test_tool_event_missing_name_returns_empty(translator):
-    # 无工具名 → 无法渲染工具行 → []（对网关 payload 0 信任；字段名待实测校准）
-    assert translator.translate(_tool('agent.tool.start')) == []
+def test_agent_tool_missing_name_returns_empty(translator):
+    """无工具名 → 无法渲染工具行 → []。"""
+    assert translator.translate(_agent_tool('start')) == []
 
 
-def test_tool_name_fallbacks(translator):
-    # name 取值链（字段名待实测校准）：payload.tool → payload.name → payload.toolName
-    assert translator.translate(_tool('agent.tool.start', name='fs.read'))[0]['name'] == 'fs.read'
-    assert translator.translate(_tool('agent.tool.start', toolName='bash'))[0]['name'] == 'bash'
+def test_agent_tool_phase_update_returns_empty(translator):
+    """phase:update 跳过（partial result 中间增量；前端已有 start 帧的 running 行，codex #162 P2）。"""
+    frame = _agent_tool('update', name='bash', toolCallId='call-3')
+    assert translator.translate(frame) == []
 
 
-def test_tool_input_result_fallbacks(translator):
-    # input 取 input→args；result 取 result→output（字段名待实测校准）
-    out = translator.translate(_tool('agent.tool.result', tool='bash', args='ls', output='ok'))
-    assert out[0]['input'] == 'ls'
-    assert out[0]['result'] == 'ok'
+def test_agent_tool_event_not_tool_stream_returns_empty(translator):
+    """event:agent 但 stream 非 tool → 不触发工具翻译（如 stream:item/command_output 留给后续 ticket）。"""
+    frame = {
+        'type': 'event', 'event': 'agent',
+        'payload': {'runId': 'r1', 'stream': 'item', 'data': {'kind': 'command', 'status': 'complete'}},
+    }
+    assert translator.translate(frame) == []
+
 
 
 # ---- codex R3 P2：网关 resolved 事件（他端 operator 回覆后广播）----
