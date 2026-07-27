@@ -553,6 +553,11 @@ def test_exec_approval_request_resolve_wire_schema(tmp_path):  # pylint: disable
             assert isinstance(cards, list), \
                 f'list_pending_approvals 应返回 list，got {type(cards).__name__}'
 
+            # codex P2 #168：翻译后 cards 应含刚创建审批 id（防 _approval_card 回归丢 card）
+            matched = [c for c in cards if c.get('id') == approval_id]
+            assert matched, \
+                f'翻译后 cards 应含刚创建审批 id {approval_id!r}，got card_ids={[c.get("id") for c in cards]}'
+
             # 验收#4：resolve（#154 method=exec.approval.resolve, params={id,decision}）
             # 网关可能 auto-deny 抢先（报 "already resolved"）——容错
             from chat.chat_client import ChatSendError
