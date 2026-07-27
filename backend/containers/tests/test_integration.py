@@ -88,6 +88,7 @@ def test_pair_chat_wiki_smoke_chain(tmp_path):  # pylint: disable=too-many-local
     """
     pytest.importorskip('docker')
     from chat.chat_client import OpenClawChatClient
+    from chat.device_crypto import DeviceIdentity
     from chat.models import Pairing
     from chat.pairing import PairingService
     from containers.docker_runtime import DockerRuntime
@@ -151,7 +152,18 @@ def test_pair_chat_wiki_smoke_chain(tmp_path):  # pylint: disable=too-many-local
         assert device_token
 
         # —— 3. chat（spec #76）：经 client 建会话/拿历史，断言链路连通，不验内容质量 ——
-        client = OpenClawChatClient(f'ws://127.0.0.1:{inst.port}/', device_token)
+        # issue #139：session connect 帧必填 device 签名块（identity/nonce/scopes）。smoke 刚完成
+        # Ed25519 配对，从 Pairing 记录读回真实 DeviceIdentity + 已批准 scopes（#141 pool 注入前，
+        # smoke 路径先验契约）；nonce 等 connect.challenge 由 #140 接入，当前空 nonce 占位。
+        identity = DeviceIdentity(
+            device_id=pairing.device_id,
+            public_key_pem=pairing.public_key_pem,
+            private_key_pem=pairing.private_key_pem,
+        )
+        client = OpenClawChatClient(
+            f'ws://127.0.0.1:{inst.port}/', device_token,
+            identity=identity, nonce='', scopes=pairing.scopes_list(),
+        )
         session_key = f'smoke-{inst.name}-{inst.port}'
 
         async def chat_smoke():

@@ -9,15 +9,56 @@ import asyncio
 import pytest
 
 from chat.chat_client import ChatClientError, ChatConnectError, ChatSendError, OpenClawChatClient
+from chat.device_crypto import DeviceCrypto, DeviceIdentity
 from chat.tests.fakes import FakeChatTransport
 
 URL = 'ws://127.0.0.1:19000/'
+
+# issue #139：session connect 帧 device 签名块所需，注入共享假值（这些测试关注路由/ack，不验签）。
+_IDENTITY = DeviceCrypto.generate_identity()
+_NONCE = 'nz-chat'
+_SCOPES = ['operator.read', 'operator.write', 'operator.approvals']
+
+
+def _client(url=URL, device_token='dt', **kwargs):
+    """构造 OpenClawChatClient，默认注入假 identity/nonce/scopes（issue #139 session device 块）。"""
+    return OpenClawChatClient(
+        url, device_token,
+        identity=_IDENTITY, nonce=_NONCE, scopes=_SCOPES, **kwargs,
+    )
+
+
+@pytest.mark.asyncio
+async def test_client_from_persisted_identity_builds_signed_device_block():
+    """回归 (codex #149 P2)：从持久化材料重建 DeviceIdentity 构造 client 不 TypeError，
+    且 connect 帧 device 块（id/publicKey/signature）源自该 identity、scopes 源自传入值。
+    锁定 test_integration smoke 与 #141 pool 注入共用的「从 Pairing 记录构造 client」契约。"""
+    persisted = DeviceIdentity(
+        device_id=_IDENTITY.device_id,
+        public_key_pem=_IDENTITY.public_key_pem,
+        private_key_pem=_IDENTITY.private_key_pem,
+    )
+    approved = ['operator.read', 'operator.write']  # 模拟 pairing.scopes_list()，少于全量 SCOPES
+    t = FakeChatTransport()
+    c = OpenClawChatClient(
+        URL, 'dt', identity=persisted, nonce='', scopes=approved, transport=t,
+    )
+    await c.connect()
+    connect = next(f for f in t.sent if f.get('method') == 'connect')
+    dev = connect['params']['device']
+    assert dev['id'] == persisted.device_id
+    assert dev['publicKey'] == persisted.public_key_raw_base64url()
+    assert dev['signature']  # 持久化私钥可签（非空）
+    assert dev['nonce'] == ''  # #140 接入前空 nonce 占位（smoke 同款）
+    assert connect['params']['scopes'] == approved
+    assert connect['params']['auth']['token'] == 'dt'
+    await c.aclose()
 
 
 @pytest.mark.asyncio
 async def test_connect_sends_connect_frame_with_device_token():
     t = FakeChatTransport()
-    c = OpenClawChatClient(URL, 'dt-xyz', transport=t)
+    c = _client(device_token='dt-xyz', transport=t)
     await c.connect()
     connect = next(f for f in t.sent if f.get('method') == 'connect')
     assert connect['params']['auth']['token'] == 'dt-xyz'
@@ -27,7 +68,7 @@ async def test_connect_sends_connect_frame_with_device_token():
 @pytest.mark.asyncio
 async def test_connect_failure_raises():
     t = FakeChatTransport(connect_ok=False)
-    c = OpenClawChatClient(URL, 'dt', transport=t)
+    c = _client(transport=t)
     with pytest.raises(ChatConnectError):
         await c.connect()
 
@@ -39,7 +80,7 @@ async def test_send_message_builds_chat_send_frame_and_returns_runid():
     async def on_event(frame):
         pass
 
-    c = OpenClawChatClient(URL, 'dt', transport=t)
+    c = _client(transport=t)
     await c.connect()
     run_id = await c.send_message('sess-1', '你好', on_event=on_event)
     assert run_id == 'run-9'
@@ -59,7 +100,7 @@ async def test_ack_error_raises_chat_send_error():
     async def on_event(frame):
         pass
 
-    c = OpenClawChatClient(URL, 'dt', transport=t)
+    c = _client(transport=t)
     await c.connect()
     with pytest.raises(ChatSendError) as exc:
         await c.send_message('s', 'm', on_event=on_event)
@@ -80,7 +121,7 @@ async def test_recv_routes_delta_final_to_on_event():
     async def on_event(frame):
         received.append(frame)
 
-    c = OpenClawChatClient(URL, 'dt', transport=t)
+    c = _client(transport=t)
     await c.connect()
     await c.send_message('s', 'm', on_event=on_event)
     await asyncio.sleep(0.1)
@@ -106,7 +147,7 @@ async def test_recv_ignores_stray_events_and_keeps_routing():
     async def on_event(frame):
         received.append(frame)
 
-    c = OpenClawChatClient(URL, 'dt', transport=t)
+    c = _client(transport=t)
     await c.connect()
     await c.send_message('s', 'm', on_event=on_event)
     await asyncio.sleep(0.1)
@@ -134,7 +175,7 @@ async def test_recv_routes_tool_events_to_on_event():
     async def on_event(frame):
         received.append(frame)
 
-    c = OpenClawChatClient(URL, 'dt', transport=t)
+    c = _client(transport=t)
     await c.connect()
     await c.send_message('s', 'm', on_event=on_event)
     await asyncio.sleep(0.1)
@@ -160,7 +201,7 @@ async def test_error_state_completes_with_error_event():
     async def on_event(frame):
         received.append(frame)
 
-    c = OpenClawChatClient(URL, 'dt', transport=t)
+    c = _client(transport=t)
     await c.connect()
     await c.send_message('s', 'm', on_event=on_event)
     await asyncio.sleep(0.1)
@@ -179,7 +220,7 @@ async def test_discard_stops_routing_subsequent_events():
     async def on_event(frame):
         received.append(frame)
 
-    c = OpenClawChatClient(URL, 'dt', transport=t)
+    c = _client(transport=t)
     await c.connect()
     await c.send_message('s', 'm', on_event=on_event)
     await asyncio.sleep(0.05)
@@ -212,7 +253,7 @@ async def test_on_event_exception_does_not_kill_recv_loop():
             raise RuntimeError('boom')
         received.append(frame)
 
-    c = OpenClawChatClient(URL, 'dt', transport=t)
+    c = _client(transport=t)
     await c.connect()
     await c.send_message('s', 'm', on_event=on_event)
     await asyncio.sleep(0.1)
@@ -230,7 +271,7 @@ async def test_aclose_rejects_pending_send_message():
     async def on_event(frame):
         pass
 
-    c = OpenClawChatClient(URL, 'dt', transport=t)
+    c = _client(transport=t)
     await c.connect()
     task = asyncio.create_task(c.send_message('s', 'm', on_event=on_event))
     await asyncio.sleep(0.05)  # send_message 已发 chat.send，在等 ack
@@ -243,7 +284,7 @@ async def test_aclose_rejects_pending_send_message():
 async def test_connect_handshake_timeout_raises_connect_error():
     # 网关升级 WS 后永不回 connect res → _await_res 挂起 → connect_timeout 触发 ChatConnectError
     t = FakeChatTransport(suppress_connect_ack=True)
-    c = OpenClawChatClient(URL, 'dt', transport=t, connect_timeout=0.1)
+    c = _client(transport=t, connect_timeout=0.1)
     with pytest.raises(ChatConnectError):
         await c.connect()
 
@@ -252,7 +293,7 @@ async def test_connect_handshake_timeout_raises_connect_error():
 async def test_send_message_times_out_when_ack_never_arrives():
     # 网关连着但不回 chat.send ack → send_message 不应永久挂起；超时后清理 pending 条目
     t = FakeChatTransport(suppress_ack=True)
-    c = OpenClawChatClient(URL, 'dt', transport=t, ack_timeout=0.1)
+    c = _client(transport=t, ack_timeout=0.1)
     await c.connect()
 
     async def on_event(frame):
@@ -281,7 +322,7 @@ async def test_approval_event_fans_out_to_all_subscribers():
     async def b_cb(frame):
         b_received.append(frame)
 
-    c = OpenClawChatClient(URL, 'dt', transport=t)
+    c = _client(transport=t)
     c.add_approval_subscriber(a_cb)
     c.add_approval_subscriber(b_cb)
     await c.connect()
@@ -306,7 +347,7 @@ async def test_remove_subscriber_keeps_peer_subscribed():
     async def b_cb(frame):
         b_received.append(frame)
 
-    c = OpenClawChatClient(URL, 'dt', transport=t)
+    c = _client(transport=t)
     c.add_approval_subscriber(a_cb)
     c.add_approval_subscriber(b_cb)
     await c.connect()
@@ -334,7 +375,7 @@ async def test_approval_event_not_routed_to_runid_handler():
     async def on_approval(frame):
         approvals.append(frame)
 
-    c = OpenClawChatClient(URL, 'dt', transport=t)
+    c = _client(transport=t)
     c.add_approval_subscriber(on_approval)
     await c.connect()
     await c.send_message('s', 'm', on_event=on_event)
@@ -351,7 +392,7 @@ async def test_approval_event_not_routed_to_runid_handler():
 async def test_approval_event_dropped_when_no_subscriber():
     """无订阅者（consumer 未 start）：审批事件被丢弃，不 crash recv loop。"""
     t = FakeChatTransport()
-    c = OpenClawChatClient(URL, 'dt', transport=t)
+    c = _client(transport=t)
     await c.connect()
     t.push({'type': 'event', 'event': 'exec.approval.requested', 'payload': {'id': 'ap-1'}})
     await asyncio.sleep(0.05)
@@ -371,7 +412,7 @@ async def test_subscriber_exception_does_not_block_peers():
     async def b_cb(frame):
         b_received.append(frame)
 
-    c = OpenClawChatClient(URL, 'dt', transport=t)
+    c = _client(transport=t)
     c.add_approval_subscriber(boom)
     c.add_approval_subscriber(b_cb)
     await c.connect()
@@ -386,7 +427,7 @@ async def test_subscriber_exception_does_not_block_peers():
 async def test_resolve_approval_returns_authoritative_payload():
     """codex P1：first-answer-wins —— resolve 返回网关权威 payload（可能与请求 decision 不同）。"""
     t = FakeChatTransport(resolve_payload={'id': 'ap-1', 'decision': 'deny', 'decidedBy': 'other-op'})
-    c = OpenClawChatClient(URL, 'dt', transport=t)
+    c = _client(transport=t)
     await c.connect()
     result = await c.resolve_approval('ap-1', 'exec', 'approve')  # 请求 approve，权威记录 deny
     assert result == {'id': 'ap-1', 'decision': 'deny', 'decidedBy': 'other-op'}
@@ -398,7 +439,7 @@ async def test_resolve_approval_returns_authoritative_payload():
 @pytest.mark.asyncio
 async def test_resolve_approval_gateway_reject_raises():
     t = FakeChatTransport(resolve_error={'code': 'FORBIDDEN', 'message': 'missing scope operator.approvals'})
-    c = OpenClawChatClient(URL, 'dt', transport=t)
+    c = _client(transport=t)
     await c.connect()
     with pytest.raises(ChatSendError) as exc:
         await c.resolve_approval('ap-1', 'exec', 'deny')
@@ -409,7 +450,7 @@ async def test_resolve_approval_gateway_reject_raises():
 @pytest.mark.asyncio
 async def test_resolve_approval_timeout_raises():
     t = FakeChatTransport(suppress_ack=True)  # 不回 resolve res
-    c = OpenClawChatClient(URL, 'dt', transport=t, ack_timeout=0.1)
+    c = _client(transport=t, ack_timeout=0.1)
     await c.connect()
     with pytest.raises(ChatSendError):
         await c.resolve_approval('ap-1', 'exec', 'approve')
@@ -425,7 +466,7 @@ async def test_list_pending_approvals_translates_cards():
             {'id': 'ap-2', 'command': 'cmd2'},
         ],
     })
-    c = OpenClawChatClient(URL, 'dt', transport=t)
+    c = _client(transport=t)
     await c.connect()
     cards = await c.list_pending_approvals()
     assert cards == [
@@ -441,7 +482,7 @@ async def test_list_pending_approvals_translates_cards():
 async def test_list_pending_approvals_single_approval_key_tolerated():
     """approval.get 响应用单项 approval 键（待实测的另一种形态）→ 翻译成单卡列表。"""
     t = FakeChatTransport(list_payload={'approval': {'id': 'ap-9', 'command': 'cmd'}})
-    c = OpenClawChatClient(URL, 'dt', transport=t)
+    c = _client(transport=t)
     await c.connect()
     cards = await c.list_pending_approvals()
     assert cards == [{'type': 'approval', 'id': 'ap-9', 'kind': 'exec', 'command': 'cmd', 'sessionKey': None}]
@@ -452,7 +493,7 @@ async def test_list_pending_approvals_single_approval_key_tolerated():
 async def test_list_pending_approvals_empty_or_malformed_tolerated():
     """approval.get 响应缺 approvals/approval 键或非列表 → 返回空列表（best-effort，不崩）。"""
     t = FakeChatTransport(list_payload={})
-    c = OpenClawChatClient(URL, 'dt', transport=t)
+    c = _client(transport=t)
     await c.connect()
     assert await c.list_pending_approvals() == []
     await c.aclose()
@@ -462,7 +503,7 @@ async def test_list_pending_approvals_empty_or_malformed_tolerated():
 async def test_broadcast_approval_resolved_fans_out_to_all_subscribers():
     """codex R2 P2：broadcast_approval_resolved 把权威回执 fan-out 到全部订阅者（副本一致收敛）。"""
     t = FakeChatTransport()
-    c = OpenClawChatClient(URL, 'dt', transport=t)
+    c = _client(transport=t)
     await c.connect()
     got_a, got_b = [], []
 
@@ -485,7 +526,7 @@ async def test_broadcast_approval_resolved_fans_out_to_all_subscribers():
 async def test_resolve_approval_send_failure_cleans_pending_future():
     """codex R3 P2：死连接下 send 抛异常须清理 _pending_resolves，否则重试无限累积 future（内存泄漏）。"""
     t = FakeChatTransport()
-    c = OpenClawChatClient(URL, 'dt', transport=t)
+    c = _client(transport=t)
     await c.connect()
 
     class _DeadWs:
@@ -512,7 +553,7 @@ async def test_gateway_resolved_event_fans_out_to_subscribers():
     async def b_cb(frame):
         b_received.append(frame)
 
-    c = OpenClawChatClient(URL, 'dt', transport=t)
+    c = _client(transport=t)
     c.add_approval_subscriber(a_cb)
     c.add_approval_subscriber(b_cb)
     await c.connect()
@@ -538,7 +579,7 @@ async def test_list_sessions_builds_frame_and_returns_payload():
     """发 sessions.list（agentId/includeDerivedTitles/limit），返回网关 res payload（原样透传）。"""
     payload = {'sessions': [{'key': 's1', 'title': '你好'}, {'key': 's2'}]}
     t = FakeChatTransport(rpc_payloads={'sessions.list': payload})
-    c = OpenClawChatClient(URL, 'dt', transport=t)
+    c = _client(transport=t)
     await c.connect()
     result = await c.list_sessions('main', include_derived_titles=True, limit=50)
     assert result == payload
@@ -551,7 +592,7 @@ async def test_list_sessions_builds_frame_and_returns_payload():
 @pytest.mark.asyncio
 async def test_list_sessions_not_connected_raises():
     """未连接（_ws None）→ ChatClientError（区别于 list_commands 的 best-effort 返回 {}）。"""
-    c = OpenClawChatClient(URL, 'dt', transport=FakeChatTransport())
+    c = _client(transport=FakeChatTransport())
     with pytest.raises(ChatClientError):
         await c.list_sessions('main')
 
@@ -561,7 +602,7 @@ async def test_list_sessions_gateway_reject_raises():
     """网关拒绝（缺 operator.read scope）→ res not ok → ChatSendError（上层映射 502）。"""
     t = FakeChatTransport(rpc_errors={
         'sessions.list': {'code': 'FORBIDDEN', 'message': 'missing scope operator.read'}})
-    c = OpenClawChatClient(URL, 'dt', transport=t)
+    c = _client(transport=t)
     await c.connect()
     with pytest.raises(ChatSendError) as exc:
         await c.list_sessions('main')
@@ -573,7 +614,7 @@ async def test_list_sessions_gateway_reject_raises():
 async def test_list_sessions_ack_timeout_raises():
     """有界等待：ack 丢失/网关不回 → ChatSendError，且 future 已从 _pending_resolves 清出（不泄漏）。"""
     t = FakeChatTransport(rpc_suppress={'sessions.list'})
-    c = OpenClawChatClient(URL, 'dt', transport=t, ack_timeout=0.05)
+    c = _client(transport=t, ack_timeout=0.05)
     await c.connect()
     with pytest.raises(ChatSendError):
         await c.list_sessions('main')
@@ -586,7 +627,7 @@ async def test_get_history_builds_frame_and_returns_payload():
     """发 chat.history（sessionKey + 可选 limit/messageId 锚点），透传 messages[]+分页 payload。"""
     payload = {'messages': [{'role': 'user', 'text': '你好'}], 'hasMore': True, 'nextOffset': 'msg-5'}
     t = FakeChatTransport(rpc_payloads={'chat.history': payload})
-    c = OpenClawChatClient(URL, 'dt', transport=t)
+    c = _client(transport=t)
     await c.connect()
     result = await c.get_history('s1', limit=20, message_id='msg-10')
     assert result == payload
@@ -599,7 +640,7 @@ async def test_get_history_builds_frame_and_returns_payload():
 async def test_get_history_minimal_params_omits_optionals():
     """只传 sessionKey → 不带可选 limit/messageId（spec：两者可选，None 时不下发）。"""
     t = FakeChatTransport(rpc_payloads={'chat.history': {'messages': []}})
-    c = OpenClawChatClient(URL, 'dt', transport=t)
+    c = _client(transport=t)
     await c.connect()
     await c.get_history('s1')
     req = next(f for f in t.sent if f.get('method') == 'chat.history')
@@ -609,7 +650,7 @@ async def test_get_history_minimal_params_omits_optionals():
 
 @pytest.mark.asyncio
 async def test_get_history_not_connected_raises():
-    c = OpenClawChatClient(URL, 'dt', transport=FakeChatTransport())
+    c = _client(transport=FakeChatTransport())
     with pytest.raises(ChatClientError):
         await c.get_history('s1')
 
@@ -617,7 +658,7 @@ async def test_get_history_not_connected_raises():
 @pytest.mark.asyncio
 async def test_get_history_gateway_reject_raises():
     t = FakeChatTransport(rpc_errors={'chat.history': {'code': 'NOT_FOUND', 'message': 'no such session'}})
-    c = OpenClawChatClient(URL, 'dt', transport=t)
+    c = _client(transport=t)
     await c.connect()
     with pytest.raises(ChatSendError):
         await c.get_history('missing')
@@ -629,7 +670,7 @@ async def test_create_session_builds_frame_and_returns_payload():
     """发 sessions.create{key,label}，返回网关 res payload。"""
     payload = {'session': {'key': 'new-1', 'label': '我的会话'}}
     t = FakeChatTransport(rpc_payloads={'sessions.create': payload})
-    c = OpenClawChatClient(URL, 'dt', transport=t)
+    c = _client(transport=t)
     await c.connect()
     result = await c.create_session('new-1', label='我的会话')
     assert result == payload
@@ -642,7 +683,7 @@ async def test_create_session_builds_frame_and_returns_payload():
 async def test_create_session_without_label_omits_field():
     """免标题新建（spec：可不带 label，由网关后续派生）→ params 只含 key。"""
     t = FakeChatTransport(rpc_payloads={'sessions.create': {'session': {'key': 'x'}}})
-    c = OpenClawChatClient(URL, 'dt', transport=t)
+    c = _client(transport=t)
     await c.connect()
     await c.create_session('x')
     req = next(f for f in t.sent if f.get('method') == 'sessions.create')
@@ -652,7 +693,7 @@ async def test_create_session_without_label_omits_field():
 
 @pytest.mark.asyncio
 async def test_create_session_not_connected_raises():
-    c = OpenClawChatClient(URL, 'dt', transport=FakeChatTransport())
+    c = _client(transport=FakeChatTransport())
     with pytest.raises(ChatClientError):
         await c.create_session('x')
 
@@ -660,7 +701,7 @@ async def test_create_session_not_connected_raises():
 @pytest.mark.asyncio
 async def test_create_session_gateway_reject_raises():
     t = FakeChatTransport(rpc_errors={'sessions.create': {'code': 'CONFLICT', 'message': 'session exists'}})
-    c = OpenClawChatClient(URL, 'dt', transport=t)
+    c = _client(transport=t)
     await c.connect()
     with pytest.raises(ChatSendError):
         await c.create_session('dup')
@@ -678,7 +719,7 @@ async def test_delete_session_builds_frame_and_returns_payload():
     """
     payload = {'deleted': True, 'archived': 'sess-1.jsonl.deleted.123.zst'}
     t = FakeChatTransport(rpc_payloads={'sessions.delete': payload})
-    c = OpenClawChatClient(URL, 'dt', transport=t)
+    c = _client(transport=t)
     await c.connect()
     result = await c.delete_session('sess-1')
     assert result == payload
@@ -689,7 +730,7 @@ async def test_delete_session_builds_frame_and_returns_payload():
 
 @pytest.mark.asyncio
 async def test_delete_session_not_connected_raises():
-    c = OpenClawChatClient(URL, 'dt', transport=FakeChatTransport())
+    c = _client(transport=FakeChatTransport())
     with pytest.raises(ChatClientError):
         await c.delete_session('sess-1')
 
@@ -699,7 +740,7 @@ async def test_delete_session_gateway_reject_raises():
     """删除是 admin 级：缺 operator.admin scope → 网关拒绝 → ChatSendError。"""
     t = FakeChatTransport(rpc_errors={
         'sessions.delete': {'code': 'FORBIDDEN', 'message': 'missing scope operator.admin'}})
-    c = OpenClawChatClient(URL, 'dt', transport=t)
+    c = _client(transport=t)
     await c.connect()
     with pytest.raises(ChatSendError) as exc:
         await c.delete_session('sess-1')

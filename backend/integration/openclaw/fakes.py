@@ -88,7 +88,9 @@ class FakeOpenClawWire:
             raise self.pair_raise
         return self.pair_result
 
-    async def connect(self, url: str, device_token: str) -> None:
+    async def connect(
+        self, url: str, device_token: str, *, identity, nonce: str, scopes,
+    ) -> None:
         self.connected.append((url, device_token))
         self._dead = False
 

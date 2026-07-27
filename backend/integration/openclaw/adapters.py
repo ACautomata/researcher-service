@@ -433,8 +433,11 @@ class OpenClawWireAdapter:
             raise PairingRequired(request_id)
         raise PairingError(error.get('message') or error.get('code') or 'connect failed')
 
-    async def connect(self, url: str, device_token: str) -> None:
-        """建立已配对长连接（deviceToken 作 auth.token 经 ConnectFrameBuilder.session 构建帧）。"""
+    async def connect(self, url: str, device_token: str, *, identity, nonce: str, scopes) -> None:
+        """建立已配对长连接（deviceToken 作 auth.token + Ed25519 device 签名块，经 ConnectFrameBuilder.session 构建帧）。
+
+        issue #139：identity/nonce/scopes 透传给 session()（nonce 等 challenge、scopes 读 Pairing 由 #140/#141 接入）。
+        """
         import json
         import uuid
 
@@ -446,7 +449,10 @@ class OpenClawWireAdapter:
         req_id = uuid.uuid4().hex
         try:
             await self._ws.send(
-                json.dumps(ConnectFrameBuilder.session(req_id=req_id, device_token=device_token)))
+                json.dumps(ConnectFrameBuilder.session(
+                    req_id=req_id, identity=identity, device_token=device_token,
+                    nonce=nonce, scopes=scopes,
+                )))
             await asyncio.wait_for(self._await_res(req_id), timeout=self._connect_timeout)
         except ChatConnectError:
             await self._cleanup_ws()
