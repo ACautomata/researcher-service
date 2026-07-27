@@ -1,7 +1,8 @@
 """integration: 真实 docker daemon 端到端 smoke —— issue #39 验收闭环。
 
-靠 docker daemon 自动探测门控（DockerDaemonProbe.is_available，替代 RUN_INTEGRATION env）；
-CI runner 即便有 daemon，也因缺 OPENCLAW_TEMPLATE_DIR/LLM_API_KEY 在用例内 skip。
+CI integration job env 齐备（OPENCLAW_TEMPLATE_DIR/OPENCLAW_IMAGE/LLM_API_KEY + docker pull）
+真跑；backend-unit job 经 `-m "not integration"` 排除（不跑真容器，契约由 test_ci_workflow 守）。
+无 skip 门控——环境缺失直接 fail，强制齐备（issue #157：集成测试 CI 必须一直跑，不靠 skip 兜底）。
 手动验证 spec §5 真实链路：
   export OPENCLAW_TEMPLATE_DIR=/path/to/researcher   # git clone ACautomata/researcher
   export OPENCLAW_IMAGE=acautomata/openclaw-docker-cn-im:latest
@@ -16,14 +17,9 @@ from pathlib import Path
 
 import pytest
 
-from containers.tests.integration_helpers import DockerDaemonProbe
-
-# daemon 自动探测门控（替代 RUN_INTEGRATION env）：有 daemon 才 collect 真容器用例；
-# 无 daemon 整体 skip。OPENCLAW_TEMPLATE_DIR/LLM_API_KEY 仍由各用例内 skip（数据依赖）。
-pytestmark = pytest.mark.skipif(
-    not DockerDaemonProbe.is_available(),
-    reason='需 docker daemon（自动探测；Colima/Docker Desktop 本地 VM 均可）',
-)
+# 真容器集成测试（issue #157）：CI integration job env 齐备时真跑；backend-unit job 经
+# `-m "not integration"` 排除。无 skip 门控——环境缺失直接 fail，强制齐备（不靠 skip 兜底）。
+pytestmark = pytest.mark.integration
 
 BASE_DIR = Path(__file__).resolve().parents[3]
 
@@ -35,13 +31,12 @@ _SMOKE_TEMPLATE_JSON = str(BASE_DIR / 'deploy' / 'openclaw.json')
 
 @pytest.mark.django_db
 def test_create_list_delete_real_container(tmp_path):
-    pytest.importorskip('docker')
     from containers.docker_runtime import DockerRuntime
     from containers.orchestrator import FleetConfig, InstanceOrchestrator
 
-    template_dir = os.environ.get('OPENCLAW_TEMPLATE_DIR')
-    if not template_dir or not Path(template_dir).is_dir():
-        pytest.skip('需 OPENCLAW_TEMPLATE_DIR 指向 researcher clone')
+    template_dir = os.environ['OPENCLAW_TEMPLATE_DIR']  # env 缺失 KeyError（环境必须齐备）
+    if not Path(template_dir).is_dir():
+        pytest.fail(f'OPENCLAW_TEMPLATE_DIR 不是目录: {template_dir}')
     image = os.environ.get('OPENCLAW_IMAGE', 'acautomata/openclaw-docker-cn-im:latest')
     config = FleetConfig(
         root=tmp_path / 'fleet',
@@ -91,7 +86,6 @@ def test_pair_chat_wiki_smoke_chain(tmp_path):  # pylint: disable=too-many-local
     取回 deviceToken、chat RPC 连通、wiki 直读 bind-mount + categories 聚合、删除连数据删。
     finally 兜底确保任何步骤失败均不残留容器。
     """
-    pytest.importorskip('docker')
     from chat.chat_client import OpenClawChatClient
     from chat.device_crypto import DeviceIdentity
     from chat.models import Pairing
@@ -107,9 +101,9 @@ def test_pair_chat_wiki_smoke_chain(tmp_path):  # pylint: disable=too-many-local
     from integration.openclaw.translation import format_device_approve_command
     from wiki.service import WikiService
 
-    template_dir = os.environ.get('OPENCLAW_TEMPLATE_DIR')
-    if not template_dir or not Path(template_dir).is_dir():
-        pytest.skip('需 OPENCLAW_TEMPLATE_DIR 指向 researcher clone')
+    template_dir = os.environ['OPENCLAW_TEMPLATE_DIR']  # env 缺失 KeyError（环境必须齐备）
+    if not Path(template_dir).is_dir():
+        pytest.fail(f'OPENCLAW_TEMPLATE_DIR 不是目录: {template_dir}')
     image = os.environ.get('OPENCLAW_IMAGE', 'acautomata/openclaw-docker-cn-im:latest')
     config = FleetConfig(
         root=tmp_path / 'fleet',

@@ -46,6 +46,14 @@ class ContainerRuntime(Protocol):
         """在运行中的实例容器内执行命令（如 wiki compile）；容器不存在则幂等。"""
         ...
 
+    def exec_sync(self, name: str, cmd: list[str]) -> None:
+        """同步在容器内执行命令并等待完成（区别于 exec_in_container 的 detach fire-and-forget）。
+
+        供 delete cleanup（chown bind-mount home 给 host uid）：容器以 root 跑，home 内由容器
+        写入的文件属主为 root，须容器还在时同步 chown 后再 rmtree——否则 host 非 root 清不掉（A3）。
+        """
+        ...
+
 
 @runtime_checkable
 class OpenClawWire(Protocol):

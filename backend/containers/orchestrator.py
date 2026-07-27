@@ -41,7 +41,13 @@ from integration.openclaw.adapters import HttpHealthProbe
 from models.config_builder import ProviderConfigBuilder
 
 from .config_renderer import ConfigRenderer
-from .constants import LEASE_TTL, MAX_HEALTH_WORKERS, MAX_PORT_RETRIES, TOKEN_URLSAFE_BYTES
+from .constants import (
+    HOME_BIND,
+    LEASE_TTL,
+    MAX_HEALTH_WORKERS,
+    MAX_PORT_RETRIES,
+    TOKEN_URLSAFE_BYTES,
+)
 from .docker_runtime import DockerRuntime
 from .models import Instance
 from .ports import RESERVED_PORT_18789, PortAllocator
@@ -421,6 +427,15 @@ class InstanceOrchestrator:  # pylint: disable=too-many-instance-attributes
                 except Exception:  # pylint: disable=broad-exception-caught
                     pass
             else:
+                # A3：容器以 root 跑，bind-mount home 内由容器写入的文件（session/cache 等）
+                # 属主为 root，host 非 root rmtree 会 PermissionError。容器还在（root 权限）时
+                # 同步 chown home 给 host uid，让 host rmtree 能清。best-effort——chown 失败不阻断。
+                try:
+                    self._runtime.exec_sync(
+                        name, ['chown', '-R', str(os.getuid()), HOME_BIND],
+                    )
+                except Exception:  # pylint: disable=broad-exception-caught
+                    pass
                 self._runtime.stop(name)
                 self._runtime.remove(name)
         # codex R4 :296：删除路径优先由 DB 记录的 home_dir 派生（创建时固化的绝对路径，
@@ -448,10 +463,10 @@ class InstanceOrchestrator:  # pylint: disable=too-many-instance-attributes
             # codex R2 :204：目录已不存在（外部清理/建行前崩溃）视为清理成功——
             # 否则 FileNotFoundError 落入 OSError 分支，行卡 REMOVING 且重试永远撞同一路径。
             pass
-        except OSError:
+        except OSError as exc:
             inst.status = Instance.STATUS_REMOVING
             inst.save()
-            raise InstanceCleanupError(name, str(instance_dir)) from None
+            raise InstanceCleanupError(name, str(instance_dir)) from exc
         inst.delete()
         return True
 

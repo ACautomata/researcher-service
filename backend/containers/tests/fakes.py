@@ -17,6 +17,8 @@ class FakeRuntime:
         self.stopped: list[str] = []
         self.removed: list[str] = []
         self.exec_calls: list[tuple[str, list[str]]] = []  # (name, cmd) 记录容器内 exec
+        # 同步 exec（delete cleanup chown 等），独立于 detach 的 exec_calls，避免干扰 wiki compile 断言
+        self.sync_exec_calls: list[tuple[str, list[str]]] = []
         self._next = 0
         # codex R1 :112：模拟 docker create 成功后 start 失败（端口占用等）。
         # 设非 None 时 run() 先记录容器（模拟 create 落 daemon）再抛该异常，
@@ -61,6 +63,9 @@ class FakeRuntime:
 
     def exec_in_container(self, name: str, cmd: list[str]) -> None:
         self.exec_calls.append((name, cmd))
+
+    def exec_sync(self, name: str, cmd: list[str]) -> None:
+        self.sync_exec_calls.append((name, cmd))
 
 
 class FakeHealthProbe:

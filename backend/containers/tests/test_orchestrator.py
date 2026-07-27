@@ -5,6 +5,7 @@
 用 FakeRuntime + FakeHealthProbe 覆盖业务逻辑（CI 无 docker daemon）；真实 DockerRuntime 走 integration。
 """
 import json
+import os
 import threading
 import time
 from pathlib import Path
@@ -12,6 +13,7 @@ from pathlib import Path
 import pytest
 from django.db import IntegrityError
 
+from containers.constants import HOME_BIND
 from containers.models import Instance
 from containers.orchestrator import (  # pylint: disable=too-many-positional-arguments
     ConfigurationError,
@@ -1226,3 +1228,24 @@ def test_list_survives_runtime_lookup_failure_during_reconcile(orch):
     # 保守保持 creating/pending（无法判定真实状态时不误收敛）
     assert stuck['status'] == 'creating'
     assert stuck['health'] == 'pending'
+
+
+# ───────────────────────────── A3：root 属主 cleanup ─────────────────────────────
+
+
+@pytest.mark.django_db
+def test_delete_chowns_root_owned_home_before_rmtree(orch, runtime):
+    """A3：容器以 root 跑（docker_runtime user=0:0），bind-mount home 内由容器写入的文件
+    （session/cache 等）属主为 root，host 非 root rmtree 会 PermissionError。
+
+    delete 须在 stop+remove 前，容器还在（root 权限）时同步 chown home 给 host uid，
+    让 host rmtree 能清。验证 exec_sync 被调且 cmd = chown -R <host_uid> HOME_BIND。
+    """
+    orch.create('demo')
+    orch.delete('demo')
+    chowns = [
+        cmd for name, cmd in runtime.sync_exec_calls
+        if name == 'demo' and cmd[:1] == ['chown']
+    ]
+    assert chowns, 'delete 须在 stop 前容器内 chown home 给 host uid（A3 root 属主 cleanup）'
+    assert chowns[0] == ['chown', '-R', str(os.getuid()), HOME_BIND]

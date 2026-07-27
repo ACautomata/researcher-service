@@ -6,6 +6,12 @@ python_files = ["tests.py", "test_*.py", "*_tests.py"]
 pythonpath = ["."]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+# integration marker：真容器集成测试（需 docker daemon + OPENCLAW_TEMPLATE_DIR/LLM_API_KEY env）。
+# backend-unit job 跑 `-m "not integration"` 排除（契约：不跑真容器）；integration job env 齐备
+# 跑 `-m "integration"` 真验证（issue #157：集成测试 CI 必须一直跑，环境齐备，不 skip）。
+markers = [
+    "integration: 真容器集成测试（CI integration job 跑，需 docker + OPENCLAW_TEMPLATE_DIR/LLM_API_KEY）",
+]
 
 [tool.ruff]
 line-length = 100

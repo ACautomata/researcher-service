@@ -1,7 +1,7 @@
 # GitHub Actions CI —— issue #91（skeleton + frontend job）、issue #92（backend-unit pytest）、
-# issue #93（backend-unit pylint 语义层质量门）。
-# 父票 #74。push 触发；frontend / backend-unit 双轨并行把关（vitest + vue-tsc / pytest），
-# 任一红即拦。container-smoke 等真容器 job 由 #74 其余子票追加。
+# issue #93（backend-unit pylint 语义层质量门）、issue #157（integration 真容器集成测试）。
+# 父票 #74。push 触发；frontend / backend-unit / integration 三轨并行把关
+# （vitest + vue-tsc / 单测 pytest + pylint / 真容器集成 pytest），任一红即拦。
 name: CI
 
 on: push
@@ -37,8 +37,36 @@ jobs:
           cache: pip
           cache-dependency-path: backend/requirements/dev.txt
       - run: pip install -r requirements/dev.txt
-      - run: python -m pytest
+      # 排除真容器集成测试（-m "not integration"）：backend-unit 不跑真容器（契约由
+      # tests/test_ci_workflow.py 守），集成测试在 integration job env 齐备时真跑（issue #157）。
+      - run: python -m pytest -m "not integration"
       # 语义层质量门（#93）：pylint 接管 ruff 不管的语义/类型层——调用参数错误、ORM/Django
       # 误用、异常规范、设计气味。退出码非零即 job 红。配置（django-settings-module、
       # pylint-django 插件、migrations 忽略）集中在 pyproject.toml（#77 落地），无需 env 兜底。
       - run: pylint accounts chat config containers models wiki
+
+  # 真容器集成测试（issue #157）：env 齐备时真跑 chat.send wire schema 断言 + 全链路 smoke。
+  # 与 backend-unit 分离——backend-unit 保持「不跑真容器」契约（test_ci_workflow 守），
+  # 集成测试在此 job 经 docker daemon + OPENCLAW_TEMPLATE_DIR/LLM_API_KEY 真验证（不 skip）。
+  # LLM_API_KEY 须在 repo secrets 配齐（缺失则集成测试 fail 暴露配置问题，符合「环境必须齐备」）。
+  integration:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    env:
+      OPENCLAW_TEMPLATE_DIR: ${{ github.workspace }}
+      OPENCLAW_IMAGE: ghcr.io/openclaw/openclaw:2026.6.34-browser
+      LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: backend/requirements/dev.txt
+      - run: pip install -r requirements/dev.txt
+      # 预拉 OpenClaw 公共 ghcr 镜像（集成测试须容器起停）
+      - run: docker pull ${{ env.OPENCLAW_IMAGE }}
+      # 真容器集成测试（pytestmark=integration）：wire schema 断言 + create/list/delete 全链路
+      - run: python -m pytest -m "integration"
