@@ -122,9 +122,12 @@ class ChatConnectionPool:
         import json
 
         try:
-            return json.loads(pairing.scopes_json) or []
+            decoded = json.loads(pairing.scopes_json)
         except (ValueError, TypeError):
             return []
+        if not isinstance(decoded, list) or not all(isinstance(s, str) for s in decoded):
+            return []
+        return decoded
 
 
 class ChatFleet:

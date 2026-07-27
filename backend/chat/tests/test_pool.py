@@ -319,3 +319,27 @@ async def test_malformed_scopes_json_passes_empty_list():
     )
     c = await pool.get_or_create(_instance('x', 19102))
     assert c.scopes == []
+
+
+@pytest.mark.asyncio
+async def test_non_list_scopes_returns_empty():
+    """scopes_json 是合法 JSON 但非 list（如 str "op.read" / dict {}）→ 返回 []。"""
+    pool = ChatConnectionPool(
+        pairing_service=FakePairingService(scopes_json='"operator.read"'),
+        client_factory=StubClient,
+        ws_url_for=_url_for,
+    )
+    c = await pool.get_or_create(_instance('x', 19103))
+    assert c.scopes == []
+
+
+@pytest.mark.asyncio
+async def test_list_with_non_string_elements_returns_empty():
+    """scopes_json 是 list 但含有非字符串元素 → 返回 []。"""
+    pool = ChatConnectionPool(
+        pairing_service=FakePairingService(scopes_json='["op.read", 123]'),
+        client_factory=StubClient,
+        ws_url_for=_url_for,
+    )
+    c = await pool.get_or_create(_instance('x', 19104))
+    assert c.scopes == []
