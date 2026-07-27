@@ -29,6 +29,10 @@ jobs:
     defaults:
       run:
         working-directory: backend
+    env:
+      OPENCLAW_TEMPLATE_DIR: ${{ github.workspace }}
+      OPENCLAW_IMAGE: ghcr.io/openclaw/openclaw:2026.6.34-browser
+      LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -37,6 +41,8 @@ jobs:
           cache: pip
           cache-dependency-path: backend/requirements/dev.txt
       - run: pip install -r requirements/dev.txt
+      # 预拉 OpenClaw 公共 ghcr 镜像（集成测试须容器起停）
+      - run: docker pull ghcr.io/openclaw/openclaw:2026.6.34-browser
       - run: python -m pytest
       # 语义层质量门（#93）：pylint 接管 ruff 不管的语义/类型层——调用参数错误、ORM/Django
       # 误用、异常规范、设计气味。退出码非零即 job 红。配置（django-settings-module、
