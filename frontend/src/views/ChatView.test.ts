@@ -362,14 +362,14 @@ describe('ChatView', () => {
     MockWS.last!.fireMessage({ type: 'approval', id: 'ap-1', kind: 'exec', command: 'cmd', sessionKey: 'sk-1' })
     await nextTick()
     await w.find('[data-test="approve-ap-1"]').trigger('click')
-    expect(MockWS.last!.sent).toContainEqual({ type: 'resolve', id: 'ap-1', kind: 'exec', decision: 'approve' })
+    expect(MockWS.last!.sent).toContainEqual({ type: 'resolve', id: 'ap-1', kind: 'exec', decision: 'allow-once' })
     await nextTick()
     // pending：按钮禁用但卡片未标记 resolved（等服务端回执，不乐观假成功）
     const card = w.find('[data-test="approval-ap-1"]')
     expect(card.classes()).not.toContain('resolved')
     expect((w.find('[data-test="approve-ap-1"]').element as HTMLButtonElement).disabled).toBe(true)
     // 服务端回执到达才落定变淡
-    MockWS.last!.fireMessage({ type: 'approvalResolved', id: 'ap-1', decision: 'approve' })
+    MockWS.last!.fireMessage({ type: 'approvalResolved', id: 'ap-1', decision: 'allow-once' })
     await nextTick()
     const card2 = w.find('[data-test="approval-ap-1"]')
     expect(card2.classes()).toContain('resolved')
@@ -380,7 +380,7 @@ describe('ChatView', () => {
     const w = await mountReady()
     MockWS.last!.fireMessage({ type: 'approval', id: 'ap-1', kind: 'exec', command: 'cmd', sessionKey: 'sk-1' })
     await nextTick()
-    await w.find('[data-test="approve-ap-1"]').trigger('click') // 请求 approve
+    await w.find('[data-test="approve-ap-1"]').trigger('click') // 请求 allow-once
     await nextTick()
     MockWS.last!.fireMessage({ type: 'approvalResolved', id: 'ap-1', decision: 'deny' }) // 权威 deny
     await nextTick()
@@ -450,7 +450,7 @@ describe('ChatView', () => {
     await nextTick()
     expect(w.find('[data-test="approval-ap-x"]').exists()).toBe(true)
     await w.find('[data-test="approve-ap-x"]').trigger('click')
-    expect(MockWS.last!.sent).toContainEqual({ type: 'resolve', id: 'ap-x', kind: 'exec', decision: 'approve' })
+    expect(MockWS.last!.sent).toContainEqual({ type: 'resolve', id: 'ap-x', kind: 'exec', decision: 'allow-once' })
   })
 
   it('clears approval cards when switching container', async () => {
