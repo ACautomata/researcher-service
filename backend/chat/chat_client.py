@@ -360,6 +360,20 @@ class OpenClawChatClient:  # pylint: disable=too-many-instance-attributes,too-ma
                 cards.append(card)
         return cards
 
+    async def request_approval(self, command: str, *, session_key: str | None = None) -> dict:
+        """确定性创建 exec 审批请求（codex P2 #168）：发 exec.approval.request，有界等 res。
+
+        LLM prompt 触发审批（agent 是否调 exec + 网关 elevated 判断）不稳定——curl 有时被允许直接
+        执行、有时触发审批。本方法用文档已证的 exec.approval.request RPC 直接创建 pending approval，
+        对集成测试完全确定性。需 operator.approvals scope；网关拒绝抛 ChatSendError。
+
+        返回网关 res payload——至少含 id 字段（审批 id），供后续 resolve/list 使用。
+        """
+        params: dict = {'command': command}
+        if session_key is not None:
+            params['sessionKey'] = session_key
+        return await self._rpc('exec.approval.request', params)
+
     async def list_commands(self) -> dict:
         """拉取该 agent 工作区的斜杠命令清单（T07，spec §8.2）：发 commands.list，有界等 res。
 
