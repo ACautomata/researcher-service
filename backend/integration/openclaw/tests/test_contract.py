@@ -665,6 +665,29 @@ class TestConnectFrameBuilderSingleSource:
         assert frame['params']['scopes'] != wire.SCOPES
 
 
+def test_wire_connect_signature_isomorphic_across_port_fake_adapter():
+    """回归 (codex #149 P2)：OpenClawWire.connect 在 Port / Fake / Adapter 三处签名同构。
+
+    isinstance(Protocol) 只验方法存在、不验签名——#139 改 Adapter.connect 加 keyword-only
+    identity/nonce/scopes 时若漏改 Port/Fake 会静默分歧（Liskov 违反：按 Port 编程换真
+    Adapter 即 TypeError）。用 inspect 锁三处 keyword-only 参数同构。
+    """
+    import inspect
+
+    from integration.openclaw.adapters import OpenClawWireAdapter
+    from integration.openclaw.fakes import FakeOpenClawWire
+    from integration.openclaw.ports import OpenClawWire
+
+    def kw_only(func):
+        sig = inspect.signature(func)
+        return [p.name for p in sig.parameters.values() if p.kind == inspect.Parameter.KEYWORD_ONLY]
+
+    expected = ['identity', 'nonce', 'scopes']
+    assert kw_only(OpenClawWire.connect) == expected
+    assert kw_only(FakeOpenClawWire.connect) == expected
+    assert kw_only(OpenClawWireAdapter.connect) == expected
+
+
 class TestPairingAdapterImplementsWirePort:
     """OpenClawWireAdapter 实现 OpenClawWire Port——issue #102 acceptance。
 
@@ -1368,7 +1391,10 @@ class TestFakeOpenClawWireLongLived:
 
         # send_message（需先 connect）
         async def _send():
-            await fake.connect('ws://x/', 'dt')
+            await fake.connect(
+                'ws://x/', 'dt',
+                identity=_SESSION_IDENTITY, nonce=_SESSION_NONCE, scopes=_SESSION_SCOPES,
+            )
             run_id = await fake.send_message('s1', 'hello', on_event=lambda f: None)
             assert run_id == 'fake-run-id'
         asyncio.run(_send())
@@ -1418,7 +1444,10 @@ class TestFakeOpenClawWireLongLived:
         fake = FakeOpenClawWire()
         fake.run_id = 'custom-run-42'
         async def _run():
-            await fake.connect('ws://x/', 'dt')
+            await fake.connect(
+                'ws://x/', 'dt',
+                identity=_SESSION_IDENTITY, nonce=_SESSION_NONCE, scopes=_SESSION_SCOPES,
+            )
             return await fake.send_message('s', 'm', on_event=lambda f: None)
         assert asyncio.run(_run()) == 'custom-run-42'
 
@@ -1435,7 +1464,10 @@ class TestFakeOpenClawWireLongLived:
             received.append(frame)
 
         async def _run():
-            await fake.connect('ws://x/', 'dt')
+            await fake.connect(
+                'ws://x/', 'dt',
+                identity=_SESSION_IDENTITY, nonce=_SESSION_NONCE, scopes=_SESSION_SCOPES,
+            )
             return await fake.send_message('sess-1', '你好', on_event=cb)
         asyncio.run(_run())
         assert len(fake.sent) == 1
@@ -1457,7 +1489,10 @@ class TestFakeOpenClawWireLongLived:
             received.append(frame)
 
         async def _run():
-            await fake.connect('ws://x/', 'dt')
+            await fake.connect(
+                'ws://x/', 'dt',
+                identity=_SESSION_IDENTITY, nonce=_SESSION_NONCE, scopes=_SESSION_SCOPES,
+            )
             rid = await fake.send_message('s', 'm', on_event=cb)
             await fake.push_event(rid, {'type': 'text', 'runId': rid, 'delta': 'hello'})
             await fake.push_event(rid, {'type': 'done', 'runId': rid})
@@ -1520,7 +1555,10 @@ class TestFakeOpenClawWireLongLived:
             received.append(frame)
 
         async def _run():
-            await fake.connect('ws://x/', 'dt')
+            await fake.connect(
+                'ws://x/', 'dt',
+                identity=_SESSION_IDENTITY, nonce=_SESSION_NONCE, scopes=_SESSION_SCOPES,
+            )
             rid = await fake.send_message('s', 'm', on_event=cb)
             fake.discard(rid)
             await fake.push_event(rid, {'type': 'text', 'delta': 'lost'})
@@ -1548,7 +1586,10 @@ class TestFakeOpenClawWireLongLived:
 
         fake = FakeOpenClawWire()
         async def _run():
-            await fake.connect('ws://x/', 'dt-1')
+            await fake.connect(
+                'ws://x/', 'dt-1',
+                identity=_SESSION_IDENTITY, nonce=_SESSION_NONCE, scopes=_SESSION_SCOPES,
+            )
         asyncio.run(_run())
         assert not fake.dead
         assert fake.connected == [('ws://x/', 'dt-1')]

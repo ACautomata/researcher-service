@@ -68,8 +68,14 @@ class OpenClawWire(Protocol):
 
     # ── 长连接（#103）───────────────────────────────────────────
 
-    async def connect(self, url: str, device_token: str) -> None:
-        """建立已配对长连（deviceToken 作 auth.token 经 ConnectFrameBuilder.session 构建帧）。"""
+    async def connect(
+        self, url: str, device_token: str, *, identity, nonce: str, scopes,
+    ) -> None:
+        """建立已配对长连（deviceToken 作 auth.token + Ed25519 device 签名块，经 ConnectFrameBuilder.session 构建帧）。
+
+        issue #139：identity/nonce/scopes 为必填 keyword-only（Port/Fake/Adapter 三处同构）；
+        nonce 等 connect.challenge、scopes 读 Pairing 由 #140/#141 接入。
+        """
         ...
 
     async def send_message(self, session_key: str, message: str, on_event: Any) -> str:
