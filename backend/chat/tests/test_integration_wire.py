@@ -370,6 +370,14 @@ def test_chat_send_event_stream_wire_schema(tmp_path):
             if isinstance(b, dict) and b.get('type') == 'text'
         ]
         assert text_blocks, 'message.content 应至少含一条 type:text 块'
+        for tb in text_blocks:
+            text_val = tb.get('text')
+            assert isinstance(text_val, str) and text_val, \
+                f'text 块应含非空 text 字符串，got {type(text_val).__name__}={text_val!r}'
+
+        # timestamp 是 final.message 必含字段
+        assert 'timestamp' in message, \
+            f'message dict 应含 timestamp，got keys={sorted(message.keys())}'
 
     # final 含 stopReason 字段
     for f_payload in finals:
