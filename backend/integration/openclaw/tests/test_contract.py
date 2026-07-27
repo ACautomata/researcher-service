@@ -89,8 +89,8 @@ class TestWireConstantsSingleSource:
     def test_event_families_single_sourced(self):
         assert event_translate._APPROVAL_REQUESTED_EVENTS is wire.APPROVAL_REQUESTED_EVENTS
         assert event_translate._APPROVAL_RESOLVED_EVENTS is wire.APPROVAL_RESOLVED_EVENTS
-        assert event_translate._TOOL_START_EVENTS is wire.TOOL_START_EVENTS
-        assert event_translate._TOOL_END_EVENTS is wire.TOOL_END_EVENTS
+        assert event_translate._TOOL_AGENT_EVENT is wire.TOOL_AGENT_EVENT
+        assert event_translate._TOOL_STREAM is wire.TOOL_STREAM
 
 
 class TestIntegrationExposesFourPorts:

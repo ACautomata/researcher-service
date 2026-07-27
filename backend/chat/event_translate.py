@@ -16,9 +16,11 @@ T06 权限审批（issue #42 / spec §8.2）：`exec.approval.requested` / `plug
 审批卡帧。command 取值链：systemRunPlan.rawCommand（r26:64 官方文档已证）→ systemRunPlan.command
 → 顶层 command → ''（防御性兜底）。decision 透传网关权威值（客户端 approval.resolve 方法已证 r26:78-79；网关事件 payload 待实测）。
 
-T08 工具执行（issue #44 / spec §8.2/§9.4 / r26 §3）：`agent.tool.start`/`agent.tool.result`（r26 §3
-二手来源，译者取值链兜底）→ `{type:tool,runId,name,state,title,input,result}` 工具帧，带 runId
-走所属 chat run 路由。工具帧字段名取值链（name/id/input/result）集中 `_translate_tool`。
+T08 工具执行（issue #44 / #153 / spec §8.2/§9.4）：实测 ghcr 2026.6.34（ADR 0003 / PR #152 深挖 #3）
+网关工具事件为 event:"agent" + payload.stream:"tool" + data.phase:"start"/"update"/"result"
+→ `{type:tool,runId,name,state,title,input,result}` 工具帧，带 runId 走所属 chat run 路由。
+字段在 data 子对象下：name/toolCallId/args（start）、partialResult（update）、
+result/isError/meta（result）。
 
 思考链 protocol v4 无独立帧（r26 §4 官方文档已证）→ 不新增 thinking 分支，整段按 text 透传
 （spec §8.3 (b) 降级，前端折叠卡标注降级模式）。r13 §3 上游源码已证 chat 仅 delta/final/aborted/
@@ -33,10 +35,10 @@ from integration.openclaw.wire import (
     APPROVAL_RESOLVED_EVENTS as _APPROVAL_RESOLVED_EVENTS,
 )
 from integration.openclaw.wire import (
-    TOOL_END_EVENTS as _TOOL_END_EVENTS,
+    TOOL_AGENT_EVENT as _TOOL_AGENT_EVENT,
 )
 from integration.openclaw.wire import (
-    TOOL_START_EVENTS as _TOOL_START_EVENTS,
+    TOOL_STREAM as _TOOL_STREAM,
 )
 
 # delta state 下增量字段；replace=true + message 快照时改发 replace 帧（整段替换）。
@@ -100,11 +102,13 @@ class ChatEventTranslator:
         if event in _APPROVAL_RESOLVED_EVENTS:
             resolved = self._approval_resolved(frame.get('payload') or {})
             return [resolved] if resolved else []
-        # T08 工具生命周期事件（runId 级，工具挂在 chat run 内，r26 §3）→ 工具帧
-        if event in _TOOL_START_EVENTS:
-            return self._translate_tool(frame.get('payload') or {}, 'running')
-        if event in _TOOL_END_EVENTS:
-            return self._translate_tool(frame.get('payload') or {}, 'done')
+        # T08 工具生命周期事件（issue #153 实测校准：event:agent + stream:tool + phase）
+        # 旧假设 agent.tool.start/result 独立事件——实测从不触发（#153）
+        if event == _TOOL_AGENT_EVENT:
+            payload = frame.get('payload') or {}
+            if payload.get('stream') == _TOOL_STREAM:
+                return self._translate_tool(payload, (payload.get('data') or {}).get('phase') or '')
+            return []
         if event != 'chat':
             return []
         payload = frame.get('payload') or {}
@@ -175,29 +179,32 @@ class ChatEventTranslator:
         return out
 
     @staticmethod
-    def _translate_tool(payload: dict, state: str) -> list[dict]:
-        """T08 工具生命周期事件 payload → 工具帧（runId 级，路由到所属 chat run，r26 §3）。
+    def _translate_tool(payload: dict, phase: str) -> list[dict]:
+        """T08 工具生命周期事件（实测 ghcr 2026.6.34 / ADR 0003） payload → 工具帧。
 
-        字段名取值链（r26 §3 二手来源；集中于此便于单点校准）：
-        - name: payload.tool → payload.name → payload.toolName；无 name → []（无法渲染工具行）
-        - id: payload.toolCallId → payload.tool_call_id → payload.callId → payload.id（缺省 None）；
-          工具调用 id，前端据此配对同名并发调用的 result（codex P2，无 id 退 name）
-        - title: payload.title（缺省 None）
-        - input: payload.input → payload.args（缺省 None）
-        - result: payload.result → payload.output（缺省 None）
-        统一 shape（start 时 result=None）便于前端按 id/name 聚合 start→result。
+        字段在 data 子对象下：name/toolCallId/args（start）、partialResult（update）、
+        result/isError/meta（result）。
+
+        phase mapping:
+        - start → 'running'（工具开始）
+        - update → 'running'（partial result 增量，前端保持工具行状态）
+        - result → 'done'（工具完成）
+        - 未知 phase → []（0 信任，不猜测）
         """
+        if phase not in ('start', 'update', 'result'):
+            return []
         run_id = payload.get('runId')
         if not run_id:
             return []
-        name = payload.get('tool') or payload.get('name') or payload.get('toolName')
+        data = payload.get('data') or {}
+        name = data.get('name')
         if not name:
             return []
+        state = 'done' if phase == 'result' else 'running'
         return [{
             'type': 'tool', 'runId': run_id, 'name': name, 'state': state,
-            'id': payload.get('toolCallId') or payload.get('tool_call_id')
-                  or payload.get('callId') or payload.get('id'),
-            'title': payload.get('title'),
-            'input': payload.get('input') or payload.get('args'),
-            'result': payload.get('result') or payload.get('output'),
+            'id': data.get('toolCallId'),
+            'title': data.get('title'),
+            'input': data.get('args'),
+            'result': data.get('result'),
         }]
