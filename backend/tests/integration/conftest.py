@@ -182,6 +182,7 @@ def _run_manage_py(argv: list[str], env: dict[str, str]) -> None:
         env=env,
         capture_output=True,
         text=True,
+        check=False,
     )
     if proc.returncode != 0:
         raise RuntimeError(

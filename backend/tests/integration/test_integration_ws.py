@@ -115,7 +115,7 @@ def test_l4_health_via_daphne(page_ws):
             const body = await resp.json();
             return { status: resp.status, body };
         }
-        """
+        """,
     )
     assert result['status'] == 200, f'health must return 200, got {result}'
     assert result['body'] == {'status': 'ok'}, f'health body mismatch: {result["body"]}'
