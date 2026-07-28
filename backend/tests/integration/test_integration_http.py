@@ -449,3 +449,109 @@ def test_logout_exhausts_refresh_and_redirects_to_login(page):
     assert current_path == '/login', (
         f'after logout + protected request, must redirect to /login, got {current_path}'
     )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# L2a: 容器列表降级契约（issue #181）
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def test_l2a_list_instances_returns_array_aligned_to_serializer(page):
+    """L2a：经 Vite proxy 调 ``listInstances()`` 断言 2xx + 数组契约（#181）。
+
+    空 fleet（无 daemon 亦可）→ 后端 ``InstanceListCreateView.get`` → ``Fleet.list()`` 在
+    无 Instance 行时直接返 ``[]``（``orchestrator.py:580``），不碰 docker daemon。本 case
+    锁契约为「降级返回空数组」，若现状返 500 则红则暴露后端 bug（另开子项，本 ticket 不改后端）。
+
+    登录后经 ``window.__listInstances()``（dev-only hook，挂 ``listInstances``）走真
+    ``apiJson``→``apiFetch`` 链路（JWT 注入 + 401 重试），断言 body 为数组且每元素字段类型与
+    ``InstanceSerializer`` 对齐（name/port/status/health/image/container_id/created_at/pairing）。
+    """
+    suffix = _username_suffix()
+    username = f'l2a-{suffix}'
+    password = 'testpass1234'
+
+    # Vite dev server 冷启动：``page.goto`` 的 ``domcontentloaded`` 早于 main.ts 转译完成，
+    # ``window.__pinia``/``__listInstances`` 在 Vue mount 后才挂（main.ts dev-only hooks）。
+    # 等三者就绪再发请求，避免竞态 TypeError。
+    page.wait_for_function(
+        "() => !!window.__pinia && !!window.__apiFetch && !!window.__listInstances",
+        timeout=15000,
+    )
+
+    # 1) 注册
+    page.evaluate(
+        """
+        async ({username, password}) => {
+            await fetch('/api/v1/auth/register', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({username, password}),
+            });
+        }
+        """,
+        {'username': username, 'password': password},
+    )
+
+    # 2) store.login() 建立完整登录态（复位 refreshExhausted，jwt 注入链路可用）
+    #    等 auth store 实例化进 Pinia._s（路由守卫 hydrate() 调 useAuthStore 注册）。
+    page.wait_for_function(
+        "() => !!window.__pinia._s && !!window.__pinia._s.get('auth')",
+        timeout=10000,
+    )
+    page.evaluate(
+        """
+        async ({username, password}) => {
+            const store = window.__pinia._s.get('auth');
+            await store.login(username, password);
+        }
+        """,
+        {'username': username, 'password': password},
+    )
+
+    # 3) 经 window.__listInstances() → Vite proxy → 后端 GET /api/v1/containers/
+    result = page.evaluate(
+        """
+        async () => {
+            try {
+                const data = await window.__listInstances();
+                return {ok: true, data};
+            } catch (e) {
+                return {ok: false, err: String(e)};
+            }
+        }
+        """,
+    )
+    assert result['ok'], f'listInstances() rejected: {result.get("err")}'
+    data = result['data']
+
+    # 4) 契约：body 必须为数组（空 fleet 时为 []）
+    assert isinstance(data, list), f'containers list must be an array, got {type(data).__name__}'
+
+    # 5) 空列表即满足降级契约——不要求存在容器
+    if not data:
+        return
+
+    # 6) 每元素字段类型与 InstanceSerializer 对齐（源真相 containers/serializers.py）
+    REQUIRED_FIELDS = {
+        'name': str,
+        'port': (int, float),
+        'status': str,
+        'health': str,
+        'image': str,
+        'container_id': str,
+        'created_at': str,
+        'pairing': dict,
+    }
+    item = data[0]
+    for field, typ in REQUIRED_FIELDS.items():
+        assert field in item, f'InstanceDTO missing field: {field}'
+        assert isinstance(item[field], typ), (
+            f'InstanceDTO.{field} must be {typ}, got {type(item[field]).__name__}: {item[field]!r}'
+        )
+    # pairing 子契约（PairingSnapshotDTO：status 必有，device_id/scopes/pairing_request_id 可选）
+    pairing = item['pairing']
+    assert 'status' in pairing, f'pairing must have status, got {pairing!r}'
+    assert isinstance(pairing['status'], str), (
+        f'pairing.status must be str, got {type(pairing["status"]).__name__}'
+    )
