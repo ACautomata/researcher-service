@@ -139,4 +139,8 @@ def test_readme_wire_env_requiredness_matches_code() -> None:
     assert "os.environ['LLM_API_KEY']" in wire_src
     section = _extract_section(_load(), _WIRE_SECTION_HEADER)
     assert "缺一不可" not in section, "wire 段统称三件套「缺一不可」与代码不符（OPENCLAW_IMAGE 可选）"
+    assert "三件套 env" not in section, (
+        "wire 段「本地怎么跑」仍以「三件套 env」为必需前提（OPENCLAW_IMAGE 可选，仅"
+        " TEMPLATE_DIR/LLM_API_KEY 必需）"
+    )
     assert "可选" in section, "wire 段须标明 OPENCLAW_IMAGE 可选（与代码 os.environ.get 默认一致）"

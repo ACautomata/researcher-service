@@ -99,7 +99,7 @@ chat.send 冒烟、事件流 schema、只读 RPC schema、exec 审批路径 sche
 （#157 统一重构自旧的 daemon 探测+skip）——两者仅覆盖面（容器生命周期/配对/chat/wiki 全链路 vs. chat
 wire schema）与镜像（fork 默认 vs. ghcr 官方）不同，门控一致。
 
-**本地怎么跑**（须 docker daemon + 三件套 env）：
+**本地怎么跑**（须 docker daemon + `OPENCLAW_TEMPLATE_DIR`/`LLM_API_KEY`；`OPENCLAW_IMAGE` 可选用默认）：
 
 ```bash
 export OPENCLAW_IMAGE=ghcr.io/openclaw/openclaw:2026.6.34-browser
