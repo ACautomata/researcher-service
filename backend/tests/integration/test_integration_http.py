@@ -414,7 +414,13 @@ def test_logout_exhausts_refresh_and_redirects_to_login(page):
         """,
     )
 
-    # 5) logout 后 store 应已清
+    # 5) logout 后 httpOnly cookie 应被后端清除
+    cookies_after_logout = page.context.cookies()
+    assert not any(c['name'] == 'refresh_token' for c in cookies_after_logout), (
+        'logout must clear refresh_token cookie on backend'
+    )
+
+    # 6) logout 后 store 应已清
     store_after_logout = page.evaluate(
         """
         () => ({
@@ -426,7 +432,7 @@ def test_logout_exhausts_refresh_and_redirects_to_login(page):
     assert store_after_logout['token'] == '', 'logout must clear token'
     assert store_after_logout['refreshExhausted'] is True, 'logout must set refreshExhausted'
 
-    # 6) 再调保护端点 → refresh 失效 → redirect /login
+    # 7) 再调保护端点 → refresh 失效 → redirect /login
     page.evaluate(
         """
         async () => {
