@@ -306,18 +306,14 @@ def test_401_triggers_silent_refresh_and_retry(page):
         {'username': username, 'password': password},
     )
 
-    # 2) 登录 — 拿 access token 并设 Pinia
+    # 2) 用 store.login() 建立完整会话——复位 refreshExhausted（page fixture 初始导航
+    #    的 hydrate() 无 refresh cookie 返回 400 致 refreshExhausted=true）
     login = page.evaluate(
         """
         async ({username, password}) => {
-            const resp = await fetch('/api/v1/auth/login', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({username, password}),
-            });
-            const body = await resp.json();
-            window.__pinia.state.value.auth.token = body.access;
-            return {ok: resp.ok, access: body.access};
+            const store = window.__pinia._s.get('auth');
+            await store.login(username, password);
+            return {ok: true, access: store.token};
         }
         """,
         {'username': username, 'password': password},
@@ -387,18 +383,13 @@ def test_logout_exhausts_refresh_and_redirects_to_login(page):
         {'username': username, 'password': password},
     )
 
-    # 2) 登录 — 拿 access token 并设 Pinia
+    # 2) 用 store.login() 建立完整登录态（复位 refreshExhausted）
     login = page.evaluate(
         """
         async ({username, password}) => {
-            const resp = await fetch('/api/v1/auth/login', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({username, password}),
-            });
-            const body = await resp.json();
-            window.__pinia.state.value.auth.token = body.access;
-            return {status: resp.status};
+            const store = window.__pinia._s.get('auth');
+            await store.login(username, password);
+            return {status: 200};
         }
         """,
         {'username': username, 'password': password},
