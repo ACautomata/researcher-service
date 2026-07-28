@@ -629,3 +629,96 @@ def test_exec_approval_request_resolve_wire_schema(tmp_path):  # pylint: disable
     from integration.openclaw.wire import APPROVAL_RESOLVED_EVENTS
     assert 'exec.approval.resolved' in APPROVAL_RESOLVED_EVENTS, \
         'APPROVAL_RESOLVED_EVENTS 应含 exec.approval.resolved（#154 补 exec 族）'
+
+
+@pytest.mark.django_db
+def test_tool_event_wire_schema(tmp_path):  # pylint: disable=too-many-locals
+    """T5（#160）：tool 事件 wire schema 断言（#153 已修，green 回归防护）。
+
+    #153 已由 PR #162 修复落地（_translate_tool 重构为 agent+stream:tool+phase，wire.py 的
+    TOOL_AGENT_EVENT/TOOL_STREAM 常量就位），故本测试为 **green 回归防护**——与 T4（#154 已修
+    全 green）同构，对齐 issue #155「已修 2 bug 的回归防护」定位；#160 标题的「xfail until #153」
+    随 #153 转绿退役。
+
+    起 ghcr 容器+配对，发强引导工具调用的 prompt（让 agent 必用工具读文件，避开 exec 网络命令的
+    审批 flaky 链路），捕获原始 wire 帧，断言真实网关发的工具事件 schema（ADR 0003 实测）：
+    - 事件是 event:"agent" + payload.stream:"tool"（非独立 agent.tool.start/result，#153 核心）
+    - data.phase ∈ {start, update, result}
+    - start 帧：data.name（非空）/ toolCallId / args
+    - result 帧：data.result（或 isError=true 时缺 result）
+    """
+    from chat.pairing import PairingService
+    from integration.openclaw.adapters import HttpHealthProbe
+
+    orch, runtime = _build_orchestrator(tmp_path)
+    capturer = _RawCaptureTransport()
+    name = 'wire-tool-schema'
+    with WireTestContext(
+        orch=orch, runtime=runtime,
+        pairing_service=PairingService(),
+        health_probe=HttpHealthProbe(),
+        name=name, transport=capturer,
+    ) as (client, _inst, _pairing):
+        async def _send():
+            await client.connect()
+            try:
+                done_event = asyncio.Event()
+
+                async def collect(event):
+                    if event.get('type') in ('done', 'error'):
+                        done_event.set()
+
+                run_id = await client.send_message(
+                    'agent:main:wire-tool-session',
+                    'You must use a tool to complete this. '
+                    'Read the file at /etc/hostname and tell me its contents.',
+                    on_event=collect,
+                )
+                assert run_id
+                try:
+                    await asyncio.wait_for(done_event.wait(), timeout=120.0)
+                except TimeoutError:
+                    pass
+            finally:
+                await client.aclose()
+            return run_id
+
+        acknowledged_run_id = asyncio.run(_send())
+
+    # 原始 agent+stream:tool 帧（真实网关工具事件，非翻译后契约帧）——按 runId 精确匹配
+    # （工具事件挂在 chat run 内，wire.py 注释 / r26 §3），防同连接其它会话事件干扰
+    tool_frames = [
+        f for f in capturer.captured
+        if f.get('type') == 'event' and f.get('event') == 'agent'
+        and (f.get('payload') or {}).get('stream') == 'tool'
+        and (f.get('payload') or {}).get('runId') == acknowledged_run_id
+    ]
+    assert tool_frames, \
+        '应收到至少一个 event:agent + stream:tool 事件（工具调用被触发）'
+
+    # data.phase ∈ {start, update, result}（ADR 0003 实测，非 agent.tool.start/result）
+    starts, results = [], []
+    for f in tool_frames:
+        data = (f.get('payload') or {}).get('data') or {}
+        phase = data.get('phase')
+        assert phase in ('start', 'update', 'result'), \
+            f'data.phase 应为 start/update/result，got {phase!r}'
+        if phase == 'start':
+            starts.append(data)
+        elif phase == 'result':
+            results.append(data)
+
+    # start 帧 schema：name（非空）/ toolCallId / args（#153 实测字段在 data 子对象下）
+    assert starts, '应收到至少一个 phase:start 工具帧（工具开始）'
+    for d in starts:
+        assert isinstance(d.get('name'), str) and d['name'], \
+            f'start 帧应含非空 name，got {d.get("name")!r}'
+        assert 'toolCallId' in d, \
+            f'start 帧应含 toolCallId，keys={sorted(d.keys())}'
+        assert 'args' in d, \
+            f'start 帧应含 args，keys={sorted(d.keys())}'
+
+    # result 帧 schema：result 字段（isError=true 时网关可省 result）
+    for d in results:
+        assert 'result' in d or d.get('isError') is True, \
+            f'result 帧应含 result（或 isError=true），keys={sorted(d.keys())}'
