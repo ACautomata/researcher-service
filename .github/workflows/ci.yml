@@ -78,6 +78,14 @@ jobs:
       - name: Install frontend deps
         working-directory: frontend
         run: npm ci
+      # npm ci 在 frontend/node_modules（~200-500MB）内生依赖树。HomeProvisioner 用 shutil.copytree
+      # 将整个 OPENCLAW_TEMPLATE_DIR（当前 workspace）递归拷入每个 OpenClaw 容器的临时 home；
+      # 7+ case 叠加拷入数百 MB/node_modules，I/O 暴增（codex #185 P2）。建一份排除 frontend/ 的
+      # 清理模板——容器不需要 web UI 文件。
+      - name: Create clean fleet template (exclude frontend from copytree)
+        run: |
+          rsync -a --exclude='frontend/' "${{ github.workspace }}/" /tmp/fleet-template/
+          echo "OPENCLAW_TEMPLATE_DIR=/tmp/fleet-template" >> "$GITHUB_ENV"
       # 预拉 OpenClaw 公共 ghcr 镜像（wire schema 集成测试须容器起停）
       - run: docker pull ${{ env.OPENCLAW_IMAGE }}
       # 真容器/真链路集成测试（pytestmark=integration）：wire schema（docker gateway）+
