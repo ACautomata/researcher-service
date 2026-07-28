@@ -563,12 +563,17 @@ def test_exec_approval_request_resolve_wire_schema(tmp_path):  # pylint: disable
                 f'list_pending_approvals 应返回 list，got {type(cards).__name__}'
             # 不再 assert cards 含 approval_id——网关双轨限制：operator-RPC 审批不进 list 视图
 
-            # ③ resolve：网关可能 auto-deny 抢先；res outcome 非关键，send 帧（⑥）才是验收#4
+            # ③ resolve：网关 auto-deny 抢先报 "already resolved"（first-answer-wins，网关已接受
+            #    帧）——仅此已知响应容错。其余 ChatSendError（unknown method / invalid params /
+            #    missing scope / ack timeout）是真错误，须 fail，否则测试只验客户端发送帧、不证
+            #    网关接受 wire schema（codex P2 #169）
             from chat.chat_client import ChatSendError
             try:
                 resolve_res = await client.resolve_approval(approval_id, 'exec', 'allow-once')
-            except ChatSendError:
-                resolve_res = None  # auto-deny 抢先 / 缺权——send 帧已发，⑥ 覆盖验收#4
+            except ChatSendError as exc:
+                if 'already resolved' not in str(exc):
+                    raise
+                resolve_res = None  # auto-deny 抢先（网关已接受帧，res 是 first-answer-wins）
 
             await client.aclose()
             return approval_id, resolve_res
