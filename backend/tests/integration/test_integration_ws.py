@@ -147,36 +147,41 @@ def test_l4_ws_handshake_via_vite_proxy(page_ws):
 
     # 浏览器原生 WebSocket（非 jsdom mock！）经 Vite /ws proxy 连 daphne Channels。
     # subprotocol ['access_token', <jwt>] 触发 JwtAuthMiddleware → 验签成功 → accept()。
+    # 收集 onerror/onclose 事件的详细错误信息以诊断 flaky 失败的根因
     result = page_ws.evaluate(
         """
         async (token) => {
             return await new Promise((resolve) => {
+                let settled = false;
+                const done = (val) => {
+                    if (settled) return;
+                    settled = true;
+                    resolve(val);
+                };
                 const ws = new WebSocket(
                     `ws://${location.host}/ws/chat/`,
                     ['access_token', token],
                 );
+                const detail = {};
                 ws.onopen = () => {
-                    const state = ws.readyState;  // 1 = OPEN
                     ws.close(1000, 'test-done');
-                    resolve({open: true, readyState: state});
+                    detail.opened = true;
+                    done({open: true, readyState: 1, detail});
                 };
                 ws.onerror = () => {
-                    resolve({open: false, reason: 'onerror', readyState: ws.readyState});
-                };
-                ws.onclose = (e) => {
-                    // onclose 在 onopen 之后触发（由本测试 ws.close 主动关）是正常的；
-                    // 但若 onclose 在 onopen 之前触发（握手被拒 4401），由 onerror 先 resolve。
-                    if (!resolve._resolved) {
-                        resolve({open: false, reason: 'onclose', code: e.code});
+                    detail.errorFired = true;
+                    if (!settled) {
+                        // 浏览器 WS onerror 不接受 event 参数，readyState 此时为 3 (CLOSED)
+                        // 原因在随后的 onclose 里给出（code/reason/wasClean）
                     }
                 };
-                // 标记 resolve 是否已被调用（避免 onclose after open resolve）
-                resolve._resolved = false;
-                const origResolve = resolve;
-                resolve = function(val) {
-                    if (origResolve._resolved) return;
-                    origResolve._resolved = true;
-                    origResolve(val);
+                ws.onclose = (e) => {
+                    detail.closeCode = e.code;
+                    detail.closeReason = e.reason;
+                    detail.wasClean = e.wasClean;
+                    if (!detail.opened) {
+                        done({open: false, reason: 'onclose', code: e.code, readyState: 3, detail});
+                    }
                 };
             });
         }
@@ -185,8 +190,9 @@ def test_l4_ws_handshake_via_vite_proxy(page_ws):
     )
 
     assert result.get('open'), (
-        f'WS handshake must succeed, got: {result.get("reason")!r}, '
-        f'code={result.get("code")!r}, readyState={result.get("readyState")!r}'
+        f'WS handshake must succeed, got: reason={result.get("reason")!r}, '
+        f'code={result.get("code")!r}, readyState={result.get("readyState")!r}, '
+        f'detail={result.get("detail")!r}'
     )
     assert result.get('readyState') == 1, (
         f'ws.readyState must be OPEN (1) after onopen, got {result.get("readyState")!r}'

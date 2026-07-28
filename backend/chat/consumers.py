@@ -32,7 +32,16 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
     async def connect(self):
         self._client = None  # pylint: disable=attribute-defined-outside-init
         self._active_runids: set[str] = set()  # pylint: disable=attribute-defined-outside-init
-        await self.accept()
+        # codex #190 P1: 浏览器 WebSocket subprotocol 要求服务器回复匹配的协议值。
+        # 前端传 ['access_token', <jwt>]；JwtAuthMiddleware 验证通过后透传给
+        # ChatConsumer，视取 'access_token' 回显给浏览器，避免「无响应 subprotocol」
+        # 导致浏览器拒绝握手（closeCode=1006）。
+        subprotocol = None
+        for proto in self.scope.get('subprotocols', []):
+            if proto == 'access_token' or (isinstance(proto, str) and proto.startswith('access_token.')):
+                subprotocol = 'access_token'
+                break
+        await self.accept(subprotocol)
 
     async def receive_json(self, content):  # pylint: disable=arguments-differ
         msg_type = content.get('type')
