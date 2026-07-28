@@ -719,6 +719,11 @@ def test_tool_event_wire_schema(tmp_path):  # pylint: disable=too-many-locals
             f'start 帧应含 args，keys={sorted(d.keys())}'
 
     # result 帧 schema：result 字段（isError=true 时网关可省 result）
+    # codex P2 #169：先断言 results 非空——start 后必发 result，空 results 意味着 run 卡到
+    # 上方吞掉的 120s 超时（line 680）；原 `for d in results:` 对空 list 是 no-op，会让测试在
+    # 结果帧契约根本没被触发时 vacuous pass（与 assert starts 对称）。
+    assert results, \
+        '应收到至少一个 phase:result 工具帧（工具闭环完成；空 results=run 未完成）'
     for d in results:
         assert 'result' in d or d.get('isError') is True, \
             f'result 帧应含 result（或 isError=true），keys={sorted(d.keys())}'
