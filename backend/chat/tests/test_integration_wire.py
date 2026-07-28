@@ -510,18 +510,27 @@ async def _wait_for_event_frame(capturer, event_name, *, timeout, interval=0.5):
 
 
 @pytest.mark.django_db
-def test_exec_approval_request_resolve_wire_schema(tmp_path):  # pylint: disable=too-many-locals,too-many-statements
-    """T4（#159）：exec approval 路径 wire schema 断言 + list_pending 非空防回归（#154 已修，全green）。
+def test_exec_approval_request_resolve_wire_schema(tmp_path):  # pylint: disable=too-many-locals
+    """T4（#159）：exec approval 路径 wire schema 断言（RPC 路径确定性可测部分）。
 
-    codex P2（#168）：LLM prompt 触发审批不确定（agent 调 exec + 网关 elevated 判断 flaky）。
-    改用 exec.approval.request RPC 确定性创建 pending approval。网关对应**不发**任何 broadcast
-    （approval.* 事件只因 agent exec 触发——RPC 路径是 operator/admin API，不走事件通道）。
-    覆盖 #159 验收中用 RPC 可测的部分；approval.resolved 事件翻译由 event_translate 单元测试
-    + APPROVAL_RESOLVED_EVENTS 常量覆盖。
-    - 验收#1：list_pending_approvals 非空 list + raw res payload 是 list（PR #152 防回归）
-    - 验收#3：request.command 在 payload.request.command（非 systemRunPlan.*，#154）
-    - 验收#4：resolve {kind}.approval.resolve + params {id, decision}（#154）
-    - 验收#5：APPROVAL_RESOLVED_EVENTS 常量含 exec.approval.resolved（#154，单元测试覆盖）
+    **根因（diag 实测 ghcr 2026.6.34 + 研究 high 置信）**：OpenClaw approval 是「双轨」模型——
+    轨道 A（agent-exec elevated 命令触发）才进 exec.approval.list 队列并广播 approval.requested；
+    轨道 B（operator/admin 的 exec.approval.request RPC）是独立 API 通道，**既不发 broadcast 也不
+    进 list 视图**。diag 实测：request_approval 拿到 id 后，exec.approval.list raw payload 立即与
+    3s 后均 []——结构性空，非时序/翻译 bug（commit 811ef0d message + 本测试原 docstring 双重印证）。
+
+    故本测试只断言 RPC 路径**确定性可测**的 wire schema；依赖 list 非空 / 广播到达 / res.ok 字段
+    的断言已剥离（网关不提供）。card 翻译（_approval_card request/systemRunPlan 取值链、sessionKey、
+    kind 派生）+ approval.requested/resolved 广播翻译由单元测试覆盖：test_event_translate.py
+    （10+ approval 卡用例）+ test_chat_client.py（list 翻译 fan-out）。
+
+    - 验收#1：exec.approval.list raw res payload 是 list 类型（PR #152 防 dict {approvals:[...]}
+      回归）；「非空」因网关双轨限制不可集成测（list 只枚举 agent-exec 触发的活审批）。
+    - 验收#3：request.command 在 payload.request.command（#154）——仅 list 非空时直验（前向兼容
+      guard）；list 恒空时路径正确性由 test_event_translate 单元测试覆盖。
+    - 验收#4：resolve 发送帧 method=exec.approval.resolve + params={id, decision}（#154）——
+      send 时捕获，与 auto-deny 竞态无关，load-bearing。
+    - 验收#5：APPROVAL_RESOLVED_EVENTS 常量含 exec.approval.resolved（#154）。
     """
 
     from chat.pairing import PairingService
@@ -540,7 +549,7 @@ def test_exec_approval_request_resolve_wire_schema(tmp_path):  # pylint: disable
         async def _run():
             await client.connect()
 
-            # codex P2 #168：exec.approval.request RPC 确定性创建 pending approval
+            # ① 创建：exec.approval.request RPC 确定性回 id（{id, decision:null, createdAtMs, expiresAtMs}）
             request_res = await client.request_approval(
                 'curl -sL http://example.com',
                 session_key='agent:main:wire-approval-schema',
@@ -548,36 +557,31 @@ def test_exec_approval_request_resolve_wire_schema(tmp_path):  # pylint: disable
             approval_id = request_res.get('id')
             assert approval_id, f'exec.approval.request res 应含 id，got {request_res}'
 
-            # 验收#1：调 list_pending_approvals（exercise 翻译路径；RPC 立即可见）
+            # ② list：exercise 翻译链（返回 list 不崩即足；非空不可测，见 docstring 根因）
             cards = await client.list_pending_approvals()
             assert isinstance(cards, list), \
                 f'list_pending_approvals 应返回 list，got {type(cards).__name__}'
+            # 不再 assert cards 含 approval_id——网关双轨限制：operator-RPC 审批不进 list 视图
 
-            # codex P2 #168：翻译后 cards 应含刚创建审批 id（防 _approval_card 回归丢 card）
-            matched = [c for c in cards if c.get('id') == approval_id]
-            assert matched, \
-                f'翻译后 cards 应含刚创建审批 id {approval_id!r}，got card_ids={[c.get("id") for c in cards]}'
-
-            # 验收#4：resolve（#154 method=exec.approval.resolve, params={id,decision}）
-            # 网关可能 auto-deny 抢先（报 "already resolved"）——容错
+            # ③ resolve：网关 auto-deny 抢先报 "already resolved"（first-answer-wins，网关已接受
+            #    帧）——仅此已知响应容错。其余 ChatSendError（unknown method / invalid params /
+            #    missing scope / ack timeout）是真错误，须 fail，否则测试只验客户端发送帧、不证
+            #    网关接受 wire schema（codex P2 #169）
             from chat.chat_client import ChatSendError
-            resolve_ok = False
             try:
                 resolve_res = await client.resolve_approval(approval_id, 'exec', 'allow-once')
-                resolve_ok = True
             except ChatSendError as exc:
-                resolve_res = {'ok': False, 'error': str(exc)}
+                if 'already resolved' not in str(exc):
+                    raise
+                resolve_res = None  # auto-deny 抢先（网关已接受帧，res 是 first-answer-wins）
 
             await client.aclose()
-            return cards, approval_id, resolve_res, resolve_ok
+            return approval_id, resolve_res
 
-        cards, approval_id, resolve_res, resolve_ok = asyncio.run(_run())
+        approval_id, resolve_res = asyncio.run(_run())
 
-    # ---- 验收#1（list_pending_approvals list 翻译防回归，PR #152 / codex P2 #168）----
-    # translate 链已验证：返回 list 非崩
-    assert isinstance(cards, list), \
-        f'list_pending_approvals 应返回 list，got {type(cards).__name__}'
-    # 原始 res payload 是 list（验证网关 list-shaped 响应，非 best-effort 空 []）
+    # ④ 验收#1：raw res payload 是 list（绕过 list_pending_approvals 的 best-effort catch，直查
+    #    capturer.captured 匹配 req id 的 res 帧；锁 ADR 0003 / PR #152「payload 直接是 list」契约）
     list_req = next(f for f in capturer.sent if f.get('method') == 'exec.approval.list')
     list_res = next(
         f for f in capturer.captured
@@ -586,11 +590,10 @@ def test_exec_approval_request_resolve_wire_schema(tmp_path):  # pylint: disable
     list_payload = list_res.get('payload')
     assert isinstance(list_payload, list), \
         f'exec.approval.list res payload 应为 list，got {type(list_payload).__name__}'
+    # 非空不可集成测：网关双轨限制，operator-RPC 审批不进 list 视图（见 docstring 根因）
 
-    # ---- 验收#3：request.command 在 payload.request.command（非 systemRunPlan.*，#154）----
-    # codex P2 #168：exec.approval.list 原始 res payload items 中取 request.command；
-    # 网关 auto-deny 后 list 可能 → [ ]；非空时直验，空时退请求 RPC 回执（exec.approval.request
-    # 的 res 不含 request 子对象）→ payload shape 断言降为「翻译链不崩」。
+    # ⑤ 验收#3：request.command 路径——仅 list 非空时直验（前向兼容 guard）；list 恒空时
+    #    由 test_event_translate 单元测试覆盖（_approval_card request/systemRunPlan 取值链）
     item = next(
         (i for i in list_payload if isinstance(i, dict) and i.get('id') == approval_id),
         None,
@@ -601,21 +604,9 @@ def test_exec_approval_request_resolve_wire_schema(tmp_path):  # pylint: disable
             f'approval 应含 request 子对象（#154 路径），got keys={sorted(item.keys())}'
         assert isinstance(req.get('command'), str) and req['command'], \
             f'request.command 应为非空字符串（#154 路径），got {req.get("command")!r}'
-    else:
-        # 网关 auto-deny 后销毁记录→list/get 均查无此审批；退守翻译链已验证 (#1) 不崩
-        assert isinstance(cards, list), \
-            'list_pending_approvals 返回 list——翻译链已验证（PR #152 list-shaped 防回归）'
+    # else: list 空（网关双轨限制）——request.command 路径由单元测试覆盖
 
-    # ---- 验收#4（resolve RPC）：网关可能 auto-deny 抢先 ----
-    if resolve_ok:
-        assert resolve_res.get('ok') is True, \
-            f'resolve RPC res.ok 应为 true（网关接受 exec.approval.resolve），got {resolve_res}'
-    else:
-        assert 'already resolved' in resolve_res.get('error', ''), \
-            f'auto-deny 抢先（resolve 帧已发到 capturer.sent 供 #4 断言），got {resolve_res}'
-
-    # ---- 验收#4：resolve 方法 exec.approval.resolve + params {id, decision}（#154）----
-    # resolve 帧在 ack 返回前已发（_ws.send 在 wait_for(fut) 之前），无论 auto-deny 是否抢先
+    # ⑥ 验收#4（load-bearing）：resolve 发送帧 method + params（send 时捕获，与竞态无关）
     sent_resolve = next(
         f for f in capturer.sent
         if f.get('type') == 'req' and f.get('method') == 'exec.approval.resolve'
@@ -623,9 +614,112 @@ def test_exec_approval_request_resolve_wire_schema(tmp_path):  # pylint: disable
     assert sent_resolve.get('params') == {'id': approval_id, 'decision': 'allow-once'}, \
         f'resolve params 应为 {{id, decision}}（无 kind，#154），got {sent_resolve.get("params")}'
 
-    # ---- 验收#5：APPROVAL_RESOLVED_EVENTS 常量含 exec.approval.resolved（#154）----
-    # RPC 路径网关不发任何 broadcast（approval.* 事件只随 agent exec 触发生成）；
-    # 事件翻译正确性由 event_translate 单元测试 + APPROVAL_RESOLVED_EVENTS 常量覆盖
+    # ⑦ resolve res：接受则断言 dict（网关权威记录，单元 fake 证 {id,decision,decidedBy}，无 ok 字段）；
+    #    auto-deny 抢先则 resolve_res=None（send 帧已发，⑥ 覆盖）
+    if resolve_res is not None:
+        assert isinstance(resolve_res, dict), \
+            f'resolve res 应为 dict，got {type(resolve_res).__name__}'
+
+    # ⑧ 验收#5：APPROVAL_RESOLVED_EVENTS 常量含 exec.approval.resolved（RPC 路径不发广播，
+    #    事件翻译正确性由 event_translate 单元测试 + 常量覆盖）
     from integration.openclaw.wire import APPROVAL_RESOLVED_EVENTS
     assert 'exec.approval.resolved' in APPROVAL_RESOLVED_EVENTS, \
         'APPROVAL_RESOLVED_EVENTS 应含 exec.approval.resolved（#154 补 exec 族）'
+
+
+@pytest.mark.django_db
+def test_tool_event_wire_schema(tmp_path):  # pylint: disable=too-many-locals
+    """T5（#160）：tool 事件 wire schema 断言（#153 已修，green 回归防护）。
+
+    #153 已由 PR #162 修复落地（_translate_tool 重构为 agent+stream:tool+phase，wire.py 的
+    TOOL_AGENT_EVENT/TOOL_STREAM 常量就位），故本测试为 **green 回归防护**——与 T4（#154 已修
+    全 green）同构，对齐 issue #155「已修 2 bug 的回归防护」定位；#160 标题的「xfail until #153」
+    随 #153 转绿退役。
+
+    起 ghcr 容器+配对，发强引导工具调用的 prompt（让 agent 必用工具读文件，避开 exec 网络命令的
+    审批 flaky 链路），捕获原始 wire 帧，断言真实网关发的工具事件 schema（ADR 0003 实测）：
+    - 事件是 event:"agent" + payload.stream:"tool"（非独立 agent.tool.start/result，#153 核心）
+    - data.phase ∈ {start, update, result}
+    - start 帧：data.name（非空）/ toolCallId / args
+    - result 帧：data.result（或 isError=true 时缺 result）
+    """
+    from chat.pairing import PairingService
+    from integration.openclaw.adapters import HttpHealthProbe
+
+    orch, runtime = _build_orchestrator(tmp_path)
+    capturer = _RawCaptureTransport()
+    name = 'wire-tool-schema'
+    with WireTestContext(
+        orch=orch, runtime=runtime,
+        pairing_service=PairingService(),
+        health_probe=HttpHealthProbe(),
+        name=name, transport=capturer,
+    ) as (client, _inst, _pairing):
+        async def _send():
+            await client.connect()
+            try:
+                done_event = asyncio.Event()
+
+                async def collect(event):
+                    if event.get('type') in ('done', 'error'):
+                        done_event.set()
+
+                run_id = await client.send_message(
+                    'agent:main:wire-tool-session',
+                    'You must use a tool to complete this. '
+                    'Read the file at /etc/hostname and tell me its contents.',
+                    on_event=collect,
+                )
+                assert run_id
+                try:
+                    await asyncio.wait_for(done_event.wait(), timeout=120.0)
+                except TimeoutError:
+                    pass
+            finally:
+                await client.aclose()
+            return run_id
+
+        acknowledged_run_id = asyncio.run(_send())
+
+    # 原始 agent+stream:tool 帧（真实网关工具事件，非翻译后契约帧）——按 runId 精确匹配
+    # （工具事件挂在 chat run 内，wire.py 注释 / r26 §3），防同连接其它会话事件干扰
+    tool_frames = [
+        f for f in capturer.captured
+        if f.get('type') == 'event' and f.get('event') == 'agent'
+        and (f.get('payload') or {}).get('stream') == 'tool'
+        and (f.get('payload') or {}).get('runId') == acknowledged_run_id
+    ]
+    assert tool_frames, \
+        '应收到至少一个 event:agent + stream:tool 事件（工具调用被触发）'
+
+    # data.phase ∈ {start, update, result}（ADR 0003 实测，非 agent.tool.start/result）
+    starts, results = [], []
+    for f in tool_frames:
+        data = (f.get('payload') or {}).get('data') or {}
+        phase = data.get('phase')
+        assert phase in ('start', 'update', 'result'), \
+            f'data.phase 应为 start/update/result，got {phase!r}'
+        if phase == 'start':
+            starts.append(data)
+        elif phase == 'result':
+            results.append(data)
+
+    # start 帧 schema：name（非空）/ toolCallId / args（#153 实测字段在 data 子对象下）
+    assert starts, '应收到至少一个 phase:start 工具帧（工具开始）'
+    for d in starts:
+        assert isinstance(d.get('name'), str) and d['name'], \
+            f'start 帧应含非空 name，got {d.get("name")!r}'
+        assert 'toolCallId' in d, \
+            f'start 帧应含 toolCallId，keys={sorted(d.keys())}'
+        assert 'args' in d, \
+            f'start 帧应含 args，keys={sorted(d.keys())}'
+
+    # result 帧 schema：result 字段（isError=true 时网关可省 result）
+    # codex P2 #169：先断言 results 非空——start 后必发 result，空 results 意味着 run 卡到
+    # 上方吞掉的 120s 超时（line 680）；原 `for d in results:` 对空 list 是 no-op，会让测试在
+    # 结果帧契约根本没被触发时 vacuous pass（与 assert starts 对称）。
+    assert results, \
+        '应收到至少一个 phase:result 工具帧（工具闭环完成；空 results=run 未完成）'
+    for d in results:
+        assert 'result' in d or d.get('isError') is True, \
+            f'result 帧应含 result（或 isError=true），keys={sorted(d.keys())}'
