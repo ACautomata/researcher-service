@@ -15,12 +15,16 @@ import base64 as _b64
 import hashlib
 import hmac
 import json
+import os
 import time as _time
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
+import docker
 import pytest
 from django.conf import settings
 
+from containers.docker_runtime import DockerRuntime
 from containers.models import Instance
 from containers.orchestrator import Fleet, FleetConfig, InstanceOrchestrator
 from containers.tests.fakes import FakeHealthProbe
@@ -723,3 +727,207 @@ def test_l2a_nonempty_fleet_fields_align_to_serializer(l2a_creating_instance, pa
         _assert_instance_dto_contract(data[0])
     finally:
         _reset_fleet()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# L2b + L3: 容器创建契约 + wiki tree（issue #182；需 Docker daemon）
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def _docker_daemon_reachable() -> bool:
+    """探测 Docker daemon 是否可达（#178 user story 8/14：L2b/L3/L4 case 级 skipif 门控）。
+
+    ``docker.from_env`` 与后端 ``DockerRuntime`` 读同一 ``DOCKER_HOST``（CI 默认 socket，本地
+    Colima 经 .envrc 指 socket）；``timeout=2`` 界定探测，daemon 不可达（无 Colima /
+    DOCKER_HOST 未指 / socket 缺失）即返 False → case skip。经 skipif 字符串条件引用，故仅在
+    case 实际运行时探测，backend-unit job（``-m "not integration"`` 收集即排除）collection
+    阶段不连 daemon。不同于 ``test_integration_wire.py`` 的「无 skip 强制 env」，本文件按
+    #178 spec 对 L2b/L3 做 daemon 门控：本地无 daemon 优雅跳过，CI integration job 真跑。
+    """
+    try:
+        docker.from_env(timeout=2).ping()
+    except Exception:  # pylint: disable=broad-exception-caught
+        return False
+    return True
+
+
+def _delete_container(name: str) -> None:
+    """teardown：删容器 + DB 行 + 端口回收（端口自动——Instance 行删后回池，ports.py）。
+
+    主路径 ``Fleet.get().delete(name)``（与 live server 线程共享同类级单例）；CREATING 行抛
+    ``InstanceBusy`` 或行已不在时兜底直连 ``DockerRuntime`` stop/remove，对齐
+    ``WireTestContext.__exit__`` 的幂等清理——防本 case 失败残留容器占用端口池。
+    """
+    try:
+        Fleet.get().delete(name)
+    except Exception:  # pylint: disable=broad-exception-caught
+        try:
+            runtime = DockerRuntime()
+            runtime.stop(name)
+            runtime.remove(name)
+        except Exception:  # pylint: disable=broad-exception-caught
+            pass
+
+
+def _override_fleet_with_real_runtime(tmp_path) -> None:
+    """override Fleet 用真实 DockerRuntime，但 root=tmp_path/fleet（模板外）。
+
+    本地（worktree）默认 Fleet root=<repo>/fleet ⊂ OPENCLAW_TEMPLATE_DIR（仓库根，含 worktree），
+    ``HomeProvisioner.copytree(template, home)`` 会把含 home 自身的模板树递归拷入 home →
+    ``[Errno 63] File name too long`` 无限递归。CI 经 rsync 把 workspace 拷成 /tmp/fleet-template
+    干净模板（ci.yml）可免此患；本测试统一把 root 指到 tmp_path（模板外）让本地+CI 一致，复刻
+    ``test_integration_wire.py:_build_orchestrator`` 的隔离模式。template/image/port/key 仍取
+    settings/env（与生产默认 Fleet 同源，仅 root 不同）→ HTTP 契约（serializer/status）不变。
+    本地跑须 ``--basetemp=$HOME/...``（Colima virtiofs 仅共享 $HOME，bind-mount tmp_path 需在
+    $HOME 内；CI Linux /tmp 无此限）。调用方须 finally ``Fleet.reset()`` 还原防泄漏。
+    """
+    cfg = settings.OPENCLAW_FLEET
+    Fleet.override(
+        InstanceOrchestrator(
+            runtime=DockerRuntime(),
+            config=FleetConfig(
+                root=tmp_path / 'fleet',
+                template_dir=Path(cfg['TEMPLATE']),
+                template_json=cfg['TEMPLATE_JSON'],
+                image=cfg['IMAGE'],
+                port_start=cfg['PORT_POOL_START'],
+                port_end=cfg['PORT_POOL_END'],
+                llm_api_key=os.environ.get('LLM_API_KEY', ''),
+            ),
+        ),
+    )
+
+
+def _seed_wiki_page(fleet_root: Path, name: str) -> tuple[str, str]:
+    """host 侧直写 bind-mount seed 一个 group+page，让 L3 inner-shape 断言可达。
+
+    新建容器 home 经 ``HomeProvisioner`` 从模板 copytree；模板无 ``wiki/main`` →
+    ``BindMountWikiFileSystem.build_tree`` 返 ``{groups: []}``（空树，adapters.py:106）。若直接
+    ``getTree`` 则 group/page 字段类型断言成死代码（同 codex #187 对 L2a 空 fleet early-return
+    的批评）。故 host 侧（与后端 wiki service 同一 bind-mount）写一页 ``wiki/main/l3seed/hello.md``，
+    让 ``getTree`` 返非空树、嵌套 shape 断言可达。``fleet_root`` 为本 case override 的 Fleet root
+    （tmp_path/fleet），home=<fleet_root>/instances/<name>/home。返回 (group_name, page_path)。
+    """
+    home = fleet_root / 'instances' / name / 'home'
+    group_dir = home / 'wiki' / 'main' / 'l3seed'
+    group_dir.mkdir(parents=True, exist_ok=True)
+    (group_dir / 'hello.md').write_text('# Hello\n', encoding='utf-8')
+    return 'l3seed', 'l3seed/hello.md'
+
+
+@pytest.mark.skipif('not _docker_daemon_reachable()', reason='L2b/L3 需可达 Docker daemon (#182)')
+@pytest.mark.django_db(transaction=True)
+def test_l2b_create_and_l3_wiki_tree_contract(page, tmp_path, request):
+    """L2b+L3：真起 OpenClaw 容器 → InstanceDTO 契约；复用容器读 wiki tree → shape 契约（#182）。
+
+    L2b——经 ``__apiFetch``（前端 JWT 拦截器，``createInstance`` 的底层 ``apiFetch``）``POST
+    /containers/`` 真起一个 OpenClaw 容器，断言**真实 201** + ``InstanceDTO`` 字段类型与
+    ``InstanceSerializer`` 对齐（复用 L2a ``_assert_instance_dto_contract``，含 pairing 子契约）。
+    用 ``__apiFetch`` 而非 ``createInstance``：create 状态码契约显著（201/409/503，
+    ``views.py:88`` 成功唯返 201），``apiFetch`` 暴露真实 ``resp.status`` 让 201 显式可断；
+    URL/method/body 与 ``createInstance`` 同，前端认证链路（JWT 注入 + 401 重试）覆盖不变。
+
+    L3——复用该容器 host 侧 seed 一页（``_seed_wiki_page``）后，经 ``__getTree``（前端 wiki api
+    模块，含 ``base(name)`` URL builder + ``apiJson``）读 ``GET /containers/<name>/wiki/tree``，
+    断言 ``getTree`` resolve（``apiJson`` 仅 2xx resolve，wiki view 成功唯返 200）+
+    ``{groups:[{kind,name,pages:[{path,title}]}]}`` 嵌套 shape（源真相 ``wiki/serializers.py``
+    ``WikiTreeSerializer``）。seed 让 groups 非空 → group/page 字段类型断言可达（非死代码）。
+
+    Fleet override：root 指 tmp_path/fleet（模板外，避 ``HomeProvisioner.copytree`` 递归，见
+    ``_override_fleet_with_real_runtime``）；``request.addfinalizer(Fleet.reset)`` 保证还原。
+    teardown：``_delete_container`` 删容器 + DB 行 + 端口回收（finally 兜底）。无 daemon 时
+    skipif 跳过（#182 acceptance）。串行跑，不验端口池并发原子性（#178 out of scope）。
+    """
+    suffix = _username_suffix()
+    username = f'l2b-{suffix}'
+    password = 'testpass1234'
+    # Instance.name 经 NAME_VALIDATOR（小写 DNS-label）；suffix 8 hex → 合规
+    container_name = f'l2b-{suffix}'
+
+    # override Fleet root 到 tmp_path/fleet（模板外，避 HomeProvisioner.copytree 递归）。
+    # addfinalizer 保证 Fleet.reset() 必跑（即便 _login 失败也不泄漏替身到后续 case）。
+    _override_fleet_with_real_runtime(tmp_path)
+    request.addfinalizer(Fleet.reset)
+
+    _login(page, username, password)
+    try:
+        # ── L2b: create → 真实 201 + InstanceDTO 契约 ──────────────────────────
+        created = page.evaluate(
+            """
+            async (name) => {
+                const resp = await window.__apiFetch('/api/v1/containers/', {
+                    method: 'POST',
+                    body: JSON.stringify({name}),
+                });
+                if (!resp.ok) {
+                    return {ok: false, status: resp.status};
+                }
+                const body = await resp.json();
+                return {ok: true, status: resp.status, body};
+            }
+            """,
+            container_name,
+        )
+        assert created['ok'], f'create rejected: status={created.get("status")}'
+        assert created['status'] == 201, (
+            f'create must return 201 (InstanceListCreateView views.py:88), got {created["status"]}'
+        )
+        assert created['body']['name'] == container_name, (
+            f'created name mismatch: {created["body"]!r}'
+        )
+        _assert_instance_dto_contract(created['body'])
+
+        # ── L3: host seed 页 → __getTree → 嵌套 shape 契约 ─────────────────────
+        seed_group, seed_page = _seed_wiki_page(tmp_path / 'fleet', container_name)
+        tree = page.evaluate(
+            """
+            async (name) => {
+                try {
+                    const data = await window.__getTree(name);
+                    return {ok: true, data};
+                } catch (e) {
+                    return {ok: false, status: e && e.status, err: String(e)};
+                }
+            }
+            """,
+            container_name,
+        )
+        assert tree['ok'], f'getTree rejected: status={tree.get("status")}, err={tree.get("err")}'
+        data = tree['data']
+        # 外层 shape（WikiTreeSerializer）：groups 必为数组
+        assert isinstance(data, dict), f'tree root must be object, got {type(data).__name__}'
+        assert isinstance(data.get('groups'), list), (
+            f'tree.groups must be array, got {type(data.get("groups")).__name__}'
+        )
+        # seed 让 groups 非空 → 嵌套断言可达（防死代码，对齐 L2a-b seed 思路）
+        seeded_group = next(
+            (g for g in data['groups'] if g.get('name') == seed_group), None,
+        )
+        assert seeded_group is not None, (
+            f'seeded group {seed_group!r} not in tree; groups={data["groups"]!r}'
+        )
+        # 嵌套契约：group {kind:str, name:str, pages:array}（WikiTreeGroupSerializer）
+        assert isinstance(seeded_group.get('kind'), str), (
+            f'group.kind must be str, got {seeded_group!r}'
+        )
+        assert isinstance(seeded_group.get('name'), str), (
+            f'group.name must be str, got {seeded_group!r}'
+        )
+        assert isinstance(seeded_group.get('pages'), list), (
+            f'group.pages must be array, got {seeded_group!r}'
+        )
+        seeded_page = next(
+            (p for p in seeded_group['pages'] if p.get('path') == seed_page), None,
+        )
+        assert seeded_page is not None, (
+            f'seeded page {seed_page!r} not in group; pages={seeded_group["pages"]!r}'
+        )
+        # 嵌套契约：page {path:str, title:str}（WikiTreePageSerializer）
+        assert isinstance(seeded_page.get('path'), str), (
+            f'page.path must be str, got {seeded_page!r}'
+        )
+        assert isinstance(seeded_page.get('title'), str), (
+            f'page.title must be str, got {seeded_page!r}'
+        )
+    finally:
+        _delete_container(container_name)
