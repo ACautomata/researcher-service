@@ -64,9 +64,14 @@ class JwtAuthMiddleware:
     def _choose_subprotocol(scope) -> str | None:
         # 如果客户端声明了 access_token subprotocol，握手回应时选中它，
         # 保持 wire format 一致；否则无 subprotocol 地 accept。
+        # 当客户端用单值格式 ['access_token.<jwt>'] 时，必须原样回显
+        # 该协议值（WebSocket RFC 要求响应 subprotocol 必须是客户端提供
+        # 之一），不能硬编码为 'access_token'（codex #190 P2）。
         for proto in scope.get('subprotocols') or []:
-            if proto == 'access_token' or (isinstance(proto, str) and proto.startswith('access_token.')):
+            if proto == 'access_token':
                 return 'access_token'
+            if isinstance(proto, str) and proto.startswith('access_token.'):
+                return proto
         return None
 
     @staticmethod

@@ -38,8 +38,14 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
         # 导致浏览器拒绝握手（closeCode=1006）。
         subprotocol = None
         for proto in self.scope.get('subprotocols', []):
-            if proto == 'access_token' or (isinstance(proto, str) and proto.startswith('access_token.')):
+            if proto == 'access_token':
                 subprotocol = 'access_token'
+                break
+            if isinstance(proto, str) and proto.startswith('access_token.'):
+                # 单值格式 ['access_token.<jwt>']：必须原样回显，不能硬编码为
+                # 'access_token'（codex #190 P2），否则浏览器因响应 subprotocol
+                # 不在已声明列表中而拒绝握手（closeCode=1006）。
+                subprotocol = proto
                 break
         await self.accept(subprotocol)
 

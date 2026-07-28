@@ -109,12 +109,32 @@ async def test_ws_other_secret_token_rejected():
 
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.asyncio
+async def test_ws_single_value_garbage_rejected_echoes_exact():
+    """codex #190 P2: 单值格式 ['access_token.<垃圾>'] reject 时原样回显该 subprotocol。"""
+    comm = WebsocketCommunicator(
+        _app(), '/ws/chat/', subprotocols=['access_token.not-a-jwt'])
+    connected, subprotocol = await comm.connect()
+    assert connected is True
+    # 服务器必须原样回显声明的 subprotocol，而非硬编码 'access_token'
+    assert subprotocol == 'access_token.not-a-jwt', (
+        f'expected subprotocol to be echoed verbatim, got {subprotocol!r}'
+    )
+    msg = await comm.receive_output(timeout=1)
+    assert msg['type'] == 'websocket.close'
+    assert msg['code'] == 4401
+    await comm.disconnect()
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.asyncio
 async def test_ws_valid_token_single_subprotocol_accepted():
     # 浏览器 new WebSocket(url, ['access_token.<jwt>']) 会把整个字符串作为一个 subprotocol
     token = await _access('single_proto')
     comm = WebsocketCommunicator(_app(), '/ws/chat/', subprotocols=[f'access_token.{token}'])
     connected, _ = await comm.connect()
     assert connected is True
+    # _ProbeConsumer 不设 subprotocol（纯探针），故 subprotocol 为 None。
+    # ChatConsumer.connect() 会原样回显 subprotocol（test_consumers.py 覆盖）。
     assert await comm.receive_from() == 'single_proto'
     await comm.disconnect()
 
