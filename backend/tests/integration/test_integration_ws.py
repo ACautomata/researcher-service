@@ -148,6 +148,9 @@ def test_l4_ws_handshake_via_vite_proxy(page_ws):
     # 浏览器原生 WebSocket（非 jsdom mock！）经 Vite /ws proxy 连 daphne Channels。
     # subprotocol ['access_token', <jwt>] 触发 JwtAuthMiddleware → 验签成功 → accept()。
     # 收集 onerror/onclose 事件的详细错误信息以诊断 flaky 失败的根因
+    # P1（codex #190）：JwtAuthMiddleware 在 auth 失败时 accept-then-close(4401)，
+    #   浏览器 onopen 仍会触发。须在 onopen 后等待短暂窗口测 close code 验证 auth 成功。
+    # P2（codex #190）：15s 超时避免 promise 挂死（Vite/daphne 既不 onopen 也不 onclose）。
     result = page_ws.evaluate(
         """
         async (token) => {
@@ -156,6 +159,7 @@ def test_l4_ws_handshake_via_vite_proxy(page_ws):
                 const done = (val) => {
                     if (settled) return;
                     settled = true;
+                    clearTimeout(handshakeTimeout);
                     resolve(val);
                 };
                 const ws = new WebSocket(
@@ -163,17 +167,28 @@ def test_l4_ws_handshake_via_vite_proxy(page_ws):
                     ['access_token', token],
                 );
                 const detail = {};
+                // P2: handshake 超时保护
+                const handshakeTimeout = setTimeout(() => {
+                    if (!settled) {
+                        ws.close();
+                        done({open: false, reason: 'timeout', readyState: ws.readyState, detail});
+                    }
+                }, 15000);
+                // P1: auth 验证窗口 — onopen 后等待 200ms 看服务器是否发 4401 close
+                let authCheckTimer = null;
                 ws.onopen = () => {
-                    ws.close(1000, 'test-done');
                     detail.opened = true;
-                    done({open: true, readyState: 1, detail});
+                    authCheckTimer = setTimeout(() => {
+                        if (settled) return;
+                        // 200ms 内无 close — auth 成功，关闭连接后返回成功
+                        ws.close(1000, 'test-done');
+                        done({open: true, readyState: 1, detail, authVerified: true});
+                    }, 200);
                 };
                 ws.onerror = () => {
                     detail.errorFired = true;
-                    if (!settled) {
-                        // 浏览器 WS onerror 不接受 event 参数，readyState 此时为 3 (CLOSED)
-                        // 原因在随后的 onclose 里给出（code/reason/wasClean）
-                    }
+                    // 浏览器 WS onerror 不接受 event 参数，readyState 此时为 3 (CLOSED)
+                    // 原因在随后的 onclose 里给出（code/reason/wasClean）
                 };
                 ws.onclose = (e) => {
                     detail.closeCode = e.code;
@@ -181,6 +196,10 @@ def test_l4_ws_handshake_via_vite_proxy(page_ws):
                     detail.wasClean = e.wasClean;
                     if (!detail.opened) {
                         done({open: false, reason: 'onclose', code: e.code, readyState: 3, detail});
+                    } else if (authCheckTimer !== null) {
+                        // onopen 已触发 — 检查是否为 auth 拒绝
+                        clearTimeout(authCheckTimer);
+                        done({open: false, reason: 'auth_rejected', code: e.code, readyState: 3, detail});
                     }
                 };
             });
@@ -196,4 +215,8 @@ def test_l4_ws_handshake_via_vite_proxy(page_ws):
     )
     assert result.get('readyState') == 1, (
         f'ws.readyState must be OPEN (1) after onopen, got {result.get("readyState")!r}'
+    )
+    assert result.get('authVerified'), (
+        f'auth verification must pass (close code 4401 not received within 200ms after onopen), '
+        f'got result={result}'
     )
