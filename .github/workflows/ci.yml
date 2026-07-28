@@ -64,9 +64,30 @@ jobs:
         with:
           python-version: "3.13"
           cache: pip
-          cache-dependency-path: backend/requirements/dev.txt
-      - run: pip install -r requirements/dev.txt
-      # 预拉 OpenClaw 公共 ghcr 镜像（集成测试须容器起停）
+          # 联调集成测试（#179）需 Playwright：integration.txt 是 dev.txt 超集
+          cache-dependency-path: backend/requirements/integration.txt
+      - uses: actions/setup-node@v7
+        with:
+          node-version: lts/*
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      # 联调测试用 Playwright 驱动真浏览器经 Vite proxy（#179）；wire schema 用 docker gateway
+      - run: pip install -r requirements/integration.txt
+      - run: python -m playwright install --with-deps chromium
+      # 联调 conftest 起 vite dev server，需 frontend 依赖
+      - name: Install frontend deps
+        working-directory: frontend
+        run: npm ci
+      # npm ci 在 frontend/node_modules（~200-500MB）内生依赖树。HomeProvisioner 用 shutil.copytree
+      # 将整个 OPENCLAW_TEMPLATE_DIR（当前 workspace）递归拷入每个 OpenClaw 容器的临时 home；
+      # 7+ case 叠加拷入数百 MB/node_modules，I/O 暴增（codex #185 P2）。建一份排除 frontend/ 的
+      # 清理模板——容器不需要 web UI 文件。
+      - name: Create clean fleet template (exclude frontend from copytree)
+        run: |
+          rsync -a --exclude='frontend/' "${{ github.workspace }}/" /tmp/fleet-template/
+          echo "OPENCLAW_TEMPLATE_DIR=/tmp/fleet-template" >> "$GITHUB_ENV"
+      # 预拉 OpenClaw 公共 ghcr 镜像（wire schema 集成测试须容器起停）
       - run: docker pull ${{ env.OPENCLAW_IMAGE }}
-      # 真容器集成测试（pytestmark=integration）：wire schema 断言 + create/list/delete 全链路
+      # 真容器/真链路集成测试（pytestmark=integration）：wire schema（docker gateway）+
+      # 联调 health 契约（vite proxy × playwright × live Django，#179）
       - run: python -m pytest -m "integration"

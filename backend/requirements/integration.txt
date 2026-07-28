@@ -1,0 +1,5 @@
+-r dev.txt
+# 联调集成测试（issue #179）：Playwright Python 客户端驱动真浏览器经 Vite proxy 打 live Django。
+# 与 dev.txt 分离——不跑集成的开发者/CI backend-unit job 不需此依赖（避免下载浏览器二进制）。
+# 装后还须 `playwright install chromium` 拉浏览器；vite dev server 依赖 frontend `npm ci`。
+playwright==1.61.0

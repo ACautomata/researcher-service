@@ -109,3 +109,26 @@ export LLM_API_KEY=sk-...
 # → 网关报 Missing config。用 --basetemp 覆盖到 $HOME 下：
 python -m pytest chat/tests/test_integration_wire.py -v --basetemp=$HOME/.cache/pytest-wire
 ```
+
+### 前后端联调集成测试（Playwright × Vite proxy × live Django）
+
+`tests/integration/test_integration_http.py`（[issue #178](https://github.com/ACautomata/researcher-service/issues/178) /
+[#179](https://github.com/ACautomata/researcher-service/issues/179)）用 Playwright Python 客户端驱动真浏览器，经
+Vite dev server (5173) 的 `/api` proxy 打 pytest-django 起的 live Django 后端，断言 HTTP 响应状态码 + JSON 契约
+（源真相在后端 serializer）。覆盖前端 mock `fetch` / 后端 `APIClient` 都测不到的「真浏览器 → Vite proxy → live 后端」
+三节点链路（jsdom 测不到 httpOnly cookie / 401→refresh 重试）。门控同 wire 段（`pytestmark = integration`）。
+
+**额外依赖**（wire 三件套之外）：`pip install -r requirements/integration.txt`（含 Playwright，dev.txt 超集）+
+`python -m playwright install chromium` + frontend `npm ci`（conftest 经 subprocess 起 vite dev server）。
+
+**本地怎么跑**（L0 health case 不需 docker daemon）：
+
+```bash
+pip install -r requirements/integration.txt
+python -m playwright install chromium
+(cd ../frontend && npm ci)
+python -m pytest -m integration tests/integration/test_integration_http.py -v
+```
+
+> vite dev server 由 conftest 经 `VITE_API_TARGET` 注入 live server 随机端口（dev 行为不变——
+> `vite.config.ts` proxy target 缺省 `http://localhost:8000`，`npm run dev` 完全不受影响）。
