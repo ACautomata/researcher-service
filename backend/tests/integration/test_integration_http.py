@@ -477,21 +477,34 @@ _REQUIRED_INSTANCE_FIELDS = {
 def _assert_instance_dto_contract(item: dict) -> None:
     """断言单条 list item 字段类型与 ``InstanceSerializer`` 对齐（含 pairing 子契约）。
 
-    ``windows.__listInstances`` 经 Vite proxy 打真后端 ``GET /api/v1/containers/``，body
-    由 ``InstanceSerializer(many=True)`` 序列化；本块是 L2a schema 锁定，被两个 case 复用：
-    空降级 case（.fake 返非空以达此断言）与非空 schema case（.fake 返非空 schema 对齐项）。
+    ``window.__listInstances`` 经 Vite proxy 打真后端 ``GET /api/v1/containers/``，body
+    由 ``InstanceSerializer(many=True)`` 序列化；本块是 L2a schema 锁定，被 L2a-b（真实 list 路径
+    序列化 STATUS_CREATING 行）复用。
     """
     for field, typ in _REQUIRED_INSTANCE_FIELDS.items():
         assert field in item, f'InstanceDTO missing field: {field}'
         assert isinstance(item[field], typ), (
             f'InstanceDTO.{field} must be {typ}, got {type(item[field]).__name__}: {item[field]!r}'
         )
-    # pairing 子契约（PairingSnapshotDTO：status 必有，device_id/scopes/pairing_request_id 可选）
+    # pairing 子契约（PairingSnapshotDTO）。默认快照 build_pairing_status_default 总含四字段
+    # （status/device_id/scopes/pairing_request_id）；status 必为 str，可选字段存在时按类型对齐
+    # —— 防 serializer/translation 类型回归（如 scopes:""）漏过（codex #187 R3 P2 线494）。
     pairing = item['pairing']
-    assert 'status' in pairing, f'pairing must have status, got {pairing!r}'
-    assert isinstance(pairing['status'], str), (
-        f'pairing.status must be str, got {type(pairing["status"]).__name__}'
-    )
+    assert isinstance(pairing.get('status'), str), f'pairing.status must be str, got {pairing!r}'
+    if pairing.get('device_id') is not None:
+        assert isinstance(pairing['device_id'], str), (
+            f'pairing.device_id must be str, got {pairing["device_id"]!r}'
+        )
+    if pairing.get('pairing_request_id') is not None:
+        assert isinstance(pairing['pairing_request_id'], str), (
+            f'pairing.pairing_request_id must be str, got {pairing["pairing_request_id"]!r}'
+        )
+    if pairing.get('scopes') is not None:
+        scopes = pairing['scopes']
+        assert isinstance(scopes, list), f'pairing.scopes must be array, got {scopes!r}'
+        assert all(isinstance(s, str) for s in scopes), (
+            f'pairing.scopes must be string[], got {scopes!r}'
+        )
 
 
 def _login(page, username: str, password: str) -> None:
