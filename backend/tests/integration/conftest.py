@@ -108,12 +108,38 @@ def _terminate_process_group(proc: subprocess.Popen) -> None:
         proc.wait(timeout=5)
 
 
+# 每次导航自动重装 dev hook 的 init script（test 侧 own，main.ts 不放测试代码，#188）。
+# add_init_script 在每页脚本前注入，异步 IIFE poll 等 Vue mount（#app.__vue_app__，app.mount 挂）
+# 再装 hook——不延迟 fixture yield（page.url 保持根路径，不破坏 L1 base 计算），且 test 内再
+# page.goto 也会重装（导航清空 window）。pinia 经 app.use(pinia)→globalProperties.$pinia（probe
+# 实证 gpPinia=True）；前端 api 经动态 import /src/...（vite dev serve 源码，同一模块实例）。
+_TEST_HOOKS_INIT_SCRIPT = """
+(async () => {
+    while (!document.querySelector('#app') || !document.querySelector('#app').__vue_app__) {
+        await new Promise(r => setTimeout(r, 50));
+    }
+    const app = document.querySelector('#app').__vue_app__;
+    window.__pinia = app.config.globalProperties.$pinia;
+    const [{ apiFetch }, { listInstances }, { getTree }] = await Promise.all([
+        import('/src/api/client.ts'),
+        import('/src/api/containers.ts'),
+        import('/src/api/wiki.ts'),
+    ]);
+    window.__apiFetch = apiFetch;
+    window.__listInstances = listInstances;
+    window.__getTree = getTree;
+})();
+"""
+
+
 @pytest.fixture
 def page(vite_dev_server):
     """每 case 独立 browser context + page：token/cookie/localStorage 全清。
 
     每 case 新启 browser（彻底隔离；case 少时不计启动成本，后续 L1-L4 case 增多可改为
-    session 级 browser 复用 + function 级 new_context）。
+    session 级 browser 复用 + function 级 new_context）。dev hook（``__pinia`` / ``__apiFetch`` /
+    ``__listInstances`` / ``__getTree``）经 ``context.add_init_script`` 在每次导航后异步注入
+    （#188，main.ts 不放测试代码）——不延迟 yield、test 内再导航也重装。
     """
     # playwright 仅在 requirements/integration.txt（#179），backend-unit job 不装（只装 dev.txt）。
     # 不能顶部 import——否则 backend-unit 收集本 conftest 即 ImportError 红整个 job；而 pytest
@@ -126,6 +152,7 @@ def page(vite_dev_server):
         browser = pw.chromium.launch()
         try:
             context = browser.new_context()
+            context.add_init_script(_TEST_HOOKS_INIT_SCRIPT)
             pg = context.new_page()
             # 指向 vite dev server origin：相对路径 fetch('/api/health') 经 vite proxy 打后端
             pg.goto(vite_dev_server, wait_until='domcontentloaded')
