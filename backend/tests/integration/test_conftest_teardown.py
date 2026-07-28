@@ -50,12 +50,33 @@ def _port_open(port: int) -> bool:
         return s.connect_ex(('127.0.0.1', port)) == 0
 
 
-def _alive(pid: int) -> bool:
+def _process_state(pid: int) -> str | None:
+    """OS 进程状态字符;``'Z'``=僵尸,``None``=PID 不存在。
+
+    Linux 走 ``/proc/<pid>/stat``(状态字段在 comm 之后,comm 可含空格/括号,按最后 ``)`` 切);
+    其他平台(macOS/BSD)用 ``ps -o stat=`` 可移植回退。
+    """
     try:
-        os.kill(pid, 0)
-        return True
-    except (ProcessLookupError, PermissionError):
-        return False
+        with open(f'/proc/{pid}/stat') as f:
+            return f.read().rsplit(')', 1)[-1].split()[0] or None
+    except FileNotFoundError:
+        pass
+    out = subprocess.run(
+        ['ps', '-o', 'stat=', '-p', str(pid)],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=False,
+    ).stdout.strip()
+    return out[:1] or None
+
+
+def _terminated(pid: int) -> bool:
+    """进程已终止:PID 不存在,或仍处僵尸态(``state=='Z'``)。
+
+    ``os.kill(pid, 0)`` 对僵尸仍成功(P2 codex #185):容器或裸机 PID 1 不及时 reap 时,
+    被杀子进程进僵尸态——端口/资源已释放但 PID 仍在,naive「存活=可 kill(pid,0)」会把它
+    误判为存活,导致 teardown 断言永不满足。改读状态字符,'Z' 即视为已终止。
+    """
+    state = _process_state(pid)
+    return state is None or state == 'Z'
 
 
 def _spawn_tree(tmp_path: Path):
@@ -90,16 +111,34 @@ def test_terminate_process_group_kills_descendant(tmp_path):
     proc, child_port, child_pid = _spawn_tree(tmp_path)
     try:
         terminate_group(proc)
-        # 子孙被收:进程不在 + 端口释放(给 OS 一瞬回收时间)
+        # 子孙被收:进程已终止 + 端口释放(给 OS 一瞬回收时间)
         deadline = time.monotonic() + 3.0
-        while time.monotonic() < deadline and (_alive(child_pid) or _port_open(child_port)):
+        while time.monotonic() < deadline and (not _terminated(child_pid) or _port_open(child_port)):
             time.sleep(0.1)
-        assert not _alive(child_pid), 'orphaned child survived teardown (port leak)'
+        assert _terminated(child_pid), 'orphaned child survived teardown (port leak)'
         assert not _port_open(child_port), 'port still bound after teardown'
     finally:
-        # 测试失败也别泄漏孤儿进程
-        if _alive(child_pid):
+        # 测试失败也别泄漏仍在运行的孤儿(僵尸无需再杀)
+        if not _terminated(child_pid):
             try:
                 os.kill(child_pid, 9)
             except ProcessLookupError:
                 pass
+
+
+def test_terminated_treats_zombie_as_terminated():
+    """僵尸态进程必须判为已终止(P2 codex #185)。
+
+    容器/裸机 PID 1 不及时 reap 时,被杀子进程进僵尸态:端口已释放但 PID 仍在,
+    ``os.kill(pid,0)`` 仍成功——naive「存活=可 kill(pid,0)」会把僵尸误判为存活,
+    导致 ``_terminated`` 断言永不满足。本 case 直接构造一个僵尸(本进程不 wait)验证。
+    """
+    zombie = subprocess.Popen([sys.executable, '-c', 'import os; os._exit(0)'])
+    try:
+        time.sleep(0.5)  # 让子退出 → 僵尸(本进程未 wait/reap)
+        assert _terminated(zombie.pid), 'zombie should count as terminated, not alive'
+    finally:
+        try:
+            zombie.wait()  # reap,避免泄漏
+        except ChildProcessError:
+            pass
