@@ -1,11 +1,13 @@
 """回归测试:L4 daphne ASGI 基础设施修复(codex #190 P1/P2)。
 
-覆写三项:
+覆写四项:
 1. Daphne 启动路径——用 ``sys.executable -m daphne`` 而非硬编码 ``.venv/bin/daphne``。
 2. Integration settings DB ``NAME``——直接覆盖 ``NAME``（非仅 ``TEST['NAME']``），
    确保 ``manage.py migrate`` 和 daphne 子进程均读写 ``test_db_file.sqlite3``。
 3. WebSocket 握手测试传入 JWT——验证 ``test_integration_ws.py`` 的 ``page_ws.evaluate()``
    携带 ``token`` 参数（非 undefined）。
+4. Test DB 文件清理——``daphne_server`` fixture teardown 时删除 ``test_db_file.sqlite3``
+   及其 WAL/SHM 侧文件，避免工作目录污染。
 
 本档不跑真 browser/daphne，仅验证模块构造与契约成立。
 """
@@ -79,4 +81,23 @@ def test_conftest_daphne_cmd_uses_sys_executable():
     )
     assert "'-m', 'daphne'" in src or "'-m','daphne'" in src, (
         'conftest must use -m daphne pattern'
+    )
+
+
+def test_conftest_cleans_up_test_db():
+    """验证 ``conftest.py`` ``daphne_server`` fixture teardown 清理 test DB 文件（codex #190 P2）。
+
+    避免 test_db_file.sqlite3 残留在工作目录中，污染后续运行。
+    """
+    conftest_path = BACKEND_DIR / 'tests' / 'integration' / 'conftest.py'
+    src = conftest_path.read_text()
+    # 验证 finally 块包含 test_db_file.sqlite3 的 unlink
+    assert 'test_db_file.sqlite3' in src, (
+        'conftest must reference test_db_file.sqlite3 for cleanup'
+    )
+    assert '.unlink(' in src, (
+        'conftest must call .unlink() to remove test DB file'
+    )
+    assert 'missing_ok=True' in src, (
+        'conftest must use missing_ok=True for idempotent cleanup'
     )

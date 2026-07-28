@@ -210,7 +210,8 @@ def daphne_server(request, django_db_setup):
     dev.py settings，pytest-django 会根据 dev settings 创建 in-memory DB 用于测试
     ORM——所以 test 进程和 daphne 进程各有独立 DB，不共享数据。
 
-    Teardown：``_terminate_process_group`` 收掉 daphne 进程树（与 vite_dev_server 同模式）。
+    Teardown：``_terminate_process_group`` 收掉 daphne 进程树（与 vite_dev_server 同模式）；
+    同时清理文件级 test DB 及其 WAL/SHM 侧文件，避免工作目录污染和跨测试状态残留（codex #190 P2）。
     """
     port = _find_free_port()
 
@@ -256,6 +257,13 @@ def daphne_server(request, django_db_setup):
         yield f'http://127.0.0.1:{port}'
     finally:
         _terminate_process_group(proc)
+        # 清理文件级 test DB 及其 WAL/SHM 侧文件（codex #190 P2）
+        _test_db = BACKEND_DIR / 'test_db_file.sqlite3'
+        for _p in (_test_db, _test_db.with_suffix('.sqlite3-wal'), _test_db.with_suffix('.sqlite3-shm')):
+            try:
+                _p.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 @pytest.fixture
