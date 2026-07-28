@@ -1,6 +1,6 @@
 """联调集成测试共享 fixtures（issue #179）。
 
-编排三节点链路：真浏览器（Playwright）→ Vite dev server(5173) proxy → pytest-django 起的
+编排三节点链路：真浏览器（Playwright）→ Vite dev server proxy → pytest-django 起的
 live Django 后端。live server 复用 pytest-django 的 ``live_server`` fixture（随机端口隔离）；
 vite dev server 由本 conftest 起 subprocess，经 ``VITE_API_TARGET`` 注入 live server 端口
 （dev 行为不变，测试时指向 live server，端口隔离得以保留）。
@@ -20,16 +20,26 @@ from pathlib import Path
 
 import pytest
 
-# vite dev server 固定端口（#178：经 vite proxy 是核心链路；pytest 默认串行不引 xdist，
-# 固定端口不冲突）。可经 env 覆盖（本地已占 5173 时）。
-VITE_PORT = int(os.environ.get('INTEGRATION_VITE_PORT', '5173'))
-
 # vite 冷启动就绪轮询（首次 ts 转译较慢）
 _VITE_READINESS_TIMEOUT = 30.0
 _VITE_POLL_INTERVAL = 0.5
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]   # backend/
 FRONTEND_DIR = BACKEND_DIR.parent / 'frontend'
+
+
+def _resolve_port() -> int:
+    """返回 vite dev server 端口。
+
+    CI/默认:随机选 free ephemeral 端口,避免遗留 Vite 抢旧端口的时候就绪探针认错服务器
+    (codex #185 P2)。设 ``INTEGRATION_VITE_PORT`` env(如 ``5173``)时为固定值
+    (本地 debug 时方便 curl/lsof 确认)。
+    """
+    if 'INTEGRATION_VITE_PORT' in os.environ:
+        return int(os.environ['INTEGRATION_VITE_PORT'])
+    with socket.socket() as s:
+        s.bind(('127.0.0.1', 0))
+        return s.getsockname()[1]
 
 
 def _port_open(host: str, port: int) -> bool:
@@ -46,10 +56,11 @@ def vite_dev_server(live_server):
     端口，坐实 浏览器→Vite proxy→live Django 三节点链路（#179 acceptance）。
     """
     env = {**os.environ, 'VITE_API_TARGET': live_server.url}
+    port = _resolve_port()
     # --host 127.0.0.1：强制 IPv4 loopback。vite 8 默认 listen [::1]（localhost→IPv6），
     # 与 readiness 探测 / 浏览器 goto 统一到 127.0.0.1，避开 v4/v6 解析歧义（CI/ubuntu 同稳）。
     proc = subprocess.Popen(
-        ['npm', 'run', 'dev', '--', '--port', str(VITE_PORT), '--strictPort', '--host', '127.0.0.1'],
+        ['npm', 'run', 'dev', '--', '--port', str(port), '--strictPort', '--host', '127.0.0.1'],
         cwd=str(FRONTEND_DIR),
         env=env,
         stdout=subprocess.PIPE,
@@ -63,14 +74,14 @@ def vite_dev_server(live_server):
             if proc.poll() is not None:
                 out = proc.stdout.read() if proc.stdout else ''
                 raise RuntimeError(f'vite dev server exited early (code {proc.returncode}):\n{out}')
-            if _port_open('127.0.0.1', VITE_PORT):
+            if _port_open('127.0.0.1', port):
                 break
             time.sleep(_VITE_POLL_INTERVAL)
         else:
             raise RuntimeError(
-                f'vite dev server not ready on :{VITE_PORT} within {_VITE_READINESS_TIMEOUT}s',
+                f'vite dev server not ready on :{port} within {_VITE_READINESS_TIMEOUT}s',
             )
-        yield f'http://127.0.0.1:{VITE_PORT}'
+        yield f'http://127.0.0.1:{port}'
     finally:
         _terminate_process_group(proc)
 
