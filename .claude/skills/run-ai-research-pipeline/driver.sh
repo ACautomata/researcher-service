@@ -35,10 +35,18 @@ _ensure_venv() {
 }
 
 _ensure_node_modules() {
-  if [ ! -d "$FRONTEND_DIR/node_modules" ]; then
+  # 不仅仅检查目录存在——检查 package.json 中的依赖是否已全部安装。
+  # node_modules 目录可能因 npm 中途中断、手动删除子目录、或 worktree 软链而部分缺失。
+  if [ -d "$FRONTEND_DIR/node_modules" ]; then
+    cd "$FRONTEND_DIR"
+    if npm ls --depth=0 --silent 2>/dev/null; then
+      return 0
+    fi
+    echo "[driver] node_modules 不完整，重新安装 …"
+  else
     echo "[driver] 安装 frontend 依赖 …"
-    cd "$FRONTEND_DIR" && npm install
   fi
+  cd "$FRONTEND_DIR" && npm install
 }
 
 _ensure_db() {
