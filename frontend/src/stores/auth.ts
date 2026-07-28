@@ -4,7 +4,6 @@ import { defineStore } from 'pinia'
 
 interface LoginResponse {
   access: string
-  refresh: string
 }
 
 // codex P2-1：检查 access token 是否过期（JWT exp claim）
