@@ -212,7 +212,6 @@ def daphne_server(request, django_db_setup):
 
     Teardown：``_terminate_process_group`` 收掉 daphne 进程树（与 vite_dev_server 同模式）。
     """
-    daphne_bin = str(BACKEND_DIR / '.venv' / 'bin' / 'daphne')
     port = _find_free_port()
 
     # 1. migrate：用 integration.py settings → 文件级 SQLite（test_db_file.sqlite3）
@@ -222,10 +221,11 @@ def daphne_server(request, django_db_setup):
     env_integration = {**os.environ, 'DJANGO_SETTINGS_MODULE': 'config.settings.integration'}
     _run_manage_py(['migrate', '--noinput'], env_integration)
 
-    # 2. 启动 daphne
+    # 2. 启动 daphne（用 sys.executable -m daphne 而非硬编码 .venv/bin/daphne，
+    #    兼容 CI 环境（无 .venv，codex #190 P1）和本地开发环境。
     proc = subprocess.Popen(
         [
-            daphne_bin,
+            sys.executable, '-m', 'daphne',
             '-b', '127.0.0.1',
             '-p', str(port),
             '--verbosity', '0',

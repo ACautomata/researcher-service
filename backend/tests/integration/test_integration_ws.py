@@ -181,6 +181,7 @@ def test_l4_ws_handshake_via_vite_proxy(page_ws):
             });
         }
         """,
+        token,  # codex #190 P1: 将 JWT 作为 evaluate 参数传入 JS 回调
     )
 
     assert result.get('open'), (

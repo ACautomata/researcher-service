@@ -7,12 +7,11 @@ pytest-django 的 dev.py ``TEST['NAME']`` 缺省时 Django SQLite backend 返回
 ``:memory:``——每个数据库连接获得独立、transient 的 in-memory DB。测试进程
 与 daphne 子进程是不同进程，pytest-django 的 in-memory DB 对 daphne 不可见。
 
-本 settings 通过 ``TEST['NAME']`` 强制文件级 SQLite，daphne fixture 在启动
-daphne 前先 ``manage.py migrate`` 建表，此后 daphne ORM 读写该文件。
+本 settings 通过覆盖 ``NAME``（而非仅 ``TEST['NAME']``）强制文件级 SQLite，
+``manage.py migrate`` 和 daphne 进程均读写该文件（codex #190 P2）。
 """
-from .dev import *  # noqa: F401,F403 — Django settings 分层惯例
+from .dev import *
 
-# 强制文件级 SQLite test DB（非 in-memory），daphne 子进程可跨进程读写。
-DATABASES['default']['TEST'] = {  # noqa: F405
-    'NAME': str(BASE_DIR / 'test_db_file.sqlite3'),  # noqa: F405
-}
+# 覆盖默认 NAME（而非仅 TEST['NAME']）：manage.py migrate / daphne 子进程
+# 的 Django ORM 读 NAME 而非 TEST['NAME']，后者仅 pytest-django 使用。
+DATABASES['default']['NAME'] = str(BASE_DIR / 'test_db_file.sqlite3')
