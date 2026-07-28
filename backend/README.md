@@ -67,11 +67,45 @@ JSON 内仅 `${GATEWAY_TOKEN}` 占位（不落盘）。
 
 ### integration smoke（需真 daemon）
 
-靠 docker daemon 自动探测门控（有 daemon 即 collect，无则 skip）；CI 即便有 daemon，也因缺 `OPENCLAW_TEMPLATE_DIR`/`LLM_API_KEY` 在用例内 skip。手动验证建/删容器真实链路：
+门控同下方 wire 段：`pytestmark = pytest.mark.integration`（env 缺失直接 fail，不跳过）；CI `backend-unit` job 经 `-m "not integration"` 排除，`integration` job env 齐备时真跑。手动验证建/删容器真实链路：
 
 ```bash
 export OPENCLAW_TEMPLATE_DIR=/path/to/researcher     # git clone ACautomata/researcher
 export OPENCLAW_IMAGE=acautomata/openclaw-docker-cn-im:latest
 export LLM_API_KEY=sk-...
 python -m pytest containers/tests/test_integration.py -v
+```
+
+### chat wire schema 集成测试（ghcr 真镜像）
+
+`chat/tests/test_integration_wire.py`（[issue #155](https://github.com/ACautomata/researcher-service/issues/155)）用真实
+`ghcr.io/openclaw/openclaw:2026.6.34-browser` 镜像起 OpenClaw 容器 + Ed25519 设备配对，对 chat 模块依赖的
+9 个 wire schema 假设逐一断言（事件结构/字段名/方法名），防止 `FakeChatTransport` 掩盖的假设错误再次潜伏。
+既是已修 bug（PR #152 / #153 / #154）的回归防护，又是 wire schema 契约的长期基线。覆盖 T1–T5 五个用例：
+chat.send 冒烟、事件流 schema、只读 RPC schema、exec 审批路径 schema、工具调用事件 schema。
+
+**env 三件套**（`OPENCLAW_TEMPLATE_DIR`/`LLM_API_KEY` 必需；`OPENCLAW_IMAGE` 可选，缺省用下方 ghcr 官方镜像。门控见下）：
+
+| env | 用途 |
+|---|---|
+| `OPENCLAW_IMAGE` | **可选**（缺省默认 `ghcr.io/openclaw/openclaw:2026.6.34-browser`，覆盖 #94 fork 默认） |
+| `OPENCLAW_TEMPLATE_DIR` | 容器 home 模板源（bind-mount 白名单路径，非 `/tmp`） |
+| `LLM_API_KEY` | 全面板共享 LLM key（注入容器，不落盘） |
+
+**门控——integration marker（非 `RUN_INTEGRATION`）**：测试文件 `pytestmark = pytest.mark.integration`，
+**无 skip**，env 缺失直接 fail（强制环境就绪，不靠 skip 兜底）。CI 双轨（`.github/workflows/ci.yml`）：
+`backend-unit` job 跑 `-m "not integration"` 排除真容器；`integration` job env 齐备时跑 `-m "integration"` 真验证。
+上方 `containers/tests/test_integration.py`（#94 smoke）共用同一 `pytestmark = pytest.mark.integration` 门控
+（#157 统一重构自旧的 daemon 探测+skip）——两者仅覆盖面（容器生命周期/配对/chat/wiki 全链路 vs. chat
+wire schema）与镜像（fork 默认 vs. ghcr 官方）不同，门控一致。
+
+**本地怎么跑**（须 docker daemon + `OPENCLAW_TEMPLATE_DIR`/`LLM_API_KEY`；`OPENCLAW_IMAGE` 可选用默认）：
+
+```bash
+export OPENCLAW_IMAGE=ghcr.io/openclaw/openclaw:2026.6.34-browser
+export OPENCLAW_TEMPLATE_DIR=/path/to/researcher     # git clone ACautomata/researcher
+export LLM_API_KEY=sk-...
+# Colima virtiofs 只共享 $HOME：pytest 默认 tmp_path（/var/folders/…）bind-mount 退化为空目录
+# → 网关报 Missing config。用 --basetemp 覆盖到 $HOME 下：
+python -m pytest chat/tests/test_integration_wire.py -v --basetemp=$HOME/.cache/pytest-wire
 ```
