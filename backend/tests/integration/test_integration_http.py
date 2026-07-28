@@ -456,30 +456,46 @@ def test_logout_exhausts_refresh_and_redirects_to_login(page):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-def test_l2a_list_instances_returns_array_aligned_to_serializer(page):
-    """L2a：经 Vite proxy 调 ``listInstances()`` 断言 2xx + 数组契约（#181）。
+# InstanceSerializer 出参字段契约（源真相 containers/serializers.py InstanceSerializer）。
+# 抽到模块级供「空 fleet 降级」与「非空 schema」两个 L2a case 共用——避免契约断言漂移。
+_REQUIRED_INSTANCE_FIELDS = {
+    'name': str,
+    'port': (int, float),
+    'status': str,
+    'health': str,
+    'image': str,
+    'container_id': str,
+    'created_at': str,
+    'pairing': dict,
+}
 
-    空 fleet（无 daemon 亦可）→ 后端 ``InstanceListCreateView.get`` → ``Fleet.list()`` 在
-    无 Instance 行时直接返 ``[]``（``orchestrator.py:580``），不碰 docker daemon。本 case
-    锁契约为「降级返回空数组」，若现状返 500 则红则暴露后端 bug（另开子项，本 ticket 不改后端）。
 
-    登录后经 ``window.__listInstances()``（dev-only hook，挂 ``listInstances``）走真
-    ``apiJson``→``apiFetch`` 链路（JWT 注入 + 401 重试），断言 body 为数组且每元素字段类型与
-    ``InstanceSerializer`` 对齐（name/port/status/health/image/container_id/created_at/pairing）。
+def _assert_instance_dto_contract(item: dict) -> None:
+    """断言单条 list item 字段类型与 ``InstanceSerializer`` 对齐（含 pairing 子契约）。
+
+    ``windows.__listInstances`` 经 Vite proxy 打真后端 ``GET /api/v1/containers/``，body
+    由 ``InstanceSerializer(many=True)`` 序列化；本块是 L2a schema 锁定，被两个 case 复用：
+    空降级 case（.fake 返非空以达此断言）与非空 schema case（.fake 返非空 schema 对齐项）。
     """
-    suffix = _username_suffix()
-    username = f'l2a-{suffix}'
-    password = 'testpass1234'
+    for field, typ in _REQUIRED_INSTANCE_FIELDS.items():
+        assert field in item, f'InstanceDTO missing field: {field}'
+        assert isinstance(item[field], typ), (
+            f'InstanceDTO.{field} must be {typ}, got {type(item[field]).__name__}: {item[field]!r}'
+        )
+    # pairing 子契约（PairingSnapshotDTO：status 必有，device_id/scopes/pairing_request_id 可选）
+    pairing = item['pairing']
+    assert 'status' in pairing, f'pairing must have status, got {pairing!r}'
+    assert isinstance(pairing['status'], str), (
+        f'pairing.status must be str, got {type(pairing["status"]).__name__}'
+    )
 
-    # Vite dev server 冷启动：``page.goto`` 的 ``domcontentloaded`` 早于 main.ts 转译完成，
-    # ``window.__pinia``/``__listInstances`` 在 Vue mount 后才挂（main.ts dev-only hooks）。
-    # 等三者就绪再发请求，避免竞态 TypeError。
+
+def _login(page, username: str, password: str) -> None:
+    """L2a 共用登录链路：注册 + store.login() 复位 refreshExhausted 后 jwt 注入链路可用。"""
     page.wait_for_function(
         "() => !!window.__pinia && !!window.__apiFetch && !!window.__listInstances",
         timeout=15000,
     )
-
-    # 1) 注册
     page.evaluate(
         """
         async ({username, password}) => {
@@ -492,9 +508,6 @@ def test_l2a_list_instances_returns_array_aligned_to_serializer(page):
         """,
         {'username': username, 'password': password},
     )
-
-    # 2) store.login() 建立完整登录态（复位 refreshExhausted，jwt 注入链路可用）
-    #    等 auth store 实例化进 Pinia._s（路由守卫 hydrate() 调 useAuthStore 注册）。
     page.wait_for_function(
         "() => !!window.__pinia._s && !!window.__pinia._s.get('auth')",
         timeout=10000,
@@ -509,8 +522,10 @@ def test_l2a_list_instances_returns_array_aligned_to_serializer(page):
         {'username': username, 'password': password},
     )
 
-    # 3) 经 window.__listInstances() → Vite proxy → 后端 GET /api/v1/containers/
-    result = page.evaluate(
+
+def _list_instances(page) -> dict:
+    """经 ``window.__listInstances()`` → Vite proxy → 后端 ``GET /api/v1/containers/`` 取列表。"""
+    return page.evaluate(
         """
         async () => {
             try {
@@ -522,36 +537,126 @@ def test_l2a_list_instances_returns_array_aligned_to_serializer(page):
         }
         """,
     )
-    assert result['ok'], f'listInstances() rejected: {result.get("err")}'
-    data = result['data']
 
-    # 4) 契约：body 必须为数组（空 fleet 时为 []）
-    assert isinstance(data, list), f'containers list must be an array, got {type(data).__name__}'
 
-    # 5) 空列表即满足降级契约——不要求存在容器
-    if not data:
-        return
+class _DaemonlessFakeOrchestrator:
+    """不碰 docker daemon 的 orchestrator 替身（``Fleet.override`` 注入）。
 
-    # 6) 每元素字段类型与 InstanceSerializer 对齐（源真相 containers/serializers.py）
-    REQUIRED_FIELDS = {
-        'name': str,
-        'port': (int, float),
-        'status': str,
-        'health': str,
-        'image': str,
-        'container_id': str,
-        'created_at': str,
-        'pairing': dict,
-    }
-    item = data[0]
-    for field, typ in REQUIRED_FIELDS.items():
-        assert field in item, f'InstanceDTO missing field: {field}'
-        assert isinstance(item[field], typ), (
-            f'InstanceDTO.{field} must be {typ}, got {type(item[field]).__name__}: {item[field]!r}'
-        )
-    # pairing 子契约（PairingSnapshotDTO：status 必有，device_id/scopes/pairing_request_id 可选）
-    pairing = item['pairing']
-    assert 'status' in pairing, f'pairing must have status, got {pairing!r}'
-    assert isinstance(pairing['status'], str), (
-        f'pairing.status must be str, got {type(pairing["status"]).__name__}'
-    )
+    codex #187 P2：原空 fleet case 仅靠空 DB 早返回拿 ``[]``，未证明「daemon 不可用亦可降级」
+    ——CI integration job 预拉 OpenClaw 镜像 + 起 docker service，空 DB 路径根本没机会接触 daemon，
+    故若后续回归让 ``list()`` 在空 fleet 时也试连 daemon，断言的 ``[]`` 仍会绿。本替身把 ``list()``
+    钉成确定行为（test 直接决定返 ``[]`` 还是非空 schema 项），使两个 case 都摆脱对 daemon 存活的
+    依赖，真正锁死「daemon 不可用时 GET /api/v1/containers/ 仍返数组」与「非空项 schema 对齐」契约。
+
+    仅供 ``Fleet.override`` 用；每个 case ``Fleet.reset()`` 收尾还原单例，杜绝跨 case 泄漏。
+    """
+
+    def __init__(self, items: list[dict]) -> None:
+        self._items = items
+
+    def list(self) -> list[dict]:
+        """返回构造期既定的项列表——不读 DB、不挂线程池、不连 daemon。"""
+        return list(self._items)
+
+    # 其余 orchestrator 方法本 case 不经由（view 仅调 list）；留空满足鸭子类型即可。
+
+
+def _seed_fake_fleet(items: list[dict]) -> None:
+    """``Fleet.override`` 注入 ``_DaemonlessFakeOrchestrator(items)``，供 L2a 降级/schema case 隔离。"""
+    from containers.orchestrator import Fleet
+
+    Fleet.override(_DaemonlessFakeOrchestrator(items))
+
+
+def _reset_fleet() -> None:
+    """还原 ``Fleet`` 单例（null → 下次 get 重建默认 orchestrator），防 L2a 替身泄漏到后续 case。"""
+    from containers.orchestrator import Fleet
+
+    Fleet.reset()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# L2a-a: 空 fleet 降级契约——daemon 不可用时仍返 ``[]``（issue #181；codex #187 P2 线 464）
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def test_l2a_empty_fleet_returns_array_without_daemon(page):
+    """L2a-a：daemon 不可用时 ``GET /api/v1/containers/`` 仍返 ``[]``（#181；codex #187 P2）。
+
+    旧 case 只在空 DB 下获 ``[]``，而 CI integration job 预装可用的 docker service——空 DB 早
+    返回让 daemon 根本未被触碰，于是「降级返回空数组」这一承诺并未被测试真证（回归让空 fleet 也
+    试连 daemon 时断言仍绿）。本 case 注入 ``_DaemonlessFakeOrchestrator([])``：``Fleet.list()``
+    被钉死返 ``[]``、测试期间任何 daemon 存活与否都与断言无关，从而坐实「daemon-independent 降级」。
+
+    登录后经 ``window.__listInstances()`` 走真 ``apiJson``→``apiFetch`` 链路（JWT 注入 + 401 重试），
+    断言 2xx + body 为 ``[]``。
+    """
+    suffix = _username_suffix()
+    username = f'l2a-empty-{suffix}'
+    password = 'testpass1234'
+
+    _seed_fake_fleet([])
+    try:
+        _login(page, username, password)
+        result = _list_instances(page)
+        assert result['ok'], f'listInstances() rejected: {result.get("err")}'
+        data = result['data']
+
+        # 契约：body 必须为空数组（fake orchestration 返 []，daemon 存活与否无关）
+        assert isinstance(data, list), f'containers list must be an array, got {type(data).__name__}'
+        assert data == [], f'empty daemonless fleet must degrade to [], got {data!r}'
+    finally:
+        _reset_fleet()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# L2a-b: 非空 fleet schema 契约——InstanceSerializer/InstanceDTO 字段对齐（issue #181；codex #187 P2 线 533）
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def test_l2a_nonempty_fleet_fields_align_to_serializer(page):
+    """L2a-b：非空响应字段类型与 ``InstanceSerializer`` 对齐（#181；codex #187 P2 线 533）。
+
+    旧 case 在空 fleet 下 ``if not data: return`` 早退，导致 advertised 的 InstanceDTO
+    字段断言永不执行；若 ``InstanceSerializer``/``InstanceDTO`` 契约改动（增删字段、改类型），
+    本该红的契约测试会假绿。本 case 注入 ``_DaemonlessFakeOrchestrator`` 返回一条与
+    ``_item()`` 形状对齐的非空项，让 view 经真 ``InstanceSerializer(many=True)`` 序列化，
+    从而跑到 ``_assert_instance_dto_contract``——把死契约复活成断言。
+
+    不种 ``Instance`` DB 行 / 不碰 docker daemon：fake orchestration 直接喂项，view 的
+    pairing 批量查询在无 ``Pairing`` 行时回退 ``build_pairing_status_default()``，故 ``pairing``
+    字段仍由 view 注入、契约断言仍可达。复用 ``_assert_instance_dto_contract`` 锁定 schema。
+    """
+    suffix = _username_suffix()
+    username = f'l2a-nonempty-{suffix}'
+    password = 'testpass1234'
+
+    # 与 orchestrator._item() 形状对齐的非空项（不含 pairing——view 会注入默认 pairing 快照）。
+    # created_at 用 ISO 串：``InstanceSerializer.created_at = DateTimeField(read_only=True)`` 序列化
+    # 解释 datetime 或 ISO 字符串均产 ISO 串。经真 serializer 序列化后契约断言即覆盖 InstanceDTO。
+    fake_items = [
+        {
+            'name': 'l2a-fake-1',
+            'port': 19001,
+            'status': 'stopped',
+            'health': 'stopped',
+            'image': 'ghcr.io/openclaw/openclaw:2026.6.34-browser',
+            'container_id': '',
+            'created_at': datetime.now(UTC).isoformat(),
+        },
+    ]
+    _seed_fake_fleet(fake_items)
+    try:
+        _login(page, username, password)
+        result = _list_instances(page)
+        assert result['ok'], f'listInstances() rejected: {result.get("err")}'
+        data = result['data']
+
+        # 非空契约：fake orchestration 喂入一项，view 序列化后 body 必为长度 1 的数组
+        assert isinstance(data, list), f'containers list must be an array, got {type(data).__name__}'
+        assert len(data) == 1, f'nonempty fake must yield exactly 1 item, got {len(data)}: {data!r}'
+
+        # 每元素字段类型与 InstanceSerializer 对齐——原断言从「dead code」复活成可达的 schema 条约
+        _assert_instance_dto_contract(data[0])
+    finally:
+        _reset_fleet()
