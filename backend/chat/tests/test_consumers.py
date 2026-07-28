@@ -89,10 +89,14 @@ class NotPairedPool:
         raise NotPaired('pending', 'req-9')
 
 
-async def _connect_authed(username='alice'):
+async def _access_token(username='alice'):
     user = await database_sync_to_async(User.objects.create_user)(
         username=username, password='strong-pass-1')
-    token = str(RefreshToken.for_user(user).access_token)
+    return str(RefreshToken.for_user(user).access_token)
+
+
+async def _connect_authed(username='alice'):
+    token = await _access_token(username)
     return WebsocketCommunicator(
         application, '/ws/chat/', subprotocols=['access_token', token])
 
@@ -123,6 +127,20 @@ async def test_jwt_handshake_accepted_for_authenticated_user(instance):
     comm = await _connect_authed()
     connected, _ = await comm.connect()
     assert connected
+    await comm.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_single_value_subprotocol_echo(instance):
+    """codex #190 P2: 单值格式 ['access_token.<jwt>'] 服务器必须原样回显 subprotocol。"""
+    token = await _access_token('alice')
+    full_proto = f'access_token.{token}'
+    comm = WebsocketCommunicator(application, '/ws/chat/', subprotocols=[full_proto])
+    connected, subprotocol = await comm.connect()
+    assert connected is True
+    assert subprotocol == full_proto, (
+        f'expected subprotocol={full_proto!r} to be echoed, got {subprotocol!r}'
+    )
     await comm.disconnect()
 
 

@@ -15,6 +15,7 @@ import os
 import signal
 import socket
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -156,6 +157,174 @@ def page(vite_dev_server):
             pg = context.new_page()
             # 指向 vite dev server origin：相对路径 fetch('/api/health') 经 vite proxy 打后端
             pg.goto(vite_dev_server, wait_until='domcontentloaded')
+            yield pg
+        finally:
+            browser.close()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# L4 WebSocket fixtures（issue #183）：daphne ASGI LiveServer + Vite proxy + Playwright
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# daphne ASGI 冷启动就绪轮询（对齐 Vite _VITE_READINESS_TIMEOUT 模式）
+_DAPHNE_READINESS_TIMEOUT = 15.0
+_DAPHNE_POLL_INTERVAL = 0.5
+
+# daphne 子进程就绪 stdout 哨兵（daphne 的 ASGI/TCP server 启动完成后打印的启动 marker）
+_DAPHNE_LISTENING_MARKER = 'Listening on'
+
+
+def _run_manage_py(argv: list[str], env: dict[str, str]) -> None:
+    """调 ``manage.py <argv>`` 在给定 env 下仿 Django CLI（如 migrate）。"""
+    proc = subprocess.run(
+        [sys.executable, 'manage.py', *argv],
+        cwd=str(BACKEND_DIR),
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f'manage.py {" ".join(argv)} failed (code {proc.returncode}):\n'
+            f'stdout={proc.stdout}\nstderr={proc.stderr}',
+        )
+
+
+def _find_free_port() -> int:
+    """返回空闲 TCP 端口（bind + release；用于 daphne subprocess）。"""
+    with socket.socket() as s:
+        s.bind(('127.0.0.1', 0))
+        return s.getsockname()[1]
+
+
+@pytest.fixture
+def daphne_server(request, django_db_setup):
+    """起 daphne 单进程 ASGI LiveServer（fixed port，同一 test DB）。
+
+    本 fixture 负责 test DB 的创建（migrate）与 daphne 进程的启停。pytest-django
+    的 ``django_db_setup`` 仅创建空的 test DB 文件（``CREATE DATABASE`` 等价物），
+    不建表——需 ``migrate`` 用 integration.py 设置连接 test DB 创建表。
+
+    此后 daphne 子进程启动，其 Django ORM 连接同一文件级 SQLite，读写表结构与数据。
+    测试进程通过 ``@django_db(transaction=True)`` TransactionTestCase 连接相同的
+    dev.py settings，pytest-django 会根据 dev settings 创建 in-memory DB 用于测试
+    ORM——所以 test 进程和 daphne 进程各有独立 DB，不共享数据。
+
+    Teardown：``_terminate_process_group`` 收掉 daphne 进程树（与 vite_dev_server 同模式）；
+    同时清理文件级 test DB 及其 WAL/SHM 侧文件，避免工作目录污染和跨测试状态残留（codex #190 P2）。
+    """
+    port = _find_free_port()
+
+    # 1. migrate：用 integration.py settings → 文件级 SQLite（test_db_file.sqlite3）
+    #    test 进程通过 pytest-django 默认 dev.py → in-memory DB，两者独立。
+    #    daphne 进程 migrate 创建表；test 进程通过 HTTP (register/login/etc.)
+    #    向 daphne 发请求，daphne ORM 读写的就是这些表。
+    env_integration = {**os.environ, 'DJANGO_SETTINGS_MODULE': 'config.settings.integration'}
+    _run_manage_py(['migrate', '--noinput'], env_integration)
+
+    # 2. 启动 daphne（用 sys.executable -m daphne 而非硬编码 .venv/bin/daphne，
+    #    兼容 CI 环境（无 .venv，codex #190 P1）和本地开发环境。
+    proc = subprocess.Popen(
+        [
+            sys.executable, '-m', 'daphne',
+            '-b', '127.0.0.1',
+            '-p', str(port),
+            '--verbosity', '0',
+            'config.asgi:application',
+        ],
+        cwd=str(BACKEND_DIR),
+        env=env_integration,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + _DAPHNE_READINESS_TIMEOUT
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                out = proc.stdout.read() if proc.stdout else ''
+                raise RuntimeError(
+                    f'daphne exited early (code {proc.returncode}):\n{out}',
+                )
+            if _port_open('127.0.0.1', port):
+                break
+            time.sleep(_DAPHNE_POLL_INTERVAL)
+        else:
+            raise RuntimeError(
+                f'daphne not listening on :{port} within {_DAPHNE_READINESS_TIMEOUT}s',
+            )
+        yield f'http://127.0.0.1:{port}'
+    finally:
+        _terminate_process_group(proc)
+        # 清理文件级 test DB 及其 sidecar 文件（codex #190 P2）
+        _test_db = BACKEND_DIR / 'test_db_file.sqlite3'
+        for _p in (_test_db,
+                   _test_db.with_suffix('.sqlite3-wal'),
+                   _test_db.with_suffix('.sqlite3-shm'),
+                   _test_db.with_suffix('.sqlite3-journal')):
+            try:
+                _p.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+@pytest.fixture
+def vite_dev_server_ws(daphne_server):
+    """起 vite dev server，proxy target 经 ``VITE_API_TARGET`` 指向 daphne ASGI server。
+
+    L4 必须 ASGI（WebSocket 走 Channels ASGI 栈）—— ``live_server`` 是 WSGI，
+    不服务 WebSocket。本 fixture 用 daphne_server 替代 live_server，其余编排
+    与 ``vite_dev_server`` 一致（复用 ``_resolve_port`` + ``_port_open`` +
+    ``_terminate_process_group``）。
+    """
+    env = {**os.environ, 'VITE_API_TARGET': daphne_server}
+    port = _resolve_port()
+    proc = subprocess.Popen(
+        ['npm', 'run', 'dev', '--', '--port', str(port), '--strictPort', '--host', '127.0.0.1'],
+        cwd=str(FRONTEND_DIR),
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + _VITE_READINESS_TIMEOUT
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                out = proc.stdout.read() if proc.stdout else ''
+                raise RuntimeError(f'vite dev server exited early (code {proc.returncode}):\n{out}')
+            if _port_open('127.0.0.1', port):
+                break
+            time.sleep(_VITE_POLL_INTERVAL)
+        else:
+            raise RuntimeError(
+                f'vite dev server not ready on :{port} within {_VITE_READINESS_TIMEOUT}s',
+            )
+        yield f'http://127.0.0.1:{port}'
+    finally:
+        _terminate_process_group(proc)
+
+
+@pytest.fixture
+def page_ws(vite_dev_server_ws):
+    """L4 用 Playwright page：每 case 独立 browser context + 导航到 Vite（ASGI 后端）。
+
+    与 ``page`` fixture 等价，仅依赖链不同：daphne_server → vite_dev_server_ws → page_ws，
+    而非 live_server → vite_dev_server → page。dev hook（``__pinia`` / ``__apiFetch`` 等）
+    经 ``context.add_init_script`` 同态注入。
+    """
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch()
+        try:
+            context = browser.new_context()
+            context.add_init_script(_TEST_HOOKS_INIT_SCRIPT)
+            pg = context.new_page()
+            pg.goto(vite_dev_server_ws, wait_until='domcontentloaded')
             yield pg
         finally:
             browser.close()
