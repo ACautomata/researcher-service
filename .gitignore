@@ -18,8 +18,8 @@ uploads/*
 # 临时文件
 *.log
 
-# Claude Code 本地配置
-.claude/
+# Claude Code —— skills/workflows/memory/agents 等配置随仓库版本化
+# （.claude/ 不再全量忽略；敏感 session 文件由子目录各自的 .gitignore 控制）
 
 # 本地虚拟环境 / pytest 缓存
 .venv/

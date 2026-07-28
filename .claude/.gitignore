@@ -1,0 +1,3 @@
+# session/tool-result 临时文件不版本化
+worktrees/
+settings.local.json
