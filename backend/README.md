@@ -67,7 +67,7 @@ JSON 内仅 `${GATEWAY_TOKEN}` 占位（不落盘）。
 
 ### integration smoke（需真 daemon）
 
-靠 docker daemon 自动探测门控（有 daemon 即 collect，无则 skip）；CI 即便有 daemon，也因缺 `OPENCLAW_TEMPLATE_DIR`/`LLM_API_KEY` 在用例内 skip。手动验证建/删容器真实链路：
+门控同下方 wire 段：`pytestmark = pytest.mark.integration`（env 缺失直接 fail，不跳过）；CI `backend-unit` job 经 `-m "not integration"` 排除，`integration` job env 齐备时真跑。手动验证建/删容器真实链路：
 
 ```bash
 export OPENCLAW_TEMPLATE_DIR=/path/to/researcher     # git clone ACautomata/researcher
@@ -95,8 +95,9 @@ chat.send 冒烟、事件流 schema、只读 RPC schema、exec 审批路径 sche
 **门控——integration marker（非 `RUN_INTEGRATION`）**：测试文件 `pytestmark = pytest.mark.integration`，
 **无 skip**，env 缺失直接 fail（强制环境就绪，不靠 skip 兜底）。CI 双轨（`.github/workflows/ci.yml`）：
 `backend-unit` job 跑 `-m "not integration"` 排除真容器；`integration` job env 齐备时跑 `-m "integration"` 真验证。
-区别于上方 `containers/tests/test_integration.py`（#94 smoke）的 `DockerDaemonProbe` daemon 探测门控（有 daemon
-即 collect、无则 skip）—— wire schema 测试用 marker 门控更严：不 skip，env 缺即 fail。
+上方 `containers/tests/test_integration.py`（#94 smoke）共用同一 `pytestmark = pytest.mark.integration` 门控
+（#157 统一重构自旧的 daemon 探测+skip）——两者仅覆盖面（容器生命周期/配对/chat/wiki 全链路 vs. chat
+wire schema）与镜像（fork 默认 vs. ghcr 官方）不同，门控一致。
 
 **本地怎么跑**（须 docker daemon + 三件套 env）：
 
