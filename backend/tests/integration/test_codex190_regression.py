@@ -1,6 +1,6 @@
 """回归测试:L4 daphne ASGI 基础设施修复(codex #190 P1/P2)。
 
-覆写四项:
+覆写五项:
 1. Daphne 启动路径——用 ``sys.executable -m daphne`` 而非硬编码 ``.venv/bin/daphne``。
 2. Integration settings DB ``NAME``——直接覆盖 ``NAME``（非仅 ``TEST['NAME']``），
    确保 ``manage.py migrate`` 和 daphne 子进程均读写 ``test_db_file.sqlite3``。
@@ -8,6 +8,8 @@
    携带 ``token`` 参数（非 undefined）。
 4. Test DB 文件清理——``daphne_server`` fixture teardown 时删除 ``test_db_file.sqlite3``
    及其 WAL/SHM 侧文件，避免工作目录污染。
+5. ``DATABASES`` 深拷贝——``from .dev import *`` 是别名引用；深拷贝后覆写 NAME
+   不会反向污染 ``config.settings.dev.DATABASES``。
 
 本档不跑真 browser/daphne，仅验证模块构造与契约成立。
 """
@@ -100,4 +102,31 @@ def test_conftest_cleans_up_test_db():
     )
     assert 'missing_ok=True' in src, (
         'conftest must use missing_ok=True for idempotent cleanup'
+    )
+
+
+def test_integration_deepcopies_databases():
+    """验证 integration settings 导入不会污染 dev DATABASES（codex #190 P2）。
+
+    ``from .dev import *`` 是别名引用——不深拷贝直接覆写 NAME 会等量修改
+    ``config.settings.dev.DATABASES``，干扰同一进程内的 pytest-django。
+    """
+    import config.settings.dev
+
+    dev_name_before = config.settings.dev.DATABASES['default'].get('NAME', '')
+
+    import config.settings.integration
+
+    integration_name = config.settings.integration.DATABASES['default']['NAME']
+    dev_name_after = config.settings.dev.DATABASES['default'].get('NAME', '')
+
+    assert 'test_db_file' in integration_name, (
+        f'integration NAME must point to test_db_file, got {integration_name!r}'
+    )
+    assert dev_name_before == dev_name_after, (
+        f'importing integration settings must not mutate dev.DATABASES: '
+        f'before={dev_name_before!r} after={dev_name_after!r}'
+    )
+    assert dev_name_after != integration_name, (
+        'dev and integration must use different database files'
     )

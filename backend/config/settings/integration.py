@@ -10,8 +10,12 @@ pytest-django 的 dev.py ``TEST['NAME']`` 缺省时 Django SQLite backend 返回
 本 settings 通过覆盖 ``NAME``（而非仅 ``TEST['NAME']``）强制文件级 SQLite，
 ``manage.py migrate`` 和 daphne 进程均读写该文件（codex #190 P2）。
 """
+import copy
+
 from .dev import *
 
-# 覆盖默认 NAME（而非仅 TEST['NAME']）：manage.py migrate / daphne 子进程
-# 的 Django ORM 读 NAME 而非 TEST['NAME']，后者仅 pytest-django 使用。
+# 深拷贝 DATABASES，避免 from .dev import * 的别名引用（codex #190 P2）。
+# star import 使 DATABASES 指向 dev 模块的同一 dict 对象；不拷贝直接覆写
+# NAME 会同等修改 config.settings.dev.DATABASES，干扰同一进程内的 pytest-django。
+DATABASES = copy.deepcopy(DATABASES)
 DATABASES['default']['NAME'] = str(BASE_DIR / 'test_db_file.sqlite3')
