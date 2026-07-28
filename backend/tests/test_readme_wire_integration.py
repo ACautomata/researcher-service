@@ -17,6 +17,7 @@ import pytest
 
 # backend/tests/test_readme_wire_integration.py -> backend/tests/ -> backend/
 README = Path(__file__).resolve().parents[1] / "README.md"
+WIRE_TEST = Path(__file__).resolve().parents[1] / "chat" / "tests" / "test_integration_wire.py"
 _WIRE_SECTION_HEADER = "### chat wire schema 集成测试"
 _SMOKE_SECTION_HEADER = "### integration smoke"
 
@@ -119,3 +120,23 @@ def test_readme_container_smoke_gate_matches_code() -> None:
     assert "pytest.mark.integration" in smoke_section, (
         "容器 smoke 段未说明 integration marker 门控机制（与现实代码一致）"
     )
+
+
+def test_readme_wire_env_requiredness_matches_code() -> None:
+    """回归（codex #170 R2 P2）：wire 段 env 必需性描述须与代码读取方式一致。
+
+    真值源：``chat/tests/test_integration_wire.py`` 实际读取——``OPENCLAW_TEMPLATE_DIR``/
+    ``LLM_API_KEY`` 经 ``os.environ[...]`` 下标读取（缺失 KeyError→fail，必需）；
+    ``OPENCLAW_IMAGE`` 经 ``os.environ.get(..., default)`` 读取（缺省用 ghcr 默认，可选）。
+    README 不得把三件套统称「缺一不可」——会误导本地跑测者多设一个无必要的 env。
+    """
+    wire_src = WIRE_TEST.read_text(encoding="utf-8")
+    # 代码现实锚定：OPENCLAW_IMAGE 可选（get+default），另两个必需（下标访问）
+    assert "os.environ.get('OPENCLAW_IMAGE'" in wire_src, (
+        "wire 测试 OPENCLAW_IMAGE 读取方式已变（原 get+default=可选），须同步本测试与 README"
+    )
+    assert "os.environ['OPENCLAW_TEMPLATE_DIR']" in wire_src
+    assert "os.environ['LLM_API_KEY']" in wire_src
+    section = _extract_section(_load(), _WIRE_SECTION_HEADER)
+    assert "缺一不可" not in section, "wire 段统称三件套「缺一不可」与代码不符（OPENCLAW_IMAGE 可选）"
+    assert "可选" in section, "wire 段须标明 OPENCLAW_IMAGE 可选（与代码 os.environ.get 默认一致）"

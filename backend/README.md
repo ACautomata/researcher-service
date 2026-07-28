@@ -84,11 +84,11 @@ python -m pytest containers/tests/test_integration.py -v
 既是已修 bug（PR #152 / #153 / #154）的回归防护，又是 wire schema 契约的长期基线。覆盖 T1–T5 五个用例：
 chat.send 冒烟、事件流 schema、只读 RPC schema、exec 审批路径 schema、工具调用事件 schema。
 
-**env 三件套**（缺一不可，门控见下）：
+**env 三件套**（`OPENCLAW_TEMPLATE_DIR`/`LLM_API_KEY` 必需；`OPENCLAW_IMAGE` 可选，缺省用下方 ghcr 官方镜像。门控见下）：
 
 | env | 用途 |
 |---|---|
-| `OPENCLAW_IMAGE` | 覆盖 #94 fork 默认，指向 ghcr 官方镜像（`ghcr.io/openclaw/openclaw:2026.6.34-browser`） |
+| `OPENCLAW_IMAGE` | **可选**（缺省默认 `ghcr.io/openclaw/openclaw:2026.6.34-browser`，覆盖 #94 fork 默认） |
 | `OPENCLAW_TEMPLATE_DIR` | 容器 home 模板源（bind-mount 白名单路径，非 `/tmp`） |
 | `LLM_API_KEY` | 全面板共享 LLM key（注入容器，不落盘） |
 
