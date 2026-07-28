@@ -89,7 +89,7 @@ def test_conftest_daphne_cmd_uses_sys_executable():
 def test_conftest_cleans_up_test_db():
     """验证 ``conftest.py`` ``daphne_server`` fixture teardown 清理 test DB 文件（codex #190 P2）。
 
-    避免 test_db_file.sqlite3 残留在工作目录中，污染后续运行。
+    覆盖主文件、WAL、SHM、rollback journal，避免工作目录污染和跨运行状态残留。
     """
     conftest_path = BACKEND_DIR / 'tests' / 'integration' / 'conftest.py'
     src = conftest_path.read_text()
