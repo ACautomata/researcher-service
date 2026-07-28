@@ -257,9 +257,12 @@ def daphne_server(request, django_db_setup):
         yield f'http://127.0.0.1:{port}'
     finally:
         _terminate_process_group(proc)
-        # 清理文件级 test DB 及其 WAL/SHM 侧文件（codex #190 P2）
+        # 清理文件级 test DB 及其 sidecar 文件（codex #190 P2）
         _test_db = BACKEND_DIR / 'test_db_file.sqlite3'
-        for _p in (_test_db, _test_db.with_suffix('.sqlite3-wal'), _test_db.with_suffix('.sqlite3-shm')):
+        for _p in (_test_db,
+                   _test_db.with_suffix('.sqlite3-wal'),
+                   _test_db.with_suffix('.sqlite3-shm'),
+                   _test_db.with_suffix('.sqlite3-journal')):
             try:
                 _p.unlink(missing_ok=True)
             except OSError:
