@@ -340,28 +340,7 @@ def test_401_triggers_silent_refresh_and_retry(page):
     refresh_tokens = [c for c in cookies if c['name'] == 'refresh_token']
     assert refresh_tokens, 'refresh cookie must exist before calling __apiFetch'
 
-    # 6) 诊断：直接模拟 forceRefresh（与 auth.ts:forceRefresh 完全一致）
-    #     this.token='' 然后 fetch refresh endpoint credentials:'include'
-    diag = page.evaluate(
-        """
-        async () => {
-            // exact same logic as forceRefresh
-            window.__pinia.state.value.auth.token = '';
-            const resp = await fetch('/api/v1/auth/token/refresh', {
-                method: 'POST',
-                credentials: 'include',
-            });
-            let body = null;
-            try { body = await resp.json(); } catch(_) {}
-            window.__pinia.state.value.auth.token = body?.access || '';
-            return {status: resp.status, ok: resp.ok, hasAccess: !!body?.access};
-        }
-        """,
-    )
-    # This diag simulates forceRefresh EXACTLY
-    assert diag['ok'], f'simulated forceRefresh failed: {diag}'
-
-    # 7) 直接用 __apiFetch 调 /me（此时 refresh 已在上一步消耗，所以预期失败——新 cookie）
+    # 6) 直接用 __apiFetch 调 /me —— apiFetch 收到 401 → auth.forceRefresh() → 换新 → 重试成功
     result = page.evaluate(
         """
         async () => {
@@ -434,23 +413,12 @@ def test_logout_exhausts_refresh_and_redirects_to_login(page):
     token = page.evaluate("() => window.__pinia.state.value.auth.token")
     assert token, 'login must set Pinia token'
 
-    # 4) 调 logout。apiFetch 会注入当前 token 为 Bearer header，后端 200→清 cookie。
-    #    但 auth.logout action 用 store 里的原始 fetch（不走 apiFetch），直接在 JS 侧调
+    # 4) 调真实 auth.logout() action → 后端清 httpOnly cookie + store 自动更新
     page.evaluate(
         """
         async () => {
-            // 模拟 auth.logout：有 token，用 raw fetch 调 logout
-            const token = window.__pinia.state.value.auth.token;
-            try {
-                await fetch('/api/v1/auth/logout', {
-                    method: 'POST',
-                    headers: {'Authorization': `Bearer ${token}`},
-                    credentials: 'include',
-                });
-            } catch (_) {}
-            // 然后模拟 action 的后段：清 store
-            window.__pinia.state.value.auth.token = '';
-            window.__pinia.state.value.auth.refreshExhausted = true;
+            const store = window.__pinia._s.get('auth');
+            await store.logout();
         }
         """,
     )
