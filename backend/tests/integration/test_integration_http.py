@@ -21,6 +21,10 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from django.conf import settings
 
+from containers.models import Instance
+from containers.orchestrator import Fleet, FleetConfig, InstanceOrchestrator
+from containers.tests.fakes import FakeHealthProbe
+
 # 真链路集成测试（issue #157/#178）：CI integration job env 齐备时真跑；backend-unit job 经
 # `-m "not integration"` 排除，默认 `python -m pytest` 不跑（不污染单元回归）。
 pytestmark = pytest.mark.integration
@@ -539,40 +543,92 @@ def _list_instances(page) -> dict:
     )
 
 
-class _DaemonlessFakeOrchestrator:
-    """不碰 docker daemon 的 orchestrator 替身（``Fleet.override`` 注入）。
+class _RaisingRuntime:
+    """所有 docker 操作必抛 + 记录调用计数（L2a daemon-independent 守护，#181；codex #187 P2 线598）。
 
-    codex #187 P2：原空 fleet case 仅靠空 DB 早返回拿 ``[]``，未证明「daemon 不可用亦可降级」
-    ——CI integration job 预拉 OpenClaw 镜像 + 起 docker service，空 DB 路径根本没机会接触 daemon，
-    故若后续回归让 ``list()`` 在空 fleet 时也试连 daemon，断言的 ``[]`` 仍会绿。本替身把 ``list()``
-    钉成确定行为（test 直接决定返 ``[]`` 还是非空 schema 项），使两个 case 都摆脱对 daemon 存活的
-    依赖，真正锁死「daemon 不可用时 GET /api/v1/containers/ 仍返数组」与「非空项 schema 对齐」契约。
-
-    仅供 ``Fleet.override`` 用；每个 case ``Fleet.reset()`` 收尾还原单例，杜绝跨 case 泄漏。
+    实现 ContainerRuntime Protocol（结构子类型）：每个 docker 方法 raise 并计数，模拟 daemon
+    完全不可达。**关键：保留真实 InstanceOrchestrator.list() 生产路径**（不替 list），仅注入本 runtime
+    ——空 fleet 时 list() 在 ``orchestrator.py:580`` ``if not insts: return []`` 短路、STATUS_CREATING
+    行 ``_build_item`` 透传不碰 runtime（``orchestrator.py:491``），故空 fleet 下 runtime.calls==0。
+    若回归让 list 在短路前 / creating 行之外调 runtime，本类抛错 → view 500 → 联调断言红，回归被捕获。
+    这正是 codex #187 P2 线598 所要求：fake list 会绕过生产路径让该回归假绿，必须走真实 list +
+    raising runtime。
     """
 
-    def __init__(self, items: list[dict]) -> None:
-        self._items = items
+    _MSG = 'RaisingRuntime: docker daemon deliberately unavailable (L2a degradation guard)'
 
-    def list(self) -> list[dict]:
-        """返回构造期既定的项列表——不读 DB、不挂线程池、不连 daemon。"""
-        return list(self._items)
+    def __init__(self) -> None:
+        self.calls = 0
 
-    # 其余 orchestrator 方法本 case 不经由（view 仅调 list）；留空满足鸭子类型即可。
+    def _raise(self) -> None:
+        self.calls += 1
+        raise RuntimeError(self._MSG)
+
+    def run(self, spec):  # 结构子类型，签名对齐 ContainerRuntime
+        self._raise()
+
+    def list_fleet(self) -> None:
+        self._raise()
+
+    def get(self, name):
+        self._raise()
+
+    def stop(self, name):
+        self._raise()
+
+    def remove(self, name):
+        self._raise()
+
+    def exec_in_container(self, name, cmd):
+        self._raise()
+
+    def exec_sync(self, name, cmd):
+        self._raise()
 
 
-def _seed_fake_fleet(items: list[dict]) -> None:
-    """``Fleet.override`` 注入 ``_DaemonlessFakeOrchestrator(items)``，供 L2a 降级/schema case 隔离。"""
-    from containers.orchestrator import Fleet
+def _override_fleet_with_raising_runtime(tmp_path) -> _RaisingRuntime:
+    """注入真实 InstanceOrchestrator（RaisingRuntime）到 Fleet 单例，返回 runtime 供调用计数断言。
 
-    Fleet.override(_DaemonlessFakeOrchestrator(items))
+    保留生产 list() 路径（不替 list），仅把 runtime 换成 docker 访问必抛的替身（codex #187 P2 线598）。
+    ``Fleet.override`` 在测试进程设类变量，threaded live server 同进程同类变量可见——HTTP 请求在
+    live server 线程调 ``Fleet.get().list()`` 用本 orchestrator。调用方须 finally ``Fleet.reset()`` 还原。
+    """
+    cfg = FleetConfig(
+        root=tmp_path / 'fleet',
+        template_dir=tmp_path / 'template',
+        template_json='{}',
+        image='img:tag',
+        port_start=19000,
+        port_end=19999,
+        llm_api_key='sk-test',
+    )
+    runtime = _RaisingRuntime()
+    Fleet.override(
+        InstanceOrchestrator(runtime=runtime, config=cfg, health_probe=FakeHealthProbe()),
+    )
+    return runtime
 
 
 def _reset_fleet() -> None:
     """还原 ``Fleet`` 单例（null → 下次 get 重建默认 orchestrator），防 L2a 替身泄漏到后续 case。"""
-    from containers.orchestrator import Fleet
-
     Fleet.reset()
+
+
+@pytest.fixture
+def l2a_creating_instance():
+    """种一条 ``STATUS_CREATING`` Instance 行供 L2a-b 真实 ``list()`` 路径序列化（#181）。
+
+    必须在 ``page``（sync_playwright）之前实例化——Playwright sync API 的 Greenlet event loop 内
+    Django ORM 触发 ``SynchronousOnlyOperation``（同 L1 forged-token 不调 ORM 的原因）。fixture 按
+    参数声明顺序先于 ``page`` 实例化，故种行在 sync_playwright 上下文之外。test 的
+    ``django_db(transaction=True)`` 下 commit，threaded live server 线程跨 DB 连接可见（spec #178）。
+    """
+    return Instance.objects.create(
+        name=f'l2a-real-{_username_suffix()}',
+        port=19001,
+        image='ghcr.io/openclaw/openclaw:2026.6.34-browser',
+        status=Instance.STATUS_CREATING,
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -580,31 +636,36 @@ def _reset_fleet() -> None:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-def test_l2a_empty_fleet_returns_array_without_daemon(page):
-    """L2a-a：daemon 不可用时 ``GET /api/v1/containers/`` 仍返 ``[]``（#181；codex #187 P2）。
+def test_l2a_empty_fleet_returns_array_without_daemon(page, tmp_path):
+    """L2a-a：daemon 不可用时 ``GET /api/v1/containers/`` 仍返 ``[]``（#181；codex #187 P2 线464/598）。
 
-    旧 case 只在空 DB 下获 ``[]``，而 CI integration job 预装可用的 docker service——空 DB 早
-    返回让 daemon 根本未被触碰，于是「降级返回空数组」这一承诺并未被测试真证（回归让空 fleet 也
-    试连 daemon 时断言仍绿）。本 case 注入 ``_DaemonlessFakeOrchestrator([])``：``Fleet.list()``
-    被钉死返 ``[]``、测试期间任何 daemon 存活与否都与断言无关，从而坐实「daemon-independent 降级」。
+    保留真实 ``InstanceOrchestrator.list()`` 生产路径，仅注入 docker 访问必抛的 ``RaisingRuntime``。
+    空 fleet 时 ``list()`` 在 ``orchestrator.py:580`` ``if not insts: return []`` 短路——不进
+    ``_reconcile_creating``、不碰 runtime。故断言 ``[]`` **且** ``runtime.calls == 0``，真正坐实
+    「空 fleet 不连 daemon」。若回归让 list 在空 fleet 也碰 runtime，runtime 抛错 → view 500 →
+    断言红，回归被捕获。codex #187 P2 线598 明确：fake list（替掉生产 ``list()``）会让该回归假绿，
+    故必须走真实 ``list()`` + raising runtime。
 
-    登录后经 ``window.__listInstances()`` 走真 ``apiJson``→``apiFetch`` 链路（JWT 注入 + 401 重试），
-    断言 2xx + body 为 ``[]``。
+    登录后经 ``window.__listInstances()`` 走真 ``apiJson``→``apiFetch`` 链路（JWT 注入 + 401 重试）。
     """
     suffix = _username_suffix()
     username = f'l2a-empty-{suffix}'
     password = 'testpass1234'
 
-    _seed_fake_fleet([])
+    runtime = _override_fleet_with_raising_runtime(tmp_path)
     try:
         _login(page, username, password)
         result = _list_instances(page)
         assert result['ok'], f'listInstances() rejected: {result.get("err")}'
         data = result['data']
 
-        # 契约：body 必须为空数组（fake orchestration 返 []，daemon 存活与否无关）
+        # 降级契约：空 fleet → []，且全程不碰 docker daemon（list 短路在 reconcile 之前）
         assert isinstance(data, list), f'containers list must be an array, got {type(data).__name__}'
-        assert data == [], f'empty daemonless fleet must degrade to [], got {data!r}'
+        assert data == [], f'empty fleet must degrade to [], got {data!r}'
+        assert runtime.calls == 0, (
+            f'empty-fleet list must short-circuit without touching docker, '
+            f'but RaisingRuntime was called {runtime.calls} time(s)'
+        )
     finally:
         _reset_fleet()
 
@@ -614,49 +675,38 @@ def test_l2a_empty_fleet_returns_array_without_daemon(page):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-def test_l2a_nonempty_fleet_fields_align_to_serializer(page):
-    """L2a-b：非空响应字段类型与 ``InstanceSerializer`` 对齐（#181；codex #187 P2 线 533）。
+@pytest.mark.django_db(transaction=True)
+def test_l2a_nonempty_fleet_fields_align_to_serializer(l2a_creating_instance, page, tmp_path):
+    """L2a-b：非空响应字段类型与 ``InstanceSerializer`` 对齐（#181；codex #187 P2 线533/598）。
 
-    旧 case 在空 fleet 下 ``if not data: return`` 早退，导致 advertised 的 InstanceDTO
-    字段断言永不执行；若 ``InstanceSerializer``/``InstanceDTO`` 契约改动（增删字段、改类型），
-    本该红的契约测试会假绿。本 case 注入 ``_DaemonlessFakeOrchestrator`` 返回一条与
-    ``_item()`` 形状对齐的非空项，让 view 经真 ``InstanceSerializer(many=True)`` 序列化，
-    从而跑到 ``_assert_instance_dto_contract``——把死契约复活成断言。
+    走真实 ``InstanceOrchestrator.list()`` 生产路径：``l2a_creating_instance`` fixture 种一条
+    ``STATUS_CREATING`` Instance 行（``_build_item`` 对 creating 行透传不碰 runtime，``orchestrator.py:491``），
+    注入 ``RaisingRuntime`` 证明即便 daemon 全坏非空 list 仍能序列化返 2xx。view 经真
+    ``InstanceSerializer(many=True)`` 序列化该行，``_assert_instance_dto_contract`` 字段类型断言
+    可达——解决 codex 线533（旧空 fleet early return 使字段断言死代码）。
 
-    不种 ``Instance`` DB 行 / 不碰 docker daemon：fake orchestration 直接喂项，view 的
-    pairing 批量查询在无 ``Pairing`` 行时回退 ``build_pairing_status_default()``，故 ``pairing``
-    字段仍由 view 注入、契约断言仍可达。复用 ``_assert_instance_dto_contract`` 锁定 schema。
+    注：``_reconcile_creating`` 对 CREATING 行会调一次 ``runtime.get``（被 ``orchestrator.py:551``
+    catch、不阻断 list），故本 case 不查精确 ``runtime.calls``；daemon-independent 由
+    ``result['ok']`` + 非空序列化守护（若回归让 creating 行也走 runtime，runtime 抛错 → 500 → 红）。
     """
     suffix = _username_suffix()
     username = f'l2a-nonempty-{suffix}'
     password = 'testpass1234'
+    instance_name = l2a_creating_instance.name
 
-    # 与 orchestrator._item() 形状对齐的非空项（不含 pairing——view 会注入默认 pairing 快照）。
-    # created_at 用 ISO 串：``InstanceSerializer.created_at = DateTimeField(read_only=True)`` 序列化
-    # 解释 datetime 或 ISO 字符串均产 ISO 串。经真 serializer 序列化后契约断言即覆盖 InstanceDTO。
-    fake_items = [
-        {
-            'name': 'l2a-fake-1',
-            'port': 19001,
-            'status': 'stopped',
-            'health': 'stopped',
-            'image': 'ghcr.io/openclaw/openclaw:2026.6.34-browser',
-            'container_id': '',
-            'created_at': datetime.now(UTC).isoformat(),
-        },
-    ]
-    _seed_fake_fleet(fake_items)
+    _override_fleet_with_raising_runtime(tmp_path)
     try:
         _login(page, username, password)
         result = _list_instances(page)
         assert result['ok'], f'listInstances() rejected: {result.get("err")}'
         data = result['data']
 
-        # 非空契约：fake orchestration 喂入一项，view 序列化后 body 必为长度 1 的数组
+        # 非空契约：一条 CREATING 行经真实 list() + 真 serializer 序列化后必为长度 1 的数组
         assert isinstance(data, list), f'containers list must be an array, got {type(data).__name__}'
-        assert len(data) == 1, f'nonempty fake must yield exactly 1 item, got {len(data)}: {data!r}'
+        assert len(data) == 1, f'one CREATING row must yield 1 item, got {len(data)}: {data!r}'
 
         # 每元素字段类型与 InstanceSerializer 对齐——原断言从「dead code」复活成可达的 schema 条约
+        assert data[0]['name'] == instance_name, f'item name mismatch: {data[0]!r}'
         _assert_instance_dto_contract(data[0])
     finally:
         _reset_fleet()
