@@ -12,6 +12,7 @@ logout 分支能从干净态精确触发的前提（#178 user story 10）。
 ``playwright install chromium`` + frontend ``npm ci``（vite dev server 依赖）。
 """
 import os
+import signal
 import socket
 import subprocess
 import time
@@ -54,6 +55,7 @@ def vite_dev_server(live_server):
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
+        start_new_session=True,
     )
     try:
         deadline = time.monotonic() + _VITE_READINESS_TIMEOUT
@@ -70,11 +72,29 @@ def vite_dev_server(live_server):
             )
         yield f'http://127.0.0.1:{VITE_PORT}'
     finally:
-        proc.terminate()
+        _terminate_process_group(proc)
+
+
+def _terminate_process_group(proc: subprocess.Popen) -> None:
+    """收掉 vite dev server 子进程树（npm→vite）。
+
+    POSIX 上 ``npm run dev`` 把 vite 作子孙进程拉起;teardown 若只对 npm 发信号,
+    vite 孤儿会继续监听 5173,下一个 function 级 fixture 因 ``--strictPort`` 绑不上而
+    失败,后续 case 叠加泄漏。配合 ``start_new_session=True``(见 fixture)把 npm 树
+    隔离进独立进程组(pgid==npm.pid),这里对整组收信号。
+    """
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
         try:
-            proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            proc.kill()
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        proc.wait(timeout=5)
 
 
 @pytest.fixture
