@@ -5,7 +5,7 @@ body {id, kind, decision} → 经该容器 pool client 发 approval.resolve（�
 WS 路径（consumer resolve）为主；REST 为回退/外部触发。受全局 IsAuthenticated 保护。
 
 验收映射：
-- 回覆成功 → 200 {ok:true, id, decision}（验收 2：批准/拒绝后结果回写）
+- 回覆成功 → 200 {ok:true, id, ...}（issue #200：透传网关 ack payload 有价值字段，如权威 decision）
 - 缺字段 → 400；容器不存在 → 404；非法 name → 400；未配对 → 409；网关拒绝 → 502
 """
 import pytest
@@ -85,18 +85,28 @@ def test_resolve_success(authed, instance, override_pool):
     override_pool(_FakePool(client))
     resp = authed.post(URL, {'id': 'ap-1', 'kind': 'exec', 'decision': 'allow-once'}, format='json')
     assert resp.status_code == 200
-    # codex P2 #163：resolve ack 只返回 ok:true（无 decision——权威值由 resolved 事件广播）
+    # 网关 ack payload 为空 → 响应即受理回执本体 {ok, id}（payload 有价值字段时透传，见下）
     assert resp.json() == {'ok': True, 'id': 'ap-1'}
     assert client.resolved == [('ap-1', 'exec', 'allow-once')]
 
 
 def test_resolve_returns_ok(authed, instance, override_pool):
-    """codex P1/P2 #163：REST resolve 不回送权威 decision——ack payload 无 decision 字段。"""
-    client = _FakeClient(payload={'id': 'ap-1', 'decision': 'deny'})
+    """issue #200 问题 4：REST resolve 透传网关 ack payload 中有价值字段——first-answer-wins 下
+    权威 decision/decidedBy 可能与本请求不同，调用方须拿得到权威结果（不再只回 {'ok': True}）。"""
+    client = _FakeClient(payload={'id': 'ap-1', 'decision': 'deny', 'decidedBy': 'other-op'})
     override_pool(_FakePool(client))
     resp = authed.post(URL, {'id': 'ap-1', 'kind': 'exec', 'decision': 'allow-once'}, format='json')
     assert resp.status_code == 200
-    assert 'decision' not in resp.json()
+    assert resp.json() == {'ok': True, 'id': 'ap-1', 'decision': 'deny', 'decidedBy': 'other-op'}
+
+
+def test_resolve_payload_cannot_override_ok_and_id(authed, instance, override_pool):
+    """透传有边界：payload 不得覆盖 ok/id（本端受理结果为准），防异常 payload 污染响应语义。"""
+    client = _FakeClient(payload={'ok': False, 'id': 'ap-evil', 'decision': 'deny'})
+    override_pool(_FakePool(client))
+    resp = authed.post(URL, {'id': 'ap-1', 'kind': 'exec', 'decision': 'allow-once'}, format='json')
+    assert resp.status_code == 200
+    assert resp.json() == {'ok': True, 'id': 'ap-1', 'decision': 'deny'}
 
 
 def test_resolve_no_broadcast_to_ws_subscribers(authed, instance, override_pool):
