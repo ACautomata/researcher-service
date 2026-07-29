@@ -3,9 +3,9 @@
 PairingStatusSerializer：配对状态出参。绝不外泄私钥（private_key_pem）与
 device_token（凭证）——仅暴露 status/device_id/scopes/pairing_request_id。
 """
-from rest_framework import serializers
+import json
 
-from chat.models import Pairing
+from rest_framework import serializers
 
 
 class ApprovalResolveSerializer(serializers.Serializer):
@@ -43,6 +43,14 @@ class SessionCreateSerializer(serializers.Serializer):
         return value
 
 
+# containers 实例列表批量预取的 values() 投影字段（issue #199 问题6-4）：只取
+# PairingStatusSerializer 需要的状态字段，避免整行加载触发 private_key_pem/device_token
+# 的 AES-GCM 解密。wire 字段字面量单源在 chat 侧（跨 app 泄漏契约由 integration 契约测试锁定）。
+PAIRING_STATUS_PROJECTION = (
+    'instance__name', 'status', 'device_id', 'scopes_json', 'pairing_request_id',
+)
+
+
 class PairingStatusSerializer(serializers.Serializer):
     """配对状态出参（read-only）。"""
 
@@ -52,5 +60,12 @@ class PairingStatusSerializer(serializers.Serializer):
     pairing_request_id = serializers.CharField(read_only=True)
     detail = serializers.CharField(read_only=True, required=False)
 
-    def get_scopes(self, obj: Pairing) -> list[str]:
+    def get_scopes(self, obj) -> list[str]:
+        # issue #199 问题6-4：兼容 containers 实例列表的 values() 投影 dict
+        # （只取状态字段避免整行加载触发密文字段解密）；模型实例维持 scopes_list()。
+        if isinstance(obj, dict):
+            try:
+                return json.loads(obj.get('scopes_json') or '[]') or []
+            except (ValueError, TypeError):
+                return []
         return obj.scopes_list()

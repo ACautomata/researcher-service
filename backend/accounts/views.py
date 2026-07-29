@@ -5,7 +5,9 @@ from rest_framework import status
 from rest_framework.parsers import JSONParser
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
+from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
+from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import TokenRefreshView
 
@@ -20,12 +22,25 @@ from .serializers import (
 
 
 class RegisterView(APIView):
-    """本地账号注册（spec §3）。公开，不参与 JWT 拦截。"""
+    """本地账号注册（spec §3）。公开，不参与 JWT 拦截。
+
+    issue #199 问题1：注册由 REGISTRATION_ENABLED 开关门控（base 默认关闭，
+    dev 默认开启）——控制面无对象级授权 + docker.sock 等价 root，开放注册 ≈
+    开放的宿主 root 后门。关闭时返回 403；首用户经 createsuperuser 创建。
+    """
 
     permission_classes = (AllowAny,)
+    # issue #199 问题3：auth 端点组限速（scope='auth'，base.py DEFAULT_THROTTLE_RATES）
+    throttle_classes = (ScopedRateThrottle,)
+    throttle_scope = 'auth'
 
-    @extend_schema(request=RegisterSerializer, responses={201: UserSerializer})
+    @extend_schema(request=RegisterSerializer, responses={201: UserSerializer, 403: None})
     def post(self, request):
+        if not settings.REGISTRATION_ENABLED:
+            return Response(
+                {'detail': '注册已关闭，请联系管理员创建账号'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
         ser = RegisterSerializer(data=request.data)
         ser.is_valid(raise_exception=True)
         user = ser.save()
@@ -39,6 +54,9 @@ class LoginView(APIView):
     # codex round-4 F4：只接受 JSON。HTML <form> 无法发 application/json，
     # 故切断跨站表单登录 CSRF（攻击者无法用跨站 form 在受害者浏览器种攻击者 refresh cookie）。
     parser_classes = (JSONParser,)
+    # issue #199 问题3：auth 端点组限速，防口令爆破/账号枚举（超限 429）
+    throttle_classes = (ScopedRateThrottle,)
+    throttle_scope = 'auth'
 
     @extend_schema(request=LoginSerializer, responses=AccessTokenSerializer)
     def post(self, request):
@@ -64,13 +82,30 @@ class CookieTokenRefreshView(TokenRefreshView):
     """刷新 access：从 httpOnly cookie 读 refresh（spec §3）。"""
 
     serializer_class = CookieTokenRefreshSerializer
+    # issue #199 问题3：auth 端点组限速（轮换后旧 refresh 已入黑名单，限速兜底爆破）
+    throttle_classes = (ScopedRateThrottle,)
+    throttle_scope = 'auth'
 
     @extend_schema(
         request=None,  # refresh 走 httpOnly cookie，无 body（codex P2-4）
         responses=AccessTokenSerializer,
     )
     def post(self, request, *args, **kwargs):
-        return super().post(request, *args, **kwargs)
+        response = super().post(request, *args, **kwargs)
+        # ROTATE_REFRESH_TOKENS（issue #199 问题3）：simplejwt 轮换后响应带新 refresh，
+        # 必须回写 httpOnly cookie——否则旧 refresh 入黑名单后下一轮刷新必然 401
+        # （cookie 仍持已吊销 token）。refresh 不出现在 body（spec §3，对齐 login）。
+        new_refresh = response.data.pop('refresh', None)
+        if new_refresh:
+            response.set_cookie(
+                'refresh_token',
+                new_refresh,
+                httponly=True,
+                samesite='Lax',
+                secure=not settings.DEBUG,
+                path='/api/v1/auth',
+            )
+        return response
 
 
 class LogoutView(APIView):
@@ -81,6 +116,15 @@ class LogoutView(APIView):
 
     @extend_schema(responses={204: None})
     def post(self, request):
+        # issue #199 问题3：登出把 cookie 中的 refresh 加入服务端黑名单（吊销会话），
+        # 不再仅清浏览器侧 cookie——cookie 被窃取/设备丢失时登出可真正终止会话。
+        # TokenError 幂等：已过期/已黑名单/伪造 token 不阻断登出主流程。
+        raw_refresh = request.COOKIES.get('refresh_token')
+        if raw_refresh:
+            try:
+                RefreshToken(raw_refresh).blacklist()
+            except TokenError:
+                pass
         response = Response(status=status.HTTP_204_NO_CONTENT)
         response.delete_cookie('refresh_token', path='/api/v1/auth')
         return response
