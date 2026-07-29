@@ -10,7 +10,7 @@ PairingService.ensure_paired(instance)：加载/创建设备身份 → 握手 �
 import pytest
 
 from chat.models import Pairing
-from chat.pairing import PairingService
+from chat.pairing import ExecPairingApprover, PairingService
 from chat.pairing_ws import PairingError, PairingRequired
 from chat.tests.fakes import FakeTransport
 from containers.models import Instance
@@ -224,6 +224,25 @@ def test_auto_approve_second_handshake_error_marks_status_error(instance):
 
 
 # ---------------------------- 事件循环上下文（ASGI 安全）----------------------------
+
+
+def test_exec_pairing_approver_wraps_runtime_error_as_pairing_error():
+    """codex P2 :2902641 review（chat/pairing.py:66）：DockerRuntime.exec_sync 在 approve CLI
+    退出码非零时抛 RuntimeError（Phase 2.1 改）。ExecPairingApprover 必须转译为 PairingError，
+    让 PairingService 的 STATUS_ERROR 路径生效——否则 RuntimeError 透传 = 配对行停留在 stale
+    actionable pending + 重握手替换原 requestId → 配对 churn 无限循环。
+    """
+    def _raise_runtime_error(instance_name, cmd):
+        raise RuntimeError(
+            f'exec_sync failed in {instance_name}: exit_code=1 cmd={cmd!r}',
+        )
+
+    approver = ExecPairingApprover(executor=_raise_runtime_error)
+    with pytest.raises(PairingError) as exc_info:
+        approver.approve('demo', 'req-1')
+    # 错误消息保留底层细节便于排错
+    assert 'exit_code=1' in str(exc_info.value)
+    assert 'demo' in str(exc_info.value)
 
 
 def test_run_handshake_inside_running_event_loop_thread():

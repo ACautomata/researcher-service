@@ -148,11 +148,25 @@ class DockerRuntime:
         # fire-and-forget（detach=True，wiki compile）。供 delete cleanup：容器以 root 跑，
         # bind-mount home 内由容器写入的文件属主为 root，须容器还在（root 权限）同步 chown 给
         # host uid 后再 stop/remove/rmtree——否则 host 非 root rmtree PermissionError（A3）。
+        #
+        # codex P2 :66（2902641 review）：docker SDK 的 exec_run 在命令退出码非零时返回
+        # ``ExecResult``（exit_code/output），并不抛异常。原实现 discard 返回值会让 approve
+        # CLI 失败（例如 token 不匹配 / request ID 过期）仍报成功，触发重握手 → 再生成新
+        # request ID → 原始 actionable pending 被替换 → 配对 churn 无限循环。这里捕获 exit_code
+        # 非零即抛 RuntimeError（含 output 片段便于排错），让 caller（ExecPairingApprover）
+        # 走 2902641 已加的 STATUS_ERROR 路径。
         try:
             c = self._client().containers.get(container_name(name))
         except NotFound:
             return
-        c.exec_run(cmd)
+        result = c.exec_run(cmd)
+        if result.exit_code != 0:
+            output = getattr(result, 'output', b'') or b''
+            output_str = output.decode('utf-8', errors='replace').strip() if hasattr(output, 'decode') else str(output)
+            raise RuntimeError(
+                f'exec_sync failed in {name}: exit_code={result.exit_code} '
+                f'cmd={cmd!r} output={output_str[:500]!r}',
+            )
 
     @staticmethod
     def _to_info(c) -> ContainerInfo:

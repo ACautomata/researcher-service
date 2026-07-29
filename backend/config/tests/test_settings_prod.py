@@ -64,3 +64,45 @@ def test_validate_prod_env_fail_fast_when_allowed_hosts_whitespace_only():
     """DJANGO_ALLOWED_HOSTS 仅空白 → 仍 fail-fast（防运维误设 ", , "）。"""
     with __import__('pytest').raises(ImproperlyConfigured):
         validate_prod_env(_minimal_env(DJANGO_ALLOWED_HOSTS='   '))
+
+
+def test_validate_prod_env_fail_fast_when_allowed_hosts_comma_only():
+    """codex P2 :2902641 review：DJANGO_ALLOWED_HOSTS=', ,' 仅原 strip() 通过（因为 "," 仍
+    是 content），让 prod.py 解析后空 ALLOWED_HOSTS → 启动成功但 DisallowedHost 拒请求。
+    现 split+filter 判空（与 prod.py 语义一致），纯逗号或纯空白也拒。
+    """
+    with __import__('pytest').raises(ImproperlyConfigured) as ei:
+        validate_prod_env(_minimal_env(DJANGO_ALLOWED_HOSTS=','))
+    assert 'DJANGO_ALLOWED_HOSTS' in str(ei.value)
+
+
+def test_validate_prod_env_fail_fast_when_allowed_hosts_comma_with_spaces():
+    """codex P2 :2902641 review 边界：', , '/', , ' 形式（split 后元素仍非空）→ 同样拒。"""
+    with __import__('pytest').raises(ImproperlyConfigured) as ei:
+        validate_prod_env(_minimal_env(DJANGO_ALLOWED_HOSTS=', , '))
+    assert 'DJANGO_ALLOWED_HOSTS' in str(ei.value)
+
+
+def test_validate_prod_env_fail_fast_when_template_dir_relative():
+    """codex P2 :2902641 review：OPENCLAW_TEMPLATE_DIR=researcher 相对路径被 validator
+    通过会让 prod 启动看似正常，但 HomeProvisioner 用 cwd 解析后 FileNotFoundError，
+    重复 issue #195「卡 creating」错配。Path.is_absolute() 必须拒相对路径。
+    """
+    with __import__('pytest').raises(ImproperlyConfigured) as ei:
+        validate_prod_env(_minimal_env(OPENCLAW_TEMPLATE_DIR='researcher'))
+    msg = str(ei.value)
+    assert 'OPENCLAW_TEMPLATE_DIR' in msg
+    # 错误消息明确告诉运维「必须是绝对路径」并显式当前值
+    assert '绝对路径' in msg
+    assert "'researcher'" in msg
+
+
+def test_validate_prod_env_fail_fast_when_template_dir_dot_relative():
+    """codex P2 :2902641 review 边界：'./researcher' / '../researcher' 等显式相对路径同样拒。"""
+    with __import__('pytest').raises(ImproperlyConfigured):
+        validate_prod_env(_minimal_env(OPENCLAW_TEMPLATE_DIR='./researcher'))
+
+
+def test_validate_prod_env_ok_when_template_dir_absolute():
+    """P2#3 反面：OPENCLAW_TEMPLATE_DIR 是合法绝对路径 → 正常通过。"""
+    validate_prod_env(_minimal_env(OPENCLAW_TEMPLATE_DIR='/srv/openclaw/template/researcher'))

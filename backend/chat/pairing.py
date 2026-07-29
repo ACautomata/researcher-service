@@ -63,7 +63,19 @@ class ExecPairingApprover:
         self._executor = executor
 
     def approve(self, instance_name: str, request_id: str) -> None:
-        self._executor(instance_name, _OPENCLAW_APPROVE_CMD + [request_id])
+        # codex P2 :2902641 review（chat/pairing.py:66）：DockerRuntime.exec_sync (2902641 +
+        # Phase 2.1 改) 在 approve CLI 退出码非零（token 不匹配 / request ID 过期 / 网关断连）
+        # 时抛 RuntimeError。仅让 RuntimeError 冒泡会让 PairingService 把它当未知失败、未走
+        # STATUS_ERROR 路径，原始 actionable pending 仍留在库里但上层以为是「没配对」触发重握手
+        # → 生成新 requestId → 替换原 actionable 请求 → 配对 churn 无限循环。
+        # 在这里转译为 PairingError（与 spec §8.1 配对错误统一），让 PairingService 的
+        # ``except PairingError`` 分支落 STATUS_ERROR，行不再 actionable。
+        try:
+            self._executor(instance_name, _OPENCLAW_APPROVE_CMD + [request_id])
+        except RuntimeError as e:
+            raise PairingError(
+                f'openclaw devices approve failed in {instance_name}: {e}',
+            ) from e
 
 
 class PairingConcurrencyError(Exception):
