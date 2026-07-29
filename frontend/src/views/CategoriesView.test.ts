@@ -10,6 +10,13 @@ vi.mock('@/api/wiki', () => ({
   readPage: vi.fn(),
 }))
 vi.mock('@/api/containers', () => ({ listInstances: vi.fn() }))
+vi.mock('element-plus', async (importOriginal) => {
+  const actual = (await importOriginal()) as Record<string, unknown>
+  return {
+    ...actual,
+    ElMessage: { success: vi.fn(), error: vi.fn(), warning: vi.fn() },
+  }
+})
 
 import CategoriesView from '@/views/CategoriesView.vue'
 import { useCategoriesStore } from '@/stores/categories'
@@ -148,5 +155,39 @@ describe('CategoriesView', () => {
     await wrapper.find('[data-test="cat-toggle"]').trigger('click')
     await flushPromises()
     expect(wrapper.findAll('[data-test="cat-item"]')).toHaveLength(1)
+  })
+})
+
+// issue #202 问题3 回归：onSwitch/onOpen 失败须 ElMessage.error 可见（对齐 onCreate/onDelete
+// 的既有约定），不得成为未处理 Promise rejection。
+describe('CategoriesView — issue #202 异步交互错误处理回归', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.clearAllMocks()
+    ;(listInstances as ReturnType<typeof vi.fn>).mockResolvedValue(INSTANCES)
+    ;(getCategories as ReturnType<typeof vi.fn>).mockResolvedValue(CATS)
+    ;(readPage as ReturnType<typeof vi.fn>).mockResolvedValue({
+      path: 'a.md', title: 'Alpha', content: '# Alpha 正文',
+    })
+  })
+
+  it('onOpen failure surfaces ElMessage.error instead of unhandled rejection', async () => {
+    ;(readPage as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('读取失败'))
+    const wrapper = mountView()
+    await flushPromises()
+    await wrapper.find('[data-test="cat-item"]').trigger('click')
+    await flushPromises()
+    const { ElMessage } = await import('element-plus')
+    expect(ElMessage.error).toHaveBeenCalledWith('读取失败')
+  })
+
+  it('onSwitch failure surfaces ElMessage.error instead of unhandled rejection', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+    ;(getCategories as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('切换失败'))
+    await wrapper.find('[data-test="container-switch"]').setValue('other')
+    await flushPromises()
+    const { ElMessage } = await import('element-plus')
+    expect(ElMessage.error).toHaveBeenCalledWith('切换失败')
   })
 })
