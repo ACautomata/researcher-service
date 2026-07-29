@@ -2,16 +2,12 @@
 // 所有需认证请求经 apiFetch/apiJson：自动注入 Authorization Bearer；
 // 401 时先用 httpOnly refresh cookie 换新并重试一次，刷新失败才清会话并跳登录（codex R2）。
 import { useAuthStore } from '@/stores/auth'
+import { ApiError } from '@/api/errors'
+import { timeoutSignal } from '@/api/timeout'
 
-export class ApiError extends Error {
-  status: number
-
-  constructor(status: number, message: string) {
-    super(message)
-    this.name = 'ApiError'
-    this.status = status
-  }
-}
+// #202 问题5：ApiError 唯一定义在 api/errors.ts（status 可选），此处 re-export 保持
+// 既有 `from '@/api/client'` 导入兼容——instanceof 行为与导入源无关。
+export { ApiError }
 
 function buildHeaders(init: RequestInit, token: string): Headers {
   const headers = new Headers(init.headers)
@@ -24,13 +20,15 @@ function buildHeaders(init: RequestInit, token: string): Headers {
 
 export async function apiFetch(path: string, init: RequestInit = {}): Promise<Response> {
   const auth = useAuthStore()
-  let resp = await fetch(path, { ...init, headers: buildHeaders(init, auth.token) })
+  // 统一 15s 超时（#202 问题4）：悬挂请求到期 abort，调用方已自带 signal 时沿用
+  const timed: RequestInit = { ...init, signal: init.signal ?? timeoutSignal() }
+  let resp = await fetch(path, { ...timed, headers: buildHeaders(timed, auth.token) })
   if (resp.status !== 401) return resp
 
   // 服务端已拒绝当前 access；即使本地 exp 尚未到期，也必须强制用 refresh cookie 换新。
   await auth.forceRefresh()
   if (auth.token) {
-    resp = await fetch(path, { ...init, headers: buildHeaders(init, auth.token) })
+    resp = await fetch(path, { ...timed, headers: buildHeaders(timed, auth.token) })
     if (resp.status !== 401) return resp
   }
   // codex R8 F2：区分「确认拒绝」与「瞬态失败」。forceRefresh 对 refresh 端点 4xx 标
@@ -42,7 +40,7 @@ export async function apiFetch(path: string, init: RequestInit = {}): Promise<Re
       window.location.assign('/login')
     }
   }
-  throw new ApiError(401, '未登录或登录已过期')
+  throw new ApiError('未登录或登录已过期', 401)
 }
 
 export async function apiJson<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -55,7 +53,13 @@ export async function apiJson<T>(path: string, init: RequestInit = {}): Promise<
     } catch {
       // 无 JSON body，沿用默认 detail
     }
-    throw new ApiError(resp.status, detail)
+    throw new ApiError(detail, resp.status)
   }
-  return resp.json() as Promise<T>
+  // #202 问题6：204/空体无 JSON 可解析，直接返回 undefined 而非让 resp.json() reject
+  if (resp.status === 204) return undefined as T
+  try {
+    return (await resp.json()) as T
+  } catch {
+    return undefined as T
+  }
 }

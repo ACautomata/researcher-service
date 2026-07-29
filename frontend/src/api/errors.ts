@@ -44,10 +44,15 @@ export function extractApiError(status: number, body: unknown): string {
 // codex P2：标记「已解析的 API 错误」——区别于 fetch 因后端不可达 reject 抛的原生
 // TypeError（"Failed to fetch" / "Load failed"）。视图据此二分:ApiError 逐字透传消息,
 // 其余（网络/意外）走模式专属本地化兜底,避免把英文浏览器报错文本直接展示给用户。
+// #202 问题5：全仓唯一定义（status 可选），api/client.ts re-export——instanceof 语义
+// 与导入源无关，杜绝旧「双同名不同构 ApiError」按导入源漂移的隐患。
 export class ApiError extends Error {
-  constructor(message: string) {
+  status?: number
+
+  constructor(message: string, status?: number) {
     super(message)
     this.name = 'ApiError'
+    this.status = status
     // 维持 instanceof 语义(es5 target 下子类化内建 Error 的常见坑由 tsconfig target 保证)
   }
 }
