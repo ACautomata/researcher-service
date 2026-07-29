@@ -23,8 +23,7 @@ export const useWikiStore = defineStore('wiki', {
     draft: '' as string, // 编辑草稿（content）
     dirty: false as boolean, // 有未落盘改动
     saving: false as boolean,
-    // 保存失败原因（#202 问题2/3）：落盘失败写入供视图展示「保存失败」+ 手动重试；
-    // 成功落盘后清空。失败不清 dirty——草稿仍在，恢复后自动保存/重试可再落盘
+    // 最近一次落盘失败原因（issue #202 问题2/3）：空=无失败；视图据此显示「保存失败，点击重试」
     saveError: '' as string,
     // 保存成功序号（codex 意见6）：每次落盘成功递增，视图 watch 它刷新树/图谱
     // （title/wikilink 变更即时反映，store 不泄漏视图关注点）
@@ -96,14 +95,10 @@ export const useWikiStore = defineStore('wiki', {
 
     // 落盘当前脏页（若有）。串行化：save 调用经 Promise 链排队，在飞保存期间的编辑
     // 会排在链尾再存一次（codex PR #62 意见2：导航 await 此链，不丢在飞期间的改动）。
-    // #202 问题2：链尾 catch 吸收错误——_persistDirty 失败（401/网络抖动/5xx）后链不得
-    // 保持 rejected，否则后续自动保存全部静默失效、导航被旧异常永久阻断（链中毒）。
     async _flush(): Promise<void> {
       this._cancelSave()
       // 把本次落盘接到保存链尾；无论之前是否在飞，都等链上既有保存完成再存剩余脏快照。
-      this._saveChain = this._saveChain
-        .then(() => this._persistDirty())
-        .catch(() => {}) // 失败已由 _persistDirty 记入 saveError；链本身永不 rejected
+      this._saveChain = this._saveChain.then(() => this._persistDirty())
       await this._saveChain
     },
 
@@ -116,12 +111,12 @@ export const useWikiStore = defineStore('wiki', {
         await updatePage(this.current, path, content)
         // 落盘期间可能有新编辑；仅当草稿未再变才清脏
         if (this.draft === content) this.dirty = false
-        this.saveError = '' // 落盘成功，清掉旧失败提示
         this.saveSeq += 1 // 通知视图刷新树/图谱（意见6）
+        this.saveError = '' // 落盘成功清失败态
       } catch (e) {
-        // 保存失败（#202 问题2/3）：记录原因供视图展示 + 手动重试；不清 dirty（草稿仍在）。
-        // 错误在此吸收、不向链传播——导航（openPage/switchContainer）不被旧失败阻断，
-        // 下一次防抖/flush 会以剩余脏快照重试落盘。
+        // issue #202 问题2：保存失败在此吸收——_saveChain 永不保持 rejected，
+        // 否则一次瞬态失败（401/抖动/5xx）后链永久中毒：自动保存全静默 reject、
+        // 导航 await 链尾被旧异常阻断。dirty 保持 true 等下次防抖/手动重试。
         this.saveError = (e as Error).message
       } finally {
         this.saving = false
@@ -132,7 +127,7 @@ export const useWikiStore = defineStore('wiki', {
       this._cancelSave()
       this._saveTimer = setTimeout(() => {
         this._saveTimer = null
-        // 链已吸收错误，catch 兜底防未处理 rejection（#202 问题3）
+        // 失败已由 _persistDirty 吸收进 saveError；catch 兜底防意外 reject 成未处理异常
         void this._flush().catch(() => {})
       }, AUTOSAVE_DEBOUNCE_MS)
     },

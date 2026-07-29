@@ -3,7 +3,7 @@
 import { defineStore } from 'pinia'
 
 import { extractApiError, ApiError } from '@/api/errors'
-import { timeoutSignal } from '@/api/timeout'
+import { fetchWithTimeout } from '@/api/fetch'
 
 interface LoginResponse {
   access: string
@@ -32,9 +32,9 @@ async function rejectWithApiError(resp: Response): Promise<never> {
   throw new ApiError(extractApiError(resp.status, body))
 }
 
-// #202 问题4：forceRefresh 并发去重的在飞 Promise——多个并发请求同收 401 时共享同一次
-// 刷新，refresh 端点只被调一次（开启 refresh 轮换后重复调用会互踢），且避免竞态：
-// A 刷新成功写入新 token 后 B 才执行到 this.token = '' 又把 token 清掉。
+// issue #202 问题4：forceRefresh 并发去重——多个并发请求同收 401 时共享同一次
+// 在飞刷新，只发一次 refresh（开 refresh 轮换后重复调用必互踢）；也避免竞态下
+// 后入者把刚换好的 token 再清空。模块级单例（Pinia store 本身即单例）。
 let refreshing: Promise<void> | null = null
 
 export const useAuthStore = defineStore('auth', {
@@ -48,11 +48,10 @@ export const useAuthStore = defineStore('auth', {
   },
   actions: {
     async login(username: string, password: string): Promise<void> {
-      const resp = await fetch('/api/v1/auth/login', {
+      const resp = await fetchWithTimeout('/api/v1/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username, password }),
-        signal: timeoutSignal(),
       })
       if (!resp.ok) {
         return rejectWithApiError(resp)
@@ -63,11 +62,10 @@ export const useAuthStore = defineStore('auth', {
     },
     // codex round-4 F5（spec §9.2 注册/登录表单）：注册成功后自动登录建立会话
     async register(username: string, password: string): Promise<void> {
-      const resp = await fetch('/api/v1/auth/register', {
+      const resp = await fetchWithTimeout('/api/v1/auth/register', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username, password }),
-        signal: timeoutSignal(),
       })
       if (!resp.ok) {
         return rejectWithApiError(resp)
@@ -75,7 +73,7 @@ export const useAuthStore = defineStore('auth', {
       await this.login(username, password)
     },
     async forceRefresh(): Promise<void> {
-      // 并发去重（#202 问题4）：已有刷新在飞则共享其结果，不重复调用 refresh 端点
+      // 并发去重：已有在飞刷新则共享其结果（issue #202 问题4）
       if (refreshing) return refreshing
       refreshing = this._doRefresh()
       try {
@@ -89,10 +87,9 @@ export const useAuthStore = defineStore('auth', {
       this.token = ''
       if (this.refreshExhausted) return
       try {
-        const resp = await fetch('/api/v1/auth/token/refresh', {
+        const resp = await fetchWithTimeout('/api/v1/auth/token/refresh', {
           method: 'POST',
           credentials: 'include',
-          signal: timeoutSignal(),
         })
         if (resp.ok) {
           const data = (await resp.json()) as { access: string }
@@ -117,11 +114,10 @@ export const useAuthStore = defineStore('auth', {
       }
       if (this.token) {
         try {
-          await fetch('/api/v1/auth/logout', {
+          await fetchWithTimeout('/api/v1/auth/logout', {
             method: 'POST',
             credentials: 'include',
             headers: { Authorization: `Bearer ${this.token}` },
-            signal: timeoutSignal(),
           })
         } catch {
           // 后端不可达也清本地
