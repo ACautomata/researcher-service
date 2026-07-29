@@ -199,7 +199,7 @@ def _find_free_port() -> int:
 
 
 @pytest.fixture
-def daphne_server(request, django_db_setup):
+def daphne_server(request, django_db_setup, tmp_path_factory):
     """起 daphne 单进程 ASGI LiveServer（fixed port，同一 test DB）。
 
     本 fixture 负责 test DB 的创建（migrate）与 daphne 进程的启停。pytest-django
@@ -211,16 +211,37 @@ def daphne_server(request, django_db_setup):
     dev.py settings，pytest-django 会根据 dev settings 创建 in-memory DB 用于测试
     ORM——所以 test 进程和 daphne 进程各有独立 DB，不共享数据。
 
+    OPENCLAW_FLEET_ROOT 注入（#184 T7）：daphne 是独立 OS 进程，测试进程的
+    ``Fleet.override`` 跨进程不可见（区别于 L0-L3 的 WSGI threaded live_server 同进程）。
+    故 daphne 创建容器（经 HTTP ``POST /containers/``）走其自身 ``Fleet._build_default``
+    读 ``settings.OPENCLAW_FLEET.ROOT``。默认 root=<repo>/fleet ⊂ OPENCLAW_TEMPLATE_DIR
+    （仓库根），``HomeProvisioner.copytree`` 会把含 fleet 自身的模板树递归拷入 home →
+    ``[Errno 63] File name too long``（本地 worktree 必现；CI 经 rsync 干净模板免此患）。
+    本 fixture 把 ``OPENCLAW_FLEET_ROOT`` 指 ``tmp_path_factory`` 建的隔离目录（模板外），
+    让本地+CI 一致避开递归——对齐 ``test_integration_http._override_fleet_with_real_runtime``
+    把 root 指 tmp_path 的隔离模式，但作用到 daphne 子进程（经 env 注入而非 Fleet.override）。
+
+    本地 Colima 跑须 ``--basetemp=$HOME/...``（virtiofs 仅共享 $HOME，fleet root 的
+    bind-mount 须在 $HOME 内；CI Linux /tmp 无此限），对齐 wire/L2b 既有惯例。
+
     Teardown：``_terminate_process_group`` 收掉 daphne 进程树（与 vite_dev_server 同模式）；
     同时清理文件级 test DB 及其 WAL/SHM 侧文件，避免工作目录污染和跨测试状态残留（codex #190 P2）。
     """
     port = _find_free_port()
 
+    # OPENCLAW_FLEET_ROOT：daphne 子进程的 Fleet root（模板外，避 HomeProvisioner 递归）。
+    # tmp_path_factory（session 级）建隔离目录；本地须 --basetemp=$HOME/... 让其在 $HOME 内。
+    fleet_root = tmp_path_factory.mktemp('daphne-fleet')
+
     # 1. migrate：用 integration.py settings → 文件级 SQLite（test_db_file.sqlite3）
     #    test 进程通过 pytest-django 默认 dev.py → in-memory DB，两者独立。
     #    daphne 进程 migrate 创建表；test 进程通过 HTTP (register/login/etc.)
     #    向 daphne 发请求，daphne ORM 读写的就是这些表。
-    env_integration = {**os.environ, 'DJANGO_SETTINGS_MODULE': 'config.settings.integration'}
+    env_integration = {
+        **os.environ,
+        'DJANGO_SETTINGS_MODULE': 'config.settings.integration',
+        'OPENCLAW_FLEET_ROOT': str(fleet_root),
+    }
     _run_manage_py(['migrate', '--noinput'], env_integration)
 
     # 2. 启动 daphne（用 sys.executable -m daphne 而非硬编码 .venv/bin/daphne，
