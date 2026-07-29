@@ -10,6 +10,8 @@ chat.pairing.PairingFleet）。
 from __future__ import annotations
 
 import asyncio
+import threading
+from typing import ClassVar
 
 from channels.db import database_sync_to_async
 
@@ -48,6 +50,9 @@ class ChatConnectionPool:
         self._clients: dict[tuple[str, str], OpenClawChatClient] = {}
         # per-key 锁（Lock Strippling）：同 (url,device_token) 串行建连（TOCTOU 防重复 orphan），
         # 异 key 并行——避免一个坏容器（建连挂起）阻塞所有其他容器的 chat（codex P1）。
+        # 注（issue #201）：asyncio.Lock 绑定创建时的 loop、跨 loop 不可共享——当前成立依赖
+        # 「单 Daphne 进程单 loop」前提；随 follow-up 的 client 专属 loop 方案，全部锁收敛到
+        # 该专属 loop 内，REST 线程只经 run_coroutine_threadsafe 进入，跨 loop 问题自然消解。
         self._locks: dict[tuple[str, str], asyncio.Lock] = {}
 
     def _key_lock(self, key: tuple[str, str]) -> asyncio.Lock:
@@ -147,11 +152,16 @@ class ChatFleet:
     """
 
     _pool: ChatConnectionPool | None = None
+    # issue #201 问题 4：并发首调双检——两线程同时首次 get() 只能建一个 pool，
+    # 否则多建的 pool 泄漏（client/recv 协程孤儿）。
+    _pool_lock: ClassVar[threading.Lock] = threading.Lock()
 
     @classmethod
     def get(cls) -> ChatConnectionPool:
         if cls._pool is None:
-            cls._pool = ChatConnectionPool()
+            with cls._pool_lock:
+                if cls._pool is None:
+                    cls._pool = ChatConnectionPool()
         return cls._pool
 
     @classmethod

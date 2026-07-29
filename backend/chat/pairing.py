@@ -16,11 +16,14 @@ async view/consumer 线程。两种上下文下 asyncio.run/async_to_sync 都可
 import asyncio
 import json
 import os
+import random
 import re
 import threading
+import time
 from typing import ClassVar
 
-from django.db import transaction
+from django.db import IntegrityError, OperationalError, transaction
+from django.db.models import F
 
 from chat.device_crypto import DeviceCrypto, DeviceIdentity
 from chat.models import Pairing
@@ -33,6 +36,24 @@ _REQUEST_ID_RE = re.compile(r'^[A-Za-z0-9_.~\-]+$')
 
 class PairingConcurrencyError(Exception):
     """并发场景下本尝试被更新版本覆盖，且原行已不存在（实例被删除）。"""
+
+
+def _run_with_lock_retry(fn):
+    """SQLite 共享缓存表锁（SQLITE_LOCKED，busy handler 不兜底该错误码）有界重试。
+
+    issue #201 问题 3：单进程多线程并发 ensure_paired 时，两个连接的写事务/条件更新
+    会撞「database table is locked」。fn 内操作须幂等（get_or_create/条件写/取号重入
+    安全）；PostgreSQL 等多 worker 形态无此错误码，行为不变。
+    退避带随机抖动：并发方若同步起步，等长退避会确定性互撞（livelock）。
+    """
+    for attempt in range(5):
+        try:
+            return fn()
+        except OperationalError as e:
+            if 'locked' not in str(e).lower() or attempt == 4:
+                raise
+            time.sleep(0.05 * (attempt + 1) + random.uniform(0, 0.05))
+    return None  # pragma: no cover（循环必然 return/raise）
 
 
 class PairingService:
@@ -69,7 +90,12 @@ class PairingService:
         return pairing
 
     def _load_or_create_identity(self, pairing: Pairing) -> DeviceIdentity:
-        """已持久化身份则复用（deviceId 稳定），否则生成新身份并落库。"""
+        """已持久化身份则复用（deviceId 稳定），否则生成新身份并仲裁落库。
+
+        issue #201 问题 3：身份落库改「条件写入空身份字段」仲裁——仅当 DB 身份仍为空
+        才写入本进程生成的身份；并发方（另一进程/worker）已先写入则以其为准重读，
+        杜绝两进程各持不同私钥完成握手导致 deviceToken 与落库公钥永久错位。
+        """
         if pairing.private_key_pem and pairing.public_key_pem and pairing.device_id:
             return DeviceIdentity(
                 device_id=pairing.device_id,
@@ -77,10 +103,41 @@ class PairingService:
                 private_key_pem=pairing.private_key_pem,
             )
         identity = DeviceCrypto.generate_identity()
-        pairing.device_id = identity.device_id
-        pairing.public_key_pem = identity.public_key_pem
-        pairing.private_key_pem = identity.private_key_pem
-        return identity
+        # 仲裁条件只用明文列（device_id/public_key_pem）；private_key_pem 是密文列，
+        # 等值过滤会经加密 prep 无法匹配，不可进 WHERE。
+        written = (
+            Pairing.objects
+            .filter(pk=pairing.pk, device_id='', public_key_pem='')
+            .update(
+                device_id=identity.device_id,
+                public_key_pem=identity.public_key_pem,
+                private_key_pem=identity.private_key_pem,
+            )
+        )
+        if written:
+            pairing.device_id = identity.device_id
+            pairing.public_key_pem = identity.public_key_pem
+            pairing.private_key_pem = identity.private_key_pem
+            return identity
+        # 并发方已先写入身份：以 DB 已有身份为准（approve 命令与真实 key 保持一致）
+        pairing.refresh_from_db(fields=['device_id', 'public_key_pem', 'private_key_pem'])
+        return DeviceIdentity(
+            device_id=pairing.device_id,
+            public_key_pem=pairing.public_key_pem,
+            private_key_pem=pairing.private_key_pem,
+        )
+
+    @staticmethod
+    def _next_attempt_version(pairing: Pairing) -> int:
+        """数据库层原子取号（issue #201 问题 3）：UPDATE ... SET v=v+1 后重读取值。
+
+        杜绝原「读-改-写 save()」在 SQLite + 多进程下取到重号（双方同读 N 各 +1）。
+        """
+        Pairing.objects.filter(pk=pairing.pk).update(
+            attempt_version=F('attempt_version') + 1,
+        )
+        pairing.refresh_from_db(fields=['attempt_version'])
+        return pairing.attempt_version
 
     def get_status(self, instance: Instance) -> Pairing:
         """查询配对状态（无则返回 unpaired 占位行，不触发握手）。"""
@@ -119,30 +176,44 @@ class PairingService:
         force_repair=True 时忽略本地已配对状态，重新握手（用于 deviceToken 被网关撤销/重置后恢复）。
         并发安全：应用级每实例锁 + select_for_update() 双重保护，确保「读取/创建设备身份」原子化；
         握手结果用 attempt_version 条件更新，防止并发/延迟响应覆盖更新状态。
+        issue #201 问题 3：attempt_version 数据库原子取号 + 身份「条件写入空字段」仲裁；
+        事务块与结果落库均经 _run_with_lock_retry 兜 SQLite 共享缓存表锁。
         """
-        with self._lock_for(instance.pk), transaction.atomic():
-            pairing = (
-                Pairing.objects
-                .select_for_update()
-                .select_related('instance')
-                .filter(instance=instance)
-                .first()
-            )
-            if pairing is None:
-                pairing = Pairing.objects.create(instance=instance)
 
-            if (
-                not force_repair
-                and pairing.status == Pairing.STATUS_PAIRED
-                and pairing.device_token
-            ):
-                return pairing
+        def _reserve_attempt():
+            with self._lock_for(instance.pk), transaction.atomic():
+                pairing = (
+                    Pairing.objects
+                    .select_for_update()
+                    .select_related('instance')
+                    .filter(instance=instance)
+                    .first()
+                )
+                if pairing is None:
+                    # issue #201 问题 3：create → get_or_create 并兜 IntegrityError 重读，
+                    # 并发创建竞争不再裸抛 500。
+                    try:
+                        pairing, _ = Pairing.objects.get_or_create(instance=instance)
+                    except IntegrityError:
+                        pairing = Pairing.objects.get(instance=instance)
 
-            identity = self._load_or_create_identity(pairing)
-            # 身份必须在本事务内落库：并发请求复用同一 deviceId，避免 approve 命令与真实 key 不一致
-            pairing.attempt_version += 1
-            attempt_version = pairing.attempt_version
-            pairing.save()
+                if (
+                    not force_repair
+                    and pairing.status == Pairing.STATUS_PAIRED
+                    and pairing.device_token
+                ):
+                    return pairing, None, None  # 幂等复用：identity=None 作 fast-path 信号
+
+                # 身份必须在本事务内落库：并发请求复用同一 deviceId，避免 approve 命令与真实 key 不一致
+                # （issue #201：落库方式改「条件写入空身份字段」仲裁，见 _load_or_create_identity）
+                identity = self._load_or_create_identity(pairing)
+                # issue #201 问题 3：attempt_version 改数据库层原子取号（不再读-改-写 save()）
+                attempt_version = self._next_attempt_version(pairing)
+                return pairing, identity, attempt_version
+
+        pairing, identity, attempt_version = _run_with_lock_retry(_reserve_attempt)
+        if identity is None:
+            return pairing  # 已 paired 且 token 在 → 幂等复用，不重握手
 
         # 握手在事务外执行：网络超时/异常不应回滚已持久化的身份或 pending/error 状态
         url = self._ws_url_for(instance)
@@ -150,35 +221,35 @@ class PairingService:
             result = self._run_handshake(url, instance.token, identity)
         except PairingRequired as e:
             if not self._is_valid_request_id(e.request_id):
-                self._apply_result(
+                _run_with_lock_retry(lambda: self._apply_result(
                     pairing,
                     attempt_version=attempt_version,
                     status=Pairing.STATUS_ERROR,
                     pairing_request_id='',
-                )
+                ))
                 raise PairingError(f'invalid pairing requestId: {e.request_id!r}') from e
-            self._apply_result(
+            _run_with_lock_retry(lambda e=e: self._apply_result(
                 pairing,
                 attempt_version=attempt_version,
                 status=Pairing.STATUS_PENDING,
                 pairing_request_id=e.request_id,
-            )
+            ))
             raise
         except PairingError:
-            self._apply_result(
+            _run_with_lock_retry(lambda: self._apply_result(
                 pairing,
                 attempt_version=attempt_version,
                 status=Pairing.STATUS_ERROR,
-            )
+            ))
             raise
 
-        self._apply_result(
+        _run_with_lock_retry(lambda: self._apply_result(
             pairing,
             attempt_version=attempt_version,
             status=Pairing.STATUS_PAIRED,
             device_token=result.device_token,
             scopes_json=json.dumps(result.scopes),
-        )
+        ))
         return pairing
 
     def _apply_result(
