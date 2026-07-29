@@ -3,6 +3,7 @@
 import { defineStore } from 'pinia'
 
 import { extractApiError, ApiError } from '@/api/errors'
+import { timeoutSignal } from '@/api/timeout'
 
 interface LoginResponse {
   access: string
@@ -31,6 +32,11 @@ async function rejectWithApiError(resp: Response): Promise<never> {
   throw new ApiError(extractApiError(resp.status, body))
 }
 
+// #202 问题4：forceRefresh 并发去重的在飞 Promise——多个并发请求同收 401 时共享同一次
+// 刷新，refresh 端点只被调一次（开启 refresh 轮换后重复调用会互踢），且避免竞态：
+// A 刷新成功写入新 token 后 B 才执行到 this.token = '' 又把 token 清掉。
+let refreshing: Promise<void> | null = null
+
 export const useAuthStore = defineStore('auth', {
   state: () => ({
     token: '' as string,
@@ -46,6 +52,7 @@ export const useAuthStore = defineStore('auth', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username, password }),
+        signal: timeoutSignal(),
       })
       if (!resp.ok) {
         return rejectWithApiError(resp)
@@ -60,6 +67,7 @@ export const useAuthStore = defineStore('auth', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username, password }),
+        signal: timeoutSignal(),
       })
       if (!resp.ok) {
         return rejectWithApiError(resp)
@@ -67,6 +75,16 @@ export const useAuthStore = defineStore('auth', {
       await this.login(username, password)
     },
     async forceRefresh(): Promise<void> {
+      // 并发去重（#202 问题4）：已有刷新在飞则共享其结果，不重复调用 refresh 端点
+      if (refreshing) return refreshing
+      refreshing = this._doRefresh()
+      try {
+        await refreshing
+      } finally {
+        refreshing = null
+      }
+    },
+    async _doRefresh(): Promise<void> {
       // 服务端 401 优先于本地 exp 判断：先丢弃被拒 token，再用 httpOnly cookie 换新。
       this.token = ''
       if (this.refreshExhausted) return
@@ -74,6 +92,7 @@ export const useAuthStore = defineStore('auth', {
         const resp = await fetch('/api/v1/auth/token/refresh', {
           method: 'POST',
           credentials: 'include',
+          signal: timeoutSignal(),
         })
         if (resp.ok) {
           const data = (await resp.json()) as { access: string }
@@ -82,7 +101,7 @@ export const useAuthStore = defineStore('auth', {
           this.refreshExhausted = true
         }
       } catch {
-        // 网络异常：瞬时失败，不标记，下次重试
+        // 网络异常/超时：瞬时失败，不标记，下次重试
       }
     },
     // codex P2-1/P2-3/round-4 F1：进入受保护路由前恢复登录态。
@@ -102,6 +121,7 @@ export const useAuthStore = defineStore('auth', {
             method: 'POST',
             credentials: 'include',
             headers: { Authorization: `Bearer ${this.token}` },
+            signal: timeoutSignal(),
           })
         } catch {
           // 后端不可达也清本地
