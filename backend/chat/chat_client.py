@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import uuid
 from collections.abc import Awaitable, Callable
 
@@ -26,6 +27,8 @@ from integration.openclaw.wire import (
 
 # on_event 回调契约：接收翻译后的前端契约帧（text/done/error）
 OnEvent = Callable[[dict], Awaitable[None]]
+
+logger = logging.getLogger(__name__)
 
 
 class ChatClientError(Exception):
@@ -85,6 +88,12 @@ class OpenClawChatClient:  # pylint: disable=too-many-instance-attributes,too-ma
         self._pending_acks: dict[str, tuple[asyncio.Future, OnEvent]] = {}
         self._pending_resolves: dict[str, asyncio.Future] = {}
         self._routes: dict[str, OnEvent] = {}
+        # issue #200：连接级待审批卡单一事实源（审批 ID → 卡片帧）。实时 requested 事件写入、
+        # resolved 删除；list_pending_approvals 回填只推相对本表的差集（防重复出卡/复活卡）。
+        self._pending_approvals: dict[str, dict] = {}
+        # 已 resolved 审批 ID 的有界 FIFO 记忆（dict 保序当有序集用）：回填迟到响应命中即跳过，
+        # 已收敛的卡不被复活；超帽逐出最旧条目（防长连接无限膨胀）。
+        self._resolved_approval_ids: dict[str, None] = {}
         self._closed = False
         self._dead = False  # recv loop 退出（连接断开）→ pool 据此驱逐重建
 
@@ -106,12 +115,30 @@ class OpenClawChatClient:  # pylint: disable=too-many-instance-attributes,too-ma
             except Exception:  # pylint: disable=broad-exception-caught
                 pass
 
+    _RESOLVED_APPROVAL_IDS_CAP = 256  # _resolved_approval_ids 容量上限（FIFO 逐出最旧）
+
+    def _mark_approval_resolved(self, approval_id) -> None:
+        """把审批 ID 移出待审批事实源并记入有界已 resolved 集（issue #200）。
+
+        三个入口共用：网关 resolved 事件（_handle）、本端 resolve_approval 成功、REST/WS 路径的
+        broadcast_approval_resolved。迟到的回填列表若仍含该 ID（竞态窗口内的陈旧快照），
+        list_pending_approvals 据此跳过，已收敛的卡不被「复活」重推给前端。
+        """
+        if not approval_id:
+            return
+        self._pending_approvals.pop(approval_id, None)
+        self._resolved_approval_ids.pop(approval_id, None)
+        self._resolved_approval_ids[approval_id] = None
+        while len(self._resolved_approval_ids) > self._RESOLVED_APPROVAL_IDS_CAP:
+            self._resolved_approval_ids.pop(next(iter(self._resolved_approval_ids)))
+
     async def broadcast_approval_resolved(self, approval_id: str, decision: str) -> None:
         """把一次权威 resolve 结果 fan-out 到全部订阅者（codex R2 P2）：共享 client 的各 consumer 卡片一致收敛。
 
         仅广播**真实发生**的 resolve 回执（权威 decision），不伪造网关 resolved 事件；REST 路径经
         pool client 调本方法，WS 路径由 consumer 在 resolve 成功后调，保证所有渲染副本同步落定。
         """
+        self._mark_approval_resolved(approval_id)  # issue #200：同步事实源，回填不复活
         await self._fanout_approval({'type': 'approvalResolved', 'id': approval_id, 'decision': decision})
 
 
@@ -231,7 +258,14 @@ class OpenClawChatClient:  # pylint: disable=too-many-instance-attributes,too-ma
         if run_id is None:
             # 连接级帧（T06 审批卡 + 网关 resolved 事件）：不挂 runId,fan-out 到所有审批订阅者,不进 runId 路由
             for translated in frames:
-                if translated.get('type') not in ('approval', 'approvalResolved'):
+                frame_type = translated.get('type')
+                # issue #200：实时事件同步连接级事实源——requested 写入（回填据此只推差集）、
+                # resolved 删除（回填据此不复活）；在 fan-out 前更新，保证订阅者看到的与事实源一致。
+                if frame_type == 'approval':
+                    self._pending_approvals[translated['id']] = translated
+                elif frame_type == 'approvalResolved':
+                    self._mark_approval_resolved(translated.get('id'))
+                if frame_type not in ('approval', 'approvalResolved'):
                     continue
                 await self._fanout_approval(translated)
             return
@@ -311,35 +345,52 @@ class OpenClawChatClient:  # pylint: disable=too-many-instance-attributes,too-ma
         except BaseException:
             self._pending_resolves.pop(req_id, None)
             raise
+        # issue #200：first-answer-wins 下无论本请求还是他端先答，审批均已收敛——同步事实源，
+        # 即使网关 resolved 事件丢失（断线窗口/作用域缺失），后续回填也不会复活该卡。
+        self._mark_approval_resolved(approval_id)
         return payload or {}
 
     async def list_pending_approvals(self) -> list[dict]:
-        """查询网关当前待审批列表（codex P2 断线恢复），翻译成审批卡帧列表。
+        """查询网关当前待审批列表（codex P2 断线恢复），翻译成审批卡帧列表（只含相对事实源的差集）。
 
-        best-effort：绝不抛异常打断 consumer 的 ready 流程。复用 _approval_card 单项翻译（kind 从事件族
-        派生，此处无事件名，按 payload.kind 或缺省 exec）。
+        best-effort：绝不抛异常打断 consumer 的 ready 流程；单族失败 logger.warning（含方法与异常，
+        缺 scope/超时/网关拒绝可观测）后续查另一族，不再静默 return []（issue #200 问题 3）。
 
-        方法名（codex R3 P1 / issue 验收③）：r26 §1 文档已证 exec/plugin 族各有 `.list`（查全部待审批），
-        通用 `approval` 族仅 `get`/`resolve`、**无 `approval.list`**。故本方法用文档已证的
-        `exec.approval.list`（exec 是 elevated 命令审批主路径，本特性正针对它）。
-        **刻意不做 exec+plugin 双查合并**（收窄 codex R3 P1）：①同一审批极可能被两族各返一次致重复出卡；
-        ②`.list` 响应 schema 同样「待实测」，双查合并 + 按 id 去重是把待实测路径复杂化成另一套未经证实的
-        死扣；③plugin 审批远少于 exec。若实测表明须双查或响应键非 `approvals`，按实测改此处与 fakes。
+        issue #200（评审 B-M6）：exec.approval.list + plugin.approval.list **双查并按审批 ID 去重
+        合并**——断线期间积累的 plugin 审批重连后也要回填，否则 agent 卡死等一张前端永远看不到的卡；
+        kind 从族名派生（复用 _approval_card 事件路径先例）。再与连接级 _pending_approvals 单一事实源
+        协调：实时 requested 已推过的 ID 不重复出卡、已 resolved 的 ID 不被迟到的陈旧回填复活。
         """
         if self._ws is None:
             return []
-        req_id = uuid.uuid4().hex
-        fut = asyncio.get_running_loop().create_future()
-        self._pending_resolves[req_id] = fut
-        frame = {'type': 'req', 'id': req_id, 'method': 'exec.approval.list', 'params': {}}
-        try:
-            await self._ws.send(json.dumps(frame))
-            payload = await asyncio.wait_for(fut, timeout=self._ack_timeout)
-        except BaseException:  # pylint: disable=broad-exception-caught
-            self._pending_resolves.pop(req_id, None)
-            return []
-        # 实测校准（spike ghcr 2026.6.34-browser, 2026-07-27）：payload 可能直接是 list
-        # （空 [] / 非空 [{...}]），也可能是 dict {approvals:[...]}。list 上调 .get 会崩，先判类型。
+        merged: dict[str, dict] = {}
+        for family in ('exec', 'plugin'):
+            method = f'{family}.approval.list'
+            try:
+                payload = await self._rpc(method, {})
+            except BaseException as exc:  # pylint: disable=broad-exception-caught
+                logger.warning('%s backfill failed: %s', method, exc)
+                continue
+            for item in self._approval_list_items(payload):
+                card = ChatEventTranslator._approval_card(f'{family}.approval.requested', item)
+                if card is not None:
+                    merged.setdefault(card['id'], card)  # 同审批两族各返一次时按 ID 去重（exec 族优先）
+        diff = []
+        for approval_id, card in merged.items():
+            if approval_id in self._resolved_approval_ids or approval_id in self._pending_approvals:
+                continue
+            self._pending_approvals[approval_id] = card
+            diff.append(card)
+        return diff
+
+    @staticmethod
+    def _approval_list_items(payload) -> list:
+        """`.list` res payload → 审批项列表（只含 dict 项；无法识别 → []）。
+
+        实测校准（spike ghcr 2026.6.34-browser, 2026-07-27）：payload 可能直接是 list
+        （空 [] / 非空 [{...}]），也可能是 dict {approvals:[...]} 或单项 {approval:{...}}。
+        list 上调 .get 会崩，先判类型。
+        """
         if isinstance(payload, list):
             items = payload
         elif isinstance(payload, dict):
@@ -348,17 +399,10 @@ class OpenClawChatClient:  # pylint: disable=too-many-instance-attributes,too-ma
                 single = payload.get('approval')
                 items = [single] if isinstance(single, dict) else []
         else:
-            items = []
+            return []
         if not isinstance(items, list):
             return []
-        cards = []
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            card = ChatEventTranslator._approval_card('exec.approval.requested', item)
-            if card is not None:
-                cards.append(card)
-        return cards
+        return [item for item in items if isinstance(item, dict)]
 
     async def request_approval(self, command: str, *, session_key: str | None = None) -> dict:
         """确定性创建 exec 审批请求（codex P2 #168）：发 exec.approval.request，有界等 res。
@@ -491,7 +535,20 @@ class OpenClawChatClient:  # pylint: disable=too-many-instance-attributes,too-ma
         """
         return await self._rpc('sessions.delete', {'key': session_key})
 
-    async def send_message(self, session_key: str, message: str, *, on_event: OnEvent) -> str:
+    async def send_message(
+        self,
+        session_key: str,
+        message: str,
+        *,
+        on_event: OnEvent,
+        idempotency_key: str | None = None,
+    ) -> str:
+        """发 chat.send 并有界等 ack（runId）。
+
+        issue #200 问题 1：idempotency_key 可选透传——重试**同一逻辑消息**须复用同键，网关才能
+        去重（防 ack 超时后重发产生重复用户消息/重复 run，双倍 LLM 成本）；未传时服务端兜底
+        uuid4（向后兼容无幂等键字段的旧前端/旧调用方）。
+        """
         if self._ws is None:
             raise ChatClientError('client not connected')
         req_id = uuid.uuid4().hex
@@ -503,11 +560,14 @@ class OpenClawChatClient:  # pylint: disable=too-many-instance-attributes,too-ma
                 'sessionKey': session_key,
                 'message': message,
                 'agentId': _AGENT_ID,
-                'idempotencyKey': uuid.uuid4().hex,
+                'idempotencyKey': idempotency_key or uuid.uuid4().hex,
             },
         }
-        await self._ws.send(json.dumps(frame))
         try:
+            # issue #200 问题 5（对齐 resolve_approval 的 codex R3 P2 先例）：死连接（_ws 非 None
+            # 但已断）下 send 会 raise；send 须在 try 内与等 ack 共用清理路径，否则重试会在
+            # _pending_acks 无限累积 future（内存泄漏 + 永不回执）
+            await self._ws.send(json.dumps(frame))
             # 有界等待 ack：网关连着但 ack 丢失/不回时不应让 consumer 永久挂起
             run_id = await asyncio.wait_for(fut, timeout=self._ack_timeout)
         except TimeoutError as exc:
@@ -518,6 +578,25 @@ class OpenClawChatClient:  # pylint: disable=too-many-instance-attributes,too-ma
             raise
         self._routes[run_id] = on_event
         return run_id
+
+    async def abort_run(
+        self, session_key: str, run_id: str | None = None, *, clear_queued: bool = False,
+    ) -> dict:
+        """中止会话内指定 run（或会话内全部活跃 run）（issue #200 问题 2）：发 sessions.abort，有界等 ack。
+
+        参数（官方协议「会话控制」节）：key（sessions.* 族用 ``key`` 非 ``sessionKey``——与
+        sessions.delete 同先例 codex #96 P1）、可选 runId（缺省中止会话内全部活跃 run）、
+        可选 clearQueued（True 时连排队中的 run 一并清出）。本方法只承诺「网关已受理」——
+        网关停止生成后对被中止的 run 下发 aborted 终态，经既有 chat 事件路由翻译成 done 收尾
+        并清路由（event_translate aborted 分支），不需要额外本地清理。
+        未连接抛 ChatClientError；网关拒绝/ack 超时抛 ChatSendError（consumer 映射 error 帧）。
+        """
+        params: dict = {'key': session_key}
+        if run_id is not None:
+            params['runId'] = run_id
+        if clear_queued:
+            params['clearQueued'] = True
+        return await self._rpc('sessions.abort', params)
 
     def discard(self, run_id: str) -> None:
         self._routes.pop(run_id, None)
