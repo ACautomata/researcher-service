@@ -10,13 +10,13 @@ const router = useRouter()
 const mode = ref<'login' | 'register'>('login')
 const form = reactive({ username: '', password: '' })
 const errorMsg = ref('')
-// #202 问题6：提交中 loading 态 + 防重复点击
-const submitting = ref(false)
+// 提交中态（issue #202 问题6）：按钮 loading + 防重复点击
+const loading = ref(false)
 
 async function onSubmit(): Promise<void> {
-  if (submitting.value) return // 提交中防重复点击
+  if (loading.value) return // 防重复提交
   errorMsg.value = ''
-  submitting.value = true
+  loading.value = true
   try {
     if (mode.value === 'register') {
       await auth.register(form.username, form.password)
@@ -36,7 +36,7 @@ async function onSubmit(): Promise<void> {
           ? '注册失败，请稍后重试'
           : '登录失败，请稍后重试'
   } finally {
-    submitting.value = false
+    loading.value = false
   }
 }
 
@@ -50,18 +50,23 @@ function toggleMode(): void {
 <template>
   <div class="login">
     <h1>{{ mode === 'login' ? '登录' : '注册' }}</h1>
-    <!-- #202 问题6：回车提交——input 上 keyup.enter 直挂 + form 上兜底（事件冒泡），防重复由 submitting 保证 -->
-    <el-form @submit.prevent="onSubmit" @keyup.enter="onSubmit">
+    <el-form @submit.prevent="onSubmit">
       <el-form-item label="用户名">
-        <el-input v-model="form.username" placeholder="用户名" @keyup.enter="onSubmit" />
+        <el-input v-model="form.username" placeholder="用户名" />
       </el-form-item>
       <el-form-item label="密码">
-        <el-input v-model="form.password" type="password" placeholder="密码" @keyup.enter="onSubmit" />
+        <el-input v-model="form.password" type="password" placeholder="密码" />
       </el-form-item>
       <el-form-item v-if="errorMsg">
         <span class="error">{{ errorMsg }}</span>
       </el-form-item>
-      <el-button type="primary" :loading="submitting" :disabled="submitting" @click="onSubmit">
+      <el-button
+        type="primary"
+        native-type="submit"
+        :loading="loading"
+        :disabled="loading"
+        @click="onSubmit"
+      >
         {{ mode === 'login' ? '登录' : '注册' }}
       </el-button>
       <a data-test="switch-register" href="#" @click.prevent="toggleMode">

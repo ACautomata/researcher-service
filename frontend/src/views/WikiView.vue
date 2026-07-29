@@ -15,7 +15,7 @@ import MdEditor from '@/components/MdEditor.vue'
 import WikiGraph from '@/components/WikiGraph.vue'
 
 const store = useWikiStore()
-const { current, groups, activePath, draft, dirty, saving, saveError, saveSeq } = storeToRefs(store)
+const { current, groups, activePath, draft, dirty, saving, saveSeq, saveError } = storeToRefs(store)
 
 const containers = ref<string[]>([])
 const graph = ref<WikiGraphDTO>({ nodes: [], edges: [] })
@@ -50,7 +50,7 @@ async function onSwitch(name: string): Promise<void> {
     await store.switchContainer(name)
     await refreshGraph()
   } catch (e) {
-    ElMessage.error((e as Error).message) // 对齐 onCreate/onDelete 的错误处理约定（#202 问题3）
+    ElMessage.error((e as Error).message)
   }
 }
 
@@ -62,8 +62,8 @@ async function onOpen(path: string): Promise<void> {
   }
 }
 
-// 保存失败后的手动重试（#202 问题3）：点「保存失败，点击重试」指示器触发一次落盘
-async function onRetrySave(): Promise<void> {
+// 保存失败后手动重试（issue #202 问题3）：链已吸收旧错误，重试即再落盘一次脏快照
+async function retrySave(): Promise<void> {
   await store._flush()
 }
 
@@ -141,7 +141,8 @@ onMounted(async () => {
         v-else-if="saveError"
         class="save-state error"
         data-test="save-error"
-        @click="onRetrySave"
+        :title="saveError"
+        @click="retrySave"
       >
         保存失败，点击重试
       </button>
@@ -209,9 +210,10 @@ onMounted(async () => {
 }
 .save-state.error {
   color: #f56c6c;
-  background: none;
   border: none;
+  background: none;
   padding: 0;
+  font-size: 12px;
   cursor: pointer;
 }
 .toggle-graph {

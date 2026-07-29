@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// #202 问题5：导航栏补登出入口——auth.logout() 调后端清 httpOnly cookie + 重置本地后跳 /login
+// issue #202 问题5：导航栏补登出入口（auth.logout 此前无任何 UI 调用方）
 import { useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 
@@ -43,9 +43,9 @@ async function onLogout(): Promise<void> {
 }
 .logout {
   margin-left: auto;
-  padding: 0;
   border: none;
   background: none;
+  padding: 0;
   color: var(--el-text-color-secondary);
   font-size: 14px;
   cursor: pointer;

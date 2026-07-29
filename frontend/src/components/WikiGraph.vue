@@ -2,8 +2,6 @@
 // WikiGraph —— obsidian 风格 wiki 关系图谱（spec §9.6 / issue #45 graph）。
 // 节点=wiki 页（含 ghost 虚节点），边=[[wikilink]]；当前页节点高亮，点节点冒泡 open 进编辑器。
 // vis-network 渲染（canvas）；数据组装与点击转发是组件 seam。
-// #202 问题5：增量更新——activePath 高亮/标题变化只走 DataSet.update（保留缩放/位置与
-// 物理布局），仅结构（节点集合/边集合）变化才 destroy + 重建 Network。
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { Network } from 'vis-network'
 import { DataSet } from 'vis-data'
@@ -14,10 +12,8 @@ const emit = defineEmits<{ open: [path: string] }>()
 
 const host = ref<HTMLDivElement | null>(null)
 let network: Network | null = null
-let nodesDS: DataSet<NodeItem> | null = null
-let edgesDS: DataSet<EdgeItem> | null = null
-// 最近一次渲染的结构指纹：比对决定是否增量更新而非重建
-let lastStructureKey = ''
+// 持有 DataSet 引用：activePath 高亮变化时增量 update，不销毁重建 Network（issue #202 问题5）
+let nodesData: DataSet<NodeItem> | null = null
 
 // 高亮当前节点的强调色（与 Element Plus primary 一致）
 const ACTIVE_COLOR = '#409eff'
@@ -27,12 +23,6 @@ interface NodeItem {
   label: string
   color?: string
   borderWidth?: number
-}
-
-interface EdgeItem {
-  id: string // vis-data DataSet.update 以 id 定位条目；边无天然 id，用端点对合成
-  from: string
-  to: string
 }
 
 function toNodes(): NodeItem[] {
@@ -45,27 +35,17 @@ function toNodes(): NodeItem[] {
   }))
 }
 
-function toEdges(): EdgeItem[] {
-  return props.graph.edges.map((e) => ({ id: `${e.from}→${e.to}`, from: e.from, to: e.to }))
+function toEdges(): Array<{ from: string; to: string }> {
+  return props.graph.edges.map((e) => ({ from: e.from, to: e.to }))
 }
 
-// 结构指纹：节点 id 集合 + 边端点对（顺序无关）。activePath/标题变化不影响指纹。
-function structureKey(): string {
-  const ids = props.graph.nodes.map((n) => n.id).sort()
-  const edges = props.graph.edges.map((e) => `${e.from}→${e.to}`).sort()
-  return `${ids.join('\n')}|${edges.join('\n')}`
-}
-
-// 全量渲染：仅首次挂载与结构变化时调用（物理布局重算、视图状态重置的代价只在这时付）
 function render(): void {
   if (!host.value) return
   network?.destroy()
-  nodesDS = new DataSet(toNodes() as never)
-  edgesDS = new DataSet(toEdges() as never)
-  lastStructureKey = structureKey()
+  nodesData = new DataSet<NodeItem>(toNodes())
   network = new Network(
     host.value,
-    { nodes: nodesDS as never, edges: edgesDS as never },
+    { nodes: nodesData as never, edges: new DataSet(toEdges() as never) },
     {
       nodes: { shape: 'dot', size: 12, font: { size: 12 } },
       edges: { arrows: 'to', color: '#c0c4cc' },
@@ -79,25 +59,36 @@ function render(): void {
 }
 
 onMounted(render)
+
+// 结构变化（图谱数据本身变了）才整图重建
+watch(() => props.graph, render, { deep: true })
+
+// activePath 高亮变化仅增量更新受影响节点的描边/配色：
+// 重建 Network 会重跑 barnesHut 物理布局且丢失缩放/位移视图状态（issue #202 问题5）
 watch(
-  () => [props.graph, props.activePath],
-  () => {
-    if (!network || !nodesDS || !edgesDS) return
-    const key = structureKey()
-    if (key === lastStructureKey) {
-      // 结构未变（activePath 高亮/标题变化）：DataSet.update 增量改节点/边，不重建 Network
-      nodesDS.update(toNodes() as never)
-      edgesDS.update(toEdges() as never)
-    } else {
-      render()
+  () => props.activePath,
+  (next, prev) => {
+    if (!nodesData) return
+    const updates: NodeItem[] = []
+    for (const id of [prev, next]) {
+      if (!id) continue
+      const node = props.graph.nodes.find((n) => n.id === id)
+      if (!node) continue // 节点不在当前图谱（如换容器途中）→ 由 graph watch 重建兜底
+      updates.push({
+        id: node.id,
+        label: node.title,
+        color: id === next ? ACTIVE_COLOR : undefined,
+        borderWidth: id === next ? 3 : 1,
+      })
     }
+    if (updates.length) nodesData.update(updates as never)
   },
-  { deep: true },
 )
 
 onBeforeUnmount(() => {
   network?.destroy()
   network = null
+  nodesData = null
 })
 </script>
 
