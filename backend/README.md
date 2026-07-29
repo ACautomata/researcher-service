@@ -7,6 +7,11 @@ P0 骨架（[issue #37](https://github.com/ACautomata/researcher-service/issues/
 
 Django 6 + DRF + drf-spectacular（OpenAPI）+ djangorestframework-simplejwt + channels。
 
+> **部署前提（issue #201）**：仅支持 **ASGI（Daphne）单进程单 worker**——REST sync 视图经
+> `async_to_sync` 驱动共享 WS pool client，依赖「一切跑在一根事件循环上」；WSGI 入口
+> （`config/wsgi.py`）已禁用（import 即 fail-fast），多 worker / WSGI 部署不支持。
+> 生产启动：`daphne config.asgi:application`。
+
 ## 开发
 
 ```bash

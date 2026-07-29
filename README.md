@@ -69,6 +69,8 @@ cd frontend && npm run test                               # vitest
 
 ## 关键机制
 
+- **部署前提（issue #201）**：仅支持 **ASGI（Daphne）单进程单 worker**（`daphne config.asgi:application`）；
+  REST 视图经 `async_to_sync` 驱动共享 WS pool client，依赖单事件循环前提，`config/wsgi.py` 已禁用。
 - **容器编排**：每容器一个命名 home + 渲染后的 `openclaw.json` + 宿主端口；容器命名
   `openclaw-gw-<name>`，label `app=openclaw-fleet`；删除默认连数据一起删。
 - **配置单一来源**：`deploy/openclaw.json` 是全面板共享模板，`ConfigRenderer` 渲染每容器配置并强制
