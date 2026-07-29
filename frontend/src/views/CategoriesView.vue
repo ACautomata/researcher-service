@@ -48,7 +48,7 @@ async function onSwitch(name: string): Promise<void> {
   try {
     await store.switchContainer(name)
   } catch (e) {
-    ElMessage.error((e as Error).message) // 对齐 WikiView/onCreate 的错误处理约定（#202 问题3）
+    ElMessage.error((e as Error).message)
   }
 }
 

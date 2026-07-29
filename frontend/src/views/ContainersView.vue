@@ -41,11 +41,12 @@ async function refresh(): Promise<void> {
     pairings.value = Object.fromEntries(
       instances.value.map((inst) => [inst.name, inst.pairing]),
     )
-    errorMsg.value = '' // 成功才清错（#202 问题6：不再每 tick 清空→重写，避免同文案闪烁）
+    // 成功才清错误；仅在有错误时写，避免无谓响应式触发（issue #202 问题6）
+    if (errorMsg.value) errorMsg.value = ''
   } catch (e) {
+    // 仅内容变化时更新：后端持续故障时同一文案不再以 3s 频率闪烁
     const msg = (e as Error).message
-    // 错误文案仅变化时更新：后端持续故障时不再以 3s 频率闪烁（#202 问题6）
-    if (errorMsg.value !== msg) errorMsg.value = msg
+    if (msg !== errorMsg.value) errorMsg.value = msg
   } finally {
     loading.value = false
     refreshInFlight = false
@@ -116,9 +117,9 @@ async function confirmRemove(name: string): Promise<void> {
   }
 }
 
-// 轮询启停（#202 问题6）：标签页隐藏时暂停，恢复可见时立即补一次刷新再重启周期
 function startPolling(): void {
   if (pollTimer !== null) return
+  // codex R2 :78：周期性刷新，反映 runtime 状态/健康变化
   pollTimer = setInterval(() => {
     void refresh()
   }, POLL_INTERVAL_MS)
@@ -131,18 +132,19 @@ function stopPolling(): void {
   }
 }
 
+// 标签页隐藏时暂停轮询、回前台恢复并立即刷一次（issue #202 问题6）：
+// 隐藏页持续 3s 轮询白耗健康探测与网络。
 function onVisibilityChange(): void {
   if (document.visibilityState === 'hidden') {
     stopPolling()
   } else {
-    void refresh() // 重新可见立即补拉一次，再恢复周期
     startPolling()
+    void refresh()
   }
 }
 
 onMounted(() => {
   void refresh()
-  // codex R2 :78：周期性刷新，反映 runtime 状态/健康变化
   startPolling()
   document.addEventListener('visibilitychange', onVisibilityChange)
 })
