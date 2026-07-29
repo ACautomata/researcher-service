@@ -714,9 +714,9 @@ async def test_gateway_resolved_event_fans_out_to_subscribers():
     t.push({'type': 'event', 'event': 'plugin.approval.resolved',
             'payload': {'id': 'ap-1', 'decision': 'deny'}})
     await asyncio.sleep(0.05)
-    expected = {'type': 'approvalResolved', 'id': 'ap-1', 'decision': 'deny'}
-    assert a_received == [expected]
-    assert b_received == [expected]
+    expected = [{'type': 'approvalResolved', 'id': 'ap-1', 'decision': 'deny'}]
+    assert a_received == expected
+    assert b_received == expected
     await c.aclose()
 
 
@@ -868,7 +868,7 @@ async def test_delete_session_builds_frame_and_returns_payload():
 
     wire 字段是 ``key``（不是 ``sessionKey``）——上游 ``SessionsDeleteParamsSchema``
     （packages/gateway-protocol/src/schema/sessions.ts）是 closedObject，``key`` 必填、
-    无 ``sessionKey``；与同族 ``sessions.create``/``sessions.send`` 的 ``key`` 一致，
+    无 ``sessionKey``；与同族 ``sessions.create``/``sessions.send`` 的 ``key`` 一致。
     区别于 ``chat.*`` 族（``chat.send``/``chat.history`` 用 ``sessionKey``）。codex #96 P1。
     """
     payload = {'deleted': True, 'archived': 'sess-1.jsonl.deleted.123.zst'}
@@ -886,7 +886,7 @@ async def test_delete_session_builds_frame_and_returns_payload():
 async def test_delete_session_not_connected_raises():
     c = _client(transport=FakeChatTransport())
     with pytest.raises(ChatClientError):
-        await c.delete_session('s1')
+        await c.delete_session('sess-1')
 
 
 @pytest.mark.asyncio
@@ -897,7 +897,7 @@ async def test_delete_session_gateway_reject_raises():
     c = _client(transport=t)
     await c.connect()
     with pytest.raises(ChatSendError) as exc:
-        await c.delete_session('s1')
+        await c.delete_session('sess-1')
     assert 'operator.admin' in str(exc.value)
     await c.aclose()
 
