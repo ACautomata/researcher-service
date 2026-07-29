@@ -1,4 +1,6 @@
 """EncryptedTextField 的 expand 阶段 ORM 行为测试。"""
+import logging
+
 import pytest
 from django.conf import settings
 from django.db import connection
@@ -40,7 +42,10 @@ class TestEncryptedCredentialFields:
         assert reloaded_pairing.device_token == 'device-token'
 
     @pytest.mark.django_db
-    def test_legacy_plaintext_rows_are_rejected_after_contract(self):
+    def test_legacy_plaintext_rows_pass_through_with_warning(self, caplog):
+        """issue #199 问题4：绕过一次性存量加密迁移的明文行（旧备份恢复/手工 SQL 直写，
+        状态列 False）按状态列分支明文透传 + logger.warning——不再无条件解密导致
+        InvalidCredentialCiphertext、整片列表/详情接口 500（原「明文行即拒绝」契约修订）。"""
         instance = Instance.objects.create(
             name='legacy', port=19001, token='new-token', home_dir='/tmp/legacy',
             container_id='cid', status=Instance.STATUS_RUNNING, image='image:tag',
@@ -60,10 +65,21 @@ class TestEncryptedCredentialFields:
                 ['legacy-private-key', False, 'legacy-device-token', False, pairing.pk],
             )
 
-        with pytest.raises(InvalidCredentialCiphertext):
-            Instance.objects.get(pk=instance.pk)
-        with pytest.raises(InvalidCredentialCiphertext):
-            Pairing.objects.get(pk=pairing.pk)
+        with caplog.at_level(logging.WARNING, logger='security.fields'):
+            assert Instance.objects.get(pk=instance.pk).token == 'legacy-token'
+            reloaded = Pairing.objects.get(pk=pairing.pk)
+            assert reloaded.private_key_pem == 'legacy-private-key'
+            assert reloaded.device_token == 'legacy-device-token'
+            # values/values_list 投影同样按状态列透传（issue #199 问题4 读路径全覆盖）
+            assert Pairing.objects.values('device_token').get(pk=pairing.pk) == {
+                'device_token': 'legacy-device-token',
+            }
+            assert Pairing.objects.values_list(
+                'device_token', flat=True,
+            ).get(pk=pairing.pk) == 'legacy-device-token'
+
+        warnings = [r for r in caplog.records if 'plaintext' in r.message]
+        assert warnings  # 每次明文透传均有可观测告警
 
     @pytest.mark.django_db
     def test_queryset_updates_encrypt_new_credential_values(self):
