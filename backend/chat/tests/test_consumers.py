@@ -27,18 +27,25 @@ class FakeChatClient:
 
     def __init__(self):
         self.sent = []  # (session_key, message)
+        self.send_keys = []  # issue #200：透传的 idempotencyKey（None = 未传，client 兜底）
         self._handlers = {}
         self.discarded = []
         self.resolved = []  # (approval_id, kind, decision)
         self.resolve_payload = {}  # resolve_approval 返回的权威 payload
         self.pending = []  # start 时补拉的待审批卡（codex P2 断线恢复）
+        self.aborted = []  # issue #200：(session_key, run_id, clear_queued)
         self._approval_subscribers = []
 
-    async def send_message(self, session_key, message, *, on_event):
+    async def send_message(self, session_key, message, *, on_event, idempotency_key=None):
         run_id = f'run-{len(self.sent) + 1}'
         self.sent.append((session_key, message))
+        self.send_keys.append(idempotency_key)
         self._handlers[run_id] = on_event
         return run_id
+
+    async def abort_run(self, session_key, run_id=None, *, clear_queued=False):
+        self.aborted.append((session_key, run_id, clear_queued))
+        return {}
 
     def discard(self, run_id):
         self.discarded.append(run_id)
@@ -265,8 +272,8 @@ async def test_start_connect_failure_sends_error_frame(instance):
 # ---- T06 权限审批（issue #42 / spec §8.2）----
 # 审批卡是连接级（无 runId）：start 后 consumer add_approval_subscriber 订阅、disconnect 独立退订
 # （codex P1 订阅者集合，多 consumer 共享 client 不互伤）；前端发 resolve{id,kind,decision} →
-# client.resolve_approval → 回执用权威 decision（codex P1 first-answer-wins）；start 补拉待审批
-# （codex P2 断线恢复）。
+# client.resolve_approval → 受理回执 approvalResolveAck{id}（issue #200 ack 语义），权威 decision
+# 仍仅由 resolved 事件落定（codex P1 first-answer-wins）；start 补拉待审批（codex P2 断线恢复）。
 
 
 @pytest.mark.asyncio
@@ -322,24 +329,28 @@ async def test_disconnect_one_keeps_peer_subscribed(override_pool, instance, fak
 
 
 @pytest.mark.asyncio
-async def test_resolve_awaits_resolved_event(override_pool, instance, fake_client):
-    """codex P2 #163：resolve ack 不应回送 approvalResolved——权威值由 resolved 事件负责。"""
+async def test_resolve_sends_accepted_receipt(override_pool, instance, fake_client):
+    """issue #200 问题 4：resolve 成功后回送受理回执 approvalResolveAck{id}（ack 语义 = 网关已受理，
+    兜底「网关到底收没收到」）；不回送 approvalResolved——权威 decision 仍仅由 resolved 事件落定。"""
     fake_client.resolve_payload = {'id': 'ap-1'}
     comm = await _connect_authed()
     await comm.connect()
     await comm.send_json_to({'type': 'start', 'container': 'demo'})
     await comm.receive_json_from()  # ready
     await comm.send_json_to({'type': 'resolve', 'id': 'ap-1', 'kind': 'exec', 'decision': 'allow-once'})
-    # resolve 应静默成功，不应发送 approvalResolved（权威值由 resolved 事件 broadcast）
-    with pytest.raises(asyncio.TimeoutError):
-        await asyncio.wait_for(comm.receive_json_from(), timeout=0.5)
+    ack = await comm.receive_json_from()
+    assert ack == {'type': 'approvalResolveAck', 'id': 'ap-1'}  # 受理回执，无 decision（不冒充权威值）
     assert fake_client.resolved == [('ap-1', 'exec', 'allow-once')]
+    # 权威 decision 仍由网关 resolved 事件广播落定（codex P2 #163 语义不变）
+    await fake_client.emit_approval({'type': 'approvalResolved', 'id': 'ap-1', 'decision': 'allow-once'})
+    resolved = await comm.receive_json_from()
+    assert resolved == {'type': 'approvalResolved', 'id': 'ap-1', 'decision': 'allow-once'}
     await comm.disconnect()
 
 
 @pytest.mark.asyncio
 async def test_resolve_peer_receives_nothing_from_ack(override_pool, instance, fake_client):
-    """codex P2 #163：resolve ack 无广播——对等端不应收到任何帧。"""
+    """issue #200：受理回执只发回发起方（非广播）——对等端不应收到任何帧。"""
     fake_client.resolve_payload = {'id': 'ap-1'}
     comm_a = await _connect_authed('alice')
     await comm_a.connect()
@@ -351,9 +362,9 @@ async def test_resolve_peer_receives_nothing_from_ack(override_pool, instance, f
     await comm_b.receive_json_from()  # B ready
     # A 提交 resolve
     await comm_a.send_json_to({'type': 'resolve', 'id': 'ap-1', 'kind': 'exec', 'decision': 'allow-once'})
-    # A 不应收到任何 immediate feedback
-    with pytest.raises(asyncio.TimeoutError):
-        await asyncio.wait_for(comm_a.receive_json_from(), timeout=0.5)
+    # A 收到受理回执（ack 语义）
+    ack = await comm_a.receive_json_from()
+    assert ack == {'type': 'approvalResolveAck', 'id': 'ap-1'}
     # B 不应收到任何广播
     with pytest.raises(asyncio.TimeoutError):
         await asyncio.wait_for(comm_b.receive_json_from(), timeout=0.5)
@@ -495,8 +506,10 @@ async def test_consumer_operates_via_wire_port_contract(override_pool, instance)
     # resolve
     wire.resolve_payload = {}
     await comm.send_json_to({'type': 'resolve', 'id': 'ap-1', 'kind': 'exec', 'decision': 'allow-once'})
-    # resolve ack 是静默的（权威值由 resolved 事件落地，codex P2 #163）
-    # 模拟网关广播 resolved 事件
+    # issue #200：resolve 成功后先收受理回执（ack 语义 = 网关已受理）
+    ack = await comm.receive_json_from()
+    assert ack == {'type': 'approvalResolveAck', 'id': 'ap-1'}
+    # 权威值由 resolved 事件落地（codex P2 #163）：模拟网关广播 resolved 事件
     await wire.emit_approval({'type': 'approvalResolved', 'id': 'ap-1', 'decision': 'allow-once'})
     resolved = await comm.receive_json_from()
     assert resolved == {'type': 'approvalResolved', 'id': 'ap-1', 'decision': 'allow-once'}
@@ -504,3 +517,141 @@ async def test_consumer_operates_via_wire_port_contract(override_pool, instance)
     await comm.disconnect()
     assert wire._approval_subscribers == []  # pylint: disable=use-implicit-booleaness-not-comparison
     ChatFleet.reset()
+
+
+# ---- issue #200：send 幂等键透传 / abort 中止链路 ----
+
+
+@pytest.mark.asyncio
+async def test_send_passes_idempotency_key_through(override_pool, instance, fake_client):
+    """issue #200 问题 1：send 帧的 idempotencyKey 透传到 client.send_message
+    （前端按消息草稿定键，ack 超时重试复用同键供网关去重）。"""
+    comm = await _connect_authed()
+    await comm.connect()
+    await comm.send_json_to({'type': 'start', 'container': 'demo'})
+    await comm.receive_json_from()  # ready
+    await comm.send_json_to({'type': 'send', 'sessionKey': 'sk-1', 'message': '你好',
+                             'idempotencyKey': 'draft-1'})
+    await comm.send_json_to({'type': 'send', 'sessionKey': 'sk-1', 'message': '你好',
+                             'idempotencyKey': 'draft-1'})  # 重试同键
+    await asyncio.sleep(0.05)
+    assert fake_client.send_keys == ['draft-1', 'draft-1']
+    await comm.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_send_without_idempotency_key_passes_none(override_pool, instance, fake_client):
+    """向后兼容：旧前端 send 帧无 idempotencyKey 字段 → 透传 None（client 兜底生成）。"""
+    comm = await _connect_authed()
+    await comm.connect()
+    await comm.send_json_to({'type': 'start', 'container': 'demo'})
+    await comm.receive_json_from()  # ready
+    await comm.send_json_to({'type': 'send', 'sessionKey': 'sk-1', 'message': '你好'})
+    await asyncio.sleep(0.05)
+    assert fake_client.send_keys == [None]
+    await comm.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_send_rejects_non_string_idempotency_key(override_pool, instance, fake_client):
+    """非 str 幂等键视为非法帧，消费端拒绝（不透传到网关）。"""
+    comm = await _connect_authed()
+    await comm.connect()
+    await comm.send_json_to({'type': 'start', 'container': 'demo'})
+    await comm.receive_json_from()  # ready
+    await comm.send_json_to({'type': 'send', 'sessionKey': 'sk-1', 'message': '你好',
+                             'idempotencyKey': 123})
+    resp = await comm.receive_json_from()
+    assert resp['type'] == 'error'
+    assert fake_client.sent == []  # pylint: disable=use-implicit-booleaness-not-comparison
+    await comm.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_abort_dispatches_to_client_and_receives_ack(override_pool, instance, fake_client):
+    """issue #200 问题 2：前端发 abort{sessionKey,runId} → client.abort_run（sessions.abort），
+    受理后回执 abortAck（ack 语义 = 网关已受理中止）。"""
+    comm = await _connect_authed()
+    await comm.connect()
+    await comm.send_json_to({'type': 'start', 'container': 'demo'})
+    await comm.receive_json_from()  # ready
+    await comm.send_json_to({'type': 'send', 'sessionKey': 'sk-1', 'message': '你好'})
+    await asyncio.sleep(0.05)  # 等 send_message 返回 run-1
+    await comm.send_json_to({'type': 'abort', 'sessionKey': 'sk-1', 'runId': 'run-1'})
+    resp = await comm.receive_json_from()
+    assert resp == {'type': 'abortAck', 'sessionKey': 'sk-1', 'runId': 'run-1'}
+    assert fake_client.aborted == [('sk-1', 'run-1', False)]
+    # 被中止 run 的气泡收尾仍由网关 aborted 终态翻译的 done 帧负责
+    await fake_client.emit({'type': 'done', 'runId': 'run-1'})
+    done = await comm.receive_json_from()
+    assert done == {'type': 'done', 'runId': 'run-1'}
+    await comm.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_abort_without_runid_aborts_whole_session(override_pool, instance, fake_client):
+    """runId 可选：缺省时中止会话内全部活跃 run（sessions.abort 仅 key）。"""
+    comm = await _connect_authed()
+    await comm.connect()
+    await comm.send_json_to({'type': 'start', 'container': 'demo'})
+    await comm.receive_json_from()  # ready
+    await comm.send_json_to({'type': 'abort', 'sessionKey': 'sk-1'})
+    resp = await comm.receive_json_from()
+    assert resp == {'type': 'abortAck', 'sessionKey': 'sk-1', 'runId': None}
+    assert fake_client.aborted == [('sk-1', None, False)]
+    await comm.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_abort_without_start_sends_error(override_pool, instance):
+    comm = await _connect_authed()
+    await comm.connect()
+    await comm.send_json_to({'type': 'abort', 'sessionKey': 'sk-1'})
+    resp = await comm.receive_json_from()
+    assert resp['type'] == 'error'
+    await comm.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_abort_missing_session_key_sends_error(override_pool, instance, fake_client):
+    comm = await _connect_authed()
+    await comm.connect()
+    await comm.send_json_to({'type': 'start', 'container': 'demo'})
+    await comm.receive_json_from()  # ready
+    await comm.send_json_to({'type': 'abort'})
+    resp = await comm.receive_json_from()
+    assert resp['type'] == 'error'
+    assert 'sessionKey' in resp['message']
+    assert fake_client.aborted == []  # pylint: disable=use-implicit-booleaness-not-comparison
+    await comm.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_abort_rejects_non_string_runid(override_pool, instance, fake_client):
+    comm = await _connect_authed()
+    await comm.connect()
+    await comm.send_json_to({'type': 'start', 'container': 'demo'})
+    await comm.receive_json_from()  # ready
+    await comm.send_json_to({'type': 'abort', 'sessionKey': 'sk-1', 'runId': 42})
+    resp = await comm.receive_json_from()
+    assert resp['type'] == 'error'
+    assert fake_client.aborted == []  # pylint: disable=use-implicit-booleaness-not-comparison
+    await comm.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_abort_failure_sends_error_frame(override_pool, instance, fake_client):
+    """sessions.abort 被网关拒（ChatSendError）→ error 帧带 runId（前端仅复位对应气泡），不传播关 WS。"""
+    async def fail_abort(*args, **kwargs):
+        raise ChatSendError('no such run')
+
+    fake_client.abort_run = fail_abort
+    comm = await _connect_authed()
+    await comm.connect()
+    await comm.send_json_to({'type': 'start', 'container': 'demo'})
+    await comm.receive_json_from()  # ready
+    await comm.send_json_to({'type': 'abort', 'sessionKey': 'sk-1', 'runId': 'run-9'})
+    resp = await comm.receive_json_from()
+    assert resp['type'] == 'error'
+    assert resp['runId'] == 'run-9'
+    await comm.disconnect()
