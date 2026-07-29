@@ -3,7 +3,7 @@
 // 错误体形态来自后端实测（accounts/serializers.py 校验器 + LANGUAGE_CODE=zh-hans）。
 import { describe, expect, it } from 'vitest'
 
-import { extractApiError } from '@/api/errors'
+import { extractApiError, ApiError } from '@/api/errors'
 
 describe('extractApiError', () => {
   it('压平字段级多条错误并用分号拼接', () => {
@@ -38,5 +38,24 @@ describe('extractApiError', () => {
     expect(extractApiError(500, undefined)).toBe('请求失败（500）')
     expect(extractApiError(500, null)).toBe('请求失败（500）')
     expect(extractApiError(500, {})).toBe('请求失败（500）')
+  })
+})
+
+// codex P2：ApiError 是「已解析的 API 错误」标记,视图据此区别网络 TypeError 走本地化兜底。
+describe('ApiError', () => {
+  it('是 Error 子类且 message 可读', () => {
+    const e = new ApiError('这个密码太常见了。')
+    expect(e).toBeInstanceOf(Error)
+    expect(e).toBeInstanceOf(ApiError)
+    expect(e.message).toBe('这个密码太常见了。')
+    expect(e.name).toBe('ApiError')
+  })
+
+  it('与原生 TypeError 区分（视图 instanceof 分流的契约）', () => {
+    const apiErr = new ApiError('用户名或密码错误')
+    const netErr = new TypeError('Failed to fetch')
+    expect(apiErr instanceof ApiError).toBe(true)
+    expect(netErr instanceof ApiError).toBe(false)
+    // 两者皆为 Error，但仅 ApiError 可逐字透传——这正是 LoginView 二分的依据。
   })
 })

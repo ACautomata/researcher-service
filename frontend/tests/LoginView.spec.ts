@@ -86,6 +86,35 @@ describe('LoginView', () => {
     expect(w.text()).not.toContain('已存在')
   })
 
+  it('网络异常（fetch reject）显示本地化兜底而非浏览器原始报错文本', async () => {
+    // codex P2：fetch 因后端不可达 reject 时浏览器抛 TypeError ("Failed to fetch"
+    // / "Load failed")。仅「已解析的 API 错误」可逐字透传；网络/意外错误须走
+    // 模式专属中文兜底,不应把英文浏览器消息直接展示给用户、也不能盖掉可重试提示。
+    const w = mountLogin()
+    // 切到注册模式,验证注册兜底
+    await w.find('[data-test="switch-register"]').trigger('click')
+    global.fetch = vi.fn().mockRejectedValue(new TypeError('Failed to fetch'))
+    await w.find('input[type="text"]').setValue('alice')
+    await w.find('input[type="password"]').setValue('pw123456')
+    await w.find('button').trigger('click')
+    await flushPromises()
+    expect(w.text()).toContain('注册失败，请稍后重试')
+    expect(w.text()).not.toContain('Failed to fetch')
+    expect(w.text()).not.toContain('Load failed')
+  })
+
+  it('登录网络异常显示登录兜底而非浏览器原始报错文本', async () => {
+    // codex P2 镜像用例：登录模式同根因,须显示「登录失败，请稍后重试」。
+    const w = mountLogin()
+    global.fetch = vi.fn().mockRejectedValue(new TypeError('Load failed'))
+    await w.find('input[type="text"]').setValue('alice')
+    await w.find('input[type="password"]').setValue('pw123456')
+    await w.find('button').trigger('click')
+    await flushPromises()
+    expect(w.text()).toContain('登录失败，请稍后重试')
+    expect(w.text()).not.toContain('Load failed')
+  })
+
   it('registers a new account when switched to register mode (codex round-4 F5)', async () => {
     // spec §9.2：登录页须含本地账号注册表单。切到注册模式提交应调 /register。
     const w = mountLogin()

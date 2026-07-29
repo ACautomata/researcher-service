@@ -2,7 +2,7 @@
 // P0：login 调后端 /api/v1/auth/login 拿 access token；isAuthenticated 驱动路由守卫。
 import { defineStore } from 'pinia'
 
-import { extractApiError } from '@/api/errors'
+import { extractApiError, ApiError } from '@/api/errors'
 
 interface LoginResponse {
   access: string
@@ -28,7 +28,7 @@ async function rejectWithApiError(resp: Response): Promise<never> {
   } catch {
     // 非 JSON（如 5xx HTML 错误页）→ body 留空，extractApiError 走状态码兜底
   }
-  throw new Error(extractApiError(resp.status, body))
+  throw new ApiError(extractApiError(resp.status, body))
 }
 
 export const useAuthStore = defineStore('auth', {
