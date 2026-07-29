@@ -35,15 +35,17 @@ async function refresh(): Promise<void> {
   if (refreshInFlight) return // codex R3 :89：上一次未完成则跳过本次
   refreshInFlight = true
   loading.value = true
-  errorMsg.value = ''
   try {
     instances.value = await listInstances()
     // 批量同步：后端 list 已携带 pairing 快照，避免 N+1 请求
     pairings.value = Object.fromEntries(
       instances.value.map((inst) => [inst.name, inst.pairing]),
     )
+    errorMsg.value = '' // 成功才清错（#202 问题6：不再每 tick 清空→重写，避免同文案闪烁）
   } catch (e) {
-    errorMsg.value = (e as Error).message
+    const msg = (e as Error).message
+    // 错误文案仅变化时更新：后端持续故障时不再以 3s 频率闪烁（#202 问题6）
+    if (errorMsg.value !== msg) errorMsg.value = msg
   } finally {
     loading.value = false
     refreshInFlight = false
@@ -114,19 +116,40 @@ async function confirmRemove(name: string): Promise<void> {
   }
 }
 
-onMounted(() => {
-  void refresh()
-  // codex R2 :78：周期性刷新，反映 runtime 状态/健康变化
+// 轮询启停（#202 问题6）：标签页隐藏时暂停，恢复可见时立即补一次刷新再重启周期
+function startPolling(): void {
+  if (pollTimer !== null) return
   pollTimer = setInterval(() => {
     void refresh()
   }, POLL_INTERVAL_MS)
-})
+}
 
-onBeforeUnmount(() => {
+function stopPolling(): void {
   if (pollTimer !== null) {
     clearInterval(pollTimer)
     pollTimer = null
   }
+}
+
+function onVisibilityChange(): void {
+  if (document.visibilityState === 'hidden') {
+    stopPolling()
+  } else {
+    void refresh() // 重新可见立即补拉一次，再恢复周期
+    startPolling()
+  }
+}
+
+onMounted(() => {
+  void refresh()
+  // codex R2 :78：周期性刷新，反映 runtime 状态/健康变化
+  startPolling()
+  document.addEventListener('visibilitychange', onVisibilityChange)
+})
+
+onBeforeUnmount(() => {
+  stopPolling()
+  document.removeEventListener('visibilitychange', onVisibilityChange)
 })
 
 // 暴露删除/配对动作 + 配对状态查询：el-table row slot 在测试 stub 下不便点击，暴露供测试与潜在父组件触发
