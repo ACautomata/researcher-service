@@ -17,7 +17,6 @@ import pytest
 from containers.docker_runtime import DockerRuntime
 from containers.tests.integration_helpers import GatewayReadinessWaiter
 from integration.openclaw.adapters import HttpHealthProbe
-from integration.openclaw.translation import format_device_approve_command
 
 # 真链路集成测试（issue #157/#178）：CI integration job env 齐备时真跑；backend-unit job 经
 # `-m "not integration"` 排除，默认 `python -m pytest` 不跑（不污染单元回归）。
@@ -320,8 +319,9 @@ def test_l4_chat_send_event_stream(page_ws):  # pylint: disable=too-many-stateme
     全链路（前端真浏览器原生 WebSocket → Vite /ws proxy → daphne Channels → ChatConsumer →
     ChatFleet pool → 真 ghcr gateway）端到端贯通，断言：
 
-    - 配对全流程（challenge→approve→deviceToken 持久化）经 HTTP /pairing/ + 容器内 approve
-      走通：daphne ensure_paired 写文件级 DB Pairing 行，ChatConsumer 经 ChatFleet.get_or_create
+    - 配对全流程（challenge→控制面自动 approve→deviceToken 持久化）经 HTTP /pairing/ 走通
+      （阶段3 自动 approve：PairingService 经容器内 exec 自动 approve，一步 paired）：
+      daphne ensure_paired 写文件级 DB Pairing 行，ChatConsumer 经 ChatFleet.get_or_create
       从该行重建 client 连 gateway（复用后端 pairing.py，#184 验收#1）。
     - 前端 ChatWebSocket 发 chat.send 后收到真实 LLM 事件流，onText/onDone 正确解析 text/done
       帧（#184 验收#2）。tool/approval 帧若触发则断言其翻译结构（不强求触发）。
@@ -370,32 +370,8 @@ def test_l4_chat_send_event_stream(page_ws):  # pylint: disable=too-many-stateme
             interval=_GATEWAY_POLL_INTERVAL,
         ).wait(port)
 
-        # ── 2. 触发配对 → PAIRING_REQUIRED（daphne ensure_paired force_repair 握手）──
-        pair1 = page_ws.evaluate(
-            """
-            async (name) => {
-                const resp = await window.__apiFetch(`/api/v1/containers/${name}/pairing/`, {
-                    method: 'POST',
-                    body: JSON.stringify({}),
-                });
-                const body = await resp.json();
-                return {status: resp.status, body};
-            }
-            """,
-            container_name,
-        )
-        request_id = (pair1.get('body') or {}).get('pairing_request_id')
-        assert request_id, (
-            f'first pairing must return pairing_request_id (PAIRING_REQUIRED 202), '
-            f'got status={pair1.get("status")}, body={pair1.get("body")}'
-        )
-
-        # ── 3. 容器内 approve（exec_in_container 加 openclaw-gw- 前缀；detach fire-and-forget）──
-        DockerRuntime().exec_in_container(
-            container_name, format_device_approve_command(request_id).split(),
-        )
-
-        # ── 4. 轮询配对至 paired（approve 异步生效；每次 POST force_repair 重握手）──
+        # ── 2. 触发配对并轮询至 paired（阶段3 自动 approve：控制面 PairingService 经容器内
+        #     exec 自动 approve，一步 paired；approve 不再由测试手动触发）──
         paired = False
         last_pair: dict = {}
         deadline = time.monotonic() + _PAIRING_APPROVAL_TIMEOUT
@@ -418,7 +394,7 @@ def test_l4_chat_send_event_stream(page_ws):  # pylint: disable=too-many-stateme
                 break
             time.sleep(_PAIRING_POLL_INTERVAL)
         assert paired, (
-            f'pairing not paired after approve within {_PAIRING_APPROVAL_TIMEOUT}s; '
+            f'pairing not paired within {_PAIRING_APPROVAL_TIMEOUT}s (阶段3 自动 approve); '
             f'last status={(last_pair.get("body") or {}).get("status")}, body={last_pair.get("body")}'
         )
 

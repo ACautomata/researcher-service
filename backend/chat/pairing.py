@@ -273,7 +273,18 @@ class PairingService:
                 )
                 raise PairingError(f'invalid pairing requestId after approve: {e.request_id!r}') from e
             raise
-        # 其它 PairingError 冒泡到外层 except（落 error）
+        except PairingError:
+            # codex P2 :257：重握手抛 PairingError（网关断连/坏帧/超时）时，本异常源自外层
+            # ``except PairingRequired`` 块内的本次调用，外层 sibling ``except PairingError`` 无法
+            # 再捕获（Python：进入某 except handler 后，同一 try 的其它 except 不再 consult）。
+            # 须在此落 STATUS_ERROR 再 raise，否则配对行停留在旧状态（force_repair 时甚至残留
+            # 已撤销的 paired + 旧 deviceToken），且 API 返 502 时 DB 与真实配对态不一致。
+            self._apply_result(
+                pairing=pairing,
+                attempt_version=attempt_version,
+                status=Pairing.STATUS_ERROR,
+            )
+            raise
 
     def _apply_result(
         self,

@@ -56,15 +56,30 @@ _ensure_db() {
 }
 
 _load_env() {
-  # 加载 deploy/.env（GATEWAY_TOKEN / LLM_API_KEY / OPENCLAW_IMAGE 等），若存在。
-  # 不强制存在——用户也可改用 shell 环境变量注入。
-  if [ -f "$PROJECT_ROOT/deploy/.env" ]; then
-    set -a
-    # shellcheck disable=SC1091
-    . "$PROJECT_ROOT/deploy/.env"
-    set +a
-    echo "[driver] 已加载 deploy/.env"
-  fi
+  # codex P2 :64：shell 环境变量优先于 deploy/.env——仅注入调用方当前未设置的变量，
+  # 避免 `LLM_API_KEY=new driver.sh start` 被 .env 的空值/旧值覆盖（→ 503 / 错凭证）。
+  # 对齐 python-dotenv load_dotenv() 默认「不覆盖既有 env」语义，落实文件注释承诺的
+  # 「用户也可改用 shell 环境变量注入」。值按文档 KEY=VALUE 字面量取（首个 = 之后整段，
+  # 不做 $ 展开/去引号——本仓库 .env.example 无此类值）。可选 $1 指定路径便于自测。
+  local env_file="${1:-$PROJECT_ROOT/deploy/.env}"
+  [ -f "$env_file" ] || return 0
+  local line key val
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line#"${line%%[![:space:]]*}"}"        # 去行首空白
+    [ -z "$line" ] && continue
+    [ "${line:0:1}" = "#" ] && continue             # 跳过注释
+    case "$line" in *=*) : ;; *) continue ;; esac   # 仅 KEY=VALUE 行
+    key="${line%%=*}"                               # 首个 = 之前
+    val="${line#*=}"                                # 首个 = 之后（含后续 =）
+    [ "${key:0:7}" = "export " ] && key="${key#export }"   # 去可选 export 前缀
+    key="${key#"${key%%[![:space:]]*}"}"
+    key="${key%"${key##*[![:space:]]}"}"
+    # 合法标识符且调用方未设置才注入（已设置的 shell 值胜出——含显式空值）
+    case "$key" in
+      [A-Za-z_]*) [ -n "${!key+x}" ] || export "$key=$val" ;;
+    esac
+  done < "$env_file"
+  echo "[driver] 已加载 deploy/.env（shell 环境变量优先，未被覆盖）"
 }
 
 _ensure_fleet_image() {

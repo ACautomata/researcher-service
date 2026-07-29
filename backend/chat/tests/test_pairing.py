@@ -191,7 +191,36 @@ def test_no_approver_keeps_legacy_pending_behavior(instance):
     svc = PairingService(transport=transport, approver=None)
     with pytest.raises(PairingRequired):
         svc.ensure_paired(instance)
-    assert approver.calls == []   # 未注入 approver，不触发 approve
+    assert not approver.calls  # 未注入 approver，不触发 approve
+
+
+def test_auto_approve_second_handshake_error_marks_status_error(instance):
+    """codex P2 :257：approve 成功但第二次握手抛 PairingError（网关断连/坏帧）→ 必须落
+    STATUS_ERROR 再 raise。
+
+    该 PairingError 源自外层 ``except PairingRequired`` 块内的 ``_approve_and_rehandshake``
+    调用，外层 sibling ``except PairingError`` 无法再捕获（Python：进入某 except handler 后，
+    同一 try 的其它 except 不再 consult）。原实现：异常透传 → API 返 502 且配对行停留在旧
+    状态（force_repair 时残留已撤销的 paired + 旧 deviceToken）。force_repair 下先建 paired
+    行以复现「stale paired」最坏情形。
+    """
+    # 先 paired + 旧 token（模拟 deviceToken 被网关撤销后的 force_repair）
+    PairingService(transport=FakeTransport.hello_ok(device_token='dt-old')).ensure_paired(instance)
+    assert Pairing.objects.get(instance=instance).status == Pairing.STATUS_PAIRED
+
+    transport = FakeTransport.sequence([
+        FakeTransport.pairing_required(request_id='req-auto')._result_frame,
+        FakeTransport.connect_error(message='gateway disconnected')._result_frame,
+    ])
+    approver = _FakeApprover()  # approve 成功
+    svc = PairingService(transport=transport, approver=approver)
+    with pytest.raises(PairingError):
+        svc.ensure_paired(instance, force_repair=True)
+
+    pairing = Pairing.objects.get(instance=instance)
+    assert pairing.status == Pairing.STATUS_ERROR          # 不再残留 paired（核心不变量）
+    assert approver.calls == [(instance.name, 'req-auto')]  # approve 确已执行（第二次握手才崩）
+    assert transport.connect_calls == 2                    # 首次 PAIRING_REQUIRED + 第二次崩
 
 
 # ---------------------------- 事件循环上下文（ASGI 安全）----------------------------

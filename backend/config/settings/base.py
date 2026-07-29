@@ -136,9 +136,29 @@ FLEET_ROOT = Path(os.environ.get('OPENCLAW_FLEET_ROOT', str(BASE_DIR.parent / 'f
 # CI 经 OPENCLAW_TEMPLATE_DIR=/tmp/fleet-template（rsync 干净模板）覆盖；服务器生产布局
 # （/srv/openclaw/template/researcher）同样经 env 覆盖。
 TEMPLATE_DEFAULT = str(BASE_DIR.parent / 'researcher')
+# codex P2 :141：模板路径须兑现 deploy/.env.example 承诺的 RESEARCHER_DIR。
+# 优先级：OPENCLAW_TEMPLATE_DIR（绝对路径，CI/生产覆盖）> RESEARCHER_DIR（deploy/ 相对，
+# 与 compose/.env.example 同基准）> 默认 <repo>/researcher。相对 RESEARCHER_DIR 相对
+# <repo>/deploy 解析（与 .env.example 注释「相对路径基准是 deploy/」一致），否则用户设了
+# RESEARCHER_DIR 仍 copytree 到默认不存在路径 → 容器创建卡 creating（本 PR 要修的同类错配）。
+_DEPLOY_DIR = BASE_DIR.parent / 'deploy'
+_OPENCLAW_TEMPLATE_DIR_ENV = os.environ.get('OPENCLAW_TEMPLATE_DIR')
+_RESEARCHER_DIR_ENV = os.environ.get('RESEARCHER_DIR')
+if _OPENCLAW_TEMPLATE_DIR_ENV:
+    _FLEET_TEMPLATE = _OPENCLAW_TEMPLATE_DIR_ENV
+elif _RESEARCHER_DIR_ENV:
+    _researcher_path = Path(_RESEARCHER_DIR_ENV)
+    _FLEET_TEMPLATE = str(
+        _researcher_path if _researcher_path.is_absolute() else _DEPLOY_DIR / _researcher_path,
+    )
+else:
+    _FLEET_TEMPLATE = TEMPLATE_DEFAULT
+# 折叠 deploy/../（相对 RESEARCHER_DIR 解析产生的 ..），使 ../researcher → <repo>/researcher，
+# 与默认值同形；不 resolve 符号链接，避免改变调用方意图路径。
+_FLEET_TEMPLATE = os.path.normpath(_FLEET_TEMPLATE)
 OPENCLAW_FLEET = {
     'ROOT': str(FLEET_ROOT),
-    'TEMPLATE': os.environ.get('OPENCLAW_TEMPLATE_DIR', TEMPLATE_DEFAULT),
+    'TEMPLATE': _FLEET_TEMPLATE,
     'TEMPLATE_JSON': str(BASE_DIR.parent / 'deploy' / 'openclaw.json'),
     'IMAGE': os.environ.get('OPENCLAW_IMAGE', 'ghcr.io/openclaw/openclaw:2026.6.34-browser'),
     'PORT_POOL_START': 19000,
