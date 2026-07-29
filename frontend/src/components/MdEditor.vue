@@ -2,7 +2,7 @@
 // MdEditor —— Milkdown Typora 式实时渲染 md 编辑器（spec §9.6 / issue #45）。
 // content prop 受控：打开新页（content 变化且非自回流）时 replaceAll 重载；用户编辑经
 // listenerCtx.markdownUpdated 取最新 markdown 冒泡 update（供 store 防抖自动保存）。
-// wikilink/frontmatter 按 commonmark/gfm 原文渲染（未接 remark 插件特殊渲染）。
+// wikilink/frontmatter 不做特殊渲染：仅按 commonmark/gfm 原文展示（未接 remark 插件）。
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { Editor, defaultValueCtx, editorViewOptionsCtx, rootCtx } from '@milkdown/core'
 import { commonmark } from '@milkdown/preset-commonmark'
@@ -22,14 +22,12 @@ const host = ref<HTMLDivElement | null>(null)
 let editor: Editor | null = null
 // 受控重载期间抑制 update 冒泡（replaceAll 会触发 markdownUpdated，不能当成用户编辑回写）
 let suppress = false
-// 自回流豁免基线（#202 问题1）：宿主受控用法（:content=draft + update 回写 draft）下，
-// 用户击键 → emit → 父级写回同一 prop → watch 再触发。此时 next === lastEmitted，
-// 须跳过 replaceAll——否则每次击键全文重建，ProseMirror 选区/DOM 被销毁、光标跳变。
-let lastEmitted = props.content
+// 自回流豁免（issue #202 问题1）：emit 时同步记下 markdown，父级受控回写同一值时
+// watch 直接跳过——否则每次击键都 replaceAll 全文重建，选区/DOM 锚点被销毁（光标跳变）。
+let lastEmitted = ''
 
 async function build(initial: string): Promise<void> {
   if (!host.value) return
-  lastEmitted = initial
   editor = await Editor.make()
     .config((ctx) => {
       ctx.set(rootCtx, host.value!)
@@ -37,7 +35,7 @@ async function build(initial: string): Promise<void> {
       ctx.set(editorViewOptionsCtx, { editable: () => !props.readonly })
       ctx.get(listenerCtx).markdownUpdated((_ctx, markdown) => {
         if (suppress) return
-        lastEmitted = markdown // emit 同步记基线，watch 据此识别自回流
+        lastEmitted = markdown
         emit('update', markdown)
       })
     })
@@ -52,21 +50,22 @@ async function build(initial: string): Promise<void> {
 
 onMounted(() => build(props.content))
 
-// content 变化（打开另一页）→ 编辑器内重载；自回流（next 是本组件刚 emit 的值）跳过
+// content 变化（打开另一页）→ 编辑器内重载；自回流（父级把我们刚 emit 的值写回）跳过
 watch(
   () => props.content,
   (next, prev) => {
-    if (!editor || next === prev || next === lastEmitted) return
-    lastEmitted = next // replaceAll 后内容基线同步，避免再次被当成换页
+    if (!editor || next === prev) return
+    if (next === lastEmitted) return // 自回流：编辑器内已是该内容，无需 replaceAll
     suppress = true
     editor.action(replaceAll(next))
     suppress = false
+    lastEmitted = next
   },
 )
 
 // 测试/调试 seam：以 markdown 注入（模拟用户输入后的 markdownUpdated）
 function _emitMarkdown(markdown: string): void {
-  lastEmitted = markdown // 与真实 markdownUpdated 路径一致：emit 同步记基线
+  lastEmitted = markdown
   emit('update', markdown)
 }
 

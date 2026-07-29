@@ -1,6 +1,6 @@
 // 共享错误词表 —— DRF 错误响应体 → 可读消息（零依赖纯模块）。
 //
-// 注册/登录（stores/auth.ts）与将来 api/client.ts 均依赖此处统一解析，避免各自重写。
+// 注册/登录（stores/auth.ts）与 api/client.ts 均依赖此处统一解析，避免各自重写。
 // 独立成模块而非内联进 auth.ts：client.ts 已 import useAuthStore（auth.ts），
 // 若 auth.ts 反向依赖 client.ts 会成环，故错误词表须落在中立、无依赖的模块。
 //
@@ -44,15 +44,20 @@ export function extractApiError(status: number, body: unknown): string {
 // codex P2：标记「已解析的 API 错误」——区别于 fetch 因后端不可达 reject 抛的原生
 // TypeError（"Failed to fetch" / "Load failed"）。视图据此二分:ApiError 逐字透传消息,
 // 其余（网络/意外）走模式专属本地化兜底,避免把英文浏览器报错文本直接展示给用户。
-// #202 问题5：全仓唯一定义（status 可选），api/client.ts re-export——instanceof 语义
-// 与导入源无关，杜绝旧「双同名不同构 ApiError」按导入源漂移的隐患。
+// issue #202 问题5：全仓唯一定义（api/client.ts re-export 兼容两类导入源），
+// instanceof/status 行为不再随导入源漂移。status 可选：鉴权解析路径（auth.ts）无 HTTP
+// 状态语义时不填；client.ts 路径带状态供 `e.status === 401` 这类判定。
 export class ApiError extends Error {
   status?: number
 
-  constructor(message: string, status?: number) {
-    super(message)
+  // 兼容两种既有调用形态：new ApiError(message)（本文件旧签名）与
+  // new ApiError(status, message)（client.ts 旧签名，api/*.ts 多处沿用）。
+  constructor(message: string)
+  constructor(status: number, message: string)
+  constructor(a: string | number, b?: string) {
+    super(typeof a === 'string' ? a : (b ?? ''))
     this.name = 'ApiError'
-    this.status = status
+    if (typeof a === 'number') this.status = a
     // 维持 instanceof 语义(es5 target 下子类化内建 Error 的常见坑由 tsconfig target 保证)
   }
 }
