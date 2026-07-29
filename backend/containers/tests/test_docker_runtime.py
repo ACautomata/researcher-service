@@ -92,3 +92,25 @@ def test_privilege_floor_matches_researcher_image():
     assert set(kw['cap_add']) == {'CHOWN', 'SETUID', 'SETGID', 'DAC_OVERRIDE'}
     assert kw['restart_policy'] == {'Name': 'unless-stopped'}
     assert kw['detach'] is True
+
+
+# ── issue #199 问题5：容器加固可配置化（默认行为不变，env 显式降权）──
+
+
+def test_user_defaults_to_root_for_compatibility():
+    # 默认 '0:0' 保持既有兼容（容器内 init 需 root chown）；降权由 env 显式开启
+    kw = DockerRuntime().build_run_kwargs(_spec())
+    assert kw['user'] == '0:0'
+
+
+def test_user_env_override(monkeypatch):
+    # OPENCLAW_FLEET_RUN_USER 对齐单容器栈 deploy/docker-compose.yml 的 OPENCLAW_RUN_USER
+    monkeypatch.setenv('OPENCLAW_FLEET_RUN_USER', '1000:1000')
+    kw = DockerRuntime().build_run_kwargs(_spec())
+    assert kw['user'] == '1000:1000'
+
+
+def test_cap_add_locked_to_minimal_set():
+    # capability 白名单锁定（最小化方向见 docker_runtime._FLEET_CAP_ADD 注释）
+    kw = DockerRuntime().build_run_kwargs(_spec())
+    assert kw['cap_add'] == ['CHOWN', 'SETUID', 'SETGID', 'DAC_OVERRIDE']

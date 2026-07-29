@@ -371,3 +371,32 @@ async def test_scopes_missing_required_permissions_raises_not_paired():
     )
     with pytest.raises(NotPaired):
         await pool.get_or_create(_instance('x', 19106))
+
+
+# ── issue #199 问题2：per-key evict（容器删除/重配对后驱逐泄漏条目）──
+
+@pytest.mark.asyncio
+async def test_evict_removes_client_and_lock_and_closes(pool):
+    inst = _instance('a', 19001)
+    client = await pool.get_or_create(inst)
+    key = ('ws://test:19001/', 'dt-1')
+    assert key in pool._clients
+    await pool.evict(inst)
+    assert key not in pool._clients  # client 条目消失
+    assert key not in pool._locks    # per-key 锁一并清理
+    assert client.closed is True     # WS 句柄关闭
+
+
+@pytest.mark.asyncio
+async def test_evict_only_target_instance(pool):
+    ca = await pool.get_or_create(_instance('a', 19001))
+    cb = await pool.get_or_create(_instance('b', 19002))
+    await pool.evict(_instance('a', 19001))
+    assert ca.closed is True
+    assert cb.closed is False  # 异容器不受影响
+    assert await pool.get_or_create(_instance('b', 19002)) is cb
+
+
+@pytest.mark.asyncio
+async def test_evict_idempotent_when_no_entry(pool):
+    await pool.evict(_instance('ghost', 19999))  # 无对应条目 no-op 不抛
