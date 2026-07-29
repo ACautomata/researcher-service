@@ -1,14 +1,20 @@
 """chat.consumers —— ChatConsumer：前端 WS ↔ 容器 pool client（issue #41 / spec §8.4）。
 
 握手经 JwtAuthMiddleware（scope['user'] 已验 JWT；匿名被 4401 拒）。前端发 start{container} → 经
-ChatFleet 连该容器已配对长连接 → ready；发 send{sessionKey,message} → client.chat.send，chat 事件
-经 _on_event 回推前端（text/done/error）。断开时 discard 活跃 runId，避免推已关闭连接。
+ChatFleet 连该容器已配对长连接 → ready；发 send{sessionKey,message,idempotencyKey?} → client.chat.send
+（issue #200：幂等键透传，重试同一逻辑消息复用同键供网关去重；未传由 client 兜底生成），chat 事件
+经 _on_event 回推前端（text/done/error）。发 abort{sessionKey,runId?} → client.abort_run
+（sessions.abort，issue #200 中止链路），受理回执 abortAck；终态收尾仍由网关 aborted 事件经
+chat 路由翻译的 done 帧负责。断开时 discard 活跃 runId，避免推已关闭连接。
 
 T06 权限审批（issue #42 / spec §8.2）：start 后经 add_approval_subscriber 注册连接级审批订阅
 （codex P1 订阅者集合：多 consumer 共享同一 pooled client 时 fan-out 到所有订阅者、独立退订不互伤），
 审批卡经 _on_approval 透传给前端（type:approval，无 runId）；前端发 resolve{id,kind,decision} →
-client.resolve_approval → 回执 approvalResolved{id,decision} 用网关权威 decision（first-answer-wins，
-codex P1）；start 后 list_pending_approvals 补拉断线期间积累的待审批（codex P2）。disconnect 独立退订。
+client.resolve_approval → 成功后回送受理回执 approvalResolveAck{id}（issue #200：ack 语义 = 网关
+已受理，兜底「网关到底收没收到」；**不冒充权威 decision**——权威 decision 仍仅由网关经
+exec/plugin.approval.resolved 事件广播落定，first-answer-wins，codex P1）；start 后
+list_pending_approvals 补拉断线期间积累的待审批（codex P2；issue #200 双族回填按审批 ID 去重，
+实时已推/已 resolved 的卡不重复不复活）。disconnect 独立退订。
 
 授权模型（安全复审 acknowledge）：容器是**全面板共享基础设施**（spec §5.2/§5.3/§5.4——共享 LLM key、
 共享端口池、Django 挂 docker.sock 统一编排），`Instance`/`Session` 均无 owner/user_id。故 start/send/
@@ -55,6 +61,8 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
             await self._handle_start(content)
         elif msg_type == 'send':
             await self._handle_send(content)
+        elif msg_type == 'abort':
+            await self._handle_abort(content)
         elif msg_type == 'resolve':
             await self._handle_resolve(content)
 
@@ -114,10 +122,10 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
             # 前端仅复位该卡（codex R2 P2，并发 resolve 不误复位其它在途卡）
             await self.send_json({'type': 'error', 'message': '审批回覆失败，请稍后重试', 'id': approval_id})
             return
-        # 不回送 approvalResolved——RPC ack payload 无 decision 字段（ADR 0003），
-        # 且 resolved 事件可能在 ack 之前到达。权威 decision 仅由网关经
-        # exec/plugin.approval.resolved 事件广播（codex P2 #163）。
-        # 前端在 resolving 态等 resolved 事件落定。此处静默成功，不干扰权威结果。
+        # issue #200：resolve 成功后回送受理回执（ack 语义 = 网关已受理该 resolve），
+        # 兜底「网关到底收没收到」——前端据此退出 resolving 态；**不冒充权威 decision**：
+        # 权威值仍仅由网关 exec/plugin.approval.resolved 事件广播落定（codex P2 #163 不变）。
+        await self.send_json({'type': 'approvalResolveAck', 'id': approval_id})
 
     async def _handle_send(self, content):
         if self._client is None:
@@ -128,15 +136,47 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
         if not session_key or not message:
             await self.send_json({'type': 'error', 'message': '缺少 sessionKey 或 message'})
             return
+        # issue #200：可选幂等键透传（前端按消息草稿定键，ack 超时重试复用同键供网关去重）；
+        # 未传由 client 兜底生成（向后兼容旧前端）。非 str 键视为非法帧，拒于消费端。
+        idempotency_key = content.get('idempotencyKey')
+        if idempotency_key is not None and not isinstance(idempotency_key, str):
+            await self.send_json({'type': 'error', 'message': 'idempotencyKey 须为字符串'})
+            return
         try:
             run_id = await self._client.send_message(
                 session_key, message, on_event=self._on_event,
+                idempotency_key=idempotency_key,
             )
         except Exception:  # pylint: disable=broad-exception-caught
             # chat.send 被拒/连接已断：发 error 帧，不传播导致 WS 关闭
             await self.send_json({'type': 'error', 'message': '发送失败，请稍后重试'})
             return
         self._active_runids.add(run_id)
+
+    async def _handle_abort(self, content):
+        """issue #200 中止链路：前端发 abort{sessionKey,runId?} → client.abort_run（sessions.abort）。
+
+        受理回执 abortAck 只承诺「网关已受理中止」；被中止 run 的气泡收尾仍由网关 aborted
+        终态经 chat 路由翻译的 done 帧负责（_on_event 收 done 时清 _active_runids）。
+        """
+        if self._client is None:
+            await self.send_json({'type': 'error', 'message': '请先选择容器'})
+            return
+        session_key = content.get('sessionKey')
+        run_id = content.get('runId')
+        if not session_key or not isinstance(session_key, str):
+            await self.send_json({'type': 'error', 'message': '缺少 sessionKey'})
+            return
+        if run_id is not None and not isinstance(run_id, str):
+            await self.send_json({'type': 'error', 'message': 'runId 须为字符串'})
+            return
+        try:
+            await self._client.abort_run(session_key, run_id)
+        except Exception:  # pylint: disable=broad-exception-caught
+            # 网关拒绝/连接已断：error 帧带 runId，前端仅复位对应气泡的停止中态
+            await self.send_json({'type': 'error', 'message': '中止失败，请稍后重试', 'runId': run_id})
+            return
+        await self.send_json({'type': 'abortAck', 'sessionKey': session_key, 'runId': run_id})
 
     async def _on_event(self, frame):
         # client recv 循环经此回调把翻译帧推给前端；send_json 可安全跨协程调用
