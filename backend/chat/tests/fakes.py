@@ -110,61 +110,94 @@ class _FakeChatWs:
     """对话长连接 fake ws（issue #41 TDD）。
 
     recv 按阶段应答（回显 req id）：① connect 握手 res ② chat.send ack res
-    ③ 预设 events ④ push 队列。events 与 push 都空时 recv 挂起在 asyncio.Queue（待 push 唤醒）。
+    ③ 预设 events ④ push 队列。events 与 push 都空时 recv 挂起，待 push 或**新的 send 帧**唤醒
+    （issue #200：连续多次 RPC——如 exec+plugin 双查回填、同幂等键重发两帧——第二帧发出时
+    recv 已挂在 push 队列上，须被 send 唤醒重估脚本，否则 ack 永不送达）。
     """
 
     def __init__(self, transport):
         self._t = transport
         self._extra = asyncio.Queue()
+        self._sent_event = asyncio.Event()  # send 落帧通知：唤醒挂起的 recv 重估脚本
 
     async def send(self, data):
         self._t.sent.append(json.loads(data))
+        self._sent_event.set()
 
-    async def recv(self):  # pylint: disable=too-many-return-statements
+    async def recv(self):
+        while True:
+            self._sent_event.clear()
+            scripted = self._scripted()
+            if scripted is not None:
+                return json.dumps(scripted)
+            # 无脚本帧可发：挂起等 push 帧或新 send 帧（后者回到循环重估脚本）
+            getter = asyncio.ensure_future(self._extra.get())
+            waiter = asyncio.ensure_future(self._sent_event.wait())
+            try:
+                done, _ = await asyncio.wait({getter, waiter}, return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                for task in (getter, waiter):
+                    if not task.done():
+                        task.cancel()
+            if getter in done:
+                return json.dumps(getter.result())
+
+    def _scripted(self):  # pylint: disable=too-many-return-statements
+        """按当前已发帧求出一帧脚本化应答；无可应答 → None（调用方挂起等待）。"""
         t = self._t
         # issue #140：脚本化 challenge 时，网关在 connect 前先下发 connect.challenge（payload.nonce），
         # client 提取 nonce 签名后才发 connect 帧。默认 None（不下发）→ 旧路径立即发帧。
         connect = next((f for f in t.sent if f.get('method') == 'connect'), None)
         if connect is None and t.challenge_nonce is not None and not t._challenge_sent:
             t._challenge_sent = True
-            return json.dumps({'type': 'event', 'event': 'connect.challenge',
-                               'payload': {'nonce': t.challenge_nonce, 'ts': 1}})
+            return {'type': 'event', 'event': 'connect.challenge',
+                    'payload': {'nonce': t.challenge_nonce, 'ts': 1}}
         if connect is not None and not t._connect_acked and not t.suppress_connect_ack:
             t._connect_acked = True
             if t.connect_ok:
-                return json.dumps({'type': 'res', 'id': connect['id'], 'ok': True,
-                                   'payload': {'auth': {'deviceToken': 'dt-fake', 'role': 'operator',
-                                                        'scopes': ['operator.read', 'operator.write',
-                                                                   'operator.admin', 'operator.approvals']}}})
-            return json.dumps({'type': 'res', 'id': connect['id'], 'ok': False,
-                               'error': {'code': 'AUTH_FAILED', 'message': 'bad token'}})
+                return {'type': 'res', 'id': connect['id'], 'ok': True,
+                        'payload': {'auth': {'deviceToken': 'dt-fake', 'role': 'operator',
+                                             'scopes': ['operator.read', 'operator.write',
+                                                        'operator.admin', 'operator.approvals']}}}
+            return {'type': 'res', 'id': connect['id'], 'ok': False,
+                    'error': {'code': 'AUTH_FAILED', 'message': 'bad token'}}
         chat_sends = [f for f in t.sent if f.get('method') == 'chat.send']
         if not t.suppress_ack and len(chat_sends) > t._chat_ack_index:
             cs = chat_sends[t._chat_ack_index]
             t._chat_ack_index += 1
             if t.ack_error is not None:
-                return json.dumps({'type': 'res', 'id': cs['id'], 'ok': False, 'error': t.ack_error})
-            return json.dumps({'type': 'res', 'id': cs['id'], 'ok': True,
-                               'payload': {'runId': t.ack_run_id}})
+                return {'type': 'res', 'id': cs['id'], 'ok': False, 'error': t.ack_error}
+            return {'type': 'res', 'id': cs['id'], 'ok': True,
+                    'payload': {'runId': t.ack_run_id}}
         resolves = [f for f in t.sent if f.get('method', '').endswith('.approval.resolve')]
         if not t.suppress_ack and len(resolves) > t._resolve_ack_index:
             rs = resolves[t._resolve_ack_index]
             t._resolve_ack_index += 1
             if t.resolve_error is not None:
-                return json.dumps({'type': 'res', 'id': rs['id'], 'ok': False, 'error': t.resolve_error})
-            return json.dumps({'type': 'res', 'id': rs['id'], 'ok': True, 'payload': t.resolve_payload})
+                return {'type': 'res', 'id': rs['id'], 'ok': False, 'error': t.resolve_error}
+            return {'type': 'res', 'id': rs['id'], 'ok': True, 'payload': t.resolve_payload}
         lists = [f for f in t.sent if f.get('method') == 'exec.approval.list']
         if not t.suppress_ack and len(lists) > t._list_ack_index:
             li = lists[t._list_ack_index]
             t._list_ack_index += 1
-            return json.dumps({'type': 'res', 'id': li['id'], 'ok': True, 'payload': t.list_payload})
+            if t.list_error is not None:
+                return {'type': 'res', 'id': li['id'], 'ok': False, 'error': t.list_error}
+            return {'type': 'res', 'id': li['id'], 'ok': True, 'payload': t.list_payload}
+        # issue #200：审批回填改 exec+plugin 双查，fake 同步支持 plugin 族 .list 应答
+        plugin_lists = [f for f in t.sent if f.get('method') == 'plugin.approval.list']
+        if not t.suppress_ack and len(plugin_lists) > t._plugin_list_ack_index:
+            li = plugin_lists[t._plugin_list_ack_index]
+            t._plugin_list_ack_index += 1
+            if t.plugin_list_error is not None:
+                return {'type': 'res', 'id': li['id'], 'ok': False, 'error': t.plugin_list_error}
+            return {'type': 'res', 'id': li['id'], 'ok': True, 'payload': t.plugin_list_payload}
         cmds = [f for f in t.sent if f.get('method') == 'commands.list']
         if not t.suppress_commands_ack and len(cmds) > t._commands_ack_index:
             cm = cmds[t._commands_ack_index]
             t._commands_ack_index += 1
             if t.commands_error is not None:
-                return json.dumps({'type': 'res', 'id': cm['id'], 'ok': False, 'error': t.commands_error})
-            return json.dumps({'type': 'res', 'id': cm['id'], 'ok': True, 'payload': t.commands_payload})
+                return {'type': 'res', 'id': cm['id'], 'ok': False, 'error': t.commands_error}
+            return {'type': 'res', 'id': cm['id'], 'ok': True, 'payload': t.commands_payload}
         # 通用 scripted RPC（issue #80 T1）：遍历已注册 method，回显首个未 ack 的 req id。
         for method in set(t.rpc_payloads) | set(t.rpc_errors):
             if method in t.rpc_suppress:
@@ -175,11 +208,11 @@ class _FakeChatWs:
                 frame = sent_for_method[idx]
                 t._rpc_ack_index[method] = idx + 1
                 if method in t.rpc_errors:
-                    return json.dumps({'type': 'res', 'id': frame['id'], 'ok': False, 'error': t.rpc_errors[method]})
-                return json.dumps({'type': 'res', 'id': frame['id'], 'ok': True, 'payload': t.rpc_payloads.get(method, {})})
+                    return {'type': 'res', 'id': frame['id'], 'ok': False, 'error': t.rpc_errors[method]}
+                return {'type': 'res', 'id': frame['id'], 'ok': True, 'payload': t.rpc_payloads.get(method, {})}
         if t.events:
-            return json.dumps(t.events.pop(0))
-        return json.dumps(await self._extra.get())
+            return t.events.pop(0)
+        return None
 
     async def close(self):
         self._t._closed = True
@@ -198,7 +231,8 @@ class FakeChatTransport:  # pylint: disable=too-many-instance-attributes  # pyli
 
     def __init__(self, *, connect_ok=True, ack_run_id='r1', ack_error=None, events=None,  # pylint: disable=too-many-arguments
                  suppress_ack=False, suppress_connect_ack=False, resolve_error=None, resolve_payload=None,
-                 list_payload=None, commands_payload=None, commands_error=None,
+                 list_payload=None, list_error=None, plugin_list_payload=None, plugin_list_error=None,
+                 commands_payload=None, commands_error=None,
                  suppress_commands_ack=False,
                  rpc_payloads=None, rpc_errors=None, rpc_suppress=None,
                  challenge_nonce=_DEFAULT_CHALLENGE_NONCE):
@@ -213,6 +247,9 @@ class FakeChatTransport:  # pylint: disable=too-many-instance-attributes  # pyli
         self.resolve_error = resolve_error
         self.resolve_payload = resolve_payload if resolve_payload is not None else {}
         self.list_payload = list_payload if list_payload is not None else {}
+        self.list_error = list_error
+        self.plugin_list_payload = plugin_list_payload if plugin_list_payload is not None else {}
+        self.plugin_list_error = plugin_list_error
         self.commands_payload = commands_payload if commands_payload is not None else {}
         self.commands_error = commands_error
         self.suppress_commands_ack = suppress_commands_ack
@@ -222,6 +259,7 @@ class FakeChatTransport:  # pylint: disable=too-many-instance-attributes  # pyli
         self._chat_ack_index = 0
         self._resolve_ack_index = 0
         self._list_ack_index = 0
+        self._plugin_list_ack_index = 0
         self._commands_ack_index = 0
         # 通用 scripted RPC res（issue #80 T1）：sessions.list / chat.history / sessions.create /
         # sessions.delete 等任意 method 的 req→res 脚本。rpc_payloads[method]=res payload、
