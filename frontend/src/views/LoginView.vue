@@ -55,7 +55,7 @@ function toggleMode(): void {
         <el-input v-model="form.username" placeholder="用户名" />
       </el-form-item>
       <el-form-item label="密码">
-        <el-input v-model="form.password" type="password" placeholder="密码" />
+        <el-input v-model="form.password" type="password" placeholder="密码" @keyup.enter="onSubmit" />
       </el-form-item>
       <el-form-item v-if="errorMsg">
         <span class="error">{{ errorMsg }}</span>

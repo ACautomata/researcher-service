@@ -77,6 +77,6 @@ export async function removeProvider(name: string, pid: string): Promise<void> {
     method: 'DELETE',
   })
   if (!resp.ok && resp.status !== 404) {
-    throw new ApiError('删除失败', resp.status)
+    throw new ApiError(resp.status, '删除失败')
   }
 }
