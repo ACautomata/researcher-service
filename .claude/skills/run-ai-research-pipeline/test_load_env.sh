@@ -59,5 +59,19 @@ out=$(bash -c '
 ' _ "$envf")
 assert_eq "$(sed -n '1p' <<<"$out")" "key-file" "无 shell 覆盖时 LLM_API_KEY 从 .env 注入"
 
+# ④ 含非法标识符的键（如 BAD-KEY=x）整行跳过；不再因间接展开抛 invalid-variable-name
+# （codex P2 :79）：原 regex 仅校验首字符，间接展开 "${!key+x}" 会因含 `-` 报错 → set -e
+# 终止 driver.sh → 前后端均不启动。注意：bash 内置 `unset BAD-KEY` 对非合法 identifier
+# 会 fatal exit 整个 subshell，须用 `|| true` 让 unset 失败不破坏后续 _load_env 跑。
+printf 'BAD-KEY=x\nGOOD_KEY=y\nANOTHER-BAD=z\n' > "$envf"
+out=$(bash -c '
+  unset GOOD_KEY 2>/dev/null || true
+  unset BAD-KEY 2>/dev/null || true
+  unset ANOTHER-BAD 2>/dev/null || true
+  _load_env "$1" >/dev/null
+  printf "%s\n" "${GOOD_KEY}"
+' _ "$envf")
+assert_eq "$(sed -n '1p' <<<"$out")" "y" "非法标识符的键被整行跳过（合法 GOOD_KEY=y 仍注入）"
+
 echo "---"
 if [ "$failures" -eq 0 ]; then echo "全部通过"; exit 0; else echo "$failures 项失败"; exit 1; fi

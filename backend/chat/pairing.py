@@ -252,9 +252,24 @@ class PairingService:
                 pairing_request_id=request_id,
             )
             raise PairingRequired(request_id)
-        # approve 失败（容器未起/CLI 异常）→ 落 pending + raise PairingRequired
+        # approve 失败分两类（codex P2 :2902641 review + :f617d25 review）：
+        # 1. PairingError（来自 ExecPairingApprover 把 exec_sync RuntimeError 转译；或
+        #    future approver 实现抛 PairingError）→ 真正的 error，不降级 pending，落
+        #    STATUS_ERROR 后 raise PairingError，让 API 返 502/admin 看到失败。
+        #    保留 pending fallback 会让 admin 以为「设备待批准」可重试，但实际是
+        #    CLI 永久失败（token 不匹配 / request ID 过期 / 网关断连）→ 配对 churn 无限循环。
+        # 2. 其它异常（容器未起 / network / OSError 等 transient，admin 重新配对可恢复）
+        #    → 保留原 pending fallback + raise PairingRequired 给 view 重试路径。
         try:
             self._approver.approve(instance.name, request_id)
+        except PairingError:
+            self._apply_result(
+                pairing=pairing,
+                attempt_version=attempt_version,
+                status=Pairing.STATUS_ERROR,
+                pairing_request_id=request_id,
+            )
+            raise
         except Exception as exc:  # pylint: disable=broad-exception-caught
             self._apply_result(
                 pairing=pairing,

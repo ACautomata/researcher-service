@@ -167,6 +167,30 @@ def test_auto_approve_failure_falls_back_to_pending(instance):
     assert transport.connect_calls == 1   # 仅首次握手，未重握手
 
 
+def test_auto_approve_pairing_error_marks_status_error_not_pending(instance):
+    """codex P2 :f617d25 review（pairing.py:258）：approve 抛 PairingError（来自
+    ExecPairingApprover 把 exec_sync RuntimeError 转译）→ 保留 STATUS_ERROR + raise PairingError，
+    不降级为 STATUS_PENDING + PairingRequired。降级会让 admin 看到 202 actionable 但实际是
+    永久失败（token 不匹配 / request ID 过期 / 网关断连），后续 retry 只需 force_repair 重置
+    attempt_version，而非「再试一次就过」。RuntimeError 路径仍走 pending fallback（transient）。
+    """
+    transport = FakeTransport.pairing_required(request_id='req-perm-fail')
+    approver = _FakeApprover(
+        fail_with=PairingError('openclaw devices approve failed in demo: token mismatch'),
+    )
+    svc = PairingService(transport=transport, approver=approver)
+    with pytest.raises(PairingError) as exc_info:
+        svc.ensure_paired(instance)
+    # 错误消息保留底层 approver 细节，便于排错
+    assert 'token mismatch' in str(exc_info.value)
+
+    pairing = Pairing.objects.get(instance=instance)
+    # 核心不变量：STATUS_ERROR 而非 STATUS_PENDING，admin 看到这是 error 不是 actionable
+    assert pairing.status == Pairing.STATUS_ERROR
+    assert pairing.pairing_request_id == 'req-perm-fail'  # 保留 reqId 以便排错
+    assert transport.connect_calls == 1   # 仅首次握手，approve 失败未触发重握手
+
+
 def test_auto_approve_skipped_when_still_pending_after_approve(instance):
     """approve 后重握手仍 PAIRING_REQUIRED（approve 未生效/竞态）→ 落最新 reqId + raise。"""
     transport = FakeTransport.sequence([

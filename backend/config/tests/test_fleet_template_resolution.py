@@ -11,8 +11,10 @@ import importlib
 import os
 
 import pytest
+from django.core.exceptions import ImproperlyConfigured
 
 from config.settings import base
+from config.settings._validation import validate_prod_env
 
 _ENV_KEYS = ('OPENCLAW_TEMPLATE_DIR', 'RESEARCHER_DIR')
 
@@ -72,3 +74,32 @@ def test_relative_researcher_dir_stays_within_repo_tree(rel):
     mod = _reload_with_env(RESEARCHER_DIR=rel)
     deploy_dir = mod.BASE_DIR.parent / 'deploy'
     assert os.path.normpath(mod.OPENCLAW_FLEET['TEMPLATE']) == os.path.normpath(str(deploy_dir / rel))
+
+
+def test_default_template_path_is_dev_fallback_with_prod_fail_fast():
+    """2902641 决策：base.py 模板默认是 dev fallback ``<repo>/researcher``（与本仓库并排
+    克隆的 researcher），生产/Docker 部署必须经 ``OPENCLAW_TEMPLATE_DIR`` 显式注入绝对路径
+    （prod.py 启动时 ``validate_prod_env`` fail-fast 校验缺失/相对路径 → ImproperlyConfigured）。
+
+    历史 codex P1 :287325b 期望"默认是 /srv/openclaw/template/researcher"，但 2902641
+    选 path 2：保持默认是 dev-friendly 路径 + 强制生产注入（更安全，旧部署漏配即启动拒）。
+    该契约需要默认 dev 工作流仍能 ``copytree`` 找到 researcher（dev 默认并排克隆
+    ``../researcher``），生产走 validator fail-fast 兜底——两契约并存。
+    """
+    mod = _reload_with_env()
+    # OPENCLAW_TEMPLATE_DIR 未设时，base.py 默认是 <repo>/researcher（dev fallback）。
+    # 生产/Docker 部署必须经 OPENCLAW_TEMPLATE_DIR 注入绝对路径（validator 强制）。
+    assert mod.OPENCLAW_FLEET['TEMPLATE'] == mod.TEMPLATE_DEFAULT
+    assert mod.OPENCLAW_FLEET['TEMPLATE'] == str(mod.BASE_DIR.parent / 'researcher')
+
+    # prod fail-fast 兜底：OPENCLAW_TEMPLATE_DIR 缺失/相对路径仍拒启动。
+    with pytest.raises(ImproperlyConfigured):
+        validate_prod_env({
+            'DJANGO_ALLOWED_HOSTS': 'example.test',
+            # OPENCLAW_TEMPLATE_DIR 故意缺失
+        })
+    with pytest.raises(ImproperlyConfigured):
+        validate_prod_env({
+            'DJANGO_ALLOWED_HOSTS': 'example.test',
+            'OPENCLAW_TEMPLATE_DIR': 'researcher',  # 相对路径
+        })

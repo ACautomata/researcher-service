@@ -54,7 +54,7 @@ wiki / models / chat app 仅建骨架，留后续 ticket。
 | 配置 | env | 默认 | 说明 |
 |---|---|---|---|
 | `ROOT` | `OPENCLAW_FLEET_ROOT` | `<repo>/fleet` | `instances/<name>/` 落盘根 |
-| `TEMPLATE` | `OPENCLAW_TEMPLATE_DIR` | `/srv/openclaw/template/researcher` | 共享只读模板（`cp -a` 预填充源，需 `git clone ACautomata/researcher`） |
+| `TEMPLATE` | `OPENCLAW_TEMPLATE_DIR` | `<repo>/researcher` | 共享只读模板（`cp -a` 预填充源，需 `git clone ACautomata/researcher`）；dev 默认与本仓库并排克隆的 researcher，**生产/Docker 必填**绝对路径（`prod.py` `validate_prod_env` 缺则启动 fail-fast，详见下方 wire 段） |
 | `IMAGE` | `OPENCLAW_IMAGE` | `ghcr.io/openclaw/openclaw:2026.6.34-browser` | 镜像 tag（官方 browser 变体，ADR 0003；生产建议 pin digest） |
 | `LLM_API_KEY` | `LLM_API_KEY` | — | 全面板共享 LLM key（env 注入容器，不落盘） |
 

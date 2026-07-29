@@ -74,9 +74,14 @@ _load_env() {
     [ "${key:0:7}" = "export " ] && key="${key#export }"   # 去可选 export 前缀
     key="${key#"${key%%[![:space:]]*}"}"
     key="${key%"${key##*[![:space:]]}"}"
-    # 合法标识符且调用方未设置才注入（已设置的 shell 值胜出——含显式空值）
+    # 合法完整标识符（codex P2 :79）：原仅 [A-Za-z_]* 验首字符，BAD-KEY=x 这类会被
+    # 接受但间接展开 ${!BAD-KEY+x} 抛 "无效的变量名" → set -e 终止 driver.sh 启动。
+    # bash 字符类 `[A-Za-z0-9_]` 内 `-` 默认作字面字符（不是范围边界），无法用字符类
+    # 直接拒 `-`；先显式 reject 含 `-` 的 key，再 pattern-match 完整 identifier。
+    # 调用方未设置才注入（已设置的 shell 值胜出——含显式空值）。
     case "$key" in
-      [A-Za-z_]*) [ -n "${!key+x}" ] || export "$key=$val" ;;
+      *-*) continue ;;
+      [A-Za-z_][A-Za-z0-9_]*) [ -n "${!key+x}" ] || export "$key=$val" ;;
     esac
   done < "$env_file"
   echo "[driver] 已加载 deploy/.env（shell 环境变量优先，未被覆盖）"
