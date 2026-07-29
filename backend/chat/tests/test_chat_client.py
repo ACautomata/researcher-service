@@ -714,9 +714,9 @@ async def test_gateway_resolved_event_fans_out_to_subscribers():
     t.push({'type': 'event', 'event': 'plugin.approval.resolved',
             'payload': {'id': 'ap-1', 'decision': 'deny'}})
     await asyncio.sleep(0.05)
-    expected = [{'type': 'approvalResolved', 'id': 'ap-1', 'decision': 'deny'}]
-    assert a_received == expected
-    assert b_received == expected
+    expected = {'type': 'approvalResolved', 'id': 'ap-1', 'decision': 'deny'}
+    assert a_received == [expected]
+    assert b_received == [expected]
     await c.aclose()
 
 
@@ -868,7 +868,7 @@ async def test_delete_session_builds_frame_and_returns_payload():
 
     wire 字段是 ``key``（不是 ``sessionKey``）——上游 ``SessionsDeleteParamsSchema``
     （packages/gateway-protocol/src/schema/sessions.ts）是 closedObject，``key`` 必填、
-    无 ``sessionKey``；与同族 ``sessions.create``/``sessions.send`` 的 ``key`` 一致。
+    无 ``sessionKey``；与同族 ``sessions.create``/``sessions.send`` 的 ``key`` 一致，
     区别于 ``chat.*`` 族（``chat.send``/``chat.history`` 用 ``sessionKey``）。codex #96 P1。
     """
     payload = {'deleted': True, 'archived': 'sess-1.jsonl.deleted.123.zst'}
@@ -886,7 +886,7 @@ async def test_delete_session_builds_frame_and_returns_payload():
 async def test_delete_session_not_connected_raises():
     c = _client(transport=FakeChatTransport())
     with pytest.raises(ChatClientError):
-        await c.delete_session('sess-1')
+        await c.delete_session('s1')
 
 
 @pytest.mark.asyncio
@@ -897,6 +897,144 @@ async def test_delete_session_gateway_reject_raises():
     c = _client(transport=t)
     await c.connect()
     with pytest.raises(ChatSendError) as exc:
-        await c.delete_session('sess-1')
+        await c.delete_session('s1')
     assert 'operator.admin' in str(exc.value)
+    await c.aclose()
+
+
+# ---- issue #203：流式事件翻译与 OpenClaw 契约对齐 ----
+
+
+class _ScriptedTranslator:
+    """一次性返回脚本化帧批次的 translator 替身：测 _handle 逐帧路由，不经真实翻译。
+
+    批次只在首次 translate 调用返回（之后 []），避免唤醒 recv loop 的多余消息重复投递同批帧。
+    """
+
+    def __init__(self, frames):
+        self._frames = list(frames)
+
+    def translate(self, msg):  # pylint: disable=unused-argument
+        frames, self._frames = self._frames, []
+        return frames
+
+
+@pytest.mark.asyncio
+async def test_handle_routes_frames_per_runid_in_mixed_batch():
+    """issue #203 问题 4：同批帧混多个 runId 时逐帧按各自 runId 路由——不再用 frames[0] 的
+    runId 路由整批（多 run 交错时互不误投）；终态只清所属 run 的 route。"""
+    t = FakeChatTransport(ack_run_id='ra')
+    got_a, got_b = [], []
+
+    async def cb_a(frame):
+        got_a.append(frame)
+
+    async def cb_b(frame):
+        got_b.append(frame)
+
+    translator = _ScriptedTranslator([
+        {'type': 'text', 'runId': 'ra', 'delta': 'A'},
+        {'type': 'text', 'runId': 'rb', 'delta': 'B'},
+        {'type': 'done', 'runId': 'rb'},
+    ])
+    c = _client(transport=t, translator=translator)
+    await c.connect()
+    await c.send_message('s', 'm', on_event=cb_a)  # ack runId=ra
+    c._routes['rb'] = cb_b  # pylint: disable=protected-access  # 直接注册第二 run 路由（焦点在 _handle 逐帧路由）
+    t.push({'type': 'event', 'event': 'chat', 'payload': {}})
+    await asyncio.sleep(0.1)
+    assert got_a == [{'type': 'text', 'runId': 'ra', 'delta': 'A'}]
+    assert got_b == [{'type': 'text', 'runId': 'rb', 'delta': 'B'},
+                     {'type': 'done', 'runId': 'rb'}]
+    assert 'rb' not in c._routes  # pylint: disable=protected-access
+    assert 'ra' in c._routes  # pylint: disable=protected-access
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_handle_discarded_route_drops_only_that_run():
+    """issue #203 问题 4：route 已 discard 的 run 帧仅丢弃该 run——同批其他 run 的帧仍正常路由
+    （旧实现按 frames[0] 的 route 丢弃整批）。"""
+    t = FakeChatTransport(ack_run_id='ra')
+    got_a, got_b = [], []
+
+    async def cb_a(frame):
+        got_a.append(frame)
+
+    async def cb_b(frame):
+        got_b.append(frame)
+
+    translator = _ScriptedTranslator([
+        {'type': 'text', 'runId': 'ra', 'delta': 'A'},
+        {'type': 'text', 'runId': 'rb', 'delta': 'B'},
+    ])
+    c = _client(transport=t, translator=translator)
+    await c.connect()
+    await c.send_message('s', 'm', on_event=cb_a)
+    c._routes['rb'] = cb_b  # pylint: disable=protected-access
+    c.discard('ra')  # consumer 断开，移除 ra 路由
+    t.push({'type': 'event', 'event': 'chat', 'payload': {}})
+    await asyncio.sleep(0.1)
+    assert got_a == []  # pylint: disable=use-implicit-booleaness-not-comparison
+    assert got_b == [{'type': 'text', 'runId': 'rb', 'delta': 'B'}]
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_recv_seq_dedup_produces_no_duplicate_text():
+    """issue #203 问题 2（端到端）：网关重发同 seq 的 delta → 不产生重复文本。"""
+    events = [
+        {'type': 'event', 'event': 'chat',
+         'payload': {'runId': 'r1', 'state': 'delta', 'deltaText': '你', 'seq': 1}},
+        {'type': 'event', 'event': 'chat',
+         'payload': {'runId': 'r1', 'state': 'delta', 'deltaText': '你', 'seq': 1}},  # 重发
+        {'type': 'event', 'event': 'chat',
+         'payload': {'runId': 'r1', 'state': 'delta', 'deltaText': '好', 'seq': 2}},
+        {'type': 'event', 'event': 'chat',
+         'payload': {'runId': 'r1', 'state': 'final', 'seq': 3}},
+    ]
+    t = FakeChatTransport(ack_run_id='r1', events=events)
+    received = []
+
+    async def on_event(frame):
+        received.append(frame)
+
+    c = _client(transport=t)
+    await c.connect()
+    await c.send_message('s', 'm', on_event=on_event)
+    await asyncio.sleep(0.1)
+    assert received == [
+        {'type': 'text', 'runId': 'r1', 'delta': '你'},
+        {'type': 'text', 'runId': 'r1', 'delta': '好'},
+        {'type': 'done', 'runId': 'r1'},
+    ]
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_recv_lifecycle_end_done_idempotent_with_chat_final():
+    """issue #203 问题 1（端到端）：lifecycle end 补发 done 并收尾清路由；迟到的 chat final
+    幂等去重，不重复发 done。"""
+    events = [
+        {'type': 'event', 'event': 'chat',
+         'payload': {'runId': 'r1', 'state': 'delta', 'deltaText': '你好'}},
+        {'type': 'event', 'event': 'agent',
+         'payload': {'runId': 'r1', 'stream': 'lifecycle', 'data': {'phase': 'end'}}},
+        {'type': 'event', 'event': 'chat',
+         'payload': {'runId': 'r1', 'state': 'final'}},  # 迟到的 chat 终态
+    ]
+    t = FakeChatTransport(ack_run_id='r1', events=events)
+    received = []
+
+    async def on_event(frame):
+        received.append(frame)
+
+    c = _client(transport=t)
+    await c.connect()
+    await c.send_message('s', 'm', on_event=on_event)
+    await asyncio.sleep(0.1)
+    assert received == [
+        {'type': 'text', 'runId': 'r1', 'delta': '你好'},
+        {'type': 'done', 'runId': 'r1'},
+    ]
     await c.aclose()
