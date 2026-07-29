@@ -5,6 +5,9 @@ run/list_fleet/get/stop/remove 经 docker client 操作 daemon（integration tes
 
 client_factory 延迟注入（默认 docker.from_env）—— 构造时不连 daemon，仅实际调用时才连。
 """
+import os
+import threading
+
 import docker
 from docker.errors import NotFound
 
@@ -49,20 +52,39 @@ _BASE_ENV = {
 }
 
 
+# docker client 默认超时（issue #201 问题 2）：docker-py 默认 60s；显式化并允许 env 覆盖，
+# 避免 daemon 卡死时 REST 视图线程无限阻塞（sync 视图串行于单一共享线程，见 issue #201）。
+_DEFAULT_CLIENT_TIMEOUT = 60.0
+
+
+def _default_client_factory():
+    """生产 docker client 工厂：显式 timeout（OPENCLAW_DOCKER_CLIENT_TIMEOUT 可调）。"""
+    raw = os.environ.get('OPENCLAW_DOCKER_CLIENT_TIMEOUT', '')
+    try:
+        timeout = float(raw) if raw else _DEFAULT_CLIENT_TIMEOUT
+    except ValueError:
+        timeout = _DEFAULT_CLIENT_TIMEOUT
+    return docker.from_env(timeout=timeout)
+
+
 class DockerRuntime:
     """docker-py 容器运行时适配器（实现 ContainerRuntime Protocol）。"""
 
     def __init__(self, client_factory=None) -> None:
-        self._client_factory = client_factory or docker.from_env
+        self._client_factory = client_factory or _default_client_factory
         # codex R9-3：复用单 client 而非每次 docker.from_env() —— 管理页每 3s×N instance
         # 的 status 轮询会产生大量无谓 daemon 连接。lazy 构造兼容构造时不连 daemon 的约定。
         # 注意：属性名 _cached_client 区别于方法 _client()，避免 Python attribute shadow 导致
         # self._client() 返回 None → TypeError（R10-1）。
         self._cached_client: ... = None
+        # issue #201 问题 4：并发首调双检，防多线程重复建连（泄漏 daemon 连接）。
+        self._client_lock = threading.Lock()
 
     def _client(self):
         if self._cached_client is None:
-            self._cached_client = self._client_factory()
+            with self._client_lock:
+                if self._cached_client is None:
+                    self._cached_client = self._client_factory()
         return self._cached_client
 
     def build_run_kwargs(self, spec: ContainerSpec) -> dict:
