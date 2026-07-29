@@ -1,10 +1,10 @@
 // seam: ChatView 对话页 —— issue #41 前端（spec §9.4）。
 // 覆盖：mount 拉容器并自动连 WS+start、发送后流式逐字 + 光标 + done 收尾、error 帧错误条、
 // 意外断线提示、新建会话。stub 原生 WebSocket（MockWS）捕获 handlers；mock containers/chat API。
-import { flushPromises, mount } from '@vue/test-utils'
+import { enableAutoUnmount, flushPromises, mount } from '@vue/test-utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { nextTick } from 'vue'
-import { createPinia, setActivePinia } from 'pinia'
+import { createPinia, setActivePinia, type Pinia } from 'pinia'
 
 vi.mock('@/api/containers', () => ({ listInstances: vi.fn() }))
 vi.mock('@/api/chat', () => ({
@@ -38,8 +38,14 @@ import { ElMessageBox } from 'element-plus'
 
 class MockWS {
   static last: MockWS | null = null
+  // readyState 常量对齐原生 WebSocket（#198：ws.ts sendRaw 的 CLOSING 窗口判断用 WebSocket.OPEN）
+  static CONNECTING = 0
+  static OPEN = 1
+  static CLOSING = 2
+  static CLOSED = 3
   sent: unknown[] = []
   closed = false // 记录 close() 是否被调用（验证切容器时旧 ws 被关闭）
+  readyState = MockWS.CONNECTING
   onopen: ((e: unknown) => void) | null = null
   onmessage: ((e: { data: string }) => void) | null = null
   onerror: ((e: unknown) => void) | null = null
@@ -59,10 +65,12 @@ class MockWS {
 
   close(): void {
     this.closed = true
-    this.onclose?.({})
+    this.readyState = MockWS.CLOSED
+    this.onclose?.({ code: 1000 })
   }
 
   fireOpen(): void {
+    this.readyState = MockWS.OPEN
     this.onopen?.({})
   }
 
@@ -77,13 +85,23 @@ const INSTANCE = {
 }
 const SESSION = { session_key: 'sk-1', title: '文献综述', updated_at: '' }
 
+// 有效格式 JWT（payload 含 exp），供 connect() 前置 hydrate 的 isTokenExpired 判定（#198）：
+// 测试默认发非过期 token（hydrate 不再发 refresh 请求）；4401/过期用例单独 stub fetch。
+function makeJwt(expInSec: number): string {
+  const payload = { exp: Math.floor(Date.now() / 1000) + expInSec }
+  return `h.${btoa(JSON.stringify(payload))}.s`
+}
+
 describe('ChatView', () => {
+  let pinia: Pinia
+  enableAutoUnmount(afterEach) // 卸载触发 onBeforeUnmount：清理 #198 退避重连定时器，防跨用例泄漏
   beforeEach(() => {
-    setActivePinia(createPinia())
+    pinia = createPinia() // 与 mount 共用同一 pinia：组件内 useAuthStore 与本用例 $patch 指向同一实例
+    setActivePinia(pinia)
     MockWS.last = null
     vi.clearAllMocks()
     vi.stubGlobal('WebSocket', MockWS)
-    useAuthStore().$patch({ token: 'jwt-test' })
+    useAuthStore().$patch({ token: makeJwt(3600), refreshExhausted: false })
     ;(listInstances as ReturnType<typeof vi.fn>).mockResolvedValue([INSTANCE])
     ;(listSessions as ReturnType<typeof vi.fn>).mockResolvedValue([SESSION])
     ;(createSession as ReturnType<typeof vi.fn>).mockResolvedValue({ session_key: 'sk-1' })
@@ -101,7 +119,7 @@ describe('ChatView', () => {
   })
 
   it('renders container list and auto-connects with start frame on mount', async () => {
-    const w = mount(ChatView, { global: { plugins: [createPinia()] } })
+    const w = mount(ChatView, { global: { plugins: [pinia] } })
     await flushPromises()
     MockWS.last!.fireOpen() // CONNECTING 期间缓冲的 start 帧在 onopen 后 flush
     expect(w.find('[data-test="container-demo"]').exists()).toBe(true)
@@ -110,7 +128,7 @@ describe('ChatView', () => {
   })
 
   it('sends a message and streams the assistant reply with cursor then done', async () => {
-    const w = mount(ChatView, { global: { plugins: [createPinia()] } })
+    const w = mount(ChatView, { global: { plugins: [pinia] } })
     await flushPromises()
     MockWS.last!.fireOpen()
     MockWS.last!.fireMessage({ type: 'ready', container: 'demo' })
@@ -131,7 +149,7 @@ describe('ChatView', () => {
   })
 
   it('shows error bar on error frame', async () => {
-    const w = mount(ChatView, { global: { plugins: [createPinia()] } })
+    const w = mount(ChatView, { global: { plugins: [pinia] } })
     await flushPromises()
     MockWS.last!.fireMessage({ type: 'error', message: '模型超时' })
     await nextTick()
@@ -139,7 +157,7 @@ describe('ChatView', () => {
   })
 
   it('shows disconnect error on unexpected close (验收 ② 断线提示)', async () => {
-    const w = mount(ChatView, { global: { plugins: [createPinia()] } })
+    const w = mount(ChatView, { global: { plugins: [pinia] } })
     await flushPromises()
     MockWS.last!.fireMessage({ type: 'ready', container: 'demo' })
     await nextTick()
@@ -149,7 +167,7 @@ describe('ChatView', () => {
   })
 
   it('creates a new session on demand', async () => {
-    const w = mount(ChatView, { global: { plugins: [createPinia()] } })
+    const w = mount(ChatView, { global: { plugins: [pinia] } })
     await flushPromises()
     await w.find('[data-test="new-session"]').trigger('click')
     await flushPromises()
@@ -157,7 +175,7 @@ describe('ChatView', () => {
   })
 
   it('disables send while assistant is streaming (防止并发 send 卡住旧消息)', async () => {
-    const w = mount(ChatView, { global: { plugins: [createPinia()] } })
+    const w = mount(ChatView, { global: { plugins: [pinia] } })
     await flushPromises()
     MockWS.last!.fireOpen()
     MockWS.last!.fireMessage({ type: 'ready', container: 'demo' })
@@ -177,7 +195,7 @@ describe('ChatView', () => {
       INSTANCE,
       { ...INSTANCE, name: 'other', port: 19001 },
     ])
-    const w = mount(ChatView, { global: { plugins: [createPinia()] } })
+    const w = mount(ChatView, { global: { plugins: [pinia] } })
     await flushPromises()
     const oldWs = MockWS.last // demo 的 ws
     oldWs!.fireOpen()
@@ -201,7 +219,7 @@ describe('ChatView', () => {
     // 切会话不切 ws：旧 run 的增量必须按 runId 丢弃，不能并入新 run 的回复
     const SESS2 = { session_key: 'sk-2', title: 'S2', updated_at: '' }
     ;(listSessions as ReturnType<typeof vi.fn>).mockResolvedValue([SESSION, SESS2])
-    const w = mount(ChatView, { global: { plugins: [createPinia()] } })
+    const w = mount(ChatView, { global: { plugins: [pinia] } })
     await flushPromises()
     MockWS.last!.fireOpen()
     MockWS.last!.fireMessage({ type: 'ready', container: 'demo' })
@@ -240,7 +258,7 @@ describe('ChatView', () => {
         ? new Promise((r) => { resolveA.fn = r })
         : new Promise((r) => { resolveB.fn = r }),
     )
-    const w = mount(ChatView, { global: { plugins: [createPinia()] } })
+    const w = mount(ChatView, { global: { plugins: [pinia] } })
     await flushPromises() // demo 自动选中，listSessions('demo') pending
     await w.find('[data-test="container-other"]').trigger('click') // 切到 other
     await nextTick()
@@ -256,7 +274,7 @@ describe('ChatView', () => {
   it('does not connect when automatic session creation fails (codex P2)', async () => {
     ;(listSessions as ReturnType<typeof vi.fn>).mockResolvedValue([]) // 容器无会话
     ;(createSession as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('创建失败'))
-    const w = mount(ChatView, { global: { plugins: [createPinia()] } })
+    const w = mount(ChatView, { global: { plugins: [pinia] } })
     await flushPromises()
     // newSession 失败 → selectedSession 仍空 → 不应 connect（无 ws），并保留错误提示
     expect(MockWS.last).toBeNull()
@@ -268,7 +286,7 @@ describe('ChatView', () => {
     // 其迟到首帧按 FIFO 视为孤儿丢弃，新会话的 run 正常渲染
     const SESS2 = { session_key: 'sk-2', title: 'S2', updated_at: '' }
     ;(listSessions as ReturnType<typeof vi.fn>).mockResolvedValue([SESSION, SESS2])
-    const w = mount(ChatView, { global: { plugins: [createPinia()] } })
+    const w = mount(ChatView, { global: { plugins: [pinia] } })
     await flushPromises()
     MockWS.last!.fireOpen()
     MockWS.last!.fireMessage({ type: 'ready', container: 'demo' })
@@ -289,7 +307,7 @@ describe('ChatView', () => {
   })
 
   it('disables send after the ws closes unexpectedly (codex #4)', async () => {
-    const w = mount(ChatView, { global: { plugins: [createPinia()] } })
+    const w = mount(ChatView, { global: { plugins: [pinia] } })
     await flushPromises()
     MockWS.last!.fireOpen()
     MockWS.last!.fireMessage({ type: 'ready', container: 'demo' })
@@ -316,7 +334,7 @@ describe('ChatView', () => {
         ? Promise.resolve([SESSION])
         : new Promise((r) => { resolveOther.fn = r }),
     )
-    const w = mount(ChatView, { global: { plugins: [createPinia()] } })
+    const w = mount(ChatView, { global: { plugins: [pinia] } })
     await flushPromises() // demo 自动选中并连接
     MockWS.last!.fireOpen()
     const demoWs = MockWS.last
@@ -335,7 +353,7 @@ describe('ChatView', () => {
 
   // ---- T06 权限审批（issue #42 / spec §9.4）----
   async function mountReady() {
-    const w = mount(ChatView, { global: { plugins: [createPinia()] } })
+    const w = mount(ChatView, { global: { plugins: [pinia] } })
     await flushPromises()
     MockWS.last!.fireOpen()
     MockWS.last!.fireMessage({ type: 'ready', container: 'demo' })
@@ -458,7 +476,7 @@ describe('ChatView', () => {
       INSTANCE,
       { ...INSTANCE, name: 'other', port: 19001 },
     ])
-    const w = mount(ChatView, { global: { plugins: [createPinia()] } })
+    const w = mount(ChatView, { global: { plugins: [pinia] } })
     await flushPromises()
     MockWS.last!.fireOpen()
     MockWS.last!.fireMessage({ type: 'ready', container: 'demo' })
@@ -847,7 +865,7 @@ describe('ChatView', () => {
     ;(listSessions as ReturnType<typeof vi.fn>).mockResolvedValue([
       { session_key: 'sk-1', title: '文献综述', updated_at: '' },
     ])
-    const w = mount(ChatView, { global: { plugins: [createPinia()] } })
+    const w = mount(ChatView, { global: { plugins: [pinia] } })
     await flushPromises()
     expect(w.find('[data-test="session-sk-1"]').text()).toContain('文献综述')
   })
@@ -868,7 +886,7 @@ describe('ChatView', () => {
             nextOffset: null,
           }),
     )
-    const w = mount(ChatView, { global: { plugins: [createPinia()] } })
+    const w = mount(ChatView, { global: { plugins: [pinia] } })
     await flushPromises()
     // 初始自动选中 sk-1，其历史渲染
     expect(w.find('[data-test="stream"]').text()).toContain('S1回答')
@@ -887,7 +905,7 @@ describe('ChatView', () => {
     ;(getSessionHistory as ReturnType<typeof vi.fn>).mockImplementation(
       () => new Promise((r) => { resolveHistory = r as (v: unknown) => void }),
     )
-    const w = mount(ChatView, { global: { plugins: [createPinia()] } })
+    const w = mount(ChatView, { global: { plugins: [pinia] } })
     await flushPromises()
     MockWS.last!.fireOpen()
     MockWS.last!.fireMessage({ type: 'ready', container: 'demo' })
@@ -912,7 +930,7 @@ describe('ChatView', () => {
 
   it('shows pairing guidance when the container is unpaired (409, 验收 未配对引导)', async () => {
     ;(listSessions as ReturnType<typeof vi.fn>).mockRejectedValue(new ApiError(409, '未配对'))
-    const w = mount(ChatView, { global: { plugins: [createPinia()] } })
+    const w = mount(ChatView, { global: { plugins: [pinia] } })
     await flushPromises()
     const guide = w.find('[data-test="pairing-guide"]')
     expect(guide.exists()).toBe(true)
@@ -935,7 +953,7 @@ describe('ChatView', () => {
         hasMore: false,
         nextOffset: null,
       })
-    const w = mount(ChatView, { global: { plugins: [createPinia()] } })
+    const w = mount(ChatView, { global: { plugins: [pinia] } })
     await flushPromises()
     expect(w.find('[data-test="load-more"]').exists()).toBe(true) // hasMore → 顶部「加载更多」
     expect(w.find('[data-test="stream"]').text()).toContain('最近回答')
@@ -955,7 +973,7 @@ describe('ChatView', () => {
   it('deletes a session after confirmation and removes it from the list (验收 会话可删除)', async () => {
     const S2 = { session_key: 'sk-2', title: 'S2', updated_at: '' }
     ;(listSessions as ReturnType<typeof vi.fn>).mockResolvedValue([SESSION, S2])
-    const w = mount(ChatView, { global: { plugins: [createPinia()] } })
+    const w = mount(ChatView, { global: { plugins: [pinia] } })
     await flushPromises()
     expect(w.find('[data-test="delete-session-sk-2"]').exists()).toBe(true)
     await w.find('[data-test="delete-session-sk-2"]').trigger('click')
@@ -966,7 +984,7 @@ describe('ChatView', () => {
 
   it('does not delete when the user cancels the confirmation', async () => {
     ;(ElMessageBox.confirm as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('cancel'))
-    const w = mount(ChatView, { global: { plugins: [createPinia()] } })
+    const w = mount(ChatView, { global: { plugins: [pinia] } })
     await flushPromises()
     await w.find('[data-test="delete-session-sk-1"]').trigger('click')
     await flushPromises()
@@ -975,7 +993,7 @@ describe('ChatView', () => {
   })
 
   it('appends a newly created session to the list and selects it (验收 新建加入列表)', async () => {
-    const w = mount(ChatView, { global: { plugins: [createPinia()] } })
+    const w = mount(ChatView, { global: { plugins: [pinia] } })
     await flushPromises()
     ;(createSession as ReturnType<typeof vi.fn>).mockResolvedValue({ session_key: 'sk-new' })
     await w.find('[data-test="new-session"]').trigger('click')
@@ -984,5 +1002,136 @@ describe('ChatView', () => {
     expect(w.find('[data-test="session-sk-new"]').exists()).toBe(true)
     expect(w.find('[data-test="session-sk-new"]').text()).toContain('sk-new'.slice(0, 8))
     expect(w.find('[data-test="session-sk-1"]').exists()).toBe(true) // 旧会话仍在
+  })
+
+  // ---- issue #198：断线退避重连 / 4401 刷新 / onClose 收尾 / 空气泡移除 / 终态残片 ----
+  it('auto-reconnects with exponential backoff after unexpected close and reloads history (#198 问题 1)', async () => {
+    await mountReady() // 真实定时器完成 mount + ready
+    vi.useFakeTimers() // 之后用假定时器推进退避序列（mountReady 的 flushPromises 依赖真实定时器）
+    try {
+      ;(getSessionHistory as ReturnType<typeof vi.fn>).mockClear()
+      const first = MockWS.last!
+      first.onclose?.({ code: 1006 }) // 意外断线（非主动切换）
+      await nextTick()
+      expect(MockWS.last).toBe(first) // 不立即重连：走 1s 退避
+      await vi.advanceTimersByTimeAsync(1000)
+      const second = MockWS.last!
+      expect(second).not.toBe(first) // 第 1 次退避（1s）后已重连
+
+      second.onclose?.({ code: 1006 }) // 再次断线
+      await nextTick()
+      await vi.advanceTimersByTimeAsync(1999)
+      expect(MockWS.last).toBe(second) // 第 2 次退避 2s 未到不重连
+      await vi.advanceTimersByTimeAsync(1)
+      const third = MockWS.last!
+      expect(third).not.toBe(second)
+
+      // 重连成功（ready）→ loadHistory 恢复投影（网关「重连后恢复状态」等价语义）
+      third.fireOpen()
+      third.fireMessage({ type: 'ready', container: 'demo' })
+      await nextTick()
+      expect(getSessionHistory).toHaveBeenCalledWith('demo', 'sk-1')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('refreshes the token and reconnects with the new token on close code 4401 (#198 问题 2)', async () => {
+    await mountReady()
+    const first = MockWS.last!
+    const fresh = makeJwt(3600)
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ access: fresh }) })
+    vi.stubGlobal('fetch', fetchMock)
+    first.onclose?.({ code: 4401 }) // 后端中间件握手期 JWT 校验失败
+    await flushPromises()
+    expect(fetchMock).toHaveBeenCalledWith('/api/v1/auth/token/refresh', expect.objectContaining({ method: 'POST' }))
+    expect(MockWS.last).not.toBe(first) // 已用新 token 重连（不再旧 token 死循环）
+    expect(MockWS.last!.protocols).toEqual(['access_token', fresh])
+  })
+
+  it('clears the session and redirects to /login when refresh is exhausted after 4401 (#198 问题 2)', async () => {
+    await mountReady()
+    const first = MockWS.last!
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 401, json: async () => ({}) }))
+    first.onclose?.({ code: 4401 })
+    await flushPromises()
+    const auth = useAuthStore()
+    expect(auth.refreshExhausted).toBe(true) // cookie 确认失效
+    expect(auth.token).toBe('') // 清会话（跳 /login 由 window.location.assign 完成，jsdom 不实现导航）
+    expect(MockWS.last).toBe(first) // 不再重连
+  })
+
+  it('refreshes an expired access token before opening the ws (#198 问题 2 前置防护)', async () => {
+    const fresh = makeJwt(3600)
+    useAuthStore().$patch({ token: makeJwt(-10) }) // 已过期 token
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ access: fresh }) }))
+    mount(ChatView, { global: { plugins: [pinia] } })
+    await flushPromises()
+    expect(MockWS.last).not.toBeNull()
+    expect(MockWS.last!.protocols).toEqual(['access_token', fresh]) // 先刷新再握手，避免 4401 往返
+  })
+
+  it('offers a manual reconnect button on the error bar that reconnects directly (#198 问题 1)', async () => {
+    const w = await mountReady()
+    const first = MockWS.last!
+    first.onclose?.({ code: 1006 })
+    await nextTick()
+    const btn = w.find('[data-test="reconnect"]')
+    expect(btn.exists()).toBe(true) // 错误条旁「重新连接」入口
+    await btn.trigger('click') // 直接 connect()，绕开 selectContainer 同名 early-return
+    await flushPromises()
+    expect(MockWS.last).not.toBe(first)
+    expect(MockWS.last!.sent).toEqual([]) // 新连接 start 帧缓冲中（fireOpen 后 flush）
+  })
+
+  it('finalizes streaming and abandons the active run on unexpected close (#198 问题 3)', async () => {
+    const w = await mountReady()
+    await w.find('[data-test="input"]').setValue('hi')
+    await w.find('[data-test="send"]').trigger('click')
+    MockWS.last!.fireMessage({ type: 'text', runId: 'r1', delta: '半截' })
+    await nextTick()
+    expect(w.find('.cursor').exists()).toBe(true) // 流式中
+    MockWS.last!.onclose?.({ code: 1006 })
+    await nextTick()
+    expect(w.find('.cursor').exists()).toBe(false) // finalizeLast：无 streaming 残留，光标不永久闪烁
+    MockWS.last!.fireMessage({ type: 'text', runId: 'r1', delta: 'LATE' }) // 旧 run 迟到帧
+    await nextTick()
+    expect(w.find('[data-test="stream"]').text()).not.toContain('LATE') // abandonActiveRun 丢弃
+    // 重连后新 run 首帧不被残留 activeRunId 误丢
+    await w.find('[data-test="reconnect"]').trigger('click')
+    await flushPromises()
+    MockWS.last!.fireOpen()
+    MockWS.last!.fireMessage({ type: 'ready', container: 'demo' })
+    await flushPromises()
+    await w.find('[data-test="input"]').setValue('yo')
+    await w.find('[data-test="send"]').trigger('click')
+    MockWS.last!.fireMessage({ type: 'text', runId: 'r2', delta: 'NEW' })
+    await nextTick()
+    expect(w.find('[data-test="stream"]').text()).toContain('NEW')
+  })
+
+  it('removes the optimistic empty assistant bubble on a send-failure error frame (#198 问题 4)', async () => {
+    const w = await mountReady()
+    await w.find('[data-test="input"]').setValue('hi')
+    await w.find('[data-test="send"]').trigger('click')
+    expect(w.findAll('.msg').length).toBe(2) // user + 乐观空 assistant 气泡
+    MockWS.last!.fireMessage({ type: 'error', message: '发送失败，请稍后重试' }) // 无 runId（consumers 发送失败）
+    await nextTick()
+    const msgs = w.findAll('.msg')
+    expect(msgs.length).toBe(1) // 空气泡移除，仅留 user 消息
+    expect(msgs[0].text()).toContain('hi')
+    expect(w.find('[data-test="error-bar"]').text()).toContain('发送失败')
+  })
+
+  it('keeps a trailing plain-text "<" fragment in the finalized text (#198 问题 5)', async () => {
+    const w = await mountReady()
+    await w.find('[data-test="input"]').setValue('hi')
+    await w.find('[data-test="send"]').trigger('click')
+    MockWS.last!.fireMessage({ type: 'text', runId: 'r1', delta: '结论 a<' }) // 流式中半截 `<` 先藏起
+    await nextTick()
+    expect(w.find('.msg.assistant .bubble').text()).not.toContain('a<')
+    MockWS.last!.fireMessage({ type: 'done', runId: 'r1' }) // 终态无下帧补齐：残片按普通文本放回正文
+    await nextTick()
+    expect(w.find('.msg.assistant .bubble').text()).toContain('a<')
   })
 })
