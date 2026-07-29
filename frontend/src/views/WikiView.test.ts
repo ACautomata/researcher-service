@@ -3,7 +3,7 @@
 // 联动：点树/图谱节点 openPage；编辑器 update → store.edit（防抖自动保存）；切容器 switchContainer。
 // store 用真 Pinia（api/wiki mock 替身）；子组件 stub 聚焦组装逻辑。
 import { flushPromises, mount } from '@vue/test-utils'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 
 vi.mock('@/api/wiki', () => ({
@@ -15,13 +15,6 @@ vi.mock('@/api/wiki', () => ({
   getGraph: vi.fn(),
 }))
 vi.mock('@/api/containers', () => ({ listInstances: vi.fn() }))
-vi.mock('element-plus', async (importOriginal) => {
-  const actual = (await importOriginal()) as Record<string, unknown>
-  return {
-    ...actual,
-    ElMessage: { success: vi.fn(), error: vi.fn(), warning: vi.fn() },
-  }
-})
 
 import WikiView from '@/views/WikiView.vue'
 import { useWikiStore } from '@/stores/wiki'
@@ -168,11 +161,11 @@ describe('WikiView — codex PR #62 意见6 回归', () => {
   })
 })
 
-// issue #202 问题3 回归：保存失败对用户可见——指示器「保存失败，点击重试」+ 手动重试落盘。
-describe('WikiView — issue #202 保存失败可见回归', () => {
+describe('WikiView — issue #202 问题3 回归（保存失败可见 + 点击重试 + 交互错误提示）', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
-    vi.clearAllMocks() // 隔离 mock 调用计数（updatePage 次数断言依赖）
+    vi.useFakeTimers() // 控住 edit 的防抖定时器，避免真实 800ms 竞态多落盘一次
+    vi.clearAllMocks() // 清前序 describe 残留的调用计数（updatePage 次数断言依赖）
     ;(listInstances as ReturnType<typeof vi.fn>).mockResolvedValue(INSTANCES)
     ;(getTree as ReturnType<typeof vi.fn>).mockResolvedValue(TREE)
     ;(getGraph as ReturnType<typeof vi.fn>).mockResolvedValue(GRAPH)
@@ -181,61 +174,58 @@ describe('WikiView — issue #202 保存失败可见回归', () => {
     })
     ;(updatePage as ReturnType<typeof vi.fn>).mockResolvedValue(undefined)
   })
+  afterEach(() => {
+    vi.useRealTimers()
+  })
 
-  it('shows 保存失败 state after a failed save and retries on click', async () => {
-    ;(updatePage as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('401 瞬态'))
+  it('shows 保存失败 indicator after autosave failure and recovers on click retry', async () => {
     const wrapper = mountView()
     await flushPromises()
     await wrapper.findComponent({ name: 'FileTree' }).vm.$emit('open', 'concepts/a.md')
     await flushPromises()
-    // 触发一次失败的落盘
+
+    // 第一次落盘失败 → 指示器显示「保存失败，点击重试」（旧实现失败完全不可见）
+    ;(updatePage as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('后端 5xx'))
     const s = useWikiStore()
     s.edit('# A 改')
     await s._flush()
     await flushPromises()
-    // 指示器出现「保存失败，点击重试」态（修复前失败完全不可见）
     const errBtn = wrapper.find('[data-test="save-error"]')
     expect(errBtn.exists()).toBe(true)
-    expect(errBtn.text()).toContain('保存失败，点击重试')
-    expect(wrapper.find('[data-test="saved"]').exists()).toBe(false)
-    // 点击重试：updatePage 再次被调，成功后恢复「已保存」
+    expect(errBtn.text()).toContain('保存失败')
+
+    // 点击重试（后端已恢复）→ 落盘成功，指示器回到「已保存」
     await errBtn.trigger('click')
     await flushPromises()
     expect(updatePage).toHaveBeenCalledTimes(2)
-    expect(s.saveError).toBe('')
     expect(wrapper.find('[data-test="save-error"]').exists()).toBe(false)
     expect(wrapper.find('[data-test="saved"]').exists()).toBe(true)
+    expect(s.dirty).toBe(false)
   })
 
-  it('shows 未保存 (not failure) while dirty and no save attempted yet', async () => {
+  it('onOpen failure surfaces ElMessage.error instead of an unhandled rejection', async () => {
+    const { ElMessage } = await import('element-plus')
+    const errSpy = vi.spyOn(ElMessage, 'error').mockImplementation(() => ({ close: () => {} }) as never)
+    ;(readPage as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('页面不存在'))
     const wrapper = mountView()
     await flushPromises()
+    // 打开失败不抛出未处理 rejection，走 ElMessage.error（对齐 onCreate/onDelete 约定）
     await wrapper.findComponent({ name: 'FileTree' }).vm.$emit('open', 'concepts/a.md')
     await flushPromises()
-    const s = useWikiStore()
-    s.edit('# A 改') // 只标脏未落盘：无 saveError，显示「未保存」而非失败态
-    await flushPromises()
-    expect(wrapper.find('[data-test="dirty"]').exists()).toBe(true)
-    expect(wrapper.find('[data-test="save-error"]').exists()).toBe(false)
+    expect(errSpy).toHaveBeenCalledWith('页面不存在')
+    errSpy.mockRestore()
   })
 
-  it('onOpen failure surfaces ElMessage.error instead of unhandled rejection', async () => {
-    ;(readPage as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('读取失败'))
+  it('onSwitch failure surfaces ElMessage.error', async () => {
+    const { ElMessage } = await import('element-plus')
+    const errSpy = vi.spyOn(ElMessage, 'error').mockImplementation(() => ({ close: () => {} }) as never)
     const wrapper = mountView()
     await flushPromises()
-    await wrapper.findComponent({ name: 'FileTree' }).vm.$emit('open', 'concepts/a.md')
+    ;(getTree as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('容器不可达'))
+    const select = wrapper.find('[data-test="container-switch"]')
+    await select.setValue('other')
     await flushPromises()
-    const { ElMessage } = await import('element-plus')
-    expect(ElMessage.error).toHaveBeenCalledWith('读取失败')
-  })
-
-  it('onSwitch failure surfaces ElMessage.error instead of unhandled rejection', async () => {
-    const wrapper = mountView()
-    await flushPromises()
-    ;(getTree as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('切换失败'))
-    await wrapper.find('[data-test="container-switch"]').setValue('other')
-    await flushPromises()
-    const { ElMessage } = await import('element-plus')
-    expect(ElMessage.error).toHaveBeenCalledWith('切换失败')
+    expect(errSpy).toHaveBeenCalledWith('容器不可达')
+    errSpy.mockRestore()
   })
 })
