@@ -83,7 +83,9 @@ AUTH_PASSWORD_VALIDATORS = [
     {'NAME': 'django.contrib.auth.password_validation.NumericPasswordValidator'},
 ]
 
-LANGUAGE_CODE = 'en-us'
+# zh-hans：全栈为中文 UI，让 DRF/Django 校验消息（密码强度、用户名唯一等）本地化为中文，
+# 与 LoginSerializer 的「用户名或密码错误」一致；无 LocaleMiddleware 时活动语言即此默认值。
+LANGUAGE_CODE = 'zh-hans'
 TIME_ZONE = 'UTC'
 USE_I18N = True
 USE_TZ = True

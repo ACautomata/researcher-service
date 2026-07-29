@@ -2,6 +2,7 @@
 import { reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
+import { ApiError } from '@/api/errors'
 
 // spec §9.2：本地账号注册/登录表单；提交后存 access token 并跳容器管理页。
 const auth = useAuthStore()
@@ -19,12 +20,17 @@ async function onSubmit(): Promise<void> {
       await auth.login(form.username, form.password)
     }
     await router.push('/')
-  } catch {
-    // codex P2-8：失败显示可操作错误，而非 unhandled rejection
+  } catch (err) {
+    // codex P2：仅「已解析的 API 错误」（rejectWithApiError 抛的 ApiError）逐字透传
+    // 后端真实校验消息（如「这个密码太常见了。」）。fetch 因后端不可达 reject 抛原生
+    // TypeError（"Failed to fetch"/"Load failed"）属网络/意外错误,不带可读 API 消息,
+    // 须走模式专属本地化兜底——旧实现只判 err.message 非空会把英文浏览器报错漏给用户。
     errorMsg.value =
-      mode.value === 'register'
-        ? '注册失败，用户名可能已存在'
-        : '登录失败，请检查用户名和密码'
+      err instanceof ApiError && err.message
+        ? err.message
+        : mode.value === 'register'
+          ? '注册失败，请稍后重试'
+          : '登录失败，请稍后重试'
   }
 }
 

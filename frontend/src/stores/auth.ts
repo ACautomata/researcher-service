@@ -2,6 +2,8 @@
 // P0：login 调后端 /api/v1/auth/login 拿 access token；isAuthenticated 驱动路由守卫。
 import { defineStore } from 'pinia'
 
+import { extractApiError, ApiError } from '@/api/errors'
+
 interface LoginResponse {
   access: string
 }
@@ -14,6 +16,19 @@ function isTokenExpired(token: string): boolean {
   } catch {
     return true
   }
+}
+
+// 读取失败响应并抛出含后端真实错误消息的 Error（DRF 校验消息，见 api/errors.ts）。
+// 修复 BUG：旧实现只抛写死文案，丢弃 {"password":["这个密码太常见了。"]} 等真实原因，
+// 致 LoginView 误显示「用户名可能已存在」——实际是密码被拒。
+async function rejectWithApiError(resp: Response): Promise<never> {
+  let body: unknown
+  try {
+    body = await resp.json()
+  } catch {
+    // 非 JSON（如 5xx HTML 错误页）→ body 留空，extractApiError 走状态码兜底
+  }
+  throw new ApiError(extractApiError(resp.status, body))
 }
 
 export const useAuthStore = defineStore('auth', {
@@ -33,7 +48,7 @@ export const useAuthStore = defineStore('auth', {
         body: JSON.stringify({ username, password }),
       })
       if (!resp.ok) {
-        throw new Error('登录失败')
+        return rejectWithApiError(resp)
       }
       const data = (await resp.json()) as LoginResponse
       this.token = data.access
@@ -47,7 +62,7 @@ export const useAuthStore = defineStore('auth', {
         body: JSON.stringify({ username, password }),
       })
       if (!resp.ok) {
-        throw new Error('注册失败')
+        return rejectWithApiError(resp)
       }
       await this.login(username, password)
     },
