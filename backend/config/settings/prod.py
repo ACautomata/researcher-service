@@ -17,3 +17,15 @@ if not ALLOWED_HOSTS:
 
 # 持久化凭证使用独立的 AES-256-GCM 密钥环；生产缺失或格式错误时拒绝启动。
 CREDENTIAL_ENCRYPTION_KEYS = CredentialKeySettings(os.environ).load()
+
+# ---- 安全响应头基线（issue #199 问题6-3，Django deployment checklist）----
+# SECURE_SSL_REDIRECT 由 env 控制且默认 False：自签证书/IP 直连的内网部署强开会导致
+# HTTP→HTTPS 死循环；确认 HTTPS 终结（反代/daemon）就绪后显式开启。
+SECURE_SSL_REDIRECT = os.environ.get('DJANGO_SECURE_SSL_REDIRECT', '').lower() in (
+    '1', 'true', 'yes',
+)
+# HSTS 仅在 HTTPS 响应上下发（SecurityMiddleware 只在 is_secure() 时加头），HTTP 部署无副作用。
+SECURE_HSTS_SECONDS = int(os.environ.get('DJANGO_SECURE_HSTS_SECONDS', '31536000'))
+SECURE_HSTS_INCLUDE_SUBDOMAINS = True
+SESSION_COOKIE_SECURE = True
+CSRF_COOKIE_SECURE = True

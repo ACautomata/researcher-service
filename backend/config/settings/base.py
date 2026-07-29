@@ -28,6 +28,9 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     # 第三方
     'rest_framework',
+    # issue #199 问题3：refresh token 服务端吊销（logout/轮换后旧 token 入黑名单）；
+    # 迁移由 simplejwt 自带，装 app 后 migrate 即可
+    'rest_framework_simplejwt.token_blacklist',
     'drf_spectacular',
     'channels',  # P0 仅注册；ASGI ProtocolTypeRouter 在 P1 chat ticket 接入
     # 本项目 5 app（spec §2）
@@ -104,7 +107,34 @@ REST_FRAMEWORK = {
         'rest_framework.permissions.IsAuthenticated',
     ),
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
+    # issue #199 问题3：auth 端点组限速（login/register/refresh 挂 ScopedRateThrottle，
+    # scope='auth'）防口令爆破/账号枚举；不做全局 anon 限速以免误伤 schema 等端点。
+    'DEFAULT_THROTTLE_RATES': {
+        'auth': os.environ.get('DRF_THROTTLE_RATE_AUTH', '10/minute'),
+    },
 }
+
+# ---- simplejwt：refresh 轮换 + 轮换后旧 token 入黑名单（issue #199 问题3）----
+# ROTATE：/token/refresh 每次换新 refresh，旧 refresh 即失效（配合 BLACKLIST）；
+# BLACKLIST_AFTER_ROTATION 依赖 INSTALLED_APPS 的 token_blacklist（simplejwt 自带迁移）。
+SIMPLE_JWT = {
+    'ROTATE_REFRESH_TOKENS': True,
+    'BLACKLIST_AFTER_ROTATION': True,
+}
+
+# ---- 注册开关（issue #199 问题1）----
+# 默认**关闭**：控制面无对象级授权 + docker.sock 等价 root，开放注册 ≈ 开放的宿主 root
+# 后门。首用户经 `createsuperuser` 创建；确需自助注册的部署显式 REGISTRATION_ENABLED=true。
+# dev.py 默认开启以方便本地开发（部署前检查清单须确认生产开关状态）。
+REGISTRATION_ENABLED = os.environ.get('REGISTRATION_ENABLED', '').lower() in (
+    '1', 'true', 'yes',
+)
+
+# ---- 凭据加密密钥环（issue #199 问题6-1）----
+# base 不提供默认值：dev/prod 各自加载（dev 未注入时启动随机生成 + warning，prod env 必配）。
+# 直接以 base 启动或新增 settings 模块忘记配置时，经 security.checks 在管理命令启动期
+# fail-fast（ImproperlyConfigured），而非首次读写凭据才炸（对齐 prod.py fail-fast 风格）。
+CREDENTIAL_ENCRYPTION_KEYS: tuple | None = None
 
 # ---- drf-spectacular：OpenAPI 契约（spec §4，前端/执行 agent 权威来源）----
 SPECTACULAR_SETTINGS = {
