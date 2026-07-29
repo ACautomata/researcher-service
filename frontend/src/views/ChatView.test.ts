@@ -743,6 +743,28 @@ describe('ChatView', () => {
     expect(tool.text()).toContain('完成')
   })
 
+  it('renders tool error state distinctly from done (codex #193 R3 P2)', async () => {
+    // 生产 _translate_tool 对 result+isError=true 故意发 state='error'，前端须独立渲染
+    // 「✗ 失败」（非一律「✓ 完成」），否则用户被误导以为失败工具成功。CSS .tool.error → 红字。
+    const w = await mountReady()
+    await w.find('[data-test="input"]').setValue('查一下')
+    await w.find('[data-test="send"]').trigger('click')
+    MockWS.last!.fireMessage({
+      type: 'tool', runId: 'r1', name: 'wiki.search', state: 'running',
+      id: null, title: null, input: null, result: null,
+    })
+    await nextTick()
+    MockWS.last!.fireMessage({
+      type: 'tool', runId: 'r1', name: 'wiki.search', state: 'error',
+      id: null, title: null, input: null, result: { error: '工具返回异常' },
+    })
+    await nextTick()
+    const tool = w.find('[data-test="tool-line"]')
+    expect(tool.classes()).toContain('error')
+    expect(tool.text()).toContain('失败')          // ✗ 失败（与 ✓ 完成区分）
+    expect(tool.text()).not.toContain('完成')
+  })
+
   it('pairs overlapping same-name tool results by call id, not recency (codex P2 ②)', async () => {
     // 同名工具两次并发调用：result 必须按调用 id 落到对应行，而非「最后一个同名 running 行」
     const w = await mountReady()

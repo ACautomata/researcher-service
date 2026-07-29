@@ -34,7 +34,7 @@ interface Msg {
 interface ToolRow {
   id: string | null // 工具调用 id（codex P2：同名并发调用按 id 配对 result，无 id 退 name）
   name: string
-  state: 'running' | 'done'
+  state: 'running' | 'done' | 'error'
   title: string | null // 网关 toolTitles 用途短标题（待实测），有则优先显示
   input: unknown
   result: unknown
@@ -705,7 +705,7 @@ defineExpose({ selectContainer, send, newSession })
               <span class="t-icon">🔧</span>
               <span class="t-name" :title="t.title ? t.name : ''">{{ t.title ?? t.name }}</span>
               <span v-if="formatToolInput(t.input)" class="t-args">{{ formatToolInput(t.input) }}</span>
-              <span class="t-state">{{ t.state === 'running' ? '⟳ 运行中' : '✓ 完成' }}</span>
+              <span class="t-state">{{ t.state === 'running' ? '⟳ 运行中' : t.state === 'error' ? '✗ 失败' : '✓ 完成' }}</span>
             </div>
             {{ m.text }}<span v-if="m.streaming" class="cursor"></span>
           </div>

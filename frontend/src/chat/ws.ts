@@ -11,7 +11,7 @@ export type ChatFrame =
   | { type: 'error'; runId?: string; message: string; id?: string }
   | { type: 'approval'; id: string; kind: string; command: string; sessionKey: string | null }
   | { type: 'approvalResolved'; id: string; decision: string }
-  | { type: 'tool'; runId: string; name: string; state: 'running' | 'done';
+  | { type: 'tool'; runId: string; name: string; state: 'running' | 'done' | 'error';
       id: string | null; title: string | null; input: unknown; result: unknown }
 
 // T06 审批卡数据（连接级，无 runId；sessionKey 标识归属会话，codex P1）
@@ -28,7 +28,7 @@ export interface ApprovalCard {
 export interface ToolLine {
   runId: string
   name: string
-  state: 'running' | 'done'
+  state: 'running' | 'done' | 'error'
   id: string | null // 工具调用 id（同名并发调用按 id 配对 result，无 id 退 name）
   title: string | null
   input: unknown
