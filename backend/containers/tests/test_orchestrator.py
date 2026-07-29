@@ -1249,3 +1249,49 @@ def test_delete_chowns_root_owned_home_before_rmtree(orch, runtime):
     ]
     assert chowns, 'delete 须在 stop 前容器内 chown home 给 host uid（A3 root 属主 cleanup）'
     assert chowns[0] == ['chown', '-R', str(os.getuid()), HOME_BIND]
+
+
+# ---------------------------- issue #199 问题2：delete 驱逐 chat 连接池条目 ----------------------------
+
+
+class _RecordingChatPool:
+    """记录 evict 调用的 pool 替身（对齐 ChatConnectionPool.evict 签名）。"""
+
+    def __init__(self, *, fail=False):
+        self.evicted = []
+        self._fail = fail
+
+    async def evict(self, instance):
+        if self._fail:
+            raise RuntimeError('client bound to another event loop')
+        self.evicted.append(instance.name)
+
+
+@pytest.mark.django_db
+def test_delete_evicts_chat_pool_entry(orch, config):
+    from chat.pool import ChatFleet
+
+    pool = _RecordingChatPool()
+    ChatFleet.override(pool)
+    try:
+        orch.create('demo')
+        assert orch.delete('demo') is True
+        assert pool.evicted == ['demo']  # delete 成功路径驱逐该实例的池条目
+    finally:
+        ChatFleet.reset()
+
+
+@pytest.mark.django_db
+def test_delete_evict_failure_does_not_block_delete(orch, config):
+    # evict best-effort：client 绑在 ASGI 事件循环等失败不阻断删除主流程
+    from chat.pool import ChatFleet
+
+    pool = _RecordingChatPool(fail=True)
+    ChatFleet.override(pool)
+    try:
+        orch.create('demo')
+        assert orch.delete('demo') is True
+        assert not Instance.objects.filter(name='demo').exists()
+        assert not (config.root / 'instances' / 'demo').exists()
+    finally:
+        ChatFleet.reset()
