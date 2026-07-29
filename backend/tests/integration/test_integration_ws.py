@@ -265,6 +265,40 @@ def _pairing_env_ready() -> bool:
     return bool(os.environ.get('OPENCLAW_TEMPLATE_DIR')) and bool(os.environ.get('LLM_API_KEY'))
 
 
+def _cleanup_container_ws(page_ws, container_name: str, runtime: DockerRuntime | None = None) -> None:
+    """teardown：经 daphne HTTP DELETE 删容器；非 2xx 或 evaluate 抛错时直连 Docker 兜底（codex #193 P2）。
+
+    daphne 是独立 OS 进程，测试进程的 ``Fleet`` 单例跨进程不可见，故主路径走 HTTP DELETE（经
+    daphne ``Fleet.delete``：处理 ``openclaw-gw-`` 前缀 + Instance 行 + 端口回收）。``__apiFetch``
+    即 ``apiFetch``，非 2xx 不抛（仅 401 不可刷新才抛），故须检 ``resp.ok``。page.evaluate 抛错
+    （浏览器/页面崩溃）或 DELETE 非 2xx（daphne ``Fleet.delete`` 异常）→ 直连 ``DockerRuntime``
+    stop/remove 兜底，对齐 ``test_integration_http._delete_container`` / ``WireTestContext`` 的幂等清理
+    （NotFound 吞；``container_name`` 即 instance name，``DockerRuntime`` 内部加前缀）。``runtime``
+    可注入（默认 ``DockerRuntime()``）供 ``test_ws_teardown_fallback`` 用 fake 隔离验证兜底分支，不连
+    真 Docker。``except Exception`` 仅吞清理自身异常——try 体的原始失败在 finally 结束后照常上抛，不被掩盖。
+    """
+    deleted = False
+    try:
+        result = page_ws.evaluate(
+            """
+            async (name) => {
+                const resp = await window.__apiFetch(
+                    `/api/v1/containers/${name}`, {method: 'DELETE'});
+                return {ok: resp.ok, status: resp.status};
+            }
+            """,
+            container_name,
+        )
+        deleted = bool(result and result.get('ok'))
+    except Exception:  # pylint: disable=broad-except  页面/浏览器崩溃→跳 Docker 兜底
+        deleted = False
+    if deleted:
+        return
+    docker = runtime or DockerRuntime()
+    docker.stop(container_name)
+    docker.remove(container_name)
+
+
 @pytest.mark.skipif(
     'not _docker_daemon_reachable_ws() or not _pairing_env_ready()',
     reason='L4 T7 需可达 Docker daemon + OPENCLAW_TEMPLATE_DIR/LLM_API_KEY（#184）',
@@ -454,20 +488,28 @@ def test_l4_chat_send_event_stream(page_ws):  # pylint: disable=too-many-stateme
             )
 
         # ── 7. chat.history content 多态契约（ADR-0003：user=str / assistant=list）──
+        # 经生产 chat API adapter ``getSessionHistory``（``encodeURIComponent(sessionKey)`` URL 构造 +
+        # ``apiJson`` 多态解析），真覆盖前端 history flow——勿绕过 adapter 手搓 __apiFetch+resp.json()
+        # （codex #193 P2：否则 adapter 回归时本测试仍过）。``getSessionHistory`` 非 2xx 经 apiJson 抛
+        # ApiError，这里捕获回填 status/error 保留可读断言信息；成功则透传 messages 供多态断言。
         history = page_ws.evaluate(
             """
             async ({name, key}) => {
-                const resp = await window.__apiFetch(
-                    `/api/v1/containers/${name}/chat/sessions/${key}/history`);
-                const body = resp.ok ? await resp.json() : null;
-                return {ok: resp.ok, status: resp.status,
-                        messages: body && body.messages};
+                const { getSessionHistory } = await import('/src/api/chat.ts');
+                try {
+                    const data = await getSessionHistory(name, key);
+                    return {ok: true, status: 200, messages: data.messages};
+                } catch (e) {
+                    return {ok: false, status: (e && e.status) || null,
+                            error: String((e && e.message) || e)};
+                }
             }
             """,
             {'name': container_name, 'key': session_key},
         )
         assert history['ok'], (
-            f'getSessionHistory must succeed, got status={history.get("status")}'
+            f'getSessionHistory must succeed, got status={history.get("status")}, '
+            f'error={history.get("error")}'
         )
         messages = history.get('messages') or []
         assert isinstance(messages, list) and messages, (
@@ -489,15 +531,6 @@ def test_l4_chat_send_event_stream(page_ws):  # pylint: disable=too-many-stateme
                 f'got {type(m.get("content")).__name__}'
             )
     finally:
-        # teardown：HTTP DELETE 容器（daphne Fleet.delete 处理 container_name 前缀 + DB 行 + 端口回收）
-        page_ws.evaluate(
-            """
-            async (name) => {
-                try {
-                    await window.__apiFetch(`/api/v1/containers/${name}`, {method:'DELETE'});
-                } catch (_) { /* teardown best-effort */ }
-                return {ok: true};
-            }
-            """,
-            container_name,
-        )
+        # teardown：HTTP DELETE 容器（daphne Fleet.delete 处理 container_name 前缀 + DB 行 + 端口回收）；
+        # 非 2xx 或 page 崩溃时 DockerRuntime stop/remove 兜底，防真容器残留（codex #193 P2）。
+        _cleanup_container_ws(page_ws, container_name)
