@@ -166,6 +166,49 @@ describe('ContainersView', () => {
     expect((listInstances as ReturnType<typeof vi.fn>).mock.calls.length).toBe(1)
   })
 
+  // issue #202 问题6 回归：标签页隐藏时暂停轮询，恢复可见时立即补拉并恢复周期
+  it('pauses polling while the tab is hidden and resumes on visibility (issue #202)', async () => {
+    vi.useFakeTimers()
+    const wrapper = mount(ContainersView, { global: { plugins: [createPinia()], stubs } })
+    await flushPromises()
+    ;(listInstances as ReturnType<typeof vi.fn>).mockClear() // 相对计数（隔离 mount 首拉与其他用例残留）
+
+    // 切到后台：轮询暂停，推进多个周期也零请求
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' })
+    document.dispatchEvent(new Event('visibilitychange'))
+    await vi.advanceTimersByTimeAsync(9000)
+    expect(listInstances).not.toHaveBeenCalled()
+
+    // 恢复可见：立即补拉，随后周期恢复
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' })
+    document.dispatchEvent(new Event('visibilitychange'))
+    await flushPromises()
+    const resumed = (listInstances as ReturnType<typeof vi.fn>).mock.calls.length
+    expect(resumed).toBeGreaterThanOrEqual(1)
+    await vi.advanceTimersByTimeAsync(3000)
+    expect((listInstances as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThan(resumed)
+    wrapper.unmount()
+  })
+
+  // issue #202 问题6 回归：持续故障时错误文案稳定（仅变化时更新），不以 3s 频率闪烁
+  it('keeps error text stable across failing poll ticks (no flicker)', async () => {
+    vi.useFakeTimers()
+    ;(listInstances as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('后端不可达'))
+    const wrapper = mount(ContainersView, { global: { plugins: [createPinia()], stubs } })
+    await flushPromises()
+    expect(wrapper.find('.error').text()).toContain('后端不可达')
+    // 多个失败 tick 后文案仍在（修复前每 tick 开头清空→失败重写，视觉上 3s 闪烁）
+    await vi.advanceTimersByTimeAsync(6000)
+    expect((listInstances as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThanOrEqual(3)
+    expect(wrapper.find('.error').text()).toContain('后端不可达')
+    // 恢复成功后错误被清除
+    ;(listInstances as ReturnType<typeof vi.fn>).mockResolvedValue([SAMPLE])
+    await vi.advanceTimersByTimeAsync(3000)
+    await flushPromises()
+    expect(wrapper.find('.error').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
   // ---------------------------- 配对状态（issue #40）----------------------------
 
   it('loads pairing status from listInstances payload', async () => {
