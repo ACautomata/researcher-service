@@ -242,11 +242,12 @@ class InstanceOrchestrator:  # pylint: disable=too-many-instance-attributes
             raise ConfigWriteError(name, str(config_path)) from None
 
     def _used_ports(self) -> set[int]:
-        """已用端口 = DB 记账 ∪ fleet 容器 label 端口 ∪ 池内宿主实测占用（codex R2 :161）。
+        """已用端口 = DB 记账 ∪ fleet 容器 label 端口（issue #201 问题 2：不再全池 bind 探测）。
 
-        仅记账会让最低候选被无关进程/未跟踪容器占用而反复失败；并入 daemon label
-        端口与宿主 bind 实测后，allocator 跳过真实不可用端口。宿主探测只扫池区间，
-        且对池外/异常端口容错（占用即跳过该候选，不影响其余）。
+        原实现每次 create 对全池约 1000 口逐个 socket bind 实测（O(池大小)），慢且阻塞
+        单根视图线程。改为只查 DB 已分配 + daemon label 端口，宿主 bind 实测收敛为仅对
+        allocator 给出的候选端口校验（见 _reserve_row，O(1) 级），行为等价：
+        被无关进程占用的候选会在候选校验处被跳过并换下一候选。
         """
         used = set(Instance.objects.values_list('port', flat=True))
         try:
@@ -255,12 +256,24 @@ class InstanceOrchestrator:  # pylint: disable=too-many-instance-attributes
                 if isinstance(port, int):
                     used.add(port)
         except Exception:  # pylint: disable=broad-exception-caught
-            # daemon 不可达不阻断分配：DB 记账 + 宿主实测仍可给出候选
+            # daemon 不可达不阻断分配：DB 记账 + 候选 bind 校验仍可给出候选
             pass
-        for port in range(self._cfg.port_start, self._cfg.port_end + 1):
-            if port not in used and self._port_in_use(port):
-                used.add(port)
         return used
+
+    def _next_free_port(self, name: str) -> int:
+        """取下一可用端口：DB/label 记账 + 仅对候选端口做宿主 bind 校验（O(1) 级）。
+
+        allocator 给出最小记账空闲候选后，bind 实测该校验（codex R2 :161 的占用兜底）；
+        候选被占则加入本批已用集并取下一候选，不再重扫全池。
+        """
+        used = self._used_ports()
+        for _ in range(MAX_PORT_RETRIES):
+            port = self._allocator.next_free(used)
+            if not self._port_in_use(port):
+                return port
+            # 宿主实测被占（无关进程/未跟踪容器）→ 跳过该候选取下一个
+            used.add(port)
+        raise PortAllocationError(name)
 
     def _reserve_row(self, name: str) -> Instance:
         """事务内占位 INSERT：name/port 冲突由 DB 唯一约束仲裁（codex R1 :77/:84）。
@@ -272,7 +285,9 @@ class InstanceOrchestrator:  # pylint: disable=too-many-instance-attributes
         home = str(self._cfg.root / 'instances' / name / 'home')
         token = secrets.token_urlsafe(TOKEN_URLSAFE_BYTES)
         for _ in range(MAX_PORT_RETRIES):
-            port = self._allocator.next_free(self._used_ports())
+            # issue #201 问题 2：候选端口由 _next_free_port 给出（记账 + 候选 bind 校验，
+            # 不再全池探测）；并发同选 port 的冲突仍由 DB 唯一约束仲裁后重试。
+            port = self._next_free_port(name)
             try:
                 with transaction.atomic():
                     return Instance.objects.create(
