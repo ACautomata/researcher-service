@@ -23,6 +23,11 @@ from integration.openclaw.translation import format_device_approve_command
 # `-m "not integration"` 排除，默认 `python -m pytest` 不跑（不污染单元回归）。
 pytestmark = pytest.mark.integration
 
+# 翻译器工具帧终态白名单（codex #193 P2 R3）：生产 ``ChatEventTranslator._translate_tool`` 对
+# result+isError=true **故意**发 ``state='error'``（backend/chat/event_translate.py:227），本断言须
+# 接纳之，否则真实工具失败会被误报为契约失败。回归守护钉在 tests/test_ws_event_contract.py。
+_ACCEPTED_TOOL_STATES = ('running', 'done', 'error')
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # helpers
@@ -437,7 +442,10 @@ def test_l4_chat_send_event_stream(page_ws):  # pylint: disable=too-many-stateme
                     onTool: (t) => window.__l4events.push(
                         {kind:'tool', runId:t.runId, name:t.name, state:t.state}),
                     onApproval: (c) => window.__l4events.push(
-                        {kind:'approval', id:c.id, kind:c.kind}),
+                        // codex #193 P2 R3：子类型（exec/plugin）必须独立于 ``kind`` 判别符——
+                        // 原 ``{kind:'approval', kind:c.kind}`` 第二个 kind 覆盖判别符，致下方
+                        // ``kind=='approval'`` 过滤永不命中、审批断言成死代码。改用 subtype 字段。
+                        {kind:'approval', id:c.id, subtype:c.kind, command:c.command}),
                     onClose: () => window.__l4events.push({kind:'close'}),
                 });
                 window.__l4ws.start(container);
@@ -480,8 +488,8 @@ def test_l4_chat_send_event_stream(page_ws):  # pylint: disable=too-many-stateme
         # tool/approval 帧若触发，断言翻译结构（不强求触发，#184「若触发」）
         tool_events = [e for e in events if e.get('kind') == 'tool']
         for te in tool_events:
-            assert te.get('state') in ('running', 'done'), (
-                f'tool frame state must be running/done, got {te!r}'
+            assert te.get('state') in _ACCEPTED_TOOL_STATES, (
+                f'tool frame state must be running/done/error, got {te!r}'
             )
             assert isinstance(te.get('name'), str) and te['name'], (
                 f'tool frame must carry non-empty name, got {te!r}'
@@ -490,6 +498,12 @@ def test_l4_chat_send_event_stream(page_ws):  # pylint: disable=too-many-stateme
         for ae in approval_events:
             assert isinstance(ae.get('id'), str) and ae['id'], (
                 f'approval frame must carry non-empty id, got {ae!r}'
+            )
+            # 子类型（exec/plugin）须独立于 ``kind`` 判别符记录（codex #193 P2 R3）：原 ``kind:c.kind``
+            # 覆盖 'approval' 判别符致本过滤永不命中、断言成死代码；改用 subtype 字段后此处才真正被覆盖。
+            subtype = ae.get('subtype')
+            assert isinstance(subtype, str) and subtype, (
+                f'approval frame must carry non-empty subtype (exec/plugin), got {ae!r}'
             )
 
         # ── 7. chat.history content 多态契约（ADR-0003：user=str / assistant=list）──
