@@ -456,6 +456,7 @@ class InstanceOrchestrator:  # pylint: disable=too-many-instance-attributes
         if current is None or current.pk != claimed_pk:
             # 行已属于另一 lifecycle 代——跳过目录清理，仅删旧实例（inst 仍指向旧 pk）
             inst.delete()
+            self._evict_chat_pool(inst)
             return True
         try:
             self._dir_remover(instance_dir)
@@ -468,7 +469,26 @@ class InstanceOrchestrator:  # pylint: disable=too-many-instance-attributes
             inst.save()
             raise InstanceCleanupError(name, str(instance_dir)) from exc
         inst.delete()
+        self._evict_chat_pool(inst)
         return True
+
+    @staticmethod
+    def _evict_chat_pool(inst: Instance) -> None:
+        """驱逐 chat 连接池中该实例的长连接条目（issue #199 问题2）。
+
+        此前 pool 条目只增不删——容器删除后旧 client 的 WS 句柄/锁/内存凭据单调泄漏。
+        delete 是同步上下文，经 async_to_sync 桥接到 pool.evict；best-effort——
+        evict 任何失败（client 绑在 ASGI 事件循环等）都不阻断删除主流程。
+        延迟 import：避免 containers.orchestrator ↔ chat.pool 模块级耦合。
+        """
+        try:
+            from asgiref.sync import async_to_sync
+
+            from chat.pool import ChatFleet
+
+            async_to_sync(ChatFleet.get().evict)(inst)
+        except Exception:  # pylint: disable=broad-exception-caught
+            pass
 
     def _item(self, inst: Instance, status: str, health: str) -> dict:
         return {
