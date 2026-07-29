@@ -86,7 +86,14 @@ class DockerRuntime:
             'environment': environment,
             'volumes': {
                 spec.home_dir: {'bind': HOME_BIND, 'mode': 'rw'},
-                spec.config_path: {'bind': CONFIG_BIND, 'mode': 'ro'},
+                # openclaw.json 挂 rw（对齐 deploy/docker-compose.yml 默认 rw 挂载）。
+                # spec §5.2 原要求 ro，但 acautomata/openclaw-docker-cn-im 镜像 init.sh 以 root
+                # (user 0:0) 启动时执行 ``chown -R node:node "$OPENCLAW_HOME"``（init.sh:236），
+                # 递归修复 home 属主，撞上 ro 的 openclaw.json → "Read-only file system" →
+                # ``set -e`` 致命退出 → restart loop → 容器 unhealthy、配对连不上。
+                # ro 覆写「防容器内篡改配置」的保护改由 ``SYNC_OPENCLAW_CONFIG=false``（_SYNC_FLAGS_OFF）
+                # 承担：init.sh 检测该 flag 后跳过 openclaw.json 覆写同步，渲染产物不被改写。
+                spec.config_path: {'bind': CONFIG_BIND, 'mode': 'rw'},
             },
             'ports': {f'{GATEWAY_INTERNAL_PORT}/tcp': ('127.0.0.1', spec.host_port)},
             'restart_policy': {'Name': 'unless-stopped'},

@@ -55,6 +55,44 @@ _ensure_db() {
   DJANGO_SETTINGS_MODULE=config.settings.dev .venv/bin/python manage.py migrate --noinput 2>&1 | tail -3
 }
 
+_load_env() {
+  # 加载 deploy/.env（GATEWAY_TOKEN / LLM_API_KEY / OPENCLAW_IMAGE 等），若存在。
+  # 不强制存在——用户也可改用 shell 环境变量注入。
+  if [ -f "$PROJECT_ROOT/deploy/.env" ]; then
+    set -a
+    # shellcheck disable=SC1091
+    . "$PROJECT_ROOT/deploy/.env"
+    set +a
+    echo "[driver] 已加载 deploy/.env"
+  fi
+}
+
+_ensure_fleet_image() {
+  # 容器编排（POST /containers）依赖镜像已 pull：本机默认
+  # acautomata/openclaw-docker-cn-im:latest 未 pull 时 docker run 会触发 pull 阻塞/失败，
+  # 前端表现为「容器一直 creating」。docker daemon 不可达时跳过（driver 仍起前后端，仅容器创建不可用）。
+  command -v docker >/dev/null 2>&1 || return 0
+  docker info >/dev/null 2>&1 || { echo "[driver] 警告: docker daemon 不可达，容器创建将不可用"; return 0; }
+  local image="${OPENCLAW_IMAGE:-acautomata/openclaw-docker-cn-im:latest}"
+  if ! docker image inspect "$image" >/dev/null 2>&1; then
+    echo "[driver] 预拉 fleet 镜像 $image …"
+    if docker pull "$image"; then
+      echo "[driver] ✓ 镜像就绪"
+    else
+      echo "[driver] 警告: 拉取 $image 失败，容器创建将不可用（检查镜像名/登录/网络）"
+    fi
+  fi
+}
+
+_warn_llm_key() {
+  # LLM_API_KEY 缺失 → orchestrator.create 第一行 raise ConfigurationError → POST /containers 返 503，
+  # 前端按钮 loading 结束但容器未起，易误判为「卡 creating」。提前显式警告。
+  if [ -z "${LLM_API_KEY:-}" ]; then
+    echo "[driver] 警告: LLM_API_KEY 未设置 —— 创建容器将返 503（'LLM_API_KEY is required but not configured'）"
+    echo "          请在 deploy/.env 或环境变量中设置 LLM_API_KEY 后重启 driver"
+  fi
+}
+
 _is_pid_alive() {
   local pid="$1"
   kill -0 "$pid" 2>/dev/null
@@ -69,9 +107,12 @@ _health_frontend() {
 }
 
 cmd_start() {
+  _load_env
   _ensure_venv
   _ensure_node_modules
   _ensure_db
+  _ensure_fleet_image
+  _warn_llm_key
 
   # ---- backend ----
   if [ -f "$BACKEND_PID_FILE" ] && _is_pid_alive "$(cat "$BACKEND_PID_FILE")"; then

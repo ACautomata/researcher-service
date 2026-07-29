@@ -128,9 +128,17 @@ OAUTH_PROVIDERS: dict = {}
 # ⚠ 安全：控制面经 docker.from_env() 挂 /var/run/docker.sock（等价 root；本地/可信部署可接受，
 #   生产应限制 Django 网络面或改用 rootless/远程 TLS daemon —— spec §5.4 明示风险）。
 FLEET_ROOT = Path(os.environ.get('OPENCLAW_FLEET_ROOT', str(BASE_DIR.parent / 'fleet')))
+# 模板单一来源：researcher 仓库克隆（含 workspace/wiki/skills，spec §5.6 cp -a 预填充源）。
+# 默认 BASE_DIR.parent/'researcher' = 与本仓库并排克隆的 researcher（对齐
+# deploy/docker-compose.yml 与 deploy/.env.example 的 RESEARCHER_DIR=../researcher 主约定，
+# compose 相对路径基准为 deploy/）。researcher 不含 fleet 自身 → HomeProvisioner.copytree
+# 无递归（区别于把 root/TEMPLATE 指向仓库根本身）。
+# CI 经 OPENCLAW_TEMPLATE_DIR=/tmp/fleet-template（rsync 干净模板）覆盖；服务器生产布局
+# （/srv/openclaw/template/researcher）同样经 env 覆盖。
+TEMPLATE_DEFAULT = str(BASE_DIR.parent / 'researcher')
 OPENCLAW_FLEET = {
     'ROOT': str(FLEET_ROOT),
-    'TEMPLATE': os.environ.get('OPENCLAW_TEMPLATE_DIR', '/srv/openclaw/template/researcher'),
+    'TEMPLATE': os.environ.get('OPENCLAW_TEMPLATE_DIR', TEMPLATE_DEFAULT),
     'TEMPLATE_JSON': str(BASE_DIR.parent / 'deploy' / 'openclaw.json'),
     'IMAGE': os.environ.get('OPENCLAW_IMAGE', 'acautomata/openclaw-docker-cn-im:latest'),
     'PORT_POOL_START': 19000,

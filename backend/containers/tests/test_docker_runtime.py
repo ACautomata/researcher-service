@@ -46,8 +46,10 @@ def test_gateway_port_maps_to_loopback_host_port():
     assert kw['ports'] == {'18789/tcp': ('127.0.0.1', 19000)}
 
 
-def test_home_bind_mount_rw_config_ro():
-    # spec §5.6：home bind-mount rw（agent 写 wiki/workspace）；openclaw.json ro 覆盖（配置单一来源）
+def test_home_and_config_bind_mount_rw():
+    # home rw（agent 写 wiki/workspace）；openclaw.json 亦 rw（对齐 deploy/docker-compose.yml 默认 rw）。
+    # spec §5.2 原要求 ro，但 acautomata 镜像 init.sh 以 root 启动时 chown -R 整个 home 会撞 ro
+    # → set -e 崩 → restart loop。ro 的「防篡改」改由 SYNC_OPENCLAW_CONFIG=false（init.sh 跳过覆写）承担。
     kw = DockerRuntime().build_run_kwargs(_spec())
     assert kw['volumes']['/fleet/instances/demo/home'] == {
         'bind': '/home/node/.openclaw',
@@ -55,7 +57,7 @@ def test_home_bind_mount_rw_config_ro():
     }
     assert kw['volumes']['/fleet/instances/demo/openclaw.json'] == {
         'bind': '/home/node/.openclaw/openclaw.json',
-        'mode': 'ro',
+        'mode': 'rw',
     }
 
 
