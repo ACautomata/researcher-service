@@ -294,9 +294,14 @@ def _cleanup_container_ws(page_ws, container_name: str, runtime: DockerRuntime |
         deleted = False
     if deleted:
         return
+    # Docker 兜底：stop/remove 各自独立隔离——stop 失败仍尝试 remove（force-removal），清理自身异常
+    # 一律吞掉，绝不从 finally 上抛掩盖原始 assert/timeout 失败（codex #193 P2 R2：名实相符 docstring）。
     docker = runtime or DockerRuntime()
-    docker.stop(container_name)
-    docker.remove(container_name)
+    for _op in (docker.stop, docker.remove):
+        try:
+            _op(container_name)
+        except Exception:  # pylint: disable=broad-except  清理失败不阻断后续 remove、不掩盖原始失败
+            pass
 
 
 @pytest.mark.skipif(
