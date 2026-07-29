@@ -74,3 +74,37 @@ describe('splitThinking (T08 思考链剥离)', () => {
     expect(splitThinking('<thinking></thinking>').thinking).toBe('')
   })
 })
+
+// issue #198 问题 5：终态重解析（finalize=true）——未补齐的 `<` 残片无下帧补齐，按普通文本放回正文；
+// 既有流式行为（默认 finalize=false）不变。
+describe('splitThinking finalize（终态重解析, #198）', () => {
+  it('终态：半截 `<thi` 残片按普通文本放回正文', () => {
+    const r = splitThinking('回答<thi', true)
+    expect(r.text).toBe('回答<thi')
+    expect(r.inThinking).toBe(false)
+  })
+
+  it('终态：单独的 `<` 结尾保留（普通文本小于号不丢）', () => {
+    expect(splitThinking('结论 a<', true).text).toBe('结论 a<')
+    expect(splitThinking('a < b', true).text).toBe('a < b')
+  })
+
+  it('流式行为不变：默认 finalize=false 仍藏残片', () => {
+    expect(splitThinking('回答<thi').text).toBe('回答')
+    expect(splitThinking('结论 a<').text).toBe('结论 a')
+  })
+
+  it('终态：完整标签解析不变', () => {
+    const r = splitThinking('<thinking>想</thinking>正文', true)
+    expect(r.text).toBe('正文')
+    expect(r.thinking).toBe('想')
+    expect(r.inThinking).toBe(false)
+  })
+
+  it('终态：未闭合 thinking 仍入 thinking（思考不丢、标签不泄露）', () => {
+    const r = splitThinking('前言<thinking>没闭合', true)
+    expect(r.text).toBe('前言')
+    expect(r.thinking).toBe('没闭合')
+    expect(r.inThinking).toBe(true)
+  })
+})

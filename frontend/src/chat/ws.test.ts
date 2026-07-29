@@ -4,9 +4,16 @@ import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
 
 class MockWS {
   static last: MockWS | null = null
+  // readyState 常量对齐原生 WebSocket（#198：sendRaw 的 CLOSING 窗口判断用 WebSocket.OPEN）
+  static CONNECTING = 0
+  static OPEN = 1
+  static CLOSING = 2
+  static CLOSED = 3
   url: string
   protocols: string | string[]
   sent: unknown[] = []
+  readyState = MockWS.CONNECTING
+  closeCalled = false // 记录 close() 是否被调用（验证静默看门狗主动判死）
   onopen: ((ev: unknown) => void) | null = null
   onmessage: ((ev: { data: string }) => void) | null = null
   onerror: ((ev: unknown) => void) | null = null
@@ -23,10 +30,14 @@ class MockWS {
   }
 
   close(): void {
-    /* 测试手动触发 onclose */
+    // 进 CLOSING 窗口但不触发 onclose（onclose 由 fireClose 手动触发）——
+    // 用于复现 close() 后、onclose 前的 send 竞态（#198 问题 5）
+    this.closeCalled = true
+    this.readyState = MockWS.CLOSING
   }
 
   fireOpen(): void {
+    this.readyState = MockWS.OPEN
     this.onopen?.({})
   }
 
@@ -38,8 +49,9 @@ class MockWS {
     this.onerror?.({})
   }
 
-  fireClose(): void {
-    this.onclose?.({})
+  fireClose(code = 1000): void {
+    this.readyState = MockWS.CLOSED
+    this.onclose?.({ code })
   }
 }
 
@@ -191,5 +203,80 @@ describe('ChatWebSocket', () => {
       runId: 'r1', name: 'wiki.search', state: 'running',
       id: 'call-1', title: '检索', input: { q: 'x' }, result: null,
     })
+  })
+
+  // ---- issue #198：close code 透传 / 畸形帧防护 / CLOSING 窗口 / 静默看门狗 ----
+  it('forwards the CloseEvent code to onClose (4401=JWT 失效可识别, #198 问题 2)', () => {
+    const onClose = vi.fn()
+    new ChatWebSocket('/ws/chat/', 'jwt', { onClose })
+    MockWS.last!.fireClose(4401)
+    expect(onClose).toHaveBeenCalledWith(4401)
+  })
+
+  it('drops a malformed JSON frame with a warn and keeps dispatching (#198 问题 4)', () => {
+    const onText = vi.fn()
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    new ChatWebSocket('/ws/chat/', 'jwt', { onText })
+    expect(() => MockWS.last!.onmessage?.({ data: '{bad json' })).not.toThrow() // 畸形帧不炸
+    expect(onText).not.toHaveBeenCalled()
+    expect(warn).toHaveBeenCalled()
+    MockWS.last!.fireMessage({ type: 'text', runId: 'r1', delta: 'ok' }) // 后续正常帧继续分发
+    expect(onText).toHaveBeenCalledWith('r1', 'ok', undefined)
+    warn.mockRestore()
+  })
+
+  it('routes send to onError in the CLOSING window without throwing (#198 问题 5)', () => {
+    // close() 已调、onclose 未到（readyState=CLOSING、closed 标志未置位）：
+    // 原生 send() 会抛 InvalidStateError → wrapper 走与 CLOSED 相同的 onError 收尾
+    const onError = vi.fn()
+    const ws = new ChatWebSocket('/ws/chat/', 'jwt', { onError })
+    MockWS.last!.fireOpen()
+    ws.close()
+    expect(() => ws.send('sk-1', 'hi')).not.toThrow()
+    expect(onError).toHaveBeenCalledWith('连接已断开，请重试或切换容器')
+    expect(MockWS.last!.sent).toEqual([]) // CLOSING 窗口未真正发出
+  })
+
+  it('closes the socket after silenceTimeoutMs without any frame (静默看门狗, #198 问题 1)', () => {
+    vi.useFakeTimers()
+    try {
+      new ChatWebSocket('/ws/chat/', 'jwt', {}, { silenceTimeoutMs: 1000 })
+      MockWS.last!.fireOpen()
+      vi.advanceTimersByTime(999)
+      expect(MockWS.last!.closeCalled).toBe(false) // 未到阈值不判死
+      vi.advanceTimersByTime(1)
+      expect(MockWS.last!.closeCalled).toBe(true) // 静默超时主动 close → 上层退避重连
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('resets the silence watchdog on incoming frames', () => {
+    vi.useFakeTimers()
+    try {
+      new ChatWebSocket('/ws/chat/', 'jwt', {}, { silenceTimeoutMs: 1000 })
+      MockWS.last!.fireOpen()
+      vi.advanceTimersByTime(900)
+      MockWS.last!.fireMessage({ type: 'ready', container: 'demo' }) // 下行帧 = 存活信号
+      vi.advanceTimersByTime(900)
+      expect(MockWS.last!.closeCalled).toBe(false)
+      vi.advanceTimersByTime(100)
+      expect(MockWS.last!.closeCalled).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('does not fire the watchdog after the socket has closed', () => {
+    vi.useFakeTimers()
+    try {
+      new ChatWebSocket('/ws/chat/', 'jwt', {}, { silenceTimeoutMs: 1000 })
+      MockWS.last!.fireOpen()
+      MockWS.last!.fireClose()
+      vi.advanceTimersByTime(5000)
+      expect(MockWS.last!.closeCalled).toBe(false) // 已关闭：看门狗已清理，不再 close
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
