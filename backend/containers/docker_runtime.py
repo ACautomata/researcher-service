@@ -5,6 +5,8 @@ run/list_fleet/get/stop/remove 经 docker client 操作 daemon（integration tes
 
 client_factory 延迟注入（默认 docker.from_env）—— 构造时不连 daemon，仅实际调用时才连。
 """
+import os
+
 import docker
 from docker.errors import NotFound
 
@@ -48,6 +50,17 @@ _BASE_ENV = {
     'OPENCLAW_PLUGINS_ENABLED': 'true',
 }
 
+# issue #199 问题5：fleet 容器运行用户 env 覆盖（对齐单容器栈 deploy/docker-compose.yml
+# 的 OPENCLAW_RUN_USER）。默认 '0:0' 保持既有兼容——容器内 init 需 root 做 chown，
+# 贸然改默认会破现有部署；确需降权的部署显式 export（如 '1000:1000'）。
+_FLEET_RUN_USER_ENV = 'OPENCLAW_FLEET_RUN_USER'
+_DEFAULT_RUN_USER = '0:0'
+
+# fleet 容器 capability 集合（抽常量便于测试锁定与后续裁剪）。最小化方向（deferred）：
+# CHOWN/SETUID/SETGID 供 entrypoint 一次性 chown bind-mount 后降权；DAC_OVERRIDE 是
+# 宿主 wiki 文件读写兜底，后续评估经 entrypoint 预置属主后移除。
+_FLEET_CAP_ADD = ['CHOWN', 'SETUID', 'SETGID', 'DAC_OVERRIDE']
+
 
 class DockerRuntime:
     """docker-py 容器运行时适配器（实现 ContainerRuntime Protocol）。"""
@@ -81,8 +94,9 @@ class DockerRuntime:
             'image': spec.image,
             'name': container_name(spec.name),
             'detach': True,
-            'user': '0:0',
-            'cap_add': ['CHOWN', 'SETUID', 'SETGID', 'DAC_OVERRIDE'],
+            # user 支持 env 覆盖（默认 root 保持兼容，见 _FLEET_RUN_USER_ENV 注释）
+            'user': os.environ.get(_FLEET_RUN_USER_ENV, _DEFAULT_RUN_USER),
+            'cap_add': list(_FLEET_CAP_ADD),
             'environment': environment,
             'volumes': {
                 spec.home_dir: {'bind': HOME_BIND, 'mode': 'rw'},

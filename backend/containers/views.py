@@ -18,7 +18,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from chat.models import Pairing
-from chat.serializers import PairingStatusSerializer
+from chat.serializers import PAIRING_STATUS_PROJECTION, PairingStatusSerializer
 from integration.openclaw.translation import build_pairing_status_default
 
 from .models import NAME_VALIDATOR
@@ -40,12 +40,16 @@ class InstanceListCreateView(APIView):
     @extend_schema(responses=InstanceSerializer(many=True))
     def get(self, request):
         items = Fleet.get().list()
-        # Codex P2：批量预取配对快照，避免 serializer 方法里 N+1 查询
+        # Codex P2：批量预取配对快照，避免 serializer 方法里 N+1 查询。
+        # issue #199 问题6-4：改 values() 投影只取 PairingStatusSerializer 需要的状态字段
+        # （投影单源 PAIRING_STATUS_PROJECTION 在 chat 侧）——Pairing 继承加密模型，整行
+        # 加载会触发 private_key_pem/device_token 的 AES-GCM 全字段解密（N 实例 = 2N 次
+        # 无谓解密且私钥明文进请求内存），投影路径不触密文字段。
         pairings = {
-            p.instance.name: p
-            for p in Pairing.objects
+            row['instance__name']: row
+            for row in Pairing.objects
             .filter(instance__name__in=[i['name'] for i in items])
-            .select_related('instance')
+            .values(*PAIRING_STATUS_PROJECTION)
         }
         for item in items:
             pairing = pairings.get(item.get('name'))
