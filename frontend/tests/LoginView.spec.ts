@@ -52,18 +52,38 @@ describe('LoginView', () => {
     expect(useAuthStore().isAuthenticated).toBe(true)
   })
 
-  it('shows an error message when login fails', async () => {
-    // codex P2-8：登录失败应显示错误，而非 unhandled rejection
+  it('登录失败显示后端真实错误而非写死文案', async () => {
+    // codex P2-8 + BUG 修复：登录失败须显示后端真实错误（api/errors.ts 透传），
+    // 而非写死「登录失败」掩盖真实原因。
     global.fetch = vi.fn().mockResolvedValue({
       ok: false,
-      json: async () => ({}),
+      status: 400,
+      json: async () => ({ non_field_errors: ['用户名或密码错误'] }),
     } as unknown as Response)
     const w = mountLogin()
     await w.find('input[type="text"]').setValue('alice')
     await w.find('input[type="password"]').setValue('wrong-pass-1')
     await w.find('button').trigger('click')
     await flushPromises()
-    expect(w.text()).toContain('登录失败')
+    expect(w.text()).toContain('用户名或密码错误')
+  })
+
+  it('注册失败显示真实校验原因（弱密码不再误报「账号已被注册」）', async () => {
+    // BUG 修复核心：旧实现任意注册失败都显示「用户名可能已存在」，
+    // 实则多为弱密码被拒。现须透传 DRF 密码校验消息，且不得再出现误导文案。
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 400,
+      json: async () => ({ password: ['这个密码太常见了。'] }),
+    } as unknown as Response)
+    const w = mountLogin()
+    await w.find('[data-test="switch-register"]').trigger('click')
+    await w.find('input[type="text"]').setValue('weakuser')
+    await w.find('input[type="password"]').setValue('12345678')
+    await w.find('button').trigger('click')
+    await flushPromises()
+    expect(w.text()).toContain('这个密码太常见了。')
+    expect(w.text()).not.toContain('已存在')
   })
 
   it('registers a new account when switched to register mode (codex round-4 F5)', async () => {

@@ -19,12 +19,14 @@ async function onSubmit(): Promise<void> {
       await auth.login(form.username, form.password)
     }
     await router.push('/')
-  } catch {
-    // codex P2-8：失败显示可操作错误，而非 unhandled rejection
+  } catch (err) {
+    // codex P2-8：失败显示可操作错误，而非 unhandled rejection。
+    // auth.register/login 透传后端真实错误（DRF 校验消息，如「这个密码太常见了。」）；
+    // 仅在网络异常等无 message 情况兜底——旧实现写死「用户名可能已存在」会误导（实际多为弱密码被拒）。
+    const message = err instanceof Error && err.message ? err.message : ''
     errorMsg.value =
-      mode.value === 'register'
-        ? '注册失败，用户名可能已存在'
-        : '登录失败，请检查用户名和密码'
+      message ||
+      (mode.value === 'register' ? '注册失败，请稍后重试' : '登录失败，请稍后重试')
   }
 }
 
