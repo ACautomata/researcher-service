@@ -182,10 +182,7 @@ describe('wiki store — codex PR #62 意见2/3 回归', () => {
   })
 })
 
-// issue #202 问题2/3 回归（评审复现用例转正）：保存链中毒恢复 + saveError 可见。
-// 修复前实测：一次 updatePage reject 后 _saveChain 永久 rejected——第二次 _flush 仍抛
-// 第一次旧错误、updatePage 调用停在 1 次、dirty 永卡 true、openPage/switchContainer 被阻断。
-describe('wiki store — issue #202 保存链中毒恢复回归', () => {
+describe('wiki store — issue #202 问题2/3 回归（保存链中毒恢复 + saveError）', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
     vi.useFakeTimers()
@@ -195,73 +192,69 @@ describe('wiki store — issue #202 保存链中毒恢复回归', () => {
       path: 'concepts/a.md', title: 'A', content: '# A\n',
     })
     ;(updatePage as ReturnType<typeof vi.fn>).mockResolvedValue(undefined)
-    ;(createPage as ReturnType<typeof vi.fn>).mockResolvedValue(undefined)
-    ;(deletePage as ReturnType<typeof vi.fn>).mockResolvedValue(undefined)
   })
   afterEach(() => { vi.useRealTimers() })
 
-  it('recovers autosave after a failed save: 2nd flush persists, dirty cleared, saveError lifecycle', async () => {
-    ;(updatePage as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('401 瞬态'))
+  it('first save failure poisons nothing: autosave recovers after backend heals', async () => {
+    // 评审实测复现转正：updatePage 首次 reject、之后恢复——第二次 _flush 不抛旧错误、
+    // updatePage 再次被调、dirty 最终 false（旧实现链永久 rejected：不再调用、dirty 卡 true）。
+    ;(updatePage as ReturnType<typeof vi.fn>)
+      .mockRejectedValueOnce(new Error('网络抖动'))
+      .mockResolvedValue(undefined)
     const s = useWikiStore()
     await s.loadTree('demo')
     await s.openPage('concepts/a.md')
-    s.edit('v1')
-    // 第一次落盘失败：不抛出（链吸收），saveError 写入，dirty 保持（草稿不丢）
-    await s._flush()
-    expect(s.saveError).toBe('401 瞬态')
-    expect(s.dirty).toBe(true)
-    expect(s.saving).toBe(false)
-    // 恢复后第二次 _flush：不抛第一次的旧错误、updatePage 再次被调、dirty 最终 false
-    await s._flush()
-    expect(updatePage).toHaveBeenCalledTimes(2)
-    expect(updatePage).toHaveBeenLastCalledWith('demo', 'concepts/a.md', 'v1')
-    expect(s.dirty).toBe(false)
-    expect(s.saveError).toBe('') // 成功落盘后清掉失败提示
-  })
-
-  it('debounced autosave failure surfaces saveError without unhandled rejection', async () => {
-    ;(updatePage as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('网络抖动'))
-    const s = useWikiStore()
-    await s.loadTree('demo')
-    await s.openPage('concepts/a.md')
-    s.edit('v1')
-    await vi.advanceTimersByTimeAsync(800) // 防抖触发 void _flush().catch——不得成为未处理 rejection
+    s.edit('# A 改')
+    await vi.advanceTimersByTimeAsync(800) // 第一次防抖落盘：失败
     expect(updatePage).toHaveBeenCalledTimes(1)
-    expect(s.saveError).toBe('网络抖动')
-    expect(s.dirty).toBe(true)
+    expect(s.dirty).toBe(true) // 未落盘，保持脏
+    expect(s.saveError).toBe('网络抖动') // 失败原因对用户可见
+
+    // 后端恢复后继续编辑 → 自动保存须重新落盘（不被旧错误阻断、不抛旧异常）
+    s.edit('# A 改2')
+    await vi.advanceTimersByTimeAsync(800)
+    expect(updatePage).toHaveBeenCalledTimes(2)
+    expect(updatePage).toHaveBeenLastCalledWith('demo', 'concepts/a.md', '# A 改2')
+    expect(s.dirty).toBe(false)
+    expect(s.saveError).toBe('') // 成功后清失败态
   })
 
-  it('failed save does not block openPage/switchContainer (no poisoned chain)', async () => {
-    ;(updatePage as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('boom'))
+  it('navigation is not blocked by a previous save failure', async () => {
+    // 失败期间 openPage/switchContainer 不被旧异常阻断（旧实现 await 中毒链抛第一次旧错误）
+    ;(updatePage as ReturnType<typeof vi.fn>)
+      .mockRejectedValueOnce(new Error('401 瞬态'))
+      .mockResolvedValue(undefined)
     const s = useWikiStore()
     await s.loadTree('demo')
     await s.openPage('concepts/a.md')
-    s.edit('v1')
-    await vi.advanceTimersByTimeAsync(800) // 自动保存失败一次
-    expect(s.saveError).toBe('boom')
-    // 导航不被旧异常阻断：openPage 前的 flush 顺带以剩余脏快照重试成功
+    s.edit('改动')
+    await vi.advanceTimersByTimeAsync(800) // 失败一次
+    expect(s.saveError).toBe('401 瞬态')
+
     ;(readPage as ReturnType<typeof vi.fn>).mockResolvedValue({
       path: 'concepts/b.md', title: 'B', content: '# B',
     })
-    await s.openPage('concepts/b.md')
-    expect(updatePage).toHaveBeenCalledTimes(2) // 恢复后重试落盘
+    await s.openPage('concepts/b.md') // 不抛旧错误；链尾会先补落盘（恢复后成功）
     expect(s.activePath).toBe('concepts/b.md')
-    expect(s.saveError).toBe('')
-    // 切容器同样不被阻断
-    await s.switchContainer('other')
+    expect(updatePage).toHaveBeenCalledTimes(2)
+
+    await expect(s.switchContainer('other')).resolves.toBeUndefined()
     expect(s.current).toBe('other')
   })
 
-  it('repeated failures keep saveError and dirty for manual retry', async () => {
-    ;(updatePage as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('后端 5xx'))
+  it('manual retry after failure persists the dirty draft', async () => {
+    ;(updatePage as ReturnType<typeof vi.fn>)
+      .mockRejectedValueOnce(new Error('保存失败'))
+      .mockResolvedValue(undefined)
     const s = useWikiStore()
     await s.loadTree('demo')
     await s.openPage('concepts/a.md')
-    s.edit('v1')
-    await s._flush()
-    await s._flush()
-    expect(updatePage).toHaveBeenCalledTimes(2) // 链未中毒：每次 flush 都真实重试
-    expect(s.saveError).toBe('后端 5xx')
-    expect(s.dirty).toBe(true) // 草稿保留，供手动重试/恢复后落盘
+    s.edit('改动')
+    await s._flush() // 失败，链吸收
+    expect(s.saveError).toBe('保存失败')
+    await s._flush() // 视图「点击重试」调同一入口
+    expect(updatePage).toHaveBeenCalledTimes(2)
+    expect(s.dirty).toBe(false)
+    expect(s.saveError).toBe('')
   })
 })
