@@ -56,6 +56,10 @@ router.beforeEach(async (to) => {
   if (to.meta.requiresAuth && !auth.isAuthenticated) {
     return { name: 'login' }
   }
+  // #202 问题6：已登录访问 /login 等 public 页 → 回首页，不重复展示登录表单
+  if (to.meta.public && auth.isAuthenticated) {
+    return { name: 'containers' }
+  }
 })
 
 export default router

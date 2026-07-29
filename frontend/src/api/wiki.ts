@@ -83,7 +83,7 @@ export async function deletePage(name: string, path: string): Promise<void> {
     method: 'DELETE',
   })
   if (!resp.ok && resp.status !== 404) {
-    throw new ApiError(resp.status, '删除失败')
+    throw new ApiError('删除失败', resp.status)
   }
 }
 
