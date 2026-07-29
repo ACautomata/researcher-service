@@ -87,7 +87,7 @@ cd frontend && npm run test                               # vitest
 | 变量 | 默认 | 说明 |
 |------|------|------|
 | `OPENCLAW_FLEET_ROOT` | `<repo>/fleet` | `instances/<name>/` 落盘根 |
-| `OPENCLAW_TEMPLATE_DIR` | `/srv/openclaw/template/researcher` | 共享只读 researcher 模板（预填充源） |
+| `OPENCLAW_TEMPLATE_DIR` | dev: `<repo>/researcher`（生产必设） | 共享只读 researcher 模板（预填充源）——开发默认与本仓库并排克隆的 researcher；**生产/Docker 部署必填**绝对路径（`prod.py` fail-fast） |
 | `OPENCLAW_IMAGE` | `ghcr.io/openclaw/openclaw:2026.6.34-browser` | 镜像 tag（官方 browser 变体，ADR 0003；生产建议 pin digest） |
 | `LLM_API_KEY` | — | 全面板共享 LLM key（env 注入容器，不落盘） |
 

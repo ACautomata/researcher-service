@@ -89,7 +89,7 @@ chat.send 冒烟、事件流 schema、只读 RPC schema、exec 审批路径 sche
 | env | 用途 |
 |---|---|
 | `OPENCLAW_IMAGE` | **可选**（缺省默认 `ghcr.io/openclaw/openclaw:2026.6.34-browser`，与 #94 smoke 同为官方 browser 变体） |
-| `OPENCLAW_TEMPLATE_DIR` | 容器 home 模板源（bind-mount 白名单路径，非 `/tmp`） |
+| `OPENCLAW_TEMPLATE_DIR` | 容器 home 模板源（bind-mount 白名单路径，非 `/tmp`）——**生产/Docker 必填**（绝对路径），dev 默认 `<repo>/researcher`，`prod.py` 缺则启动 fail-fast |
 | `LLM_API_KEY` | 全面板共享 LLM key（注入容器，不落盘） |
 
 **门控——integration marker（非 `RUN_INTEGRATION`）**：测试文件 `pytestmark = pytest.mark.integration`，

@@ -133,8 +133,12 @@ FLEET_ROOT = Path(os.environ.get('OPENCLAW_FLEET_ROOT', str(BASE_DIR.parent / 'f
 # deploy/docker-compose.yml 与 deploy/.env.example 的 RESEARCHER_DIR=../researcher 主约定，
 # compose 相对路径基准为 deploy/）。researcher 不含 fleet 自身 → HomeProvisioner.copytree
 # 无递归（区别于把 root/TEMPLATE 指向仓库根本身）。
-# CI 经 OPENCLAW_TEMPLATE_DIR=/tmp/fleet-template（rsync 干净模板）覆盖；服务器生产布局
-# （/srv/openclaw/template/researcher）同样经 env 覆盖。
+#
+# ⚠ 此默认仅适用开发/CI。生产部署（含 Docker 镜像化后端）**必须**显式设
+# ``OPENCLAW_TEMPLATE_DIR``（绝对路径到运维侧部署的 researcher 克隆，或共享卷挂载点）；
+# ``prod.py`` 启动时 fail-fast 校验。镜像内 ``BASE_DIR`` 是容器内路径，``<repo>/researcher``
+# 在打包后的后端镜像里必然不存在，不能作为生产兜底。
+# CI 经 OPENCLAW_TEMPLATE_DIR=/tmp/fleet-template（rsync 干净模板）覆盖。
 TEMPLATE_DEFAULT = str(BASE_DIR.parent / 'researcher')
 # codex P2 :141：模板路径须兑现 deploy/.env.example 承诺的 RESEARCHER_DIR。
 # 优先级：OPENCLAW_TEMPLATE_DIR（绝对路径，CI/生产覆盖）> RESEARCHER_DIR（deploy/ 相对，
