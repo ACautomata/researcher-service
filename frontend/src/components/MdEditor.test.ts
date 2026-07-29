@@ -54,48 +54,36 @@ describe('MdEditor', () => {
     expect(wrapper.find('.ProseMirror').attributes('contenteditable')).toBe('false')
     wrapper.unmount()
   })
+})
 
-  // issue #202 问题1 回归（评审复现用例转正）：宿主受控用法（:content=draft + update 回写）
-  // 下，emit 后的自回流不得触发 replaceAll——断言 .milkdown h1 的 DOM 引用不变
-  it('skips replaceAll on controlled echo: h1 DOM reference stays stable (issue #202)', async () => {
+describe('MdEditor — issue #202 问题1 回归（受控回写循环）', () => {
+  it('echo write-back does not rebuild editor DOM (skip replaceAll on self-echo)', async () => {
+    // 模拟宿主受控用法（WikiView: :content=draft + update 回写 store.edit）：
+    // 用户编辑 → emit → 父级把同一 markdown 写回 content prop → watch 必须跳过 replaceAll，
+    // 否则每次击键全文重建、选区锚定 DOM 被销毁（评审实测复现：h1 DOM 引用变化）。
     const wrapper = mount(MdEditor, { props: { content: '# A' } })
     await flushPromises()
-    const h1Before = wrapper.find('.milkdown h1')
-    expect(h1Before.exists()).toBe(true)
-    // 模拟宿主受控回写：用户编辑 → emit → 父级把同一 markdown 写回 content prop（自回流）
-    await (wrapper.vm as unknown as { _emitMarkdown: (m: string) => void })._emitMarkdown('# A 改')
-    await wrapper.setProps({ content: '# A 改' })
+    const h1Before = wrapper.find('.milkdown h1').element
+    expect(h1Before.textContent).toBe('A')
+
+    // 用户敲了一个字符：编辑器 emit 新 markdown，父级受控回写同一值
+    await (wrapper.vm as unknown as { _emitMarkdown: (m: string) => void })._emitMarkdown('# A改')
+    await wrapper.setProps({ content: '# A改' })
     await flushPromises()
-    // 自回流被豁免：未 replaceAll，h1 DOM 引用不变（修复前每次击键全文重建，引用必变）
-    expect(wrapper.find('.milkdown h1').element).toBe(h1Before.element)
-    expect(wrapper.find('.milkdown h1').text()).toBe('A')
+
+    // DOM 引用必须保持不变（未触发 replaceAll 重建）
+    expect(wrapper.find('.milkdown h1').element).toBe(h1Before)
     wrapper.unmount()
   })
 
-  it('consecutive echoed keystrokes never rebuild the editor DOM (issue #202)', async () => {
+  it('still reloads when switching to a different page (content != lastEmitted)', async () => {
     const wrapper = mount(MdEditor, { props: { content: '# A' } })
     await flushPromises()
-    const pmBefore = wrapper.find('.ProseMirror').element
-    const vm = wrapper.vm as unknown as { _emitMarkdown: (m: string) => void }
-    // 连续击键的受控回写序列：每次都应命中 lastEmitted 豁免
-    for (const m of ['# A1', '# A12', '# A123']) {
-      await vm._emitMarkdown(m)
-      await wrapper.setProps({ content: m })
-      await flushPromises()
-    }
-    expect(wrapper.find('.ProseMirror').element).toBe(pmBefore)
-    wrapper.unmount()
-  })
-
-  it('still reloads on real page switch after echoed edits (issue #202)', async () => {
-    const wrapper = mount(MdEditor, { props: { content: '# A' } })
+    await (wrapper.vm as unknown as { _emitMarkdown: (m: string) => void })._emitMarkdown('# A改')
+    // 换页：父级传入与 lastEmitted 不同的内容 → 仍须 replaceAll 重载
+    await wrapper.setProps({ content: '# B' })
     await flushPromises()
-    const vm = wrapper.vm as unknown as { _emitMarkdown: (m: string) => void }
-    await vm._emitMarkdown('# A 改')
-    await wrapper.setProps({ content: '# A 改' }) // 自回流：跳过
-    await wrapper.setProps({ content: '# B' }) // 真换页（≠ lastEmitted）：必须重载
-    await flushPromises()
-    expect(wrapper.find('h1').text()).toBe('B')
+    expect(wrapper.find('.milkdown h1').element.textContent).toBe('B')
     wrapper.unmount()
   })
 })

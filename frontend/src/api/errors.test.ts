@@ -58,4 +58,17 @@ describe('ApiError', () => {
     expect(netErr instanceof ApiError).toBe(false)
     // 两者皆为 Error，但仅 ApiError 可逐字透传——这正是 LoginView 二分的依据。
   })
+
+  it('instanceof/status 与导入源无关（issue #202 问题5：client.ts re-export 同一类）', async () => {
+    const { ApiError: ClientApiError } = await import('@/api/client')
+    // client.ts 旧签名 (status, message)：实例同样是 errors.ts ApiError 的实例
+    const fromClient = new ClientApiError(401, '未登录或登录已过期')
+    expect(fromClient).toBeInstanceOf(ApiError)
+    expect(fromClient.status).toBe(401)
+    expect(fromClient.message).toBe('未登录或登录已过期')
+    // errors.ts 旧签名 (message)：反向 instanceof 也成立，status 缺省
+    const fromErrors = new ApiError('这个密码太常见了。')
+    expect(fromErrors).toBeInstanceOf(ClientApiError)
+    expect(fromErrors.status).toBeUndefined()
+  })
 })
