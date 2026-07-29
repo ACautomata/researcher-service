@@ -7,16 +7,23 @@
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 from django.core.exceptions import ImproperlyConfigured
 
 from config.settings._validation import validate_prod_env
+
+# 校验「绝对路径 + 已存在目录」通过用：任一测试机上都已存在的绝对目录（本测试包的上两级
+# = backend/config）。validate_prod_env 现要求 OPENCLAW_TEMPLATE_DIR 不仅是绝对路径，
+# 还必须是已存在目录（codex P2 :292d349），故「通过用」必须给真实存在的目录。
+_EXISTING_DIR = str(Path(__file__).resolve().parent.parent)
 
 
 def _minimal_env(**overrides):
     """validate_prod_env 期望的最小 env 集合（除被测项外给齐）。"""
     base = {
         'DJANGO_ALLOWED_HOSTS': 'example.test',
-        'OPENCLAW_TEMPLATE_DIR': '/srv/openclaw/template/researcher',
+        'OPENCLAW_TEMPLATE_DIR': _EXISTING_DIR,
     }
     base.update(overrides)
     return base
@@ -104,5 +111,32 @@ def test_validate_prod_env_fail_fast_when_template_dir_dot_relative():
 
 
 def test_validate_prod_env_ok_when_template_dir_absolute():
-    """P2#3 反面：OPENCLAW_TEMPLATE_DIR 是合法绝对路径 → 正常通过。"""
-    validate_prod_env(_minimal_env(OPENCLAW_TEMPLATE_DIR='/srv/openclaw/template/researcher'))
+    """P2#3 反面：OPENCLAW_TEMPLATE_DIR 是合法绝对路径且已存在目录 → 正常通过。"""
+    validate_prod_env(_minimal_env(OPENCLAW_TEMPLATE_DIR=_EXISTING_DIR))
+
+
+def test_validate_prod_env_fail_fast_when_template_dir_nonexistent():
+    """codex P2 :292d349 review：OPENCLAW_TEMPLATE_DIR 是绝对路径但不存在（如拼写错误
+    /srv/openclaw/template/reseacher）被 validator 放行会让 prod 启动看似正常，首次创建
+    容器时 HomeProvisioner.copytree 才抛 FileNotFoundError，违背 fail-fast「启动时即知」
+    初衷（issue #195 同类错配）。启动期必须校验路径已存在且是目录。
+    """
+    with __import__('pytest').raises(ImproperlyConfigured) as ei:
+        validate_prod_env(_minimal_env(OPENCLAW_TEMPLATE_DIR='/srv/openclaw/template/reseacher'))
+    msg = str(ei.value)
+    assert 'OPENCLAW_TEMPLATE_DIR' in msg
+    # 错误消息告诉运维「必须是已存在/可读目录」并显式当前错值
+    assert '目录' in msg
+    assert "'/srv/openclaw/template/reseacher'" in msg
+
+
+def test_validate_prod_env_fail_fast_when_template_dir_is_file(tmp_path):
+    """codex P2 :292d349 review 边界：OPENCLAW_TEMPLATE_DIR 指向一个普通文件（绝对、存在
+    但不是目录）同样要让 copytree 失败 → 启动期即拒，而非首次创建容器才 NotADirectoryError。
+    """
+    file_path = tmp_path / 'not_a_dir'
+    file_path.write_text('x')
+    with __import__('pytest').raises(ImproperlyConfigured) as ei:
+        validate_prod_env(_minimal_env(OPENCLAW_TEMPLATE_DIR=str(file_path)))
+    assert 'OPENCLAW_TEMPLATE_DIR' in str(ei.value)
+    assert '目录' in str(ei.value)

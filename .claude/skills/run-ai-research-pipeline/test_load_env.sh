@@ -73,5 +73,23 @@ out=$(bash -c '
 ' _ "$envf")
 assert_eq "$(sed -n '1p' <<<"$out")" "y" "非法标识符的键被整行跳过（合法 GOOD_KEY=y 仍注入）"
 
+# ⑤ codex P2 :84：case 的 glob `[A-Za-z_][A-Za-z0-9_]*` 里 `*` 是通配（匹配任意字符），
+#   GOOD.KEY / AB@CD 这类非法 identifier 仍被首/次字符放行 → 间接展开 ${!key+x} 抛
+#   「无效的变量名」→ set -e 终止 driver.sh start（前后端均不启动）；且 glob 需第 2 字符，
+#   合法单字符键 X=x 被静默跳过不注入。改用锚定整个串的正则 [[ =~ ^...$ ]] 后：
+#   非法键整行跳过（set -e 不崩溃）、单字符键注入。
+#   必须在 set -euo pipefail 下验证（真实 driver.sh 语义）。
+printf 'GOOD.KEY=x\nAB@CD=y\nX=z\nWANT=v\n' > "$envf"
+out=$(bash -c '
+  set -euo pipefail
+  unset WANT X 2>/dev/null || true
+  _load_env "$1" >/dev/null
+  printf "%s\n%s\n" "${WANT-<unset>}" "${X-<unset>}"
+' _ "$envf")
+rc=$?
+assert_eq "$rc" "0" "GOOD.KEY/AB@CD 被跳过，set -e 下 _load_env 不崩溃"
+assert_eq "$(sed -n '1p' <<<"$out")" "v" "非法键跳过后合法 WANT=v 仍注入"
+assert_eq "$(sed -n '2p' <<<"$out")" "z" "合法单字符键 X=z 被注入（旧 glob 需第 2 字符会漏）"
+
 echo "---"
 if [ "$failures" -eq 0 ]; then echo "全部通过"; exit 0; else echo "$failures 项失败"; exit 1; fi

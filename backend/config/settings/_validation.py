@@ -43,11 +43,22 @@ def validate_prod_env(env: os.environ | dict) -> None:
             'Docker 化部署由 compose/K8s environment 注入；参见 deploy/README.md 与'
             'deploy/.env.example。',
         )
-    if not Path(template_dir).is_absolute():
+    template_path = Path(template_dir)
+    if not template_path.is_absolute():
         # codex P2 :2902641 review：相对路径被 validator 通过会让 prod 启动看似正常，
         # 但 HomeProvisioner 用 cwd 解析后 FileNotFoundError，重复 issue #195 错配。
         raise ImproperlyConfigured(
             'OPENCLAW_TEMPLATE_DIR 必须是绝对路径（spec §5.6 cp -a 源在镜像化后端内'
             'BASE_DIR 是容器路径，相对路径会被 cwd 静默吞）；当前值：'
             f'{template_dir!r}。参见 deploy/README.md。',
+        )
+    if not template_path.is_dir():
+        # codex P2 :292d349 review：绝对路径但不存在 / 指向普通文件（如拼错的
+        # /srv/openclaw/template/reseacher）被 validator 放行会让 prod 启动看似正常，
+        # 首次创建容器时 HomeProvisioner.copytree 才抛 FileNotFoundError/NotADirectory，
+        # 违背 fail-fast「启动时即知」初衷（issue #195 同类错配）。启动期校验已存在且是目录。
+        raise ImproperlyConfigured(
+            'OPENCLAW_TEMPLATE_DIR 必须是已存在且可读的目录（HomeProvisioner 以 cp -a '
+            '预填充 home 源）；当前值 'f'{template_dir!r} 不存在或不是目录。'
+            '参见 deploy/README.md 与 deploy/.env.example。',
         )

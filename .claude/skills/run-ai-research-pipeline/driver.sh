@@ -74,15 +74,15 @@ _load_env() {
     [ "${key:0:7}" = "export " ] && key="${key#export }"   # 去可选 export 前缀
     key="${key#"${key%%[![:space:]]*}"}"
     key="${key%"${key##*[![:space:]]}"}"
-    # 合法完整标识符（codex P2 :79）：原仅 [A-Za-z_]* 验首字符，BAD-KEY=x 这类会被
-    # 接受但间接展开 ${!BAD-KEY+x} 抛 "无效的变量名" → set -e 终止 driver.sh 启动。
-    # bash 字符类 `[A-Za-z0-9_]` 内 `-` 默认作字面字符（不是范围边界），无法用字符类
-    # 直接拒 `-`；先显式 reject 含 `-` 的 key，再 pattern-match 完整 identifier。
+    # 合法完整 shell 标识符（codex P2 :84）：case 的 glob `[A-Za-z_][A-Za-z0-9_]*` 里
+    # `*` 是通配（匹配任意字符），GOOD.KEY/AB@CD 这类非法 identifier 会被首/次字符放行，
+    # 随后间接展开 ${!key+x} 仍抛「无效的变量名」→ set -e 终止 driver.sh 启动（前后端不启）；
+    # 且 glob 强制第 2 个字符，合法单字符键（X=x）被静默跳过不注入。改用锚定整个串的正则
+    # `[[ =~ ^...$ ]]` 精确判定完整 identifier：`-`/`.`/`@` 等一律拒，单字符键放行。
     # 调用方未设置才注入（已设置的 shell 值胜出——含显式空值）。
-    case "$key" in
-      *-*) continue ;;
-      [A-Za-z_][A-Za-z0-9_]*) [ -n "${!key+x}" ] || export "$key=$val" ;;
-    esac
+    if [[ $key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+      [ -n "${!key+x}" ] || export "$key=$val"
+    fi
   done < "$env_file"
   echo "[driver] 已加载 deploy/.env（shell 环境变量优先，未被覆盖）"
 }
