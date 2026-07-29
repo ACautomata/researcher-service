@@ -15,7 +15,7 @@ import MdEditor from '@/components/MdEditor.vue'
 import WikiGraph from '@/components/WikiGraph.vue'
 
 const store = useWikiStore()
-const { current, groups, activePath, draft, dirty, saving, saveSeq } = storeToRefs(store)
+const { current, groups, activePath, draft, dirty, saving, saveError, saveSeq } = storeToRefs(store)
 
 const containers = ref<string[]>([])
 const graph = ref<WikiGraphDTO>({ nodes: [], edges: [] })
@@ -46,12 +46,25 @@ async function selectContainer(name: string): Promise<void> {
 
 async function onSwitch(name: string): Promise<void> {
   if (name === current.value) return
-  await store.switchContainer(name)
-  await refreshGraph()
+  try {
+    await store.switchContainer(name)
+    await refreshGraph()
+  } catch (e) {
+    ElMessage.error((e as Error).message) // 对齐 onCreate/onDelete 的错误处理约定（#202 问题3）
+  }
 }
 
 async function onOpen(path: string): Promise<void> {
-  await store.openPage(path)
+  try {
+    await store.openPage(path)
+  } catch (e) {
+    ElMessage.error((e as Error).message)
+  }
+}
+
+// 保存失败后的手动重试（#202 问题3）：点「保存失败，点击重试」指示器触发一次落盘
+async function onRetrySave(): Promise<void> {
+  await store._flush()
 }
 
 function onEdit(markdown: string): void {
@@ -124,6 +137,14 @@ onMounted(async () => {
         <option v-for="c in containers" :key="c" :value="c">{{ c }}</option>
       </select>
       <span v-if="saving" class="save-state" data-test="saving">保存中…</span>
+      <button
+        v-else-if="saveError"
+        class="save-state error"
+        data-test="save-error"
+        @click="onRetrySave"
+      >
+        保存失败，点击重试
+      </button>
       <span v-else-if="dirty" class="save-state dirty" data-test="dirty">未保存</span>
       <span v-else class="save-state" data-test="saved">已保存</span>
       <button
@@ -185,6 +206,13 @@ onMounted(async () => {
 }
 .save-state.dirty {
   color: #e6a23c;
+}
+.save-state.error {
+  color: #f56c6c;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
 }
 .toggle-graph {
   margin-left: auto;
