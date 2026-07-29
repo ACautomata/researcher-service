@@ -5,6 +5,7 @@ chat.send + runId 路由：发 chat.send → ack(runId) → chat 事件按 runId
 error 收尾 / discard / ack 失败。
 """
 import asyncio
+import logging
 
 import pytest
 
@@ -899,4 +900,252 @@ async def test_delete_session_gateway_reject_raises():
     with pytest.raises(ChatSendError) as exc:
         await c.delete_session('sess-1')
     assert 'operator.admin' in str(exc.value)
+    await c.aclose()
+
+
+# ---- issue #200：幂等键透传 / sessions.abort 中止链路 / 审批回填按 ID 协调 ----
+
+
+@pytest.mark.asyncio
+async def test_send_message_reuses_passed_idempotency_key_on_retry():
+    """issue #200 问题 1：同一逻辑消息重试（ack 超时后重发）复用同一 idempotencyKey——
+    契约断言：同键重发两帧的 idempotencyKey 相同（网关据此去重，不产生重复用户消息/重复 run）。"""
+    t = FakeChatTransport()
+
+    async def on_event(frame):
+        pass
+
+    c = _client(transport=t)
+    await c.connect()
+    await c.send_message('s', 'm', on_event=on_event, idempotency_key='draft-123')
+    await c.send_message('s', 'm', on_event=on_event, idempotency_key='draft-123')  # 重试同键
+    keys = [f['params']['idempotencyKey'] for f in t.sent if f.get('method') == 'chat.send']
+    assert keys == ['draft-123', 'draft-123']
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_send_message_generates_key_when_not_provided():
+    """向后兼容：未传幂等键时服务端兜底生成非空键（旧前端无 idempotencyKey 字段），且逐调用独立。"""
+    t = FakeChatTransport()
+
+    async def on_event(frame):
+        pass
+
+    c = _client(transport=t)
+    await c.connect()
+    await c.send_message('s', 'm1', on_event=on_event)
+    await c.send_message('s', 'm2', on_event=on_event)
+    keys = [f['params']['idempotencyKey'] for f in t.sent if f.get('method') == 'chat.send']
+    assert len(keys) == 2
+    assert all(keys)  # 兜底键非空
+    assert keys[0] != keys[1]  # 未传键时不同消息不复用同键
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_send_message_send_failure_cleans_pending_acks():
+    """issue #200 问题 5：死连接（_ws 非 None 但已断）下 send 抛异常须清理 _pending_acks
+    （对齐 resolve_approval 的 codex R3 P2 先例），重试不在 _pending_acks 泄漏累积 future。"""
+    t = FakeChatTransport()
+    c = _client(transport=t)
+    await c.connect()
+
+    class _DeadWs:
+        async def send(self, data):
+            raise ConnectionError('socket dead')
+
+    async def on_event(frame):
+        pass
+
+    c._ws = _DeadWs()  # 模拟 _ws 非 None 但已死（recv loop 尚未标 dead）
+    for _ in range(3):  # 模拟多次重试
+        with pytest.raises(ConnectionError):
+            await c.send_message('s', 'm', on_event=on_event)
+    assert c._pending_acks == {}  # pylint: disable=use-implicit-booleaness-not-comparison
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_abort_run_builds_sessions_abort_frame_and_returns_payload():
+    """issue #200 问题 2：abort_run 发 sessions.abort{key,runId?,clearQueued?}，有界等 ack。"""
+    t = FakeChatTransport(rpc_payloads={'sessions.abort': {'aborted': True}})
+    c = _client(transport=t)
+    await c.connect()
+    result = await c.abort_run('sk-1', 'run-9', clear_queued=True)
+    assert result == {'aborted': True}
+    req = next(f for f in t.sent if f.get('method') == 'sessions.abort')
+    assert req['type'] == 'req'
+    # sessions.* 族用 key（非 sessionKey，同 sessions.delete 先例）；可选字段显式给才下发
+    assert req['params'] == {'key': 'sk-1', 'runId': 'run-9', 'clearQueued': True}
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_abort_run_minimal_params_omit_optionals():
+    """只传 session_key → 不带可选 runId/clearQueued（中止会话内全部活跃 run）。"""
+    t = FakeChatTransport(rpc_payloads={'sessions.abort': {}})
+    c = _client(transport=t)
+    await c.connect()
+    await c.abort_run('sk-1')
+    req = next(f for f in t.sent if f.get('method') == 'sessions.abort')
+    assert req['params'] == {'key': 'sk-1'}
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_abort_run_not_connected_raises():
+    c = _client(transport=FakeChatTransport())
+    with pytest.raises(ChatClientError):
+        await c.abort_run('sk-1')
+
+
+@pytest.mark.asyncio
+async def test_abort_run_gateway_reject_raises():
+    t = FakeChatTransport(rpc_errors={'sessions.abort': {'code': 'NOT_FOUND', 'message': 'no such run'}})
+    c = _client(transport=t)
+    await c.connect()
+    with pytest.raises(ChatSendError) as exc:
+        await c.abort_run('sk-1', 'run-missing')
+    assert 'no such run' in str(exc.value)
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_abort_terminal_event_cleans_route():
+    """abort 受理后 fake 网关推 aborted 终态 → on_event 收 done 收尾且 runId 路由清理。"""
+    t = FakeChatTransport(ack_run_id='r1', rpc_payloads={'sessions.abort': {}})
+    received = []
+
+    async def on_event(frame):
+        received.append(frame)
+
+    c = _client(transport=t)
+    await c.connect()
+    await c.send_message('s', 'm', on_event=on_event)
+    assert 'r1' in c._routes
+    await c.abort_run('s', 'r1')
+    t.push({'type': 'event', 'event': 'chat', 'payload': {'runId': 'r1', 'state': 'aborted'}})
+    await asyncio.sleep(0.05)
+    assert received == [{'type': 'done', 'runId': 'r1'}]
+    assert 'r1' not in c._routes  # pylint: disable=use-implicit-booleaness-not-comparison
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_list_pending_approvals_merges_exec_and_plugin_dedup_by_id():
+    """issue #200 问题 3：exec+plugin 双族回填按审批 ID 去重合并（同审批两族各返一次不重复出卡）；
+    plugin 卡 kind 从族名派生（与事件路径 _approval_card 同先例）。"""
+    t = FakeChatTransport(
+        list_payload=[{'id': 'ap-1', 'command': 'cmd1'}, {'id': 'ap-shared', 'command': 'exec-cmd'}],
+        plugin_list_payload=[{'id': 'ap-shared', 'command': 'plugin-cmd'}, {'id': 'ap-2', 'command': 'cmd2'}],
+    )
+    c = _client(transport=t)
+    await c.connect()
+    cards = await c.list_pending_approvals()
+    assert cards == [
+        {'type': 'approval', 'id': 'ap-1', 'kind': 'exec', 'command': 'cmd1', 'sessionKey': None},
+        {'type': 'approval', 'id': 'ap-shared', 'kind': 'exec', 'command': 'exec-cmd', 'sessionKey': None},
+        {'type': 'approval', 'id': 'ap-2', 'kind': 'plugin', 'command': 'cmd2', 'sessionKey': None},
+    ]
+    assert any(f.get('method') == 'exec.approval.list' for f in t.sent)
+    assert any(f.get('method') == 'plugin.approval.list' for f in t.sent)
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_backfill_skips_ids_already_delivered_by_realtime_event():
+    """竞态窗口（先装监听再回填）：实时 requested 已推过的同 ID 卡，回填只推差集不重复出卡。"""
+    t = FakeChatTransport(list_payload=[{'id': 'ap-1', 'command': 'c1'}, {'id': 'ap-2', 'command': 'c2'}])
+    got = []
+
+    async def cb(frame):
+        got.append(frame)
+
+    c = _client(transport=t)
+    c.add_approval_subscriber(cb)
+    await c.connect()
+    t.push({'type': 'event', 'event': 'exec.approval.requested',
+            'payload': {'id': 'ap-1', 'request': {'command': 'c1'}}})
+    await asyncio.sleep(0.05)
+    cards = await c.list_pending_approvals()
+    assert [card['id'] for card in cards] == ['ap-2']  # ap-1 实时已推，回填不重复出卡
+    assert [f['id'] for f in got] == ['ap-1']  # 实时路径只出一张
+    assert await c.list_pending_approvals() == []  # 已回填的也不重复推（差集为空）
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_backfill_does_not_resurrect_resolved_approval():
+    """已 resolved 的审批（实时 resolved 事件已收敛）不被迟到的陈旧回填列表复活。"""
+    t = FakeChatTransport(list_payload=[{'id': 'ap-1', 'command': 'c1'}])
+    got = []
+
+    async def cb(frame):
+        got.append(frame)
+
+    c = _client(transport=t)
+    c.add_approval_subscriber(cb)
+    await c.connect()
+    t.push({'type': 'event', 'event': 'exec.approval.requested',
+            'payload': {'id': 'ap-1', 'request': {'command': 'c1'}}})
+    t.push({'type': 'event', 'event': 'exec.approval.resolved',
+            'payload': {'id': 'ap-1', 'decision': 'allow-once'}})
+    await asyncio.sleep(0.05)
+    cards = await c.list_pending_approvals()
+    assert cards == []  # pylint: disable=use-implicit-booleaness-not-comparison
+    assert 'ap-1' not in c._pending_approvals
+    assert [f['type'] for f in got] == ['approval', 'approvalResolved']
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_resolve_approval_marks_resolved_for_backfill():
+    """本端 resolve 成功后同步事实源：即使网关 resolved 事件丢失，后续回填也不复活该卡。"""
+    t = FakeChatTransport(resolve_payload={'id': 'ap-1'},
+                          list_payload=[{'id': 'ap-1', 'command': 'c1'}])
+    c = _client(transport=t)
+    await c.connect()
+    c._pending_approvals['ap-1'] = {'type': 'approval', 'id': 'ap-1'}  # 模拟实时已推
+    await c.resolve_approval('ap-1', 'exec', 'allow-once')
+    assert 'ap-1' not in c._pending_approvals
+    assert await c.list_pending_approvals() == []  # pylint: disable=use-implicit-booleaness-not-comparison
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_list_pending_approvals_logs_warning_and_continues_on_single_family_failure(caplog):
+    """回填失败不再静默（issue #200 问题 3）：单族失败 logger.warning（含方法与异常），
+    另一族结果照常返回（断线期间的 plugin 审批重连后可见）。"""
+    t = FakeChatTransport(
+        list_error={'code': 'FORBIDDEN', 'message': 'missing scope operator.approvals'},
+        plugin_list_payload=[{'id': 'ap-9', 'command': 'cmd'}],
+    )
+    c = _client(transport=t)
+    await c.connect()
+    with caplog.at_level(logging.WARNING, logger='chat.chat_client'):
+        cards = await c.list_pending_approvals()
+    assert cards == [
+        {'type': 'approval', 'id': 'ap-9', 'kind': 'plugin', 'command': 'cmd', 'sessionKey': None},
+    ]
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any('exec.approval.list' in m and 'operator.approvals' in m for m in warnings)
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_list_pending_approvals_both_families_fail_returns_empty_with_warnings(caplog):
+    """双族均失败 → 返回 []（best-effort 不打断 ready）但每族各留一条 warning。"""
+    t = FakeChatTransport(
+        list_error={'code': 'FORBIDDEN', 'message': 'missing scope'},
+        plugin_list_error={'code': 'UNAVAILABLE', 'message': 'gateway timeout'},
+    )
+    c = _client(transport=t)
+    await c.connect()
+    with caplog.at_level(logging.WARNING, logger='chat.chat_client'):
+        cards = await c.list_pending_approvals()
+    assert cards == []  # pylint: disable=use-implicit-booleaness-not-comparison
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any('exec.approval.list' in m for m in warnings)
+    assert any('plugin.approval.list' in m for m in warnings)
     await c.aclose()
