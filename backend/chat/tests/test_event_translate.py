@@ -2,8 +2,12 @@
 
 translate 返回帧列表（一帧网关事件可产 0..N 帧线端帧）。覆盖：
 delta(deltaText)→text、delta replace=true+快照→replace 帧（整段替换，前缀/非前缀均正确）、
-delta replace=true 无快照→退回 deltaText、final 含未发尾部→先 text(tail) 再 done、final/aborted→done、
+delta replace=true 无快照→replace 帧（deltaText 即替换文本，issue #203 问题 3）、
+final 含未发尾部→先 text(tail) 再 done、final/aborted→done、
 error→error(errorMessage|errorKind)；非 chat event / 非 event 帧 / 缺 runId / 未知 state / delta message 变体 → []。
+
+issue #203：payload.seq 去重与缺口检测、replace 无快照语义、final 发散兜底、agent lifecycle
+end/error 幂等补发终态帧。
 """
 import pytest
 
@@ -98,10 +102,17 @@ def test_delta_replace_non_prefix_snapshot_emits_replace_frame(translator):
     assert out == [{'type': 'text', 'runId': 'r1', 'delta': 'The dog', 'replace': True}]
 
 
-def test_delta_replace_without_snapshot_falls_back_to_delta_text(translator):
-    # replace=true 但无 message 快照 → 退回 deltaText 增量（追加），对齐 r13:127
-    assert translator.translate(_chat('delta', deltaText='x', replace=True)) == [
-        {'type': 'text', 'runId': 'r1', 'delta': 'x'},
+def test_delta_replace_without_snapshot_emits_replace_frame(translator):
+    # issue #203 问题 3：replace=true 无 message 快照时，deltaText 即替换文本（契约：非前缀替换设
+    # replace=true，用 deltaText 作替换文本）→ 发 replace 帧（前端 set 而非 append），_sent 置为
+    # deltaText。本用例替换了固化旧错误行为的 test_delta_replace_without_snapshot_falls_back_to_delta_text
+    # （旧行为退回追加 → "The catThe dog" 式重复，被本 issue 判为错误）。
+    translator.translate(_chat('delta', deltaText='The cat'))
+    out = translator.translate(_chat('delta', deltaText='The dog', replace=True))
+    assert out == [{'type': 'text', 'runId': 'r1', 'delta': 'The dog', 'replace': True}]
+    # _sent 为 set 而非 append：后续 final 快照等于替换文本时不再补发尾部
+    assert translator.translate(_chat('final', message='The dog')) == [
+        {'type': 'done', 'runId': 'r1'},
     ]
 
 
@@ -379,4 +390,137 @@ def test_delta_message_variant_returns_empty(translator):
 
 def test_chat_event_without_state_returns_empty(translator):
     frame = {'type': 'event', 'event': 'chat', 'payload': {'runId': 'r1'}}
+    assert translator.translate(frame) == []
+
+
+# ---- issue #203：流式事件翻译与 OpenClaw 契约对齐 ----
+
+
+def _agent_lifecycle(phase: str, run_id: str = 'r1', **extra) -> dict:
+    """agent lifecycle 流事件（官方契约：stream:"lifecycle" + data.phase）。"""
+    data = {'phase': phase}
+    data.update(extra)
+    return {
+        'type': 'event', 'event': 'agent',
+        'payload': {'runId': run_id, 'stream': 'lifecycle', 'data': data},
+    }
+
+
+# -- 问题 2：payload.seq 去重与缺口检测 --
+
+def test_seq_duplicate_and_out_of_order_dropped(translator):
+    # 网关重发/乱序：seq <= last_seq 的 chat 事件丢弃，不产生重复文本
+    assert translator.translate(_chat('delta', deltaText='你', seq=1)) == [
+        {'type': 'text', 'runId': 'r1', 'delta': '你'},
+    ]
+    assert translator.translate(_chat('delta', deltaText='你', seq=1)) == []  # 重发同 seq
+    assert translator.translate(_chat('delta', deltaText='好', seq=2)) == [
+        {'type': 'text', 'runId': 'r1', 'delta': '好'},
+    ]
+    assert translator.translate(_chat('delta', deltaText='你', seq=1)) == []  # 乱序旧 seq
+    assert translator.translate(_chat('final', seq=3)) == [{'type': 'done', 'runId': 'r1'}]
+
+
+def test_seq_gap_logs_warning_and_marks_reload(translator, caplog):
+    # 前向缺口（seq 跳到 last+2 以上）→ warning 日志 + pending_history_reload 钩子置位（重载属 #196）
+    translator.translate(_chat('delta', deltaText='a', seq=1))
+    with caplog.at_level('WARNING', logger='chat.event_translate'):
+        out = translator.translate(_chat('delta', deltaText='c', seq=4))
+    assert out == [{'type': 'text', 'runId': 'r1', 'delta': 'c'}]  # 本 PR 不暂停投递，仅标记
+    assert any('缺口' in r.message and 'r1' in r.message for r in caplog.records)
+    assert translator.pending_history_reload('r1') is True
+    # 终态收尾后标记随 run 状态清理
+    translator.translate(_chat('final', seq=5))
+    assert translator.pending_history_reload('r1') is False
+
+
+def test_seq_gap_same_run_logged_once_per_gap(translator, caplog):
+    # 顺序到达不告警；连续缺口逐次告警（last 随接受前移）
+    translator.translate(_chat('delta', deltaText='a', seq=1))
+    translator.translate(_chat('delta', deltaText='b', seq=2))
+    with caplog.at_level('WARNING', logger='chat.event_translate'):
+        translator.translate(_chat('delta', deltaText='d', seq=5))
+    assert len([r for r in caplog.records if '缺口' in r.message]) == 1
+
+
+def test_seq_absent_tolerated(translator):
+    # 旧网关无 payload.seq → 不校验直接接受（向后兼容，行为同修复前）
+    assert translator.translate(_chat('delta', deltaText='x')) == [
+        {'type': 'text', 'runId': 'r1', 'delta': 'x'},
+    ]
+
+
+def test_seq_dedup_applies_to_agent_events(translator):
+    # agent 事件 payload.seq 同样按 run 去重（契约：seq 按 run 分配，覆盖 lifecycle/tool 等流）
+    frame = _agent_tool('start', name='bash', toolCallId='c1')
+    frame['payload']['seq'] = 7
+    assert len(translator.translate(frame)) == 1
+    assert translator.translate(frame) == []  # 同 seq 重发 → 丢弃
+
+
+# -- 问题 4：final 尾部发散 --
+
+def test_final_divergent_snapshot_logs_and_replaces(translator, caplog):
+    # final.message 不以已发文本为前缀（发散）→ warning 日志（含 runId/长度）+ 按快照整段替换兜底
+    translator.translate(_chat('delta', deltaText='The cat'))
+    with caplog.at_level('WARNING', logger='chat.event_translate'):
+        out = translator.translate(_chat('final', message='The dog'))
+    assert out == [
+        {'type': 'text', 'runId': 'r1', 'delta': 'The dog', 'replace': True},
+        {'type': 'done', 'runId': 'r1'},
+    ]
+    assert any('发散' in r.message and 'r1' in r.message for r in caplog.records)
+
+
+def test_final_snapshot_equal_sent_no_divergence(translator, caplog):
+    # final.message 与已发文本一致 → 无 warning，仅 done（不误判发散）
+    translator.translate(_chat('delta', deltaText='你好'))
+    with caplog.at_level('WARNING', logger='chat.event_translate'):
+        assert translator.translate(_chat('final', message='你好')) == [{'type': 'done', 'runId': 'r1'}]
+    assert not [r for r in caplog.records if '发散' in r.message]
+
+
+# -- 问题 1：agent lifecycle end/error 幂等补发终态 --
+
+def test_lifecycle_end_emits_done_when_chat_not_finished(translator):
+    # chat 通道未收尾时，lifecycle end 兜底补发 done 并清理 run 状态
+    translator.translate(_chat('delta', deltaText='你好'))
+    assert translator.translate(_agent_lifecycle('end')) == [{'type': 'done', 'runId': 'r1'}]
+    assert translator._sent == {}  # pylint: disable=protected-access
+
+
+def test_lifecycle_error_emits_error_when_chat_not_finished(translator):
+    out = translator.translate(_agent_lifecycle('error', message='模型超时'))
+    assert out == [{'type': 'error', 'runId': 'r1', 'message': '模型超时'}]
+
+
+def test_lifecycle_end_after_chat_final_idempotent(translator):
+    # chat final 已收尾 → lifecycle end 幂等去重，不重复发 done
+    translator.translate(_chat('delta', deltaText='你好'))
+    assert translator.translate(_chat('final')) == [{'type': 'done', 'runId': 'r1'}]
+    assert translator.translate(_agent_lifecycle('end')) == []
+
+
+def test_chat_final_after_lifecycle_end_idempotent(translator):
+    # lifecycle end 先收尾（chat 终态丢失/网关以 agent 流为主通道）→ 迟到的 chat final 不重复发 done
+    translator.translate(_chat('delta', deltaText='你好'))
+    assert translator.translate(_agent_lifecycle('end')) == [{'type': 'done', 'runId': 'r1'}]
+    assert translator.translate(_chat('final')) == []
+
+
+def test_lifecycle_non_terminal_phase_returns_empty(translator):
+    # 非终态 phase（start 等）不猜测
+    assert translator.translate(_agent_lifecycle('start')) == []
+
+
+def test_lifecycle_missing_run_id_returns_empty(translator):
+    frame = {'type': 'event', 'event': 'agent',
+             'payload': {'stream': 'lifecycle', 'data': {'phase': 'end'}}}
+    assert translator.translate(frame) == []
+
+
+def test_agent_assistant_stream_not_consumed(translator):
+    # stream:assistant 的文本消费本 PR deferred（待真网关复核）→ 不投递，行为与修复前一致
+    frame = {'type': 'event', 'event': 'agent',
+             'payload': {'runId': 'r1', 'stream': 'assistant', 'data': {'delta': '你好'}}}
     assert translator.translate(frame) == []
