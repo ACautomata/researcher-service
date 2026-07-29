@@ -114,6 +114,31 @@ class ChatConnectionPool:
             await client.aclose()
         self._clients.clear()
 
+    async def evict(self, instance) -> None:
+        """驱逐指定容器的池条目（issue #199 问题2）：关闭并移除 client、清理 per-key 锁。
+
+        此前池条目只增不删（aclose_all 生产零调用点），容器删除/重配对（deviceToken
+        轮换、key 改变）后旧 client 的 WS 句柄、_clients/_locks 条目与 client 内
+        内存凭据（deviceToken/私钥）单调泄漏，且旧 client 会继续推送已删除容器的
+        过期事件。按 url 驱逐（url 由实例 port 唯一决定），同时覆盖删除与重配对
+        两种 key 形态。幂等：无对应条目时 no-op。供 orchestrator.delete 成功路径
+        与重新配对路径调用。
+        """
+        url = self._ws_url_for(instance)
+        keys = {
+            key for key in (*self._clients.keys(), *self._locks.keys())
+            if key[0] == url
+        }
+        for key in keys:
+            client = self._clients.pop(key, None)
+            self._locks.pop(key, None)
+            if client is not None:
+                try:
+                    await client.aclose()
+                except Exception:  # pylint: disable=broad-exception-caught
+                    # 驱逐是资源回收兜底，单个 client 关闭失败不阻断其余条目清理
+                    pass
+
     @staticmethod
     def _build_identity(pairing) -> DeviceIdentity | None:
         """从 Pairing 行重建 DeviceIdentity。三要素缺一不可——缺任意一个返回 None

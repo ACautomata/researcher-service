@@ -79,6 +79,12 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
         # 切容器/重连：旧 client 的本 consumer 审批订阅退订，避免推已失效连接（codex P1 独立退订）
         if self._client is not None and self._client is not client:
             self._client.remove_approval_subscriber(self._on_approval)
+            # issue #199 问题6-6：切容器时在**旧** client 上 discard 旧 runId 集合并清空——
+            # 否则 disconnect 会对**新** client discard 同形 runId，误清其他 consumer
+            # 正在使用的 runId 路由。
+            for run_id in list(self._active_runids):
+                self._client.discard(run_id)
+            self._active_runids.clear()
         self._client = client  # pylint: disable=attribute-defined-outside-init
         # T06：注册连接级审批订阅（codex P1 订阅者集合，多 consumer 共享 client 不互伤）
         client.add_approval_subscriber(self._on_approval)
