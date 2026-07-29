@@ -17,7 +17,7 @@ def test_instance_defaults_to_creating_status():
         port=19000,
         token='t-token',
         home_dir='/fleet/instances/demo/home',
-        image='acautomata/openclaw-docker-cn-im:latest',
+        image='ghcr.io/openclaw/openclaw:2026.6.34-browser',
     )
     inst.refresh_from_db()
     assert inst.status == Instance.STATUS_CREATING

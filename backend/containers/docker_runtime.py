@@ -21,7 +21,10 @@ from .constants import (
 )
 from .runtime import ContainerInfo, ContainerSpec, container_name
 
-# 4 个 sync flag 全关（R6 §3：防覆写挂载的 openclaw.json / 防明文写凭证）
+# 4 个 sync flag 全关（R6 §3：防覆写挂载的 openclaw.json / 防明文写凭证）。
+# 官方镜像 entrypoint = tini 直起 gateway，无 init.sh、无 sync 逻辑，不读这些 flag（对官方
+# 无效、无害）；保留以兼容 acautomata 谱系——用户可经 OPENCLAW_IMAGE 切回 fork，其 init.sh
+# 仍会读这些 flag 做配置同步。
 _SYNC_FLAGS_OFF = {
     'SYNC_OPENCLAW_CONFIG': 'false',
     'SYNC_EXTENSIONS_ON_START': 'false',
@@ -86,14 +89,12 @@ class DockerRuntime:
             'environment': environment,
             'volumes': {
                 spec.home_dir: {'bind': HOME_BIND, 'mode': 'rw'},
-                # openclaw.json 挂 rw（对齐 deploy/docker-compose.yml 默认 rw 挂载）。
-                # spec §5.2 原要求 ro，但 acautomata/openclaw-docker-cn-im 镜像 init.sh 以 root
-                # (user 0:0) 启动时执行 ``chown -R node:node "$OPENCLAW_HOME"``（init.sh:236），
-                # 递归修复 home 属主，撞上 ro 的 openclaw.json → "Read-only file system" →
-                # ``set -e`` 致命退出 → restart loop → 容器 unhealthy、配对连不上。
-                # ro 覆写「防容器内篡改配置」的保护改由 ``SYNC_OPENCLAW_CONFIG=false``（_SYNC_FLAGS_OFF）
-                # 承担：init.sh 检测该 flag 后跳过 openclaw.json 覆写同步，渲染产物不被改写。
-                spec.config_path: {'bind': CONFIG_BIND, 'mode': 'rw'},
+                # openclaw.json 挂 ro（spec §5.2：防容器内篡改配置）。
+                # 官方镜像 entrypoint = tini 直起 gateway，无 init.sh、无 chown/sync 逻辑（ADR 0003），
+                # 故 acautomata fork init.sh ``chown -R`` 撞 ro 的崩溃路径在官方镜像上不成立——ro 不会崩。
+                # 所有配置写入都在 host 侧（orchestrator 原子 os.replace / create 写盘），gateway 只
+                # read-only watch 热加载（r28）；host 侧写透过 bind 传播给容器，不受 ro 影响。
+                spec.config_path: {'bind': CONFIG_BIND, 'mode': 'ro'},
             },
             'ports': {f'{GATEWAY_INTERNAL_PORT}/tcp': ('127.0.0.1', spec.host_port)},
             'restart_policy': {'Name': 'unless-stopped'},

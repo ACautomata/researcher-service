@@ -8,7 +8,7 @@
   多容器 fleet 由 Django 经 Docker SDK 直接编排（不走本 compose），但镜像、env、挂载契约与此保持一致。
 - `.env.example` —— 网关环境变量模板（`GATEWAY_TOKEN` / `LLM_API_KEY` 等）。
 
-镜像 `acautomata/openclaw-docker-cn-im`，把 [ACautomata/researcher](https://github.com/ACautomata/researcher)
+镜像 `ghcr.io/openclaw/openclaw:2026.6.34-browser`（官方稳定 browser 变体，ADR 0003），把 [ACautomata/researcher](https://github.com/ACautomata/researcher)
 仓库作为容器 `~/.openclaw` 配置卷挂载。researcher 仓库**不动**（其 workspace/、wiki/、skills/ 仍照常挂载）。
 
 ## 在新架构中的位置
