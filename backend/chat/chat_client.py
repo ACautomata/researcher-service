@@ -227,26 +227,26 @@ class OpenClawChatClient:  # pylint: disable=too-many-instance-attributes,too-ma
         frames = self._translator.translate(msg)
         if not frames:
             return
-        run_id = frames[0].get('runId')
-        if run_id is None:
-            # 连接级帧（T06 审批卡 + 网关 resolved 事件）：不挂 runId,fan-out 到所有审批订阅者,不进 runId 路由
-            for translated in frames:
-                if translated.get('type') not in ('approval', 'approvalResolved'):
-                    continue
-                await self._fanout_approval(translated)
-            return
-        cb = self._routes.get(run_id)
-        if cb is None:
-            return  # route 已 discard，丢弃整批帧
-        terminal = False
+        # issue #203 问题 4：逐帧按各自 runId 路由——不再用 frames[0] 的 runId 路由整批
+        # （同连接多 run 交错时互不误投；route 已 discard 只丢弃该 run 的帧而非整批）
+        terminal: set[str] = set()
         for translated in frames:
+            run_id = translated.get('runId')
+            if run_id is None:
+                # 连接级帧（T06 审批卡 + 网关 resolved 事件）：不挂 runId,fan-out 到所有审批订阅者,不进 runId 路由
+                if translated.get('type') in ('approval', 'approvalResolved'):
+                    await self._fanout_approval(translated)
+                continue
+            cb = self._routes.get(run_id)
+            if cb is None:
+                continue  # route 已 discard，仅丢弃该 run 的帧
             try:
                 await cb(translated)
             except Exception:  # pylint: disable=broad-exception-caught
                 pass  # 隔离单 route 回调失败，避免杀整个 recv loop 影响同 client 其他 route
             if translated.get('type') in ('done', 'error'):
-                terminal = True
-        if terminal:
+                terminal.add(run_id)
+        for run_id in terminal:
             self._routes.pop(run_id, None)
 
     def _resolve_ack(self, msg: dict) -> None:
