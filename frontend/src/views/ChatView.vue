@@ -203,7 +203,69 @@ function finalizeLast() {
   if (last && last.streaming) {
     last.streaming = false
     last.thinkingOpen = false // 断流时 <thinking> 未闭合也落定：text/thinking 已是剥离结果，思考保留在折叠卡
+    // 终态重解析（issue #198 问题 5）：流式中藏起的半截 `<thi…` 残片终态无下帧补齐，
+    // 按普通文本放回正文（finalize=true），既有的流式隐藏行为不变
+    const parts = splitThinking(last.raw, true)
+    last.thinking = parts.thinking
+    last.text = parts.text
   }
+}
+
+// ---- issue #198 断线恢复：指数退避自动重连 + 4401 JWT 刷新 ----
+// 退避序列（参考网关 GATEWAY_RECONNECT_POLICY 初始 1s；上限取 15s 避免聊天页长时间假死），末档封顶。
+const RECONNECT_DELAYS_MS = [1000, 2000, 5000, 15000]
+let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+let reconnectAttempt = 0
+let reconnecting = false // 本次 connect 属断线重连：onReady 成功后 loadHistory 恢复投影（网关「重连后恢复状态」等价语义）
+
+function cancelReconnect() {
+  if (reconnectTimer !== null) {
+    clearTimeout(reconnectTimer)
+    reconnectTimer = null
+  }
+}
+
+// 意外断线后按 1s→2s→5s→15s 上限退避自动重连；切容器/卸载经 cancelReconnect/onBeforeUnmount 清理
+function scheduleReconnect() {
+  if (disposed || reconnectTimer !== null) return
+  if (!selectedContainer.value || !selectedSession.value) return
+  const delay = RECONNECT_DELAYS_MS[Math.min(reconnectAttempt, RECONNECT_DELAYS_MS.length - 1)]
+  reconnectAttempt++
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null
+    if (disposed || !selectedContainer.value || !selectedSession.value) return
+    reconnecting = true
+    void connect()
+  }, delay)
+}
+
+// close code 4401（后端中间件握手期 JWT 校验失败，见 accounts/middleware.py）：
+// forceRefresh 换新 token 后立即重连；refreshExhausted（cookie 确认失效）才清会话跳 /login
+// （复用 api/client.ts 既有语义）；瞬时失败退回退避重连，下次 connect 的 hydrate 再试刷新。
+async function reconnectAfterRefresh() {
+  const gen = containerGen
+  await auth.forceRefresh()
+  if (disposed || gen !== containerGen) return // 卸载/切容器：丢弃
+  if (auth.token) {
+    reconnecting = true
+    void connect()
+  } else if (auth.refreshExhausted) {
+    auth.clearSession()
+    if (typeof window !== 'undefined' && window.location.pathname !== '/login') {
+      window.location.assign('/login')
+    }
+  } else {
+    scheduleReconnect()
+  }
+}
+
+// 错误条「重新连接」按钮入口：直接调 connect()（绕开 selectContainer 的同名 early-return，#198 问题 1）
+function manualReconnect() {
+  if (!selectedContainer.value || !selectedSession.value) return
+  cancelReconnect()
+  reconnectAttempt = 0
+  reconnecting = true
+  void connect()
 }
 
 async function loadInstances() {
@@ -222,6 +284,10 @@ async function selectContainer(name: string) {
   if (!name || selectedContainer.value === name) return
   const gen = ++containerGen // 每次切换自增，await 后据此丢弃过期响应
   selectedContainer.value = name
+  // 用户主动切容器：取消在途的断线退避重连（新容器走自己的连接主流程，#198）
+  cancelReconnect()
+  reconnectAttempt = 0
+  reconnecting = false
   // 立即停用旧连接 + 禁用 composer + 清空 session：避免 listSessions pending 期间经旧 socket
   // 用旧 sessionKey 发送（UI 已显示新容器）（codex P2 #5）
   const oldWs = ws
@@ -249,7 +315,7 @@ async function selectContainer(name: string) {
     if (gen !== containerGen) return // newSession 期间又切容器：不连
     if (!selectedSession.value) return // 会话创建失败（newSession 已显示错误）：不连接（codex P2）
     void loadHistory(selectedSession.value) // T3：加载首个会话历史（不阻塞 WS 连接）
-    connect()
+    void connect()
   } catch (e) {
     if (gen !== containerGen) return
     connecting.value = false // 出错解除 connecting（composer 解禁后用户可重试）
@@ -412,17 +478,46 @@ async function loadMoreHistory() {
   }
 }
 
-function connect() {
-  ws?.close()
+// 建连（#198 改 async）：先关旧连接，token 过期先 hydrate 刷新再握手（前置防护，避免无谓的 4401 往返）；
+// 自动/手动重连与切容器共用本入口，经 containerGen + ws===myWs 双守卫丢弃过期路径。
+async function connect() {
+  const gen = containerGen
+  const oldWs = ws
+  ws = null
+  oldWs?.close() // 旧 ws 的 onClose 见 ws(null) !== myWs → 不报误断线
+  cancelReconnect() // 本次建连取代任何在途的退避重连计划
   connecting.value = true
   disconnected.value = false
   errorMsg.value = ''
-  // 每个 ws 闭包捕获自身；旧 ws 的 onClose 触发时 ws 已指向新连接 → 不报误断线
+  // 前置防护（#198 问题 2）：access token 已过期先 refresh 换新（复用 auth.hydrate 既有 API，
+  // 其并发去重由 #202 在 stores/auth.ts 负责，本视图不改 auth store）
+  await auth.hydrate()
+  if (disposed || gen !== containerGen) return // 卸载/切容器途中：丢弃
+  if (!auth.token) {
+    // 刷新后仍无 token：确认失效（refreshExhausted）清会话跳登录；瞬时失败提示重试
+    connecting.value = false
+    if (auth.refreshExhausted) {
+      auth.clearSession()
+      if (typeof window !== 'undefined' && window.location.pathname !== '/login') {
+        window.location.assign('/login')
+      }
+    } else {
+      disconnected.value = true
+      errorMsg.value = '登录状态已过期，请重新登录或点击重试'
+    }
+    return
+  }
+  // 每个 ws 闭包捕获自身；旧 ws 的 onClose 触发时 ws 已指向新连接（或 null）→ 不报误断线
   const myWs = new ChatWebSocket('/ws/chat/', auth.token, {
     onReady: () => {
-      if (ws === myWs) {
-        connecting.value = false
-        errorMsg.value = ''
+      if (ws !== myWs) return
+      connecting.value = false
+      errorMsg.value = ''
+      if (reconnecting) {
+        // 断线重连成功：退避计数归零，loadHistory 以权威历史恢复投影（#198 问题 1/3）
+        reconnecting = false
+        reconnectAttempt = 0
+        if (selectedSession.value) void loadHistory(selectedSession.value)
       }
     },
     onText: (runId, delta, replace) => {
@@ -486,16 +581,29 @@ function connect() {
         else if (pendingAbandonCount > 0) pendingAbandonCount--
         else if (pendingSend) pendingSend = false
       } else {
+        // #198 问题 4：发送失败（无 runId 错误帧）且 pendingSend 中 → 移除 send() 乐观 push 的
+        // 空 assistant 气泡（仍为空壳：无文本/思考/工具），防永久残留
+        if (pendingSend) removeOptimisticBubble()
         activeRunId = ''
         pendingSend = false
       }
     },
-    onClose: () => {
-      if (ws !== myWs) return  // 旧 ws 的关闭（切容器）不报断线
+    onClose: (code) => {
+      if (ws !== myWs) return  // 旧 ws 的关闭（切容器/重连更替）不报断线
       connecting.value = false
       disconnected.value = true  // 意外断线：禁用发送（codex P2 #4）
+      // #198 问题 3：断线收尾——finalizeLast 落定流式气泡（光标不永久闪烁），
+      // abandonActiveRun 标记在途 run，迟到帧按既有体系丢弃，重连后新 run 首帧不被残留 activeRunId 误丢
+      finalizeLast()
+      abandonActiveRun()
       recoverPendingApprovals()  // 连接断开：恢复所有 resolving 卡片可重试
-      if (!disposed) errorMsg.value = '连接已断开，请重试或切换容器'
+      if (disposed) return  // 卸载途中：不提示、不重连
+      errorMsg.value = '连接已断开，请重试或切换容器'
+      if (code === 4401) {
+        void reconnectAfterRefresh() // #198 问题 2：JWT 失效 → 刷新后重连，避免旧 token 重连死循环
+      } else {
+        scheduleReconnect() // #198 问题 1：意外断线 → 指数退避自动重连
+      }
     },
     onApproval: (card) => {
       if (ws !== myWs) return  // stale guard：旧 ws 的审批卡不污染新会话
@@ -576,6 +684,14 @@ function recoverPendingApprovals(id?: string) {
   }
 }
 
+// 移除 send() 乐观 push 的空 assistant 气泡（仅当仍是空壳：无文本/思考/工具，#198 问题 4）
+function removeOptimisticBubble() {
+  const last = messages.value[messages.value.length - 1]
+  if (last && last.role === 'assistant' && !last.raw && last.tools.length === 0) {
+    messages.value.pop()
+  }
+}
+
 // 查看细节：展开/收起命令全文
 function toggleDetail(a: ApprovalItem) {
   a.detailOpen = !a.detailOpen
@@ -616,6 +732,7 @@ function send() {
 onMounted(loadInstances)
 onBeforeUnmount(() => {
   disposed = true
+  cancelReconnect() // #198：退避重连定时器纳入卸载清理
   ws?.close()
 })
 
@@ -670,7 +787,17 @@ defineExpose({ selectContainer, send, newSession })
       <div v-if="pairingNeeded" class="pair-guide" data-test="pairing-guide">
         ⚠️ 该容器尚未完成设备配对，对话与历史暂不可用。请先在「容器」页完成设备配对后再回来。
       </div>
-      <p v-if="errorMsg" class="error" data-test="error-bar">{{ errorMsg }}</p>
+      <p v-if="errorMsg" class="error" data-test="error-bar">
+        {{ errorMsg }}
+        <!-- #198 问题 1：断线时提供「重新连接」入口，直接 connect()（绕开 selectContainer 同名 early-return） -->
+        <button
+          v-if="disconnected"
+          type="button"
+          class="reconnect"
+          data-test="reconnect"
+          @click="manualReconnect"
+        >重新连接</button>
+      </p>
       <div class="stream" data-test="stream">
         <!-- T3 历史分页（issue #82）：hasMore 时顶部「加载更多」向回翻更旧消息，prepend 到头部。 -->
         <button
@@ -791,6 +918,7 @@ defineExpose({ selectContainer, send, newSession })
 .tag { font-size: 11px; padding: 2px 8px; border-radius: 10px; background: var(--el-fill-color-light); color: var(--el-text-color-secondary); }
 .tag.warn { color: var(--el-color-warning); }
 .error { margin: 0; padding: 8px 18px; color: var(--el-color-danger); background: var(--el-color-danger-light-9); }
+.error .reconnect { margin-left: 10px; background: transparent; border: 1px solid var(--el-color-danger); color: var(--el-color-danger); border-radius: 6px; padding: 1px 10px; cursor: pointer; font-size: 12.5px; }
 .pair-guide { margin: 0; padding: 10px 18px; color: var(--el-color-warning); background: var(--el-color-warning-light-9); border-bottom: 1px solid var(--el-color-warning-light-7); font-size: 13px; }
 .stream { flex: 1; overflow-y: auto; padding: 18px; display: flex; flex-direction: column; gap: 14px; }
 .load-more { align-self: center; background: transparent; border: 1px dashed var(--el-border-color); border-radius: 8px; padding: 5px 18px; cursor: pointer; color: var(--el-text-color-secondary); font-size: 12.5px; }
