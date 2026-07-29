@@ -472,7 +472,7 @@ class ApprovalResolveView(APIView):
                 status=status.HTTP_502_BAD_GATEWAY,
             )
         try:
-            async_to_sync(client.resolve_approval)(approval_id, kind, decision)
+            payload = async_to_sync(client.resolve_approval)(approval_id, kind, decision)
         except Exception as e:  # pylint: disable=broad-exception-caught
             # 原始异常（缺 scope/连接断开等）仅记服务端日志，不外泄到响应
             logger.warning('approval.resolve failed for %s id=%s: %s', name, approval_id, e)
@@ -480,6 +480,10 @@ class ApprovalResolveView(APIView):
                 {'detail': '审批回覆失败，请稍后重试'},
                 status=status.HTTP_502_BAD_GATEWAY,
             )
-        # 不回送权威 decision——RPC ack payload 无 decision 字段（ADR 0003），
-        # 实际权威值由网关经 exec/plugin.approval.resolved 事件广播。
-        return Response({'ok': True, APPROVAL_FIELD_ID: approval_id})
+        # issue #200：透传网关 ack payload 中有价值字段（first-answer-wins 下权威 decision/decidedBy
+        # 可能与本请求不同，见 resolve_approval docstring——调用方须用权威 payload），不再只回
+        # {'ok': True} 盲目丢弃；ok/id 以本端受理结果为准，payload 不得覆盖这两个键。
+        extra = {}
+        if isinstance(payload, dict):
+            extra = {k: v for k, v in payload.items() if k not in ('ok', APPROVAL_FIELD_ID)}
+        return Response({'ok': True, APPROVAL_FIELD_ID: approval_id, **extra})
