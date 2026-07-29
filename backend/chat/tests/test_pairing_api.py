@@ -146,3 +146,30 @@ def test_post_pair_error_returns_502(authed, instance, override_service):
     # codex R security：固定文案，不泄露原始异常（网络地址/协议细节）
     assert '10.0.0.5' not in resp.json()['detail']
     assert 'unreachable' not in resp.json()['detail']
+
+
+# ---------------------------- issue #199 问题4：明文行降级不 500 ----------------------------
+
+
+def test_pairing_get_tolerates_plaintext_credential_row(authed, instance, caplog):
+    """手工明文行（备份恢复/手工 SQL 绕过存量加密迁移，状态列 False）：
+    GET 配对状态 200 + 明文透传 + 告警，不再 InvalidCredentialCiphertext → 500。"""
+    import logging
+
+    from django.db import connection
+
+    pairing = Pairing.objects.create(
+        instance=instance, status=Pairing.STATUS_PAIRED, device_id='dev-1',
+        private_key_pem='priv', device_token='dt-1', scopes_json='["operator.read"]',
+    )
+    with connection.cursor() as cursor:
+        cursor.execute(
+            'UPDATE chat_pairing SET private_key_pem = %s, private_key_pem_is_encrypted = %s, '
+            'device_token = %s, device_token_is_encrypted = %s WHERE id = %s',
+            ['plain-priv', False, 'plain-dt', False, pairing.pk],
+        )
+    with caplog.at_level(logging.WARNING, logger='security.fields'):
+        resp = authed.get('/api/v1/containers/demo/pairing/')
+    assert resp.status_code == 200
+    assert resp.json()['status'] == 'paired'
+    assert any('plaintext' in r.message for r in caplog.records)

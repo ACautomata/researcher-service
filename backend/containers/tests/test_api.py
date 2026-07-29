@@ -232,3 +232,65 @@ def test_create_returns_201_even_if_post_create_detail_fails(authed, fleet, monk
     assert resp.status_code == 201
     assert resp.json()['name'] == 'demo'
     assert resp.json()['status'] == 'running'
+
+
+# ---------------------------- issue #199：实例列表不批量解密凭据 ----------------------------
+
+
+@pytest.mark.django_db
+def test_list_does_not_decrypt_pairing_credentials(authed, fleet, monkeypatch):
+    """问题6-4：实例列表改 values() 投影只取 Pairing 状态字段——
+    不再整行加载触发 private_key_pem/device_token 的 AES-GCM 解密
+    （N 实例 = 2N 次无谓解密且私钥明文进请求内存）。"""
+    from chat.models import Pairing
+    from containers.models import Instance
+    from security.fields import EncryptedTextField
+
+    fleet['orch'].create('demo')
+    inst = Instance.objects.get(name='demo')
+    Pairing.objects.create(
+        instance=inst, status=Pairing.STATUS_PAIRED, device_id='dev-1',
+        private_key_pem='priv', device_token='dt-1', scopes_json='["operator.read"]',
+    )
+    decrypted_fields = []
+    monkeypatch.setattr(
+        EncryptedTextField, 'decrypt_value',
+        lambda self, value: (decrypted_fields.append(self.name), value)[1],
+    )
+    resp = authed.get('/api/v1/containers/')
+    assert resp.status_code == 200
+    item = resp.json()[0]
+    assert item['pairing']['status'] == 'paired'
+    assert item['pairing']['device_id'] == 'dev-1'
+    assert item['pairing']['scopes'] == ['operator.read']
+    # Pairing 的密文字段未被解密（Instance.token 等其他字段的既有解密不受影响）
+    assert 'private_key_pem' not in decrypted_fields
+    assert 'device_token' not in decrypted_fields
+
+
+@pytest.mark.django_db
+def test_list_tolerates_plaintext_pairing_row(authed, fleet, caplog):
+    """问题4：手工明文行（模拟备份恢复绕过存量加密迁移）→ 列表 200，不再 500。"""
+    import logging
+
+    from django.db import connection
+
+    from chat.models import Pairing
+    from containers.models import Instance
+
+    fleet['orch'].create('demo')
+    inst = Instance.objects.get(name='demo')
+    pairing = Pairing.objects.create(
+        instance=inst, status=Pairing.STATUS_PAIRED, device_id='dev-1',
+        private_key_pem='priv', device_token='dt-1', scopes_json='[]',
+    )
+    with connection.cursor() as cursor:
+        cursor.execute(
+            'UPDATE chat_pairing SET private_key_pem = %s, private_key_pem_is_encrypted = %s, '
+            'device_token = %s, device_token_is_encrypted = %s WHERE id = %s',
+            ['plain-priv', False, 'plain-dt', False, pairing.pk],
+        )
+    with caplog.at_level(logging.WARNING, logger='security.fields'):
+        resp = authed.get('/api/v1/containers/')
+    assert resp.status_code == 200
+    assert resp.json()[0]['pairing']['status'] == 'paired'
