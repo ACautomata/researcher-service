@@ -127,4 +127,33 @@ describe('LoginView', () => {
     expect(calls[0][0]).toBe('/api/v1/auth/register')
     expect(JSON.parse(calls[0][1].body)).toEqual({ username: 'newbie', password: 'newpass-1' })
   })
+
+  it('回车提交登录（issue #202 问题6）', async () => {
+    const w = mountLogin()
+    await w.find('input[type="text"]').setValue('alice')
+    await w.find('input[type="password"]').setValue('pw123456')
+    await w.find('input[type="password"]').trigger('keyup.enter')
+    await flushPromises()
+    expect(global.fetch).toHaveBeenCalledWith(
+      '/api/v1/auth/login',
+      expect.objectContaining({ method: 'POST' }),
+    )
+  })
+
+  it('提交中防重复点击（loading 态只发一次请求，issue #202 问题6）', async () => {
+    let resolveLogin!: (r: unknown) => void
+    global.fetch = vi.fn().mockImplementation(
+      () => new Promise((res) => { resolveLogin = res }),
+    )
+    const w = mountLogin()
+    await w.find('input[type="text"]').setValue('alice')
+    await w.find('input[type="password"]').setValue('pw123456')
+    await w.find('button').trigger('click')
+    await w.find('button').trigger('click') // 提交中重复点击须被忽略
+    await flushPromises()
+    expect(global.fetch).toHaveBeenCalledTimes(1)
+    resolveLogin({ ok: true, json: async () => ({ access: 'tk' }) })
+    await flushPromises()
+    expect(useAuthStore().isAuthenticated).toBe(true)
+  })
 })

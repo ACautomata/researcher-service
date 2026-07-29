@@ -41,6 +41,15 @@ describe('router guard', () => {
     expect(router.currentRoute.value.name).toBe('containers')
   })
 
+  it('redirects authenticated visits to /login back to home (issue #202 问题6)', async () => {
+    // 已登录用户访问 public 登录页：不必再看登录表单，直接回首页
+    const auth = useAuthStore()
+    auth.token = unexpiredJwt()
+    await router.push('/') // 先到首页（同路由 no-op 会跳过守卫，须先离开 login）
+    await router.push({ name: 'login' })
+    expect(router.currentRoute.value.name).toBe('containers')
+  })
+
   it('hydrates token from refresh cookie on first navigation', async () => {
     // codex P2-2：刷新页面后用 httpOnly refresh cookie 换 access 恢复登录态
     global.fetch = vi.fn().mockResolvedValue({
