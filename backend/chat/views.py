@@ -20,6 +20,7 @@ from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from chat.asgi_guard import on_synctoasync_thread
 from chat.models import Pairing
 from chat.pairing import PairingConcurrencyError, PairingFleet
 from chat.pairing_ws import PairingError, PairingRequired
@@ -42,6 +43,23 @@ logger = logging.getLogger(__name__)
 
 class _InvalidName(Exception):
     """路径参数 name 非法（内部信号，非 HTTP 响应）。"""
+
+
+def _loop_premise_503(name: str, label: str) -> Response:
+    """fail-fast：非 SyncToAsync 派生线程触达 REST→pool 路径（issue #201 问题 1）。
+
+    承认「单 Daphne 进程单 loop」前提：只有 SyncToAsync 派生线程（Daphne 下 sync view
+    工作线程）上的 async_to_sync 才把协程调度回 client 所在主 loop；其它线程会新建
+    临时 loop，跨 loop set_result 会炸 client 的 recv loop。宁可 503 也不炸连接。
+    """
+    logger.error(
+        '%s rejected for %s: 非 SyncToAsync 派生线程触达（仅支持 ASGI/Daphne 单进程单 worker）',
+        label, name,
+    )
+    return Response(
+        {'detail': '部署形态不支持：本服务仅支持 ASGI（Daphne）单进程单 worker'},
+        status=status.HTTP_503_SERVICE_UNAVAILABLE,
+    )
 
 
 class PairingView(APIView):
@@ -192,7 +210,10 @@ class _GatewaySessionsView(APIView):
             return None, Response({'detail': '非法 name'}, status=status.HTTP_400_BAD_REQUEST)
 
     def _client_or_error(self, inst, name: str):
-        """(client, None) 或 (None, 409/502 Response)：未配对 409；离线/握手失败 502。"""
+        """(client, None) 或 (None, 409/502/503 Response)：未配对 409；离线/握手失败 502；
+        非 SyncToAsync 派生线程触达 503（issue #201 部署前提守卫）。"""
+        if not on_synctoasync_thread():
+            return None, _loop_premise_503(name, 'pool acquire')
         try:
             return async_to_sync(ChatFleet.get().get_or_create)(inst), None
         except NotPaired as e:
@@ -212,7 +233,10 @@ class _GatewaySessionsView(APIView):
         """执行一次网关 RPC（thunk 为零参 async callable）；网关拒绝/超时 → 502。
 
         固定文案不外泄原始异常（仅记服务端日志）。async_to_sync 直接包 client 的 async 方法。
+        非 SyncToAsync 派生线程触达 → 503（issue #201 部署前提守卫，fail-fast 不炸 recv loop）。
         """
+        if not on_synctoasync_thread():
+            return None, _loop_premise_503(name, label)
         try:
             return async_to_sync(thunk)(), None
         except Exception as e:  # pylint: disable=broad-exception-caught
@@ -392,6 +416,9 @@ class CommandListView(APIView):
             inst = self._get_instance(name)
         except _InvalidName:
             return Response({'detail': '非法 name'}, status=status.HTTP_400_BAD_REQUEST)
+        # issue #201：同 _client_or_error 的部署前提守卫（本视图不经 _GatewaySessionsView 底座）
+        if not on_synctoasync_thread():
+            return _loop_premise_503(name, 'commands.list')
         try:
             client = async_to_sync(ChatFleet.get().get_or_create)(inst)
         except NotPaired as e:
@@ -457,6 +484,9 @@ class ApprovalResolveView(APIView):
         approval_id = ser.validated_data[APPROVAL_FIELD_ID]
         kind = ser.validated_data[APPROVAL_FIELD_KIND]
         decision = ser.validated_data[APPROVAL_FIELD_DECISION]
+        # issue #201：同 _client_or_error 的部署前提守卫（本视图不经 _GatewaySessionsView 底座）
+        if not on_synctoasync_thread():
+            return _loop_premise_503(name, 'approval.resolve')
         try:
             client = async_to_sync(ChatFleet.get().get_or_create)(inst)
         except NotPaired as e:
