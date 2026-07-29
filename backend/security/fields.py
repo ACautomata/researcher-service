@@ -1,4 +1,6 @@
 """Django 模型的应用层凭证加密字段。"""
+import logging
+
 from django.conf import settings
 from django.db import models
 from django.db.models.expressions import BaseExpression
@@ -6,6 +8,8 @@ from django.db.models.query import ValuesIterable, ValuesListIterable
 from django.db.models.utils import create_namedtuple_class
 
 from security.credential_cipher import CredentialCipher
+
+logger = logging.getLogger(__name__)
 
 
 class EncryptedTextField(models.TextField):
@@ -38,6 +42,27 @@ class EncryptedTextField(models.TextField):
     def decrypt_value(self, value):
         return self._cipher().decrypt(value)
 
+    def load_db_value(self, value, *, is_encrypted):
+        """读路径按 `*_is_encrypted` 状态列分支（issue #199 问题4）。
+
+        - False 且值无 `enc:v1:` 前缀：绕过一次性存量加密迁移的明文行（旧备份恢复/
+          手工 SQL 导入/其他工具直写）——明文透传 + logger.warning，不再无条件解密
+          导致缺前缀抛 InvalidCredentialCiphertext、整片列表/详情接口 500。
+        - False 但值带前缀（状态列与值不一致，疑似损坏密文）：仍走解密路径，
+          让篡改/损坏响亮失败，不静默透传垃圾给调用方。
+        - True / None（状态列未随投影加载，理论上 only()/投影已强制带上）：
+          维持解密旧行为。
+        """
+        if value is None:
+            return None
+        if is_encrypted is False and not value.startswith(CredentialCipher.PREFIX):
+            logger.warning(
+                'credential field %s read as plaintext (state column is_encrypted=False)',
+                self.name,
+            )
+            return value
+        return self.decrypt_value(value)
+
 
 class EncryptedValuesIterable(ValuesIterable):
     def __iter__(self):
@@ -50,8 +75,9 @@ class EncryptedValuesListIterable(ValuesListIterable):
         for row in super().__iter__():
             values = list(row)
             for value_index, state_index, field in self.queryset._credential_projection:
-                if values[value_index] is not None:
-                    values[value_index] = field.decrypt_value(values[value_index])
+                values[value_index] = field.load_db_value(
+                    values[value_index], is_encrypted=values[state_index],
+                )
             result = tuple(
                 value for index, value in enumerate(values)
                 if index not in self.queryset._projection_state_indexes
@@ -134,8 +160,10 @@ class EncryptedCredentialQuerySet(models.QuerySet):
 
     def _decrypt_projection_dict(self, row):
         for field in self._projection_protected_fields:
-            if row[field.name] is not None:
-                row[field.name] = field.decrypt_value(row[field.name])
+            # 状态列恒在投影中（_projection_fields 强制带上），按状态列分支（issue #199）
+            row[field.name] = field.load_db_value(
+                row[field.name], is_encrypted=row.get(field.state_field),
+            )
         for state_field in self._projection_added_state_fields:
             row.pop(state_field)
         return row
@@ -282,9 +310,14 @@ class EncryptedCredentialsModel(models.Model):
         instance = super().from_db(db, field_names, values)
         for field in instance._meta.fields:
             if isinstance(field, EncryptedTextField) and field.attname in field_names:
-                value = instance.__dict__[field.attname]
-                if value is not None:
-                    instance.__dict__[field.attname] = field.decrypt_value(value)
+                # 按 `*_is_encrypted` 状态列分支（issue #199 问题4）：明文行透传 + 告警，
+                # 不再无条件解密炸读路径。状态列未加载时（None）维持解密旧行为。
+                is_encrypted = None
+                if field.state_field in field_names:
+                    is_encrypted = instance.__dict__[field.state_field]
+                instance.__dict__[field.attname] = field.load_db_value(
+                    instance.__dict__[field.attname], is_encrypted=is_encrypted,
+                )
         return instance
 
     def save(self, *args, **kwargs):
