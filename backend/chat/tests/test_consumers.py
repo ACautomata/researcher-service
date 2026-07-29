@@ -92,7 +92,11 @@ class NotPairedPool:
 async def _access_token(username='alice'):
     user = await database_sync_to_async(User.objects.create_user)(
         username=username, password='strong-pass-1')
-    return str(RefreshToken.for_user(user).access_token)
+    # issue #199 问题3：token_blacklist app 使 for_user 落 OutstandingToken 行（sync ORM），
+    # async 测试上下文须 database_sync_to_async 包裹（对齐 test_asgi/test_ws_middleware）
+    return await database_sync_to_async(
+        lambda: str(RefreshToken.for_user(user).access_token),
+    )()
 
 
 async def _connect_authed(username='alice'):
@@ -504,3 +508,37 @@ async def test_consumer_operates_via_wire_port_contract(override_pool, instance)
     await comm.disconnect()
     assert wire._approval_subscribers == []  # pylint: disable=use-implicit-booleaness-not-comparison
     ChatFleet.reset()
+
+
+@pytest.mark.asyncio
+async def test_switch_container_discards_old_runids_on_old_client(instance):
+    """issue #199 问题6-6：切容器时在**旧** client 上 discard 旧 runId 集合并清空——
+    防 disconnect 对**新** client 误 discard 同形 runId（误清其他 consumer 路由）。"""
+    await database_sync_to_async(Instance.objects.create)(
+        name='other', port=19001, token='gw2', home_dir='/tmp/y', image='img:tag')
+    old_client = FakeChatClient()
+    new_client = FakeChatClient()
+
+    class PerNamePool:
+        async def get_or_create(self, inst):
+            return old_client if inst.name == 'demo' else new_client
+
+    ChatFleet.override(PerNamePool())
+    try:
+        comm = await _connect_authed()
+        await comm.connect()
+        await comm.send_json_to({'type': 'start', 'container': 'demo'})
+        await comm.receive_json_from()  # ready demo
+        await comm.send_json_to({'type': 'send', 'sessionKey': 'sk-1', 'message': 'hi'})
+        await asyncio.sleep(0.05)  # 等 send_message 注册 run-1 到 _active_runids
+        await comm.send_json_to({'type': 'start', 'container': 'other'})
+        await comm.receive_json_from()  # ready other
+        # 切容器：旧 runId 在旧 client 上 discard 并清空
+        assert old_client.discarded == ['run-1']
+        assert new_client.discarded == []
+        await comm.disconnect()
+        await asyncio.sleep(0.05)
+        # disconnect 不再对新 client 误 discard 旧 runId
+        assert new_client.discarded == []
+    finally:
+        ChatFleet.reset()
