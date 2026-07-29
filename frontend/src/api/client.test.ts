@@ -136,4 +136,66 @@ describe('api client', () => {
     )
     await expect(apiJson('/x')).rejects.toThrow('非法 name')
   })
+
+  it('apiJson returns undefined on 204/empty body without throwing (issue #202 问题6)', async () => {
+    // 204 No Content：resp.json() 对空体会 reject——须短路，不抛错
+    ;(globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
+      status: 204,
+      ok: true,
+      json: async () => {
+        throw new SyntaxError('Unexpected end of JSON input')
+      },
+    } as unknown as Response)
+    await expect(apiJson('/x')).resolves.toBeUndefined()
+  })
+
+  it('apiFetch wraps requests with a 15s timeout signal (issue #202 问题4)', async () => {
+    // 验证 fetch 收到 AbortSignal.timeout(15_000) 生成的 signal（到期自动 abort 由平台保证），
+    // 且超时 abort 的 rejection 按瞬态失败语义传播（不永久悬挂）。
+    const timeoutSpy = vi.spyOn(AbortSignal, 'timeout')
+    let capturedSignal: AbortSignal | null | undefined
+    ;(globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation(
+      (_url: string, init: RequestInit) => {
+        capturedSignal = init.signal
+        // 模拟 15s 到期后浏览器以 TimeoutError reject 悬挂请求
+        return Promise.reject(new DOMException('The operation timed out', 'TimeoutError'))
+      },
+    )
+    await expect(apiFetch('/api/v1/x')).rejects.toThrow()
+    expect(timeoutSpy).toHaveBeenCalledWith(15_000)
+    expect(capturedSignal).toBeInstanceOf(AbortSignal)
+    timeoutSpy.mockRestore()
+  })
+
+  it('apiFetch preserves a caller-provided signal instead of overriding it', async () => {
+    ;(globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(mockResp('{}'))
+    const ctrl = new AbortController()
+    await apiFetch('/x', { signal: ctrl.signal })
+    const init = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0][1] as RequestInit
+    expect(init.signal).toBe(ctrl.signal)
+  })
+})
+
+// issue #202 问题5 回归：全仓单一 ApiError 定义（api/errors.ts），client.ts re-export——
+// instanceof + status 行为与导入源无关，杜绝双同名不同构漂移。
+describe('ApiError 单一定义（issue #202 问题5）', () => {
+  it('client re-export 与 errors 定义是同一个类', async () => {
+    const { ApiError: FromClient } = await import('@/api/client')
+    const { ApiError: FromErrors } = await import('@/api/errors')
+    expect(FromClient).toBe(FromErrors)
+  })
+
+  it('instanceof 与 status 行为不随导入源漂移', async () => {
+    const { ApiError: FromClient } = await import('@/api/client')
+    const { ApiError: FromErrors } = await import('@/api/errors')
+    const withStatus = new FromClient('未登录或登录已过期', 401)
+    expect(withStatus).toBeInstanceOf(FromErrors)
+    expect(withStatus).toBeInstanceOf(Error)
+    expect(withStatus.status).toBe(401)
+    expect(withStatus.name).toBe('ApiError')
+    // status 可选：auth.ts 注册/登录路径不带 status 也合法
+    const noStatus = new FromErrors('这个密码太常见了。')
+    expect(noStatus).toBeInstanceOf(FromClient)
+    expect(noStatus.status).toBeUndefined()
+  })
 })

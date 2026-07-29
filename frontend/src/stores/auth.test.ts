@@ -97,3 +97,60 @@ describe('auth register/login 错误透传', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2)
   })
 })
+
+// issue #202 问题4 回归：forceRefresh 并发去重——多个并发请求同收 401 时共享同一次刷新，
+// refresh 端点只被调一次（开启 refresh 轮换后重复调用会互踢），且消除 token 被后到的
+// 空调用清掉的竞态（A 已写入新 token，B 才执行到 this.token = ''）。
+describe('auth forceRefresh 并发去重（issue #202 问题4）', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.stubGlobal('fetch', vi.fn())
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('两个并发 forceRefresh 只调一次 refresh 端点', async () => {
+    let resolveRefresh!: (r: Response) => void
+    const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>
+    fetchMock.mockImplementation(
+      () => new Promise<Response>((res) => { resolveRefresh = res }),
+    )
+    const auth = useAuthStore()
+    auth.token = 'rejected-access'
+    const p1 = auth.forceRefresh()
+    const p2 = auth.forceRefresh() // 并发：须共享 p1 的在飞刷新
+    resolveRefresh(mockResp({ access: 'new-access' }, 200))
+    await Promise.all([p1, p2])
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/v1/auth/token/refresh',
+      expect.objectContaining({ method: 'POST' }),
+    )
+    expect(auth.token).toBe('new-access')
+  })
+
+  it('在飞刷新完成后允许下一次刷新（不永久缓存）', async () => {
+    const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>
+    fetchMock.mockResolvedValue(mockResp({ access: 'tok' }, 200))
+    const auth = useAuthStore()
+    await auth.forceRefresh()
+    await auth.forceRefresh()
+    expect(fetchMock).toHaveBeenCalledTimes(2) // 串行两次各自真实刷新
+  })
+
+  it('并发共享失败结果后下一轮仍可重试（瞬态失败语义保持）', async () => {
+    const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>
+    fetchMock.mockRejectedValueOnce(new TypeError('Failed to fetch'))
+    const auth = useAuthStore()
+    const p1 = auth.forceRefresh()
+    const p2 = auth.forceRefresh()
+    await Promise.all([p1, p2])
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(auth.refreshExhausted).toBe(false) // 网络异常不标耗尽
+    fetchMock.mockResolvedValueOnce(mockResp({ access: 'tok-again' }, 200))
+    await auth.forceRefresh()
+    expect(auth.token).toBe('tok-again')
+  })
+})
