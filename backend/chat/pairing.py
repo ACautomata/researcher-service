@@ -7,6 +7,11 @@ ensure_paired(instance) 驱动配对状态机：
   PAIRING_REQUIRED → 存 requestId，status=pending（raise PairingRequired 供上层给重试路径）；
   其它错误 → status=error（raise PairingError）。
 
+自动 approve（面板默认开启）：握手得 PAIRING_REQUIRED(requestId) 时，若注入了 approver，
+在容器内执行 ``openclaw devices approve <requestId>`` 后用同一 deviceId 身份重握手一次。
+OpenClaw 的 operator scope 不在 WS 握手授予，须宿主显式 approve（spec §8.1）；面板作为受信
+控制面代行 approve，使前端点「配对」一步到位（issue：配对「设备待批准」断裂）。
+
 transport 注入（默认 websockets.connect），测试用 FakeTransport。
 握手是 async（websockets）。桥接在**独立线程**跑握手协程（asyncio.run 于该线程）——
 本项目跑 ASGI/Daphne：调用方可能是无循环的 sync view 线程，也可能是已有循环的
@@ -18,7 +23,7 @@ import json
 import os
 import re
 import threading
-from typing import ClassVar
+from typing import ClassVar, Protocol
 
 from django.db import transaction
 
@@ -29,6 +34,36 @@ from containers.models import Instance
 
 # 网关 requestId 合法字符：与 openclaw 上游一致，仅允许 URL-safe base64 / UUID / 横线 / 下划线
 _REQUEST_ID_RE = re.compile(r'^[A-Za-z0-9_.~\-]+$')
+
+# 容器内 gateway CLI：approve 一个 pending 配对请求（spec §8.1 宿主侧动作）。
+# approver 在容器内（root）执行，gateway 据 requestId 批准该 deviceId 的 operator scope。
+_OPENCLAW_APPROVE_CMD = ['openclaw', 'devices', 'approve']
+
+
+class PairingApprover(Protocol):
+    """在目标实例容器内批准一个 pending 配对请求（spec §8.1 approve 动作的抽象）。
+
+    默认实现 ``ExecPairingApprover`` 经 containers runtime 的 exec_sync 执行 gateway CLI。
+    抽象为 Protocol 使 PairingService 不直接依赖 containers 具体 runtime，便于测试注入 fake。
+    """
+
+    def approve(self, instance_name: str, request_id: str) -> None:
+        """批准 ``request_id``；失败抛异常（PairingService 据此落 pending 不重握手）。"""
+
+
+class ExecPairingApprover:
+    """默认 approver：经 Fleet orchestrator 在容器内同步执行 ``openclaw devices approve``。
+
+    用 exec_sync（等命令完成）而非 exec_in_container（fire-and-forget detach）——approve 须
+    在重握手前真正落库到 gateway 设备表，否则重握手仍 PAIRING_REQUIRED。
+    """
+
+    def __init__(self, executor) -> None:
+        # executor(instance_name, cmd)：委托 orchestrator.exec_sync（容器内 root 跑 CLI）。
+        self._executor = executor
+
+    def approve(self, instance_name: str, request_id: str) -> None:
+        self._executor(instance_name, _OPENCLAW_APPROVE_CMD + [request_id])
 
 
 class PairingConcurrencyError(Exception):
@@ -42,10 +77,12 @@ class PairingService:
     _instance_locks: ClassVar[dict[int, threading.Lock]] = {}
     _locks_mutex = threading.Lock()
 
-    def __init__(self, transport=None, ws_url_for=None) -> None:
+    def __init__(self, transport=None, ws_url_for=None, approver: PairingApprover | None = None) -> None:
         # transport 传给握手层；ws_url_for(instance) → ws://host:port/（可注入便于测试/部署）
         self._transport = transport
         self._ws_url_for = ws_url_for or self._default_ws_url
+        # 自动 approve：注入则在 PAIRING_REQUIRED 后 approve + 重握手；None 则保持原 pending 行为。
+        self._approver = approver
 
     @classmethod
     def _lock_for(cls, instance_id: int) -> threading.Lock:
@@ -157,13 +194,11 @@ class PairingService:
                     pairing_request_id='',
                 )
                 raise PairingError(f'invalid pairing requestId: {e.request_id!r}') from e
-            self._apply_result(
-                pairing,
-                attempt_version=attempt_version,
-                status=Pairing.STATUS_PENDING,
-                pairing_request_id=e.request_id,
+            # 自动 approve（面板默认开启）：受信控制面代行 spec §8.1 宿主 approve，
+            # 使前端「配对」一步到位。approver 为 None 时保持原 pending 行为（不自动 approve）。
+            result = self._approve_and_rehandshake(
+                instance, pairing, identity, e.request_id, attempt_version,
             )
-            raise
         except PairingError:
             self._apply_result(
                 pairing,
@@ -180,6 +215,65 @@ class PairingService:
             scopes_json=json.dumps(result.scopes),
         )
         return pairing
+
+    def _approve_and_rehandshake(
+        self,
+        instance: Instance,
+        pairing: Pairing,
+        identity: DeviceIdentity,
+        request_id: str,
+        attempt_version: int,
+    ) -> PairingResult:
+        """PAIRING_REQUIRED 后的自动 approve + 重握手。
+
+        无 approver（或 approve 失败）→ 落 pending + raise PairingRequired（保留原行为）。
+        approve 成功 → 用同一 deviceId 身份重握手一次：gateway 已批准该 deviceId 的 operator
+        scope，重握手应 hello-ok 拿 deviceToken。重握手仍 PAIRING_REQUIRED（approve 未生效/竞态）
+        或其它错误 → 落 pending/error + 抛对应异常。
+        """
+        # 无 approver：保持原行为——落 pending + raise PairingRequired（调用方 view 给重试路径）
+        if self._approver is None:
+            self._apply_result(
+                pairing=pairing,
+                attempt_version=attempt_version,
+                status=Pairing.STATUS_PENDING,
+                pairing_request_id=request_id,
+            )
+            raise PairingRequired(request_id)
+        # approve 失败（容器未起/CLI 异常）→ 落 pending + raise PairingRequired
+        try:
+            self._approver.approve(instance.name, request_id)
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            self._apply_result(
+                pairing=pairing,
+                attempt_version=attempt_version,
+                status=Pairing.STATUS_PENDING,
+                pairing_request_id=request_id,
+            )
+            raise PairingRequired(request_id) from exc
+        # 重握手（同一 identity/deviceId；attempt_version 不变，成功后统一 _apply_result 落 paired）
+        url = self._ws_url_for(instance)
+        try:
+            return self._run_handshake(url, instance.token, identity)
+        except PairingRequired as e:
+            # approve 后仍 pending：approve 未生效（CLI 未落库/竞态）→ 落最新 requestId + raise
+            if self._is_valid_request_id(e.request_id):
+                self._apply_result(
+                    pairing=pairing,
+                    attempt_version=attempt_version,
+                    status=Pairing.STATUS_PENDING,
+                    pairing_request_id=e.request_id,
+                )
+            else:
+                self._apply_result(
+                    pairing=pairing,
+                    attempt_version=attempt_version,
+                    status=Pairing.STATUS_ERROR,
+                    pairing_request_id='',
+                )
+                raise PairingError(f'invalid pairing requestId after approve: {e.request_id!r}') from e
+            raise
+        # 其它 PairingError 冒泡到外层 except（落 error）
 
     def _apply_result(
         self,
@@ -237,7 +331,7 @@ class PairingFleet:
     @classmethod
     def get(cls) -> PairingService:
         if cls._service is None:
-            cls._service = PairingService()
+            cls._service = PairingService(approver=_default_approver())
         return cls._service
 
     @classmethod
@@ -248,3 +342,17 @@ class PairingFleet:
     @classmethod
     def reset(cls) -> None:
         cls._service = None
+
+
+def _default_approver() -> PairingApprover | None:
+    """默认 approver：经 containers Fleet 在容器内执行 ``openclaw devices approve``。
+
+    lazy 引用 containers.Fleet（避免 chat ↔ containers 顶层循环导入）；Fleet.get() 在容器
+    daemon 不可达或 settings 未就绪时可能抛异常——保守返回 None（退回原 pending 行为，
+    由人工 approve），不阻断 PairingService 构造。
+    """
+    try:
+        from containers.orchestrator import Fleet
+        return ExecPairingApprover(Fleet.get().exec_sync)
+    except Exception:  # pylint: disable=broad-exception-caught
+        return None

@@ -121,6 +121,79 @@ def test_force_repair_re_handshakes_even_when_already_paired(instance):
 # 身份持久化后复用（test_pair_generates_persistent_identity_reused_across_calls）+ force_repair。
 
 
+# ---------------------------- 自动 approve（面板默认开启）----------------------------
+
+
+class _FakeApprover:
+    """记录 approve 调用；可注入失败以测 approve 异常路径。"""
+
+    def __init__(self, fail_with: Exception | None = None):
+        self.calls: list[tuple[str, str]] = []
+        self._fail_with = fail_with
+
+    def approve(self, instance_name: str, request_id: str) -> None:
+        self.calls.append((instance_name, request_id))
+        if self._fail_with is not None:
+            raise self._fail_with
+
+
+def test_auto_approve_pairs_in_single_call(instance):
+    """注入 approver：PAIRING_REQUIRED 后自动 approve + 同 deviceId 重握手 → 一次 ensure_paired 即 paired。"""
+    transport = FakeTransport.sequence([
+        FakeTransport.pairing_required(request_id='req-auto')._result_frame,
+        FakeTransport.hello_ok(device_token='dt-approved')._result_frame,
+    ])
+    approver = _FakeApprover()
+    svc = PairingService(transport=transport, approver=approver)
+    pairing = svc.ensure_paired(instance)
+
+    assert pairing.status == Pairing.STATUS_PAIRED
+    assert pairing.device_token == 'dt-approved'
+    assert approver.calls == [(instance.name, 'req-auto')]   # approve 用首次 reqId
+    assert transport.connect_calls == 2                       # 握手两次：pending → hello-ok
+
+
+def test_auto_approve_failure_falls_back_to_pending(instance):
+    """approve 异常（容器未起/CLI 失败）→ 落 pending + raise PairingRequired（调用方给重试路径）。"""
+    transport = FakeTransport.pairing_required(request_id='req-fail')
+    approver = _FakeApprover(fail_with=RuntimeError('container not running'))
+    svc = PairingService(transport=transport, approver=approver)
+    with pytest.raises(PairingRequired):
+        svc.ensure_paired(instance)
+
+    pairing = Pairing.objects.get(instance=instance)
+    assert pairing.status == Pairing.STATUS_PENDING
+    assert pairing.pairing_request_id == 'req-fail'
+    assert transport.connect_calls == 1   # 仅首次握手，未重握手
+
+
+def test_auto_approve_skipped_when_still_pending_after_approve(instance):
+    """approve 后重握手仍 PAIRING_REQUIRED（approve 未生效/竞态）→ 落最新 reqId + raise。"""
+    transport = FakeTransport.sequence([
+        FakeTransport.pairing_required(request_id='req-1')._result_frame,
+        FakeTransport.pairing_required(request_id='req-2')._result_frame,
+    ])
+    approver = _FakeApprover()
+    svc = PairingService(transport=transport, approver=approver)
+    with pytest.raises(PairingRequired) as exc_info:
+        svc.ensure_paired(instance)
+    assert exc_info.value.request_id == 'req-2'
+
+    pairing = Pairing.objects.get(instance=instance)
+    assert pairing.status == Pairing.STATUS_PENDING
+    assert pairing.pairing_request_id == 'req-2'
+
+
+def test_no_approver_keeps_legacy_pending_behavior(instance):
+    """无 approver：PAIRING_REQUIRED 保持原行为（落 pending + raise，不自动 approve）。"""
+    transport = FakeTransport.pairing_required(request_id='req-legacy')
+    approver = _FakeApprover()
+    svc = PairingService(transport=transport, approver=None)
+    with pytest.raises(PairingRequired):
+        svc.ensure_paired(instance)
+    assert approver.calls == []   # 未注入 approver，不触发 approve
+
+
 # ---------------------------- 事件循环上下文（ASGI 安全）----------------------------
 
 

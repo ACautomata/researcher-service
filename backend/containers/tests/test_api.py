@@ -13,6 +13,7 @@ from rest_framework.test import APIClient
 from containers.orchestrator import (
     InstanceBusy,
     InstanceCleanupError,
+    InstanceDirExists,
     InstanceExists,
     PortAllocationError,
 )
@@ -156,6 +157,19 @@ def test_create_returns_409_on_concurrent_duplicate(authed, fleet, monkeypatch):
     monkeypatch.setattr(fleet['orch'], 'create', _raise)
     resp = authed.post('/api/v1/containers/', {'name': 'demo'}, format='json')
     assert resp.status_code == 409
+
+
+@pytest.mark.django_db
+def test_create_returns_409_on_residual_dir(authed, fleet, monkeypatch):
+    # 残留 orphan 目录（DB 无行，崩溃中断/外部残留）→ InstanceDirExists → 409，非裸 500。
+    # 场景：上次 create 在 mkdir 后崩溃/手动删 DB 行，目录残留；同名再建撞 mkdir(exist_ok=False)。
+    def _raise(name):
+        raise InstanceDirExists(name, f'/fleet/instances/{name}')
+
+    monkeypatch.setattr(fleet['orch'], 'create', _raise)
+    resp = authed.post('/api/v1/containers/', {'name': 'demo'}, format='json')
+    assert resp.status_code == 409
+    assert '残留' in resp.json()['detail']
 
 
 @pytest.mark.django_db

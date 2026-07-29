@@ -27,6 +27,7 @@ from .orchestrator import (
     Fleet,
     InstanceBusy,
     InstanceCleanupError,
+    InstanceDirExists,
     InstanceExists,
     PortAllocationError,
 )
@@ -70,6 +71,12 @@ class InstanceListCreateView(APIView):
         except InstanceExists:
             # codex R1 :84：并发绕 UniqueValidator → DB 唯一约束 → 409（非裸 IntegrityError→500）
             return Response({'detail': '实例名已存在'}, status=status.HTTP_409_CONFLICT)
+        except InstanceDirExists:
+            # 残留 orphan 目录（DB 无行，崩溃中断/外部残留）→ 409，提示先删/清理，非裸 500。
+            return Response(
+                {'detail': '该名称存在残留数据目录（上次创建未完成），请删除同名实例或手动清理后重试'},
+                status=status.HTTP_409_CONFLICT,
+            )
         except (PortPoolExhausted, PortAllocationError):
             # codex R2 :40：端口池耗尽 / 持续分配冲突（预期容量条件）→ 503，非裸 500
             return Response(

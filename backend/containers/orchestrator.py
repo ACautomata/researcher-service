@@ -79,6 +79,21 @@ class InstanceCleanupError(Exception):
         self.path = path
 
 
+class InstanceDirExists(FileExistsError):
+    """create 时目标 instance 目录已存在但 DB 无行（崩溃中断/外部残留/手动删 DB）。
+
+    继承 FileExistsError 以保留 codex R5 契约（``pytest.raises(FileExistsError)``：mkdir 撞既有
+    目录 → 本次不拥有该目录 → 不删、DB 行回滚）；view 层额外捕获本子类转 409（避免裸 500），
+    提示先删除同名实例或手动清理目录。区别于 InstanceExists（DB 有行→409 重名）：此处 DB 无行、
+    仅磁盘残留。
+    """
+
+    def __init__(self, name: str, path: str) -> None:
+        super().__init__(f'instance dir already exists for {name!r}: {path}')
+        self.name = name
+        self.path = path
+
+
 class PortAllocationError(Exception):
     """端口分配重试用尽（池理论充足但持续冲突）；不可重试，view 层 503。"""
 
@@ -211,6 +226,15 @@ class InstanceOrchestrator:  # pylint: disable=too-many-instance-attributes
         """
         self._runtime.exec_in_container(name, cmd)
 
+    def exec_sync(self, name: str, cmd: list[str]) -> None:
+        """在容器内同步执行命令并等待完成 —— 委托 runtime。
+
+        区别于 exec_in_container 的 fire-and-forget（detach=True）：供需等命令落库的调用，
+        如设备配对 approve（``openclaw devices approve <reqId>``）——approve 须在重握手前真正写入
+        gateway 设备表，否则重握手仍 PAIRING_REQUIRED。runtime 为唯一 docker 接触面（同上）。
+        """
+        self._runtime.exec_sync(name, cmd)
+
     def rewrite_config(self, name: str) -> None:
         """重渲染该容器 openclaw.json（spec §7：model CRUD 后经 OpenClaw watch 热加载生效）。
 
@@ -327,7 +351,15 @@ class InstanceOrchestrator:  # pylint: disable=too-many-instance-attributes
             inst = self._reserve_row(name)
             # preflight 也在统一回滚范围内；daemon 异常不得遗留 creating 行。
             preexisting = self._runtime.get(name) is not None
-            instance_dir.mkdir(parents=True, exist_ok=False)
+            try:
+                instance_dir.mkdir(parents=True, exist_ok=False)
+            except FileExistsError:
+                # 目录已存在但 _reserve_row 成功（DB 无行）= 上次崩溃中断/外部残留/手动删 DB 遗留的
+                # orphan 目录。回滚刚建的 CREATING 行（保持「DB 无行」与残留目录一致，便于客户端
+                # 经 DELETE 或手动清理后重试），转 InstanceDirExists（view 409），不冒泡裸 500。
+                if inst is not None and inst.pk is not None:
+                    inst.delete()
+                raise InstanceDirExists(name, str(instance_dir)) from None
             directory_created = True
             self._provisioner.provision(home)
             config_path.write_text(self._renderer.render())
@@ -379,7 +411,7 @@ class InstanceOrchestrator:  # pylint: disable=too-many-instance-attributes
                         except Exception:  # pylint: disable=broad-exception-caught
                             pass
                     raise InstanceCleanupError(name, str(instance_dir)) from None
-            if inst is not None:
+            if inst is not None and inst.pk is not None:
                 inst.delete()
             raise
         finally:
