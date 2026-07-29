@@ -94,7 +94,7 @@ export async function deleteSession(name: string, sessionKey: string): Promise<v
     } catch {
       // 无 JSON body（如 204 已被 ok 吞掉），沿用默认 detail
     }
-    throw new ApiError(resp.status, detail)
+    throw new ApiError(detail, resp.status)
   }
 }
 
