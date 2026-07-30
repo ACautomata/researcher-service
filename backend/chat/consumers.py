@@ -19,6 +19,8 @@ resolve 与容器创建/删除等整个控制面一致，仅吃全局 IsAuthenti
 """
 from __future__ import annotations
 
+import uuid
+
 from channels.db import database_sync_to_async
 from channels.generic.websocket import AsyncJsonWebsocketConsumer
 
@@ -87,11 +89,7 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
         client.add_approval_subscriber(self._on_approval)
         await self.send_json({'type': 'ready', 'container': name})
         # codex P2：断线期间积累的待审批补拉（agent 不再卡死）；best-effort，失败不影响 ready
-        try:
-            for card in await client.list_pending_approvals():
-                await self.send_json(card)
-        except Exception:  # pylint: disable=broad-exception-caught
-            pass
+        await self._push_pending_approvals(client)
 
     async def _handle_resolve(self, content):
         """T06 审批回覆（spec §8.2）：前端发 resolve{id,kind,decision} → client.resolve_approval。"""
@@ -139,6 +137,10 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
         成功则切换 self._client：旧 client 退订本 consumer 审批回调、新 client 订阅
         （对齐 _handle_start 切换逻辑，codex P1 独立退订）。重取本身失败（NotPaired/握手失败）
         也返回 None，由调用方发 error 帧。返回新 client 或 None。
+
+        codex #219 P1：换 client 后补拉 list_pending_approvals——订阅只投递**未来**事件，
+        旧 client 收循环死亡期间积累的待审批不会随新订阅到达，须显式补拉（同 _handle_start
+        的断线恢复），否则 agent 卡死直到用户手动再 start。
         """
         client = self._client
         if client is None or self._instance is None or not client.dead:
@@ -152,7 +154,21 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
         client.remove_approval_subscriber(self._on_approval)
         fresh.add_approval_subscriber(self._on_approval)
         self._client = fresh  # pylint: disable=attribute-defined-outside-init
+        # codex #219 P1：补拉换 client 前累积的待审批（best-effort，不影响已建立的新订阅）
+        await self._push_pending_approvals(fresh)
         return fresh
+
+    async def _push_pending_approvals(self, client):
+        """断线/换 client 后补拉待审批卡透传前端（best-effort，失败静默）。
+
+        _handle_start（ready 后）与 _reacquire_client（自愈换 client 后）共用同一恢复
+        语义（codex #219 P1：订阅只投未来事件，死循环期间积累的待审批须显式补拉）。
+        """
+        try:
+            for card in await client.list_pending_approvals():
+                await self.send_json(card)
+        except Exception:  # pylint: disable=broad-exception-caught
+            pass
 
     async def _handle_send(self, content):
         if self._client is None:
@@ -164,8 +180,13 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
             await self.send_json({'type': 'error', 'message': '缺少 sessionKey 或 message'})
             return
         try:
+            # codex #219 P1：同一逻辑发送在初次与有界重试间复用同一 idempotencyKey——
+            # 若网关已收下原 chat.send 但 ack 随死连接丢失，重试带同 key 让网关幂等去重，
+            # 避免起两个 run、工具被执行两次。key 由本 consumer 按逻辑发送生成一次。
+            idempotency_key = uuid.uuid4().hex
             run_id = await self._client.send_message(
                 session_key, message, on_event=self._on_event,
+                idempotency_key=idempotency_key,
             )
         except Exception:  # pylint: disable=broad-exception-caught
             # chat.send 被拒/连接已断。issue #214：dead 则自愈重取一次并有界重试一次（防循环）；
@@ -175,6 +196,7 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
                 try:
                     run_id = await fresh.send_message(
                         session_key, message, on_event=self._on_event,
+                        idempotency_key=idempotency_key,  # codex #219 P1：复用同 key 幂等重试
                     )
                 except Exception:  # pylint: disable=broad-exception-caught
                     await self.send_json({'type': 'error', 'message': '发送失败，请稍后重试'})

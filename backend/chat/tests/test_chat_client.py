@@ -206,6 +206,22 @@ async def test_send_message_builds_chat_send_frame_and_returns_runid():
 
 
 @pytest.mark.asyncio
+async def test_send_message_uses_provided_idempotency_key():
+    """codex #219 P1：显式传 idempotency_key 时透传（consumer 自愈重试复用同 key）。"""
+    t = FakeChatTransport(ack_run_id='run-9')
+
+    async def on_event(frame):
+        pass
+
+    c = _client(transport=t)
+    await c.connect()
+    await c.send_message('sess-1', '你好', on_event=on_event, idempotency_key='fixed-key-1')
+    cs = next(f for f in t.sent if f.get('method') == 'chat.send')
+    assert cs['params']['idempotencyKey'] == 'fixed-key-1'
+    await c.aclose()
+
+
+@pytest.mark.asyncio
 async def test_ack_error_raises_chat_send_error():
     t = FakeChatTransport(ack_error={'code': 'RATE_LIMIT', 'message': 'too fast'})
 

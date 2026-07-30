@@ -555,7 +555,15 @@ class OpenClawChatClient:  # pylint: disable=too-many-instance-attributes,too-ma
         """
         return await self._rpc('sessions.delete', {'key': session_key})
 
-    async def send_message(self, session_key: str, message: str, *, on_event: OnEvent) -> str:
+    async def send_message(self, session_key: str, message: str, *, on_event: OnEvent,
+                           idempotency_key: str | None = None) -> str:
+        """发送 chat.send 并有界等 ack，返回 runId。
+
+        ``idempotency_key`` 可选：缺省每次调用生成新 key（普通发送）。调用方（consumer
+        自愈重试，issue #214 / codex P1）对**同一逻辑发送**在初次与有界重试间复用同一
+        key——若网关已收下原 chat.send 但 ack 在连接死亡前丢失，重试带同 key 让网关按
+        幂等去重，避免起两个 run、工具被执行两次。
+        """
         if self._ws is None:
             raise ChatClientError('client not connected')
         req_id = uuid.uuid4().hex
@@ -567,7 +575,7 @@ class OpenClawChatClient:  # pylint: disable=too-many-instance-attributes,too-ma
                 'sessionKey': session_key,
                 'message': message,
                 'agentId': _AGENT_ID,
-                'idempotencyKey': uuid.uuid4().hex,
+                'idempotencyKey': idempotency_key or uuid.uuid4().hex,
             },
         }
         await self._ws.send(json.dumps(frame))

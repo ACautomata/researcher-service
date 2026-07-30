@@ -36,10 +36,13 @@ class FakeChatClient:
         # issue #214 T2：对齐真实 client 的 public dead 契约（chat_client.dead = _dead or _closed）。
         # consumer 自愈据此判定；真实场景由 #213 T1 看门狗/CancelledError 置位。
         self.dead = False
+        # codex #219 P1：记录每次 send_message 收到的 idempotency_key（验证重试复用同 key）。
+        self.sent_idempotency_keys = []
 
-    async def send_message(self, session_key, message, *, on_event):
+    async def send_message(self, session_key, message, *, on_event, idempotency_key=None):
         run_id = f'run-{len(self.sent) + 1}'
         self.sent.append((session_key, message))
+        self.sent_idempotency_keys.append(idempotency_key)
         self._handlers[run_id] = on_event
         return run_id
 
@@ -631,3 +634,67 @@ async def test_send_nondead_failure_does_not_reacquire(override_pool, instance, 
     # 非 dead：不触发重取，仍只 start 那一条
     assert override_pool.created == ['demo']
     await comm.disconnect()
+
+
+# ── codex #219 P1 回归：自愈重试的两处漏洞 ────────────────────────────────────
+# ① 自愈重试须复用同一 idempotencyKey——否则网关收下原 chat.send 但 ack 随死连接丢失时，
+#    重试带新 key 会被当作新操作，起两个 run、工具被执行两次。
+# ② 自愈换 client 后须补拉 list_pending_approvals——订阅只投未来事件，旧 client 收循环
+#    死亡期间积累的待审批不随新订阅到达，不补拉则 agent 卡死直到用户手动再 start。
+
+
+@pytest.mark.asyncio
+async def test_send_initial_and_retry_share_same_key(override_pool, instance, fake_client):
+    """codex #219 P1①：初次与重试携带**相同** idempotencyKey（捕捉初次 key 比对重试 key）。"""
+    comm = await _connect_authed()
+    await comm.connect()
+    await comm.send_json_to({'type': 'start', 'container': 'demo'})
+    await comm.receive_json_from()  # ready
+
+    fresh = FakeChatClient()
+    override_pool.set_client(fresh)
+    fake_client.dead = True
+
+    captured = []  # 初次发送实际收到的 key
+
+    async def dead_send(session_key, message, *, on_event, idempotency_key=None):
+        captured.append(idempotency_key)
+        raise ChatSendError('client not connected')
+
+    fake_client.send_message = dead_send
+
+    await comm.send_json_to({'type': 'send', 'sessionKey': 'sk-1', 'message': '你好'})
+    await asyncio.sleep(0.05)
+    assert len(captured) == 1  # 初次一次
+    assert len(fresh.sent_idempotency_keys) == 1  # 重试一次
+    # 关键：初次 key == 重试 key（网关据此幂等去重，不起两个 run）
+    assert captured[0] == fresh.sent_idempotency_keys[0]
+    assert captured[0]  # 非空
+    await comm.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_reacquire_pulls_pending_approvals(override_pool, instance, fake_client):
+    """codex #219 P1②：自愈换 client 后补拉待审批——死循环期间积累的卡经新 client 补到前端。"""
+    comm = await _connect_authed()
+    await comm.connect()
+    await comm.send_json_to({'type': 'start', 'container': 'demo'})
+    await comm.receive_json_from()  # ready
+
+    fresh = FakeChatClient()
+    # 旧 client 收循环死亡期间积累的待审批：换到的新 client 经 list_pending_approvals 返回
+    fresh.pending = [{'type': 'approval', 'id': 'ap-pend', 'kind': 'exec', 'command': 'curl x'}]
+    override_pool.set_client(fresh)
+    fake_client.dead = True
+
+    async def dead_send(*args, **kwargs):
+        raise ChatSendError('client not connected')
+
+    fake_client.send_message = dead_send
+
+    await comm.send_json_to({'type': 'send', 'sessionKey': 'sk-1', 'message': 'hi'})
+    # 自愈换 client 后补拉的待审批卡应被推到前端（send 成功不推帧，首个收到的即是补拉卡）
+    frame = await comm.receive_json_from()
+    assert frame == {'type': 'approval', 'id': 'ap-pend', 'kind': 'exec', 'command': 'curl x'}
+    await comm.disconnect()
+
