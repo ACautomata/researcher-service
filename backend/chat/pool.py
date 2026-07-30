@@ -271,7 +271,14 @@ class ChatConnectionPool:
             new_client = self._make_client(key, url, device_token, target.identity, target.scopes)
             await new_client.connect()
             self._clients[key] = new_client
-            self._reschedule_if_dead(key, new_client)  # codex #221 P1：插入前死亡的补调度
+            # codex #221 R3 P1：换入的替换 client 已 dead（握手完成但 recv 立刻退出）时，**不能**
+            # 在此 _reschedule_if_dead/_start_reconnect——当前重连 task 仍占 _reconnect_tasks[key]，
+            # 幂等检查会把补调度当重复丢弃；run() 又会把本次 _reconnect_once 当成功退出，死替换
+            # 留在池中无人再连。改为抛 ConnectionError 让 run() 视为本轮失败 continue：退避翻倍、
+            # task 槽位被自己占着，下一轮循环自然重连。get_or_create 路径无此循环，仍用
+            # _reschedule_if_dead 独立补调度（见该处）。
+            if new_client.dead:
+                raise ConnectionError('reconnect replacement died immediately after handshake')
 
     async def aclose_all(self) -> None:
         # codex #221 P2：先置 _closing（阻断 client.aclose() 触发 on_dead 又生新重连 task），

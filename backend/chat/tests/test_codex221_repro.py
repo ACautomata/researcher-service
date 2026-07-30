@@ -225,3 +225,85 @@ async def test_p2_force_repair_evicts_superseded_credential_reconnect():
     assert pool._reconnect_tasks.get(old_key) is None
     assert c1.closed  # 旧 client 已被 aclose 清理
     await pool.aclose_all()
+
+
+class ReplaceDeathClient:
+    """connect 成功但按代际决定是否立即标死（P1 #221 R3：换入的替换 client 已 dead）。
+
+    第 1 代（index 0）connect 后不标死（正常建连）；第 2 代起 connect 后立即标死并触发
+    on_dead——模拟「重连握手完成但替换连接立刻断开」。real client 的 _recv_task 在 connect()
+    内启动、可先于插入 _clients 标死。
+    """
+
+    def __init__(self, url, device_token, *, identity, scopes, on_dead=None, index):
+        self.url = url
+        self.device_token = device_token
+        self.identity = identity
+        self.scopes = scopes
+        self._on_dead = on_dead
+        self._index = index
+        self.dead = False
+        self.closed = False
+
+    async def connect(self):
+        i = self._index[0]
+        self._index[0] += 1
+        if i >= 1:  # 第 2 代起：握手完成但立刻死亡
+            self.dead = True
+            if self._on_dead is not None:
+                self._on_dead(self)
+
+    def kill(self):
+        self.dead = True
+        if self._on_dead is not None:
+            self._on_dead(self)
+
+    async def aclose(self):
+        self.closed = True
+
+    def discard(self, run_id):
+        pass
+
+
+@pytest.mark.asyncio
+async def test_p1_reconnect_retries_when_replacement_already_dead():
+    """P1（codex #221 第三轮）：重连换入的替换 client 已 dead 时，重连循环必须继续重试，
+    而非把这次 _reconnect_once 当成功退出、把死替换留在池中无人再连。
+
+    根因：_reconnect_once 在当前重连 task 内运行，它插入新 client 后 _reschedule_if_dead →
+    _start_reconnect，但当前 task 仍占 _reconnect_tasks[key]，幂等检查把补调度当重复丢弃；
+    run() 随后视 _reconnect_once 成功而 return，死替换无人再重试。
+
+    修复：_reconnect_once 换入的新 client 已 dead 时抛 ConnectionError，让 run() 视为失败
+    continue 重试（退避翻倍、task 槽位被自己占着，下轮自然重连）。
+    """
+    index = [0]
+    clock = _clock()
+
+    def factory(url, dt, *, identity, scopes, on_dead=None):
+        return ReplaceDeathClient(url, dt, identity=identity, scopes=scopes,
+                                  on_dead=on_dead, index=index)
+
+    pool = ChatConnectionPool(
+        pairing_service=FakePairingService(), client_factory=factory,
+        ws_url_for=_url_for, reconnect_policy=ReconnectPolicy(sleeper=_sleeper(clock)))
+    inst = SimpleNamespace(name='a', port=19001)
+    c1 = await pool.get_or_create(inst)  # 第 1 代：正常建连
+    key = (c1.url, c1.device_token)
+    assert not c1.dead
+    c1.kill()  # 第 1 代死亡 → on_dead 启动重连（target=c1）
+    task = pool._reconnect_tasks.get(key)
+    assert task is not None
+    # 让重连循环跑若干轮（假时钟，不真睡）。每轮 _reconnect_once 换入第 2+ 代（已 dead）。
+    # P1 期望：循环把「换入已 dead」视为失败继续重试——sleeper 记录到**多次**退避（不只 1 次），
+    # 证明 run() 没有在第 1 次换入死替换后就 return 退出。
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    # buggy 行为：run() 第 1 次 _reconnect_once（换入已 dead 的第 2 代）当成功 return →
+    # 只退避 1 次。修复后：每次换入已 dead 都 continue → 退避多次。
+    assert len(clock.sleeps) > 1, (
+        f'P1 R3: 重连换入已 dead 替换后循环退出（只退避 {len(clock.sleeps)} 次），'
+        '死替换留在池中无人再重试')
+    await pool.aclose_all()
