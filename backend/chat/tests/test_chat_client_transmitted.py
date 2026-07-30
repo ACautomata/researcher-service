@@ -10,6 +10,7 @@ import pytest
 from websockets.exceptions import ConnectionClosedOK
 
 from chat.chat_client import (
+    ChatClientError,
     ChatSendError,
     ChatSendTransmittedError,
     OpenClawChatClient,
@@ -155,11 +156,14 @@ async def test_send_message_dead_set_during_send_still_transmitted():
 
 
 @pytest.mark.asyncio
-async def test_send_message_dead_before_send_raises_raw_for_safe_retry():
-    """codex #219 十轮 P1-930 对照：send **前**已死 → 原生 ConnectionClosed（帧确定未发出，可安全重试）。
+async def test_send_message_dead_before_send_rejected_at_entry_for_safe_retry():
+    """codex #219 十轮 P1-930/P2-631 对照：send **前**已死（dead 已置位）→ 入口拒发，可安全重试。
 
-    watchdog/CancelledError 早已置 dead 时，ws.send 在死 socket 上立即抛 ConnectionClosed，
-    帧确定未到达网关——保留原生让 consumer 走「安全重试」分支（区别于 transmitted 的不盲发）。
+    watchdog/CancelledError/recv loop 已置 dead 时，send_message 在入口守卫（`_ws is None or
+    self.dead`）即抛 ChatClientError('client not connected')——帧根本未发出、确定未到达网关，
+    consumer 宽 except 见 client.dead=True 走「重取 + 安全重试」分支（区别于 transmitted 的不盲发）。
+    P2-631 把入口守卫从 `_closed` 扩到 `_dead` 后，十轮 send 阶段的 dead_before_send 快照恒 False
+    （_dead=True 已在入口被挡），「send 前已死」语义前移到入口判定。
     """
     t = FakeChatTransport(ack_run_id='run-x')
 
@@ -168,14 +172,10 @@ async def test_send_message_dead_before_send_raises_raw_for_safe_retry():
 
     c = _client(transport=t)
     await c.connect()
-    c._dead = True  # pylint: disable=protected-access  # send 前已死（看门狗/取消早已置位）
+    c._dead = True  # pylint: disable=protected-access  # send 前已死（看门狗/取消/recv loop 早已置位）
 
-    async def closed_send(data):
-        raise ConnectionClosedOK(None, None)  # 死 socket 上立即失败，帧确定未发出
-
-    c._ws.send = closed_send  # pylint: disable=protected-access
-
-    with pytest.raises(ConnectionClosedOK):  # 原生上抛（非 transmitted），consumer 安全重试
+    # 入口即拒（不触达 ws.send），抛 ChatClientError → consumer 走 dead 重取 + 安全重试。
+    with pytest.raises(ChatClientError):
         await c.send_message('s', 'm', on_event=on_event)
     await c.aclose()
 
