@@ -7,6 +7,7 @@ ChatSendTransmittedError 分类边界 + idempotencyKey 透传——consumer 自�
 import asyncio
 
 import pytest
+from websockets.exceptions import ConnectionClosedOK
 
 from chat.chat_client import (
     ChatSendError,
@@ -94,6 +95,32 @@ async def test_send_message_explicit_reject_is_not_transmitted():
         await c.send_message('s', 'm', on_event=on_event)
     # 显式拒绝 = 确定未起 run，不是 transmitted 子类
     assert not isinstance(exc.value, ChatSendTransmittedError)
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_send_message_connection_closed_mid_send_is_transmitted():
+    """codex #219 八轮 P1：ws.send 刷帧中途撞原生 ConnectionClosed → 分类为「传输未知」。
+
+    帧字节可能已部分/全部到达网关（网关可能已起 run），不能像「确定未传输」那样被上层
+    盲重发。client 须把 send 阶段的原生 ConnectionClosed 归为 ChatSendTransmittedError，
+    让 consumer 走「不盲重发、只重取连接」路径。区别于「send 前已死」的未连接态。
+    """
+    t = FakeChatTransport(ack_run_id='run-x')
+
+    async def on_event(frame):
+        pass
+
+    c = _client(transport=t)
+    await c.connect()
+
+    async def closed_send(data):
+        raise ConnectionClosedOK(None, None)  # send 刷帧中途 socket 关闭（字节或已部分到达）
+
+    c._ws.send = closed_send  # pylint: disable=protected-access
+
+    with pytest.raises(ChatSendTransmittedError):
+        await c.send_message('s', 'm', on_event=on_event)
     await c.aclose()
 
 

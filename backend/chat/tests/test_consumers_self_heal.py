@@ -314,10 +314,12 @@ async def test_send_transmitted_failure_does_not_retry(override_pool, instance, 
 @pytest.mark.asyncio
 async def test_send_dead_socket_rpc_error_reacquires_despite_flag_unset(
         override_pool, instance, fake_client):
-    """codex #219 三轮 P2-436：send 抛原生 ConnectionClosed（帧未发出）但 dead 未置位 → 仍重取重试。
+    """codex #219 三轮 P2-436 + 八轮 P1：send 撞原生 ConnectionClosed（send 中途关闭）→
+    归 transmitted，重取恢复订阅者但**不盲重发**。
 
-    竞态：recv task 尚未置 dead，guard 若只看 dead 会漏。ConnectionClosed（与 ChatSendError
-    业务拒绝不相交）本身即连接已断的充分证据。
+    八轮 P1：client 把 send 阶段（recv loop 尚未置 dead 的竞态窗口）的原生 ConnectionClosed
+    归为 ChatSendTransmittedError——帧或已部分到达网关。consumer 落 transmitted 分支：重取
+    连接（迁移订阅者 + 补拉待审批）但不重发 chat.send（防幂等去重到死连接 runId）。
     """
     comm = await _connect_authed()
     await comm.connect()
@@ -325,29 +327,31 @@ async def test_send_dead_socket_rpc_error_reacquires_despite_flag_unset(
     await comm.receive_json_from()  # ready
 
     fresh = FakeChatClient()
+    fresh.pending = [{'type': 'approval', 'id': 'ap-ds', 'kind': 'exec', 'command': 'curl d'}]
     override_pool.set_client(fresh)
-    # 关键：dead **不**置位（模拟竞态——RPC 先于 recv task 检测到 socket 死）
-    assert fake_client.dead is False
+    # transmitted ⇒ 连接必死（dead 置位，竞态仅秒级窗口；稳态 transmitted 抛出前已置位）。
+    fake_client.dead = True
 
     async def dead_socket_send(session_key, message, *, on_event, idempotency_key=None):
-        # 真实竞态：ws.send 在刚关闭的 socket 上抛原生 ConnectionClosed（与 ChatClientError/
-        # ChatSendError 均不相交），recv task 尚未置 dead。帧未发出、网关未起 run。
-        raise ConnectionClosedOK(None, None)
+        # 真实竞态：ws.send 刷帧中途 socket 关闭（八轮 P1：帧或已部分到达）→ transmitted。
+        raise ChatSendTransmittedError('chat.send socket closed mid-send')
 
     fake_client.send_message = dead_socket_send
 
     await comm.send_json_to({'type': 'send', 'sessionKey': 'sk-1', 'message': '你好'})
-    await asyncio.sleep(0.05)
-    await fresh.emit({'type': 'text', 'runId': 'run-1', 'delta': '你好'})
-    await fresh.emit({'type': 'done', 'runId': 'run-1'})
-    text_frame = await comm.receive_json_from()
-    assert text_frame == {'type': 'text', 'runId': 'run-1', 'delta': '你好'}
-    done_frame = await comm.receive_json_from()
-    assert done_frame == {'type': 'done', 'runId': 'run-1'}
-    # 虽 dead 未置位，连接级异常仍触发有界自愈（reacquire 采纳 pool 健康项 fresh，不驱逐不重建）
+    # 重取后补拉 fresh 上的待审批卡（被收下 run 起的审批经新连接恢复）
+    approval_frame = await comm.receive_json_from()
+    assert approval_frame == {'type': 'approval', 'id': 'ap-ds', 'kind': 'exec', 'command': 'curl d'}
+    # 再收到终态 error 帧（不盲重发，解锁前端 pending）
+    resp = await comm.receive_json_from()
+    assert resp['type'] == 'error'
+    assert '结果未知' in resp['message']
+    # transmitted ⇒ dead 置位触发重取（reacquire 采纳 pool 健康项 fresh）；但不重发
     assert override_pool.created == ['demo', 'demo']
     assert override_pool.evicted == []
-    assert fresh.sent == [('sk-1', '你好')]
+    assert not fresh.sent
+    assert fake_client._approval_subscribers == []
+    assert len(fresh._approval_subscribers) == 1
     await comm.disconnect()
 
 
@@ -406,43 +410,6 @@ async def test_send_rate_limit_senderror_still_no_reacquire(override_pool, insta
 # pool.get_or_create 快路径（pool.py:80-82）只看 dead==False，evidence（ConnectionClosed）
 # 证明已死但 dead 未置位时返回**同一个**濒死 client → consumer identity check 放弃恢复。
 # 这里**不**预先 set_client——只有 consumer 先 evict 驱逐旧 client，get_or_create 才会重建。
-
-
-@pytest.mark.asyncio
-async def test_send_dead_socket_evicts_stale_client_before_reacquire(
-        override_pool, instance, fake_client):
-    """codex #219 四轮 P2-891：ConnectionClosed 且 dead 未置位时，consumer 先 evict 再重取。
-
-    复刻生产竞态（不预先 set_client）：若 consumer 不 evict，真 pool 快路径返回同一 client，
-    identity check 放弃恢复、误报失败。evict 后 get_or_create 才重建新 client。
-    """
-    comm = await _connect_authed()
-    await comm.connect()
-    await comm.send_json_to({'type': 'start', 'container': 'demo'})
-    await comm.receive_json_from()  # ready
-    assert override_pool.created == ['demo']
-
-    # 竞态：dead 未置位（recv task 尚未跑异常处理器），但 ws.send 已撞刚死 socket
-    assert fake_client.dead is False
-    fresh = FakeChatClient()
-    override_pool.stage_next(fresh)  # evict 后 get_or_create 应重建出 fresh（真实 pool 行为）
-
-    async def dead_socket_send(session_key, message, *, on_event, idempotency_key=None):
-        raise ConnectionClosedOK(None, None)  # evidence：帧未发出、连接已断
-
-    fake_client.send_message = dead_socket_send
-
-    await comm.send_json_to({'type': 'send', 'sessionKey': 'sk-1', 'message': '你好'})
-    await asyncio.sleep(0.05)
-    await fresh.emit({'type': 'text', 'runId': 'run-1', 'delta': '你好'})
-    await fresh.emit({'type': 'done', 'runId': 'run-1'})
-    assert (await comm.receive_json_from())['type'] == 'text'
-    assert (await comm.receive_json_from())['type'] == 'done'
-    # consumer 先 evict 驱逐濒死 client，get_or_create 才重建出 fresh 完成有界重试
-    assert override_pool.evicted == ['demo']
-    assert override_pool.created == ['demo', 'demo']
-    assert fresh.sent == [('sk-1', '你好')]
-    await comm.disconnect()
 
 
 @pytest.mark.asyncio
@@ -639,6 +606,57 @@ async def test_passive_consumer_adopts_healthy_replacement_without_evict(
 # 重试的宽 except（非 transmitted 分支）。若该分支只发 error 不重取，迁移过去的全体审批
 # 订阅者滞留死 fresh，被收下 run 的审批无法投递/恢复。故对该连接异常也做连接级恢复
 # （evidence=ConnectionClosed 触发重取，仍不重发 chat.send）。
+
+
+# ── codex #219 八轮 P1：ambiguous socket send（ConnectionClosed）不盲重发 ────────
+# _handle_send 宽 except 此前把原生 ConnectionClosed 一律当「确定未传输」重试。但 ws.send
+# 刷帧中途失败时，帧字节可能已部分/全部到达网关（网关可能已起 run）——盲目重试被幂等去重
+# 到同一 runId，其事件流绑死连接，新连接 route 收不到事件 → 浏览器消息永久 pending。
+# 故 client 把 send 阶段的原生 ConnectionClosed 归为 ChatSendTransmittedError；consumer
+# 对该类别**不重发** chat.send，只重取连接（迁移订阅者 + 补拉待审批）+ 发终态 error 解锁前端。
+
+
+@pytest.mark.asyncio
+async def test_send_connection_closed_ambiguous_recovers_without_retry(
+        override_pool, instance, fake_client):
+    """codex #219 八轮 P1：transmitted（帧或已发出）→ 不盲重发，但仍重取死连接恢复订阅者。
+
+    帧字节或已部分到达网关（网关或已起 run）：consumer 落 transmitted 分支**不重发**
+    chat.send（避免幂等去重到死连接 runId）；但因 transmitted ⇒ 连接必死（dead 已置位），
+    仍须重取（迁移订阅者 + 补拉待审批），让被收下 run 起的审批经新连接恢复投递。
+    """
+    comm = await _connect_authed()
+    await comm.connect()
+    await comm.send_json_to({'type': 'start', 'container': 'demo'})
+    await comm.receive_json_from()  # ready
+    assert len(fake_client._approval_subscribers) == 1
+
+    fresh = FakeChatClient()
+    fresh.pending = [{'type': 'approval', 'id': 'ap-amb', 'kind': 'exec', 'command': 'curl a'}]
+    override_pool.set_client(fresh)
+    # transmitted ⇒ 连接必死：真实 client 此时 recv loop 已死、dead 必置位（竞态仅秒级窗口，
+    # 稳态下 transmitted 抛出前 dead 已置位）。consumer 据此重取（迁移订阅者 + 补拉）。
+    fake_client.dead = True
+
+    async def ambiguous_send(*args, **kwargs):
+        # send 中途 socket 关闭（帧或已部分到达）→ client 归为 transmitted。
+        raise ChatSendTransmittedError('socket closed mid-send')
+
+    fake_client.send_message = ambiguous_send
+
+    await comm.send_json_to({'type': 'send', 'sessionKey': 'sk-1', 'message': '你好'})
+    # 重取后补拉 fresh 上的待审批卡（被收下 run 起的审批经新连接恢复）
+    approval_frame = await comm.receive_json_from()
+    assert approval_frame == {'type': 'approval', 'id': 'ap-amb', 'kind': 'exec', 'command': 'curl a'}
+    # 再收到终态 error 帧（不盲重发，解锁前端 pending）
+    resp = await comm.receive_json_from()
+    assert resp['type'] == 'error'
+    assert '结果未知' in resp['message']
+    # 关键：不重发——fresh 上无任何 chat.send；订阅者已迁到 fresh（死 client 退空）
+    assert not fresh.sent
+    assert fake_client._approval_subscribers == []
+    assert len(fresh._approval_subscribers) == 1
+    await comm.disconnect()
 
 
 @pytest.mark.asyncio

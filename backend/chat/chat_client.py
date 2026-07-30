@@ -16,6 +16,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 import websockets
+from websockets.exceptions import ConnectionClosed
 
 from chat.event_translate import ChatEventTranslator
 from integration.openclaw.wire import (
@@ -81,13 +82,15 @@ class ChatSendError(ChatClientError):
 
 
 class ChatSendTransmittedError(ChatSendError):
-    """chat.send 帧已发出、但 ack 在连接死亡/超时前未到达（codex #219 P1）。
+    """chat.send 帧可能已发出、但传输结果**未知**——ack 在连接死亡/超时前未到达，或
+    send 刷帧中途 socket 关闭（codex #219 P1 / 八轮 P1）。
 
-    区别于网关显式拒绝（ack ok:false，确定未起 run）：此时帧已 send，网关**可能**已起
-    run，只是 ack 丢失。runId 是连接级的（r13-ws-protocol §5.3，重连不可恢复进行中 run），
-    若 consumer 拿同 idempotencyKey 盲重试，网关幂等去重返回同一 runId，但该 run 的事件
-    流绑在死连接上、不会到新 client 的 route——浏览器 pending 消息永久卡住。故 consumer
-    捕获本子类时**不重试**，直接发终态 error 帧解锁前端；只有确定未发出的失败才自愈重试。
+    区别于网关显式拒绝（ack ok:false，确定未起 run）：此时帧**可能**已 send，网关**可能**
+    已起 run，只是 ack 丢失或字节已部分到达。runId 是连接级的（r13-ws-protocol §5.3，重连
+    不可恢复进行中 run），若 consumer 拿同 idempotencyKey 盲重试，网关幂等去重返回同一
+    runId，但该 run 的事件流绑在死连接上、不会到新 client 的 route——浏览器 pending 消息
+    永久卡住。故 consumer 捕获本子类时**不重试**，直接发终态 error 帧解锁前端；只有确定
+    未发出的失败（send 前已死 / 显式拒绝）才自愈重试。
     """
 
 
@@ -598,7 +601,18 @@ class OpenClawChatClient:  # pylint: disable=too-many-instance-attributes,too-ma
                 'idempotencyKey': idempotency_key or uuid.uuid4().hex,
             },
         }
-        await self._ws.send(json.dumps(frame))
+        try:
+            await self._ws.send(json.dumps(frame))
+        except ConnectionClosed as exc:
+            self._pending_acks.pop(req_id, None)
+            if self._dead:
+                # send 前已知连接死（#213 看门狗/CancelledError 已置位）：帧确定未发出，
+                # 保留原生 ConnectionClosed——consumer 据此作 decisive evidence 安全重试。
+                raise
+            # codex #219 八轮 P1：竞态——recv task 尚未置 dead，但 send 刷帧中途 socket 关闭。
+            # 帧字节可能已部分/全部到达网关（网关或已起 run），传输结果**未知**，归
+            # transmitted 让 consumer 不盲重发（盲重试被幂等去重到死连接 runId）。
+            raise ChatSendTransmittedError('chat.send socket closed mid-send') from exc
         try:
             # 有界等待 ack：网关连着但 ack 丢失/不回时不应让 consumer 永久挂起
             run_id = await asyncio.wait_for(fut, timeout=self._ack_timeout)
