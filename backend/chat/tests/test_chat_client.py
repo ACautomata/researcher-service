@@ -1056,3 +1056,22 @@ async def test_send_message_oversized_does_not_affect_inflight_run():
         {'type': 'done', 'runId': 'r1'},
     ]
     await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_send_message_sends_text_frame_not_binary():
+    """codex #220 P1：websockets.send(bytes) 发二进制帧——OpenClaw 协议 chat.send 与其他 RPC 一致
+    走 JSON 文本帧。maxPayload 预检需 frame_bytes 仅供测量；send() 必须传原始序列化 str（文本帧），
+    否则强制文本帧协议的网关会在 ack 到达前拒绝/断连每个本应合法的 chat.send。"""
+    t = FakeChatTransport(ack_run_id='r1')
+
+    async def on_event(frame):
+        pass
+
+    c = _client(transport=t)
+    await c.connect()
+    await c.send_message('s', '你好', on_event=on_event)
+    # 找到 chat.send 那次 send 的原始类型：必须是 str（文本帧），不能是 bytes（二进制帧）
+    idx = next(i for i, f in enumerate(t.sent) if f.get('method') == 'chat.send')
+    assert t.sent_types[idx] is str
+    await c.aclose()
