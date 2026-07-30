@@ -8,6 +8,7 @@ vite 孤儿会继续监听 5173,下一个 function 级 fixture 因 ``--strictPor
 源真相:``conftest._terminate_process_group``——经 importlib 按 path 加载,不依赖 pytest
 import mode,也不触发 playwright 顶部 import(conftest 顶部无重依赖)。
 """
+import builtins
 import importlib.util
 import os
 import socket
@@ -59,7 +60,10 @@ def _process_state(pid: int) -> str | None:
     try:
         with open(f'/proc/{pid}/stat') as f:
             return f.read().rsplit(')', 1)[-1].split()[0] or None
-    except FileNotFoundError:
+    except (FileNotFoundError, ProcessLookupError):
+        # Linux procfs 对不存在 PID 抛 ESRCH→ProcessLookupError(非 ENOENT→FileNotFoundError);
+        # 两者同为 OSError 兄弟,只捕 FileNotFoundError 会让 ESRCH 穿透——child 被 reaped
+        # (PID 消失)这种"成功"态被误判崩溃,CI 间歇红。两者都意味着"读不到 stat"→ fall through ps。
         pass
     out = subprocess.run(
         ['ps', '-o', 'stat=', '-p', str(pid)],
@@ -124,6 +128,27 @@ def test_terminate_process_group_kills_descendant(tmp_path):
                 os.kill(child_pid, 9)
             except ProcessLookupError:
                 pass
+
+
+def test_process_state_survives_procfs_esrch(monkeypatch):
+    """Linux procfs 对已被 reaped(PID 消失)的 pid 抛 ``ProcessLookupError``(ESRCH, errno 3),
+    而非 ``FileNotFoundError``(ENOENT)——两者同属 ``OSError`` 却互为兄弟,``except FileNotFoundError``
+    抓不住 ESRCH。``_process_state`` 必须把它当"读不到 stat" fall through 到 ps 回退(→ ``None``),
+    不能让异常穿透:否则 child 被彻底 reaped 这种**成功**态会被误判成崩溃,CI 间歇红
+    (codex #185 P1 回归路径;本地 macOS 无 ``/proc`` 永远碰不到,故仅 CI Linux 间歇炸)。
+
+    跨平台用 monkeypatch 模拟 Linux procfs ESRCH,本地 + CI 同稳。
+    """
+    real_open = open
+
+    def fake_open(path, *args, **kwargs):
+        if str(path).startswith('/proc/') and str(path).endswith('/stat'):
+            raise ProcessLookupError(3, 'No such process')
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, 'open', fake_open)
+    # ESRCH fall through 到 ps;ps 对不存在 PID 返回空 → None(而非抛异常)
+    assert _process_state(6865) is None
 
 
 def test_terminated_treats_zombie_as_terminated():
