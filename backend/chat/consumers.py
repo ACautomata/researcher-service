@@ -147,8 +147,11 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
           与 ChatClientError/ChatSendError **均不相交**（websockets 16.x 层级），它本身就是
           连接已断的充分证据（帧未发出、网关未起 run，可安全重取）。业务拒绝（rate limit 的
           ChatSendError、网关 ack ok:false）不传 evidence → 不重取，边界不变。
-        重取前先经 pool.evict 驱逐缓存的濒死 client（codex #219 四轮 P2-891）：否则 pool 快路径
-        在 dead 未置位时返回同一 client，identity check 放弃恢复。成功则切换 self._client 并把
+        重取前先查 pool 健康 client（codex #219 五轮 P1）：共享 client 时若别人已换好（pool
+        健康项非 self._client）直接采纳、不 evict——避免误关别的 consumer 建好的健康连接并
+        把订阅者迁空。否则（pool 健康项就是自己这个死/濒死 client）先经 pool.evict 驱逐缓存
+        的濒死 client 再 get_or_create 重建（codex #219 四轮 P2-891）：否则 pool 快路径在
+        dead 未置位时返回同一 client，identity check 放弃恢复。成功则切换 self._client 并把
         **所有**审批订阅者迁到新 client（codex #219 P2，见下）。
         重取本身失败（NotPaired/握手失败）也返回 None，由调用方发 error 帧。返回新 client 或 None。
 
@@ -167,12 +170,21 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
         if not (client.dead or isinstance(evidence, ConnectionClosed)):  # dead 或 RPC 已证连接断
             return None
         try:
-            # codex #219 四轮 P2-891：先把缓存的濒死 client 逐出 pool 再 get_or_create。
-            # evidence（ConnectionClosed）证明已死但 dead 未置位时，pool 快路径（pool.py:80-82）
-            # 只看 dead==False 会返回**同一个** client，下面 identity check 便放弃恢复。evict
-            # 强制 pool 走慢路径重建；client.dead 已置位时 evict 是幂等 noop（pool 本就会重建）。
-            await ChatFleet.get().evict(self._instance)
-            fresh = await ChatFleet.get().get_or_create(self._instance)
+            # codex #219 五轮 P1：先查 pool 当前健康 client——若它**不是** self._client（共享
+            # client 场景下别的 consumer 已自愈换好），直接采纳它，**不 evict**：否则会把别人
+            # 建好的健康连接 pop+aclose（中断其路由），且自己旧 client 订阅者已被迁空、这次
+            # 迁移装 0 个订阅者（审批丢失）。仅当 pool 健康项就是自己这个死/濒死 client（或无
+            # 健康项）时才 evict 自己再重建——保证 evict 只移除自己持有的死对象。
+            live = await ChatFleet.get().get_live(self._instance)
+            if live is not None and live is not client:
+                fresh = live  # 别的 consumer 已换好的健康连接：采纳，不 evict 不重建
+            else:
+                # codex #219 四轮 P2-891：先把缓存的濒死 client 逐出 pool 再 get_or_create。
+                # evidence（ConnectionClosed）证明已死但 dead 未置位时，pool 快路径（pool.py:80-82）
+                # 只看 dead==False 会返回**同一个** client，下面 identity check 便放弃恢复。evict
+                # 强制 pool 走慢路径重建；client.dead 已置位时 evict 是幂等 noop（pool 本就会重建）。
+                await ChatFleet.get().evict(self._instance)
+                fresh = await ChatFleet.get().get_or_create(self._instance)
         except Exception:  # pylint: disable=broad-exception-caught
             return None  # 重取失败：保持原错误路径，调用方发 error 帧
         if fresh is client:

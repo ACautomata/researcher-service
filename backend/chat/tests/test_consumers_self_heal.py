@@ -54,8 +54,9 @@ async def test_send_dead_client_reacquires_and_retries(override_pool, instance, 
     assert text_frame == {'type': 'text', 'runId': 'run-1', 'delta': '你好'}
     done_frame = await comm.receive_json_from()
     assert done_frame == {'type': 'done', 'runId': 'run-1'}
-    # 有界一次重取：start 一次 + 自愈一次，共两次，无循环
-    assert override_pool.created == ['demo', 'demo']
+    # 有界自愈：pool 健康项已是 set_client 换好的 fresh（≠旧死 client）→ 采纳路径，
+    # get_or_create 只 start 调一次（自愈经 get_live 采纳，不再重建；重建路径由 stage_next 测试锁定）
+    assert override_pool.created == ['demo']
     assert fresh.sent == [('sk-1', '你好')]  # 重试落在唯一的新 client 上
     await comm.disconnect()
 
@@ -112,9 +113,9 @@ async def test_resolve_dead_client_reacquires_and_retries(override_pool, instanc
     # resolve 成功是静默的（无 immediate 帧，权威值由 resolved 事件落地，codex P2 #163）
     with pytest.raises(asyncio.TimeoutError):
         await asyncio.wait_for(comm.receive_json_from(), timeout=0.5)
-    # 重试落在新 client 上；有界一次重取
+    # 重试落在新 client 上；有界自愈（采纳 pool 健康项 fresh，get_or_create 只 start 一次）
     assert fresh.resolved == [('ap-1', 'exec', 'allow-once')]
-    assert override_pool.created == ['demo', 'demo']
+    assert override_pool.created == ['demo']
     await comm.disconnect()
 
 
@@ -290,9 +291,9 @@ async def test_send_transmitted_failure_does_not_retry(override_pool, instance, 
     resp = await comm.receive_json_from()
     assert resp['type'] == 'error'
     assert '结果未知' in resp['message']
-    # 不重发 chat.send：fresh 上无 send；但**已重取**连接（start 一次 + 自愈一次）
+    # 不重发 chat.send：fresh 上无 send；但**已重取**连接（采纳 pool 健康项 fresh，get_or_create 仍只 start 一次）
     assert not fresh.sent
-    assert override_pool.created == ['demo', 'demo']
+    assert override_pool.created == ['demo']
     # 本 consumer 的审批订阅已迁到 fresh（死 client 退空）
     assert fake_client._approval_subscribers == []
     assert len(fresh._approval_subscribers) == 1
@@ -340,8 +341,8 @@ async def test_send_dead_socket_rpc_error_reacquires_despite_flag_unset(
     assert text_frame == {'type': 'text', 'runId': 'run-1', 'delta': '你好'}
     done_frame = await comm.receive_json_from()
     assert done_frame == {'type': 'done', 'runId': 'run-1'}
-    # 虽 dead 未置位，连接级异常仍触发有界一次重取（start + 自愈）
-    assert override_pool.created == ['demo', 'demo']
+    # 虽 dead 未置位，连接级异常仍触发有界自愈（采纳 pool 健康项 fresh，get_or_create 只 start 一次）
+    assert override_pool.created == ['demo']
     assert fresh.sent == [('sk-1', '你好')]
     await comm.disconnect()
 
@@ -368,7 +369,7 @@ async def test_resolve_dead_socket_rpc_error_reacquires_despite_flag_unset(
     with pytest.raises(asyncio.TimeoutError):  # resolve 成功静默
         await asyncio.wait_for(comm.receive_json_from(), timeout=0.5)
     assert fresh.resolved == [('ap-1', 'exec', 'allow-once')]
-    assert override_pool.created == ['demo', 'demo']
+    assert override_pool.created == ['demo']  # 采纳 pool 健康项 fresh（get_or_create 只 start 一次）
     await comm.disconnect()
 
 
@@ -511,8 +512,8 @@ async def test_retried_send_transmitted_reacquires_again(override_pool, instance
     resp = await comm.receive_json_from()
     assert resp['type'] == 'error'
     assert '结果未知' in resp['message']
-    # 连接被重取两次：start + 初次自愈 + 重试 transmitted 自愈
-    assert override_pool.created == ['demo', 'demo', 'demo']
+    # 两次自愈都采纳 pool 健康项（fake_client→fresh→newer，get_or_create 只 start 一次）
+    assert override_pool.created == ['demo']
     # 订阅者最终迁到 newer（fresh 已死、退空）
     assert len(newer._approval_subscribers) == 1
     await comm.disconnect()
@@ -566,3 +567,61 @@ async def test_disconnect_discards_runs_on_callback_owning_client(override_pool,
     # run-1 的 discard 须落到旧 client（路由持有者），不是只落到新 live client
     assert 'run-1' in fake_client.discarded
     await comm.disconnect()
+
+
+# ── codex #219 五轮 P1：共享 client 时被动 consumer 不得误 evict 替代连接 ─────
+# 多 consumer 共享同一 pooled client：A 先触发自愈，迁移**全体**订阅者到新 client 并只更新
+# A 自己的 self._client——pool 里此刻已是健康新连接。B 仍持有旧死对象；B 后来 send 触发自愈时，
+# 若无条件 evict，会把 pool 里 A 建好的健康连接 pop+aclose（而非 B 持有的旧对象）：中断 A 的
+# 活跃路由，且旧 client 订阅者已被 A 迁空 → B 这次迁移装 0 个审批订阅者（审批丢失）。故 B 须
+# 先查 pool 健康 client，发现它**不是**自己持有的旧对象（A 已换好）→ 直接采纳，不 evict。
+
+
+@pytest.mark.asyncio
+async def test_passive_consumer_adopts_healthy_replacement_without_evict(
+        override_pool, instance, fake_client):
+    """codex #219 五轮 P1：被动 consumer 自愈采纳别的 consumer 已换好的健康连接，不误 evict。"""
+    # consumer A 先 start（共享 fake_client）
+    comm_a = await _connect_authed('alice')
+    await comm_a.connect()
+    await comm_a.send_json_to({'type': 'start', 'container': 'demo'})
+    await comm_a.receive_json_from()  # ready
+
+    # consumer B 也 start，共享同一 pooled fake_client
+    comm_b = await _connect_authed('bob')
+    await comm_b.connect()
+    await comm_b.send_json_to({'type': 'start', 'container': 'demo'})
+    await comm_b.receive_json_from()  # ready
+    assert len(fake_client._approval_subscribers) == 2  # A+B 都订阅在共享 client 上
+
+    # 共享 client 死：A 先 send 触发自愈。A 自愈时 pool 里**还是死 client**（没人换好）——
+    # get_live 命中死 client（==self._client），A 必须 evict 死 client 再重建出 fresh_a，
+    # 迁移全体订阅者（含 B 的），但只更新 A 的 self._client；B 仍持有旧死 fake_client。
+    fake_client.dead = True
+    fresh_a = FakeChatClient()
+    override_pool.stage_next(fresh_a)  # A evict 死 client 后 get_or_create 重建出 fresh_a
+
+    async def dead_send(*args, **kwargs):
+        # 真实 client 死时 send 抛 ChatSendError（fake 默认不死也成功，须显式模拟死连行为）。
+        raise ChatSendError('client dead')
+
+    fake_client.send_message = dead_send
+
+    await comm_a.send_json_to({'type': 'send', 'sessionKey': 'sk', 'message': 'from A'})
+    await asyncio.sleep(0.05)
+    assert override_pool.evicted == ['demo']  # A 驱逐了死 client（pool 当时是死 client，非别人换好的）
+    assert len(fresh_a._approval_subscribers) == 2  # A 迁移了 A+B 两个订阅者
+
+    # B 后 send：B 的 self._client 仍是旧死 fake_client（dead=True）→ B 也触发自愈。
+    # 关键断言：B **不得**再 evict——pool 健康连接 fresh_a 不是 B 持有的旧对象（A 已换好），
+    # B 应直接采纳 fresh_a，而非把 fresh_a evict 掉。
+    await comm_b.send_json_to({'type': 'send', 'sessionKey': 'sk', 'message': 'from B'})
+    await asyncio.sleep(0.05)
+    # evict 仍只有 A 那一次（B 没有误 evict A 的健康 fresh_a）
+    assert override_pool.evicted == ['demo']
+    # B 的 send 经 fresh_a 成功（采纳健康连接重试），不是 error 帧
+    assert ('sk', 'from B') in fresh_a.sent
+    # B 的订阅者仍在 fresh_a 上（未因误 evict+空迁移而丢审批订阅）
+    assert len(fresh_a._approval_subscribers) == 2
+    await comm_a.disconnect()
+    await comm_b.disconnect()
