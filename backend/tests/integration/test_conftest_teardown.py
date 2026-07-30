@@ -147,6 +147,13 @@ def test_process_state_survives_procfs_esrch(monkeypatch):
         return real_open(path, *args, **kwargs)
 
     monkeypatch.setattr(builtins, 'open', fake_open)
+    # 锁死 ps 回退结果为空(模拟「PID 不存在」→ None)。只 mock procfs 不够:
+    # 若测试机恰好有进程占用该 PID(如 6865 真实存活),未 mock 的真 ``ps`` 会返回其
+    # 状态字符,断言 ``is None`` 误红——又一处环境相关 CI flake(codex #212 P2)。
+    def fake_run(args, *a, **kw):
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout='', stderr='')
+
+    monkeypatch.setattr(subprocess, 'run', fake_run)
     # ESRCH fall through 到 ps;ps 对不存在 PID 返回空 → None(而非抛异常)
     assert _process_state(6865) is None
 
