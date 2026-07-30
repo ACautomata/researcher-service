@@ -23,6 +23,7 @@ import uuid
 
 from channels.db import database_sync_to_async
 from channels.generic.websocket import AsyncJsonWebsocketConsumer
+from websockets.exceptions import ConnectionClosed
 
 from chat.chat_client import ChatSendTransmittedError
 from chat.pool import ChatFleet, NotPaired
@@ -83,10 +84,11 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
             return
         # 切容器/重连：旧 client 的本 consumer 审批订阅退订，避免推已失效连接（codex P1 独立退订）。
         # codex #219 P2：经 pool 再解析旧容器的活 client 退订（自愈后 self._client 可能是死 client，
-        # 退订落空会把回调泄漏到活的新 client）。self._instance 此刻仍是旧容器，_unsubscribe_target 用之。
-        old_target = await self._unsubscribe_target()
-        if old_target is not None and old_target is not client:
-            old_target.remove_approval_subscriber(self._on_approval)
+        # 退订落空会把回调泄漏到活的新 client）。self._instance 此刻仍是旧容器，_unsubscribe_targets 用之。
+        # codex #219 三轮 P2-444：force-repair 换 token 后回调可能在旧 self._client——对所有目标幂等退订。
+        for old_target in await self._unsubscribe_targets():
+            if old_target is not client:
+                old_target.remove_approval_subscriber(self._on_approval)
         self._client = client  # pylint: disable=attribute-defined-outside-init
         self._instance = instance  # pylint: disable=attribute-defined-outside-init  # issue #214：供失效重取
         # T06：注册连接级审批订阅（codex P1 订阅者集合，多 consumer 共享 client 不互伤）
@@ -114,11 +116,13 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
             return
         try:
             await self._client.resolve_approval(approval_id, kind, decision)
-        except Exception:  # pylint: disable=broad-exception-caught
+        except Exception as exc:  # pylint: disable=broad-exception-caught
             # 网关拒绝（缺 operator.approvals 等）/连接已断。issue #214：dead 则复用自愈重取
-            # 重试一次；非 dead / 重取失败 / 重试仍败 → error 帧带 approval id，前端仅复位该卡
+            # 重试一次；codex #219 三轮 P2：原生 ConnectionClosed（ws.send 撞刚死 socket）即使
+            # dead 未置位也重取（竞态，exc 作 evidence 传入）。业务拒绝（ChatSendError）非连接
+            # 断不重取。重取失败 / 重试仍败 → error 帧带 approval id，前端仅复位该卡
             # （codex R2 P2，并发 resolve 不误复位其它在途卡）
-            fresh = await self._reacquire_client()
+            fresh = await self._reacquire_client(evidence=exc)
             if fresh is not None:
                 try:
                     await fresh.resolve_approval(approval_id, kind, decision)
@@ -132,12 +136,17 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
         # exec/plugin.approval.resolved 事件广播（codex P2 #163）。
         # 前端在 resolving 态等 resolved 事件落定。此处静默成功，不干扰权威结果。
 
-    async def _reacquire_client(self):
-        """issue #214 T2 自愈：cached client 失效（dead）后经 pool 重取一次并刷新审批订阅。
+    async def _reacquire_client(self, evidence: BaseException | None = None):
+        """issue #214 T2 自愈：cached client 失效后经 pool 重取一次并刷新审批订阅。
 
-        触发时机：_handle_send/_handle_resolve 的 RPC 已抛错（连接已断）。仅当
-        `self._client.dead`（#213 T1 看门狗/CancelledError 置位）才重取——非 dead 的失败
-        （如 rate limit）返回 None，调用方直接发 error 帧，不做无谓重连。
+        触发时机：_handle_send/_handle_resolve 的 RPC 已抛错（连接已断）。满足下列任一即重取：
+        - `self._client.dead`（#213 T1 看门狗/CancelledError 置位）；或
+        - `evidence` 是原生 `websockets.exceptions.ConnectionClosed`（codex #219 三轮 P2）：
+          send_message/resolve_approval 在刚关闭的 socket 上 `ws.send()` 抛出它，而后台 recv
+          task 尚未跑异常处理器置 `dead`——竞态窗口内 guard 只看 dead 会漏。ConnectionClosed
+          与 ChatClientError/ChatSendError **均不相交**（websockets 16.x 层级），它本身就是
+          连接已断的充分证据（帧未发出、网关未起 run，可安全重取）。业务拒绝（rate limit 的
+          ChatSendError、网关 ack ok:false）不传 evidence → 不重取，边界不变。
         成功则切换 self._client 并把**所有**审批订阅者迁到新 client（codex #219 P2，见下）。
         重取本身失败（NotPaired/握手失败）也返回 None，由调用方发 error 帧。返回新 client 或 None。
 
@@ -151,7 +160,9 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
         （不只推本 consumer），保住共享 fan-out 契约。
         """
         client = self._client
-        if client is None or self._instance is None or not client.dead:
+        if client is None or self._instance is None:
+            return None
+        if not (client.dead or isinstance(evidence, ConnectionClosed)):  # dead 或 RPC 已证连接断
             return None
         try:
             fresh = await ChatFleet.get().get_or_create(self._instance)
@@ -231,11 +242,13 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
                 'message': '连接中断，发送结果未知：若已发出请稍后在历史确认，否则请重试',
             })
             return
-        except Exception:  # pylint: disable=broad-exception-caught
+        except Exception as exc:  # pylint: disable=broad-exception-caught
             # chat.send 未发出（client not connected / 网关显式拒绝 ack ok:false）/连接已断——
             # 确定未起 run，安全自愈。issue #214：dead 则重取一次并有界重试一次（防循环）；
-            # 非 dead / 重取失败 / 重试仍败 → error 帧，不传播导致 WS 关闭。
-            fresh = await self._reacquire_client()
+            # codex #219 三轮 P2：原生 ConnectionClosed（ws.send 撞刚死 socket）即使 dead 未
+            # 置位也重取（竞态，exc 作 evidence 传入）。业务拒绝（rate limit 的 ChatSendError）
+            # 非连接断不重取。重取失败 / 重试仍败 → error 帧，不传播导致 WS 关闭。
+            fresh = await self._reacquire_client(evidence=exc)
             if fresh is not None:
                 try:
                     run_id = await fresh.send_message(
@@ -271,28 +284,37 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
         # codex #219 P2：从 pool 再解析活 client 退订/丢弃 runId——自愈换 client 后，
         # 缓存的 self._client 可能仍是死 client（被动 consumer 被迁移过），直接退订会把回调
         # 泄漏到存活的新 client（T06 独立退订契约）。best-effort，WS 关闭路径不抛错。
-        target = await self._unsubscribe_target()
-        if target is not None:
+        # codex #219 三轮 P2-444：force-repair 换 device_token 后，pool 可同时有旧 token
+        # client + 新 token live client；回调/路由可能还在旧 self._client 上。对 [live,
+        # self._client] 去重后的每个目标都退订 + discard（幂等，cb in list 检查），覆盖
+        # 持有回调的旧 client，避免泄漏后仍被旧 client fan-out。
+        for target in await self._unsubscribe_targets():
             target.remove_approval_subscriber(self._on_approval)  # T06：独立退订（codex P1）
             for run_id in list(self._active_runids):
                 target.discard(run_id)
-            self._active_runids.clear()
+        self._active_runids.clear()
 
-    async def _unsubscribe_target(self):
-        """退订/丢弃 runId 的目标 client：优先 pool 里的活 client，回退缓存的 self._client。
+    async def _unsubscribe_targets(self):
+        """退订/丢弃 runId 的目标 client 列表：pool 里的活 client + 缓存的 self._client，去重。
 
         codex #219 P2：自愈把本 consumer 的审批回调迁到新 client 后，self._client 可能仍是
-        死 client；退订须落到持有回调的活 client 上，否则回调泄漏。pool 查询失败/无活 client
-        时回退 self._client（保持原行为， best-effort）。
+        死 client；退订须落到持有回调的活 client 上，否则回调泄漏。
+        codex #219 三轮 P2-444：force-repair 换 token 后 pool 的 live client 与持有回调的
+        self._client 可能是**两个不同对象**——只退 live 会漏掉 self._client 上的回调/路由。
+        故返回两者去重（保序：live 在前），调用方对每个做幂等清理。pool 查询失败/无 live
+        时只回 self._client（保持原行为，best-effort）。
         """
+        targets: list = []
         if self._instance is not None:
             try:
                 live = await ChatFleet.get().get_live(self._instance)
             except Exception:  # pylint: disable=broad-exception-caught
                 live = None
             if live is not None:
-                return live
-        return self._client
+                targets.append(live)
+        if self._client is not None and self._client not in targets:
+            targets.append(self._client)
+        return targets
 
     @staticmethod
     def _lookup_instance(name):

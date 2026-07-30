@@ -11,8 +11,13 @@ from channels.db import database_sync_to_async
 from channels.testing import WebsocketCommunicator
 from django.contrib.auth import get_user_model
 from rest_framework_simplejwt.tokens import RefreshToken
+from websockets.exceptions import ConnectionClosedOK
 
-from chat.chat_client import ChatConnectError, ChatSendError, ChatSendTransmittedError
+from chat.chat_client import (
+    ChatConnectError,
+    ChatSendError,
+    ChatSendTransmittedError,
+)
 from chat.pool import ChatFleet, NotPaired
 from config.asgi import application
 from containers.models import Instance
@@ -805,6 +810,152 @@ async def test_send_transmitted_failure_does_not_retry(override_pool, instance, 
     # 本 consumer 的审批订阅已迁到 fresh（死 client 退空）
     assert fake_client._approval_subscribers == []
     assert len(fresh._approval_subscribers) == 1
+    await comm.disconnect()
+
+
+# ── codex #219 三轮 P2：RPC 自身检测死 socket 的竞态 ─────────────────────────
+# send_message/resolve_approval 在刚关闭的 socket 上 ws.send() 抛原生 ConnectionClosed
+# （与 ChatClientError/ChatSendError 均不相交），后台 recv task 可能还没跑异常处理器置
+# client.dead。guard 只看 dead 会误判 → 返回 None → 误报失败。ConnectionClosed 本身即
+# 连接已断的充分证据（帧未发出、网关未起 run），与 dead 并列触发重取；业务拒绝
+# （ChatSendError rate limit）不传 evidence → 不重取。
+
+
+@pytest.mark.asyncio
+async def test_send_dead_socket_rpc_error_reacquires_despite_flag_unset(
+        override_pool, instance, fake_client):
+    """codex #219 三轮 P2-436：send 抛原生 ConnectionClosed（帧未发出）但 dead 未置位 → 仍重取重试。
+
+    竞态：recv task 尚未置 dead，guard 若只看 dead 会漏。ConnectionClosed（与 ChatSendError
+    业务拒绝不相交）本身即连接已断的充分证据。
+    """
+    comm = await _connect_authed()
+    await comm.connect()
+    await comm.send_json_to({'type': 'start', 'container': 'demo'})
+    await comm.receive_json_from()  # ready
+
+    fresh = FakeChatClient()
+    override_pool.set_client(fresh)
+    # 关键：dead **不**置位（模拟竞态——RPC 先于 recv task 检测到 socket 死）
+    assert fake_client.dead is False
+
+    async def dead_socket_send(session_key, message, *, on_event, idempotency_key=None):
+        # 真实竞态：ws.send 在刚关闭的 socket 上抛原生 ConnectionClosed（与 ChatClientError/
+        # ChatSendError 均不相交），recv task 尚未置 dead。帧未发出、网关未起 run。
+        raise ConnectionClosedOK(None, None)
+
+    fake_client.send_message = dead_socket_send
+
+    await comm.send_json_to({'type': 'send', 'sessionKey': 'sk-1', 'message': '你好'})
+    await asyncio.sleep(0.05)
+    await fresh.emit({'type': 'text', 'runId': 'run-1', 'delta': '你好'})
+    await fresh.emit({'type': 'done', 'runId': 'run-1'})
+    text_frame = await comm.receive_json_from()
+    assert text_frame == {'type': 'text', 'runId': 'run-1', 'delta': '你好'}
+    done_frame = await comm.receive_json_from()
+    assert done_frame == {'type': 'done', 'runId': 'run-1'}
+    # 虽 dead 未置位，连接级异常仍触发有界一次重取（start + 自愈）
+    assert override_pool.created == ['demo', 'demo']
+    assert fresh.sent == [('sk-1', '你好')]
+    await comm.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_resolve_dead_socket_rpc_error_reacquires_despite_flag_unset(
+        override_pool, instance, fake_client):
+    """codex #219 三轮 P2-436：resolve 抛原生 ConnectionClosed 但 dead 未置位 → 仍重取重试。"""
+    comm = await _connect_authed()
+    await comm.connect()
+    await comm.send_json_to({'type': 'start', 'container': 'demo'})
+    await comm.receive_json_from()  # ready
+
+    fresh = FakeChatClient()
+    override_pool.set_client(fresh)
+    assert fake_client.dead is False  # 竞态：dead 未置位
+
+    async def dead_socket_resolve(*args):
+        raise ConnectionClosedOK(None, None)  # ws.send 撞刚死 socket（竞态，dead 未置位）
+
+    fake_client.resolve_approval = dead_socket_resolve
+
+    await comm.send_json_to({'type': 'resolve', 'id': 'ap-1', 'kind': 'exec', 'decision': 'allow-once'})
+    with pytest.raises(asyncio.TimeoutError):  # resolve 成功静默
+        await asyncio.wait_for(comm.receive_json_from(), timeout=0.5)
+    assert fresh.resolved == [('ap-1', 'exec', 'allow-once')]
+    assert override_pool.created == ['demo', 'demo']
+    await comm.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_send_rate_limit_senderror_still_no_reacquire(override_pool, instance, fake_client):
+    """对照：业务级拒绝（ChatSendError rate limit，dead 未置位）**不**重取——帧已达网关被拒，
+    非连接断，重连无意义。守住「只连接级异常才重取」的边界。"""
+    comm = await _connect_authed()
+    await comm.connect()
+    await comm.send_json_to({'type': 'start', 'container': 'demo'})
+    await comm.receive_json_from()  # ready
+    assert override_pool.created == ['demo']
+    assert fake_client.dead is False
+
+    async def rate_limit_send(*args, **kwargs):
+        raise ChatSendError('rate limit')  # ChatSendError 子类=业务拒绝，非连接级
+
+    fake_client.send_message = rate_limit_send
+
+    await comm.send_json_to({'type': 'send', 'sessionKey': 'sk', 'message': 'hi'})
+    resp = await comm.receive_json_from()
+    assert resp['type'] == 'error'
+    assert override_pool.created == ['demo']  # 不重取
+    await comm.disconnect()
+
+
+# ── codex #219 三轮 P2-444：退订须落到持有回调的 client ─────────────────────
+# POST /pairing/ force-repair 换 device_token 后，pool 可同时有旧 token client + 新 token
+# live client。get_live 只返回新 client，但本 consumer 的回调/active runId 可能还在旧
+# self._client 上。disconnect/切容器只退新 client 会把回调泄漏在旧 client（关闭的 consumer
+# 仍被旧 client fan-out）。须从持有回调的 client（[live, self._client] 去重）都退订 + discard。
+
+
+@pytest.mark.asyncio
+async def test_disconnect_unsubscribes_from_both_stale_and_live(override_pool, instance, fake_client):
+    """codex #219 三轮 P2-444：force-repair 换 token 后 disconnect，旧 self._client 上的回调也退订。"""
+    comm = await _connect_authed()
+    await comm.connect()
+    await comm.send_json_to({'type': 'start', 'container': 'demo'})
+    await comm.receive_json_from()  # ready
+    assert len(fake_client._approval_subscribers) == 1  # 回调在旧 client（self._client）上
+
+    # force-repair：pool 换成新 token 的 live client（非 dead），但本 consumer 未重连——
+    # self._client 仍是旧 client，回调还挂在旧 client 上。get_live 只返回新 client。
+    new_live = FakeChatClient()
+    override_pool.set_client(new_live)
+
+    await comm.disconnect()
+    await asyncio.sleep(0.05)
+    # 旧 client 上的回调须退订（不漏），新 live client 上本就无（幂等无害）
+    assert fake_client._approval_subscribers == []
+    await comm.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_disconnect_discards_runs_on_callback_owning_client(override_pool, instance, fake_client):
+    """codex #219 三轮 P2-444：active runId 的 discard 也须落到持有路由的旧 self._client。"""
+    comm = await _connect_authed()
+    await comm.connect()
+    await comm.send_json_to({'type': 'start', 'container': 'demo'})
+    await comm.receive_json_from()  # ready
+    # 在旧 client 上发一条 → run-1 路由注册在旧 client
+    await comm.send_json_to({'type': 'send', 'sessionKey': 'sk', 'message': 'hi'})
+    await asyncio.sleep(0.05)
+
+    # force-repair：pool 换新 token live client；旧 self._client 仍持有 run-1 路由
+    new_live = FakeChatClient()
+    override_pool.set_client(new_live)
+
+    await comm.disconnect()
+    await asyncio.sleep(0.05)
+    # run-1 的 discard 须落到旧 client（路由持有者），不是只落到新 live client
+    assert 'run-1' in fake_client.discarded
     await comm.disconnect()
 
 
