@@ -33,6 +33,9 @@ class FakeChatClient:
         self.resolve_payload = {}  # resolve_approval 返回的权威 payload
         self.pending = []  # start 时补拉的待审批卡（codex P2 断线恢复）
         self._approval_subscribers = []
+        # issue #214 T2：对齐真实 client 的 public dead 契约（chat_client.dead = _dead or _closed）。
+        # consumer 自愈据此判定；真实场景由 #213 T1 看门狗/CancelledError 置位。
+        self.dead = False
 
     async def send_message(self, session_key, message, *, on_event):
         run_id = f'run-{len(self.sent) + 1}'
@@ -78,6 +81,10 @@ class FakePool:
     def __init__(self, client):
         self._client = client
         self.created = []
+
+    def set_client(self, client):
+        # issue #214：替换 get_or_create 将返回的 client（模拟 pool 驱逐死连接后重建新 client）。
+        self._client = client
 
     async def get_or_create(self, instance):
         self.created.append(instance.name)
@@ -504,3 +511,123 @@ async def test_consumer_operates_via_wire_port_contract(override_pool, instance)
     await comm.disconnect()
     assert wire._approval_subscribers == []  # pylint: disable=use-implicit-booleaness-not-comparison
     ChatFleet.reset()
+
+
+# ── issue #214 T2：consumer 发送失效自愈（检测 dead，有界重取重试一次）────────────
+# 一次 task 取消 / 跨 loop 清理（REST 触发，根因归 #201）后，pool 已驱逐重建新 client，
+# 但本 consumer 仍缓存旧死 client。自愈：_handle_send/_handle_resolve 失败时检测
+# self._client.dead，dead 则经 get_or_create(self._instance) 重取一次并重试（有界一次，
+# 防循环）；重取成功后刷新 approval 订阅（旧退订、新订阅，对齐 _handle_start 切换逻辑）。
+# 非 dead 的失败（如 rate limit）不重取，直接 error 帧。dead 判定靠 #213 T1 保证。
+
+
+@pytest.mark.asyncio
+async def test_send_dead_client_reacquires_and_retries(override_pool, instance, fake_client):
+    """AC1：cached client dead 且 send 抛错 → 重取一次 + 新 client 重试成功发流。"""
+    comm = await _connect_authed()
+    await comm.connect()
+    await comm.send_json_to({'type': 'start', 'container': 'demo'})
+    await comm.receive_json_from()  # ready
+
+    # pool 驱逐旧死 client、重建新 client（模拟 #213 看门狗置 dead 后的重建）。
+    fresh = FakeChatClient()
+    override_pool.set_client(fresh)
+    fake_client.dead = True  # consumer 缓存的旧 client 已死
+
+    async def dead_send(*args, **kwargs):
+        raise ChatSendError('client not connected')
+
+    fake_client.send_message = dead_send
+
+    await comm.send_json_to({'type': 'send', 'sessionKey': 'sk-1', 'message': '你好'})
+    await asyncio.sleep(0.05)  # 等自愈重取 + 新 client 注册 on_event
+    await fresh.emit({'type': 'text', 'runId': 'run-1', 'delta': '你好'})
+    await fresh.emit({'type': 'done', 'runId': 'run-1'})
+    text_frame = await comm.receive_json_from()
+    assert text_frame == {'type': 'text', 'runId': 'run-1', 'delta': '你好'}
+    done_frame = await comm.receive_json_from()
+    assert done_frame == {'type': 'done', 'runId': 'run-1'}
+    # 有界一次重取：start 一次 + 自愈一次，共两次，无循环
+    assert override_pool.created == ['demo', 'demo']
+    assert fresh.sent == [('sk-1', '你好')]  # 重试落在唯一的新 client 上
+    await comm.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_reacquire_refreshes_approval_subscription(override_pool, instance, fake_client):
+    """AC2：重取成功后 approval 订阅刷新——旧 client 退订、新 client 订阅本 consumer 回调。"""
+    comm = await _connect_authed()
+    await comm.connect()
+    await comm.send_json_to({'type': 'start', 'container': 'demo'})
+    await comm.receive_json_from()  # ready
+    assert len(fake_client._approval_subscribers) == 1  # start 已订阅
+
+    fresh = FakeChatClient()
+    override_pool.set_client(fresh)
+    fake_client.dead = True
+
+    async def dead_send(*args, **kwargs):
+        raise ChatSendError('client not connected')
+
+    fake_client.send_message = dead_send
+
+    await comm.send_json_to({'type': 'send', 'sessionKey': 'sk-1', 'message': 'hi'})
+    await asyncio.sleep(0.05)  # 等自愈完成
+    # 旧 client 退订、新 client 订阅（同一 consumer 回调迁移）
+    assert fake_client._approval_subscribers == []
+    assert len(fresh._approval_subscribers) == 1
+    # 新 client 的审批卡能 fan-out 到本 consumer
+    await fresh.emit_approval({'type': 'approval', 'id': 'ap-9', 'kind': 'exec', 'command': 'x'})
+    # 先排空 send 自愈成功的无任何帧——send 成功不推帧，直接收审批卡
+    frame = await comm.receive_json_from()
+    assert frame == {'type': 'approval', 'id': 'ap-9', 'kind': 'exec', 'command': 'x'}
+    await comm.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_resolve_dead_client_reacquires_and_retries(override_pool, instance, fake_client):
+    """AC3：_handle_resolve 复用同一自愈 helper——dead + resolve 抛错 → 重取重试一次。"""
+    comm = await _connect_authed()
+    await comm.connect()
+    await comm.send_json_to({'type': 'start', 'container': 'demo'})
+    await comm.receive_json_from()  # ready
+
+    fresh = FakeChatClient()
+    override_pool.set_client(fresh)
+    fake_client.dead = True
+
+    async def dead_resolve(*args):
+        raise ChatSendError('client not connected')
+
+    fake_client.resolve_approval = dead_resolve
+
+    await comm.send_json_to({'type': 'resolve', 'id': 'ap-1', 'kind': 'exec', 'decision': 'allow-once'})
+    # resolve 成功是静默的（无 immediate 帧，权威值由 resolved 事件落地，codex P2 #163）
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(comm.receive_json_from(), timeout=0.5)
+    # 重试落在新 client 上；有界一次重取
+    assert fresh.resolved == [('ap-1', 'exec', 'allow-once')]
+    assert override_pool.created == ['demo', 'demo']
+    await comm.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_send_nondead_failure_does_not_reacquire(override_pool, instance, fake_client):
+    """AC4：send 失败但 client 非 dead（如 rate limit）→ 不重取，直接 error 帧。"""
+    comm = await _connect_authed()
+    await comm.connect()
+    await comm.send_json_to({'type': 'start', 'container': 'demo'})
+    await comm.receive_json_from()  # ready
+    assert override_pool.created == ['demo']  # start 取一次
+
+    async def fail_send(*args, **kwargs):
+        raise ChatSendError('rate limit')
+
+    fake_client.send_message = fail_send  # 非 dead（fake_client.dead 仍 False）
+
+    await comm.send_json_to({'type': 'send', 'sessionKey': 'sk', 'message': 'hi'})
+    resp = await comm.receive_json_from()
+    assert resp['type'] == 'error'
+    # 非 dead：不触发重取，仍只 start 那一条
+    assert override_pool.created == ['demo']
+    await comm.disconnect()

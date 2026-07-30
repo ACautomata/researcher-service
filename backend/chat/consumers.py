@@ -31,6 +31,8 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
 
     async def connect(self):
         self._client = None  # pylint: disable=attribute-defined-outside-init
+        # issue #214 T2：缓存 start 成功的 instance，供 client 失效后经 get_or_create 重取。
+        self._instance = None  # pylint: disable=attribute-defined-outside-init
         self._active_runids: set[str] = set()  # pylint: disable=attribute-defined-outside-init
         # codex #190 P1: 浏览器 WebSocket subprotocol 要求服务器回复匹配的协议值。
         # 前端传 ['access_token', <jwt>]；JwtAuthMiddleware 验证通过后透传给
@@ -80,6 +82,7 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
         if self._client is not None and self._client is not client:
             self._client.remove_approval_subscriber(self._on_approval)
         self._client = client  # pylint: disable=attribute-defined-outside-init
+        self._instance = instance  # pylint: disable=attribute-defined-outside-init  # issue #214：供失效重取
         # T06：注册连接级审批订阅（codex P1 订阅者集合，多 consumer 共享 client 不互伤）
         client.add_approval_subscriber(self._on_approval)
         await self.send_json({'type': 'ready', 'container': name})
@@ -110,14 +113,46 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
         try:
             await self._client.resolve_approval(approval_id, kind, decision)
         except Exception:  # pylint: disable=broad-exception-caught
-            # 网关拒绝（缺 operator.approvals 等）/连接已断：error 帧带 approval id，
-            # 前端仅复位该卡（codex R2 P2，并发 resolve 不误复位其它在途卡）
+            # 网关拒绝（缺 operator.approvals 等）/连接已断。issue #214：dead 则复用自愈重取
+            # 重试一次；非 dead / 重取失败 / 重试仍败 → error 帧带 approval id，前端仅复位该卡
+            # （codex R2 P2，并发 resolve 不误复位其它在途卡）
+            fresh = await self._reacquire_client()
+            if fresh is not None:
+                try:
+                    await fresh.resolve_approval(approval_id, kind, decision)
+                except Exception:  # pylint: disable=broad-exception-caught
+                    await self.send_json({'type': 'error', 'message': '审批回覆失败，请稍后重试', 'id': approval_id})
+                return
             await self.send_json({'type': 'error', 'message': '审批回覆失败，请稍后重试', 'id': approval_id})
             return
         # 不回送 approvalResolved——RPC ack payload 无 decision 字段（ADR 0003），
         # 且 resolved 事件可能在 ack 之前到达。权威 decision 仅由网关经
         # exec/plugin.approval.resolved 事件广播（codex P2 #163）。
         # 前端在 resolving 态等 resolved 事件落定。此处静默成功，不干扰权威结果。
+
+    async def _reacquire_client(self):
+        """issue #214 T2 自愈：cached client 失效（dead）后经 pool 重取一次并刷新审批订阅。
+
+        触发时机：_handle_send/_handle_resolve 的 RPC 已抛错（连接已断）。仅当
+        `self._client.dead`（#213 T1 看门狗/CancelledError 置位）才重取——非 dead 的失败
+        （如 rate limit）返回 None，调用方直接发 error 帧，不做无谓重连。
+        成功则切换 self._client：旧 client 退订本 consumer 审批回调、新 client 订阅
+        （对齐 _handle_start 切换逻辑，codex P1 独立退订）。重取本身失败（NotPaired/握手失败）
+        也返回 None，由调用方发 error 帧。返回新 client 或 None。
+        """
+        client = self._client
+        if client is None or self._instance is None or not client.dead:
+            return None
+        try:
+            fresh = await ChatFleet.get().get_or_create(self._instance)
+        except Exception:  # pylint: disable=broad-exception-caught
+            return None  # 重取失败：保持原错误路径，调用方发 error 帧
+        if fresh is client:
+            return None  # pool 未换 client（防御）：重试同一死 client 无意义，不重取
+        client.remove_approval_subscriber(self._on_approval)
+        fresh.add_approval_subscriber(self._on_approval)
+        self._client = fresh  # pylint: disable=attribute-defined-outside-init
+        return fresh
 
     async def _handle_send(self, content):
         if self._client is None:
@@ -133,9 +168,20 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
                 session_key, message, on_event=self._on_event,
             )
         except Exception:  # pylint: disable=broad-exception-caught
-            # chat.send 被拒/连接已断：发 error 帧，不传播导致 WS 关闭
-            await self.send_json({'type': 'error', 'message': '发送失败，请稍后重试'})
-            return
+            # chat.send 被拒/连接已断。issue #214：dead 则自愈重取一次并有界重试一次（防循环）；
+            # 非 dead / 重取失败 / 重试仍败 → error 帧，不传播导致 WS 关闭。
+            fresh = await self._reacquire_client()
+            if fresh is not None:
+                try:
+                    run_id = await fresh.send_message(
+                        session_key, message, on_event=self._on_event,
+                    )
+                except Exception:  # pylint: disable=broad-exception-caught
+                    await self.send_json({'type': 'error', 'message': '发送失败，请稍后重试'})
+                    return
+            else:
+                await self.send_json({'type': 'error', 'message': '发送失败，请稍后重试'})
+                return
         self._active_runids.add(run_id)
 
     async def _on_event(self, frame):
