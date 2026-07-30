@@ -486,7 +486,11 @@ class OpenClawWireAdapter:
             ChatSendTransmittedError,
         )
 
-        if self._ws is None:
+        if self._ws is None or self.dead:
+            # codex #219 十二轮 P2-331：recv loop 退出置 _dead=True 后 _ws 非空，仅查 _ws 仍会注册
+            # ack 并发帧——recv loop 已无法处理 ack/事件，网关或收下 run 但输出丢失，最终只暴露为
+            # ack 超时。对齐 OpenClawChatClient.send_message：dead（_dead or _closed）视为已断连，
+            # 注册/发送前拒发，consumer 走 dead 重取换健康 client。
             raise ChatClientError('client not connected')
         import uuid
         req_id = uuid.uuid4().hex
@@ -542,7 +546,9 @@ class OpenClawWireAdapter:
     async def resolve_approval(self, approval_id: str, kind: str, decision: str) -> dict:
         from chat.chat_client import ChatClientError, ChatSendError
 
-        if self._ws is None:
+        if self._ws is None or self.dead:
+            # codex #219 十二轮 P2-331：同 send_message——dead 视为已断连，closing/recv 死期间拒发
+            # 审批回覆（避免 future 注册后 ack/resolved 事件随死连接丢失，已执行的卡被超时误复位）。
             raise ChatClientError('client not connected')
         import uuid
         req_id = uuid.uuid4().hex
@@ -634,7 +640,9 @@ class OpenClawWireAdapter:
     async def sessions_rpc(self, method: str, params: dict) -> dict:
         from chat.chat_client import ChatClientError, ChatSendError
 
-        if self._ws is None:
+        if self._ws is None or self.dead:
+            # codex #219 十二轮 P2-331：同 send_message——dead 视为已断连，closing/recv 死期间拒发
+            # sessions/history RPC（避免 future 注册后 ack 随死连接丢失、调用方空等超时）。
             raise ChatClientError('client not connected')
         import uuid
         req_id = uuid.uuid4().hex
