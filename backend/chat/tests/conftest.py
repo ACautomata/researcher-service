@@ -112,6 +112,21 @@ class FakePool:
             return self._client
         return None
 
+    async def reacquire(self, instance, expected_client):
+        # codex #219 六轮 P1-872：对齐真 pool.reacquire 的锁内语义——
+        # 缓存项健康且非 expected_client（别的 consumer 已换好）→ 采纳，不 evict 不重建；
+        # 否则（缓存==expected 死/濒死 client，或已驱逐无缓存）→ 驱逐并重建（经 _next / set_client）。
+        self.created.append(instance.name)
+        cur = self._client
+        if cur is not None and not getattr(cur, 'dead', False) and cur is not expected_client:
+            return cur  # 采纳 peer 换好的健康连接
+        # 驱逐自己持有的死/濒死 client 并重建
+        self.evicted.append(instance.name)
+        if self._next is not None:
+            self._client = self._next
+            self._next = None
+        return self._client
+
 
 class NotPairedPool:
     async def get_or_create(self, instance):
@@ -119,6 +134,9 @@ class NotPairedPool:
 
     async def evict(self, instance):
         return None  # codex #219 四轮 P2-891：自愈重取前先 evict，未配对 noop
+
+    async def reacquire(self, instance, expected_client):
+        raise NotPaired('pending', 'req-9')  # codex #219 六轮 P1：未配对重取也抛 NotPaired
 
     async def get_live(self, instance):
         return None

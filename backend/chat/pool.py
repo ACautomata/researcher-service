@@ -156,6 +156,50 @@ class ChatConnectionPool:
             except Exception:  # pylint: disable=broad-exception-caught
                 pass
 
+    async def reacquire(self, instance, expected_client) -> OpenClawChatClient:
+        """consumer 自愈用的原子重取：在 per-key 锁内「比较缓存项 → 采纳/驱逐 → 重建」一次完成。
+
+        codex #219 六轮 P1-872：consumer 原 get_live→evict→get_or_create 三步非原子——两
+        consumer 并发自愈同一死 client 时都在 get_live 见无活连接，A 在 B 检查与 evict 间装好
+        健康连接，B 又把它 evict+aclose（中断 A 路由、订阅者滞留死 client）。本方法把比较与
+        替换收敛进同一把 `_key_lock`，消除跨 consumer 的 TOCTOU。语义（锁内判定）：
+        - 缓存项**健康且非** expected_client（别的 consumer 已换好）→ 直接采纳返回，不驱逐不重建；
+        - 缓存项**就是** expected_client（本 consumer 持有的死/濒死 client）→ 驱逐后重建；
+        - 缓存项缺失（已被驱逐）→ 直接重建。
+        未配对/配对材料不完整仍抛 NotPaired（与 get_or_create 一致）。
+        """
+        pairing = await database_sync_to_async(self._pairing.get_status)(instance)
+        if pairing.status != Pairing.STATUS_PAIRED or not pairing.device_token:
+            raise NotPaired(pairing.status, pairing.pairing_request_id)
+        url = self._ws_url_for(instance)
+        key = (url, pairing.device_token)
+        async with self._key_lock(key):
+            cached = self._clients.get(key)
+            # 采纳：别的 consumer 已在锁内换好健康连接（非本 consumer 持有的 expected_client）
+            if cached is not None and not cached.dead and cached is not expected_client:
+                return cached
+            if cached is not None:  # 自己持有的死/濒死 client（或健康但==expected，防御）：驱逐
+                try:
+                    await cached.aclose()
+                except Exception:  # pylint: disable=broad-exception-caught
+                    pass
+                self._clients.pop(key, None)
+            # 重建（复用 get_or_create 慢路径同款配对材料校验，防 identity/scopes 损坏）
+            identity = self._build_identity(pairing)
+            scopes = self._pairing_scopes(pairing)
+            if pairing.status == Pairing.STATUS_PAIRED and identity is None:
+                raise NotPaired(pairing.status, pairing.pairing_request_id)
+            if identity is not None and not scopes:
+                raise NotPaired(pairing.status, pairing.pairing_request_id)
+            if identity is not None and not REQUIRED_SCOPES.issubset(set(scopes)):
+                raise NotPaired(pairing.status, pairing.pairing_request_id)
+            new_client = self._client_factory(
+                url, pairing.device_token, identity=identity, scopes=scopes,
+            )
+            await new_client.connect()  # 握手有界（chat_client.connect_timeout）
+            self._clients[key] = new_client
+            return new_client
+
     @staticmethod
     def _build_identity(pairing) -> DeviceIdentity | None:
         """从 Pairing 行重建 DeviceIdentity。三要素缺一不可——缺任意一个返回 None

@@ -170,21 +170,12 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
         if not (client.dead or isinstance(evidence, ConnectionClosed)):  # dead 或 RPC 已证连接断
             return None
         try:
-            # codex #219 五轮 P1：先查 pool 当前健康 client——若它**不是** self._client（共享
-            # client 场景下别的 consumer 已自愈换好），直接采纳它，**不 evict**：否则会把别人
-            # 建好的健康连接 pop+aclose（中断其路由），且自己旧 client 订阅者已被迁空、这次
-            # 迁移装 0 个订阅者（审批丢失）。仅当 pool 健康项就是自己这个死/濒死 client（或无
-            # 健康项）时才 evict 自己再重建——保证 evict 只移除自己持有的死对象。
-            live = await ChatFleet.get().get_live(self._instance)
-            if live is not None and live is not client:
-                fresh = live  # 别的 consumer 已换好的健康连接：采纳，不 evict 不重建
-            else:
-                # codex #219 四轮 P2-891：先把缓存的濒死 client 逐出 pool 再 get_or_create。
-                # evidence（ConnectionClosed）证明已死但 dead 未置位时，pool 快路径（pool.py:80-82）
-                # 只看 dead==False 会返回**同一个** client，下面 identity check 便放弃恢复。evict
-                # 强制 pool 走慢路径重建；client.dead 已置位时 evict 是幂等 noop（pool 本就会重建）。
-                await ChatFleet.get().evict(self._instance)
-                fresh = await ChatFleet.get().get_or_create(self._instance)
+            # codex #219 六轮 P1-872：经 pool.reacquire 在 per-key 锁内原子完成「比较缓存项 →
+            # 采纳（别的 consumer 已换好的健康连接，非 self._client）/ 驱逐（自己持有的死 client）
+            # → 重建」——消除原 get_live→evict→get_or_create 三步的跨 consumer TOCTOU（两
+            # consumer 并发自愈互踢对方建好的连接）。evidence（ConnectionClosed）证明已死但 dead
+            # 未置位时，reacquire 也因缓存项==expected_client 而驱逐重建（对齐四轮 P2-891）。
+            fresh = await ChatFleet.get().reacquire(self._instance, client)
         except Exception:  # pylint: disable=broad-exception-caught
             return None  # 重取失败：保持原错误路径，调用方发 error 帧
         if fresh is client:
@@ -285,7 +276,12 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
                         'message': '连接中断，发送结果未知：若已发出请稍后在历史确认，否则请重试',
                     })
                     return
-                except Exception:  # pylint: disable=broad-exception-caught
+                except Exception as retry_exc:  # pylint: disable=broad-exception-caught
+                    # codex #219 六轮 P2-875：重试的 send 也可能撞原生 ConnectionClosed（替换
+                    # socket 在 recv loop 置 dead 前关闭，dead 未置位）——落到此宽 except 而非
+                    # transmitted 分支。对该连接异常也做连接级恢复（迁移订阅者 + 补拉待审批，
+                    # 仍不重发 chat.send）；业务拒绝（ChatSendError）经 evidence guard 不重取。
+                    await self._reacquire_client(evidence=retry_exc)
                     await self.send_json({'type': 'error', 'message': '发送失败，请稍后重试'})
                     return
             else:

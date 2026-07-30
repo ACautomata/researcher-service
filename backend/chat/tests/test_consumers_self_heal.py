@@ -54,9 +54,10 @@ async def test_send_dead_client_reacquires_and_retries(override_pool, instance, 
     assert text_frame == {'type': 'text', 'runId': 'run-1', 'delta': '你好'}
     done_frame = await comm.receive_json_from()
     assert done_frame == {'type': 'done', 'runId': 'run-1'}
-    # 有界自愈：pool 健康项已是 set_client 换好的 fresh（≠旧死 client）→ 采纳路径，
-    # get_or_create 只 start 调一次（自愈经 get_live 采纳，不再重建；重建路径由 stage_next 测试锁定）
-    assert override_pool.created == ['demo']
+    # 有界自愈：pool 健康项已是 set_client 换好的 fresh（≠旧死 client）→ reacquire 采纳路径，
+    # 不驱逐（evicted 空）、不重建（created 只 start+reacquire 两次调用，重建路径由 stage_next 测试锁定）
+    assert override_pool.created == ['demo', 'demo']
+    assert override_pool.evicted == []  # 采纳未驱逐
     assert fresh.sent == [('sk-1', '你好')]  # 重试落在唯一的新 client 上
     await comm.disconnect()
 
@@ -113,9 +114,10 @@ async def test_resolve_dead_client_reacquires_and_retries(override_pool, instanc
     # resolve 成功是静默的（无 immediate 帧，权威值由 resolved 事件落地，codex P2 #163）
     with pytest.raises(asyncio.TimeoutError):
         await asyncio.wait_for(comm.receive_json_from(), timeout=0.5)
-    # 重试落在新 client 上；有界自愈（采纳 pool 健康项 fresh，get_or_create 只 start 一次）
+    # 重试落在新 client 上；有界自愈（reacquire 采纳 pool 健康项 fresh，不驱逐不重建）
     assert fresh.resolved == [('ap-1', 'exec', 'allow-once')]
-    assert override_pool.created == ['demo']
+    assert override_pool.created == ['demo', 'demo']
+    assert override_pool.evicted == []
     await comm.disconnect()
 
 
@@ -291,9 +293,10 @@ async def test_send_transmitted_failure_does_not_retry(override_pool, instance, 
     resp = await comm.receive_json_from()
     assert resp['type'] == 'error'
     assert '结果未知' in resp['message']
-    # 不重发 chat.send：fresh 上无 send；但**已重取**连接（采纳 pool 健康项 fresh，get_or_create 仍只 start 一次）
+    # 不重发 chat.send：fresh 上无 send；但**已重取**连接（reacquire 采纳 pool 健康项 fresh，不驱逐不重建）
     assert not fresh.sent
-    assert override_pool.created == ['demo']
+    assert override_pool.created == ['demo', 'demo']
+    assert override_pool.evicted == []
     # 本 consumer 的审批订阅已迁到 fresh（死 client 退空）
     assert fake_client._approval_subscribers == []
     assert len(fresh._approval_subscribers) == 1
@@ -341,8 +344,9 @@ async def test_send_dead_socket_rpc_error_reacquires_despite_flag_unset(
     assert text_frame == {'type': 'text', 'runId': 'run-1', 'delta': '你好'}
     done_frame = await comm.receive_json_from()
     assert done_frame == {'type': 'done', 'runId': 'run-1'}
-    # 虽 dead 未置位，连接级异常仍触发有界自愈（采纳 pool 健康项 fresh，get_or_create 只 start 一次）
-    assert override_pool.created == ['demo']
+    # 虽 dead 未置位，连接级异常仍触发有界自愈（reacquire 采纳 pool 健康项 fresh，不驱逐不重建）
+    assert override_pool.created == ['demo', 'demo']
+    assert override_pool.evicted == []
     assert fresh.sent == [('sk-1', '你好')]
     await comm.disconnect()
 
@@ -369,7 +373,8 @@ async def test_resolve_dead_socket_rpc_error_reacquires_despite_flag_unset(
     with pytest.raises(asyncio.TimeoutError):  # resolve 成功静默
         await asyncio.wait_for(comm.receive_json_from(), timeout=0.5)
     assert fresh.resolved == [('ap-1', 'exec', 'allow-once')]
-    assert override_pool.created == ['demo']  # 采纳 pool 健康项 fresh（get_or_create 只 start 一次）
+    assert override_pool.created == ['demo', 'demo']  # reacquire 采纳 pool 健康项 fresh（不重建）
+    assert override_pool.evicted == []
     await comm.disconnect()
 
 
@@ -512,8 +517,9 @@ async def test_retried_send_transmitted_reacquires_again(override_pool, instance
     resp = await comm.receive_json_from()
     assert resp['type'] == 'error'
     assert '结果未知' in resp['message']
-    # 两次自愈都采纳 pool 健康项（fake_client→fresh→newer，get_or_create 只 start 一次）
-    assert override_pool.created == ['demo']
+    # 两次自愈都采纳 pool 健康项（fake_client→fresh→newer：start + 两次 reacquire 采纳，均不驱逐不重建）
+    assert override_pool.created == ['demo', 'demo', 'demo']
+    assert override_pool.evicted == []
     # 订阅者最终迁到 newer（fresh 已死、退空）
     assert len(newer._approval_subscribers) == 1
     await comm.disconnect()
@@ -625,3 +631,56 @@ async def test_passive_consumer_adopts_healthy_replacement_without_evict(
     assert len(fresh_a._approval_subscribers) == 2
     await comm_a.disconnect()
     await comm_b.disconnect()
+
+
+# ── codex #219 六轮 P2-875：重试 send 撞原生 ConnectionClosed 也须连接级恢复 ─────
+# 初次失败自愈换到 fresh，但 fresh 的 socket 在 recv loop 置 dead 前就关闭——重试的
+# send_message 在刚死 socket 上 ws.send() 抛原生 ConnectionClosed（dead 未置位），落到
+# 重试的宽 except（非 transmitted 分支）。若该分支只发 error 不重取，迁移过去的全体审批
+# 订阅者滞留死 fresh，被收下 run 的审批无法投递/恢复。故对该连接异常也做连接级恢复
+# （evidence=ConnectionClosed 触发重取，仍不重发 chat.send）。
+
+
+@pytest.mark.asyncio
+async def test_retried_send_raw_connection_closed_recovers_connection(
+        override_pool, instance, fake_client):
+    """codex #219 六轮 P2-875：重试 send 撞原生 ConnectionClosed（替换 socket 刚死、dead 未置位）
+    → 落到宽 except 也做连接级重取（迁移订阅者 + 补拉），仍不重发。"""
+    comm = await _connect_authed()
+    await comm.connect()
+    await comm.send_json_to({'type': 'start', 'container': 'demo'})
+    await comm.receive_json_from()  # ready
+
+    # 初次 send：fake_client dead → 自愈换到 fresh
+    fake_client.dead = True
+    fresh = FakeChatClient()
+    override_pool.set_client(fresh)
+
+    async def first_send_dead(*args, **kwargs):
+        raise ChatSendError('client dead')  # 初次失败（非 transmitted）→ 触发自愈
+
+    fake_client.send_message = first_send_dead
+
+    # fresh 重试时 socket 在 recv loop 置 dead 前关闭：ws.send 抛原生 ConnectionClosed（dead 未置位）。
+    # pool 再次换好更新连接 newer（等待补拉的审批卡）。
+    newer = FakeChatClient()
+    newer.pending = [{'type': 'approval', 'id': 'ap-raw', 'kind': 'exec', 'command': 'curl z'}]
+
+    async def fresh_raw_closed_send(*args, **kwargs):
+        assert fresh.dead is False  # 竞态：recv loop 尚未置 dead
+        override_pool.set_client(newer)  # pool 经 reacquire 换到 newer
+        raise ConnectionClosedOK(None, None)  # 原生连接关闭异常（非 transmitted、非 ChatSendError）
+
+    fresh.send_message = fresh_raw_closed_send
+
+    await comm.send_json_to({'type': 'send', 'sessionKey': 'sk-1', 'message': '你好'})
+    # 连接级重取后补拉 newer 上的待审批卡（订阅者迁移 + fan-out 恢复）
+    approval_frame = await comm.receive_json_from()
+    assert approval_frame == {'type': 'approval', 'id': 'ap-raw', 'kind': 'exec', 'command': 'curl z'}
+    # 再收到终态 error 帧（仍不重发 chat.send，解锁前端 pending）
+    resp = await comm.receive_json_from()
+    assert resp['type'] == 'error'
+    # 订阅者最终迁到 newer（fresh 已死、退空）
+    assert len(newer._approval_subscribers) == 1
+    assert not fresh._approval_subscribers
+    await comm.disconnect()

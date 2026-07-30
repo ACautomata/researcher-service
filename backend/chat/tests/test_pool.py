@@ -281,6 +281,83 @@ async def test_evict_unpaired_is_noop():
     await pool.evict(_instance('a', 19001))  # 未配对 → noop，不抛 NotPaired
 
 
+# ── codex #219 六轮 P1-872：reacquire 把比较+驱逐+重建收敛进一把锁（消 TOCTOU）────────
+# consumer 原 get_live→evict→get_or_create 三步非原子：两 consumer 并发自愈同一死 client 时
+# 都见无 live，A 在 B 检查与 evict 间装好健康连接，B 又把它 evict+aclose（中断 A 路由 + 订阅者
+# 滞留死 client）。reacquire(instance, expected_client) 在 per-key 锁内一次性完成「比较缓存项
+# → 采纳/驱逐 → 重建」，比较与替换原子，消除跨 consumer 的 TOCTOU。
+
+
+@pytest.mark.asyncio
+async def test_reacquire_evicts_expected_dead_and_recreates():
+    """缓存项就是 expected_client（自己持有的死 client）→ 驱逐并重建新 client。"""
+    pool = ChatConnectionPool(
+        pairing_service=FakePairingService(),
+        client_factory=_DeadAwareClient,
+        ws_url_for=_url_for,
+    )
+    inst = _instance('a', 19001)
+    c1 = await pool.get_or_create(inst)
+    c1.dead = True  # 本 consumer 持有的死 client
+
+    c2 = await pool.reacquire(inst, c1)
+    assert c2 is not c1
+    assert not c2.dead
+    assert c1.closed  # 旧死 client best-effort aclose
+    # 再 get_or_create 命中刚重建的健康 client（复用）
+    assert await pool.get_or_create(inst) is c2
+
+
+@pytest.mark.asyncio
+async def test_reacquire_adopts_live_replacement_installed_by_peer():
+    """codex #219 六轮 P1-872：缓存项已被别的 consumer 换成健康新连接（≠expected_client）→ 采纳，
+    不驱逐不重建（绝不误关别人建好的连接）。"""
+    pool = ChatConnectionPool(
+        pairing_service=FakePairingService(),
+        client_factory=_DeadAwareClient,
+        ws_url_for=_url_for,
+    )
+    inst = _instance('a', 19001)
+    stale = await pool.get_or_create(inst)
+    stale.dead = True  # 本 consumer 持有的旧死 client
+
+    # 别的 consumer 已先自愈：驱逐并装好健康新连接（模拟 peer 在锁内完成替换）
+    peer_fresh = await pool.reacquire(inst, stale)
+    assert peer_fresh is not stale and not peer_fresh.dead
+    stale_closed_before = stale.closed
+
+    # 本 consumer 后到：缓存项已是 peer 换好的健康连接（≠ 自己持有的 stale）→ 直接采纳
+    adopted = await pool.reacquire(inst, stale)
+    assert adopted is peer_fresh  # 采纳 peer 的健康连接
+    assert not peer_fresh.closed  # 不误关 peer 的连接
+    assert stale.closed == stale_closed_before  # stale 已被 peer 关过，不重复关
+
+
+@pytest.mark.asyncio
+async def test_reacquire_concurrent_same_dead_client_single_recreate():
+    """codex #219 六轮 P1-872：两 consumer 并发 reacquire 同一死 client——per-key 锁串行化，
+    只重建一次，两者都拿到同一健康新连接（无互相 evict 对方成果）。"""
+    pool = ChatConnectionPool(
+        pairing_service=FakePairingService(),
+        client_factory=_DeadAwareClient,
+        ws_url_for=_url_for,
+    )
+    inst = _instance('a', 19001)
+    dead_client = await pool.get_or_create(inst)
+    dead_client.dead = True
+
+    # 两个 consumer 都持有同一 dead_client，并发自愈
+    r1, r2 = await asyncio.gather(
+        pool.reacquire(inst, dead_client),
+        pool.reacquire(inst, dead_client),
+    )
+    assert r1 is r2  # 都拿到同一健康新连接（第二个采纳第一个的重建成果）
+    assert r1 is not dead_client
+    assert not r1.dead
+    assert r1.connect_calls == 1  # 只重建一次（不重复建连）
+    assert dead_client.closed  # 死 client 被清理一次
+
+
 # ── per-key 锁隔离 ─────────────────────────────────────────
 
 @pytest.mark.asyncio
