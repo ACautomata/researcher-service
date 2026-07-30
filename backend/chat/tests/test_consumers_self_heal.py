@@ -356,6 +356,52 @@ async def test_send_dead_socket_rpc_error_reacquires_despite_flag_unset(
 
 
 @pytest.mark.asyncio
+async def test_send_transmitted_flag_unset_still_reacquires(override_pool, instance, fake_client):
+    """codex #219 八轮 P1-224：transmitted 抛出但 dead 未置位（竞态窗口）→ 仍须重取连接。
+
+    chat_client 在 recv loop 置 dead 前就把原生 ConnectionClosed 归为 ChatSendTransmittedError
+    （mid-send 刷帧中途关闭，chat_client.py:612-615）——此刻 client.dead 仍为 False。外层
+    transmitted 分支若调 _reacquire_client() 不带 evidence，guard（只看 dead/ConnectionClosed）
+    不通过 → 返回 None 不换连接 → 全体审批订阅者滞留死 client，被收下 run 起的审批永不投递/补拉。
+
+    transmitted 本身即「本次发送不可靠、且不可安全重发」的充分证据：须重取连接（迁移订阅者 +
+    补拉待审批），但仍**不重发** chat.send。本测试**不**预设 dead=True，锁定该竞态窗口。
+    """
+    comm = await _connect_authed()
+    await comm.connect()
+    await comm.send_json_to({'type': 'start', 'container': 'demo'})
+    await comm.receive_json_from()  # ready
+
+    fresh = FakeChatClient()
+    fresh.pending = [{'type': 'approval', 'id': 'ap-race', 'kind': 'exec', 'command': 'curl r'}]
+    # 不预先 set_client——模拟「consumer 持有的死/濒死 client 仍在 pool 缓存」，
+    # 由 consumer 触发 reacquire 驱逐并换到 stage_next 预排的 fresh（对齐真 pool 驱逐后重建）。
+    override_pool.stage_next(fresh)
+    assert fake_client.dead is False  # 竞态窗口：transmitted 抛出时 dead 尚未置位
+
+    async def transmitted_send(session_key, message, *, on_event, idempotency_key=None):
+        # 真实竞态：ws.send 刷帧中途 socket 关闭（帧或已部分到达），recv loop 还没置 dead。
+        raise ChatSendTransmittedError('chat.send socket closed mid-send')
+
+    fake_client.send_message = transmitted_send
+
+    await comm.send_json_to({'type': 'send', 'sessionKey': 'sk-1', 'message': '你好'})
+    # 重取后补拉 fresh 上的待审批卡（被收下 run 起的审批经新连接恢复）
+    approval_frame = await comm.receive_json_from()
+    assert approval_frame == {'type': 'approval', 'id': 'ap-race', 'kind': 'exec', 'command': 'curl r'}
+    # 再收到终态 error 帧（不盲重发，解锁前端 pending）
+    resp = await comm.receive_json_from()
+    assert resp['type'] == 'error'
+    assert '结果未知' in resp['message']
+    # dead 未置位也触发了重取：驱逐旧 client 换到 fresh；不重发 chat.send
+    assert override_pool.evicted == ['demo']
+    assert not fresh.sent
+    assert fake_client._approval_subscribers == []
+    assert len(fresh._approval_subscribers) == 1
+    await comm.disconnect()
+
+
+@pytest.mark.asyncio
 async def test_resolve_dead_socket_rpc_error_reacquires_despite_flag_unset(
         override_pool, instance, fake_client):
     """codex #219 三轮 P2-436：resolve 抛原生 ConnectionClosed 但 dead 未置位 → 仍重取重试。"""

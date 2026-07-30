@@ -146,7 +146,14 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
           task 尚未跑异常处理器置 `dead`——竞态窗口内 guard 只看 dead 会漏。ConnectionClosed
           与 ChatClientError/ChatSendError **均不相交**（websockets 16.x 层级），它本身就是
           连接已断的充分证据（帧未发出、网关未起 run，可安全重取）。业务拒绝（rate limit 的
-          ChatSendError、网关 ack ok:false）不传 evidence → 不重取，边界不变。
+          ChatSendError、网关 ack ok:false）不传 evidence → 不重取，边界不变；或
+        - `evidence` 是 `ChatSendTransmittedError`（codex #219 八轮 P1-224）：chat_client 在
+          recv loop 置 `dead` 前就把 send 刷帧中途的原生 ConnectionClosed 归为 transmitted
+          （chat_client.py:612-615）——此刻 `client.dead` 仍为 False，guard 只看 dead/
+          ConnectionClosed 会漏，不换连接 → 全体审批订阅者滞留死 client。transmitted 本身即
+          「传输结果未知、不可安全重发」的充分证据：须重取连接（迁移订阅者 + 补拉待审批），
+          但仍**不重发** chat.send。它是 ChatSendError 子类，故充分条件须**先于**普通
+          ChatSendError（业务拒绝）判定，否则 rate limit 也会被误当重取证据。
         重取前先查 pool 健康 client（codex #219 五轮 P1）：共享 client 时若别人已换好（pool
         健康项非 self._client）直接采纳、不 evict——避免误关别的 consumer 建好的健康连接并
         把订阅者迁空。否则（pool 健康项就是自己这个死/濒死 client）先经 pool.evict 驱逐缓存
@@ -167,7 +174,10 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
         client = self._client
         if client is None or self._instance is None:
             return None
-        if not (client.dead or isinstance(evidence, ConnectionClosed)):  # dead 或 RPC 已证连接断
+        if not (client.dead
+                # dead，或连接级证据：原生 ConnectionClosed（连接已断）/ ChatSendTransmittedError
+                # （transmitted 时 dead 或未置位，八轮 P1-224）——均充分证明该重取连接。
+                or isinstance(evidence, (ConnectionClosed, ChatSendTransmittedError))):
             return None
         try:
             # codex #219 六轮 P1-872：经 pool.reacquire 在 per-key 锁内原子完成「比较缓存项 →
@@ -238,7 +248,7 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
                 session_key, message, on_event=self._on_event,
                 idempotency_key=idempotency_key,
             )
-        except ChatSendTransmittedError:
+        except ChatSendTransmittedError as exc:
             # codex #219 P1：帧已发出但 ack 丢失——网关可能已起 run，其事件流绑在死连接上
             # （runId 是连接级的，重连不可恢复）。盲重试会被幂等去重到同一 runId，但新 client
             # 的 route 收不到任何事件 → 浏览器 pending 永久卡住。故**不重发** chat.send，发终态
@@ -246,7 +256,9 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
             # codex #219 P1 二轮：但**仍须重取连接**——旧 client 已死，全体审批订阅者还挂在死
             # client 上；被收下的 run 若起审批，不经新连接投递/补拉会一直阻塞。故重取（迁移全体
             # 订阅者 + fan-out 补拉待审批），只是不重发 chat.send。
-            await self._reacquire_client()
+            # codex #219 八轮 P1-224：exc 作 evidence 传入——transmitted 抛出时 dead 可能未置位
+            # （mid-send 竞态），无 evidence 则 guard 不通过、不换连接，订阅者滞留死 client。
+            await self._reacquire_client(evidence=exc)
             await self.send_json({
                 'type': 'error',
                 'message': '连接中断，发送结果未知：若已发出请稍后在历史确认，否则请重试',
@@ -265,12 +277,14 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
                         session_key, message, on_event=self._on_event,
                         idempotency_key=idempotency_key,  # codex #219 P1：复用同 key 幂等重试
                     )
-                except ChatSendTransmittedError:
+                except ChatSendTransmittedError as retry_tx:
                     # 重试这条也撞上已发出 ack 丢失：不再嵌套重发，发终态 error。
                     # codex #219 四轮 P2-895：但仍须**再重取**——fresh 发出帧后已死，迁移过去的
                     # 全体审批订阅者还挂在死 fresh 上；被收下的 run 若起审批不经新连接补拉会阻塞。
                     # 故做与外层 transmitted 分支相同的连接/订阅者恢复（仍不重发 chat.send）。
-                    await self._reacquire_client()
+                    # codex #219 八轮 P1-224：retry_tx 作 evidence——transmitted 时 dead 或未置位，
+                    # 无 evidence 则 guard 不通过、不换连接，订阅者滞留死 fresh。
+                    await self._reacquire_client(evidence=retry_tx)
                     await self.send_json({
                         'type': 'error',
                         'message': '连接中断，发送结果未知：若已发出请稍后在历史确认，否则请重试',
