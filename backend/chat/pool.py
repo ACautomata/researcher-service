@@ -173,6 +173,8 @@ class ChatConnectionPool:
         `replaced`（而非自己持有的 expected_client）迁移审批订阅者——被动 consumer 持有的
         expected_client 可能已是更早的空壳代际，而 pool 缓存里实际被替换的才是当前挂着全部
         订阅者的那一代；从 expected_client 迁会把真实订阅者丢在被关掉的 `replaced` 上。
+        重建 `connect()` 失败时把 `replaced` 放回缓存再抛（codex #219 十五轮 P2-208），下次
+        reacquire 仍能从缓存取到它作迁移源，不致因缓存已空而回退到空壳 expected_client。
         """
         pairing = await database_sync_to_async(self._pairing.get_status)(instance)
         if pairing.status != Pairing.STATUS_PAIRED or not pairing.device_token:
@@ -205,7 +207,17 @@ class ChatConnectionPool:
             new_client = self._client_factory(
                 url, pairing.device_token, identity=identity, scopes=scopes,
             )
-            await new_client.connect()  # 握手有界（chat_client.connect_timeout）
+            try:
+                await new_client.connect()  # 握手有界（chat_client.connect_timeout）
+            except Exception:
+                # codex #219 十五轮 P2-208：connect 失败时 replaced 已被 pop+aclose，若就此抛错，
+                # 下次 reacquire 见空缓存 → replaced=None → consumer 回退到空壳 expected_client 迁
+                # 订阅者，把仍挂在 replaced 上的真实订阅者丢在被关掉的 client 上。故把 replaced 放回
+                # 缓存（best-effort）：下次 reacquire 从缓存取到它作迁移源（届时再走 189-195 驱逐
+                # 路径，幂等——aclose 已 _routes.clear() 可重复、pop 再删一次无碍）。
+                if replaced is not None and self._clients.get(key) is None:
+                    self._clients[key] = replaced
+                raise
             self._clients[key] = new_client
             return new_client, replaced
 

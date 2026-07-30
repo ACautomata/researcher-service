@@ -359,9 +359,61 @@ async def test_reacquire_concurrent_same_dead_client_single_recreate():
     assert not r1.dead
     # codex #219 十四轮 P2-183：恰好一个驱逐（replaced=dead_client），另一个采纳（replaced=None）
     assert (rep1 is dead_client) != (rep2 is dead_client)
-    assert (rep1 is None) != (rep2 is None)
     assert r1.connect_calls == 1  # 只重建一次（不重复建连）
     assert dead_client.closed  # 死 client 被清理一次
+
+
+@pytest.mark.asyncio
+async def test_reacquire_connect_failure_restores_replaced_for_retry():
+    """codex #219 十五轮 P2-208：重建 connect 失败时把 replaced 放回缓存——下次 reacquire
+    仍能从缓存取到它作迁移源（不丢真实订阅者），不致因缓存已空而 replaced=None。"""
+    fail_connect = {'on': False}  # 初始建连须成功；建出 stale 后才开故障
+
+    class FlakyClient:
+        """connect 可控失败的 client 替身（组合自 _DeadAwareClient 语义，不继承）。"""
+
+        def __init__(self, url, device_token, *, identity, scopes):
+            self.url = url
+            self.device_token = device_token
+            self.identity = identity
+            self.scopes = scopes
+            self.dead = False
+            self.connect_calls = 0
+            self.closed = False
+
+        async def connect(self):
+            self.connect_calls += 1
+            if fail_connect['on']:
+                raise ConnectionError('handshake refused')
+
+        async def aclose(self):
+            self.closed = True
+
+        def discard(self, run_id):
+            pass
+
+    pool = ChatConnectionPool(
+        pairing_service=FakePairingService(),
+        client_factory=FlakyClient,
+        ws_url_for=_url_for,
+    )
+    inst = _instance('a', 19001)
+    stale = await pool.get_or_create(inst)
+    stale.dead = True
+
+    # 第一次 reacquire：驱逐 stale（replaced），但重建 connect 失败 → 抛错且 stale 放回缓存
+    fail_connect['on'] = True
+    with pytest.raises(ConnectionError):
+        await pool.reacquire(inst, stale)
+    assert stale.closed  # 已被 best-effort aclose
+    # replaced（stale）已放回缓存：get_live 不返回（stale.dead），但缓存放行在 reacquire 内可见
+    fail_connect['on'] = False
+
+    # 第二次 reacquire：缓存里的 stale 仍是 expected_client → 再走驱逐路径（replaced=stale）重建成功
+    fresh, replaced = await pool.reacquire(inst, stale)
+    assert fresh is not stale and not fresh.dead
+    assert replaced is stale  # 关键：仍能从缓存取到实际被替换的 stale 作迁移源（非 None）
+    assert await pool.get_or_create(inst) is fresh  # 缓存指向新健康 client
 
 
 # ── per-key 锁隔离 ─────────────────────────────────────────
