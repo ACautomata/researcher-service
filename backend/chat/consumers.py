@@ -147,7 +147,9 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
           与 ChatClientError/ChatSendError **均不相交**（websockets 16.x 层级），它本身就是
           连接已断的充分证据（帧未发出、网关未起 run，可安全重取）。业务拒绝（rate limit 的
           ChatSendError、网关 ack ok:false）不传 evidence → 不重取，边界不变。
-        成功则切换 self._client 并把**所有**审批订阅者迁到新 client（codex #219 P2，见下）。
+        重取前先经 pool.evict 驱逐缓存的濒死 client（codex #219 四轮 P2-891）：否则 pool 快路径
+        在 dead 未置位时返回同一 client，identity check 放弃恢复。成功则切换 self._client 并把
+        **所有**审批订阅者迁到新 client（codex #219 P2，见下）。
         重取本身失败（NotPaired/握手失败）也返回 None，由调用方发 error 帧。返回新 client 或 None。
 
         codex #219 P1：换 client 后补拉 list_pending_approvals——订阅只投递**未来**事件，
@@ -165,6 +167,11 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
         if not (client.dead or isinstance(evidence, ConnectionClosed)):  # dead 或 RPC 已证连接断
             return None
         try:
+            # codex #219 四轮 P2-891：先把缓存的濒死 client 逐出 pool 再 get_or_create。
+            # evidence（ConnectionClosed）证明已死但 dead 未置位时，pool 快路径（pool.py:80-82）
+            # 只看 dead==False 会返回**同一个** client，下面 identity check 便放弃恢复。evict
+            # 强制 pool 走慢路径重建；client.dead 已置位时 evict 是幂等 noop（pool 本就会重建）。
+            await ChatFleet.get().evict(self._instance)
             fresh = await ChatFleet.get().get_or_create(self._instance)
         except Exception:  # pylint: disable=broad-exception-caught
             return None  # 重取失败：保持原错误路径，调用方发 error 帧
@@ -256,7 +263,11 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
                         idempotency_key=idempotency_key,  # codex #219 P1：复用同 key 幂等重试
                     )
                 except ChatSendTransmittedError:
-                    # 重试这条也撞上已发出 ack 丢失：不再嵌套重试，发终态 error
+                    # 重试这条也撞上已发出 ack 丢失：不再嵌套重发，发终态 error。
+                    # codex #219 四轮 P2-895：但仍须**再重取**——fresh 发出帧后已死，迁移过去的
+                    # 全体审批订阅者还挂在死 fresh 上；被收下的 run 若起审批不经新连接补拉会阻塞。
+                    # 故做与外层 transmitted 分支相同的连接/订阅者恢复（仍不重发 chat.send）。
+                    await self._reacquire_client()
                     await self.send_json({
                         'type': 'error',
                         'message': '连接中断，发送结果未知：若已发出请稍后在历史确认，否则请重试',

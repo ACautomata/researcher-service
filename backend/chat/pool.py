@@ -134,6 +134,28 @@ class ChatConnectionPool:
             return client
         return None
 
+    async def evict(self, instance) -> None:
+        """把该容器当前缓存的 client 逐出池（best-effort aclose 清理），下次 get_or_create 重建。
+
+        codex #219 四轮 P2-891：consumer 的 RPC 在刚关闭的 socket 上 ws.send() 抛原生
+        ConnectionClosed——连接已断的充分证据，但后台 recv task 尚未跑异常处理器置
+        client.dead（竞态窗口）。get_or_create 快路径（pool.py:80-82）只看 dead==False，
+        会返回同一个濒死 client，consumer 的 identity check（fresh is client）据此放弃恢复。
+        故 consumer 重取前先 evict 把该 client 逐出缓存，get_or_create 才走慢路径重建新 client。
+        幂等：无缓存 / 未配对（查不到 key）时 noop 不抛。
+        """
+        pairing = await database_sync_to_async(self._pairing.get_status)(instance)
+        if pairing.status != Pairing.STATUS_PAIRED or not pairing.device_token:
+            return
+        key = (self._ws_url_for(instance), pairing.device_token)
+        async with self._key_lock(key):  # 与 get_or_create 慢路径同锁，避免竞态重复建连
+            client = self._clients.pop(key, None)
+        if client is not None:
+            try:
+                await client.aclose()
+            except Exception:  # pylint: disable=broad-exception-caught
+                pass
+
     @staticmethod
     def _build_identity(pairing) -> DeviceIdentity | None:
         """从 Pairing 行重建 DeviceIdentity。三要素缺一不可——缺任意一个返回 None

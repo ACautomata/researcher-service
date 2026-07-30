@@ -226,6 +226,61 @@ async def test_dead_client_is_evicted_and_recreated():
     assert c1.closed  # 旧死连接 best-effort aclose 清理
 
 
+# ── codex #219 四轮 P2-891：evidence 证明死但 dead 未置位时的驱逐 ────────────
+# RPC 在刚关闭的 socket 上 ws.send() 抛原生 ConnectionClosed（连接已断的充分证据），但
+# 后台 recv task 尚未跑异常处理器置 client.dead——竞态窗口。此时 get_or_create 快路径
+# （pool.py:80-82）只看 dead==False，会返回同一个濒死 client，consumer 的 identity check
+# 放弃恢复。须先 evict 把该 client 逐出缓存，再 get_or_create 才走慢路径重建。
+
+
+@pytest.mark.asyncio
+async def test_evict_removes_live_client_so_get_or_create_recreates():
+    """codex #219 四轮 P2-891：evict 把 dead 未置位的 client 逐出缓存，get_or_create 重建新 client。"""
+    pool = ChatConnectionPool(
+        pairing_service=FakePairingService(),
+        client_factory=_DeadAwareClient,
+        ws_url_for=_url_for,
+    )
+    inst = _instance('a', 19001)
+    c1 = await pool.get_or_create(inst)
+    assert c1.connect_calls == 1
+    assert c1.dead is False  # 竞态：dead 未置位（ConnectionClosed 先于 recv task 异常处理器）
+
+    await pool.evict(inst)  # evidence 证明已死 → 逐出缓存
+    assert c1.closed  # best-effort aclose 清理（对齐死连接驱逐语义）
+
+    c2 = await pool.get_or_create(inst)
+    assert c2 is not c1  # 不再是同一个濒死 client
+    assert c2.connect_calls == 1
+    assert not c2.dead
+
+
+@pytest.mark.asyncio
+async def test_evict_without_cached_client_is_noop():
+    """evict 幂等：pool 无该容器缓存 client 时不抛错、不建连。"""
+    pool = ChatConnectionPool(
+        pairing_service=FakePairingService(),
+        client_factory=_DeadAwareClient,
+        ws_url_for=_url_for,
+    )
+    inst = _instance('a', 19001)
+    await pool.evict(inst)  # 无缓存 → noop，不抛
+    # get_or_create 正常建连（确认 evict 未破坏状态）
+    c = await pool.get_or_create(inst)
+    assert c.connect_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_evict_unpaired_is_noop():
+    """evict 未配对容器：get_status 非 paired → 找不到 key，noop 不抛。"""
+    pool = ChatConnectionPool(
+        pairing_service=FakePairingService(status='pending', device_token=''),
+        client_factory=_DeadAwareClient,
+        ws_url_for=_url_for,
+    )
+    await pool.evict(_instance('a', 19001))  # 未配对 → noop，不抛 NotPaired
+
+
 # ── per-key 锁隔离 ─────────────────────────────────────────
 
 @pytest.mark.asyncio
