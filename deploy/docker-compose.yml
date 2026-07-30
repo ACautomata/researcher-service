@@ -14,8 +14,9 @@
 services:
   openclaw-gateway:
     container_name: openclaw-gateway
-    image: ${OPENCLAW_IMAGE:-acautomata/openclaw-docker-cn-im:latest}   # 生产建议 pin digest（R6: latest=2026.7.1）
-    # 以 root 启动便于 init.sh chown；gateway 进程随后被降权到 node(uid 1000)
+    image: ${OPENCLAW_IMAGE:-ghcr.io/openclaw/openclaw:2026.6.34-browser}   # 官方稳定 browser 变体（ADR 0003）；生产建议 pin digest
+    # 以 root 运行：A3 delete cleanup（orchestrator）依赖容器还在时以 root chown home 给 host uid；
+    # 官方镜像本以 node(1000) 运行，收紧到 node 需配套重做 cleanup（ADR 0003 后续），本次不动。
     user: ${OPENCLAW_RUN_USER:-0:0}
     cap_add: [CHOWN, SETUID, SETGID, DAC_OVERRIDE]
     environment:
@@ -26,7 +27,8 @@ services:
       LANG: en_US.UTF-8
       LANGUAGE: en_US:en
       LC_ALL: en_US.UTF-8
-      # --- 关闭 init.sh 的 config/model 同步（关键：防覆写挂载的 openclaw.json / 防明文写凭证）---
+      # --- sync flag 全关（R6 §3：防覆写挂载的 openclaw.json / 防明文写凭证）---
+      # 官方镜像无 init.sh 不读这些 flag（对官方无效、无害）；保留兼容 acautomata 谱系。
       SYNC_OPENCLAW_CONFIG: "false"
       SYNC_EXTENSIONS_ON_START: "false"
       SYNC_EXTENSIONS_MODE: "none"
@@ -57,7 +59,7 @@ services:
       - ${RESEARCHER_DIR:-../researcher}:/home/node/.openclaw
       # 本仓库维护的精简版 openclaw.json 覆盖 researcher 的同名文件（配置单一来源在本仓库，
       # researcher 不动；精简：删 channels/bindings/lossless-claw，留 browser/memory-core/minimax/memory-wiki）
-      - ./openclaw.json:/home/node/.openclaw/openclaw.json
+      - ./openclaw.json:/home/node/.openclaw/openclaw.json:ro
       # 运行时 state/logs 用匿名卷，避免污染宿主 researcher git 树（R6 风险残留）
       - openclaw-state:/home/node/.openclaw/state
       - openclaw-logs:/home/node/.openclaw/logs

@@ -54,8 +54,8 @@ wiki / models / chat app 仅建骨架，留后续 ticket。
 | 配置 | env | 默认 | 说明 |
 |---|---|---|---|
 | `ROOT` | `OPENCLAW_FLEET_ROOT` | `<repo>/fleet` | `instances/<name>/` 落盘根 |
-| `TEMPLATE` | `OPENCLAW_TEMPLATE_DIR` | `/srv/openclaw/template/researcher` | 共享只读模板（`cp -a` 预填充源，需 `git clone ACautomata/researcher`） |
-| `IMAGE` | `OPENCLAW_IMAGE` | `acautomata/openclaw-docker-cn-im:latest` | 镜像 tag（生产建议 pin digest） |
+| `TEMPLATE` | `OPENCLAW_TEMPLATE_DIR` | `<repo>/researcher` | 共享只读模板（`cp -a` 预填充源，需 `git clone ACautomata/researcher`）；dev 默认与本仓库并排克隆的 researcher，**生产/Docker 必填**绝对路径（`prod.py` `validate_prod_env` 缺则启动 fail-fast，详见下方 wire 段） |
+| `IMAGE` | `OPENCLAW_IMAGE` | `ghcr.io/openclaw/openclaw:2026.6.34-browser` | 镜像 tag（官方 browser 变体，ADR 0003；生产建议 pin digest） |
 | `LLM_API_KEY` | `LLM_API_KEY` | — | 全面板共享 LLM key（env 注入容器，不落盘） |
 
 端口池 `19000–19999`（避开单容器 compose 占用的 18789）。容器命名 `openclaw-gw-<name>`，label
@@ -71,7 +71,7 @@ JSON 内仅 `${GATEWAY_TOKEN}` 占位（不落盘）。
 
 ```bash
 export OPENCLAW_TEMPLATE_DIR=/path/to/researcher     # git clone ACautomata/researcher
-export OPENCLAW_IMAGE=acautomata/openclaw-docker-cn-im:latest
+export OPENCLAW_IMAGE=ghcr.io/openclaw/openclaw:2026.6.34-browser
 export LLM_API_KEY=sk-...
 python -m pytest containers/tests/test_integration.py -v
 ```
@@ -88,16 +88,16 @@ chat.send 冒烟、事件流 schema、只读 RPC schema、exec 审批路径 sche
 
 | env | 用途 |
 |---|---|
-| `OPENCLAW_IMAGE` | **可选**（缺省默认 `ghcr.io/openclaw/openclaw:2026.6.34-browser`，覆盖 #94 fork 默认） |
-| `OPENCLAW_TEMPLATE_DIR` | 容器 home 模板源（bind-mount 白名单路径，非 `/tmp`） |
+| `OPENCLAW_IMAGE` | **可选**（缺省默认 `ghcr.io/openclaw/openclaw:2026.6.34-browser`，与 #94 smoke 同为官方 browser 变体） |
+| `OPENCLAW_TEMPLATE_DIR` | 容器 home 模板源（bind-mount 白名单路径，非 `/tmp`）——**生产/Docker 必填**（绝对路径），dev 默认 `<repo>/researcher`，`prod.py` 缺则启动 fail-fast |
 | `LLM_API_KEY` | 全面板共享 LLM key（注入容器，不落盘） |
 
 **门控——integration marker（非 `RUN_INTEGRATION`）**：测试文件 `pytestmark = pytest.mark.integration`，
 **无 skip**，env 缺失直接 fail（强制环境就绪，不靠 skip 兜底）。CI 双轨（`.github/workflows/ci.yml`）：
 `backend-unit` job 跑 `-m "not integration"` 排除真容器；`integration` job env 齐备时跑 `-m "integration"` 真验证。
 上方 `containers/tests/test_integration.py`（#94 smoke）共用同一 `pytestmark = pytest.mark.integration` 门控
-（#157 统一重构自旧的 daemon 探测+skip）——两者仅覆盖面（容器生命周期/配对/chat/wiki 全链路 vs. chat
-wire schema）与镜像（fork 默认 vs. ghcr 官方）不同，门控一致。
+（#157 统一重构自旧的 daemon 探测+skip）——两者镜像已统一为官方 browser 变体（ADR 0003），
+仅覆盖面（容器生命周期/配对/chat/wiki 全链路 vs. chat wire schema）不同，门控一致。
 
 **本地怎么跑**（须 docker daemon + `OPENCLAW_TEMPLATE_DIR`/`LLM_API_KEY`；`OPENCLAW_IMAGE` 可选用默认）：
 

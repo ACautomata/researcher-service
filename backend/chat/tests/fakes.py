@@ -48,7 +48,10 @@ class FakeTransport:
     """connect(url) → async CM 产出按脚本应答的 fake ws。"""
 
     def __init__(self, result_frame, pre_challenge_frames=None, pre_result_frames=None,
-                 error: Exception | None = None):
+                 error: Exception | None = None, result_frames=None):
+        # result_frames：序列模式——每次 connect 按序取一帧（最后帧复用于超额调用）。
+        # 单 result_frame 时退化为「每次同帧」（向后兼容既有构造器与脚本）。
+        self._result_frames = result_frames
         self._result_frame = result_frame
         self._pre_challenge = pre_challenge_frames or []
         self._pre_result = pre_result_frames or []
@@ -80,6 +83,15 @@ class FakeTransport:
         )
 
     @classmethod
+    def sequence(cls, frames, **kwargs):
+        """序列模式：每次 connect 按序产出 frames[i]（超额复用最后一帧）。
+
+        供「同一次 ensure_paired 内两次握手」测试——如自动 approve：第 1 次 PAIRING_REQUIRED、
+        approve 后第 2 次 hello-ok。frames 为完整 result 帧 dict 列表。
+        """
+        return cls(result_frame=frames[-1], result_frames=list(frames), **kwargs)
+
+    @classmethod
     def connect_error(cls, message='connect failed', **kwargs):
         return cls(
             result_frame={'type': 'res', 'ok': False,
@@ -87,12 +99,18 @@ class FakeTransport:
             **kwargs,
         )
 
+    def _current_frame(self):
+        if self._result_frames:
+            idx = min(self.connect_calls - 1, len(self._result_frames) - 1)
+            return self._result_frames[idx]
+        return self._result_frame
+
     # ---- transport 协议 ----
     def __call__(self, url):
         self.connect_calls += 1
         if self._error is not None:
             raise self._error
-        return _CM(_FakeWs(self._pre_challenge, self._result_frame, self._pre_result))
+        return _CM(_FakeWs(self._pre_challenge, self._current_frame(), self._pre_result))
 
 
 class _CM:

@@ -123,16 +123,48 @@ OAUTH_PROVIDERS: dict = {}
 # ROOT：instances/<name>/ 落盘根（开发默认 <repo>/fleet，生产 /srv/openclaw）
 # TEMPLATE：共享只读 researcher 模板（cp -a 预填充源，spec §5.1/§5.6）
 # TEMPLATE_JSON：openclaw.json 模板来源（deploy/openclaw.json，与单容器 compose 共用一份）
-# IMAGE：镜像 tag（生产建议 pin digest，spec §5.4 / r27 §4.1）
+# IMAGE：镜像 tag（官方稳定 browser 变体，ADR 0003；生产建议 pin digest，spec §5.4 / r27 §4.1）
 # 端口池 19000–19999（避开单容器 compose 占用的 18789，spec §5.3）
 # ⚠ 安全：控制面经 docker.from_env() 挂 /var/run/docker.sock（等价 root；本地/可信部署可接受，
 #   生产应限制 Django 网络面或改用 rootless/远程 TLS daemon —— spec §5.4 明示风险）。
 FLEET_ROOT = Path(os.environ.get('OPENCLAW_FLEET_ROOT', str(BASE_DIR.parent / 'fleet')))
+# 模板单一来源：researcher 仓库克隆（含 workspace/wiki/skills，spec §5.6 cp -a 预填充源）。
+# 默认 BASE_DIR.parent/'researcher' = 与本仓库并排克隆的 researcher（对齐
+# deploy/docker-compose.yml 与 deploy/.env.example 的 RESEARCHER_DIR=../researcher 主约定，
+# compose 相对路径基准为 deploy/）。researcher 不含 fleet 自身 → HomeProvisioner.copytree
+# 无递归（区别于把 root/TEMPLATE 指向仓库根本身）。
+#
+# ⚠ 此默认仅适用开发/CI。生产部署（含 Docker 镜像化后端）**必须**显式设
+# ``OPENCLAW_TEMPLATE_DIR``（绝对路径到运维侧部署的 researcher 克隆，或共享卷挂载点）；
+# ``prod.py`` 启动时 fail-fast 校验。镜像内 ``BASE_DIR`` 是容器内路径，``<repo>/researcher``
+# 在打包后的后端镜像里必然不存在，不能作为生产兜底。
+# CI 经 OPENCLAW_TEMPLATE_DIR=/tmp/fleet-template（rsync 干净模板）覆盖。
+TEMPLATE_DEFAULT = str(BASE_DIR.parent / 'researcher')
+# codex P2 :141：模板路径须兑现 deploy/.env.example 承诺的 RESEARCHER_DIR。
+# 优先级：OPENCLAW_TEMPLATE_DIR（绝对路径，CI/生产覆盖）> RESEARCHER_DIR（deploy/ 相对，
+# 与 compose/.env.example 同基准）> 默认 <repo>/researcher。相对 RESEARCHER_DIR 相对
+# <repo>/deploy 解析（与 .env.example 注释「相对路径基准是 deploy/」一致），否则用户设了
+# RESEARCHER_DIR 仍 copytree 到默认不存在路径 → 容器创建卡 creating（本 PR 要修的同类错配）。
+_DEPLOY_DIR = BASE_DIR.parent / 'deploy'
+_OPENCLAW_TEMPLATE_DIR_ENV = os.environ.get('OPENCLAW_TEMPLATE_DIR')
+_RESEARCHER_DIR_ENV = os.environ.get('RESEARCHER_DIR')
+if _OPENCLAW_TEMPLATE_DIR_ENV:
+    _FLEET_TEMPLATE = _OPENCLAW_TEMPLATE_DIR_ENV
+elif _RESEARCHER_DIR_ENV:
+    _researcher_path = Path(_RESEARCHER_DIR_ENV)
+    _FLEET_TEMPLATE = str(
+        _researcher_path if _researcher_path.is_absolute() else _DEPLOY_DIR / _researcher_path,
+    )
+else:
+    _FLEET_TEMPLATE = TEMPLATE_DEFAULT
+# 折叠 deploy/../（相对 RESEARCHER_DIR 解析产生的 ..），使 ../researcher → <repo>/researcher，
+# 与默认值同形；不 resolve 符号链接，避免改变调用方意图路径。
+_FLEET_TEMPLATE = os.path.normpath(_FLEET_TEMPLATE)
 OPENCLAW_FLEET = {
     'ROOT': str(FLEET_ROOT),
-    'TEMPLATE': os.environ.get('OPENCLAW_TEMPLATE_DIR', '/srv/openclaw/template/researcher'),
+    'TEMPLATE': _FLEET_TEMPLATE,
     'TEMPLATE_JSON': str(BASE_DIR.parent / 'deploy' / 'openclaw.json'),
-    'IMAGE': os.environ.get('OPENCLAW_IMAGE', 'acautomata/openclaw-docker-cn-im:latest'),
+    'IMAGE': os.environ.get('OPENCLAW_IMAGE', 'ghcr.io/openclaw/openclaw:2026.6.34-browser'),
     'PORT_POOL_START': 19000,
     'PORT_POOL_END': 19999,
 }

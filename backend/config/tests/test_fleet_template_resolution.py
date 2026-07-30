@@ -1,0 +1,105 @@
+"""settings.OPENCLAW_FLEET['TEMPLATE'] 模板路径解析回归测试 —— codex P2 :141。
+
+验证 deploy/.env.example 承诺的 RESEARCHER_DIR 被 fleet 控制面兑现，而非被无视后
+copytree 到默认不存在路径（→ 容器卡 creating，本 PR 要修的同类配置错配）。
+
+优先级：OPENCLAW_TEMPLATE_DIR（绝对，CI/生产）> RESEARCHER_DIR（deploy/ 相对或绝对）
+> 默认 <repo>/researcher。相对 RESEARCHER_DIR 相对 <repo>/deploy 解析，对齐 .env.example
+注释「相对路径基准是 compose 文件所在目录（deploy/）」。
+"""
+import importlib
+import os
+
+import pytest
+from django.core.exceptions import ImproperlyConfigured
+
+from config.settings import base
+from config.settings._validation import validate_prod_env
+
+_ENV_KEYS = ('OPENCLAW_TEMPLATE_DIR', 'RESEARCHER_DIR')
+
+
+@pytest.fixture(autouse=True)
+def _isolate_template_env():
+    """每个用例前后清空/还原受测 env 并重载 base，避免污染其它读取 base 模块的测试。"""
+    saved = {k: os.environ.get(k) for k in _ENV_KEYS}
+    for k in _ENV_KEYS:
+        os.environ.pop(k, None)
+    yield
+    for k, v in saved.items():
+        if v is not None:
+            os.environ[k] = v
+        else:
+            os.environ.pop(k, None)
+    importlib.reload(base)  # 还原 base 模块到原始 env 解析状态
+
+
+def _reload_with_env(**env) -> object:
+    for k, v in env.items():
+        os.environ[k] = v
+    return importlib.reload(base)
+
+
+def test_researcher_dir_absolute_is_used_verbatim():
+    """绝对 RESEARCHER_DIR 直接作为模板路径（host 上 copytree 源）。"""
+    mod = _reload_with_env(RESEARCHER_DIR='/opt/custom/researcher')
+    assert mod.OPENCLAW_FLEET['TEMPLATE'] == '/opt/custom/researcher'
+
+
+def test_researcher_dir_relative_resolved_against_deploy_dir():
+    """相对 RESEARCHER_DIR 相对 <repo>/deploy 解析，与 .env.example 注释一致。"""
+    mod = _reload_with_env(RESEARCHER_DIR='../researcher')
+    deploy_dir = mod.BASE_DIR.parent / 'deploy'
+    # ../researcher 从 deploy/ → <repo>/researcher，与默认 TEMPLATE_DEFAULT 同位（规范路径）
+    assert os.path.normpath(mod.OPENCLAW_FLEET['TEMPLATE']) == os.path.normpath(str(deploy_dir / '..' / 'researcher'))
+    assert mod.OPENCLAW_FLEET['TEMPLATE'] == mod.TEMPLATE_DEFAULT
+
+
+def test_openclaw_template_dir_precedence():
+    """OPENCLAW_TEMPLATE_DIR 优先于 RESEARCHER_DIR（CI/生产绝对路径覆盖）。"""
+    mod = _reload_with_env(OPENCLAW_TEMPLATE_DIR='/ci/fleet-template',
+                           RESEARCHER_DIR='/should/be/ignored')
+    assert mod.OPENCLAW_FLEET['TEMPLATE'] == '/ci/fleet-template'
+
+
+def test_default_when_neither_set():
+    """两者皆未设 → 默认 <repo>/researcher（回归默认路径仍工作）。"""
+    mod = _reload_with_env()
+    assert mod.OPENCLAW_FLEET['TEMPLATE'] == mod.TEMPLATE_DEFAULT
+
+
+@pytest.mark.parametrize('rel', ['../researcher', './researcher', 'researcher'])
+def test_relative_researcher_dir_stays_within_repo_tree(rel):
+    """任意相对 RESEARCHER_DIR 都相对 deploy/ 解析（不再落到默认不存在路径）。"""
+    mod = _reload_with_env(RESEARCHER_DIR=rel)
+    deploy_dir = mod.BASE_DIR.parent / 'deploy'
+    assert os.path.normpath(mod.OPENCLAW_FLEET['TEMPLATE']) == os.path.normpath(str(deploy_dir / rel))
+
+
+def test_default_template_path_is_dev_fallback_with_prod_fail_fast():
+    """2902641 决策：base.py 模板默认是 dev fallback ``<repo>/researcher``（与本仓库并排
+    克隆的 researcher），生产/Docker 部署必须经 ``OPENCLAW_TEMPLATE_DIR`` 显式注入绝对路径
+    （prod.py 启动时 ``validate_prod_env`` fail-fast 校验缺失/相对路径 → ImproperlyConfigured）。
+
+    历史 codex P1 :287325b 期望"默认是 /srv/openclaw/template/researcher"，但 2902641
+    选 path 2：保持默认是 dev-friendly 路径 + 强制生产注入（更安全，旧部署漏配即启动拒）。
+    该契约需要默认 dev 工作流仍能 ``copytree`` 找到 researcher（dev 默认并排克隆
+    ``../researcher``），生产走 validator fail-fast 兜底——两契约并存。
+    """
+    mod = _reload_with_env()
+    # OPENCLAW_TEMPLATE_DIR 未设时，base.py 默认是 <repo>/researcher（dev fallback）。
+    # 生产/Docker 部署必须经 OPENCLAW_TEMPLATE_DIR 注入绝对路径（validator 强制）。
+    assert mod.OPENCLAW_FLEET['TEMPLATE'] == mod.TEMPLATE_DEFAULT
+    assert mod.OPENCLAW_FLEET['TEMPLATE'] == str(mod.BASE_DIR.parent / 'researcher')
+
+    # prod fail-fast 兜底：OPENCLAW_TEMPLATE_DIR 缺失/相对路径仍拒启动。
+    with pytest.raises(ImproperlyConfigured):
+        validate_prod_env({
+            'DJANGO_ALLOWED_HOSTS': 'example.test',
+            # OPENCLAW_TEMPLATE_DIR 故意缺失
+        })
+    with pytest.raises(ImproperlyConfigured):
+        validate_prod_env({
+            'DJANGO_ALLOWED_HOSTS': 'example.test',
+            'OPENCLAW_TEMPLATE_DIR': 'researcher',  # 相对路径
+        })

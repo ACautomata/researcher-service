@@ -21,7 +21,10 @@ from .constants import (
 )
 from .runtime import ContainerInfo, ContainerSpec, container_name
 
-# 4 个 sync flag 全关（R6 §3：防覆写挂载的 openclaw.json / 防明文写凭证）
+# 4 个 sync flag 全关（R6 §3：防覆写挂载的 openclaw.json / 防明文写凭证）。
+# 官方镜像 entrypoint = tini 直起 gateway，无 init.sh、无 sync 逻辑，不读这些 flag（对官方
+# 无效、无害）；保留以兼容 acautomata 谱系——用户可经 OPENCLAW_IMAGE 切回 fork，其 init.sh
+# 仍会读这些 flag 做配置同步。
 _SYNC_FLAGS_OFF = {
     'SYNC_OPENCLAW_CONFIG': 'false',
     'SYNC_EXTENSIONS_ON_START': 'false',
@@ -86,6 +89,11 @@ class DockerRuntime:
             'environment': environment,
             'volumes': {
                 spec.home_dir: {'bind': HOME_BIND, 'mode': 'rw'},
+                # openclaw.json 挂 ro（spec §5.2：防容器内篡改配置）。
+                # 官方镜像 entrypoint = tini 直起 gateway，无 init.sh、无 chown/sync 逻辑（ADR 0003），
+                # 故 acautomata fork init.sh ``chown -R`` 撞 ro 的崩溃路径在官方镜像上不成立——ro 不会崩。
+                # 所有配置写入都在 host 侧（orchestrator 原子 os.replace / create 写盘），gateway 只
+                # read-only watch 热加载（r28）；host 侧写透过 bind 传播给容器，不受 ro 影响。
                 spec.config_path: {'bind': CONFIG_BIND, 'mode': 'ro'},
             },
             'ports': {f'{GATEWAY_INTERNAL_PORT}/tcp': ('127.0.0.1', spec.host_port)},
@@ -140,11 +148,25 @@ class DockerRuntime:
         # fire-and-forget（detach=True，wiki compile）。供 delete cleanup：容器以 root 跑，
         # bind-mount home 内由容器写入的文件属主为 root，须容器还在（root 权限）同步 chown 给
         # host uid 后再 stop/remove/rmtree——否则 host 非 root rmtree PermissionError（A3）。
+        #
+        # codex P2 :66（2902641 review）：docker SDK 的 exec_run 在命令退出码非零时返回
+        # ``ExecResult``（exit_code/output），并不抛异常。原实现 discard 返回值会让 approve
+        # CLI 失败（例如 token 不匹配 / request ID 过期）仍报成功，触发重握手 → 再生成新
+        # request ID → 原始 actionable pending 被替换 → 配对 churn 无限循环。这里捕获 exit_code
+        # 非零即抛 RuntimeError（含 output 片段便于排错），让 caller（ExecPairingApprover）
+        # 走 2902641 已加的 STATUS_ERROR 路径。
         try:
             c = self._client().containers.get(container_name(name))
         except NotFound:
             return
-        c.exec_run(cmd)
+        result = c.exec_run(cmd)
+        if result.exit_code != 0:
+            output = getattr(result, 'output', b'') or b''
+            output_str = output.decode('utf-8', errors='replace').strip() if hasattr(output, 'decode') else str(output)
+            raise RuntimeError(
+                f'exec_sync failed in {name}: exit_code={result.exit_code} '
+                f'cmd={cmd!r} output={output_str[:500]!r}',
+            )
 
     @staticmethod
     def _to_info(c) -> ContainerInfo:

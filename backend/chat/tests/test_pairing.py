@@ -10,7 +10,7 @@ PairingService.ensure_paired(instance)：加载/创建设备身份 → 握手 �
 import pytest
 
 from chat.models import Pairing
-from chat.pairing import PairingService
+from chat.pairing import ExecPairingApprover, PairingService
 from chat.pairing_ws import PairingError, PairingRequired
 from chat.tests.fakes import FakeTransport
 from containers.models import Instance
@@ -121,7 +121,152 @@ def test_force_repair_re_handshakes_even_when_already_paired(instance):
 # 身份持久化后复用（test_pair_generates_persistent_identity_reused_across_calls）+ force_repair。
 
 
+# ---------------------------- 自动 approve（面板默认开启）----------------------------
+
+
+class _FakeApprover:
+    """记录 approve 调用；可注入失败以测 approve 异常路径。"""
+
+    def __init__(self, fail_with: Exception | None = None):
+        self.calls: list[tuple[str, str]] = []
+        self._fail_with = fail_with
+
+    def approve(self, instance_name: str, request_id: str) -> None:
+        self.calls.append((instance_name, request_id))
+        if self._fail_with is not None:
+            raise self._fail_with
+
+
+def test_auto_approve_pairs_in_single_call(instance):
+    """注入 approver：PAIRING_REQUIRED 后自动 approve + 同 deviceId 重握手 → 一次 ensure_paired 即 paired。"""
+    transport = FakeTransport.sequence([
+        FakeTransport.pairing_required(request_id='req-auto')._result_frame,
+        FakeTransport.hello_ok(device_token='dt-approved')._result_frame,
+    ])
+    approver = _FakeApprover()
+    svc = PairingService(transport=transport, approver=approver)
+    pairing = svc.ensure_paired(instance)
+
+    assert pairing.status == Pairing.STATUS_PAIRED
+    assert pairing.device_token == 'dt-approved'
+    assert approver.calls == [(instance.name, 'req-auto')]   # approve 用首次 reqId
+    assert transport.connect_calls == 2                       # 握手两次：pending → hello-ok
+
+
+def test_auto_approve_failure_falls_back_to_pending(instance):
+    """approve 异常（容器未起/CLI 失败）→ 落 pending + raise PairingRequired（调用方给重试路径）。"""
+    transport = FakeTransport.pairing_required(request_id='req-fail')
+    approver = _FakeApprover(fail_with=RuntimeError('container not running'))
+    svc = PairingService(transport=transport, approver=approver)
+    with pytest.raises(PairingRequired):
+        svc.ensure_paired(instance)
+
+    pairing = Pairing.objects.get(instance=instance)
+    assert pairing.status == Pairing.STATUS_PENDING
+    assert pairing.pairing_request_id == 'req-fail'
+    assert transport.connect_calls == 1   # 仅首次握手，未重握手
+
+
+def test_auto_approve_pairing_error_marks_status_error_not_pending(instance):
+    """codex P2 :f617d25 review（pairing.py:258）：approve 抛 PairingError（来自
+    ExecPairingApprover 把 exec_sync RuntimeError 转译）→ 保留 STATUS_ERROR + raise PairingError，
+    不降级为 STATUS_PENDING + PairingRequired。降级会让 admin 看到 202 actionable 但实际是
+    永久失败（token 不匹配 / request ID 过期 / 网关断连），后续 retry 只需 force_repair 重置
+    attempt_version，而非「再试一次就过」。RuntimeError 路径仍走 pending fallback（transient）。
+    """
+    transport = FakeTransport.pairing_required(request_id='req-perm-fail')
+    approver = _FakeApprover(
+        fail_with=PairingError('openclaw devices approve failed in demo: token mismatch'),
+    )
+    svc = PairingService(transport=transport, approver=approver)
+    with pytest.raises(PairingError) as exc_info:
+        svc.ensure_paired(instance)
+    # 错误消息保留底层 approver 细节，便于排错
+    assert 'token mismatch' in str(exc_info.value)
+
+    pairing = Pairing.objects.get(instance=instance)
+    # 核心不变量：STATUS_ERROR 而非 STATUS_PENDING，admin 看到这是 error 不是 actionable
+    assert pairing.status == Pairing.STATUS_ERROR
+    assert pairing.pairing_request_id == 'req-perm-fail'  # 保留 reqId 以便排错
+    assert transport.connect_calls == 1   # 仅首次握手，approve 失败未触发重握手
+
+
+def test_auto_approve_skipped_when_still_pending_after_approve(instance):
+    """approve 后重握手仍 PAIRING_REQUIRED（approve 未生效/竞态）→ 落最新 reqId + raise。"""
+    transport = FakeTransport.sequence([
+        FakeTransport.pairing_required(request_id='req-1')._result_frame,
+        FakeTransport.pairing_required(request_id='req-2')._result_frame,
+    ])
+    approver = _FakeApprover()
+    svc = PairingService(transport=transport, approver=approver)
+    with pytest.raises(PairingRequired) as exc_info:
+        svc.ensure_paired(instance)
+    assert exc_info.value.request_id == 'req-2'
+
+    pairing = Pairing.objects.get(instance=instance)
+    assert pairing.status == Pairing.STATUS_PENDING
+    assert pairing.pairing_request_id == 'req-2'
+
+
+def test_no_approver_keeps_legacy_pending_behavior(instance):
+    """无 approver：PAIRING_REQUIRED 保持原行为（落 pending + raise，不自动 approve）。"""
+    transport = FakeTransport.pairing_required(request_id='req-legacy')
+    approver = _FakeApprover()
+    svc = PairingService(transport=transport, approver=None)
+    with pytest.raises(PairingRequired):
+        svc.ensure_paired(instance)
+    assert not approver.calls  # 未注入 approver，不触发 approve
+
+
+def test_auto_approve_second_handshake_error_marks_status_error(instance):
+    """codex P2 :257：approve 成功但第二次握手抛 PairingError（网关断连/坏帧）→ 必须落
+    STATUS_ERROR 再 raise。
+
+    该 PairingError 源自外层 ``except PairingRequired`` 块内的 ``_approve_and_rehandshake``
+    调用，外层 sibling ``except PairingError`` 无法再捕获（Python：进入某 except handler 后，
+    同一 try 的其它 except 不再 consult）。原实现：异常透传 → API 返 502 且配对行停留在旧
+    状态（force_repair 时残留已撤销的 paired + 旧 deviceToken）。force_repair 下先建 paired
+    行以复现「stale paired」最坏情形。
+    """
+    # 先 paired + 旧 token（模拟 deviceToken 被网关撤销后的 force_repair）
+    PairingService(transport=FakeTransport.hello_ok(device_token='dt-old')).ensure_paired(instance)
+    assert Pairing.objects.get(instance=instance).status == Pairing.STATUS_PAIRED
+
+    transport = FakeTransport.sequence([
+        FakeTransport.pairing_required(request_id='req-auto')._result_frame,
+        FakeTransport.connect_error(message='gateway disconnected')._result_frame,
+    ])
+    approver = _FakeApprover()  # approve 成功
+    svc = PairingService(transport=transport, approver=approver)
+    with pytest.raises(PairingError):
+        svc.ensure_paired(instance, force_repair=True)
+
+    pairing = Pairing.objects.get(instance=instance)
+    assert pairing.status == Pairing.STATUS_ERROR          # 不再残留 paired（核心不变量）
+    assert approver.calls == [(instance.name, 'req-auto')]  # approve 确已执行（第二次握手才崩）
+    assert transport.connect_calls == 2                    # 首次 PAIRING_REQUIRED + 第二次崩
+
+
 # ---------------------------- 事件循环上下文（ASGI 安全）----------------------------
+
+
+def test_exec_pairing_approver_wraps_runtime_error_as_pairing_error():
+    """codex P2 :2902641 review（chat/pairing.py:66）：DockerRuntime.exec_sync 在 approve CLI
+    退出码非零时抛 RuntimeError（Phase 2.1 改）。ExecPairingApprover 必须转译为 PairingError，
+    让 PairingService 的 STATUS_ERROR 路径生效——否则 RuntimeError 透传 = 配对行停留在 stale
+    actionable pending + 重握手替换原 requestId → 配对 churn 无限循环。
+    """
+    def _raise_runtime_error(instance_name, cmd):
+        raise RuntimeError(
+            f'exec_sync failed in {instance_name}: exit_code=1 cmd={cmd!r}',
+        )
+
+    approver = ExecPairingApprover(executor=_raise_runtime_error)
+    with pytest.raises(PairingError) as exc_info:
+        approver.approve('demo', 'req-1')
+    # 错误消息保留底层细节便于排错
+    assert 'exit_code=1' in str(exc_info.value)
+    assert 'demo' in str(exc_info.value)
 
 
 def test_run_handshake_inside_running_event_loop_thread():

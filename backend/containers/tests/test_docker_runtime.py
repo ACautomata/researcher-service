@@ -17,7 +17,7 @@ from containers.docker_runtime import DockerRuntime
 def _spec() -> ContainerSpec:
     return ContainerSpec(
         name='demo',
-        image='acautomata/openclaw-docker-cn-im:latest',
+        image='ghcr.io/openclaw/openclaw:2026.6.34-browser',
         host_port=19000,
         gateway_token='tok-DO-NOT-LEAK',
         home_dir='/fleet/instances/demo/home',
@@ -46,8 +46,9 @@ def test_gateway_port_maps_to_loopback_host_port():
     assert kw['ports'] == {'18789/tcp': ('127.0.0.1', 19000)}
 
 
-def test_home_bind_mount_rw_config_ro():
-    # spec §5.6：home bind-mount rw（agent 写 wiki/workspace）；openclaw.json ro 覆盖（配置单一来源）
+def test_home_rw_and_config_bind_mount_ro():
+    # home rw（agent 写 wiki/workspace）；openclaw.json ro（spec §5.2 防容器内篡改配置）。
+    # 官方镜像无 init.sh chown，ro 不会崩（ADR 0003）；配置写入全在 host 侧，gateway 只 read-only watch。
     kw = DockerRuntime().build_run_kwargs(_spec())
     assert kw['volumes']['/fleet/instances/demo/home'] == {
         'bind': '/home/node/.openclaw',
@@ -86,7 +87,8 @@ def test_gateway_token_never_in_persistent_layers():
 
 
 def test_privilege_floor_matches_researcher_image():
-    # r27 §4.2：root 启动便于 init.sh chown，cap 仅 4 项；restart unless-stopped
+    # r27 §4.2：root + 4 caps 保留——A3 delete cleanup（orchestrator）依赖 root chown home 给 host uid；
+    # 收紧到 node(1000) 是 ADR 0003 后续（需配套重做 cleanup）。restart unless-stopped
     kw = DockerRuntime().build_run_kwargs(_spec())
     assert kw['user'] == '0:0'
     assert set(kw['cap_add']) == {'CHOWN', 'SETUID', 'SETGID', 'DAC_OVERRIDE'}

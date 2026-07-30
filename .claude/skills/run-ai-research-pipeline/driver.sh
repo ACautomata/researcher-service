@@ -55,6 +55,64 @@ _ensure_db() {
   DJANGO_SETTINGS_MODULE=config.settings.dev .venv/bin/python manage.py migrate --noinput 2>&1 | tail -3
 }
 
+_load_env() {
+  # codex P2 :64：shell 环境变量优先于 deploy/.env——仅注入调用方当前未设置的变量，
+  # 避免 `LLM_API_KEY=new driver.sh start` 被 .env 的空值/旧值覆盖（→ 503 / 错凭证）。
+  # 对齐 python-dotenv load_dotenv() 默认「不覆盖既有 env」语义，落实文件注释承诺的
+  # 「用户也可改用 shell 环境变量注入」。值按文档 KEY=VALUE 字面量取（首个 = 之后整段，
+  # 不做 $ 展开/去引号——本仓库 .env.example 无此类值）。可选 $1 指定路径便于自测。
+  local env_file="${1:-$PROJECT_ROOT/deploy/.env}"
+  [ -f "$env_file" ] || return 0
+  local line key val
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line#"${line%%[![:space:]]*}"}"        # 去行首空白
+    [ -z "$line" ] && continue
+    [ "${line:0:1}" = "#" ] && continue             # 跳过注释
+    case "$line" in *=*) : ;; *) continue ;; esac   # 仅 KEY=VALUE 行
+    key="${line%%=*}"                               # 首个 = 之前
+    val="${line#*=}"                                # 首个 = 之后（含后续 =）
+    [ "${key:0:7}" = "export " ] && key="${key#export }"   # 去可选 export 前缀
+    key="${key#"${key%%[![:space:]]*}"}"
+    key="${key%"${key##*[![:space:]]}"}"
+    # 合法完整 shell 标识符（codex P2 :84）：case 的 glob `[A-Za-z_][A-Za-z0-9_]*` 里
+    # `*` 是通配（匹配任意字符），GOOD.KEY/AB@CD 这类非法 identifier 会被首/次字符放行，
+    # 随后间接展开 ${!key+x} 仍抛「无效的变量名」→ set -e 终止 driver.sh 启动（前后端不启）；
+    # 且 glob 强制第 2 个字符，合法单字符键（X=x）被静默跳过不注入。改用锚定整个串的正则
+    # `[[ =~ ^...$ ]]` 精确判定完整 identifier：`-`/`.`/`@` 等一律拒，单字符键放行。
+    # 调用方未设置才注入（已设置的 shell 值胜出——含显式空值）。
+    if [[ $key =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+      [ -n "${!key+x}" ] || export "$key=$val"
+    fi
+  done < "$env_file"
+  echo "[driver] 已加载 deploy/.env（shell 环境变量优先，未被覆盖）"
+}
+
+_ensure_fleet_image() {
+  # 容器编排（POST /containers）依赖镜像已 pull：本机默认官方 browser 变体
+  # ghcr.io/openclaw/openclaw:2026.6.34-browser（ADR 0003）未 pull 时 docker run 会触发 pull 阻塞/失败，
+  # 前端表现为「容器一直 creating」。docker daemon 不可达时跳过（driver 仍起前后端，仅容器创建不可用）。
+  command -v docker >/dev/null 2>&1 || return 0
+  docker info >/dev/null 2>&1 || { echo "[driver] 警告: docker daemon 不可达，容器创建将不可用"; return 0; }
+  local image="${OPENCLAW_IMAGE:-ghcr.io/openclaw/openclaw:2026.6.34-browser}"
+  if ! docker image inspect "$image" >/dev/null 2>&1; then
+    echo "[driver] 预拉 fleet 镜像 $image …"
+    if docker pull "$image"; then
+      echo "[driver] ✓ 镜像就绪"
+    else
+      echo "[driver] 警告: 拉取 $image 失败，容器创建将不可用（检查镜像名/登录/网络）"
+    fi
+  fi
+}
+
+_warn_llm_key() {
+  # LLM_API_KEY 缺失 → orchestrator.create 第一行 raise ConfigurationError → POST /containers 返 503，
+  # 前端按钮 loading 结束但容器未起，易误判为「卡 creating」。提前显式警告。
+  if [ -z "${LLM_API_KEY:-}" ]; then
+    echo "[driver] 警告: LLM_API_KEY 未设置 —— 创建容器将返 503（'LLM_API_KEY is required but not configured'）"
+    echo "          请在 deploy/.env 或环境变量中设置 LLM_API_KEY 后重启 driver"
+  fi
+}
+
 _is_pid_alive() {
   local pid="$1"
   kill -0 "$pid" 2>/dev/null
@@ -69,9 +127,12 @@ _health_frontend() {
 }
 
 cmd_start() {
+  _load_env
   _ensure_venv
   _ensure_node_modules
   _ensure_db
+  _ensure_fleet_image
+  _warn_llm_key
 
   # ---- backend ----
   if [ -f "$BACKEND_PID_FILE" ] && _is_pid_alive "$(cat "$BACKEND_PID_FILE")"; then
