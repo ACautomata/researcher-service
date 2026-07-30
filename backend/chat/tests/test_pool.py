@@ -196,6 +196,8 @@ class _DeadAwareClient:
         self.dead = False
         self.connect_calls = 0
         self.closed = False
+        # codex #219 十六轮 P2-219：审批订阅者集合（aclose 不清空，供替换路径迁移）。
+        self._approval_subscribers = []
 
     async def connect(self):
         self.connect_calls += 1
@@ -205,6 +207,18 @@ class _DeadAwareClient:
 
     def discard(self, run_id):
         pass
+
+    # 订阅者访问器（对齐真实 client：add 幂等、remove 只删自己、subscribers 返回副本）
+    def add_approval_subscriber(self, cb):
+        if cb not in self._approval_subscribers:
+            self._approval_subscribers.append(cb)
+
+    def remove_approval_subscriber(self, cb):
+        if cb in self._approval_subscribers:
+            self._approval_subscribers.remove(cb)
+
+    def approval_subscribers(self):
+        return list(self._approval_subscribers)
 
 
 @pytest.mark.asyncio
@@ -224,6 +238,30 @@ async def test_dead_client_is_evicted_and_recreated():
     assert c2.connect_calls == 1
     assert not c2.dead
     assert c1.closed  # 旧死连接 best-effort aclose 清理
+
+
+@pytest.mark.asyncio
+async def test_get_or_create_migrates_subscribers_from_evicted_dead_client():
+    """codex #219 十六轮 P2-219：get_or_create 驱逐死 client 重建时，把其审批订阅者迁到新 client——
+    reacquire connect 失败放回缓存的被关 client 若被 get_or_create（REST/另一浏览器 start）替换，
+    订阅者不丢在被关对象上。"""
+    pool = ChatConnectionPool(
+        pairing_service=FakePairingService(),
+        client_factory=_DeadAwareClient,
+        ws_url_for=_url_for,
+    )
+    inst = _instance('a', 19001)
+    c1 = await pool.get_or_create(inst)
+    cb1, cb2 = object(), object()
+    c1.add_approval_subscriber(cb1)
+    c1.add_approval_subscriber(cb2)
+    c1.dead = True  # 模拟被 reacquire 放回缓存的被关 client（dead，订阅者仍挂其上）
+
+    c2 = await pool.get_or_create(inst)  # 驱逐 c1、重建 c2
+    assert c2 is not c1
+    assert c1.closed
+    assert c1.approval_subscribers() == []  # 从被关 client 迁出
+    assert c2.approval_subscribers() == [cb1, cb2]  # …落到新 client（保序）
 
 
 # ── codex #219 四轮 P2-891：evidence 证明死但 dead 未置位时的驱逐 ────────────

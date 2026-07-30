@@ -10,7 +10,7 @@ from channels.testing import WebsocketCommunicator
 from django.contrib.auth import get_user_model
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from chat.pool import ChatFleet, NotPaired
+from chat.pool import ChatConnectionPool, ChatFleet, NotPaired
 from config.asgi import application
 from containers.models import Instance
 
@@ -74,6 +74,11 @@ class FakeChatClient:
     async def list_pending_approvals(self):
         return list(self.pending)
 
+    async def aclose(self):
+        # 对齐真实 client.aclose：置 dead（关闭后 pool 不复用），但**不清** _approval_subscribers
+        # （真实 aclose 只 fail routes/pending，订阅者仍挂其上、供替换路径迁移）。
+        self.dead = True
+
     async def emit_approval(self, frame):
         for cb in list(self._approval_subscribers):
             await cb(frame)
@@ -92,6 +97,15 @@ class FakePool:
 
     async def get_or_create(self, instance):
         self.created.append(instance.name)
+        cur = self._client
+        if cur is not None and getattr(cur, 'dead', False):
+            # codex #219 十六轮 P2-219：对齐真 pool.get_or_create——驱逐死缓存 client 并把其
+            # 审批订阅者迁到新 client（aclose 不清订阅者，仍挂其上可迁），不丢给被关对象。
+            await cur.aclose()
+            new_client = self._next if self._next is not None else FakeChatClient()
+            self._next = None
+            ChatConnectionPool._migrate_subscribers(cur, new_client)
+            self._client = new_client
         return self._client
 
     async def evict(self, instance):

@@ -107,7 +107,23 @@ class ChatConnectionPool:
             )
             await new_client.connect()  # 握手有界（chat_client.connect_timeout）
             self._clients[key] = new_client
+            if client is not None:  # codex #219 十六轮 P2-219：把被替换死 client 的订阅者迁到新 client
+                self._migrate_subscribers(client, new_client)
             return new_client
+
+    @staticmethod
+    def _migrate_subscribers(old_client, new_client) -> None:
+        """把 old_client 的全部审批订阅者迁到 new_client（old 退订、new 幂等注册）。
+
+        codex #219 十六轮 P2-219：reacquire 重建失败会把已关闭的 client 放回缓存作迁移源；
+        若下次替换它的是 get_or_create（REST / 另一浏览器 start）而非 reacquire，原实现直接
+        丢弃被关 client、不迁订阅者——已连接浏览器仍订阅在被关对象上、错过新审批。故
+        get_or_create 驱逐死 client 时也迁（aclose 不清订阅者，仍挂其上可迁）。同步无 await，
+        单事件循环内对订阅者列表原子，无跨协程竞态。
+        """
+        for cb in old_client.approval_subscribers():
+            old_client.remove_approval_subscriber(cb)
+            new_client.add_approval_subscriber(cb)
 
     async def aclose_all(self) -> None:
         for client in list(self._clients.values()):

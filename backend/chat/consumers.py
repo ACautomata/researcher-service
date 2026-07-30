@@ -26,7 +26,7 @@ from channels.generic.websocket import AsyncJsonWebsocketConsumer
 from websockets.exceptions import ConnectionClosed
 
 from chat.chat_client import ChatSendTransmittedError
-from chat.pool import ChatFleet, NotPaired
+from chat.pool import ChatConnectionPool, ChatFleet, NotPaired
 from containers.models import Instance
 
 
@@ -209,11 +209,9 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
         # （其订阅者早已被 peer 迁走），而 pool 缓存里实际被替换的那代才挂着当前全部订阅者；
         # 从 self._client 迁会把真实订阅者丢在被关掉的 replaced 上、全体审批回调失联。
         # 多数情况（本 consumer 持有的就是缓存项）replaced is client，行为与原来一致。
+        # codex #219 十六轮 P2-219：迁移与 pool 驱逐死 client 共用同一实现（_migrate_subscribers）。
         source = replaced if replaced is not None else client
-        subscribers = source.approval_subscribers()
-        for cb in subscribers:
-            source.remove_approval_subscriber(cb)
-            fresh.add_approval_subscriber(cb)
+        ChatConnectionPool._migrate_subscribers(source, fresh)
         self._client = fresh  # pylint: disable=attribute-defined-outside-init
         # codex #219 P1+P2：补拉换 client 前累积的待审批，并 fan-out 到全部迁移订阅者
         # （best-effort，不影响已建立的新订阅）；共享 client 的各 consumer 都恢复。
