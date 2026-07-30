@@ -410,7 +410,7 @@ class _ScriptedReconnectClient:
         """模拟 T1 看门狗判死：置 dead 并经 on_dead 上报 pool（触发主动重连）。"""
         self.dead = True
         if self._on_dead is not None:
-            self._on_dead()
+            self._on_dead(self)
 
     async def aclose(self):
         self.closed = True

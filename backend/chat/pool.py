@@ -116,6 +116,9 @@ class ChatConnectionPool:
         # 不再干等下次 get_or_create 惰性重建——半开断线无需用户发消息即自愈（T4 恢复在途 run 的前提）。
         self._reconnect_policy = reconnect_policy or ReconnectPolicy()
         self._reconnect_tasks: dict[tuple[str, str], asyncio.Task] = {}
+        # codex #221 P2：aclose_all 期间置位——此时 client.aclose() 取消 recv_task 会触发 on_dead，
+        # _schedule_reconnect 见此标志直接返回，避免 drain 后又生新重连 task / 泄漏替换连接。
+        self._closing = False
 
     def _key_lock(self, key: tuple[str, str]) -> asyncio.Lock:
         # 同步创建（无 await），单事件循环内原子；并发同 key 第一次进入会拿到同一把锁
@@ -177,6 +180,7 @@ class ChatConnectionPool:
             new_client = self._make_client(key, url, pairing.device_token, identity, scopes)
             await new_client.connect()  # 握手有界（chat_client.connect_timeout）
             self._clients[key] = new_client
+            self._reschedule_if_dead(key, new_client)  # codex #221 P1：插入前死亡的补调度
             return new_client
 
     def _make_client(self, key, url, device_token, identity, scopes):
@@ -188,23 +192,31 @@ class ChatConnectionPool:
         try:
             return self._client_factory(
                 url, device_token, identity=identity, scopes=scopes,
-                on_dead=lambda: self._schedule_reconnect(key),
+                on_dead=lambda reporter: self._schedule_reconnect(key, reporter),
             )
         except TypeError:
             return self._client_factory(url, device_token, identity=identity, scopes=scopes)
 
     # ── #196 T3 / #215：主动重连（指数退避 1s→30s）─────────────────
 
-    def _schedule_reconnect(self, key) -> None:
-        """client 经 on_dead 上报标死时触发主动重连（仅当该 client 仍是池中当前值）。
+    def _schedule_reconnect(self, key, reporter) -> None:
+        """client 经 on_dead 上报标死时触发主动重连（仅当 reporter 仍是池中当前值）。
 
-        旧 client 被驱逐后其 on_dead 可能迟到触发——此时 _clients[key] 已是新 client，不应再为其
-        启动重连（否则与 fast-path 复用的新 client 分裂）。
+        reporter（codex #221 P1）是触发 on_dead 的那个 client——回调直接携带报告方身份，不再靠
+        重新查 pool。reporter 已不是池中当前值（被 fast-path 换入的新 client 顶掉 / 池已清空）时不
+        再为其启动重连（否则与 fast-path 复用的新 client 分裂）。池关闭中（aclose_all）也不再调度。
         """
-        client = self._clients.get(key)
-        if client is None or not client.dead:
+        if self._closing:
             return
-        self._start_reconnect(key, client)
+        if self._clients.get(key) is not reporter or not reporter.dead:
+            return
+        self._start_reconnect(key, reporter)
+
+    def _reschedule_if_dead(self, key, client) -> None:
+        """插入 _clients 后复查（codex #221 P1）：client 在 connect() 后、放入 pool 前已死亡时，
+        on_dead 曾因「reporter 尚非池中当前值」被丢弃——此处插入完成后补调度，不丢这次死亡。"""
+        if not self._closing and client.dead:
+            self._start_reconnect(key, client)
 
     def _start_reconnect(self, key, target) -> None:
         """为该 key 的 target client 启动后台主动重连（幂等：已有在途重连则不重复启动）。
@@ -220,7 +232,11 @@ class ChatConnectionPool:
         task = asyncio.ensure_future(
             policy.run(lambda: self._clients.get(key) is not target))
         self._reconnect_tasks[key] = task
-        task.add_done_callback(lambda _t: self._reconnect_tasks.pop(key, None))
+        # codex #221 P2：仅当槽位仍指向本 task 才弹出——避免「旧 task 的 done_callback 晚于同 key 新
+        # task 注册执行」时误删新 task（新 task 失跟踪 → aclose_all 无法取消、死亡又起重复重连）。
+        task.add_done_callback(
+            lambda _t, _task=task: self._reconnect_tasks.pop(key, None)
+            if self._reconnect_tasks.get(key) is _task else None)
 
     def _cancel_reconnect(self, key) -> None:
         """取消该 key 悬挂的重连计时器（fast-path 命中存活 / client aclose / aclose_all 时调）。"""
@@ -255,12 +271,19 @@ class ChatConnectionPool:
             new_client = self._make_client(key, url, device_token, target.identity, target.scopes)
             await new_client.connect()
             self._clients[key] = new_client
+            self._reschedule_if_dead(key, new_client)  # codex #221 P1：插入前死亡的补调度
 
     async def aclose_all(self) -> None:
+        # codex #221 P2：先置 _closing（阻断 client.aclose() 触发 on_dead 又生新重连 task），
+        # 并把 clients 一次性移出池再逐个 aclose——快照外新生的替换连接不会逃过关闭。
+        self._closing = True
         await self._drain_reconnects()  # #215：先取消并等待全部退避计时器落定，无悬挂 task
-        for client in list(self._clients.values()):
-            await client.aclose()
+        clients = list(self._clients.values())
         self._clients.clear()
+        for client in clients:
+            await client.aclose()
+        await self._drain_reconnects()  # 兜底：aclose 间若有漏网重连（_closing 前已调度）一并清
+        self._closing = False
 
     @staticmethod
     def _build_identity(pairing) -> DeviceIdentity | None:

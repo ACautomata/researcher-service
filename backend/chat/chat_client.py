@@ -298,11 +298,13 @@ class OpenClawChatClient:  # pylint: disable=too-many-instance-attributes,too-ma
             return
 
     def _mark_dead(self) -> None:
-        """置 dead 并触发 on_dead 回调（#215 pool 注入以启动主动重连）。回调 best-effort 不杀 recv loop。"""
+        """置 dead 并触发 on_dead 回调（#215 pool 注入以启动主动重连）。回调 best-effort 不杀 recv loop。
+        传入 self（codex #221 P1）：pool 按「报告方是否仍是池中当前值」判定，且能在 client 于
+        connect() 后、放入 pool 前死亡时不丢通知（回调可直接携带报告方身份）。"""
         self._dead = True
         if self._on_dead is not None:
             try:
-                self._on_dead()
+                self._on_dead(self)
             except Exception:  # pylint: disable=broad-exception-caught
                 pass
 
