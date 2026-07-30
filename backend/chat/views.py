@@ -113,6 +113,9 @@ class PairingView(APIView):
                 {'detail': '容器或配对记录已被删除，请刷新列表'},
                 status=status.HTTP_404_NOT_FOUND,
             )
+        # codex #221 P2：force-repair 成功（已换 device_token）→ 逐出该网关旧凭证 client + 重连，
+        # 避免旧 key 重连循环无限重建已撤销 token；后续 get_or_create 按新 token 重建。
+        async_to_sync(ChatFleet.get().evict_instance)(inst)
         return Response(PairingStatusSerializer(pairing).data)
 
 

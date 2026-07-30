@@ -192,3 +192,36 @@ async def test_p2a_aclose_all_no_reconnect_leak_after_closing_live_client():
     # P2a 期望：aclose_all 返回后无悬挂重连 task（on_dead 新生成的被阻断/已 drain）
     assert not pool._reconnect_tasks, \
         'P2a: aclose_all 关闭 live client 后仍残留重连 task（on_dead 在 drain 后又生新 task）'
+
+
+@pytest.mark.asyncio
+async def test_p2_force_repair_evicts_superseded_credential_reconnect():
+    """P2（codex #221 第二轮）：force-repair 换 device_token 后，旧 key 的重连循环不应再无限
+    重建已撤销凭证——pool.evict_url(url) 逐出该网关全部旧 key client + 取消其重连 task。
+
+    根因：旧 key 的 target 永是池中当前值（force-repair 不触碰 pool），重连 stop 永不触发，
+    每 30s 无限重建已撤销 token。evict_url 让 force-repair 路径能清掉旧凭证的 client 与重连。
+    """
+    index = [0]
+    clock = _clock()
+
+    def factory(url, dt, *, identity, scopes, on_dead=None):
+        return GenClient(url, dt, identity=identity, scopes=scopes,
+                         on_dead=on_dead, index=index)
+
+    pool = ChatConnectionPool(
+        pairing_service=FakePairingService(), client_factory=factory,
+        ws_url_for=_url_for, reconnect_policy=ReconnectPolicy(sleeper=_sleeper(clock)))
+    inst = SimpleNamespace(name='a', port=19001)
+    c1 = await pool.get_or_create(inst)
+    url = c1.url
+    old_key = (url, c1.device_token)
+    c1.kill()  # 旧 token client 死亡 → on_dead 启动旧 key 重连
+    assert pool._reconnect_tasks.get(old_key) is not None
+    # force-repair 换 token：pool 应能逐出该 url 下全部旧凭证 client + 取消其重连
+    await pool.evict_url(url)
+    # P2 期望：旧 key 的 client 与重连 task 均被逐出/取消（不再无限重建已撤销凭证）
+    assert old_key not in pool._clients
+    assert pool._reconnect_tasks.get(old_key) is None
+    assert c1.closed  # 旧 client 已被 aclose 清理
+    await pool.aclose_all()

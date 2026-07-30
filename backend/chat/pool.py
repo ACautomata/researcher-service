@@ -285,6 +285,35 @@ class ChatConnectionPool:
         await self._drain_reconnects()  # 兜底：aclose 间若有漏网重连（_closing 前已调度）一并清
         self._closing = False
 
+    async def evict_url(self, url: str) -> None:
+        """逐出某网关 url 下全部 client + 取消其重连 task（codex #221 第二轮 P2）。
+
+        force-repair（PairingView.ensure_paired(force_repair=True)）换 device_token 后，旧
+        key=(url, old_token) 的 client 仍留池中、其 target 永是当前值 → 重连 stop 永不触发，每 30s
+        无限重建已撤销凭证。本方法让凭证变更路径能清掉该 url 下所有旧 key 的 client 与重连，
+        后续 get_or_create 按新 token 重建。
+        """
+        keys = [k for k in self._clients if k[0] == url]
+        for key in keys:
+            self._cancel_reconnect(key)
+            client = self._clients.pop(key, None)
+            if client is not None:
+                try:
+                    await client.aclose()
+                except Exception:  # pylint: disable=broad-exception-caught
+                    pass
+        # 同 url 可能只剩「无 client 但悬挂重连」的 key（target 已被 fast-path 移出池）——一并取消
+        for key in [k for k in list(self._reconnect_tasks) if k[0] == url]:
+            self._cancel_reconnect(key)
+
+    async def evict_instance(self, instance) -> None:
+        """按容器实例逐出其网关下全部旧凭证 client + 重连（codex #221 第二轮 P2）。
+
+        force-repair 换 device_token 后调用——url 由 pool 内部 _ws_url_for 算（与建连同源），
+        调用方（REST 层）无需关心 key 构造。委托 evict_url。
+        """
+        await self.evict_url(self._ws_url_for(instance))
+
     @staticmethod
     def _build_identity(pairing) -> DeviceIdentity | None:
         """从 Pairing 行重建 DeviceIdentity。三要素缺一不可——缺任意一个返回 None
