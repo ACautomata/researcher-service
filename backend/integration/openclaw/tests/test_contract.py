@@ -1210,6 +1210,51 @@ class TestOpenClawWireAdapterLongLived:
         assert 'chat.send ack timeout' in str(exc.value)
         assert isinstance(exc.value.__cause__, TimeoutError)
 
+    def test_send_message_ack_timeout_is_transmitted(self):
+        """codex #219 P1（adapter）：ack 超时（帧已发出）→ ChatSendTransmittedError。
+
+        consumer 经 port 编程时据此判不可盲重试——与 OpenClawChatClient 分类一致
+        （Liskov：换真实 adapter 不丢 transmitted 语义）。
+        """
+        import asyncio
+
+        from chat.chat_client import ChatSendTransmittedError
+        from chat.tests.fakes import FakeChatTransport
+        from integration.openclaw.adapters import OpenClawWireAdapter
+
+        t = FakeChatTransport(suppress_ack=True)
+        adapter = OpenClawWireAdapter(transport=t, timeout=0.1)
+
+        async def _run():
+            await adapter.connect(
+                'ws://x/', 'dt',
+                identity=_SESSION_IDENTITY, nonce=_SESSION_NONCE, scopes=_SESSION_SCOPES,
+            )
+            await adapter.send_message('s', 'm', on_event=lambda f: None)
+        with pytest.raises(ChatSendTransmittedError):
+            asyncio.run(_run())
+
+    def test_send_message_explicit_reject_is_not_transmitted(self):
+        """codex #219 P1（adapter）：网关显式拒绝（ack ok:false）→ 普通 ChatSendError，非 transmitted。"""
+        import asyncio
+
+        from chat.chat_client import ChatSendError, ChatSendTransmittedError
+        from chat.tests.fakes import FakeChatTransport
+        from integration.openclaw.adapters import OpenClawWireAdapter
+
+        t = FakeChatTransport(ack_error={'code': 'RATE_LIMIT', 'message': 'too fast'})
+        adapter = OpenClawWireAdapter(transport=t)
+
+        async def _run():
+            await adapter.connect(
+                'ws://x/', 'dt',
+                identity=_SESSION_IDENTITY, nonce=_SESSION_NONCE, scopes=_SESSION_SCOPES,
+            )
+            await adapter.send_message('s', 'm', on_event=lambda f: None)
+        with pytest.raises(ChatSendError) as exc:
+            asyncio.run(_run())
+        assert not isinstance(exc.value, ChatSendTransmittedError)  # 显式拒绝=未起 run，可安全重试
+
     def test_resolve_approval_ack_timeout_chains_timeout_error(self):
         """approval.resolve ack 超时 → ChatSendError 且 __cause__ 为 TimeoutError。"""
         import asyncio
