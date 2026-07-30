@@ -606,17 +606,23 @@ class OpenClawChatClient:  # pylint: disable=too-many-instance-attributes,too-ma
                 'idempotencyKey': idempotency_key or uuid.uuid4().hex,
             },
         }
+        # codex #219 十轮 P1-930：send **前**快照 dead——await 让渡期间 recv loop 可能置 dead。
+        # 若待 catch 里才采样 self._dead，「send 刷帧中途 recv loop 置 dead」的竞态会读到 True，
+        # 误判为「发送前已死、帧确定未发出」而保留原生 ConnectionClosed（consumer 据此安全重试）
+        # ——但字节可能已部分到达网关（网关或已起 run），盲重试重复执行工具。发送前已死才可断
+        # 「确定未传输」；发送尝试中抛出的 close 一律归 transmitted（不确定，consumer 不盲发）。
+        dead_before_send = self._dead
         try:
             await self._ws.send(json.dumps(frame))
         except ConnectionClosed as exc:
             self._pending_acks.pop(req_id, None)
-            if self._dead:
+            if dead_before_send:
                 # send 前已知连接死（#213 看门狗/CancelledError 已置位）：帧确定未发出，
                 # 保留原生 ConnectionClosed——consumer 据此作 decisive evidence 安全重试。
                 raise
-            # codex #219 八轮 P1：竞态——recv task 尚未置 dead，但 send 刷帧中途 socket 关闭。
-            # 帧字节可能已部分/全部到达网关（网关或已起 run），传输结果**未知**，归
-            # transmitted 让 consumer 不盲重发（盲重试被幂等去重到死连接 runId）。
+            # codex #219 八轮 P1：竞态——recv task 尚未置 dead（或 send 中途才置，十轮 P1-930），
+            # 但 send 刷帧中途 socket 关闭。帧字节可能已部分/全部到达网关（网关或已起 run），传输
+            # 结果**未知**，归 transmitted 让 consumer 不盲重发（盲重试被幂等去重到死连接 runId）。
             raise ChatSendTransmittedError('chat.send socket closed mid-send') from exc
         try:
             # 有界等待 ack：网关连着但 ack 丢失/不回时不应让 consumer 永久挂起

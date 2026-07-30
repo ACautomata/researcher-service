@@ -502,8 +502,21 @@ class OpenClawWireAdapter:
                 'idempotencyKey': idempotency_key or uuid.uuid4().hex,
             },
         }
-        # ws.send 放在 try 外：发送本身失败（帧未发出）原样上抛=可安全重试，不被误标 transmitted。
-        await self._ws.send(json.dumps(frame))
+        # codex #219 十轮 P2-934：ws.send 不能再放 try 外原样上抛——send 刷帧中途 socket 关闭时
+        # 帧字节可能已部分到达网关（网关或已起 run），原样抛原生 ConnectionClosed 会被 consumer 当
+        # 「确定未传输」安全重试 → 重复执行工具 / 把幂等去重的 run 挂到收不到事件的连接。对齐
+        # OpenClawChatClient.send_message（chat_client.py:609-625）：send 前快照 dead，发送前已死
+        # （帧确定未发出）才原生上抛可重试；发送尝试中抛出的 close 一律归 transmitted（不确定，不盲发）。
+        from websockets.exceptions import ConnectionClosed
+
+        dead_before_send = self._dead
+        try:
+            await self._ws.send(json.dumps(frame))
+        except ConnectionClosed as exc:
+            self._pending_acks.pop(req_id, None)
+            if dead_before_send:
+                raise  # 发送前已死：帧确定未发出，原生上抛（consumer 据此安全重试）
+            raise ChatSendTransmittedError('chat.send socket closed mid-send') from exc
         try:
             run_id = await asyncio.wait_for(fut, timeout=self._ack_timeout)
         except TimeoutError as exc:
