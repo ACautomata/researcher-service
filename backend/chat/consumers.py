@@ -22,6 +22,7 @@ from __future__ import annotations
 from channels.db import database_sync_to_async
 from channels.generic.websocket import AsyncJsonWebsocketConsumer
 
+from chat.chat_client import ChatPayloadTooLargeError
 from chat.pool import ChatFleet, NotPaired
 from containers.models import Instance
 
@@ -132,6 +133,12 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
             run_id = await self._client.send_message(
                 session_key, message, on_event=self._on_event,
             )
+        except ChatPayloadTooLargeError as exc:
+            # #196 T5 / #216：本地帧大小预检超限——透传明确文案「消息超过网关帧大小上限…请分段发送」，
+            # 区别于真连接断开的笼统「发送失败」。其他 ChatSendError（网关 ack 拒绝/timeout）仍走
+            # 下方通用错误（spec 只要求把超限这一种映射为可理解错误，不透传英文技术文案）。
+            await self.send_json({'type': 'error', 'message': str(exc)})
+            return
         except Exception:  # pylint: disable=broad-exception-caught
             # chat.send 被拒/连接已断：发 error 帧，不传播导致 WS 关闭
             await self.send_json({'type': 'error', 'message': '发送失败，请稍后重试'})
