@@ -381,7 +381,12 @@ async def test_send_transmitted_flag_unset_still_reacquires(override_pool, insta
 
     async def transmitted_send(session_key, message, *, on_event, idempotency_key=None):
         # 真实竞态：ws.send 刷帧中途 socket 关闭（帧或已部分到达），recv loop 还没置 dead。
-        raise ChatSendTransmittedError('chat.send socket closed mid-send')
+        # 对齐 chat_client.py:615——mid-send 的 transmitted `from 原生 ConnectionClosed` 抛出，
+        # cause 即连接已物理断的证据（九轮 P1-994：仅靠 cause 区分「连接死」与「健康 socket ack 超时」）。
+        try:
+            raise ConnectionClosedOK(None, None)
+        except ConnectionClosedOK as closed:
+            raise ChatSendTransmittedError('chat.send socket closed mid-send') from closed
 
     fake_client.send_message = transmitted_send
 
@@ -398,6 +403,46 @@ async def test_send_transmitted_flag_unset_still_reacquires(override_pool, insta
     assert not fresh.sent
     assert fake_client._approval_subscribers == []
     assert len(fresh._approval_subscribers) == 1
+    await comm.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_send_transmitted_ack_timeout_healthy_socket_no_reacquire(
+        override_pool, instance, fake_client):
+    """codex #219 九轮 P1-994：transmitted 仅 ack 超时（健康 socket，cause 非 ConnectionClosed）
+    → **不重取**连接，发终态 error 解锁前端即可。
+
+    chat.send 在**仍活的 socket** 上仅因 ack_timeout 超时也抛 ChatSendTransmittedError
+    （chat_client.py:619-622，`from TimeoutError`）。若把 transmitted 一律当连接死证据重取，
+    pool.reacquire 会 aclose 这个健康 pooled client、向所有无关在途路由发终态 error——一次
+    慢 ack 就 abort 其它所有对话。故 transmitted 仅当 cause 是 ConnectionClosed（mid-send 连接
+    已物理断）才重取；ack 超时（cause 是 TimeoutError）不重取、不驱逐、订阅者原样保留。
+    """
+    comm = await _connect_authed()
+    await comm.connect()
+    await comm.send_json_to({'type': 'start', 'container': 'demo'})
+    await comm.receive_json_from()  # ready
+    assert override_pool.created == ['demo']
+    assert fake_client.dead is False  # 健康 socket：只是这一次 ack 慢/丢
+
+    async def ack_timeout_send(session_key, message, *, on_event, idempotency_key=None):
+        # 对齐 chat_client.py:622——ack 超时的 transmitted `from TimeoutError` 抛出（socket 仍活）。
+        try:
+            raise TimeoutError()
+        except TimeoutError as timeout:
+            raise ChatSendTransmittedError('chat.send ack timeout') from timeout
+
+    fake_client.send_message = ack_timeout_send
+
+    await comm.send_json_to({'type': 'send', 'sessionKey': 'sk-1', 'message': '你好'})
+    # 不重取连接：只发终态 error 解锁前端 pending（用户可重发），无任何补拉审批卡。
+    resp = await comm.receive_json_from()
+    assert resp['type'] == 'error'
+    assert '结果未知' in resp['message']
+    # 健康 socket 不被误重取/驱逐：无 reacquire、无 evict，订阅者仍留在原 client 上。
+    assert override_pool.created == ['demo']  # 仅 start 那次
+    assert override_pool.evicted == []
+    assert len(fake_client._approval_subscribers) == 1  # 本 consumer 订阅未迁走
     await comm.disconnect()
 
 

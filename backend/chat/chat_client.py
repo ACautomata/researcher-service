@@ -587,7 +587,12 @@ class OpenClawChatClient:  # pylint: disable=too-many-instance-attributes,too-ma
         key——若网关已收下原 chat.send 但 ack 在连接死亡前丢失，重试带同 key 让网关按
         幂等去重，避免起两个 run、工具被执行两次。
         """
-        if self._ws is None:
+        if self._ws is None or self._closed:
+            # codex #219 九轮 P2-999：aclose 已置 _closed、_notify_all_error 正清空 _routes 期间，
+            # _ws 尚未置 None——若只查 _ws，共享 client 的另一 consumer 可在此窗口进入 send_message，
+            # 其 route 在 _notify_all_error 快照后安装、随后被 clear 却无终态 error → 浏览器永久
+            # pending。_closed 一并视为不可发送，closing 期间拒绝新 send（抛错由 consumer 走既有
+            # dead/evidence 重取换到健康 client）。
             raise ChatClientError('client not connected')
         req_id = uuid.uuid4().hex
         fut = asyncio.get_running_loop().create_future()

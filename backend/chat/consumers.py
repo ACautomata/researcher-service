@@ -147,13 +147,14 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
           与 ChatClientError/ChatSendError **均不相交**（websockets 16.x 层级），它本身就是
           连接已断的充分证据（帧未发出、网关未起 run，可安全重取）。业务拒绝（rate limit 的
           ChatSendError、网关 ack ok:false）不传 evidence → 不重取，边界不变；或
-        - `evidence` 是 `ChatSendTransmittedError`（codex #219 八轮 P1-224）：chat_client 在
-          recv loop 置 `dead` 前就把 send 刷帧中途的原生 ConnectionClosed 归为 transmitted
-          （chat_client.py:612-615）——此刻 `client.dead` 仍为 False，guard 只看 dead/
-          ConnectionClosed 会漏，不换连接 → 全体审批订阅者滞留死 client。transmitted 本身即
-          「传输结果未知、不可安全重发」的充分证据：须重取连接（迁移订阅者 + 补拉待审批），
-          但仍**不重发** chat.send。它是 ChatSendError 子类，故充分条件须**先于**普通
-          ChatSendError（业务拒绝）判定，否则 rate limit 也会被误当重取证据。
+        - `evidence` 是 `ChatSendTransmittedError` **且其 cause 是 ConnectionClosed**（codex #219
+          八轮 P1-224）：chat_client 在 recv loop 置 `dead` 前就把 send 刷帧中途的原生
+          ConnectionClosed 归为 transmitted（chat_client.py:612-615）——此刻 `client.dead` 仍为
+          False，guard 只看 dead/ConnectionClosed 会漏，不换连接 → 全体审批订阅者滞留死 client。
+          此类 transmitted 是「帧或已部分到达、连接已物理断」的死证据：须重取连接（迁移订阅者 +
+          补拉待审批），但仍**不重发** chat.send。判据须精确到 cause（九轮 P1-994）：仅 ack 超时
+          的健康 socket 也抛 transmitted（cause 是 TimeoutError），不能当死证据误重取——见
+          `_is_connection_dead_evidence`。
         重取前先查 pool 健康 client（codex #219 五轮 P1）：共享 client 时若别人已换好（pool
         健康项非 self._client）直接采纳、不 evict——避免误关别的 consumer 建好的健康连接并
         把订阅者迁空。否则（pool 健康项就是自己这个死/濒死 client）先经 pool.evict 驱逐缓存
@@ -175,9 +176,10 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
         if client is None or self._instance is None:
             return None
         if not (client.dead
-                # dead，或连接级证据：原生 ConnectionClosed（连接已断）/ ChatSendTransmittedError
-                # （transmitted 时 dead 或未置位，八轮 P1-224）——均充分证明该重取连接。
-                or isinstance(evidence, (ConnectionClosed, ChatSendTransmittedError))):
+                # 连接级证据（充分证明该重取连接）：原生 ConnectionClosed（连接已断，三轮 P2）；
+                # 或 transmitted 且其 cause 是 ConnectionClosed（mid-send 刷帧中途关闭——帧或已
+                # 部分到达、连接已物理断，但 recv loop 未置 dead 的竞态，八轮 P1-224）。
+                or self._is_connection_dead_evidence(evidence)):
             return None
         try:
             # codex #219 六轮 P1-872：经 pool.reacquire 在 per-key 锁内原子完成「比较缓存项 →
@@ -348,6 +350,26 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
         if self._client is not None and self._client not in targets:
             targets.append(self._client)
         return targets
+
+    @staticmethod
+    def _is_connection_dead_evidence(evidence: BaseException | None) -> bool:
+        """evidence 是否充分证明「连接已死、该重取」——区别于「本次发送不可靠但连接仍活」。
+
+        codex #219 九轮 P1-994：三类 ChatSendTransmittedError 连接死活不同，不能一律当死证据——
+        - mid-send 原生 ConnectionClosed（chat_client.py:612-615，`from ConnectionClosed`）：socket
+          物理关闭、recv loop 未置 dead 的竞态 → 连接已死，**是**死证据（cause 是 ConnectionClosed）；
+        - 健康 socket 仅 ack 超时（chat_client.py:619-622，`from TimeoutError`）：socket **仍活**，
+          重取会 aclose 健康 pooled client、向所有无关在途路由发终态 error（一次慢 ack abort 全部
+          对话）→ **不是**死证据（cause 是 TimeoutError，排除）；
+        - recv loop 死注入 ChatClientError（chat_client.py:628-633，cause 是 ChatClientError）：recv
+          loop 已置 dead（chat_client.py:300），由 `client.dead` 分支覆盖，无需 evidence 判定。
+        故 transmitted 仅当其 cause 是 ConnectionClosed 才算死证据。原生 ConnectionClosed（三轮 P2，
+        resolve/未包装路径）也直接算。
+        """
+        if isinstance(evidence, ConnectionClosed):
+            return True
+        return (isinstance(evidence, ChatSendTransmittedError)
+                and isinstance(evidence.__cause__, ConnectionClosed))
 
     @staticmethod
     def _lookup_instance(name):
