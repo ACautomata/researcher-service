@@ -13,6 +13,7 @@ from channels.testing import WebsocketCommunicator
 
 from chat.chat_client import (
     ChatConnectError,
+    ChatPayloadTooLargeError,
     ChatSendError,
 )
 from chat.pool import ChatFleet
@@ -135,7 +136,8 @@ async def test_multi_container_switch(override_pool, instance):
 
 @pytest.mark.asyncio
 async def test_send_failure_sends_error_frame_not_crash(override_pool, instance, fake_client):
-    """chat.send 被网关拒（ChatSendError）→ 发 error 帧，不传播导致 WS 关闭。"""
+    """chat.send 被网关拒（普通 ChatSendError，非超限）→ 走通用「发送失败」，不透传英文技术文案
+    （codex review / #216：spec 只要求把超限这一种映射为可理解错误，其他 ChatSendError 不 scope-creep）。"""
 
     async def fail_send(*args, **kwargs):
         raise ChatSendError('rate limit')
@@ -147,7 +149,30 @@ async def test_send_failure_sends_error_frame_not_crash(override_pool, instance,
     await comm.receive_json_from()  # ready
     await comm.send_json_to({'type': 'send', 'sessionKey': 'sk', 'message': 'hi'})
     resp = await comm.receive_json_from()
+    assert resp == {'type': 'error', 'message': '发送失败，请稍后重试'}  # 非超限不透传 'rate limit'
+    await comm.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_send_oversized_shows_clear_message_not_generic(override_pool, instance, fake_client):
+    """#196 T5 / #216：send_message 帧大小预检超限（ChatPayloadTooLargeError，带明确文案）→ 前端看到
+    「消息超过网关帧大小上限…请分段发送」而非笼统「发送失败，请稍后重试」（区别于真连接断开）。
+    本地预检拒绝、连接未断——不应让用户误以为容器掉线。"""
+
+    async def oversized_send(*args, **kwargs):
+        raise ChatPayloadTooLargeError('消息超过网关帧大小上限 25 MB，请分段发送')
+
+    fake_client.send_message = oversized_send
+    comm = await _connect_authed()
+    await comm.connect()
+    await comm.send_json_to({'type': 'start', 'container': 'demo'})
+    await comm.receive_json_from()  # ready
+    await comm.send_json_to({'type': 'send', 'sessionKey': 'sk', 'message': 'x' * 1000})
+    resp = await comm.receive_json_from()
     assert resp['type'] == 'error'
+    assert '帧大小上限' in resp['message']
+    assert '分段发送' in resp['message']
+    assert '容器连接断开' not in resp['message']
     await comm.disconnect()
 
 

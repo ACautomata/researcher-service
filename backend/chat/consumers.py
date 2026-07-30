@@ -25,7 +25,7 @@ from channels.db import database_sync_to_async
 from channels.generic.websocket import AsyncJsonWebsocketConsumer
 from websockets.exceptions import ConnectionClosed
 
-from chat.chat_client import ChatSendTransmittedError
+from chat.chat_client import ChatPayloadTooLargeError, ChatSendTransmittedError
 from chat.pool import ChatConnectionPool, ChatFleet, NotPaired
 from containers.models import Instance
 
@@ -247,7 +247,7 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
         except Exception:  # pylint: disable=broad-exception-caught
             pass
 
-    async def _handle_send(self, content):
+    async def _handle_send(self, content):  # pylint: disable=too-many-return-statements
         if self._client is None:
             await self.send_json({'type': 'error', 'message': '请先选择容器'})
             return
@@ -265,6 +265,12 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
                 session_key, message, on_event=self._on_event,
                 idempotency_key=idempotency_key,
             )
+        except ChatPayloadTooLargeError as exc:
+            # #196 T5 / #216：本地帧大小预检超限——透传明确文案「消息超过网关帧大小上限…请分段发送」，
+            # 区别于真连接断开的笼统「发送失败」。其他 ChatSendError（网关 ack 拒绝/timeout）仍走
+            # 下方通用错误（spec 只要求把超限这一种映射为可理解错误，不透传英文技术文案）。
+            await self.send_json({'type': 'error', 'message': str(exc)})
+            return
         except ChatSendTransmittedError as exc:
             # codex #219 P1：帧已发出但 ack 丢失——网关可能已起 run，其事件流绑在死连接上
             # （runId 是连接级的，重连不可恢复）。盲重试会被幂等去重到同一 runId，但新 client

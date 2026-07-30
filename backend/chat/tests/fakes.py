@@ -136,6 +136,9 @@ class _FakeChatWs:
         self._extra = asyncio.Queue()
 
     async def send(self, data):
+        # codex #220 P1：记录原始数据类型——websockets.send(str)→文本帧、send(bytes)→二进制帧。
+        # 断言 chat.send 走文本帧（OpenClaw 协议全系 JSON 文本），防「为测大小误传 bytes 发二进制帧」回归。
+        self._t.sent_types.append(type(data))
         self._t.sent.append(json.loads(data))
 
     async def recv(self):  # pylint: disable=too-many-return-statements
@@ -247,6 +250,8 @@ class FakeChatTransport:  # pylint: disable=too-many-instance-attributes  # pyli
         self.suppress_commands_ack = suppress_commands_ack
         self.events = list(events or [])
         self.sent: list = []
+        # codex #220 P1：与 sent 平行的原始发送数据类型（str=文本帧 / bytes=二进制帧），供 opcode 断言。
+        self.sent_types: list = []
         self._connect_acked = False
         self._chat_ack_index = 0
         self._resolve_ack_index = 0

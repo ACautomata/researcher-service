@@ -94,6 +94,14 @@ class ChatSendTransmittedError(ChatSendError):
     """
 
 
+class ChatPayloadTooLargeError(ChatSendError):
+    """#196 T5 / #216：发送侧帧大小预检超限——本地拒绝（未发出该帧、连接未断）。
+
+    独立子类让 consumer 能把「消息过大」与其他 ChatSendError（网关 ack 拒绝 / ack timeout）区分开：
+    前者透传明确文案「请分段发送」，后者仍走通用「发送失败」（spec 只要求把超限映射为可理解错误）。
+    """
+
+
 class OpenClawChatClient:  # pylint: disable=too-many-instance-attributes,too-many-arguments
     """对单个已配对容器维持一条长连接，发 chat.send 并按 runId 路由 chat 事件。"""
 
@@ -622,8 +630,20 @@ class OpenClawChatClient:  # pylint: disable=too-many-instance-attributes,too-ma
         # ——但字节可能已部分到达网关（网关或已起 run），盲重试重复执行工具。发送前已死才可断
         # 「确定未传输」；发送尝试中抛出的 close 一律归 transmitted（不确定，consumer 不盲发）。
         dead_before_send = self._dead
+        frame_json = json.dumps(frame)
+        # #196 T5 / #216：发送侧帧大小自律——按 hello-ok policy.maxPayload（缺省 25MB）预检。超限在
+        # _ws.send 之前本地拒绝（不发出该帧、不触发网关协议断连），避免超长粘贴连累同连接其他在途
+        # run、避免用户看到莫名「容器连接断开」。须先移除已注册的 pending ack：本地拒绝后既不发帧也
+        # 无回执，不清会让该 future/dict 项悬挂泄漏（孤儿 entry，永不回执）。
+        frame_bytes = frame_json.encode('utf-8')
+        if len(frame_bytes) > self._policy.max_payload_bytes:
+            self._pending_acks.pop(req_id, None)
+            limit_mb = self._policy.max_payload_bytes / (1024 * 1024)
+            raise ChatPayloadTooLargeError(f'消息超过网关帧大小上限 {limit_mb:g} MB，请分段发送')
         try:
-            await self._ws.send(json.dumps(frame))
+            # codex #220 P1：send 必须传 str——bytes 会让 websockets 发二进制帧，而 OpenClaw 协议
+            # （与其他 RPC 一致）走 JSON 文本帧，二进制帧会被网关拒绝/断连。
+            await self._ws.send(frame_json)
         except ConnectionClosed as exc:
             self._pending_acks.pop(req_id, None)
             if dead_before_send:
