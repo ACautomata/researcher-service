@@ -378,7 +378,11 @@ class OpenClawChatClient:  # pylint: disable=too-many-instance-attributes,too-ma
         与本请求的 decision 不同（另一 operator 已答）；调用方须用 payload 里的权威结果，不能回声
         本请求的 decision（codex P1）。需 operator.approvals scope；网关拒绝抛 ChatSendError。
         """
-        if self._ws is None:
+        if self._ws is None or self.dead:
+            # codex #219 十一轮 P2-319：closing/recv 死期间拒发 approval RPC——同 send_message 的
+            # 死窗口（_notify_all_error 快照后 await 回调、_ws 未置 None），新 resolve 的 future
+            # 注册后网关或已接受审批，但 ack/resolved 事件随死连接丢失 → 超时把已执行的卡误复位
+            # pending。dead（_dead or _closed）视为已断连拒发，consumer 走 dead 重取换健康 client。
             raise ChatClientError('client not connected')
         req_id = uuid.uuid4().hex
         fut = asyncio.get_running_loop().create_future()
@@ -499,7 +503,9 @@ class OpenClawChatClient:  # pylint: disable=too-many-instance-attributes,too-ma
         list_commands/list_pending_approvals 的 best-effort 静默返回）；网关拒绝（res not ok）/ ack
         超时抛 ChatSendError。原样透传网关 payload，不做字段翻译（集中在 REST 解析层 T2）。
         """
-        if self._ws is None:
+        if self._ws is None or self.dead:
+            # codex #219 十一轮 P2-319：closing/recv 死期间拒发 RPC（同 resolve_approval/send_message
+            # 死窗口）——future 注册后 ack 随死连接丢失会让调用方空等超时。dead 视为已断连拒发。
             raise ChatClientError('client not connected')
         req_id = uuid.uuid4().hex
         fut = asyncio.get_running_loop().create_future()

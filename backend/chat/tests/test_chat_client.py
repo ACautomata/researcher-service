@@ -591,6 +591,26 @@ async def test_resolve_approval_timeout_raises():
 
 
 @pytest.mark.asyncio
+async def test_approval_and_rpc_rejected_when_dead():
+    """codex #219 十一轮 P2-319：dead 置位（closing/recv 死）期间 resolve_approval / _rpc 入口拒发。
+
+    closing 死窗口内（_notify_all_error 快照后 await 回调、_ws 未置 None）若仍放行，新 RPC 的
+    future 注册后网关或已接受审批，但 ack/resolved 事件随死连接丢失 → 超时把已执行的卡误复位
+    pending。dead（_dead or _closed）置位即抛 ChatClientError，consumer 走 dead 重取。
+    """
+    t = FakeChatTransport()
+    c = _client(transport=t)
+    await c.connect()
+    c._dead = True  # pylint: disable=protected-access  # closing/recv 死已置位
+
+    with pytest.raises(ChatClientError):
+        await c.resolve_approval('ap-1', 'exec', 'allow-once')
+    with pytest.raises(ChatClientError):
+        await c.list_sessions()  # 经 _rpc
+    await c.aclose()
+
+
+@pytest.mark.asyncio
 async def test_list_pending_approvals_translates_cards():
     """codex P2：start 补拉——发 exec.approval.list（文档已证方法名，codex R3 P1 收窄），响应项翻译成审批卡帧。"""
     t = FakeChatTransport(list_payload={
