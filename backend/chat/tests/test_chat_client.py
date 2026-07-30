@@ -900,3 +900,76 @@ async def test_delete_session_gateway_reject_raises():
         await c.delete_session('sess-1')
     assert 'operator.admin' in str(exc.value)
     await c.aclose()
+
+
+# ---- #196 T1 / #213：可靠 _dead 地基（hello-ok policy 解析 + tick 静默看门狗 + CancelledError 置 dead）----
+
+
+@pytest.mark.asyncio
+async def test_recv_task_cancelled_marks_client_dead():
+    """#196 问题3 / #213：recv_task 被取消（REST 跨 loop 清理 / 服务关闭竞态）→ 置 _dead，pool
+    快路径（not client.dead）据此驱逐假活 client。原 CancelledError 分支只 raise 不置位，一次
+    task 取消后死连接被无限复用、该容器聊天永久变砖。"""
+    t = FakeChatTransport()
+    c = _client(transport=t)
+    await c.connect()
+    assert not c.dead
+    await asyncio.sleep(0.05)  # 让 _recv_loop 跑到 recv() 挂起（真实取消场景：loop 已在跑）
+    c._recv_task.cancel()  # 非 aclose 路径的 task 取消（aclose 会同时置 _closed）
+    with pytest.raises(asyncio.CancelledError):
+        await c._recv_task
+    assert c.dead is True  # 取消即连接不可用，pool 不再复用
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_hello_ok_policy_parsed_and_stored():
+    """#196 问题1 / #213：hello-ok payload.policy（HelloOkSchema 必填项）被解析存储，供静默看门狗
+    （2×tickIntervalMs）与 T5 maxPayload 发送预检 / T3 重连计时复用。原 _await_res 只看 ok、
+    payload（含 policy）整体丢弃。"""
+    policy = {'tickIntervalMs': 100, 'maxPayload': 26214400, 'maxBufferedBytes': 52428800}
+    t = FakeChatTransport(connect_policy=policy)
+    c = _client(transport=t)
+    await c.connect()
+    assert c.policy.tick_interval_ms == 100
+    assert c.policy.max_payload_bytes == 26214400
+    assert c.policy.max_buffered_bytes == 52428800
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_hello_ok_missing_policy_falls_back_to_protocol_defaults():
+    """#213：缺 policy 字段（旧网关 / 握手前）回退协议默认——tickIntervalMs=30000、maxPayload=25MB
+    （MAX_PAYLOAD_BYTES）；maxBufferedBytes 协议未指定握手前默认 → None。"""
+    t = FakeChatTransport()  # 默认不下发 policy
+    c = _client(transport=t)
+    await c.connect()
+    assert c.policy.tick_interval_ms == 30000
+    assert c.policy.max_payload_bytes == 26214400
+    assert c.policy.max_buffered_bytes is None
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_silence_watchdog_marks_dead_and_rejects_pending_after_two_ticks():
+    """#196 问题1 / #213：半开连接（recv 永久挂起——TCP 半开 / NAT 超时 / 代理静默掐断）静默 >
+    2×tickIntervalMs → 置 _dead + 拒全部挂起请求（不重放）。原 _recv_loop 裸 recv() 永久挂起，
+    _dead 永不置位、连接永不自愈，所有 chat.send 只能逐条等 ack timeout 失败——与契约「静默 >
+    2×tick 即关闭重连」完全相反。"""
+    # tickIntervalMs=50 → 看门狗 100ms。不 push 任何帧 → _recv_loop 的 recv() 永久挂起（半开）。
+    t = FakeChatTransport(connect_policy={'tickIntervalMs': 50, 'maxPayload': 26214400})
+    c = _client(transport=t, ack_timeout=1.0)
+    await c.connect()
+
+    async def on_event(frame):
+        pass
+
+    send = asyncio.create_task(c.send_message('s', 'm', on_event=on_event))
+    await asyncio.sleep(0.06)  # chat.send 已发、挂起等 ack（半开 → ack 永不回）
+    assert not send.done()
+    await asyncio.sleep(0.12)  # 静默 > 2×tick（100ms）→ 看门狗触发
+    assert c.dead is True
+    assert t._close_code == 4000  # 按契约 close code 4000 语义关闭套接字
+    with pytest.raises(ChatClientError):  # 挂起 ack 被拒（不重放被拒请求）
+        await send
+    await c.aclose()
