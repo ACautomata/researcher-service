@@ -770,7 +770,11 @@ async def test_reacquire_migrates_all_shared_subscribers(override_pool, instance
 
 @pytest.mark.asyncio
 async def test_send_transmitted_failure_does_not_retry(override_pool, instance, fake_client):
-    """codex #219 P1③：原 send 已发出但 ack 丢失 → 不重取不重试，直接终态 error 帧。"""
+    """codex #219 P1③：原 send 已发出但 ack 丢失 → 不重发 chat.send，发终态 error 帧。
+
+    codex #219 P1 二轮：但**仍重取连接**（迁移全体订阅者 + 补拉待审批）——旧 client 已死，
+    被收下的 run 若起审批须能经新连接投递/补拉，不因 skip 重发而滞留死 client。
+    """
     comm = await _connect_authed()
     await comm.connect()
     await comm.send_json_to({'type': 'start', 'container': 'demo'})
@@ -778,6 +782,7 @@ async def test_send_transmitted_failure_does_not_retry(override_pool, instance, 
     assert override_pool.created == ['demo']  # start 取一次
 
     fresh = FakeChatClient()
+    fresh.pending = [{'type': 'approval', 'id': 'ap-accepted', 'kind': 'exec', 'command': 'curl z'}]
     override_pool.set_client(fresh)
     fake_client.dead = True  # 旧 client 已死
 
@@ -787,12 +792,19 @@ async def test_send_transmitted_failure_does_not_retry(override_pool, instance, 
     fake_client.send_message = transmitted_send
 
     await comm.send_json_to({'type': 'send', 'sessionKey': 'sk-1', 'message': '你好'})
+    # 重取后补拉的待审批卡先到（被收下的 run 起的审批经新连接恢复）
+    approval_frame = await comm.receive_json_from()
+    assert approval_frame == {'type': 'approval', 'id': 'ap-accepted', 'kind': 'exec', 'command': 'curl z'}
+    # 再收到终态 error 帧（解锁前端 pending）
     resp = await comm.receive_json_from()
     assert resp['type'] == 'error'
-    assert '结果未知' in resp['message']  # 终态 error（解锁前端 pending）
-    # 不重试：fresh 上无 send；不重取：pool 仍只 start 那一次（不盲重试已发出的 send）
+    assert '结果未知' in resp['message']
+    # 不重发 chat.send：fresh 上无 send；但**已重取**连接（start 一次 + 自愈一次）
     assert fresh.sent == []
-    assert override_pool.created == ['demo']
+    assert override_pool.created == ['demo', 'demo']
+    # 本 consumer 的审批订阅已迁到 fresh（死 client 退空）
+    assert fake_client._approval_subscribers == []
+    assert len(fresh._approval_subscribers) == 1
     await comm.disconnect()
 
 

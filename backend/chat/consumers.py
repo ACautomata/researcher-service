@@ -220,8 +220,12 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
         except ChatSendTransmittedError:
             # codex #219 P1：帧已发出但 ack 丢失——网关可能已起 run，其事件流绑在死连接上
             # （runId 是连接级的，重连不可恢复）。盲重试会被幂等去重到同一 runId，但新 client
-            # 的 route 收不到任何事件 → 浏览器 pending 永久卡住。故**不重试**，发终态 error
-            # 帧解锁前端（用户可重发），不假设新 route 有完整事件流。不加入 _active_runids。
+            # 的 route 收不到任何事件 → 浏览器 pending 永久卡住。故**不重发** chat.send，发终态
+            # error 帧解锁前端（用户可重发），不假设新 route 有完整事件流。不加入 _active_runids。
+            # codex #219 P1 二轮：但**仍须重取连接**——旧 client 已死，全体审批订阅者还挂在死
+            # client 上；被收下的 run 若起审批，不经新连接投递/补拉会一直阻塞。故重取（迁移全体
+            # 订阅者 + fan-out 补拉待审批），只是不重发 chat.send。
+            await self._reacquire_client()
             await self.send_json({
                 'type': 'error',
                 'message': '连接中断，发送结果未知：若已发出请稍后在历史确认，否则请重试',

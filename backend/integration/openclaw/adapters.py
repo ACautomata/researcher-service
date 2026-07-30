@@ -480,7 +480,11 @@ class OpenClawWireAdapter:
     async def send_message(
         self, session_key: str, message: str, on_event: Any, *, idempotency_key: str | None = None,
     ) -> str:
-        from chat.chat_client import ChatClientError, ChatSendError
+        from chat.chat_client import (
+            ChatClientError,
+            ChatSendError,
+            ChatSendTransmittedError,
+        )
 
         if self._ws is None:
             raise ChatClientError('client not connected')
@@ -498,14 +502,24 @@ class OpenClawWireAdapter:
                 'idempotencyKey': idempotency_key or uuid.uuid4().hex,
             },
         }
+        # ws.send 放在 try 外：发送本身失败（帧未发出）原样上抛=可安全重试，不被误标 transmitted。
+        await self._ws.send(json.dumps(frame))
         try:
-            await self._ws.send(json.dumps(frame))
             run_id = await asyncio.wait_for(fut, timeout=self._ack_timeout)
         except TimeoutError as exc:
             self._pending_acks.pop(req_id, None)
-            raise ChatSendError('chat.send ack timeout') from exc
-        except BaseException:
+            # codex #219 P1：帧已发出、ack 超时——网关可能已起 run；不可盲重试（丢事件流）
+            raise ChatSendTransmittedError('chat.send ack timeout') from exc
+        except ChatSendError:
+            # 网关显式拒绝（ack ok:false）——确定未起 run，原样上抛（可安全重试）
             self._pending_acks.pop(req_id, None)
+            raise
+        except BaseException as exc:
+            self._pending_acks.pop(req_id, None)
+            # codex #219 P1：帧已发出后 recv loop 死（_fail_pending_acks 置 ChatClientError）
+            # ——可能已起 run；包装为 ChatSendTransmittedError 让 consumer 判不可盲重试。
+            if isinstance(exc, ChatClientError):
+                raise ChatSendTransmittedError(str(exc)) from exc
             raise
         self._routes[run_id] = on_event
         return run_id
