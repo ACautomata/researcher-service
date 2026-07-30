@@ -477,10 +477,20 @@ class OpenClawWireAdapter:
 
     # ── send_message ─────────────────────────────────────────────────────────
 
-    async def send_message(self, session_key: str, message: str, on_event: Any) -> str:
-        from chat.chat_client import ChatClientError, ChatSendError
+    async def send_message(
+        self, session_key: str, message: str, on_event: Any, *, idempotency_key: str | None = None,
+    ) -> str:
+        from chat.chat_client import (
+            ChatClientError,
+            ChatSendError,
+            ChatSendTransmittedError,
+        )
 
-        if self._ws is None:
+        if self._ws is None or self.dead:
+            # codex #219 十二轮 P2-331：recv loop 退出置 _dead=True 后 _ws 非空，仅查 _ws 仍会注册
+            # ack 并发帧——recv loop 已无法处理 ack/事件，网关或收下 run 但输出丢失，最终只暴露为
+            # ack 超时。对齐 OpenClawChatClient.send_message：dead（_dead or _closed）视为已断连，
+            # 注册/发送前拒发，consumer 走 dead 重取换健康 client。
             raise ChatClientError('client not connected')
         import uuid
         req_id = uuid.uuid4().hex
@@ -492,19 +502,45 @@ class OpenClawWireAdapter:
                 'sessionKey': session_key,
                 'message': message,
                 'agentId': 'main',
-                'idempotencyKey': uuid.uuid4().hex,
+                # codex #219 P2：consumer 自愈重试复用同 key（网关幂等去重）；缺省生成新 key
+                'idempotencyKey': idempotency_key or uuid.uuid4().hex,
             },
         }
+        # codex #219 十轮 P2-934：ws.send 不能再放 try 外原样上抛——send 刷帧中途 socket 关闭时
+        # 帧字节可能已部分到达网关（网关或已起 run），原样抛原生 ConnectionClosed 会被 consumer 当
+        # 「确定未传输」安全重试 → 重复执行工具 / 把幂等去重的 run 挂到收不到事件的连接。对齐
+        # OpenClawChatClient.send_message（chat_client.py:609-625）：send 前快照 dead，发送前已死
+        # （帧确定未发出）才原生上抛可重试；发送尝试中抛出的 close 一律归 transmitted（不确定，不盲发）。
+        from websockets.exceptions import ConnectionClosed
+
+        dead_before_send = self._dead
         try:
             await self._ws.send(json.dumps(frame))
+        except ConnectionClosed as exc:
+            self._pending_acks.pop(req_id, None)
+            if dead_before_send:
+                raise  # 发送前已死：帧确定未发出，原生上抛（consumer 据此安全重试）
+            raise ChatSendTransmittedError('chat.send socket closed mid-send') from exc
+        try:
             run_id = await asyncio.wait_for(fut, timeout=self._ack_timeout)
         except TimeoutError as exc:
             self._pending_acks.pop(req_id, None)
-            raise ChatSendError('chat.send ack timeout') from exc
-        except BaseException:
+            # codex #219 P1：帧已发出、ack 超时——网关可能已起 run；不可盲重试（丢事件流）
+            raise ChatSendTransmittedError('chat.send ack timeout') from exc
+        except ChatSendError:
+            # 网关显式拒绝（ack ok:false）——确定未起 run，原样上抛（可安全重试）
             self._pending_acks.pop(req_id, None)
             raise
-        self._routes[run_id] = on_event
+        except BaseException as exc:
+            self._pending_acks.pop(req_id, None)
+            # codex #219 P1：帧已发出后 recv loop 死（_fail_pending_acks 置 ChatClientError）
+            # ——可能已起 run；包装为 ChatSendTransmittedError 让 consumer 判不可盲重试。
+            if isinstance(exc, ChatClientError):
+                raise ChatSendTransmittedError(str(exc)) from exc
+            raise
+        # codex #219 十二轮 P2-921：对齐 chat_client——route 已由 _resolve_ack 在 recv loop 里
+        # 装好（adapters.py:764-765），此处发送协程恢复后不再重装，避免 aclose fail+clear 后
+        # 把 route 重新装到已关闭 client 上（浏览器永久 pending）。
         return run_id
 
     # ── resolve_approval ─────────────────────────────────────────────────────
@@ -512,7 +548,9 @@ class OpenClawWireAdapter:
     async def resolve_approval(self, approval_id: str, kind: str, decision: str) -> dict:
         from chat.chat_client import ChatClientError, ChatSendError
 
-        if self._ws is None:
+        if self._ws is None or self.dead:
+            # codex #219 十二轮 P2-331：同 send_message——dead 视为已断连，closing/recv 死期间拒发
+            # 审批回覆（避免 future 注册后 ack/resolved 事件随死连接丢失，已执行的卡被超时误复位）。
             raise ChatClientError('client not connected')
         import uuid
         req_id = uuid.uuid4().hex
@@ -604,7 +642,9 @@ class OpenClawWireAdapter:
     async def sessions_rpc(self, method: str, params: dict) -> dict:
         from chat.chat_client import ChatClientError, ChatSendError
 
-        if self._ws is None:
+        if self._ws is None or self.dead:
+            # codex #219 十二轮 P2-331：同 send_message——dead 视为已断连，closing/recv 死期间拒发
+            # sessions/history RPC（避免 future 注册后 ack 随死连接丢失、调用方空等超时）。
             raise ChatClientError('client not connected')
         import uuid
         req_id = uuid.uuid4().hex
@@ -631,6 +671,10 @@ class OpenClawWireAdapter:
     def remove_approval_subscriber(self, cb: Any) -> None:
         if cb in self._approval_subscribers:
             self._approval_subscribers.remove(cb)
+
+    def approval_subscribers(self) -> list:
+        """返回当前全部审批订阅者的副本（codex #219 P2：共享 client 自愈迁移用）。"""
+        return list(self._approval_subscribers)
 
     async def broadcast_approval_resolved(self, approval_id: str, decision: str) -> None:
         """把一次权威 resolve 结果 fan-out 到全部订阅者（codex R2 P2）。"""

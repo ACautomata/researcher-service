@@ -16,6 +16,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 import websockets
+from websockets.exceptions import ConnectionClosed
 
 from chat.event_translate import ChatEventTranslator
 from integration.openclaw.wire import (
@@ -78,6 +79,19 @@ class ChatConnectError(ChatClientError):
 
 class ChatSendError(ChatClientError):
     """chat.send 被网关拒绝（ack not ok）或 ack 缺 runId。"""
+
+
+class ChatSendTransmittedError(ChatSendError):
+    """chat.send 帧可能已发出、但传输结果**未知**——ack 在连接死亡/超时前未到达，或
+    send 刷帧中途 socket 关闭（codex #219 P1 / 八轮 P1）。
+
+    区别于网关显式拒绝（ack ok:false，确定未起 run）：此时帧**可能**已 send，网关**可能**
+    已起 run，只是 ack 丢失或字节已部分到达。runId 是连接级的（r13-ws-protocol §5.3，重连
+    不可恢复进行中 run），若 consumer 拿同 idempotencyKey 盲重试，网关幂等去重返回同一
+    runId，但该 run 的事件流绑在死连接上、不会到新 client 的 route——浏览器 pending 消息
+    永久卡住。故 consumer 捕获本子类时**不重试**，直接发终态 error 帧解锁前端；只有确定
+    未发出的失败（send 前已死 / 显式拒绝）才自愈重试。
+    """
 
 
 class ChatPayloadTooLargeError(ChatSendError):
@@ -147,6 +161,15 @@ class OpenClawChatClient:  # pylint: disable=too-many-instance-attributes,too-ma
         """退订指定订阅者（codex P1）：只移除自己，不误伤同 client 其他 consumer 的订阅。"""
         if cb in self._approval_subscribers:
             self._approval_subscribers.remove(cb)
+
+    def approval_subscribers(self) -> list[OnEvent]:
+        """返回当前全部审批订阅者的副本（codex #219 P2：共享 client 自愈迁移用）。
+
+        consumer 自愈换 client 时须把**所有**订阅者（不止触发自愈的那个 consumer）迁到
+        新 client，否则被动 consumer 仍挂在死 client 上、错过新连接上的审批。返回副本
+        防调用方直接改内部列表。
+        """
+        return list(self._approval_subscribers)
 
     async def _fanout_approval(self, frame: dict) -> None:
         """把一帧连接级审批帧 fan-out 到所有订阅者；隔离单订阅者回调失败（不杀 recv loop / 不互伤）。"""
@@ -363,7 +386,11 @@ class OpenClawChatClient:  # pylint: disable=too-many-instance-attributes,too-ma
         与本请求的 decision 不同（另一 operator 已答）；调用方须用 payload 里的权威结果，不能回声
         本请求的 decision（codex P1）。需 operator.approvals scope；网关拒绝抛 ChatSendError。
         """
-        if self._ws is None:
+        if self._ws is None or self.dead:
+            # codex #219 十一轮 P2-319：closing/recv 死期间拒发 approval RPC——同 send_message 的
+            # 死窗口（_notify_all_error 快照后 await 回调、_ws 未置 None），新 resolve 的 future
+            # 注册后网关或已接受审批，但 ack/resolved 事件随死连接丢失 → 超时把已执行的卡误复位
+            # pending。dead（_dead or _closed）视为已断连拒发，consumer 走 dead 重取换健康 client。
             raise ChatClientError('client not connected')
         req_id = uuid.uuid4().hex
         fut = asyncio.get_running_loop().create_future()
@@ -484,7 +511,9 @@ class OpenClawChatClient:  # pylint: disable=too-many-instance-attributes,too-ma
         list_commands/list_pending_approvals 的 best-effort 静默返回）；网关拒绝（res not ok）/ ack
         超时抛 ChatSendError。原样透传网关 payload，不做字段翻译（集中在 REST 解析层 T2）。
         """
-        if self._ws is None:
+        if self._ws is None or self.dead:
+            # codex #219 十一轮 P2-319：closing/recv 死期间拒发 RPC（同 resolve_approval/send_message
+            # 死窗口）——future 注册后 ack 随死连接丢失会让调用方空等超时。dead 视为已断连拒发。
             raise ChatClientError('client not connected')
         req_id = uuid.uuid4().hex
         fut = asyncio.get_running_loop().create_future()
@@ -563,8 +592,25 @@ class OpenClawChatClient:  # pylint: disable=too-many-instance-attributes,too-ma
         """
         return await self._rpc('sessions.delete', {'key': session_key})
 
-    async def send_message(self, session_key: str, message: str, *, on_event: OnEvent) -> str:
-        if self._ws is None:
+    async def send_message(self, session_key: str, message: str, *, on_event: OnEvent,
+                           idempotency_key: str | None = None) -> str:
+        """发送 chat.send 并有界等 ack，返回 runId。
+
+        ``idempotency_key`` 可选：缺省每次调用生成新 key（普通发送）。调用方（consumer
+        自愈重试，issue #214 / codex P1）对**同一逻辑发送**在初次与有界重试间复用同一
+        key——若网关已收下原 chat.send 但 ack 在连接死亡前丢失，重试带同 key 让网关按
+        幂等去重，避免起两个 run、工具被执行两次。
+        """
+        if self._ws is None or self.dead:
+            # codex #219 九轮 P2-999：aclose 已置 _closed、_notify_all_error 正清空 _routes 期间，
+            # _ws 尚未置 None——若只查 _ws，共享 client 的另一 consumer 可在此窗口进入 send_message，
+            # 其 route 在 _notify_all_error 快照后安装、随后被 clear 却无终态 error → 浏览器永久
+            # pending。_closed 一并视为不可发送，closing 期间拒绝新 send（抛错由 consumer 走既有
+            # dead/evidence 重取换到健康 client）。
+            # codex #219 十轮 P2-631：guard 再扩到 _dead（dead=_dead or _closed）——recv loop 置
+            # _dead=True 后、_notify_all_error await 回调并关 _ws 前的窗口内，_ws 仍非 None、_closed
+            # 仍 False；此时新 send 的帧或达网关，但 recv loop 已无法处理 ack/事件 → run 空跑、输出
+            # 丢失。dead 视为已断连，consumer 据此走重取换到健康 client 再发。
             raise ChatClientError('client not connected')
         req_id = uuid.uuid4().hex
         fut = asyncio.get_running_loop().create_future()
@@ -575,9 +621,15 @@ class OpenClawChatClient:  # pylint: disable=too-many-instance-attributes,too-ma
                 'sessionKey': session_key,
                 'message': message,
                 'agentId': _AGENT_ID,
-                'idempotencyKey': uuid.uuid4().hex,
+                'idempotencyKey': idempotency_key or uuid.uuid4().hex,
             },
         }
+        # codex #219 十轮 P1-930：send **前**快照 dead——await 让渡期间 recv loop 可能置 dead。
+        # 若待 catch 里才采样 self._dead，「send 刷帧中途 recv loop 置 dead」的竞态会读到 True，
+        # 误判为「发送前已死、帧确定未发出」而保留原生 ConnectionClosed（consumer 据此安全重试）
+        # ——但字节可能已部分到达网关（网关或已起 run），盲重试重复执行工具。发送前已死才可断
+        # 「确定未传输」；发送尝试中抛出的 close 一律归 transmitted（不确定，consumer 不盲发）。
+        dead_before_send = self._dead
         frame_json = json.dumps(frame)
         # #196 T5 / #216：发送侧帧大小自律——按 hello-ok policy.maxPayload（缺省 25MB）预检。超限在
         # _ws.send 之前本地拒绝（不发出该帧、不触发网关协议断连），避免超长粘贴连累同连接其他在途
@@ -588,19 +640,46 @@ class OpenClawChatClient:  # pylint: disable=too-many-instance-attributes,too-ma
             self._pending_acks.pop(req_id, None)
             limit_mb = self._policy.max_payload_bytes / (1024 * 1024)
             raise ChatPayloadTooLargeError(f'消息超过网关帧大小上限 {limit_mb:g} MB，请分段发送')
-        # codex #220 P1：frame_bytes 仅供上面测量大小；send 必须传 str——bytes 会让 websockets 发
-        # 二进制帧，而 OpenClaw 协议（与其他 RPC 一致）走 JSON 文本帧，二进制帧会被网关拒绝/断连。
-        await self._ws.send(frame_json)
+        try:
+            # codex #220 P1：send 必须传 str——bytes 会让 websockets 发二进制帧，而 OpenClaw 协议
+            # （与其他 RPC 一致）走 JSON 文本帧，二进制帧会被网关拒绝/断连。
+            await self._ws.send(frame_json)
+        except ConnectionClosed as exc:
+            self._pending_acks.pop(req_id, None)
+            if dead_before_send:
+                # send 前已知连接死（#213 看门狗/CancelledError 已置位）：帧确定未发出，
+                # 保留原生 ConnectionClosed——consumer 据此作 decisive evidence 安全重试。
+                raise
+            # codex #219 八轮 P1：竞态——recv task 尚未置 dead（或 send 中途才置，十轮 P1-930），
+            # 但 send 刷帧中途 socket 关闭。帧字节可能已部分/全部到达网关（网关或已起 run），传输
+            # 结果**未知**，归 transmitted 让 consumer 不盲重发（盲重试被幂等去重到死连接 runId）。
+            raise ChatSendTransmittedError('chat.send socket closed mid-send') from exc
         try:
             # 有界等待 ack：网关连着但 ack 丢失/不回时不应让 consumer 永久挂起
             run_id = await asyncio.wait_for(fut, timeout=self._ack_timeout)
         except TimeoutError as exc:
             self._pending_acks.pop(req_id, None)
-            raise ChatSendError('chat.send ack timeout') from exc
-        except BaseException:
+            # codex #219 P1：帧已发出、ack 超时——网关可能已起 run；不可盲重试（丢事件流）
+            raise ChatSendTransmittedError('chat.send ack timeout') from exc
+        except ChatSendError:
+            # 网关显式拒绝（ack ok:false，如 rate limit）或 ack 缺 runId——确定未起 run，
+            # 原样上抛（非 transmitted），consumer 走既有重试/error 路径。
             self._pending_acks.pop(req_id, None)
             raise
-        self._routes[run_id] = on_event
+        except BaseException as exc:
+            self._pending_acks.pop(req_id, None)
+            # codex #219 P1：帧已发出后 recv loop 死（_fail_pending_acks 置 ChatClientError）
+            # ——可能已起 run；包装为 ChatSendTransmittedError 让 consumer 判不可盲重试。
+            if isinstance(exc, ChatClientError):
+                raise ChatSendTransmittedError(str(exc)) from exc
+            raise
+        # codex #219 十二轮 P2-921：此处**不再**重装 route——_resolve_ack 在 recv loop 里收到
+        # ok ack 时已先装 route 再 set_result（chat_client.py:362-363），wait_for 返回 run_id 必
+        # 意味着 route 已就绪。若在此由发送协程恢复后重装，两 consumer 共享 client 时：ack 后、
+        # 本协程恢复前另一 consumer 触发自愈 aclose，_notify_all_error 已 fail+clear 该 route，
+        # 本行会在已关闭/已清空的 client 上重新装入 route → 浏览器收不到终态帧永久 pending。
+        # route 生命周期单源化：recv loop（_resolve_ack）安装、aclose/_notify_all_error fail+clear、
+        # discard/事件终态清除，发送协程不再触碰。
         return run_id
 
     def discard(self, run_id: str) -> None:
@@ -633,8 +712,12 @@ class OpenClawChatClient:  # pylint: disable=too-many-instance-attributes,too-ma
 
     async def aclose(self) -> None:
         self._closed = True
-        self._fail_pending_acks('client closed')
-        self._fail_pending_resolves('client closed')
+        # codex #219 七轮 P1：用 _notify_all_error（含 fail 活跃 _routes 推终态 error 帧）替代
+        # 仅 fail pending acks/resolves——evidence-based 重取（ConnectionClosed 竞态，recv loop
+        # 尚未跑 298-299 清理）经 pool.reacquire aclose 旧 client 时，别的 consumer 在该共享连接
+        # 上的 in-progress run 须收到终态 error（否则浏览器消息永久 pending）。与 recv-loop 清理
+        # 幂等（_routes.clear()，重复调空集合无操作）。
+        await self._notify_all_error('client closed')
         if self._recv_task is not None:
             self._recv_task.cancel()
             try:

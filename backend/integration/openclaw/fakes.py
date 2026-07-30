@@ -56,6 +56,8 @@ class FakeOpenClawWire:
         self.pair_calls: list = []
         self.connected: list[tuple[str, str]] = []
         self.sent: list = []
+        # codex #219 P2：记录每次 send_message 收到的 idempotency_key（对齐 port 契约）
+        self.sent_idempotency_keys: list = []
         self.closed: bool = False
         self._dead: bool = False
         # 测试可预设 pair() 返回值（如 PairingResult dataclass）
@@ -97,12 +99,15 @@ class FakeOpenClawWire:
         self.connected.append((url, device_token))
         self._dead = False
 
-    async def send_message(self, session_key: str, message: str, on_event: Any) -> str:
+    async def send_message(
+        self, session_key: str, message: str, on_event: Any, *, idempotency_key: str | None = None,
+    ) -> str:
         from chat.chat_client import ChatClientError
 
         if not self.connected:
             raise ChatClientError('client not connected')
         self.sent.append((session_key, message, on_event))
+        self.sent_idempotency_keys.append(idempotency_key)  # codex #219 P2：转发契约对齐
         rid = self.run_id
         self._routes[rid] = on_event
         return rid
@@ -126,6 +131,10 @@ class FakeOpenClawWire:
     def remove_approval_subscriber(self, cb: Any) -> None:
         if cb in self._approval_subscribers:
             self._approval_subscribers.remove(cb)
+
+    def approval_subscribers(self) -> list:
+        """返回当前全部审批订阅者的副本（codex #219 P2：共享 client 自愈迁移用）。"""
+        return list(self._approval_subscribers)
 
     async def broadcast_approval_resolved(self, approval_id: str, decision: str) -> None:
         frame = {'type': 'approvalResolved', 'id': approval_id, 'decision': decision}
