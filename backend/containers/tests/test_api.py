@@ -134,6 +134,33 @@ def test_delete_removes_instance_and_dir(authed, fleet):
 
 
 @pytest.mark.django_db
+def test_delete_evicts_pooled_chat_client(authed, fleet):
+    """codex #221 第五轮 P2：删除容器须逐出该网关的 pool client + 取消其重连 task。
+
+    否则被删容器的 url/token 仍是 pool 当前 target，#215 主动重连循环 stop 永不命中，
+    每 30s 无限向已删端口（可能被后续容器复用）重连陈旧凭证。
+    """
+    from chat.pool import ChatFleet
+
+    evicted = []
+
+    class SpyPool:
+        async def evict_instance(self, instance):
+            evicted.append(instance.name)
+
+    authed.post('/api/v1/containers/', {'name': 'demo'}, format='json')
+    ChatFleet.override(SpyPool())
+    try:
+        resp = authed.delete('/api/v1/containers/demo')
+        assert resp.status_code == 204
+        assert evicted == ['demo'], (
+            f'删除容器未逐出 ChatFleet pool client（evicted={evicted}），'
+            '主动重连循环将无限重试已删端口')
+    finally:
+        ChatFleet.reset()
+
+
+@pytest.mark.django_db
 def test_delete_missing_returns_404(authed):
     assert authed.delete('/api/v1/containers/nope').status_code == 404
 
@@ -183,6 +210,37 @@ def test_delete_returns_409_when_cleanup_fails(authed, fleet, monkeypatch):
     monkeypatch.setattr(fleet['orch'], 'delete', _fail)
     resp = authed.delete('/api/v1/containers/demo')
     assert resp.status_code == 409
+
+
+@pytest.mark.django_db
+def test_delete_evicts_pool_even_when_cleanup_fails(authed, fleet, monkeypatch):
+    """codex #221 R7 P2：delete 已 stop/remove 网关后 raise InstanceCleanupError（行保留可重试）时，
+    也应逐出 pool client——网关已删，pool client 连的是已删容器，主动重连会打已删端口。
+    当前实现仅在 204 成功分支 evict，CleanupError(409) 分支跳过 → 旧 client 无限重连已删端口。
+    """
+    from chat.pool import ChatFleet
+
+    evicted = []
+
+    class SpyPool:
+        async def evict_instance(self, instance):
+            evicted.append(instance.name)
+
+    authed.post('/api/v1/containers/', {'name': 'demo'}, format='json')
+
+    def _fail(name):
+        raise InstanceCleanupError(name, str(fleet['config'].root))  # 网关已删、home 清理失败
+
+    monkeypatch.setattr(fleet['orch'], 'delete', _fail)
+    ChatFleet.override(SpyPool())
+    try:
+        resp = authed.delete('/api/v1/containers/demo')
+        assert resp.status_code == 409  # CleanupError → 409 行保留可重试
+        assert evicted == ['demo'], (
+            f'delete 网关已删但 cleanup 失败(409)时未逐出 pool client（evicted={evicted}）——'
+            '主动重连将无限重试已删端口')
+    finally:
+        ChatFleet.reset()
 
 
 # ---------------------------- codex R2 端口耗尽转译（:40） ----------------------------

@@ -117,6 +117,7 @@ class OpenClawChatClient:  # pylint: disable=too-many-instance-attributes,too-ma
         connect_frame_builder=None,
         connect_timeout: float = 10.0,
         ack_timeout: float = 10.0,
+        on_dead: Callable[[], None] | None = None,
     ) -> None:
         self._url = url
         self._device_token = device_token
@@ -151,6 +152,8 @@ class OpenClawChatClient:  # pylint: disable=too-many-instance-attributes,too-ma
         self._dead = False  # recv loop 退出（连接断开）→ pool 据此驱逐重建
         # #196 T1 / #213：网关 policy（hello-ok 解析；握手前为协议默认）。tick_interval_ms 驱动静默看门狗。
         self._policy = GatewayPolicy.default()
+        # #196 T3 / #215：标 dead 时回调（pool 注入以触发主动重连；None = 不触发，如单测直建 client）。
+        self._on_dead = on_dead
 
     def add_approval_subscriber(self, cb: OnEvent) -> None:
         """注册连接级审批订阅者（T06 / codex P1）：多 consumer 共享 client 时各自独立注册。"""
@@ -197,6 +200,16 @@ class OpenClawChatClient:  # pylint: disable=too-many-instance-attributes,too-ma
     def policy(self) -> GatewayPolicy:
         """当前生效的网关 policy（hello-ok 解析；握手前 / 缺字段为协议默认）。#196 T1 / #213。"""
         return self._policy
+
+    @property
+    def identity(self):
+        """本连接的 DeviceIdentity（#215：pool 主动重连复用同份材料重建，无需重读配对）。"""
+        return self._identity
+
+    @property
+    def scopes(self):
+        """本连接的已批准 scopes（#215：pool 主动重连复用重建）。"""
+        return self._scopes
 
     def _default_connect_frame(self, req_id: str, device_token: str) -> dict:
         """已配对长连接帧：委托给单一来源 ConnectFrameBuilder.session()（issue #102 / #139 / #140）。
@@ -300,12 +313,12 @@ class OpenClawChatClient:  # pylint: disable=too-many-instance-attributes,too-ma
         except asyncio.CancelledError:  # pylint: disable=try-except-raise
             # #196 T1 / #213：task 取消即连接不可用（REST 跨 loop 清理 / 服务关闭竞态）。原分支只 raise
             # 不置位 → pool 快路径（not client.dead）无限复用假活 client，该容器聊天永久变砖。
-            self._dead = True
+            self._mark_dead()
             raise
         except Exception:  # pylint: disable=broad-exception-caught
             # 连接断开 / 静默超时（含看门狗 TimeoutError）：标记 dead 供 pool 驱逐重建，拒全部挂起请求
             # （不重放），按契约 close code 4000 语义关闭套接字（best-effort；pool 重建时 aclose 兜底）。
-            self._dead = True
+            self._mark_dead()
             if not self._closed:
                 await self._notify_all_error('容器连接断开')
             if self._ws is not None:
@@ -314,6 +327,17 @@ class OpenClawChatClient:  # pylint: disable=too-many-instance-attributes,too-ma
                 except Exception:  # pylint: disable=broad-exception-caught
                     pass
             return
+
+    def _mark_dead(self) -> None:
+        """置 dead 并触发 on_dead 回调（#215 pool 注入以启动主动重连）。回调 best-effort 不杀 recv loop。
+        传入 self（codex #221 P1）：pool 按「报告方是否仍是池中当前值」判定，且能在 client 于
+        connect() 后、放入 pool 前死亡时不丢通知（回调可直接携带报告方身份）。"""
+        self._dead = True
+        if self._on_dead is not None:
+            try:
+                self._on_dead(self)
+            except Exception:  # pylint: disable=broad-exception-caught
+                pass
 
     async def _handle(self, msg: dict) -> None:
         if msg.get('type') == 'res':
