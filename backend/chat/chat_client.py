@@ -651,8 +651,12 @@ class OpenClawChatClient:  # pylint: disable=too-many-instance-attributes,too-ma
 
     async def aclose(self) -> None:
         self._closed = True
-        self._fail_pending_acks('client closed')
-        self._fail_pending_resolves('client closed')
+        # codex #219 七轮 P1：用 _notify_all_error（含 fail 活跃 _routes 推终态 error 帧）替代
+        # 仅 fail pending acks/resolves——evidence-based 重取（ConnectionClosed 竞态，recv loop
+        # 尚未跑 298-299 清理）经 pool.reacquire aclose 旧 client 时，别的 consumer 在该共享连接
+        # 上的 in-progress run 须收到终态 error（否则浏览器消息永久 pending）。与 recv-loop 清理
+        # 幂等（_routes.clear()，重复调空集合无操作）。
+        await self._notify_all_error('client closed')
         if self._recv_task is not None:
             self._recv_task.cancel()
             try:

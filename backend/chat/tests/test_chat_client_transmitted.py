@@ -95,3 +95,26 @@ async def test_send_message_explicit_reject_is_not_transmitted():
     # 显式拒绝 = 确定未起 run，不是 transmitted 子类
     assert not isinstance(exc.value, ChatSendTransmittedError)
     await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_aclose_fails_active_routes_with_terminal_error():
+    """codex #219 七轮 P1：aclose 关闭前须 fail 活跃 _routes（推终态 error 帧）——否则
+    evidence-based 重取（ConnectionClosed 竞态）aclose 旧 client 时，别的 consumer 在该共享
+    连接上的 in-progress run 收不到终态 error，浏览器消息永久 pending。"""
+    t = FakeChatTransport(ack_run_id='run-live')
+    received = []
+
+    async def on_event(frame):
+        received.append(frame)
+
+    c = _client(transport=t)
+    await c.connect()
+    # 起一个 in-progress run（已 send、runId 路由已注册，尚未 done）
+    await c.send_message('s', 'm', on_event=on_event)
+    assert 'run-live' in c._routes  # pylint: disable=protected-access
+
+    await c.aclose()  # 关闭：须先 fail 活跃路由
+    # in-progress run 收到终态 error 帧（解锁前端 pending），且路由表清空
+    assert {'type': 'error', 'runId': 'run-live', 'message': 'client closed'} in received
+    assert c._routes == {}  # pylint: disable=protected-access use-implicit-booleaness-not-comparison
