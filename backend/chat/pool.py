@@ -119,6 +119,10 @@ class ChatConnectionPool:
         # codex #221 P2：aclose_all 期间置位——此时 client.aclose() 取消 recv_task 会触发 on_dead，
         # _schedule_reconnect 见此标志直接返回，避免 drain 后又生新重连 task / 泄漏替换连接。
         self._closing = False
+        # codex #221 R6 P2：每 url 的 evict 代际。evict_url 递增；get_or_create 慢路径建连前读、
+        # 插入前再读，代际变了说明建连期间发生 evict（force-repair/删除）→ 丢弃新 client 不发布，
+        # fencing「evict 快照漏掉 in-flight key、其随后发布旧凭证」的并发窗口。
+        self._evict_gen: dict[str, int] = {}
 
     def _key_lock(self, key: tuple[str, str]) -> asyncio.Lock:
         # 同步创建（无 await），单事件循环内原子；并发同 key 第一次进入会拿到同一把锁
@@ -178,7 +182,19 @@ class ChatConnectionPool:
             if identity is not None and not REQUIRED_SCOPES.issubset(set(scopes)):
                 raise NotPaired(pairing.status, pairing.pairing_request_id)
             new_client = self._make_client(key, url, pairing.device_token, identity, scopes)
+            # codex #221 R6 P2：建连前读 evict 代际——connect 期间若发生 evict（force-repair/删除），
+            # 代际会递增。
+            gen0 = self._evict_gen.get(url, 0)
             await new_client.connect()  # 握手有界（chat_client.connect_timeout）
+            # 插入前复核代际：建连期间发生 evict → 本 client 用的是被 evict 时读的旧凭证材料，
+            # 发布会成为重连 target 无限重试已删/旧凭证。丢弃（aclose）并视为建连失败 raise，
+            # 让上层按当前 Pairing 重新 get_or_create（force-repair 已换新 token 时按新 token 建）。
+            if self._evict_gen.get(url, 0) != gen0:
+                try:
+                    await new_client.aclose()
+                except Exception:  # pylint: disable=broad-exception-caught
+                    pass
+                raise ConnectionError('pool evicted during connect; credentials superseded')
             self._clients[key] = new_client
             self._reschedule_if_dead(key, new_client)  # codex #221 P1：插入前死亡的补调度
             return new_client
@@ -219,7 +235,7 @@ class ChatConnectionPool:
             self._start_reconnect(key, client)
 
     def _start_reconnect(self, key, target) -> None:
-        """为该 key 的 target client 启动后台主动重连（幂等：已有在途重连则不重复启动）。
+        """为该 key 的 target client 启动后台主动重连（幂等：已有守护**同一** target 的在途重连才不重复启动）。
 
         用独立 ReconnectPolicy 实例跑本轮重连（成功 reset 退避、失败翻倍）。stop 条件：fast-path 在
         重连在途期间已把该 key 换成**别的** client（用户流量迁走）→ 本次重连作废，防双 client 分裂。
@@ -227,10 +243,16 @@ class ChatConnectionPool:
         """
         existing = self._reconnect_tasks.get(key)
         if existing is not None and not existing.done():
-            return
+            # codex #221 R6 P1：槽位 task 守护的 target 非本次 target（fast-path 已换走旧 client、
+            # 当前值是新 client 且也死了）时，不能当重复丢弃——陈旧 task 醒来 stop 谓词命中即退出，
+            # 当前 dead client 将无人主动重连。取消陈旧 task、落入下方为当前 target 重启。
+            if getattr(existing, '_pool_target', None) is target:
+                return  # 真重复：已有守护同一 target 的在途重连
+            existing.cancel()  # 陈旧 task：守护已被换走的旧 client，其 stop 本就会命中退出
         policy = self._reconnect_policy.fork(lambda: self._reconnect_once(key, target))
         task = asyncio.ensure_future(
             policy.run(lambda: self._clients.get(key) is not target))
+        task._pool_target = target  # 供代际比较：本 task 守护哪个 client（见上方幂等检查）
         self._reconnect_tasks[key] = task
         # codex #221 P2：仅当槽位仍指向本 task 才弹出——避免「旧 task 的 done_callback 晚于同 key 新
         # task 注册执行」时误删新 task（新 task 失跟踪 → aclose_all 无法取消、死亡又起重复重连）。
@@ -317,6 +339,11 @@ class ChatConnectionPool:
         # 同 url 可能只剩「无 client 但悬挂重连」的 key（target 已被 fast-path 移出池）——一并取消
         for key in [k for k in list(self._reconnect_tasks) if k[0] == url]:
             self._cancel_reconnect(key)
+        # codex #221 R6 P2：递增该 url 的 evict 代际——fence「evict 与 in-flight get_or_create 建连
+        # 并发」窗口：in-flight 建连（connect 挂起、尚未插入 _clients）的快照不含它，但它插入前会
+        # 复核代际，发现递增即丢弃不发布（见 get_or_create）。同 event loop 单线程，本递增是同步
+        # 原子，get_or_create 在 connect 让渡后必读到最新值——无需 evict 也持 per-key 锁。
+        self._evict_gen[url] = self._evict_gen.get(url, 0) + 1
 
     async def evict_instance(self, instance) -> None:
         """按容器实例逐出其网关下全部旧凭证 client + 重连（codex #221 第二轮 P2）。

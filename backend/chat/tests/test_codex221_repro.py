@@ -317,3 +317,134 @@ async def test_p1_reconnect_retries_when_replacement_already_dead():
     assert final is not c1 and not final.dead, (
         'P1: 重连收敛后池中仍是死 client（dead 替换未被丢弃重建）')
     await pool.aclose_all()
+
+
+@pytest.mark.asyncio
+async def test_p1_replaces_stale_reconnect_when_current_client_dies():
+    """P1（codex #221 第六轮）：当前 client 死亡时，若槽位仍被「守护陈旧 target 的退避 task」
+    占着，必须取消它并为当前 target 重启——否则陈旧 task 醒来 stop 命中退出，当前 dead client
+    无人主动重连。
+
+    场景链：
+      1. A dead → 调度过期退避 task T_A（target=A，还在睡）
+      2. 前台 get_or_create() 驱逐 dead A、重建换入 B（慢路径不取消 T_A）
+      3. B 也断开 → on_dead → _schedule_reconnect(key, B)：B 是当前值 → _start_reconnect(key, B)
+      4. buggy：_start_reconnect 幂等检查见 T_A 仍 in-flight 即 return（不为 B 启动）；
+         T_A 醒来 stop 谓词 `_clients[key] is not A`（池中是 B）命中 → 退出，B dead 无人连。
+      期望：识别 T_A 守护的是陈旧 target，取消并为 B 重启新 task。
+    """
+    index = [0]
+    clock = _clock()
+    # 让 T_A 卡在首次退避里（sleeper 挂起），横跨 get_or_create 换入 B——
+    # 否则假时钟不真睡，T_A 在 get_or_create 的 await 点就跑完退避、stop 命中退出，测不到竞态。
+    first_sleep_block = asyncio.Event()
+
+    async def blocking_sleeper(x):
+        clock.sleeps.append(x)
+        if len(clock.sleeps) == 1:
+            await first_sleep_block.wait()  # 首次退避（T_A）挂起，直到测试放行
+
+    def factory(url, dt, *, identity, scopes, on_dead=None):
+        return GenClient(url, dt, identity=identity, scopes=scopes,
+                         on_dead=on_dead, index=index)
+
+    pool = ChatConnectionPool(
+        pairing_service=FakePairingService(), client_factory=factory,
+        ws_url_for=_url_for, reconnect_policy=ReconnectPolicy(sleeper=blocking_sleeper))
+    inst = SimpleNamespace(name='a', port=19001)
+    a = await pool.get_or_create(inst)  # A
+    key = (a.url, a.device_token)
+    a.kill()  # A dead → 调度 T_A（target=A，卡在首次退避里）
+    t_a = pool._reconnect_tasks.get(key)
+    assert t_a is not None
+    await asyncio.sleep(0)  # 让 T_A 进入退避挂起点
+    assert not t_a.done()
+    # 前台 get_or_create 驱逐 dead A、重建换入 B（A 已 dead → 走慢路径，不取消 T_A）
+    b = await pool.get_or_create(inst)
+    assert b is not a and not b.dead
+    assert pool._clients[key] is b
+    assert pool._reconnect_tasks.get(key) is t_a, '慢路径重建不应取消 T_A（前置假设）'
+    # B 也断开 → on_dead → _schedule_reconnect(key, B)
+    b.kill()
+    # P1 期望：槽位换成守护 B 的新 task（非陈旧 T_A），且 T_A 已被取消
+    t_b = pool._reconnect_tasks.get(key)
+    assert t_b is not None and t_b is not t_a, (
+        'P1 R6: 当前 client B 死亡时未替换守护陈旧 target A 的重连 task——'
+        'T_A 醒来 stop 命中退出后，B 无人主动重连')
+    first_sleep_block.set()  # 放行 T_A 的挂起退避，让其 cancel/落定
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert t_a.done(), '陈旧 task T_A 应被取消终止'
+    await pool.aclose_all()
+
+
+class SlowConnectClient(GenClient):
+    """connect 可挂起（P2 #221 R6：in-flight 建连与 evict 并发）。第 2 次及以后 connect 在
+    connect_gate set 前挂起，模拟「已开始建连但尚未插入 _clients」的窗口；首次 connect 不挂
+    （让初始 c1 正常建连）。connect_started 在第 2 代 connect 到达挂起点时 set，供测试同步
+    「in-flight 已读 evict 代际、正挂在 connect」后再触发 evict。"""
+
+    def __init__(self, *args, connect_gate=None, connect_started=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._connect_gate = connect_gate
+        self._connect_started = connect_started
+
+    async def connect(self):
+        i = self._index[0]
+        await super().connect()  # 先递增 index（i 为本次代际）
+        if i >= 1 and self._connect_gate is not None:
+            if self._connect_started is not None:
+                self._connect_started.set()  # 标记：in-flight 已进入 connect 挂起窗口
+            await self._connect_gate.wait()  # 第 2 代起：connect 完成前挂起（in-flight 窗口）
+
+
+@pytest.mark.asyncio
+async def test_p2_evict_fences_inflight_pool_insertion():
+    """P2（codex #221 第六轮）：evict 与「已开始 connect 但尚未插入 _clients」的 get_or_create
+    并发时，evict 快照漏掉 in-flight key，其随后发布已删/旧凭证 client 并无限重连。
+
+    场景：c1 在池中 → c1 dead → 后台/前台 get_or_create 开始慢路径重建（第 2 代 connect 挂起，
+    尚未插入 _clients）→ 此时 evict_url(url)（force-repair/删除）快照 _clients 只看到 dead c1、
+    逐出它，但漏掉 in-flight 重建 → evict 返回后 connect 完成、把第 2 代 client 插入 _clients
+    （凭证仍是被 evict 时读的材料）→ 该 client 成为重连 target 无限重试已删/旧凭证。
+
+    期望（per-key 锁 fencing）：evict_url 对同 url 的 per-key 锁 acquire，与 in-flight 建连互斥；
+    建连在锁内插入前复核 evict 代际，建连期间发生 evict 则丢弃新 client 不发布。
+    """
+    index = [0]
+    clock = _clock()
+    connect_gate = asyncio.Event()  # 未 set：第 2 代 connect 挂起
+    connect_started = asyncio.Event()  # in-flight 进入 connect 挂起窗口时 set
+
+    def factory(url, dt, *, identity, scopes, on_dead=None):
+        return SlowConnectClient(url, dt, identity=identity, scopes=scopes,
+                                 on_dead=on_dead, index=index, connect_gate=connect_gate,
+                                 connect_started=connect_started)
+
+    pool = ChatConnectionPool(
+        pairing_service=FakePairingService(), client_factory=factory,
+        ws_url_for=_url_for, reconnect_policy=ReconnectPolicy(sleeper=_sleeper(clock)))
+    inst = SimpleNamespace(name='a', port=19001)
+    c1 = await pool.get_or_create(inst)  # 第 1 代：正常建连（i=0 不挂）
+    url = c1.url
+    key = (url, c1.device_token)
+    c1.kill()  # c1 dead → 取消死亡调度的重连，聚焦 in-flight 窗口本身
+    pool._cancel_reconnect(key)
+    # 后台启动慢路径重建：第 2 代 connect 挂起（in-flight，尚未插入 _clients）
+    inflight = asyncio.ensure_future(pool.get_or_create(inst))
+    # 等 in-flight 真正到达 connect 挂起点（已读 evict 代际、正挂在 connect 窗口内）
+    await asyncio.wait_for(connect_started.wait(), timeout=5)
+    assert not inflight.done()
+    # 此时 evict_url(url)（force-repair/删除）：落在「读 gen0 之后、读 gen1 之前」的窗口内
+    await pool.evict_url(url)
+    assert key not in pool._clients
+    # 放行 in-flight connect——buggy：第 2 代被插入 _clients（凭证是被 evict 时读的旧材料）；
+    # 修复后：建连期间已 evict（代际变），in-flight 丢弃新 client 并 raise ConnectionError。
+    connect_gate.set()
+    with pytest.raises(ConnectionError):
+        await inflight
+    # P2 期望：in-flight 建连完成**后**，旧凭证 client 未发布进池（建连期间已 evict，凭证作废）。
+    assert key not in pool._clients, (
+        'P2 R6: in-flight 建连在 evict 后仍把旧凭证 client 发布进池——'
+        '该 client 将成为重连 target 无限重试已删/旧凭证')
+    await pool.aclose_all()
