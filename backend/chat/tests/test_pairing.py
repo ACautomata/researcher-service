@@ -80,9 +80,8 @@ def test_pair_retry_after_approve_succeeds(instance):
     assert pairing.status == Pairing.STATUS_PENDING
     first_device_id = pairing.device_id
 
-    # 宿主 approve 后重试：同一 deviceId 握手成功
-    svc2 = PairingService(transport=FakeTransport.hello_ok(
-        scopes=['operator.read', 'operator.write', 'operator.approvals']))
+    # 宿主 approve 后重试：同一 deviceId 握手成功（缺省 scopes = 含 admin 全量 4-scope）
+    svc2 = PairingService(transport=FakeTransport.hello_ok())
     pairing2 = svc2.ensure_paired(instance)
     assert pairing2.status == Pairing.STATUS_PAIRED
     assert pairing2.device_id == first_device_id  # 身份稳定

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -22,8 +23,13 @@ from integration.openclaw.wire import (
     AGENT_ID as _AGENT_ID,
 )
 from integration.openclaw.wire import (
+    REQUIRED_SCOPES as _REQUIRED_SCOPES,
+)
+from integration.openclaw.wire import (
     ConnectFrameBuilder as _ConnectFrameBuilder,
 )
+
+logger = logging.getLogger(__name__)
 
 # on_event 回调契约：接收翻译后的前端契约帧（text/done/error）
 OnEvent = Callable[[dict], Awaitable[None]]
@@ -73,7 +79,17 @@ class ChatClientError(Exception):
 
 
 class ChatConnectError(ChatClientError):
-    """长连接握手失败（connect res not ok / 网络）。"""
+    """长连接握手失败（connect res not ok / 网络 / 超时）。
+
+    issue #222 / #197-01：结构化——保留网关返回的 ``error.code`` 与 ``error.details``
+    （``reason``/``retryAfterMs``/``MISSING_SCOPE``），pool/consumer/REST 按码分流恢复策略，
+    不再统一塌缩成一句「连接容器失败，请稍后重试」。网络/超时等非网关拒绝时 code='UNKNOWN'。
+    """
+
+    def __init__(self, message: str, *, code: str = 'UNKNOWN', details: dict | None = None) -> None:
+        super().__init__(message)
+        self.code = code
+        self.details = details or {}
 
 
 class ChatSendError(ChatClientError):
@@ -103,21 +119,27 @@ class OpenClawChatClient:  # pylint: disable=too-many-instance-attributes,too-ma
         connect_frame_builder=None,
         connect_timeout: float = 10.0,
         ack_timeout: float = 10.0,
+        on_device_token_rotated=None,
     ) -> None:
         self._url = url
         self._device_token = device_token
         # session connect 帧 device 签名块所需（issue #139/#140）：identity 为 DeviceIdentity、
-        # scopes 为配对时网关批准的 scopes（#141 pool 从 Pairing 注入）。两者可选——缺省（identity=None）
-        # 走旧路径：不签名，仅 gateway_token + device_token（向后兼容）。nonce 不再构造注入，
+        # scopes 为配对时网关批准的 scopes（#141 pool 从 Pairing 注入）。nonce 不再构造注入，
         # 由 connect() 等 connect.challenge 动态提取（#140）。
+        # issue #222 / #197-01 问题4a：删除 identity=None 的裸 connect「向后兼容」死路径——按契约
+        # 第一帧必须是合法 connect 帧，省略设备身份的操作员连接会被清空自行声明的 scopes，该路径
+        # 对当前网关必然失败/拿到无权限连接，不可能有正确调用方。构造期 fail-fast。
+        if identity is None:
+            raise ValueError('signed connect path requires identity (legacy unsigned path removed in #222)')
         # codex #150 P2：identity 与 scopes 是签名路径的**一体**前提——给了 identity 就必须给非空
         # scopes，否则 ConnectFrameBuilder.session() 会在握手半途 `','.join(None)` TypeError。
-        # 构造期 fail-fast 校验（优于让坏配置连上网关后才崩），与「identity=None 才走旧路径」对齐。
-        if identity is not None and not scopes:
+        if not scopes:
             raise ValueError('signed connect path requires non-empty scopes when identity is provided')
         self._identity = identity
         self._scopes = scopes
         self._nonce = ''  # #140：connect() 等 challenge 提取后填入，供默认 builder 读（seam 保持 2 参）
+        # issue #222 问题2：hello-ok auth.deviceToken 轮换持久化钩子（pool 注入，负责加密落库 + re-key）。
+        self._on_device_token_rotated = on_device_token_rotated
         self._connect = transport or websockets.connect
         self._translator = translator or ChatEventTranslator()
         self._build_connect = connect_frame_builder or self._default_connect_frame
@@ -135,6 +157,8 @@ class OpenClawChatClient:  # pylint: disable=too-many-instance-attributes,too-ma
         self._routes: dict[str, OnEvent] = {}
         self._closed = False
         self._dead = False  # recv loop 退出（连接断开）→ pool 据此驱逐重建
+        # issue #222 问题2：hello-ok 授予 scopes 收窄（⊉ REQUIRED_SCOPES）→ pool 路由重新配对。
+        self._scopes_narrowed = False
         # #196 T1 / #213：网关 policy（hello-ok 解析；握手前为协议默认）。tick_interval_ms 驱动静默看门狗。
         self._policy = GatewayPolicy.default()
 
@@ -171,6 +195,16 @@ class OpenClawChatClient:  # pylint: disable=too-many-instance-attributes,too-ma
         return self._dead or self._closed
 
     @property
+    def device_token(self) -> str:
+        """当前生效的 deviceToken（hello-ok 轮换采纳后为新值）；pool 据此 re-key。"""
+        return self._device_token
+
+    @property
+    def scopes_narrowed(self) -> bool:
+        """hello-ok 授予 scopes 收窄（⊉ REQUIRED_SCOPES，issue #222 问题2）；pool 据此路由重配。"""
+        return self._scopes_narrowed
+
+    @property
     def policy(self) -> GatewayPolicy:
         """当前生效的网关 policy（hello-ok 解析；握手前 / 缺字段为协议默认）。#196 T1 / #213。"""
         return self._policy
@@ -180,26 +214,22 @@ class OpenClawChatClient:  # pylint: disable=too-many-instance-attributes,too-ma
 
         spec §8.1 step5 + #139：配对后用 deviceToken 直连（auth.token）并附 Ed25519 device 签名块
         （identity/scopes 构造期注入；nonce 由 connect() 等 connect.challenge 提取后写入 self._nonce，#140）。
-        identity 为 None（未配对/旧路径）时不签名——返回仅 gateway_token + device_token 的
-        connect 帧（无 device 块，向后兼容）。
+        issue #222 问题4a：identity=None 裸 connect 死路径已删除（构造期 fail-fast），此处恒走签名路径。
 
         codex #150 P2：本 builder 与注入的 connect_frame_builder 共用 (req_id, device_token) 两参契约
         ——nonce 经 self._nonce 实例态传入（connect() 提取后填），不在 seam 上加第三参，保持自定义
         两参 builder 可继续注入。
         """
-        if self._identity is None:
-            return {
-                'type': 'req',
-                'id': req_id,
-                'method': 'connect',
-                'params': {'auth': {'token': device_token}},
-            }
         return _ConnectFrameBuilder.session(
             req_id=req_id, identity=self._identity, device_token=device_token,
             nonce=self._nonce, scopes=self._scopes,
         )
 
     async def connect(self) -> None:
+        # issue #222：允许同一 client 在建连失败（内部 aclose 置 _closed/_dead）后有界重试
+        # （pool 按码分流重试同一 deviceToken）：每次建连前复位关闭/死亡标志，不因残留状态误判已死。
+        self._closed = False
+        self._dead = False
         try:
             self._cm = self._connect(self._url)
             self._ws = await self._cm.__aenter__()  # pylint: disable=unnecessary-dunder-call
@@ -209,26 +239,58 @@ class OpenClawChatClient:  # pylint: disable=too-many-instance-attributes,too-ma
             # 预算（最坏 ~2× connect_timeout），拖慢 pool.get_or_create() 对慢/坏网关的感知。
             deadline = asyncio.get_running_loop().time() + self._connect_timeout
             try:
-                if self._identity is not None:
-                    # issue #140：先等 connect.challenge 提取 nonce，用 DeviceIdentity 签名后才发帧
-                    self._nonce = await asyncio.wait_for(
-                        self._await_challenge(), timeout=self._remaining(deadline),
-                    )
-                # 向后兼容：无 device_identity 走旧路径——不等 challenge、不签名、立即发帧。
+                # issue #140 + #222 问题4a：恒走签名路径——先等 connect.challenge 提取 nonce，
+                # 用 DeviceIdentity 签名后才发帧（identity=None 旧路径已删除）。
+                self._nonce = await asyncio.wait_for(
+                    self._await_challenge(), timeout=self._remaining(deadline),
+                )
                 # 统一两参调用（builder seam 契约）；签名所需 nonce 已由默认 builder 读 self._nonce。
                 frame = self._build_connect(req_id, self._device_token)
                 await self._ws.send(json.dumps(frame))
                 hello_ok = await asyncio.wait_for(
                     self._await_res(req_id), timeout=self._remaining(deadline),
                 )
-                # #213：解析 hello-ok payload.policy（驱动静默看门狗 2×tick）；缺字段由 from_hello_ok 回退默认
-                self._policy = GatewayPolicy.from_hello_ok(hello_ok.get('payload'))
+                # issue #222 问题2：采纳 hello-ok 协商结果——auth.scopes 收窄标记 + auth.deviceToken
+                # 轮换采纳 + payload.policy 解析（#213 看门狗/发送预检消费）。
+                self._adopt_hello_ok(hello_ok)
             except TimeoutError as exc:
                 raise ChatConnectError('connect handshake timeout') from exc
         except BaseException:
             await self.aclose()
             raise
         self._recv_task = asyncio.create_task(self._recv_loop())
+
+    def _adopt_hello_ok(self, hello_ok: dict) -> None:
+        """采纳 hello-ok 协商结果（issue #222 问题2，对齐配对路径 pairing_ws._await_connect_res）。
+
+        协商结果是必须采纳的会话事实：
+        - ``payload.policy`` → ``GatewayPolicy.from_hello_ok``（#213，驱动静默看门狗 2×tick、T5 预检）。
+        - ``payload.auth.scopes`` 授予收窄（⊉ REQUIRED_SCOPES）→ 告警并置 ``_scopes_narrowed``，
+          pool 据此路由重新配对（否则后续 RPC 逐个 FORBIDDEN 才零散暴露）。
+        - ``payload.auth.deviceToken`` 轮换（与当前不同）→ 更新当前 token 并经
+          ``on_device_token_rotated`` 钩子持久化（pool 加密落库 + re-key）；旧 token 一旦被撤销
+          即落入「同一失效 token 无限重建 → 聊天永久变砖」死局，采纳新 token 解之。
+        """
+        payload = hello_ok.get('payload')
+        # #213：解析 hello-ok payload.policy（驱动静默看门狗 2×tick）；缺字段由 from_hello_ok 回退默认
+        self._policy = GatewayPolicy.from_hello_ok(payload)
+        auth = (payload or {}).get('auth') or {}
+        scopes = auth.get('scopes')
+        if scopes is not None and not _REQUIRED_SCOPES.issubset(set(scopes)):
+            # 授予 scopes 收窄：后续 RPC 会逐个 FORBIDDEN——告警并标记需重配（pool 路由）。
+            logger.warning(
+                'hello-ok granted scopes narrowed: %s (missing %s); re-pairing required',
+                scopes, sorted(_REQUIRED_SCOPES - set(scopes)),
+            )
+            self._scopes_narrowed = True
+        device_token = auth.get('deviceToken')
+        if device_token and device_token != self._device_token:
+            # 网关轮换下发新 deviceToken：采纳为当前值并经钩子持久化（对齐上游 selectConnectAuth
+            # 「新签发 deviceToken 优先于旧值」语义）。
+            logger.info('hello-ok rotated deviceToken; adopting new token')
+            self._device_token = device_token
+            if self._on_device_token_rotated is not None:
+                self._on_device_token_rotated(device_token)
 
     @staticmethod
     def _remaining(deadline: float) -> float:
@@ -261,7 +323,15 @@ class OpenClawChatClient:  # pylint: disable=too-many-instance-attributes,too-ma
             f'connect res (id={req_id})',
         )
         if not msg.get('ok'):
-            raise ChatConnectError('connect handshake rejected by gateway')
+            # issue #222 问题1：保留网关 error.code/details（reason/retryAfterMs/MISSING_SCOPE），
+            # pool/consumer 按码分流——不再塌缩成一句笼统「handshake rejected」。
+            error = msg.get('error') or {}
+            code = error.get('code') or 'UNKNOWN'
+            details = error.get('details') if isinstance(error.get('details'), dict) else {}
+            raise ChatConnectError(
+                error.get('message') or f'connect handshake rejected by gateway ({code})',
+                code=code, details=details,
+            )
         return msg
 
     async def _recv_loop(self) -> None:

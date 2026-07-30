@@ -713,8 +713,9 @@ class TestPairingAdapterImplementsWirePort:
         from integration.openclaw.adapters import OpenClawWireAdapter
 
         identity = DeviceCrypto.generate_identity()
+        # issue #222：REQUIRED_SCOPES 纳入 operator.admin——配对成功 hello-ok 须含全量 4-scope。
         transport = FakeTransport.hello_ok(
-            scopes=['operator.read', 'operator.write', 'operator.approvals'],
+            scopes=['operator.read', 'operator.write', 'operator.admin', 'operator.approvals'],
             device_token='dt-xyz',
         )
         adapter = OpenClawWireAdapter(transport=transport)

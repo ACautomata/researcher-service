@@ -24,8 +24,11 @@ AGENT_ID = 'main'
 SCOPES = ['operator.read', 'operator.write', 'operator.admin', 'operator.approvals']
 CAPS = ['tool-events']
 
-# 验收要求：协商 scopes 必须至少包含以下三者，否则聊天/审批调用会缺权失败。
-REQUIRED_SCOPES = {'operator.read', 'operator.write', 'operator.approvals'}
+# 验收要求：协商 scopes 必须至少包含以下四者，否则聊天/审批/会话删除/配置调用会缺权失败。
+# issue #222 / #197-01：纳入 operator.admin——sessions.delete 与 /config set 需 admin；申请了
+# admin（SCOPES 已含）却不校验会导致「调用永久失败却提示重试」。配对握手（pairing_ws）与 session
+# 建连（pool）均按本集校验，admin 缺失在配对/建连阶段即暴露并路由重配。
+REQUIRED_SCOPES = {'operator.read', 'operator.write', 'operator.admin', 'operator.approvals'}
 
 # 事件族名（语义层归一用，r26 / spec §8.2）—— Translator 据此把 OpenClaw 原生事件族
 # 归一为内部 approval / tool 语义。确切事件名/payload 待配对后实测校准（r26 §0/§3）。

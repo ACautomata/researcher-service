@@ -107,18 +107,6 @@ async def test_connect_challenge_missing_nonce_raises():
 
 
 @pytest.mark.asyncio
-async def test_connect_without_identity_ignores_challenge_legacy_path():
-    """issue #140 向后兼容：device_identity 为 None 时走旧路径——不等 challenge、立即发帧、不签名。"""
-    t = FakeChatTransport(challenge_nonce=None)  # 不下发 challenge（旧网关）
-    c = OpenClawChatClient(URL, 'dt', transport=t)  # 不传 identity/scopes
-    await c.connect()
-    connect = next(f for f in t.sent if f.get('method') == 'connect')
-    assert connect['params']['auth']['token'] == 'dt'
-    assert 'device' not in connect['params']  # 旧路径无 device 签名块
-    await c.aclose()
-
-
-@pytest.mark.asyncio
 async def test_identity_without_scopes_raises_at_construction():
     """回归 (codex #150 P2 #1)：identity 与 scopes 是签名路径一体前提——给 identity 但 scopes
     缺省/为空时，构造期 fail-fast ValueError，而非连上网关后 `','.join(None)` TypeError 半途崩。"""
@@ -1075,4 +1063,134 @@ async def test_send_message_sends_text_frame_not_binary():
     # 找到 chat.send 那次 send 的原始类型：必须是 str（文本帧），不能是 bytes（二进制帧）
     idx = next(i for i, f in enumerate(t.sent) if f.get('method') == 'chat.send')
     assert t.sent_types[idx] is str
+    await c.aclose()
+
+
+# ── #222 / #197-01：结构化握手错误码 + hello-ok 协商采纳 + 删 identity=None 死路径 ──
+
+# 与 pool 校验一致的全量必需 scopes（含 operator.admin）；收窄脚本在其上删减。
+_REQUIRED = ['operator.read', 'operator.write', 'operator.admin', 'operator.approvals']
+
+
+@pytest.mark.asyncio
+async def test_connect_error_carries_code_and_details():
+    """#222 问题1：握手 res not ok 时 ChatConnectError 保留网关 error.code/details——
+    不再塌缩成一句笼统文案，pool/consumer 据此按码分流。"""
+    t = FakeChatTransport(connect_ok=False, connect_error={
+        'code': 'AUTH_TOKEN_MISMATCH', 'message': 'device token revoked',
+        'details': {'reason': 'revoked'}})
+    c = _client(transport=t)
+    with pytest.raises(ChatConnectError) as exc:
+        await c.connect()
+    assert exc.value.code == 'AUTH_TOKEN_MISMATCH'
+    assert exc.value.details == {'reason': 'revoked'}
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_connect_error_unavailable_startup_sidecars_retry_after():
+    """#222 问题1：UNAVAILABLE + details.reason=startup-sidecars + retryAfterMs 结构化保留
+    （合法启动暂不可用，pool 按 retryAfterMs 有界重试，非硬错误）。"""
+    t = FakeChatTransport(connect_ok=False, connect_error={
+        'code': 'UNAVAILABLE',
+        'details': {'reason': 'startup-sidecars', 'retryAfterMs': 50}})
+    c = _client(transport=t)
+    with pytest.raises(ChatConnectError) as exc:
+        await c.connect()
+    assert exc.value.code == 'UNAVAILABLE'
+    assert exc.value.details['reason'] == 'startup-sidecars'
+    assert exc.value.details['retryAfterMs'] == 50
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_connect_error_missing_code_defaults_unknown():
+    """#222 健壮性：网关 res 无 error.code → ChatConnectError.code 回退 'UNKNOWN'（不 None crash）。"""
+    t = FakeChatTransport(connect_ok=False, connect_error={'message': 'boom'})
+    c = _client(transport=t)
+    with pytest.raises(ChatConnectError) as exc:
+        await c.connect()
+    assert exc.value.code == 'UNKNOWN'
+    assert exc.value.details == {}
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_hello_ok_narrowed_scopes_marks_scopes_narrowed():
+    """#222 问题2：hello-ok 授予 scopes 收窄（⊉ REQUIRED_SCOPES）→ scopes_narrowed=True，
+    pool 据此路由重新配对（后续 RPC 会逐个 FORBIDDEN，须尽早暴露）。"""
+    narrowed = ['operator.read', 'operator.write']  # 缺 admin/approvals
+    t = FakeChatTransport(connect_auth={'deviceToken': 'dt-fake', 'role': 'operator',
+                                        'scopes': narrowed})
+    c = _client(transport=t)
+    await c.connect()
+    assert c.scopes_narrowed is True
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_hello_ok_full_scopes_not_narrowed():
+    """#222 对照：hello-ok 授予全量 REQUIRED_SCOPES → scopes_narrowed=False（不误判重配）。"""
+    t = FakeChatTransport(connect_auth={'deviceToken': 'dt-fake', 'role': 'operator',
+                                        'scopes': _REQUIRED})
+    c = _client(transport=t)
+    await c.connect()
+    assert c.scopes_narrowed is False
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_hello_ok_rotated_device_token_persisted_via_hook():
+    """#222 问题2：hello-ok 下发新 auth.deviceToken（网关轮换）→ client 更新当前 token 并
+    调 on_device_token_rotated 钩子（pool 注入负责加密落库 + re-key）；旧 token 失效即死局被解。"""
+    rotated = []
+    t = FakeChatTransport(connect_auth={'deviceToken': 'dt-new-rotated', 'role': 'operator',
+                                        'scopes': _REQUIRED})
+    c = OpenClawChatClient(URL, 'dt-old', identity=_IDENTITY, scopes=_SCOPES, transport=t,
+                           on_device_token_rotated=rotated.append)
+    await c.connect()
+    assert c.device_token == 'dt-new-rotated'
+    assert rotated == ['dt-new-rotated']
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_hello_ok_same_device_token_no_rotation_hook():
+    """#222 对照：hello-ok deviceToken 与当前一致 → 不触发轮换钩子（不重复落库）。"""
+    rotated = []
+    t = FakeChatTransport(connect_auth={'deviceToken': 'dt-same', 'role': 'operator',
+                                        'scopes': _REQUIRED})
+    c = OpenClawChatClient(URL, 'dt-same', identity=_IDENTITY, scopes=_SCOPES, transport=t,
+                           on_device_token_rotated=rotated.append)
+    await c.connect()
+    assert c.device_token == 'dt-same'
+    assert rotated == []
+    await c.aclose()
+
+
+def test_identity_required_at_construction():
+    """#222 问题4a：删除 identity=None 裸 connect 死路径——identity 缺省/None 构造期 fail-fast
+    ValueError（按契约第一帧必须是合法 connect 帧，省略身份的连接必然失败/无权限，无正确调用方）。"""
+    with pytest.raises(ValueError, match='identity'):
+        OpenClawChatClient(URL, 'dt', scopes=_SCOPES, transport=FakeChatTransport())
+    with pytest.raises(ValueError, match='identity'):
+        OpenClawChatClient(URL, 'dt', identity=None, scopes=_SCOPES,
+                           transport=FakeChatTransport())
+
+
+@pytest.mark.asyncio
+async def test_connect_is_reentrant_after_failure():
+    """#222 pool 重试前提：connect() 失败后（内部 aclose 置 _closed/_dead）可在同一 client 上
+    有界重试——复位关闭/死亡标志，不因残留状态误判已死。第一次 AUTH 失败、第二次成功。"""
+    t = FakeChatTransport(connect_ok=False, connect_error={'code': 'AUTH_TOKEN_MISMATCH'})
+    c = _client(transport=t)
+    with pytest.raises(ChatConnectError):
+        await c.connect()
+    assert c.dead is True  # 失败后内部清理置 dead
+    # 换好网关脚本后同一 client 重连成功（pool 重试同一 deviceToken 的前提）。connect() 每次
+    # 经 transport 产新 _FakeChatWs，其 challenge/connect-ack 标志随新连接自动复位，无需手动复位。
+    t.connect_ok = True
+    t.connect_error = None
+    await c.connect()
+    assert c.dead is False
     await c.aclose()

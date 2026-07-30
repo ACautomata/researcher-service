@@ -135,6 +135,25 @@ class PairingService:
         """查询配对状态（无则返回 unpaired 占位行，不触发握手）。"""
         return self._get_or_create(instance)
 
+    def mark_pairing_invalid(self, instance: Instance, reason: str = '') -> None:
+        """把配对行标记为失效（STATUS_ERROR），引导用户重新配对（issue #222 问题1/问题2）。
+
+        触发场景：session 握手按结构化错误码判定配对材料已失效/不足——deviceToken 被撤销
+        （AUTH_TOKEN_MISMATCH 有界重试仍失败）、scope 不匹配需重配（AUTH_SCOPE_MISMATCH）、
+        hello-ok 授予 scopes 收窄（⊉ REQUIRED_SCOPES）。落 STATUS_ERROR 让上层（pairing view /
+        pool 后续 get_or_create）路由重新配对，而非继续用失效材料无限重建连接。
+        """
+        Pairing.objects.filter(instance=instance).update(status=Pairing.STATUS_ERROR)
+
+    def update_device_token(self, instance: Instance, new_token: str) -> None:
+        """持久化 hello-ok 轮换下发的新 deviceToken（issue #222 问题2）。
+
+        session 握手 hello-ok 携带新 auth.deviceToken 时，pool 经本方法把新 token 加密落库
+        （device_token 是 EncryptedTextField），后续连接复用新 token——旧 token 一旦被网关撤销
+        即落入「同一失效 token 无限重建 → 聊天永久变砖」死局，采纳并落库新 token 解之。
+        """
+        Pairing.objects.filter(instance=instance).update(device_token=new_token)
+
     def _run_handshake(
         self, url: str, token: str, identity: DeviceIdentity,
     ) -> PairingResult:

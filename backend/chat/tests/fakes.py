@@ -134,36 +134,52 @@ class _FakeChatWs:
     def __init__(self, transport):
         self._t = transport
         self._extra = asyncio.Queue()
+        # 本连接收到的 connect 帧 + 本连接的 challenge/connect-ack 下发标志（非全局 t.sent /
+        # transport 级标志——那些跨连接累积，重试同一 client 时会误判旧连接状态为本连接的，
+        # 跳过 challenge/ack 分支致握手超时）。issue #222 reentrant：每连接（_FakeChatWs 实例）独立。
+        self._my_connect = None
+        self._challenge_sent = False
+        self._connect_acked = False
 
     async def send(self, data):
         # codex #220 P1：记录原始数据类型——websockets.send(str)→文本帧、send(bytes)→二进制帧。
         # 断言 chat.send 走文本帧（OpenClaw 协议全系 JSON 文本），防「为测大小误传 bytes 发二进制帧」回归。
         self._t.sent_types.append(type(data))
-        self._t.sent.append(json.loads(data))
+        frame = json.loads(data)
+        self._t.sent.append(frame)
+        if frame.get('method') == 'connect' and self._my_connect is None:
+            self._my_connect = frame
 
     async def recv(self):  # pylint: disable=too-many-return-statements
         t = self._t
         # issue #140：脚本化 challenge 时，网关在 connect 前先下发 connect.challenge（payload.nonce），
         # client 提取 nonce 签名后才发 connect 帧。默认 None（不下发）→ 旧路径立即发帧。
-        connect = next((f for f in t.sent if f.get('method') == 'connect'), None)
-        if connect is None and t.challenge_nonce is not None and not t._challenge_sent:
-            t._challenge_sent = True
+        # connect 判定用本连接的 _my_connect（非全局 t.sent，见 __init__ 注释）。
+        connect = self._my_connect
+        if connect is None and t.challenge_nonce is not None and not self._challenge_sent:
+            self._challenge_sent = True
             return json.dumps({'type': 'event', 'event': 'connect.challenge',
                                'payload': {'nonce': t.challenge_nonce, 'ts': 1}})
-        if connect is not None and not t._connect_acked and not t.suppress_connect_ack:
-            t._connect_acked = True
+        if connect is not None and not self._connect_acked and not t.suppress_connect_ack:
+            self._connect_acked = True
             if t.connect_ok:
                 # #213：hello-ok payload.policy（connect_policy 为 None 时不下发，测协议默认回退）。
-                # 用三元 unpack 而非 if 语句，避免 recv 再增分支触发 too-many-branches。
+                # #222：connect_auth 覆盖 hello-ok payload.auth（测 deviceToken 轮换 / scopes 收窄）；
+                # 缺省下发全量 4-scope（含 operator.admin，对齐 REQUIRED_SCOPES）。
+                auth = t.connect_auth or {
+                    'deviceToken': 'dt-fake', 'role': 'operator',
+                    'scopes': ['operator.read', 'operator.write',
+                               'operator.admin', 'operator.approvals'],
+                }
                 payload = {
-                    'auth': {'deviceToken': 'dt-fake', 'role': 'operator',
-                             'scopes': ['operator.read', 'operator.write',
-                                        'operator.admin', 'operator.approvals']},
+                    'auth': auth,
                     **({'policy': t.connect_policy} if t.connect_policy is not None else {}),
                 }
                 return json.dumps({'type': 'res', 'id': connect['id'], 'ok': True, 'payload': payload})
-            return json.dumps({'type': 'res', 'id': connect['id'], 'ok': False,
-                               'error': {'code': 'AUTH_FAILED', 'message': 'bad token'}})
+            # #222：connect_error 脚本化结构化错误（code/details），供按码分流测试；
+            # 缺省回退旧 AUTH_FAILED 文案（向后兼容既有 connect_ok=False 用法）。
+            error = t.connect_error or {'code': 'AUTH_FAILED', 'message': 'bad token'}
+            return json.dumps({'type': 'res', 'id': connect['id'], 'ok': False, 'error': error})
         chat_sends = [f for f in t.sent if f.get('method') == 'chat.send']
         if not t.suppress_ack and len(chat_sends) > t._chat_ack_index:
             cs = chat_sends[t._chat_ack_index]
@@ -229,17 +245,22 @@ class FakeChatTransport:  # pylint: disable=too-many-instance-attributes  # pyli
                  list_payload=None, commands_payload=None, commands_error=None,
                  suppress_commands_ack=False,
                  rpc_payloads=None, rpc_errors=None, rpc_suppress=None,
-                 challenge_nonce=_DEFAULT_CHALLENGE_NONCE, connect_policy=None):
+                 challenge_nonce=_DEFAULT_CHALLENGE_NONCE, connect_policy=None,
+                 connect_error=None, connect_auth=None):
         self.connect_ok = connect_ok
         self.ack_run_id = ack_run_id
         self.ack_error = ack_error
         self.suppress_ack = suppress_ack
         self.suppress_connect_ack = suppress_connect_ack
         # issue #140：脚本化 connect.challenge 的 nonce；None = 不下发（旧路径立即发帧）。
+        # challenge/connect-ack 下发标志在每连接 _FakeChatWs 实例上（非本 transport 级），见 _FakeChatWs。
         self.challenge_nonce = challenge_nonce
-        self._challenge_sent = False
         # #196 T1 / #213：hello-ok payload.policy 注入（None=不下发，测协议默认回退）。
         self.connect_policy = connect_policy
+        # #222：connect res 结构化错误（error.code/details，connect_ok=False 时下发；
+        # None=回退旧 AUTH_FAILED 文案）；hello-ok payload.auth 覆盖（None=默认全量 4-scope + dt-fake）。
+        self.connect_error = connect_error
+        self.connect_auth = connect_auth
         # #213：_FakeChatWs.close 记录的 close code（看门狗按契约 4000 关闭）；无参 close（aclose）为 None。
         self._close_code = None
         self.resolve_error = resolve_error
@@ -252,7 +273,6 @@ class FakeChatTransport:  # pylint: disable=too-many-instance-attributes  # pyli
         self.sent: list = []
         # codex #220 P1：与 sent 平行的原始发送数据类型（str=文本帧 / bytes=二进制帧），供 opcode 断言。
         self.sent_types: list = []
-        self._connect_acked = False
         self._chat_ack_index = 0
         self._resolve_ack_index = 0
         self._list_ack_index = 0
@@ -269,6 +289,8 @@ class FakeChatTransport:  # pylint: disable=too-many-instance-attributes  # pyli
         self._ws: _FakeChatWs | None = None
 
     def __call__(self, url):
+        # 每次新连接产新 _FakeChatWs（其 challenge/connect-ack 标志在实例上，随新连接自动复位）；
+        # 真实网关对新 WS 重新 challenge + connect res，支撑 #222 pool 重试同一 client 重走完整握手。
         self._ws = _FakeChatWs(self)
         return _CM(self._ws)
 

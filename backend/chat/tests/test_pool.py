@@ -7,9 +7,11 @@
 import asyncio
 import contextlib
 from types import SimpleNamespace
+from typing import ClassVar
 
 import pytest
 
+from chat.chat_client import ChatConnectError
 from chat.pool import ChatConnectionPool, ChatFleet, NotPaired
 
 # pool.get_or_create 经 channels database_sync_to_async（线程内 close_old_connections 触 DB 连接管理），
@@ -53,7 +55,8 @@ class FakePairingService:
         device_id='dev-1',
         public_key_pem='PUBKEY',
         private_key_pem='PRIVKEY',
-        scopes_json='["operator.read","operator.write","operator.approvals"]',
+        # 缺省含 operator.admin 全量 4-scope（#222 REQUIRED_SCOPES 纳入 admin，pool 据此校验）。
+        scopes_json='["operator.read","operator.write","operator.admin","operator.approvals"]',
     ):
         self._status = status
         self._device_token = device_token
@@ -283,7 +286,7 @@ async def test_identity_and_scopes_are_passed_from_pairing_to_client():
             device_id='did-1',
             public_key_pem='PUB',
             private_key_pem='PRIV',
-            scopes_json='["operator.read","operator.write","operator.approvals"]',
+            scopes_json='["operator.read","operator.write","operator.admin","operator.approvals"]',
         ),
         client_factory=StubClient,
         ws_url_for=_url_for,
@@ -294,7 +297,7 @@ async def test_identity_and_scopes_are_passed_from_pairing_to_client():
     assert c.identity.device_id == 'did-1'
     assert c.identity.public_key_pem == 'PUB'
     assert c.identity.private_key_pem == 'PRIV'
-    assert c.scopes == ['operator.read', 'operator.write', 'operator.approvals']
+    assert c.scopes == ['operator.read', 'operator.write', 'operator.admin', 'operator.approvals']
 
 
 @pytest.mark.asyncio
@@ -364,10 +367,179 @@ async def test_scopes_missing_required_permissions_raises_not_paired():
     """scopes_json 合法但缺少 REQUIRED_SCOPES → NotPaired（scopes 不足，路由重新配对）。"""
     pool = ChatConnectionPool(
         pairing_service=FakePairingService(
-            scopes_json='["operator.read","operator.write"]',  # 缺 operator.approvals
+            scopes_json='["operator.read","operator.write"]',  # 缺 operator.admin/approvals
         ),
         client_factory=StubClient,
         ws_url_for=_url_for,
     )
     with pytest.raises(NotPaired):
         await pool.get_or_create(_instance('x', 19106))
+
+
+# ── #222 / #197-01：按结构化错误码分流恢复策略 ─────────────────────────────
+
+
+class _FlakyConnectClient:
+    """connect() 按脚本抛结构化 ChatConnectError（或成功）的 client 替身。
+
+    fail_codes：列表，第 i 次 connect 若 i < len(fail_codes) 则抛对应 code 的 ChatConnectError，
+    否则成功。模拟「同一 client 有界重试」场景。
+    """
+
+    instances: ClassVar[list] = []
+    fail_codes: ClassVar[list] = []
+
+    def __init__(self, url, device_token, *, identity, scopes):
+        self.url = url
+        self.device_token = device_token
+        self.identity = identity
+        self.scopes = scopes
+        self.dead = False
+        self.connect_calls = 0
+        self.closed = False
+        self.scopes_narrowed = False
+        self.on_device_token_rotated = None
+        self.__class__.instances.append(self)
+
+    async def connect(self):
+        self.connect_calls += 1
+        codes = self.__class__.fail_codes
+        if self.connect_calls <= len(codes):
+            code = codes[self.connect_calls - 1]
+            # UNAVAILABLE 附 startup-sidecars + retryAfterMs=0（测 #222 暂态重试路径；
+            # retryAfterMs=0 避免测试真 sleep）。
+            details = {'reason': 'startup-sidecars', 'retryAfterMs': 0} if code == 'UNAVAILABLE' else {}
+            raise ChatConnectError('rejected', code=code, details=details)
+
+    async def aclose(self):
+        self.closed = True
+
+    def discard(self, run_id):
+        pass
+
+
+class _RecordingPairingService(FakePairingService):
+    """在 FakePairingService 上记录「标记配对失效 / 持久化轮换 token」调用。"""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.invalidated = []  # [(instance, reason)] 标记配对失效（引导重配）
+        self.token_updates = []  # [(instance, new_token)] deviceToken 轮换落库
+
+    def mark_pairing_invalid(self, instance, reason=''):
+        self.invalidated.append((instance, reason))
+
+    def update_device_token(self, instance, new_token):
+        self.token_updates.append((instance, new_token))
+        self._device_token = new_token  # 落库后下次 get_status 返回新 token（模拟真实 DB 写入生效）
+
+
+def _flaky_pool(codes, **pairing_kwargs):
+    _FlakyConnectClient.instances = []
+    _FlakyConnectClient.fail_codes = codes
+    pairing = _RecordingPairingService(**pairing_kwargs)
+    pool = ChatConnectionPool(
+        pairing_service=pairing, client_factory=_FlakyConnectClient, ws_url_for=_url_for,
+    )
+    return pool, pairing
+
+
+@pytest.mark.asyncio
+async def test_auth_token_mismatch_retries_once_then_guides_repair():
+    """#222 问题1 AUTH_TOKEN_MISMATCH（deviceToken 被撤销/轮换）：同一 client 有界重试一次已存
+    deviceToken，仍失败则**停止自动重连**、标记配对失效并 raise NotPaired 引导重新配对——
+    不再用同一失效 token 无限重建（当前 = 聊天永久变砖）。"""
+    pool, pairing = _flaky_pool(['AUTH_TOKEN_MISMATCH', 'AUTH_TOKEN_MISMATCH'])
+    with pytest.raises(NotPaired):
+        await pool.get_or_create(_instance('a', 19001))
+    client = _FlakyConnectClient.instances[0]
+    assert client.connect_calls == 2  # 重试一次（共 2 次）后停连
+    assert len(pairing.invalidated) == 1  # 标记配对失效（引导重配）
+
+
+@pytest.mark.asyncio
+async def test_auth_token_mismatch_first_retry_succeeds_recovers():
+    """#222 AUTH_TOKEN_MISMATCH 边界：第一次失败、重试一次成功 → 正常返回 client（不误判重配）。"""
+    pool, pairing = _flaky_pool(['AUTH_TOKEN_MISMATCH'])  # 仅第一次失败
+    client = await pool.get_or_create(_instance('a', 19001))
+    assert client.connect_calls == 2
+    assert pairing.invalidated == []  # 恢复成功，不标记失效
+
+
+@pytest.mark.asyncio
+async def test_auth_scope_mismatch_routes_repair_not_token_retry():
+    """#222 问题1 AUTH_SCOPE_MISMATCH：直接路由重新配对（不当 token 错误重试）——
+    connect 只调一次即标记失效 + NotPaired。"""
+    pool, pairing = _flaky_pool(['AUTH_SCOPE_MISMATCH', 'AUTH_SCOPE_MISMATCH'])
+    with pytest.raises(NotPaired):
+        await pool.get_or_create(_instance('a', 19001))
+    client = _FlakyConnectClient.instances[0]
+    assert client.connect_calls == 1  # 不重试 token（scope 问题重试无意义）
+    assert len(pairing.invalidated) == 1
+
+
+@pytest.mark.asyncio
+async def test_unavailable_startup_sidecars_retries_then_recovers():
+    """#222 问题1 UNAVAILABLE+startup-sidecars：合法启动暂不可用，按 retryAfterMs 有界重试——
+    第一次 UNAVAILABLE(startup-sidecars)、第二次成功 → 正常返回（非硬错误）。"""
+    pool, pairing = _flaky_pool(['UNAVAILABLE'])
+    client = await pool.get_or_create(_instance('a', 19001))
+    assert client.connect_calls == 2  # 重试后恢复
+    assert pairing.invalidated == []
+
+
+@pytest.mark.asyncio
+async def test_unavailable_startup_sidecars_exhausts_bounded_retries():
+    """#222 UNAVAILABLE 有界：持续 startup-sidecars 不可用 → 有界重试耗尽后抛 ChatConnectError
+    （非 NotPaired——这是暂态非配对问题），不无限重试。"""
+    # fail_codes 长度 5 > pool 有界重试上限 → 耗尽后仍失败
+    pool, pairing = _flaky_pool(['UNAVAILABLE'] * 5)
+    with pytest.raises(ChatConnectError):
+        await pool.get_or_create(_instance('a', 19001))
+    assert pairing.invalidated == []  # UNAVAILABLE 不路由重配
+
+
+@pytest.mark.asyncio
+async def test_hello_ok_narrowed_scopes_marks_invalid_and_raises_not_paired():
+    """#222 问题2：connect 成功但 hello-ok 授予 scopes 收窄（client.scopes_narrowed=True）→
+    pool 标记配对失效 + raise NotPaired 路由重新配对（后续 RPC 会逐个 FORBIDDEN，须尽早暴露）。"""
+    class _NarrowedClient(_FlakyConnectClient):
+        async def connect(self):
+            self.connect_calls += 1
+            self.scopes_narrowed = True  # 模拟 hello-ok 收窄
+
+    _NarrowedClient.instances = []
+    _NarrowedClient.fail_codes = []
+    pairing = _RecordingPairingService()
+    pool = ChatConnectionPool(
+        pairing_service=pairing, client_factory=_NarrowedClient, ws_url_for=_url_for,
+    )
+    with pytest.raises(NotPaired):
+        await pool.get_or_create(_instance('a', 19001))
+    assert len(pairing.invalidated) == 1
+
+
+@pytest.mark.asyncio
+async def test_device_token_rotation_persisted_and_pool_rekeyed():
+    """#222 问题2：hello-ok 轮换下发新 deviceToken → client 在 connect 内采纳为当前 device_token
+    属性（并触发 on_device_token_rotated 钩子），pool connect 后检测到变化 → 经 PairingService
+    加密落库（update_device_token）并以新 token re-key 供后续连接复用。"""
+    class _RotatingClient(_FlakyConnectClient):
+        async def connect(self):
+            self.connect_calls += 1
+            # 模拟 client 在 connect 内采纳 hello-ok 新 token（更新 device_token 属性并触发钩子）
+            self.device_token = 'dt-rotated-new'
+            if self.on_device_token_rotated is not None:
+                self.on_device_token_rotated('dt-rotated-new')
+
+    _RotatingClient.instances = []
+    _RotatingClient.fail_codes = []
+    pairing = _RecordingPairingService(device_token='dt-old')
+    pool = ChatConnectionPool(
+        pairing_service=pairing, client_factory=_RotatingClient, ws_url_for=_url_for,
+    )
+    inst = _instance('a', 19001)
+    client = await pool.get_or_create(inst)
+    assert pairing.token_updates == [(inst, 'dt-rotated-new')]  # 新 token 已落库
+    # pool 以新 token re-key：再次 get_or_create 复用同一 client（key 已更新）
+    assert client is await pool.get_or_create(inst)

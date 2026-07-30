@@ -193,6 +193,49 @@ async def test_start_unpaired_sends_error(instance):
     await comm.disconnect()
 
 
+# ── #222 / #197-01：用户可见文案按结构化错误码区分，不再统一「请稍后重试」──────
+
+
+class _ConnectErrorPool:
+    """get_or_create 抛指定 code 的 ChatConnectError（模拟 pool 有界重试耗尽后的暂态硬失败）。"""
+
+    def __init__(self, code, details=None):
+        self._code = code
+        self._details = details or {}
+
+    async def get_or_create(self, instance):
+        raise ChatConnectError('rejected', code=self._code, details=self._details)
+
+
+@pytest.mark.asyncio
+async def test_start_unavailable_startup_sidecars_prompts_transient_retry(instance):
+    """#222 问题1：UNAVAILABLE+startup-sidecars（合法启动暂不可用，有界重试仍失败）→
+    提示「容器启动中」暂态重试文案，区别于笼统「连接失败」（用户知道是启动中稍等，非配对坏了）。"""
+    ChatFleet.override(_ConnectErrorPool('UNAVAILABLE', {'reason': 'startup-sidecars'}))
+    comm = await _connect_authed()
+    await comm.connect()
+    await comm.send_json_to({'type': 'start', 'container': 'demo'})
+    resp = await comm.receive_json_from()
+    assert resp['type'] == 'error'
+    assert '启动' in resp['message']
+    ChatFleet.reset()
+    await comm.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_start_unknown_connect_error_generic_message(instance):
+    """#222 对照：非 UNAVAILABLE 的其它 ChatConnectError（UNKNOWN/网络等）→ 通用「连接失败」文案。"""
+    ChatFleet.override(_ConnectErrorPool('UNKNOWN'))
+    comm = await _connect_authed()
+    await comm.connect()
+    await comm.send_json_to({'type': 'start', 'container': 'demo'})
+    resp = await comm.receive_json_from()
+    assert resp['type'] == 'error'
+    assert '连接容器失败' in resp['message']
+    ChatFleet.reset()
+    await comm.disconnect()
+
+
 @pytest.mark.asyncio
 async def test_send_streams_text_then_done(override_pool, instance, fake_client):
     comm = await _connect_authed()
