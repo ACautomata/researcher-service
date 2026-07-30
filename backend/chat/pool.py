@@ -156,7 +156,7 @@ class ChatConnectionPool:
             except Exception:  # pylint: disable=broad-exception-caught
                 pass
 
-    async def reacquire(self, instance, expected_client) -> OpenClawChatClient:
+    async def reacquire(self, instance, expected_client) -> tuple[OpenClawChatClient, OpenClawChatClient | None]:
         """consumer 自愈用的原子重取：在 per-key 锁内「比较缓存项 → 采纳/驱逐 → 重建」一次完成。
 
         codex #219 六轮 P1-872：consumer 原 get_live→evict→get_or_create 三步非原子——两
@@ -167,6 +167,12 @@ class ChatConnectionPool:
         - 缓存项**就是** expected_client（本 consumer 持有的死/濒死 client）→ 驱逐后重建；
         - 缓存项缺失（已被驱逐）→ 直接重建。
         未配对/配对材料不完整仍抛 NotPaired（与 get_or_create 一致）。
+
+        返回 `(fresh, replaced)` 二元组（codex #219 十四轮 P2-183）：`fresh` 是采纳/重建后应使用的
+        client；`replaced` 是本调用在锁内**实际驱逐**的缓存 client（无驱逐则 None）。consumer 须从
+        `replaced`（而非自己持有的 expected_client）迁移审批订阅者——被动 consumer 持有的
+        expected_client 可能已是更早的空壳代际，而 pool 缓存里实际被替换的才是当前挂着全部
+        订阅者的那一代；从 expected_client 迁会把真实订阅者丢在被关掉的 `replaced` 上。
         """
         pairing = await database_sync_to_async(self._pairing.get_status)(instance)
         if pairing.status != Pairing.STATUS_PAIRED or not pairing.device_token:
@@ -175,10 +181,13 @@ class ChatConnectionPool:
         key = (url, pairing.device_token)
         async with self._key_lock(key):
             cached = self._clients.get(key)
-            # 采纳：别的 consumer 已在锁内换好健康连接（非本 consumer 持有的 expected_client）
+            # 采纳：别的 consumer 已在锁内换好健康连接（非本 consumer 持有的 expected_client）。
+            # 无驱逐发生 → replaced=None（订阅者已在 peer 那代被迁走，见 adopt 调用方）。
             if cached is not None and not cached.dead and cached is not expected_client:
-                return cached
+                return cached, None
+            replaced = None
             if cached is not None:  # 自己持有的死/濒死 client（或健康但==expected，防御）：驱逐
+                replaced = cached
                 try:
                     await cached.aclose()
                 except Exception:  # pylint: disable=broad-exception-caught
@@ -198,7 +207,7 @@ class ChatConnectionPool:
             )
             await new_client.connect()  # 握手有界（chat_client.connect_timeout）
             self._clients[key] = new_client
-            return new_client
+            return new_client, replaced
 
     @staticmethod
     def _build_identity(pairing) -> DeviceIdentity | None:

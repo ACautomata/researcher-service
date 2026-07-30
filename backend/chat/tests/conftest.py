@@ -116,16 +116,19 @@ class FakePool:
         # codex #219 六轮 P1-872：对齐真 pool.reacquire 的锁内语义——
         # 缓存项健康且非 expected_client（别的 consumer 已换好）→ 采纳，不 evict 不重建；
         # 否则（缓存==expected 死/濒死 client，或已驱逐无缓存）→ 驱逐并重建（经 _next / set_client）。
+        # codex #219 十四轮 P2-183：返回 (fresh, replaced)——replaced 是实际驱逐的缓存 client
+        # （采纳路径无驱逐 → None），供 consumer 从被替换的那代迁订阅者。
         self.created.append(instance.name)
         cur = self._client
         if cur is not None and not getattr(cur, 'dead', False) and cur is not expected_client:
-            return cur  # 采纳 peer 换好的健康连接
+            return cur, None  # 采纳 peer 换好的健康连接（无驱逐）
         # 驱逐自己持有的死/濒死 client 并重建
+        replaced = cur
         self.evicted.append(instance.name)
         if self._next is not None:
             self._client = self._next
             self._next = None
-        return self._client
+        return self._client, replaced
 
 
 class NotPairedPool:

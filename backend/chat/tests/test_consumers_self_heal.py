@@ -256,6 +256,75 @@ async def test_reacquire_migrates_all_shared_subscribers(override_pool, instance
     assert len(fresh._approval_subscribers) == 0  # A、B 均从 fresh 退订，无泄漏
 
 
+@pytest.mark.asyncio
+async def test_reacquire_migrates_subscribers_from_replaced_client(override_pool, instance, fake_client):
+    """codex #219 十四轮 P2-183：被动 consumer 持陈旧 client 时，订阅者须从 pool 实际驱逐的
+    那代（replaced）迁，而非从 consumer 缓存的 self._client 迁——否则真实订阅者丢在被关掉的
+    replaced 上、全体审批回调失联。
+
+    代际场景（gen-A→gen-B→gen-C）：
+    - consumer A 先持 gen-A（=fake_client）start，B 也 start 共享 gen-A（A、B 订阅都挂 gen-A）。
+    - A 触发自愈：reacquire 驱逐 gen-A、采纳/换 gen-B，把 A+B 订阅迁到 gen-B；A 缓存 gen-B。
+    - B 是被动 consumer，缓存的 self._client 仍是 gen-A（**陈旧**，订阅已迁走、空了）。
+    - gen-B 又死。B 触发 send → B 持陈旧 gen-A（≠ pool 缓存的 gen-B）调 reacquire →
+      pool 驱逐的是 **gen-B**（replaced=gen-B，挂着当前全部订阅者），重建 gen-C。
+    修复前 consumer 从 self._client（gen-A，已空）迁 → gen-B 上的真实订阅者全丢；
+    修复后从 replaced（gen-B）迁 → A、B 订阅都落到 gen-C。
+    """
+    comm_a = await _connect_authed('alice')
+    await comm_a.connect()
+    await comm_a.send_json_to({'type': 'start', 'container': 'demo'})
+    await comm_a.receive_json_from()  # A ready（gen-A = fake_client）
+    comm_b = await _connect_authed('bob')
+    await comm_b.connect()
+    await comm_b.send_json_to({'type': 'start', 'container': 'demo'})
+    await comm_b.receive_json_from()  # B ready（共享 gen-A）
+    assert len(fake_client._approval_subscribers) == 2  # A、B 都挂 gen-A
+
+    # A 先自愈：gen-A 死，pool 驱逐 gen-A、换 gen-B，把 A+B 订阅迁到 gen-B。
+    gen_b = FakeChatClient()
+    override_pool.stage_next(gen_b)  # reacquire 驱逐 gen-A 后重建出 gen-B
+    fake_client.dead = True
+
+    async def a_dead_send(*args, **kwargs):
+        raise ChatSendError('client not connected')
+
+    fake_client.send_message = a_dead_send
+    await comm_a.send_json_to({'type': 'send', 'sessionKey': 'sk-1', 'message': 'hi'})
+    await asyncio.sleep(0.05)  # send 死→自愈换 gen-B 重试成功（不推帧），等迁移落定
+    assert fake_client._approval_subscribers == []  # A+B 订阅已迁离 gen-A
+    assert len(gen_b._approval_subscribers) == 2  # …落到 gen-B
+
+    # 此刻 B 缓存的 self._client 仍是 gen-A（陈旧）；pool 缓存的是 gen-B。gen-B 再死。
+    gen_c = FakeChatClient()
+    gen_c.pending = [{'type': 'approval', 'id': 'ap-cross', 'kind': 'exec', 'command': 'curl c'}]
+    override_pool.stage_next(gen_c)  # reacquire 驱逐 gen-B 后重建出 gen-C
+    override_pool.set_client(gen_b)  # pool 当前缓存 = gen-B（被动 B 的陈旧 self._client 是 gen-A）
+    gen_b.dead = True
+
+    async def b_dead_send(*args, **kwargs):
+        raise ChatSendError('client not connected')
+
+    gen_b.send_message = b_dead_send  # 防御：真正发送应落在 gen-C，不经 gen-B
+
+    # B 触发 send：B 持陈旧 gen-A（dead=True）调 reacquire → pool 驱逐 gen-B（replaced）、建 gen-C。
+    await comm_b.send_json_to({'type': 'send', 'sessionKey': 'sk-2', 'message': 'again'})
+    # 补拉 gen-C 的待审批卡 fan-out 到全部迁移订阅者：A、B 都收到（证明订阅没丢在 gen-B 上）
+    fa = await comm_a.receive_json_from()
+    fb = await comm_b.receive_json_from()
+    assert fa == {'type': 'approval', 'id': 'ap-cross', 'kind': 'exec', 'command': 'curl c'}
+    assert fb == {'type': 'approval', 'id': 'ap-cross', 'kind': 'exec', 'command': 'curl c'}
+    # 关键断言：A、B 订阅从 **gen-B（replaced）** 迁到 gen-C，而非从 B 的陈旧 gen-A（已空）迁。
+    assert not gen_b._approval_subscribers
+    assert len(gen_c._approval_subscribers) == 2
+    # gen-C 上的新审批 A、B 都能收（共享 fan-out 契约在跨代际自愈后仍成立）
+    await gen_c.emit_approval({'type': 'approval', 'id': 'ap-live-c', 'kind': 'exec', 'command': 'live'})
+    assert (await comm_a.receive_json_from())['id'] == 'ap-live-c'
+    assert (await comm_b.receive_json_from())['id'] == 'ap-live-c'
+    await comm_a.disconnect()
+    await comm_b.disconnect()
+
+
 # ── codex #219 P1③：已发出但 ack 丢失的 send 不盲重试 ────────────────────────
 # 帧已 send、ack 在连接死前丢失（ChatSendTransmittedError）：网关可能已起 run，其事件流
 # 绑在死连接上（runId 连接级，重连不可恢复）。盲重试被幂等去重到同一 runId，但新 route

@@ -176,6 +176,10 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
         会让其余被动 consumer 仍挂在死 client 上、错过新连接上的审批。故把旧 client 的**全部**
         订阅者迁到 fresh（本 consumer 的回调也在其中），补拉的待审批也 fan-out 到全部订阅者
         （不只推本 consumer），保住共享 fan-out 契约。
+
+        codex #219 十四轮 P2-183：迁移源是 reacquire 带回的 **replaced**（pool 在锁内实际驱逐的
+        缓存 client），而非本 consumer 持有的 self._client——后者可能是更早的空壳代际（订阅者早被
+        peer 迁走），从它迁会把当前真实订阅者丢在被关掉的 replaced 上。
         """
         client = self._client
         if client is None or self._instance is None:
@@ -192,15 +196,23 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
             # → 重建」——消除原 get_live→evict→get_or_create 三步的跨 consumer TOCTOU（两
             # consumer 并发自愈互踢对方建好的连接）。evidence（ConnectionClosed）证明已死但 dead
             # 未置位时，reacquire 也因缓存项==expected_client 而驱逐重建（对齐四轮 P2-891）。
-            fresh = await ChatFleet.get().reacquire(self._instance, client)
+            # codex #219 十四轮 P2-183：reacquire 返回 (fresh, replaced)——replaced 是它在锁内
+            # **实际驱逐**的缓存 client（无驱逐/采纳则 None）。
+            fresh, replaced = await ChatFleet.get().reacquire(self._instance, client)
         except Exception:  # pylint: disable=broad-exception-caught
             return None  # 重取失败：保持原错误路径，调用方发 error 帧
         if fresh is client:
             return None  # pool 未换 client（防御）：重试同一死 client 无意义，不重取
-        # codex #219 P2：迁移全部订阅者（含本 consumer），被动 consumer 不滞留死 client
-        subscribers = client.approval_subscribers()
+        # codex #219 P2：迁移全部订阅者（含本 consumer），被动 consumer 不滞留死 client。
+        # codex #219 十四轮 P2-183：从 **replaced**（pool 实际驱逐的缓存 client）迁，而非
+        # 本 consumer 持有的 client——被动 consumer 缓存的 self._client 可能是更早的空壳代际
+        # （其订阅者早已被 peer 迁走），而 pool 缓存里实际被替换的那代才挂着当前全部订阅者；
+        # 从 self._client 迁会把真实订阅者丢在被关掉的 replaced 上、全体审批回调失联。
+        # 多数情况（本 consumer 持有的就是缓存项）replaced is client，行为与原来一致。
+        source = replaced if replaced is not None else client
+        subscribers = source.approval_subscribers()
         for cb in subscribers:
-            client.remove_approval_subscriber(cb)
+            source.remove_approval_subscriber(cb)
             fresh.add_approval_subscriber(cb)
         self._client = fresh  # pylint: disable=attribute-defined-outside-init
         # codex #219 P1+P2：补拉换 client 前累积的待审批，并 fan-out 到全部迁移订阅者

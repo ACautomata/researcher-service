@@ -300,9 +300,10 @@ async def test_reacquire_evicts_expected_dead_and_recreates():
     c1 = await pool.get_or_create(inst)
     c1.dead = True  # 本 consumer 持有的死 client
 
-    c2 = await pool.reacquire(inst, c1)
+    c2, replaced = await pool.reacquire(inst, c1)
     assert c2 is not c1
     assert not c2.dead
+    assert replaced is c1  # codex #219 十四轮 P2-183：返回被驱逐的旧死 client（供迁订阅者）
     assert c1.closed  # 旧死 client best-effort aclose
     # 再 get_or_create 命中刚重建的健康 client（复用）
     assert await pool.get_or_create(inst) is c2
@@ -322,13 +323,15 @@ async def test_reacquire_adopts_live_replacement_installed_by_peer():
     stale.dead = True  # 本 consumer 持有的旧死 client
 
     # 别的 consumer 已先自愈：驱逐并装好健康新连接（模拟 peer 在锁内完成替换）
-    peer_fresh = await pool.reacquire(inst, stale)
+    peer_fresh, peer_replaced = await pool.reacquire(inst, stale)
     assert peer_fresh is not stale and not peer_fresh.dead
+    assert peer_replaced is stale  # 首次驱逐的是 stale
     stale_closed_before = stale.closed
 
     # 本 consumer 后到：缓存项已是 peer 换好的健康连接（≠ 自己持有的 stale）→ 直接采纳
-    adopted = await pool.reacquire(inst, stale)
+    adopted, adopt_replaced = await pool.reacquire(inst, stale)
     assert adopted is peer_fresh  # 采纳 peer 的健康连接
+    assert adopt_replaced is None  # codex #219 十四轮 P2-183：采纳无驱逐 → replaced=None
     assert not peer_fresh.closed  # 不误关 peer 的连接
     assert stale.closed == stale_closed_before  # stale 已被 peer 关过，不重复关
 
@@ -347,13 +350,16 @@ async def test_reacquire_concurrent_same_dead_client_single_recreate():
     dead_client.dead = True
 
     # 两个 consumer 都持有同一 dead_client，并发自愈
-    r1, r2 = await asyncio.gather(
+    (r1, rep1), (r2, rep2) = await asyncio.gather(
         pool.reacquire(inst, dead_client),
         pool.reacquire(inst, dead_client),
     )
     assert r1 is r2  # 都拿到同一健康新连接（第二个采纳第一个的重建成果）
     assert r1 is not dead_client
     assert not r1.dead
+    # codex #219 十四轮 P2-183：恰好一个驱逐（replaced=dead_client），另一个采纳（replaced=None）
+    assert (rep1 is dead_client) != (rep2 is dead_client)
+    assert (rep1 is None) != (rep2 is None)
     assert r1.connect_calls == 1  # 只重建一次（不重复建连）
     assert dead_client.closed  # 死 client 被清理一次
 
