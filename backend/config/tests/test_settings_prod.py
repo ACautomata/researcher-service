@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from django.core.exceptions import ImproperlyConfigured
@@ -140,3 +141,24 @@ def test_validate_prod_env_fail_fast_when_template_dir_is_file(tmp_path):
         validate_prod_env(_minimal_env(OPENCLAW_TEMPLATE_DIR=str(file_path)))
     assert 'OPENCLAW_TEMPLATE_DIR' in str(ei.value)
     assert '目录' in str(ei.value)
+
+
+def test_validate_prod_env_fail_fast_when_template_dir_not_readable(tmp_path):
+    """codex P2 :55：OPENCLAW_TEMPLATE_DIR 是已存在目录但当前进程无读/遍历权限 →
+    HomeProvisioner.copytree 递归拷贝仍抛 PermissionError。is_dir() 仅判文件类型不判权限位，
+    须 os.access(R_OK|X_OK) 兜底（R_OK=列条目，X_OK=遍历子目录，copytree 递归两者皆需）。
+    root 用户绕过 POSIX 权限位（os.access 恒 True），该用例在 root 下跳过。
+    """
+    if hasattr(os, 'geteuid') and os.geteuid() == 0:
+        __import__('pytest').skip('root 绕过 POSIX 权限位，os.access 恒 True')
+    no_access = tmp_path / 'no_access'
+    no_access.mkdir()
+    no_access.chmod(0o000)
+    try:
+        with __import__('pytest').raises(ImproperlyConfigured) as ei:
+            validate_prod_env(_minimal_env(OPENCLAW_TEMPLATE_DIR=str(no_access)))
+        msg = str(ei.value)
+        assert 'OPENCLAW_TEMPLATE_DIR' in msg
+        assert '权限' in msg
+    finally:
+        no_access.chmod(0o755)  # 还原权限，让 tmp_path fixture 能清理

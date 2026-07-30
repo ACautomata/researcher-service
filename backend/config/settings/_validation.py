@@ -62,3 +62,13 @@ def validate_prod_env(env: os.environ | dict) -> None:
             '预填充 home 源）；当前值 'f'{template_dir!r} 不存在或不是目录。'
             '参见 deploy/README.md 与 deploy/.env.example。',
         )
+    # codex P2 :55：is_dir 仅判文件类型，不判权限位——目录存在但当前进程无读/遍历权限时，
+    # HomeProvisioner.copytree 递归拷贝仍抛 PermissionError，同样违背 fail-fast「启动即知」。
+    # os.access(R_OK|X_OK)：R_OK=可列目录条目，X_OK=可遍历进入子目录（POSIX 目录语义，
+    # copytree 递归两者皆需）。
+    if not os.access(template_path, os.R_OK | os.X_OK):
+        raise ImproperlyConfigured(
+            'OPENCLAW_TEMPLATE_DIR 已存在且是目录，但当前进程无读/遍历权限'
+            f'（{template_dir!r}）——HomeProvisioner.copytree 预填充会抛 PermissionError。'
+            '修正目录属主/权限（chmod r-x）后重启。参见 deploy/README.md。',
+        )

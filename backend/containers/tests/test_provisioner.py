@@ -57,3 +57,17 @@ def test_provision_fails_if_template_missing(tmp_path):
     # 模板目录不存在 = 部署未配（OPENCLAW_FLEET TEMPLATE），fail-fast 而非产空 home
     with pytest.raises(FileNotFoundError):
         HomeProvisioner(tmp_path / 'nope').provision(tmp_path / 'home')
+
+
+def test_provision_fails_if_template_is_home_ancestor(tmp_path):
+    """codex P1 :162：template 是 home 的祖先/同一目录时 shutil.copytree 会无限递归
+    （fleet root 典型误配：OPENCLAW_TEMPLATE_DIR 指仓库根，home 落在其下
+    fleet/instances/<name>/home）。copytree 前用「真实 template + 真实 home」fail-fast，
+    而非 [Errno 63] 文件名过长 / 卡 creating（issue #195 同类错配，docs memory
+    openclaw-fleet-config-alignment-gotcha）。
+    """
+    template = tmp_path / 'fleet'  # 模拟「template 误指 fleet root」
+    template.mkdir(parents=True)
+    home = template / 'instances' / 'demo' / 'home'  # home 落在 template 下 → 递归
+    with pytest.raises(ValueError, match='无限递归'):
+        HomeProvisioner(template).provision(home)
