@@ -653,7 +653,13 @@ class OpenClawChatClient:  # pylint: disable=too-many-instance-attributes,too-ma
             if isinstance(exc, ChatClientError):
                 raise ChatSendTransmittedError(str(exc)) from exc
             raise
-        self._routes[run_id] = on_event
+        # codex #219 十二轮 P2-921：此处**不再**重装 route——_resolve_ack 在 recv loop 里收到
+        # ok ack 时已先装 route 再 set_result（chat_client.py:362-363），wait_for 返回 run_id 必
+        # 意味着 route 已就绪。若在此由发送协程恢复后重装，两 consumer 共享 client 时：ack 后、
+        # 本协程恢复前另一 consumer 触发自愈 aclose，_notify_all_error 已 fail+clear 该 route，
+        # 本行会在已关闭/已清空的 client 上重新装入 route → 浏览器收不到终态帧永久 pending。
+        # route 生命周期单源化：recv loop（_resolve_ack）安装、aclose/_notify_all_error fail+clear、
+        # discard/事件终态清除，发送协程不再触碰。
         return run_id
 
     def discard(self, run_id: str) -> None:

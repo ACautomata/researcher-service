@@ -538,7 +538,9 @@ class OpenClawWireAdapter:
             if isinstance(exc, ChatClientError):
                 raise ChatSendTransmittedError(str(exc)) from exc
             raise
-        self._routes[run_id] = on_event
+        # codex #219 十二轮 P2-921：对齐 chat_client——route 已由 _resolve_ack 在 recv loop 里
+        # 装好（adapters.py:764-765），此处发送协程恢复后不再重装，避免 aclose fail+clear 后
+        # 把 route 重新装到已关闭 client 上（浏览器永久 pending）。
         return run_id
 
     # ── resolve_approval ─────────────────────────────────────────────────────
