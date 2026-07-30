@@ -25,6 +25,7 @@ from channels.generic.websocket import AsyncJsonWebsocketConsumer
 from chat.chat_client import ChatConnectError, ChatPayloadTooLargeError
 from chat.pool import ChatFleet, NotPaired
 from containers.models import Instance
+from integration.openclaw.wire import REASON_STARTUP_SIDECARS, UNAVAILABLE
 
 
 class ChatConsumer(AsyncJsonWebsocketConsumer):
@@ -77,7 +78,7 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
             # issue #222 / #197-01：按结构化错误码分流用户文案，不再统一「请稍后重试」。
             # UNAVAILABLE+startup-sidecars（容器启动中暂不可用，pool 有界重试仍失败）→ 暂态文案；
             # 其余 ChatConnectError（网络/UNKNOWN 等）→ 通用连接失败文案。
-            if exc.code == 'UNAVAILABLE' and exc.details.get('reason') == 'startup-sidecars':
+            if exc.code == UNAVAILABLE and exc.details.get('reason') == REASON_STARTUP_SIDECARS:
                 await self.send_json({
                     'type': 'error',
                     'message': '容器正在启动中，请稍后重试',

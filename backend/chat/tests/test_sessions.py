@@ -335,6 +335,45 @@ def test_pool_connect_failure_502(authed, instance, override_pool, method, url):
     assert resp.status_code == 502
 
 
+# ── #222 / #197-01：REST 层按结构化错误码分流文案（对齐 consumer），不再统一「请稍后重试」──
+
+
+@pytest.mark.parametrize('method,url', [
+    ('get', LIST_URL),
+    ('get', HISTORY_URL),
+    ('delete', DELETE_URL),
+])
+def test_pool_unavailable_startup_sidecars_502_transient_message(authed, instance, override_pool, method, url):
+    """#222 问题1：UNAVAILABLE+startup-sidecars（容器启动中暂不可用，pool 有界重试仍失败）→
+    502 但文案提示「启动中」（暂态），区别于笼统「连接容器失败」（用户知道稍等，非配对坏了）。"""
+    class _StartupPool:
+        async def get_or_create(self, instance):
+            raise ChatConnectError('starting', code='UNAVAILABLE',
+                                   details={'reason': 'startup-sidecars'})
+
+    override_pool(_StartupPool())
+    resp = getattr(authed, method)(url)
+    assert resp.status_code == 502
+    assert '启动' in resp.json()['detail']
+
+
+@pytest.mark.parametrize('method,url', [
+    ('get', LIST_URL),
+    ('get', HISTORY_URL),
+    ('delete', DELETE_URL),
+])
+def test_pool_unknown_connect_error_502_generic_message(authed, instance, override_pool, method, url):
+    """#222 对照：非 UNAVAILABLE 的其它 ChatConnectError（UNKNOWN/网络等）→ 502 通用连接失败文案。"""
+    class _UnknownPool:
+        async def get_or_create(self, instance):
+            raise ChatConnectError('boom', code='UNKNOWN')
+
+    override_pool(_UnknownPool())
+    resp = getattr(authed, method)(url)
+    assert resp.status_code == 502
+    assert '连接容器失败' in resp.json()['detail']
+
+
 # ---------------------------------------------------------------------------
 # 删表 migration 正反应用（chat.Session → 无表）
 # ---------------------------------------------------------------------------

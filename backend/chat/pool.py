@@ -28,7 +28,13 @@ from chat.chat_client import ChatConnectError, OpenClawChatClient
 from chat.device_crypto import DeviceIdentity
 from chat.models import Pairing
 from chat.pairing import PairingService
-from integration.openclaw.wire import REQUIRED_SCOPES
+from integration.openclaw.wire import (
+    AUTH_SCOPE_MISMATCH,
+    AUTH_TOKEN_MISMATCH,
+    REASON_STARTUP_SIDECARS,
+    REQUIRED_SCOPES,
+    UNAVAILABLE,
+)
 
 # issue #222 问题1：UNAVAILABLE+startup-sidecars 有界重试上限（合法启动暂不可用，非无限等待）。
 _STARTUP_SIDECARS_MAX_RETRIES = 3
@@ -76,7 +82,13 @@ class ChatConnectionPool:
         self, url: str, device_token: str, *, identity, scopes,
     ) -> OpenClawChatClient:
         """生产 client factory：签名对齐 #141，identity+scopes 由 get_or_create 从 Pairing 注入。
-        nonce 由 connect() 等 connect.challenge 提取（#140）。transport 注入（测试用 FakeTransport）。"""
+        nonce 由 connect() 等 connect.challenge 提取（#140）。transport 注入（测试用 FakeTransport）。
+
+        issue #222 问题2 deviceToken 轮换：不在此注入 on_device_token_rotated 钩子——钩子在 client
+        connect 内同步触发（async 上下文 sync ORM 落库需独立线程，别扭）；改为 connect 返回后由
+        get_or_create 比较 client.device_token 与 pairing.device_token，经 database_sync_to_async
+        落库 + re-key（功能等价且能 await）。钩子保留为 client 内部轮换通知 seam（测试断言轮换时机）。
+        """
         kwargs: dict = {}
         if self._transport is not None:
             kwargs['transport'] = self._transport
@@ -104,6 +116,7 @@ class ChatConnectionPool:
                     await client.aclose()
                 except Exception:  # pylint: disable=broad-exception-caught
                     pass
+                self._clients.pop(key, None)  # 丢弃死 client 的旧 key entry（防 re-key 后旧 key 残留孤儿）
             # #141：从 Pairing 行重建 DeviceIdentity + 解析 scopes，传 factory
             identity = self._build_identity(pairing)
             scopes = self._pairing_scopes(pairing)
@@ -123,6 +136,8 @@ class ChatConnectionPool:
             await self._connect_with_recovery(new_client, instance, pairing)
             # issue #222 问题2：hello-ok 授予 scopes 收窄 → 标记失效 + 路由重配
             # （后续 RPC 会逐个 FORBIDDEN，须尽早暴露而非零散失败）。
+            # getattr 防御：scopes_narrowed 是 #222 新增 client 属性，部分测试替身未实现——
+            # 缺省 False（不误判重配），区别于 device_token（factory 构造必传的既有契约，直接访问）。
             if getattr(new_client, 'scopes_narrowed', False):
                 await self._invalidate(instance, 'hello-ok granted scopes narrowed')
                 raise NotPaired(pairing.status, pairing.pairing_request_id)
@@ -149,17 +164,17 @@ class ChatConnectionPool:
                 await client.connect()
                 return
             except ChatConnectError as exc:
-                if exc.code == 'AUTH_TOKEN_MISMATCH':
+                if exc.code == AUTH_TOKEN_MISMATCH:
                     if attempt == 0:
                         continue  # 有界重试一次已存 deviceToken
                     # 仍失败：停止自动重连、标记配对失效、引导重配（不再无限重建）。
                     await self._invalidate(instance, 'deviceToken rejected (AUTH_TOKEN_MISMATCH)')
                     raise NotPaired(pairing.status, pairing.pairing_request_id) from exc
-                if exc.code == 'AUTH_SCOPE_MISMATCH':
+                if exc.code == AUTH_SCOPE_MISMATCH:
                     # scope 不匹配：直接路由重配（重试 token 无意义）。
                     await self._invalidate(instance, 'scope mismatch (AUTH_SCOPE_MISMATCH)')
                     raise NotPaired(pairing.status, pairing.pairing_request_id) from exc
-                if exc.code == 'UNAVAILABLE' and exc.details.get('reason') == 'startup-sidecars':
+                if exc.code == UNAVAILABLE and exc.details.get('reason') == REASON_STARTUP_SIDECARS:
                     # 合法启动暂不可用：按 retryAfterMs 有界重试。
                     await self._retry_startup_sidecars(client, exc)
                     return
@@ -177,7 +192,7 @@ class ChatConnectionPool:
                 await client.connect()
                 return
             except ChatConnectError as retry_exc:
-                if retry_exc.code == 'UNAVAILABLE' and retry_exc.details.get('reason') == 'startup-sidecars':
+                if retry_exc.code == UNAVAILABLE and retry_exc.details.get('reason') == REASON_STARTUP_SIDECARS:
                     exc = retry_exc
                     continue
                 raise

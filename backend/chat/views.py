@@ -20,6 +20,7 @@ from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from chat.chat_client import ChatConnectError
 from chat.models import Pairing
 from chat.pairing import PairingConcurrencyError, PairingFleet
 from chat.pairing_ws import PairingError, PairingRequired
@@ -36,6 +37,7 @@ from integration.openclaw.translation import (
     APPROVAL_FIELD_KIND,
     format_device_approve_command,
 )
+from integration.openclaw.wire import REASON_STARTUP_SIDECARS, UNAVAILABLE
 
 logger = logging.getLogger(__name__)
 
@@ -197,8 +199,22 @@ class _GatewaySessionsView(APIView):
             return async_to_sync(ChatFleet.get().get_or_create)(inst), None
         except NotPaired as e:
             return None, Response(
-                {'detail': f'容器未配对，请先完成设备配对（status={e.status}）'},
+                {'detail': f'容器未配对或配对已失效，请重新完成设备配对（status={e.status}）'},
                 status=status.HTTP_409_CONFLICT,
+            )
+        except ChatConnectError as e:
+            # issue #222 / #197-01：REST 按结构化错误码分流文案（对齐 consumer），不再统一
+            # 「连接容器失败，请稍后重试」。UNAVAILABLE+startup-sidecars（容器启动中暂不可用，
+            # pool 有界重试仍失败）→ 暂态文案；其余 ChatConnectError → 通用连接失败文案。
+            logger.warning('sessions pool acquire failed for %s: %s (code=%s)', name, e, e.code)
+            if e.code == UNAVAILABLE and e.details.get('reason') == REASON_STARTUP_SIDECARS:
+                return None, Response(
+                    {'detail': '容器正在启动中，请稍后重试'},
+                    status=status.HTTP_502_BAD_GATEWAY,
+                )
+            return None, Response(
+                {'detail': '连接容器失败，请稍后重试'},
+                status=status.HTTP_502_BAD_GATEWAY,
             )
         except Exception as e:  # pylint: disable=broad-exception-caught
             logger.warning('sessions pool acquire failed for %s: %s', name, e)

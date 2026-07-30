@@ -30,6 +30,16 @@ CAPS = ['tool-events']
 # 建连（pool）均按本集校验，admin 缺失在配对/建连阶段即暴露并路由重配。
 REQUIRED_SCOPES = {'operator.read', 'operator.write', 'operator.admin', 'operator.approvals'}
 
+# connect 握手错误码（issue #222 / #197-01，跨 chat_client/pool/consumers/views 多层消费的 wire 契约，
+# 集中于此与 REQUIRED_SCOPES 同处，避免 magic-string 散落）。官方文档《Gateway 网关协议》「身份验证」节：
+# - AUTH_TOKEN_MISMATCH：deviceToken 被撤销/轮换——有界重试一次已存 token，仍失败停连引导重配。
+# - AUTH_SCOPE_MISMATCH：scope 不匹配——直接路由重配（非 token 错误）。
+# - UNAVAILABLE + details.reason==REASON_STARTUP_SIDECARS + retryAfterMs：合法启动暂不可用——按时长有界重试。
+AUTH_TOKEN_MISMATCH = 'AUTH_TOKEN_MISMATCH'
+AUTH_SCOPE_MISMATCH = 'AUTH_SCOPE_MISMATCH'
+UNAVAILABLE = 'UNAVAILABLE'
+REASON_STARTUP_SIDECARS = 'startup-sidecars'
+
 # 事件族名（语义层归一用，r26 / spec §8.2）—— Translator 据此把 OpenClaw 原生事件族
 # 归一为内部 approval / tool 语义。确切事件名/payload 待配对后实测校准（r26 §0/§3）。
 # T06 权限审批（issue #42）：exec/plugin 两族共用同一翻译；连接级事件（不挂 chat runId，r26:88）；

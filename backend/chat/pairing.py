@@ -20,6 +20,7 @@ async view/consumer 线程。两种上下文下 asyncio.run/async_to_sync 都可
 """
 import asyncio
 import json
+import logging
 import os
 import re
 import threading
@@ -34,6 +35,8 @@ from containers.models import Instance
 
 # 网关 requestId 合法字符：与 openclaw 上游一致，仅允许 URL-safe base64 / UUID / 横线 / 下划线
 _REQUEST_ID_RE = re.compile(r'^[A-Za-z0-9_.~\-]+$')
+
+logger = logging.getLogger(__name__)
 
 # 容器内 gateway CLI：approve 一个 pending 配对请求（spec §8.1 宿主侧动作）。
 # approver 在容器内（root）执行，gateway 据 requestId 批准该 deviceId 的 operator scope。
@@ -142,7 +145,9 @@ class PairingService:
         （AUTH_TOKEN_MISMATCH 有界重试仍失败）、scope 不匹配需重配（AUTH_SCOPE_MISMATCH）、
         hello-ok 授予 scopes 收窄（⊉ REQUIRED_SCOPES）。落 STATUS_ERROR 让上层（pairing view /
         pool 后续 get_or_create）路由重新配对，而非继续用失效材料无限重建连接。
+        reason 仅作诊断留痕（log），不落库。
         """
+        logger.info('mark pairing invalid for %s: %s', instance.name, reason)
         Pairing.objects.filter(instance=instance).update(status=Pairing.STATUS_ERROR)
 
     def update_device_token(self, instance: Instance, new_token: str) -> None:
