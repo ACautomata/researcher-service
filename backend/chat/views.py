@@ -47,6 +47,19 @@ class _InvalidName(Exception):
 class PairingView(APIView):
     """GET 查询配对状态 + POST 触发/重试配对（spec §8.1）。"""
 
+    @staticmethod
+    def _evict_pool(inst) -> None:
+        """best-effort 逐出该网关 pool client + 取消其重连 task（codex #221）。
+
+        force-repair 的语义即「作废旧凭证重配」——`_apply_result` 改 status 后旧 device_token
+        不再可信（无论是否已换新 token），故成功/待批准(202)/失败(502) 三态都该逐出，防 #215
+        主动重连无限重试已撤销凭证。evict 失败不阻断响应（池残留由后续 get_or_create 惰性兜底）。
+        """
+        try:
+            async_to_sync(ChatFleet.get().evict_instance)(inst)
+        except Exception:  # pylint: disable=broad-exception-caught
+            logger.warning('evict chat pool failed for %s', inst.name, exc_info=True)
+
     def _get_instance(self, name: str) -> Instance:
         try:
             NAME_VALIDATOR(name)
@@ -93,6 +106,8 @@ class PairingView(APIView):
                 f'设备待批准：请在宿主执行 `{format_device_approve_command(e.request_id)}` '
                 f'后重试本接口'
             )
+            # codex #221 R7 P2：force-repair 待批准（旧 token 已作废待重配）也逐出旧凭证 pool client
+            self._evict_pool(inst)
             return Response(data, status=status.HTTP_202_ACCEPTED)
         except PairingError as e:
             # 原始异常（网络/协议细节）仅记服务端日志，不外泄到响应（codex R security）
@@ -106,6 +121,8 @@ class PairingView(APIView):
                 )
             data = PairingStatusSerializer(pairing).data
             data['detail'] = '配对握手失败，请检查容器网关状态后重试'
+            # codex #221 R7 P2：force-repair 失败（status→error，旧 token 不再可信）也逐出旧凭证
+            self._evict_pool(inst)
             return Response(data, status=status.HTTP_502_BAD_GATEWAY)
         except PairingConcurrencyError:
             # 握手期间容器/配对行被删除
@@ -115,7 +132,7 @@ class PairingView(APIView):
             )
         # codex #221 P2：force-repair 成功（已换 device_token）→ 逐出该网关旧凭证 client + 重连，
         # 避免旧 key 重连循环无限重建已撤销 token；后续 get_or_create 按新 token 重建。
-        async_to_sync(ChatFleet.get().evict_instance)(inst)
+        self._evict_pool(inst)
         return Response(PairingStatusSerializer(pairing).data)
 
 

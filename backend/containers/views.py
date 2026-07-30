@@ -100,6 +100,21 @@ class InstanceListCreateView(APIView):
 class InstanceDetailView(APIView):
     """DELETE 删除容器（默认连数据删，spec §5.4）。"""
 
+    @staticmethod
+    def _evict_pool(inst) -> None:
+        """best-effort 逐出该网关 ChatFleet pool client + 取消其重连 task（codex #221 R5+R7 P2）。
+
+        被删容器的 url/token 若仍是 pool 当前 target，#215 主动重连循环 stop 永不命中，每 30s 无限
+        向已删端口（可能被后续容器复用）重连陈旧凭证。凡网关已删（delete 成功 / cleanup 失败但容器
+        已 stop/remove）都该逐出。evict 失败不阻断响应（池残留由后续 get_or_create 惰性兜底）。
+        """
+        if inst is None:
+            return
+        try:
+            async_to_sync(ChatFleet.get().evict_instance)(inst)
+        except Exception:  # pylint: disable=broad-exception-caught
+            pass
+
     @extend_schema(responses={204: None, 409: None})
     def delete(self, request, name):
         # spec §4：路径参数也校验，防 URL path 注入 → 目录穿越（name 进 rmtree 路径）
@@ -120,19 +135,15 @@ class InstanceDetailView(APIView):
             )
         except InstanceCleanupError:
             # codex R1 :126：容器已停删但 home 清理失败 → 409 + DB 行保留（标 REMOVING，可重试）
+            # codex #221 R7 P2：网关已 stop/remove（容器没了）→ 也逐出 pool client，防主动重连
+            # 打已删端口；行保留可重试不影响 evict（pool client 连的是已删容器）。
+            self._evict_pool(inst)
             return Response(
                 {'detail': '容器已停删，但 home 目录清理失败（权限/属主），请重试或手动清理'},
                 status=status.HTTP_409_CONFLICT,
             )
         if not removed:
             raise Http404
-        # codex #221 R5 P2：删除成功后逐出 ChatFleet pool client + 取消其重连 task——否则被删
-        # 容器的 url/token 仍是 pool 当前 target，#215 主动重连循环 stop 永不命中，每 30s 无限向
-        # 已删端口（可能被后续容器复用）重连陈旧凭证。evict 失败不阻断 204（best-effort，池残留
-        # 可由后续 get_or_create 惰性重建/驱逐兜底）。
-        if inst is not None:
-            try:
-                async_to_sync(ChatFleet.get().evict_instance)(inst)
-            except Exception:  # pylint: disable=broad-exception-caught
-                pass
+        # codex #221 R5 P2：删除成功后逐出 ChatFleet pool client + 取消其重连 task。
+        self._evict_pool(inst)
         return Response(status=status.HTTP_204_NO_CONTENT)

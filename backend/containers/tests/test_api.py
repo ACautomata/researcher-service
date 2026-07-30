@@ -212,6 +212,37 @@ def test_delete_returns_409_when_cleanup_fails(authed, fleet, monkeypatch):
     assert resp.status_code == 409
 
 
+@pytest.mark.django_db
+def test_delete_evicts_pool_even_when_cleanup_fails(authed, fleet, monkeypatch):
+    """codex #221 R7 P2：delete 已 stop/remove 网关后 raise InstanceCleanupError（行保留可重试）时，
+    也应逐出 pool client——网关已删，pool client 连的是已删容器，主动重连会打已删端口。
+    当前实现仅在 204 成功分支 evict，CleanupError(409) 分支跳过 → 旧 client 无限重连已删端口。
+    """
+    from chat.pool import ChatFleet
+
+    evicted = []
+
+    class SpyPool:
+        async def evict_instance(self, instance):
+            evicted.append(instance.name)
+
+    authed.post('/api/v1/containers/', {'name': 'demo'}, format='json')
+
+    def _fail(name):
+        raise InstanceCleanupError(name, str(fleet['config'].root))  # 网关已删、home 清理失败
+
+    monkeypatch.setattr(fleet['orch'], 'delete', _fail)
+    ChatFleet.override(SpyPool())
+    try:
+        resp = authed.delete('/api/v1/containers/demo')
+        assert resp.status_code == 409  # CleanupError → 409 行保留可重试
+        assert evicted == ['demo'], (
+            f'delete 网关已删但 cleanup 失败(409)时未逐出 pool client（evicted={evicted}）——'
+            '主动重连将无限重试已删端口')
+    finally:
+        ChatFleet.reset()
+
+
 # ---------------------------- codex R2 端口耗尽转译（:40） ----------------------------
 
 

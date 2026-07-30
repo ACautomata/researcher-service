@@ -123,6 +123,58 @@ def test_post_pair_force_repair_overwrites_revoked_token(authed, instance, overr
     assert Pairing.objects.get(instance=instance).device_token == 'dt-new'
 
 
+# ------- codex #221 R7 P2：force-repair 各收尾（成功/待批准/失败）都应逐出旧凭证 pool client -------
+
+
+class _SpyPool:
+    """记录 evict_instance 调用（codex #221 R7：force-repair 全收尾都该逐出旧凭证）。"""
+
+    def __init__(self):
+        self.evicted = []
+
+    async def evict_instance(self, instance):
+        self.evicted.append(instance.name)
+
+
+@pytest.fixture
+def spy_chat_fleet():
+    from chat.pool import ChatFleet
+    pool = _SpyPool()
+    ChatFleet.override(pool)
+    yield pool
+    ChatFleet.reset()
+
+
+def test_force_repair_pending_evicts_pool(authed, instance, override_service, spy_chat_fleet):
+    """codex #221 R7 P2：force-repair 以 PairingRequired(202) 收尾时也应逐出旧凭证 pool client。
+
+    _apply_result 改 status=pending 但无替换 token 时保留旧 device_token，主动重连不重查 pairing
+    status → 旧 client 会无限重试已待重配的凭证。202 分支提前 return 不该跳过 evict。
+    """
+    override_service(FakeTransport.hello_ok(device_token='dt-old'))
+    authed.post('/api/v1/containers/demo/pairing/', {}, format='json')
+    spy_chat_fleet.evicted.clear()
+    # force-repair → 待批准（202）
+    override_service(FakeTransport.pairing_required(request_id='req-777'))
+    resp = authed.post('/api/v1/containers/demo/pairing/', {}, format='json')
+    assert resp.status_code == 202
+    assert 'demo' in spy_chat_fleet.evicted, (
+        'force-repair 待批准(202)未逐出旧凭证 pool client——主动重连将无限重试已撤销凭证')
+
+
+def test_force_repair_error_evicts_pool(authed, instance, override_service, spy_chat_fleet):
+    """codex #221 R7 P2：force-repair 以 PairingError(502) 收尾时也应逐出旧凭证 pool client。"""
+    override_service(FakeTransport.hello_ok(device_token='dt-old'))
+    authed.post('/api/v1/containers/demo/pairing/', {}, format='json')
+    spy_chat_fleet.evicted.clear()
+    # force-repair → 握手失败（502）
+    override_service(FakeTransport.connect_error('gateway unreachable'))
+    resp = authed.post('/api/v1/containers/demo/pairing/', {}, format='json')
+    assert resp.status_code == 502
+    assert 'demo' in spy_chat_fleet.evicted, (
+        'force-repair 失败(502)未逐出旧凭证 pool client——主动重连将无限重试已撤销凭证')
+
+
 # ---------------------------- POST 待批准（验收 3）----------------------------
 
 

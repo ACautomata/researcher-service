@@ -327,6 +327,13 @@ class ChatConnectionPool:
         无限重建已撤销凭证。本方法让凭证变更路径能清掉该 url 下所有旧 key 的 client 与重连，
         后续 get_or_create 按新 token 重建。
         """
+        # codex #221 R6+R7 P2：代际递增必须在**第一个 await 之前**（tombstone-first）。若放在
+        # 下方 aclose() await 之后（R6 初版位置），evict 的 aclose 让渡期间，并发 get_or_create
+        # 会读到旧代际、connect、并插入新 client——随后才递增的代际拦不住这个已发布 client
+        # （它不再做代际检查而存活，成为重连 target 无限重试已删/旧凭证）。开头先递增，则任何
+        # evict 期间 connect 的 in-flight 在插入前复核代际都会发现已变 → 丢弃不发布（见
+        # get_or_create 慢路径的代际复核）。同 event loop 单线程，本递增是同步原子。
+        self._evict_gen[url] = self._evict_gen.get(url, 0) + 1
         keys = [k for k in self._clients if k[0] == url]
         for key in keys:
             self._cancel_reconnect(key)
@@ -339,11 +346,6 @@ class ChatConnectionPool:
         # 同 url 可能只剩「无 client 但悬挂重连」的 key（target 已被 fast-path 移出池）——一并取消
         for key in [k for k in list(self._reconnect_tasks) if k[0] == url]:
             self._cancel_reconnect(key)
-        # codex #221 R6 P2：递增该 url 的 evict 代际——fence「evict 与 in-flight get_or_create 建连
-        # 并发」窗口：in-flight 建连（connect 挂起、尚未插入 _clients）的快照不含它，但它插入前会
-        # 复核代际，发现递增即丢弃不发布（见 get_or_create）。同 event loop 单线程，本递增是同步
-        # 原子，get_or_create 在 connect 让渡后必读到最新值——无需 evict 也持 per-key 锁。
-        self._evict_gen[url] = self._evict_gen.get(url, 0) + 1
 
     async def evict_instance(self, instance) -> None:
         """按容器实例逐出其网关下全部旧凭证 client + 重连（codex #221 第二轮 P2）。

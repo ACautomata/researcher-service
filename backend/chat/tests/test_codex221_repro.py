@@ -448,3 +448,50 @@ async def test_p2_evict_fences_inflight_pool_insertion():
         'P2 R6: in-flight 建连在 evict 后仍把旧凭证 client 发布进池——'
         '该 client 将成为重连 target 无限重试已删/旧凭证')
     await pool.aclose_all()
+
+
+@pytest.mark.asyncio
+async def test_p2_evict_advances_generation_before_awaiting_aclose():
+    """P2（codex #221 第七轮）：evict_url 的代际递增必须在**第一个 await（aclose）之前**
+    （tombstone-first）。评论原文「Advance the eviction generation before awaiting cleanup」：
+    若递增在 aclose await 之后，evict 快照→aclose 让渡期间，已读旧代际的 in-flight get_or_create
+    connect 完成、插入新 client——随后才递增的代际拦不住这个已发布 client（不再检查而存活）。
+
+    本测试直接验证**位置语义**：evict 卡在 c1 的 aclose await（挂起）期间，该 url 的代际必须
+    **已递增**——这样任何在 evict 开始前读过旧代际的 in-flight，插入前复核都会发现已变而丢弃。
+    用 SlowCloseClient 让 evict 停在 aclose await，断言此刻代际 > evict 前的值。
+    """
+    index = [0]
+    clock = _clock()
+    aclose_gate = asyncio.Event()      # 未 set：c1 的 aclose 挂起（evict 停在 aclose await）
+    aclose_started = asyncio.Event()   # evict 进入 c1.aclose 挂起点时 set
+
+    class SlowCloseClient(GenClient):
+        async def aclose(self):
+            aclose_started.set()
+            await aclose_gate.wait()
+            await super().aclose()
+
+    def factory(url, dt, *, identity, scopes, on_dead=None):
+        return SlowCloseClient(url, dt, identity=identity, scopes=scopes,
+                               on_dead=on_dead, index=index)
+
+    pool = ChatConnectionPool(
+        pairing_service=FakePairingService(), client_factory=factory,
+        ws_url_for=_url_for, reconnect_policy=ReconnectPolicy(sleeper=_sleeper(clock)))
+    inst = SimpleNamespace(name='a', port=19001)
+    c1 = await pool.get_or_create(inst)
+    url = c1.url
+    gen_before = pool._evict_gen.get(url, 0)
+    # 后台 evict：tombstone-first 下开头即递增代际，然后停在 c1.aclose 挂起点
+    evict_task = asyncio.ensure_future(pool.evict_url(url))
+    await asyncio.wait_for(aclose_started.wait(), timeout=5)  # evict 已到 c1.aclose await
+    assert not evict_task.done()
+    # P2 期望：evict 仍卡在 aclose await（清理未完成），但代际**已递增**（tombstone-first）——
+    # 凡 evict 开始前读过旧代际的 in-flight，插入前复核必发现已变而丢弃。
+    assert pool._evict_gen.get(url, 0) > gen_before, (
+        'P2 R7: evict 的 aclose await 期间代际仍未递增（递增放在 cleanup 之后）——'
+        '该窗口内 in-flight 读旧代际插入的 client 会存活漏拦')
+    aclose_gate.set()  # 放行 evict 的 aclose
+    await evict_task
+    await pool.aclose_all()
