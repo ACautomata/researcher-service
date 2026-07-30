@@ -10,7 +10,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from chat.pool import ChatConnectionPool, ChatFleet, NotPaired
+from chat.chat_client import OpenClawChatClient
+from chat.device_crypto import DeviceCrypto
+from chat.pool import ChatConnectionPool, ChatFleet, NotPaired, ReconnectPolicy
+from chat.tests.fakes import FakeChatTransport
 
 # pool.get_or_create 经 channels database_sync_to_async（线程内 close_old_connections 触 DB 连接管理），
 # 故测试需 django_db mark，即便 FakePairingService 不真查 DB。
@@ -371,3 +374,267 @@ async def test_scopes_missing_required_permissions_raises_not_paired():
     )
     with pytest.raises(NotPaired):
         await pool.get_or_create(_instance('x', 19106))
+
+
+# ── #196 T3 / #215：主动重连 + 指数退避（1s→30s）────────────────
+
+
+class _ScriptedReconnectClient:
+    """按脚本决定 connect 成败的 client 替身（记录 connect/aclose 调用供断言）。
+
+    每次 connect 消费脚本一格决定成败（超限复用最后一格）。接受 pool 注入的 ``on_dead``（模拟
+    真实 client 的 ``_mark_dead`` → ``on_dead`` 链路）：``kill()`` 模拟 T1 看门狗标死并上报，
+    触发 pool 后台主动重连——这正是 #215 的「标 dead 后无需用户发消息即自愈」。
+    """
+
+    def __init__(self, url, device_token, *, identity, scopes, script, index, on_dead=None):
+        self.url = url
+        self.device_token = device_token
+        self.identity = identity
+        self.scopes = scopes
+        self._script = script
+        self._index = index
+        self._on_dead = on_dead
+        self.dead = False
+        self.connect_calls = 0
+        self.closed = False
+
+    async def connect(self):
+        self.connect_calls += 1
+        should_fail = self._script[min(self._index[0], len(self._script) - 1)]
+        self._index[0] += 1
+        if should_fail:
+            raise ConnectionError('gateway offline')
+
+    def kill(self):
+        """模拟 T1 看门狗判死：置 dead 并经 on_dead 上报 pool（触发主动重连）。"""
+        self.dead = True
+        if self._on_dead is not None:
+            self._on_dead()
+
+    async def aclose(self):
+        self.closed = True
+
+    def discard(self, run_id):
+        pass
+
+
+def _scripted_factory(script, index):
+    def factory(url, device_token, *, identity, scopes, on_dead=None):
+        return _ScriptedReconnectClient(
+            url, device_token, identity=identity, scopes=scopes,
+            script=script, index=index, on_dead=on_dead,
+        )
+    return factory
+
+
+@pytest.fixture
+def clock():
+    """假时钟：sleep 只记录时长（指数退避序列可断言），不真睡（issue #215 假时钟可控）。"""
+    return SimpleNamespace(sleeps=[], now=0.0)
+
+
+def _sleeper_for(clock):
+    async def sleeper(seconds):
+        clock.sleeps.append(seconds)
+        clock.now += seconds
+    return sleeper
+
+
+def _reconnect_pool(clock, script, index):
+    return ChatConnectionPool(
+        pairing_service=FakePairingService(),
+        client_factory=_scripted_factory(script, index),
+        ws_url_for=_url_for,
+        reconnect_policy=ReconnectPolicy(sleeper=_sleeper_for(clock)),
+    )
+
+
+async def _run_reconnect(pool, key):
+    """确定性驱动后台重连跑完（假时钟下退避立即返回，直接 await 该 key 的重连 task）。"""
+    task = pool._reconnect_tasks.get(key)
+    assert task is not None, '应已启动后台重连'
+    await task
+
+
+@pytest.mark.asyncio
+async def test_reconnect_policy_exponential_backoff_with_cap(clock):
+    """#215：指数退避序列 1,2,4,8,16,30，封顶 30（契约 GATEWAY_RECONNECT_POLICY 1s→30s）。"""
+    policy = ReconnectPolicy(sleeper=_sleeper_for(clock))
+    assert [await policy.next_delay() for _ in range(8)] == [1.0, 2.0, 4.0, 8.0, 16.0, 30.0, 30.0, 30.0]
+
+
+@pytest.mark.asyncio
+async def test_reconnect_policy_reset_restarts_from_initial(clock):
+    """#215：重连成功 reset() 后下次 dead 退避重置回 1s（不沿用上次失败累计的退避）。"""
+    policy = ReconnectPolicy(sleeper=_sleeper_for(clock))
+    await policy.next_delay()
+    await policy.next_delay()
+    policy.reset()
+    assert await policy.next_delay() == 1.0
+
+
+@pytest.mark.asyncio
+async def test_dead_client_triggers_background_reconnect(clock):
+    """#215：client 标 dead（on_dead 上报）后，pool 后台按 1s 退避主动重连——无需用户发消息即自愈。"""
+    index = [0]
+    pool = _reconnect_pool(clock, [False, False], index)  # c1 建连 + 后台重连各 1 次，全成功
+    inst = _instance('a', 19001)
+    c1 = await pool.get_or_create(inst)
+    assert index[0] == 1  # 仅建连 1 次
+    key = (c1.url, c1.device_token)
+    c1.kill()  # 模拟 T1 看门狗标死（半开连接）→ on_dead 触发 pool 主动重连
+    await _run_reconnect(pool, key)  # 后台重连跑完（假时钟退避立即返回）
+    assert index[0] == 2  # 前台 1 次（c1）+ 后台重连 1 次
+    assert clock.sleeps == [1.0]  # 首次退避 1s
+    latest = pool._clients[key]
+    assert latest is not c1  # 重连换入全新 client
+    assert not latest.dead
+    assert c1.closed  # 换入前 best-effort 清理旧死连接
+    await pool.aclose_all()
+
+
+@pytest.mark.asyncio
+async def test_successful_reconnect_resets_backoff(clock):
+    """#215 验收①：重连成功即重置退避——首次重连成功后再次标 dead，退避重新从 1s 起。"""
+    index = [0]
+    pool = _reconnect_pool(clock, [False], index)  # 全部 connect 成功
+    inst = _instance('a', 19001)
+    c1 = await pool.get_or_create(inst)
+    key = (c1.url, c1.device_token)
+    c1.kill()
+    await _run_reconnect(pool, key)  # 后台重连成功（脚本全成功）
+    assert clock.sleeps == [1.0]
+    # 重连成功 → 退避已 reset；再次标 dead 触发新一轮重连，退避从 1s 重起
+    c2 = pool._clients[key]
+    c2.kill()
+    await _run_reconnect(pool, key)
+    assert clock.sleeps == [1.0, 1.0]  # 第二轮退避重置回 1s（非 2s）
+    await pool.aclose_all()
+
+
+@pytest.mark.asyncio
+async def test_failed_reconnect_retries_with_backoff_until_success(clock):
+    """#215：重连失败按 1,2,4… 退避持续重试，成功后换入存活 client（半开断线自愈，T4 前提）。"""
+    index = [0]
+    # c1 建连成功（False）；后台重连前 2 次失败、第 3 次成功（True,True,False）
+    pool = _reconnect_pool(clock, [False, True, True, False], index)
+    inst = _instance('a', 19001)
+    c1 = await pool.get_or_create(inst)
+    key = (c1.url, c1.device_token)
+    c1.kill()
+    await _run_reconnect(pool, key)  # 后台重连跑通全部重试（假时钟退避立即返回）
+    assert index[0] == 4  # 前台 1 次 + 后台 3 次（2 败 1 成）
+    assert clock.sleeps == [1.0, 2.0, 4.0]  # 指数退避序列
+    latest = pool._clients[key]
+    assert latest is not c1
+    assert not latest.dead
+    await pool.aclose_all()
+
+
+@pytest.mark.asyncio
+async def test_aclose_all_cancels_pending_reconnect_timer(clock):
+    """#215 验收②：aclose_all 取消未触发的退避计时器——不再重连、无悬挂 task。"""
+    index = [0]
+    # 重连 task 建连前立刻取消（同步 hook，跑在 connect_factory 内、重连循环 await 退避之前），
+    # 否则假时钟下重连循环在 aclose_all 前就跑完，测不到「取消未触发计时器」。
+    pool = _reconnect_pool(clock, [False], index)
+    inst = _instance('a', 19001)
+    c1 = await pool.get_or_create(inst)
+    key = (c1.url, c1.device_token)
+    c1.kill()  # 标 dead → on_dead 启动后台重连（task 已挂在 pool 上）
+    assert pool._reconnect_tasks.get(key) is not None
+    await pool.aclose_all()  # 取消并等待重连 task 落定
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert index[0] == 1  # 仅前台建连 1 次，后台重连被取消未再 connect
+    assert clock.sleeps == []  # 退避计时器从未触发（aclose_all 在首个退避 await 前取消）
+    assert not pool._reconnect_tasks  # 无悬挂重连 task
+
+
+@pytest.mark.asyncio
+async def test_fast_path_get_or_create_cancels_pending_reconnect(clock):
+    """#215：重连在途时 fast-path 命中存活 client → 幂等取消悬挂重连（竞态防御，防双 client 分裂）。
+
+    场景：重连计时器在途（client 已死、池尚未换入新连接）时，外部已把池中换成存活 client（如另一
+    路 fast-path 重建）；此后台重连再触发会顶掉存活 client → fast-path 命中时幂等取消悬挂重连。
+    """
+    index = [0]
+    pool = _reconnect_pool(clock, [False, False], index)
+    inst = _instance('a', 19001)
+    c1 = await pool.get_or_create(inst)
+    key = (c1.url, c1.device_token)
+    c1.kill()  # 标 dead → on_dead 启动后台重连（task 在途、假时钟下尚未跑）
+    task = pool._reconnect_tasks.get(key)
+    assert task is not None
+    # fast-path 在重连在途期间命中：池中换成存活 client（模拟另一路已重建），取消悬挂重连
+    c_alive = await pool.get_or_create(inst)  # c1 已死 → 驱逐重建 c_alive
+    assert c_alive is not c1
+    assert not c_alive.dead
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert pool._clients[key] is c_alive  # 存活 client 未被悬挂重连顶掉（无 client 分裂）
+    await pool.aclose_all()
+
+
+@pytest.mark.asyncio
+async def test_real_client_dead_triggers_proactive_reconnect(clock):
+    """#215 生产闭环：真实 client 经 _recv_loop 看门狗标 dead → on_dead 触发 pool 主动重连。
+
+    stub 不接受 on_dead kwarg（走 TypeError 回退），覆盖不到「client 标死 → pool 重连」的触发链路；
+    此测试用接受 on_dead 的 factory 包真实 OpenClawChatClient + FakeChatTransport：首连接 tickIntervalMs
+    极小 → 半开看门狗判死 → on_dead 上报 → pool 后台退避重连 → 换入新连接（其 hello-ok 用大 tick 不再判死）。
+    """
+    async def _main():
+        # FakePairingService 默认返回假 PEM（'PUBKEY'/'PRIVKEY'），真实 client 签名路径需合法
+        # Ed25519 身份——用真实生成的 identity，签名握手才能通过（_recv_loop 才启动、看门狗才生效）。
+        real_identity = DeviceCrypto.generate_identity()
+        pairing = FakePairingService(
+            device_id=real_identity.device_id,
+            public_key_pem=real_identity.public_key_pem,
+            private_key_pem=real_identity.private_key_pem,
+            scopes_json='["operator.read","operator.write","operator.approvals"]',
+        )
+        # 第 1 次连接 hello-ok 带小 tick（看门狗 2×20ms=40ms 判死）；重连后第 2 次起用大 tick（不再判死）
+        transports = [
+            FakeChatTransport(connect_policy={'tickIntervalMs': 20, 'maxPayload': 26214400}),
+            FakeChatTransport(connect_policy={'tickIntervalMs': 60000, 'maxPayload': 26214400}),
+        ]
+        made = []
+
+        def factory(url, device_token, *, identity, scopes, on_dead=None):
+            t = transports[min(len(made), len(transports) - 1)]
+            client = OpenClawChatClient(
+                url, device_token, identity=identity, scopes=scopes,
+                transport=t, on_dead=on_dead,
+            )
+            made.append(client)
+            return client
+
+        pool = ChatConnectionPool(
+            pairing_service=pairing,
+            client_factory=factory,
+            ws_url_for=_url_for,
+            reconnect_policy=ReconnectPolicy(sleeper=_sleeper_for(clock)),
+        )
+        inst = _instance('a', 19001)
+        c1 = await pool.get_or_create(inst)
+        assert not c1.dead
+        # 静默 > 2×20ms → 看门狗判死，触发 on_dead → pool 启动后台重连。假时钟下退避立即返回，
+        # 重连在此 sleep 窗口内并发跑完（真实 client 的 recv_task 用真实时钟，aclose_all 负责清理）。
+        await asyncio.sleep(0.08)
+        assert c1.dead
+        key = (c1._url, c1._device_token)  # 真实 client 的 url/device_token 是私有属性（stub 才是公开）
+        # 等后台重连落定（退避立即返回，重连建 c2 换入）。轮询至重连建了第 2 个 client。
+        for _ in range(200):
+            if len(made) >= 2:
+                break
+            await asyncio.sleep(0.005)
+        assert clock.sleeps == [1.0]  # 首次退避 1s
+        assert len(made) == 2  # 重连建了第 2 个真实 client
+        latest = pool._clients[key]
+        assert latest is not c1
+        assert not latest.dead  # 新连接存活（大 tick 不再判死）
+        await pool.aclose_all()
+
+    await asyncio.wait_for(_main(), timeout=5.0)  # 硬上限：重连/aclose 异常挂起时快速失败而非超时

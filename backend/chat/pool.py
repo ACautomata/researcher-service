@@ -10,6 +10,8 @@ chat.pairing.PairingFleet）。
 from __future__ import annotations
 
 import asyncio
+import contextlib
+from collections.abc import Awaitable, Callable
 
 from channels.db import database_sync_to_async
 
@@ -29,9 +31,69 @@ class NotPaired(Exception):
         self.request_id = request_id
 
 
+class ReconnectPolicy:
+    """#196 T3 / #215：指数退避主动重连策略（注入式对象，组合优于继承、无自由函数）。
+
+    契约 ``GATEWAY_RECONNECT_POLICY``：初始退避 ``initial``、每次失败翻倍、上限 ``cap``，重连成功
+    ``reset()`` 后回 ``initial``。``sleeper`` 注入便于测试假时钟（记录时长不真睡）；``connect_factory``
+    由 pool 绑定为该 key 的「client 建连」协程（对齐 ``get_or_create`` 无参样式）。
+    """
+
+    def __init__(
+        self,
+        *,
+        initial: float = 1.0,
+        cap: float = 30.0,
+        sleeper: Callable[[float], Awaitable[None]] | None = None,
+        connect_factory: Callable[[], Awaitable[None]] | None = None,
+    ) -> None:
+        self._initial = initial
+        self._cap = cap
+        self._sleep = sleeper or asyncio.sleep
+        self._connect = connect_factory
+        self._delay = initial
+
+    async def next_delay(self) -> float:
+        """记录并返回本次退避时长，随后翻倍（封顶 cap）——供测试断言指数序列。"""
+        delay = self._delay
+        self._delay = min(self._delay * 2, self._cap)
+        return delay
+
+    def reset(self) -> None:
+        """重连成功后重置退避回 initial（契约「重连成功即重置退避」）。"""
+        self._delay = self._initial
+
+    def fork(self, connect_factory: Callable[[], Awaitable[None]]) -> ReconnectPolicy:
+        """派生一个绑定新 connect_factory、退避重置回 initial 的同类实例（pool 每轮重连用）。
+
+        把「克隆自身配置（initial/cap/sleeper）+ 换新 connect_factory」收进拥有数据的类，
+        调用方（pool）不再掏本类私有字段。每轮重连用独立实例 → 上轮失败累计的退避不跨轮泄漏。
+        """
+        return type(self)(
+            initial=self._initial, cap=self._cap, sleeper=self._sleep,
+            connect_factory=connect_factory,
+        )
+
+    async def run(self, stop: Callable[[], bool]) -> None:
+        """指数退避重连循环：退避 → 建连，失败翻倍重试，成功即重置退避并返回。
+
+        每轮退避后先查 ``stop()``（fast-path 已复活 / pool 关闭）避免无谓重连。被取消（aclose_all /
+        client aclose / fast-path 命中存活）时 CancelledError 自然传播退出，不吞。
+        """
+        while True:
+            await self._sleep(await self.next_delay())
+            if stop():
+                return
+            try:
+                await self._connect()
+            except Exception:  # pylint: disable=broad-exception-caught
+                continue  # 建连失败：已退避翻倍，下轮重试
+            self.reset()
+            return
+
+
 class ChatConnectionPool:
     """每容器一条已配对长连接的连接池（Object Pool）。"""
-
     def __init__(
         self,
         *,
@@ -39,6 +101,7 @@ class ChatConnectionPool:
         client_factory=None,
         ws_url_for=None,
         transport=None,
+        reconnect_policy: ReconnectPolicy | None = None,
     ) -> None:
         self._pairing = pairing_service or PairingService()
         self._client_factory = client_factory or self._default_client_factory
@@ -49,6 +112,10 @@ class ChatConnectionPool:
         # per-key 锁（Lock Strippling）：同 (url,device_token) 串行建连（TOCTOU 防重复 orphan），
         # 异 key 并行——避免一个坏容器（建连挂起）阻塞所有其他容器的 chat（codex P1）。
         self._locks: dict[tuple[str, str], asyncio.Lock] = {}
+        # #196 T3 / #215：注入式主动重连策略（组合优于继承）。client 标 dead 即后台指数退避重连，
+        # 不再干等下次 get_or_create 惰性重建——半开断线无需用户发消息即自愈（T4 恢复在途 run 的前提）。
+        self._reconnect_policy = reconnect_policy or ReconnectPolicy()
+        self._reconnect_tasks: dict[tuple[str, str], asyncio.Task] = {}
 
     def _key_lock(self, key: tuple[str, str]) -> asyncio.Lock:
         # 同步创建（无 await），单事件循环内原子；并发同 key 第一次进入会拿到同一把锁
@@ -59,15 +126,16 @@ class ChatConnectionPool:
         return lock
 
     def _default_client_factory(
-        self, url: str, device_token: str, *, identity, scopes,
+        self, url: str, device_token: str, *, identity, scopes, on_dead=None,
     ) -> OpenClawChatClient:
         """生产 client factory：签名对齐 #141，identity+scopes 由 get_or_create 从 Pairing 注入。
-        nonce 由 connect() 等 connect.challenge 提取（#140）。transport 注入（测试用 FakeTransport）。"""
+        nonce 由 connect() 等 connect.challenge 提取（#140）。transport 注入（测试用 FakeTransport）。
+        on_dead（#215）：client 标 dead 时回调（pool 注入以触发主动重连）。"""
         kwargs: dict = {}
         if self._transport is not None:
             kwargs['transport'] = self._transport
         return OpenClawChatClient(
-            url, device_token, identity=identity, scopes=scopes, **kwargs,
+            url, device_token, identity=identity, scopes=scopes, on_dead=on_dead, **kwargs,
         )
 
     async def get_or_create(self, instance) -> OpenClawChatClient:
@@ -76,14 +144,18 @@ class ChatConnectionPool:
             raise NotPaired(pairing.status, pairing.pairing_request_id)
         url = self._ws_url_for(instance)
         key = (url, pairing.device_token)
-        # 快路径：命中存活 client 直接返回（无需锁）；dead 的不复用（codex P1：连接断开后驱逐重建）
+        # 快路径：命中存活 client 直接返回（无需锁）；dead 的不复用（codex P1：连接断开后驱逐重建）。
+        # #215：幂等取消该 key 悬挂的重连——活着就不该再有重连在途（防「快路径复用 client 而重连又
+        # 换入新 client」的双 client 分裂；竞态防御，重连 task 收尾本已 self-clean）。
         client = self._clients.get(key)
         if client is not None and not client.dead:
+            self._cancel_reconnect(key)
             return client
         # 同 key 串行建连，异 key 并行（per-key lock）；建连耗时/挂起只阻塞同 key
         async with self._key_lock(key):
             client = self._clients.get(key)
             if client is not None and not client.dead:
+                self._cancel_reconnect(key)
                 return client
             if client is not None:  # 死连接：best-effort 清理后丢弃
                 try:
@@ -102,14 +174,90 @@ class ChatConnectionPool:
             # codex #151 P2：identity 非空但缺少 REQUIRED_SCOPES → scopes 损坏/不足，路由重新配对
             if identity is not None and not REQUIRED_SCOPES.issubset(set(scopes)):
                 raise NotPaired(pairing.status, pairing.pairing_request_id)
-            new_client = self._client_factory(
-                url, pairing.device_token, identity=identity, scopes=scopes,
-            )
+            new_client = self._make_client(key, url, pairing.device_token, identity, scopes)
             await new_client.connect()  # 握手有界（chat_client.connect_timeout）
             self._clients[key] = new_client
             return new_client
 
+    def _make_client(self, key, url, device_token, identity, scopes):
+        """经 client_factory 建 client，best-effort 注入 on_dead 回调（#215 触发主动重连）。
+
+        on_dead 是 pool 内部优化钩子：自定义 factory 不接受该 kwarg（如既存测试 stub 的固定签名）
+        时回退不传，不影响建连主路径。
+        """
+        try:
+            return self._client_factory(
+                url, device_token, identity=identity, scopes=scopes,
+                on_dead=lambda: self._schedule_reconnect(key),
+            )
+        except TypeError:
+            return self._client_factory(url, device_token, identity=identity, scopes=scopes)
+
+    # ── #196 T3 / #215：主动重连（指数退避 1s→30s）─────────────────
+
+    def _schedule_reconnect(self, key) -> None:
+        """client 经 on_dead 上报标死时触发主动重连（仅当该 client 仍是池中当前值）。
+
+        旧 client 被驱逐后其 on_dead 可能迟到触发——此时 _clients[key] 已是新 client，不应再为其
+        启动重连（否则与 fast-path 复用的新 client 分裂）。
+        """
+        client = self._clients.get(key)
+        if client is None or not client.dead:
+            return
+        self._start_reconnect(key, client)
+
+    def _start_reconnect(self, key, target) -> None:
+        """为该 key 的 target client 启动后台主动重连（幂等：已有在途重连则不重复启动）。
+
+        用独立 ReconnectPolicy 实例跑本轮重连（成功 reset 退避、失败翻倍）。stop 条件：fast-path 在
+        重连在途期间已把该 key 换成**别的** client（用户流量迁走）→ 本次重连作废，防双 client 分裂。
+        connect_factory 复用 get_or_create 的「驱逐 → 重建」材料（`_reconnect_once`）。
+        """
+        existing = self._reconnect_tasks.get(key)
+        if existing is not None and not existing.done():
+            return
+        policy = self._reconnect_policy.fork(lambda: self._reconnect_once(key, target))
+        task = asyncio.ensure_future(
+            policy.run(lambda: self._clients.get(key) is not target))
+        self._reconnect_tasks[key] = task
+        task.add_done_callback(lambda _t: self._reconnect_tasks.pop(key, None))
+
+    def _cancel_reconnect(self, key) -> None:
+        """取消该 key 悬挂的重连计时器（fast-path 命中存活 / client aclose / aclose_all 时调）。"""
+        task = self._reconnect_tasks.pop(key, None)
+        if task is not None and not task.done():
+            task.cancel()
+
+    async def _drain_reconnects(self) -> None:
+        """取消并等待全部重连 task 落定（aclose_all 用：确保无悬挂 task，契约 #215 验收②）。"""
+        tasks = [t for t in (self._reconnect_tasks.pop(k, None) for k in list(self._reconnect_tasks)) if t]
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
+            with contextlib.suppress(asyncio.CancelledError, Exception):  # pylint: disable=broad-exception-caught
+                await task
+
+    async def _reconnect_once(self, key, target) -> None:
+        """单次主动重连：驱逐 target（已断连的 client）→ 重建换入池中。
+
+        仅当 target 仍是池中当前值时执行——fast-path 若已换成别的 client（stop 已拦），或并发重复
+        进入，则不重复重连。与 get_or_create 同走 per-key 锁串行化，防与前台建连竞态；重建复用
+        target 的连接材料（identity/scopes，与 fast-path 建它时一致），半开断线经此自愈换入全新连接。
+        """
+        url, device_token = key
+        async with self._key_lock(key):
+            if self._clients.get(key) is not target:
+                return  # fast-path 已换成别的 client（并发防御；stop 是主拦截）
+            try:
+                await target.aclose()  # best-effort 清理旧连接
+            except Exception:  # pylint: disable=broad-exception-caught
+                pass
+            new_client = self._make_client(key, url, device_token, target.identity, target.scopes)
+            await new_client.connect()
+            self._clients[key] = new_client
+
     async def aclose_all(self) -> None:
+        await self._drain_reconnects()  # #215：先取消并等待全部退避计时器落定，无悬挂 task
         for client in list(self._clients.values()):
             await client.aclose()
         self._clients.clear()
