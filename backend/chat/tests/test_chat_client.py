@@ -1,3 +1,4 @@
+# pylint: disable=too-many-lines
 """seam: chat.chat_client —— OpenClaw 长连接对话客户端（issue #41 / spec §8.2）。
 
 chat.send + runId 路由：发 chat.send → ack(runId) → chat 事件按 runId 经 translator 翻译回调 on_event。
@@ -1021,7 +1022,7 @@ async def test_send_message_oversized_does_not_leak_pending_ack():
     await c.connect()
     with pytest.raises(ChatPayloadTooLargeError):
         await c.send_message('s', 'x' * 1000, on_event=on_event)
-    assert c._pending_acks == {}  # pylint: disable=protected-access
+    assert not c._pending_acks  # pylint: disable=protected-access  # 无泄漏：pending ack 已 pop
     await c.aclose()
 
 
