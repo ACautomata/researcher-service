@@ -10,6 +10,7 @@ codex R2：PortPoolExhausted/PortAllocationError→503（端口池耗尽/持续�
 属预期容量条件，非内部缺陷——客户端可区分，不再裸 500）。
 codex R3：InstanceBusy→409（删除目标仍在 provisioning，防与在飞 create 竞态）。
 """
+from asgiref.sync import async_to_sync
 from django.core.exceptions import ValidationError
 from django.http import Http404
 from drf_spectacular.utils import extend_schema
@@ -18,10 +19,11 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from chat.models import Pairing
+from chat.pool import ChatFleet
 from chat.serializers import PairingStatusSerializer
 from integration.openclaw.translation import build_pairing_status_default
 
-from .models import NAME_VALIDATOR
+from .models import NAME_VALIDATOR, Instance
 from .orchestrator import (
     ConfigurationError,
     Fleet,
@@ -105,6 +107,9 @@ class InstanceDetailView(APIView):
             NAME_VALIDATOR(name)
         except ValidationError:
             return Response({'detail': '非法 name'}, status=status.HTTP_400_BAD_REQUEST)
+        # codex #221 R5 P2：delete 前取 inst（删除后行已删、port 回收），保留 name/port 供
+        # evict_instance 经 _ws_url_for 算同一 url，逐出该网关 pool client + 取消其重连 task。
+        inst = Instance.objects.filter(name=name).first()
         try:
             removed = Fleet.get().delete(name)
         except InstanceBusy:
@@ -121,4 +126,13 @@ class InstanceDetailView(APIView):
             )
         if not removed:
             raise Http404
+        # codex #221 R5 P2：删除成功后逐出 ChatFleet pool client + 取消其重连 task——否则被删
+        # 容器的 url/token 仍是 pool 当前 target，#215 主动重连循环 stop 永不命中，每 30s 无限向
+        # 已删端口（可能被后续容器复用）重连陈旧凭证。evict 失败不阻断 204（best-effort，池残留
+        # 可由后续 get_or_create 惰性重建/驱逐兜底）。
+        if inst is not None:
+            try:
+                async_to_sync(ChatFleet.get().evict_instance)(inst)
+            except Exception:  # pylint: disable=broad-exception-caught
+                pass
         return Response(status=status.HTTP_204_NO_CONTENT)
