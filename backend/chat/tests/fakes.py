@@ -150,10 +150,15 @@ class _FakeChatWs:
         if connect is not None and not t._connect_acked and not t.suppress_connect_ack:
             t._connect_acked = True
             if t.connect_ok:
-                return json.dumps({'type': 'res', 'id': connect['id'], 'ok': True,
-                                   'payload': {'auth': {'deviceToken': 'dt-fake', 'role': 'operator',
-                                                        'scopes': ['operator.read', 'operator.write',
-                                                                   'operator.admin', 'operator.approvals']}}})
+                # #213：hello-ok payload.policy（connect_policy 为 None 时不下发，测协议默认回退）。
+                # 用三元 unpack 而非 if 语句，避免 recv 再增分支触发 too-many-branches。
+                payload = {
+                    'auth': {'deviceToken': 'dt-fake', 'role': 'operator',
+                             'scopes': ['operator.read', 'operator.write',
+                                        'operator.admin', 'operator.approvals']},
+                    **({'policy': t.connect_policy} if t.connect_policy is not None else {}),
+                }
+                return json.dumps({'type': 'res', 'id': connect['id'], 'ok': True, 'payload': payload})
             return json.dumps({'type': 'res', 'id': connect['id'], 'ok': False,
                                'error': {'code': 'AUTH_FAILED', 'message': 'bad token'}})
         chat_sends = [f for f in t.sent if f.get('method') == 'chat.send']
@@ -199,8 +204,10 @@ class _FakeChatWs:
             return json.dumps(t.events.pop(0))
         return json.dumps(await self._extra.get())
 
-    async def close(self):
+    async def close(self, *args, **kwargs):
         self._t._closed = True
+        # #213：记录 close code（看门狗按契约 4000）；无参 close（aclose）为 None。
+        self._t._close_code = args[0] if args else kwargs.get('code')
 
 
 class FakeChatTransport:  # pylint: disable=too-many-instance-attributes  # pylint: disable=too-many-instance-attributes
@@ -219,7 +226,7 @@ class FakeChatTransport:  # pylint: disable=too-many-instance-attributes  # pyli
                  list_payload=None, commands_payload=None, commands_error=None,
                  suppress_commands_ack=False,
                  rpc_payloads=None, rpc_errors=None, rpc_suppress=None,
-                 challenge_nonce=_DEFAULT_CHALLENGE_NONCE):
+                 challenge_nonce=_DEFAULT_CHALLENGE_NONCE, connect_policy=None):
         self.connect_ok = connect_ok
         self.ack_run_id = ack_run_id
         self.ack_error = ack_error
@@ -228,6 +235,10 @@ class FakeChatTransport:  # pylint: disable=too-many-instance-attributes  # pyli
         # issue #140：脚本化 connect.challenge 的 nonce；None = 不下发（旧路径立即发帧）。
         self.challenge_nonce = challenge_nonce
         self._challenge_sent = False
+        # #196 T1 / #213：hello-ok payload.policy 注入（None=不下发，测协议默认回退）。
+        self.connect_policy = connect_policy
+        # #213：_FakeChatWs.close 记录的 close code（看门狗按契约 4000 关闭）；无参 close（aclose）为 None。
+        self._close_code = None
         self.resolve_error = resolve_error
         self.resolve_payload = resolve_payload if resolve_payload is not None else {}
         self.list_payload = list_payload if list_payload is not None else {}

@@ -13,6 +13,7 @@ import asyncio
 import json
 import uuid
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 
 import websockets
 
@@ -26,6 +27,45 @@ from integration.openclaw.wire import (
 
 # on_event 回调契约：接收翻译后的前端契约帧（text/done/error）
 OnEvent = Callable[[dict], Awaitable[None]]
+
+# Gateway 协议常量（https://docs.openclaw.ai/zh-CN/gateway/protocol 「客户端常量」节）。
+# hello-ok 前的握手前默认（缺 policy 字段时回退）。
+DEFAULT_TICK_INTERVAL_MS = 30_000  # 默认 tick 间隔（hello-ok 前）
+DEFAULT_MAX_PAYLOAD_BYTES = 25 * 1024 * 1024  # MAX_PAYLOAD_BYTES = 25 MB（26214400）
+
+
+@dataclass(frozen=True)
+class GatewayPolicy:
+    """hello-ok ``payload.policy`` 的解析结果（不可变值对象，#196 T1 / #213）。
+
+    网关在 hello-ok 公布实际生效的 ``policy.*``（HelloOkSchema 必填项），客户端应遵循这些值而非
+    握手前默认。缺字段回退协议默认：``tickIntervalMs=30000``、``maxPayload=25MB``；``maxBufferedBytes``
+    协议未指定握手前默认 → ``None``。``tick_interval_ms`` 驱动本 ticket 的静默看门狗（2×tick）；
+    ``max_payload_bytes`` 供 T5 发送侧预检；整体供 T3 重连计时复用。
+    """
+    tick_interval_ms: int
+    max_payload_bytes: int
+    max_buffered_bytes: int | None
+
+    @classmethod
+    def default(cls) -> GatewayPolicy:
+        """握手前默认（未收到 hello-ok 时）。"""
+        return cls(
+            tick_interval_ms=DEFAULT_TICK_INTERVAL_MS,
+            max_payload_bytes=DEFAULT_MAX_PAYLOAD_BYTES,
+            max_buffered_bytes=None,
+        )
+
+    @classmethod
+    def from_hello_ok(cls, payload: dict | None) -> GatewayPolicy:
+        """从 hello-ok res 的 ``payload`` 解析 ``policy``；缺字段回退协议默认。"""
+        policy = ((payload or {}).get('policy') or {})
+        buffered = policy.get('maxBufferedBytes')
+        return cls(
+            tick_interval_ms=int(policy.get('tickIntervalMs', DEFAULT_TICK_INTERVAL_MS)),
+            max_payload_bytes=int(policy.get('maxPayload', DEFAULT_MAX_PAYLOAD_BYTES)),
+            max_buffered_bytes=int(buffered) if buffered is not None else None,
+        )
 
 
 class ChatClientError(Exception):
@@ -87,6 +127,8 @@ class OpenClawChatClient:  # pylint: disable=too-many-instance-attributes,too-ma
         self._routes: dict[str, OnEvent] = {}
         self._closed = False
         self._dead = False  # recv loop 退出（连接断开）→ pool 据此驱逐重建
+        # #196 T1 / #213：网关 policy（hello-ok 解析；握手前为协议默认）。tick_interval_ms 驱动静默看门狗。
+        self._policy = GatewayPolicy.default()
 
     def add_approval_subscriber(self, cb: OnEvent) -> None:
         """注册连接级审批订阅者（T06 / codex P1）：多 consumer 共享 client 时各自独立注册。"""
@@ -119,6 +161,11 @@ class OpenClawChatClient:  # pylint: disable=too-many-instance-attributes,too-ma
     def dead(self) -> bool:
         """连接是否已不可用（recv loop 退出或被显式关闭）；pool 据此不复用。"""
         return self._dead or self._closed
+
+    @property
+    def policy(self) -> GatewayPolicy:
+        """当前生效的网关 policy（hello-ok 解析；握手前 / 缺字段为协议默认）。#196 T1 / #213。"""
+        return self._policy
 
     def _default_connect_frame(self, req_id: str, device_token: str) -> dict:
         """已配对长连接帧：委托给单一来源 ConnectFrameBuilder.session()（issue #102 / #139 / #140）。
@@ -163,9 +210,11 @@ class OpenClawChatClient:  # pylint: disable=too-many-instance-attributes,too-ma
                 # 统一两参调用（builder seam 契约）；签名所需 nonce 已由默认 builder 读 self._nonce。
                 frame = self._build_connect(req_id, self._device_token)
                 await self._ws.send(json.dumps(frame))
-                await asyncio.wait_for(
+                hello_ok = await asyncio.wait_for(
                     self._await_res(req_id), timeout=self._remaining(deadline),
                 )
+                # #213：解析 hello-ok payload.policy（驱动静默看门狗 2×tick）；缺字段由 from_hello_ok 回退默认
+                self._policy = GatewayPolicy.from_hello_ok(hello_ok.get('payload'))
             except TimeoutError as exc:
                 raise ChatConnectError('connect handshake timeout') from exc
         except BaseException:
@@ -208,16 +257,31 @@ class OpenClawChatClient:  # pylint: disable=too-many-instance-attributes,too-ma
         return msg
 
     async def _recv_loop(self) -> None:
+        # #196 T1 / #213：静默看门狗——连续静默 > 2×tickIntervalMs 即按契约 close code 4000 语义
+        # 关闭、置 _dead、拒全部挂起请求（不重放）。tickIntervalMs 取自 hello-ok policy（缺省 30s → 60s）。
+        # 每收到一帧 wait_for 重置，等价于「最后一次收帧后起算」的静默计时；半开连接（recv 永久挂起）
+        # 超时即走断连收尾，让 pool 驱逐重建——修复原裸 recv() 永久挂起、_dead 永不置位、连接永不自愈。
+        silence_timeout = self._policy.tick_interval_ms * 2 / 1000
         try:
             while True:
-                raw = await self._ws.recv()
+                raw = await asyncio.wait_for(self._ws.recv(), timeout=silence_timeout)
                 await self._handle(json.loads(raw))
         except asyncio.CancelledError:  # pylint: disable=try-except-raise
+            # #196 T1 / #213：task 取消即连接不可用（REST 跨 loop 清理 / 服务关闭竞态）。原分支只 raise
+            # 不置位 → pool 快路径（not client.dead）无限复用假活 client，该容器聊天永久变砖。
+            self._dead = True
             raise
         except Exception:  # pylint: disable=broad-exception-caught
-            self._dead = True  # 连接断开：标记 dead 供 pool 驱逐重建
+            # 连接断开 / 静默超时（含看门狗 TimeoutError）：标记 dead 供 pool 驱逐重建，拒全部挂起请求
+            # （不重放），按契约 close code 4000 语义关闭套接字（best-effort；pool 重建时 aclose 兜底）。
+            self._dead = True
             if not self._closed:
                 await self._notify_all_error('容器连接断开')
+            if self._ws is not None:
+                try:
+                    await self._ws.close(4000)
+                except Exception:  # pylint: disable=broad-exception-caught
+                    pass
             return
 
     async def _handle(self, msg: dict) -> None:
