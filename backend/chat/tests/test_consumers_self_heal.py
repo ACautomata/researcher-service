@@ -583,6 +583,56 @@ async def test_retried_send_transmitted_reacquires_again(override_pool, instance
     await comm.disconnect()
 
 
+@pytest.mark.asyncio
+async def test_retried_resolve_dead_reacquires_again(override_pool, instance, fake_client):
+    """codex #219 十三轮 P2-517：resolve 重试时 replacement client 也死 → 再重取迁移订阅者。
+
+    初次 resolve 在死 fake_client 上失败 → 自愈换 fresh；fresh 重试 resolve 又撞连接死（fresh
+    死）——对齐 _handle_send 六轮 P2-875 / 四轮 P2-895：对该连接异常做连接级恢复（再重取迁移
+    全体订阅者 + 补拉待审批），但**不二次重试** resolve（有界一次，发 error 帧复位该卡）。
+    """
+    comm = await _connect_authed()
+    await comm.connect()
+    await comm.send_json_to({'type': 'start', 'container': 'demo'})
+    await comm.receive_json_from()  # ready
+
+    # 初次 resolve：fake_client dead → 自愈换到 fresh
+    fake_client.dead = True
+    fresh = FakeChatClient()
+    override_pool.set_client(fresh)
+
+    async def first_resolve_dead(*args):
+        raise ConnectionClosedOK(None, None)  # 初次撞死 socket → 触发自愈
+
+    fake_client.resolve_approval = first_resolve_dead
+
+    # fresh 重试 resolve 时也死（连接异常），pool 已重建出更新 client newer
+    newer = FakeChatClient()
+    newer.pending = [{'type': 'approval', 'id': 'ap-r2', 'kind': 'exec', 'command': 'curl r2'}]
+
+    async def fresh_resolve_dead(*args):
+        fresh.dead = True  # 重试撞连接死
+        override_pool.set_client(newer)
+        raise ConnectionClosedOK(None, None)
+
+    fresh.resolve_approval = fresh_resolve_dead
+
+    await comm.send_json_to({'type': 'resolve', 'id': 'ap-1', 'kind': 'exec', 'decision': 'allow-once'})
+    # 再次重取后补拉 newer 上的待审批卡（fresh 死期间积累的审批经新连接恢复）
+    approval_frame = await comm.receive_json_from()
+    assert approval_frame == {'type': 'approval', 'id': 'ap-r2', 'kind': 'exec', 'command': 'curl r2'}
+    # 再收到 error 帧（不二次重试 resolve，复位该卡）
+    resp = await comm.receive_json_from()
+    assert resp['type'] == 'error'
+    assert resp['id'] == 'ap-1'
+    # 两次自愈都采纳 pool 健康项（fake_client→fresh→newer），均不驱逐不重建
+    assert override_pool.created == ['demo', 'demo', 'demo']
+    assert override_pool.evicted == []
+    # 订阅者最终迁到 newer（fresh 已死、退空）
+    assert len(newer._approval_subscribers) == 1
+    await comm.disconnect()
+
+
 # ── codex #219 三轮 P2-444：退订须落到持有回调的 client ─────────────────────
 # POST /pairing/ force-repair 换 device_token 后，pool 可同时有旧 token client + 新 token
 # live client。get_live 只返回新 client，但本 consumer 的回调/active runId 可能还在旧

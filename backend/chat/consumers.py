@@ -126,7 +126,12 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
             if fresh is not None:
                 try:
                     await fresh.resolve_approval(approval_id, kind, decision)
-                except Exception:  # pylint: disable=broad-exception-caught
+                except Exception as retry_exc:  # pylint: disable=broad-exception-caught
+                    # codex #219 十三轮 P2-517：重试这条 replacement client 也撞连接异常（fresh 死）
+                    # 时，迁移过去的全体审批订阅者还挂在死 fresh 上——对齐 _handle_send 六轮 P2-875，
+                    # 对该连接异常也做连接级恢复（重取迁移订阅者 + 补拉待审批），但**不二次重试**
+                    # resolve（有界一次）。业务拒绝（ChatSendError）经 evidence guard 不重取。
+                    await self._reacquire_client(evidence=retry_exc)
                     await self.send_json({'type': 'error', 'message': '审批回覆失败，请稍后重试', 'id': approval_id})
                 return
             await self.send_json({'type': 'error', 'message': '审批回覆失败，请稍后重试', 'id': approval_id})
