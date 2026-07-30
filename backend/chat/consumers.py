@@ -24,6 +24,7 @@ import uuid
 from channels.db import database_sync_to_async
 from channels.generic.websocket import AsyncJsonWebsocketConsumer
 
+from chat.chat_client import ChatSendTransmittedError
 from chat.pool import ChatFleet, NotPaired
 from containers.models import Instance
 
@@ -80,9 +81,12 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
             # 连接握手失败（ChatConnectError 等）发 error 帧，不传播导致 Channels 关闭 WS
             await self.send_json({'type': 'error', 'message': '连接容器失败，请稍后重试'})
             return
-        # 切容器/重连：旧 client 的本 consumer 审批订阅退订，避免推已失效连接（codex P1 独立退订）
-        if self._client is not None and self._client is not client:
-            self._client.remove_approval_subscriber(self._on_approval)
+        # 切容器/重连：旧 client 的本 consumer 审批订阅退订，避免推已失效连接（codex P1 独立退订）。
+        # codex #219 P2：经 pool 再解析旧容器的活 client 退订（自愈后 self._client 可能是死 client，
+        # 退订落空会把回调泄漏到活的新 client）。self._instance 此刻仍是旧容器，_unsubscribe_target 用之。
+        old_target = await self._unsubscribe_target()
+        if old_target is not None and old_target is not client:
+            old_target.remove_approval_subscriber(self._on_approval)
         self._client = client  # pylint: disable=attribute-defined-outside-init
         self._instance = instance  # pylint: disable=attribute-defined-outside-init  # issue #214：供失效重取
         # T06：注册连接级审批订阅（codex P1 订阅者集合，多 consumer 共享 client 不互伤）
@@ -134,13 +138,17 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
         触发时机：_handle_send/_handle_resolve 的 RPC 已抛错（连接已断）。仅当
         `self._client.dead`（#213 T1 看门狗/CancelledError 置位）才重取——非 dead 的失败
         （如 rate limit）返回 None，调用方直接发 error 帧，不做无谓重连。
-        成功则切换 self._client：旧 client 退订本 consumer 审批回调、新 client 订阅
-        （对齐 _handle_start 切换逻辑，codex P1 独立退订）。重取本身失败（NotPaired/握手失败）
-        也返回 None，由调用方发 error 帧。返回新 client 或 None。
+        成功则切换 self._client 并把**所有**审批订阅者迁到新 client（codex #219 P2，见下）。
+        重取本身失败（NotPaired/握手失败）也返回 None，由调用方发 error 帧。返回新 client 或 None。
 
         codex #219 P1：换 client 后补拉 list_pending_approvals——订阅只投递**未来**事件，
         旧 client 收循环死亡期间积累的待审批不会随新订阅到达，须显式补拉（同 _handle_start
         的断线恢复），否则 agent 卡死直到用户手动再 start。
+
+        codex #219 P2：多 consumer 共享同一 pooled client 时，只迁移触发自愈的本 consumer
+        会让其余被动 consumer 仍挂在死 client 上、错过新连接上的审批。故把旧 client 的**全部**
+        订阅者迁到 fresh（本 consumer 的回调也在其中），补拉的待审批也 fan-out 到全部订阅者
+        （不只推本 consumer），保住共享 fan-out 契约。
         """
         client = self._client
         if client is None or self._instance is None or not client.dead:
@@ -151,12 +159,33 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
             return None  # 重取失败：保持原错误路径，调用方发 error 帧
         if fresh is client:
             return None  # pool 未换 client（防御）：重试同一死 client 无意义，不重取
-        client.remove_approval_subscriber(self._on_approval)
-        fresh.add_approval_subscriber(self._on_approval)
+        # codex #219 P2：迁移全部订阅者（含本 consumer），被动 consumer 不滞留死 client
+        subscribers = client.approval_subscribers()
+        for cb in subscribers:
+            client.remove_approval_subscriber(cb)
+            fresh.add_approval_subscriber(cb)
         self._client = fresh  # pylint: disable=attribute-defined-outside-init
-        # codex #219 P1：补拉换 client 前累积的待审批（best-effort，不影响已建立的新订阅）
-        await self._push_pending_approvals(fresh)
+        # codex #219 P1+P2：补拉换 client 前累积的待审批，并 fan-out 到全部迁移订阅者
+        # （best-effort，不影响已建立的新订阅）；共享 client 的各 consumer 都恢复。
+        await self._fanout_pending_approvals(fresh)
         return fresh
+
+    async def _fanout_pending_approvals(self, client):
+        """补拉待审批并 fan-out 到该 client 全部订阅者（best-effort，失败静默）。
+
+        _reacquire_client 自愈换 client 后用：多 consumer 共享 client 时，补拉的卡须
+        经各订阅者回调送达每个 consumer 的前端（codex #219 P2），不只推触发自愈的那个。
+        """
+        try:
+            cards = await client.list_pending_approvals()
+        except Exception:  # pylint: disable=broad-exception-caught
+            return
+        for card in cards:
+            for cb in client.approval_subscribers():
+                try:
+                    await cb(card)
+                except Exception:  # pylint: disable=broad-exception-caught
+                    pass
 
     async def _push_pending_approvals(self, client):
         """断线/换 client 后补拉待审批卡透传前端（best-effort，失败静默）。
@@ -179,17 +208,28 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
         if not session_key or not message:
             await self.send_json({'type': 'error', 'message': '缺少 sessionKey 或 message'})
             return
+        # codex #219 P1：同一逻辑发送在初次与有界重试间复用同一 idempotencyKey——
+        # 若网关已收下原 chat.send 但 ack 随死连接丢失，重试带同 key 让网关幂等去重，
+        # 避免起两个 run、工具被执行两次。key 由本 consumer 按逻辑发送生成一次。
+        idempotency_key = uuid.uuid4().hex
         try:
-            # codex #219 P1：同一逻辑发送在初次与有界重试间复用同一 idempotencyKey——
-            # 若网关已收下原 chat.send 但 ack 随死连接丢失，重试带同 key 让网关幂等去重，
-            # 避免起两个 run、工具被执行两次。key 由本 consumer 按逻辑发送生成一次。
-            idempotency_key = uuid.uuid4().hex
             run_id = await self._client.send_message(
                 session_key, message, on_event=self._on_event,
                 idempotency_key=idempotency_key,
             )
+        except ChatSendTransmittedError:
+            # codex #219 P1：帧已发出但 ack 丢失——网关可能已起 run，其事件流绑在死连接上
+            # （runId 是连接级的，重连不可恢复）。盲重试会被幂等去重到同一 runId，但新 client
+            # 的 route 收不到任何事件 → 浏览器 pending 永久卡住。故**不重试**，发终态 error
+            # 帧解锁前端（用户可重发），不假设新 route 有完整事件流。不加入 _active_runids。
+            await self.send_json({
+                'type': 'error',
+                'message': '连接中断，发送结果未知：若已发出请稍后在历史确认，否则请重试',
+            })
+            return
         except Exception:  # pylint: disable=broad-exception-caught
-            # chat.send 被拒/连接已断。issue #214：dead 则自愈重取一次并有界重试一次（防循环）；
+            # chat.send 未发出（client not connected / 网关显式拒绝 ack ok:false）/连接已断——
+            # 确定未起 run，安全自愈。issue #214：dead 则重取一次并有界重试一次（防循环）；
             # 非 dead / 重取失败 / 重试仍败 → error 帧，不传播导致 WS 关闭。
             fresh = await self._reacquire_client()
             if fresh is not None:
@@ -198,6 +238,13 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
                         session_key, message, on_event=self._on_event,
                         idempotency_key=idempotency_key,  # codex #219 P1：复用同 key 幂等重试
                     )
+                except ChatSendTransmittedError:
+                    # 重试这条也撞上已发出 ack 丢失：不再嵌套重试，发终态 error
+                    await self.send_json({
+                        'type': 'error',
+                        'message': '连接中断，发送结果未知：若已发出请稍后在历史确认，否则请重试',
+                    })
+                    return
                 except Exception:  # pylint: disable=broad-exception-caught
                     await self.send_json({'type': 'error', 'message': '发送失败，请稍后重试'})
                     return
@@ -217,11 +264,31 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
         await self.send_json(frame)
 
     async def disconnect(self, code):
-        if self._client is not None:
-            self._client.remove_approval_subscriber(self._on_approval)  # T06：独立退订（codex P1）
+        # codex #219 P2：从 pool 再解析活 client 退订/丢弃 runId——自愈换 client 后，
+        # 缓存的 self._client 可能仍是死 client（被动 consumer 被迁移过），直接退订会把回调
+        # 泄漏到存活的新 client（T06 独立退订契约）。best-effort，WS 关闭路径不抛错。
+        target = await self._unsubscribe_target()
+        if target is not None:
+            target.remove_approval_subscriber(self._on_approval)  # T06：独立退订（codex P1）
             for run_id in list(self._active_runids):
-                self._client.discard(run_id)
+                target.discard(run_id)
             self._active_runids.clear()
+
+    async def _unsubscribe_target(self):
+        """退订/丢弃 runId 的目标 client：优先 pool 里的活 client，回退缓存的 self._client。
+
+        codex #219 P2：自愈把本 consumer 的审批回调迁到新 client 后，self._client 可能仍是
+        死 client；退订须落到持有回调的活 client 上，否则回调泄漏。pool 查询失败/无活 client
+        时回退 self._client（保持原行为， best-effort）。
+        """
+        if self._instance is not None:
+            try:
+                live = await ChatFleet.get().get_live(self._instance)
+            except Exception:  # pylint: disable=broad-exception-caught
+                live = None
+            if live is not None:
+                return live
+        return self._client
 
     @staticmethod
     def _lookup_instance(name):

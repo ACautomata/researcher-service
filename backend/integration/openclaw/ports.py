@@ -115,6 +115,15 @@ class OpenClawWire(Protocol):
         """退订指定审批订阅者。"""
         ...
 
+    def approval_subscribers(self) -> list:
+        """返回当前全部审批订阅者的副本（codex #219 P2：共享 client 自愈迁移用）。
+
+        consumer 自愈换 client 时须把所有订阅者（不止触发自愈的那个 consumer）迁到新
+        client，否则被动 consumer 滞留死 client、错过新连接上的审批。Port/Fake/Adapter
+        三处同构（同 send_message idempotency_key 的 Liskov 对齐）。
+        """
+        ...
+
     async def broadcast_approval_resolved(self, approval_id: str, decision: str) -> None:
         """把一次权威 resolve 结果 fan-out 到全部订阅者。
 

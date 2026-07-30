@@ -80,6 +80,17 @@ class ChatSendError(ChatClientError):
     """chat.send 被网关拒绝（ack not ok）或 ack 缺 runId。"""
 
 
+class ChatSendTransmittedError(ChatSendError):
+    """chat.send 帧已发出、但 ack 在连接死亡/超时前未到达（codex #219 P1）。
+
+    区别于网关显式拒绝（ack ok:false，确定未起 run）：此时帧已 send，网关**可能**已起
+    run，只是 ack 丢失。runId 是连接级的（r13-ws-protocol §5.3，重连不可恢复进行中 run），
+    若 consumer 拿同 idempotencyKey 盲重试，网关幂等去重返回同一 runId，但该 run 的事件
+    流绑在死连接上、不会到新 client 的 route——浏览器 pending 消息永久卡住。故 consumer
+    捕获本子类时**不重试**，直接发终态 error 帧解锁前端；只有确定未发出的失败才自愈重试。
+    """
+
+
 class OpenClawChatClient:  # pylint: disable=too-many-instance-attributes,too-many-arguments
     """对单个已配对容器维持一条长连接，发 chat.send 并按 runId 路由 chat 事件。"""
 
@@ -139,6 +150,15 @@ class OpenClawChatClient:  # pylint: disable=too-many-instance-attributes,too-ma
         """退订指定订阅者（codex P1）：只移除自己，不误伤同 client 其他 consumer 的订阅。"""
         if cb in self._approval_subscribers:
             self._approval_subscribers.remove(cb)
+
+    def approval_subscribers(self) -> list[OnEvent]:
+        """返回当前全部审批订阅者的副本（codex #219 P2：共享 client 自愈迁移用）。
+
+        consumer 自愈换 client 时须把**所有**订阅者（不止触发自愈的那个 consumer）迁到
+        新 client，否则被动 consumer 仍挂在死 client 上、错过新连接上的审批。返回副本
+        防调用方直接改内部列表。
+        """
+        return list(self._approval_subscribers)
 
     async def _fanout_approval(self, frame: dict) -> None:
         """把一帧连接级审批帧 fan-out 到所有订阅者；隔离单订阅者回调失败（不杀 recv loop / 不互伤）。"""
@@ -584,9 +604,19 @@ class OpenClawChatClient:  # pylint: disable=too-many-instance-attributes,too-ma
             run_id = await asyncio.wait_for(fut, timeout=self._ack_timeout)
         except TimeoutError as exc:
             self._pending_acks.pop(req_id, None)
-            raise ChatSendError('chat.send ack timeout') from exc
-        except BaseException:
+            # codex #219 P1：帧已发出、ack 超时——网关可能已起 run；不可盲重试（丢事件流）
+            raise ChatSendTransmittedError('chat.send ack timeout') from exc
+        except ChatSendError:
+            # 网关显式拒绝（ack ok:false，如 rate limit）或 ack 缺 runId——确定未起 run，
+            # 原样上抛（非 transmitted），consumer 走既有重试/error 路径。
             self._pending_acks.pop(req_id, None)
+            raise
+        except BaseException as exc:
+            self._pending_acks.pop(req_id, None)
+            # codex #219 P1：帧已发出后 recv loop 死（_fail_pending_acks 置 ChatClientError）
+            # ——可能已起 run；包装为 ChatSendTransmittedError 让 consumer 判不可盲重试。
+            if isinstance(exc, ChatClientError):
+                raise ChatSendTransmittedError(str(exc)) from exc
             raise
         self._routes[run_id] = on_event
         return run_id

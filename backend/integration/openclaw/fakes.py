@@ -132,6 +132,10 @@ class FakeOpenClawWire:
         if cb in self._approval_subscribers:
             self._approval_subscribers.remove(cb)
 
+    def approval_subscribers(self) -> list:
+        """返回当前全部审批订阅者的副本（codex #219 P2：共享 client 自愈迁移用）。"""
+        return list(self._approval_subscribers)
+
     async def broadcast_approval_resolved(self, approval_id: str, decision: str) -> None:
         frame = {'type': 'approvalResolved', 'id': approval_id, 'decision': decision}
         for cb in list(self._approval_subscribers):

@@ -12,7 +12,7 @@ from channels.testing import WebsocketCommunicator
 from django.contrib.auth import get_user_model
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from chat.chat_client import ChatConnectError, ChatSendError
+from chat.chat_client import ChatConnectError, ChatSendError, ChatSendTransmittedError
 from chat.pool import ChatFleet, NotPaired
 from config.asgi import application
 from containers.models import Instance
@@ -64,6 +64,10 @@ class FakeChatClient:
         if cb in self._approval_subscribers:
             self._approval_subscribers.remove(cb)
 
+    def approval_subscribers(self):
+        # codex #219 P2：对齐真实 client 的迁移访问器（_reacquire_client 迁全部订阅者用）。
+        return list(self._approval_subscribers)
+
     async def resolve_approval(self, approval_id, kind, decision):
         self.resolved.append((approval_id, kind, decision))
         return self.resolve_payload
@@ -93,10 +97,19 @@ class FakePool:
         self.created.append(instance.name)
         return self._client
 
+    async def get_live(self, instance):
+        # codex #219 P2：对齐真实 pool 的非创建式查活——返回当前存活 client（dead 则 None）。
+        if self._client is not None and not getattr(self._client, 'dead', False):
+            return self._client
+        return None
+
 
 class NotPairedPool:
     async def get_or_create(self, instance):
         raise NotPaired('pending', 'req-9')
+
+    async def get_live(self, instance):
+        return None
 
 
 async def _access_token(username='alice'):
@@ -697,4 +710,90 @@ async def test_reacquire_pulls_pending_approvals(override_pool, instance, fake_c
     frame = await comm.receive_json_from()
     assert frame == {'type': 'approval', 'id': 'ap-pend', 'kind': 'exec', 'command': 'curl x'}
     await comm.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_reacquire_migrates_all_shared_subscribers(override_pool, instance, fake_client):
+    """codex #219 P2：共享 client 自愈——所有 consumer（不只触发自愈的）迁到 fresh 并收补拉卡。
+
+    A 触发自愈换 client；被动 consumer B 不能滞留死 client——B 的订阅也迁到 fresh，
+    补拉的待审批 fan-out 到 A、B 两端（保住共享 fan-out 契约）。
+    """
+    comm_a = await _connect_authed('alice')
+    await comm_a.connect()
+    await comm_a.send_json_to({'type': 'start', 'container': 'demo'})
+    await comm_a.receive_json_from()  # A ready
+    comm_b = await _connect_authed('bob')
+    await comm_b.connect()
+    await comm_b.send_json_to({'type': 'start', 'container': 'demo'})
+    await comm_b.receive_json_from()  # B ready
+    assert len(fake_client._approval_subscribers) == 2  # A、B 共享旧 client
+
+    fresh = FakeChatClient()
+    fresh.pending = [{'type': 'approval', 'id': 'ap-shared', 'kind': 'exec', 'command': 'curl y'}]
+    override_pool.set_client(fresh)
+    fake_client.dead = True
+
+    async def dead_send(*args, **kwargs):
+        raise ChatSendError('client not connected')
+
+    fake_client.send_message = dead_send
+
+    # A 触发 send → 旧 client dead → 自愈换 fresh
+    await comm_a.send_json_to({'type': 'send', 'sessionKey': 'sk-1', 'message': 'hi'})
+    # 补拉的待审批卡 fan-out：A、B 都收到（不只 A）
+    fa = await comm_a.receive_json_from()
+    fb = await comm_b.receive_json_from()
+    assert fa == {'type': 'approval', 'id': 'ap-shared', 'kind': 'exec', 'command': 'curl y'}
+    assert fb == {'type': 'approval', 'id': 'ap-shared', 'kind': 'exec', 'command': 'curl y'}
+    # 全部订阅者迁到 fresh（旧 client 退空、fresh 有 A+B 两个）
+    assert fake_client._approval_subscribers == []
+    assert len(fresh._approval_subscribers) == 2
+    # B 也能收 fresh 上的新审批（不只 A）
+    await fresh.emit_approval({'type': 'approval', 'id': 'ap-live', 'kind': 'exec', 'command': 'z'})
+    fb2 = await comm_b.receive_json_from()
+    assert fb2['id'] == 'ap-live'
+    await comm_a.disconnect()
+    await asyncio.sleep(0.02)
+    # codex #219 P2 残留泄漏修复：被动 consumer B 断开时经 pool 再解析活 client（fresh）退订——
+    # 不能因缓存的 self._client 仍是死 client 而把 B 的回调泄漏在 fresh 上。
+    await comm_b.disconnect()
+    await asyncio.sleep(0.02)
+    assert len(fresh._approval_subscribers) == 0  # A、B 均从 fresh 退订，无泄漏
+
+
+# ── codex #219 P1③：已发出但 ack 丢失的 send 不盲重试 ────────────────────────
+# 帧已 send、ack 在连接死前丢失（ChatSendTransmittedError）：网关可能已起 run，其事件流
+# 绑在死连接上（runId 连接级，重连不可恢复）。盲重试被幂等去重到同一 runId，但新 route
+# 收不到事件 → 浏览器 pending 永久卡。故 consumer 不重试，发终态 error 解锁前端。
+
+
+@pytest.mark.asyncio
+async def test_send_transmitted_failure_does_not_retry(override_pool, instance, fake_client):
+    """codex #219 P1③：原 send 已发出但 ack 丢失 → 不重取不重试，直接终态 error 帧。"""
+    comm = await _connect_authed()
+    await comm.connect()
+    await comm.send_json_to({'type': 'start', 'container': 'demo'})
+    await comm.receive_json_from()  # ready
+    assert override_pool.created == ['demo']  # start 取一次
+
+    fresh = FakeChatClient()
+    override_pool.set_client(fresh)
+    fake_client.dead = True  # 旧 client 已死
+
+    async def transmitted_send(*args, **kwargs):
+        raise ChatSendTransmittedError('chat.send ack timeout')  # 帧已发出、ack 丢失
+
+    fake_client.send_message = transmitted_send
+
+    await comm.send_json_to({'type': 'send', 'sessionKey': 'sk-1', 'message': '你好'})
+    resp = await comm.receive_json_from()
+    assert resp['type'] == 'error'
+    assert '结果未知' in resp['message']  # 终态 error（解锁前端 pending）
+    # 不重试：fresh 上无 send；不重取：pool 仍只 start 那一次（不盲重试已发出的 send）
+    assert fresh.sent == []
+    assert override_pool.created == ['demo']
+    await comm.disconnect()
+
+
 

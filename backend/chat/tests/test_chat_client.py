@@ -8,7 +8,13 @@ import asyncio
 
 import pytest
 
-from chat.chat_client import ChatClientError, ChatConnectError, ChatSendError, OpenClawChatClient
+from chat.chat_client import (
+    ChatClientError,
+    ChatConnectError,
+    ChatSendError,
+    ChatSendTransmittedError,
+    OpenClawChatClient,
+)
 from chat.device_crypto import DeviceCrypto, DeviceIdentity
 from chat.tests.fakes import FakeChatTransport
 
@@ -411,6 +417,24 @@ async def test_aclose_rejects_pending_send_message():
 
 
 @pytest.mark.asyncio
+async def test_recv_death_after_send_raises_transmitted():
+    """codex #219 P1：帧已发出、等 ack 期间连接死（aclose 触发 _fail_pending_acks）→
+    ChatSendTransmittedError——consumer 据此判不可盲重试（run 事件流已绑死连接）。"""
+    t = FakeChatTransport(suppress_ack=True)  # 不回 ack，send_message 卡在等 ack
+
+    async def on_event(frame):
+        pass
+
+    c = _client(transport=t)
+    await c.connect()
+    task = asyncio.create_task(c.send_message('s', 'm', on_event=on_event))
+    await asyncio.sleep(0.05)  # chat.send 已发出，正在等 ack
+    await c.aclose()  # 连接死 → _fail_pending_acks reject 未决 ack
+    with pytest.raises(ChatSendTransmittedError):
+        await task
+
+
+@pytest.mark.asyncio
 async def test_connect_handshake_timeout_raises_connect_error():
     # 网关升级 WS 后永不回 connect res → _await_res 挂起 → connect_timeout 触发 ChatConnectError
     t = FakeChatTransport(suppress_connect_ack=True)
@@ -432,6 +456,38 @@ async def test_send_message_times_out_when_ack_never_arrives():
     with pytest.raises(ChatSendError):
         await c.send_message('s', 'm', on_event=on_event)
     assert c._pending_acks == {}  # pylint: disable=use-implicit-booleaness-not-comparison
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_send_message_ack_timeout_raises_transmitted():
+    """codex #219 P1：ack 超时（帧已发出）→ ChatSendTransmittedError（consumer 据此不盲重试）。"""
+    t = FakeChatTransport(suppress_ack=True)
+    c = _client(transport=t, ack_timeout=0.1)
+    await c.connect()
+
+    async def on_event(frame):
+        pass
+
+    with pytest.raises(ChatSendTransmittedError):
+        await c.send_message('s', 'm', on_event=on_event)
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_send_message_explicit_reject_is_not_transmitted():
+    """codex #219 P1：网关显式拒绝（ack ok:false）→ 普通 ChatSendError（非 transmitted，可安全重试）。"""
+    t = FakeChatTransport(ack_error={'code': 'RATE_LIMIT', 'message': 'too fast'})
+    c = _client(transport=t)
+    await c.connect()
+
+    async def on_event(frame):
+        pass
+
+    with pytest.raises(ChatSendError) as exc:
+        await c.send_message('s', 'm', on_event=on_event)
+    # 显式拒绝 = 确定未起 run，不是 transmitted 子类
+    assert not isinstance(exc.value, ChatSendTransmittedError)
     await c.aclose()
 
 

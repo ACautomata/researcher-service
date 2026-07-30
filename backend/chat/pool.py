@@ -114,6 +114,26 @@ class ChatConnectionPool:
             await client.aclose()
         self._clients.clear()
 
+    async def get_live(self, instance) -> OpenClawChatClient | None:
+        """非创建式查活：返回该容器当前存活 client，无则 None（codex #219 P2 退订再同步用）。
+
+        与 get_or_create 不同——**不建连、不抛 NotPaired**，只在 pool 里查存活 client。
+        consumer 自愈换 client 后，被动 consumer 缓存的 self._client 可能仍是死 client；
+        disconnect/切容器退订时经此方法从 pool（唯一事实源）再解析活 client，避免退订/丢弃
+        runId 落到死 client 上、把回调泄漏到存活的新 client（T06 独立退订契约）。
+        """
+        try:
+            pairing = await database_sync_to_async(self._pairing.get_status)(instance)
+        except Exception:  # pylint: disable=broad-exception-caught
+            return None
+        if pairing.status != Pairing.STATUS_PAIRED or not pairing.device_token:
+            return None
+        key = (self._ws_url_for(instance), pairing.device_token)
+        client = self._clients.get(key)
+        if client is not None and not client.dead:
+            return client
+        return None
+
     @staticmethod
     def _build_identity(pairing) -> DeviceIdentity | None:
         """从 Pairing 行重建 DeviceIdentity。三要素缺一不可——缺任意一个返回 None
