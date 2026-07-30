@@ -477,7 +477,9 @@ class OpenClawWireAdapter:
 
     # ── send_message ─────────────────────────────────────────────────────────
 
-    async def send_message(self, session_key: str, message: str, on_event: Any) -> str:
+    async def send_message(
+        self, session_key: str, message: str, on_event: Any, *, idempotency_key: str | None = None,
+    ) -> str:
         from chat.chat_client import ChatClientError, ChatSendError
 
         if self._ws is None:
@@ -492,7 +494,8 @@ class OpenClawWireAdapter:
                 'sessionKey': session_key,
                 'message': message,
                 'agentId': 'main',
-                'idempotencyKey': uuid.uuid4().hex,
+                # codex #219 P2：consumer 自愈重试复用同 key（网关幂等去重）；缺省生成新 key
+                'idempotencyKey': idempotency_key or uuid.uuid4().hex,
             },
         }
         try:

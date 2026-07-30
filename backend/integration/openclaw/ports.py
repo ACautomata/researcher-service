@@ -86,10 +86,14 @@ class OpenClawWire(Protocol):
         """
         ...
 
-    async def send_message(self, session_key: str, message: str, on_event: Any) -> str:
+    async def send_message(
+        self, session_key: str, message: str, on_event: Any, *, idempotency_key: str | None = None,
+    ) -> str:
         """发 chat.send → ack(runId) → 事件流回调 on_event；返回 runId。
 
         Falsification: 未 connect 抛 ChatClientError；ack 超时/网关拒绝抛 ChatSendError。
+        ``idempotency_key`` 可选：缺省每次生成新 key；consumer 自愈重试（codex #219 P2）
+        对同一逻辑发送复用同 key，网关按幂等去重避免起两个 run。
         """
         ...
 
