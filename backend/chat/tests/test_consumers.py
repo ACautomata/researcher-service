@@ -1,126 +1,34 @@
 """seam: chat.consumers —— ChatConsumer 集成（issue #41，验收 ①②③）。
 
 WebsocketCommunicator 经 config.asgi.application（含 JwtAuthMiddleware）。ChatFleet.override 注入
-FakePool（FakeChatClient 记录 send_message、可 emit 事件回调）。覆盖：JWT 握手成功、匿名不可达、
-start→ready、未知容器 error、未配对 error、send→流式 text/done、多容器切换。
+FakePool（conftest.py；FakeChatClient 记录 send_message、可 emit 事件回调）。覆盖：JWT 握手成功、
+匿名不可达、start→ready、未知容器 error、未配对 error、send→流式 text/done、多容器切换、审批契约。
+issue #214 自愈 + codex #219 各轮见同 seam 的 test_consumers_self_heal.py（本文件超 pylint C0302 拆分）。
 """
 import asyncio
 
 import pytest
 from channels.db import database_sync_to_async
 from channels.testing import WebsocketCommunicator
-from django.contrib.auth import get_user_model
-from rest_framework_simplejwt.tokens import RefreshToken
 
-from chat.chat_client import ChatConnectError, ChatSendError
-from chat.pool import ChatFleet, NotPaired
+from chat.chat_client import (
+    ChatConnectError,
+    ChatPayloadTooLargeError,
+    ChatSendError,
+)
+from chat.pool import ChatFleet
+from chat.tests.conftest import (
+    FakeChatClient,
+    FakePool,
+    NotPairedPool,
+    _access_token,
+    _connect_authed,
+)
 from config.asgi import application
 from containers.models import Instance
 
-User = get_user_model()
 # channels database_sync_to_async 在独立线程跑 DB；非 transaction 模式下 SQLite 会锁表。
 pytestmark = [pytest.mark.django_db(transaction=True), pytest.mark.asyncio]
-
-
-class FakeChatClient:
-    """记录 send_message 的 client 替身；emit 直接触发注册过的 on_event 回调。"""
-
-    def __init__(self):
-        self.sent = []  # (session_key, message)
-        self._handlers = {}
-        self.discarded = []
-        self.resolved = []  # (approval_id, kind, decision)
-        self.resolve_payload = {}  # resolve_approval 返回的权威 payload
-        self.pending = []  # start 时补拉的待审批卡（codex P2 断线恢复）
-        self._approval_subscribers = []
-
-    async def send_message(self, session_key, message, *, on_event):
-        run_id = f'run-{len(self.sent) + 1}'
-        self.sent.append((session_key, message))
-        self._handlers[run_id] = on_event
-        return run_id
-
-    def discard(self, run_id):
-        self.discarded.append(run_id)
-        self._handlers.pop(run_id, None)
-
-    async def emit(self, frame):
-        cb = self._handlers.get(frame.get('runId'))
-        if cb is not None:
-            await cb(frame)
-
-    # T06：订阅者集合（codex P1）+ 权威 decision 回覆 + start 补拉待审批（codex P2）
-    def add_approval_subscriber(self, cb):
-        if cb not in self._approval_subscribers:
-            self._approval_subscribers.append(cb)
-
-    def remove_approval_subscriber(self, cb):
-        if cb in self._approval_subscribers:
-            self._approval_subscribers.remove(cb)
-
-    async def resolve_approval(self, approval_id, kind, decision):
-        self.resolved.append((approval_id, kind, decision))
-        return self.resolve_payload
-
-    async def broadcast_approval_resolved(self, approval_id, decision):
-        # 与真实 client 一致：fan-out approvalResolved 到全部订阅者（codex R2 P2 副本收敛）
-        await self.emit_approval({'type': 'approvalResolved', 'id': approval_id, 'decision': decision})
-
-    async def list_pending_approvals(self):
-        return list(self.pending)
-
-    async def emit_approval(self, frame):
-        for cb in list(self._approval_subscribers):
-            await cb(frame)
-
-
-class FakePool:
-    def __init__(self, client):
-        self._client = client
-        self.created = []
-
-    async def get_or_create(self, instance):
-        self.created.append(instance.name)
-        return self._client
-
-
-class NotPairedPool:
-    async def get_or_create(self, instance):
-        raise NotPaired('pending', 'req-9')
-
-
-async def _access_token(username='alice'):
-    user = await database_sync_to_async(User.objects.create_user)(
-        username=username, password='strong-pass-1')
-    return str(RefreshToken.for_user(user).access_token)
-
-
-async def _connect_authed(username='alice'):
-    token = await _access_token(username)
-    return WebsocketCommunicator(
-        application, '/ws/chat/', subprotocols=['access_token', token])
-
-
-@pytest.fixture
-def fake_client():
-    return FakeChatClient()
-
-
-@pytest.fixture
-def override_pool(fake_client):
-    pool = FakePool(fake_client)
-    ChatFleet.override(pool)
-    yield pool
-    ChatFleet.reset()
-
-
-@pytest.fixture
-def instance():
-    return Instance.objects.create(
-        name='demo', port=19000, token='gw', home_dir='/tmp/x',
-        status=Instance.STATUS_RUNNING, image='img:tag',
-    )
-
 
 @pytest.mark.asyncio
 async def test_jwt_handshake_accepted_for_authenticated_user(instance):
@@ -228,7 +136,8 @@ async def test_multi_container_switch(override_pool, instance):
 
 @pytest.mark.asyncio
 async def test_send_failure_sends_error_frame_not_crash(override_pool, instance, fake_client):
-    """chat.send 被网关拒（ChatSendError）→ 发 error 帧，不传播导致 WS 关闭。"""
+    """chat.send 被网关拒（普通 ChatSendError，非超限）→ 走通用「发送失败」，不透传英文技术文案
+    （codex review / #216：spec 只要求把超限这一种映射为可理解错误，其他 ChatSendError 不 scope-creep）。"""
 
     async def fail_send(*args, **kwargs):
         raise ChatSendError('rate limit')
@@ -240,7 +149,30 @@ async def test_send_failure_sends_error_frame_not_crash(override_pool, instance,
     await comm.receive_json_from()  # ready
     await comm.send_json_to({'type': 'send', 'sessionKey': 'sk', 'message': 'hi'})
     resp = await comm.receive_json_from()
+    assert resp == {'type': 'error', 'message': '发送失败，请稍后重试'}  # 非超限不透传 'rate limit'
+    await comm.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_send_oversized_shows_clear_message_not_generic(override_pool, instance, fake_client):
+    """#196 T5 / #216：send_message 帧大小预检超限（ChatPayloadTooLargeError，带明确文案）→ 前端看到
+    「消息超过网关帧大小上限…请分段发送」而非笼统「发送失败，请稍后重试」（区别于真连接断开）。
+    本地预检拒绝、连接未断——不应让用户误以为容器掉线。"""
+
+    async def oversized_send(*args, **kwargs):
+        raise ChatPayloadTooLargeError('消息超过网关帧大小上限 25 MB，请分段发送')
+
+    fake_client.send_message = oversized_send
+    comm = await _connect_authed()
+    await comm.connect()
+    await comm.send_json_to({'type': 'start', 'container': 'demo'})
+    await comm.receive_json_from()  # ready
+    await comm.send_json_to({'type': 'send', 'sessionKey': 'sk', 'message': 'x' * 1000})
+    resp = await comm.receive_json_from()
     assert resp['type'] == 'error'
+    assert '帧大小上限' in resp['message']
+    assert '分段发送' in resp['message']
+    assert '容器连接断开' not in resp['message']
     await comm.disconnect()
 
 

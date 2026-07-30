@@ -199,6 +199,8 @@ class _DeadAwareClient:
         self.dead = False
         self.connect_calls = 0
         self.closed = False
+        # codex #219 十六轮 P2-219：审批订阅者集合（aclose 不清空，供替换路径迁移）。
+        self._approval_subscribers = []
 
     async def connect(self):
         self.connect_calls += 1
@@ -208,6 +210,18 @@ class _DeadAwareClient:
 
     def discard(self, run_id):
         pass
+
+    # 订阅者访问器（对齐真实 client：add 幂等、remove 只删自己、subscribers 返回副本）
+    def add_approval_subscriber(self, cb):
+        if cb not in self._approval_subscribers:
+            self._approval_subscribers.append(cb)
+
+    def remove_approval_subscriber(self, cb):
+        if cb in self._approval_subscribers:
+            self._approval_subscribers.remove(cb)
+
+    def approval_subscribers(self):
+        return list(self._approval_subscribers)
 
 
 @pytest.mark.asyncio
@@ -227,6 +241,220 @@ async def test_dead_client_is_evicted_and_recreated():
     assert c2.connect_calls == 1
     assert not c2.dead
     assert c1.closed  # 旧死连接 best-effort aclose 清理
+
+
+@pytest.mark.asyncio
+async def test_get_or_create_migrates_subscribers_from_evicted_dead_client():
+    """codex #219 十六轮 P2-219：get_or_create 驱逐死 client 重建时，把其审批订阅者迁到新 client——
+    reacquire connect 失败放回缓存的被关 client 若被 get_or_create（REST/另一浏览器 start）替换，
+    订阅者不丢在被关对象上。"""
+    pool = ChatConnectionPool(
+        pairing_service=FakePairingService(),
+        client_factory=_DeadAwareClient,
+        ws_url_for=_url_for,
+    )
+    inst = _instance('a', 19001)
+    c1 = await pool.get_or_create(inst)
+    cb1, cb2 = object(), object()
+    c1.add_approval_subscriber(cb1)
+    c1.add_approval_subscriber(cb2)
+    c1.dead = True  # 模拟被 reacquire 放回缓存的被关 client（dead，订阅者仍挂其上）
+
+    c2 = await pool.get_or_create(inst)  # 驱逐 c1、重建 c2
+    assert c2 is not c1
+    assert c1.closed
+    assert c1.approval_subscribers() == []  # 从被关 client 迁出
+    assert c2.approval_subscribers() == [cb1, cb2]  # …落到新 client（保序）
+
+
+# ── codex #219 四轮 P2-891：evidence 证明死但 dead 未置位时的驱逐 ────────────
+# RPC 在刚关闭的 socket 上 ws.send() 抛原生 ConnectionClosed（连接已断的充分证据），但
+# 后台 recv task 尚未跑异常处理器置 client.dead——竞态窗口。此时 get_or_create 快路径
+# （pool.py:80-82）只看 dead==False，会返回同一个濒死 client，consumer 的 identity check
+# 放弃恢复。须先 evict 把该 client 逐出缓存，再 get_or_create 才走慢路径重建。
+
+
+@pytest.mark.asyncio
+async def test_evict_removes_live_client_so_get_or_create_recreates():
+    """codex #219 四轮 P2-891：evict 把 dead 未置位的 client 逐出缓存，get_or_create 重建新 client。"""
+    pool = ChatConnectionPool(
+        pairing_service=FakePairingService(),
+        client_factory=_DeadAwareClient,
+        ws_url_for=_url_for,
+    )
+    inst = _instance('a', 19001)
+    c1 = await pool.get_or_create(inst)
+    assert c1.connect_calls == 1
+    assert c1.dead is False  # 竞态：dead 未置位（ConnectionClosed 先于 recv task 异常处理器）
+
+    await pool.evict(inst)  # evidence 证明已死 → 逐出缓存
+    assert c1.closed  # best-effort aclose 清理（对齐死连接驱逐语义）
+
+    c2 = await pool.get_or_create(inst)
+    assert c2 is not c1  # 不再是同一个濒死 client
+    assert c2.connect_calls == 1
+    assert not c2.dead
+
+
+@pytest.mark.asyncio
+async def test_evict_without_cached_client_is_noop():
+    """evict 幂等：pool 无该容器缓存 client 时不抛错、不建连。"""
+    pool = ChatConnectionPool(
+        pairing_service=FakePairingService(),
+        client_factory=_DeadAwareClient,
+        ws_url_for=_url_for,
+    )
+    inst = _instance('a', 19001)
+    await pool.evict(inst)  # 无缓存 → noop，不抛
+    # get_or_create 正常建连（确认 evict 未破坏状态）
+    c = await pool.get_or_create(inst)
+    assert c.connect_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_evict_unpaired_is_noop():
+    """evict 未配对容器：get_status 非 paired → 找不到 key，noop 不抛。"""
+    pool = ChatConnectionPool(
+        pairing_service=FakePairingService(status='pending', device_token=''),
+        client_factory=_DeadAwareClient,
+        ws_url_for=_url_for,
+    )
+    await pool.evict(_instance('a', 19001))  # 未配对 → noop，不抛 NotPaired
+
+
+# ── codex #219 六轮 P1-872：reacquire 把比较+驱逐+重建收敛进一把锁（消 TOCTOU）────────
+# consumer 原 get_live→evict→get_or_create 三步非原子：两 consumer 并发自愈同一死 client 时
+# 都见无 live，A 在 B 检查与 evict 间装好健康连接，B 又把它 evict+aclose（中断 A 路由 + 订阅者
+# 滞留死 client）。reacquire(instance, expected_client) 在 per-key 锁内一次性完成「比较缓存项
+# → 采纳/驱逐 → 重建」，比较与替换原子，消除跨 consumer 的 TOCTOU。
+
+
+@pytest.mark.asyncio
+async def test_reacquire_evicts_expected_dead_and_recreates():
+    """缓存项就是 expected_client（自己持有的死 client）→ 驱逐并重建新 client。"""
+    pool = ChatConnectionPool(
+        pairing_service=FakePairingService(),
+        client_factory=_DeadAwareClient,
+        ws_url_for=_url_for,
+    )
+    inst = _instance('a', 19001)
+    c1 = await pool.get_or_create(inst)
+    c1.dead = True  # 本 consumer 持有的死 client
+
+    c2, replaced = await pool.reacquire(inst, c1)
+    assert c2 is not c1
+    assert not c2.dead
+    assert replaced is c1  # codex #219 十四轮 P2-183：返回被驱逐的旧死 client（供迁订阅者）
+    assert c1.closed  # 旧死 client best-effort aclose
+    # 再 get_or_create 命中刚重建的健康 client（复用）
+    assert await pool.get_or_create(inst) is c2
+
+
+@pytest.mark.asyncio
+async def test_reacquire_adopts_live_replacement_installed_by_peer():
+    """codex #219 六轮 P1-872：缓存项已被别的 consumer 换成健康新连接（≠expected_client）→ 采纳，
+    不驱逐不重建（绝不误关别人建好的连接）。"""
+    pool = ChatConnectionPool(
+        pairing_service=FakePairingService(),
+        client_factory=_DeadAwareClient,
+        ws_url_for=_url_for,
+    )
+    inst = _instance('a', 19001)
+    stale = await pool.get_or_create(inst)
+    stale.dead = True  # 本 consumer 持有的旧死 client
+
+    # 别的 consumer 已先自愈：驱逐并装好健康新连接（模拟 peer 在锁内完成替换）
+    peer_fresh, peer_replaced = await pool.reacquire(inst, stale)
+    assert peer_fresh is not stale and not peer_fresh.dead
+    assert peer_replaced is stale  # 首次驱逐的是 stale
+    stale_closed_before = stale.closed
+
+    # 本 consumer 后到：缓存项已是 peer 换好的健康连接（≠ 自己持有的 stale）→ 直接采纳
+    adopted, adopt_replaced = await pool.reacquire(inst, stale)
+    assert adopted is peer_fresh  # 采纳 peer 的健康连接
+    assert adopt_replaced is None  # codex #219 十四轮 P2-183：采纳无驱逐 → replaced=None
+    assert not peer_fresh.closed  # 不误关 peer 的连接
+    assert stale.closed == stale_closed_before  # stale 已被 peer 关过，不重复关
+
+
+@pytest.mark.asyncio
+async def test_reacquire_concurrent_same_dead_client_single_recreate():
+    """codex #219 六轮 P1-872：两 consumer 并发 reacquire 同一死 client——per-key 锁串行化，
+    只重建一次，两者都拿到同一健康新连接（无互相 evict 对方成果）。"""
+    pool = ChatConnectionPool(
+        pairing_service=FakePairingService(),
+        client_factory=_DeadAwareClient,
+        ws_url_for=_url_for,
+    )
+    inst = _instance('a', 19001)
+    dead_client = await pool.get_or_create(inst)
+    dead_client.dead = True
+
+    # 两个 consumer 都持有同一 dead_client，并发自愈
+    (r1, rep1), (r2, rep2) = await asyncio.gather(
+        pool.reacquire(inst, dead_client),
+        pool.reacquire(inst, dead_client),
+    )
+    assert r1 is r2  # 都拿到同一健康新连接（第二个采纳第一个的重建成果）
+    assert r1 is not dead_client
+    assert not r1.dead
+    # codex #219 十四轮 P2-183：恰好一个驱逐（replaced=dead_client），另一个采纳（replaced=None）
+    assert (rep1 is dead_client) != (rep2 is dead_client)
+    assert r1.connect_calls == 1  # 只重建一次（不重复建连）
+    assert dead_client.closed  # 死 client 被清理一次
+
+
+@pytest.mark.asyncio
+async def test_reacquire_connect_failure_restores_replaced_for_retry():
+    """codex #219 十五轮 P2-208：重建 connect 失败时把 replaced 放回缓存——下次 reacquire
+    仍能从缓存取到它作迁移源（不丢真实订阅者），不致因缓存已空而 replaced=None。"""
+    fail_connect = {'on': False}  # 初始建连须成功；建出 stale 后才开故障
+
+    class FlakyClient:
+        """connect 可控失败的 client 替身（组合自 _DeadAwareClient 语义，不继承）。"""
+
+        def __init__(self, url, device_token, *, identity, scopes):
+            self.url = url
+            self.device_token = device_token
+            self.identity = identity
+            self.scopes = scopes
+            self.dead = False
+            self.connect_calls = 0
+            self.closed = False
+
+        async def connect(self):
+            self.connect_calls += 1
+            if fail_connect['on']:
+                raise ConnectionError('handshake refused')
+
+        async def aclose(self):
+            self.closed = True
+
+        def discard(self, run_id):
+            pass
+
+    pool = ChatConnectionPool(
+        pairing_service=FakePairingService(),
+        client_factory=FlakyClient,
+        ws_url_for=_url_for,
+    )
+    inst = _instance('a', 19001)
+    stale = await pool.get_or_create(inst)
+    stale.dead = True
+
+    # 第一次 reacquire：驱逐 stale（replaced），但重建 connect 失败 → 抛错且 stale 放回缓存
+    fail_connect['on'] = True
+    with pytest.raises(ConnectionError):
+        await pool.reacquire(inst, stale)
+    assert stale.closed  # 已被 best-effort aclose
+    # replaced（stale）已放回缓存：get_live 不返回（stale.dead），但缓存放行在 reacquire 内可见
+    fail_connect['on'] = False
+
+    # 第二次 reacquire：缓存里的 stale 仍是 expected_client → 再走驱逐路径（replaced=stale）重建成功
+    fresh, replaced = await pool.reacquire(inst, stale)
+    assert fresh is not stale and not fresh.dead
+    assert replaced is stale  # 关键：仍能从缓存取到实际被替换的 stale 作迁移源（非 None）
+    assert await pool.get_or_create(inst) is fresh  # 缓存指向新健康 client
 
 
 # ── per-key 锁隔离 ─────────────────────────────────────────

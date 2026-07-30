@@ -196,8 +196,24 @@ class ChatConnectionPool:
                     pass
                 raise ConnectionError('pool evicted during connect; credentials superseded')
             self._clients[key] = new_client
+            if client is not None:  # codex #219 十六轮 P2-219：把被替换死 client 的订阅者迁到新 client
+                self._migrate_subscribers(client, new_client)
             self._reschedule_if_dead(key, new_client)  # codex #221 P1：插入前死亡的补调度
             return new_client
+
+    @staticmethod
+    def _migrate_subscribers(old_client, new_client) -> None:
+        """把 old_client 的全部审批订阅者迁到 new_client（old 退订、new 幂等注册）。
+
+        codex #219 十六轮 P2-219：reacquire 重建失败会把已关闭的 client 放回缓存作迁移源；
+        若下次替换它的是 get_or_create（REST / 另一浏览器 start）而非 reacquire，原实现直接
+        丢弃被关 client、不迁订阅者——已连接浏览器仍订阅在被关对象上、错过新审批。故
+        get_or_create 驱逐死 client 时也迁（aclose 不清订阅者，仍挂其上可迁）。同步无 await，
+        单事件循环内对订阅者列表原子，无跨协程竞态。
+        """
+        for cb in old_client.approval_subscribers():
+            old_client.remove_approval_subscriber(cb)
+            new_client.add_approval_subscriber(cb)
 
     def _make_client(self, key, url, device_token, identity, scopes):
         """经 client_factory 建 client，best-effort 注入 on_dead 回调（#215 触发主动重连）。
@@ -354,6 +370,113 @@ class ChatConnectionPool:
         调用方（REST 层）无需关心 key 构造。委托 evict_url。
         """
         await self.evict_url(self._ws_url_for(instance))
+
+    async def get_live(self, instance) -> OpenClawChatClient | None:
+        """非创建式查活：返回该容器当前存活 client，无则 None（codex #219 P2 退订再同步用）。
+
+        与 get_or_create 不同——**不建连、不抛 NotPaired**，只在 pool 里查存活 client。
+        consumer 自愈换 client 后，被动 consumer 缓存的 self._client 可能仍是死 client；
+        disconnect/切容器退订时经此方法从 pool（唯一事实源）再解析活 client，避免退订/丢弃
+        runId 落到死 client 上、把回调泄漏到存活的新 client（T06 独立退订契约）。
+        """
+        try:
+            pairing = await database_sync_to_async(self._pairing.get_status)(instance)
+        except Exception:  # pylint: disable=broad-exception-caught
+            return None
+        if pairing.status != Pairing.STATUS_PAIRED or not pairing.device_token:
+            return None
+        key = (self._ws_url_for(instance), pairing.device_token)
+        client = self._clients.get(key)
+        if client is not None and not client.dead:
+            return client
+        return None
+
+    async def evict(self, instance) -> None:
+        """把该容器当前缓存的 client 逐出池（best-effort aclose 清理），下次 get_or_create 重建。
+
+        codex #219 四轮 P2-891：consumer 的 RPC 在刚关闭的 socket 上 ws.send() 抛原生
+        ConnectionClosed——连接已断的充分证据，但后台 recv task 尚未跑异常处理器置
+        client.dead（竞态窗口）。get_or_create 快路径（pool.py:80-82）只看 dead==False，
+        会返回同一个濒死 client，consumer 的 identity check（fresh is client）据此放弃恢复。
+        故 consumer 重取前先 evict 把该 client 逐出缓存，get_or_create 才走慢路径重建新 client。
+        幂等：无缓存 / 未配对（查不到 key）时 noop 不抛。
+        """
+        pairing = await database_sync_to_async(self._pairing.get_status)(instance)
+        if pairing.status != Pairing.STATUS_PAIRED or not pairing.device_token:
+            return
+        key = (self._ws_url_for(instance), pairing.device_token)
+        async with self._key_lock(key):  # 与 get_or_create 慢路径同锁，避免竞态重复建连
+            client = self._clients.pop(key, None)
+        if client is not None:
+            try:
+                await client.aclose()
+            except Exception:  # pylint: disable=broad-exception-caught
+                pass
+
+    async def reacquire(self, instance, expected_client) -> tuple[OpenClawChatClient, OpenClawChatClient | None]:
+        """consumer 自愈用的原子重取：在 per-key 锁内「比较缓存项 → 采纳/驱逐 → 重建」一次完成。
+
+        codex #219 六轮 P1-872：consumer 原 get_live→evict→get_or_create 三步非原子——两
+        consumer 并发自愈同一死 client 时都在 get_live 见无活连接，A 在 B 检查与 evict 间装好
+        健康连接，B 又把它 evict+aclose（中断 A 路由、订阅者滞留死 client）。本方法把比较与
+        替换收敛进同一把 `_key_lock`，消除跨 consumer 的 TOCTOU。语义（锁内判定）：
+        - 缓存项**健康且非** expected_client（别的 consumer 已换好）→ 直接采纳返回，不驱逐不重建；
+        - 缓存项**就是** expected_client（本 consumer 持有的死/濒死 client）→ 驱逐后重建；
+        - 缓存项缺失（已被驱逐）→ 直接重建。
+        未配对/配对材料不完整仍抛 NotPaired（与 get_or_create 一致）。
+
+        返回 `(fresh, replaced)` 二元组（codex #219 十四轮 P2-183）：`fresh` 是采纳/重建后应使用的
+        client；`replaced` 是本调用在锁内**实际驱逐**的缓存 client（无驱逐则 None）。consumer 须从
+        `replaced`（而非自己持有的 expected_client）迁移审批订阅者——被动 consumer 持有的
+        expected_client 可能已是更早的空壳代际，而 pool 缓存里实际被替换的才是当前挂着全部
+        订阅者的那一代；从 expected_client 迁会把真实订阅者丢在被关掉的 `replaced` 上。
+        重建 `connect()` 失败时把 `replaced` 放回缓存再抛（codex #219 十五轮 P2-208），下次
+        reacquire 仍能从缓存取到它作迁移源，不致因缓存已空而回退到空壳 expected_client。
+        """
+        pairing = await database_sync_to_async(self._pairing.get_status)(instance)
+        if pairing.status != Pairing.STATUS_PAIRED or not pairing.device_token:
+            raise NotPaired(pairing.status, pairing.pairing_request_id)
+        url = self._ws_url_for(instance)
+        key = (url, pairing.device_token)
+        async with self._key_lock(key):
+            cached = self._clients.get(key)
+            # 采纳：别的 consumer 已在锁内换好健康连接（非本 consumer 持有的 expected_client）。
+            # 无驱逐发生 → replaced=None（订阅者已在 peer 那代被迁走，见 adopt 调用方）。
+            if cached is not None and not cached.dead and cached is not expected_client:
+                return cached, None
+            replaced = None
+            if cached is not None:  # 自己持有的死/濒死 client（或健康但==expected，防御）：驱逐
+                replaced = cached
+                try:
+                    await cached.aclose()
+                except Exception:  # pylint: disable=broad-exception-caught
+                    pass
+                self._clients.pop(key, None)
+            # 重建（复用 get_or_create 慢路径同款配对材料校验，防 identity/scopes 损坏）
+            identity = self._build_identity(pairing)
+            scopes = self._pairing_scopes(pairing)
+            if pairing.status == Pairing.STATUS_PAIRED and identity is None:
+                raise NotPaired(pairing.status, pairing.pairing_request_id)
+            if identity is not None and not scopes:
+                raise NotPaired(pairing.status, pairing.pairing_request_id)
+            if identity is not None and not REQUIRED_SCOPES.issubset(set(scopes)):
+                raise NotPaired(pairing.status, pairing.pairing_request_id)
+            new_client = self._client_factory(
+                url, pairing.device_token, identity=identity, scopes=scopes,
+            )
+            try:
+                await new_client.connect()  # 握手有界（chat_client.connect_timeout）
+            except Exception:
+                # codex #219 十五轮 P2-208：connect 失败时 replaced 已被 pop+aclose，若就此抛错，
+                # 下次 reacquire 见空缓存 → replaced=None → consumer 回退到空壳 expected_client 迁
+                # 订阅者，把仍挂在 replaced 上的真实订阅者丢在被关掉的 client 上。故把 replaced 放回
+                # 缓存（best-effort）：下次 reacquire 从缓存取到它作迁移源（届时再走 189-195 驱逐
+                # 路径，幂等——aclose 已 _routes.clear() 可重复、pop 再删一次无碍）。
+                if replaced is not None and self._clients.get(key) is None:
+                    self._clients[key] = replaced
+                raise
+            self._clients[key] = new_client
+            return new_client, replaced
 
     @staticmethod
     def _build_identity(pairing) -> DeviceIdentity | None:

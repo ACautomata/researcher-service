@@ -96,6 +96,7 @@ class GenClient:
         self._index = index
         self.dead = False
         self.closed = False
+        self._approval_subs = []
 
     async def connect(self):
         self._index[0] += 1
@@ -110,6 +111,18 @@ class GenClient:
 
     def discard(self, run_id):
         pass
+
+    # codex #219 接缝：get_or_create 合并后调 _migrate_subscribers → 需订阅者 API
+    def approval_subscribers(self):
+        return list(self._approval_subs)
+
+    def add_approval_subscriber(self, cb):
+        if cb not in self._approval_subs:
+            self._approval_subs.append(cb)
+
+    def remove_approval_subscriber(self, cb):
+        if cb in self._approval_subs:
+            self._approval_subs.remove(cb)
 
 
 @pytest.mark.asyncio

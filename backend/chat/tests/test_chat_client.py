@@ -1,3 +1,4 @@
+# pylint: disable=too-many-lines
 """seam: chat.chat_client —— OpenClaw 长连接对话客户端（issue #41 / spec §8.2）。
 
 chat.send + runId 路由：发 chat.send → ack(runId) → chat 事件按 runId 经 translator 翻译回调 on_event。
@@ -8,7 +9,14 @@ import asyncio
 
 import pytest
 
-from chat.chat_client import ChatClientError, ChatConnectError, ChatSendError, OpenClawChatClient
+from chat.chat_client import (
+    ChatClientError,
+    ChatConnectError,
+    ChatPayloadTooLargeError,
+    ChatSendError,
+    GatewayPolicy,
+    OpenClawChatClient,
+)
 from chat.device_crypto import DeviceCrypto, DeviceIdentity
 from chat.tests.fakes import FakeChatTransport
 
@@ -389,7 +397,7 @@ async def test_aclose_rejects_pending_send_message():
     await c.connect()
     task = asyncio.create_task(c.send_message('s', 'm', on_event=on_event))
     await asyncio.sleep(0.05)  # send_message 已发 chat.send，在等 ack
-    await c.aclose()
+    await c.aclose()  # 连接死 → _fail_pending_acks reject 未决 ack
     with pytest.raises(ChatClientError):
         await task
 
@@ -582,6 +590,26 @@ async def test_resolve_approval_timeout_raises():
     await c.connect()
     with pytest.raises(ChatSendError):
         await c.resolve_approval('ap-1', 'exec', 'approve')
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_approval_and_rpc_rejected_when_dead():
+    """codex #219 十一轮 P2-319：dead 置位（closing/recv 死）期间 resolve_approval / _rpc 入口拒发。
+
+    closing 死窗口内（_notify_all_error 快照后 await 回调、_ws 未置 None）若仍放行，新 RPC 的
+    future 注册后网关或已接受审批，但 ack/resolved 事件随死连接丢失 → 超时把已执行的卡误复位
+    pending。dead（_dead or _closed）置位即抛 ChatClientError，consumer 走 dead 重取。
+    """
+    t = FakeChatTransport()
+    c = _client(transport=t)
+    await c.connect()
+    c._dead = True  # pylint: disable=protected-access  # closing/recv 死已置位
+
+    with pytest.raises(ChatClientError):
+        await c.resolve_approval('ap-1', 'exec', 'allow-once')
+    with pytest.raises(ChatClientError):
+        await c.list_sessions()  # 经 _rpc
     await c.aclose()
 
 
@@ -972,4 +1000,99 @@ async def test_silence_watchdog_marks_dead_and_rejects_pending_after_two_ticks()
     assert t._close_code == 4000  # 按契约 close code 4000 语义关闭套接字
     with pytest.raises(ChatClientError):  # 挂起 ack 被拒（不重放被拒请求）
         await send
+    await c.aclose()
+
+
+# ---- #196 T5 / #216：send_message 帧大小预检（maxPayload 发送侧自律）----
+
+
+@pytest.mark.asyncio
+async def test_send_message_oversized_frame_rejected_locally():
+    """#196 问题4 / #216：send_message 序列化帧后按 policy.maxPayload 预检——超限本地抛
+    ChatSendError（明确文案「消息超过网关帧大小上限 N MB，请分段发送」），不发出该帧、连接不断。
+    原无预检：超长粘贴触发网关按协议断连，用户看到莫名「容器连接断开」，还连累同连接其他在途 run。"""
+    # maxPayload 极小（200B）：正常 chat.send 帧（含 connect 帧/签名块）序列化后即超 → 必触发预检。
+    t = FakeChatTransport(connect_policy={'tickIntervalMs': 30_000, 'maxPayload': 200})
+
+    async def on_event(frame):
+        pass
+
+    c = _client(transport=t)
+    await c.connect()
+    with pytest.raises(ChatPayloadTooLargeError) as exc:
+        await c.send_message('s', 'x' * 1000, on_event=on_event)
+    assert '帧大小上限' in str(exc.value)
+    assert '分段发送' in str(exc.value)
+    # 本地拒绝：未发出任何 chat.send 帧（网关完全无感知）
+    assert not any(f.get('method') == 'chat.send' for f in t.sent)
+    assert c.dead is False  # 连接未断（预检不触发网关断连）
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_send_message_oversized_does_not_leak_pending_ack():
+    """#216：超限本地拒绝后 _pending_acks 无泄漏——预检在 _ws.send 之前，须先移除已注册的 pending
+    ack（否则本地拒绝、永不发帧也永无回执，future 悬挂泄漏；且会误吞同连接后续 ack）。"""
+    t = FakeChatTransport(connect_policy={'tickIntervalMs': 30_000, 'maxPayload': 200})
+
+    async def on_event(frame):
+        pass
+
+    c = _client(transport=t)
+    await c.connect()
+    with pytest.raises(ChatPayloadTooLargeError):
+        await c.send_message('s', 'x' * 1000, on_event=on_event)
+    assert not c._pending_acks  # pylint: disable=protected-access  # 无泄漏：pending ack 已 pop
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_send_message_oversized_does_not_affect_inflight_run():
+    """#216 验收：超限消息本地被拒、同连接其他在途 run 不受影响。先发一条正常消息建立 run
+    （增大 maxPayload 让其通过），再发超限消息（被本地拒），正常 run 的 ack / 事件路由不受影响。"""
+    # maxPayload 足够大：正常帧通过。connect 后先行第一条正常 chat.send。
+    t = FakeChatTransport(connect_policy={'tickIntervalMs': 30_000, 'maxPayload': 26214400})
+    received = []
+
+    async def on_event(frame):
+        received.append(frame)
+
+    c = _client(transport=t)
+    await c.connect()
+    run_id = await c.send_message('s', 'hello', on_event=on_event)
+    assert run_id == 'r1'  # 正常 run 已建立
+    # 同连接上发超限消息：临时收紧 policy 模拟另一条超限（>25MB 实操难凑，收紧 policy 等价触发预检）。
+    c._policy = GatewayPolicy(  # pylint: disable=protected-access
+        tick_interval_ms=30_000, max_payload_bytes=200, max_buffered_bytes=None)
+    with pytest.raises(ChatPayloadTooLargeError):
+        await c.send_message('s', 'x' * 1000, on_event=on_event)
+    assert c.dead is False  # 超限未断连
+    # 正常 run 的后续事件仍按 runId 路由（在途 run 不受超限消息影响）
+    t.push({'type': 'event', 'event': 'chat',
+            'payload': {'runId': 'r1', 'state': 'delta', 'deltaText': '世界'}})
+    t.push({'type': 'event', 'event': 'chat', 'payload': {'runId': 'r1', 'state': 'final'}})
+    await asyncio.sleep(0.1)
+    assert received == [
+        {'type': 'text', 'runId': 'r1', 'delta': '世界'},
+        {'type': 'done', 'runId': 'r1'},
+    ]
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_send_message_sends_text_frame_not_binary():
+    """codex #220 P1：websockets.send(bytes) 发二进制帧——OpenClaw 协议 chat.send 与其他 RPC 一致
+    走 JSON 文本帧。maxPayload 预检需 frame_bytes 仅供测量；send() 必须传原始序列化 str（文本帧），
+    否则强制文本帧协议的网关会在 ack 到达前拒绝/断连每个本应合法的 chat.send。"""
+    t = FakeChatTransport(ack_run_id='r1')
+
+    async def on_event(frame):
+        pass
+
+    c = _client(transport=t)
+    await c.connect()
+    await c.send_message('s', '你好', on_event=on_event)
+    # 找到 chat.send 那次 send 的原始类型：必须是 str（文本帧），不能是 bytes（二进制帧）
+    idx = next(i for i, f in enumerate(t.sent) if f.get('method') == 'chat.send')
+    assert t.sent_types[idx] is str
     await c.aclose()

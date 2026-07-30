@@ -86,10 +86,14 @@ class OpenClawWire(Protocol):
         """
         ...
 
-    async def send_message(self, session_key: str, message: str, on_event: Any) -> str:
+    async def send_message(
+        self, session_key: str, message: str, on_event: Any, *, idempotency_key: str | None = None,
+    ) -> str:
         """发 chat.send → ack(runId) → 事件流回调 on_event；返回 runId。
 
         Falsification: 未 connect 抛 ChatClientError；ack 超时/网关拒绝抛 ChatSendError。
+        ``idempotency_key`` 可选：缺省每次生成新 key；consumer 自愈重试（codex #219 P2）
+        对同一逻辑发送复用同 key，网关按幂等去重避免起两个 run。
         """
         ...
 
@@ -109,6 +113,15 @@ class OpenClawWire(Protocol):
 
     def remove_approval_subscriber(self, cb: Any) -> None:
         """退订指定审批订阅者。"""
+        ...
+
+    def approval_subscribers(self) -> list:
+        """返回当前全部审批订阅者的副本（codex #219 P2：共享 client 自愈迁移用）。
+
+        consumer 自愈换 client 时须把所有订阅者（不止触发自愈的那个 consumer）迁到新
+        client，否则被动 consumer 滞留死 client、错过新连接上的审批。Port/Fake/Adapter
+        三处同构（同 send_message idempotency_key 的 Liskov 对齐）。
+        """
         ...
 
     async def broadcast_approval_resolved(self, approval_id: str, decision: str) -> None:
