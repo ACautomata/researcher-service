@@ -12,6 +12,7 @@ logout 分支能从干净态精确触发的前提（#178 user story 10）。
 ``playwright install chromium`` + frontend ``npm ci``（vite dev server 依赖）。
 """
 import os
+import shutil
 import signal
 import socket
 import subprocess
@@ -27,6 +28,226 @@ _VITE_POLL_INTERVAL = 0.5
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]   # backend/
 FRONTEND_DIR = BACKEND_DIR.parent / 'frontend'
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 环境 setup/teardown（issue #257 follow-up）：把「装 Playwright / frontend npm ci」这类
+# fixture-bootstrap 依赖的检测+可选自动准备，以及「session 结束清掉残留 fleet 容器/孤儿进程」
+# 的 teardown 收进 pytest fixture 生命周期（yield 配对），而非外置脚本——环境没备好给出
+# 可操作失败，跑完留残（容器占端口池、vite/daphne 孤儿、test DB 文件）由 teardown 兜底。
+#
+# 与 case 级 skipif 门控（_docker_daemon_reachable / _pairing_env_ready）分工：
+#   - bootstrap 依赖（playwright 客户端 / chromium / vite 的 node_modules）是「只要跑
+#     本目录任何 case 就必须有」的 fixture 前提 → 这里 session 级 fail-fast 断言。
+#   - docker daemon / LLM_API_KEY / OPENCLAW_TEMPLATE_DIR 是「只有真起容器的 case 才要」
+#     的运行期前提 → 仍由各 case 的 skipif 优雅跳过，不在此断言。
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def pytest_addoption(parser):
+    """注册 ``--integration-setup``：opt-in 让 bootstrap fixture 自动补齐缺失依赖。
+
+    默认只检测、不安装（不替用户环境做写操作）；显式加该 flag 才执行 npm ci /
+    playwright install chromium 等准备动作（CI 已显式装过，无需此 flag）。
+    """
+    parser.addoption(
+        '--integration-setup',
+        action='store_true',
+        default=False,
+        help='自动准备联调集成测试缺失的 bootstrap 依赖（frontend npm ci / '
+             'playwright install chromium）。默认仅检测并给出可操作提示。',
+    )
+
+
+def _chromium_installed() -> bool:
+    """探测 Playwright chromium 浏览器二进制是否已拉取（不启动浏览器）。
+
+    用 sync_playwright 的 executable_path 指向缓存路径判断存在性，避免真 launch。
+    任何异常（playwright 未装 / 路径解析失败）一律按「未就绪」处理，交给 bootstrap 报错。
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as pw:
+            return Path(pw.chromium.executable_path).exists()
+    except Exception:  # pylint: disable=broad-exception-caught
+        return False
+
+
+def _integration_bootstrap_gaps() -> list[str]:
+    """返回缺失的 bootstrap 依赖描述（空 = 全就绪）。仅在跑本目录 case 时被调一次。"""
+    gaps = []
+    try:
+        import playwright  # noqa: F401
+    except ImportError:
+        gaps.append('playwright Python 客户端未装')
+    else:
+        if not _chromium_installed():
+            gaps.append('playwright chromium 浏览器未拉取')
+    if not (FRONTEND_DIR / 'node_modules' / '.bin' / 'vite').exists():
+        gaps.append('frontend 依赖未装（vite 不在 node_modules）')
+    return gaps
+
+
+@pytest.fixture(scope='session', autouse=True)
+def integration_bootstrap(request):
+    """session 级 setup/teardown 门：跑本目录 case 前确保依赖就绪；跑完清残留。
+
+    setup：默认只检测——缺依赖即 ``pytest.UsageError`` 给可操作指引（而非 vite/daphne
+    subprocess 起来后才裸 RuntimeError，或 page fixture 内 ImportError）。加
+    ``--integration-setup`` 则自动补齐缺失项（幂等：已就绪项跳过；任一步失败即回滚已
+    备项，不留半拉子状态）。
+
+    teardown（yield 后）：扫掉 session 期间残留的真容器 + test DB 文件——容器失败/中断会
+    残留 ``openclaw-gw-*`` 占端口池（下次端口分配假失败，记忆 portpool-unit-test-...）。
+    只删「session 基线之后在端口池内新建」的容器，不碰基线已存在或池外的（可能是开发者
+    手动起的 fleet 容器，不属于本 session）。
+    """
+    gaps = _integration_bootstrap_gaps()
+    if gaps:
+        if not request.config.getoption('--integration-setup'):
+            raise pytest.UsageError(
+                '联调集成测试 bootstrap 依赖未就绪：\n  - ' + '\n  - '.join(gaps) + '\n\n'
+                '二选一：\n'
+                '  1) 让 pytest 自动准备：python -m pytest tests/integration/ --integration-setup ...\n'
+                '  2) 手动准备：\n'
+                '       pip install -r requirements/integration.txt\n'
+                '       python -m playwright install chromium\n'
+                '       (cd ../frontend && npm ci)\n'
+                '（docker daemon / LLM_API_KEY / OPENCLAW_TEMPLATE_DIR 属 case 级 skipif 门控，'
+                '不在此列——daemon-independent case 无需它们。）',
+            )
+        _prepare_bootstrap()
+
+    # teardown 基线：session 开始时的 fleet 容器（id 集合），用于「只清本 session 新建」。
+    baseline_ids = _fleet_container_ids()
+    yield
+    _teardown_containers(baseline_ids)
+    _cleanup_test_db_files()
+
+
+def _prepare_bootstrap() -> None:
+    """自动补齐 bootstrap 缺失项；任一步失败即尽力回滚，不留半拉子状态。"""
+    done = []
+    try:
+        try:
+            import playwright  # noqa: F401
+        except ImportError:
+            _install_python_requirements()
+            done.append('playwright')
+        if not _chromium_installed():
+            _run(['-m', 'playwright', 'install', 'chromium'], cwd=BACKEND_DIR, via_python=True)
+            done.append('chromium')
+        if not (FRONTEND_DIR / 'node_modules' / '.bin' / 'vite').exists():
+            _run(['npm', 'ci'], cwd=FRONTEND_DIR)
+            done.append('frontend')
+    except Exception as exc:
+        raise pytest.UsageError(
+            f'--integration-setup 自动准备失败（已备：{done or "无"}）：{exc}\n'
+            '请按报错手动补齐后重跑，或不带 --integration-setup 仅检测。',
+        ) from exc
+
+    remaining = _integration_bootstrap_gaps()
+    if remaining:
+        raise pytest.UsageError(
+            '--integration-setup 自动准备后仍有缺失：\n  - ' + '\n  - '.join(remaining),
+        )
+
+
+def _install_python_requirements() -> None:
+    """装 requirements/integration.txt 进当前 venv。
+
+    本地 worktree 的 .venv 多为 ``uv venv`` 所建、**无 pip 模块**（``python -m pip`` 直接
+    ModuleNotFoundError）；故优先用 uv（经 ``VIRTUAL_ENV`` 指当前 venv，幂等），无 uv 时
+    回退 ``python -m pip``（CI 的 setup-python venv 自带 pip）。
+    """
+    req = str(BACKEND_DIR / 'requirements' / 'integration.txt')
+    if shutil.which('uv'):
+        env = {**os.environ, 'VIRTUAL_ENV': sys.prefix}
+        proc = subprocess.run(['uv', 'pip', 'install', '-r', req],
+                              cwd=str(BACKEND_DIR), env=env,
+                              capture_output=True, text=True, check=False)
+        if proc.returncode == 0:
+            return
+        raise RuntimeError(f'uv pip install 失败（code {proc.returncode}）：\n{proc.stderr}')
+    _run(['-m', 'pip', 'install', '-r', req], cwd=BACKEND_DIR, via_python=True)
+
+
+def _fleet_container_ids() -> set[str]:
+    """当前 daemon 上全部 fleet 容器的 id 集合（label app=openclaw-fleet）；daemon 不可达→空集。"""
+    try:
+        from containers.docker_runtime import DockerRuntime
+        return {c.container_id for c in DockerRuntime().list_fleet()}
+    except Exception:  # pylint: disable=broad-exception-caught
+        return set()
+
+
+def _teardown_containers(baseline_ids: set[str]) -> None:
+    """清掉 session 期间新建的 fleet 容器（基线之外），不碰基线已存在/池外的。
+
+    双保险：既要在基线之后（本 session 新建），又要在端口池内（池外可能是并发/手动起的）。
+    每个容器 stop+remove 独立 try，清理自身异常绝不阻断后续、更不上抛掩盖测试结果。
+    端口池界取自 settings.OPENCLAW_FLEET（与 Fleet._build_default 同源，不另硬编码）。
+    """
+    try:
+        from django.conf import settings
+
+        from containers.docker_runtime import DockerRuntime
+        pool_start = settings.OPENCLAW_FLEET['PORT_POOL_START']
+        pool_end = settings.OPENCLAW_FLEET['PORT_POOL_END']
+        runtime = DockerRuntime()
+        current = runtime.list_fleet()
+    except Exception:  # pylint: disable=broad-exception-caught
+        return  # daemon 不可达 / settings 未就绪 → 无可清
+
+    for info in current:
+        if info.container_id in baseline_ids:
+            continue  # 基线已存在，非本 session 新建，跳过
+        in_pool = info.port is not None and pool_start <= info.port <= pool_end
+        if info.port is not None and not in_pool:
+            continue  # 池外端口（手动起的），不碰
+        instance = info.instance_name or _strip_prefix(info.name)
+        for op in (runtime.stop, runtime.remove):
+            try:
+                op(instance)
+            except Exception:  # pylint: disable=broad-exception-caught
+                pass
+
+
+def _strip_prefix(container_name: str) -> str:
+    """``openclaw-gw-<name>`` → ``<name>``（DockerRuntime.stop/remove 内部会再加前缀）。"""
+    from containers.constants import CONTAINER_PREFIX
+    return container_name.removeprefix(CONTAINER_PREFIX)
+
+
+def _cleanup_test_db_files() -> None:
+    """清掉 daphne 用的文件级 test DB 及 sidecar（与 daphne_server fixture finally 同集）。
+
+    session 级兜底：daphne fixture 自身 finally 已清，但 fixture setup 中途失败（如 migrate
+    成功、daphne 启动失败）可能残留；session 结束再清一遍幂等。
+    """
+    test_db = BACKEND_DIR / 'test_db_file.sqlite3'
+    for p in (test_db,
+              test_db.with_suffix('.sqlite3-wal'),
+              test_db.with_suffix('.sqlite3-shm'),
+              test_db.with_suffix('.sqlite3-journal')):
+        try:
+            p.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _run(argv: list[str], *, cwd: Path, via_python: bool = False) -> None:
+    """跑准备子进程（失败即 RuntimeError，带 stdout/stderr 便于诊断）。
+
+    ``via_python=True`` 经 ``sys.executable -m ...`` 调用，兼容无 .venv 的 CI（对齐
+    既有 ``_run_manage_py`` / daphne 用 sys.executable 的模式）。
+    """
+    cmd = [sys.executable, *argv] if via_python else argv
+    proc = subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True, check=False)
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f'bootstrap 准备失败（{" ".join(cmd)}，code {proc.returncode}）：\n'
+            f'stdout={proc.stdout}\nstderr={proc.stderr}',
+        )
 
 
 def _resolve_port() -> int:
