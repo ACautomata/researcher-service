@@ -1,6 +1,8 @@
 """chat.pool —— 每容器已配对长连接的连接池（issue #41 / spec §8.2 / #141 identity+scopes 传递）。
 
-dict[(url,device_token)→OpenClawChatClient]：同容器复用、异容器隔离。get_or_create 读 Pairing 行
+dict[(url,device_token)→OpenClawWire]：同容器复用、异容器隔离。pool 以防腐层 OpenClawWire Port
+为类型依赖（#231 / ADR 0004）；唯一实现是 integration.openclaw.wire_client.OpenClawWireClient
+（经默认 client_factory 实例化，OpenClawChatClient 为其同对象 alias）。get_or_create 读 Pairing 行
 （PairingService.get_status，database_sync_to_async 包，供 async consumer 调 sync ORM），未 paired /
 无 deviceToken → NotPaired（上层提示先配对，spec §8.1）；已 paired 则从 Pairing 重建 DeviceIdentity
 + 解析 scopes，传 factory 创建 client 并按 (url,device_token) 复用或 connect。#141 移除 gateway_token
@@ -19,6 +21,7 @@ from chat.chat_client import OpenClawChatClient
 from chat.device_crypto import DeviceIdentity
 from chat.models import Pairing
 from chat.pairing import PairingService
+from integration.openclaw import OpenClawWire
 from integration.openclaw.wire import REQUIRED_SCOPES
 
 
@@ -108,7 +111,7 @@ class ChatConnectionPool:
         # 复用 PairingService 的 ws url 构造（连同一容器，scheme/host 一致）
         self._ws_url_for = ws_url_for or PairingService._default_ws_url
         self._transport = transport
-        self._clients: dict[tuple[str, str], OpenClawChatClient] = {}
+        self._clients: dict[tuple[str, str], OpenClawWire] = {}
         # per-key 锁（Lock Strippling）：同 (url,device_token) 串行建连（TOCTOU 防重复 orphan），
         # 异 key 并行——避免一个坏容器（建连挂起）阻塞所有其他容器的 chat（codex P1）。
         self._locks: dict[tuple[str, str], asyncio.Lock] = {}
@@ -145,7 +148,7 @@ class ChatConnectionPool:
             url, device_token, identity=identity, scopes=scopes, on_dead=on_dead, **kwargs,
         )
 
-    async def get_or_create(self, instance) -> OpenClawChatClient:
+    async def get_or_create(self, instance) -> OpenClawWire:
         pairing = await database_sync_to_async(self._pairing.get_status)(instance)
         if pairing.status != Pairing.STATUS_PAIRED or not pairing.device_token:
             raise NotPaired(pairing.status, pairing.pairing_request_id)
@@ -371,7 +374,7 @@ class ChatConnectionPool:
         """
         await self.evict_url(self._ws_url_for(instance))
 
-    async def get_live(self, instance) -> OpenClawChatClient | None:
+    async def get_live(self, instance) -> OpenClawWire | None:
         """非创建式查活：返回该容器当前存活 client，无则 None（codex #219 P2 退订再同步用）。
 
         与 get_or_create 不同——**不建连、不抛 NotPaired**，只在 pool 里查存活 client。
@@ -413,7 +416,7 @@ class ChatConnectionPool:
             except Exception:  # pylint: disable=broad-exception-caught
                 pass
 
-    async def reacquire(self, instance, expected_client) -> tuple[OpenClawChatClient, OpenClawChatClient | None]:
+    async def reacquire(self, instance, expected_client) -> tuple[OpenClawWire, OpenClawWire | None]:
         """consumer 自愈用的原子重取：在 per-key 锁内「比较缓存项 → 采纳/驱逐 → 重建」一次完成。
 
         codex #219 六轮 P1-872：consumer 原 get_live→evict→get_or_create 三步非原子——两
@@ -461,9 +464,7 @@ class ChatConnectionPool:
                 raise NotPaired(pairing.status, pairing.pairing_request_id)
             if identity is not None and not REQUIRED_SCOPES.issubset(set(scopes)):
                 raise NotPaired(pairing.status, pairing.pairing_request_id)
-            new_client = self._client_factory(
-                url, pairing.device_token, identity=identity, scopes=scopes,
-            )
+            new_client = self._make_client(key, url, pairing.device_token, identity, scopes)
             try:
                 await new_client.connect()  # 握手有界（chat_client.connect_timeout）
             except Exception:

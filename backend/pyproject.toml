@@ -73,8 +73,9 @@ disable = [
     "fixme",                    # W0511 TODO/FIXME 注释不报警
     "duplicate-code",           # R0801 噪音大、价值低
     # (c) 类别B（issue #130）：WS 长连状态机的字段聚合是合理内聚，非坏味道。
-    #     OpenClawWireAdapter(15/10) 与其 fake(18/10) 的 ws/cm/recv_task/pending_acks/
-    #     pending_resolves/… 同属一条长连接的生命周期状态，与上面 too-many-ancestors 同策略静默。
+    #     OpenClawWireClient(15/10)（#231 收敛自 OpenClawWireAdapter/活 client）与其 fake(18/10) 的
+    #     ws/cm/recv_task/pending_acks/pending_resolves/… 同属一条长连接的生命周期状态，与上面
+    #     too-many-ancestors 同策略静默。
     "too-many-instance-attributes",  # R0902
     # 说明：issue #130 的 W0718(broad-exception-caught) 与 C2801(unnecessary-dunder-call)
     # 不在此全局 disable —— 按 docs/ruff-pylint-boundary.md §45/维护约定，有意的故障隔离

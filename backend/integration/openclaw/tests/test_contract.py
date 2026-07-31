@@ -30,9 +30,11 @@ class TestWireConstantsSingleSource:
     """wire 域常量单一来源：chat 三处与 integration.openclaw.wire 同对象（#90 范式）。"""
 
     def test_protocol_is_single_sourced(self):
-        # chat_client 经 ConnectFrameBuilder.session() 消费 PROTOCOL（间接单源）
+        # 唯一实现 wire_client 经 ConnectFrameBuilder.session() 消费 PROTOCOL（间接单源）
         # pairing_ws 经 ConnectFrameBuilder.pairing() 消费 PROTOCOL（间接单源）
-        assert chat_client._ConnectFrameBuilder is wire.ConnectFrameBuilder
+        from integration.openclaw import wire_client
+
+        assert wire_client._ConnectFrameBuilder is wire.ConnectFrameBuilder
         assert pairing_ws._ConnectFrameBuilder is wire.ConnectFrameBuilder
 
     def test_scopes_is_single_sourced(self):
@@ -73,7 +75,9 @@ class TestWireConstantsSingleSource:
         assert session_frame['params']['client']['id'] == wire.CLIENT_ID
 
     def test_agent_id_is_single_sourced(self):
-        assert chat_client._AGENT_ID is wire.AGENT_ID
+        from integration.openclaw import wire_client
+
+        assert wire_client._AGENT_ID is wire.AGENT_ID
 
     def test_connect_frame_fields_single_sourced(self):
         # pairing_ws 不再直接 import CLIENT_MODE/ROLE —— 由 ConnectFrameBuilder 单源消费
@@ -745,836 +749,141 @@ _OPENCLAW_WIRE_PORT_METHODS = tuple(
 
 
 @pytest.mark.parametrize('method', _OPENCLAW_WIRE_PORT_METHODS)
-def test_wire_method_signature_isomorphic_across_port_fake_adapter(method):
-    """issue #230：OpenClawWire Port 每个方法在 Port / Fake / Adapter 三处签名同构。
+def test_wire_method_signature_isomorphic_across_port_fake_impl(method):
+    """#230/#231：OpenClawWire Port 每个方法在 Port / Fake / 唯一实现三处签名同构（向下闭合）。
 
     isinstance(runtime_checkable Protocol) 只验方法存在、不验签名——历史上 connect 的
     keyword-only identity/nonce/scopes（codex #149）与 send_message 的 keyword-only
     idempotency_key（codex #219）都曾因此静默分歧：按 Port 编程换真实现即 TypeError
-    （Liskov 违反）。本守卫用 inspect 把覆盖面从 connect/send_message 扩到 Port **每个**
-    方法（pair / connect / send_message / resolve_approval / list_commands / sessions_rpc /
-    list_pending_approvals / 审批订阅三元组 / broadcast_approval_resolved / dead / discard /
-    close），任意 Port/Fake/Adapter 单边签名漂移（改名 / 挪位置·关键字 / 增删默认值）都在
-    测试期失败而非生产 TypeError。
+    （Liskov 违反）。本守卫用 inspect 把覆盖面扩到 Port **每个** 方法（connect / send_message /
+    aclose / resolve_approval / list_commands / 具名 session 方法 / list_pending_approvals /
+    审批订阅三元组 / broadcast_approval_resolved / dead / discard），任意 Port/Fake/Impl 单边
+    签名漂移（改名 / 挪位置·关键字 / 增删默认值）都在测试期失败而非生产 TypeError。
 
-    这是 #227 路径4 收敛的「make the change easy」预重构：全方法守卫就位后，后续 Port
-    reshape（移除 pair、connect 无参化、sessions_rpc 拆具名方法等）无法静默漂移三元组。
-    只比调用约定 shape（名/kind/默认值有无），不比标注：实现可比 Port 窄（#227
-    downward-closure isomorphism）；``dead`` 三处皆为 property。
+    #231 收敛后三处为 (Port, FakeOpenClawWire, OpenClawWireClient)——唯一实现是
+    OpenClawWireClient（原停滞 Adapter 已删除，ADR 0004）。只比调用约定 shape
+    （名/kind/默认值有无），不比标注：实现可比 Port 富（request_approval/policy 等留在
+    Impl 不进 Port，向下闭合 isomorphism）；``dead`` 三处皆为 property。
     """
-    from integration.openclaw.adapters import OpenClawWireAdapter
     from integration.openclaw.fakes import FakeOpenClawWire
+    from integration.openclaw.wire_client import OpenClawWireClient
 
     port_shape = _wire_attr_signature_shape(_OpenClawWirePort, method)
     fake_shape = _wire_attr_signature_shape(FakeOpenClawWire, method)
-    adapter_shape = _wire_attr_signature_shape(OpenClawWireAdapter, method)
+    impl_shape = _wire_attr_signature_shape(OpenClawWireClient, method)
 
     assert fake_shape == port_shape, (
         f'FakeOpenClawWire.{method} 签名漂离 Port：port={port_shape} fake={fake_shape}'
     )
-    assert adapter_shape == port_shape, (
-        f'OpenClawWireAdapter.{method} 签名漂离 Port：port={port_shape} adapter={adapter_shape}'
+    assert impl_shape == port_shape, (
+        f'OpenClawWireClient.{method} 签名漂离 Port：port={port_shape} impl={impl_shape}'
     )
 
 
-class TestPairingAdapterImplementsWirePort:
-    """OpenClawWireAdapter 实现 OpenClawWire Port——issue #102 acceptance。
+# ═══════════════════════════════════════════════════════════════════════════════
+# Issue #231 / ADR 0004：路径4 收敛——唯一实现 OpenClawWireClient + 同对象 alias
+# ═══════════════════════════════════════════════════════════════════════════════
 
-    Adapter 封装 challenge/nonce/Ed25519/connect/PAIRING_REQUIRED 握手全流程。
-    """
 
-    def test_adapter_exists_and_satisfies_port(self):
-        """adapters 模块暴露 OpenClawWireAdapter，结构子类型满足 OpenClawWire Port。"""
+class TestWireConvergenceSingleImpl:
+    """路径4 收敛到单一实现（#231 / ADR 0004）：活实现迁入防腐层为 OpenClawWireClient，
+    chat.chat_client.OpenClawChatClient 保留同对象 alias（strangler 零改名）；停滞的
+    OpenClawWireAdapter 已删除。"""
+
+    def test_alias_is_same_object(self):
+        """OpenClawChatClient 是 OpenClawWireClient 的同对象 alias（identity，非拷贝/子类）。"""
+        from chat.chat_client import OpenClawChatClient
+        from integration.openclaw.wire_client import OpenClawWireClient
+
+        assert OpenClawChatClient is OpenClawWireClient, (
+            'OpenClawChatClient 应为 OpenClawWireClient 的同对象 alias（isinstance/except 语义不变）'
+        )
+
+    def test_on_event_is_same_object(self):
+        """OnEvent 回调契约经 chat.chat_client 与 wire_client 同对象 re-export。"""
+        from chat.chat_client import OnEvent as ChatOnEvent
+        from integration.openclaw.wire_client import OnEvent as WireOnEvent
+
+        assert ChatOnEvent is WireOnEvent
+
+    def test_sole_impl_satisfies_port(self):
+        """唯一实现 OpenClawWireClient 满足收敛后 OpenClawWire Port。"""
         from integration.openclaw import OpenClawWire
-        from integration.openclaw.adapters import OpenClawWireAdapter
+        from integration.openclaw.wire_client import OpenClawWireClient
 
-        adapter = OpenClawWireAdapter(transport=None)
-        assert isinstance(adapter, OpenClawWire), (
-            'OpenClawWireAdapter 应实现 OpenClawWire Port'
+        client = OpenClawWireClient.__new__(OpenClawWireClient)
+        assert isinstance(client, OpenClawWire), (
+            'OpenClawWireClient 应满足收敛后 OpenClawWire Port'
         )
 
-    def test_adapter_pair_returns_pairing_result(self):
-        """配对成功返回 deviceToken + scopes（PairingResult 语义）。"""
-        import asyncio
+    def test_adapter_deleted(self):
+        """停滞的 OpenClawWireAdapter 已删除——adapters 模块不再暴露，且无生产/测试引用。"""
+        from integration.openclaw import adapters
 
-        from chat.device_crypto import DeviceCrypto
-        from chat.tests.fakes import FakeTransport
-        from integration.openclaw.adapters import OpenClawWireAdapter
-
-        identity = DeviceCrypto.generate_identity()
-        transport = FakeTransport.hello_ok(
-            scopes=['operator.read', 'operator.write', 'operator.approvals'],
-            device_token='dt-xyz',
-        )
-        adapter = OpenClawWireAdapter(transport=transport)
-
-        async def _run():
-            return await adapter.pair(
-                url='ws://127.0.0.1:19000/',
-                identity=identity,
-                bootstrap_token='gw-tok',
-            )
-
-        result = asyncio.run(_run())
-        assert result.device_token == 'dt-xyz'
-        assert 'operator.approvals' in result.scopes
-
-    def test_adapter_pair_uses_single_connect_frame_builder(self, monkeypatch):
-        """OpenClawWireAdapter.pair() 经 ConnectFrameBuilder 构建 connect 帧（非自建）。"""
-        import asyncio
-
-        from chat.device_crypto import DeviceCrypto
-        from chat.tests.fakes import FakeTransport
-        from integration.openclaw.adapters import OpenClawWireAdapter
-
-        identity = DeviceCrypto.generate_identity()
-        transport = FakeTransport.hello_ok()
-
-        # 打桩 ConnectFrameBuilder.pairing 以验证调用
-        calls = []
-        original = wire.ConnectFrameBuilder.pairing
-
-        def _spy(*args, **kwargs):
-            calls.append(True)
-            return original(*args, **kwargs)
-
-        monkeypatch.setattr(wire.ConnectFrameBuilder, 'pairing', _spy)
-
-        adapter = OpenClawWireAdapter(transport=transport)
-        asyncio.run(adapter.pair(
-            url='ws://127.0.0.1:19000/',
-            identity=identity,
-            bootstrap_token='gw-tok',
-        ))
-        assert len(calls) == 1, (
-            'OpenClawWireAdapter 应经 ConnectFrameBuilder.pairing 构建 connect 帧'
+        assert not hasattr(adapters, 'OpenClawWireAdapter'), (
+            'OpenClawWireAdapter 应已删除（ADR 0004 删 adapter 而非补齐接线）'
         )
 
-    def test_adapter_pair_pairing_required_raises(self):
-        """网关返回 PAIRING_REQUIRED → 上抛 PairingRequired(requestId)。"""
-        import asyncio
+    def test_pool_consumers_depend_on_port_not_impl(self):
+        """pool/consumers 以 OpenClawWire Port 为类型依赖（而非具体实现）——#231 retype。
 
-        from chat.device_crypto import DeviceCrypto
-        from chat.pairing_ws import PairingRequired
-        from chat.tests.fakes import FakeTransport
-        from integration.openclaw.adapters import OpenClawWireAdapter
-
-        identity = DeviceCrypto.generate_identity()
-        transport = FakeTransport.pairing_required(request_id='req-999')
-        adapter = OpenClawWireAdapter(transport=transport)
-
-        async def _run():
-            return await adapter.pair(
-                url='ws://127.0.0.1:19000/',
-                identity=identity,
-                bootstrap_token='gw-tok',
-            )
-
-        with pytest.raises(PairingRequired) as exc_info:
-            asyncio.run(_run())
-        assert exc_info.value.request_id == 'req-999'
-
-    def test_adapter_pair_nested_not_paired_raises_pairing_required(self):
-        """回归 (codex #164 P2)：网关返回嵌套 NOT_PAIRED/details.code=PAIRING_REQUIRED →
-        上抛 PairingRequired(requestId)。ghcr 2026.6.34 官方镜像用嵌套码，旧
-        adapters.py 只检外层 error.code 遗漏。
+        静态断言：pool/consumers 不再 import 具体 client 类作类型注解（行为不变、契约收窄）。
         """
-        import asyncio
+        import inspect as _inspect
 
-        from chat.device_crypto import DeviceCrypto
-        from chat.pairing_ws import PairingRequired
-        from chat.tests.fakes import _CM, _FakeWs
-        from integration.openclaw.adapters import OpenClawWireAdapter
+        from chat import pool
+        from integration.openclaw import ports as _ports
 
-        identity = DeviceCrypto.generate_identity()
-
-        class _NestedNotPairedTransport:
-            """模拟 ghcr 2026.6.34 官方镜像的两段嵌套错误应答。"""
-            connect_calls = 0
-
-            def __call__(self, url):
-                self.connect_calls += 1
-                ws = _FakeWs(
-                    pre_challenge_frames=[],
-                    result_frame={'type': 'res', 'ok': False,
-                                  'error': {'code': 'NOT_PAIRED',
-                                            'details': {'code': 'PAIRING_REQUIRED',
-                                                        'requestId': 'req-nested'}}},
-                    pre_result_frames=[],
-                )
-                return _CM(ws)
-
-        adapter = OpenClawWireAdapter(transport=_NestedNotPairedTransport())
-
-        async def _run():
-            return await adapter.pair(
-                url='ws://127.0.0.1:19000/',
-                identity=identity,
-                bootstrap_token='gw-tok',
-            )
-
-        with pytest.raises(PairingRequired) as exc_info:
-            asyncio.run(_run())
-        assert exc_info.value.request_id == 'req-nested'
-
-    def test_adapter_pair_error_raises_pairing_error(self):
-        """网关返回其它错误 → 上抛 PairingError。"""
-        import asyncio
-
-        from chat.device_crypto import DeviceCrypto
-        from chat.pairing_ws import PairingError
-        from chat.tests.fakes import FakeTransport
-        from integration.openclaw.adapters import OpenClawWireAdapter
-
-        identity = DeviceCrypto.generate_identity()
-        transport = FakeTransport.connect_error('bad token')
-        adapter = OpenClawWireAdapter(transport=transport)
-
-        async def _run():
-            return await adapter.pair(
-                url='ws://127.0.0.1:19000/',
-                identity=identity,
-                bootstrap_token='gw-tok',
-            )
-
-        with pytest.raises(PairingError):
-            asyncio.run(_run())
-
-    # ── regression: codex P1 ──────────────────────────────────────────────
-
-    def test_default_connect_is_sync_factory(self):
-        """_default_connect 是同步工厂（非 coroutine），
-        pair() 用 async with 打开连接时不 TypeError。"""
-        from integration.openclaw.adapters import OpenClawWireAdapter
-
-        assert not inspect.iscoroutinefunction(
-            OpenClawWireAdapter._default_connect,
-        ), '_default_connect 应是同步工厂，返回 async context manager 而非 coroutine'
-
-    # ── regression: codex P2 ──────────────────────────────────────────────
-
-    def test_pair_accepts_positional_args(self):
-        """pair() 支持位置参数（与 OpenClawWire Port 和 FakeOpenClawWire 一致）。"""
-        import asyncio
-
-        from chat.device_crypto import DeviceCrypto
-        from chat.tests.fakes import FakeTransport
-        from integration.openclaw.adapters import OpenClawWireAdapter
-
-        identity = DeviceCrypto.generate_identity()
-        transport = FakeTransport.hello_ok(device_token='dt-pos')
-        adapter = OpenClawWireAdapter(transport=transport)
-
-        async def _run():
-            # 位置参数调用，非关键字
-            return await adapter.pair(
-                'ws://127.0.0.1:19000/', identity, 'gw-tok',
-            )
-
-        result = asyncio.run(_run())
-        assert result.device_token == 'dt-pos'
+        # pool 应引用 OpenClawWire Port（来自 integration.openclaw）作类型
+        assert _ports.OpenClawWire.__name__ == 'OpenClawWire'
+        src = _inspect.getsource(pool)
+        assert 'OpenClawWire' in src, 'pool.py 应经 OpenClawWire Port 表达类型依赖（#231 retype）'
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Issue #103: 路径4b OpenClawWire 长连接合并——Port 扩展 + Fake + Adapter
+# Issue #103: 路径4b OpenClawWire 长连接合并——Port 扩展 + Fake
 # ═══════════════════════════════════════════════════════════════════════════════
-
-
-class TestOpenClawWireAdapterLongLived:
-    """OpenClawWireAdapter 长连接方法契约测试——issue #103 acceptance。
-
-    利用 FakeChatTransport 模拟 WS 应答，验证所有长连 RPC 方法：
-    connect / send_message / resolve_approval / list_commands / sessions_rpc /
-    list_pending_approvals + 审批订阅 + dead / discard / close。
-    """
-
-    # ── connect ───────────────────────────────────────────────────────────────
-
-    def test_connect_uses_connect_frame_builder(self):
-        """connect() 经 ConnectFrameBuilder.session() 构建握手帧（issue #139：含 device 签名块）。"""
-        import asyncio
-
-        from chat.tests.fakes import FakeChatTransport
-        from integration.openclaw.adapters import OpenClawWireAdapter
-
-        t = FakeChatTransport()
-        adapter = OpenClawWireAdapter(transport=t)
-
-        async def _run():
-            await adapter.connect(
-                'ws://x/', 'dt-xyz',
-                identity=_SESSION_IDENTITY, nonce=_SESSION_NONCE, scopes=_SESSION_SCOPES,
-            )
-        asyncio.run(_run())
-        connect_frame = next(f for f in t.sent if f.get('method') == 'connect')
-        assert connect_frame['params']['auth']['token'] == 'dt-xyz'
-        assert connect_frame['params']['device']['id'] == _SESSION_IDENTITY.device_id
-        assert connect_frame['params']['device']['signature']  # 非空签名
-
-    def test_connect_failure_raises(self):
-        """connect 握手失败上抛 ChatConnectError。"""
-        import asyncio
-
-        from chat.chat_client import ChatConnectError
-        from chat.tests.fakes import FakeChatTransport
-        from integration.openclaw.adapters import OpenClawWireAdapter
-
-        t = FakeChatTransport(connect_ok=False)
-        adapter = OpenClawWireAdapter(transport=t)
-
-        async def _run():
-            await adapter.connect(
-                'ws://x/', 'dt',
-                identity=_SESSION_IDENTITY, nonce=_SESSION_NONCE, scopes=_SESSION_SCOPES,
-            )
-        with pytest.raises(ChatConnectError):
-            asyncio.run(_run())
-
-    def test_connect_timeout_raises(self):
-        """connect 握手超时抛 ChatConnectError。"""
-        import asyncio
-
-        from chat.chat_client import ChatConnectError
-        from chat.tests.fakes import FakeChatTransport
-        from integration.openclaw.adapters import OpenClawWireAdapter
-
-        t = FakeChatTransport(suppress_connect_ack=True)
-        adapter = OpenClawWireAdapter(transport=t, timeout=0.1)
-
-        async def _run():
-            await adapter.connect(
-                'ws://x/', 'dt',
-                identity=_SESSION_IDENTITY, nonce=_SESSION_NONCE, scopes=_SESSION_SCOPES,
-            )
-        with pytest.raises(ChatConnectError):
-            asyncio.run(_run())
-
-    # ── send_message ──────────────────────────────────────────────────────────
-
-    def test_send_message_builds_chat_send_frame_and_returns_runid(self):
-        """send_message 发 chat.send → ack(runId)，返回 runId。"""
-        import asyncio
-
-        from chat.tests.fakes import FakeChatTransport
-        from integration.openclaw.adapters import OpenClawWireAdapter
-
-        t = FakeChatTransport(ack_run_id='run-9')
-        adapter = OpenClawWireAdapter(transport=t)
-
-        async def _run():
-            await adapter.connect(
-                'ws://x/', 'dt',
-                identity=_SESSION_IDENTITY, nonce=_SESSION_NONCE, scopes=_SESSION_SCOPES,
-            )
-            return await adapter.send_message('sess-1', 'hello', on_event=lambda f: None)
-        run_id = asyncio.run(_run())
-        assert run_id == 'run-9'
-        cs = next(f for f in t.sent if f.get('method') == 'chat.send')
-        assert cs['params']['sessionKey'] == 'sess-1'
-        assert cs['params']['message'] == 'hello'
-        assert cs['params']['agentId'] == 'main'
-
-    def test_send_message_forwards_provided_idempotency_key(self):
-        """codex #219 P2：Adapter 透传显式 idempotency_key 到 chat.send 帧（consumer 复用同 key）。"""
-        import asyncio
-
-        from chat.tests.fakes import FakeChatTransport
-        from integration.openclaw.adapters import OpenClawWireAdapter
-
-        t = FakeChatTransport(ack_run_id='run-9')
-        adapter = OpenClawWireAdapter(transport=t)
-
-        async def _run():
-            await adapter.connect(
-                'ws://x/', 'dt',
-                identity=_SESSION_IDENTITY, nonce=_SESSION_NONCE, scopes=_SESSION_SCOPES,
-            )
-            return await adapter.send_message(
-                'sess-1', 'hello', on_event=lambda f: None, idempotency_key='fixed-key-7')
-        asyncio.run(_run())
-        cs = next(f for f in t.sent if f.get('method') == 'chat.send')
-        assert cs['params']['idempotencyKey'] == 'fixed-key-7'
-
-    def test_send_message_not_connected_raises(self):
-        """未 connect 时 send_message 抛 ChatClientError。"""
-        import asyncio
-
-        from chat.chat_client import ChatClientError
-        from chat.tests.fakes import FakeChatTransport
-        from integration.openclaw.adapters import OpenClawWireAdapter
-
-        adapter = OpenClawWireAdapter(transport=FakeChatTransport())
-
-        async def _run():
-            await adapter.send_message('s', 'm', on_event=lambda f: None)
-        with pytest.raises(ChatClientError):
-            asyncio.run(_run())
-
-    def test_send_message_ack_error_raises(self):
-        """chat.send ack 被网关拒绝 → ChatSendError。"""
-        import asyncio
-
-        from chat.chat_client import ChatSendError
-        from chat.tests.fakes import FakeChatTransport
-        from integration.openclaw.adapters import OpenClawWireAdapter
-
-        t = FakeChatTransport(ack_error={'code': 'RATE_LIMIT', 'message': 'too fast'})
-        adapter = OpenClawWireAdapter(transport=t)
-
-        async def _run():
-            await adapter.connect(
-                'ws://x/', 'dt',
-                identity=_SESSION_IDENTITY, nonce=_SESSION_NONCE, scopes=_SESSION_SCOPES,
-            )
-            await adapter.send_message('s', 'm', on_event=lambda f: None)
-        with pytest.raises(ChatSendError) as exc:
-            asyncio.run(_run())
-        assert 'too fast' in str(exc.value)
-
-    def test_recv_routes_events_to_on_event(self):
-        """recv loop 把网关 chat 事件翻译后经 on_event 回传。"""
-        import asyncio
-
-        from chat.tests.fakes import FakeChatTransport
-        from integration.openclaw.adapters import OpenClawWireAdapter
-
-        events = [
-            {'type': 'event', 'event': 'chat', 'payload': {'runId': 'r1', 'state': 'delta', 'deltaText': '你好'}},
-            {'type': 'event', 'event': 'chat', 'payload': {'runId': 'r1', 'state': 'final'}},
-        ]
-        t = FakeChatTransport(ack_run_id='r1', events=events)
-        adapter = OpenClawWireAdapter(transport=t)
-        received = []
-
-        async def cb(frame):
-            received.append(frame)
-
-        async def _run():
-            await adapter.connect(
-                'ws://x/', 'dt',
-                identity=_SESSION_IDENTITY, nonce=_SESSION_NONCE, scopes=_SESSION_SCOPES,
-            )
-            await adapter.send_message('s', 'm', on_event=cb)
-            await asyncio.sleep(0.1)
-        asyncio.run(_run())
-        assert received == [
-            {'type': 'text', 'runId': 'r1', 'delta': '你好'},
-            {'type': 'done', 'runId': 'r1'},
-        ]
-
-    # ── resolve_approval ──────────────────────────────────────────────────────
-
-    def test_resolve_approval_returns_payload(self):
-        """resolve_approval 发 {kind}.approval.resolve 帧并返回网关 payload。"""
-        import asyncio
-
-        from chat.tests.fakes import FakeChatTransport
-        from integration.openclaw.adapters import OpenClawWireAdapter
-
-        t = FakeChatTransport(resolve_payload={'id': 'ap-1', 'decision': 'allow-once'})
-        adapter = OpenClawWireAdapter(transport=t)
-
-        async def _run():
-            await adapter.connect(
-                'ws://x/', 'dt',
-                identity=_SESSION_IDENTITY, nonce=_SESSION_NONCE, scopes=_SESSION_SCOPES,
-            )
-            return await adapter.resolve_approval('ap-1', 'exec', 'allow-once')
-        result = asyncio.run(_run())
-        assert result == {'id': 'ap-1', 'decision': 'allow-once'}
-        rs = next(f for f in t.sent if f.get('method') == 'exec.approval.resolve')
-        assert rs['params'] == {'id': 'ap-1', 'decision': 'allow-once'}
-
-    def test_resolve_approval_gateway_reject_raises(self):
-        """审批回覆被网关拒绝 → ChatSendError。"""
-        import asyncio
-
-        from chat.chat_client import ChatSendError
-        from chat.tests.fakes import FakeChatTransport
-        from integration.openclaw.adapters import OpenClawWireAdapter
-
-        t = FakeChatTransport(resolve_error={'code': 'FORBIDDEN', 'message': 'missing scope'})
-        adapter = OpenClawWireAdapter(transport=t)
-
-        async def _run():
-            await adapter.connect(
-                'ws://x/', 'dt',
-                identity=_SESSION_IDENTITY, nonce=_SESSION_NONCE, scopes=_SESSION_SCOPES,
-            )
-            await adapter.resolve_approval('ap-1', 'exec', 'deny')
-        with pytest.raises(ChatSendError) as exc:
-            asyncio.run(_run())
-        assert 'missing scope' in str(exc.value)
-
-    # ── list_commands ─────────────────────────────────────────────────────────
-
-    def test_list_commands_returns_payload(self):
-        """list_commands 返回网关 payload。"""
-        import asyncio
-
-        from chat.tests.fakes import FakeChatTransport
-        from integration.openclaw.adapters import OpenClawWireAdapter
-
-        payload = {'commands': [{'name': '/wiki', 'description': 'Wiki tools'}]}
-        t = FakeChatTransport(commands_payload=payload)
-        adapter = OpenClawWireAdapter(transport=t)
-
-        async def _run():
-            await adapter.connect(
-                'ws://x/', 'dt',
-                identity=_SESSION_IDENTITY, nonce=_SESSION_NONCE, scopes=_SESSION_SCOPES,
-            )
-            return await adapter.list_commands()
-        result = asyncio.run(_run())
-        assert result == payload
-        req = next(f for f in t.sent if f.get('method') == 'commands.list')
-        assert req['params']['agentId'] == 'main'
-
-    # ── sessions_rpc ──────────────────────────────────────────────────────────
-
-    def test_sessions_rpc_returns_payload(self):
-        """sessions_rpc 发任意 method→params 帧并返回 payload（透传）。"""
-        import asyncio
-
-        from chat.tests.fakes import FakeChatTransport
-        from integration.openclaw.adapters import OpenClawWireAdapter
-
-        t = FakeChatTransport(rpc_payloads={'sessions.list': {'sessions': []}})
-        adapter = OpenClawWireAdapter(transport=t)
-
-        async def _run():
-            await adapter.connect(
-                'ws://x/', 'dt',
-                identity=_SESSION_IDENTITY, nonce=_SESSION_NONCE, scopes=_SESSION_SCOPES,
-            )
-            return await adapter.sessions_rpc('sessions.list', {'agentId': 'main'})
-        result = asyncio.run(_run())
-        assert result == {'sessions': []}
-
-    # ── ack timeout 异常链（issue #130 类别A W0707：raise ChatSendError from TimeoutError）──
-
-    def test_send_message_ack_timeout_chains_timeout_error(self):
-        """chat.send ack 超时 → ChatSendError 且 __cause__ 为 TimeoutError（W0707 raise-missing-from）。"""
-        import asyncio
-
-        from chat.chat_client import ChatSendError
-        from chat.tests.fakes import FakeChatTransport
-        from integration.openclaw.adapters import OpenClawWireAdapter
-
-        t = FakeChatTransport(suppress_ack=True)  # 不回 chat.send ack → 超时
-        adapter = OpenClawWireAdapter(transport=t, timeout=0.1)
-
-        async def _run():
-            await adapter.connect(
-                'ws://x/', 'dt',
-                identity=_SESSION_IDENTITY, nonce=_SESSION_NONCE, scopes=_SESSION_SCOPES,
-            )
-            await adapter.send_message('s', 'm', on_event=lambda f: None)
-        with pytest.raises(ChatSendError) as exc:
-            asyncio.run(_run())
-        assert 'chat.send ack timeout' in str(exc.value)
-        assert isinstance(exc.value.__cause__, TimeoutError)
-
-    def test_send_message_ack_timeout_is_transmitted(self):
-        """codex #219 P1（adapter）：ack 超时（帧已发出）→ ChatSendTransmittedError。
-
-        consumer 经 port 编程时据此判不可盲重试——与 OpenClawChatClient 分类一致
-        （Liskov：换真实 adapter 不丢 transmitted 语义）。
-        """
-        import asyncio
-
-        from chat.chat_client import ChatSendTransmittedError
-        from chat.tests.fakes import FakeChatTransport
-        from integration.openclaw.adapters import OpenClawWireAdapter
-
-        t = FakeChatTransport(suppress_ack=True)
-        adapter = OpenClawWireAdapter(transport=t, timeout=0.1)
-
-        async def _run():
-            await adapter.connect(
-                'ws://x/', 'dt',
-                identity=_SESSION_IDENTITY, nonce=_SESSION_NONCE, scopes=_SESSION_SCOPES,
-            )
-            await adapter.send_message('s', 'm', on_event=lambda f: None)
-        with pytest.raises(ChatSendTransmittedError):
-            asyncio.run(_run())
-
-    def test_send_message_explicit_reject_is_not_transmitted(self):
-        """codex #219 P1（adapter）：网关显式拒绝（ack ok:false）→ 普通 ChatSendError，非 transmitted。"""
-        import asyncio
-
-        from chat.chat_client import ChatSendError, ChatSendTransmittedError
-        from chat.tests.fakes import FakeChatTransport
-        from integration.openclaw.adapters import OpenClawWireAdapter
-
-        t = FakeChatTransport(ack_error={'code': 'RATE_LIMIT', 'message': 'too fast'})
-        adapter = OpenClawWireAdapter(transport=t)
-
-        async def _run():
-            await adapter.connect(
-                'ws://x/', 'dt',
-                identity=_SESSION_IDENTITY, nonce=_SESSION_NONCE, scopes=_SESSION_SCOPES,
-            )
-            await adapter.send_message('s', 'm', on_event=lambda f: None)
-        with pytest.raises(ChatSendError) as exc:
-            asyncio.run(_run())
-        assert not isinstance(exc.value, ChatSendTransmittedError)  # 显式拒绝=未起 run，可安全重试
-
-    def test_resolve_approval_ack_timeout_chains_timeout_error(self):
-        """approval.resolve ack 超时 → ChatSendError 且 __cause__ 为 TimeoutError。"""
-        import asyncio
-
-        from chat.chat_client import ChatSendError
-        from chat.tests.fakes import FakeChatTransport
-        from integration.openclaw.adapters import OpenClawWireAdapter
-
-        t = FakeChatTransport(suppress_ack=True)  # 不回 approval.resolve ack → 超时
-        adapter = OpenClawWireAdapter(transport=t, timeout=0.1)
-
-        async def _run():
-            await adapter.connect(
-                'ws://x/', 'dt',
-                identity=_SESSION_IDENTITY, nonce=_SESSION_NONCE, scopes=_SESSION_SCOPES,
-            )
-            await adapter.resolve_approval('ap-1', 'exec', 'approve')
-        with pytest.raises(ChatSendError) as exc:
-            asyncio.run(_run())
-        assert 'approval.resolve ack timeout' in str(exc.value)
-        assert isinstance(exc.value.__cause__, TimeoutError)
-
-    def test_list_commands_ack_timeout_chains_timeout_error(self):
-        """commands.list ack 超时 → ChatSendError 且 __cause__ 为 TimeoutError。"""
-        import asyncio
-
-        from chat.chat_client import ChatSendError
-        from chat.tests.fakes import FakeChatTransport
-        from integration.openclaw.adapters import OpenClawWireAdapter
-
-        t = FakeChatTransport(suppress_commands_ack=True)  # 不回 commands.list ack → 超时
-        adapter = OpenClawWireAdapter(transport=t, timeout=0.1)
-
-        async def _run():
-            await adapter.connect(
-                'ws://x/', 'dt',
-                identity=_SESSION_IDENTITY, nonce=_SESSION_NONCE, scopes=_SESSION_SCOPES,
-            )
-            await adapter.list_commands()
-        with pytest.raises(ChatSendError) as exc:
-            asyncio.run(_run())
-        assert 'commands.list ack timeout' in str(exc.value)
-        assert isinstance(exc.value.__cause__, TimeoutError)
-
-    def test_sessions_rpc_ack_timeout_chains_timeout_error(self):
-        """sessions.* ack 超时 → ChatSendError 且 __cause__ 为 TimeoutError。"""
-        import asyncio
-
-        from chat.chat_client import ChatSendError
-        from chat.tests.fakes import FakeChatTransport
-        from integration.openclaw.adapters import OpenClawWireAdapter
-
-        # rpc_suppress 含该方法 → 不回 res → 超时（需先注册进 rpc_payloads 才会进分发循环）
-        t = FakeChatTransport(
-            rpc_payloads={'sessions.list': {'sessions': []}},
-            rpc_suppress={'sessions.list'},
-        )
-        adapter = OpenClawWireAdapter(transport=t, timeout=0.1)
-
-        async def _run():
-            await adapter.connect(
-                'ws://x/', 'dt',
-                identity=_SESSION_IDENTITY, nonce=_SESSION_NONCE, scopes=_SESSION_SCOPES,
-            )
-            await adapter.sessions_rpc('sessions.list', {'agentId': 'main'})
-        with pytest.raises(ChatSendError) as exc:
-            asyncio.run(_run())
-        assert 'sessions.list ack timeout' in str(exc.value)
-        assert isinstance(exc.value.__cause__, TimeoutError)
-
-    # ── list_pending_approvals ────────────────────────────────────────────────
-
-    def test_list_pending_approvals_translates_cards(self):
-        """list_pending_approvals 补拉审批并翻译成卡帧。"""
-        import asyncio
-
-        from chat.tests.fakes import FakeChatTransport
-        from integration.openclaw.adapters import OpenClawWireAdapter
-
-        t = FakeChatTransport(list_payload={
-            'approvals': [{'id': 'ap-1', 'kind': 'exec', 'systemRunPlan': {'rawCommand': 'cmd1'}}],
-        })
-        adapter = OpenClawWireAdapter(transport=t)
-
-        async def _run():
-            await adapter.connect(
-                'ws://x/', 'dt',
-                identity=_SESSION_IDENTITY, nonce=_SESSION_NONCE, scopes=_SESSION_SCOPES,
-            )
-            return await adapter.list_pending_approvals()
-        cards = asyncio.run(_run())
-        assert cards == [{'type': 'approval', 'id': 'ap-1', 'kind': 'exec', 'command': 'cmd1', 'sessionKey': None}]
-
-    def test_list_pending_approvals_payload_list_translates_cards(self):
-        """实测校准（spike ghcr 2026.6.34-browser, 2026-07-27）：exec.approval.list 的 payload
-        直接是 list（非空 [{...}]），非 {approvals:[...]} dict。wire adapter 旧代码 list.get 会
-        AttributeError（codex P2：与 OpenClawChatClient 同源 dispatch，两实现不可漂移）。"""
-        import asyncio
-
-        from chat.tests.fakes import FakeChatTransport
-        from integration.openclaw.adapters import OpenClawWireAdapter
-
-        t = FakeChatTransport(list_payload=[
-            {'id': 'ap-1', 'kind': 'exec', 'systemRunPlan': {'rawCommand': 'cmd1'}},
-        ])
-        adapter = OpenClawWireAdapter(transport=t)
-
-        async def _run():
-            await adapter.connect(
-                'ws://x/', 'dt',
-                identity=_SESSION_IDENTITY, nonce=_SESSION_NONCE, scopes=_SESSION_SCOPES,
-            )
-            return await adapter.list_pending_approvals()
-        cards = asyncio.run(_run())
-        assert cards == [{'type': 'approval', 'id': 'ap-1', 'kind': 'exec', 'command': 'cmd1', 'sessionKey': None}]
-
-    # ── approval subscribers ──────────────────────────────────────────────────
-
-    def test_approval_subscribers_fan_out(self):
-        """add_approval_subscriber 注册后在 recv loop 中收到审批事件。"""
-        import asyncio
-
-        from chat.tests.fakes import FakeChatTransport
-        from integration.openclaw.adapters import OpenClawWireAdapter
-
-        events = [
-            {'type': 'event', 'event': 'exec.approval.requested',
-             'payload': {'id': 'ap-1', 'kind': 'exec', 'systemRunPlan': {'rawCommand': 'rm'}}},
-        ]
-        t = FakeChatTransport(events=events)
-        adapter = OpenClawWireAdapter(transport=t)
-        got = []
-
-        async def sub(frame):
-            got.append(frame)
-
-        async def _run():
-            await adapter.connect(
-                'ws://x/', 'dt',
-                identity=_SESSION_IDENTITY, nonce=_SESSION_NONCE, scopes=_SESSION_SCOPES,
-            )
-            adapter.add_approval_subscriber(sub)
-            await asyncio.sleep(0.1)
-        asyncio.run(_run())
-        assert len(got) == 1
-        assert got[0]['type'] == 'approval'
-        assert got[0]['id'] == 'ap-1'
-
-    def test_remove_subscriber_stops_delivery(self):
-        """退订后不再收审批事件。"""
-        import asyncio
-
-        from chat.tests.fakes import FakeChatTransport
-        from integration.openclaw.adapters import OpenClawWireAdapter
-
-        t = FakeChatTransport()
-        adapter = OpenClawWireAdapter(transport=t)
-        got_a, got_b = [], []
-
-        async def sub_a(frame):
-            got_a.append(frame)
-
-        async def sub_b(frame):
-            got_b.append(frame)
-
-        async def _run():
-            await adapter.connect(
-                'ws://x/', 'dt',
-                identity=_SESSION_IDENTITY, nonce=_SESSION_NONCE, scopes=_SESSION_SCOPES,
-            )
-            adapter.add_approval_subscriber(sub_a)
-            adapter.add_approval_subscriber(sub_b)
-            adapter.remove_approval_subscriber(sub_a)
-            t.push({'type': 'event', 'event': 'exec.approval.requested',
-                    'payload': {'id': 'ap-2', 'kind': 'exec', 'systemRunPlan': {'rawCommand': 'cmd'}}})
-            await asyncio.sleep(0.1)
-        asyncio.run(_run())
-        assert not got_a
-        assert len(got_b) == 1
-
-    # ── dead / discard / close ────────────────────────────────────────────────
-
-    def test_adapter_dead_after_connect_disconnect(self):
-        """connect 后 dead=False；close 后 dead=True。"""
-        import asyncio
-
-        from chat.tests.fakes import FakeChatTransport
-        from integration.openclaw.adapters import OpenClawWireAdapter
-
-        t = FakeChatTransport()
-        adapter = OpenClawWireAdapter(transport=t)
-
-        async def _run():
-            await adapter.connect(
-                'ws://x/', 'dt',
-                identity=_SESSION_IDENTITY, nonce=_SESSION_NONCE, scopes=_SESSION_SCOPES,
-            )
-            assert not adapter.dead
-            await adapter.close()
-            assert adapter.dead
-        asyncio.run(_run())
-
-    def test_discard_removes_runid(self):
-        """discard 后后续事件不回调。"""
-        import asyncio
-
-        from chat.tests.fakes import FakeChatTransport
-        from integration.openclaw.adapters import OpenClawWireAdapter
-
-        t = FakeChatTransport()
-        adapter = OpenClawWireAdapter(transport=t)
-        received = []
-
-        async def cb(frame):
-            received.append(frame)
-
-        async def _run():
-            await adapter.connect(
-                'ws://x/', 'dt',
-                identity=_SESSION_IDENTITY, nonce=_SESSION_NONCE, scopes=_SESSION_SCOPES,
-            )
-            rid = await adapter.send_message('s', 'm', on_event=cb)
-            adapter.discard(rid)
-            t.push({'type': 'event', 'event': 'chat', 'payload': {'runId': rid, 'state': 'delta', 'deltaText': 'lost'}})
-            await asyncio.sleep(0.05)
-        asyncio.run(_run())
-        assert not received
 
 
 class TestOpenClawWireLongLivedPort:
-    """OpenClawWire Port 长连接方法完整性——issue #103 acceptance。
+    """OpenClawWire Port 收敛后最小契约完整性——#231 / ADR 0004。
 
-    合约：Port 包含配对后长连的完整生命周期（connect/send_message/resolve_approval/
-    list_commands/sessions RPC + 审批订阅 + dead/disconnect/close）。
+    合约：Port 收窄为**配对后长连接**——无参 connect / send_message（kw-only on_event）/ aclose /
+    具名 session 方法（list_sessions/get_history/create_session/delete_session 取代通用 sessions_rpc）/
+    resolve_approval / list_commands / list_pending_approvals + 审批订阅三元组 + dead/discard。
+    pair() 已移出 Port（由 PairingHandshake/PairingService 独立 seam 拥有）。
     """
 
     # ── 方法存在性 ──
 
     def test_port_has_long_lived_methods(self):
-        """Port 暴露所有长连接方法签名（供 consumer/pool 依赖）。"""
+        """Port 暴露收敛后所有长连接方法签名（供 consumer/pool/views 依赖）。"""
         from integration.openclaw import OpenClawWire
 
         names = [n for n in dir(OpenClawWire) if not n.startswith('_')]
         required = {
-            'pair',           # #102: 配对握手
-            'connect',        # 建立已配对长连
+            'connect',        # 无参建立已配对长连
+            'aclose',         # 关闭长连（aclose，非 close）
             'send_message',   # chat.send → ack(runId)
             'resolve_approval',  # approve/deny
-            'list_commands',  # commands.list（已配对长连可用）
+            'list_commands',  # commands.list
             'list_pending_approvals',  # 补拉待审批
-            'sessions_rpc',   # 通用会话 RPC（sessions.list/create/delete + chat.history）
-            'close',          # 关闭长连
+            'list_sessions',  # sessions.list（具名，取代 sessions_rpc）
+            'get_history',    # chat.history
+            'create_session',  # sessions.create
+            'delete_session',  # sessions.delete
         }
         missing = required - set(names)
         assert not missing, f'OpenClawWire Port 缺长连接方法: {sorted(missing)}'
+
+    def test_port_dropped_pairing_and_generic_rpc(self):
+        """Port 不再声明 pair() 与通用 sessions_rpc（#231 收窄：配对出 Port、具名方法取代通用 RPC）。"""
+        from integration.openclaw import OpenClawWire
+
+        names = {n for n in dir(OpenClawWire) if not n.startswith('_')}
+        assert 'pair' not in names, 'pair() 应移出 Port（配对由 PairingHandshake/PairingService 拥有）'
+        assert 'sessions_rpc' not in names, '通用 sessions_rpc 应由具名 session 方法取代'
+        assert 'close' not in names, 'close() 应更名为 aclose()'
 
     def test_port_approval_subscriber_contract(self):
         """Port 暴露 add_approval_subscriber / remove_approval_subscriber。"""
@@ -1594,28 +903,27 @@ class TestOpenClawWireLongLivedPort:
 
 
 class TestFakeOpenClawWireLongLived:
-    """FakeOpenClawWire 完整模拟所有长连接方法——issue #103 acceptance。
+    """FakeOpenClawWire 完整模拟收敛后 Port 全部方法（向下闭合）——#231 / ADR 0004。
 
-    合约：Fake 实现扩展后的 Port，所有长连接方法可注入测试，不依赖真 gateway。
+    合约：Fake 实现配对后长连 Port，所有方法可注入测试，不依赖真 gateway。连接身份材料
+    （url/device_token/identity/scopes）构造期注入，connect 无参；具名 session 方法经
+    rpc_results/rpc_errors 预设（与真实现 _rpc 同 method 键）。
     """
 
     def test_fake_has_all_long_lived_methods(self):
-        """Fake 暴露扩展后 Port 的所有方法（Port 合规性守护）。"""
+        """Fake 暴露收敛后 Port 的所有方法（Port 合规性守护 + isinstance）。"""
         from integration.openclaw import OpenClawWire
         from integration.openclaw.fakes import FakeOpenClawWire
 
         fake = FakeOpenClawWire()
-        assert isinstance(fake, OpenClawWire), 'FakeOpenClawWire 应满足扩展后 OpenClawWire Port'
+        assert isinstance(fake, OpenClawWire), 'FakeOpenClawWire 应满足收敛后 OpenClawWire Port'
 
         # 验证所有方法可调用不抛 NotImplementedError
         import asyncio
 
         # send_message（需先 connect）
         async def _send():
-            await fake.connect(
-                'ws://x/', 'dt',
-                identity=_SESSION_IDENTITY, nonce=_SESSION_NONCE, scopes=_SESSION_SCOPES,
-            )
+            await fake.connect()
             run_id = await fake.send_message('s1', 'hello', on_event=lambda f: None)
             assert run_id == 'fake-run-id'
         asyncio.run(_send())
@@ -1632,10 +940,10 @@ class TestFakeOpenClawWireLongLived:
             return await fake.list_commands()
         assert asyncio.run(_cmds()) == {'commands': []}
 
-        # sessions_rpc
+        # 具名 session 方法（取代通用 sessions_rpc）
         fake.rpc_results = {'sessions.list': {'sessions': [{'key': 's1'}]}}
         async def _rpc():
-            return await fake.sessions_rpc('sessions.list', {})
+            return await fake.list_sessions()
         assert asyncio.run(_rpc()) == {'sessions': [{'key': 's1'}]}
 
         # list_pending_approvals
@@ -1665,10 +973,7 @@ class TestFakeOpenClawWireLongLived:
         fake = FakeOpenClawWire()
         fake.run_id = 'custom-run-42'
         async def _run():
-            await fake.connect(
-                'ws://x/', 'dt',
-                identity=_SESSION_IDENTITY, nonce=_SESSION_NONCE, scopes=_SESSION_SCOPES,
-            )
+            await fake.connect()
             return await fake.send_message('s', 'm', on_event=lambda f: None)
         assert asyncio.run(_run()) == 'custom-run-42'
 
@@ -1685,10 +990,7 @@ class TestFakeOpenClawWireLongLived:
             received.append(frame)
 
         async def _run():
-            await fake.connect(
-                'ws://x/', 'dt',
-                identity=_SESSION_IDENTITY, nonce=_SESSION_NONCE, scopes=_SESSION_SCOPES,
-            )
+            await fake.connect()
             return await fake.send_message('sess-1', '你好', on_event=cb)
         asyncio.run(_run())
         assert len(fake.sent) == 1
@@ -1710,10 +1012,7 @@ class TestFakeOpenClawWireLongLived:
             received.append(frame)
 
         async def _run():
-            await fake.connect(
-                'ws://x/', 'dt',
-                identity=_SESSION_IDENTITY, nonce=_SESSION_NONCE, scopes=_SESSION_SCOPES,
-            )
+            await fake.connect()
             rid = await fake.send_message('s', 'm', on_event=cb)
             await fake.push_event(rid, {'type': 'text', 'runId': rid, 'delta': 'hello'})
             await fake.push_event(rid, {'type': 'done', 'runId': rid})
@@ -1733,8 +1032,8 @@ class TestFakeOpenClawWireLongLived:
         fake.dead = True
         assert fake.dead
 
-    def test_fake_rpc_raises_when_preset(self):
-        """Fake sessions_rpc 可模拟网关拒绝（测试注入错误）。"""
+    def test_fake_named_session_methods_raise_when_preset(self):
+        """Fake 具名 session 方法可模拟网关拒绝（测试注入错误，经 rpc_errors 按 method 键）。"""
         import asyncio
 
         from chat.chat_client import ChatSendError
@@ -1743,10 +1042,31 @@ class TestFakeOpenClawWireLongLived:
         fake = FakeOpenClawWire()
         fake.rpc_errors = {'sessions.delete': ChatSendError('forbidden')}
         async def _run():
-            return await fake.sessions_rpc('sessions.delete', {'key': 'x'})
+            return await fake.delete_session('x')
         with pytest.raises(ChatSendError) as exc:
             asyncio.run(_run())
         assert 'forbidden' in str(exc.value)
+
+    def test_fake_named_session_methods_dispatch_by_method(self):
+        """四个具名方法各自经 _rpc 的 method 键取预设 payload（对齐真实现 _rpc）。"""
+        import asyncio
+
+        from integration.openclaw.fakes import FakeOpenClawWire
+
+        fake = FakeOpenClawWire()
+        fake.rpc_results = {
+            'sessions.list': {'sessions': []},
+            'chat.history': {'messages': []},
+            'sessions.create': {'key': 'k1'},
+            'sessions.delete': {},
+        }
+
+        async def _run():
+            assert await fake.list_sessions() == {'sessions': []}
+            assert await fake.get_history('sk') == {'messages': []}
+            assert await fake.create_session('k1') == {'key': 'k1'}
+            assert await fake.delete_session('k1') == {}
+        asyncio.run(_run())
 
     def test_fake_commands_rpc_raises_when_preset(self):
         """Fake list_commands 可模拟网关拒绝。"""
@@ -1776,10 +1096,7 @@ class TestFakeOpenClawWireLongLived:
             received.append(frame)
 
         async def _run():
-            await fake.connect(
-                'ws://x/', 'dt',
-                identity=_SESSION_IDENTITY, nonce=_SESSION_NONCE, scopes=_SESSION_SCOPES,
-            )
+            await fake.connect()
             rid = await fake.send_message('s', 'm', on_event=cb)
             fake.discard(rid)
             await fake.push_event(rid, {'type': 'text', 'delta': 'lost'})
@@ -1787,7 +1104,7 @@ class TestFakeOpenClawWireLongLived:
         assert not received  # discard 后事件丢弃
 
     def test_fake_not_connected_send_raises(self):
-        """Fake 未 connect 时 send_message 抛 ChatClientError（与真 Adapter 一致）。"""
+        """Fake 未 connect 时 send_message 抛 ChatClientError（与真实现一致）。"""
         import asyncio
 
         from chat.chat_client import ChatClientError
@@ -1800,20 +1117,18 @@ class TestFakeOpenClawWireLongLived:
             asyncio.run(_run())
 
     def test_fake_connect_marks_not_dead(self):
-        """Fake connect 后 dead=False。"""
+        """Fake connect 后 dead=False（无参，对齐真实现）。"""
         import asyncio
 
         from integration.openclaw.fakes import FakeOpenClawWire
 
         fake = FakeOpenClawWire()
+        fake.dead = True
         async def _run():
-            await fake.connect(
-                'ws://x/', 'dt-1',
-                identity=_SESSION_IDENTITY, nonce=_SESSION_NONCE, scopes=_SESSION_SCOPES,
-            )
+            await fake.connect()
         asyncio.run(_run())
         assert not fake.dead
-        assert fake.connected == [('ws://x/', 'dt-1')]
+        assert fake.connect_calls == 1
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2001,72 +1316,3 @@ class TestCrossAppLeakPrevention:
 
         pairing.delete()
         inst.delete()
-
-
-class TestFakeOpenClawWirePairing:
-    """FakeOpenClawWire 支持完整配对状态模拟——issue #102 acceptance。
-
-    PairingService 保留编排（状态机 + 持久化），把实际握手委托给 Wire Port；
-    测试用 fake 注入，不依赖真容器网关。
-    """
-
-    def test_fake_pair_records_calls(self):
-        """fake.pair() 记录调用参数，供断言。"""
-        import asyncio
-
-        from chat.device_crypto import DeviceCrypto
-        from integration.openclaw.fakes import FakeOpenClawWire
-
-        identity = DeviceCrypto.generate_identity()
-        fake = FakeOpenClawWire()
-
-        async def _run():
-            return await fake.pair(
-                url='ws://x/', identity=identity, bootstrap_token='tok',
-            )
-
-        asyncio.run(_run())
-        assert len(fake.pair_calls) == 1
-        assert fake.pair_calls[0][0] == 'ws://x/'
-        assert fake.pair_calls[0][2] == 'tok'
-
-    def test_fake_pair_returns_preset_result(self):
-        """fake.pair() 返回预设 PairingResult，测试可控。"""
-        import asyncio
-
-        from chat.device_crypto import DeviceCrypto
-        from chat.pairing_ws import PairingResult
-        from integration.openclaw.fakes import FakeOpenClawWire
-
-        identity = DeviceCrypto.generate_identity()
-        fake = FakeOpenClawWire()
-        fake.pair_result = PairingResult(
-            device_token='dt-preset',
-            scopes=['operator.read', 'operator.write', 'operator.approvals'],
-        )
-
-        async def _run():
-            return await fake.pair(url='ws://x/', identity=identity, bootstrap_token='tok')
-
-        result = asyncio.run(_run())
-        assert result.device_token == 'dt-preset'
-        assert 'operator.approvals' in result.scopes
-
-    def test_fake_pair_raises_when_preset(self):
-        """fake 可预设异常以模拟 PairingRequired / PairingError 分支。"""
-        import asyncio
-
-        from chat.device_crypto import DeviceCrypto
-        from chat.pairing_ws import PairingRequired
-        from integration.openclaw.fakes import FakeOpenClawWire
-
-        identity = DeviceCrypto.generate_identity()
-        fake = FakeOpenClawWire()
-        fake.pair_raise = PairingRequired('req-err')
-
-        async def _run():
-            return await fake.pair(url='ws://x/', identity=identity, bootstrap_token='tok')
-
-        with pytest.raises(PairingRequired) as exc_info:
-            asyncio.run(_run())
-        assert exc_info.value.request_id == 'req-err'

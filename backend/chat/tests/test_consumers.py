@@ -380,7 +380,14 @@ async def test_disconnect_unsubscribes_approval(override_pool, instance, fake_cl
 
 
 class FakeWirePort(FakeChatClient):
-    """FakeChatClient 兼容 OpenClawWire Port 契约：添加 dead/sessions_rpc/connect/close。"""
+    """FakeChatClient + dead/connect/close 语义的 consumer 测试替身（#231 收敛后：
+
+    此替身仅模拟 consumer 实际调用的方法集——send_message/resolve_approval/list_pending_approvals/
+    add_approval_subscriber/remove_approval_subscriber/discard + dead/discard。额外的
+    sessions_rpc/connect/close 是历史遗留的富余方法，consumer 不调用；收敛后 OpenClawWire Port
+    已收窄（无 sessions_rpc/close——具名 session 方法 + aclose），consumer 与本替身均不依赖它们，
+    故原样保留不删（测试替身可比 Port 富，向下闭合）。
+    """
 
     def __init__(self):
         super().__init__()
