@@ -1270,6 +1270,41 @@ describe('ChatView', () => {
       expect(stream).not.toContain('sk-1-历史')
     })
 
+    it('serializes concurrent same-session history reloads (codex #249 P2 转录不重复)', async () => {
+      // 复现：断线时上一次 loadHistory(sk-1) 仍在途 → 重连 onReady 又发一次 loadHistory(sk-1)。
+      // 两次 containerGen+selectedSession 守卫值相同、若都被接受，后落地快照 prepend 到先落地的已渲染
+      // 历史上 → 转录重复。historyGen 请求代只让最新一次提交快照。
+      let call = 0
+      ;(getSessionHistory as ReturnType<typeof vi.fn>).mockImplementation(() => {
+        call += 1
+        const mine = call
+        // 第一次（挂载时）响应延迟到第二次（重连恢复）发起之后才落地——模拟并发在途
+        return new Promise((resolve) => {
+          setTimeout(() => resolve({
+            messages: [{ role: 'agent', text: `快照#${mine}` }],
+            hasMore: false,
+            nextOffset: null,
+          }), mine === 1 ? 5_000 : 0) // 旧请求更晚落地：若无代际守卫会覆盖/重复新快照
+        })
+      })
+      const w = await mountReady() // 挂载：loadHistory#1（5s 后才落地）
+      MockWS.last!.fireClose()
+      await nextTick()
+      await vi.advanceTimersByTimeAsync(1_000) // 退避到点 → 自动重连
+      await flushPromises()
+      MockWS.last!.fireOpen()
+      MockWS.last!.fireMessage({ type: 'ready', container: 'demo' }) // onReady → loadHistory#2（取代 #1）
+      await flushPromises() // #2 立即落地
+      // #2 快照渲染；#1 旧响应（5s 后）落地须被丢弃，不得再 prepend 一份
+      await vi.advanceTimersByTimeAsync(6_000) // 越过 #1 的落地时刻
+      await flushPromises()
+      const text = w.find('[data-test="stream"]').text()
+      expect(text).toContain('快照#2') // 最新快照生效
+      expect(text).not.toContain('快照#1') // 被取代的旧快照已丢弃
+      // 转录不重复：同一快照只出现一次
+      expect(w.findAll('.msg.assistant').length).toBe(1)
+    })
+
     it('manual reconnect button reconnects the current container (重连按钮，绕开 early-return)', async () => {
       const w = await mountReady()
       const first = MockWS.last!

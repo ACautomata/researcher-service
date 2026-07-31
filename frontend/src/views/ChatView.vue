@@ -72,6 +72,11 @@ let pendingSend = false // 已 send 但首帧未到（runId 未知）
 let pendingAbandonCount = 0 // 切会话时仍 pending 的 run 数；其迟到首帧按 FIFO 视为孤儿丢弃（codex P2 #3）
 // selectContainer 的请求代：丢弃切容器途中迟到的 listSessions 响应（codex P2）
 let containerGen = 0
+// codex #249 P2：loadHistory 的请求代。仅 containerGen+selectedSession 守卫拦不住「同一会话并发
+// 两次 loadHistory」（如断线重连 onReady 恢复时上一次历史请求仍在途）——两次守卫值相同、响应都被
+// 接受，后落地的快照 prepend 到先落地的已渲染历史上 → 转录重复/混杂。每次 loadHistory 自增并捕获
+// 请求代，只有最新一次才允许提交其快照，其余（被取代的在途请求）落地即丢弃。
+let historyGen = 0
 
 // issue #239 / 评审 #198 问题 1：断线自动重连——指数退避（对齐 GATEWAY_RECONNECT_POLICY 与
 // 后端 pool.ReconnectPolicy：初始 1s、每次翻倍、封顶 30s，重连成功即重置）。仅普通断线（非 4401；
@@ -369,8 +374,11 @@ function pickSession(key: string) {
 // T3 会话历史回看（issue #82 / spec #76）：拉 chat.history 渲染历史消息 + 维护分页态。
 // stale 守卫：切会话/容器后迟到的 history 响应按 containerGen + selectedSession 双校验丢弃
 // （同 listSessions 的 containerGen 套路）。401 由 client 处理；其它失败落 errorMsg。
+// codex #249 P2：另加 historyGen 请求代——同一会话并发两次 loadHistory（如重连恢复撞上在途请求）
+// 时只让最新一次提交快照，被取代的在途请求落地即丢弃，避免两份快照各自 prepend 造成转录重复。
 async function loadHistory(key: string) {
   const gen = containerGen
+  const hgen = ++historyGen // codex #249 P2：本请求代；之后再有 loadHistory 即取代本请求
   const cname = selectedContainer.value
   messages.value = []
   historyHasMore.value = false
@@ -381,6 +389,7 @@ async function loadHistory(key: string) {
   try {
     const res = await getSessionHistory(cname, key)
     if (gen !== containerGen || selectedSession.value !== key) return // 切走了：丢弃迟到响应
+    if (hgen !== historyGen) return // codex #249 P2：已被更新的 loadHistory 取代：丢弃本在途响应
     // codex P2 #108：保留 await 期间 send() 追加的进行中 turn（user + 流式 assistant 占位）。
     // 直接整体替换会被历史快照覆盖 → WS delta 找不到 streaming 尾，整轮实时回复从 UI 消失。
     // 历史在前、进行中 turn 留在尾，streaming 尾仍是 onText 路由的目标。
@@ -390,6 +399,7 @@ async function loadHistory(key: string) {
     historyAnchor.value = res.nextOffset
   } catch (e) {
     if (gen !== containerGen || selectedSession.value !== key) return
+    if (hgen !== historyGen) return // codex #249 P2：被取代的请求：不落错误、不干扰新请求
     if (e instanceof ApiError && e.status === 401) return // 401 由 client 处理会话
     if (e instanceof ApiError && e.status === 409) {
       pairingNeeded.value = true // T3：未配对 → 引导（容器可能在会话期间被解配）
@@ -397,7 +407,9 @@ async function loadHistory(key: string) {
     }
     errorMsg.value = (e as Error).message
   } finally {
-    if (gen === containerGen && selectedSession.value === key) historyLoading.value = false
+    if (gen === containerGen && selectedSession.value === key && hgen === historyGen) {
+      historyLoading.value = false // codex #249 P2：只有最新请求才复位（被取代的不得关新请求的 loading）
+    }
   }
 }
 
