@@ -99,24 +99,30 @@ class _RecoveryCoordinator:
                 'type': 'text', 'runId': recovered.run_id,
                 'delta': recovered.text, 'replace': True,
             })
-        if recovered.plan is not None:
-            # 步3 采用可选 plan（systemRunPlan）：透传给前端展示计划卡（wire 原生字段，不翻译）。
-            await on_event({'type': 'plan', 'runId': recovered.run_id, 'plan': recovered.plan})
+        # codex #236 P2-104：plan（systemRunPlan）采用进 RecoveredRun 但**暂不下发**——前端 ws.ts 尚无
+        # plan ChatFrame 类型/handleMessage 分支，发即静默丢弃；#217 边界为后端恢复，前端 plan 卡属
+        # #198。RecoveredRun.plan 保留该值供 #198 接线时取用。
         # 步3 路由已重建：回放恢复泵期缓冲的 event 帧（重连期到达的进行中 run 事件不丢，路由到本 run）。
         client._flush_connect_buffered()
 
     def _history_frames(self, messages) -> list[dict]:
-        """history messages[] → __history__ 命名空间的 text 帧：首发 replace=True 整段锚定，
-        后续追加（前端按 historyRunId 累积重解析）。空/非 list → []。"""
+        """history messages[] → __history__ 命名空间的 text 帧：**首个产出帧** replace=True 整段锚定，
+        后续追加（前端按 historyRunId 累积重解析）。空/非 list → []。
+
+        codex #236 P2-120：content 多态（user=字符串 / assistant=list，ADR 0003）经
+        ``extract_history_text`` 校准——复用 _extract_text 会把 user 字符串 content 归 ''（user turn
+        从投影消失）。replace 锚定**首个产出帧**而非 index==0：index 0 消息 text 为空（如纯工具 turn）
+        被跳过时，原实现会让首个实际产出帧缺 replace=True，前端无法整段锚定。
+        """
         if not isinstance(messages, list):
             return []
         frames: list[dict] = []
-        for index, message in enumerate(messages):
-            text = self._client._translator._extract_text(message)  # pylint: disable=protected-access
+        for message in messages:
+            text = self._client._translator.extract_history_text(message)  # pylint: disable=protected-access
             if not text:
                 continue
             frame = {'type': 'text', 'runId': HISTORY_RUN_ID, 'delta': text}
-            if index == 0:
+            if not frames:
                 frame['replace'] = True
             frames.append(frame)
         return frames
@@ -230,6 +236,22 @@ class OpenClawWireClient:  # pylint: disable=too-many-instance-attributes,too-ma
         if self._active_session_key is None:
             return None
         return self._active_session_key, self._session_callbacks.get(self._active_session_key)
+
+    def unregister_active_session(self, session_key: str, on_event: OnEvent | None = None) -> None:
+        """#217 / codex #236 P2-261：注销 ``record_active_session`` 记住的恢复回调（consumer 断开 /
+        切容器时调用），防池化 client 后续重连把恢复投影投到已关闭 consumer（输出丢失 + 回调异常
+        连累 connect），并释放对 consumer 的引用保留。
+
+        **匹配恒等才清**：``session_key`` 是当前活跃 key 且 ``on_event``（提供时）与记住的回调同对象
+        才清——多 consumer 共享池化 client 时，别的 consumer 后注册的同名会话不被本 consumer 的断开
+        误清（对齐 remove_approval_subscriber 的只清自己语义）。不匹配 no-op（幂等）。
+        """
+        if self._active_session_key != session_key:
+            return
+        if on_event is not None and self._session_callbacks.get(session_key) is not on_event:
+            return
+        self._session_callbacks.pop(session_key, None)
+        self._active_session_key = None
 
     def add_approval_subscriber(self, cb: OnEvent) -> None:
         """注册连接级审批订阅者（T06 / codex P1）：多 consumer 共享 client 时各自独立注册。"""
@@ -348,6 +370,11 @@ class OpenClawWireClient:  # pylint: disable=too-many-instance-attributes,too-ma
                     )
                 finally:
                     self._connect_done.set()  # 停泵：无论恢复成败，交棒给 _recv_loop（或 aclose）
+                    # codex #236 P2-419：恢复完成后兜底回放泵期缓冲的**连接级** event 帧（approval /
+                    # approvalResolved 无 runId、fan-out 不需路由）——否则无活跃会话 / 无可采用 run 时
+                    # 它们滞留到无关的未来 send 才浮现。run-scoped 帧不在此弹（路由未就绪回放即被
+                    # _handle 丢弃），留待路由注册（send ack / inFlightRun 重建）时回放，不丢帧。
+                    self._flush_connection_level_buffered()
             except TimeoutError as exc:
                 raise ChatConnectError('connect handshake timeout') from exc
         except BaseException:
@@ -545,6 +572,26 @@ class OpenClawWireClient:  # pylint: disable=too-many-instance-attributes,too-ma
             return
         buffered, self._connect_buffered = self._connect_buffered, []
         asyncio.ensure_future(self._replay_connect_buffered(buffered))
+
+    def _flush_connection_level_buffered(self) -> None:
+        """#217 / codex #236 P2-419：恢复完成后回放泵期缓冲的**连接级** event 帧（approval /
+        approvalResolved——fan-out 到审批订阅者，不需 runId 路由）。
+
+        原先缓冲仅「采用 inFlightRun」或「后续 send ack 注册路由」两路回放——无活跃会话 / 无可采用
+        run 时连接级帧滞留到无关的未来 send 才浮现（审批卡迟到/丢失）。此处兜底只弹**连接级**帧；
+        **run-scoped 帧留在缓冲**待路由注册（send ack / inFlightRun 重建）时回放——否则恢复完成后
+        路由未就绪即回放会被 _handle 丢弃（cb is None），重连期进行中 run 的输出反被本兜底弄丢。
+        """
+        if not self._connect_buffered:
+            return
+        keep: list[dict] = []
+        drain: list[dict] = []
+        for msg in self._connect_buffered:
+            frames = self._translator.translate(msg)
+            (drain if frames and frames[0].get('runId') is None else keep).append(msg)
+        self._connect_buffered = keep
+        if drain:
+            asyncio.ensure_future(self._replay_connect_buffered(drain))
 
     async def _replay_connect_buffered(self, buffered: list[dict]) -> None:
         for msg in buffered:

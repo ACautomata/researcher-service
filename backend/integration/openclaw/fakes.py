@@ -122,6 +122,11 @@ class FakeOpenClawWire:
         """#217：对齐真实现——记住活跃会话供重连恢复（consumer _handle_send 调用）。"""
         self.recorded_session = (session_key, on_event)
 
+    def unregister_active_session(self, session_key: str, on_event: Any = None) -> None:
+        """#217 / codex #236 P2-261：对齐真实现——consumer disconnect/切容器对称注销恢复回调。"""
+        if self.recorded_session is not None and self.recorded_session[0] == session_key:
+            self.recorded_session = None
+
     # ── 连接级审批 ──
 
     def add_approval_subscriber(self, cb: Any) -> None:

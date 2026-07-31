@@ -1227,8 +1227,9 @@ async def test_adopt_inflight_run_empty_text_still_rebuilds_route():
 
 @pytest.mark.asyncio
 async def test_adopt_inflight_run_plan_passthrough():
-    """#217 步3（采用可选 plan）：inFlightRun.plan（systemRunPlan）采用并透传给前端展示计划卡
-    （wire 原生字段，不翻译）。"""
+    """#217 步3（采用可选 plan）/ codex #236 P2-104：inFlightRun.plan（systemRunPlan）被采用进
+    RecoveredRun，但**不下发** plan 帧——前端 ws.ts 尚无 plan ChatFrame 类型/handleMessage 分支，
+    发即静默丢弃；前端 plan 卡接线属 #198。故断言**无** plan 帧发出（采纳值留 RecoveredRun 供 #198）。"""
     history = {
         'messages': [],
         'inFlightRun': {'runId': 'inflight-plan', 'text': '',
@@ -1243,8 +1244,8 @@ async def test_adopt_inflight_run_plan_passthrough():
     c = _client(transport=t)
     c.record_active_session('s1', on_event=on_event)
     await c.connect()
-    assert {'type': 'plan', 'runId': 'inflight-plan',
-            'plan': {'rawCommand': 'curl x', 'sessionKey': 's1'}} in received
+    # plan 被采用（路由重建证明 run 被采纳），但不下发 plan 帧（前端无此契约，#198 接线前不发明文）
+    assert not any(f.get('type') == 'plan' for f in received)
     await c.aclose()
 
 
@@ -1271,6 +1272,61 @@ async def test_history_messages_replayed_as_history_namespace_replace():
     assert history_frames == [
         {'type': 'text', 'runId': '__history__', 'delta': '问题一', 'replace': True},
         {'type': 'text', 'runId': '__history__', 'delta': '回答一'},
+    ]
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_history_user_string_content_replayed():
+    """#217 步2 / codex #236 P2-120：chat.history 的 content **多态**（ADR 0003：user=字符串，
+    assistant=list）。复用 _extract_text 会把 user 字符串 content 归 '' → 历史 user turn 从恢复
+    投影消失。此处 user 用字符串 content、assistant 用 list，两者都须回放进 __history__ 投影。"""
+    history = {
+        'messages': [
+            {'role': 'user', 'content': '问题一'},  # 字符串 content（ADR 0003 user 形态）
+            {'role': 'assistant', 'content': [{'type': 'text', 'text': '回答一'}]},  # list content
+        ],
+    }
+    t = FakeChatTransport(rpc_payloads={'chat.history': history})
+    received = []
+
+    async def on_event(frame):
+        received.append(frame)
+
+    c = _client(transport=t)
+    c.record_active_session('s1', on_event=on_event)
+    await c.connect()
+    history_frames = [f for f in received if f.get('runId') == '__history__']
+    assert history_frames == [
+        {'type': 'text', 'runId': '__history__', 'delta': '问题一', 'replace': True},
+        {'type': 'text', 'runId': '__history__', 'delta': '回答一'},
+    ]
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_history_first_emitted_frame_marked_replace_when_leading_empty():
+    """#217 步2 / codex #236 P2-120：replace=True 锚定**首个产出帧**而非 index==0——index 0 消息 text
+    为空（如纯工具 turn，无 text content）被跳过时，首个实际产出帧仍须带 replace=True 供前端整段锚定。"""
+    history = {
+        'messages': [
+            {'role': 'assistant', 'content': [{'type': 'thinking', 'thinking': '...'}]},  # 无 text → 跳过
+            {'role': 'user', 'content': '首个有效'},
+        ],
+    }
+    t = FakeChatTransport(rpc_payloads={'chat.history': history})
+    received = []
+
+    async def on_event(frame):
+        received.append(frame)
+
+    c = _client(transport=t)
+    c.record_active_session('s1', on_event=on_event)
+    await c.connect()
+    history_frames = [f for f in received if f.get('runId') == '__history__']
+    # index 0 跳过（无 text）；首个产出帧（index 1）带 replace=True
+    assert history_frames == [
+        {'type': 'text', 'runId': '__history__', 'delta': '首个有效', 'replace': True},
     ]
     await c.aclose()
 
@@ -1323,6 +1379,34 @@ async def test_inflight_event_arriving_during_recovery_not_lost():
     await asyncio.sleep(0.1)  # 等缓冲回放
     deltas = [f for f in received if f.get('runId') == 'inflight-1' and f.get('type') == 'text']
     assert any(f.get('delta') == '，途中' for f in deltas), f'恢复泵期到达的事件未回放: {received}'
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_connection_level_event_drained_when_no_adoptable_run():
+    """#217 / codex #236 P2-419：恢复泵期到达的**连接级** event（approval，无 runId、无可采用
+    inFlightRun）须在恢复完成后**无条件**回放 fan-out——原先仅「采用 inFlightRun」或「后续 send ack」
+    两路回放缓冲，无活跃会话/无可采用 run 时该帧滞留到无关的未来 send 才浮现（审批卡迟到/丢失）。"""
+    t = FakeChatTransport(
+        rpc_payloads={'chat.history': {'messages': []}},  # 无 inFlightRun → 无可采用 run
+        events=[{'type': 'event', 'event': 'exec.approval.requested',
+                 'payload': {'id': 'ap-conn', 'request': {'command': 'curl x', 'sessionKey': 's1'}}}],
+    )
+    approvals = []
+
+    async def on_approval(frame):
+        approvals.append(frame)
+
+    async def on_event(frame):  # 会话投影回调（本测试不关注）
+        pass
+
+    c = _client(transport=t)
+    c.add_approval_subscriber(on_approval)
+    c.record_active_session('s1', on_event=on_event)
+    await c.connect()
+    await asyncio.sleep(0.1)  # 等恢复完成后的无条件缓冲回放
+    assert any(f.get('type') == 'approval' and f.get('id') == 'ap-conn' for f in approvals), \
+        f'连接级审批事件在无可采用 run 时未回放: {approvals}'
     await c.aclose()
 
 

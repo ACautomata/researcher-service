@@ -182,6 +182,18 @@ class ChatEventTranslator:
             )
         return ''
 
+    @classmethod
+    def extract_history_text(cls, message) -> str:
+        """#217 步2 / codex #236 P2-120：chat.history 的 messages[].content **多态**（ADR 0003：
+        user=字符串，assistant=list [{type:text,text}]）。复用 _extract_text 会把 user 字符串 content
+        归 ''（其 dict 分支对 str content 迭代空）→ 历史 user turn 从恢复投影消失。此处对 content
+        为 str 的 history 消息直取 content，list 走 _extract_text；message 整体为 str 亦兼容。"""
+        if isinstance(message, str):
+            return message
+        if isinstance(message, dict) and isinstance(message.get('content'), str):
+            return message['content']
+        return cls._extract_text(message)
+
     def _translate_final(self, run_id: str, payload: dict) -> list[dict]:
         out: list[dict] = []
         message = self._extract_text(payload.get('message'))

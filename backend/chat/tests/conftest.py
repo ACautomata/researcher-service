@@ -47,6 +47,15 @@ class FakeChatClient:
         """#217：对齐真实 client——consumer _handle_send 记住活跃会话供重连恢复。"""
         self.recorded_session = (session_key, on_event)
 
+    def unregister_active_session(self, session_key, on_event=None):
+        """#217 / codex #236 P2-261：对齐真实 client——consumer disconnect/切容器对称注销恢复回调。
+
+        匹配恒等才清（on_event 提供时须同对象），不对齐真实实现的多 consumer 共享语义从简——
+        测试替身只需记录注销发生了 + 清掉 recorded_session（同 key 即清）。
+        """
+        if self.recorded_session is not None and self.recorded_session[0] == session_key:
+            self.recorded_session = None
+
     def discard(self, run_id):
         self.discarded.append(run_id)
         self._handlers.pop(run_id, None)
