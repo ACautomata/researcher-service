@@ -24,6 +24,9 @@ def validate_prod_env(env: os.environ | dict) -> None:
     - ``OPENCLAW_TEMPLATE_DIR`` —— 缺失/空/纯空白/相对路径 → base.py 模板解析后
       HomeProvisioner.copytree 找不到源（绝对路径校验：相对路径会被 cwd 静默吞，重复
       issue #195「卡 creating」错配，复用 2902641 + P2 :2902641 review）
+    - ``LLM_API_KEY`` —— 缺失/空/纯空白 → 空 key 会静默注入 OpenClaw 容器，到首次
+      创建/对话才暴露（issue #195 同类错配；ADR 0005 + spec §5.2：全面板共享必填敏感值，
+      base 默认空串保持 dev/integration 宽容，生产由本校验强制非空）
     - ``CREDENTIAL_ENCRYPTION_KEYS`` —— CredentialKeySettings 内部校验
     """
     allowed_hosts_str = env.get('DJANGO_ALLOWED_HOSTS', '').strip()
@@ -34,6 +37,18 @@ def validate_prod_env(env: os.environ | dict) -> None:
         raise ImproperlyConfigured(
             '生产必须设置 DJANGO_ALLOWED_HOSTS（逗号分隔非空主机名，至少一项；'
             '参见 deploy/README.md 与 deploy/.env.example）。',
+        )
+
+    # ADR 0005 + spec §5.2：LLM_API_KEY 是全面板共享的必填敏感值，base.py 声明默认空串
+    # （dev/integration 宽容，integration CI 靠 env 注入跑真容器）；生产缺省空串会把空 key
+    # 静默注入 OpenClaw 容器，到首次创建/对话才暴露（issue #195 同类错配），故强制非空。
+    llm_api_key = env.get('LLM_API_KEY', '').strip()
+    if not llm_api_key:
+        raise ImproperlyConfigured(
+            '生产必须设置 LLM_API_KEY（全面板共享的必填敏感值，spec §5.2；缺省空串会'
+            '把空 key 静默注入 OpenClaw 容器，首次创建/对话才暴露）。'
+            'Docker 化部署由 compose/K8s environment 注入，勿写盘；参见 deploy/README.md '
+            '与 deploy/.env.example。',
         )
 
     template_dir = env.get('OPENCLAW_TEMPLATE_DIR', '').strip()

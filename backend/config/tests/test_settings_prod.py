@@ -25,6 +25,7 @@ def _minimal_env(**overrides):
     base = {
         'DJANGO_ALLOWED_HOSTS': 'example.test',
         'OPENCLAW_TEMPLATE_DIR': _EXISTING_DIR,
+        'LLM_API_KEY': 'sk-prod-test',
     }
     base.update(overrides)
     return base
@@ -162,3 +163,37 @@ def test_validate_prod_env_fail_fast_when_template_dir_not_readable(tmp_path):
         assert '权限' in msg
     finally:
         no_access.chmod(0o755)  # 还原权限，让 tmp_path fixture 能清理
+
+
+# ---- LLM_API_KEY 生产 fail-fast（issue #258 / parent #250）----
+# ADR 0005 + spec §5.2：LLM_API_KEY 是全面板共享的必填敏感值。base.py 声明为默认空串
+# （dev/integration 宽容，integration CI 靠 env 注入跑真容器），生产由本校验强制非空——
+# 缺省空串会静默注入空 key 到 OpenClaw 容器，首次创建/对话才暴露（issue #195 同类错配）。
+
+
+def test_validate_prod_env_fail_fast_when_llm_api_key_missing():
+    """LLM_API_KEY 缺失 → ImproperlyConfigured（运维启动即知，而非首次创建/对话才暴露）。"""
+    env = _minimal_env()
+    env.pop('LLM_API_KEY')
+    with __import__('pytest').raises(ImproperlyConfigured) as ei:
+        validate_prod_env(env)
+    msg = str(ei.value)
+    assert 'LLM_API_KEY' in msg
+    assert '生产' in msg and ('必填' in msg or '必设' in msg or '必须' in msg)
+    # 错误消息指向部署文档，运维能立即知道在哪改（与 TEMPLATE_DIR 校验同款）
+    assert 'deploy/README.md' in msg or 'deploy/.env.example' in msg, (
+        f'错误消息应指向部署文档，当前: {msg!r}'
+    )
+
+
+def test_validate_prod_env_fail_fast_when_llm_api_key_empty():
+    """LLM_API_KEY 显式空串 → 同样 fail-fast（与缺失同语义：空 key 静默注入容器）。"""
+    with __import__('pytest').raises(ImproperlyConfigured) as ei:
+        validate_prod_env(_minimal_env(LLM_API_KEY=''))
+    assert 'LLM_API_KEY' in str(ei.value)
+
+
+def test_validate_prod_env_fail_fast_when_llm_api_key_whitespace_only():
+    """LLM_API_KEY 仅空白 → 仍 fail-fast（防运维误设含缩进的空值）。"""
+    with __import__('pytest').raises(ImproperlyConfigured):
+        validate_prod_env(_minimal_env(LLM_API_KEY='   '))
