@@ -12,13 +12,22 @@ export interface ThinkingParts {
   inThinking: boolean // 当前是否处于未闭合的 <thinking> 内（用于卡片「思考中」态）
 }
 
+export interface SplitOptions {
+  // 终态重解析（issue #238 / 评审 #198 Low 5.3）：流已结束（finalize/done/断线）时末尾半截
+  // `<thi…` 残片按普通文本放回正文——终态无「下帧补齐」可言，残片不应被永久吞掉。
+  // 流式中保持默认行为（隐藏残片等下帧补齐）；未闭合 <thinking> 内容仍入 thinking 不丢。
+  terminal?: boolean
+}
+
 const OPEN = '<thinking>'
 const CLOSE = '</thinking>'
 
 // 把原始累积文本拆成 正文 / 思考 两段。大小写敏感（网关按小写 `<thinking>` 下发，r26 §4 实测）。
 // 扫描思路：线性找 OPEN/CLOSE 配对；OPEN 前、CLOSE 后归正文，OPEN..CLOSE 间归 thinking。
-// 末尾若悬着半个 `<thi…` 标签残片（流式截断），归入正文但自残片起点截断——避免逐字泄露尖括号标签。
-export function splitThinking(raw: string): ThinkingParts {
+// 末尾若悬着半个 `<thi…` 标签残片：流式中（默认）归入正文但自残片起点截断——避免逐字泄露尖括号标签；
+// 终态（{ terminal: true }）无「下帧补齐」可言，残片按普通文本放回正文，不吞字符（issue #238）。
+export function splitThinking(raw: string, options?: SplitOptions): ThinkingParts {
+  const terminal = options?.terminal ?? false
   let text = ''
   let thinking = ''
   let inThinking = false
@@ -27,11 +36,12 @@ export function splitThinking(raw: string): ThinkingParts {
   while (i < n) {
     if (!inThinking) {
       const open = raw.indexOf(OPEN, i)
-      // 末尾半截 `<thi…` 残片（OPEN 的前缀）属流式截断，不入正文（下帧补齐后再判）
-      const openStart = open === -1 ? partialTagStart(raw, i) : open
-      text += raw.slice(i, openStart)
+      // 末尾半截 `<thi…` 残片（OPEN 的前缀）属流式截断，不入正文（下帧补齐后再判）；
+      // 终态（terminal）无下帧补齐——残片按普通文本放回正文，不吞字符（issue #238）
+      const openStart = open === -1 && !terminal ? partialTagStart(raw, i) : open
+      text += raw.slice(i, openStart === -1 ? n : openStart)
       if (open === -1) {
-        i = n // 无完整 OPEN：到末尾（残片已截断）
+        i = n // 无完整 OPEN：到末尾（流式中残片已截断；终态已整体入正文）
       } else {
         inThinking = true
         i = open + OPEN.length

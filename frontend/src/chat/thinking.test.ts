@@ -73,4 +73,40 @@ describe('splitThinking (T08 思考链剥离)', () => {
     expect(splitThinking('<thinking></thinking>').text).toBe('')
     expect(splitThinking('<thinking></thinking>').thinking).toBe('')
   })
+
+  // ---- #238 终态重解析（评审 issue #198 Low 5.3）：流结束（finalize）时末尾半截 `<thi…` 残片
+  // 按普通文本放回正文——终态无「下帧补齐」可言，残片不应被永久吞掉 ----
+  it('terminal：流式以普通文本 `<` 结尾 → 终态正文完整保留该字符', () => {
+    const r = splitThinking('回答<', { terminal: true })
+    expect(r.text).toBe('回答<')
+    expect(r.inThinking).toBe(false)
+  })
+
+  it('terminal：半截 `<thi` 残片按普通文本放回正文', () => {
+    const r = splitThinking('回答<thi', { terminal: true })
+    expect(r.text).toBe('回答<thi')
+  })
+
+  it('terminal：无残片时与流式行为一致（正文直通）', () => {
+    const r = splitThinking('回答', { terminal: true })
+    expect(r.text).toBe('回答')
+  })
+
+  it('terminal：完整 thinking 块仍剥离进思考，正文残片放回', () => {
+    const r = splitThinking('<thinking>先想</thinking>答<', { terminal: true })
+    expect(r.thinking).toBe('先想')
+    expect(r.text).toBe('答<')
+  })
+
+  it('terminal：未闭合 <thinking> 内容仍入思考不丢（标签不泄露正文）', () => {
+    const r = splitThinking('前言<thinking>没闭合', { terminal: true })
+    expect(r.text).toBe('前言')
+    expect(r.thinking).toBe('没闭合')
+    expect(r.inThinking).toBe(true)
+  })
+
+  it('流式中（非 terminal，默认）：残片仍隐藏，等下帧补齐后再判', () => {
+    const r = splitThinking('回答<thi')
+    expect(r.text).toBe('回答')
+  })
 })

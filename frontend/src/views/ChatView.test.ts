@@ -991,4 +991,105 @@ describe('ChatView', () => {
     expect(w.find('[data-test="session-sk-new"]').text()).toContain('sk-new'.slice(0, 8))
     expect(w.find('[data-test="session-sk-1"]').exists()).toBe(true) // 旧会话仍在
   })
+
+  // ---- #238 onClose 收尾（评审 issue #198 问题 3 / T2）：断线时收尾流式气泡 + 清理 run 态 ----
+  it('finalizes the streaming bubble on disconnect so the cursor stops (流式中断线光标落定)', async () => {
+    const w = await mountReady()
+    await w.find('[data-test="input"]').setValue('hi')
+    await w.find('[data-test="send"]').trigger('click')
+    MockWS.last!.fireMessage({ type: 'text', runId: 'r1', delta: '回答' })
+    await nextTick()
+    expect(w.find('.cursor').exists()).toBe(true) // 流式中：光标闪烁
+    MockWS.last!.onclose?.({}) // 意外断线：正在流式
+    await nextTick()
+    // onClose 收尾 → streaming 落定：光标不再永久闪烁（发送按钮也不被 streaming 永久禁用）
+    expect(w.find('.cursor').exists()).toBe(false)
+  })
+
+  it('drops late deltas of the abandoned run after disconnect (断线后旧 run 迟到帧按 abandoned 丢弃)', async () => {
+    const w = await mountReady()
+    await w.find('[data-test="input"]').setValue('hi')
+    await w.find('[data-test="send"]').trigger('click')
+    MockWS.last!.fireMessage({ type: 'text', runId: 'r1', delta: 'A' })
+    await nextTick()
+    MockWS.last!.onclose?.({}) // 断线：在途 run r1 应被标记 abandoned
+    await nextTick()
+    // 旧 run 迟到增量（重连/恢复前经旧链路迟到）→ 按 abandoned 丢弃，不得重新锚定渲染
+    MockWS.last!.fireMessage({ type: 'text', runId: 'r1', delta: 'STALE' })
+    await nextTick()
+    expect(w.find('[data-test="stream"]').text()).not.toContain('STALE')
+  })
+
+  it('anchors a fresh run after a reconnect cycle (activeRunId 清理：新 run 首帧不被静默丢弃)', async () => {
+    // 断线后经「切走再切回」重建连接：若 onClose 未清 activeRunId，新 run 首帧会撞
+    // if (activeRunId && runId !== activeRunId) return 被静默丢弃（评审 #198 问题 3 后果 2）
+    ;(listInstances as ReturnType<typeof vi.fn>).mockResolvedValue([
+      INSTANCE,
+      { ...INSTANCE, name: 'other', port: 19001 },
+    ])
+    const w = await mountReady()
+    await w.find('[data-test="input"]').setValue('hi')
+    await w.find('[data-test="send"]').trigger('click')
+    MockWS.last!.fireMessage({ type: 'text', runId: 'r1', delta: 'A' })
+    await nextTick()
+    MockWS.last!.onclose?.({})
+    await nextTick()
+    // 切到 other 再切回 demo → 重建 ws（模拟断线后的重连）
+    await w.find('[data-test="container-other"]').trigger('click')
+    await flushPromises()
+    await w.find('[data-test="container-demo"]').trigger('click')
+    await flushPromises()
+    MockWS.last!.fireOpen()
+    MockWS.last!.fireMessage({ type: 'ready', container: 'demo' })
+    await nextTick()
+    // 新会话发消息 → 新 run 首帧必须渲染（activeRunId 未残留旧 run）
+    await w.find('[data-test="input"]').setValue('yo')
+    await w.find('[data-test="send"]').trigger('click')
+    MockWS.last!.fireMessage({ type: 'text', runId: 'r2', delta: 'NEW' })
+    await nextTick()
+    expect(w.find('[data-test="stream"]').text()).toContain('NEW')
+  })
+
+  it('does not let a stale pendingAbandonCount eat the next run after reconnect (断线清理孤儿计数)', async () => {
+    // 发送后首帧未到即断线（pendingSend=true）：abandonActiveRun 会 pendingAbandonCount++，
+    // 但该计数是「同 socket 内孤儿帧 FIFO」语义——已断的 socket 不会再投递孤儿帧，
+    // 残留计数会在重连后吞掉新 run 首帧（评审 #198 问题 3 后果 2 的另一入口）。onClose 须清零。
+    ;(listInstances as ReturnType<typeof vi.fn>).mockResolvedValue([
+      INSTANCE,
+      { ...INSTANCE, name: 'other', port: 19001 },
+    ])
+    const w = await mountReady()
+    await w.find('[data-test="input"]').setValue('hi')
+    await w.find('[data-test="send"]').trigger('click') // pendingSend=true，未收首帧
+    MockWS.last!.onclose?.({}) // 断线
+    await nextTick()
+    // 经切容器重建连接（模拟重连）
+    await w.find('[data-test="container-other"]').trigger('click')
+    await flushPromises()
+    await w.find('[data-test="container-demo"]').trigger('click')
+    await flushPromises()
+    MockWS.last!.fireOpen()
+    MockWS.last!.fireMessage({ type: 'ready', container: 'demo' })
+    await nextTick()
+    // 新 run 首帧必须渲染（孤儿计数不应残留吞掉新 run）
+    await w.find('[data-test="input"]').setValue('yo')
+    await w.find('[data-test="send"]').trigger('click')
+    MockWS.last!.fireMessage({ type: 'text', runId: 'r2', delta: 'NEW' })
+    await nextTick()
+    expect(w.find('[data-test="stream"]').text()).toContain('NEW')
+  })
+
+  it('keeps a terminal plain < character in the final text (终态 < 残片不吞)', async () => {
+    // 评审 #198 Low 5.3：流式以普通文本 < 结尾（非 thinking 标签前缀）时，流中隐藏的残片
+    // 终态（done/finalize）应重解析放回正文，不被永久吞掉
+    const w = await mountReady()
+    await w.find('[data-test="input"]').setValue('hi')
+    await w.find('[data-test="send"]').trigger('click')
+    MockWS.last!.fireMessage({ type: 'text', runId: 'r1', delta: '回答<' }) // 流式：半截 < 暂隐藏
+    await nextTick()
+    expect(w.find('.msg.assistant .bubble').text()).not.toContain('<')
+    MockWS.last!.fireMessage({ type: 'done', runId: 'r1' }) // 终态：finalize 重解析，残片放回正文
+    await nextTick()
+    expect(w.find('.msg.assistant .bubble').text()).toContain('回答<')
+  })
 })
