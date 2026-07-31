@@ -9,7 +9,8 @@ interface LoginResponse {
 }
 
 // codex P2-1：检查 access token 是否过期（JWT exp claim）
-function isTokenExpired(token: string): boolean {
+// issue #240：导出供 ChatView connect() 前置检查——过期先 forceRefresh 再建连，避免无谓 4401 往返。
+export function isTokenExpired(token: string): boolean {
   try {
     const payload = JSON.parse(atob(token.split('.')[1]))
     return Date.now() >= payload.exp * 1000
