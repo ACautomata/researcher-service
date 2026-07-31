@@ -11,6 +11,7 @@ import pytest
 
 from chat import chat_client, event_translate, pairing_ws
 from integration.openclaw import wire
+from integration.openclaw.ports import OpenClawWire as _OpenClawWirePort
 
 
 def _fake_identity():
@@ -710,51 +711,70 @@ class TestConnectFrameBuilderSingleSource:
         assert frame['params']['scopes'] != wire.SCOPES
 
 
-def test_wire_connect_signature_isomorphic_across_port_fake_adapter():
-    """回归 (codex #149 P2)：OpenClawWire.connect 在 Port / Fake / Adapter 三处签名同构。
+# ═══════════════════════════════════════════════════════════════════════════════
+# Issue #230: OpenClawWire Port 全方法同构守卫（make-the-change-easy 预重构 / parent #227）
+# ═══════════════════════════════════════════════════════════════════════════════
 
-    isinstance(Protocol) 只验方法存在、不验签名——#139 改 Adapter.connect 加 keyword-only
-    identity/nonce/scopes 时若漏改 Port/Fake 会静默分歧（Liskov 违反：按 Port 编程换真
-    Adapter 即 TypeError）。用 inspect 锁三处 keyword-only 参数同构。
+
+def _wire_attr_signature_shape(cls, name):
+    """提取 ``cls.<name>`` 的可比较签名 shape（issue #230 全方法同构守卫用）。
+
+    返回元组：
+    - property：``('property',)``
+    - 方法/函数：每个非 ``self`` 参数的 ``(name, kind, has_default)`` 三元组
+
+    只比 Liskov 调用约定相关结构（参数名 / 位置·关键字类别 / 默认值有无），不比标注——
+    实现可比 Port 更窄（ADR-0002 / #227 downward-closure），强制标注相等会假阳性。
     """
-    import inspect
+    attr = inspect.getattr_static(cls, name)
+    if isinstance(attr, property):
+        return ('property',)
+    sig = inspect.signature(attr)
+    return tuple(
+        (pname, param.kind, param.default is not inspect.Parameter.empty)
+        for pname, param in sig.parameters.items()
+        if pname != 'self'
+    )
 
+
+# 动态枚举 Port 公开方法——新加方法自动纳入守卫（issue #230「every Port method」恒真，
+# 即便 #227 收敛重塑 Port，如移除 pair / connect 改无参 / sessions_rpc 拆具名方法）。
+_OPENCLAW_WIRE_PORT_METHODS = tuple(
+    n for n in dir(_OpenClawWirePort) if not n.startswith('_')
+)
+
+
+@pytest.mark.parametrize('method', _OPENCLAW_WIRE_PORT_METHODS)
+def test_wire_method_signature_isomorphic_across_port_fake_adapter(method):
+    """issue #230：OpenClawWire Port 每个方法在 Port / Fake / Adapter 三处签名同构。
+
+    isinstance(runtime_checkable Protocol) 只验方法存在、不验签名——历史上 connect 的
+    keyword-only identity/nonce/scopes（codex #149）与 send_message 的 keyword-only
+    idempotency_key（codex #219）都曾因此静默分歧：按 Port 编程换真实现即 TypeError
+    （Liskov 违反）。本守卫用 inspect 把覆盖面从 connect/send_message 扩到 Port **每个**
+    方法（pair / connect / send_message / resolve_approval / list_commands / sessions_rpc /
+    list_pending_approvals / 审批订阅三元组 / broadcast_approval_resolved / dead / discard /
+    close），任意 Port/Fake/Adapter 单边签名漂移（改名 / 挪位置·关键字 / 增删默认值）都在
+    测试期失败而非生产 TypeError。
+
+    这是 #227 路径4 收敛的「make the change easy」预重构：全方法守卫就位后，后续 Port
+    reshape（移除 pair、connect 无参化、sessions_rpc 拆具名方法等）无法静默漂移三元组。
+    只比调用约定 shape（名/kind/默认值有无），不比标注：实现可比 Port 窄（#227
+    downward-closure isomorphism）；``dead`` 三处皆为 property。
+    """
     from integration.openclaw.adapters import OpenClawWireAdapter
     from integration.openclaw.fakes import FakeOpenClawWire
-    from integration.openclaw.ports import OpenClawWire
 
-    def kw_only(func):
-        sig = inspect.signature(func)
-        return [p.name for p in sig.parameters.values() if p.kind == inspect.Parameter.KEYWORD_ONLY]
+    port_shape = _wire_attr_signature_shape(_OpenClawWirePort, method)
+    fake_shape = _wire_attr_signature_shape(FakeOpenClawWire, method)
+    adapter_shape = _wire_attr_signature_shape(OpenClawWireAdapter, method)
 
-    expected = ['identity', 'nonce', 'scopes']
-    assert kw_only(OpenClawWire.connect) == expected
-    assert kw_only(FakeOpenClawWire.connect) == expected
-    assert kw_only(OpenClawWireAdapter.connect) == expected
-
-
-def test_wire_send_message_idempotency_key_isomorphic_across_port_fake_adapter():
-    """回归 (codex #219 P2)：OpenClawWire.send_message 的 idempotency_key 三处签名同构。
-
-    consumer 自愈重试（#214）经 send_message 传 idempotency_key 复用同 key。若只改
-    OpenClawChatClient 而漏改 OpenClawWire Port / Adapter / Fake，按 Port 编程换真实现
-    即 TypeError（Liskov 违反；isinstance(Protocol) 只验方法存在、不验签名）。本测试用
-    inspect 锁三处都有 keyword-only idempotency_key，防再次漏改。同 #149 connect 同构守卫。
-    """
-    import inspect
-
-    from integration.openclaw.adapters import OpenClawWireAdapter
-    from integration.openclaw.fakes import FakeOpenClawWire
-    from integration.openclaw.ports import OpenClawWire
-
-    def kw_only(func):
-        sig = inspect.signature(func)
-        return [p.name for p in sig.parameters.values() if p.kind == inspect.Parameter.KEYWORD_ONLY]
-
-    for impl in (OpenClawWire, FakeOpenClawWire, OpenClawWireAdapter):
-        assert 'idempotency_key' in kw_only(impl.send_message), (
-            f'{impl.__name__}.send_message 缺 keyword-only idempotency_key'
-        )
+    assert fake_shape == port_shape, (
+        f'FakeOpenClawWire.{method} 签名漂离 Port：port={port_shape} fake={fake_shape}'
+    )
+    assert adapter_shape == port_shape, (
+        f'OpenClawWireAdapter.{method} 签名漂离 Port：port={port_shape} adapter={adapter_shape}'
+    )
 
 
 class TestPairingAdapterImplementsWirePort:
