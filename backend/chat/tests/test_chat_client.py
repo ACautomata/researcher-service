@@ -1132,17 +1132,18 @@ async def test_connect_emits_sessions_subscribe_no_active_session():
 
 @pytest.mark.asyncio
 async def test_reconnect_sequences_subscribe_messages_subscribe_history():
-    """#217 步1-2（断线→重连→hello-ok）：旧 client 记住的活跃会话经 recovery_session 传播到替换
-    client（pool._reconnect_once 路径），替换 client connect 后按序发
+    """#217 步1-2（断线→重连→hello-ok）：旧 client 记住的活跃会话经 recovery_sessions 传播到替换
+    client（pool 换 client 路径），替换 client connect 后按序发
     sessions.subscribe → sessions.messages.subscribe{key} → chat.history{sessionKey}。"""
     t = FakeChatTransport(rpc_payloads={'chat.history': {'messages': []}})
     c = _client(transport=t)
     c.record_active_session('s1')
     await c.connect()  # 首连（记住 s1）
     await c.aclose()  # 断线
-    # 重连：pool 建新 client，经 recovery_session() 从旧 client 继承记住的会话（不在 c2 上手填）。
+    # 重连：pool 建新 client，经 recovery_sessions() 从旧 client 继承记住的会话（不在 c2 上手填）。
     c2 = _client(transport=t)
-    c2.record_active_session(*c.recovery_session())
+    for session_key, on_event in c.recovery_sessions():
+        c2.record_active_session(session_key, on_event)
     await c2.connect()  # 重连（同一 transport，第二连接）
     methods = _methods(t)
     assert 'sessions.subscribe' in methods
@@ -1170,6 +1171,78 @@ async def test_record_active_session_default_subscribes_on_first_connect():
     methods = _methods(t)
     assert 'sessions.messages.subscribe' in methods
     assert 'chat.history' in methods
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_recovery_restores_every_remembered_session():
+    """#217 / codex #236 R2 P1-223：多 consumer 共享池化 client 各自记住不同 sessionKey——恢复须
+    **逐会话** messages.subscribe + chat.history（不再只恢复最近一条，否则其余 consumer 的进行中
+    run 丢路由续流）。"""
+    t = FakeChatTransport(rpc_payloads={'chat.history': {'messages': []}})
+    received = []
+
+    async def cb_a(frame):
+        received.append(('a', frame))
+
+    async def cb_b(frame):
+        received.append(('b', frame))
+
+    c = _client(transport=t)
+    c.record_active_session('sess-a', cb_a)  # consumer A 的会话
+    c.record_active_session('sess-b', cb_b)  # consumer B 的会话（同 client，不同 key）
+    await c.connect()
+    sub_keys = {f['params'].get('key') for f in t.sent if f.get('method') == 'sessions.messages.subscribe'}
+    hist_keys = {f['params'].get('sessionKey') for f in t.sent if f.get('method') == 'chat.history'}
+    assert sub_keys == {'sess-a', 'sess-b'}, f'两会话都须 messages.subscribe: {sub_keys}'
+    assert hist_keys == {'sess-a', 'sess-b'}, f'两会话都须 chat.history: {hist_keys}'
+    # recovery_sessions 逐条返回（传播源）
+    assert dict(c.recovery_sessions()) == {'sess-a': cb_a, 'sess-b': cb_b}
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_unregister_matches_bound_method_equality_not_identity():
+    """#217 / codex #236 R2 P2-251：unregister 用**相等**（bound method 按 __self__+__func__ 判等）
+    非恒等——consumer 每次求值 self._on_event 得到新 bound-method 对象，``is`` 恒假会让注销静默失效。
+    此处断开时传入**新求值**的 bound method（非 record 时同一对象），仍须成功注销。"""
+    class _Consumer:  # 模拟 ChatConsumer：方法作回调，两次取 self.cb 得不同 bound-method 对象
+        async def cb(self, frame):
+            pass
+
+    consumer = _Consumer()
+    c = _client(transport=FakeChatTransport(rpc_payloads={'chat.history': {'messages': []}}))
+    c.record_active_session('s1', consumer.cb)  # 注册时的一个 bound-method 对象
+    assert dict(c.recovery_sessions()) != {}
+    c.unregister_active_session('s1', consumer.cb)  # 断开时再取 self.cb——新对象但 __eq__ 相等
+    assert c.recovery_sessions() == [], 'bound-method 相等应注销成功（恒等比较会静默失效）'
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_unregister_drops_adopted_run_route():
+    """#217 / codex #236 R2 P2-96：恢复采用的 inFlightRun 重建了路由但不进 consumer._active_runids
+    （disconnect 不 discard）——unregister_active_session 须按会话对称清这些重建路由，防已关闭
+    consumer 被池化 client 保留并续接该 run 事件。"""
+    history = {'messages': [], 'inFlightRun': {'runId': 'adopted-run', 'text': 'buf'}}
+    t = FakeChatTransport(rpc_payloads={'chat.history': history})
+    received = []
+
+    async def on_event(frame):
+        received.append(frame)
+
+    c = _client(transport=t)
+    c.record_active_session('s1', on_event)
+    await c.connect()
+    assert 'adopted-run' in c._routes  # 恢复重建了路由
+    c.unregister_active_session('s1', on_event)  # 断开 → 对称清
+    assert 'adopted-run' not in c._routes, 'adopted run 路由须随 unregister 清除'
+    # 后续该 runId 事件不再路由到已注销 consumer（cb is None 丢弃）
+    t.push({'type': 'event', 'event': 'chat',
+            'payload': {'runId': 'adopted-run', 'state': 'delta', 'deltaText': 'x'}})
+    await asyncio.sleep(0.05)
+    assert not any(f.get('runId') == 'adopted-run' and f.get('type') == 'text' and f.get('delta') == 'x'
+                   for f in received)
     await c.aclose()
 
 

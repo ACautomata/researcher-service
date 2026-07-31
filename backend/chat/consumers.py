@@ -38,9 +38,10 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
         # issue #214 T2：缓存 start 成功的 instance，供 client 失效后经 get_or_create 重取。
         self._instance = None  # pylint: disable=attribute-defined-outside-init
         self._active_runids: set[str] = set()  # pylint: disable=attribute-defined-outside-init
-        # #217 / codex #236 P2-261：本 consumer 经 record_active_session 记住的 sessionKey，
-        # 供 disconnect/切容器时对称 unregister（防池化 client 重连把恢复投影投到已关闭 consumer）。
-        self._recovery_session_key = None  # pylint: disable=attribute-defined-outside-init
+        # #217 / codex #236 P2-261 + R2 P1-223：本 consumer 经 record_active_session 记住的 sessionKey
+        # 集合（多会话共存，不再单一 slot），供 disconnect/切容器时逐一对称 unregister（防池化 client
+        # 重连把恢复投影投到已关闭 consumer）。
+        self._recovery_session_keys: set[str] = set()  # pylint: disable=attribute-defined-outside-init
         # codex #190 P1: 浏览器 WebSocket subprotocol 要求服务器回复匹配的协议值。
         # 前端传 ['access_token', <jwt>]；JwtAuthMiddleware 验证通过后透传给
         # ChatConsumer，视取 'access_token' 回显给浏览器，避免「无响应 subprotocol」
@@ -94,12 +95,12 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
                 old_target.remove_approval_subscriber(self._on_approval)
                 # codex #236 P2-261：切容器前把旧 client 上的恢复回调一并注销（换 client 后旧 client
                 # 重连不应再把本 consumer 的恢复投影投出）。新 client 的记住在下次 _handle_send 重建。
-                if self._recovery_session_key is not None:
+                for session_key in self._recovery_session_keys:
                     unregister = getattr(old_target, 'unregister_active_session', None)
                     if unregister is not None:
-                        unregister(self._recovery_session_key, self._on_event)
+                        unregister(session_key, self._on_event)
         # 换 client：旧记住失效，下次 send 重记
-        self._recovery_session_key = None  # pylint: disable=attribute-defined-outside-init
+        self._recovery_session_keys.clear()  # pylint: disable=attribute-defined-outside-init
         self._client = client  # pylint: disable=attribute-defined-outside-init
         self._instance = instance  # pylint: disable=attribute-defined-outside-init  # issue #214：供失效重取
         # T06：注册连接级审批订阅（codex P1 订阅者集合，多 consumer 共享 client 不互伤）
@@ -270,8 +271,8 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
         # #196 T4 / #217：记住当前活跃 sessionKey + 其恢复回调，供 pool 主动重连后恢复该会话投影
         # （messages.subscribe + chat.history + inFlightRun 路由重建）。换会话/换 client 再发时更新。
         self._client.record_active_session(session_key, self._on_event)
-        # codex #236 P2-261：记 key 供 disconnect/switch 对称注销
-        self._recovery_session_key = session_key  # pylint: disable=attribute-defined-outside-init
+        # codex #236 P2-261：记 key 供 disconnect/switch 对称注销（集合，多会话共存）
+        self._recovery_session_keys.add(session_key)  # pylint: disable=attribute-defined-outside-init
         # codex #219 P1：同一逻辑发送在初次与有界重试间复用同一 idempotencyKey——
         # 若网关已收下原 chat.send 但 ack 随死连接丢失，重试带同 key 让网关幂等去重，
         # 避免起两个 run、工具被执行两次。key 由本 consumer 按逻辑发送生成一次。
@@ -366,12 +367,12 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
                 target.discard(run_id)
             # codex #236 P2-261：对称注销 record_active_session 记住的恢复回调——否则池化 client 后续
             # 重连把恢复投影投到已关闭 consumer（输出丢失 + 回调异常连累 connect），并保留本 consumer。
-            if self._recovery_session_key is not None:
+            for session_key in self._recovery_session_keys:
                 unregister = getattr(target, 'unregister_active_session', None)
                 if unregister is not None:
-                    unregister(self._recovery_session_key, self._on_event)
+                    unregister(session_key, self._on_event)
         self._active_runids.clear()
-        self._recovery_session_key = None  # pylint: disable=attribute-defined-outside-init
+        self._recovery_session_keys.clear()  # pylint: disable=attribute-defined-outside-init
 
     async def _unsubscribe_targets(self):
         """退订/丢弃 runId 的目标 client 列表：pool 里的活 client + 缓存的 self._client，去重。

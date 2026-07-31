@@ -73,15 +73,19 @@ class _RecoveryCoordinator:
         self._client = client
 
     async def run(self) -> None:
-        """执行恢复序列。无活跃会话时仅 sessions.subscribe（步1）。"""
+        """执行恢复序列：sessions.subscribe（步1）后，对**每个**记住的活跃会话逐条恢复（步2-4）。
+
+        codex #236 R2 P1-223：多 consumer 共享池化 client 各自记住不同 sessionKey——逐会话
+        messages.subscribe + chat.history + 采用 inFlightRun，不再只恢复最近一条（否则其余
+        consumer 的进行中 run 丢路由、续流丢失）。key-only 会话（无回调）仍 subscribe+chat.history，
+        只是不回放投影/重建路由（_replay_projection 内 on_event None 跳过）。
+        """
         client = self._client
         await client._rpc('sessions.subscribe', {})
-        session_key = client._active_session_key
-        if session_key is None:
-            return
-        await client._rpc('sessions.messages.subscribe', {'key': session_key})
-        history = await client._rpc('chat.history', {'sessionKey': session_key})
-        await self._replay_projection(session_key, history or {})
+        for session_key in list(client._active_session_keys):
+            await client._rpc('sessions.messages.subscribe', {'key': session_key})
+            history = await client._rpc('chat.history', {'sessionKey': session_key})
+            await self._replay_projection(session_key, history or {})
 
     async def _replay_projection(self, session_key: str, history: dict) -> None:
         """步2-4：回放 history 投影（replace）+ 按 sessionInfo 归属采用 inFlightRun 重建路由。"""
@@ -94,6 +98,9 @@ class _RecoveryCoordinator:
         if recovered is None or on_event is None:
             return
         client._routes[recovered.run_id] = on_event  # 步3：重建 runId 路由
+        # codex #236 R2 P2-96：记 adopted runId→sessionKey——adopted run 不进 consumer._active_runids，
+        # disconnect 不 discard；unregister_active_session 按会话对称清这些重建路由。
+        client._recovery_routes[recovered.run_id] = session_key
         if recovered.text:
             await on_event({
                 'type': 'text', 'runId': recovered.run_id,
@@ -208,50 +215,63 @@ class OpenClawWireClient:  # pylint: disable=too-many-instance-attributes,too-ma
         self._policy = GatewayPolicy.default()
         # #196 T3 / #215：标 dead 时回调（pool 注入以触发主动重连；None = 不触发，如单测直建 client）。
         self._on_dead = on_dead
-        # #196 T4 / #217：记住的活跃 sessionKey + 其恢复回调（consumer 注册，重连后恢复该会话投影）。
-        # _session_callbacks 以 sessionKey 为键，支持后续多会话；当前面板单会话 → 至多一项。
-        self._active_session_key: str | None = None
+        # #196 T4 / #217：记住的活跃会话集合（consumer 注册，重连后逐会话恢复投影）。
+        # codex #236 R2 P1-223：**按会话记忆**（不再单一全局 slot）——多 consumer 共享池化 client
+        # 各自用不同 sessionKey 时，逐会话记住 + 逐会话恢复，不互相覆盖丢失。
+        self._active_session_keys: set[str] = set()
+        # 会话 → 恢复回调（on_event）；仅提供回调的会话才回放投影/重建路由，key-only 会话仍
+        # subscribe+chat.history 但不回放（对齐 record_active_session on_event=None 语义）。
         self._session_callbacks: dict[str, OnEvent] = {}
+        # 恢复重建的 runId → 所属 sessionKey（codex #236 R2 P2-96）：unregister 时按会话清这些重建
+        # 路由——adopted run 不进 consumer._active_runids，disconnect 不 discard，须在此对称清，
+        # 防已关闭 consumer 被池化 client 保留并续接该 run 事件。
+        self._recovery_routes: dict[str, str] = {}
 
     def record_active_session(self, session_key: str, on_event: OnEvent | None = None) -> None:
-        """#196 T4 / #217：记住当前活跃 sessionKey（+其恢复回调），供每次 connect 后重连恢复。
+        """#196 T4 / #217：记住一个活跃 sessionKey（+其恢复回调），供每次 connect 后重连恢复。
 
-        consumer 在对话 start / 切换会话时调用。``on_event`` 是恢复投影（history replace 回放、
+        consumer 在对话 start / 切换会话时调用。``on_event`` 是该会话恢复投影（history replace 回放、
         inFlightRun 缓冲 text、重建路由后该 runId 后续事件）的投递目标；为 None 时仅记住 sessionKey
-        （仍发 subscribe + chat.history，但不回放/不重建路由）。再次调用换 key 即切会话。
+        （仍发 subscribe + chat.history，但不回放/不重建路由）。同 key 再调更新回调；**多 key 共存**
+        （codex #236 R2 P1：不再覆盖单一 slot）——共享 client 的每 consumer 各自记住自己的会话。
         """
-        self._active_session_key = session_key
+        self._active_session_keys.add(session_key)
         if on_event is None:
             self._session_callbacks.pop(session_key, None)
         else:
             self._session_callbacks[session_key] = on_event
 
-    def recovery_session(self) -> tuple[str, OnEvent | None] | None:
-        """#196 T4 / #217：返回记住的活跃会话 ``(session_key, on_event)``，无则 None。
+    def recovery_sessions(self) -> list[tuple[str, OnEvent | None]]:
+        """#196 T4 / #217：返回**全部**记住的活跃会话 ``[(session_key, on_event), ...]``（可空）。
 
-        pool 主动重连（_reconnect_once）建替换 client 前读旧 client 的记住会话， propagate 到新
-        client——否则 remembered session 随旧 client 丢弃，重连恢复永不携带该会话（Spec 步1
-        「client 记住上次活跃 sessionKey」跨重连失效）。
+        pool 换 client（_reconnect_once / reacquire / get_or_create 死路径）建替换 client 前读旧
+        client 的记住会话，逐条 propagate 到新 client——否则 remembered session 随旧 client 丢弃，
+        重连恢复永不携带（Spec 步1「client 记住上次活跃 sessionKey」跨重连失效）。codex #236 R2 P1：
+        多会话逐条返回（on_event 缺省为 None），不再只回最近一条。
         """
-        if self._active_session_key is None:
-            return None
-        return self._active_session_key, self._session_callbacks.get(self._active_session_key)
+        return [(key, self._session_callbacks.get(key)) for key in self._active_session_keys]
 
     def unregister_active_session(self, session_key: str, on_event: OnEvent | None = None) -> None:
         """#217 / codex #236 P2-261：注销 ``record_active_session`` 记住的恢复回调（consumer 断开 /
         切容器时调用），防池化 client 后续重连把恢复投影投到已关闭 consumer（输出丢失 + 回调异常
         连累 connect），并释放对 consumer 的引用保留。
 
-        **匹配恒等才清**：``session_key`` 是当前活跃 key 且 ``on_event``（提供时）与记住的回调同对象
-        才清——多 consumer 共享池化 client 时，别的 consumer 后注册的同名会话不被本 consumer 的断开
-        误清（对齐 remove_approval_subscriber 的只清自己语义）。不匹配 no-op（幂等）。
+        **匹配才清**（codex #236 R2 P2-251 用**相等**非恒等——bound method 每次求值建新对象，``is``
+        恒假会让注销静默失效；``==`` 按 __self__+__func__ 判等）：该会话有记住回调且 ``on_event``
+        提供而**不等**时 no-op（别的 consumer 后注册的同名会话不被本 consumer 断开误清，对齐
+        remove_approval_subscriber 只清自己）。匹配则清 key+回调 + 该会话恢复重建的 runId 路由
+        （R2 P2-96）。key-only 会话（无回调）直接清。
         """
-        if self._active_session_key != session_key:
+        if session_key not in self._active_session_keys:
             return
-        if on_event is not None and self._session_callbacks.get(session_key) is not on_event:
+        remembered = self._session_callbacks.get(session_key)
+        if remembered is not None and on_event is not None and remembered != on_event:
             return
+        self._active_session_keys.discard(session_key)
         self._session_callbacks.pop(session_key, None)
-        self._active_session_key = None
+        for run_id, owner in [kv for kv in self._recovery_routes.items() if kv[1] == session_key]:
+            self._recovery_routes.pop(run_id, None)
+            self._routes.pop(run_id, None)
 
     def add_approval_subscriber(self, cb: OnEvent) -> None:
         """注册连接级审批订阅者（T06 / codex P1）：多 consumer 共享 client 时各自独立注册。"""
