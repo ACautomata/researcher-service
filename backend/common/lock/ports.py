@@ -22,18 +22,6 @@ from datetime import timedelta
 from typing import ClassVar, Protocol, runtime_checkable
 
 
-@runtime_checkable
-class LockResource(Protocol):
-    """闭合 tagged union 的运行时标记（防 KV 逃逸口 #246 Q6 / #251 AC2）。
-
-    只声明 ``kind`` 标记；各变体（``ProvisionResource`` / ``PairingResource``）为
-    frozen dataclass，携带锁定所需的标识字段。Port 绝不受裸 string 作 resource——
-    新增用途须新增类型化 resource（type-level guard）。
-    """
-
-    kind: ClassVar[str]
-
-
 @dataclass(frozen=True)
 class ProvisionResource:
     """容器 create 流程的锁资源：按容器名互斥（orchestrator create 租约 / in-flight 防重）。"""
@@ -50,6 +38,12 @@ class PairingResource:
     instance_id: int
 
     kind: ClassVar[str] = 'pairing'
+
+
+# 闭合 tagged union（防 KV 逃逸口 #246 Q6 / #251 AC2）：Port 只收这两个具体变体，
+# 绝不受裸 string 作 resource——新增用途须扩展此 union（type-level guard，闭锁到具体
+# 变体而非结构 Protocol）。``kind`` tag 保留在各变体上，供 adapter 运行时分派。
+LockResource = ProvisionResource | PairingResource
 
 
 @runtime_checkable

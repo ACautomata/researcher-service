@@ -278,12 +278,13 @@ class TestFakeLockSatisfiesPort:
         lock = FakeLock()
         assert isinstance(lock, _DistributedLockPort), 'FakeLock 应满足 DistributedLock Port'
 
-    def test_fake_lock_holder_protocol_passes_runtime_check(self):
-        """LockResource 以运行时成员提供锁定键（闭锁 tagged union，不收裸 string）。"""
+    def test_lock_resource_is_closed_tagged_union(self):
+        """LockResource 为闭合 tagged union 类型（type-level guard，防 KV 逃逸口 #246 Q6）。
+
+        union 别名意味着类型级闭合：新增资源用途必须扩展本 union 才能被 Port 接受，
+        任何只带 ``kind`` 属性的外来类都不能冒充变体。运行时裸 string 拒绝由
+        test_bare_string_resource_rejected / test_foreign_class_with_kind_attribute_rejected 覆盖。
+        """
         from common.lock.ports import PairingResource, ProvisionResource
 
-        assert isinstance(ProvisionResource('gw-a'), LockResource)
-        assert isinstance(PairingResource(instance_id=7), LockResource)
-        # 裸 string / int 不在闭锁 union 内——绝不受裸 string 作 resource
-        assert not isinstance('gw-a', LockResource)
-        assert not isinstance(7, LockResource)
+        assert LockResource == ProvisionResource | PairingResource
