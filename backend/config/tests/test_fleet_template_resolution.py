@@ -16,7 +16,8 @@ from django.core.exceptions import ImproperlyConfigured
 from config.settings import base
 from config.settings._validation import validate_prod_env
 
-_ENV_KEYS = ('OPENCLAW_TEMPLATE_DIR', 'RESEARCHER_DIR')
+_ENV_KEYS = ('OPENCLAW_TEMPLATE_DIR', 'RESEARCHER_DIR',
+             'LLM_API_KEY', 'OPENCLAW_FLEET_WS_SCHEME', 'OPENCLAW_FLEET_WS_HOST')
 
 
 @pytest.fixture(autouse=True)
@@ -103,3 +104,40 @@ def test_default_template_path_is_dev_fallback_with_prod_fail_fast():
             'DJANGO_ALLOWED_HOSTS': 'example.test',
             'OPENCLAW_TEMPLATE_DIR': 'researcher',  # 相对路径
         })
+
+
+# ---- seam 2：ADR 0005 配置边界 settings 声明解析（issue #257）----
+# fleet 配置与配对 WS 配置是 base.py 的环境变量声明落点：runtime 一律经 settings 取值，
+# 不在 app 里裸读 os.environ。这里测声明解析本身（默认 + 环境覆盖），与模板解析同 seam。
+
+
+def test_llm_api_key_declared_default_empty():
+    """ADR 0005：OPENCLAW_FLEET 增 LLM_API_KEY 键，读环境、默认空串（dev/integration 宽容）。
+
+    生产必填 fail-fast 在 prod.py 的 validate_prod_env（见 test_settings_prod.py）；
+    base 这一层保持宽容，缺省给空串——integration CI 靠 env 注入跑真容器，base 不强制非空。
+    """
+    mod = _reload_with_env()
+    assert 'LLM_API_KEY' in mod.OPENCLAW_FLEET
+    assert mod.OPENCLAW_FLEET['LLM_API_KEY'] == ''
+
+
+def test_llm_api_key_env_override_reflected():
+    """环境注入 LLM_API_KEY 后，settings.OPENCLAW_FLEET 反映新值（编排经此取，不再裸读 env）。"""
+    mod = _reload_with_env(LLM_API_KEY='sk-test-123')
+    assert mod.OPENCLAW_FLEET['LLM_API_KEY'] == 'sk-test-123'
+
+
+def test_fleet_ws_defaults_ws_and_loopback():
+    """ADR 0005：新增配对 WS 配置声明，scheme/host 默认 ws/127.0.0.1（本地零配置可用）。"""
+    mod = _reload_with_env()
+    assert mod.OPENCLAW_FLEET_WS['SCHEME'] == 'ws'
+    assert mod.OPENCLAW_FLEET_WS['HOST'] == '127.0.0.1'
+
+
+def test_fleet_ws_env_override_reflected():
+    """环境覆盖 scheme/host 后 settings 反映新值（配对经此取；wss/lan 绑定由部署注入）。"""
+    mod = _reload_with_env(OPENCLAW_FLEET_WS_SCHEME='wss',
+                           OPENCLAW_FLEET_WS_HOST='0.0.0.0')
+    assert mod.OPENCLAW_FLEET_WS['SCHEME'] == 'wss'
+    assert mod.OPENCLAW_FLEET_WS['HOST'] == '0.0.0.0'

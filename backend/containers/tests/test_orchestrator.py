@@ -1130,6 +1130,7 @@ def test_fleet_get_survives_missing_template_file(tmp_path, settings):
         'IMAGE': 'img:tag',
         'PORT_POOL_START': 19000,
         'PORT_POOL_END': 19999,
+        'LLM_API_KEY': '',  # ADR 0005：stub 须镜像 base.py 的 fleet 键（编排改经 settings 取）
     }
     Fleet.reset()
     try:
