@@ -14,6 +14,12 @@ ALLOWED_HOSTS = [
     h.strip() for h in os.environ.get('DJANGO_ALLOWED_HOSTS', '').split(',') if h.strip()
 ]
 
+# REDIS_URL（issue #252 / parent #243）：DistributedLock（backend/common/lock）的连接配置
+# （非凭证，区别于 LLM_API_KEY 敏感值）。生产强制注入，缺失即 KeyError；base.py 的开发
+# 可跑默认仅适用本地，生产镜像/部署必须显式提供，否则 LockFleet 首次用锁才连接失败。
+# 非空/非空白由下方 validate_prod_env 进一步 fail-fast（对齐 SECRET_KEY/LLM_API_KEY 先例）。
+REDIS_URL = os.environ['REDIS_URL']
+
 # 生产/Docker 部署必须显式提供 researcher 模板路径（spec §5.6 cp -a 源）。
 # base.py 的 TEMPLATE_DEFAULT = BASE_DIR.parent/'researcher' 仅适用开发/CI——后端镜像内
 # BASE_DIR 是容器路径，不会有宿主 researcher 克隆；不设 OPENCLAW_TEMPLATE_DIR 会让
