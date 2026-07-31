@@ -83,6 +83,10 @@ class FakeOpenClawWire:
         # runId→on_event 路由（send_message 自动注册；push_event 推事件）
         self._routes: dict[str, Any] = {}
         self.discarded: list[str] = []
+        # #217：record_active_session 记住的活跃会话（sessionKey → on_event，多会话共存，
+        # codex #236 R2 P1）。recorded_session 保留单会话便捷访问（最新一条或 None）。
+        self.recorded_sessions: dict = {}
+        self.recorded_session: tuple | None = None
 
     @property
     def dead(self) -> bool:
@@ -115,6 +119,22 @@ class FakeOpenClawWire:
     def discard(self, run_id: str) -> None:
         self._routes.pop(run_id, None)
         self.discarded.append(run_id)
+
+    def record_active_session(self, session_key: str, on_event: Any = None) -> None:
+        """#217：对齐真实现——记住活跃会话供重连恢复（consumer _handle_send 调用，多会话共存）。"""
+        self.recorded_sessions[session_key] = on_event
+        self.recorded_session = (session_key, on_event)
+
+    def recovery_sessions(self) -> list:
+        """#217 / codex #236 R2 P1：对齐真实现——返回全部记住会话 [(key, on_event), ...]。"""
+        return list(self.recorded_sessions.items())
+
+    def unregister_active_session(self, session_key: str, on_event: Any = None) -> None:
+        """#217 / codex #236 P2-261：对齐真实现——consumer disconnect/切容器对称注销恢复回调。"""
+        if session_key in self.recorded_sessions:
+            self.recorded_sessions.pop(session_key, None)
+        if self.recorded_session is not None and self.recorded_session[0] == session_key:
+            self.recorded_session = None
 
     # ── 连接级审批 ──
 

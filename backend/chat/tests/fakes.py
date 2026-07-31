@@ -129,6 +129,11 @@ class _FakeChatWs:
 
     recv 按阶段应答（回显 req id）：① connect 握手 res ② chat.send ack res
     ③ 预设 events ④ push 队列。events 与 push 都空时 recv 挂起在 asyncio.Queue（待 push 唤醒）。
+
+    **#217 恢复支持**：connect 恢复泵（client._run_until）在 connect res 后逐帧取恢复 RPC
+    （sessions.subscribe / chat.history）的 res——通用 scripted RPC 分支按本连接（_sent_base 起）
+    逐 method 应答；预设 events 须待恢复 RPC 全部 ack（泵退出交棒 recv-loop）后才弹，避免泵期
+    误弹 events 首帧丢帧。泵用短超时轮询 recv（见 client），故无 send 侧唤醒。
     """
 
     def __init__(self, transport):
@@ -141,11 +146,11 @@ class _FakeChatWs:
         self._t.sent_types.append(type(data))
         self._t.sent.append(json.loads(data))
 
-    async def recv(self):  # pylint: disable=too-many-return-statements
+    async def recv(self):  # pylint: disable=too-many-return-statements,too-many-branches
         t = self._t
         # issue #140：脚本化 challenge 时，网关在 connect 前先下发 connect.challenge（payload.nonce），
         # client 提取 nonce 签名后才发 connect 帧。默认 None（不下发）→ 旧路径立即发帧。
-        connect = next((f for f in t.sent if f.get('method') == 'connect'), None)
+        connect = next((f for f in t.sent[t._sent_base:] if f.get('method') == 'connect'), None)
         if connect is None and t.challenge_nonce is not None and not t._challenge_sent:
             t._challenge_sent = True
             return json.dumps({'type': 'event', 'event': 'connect.challenge',
@@ -164,7 +169,8 @@ class _FakeChatWs:
                 return json.dumps({'type': 'res', 'id': connect['id'], 'ok': True, 'payload': payload})
             return json.dumps({'type': 'res', 'id': connect['id'], 'ok': False,
                                'error': {'code': 'AUTH_FAILED', 'message': 'bad token'}})
-        chat_sends = [f for f in t.sent if f.get('method') == 'chat.send']
+        conn_frames = t.sent[t._sent_base:]  # 只应答本连接发出的帧（重连脚本边界，#217）
+        chat_sends = [f for f in conn_frames if f.get('method') == 'chat.send']
         if not t.suppress_ack and len(chat_sends) > t._chat_ack_index:
             cs = chat_sends[t._chat_ack_index]
             t._chat_ack_index += 1
@@ -172,36 +178,44 @@ class _FakeChatWs:
                 return json.dumps({'type': 'res', 'id': cs['id'], 'ok': False, 'error': t.ack_error})
             return json.dumps({'type': 'res', 'id': cs['id'], 'ok': True,
                                'payload': {'runId': t.ack_run_id}})
-        resolves = [f for f in t.sent if f.get('method', '').endswith('.approval.resolve')]
+        resolves = [f for f in conn_frames if f.get('method', '').endswith('.approval.resolve')]
         if not t.suppress_ack and len(resolves) > t._resolve_ack_index:
             rs = resolves[t._resolve_ack_index]
             t._resolve_ack_index += 1
             if t.resolve_error is not None:
                 return json.dumps({'type': 'res', 'id': rs['id'], 'ok': False, 'error': t.resolve_error})
             return json.dumps({'type': 'res', 'id': rs['id'], 'ok': True, 'payload': t.resolve_payload})
-        lists = [f for f in t.sent if f.get('method') == 'exec.approval.list']
+        lists = [f for f in conn_frames if f.get('method') == 'exec.approval.list']
         if not t.suppress_ack and len(lists) > t._list_ack_index:
             li = lists[t._list_ack_index]
             t._list_ack_index += 1
             return json.dumps({'type': 'res', 'id': li['id'], 'ok': True, 'payload': t.list_payload})
-        cmds = [f for f in t.sent if f.get('method') == 'commands.list']
+        cmds = [f for f in conn_frames if f.get('method') == 'commands.list']
         if not t.suppress_commands_ack and len(cmds) > t._commands_ack_index:
             cm = cmds[t._commands_ack_index]
             t._commands_ack_index += 1
             if t.commands_error is not None:
                 return json.dumps({'type': 'res', 'id': cm['id'], 'ok': False, 'error': t.commands_error})
             return json.dumps({'type': 'res', 'id': cm['id'], 'ok': True, 'payload': t.commands_payload})
-        # 通用 scripted RPC（issue #80 T1）：遍历已注册 method，回显首个未 ack 的 req id。
+        # 通用 scripted RPC（issue #80 T1 / #217 sessions.subscribe+messages.subscribe）：遍历已注册
+        # method，回显首个未 ack 的 req id。connect 泵逐帧取走每个待答 res。
         for method in set(t.rpc_payloads) | set(t.rpc_errors):
             if method in t.rpc_suppress:
                 continue
-            sent_for_method = [f for f in t.sent if f.get('method') == method]
+            sent_for_method = [f for f in conn_frames if f.get('method') == method]
             idx = t._rpc_ack_index.get(method, 0)
             if len(sent_for_method) > idx:
                 frame = sent_for_method[idx]
                 t._rpc_ack_index[method] = idx + 1
                 if method in t.rpc_errors:
                     return json.dumps({'type': 'res', 'id': frame['id'], 'ok': False, 'error': t.rpc_errors[method]})
+                # codex #236 R4 P1：chat.history 支持按 sessionKey 区分 payload（多会话恢复各回各的
+                # inFlightRun）。rpc_payloads_by_param[method][param_key]=payload——命中时用该 payload
+                # （不 fallback 到 rpc_payloads 的默认值，保证每会话各自的历史/inFlightRun 归属）。
+                key = frame.get('params', {}).get('sessionKey')
+                param_payload = (t.rpc_payloads_by_param.get(method, {}) or {}).get(key)
+                if param_payload is not None:
+                    return json.dumps({'type': 'res', 'id': frame['id'], 'ok': True, 'payload': param_payload})
                 return json.dumps({'type': 'res', 'id': frame['id'], 'ok': True, 'payload': t.rpc_payloads.get(method, {})})
         if t.events:
             return json.dumps(t.events.pop(0))
@@ -229,6 +243,7 @@ class FakeChatTransport:  # pylint: disable=too-many-instance-attributes  # pyli
                  list_payload=None, commands_payload=None, commands_error=None,
                  suppress_commands_ack=False,
                  rpc_payloads=None, rpc_errors=None, rpc_suppress=None,
+                 rpc_payloads_by_param=None,
                  challenge_nonce=_DEFAULT_CHALLENGE_NONCE, connect_policy=None):
         self.connect_ok = connect_ok
         self.ack_run_id = ack_run_id
@@ -264,11 +279,38 @@ class FakeChatTransport:  # pylint: disable=too-many-instance-attributes  # pyli
         self.rpc_payloads = dict(rpc_payloads or {})
         self.rpc_errors = dict(rpc_errors or {})
         self.rpc_suppress = set(rpc_suppress or ())
+        # codex #236 R4 P1：按请求参数区分的 RPC res（rpc_payloads_by_param[method][param_key]=payload）。
+        # 目前仅 chat.history 用（按 sessionKey 区分各会话历史/inFlightRun）；对既有 rpc_payloads
+        # 调用方零影响（该 dict 为空时走原默认路径）。
+        self.rpc_payloads_by_param = dict(rpc_payloads_by_param or {})
+        # #217 T4：connect() 现在发 sessions.subscribe（+有活跃会话时 sessions.messages.subscribe）
+        # 并经 _rpc 等 res。给这两个方法默认 ok res（除非显式 suppress/error），否则握手会 ack 超时。
+        self.rpc_payloads.setdefault('sessions.subscribe', {})
+        self.rpc_payloads.setdefault('sessions.messages.subscribe', {})
         self._rpc_ack_index: dict[str, int] = {}
         self._closed = False
         self._ws: _FakeChatWs | None = None
+        self._sent_base = 0  # 本连接帧在 sent 的起始下标（每连接 ack 边界，_reset_connection_state 重置）
+
+    def _reset_connection_state(self) -> None:
+        """每次新 connect 重置**每连接** ack/握手索引 + sent 基线（#217 T4 重连脚本支持）。
+
+        重连恢复测试让同一 transport 出两个连接、各自握 + ack 各自的 RPC（subscribe / chat.history）。
+        ack 索引若跨连接不清，第二连接的 recv 会把**第一连接**已 ack 的 chat.send/RPC 当成未 ack
+        重新应答（t.sent 跨连接累积）。故记录 sent 基线：本连接只应答基线之后自己发出的帧。
+        events / sent_types / challenge_nonce 不重置；sent 仍跨连接累积（断言脚本用）。
+        """
+        self._connect_acked = False
+        self._challenge_sent = False
+        self._chat_ack_index = 0
+        self._resolve_ack_index = 0
+        self._list_ack_index = 0
+        self._commands_ack_index = 0
+        self._rpc_ack_index = {}
+        self._sent_base = len(self.sent)  # 本连接帧的起始下标（只 ack 这之后的）
 
     def __call__(self, url):
+        self._reset_connection_state()
         self._ws = _FakeChatWs(self)
         return _CM(self._ws)
 

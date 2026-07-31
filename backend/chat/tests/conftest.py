@@ -33,6 +33,10 @@ class FakeChatClient:
         self.dead = False
         # codex #219 P1：记录每次 send_message 收到的 idempotency_key（验证重试复用同 key）。
         self.sent_idempotency_keys = []
+        # #217：record_active_session 记住的活跃会话（sessionKey → on_event，多会话共存，
+        # codex #236 R2 P1）。recorded_session 保留单会话便捷访问（最新一条或 None）。
+        self.recorded_sessions = {}
+        self.recorded_session = None
 
     async def send_message(self, session_key, message, *, on_event, idempotency_key=None):
         run_id = f'run-{len(self.sent) + 1}'
@@ -40,6 +44,22 @@ class FakeChatClient:
         self.sent_idempotency_keys.append(idempotency_key)
         self._handlers[run_id] = on_event
         return run_id
+
+    def record_active_session(self, session_key, on_event=None):
+        """#217：对齐真实 client——consumer _handle_send 记住活跃会话供重连恢复（多会话共存）。"""
+        self.recorded_sessions[session_key] = on_event
+        self.recorded_session = (session_key, on_event)
+
+    def recovery_sessions(self):
+        """#217 / codex #236 R2 P1：对齐真实 client——返回全部记住会话 [(key, on_event), ...]。"""
+        return list(self.recorded_sessions.items())
+
+    def unregister_active_session(self, session_key, on_event=None):
+        """#217 / codex #236 P2-261：对齐真实 client——consumer disconnect/切容器对称注销恢复回调。"""
+        if session_key in self.recorded_sessions:
+            self.recorded_sessions.pop(session_key, None)
+        if self.recorded_session is not None and self.recorded_session[0] == session_key:
+            self.recorded_session = None
 
     def discard(self, run_id):
         self.discarded.append(run_id)

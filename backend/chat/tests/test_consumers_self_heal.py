@@ -912,3 +912,57 @@ async def test_retried_send_raw_connection_closed_recovers_connection(
     assert len(newer._approval_subscribers) == 1
     assert not fresh._approval_subscribers
     await comm.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_reacquire_registers_switched_session_on_adopted_client(
+        override_pool, instance, fake_client):
+    """codex #236 R4 P1（consumers）：pool 主动重连已换掉死 client，但被动 consumer 仍持有死对象；
+    它换会话 A→B 再发时，unregister+record 只作用在**死** client 上。reacquire 采纳健康替换 client
+    后若不迁移恢复注册 → 活 client 仍留 A、缺 B：下次重连把 A 投影投进显示 B 的 UI、disconnect 也
+    清不掉留存的 A 回调。修复：_reacquire_client 采纳 fresh 后把本 consumer 的恢复注册迁到 fresh
+    （对齐审批订阅者迁移），_handle_send 换会话注销也落到全部持有回调的目标上。
+
+    场景（对齐 codex #219 十四轮代际）：A 先 start 共享 fake_client 并 send(sk-1)；pool 主动重连
+    （get_or_create 死路径）把记住的 sk-1 propagate 到活替换 fresh（模拟被动 consumer 的 self._client
+    仍是死 fake_client）；consumer 换会话 sk-2 再 send——换会话注销须落到活 fresh（清 sk-1），
+    新注册 sk-2 到 fresh；随后 reacquire 采纳 fresh（fresh 非 self._client 的死 fake_client），
+    sk-2 注册不得丢失。"""
+    comm = await _connect_authed()
+    await comm.connect()
+    await comm.send_json_to({'type': 'start', 'container': 'demo'})
+    await comm.receive_json_from()  # ready
+
+    # 先 send(sk-1)：consumer 记住 sk-1 在 self._client（fake_client）上
+    await comm.send_json_to({'type': 'send', 'sessionKey': 'sk-1', 'message': 'first'})
+    await asyncio.sleep(0.05)
+    assert set(fake_client.recorded_sessions) == {'sk-1'}
+
+    # pool 主动重连换掉死 client：把记住的 sk-1 propagate 到活替换 fresh（被动 consumer 仍持 fake_client）
+    fresh = FakeChatClient()
+    fresh.record_active_session('sk-1', fake_client.recorded_sessions['sk-1'])
+    override_pool.set_client(fresh)
+    fake_client.dead = True
+
+    # 换会话 sk-2 再发：换会话注销（sk-1）须落到活 fresh（否则活 client 留 A）+ 注册 sk-2
+    await comm.send_json_to({'type': 'send', 'sessionKey': 'sk-2', 'message': 'second'})
+    await asyncio.sleep(0.05)
+    # 换会话注销 sk-1 须落到活替换 client（R4 P1 同族）：fresh 上的 A 被清（否则下次重连把 A 投影
+    # 投进显示 B 的 UI）。sk-2 此刻记在死 self._client 上（被动 consumer 仍持死对象），待 reacquire 迁。
+    assert 'sk-1' not in fresh.recorded_sessions, \
+        f'换会话后活替换 client 仍留 A（注销未落到活对象）: {set(fresh.recorded_sessions)}'
+    assert set(fake_client.recorded_sessions) == {'sk-2'}, \
+        f'换会话后新注册 sk-2 应在当前 self._client（死对象）: {set(fake_client.recorded_sessions)}'
+
+    # 被动 consumer 再触发 reacquire：采纳 fresh（fresh 非本 consumer 的死 fake_client）
+    async def dead_send(*args, **kwargs):
+        raise ChatSendError('client not connected')
+
+    fake_client.send_message = dead_send
+    await comm.send_json_to({'type': 'send', 'sessionKey': 'sk-2', 'message': 'again'})
+    await asyncio.sleep(0.05)
+    # 关键断言：reacquire 采纳 fresh 后恢复注册不丢——fresh 仍注册 sk-2（后续重连投影投到正确会话）
+    assert set(fresh.recorded_sessions) == {'sk-2'}, \
+        f'reacquire 采纳 fresh 后恢复注册丢失: {set(fresh.recorded_sessions)}'
+    assert ('sk-2', 'again') in fresh.sent  # 重试落在采纳的 fresh 上
+    await comm.disconnect()

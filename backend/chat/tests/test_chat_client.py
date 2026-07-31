@@ -19,6 +19,7 @@ from chat.chat_client import (
 )
 from chat.device_crypto import DeviceCrypto, DeviceIdentity
 from chat.tests.fakes import FakeChatTransport
+from integration.openclaw.wire_client import HISTORY_RUN_ID
 
 URL = 'ws://127.0.0.1:19000/'
 
@@ -1095,4 +1096,612 @@ async def test_send_message_sends_text_frame_not_binary():
     # 找到 chat.send 那次 send 的原始类型：必须是 str（文本帧），不能是 bytes（二进制帧）
     idx = next(i for i, f in enumerate(t.sent) if f.get('method') == 'chat.send')
     assert t.sent_types[idx] is str
+    await c.aclose()
+
+
+# ---- #196 T4 / #217：重连恢复流程（契约《构建 Gateway 客户端》「重连后恢复状态」5 步）----
+#
+# 每次 connect()（首连与每次 pool 主动重连）握手成功后：
+# 1. 发 sessions.subscribe；对已记住的活跃 sessionKey 发 sessions.messages.subscribe{key}；
+# 2. 对该 sessionKey 调 chat.history（投影替换语义经 text replace 帧回放）；
+# 3. 采用返回的 inFlightRun（runId + 缓冲 text[即使为空] + 可选 plan），重建 runId 路由；
+# 4. 读 sessionInfo.hasActiveRun / activeRunIds 判定运行归属；
+# 5. 后续事件按 runId 路由（去重归 #203）。
+#
+# 恢复的 history / inFlightRun 经 record_active_session 注册的 session 回调回放为 text replace
+# 帧（replace=True → 前端整段替换、不追加），runId 用 __history__ 命名空间避免与真实 runId 冲突；
+# 恢复本身不发终态 done（进行中 run 的终帧由网关后续事件经重建路由到达）。
+
+
+def _methods(t):
+    """transport 已发帧的 method 序列（按发送顺序），供恢复顺序断言。"""
+    return [f.get('method') for f in t.sent]
+
+
+@pytest.mark.asyncio
+async def test_connect_emits_sessions_subscribe_no_active_session():
+    """#217 步1（无活跃会话）：connect() 握手成功后发 sessions.subscribe；未记录活跃 sessionKey
+    时不发 sessions.messages.subscribe、不调 chat.history。"""
+    t = FakeChatTransport()
+    c = _client(transport=t)
+    await c.connect()
+    assert 'sessions.subscribe' in _methods(t)
+    assert 'sessions.messages.subscribe' not in _methods(t)
+    assert 'chat.history' not in _methods(t)
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_reconnect_sequences_subscribe_messages_subscribe_history():
+    """#217 步1-2（断线→重连→hello-ok）：旧 client 记住的活跃会话经 recovery_sessions 传播到替换
+    client（pool 换 client 路径），替换 client connect 后按序发
+    sessions.subscribe → sessions.messages.subscribe{key} → chat.history{sessionKey}。"""
+    t = FakeChatTransport(rpc_payloads={'chat.history': {'messages': []}})
+    c = _client(transport=t)
+    c.record_active_session('s1')
+    await c.connect()  # 首连（记住 s1）
+    await c.aclose()  # 断线
+    # 重连：pool 建新 client，经 recovery_sessions() 从旧 client 继承记住的会话（不在 c2 上手填）。
+    c2 = _client(transport=t)
+    for session_key, callbacks in c.recovery_sessions():
+        if not callbacks:
+            c2.record_active_session(session_key)  # key-only：只记住 key
+            continue
+        for on_event in callbacks:
+            c2.record_active_session(session_key, on_event)
+    await c2.connect()  # 重连（同一 transport，第二连接）
+    methods = _methods(t)
+    assert 'sessions.subscribe' in methods
+    assert 'sessions.messages.subscribe' in methods
+    assert 'chat.history' in methods
+    assert (methods.index('sessions.subscribe')
+            < methods.index('sessions.messages.subscribe')
+            < methods.index('chat.history'))
+    # messages.subscribe 带当前会话 key；chat.history 带 sessionKey
+    ms = next(f for f in t.sent if f.get('method') == 'sessions.messages.subscribe')
+    assert ms['params'] == {'key': 's1'}
+    hist = next(f for f in t.sent if f.get('method') == 'chat.history')
+    assert hist['params'] == {'sessionKey': 's1'}
+    await c2.aclose()
+
+
+@pytest.mark.asyncio
+async def test_record_active_session_default_subscribes_on_first_connect():
+    """#217 步1：首连前已 record_active_session → 首连即发 messages.subscribe + chat.history
+    （恢复语义对首连同样生效——每次握手成功后都重建订阅）。"""
+    t = FakeChatTransport(rpc_payloads={'chat.history': {'messages': []}})
+    c = _client(transport=t)
+    c.record_active_session('s1')
+    await c.connect()
+    methods = _methods(t)
+    assert 'sessions.messages.subscribe' in methods
+    assert 'chat.history' in methods
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_recovery_restores_every_remembered_session():
+    """#217 / codex #236 R2 P1-223：多 consumer 共享池化 client 各自记住不同 sessionKey——恢复须
+    **逐会话** messages.subscribe + chat.history（不再只恢复最近一条，否则其余 consumer 的进行中
+    run 丢路由续流）。"""
+    t = FakeChatTransport(rpc_payloads={'chat.history': {'messages': []}})
+    received = []
+
+    async def cb_a(frame):
+        received.append(('a', frame))
+
+    async def cb_b(frame):
+        received.append(('b', frame))
+
+    c = _client(transport=t)
+    c.record_active_session('sess-a', cb_a)  # consumer A 的会话
+    c.record_active_session('sess-b', cb_b)  # consumer B 的会话（同 client，不同 key）
+    await c.connect()
+    sub_keys = {f['params'].get('key') for f in t.sent if f.get('method') == 'sessions.messages.subscribe'}
+    hist_keys = {f['params'].get('sessionKey') for f in t.sent if f.get('method') == 'chat.history'}
+    assert sub_keys == {'sess-a', 'sess-b'}, f'两会话都须 messages.subscribe: {sub_keys}'
+    assert hist_keys == {'sess-a', 'sess-b'}, f'两会话都须 chat.history: {hist_keys}'
+    # recovery_sessions 逐条返回（传播源）
+    assert dict(c.recovery_sessions()) == {'sess-a': [cb_a], 'sess-b': [cb_b]}
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_unregister_matches_bound_method_equality_not_identity():
+    """#217 / codex #236 R2 P2-251：unregister 用**相等**（bound method 按 __self__+__func__ 判等）
+    非恒等——consumer 每次求值 self._on_event 得到新 bound-method 对象，``is`` 恒假会让注销静默失效。
+    此处断开时传入**新求值**的 bound method（非 record 时同一对象），仍须成功注销。"""
+    class _Consumer:  # 模拟 ChatConsumer：方法作回调，两次取 self.cb 得不同 bound-method 对象
+        async def cb(self, frame):
+            pass
+
+    consumer = _Consumer()
+    c = _client(transport=FakeChatTransport(rpc_payloads={'chat.history': {'messages': []}}))
+    c.record_active_session('s1', consumer.cb)  # 注册时的一个 bound-method 对象
+    assert dict(c.recovery_sessions())  # 非空即注册成功（空 dict 为 falsey，C1803 简化）
+    c.unregister_active_session('s1', consumer.cb)  # 断开时再取 self.cb——新对象但 __eq__ 相等
+    assert c.recovery_sessions() == [], 'bound-method 相等应注销成功（恒等比较会静默失效）'
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_unregister_drops_adopted_run_route():
+    """#217 / codex #236 R2 P2-96：恢复采用的 inFlightRun 重建了路由但不进 consumer._active_runids
+    （disconnect 不 discard）——unregister_active_session 须按会话对称清这些重建路由，防已关闭
+    consumer 被池化 client 保留并续接该 run 事件。"""
+    history = {'messages': [], 'inFlightRun': {'runId': 'adopted-run', 'text': 'buf'}}
+    t = FakeChatTransport(rpc_payloads={'chat.history': history})
+    received = []
+
+    async def on_event(frame):
+        received.append(frame)
+
+    c = _client(transport=t)
+    c.record_active_session('s1', on_event)
+    await c.connect()
+    assert 'adopted-run' in c._routes  # 恢复重建了路由
+    c.unregister_active_session('s1', on_event)  # 断开 → 对称清
+    assert 'adopted-run' not in c._routes, 'adopted run 路由须随 unregister 清除'
+    # 后续该 runId 事件不再路由到已注销 consumer（cb is None 丢弃）
+    t.push({'type': 'event', 'event': 'chat',
+            'payload': {'runId': 'adopted-run', 'state': 'delta', 'deltaText': 'x'}})
+    await asyncio.sleep(0.05)
+    assert not any(f.get('runId') == 'adopted-run' and f.get('type') == 'text' and f.get('delta') == 'x'
+                   for f in received)
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_adopt_inflight_run_rebuilds_route_and_replays_text():
+    """#217 步3：chat.history 返回 inFlightRun → 采用其 runId + 缓冲 text（replace 回放），
+    重建 runId 路由——网关后续该 runId 的事件路由到 session 回调（不再 cb is None 黑洞）。"""
+    history = {
+        'messages': [],
+        'inFlightRun': {'runId': 'inflight-1', 'text': '半截回答'},
+    }
+    t = FakeChatTransport(rpc_payloads={'chat.history': history})
+    received = []
+
+    async def on_event(frame):
+        received.append(frame)
+
+    c = _client(transport=t)
+    c.record_active_session('s1', on_event=on_event)
+    await c.connect()
+    # 采用 inFlightRun：缓冲 text 经真实 runId replace 回放
+    assert {'type': 'text', 'runId': 'inflight-1', 'delta': '半截回答', 'replace': True} in received
+    # 恢复不发终态 done
+    assert not any(f.get('type') == 'done' for f in received)
+    # 路由已重建：网关后续该 runId 的 delta 路由到 session 回调
+    t.push({'type': 'event', 'event': 'chat',
+            'payload': {'runId': 'inflight-1', 'state': 'delta', 'deltaText': '，继续'}})
+    await asyncio.sleep(0.05)
+    assert {'type': 'text', 'runId': 'inflight-1', 'delta': '，继续'} in received
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_adopt_inflight_run_empty_text_still_rebuilds_route():
+    """#217 步3（即使 text 为空也采用）：inFlightRun.text 为空 → 不发 text 帧，但仍重建 runId 路由
+    （恢复进行中 run 的事件流不丢）。"""
+    history = {'messages': [], 'inFlightRun': {'runId': 'inflight-empty', 'text': ''}}
+    t = FakeChatTransport(rpc_payloads={'chat.history': history})
+    received = []
+
+    async def on_event(frame):
+        received.append(frame)
+
+    c = _client(transport=t)
+    c.record_active_session('s1', on_event=on_event)
+    await c.connect()
+    # 空 text：不发 text 回放帧，但路由须已重建
+    assert not any(f.get('runId') == 'inflight-empty' and f.get('type') == 'text' for f in received)
+    t.push({'type': 'event', 'event': 'chat',
+            'payload': {'runId': 'inflight-empty', 'state': 'delta', 'deltaText': 'x'}})
+    await asyncio.sleep(0.05)
+    assert {'type': 'text', 'runId': 'inflight-empty', 'delta': 'x'} in received
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_adopt_inflight_run_plan_passthrough():
+    """#217 步3（采用可选 plan）/ codex #236 P2-104：inFlightRun.plan（systemRunPlan）被采用进
+    RecoveredRun，但**不下发** plan 帧——前端 ws.ts 尚无 plan ChatFrame 类型/handleMessage 分支，
+    发即静默丢弃；前端 plan 卡接线属 #198。故断言**无** plan 帧发出（采纳值留 RecoveredRun 供 #198）。"""
+    history = {
+        'messages': [],
+        'inFlightRun': {'runId': 'inflight-plan', 'text': '',
+                        'plan': {'rawCommand': 'curl x', 'sessionKey': 's1'}},
+    }
+    t = FakeChatTransport(rpc_payloads={'chat.history': history})
+    received = []
+
+    async def on_event(frame):
+        received.append(frame)
+
+    c = _client(transport=t)
+    c.record_active_session('s1', on_event=on_event)
+    await c.connect()
+    # plan 被采用（路由重建证明 run 被采纳），但不下发 plan 帧（前端无此契约，#198 接线前不发明文）
+    assert not any(f.get('type') == 'plan' for f in received)
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_history_messages_replayed_as_history_namespace_replace():
+    """#217 步2：chat.history 的 messages 投影经 __history__ 命名空间 runId 整段回放（replace=True
+    → 前端整段替换而非追加），按消息顺序拼接、后发覆盖先发。"""
+    history = {
+        'messages': [
+            {'role': 'user', 'content': [{'type': 'text', 'text': '问题一'}]},
+            {'role': 'assistant', 'content': [{'type': 'text', 'text': '回答一'}]},
+        ],
+    }
+    t = FakeChatTransport(rpc_payloads={'chat.history': history})
+    received = []
+
+    async def on_event(frame):
+        received.append(frame)
+
+    c = _client(transport=t)
+    c.record_active_session('s1', on_event=on_event)
+    await c.connect()
+    history_frames = [f for f in received if f.get('runId') == '__history__']
+    assert history_frames == [
+        {'type': 'text', 'runId': '__history__', 'delta': '问题一', 'replace': True},
+        {'type': 'text', 'runId': '__history__', 'delta': '回答一'},
+    ]
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_history_user_string_content_replayed():
+    """#217 步2 / codex #236 P2-120：chat.history 的 content **多态**（ADR 0003：user=字符串，
+    assistant=list）。复用 _extract_text 会把 user 字符串 content 归 '' → 历史 user turn 从恢复
+    投影消失。此处 user 用字符串 content、assistant 用 list，两者都须回放进 __history__ 投影。"""
+    history = {
+        'messages': [
+            {'role': 'user', 'content': '问题一'},  # 字符串 content（ADR 0003 user 形态）
+            {'role': 'assistant', 'content': [{'type': 'text', 'text': '回答一'}]},  # list content
+        ],
+    }
+    t = FakeChatTransport(rpc_payloads={'chat.history': history})
+    received = []
+
+    async def on_event(frame):
+        received.append(frame)
+
+    c = _client(transport=t)
+    c.record_active_session('s1', on_event=on_event)
+    await c.connect()
+    history_frames = [f for f in received if f.get('runId') == '__history__']
+    assert history_frames == [
+        {'type': 'text', 'runId': '__history__', 'delta': '问题一', 'replace': True},
+        {'type': 'text', 'runId': '__history__', 'delta': '回答一'},
+    ]
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_history_first_emitted_frame_marked_replace_when_leading_empty():
+    """#217 步2 / codex #236 P2-120：replace=True 锚定**首个产出帧**而非 index==0——index 0 消息 text
+    为空（如纯工具 turn，无 text content）被跳过时，首个实际产出帧仍须带 replace=True 供前端整段锚定。"""
+    history = {
+        'messages': [
+            {'role': 'assistant', 'content': [{'type': 'thinking', 'thinking': '...'}]},  # 无 text → 跳过
+            {'role': 'user', 'content': '首个有效'},
+        ],
+    }
+    t = FakeChatTransport(rpc_payloads={'chat.history': history})
+    received = []
+
+    async def on_event(frame):
+        received.append(frame)
+
+    c = _client(transport=t)
+    c.record_active_session('s1', on_event=on_event)
+    await c.connect()
+    history_frames = [f for f in received if f.get('runId') == '__history__']
+    # index 0 跳过（无 text）；首个产出帧（index 1）带 replace=True
+    assert history_frames == [
+        {'type': 'text', 'runId': '__history__', 'delta': '首个有效', 'replace': True},
+    ]
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_session_info_active_run_not_in_ids_no_retained_route():
+    """#217 步4：sessionInfo.hasActiveRun=true 但 inFlightRun.runId 不在 activeRunIds → 不重建
+    保留路由（该 run 属另一活跃投影，网关不会在本连接续流）。"""
+    history = {
+        'messages': [],
+        'inFlightRun': {'runId': 'stale-run', 'text': 'orphan'},
+        'sessionInfo': {'hasActiveRun': True, 'activeRunIds': ['other-run']},
+    }
+    t = FakeChatTransport(rpc_payloads={'chat.history': history})
+    received = []
+
+    async def on_event(frame):
+        received.append(frame)
+
+    c = _client(transport=t)
+    c.record_active_session('s1', on_event=on_event)
+    await c.connect()
+    # 不采用 stale-run（不在 activeRunIds）→ 后续该 runId 事件不路由（cb is None 丢弃）
+    t.push({'type': 'event', 'event': 'chat',
+            'payload': {'runId': 'stale-run', 'state': 'delta', 'deltaText': 'x'}})
+    await asyncio.sleep(0.05)
+    assert not any(f.get('runId') == 'stale-run' for f in received)
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_inflight_event_arriving_during_recovery_not_lost():
+    """#217 步3+5（不丢）：inFlightRun 的 delta 事件**在恢复泵期**到达（history res 与路由重建之间
+    或紧随其后）——经缓冲在路由重建后回放，不丢帧（契约「重连后进行中 run 输出不进入无路由黑洞」）。"""
+    history = {'messages': [], 'inFlightRun': {'runId': 'inflight-1', 'text': 'buf'}}
+    # events 预设在 connect 期到达（恢复泵会读到并缓冲）；路由重建后回放。
+    t = FakeChatTransport(
+        rpc_payloads={'chat.history': history},
+        events=[{'type': 'event', 'event': 'chat',
+                 'payload': {'runId': 'inflight-1', 'state': 'delta', 'deltaText': '，途中'}}],
+    )
+    received = []
+
+    async def on_event(frame):
+        received.append(frame)
+
+    c = _client(transport=t)
+    c.record_active_session('s1', on_event=on_event)
+    await c.connect()
+    await asyncio.sleep(0.1)  # 等缓冲回放
+    deltas = [f for f in received if f.get('runId') == 'inflight-1' and f.get('type') == 'text']
+    assert any(f.get('delta') == '，途中' for f in deltas), f'恢复泵期到达的事件未回放: {received}'
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_connection_level_event_drained_when_no_adoptable_run():
+    """#217 / codex #236 P2-419：恢复泵期到达的**连接级** event（approval，无 runId、无可采用
+    inFlightRun）须在恢复完成后**无条件**回放 fan-out——原先仅「采用 inFlightRun」或「后续 send ack」
+    两路回放缓冲，无活跃会话/无可采用 run 时该帧滞留到无关的未来 send 才浮现（审批卡迟到/丢失）。"""
+    t = FakeChatTransport(
+        rpc_payloads={'chat.history': {'messages': []}},  # 无 inFlightRun → 无可采用 run
+        events=[{'type': 'event', 'event': 'exec.approval.requested',
+                 'payload': {'id': 'ap-conn', 'request': {'command': 'curl x', 'sessionKey': 's1'}}}],
+    )
+    approvals = []
+
+    async def on_approval(frame):
+        approvals.append(frame)
+
+    async def on_event(frame):  # 会话投影回调（本测试不关注）
+        pass
+
+    c = _client(transport=t)
+    c.add_approval_subscriber(on_approval)
+    c.record_active_session('s1', on_event=on_event)
+    await c.connect()
+    await asyncio.sleep(0.1)  # 等恢复完成后的无条件缓冲回放
+    assert any(f.get('type') == 'approval' and f.get('id') == 'ap-conn' for f in approvals), \
+        f'连接级审批事件在无可采用 run 时未回放: {approvals}'
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_session_info_active_run_in_ids_keeps_route():
+    """#217 步4（对照）：inFlightRun.runId 在 activeRunIds 中 → 正常重建路由（归属本连接）。"""
+    history = {
+        'messages': [],
+        'inFlightRun': {'runId': 'live-run', 'text': 'buf'},
+        'sessionInfo': {'hasActiveRun': True, 'activeRunIds': ['live-run']},
+    }
+    t = FakeChatTransport(rpc_payloads={'chat.history': history})
+    received = []
+
+    async def on_event(frame):
+        received.append(frame)
+
+    c = _client(transport=t)
+    c.record_active_session('s1', on_event=on_event)
+    await c.connect()
+    t.push({'type': 'event', 'event': 'chat',
+            'payload': {'runId': 'live-run', 'state': 'delta', 'deltaText': 'y'}})
+    await asyncio.sleep(0.05)
+    assert {'type': 'text', 'runId': 'live-run', 'delta': 'y'} in received
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_recovered_inflight_run_final_does_not_duplicate():
+    """#217 / codex #236 R3 P1-108：恢复回放的 inFlightRun 缓冲 text 须 seed 翻译器累积器——否则网关
+    后续 final 快照以为尚未产出、整段重发（"Hello"+"Hello world"→"HelloHello world"）。
+
+    恢复后仅应补 final 的**尾部增量**（sent 差集），不得重放已恢复的整段文本。"""
+    history = {'messages': [], 'inFlightRun': {'runId': 'inflight-1', 'text': 'Hello'}}
+    # final 在恢复完成后到达（经重建路由翻译）——message 含已恢复前缀 + 尾部。
+    t = FakeChatTransport(rpc_payloads={'chat.history': history})
+    received = []
+
+    async def on_event(frame):
+        received.append(frame)
+
+    c = _client(transport=t)
+    c.record_active_session('s1', on_event=on_event)
+    await c.connect()
+    # 恢复已完成：路由重建 + 缓冲 text 回放（此时才推 final，避免撞泵期缓冲）
+    t.push({'type': 'event', 'event': 'chat',
+            'payload': {'runId': 'inflight-1', 'state': 'final',
+                        'message': {'role': 'assistant', 'content': [{'type': 'text', 'text': 'Hello world'}]}}})
+    await asyncio.sleep(0.1)  # 等 final 翻译
+    texts = [f for f in received if f.get('type') == 'text']
+    # 恢复回放整段 Hello（replace），final 只补尾部 world——全文不得出现第二次整段 Hello
+    assert {'type': 'text', 'runId': 'inflight-1', 'delta': 'Hello', 'replace': True} in texts
+    assert {'type': 'text', 'runId': 'inflight-1', 'delta': ' world'} in texts, \
+        f'final 未以恢复文本为基线只补尾部: {texts}'
+    assert not any(f.get('delta') == 'Hello world' for f in texts), \
+        f'final 整段重发已恢复文本（累积器未 seed）: {texts}'
+    assert any(f.get('type') == 'done' for f in received)
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_same_session_multi_subscriber_both_get_recovery():
+    """#217 / codex #236 R3 P1-242：共享池化 client 同一会话多 consumer（各自 record_active_session）——
+    history 投影 + inFlightRun 续流须 fan-out 到**全部**订阅者，非只投最后一个（单槽覆盖会丢前者的
+    续流）。"""
+    history = {
+        'messages': [{'role': 'user', 'content': '历史消息'}],
+        'inFlightRun': {'runId': 'inflight-shared', 'text': '半截'},
+    }
+    t = FakeChatTransport(rpc_payloads={'chat.history': history})
+    received_a, received_b = [], []
+
+    async def on_event_a(frame):
+        received_a.append(frame)
+
+    async def on_event_b(frame):
+        received_b.append(frame)
+
+    c = _client(transport=t)
+    c.record_active_session('s1', on_event_a)  # consumer A
+    c.record_active_session('s1', on_event_b)  # consumer B（同会话——单槽覆盖会顶掉 A）
+    await c.connect()
+    # 两会话投影都到：历史 replace 帧 + inFlightRun 缓冲 text
+    assert {'type': 'text', 'runId': HISTORY_RUN_ID, 'delta': '历史消息', 'replace': True} in received_a
+    assert {'type': 'text', 'runId': HISTORY_RUN_ID, 'delta': '历史消息', 'replace': True} in received_b
+    assert {'type': 'text', 'runId': 'inflight-shared', 'delta': '半截', 'replace': True} in received_a
+    assert {'type': 'text', 'runId': 'inflight-shared', 'delta': '半截', 'replace': True} in received_b
+    # 续流：网关后续该 runId 的 delta 须路由到**两个**订阅者（fan-out 路由，非单槽）
+    t.push({'type': 'event', 'event': 'chat',
+            'payload': {'runId': 'inflight-shared', 'state': 'delta', 'deltaText': '，续'}})
+    await asyncio.sleep(0.05)
+    assert {'type': 'text', 'runId': 'inflight-shared', 'delta': '，续'} in received_a
+    assert {'type': 'text', 'runId': 'inflight-shared', 'delta': '，续'} in received_b
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_same_session_unregister_keeps_peer_subscriber():
+    """#217 / codex #236 R3 P1-242：同会话多订阅者之一断开（unregister）只移除**自己**——会话与
+    恢复路由保留，peer 的续流不受影响（单槽覆盖会因最后一个注册者断开而整个清掉）。"""
+    history = {'messages': [], 'inFlightRun': {'runId': 'inflight-shared', 'text': 'buf'}}
+    t = FakeChatTransport(rpc_payloads={'chat.history': history})
+    received_a, received_b = [], []
+
+    async def on_event_a(frame):
+        received_a.append(frame)
+
+    async def on_event_b(frame):
+        received_b.append(frame)
+
+    c = _client(transport=t)
+    c.record_active_session('s1', on_event_a)
+    c.record_active_session('s1', on_event_b)
+    await c.connect()
+    assert 'inflight-shared' in c._routes  # 恢复路由已建
+    c.unregister_active_session('s1', on_event_a)  # A 断开
+    # B 仍在订阅：会话保留、恢复路由未清、续流继续投 B
+    assert 's1' in c._active_session_keys
+    assert 'inflight-shared' in c._routes, 'peer 仍订阅时恢复路由不得随单订阅者断开清除'
+    t.push({'type': 'event', 'event': 'chat',
+            'payload': {'runId': 'inflight-shared', 'state': 'delta', 'deltaText': 'x'}})
+    await asyncio.sleep(0.05)
+    assert not any(f.get('delta') == 'x' for f in received_a), '已断开订阅者不得再收续流'
+    assert {'type': 'text', 'runId': 'inflight-shared', 'delta': 'x'} in received_b
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_recovery_callback_raise_does_not_abort_connect():
+    """#217 / codex #236 R4 P2：恢复投影回调（history 投影 / inFlightRun 缓冲 text fan-out）须**异常隔离**
+    ——任一订阅者回调抛错（如浏览器在回调传播后、新 client 发布前断开）不得中止 _RecoveryCoordinator.run()
+    → connect() 不得对共享 pool 的**所有** consumer 判失败。对齐 _fanout_approval / _recovery_fanout 的
+    per-callback try/except 模式（此处 history 投影 + inFlightRun 缓冲 text 是裸 await，缺对称隔离）。"""
+    history = {
+        'messages': [{'role': 'user', 'content': '历史消息'}],
+        'inFlightRun': {'runId': 'inflight-1', 'text': '半截'},
+    }
+    t = FakeChatTransport(rpc_payloads={'chat.history': history})
+    good = []
+
+    async def raising_on_event(frame):  # 模拟已断开的 consumer 回调：恢复投影时抛错
+        raise RuntimeError('consumer gone')
+
+    async def good_on_event(frame):
+        good.append(frame)
+
+    c = _client(transport=t)
+    c.record_active_session('s1', raising_on_event)  # 先注册的消费者（恢复投影时抛错）
+    c.record_active_session('s1', good_on_event)  # 后注册的正常消费者
+    await c.connect()  # 不抛（坏回调被隔离）：恢复流程不得中止 connect
+    # 正常回调仍收到完整投影：history replace 帧 + inFlightRun 缓冲 text
+    assert {'type': 'text', 'runId': HISTORY_RUN_ID, 'delta': '历史消息', 'replace': True} in good
+    assert {'type': 'text', 'runId': 'inflight-1', 'delta': '半截', 'replace': True} in good
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_multi_session_flush_keeps_unrouted_events_until_route_ready():
+    """#217 / codex #236 R4 P1：**多会话**维度的缓冲回放归属——第一会话采用 inFlightRun 时
+    _flush_connect_buffered() 不得把**整个连接级缓冲**清空回放（含第二会话已到达、路由尚未重建
+    的 run 事件——`_handle` 见 cb is None 会永久丢弃）。须按「路由是否就绪」过滤：路由已重建的
+    run 事件立即回放，其余保留缓冲待第二会话 chat.history 完成、路由重建后再 flush。
+
+    （对齐 codex #236 P2-419 已区分的「连接级 vs run-scoped」维度——此处是跨会话的同类问题。）
+
+    sess-a 的 history 有 2 条消息 + inFlightRun（replay 多次 yield）→ 泵在 sess-a 回放期间把两个
+    run 的泵期事件都读进缓冲；sess-a 路由重建后首 flush 若清空整个缓冲，sess-b 的 inflight-b 事件
+    因路由未建被 _handle 丢弃（永久丢失）。修复后按路由就绪过滤，inflight-b 事件留待 sess-b 恢复
+    flush 回放。"""
+    history_a = {
+        'messages': [
+            {'role': 'user', 'content': 'A 问题'},
+            {'role': 'assistant', 'content': 'A 回答'},
+        ],
+        'inFlightRun': {'runId': 'inflight-a', 'text': 'A 半截'},
+    }
+    history_b = {
+        'messages': [{'role': 'user', 'content': 'B 历史'}],
+        'inFlightRun': {'runId': 'inflight-b', 'text': 'B 半截'},
+    }
+    t = FakeChatTransport(
+        # rpc_payloads 须含 'chat.history'（通用 RPC 循环按 method 集合应答）；by_param 命中时用
+        # 各会话自己的 payload（不 fallback），未命中时回退到这里的 {} 兜底。
+        rpc_payloads={'chat.history': {}},
+        rpc_payloads_by_param={'chat.history': {'sess-a': history_a, 'sess-b': history_b}},
+        # 泵期到达：inflight-a 事件（第一会话路由重建后即可回放）+ inflight-b 事件（第二会话路由未就绪）。
+        events=[
+            {'type': 'event', 'event': 'chat',
+             'payload': {'runId': 'inflight-a', 'state': 'delta', 'deltaText': 'A 途中'}},
+            {'type': 'event', 'event': 'chat',
+             'payload': {'runId': 'inflight-b', 'state': 'delta', 'deltaText': 'B 途中'}},
+        ],
+    )
+    received_a, received_b = [], []
+
+    async def cb_a(frame):
+        received_a.append(frame)
+        # 模拟真实 consumer 回调的 I/O 让渡（send_json 到浏览器）——恢复泵须在本会话回放期间
+        # 获得调度、把泵期到达的事件读进 _connect_buffered（否则首 flush 时缓冲为空、测不到误清）。
+        await asyncio.sleep(0)
+
+    async def cb_b(frame):
+        received_b.append(frame)
+        await asyncio.sleep(0)
+
+    c = _client(transport=t)
+    c.record_active_session('sess-a', cb_a)
+    c.record_active_session('sess-b', cb_b)
+    await c.connect()
+    await asyncio.sleep(0.1)  # 等两会话恢复 + 第二次 flush 回放
+    # 会话 A：泵期事件已回放（其路由在第一会话 flush 时已重建）
+    assert {'type': 'text', 'runId': 'inflight-a', 'delta': 'A 途中'} in received_a, \
+        f'第一会话路由就绪的事件未回放: {received_a}'
+    # 会话 B：泵期事件**不丢**——第一会话 flush 时 B 路由未重建须保留，B 的 chat.history 完成后回放
+    assert {'type': 'text', 'runId': 'inflight-b', 'delta': 'B 途中'} in received_b, \
+        f'第二会话路由重建后的事件未回放（首 flush 误清导致永久丢弃）: {received_b}'
+    # B 的历史投影 + inFlightRun 缓冲 text 也正常（路由未因误清而丢失）
+    assert {'type': 'text', 'runId': HISTORY_RUN_ID, 'delta': 'B 历史', 'replace': True} in received_b
+    assert {'type': 'text', 'runId': 'inflight-b', 'delta': 'B 半截', 'replace': True} in received_b
     await c.aclose()

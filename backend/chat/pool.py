@@ -185,6 +185,10 @@ class ChatConnectionPool:
             if identity is not None and not REQUIRED_SCOPES.issubset(set(scopes)):
                 raise NotPaired(pairing.status, pairing.pairing_request_id)
             new_client = self._make_client(key, url, pairing.device_token, identity, scopes)
+            # codex #236 R2 P1-318：死路径驱逐重建也 propagate 记住会话（原仅 _reconnect_once）——
+            # 否则前台驱逐重建的 connect 不带记住 sessionKey，恢复永不触发。
+            if client is not None:
+                self._propagate_recovery(client, new_client)
             # codex #221 R6 P2：建连前读 evict 代际——connect 期间若发生 evict（force-repair/删除），
             # 代际会递增。
             gen0 = self._evict_gen.get(url, 0)
@@ -217,6 +221,27 @@ class ChatConnectionPool:
         for cb in old_client.approval_subscribers():
             old_client.remove_approval_subscriber(cb)
             new_client.add_approval_subscriber(cb)
+
+    @staticmethod
+    def _propagate_recovery(old_client, new_client) -> None:
+        """#196 T4 / #217 / codex #236 R2 P1-318：把 old_client 记住的活跃会话逐条 propagate 到
+        new_client（建替换 client 后、connect 前调用）。
+
+        所有「驱逐旧 client 重建新 client」路径都须经此——_reconnect_once（主动重连）、reacquire
+        （consumer 自愈）、get_or_create 死路径（前台驱逐重建）——否则该路径 connect 不携带记住的
+        sessionKey，恢复（messages.subscribe + chat.history + inFlightRun）永不触发、remembered
+        session 随旧 client 丢弃。getattr 防御：stub/无 recovery_sessions 的 client 视为无记住。
+        """
+        sessions = getattr(old_client, 'recovery_sessions', None)
+        if sessions is None:
+            return
+        for session_key, callbacks in sessions():
+            if not callbacks:
+                new_client.record_active_session(session_key)  # key-only 会话：仅记住 key
+                continue
+            # codex #236 R3 P1-242：同会话多订阅者逐条全部 propagate（record_active_session 幂等去重）
+            for on_event in callbacks:
+                new_client.record_active_session(session_key, on_event)
 
     def _make_client(self, key, url, device_token, identity, scopes):
         """经 client_factory 建 client，best-effort 注入 on_dead 回调（#215 触发主动重连）。
@@ -310,6 +335,10 @@ class ChatConnectionPool:
             except Exception:  # pylint: disable=broad-exception-caught
                 pass
             new_client = self._make_client(key, url, device_token, target.identity, target.scopes)
+            # #196 T4 / #217：把旧 client 记住的活跃会话 propagate 到替换 client——重连恢复
+            # （messages.subscribe + chat.history + inFlightRun）须携带「client 记住的上次活跃
+            # sessionKey」（契约步1），否则 remembered session 随旧 client 丢弃、恢复永不触发。
+            self._propagate_recovery(target, new_client)
             await new_client.connect()
             # codex #221 R3+R4 P1：换入的替换 client 已 dead（握手完成但 recv 立刻退出）时，
             # **确认存活后才发布**——dead 则先 aclose 丢弃半成品、不写入 _clients[key]，再抛
@@ -465,6 +494,10 @@ class ChatConnectionPool:
             if identity is not None and not REQUIRED_SCOPES.issubset(set(scopes)):
                 raise NotPaired(pairing.status, pairing.pairing_request_id)
             new_client = self._make_client(key, url, pairing.device_token, identity, scopes)
+            # codex #236 R2 P1-318：consumer 自愈重建也 propagate 记住会话（原仅 _reconnect_once）——
+            # 否则 reacquire 的 connect 不带记住 sessionKey，恢复（messages.subscribe+chat.history）跳过。
+            if replaced is not None:
+                self._propagate_recovery(replaced, new_client)
             try:
                 await new_client.connect()  # 握手有界（chat_client.connect_timeout）
             except Exception:

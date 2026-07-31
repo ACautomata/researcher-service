@@ -86,6 +86,9 @@ def _url_for(inst):
     return f'ws://test:{inst.port}/'
 
 
+def _noop_on_event(frame):
+    """#217 恢复回调 stub：record_active_session 的 on_event 占位（测试只关心传播/注销，不消费帧）。"""
+
 @pytest.fixture
 def pool():
     return ChatConnectionPool(
@@ -348,6 +351,67 @@ async def test_reacquire_evicts_expected_dead_and_recreates():
     assert c1.closed  # 旧死 client best-effort aclose
     # 再 get_or_create 命中刚重建的健康 client（复用）
     assert await pool.get_or_create(inst) is c2
+
+
+class _RecoveryDeadClient(_DeadAwareClient):
+    """_DeadAwareClient + #217 恢复 API（record_active_session/recovery_sessions，多会话共存）。"""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._recorded = {}
+
+    def record_active_session(self, session_key, on_event=None):
+        # codex #236 R3 P1-242：对齐真实 client 多订阅者列表（append 幂等，None=key-only 清回调）。
+        if on_event is None:
+            self._recorded.pop(session_key, None)
+        else:
+            self._recorded.setdefault(session_key, [])
+            if on_event not in self._recorded[session_key]:
+                self._recorded[session_key].append(on_event)
+
+    def recovery_sessions(self):
+        return list(self._recorded.items())
+
+
+@pytest.mark.asyncio
+async def test_reacquire_propagates_remembered_sessions():
+    """#217 / codex #236 R2 P1-318：consumer 自愈（reacquire）驱逐死 client 重建时，也须把记住的
+    活跃会话 propagate 到新 client（原仅 _reconnect_once）——否则该路径 connect 不带 sessionKey，
+    恢复（messages.subscribe+chat.history+inFlightRun）永不触发。"""
+    pool = ChatConnectionPool(
+        pairing_service=FakePairingService(),
+        client_factory=_RecoveryDeadClient,
+        ws_url_for=_url_for,
+    )
+    inst = _instance('a', 19001)
+    c1 = await pool.get_or_create(inst)
+    c1.record_active_session('s1', _noop_on_event)
+    c1.dead = True  # 本 consumer 持有的死 client → reacquire 驱逐重建
+
+    c2, _replaced = await pool.reacquire(inst, c1)
+    assert c2 is not c1
+    assert c2.recovery_sessions() == [('s1', [_noop_on_event])], 'reacquire 重建须传播记住会话'
+    await pool.aclose_all()
+
+
+@pytest.mark.asyncio
+async def test_get_or_create_dead_path_propagates_remembered_sessions():
+    """#217 / codex #236 R2 P1-318：前台 get_or_create 驱逐死 client 重建（非 _reconnect_once）也须
+    propagate 记住会话——否则该路径 connect 不带 sessionKey，恢复永不触发。"""
+    pool = ChatConnectionPool(
+        pairing_service=FakePairingService(),
+        client_factory=_RecoveryDeadClient,
+        ws_url_for=_url_for,
+    )
+    inst = _instance('a', 19001)
+    c1 = await pool.get_or_create(inst)
+    c1.record_active_session('s1', _noop_on_event)
+    c1.dead = True  # 标 dead → 下次 get_or_create 驱逐重建
+
+    c2 = await pool.get_or_create(inst)
+    assert c2 is not c1
+    assert c2.recovery_sessions() == [('s1', [_noop_on_event])], 'get_or_create 死路径重建须传播记住会话'
+    await pool.aclose_all()
 
 
 @pytest.mark.asyncio
@@ -647,6 +711,31 @@ class _ScriptedReconnectClient:
         pass
 
 
+class _RecoveryAwareClient(_ScriptedReconnectClient):
+    """带 #217 恢复 API（record_active_session/recovery_sessions）的重连 client 替身。
+
+    记录「记住的活跃会话」（多会话共存，codex #236 R2 P1），供 pool 传播断言——证明 remembered
+    session 跨「旧 client 死 → 替换 client」被继承（契约步1「client 记住上次活跃 sessionKey」
+    跨重连不失效）。
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._recorded = {}
+
+    def record_active_session(self, session_key, on_event=None):
+        # codex #236 R3 P1-242：对齐真实 client 多订阅者列表（append 幂等，None=key-only 清回调）。
+        if on_event is None:
+            self._recorded.pop(session_key, None)
+        else:
+            self._recorded.setdefault(session_key, [])
+            if on_event not in self._recorded[session_key]:
+                self._recorded[session_key].append(on_event)
+
+    def recovery_sessions(self):
+        return list(self._recorded.items())
+
+
 def _scripted_factory(script, index):
     def factory(url, device_token, *, identity, scopes, on_dead=None):
         return _ScriptedReconnectClient(
@@ -802,6 +891,37 @@ async def test_fast_path_get_or_create_cancels_pending_reconnect(clock):
     await asyncio.sleep(0)
     await asyncio.sleep(0)
     assert pool._clients[key] is c_alive  # 存活 client 未被悬挂重连顶掉（无 client 分裂）
+    await pool.aclose_all()
+
+
+@pytest.mark.asyncio
+async def test_reconnect_propagates_remembered_active_session(clock):
+    """#217 步1 跨重连：pool._reconnect_once 建替换 client 时，把旧 client 记住的活跃会话经
+    recovery_sessions 传播到新 client（record_active_session）——否则 remembered session 随旧
+    client 丢弃，重连恢复（messages.subscribe + chat.history + inFlightRun）永不携带该会话。"""
+    index = [0]
+
+    def factory(url, device_token, *, identity, scopes, on_dead=None):
+        return _RecoveryAwareClient(
+            url, device_token, identity=identity, scopes=scopes,
+            script=[False], index=index, on_dead=on_dead,
+        )
+
+    pool = ChatConnectionPool(
+        pairing_service=FakePairingService(),
+        client_factory=factory,
+        ws_url_for=_url_for,
+        reconnect_policy=ReconnectPolicy(sleeper=_sleeper_for(clock)),
+    )
+    inst = _instance('a', 19001)
+    c1 = await pool.get_or_create(inst)
+    c1.record_active_session('s1', _noop_on_event)  # 对话中记住活跃会话
+    key = (c1.url, c1.device_token)
+    c1.kill()  # 标 dead → 后台主动重连
+    await _run_reconnect(pool, key)
+    c2 = pool._clients[key]
+    assert c2 is not c1  # 换入全新 client
+    assert c2.recovery_sessions() == [('s1', [_noop_on_event])]  # 记住会话已传播（同 key + 同回调）
     await pool.aclose_all()
 
 
