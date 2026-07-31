@@ -94,14 +94,18 @@ def test_default_template_path_is_dev_fallback_with_prod_fail_fast():
     assert mod.OPENCLAW_FLEET['TEMPLATE'] == str(mod.BASE_DIR.parent / 'researcher')
 
     # prod fail-fast 兜底：OPENCLAW_TEMPLATE_DIR 缺失/相对路径仍拒启动。
+    # LLM_API_KEY 给齐，确保拒启动落在 TEMPLATE_DIR 分支而非 LLM_API_KEY 分支
+    # （issue #258 起 LLM_API_KEY 也是生产必填，缺失会先于 TEMPLATE_DIR 触发）。
     with pytest.raises(ImproperlyConfigured):
         validate_prod_env({
             'DJANGO_ALLOWED_HOSTS': 'example.test',
+            'LLM_API_KEY': 'sk-prod-test',
             # OPENCLAW_TEMPLATE_DIR 故意缺失
         })
     with pytest.raises(ImproperlyConfigured):
         validate_prod_env({
             'DJANGO_ALLOWED_HOSTS': 'example.test',
+            'LLM_API_KEY': 'sk-prod-test',
             'OPENCLAW_TEMPLATE_DIR': 'researcher',  # 相对路径
         })
 
