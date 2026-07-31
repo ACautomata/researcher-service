@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from integration.openclaw.wire import ChatClientError
+
 
 class FakeContainerRuntime:
     """ContainerRuntime Port 的内存 fake：记录调用、模拟容器状态（对齐 containers FakeRuntime 语义）。"""
@@ -102,8 +104,6 @@ class FakeOpenClawWire:
     async def send_message(
         self, session_key: str, message: str, on_event: Any, *, idempotency_key: str | None = None,
     ) -> str:
-        from chat.chat_client import ChatClientError
-
         if not self.connected:
             raise ChatClientError('client not connected')
         self.sent.append((session_key, message, on_event))
