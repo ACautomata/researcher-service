@@ -79,6 +79,19 @@ async def test_start_emits_ready(override_pool, instance):
 
 
 @pytest.mark.asyncio
+async def test_ping_replies_pong(instance):
+    """codex #249 P1：浏览器↔Channels 腿的应用层心跳——前端周期 ping，consumer 回 pong，
+    给前端静默看门狗一个周期性的 JS 可见活性信号（idle 健康连接不再被误判半开掐死）。
+    ping 不触 run/session/容器状态，纯活性回显。"""
+    comm = await _connect_authed()
+    await comm.connect()
+    await comm.send_json_to({'type': 'ping'})
+    resp = await comm.receive_json_from()
+    assert resp == {'type': 'pong'}
+    await comm.disconnect()
+
+
+@pytest.mark.asyncio
 async def test_start_unknown_container_sends_error(override_pool):
     comm = await _connect_authed()
     await comm.connect()

@@ -343,4 +343,54 @@ describe('ChatWebSocket', () => {
       expect(onClose).toHaveBeenCalledTimes(1)
     })
   })
+
+  // ---- codex #249 P1 应用层心跳：周期 ping 给本腿活性流量，idle 健康连接不被看门狗误判半开 ----
+  describe('heartbeat ping (codex #249 P1)', () => {
+    beforeEach(() => {
+      vi.useFakeTimers()
+    })
+    afterEach(() => {
+      vi.useRealTimers()
+    })
+
+    it('sends a ping on the heartbeat interval after open', () => {
+      new ChatWebSocket('/ws/chat/', 'jwt', {}, { pingIntervalMs: 1000 })
+      MockWS.last!.fireOpen()
+      MockWS.last!.sent.length = 0 // 清掉 open flush 的缓冲帧
+      vi.advanceTimersByTime(1000)
+      expect(MockWS.last!.sent).toContainEqual({ type: 'ping' })
+    })
+
+    it('keeps an idle connection alive: periodic pong resets the watchdog (idle 健康不判死)', () => {
+      // 复现 Codex P1：本腿无周期帧时 idle 60s 会被看门狗掐死。有心跳后——前端周期 ping、
+      // 对端回 pong（入站帧）重置看门狗，idle 健康连接在多倍 silenceTimeout 内不被判死。
+      const onClose = vi.fn()
+      new ChatWebSocket('/ws/chat/', 'jwt', { onClose }, { silenceTimeoutMs: 3000, pingIntervalMs: 1000 })
+      MockWS.last!.fireOpen()
+      // 每个 ping 周期对端回 pong（模拟 consumer ping→pong）：推进 5 个周期（5s > silenceTimeout 3s）
+      for (let i = 0; i < 5; i++) {
+        vi.advanceTimersByTime(1000) // 触发一次 ping
+        MockWS.last!.fireMessage({ type: 'pong' }) // 对端应答 → 入站帧重置看门狗
+      }
+      expect(onClose).not.toHaveBeenCalled() // idle 但有 pong：健康，不判死
+    })
+
+    it('still kills a genuinely half-open connection when pings go unanswered (ping 无应答判死)', () => {
+      const onClose = vi.fn()
+      new ChatWebSocket('/ws/chat/', 'jwt', { onClose }, { silenceTimeoutMs: 3000, pingIntervalMs: 1000 })
+      MockWS.last!.fireOpen()
+      // ping 照发但对端无任何应答（真半开）：静默超 silenceTimeout 判死
+      vi.advanceTimersByTime(3000)
+      expect(onClose).toHaveBeenCalled()
+    })
+
+    it('stops the heartbeat on close (关闭后不再发 ping)', () => {
+      const ws = new ChatWebSocket('/ws/chat/', 'jwt', {}, { pingIntervalMs: 1000 })
+      MockWS.last!.fireOpen()
+      ws.close()
+      MockWS.last!.sent.length = 0
+      vi.advanceTimersByTime(5000)
+      expect(MockWS.last!.sent).toEqual([]) // 关闭后心跳停止
+    })
+  })
 })

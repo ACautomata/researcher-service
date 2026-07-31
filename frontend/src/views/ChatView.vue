@@ -475,7 +475,13 @@ function connect() {
         reconnectAttempts = 0 // 连接成功：重置退避（契约「重连成功即重置退避」）
         // issue #239：断线重连成功（attempts>0 表示上一轮在退避重连）→ 以权威历史恢复投影，
         // 找回断线期间的流式文本（对齐 OpenClaw「重连后恢复状态」：重连视为基于持久历史的新投影）。
-        if (attempts > 0 && resumeSession) void loadHistory(resumeSession)
+        // codex #249 P2：重连 socket 创建后、ready 到达前用户可能已切会话——resumeSession 仍指旧会话，
+        // 若仍 loadHistory(resumeSession) 会同步清空新会话消息并置 historyLoading（其 stale 守卫因
+        // selectedSession 已变直接 return、不复位该 flag）→ 新会话空白且「加载更多」永久禁用。
+        // 仅当当前会话仍是重连前捕获的那会话才恢复；否则跳过（pickSession 已自行 loadHistory 新会话）。
+        if (attempts > 0 && resumeSession && selectedSession.value === resumeSession) {
+          void loadHistory(resumeSession)
+        }
       }
     },
     onText: (runId, delta, replace) => {

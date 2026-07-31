@@ -67,6 +67,11 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
             await self._handle_send(content)
         elif msg_type == 'resolve':
             await self._handle_resolve(content)
+        elif msg_type == 'ping':
+            # codex #249 P1：浏览器↔Channels 腿的应用层心跳回显。本腿除 ready/业务事件外无周期帧
+            # （daphne 默认不发协议 ping），前端静默看门狗若无 JS 可见活性信号会把 idle 健康连接误
+            # 判半开掐死。前端周期 ping → 此处回 pong（纯活性，不触 run/session/容器状态）。
+            await self.send_json({'type': 'pong'})
 
     async def _handle_start(self, content):
         name = content.get('container')

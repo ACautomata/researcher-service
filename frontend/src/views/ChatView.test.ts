@@ -1240,6 +1240,36 @@ describe('ChatView', () => {
       expect(w.find('[data-test="stream"]').text()).toContain('断线期间恢复的回答')
     })
 
+    it('does not restore the old session when the user switches before ready (codex #249 P2)', async () => {
+      // 复现：断线 → 重连 socket 已建、ready 未到 → 用户切到 sk-2 → ready 到。
+      // resumeSession 仍指旧 sk-1；若仍 loadHistory(sk-1) 会清空 sk-2 消息并 wedge historyLoading。
+      const SESS2 = { session_key: 'sk-2', title: 'S2', updated_at: '' }
+      ;(listSessions as ReturnType<typeof vi.fn>).mockResolvedValue([SESSION, SESS2])
+      ;(getSessionHistory as ReturnType<typeof vi.fn>).mockImplementation((_n: string, key: string) =>
+        Promise.resolve({
+          messages: [{ role: 'agent', text: `${key}-历史` }],
+          hasMore: false,
+          nextOffset: null,
+        }),
+      )
+      const w = await mountReady()
+      MockWS.last!.fireClose()
+      await nextTick()
+      await vi.advanceTimersByTimeAsync(1000) // 触发自动重连（新 socket 已建，ready 未到）
+      await flushPromises()
+      MockWS.last!.fireOpen()
+      // ready 到达前切到 sk-2（pickSession 自行 loadHistory(sk-2)）
+      await w.find('[data-test="session-sk-2"]').trigger('click')
+      await flushPromises()
+      expect(w.find('[data-test="stream"]').text()).toContain('sk-2-历史')
+      // 此刻 ready 才到：不得用旧会话 sk-1 覆盖 sk-2 的投影
+      MockWS.last!.fireMessage({ type: 'ready', container: 'demo' })
+      await flushPromises()
+      const stream = w.find('[data-test="stream"]').text()
+      expect(stream).toContain('sk-2-历史')
+      expect(stream).not.toContain('sk-1-历史')
+    })
+
     it('manual reconnect button reconnects the current container (重连按钮，绕开 early-return)', async () => {
       const w = await mountReady()
       const first = MockWS.last!
