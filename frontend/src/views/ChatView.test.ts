@@ -37,9 +37,12 @@ import { ApiError } from '@/api/client'
 import { ElMessageBox } from 'element-plus'
 
 class MockWS {
+  static OPEN = 1 // ws.ts sendRaw 守卫用 WebSocket.OPEN（readyState 判走 onError，codex P2）
+  static CLOSED = 3
   static last: MockWS | null = null
   sent: unknown[] = []
   closed = false // 记录 close() 是否被调用（验证切容器时旧 ws 被关闭）
+  readyState = MockWS.OPEN // 对齐原生：默认 OPEN，fireOpen 置位（否则守卫误判 CLOSING）
   onopen: ((e: unknown) => void) | null = null
   onmessage: ((e: { data: string }) => void) | null = null
   onerror: ((e: unknown) => void) | null = null
@@ -54,15 +57,18 @@ class MockWS {
   }
 
   send(data: string): void {
+    if (this.readyState !== MockWS.OPEN) return // 非 OPEN 静默丢弃（对齐原生 CLOSING/CLOSED）
     this.sent.push(JSON.parse(data))
   }
 
   close(): void {
     this.closed = true
+    this.readyState = MockWS.CLOSED
     this.onclose?.({})
   }
 
   fireOpen(): void {
+    this.readyState = MockWS.OPEN
     this.onopen?.({})
   }
 

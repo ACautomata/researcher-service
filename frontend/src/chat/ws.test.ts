@@ -2,18 +2,24 @@
 // 覆盖：access_token subprotocol 携 jwt、start/send 帧、ready/text/done/error 分发、断线 onClose/onError。
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
 
-// MockWS 用 readyState 模拟 CLOSING/CLOSED 窗口：非 OPEN 态 send 抛 InvalidStateError（对齐原生），
-// 供 ws.ts 的 try/catch 收尾路径测试。
+// MockWS 用 readyState 忠实原生 WebSocket 语义（WHATWG #dom-websocket-send）：
+// CONNECTING(0) send 抛 InvalidStateError；OPEN(1) 发送；CLOSING(2)/CLOSED(3) 静默丢弃不抛错。
+// 供 ws.ts 的 readyState 守卫收尾路径测试（codex P2 修正：CLOSING/CLOSED 不抛，catch 捕不到）。
+const CONNECTING = 0
 const OPEN = 1
 const CLOSING = 2
 const CLOSED = 3
 
 class MockWS {
+  static CONNECTING = CONNECTING
+  static OPEN = OPEN
+  static CLOSING = CLOSING
+  static CLOSED = CLOSED
   static last: MockWS | null = null
   url: string
   protocols: string | string[]
   sent: unknown[] = []
-  readyState = OPEN
+  readyState = CONNECTING // 新 socket 从 CONNECTING 起步（对齐原生生命周期）
   onopen: ((ev: unknown) => void) | null = null
   onmessage: ((ev: { data: string }) => void) | null = null
   onerror: ((ev: unknown) => void) | null = null
@@ -26,7 +32,8 @@ class MockWS {
   }
 
   send(data: string): void {
-    if (this.readyState !== OPEN) throw new Error('InvalidStateError') // 对齐原生：非 OPEN 态 send 抛错
+    if (this.readyState === CONNECTING) throw new Error('InvalidStateError')
+    if (this.readyState !== OPEN) return // CLOSING/CLOSED：原生静默丢弃，不 push、不抛
     this.sent.push(JSON.parse(data))
   }
 
@@ -57,7 +64,7 @@ class MockWS {
   }
 
   fireClosing(): void {
-    // close() 之后、onclose 触发之前的窗口：readyState=CLOSING，原生 send() 抛 InvalidStateError
+    // close() 之后、onclose 触发之前的窗口：readyState=CLOSING，原生 send() 静默丢弃不抛错
     this.readyState = CLOSING
   }
 }
@@ -164,7 +171,7 @@ describe('ChatWebSocket', () => {
   })
 
   it('routes send to onError after the socket has closed (no throw, codex P2)', () => {
-    // socket 关闭后原生 WebSocket.send() 会抛 InvalidStateError 且不触发 handler；
+    // socket 关闭后原生 WebSocket.send() 静默丢弃不抛错（不触发 handler）；
     // wrapper 标记 closed 后改走 onError，不真正发出（codex #4）
     const onError = vi.fn()
     const ws = new ChatWebSocket('/ws/chat/', 'jwt', { onError })
@@ -247,12 +254,27 @@ describe('ChatWebSocket', () => {
     expect(onClose).toHaveBeenCalledWith(1000, '')
   })
 
-  it('CLOSING window send routes to onError, not a raw send (InvalidStateError 竞态)', () => {
+  it('CLOSING window send routes to onError, not a raw send (readyState 守卫)', () => {
+    // CLOSING 原生 send 静默丢弃不抛错（try/catch 捕不到）→ 守卫 must 用 readyState 判走 onError，
+    // 否则消息从 composer 清空但帧没发出（codex P2）
     const onError = vi.fn()
     const ws = new ChatWebSocket('/ws/chat/', 'jwt', { onError })
     MockWS.last!.fireOpen()
     MockWS.last!.fireClosing() // close() 后、onclose 前：readyState=CLOSING
     expect(() => ws.send('sk-1', 'hi')).not.toThrow()
+    expect(onError).toHaveBeenCalledWith('连接已断开，请重试或切换容器')
+    expect(MockWS.last!.sent).toEqual([]) // 未真正发出
+  })
+
+  it('CLOSING window start/resolve also take the onError wrap-up (issue #237 AC3 三入口)', () => {
+    // start()/resolve() 与 send() 共用 sendRaw 守卫：CLOSING 窗口同样不抛、走 onError、不真正发出
+    const onError = vi.fn()
+    const ws = new ChatWebSocket('/ws/chat/', 'jwt', { onError })
+    MockWS.last!.fireOpen()
+    MockWS.last!.fireClosing()
+    expect(() => ws.start('demo')).not.toThrow()
+    expect(() => ws.resolve('ap-1', 'exec', 'deny')).not.toThrow()
+    expect(onError).toHaveBeenCalledTimes(2)
     expect(onError).toHaveBeenCalledWith('连接已断开，请重试或切换容器')
     expect(MockWS.last!.sent).toEqual([]) // 未真正发出
   })

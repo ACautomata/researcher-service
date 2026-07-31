@@ -47,7 +47,7 @@ export interface ChatHandlers {
   onTool?: (tool: ToolLine) => void
 }
 
-// 断线/CLOSED/CLOSING 态 send 的统一收尾文案（sendRaw 两分支共用，issue #237）
+// 断线/CLOSED/CLOSING 态 send 的统一收尾文案（sendRaw 守卫收尾，issue #237）
 const DISCONNECTED_MSG = '连接已断开，请重试或切换容器'
 
 export class ChatWebSocket {
@@ -56,7 +56,7 @@ export class ChatWebSocket {
   // CONNECTING 期间 send() 会抛 InvalidStateError → 缓冲到 onopen 后 flush（codex P1）
   private readonly queue: Record<string, unknown>[] = []
   private opened = false
-  private closed = false // onclose 后置位：后续 send 不再调原生 send（CLOSED 态抛 InvalidStateError）
+  private closed = false // onclose 后置位：sendRaw 不再调原生 send，走 onError 收尾（codex P2）
 
   constructor(path: string, jwt: string, handlers: ChatHandlers) {
     this.handlers = handlers
@@ -97,20 +97,17 @@ export class ChatWebSocket {
   }
 
   private sendRaw(frame: Record<string, unknown>): void {
-    if (this.closed) {
-      // socket 已关（代理/后端重启）：不再调原生 send（会抛 InvalidStateError 且不触发 handler），
-      // 改走 onError 让视图提示并收尾 streaming bubble（codex P2）。
+    // 守卫而非 try/catch：原生 WebSocket.send() 仅在 CONNECTING 抛 InvalidStateError，
+    // CLOSING/CLOSED 是静默丢弃不抛错（WHATWG #dom-websocket-send）→ try/catch 捕不到 CLOSING
+    // 竞态，消息会从 composer 清空但帧没发出。改用 readyState 判走 onError 收尾（codex P2）。
+    if (this.closed || (this.opened && this.ws.readyState !== WebSocket.OPEN)) {
+      // closed：onclose 已触发（代理/后端重启/连接失败）——直接收尾；
+      // opened && CLOSING/CLOSED：close() 后、onclose 前窗口——原生静默丢弃，与 CLOSED 同走 onError。
       this.handlers.onError?.(DISCONNECTED_MSG)
       return
     }
     if (this.opened) {
-      try {
-        this.ws.send(JSON.stringify(frame))
-      } catch {
-        // CLOSING 窗口（close() 后、onclose 前，readyState=2）原生 send 抛 InvalidStateError 且不触发
-        // handler → 与 CLOSED 同走 onError 收尾（issue #237）。
-        this.handlers.onError?.(DISCONNECTED_MSG)
-      }
+      this.ws.send(JSON.stringify(frame))
     } else {
       this.queue.push(frame) // CONNECTING 期间缓冲，onopen 后 flush
     }
