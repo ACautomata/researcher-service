@@ -32,3 +32,13 @@ _Avoid_: 协议字段——笼统，掩盖了"标识符 vs 语义类"这一关�
 **OpenClawWire**:
 接触路径 (4) 的 Port（ADR 0004，**已于 #231 收敛落地**）：**配对后长连接**（chat.send + 事件流按 runId 路由 + 连接级审批 fan-out + 只读/会话 RPC）。配对本身不在本 Port：由 `PairingHandshake` / `PairingService`（独立 seam）完成 challenge→connect→approve→持久化 deviceToken 后，pool 构造本 Port 的实现并发起无参 `connect()`。ADR 0004 据此修订了 0002 的"配对+长连合并"原意——两套 `connect` 帧的重复已由 `ConnectFrameBuilder` 偿清（与一 Port/两 Port 无关），而配对的有状态多步流程与长连事件流 shape 本质不同，故分立。实现单一（`integration.openclaw.wire_client.OpenClawWireClient`，原活实现迁入防腐层；停滞的 `OpenClawWireAdapter` 已删除），最小契约 + 向下闭合同构（Port 只声明 pool/consumers/views 依赖的方法；Impl 可更富——`request_approval`/`policy` 留在 Impl 不进 Port）。
 _Avoid_: ChatClient——历史实现名（收敛后 `chat.chat_client.OpenClawChatClient` 是 `OpenClawWireClient` 的同对象 alias，strangler 过渡保留，alias 清理列 deferred；见 ADR 0004）。
+
+**配置边界 (config boundary)**:
+环境变量读取的唯一位置是 `config/settings/*.py`。runtime app（`containers` / `chat` / `wiki` / `models` / `accounts`）不直接读 `os.environ`，一律经 `django.conf.settings` 取配置——settings 即面板配置的唯一声明处与单一来源。敏感值（secret）只经环境注入（compose/K8s `environment`，dev 可用 gitignored `.env`），**不经 CLI argv 传参**（argv 泄露 `ps` / shell history，非 Django 惯例）。
+_Avoid_: 在 app 里散读 env、新建独立「env 注册包」——前者绕过声明、后者是非 Django 惯例的多余层。
+
+**配置边界豁免 (config boundary exemptions)**:
+两类 `os.environ` 读取不算违规：(1) `DJANGO_SETTINGS_MODULE` 自举——`manage.py` / `asgi.py` / `wsgi.py` 在 settings 加载前必须 setdefault，物理上无法入 config/；(2) 测试 harness / fixture（如 `tests/integration/conftest.py` 的 `INTEGRATION_VITE_PORT`、测 settings 解析的测试）——pytest 固定 `DJANGO_SETTINGS_MODULE = config.settings.dev`（pyproject.toml），测试基建读 env 不属于 runtime。边界是架构约定（code review 维护），非零容忍 grep——`prod.py` 故意 `os.environ['DJANGO_SECRET_KEY']` 硬读即为反例。
+
+**必填 secret 的 fail-fast (required-secret fail-fast)**:
+生产（`prod.py` 的 `validate_prod_env`）对必填 secret 缺失即拒启动（`DJANGO_SECRET_KEY` 硬读、`LLM_API_KEY` 非空校验），杜绝「生产漏设 → 静默空值」的错配（`LLM_API_KEY` 旧为 `os.environ.get(...,'')`，漏设会把空 key 静默注入容器，与 issue #195「卡 creating」同类）。**dev / integration 宽容不加 fail-fast**——integration CI 恰恰靠 `LLM_API_KEY` env 注入跑真容器，强制非空会打红。
