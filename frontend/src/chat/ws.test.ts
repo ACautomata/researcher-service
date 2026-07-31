@@ -2,11 +2,18 @@
 // 覆盖：access_token subprotocol 携 jwt、start/send 帧、ready/text/done/error 分发、断线 onClose/onError。
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
 
+// MockWS 用 readyState 模拟 CLOSING/CLOSED 窗口：非 OPEN 态 send 抛 InvalidStateError（对齐原生），
+// 供 ws.ts 的 try/catch 收尾路径测试。
+const OPEN = 1
+const CLOSING = 2
+const CLOSED = 3
+
 class MockWS {
   static last: MockWS | null = null
   url: string
   protocols: string | string[]
   sent: unknown[] = []
+  readyState = OPEN
   onopen: ((ev: unknown) => void) | null = null
   onmessage: ((ev: { data: string }) => void) | null = null
   onerror: ((ev: unknown) => void) | null = null
@@ -19,6 +26,7 @@ class MockWS {
   }
 
   send(data: string): void {
+    if (this.readyState !== OPEN) throw new Error('InvalidStateError') // 对齐原生：非 OPEN 态 send 抛错
     this.sent.push(JSON.parse(data))
   }
 
@@ -27,6 +35,7 @@ class MockWS {
   }
 
   fireOpen(): void {
+    this.readyState = OPEN
     this.onopen?.({})
   }
 
@@ -34,12 +43,22 @@ class MockWS {
     this.onmessage?.({ data: JSON.stringify(obj) })
   }
 
+  fireRawMessage(raw: string): void {
+    this.onmessage?.({ data: raw })
+  }
+
   fireError(): void {
     this.onerror?.({})
   }
 
-  fireClose(): void {
-    this.onclose?.({})
+  fireClose(code?: number, reason?: string): void {
+    this.readyState = CLOSED
+    this.onclose?.({ code: code ?? 1000, reason: reason ?? '', wasClean: true })
+  }
+
+  fireClosing(): void {
+    // close() 之后、onclose 触发之前的窗口：readyState=CLOSING，原生 send() 抛 InvalidStateError
+    this.readyState = CLOSING
   }
 }
 
@@ -191,5 +210,50 @@ describe('ChatWebSocket', () => {
       runId: 'r1', name: 'wiki.search', state: 'running',
       id: 'call-1', title: '检索', input: { q: 'x' }, result: null,
     })
+  })
+
+  // ---- #237 帧健壮性（评审 issue #198 问题 4.1/5.1）----
+  it('drops a malformed JSON frame with console.warn and keeps dispatching later frames', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const onText = vi.fn()
+    new ChatWebSocket('/ws/chat/', 'jwt', { onText })
+    MockWS.last!.fireRawMessage('not-json{')
+    expect(warn).toHaveBeenCalledTimes(1) // 仅 warn，不抛未捕获异常
+    MockWS.last!.fireMessage({ type: 'text', runId: 'r1', delta: '你好' })
+    expect(onText).toHaveBeenCalledWith('r1', '你好', undefined) // 后续正常帧继续分发
+    warn.mockRestore()
+  })
+
+  it('drops a non-JSON text frame without throwing', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const ws = new ChatWebSocket('/ws/chat/', 'jwt', {})
+    expect(() => MockWS.last!.fireRawMessage('hello plain text')).not.toThrow()
+    expect(warn).toHaveBeenCalledTimes(1)
+    expect(ws.isClosed).toBe(false) // 帧丢弃不影响连接
+    warn.mockRestore()
+  })
+
+  it('forwards CloseEvent.code and reason to onClose (4401 判定用)', () => {
+    const onClose = vi.fn()
+    new ChatWebSocket('/ws/chat/', 'jwt', { onClose })
+    MockWS.last!.fireClose(4401, 'Unauthorized')
+    expect(onClose).toHaveBeenCalledWith(4401, 'Unauthorized')
+  })
+
+  it('normal close (code 1000) forwards code and empty reason', () => {
+    const onClose = vi.fn()
+    new ChatWebSocket('/ws/chat/', 'jwt', { onClose })
+    MockWS.last!.fireClose(1000)
+    expect(onClose).toHaveBeenCalledWith(1000, '')
+  })
+
+  it('CLOSING window send routes to onError, not a raw send (InvalidStateError 竞态)', () => {
+    const onError = vi.fn()
+    const ws = new ChatWebSocket('/ws/chat/', 'jwt', { onError })
+    MockWS.last!.fireOpen()
+    MockWS.last!.fireClosing() // close() 后、onclose 前：readyState=CLOSING
+    expect(() => ws.send('sk-1', 'hi')).not.toThrow()
+    expect(onError).toHaveBeenCalledWith('连接已断开，请重试或切换容器')
+    expect(MockWS.last!.sent).toEqual([]) // 未真正发出
   })
 })

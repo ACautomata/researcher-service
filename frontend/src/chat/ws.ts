@@ -40,11 +40,15 @@ export interface ChatHandlers {
   onText?: (runId: string, delta: string, replace?: boolean) => void
   onDone?: (runId: string) => void
   onError?: (message: string, runId?: string, approvalId?: string) => void
-  onClose?: () => void
+  // onClose 透传 CloseEvent.code/reason（4401 = JWT 过期等应用私有码，供视图判定重连/刷新，issue #237）
+  onClose?: (code?: number, reason?: string) => void
   onApproval?: (card: ApprovalCard) => void
   onApprovalResolved?: (id: string, decision: string) => void
   onTool?: (tool: ToolLine) => void
 }
+
+// 断线/CLOSED/CLOSING 态 send 的统一收尾文案（sendRaw 两分支共用，issue #237）
+const DISCONNECTED_MSG = '连接已断开，请重试或切换容器'
 
 export class ChatWebSocket {
   private readonly ws: WebSocket
@@ -64,9 +68,10 @@ export class ChatWebSocket {
     }
     this.ws.onmessage = this.handleMessage.bind(this)
     this.ws.onerror = () => this.handlers.onError?.('连接错误')
-    this.ws.onclose = () => {
+    this.ws.onclose = (ev: CloseEvent) => {
       this.closed = true
-      this.handlers.onClose?.()
+      // 透传 code/reason：视图用 code=4401（JWT 过期）等应用私有码区分断线原因（issue #237）
+      this.handlers.onClose?.(ev.code, ev.reason)
     }
   }
 
@@ -95,18 +100,31 @@ export class ChatWebSocket {
     if (this.closed) {
       // socket 已关（代理/后端重启）：不再调原生 send（会抛 InvalidStateError 且不触发 handler），
       // 改走 onError 让视图提示并收尾 streaming bubble（codex P2）。
-      this.handlers.onError?.('连接已断开，请重试或切换容器')
+      this.handlers.onError?.(DISCONNECTED_MSG)
       return
     }
     if (this.opened) {
-      this.ws.send(JSON.stringify(frame))
+      try {
+        this.ws.send(JSON.stringify(frame))
+      } catch {
+        // CLOSING 窗口（close() 后、onclose 前，readyState=2）原生 send 抛 InvalidStateError 且不触发
+        // handler → 与 CLOSED 同走 onError 收尾（issue #237）。
+        this.handlers.onError?.(DISCONNECTED_MSG)
+      }
     } else {
       this.queue.push(frame) // CONNECTING 期间缓冲，onopen 后 flush
     }
   }
 
   private handleMessage(ev: MessageEvent): void {
-    const frame = JSON.parse(ev.data as string) as ChatFrame
+    // 畸形 JSON / 非 JSON 文本帧：仅 warn 后丢弃，不抛未捕获异常、不中断后续帧分发（issue #237）
+    let frame: ChatFrame
+    try {
+      frame = JSON.parse(ev.data as string) as ChatFrame
+    } catch {
+      console.warn('[chat-ws] 丢弃畸形 WS 帧（非 JSON）：', ev.data)
+      return
+    }
     switch (frame.type) {
       case 'ready':
         this.handlers.onReady?.(frame.container)
