@@ -167,4 +167,17 @@ OPENCLAW_FLEET = {
     'IMAGE': os.environ.get('OPENCLAW_IMAGE', 'ghcr.io/openclaw/openclaw:2026.6.34-browser'),
     'PORT_POOL_START': 19000,
     'PORT_POOL_END': 19999,
+    # 全面板共享 LLM_API_KEY（spec §5.2，敏感值）。ADR 0005 配置边界：settings 是唯一 env 读取处，
+    # 编排经 settings.OPENCLAW_FLEET['LLM_API_KEY'] 取值，不再 runtime 裸读 os.environ。
+    # 默认空串保持 dev/integration 宽容（integration CI 靠 env 注入跑真容器，base 不强制非空）；
+    # 生产必填 fail-fast 在 prod.py 的 validate_prod_env（issue #250）。
+    'LLM_API_KEY': os.environ.get('LLM_API_KEY', ''),
+}
+
+# ---- 设备配对 WS 连接（ADR 0005 配置边界：settings 声明，pairing 经 settings 取值）----
+# 默认 ws://127.0.0.1（loopback，容器端口仅绑 loopback），本地零配置可用；
+# lan 绑定/生产切 wss 由部署经 env 注入（wss 由网关 tls.enabled 决定）。
+OPENCLAW_FLEET_WS = {
+    'SCHEME': os.environ.get('OPENCLAW_FLEET_WS_SCHEME', 'ws'),
+    'HOST': os.environ.get('OPENCLAW_FLEET_WS_HOST', '127.0.0.1'),
 }

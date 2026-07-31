@@ -656,6 +656,6 @@ class Fleet:
                 image=cfg['IMAGE'],
                 port_start=cfg['PORT_POOL_START'],
                 port_end=cfg['PORT_POOL_END'],
-                llm_api_key=os.environ.get('LLM_API_KEY', ''),
+                llm_api_key=cfg['LLM_API_KEY'],  # ADR 0005：settings 声明，不再 runtime 裸读 env
             ),
         )

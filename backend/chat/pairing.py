@@ -20,11 +20,11 @@ async view/consumer 线程。两种上下文下 asyncio.run/async_to_sync 都可
 """
 import asyncio
 import json
-import os
 import re
 import threading
 from typing import ClassVar, Protocol
 
+from django.conf import settings
 from django.db import transaction
 
 from chat.device_crypto import DeviceCrypto, DeviceIdentity
@@ -107,11 +107,11 @@ class PairingService:
 
     @staticmethod
     def _default_ws_url(instance: Instance) -> str:
-        # scheme/host 可经环境变量覆盖（codex R security：lan 绑定/生产可切 wss）。
-        # 默认 ws://127.0.0.1（loopback，容器端口仅绑 loopback）；wss 由网关 tls.enabled 决定。
-        scheme = os.environ.get('OPENCLAW_FLEET_WS_SCHEME', 'ws')
-        host = os.environ.get('OPENCLAW_FLEET_WS_HOST', '127.0.0.1')
-        return f'{scheme}://{host}:{instance.port}/'
+        # ADR 0005 配置边界：scheme/host 经 settings 声明（不再 runtime 裸读 env），
+        # 部署经 env 覆盖（lan 绑定/生产切 wss；wss 由网关 tls.enabled 决定）。
+        # 默认 ws://127.0.0.1（loopback，容器端口仅绑 loopback）。
+        ws_cfg = settings.OPENCLAW_FLEET_WS
+        return f"{ws_cfg['SCHEME']}://{ws_cfg['HOST']}:{instance.port}/"
 
     def _get_or_create(self, instance: Instance) -> Pairing:
         pairing, _ = Pairing.objects.get_or_create(instance=instance)
