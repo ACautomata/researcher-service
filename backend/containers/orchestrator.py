@@ -28,7 +28,6 @@ import secrets
 import shutil
 import socket
 import threading
-import urllib.request
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -150,22 +149,6 @@ class FleetConfig:
     port_end: int
     llm_api_key: str           # 全面板共享 LLM_API_KEY（spec §5.2）
     reserved_ports: frozenset[int] = frozenset({RESERVED_PORT_18789})
-
-
-class HealthProbe:
-    """外部 HTTP GET 127.0.0.1:<port>/health 探容器 gateway 可达性（spec §5.4/§12）。"""
-
-    def __init__(self, timeout: float = 2.0) -> None:
-        self._timeout = timeout
-
-    def is_reachable(self, port: int) -> bool:
-        url = f'http://127.0.0.1:{port}/health'
-        try:
-            with urllib.request.urlopen(url, timeout=self._timeout) as resp:
-                return 200 <= resp.status < 300
-        except Exception:  # pylint: disable=broad-exception-caught
-            # URLError（连不上）/ HTTPError（非 2xx）/ timeout —— 统一不可达
-            return False
 
 
 def _host_port_in_use(port: int) -> bool:
