@@ -37,6 +37,7 @@ class FakeChatClient:
         # codex #236 R2 P1）。recorded_session 保留单会话便捷访问（最新一条或 None）。
         self.recorded_sessions = {}
         self.recorded_session = None
+        self.resumed_sessions = []
 
     async def send_message(self, session_key, message, *, on_event, idempotency_key=None):
         run_id = f'run-{len(self.sent) + 1}'
@@ -49,6 +50,11 @@ class FakeChatClient:
         """#217：对齐真实 client——consumer _handle_send 记住活跃会话供重连恢复（多会话共存）。"""
         self.recorded_sessions[session_key] = on_event
         self.recorded_session = (session_key, on_event)
+
+    async def resume_active_session(self, session_key, on_event):
+        """对齐真实 client 的 live-wire 恢复入口，并记录 consumer 是否调用。"""
+        self.record_active_session(session_key, on_event)
+        self.resumed_sessions.append(session_key)
 
     def recovery_sessions(self):
         """#217 / codex #236 R2 P1：对齐真实 client——返回全部记住会话 [(key, on_event), ...]。"""

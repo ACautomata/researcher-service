@@ -550,7 +550,7 @@ function connect() {
       if (pendingAbandonCount > 0) { pendingAbandonCount--; return }  // 孤儿 run 终态：计数丢弃
       if (pendingSend) { finalizeLast(); pendingSend = false }  // 当前 pending run 无 delta 收尾
     },
-    onError: (msg, runId, approvalId) => {
+    onError: (msg, runId, approvalId, retryable) => {
       if (ws !== myWs) return
       // codex R2 P2：resolve 失败的 error 帧带 approval id → 仅复位该卡（并发 resolve 不误复位其它在途卡）
       if (approvalId) {
@@ -576,6 +576,10 @@ function connect() {
         activeRunId = ''
         pendingSend = false
       }
+      // Django socket can be healthy while start/resume fails to reach OpenClaw.  A retryable
+      // startup error must re-enter the sole onClose/backoff path; otherwise this open browser
+      // socket strands the UI with neither automatic nor manual recovery.
+      if (retryable) myWs.close()
     },
     onClose: (code) => {
       if (ws !== myWs) return  // 旧 ws 的关闭（切容器）不报断线

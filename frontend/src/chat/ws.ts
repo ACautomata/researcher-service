@@ -9,7 +9,7 @@ export type ChatFrame =
   | { type: 'pong' } // codex #249 P1：心跳应答（无业务载荷；入站即重置静默看门狗，switch 无需分发）
   | { type: 'text'; runId: string; delta: string; replace?: boolean }
   | { type: 'done'; runId: string }
-  | { type: 'error'; runId?: string; message: string; id?: string }
+  | { type: 'error'; runId?: string; message: string; id?: string; retryable?: boolean }
   | { type: 'approval'; id: string; kind: string; command: string; sessionKey: string | null }
   | { type: 'approvalResolved'; id: string; decision: string }
   | { type: 'tool'; runId: string; name: string; state: 'running' | 'done' | 'error';
@@ -40,7 +40,7 @@ export interface ChatHandlers {
   onReady?: (container: string) => void
   onText?: (runId: string, delta: string, replace?: boolean) => void
   onDone?: (runId: string) => void
-  onError?: (message: string, runId?: string, approvalId?: string) => void
+  onError?: (message: string, runId?: string, approvalId?: string, retryable?: boolean) => void
   // onClose 透传 CloseEvent.code/reason（4401 = JWT 过期等应用私有码，供视图判定重连/刷新，issue #237）
   onClose?: (code?: number, reason?: string) => void
   onApproval?: (card: ApprovalCard) => void
@@ -303,7 +303,7 @@ export class ChatWebSocket {
         this.handlers.onDone?.(frame.runId)
         break
       case 'error':
-        this.handlers.onError?.(frame.message, frame.runId, frame.id)
+        this.handlers.onError?.(frame.message, frame.runId, frame.id, frame.retryable)
         break
       case 'approval':
         this.handlers.onApproval?.({

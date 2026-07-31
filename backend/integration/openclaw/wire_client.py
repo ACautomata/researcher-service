@@ -87,7 +87,23 @@ class _RecoveryCoordinator:
             history = await client._rpc('chat.history', {'sessionKey': session_key})
             await self._replay_projection(session_key, history or {})
 
-    async def _replay_projection(self, session_key: str, history: dict) -> None:
+    async def resume_live_session(self, session_key: str) -> None:
+        """Rebuild one session's subscription and in-flight route on an already-live wire.
+
+        A browser reconnect can reuse the pooled OpenClaw connection, so ``connect()`` (and
+        therefore :meth:`run`) is not invoked.  Repeating the two session-scoped RPCs gives us
+        the authoritative in-flight run and lets the replacement consumer receive subsequent
+        deltas.  The browser reloads persisted history separately, so do not replay completed
+        history here; only adopt/replay the in-flight buffer and rebuild its route.
+        """
+        client = self._client
+        await client._rpc('sessions.messages.subscribe', {'key': session_key})
+        history = await client._rpc('chat.history', {'sessionKey': session_key})
+        await self._replay_projection(session_key, history or {}, replay_history=False)
+
+    async def _replay_projection(
+        self, session_key: str, history: dict, *, replay_history: bool = True,
+    ) -> None:
         """步2-4：回放 history 投影（replace）+ 按 sessionInfo 归属采用 inFlightRun 重建路由。
 
         codex #236 R3 P1-242：同会话多订阅者时 history 投影与 inFlightRun 缓冲 text **fan-out** 到
@@ -96,7 +112,7 @@ class _RecoveryCoordinator:
         """
         client = self._client
         callbacks = list(client._session_callbacks.get(session_key, []))
-        if callbacks:
+        if callbacks and replay_history:
             for frame in self._history_frames(history.get('messages')):
                 for on_event in callbacks:
                     # codex #236 R4 P2：恢复投影回调 per-callback 异常隔离——任一订阅者抛错（如
@@ -264,6 +280,16 @@ class OpenClawWireClient:  # pylint: disable=too-many-instance-attributes,too-ma
             # codex #236 R3 P1-242：同一会话多 consumer 各注册自己的回调（列表 append，非覆盖）；
             # 幂等去重（同回调重复 record 不重复回放）。
             self._session_callbacks[session_key].append(on_event)
+
+    async def resume_active_session(self, session_key: str, on_event: OnEvent) -> None:
+        """Register a replacement consumer and restore its live route without reconnecting.
+
+        ``record_active_session`` alone is storage-only.  This method is the browser-reconnect
+        path for a healthy pooled connection: it also queries the current in-flight run and
+        rebuilds ``_routes`` so future gateway events reach the new consumer.
+        """
+        self.record_active_session(session_key, on_event)
+        await _RecoveryCoordinator(self).resume_live_session(session_key)
 
     def recovery_sessions(self) -> list[tuple[str, list[OnEvent]]]:
         """#196 T4 / #217：返回**全部**记住的活跃会话 ``[(session_key, [on_event, ...]), ...]``（可空）。

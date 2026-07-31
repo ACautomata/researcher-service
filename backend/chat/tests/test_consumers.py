@@ -179,6 +179,7 @@ async def test_reconnect_start_resubscribes_active_session(override_pool, instan
         '重连握手未重新注册活跃会话恢复回调：run 剩余增量/终态帧丢失'
     assert fake_client.recorded_session[0] == 'sk-1'
     assert callable(fake_client.recorded_session[1])
+    assert fake_client.resumed_sessions == ['sk-1'], '须调用 live-wire 恢复而非只存储 sessionKey'
     await comm2.disconnect()
 
 

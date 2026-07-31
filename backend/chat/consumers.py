@@ -89,7 +89,9 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
             return
         except Exception:  # pylint: disable=broad-exception-caught
             # 连接握手失败（ChatConnectError 等）发 error 帧，不传播导致 Channels 关闭 WS
-            await self.send_json({'type': 'error', 'message': '连接容器失败，请稍后重试'})
+            await self.send_json({
+                'type': 'error', 'message': '连接容器失败，请稍后重试', 'retryable': True,
+            })
             return
         # 切容器/重连：旧 client 的本 consumer 审批订阅退订，避免推已失效连接（codex P1 独立退订）。
         # codex #219 P2：经 pool 再解析旧容器的活 client 退订（自愈后 self._client 可能是死 client，
@@ -118,7 +120,22 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
         # disconnect 的注销，故此处只需注册 + 记 key，切换/断开由既有路径对称清。
         session_key = content.get('sessionKey')
         if session_key:
-            client.record_active_session(session_key, self._on_event)
+            resume = getattr(client, 'resume_active_session', None)
+            if resume is not None:
+                try:
+                    await resume(session_key, self._on_event)
+                except Exception:  # pylint: disable=broad-exception-caught
+                    unregister = getattr(client, 'unregister_active_session', None)
+                    if unregister is not None:
+                        unregister(session_key, self._on_event)
+                    await self.send_json({
+                        'type': 'error', 'message': '恢复会话失败，请稍后重试', 'retryable': True,
+                    })
+                    return
+            else:
+                # Compatibility for lightweight client implementations; production wire clients
+                # expose resume_active_session and rebuild the in-flight route above.
+                client.record_active_session(session_key, self._on_event)
             self._recovery_session_keys.add(session_key)  # pylint: disable=attribute-defined-outside-init
         # T06：注册连接级审批订阅（codex P1 订阅者集合，多 consumer 共享 client 不互伤）
         client.add_approval_subscriber(self._on_approval)

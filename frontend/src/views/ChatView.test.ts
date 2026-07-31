@@ -1176,6 +1176,28 @@ describe('ChatView', () => {
       expect(MockWS.last).not.toBe(stalled)
     })
 
+    it('continues backoff when reconnect start fails after the browser socket opens', async () => {
+      await mountReady()
+      const first = MockWS.last!
+      first.fireClose()
+      await vi.advanceTimersByTimeAsync(1_000)
+      await flushPromises()
+      const retry = MockWS.last!
+      retry.fireOpen()
+
+      // Django accepted the browser WS, but its downstream OpenClaw startup failed transiently.
+      retry.fireMessage({ type: 'error', message: '连接容器失败，请稍后重试', retryable: true })
+      await nextTick()
+      expect(retry.closed).toBe(true)
+      expect(MockWS.last).toBe(retry)
+
+      await vi.advanceTimersByTimeAsync(1_999)
+      expect(MockWS.last).toBe(retry)
+      await vi.advanceTimersByTimeAsync(1)
+      await flushPromises()
+      expect(MockWS.last).not.toBe(retry)
+    })
+
     it('follows an exponential backoff sequence capped at 30s (退避指数曲线封顶)', async () => {
       await mountReady()
       // 连续断线 → 逐次断连，记录每次重建前的等待（退避 1s/2s/4s…）

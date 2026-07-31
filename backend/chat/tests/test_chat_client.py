@@ -1281,6 +1281,39 @@ async def test_adopt_inflight_run_rebuilds_route_and_replays_text():
 
 
 @pytest.mark.asyncio
+async def test_resume_active_session_rebuilds_route_on_already_live_client():
+    """浏览器腿重连复用存活 pooled client 时也须重新查询并绑定 in-flight run。"""
+    history = {
+        'messages': [{'role': 'assistant', 'content': 'completed history'}],
+        'inFlightRun': {'runId': 'live-run', 'text': 'partial'},
+    }
+    t = FakeChatTransport(rpc_payloads={'chat.history': history})
+    received = []
+
+    async def on_event(frame):
+        received.append(frame)
+
+    c = _client(transport=t)
+    await c.connect()  # pooled wire is already live; no remembered session during connect
+    resume = asyncio.create_task(c.resume_active_session('s1', on_event))
+    # Fake recv may already be blocked on its queue when either sequential RPC is sent; real
+    # websockets wake on network input, so nudge the fake until both scripted replies are read.
+    while not resume.done():
+        t.push({'type': 'event', 'event': 'noop', 'payload': {}})
+        await asyncio.sleep(0)
+    await resume
+
+    assert {'type': 'text', 'runId': 'live-run', 'delta': 'partial', 'replace': True} in received
+    assert not any(f.get('runId') == '__history__' for f in received), \
+        'browser reconnect reloads persisted history separately'
+    t.push({'type': 'event', 'event': 'chat',
+            'payload': {'runId': 'live-run', 'state': 'delta', 'deltaText': ' next'}})
+    await asyncio.sleep(0.05)
+    assert {'type': 'text', 'runId': 'live-run', 'delta': ' next'} in received
+    await c.aclose()
+
+
+@pytest.mark.asyncio
 async def test_adopt_inflight_run_empty_text_still_rebuilds_route():
     """#217 步3（即使 text 为空也采用）：inFlightRun.text 为空 → 不发 text 帧，但仍重建 runId 路由
     （恢复进行中 run 的事件流不丢）。"""
