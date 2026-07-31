@@ -87,7 +87,31 @@ describe('ChatWebSocket', () => {
     vi.stubGlobal('WebSocket', MockWS)
   })
   afterEach(() => {
+    vi.useRealTimers()
     vi.unstubAllGlobals()
+  })
+
+  it('closes a socket whose opening handshake stalls', () => {
+    vi.useFakeTimers()
+    const onClose = vi.fn()
+    new ChatWebSocket('/ws/chat/', 'jwt', { onClose }, { connectTimeoutMs: 1000 })
+
+    vi.advanceTimersByTime(999)
+    expect(MockWS.last!.readyState).toBe(CONNECTING)
+    vi.advanceTimersByTime(1)
+    expect(MockWS.last!.readyState).toBe(CLOSED)
+    expect(onClose).toHaveBeenCalledOnce()
+  })
+
+  it('cancels the opening-handshake timeout after the socket opens', () => {
+    vi.useFakeTimers()
+    const onClose = vi.fn()
+    new ChatWebSocket('/ws/chat/', 'jwt', { onClose }, { connectTimeoutMs: 1000 })
+    MockWS.last!.fireOpen()
+
+    vi.advanceTimersByTime(1001)
+    expect(MockWS.last!.readyState).toBe(OPEN)
+    expect(onClose).not.toHaveBeenCalled()
   })
 
   it('connects with access_token subprotocol carrying jwt', () => {

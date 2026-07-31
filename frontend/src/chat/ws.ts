@@ -60,6 +60,9 @@ const DISCONNECTED_MSG = '连接已断开，请重试或切换容器'
 // 退避重连（唯一入口）。健康但繁忙的连接（无 ping 在飞——流式/审批流量证明活性，或 pong 已到）不判死。
 export const PING_INTERVAL_MS = 25_000 // < nginx 60s idle 掐断 & < SILENCE_TIMEOUT，保证 idle 也有活性流量
 export const SILENCE_TIMEOUT_MS = 60_000 // 连续 ping 无应答才判死（≈2 个心跳周期无 pong）
+// 浏览器在网络黑洞中可能长期停在 CONNECTING，且此时既没有 onclose 也尚未启动心跳。
+// 给 WS 握手一个明确上限，超时后 close 以便 ChatView 的唯一 onClose 链路继续指数退避。
+export const CONNECT_TIMEOUT_MS = 10_000
 
 export class ChatWebSocket {
   private readonly ws: WebSocket
@@ -72,6 +75,7 @@ export class ChatWebSocket {
   private watchdogTimer: ReturnType<typeof setTimeout> | null = null
   // 应用层心跳定时器（codex #249 P1）：周期发 ping 给本腿提供活性流量
   private pingTimer: ReturnType<typeof setInterval> | null = null
+  private connectTimer: ReturnType<typeof setTimeout> | null = null
   // codex #249 P2：是否有 ping 已发出、仍待应答（pong 未到）。发 ping 置位、任入站帧清除；
   // 看门狗据此判死——仅「ping 无应答」（真半开）才 close，健康繁忙连接（无 ping 在飞）不判死。
   private _awaitingPong = false
@@ -90,13 +94,19 @@ export class ChatWebSocket {
     path: string,
     jwt: string,
     handlers: ChatHandlers,
-    opts?: { silenceTimeoutMs?: number; pingIntervalMs?: number },
+    opts?: { silenceTimeoutMs?: number; pingIntervalMs?: number; connectTimeoutMs?: number },
   ) {
     this.handlers = handlers
     this.silenceTimeout = opts?.silenceTimeoutMs ?? SILENCE_TIMEOUT_MS
     this.pingInterval = opts?.pingIntervalMs ?? PING_INTERVAL_MS
     this.ws = new WebSocket(path, ['access_token', jwt])
+    this.connectTimer = setTimeout(() => {
+      this.connectTimer = null
+      // 定时器可能与 onopen 同一轮排队；只关闭仍未完成握手的 socket。
+      if (!this.opened && !this.closed && this.ws.readyState === WebSocket.CONNECTING) this.ws.close()
+    }, opts?.connectTimeoutMs ?? CONNECT_TIMEOUT_MS)
     this.ws.onopen = () => {
+      this.clearConnectTimer()
       this.opened = true
       this.armWatchdog() // 连接建立即开始计时：对端从此静默超阈值即判死
       this.startHeartbeat() // 周期 ping：给本腿活性流量，idle 健康连接不被误判半开
@@ -107,6 +117,7 @@ export class ChatWebSocket {
     this.ws.onerror = () => this.handlers.onError?.('连接错误')
     this.ws.onclose = (ev: CloseEvent) => {
       this.closed = true
+      this.clearConnectTimer()
       this.clearTimers() // 连接已关：看门狗与心跳都无需再触发
       this._awaitingPong = false // 连接已关：无 ping 在飞待应答
       this._awaitingPongSince = -1
@@ -158,6 +169,7 @@ export class ChatWebSocket {
   }
 
   close(): void {
+    this.clearConnectTimer()
     this.clearTimers() // 主动关闭：心跳与看门狗都不再触发，防定时器泄漏
     this._awaitingPong = false // 连接将关：不再有 ping 在飞待应答
     this._awaitingPongSince = -1
@@ -237,6 +249,13 @@ export class ChatWebSocket {
       this.watchdogTimer = null
     }
     this.stopHeartbeat()
+  }
+
+  private clearConnectTimer(): void {
+    if (this.connectTimer !== null) {
+      clearTimeout(this.connectTimer)
+      this.connectTimer = null
+    }
   }
 
   private sendRaw(frame: Record<string, unknown>): void {

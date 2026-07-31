@@ -37,12 +37,15 @@ import { ApiError } from '@/api/client'
 import { ElMessageBox } from 'element-plus'
 
 class MockWS {
+  static CONNECTING = 0
   static OPEN = 1 // ws.ts sendRaw 守卫用 WebSocket.OPEN（readyState 判走 onError，codex P2）
   static CLOSED = 3
   static last: MockWS | null = null
   sent: unknown[] = []
   closed = false // 记录 close() 是否被调用（验证切容器时旧 ws 被关闭）
-  readyState = MockWS.OPEN // 对齐原生：默认 OPEN，fireOpen 置位（否则守卫误判 CLOSING）
+  // Most view tests focus on ChatView state rather than the native handshake and historically treat the mock as
+  // transport-ready; the stalled-handshake case below explicitly switches its reconnect socket to CONNECTING.
+  readyState = MockWS.OPEN
   onopen: ((e: unknown) => void) | null = null
   onmessage: ((e: { data: string }) => void) | null = null
   onerror: ((e: unknown) => void) | null = null
@@ -1120,6 +1123,29 @@ describe('ChatView', () => {
       expect(MockWS.last).not.toBe(first)
       MockWS.last!.fireOpen() // CONNECTING 期间缓冲的 start 帧在 open 后 flush
       expect(MockWS.last!.sent).toContainEqual({ type: 'start', container: 'demo' })
+    })
+
+    it('advances the backoff when a reconnect opening handshake stalls', async () => {
+      await mountReady()
+      const first = MockWS.last!
+      first.fireClose()
+      await nextTick()
+      await vi.advanceTimersByTimeAsync(1_000) // 第一次退避后建立重连 socket
+      await flushPromises()
+      const stalled = MockWS.last!
+      expect(stalled).not.toBe(first)
+      stalled.readyState = MockWS.CONNECTING
+
+      // 不触发 open/close，模拟网络黑洞。10s 握手上限会主动 close，并安排下一档 2s 退避。
+      await vi.advanceTimersByTimeAsync(10_000)
+      await flushPromises()
+      expect(stalled.readyState).toBe(MockWS.CLOSED)
+      expect(MockWS.last).toBe(stalled)
+      await vi.advanceTimersByTimeAsync(1_999)
+      expect(MockWS.last).toBe(stalled)
+      await vi.advanceTimersByTimeAsync(1)
+      await flushPromises()
+      expect(MockWS.last).not.toBe(stalled)
     })
 
     it('follows an exponential backoff sequence capped at 30s (退避指数曲线封顶)', async () => {
