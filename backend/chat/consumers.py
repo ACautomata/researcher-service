@@ -67,6 +67,11 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
             await self._handle_send(content)
         elif msg_type == 'resolve':
             await self._handle_resolve(content)
+        elif msg_type == 'ping':
+            # codex #249 P1：浏览器↔Channels 腿的应用层心跳回显。本腿除 ready/业务事件外无周期帧
+            # （daphne 默认不发协议 ping），前端静默看门狗若无 JS 可见活性信号会把 idle 健康连接误
+            # 判半开掐死。前端周期 ping → 此处回 pong（纯活性，不触 run/session/容器状态）。
+            await self.send_json({'type': 'pong'})
 
     async def _handle_start(self, content):
         name = content.get('container')
@@ -84,7 +89,9 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
             return
         except Exception:  # pylint: disable=broad-exception-caught
             # 连接握手失败（ChatConnectError 等）发 error 帧，不传播导致 Channels 关闭 WS
-            await self.send_json({'type': 'error', 'message': '连接容器失败，请稍后重试'})
+            await self.send_json({
+                'type': 'error', 'message': '连接容器失败，请稍后重试', 'retryable': True,
+            })
             return
         # 切容器/重连：旧 client 的本 consumer 审批订阅退订，避免推已失效连接（codex P1 独立退订）。
         # codex #219 P2：经 pool 再解析旧容器的活 client 退订（自愈后 self._client 可能是死 client，
@@ -103,6 +110,33 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
         self._recovery_session_keys.clear()  # pylint: disable=attribute-defined-outside-init
         self._client = client  # pylint: disable=attribute-defined-outside-init
         self._instance = instance  # pylint: disable=attribute-defined-outside-init  # issue #214：供失效重取
+        # codex #249 P1 (id 3690452668, ChatView.vue:511)：浏览器↔Channels 腿断线重连恢复活跃会话。
+        # start 帧可带 sessionKey（前端 connect() 在重连时传入断线前选中的会话）——本 consumer 经
+        # record_active_session 重新注册其恢复回调。缺它则：浏览器 socket 在**活跃 run 进行中**断开时，
+        # disconnect() 已注销旧 consumer 的会话回调（对称清理），而重连的新 consumer 复用**同一存活池化
+        # client**（不经 client.connect() 恢复），且 record_active_session 仅在 _handle_send 触发——新
+        # consumer 既收不到当前 run 的剩余增量、也收不到它的终态帧（loadHistory 快照之后产生的内容缺失，
+        # 直到手动刷新/切会话）。同族对称：上方 cleanup 循环 + _recovery_session_keys 已统一处理换 client/
+        # disconnect 的注销，故此处只需注册 + 记 key，切换/断开由既有路径对称清。
+        session_key = content.get('sessionKey')
+        if session_key:
+            resume = getattr(client, 'resume_active_session', None)
+            if resume is not None:
+                try:
+                    await resume(session_key, self._on_event)
+                except Exception:  # pylint: disable=broad-exception-caught
+                    unregister = getattr(client, 'unregister_active_session', None)
+                    if unregister is not None:
+                        unregister(session_key, self._on_event)
+                    await self.send_json({
+                        'type': 'error', 'message': '恢复会话失败，请稍后重试', 'retryable': True,
+                    })
+                    return
+            else:
+                # Compatibility for lightweight client implementations; production wire clients
+                # expose resume_active_session and rebuild the in-flight route above.
+                client.record_active_session(session_key, self._on_event)
+            self._recovery_session_keys.add(session_key)  # pylint: disable=attribute-defined-outside-init
         # T06：注册连接级审批订阅（codex P1 订阅者集合，多 consumer 共享 client 不互伤）
         client.add_approval_subscriber(self._on_approval)
         await self.send_json({'type': 'ready', 'container': name})

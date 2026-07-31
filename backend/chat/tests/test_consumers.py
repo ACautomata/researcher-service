@@ -79,6 +79,19 @@ async def test_start_emits_ready(override_pool, instance):
 
 
 @pytest.mark.asyncio
+async def test_ping_replies_pong(instance):
+    """codex #249 P1：浏览器↔Channels 腿的应用层心跳——前端周期 ping，consumer 回 pong，
+    给前端静默看门狗一个周期性的 JS 可见活性信号（idle 健康连接不再被误判半开掐死）。
+    ping 不触 run/session/容器状态，纯活性回显。"""
+    comm = await _connect_authed()
+    await comm.connect()
+    await comm.send_json_to({'type': 'ping'})
+    resp = await comm.receive_json_from()
+    assert resp == {'type': 'pong'}
+    await comm.disconnect()
+
+
+@pytest.mark.asyncio
 async def test_start_unknown_container_sends_error(override_pool):
     comm = await _connect_authed()
     await comm.connect()
@@ -133,6 +146,41 @@ async def test_send_records_active_session_for_reconnect_recovery(override_pool,
     assert session_key == 'sk-1'
     assert callable(on_event)
     await comm.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_reconnect_start_resubscribes_active_session(override_pool, instance, fake_client):
+    """codex #249 P1 (id 3690452668, ChatView.vue:511)：浏览器↔Channels 腿在**活跃 run 进行中**断开后
+    重连，重连握手（start）须**重新注册**该活跃会话的恢复回调——否则后端 disconnect() 已把旧 consumer
+    的会话回调注销（对称清理），而重连的新 consumer 复用**同一存活池化 client**、不经 client.connect()
+    恢复，且 record_active_session 仅在 _handle_send 触发（_handle_start 不注册）。结果：新 consumer
+    既收不到当前 run 的**剩余增量**、也收不到它的**终态帧**——loadHistory 快照之后产生的任何内容都缺失，
+    直到用户手动刷新/切会话。修复：start 帧带 sessionKey（恢复目标会话），_handle_start 对其
+    record_active_session(self._on_event) 重新注册。"""
+    # ── 连接 1：start + send（sk-1 起 run），随后浏览器断开（活跃 run 进行中）──
+    comm1 = await _connect_authed('alice')
+    await comm1.connect()
+    await comm1.send_json_to({'type': 'start', 'container': 'demo'})
+    await comm1.receive_json_from()  # ready
+    await comm1.send_json_to({'type': 'send', 'sessionKey': 'sk-1', 'message': '你好'})
+    await asyncio.sleep(0.05)
+    assert fake_client.recorded_session is not None
+    await comm1.disconnect()
+    await asyncio.sleep(0.05)  # 等 consumer disconnect() 对称注销恢复回调
+    assert fake_client.recorded_session is None, '断开后旧 consumer 恢复回调应已注销'
+
+    # ── 连接 2：重连握手带 sessionKey（恢复目标会话）→ 新 consumer 须重新注册恢复回调 ──
+    comm2 = await _connect_authed('bob')
+    await comm2.connect()
+    await comm2.send_json_to({'type': 'start', 'container': 'demo', 'sessionKey': 'sk-1'})
+    await comm2.receive_json_from()  # ready
+    await asyncio.sleep(0.05)
+    assert fake_client.recorded_session is not None, \
+        '重连握手未重新注册活跃会话恢复回调：run 剩余增量/终态帧丢失'
+    assert fake_client.recorded_session[0] == 'sk-1'
+    assert callable(fake_client.recorded_session[1])
+    assert fake_client.resumed_sessions == ['sk-1'], '须调用 live-wire 恢复而非只存储 sessionKey'
+    await comm2.disconnect()
 
 
 @pytest.mark.asyncio

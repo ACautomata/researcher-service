@@ -87,7 +87,23 @@ class _RecoveryCoordinator:
             history = await client._rpc('chat.history', {'sessionKey': session_key})
             await self._replay_projection(session_key, history or {})
 
-    async def _replay_projection(self, session_key: str, history: dict) -> None:
+    async def resume_live_session(self, session_key: str) -> None:
+        """Rebuild one session's subscription and in-flight route on an already-live wire.
+
+        A browser reconnect can reuse the pooled OpenClaw connection, so ``connect()`` (and
+        therefore :meth:`run`) is not invoked.  Repeating the two session-scoped RPCs gives us
+        the authoritative in-flight run and lets the replacement consumer receive subsequent
+        deltas.  The browser reloads persisted history separately, so do not replay completed
+        history here; only adopt/replay the in-flight buffer and rebuild its route.
+        """
+        client = self._client
+        await client._rpc('sessions.messages.subscribe', {'key': session_key})
+        history = await client._rpc('chat.history', {'sessionKey': session_key})
+        await self._replay_projection(session_key, history or {}, replay_history=False)
+
+    async def _replay_projection(
+        self, session_key: str, history: dict, *, replay_history: bool = True,
+    ) -> None:
         """步2-4：回放 history 投影（replace）+ 按 sessionInfo 归属采用 inFlightRun 重建路由。
 
         codex #236 R3 P1-242：同会话多订阅者时 history 投影与 inFlightRun 缓冲 text **fan-out** 到
@@ -96,7 +112,7 @@ class _RecoveryCoordinator:
         """
         client = self._client
         callbacks = list(client._session_callbacks.get(session_key, []))
-        if callbacks:
+        if callbacks and replay_history:
             for frame in self._history_frames(history.get('messages')):
                 for on_event in callbacks:
                     # codex #236 R4 P2：恢复投影回调 per-callback 异常隔离——任一订阅者抛错（如
@@ -131,6 +147,9 @@ class _RecoveryCoordinator:
         # #198。RecoveredRun.plan 保留该值供 #198 接线时取用。
         # 步3 路由已重建：回放恢复泵期缓冲的 event 帧（重连期到达的进行中 run 事件不丢，路由到本 run）。
         client._flush_connect_buffered()
+        # codex #249 R5 (id 3690750256)：live-wire resume 窗口缓冲的 run-scoped 帧此刻路由已装好，
+        # 回放（对齐 _flush_connect_buffered；无缓冲则 no-op）。
+        client._flush_recovery_buffered()
 
     def _history_frames(self, messages) -> list[dict]:
         """history messages[] → __history__ 命名空间的 text 帧：**首个产出帧** replace=True 整段锚定，
@@ -231,6 +250,14 @@ class OpenClawWireClient:  # pylint: disable=too-many-instance-attributes,too-ma
         # #217 T4：恢复泵期缓冲的 event 帧——泵只消费 res，event 缓冲待路由就绪后由 _resolve_ack
         # 注册路由时回放（重连期到达的进行中 run 事件不丢）。
         self._connect_buffered: list[dict] = []
+        # codex #249 R5 (id 3690750256)：live-wire resume（resume_active_session）恢复窗口标志。
+        # 浏览器腿重连复用**存活池化 client**（不经 connect()，无恢复泵）时，_recv_loop 持续消费
+        # 入站帧；恢复 RPC（messages.subscribe + chat.history）完成前该会话 in-flight run 的路由尚未
+        # 安装，dequeued 的 run-scoped 帧会被 _handle 以「route 未就绪」静默丢弃（终态帧被丢则 run
+        # 永无完成帧）。窗口内 run-scoped 帧改走 _recovery_buffered 缓冲，路由重建后由
+        # _flush_recovery_buffered 回放。
+        self._recovering = False
+        self._recovery_buffered: list[dict] = []
         # #196 T1 / #213：网关 policy（hello-ok 解析；握手前为协议默认）。tick_interval_ms 驱动静默看门狗。
         self._policy = GatewayPolicy.default()
         # #196 T3 / #215：标 dead 时回调（pool 注入以触发主动重连；None = 不触发，如单测直建 client）。
@@ -264,6 +291,25 @@ class OpenClawWireClient:  # pylint: disable=too-many-instance-attributes,too-ma
             # codex #236 R3 P1-242：同一会话多 consumer 各注册自己的回调（列表 append，非覆盖）；
             # 幂等去重（同回调重复 record 不重复回放）。
             self._session_callbacks[session_key].append(on_event)
+
+    async def resume_active_session(self, session_key: str, on_event: OnEvent) -> None:
+        """Register a replacement consumer and restore its live route without reconnecting.
+
+        ``record_active_session`` alone is storage-only.  This method is the browser-reconnect
+        path for a healthy pooled connection: it also queries the current in-flight run and
+        rebuilds ``_routes`` so future gateway events reach the new consumer.
+
+        codex #249 R5 (id 3690750256)：恢复 RPC 期间 _recv_loop 持续消费入站帧，而重建路由要等
+        chat.history 返回后才安装——期间到达的该会话 in-flight run 帧（含终态）若直接经 _handle
+        路由会被静默丢弃。故恢复窗口置 _recovering 缓冲 run-scoped 帧，_replay_projection 装好
+        路由后回放（对齐 connect() 恢复泵 _connect_buffered 的同一不丢帧语义）。
+        """
+        self.record_active_session(session_key, on_event)
+        self._recovering = True
+        try:
+            await _RecoveryCoordinator(self).resume_live_session(session_key)
+        finally:
+            self._recovering = False
 
     def recovery_sessions(self) -> list[tuple[str, list[OnEvent]]]:
         """#196 T4 / #217：返回**全部**记住的活跃会话 ``[(session_key, [on_event, ...]), ...]``（可空）。
@@ -580,6 +626,13 @@ class OpenClawWireClient:  # pylint: disable=too-many-instance-attributes,too-ma
                     continue
                 await self._fanout_approval(translated)
             return
+        if self._recovering and run_id not in self._routes:
+            # codex #249 R5 (id 3690750256)：live-wire resume 恢复窗口（路由重建前），该 run 的帧
+            # 不能经 _handle 分发——route 未就绪即被静默丢弃（终态帧被丢则 run 永无完成帧）。缓冲，
+            # 待 _replay_projection 安装路由后由 _flush_recovery_buffered 回放（对齐 _connect_buffered
+            # 的同一不丢帧语义）。窗口内仅 run-scoped 帧缓冲；连接级帧上方已 fan-out，不经此分支。
+            self._recovery_buffered.append(msg)
+            return
         cb = self._routes.get(run_id)
         if cb is None:
             return  # route 已 discard，丢弃整批帧
@@ -621,6 +674,10 @@ class OpenClawWireClient:  # pylint: disable=too-many-instance-attributes,too-ma
                 fut.set_result(run_id)
                 # #217：回放恢复泵期缓冲的 event 帧——路由已注册，重连期到达的进行中 run 事件可路由。
                 self._flush_connect_buffered()
+                # codex #249 R5 (id 3690750256)：本 ack 也可能解封 live-wire resume 窗口缓冲的帧
+                # （多 consumer 共享 client：A resume 期间 B 的 send ack 在途，B 的 run 帧被缓冲到
+                # _recovery_buffered）——路由刚装好即一并回放，避免缓冲帧滞留到无关的未来 send。
+                self._flush_recovery_buffered()
             else:
                 fut.set_exception(ChatSendError('chat.send ack missing runId'))
         else:
@@ -652,6 +709,29 @@ class OpenClawWireClient:  # pylint: disable=too-many-instance-attributes,too-ma
             else:
                 keep.append(msg)  # 路由未重建（如第二会话）：保留待其就绪后回放
         self._connect_buffered = keep
+        if drain:
+            asyncio.ensure_future(self._replay_connect_buffered(drain))
+
+    def _flush_recovery_buffered(self) -> None:
+        """codex #249 R5 (id 3690750256)：回放 live-wire resume 窗口缓冲的 run-scoped 帧。
+
+        resume_active_session 恢复窗口内 _handle 把路由未就绪的 run 帧缓冲到 _recovery_buffered；
+        本方法在 _replay_projection 装好路由后调用，经 _handle 分发（路由已注册 → 正常路由）。
+        连接级帧不走此缓冲（_handle 已 fan-out）；缓冲帧路由仍未就绪则保留等下次 flush（对齐
+        _flush_connect_buffered 的按就绪过滤）。异步回放不阻塞调用方（对齐 _replay_connect_buffered）。
+        """
+        if not self._recovery_buffered:
+            return
+        keep: list[dict] = []
+        drain: list[dict] = []
+        for msg in self._recovery_buffered:
+            frames = self._translator.translate(msg)
+            run_id = frames[0].get('runId') if frames else None
+            if run_id in self._routes:
+                drain.append(msg)
+            else:
+                keep.append(msg)
+        self._recovery_buffered = keep
         if drain:
             asyncio.ensure_future(self._replay_connect_buffered(drain))
 

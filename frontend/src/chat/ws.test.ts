@@ -38,7 +38,10 @@ class MockWS {
   }
 
   close(): void {
-    /* 测试手动触发 onclose */
+    // 对齐原生：主动 close() 触发 onclose（静默看门狗判死走此路径，issue #239）
+    if (this.readyState === CLOSED) return
+    this.readyState = CLOSED
+    this.onclose?.({ code: 1000, reason: '', wasClean: true })
   }
 
   fireOpen(): void {
@@ -69,6 +72,13 @@ class MockWS {
   }
 }
 
+// codex #249 P2：模拟后台标签挂起后恢复可见——把 visibilityState 置 'visible' 并派生 visibilitychange，
+// 触发 ws.ts 的「恢复给一整个新应答窗口」逻辑（jsdom 提供 document，visibilityState 可写）。
+function fireVisibilityVisible(): void {
+  Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true })
+  document.dispatchEvent(new Event('visibilitychange'))
+}
+
 import { ChatWebSocket } from './ws'
 
 describe('ChatWebSocket', () => {
@@ -77,7 +87,31 @@ describe('ChatWebSocket', () => {
     vi.stubGlobal('WebSocket', MockWS)
   })
   afterEach(() => {
+    vi.useRealTimers()
     vi.unstubAllGlobals()
+  })
+
+  it('closes a socket whose opening handshake stalls', () => {
+    vi.useFakeTimers()
+    const onClose = vi.fn()
+    new ChatWebSocket('/ws/chat/', 'jwt', { onClose }, { connectTimeoutMs: 1000 })
+
+    vi.advanceTimersByTime(999)
+    expect(MockWS.last!.readyState).toBe(CONNECTING)
+    vi.advanceTimersByTime(1)
+    expect(MockWS.last!.readyState).toBe(CLOSED)
+    expect(onClose).toHaveBeenCalledOnce()
+  })
+
+  it('cancels the opening-handshake timeout after the socket opens', () => {
+    vi.useFakeTimers()
+    const onClose = vi.fn()
+    new ChatWebSocket('/ws/chat/', 'jwt', { onClose }, { connectTimeoutMs: 1000 })
+    MockWS.last!.fireOpen()
+
+    vi.advanceTimersByTime(1001)
+    expect(MockWS.last!.readyState).toBe(OPEN)
+    expect(onClose).not.toHaveBeenCalled()
   })
 
   it('connects with access_token subprotocol carrying jwt', () => {
@@ -146,14 +180,21 @@ describe('ChatWebSocket', () => {
     const onError = vi.fn()
     new ChatWebSocket('/ws/chat/', 'jwt', { onError })
     MockWS.last!.fireMessage({ type: 'error', runId: 'r1', message: '模型超时' })
-    expect(onError).toHaveBeenCalledWith('模型超时', 'r1', undefined)
+    expect(onError).toHaveBeenCalledWith('模型超时', 'r1', undefined, undefined)
   })
 
   it('dispatches approval id on a resolve-error frame (codex R2 P2)', () => {
     const onError = vi.fn()
     new ChatWebSocket('/ws/chat/', 'jwt', { onError })
     MockWS.last!.fireMessage({ type: 'error', message: '审批回覆失败', id: 'ap-1' })
-    expect(onError).toHaveBeenCalledWith('审批回覆失败', undefined, 'ap-1')
+    expect(onError).toHaveBeenCalledWith('审批回覆失败', undefined, 'ap-1', undefined)
+  })
+
+  it('dispatches the retryable startup-error marker', () => {
+    const onError = vi.fn()
+    new ChatWebSocket('/ws/chat/', 'jwt', { onError })
+    MockWS.last!.fireMessage({ type: 'error', message: '连接容器失败，请稍后重试', retryable: true })
+    expect(onError).toHaveBeenCalledWith('连接容器失败，请稍后重试', undefined, undefined, true)
   })
 
   it('fires onClose when underlying socket closes (断线)', () => {
@@ -277,5 +318,179 @@ describe('ChatWebSocket', () => {
     expect(onError).toHaveBeenCalledTimes(2)
     expect(onError).toHaveBeenCalledWith('连接已断开，请重试或切换容器')
     expect(MockWS.last!.sent).toEqual([]) // 未真正发出
+  })
+
+  // ---- #239 静默看门狗（评审 issue #198 问题 1）+ codex #249 P2：判死基于「ping 无应答」----
+  // codex #249 P2：看门狗不再凭「纯静默时长」判死——健康连接可能无 ping 在飞（繁忙流量/pong 刚到）。
+  // 仅当 ping 已发出且超一整个 silenceTimeout 无应答（真半开）才 close；否则重布防再核。
+  // toFake:['performance'] 让 performance.now() 随 fake timers 推进，与判死的「应答窗口」计时对齐。
+  describe('silence watchdog (issue #239)', () => {
+    beforeEach(() => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'performance'] })
+    })
+    afterEach(() => {
+      vi.useRealTimers()
+    })
+
+    it('closes the socket only after a ping goes unanswered for a full response window (真半开判死)', () => {
+      const onClose = vi.fn()
+      new ChatWebSocket('/ws/chat/', 'jwt', { onClose }, { silenceTimeoutMs: 1000, pingIntervalMs: 400 })
+      MockWS.last!.fireOpen()
+      MockWS.last!.sent.length = 0 // 清掉 open flush 的缓冲帧
+      vi.advanceTimersByTime(400) // 心跳发出 ping → awaitingPong 置位、_lastPingAt=400、看门狗布防到 1400
+      expect(MockWS.last!.sent).toContainEqual({ type: 'ping' })
+      // 应答窗口未满（ping 才发 600ms）：看门狗不在窗口内触发
+      vi.advanceTimersByTime(600)
+      expect(onClose).not.toHaveBeenCalled()
+      // ping 满一整个 silenceTimeout 无应答（真半开）：看门狗于 1400 触发判死
+      vi.advanceTimersByTime(400)
+      expect(onClose).toHaveBeenCalled()
+    })
+
+    it('does not kill a healthy busy connection that has no ping in flight (健康繁忙不误杀)', () => {
+      // codex #249 P2：连接持续有业务流量（每次入站帧清除 awaitingPong、重置看门狗）→ 永无
+      // 「ping 满应答窗口无应答」情形，多次越过 silenceTimeout 也不判死。
+      const onClose = vi.fn()
+      const onText = vi.fn()
+      new ChatWebSocket('/ws/chat/', 'jwt', { onClose, onText }, { silenceTimeoutMs: 1000, pingIntervalMs: 1000 })
+      MockWS.last!.fireOpen()
+      // 每 900ms 收一帧（< 阈值）：ping 即使发出也被下一帧应答，看门狗反复重置，永不判死
+      for (let i = 0; i < 8; i++) {
+        vi.advanceTimersByTime(900)
+        MockWS.last!.fireMessage({ type: 'text', runId: 'r1', delta: 'x' })
+      }
+      expect(onText).toHaveBeenCalledTimes(8)
+      expect(onClose).not.toHaveBeenCalled()
+    })
+
+    it('resets the watchdog on every inbound frame (活跃连接不判死，断流后 ping 无应答判死)', () => {
+      const onClose = vi.fn()
+      const onText = vi.fn()
+      new ChatWebSocket('/ws/chat/', 'jwt', { onClose, onText }, { silenceTimeoutMs: 1000, pingIntervalMs: 1000 })
+      MockWS.last!.fireOpen()
+      // 每 900ms 收一帧（< 阈值）：看门狗被反复重置，永不判死
+      for (let i = 0; i < 5; i++) {
+        vi.advanceTimersByTime(900)
+        MockWS.last!.fireMessage({ type: 'text', runId: 'r1', delta: 'x' })
+      }
+      expect(onClose).not.toHaveBeenCalled()
+      expect(onText).toHaveBeenCalledTimes(5)
+      // 来帧停止后：心跳于下一周期发出 ping，该 ping 满一个 silenceTimeout 无应答 → 判死
+      vi.advanceTimersByTime(2_500)
+      expect(onClose).toHaveBeenCalled()
+    })
+
+    it('grants a fresh response window when a suspended tab becomes visible again (codex #249 P2，不误杀)', () => {
+      // 复现：后台标签被挂起 >silenceTimeout，心跳 interval 与看门狗定时器都被冻结；恢复瞬间两者一并
+      // 过期、入队顺序不定——旧实现（看门狗拿挂起前 stale「连续等待」状态）会误杀健康连接。修正后标签
+      // 回到可见即给一整个新应答窗口（清零连续等待起点并重布防），恢复 ping 的 pong 有机会先返回。
+      const onClose = vi.fn()
+      new ChatWebSocket('/ws/chat/', 'jwt', { onClose }, { silenceTimeoutMs: 1000, pingIntervalMs: 400 })
+      MockWS.last!.fireOpen()
+      vi.advanceTimersByTime(400) // 发 ping
+      MockWS.last!.fireMessage({ type: 'pong' }) // 挂起前对端回 pong（健康）
+      // —— 标签被挂起：时钟冻结，期间挂起前 ping 的「连续等待」状态变 stale ——
+      // 标签恢复可见：给一整个新应答窗口，不拿挂起前 stale 状态判死
+      fireVisibilityVisible()
+      vi.advanceTimersByTime(999) // 新窗口内：不判死
+      expect(onClose).not.toHaveBeenCalled()
+      // 恢复后健康：对端回 pong，连接在多倍 silenceTimeout 内不再判死
+      MockWS.last!.fireMessage({ type: 'pong' })
+      vi.advanceTimersByTime(400)
+      MockWS.last!.fireMessage({ type: 'pong' })
+      expect(onClose).not.toHaveBeenCalled()
+    })
+
+    it('still kills after resume when the connection is genuinely half-open (恢复后真半开仍判死)', () => {
+      // 对偶：恢复（标签再可见）给足一整个新应答窗口后，恢复 ping 仍无应答（真半开）→ 判死。
+      const onClose = vi.fn()
+      new ChatWebSocket('/ws/chat/', 'jwt', { onClose }, { silenceTimeoutMs: 1000, pingIntervalMs: 400 })
+      MockWS.last!.fireOpen()
+      vi.advanceTimersByTime(400)
+      MockWS.last!.fireMessage({ type: 'pong' })
+      fireVisibilityVisible() // 恢复：给新窗口
+      expect(onClose).not.toHaveBeenCalled()
+      vi.advanceTimersByTime(5_000) // 恢复 ping 始终无应答（真半开）：窗口满后判死
+      expect(onClose).toHaveBeenCalled()
+    })
+
+    it('does not fire before the timeout elapses', () => {
+      const onClose = vi.fn()
+      new ChatWebSocket('/ws/chat/', 'jwt', { onClose }, { silenceTimeoutMs: 1000, pingIntervalMs: 400 })
+      MockWS.last!.fireOpen()
+      vi.advanceTimersByTime(999)
+      expect(onClose).not.toHaveBeenCalled()
+    })
+
+    it('does not start the watchdog before the socket opens', () => {
+      const onClose = vi.fn()
+      new ChatWebSocket('/ws/chat/', 'jwt', { onClose }, { silenceTimeoutMs: 1000 })
+      // 未 open（CONNECTING）：看门狗未布防，计时流逝不判死
+      vi.advanceTimersByTime(5000)
+      expect(onClose).not.toHaveBeenCalled()
+    })
+
+    it('clears the watchdog on an explicit close() (主动关闭后看门狗不再重复判死)', () => {
+      const onClose = vi.fn()
+      const ws = new ChatWebSocket('/ws/chat/', 'jwt', { onClose }, { silenceTimeoutMs: 1000 })
+      MockWS.last!.fireOpen()
+      ws.close() // 主动关闭：触发一次 onclose，并清看门狗
+      expect(onClose).toHaveBeenCalledTimes(1)
+      vi.advanceTimersByTime(5000) // 看门狗已清：计时流逝不再二次判死
+      expect(onClose).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  // ---- codex #249 P1 应用层心跳：周期 ping 给本腿活性流量，idle 健康连接不被看门狗误判半开 ----
+  describe('heartbeat ping (codex #249 P1)', () => {
+    beforeEach(() => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'performance'] })
+    })
+    afterEach(() => {
+      vi.useRealTimers()
+    })
+
+    it('sends a ping on the heartbeat interval after open', () => {
+      new ChatWebSocket('/ws/chat/', 'jwt', {}, { pingIntervalMs: 1000 })
+      MockWS.last!.fireOpen()
+      MockWS.last!.sent.length = 0 // 清掉 open flush 的缓冲帧
+      vi.advanceTimersByTime(1000)
+      expect(MockWS.last!.sent).toContainEqual({ type: 'ping' })
+    })
+
+    it('keeps an idle connection alive: periodic pong resets the watchdog (idle 健康不判死)', () => {
+      // 复现 Codex P1：本腿无周期帧时 idle 60s 会被看门狗掐死。有心跳后——前端周期 ping、
+      // 对端回 pong（入站帧）重置看门狗，idle 健康连接在多倍 silenceTimeout 内不被判死。
+      const onClose = vi.fn()
+      new ChatWebSocket('/ws/chat/', 'jwt', { onClose }, { silenceTimeoutMs: 3000, pingIntervalMs: 1000 })
+      MockWS.last!.fireOpen()
+      // 每个 ping 周期对端回 pong（模拟 consumer ping→pong）：推进 5 个周期（5s > silenceTimeout 3s）
+      for (let i = 0; i < 5; i++) {
+        vi.advanceTimersByTime(1000) // 触发一次 ping
+        MockWS.last!.fireMessage({ type: 'pong' }) // 对端应答 → 入站帧重置看门狗
+      }
+      expect(onClose).not.toHaveBeenCalled() // idle 但有 pong：健康，不判死
+    })
+
+    it('still kills a genuinely half-open connection when pings go unanswered (ping 无应答判死)', () => {
+      const onClose = vi.fn()
+      new ChatWebSocket('/ws/chat/', 'jwt', { onClose }, { silenceTimeoutMs: 3000, pingIntervalMs: 1000 })
+      MockWS.last!.fireOpen()
+      // ping 照发但对端无任何应答（真半开）：首个 ping 于 t=1000 发出、看门狗布防到其窗口截止点
+      // t=4000；窗口未满不判死，满一整个 silenceTimeout 无应答才判死。
+      vi.advanceTimersByTime(3_999)
+      expect(onClose).not.toHaveBeenCalled()
+      vi.advanceTimersByTime(1)
+      expect(onClose).toHaveBeenCalled()
+    })
+
+    it('stops the heartbeat on close (关闭后不再发 ping)', () => {
+      const ws = new ChatWebSocket('/ws/chat/', 'jwt', {}, { pingIntervalMs: 1000 })
+      MockWS.last!.fireOpen()
+      ws.close()
+      MockWS.last!.sent.length = 0
+      vi.advanceTimersByTime(5000)
+      expect(MockWS.last!.sent).toEqual([]) // 关闭后心跳停止
+    })
   })
 })

@@ -1281,6 +1281,124 @@ async def test_adopt_inflight_run_rebuilds_route_and_replays_text():
 
 
 @pytest.mark.asyncio
+async def test_resume_active_session_rebuilds_route_on_already_live_client():
+    """浏览器腿重连复用存活 pooled client 时也须重新查询并绑定 in-flight run。"""
+    history = {
+        'messages': [{'role': 'assistant', 'content': 'completed history'}],
+        'inFlightRun': {'runId': 'live-run', 'text': 'partial'},
+    }
+    t = FakeChatTransport(rpc_payloads={'chat.history': history})
+    received = []
+
+    async def on_event(frame):
+        received.append(frame)
+
+    c = _client(transport=t)
+    await c.connect()  # pooled wire is already live; no remembered session during connect
+    resume = asyncio.create_task(c.resume_active_session('s1', on_event))
+    # Fake recv may already be blocked on its queue when either sequential RPC is sent; real
+    # websockets wake on network input, so nudge the fake until both scripted replies are read.
+    while not resume.done():
+        t.push({'type': 'event', 'event': 'noop', 'payload': {}})
+        await asyncio.sleep(0)
+    await resume
+
+    assert {'type': 'text', 'runId': 'live-run', 'delta': 'partial', 'replace': True} in received
+    assert not any(f.get('runId') == '__history__' for f in received), \
+        'browser reconnect reloads persisted history separately'
+    t.push({'type': 'event', 'event': 'chat',
+            'payload': {'runId': 'live-run', 'state': 'delta', 'deltaText': ' next'}})
+    await asyncio.sleep(0.05)
+    assert {'type': 'text', 'runId': 'live-run', 'delta': ' next'} in received
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_resume_active_session_buffers_events_until_route_installed():
+    """codex #249 P1 R5 (id 3690750256, wire_client.py:102)：already-live pooled wire 上恢复会话期间
+    _recv_loop 持续消费事件——恢复的 inFlightRun 路由未安装前 dequeued 的该 run 帧会被 _handle 以
+    「route 未就绪」（cb is None）静默丢弃，终态帧被丢则恢复的 run 永无完成帧。修复：resume 的 RPC
+    完成前**缓冲** run-scoped event 帧，路由安装后回放不丢帧。
+
+    测试纪律：chat.history 的 scripted ack 被 suppress、ack 手动注入——mid-run 帧在 chat.history ack
+    就绪**之前**（路由未装）经 _recv_loop dequeued。修复前该帧 cb is None 被静默丢（本断言红）；修复
+    后缓冲待路由就绪回放（绿）。"""
+    history = {
+        'messages': [],
+        'inFlightRun': {'runId': 'live-run', 'text': 'partial'},
+    }
+    t = FakeChatTransport(
+        rpc_payloads={'chat.history': history},
+        rpc_suppress={'sessions.messages.subscribe', 'chat.history'},
+    )
+    received = []
+
+    async def on_event(frame):
+        received.append(frame)
+
+    c = _client(transport=t)
+    await c.connect()  # pooled wire already live; no remembered session during connect
+    resume = asyncio.create_task(c.resume_active_session('s1', on_event))
+    await asyncio.sleep(0)  # resume 起跑：_recovering=True、发出 messages.subscribe、等其 ack
+    sub_req = next(f for f in t.sent[t._sent_base:] if f.get('method') == 'sessions.messages.subscribe')
+    t.push({'type': 'res', 'id': sub_req['id'], 'ok': True, 'payload': {}})
+    await asyncio.sleep(0)  # recv 消费 ack → resume 续发 chat.history
+    while not any(f.get('method') == 'chat.history' for f in t.sent[t._sent_base:]):
+        await asyncio.sleep(0)
+    hist_req = next(f for f in t.sent[t._sent_base:] if f.get('method') == 'chat.history')
+    # 恢复窗口内注入 mid-run delta（chat.history ack 未决、route 未装）——recv 消费即应缓冲。
+    t.push({'type': 'event', 'event': 'chat',
+            'payload': {'runId': 'live-run', 'state': 'delta', 'deltaText': ' mid'}})
+    await asyncio.sleep(0)  # recv 消费该帧：route 未装 → 缓冲（修复前这里被静默丢弃）
+    t.push({'type': 'res', 'id': hist_req['id'], 'ok': True, 'payload': history})
+    await resume
+
+    # 竞态帧不丢：缓冲待路由就绪回放（delta 增量续接到 inFlightRun replace 回放之后）。
+    assert {'type': 'text', 'runId': 'live-run', 'delta': ' mid'} in received
+    t.push({'type': 'event', 'event': 'chat',
+            'payload': {'runId': 'live-run', 'state': 'delta', 'deltaText': ' tail'}})
+    await asyncio.sleep(0.05)
+    assert {'type': 'text', 'runId': 'live-run', 'delta': ' tail'} in received
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_resume_active_session_buffers_terminal_frame():
+    """codex #249 P1 R5 (id 3690750256)：恢复窗口内到达的**终态帧**（final → done）同样不得被丢——
+    否则恢复的 run 永不完成、前端光标永久闪烁。缓冲回放须覆盖终态（含路由清理）。"""
+    history = {'messages': [], 'inFlightRun': {'runId': 'live-run', 'text': ''}}
+    t = FakeChatTransport(
+        rpc_payloads={'chat.history': history},
+        rpc_suppress={'sessions.messages.subscribe', 'chat.history'},
+    )
+    received = []
+
+    async def on_event(frame):
+        received.append(frame)
+
+    c = _client(transport=t)
+    await c.connect()
+    resume = asyncio.create_task(c.resume_active_session('s1', on_event))
+    await asyncio.sleep(0)
+    sub_req = next(f for f in t.sent[t._sent_base:] if f.get('method') == 'sessions.messages.subscribe')
+    t.push({'type': 'res', 'id': sub_req['id'], 'ok': True, 'payload': {}})
+    await asyncio.sleep(0)
+    while not any(f.get('method') == 'chat.history' for f in t.sent[t._sent_base:]):
+        await asyncio.sleep(0)
+    hist_req = next(f for f in t.sent[t._sent_base:] if f.get('method') == 'chat.history')
+    # 恢复窗口内注入终态帧（final，message 空 → 仅 done 帧）。
+    t.push({'type': 'event', 'event': 'chat',
+            'payload': {'runId': 'live-run', 'state': 'final', 'message': ''}})
+    await asyncio.sleep(0)
+    t.push({'type': 'res', 'id': hist_req['id'], 'ok': True, 'payload': history})
+    await resume
+
+    assert {'type': 'done', 'runId': 'live-run'} in received, \
+        '恢复窗口内到达的终态帧不得被丢弃（否则 run 永无完成帧）'
+    await c.aclose()
+
+
+@pytest.mark.asyncio
 async def test_adopt_inflight_run_empty_text_still_rebuilds_route():
     """#217 步3（即使 text 为空也采用）：inFlightRun.text 为空 → 不发 text 帧，但仍重建 runId 路由
     （恢复进行中 run 的事件流不丢）。"""
