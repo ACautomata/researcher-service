@@ -93,6 +93,51 @@ class TestWireConstantsSingleSource:
         assert event_translate._TOOL_STREAM is wire.TOOL_STREAM
 
 
+class TestWireTypesSingleSourced:
+    """wire 异常族 / GatewayPolicy / 握手默认常量单一来源（issue #229）。
+
+    这些类型历史上住在 chat.chat_client；#229 把它们迁入 integration.openclaw.wire（防腐层
+    wire 常量模块，与 ConnectFrameBuilder / SCOPES / 事件族同处），chat.chat_client 做
+    **identity-preserving re-export**（同对象，非拷贝）——isinstance / is / 异常 __cause__ 链
+    行为全部不变，现有 import 与 except 子句零改动。这是 #227 路径4 收敛的机械前置步。
+    """
+
+    _ERROR_HIERARCHY = (
+        'ChatClientError',
+        'ChatConnectError',
+        'ChatSendError',
+        'ChatSendTransmittedError',
+        'ChatPayloadTooLargeError',
+    )
+
+    def test_error_hierarchy_identity_preserving(self):
+        """chat.chat_client 的异常族与 wire 同对象（re-export，非拷贝）。"""
+        for name in self._ERROR_HIERARCHY:
+            assert getattr(chat_client, name) is getattr(wire, name), (
+                f'chat_client.{name} 应与 wire.{name} 同对象（identity re-export）'
+            )
+
+    def test_gateway_policy_identity_preserving(self):
+        assert chat_client.GatewayPolicy is wire.GatewayPolicy
+
+    def test_default_constants_identity_preserving(self):
+        assert chat_client.DEFAULT_TICK_INTERVAL_MS is wire.DEFAULT_TICK_INTERVAL_MS
+        assert chat_client.DEFAULT_MAX_PAYLOAD_BYTES is wire.DEFAULT_MAX_PAYLOAD_BYTES
+
+    def test_isinstance_invariant_across_re_export(self):
+        """identity re-export 保证跨模块捕获语义不变——经 chat_client 类名抛、用 wire 类名捕。"""
+        assert isinstance(chat_client.ChatSendTransmittedError('x'), wire.ChatSendError)
+        assert isinstance(chat_client.ChatPayloadTooLargeError('y'), wire.ChatClientError)
+        assert isinstance(chat_client.ChatConnectError('z'), wire.ChatClientError)
+
+    def test_error_subclass_hierarchy_preserved(self):
+        """异常族继承结构经迁移不变（consumer 的 except ChatClientError 仍兜住全部子类）。"""
+        assert issubclass(wire.ChatSendTransmittedError, wire.ChatSendError)
+        assert issubclass(wire.ChatPayloadTooLargeError, wire.ChatSendError)
+        assert issubclass(wire.ChatSendError, wire.ChatClientError)
+        assert issubclass(wire.ChatConnectError, wire.ChatClientError)
+
+
 class TestIntegrationExposesFourPorts:
     """集成包暴露 4 Port（Protocol 形态）—— issue #98 acceptance「集成包建立，含 4 Port 接口」。"""
 

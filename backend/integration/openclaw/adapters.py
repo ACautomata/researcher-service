@@ -15,7 +15,14 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-from integration.openclaw.wire import REQUIRED_SCOPES, ConnectFrameBuilder
+from integration.openclaw.wire import (
+    REQUIRED_SCOPES,
+    ChatClientError,
+    ChatConnectError,
+    ChatSendError,
+    ChatSendTransmittedError,
+    ConnectFrameBuilder,
+)
 
 
 class HttpHealthProbe:
@@ -447,8 +454,6 @@ class OpenClawWireAdapter:
         import json
         import uuid
 
-        from chat.chat_client import ChatConnectError
-
         self._device_token = device_token
         self._cm = self._connect_factory(url)
         self._ws = await self._cm.__aenter__()  # pylint: disable=unnecessary-dunder-call  # C2801 长连手动管理异步 CM(跨 connect/close 持句柄),非 async with 可圈定
@@ -480,12 +485,6 @@ class OpenClawWireAdapter:
     async def send_message(
         self, session_key: str, message: str, on_event: Any, *, idempotency_key: str | None = None,
     ) -> str:
-        from chat.chat_client import (
-            ChatClientError,
-            ChatSendError,
-            ChatSendTransmittedError,
-        )
-
         if self._ws is None or self.dead:
             # codex #219 十二轮 P2-331：recv loop 退出置 _dead=True 后 _ws 非空，仅查 _ws 仍会注册
             # ack 并发帧——recv loop 已无法处理 ack/事件，网关或收下 run 但输出丢失，最终只暴露为
@@ -546,8 +545,6 @@ class OpenClawWireAdapter:
     # ── resolve_approval ─────────────────────────────────────────────────────
 
     async def resolve_approval(self, approval_id: str, kind: str, decision: str) -> dict:
-        from chat.chat_client import ChatClientError, ChatSendError
-
         if self._ws is None or self.dead:
             # codex #219 十二轮 P2-331：同 send_message——dead 视为已断连，closing/recv 死期间拒发
             # 审批回覆（避免 future 注册后 ack/resolved 事件随死连接丢失，已执行的卡被超时误复位）。
@@ -614,8 +611,6 @@ class OpenClawWireAdapter:
     # ── list_commands ─────────────────────────────────────────────────────────
 
     async def list_commands(self) -> dict:
-        from chat.chat_client import ChatClientError, ChatSendError
-
         if self._ws is None:
             raise ChatClientError('client not connected')
         import uuid
@@ -640,8 +635,6 @@ class OpenClawWireAdapter:
     # ── sessions_rpc ──────────────────────────────────────────────────────────
 
     async def sessions_rpc(self, method: str, params: dict) -> dict:
-        from chat.chat_client import ChatClientError, ChatSendError
-
         if self._ws is None or self.dead:
             # codex #219 十二轮 P2-331：同 send_message——dead 视为已断连，closing/recv 死期间拒发
             # sessions/history RPC（避免 future 注册后 ack 随死连接丢失、调用方空等超时）。
@@ -749,7 +742,6 @@ class OpenClawWireAdapter:
                     resolve_fut.set_result(msg.get('payload'))
                 else:
                     err = msg.get('error') or {}
-                    from chat.chat_client import ChatSendError
                     resolve_fut.set_exception(
                         ChatSendError(err.get('message') or err.get('code') or 'RPC failed'))
             return
@@ -766,11 +758,9 @@ class OpenClawWireAdapter:
                 self._routes[run_id] = on_event
                 fut.set_result(run_id)
             else:
-                from chat.chat_client import ChatSendError
                 fut.set_exception(ChatSendError('chat.send ack missing runId'))
         else:
             err = msg.get('error') or {}
-            from chat.chat_client import ChatSendError
             fut.set_exception(ChatSendError(err.get('message') or err.get('code') or 'chat.send failed'))
 
     async def _handle_event(self, msg: dict) -> None:
@@ -806,7 +796,6 @@ class OpenClawWireAdapter:
     # ── await helpers ─────────────────────────────────────────────────────────
 
     async def _await_res(self, req_id: str) -> dict:
-        from chat.chat_client import ChatConnectError
         while True:
             raw = await self._ws.recv()
             msg = json.loads(raw)
@@ -826,7 +815,6 @@ class OpenClawWireAdapter:
         self._routes.clear()
 
     def _fail_pending_acks(self, message: str) -> None:
-        from chat.chat_client import ChatClientError
         for entry in list(self._pending_acks.values()):
             fut = entry[0]
             if not fut.done():
@@ -834,7 +822,6 @@ class OpenClawWireAdapter:
         self._pending_acks.clear()
 
     def _fail_pending_resolves(self, message: str) -> None:
-        from chat.chat_client import ChatClientError
         for fut in list(self._pending_resolves.values()):
             if not fut.done():
                 fut.set_exception(ChatClientError(message))
