@@ -1,0 +1,9 @@
+# 版本控制与依赖/构建产物，勿进构建上下文（node_modules 由 npm ci 在镜像内重建）
+.git
+node_modules
+dist
+# 测试与覆盖率
+coverage
+*.local
+# Dockerfile/配置自身外的本地覆盖
+.dockerignore

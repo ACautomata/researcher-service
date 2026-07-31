@@ -1,0 +1,68 @@
+# deploy/docker-compose.deploy.yml —— 面板生产栈（BaoTa 边缘 TLS 之后的应用层）
+#
+# 由 CD（.github/workflows/cd.yml）scp 到宿主 /www/panel/ 并经 `docker compose ... up -d` 启动。
+# 三服务：frontend（唯一对宿主暴露，loopback 8080 供 BaoTa 反代）/ backend（内部，daphne +
+# docker.sock 编排 OpenClaw 容器 + SQLite 卷 + researcher 模板只读挂载）/ redis（内部，DistributedLock）。
+#
+# 运行时敏感值（DJANGO_SECRET_KEY / LLM_API_KEY / CREDENTIAL_ENCRYPTION_KEYS / DJANGO_ALLOWED_HOSTS）
+# 经同目录 .env（env_file）注入，不落盘进 git；非敏感固定项（REDIS_URL/OPENCLAW_TEMPLATE_DIR/端口）
+# 直接写在本文件。
+#
+# 用法（CD 已自动化；手工排障时参考）：
+#   docker compose -f docker-compose.deploy.yml --env-file .env pull
+#   docker compose -f docker-compose.deploy.yml --env-file .env up -d --remove-orphans
+
+name: panel
+
+services:
+  frontend:
+    image: ${PANEL_FRONTEND_IMAGE:-ghcr.io/acautomata/researcher-service/frontend:latest}
+    container_name: panel-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      # 仅 loopback 暴露；BaoTa 边缘（Let's Encrypt TLS）反代 https://researcher.acautomata.top → 127.0.0.1:8080
+      - "127.0.0.1:8080:80"
+    networks:
+      - panel-net
+
+  backend:
+    image: ${PANEL_BACKEND_IMAGE:-ghcr.io/acautomata/researcher-service/backend:latest}
+    container_name: panel-backend
+    restart: unless-stopped
+    env_file:
+      - .env
+    depends_on:
+      - redis   # 启动顺序：redis 先于 backend（仅启动序，非就绪等待；entrypoint migrate 阶段给 redis 留出窗口）
+    environment:
+      # 非敏感固定项：settings 唯一 env 读取处（config/settings）。
+      DJANGO_SETTINGS_MODULE: config.settings.prod
+      REDIS_URL: redis://redis:6379/0
+      OPENCLAW_TEMPLATE_DIR: /srv/openclaw/template
+      DATABASE_NAME: /app/db/db.sqlite3
+    volumes:
+      # 控制面等价 root：经宿主 docker.sock 增删查 OpenClaw 容器（spec §5.4 已明示风险）。
+      - /var/run/docker.sock:/var/run/docker.sock
+      # SQLite 持久化：prod settings 经 DATABASE_NAME 覆盖（默认 BASE_DIR/db.sqlite3），
+      # 指向本 named volume 挂载点 /app/db/db.sqlite3，容器重建数据不丢。
+      - panel-db:/app/db
+      # researcher 模板（home 预填充 cp -a 源）：宿主克隆只读挂载。
+      - /srv/openclaw/template:/srv/openclaw/template:ro
+    networks:
+      - panel-net
+
+  redis:
+    image: redis:7-alpine
+    container_name: panel-redis
+    restart: unless-stopped
+    # DistributedLock 后端；仅内部网络，不对宿主暴露。
+    networks:
+      - panel-net
+
+networks:
+  panel-net:
+    driver: bridge
+
+volumes:
+  panel-db:
