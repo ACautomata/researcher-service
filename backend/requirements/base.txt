@@ -7,3 +7,4 @@ daphne==4.2.1  # Channels 要求 daphne 在 INSTALLED_APPS 中，且 base settin
 docker==7.2.0  # containers 控制面：docker-py 经 docker.sock 增删查容器（spec §5.4）
 cryptography==49.0.0  # chat 设备配对：Ed25519 设备身份 + challenge 签名（spec §8.1 / issue #40）
 websockets==16.1.1  # chat 配对握手 + P1 对话桥接：OpenClaw WS protocol v4 客户端（spec §8 / r13 §5.1）
+redis==8.1.0  # common/lock DistributedLock：redis.asyncio 自带 asyncio Lock（SET NX PX+Lua）；单节点无需 Redlock（#253 / #248）

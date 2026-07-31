@@ -2,12 +2,13 @@
 
 单一 seam = DistributedLock Port（backend/common/lock/ports.py）。两面：
 
-1. **签名同构守卫**（#251 AC4）：动态枚举 Port 全部公开方法，断言签名 shape 在
-   Port / FakeLock 两方锁步（issue #230「every Port method」范式，复制
-   integration/openclaw/tests/test_contract.py:746-780）。isinstance(runtime_checkable
+1. **签名同构守卫**（#251 AC4 / #253 扩三方）：动态枚举 Port 全部公开方法，断言签名 shape 在
+   Port / FakeLock / AsyncRedisLockAdapter **三方**锁步（issue #230「every Port method」范式，
+   复制 integration/openclaw/tests/test_contract.py:746-780）。isinstance(runtime_checkable
    Protocol) 只验方法存在、不验签名——历史上 connect 的 keyword-only 参数曾静默分歧
    （codex #149 / #219）。本守卫用 inspect 把覆盖面扩到 Port **每个**方法，新增方法
-   自动纳入（动态枚举）。
+   自动纳入（动态枚举）；任一单边签名漂移（改名 / 挪位置·关键字 / 增删默认值）都在
+   测试期失败而非生产 TypeError。
 
 2. **FakeLock 行为**（#251 AC3）：内存模拟 TTL/持有者，记录 acquire/try_acquire/
    renew/release 调用；租约期满自动失效；未持有不可续约/释放；闭锁 LockResource 的
@@ -57,34 +58,47 @@ _LEASE_HANDLE_METHODS = tuple(
 
 
 @pytest.mark.parametrize('method', _LOCK_PORT_METHODS)
-def test_lock_method_signature_isomorphic_across_port_fake(method):
-    """#251：DistributedLock 每个方法在 Port / Fake 两处签名同构（向下闭合）。
+def test_lock_method_signature_isomorphic_across_port_fake_adapter(method):
+    """#251/#253：DistributedLock 每个方法在 Port / Fake / Adapter 三方签名同构（向下闭合）。
 
     isinstance(runtime_checkable Protocol) 只验方法存在、不验签名——历史上
     integration/openclaw connect/send_message 的 keyword-only 参数都曾因此静默分歧
-    （#230）。本守卫用 inspect 扩到 Port **每个**方法，任意单边签名漂移（改名 /
-    挪位置·关键字 / 增删默认值）都在测试期失败而非生产 TypeError。
+    （#230）。本守卫用 inspect 扩到 Port **每个**方法在 Port/FakeLock/AsyncRedisLockAdapter
+    **三方**锁步，任意单边签名漂移（改名 / 挪位置·关键字 / 增删默认值）都在测试期失败
+    而非生产 TypeError。
     """
+    from common.lock.adapters import AsyncRedisLockAdapter
     from common.lock.fakes import FakeLock
 
     port_shape = _lock_attr_signature_shape(_DistributedLockPort, method)
     fake_shape = _lock_attr_signature_shape(FakeLock, method)
+    adapter_shape = _lock_attr_signature_shape(AsyncRedisLockAdapter, method)
 
     assert fake_shape == port_shape, (
         f'FakeLock.{method} 签名漂离 Port：port={port_shape} fake={fake_shape}'
     )
+    assert adapter_shape == port_shape, (
+        f'AsyncRedisLockAdapter.{method} 签名漂离 Port：'
+        f'port={port_shape} adapter={adapter_shape}'
+    )
 
 
 @pytest.mark.parametrize('method', _LEASE_HANDLE_METHODS)
-def test_lease_handle_signature_isomorphic_across_port_fake(method):
-    """#251：LeaseHandle 每个方法在 Port / Fake 两处签名同构（契约公开面全覆盖）。"""
+def test_lease_handle_signature_isomorphic_across_port_fake_adapter(method):
+    """#251/#253：LeaseHandle 每个方法在 Port / Fake / Adapter 三方签名同构（契约公开面全覆盖）。"""
+    from common.lock.adapters import _RedisLeaseHandle
     from common.lock.fakes import FakeLeaseHandle
 
     port_shape = _lock_attr_signature_shape(_LeaseHandlePort, method)
     fake_shape = _lock_attr_signature_shape(FakeLeaseHandle, method)
+    adapter_shape = _lock_attr_signature_shape(_RedisLeaseHandle, method)
 
     assert fake_shape == port_shape, (
         f'FakeLeaseHandle.{method} 签名漂离 Port：port={port_shape} fake={fake_shape}'
+    )
+    assert adapter_shape == port_shape, (
+        f'_RedisLeaseHandle.{method} 签名漂离 Port：'
+        f'port={port_shape} adapter={adapter_shape}'
     )
 
 
