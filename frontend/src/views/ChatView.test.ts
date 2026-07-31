@@ -1146,6 +1146,46 @@ describe('ChatView', () => {
       expect(MockWS.last!.sent).toContainEqual({ type: 'start', container: 'demo', sessionKey: 'sk-1' })
     })
 
+    it('consumes the resumed run after reconnect (重连恢复的在途 run 不被 abandonedRunIds 吞掉)', async () => {
+      // codex #249 P1 R5 (id 3690750253, ChatView.vue:593)：断线时 onClose 把在途 runId 标记
+      // abandoned（其迟到帧按 abandoned 丢弃）；但重连握手**恢复同一 runId**——后端重建其路由并续流
+      // 剩余增量/终态帧。若重连后仍保留 abandonedRunIds 标记，onText/onDone 会把恢复的增量与终态帧
+      // 全按「切换前遗留 run」丢弃，可见回答停留在断线时的快照（loadHistory 之后产出的内容缺失）。
+      // 修复：重连时置恢复窗口（resumePending），恢复首帧认领（claimResumedRun）解除 abandoned 标记
+      // + 重新续流尾部气泡；onReady 的 loadHistory 保留续流中的尾（不 wipe）。
+      const w = await mountReady()
+      // 起一个 run 并收到首帧（activeRunId=r1，流式中断线）
+      await w.find('[data-test="input"]').setValue('你好')
+      await w.find('[data-test="send"]').trigger('click')
+      await nextTick()
+      MockWS.last!.fireMessage({ type: 'text', runId: 'r1', delta: '回答' })
+      await nextTick()
+      expect(w.find('[data-test="stream"]').text()).toContain('回答')
+      const first = MockWS.last!
+      first.fireClose() // 流式中意外断线 → onClose 收尾 + 标记 r1 abandoned + 调度 1s 重连
+      await nextTick()
+      await vi.advanceTimersByTimeAsync(1000) // 退避到点 → 自动重连
+      await flushPromises()
+      expect(MockWS.last).not.toBe(first)
+      MockWS.last!.fireOpen()
+      await flushPromises() // 缓冲的 start{container,sessionKey} 帧 flush
+      // 后端 resume_active_session 在 ready **之前**回放恢复帧：replace 快照 + 后续 delta + 终态 done。
+      // 修复前这些帧撞 abandonedRunIds.has('r1') 被丢弃（本断言红）；修复后认领续流渲染。
+      MockWS.last!.fireMessage({ type: 'text', runId: 'r1', delta: '回答，继续', replace: true })
+      await nextTick()
+      expect(w.find('[data-test="stream"]').text()).toContain('回答，继续')
+      MockWS.last!.fireMessage({ type: 'text', runId: 'r1', delta: '，最后一段' })
+      await nextTick()
+      expect(w.find('[data-test="stream"]').text()).toContain('最后一段')
+      MockWS.last!.fireMessage({ type: 'done', runId: 'r1' })
+      await nextTick()
+      expect(w.find('.cursor').exists()).toBe(false) // 终态帧被消费 → 光标落定
+      // ready 后 loadHistory（mock 返回空历史）不得 wipe 已认领的续流内容
+      MockWS.last!.fireMessage({ type: 'ready', container: 'demo' })
+      await nextTick()
+      expect(w.find('[data-test="stream"]').text()).toContain('最后一段')
+    })
+
     it('first connect after mount uses a plain start frame without sessionKey (首连/切容器不带 sessionKey)', async () => {
       // 首连（reconnectAttempts==0）：start 不带 sessionKey，与切容器一致——后端不注册恢复回调。
       await mountReady()

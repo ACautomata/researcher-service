@@ -77,6 +77,18 @@ let containerGen = 0
 // 接受，后落地的快照 prepend 到先落地的已渲染历史上 → 转录重复/混杂。每次 loadHistory 自增并捕获
 // 请求代，只有最新一次才允许提交其快照，其余（被取代的在途请求）落地即丢弃。
 let historyGen = 0
+// codex #249 R5 (id 3690750253)：断线重连恢复在途 run。onClose 把断线时在途 runId 标记 abandoned +
+// 收尾气泡；但重连握手**恢复同一 run**（后端续流其剩余增量/终态帧）——若残留 abandoned 标记，
+// onText/onDone 把恢复帧按「切换前遗留 run」丢弃；若气泡已收尾（streaming=false），恢复帧也被
+// last.streaming 守卫跳过渲染，可见回答停在断线快照。
+// 状态机：connect() 重连（reconnectAttempts>0）置 resumePending；恢复首帧（onText/onTool 认领）解除
+// abandoned 标记 + 重新续流尾部气泡 + 锚定 activeRunId；onReady 的 loadHistory（同会话）完成后清除。
+// 恢复帧在 ready 之前到达（后端 resume_active_session → 回放 → ready），故认领在 loadHistory 之前；
+// loadHistory 以「保留 streaming 尾」方式加载（见 loadHistory），不覆盖被恢复的在途 run。
+// 用户切会话/切容器走 abandonActiveRun 对称清 resumePending——恢复帧按旧 run 丢弃（abandoned 标记仍在）。
+let resumePending = false // 重连已建、恢复窗口内（connect() 置位，认领/loadHistory/切走时清除）
+let resumeClaimed = false // 已认领恢复 run（首帧到达）——尾部气泡在流式续流，loadHistory 须保留
+let resumeRunSession = '' // connect() 重连时选中的会话（认领须仍在该会话；切走则恢复帧按旧 run 丢弃）
 
 // issue #239 / 评审 #198 问题 1：断线自动重连——指数退避（对齐 GATEWAY_RECONNECT_POLICY 与
 // 后端 pool.ReconnectPolicy：初始 1s、每次翻倍、封顶 30s，重连成功即重置）。仅普通断线（非 4401；
@@ -208,6 +220,31 @@ function abandonActiveRun() {
   else if (pendingSend) pendingAbandonCount++ // 首帧未到、runId 未知：迟到首帧按 FIFO 计数丢弃
   activeRunId = ''
   pendingSend = false
+  // codex #249 R5：切会话/切容器 = 不再恢复断线前那个 run——清除重连恢复态（恢复帧按旧 run 丢弃）
+  resumePending = false
+  resumeClaimed = false
+  resumeRunSession = ''
+}
+
+// codex #249 R5 (id 3690750253)：认领重连后本连接的首个 run 帧——重连恢复的正是断线前在途 run，
+// 其帧须解除 abandoned 标记（若在集内）并把 onClose 已收尾的尾部气泡重新置为流式，续流渲染。
+// 仅当「重连恢复窗口内 + 会话未切走 + 尚无已锚定 run」才认领；认领即结束窗口（后续帧走正常锚定）。
+// 尾部无 assistant 气泡时（首帧在 loadHistory wipe 后才到 / 空 text 恢复 run）补一个流式占位，
+// 恢复帧可锚定（对齐 send() 的 user+assistant 占位语义）。返回是否认领成功。
+function claimResumedRun(runId: string): boolean {
+  if (!resumePending || resumeRunSession !== selectedSession.value) return false
+  if (activeRunId) return false
+  abandonedRunIds.delete(runId) // 若该 run 恰是被放弃的那个：解除 abandoned 标记（不在集内则 no-op）
+  resumePending = false // 已认领：恢复窗口结束
+  resumeClaimed = true // loadHistory 据此保留续流中的尾气泡
+  const last = messages.value[messages.value.length - 1]
+  if (last && last.role === 'assistant') {
+    last.streaming = true // 恢复续流：尾部气泡重新流式
+  } else {
+    // 尾部无 assistant 气泡（首帧在 loadHistory wipe 后才到 / 空 text 恢复 run）：补流式占位
+    messages.value.push({ role: 'assistant', raw: '', text: '', thinking: '', thinkingOpen: false, streaming: true, tools: [] })
+  }
+  return true
 }
 
 // 收尾最后一条 streaming 助手消息（done/error/关闭时）
@@ -387,7 +424,17 @@ async function loadHistory(key: string) {
   const gen = containerGen
   const hgen = ++historyGen // codex #249 P2：本请求代；之后再有 loadHistory 即取代本请求
   const cname = selectedContainer.value
-  messages.value = []
+  // codex #249 R5 (id 3690750253)：重连恢复会话的 loadHistory 不得 wipe 已认领续流的在途 run——
+  // 恢复帧（replace 快照）在 ready 之前已到达并写入尾气泡，历史快照是**断线前**的旧投影，整体替换
+  // 会清掉恢复中的流式尾（续流 delta 无处锚定 → 可见回答停在断线快照）。resumeClaimed 且同会话时
+  // 保留断线前投影作 inFlight（含已认领续流的流式尾），历史快照 prepend 在前（对齐 codex P2 #108）。
+  const preserveTail = resumeClaimed && resumeRunSession === key
+  if (preserveTail) {
+    resumePending = false // 恢复投影已由本 loadHistory 接管：窗口结束
+    resumeClaimed = false
+  } else {
+    messages.value = []
+  }
   historyHasMore.value = false
   historyAnchor.value = null
   historyLoading.value = true
@@ -490,6 +537,12 @@ function connect() {
   oldWs?.close()
   // 记录断线重连前的会话：重连 Ready 后用 loadHistory 恢复该会话权威投影（issue #239）
   const resumeSession = selectedSession.value
+  // codex #249 R5 (id 3690750253)：断线重连（reconnectAttempts>0）置恢复窗口——恢复的正是 onClose
+  // 标记 abandoned 的那个在途 run。首帧认领（claimResumedRun）解除其 abandoned 标记并重新续流；
+  // 仅当前仍选中同一会话才认领（resumeRunSession 守卫），切会话/容器时 abandonActiveRun 已清空。
+  const isReconnect = reconnectAttempts > 0
+  resumePending = isReconnect
+  resumeRunSession = isReconnect ? resumeSession : ''
   connecting.value = true
   disconnected.value = false
   errorMsg.value = ''
@@ -507,14 +560,26 @@ function connect() {
         // 若仍 loadHistory(resumeSession) 会同步清空新会话消息并置 historyLoading（其 stale 守卫因
         // selectedSession 已变直接 return、不复位该 flag）→ 新会话空白且「加载更多」永久禁用。
         // 仅当当前会话仍是重连前捕获的那会话才恢复；否则跳过（pickSession 已自行 loadHistory 新会话）。
+        // codex #249 R5：resumePending/resumeClaimed 由 loadHistory 在恢复会话时消费清除（preserveTail
+        // 分支）；若恢复窗口仍在但 ready 不触发 loadHistory（切走了会话），在此兜底结束窗口防泄漏。
         if (attempts > 0 && resumeSession && selectedSession.value === resumeSession) {
           void loadHistory(resumeSession)
+        } else if (resumePending) {
+          resumePending = false
+          resumeClaimed = false
         }
       }
     },
     onText: (runId, delta, replace) => {
       if (ws !== myWs) return  // stale guard：切换容器后旧 ws 回调不污染新会话
-      if (abandonedRunIds.has(runId)) return  // 切换前遗留 run 的增量：丢弃
+      // codex #249 R5：恢复 run 的首帧认领——解除 abandoned 标记 + 重新续流尾部气泡。须在
+      // abandonedRunIds 守卫之前（该 run 正被标记着）。新 run 不认领（不在 abandoned 集）。
+      if (claimResumedRun(runId)) {
+        activeRunId = runId
+        pendingSend = false
+      } else if (abandonedRunIds.has(runId)) {
+        return  // 切换前遗留 run 的增量：丢弃
+      }
       if (activeRunId && runId !== activeRunId) return  // 仅当前 run 的增量写入回复
       if (!activeRunId) {
         // 首帧到达：若属于切会话时仍 pending 的孤儿 run（FIFO 先到）→ 标记 abandoned 丢弃（codex P2 #3）
@@ -625,7 +690,13 @@ function connect() {
       // T08 工具执行（issue #44 / spec §9.4）：工具挂在所属 chat run 内，带 runId。首帧可能是工具
       // （agent 先调工具再回复）→ 与 onText 同款锚定当前 run；按 name 聚合 start→result 渲染一行标题+状态。
       if (ws !== myWs) return
-      if (abandonedRunIds.has(tool.runId)) return
+      // codex #249 R5：恢复 run 首帧是工具帧时同样认领（解除 abandoned 标记），续流不丢
+      if (claimResumedRun(tool.runId)) {
+        activeRunId = tool.runId
+        pendingSend = false
+      } else if (abandonedRunIds.has(tool.runId)) {
+        return
+      }
       if (activeRunId && tool.runId !== activeRunId) return
       if (!activeRunId) {
         if (pendingAbandonCount > 0) { pendingAbandonCount--; abandonedRunIds.add(tool.runId); return }
