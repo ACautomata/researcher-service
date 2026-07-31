@@ -30,5 +30,5 @@ OpenClaw WS 协议 v4 的原生命名——事件族（`exec.approval.requested`
 _Avoid_: 协议字段——笼统，掩盖了"标识符 vs 语义类"这一关键区分。
 
 **OpenClawWire**:
-接触路径 (4) 的 Port。把"配对引导"与"配对后长连"合并为单一连接生命周期（未配对 → 配对中 → 稳态长连），消除历史上 `pairing_ws` + `chat_client` 两套独立 `connect` 帧的重复。
-_Avoid_: ChatClient / PairingClient——二者是合并前的历史实现名，合并后不再区分。
+接触路径 (4) 的 Port——**配对后长连接**（chat.send + 事件流按 runId 路由 + 连接级审批 fan-out + 只读/会话 RPC）。配对本身不在本 Port：由 `PairingHandshake` / `PairingService`（独立 seam）完成 challenge→connect→approve→持久化 deviceToken 后，pool 构造本 Port 的实现并发起无参 `connect()`。ADR 0004 据此修订了 0002 的"配对+长连合并"原意——两套 `connect` 帧的重复已由 `ConnectFrameBuilder` 偿清（与一 Port/两 Port 无关），而配对的有状态多步流程与长连事件流 shape 本质不同，故分立。实现单一（`OpenClawWireClient`），最小契约 + 向下闭合同构（Port 只声明 pool/consumers/views 依赖的方法；Impl 可更富）。
+_Avoid_: ChatClient——历史实现名（`OpenClawChatClient` 现为 `OpenClawWireClient` 的同对象 alias，strangler 过渡保留）。
