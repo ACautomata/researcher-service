@@ -361,7 +361,13 @@ class _RecoveryDeadClient(_DeadAwareClient):
         self._recorded = {}
 
     def record_active_session(self, session_key, on_event=None):
-        self._recorded[session_key] = on_event
+        # codex #236 R3 P1-242：对齐真实 client 多订阅者列表（append 幂等，None=key-only 清回调）。
+        if on_event is None:
+            self._recorded.pop(session_key, None)
+        else:
+            self._recorded.setdefault(session_key, [])
+            if on_event not in self._recorded[session_key]:
+                self._recorded[session_key].append(on_event)
 
     def recovery_sessions(self):
         return list(self._recorded.items())
@@ -384,7 +390,7 @@ async def test_reacquire_propagates_remembered_sessions():
 
     c2, _replaced = await pool.reacquire(inst, c1)
     assert c2 is not c1
-    assert c2.recovery_sessions() == [('s1', _noop_on_event)], 'reacquire 重建须传播记住会话'
+    assert c2.recovery_sessions() == [('s1', [_noop_on_event])], 'reacquire 重建须传播记住会话'
     await pool.aclose_all()
 
 
@@ -404,7 +410,7 @@ async def test_get_or_create_dead_path_propagates_remembered_sessions():
 
     c2 = await pool.get_or_create(inst)
     assert c2 is not c1
-    assert c2.recovery_sessions() == [('s1', _noop_on_event)], 'get_or_create 死路径重建须传播记住会话'
+    assert c2.recovery_sessions() == [('s1', [_noop_on_event])], 'get_or_create 死路径重建须传播记住会话'
     await pool.aclose_all()
 
 
@@ -718,7 +724,13 @@ class _RecoveryAwareClient(_ScriptedReconnectClient):
         self._recorded = {}
 
     def record_active_session(self, session_key, on_event=None):
-        self._recorded[session_key] = on_event
+        # codex #236 R3 P1-242：对齐真实 client 多订阅者列表（append 幂等，None=key-only 清回调）。
+        if on_event is None:
+            self._recorded.pop(session_key, None)
+        else:
+            self._recorded.setdefault(session_key, [])
+            if on_event not in self._recorded[session_key]:
+                self._recorded[session_key].append(on_event)
 
     def recovery_sessions(self):
         return list(self._recorded.items())
@@ -909,7 +921,7 @@ async def test_reconnect_propagates_remembered_active_session(clock):
     await _run_reconnect(pool, key)
     c2 = pool._clients[key]
     assert c2 is not c1  # 换入全新 client
-    assert c2.recovery_sessions() == [('s1', _noop_on_event)]  # 记住会话已传播（同 key + 同回调）
+    assert c2.recovery_sessions() == [('s1', [_noop_on_event])]  # 记住会话已传播（同 key + 同回调）
     await pool.aclose_all()
 
 

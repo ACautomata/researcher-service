@@ -235,8 +235,13 @@ class ChatConnectionPool:
         sessions = getattr(old_client, 'recovery_sessions', None)
         if sessions is None:
             return
-        for session_key, on_event in sessions():
-            new_client.record_active_session(session_key, on_event)
+        for session_key, callbacks in sessions():
+            if not callbacks:
+                new_client.record_active_session(session_key)  # key-only 会话：仅记住 key
+                continue
+            # codex #236 R3 P1-242：同会话多订阅者逐条全部 propagate（record_active_session 幂等去重）
+            for on_event in callbacks:
+                new_client.record_active_session(session_key, on_event)
 
     def _make_client(self, key, url, device_token, identity, scopes):
         """经 client_factory 建 client，best-effort 注入 on_dead 回调（#215 触发主动重连）。

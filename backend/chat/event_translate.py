@@ -52,6 +52,16 @@ class ChatEventTranslator:
         # runId → 已发文本累积；final 尾部补发 / replace 整段替换时用于求差集或覆盖
         self._sent: dict[str, str] = {}
 
+    def seed_sent(self, run_id: str, text: str) -> None:
+        """#217 / codex #236 R3 P1-108：把恢复采用的 inFlightRun 缓冲 text 预置进累积器。
+
+        恢复回放把 ``inFlightRun.text`` 直接投给前端（replace 帧），但 _sent 不知情——网关后续
+        ``final`` 快照会以为尚未产出而整段重发（recovered "Hello" + final "Hello world" 渲染成
+        "HelloHello world"）。恢复方在重建路由、回放缓冲 text 前调用本方法预置累积值，final 的
+        ``startswith(sent)`` 差集判断即以恢复文本为基线，只补尾部增量。
+        """
+        self._sent[run_id] = text
+
     @staticmethod
     def _approval_card(event: str, payload: dict) -> dict | None:
         """待审批事件 payload → 前端审批卡帧；无稳定审批 id 则返回 None（无法 resolve，不出卡）。

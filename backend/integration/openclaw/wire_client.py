@@ -88,24 +88,34 @@ class _RecoveryCoordinator:
             await self._replay_projection(session_key, history or {})
 
     async def _replay_projection(self, session_key: str, history: dict) -> None:
-        """步2-4：回放 history 投影（replace）+ 按 sessionInfo 归属采用 inFlightRun 重建路由。"""
+        """步2-4：回放 history 投影（replace）+ 按 sessionInfo 归属采用 inFlightRun 重建路由。
+
+        codex #236 R3 P1-242：同会话多订阅者时 history 投影与 inFlightRun 缓冲 text **fan-out** 到
+        全部回调（列表），重建的 runId 路由经 ``_recovery_fanout`` 续流到**当前**全部订阅者——
+        单槽覆盖会让后注册 consumer 顶掉前者、续流只投最后一个。
+        """
         client = self._client
-        on_event = client._session_callbacks.get(session_key)
-        if on_event is not None:
+        callbacks = list(client._session_callbacks.get(session_key, []))
+        if callbacks:
             for frame in self._history_frames(history.get('messages')):
-                await on_event(frame)
+                for on_event in callbacks:
+                    await on_event(frame)
         recovered = self._adopt_inflight_run(history)
-        if recovered is None or on_event is None:
+        if recovered is None or not callbacks:
             return
-        client._routes[recovered.run_id] = on_event  # 步3：重建 runId 路由
+        client._routes[recovered.run_id] = client._recovery_fanout(session_key)  # 步3：重建 runId 路由
         # codex #236 R2 P2-96：记 adopted runId→sessionKey——adopted run 不进 consumer._active_runids，
         # disconnect 不 discard；unregister_active_session 按会话对称清这些重建路由。
         client._recovery_routes[recovered.run_id] = session_key
         if recovered.text:
-            await on_event({
-                'type': 'text', 'runId': recovered.run_id,
-                'delta': recovered.text, 'replace': True,
-            })
+            # codex #236 R3 P1-108：先 seed 翻译器累积器再回放——恢复 text 已投前端（replace），
+            # 网关后续 final 快照须以它为基线只补尾部，否则整段重发（"Hello"+"Hello world"→"HelloHello world"）。
+            client._translator.seed_sent(recovered.run_id, recovered.text)
+            for on_event in callbacks:
+                await on_event({
+                    'type': 'text', 'runId': recovered.run_id,
+                    'delta': recovered.text, 'replace': True,
+                })
         # codex #236 P2-104：plan（systemRunPlan）采用进 RecoveredRun 但**暂不下发**——前端 ws.ts 尚无
         # plan ChatFrame 类型/handleMessage 分支，发即静默丢弃；#217 边界为后端恢复，前端 plan 卡属
         # #198。RecoveredRun.plan 保留该值供 #198 接线时取用。
@@ -219,9 +229,11 @@ class OpenClawWireClient:  # pylint: disable=too-many-instance-attributes,too-ma
         # codex #236 R2 P1-223：**按会话记忆**（不再单一全局 slot）——多 consumer 共享池化 client
         # 各自用不同 sessionKey 时，逐会话记住 + 逐会话恢复，不互相覆盖丢失。
         self._active_session_keys: set[str] = set()
-        # 会话 → 恢复回调（on_event）；仅提供回调的会话才回放投影/重建路由，key-only 会话仍
-        # subscribe+chat.history 但不回放（对齐 record_active_session on_event=None 语义）。
-        self._session_callbacks: dict[str, OnEvent] = {}
+        # 会话 → 恢复回调**列表**（codex #236 R3 P1-242：同一会话多 consumer 各持自己的 on_event，
+        # 共享池化 client 时单槽覆盖会让后注册者顶掉前者、断连只清最后一个——改列表 fan-out，
+        # 对齐 _approval_subscribers 多订阅者模式）；仅提供回调的会话才回放投影/重建路由，
+        # key-only 会话仍 subscribe+chat.history 但不回放（对齐 record_active_session on_event=None 语义）。
+        self._session_callbacks: dict[str, list[OnEvent]] = {}
         # 恢复重建的 runId → 所属 sessionKey（codex #236 R2 P2-96）：unregister 时按会话清这些重建
         # 路由——adopted run 不进 consumer._active_runids，disconnect 不 discard，须在此对称清，
         # 防已关闭 consumer 被池化 client 保留并续接该 run 事件。
@@ -238,18 +250,21 @@ class OpenClawWireClient:  # pylint: disable=too-many-instance-attributes,too-ma
         self._active_session_keys.add(session_key)
         if on_event is None:
             self._session_callbacks.pop(session_key, None)
-        else:
-            self._session_callbacks[session_key] = on_event
+        elif on_event not in self._session_callbacks.setdefault(session_key, []):
+            # codex #236 R3 P1-242：同一会话多 consumer 各注册自己的回调（列表 append，非覆盖）；
+            # 幂等去重（同回调重复 record 不重复回放）。
+            self._session_callbacks[session_key].append(on_event)
 
-    def recovery_sessions(self) -> list[tuple[str, OnEvent | None]]:
-        """#196 T4 / #217：返回**全部**记住的活跃会话 ``[(session_key, on_event), ...]``（可空）。
+    def recovery_sessions(self) -> list[tuple[str, list[OnEvent]]]:
+        """#196 T4 / #217：返回**全部**记住的活跃会话 ``[(session_key, [on_event, ...]), ...]``（可空）。
 
         pool 换 client（_reconnect_once / reacquire / get_or_create 死路径）建替换 client 前读旧
         client 的记住会话，逐条 propagate 到新 client——否则 remembered session 随旧 client 丢弃，
         重连恢复永不携带（Spec 步1「client 记住上次活跃 sessionKey」跨重连失效）。codex #236 R2 P1：
-        多会话逐条返回（on_event 缺省为 None），不再只回最近一条。
+        多会话逐条返回。codex #236 R3 P1-242：同一会话多订阅者**全部**返回（列表副本），非只回最近
+        一个——pool 重建后每 consumer 的恢复回调都被带到新 client。key-only 会话（无回调）为 ``[]``。
         """
-        return [(key, self._session_callbacks.get(key)) for key in self._active_session_keys]
+        return [(key, list(self._session_callbacks.get(key, []))) for key in self._active_session_keys]
 
     def unregister_active_session(self, session_key: str, on_event: OnEvent | None = None) -> None:
         """#217 / codex #236 P2-261：注销 ``record_active_session`` 记住的恢复回调（consumer 断开 /
@@ -257,16 +272,20 @@ class OpenClawWireClient:  # pylint: disable=too-many-instance-attributes,too-ma
         连累 connect），并释放对 consumer 的引用保留。
 
         **匹配才清**（codex #236 R2 P2-251 用**相等**非恒等——bound method 每次求值建新对象，``is``
-        恒假会让注销静默失效；``==`` 按 __self__+__func__ 判等）：该会话有记住回调且 ``on_event``
-        提供而**不等**时 no-op（别的 consumer 后注册的同名会话不被本 consumer 断开误清，对齐
-        remove_approval_subscriber 只清自己）。匹配则清 key+回调 + 该会话恢复重建的 runId 路由
-        （R2 P2-96）。key-only 会话（无回调）直接清。
+        恒假会让注销静默失效；``==`` 按 __self__+__func__ 判等）。codex #236 R3 P1-242：同一会话
+        多订阅者时只移除**本 consumer** 的回调，其余订阅者保留会话与重建路由；本 consumer 未注册
+        此会话（别的 consumer 的同名会话）时 no-op，不误清。仅当回调列表清空（或 key-only 会话 /
+        显式 on_event=None）才整体移除会话 + 该会话恢复重建的 runId 路由（R2 P2-96）。
         """
         if session_key not in self._active_session_keys:
             return
-        remembered = self._session_callbacks.get(session_key)
-        if remembered is not None and on_event is not None and remembered != on_event:
-            return
+        callbacks = self._session_callbacks.get(session_key)
+        if on_event is not None and callbacks:
+            if on_event not in callbacks:
+                return  # 本 consumer 未注册此会话：不误清别的 consumer 的订阅
+            callbacks.remove(on_event)
+            if callbacks:
+                return  # 仍有其他订阅者：会话与恢复路由保留，续流继续投给 peer
         self._active_session_keys.discard(session_key)
         self._session_callbacks.pop(session_key, None)
         for run_id, owner in [kv for kv in self._recovery_routes.items() if kv[1] == session_key]:
@@ -299,6 +318,22 @@ class OpenClawWireClient:  # pylint: disable=too-many-instance-attributes,too-ma
                 await cb(frame)
             except Exception:  # pylint: disable=broad-exception-caught
                 pass
+
+    def _recovery_fanout(self, session_key: str) -> OnEvent:
+        """#217 / codex #236 R3 P1-242：恢复重建的 runId 路由回调——把该 run 的每帧续流 fan-out 到
+        **当前**全部订阅该会话的 consumer（调用时查 _session_callbacks，非建路由时快照）。
+
+        共享池化 client 同一会话多 consumer 时，续流须投给每个仍订阅者；consumer 断开（unregister）
+        后自然从列表移除、不再续流，而仍连接的 peer 不受影响（单槽覆盖会把续流只投给最后一个
+        注册者）。单订阅者回调失败隔离（对齐 _fanout_approval），不杀 recv loop / 不互伤。
+        """
+        async def _dispatch(frame: dict) -> None:
+            for cb in list(self._session_callbacks.get(session_key, [])):
+                try:
+                    await cb(frame)
+                except Exception:  # pylint: disable=broad-exception-caught
+                    pass
+        return _dispatch
 
     async def broadcast_approval_resolved(self, approval_id: str, decision: str) -> None:
         """把一次权威 resolve 结果 fan-out 到全部订阅者（codex R2 P2）：共享 client 的各 consumer 卡片一致收敛。

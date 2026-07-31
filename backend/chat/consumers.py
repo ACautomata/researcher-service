@@ -270,6 +270,15 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
             return
         # #196 T4 / #217：记住当前活跃 sessionKey + 其恢复回调，供 pool 主动重连后恢复该会话投影
         # （messages.subscribe + chat.history + inFlightRun 路由重建）。换会话/换 client 再发时更新。
+        # codex #236 R3 P1-275：同一 consumer **换会话**（A→B）时先注销先前记住的会话 A——否则
+        # _recovery_session_keys 保留 A 直到切容器/断开，重连会把 A 的投影投到当前正显示的 B 会话
+        # （恢复帧不带 sessionKey，前端按当前会话应用即错位）。
+        for old_key in list(self._recovery_session_keys):
+            if old_key != session_key:
+                unregister = getattr(self._client, 'unregister_active_session', None)
+                if unregister is not None:
+                    unregister(old_key, self._on_event)
+                self._recovery_session_keys.discard(old_key)  # pylint: disable=attribute-defined-outside-init
         self._client.record_active_session(session_key, self._on_event)
         # codex #236 P2-261：记 key 供 disconnect/switch 对称注销（集合，多会话共存）
         self._recovery_session_keys.add(session_key)  # pylint: disable=attribute-defined-outside-init

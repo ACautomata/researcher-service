@@ -178,6 +178,27 @@ async def test_switch_container_unregisters_old_recovery_session(override_pool, 
 
 
 @pytest.mark.asyncio
+async def test_switch_session_unregisters_prior_session(override_pool, instance, fake_client):
+    """#217 / codex #236 R3 P1-275：同一 consumer 同容器**换会话**（sk-1 → sk-2）再发时，须先注销
+    先前记住的 sk-1——否则 _recovery_session_keys 保留 sk-1 直到切容器/断开，重连会把 sk-1 的投影
+    投到当前正显示的 sk-2 会话（恢复帧不带 sessionKey，前端按当前会话应用即错位）。"""
+    comm = await _connect_authed()
+    await comm.connect()
+    await comm.send_json_to({'type': 'start', 'container': 'demo'})
+    await comm.receive_json_from()  # ready
+    await comm.send_json_to({'type': 'send', 'sessionKey': 'sk-1', 'message': '你好'})
+    await asyncio.sleep(0.05)
+    assert fake_client.recorded_session is not None
+    assert fake_client.recorded_session[0] == 'sk-1'
+    # 同容器换会话 sk-2 再发：sk-1 应被注销，只记住 sk-2
+    await comm.send_json_to({'type': 'send', 'sessionKey': 'sk-2', 'message': '世界'})
+    await asyncio.sleep(0.05)
+    assert set(fake_client.recorded_sessions) == {'sk-2'}, \
+        f'换会话后先前 sessionKey 未注销，重连会把旧会话投影投到当前会话: {set(fake_client.recorded_sessions)}'
+    await comm.disconnect()
+
+
+@pytest.mark.asyncio
 async def test_multi_container_switch(override_pool, instance):
     await database_sync_to_async(Instance.objects.create)(
         name='other', port=19001, token='gw2', home_dir='/tmp/y', image='img:tag')

@@ -19,6 +19,7 @@ from chat.chat_client import (
 )
 from chat.device_crypto import DeviceCrypto, DeviceIdentity
 from chat.tests.fakes import FakeChatTransport
+from integration.openclaw.wire_client import HISTORY_RUN_ID
 
 URL = 'ws://127.0.0.1:19000/'
 
@@ -1142,8 +1143,12 @@ async def test_reconnect_sequences_subscribe_messages_subscribe_history():
     await c.aclose()  # 断线
     # 重连：pool 建新 client，经 recovery_sessions() 从旧 client 继承记住的会话（不在 c2 上手填）。
     c2 = _client(transport=t)
-    for session_key, on_event in c.recovery_sessions():
-        c2.record_active_session(session_key, on_event)
+    for session_key, callbacks in c.recovery_sessions():
+        if not callbacks:
+            c2.record_active_session(session_key)  # key-only：只记住 key
+            continue
+        for on_event in callbacks:
+            c2.record_active_session(session_key, on_event)
     await c2.connect()  # 重连（同一 transport，第二连接）
     methods = _methods(t)
     assert 'sessions.subscribe' in methods
@@ -1197,7 +1202,7 @@ async def test_recovery_restores_every_remembered_session():
     assert sub_keys == {'sess-a', 'sess-b'}, f'两会话都须 messages.subscribe: {sub_keys}'
     assert hist_keys == {'sess-a', 'sess-b'}, f'两会话都须 chat.history: {hist_keys}'
     # recovery_sessions 逐条返回（传播源）
-    assert dict(c.recovery_sessions()) == {'sess-a': cb_a, 'sess-b': cb_b}
+    assert dict(c.recovery_sessions()) == {'sess-a': [cb_a], 'sess-b': [cb_b]}
     await c.aclose()
 
 
@@ -1213,7 +1218,7 @@ async def test_unregister_matches_bound_method_equality_not_identity():
     consumer = _Consumer()
     c = _client(transport=FakeChatTransport(rpc_payloads={'chat.history': {'messages': []}}))
     c.record_active_session('s1', consumer.cb)  # 注册时的一个 bound-method 对象
-    assert dict(c.recovery_sessions()) != {}
+    assert dict(c.recovery_sessions())  # 非空即注册成功（空 dict 为 falsey，C1803 简化）
     c.unregister_active_session('s1', consumer.cb)  # 断开时再取 self.cb——新对象但 __eq__ 相等
     assert c.recovery_sessions() == [], 'bound-method 相等应注销成功（恒等比较会静默失效）'
     await c.aclose()
@@ -1504,4 +1509,104 @@ async def test_session_info_active_run_in_ids_keeps_route():
             'payload': {'runId': 'live-run', 'state': 'delta', 'deltaText': 'y'}})
     await asyncio.sleep(0.05)
     assert {'type': 'text', 'runId': 'live-run', 'delta': 'y'} in received
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_recovered_inflight_run_final_does_not_duplicate():
+    """#217 / codex #236 R3 P1-108：恢复回放的 inFlightRun 缓冲 text 须 seed 翻译器累积器——否则网关
+    后续 final 快照以为尚未产出、整段重发（"Hello"+"Hello world"→"HelloHello world"）。
+
+    恢复后仅应补 final 的**尾部增量**（sent 差集），不得重放已恢复的整段文本。"""
+    history = {'messages': [], 'inFlightRun': {'runId': 'inflight-1', 'text': 'Hello'}}
+    # final 在恢复完成后到达（经重建路由翻译）——message 含已恢复前缀 + 尾部。
+    t = FakeChatTransport(rpc_payloads={'chat.history': history})
+    received = []
+
+    async def on_event(frame):
+        received.append(frame)
+
+    c = _client(transport=t)
+    c.record_active_session('s1', on_event=on_event)
+    await c.connect()
+    # 恢复已完成：路由重建 + 缓冲 text 回放（此时才推 final，避免撞泵期缓冲）
+    t.push({'type': 'event', 'event': 'chat',
+            'payload': {'runId': 'inflight-1', 'state': 'final',
+                        'message': {'role': 'assistant', 'content': [{'type': 'text', 'text': 'Hello world'}]}}})
+    await asyncio.sleep(0.1)  # 等 final 翻译
+    texts = [f for f in received if f.get('type') == 'text']
+    # 恢复回放整段 Hello（replace），final 只补尾部 world——全文不得出现第二次整段 Hello
+    assert {'type': 'text', 'runId': 'inflight-1', 'delta': 'Hello', 'replace': True} in texts
+    assert {'type': 'text', 'runId': 'inflight-1', 'delta': ' world'} in texts, \
+        f'final 未以恢复文本为基线只补尾部: {texts}'
+    assert not any(f.get('delta') == 'Hello world' for f in texts), \
+        f'final 整段重发已恢复文本（累积器未 seed）: {texts}'
+    assert any(f.get('type') == 'done' for f in received)
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_same_session_multi_subscriber_both_get_recovery():
+    """#217 / codex #236 R3 P1-242：共享池化 client 同一会话多 consumer（各自 record_active_session）——
+    history 投影 + inFlightRun 续流须 fan-out 到**全部**订阅者，非只投最后一个（单槽覆盖会丢前者的
+    续流）。"""
+    history = {
+        'messages': [{'role': 'user', 'content': '历史消息'}],
+        'inFlightRun': {'runId': 'inflight-shared', 'text': '半截'},
+    }
+    t = FakeChatTransport(rpc_payloads={'chat.history': history})
+    received_a, received_b = [], []
+
+    async def on_event_a(frame):
+        received_a.append(frame)
+
+    async def on_event_b(frame):
+        received_b.append(frame)
+
+    c = _client(transport=t)
+    c.record_active_session('s1', on_event_a)  # consumer A
+    c.record_active_session('s1', on_event_b)  # consumer B（同会话——单槽覆盖会顶掉 A）
+    await c.connect()
+    # 两会话投影都到：历史 replace 帧 + inFlightRun 缓冲 text
+    assert {'type': 'text', 'runId': HISTORY_RUN_ID, 'delta': '历史消息', 'replace': True} in received_a
+    assert {'type': 'text', 'runId': HISTORY_RUN_ID, 'delta': '历史消息', 'replace': True} in received_b
+    assert {'type': 'text', 'runId': 'inflight-shared', 'delta': '半截', 'replace': True} in received_a
+    assert {'type': 'text', 'runId': 'inflight-shared', 'delta': '半截', 'replace': True} in received_b
+    # 续流：网关后续该 runId 的 delta 须路由到**两个**订阅者（fan-out 路由，非单槽）
+    t.push({'type': 'event', 'event': 'chat',
+            'payload': {'runId': 'inflight-shared', 'state': 'delta', 'deltaText': '，续'}})
+    await asyncio.sleep(0.05)
+    assert {'type': 'text', 'runId': 'inflight-shared', 'delta': '，续'} in received_a
+    assert {'type': 'text', 'runId': 'inflight-shared', 'delta': '，续'} in received_b
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_same_session_unregister_keeps_peer_subscriber():
+    """#217 / codex #236 R3 P1-242：同会话多订阅者之一断开（unregister）只移除**自己**——会话与
+    恢复路由保留，peer 的续流不受影响（单槽覆盖会因最后一个注册者断开而整个清掉）。"""
+    history = {'messages': [], 'inFlightRun': {'runId': 'inflight-shared', 'text': 'buf'}}
+    t = FakeChatTransport(rpc_payloads={'chat.history': history})
+    received_a, received_b = [], []
+
+    async def on_event_a(frame):
+        received_a.append(frame)
+
+    async def on_event_b(frame):
+        received_b.append(frame)
+
+    c = _client(transport=t)
+    c.record_active_session('s1', on_event_a)
+    c.record_active_session('s1', on_event_b)
+    await c.connect()
+    assert 'inflight-shared' in c._routes  # 恢复路由已建
+    c.unregister_active_session('s1', on_event_a)  # A 断开
+    # B 仍在订阅：会话保留、恢复路由未清、续流继续投 B
+    assert 's1' in c._active_session_keys
+    assert 'inflight-shared' in c._routes, 'peer 仍订阅时恢复路由不得随单订阅者断开清除'
+    t.push({'type': 'event', 'event': 'chat',
+            'payload': {'runId': 'inflight-shared', 'state': 'delta', 'deltaText': 'x'}})
+    await asyncio.sleep(0.05)
+    assert not any(f.get('delta') == 'x' for f in received_a), '已断开订阅者不得再收续流'
+    assert {'type': 'text', 'runId': 'inflight-shared', 'delta': 'x'} in received_b
     await c.aclose()
