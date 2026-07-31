@@ -125,8 +125,9 @@ Vite dev server (5173) 的 `/api` proxy 打 pytest-django 起的 live Django 后
 fixture）：跑本目录任何 case 前自动检测 Playwright 客户端 / chromium / frontend vite 三项 bootstrap
 依赖，缺失即 `pytest.UsageError` 给可操作指引（而非 fixture setup 期裸 ImportError/RuntimeError）。
 **teardown 配对**：session 结束自动清掉本 session 新建的真容器（失败/中断残留的 `openclaw-gw-*`
-占端口池）+ 文件级 test DB——只清「session 基线之后且端口在池内」的容器，不碰基线已存在/池外的
-（开发者手动起的 fleet 容器不动）。
+占端口池）+ 文件级 test DB。**保守所有权**——只清「基线可信、不在基线内、且端口在池内」的容器；
+基线快照若无法建立（daemon 瞬断）则**完全不清理**（宁可留残可手动 `docker rm -f`，绝不误删并发
+session/手动起的容器）。基线已存在/池外的一律不碰。
 
 **本地怎么跑**（L0 health case 不需 docker daemon）：
 

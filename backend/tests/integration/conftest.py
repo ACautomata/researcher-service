@@ -98,8 +98,9 @@ def integration_bootstrap(request):
 
     teardown（yield 后）：扫掉 session 期间残留的真容器 + test DB 文件——容器失败/中断会
     残留 ``openclaw-gw-*`` 占端口池（下次端口分配假失败，记忆 portpool-unit-test-...）。
-    只删「session 基线之后在端口池内新建」的容器，不碰基线已存在或池外的（可能是开发者
-    手动起的 fleet 容器，不属于本 session）。
+    保守所有权（codex P1）：只删「基线可信、且不在基线内、且端口在池内」的容器；基线快照
+    若无法建立（daemon 瞬断）则**完全不清理**（宁可留残可手动清，绝不误删并发/手动起的
+    容器——本仓库视 docker.sock 为 root 等价）。不碰基线已存在或池外的。
     """
     gaps = _integration_bootstrap_gaps()
     if gaps:
@@ -117,7 +118,7 @@ def integration_bootstrap(request):
             )
         _prepare_bootstrap()
 
-    # teardown 基线：session 开始时的 fleet 容器（id 集合），用于「只清本 session 新建」。
+    # teardown 基线：session 开始时的 fleet 容器 id 集（None=快照失败→teardown 不清理）。
     baseline_ids = _fleet_container_ids()
     yield
     _teardown_containers(baseline_ids)
@@ -171,22 +172,41 @@ def _install_python_requirements() -> None:
     _run(['-m', 'pip', 'install', '-r', req], cwd=BACKEND_DIR, via_python=True)
 
 
-def _fleet_container_ids() -> set[str]:
-    """当前 daemon 上全部 fleet 容器的 id 集合（label app=openclaw-fleet）；daemon 不可达→空集。"""
+def _fleet_container_ids() -> set[str] | None:
+    """当前 daemon 上全部 fleet 容器的 id 集合（label app=openclaw-fleet）。
+
+    返回 ``None`` 表示基线**无法建立**（daemon 不可达 / list_fleet 抛错）——区别于「daemon
+    上确实没有 fleet 容器」的空集。teardown 据此决定「基线不可信 → 完全不清理」，避免
+    codex P1 警示的空基线灾难：若快照失败被吞成空集，daemon 恢复后所有容器都会被误判为
+    本 session 新建而遭误删。
+    """
     try:
         from containers.docker_runtime import DockerRuntime
         return {c.container_id for c in DockerRuntime().list_fleet()}
     except Exception:  # pylint: disable=broad-exception-caught
-        return set()
+        return None
 
 
-def _teardown_containers(baseline_ids: set[str]) -> None:
-    """清掉 session 期间新建的 fleet 容器（基线之外），不碰基线已存在/池外的。
+def _teardown_containers(baseline_ids: set[str] | None) -> None:
+    """清掉 session 期间新建的 fleet 容器（基线之外）；基线不可信（None）则完全不清理。
 
-    双保险：既要在基线之后（本 session 新建），又要在端口池内（池外可能是并发/手动起的）。
-    每个容器 stop+remove 独立 try，清理自身异常绝不阻断后续、更不上抛掩盖测试结果。
-    端口池界取自 settings.OPENCLAW_FLEET（与 Fleet._build_default 同源，不另硬编码）。
+    所有权判断的固有局限（codex P1）：daphne 是独立 OS 进程、经 HTTP 创建容器，测试进程
+    **拿不到**它创建的容器 ID，故无法「记录本 session 实际创建的 ID」——只能用「基线差分 +
+    端口池内」这一保守启发式，并把「基线无法建立」降级为**不清理**（宁可留残、可手动
+    ``docker rm -f``，也绝不误删别的控制面进程/并发 session 的容器——本仓库视 docker.sock
+    为 root 等价，AGENTS.md §docker.sock 安全）。
+
+    清理规则（三重保险，全过才删）：① 基线可信（非 None）；② 容器不在基线内（本 session
+    新建）；③ 端口在池内（池外可能是手动起的）。每个容器 stop+remove 独立 try，清理自身
+    异常绝不阻断后续、更不上抛掩盖测试结果。端口池界取自 settings.OPENCLAW_FLEET
+    （与 Fleet._build_default 同源，不另硬编码）。
     """
+    if baseline_ids is None:
+        print(
+            '[integration teardown] 基线容器快照无法建立（daemon 不可达/瞬断），'
+            '跳过残留容器清理以防误删；如有 openclaw-gw-* 残留请手动 docker rm -f。',
+        )
+        return
     try:
         from django.conf import settings
 
