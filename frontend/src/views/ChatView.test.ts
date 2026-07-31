@@ -1193,18 +1193,28 @@ describe('ChatView', () => {
       expect(MockWS.last!.sent).toContainEqual({ type: 'start', container: 'other' })
     })
 
-    it('cancels the pending reconnect when switching session (切会话清理重连定时器)', async () => {
+    it('cancels the pending reconnect when switching session while connected (切会话清理重连定时器)', async () => {
+      // codex #249 R3 P2 区分语义：断线退避中切会话须**保留**重连（见 R3 ① 测试）；本用例覆盖「已连上」时
+      // 切会话仍取消 pending 重连（保险路径：正常连接态不会有 pending 定时器，若有残留切会话应清掉）。
       const SESS2 = { session_key: 'sk-2', title: 'S2', updated_at: '' }
       ;(listSessions as ReturnType<typeof vi.fn>).mockResolvedValue([SESSION, SESS2])
       const w = await mountReady()
       const first = MockWS.last!
       MockWS.last!.fireClose() // 断线 → 调度 1s 重连
       await nextTick()
-      await w.find('[data-test="session-sk-2"]').trigger('click') // 1s 内切会话 → 取消 pending 重连
-      await nextTick()
-      await vi.advanceTimersByTimeAsync(5_000) // 原重连定时器到点
+      await vi.advanceTimersByTimeAsync(1_000) // 退避到点 → 自动重连
       await flushPromises()
-      expect(MockWS.last).toBe(first) // 切会话已取消：不自动重连
+      MockWS.last!.fireOpen()
+      MockWS.last!.fireMessage({ type: 'ready', container: 'demo' }) // ready → 已连上、disconnected 复位
+      await flushPromises()
+      const reconnected = MockWS.last
+      expect(reconnected).not.toBe(first)
+      // 已连上状态下切会话：不得触发新连接（cancelReconnect 保险取消任何残留 pending 定时器）
+      await w.find('[data-test="session-sk-2"]').trigger('click')
+      await flushPromises()
+      await vi.advanceTimersByTimeAsync(5_000)
+      await flushPromises()
+      expect(MockWS.last).toBe(reconnected)
     })
 
     it('cancels the pending reconnect on unmount (卸载清理重连定时器)', async () => {
@@ -1318,6 +1328,92 @@ describe('ChatView', () => {
       expect(MockWS.last).not.toBe(first)
       MockWS.last!.fireOpen()
       expect(MockWS.last!.sent).toContainEqual({ type: 'start', container: 'demo' })
+    })
+
+    it('keeps the scheduled reconnect when switching session while disconnected (codex #249 R3 ①)', async () => {
+      // 复现：断线退避中切会话（同容器）——pickSession 不得取消本容器 pending 重连（断的是同一连接，
+      // 重连恢复的是同一 socket）。旧代码 cancelReconnect() 会杀死唯一自动重连，单容器用户只能刷新页面。
+      // 区别语义：切「容器」才取消（旧容器不重连污染），切「会话」（同容器）保留。
+      const SESS2 = { session_key: 'sk-2', title: 'S2', updated_at: '' }
+      ;(listSessions as ReturnType<typeof vi.fn>).mockResolvedValue([SESSION, SESS2])
+      const w = await mountReady()
+      const first = MockWS.last!
+      MockWS.last!.fireClose() // 断线 → 调度 1s 重连
+      await nextTick()
+      await w.find('[data-test="session-sk-2"]').trigger('click') // 退避未到即切会话
+      await flushPromises()
+      const before = MockWS.last
+      await vi.advanceTimersByTimeAsync(1_000) // 原退避到点
+      await flushPromises()
+      // 保留的 pending 重连到点仍应触发：新建 ws（同容器恢复，与切容器取消语义区分）
+      expect(MockWS.last).not.toBe(before)
+      expect(MockWS.last).not.toBe(first)
+      MockWS.last!.fireOpen()
+      expect(MockWS.last!.sent).toContainEqual({ type: 'start', container: 'demo' })
+    })
+
+    it('keeps a reconnect entry after switching session clears the disconnect error (codex #249 R3 ①)', async () => {
+      // 复现：断线（errorMsg+disconnected+重连按钮）→ 切会话 → loadHistory 清 errorMsg。
+      // 重连入口若套在 errorMsg 的 <p v-if> 里会随错误条消失，disconnected 仍 true、发送仍禁用 → 无重连路径。
+      // 修复后重连入口由 disconnected 独立驱动，errorMsg 清空后仍可用。
+      const SESS2 = { session_key: 'sk-2', title: 'S2', updated_at: '' }
+      ;(listSessions as ReturnType<typeof vi.fn>).mockResolvedValue([SESSION, SESS2])
+      const w = await mountReady()
+      const first = MockWS.last!
+      MockWS.last!.fireClose() // 断线：error-bar + 重连入口出现
+      await nextTick()
+      expect(w.find('[data-test="error-bar"]').exists()).toBe(true)
+      await w.find('[data-test="session-sk-2"]').trigger('click') // loadHistory 清 errorMsg
+      await flushPromises()
+      expect(w.find('[data-test="error-bar"]').exists()).toBe(false) // 错误条已清
+      expect(w.find('[data-test="reconnect"]').exists()).toBe(true) // 重连入口仍在（由 disconnected 独立渲染）
+      await w.find('[data-test="reconnect"]').trigger('click') // 点击仍可重连当前容器
+      await flushPromises()
+      expect(MockWS.last).not.toBe(first)
+      MockWS.last!.fireOpen()
+      expect(MockWS.last!.sent).toContainEqual({ type: 'start', container: 'demo' })
+    })
+
+    it('invalidates an in-flight load-more when a full reload supersedes it (codex #249 R3 ②)', async () => {
+      // 复现：「加载更多」分页请求在途时，重连成功触发完整 loadHistory。分页不在 historyGen 覆盖内、
+      // 只校验不变的 container/session → 旧页响应晚落地仍被接受并 prepend + 覆盖 historyAnchor →
+      // 下次「加载更多」重复拉取/prepend 同一旧页（转录重复）。修复：分页与完整加载共用 historyGen。
+      let call = 0
+      let resolvePage!: (v: unknown) => void
+      ;(getSessionHistory as ReturnType<typeof vi.fn>).mockImplementation(
+        (_n: string, _k: string, _l?: number, anchor?: string) => {
+          call += 1
+          if (anchor) return new Promise((r) => { resolvePage = r }) // 分页请求挂起，最后才落地
+          const mine = call
+          return Promise.resolve({
+            messages: [{ role: 'agent', text: `快照#${mine}` }],
+            hasMore: true,
+            nextOffset: `锚点#${mine}`,
+          })
+        },
+      )
+      const w = await mountReady() // 完整加载#1：快照#1 + hasMore + 锚点#1
+      await flushPromises()
+      await w.find('[data-test="load-more"]').trigger('click') // 分页请求在途（挂起）
+      await nextTick()
+      // 断线 → 重连成功 → 完整 loadHistory#3（应取代在途分页）
+      MockWS.last!.fireClose()
+      await nextTick()
+      await vi.advanceTimersByTimeAsync(1_000)
+      await flushPromises()
+      MockWS.last!.fireOpen()
+      MockWS.last!.fireMessage({ type: 'ready', container: 'demo' })
+      await flushPromises()
+      expect(w.find('[data-test="stream"]').text()).toContain('快照#3') // 最新完整快照生效
+      // 在途分页响应迟到：须被 historyGen 丢弃——不 prepend、也不覆盖锚点为分页的旧锚点
+      resolvePage({ messages: [{ role: 'operator', text: '旧分页' }], hasMore: true, nextOffset: '分页旧锚点' })
+      await flushPromises()
+      const text = w.find('[data-test="stream"]').text()
+      expect(text).not.toContain('旧分页') // 迟到分页不得 prepend
+      // 锚点仍是完整加载#3 的锚点（未被分页响应覆盖）→ 下次加载更多用权威锚点，不重复拉同一旧页
+      await w.find('[data-test="load-more"]').trigger('click')
+      await flushPromises()
+      expect(getSessionHistory).toHaveBeenLastCalledWith('demo', 'sk-1', undefined, '锚点#3')
     })
   })
 })

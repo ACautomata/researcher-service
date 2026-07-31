@@ -308,7 +308,10 @@ async function selectContainer(name: string) {
 
 async function newSession() {
   if (!selectedContainer.value) return
-  cancelReconnect() // issue #239：新会话取消 pending 重连定时器（断线时仍可由错误条手动重连）
+  // issue #239：新会话取消 pending 重连定时器（断线时仍可由重连入口手动重连）。
+  // codex #249 R3 P2：仅「已连上」时取消；若正处在断线退避中（disconnected），新会话（同容器）不得取消
+  // 唯一自动重连——断的是同一连接、重连恢复的是同一 socket，与切容器「旧容器不重连」语义不同。
+  if (!disconnected.value) cancelReconnect()
   abandonActiveRun()
   messages.value = []
   // codex R3 P1：不清空审批卡——新会话不换容器，切会话特意留存的同容器卡须保留（按 sessionKey 过滤渲染），
@@ -364,7 +367,11 @@ async function removeSession(key: string) {
 
 function pickSession(key: string) {
   if (!key || selectedSession.value === key) return
-  cancelReconnect() // issue #239：切会话取消 pending 重连定时器（断线重连由用户重进/手动触发，不跨会话自动续）
+  // issue #239：切会话清理重连定时器。
+  // codex #249 R3 P2：仅「已连上」时取消（连上状态下不会有 pending 重连，此为保险）；若正处在断线退避中
+  // （disconnected），切会话（同容器）不得取消唯一自动重连——断的是同一连接、重连恢复的是同一 socket，
+  // 取消后错误条又被 loadHistory 清空、重连入口消失，单容器用户只能刷新页面。切「容器」才无条件取消。
+  if (!disconnected.value) cancelReconnect()
   abandonActiveRun()
   selectedSession.value = key
   // codex R2 P1：不清空审批卡——同容器其它会话的卡保留，渲染时按 selectedSession 过滤即可
@@ -442,26 +449,35 @@ function historyRole(role: unknown): 'user' | 'assistant' {
 // T3 历史分页（issue #82）：顶部「加载更多」向回翻更旧消息——用 historyAnchor(=nextOffset) 作
 // messageId 锚点请求更旧一页，prepend 到列表头部（消息流按时间旧→新，更旧的在上）。
 // stale 守卫同 loadHistory（containerGen + selectedSession 双校验）。
+// codex #249 R3 P2：与 loadHistory 共用 historyGen 请求代——完整 reload（如重连恢复）会 ++historyGen
+// 取代在途分页；若分页只校验不变的 container/session，其迟到响应会 prepend 旧页并覆盖 historyAnchor
+// 回第一页锚点，下次「加载更多」重复拉取/prepend 同一旧页（转录重复）。故分页也捕获并校验请求代。
 async function loadMoreHistory() {
   if (!historyHasMore.value || historyAnchor.value == null || historyLoading.value) return
   const key = selectedSession.value
   const gen = containerGen
+  const hgen = historyGen // codex #249 R3 P2：捕获当前代；不自增（分页不得取代进行中的完整 loadHistory）
   const cname = selectedContainer.value
   const anchor = String(historyAnchor.value)
   historyLoading.value = true
   try {
     const res = await getSessionHistory(cname, key, undefined, anchor)
     if (gen !== containerGen || selectedSession.value !== key) return // 切走了：丢弃迟到响应
+    if (hgen !== historyGen) return // codex #249 R3 P2：已被完整 loadHistory 取代：丢弃本在途分页
     messages.value = [...res.messages.map(translateHistoryMessage), ...messages.value]
     historyHasMore.value = res.hasMore
     historyAnchor.value = res.nextOffset
   } catch (e) {
     if (gen !== containerGen || selectedSession.value !== key) return
+    if (hgen !== historyGen) return // codex #249 R3 P2：被取代的分页：不落错误、不干扰新请求
     if (e instanceof ApiError && e.status === 401) return
     if (e instanceof ApiError && e.status === 409) { pairingNeeded.value = true; return }
     errorMsg.value = (e as Error).message
   } finally {
-    if (gen === containerGen && selectedSession.value === key) historyLoading.value = false
+    // codex #249 R3 P2：仅当代际未变才复位——被取代的分页不得关掉完整 reload 的 loading
+    if (gen === containerGen && selectedSession.value === key && hgen === historyGen) {
+      historyLoading.value = false
+    }
   }
 }
 
@@ -751,15 +767,14 @@ defineExpose({ selectContainer, send, newSession })
       <div v-if="pairingNeeded" class="pair-guide" data-test="pairing-guide">
         ⚠️ 该容器尚未完成设备配对，对话与历史暂不可用。请先在「容器」页完成设备配对后再回来。
       </div>
-      <p v-if="errorMsg" class="error" data-test="error-bar">
-        {{ errorMsg }}
-        <!-- issue #239：断线手动重连入口——直接调 connect()（绕开 selectContainer 同名 early-return） -->
-        <button
-          v-if="disconnected"
-          class="reconnect"
-          data-test="reconnect"
-          @click="connect()"
-        >重新连接</button>
+      <p v-if="errorMsg" class="error" data-test="error-bar">{{ errorMsg }}</p>
+      <!-- issue #239：断线手动重连入口——直接调 connect()（绕开 selectContainer 同名 early-return）。
+           codex #249 R3 P2：由 disconnected 独立渲染，不套在 errorMsg 的 <p v-if> 里——断线后切会话
+           loadHistory 会清 errorMsg，若入口随错误条消失则 disconnected 仍 true、发送仍禁用，单容器用户
+           只能刷新页面。断开期间始终提供重连路径。 -->
+      <p v-if="disconnected" class="error" data-test="reconnect-bar">
+        连接已断开
+        <button class="reconnect" data-test="reconnect" @click="connect()">重新连接</button>
       </p>
       <div class="stream" data-test="stream">
         <!-- T3 历史分页（issue #82）：hasMore 时顶部「加载更多」向回翻更旧消息，prepend 到头部。 -->
