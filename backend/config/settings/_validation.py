@@ -27,6 +27,9 @@ def validate_prod_env(env: os.environ | dict) -> None:
     - ``LLM_API_KEY`` —— 缺失/空/纯空白 → 空 key 会静默注入 OpenClaw 容器，到首次
       创建/对话才暴露（issue #195 同类错配；ADR 0005 + spec §5.2：全面板共享必填敏感值，
       base 默认空串保持 dev/integration 宽容，生产由本校验强制非空）
+    - ``REDIS_URL`` —— 缺失/空/纯空白 → DistributedLock（backend/common/lock）的连接
+      配置（非凭证），缺失会让 LockFleet 首次用锁时才连接失败（issue #252；对齐
+      SECRET_KEY/LLM_API_KEY fail-fast 先例，base 给开发可跑默认，生产强制非空）
     - ``CREDENTIAL_ENCRYPTION_KEYS`` —— CredentialKeySettings 内部校验
     """
     allowed_hosts_str = env.get('DJANGO_ALLOWED_HOSTS', '').strip()
@@ -49,6 +52,18 @@ def validate_prod_env(env: os.environ | dict) -> None:
             '把空 key 静默注入 OpenClaw 容器，首次创建/对话才暴露）。'
             'Docker 化部署由 compose/K8s environment 注入，勿写盘；参见 deploy/README.md '
             '与 deploy/.env.example。',
+        )
+
+    # issue #252：REDIS_URL 是 DistributedLock（backend/common/lock）的连接配置
+    # （非凭证，区别于 LLM_API_KEY 敏感值）。base.py 提供开发可跑默认（env 可覆盖），
+    # dev.py 显式本地默认；生产缺省会让 LockFleet 首次用锁时才连接失败，违背 fail-fast
+    # 「启动时即知」初衷（对齐 SECRET_KEY/LLM_API_KEY 先例），故生产强制非空。
+    redis_url = env.get('REDIS_URL', '').strip()
+    if not redis_url:
+        raise ImproperlyConfigured(
+            '生产必须设置 REDIS_URL（DistributedLock 的 Redis 连接配置，非凭证；缺省会让'
+            ' LockFleet 首次用锁时才连接失败）。Docker 化部署由 compose/K8s environment '
+            '注入；参见 deploy/README.md 与 deploy/.env.example。',
         )
 
     template_dir = env.get('OPENCLAW_TEMPLATE_DIR', '').strip()

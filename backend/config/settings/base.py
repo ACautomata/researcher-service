@@ -181,3 +181,12 @@ OPENCLAW_FLEET_WS = {
     'SCHEME': os.environ.get('OPENCLAW_FLEET_WS_SCHEME', 'ws'),
     'HOST': os.environ.get('OPENCLAW_FLEET_WS_HOST', '127.0.0.1'),
 }
+
+# ---- DistributedLock 的 Redis 连接配置（issue #252 / parent #243，ADR 0005 配置边界）----
+# REDIS_URL 是 backend/common/lock 的 DistributedLock Port 的连接配置（非凭证，区别于
+# LLM_API_KEY 敏感值）。settings 是唯一 env 读取处，LockFleet 经 settings.REDIS_URL 取值。
+# 默认 redis://localhost:6379/0 保持本地开发可跑（env 可覆盖）；dev.py 显式同一本地默认
+# （#247 D5：base/dev/prod 各自直接显式配置，非单点默认）；生产由 prod.py 硬读 +
+# validate_prod_env fail-fast 强制非空。本票纯 settings 字符串，不引入 redis/channels-redis/
+# django-redis 运行时依赖（与 Port/Adapter 解耦）。
+REDIS_URL = os.environ.get('REDIS_URL', 'redis://localhost:6379/0')

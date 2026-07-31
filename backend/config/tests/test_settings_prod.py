@@ -26,6 +26,7 @@ def _minimal_env(**overrides):
         'DJANGO_ALLOWED_HOSTS': 'example.test',
         'OPENCLAW_TEMPLATE_DIR': _EXISTING_DIR,
         'LLM_API_KEY': 'sk-prod-test',
+        'REDIS_URL': 'redis://redis:6379/0',
     }
     base.update(overrides)
     return base
@@ -197,3 +198,44 @@ def test_validate_prod_env_fail_fast_when_llm_api_key_whitespace_only():
     """LLM_API_KEY 仅空白 → 仍 fail-fast（防运维误设含缩进的空值）。"""
     with __import__('pytest').raises(ImproperlyConfigured):
         validate_prod_env(_minimal_env(LLM_API_KEY='   '))
+
+
+# ---- REDIS_URL 生产 fail-fast（issue #252 / parent #243）----
+# REDIS_URL 是 DistributedLock（backend/common/lock）的**连接配置**（非凭证，区别于
+# LLM_API_KEY 敏感值）。base.py 提供开发可跑默认（env 可覆盖），dev.py 显式本地默认，
+# 生产由本校验强制非空——缺省会让 LockFleet 首次用锁时才连接失败，违背 fail-fast
+# 「启动时即知」初衷（对齐 SECRET_KEY/LLM_API_KEY 先例）。本票纯 settings 字符串，
+# 不引入 redis/channels-redis/django-redis 运行时依赖（与 Port/Adapter 解耦）。
+
+
+def test_validate_prod_env_ok_when_redis_url_set():
+    """REDIS_URL 显式提供 → 正常通过（与其他必填项一起给齐时不抛）。"""
+    validate_prod_env(_minimal_env())  # 不抛即通过
+
+
+def test_validate_prod_env_fail_fast_when_redis_url_missing():
+    """REDIS_URL 缺失 → ImproperlyConfigured（启动即知，而非首次用锁才连接失败）。"""
+    env = _minimal_env()
+    env.pop('REDIS_URL')
+    with __import__('pytest').raises(ImproperlyConfigured) as ei:
+        validate_prod_env(env)
+    msg = str(ei.value)
+    assert 'REDIS_URL' in msg
+    assert '生产' in msg and ('必填' in msg or '必设' in msg or '必须' in msg)
+    # 错误消息指向部署文档，运维能立即知道在哪改（与 TEMPLATE_DIR/LLM_API_KEY 同款）
+    assert 'deploy/README.md' in msg or 'deploy/.env.example' in msg, (
+        f'错误消息应指向部署文档，当前: {msg!r}'
+    )
+
+
+def test_validate_prod_env_fail_fast_when_redis_url_empty():
+    """REDIS_URL 显式空串 → 同样 fail-fast（与缺失同语义：空连接串到首次用锁才暴露）。"""
+    with __import__('pytest').raises(ImproperlyConfigured) as ei:
+        validate_prod_env(_minimal_env(REDIS_URL=''))
+    assert 'REDIS_URL' in str(ei.value)
+
+
+def test_validate_prod_env_fail_fast_when_redis_url_whitespace_only():
+    """REDIS_URL 仅空白 → 仍 fail-fast（防运维误设含缩进的空值）。"""
+    with __import__('pytest').raises(ImproperlyConfigured):
+        validate_prod_env(_minimal_env(REDIS_URL='   '))
