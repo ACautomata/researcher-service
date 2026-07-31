@@ -3,8 +3,10 @@
 四条接触路径各一个 Port（Protocol 形态），业务层依赖 Port、测试注入 fake/Adapter：
 - ContainerRuntime（路径1，Docker SDK 编排）—— 复刻 containers.ports 既有 Protocol，归属前移到集成包
   （strangler：#101 才让 DockerRuntime implements + containers.Fleet 委托，本票仅接口骨架）。
-- OpenClawWire（路径4，WS 协议 v4）—— 合并配对握手 + 配对后长连为单一连接生命周期 Port
-  （#102 配对握手 / #103 长连填充实现；本票仅接口骨架）。
+- OpenClawWire（路径4，WS 协议 v4）—— **配对后长连接**（ADR 0004 修订 0002：移除 pair()，
+  收窄为 chat.send + 事件流按 runId 路由 + 连接级审批 fan-out + 只读/会话 RPC；配对由
+  PairingHandshake / PairingService 独立 seam 拥有）。实现单一（integration.openclaw.wire_client
+  .OpenClawWireClient），最小契约 + 向下闭合同构（Port 只声明 pool/consumers/views 依赖的方法）。
 - WikiFileSystem（路径2，宿主 bind-mount 读写）—— wiki/main 文件树 + 五分类 + 越权防护
   （#100 WikiService 构造注入；本票仅接口骨架）。
 - HealthProbe（路径3，HTTP /health 探测）—— 构造注入 http client（#99 真实 Adapter；本票仅接口骨架）。
@@ -57,52 +59,52 @@ class ContainerRuntime(Protocol):
 
 @runtime_checkable
 class OpenClawWire(Protocol):
-    """路径4：单一连接生命周期（配对握手 + 配对后长连）。
+    """路径4：**配对后长连接**（ADR 0004 修订 0002 的配对合并——移除 pair()，收窄契约）。
 
-    状态机：未配对 → 配对中 → 稳态长连（ADR 0002 合并 pairing_ws + chat_client 两套 connect 帧）。
-    #102 配对握手实现；#103 长连填充实现。
+    本 Port 只覆盖「已配对 deviceToken → 长连接事件流」：chat.send → ack(runId) → 事件按 runId
+    路由 + 连接级审批 fan-out + 只读（commands/history/sessions list）/会话管理（create/delete）RPC。
+    **配对握手不在本 Port**——challenge→connect→approve→持久化 deviceToken 的有状态多步流程由
+    PairingHandshake / PairingService（独立 seam）拥有；pool 拿到 deviceToken 后构造本 Port 的
+    实现（构造期注入 url/device_token/identity/scopes），再发起无参 ``connect()``。
+
+    **最小契约 + 向下闭合同构**：只声明 pool / consumers / views 实际依赖的方法。实现
+    （integration.openclaw.wire_client.OpenClawWireClient）可更富——``request_approval``（仅集成
+    测试用）、``policy``（仅测试读）等留在实现内部、不进 Port；isomorph 守卫只强制「Port 每个
+    方法在 Port/Fake/Impl 三处签名同构」，允许 Impl 比 Port 富（ADR 0004 / #227 downward-closure）。
+    nonce 不出现在接口——connect() 内部等 connect.challenge 提取（#140，藏于 seam 之后）。
     """
 
     @property
     def dead(self) -> bool:
-        """连接是否已不可用；pool 据此不复用。"""
+        """连接是否已不可用（recv loop 退出或被显式关闭）；pool 据此不复用、驱逐重建。"""
         ...
 
-    # ── 配对握手（#102）─────────────────────────────────────────
+    # ── 生命周期 ────────────────────────────────────────────────
 
-    async def pair(self, url: str, identity: Any, bootstrap_token: str) -> Any:
-        """配对握手（challenge/nonce/Ed25519/connect 帧）→ deviceToken；未配对上抛 PairingRequired。"""
+    async def connect(self) -> None:
+        """建立已配对长连（构造期注入的身份材料；nonce 内部等 challenge 提取）。握手失败抛 ChatConnectError。"""
         ...
 
-    # ── 长连接（#103）───────────────────────────────────────────
-
-    async def connect(
-        self, url: str, device_token: str, *, identity, nonce: str, scopes,
-    ) -> None:
-        """建立已配对长连（deviceToken 作 auth.token + Ed25519 device 签名块，经 ConnectFrameBuilder.session 构建帧）。
-
-        issue #139：identity/nonce/scopes 为必填 keyword-only（Port/Fake/Adapter 三处同构）；
-        nonce 等 connect.challenge、scopes 读 Pairing 由 #140/#141 接入。
-        """
+    async def aclose(self) -> None:
+        """关闭长连、清理路由与审批注册（幂等；pool 驱逐/重建时调用）。"""
         ...
+
+    # ── chat.send + 事件路由 ────────────────────────────────────
 
     async def send_message(
-        self, session_key: str, message: str, on_event: Any, *, idempotency_key: str | None = None,
+        self, session_key: str, message: str, *, on_event: Any, idempotency_key: str | None = None,
     ) -> str:
-        """发 chat.send → ack(runId) → 事件流回调 on_event；返回 runId。
+        """发 chat.send → ack(runId) → 事件流回调 on_event（**keyword-only**）；返回 runId。
 
-        Falsification: 未 connect 抛 ChatClientError；ack 超时/网关拒绝抛 ChatSendError。
+        Falsification: 未 connect / dead 抛 ChatClientError；ack 超时/网关拒绝抛 ChatSendError
+        （帧可能已发出时归 ChatSendTransmittedError 子类，consumer 据此不盲重试）。
         ``idempotency_key`` 可选：缺省每次生成新 key；consumer 自愈重试（codex #219 P2）
         对同一逻辑发送复用同 key，网关按幂等去重避免起两个 run。
         """
         ...
 
-    async def close(self) -> None:
-        """关闭长连、清理路由与审批注册。"""
-        ...
-
     def discard(self, run_id: str) -> None:
-        """移除某 runId 路由（consumer 断开时清理）。"""
+        """移除某 runId 路由（consumer 断开时清理，避免推已关闭连接）。"""
         ...
 
     # ── 连接级审批（T06 / spec §8.2）────────────────────────────
@@ -119,35 +121,46 @@ class OpenClawWire(Protocol):
         """返回当前全部审批订阅者的副本（codex #219 P2：共享 client 自愈迁移用）。
 
         consumer 自愈换 client 时须把所有订阅者（不止触发自愈的那个 consumer）迁到新
-        client，否则被动 consumer 滞留死 client、错过新连接上的审批。Port/Fake/Adapter
-        三处同构（同 send_message idempotency_key 的 Liskov 对齐）。
+        client，否则被动 consumer 滞留死 client、错过新连接上的审批。Port/Fake/Impl 三处同构。
         """
         ...
 
     async def broadcast_approval_resolved(self, approval_id: str, decision: str) -> None:
-        """把一次权威 resolve 结果 fan-out 到全部订阅者。
-
-        codex R2 P2：共享 client 的各 consumer 卡片一致收敛。
-        仅广播真实发生的 resolve 回执（权威 decision），不伪造网关 resolved 事件。
-        """
+        """把一次权威 resolve 结果 fan-out 到全部订阅者（codex R2 P2：共享 client 各 consumer 卡片一致收敛）。"""
         ...
 
     async def resolve_approval(self, approval_id: str, kind: str, decision: str) -> dict:
-        """回覆一次权限审批（approval.resolve RPC），返回网关 res payload。"""
+        """回覆一次权限审批（{kind}.approval.resolve RPC），返回网关 res payload。"""
         ...
 
     async def list_pending_approvals(self) -> list[dict]:
-        """查询网关当前待审批列表（补拉断线期间积累）。"""
+        """查询网关当前待审批列表（补拉断线期间积累），翻译成审批卡帧列表（best-effort 不抛）。"""
         ...
 
-    # ── 命令/session RPC（T07 / spec §8.2 / #76）────────────────
+    # ── 只读 / 会话管理 RPC（T07 / spec §8.2 / #76）─────────────
 
     async def list_commands(self) -> dict:
         """拉取该 agent 工作区的斜杠命令清单（commands.list RPC），返回 payload。"""
         ...
 
-    async def sessions_rpc(self, method: str, params: dict) -> dict:
-        """通用会话 RPC（sessions.list / chat.history / sessions.create / sessions.delete），返回 payload。"""
+    async def list_sessions(
+        self, agent_id: str = 'main', *, include_derived_titles: bool = True, limit: int | None = None,
+    ) -> dict:
+        """列出该 agent 网关中真实存在的会话（sessions.list RPC），返回 payload（ADR-0003 校准参数）。"""
+        ...
+
+    async def get_history(
+        self, session_key: str, *, limit: int | None = None, message_id: str | None = None,
+    ) -> dict:
+        """读取某会话完整聊天记录（chat.history RPC），返回 display-normalized payload。"""
+        ...
+
+    async def create_session(self, key: str, *, label: str | None = None) -> dict:
+        """新建会话（sessions.create{key,label} RPC），返回 payload。"""
+        ...
+
+    async def delete_session(self, session_key: str) -> dict:
+        """删除会话（sessions.delete{key} RPC，**admin 级提升权限操作**；wire 字段是 key 非 sessionKey）。"""
         ...
 
 

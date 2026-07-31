@@ -47,33 +47,36 @@ class FakeContainerRuntime:
 
 
 class FakeOpenClawWire:
-    """OpenClawWire Port 的内存 fake：记录 pair/connect/send_message/close 调用。
+    """OpenClawWire Port 的内存 fake：记录 connect/send_message/aclose 调用。
 
-    完整模拟所有长连接方法——send_message（chat.send）/ resolve_approval / list_commands /
-    sessions_rpc / list_pending_approvals + 审批订阅者（add/remove） + dead / discard。
-    测试用 fake 注入，不依赖真 gateway。
+    ADR 0004 / #231 收敛后：完整模拟**配对后长连** Port 全部方法——connect（无参）/ send_message /
+    aclose / resolve_approval / list_commands / 具名 session 方法（list_sessions/get_history/
+    create_session/delete_session）/ list_pending_approvals + 审批订阅者（add/remove） + dead/discard。
+    配对握手已移出 Port（pair() 由 PairingHandshake/PairingService 独立 seam 拥有，不在此 fake）。
+    测试用 fake 注入，不依赖真 gateway。连接身份材料（url/device_token/identity/scopes）构造期注入，
+    对齐真实现 OpenClawWireClient。
     """
 
-    def __init__(self) -> None:
-        self.pair_calls: list = []
-        self.connected: list[tuple[str, str]] = []
+    def __init__(self, url: str = 'ws://x/', device_token: str = 'dt', *,
+                 identity: Any = None, scopes: Any = None) -> None:
+        self.url = url
+        self.device_token = device_token
+        self.identity = identity
+        self.scopes = scopes
+        self.connect_calls = 0
         self.sent: list = []
         # codex #219 P2：记录每次 send_message 收到的 idempotency_key（对齐 port 契约）
         self.sent_idempotency_keys: list = []
         self.closed: bool = False
         self._dead: bool = False
-        # 测试可预设 pair() 返回值（如 PairingResult dataclass）
-        self.pair_result: Any = None
-        # 测试可预设 pair() 抛异常（PairingRequired / PairingError）
-        self.pair_raise: Exception | None = None
         # 长连接预设
         self.run_id: str = 'fake-run-id'  # send_message 返回的 runId
         self.resolve_result: dict | None = None  # resolve_approval 返回值
         self.resolve_error: Exception | None = None  # resolve_approval 抛异常
         self.commands_payload: dict | None = None  # list_commands 返回值
         self.commands_error: Exception | None = None  # list_commands 抛异常
-        self.rpc_results: dict[str, dict] = {}  # sessions_rpc method→payload
-        self.rpc_errors: dict[str, Exception] = {}  # sessions_rpc method→exception
+        self.rpc_results: dict[str, dict] = {}  # 具名 session 方法 method→payload
+        self.rpc_errors: dict[str, Exception] = {}  # 具名 session 方法 method→exception
         self.pending_approvals: list[dict] = []  # list_pending_approvals 返回
         # 审批订阅者
         self._approval_subscribers: list = []
@@ -89,22 +92,14 @@ class FakeOpenClawWire:
     def dead(self, value: bool) -> None:
         self._dead = value
 
-    async def pair(self, url: str, identity: Any, bootstrap_token: str) -> Any:
-        self.pair_calls.append((url, identity, bootstrap_token))
-        if self.pair_raise is not None:
-            raise self.pair_raise
-        return self.pair_result
-
-    async def connect(
-        self, url: str, device_token: str, *, identity, nonce: str, scopes,
-    ) -> None:
-        self.connected.append((url, device_token))
+    async def connect(self) -> None:
+        self.connect_calls += 1
         self._dead = False
 
     async def send_message(
-        self, session_key: str, message: str, on_event: Any, *, idempotency_key: str | None = None,
+        self, session_key: str, message: str, *, on_event: Any, idempotency_key: str | None = None,
     ) -> str:
-        if not self.connected:
+        if self.connect_calls == 0:
             raise ChatClientError('client not connected')
         self.sent.append((session_key, message, on_event))
         self.sent_idempotency_keys.append(idempotency_key)  # codex #219 P2：转发契约对齐
@@ -112,10 +107,9 @@ class FakeOpenClawWire:
         self._routes[rid] = on_event
         return rid
 
-    async def close(self) -> None:
+    async def aclose(self) -> None:
         self.closed = True
         self._dead = True
-        self.connected = []
         self._routes.clear()
 
     def discard(self, run_id: str) -> None:
@@ -152,17 +146,33 @@ class FakeOpenClawWire:
     async def list_pending_approvals(self) -> list[dict]:
         return list(self.pending_approvals)
 
-    # ── 命令/session RPC ──
+    # ── 只读 / 会话管理 RPC ──
 
     async def list_commands(self) -> dict:
         if self.commands_error is not None:
             raise self.commands_error
         return self.commands_payload or {}
 
-    async def sessions_rpc(self, method: str, params: dict) -> dict:
+    async def _named_rpc(self, method: str) -> dict:
         if method in self.rpc_errors:
             raise self.rpc_errors[method]
         return self.rpc_results.get(method, {})
+
+    async def list_sessions(
+        self, agent_id: str = 'main', *, include_derived_titles: bool = True, limit: int | None = None,
+    ) -> dict:
+        return await self._named_rpc('sessions.list')
+
+    async def get_history(
+        self, session_key: str, *, limit: int | None = None, message_id: str | None = None,
+    ) -> dict:
+        return await self._named_rpc('chat.history')
+
+    async def create_session(self, key: str, *, label: str | None = None) -> dict:
+        return await self._named_rpc('sessions.create')
+
+    async def delete_session(self, session_key: str) -> dict:
+        return await self._named_rpc('sessions.delete')
 
     # ── 测试辅助 ──
 
