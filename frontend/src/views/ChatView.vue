@@ -203,6 +203,12 @@ function finalizeLast() {
   if (last && last.streaming) {
     last.streaming = false
     last.thinkingOpen = false // 断流时 <thinking> 未闭合也落定：text/thinking 已是剥离结果，思考保留在折叠卡
+    // issue #238（评审 #198 Low 5.3）：终态对 raw 做一次最终 splitThinking 重解析——流式中
+    // 被隐藏的半截 `<thi…` 残片按普通文本放回正文（终态无「下帧补齐」可言，残片不应被永久吞掉）；
+    // 未闭合 <thinking> 内容仍留思考（标签不泄露正文）。
+    const parts = splitThinking(last.raw, { terminal: true })
+    last.text = parts.text
+    last.thinking = parts.thinking
   }
 }
 
@@ -495,6 +501,12 @@ function connect() {
       connecting.value = false
       disconnected.value = true  // 意外断线：禁用发送（codex P2 #4）
       recoverPendingApprovals()  // 连接断开：恢复所有 resolving 卡片可重试
+      // issue #238（评审 #198 问题 3）：断线若正在流式——收尾气泡（光标落定、不被 streaming 永久锁死）
+      // + 把在途 run 标记 abandoned（activeRunId/pendingSend 清理干净），迟到帧按既有体系丢弃；
+      // 重连/恢复后新 run 首帧不被残留 activeRunId 静默丢弃。
+      finalizeLast()
+      abandonActiveRun()
+      pendingAbandonCount = 0 // socket 已死：孤儿计数是「同 socket 内迟到首帧」语义，不会再投递，清零防吞新 run
       if (!disposed) errorMsg.value = '连接已断开，请重试或切换容器'
     },
     onApproval: (card) => {
