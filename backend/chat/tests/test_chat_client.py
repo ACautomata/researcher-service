@@ -1610,3 +1610,98 @@ async def test_same_session_unregister_keeps_peer_subscriber():
     assert not any(f.get('delta') == 'x' for f in received_a), '已断开订阅者不得再收续流'
     assert {'type': 'text', 'runId': 'inflight-shared', 'delta': 'x'} in received_b
     await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_recovery_callback_raise_does_not_abort_connect():
+    """#217 / codex #236 R4 P2：恢复投影回调（history 投影 / inFlightRun 缓冲 text fan-out）须**异常隔离**
+    ——任一订阅者回调抛错（如浏览器在回调传播后、新 client 发布前断开）不得中止 _RecoveryCoordinator.run()
+    → connect() 不得对共享 pool 的**所有** consumer 判失败。对齐 _fanout_approval / _recovery_fanout 的
+    per-callback try/except 模式（此处 history 投影 + inFlightRun 缓冲 text 是裸 await，缺对称隔离）。"""
+    history = {
+        'messages': [{'role': 'user', 'content': '历史消息'}],
+        'inFlightRun': {'runId': 'inflight-1', 'text': '半截'},
+    }
+    t = FakeChatTransport(rpc_payloads={'chat.history': history})
+    good = []
+
+    async def raising_on_event(frame):  # 模拟已断开的 consumer 回调：恢复投影时抛错
+        raise RuntimeError('consumer gone')
+
+    async def good_on_event(frame):
+        good.append(frame)
+
+    c = _client(transport=t)
+    c.record_active_session('s1', raising_on_event)  # 先注册的消费者（恢复投影时抛错）
+    c.record_active_session('s1', good_on_event)  # 后注册的正常消费者
+    await c.connect()  # 不抛（坏回调被隔离）：恢复流程不得中止 connect
+    # 正常回调仍收到完整投影：history replace 帧 + inFlightRun 缓冲 text
+    assert {'type': 'text', 'runId': HISTORY_RUN_ID, 'delta': '历史消息', 'replace': True} in good
+    assert {'type': 'text', 'runId': 'inflight-1', 'delta': '半截', 'replace': True} in good
+    await c.aclose()
+
+
+@pytest.mark.asyncio
+async def test_multi_session_flush_keeps_unrouted_events_until_route_ready():
+    """#217 / codex #236 R4 P1：**多会话**维度的缓冲回放归属——第一会话采用 inFlightRun 时
+    _flush_connect_buffered() 不得把**整个连接级缓冲**清空回放（含第二会话已到达、路由尚未重建
+    的 run 事件——`_handle` 见 cb is None 会永久丢弃）。须按「路由是否就绪」过滤：路由已重建的
+    run 事件立即回放，其余保留缓冲待第二会话 chat.history 完成、路由重建后再 flush。
+
+    （对齐 codex #236 P2-419 已区分的「连接级 vs run-scoped」维度——此处是跨会话的同类问题。）
+
+    sess-a 的 history 有 2 条消息 + inFlightRun（replay 多次 yield）→ 泵在 sess-a 回放期间把两个
+    run 的泵期事件都读进缓冲；sess-a 路由重建后首 flush 若清空整个缓冲，sess-b 的 inflight-b 事件
+    因路由未建被 _handle 丢弃（永久丢失）。修复后按路由就绪过滤，inflight-b 事件留待 sess-b 恢复
+    flush 回放。"""
+    history_a = {
+        'messages': [
+            {'role': 'user', 'content': 'A 问题'},
+            {'role': 'assistant', 'content': 'A 回答'},
+        ],
+        'inFlightRun': {'runId': 'inflight-a', 'text': 'A 半截'},
+    }
+    history_b = {
+        'messages': [{'role': 'user', 'content': 'B 历史'}],
+        'inFlightRun': {'runId': 'inflight-b', 'text': 'B 半截'},
+    }
+    t = FakeChatTransport(
+        # rpc_payloads 须含 'chat.history'（通用 RPC 循环按 method 集合应答）；by_param 命中时用
+        # 各会话自己的 payload（不 fallback），未命中时回退到这里的 {} 兜底。
+        rpc_payloads={'chat.history': {}},
+        rpc_payloads_by_param={'chat.history': {'sess-a': history_a, 'sess-b': history_b}},
+        # 泵期到达：inflight-a 事件（第一会话路由重建后即可回放）+ inflight-b 事件（第二会话路由未就绪）。
+        events=[
+            {'type': 'event', 'event': 'chat',
+             'payload': {'runId': 'inflight-a', 'state': 'delta', 'deltaText': 'A 途中'}},
+            {'type': 'event', 'event': 'chat',
+             'payload': {'runId': 'inflight-b', 'state': 'delta', 'deltaText': 'B 途中'}},
+        ],
+    )
+    received_a, received_b = [], []
+
+    async def cb_a(frame):
+        received_a.append(frame)
+        # 模拟真实 consumer 回调的 I/O 让渡（send_json 到浏览器）——恢复泵须在本会话回放期间
+        # 获得调度、把泵期到达的事件读进 _connect_buffered（否则首 flush 时缓冲为空、测不到误清）。
+        await asyncio.sleep(0)
+
+    async def cb_b(frame):
+        received_b.append(frame)
+        await asyncio.sleep(0)
+
+    c = _client(transport=t)
+    c.record_active_session('sess-a', cb_a)
+    c.record_active_session('sess-b', cb_b)
+    await c.connect()
+    await asyncio.sleep(0.1)  # 等两会话恢复 + 第二次 flush 回放
+    # 会话 A：泵期事件已回放（其路由在第一会话 flush 时已重建）
+    assert {'type': 'text', 'runId': 'inflight-a', 'delta': 'A 途中'} in received_a, \
+        f'第一会话路由就绪的事件未回放: {received_a}'
+    # 会话 B：泵期事件**不丢**——第一会话 flush 时 B 路由未重建须保留，B 的 chat.history 完成后回放
+    assert {'type': 'text', 'runId': 'inflight-b', 'delta': 'B 途中'} in received_b, \
+        f'第二会话路由重建后的事件未回放（首 flush 误清导致永久丢弃）: {received_b}'
+    # B 的历史投影 + inFlightRun 缓冲 text 也正常（路由未因误清而丢失）
+    assert {'type': 'text', 'runId': HISTORY_RUN_ID, 'delta': 'B 历史', 'replace': True} in received_b
+    assert {'type': 'text', 'runId': 'inflight-b', 'delta': 'B 半截', 'replace': True} in received_b
+    await c.aclose()

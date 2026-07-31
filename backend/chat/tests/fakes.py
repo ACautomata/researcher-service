@@ -146,7 +146,7 @@ class _FakeChatWs:
         self._t.sent_types.append(type(data))
         self._t.sent.append(json.loads(data))
 
-    async def recv(self):  # pylint: disable=too-many-return-statements
+    async def recv(self):  # pylint: disable=too-many-return-statements,too-many-branches
         t = self._t
         # issue #140：脚本化 challenge 时，网关在 connect 前先下发 connect.challenge（payload.nonce），
         # client 提取 nonce 签名后才发 connect 帧。默认 None（不下发）→ 旧路径立即发帧。
@@ -209,6 +209,13 @@ class _FakeChatWs:
                 t._rpc_ack_index[method] = idx + 1
                 if method in t.rpc_errors:
                     return json.dumps({'type': 'res', 'id': frame['id'], 'ok': False, 'error': t.rpc_errors[method]})
+                # codex #236 R4 P1：chat.history 支持按 sessionKey 区分 payload（多会话恢复各回各的
+                # inFlightRun）。rpc_payloads_by_param[method][param_key]=payload——命中时用该 payload
+                # （不 fallback 到 rpc_payloads 的默认值，保证每会话各自的历史/inFlightRun 归属）。
+                key = frame.get('params', {}).get('sessionKey')
+                param_payload = (t.rpc_payloads_by_param.get(method, {}) or {}).get(key)
+                if param_payload is not None:
+                    return json.dumps({'type': 'res', 'id': frame['id'], 'ok': True, 'payload': param_payload})
                 return json.dumps({'type': 'res', 'id': frame['id'], 'ok': True, 'payload': t.rpc_payloads.get(method, {})})
         if t.events:
             return json.dumps(t.events.pop(0))
@@ -236,6 +243,7 @@ class FakeChatTransport:  # pylint: disable=too-many-instance-attributes  # pyli
                  list_payload=None, commands_payload=None, commands_error=None,
                  suppress_commands_ack=False,
                  rpc_payloads=None, rpc_errors=None, rpc_suppress=None,
+                 rpc_payloads_by_param=None,
                  challenge_nonce=_DEFAULT_CHALLENGE_NONCE, connect_policy=None):
         self.connect_ok = connect_ok
         self.ack_run_id = ack_run_id
@@ -271,6 +279,10 @@ class FakeChatTransport:  # pylint: disable=too-many-instance-attributes  # pyli
         self.rpc_payloads = dict(rpc_payloads or {})
         self.rpc_errors = dict(rpc_errors or {})
         self.rpc_suppress = set(rpc_suppress or ())
+        # codex #236 R4 P1：按请求参数区分的 RPC res（rpc_payloads_by_param[method][param_key]=payload）。
+        # 目前仅 chat.history 用（按 sessionKey 区分各会话历史/inFlightRun）；对既有 rpc_payloads
+        # 调用方零影响（该 dict 为空时走原默认路径）。
+        self.rpc_payloads_by_param = dict(rpc_payloads_by_param or {})
         # #217 T4：connect() 现在发 sessions.subscribe（+有活跃会话时 sessions.messages.subscribe）
         # 并经 _rpc 等 res。给这两个方法默认 ok res（除非显式 suppress/error），否则握手会 ack 超时。
         self.rpc_payloads.setdefault('sessions.subscribe', {})

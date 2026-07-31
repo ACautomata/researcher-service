@@ -99,7 +99,13 @@ class _RecoveryCoordinator:
         if callbacks:
             for frame in self._history_frames(history.get('messages')):
                 for on_event in callbacks:
-                    await on_event(frame)
+                    # codex #236 R4 P2：恢复投影回调 per-callback 异常隔离——任一订阅者抛错（如
+                    # 浏览器在回调传播后、新 client 发布前断开）不得中止本协程让 connect() 对共享
+                    # pool 的全部 consumer 判失败；对齐 _fanout_approval / _recovery_fanout 模式。
+                    try:
+                        await on_event(frame)
+                    except Exception:  # pylint: disable=broad-exception-caught
+                        pass
         recovered = self._adopt_inflight_run(history)
         if recovered is None or not callbacks:
             return
@@ -112,10 +118,14 @@ class _RecoveryCoordinator:
             # 网关后续 final 快照须以它为基线只补尾部，否则整段重发（"Hello"+"Hello world"→"HelloHello world"）。
             client._translator.seed_sent(recovered.run_id, recovered.text)
             for on_event in callbacks:
-                await on_event({
-                    'type': 'text', 'runId': recovered.run_id,
-                    'delta': recovered.text, 'replace': True,
-                })
+                # codex #236 R4 P2：inFlightRun 缓冲 text 回放同做异常隔离（对齐 history 投影分支）。
+                try:
+                    await on_event({
+                        'type': 'text', 'runId': recovered.run_id,
+                        'delta': recovered.text, 'replace': True,
+                    })
+                except Exception:  # pylint: disable=broad-exception-caught
+                    pass
         # codex #236 P2-104：plan（systemRunPlan）采用进 RecoveredRun 但**暂不下发**——前端 ws.ts 尚无
         # plan ChatFrame 类型/handleMessage 分支，发即静默丢弃；#217 边界为后端恢复，前端 plan 卡属
         # #198。RecoveredRun.plan 保留该值供 #198 接线时取用。
@@ -622,11 +632,28 @@ class OpenClawWireClient:  # pylint: disable=too-many-instance-attributes,too-ma
 
         缓冲帧可能属恢复重建的 inFlightRun 或本次 send_message 的 runId——路由就绪后回放不丢帧。
         同步取快照清空后由调用方 await 分发（_resolve_ack 是同步方法，回放经 _flush_task 异步）。
+
+        codex #236 R4 P1：**按路由就绪过滤**再回放——多会话恢复时，第一会话采用 inFlightRun 后
+        flush 若清空整个连接级缓冲，会把第二会话已到达、路由尚未重建的 run 事件一并弹给 _handle
+        （cb is None 永久丢弃）。故只弹「路由已注册的 run 事件 + 连接级事件（fan-out 不需路由）」，
+        其余保留缓冲，等其路由重建（后续会话 _replay_projection / 后续 send ack）时再 flush。
         """
         if not self._connect_buffered:
             return
-        buffered, self._connect_buffered = self._connect_buffered, []
-        asyncio.ensure_future(self._replay_connect_buffered(buffered))
+        keep: list[dict] = []
+        drain: list[dict] = []
+        for msg in self._connect_buffered:
+            frames = self._translator.translate(msg)
+            # 不可翻译帧（frames 空）归 drain——_handle 对它们本来就是 no-op（translate 确定性，
+            # 现在不可翻译以后也不可翻译），与旧行为一致地消费掉；连接级帧（runId None）同 drain。
+            run_id = frames[0].get('runId') if frames else None
+            if run_id is None or run_id in self._routes:
+                drain.append(msg)  # 连接级帧 / 不可翻译帧 / 路由已就绪：立即可回放
+            else:
+                keep.append(msg)  # 路由未重建（如第二会话）：保留待其就绪后回放
+        self._connect_buffered = keep
+        if drain:
+            asyncio.ensure_future(self._replay_connect_buffered(drain))
 
     def _flush_connection_level_buffered(self) -> None:
         """#217 / codex #236 P2-419：恢复完成后回放泵期缓冲的**连接级** event 帧（approval /
