@@ -155,8 +155,13 @@ export class ChatWebSocket {
     return performance.now()
   }
 
-  start(container: string): void {
-    this.sendRaw({ type: 'start', container })
+  start(container: string, sessionKey?: string): void {
+    // codex #249 P1 (id 3690452668)：重连握手带恢复目标会话——后端 _handle_start 据此
+    // record_active_session 重新注册该会话的恢复回调，让断线前进行中的 run 剩余增量/终态帧
+    // 继续投给重连的新 consumer（仅 plain start 无会话可恢复）。首连/切容器不带 sessionKey。
+    const frame: Record<string, unknown> = { type: 'start', container }
+    if (sessionKey) frame.sessionKey = sessionKey
+    this.sendRaw(frame)
   }
 
   send(sessionKey: string, message: string): void {

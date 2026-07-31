@@ -650,7 +650,13 @@ function connect() {
     },
   })
   ws = myWs
-  myWs.start(selectedContainer.value)
+  // codex #249 P1 (id 3690452668)：仅**断线重连**（reconnectAttempts>0，上一轮在退避重连）才把当前会话
+  // 随握手带给后端——后端 _handle_start 据此 record_active_session 重新注册该会话恢复回调，让断线前
+  // 进行中的 run 的剩余增量/终态帧投给重连的新 consumer。取**当前** selectedSession（非断线前捕获的
+  // resumeSession）：断线退避中切会话（R3 ①）时注册的是切后的新会话，旧会话迟到帧由 onText/onDone 的
+  // stale/abandon 守卫丢弃。首连/切容器（reconnectAttempts==0）不带 sessionKey：维持 plain start。
+  const resumeKey = reconnectAttempts > 0 ? selectedSession.value : ''
+  myWs.start(selectedContainer.value, resumeKey || undefined)
 }
 
 // T06：批准/拒绝 → 回发 resolve 帧 + 进 resolving 态（禁用按钮等回执，不乐观假成功，codex P2）。

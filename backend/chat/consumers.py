@@ -108,6 +108,18 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
         self._recovery_session_keys.clear()  # pylint: disable=attribute-defined-outside-init
         self._client = client  # pylint: disable=attribute-defined-outside-init
         self._instance = instance  # pylint: disable=attribute-defined-outside-init  # issue #214：供失效重取
+        # codex #249 P1 (id 3690452668, ChatView.vue:511)：浏览器↔Channels 腿断线重连恢复活跃会话。
+        # start 帧可带 sessionKey（前端 connect() 在重连时传入断线前选中的会话）——本 consumer 经
+        # record_active_session 重新注册其恢复回调。缺它则：浏览器 socket 在**活跃 run 进行中**断开时，
+        # disconnect() 已注销旧 consumer 的会话回调（对称清理），而重连的新 consumer 复用**同一存活池化
+        # client**（不经 client.connect() 恢复），且 record_active_session 仅在 _handle_send 触发——新
+        # consumer 既收不到当前 run 的剩余增量、也收不到它的终态帧（loadHistory 快照之后产生的内容缺失，
+        # 直到手动刷新/切会话）。同族对称：上方 cleanup 循环 + _recovery_session_keys 已统一处理换 client/
+        # disconnect 的注销，故此处只需注册 + 记 key，切换/断开由既有路径对称清。
+        session_key = content.get('sessionKey')
+        if session_key:
+            client.record_active_session(session_key, self._on_event)
+            self._recovery_session_keys.add(session_key)  # pylint: disable=attribute-defined-outside-init
         # T06：注册连接级审批订阅（codex P1 订阅者集合，多 consumer 共享 client 不互伤）
         client.add_approval_subscriber(self._on_approval)
         await self.send_json({'type': 'ready', 'container': name})

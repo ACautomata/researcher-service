@@ -1122,7 +1122,35 @@ describe('ChatView', () => {
       await flushPromises()
       expect(MockWS.last).not.toBe(first)
       MockWS.last!.fireOpen() // CONNECTING 期间缓冲的 start 帧在 open 后 flush
+      // codex #249 P1：断线重连握手带当前会话 sk-1（恢复该会话 run 续流），区别于首连的 plain start
+      expect(MockWS.last!.sent).toContainEqual({ type: 'start', container: 'demo', sessionKey: 'sk-1' })
+    })
+
+    it('reconnect handshake carries the active sessionKey so the run keeps streaming (codex #249 P1)', async () => {
+      // codex #249 P1 (id 3690452668, ChatView.vue:511)：浏览器↔Channels 腿在活跃 run 中断后重连，
+      // 握手须带恢复目标 sessionKey——后端 _handle_start 据此 record_active_session 重新注册该会话
+      // 恢复回调，run 剩余增量/终态帧继续投给重连的新 consumer；缺它则快照之后的内容缺失。
+      const w = await mountReady()
+      // 起一个 run（发送后首帧未到也可——断线即「活跃 run 进行中」）
+      await w.find('[data-test="input"]').setValue('你好')
+      await w.find('[data-test="send"]').trigger('click')
+      await nextTick()
+      const first = MockWS.last!
+      first.fireClose() // 意外断线（活跃 run 进行中）→ 调度 1s 退避重连
+      await nextTick()
+      await vi.advanceTimersByTimeAsync(1000) // 退避到点 → 自动重连
+      await flushPromises()
+      expect(MockWS.last).not.toBe(first)
+      MockWS.last!.fireOpen() // 重连 socket open：缓冲的 start 帧 flush
+      // 重连握手带恢复目标会话 sk-1（区别于首连/切容器的 plain start）
+      expect(MockWS.last!.sent).toContainEqual({ type: 'start', container: 'demo', sessionKey: 'sk-1' })
+    })
+
+    it('first connect after mount uses a plain start frame without sessionKey (首连/切容器不带 sessionKey)', async () => {
+      // 首连（reconnectAttempts==0）：start 不带 sessionKey，与切容器一致——后端不注册恢复回调。
+      await mountReady()
       expect(MockWS.last!.sent).toContainEqual({ type: 'start', container: 'demo' })
+      expect(MockWS.last!.sent).not.toContainEqual({ type: 'start', container: 'demo', sessionKey: 'sk-1' })
     })
 
     it('advances the backoff when a reconnect opening handshake stalls', async () => {
@@ -1353,7 +1381,8 @@ describe('ChatView', () => {
       await flushPromises()
       expect(MockWS.last).not.toBe(first)
       MockWS.last!.fireOpen()
-      expect(MockWS.last!.sent).toContainEqual({ type: 'start', container: 'demo' })
+      // codex #249 P1：手动重连握手带当前会话 sk-1（恢复该会话 run 续流）
+      expect(MockWS.last!.sent).toContainEqual({ type: 'start', container: 'demo', sessionKey: 'sk-1' })
     })
 
     it('keeps the scheduled reconnect when switching session while disconnected (codex #249 R3 ①)', async () => {
@@ -1375,7 +1404,8 @@ describe('ChatView', () => {
       expect(MockWS.last).not.toBe(before)
       expect(MockWS.last).not.toBe(first)
       MockWS.last!.fireOpen()
-      expect(MockWS.last!.sent).toContainEqual({ type: 'start', container: 'demo' })
+      // codex #249 P1：断线退避中切到 sk-2 → 重连握手带**当前**会话 sk-2（注册切后新会话恢复回调）
+      expect(MockWS.last!.sent).toContainEqual({ type: 'start', container: 'demo', sessionKey: 'sk-2' })
     })
 
     it('keeps a reconnect entry after switching session clears the disconnect error (codex #249 R3 ①)', async () => {
@@ -1397,7 +1427,8 @@ describe('ChatView', () => {
       await flushPromises()
       expect(MockWS.last).not.toBe(first)
       MockWS.last!.fireOpen()
-      expect(MockWS.last!.sent).toContainEqual({ type: 'start', container: 'demo' })
+      // codex #249 P1：切到 sk-2 后手动重连，握手带**当前**会话 sk-2（注册切后新会话恢复回调）
+      expect(MockWS.last!.sent).toContainEqual({ type: 'start', container: 'demo', sessionKey: 'sk-2' })
     })
 
     it('invalidates an in-flight load-more when a full reload supersedes it (codex #249 R3 ②)', async () => {
