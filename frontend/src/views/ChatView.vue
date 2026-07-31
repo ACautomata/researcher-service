@@ -14,7 +14,7 @@ import {
   type HistoryMessageDTO,
   type SessionDTO,
 } from '@/api/chat'
-import { useAuthStore } from '@/stores/auth'
+import { useAuthStore, isTokenExpired } from '@/stores/auth'
 import { ApiError } from '@/api/client'
 import { ChatWebSocket } from '@/chat/ws'
 import { splitThinking } from '@/chat/thinking'
@@ -91,8 +91,8 @@ let resumeClaimed = false // 已认领恢复 run（首帧到达）——尾部�
 let resumeRunSession = '' // connect() 重连时选中的会话（认领须仍在该会话；切走则恢复帧按旧 run 丢弃）
 
 // issue #239 / 评审 #198 问题 1：断线自动重连——指数退避（对齐 GATEWAY_RECONNECT_POLICY 与
-// 后端 pool.ReconnectPolicy：初始 1s、每次翻倍、封顶 30s，重连成功即重置）。仅普通断线（非 4401；
-// JWT 过期刷新属另一 ticket）触发；切容器/卸载时取消 pending 定时器（旧容器不重连）。
+// 后端 pool.ReconnectPolicy：初始 1s、每次翻倍、封顶 30s，重连成功即重置）。仅普通断线触发
+// （4401 JWT 过期走 #240 的刷新重连链路 recoverUnauthorized，不经退避）；切容器/卸载时取消 pending 定时器。
 const RECONNECT_INITIAL_MS = 1_000
 const RECONNECT_CAP_MS = 30_000
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null // pending 的重连定时器
@@ -282,6 +282,34 @@ function cancelReconnect() {
   if (reconnectTimer !== null) {
     clearTimeout(reconnectTimer)
     reconnectTimer = null
+  }
+}
+
+// issue #240：refresh 确认失效（refreshExhausted，cookie 4xx）——清会话跳登录，复用 api/client.ts 既有语义
+// （瞬态失败不走这里）。跳到登录页后路由守卫 hydrate 会再次确认，用户重新登录。
+function redirectLogin() {
+  auth.clearSession()
+  if (typeof window !== 'undefined' && window.location.pathname !== '/login') {
+    window.location.assign('/login')
+  }
+}
+
+// issue #240：4401（access token 过期）断线的刷新重连链路——区别于普通断线的退避重连。
+// forceRefresh 换到新 token 后立即重连（socket 本身健康，只是凭证过期，无需退避）；
+// refresh 确认失效（refreshExhausted）→ 清会话跳登录，不再重连（防 4401 重连死循环）；
+// 瞬态失败（网络异常/5xx，token 仍空）→ 不踢人，按 #239 指数退避重试（scheduleReconnect 到点调 connect，
+// 其前置检查再过 isTokenExpired → 再 forceRefresh），直到 refresh 成功或确认失效为止。
+async function recoverUnauthorized() {
+  await auth.forceRefresh()
+  if (disposed) return
+  if (auth.refreshExhausted) {
+    redirectLogin()
+    return
+  }
+  if (auth.token) {
+    connect() // 新 token 已就绪：connect 前置检查通过 → 同步直建（无退避，socket 本身健康仅凭证过期）
+  } else {
+    scheduleReconnect() // 瞬态失败：退避重试（到点 connect 前置刷新），退避链与普通断线一致
   }
 }
 
@@ -530,6 +558,26 @@ async function loadMoreHistory() {
 
 function connect() {
   cancelReconnect() // 手动/自动重连都先取消 pending 定时器，避免并发两条重连链
+  // issue #240 前置防护：过期/缺失的 token 不直接建连（后端握手 accept 后立即 4401 关闭，白跑一次）——
+  // 先 forceRefresh 换新再建连。token 有效时同步直建（无调用方在 connect() 后同步读 ws，同步入口只为
+  // 测试/手动重连的对称性，非承载契约；建连主体 openSocket 内含 myWs.start）。refresh 确认失效
+  // （refreshExhausted）→ 清会话跳登录，不再建连；瞬态失败（网络异常/5xx）不置 exhausted、不踢人：
+  // token 已空，建连由后端 4401 兜底走刷新重连链路。
+  if (!auth.token || isTokenExpired(auth.token)) {
+    void (async () => {
+      await auth.forceRefresh()
+      if (disposed) return
+      if (auth.refreshExhausted) { redirectLogin(); return }
+      openSocket()
+    })()
+    return
+  }
+  openSocket()
+}
+
+// connect 的建连主体（token 就绪后调用）：关旧 socket → 记恢复会话 → 建 ChatWebSocket → start。
+// 从 connect 抽出以便前置 token 刷新的异步路径复用同一建连逻辑（issue #240）。
+function openSocket() {
   // 先把当前引用置空再关旧 socket：旧 ws 的 onClose 触发时 ws!==myWs（stale guard 判定为旧连接），
   // 不报误断线、也不调度重连（与 selectContainer 同款「先置空再 close」模式）
   const oldWs = ws
@@ -658,9 +706,14 @@ function connect() {
       abandonActiveRun()
       pendingAbandonCount = 0 // socket 已死：孤儿计数是「同 socket 内迟到首帧」语义，不会再投递，清零防吞新 run
       if (!disposed) errorMsg.value = '连接已断开，请重试或切换容器'
+      // issue #240：4401（access token 过期）走刷新重连链路（forceRefresh → 新 token 立即重连），
+      // refresh 确认失效才跳登录——不走普通退避重连，避免拿过期 token 空转形成 4401 死循环。
+      if (code === 4401) {
+        if (!disposed) void recoverUnauthorized()
+        return
+      }
       // issue #239：意外断线（非 4401 JWT 过期、非卸载）→ 调度指数退避自动重连，Ready 后恢复历史投影。
-      // 4401 走 JWT 刷新链路（另一 ticket），不在此自动重连，避免 4401 重连死循环。
-      if (!disposed && code !== 4401) scheduleReconnect()
+      if (!disposed) scheduleReconnect()
     },
     onApproval: (card) => {
       if (ws !== myWs) return  // stale guard：旧 ws 的审批卡不污染新会话

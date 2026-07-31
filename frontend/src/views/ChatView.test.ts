@@ -1280,14 +1280,100 @@ describe('ChatView', () => {
       expect(MockWS.last).not.toBe(before)
     })
 
-    it('does not reconnect on a 4401 close (JWT 过期走刷新链路，不自动重连)', async () => {
-      await mountReady()
+    it('4401 close → forceRefresh success → immediate reconnect with new token (无退避)', async () => {
+      // issue #240：access token 过期被后端以 4401 关闭 → forceRefresh 换新 → 立即用新 token 重连，
+      // 不走指数退避（socket 本身健康，只是凭证过期），也不跳登录。
+      const w = await mountReady()
+      const auth = useAuthStore()
+      vi.spyOn(auth, 'forceRefresh').mockImplementation(async () => {
+        auth.token = 'jwt-refreshed'
+        auth.refreshExhausted = false
+      })
       const first = MockWS.last!
       first.fireClose(4401) // JWT 过期
-      await nextTick()
-      await vi.advanceTimersByTimeAsync(60_000) // 远超任何退避
+      await flushPromises() // forceRefresh + connect 落地
+      expect(auth.forceRefresh).toHaveBeenCalled()
+      expect(MockWS.last).not.toBe(first) // 已重连
+      // 新连接握手用刷新后的 token（subprotocol ['access_token', <jwt>]）
+      expect((MockWS.last!.protocols as string[])[1]).toBe('jwt-refreshed')
+      MockWS.last!.fireOpen()
       await flushPromises()
-      expect(MockWS.last).toBe(first) // 未自动重连（防 4401 死循环）
+      expect(MockWS.last!.sent).toContainEqual({ type: 'start', container: 'demo' })
+      w.unmount()
+    })
+
+    it('4401 close → refreshExhausted → clearSession + 跳登录，不重连（防 4401 死循环）', async () => {
+      // issue #240：refresh 端点确认 cookie 失效（refreshExhausted）→ 清会话跳登录，不再重连。
+      const w = await mountReady()
+      const auth = useAuthStore()
+      vi.spyOn(auth, 'forceRefresh').mockImplementation(async () => {
+        auth.token = ''
+        auth.refreshExhausted = true
+      })
+      const clearSpy = vi.spyOn(auth, 'clearSession').mockImplementation(() => {
+        auth.token = ''
+      })
+      const assignSpy = vi.fn()
+      Object.defineProperty(window, 'location', {
+        configurable: true,
+        value: { pathname: '/chat', assign: assignSpy },
+      })
+      const first = MockWS.last!
+      first.fireClose(4401)
+      await flushPromises()
+      await vi.advanceTimersByTimeAsync(60_000) // 远超任何退避：确认不重连
+      await flushPromises()
+      expect(clearSpy).toHaveBeenCalled()
+      expect(assignSpy).toHaveBeenCalledWith('/login')
+      expect(MockWS.last).toBe(first) // 未重连（refresh 确认失效 → 跳登录，不再建连）
+      w.unmount()
+    })
+
+    it('4401 close → transient refresh failure → 不踢人，按退避重试（不空转死循环）', async () => {
+      // issue #240：refresh 遇网络异常/5xx（非 4xx 确认拒绝）→ 不标 refreshExhausted、不清会话跳登录；
+      // 按 #239 指数退避重试（scheduleReconnect 到点 connect 前置再刷新），而非立即重连——避免 refresh
+      // 端点宕机时 4401→刷新→4401 零延迟空转死循环。退避到点后 connect 前置仍拿到空 token → 再刷新。
+      const w = await mountReady()
+      const auth = useAuthStore()
+      vi.spyOn(auth, 'forceRefresh').mockImplementation(async () => {
+        auth.token = '' // 瞬态失败：未换到新 token
+        auth.refreshExhausted = false
+      })
+      const clearSpy = vi.spyOn(auth, 'clearSession')
+      const first = MockWS.last!
+      first.fireClose(4401)
+      await flushPromises() // recoverUnauthorized → token 空 → scheduleReconnect（退避，非立即）
+      expect(clearSpy).not.toHaveBeenCalled() // 瞬态失败不踢人
+      expect(MockWS.last).toBe(first) // 退避中：未立即重连（防 4401 零延迟空转）
+      // 退避到点（首轮 1s）→ connect 前置再 forceRefresh（仍瞬态失败、token 空）→ openSocket 拿空 token 建连
+      await vi.advanceTimersByTimeAsync(1_000)
+      await flushPromises()
+      expect(MockWS.last).not.toBe(first) // 退避到点后已重连（交由后端 4401 再兜底 / 下轮刷新）
+      w.unmount()
+    })
+
+    it('connect() with an expired access token refreshes before building the socket (前置过期检查)', async () => {
+      // issue #240 前置防护：token 已过期时不直接建连（避免无谓 4401 往返），先 forceRefresh 换新再建连。
+      // 用同一 pinia 挂载组件（组件内 useAuthStore 与本测试共享实例），先把过期 token 种进 store。
+      const pinia = createPinia()
+      setActivePinia(pinia)
+      const auth = useAuthStore()
+      const header = btoa('{}')
+      const payload = btoa(JSON.stringify({ exp: 1 })) // exp=1970 → 已过期
+      auth.token = `${header}.${payload}.sig`
+      vi.spyOn(auth, 'forceRefresh').mockImplementation(async () => {
+        auth.token = 'jwt-refreshed'
+        auth.refreshExhausted = false
+      })
+      const w = mount(ChatView, { global: { plugins: [pinia] } })
+      // onMounted → selectContainer → connect →（token 过期）void IIFE 前置 forceRefresh → openSocket。
+      // 多一跳异步，flush 两轮确保 forceRefresh 与建连都落地。
+      await flushPromises()
+      await flushPromises()
+      expect(auth.forceRefresh).toHaveBeenCalled()
+      expect(MockWS.last).not.toBeNull()
+      expect((MockWS.last!.protocols as string[])[1]).toBe('jwt-refreshed') // 用新 token 建连
+      w.unmount()
     })
 
     it('cancels the pending reconnect when switching container (切容器旧容器不重连)', async () => {
