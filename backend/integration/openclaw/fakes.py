@@ -83,6 +83,8 @@ class FakeOpenClawWire:
         # runId→on_event 路由（send_message 自动注册；push_event 推事件）
         self._routes: dict[str, Any] = {}
         self.discarded: list[str] = []
+        # #217：record_active_session 记住的活跃会话（session_key, on_event）
+        self.recorded_session: tuple | None = None
 
     @property
     def dead(self) -> bool:
@@ -115,6 +117,10 @@ class FakeOpenClawWire:
     def discard(self, run_id: str) -> None:
         self._routes.pop(run_id, None)
         self.discarded.append(run_id)
+
+    def record_active_session(self, session_key: str, on_event: Any = None) -> None:
+        """#217：对齐真实现——记住活跃会话供重连恢复（consumer _handle_send 调用）。"""
+        self.recorded_session = (session_key, on_event)
 
     # ── 连接级审批 ──
 

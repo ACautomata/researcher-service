@@ -18,6 +18,7 @@ import asyncio
 import json
 import uuid
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 
 import websockets
 from websockets.exceptions import ConnectionClosed
@@ -41,8 +42,109 @@ from integration.openclaw.wire import (
 # on_event 回调契约：接收翻译后的前端契约帧（text/done/error）
 OnEvent = Callable[[dict], Awaitable[None]]
 
+# #217 T4：恢复回放时 history 投影用的 runId 命名空间——与真实 runId 隔离，前端按
+# 「historyRunId → 整段替换」应用（replace 语义），不与进行中 run 的 runId 冲突。
+HISTORY_RUN_ID = '__history__'
 
-class OpenClawWireClient:  # pylint: disable=too-many-instance-attributes,too-many-arguments
+
+@dataclass(frozen=True)
+class RecoveredRun:
+    """#217 步3 采用的进行中 run 投影（不可变值对象）。
+
+    ``text`` 为网关缓冲的已产文本（**即使为空也采用**——空 text 也重建路由恢复事件流）；
+    ``plan`` 为可选 systemRunPlan（透传，前端展示计划卡）。"""
+    run_id: str
+    text: str
+    plan: dict | None
+
+
+class _RecoveryCoordinator:
+    """#217 T4：connect() 握手成功后按序执行重连恢复（client 内部成员，组合非继承）。
+
+    序列（每次 connect，含首连与 pool 主动重连）：sessions.subscribe →（有活跃会话）
+    sessions.messages.subscribe → chat.history → 回放投影 + 采用 inFlightRun 重建路由。
+    经 ``client._rpc`` 发 RPC、``client._translator`` 复用 history 文本提取、
+    ``client._routes`` 重建路由——不持独立连接态，纯属 client 的行为分解。
+    ``includeApprovals`` 暂不下发——连接级审批 fan-out（T06 add_approval_subscriber）已独立覆盖，
+    且该 opt-in 需 operator.admin/approvals 逐次订阅生效（待实测，#217 边界不引入）。
+    """
+
+    def __init__(self, client: OpenClawWireClient) -> None:
+        self._client = client
+
+    async def run(self) -> None:
+        """执行恢复序列。无活跃会话时仅 sessions.subscribe（步1）。"""
+        client = self._client
+        await client._rpc('sessions.subscribe', {})
+        session_key = client._active_session_key
+        if session_key is None:
+            return
+        await client._rpc('sessions.messages.subscribe', {'key': session_key})
+        history = await client._rpc('chat.history', {'sessionKey': session_key})
+        await self._replay_projection(session_key, history or {})
+
+    async def _replay_projection(self, session_key: str, history: dict) -> None:
+        """步2-4：回放 history 投影（replace）+ 按 sessionInfo 归属采用 inFlightRun 重建路由。"""
+        client = self._client
+        on_event = client._session_callbacks.get(session_key)
+        if on_event is not None:
+            for frame in self._history_frames(history.get('messages')):
+                await on_event(frame)
+        recovered = self._adopt_inflight_run(history)
+        if recovered is None or on_event is None:
+            return
+        client._routes[recovered.run_id] = on_event  # 步3：重建 runId 路由
+        if recovered.text:
+            await on_event({
+                'type': 'text', 'runId': recovered.run_id,
+                'delta': recovered.text, 'replace': True,
+            })
+        if recovered.plan is not None:
+            # 步3 采用可选 plan（systemRunPlan）：透传给前端展示计划卡（wire 原生字段，不翻译）。
+            await on_event({'type': 'plan', 'runId': recovered.run_id, 'plan': recovered.plan})
+        # 步3 路由已重建：回放恢复泵期缓冲的 event 帧（重连期到达的进行中 run 事件不丢，路由到本 run）。
+        client._flush_connect_buffered()
+
+    def _history_frames(self, messages) -> list[dict]:
+        """history messages[] → __history__ 命名空间的 text 帧：首发 replace=True 整段锚定，
+        后续追加（前端按 historyRunId 累积重解析）。空/非 list → []。"""
+        if not isinstance(messages, list):
+            return []
+        frames: list[dict] = []
+        for index, message in enumerate(messages):
+            text = self._client._translator._extract_text(message)  # pylint: disable=protected-access
+            if not text:
+                continue
+            frame = {'type': 'text', 'runId': HISTORY_RUN_ID, 'delta': text}
+            if index == 0:
+                frame['replace'] = True
+            frames.append(frame)
+        return frames
+
+    @staticmethod
+    def _adopt_inflight_run(history: dict) -> RecoveredRun | None:
+        """步3-4：采用 inFlightRun（取 runId + 缓冲 text[即使为空] + 可选 plan）。
+
+        步4 归属判定：sessionInfo.hasActiveRun=true 且给了 activeRunIds 列表时，runId 须是
+        其成员才采用——否则该 run 属另一活跃投影（hasActiveRun 无成员匹配），网关不会在本
+        连接续流，不重建保留路由。activeRunIds 缺省（None）时按 inFlightRun 存在即采用。
+        """
+        inflight = history.get('inFlightRun')
+        if not isinstance(inflight, dict):
+            return None
+        run_id = inflight.get('runId')
+        if not run_id:
+            return None
+        session_info = history.get('sessionInfo') or {}
+        active_ids = session_info.get('activeRunIds')
+        if session_info.get('hasActiveRun') and active_ids is not None and run_id not in active_ids:
+            return None
+        plan = inflight.get('plan')
+        return RecoveredRun(run_id=run_id, text=inflight.get('text') or '',
+                            plan=plan if isinstance(plan, dict) else None)
+
+
+class OpenClawWireClient:  # pylint: disable=too-many-instance-attributes,too-many-arguments,too-many-public-methods
     """对单个已配对容器维持一条长连接，发 chat.send 并按 runId 路由 chat 事件。"""
 
     def __init__(
@@ -90,10 +192,44 @@ class OpenClawWireClient:  # pylint: disable=too-many-instance-attributes,too-ma
         self._routes: dict[str, OnEvent] = {}
         self._closed = False
         self._dead = False  # recv loop 退出（连接断开）→ pool 据此驱逐重建
+        # #217 T4：connect() 握手成功后恢复期间的入站泵信号——connect 在恢复完成前持续 recv 并
+        # 经 _handle_incoming 分发（含 _rpc res），置位后停泵交棒给 _recv_loop（防双 reader）。
+        self._connect_done: asyncio.Event | None = None
+        # #217 T4：恢复泵期缓冲的 event 帧——泵只消费 res，event 缓冲待路由就绪后由 _resolve_ack
+        # 注册路由时回放（重连期到达的进行中 run 事件不丢）。
+        self._connect_buffered: list[dict] = []
         # #196 T1 / #213：网关 policy（hello-ok 解析；握手前为协议默认）。tick_interval_ms 驱动静默看门狗。
         self._policy = GatewayPolicy.default()
         # #196 T3 / #215：标 dead 时回调（pool 注入以触发主动重连；None = 不触发，如单测直建 client）。
         self._on_dead = on_dead
+        # #196 T4 / #217：记住的活跃 sessionKey + 其恢复回调（consumer 注册，重连后恢复该会话投影）。
+        # _session_callbacks 以 sessionKey 为键，支持后续多会话；当前面板单会话 → 至多一项。
+        self._active_session_key: str | None = None
+        self._session_callbacks: dict[str, OnEvent] = {}
+
+    def record_active_session(self, session_key: str, on_event: OnEvent | None = None) -> None:
+        """#196 T4 / #217：记住当前活跃 sessionKey（+其恢复回调），供每次 connect 后重连恢复。
+
+        consumer 在对话 start / 切换会话时调用。``on_event`` 是恢复投影（history replace 回放、
+        inFlightRun 缓冲 text、重建路由后该 runId 后续事件）的投递目标；为 None 时仅记住 sessionKey
+        （仍发 subscribe + chat.history，但不回放/不重建路由）。再次调用换 key 即切会话。
+        """
+        self._active_session_key = session_key
+        if on_event is None:
+            self._session_callbacks.pop(session_key, None)
+        else:
+            self._session_callbacks[session_key] = on_event
+
+    def recovery_session(self) -> tuple[str, OnEvent | None] | None:
+        """#196 T4 / #217：返回记住的活跃会话 ``(session_key, on_event)``，无则 None。
+
+        pool 主动重连（_reconnect_once）建替换 client 前读旧 client 的记住会话， propagate 到新
+        client——否则 remembered session 随旧 client 丢弃，重连恢复永不携带该会话（Spec 步1
+        「client 记住上次活跃 sessionKey」跨重连失效）。
+        """
+        if self._active_session_key is None:
+            return None
+        return self._active_session_key, self._session_callbacks.get(self._active_session_key)
 
     def add_approval_subscriber(self, cb: OnEvent) -> None:
         """注册连接级审批订阅者（T06 / codex P1）：多 consumer 共享 client 时各自独立注册。"""
@@ -199,6 +335,19 @@ class OpenClawWireClient:  # pylint: disable=too-many-instance-attributes,too-ma
                 )
                 # #213：解析 hello-ok payload.policy（驱动静默看门狗 2×tick）；缺字段由 from_hello_ok 回退默认
                 self._policy = GatewayPolicy.from_hello_ok(hello_ok.get('payload'))
+                # #196 T4 / #217：握手成功后（首连与每次重连）按契约恢复——sessions.subscribe →
+                # （有活跃会话）messages.subscribe + chat.history + 采用 inFlightRun 重建路由。
+                # 恢复经 _rpc 发 RPC 等 res，而握手期无 _recv_loop 收帧——connect 在恢复完成前持续
+                # recv 并经 _handle_incoming 分发（含 _rpc res 解析），恢复完成置 _connect_done 停泵
+                # 交棒给 _recv_loop（防双 reader）。失败按建连失败处理（下方 BaseException → aclose + raise）。
+                self._connect_done = asyncio.Event()
+                try:
+                    await asyncio.wait_for(
+                        self._run_until(_RecoveryCoordinator(self).run()),
+                        timeout=self._remaining(deadline),
+                    )
+                finally:
+                    self._connect_done.set()  # 停泵：无论恢复成败，交棒给 _recv_loop（或 aclose）
             except TimeoutError as exc:
                 raise ChatConnectError('connect handshake timeout') from exc
         except BaseException:
@@ -239,6 +388,51 @@ class OpenClawWireClient:  # pylint: disable=too-many-instance-attributes,too-ma
         if not msg.get('ok'):
             raise ChatConnectError('connect handshake rejected by gateway')
         return msg
+
+    async def _run_until(self, work) -> None:
+        """跑 ``work``（connect 期恢复协程）并持续 recv 分发入站帧，直到 work 完成（#217）。
+
+        握手期 _recv_loop 未起，work 内 _rpc 发的 req 需有人 recv 其 res——本泵即临时 reader，
+        逐帧经 _handle_incoming 分发（res 解析 pending RPC）。**event 帧缓冲**（_connect_buffered）：
+        恢复期到达的事件路由尚未由 _recv_loop 接管，直接分发会丢（route 未就绪）；缓冲后由
+        _recv_loop 启动时回放，不丢帧。recv 用**短轮询**（10ms 超时重试）而非长阻塞：work 完成
+        最后一帧 res 分发后即 done，泵下一轮轮询见 task.done() 即退出，不空等（真网关静默 / fake
+        挂起队列都不卡死）。work 完成（或失败）即返回；connect 在 finally 置 _connect_done 后由
+        _recv_loop 接管（防双 reader）。
+        """
+        task = asyncio.ensure_future(work)
+        try:
+            while not task.done():
+                try:
+                    raw = await asyncio.wait_for(self._ws.recv(), timeout=0.01)
+                except TimeoutError:
+                    continue  # 暂无入站帧：复查 work 是否完成
+                msg = json.loads(raw)
+                if msg.get('type') == 'res':
+                    await self._handle_incoming(msg)
+                    # 让渡：恢复协程收到最后一帧 res 需一拍才标 done——让渡让其完成，下轮 while
+                    # 见 task.done() 即退出，不多读一帧。
+                    await asyncio.sleep(0)
+                else:
+                    # event：泵期路由未就绪（恢复重建的 inFlightRun / send_message 注册的 route 尚未
+                    # 就位），缓冲待路由注册时由 _resolve_ack 回放——重连期进行中 run 事件不丢。
+                    self._connect_buffered.append(msg)
+        finally:
+            if not task.done():
+                task.cancel()
+            # 传播 work 的异常（恢复失败 → connect 失败）；取消泵自身不吞 work 结果。
+            await asyncio.gather(task, return_exceptions=False)
+
+    async def _handle_incoming(self, msg: dict) -> None:
+        """connect 恢复泵期的入站分发：res 解析 pending RPC（_rpc 回执）；event 复用 _handle 翻译/路由。
+
+        恢复的 inFlightRun 路由在 connect 内已重建（_RecoveryCoordinator 写 _routes），故恢复后立即
+        到达的 run 事件经 _handle 正常路由——connect 泵与 _recv_loop 共用同一份 _handle 分发逻辑。
+        """
+        if msg.get('type') == 'res':
+            self._resolve_ack(msg)
+            return
+        await self._handle(msg)
 
     async def _recv_loop(self) -> None:
         # #196 T1 / #213：静默看门狗——连续静默 > 2×tickIntervalMs 即按契约 close code 4000 语义
@@ -333,11 +527,28 @@ class OpenClawWireClient:  # pylint: disable=too-many-instance-attributes,too-ma
                 # 紧接 ack 注册路由（同 recv 循环内），保证后续事件到达前 route 已就绪
                 self._routes[run_id] = on_event
                 fut.set_result(run_id)
+                # #217：回放恢复泵期缓冲的 event 帧——路由已注册，重连期到达的进行中 run 事件可路由。
+                self._flush_connect_buffered()
             else:
                 fut.set_exception(ChatSendError('chat.send ack missing runId'))
         else:
             err = msg.get('error') or {}
             fut.set_exception(ChatSendError(err.get('message') or err.get('code') or 'chat.send failed'))
+
+    def _flush_connect_buffered(self) -> None:
+        """#217：把恢复泵期缓冲的 event 帧逐个交 _handle 路由（路由已注册后调用）。
+
+        缓冲帧可能属恢复重建的 inFlightRun 或本次 send_message 的 runId——路由就绪后回放不丢帧。
+        同步取快照清空后由调用方 await 分发（_resolve_ack 是同步方法，回放经 _flush_task 异步）。
+        """
+        if not self._connect_buffered:
+            return
+        buffered, self._connect_buffered = self._connect_buffered, []
+        asyncio.ensure_future(self._replay_connect_buffered(buffered))
+
+    async def _replay_connect_buffered(self, buffered: list[dict]) -> None:
+        for msg in buffered:
+            await self._handle(msg)
 
     async def resolve_approval(self, approval_id: str, kind: str, decision: str) -> dict:
         """回覆一次权限审批（T06，spec §8.2）：发 {kind}.approval.resolve(id,decision)，有界等 res。

@@ -119,6 +119,23 @@ async def test_send_streams_text_then_done(override_pool, instance, fake_client)
 
 
 @pytest.mark.asyncio
+async def test_send_records_active_session_for_reconnect_recovery(override_pool, instance, fake_client):
+    """#196 T4 / #217：consumer _handle_send 记住活跃 sessionKey + 其 on_event 回调，
+    供 pool 主动重连后 recovery_session() 传播给替换 client 恢复该会话投影。"""
+    comm = await _connect_authed()
+    await comm.connect()
+    await comm.send_json_to({'type': 'start', 'container': 'demo'})
+    await comm.receive_json_from()  # ready
+    await comm.send_json_to({'type': 'send', 'sessionKey': 'sk-1', 'message': '你好'})
+    await asyncio.sleep(0.05)  # 等 consumer 走完 _handle_send（send_message + record_active_session）
+    assert fake_client.recorded_session is not None
+    session_key, on_event = fake_client.recorded_session
+    assert session_key == 'sk-1'
+    assert callable(on_event)
+    await comm.disconnect()
+
+
+@pytest.mark.asyncio
 async def test_multi_container_switch(override_pool, instance):
     await database_sync_to_async(Instance.objects.create)(
         name='other', port=19001, token='gw2', home_dir='/tmp/y', image='img:tag')

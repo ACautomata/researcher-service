@@ -310,6 +310,12 @@ class ChatConnectionPool:
             except Exception:  # pylint: disable=broad-exception-caught
                 pass
             new_client = self._make_client(key, url, device_token, target.identity, target.scopes)
+            # #196 T4 / #217：把旧 client 记住的活跃会话 propagate 到替换 client——重连恢复
+            # （messages.subscribe + chat.history + inFlightRun）须携带「client 记住的上次活跃
+            # sessionKey」（契约步1），否则 remembered session 随旧 client 丢弃、恢复永不触发。
+            recovery = getattr(target, 'recovery_session', lambda: None)()
+            if recovery is not None:
+                new_client.record_active_session(*recovery)
             await new_client.connect()
             # codex #221 R3+R4 P1：换入的替换 client 已 dead（握手完成但 recv 立刻退出）时，
             # **确认存活后才发布**——dead 则先 aclose 丢弃半成品、不写入 _clients[key]，再抛

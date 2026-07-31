@@ -647,6 +647,24 @@ class _ScriptedReconnectClient:
         pass
 
 
+class _RecoveryAwareClient(_ScriptedReconnectClient):
+    """带 #217 恢复 API（record_active_session/recovery_session）的重连 client 替身。
+
+    记录「记住的活跃会话」，供 pool._reconnect_once 传播断言——证明 remembered session
+    跨「旧 client 死 → 替换 client」被继承（契约步1「client 记住上次活跃 sessionKey」跨重连不失效）。
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._recorded = None
+
+    def record_active_session(self, session_key, on_event=None):
+        self._recorded = (session_key, on_event)
+
+    def recovery_session(self):
+        return self._recorded
+
+
 def _scripted_factory(script, index):
     def factory(url, device_token, *, identity, scopes, on_dead=None):
         return _ScriptedReconnectClient(
@@ -802,6 +820,37 @@ async def test_fast_path_get_or_create_cancels_pending_reconnect(clock):
     await asyncio.sleep(0)
     await asyncio.sleep(0)
     assert pool._clients[key] is c_alive  # 存活 client 未被悬挂重连顶掉（无 client 分裂）
+    await pool.aclose_all()
+
+
+@pytest.mark.asyncio
+async def test_reconnect_propagates_remembered_active_session(clock):
+    """#217 步1 跨重连：pool._reconnect_once 建替换 client 时，把旧 client 记住的活跃会话经
+    recovery_session 传播到新 client（record_active_session）——否则 remembered session 随旧
+    client 丢弃，重连恢复（messages.subscribe + chat.history + inFlightRun）永不携带该会话。"""
+    index = [0]
+
+    def factory(url, device_token, *, identity, scopes, on_dead=None):
+        return _RecoveryAwareClient(
+            url, device_token, identity=identity, scopes=scopes,
+            script=[False], index=index, on_dead=on_dead,
+        )
+
+    pool = ChatConnectionPool(
+        pairing_service=FakePairingService(),
+        client_factory=factory,
+        ws_url_for=_url_for,
+        reconnect_policy=ReconnectPolicy(sleeper=_sleeper_for(clock)),
+    )
+    inst = _instance('a', 19001)
+    c1 = await pool.get_or_create(inst)
+    c1.record_active_session('s1', lambda f: None)  # 对话中记住活跃会话
+    key = (c1.url, c1.device_token)
+    c1.kill()  # 标 dead → 后台主动重连
+    await _run_reconnect(pool, key)
+    c2 = pool._clients[key]
+    assert c2 is not c1  # 换入全新 client
+    assert c2.recovery_session() == ('s1', c1.recovery_session()[1])  # 记住会话已传播（同 key + 同回调）
     await pool.aclose_all()
 
 

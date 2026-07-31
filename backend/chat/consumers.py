@@ -256,6 +256,9 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
         if not session_key or not message:
             await self.send_json({'type': 'error', 'message': '缺少 sessionKey 或 message'})
             return
+        # #196 T4 / #217：记住当前活跃 sessionKey + 其恢复回调，供 pool 主动重连后恢复该会话投影
+        # （messages.subscribe + chat.history + inFlightRun 路由重建）。换会话/换 client 再发时更新。
+        self._client.record_active_session(session_key, self._on_event)
         # codex #219 P1：同一逻辑发送在初次与有界重试间复用同一 idempotencyKey——
         # 若网关已收下原 chat.send 但 ack 随死连接丢失，重试带同 key 让网关幂等去重，
         # 避免起两个 run、工具被执行两次。key 由本 consumer 按逻辑发送生成一次。
