@@ -73,6 +73,14 @@ let pendingAbandonCount = 0 // 切会话时仍 pending 的 run 数；其迟到�
 // selectContainer 的请求代：丢弃切容器途中迟到的 listSessions 响应（codex P2）
 let containerGen = 0
 
+// issue #239 / 评审 #198 问题 1：断线自动重连——指数退避（对齐 GATEWAY_RECONNECT_POLICY 与
+// 后端 pool.ReconnectPolicy：初始 1s、每次翻倍、封顶 30s，重连成功即重置）。仅普通断线（非 4401；
+// JWT 过期刷新属另一 ticket）触发；切容器/卸载时取消 pending 定时器（旧容器不重连）。
+const RECONNECT_INITIAL_MS = 1_000
+const RECONNECT_CAP_MS = 30_000
+let reconnectTimer: ReturnType<typeof setTimeout> | null = null // pending 的重连定时器
+let reconnectAttempts = 0 // 本未成功周期内已尝试次数（决定退避时长）；onReady 重置
+
 // T3 会话历史回看（issue #82 / spec #76）：分页态——hasMore 标记可向回翻更旧消息，
 // historyAnchor=nextOffset 为下一更旧页的 messageId 锚点；historyLoading 控「加载更多」禁用。
 const historyHasMore = ref(false)
@@ -212,6 +220,29 @@ function finalizeLast() {
   }
 }
 
+// issue #239：安排一次指数退避自动重连。仅在「当前仍选中同一容器」且「组件未卸载」时到点真正重连；
+// 重连成功由 onReady 重置 reconnectAttempts（见 connect 的 onReady），loadHistory 在 Ready 后恢复投影。
+function scheduleReconnect() {
+  cancelReconnect()
+  const container = selectedContainer.value
+  const delay = Math.min(RECONNECT_INITIAL_MS * 2 ** reconnectAttempts, RECONNECT_CAP_MS)
+  reconnectAttempts++
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null
+    // 到点再校验：组件已卸载 / 已切走容器（旧容器不重连污染）/ 已有新连接 → 放弃本次重连
+    if (disposed || selectedContainer.value !== container || !disconnected.value) return
+    connect()
+  }, delay)
+}
+
+// issue #239：取消 pending 重连定时器（切容器/切会话/卸载/手动重连前调用，避免旧容器重连污染）
+function cancelReconnect() {
+  if (reconnectTimer !== null) {
+    clearTimeout(reconnectTimer)
+    reconnectTimer = null
+  }
+}
+
 async function loadInstances() {
   try {
     instances.value = await listInstances()
@@ -227,6 +258,8 @@ async function loadInstances() {
 async function selectContainer(name: string) {
   if (!name || selectedContainer.value === name) return
   const gen = ++containerGen // 每次切换自增，await 后据此丢弃过期响应
+  cancelReconnect() // issue #239：切容器取消旧容器 pending 重连（旧容器不重连污染）
+  reconnectAttempts = 0 // 新容器从初始退避起算
   selectedContainer.value = name
   // 立即停用旧连接 + 禁用 composer + 清空 session：避免 listSessions pending 期间经旧 socket
   // 用旧 sessionKey 发送（UI 已显示新容器）（codex P2 #5）
@@ -270,6 +303,7 @@ async function selectContainer(name: string) {
 
 async function newSession() {
   if (!selectedContainer.value) return
+  cancelReconnect() // issue #239：新会话取消 pending 重连定时器（断线时仍可由错误条手动重连）
   abandonActiveRun()
   messages.value = []
   // codex R3 P1：不清空审批卡——新会话不换容器，切会话特意留存的同容器卡须保留（按 sessionKey 过滤渲染），
@@ -325,6 +359,7 @@ async function removeSession(key: string) {
 
 function pickSession(key: string) {
   if (!key || selectedSession.value === key) return
+  cancelReconnect() // issue #239：切会话取消 pending 重连定时器（断线重连由用户重进/手动触发，不跨会话自动续）
   abandonActiveRun()
   selectedSession.value = key
   // codex R2 P1：不清空审批卡——同容器其它会话的卡保留，渲染时按 selectedSession 过滤即可
@@ -419,7 +454,14 @@ async function loadMoreHistory() {
 }
 
 function connect() {
-  ws?.close()
+  cancelReconnect() // 手动/自动重连都先取消 pending 定时器，避免并发两条重连链
+  // 先把当前引用置空再关旧 socket：旧 ws 的 onClose 触发时 ws!==myWs（stale guard 判定为旧连接），
+  // 不报误断线、也不调度重连（与 selectContainer 同款「先置空再 close」模式）
+  const oldWs = ws
+  ws = null
+  oldWs?.close()
+  // 记录断线重连前的会话：重连 Ready 后用 loadHistory 恢复该会话权威投影（issue #239）
+  const resumeSession = selectedSession.value
   connecting.value = true
   disconnected.value = false
   errorMsg.value = ''
@@ -429,6 +471,11 @@ function connect() {
       if (ws === myWs) {
         connecting.value = false
         errorMsg.value = ''
+        const attempts = reconnectAttempts
+        reconnectAttempts = 0 // 连接成功：重置退避（契约「重连成功即重置退避」）
+        // issue #239：断线重连成功（attempts>0 表示上一轮在退避重连）→ 以权威历史恢复投影，
+        // 找回断线期间的流式文本（对齐 OpenClaw「重连后恢复状态」：重连视为基于持久历史的新投影）。
+        if (attempts > 0 && resumeSession) void loadHistory(resumeSession)
       }
     },
     onText: (runId, delta, replace) => {
@@ -496,7 +543,7 @@ function connect() {
         pendingSend = false
       }
     },
-    onClose: () => {
+    onClose: (code) => {
       if (ws !== myWs) return  // 旧 ws 的关闭（切容器）不报断线
       connecting.value = false
       disconnected.value = true  // 意外断线：禁用发送（codex P2 #4）
@@ -508,6 +555,9 @@ function connect() {
       abandonActiveRun()
       pendingAbandonCount = 0 // socket 已死：孤儿计数是「同 socket 内迟到首帧」语义，不会再投递，清零防吞新 run
       if (!disposed) errorMsg.value = '连接已断开，请重试或切换容器'
+      // issue #239：意外断线（非 4401 JWT 过期、非卸载）→ 调度指数退避自动重连，Ready 后恢复历史投影。
+      // 4401 走 JWT 刷新链路（另一 ticket），不在此自动重连，避免 4401 重连死循环。
+      if (!disposed && code !== 4401) scheduleReconnect()
     },
     onApproval: (card) => {
       if (ws !== myWs) return  // stale guard：旧 ws 的审批卡不污染新会话
@@ -628,6 +678,7 @@ function send() {
 onMounted(loadInstances)
 onBeforeUnmount(() => {
   disposed = true
+  cancelReconnect() // issue #239：卸载清理 pending 重连定时器（防泄漏/卸载后误重连）
   ws?.close()
 })
 
@@ -682,7 +733,16 @@ defineExpose({ selectContainer, send, newSession })
       <div v-if="pairingNeeded" class="pair-guide" data-test="pairing-guide">
         ⚠️ 该容器尚未完成设备配对，对话与历史暂不可用。请先在「容器」页完成设备配对后再回来。
       </div>
-      <p v-if="errorMsg" class="error" data-test="error-bar">{{ errorMsg }}</p>
+      <p v-if="errorMsg" class="error" data-test="error-bar">
+        {{ errorMsg }}
+        <!-- issue #239：断线手动重连入口——直接调 connect()（绕开 selectContainer 同名 early-return） -->
+        <button
+          v-if="disconnected"
+          class="reconnect"
+          data-test="reconnect"
+          @click="connect()"
+        >重新连接</button>
+      </p>
       <div class="stream" data-test="stream">
         <!-- T3 历史分页（issue #82）：hasMore 时顶部「加载更多」向回翻更旧消息，prepend 到头部。 -->
         <button
@@ -803,6 +863,7 @@ defineExpose({ selectContainer, send, newSession })
 .tag { font-size: 11px; padding: 2px 8px; border-radius: 10px; background: var(--el-fill-color-light); color: var(--el-text-color-secondary); }
 .tag.warn { color: var(--el-color-warning); }
 .error { margin: 0; padding: 8px 18px; color: var(--el-color-danger); background: var(--el-color-danger-light-9); }
+.error .reconnect { margin-left: 10px; background: transparent; border: 1px solid currentColor; border-radius: 6px; padding: 1px 10px; cursor: pointer; color: inherit; font-size: 12.5px; }
 .pair-guide { margin: 0; padding: 10px 18px; color: var(--el-color-warning); background: var(--el-color-warning-light-9); border-bottom: 1px solid var(--el-color-warning-light-7); font-size: 13px; }
 .stream { flex: 1; overflow-y: auto; padding: 18px; display: flex; flex-direction: column; gap: 14px; }
 .load-more { align-self: center; background: transparent; border: 1px dashed var(--el-border-color); border-radius: 8px; padding: 5px 18px; cursor: pointer; color: var(--el-text-color-secondary); font-size: 12.5px; }

@@ -72,6 +72,12 @@ class MockWS {
     this.onopen?.({})
   }
 
+  // 模拟意外断线（非经 close()）：readyState 置 CLOSED 并以指定 code 触发 onclose（issue #239 测试）
+  fireClose(code?: number): void {
+    this.readyState = MockWS.CLOSED
+    this.onclose?.({ code: code ?? 1006, reason: '', wasClean: false })
+  }
+
   fireMessage(obj: unknown): void {
     this.onmessage?.({ data: JSON.stringify(obj) })
   }
@@ -1091,5 +1097,162 @@ describe('ChatView', () => {
     MockWS.last!.fireMessage({ type: 'done', runId: 'r1' }) // 终态：finalize 重解析，残片放回正文
     await nextTick()
     expect(w.find('.msg.assistant .bubble').text()).toContain('回答<')
+  })
+
+  // ---- #239 断线自动重连（评审 issue #198 问题 1）：指数退避 + 重连按钮 + 历史恢复 ----
+  describe('auto-reconnect (issue #239)', () => {
+    beforeEach(() => {
+      vi.useFakeTimers()
+    })
+    afterEach(() => {
+      vi.useRealTimers()
+    })
+
+    it('reconnects automatically after an unexpected close (断网恢复自动重连，零操作)', async () => {
+      const w = await mountReady()
+      const first = MockWS.last!
+      first.fireClose() // 意外断线（如代理掐断）
+      await nextTick()
+      expect(w.find('[data-test="error-bar"]').text()).toContain('断开')
+      // 1s 退避到点 → 自动新建 ws 重连（用户零操作）
+      await vi.advanceTimersByTimeAsync(1000)
+      await flushPromises()
+      expect(MockWS.last).not.toBe(first)
+      MockWS.last!.fireOpen() // CONNECTING 期间缓冲的 start 帧在 open 后 flush
+      expect(MockWS.last!.sent).toContainEqual({ type: 'start', container: 'demo' })
+    })
+
+    it('follows an exponential backoff sequence capped at 30s (退避指数曲线封顶)', async () => {
+      await mountReady()
+      // 连续断线 → 逐次断连，记录每次重建前的等待（退避 1s/2s/4s…）
+      const gaps: number[] = []
+      for (let round = 0; round < 4; round++) {
+        MockWS.last!.fireClose()
+        await nextTick()
+        const before = MockWS.last
+        // 以 500ms 步进推进，直到出现新 ws（重建）为止，记录推进时长
+        let waited = 0
+        while (MockWS.last === before && waited <= 35_000) {
+          await vi.advanceTimersByTimeAsync(500)
+          waited += 500
+        }
+        gaps.push(waited)
+      }
+      // 期望退避 ~1s/2s/4s/8s（步进 500ms 量化：1000/2000/4000/8000）
+      expect(gaps).toEqual([1000, 2000, 4000, 8000])
+    })
+
+    it('caps the backoff at 30s after many failures (退避封顶 30s)', async () => {
+      await mountReady()
+      // 连续 8 次断连：1/2/4/8/16/32→30/30/30 —— 第 6 次起封顶 30s
+      for (let round = 0; round < 7; round++) {
+        MockWS.last!.fireClose()
+        await nextTick()
+        const before = MockWS.last
+        await vi.advanceTimersByTimeAsync(30_000)
+        await flushPromises()
+        expect(MockWS.last).not.toBe(before)
+      }
+      // 第 8 次断连：退避已封顶 30s——30s 内未到点不重建，满 30s 才重建
+      MockWS.last!.fireClose()
+      await nextTick()
+      const before = MockWS.last
+      await vi.advanceTimersByTimeAsync(29_999)
+      expect(MockWS.last).toBe(before)
+      await vi.advanceTimersByTimeAsync(1)
+      await flushPromises()
+      expect(MockWS.last).not.toBe(before)
+    })
+
+    it('does not reconnect on a 4401 close (JWT 过期走刷新链路，不自动重连)', async () => {
+      await mountReady()
+      const first = MockWS.last!
+      first.fireClose(4401) // JWT 过期
+      await nextTick()
+      await vi.advanceTimersByTimeAsync(60_000) // 远超任何退避
+      await flushPromises()
+      expect(MockWS.last).toBe(first) // 未自动重连（防 4401 死循环）
+    })
+
+    it('cancels the pending reconnect when switching container (切容器旧容器不重连)', async () => {
+      ;(listInstances as ReturnType<typeof vi.fn>).mockResolvedValue([
+        INSTANCE,
+        { ...INSTANCE, name: 'other', port: 19001 },
+      ])
+      const w = await mountReady()
+      MockWS.last!.fireClose() // demo 断线 → 调度 1s 重连
+      await nextTick()
+      await w.find('[data-test="container-other"]').trigger('click') // 1s 内切到 other
+      await flushPromises()
+      const otherWs = MockWS.last // other 的连接
+      await vi.advanceTimersByTimeAsync(5_000) // 原 demo 重连定时器到点
+      await flushPromises()
+      // demo 的 pending 重连已被取消：不会另建第三个 ws，当前仍是 other 的连接
+      expect(MockWS.last).toBe(otherWs)
+      otherWs!.fireOpen()
+      expect(MockWS.last!.sent).toContainEqual({ type: 'start', container: 'other' })
+    })
+
+    it('cancels the pending reconnect when switching session (切会话清理重连定时器)', async () => {
+      const SESS2 = { session_key: 'sk-2', title: 'S2', updated_at: '' }
+      ;(listSessions as ReturnType<typeof vi.fn>).mockResolvedValue([SESSION, SESS2])
+      const w = await mountReady()
+      const first = MockWS.last!
+      MockWS.last!.fireClose() // 断线 → 调度 1s 重连
+      await nextTick()
+      await w.find('[data-test="session-sk-2"]').trigger('click') // 1s 内切会话 → 取消 pending 重连
+      await nextTick()
+      await vi.advanceTimersByTimeAsync(5_000) // 原重连定时器到点
+      await flushPromises()
+      expect(MockWS.last).toBe(first) // 切会话已取消：不自动重连
+    })
+
+    it('cancels the pending reconnect on unmount (卸载清理重连定时器)', async () => {
+      const w = await mountReady()
+      const first = MockWS.last!
+      MockWS.last!.fireClose()
+      await nextTick()
+      w.unmount() // 卸载：disposed + cancelReconnect
+      await vi.advanceTimersByTimeAsync(5_000)
+      await flushPromises()
+      expect(MockWS.last).toBe(first) // 卸载后不重连
+    })
+
+    it('restores history via loadHistory after a successful reconnect (重连后历史恢复)', async () => {
+      ;(getSessionHistory as ReturnType<typeof vi.fn>).mockResolvedValue({
+        messages: [
+          { role: 'operator', text: '断线前问题' },
+          { role: 'agent', text: '断线期间恢复的回答' },
+        ],
+        hasMore: false,
+        nextOffset: null,
+      })
+      const w = await mountReady()
+      MockWS.last!.fireClose()
+      await nextTick()
+      await vi.advanceTimersByTimeAsync(1000) // 触发自动重连
+      await flushPromises()
+      MockWS.last!.fireOpen()
+      MockWS.last!.fireMessage({ type: 'ready', container: 'demo' })
+      await flushPromises() // onReady → loadHistory 恢复权威投影
+      expect(getSessionHistory).toHaveBeenCalledWith('demo', 'sk-1')
+      await flushPromises()
+      expect(w.find('[data-test="stream"]').text()).toContain('断线期间恢复的回答')
+    })
+
+    it('manual reconnect button reconnects the current container (重连按钮，绕开 early-return)', async () => {
+      const w = await mountReady()
+      const first = MockWS.last!
+      MockWS.last!.fireClose()
+      await nextTick()
+      const btn = w.find('[data-test="reconnect"]')
+      expect(btn.exists()).toBe(true)
+      expect(btn.text()).toContain('重新连接')
+      await btn.trigger('click') // 点击直接重连（不经 selectContainer，点当前容器不被吞）
+      await flushPromises()
+      expect(MockWS.last).not.toBe(first)
+      MockWS.last!.fireOpen()
+      expect(MockWS.last!.sent).toContainEqual({ type: 'start', container: 'demo' })
+    })
   })
 })

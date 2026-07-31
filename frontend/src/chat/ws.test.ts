@@ -38,7 +38,10 @@ class MockWS {
   }
 
   close(): void {
-    /* 测试手动触发 onclose */
+    // 对齐原生：主动 close() 触发 onclose（静默看门狗判死走此路径，issue #239）
+    if (this.readyState === CLOSED) return
+    this.readyState = CLOSED
+    this.onclose?.({ code: 1000, reason: '', wasClean: true })
   }
 
   fireOpen(): void {
@@ -277,5 +280,67 @@ describe('ChatWebSocket', () => {
     expect(onError).toHaveBeenCalledTimes(2)
     expect(onError).toHaveBeenCalledWith('连接已断开，请重试或切换容器')
     expect(MockWS.last!.sent).toEqual([]) // 未真正发出
+  })
+
+  // ---- #239 静默看门狗（评审 issue #198 问题 1）：半开连接静默超阈值主动判死 close ----
+  describe('silence watchdog (issue #239)', () => {
+    beforeEach(() => {
+      vi.useFakeTimers()
+    })
+    afterEach(() => {
+      vi.useRealTimers()
+    })
+
+    it('closes the socket after silence beyond the timeout (半开判死 → onClose 重连链路)', () => {
+      const onClose = vi.fn()
+      new ChatWebSocket('/ws/chat/', 'jwt', { onClose }, { silenceTimeoutMs: 1000 })
+      MockWS.last!.fireOpen()
+      // 对端从此静默：超阈值后看门狗应主动 close() → onclose 上抛
+      vi.advanceTimersByTime(1000)
+      expect(onClose).toHaveBeenCalled()
+    })
+
+    it('does not fire before the timeout elapses', () => {
+      const onClose = vi.fn()
+      new ChatWebSocket('/ws/chat/', 'jwt', { onClose }, { silenceTimeoutMs: 1000 })
+      MockWS.last!.fireOpen()
+      vi.advanceTimersByTime(999)
+      expect(onClose).not.toHaveBeenCalled()
+    })
+
+    it('resets the watchdog on every inbound frame (活跃连接不判死)', () => {
+      const onClose = vi.fn()
+      const onText = vi.fn()
+      new ChatWebSocket('/ws/chat/', 'jwt', { onClose, onText }, { silenceTimeoutMs: 1000 })
+      MockWS.last!.fireOpen()
+      // 每 900ms 收一帧（< 阈值）：看门狗应被反复重置，永不判死
+      for (let i = 0; i < 5; i++) {
+        vi.advanceTimersByTime(900)
+        MockWS.last!.fireMessage({ type: 'text', runId: 'r1', delta: 'x' })
+      }
+      expect(onClose).not.toHaveBeenCalled()
+      expect(onText).toHaveBeenCalledTimes(5)
+      // 停止来帧后再超阈值 → 判死
+      vi.advanceTimersByTime(1000)
+      expect(onClose).toHaveBeenCalled()
+    })
+
+    it('does not start the watchdog before the socket opens', () => {
+      const onClose = vi.fn()
+      new ChatWebSocket('/ws/chat/', 'jwt', { onClose }, { silenceTimeoutMs: 1000 })
+      // 未 open（CONNECTING）：看门狗未布防，计时流逝不判死
+      vi.advanceTimersByTime(5000)
+      expect(onClose).not.toHaveBeenCalled()
+    })
+
+    it('clears the watchdog on an explicit close() (主动关闭后看门狗不再重复判死)', () => {
+      const onClose = vi.fn()
+      const ws = new ChatWebSocket('/ws/chat/', 'jwt', { onClose }, { silenceTimeoutMs: 1000 })
+      MockWS.last!.fireOpen()
+      ws.close() // 主动关闭：触发一次 onclose，并清看门狗
+      expect(onClose).toHaveBeenCalledTimes(1)
+      vi.advanceTimersByTime(5000) // 看门狗已清：计时流逝不再二次判死
+      expect(onClose).toHaveBeenCalledTimes(1)
+    })
   })
 })
