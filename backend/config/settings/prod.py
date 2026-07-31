@@ -30,3 +30,10 @@ validate_prod_env(os.environ)
 
 # 持久化凭证使用独立的 AES-256-GCM 密钥环；生产缺失或格式错误时拒绝启动。
 CREDENTIAL_ENCRYPTION_KEYS = CredentialKeySettings(os.environ).load()
+
+# SQLite 库文件路径（Docker 部署）：base.py 默认 BASE_DIR/'db.sqlite3'（=/app/db.sqlite3）
+# 在容器层内、重建即丢；生产经 named volume 挂载点持久化（compose DATABASE_NAME=/app/db/db.sqlite3）。
+# 非敏感固定项、本地开发不设则沿用 base 默认，故用 env.get 而非强制注入。
+_db_name = os.environ.get('DATABASE_NAME')
+if _db_name:
+    DATABASES['default']['NAME'] = _db_name

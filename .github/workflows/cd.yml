@@ -1,0 +1,154 @@
+# GitHub Actions CD —— 打包前后端 Docker 镜像推 GHCR，经 SSH 部署到宝塔宿主。
+#
+# 触发：CI（.github/workflows/ci.yml）在 master 上成功完成后（workflow_run），保证「不部署红码」。
+# 镜像：backend（Django/Daphne）+ frontend（Vue/Vite→nginx）双镜像，tag `:latest` + `:<CI head_sha>`
+# （head_sha 取自通过的 CI run，使 latest/sha 精确对应该 commit，便于 :sha 回滚）。
+# 部署：appleboy/scp-action 推 compose + 渲染 .env → /www/panel；appleboy/ssh-action 远端
+# docker login（持久，供运行时 OpenClaw 拉取复用宿主 daemon 凭证）→ pull → up -d → prune → /api/health 健康门。
+#
+# 所需 secrets（见 deploy/DEPLOY.md 清单）：
+#   REMOTE_HOST REMOTE_USER DEPLOY_KEY            —— SSH 登录宿主
+#   GHCR_PULL_USER GHCR_PULL_TOKEN                —— 宿主拉私有 GHCR（read:packages PAT）
+#   DJANGO_SECRET_KEY DJANGO_ALLOWED_HOSTS LLM_API_KEY CREDENTIAL_ENCRYPTION_KEYS —— 后端运行时
+#   RESEARCHER_REPO（可选，默认 https://github.com/ACautomata/researcher.git）
+
+name: CD
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [master]
+
+# 仅在 CI 成功时部署；失败/取消即跳过（job 级 if 守卫）。
+concurrency:
+  group: cd-master
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write   # GITHUB_TOKEN 推 ghcr.io（本 repo 所属 GHCR 无需额外 secret）
+    env:
+      REGISTRY: ghcr.io
+      # CI run 的 head_sha：使镜像 tag 精确对应通过 CI 的 commit（而非 CD run 自身 sha）。
+      IMAGE_TAG: ${{ github.event.workflow_run.head_sha }}
+      BACKEND_IMAGE: ghcr.io/${{ github.repository }}/backend
+      FRONTEND_IMAGE: ghcr.io/${{ github.repository }}/frontend
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # 构建须基于通过 CI 的那个 commit，而非 master 当前头（可能已前进）。
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR (push)
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & push backend image
+        uses: docker/build-push-action@v6
+        with:
+          context: backend
+          file: backend/Dockerfile
+          push: true
+          tags: |
+            ${{ env.BACKEND_IMAGE }}:latest
+            ${{ env.BACKEND_IMAGE }}:${{ env.IMAGE_TAG }}
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,mode=max,scope=backend
+
+      - name: Build & push frontend image
+        uses: docker/build-push-action@v6
+        with:
+          context: frontend
+          file: frontend/Dockerfile
+          push: true
+          tags: |
+            ${{ env.FRONTEND_IMAGE }}:latest
+            ${{ env.FRONTEND_IMAGE }}:${{ env.IMAGE_TAG }}
+          cache-from: type=gha,scope=frontend
+          cache-to: type=gha,mode=max,scope=frontend
+
+      - name: Stage deploy artifacts (compose + rendered .env)
+        # 运行时敏感值渲染为 .env（compose env_file 读取）；.env 不进 git，仅经 scp 落到宿主。
+        # 两个文件先汇入扁平 staging 目录，scp 以 strip_components=1 整目录平铺到 /www/panel/ 根部，
+        # 避免 source 多路径不同深度 + strip_components 的错位问题。
+        run: |
+          mkdir -p _deploy
+          cp deploy/docker-compose.deploy.yml _deploy/
+          # 命名 .env：compose 变量替换（$PANEL_BACKEND_IMAGE 等）与 env_file 都自动读它，
+          # v1/v2 CLI 行为一致（--env-file 仅 v2 且只管 env_file 不管替换；v1 缺 .env 直接报错）。
+          {
+            echo "DJANGO_SECRET_KEY=${{ secrets.DJANGO_SECRET_KEY }}"
+            echo "DJANGO_ALLOWED_HOSTS=${{ secrets.DJANGO_ALLOWED_HOSTS }}"
+            echo "LLM_API_KEY=${{ secrets.LLM_API_KEY }}"
+            echo "CREDENTIAL_ENCRYPTION_KEYS=${{ secrets.CREDENTIAL_ENCRYPTION_KEYS }}"
+            echo "PANEL_BACKEND_IMAGE=${{ env.BACKEND_IMAGE }}:latest"
+            echo "PANEL_FRONTEND_IMAGE=${{ env.FRONTEND_IMAGE }}:latest"
+          } > _deploy/.env
+          chmod 600 _deploy/.env
+
+      - name: Copy compose + .env to host
+        uses: appleboy/scp-action@v1
+        with:
+          host: ${{ secrets.REMOTE_HOST }}
+          username: ${{ secrets.REMOTE_USER }}
+          key: ${{ secrets.DEPLOY_KEY }}
+          source: "_deploy"
+          target: "/www/panel/"
+          strip_components: 1   # 去掉 _deploy/ 前缀，内容平铺到 /www/panel/ 根部
+          overwrite: true
+
+      - name: Deploy over SSH (login → pull → up → health gate)
+        uses: appleboy/ssh-action@v1
+        env:
+          GHCR_PULL_USER: ${{ secrets.GHCR_PULL_USER }}
+          GHCR_PULL_TOKEN: ${{ secrets.GHCR_PULL_TOKEN }}
+          RESEARCHER_REPO: ${{ secrets.RESEARCHER_REPO }}
+        with:
+          host: ${{ secrets.REMOTE_HOST }}
+          username: ${{ secrets.REMOTE_USER }}
+          key: ${{ secrets.DEPLOY_KEY }}
+          envs: GHCR_PULL_USER,GHCR_PULL_TOKEN,RESEARCHER_REPO
+          script: |
+            set -euo pipefail
+
+            APP_DIR=/www/panel
+            TEMPLATE_DIR=/srv/openclaw/template
+            # 防御性 bootstrap：缺则建（首次部署）；后续幂等。
+            mkdir -p "$APP_DIR" /srv/openclaw
+            if [ ! -d "$TEMPLATE_DIR/.git" ]; then
+              echo "[deploy] cloning researcher template -> $TEMPLATE_DIR"
+              rm -rf "$TEMPLATE_DIR"
+              git clone --depth 1 "${RESEARCHER_REPO:-https://github.com/ACautomata/researcher.git}" "$TEMPLATE_DIR"
+            fi
+
+            # 持久登录 ghcr：deploy 拉面板镜像 + 运行时后端经宿主 daemon 拉 OpenClaw 镜像共用此凭证。
+            echo "$GHCR_PULL_TOKEN" | docker login ghcr.io -u "$GHCR_PULL_USER" --password-stdin
+
+            cd "$APP_DIR"
+            docker compose pull
+            docker compose up -d --remove-orphans
+            docker image prune -f
+
+            # 健康门：frontend 反代 /api/health（公开探针），30s 内非 200 即 fail 让 workflow 红。
+            echo "[deploy] waiting for /api/health ..."
+            ok=0
+            for i in $(seq 1 15); do
+              if curl -fsS http://127.0.0.1:8080/api/health >/dev/null 2>&1; then ok=1; break; fi
+              sleep 2
+            done
+            if [ "$ok" != "1" ]; then
+              echo "[deploy] ERROR: /api/health did not return 200 in time" >&2
+              docker compose ps >&2 || true
+              exit 1
+            fi
+            echo "[deploy] healthy ✓"
