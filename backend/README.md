@@ -121,14 +121,30 @@ Vite dev server (5173) 的 `/api` proxy 打 pytest-django 起的 live Django 后
 **额外依赖**（wire 三件套之外）：`pip install -r requirements/integration.txt`（含 Playwright，dev.txt 超集）+
 `python -m playwright install chromium` + frontend `npm ci`（conftest 经 subprocess 起 vite dev server）。
 
+**setup/teardown 已收进 pytest**（`tests/integration/conftest.py` 的 session 级 `integration_bootstrap`
+fixture）：跑本目录任何 case 前自动检测 Playwright 客户端 / chromium / frontend vite 三项 bootstrap
+依赖，缺失即 `pytest.UsageError` 给可操作指引（而非 fixture setup 期裸 ImportError/RuntimeError）。
+**teardown 配对**：session 结束自动清掉本 session 新建的真容器（失败/中断残留的 `openclaw-gw-*`
+占端口池）+ 文件级 test DB。**保守所有权**——只清「基线可信、不在基线内、且端口在池内」的容器；
+基线快照若无法建立（daemon 瞬断）则**完全不清理**（宁可留残可手动 `docker rm -f`，绝不误删并发
+session/手动起的容器）。基线已存在/池外的一律不碰。
+
 **本地怎么跑**（L0 health case 不需 docker daemon）：
 
 ```bash
+# 方式一：让 pytest 自动准备缺失依赖（幂等，等价于下面三步手动装）
+python -m pytest -m integration tests/integration/ -v --integration-setup
+
+# 方式二：手动准备后直接跑
 pip install -r requirements/integration.txt
 python -m playwright install chromium
 (cd ../frontend && npm ci)
 python -m pytest -m integration tests/integration/test_integration_http.py -v
 ```
+
+> Colima 注意：`--basetemp` 与 `OPENCLAW_TEMPLATE_DIR` 都须在 `$HOME` 下（virtiofs 只共享 `$HOME`；
+> /tmp 或默认 `/var/folders/...` 的 bind-mount 会退化成空目录 → 网关 Missing config），如
+> `--basetemp=$HOME/.cache/pytest-integration`。
 
 > vite dev server 由 conftest 经 `VITE_API_TARGET` 注入 live server 随机端口（dev 行为不变——
 > `vite.config.ts` proxy target 缺省 `http://localhost:8000`，`npm run dev` 完全不受影响）。
