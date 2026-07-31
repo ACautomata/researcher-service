@@ -37,7 +37,7 @@ extend-ignore = [
 
 # I001 isort 的 known-first-party
 [tool.ruff.lint.isort]
-known-first-party = ["accounts", "chat", "config", "containers", "models", "wiki"]
+known-first-party = ["accounts", "chat", "common", "config", "containers", "models", "wiki"]
 
 # ---- pylint：语义/类型层（风格交给 ruff，见 [tool.ruff]）----
 [tool.pylint.MAIN]
