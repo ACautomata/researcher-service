@@ -133,16 +133,18 @@ async function loginHandler(req: Request, res: Response): Promise<void> {
 }
 
 async function refreshHandler(req: Request, res: Response): Promise<void> {
-  const oldToken = req.cookies?.[REFRESH_COOKIE] as string | undefined
-  if (!oldToken) throw fail(CODE.REFRESH_INVALID)
+  const oldToken = req.cookies?.[REFRESH_COOKIE]
+  // cookie-parser 对 j: 前缀 JSON cookie 解析为对象 → hashToken 会抛 TypeError → 90000。
+  // 拒绝任何非 string cookie（Codex #342 四轮 P2）。
+  if (typeof oldToken !== 'string') throw fail(CODE.REFRESH_INVALID)
   const { access, refreshCookie } = await rotateRefresh(oldToken, req.prisma)
   setRefreshCookie(res, refreshCookie)
   ok(res, { access })
 }
 
 async function logoutHandler(req: Request, res: Response): Promise<void> {
-  const token = req.cookies?.[REFRESH_COOKIE] as string | undefined
-  if (token) {
+  const token = req.cookies?.[REFRESH_COOKIE]
+  if (typeof token === 'string') {
     await req.prisma.refreshToken.updateMany({
       where: { tokenHash: hashToken(token), revokedAt: null },
       data: { revokedAt: new Date() },

@@ -55,6 +55,23 @@ describe('refresh R1 (slice 5)', () => {
     expect(res.body.code).toBe(10003)
   })
 
+  // 意见⑩[P2]（Codex 四轮）：refresh cookie 运行时类型 —— cookie-parser 对 j: 前缀 JSON cookie
+  // 解析为对象，hashToken 的 crypto.update 抛 TypeError → 90000。须在 hash 前拒绝非 string。
+  it('JSON cookie（非 string）→ 10003 而非 90000', async () => {
+    const res = await ctx.request
+      .post('/api/v1/auth/token/refresh')
+      .set('Cookie', ['refresh_token=j:{"x":1}'])
+    expect(res.body.code).toBe(10003)
+  })
+
+  it('logout 同样拒绝非 string cookie → 10001（未认证）或正常撤销，不 90000', async () => {
+    const res = await ctx.request
+      .post('/api/v1/auth/logout')
+      .set('Cookie', ['refresh_token=j:{"x":1}'])
+    // 无 access token → 10001；重点是不 90000（未因对象 cookie 抛错）
+    expect([10001, 0]).toContain(res.body.code)
+  })
+
   it('过期 refresh → 10003', async () => {
     const admin = await ctx.prisma.user.findUnique({ where: { username: 'admin1' } })
     const { token, hash } = generateRefreshToken()

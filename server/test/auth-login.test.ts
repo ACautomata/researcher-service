@@ -43,6 +43,17 @@ describe('login (slice 3)', () => {
     expect(res.body.data).toHaveProperty('password')
   })
 
+  // 意见⑨[P2]（Codex 四轮）：bcrypt 72 字节截断 —— bcryptjs 截断 >72 字节的密码，首 72 字节
+  // 相同而后续不同的两个密码可互登。schema 须加共享 72 字节上限，超长密码提交即 90002。
+  it('超 72 字节密码 → 90002（拒绝 bcrypt 截断碰撞面）', async () => {
+    const over72 = 'a'.repeat(72) + 'AAAA' // 76 字节 > 72
+    const res = await ctx.request
+      .post('/api/v1/auth/login')
+      .send({ username: 'admin1', password: over72 })
+    expect(res.body.code).toBe(90002)
+    expect(res.body.data).toHaveProperty('password')
+  })
+
   it('禁用用户 → 10002', async () => {
     await seedUserDisabled(ctx)
     const res = await login(ctx.request, 'disabled1', 'pw-disabled1-secure')
