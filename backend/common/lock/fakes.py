@@ -248,6 +248,11 @@ class FakeLockSyncLease:
         **身份 + 过期检查在持 ``_mutex`` 时一次完成**（#254 / codex P2）：修前先锁外
         ``_is_held()`` 再锁内只做身份检查——两检查间租约过期且无竞争者替换 entry 时，
         会在过期后 renew 成功（违反不 resurrect 契约）。原子化后过期租约绝不被复活。
+
+        **缩短 TTL 时唤醒 waiters（#254 / codex P2）：** contender 在 ``acquire()`` 已快照
+        持有者剩余 TTL（如 60s）并注册 Event；持有者 renew 把 TTL 缩短到 10ms 时只更新
+        ``_held`` 会让 waiter 仍按旧 60s 快照睡（锁实际早空但 fake 测试挂死）。当新
+        ``expires_at`` 比旧值提前（缩短）时，快照并唤醒已注册 waiter 让它们立即重查。
         """
         with self._lock._mutex:
             entry = self._lock._held.get(self._resource)
@@ -257,9 +262,20 @@ class FakeLockSyncLease:
                 and entry[1] is self
                 and self._lock._entry_live(entry)
             ):
-                self._lock._held[self._resource] = (
-                    self._lock._now() + new_ttl.total_seconds(), self,
-                )
+                new_expires_at = self._lock._now() + new_ttl.total_seconds()
+                self._lock._held[self._resource] = (new_expires_at, self)
+                if new_expires_at < entry[0]:
+                    # 缩短：唤醒已快照旧 TTL 的 waiter，让它们立即重查（同 release 的
+                    # 锁内快照 + clear，锁外 set）
+                    waiters = list(self._waiters)
+                    self._waiters.clear()
+                else:
+                    waiters = None
+            else:
+                waiters = None
+        if waiters:
+            for waiter in waiters:
+                waiter.set()
         self._lock.renew_calls.append((self._resource, new_ttl))
 
     def release(self) -> None:

@@ -732,3 +732,42 @@ class TestFakeLockSyncBehavior:
         assert not blocked.is_alive(), 'release 后 acquire 应返回（未被 waiter 竞态卡死）'
         assert box.get('handle') is not None, '阻塞 acquire 应取得租约'
         box['handle'].release()
+
+    def test_renew_shortening_ttl_wakes_waiters(self):
+        """#254 / codex P2：renew 把 TTL 缩短到提前过期时，须唤醒已注册 waiter。
+
+        contender 在 ``acquire()`` 快照持有者剩余 TTL（60s）并注册 Event 后，持有者 renew
+        缩短到 10ms——只更新 ``_held`` 不 signal waiter，waiter 仍按旧 60s 快照睡，锁实际
+        早空但 fake 测试挂死（与 Redis adapter 轮询背离）。修复后 renew 使 ``expires_at``
+        提前时应唤醒 waiters 让它们立即重查。
+        """
+        from common.lock.fakes import FakeLockSync
+
+        lock = FakeLockSync()
+        holder = lock.acquire(_fresh_resource(), ttl=timedelta(seconds=60))
+
+        box: dict = {}
+        started = threading.Event()
+
+        def _blocked_acquire():
+            started.set()
+            box['handle'] = lock.acquire(_fresh_resource(), ttl=timedelta(seconds=60))
+
+        blocked = threading.Thread(target=_blocked_acquire)
+        blocked.start()
+        assert started.wait(timeout=1), 'acquire 线程应已启动'
+        time.sleep(0.02)  # 让线程快照 60s 剩余 TTL 并注册 waiter
+
+        start = time.monotonic()
+        holder.renew(timedelta(milliseconds=10))  # 缩短 TTL → 10ms 后过期
+        blocked.join(timeout=2)
+        elapsed = time.monotonic() - start
+
+        # 修复前：waiter 按旧 60s 快照睡，join 超时 → blocked.is_alive() 为真（红）
+        assert not blocked.is_alive(), (
+            f'renew 缩短 TTL 后 waiter 应在 TTL 过期时立即取得，'
+            f'实际阻塞 {elapsed:.2f}s 未返回（按旧快照睡满）'
+        )
+        assert box.get('handle') is not None, '阻塞 acquire 应取得租约'
+        assert elapsed < 2, f'renew 缩短 TTL 后 acquire 应在 ~10ms 返回，实际 {elapsed:.2f}s'
+        box['handle'].release()
