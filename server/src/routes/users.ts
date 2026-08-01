@@ -5,7 +5,7 @@ import { requireAuth } from '../middleware/auth'
 import { mustChangePasswordGate } from '../middleware/mustChangePasswordGate'
 import { validateBody } from '../middleware/validate'
 import { userCreateSchema, userPatchSchema } from '../validation/schemas'
-import { createUser, type CreateUserInput } from '../auth/userService'
+import { createUser, assertQuotaValid, type CreateUserInput } from '../auth/userService'
 import { hashPassword, generateTempPassword } from '../auth/password'
 import { revokeAllUserRefresh } from '../auth/tokens'
 
@@ -60,8 +60,8 @@ usersRouter.patch('/:id', validateBody(userPatchSchema), async (req: Request, re
     isActive?: boolean
     maxContainers?: number
   }
-  // 配额语义非法（负数）→ 10043（区别于 90002 结构校验）
-  if (maxContainers !== undefined && maxContainers < 0) throw fail(CODE.QUOTA_INVALID)
+  // 配额语义非法（负数或超 Int 上界）→ 10043（区别于 90002 结构校验；与 createUser 共享）
+  assertQuotaValid(maxContainers)
 
   const existing = await req.prisma.user.findUnique({ where: { id } })
   if (!existing) {

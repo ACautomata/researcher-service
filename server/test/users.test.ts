@@ -97,6 +97,26 @@ describe('users admin (slice 10/11/12)', () => {
     expect(res.body.code).toBe(10043)
   })
 
+  // 意见⑫[P2]（Codex 五轮）：quota 未绑 Prisma Int 范围 —— maxContainers 超 2,147,483,647
+  // zod int() 接受但 Prisma Int 列存不了 → 90000。须共享上界，超界 → 10043 拒绝。
+  it('PATCH 配额超 Int 上界（2147483648）→ 10043 而非 90000', async () => {
+    const admin = await login(ctx.request, 'admin1', 'pw-admin1-secure')
+    const res = await ctx.request
+      .patch(`/api/v1/users/${targetId}`)
+      .set(bearer(admin.access))
+      .send({ maxContainers: 2147483648 })
+    expect(res.body.code).toBe(10043)
+  })
+
+  it('POST 建号配额超 Int 上界（2147483648）→ 10043 而非 90000', async () => {
+    const admin = await login(ctx.request, 'admin1', 'pw-admin1-secure')
+    const res = await ctx.request
+      .post('/api/v1/users')
+      .set(bearer(admin.access))
+      .send({ username: 'quotaHuge', password: 'pw-quota-secure', maxContainers: 2147483648 })
+    expect(res.body.code).toBe(10043)
+  })
+
   it('不存在 id → 10041（防探测）', async () => {
     const admin = await login(ctx.request, 'admin1', 'pw-admin1-secure')
     const res = await ctx.request

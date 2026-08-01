@@ -2,6 +2,8 @@ import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest'
 import { setupTestApp, type TestContext } from './setup'
 import { seedAdmin, login, assertRefreshCookieShape } from './helpers'
 import * as passwordMod from '../src/auth/password'
+import { hashPassword } from '../src/auth/password'
+import { issueSessionInTx } from '../src/routes/auth'
 
 // 片3：login
 describe('login (slice 3)', () => {
@@ -58,6 +60,32 @@ describe('login (slice 3)', () => {
     await seedUserDisabled(ctx)
     const res = await login(ctx.request, 'disabled1', 'pw-disabled1-secure')
     expect(res.body.code).toBe(10002)
+  })
+
+  // 意见⑪[P1]（Codex 五轮）：login 发 refresh 前未复查 —— 验证密码后并发改密/reset commit
+  // 会撤销旧 refresh 并改 hash，login 仍插入基于过期密码的新 refresh → 旧凭据存活。
+  // issueSessionInTx 事务内条件复查 passwordHash + isActive，任一变化 → ok:false 拒绝。
+  it('并发改密后（hash 已变）→ issueSessionInTx 拒绝且不 create refresh', async () => {
+    const admin = await ctx.prisma.user.findUnique({ where: { username: 'admin1' } })
+    const oldHash = admin!.passwordHash!
+    const activeBefore = await ctx.prisma.refreshToken.count({
+      where: { userId: admin!.id, revokedAt: null },
+    })
+    // 模拟并发：verify 通过后、create 前 admin 改密（hash 变了）
+    await ctx.prisma.user.update({
+      where: { id: admin!.id },
+      data: { passwordHash: await hashPassword('reset-by-admin-88'), mustChangePassword: true },
+    })
+    const result = await issueSessionInTx(
+      ctx.prisma as never,
+      admin!.id,
+      oldHash, // 仍是校验时读到的旧 hash
+    )
+    expect(result).toEqual({ ok: false }) // 复查失败 → 拒绝
+    const activeAfter = await ctx.prisma.refreshToken.count({
+      where: { userId: admin!.id, revokedAt: null },
+    })
+    expect(activeAfter).toBe(activeBefore) // 未插入新 refresh（旧凭据不存活）
   })
 
   // 意见③[P2]：时序侧信道防护（Codex #342）—— 短路分支（不存在/OIDC-only/inactive）也跑

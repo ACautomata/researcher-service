@@ -109,6 +109,29 @@ async function rotateRefresh(
 
 // --- handlers ---
 
+// login 发 session 事务体内核（可测 seam，Codex #342 五轮 P1）：条件复查已验证的 passwordHash
+// 仍等于旧 hash 且 isActive 仍 true（事务内），count=0（并发改密/reset 已 commit 或账号被禁用）→
+// ok:false 拒绝，不插入基于过期密码的 refresh → 旧凭据不存活。
+export async function issueSessionInTx(
+  tx: Pick<PrismaClient, 'user' | 'refreshToken'>,
+  userId: string,
+  verifiedHash: string,
+): Promise<
+  | { ok: false }
+  | { ok: true; refreshHash: string; refreshToken: string; access: string }
+> {
+  const user = await tx.user.findFirst({
+    where: { id: userId, passwordHash: verifiedHash, isActive: true },
+  })
+  if (!user) return { ok: false } // 并发改密/reset 或禁用 → 拒绝
+  const refresh = generateRefreshToken()
+  await tx.refreshToken.create({
+    data: { userId: user.id, tokenHash: refresh.hash, expiresAt: refreshExpiresAt() },
+  })
+  const access = await signAccessToken(user.id)
+  return { ok: true, refreshHash: refresh.hash, refreshToken: refresh.token, access }
+}
+
 async function loginHandler(req: Request, res: Response): Promise<void> {
   const { username, password } = req.body as { username: string; password: string }
   const user = await req.prisma.user.findUnique({ where: { username } })
@@ -123,13 +146,14 @@ async function loginHandler(req: Request, res: Response): Promise<void> {
   if (!(await verifyPassword(password, user.passwordHash))) {
     throw fail(CODE.LOGIN_FAILED)
   }
-  const access = await signAccessToken(user.id)
-  const refresh = generateRefreshToken()
-  await req.prisma.refreshToken.create({
-    data: { userId: user.id, tokenHash: refresh.hash, expiresAt: refreshExpiresAt() },
-  })
-  setRefreshCookie(res, refresh.token)
-  ok(res, { access, mustChangePassword: user.mustChangePassword })
+  // 发 session 原子化：事务内条件复查 passwordHash + isActive（防 verify 后被并发改密/reset
+  // 导致旧凭据存活）。复查失败 → 拒绝 10002。
+  const issued = await req.prisma.$transaction(async (tx) =>
+    issueSessionInTx(tx, user.id, user.passwordHash!),
+  )
+  if (!issued.ok) throw fail(CODE.LOGIN_FAILED)
+  setRefreshCookie(res, issued.refreshToken)
+  ok(res, { access: issued.access, mustChangePassword: user.mustChangePassword })
 }
 
 async function refreshHandler(req: Request, res: Response): Promise<void> {
