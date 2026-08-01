@@ -122,7 +122,7 @@ class DockerRuntime:
         return [self._to_info(c) for c in cs]
 
     def host_published_ports(self) -> set[int]:
-        """枚举宿主上活动容器已发布的宿主端口（无 label 过滤，含未跟踪容器）。
+        """枚举宿主上与发布地址冲突的活动容器宿主端口（无 label 过滤，含未跟踪容器）。
 
         #295 codex P2：端口分配须反映 daemon（宿主）命名空间的真实占用。list_fleet 按
         label 过滤只覆盖本面板容器；后端容器化（bridge 网络）时容器内 socket.bind 又探
@@ -132,12 +132,17 @@ class DockerRuntime:
         保留 PortBindings 但 daemon 已收回端口（无活跃 docker-proxy），计数会误判池端口
         占用、假耗尽池；running/restarting/paused 仍持有绑定须计数（宁多算只跳过候选，
         少算则真实占用被误判空闲 → bind 冲突走重试）。
+        #295 codex P2 #3695357690：按发布地址过滤 HostIp——publish_host 为具体地址
+        （默认 127.0.0.1）时，仅绑到别的宿主 IP 的容器可复用同端口（地址不相交），
+        不计为占用；通配绑定（HostIp 空 / 0.0.0.0）与所有地址冲突，publish_host=0.0.0.0
+        （生产）覆盖所有接口、任意绑定都冲突。
         """
         published: set[int] = set()
         try:
             cs = self._client().containers.list(all=True)
         except Exception:  # pylint: disable=broad-exception-caught  # daemon 不可达 → 空集（不误报）
             return published
+        publish_host = self._publish_host
         for c in cs:
             if c.status in {'exited', 'created', 'dead'}:
                 continue
@@ -145,9 +150,15 @@ class DockerRuntime:
             for binds in bindings.values():
                 for b in binds or []:
                     raw = b.get('HostPort')
+                    if raw is None:
+                        continue
+                    # 通配绑定（HostIp 空/0.0.0.0）与任意发布地址冲突；具体地址仅在同
+                    # publish_host 时冲突（0.0.0.0 发布覆盖所有接口）。
+                    host_ip = (b.get('HostIp') or '0.0.0.0')
+                    if publish_host != '0.0.0.0' and host_ip != '0.0.0.0' and host_ip != publish_host:
+                        continue
                     try:
-                        if raw is not None:
-                            published.add(int(raw))
+                        published.add(int(raw))
                     except (TypeError, ValueError):
                         pass
         return published

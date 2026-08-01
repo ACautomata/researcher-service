@@ -253,7 +253,7 @@ def test_create_removes_partial_container_when_run_fails(config, health, tmp_pat
     # 重试同名 docker 冲突。except 分支须 best-effort remove 残留容器。
     _seed_template(tmp_path / 'template')
     runtime = FakeRuntime()
-    runtime.fail_after_create = RuntimeError('port already allocated')
+    runtime.fail_after_create = RuntimeError('random daemon error')  # 非 bind 措辞——验证 run 后回滚清残留
     orch = InstanceOrchestrator(runtime=runtime, config=config, health_probe=health)
     with pytest.raises(RuntimeError):
         orch.create('demo')
@@ -309,6 +309,28 @@ def test_create_retries_on_docker_bind_conflict(config, health, runtime, tmp_pat
     assert runtime.run_specs[0].host_port == 19000  # 第一次尝试 19000
     assert runtime.run_specs[1].host_port == 19001  # 冲突后重试 19001
     assert not Instance.objects.filter(name='demo', port=19000).exists()  # 冲突行已删
+    assert Instance.objects.filter(name='demo', port=19001).exists()
+
+
+@pytest.mark.django_db
+def test_create_retries_on_port_already_allocated_wording(config, health, runtime, tmp_path):
+    """#295 codex P2（新轮 #3695357689）：daemon 报 'port is already allocated' 也是 bind 冲突。
+
+    真实 docker daemon 依来源以 "Bind for 0.0.0.0:19000 failed: port is already
+    allocated"（libnetwork portallocator，含 "is"）或 "bind: address already in use"
+    （docker-proxy OS 层）报告宿主端口发布冲突。_is_bind_conflict 归一化匹配两种措辞
+    （"already allocated" 子串覆盖 "is already allocated" 与简写），任一种都触发学习冲突
+    端口重试下一空闲端口，而非整段回滚、create 失败。
+    """
+    _seed_template(tmp_path / 'template')
+    runtime.fail_bind_ports = {19000}
+    runtime.fail_bind_message = 'Bind for 0.0.0.0:{port} failed: port is already allocated'
+    orch = InstanceOrchestrator(runtime=runtime, config=config, health_probe=health)
+    inst = orch.create('demo')
+    assert inst.port == 19001                 # 冲突措辞被识别 → 重试到 19001
+    assert inst.status == Instance.STATUS_RUNNING
+    assert runtime.run_specs[0].host_port == 19000  # 第一次尝试 19000
+    assert runtime.run_specs[1].host_port == 19001  # 冲突后重试 19001
     assert Instance.objects.filter(name='demo', port=19001).exists()
 
 
@@ -617,7 +639,7 @@ def test_create_rollback_removes_when_run_attempted_and_start_fails(config, heal
     # → 残留命名容器须 best-effort remove（否则重试同名 docker 冲突）。
     _seed_template(tmp_path / 'template')
     runtime = FakeRuntime()
-    runtime.fail_after_create = RuntimeError('port already allocated')
+    runtime.fail_after_create = RuntimeError('random daemon error')  # 非 bind 措辞——验证 run 后回滚清残留
     orch = InstanceOrchestrator(runtime=runtime, config=config, health_probe=health)
     with pytest.raises(RuntimeError):
         orch.create('demo')

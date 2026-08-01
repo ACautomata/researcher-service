@@ -181,6 +181,69 @@ def test_host_published_ports_ignores_stopped_containers(monkeypatch):
     assert 19006 not in ports      # dead 容器残留 PortBindings 不计数
 
 
+def test_host_published_ports_filters_by_publish_host(monkeypatch):
+    """#295 codex P2（新轮 #3695357690）：按发布地址过滤 HostIp，不相交绑定不误占端口。
+
+    publish_host=127.0.0.1 时，仅绑到别的宿主 IP 的容器可复用同端口（地址不相交）。
+    现实现丢弃 HostIp 全局标记占用 → 假耗尽 19000–19999。通配绑定（HostIp 空/0.0.0.0）
+    与所有地址冲突，必须计数。
+    """
+    from containers.docker_runtime import DockerRuntime
+
+    class _FakeContainers:
+        def list(self, all=True, filters=None):  # pylint: disable=redefined-builtin
+            return [
+                _FakeC('same-ip', None, {'18789/tcp': [{'HostIp': '127.0.0.1', 'HostPort': '19001'}]}, 'running'),
+                _FakeC('other-ip', None, {'18789/tcp': [{'HostIp': '192.168.1.5', 'HostPort': '19002'}]}, 'running'),
+                _FakeC('wildcard', None, {'18789/tcp': [{'HostIp': '0.0.0.0', 'HostPort': '19003'}]}, 'running'),
+                _FakeC('empty-hostip', None, {'18789/tcp': [{'HostIp': '', 'HostPort': '19004'}]}, 'running'),
+            ]
+
+    class _FakeC:
+        def __init__(self, name, labels, port_bindings, status):
+            self.name = name
+            self.labels = labels or {}
+            self.status = status
+            self.attrs = {'HostConfig': {'PortBindings': port_bindings}} if port_bindings else {'HostConfig': {}}
+
+    class _FakeClient:
+        containers = _FakeContainers()
+
+    rt = DockerRuntime(client_factory=_FakeClient, publish_host='127.0.0.1')
+    ports = rt.host_published_ports()
+    assert 19001 in ports          # 绑定到 127.0.0.1 → 与 publish_host 冲突
+    assert 19002 not in ports      # 仅绑到其它宿主 IP → 地址不相交，不算占用
+    assert 19003 in ports          # 通配 0.0.0.0 → 与所有地址冲突
+    assert 19004 in ports          # HostIp 空 = 通配 → 冲突
+
+
+def test_host_published_ports_wildcard_publish_conflicts_all(monkeypatch):
+    """publish_host=0.0.0.0（生产）时任意具体地址绑定都算冲突（0.0.0.0 覆盖所有接口）。"""
+    from containers.docker_runtime import DockerRuntime
+
+    class _FakeContainers:
+        def list(self, all=True, filters=None):  # pylint: disable=redefined-builtin
+            return [
+                _FakeC('loopback', None, {'18789/tcp': [{'HostIp': '127.0.0.1', 'HostPort': '19001'}]}, 'running'),
+                _FakeC('lan', None, {'18789/tcp': [{'HostIp': '192.168.1.5', 'HostPort': '19002'}]}, 'running'),
+            ]
+
+    class _FakeC:
+        def __init__(self, name, labels, port_bindings, status):
+            self.name = name
+            self.labels = labels or {}
+            self.status = status
+            self.attrs = {'HostConfig': {'PortBindings': port_bindings}} if port_bindings else {'HostConfig': {}}
+
+    class _FakeClient:
+        containers = _FakeContainers()
+
+    rt = DockerRuntime(client_factory=_FakeClient, publish_host='0.0.0.0')
+    ports = rt.host_published_ports()
+    assert 19001 in ports          # 0.0.0.0 覆盖所有接口 → loopback 绑定冲突
+    assert 19002 in ports          # 同理 lan 绑定也冲突
+
+
 def test_host_published_ports_empty_when_no_containers(monkeypatch):
     """空 daemon → 空集合（不误报占用）。"""
     from containers.docker_runtime import DockerRuntime

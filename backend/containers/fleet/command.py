@@ -126,11 +126,17 @@ class FleetCommand:
 
         #295 codex P2：宿主非 Docker 进程占池端口时，容器内 socket.bind 与 daemon 容器
         枚举都看不到占用（命名空间盲区 / 无 PortBindings），allocator 仍选中该端口；
-        docker run 发布时 daemon（宿主命名空间）最终仲裁 → bind: address already in use。
-        此异常须触发重试下一空闲端口，而非整段回滚。docker-py 抛 docker.errors.APIError
-        （str 含 "address already in use"）；fake/tests 用 RuntimeError 近似。
+        docker run 发布时 daemon（宿主命名空间）最终仲裁 → bind 冲突。此异常须触发重试
+        下一空闲端口，而非整段回滚。docker-py 抛 docker.errors.APIError，措辞依来源分两种：
+        - OS 层 bind 失败（docker-proxy）："bind: address already in use"；
+        - libnetwork portallocator（端口已被其它容器/本 daemon 记账占用）：
+          "Bind for 0.0.0.0:19000 failed: port is already allocated"（含 "is"）。
+        归一化匹配——"already allocated" 覆盖两者与 codex 的简写（#295 codex P2 新轮：
+        只精确匹配前一种会让 portallocator 冲突走非 bind 回滚、create 失败而非学习冲突
+        端口重试）。fake/tests 用 RuntimeError 近似。
         """
-        return 'address already in use' in str(exc)
+        message = str(exc)
+        return 'address already in use' in message or 'already allocated' in message
 
     def create(self, name: str) -> Instance:  # pylint: disable=too-many-statements,too-many-branches
         """创建并启动一个容器（spec §5.4/§5.5）。

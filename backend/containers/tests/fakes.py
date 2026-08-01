@@ -28,14 +28,21 @@ class FakeRuntime:
         # 命中 set 内 host_port 时 run() 抛 bind conflict（近似 docker.errors.APIError），
         # 用于验证 create 识别冲突后重试下一空闲端口而非整段回滚。
         self.fail_bind_ports: set[int] = set()
+        # #295 codex P2（新轮）：bind 冲突措辞可配——真实 daemon 依来源报
+        # "bind: address already in use"（docker-proxy OS 层）或
+        # "Bind for 0.0.0.0:19000 failed: port is already allocated"（libnetwork
+        # portallocator），_is_bind_conflict 须归一化匹配两者。默认取真实
+        # portallocator 措辞（"is already allocated"）。
+        self.fail_bind_message = (
+            '500 Server Error for http+docker://localhost/containers/create: '
+            'driver failed programming external connectivity on endpoint xyz: '
+            'Bind for 0.0.0.0:{port} failed: port is already allocated'
+        )
 
     def run(self, spec: ContainerSpec) -> str:
         self.run_specs.append(spec)
         if spec.host_port in self.fail_bind_ports:
-            raise RuntimeError(
-                f'500 Server Error for http+docker://localhost/containers/create: '
-                f'bind: address already in use (port {spec.host_port})',
-            )
+            raise RuntimeError(self.fail_bind_message.format(port=spec.host_port))
         cid = f'fakeid-{spec.name}-{self._next}'
         self._next += 1
         # 模拟 docker create：容器先入 daemon（Created 态），与真实 containers.run(create+start) 一致
