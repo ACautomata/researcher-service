@@ -7,9 +7,9 @@
 ```
 https://researcher.acautomata.top
     │  宝塔边缘 nginx：Let's Encrypt 证书（自动续期）+ 强制 HTTPS
-    │  反代 → http://127.0.0.1:8080
+    │  反代 → http://127.0.0.1:18080
     ▼
-panel-frontend 容器（nginx，唯一对宿主暴露，loopback:8080）
+panel-frontend 容器（nginx，唯一对宿主暴露，loopback:18080）
     ├─ /        → SPA（dist/，history fallback）
     ├─ /api/    → panel-backend:8000（Daphne/DRF）
     └─ /ws/     → panel-backend:8000（Channels，Upgrade 透传）
@@ -30,7 +30,7 @@ panel-frontend 容器（nginx，唯一对宿主暴露，loopback:8080）
 2. 渲染运行时 `.env`（敏感值来自 secrets，不进 git）。
 3. scp `docker-compose.deploy.yml` + `.env` → 宿主 `/www/panel/`。
 4. SSH 远端：`docker login ghcr.io`（持久）→ `pull` → `up -d --remove-orphans` → `image prune` →
-   健康门 `curl 127.0.0.1:8080/api/health`（30s 内非 200 即 workflow 红）。
+   健康门 `curl 127.0.0.1:18080/api/health`（30s 内非 200 即 workflow 红）。
 5. 防御性 bootstrap：`/www/panel`、`/srv/openclaw/template` 缺则自动建/克隆。
 
 ## 一次性 bootstrap（手工，仅首次）
@@ -41,7 +41,7 @@ panel-frontend 容器（nginx，唯一对宿主暴露，loopback:8080）
 | 2 | DNS 指向 | `researcher.acautomata.top` A 记录 → 宿主公网 IP（LE HTTP-01 需先解析）。 |
 | 3 | 宝塔建站点 | 网站 → 添加站点 `researcher.acautomata.top`（纯静态/反代用途，无需 PHP）。 |
 | 4 | Let's Encrypt | 站点 SSL → Let's Encrypt 申请 → 开启「强制 HTTPS」。续期宝塔自动。 |
-| 5 | 反代 | 站点 → 反向代理 → 目标 `http://127.0.0.1:8080`，发送域名 `$host`。 |
+| 5 | 反代 | 站点 → 反向代理 → 目标 `http://127.0.0.1:18080`，发送域名 `$host`。 |
 | 6 | GitHub secrets | 见下表。 |
 
 > researcher 模板、/www/panel 目录 **无需手工预建**——CD 首次会自动克隆/创建（防御性 bootstrap）。
@@ -99,6 +99,6 @@ cd /www/panel
 docker compose -f docker-compose.deploy.yml --env-file deploy.env ps
 docker compose -f docker-compose.deploy.yml --env-file deploy.env logs backend
 docker logs panel-frontend
-curl -v http://127.0.0.1:8080/api/health   # 应用层
+curl -v http://127.0.0.1:18080/api/health   # 应用层
 curl -v https://researcher.acautomata.top/api/health  # 经宝塔 TLS 全链路
 ```
