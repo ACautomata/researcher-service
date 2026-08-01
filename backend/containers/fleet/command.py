@@ -57,14 +57,20 @@ class FleetCommand:
             self._renderer = ConfigRenderer(template_text)
         return self._renderer
 
-    def _used_ports(self) -> set[int]:
-        """已用端口 = DB 记账 ∪ fleet 容器 label 端口 ∪ 池内宿主实测占用（codex R2 :161）。
+    def _used_ports(self, extra_used: set[int] | None = None) -> set[int]:
+        """已用端口 = DB 记账 ∪ daemon 宿主发布端口（含未跟踪容器）∪ 池内宿主实测占用。
 
-        仅记账会让最低候选被无关进程/未跟踪容器占用而反复失败；并入 daemon label
-        端口与宿主 bind 实测后，allocator 跳过真实不可用端口。宿主探测只扫池区间，
-        且对池外/异常端口容错（占用即跳过该候选，不影响其余）。
+        仅记账会让最低候选被无关进程/未跟踪容器占用而反复失败；并入 daemon 侧端口与
+        宿主 bind 实测后，allocator 跳过真实不可用端口。#295 codex P2：host_published_ports
+        经 daemon 命名空间枚举（后端容器化时容器内 socket.bind 探不到宿主端口），
+        list_fleet 按 label 过滤看不到未跟踪容器。宿主探测只扫池区间，且对池外/异常
+        端口容错（占用即跳过该候选，不影响其余）。
+        extra_used：create 重试循环内学习到的 bind 冲突端口（探测不可见，经 daemon 发布失败
+        反推），并入门沿用。
         """
         used = set(Instance.objects.values_list('port', flat=True))
+        if extra_used:
+            used |= extra_used
         try:
             for info in self._deps.runtime.list_fleet():
                 port = getattr(info, 'port', None)
@@ -73,22 +79,27 @@ class FleetCommand:
         except Exception:  # pylint: disable=broad-exception-caught
             # daemon 不可达不阻断分配：DB 记账 + 宿主实测仍可给出候选
             pass
+        try:
+            used |= self._deps.runtime.host_published_ports()
+        except Exception:  # pylint: disable=broad-exception-caught
+            pass
         for port in range(self._deps.config.port_start, self._deps.config.port_end + 1):
             if port not in used and self._deps.port_in_use(port):
                 used.add(port)
         return used
 
-    def _reserve_row(self, name: str) -> Instance:
+    def _reserve_row(self, name: str, extra_used: set[int] | None = None) -> Instance:
         """事务内占位 INSERT：name/port 冲突由 DB 唯一约束仲裁（codex R1 :77/:84）。
 
         port 冲突（并发选同 port）→ 保存点回滚后重试下一个空闲 port；
         name 冲突（并发同名）→ InstanceExists（view 409，不重试）。
         预占在 mkdir 之前：DB 唯一约束先挡重名，避免误删既有实例目录。
+        extra_used：create 重试循环内学习到的 bind 冲突端口（透传给 _used_ports）。
         """
         home = str(self._deps.config.root / 'instances' / name / 'home')
         token = secrets.token_urlsafe(TOKEN_URLSAFE_BYTES)
         for _ in range(MAX_PORT_RETRIES):
-            port = self._deps.allocator.next_free(self._used_ports())
+            port = self._deps.allocator.next_free(self._used_ports(extra_used))
             try:
                 with transaction.atomic():
                     return Instance.objects.create(
@@ -109,7 +120,19 @@ class FleetCommand:
                 # 否则 port 冲突 → 保存点已回滚，继续重试下一 port
         raise PortAllocationError(name)
 
-    def create(self, name: str) -> Instance:  # pylint: disable=too-many-statements
+    @staticmethod
+    def _is_bind_conflict(exc: Exception) -> bool:
+        """识别 docker 发布端口时的宿主 bind 冲突异常。
+
+        #295 codex P2：宿主非 Docker 进程占池端口时，容器内 socket.bind 与 daemon 容器
+        枚举都看不到占用（命名空间盲区 / 无 PortBindings），allocator 仍选中该端口；
+        docker run 发布时 daemon（宿主命名空间）最终仲裁 → bind: address already in use。
+        此异常须触发重试下一空闲端口，而非整段回滚。docker-py 抛 docker.errors.APIError
+        （str 含 "address already in use"）；fake/tests 用 RuntimeError 近似。
+        """
+        return 'address already in use' in str(exc)
+
+    def create(self, name: str) -> Instance:  # pylint: disable=too-many-statements,too-many-branches
         """创建并启动一个容器（spec §5.4/§5.5）。
 
         先以进程内 guard 覆盖完整 create，再事务占位（挡重名/仲裁 port），
@@ -123,81 +146,128 @@ class FleetCommand:
         if not self._deps.inflight.claim(name):
             raise InstanceExists(name)
 
-        inst = None
-        instance_dir = self._deps.config.root / 'instances' / name
-        home = instance_dir / 'home'
-        config_path = instance_dir / 'openclaw.json'
-        directory_created = False
-        run_attempted = False
-        preexisting = False
+        # #295 codex P2：bind 冲突重试预算 = 端口池候选数，而非 MAX_PORT_RETRIES
+        # （那是 DB 并发冲突重试预算）。宿主非容器监听占 8+ 最低端口时，池内更高端口仍空闲，
+        # 外层循环须继续尝试直至 allocator 池耗尽（_reserve_row 抛 PortAllocationError）。
+        pool_size = self._deps.config.port_end - self._deps.config.port_start + 1
+        # bind 冲突学习集——探测不可见的宿主占用端口（经 docker 发布失败反推），重试循环内
+        # 并入已用集，避免每次 re-reserve 都重选同一冲突端口。
+        learned_conflicts: set[int] = set()
         try:
-            # guard 必须先于预占行：DELETE 不能观察到尚未受保护的 creating 行。
-            inst = self._reserve_row(name)
-            # preflight 也在统一回滚范围内；daemon 异常不得遗留 creating 行。
-            preexisting = self._deps.runtime.get(name) is not None
-            try:
-                instance_dir.mkdir(parents=True, exist_ok=False)
-            except FileExistsError:
-                # 目录已存在但 _reserve_row 成功（DB 无行）= 上次崩溃中断/外部残留/手动删 DB 遗留的
-                # orphan 目录。回滚刚建的 CREATING 行（保持「DB 无行」与残留目录一致，便于客户端
-                # 经 DELETE 或手动清理后重试），转 InstanceDirExists（view 409），不冒泡裸 500。
-                if inst is not None and inst.pk is not None:
-                    inst.delete()
-                raise InstanceDirExists(name, str(instance_dir)) from None
-            directory_created = True
-            self._deps.provisioner.provision(home)
-            # #280：config 写盘从裸 write_text + chmod 升级为 ConfigStore 原子写单源
-            # （tmp + chmod 0644 + os.replace）——create 不再有 torn/partial 风险。
-            self._config_store.write(name, self._ensure_renderer().render())
-            # codex R8 F1：renewable lease——render 完成后、run 前续约，把 lease 起点推到此刻，
-            # 覆盖随后的 docker run（create+start）。run 内 image pull 仍受 LEASE_TTL 约束
-            # （阻塞 IO 内部不续约，靠 TTL 充分性 + _reconcile self-heal 兜底，见 LEASE_TTL）。
-            inst.lease_expires_at = timezone.now() + LEASE_TTL
-            inst.save(update_fields=['lease_expires_at'])
-            run_attempted = True
-            container_id = self._deps.runtime.run(
-                ContainerSpec(
-                    name=name,
-                    image=self._deps.config.image,
-                    host_port=inst.port,
-                    gateway_token=inst.token,
-                    home_dir=str(home),
-                    config_path=str(config_path),
-                    llm_api_key=self._deps.config.llm_api_key,
-                ),
-            )
-            inst.container_id = container_id
-            inst.status = Instance.STATUS_RUNNING
-            inst.save()
-            return inst
-        except Exception:
-            # 仅 run 前确认不存在同名容器时，才可能清理由本次 run 留下的容器。
-            if run_attempted and not preexisting:
+            for _ in range(pool_size):
+                inst = None
+                instance_dir = self._deps.config.root / 'instances' / name
+                home = instance_dir / 'home'
+                config_path = instance_dir / 'openclaw.json'
+                directory_created = False
+                run_attempted = False
+                preexisting = False
                 try:
-                    created = self._deps.runtime.get(name)
-                    if created is not None and created.container_id:
-                        inst.container_id = created.container_id
-                    self._deps.runtime.remove(name)
-                    inst.container_id = ''
-                except Exception:  # pylint: disable=broad-exception-caught
-                    # 若清容器失败，保留刚观测到的 id，供 ERROR 行后续 delete 证明所有权。
-                    pass
-            # mkdir 成功是目录所有权的正向证据；mkdir 自身失败时保留既有数据。
-            if directory_created:
-                try:
-                    self._deps.dir_remover(instance_dir)
-                except OSError:
-                    if inst is not None:
-                        inst.status = Instance.STATUS_ERROR
+                    # guard 必须先于预占行：DELETE 不能观察到尚未受保护的 creating 行。
+                    inst = self._reserve_row(name, learned_conflicts)
+                    # preflight 也在统一回滚范围内；daemon 异常不得遗留 creating 行。
+                    preexisting = self._deps.runtime.get(name) is not None
+                    try:
+                        instance_dir.mkdir(parents=True, exist_ok=False)
+                    except FileExistsError:
+                        # 目录已存在但 _reserve_row 成功（DB 无行）= 上次崩溃中断/外部残留/手动删 DB 遗留的
+                        # orphan 目录。回滚刚建的 CREATING 行（保持「DB 无行」与残留目录一致，便于客户端
+                        # 经 DELETE 或手动清理后重试），转 InstanceDirExists（view 409），不冒泡裸 500。
+                        if inst is not None and inst.pk is not None:
+                            inst.delete()
+                        raise InstanceDirExists(name, str(instance_dir)) from None
+                    directory_created = True
+                    self._deps.provisioner.provision(home)
+                    # #280：config 写盘从裸 write_text + chmod 升级为 ConfigStore 原子写单源
+                    # （tmp + chmod 0644 + os.replace）——create 不再有 torn/partial 风险。
+                    self._config_store.write(name, self._ensure_renderer().render())
+                    # codex R8 F1：renewable lease——render 完成后、run 前续约，把 lease 起点推到此刻，
+                    # 覆盖随后的 docker run（create+start）。run 内 image pull 仍受 LEASE_TTL 约束
+                    # （阻塞 IO 内部不续约，靠 TTL 充分性 + _reconcile self-heal 兜底，见 LEASE_TTL）。
+                    inst.lease_expires_at = timezone.now() + LEASE_TTL
+                    inst.save(update_fields=['lease_expires_at'])
+                    run_attempted = True
+                    container_id = self._deps.runtime.run(
+                        ContainerSpec(
+                            name=name,
+                            image=self._deps.config.image,
+                            host_port=inst.port,
+                            gateway_token=inst.token,
+                            home_dir=str(home),
+                            config_path=str(config_path),
+                            llm_api_key=self._deps.config.llm_api_key,
+                        ),
+                    )
+                    inst.container_id = container_id
+                    inst.status = Instance.STATUS_RUNNING
+                    inst.save()
+                    return inst
+                except Exception as exc:  # pylint: disable=broad-exception-caught
+                    # #295 codex P2：docker run bind 冲突 → 释放当前行、继续循环重试下一端口。
+                    # 该端口已被 daemon 判占用（宿主命名空间唯一仲裁源），并入学习集使下一轮
+                    # _reserve_row 跳过它（host_published_ports / HostPortProbe 探测不可见）。
+                    if self._is_bind_conflict(exc):
+                        if inst is not None and inst.port is not None:
+                            learned_conflicts.add(inst.port)
+                        if run_attempted and not preexisting:
+                            try:
+                                created = self._deps.runtime.get(name)
+                                if created is not None and created.container_id:
+                                    inst.container_id = created.container_id
+                                self._deps.runtime.remove(name)
+                                inst.container_id = ''
+                            except Exception:  # pylint: disable=broad-exception-caught
+                                pass
+                        if directory_created:
+                            try:
+                                self._deps.dir_remover(instance_dir)
+                            except OSError:
+                                # codex P2（#295 第 4 轮）：bind 冲突后目录清理失败不能吞——
+                                # 残留目录会让下一轮重试撞 InstanceDirExists，且行已删则 delete
+                                # 无法清理孤儿数据，实例名被永久阻塞。保留 ERROR 行 + raise
+                                # InstanceCleanupError（对齐非 bind 回滚路径），运维可经 delete 重试。
+                                if inst is not None:
+                                    inst.status = Instance.STATUS_ERROR
+                                    try:
+                                        inst.save(update_fields=['status', 'container_id'])
+                                    except Exception:  # pylint: disable=broad-exception-caught
+                                        pass
+                                raise InstanceCleanupError(name, str(instance_dir)) from None
+                        if inst is not None and inst.pk is not None:
+                            inst.delete()
+                        # 池耗尽时（learned_conflicts 覆盖全部候选）下一轮 _reserve_row 抛
+                        # PortAllocationError，自然终止——无需按 attempt 计数。
+                        continue
+                    # 非 bind 冲突 → 原整段回滚逻辑
+                    if run_attempted and not preexisting:
                         try:
-                            inst.save(update_fields=['status', 'container_id'])
+                            created = self._deps.runtime.get(name)
+                            if created is not None and created.container_id:
+                                inst.container_id = created.container_id
+                            self._deps.runtime.remove(name)
+                            inst.container_id = ''
                         except Exception:  # pylint: disable=broad-exception-caught
+                            # 若清容器失败，保留刚观测到的 id，供 ERROR 行后续 delete 证明所有权。
                             pass
-                    raise InstanceCleanupError(name, str(instance_dir)) from None
-            if inst is not None and inst.pk is not None:
-                inst.delete()
-            raise
+                    # mkdir 成功是目录所有权的正向证据；mkdir 自身失败时保留既有数据。
+                    if directory_created:
+                        try:
+                            self._deps.dir_remover(instance_dir)
+                        except OSError:
+                            if inst is not None:
+                                inst.status = Instance.STATUS_ERROR
+                                try:
+                                    inst.save(update_fields=['status', 'container_id'])
+                                except Exception:  # pylint: disable=broad-exception-caught
+                                    pass
+                            raise InstanceCleanupError(name, str(instance_dir)) from None
+                    if inst is not None and inst.pk is not None:
+                        inst.delete()
+                    raise
+            # 理论上不可达：池候选数次循环内每次 return 或 raise（池耗尽抛 PortAllocationError）。
+            raise PortAllocationError(name)
         finally:
+            # guard 释放必须无条件执行：无论成功/回滚/重试耗尽，create 收尾都要释放在飞标记。
             self._deps.inflight.release(name)
 
     def delete(self, name: str) -> bool:
