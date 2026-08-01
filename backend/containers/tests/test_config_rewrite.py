@@ -91,3 +91,49 @@ def test_rewrite_creates_config_dir_if_missing(fleet):
 def test_rewrite_missing_instance_raises(fleet):
     with pytest.raises(InstanceNotFound):
         fleet['orch'].rewrite_config('nope')
+
+
+# ── #280：create config 写盘原子性（ConfigStore 单源，打在 facade seam）──
+
+
+@pytest.mark.django_db
+def test_create_writes_config_atomically_no_tmp_leftover(fleet):
+    # #280：create 的 config 写盘经 ConfigStore（tmp + os.replace）原子落盘——
+    # 正常路径不得残留 .tmp 文件（torn/partial 风险已消）。
+    fleet['orch'].create('demo')
+    cfg_file = fleet['config'].root / 'instances' / 'demo' / 'openclaw.json'
+    assert cfg_file.exists()
+    assert cfg_file.read_text().strip()                      # 非空
+    assert not cfg_file.with_name('openclaw.json.tmp').exists()
+
+
+@pytest.mark.django_db
+def test_create_config_write_failure_preserves_existing_and_cleans_tmp(fleet, monkeypatch):
+    """#280：create 写盘失败（注入 OSError）→ 既有 openclaw.json 不被污染、tmp 被清理、
+    转 ConfigWriteError。打在 facade seam（orch.create 触发、观察磁盘副作用）。"""
+    from pathlib import Path
+
+    from containers.fleet.values import ConfigWriteError
+    from containers.models import Instance
+
+    orch = fleet['orch']
+    orch.create('demo')                                      # 首次成功落盘
+    cfg_file = fleet['config'].root / 'instances' / 'demo' / 'openclaw.json'
+    original = cfg_file.read_text()
+    assert original.strip()
+
+    # 打点 ConfigStore 的 os.replace（Path.replace 绑定方法）为抛 OSError，模拟卷只读/权限
+    # 失败——替换发生在 tmp 写入 + chmod 之后，故 tmp 应被清理、目标文件不受污染。
+    def fail_replace(self, target):
+        raise OSError('simulated disk failure')
+
+    monkeypatch.setattr(Path, 'replace', fail_replace)
+
+    with pytest.raises(ConfigWriteError):
+        orch.create('demo2')
+
+    # 既有 openclaw.json 不受污染；tmp 已清理；demo2 的目录因回滚被删除
+    assert cfg_file.read_text() == original
+    assert not cfg_file.with_name('openclaw.json.tmp').exists()
+    assert not (fleet['config'].root / 'instances' / 'demo2').exists()
+    assert not Instance.objects.filter(name='demo2').exists()

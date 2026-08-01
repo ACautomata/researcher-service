@@ -730,14 +730,14 @@ def test_reconcile_creating_to_error_when_no_container(orch):
 @pytest.mark.django_db
 def test_create_marks_inflight_before_reserving_row(orch, monkeypatch):
     # codex R5 :238：DB 行一旦可见，name 必须已在 in-flight guard 中。
-    real_reserve = orch._reserve_row
+    real_reserve = orch._cmd._reserve_row
     guarded_at_reserve = []
 
     def spy_reserve(name):
         guarded_at_reserve.append(name in orch._deps.inflight)
         return real_reserve(name)
 
-    monkeypatch.setattr(orch, '_reserve_row', spy_reserve)
+    monkeypatch.setattr(orch._cmd, '_reserve_row', spy_reserve)
     orch.create('demo')
     assert guarded_at_reserve == [True]
     assert 'demo' not in orch._deps.inflight
