@@ -2,20 +2,23 @@
 
 本仓库历史部署镜像为 `acautomata/openclaw-docker-cn-im`（fork 自 `justlovemaki/OpenClaw-Docker-CN-IM`，R6 §5）。researcher 的 `openclaw.json` 保留了 browser 插件配置（`plugins.entries.browser.enabled=true`），但该 fork 镜像**不含 browser 运行时** —— image config 的 env 无 `PLAYWRIGHT_BROWSERS_PATH`，体积 1468MB 全为 IM 插件 + init 逻辑。因此 browser 能力在 fork 上是死的。
 
-经实测 ghcr 完整 tag 列表（1702 个）：OpenClaw 官方稳定版最新为 `2026.6.34`（7.x 系列目前全为 beta）；`-browser` 变体（`2026.6.34-browser`）env 含 `PLAYWRIGHT_BROWSERS_PATH=/home/node/.cache/ms-playwright`、预装 Playwright 运行时，体积 699MB（`-slim` 309MB 未预装浏览器二进制）。
+经实测 ghcr 完整 tag 列表（1702 个）：`-browser` 变体（env 含 `PLAYWRIGHT_BROWSERS_PATH=/home/node/.cache/ms-playwright`、预装 Playwright 运行时）是官方 browser 能力载体（`-slim` 309MB 未预装浏览器二进制）。
 
-**决定**：把部署与集成测试镜像迁移到 `ghcr.io/openclaw/openclaw:2026.6.34-browser`（官方稳定版 browser 变体）。迁移以「最小 DoD」先行：容器跑起来 + WS connect 握手通过 + 设备配对完成 + 一个 `chat.send` 收到真实事件流（顺带验证 `browser.noSandbox` 能起）；**chat wire schema 校准在官方镜像上做**。
+> **2026-08-01 更新**：原校准对象 `2026.6.34-browser` 已被上游从 registry 删除（`manifest unknown`，CI integration 因此全红，issue #302）。最新稳定 `-browser` 变体为 `2026.7.1-browser`（与 `latest-browser` 同 digest；`2026.7.2` 系列仍全为 beta）。本 ADR 决定目标随之更新为 `2026.7.1-browser`，并在该镜像上重验 wire 校准（全绿，无漂移，见下）。
+
+**决定**：把部署与集成测试镜像迁移到 `ghcr.io/openclaw/openclaw:2026.7.1-browser`（官方稳定版 browser 变体；原 `2026.6.34-browser` 因上游删除已废弃）。迁移以「最小 DoD」先行：容器跑起来 + WS connect 握手通过 + 设备配对完成 + 一个 `chat.send` 收到真实事件流（顺带验证 `browser.noSandbox` 能起）；**chat wire schema 校准在官方镜像上做**。
 
 **为什么**：
 - browser 能力是产品需求，fork 镜像给不了（无 Playwright），官方 `-browser` 变体是唯一稳健路径。
-- 选稳定版 `6.34` 而非 beta `7.2-beta.5`：beta 的 wire schema 会随迭代漂移，做 schema 校准的**对象必须稳定**（见 chat_client.py 中大量"待实测"标注）。
-- 迁移先行、chat schema 校准在官方镜像上做：fork 7.1 与官方 6.34 是不同谱系/版本，在 fork 上校准的 wire schema 未必适用于官方，等于白做。
+- 选稳定版（`2026.6.34` → 上游删除后 `2026.7.1`）而非 beta（`7.2-beta.*`）：beta 的 wire schema 会随迭代漂移，做 schema 校准的**对象必须稳定**（见 chat_client.py 中大量"待实测"标注）。
+- 迁移先行、chat schema 校准在官方镜像上做：fork 7.1 与官方 6.34/7.1 是不同谱系/版本，在 fork 上校准的 wire schema 未必适用于官方，等于白做。
 
 ## 考虑过但否决的方案
 
 - **留在 fork 上做 chat schema 校准**：fork 给不了 browser（动机未达）；且不同谱系 schema 可能存在版本差异，校准成果不可迁移到目标镜像。
-- **官方 beta（`2026.7.2-beta.5-browser`）**：beta 做 schema 校准会漂移，校准对象不稳定；用户最初提到的 `2026.6.34` 正是稳定版。
+- **官方 beta（`2026.7.2-beta.*-browser`）**：beta 做 schema 校准会漂移，校准对象不稳定；校准对象须为稳定版（`2026.6.34` → 上游删除后 `2026.7.1`）。
 - **`-slim` 变体**：体积 309MB 未预装浏览器二进制，browser 能力需运行时额外下载，违背"browser 即开即用"的产品诉求。
+- **沿用已删除的 `2026.6.34-browser`**：tag 已从 registry 移除，pull 必失败（`manifest unknown`），不可作为部署/CI 目标。
 
 ## 后果
 
@@ -44,6 +47,7 @@
   - **`APPROVAL_RESOLVED_EVENTS` 漏 exec 族**：`wire.py` 仅列 `plugin.approval.resolved`，漏 `exec.approval.resolved`。
   - **拆 ticket 后续回写**（避免本 PR 膨胀）：工具翻译重构、approval card 字段路径、resolve 方法名/params、`APPROVAL_RESOLVED_EVENTS` 补 exec —— 每项一个 TDD fix。
 - **browser 免 SYS_ADMIN**：官方 browser 变体用 Playwright + Xvfb + `noSandbox`，hardened compose 已 drop `NET_RAW`/`NET_ADMIN`，**不需要 `SYS_ADMIN` cap**（与 fork 的 caps 设计无关，是独立利好）。
+- **`2026.7.1-browser` 重验（2026-08-01, CI integration job, 真容器）**：上游删除 `2026.6.34-browser` 后全仓升级到 `2026.7.1-browser`（PR #299 `6be88d0`）。CI integration 三 job 全绿——**wire schema 校准在 7.1 上无漂移**：T1-T5（`chat.send` 事件流 / 只读 RPC / approval 路径）、`event_translate` 的 `deltaText`/`state:final`/工具帧、`request_router` 的 `exec.approval.resolve` 方法名、`pairing_ws` 嵌套错误码均仍通过，无需修改任何校准代码。7.1 与 6.34 同属 wire 协议族（`PROTOCOL=4`），本 ADR 的 spike 实测结论（token 占位 / SecretRef / 配对 / 工具事件结构）对 7.1 继续成立。
 - **历史实测文档须重验**：R6（挂载契约）、`r26`（ws 协议/operator scope 来自配对）、`r28`（热加载不重启）均基于 fork + init.sh，迁移后须在新镜像上重新验证回填。
 - **配置小坑**：`openclaw.json:33` `browser.executablePath:"/usr/bin/chromium"` 需对齐 Playwright 路径（`/home/node/.cache/ms-playwright`）或删除让其自解析。
 - 本 ADR 与 [0001-persistent-credential-encryption](./0001-persistent-credential-encryption.md) 相关：LLM key 注入方式若从 SecretRef 改为 auth-profiles，必须守住 0001 的"凭证不落明文"不变量（经 env/SecretRef 读，不写盘）。

@@ -13,6 +13,9 @@ MAX_HEALTH_WORKERS / MAX_PORT_RETRIES / TOKEN_URLSAFE_BYTES）单一来源仍在
 ``containers.constants``（读侧经 constants 直接导入，本入口经 constants 转发）。re-export 集合
 与语义完全不变。
 
+#280 预重构（parent #277）：写侧 ``FleetCommand`` + config 原子写单源 ``ConfigStore`` 落地
+（``fleet/command.py`` / ``fleet/config_store.py``），facade 写方法委托 ``FleetCommand``。
+
 包名无下划线（对齐 #271 的 ``integration.openclaw.wire`` 先例）；import 置顶绝对路径。
 """
 from containers.constants import (
@@ -21,6 +24,8 @@ from containers.constants import (
     MAX_PORT_RETRIES,
     TOKEN_URLSAFE_BYTES,
 )
+from containers.fleet.command import FleetCommand
+from containers.fleet.config_store import ConfigStore
 from containers.fleet.orchestrator import Fleet, InstanceOrchestrator
 from containers.fleet.values import (
     HEALTH_HEALTHY,
@@ -50,9 +55,11 @@ __all__ = [
     'MAX_HEALTH_WORKERS',
     'MAX_PORT_RETRIES',
     'TOKEN_URLSAFE_BYTES',
+    'ConfigStore',
     'ConfigWriteError',
     'ConfigurationError',
     'Fleet',
+    'FleetCommand',
     'FleetConfig',
     'InstanceBusy',
     'InstanceCleanupError',
