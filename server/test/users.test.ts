@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { setupTestApp, type TestContext } from './setup'
 import { seedAdmin, seedUser, login, bearer } from './helpers'
+import { verifyPassword } from '../src/auth/password'
 
 // 片10/11/12：users 4 端点（GET+containerCount / POST / PATCH / reset-password）
 describe('users admin (slice 10/11/12)', () => {
@@ -115,6 +116,26 @@ describe('users admin (slice 10/11/12)', () => {
       .set(bearer(admin.access))
       .send({ username: 'quotaHuge', password: 'pw-quota-secure', maxContainers: 2147483648 })
     expect(res.body.code).toBe(10043)
+  })
+
+  // 自查 Spec 轴 P2（缺陷2）：reset 原实现无条件 update → 并发禁用/改密后仍写密码，回显密码会
+  // 被覆盖（last-write-wins），破坏「一次性明文回显」。修复：CAS 条件 updateMany（where isActive:true）
+  // 与改密同语义互斥，count=0 → 拒绝（不回显将失效的密码）。确定性用例：目标已被禁用 → 10041。
+  it('reset-password 目标已被禁用 → 拒绝（不回显将失效的密码）', async () => {
+    const disabledTarget = await seedUser(ctx.prisma, 'reset-disabled', 'pw-reset-disabled-1')
+    const admin = await login(ctx.request, 'admin1', 'pw-admin1-secure')
+    // 禁用目标（并发/先前状态：目标不可登录）
+    await ctx.prisma.user.update({ where: { id: disabledTarget.id }, data: { isActive: false } })
+    const res = await ctx.request
+      .post(`/api/v1/users/${disabledTarget.id}/reset-password`)
+      .set(bearer(admin.access))
+    // CAS count=0 → 拒绝；不回显密码
+    expect(res.body.code).toBe(10041)
+    expect(res.body.data).toBeNull()
+    // 密码未被覆盖（仍可验证原密码）
+    const row = await ctx.prisma.user.findUnique({ where: { id: disabledTarget.id } })
+    expect(await verifyPassword('pw-reset-disabled-1', row!.passwordHash!)).toBe(true)
+    expect(row!.mustChangePassword).toBe(false)
   })
 
   it('不存在 id → 10041（防探测）', async () => {

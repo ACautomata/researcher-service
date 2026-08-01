@@ -109,9 +109,12 @@ async function rotateRefresh(
 
 // --- handlers ---
 
-// login 发 session 事务体内核（可测 seam，Codex #342 五轮 P1）：条件复查已验证的 passwordHash
-// 仍等于旧 hash 且 isActive 仍 true（事务内），count=0（并发改密/reset 已 commit 或账号被禁用）→
-// ok:false 拒绝，不插入基于过期密码的 refresh → 旧凭据不存活。
+// login 发 session 事务体内核（可测 seam，Codex #342 五轮 P1 + 自查 Spec 轴 P1）：条件复查已
+// 验证的 passwordHash 仍等于旧 hash 且 isActive 仍 true（事务内）。复查必须放在 create 之后：
+// 改密/reset 的 revokeAll 扫描不到本事务刚插入的 refresh，若「先查后建」，并发改密 commit 落在
+// 查-建之间会让新 refresh 落库且不被撤销（旧凭据存活）。改为「先建后查」：任何在 create 之后
+// commit 的并发改密，都会被随后的 findFirst 命中新 hash → 删除刚建的 refresh + ok:false 拒绝
+// （Postgres READ COMMITTED 逐语句新快照下亦然闭合；若未来事务内再加写可升 Serializable）。
 export async function issueSessionInTx(
   tx: Pick<PrismaClient, 'user' | 'refreshToken'>,
   userId: string,
@@ -120,14 +123,18 @@ export async function issueSessionInTx(
   | { ok: false }
   | { ok: true; refreshHash: string; refreshToken: string; access: string }
 > {
+  const refresh = generateRefreshToken()
+  await tx.refreshToken.create({
+    data: { userId, tokenHash: refresh.hash, expiresAt: refreshExpiresAt() },
+  })
   const user = await tx.user.findFirst({
     where: { id: userId, passwordHash: verifiedHash, isActive: true },
   })
-  if (!user) return { ok: false } // 并发改密/reset 或禁用 → 拒绝
-  const refresh = generateRefreshToken()
-  await tx.refreshToken.create({
-    data: { userId: user.id, tokenHash: refresh.hash, expiresAt: refreshExpiresAt() },
-  })
+  if (!user) {
+    // 并发改密/reset 已 commit 或账号被禁用 → 删掉刚建的 refresh（避免未被 revokeAll 扫到的残留）
+    await tx.refreshToken.delete({ where: { tokenHash: refresh.hash } })
+    return { ok: false }
+  }
   const access = await signAccessToken(user.id)
   return { ok: true, refreshHash: refresh.hash, refreshToken: refresh.token, access }
 }

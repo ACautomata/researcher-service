@@ -88,6 +88,10 @@ usersRouter.patch('/:id', validateBody(userPatchSchema), async (req: Request, re
 })
 
 // POST /:id/reset-password —— 一次性明文回显 + 撤销该 user 全部 refresh + C1
+// CAS 对齐（自查 Spec 轴 P2）：reset 是唯一无条件写 passwordHash 的路径（改密用 CAS）。若目标
+// 自己的 password/change 在 reset 写 hash 后 commit，会覆盖回显密码 → 破坏「一次性明文回显」。
+// 改为条件 updateMany（where isActive:true），与改密 CAS 同语义互斥：count=0（目标正被禁用或
+// 并发已改）→ 不覆盖，回显密码保持有效。两 op 同事务原子提交。
 usersRouter.post('/:id/reset-password', async (req: Request, res: Response) => {
   const id = req.params.id as string
   const existing = await req.prisma.user.findUnique({ where: { id } })
@@ -98,9 +102,14 @@ usersRouter.post('/:id/reset-password', async (req: Request, res: Response) => {
   }
   const password = generateTempPassword()
   const passwordHash = await hashPassword(password)
-  await req.prisma.$transaction([
-    req.prisma.user.update({ where: { id }, data: { passwordHash, mustChangePassword: true } }),
+  const updated = await req.prisma.$transaction([
+    req.prisma.user.updateMany({
+      where: { id, isActive: true },
+      data: { passwordHash, mustChangePassword: true },
+    }),
     revokeAllUserRefresh(req.prisma, id, new Date()),
   ])
+  // count=0：目标被禁用或并发已改 → 回显密码未生效，拒绝而非返回「将失效」的密码
+  if (updated[0].count === 0) throw fail(CODE.USER_NOT_FOUND)
   ok(res, { password }) // 一次性明文回显（仅此一次，前端弹 modal）
 })
