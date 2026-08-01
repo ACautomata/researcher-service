@@ -82,12 +82,23 @@ python3 -c "import base64,os;print(base64.urlsafe_b64encode(os.urandom(32)).deco
 `DJANGO_SECRET_KEY` · `DJANGO_ALLOWED_HOSTS` · `LLM_API_KEY` · `REDIS_URL`（compose 固定
 `redis://redis:6379/0`）· `OPENCLAW_TEMPLATE_DIR`（compose 固定 `/srv/openclaw/template`）·
 `OPENCLAW_TEMPLATE_JSON`（compose 固定 `/app/deploy/openclaw.json`，挂载 `./openclaw.json`）·
-`CREDENTIAL_ENCRYPTION_KEYS`。
+`CREDENTIAL_ENCRYPTION_KEYS` · `OPENCLAW_FLEET_ROOT`（生产默认 `/fleet`，**须经 compose
+挂载宿主 fleet 根**，见下）。
 
 > 说明：`OPENCLAW_TEMPLATE_JSON` 指向后端镜像内挂载的 openclaw.json 模板文件（配置单一来源，
 > 与单容器 compose 共用 `deploy/openclaw.json`）。镜像构建 context=backend 不含 `deploy/`，
 > 默认路径解析到 `/deploy` 不存在——首次创建容器会裸 500；CD 分发 `deploy/openclaw.json` 到
 > 宿主 `/www/panel/` 并经 compose 挂载注入（见 `docker-compose.deploy.yml`）。
+
+> **`/fleet` 挂载（spec §5.4/§5.6 契约，缺失即静默失败）：** backend 容器**必须**挂载宿主 fleet
+> 根（`volumes` 加 `/fleet:/fleet`）。Django 在宿主文件系统直接操作
+> `OPENCLAW_FLEET_ROOT/instances/<name>/`（cp -a 预填充 home、ConfigStore 原子写 openclaw.json、
+> 删除 rmtree）。缺此挂载时配置写到容器私有 `/fleet`（与宿主隔离），docker run 的 bind-mount
+> 源路径在宿主侧不存在 → **Docker 自动建空目录** → gateway 读到目录而非配置文件 →
+> `missing gateway.mode` 崩溃循环（Restarting）→ 无端口监听 → 健康探测失败 unhealthy →
+> 配对/对话 502 → 最终 stop，全程无日志报错（生产 2026-08-01 实测）。`prod.py` 启动时
+> fail-fast 校验 `/fleet` 是已存在、可写的目录——挂载缺失时容器拒绝启动，健康门判红，不再
+> 静默坏到首次创建容器。
 
 ## 回滚
 

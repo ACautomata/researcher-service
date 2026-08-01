@@ -53,6 +53,10 @@ services:
       # 仅开 80/443 收敛公网面。生产若需传输加密，后续在网关开 tls 并切 OPENCLAW_FLEET_WS_SCHEME=wss。
       OPENCLAW_FLEET_WS_HOST: host.docker.internal
       OPENCLAW_FLEET_PORT_BIND_HOST: 0.0.0.0
+      # fleet 根显式 pin：与下方 volumes 挂载 /fleet:/fleet 及 prod.py fail-fast 校验默认值
+      # 三者恒同源（spec §5.4/§5.6 契约，Django 直操作宿主 OPENCLAW_FLEET_ROOT/instances/<name>/）。
+      # 显式声明防「运维设了错误路径但校验通过」——compose 覆盖为唯一正确值。
+      OPENCLAW_FLEET_ROOT: /fleet
     extra_hosts:
       # Linux host-gateway 映射：后端容器访问宿主 loopback 接口（host.docker.internal）。
       # macOS Docker Desktop 自动提供该名，此处显式声明保证 Linux 生产宿主（BaoTa）可解析。
@@ -60,6 +64,12 @@ services:
     volumes:
       # 控制面等价 root：经宿主 docker.sock 增删查 OpenClaw 容器（spec §5.4 已明示风险）。
       - /var/run/docker.sock:/var/run/docker.sock
+      # fleet 根（spec §5.4/§5.6 契约）：Django 在宿主文件系统操作 OPENCLAW_FLEET_ROOT
+      # /instances/<name>/ —— cp -a 预填充 home + 原子写 openclaw.json + rmtree 删除。
+      # 缺此挂载时 backend 容器把配置写到容器私有 /fleet（与宿主 /fleet 隔离），docker run
+      # 的 bind-mount 源路径在宿主侧不存在 → Docker 自动建空目录 → gateway 读到目录而非
+      # 配置文件 → missing gateway.mode 崩溃循环 → unhealthy/502/stop（生产 2026-08-01 实测）。
+      - /fleet:/fleet
       # SQLite 持久化：prod settings 经 DATABASE_NAME 覆盖（默认 BASE_DIR/db.sqlite3），
       # 指向本 named volume 挂载点 /app/db/db.sqlite3，容器重建数据不丢。
       - panel-db:/app/db
