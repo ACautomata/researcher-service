@@ -24,9 +24,18 @@ class FakeRuntime:
         # 设非 None 时 run() 先记录容器（模拟 create 落 daemon）再抛该异常，
         # 用于验证 except 分支 best-effort 清理残留命名容器。
         self.fail_after_create: Exception | None = None
+        # codex P2 #295：模拟宿主非 Docker 进程占用池端口 → docker run bind 冲突。
+        # 命中 set 内 host_port 时 run() 抛 bind conflict（近似 docker.errors.APIError），
+        # 用于验证 create 识别冲突后重试下一空闲端口而非整段回滚。
+        self.fail_bind_ports: set[int] = set()
 
     def run(self, spec: ContainerSpec) -> str:
         self.run_specs.append(spec)
+        if spec.host_port in self.fail_bind_ports:
+            raise RuntimeError(
+                f'500 Server Error for http+docker://localhost/containers/create: '
+                f'bind: address already in use (port {spec.host_port})',
+            )
         cid = f'fakeid-{spec.name}-{self._next}'
         self._next += 1
         # 模拟 docker create：容器先入 daemon（Created 态），与真实 containers.run(create+start) 一致

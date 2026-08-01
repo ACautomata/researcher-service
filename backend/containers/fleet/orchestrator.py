@@ -162,8 +162,7 @@ class Fleet:
         # #295：健康探测与 WS 配对共享同一连接目标 host（OPENCLAW_FLEET_WS['HOST']），
         # 端口发布地址用 OPENCLAW_FLEET['PORT_BIND_HOST']——生产后端容器化后前者注入
         # host.docker.internal、后者 0.0.0.0（compose 装配），本地默认 loopback 零回归。
-        # HostPortProbe 探测目标与 DockerRuntime 发布目标须同源（codex P2）：publish_host
-        # 变 0.0.0.0 时探测仍只测 loopback 会误报空闲 → 选中被非 loopback 占用的端口 → run 失败。
+        # HostPortProbe 探测目标与 DockerRuntime 发布目标须同源（codex P2）。
         return InstanceOrchestrator(
             runtime=DockerRuntime(publish_host=cfg['PORT_BIND_HOST']),
             health_probe=HttpHealthProbe(host=settings.OPENCLAW_FLEET_WS['HOST']),

@@ -292,6 +292,26 @@ def test_create_retries_port_allocation_on_unique_conflict(orch, monkeypatch):
     assert inst.status == Instance.STATUS_RUNNING
 
 
+@pytest.mark.django_db
+def test_create_retries_on_docker_bind_conflict(config, health, runtime, tmp_path):
+    """#295 codex P2：docker run 因宿主 bind 冲突失败时，重试下一空闲端口而非整段回滚。
+
+    宿主非 Docker 进程（无 PortBindings 可枚举）+ 后端容器化（socket.bind 命名空间盲区）
+    → 探测全看不到占用，allocator 仍选 19000；docker run 发布冲突（bind: address
+    already in use）。create 须识别该冲突、释放端口重试 19001，而不是 create 失败。
+    """
+    _seed_template(tmp_path / 'template')
+    runtime.fail_bind_ports = {19000}         # 19000 被宿主非容器进程占用
+    orch = InstanceOrchestrator(runtime=runtime, config=config, health_probe=health)
+    inst = orch.create('demo')
+    assert inst.port == 19001                 # bind 冲突后重试到 19001
+    assert inst.status == Instance.STATUS_RUNNING
+    assert runtime.run_specs[0].host_port == 19000  # 第一次尝试 19000
+    assert runtime.run_specs[1].host_port == 19001  # 冲突后重试 19001
+    assert not Instance.objects.filter(name='demo', port=19000).exists()  # 冲突行已删
+    assert Instance.objects.filter(name='demo', port=19001).exists()
+
+
 # --- delete：:126 rmtree 失败保留 DB 行 + 标 REMOVING（不吞错、可重试）---
 
 
@@ -757,9 +777,9 @@ def test_create_marks_inflight_before_reserving_row(orch, monkeypatch):
     real_reserve = orch._cmd._reserve_row
     guarded_at_reserve = []
 
-    def spy_reserve(name):
+    def spy_reserve(name, extra_used=None):
         guarded_at_reserve.append(name in orch._deps.inflight)
-        return real_reserve(name)
+        return real_reserve(name, extra_used)
 
     monkeypatch.setattr(orch._cmd, '_reserve_row', spy_reserve)
     orch.create('demo')
