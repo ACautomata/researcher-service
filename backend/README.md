@@ -121,9 +121,16 @@ Vite dev server (5173) 的 `/api` proxy 打 pytest-django 起的 live Django 后
 **额外依赖**（wire 三件套之外）：`pip install -r requirements/integration.txt`（含 Playwright，dev.txt 超集）+
 `python -m playwright install chromium` + frontend `npm ci`（conftest 经 subprocess 起 vite dev server）。
 
-**setup/teardown 已收进 pytest**（`tests/integration/conftest.py` 的 session 级 `integration_bootstrap`
-fixture）：跑本目录任何 case 前自动检测 Playwright 客户端 / chromium / frontend vite 三项 bootstrap
-依赖，缺失即 `pytest.UsageError` 给可操作指引（而非 fixture setup 期裸 ImportError/RuntimeError）。
+**setup/teardown 已收进 pytest**：两层分工——
+- **Python 依赖缺口**（root `backend/conftest.py` 的 `pytest_configure`，collection 前执行）：
+  探测 `requirements/dev.txt` 的 `-r` closure（含 base.txt）中缺失的 pinned distribution
+  （如父仓库 .venv 早于 #253 加 redis 创建），本地激活 venv 自动 `uv pip install -r
+  requirements/dev.txt`（回退 pip）自愈；CI / 裸解释器抛 `pytest.UsageError` 给出缺失清单
+  与手动命令（loud-fail 暴露漂移信号，不静默自愈）。
+- **integration-infra 专属项**（`tests/integration/conftest.py` 的 session 级
+  `integration_bootstrap` fixture）：跑本目录任何 case 前自动检测并补齐 Playwright 客户端 /
+  chromium / frontend vite 三项 bootstrap 依赖（幂等，已就绪项跳过；无需加参数），任一步失败
+  抛 `pytest.UsageError` 给可操作指引（而非 fixture setup 期裸 ImportError/RuntimeError）。
 **teardown 配对**：session 结束自动清掉本 session 新建的真容器（失败/中断残留的 `openclaw-gw-*`
 占端口池）+ 文件级 test DB。**保守所有权**——只清「基线可信、不在基线内、且端口在池内」的容器；
 基线快照若无法建立（daemon 瞬断）则**完全不清理**（宁可留残可手动 `docker rm -f`，绝不误删并发
@@ -132,14 +139,13 @@ session/手动起的容器）。基线已存在/池外的一律不碰。
 **本地怎么跑**（L0 health case 不需 docker daemon）：
 
 ```bash
-# 方式一：让 pytest 自动准备缺失依赖（幂等，等价于下面三步手动装）
-python -m pytest -m integration tests/integration/ -v --integration-setup
+# 直接跑：bootstrap 依赖缺失时 pytest 会自动准备（等价于下面三步手动装）
+python -m pytest -m integration tests/integration/test_integration_http.py -v
 
-# 方式二：手动准备后直接跑
+# 若不想让 pytest 替你装，可先手动备齐再跑（此时 pytest 检测到就绪即跳过自动准备）
 pip install -r requirements/integration.txt
 python -m playwright install chromium
 (cd ../frontend && npm ci)
-python -m pytest -m integration tests/integration/test_integration_http.py -v
 ```
 
 > Colima 注意：`--basetemp` 与 `OPENCLAW_TEMPLATE_DIR` 都须在 `$HOME` 下（virtiofs 只共享 `$HOME`；

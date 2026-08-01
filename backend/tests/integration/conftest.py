@@ -9,7 +9,8 @@ vite dev server 由本 conftest 起 subprocess，经 ``VITE_API_TARGET`` 注入 
 logout 分支能从干净态精确触发的前提（#178 user story 10）。
 
 运行前提（CI integration job / 本地）：装 ``requirements/integration.txt`` +
-``playwright install chromium`` + frontend ``npm ci``（vite dev server 依赖）。
+``playwright install chromium`` + frontend ``npm ci``（vite dev server 依赖）—— 缺失时由
+session 级 ``integration_bootstrap`` fixture 自动补齐（幂等，无需加参数）。
 """
 import os
 import shutil
@@ -32,31 +33,18 @@ FRONTEND_DIR = BACKEND_DIR.parent / 'frontend'
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 环境 setup/teardown（issue #257 follow-up）：把「装 Playwright / frontend npm ci」这类
-# fixture-bootstrap 依赖的检测+可选自动准备，以及「session 结束清掉残留 fleet 容器/孤儿进程」
-# 的 teardown 收进 pytest fixture 生命周期（yield 配对），而非外置脚本——环境没备好给出
-# 可操作失败，跑完留残（容器占端口池、vite/daphne 孤儿、test DB 文件）由 teardown 兜底。
+# fixture-bootstrap 依赖的检测+自动准备，以及「session 结束清掉残留 fleet 容器/孤儿进程」
+# 的 teardown 收进 pytest fixture 生命周期（yield 配对），而非外置脚本——跑本目录 case
+# 前自动补齐缺失依赖（幂等），跑完留残（容器占端口池、vite/daphne 孤儿、test DB 文件）
+# 由 teardown 兜底。
 #
 # 与 case 级 skipif 门控（_docker_daemon_reachable / _pairing_env_ready）分工：
 #   - bootstrap 依赖（playwright 客户端 / chromium / vite 的 node_modules）是「只要跑
-#     本目录任何 case 就必须有」的 fixture 前提 → 这里 session 级 fail-fast 断言。
+#     本目录任何 case 就必须有」的 fixture 前提 → 这里 session 级自动补齐，任一步失败
+#     即 ``pytest.UsageError`` 带可操作指引。
 #   - docker daemon / LLM_API_KEY / OPENCLAW_TEMPLATE_DIR 是「只有真起容器的 case 才要」
 #     的运行期前提 → 仍由各 case 的 skipif 优雅跳过，不在此断言。
 # ═══════════════════════════════════════════════════════════════════════════════
-
-def pytest_addoption(parser):
-    """注册 ``--integration-setup``：opt-in 让 bootstrap fixture 自动补齐缺失依赖。
-
-    默认只检测、不安装（不替用户环境做写操作）；显式加该 flag 才执行 npm ci /
-    playwright install chromium 等准备动作（CI 已显式装过，无需此 flag）。
-    """
-    parser.addoption(
-        '--integration-setup',
-        action='store_true',
-        default=False,
-        help='自动准备联调集成测试缺失的 bootstrap 依赖（frontend npm ci / '
-             'playwright install chromium）。默认仅检测并给出可操作提示。',
-    )
-
 
 def _chromium_installed() -> bool:
     """探测 Playwright chromium 浏览器二进制是否已拉取（不启动浏览器）。
@@ -88,13 +76,13 @@ def _integration_bootstrap_gaps() -> list[str]:
 
 
 @pytest.fixture(scope='session', autouse=True)
-def integration_bootstrap(request):
-    """session 级 setup/teardown 门：跑本目录 case 前确保依赖就绪；跑完清残留。
+def integration_bootstrap():
+    """session 级 setup/teardown 门：跑本目录 case 前自动备依赖；跑完清残留。
 
-    setup：默认只检测——缺依赖即 ``pytest.UsageError`` 给可操作指引（而非 vite/daphne
-    subprocess 起来后才裸 RuntimeError，或 page fixture 内 ImportError）。加
-    ``--integration-setup`` 则自动补齐缺失项（幂等：已就绪项跳过；任一步失败即回滚已
-    备项，不留半拉子状态）。
+    setup：缺依赖即自动补齐（幂等：已就绪项跳过；任一步失败即回滚已备项，不留半拉子
+    状态）——无需加参数。自动准备失败（如无 uv/无 pip、npm ci 网络失败）时抛
+    ``pytest.UsageError`` 给可操作指引，而非 vite/daphne subprocess 起来后才裸
+    RuntimeError，或 page fixture 内 ImportError。
 
     teardown（yield 后）：扫掉 session 期间残留的真容器 + test DB 文件——容器失败/中断会
     残留 ``openclaw-gw-*`` 占端口池（下次端口分配假失败，记忆 portpool-unit-test-...）。
@@ -102,21 +90,7 @@ def integration_bootstrap(request):
     若无法建立（daemon 瞬断）则**完全不清理**（宁可留残可手动清，绝不误删并发/手动起的
     容器——本仓库视 docker.sock 为 root 等价）。不碰基线已存在或池外的。
     """
-    gaps = _integration_bootstrap_gaps()
-    if gaps:
-        if not request.config.getoption('--integration-setup'):
-            raise pytest.UsageError(
-                '联调集成测试 bootstrap 依赖未就绪：\n  - ' + '\n  - '.join(gaps) + '\n\n'
-                '二选一：\n'
-                '  1) 让 pytest 自动准备：python -m pytest tests/integration/ --integration-setup ...\n'
-                '  2) 手动准备：\n'
-                '       pip install -r requirements/integration.txt\n'
-                '       python -m playwright install chromium\n'
-                '       (cd ../frontend && npm ci)\n'
-                '（docker daemon / LLM_API_KEY / OPENCLAW_TEMPLATE_DIR 属 case 级 skipif 门控，'
-                '不在此列——daemon-independent case 无需它们。）',
-            )
-        _prepare_bootstrap()
+    _prepare_bootstrap()
 
     # teardown 基线：session 开始时的 fleet 容器 id 集（None=快照失败→teardown 不清理）。
     baseline_ids = _fleet_container_ids()
@@ -142,14 +116,15 @@ def _prepare_bootstrap() -> None:
             done.append('frontend')
     except Exception as exc:
         raise pytest.UsageError(
-            f'--integration-setup 自动准备失败（已备：{done or "无"}）：{exc}\n'
-            '请按报错手动补齐后重跑，或不带 --integration-setup 仅检测。',
+            f'联调集成测试 bootstrap 依赖自动准备失败（已备：{done or "无"}）：{exc}\n'
+            '请按报错手动补齐后重跑（手动步骤：pip install -r requirements/integration.txt；'
+            'python -m playwright install chromium；(cd ../frontend && npm ci)）。',
         ) from exc
 
     remaining = _integration_bootstrap_gaps()
     if remaining:
         raise pytest.UsageError(
-            '--integration-setup 自动准备后仍有缺失：\n  - ' + '\n  - '.join(remaining),
+            '联调集成测试 bootstrap 依赖自动准备后仍有缺失：\n  - ' + '\n  - '.join(remaining),
         )
 
 
