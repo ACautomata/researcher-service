@@ -140,6 +140,56 @@ async def test_handshake_propagates_retryable_flag_on_startup_pending(identity):
     assert 'retry shortly' in str(exc_info.value)
 
 
+@pytest.mark.asyncio
+async def test_handshake_retries_startup_pending_then_succeeds(identity):
+    """有界重试：冷启动瞬态错误（retryable）重试后成功——生产配对与 smoke 共用此叶子。"""
+    transport = FakeTransport.startup_then_ok()
+    sleeps = []
+
+    async def _record_sleep(secs):
+        sleeps.append(secs)
+
+    hs = PairingHandshake(transport=transport, sleep=_record_sleep)
+    result = await hs.pair(url='ws://127.0.0.1:19000/', token='gw-tok', identity=identity)
+
+    assert isinstance(result, PairingResult)
+    assert result.device_token == 'dt-fake'
+    assert transport.connect_calls == 2      # 第 1 次 startup pending → 第 2 次成功
+    assert sleeps == [0.5]                   # 按 retryAfterMs=500 等待一次
+
+
+@pytest.mark.asyncio
+async def test_handshake_gives_up_after_max_startup_retries(identity):
+    """有界重试上限：持续 startup pending 至 max_startup_retries 后仍抛（不无限循环）。"""
+    transport = FakeTransport.startup_pending()
+    sleeps = []
+
+    async def _record_sleep(secs):
+        sleeps.append(secs)
+
+    hs = PairingHandshake(
+        transport=transport, max_startup_retries=3,
+        sleep=_record_sleep,
+    )
+    with pytest.raises(PairingError) as exc_info:
+        await hs.pair(url='ws://127.0.0.1:19000/', token='gw-tok', identity=identity)
+
+    assert exc_info.value.retryable is True
+    assert transport.connect_calls == 4      # 初始 1 + 重试 3
+    assert len(sleeps) == 3                  # 每次失败后等 0.5s
+
+
+@pytest.mark.asyncio
+async def test_handshake_does_not_retry_non_retryable_error(identity):
+    """确定错误（非 retryable）不重试，立即传播。"""
+    transport = FakeTransport.connect_error('bad token')
+    hs = PairingHandshake(transport=transport, max_startup_retries=5)
+    with pytest.raises(PairingError):
+        await hs.pair(url='ws://127.0.0.1:19000/', token='gw-tok', identity=identity)
+
+    assert transport.connect_calls == 1
+
+
 # ---------------------------- 乱序帧容错（codex R protocol/correctness）----------------------------
 
 

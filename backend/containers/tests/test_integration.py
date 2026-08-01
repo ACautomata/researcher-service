@@ -5,7 +5,7 @@ CI integration job env 齐备（OPENCLAW_TEMPLATE_DIR/OPENCLAW_IMAGE/LLM_API_KEY
 无 skip 门控——环境缺失直接 fail，强制齐备（issue #157：集成测试 CI 必须一直跑，不靠 skip 兜底）。
 手动验证 spec §5 真实链路：
   export OPENCLAW_TEMPLATE_DIR=/path/to/researcher   # git clone ACautomata/researcher
-  export OPENCLAW_IMAGE=ghcr.io/openclaw/openclaw:2026.6.34-browser
+  export OPENCLAW_IMAGE=ghcr.io/openclaw/openclaw:2026.7.1-browser
   export LLM_API_KEY=sk-...
   uv run python -m pytest containers/tests/test_integration.py -v
 
@@ -37,7 +37,7 @@ def test_create_list_delete_real_container(tmp_path):
     template_dir = os.environ['OPENCLAW_TEMPLATE_DIR']  # env 缺失 KeyError（环境必须齐备）
     if not Path(template_dir).is_dir():
         pytest.fail(f'OPENCLAW_TEMPLATE_DIR 不是目录: {template_dir}')
-    image = os.environ.get('OPENCLAW_IMAGE', 'ghcr.io/openclaw/openclaw:2026.6.34-browser')
+    image = os.environ.get('OPENCLAW_IMAGE', 'ghcr.io/openclaw/openclaw:2026.7.1-browser')
     config = FleetConfig(
         root=tmp_path / 'fleet',
         template_dir=Path(template_dir),
@@ -104,7 +104,7 @@ def test_pair_chat_wiki_smoke_chain(tmp_path):  # pylint: disable=too-many-local
     template_dir = os.environ['OPENCLAW_TEMPLATE_DIR']  # env 缺失 KeyError（环境必须齐备）
     if not Path(template_dir).is_dir():
         pytest.fail(f'OPENCLAW_TEMPLATE_DIR 不是目录: {template_dir}')
-    image = os.environ.get('OPENCLAW_IMAGE', 'ghcr.io/openclaw/openclaw:2026.6.34-browser')
+    image = os.environ.get('OPENCLAW_IMAGE', 'ghcr.io/openclaw/openclaw:2026.7.1-browser')
     config = FleetConfig(
         root=tmp_path / 'fleet',
         template_dir=Path(template_dir),

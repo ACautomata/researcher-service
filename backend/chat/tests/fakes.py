@@ -114,6 +114,22 @@ class FakeTransport:
             **kwargs,
         )
 
+    @classmethod
+    def startup_then_ok(cls, **kwargs):
+        """冷启动 retryable 错误一次 → 重试后 hello-ok：验证有界重试路径（生产/测试共用）。"""
+        return cls.sequence(
+            [
+                {'type': 'res', 'ok': False,
+                 'error': {'code': 'UNAVAILABLE', 'message': 'gateway starting; retry shortly',
+                           'retryable': True, 'retryAfterMs': 500,
+                           'details': {'code': 'UNAVAILABLE'}}},
+                {'type': 'res', 'ok': True,
+                 'payload': {'auth': {'deviceToken': 'dt-fake', 'role': 'operator',
+                                      'scopes': list(cls._DEFAULT_SCOPES)}}},
+            ],
+            **kwargs,
+        )
+
     def _current_frame(self):
         if self._result_frames:
             idx = min(self.connect_calls - 1, len(self._result_frames) - 1)

@@ -53,6 +53,16 @@ def test_pair_generates_persistent_identity_reused_across_calls(instance):
     assert transport2.connect_calls == 0  # 未触发新握手
 
 
+def test_pair_retries_gateway_startup_pending_then_succeeds(instance):
+    """生产路径：创建容器后立即配对撞上冷启动 isStartupPending（retryable）→ 握手层
+    有界重试后成功（不再落 STATUS_ERROR 抛 502，codex P1）。"""
+    svc = PairingService(transport=FakeTransport.startup_then_ok())
+    pairing = svc.ensure_paired(instance)
+
+    assert pairing.status == Pairing.STATUS_PAIRED
+    assert pairing.device_token == 'dt-fake'
+
+
 # ---------------------------- PAIRING_REQUIRED（待批准）----------------------------
 
 

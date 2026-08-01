@@ -65,12 +65,23 @@ class PairingError(Exception):
 
 
 class PairingHandshake:
-    """对单个容器网关执行一次配对握手。"""
+    """对单个容器网关执行一次配对握手。
 
-    def __init__(self, transport=None, timeout: float = 10.0) -> None:
+    网关冷启动期（/health 绿早于主循环就绪）isStartupPending 分支返回显式 retryable
+    错误（``gateway starting; retry shortly``，errorShape retryable:true, retryAfterMs）——
+    pair() 对该瞬态错误按网关建议间隔做有界重试，避免生产配对（创建容器后立即配对）与
+    smoke 链路在冷启动窗口内一次撞上即失败。非 retryable 错误与 PairingRequired 立即传播。
+    """
+
+    def __init__(self, transport=None, timeout: float = 10.0,
+                 max_startup_retries: int = 5, sleep=None) -> None:
         # transport: connect(url) → async CM 产出 ws（send/recv/close）。默认 websockets。
         self._connect = transport or websockets.connect
         self._timeout = timeout
+        # 冷启动瞬态错误的有界重试上限（网关 retryAfterMs≈500ms，5 次 ≈ 2.5s 窗口覆盖启动）。
+        # sleep 可注入（测试传 no-op，不真睡）；默认 asyncio.sleep。
+        self._max_startup_retries = max_startup_retries
+        self._sleep = sleep or asyncio.sleep
 
     def _build_connect_frame(self, identity: DeviceIdentity, token: str, nonce: str) -> dict:
         """构造配对手 connect 帧，委托给单一来源 ConnectFrameBuilder.pairing()。
@@ -84,7 +95,23 @@ class PairingHandshake:
     async def pair(
         self, *, url: str, token: str, identity: DeviceIdentity,
     ) -> PairingResult:
-        """执行一次配对握手。三分支：PairingResult / PairingRequired / PairingError。"""
+        """执行配对握手。有界重试瞬态启动错误；PairingRequired / 确定 PairingError 立即传播。"""
+        for attempt in range(self._max_startup_retries + 1):
+            try:
+                return await self._pair_once(url, token, identity)
+            except PairingError as e:
+                if not e.retryable or attempt >= self._max_startup_retries:
+                    raise
+                # 网关显式标瞬态（冷启动未就绪）：按网关建议间隔等待后重试（最后一次尝试
+                # 的 retryable 错误在循环外 raise，不吞）。
+                delay = (e.retry_after_ms or 0) / 1000.0
+                if delay > 0:
+                    await self._sleep(delay)
+
+    async def _pair_once(
+        self, url: str, token: str, identity: DeviceIdentity,
+    ) -> PairingResult:
+        """单次配对握手。三分支：PairingResult / PairingRequired / PairingError。"""
         try:
             async with self._connect(url) as ws:
                 deadline = asyncio.get_event_loop().time() + self._timeout
