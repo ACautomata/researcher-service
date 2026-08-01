@@ -36,13 +36,25 @@ jobs:
       REGISTRY: ghcr.io
       # CI run 的 head_sha：使镜像 tag 精确对应通过 CI 的 commit（而非 CD run 自身 sha）。
       IMAGE_TAG: ${{ github.event.workflow_run.head_sha }}
-      BACKEND_IMAGE: ghcr.io/${{ github.repository }}/backend
-      FRONTEND_IMAGE: ghcr.io/${{ github.repository }}/frontend
+      # BACKEND_IMAGE / FRONTEND_IMAGE 不进 job env：它们依赖归一小写后的 IMAGE_REPO，
+      # 而 job env 在 job 启动时即求值（彼时 IMAGE_REPO 未设，会得空值）。故在下方
+      # "Normalize image repo" step 里经 $GITHUB_ENV 一并写入，step 运行时才是正确值。
     steps:
       - uses: actions/checkout@v7
         with:
           # 构建须基于通过 CI 的那个 commit，而非 master 当前头（可能已前进）。
           ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Normalize image repo (lowercase)
+        # github.repository 的 owner 可能含大写（本仓 ACautomata），而 Docker/GHCR reference
+        # 要求 repository name 全小写——否则 buildx 校验报
+        # "repository name must be lowercase"（本 bug：CI 全绿但 CD 必败）。
+        # 表达式层无大小写转换函数（case 是 switch），故用 shell tr 归一后写入 $GITHUB_ENV。
+        run: |
+          IMAGE_REPO="$(printf '%s' "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')"
+          echo "IMAGE_REPO=${IMAGE_REPO}" >> "$GITHUB_ENV"
+          echo "BACKEND_IMAGE=ghcr.io/${IMAGE_REPO}/backend" >> "$GITHUB_ENV"
+          echo "FRONTEND_IMAGE=ghcr.io/${IMAGE_REPO}/frontend" >> "$GITHUB_ENV"
 
       - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c  # v4.2.0
 

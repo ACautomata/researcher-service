@@ -15,6 +15,7 @@ import yaml
 # backend/tests/test_ci_workflow.py -> backend/tests/ -> backend/ -> repo root
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
+CD_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "cd.yml"
 
 # lockfile 暴露的 Node 约束偶数主版本号（=LTS 系列），用于判定 node-version 对齐 LTS
 LTS_NODE_MAJORS = {"20", "22", "24", "26"}
@@ -233,4 +234,74 @@ def test_backend_unit_pylint_no_django_settings_env_fallback() -> None:
     for env in env_sources:
         assert "DJANGO_SETTINGS_MODULE" not in env, (
             "不应为 pylint 设 DJANGO_SETTINGS_MODULE env 兜底（配置已在 pyproject.toml）"
+        )
+
+
+# ---- CD workflow 契约（#266）----
+
+
+def _cd_load() -> dict:
+    if not CD_WORKFLOW.exists():
+        pytest.fail(f"工作流不存在：{CD_WORKFLOW}")
+    return yaml.safe_load(CD_WORKFLOW.read_text(encoding="utf-8"))
+
+
+def _cd_deploy_steps(workflow: dict) -> list:
+    jobs = workflow["jobs"]
+    assert "deploy" in jobs, "CD 缺少 deploy job"
+    return jobs["deploy"]["steps"]
+
+
+def _cd_normalize_run(steps: list) -> str:
+    for step in steps:
+        if (step.get("name") or "").startswith("Normalize image repo"):
+            return step.get("run") or ""
+    return pytest.fail("CD 缺少 Normalize image repo 步骤")
+
+
+def test_cd_workflow_file_exists_and_parseable() -> None:
+    """CD：cd.yml 存在且为合法 YAML。"""
+    _cd_load()
+
+
+def test_cd_triggers_on_ci_success_workflow_run() -> None:
+    """CD：仅由 CI 成功后的 workflow_run 触发（不部署红码），且仅 master。"""
+    data = _cd_load()
+    # YAML 1.1 把裸键 "on" 解析为布尔 True（PyYAML 已知行为），与 _trigger() 同理。
+    on = data.get(True) if True in data else data.get("on")
+    assert "workflow_run" in on, "CD 必须由 workflow_run 触发"
+    wr = on["workflow_run"]
+    assert wr.get("types") == ["completed"], "workflow_run 必须监听 completed"
+    assert "CI" in (wr.get("workflows") or []), "workflow_run 必须监听 CI"
+    assert wr.get("branches") == ["master"], "CD 应仅在 master 分支上触发"
+
+
+def test_cd_deploy_gated_on_ci_success() -> None:
+    """CD：deploy job 由 CI conclusion==success 门控。"""
+    data = _cd_load()
+    job = data["jobs"]["deploy"]
+    assert job.get("if") == "${{ github.event.workflow_run.conclusion == 'success' }}"
+
+
+def test_cd_image_repo_lowercased_not_raw_github_repository() -> None:
+    """CD：镜像仓库名必须全小写——owner 混大小写（ACautomata）会触发 buildx
+    "repository name must be lowercase" 校验失败（CI 绿但 CD 必败的 #193 bug）。
+
+    真值路径：Normalize step 经 shell ``tr '[:upper:]' '[:lower:]'`` 归一
+    ``$GITHUB_REPOSITORY``（github.repository 的运行时等价物），而非在表达式层
+    直接用 ``github.repository``（表达式无大小写转换函数，case 是 switch）。
+    """
+    run = _cd_normalize_run(_cd_deploy_steps(_cd_load()))
+    assert "tr '[:upper:]' '[:lower:]'" in run, "必须用 tr 归一小写"
+    assert "GITHUB_REPOSITORY" in run, "归一化必须基于 GITHUB_REPOSITORY"
+    assert "echo \"IMAGE_REPO=${IMAGE_REPO}\" >> \"$GITHUB_ENV\"" in run, (
+        "必须把小写结果写回 $GITHUB_ENV"
+    )
+    # 镜像名不再直接引用 github.repository（owner 可能含大写）
+    data = _cd_load()
+    env_sources = [data["jobs"]["deploy"].get("env") or {}]
+    env_sources.extend(s.get("env") or {} for s in data["jobs"]["deploy"]["steps"])
+    for env in env_sources:
+        assert "github.repository" not in str(env), (
+            "CD 镜像名不应引用原始 github.repository（owner 可能含大写）"
         )
