@@ -117,7 +117,7 @@ def test_host_published_ports_enumerates_unlabelled_containers(monkeypatch):
     from containers.docker_runtime import DockerRuntime
 
     class _FakeContainers:
-        def list(self, all=True, filters=None):
+        def list(self, all=True, filters=None):  # pylint: disable=redefined-builtin
             return [
                 _FakeC('tracked', {'openclaw.port': '19000'}, None),
                 _FakeC('untracked', None, {'18789/tcp': [{'HostIp': '127.0.0.1', 'HostPort': '19002'}]}),
@@ -132,7 +132,7 @@ def test_host_published_ports_enumerates_unlabelled_containers(monkeypatch):
     class _FakeClient:
         containers = _FakeContainers()
 
-    rt = DockerRuntime(client_factory=lambda: _FakeClient())
+    rt = DockerRuntime(client_factory=_FakeClient)
     ports = rt.host_published_ports()
     assert 19002 in ports          # 未跟踪容器的宿主发布端口被枚举
     assert 19000 not in ports      # 无 PortBindings 的容器不算发布端口
@@ -143,11 +143,11 @@ def test_host_published_ports_empty_when_no_containers(monkeypatch):
     from containers.docker_runtime import DockerRuntime
 
     class _FakeContainers:
-        def list(self, all=True, filters=None):
+        def list(self, all=True, filters=None):  # pylint: disable=redefined-builtin
             return []
 
     class _FakeClient:
         containers = _FakeContainers()
 
-    rt = DockerRuntime(client_factory=lambda: _FakeClient())
+    rt = DockerRuntime(client_factory=_FakeClient)
     assert rt.host_published_ports() == set()
