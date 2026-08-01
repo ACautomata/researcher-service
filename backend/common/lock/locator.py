@@ -17,6 +17,8 @@ CI/单测默认**无真 Redis**——行为测试全走 FakeLock，真 Redis 仅
 """
 from __future__ import annotations
 
+import threading
+
 from redis import Redis as _Redis
 from redis.asyncio import from_url as _redis_from_url
 
@@ -44,6 +46,12 @@ class LockFleet:
     # aclose() 关闭，防 override-after-get 泄漏真连接。async 与 sync 各一。
     _client = None
     _sync_client = None
+    # sync 懒构造的线程安全 once（#254 / codex P2）：threadpool 调用方并发首个
+    # get(sync=True) 时，双检锁保证只建一个共享 client，`_sync_lock`/`_sync_client`
+    # 始终指向同一实例（async 槽由事件循环单线程访问，无需此锁）。aclose()/reset()
+    # 不复位此锁——它们仅测试 teardown 调用（不并发生产 get），持锁重查可容忍
+    # 清空后的重建。
+    _sync_init_lock = threading.Lock()
 
     @classmethod
     def get(cls, *, sync: bool = False) -> DistributedLock | SyncDistributedLock:
@@ -54,7 +62,11 @@ class LockFleet:
         """
         if sync:
             if cls._sync_lock is None:
-                cls._sync_lock = cls._build_sync_default()
+                # 双检锁（#254 / codex P2）：threadpool 并发首个构造时，持锁重查避免
+                # 各建一个 client。锁只保护构造；已建后走无锁快路径（get 高频）。
+                with cls._sync_init_lock:
+                    if cls._sync_lock is None:
+                        cls._sync_lock = cls._build_sync_default()
             return cls._sync_lock
         if cls._lock is None:
             cls._lock = cls._build_default()
@@ -85,14 +97,22 @@ class LockFleet:
         """关闭全部共享 client 并复原单例。**仅测试 teardown 调用**（生产不挂全局钩子）。
 
         幂等：未 get（无共享 client）或 override 注入替身（无共享 client）时为 no-op。
+
+        **分槽关闭（#254 / codex P2）：** async client（``redis.asyncio.Redis``）走
+        ``await aclose()``，sync client（``redis.Redis``）走 ``close()``——统一
+        ``aclose()`` 会让真 sync client 抛 ``AttributeError`` 且连接池泄漏。
         """
-        clients = [c for c in (cls._client, cls._sync_client) if c is not None]
+        # 先清单例再关 client：aclose 途中并发 get 不会拿到「已标记关闭」的 client。
         cls._lock = None
         cls._sync_lock = None
+        async_client = cls._client
+        sync_client = cls._sync_client
         cls._client = None
         cls._sync_client = None
-        for client in clients:
-            await client.aclose()
+        if async_client is not None:
+            await async_client.aclose()
+        if sync_client is not None:
+            sync_client.close()
 
     @classmethod
     def _build_default(cls) -> DistributedLock:

@@ -516,6 +516,103 @@ class TestFakeLockSyncBehavior:
 
         assert lock.try_acquire(_fresh_resource(), ttl=timedelta(seconds=60)) is not None
 
+    def test_renew_after_expiry_noop_without_contender(self, monkeypatch):
+        """#254 / codex P2：租约过期后 renew 不得 resurrect——即使无人顶替 entry。
+
+        修前 renew 先 ``_is_held()``（锁外做身份+过期检查）再锁内只做身份检查更新 TTL：
+        两检查间租约过期且无竞争者替换 entry 时，会在过期后 renew 成功（违反不 resurrect
+        契约）。修复须在持 ``_mutex`` 时同时做身份+过期检查（codex 意见 #4）。
+
+        确定性复现竞态：monkeypatch ``_is_held`` 恒 True（=「锁外检查那一刻租约仍存活」），
+        同时让 entry 已过期——修前锁内仅身份检查命中 → 复活已过期租约（红）；修复后锁内
+        身份+过期检查 → no-op（绿）。
+        """
+        from common.lock.fakes import FakeLockSync
+
+        lock = FakeLockSync()
+        handle = lock.acquire(_fresh_resource(), ttl=timedelta(seconds=60))
+        # 「锁外 _is_held 检查」瞬间租约仍存活（模拟判定通过后才过期的时间窗）
+        monkeypatch.setattr(
+            FakeLockSync, '_is_held', lambda self, resource, h: True,
+        )
+        # 锁内检查时租约已过期；无竞争者替换 entry（entry 仍指向 handle）
+        with lock._mutex:
+            lock._held[_fresh_resource()] = (lock._now() - 1, handle)  # 已过期
+
+        handle.renew(timedelta(seconds=60))  # 过期后 renew：必须 no-op
+
+        # 锁必须仍可获取——renew 不得在过期后把锁重新占用
+        assert lock.try_acquire(_fresh_resource(), ttl=timedelta(seconds=60)) is not None
+
+    def test_renew_sets_new_ttl_from_now_when_still_held(self):
+        """#254：仍持有且未过期时 renew 以**当前时刻**为基准重置 TTL（不保留旧起算点）。
+
+        用较长持有期验证：若 renew 起算点错误（沿用过期前的 expires_at），续期后
+        剩余寿命会偏短甚至立即可获取。
+        """
+        from common.lock.fakes import FakeLockSync
+
+        lock = FakeLockSync()
+        handle = lock.acquire(_fresh_resource(), ttl=timedelta(seconds=60))
+
+        handle.renew(timedelta(seconds=30))
+        time.sleep(0.02)
+
+        # renew 后仍持有（从 renew 时刻起 30s，而非旧 expires_at 折算）
+        assert lock.try_acquire(_fresh_resource(), ttl=timedelta(seconds=60)) is None
+        handle.release()
+
+    def test_acquire_wakes_at_holder_remaining_ttl_not_contender_ttl(self):
+        """#254 / codex P2：阻塞 acquire 等待上限取**持有者剩余 TTL**，非 contender 请求 TTL。
+
+        持有者剩余 ~20ms、contender 请求 1s 时，等待 1s 而非 20ms 会让锁已过期仍阻塞
+        （Event 等待超时后重查只在超时点触发）——与 Redis adapter（按持有者剩余轮询）
+        背离、测试可能挂死（codex 意见 #3）。
+        """
+        from common.lock.fakes import FakeLockSync
+
+        lock = FakeLockSync()
+        lock.acquire(_fresh_resource(), ttl=timedelta(milliseconds=20))  # 持有者剩余 ~20ms
+
+        start = time.monotonic()
+        handle = lock.acquire(_fresh_resource(), ttl=timedelta(seconds=1))  # contender 请求 1s
+        elapsed = time.monotonic() - start
+
+        # 持有者 ~20ms 后过期即应取得——等满 1s（修前）必然超时失败
+        assert elapsed < 0.5, f'acquire 应在持有者剩余 TTL（~20ms）后返回，实际等待 {elapsed:.2f}s'
+        assert handle is not None
+        handle.release()
+
+    def test_acquire_wakes_on_release_before_remaining_ttl(self):
+        """#254：持有方显式 release（早于 TTL 过期）时，Event 唤醒仍立即可用。
+
+        修复 #3 把等待上限改为持有者剩余 TTL 后，不能误延时显式 release 的唤醒路径——
+        持有方在 TTL 内 release，等待方应立即取得（不被剩余 TTL 上限卡住）。
+        """
+        from common.lock.fakes import FakeLockSync
+
+        lock = FakeLockSync()
+        holder = lock.acquire(_fresh_resource(), ttl=timedelta(seconds=60))
+
+        box: dict = {}
+        started = threading.Event()
+
+        def _blocked_acquire():
+            started.set()
+            box['handle'] = lock.acquire(_fresh_resource(), ttl=timedelta(seconds=60))
+
+        blocked = threading.Thread(target=_blocked_acquire)
+        blocked.start()
+        assert started.wait(timeout=1), 'acquire 线程应已启动'
+        time.sleep(0.02)  # 给线程进入阻塞等待、注册 waiter 的时间
+
+        holder.release()  # 早于剩余 TTL 过期：Event 唤醒
+        blocked.join(timeout=2)
+
+        assert 'handle' in box, 'release 后阻塞 acquire 应立即返回（不被剩余 TTL 上限延时）'
+        assert box['handle'] is not None
+        box['handle'].release()
+
     def test_bare_string_resource_rejected(self):
         from common.lock.fakes import FakeLockSync
 

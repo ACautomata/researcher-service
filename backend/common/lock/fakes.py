@@ -166,6 +166,12 @@ class FakeLockSync:
         return entry[0] > self._now()
 
     def _is_held(self, resource: LockResource, handle) -> bool:
+        """身份 + 过期检查（供 renew 的修前竞态复现测试 monkeypatch，见 test_contract.py）。
+
+        renew 现已在持 ``_mutex`` 时原子完成身份 + 过期检查（#254 / codex P2），本方法
+        不再被生产路径调用；保留为 test_contract.py 中 codex #4 红测试的 monkeypatch
+        目标（模拟「锁外判定通过、锁内已过期」的修前 TOCTOU 窗口）。
+        """
         entry = self._held.get(resource)
         return entry is not None and entry[1] is handle and self._entry_live(entry)
 
@@ -175,7 +181,13 @@ class FakeLockSync:
         return handle
 
     def acquire(self, resource: LockResource, ttl: timedelta) -> SyncLeaseHandle:
-        """阻塞获取租约：被他人持有（未过期）则等待释放/过期后再获取（Event 有界等待）。"""
+        """阻塞获取租约：被他人持有（未过期）则等待释放/过期后再获取（Event 有界等待）。
+
+        等待上限取**当前持有租约的剩余生命周期**（``entry.expires_at - now``），而非
+        contender 请求 TTL（#254 / codex P2）：持有者剩余 20ms、contender 请求 60s 时，
+        等满 60s 会让锁已过期仍阻塞——与 Redis adapter（按持有者剩余轮询）背离、测试
+        挂死。``max(0.05, ...)`` 保底防 0 超时忙转；显式 release 仍经 Event 即时唤醒。
+        """
         self._validate_resource(resource)
         with self._mutex:
             self.acquire_calls.append((resource, ttl))
@@ -186,8 +198,10 @@ class FakeLockSync:
                     return self._claim(resource, ttl)
                 waiter = threading.Event()
                 entry[1]._waiters.add(waiter)
+                # 剩余生命周期（此刻起的绝对等待上限）；release 会提前 set 唤醒
+                wait_timeout = max(0.05, entry[0] - self._now())
             try:
-                if not waiter.wait(timeout=max(0.05, ttl.total_seconds())):
+                if not waiter.wait(timeout=wait_timeout):
                     continue  # 等待超时（未 release）→ 重查（租约可能已过期）
             finally:
                 entry[1]._waiters.discard(waiter)
@@ -216,14 +230,23 @@ class FakeLockSyncLease:
         self._waiters: set[threading.Event] = set()
 
     def renew(self, new_ttl: timedelta) -> None:
-        """续租：仍持有且未过期则延长 TTL；否则 no-op（不 resurrect 锁）。"""
-        if not self._released and self._lock._is_held(self._resource, self):
-            with self._lock._mutex:
-                entry = self._lock._held.get(self._resource)
-                if entry is not None and entry[1] is self:
-                    self._lock._held[self._resource] = (
-                        self._lock._now() + new_ttl.total_seconds(), self,
-                    )
+        """续租：仍持有且未过期则延长 TTL；否则 no-op（不 resurrect 锁）。
+
+        **身份 + 过期检查在持 ``_mutex`` 时一次完成**（#254 / codex P2）：修前先锁外
+        ``_is_held()`` 再锁内只做身份检查——两检查间租约过期且无竞争者替换 entry 时，
+        会在过期后 renew 成功（违反不 resurrect 契约）。原子化后过期租约绝不被复活。
+        """
+        with self._lock._mutex:
+            entry = self._lock._held.get(self._resource)
+            if (
+                not self._released
+                and entry is not None
+                and entry[1] is self
+                and self._lock._entry_live(entry)
+            ):
+                self._lock._held[self._resource] = (
+                    self._lock._now() + new_ttl.total_seconds(), self,
+                )
         self._lock.renew_calls.append((self._resource, new_ttl))
 
     def release(self) -> None:
