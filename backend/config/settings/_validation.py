@@ -134,3 +134,47 @@ def validate_prod_env(env: os.environ | dict) -> None:
             '缺文件/目录会在首次创建容器时 FileNotFoundError）；当前值 '
             f'{template_json!r} 不存在或不是文件。参见 deploy/README.md 与 deploy/.env.example。',
         )
+
+    # OPENCLAW_FLEET_ROOT：fleet 根（spec §5.4/§5.6 契约）——Django 在宿主文件系统直接操作
+    # OPENCLAW_FLEET_ROOT/instances/<name>/：cp -a 预填充 home + ConfigStore 原子写
+    # openclaw.json + 删除 rmtree。生产镜像化后端内默认 /fleet（base.py FLEET_ROOT =
+    # BASE_DIR.parent/fleet，BASE_DIR=/app），**必须由 compose 把宿主 fleet 根挂载进 backend
+    # 容器**（volumes 加 /fleet:/fleet）使容器内该路径是宿主共享目录。
+    #
+    # 缺挂载的静默失败链（生产 2026-08-01 实测，issue #298 后续）：backend 容器内无 /fleet
+    # → ConfigStore 把配置写到容器私有 /fleet（与宿主隔离）→ docker run 的 bind-mount 源
+    # 路径 /fleet/instances/<name>/openclaw.json 在宿主侧不存在 → Docker 自动建**空目录** →
+    # gateway 挂载到目录而非配置文件 → missing gateway.mode 崩溃循环（Restarting）→ 无端口
+    # 监听 → 健康探测失败 unhealthy → 配对/对话 502 → 最终 stop。全程无日志报错，到首次
+    # 创建容器才暴露。fail-fast 让运维启动时即知，而非创建容器时才炸。
+    fleet_root = env.get('OPENCLAW_FLEET_ROOT', '').strip()
+    if fleet_root:
+        fleet_path = Path(fleet_root)
+    else:
+        # 未显式设置 → 生产默认 /fleet。base.py:130 FLEET_ROOT = BASE_DIR.parent / 'fleet'，
+        # 镜像内 BASE_DIR=/app → BASE_DIR.parent=/ → 默认 /fleet 是**确定事实**（不必用
+        # parents 推导：那是脆弱的层级耦合，文件一旦移动就与 base.py 解析分叉——spec
+        # review 指出的重复推导）。compose 亦显式 pin OPENCLAW_FLEET_ROOT=/fleet 与挂载
+        # /fleet:/fleet 一致（见 docker-compose.deploy.yml），使校验路径与挂载恒同源。
+        fleet_path = Path('/fleet')
+    if not fleet_path.is_absolute():
+        raise ImproperlyConfigured(
+            'OPENCLAW_FLEET_ROOT 必须是绝对路径（镜像内 BASE_DIR 是容器路径，相对路径会被'
+            'cwd 静默吞 → ConfigStore 写盘到错误位置，docker bind-mount 读到空目录 → '
+            'gateway 崩溃循环）；当前值：'
+            f'{fleet_root!r}。参见 deploy/README.md。',
+        )
+    if not fleet_path.is_dir():
+        raise ImproperlyConfigured(
+            'OPENCLAW_FLEET_ROOT 必须是已存在的目录（backend 容器须经 compose 挂载宿主 fleet '
+            '根，volumes 加 /fleet:/fleet）。缺挂载时配置写到容器私有 /fleet，docker 建空目录'
+            '→ gateway missing gateway.mode 崩溃循环 → unhealthy/502/stop（生产 2026-08-01 '
+            f'实测）。当前值 {fleet_path!r} 不存在或不是目录。参见 deploy/README.md。',
+        )
+    if not os.access(fleet_path, os.W_OK | os.X_OK):
+        raise ImproperlyConfigured(
+            'OPENCLAW_FLEET_ROOT 已存在但不是可写目录（ConfigStore 原子写 openclaw.json + '
+            'rmtree 删除需要写权限；目录须同时可写、可遍历——W_OK|X_OK，防 0o222 之类'
+            '仅可写不可遍历的目录误判）；当前值 '
+            f'{fleet_path!r}。修正目录属主/权限后重启。参见 deploy/README.md。',
+        )

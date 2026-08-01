@@ -29,6 +29,7 @@ def _minimal_env(**overrides):
         'DJANGO_ALLOWED_HOSTS': 'example.test',
         'OPENCLAW_TEMPLATE_DIR': _EXISTING_DIR,
         'OPENCLAW_TEMPLATE_JSON': _EXISTING_FILE,
+        'OPENCLAW_FLEET_ROOT': _EXISTING_DIR,
         'LLM_API_KEY': 'sk-prod-test',
         'REDIS_URL': 'redis://redis:6379/0',
     }
@@ -300,3 +301,46 @@ def test_validate_prod_env_fail_fast_when_template_json_is_dir(tmp_path):
     with __import__('pytest').raises(ImproperlyConfigured) as ei:
         validate_prod_env(_minimal_env(OPENCLAW_TEMPLATE_JSON=str(a_dir)))
     assert 'OPENCLAW_TEMPLATE_JSON' in str(ei.value)
+
+
+def test_validate_prod_env_ok_when_fleet_root_set():
+    """OPENCLAW_FLEET_ROOT 提供已存在的绝对目录 → 正常通过（与其它必填项一起）。"""
+    validate_prod_env(_minimal_env())  # 不抛即通过
+
+
+def test_validate_prod_env_fail_fast_when_fleet_root_nonexistent(tmp_path):
+    """OPENCLAW_FLEET_ROOT 绝对路径但不存在 → fail-fast。
+
+    生产镜像化后端缺 /fleet 挂载时静默失败到首次创建容器才暴露（config 写到容器私有
+    /fleet，docker bind-mount 自动建空目录 → gateway missing gateway.mode 崩溃循环 →
+    unhealthy/502/stop，issue #298 生产 2026-08-01 实测）。fail-fast 让运维启动即知。
+    """
+    missing = tmp_path / 'no_fleet_root'
+    with __import__('pytest').raises(ImproperlyConfigured) as ei:
+        validate_prod_env(_minimal_env(OPENCLAW_FLEET_ROOT=str(missing)))
+    msg = str(ei.value)
+    assert 'OPENCLAW_FLEET_ROOT' in msg
+    assert '目录' in msg
+    assert str(missing) in msg
+    assert 'deploy/README.md' in msg or 'deploy/.env.example' in msg, (
+        f'错误消息应指向部署文档，当前: {msg!r}'
+    )
+
+
+def test_validate_prod_env_fail_fast_when_fleet_root_is_file(tmp_path):
+    """OPENCLAW_FLEET_ROOT 指向文件（绝对、存在但不是目录）→ fail-fast。"""
+    file_path = tmp_path / 'not_a_dir'
+    file_path.write_text('x')
+    with __import__('pytest').raises(ImproperlyConfigured) as ei:
+        validate_prod_env(_minimal_env(OPENCLAW_FLEET_ROOT=str(file_path)))
+    assert 'OPENCLAW_FLEET_ROOT' in str(ei.value)
+
+
+def test_validate_prod_env_fail_fast_when_fleet_root_relative():
+    """OPENCLAW_FLEET_ROOT 相对路径 → fail-fast（镜像内 BASE_DIR 是容器路径，相对会被 cwd 吞）。"""
+    with __import__('pytest').raises(ImproperlyConfigured) as ei:
+        validate_prod_env(_minimal_env(OPENCLAW_FLEET_ROOT='fleet'))
+    msg = str(ei.value)
+    assert 'OPENCLAW_FLEET_ROOT' in msg
+    assert '绝对路径' in msg
+    assert "'fleet'" in msg
