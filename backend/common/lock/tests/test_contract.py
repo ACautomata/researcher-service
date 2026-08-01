@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import threading
+import time
 from datetime import timedelta
 
 import pytest
@@ -25,6 +27,7 @@ import pytest
 from common.lock.ports import DistributedLock as _DistributedLockPort
 from common.lock.ports import LeaseHandle as _LeaseHandlePort
 from common.lock.ports import LockResource
+from common.lock.ports import SyncLeaseHandle as _SyncLeaseHandlePort
 
 
 def _lock_attr_signature_shape(cls, name):
@@ -55,6 +58,9 @@ _LOCK_PORT_METHODS = tuple(
 _LEASE_HANDLE_METHODS = tuple(
     n for n in dir(_LeaseHandlePort) if not n.startswith('_')
 )
+_SYNC_LEASE_HANDLE_METHODS = tuple(
+    n for n in dir(_SyncLeaseHandlePort) if not n.startswith('_')
+)
 
 
 @pytest.mark.parametrize('method', _LOCK_PORT_METHODS)
@@ -83,6 +89,54 @@ def test_lock_method_signature_isomorphic_across_port_fake_adapter(method):
     )
 
 
+@pytest.mark.parametrize('method', _LOCK_PORT_METHODS)
+def test_lock_method_signature_isomorphic_across_port_sync_fake(method):
+    """#254：DistributedLock 每个方法在 Port / FakeLockSync 三方签名同构（向下闭合）。
+
+    sync 侧实现（FakeLockSync）须与 async 侧同构——sync 只是同一 Port 契约的
+    threading 形态（T4 裁决），签名形状一致才有「同构」可言。
+    """
+    from common.lock.fakes import FakeLockSync
+
+    port_shape = _lock_attr_signature_shape(_DistributedLockPort, method)
+    sync_shape = _lock_attr_signature_shape(FakeLockSync, method)
+
+    assert sync_shape == port_shape, (
+        f'FakeLockSync.{method} 签名漂离 Port：port={port_shape} sync={sync_shape}'
+    )
+
+
+@pytest.mark.parametrize('method', _LOCK_PORT_METHODS)
+def test_lock_method_signature_isomorphic_across_port_sync_adapter(method):
+    """#254：DistributedLock 每个方法在 Port / SyncRedisLockAdapter 三方签名同构（向下闭合）。
+
+    sync adapter 是同一 Port 的 threading 形态（T4 裁决）——签名形状须与 async 侧一致，
+    否则 sync 调用点（orchestrator/pairing）无法按 Port 契约取锁。
+    """
+    from common.lock.adapters import SyncRedisLockAdapter
+
+    port_shape = _lock_attr_signature_shape(_DistributedLockPort, method)
+    sync_shape = _lock_attr_signature_shape(SyncRedisLockAdapter, method)
+
+    assert sync_shape == port_shape, (
+        f'SyncRedisLockAdapter.{method} 签名漂离 Port：port={port_shape} sync={sync_shape}'
+    )
+
+
+@pytest.mark.parametrize('method', _LOCK_PORT_METHODS)
+def test_sync_lock_satisfies_sync_port(method):
+    """#254：sync 侧实现（SyncRedisLockAdapter/FakeLockSync）满足 SyncDistributedLock Port。
+
+    isinstance(runtime_checkable Protocol) 验证 sync Port 面的方法存在性。
+    """
+    from common.lock.adapters import SyncRedisLockAdapter
+    from common.lock.fakes import FakeLockSync
+    from common.lock.ports import SyncDistributedLock as _SyncPort
+
+    assert isinstance(SyncRedisLockAdapter(object()), _SyncPort)  # 构造惰性，不连 Redis
+    assert isinstance(FakeLockSync(), _SyncPort)
+
+
 @pytest.mark.parametrize('method', _LEASE_HANDLE_METHODS)
 def test_lease_handle_signature_isomorphic_across_port_fake_adapter(method):
     """#251/#253：LeaseHandle 每个方法在 Port / Fake / Adapter 三方签名同构（契约公开面全覆盖）。"""
@@ -99,6 +153,28 @@ def test_lease_handle_signature_isomorphic_across_port_fake_adapter(method):
     assert adapter_shape == port_shape, (
         f'_RedisLeaseHandle.{method} 签名漂离 Port：'
         f'port={port_shape} adapter={adapter_shape}'
+    )
+
+
+@pytest.mark.parametrize('method', _SYNC_LEASE_HANDLE_METHODS)
+def test_sync_lease_handle_signature_isomorphic_across_port_impls(method):
+    """#254：SyncLeaseHandle 每个方法在 Port / sync 实现三方签名同构（AC3 锁步全覆盖）。
+
+    sync 形态的 lease handle（SyncRedisLeaseHandle / FakeLockSyncLease）同样受同构守卫——
+    签名漂移在测试期失败而非生产 TypeError（对齐 async 侧 guard）。
+    """
+    from common.lock.adapters import SyncRedisLeaseHandle
+    from common.lock.fakes import FakeLockSyncLease
+
+    port_shape = _lock_attr_signature_shape(_SyncLeaseHandlePort, method)
+    adapter_shape = _lock_attr_signature_shape(SyncRedisLeaseHandle, method)
+    fake_shape = _lock_attr_signature_shape(FakeLockSyncLease, method)
+
+    assert adapter_shape == port_shape, (
+        f'SyncRedisLeaseHandle.{method} 签名漂离 Port：port={port_shape} impl={adapter_shape}'
+    )
+    assert fake_shape == port_shape, (
+        f'FakeLockSyncLease.{method} 签名漂离 Port：port={port_shape} impl={fake_shape}'
     )
 
 
@@ -247,6 +323,21 @@ class TestFakeLockBehavior:
         with pytest.raises(TypeError):
             await lock.try_acquire(ForeignResource(), ttl=timedelta(seconds=60))  # type: ignore[arg-type]
 
+    async def test_resource_subclass_rejected_like_adapter(self):
+        """#254 / codex P2：async fake 同样拒绝子类（与 adapter 精确变体检查对齐）。"""
+        from common.lock.fakes import FakeLock
+        from common.lock.ports import ProvisionResource
+
+        class SubProvisionResource(ProvisionResource):
+            """ProvisionResource 子类——生产 adapter 拒绝，fake 须同样拒绝。"""
+
+        lock = FakeLock()
+        with pytest.raises(TypeError):
+            await lock.try_acquire(
+                SubProvisionResource(container_name='gw-a'),  # type: ignore[arg-type]
+                ttl=timedelta(seconds=60),
+            )
+
     async def test_acquire_unblocks_when_lease_expires(self):
         """阻塞 acquire 在持有租约 TTL 过期后自动取得（无显式 release）。"""
         from common.lock.fakes import FakeLock
@@ -302,3 +393,381 @@ class TestFakeLockSatisfiesPort:
         from common.lock.ports import PairingResource, ProvisionResource
 
         assert LockResource == ProvisionResource | PairingResource
+
+
+class TestFakeLockSyncBehavior:
+    """FakeLockSync 契约行为（#254 sync 形态）：threading 语义 + 内存 TTL + 记录调用。
+
+    sync 侧实现须与 async 侧同构（同一 Port 契约的 threading 形态）——acquire 阻塞语义
+    用 threading.Event（有界等待）而非空转轮询；renew 无返回值（async renew 契约）；
+    TTL 到期自动释放、不 resurrect。
+    """
+
+    def test_satisfies_port(self):
+        from common.lock.fakes import FakeLockSync
+
+        assert isinstance(FakeLockSync(), _DistributedLockPort), (
+            'FakeLockSync 应满足 DistributedLock Port（runtime_checkable Protocol）'
+        )
+
+    def test_try_acquire_returns_lease_and_records_call(self):
+        from common.lock.fakes import FakeLockSync
+
+        lock = FakeLockSync()
+        handle = lock.try_acquire(_fresh_resource(), ttl=timedelta(seconds=60))
+
+        assert handle is not None
+        assert not lock.acquire_calls
+        assert len(lock.try_acquire_calls) == 1
+        assert lock.try_acquire_calls[0][0] == _fresh_resource()
+        assert lock.try_acquire_calls[0][1] == timedelta(seconds=60)
+
+    def test_acquire_returns_lease_and_records_call(self):
+        from common.lock.fakes import FakeLockSync
+
+        lock = FakeLockSync()
+        handle = lock.acquire(_fresh_resource(), ttl=timedelta(seconds=60))
+
+        assert handle is not None
+        assert len(lock.acquire_calls) == 1
+        assert not lock.try_acquire_calls
+
+    def test_second_try_acquire_on_held_resource_returns_none(self):
+        from common.lock.fakes import FakeLockSync
+
+        lock = FakeLockSync()
+        lock.acquire(_fresh_resource(), ttl=timedelta(seconds=60))
+
+        assert lock.try_acquire(_fresh_resource(), ttl=timedelta(seconds=60)) is None
+
+    def test_distinct_resources_do_not_conflict(self):
+        from common.lock.fakes import FakeLockSync
+        from common.lock.ports import PairingResource, ProvisionResource
+
+        lock = FakeLockSync()
+        lock.acquire(ProvisionResource('gw-a'), ttl=timedelta(seconds=60))
+
+        pairing_handle = lock.try_acquire(
+            PairingResource(instance_id=7), ttl=timedelta(seconds=60),
+        )
+        assert pairing_handle is not None
+
+    def test_acquire_blocks_until_release_then_succeeds(self):
+        """#254：sync acquire 阻塞——被持有期间等待，持有方 release 后取得（Event 有界等待）。"""
+        from common.lock.fakes import FakeLockSync
+
+        lock = FakeLockSync()
+        holder = lock.acquire(_fresh_resource(), ttl=timedelta(seconds=60))
+
+        box: dict = {}
+        started = threading.Event()
+
+        def _blocked_acquire():
+            started.set()
+            box['handle'] = lock.acquire(_fresh_resource(), ttl=timedelta(seconds=60))
+
+        blocked = threading.Thread(target=_blocked_acquire)
+        blocked.start()
+        assert started.wait(timeout=1), 'acquire 线程应已启动'
+        time.sleep(0.02)  # 给线程进入阻塞等待的时间
+        assert 'handle' not in box, 'release 前阻塞 acquire 不应返回'
+
+        holder.release()
+        blocked.join(timeout=2)
+
+        assert 'handle' in box, 'release 后阻塞 acquire 应返回'
+        assert len(lock.acquire_calls) == 2
+
+    def test_release_frees_resource_and_records_call(self):
+        from common.lock.fakes import FakeLockSync
+
+        lock = FakeLockSync()
+        handle = lock.acquire(_fresh_resource(), ttl=timedelta(seconds=60))
+        assert lock.try_acquire(_fresh_resource(), ttl=timedelta(seconds=60)) is None
+
+        handle.release()
+
+        assert lock.try_acquire(_fresh_resource(), ttl=timedelta(seconds=60)) is not None
+        assert len(lock.release_calls) == 1
+
+    def test_release_is_idempotent(self):
+        from common.lock.fakes import FakeLockSync
+
+        lock = FakeLockSync()
+        handle = lock.acquire(_fresh_resource(), ttl=timedelta(seconds=60))
+
+        handle.release()
+        handle.release()
+
+        assert len(lock.release_calls) == 2
+
+    def test_renew_extends_lease_and_records_call(self):
+        from common.lock.fakes import FakeLockSync
+
+        lock = FakeLockSync()
+        handle = lock.acquire(_fresh_resource(), ttl=timedelta(seconds=60))
+        handle.renew(timedelta(seconds=300))
+
+        assert len(lock.renew_calls) == 1
+        assert lock.renew_calls[0][1] == timedelta(seconds=300)
+
+    def test_lease_expires_after_ttl_and_frees_resource(self):
+        from common.lock.fakes import FakeLockSync
+
+        lock = FakeLockSync()
+        lock.acquire(_fresh_resource(), ttl=timedelta(milliseconds=20))
+        time.sleep(0.05)
+
+        assert lock.try_acquire(_fresh_resource(), ttl=timedelta(seconds=60)) is not None
+
+    def test_renew_after_expiry_is_noop(self):
+        from common.lock.fakes import FakeLockSync
+
+        lock = FakeLockSync()
+        handle = lock.acquire(_fresh_resource(), ttl=timedelta(milliseconds=20))
+        time.sleep(0.05)
+
+        handle.renew(timedelta(seconds=60))  # 已过期：不 resurrect 锁
+
+        assert lock.try_acquire(_fresh_resource(), ttl=timedelta(seconds=60)) is not None
+
+    def test_renew_after_expiry_noop_without_contender(self, monkeypatch):
+        """#254 / codex P2：租约过期后 renew 不得 resurrect——即使无人顶替 entry。
+
+        修前 renew 先 ``_is_held()``（锁外做身份+过期检查）再锁内只做身份检查更新 TTL：
+        两检查间租约过期且无竞争者替换 entry 时，会在过期后 renew 成功（违反不 resurrect
+        契约）。修复须在持 ``_mutex`` 时同时做身份+过期检查（codex 意见 #4）。
+
+        确定性复现竞态：monkeypatch ``_is_held`` 恒 True（=「锁外检查那一刻租约仍存活」），
+        同时让 entry 已过期——修前锁内仅身份检查命中 → 复活已过期租约（红）；修复后锁内
+        身份+过期检查 → no-op（绿）。
+        """
+        from common.lock.fakes import FakeLockSync
+
+        lock = FakeLockSync()
+        handle = lock.acquire(_fresh_resource(), ttl=timedelta(seconds=60))
+        # 「锁外 _is_held 检查」瞬间租约仍存活（模拟判定通过后才过期的时间窗）
+        monkeypatch.setattr(
+            FakeLockSync, '_is_held', lambda self, resource, h: True,
+        )
+        # 锁内检查时租约已过期；无竞争者替换 entry（entry 仍指向 handle）
+        with lock._mutex:
+            lock._held[_fresh_resource()] = (lock._now() - 1, handle)  # 已过期
+
+        handle.renew(timedelta(seconds=60))  # 过期后 renew：必须 no-op
+
+        # 锁必须仍可获取——renew 不得在过期后把锁重新占用
+        assert lock.try_acquire(_fresh_resource(), ttl=timedelta(seconds=60)) is not None
+
+    def test_renew_sets_new_ttl_from_now_when_still_held(self):
+        """#254：仍持有且未过期时 renew 以**当前时刻**为基准重置 TTL（不保留旧起算点）。
+
+        用较长持有期验证：若 renew 起算点错误（沿用过期前的 expires_at），续期后
+        剩余寿命会偏短甚至立即可获取。
+        """
+        from common.lock.fakes import FakeLockSync
+
+        lock = FakeLockSync()
+        handle = lock.acquire(_fresh_resource(), ttl=timedelta(seconds=60))
+
+        handle.renew(timedelta(seconds=30))
+        time.sleep(0.02)
+
+        # renew 后仍持有（从 renew 时刻起 30s，而非旧 expires_at 折算）
+        assert lock.try_acquire(_fresh_resource(), ttl=timedelta(seconds=60)) is None
+        handle.release()
+
+    def test_acquire_wakes_at_holder_remaining_ttl_not_contender_ttl(self):
+        """#254 / codex P2：阻塞 acquire 等待上限取**持有者剩余 TTL**，非 contender 请求 TTL。
+
+        持有者剩余 ~20ms、contender 请求 1s 时，等待 1s 而非 20ms 会让锁已过期仍阻塞
+        （Event 等待超时后重查只在超时点触发）——与 Redis adapter（按持有者剩余轮询）
+        背离、测试可能挂死（codex 意见 #3）。
+        """
+        from common.lock.fakes import FakeLockSync
+
+        lock = FakeLockSync()
+        lock.acquire(_fresh_resource(), ttl=timedelta(milliseconds=20))  # 持有者剩余 ~20ms
+
+        start = time.monotonic()
+        handle = lock.acquire(_fresh_resource(), ttl=timedelta(seconds=1))  # contender 请求 1s
+        elapsed = time.monotonic() - start
+
+        # 持有者 ~20ms 后过期即应取得——等满 1s（修前）必然超时失败
+        assert elapsed < 0.5, f'acquire 应在持有者剩余 TTL（~20ms）后返回，实际等待 {elapsed:.2f}s'
+        assert handle is not None
+        handle.release()
+
+    def test_acquire_wakes_on_release_before_remaining_ttl(self):
+        """#254：持有方显式 release（早于 TTL 过期）时，Event 唤醒仍立即可用。
+
+        修复 #3 把等待上限改为持有者剩余 TTL 后，不能误延时显式 release 的唤醒路径——
+        持有方在 TTL 内 release，等待方应立即取得（不被剩余 TTL 上限卡住）。
+        """
+        from common.lock.fakes import FakeLockSync
+
+        lock = FakeLockSync()
+        holder = lock.acquire(_fresh_resource(), ttl=timedelta(seconds=60))
+
+        box: dict = {}
+        started = threading.Event()
+
+        def _blocked_acquire():
+            started.set()
+            box['handle'] = lock.acquire(_fresh_resource(), ttl=timedelta(seconds=60))
+
+        blocked = threading.Thread(target=_blocked_acquire)
+        blocked.start()
+        assert started.wait(timeout=1), 'acquire 线程应已启动'
+        time.sleep(0.02)  # 给线程进入阻塞等待、注册 waiter 的时间
+
+        holder.release()  # 早于剩余 TTL 过期：Event 唤醒
+        blocked.join(timeout=2)
+
+        assert 'handle' in box, 'release 后阻塞 acquire 应立即返回（不被剩余 TTL 上限延时）'
+        assert box['handle'] is not None
+        box['handle'].release()
+
+    def test_bare_string_resource_rejected(self):
+        from common.lock.fakes import FakeLockSync
+
+        lock = FakeLockSync()
+        with pytest.raises(TypeError):
+            lock.try_acquire('gw-a', ttl=timedelta(seconds=60))  # type: ignore[arg-type]
+        with pytest.raises(TypeError):
+            lock.acquire('gw-a', ttl=timedelta(seconds=60))  # type: ignore[arg-type]
+
+    def test_resource_subclass_rejected_like_adapter(self):
+        """#254 / codex P2：resource 子类须像生产 adapter 一样拒绝（精确变体检查）。
+
+        ``isinstance(resource, _RESOURCE_VARIANTS)`` 会让 ProvisionResource/PairingResource
+        的子类通过，而生产 adapter 用 ``_KEY_BUILDERS.get(type(resource))`` 只接受精确
+        变体（子类抛 TypeError）——fake 与 adapter 行为不一致，测试会用 fake 全绿、
+        生产抛错。修 fake 用 ``type(resource)`` 精确变体检查，与 adapter 对齐。
+        """
+        from common.lock.fakes import FakeLockSync
+        from common.lock.ports import ProvisionResource
+
+        class SubProvisionResource(ProvisionResource):
+            """ProvisionResource 子类——生产 adapter 拒绝，fake 须同样拒绝。"""
+
+        lock = FakeLockSync()
+        with pytest.raises(TypeError):
+            lock.try_acquire(
+                SubProvisionResource(container_name='gw-a'),  # type: ignore[arg-type]
+                ttl=timedelta(seconds=60),
+            )
+        with pytest.raises(TypeError):
+            lock.acquire(
+                SubProvisionResource(container_name='gw-a'),  # type: ignore[arg-type]
+                ttl=timedelta(seconds=60),
+            )
+
+    def test_waiters_access_holds_mutex(self):
+        """#254 / codex P2：共享 ``_waiters`` 集合的所有访问都持 ``_mutex``（线程安全不变量）。
+
+        修前 ``release()`` 在锁外 ``list(self._waiters)`` 迭代、``acquire()`` 超时后在锁外
+        ``_waiters.discard()``——两处并发修改同一 set 会 ``RuntimeError: Set changed size
+        during iteration``（线程安全 fake 的 release 失败、contender 残留睡着）。codex 静态
+        发现此竞态；CPython GIL 下极难实际触发，故用哨兵 set 确定性断言「访问即持锁」。
+
+        哨兵 set 复刻 set 的 add/discard/__iter__ 语义，但在锁外调用抛 ``AssertionError``
+        （模拟并发下 set 竞态的失败）。修复前 ``release`` 的 ``list()`` 与 ``acquire`` 的
+        ``discard`` 均在锁外 → 红；修复后全部持锁访问 → 绿。
+        """
+        from common.lock.fakes import FakeLockSync
+
+        class _LockGuardedSet:
+            """仅在持 ``_mutex`` 时可访问的 ``_waiters`` 替身：锁外操作抛 ``AssertionError``。"""
+
+            def __init__(self, mutex):
+                self._mutex = mutex
+                self._items: set[threading.Event] = set()
+
+            def _check_held(self):
+                if not self._mutex._is_owned():
+                    raise AssertionError(
+                        '_waiters 访问须持 _mutex（线程安全不变量）——锁外操作会与并发'
+                        ' acquire/release 冲突（Set changed size during iteration）',
+                    )
+
+            def add(self, item):
+                self._check_held()
+                self._items.add(item)
+
+            def discard(self, item):
+                self._check_held()
+                self._items.discard(item)
+
+            def clear(self):
+                self._check_held()
+                self._items.clear()
+
+            def __iter__(self):
+                self._check_held()
+                return iter(list(self._items))
+
+        lock = FakeLockSync()
+        holder = lock.acquire(_fresh_resource(), ttl=timedelta(seconds=60))
+        # 换哨兵 set：任何锁外访问（list/discard/add）都立即失败
+        holder._waiters = _LockGuardedSet(lock._mutex)
+
+        # 阻塞 acquire 注册 waiter（锁内 add → 通过哨兵）
+        box: dict = {}
+        started = threading.Event()
+
+        def _blocked_acquire():
+            started.set()
+            box['handle'] = lock.acquire(_fresh_resource(), ttl=timedelta(seconds=60))
+
+        blocked = threading.Thread(target=_blocked_acquire)
+        blocked.start()
+        assert started.wait(timeout=1), 'acquire 线程应已启动'
+        time.sleep(0.02)  # 让线程注册 waiter 进入阻塞
+
+        # 修复前：release 锁外 list(self._waiters) → AssertionError（红）
+        holder.release()
+
+        blocked.join(timeout=2)
+        assert not blocked.is_alive(), 'release 后 acquire 应返回（未被 waiter 竞态卡死）'
+        assert box.get('handle') is not None, '阻塞 acquire 应取得租约'
+        box['handle'].release()
+
+    def test_renew_shortening_ttl_wakes_waiters(self):
+        """#254 / codex P2：renew 把 TTL 缩短到提前过期时，须唤醒已注册 waiter。
+
+        contender 在 ``acquire()`` 快照持有者剩余 TTL（60s）并注册 Event 后，持有者 renew
+        缩短到 10ms——只更新 ``_held`` 不 signal waiter，waiter 仍按旧 60s 快照睡，锁实际
+        早空但 fake 测试挂死（与 Redis adapter 轮询背离）。修复后 renew 使 ``expires_at``
+        提前时应唤醒 waiters 让它们立即重查。
+        """
+        from common.lock.fakes import FakeLockSync
+
+        lock = FakeLockSync()
+        holder = lock.acquire(_fresh_resource(), ttl=timedelta(seconds=60))
+
+        box: dict = {}
+        started = threading.Event()
+
+        def _blocked_acquire():
+            started.set()
+            box['handle'] = lock.acquire(_fresh_resource(), ttl=timedelta(seconds=60))
+
+        blocked = threading.Thread(target=_blocked_acquire)
+        blocked.start()
+        assert started.wait(timeout=1), 'acquire 线程应已启动'
+        time.sleep(0.02)  # 让线程快照 60s 剩余 TTL 并注册 waiter
+
+        start = time.monotonic()
+        holder.renew(timedelta(milliseconds=10))  # 缩短 TTL → 10ms 后过期
+        blocked.join(timeout=2)
+        elapsed = time.monotonic() - start
+
+        # 修复前：waiter 按旧 60s 快照睡，join 超时 → blocked.is_alive() 为真（红）
+        assert not blocked.is_alive(), (
+            f'renew 缩短 TTL 后 waiter 应在 TTL 过期时立即取得，'
+            f'实际阻塞 {elapsed:.2f}s 未返回（按旧快照睡满）'
+        )
+        assert box.get('handle') is not None, '阻塞 acquire 应取得租约'
+        assert elapsed < 2, f'renew 缩短 TTL 后 acquire 应在 ~10ms 返回，实际 {elapsed:.2f}s'
+        box['handle'].release()
