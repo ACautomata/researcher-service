@@ -357,8 +357,9 @@ def test_l4_chat_send_event_stream(page_ws):  # pylint: disable=too-many-stateme
             """,
             container_name,
         )
-        assert created['ok'] and created['status'] == 201, (
-            f'create must return 201, got status={created.get("status")}, body={created.get("body")}'
+        assert created['ok'] and created['status'] == 202, (
+            f'create must return 202 (#297 异步化：同步预占 creating 行即返), '
+            f'got status={created.get("status")}, body={created.get("body")}'
         )
 
         # ── 1b. 网关冷启动就绪等待（对齐 wire GatewayReadinessWaiter：create 后网关 WS server

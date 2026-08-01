@@ -28,6 +28,8 @@ from containers.docker_runtime import DockerRuntime
 from containers.models import Instance
 from containers.orchestrator import Fleet, FleetConfig, InstanceOrchestrator
 from containers.tests.fakes import FakeHealthProbe
+from containers.tests.integration_helpers import GatewayReadinessWaiter
+from integration.openclaw.adapters import HttpHealthProbe
 
 # 真链路集成测试（issue #157/#178）：CI integration job env 齐备时真跑；backend-unit job 经
 # `-m "not integration"` 排除，默认 `python -m pytest` 不跑（不污染单元回归）。
@@ -815,17 +817,25 @@ def _seed_wiki_page(fleet_root: Path, name: str) -> tuple[str, str]:
     return 'l3seed', 'l3seed/hello.md'
 
 
+# 网关冷启动就绪轮询（对齐 L4/wire 的 _GATEWAY_READINESS_TIMEOUT：create 返 202 后 docker run
+# 后台完成、网关 WS server 需数秒 boot）。不等就绪直接 L3 读 wiki tree 会撞网关未就绪。
+_GATEWAY_READINESS_TIMEOUT = 60.0
+_GATEWAY_POLL_INTERVAL = 1.0
+
+
 @pytest.mark.skipif('not _docker_daemon_reachable()', reason='L2b/L3 需可达 Docker daemon (#182)')
 @pytest.mark.django_db(transaction=True)
 def test_l2b_create_and_l3_wiki_tree_contract(page, tmp_path, request):
     """L2b+L3：真起 OpenClaw 容器 → InstanceDTO 契约；复用容器读 wiki tree → shape 契约（#182）。
 
     L2b——经 ``__apiFetch``（前端 JWT 拦截器，``createInstance`` 的底层 ``apiFetch``）``POST
-    /containers/`` 真起一个 OpenClaw 容器，断言**真实 201** + ``InstanceDTO`` 字段类型与
-    ``InstanceSerializer`` 对齐（复用 L2a ``_assert_instance_dto_contract``，含 pairing 子契约）。
-    用 ``__apiFetch`` 而非 ``createInstance``：create 状态码契约显著（201/409/503，
-    ``views.py:88`` 成功唯返 201），``apiFetch`` 暴露真实 ``resp.status`` 让 201 显式可断；
-    URL/method/body 与 ``createInstance`` 同，前端认证链路（JWT 注入 + 401 重试）覆盖不变。
+    /containers/`` 真起一个 OpenClaw 容器，断言**真实 202**（#297 异步化：同步预占 creating 行
+    后即返）+ ``InstanceDTO`` 字段类型与 ``InstanceSerializer`` 对齐（复用 L2a
+    ``_assert_instance_dto_contract``，含 pairing 子契约）。202 body 是 creating 态快照，随后
+    ``GatewayReadinessWaiter`` 轮询 /health 至就绪（docker run 后台完成、网关冷启动 boot）。
+    用 ``__apiFetch`` 而非 ``createInstance``：create 状态码契约显著（202/409/503），
+    ``apiFetch`` 暴露真实 ``resp.status`` 让 202 显式可断；URL/method/body 与 ``createInstance``
+    同，前端认证链路（JWT 注入 + 401 重试）覆盖不变。
 
     L3——复用该容器 host 侧 seed 一页（``_seed_wiki_page``）后，经 ``__getTree``（前端 wiki api
     模块，含 ``base(name)`` URL builder + ``apiJson``）读 ``GET /containers/<name>/wiki/tree``，
@@ -851,7 +861,7 @@ def test_l2b_create_and_l3_wiki_tree_contract(page, tmp_path, request):
 
     _login(page, username, password)
     try:
-        # ── L2b: create → 真实 201 + InstanceDTO 契约 ──────────────────────────
+        # ── L2b: create → 真实 202 + InstanceDTO 契约 ──────────────────────────
         created = page.evaluate(
             """
             async (name) => {
@@ -869,13 +879,24 @@ def test_l2b_create_and_l3_wiki_tree_contract(page, tmp_path, request):
             container_name,
         )
         assert created['ok'], f'create rejected: status={created.get("status")}'
-        assert created['status'] == 201, (
-            f'create must return 201 (InstanceListCreateView views.py:88), got {created["status"]}'
+        assert created['status'] == 202, (
+            f'create must return 202 (InstanceListCreateView views.py:post, #297 异步化), '
+            f'got {created["status"]}'
         )
         assert created['body']['name'] == container_name, (
             f'created name mismatch: {created["body"]!r}'
         )
+        # 202 body 是 creating 态快照（#297）；后续 L3 读 wiki tree 前须等 provisioning 完成
+        # + 网关就绪——否则 wiki view 撞未就绪。就绪轮询对齐 L4（GatewayReadinessWaiter）。
+        assert created['body']['status'] == 'creating', (
+            f'202 body must snapshot creating state, got {created["body"]["status"]!r}'
+        )
         _assert_instance_dto_contract(created['body'])
+        GatewayReadinessWaiter(
+            HttpHealthProbe(),
+            timeout=_GATEWAY_READINESS_TIMEOUT,
+            interval=_GATEWAY_POLL_INTERVAL,
+        ).wait(created['body']['port'])
 
         # ── L3: host seed 页 → __getTree → 嵌套 shape 契约 ─────────────────────
         seed_group, seed_page = _seed_wiki_page(tmp_path / 'fleet', container_name)

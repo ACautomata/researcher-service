@@ -20,6 +20,7 @@ from containers.orchestrator import (  # pylint: disable=too-many-positional-arg
     FleetConfig,
     InstanceBusy,
     InstanceCleanupError,
+    InstanceDirExists,
     InstanceExists,
     InstanceOrchestrator,
 )
@@ -1399,6 +1400,177 @@ def test_list_survives_runtime_lookup_failure_during_reconcile(orch):
     # 保守保持 creating/pending（无法判定真实状态时不误收敛）
     assert stuck['status'] == 'creating'
     assert stuck['health'] == 'pending'
+
+
+# ───────────────────────────── #297 异步化：reserve/complete/submit ─────────────────────────────
+
+
+@pytest.mark.django_db
+def test_create_reserve_returns_creating_row(orch):
+    """#297：create_reserve 同步预占 creating 行——lease 非空 + inflight 含 name（防被收敛/拒删）。"""
+    from django.utils import timezone
+
+    inst = orch.create_reserve('demo')
+    assert inst.status == Instance.STATUS_CREATING
+    assert inst.lease_expires_at is not None
+    assert inst.lease_expires_at > timezone.now()
+    assert 'demo' in orch._deps.inflight  # pylint: disable=protected-access
+    # 后台完成前不落盘（mkdir/cp -a 未执行）
+    assert not (orch._deps.config.root / 'instances' / 'demo').exists()
+
+
+@pytest.mark.django_db
+def test_create_reserve_rejects_duplicate_name(orch):
+    """#297：reserve 阶段并发同名仍 InstanceExists（view 409）——不因异步化丢失错误语义。"""
+    orch.create_reserve('demo')
+    with pytest.raises(InstanceExists):
+        orch.create_reserve('demo')
+
+
+@pytest.mark.django_db
+def test_create_reserve_rolls_back_on_missing_template(orch, monkeypatch):
+    """#297：reserve 阶段 renderer 惰性构造失败（模板缺失）→ 回滚 creating 行 + 释放 inflight。
+
+    模板损坏是确定性配置错误，须同步暴露（客户端可改配置重试），而非后台线程失败留下无主
+    creating 行（占名占端口，且 DELETE 拒删 CREATING 行）。
+    """
+    config = orch._deps.config  # pylint: disable=protected-access
+    # 把 template_json 指向不存在路径——reserve 读模板触发 FileNotFoundError
+    bad_config = FleetConfig(
+        root=config.root,
+        template_dir=config.template_dir,
+        template_json=str(orch._deps.config.root / 'no-such-template.json'),
+        image=config.image,
+        port_start=config.port_start,
+        port_end=config.port_end,
+        llm_api_key=config.llm_api_key,
+    )
+    orch._deps.config = bad_config  # pylint: disable=protected-access
+    with pytest.raises(FileNotFoundError):
+        orch.create_reserve('demo')
+    assert not Instance.objects.filter(name='demo').exists()
+    assert 'demo' not in orch._deps.inflight  # pylint: disable=protected-access
+
+
+@pytest.mark.django_db
+def test_create_reserve_rejects_residual_dir(orch, config):
+    """#297：reserve 阶段残留目录预检 → InstanceDirExists（view 409），不留无主 creating 行。
+
+    残留目录（DB 无行的 orphan）若拖到后台 mkdir 才失败，客户端拿到 202 却落 ERROR 行，
+    且无「先清理」提示——同步预检在请求线程暴露。
+    """
+    (config.root / 'instances' / 'demo').mkdir(parents=True)
+    with pytest.raises(InstanceDirExists):
+        orch.create_reserve('demo')
+    assert not Instance.objects.filter(name='demo').exists()
+    assert 'demo' not in orch._deps.inflight  # pylint: disable=protected-access
+
+
+@pytest.mark.django_db
+def test_create_complete_discards_inflight(orch, runtime):
+    """#297：create_complete 收尾 finally 释放 inflight——后台完成不可留下在飞标记卡住并发同名。"""
+    inst = orch.create_reserve('demo')
+    assert 'demo' in orch._deps.inflight  # pylint: disable=protected-access
+    orch._cmd.create_complete(inst)  # pylint: disable=protected-access
+    assert 'demo' not in orch._deps.inflight  # pylint: disable=protected-access
+    # 完成的行已 running + run_spec 落过
+    inst.refresh_from_db()
+    assert inst.status == Instance.STATUS_RUNNING
+    assert runtime.run_specs[0].name == 'demo'
+
+
+@pytest.mark.django_db
+def test_create_complete_releases_inflight_on_failure(config, health, tmp_path):
+    """#297：create_complete 后台失败（run 抛异常）finally 仍释放 inflight——不泄漏 in-flight 标记。"""
+    _seed_template(tmp_path / 'template')
+
+    class _RunFails(FakeRuntime):
+        def run(self, spec):
+            raise RuntimeError('daemon down')
+
+    orch = InstanceOrchestrator(runtime=_RunFails(), config=config, health_probe=health)
+    inst = orch.create_reserve('demo')
+    with pytest.raises(RuntimeError):
+        orch._cmd.create_complete(inst)  # pylint: disable=protected-access
+    assert 'demo' not in orch._deps.inflight  # pylint: disable=protected-access
+    assert not Instance.objects.filter(name='demo').exists()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_create_async_background_thread(orch):
+    """#297：submit_create 经真后台线程完成 provisioning 并落库（close_old_connections 生效）。
+
+    @django_db(transaction=True)：pytest 不开事务包裹，后台线程的 DB 写入真实可见。
+    线程 join 保证断言时 provisioning 已完成；完成后行 running + 目录落盘。
+    收尾显式删除行/目录——transaction=True 不自动回滚，防残留端口行污染后续测试。
+    """
+    import threading
+
+    inst = orch.create_reserve('demo')
+    assert 'demo' in orch._deps.inflight  # pylint: disable=protected-access
+
+    done = threading.Event()
+
+    def _submit(task, *args):
+        def _wrapped():
+            try:
+                task(*args)
+            finally:
+                done.set()
+        threading.Thread(target=_wrapped, daemon=True).start()
+
+    orch._cmd._submit_task = _submit  # pylint: disable=protected-access
+    try:
+        orch.submit_create(inst)
+
+        assert done.wait(timeout=10), '后台 create 线程 10s 内未完成'
+        inst.refresh_from_db()
+        assert inst.status == Instance.STATUS_RUNNING
+        assert (orch._deps.config.root / 'instances' / 'demo' / 'home' / 'workspace' / 'note.md').exists()
+        assert 'demo' not in orch._deps.inflight  # pylint: disable=protected-access
+    finally:
+        # transaction=True 不回滚——显式清理行 + 目录，不污染后续测试的端口池断言
+        Instance.objects.filter(name='demo').delete()
+        import shutil
+
+        shutil.rmtree(orch._deps.config.root / 'instances' / 'demo', ignore_errors=True)
+
+
+@pytest.mark.django_db
+def test_create_sync_wrapper_still_works(orch, runtime):
+    """#297：create() 同步封装（reserve + complete）语义不变——既有调用方/单测零破坏。"""
+    inst = orch.create('demo')
+    assert inst.status == Instance.STATUS_RUNNING
+    assert runtime.run_specs[0].name == 'demo'
+    assert 'demo' not in orch._deps.inflight  # pylint: disable=protected-access
+
+
+@pytest.mark.django_db
+def test_background_failure_preserves_error_row(config, health, tmp_path):
+    """codex P1（#297 后台）：非 bind 失败且目录清理成功时，后台路径保留 ERROR 行。
+
+    原 create_complete 非 bind 失败删行回滚；但 POST 已返 202、行对客户端可见，删行会让
+    已接受的实例静默消失——客户端轮询看不到 error 态、无法经 delete 清理。后台线程入口
+    _run_create_complete 传 preserve_error_row=True，失败保留 ERROR 行（list 显示 error）。
+    """
+    _seed_template(tmp_path / 'template')
+
+    class _RunFails(FakeRuntime):
+        def run(self, spec):
+            raise RuntimeError('daemon down')  # 非 bind 冲突（ConfigStore.write/run 失败同类）
+
+    orch = InstanceOrchestrator(runtime=_RunFails(), config=config, health_probe=health)
+    inst = orch.create_reserve('demo')
+    # 后台路径：preserve_error_row=True → 失败保留 ERROR 行（不抛到外层，_run_create_complete 兜底）
+    orch._cmd._run_create_complete(inst)  # pylint: disable=protected-access
+    row = Instance.objects.get(name='demo')
+    assert row.status == Instance.STATUS_ERROR
+    assert 'demo' not in orch._deps.inflight  # pylint: disable=protected-access
+    # 同步路径对照：create_complete(preserve_error_row=False) 仍删行回滚（历史契约）
+    inst2 = orch.create_reserve('sync-demo')
+    with pytest.raises(RuntimeError):
+        orch._cmd.create_complete(inst2)  # pylint: disable=protected-access
+    assert not Instance.objects.filter(name='sync-demo').exists()
 
 
 # ───────────────────────────── A3：root 属主 cleanup ─────────────────────────────

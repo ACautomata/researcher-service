@@ -26,7 +26,6 @@ from integration.openclaw.translation import build_pairing_status_default
 from .models import NAME_VALIDATOR, Instance
 from .orchestrator import (
     ConfigurationError,
-    ConfigWriteError,
     Fleet,
     InstanceBusy,
     InstanceCleanupError,
@@ -58,15 +57,20 @@ class InstanceListCreateView(APIView):
 
     @extend_schema(
         request=InstanceCreateSerializer,
-        responses={201: InstanceSerializer, 409: None, 503: None},
+        responses={202: InstanceSerializer, 409: None, 503: None},
     )
     def post(self, request):  # pylint: disable=too-many-return-statements
         # 每个 except 分支的 return 都是领域异常→HTTP 转译的必要出口（chat/views.py:87 同先例）
+        # #297 异步化：同步 create_reserve（预占 creating 行）→ 立即返 202；模板拷贝 + docker
+        # run 在注入 executor 后台完成，客户端经 list 轮询 seeing creating → running 迁移。
+        # 同步阶段错误语义不变：LLM key/端口池 → 503，重名/残留目录 → 409（User story 14）。
+        # ConfigWriteError / InstanceCleanupError 仅后台抛（create_complete 已回滚/标 ERROR），
+        # 不再同步拦截——客户端经 list + delete 感知/重试。
         ser = InstanceCreateSerializer(data=request.data)
         ser.is_valid(raise_exception=True)  # spec §4：禁裸读 request.data
         name = ser.validated_data['name']
         try:
-            inst = Fleet.get().create(name)
+            inst = Fleet.get().create_reserve(name)
         except ConfigurationError as e:
             # codex R6 :484：LLM_API_KEY 未配置 → 503，不裸 500
             return Response(
@@ -77,6 +81,7 @@ class InstanceListCreateView(APIView):
             return Response({'detail': '实例名已存在'}, status=status.HTTP_409_CONFLICT)
         except InstanceDirExists:
             # 残留 orphan 目录（DB 无行，崩溃中断/外部残留）→ 409，提示先删/清理，非裸 500。
+            # #297：reserve 阶段预检同步暴露（而非留到后台 mkdir 才失败）。
             return Response(
                 {'detail': '该名称存在残留数据目录（上次创建未完成），请删除同名实例或手动清理后重试'},
                 status=status.HTTP_409_CONFLICT,
@@ -87,23 +92,13 @@ class InstanceListCreateView(APIView):
                 {'detail': '端口池已耗尽，暂无法创建容器，请稍后重试或删除闲置容器'},
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,
             )
-        except ConfigWriteError:
-            # codex #280 review：create 的 config 写盘失败（卷只读/满，ConfigWriteError）→
-            # 503（schema 已声明；models 视图同语义）。create 行/目录已回滚，客户端可重试。
-            return Response(
-                {'detail': '容器配置写盘失败（磁盘只读/已满），请重试或联系管理员'},
-                status=status.HTTP_503_SERVICE_UNAVAILABLE,
-            )
-        except InstanceCleanupError:
-            # codex R4 :265：create 回滚时目录清理失败（行标 ERROR 保留可重试）→ 409，非裸 500
-            return Response(
-                {'detail': '容器创建失败且数据目录清理未完成（权限/属主），请重试或联系管理员清理'},
-                status=status.HTTP_409_CONFLICT,
-            )
-        # codex R4 :60：由 create() 返回构造 201，不再二次 detail() 查 runtime——
-        # 创建已 commit 并启动容器后，detail 的 daemon 抖动会让成功创建误返 500（重试撞 409）。
+        # 预占成功：先构造 202 响应（creating 态快照，由 create_reserve 返回的行构造，不做二次
+        # runtime 查询——daemon 抖动不应让已提交的创建 500，重试撞 409），再提交后台完成。
+        # 顺序保证：即使测试注入 inline 同步 executor（后台 provisioning 同步跑完），202 body
+        # 仍是创建态快照，客户端据此轮询列表 seeing creating → running 迁移。
         item = Fleet.get().created_item(inst)
-        return Response(InstanceSerializer(item).data, status=status.HTTP_201_CREATED)
+        Fleet.get().submit_create(inst)
+        return Response(InstanceSerializer(item).data, status=status.HTTP_202_ACCEPTED)
 
 
 class InstanceDetailView(APIView):
