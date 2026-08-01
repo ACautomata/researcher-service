@@ -21,6 +21,11 @@ panel-frontend 容器（nginx，唯一对宿主暴露，loopback:18080）
 - 三服务 `restart: unless-stopped`，宿主重启自恢复。
 - 前端为 origin-relative：构建不注入后端地址，无 CORS、无 per-domain 重建。
 - 镜像存私有 GHCR：`ghcr.io/<owner>/<repo>/{backend,frontend}`，tag `:latest` + `:<commit sha>`。
+- **超时分层**：`/api/` 慢请求（创建容器、配对等）依赖代理链逐层放宽超时。容器内 nginx 已配
+  `proxy_read_timeout/send_timeout 300s`（`/api/`）与 `3600s`（`/ws/`）；**BaoTa 边缘反代须 ≥ 内层
+  最慢值 `3600s`**：站点 → 反向代理 → 配置，填 `proxy_read_timeout 3600s;` + `proxy_send_timeout 3600s;`
+  （bootstrap 步骤 5），否则外层默认 60s 会先于内层返回 504——慢请求已完成但 UI 报失败。
+  改任一层超时须同步全链。
 
 ## CD 自动化什么
 
@@ -41,7 +46,7 @@ panel-frontend 容器（nginx，唯一对宿主暴露，loopback:18080）
 | 2 | DNS 指向 | `researcher.acautomata.top` A 记录 → 宿主公网 IP（LE HTTP-01 需先解析）。 |
 | 3 | 宝塔建站点 | 网站 → 添加站点 `researcher.acautomata.top`（纯静态/反代用途，无需 PHP）。 |
 | 4 | Let's Encrypt | 站点 SSL → Let's Encrypt 申请 → 开启「强制 HTTPS」。续期宝塔自动。 |
-| 5 | 反代 | 站点 → 反向代理 → 目标 `http://127.0.0.1:18080`，发送域名 `$host`。 |
+| 5 | 反代 | 站点 → 反向代理 → 目标 `http://127.0.0.1:18080`，发送域名 `$host`。**并把代理读/写超时放宽到 `3600s`**（见上方「超时分层」）。 |
 | 6 | GitHub secrets | 见下表。 |
 
 > researcher 模板、/www/panel 目录 **无需手工预建**——CD 首次会自动克隆/创建（防御性 bootstrap）。
