@@ -52,6 +52,7 @@ from containers.fleet.deps import FleetDeps
 from containers.fleet.read_model import FleetReadModel
 from containers.fleet.values import FleetConfig
 from containers.models import Instance
+from integration.openclaw.adapters import HttpHealthProbe
 
 
 class InstanceOrchestrator:
@@ -158,8 +159,12 @@ class Fleet:
         cfg = settings.OPENCLAW_FLEET
         # codex R7 :509：模板文件 IO 推迟到 create() 内惰性加载——
         # list/delete 恢复操作不应因模板文件缺失而 500。
+        # #295：健康探测与 WS 配对共享同一连接目标 host（OPENCLAW_FLEET_WS['HOST']），
+        # 端口发布地址用 OPENCLAW_FLEET['PORT_BIND_HOST']——生产后端容器化后前者注入
+        # host.docker.internal、后者 0.0.0.0（compose 装配），本地默认 loopback 零回归。
         return InstanceOrchestrator(
-            runtime=DockerRuntime(),
+            runtime=DockerRuntime(publish_host=cfg['PORT_BIND_HOST']),
+            health_probe=HttpHealthProbe(host=settings.OPENCLAW_FLEET_WS['HOST']),
             config=FleetConfig(
                 root=Path(cfg['ROOT']),
                 template_dir=Path(cfg['TEMPLATE']),

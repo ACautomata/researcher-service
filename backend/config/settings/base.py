@@ -180,6 +180,10 @@ OPENCLAW_FLEET = {
     # 默认空串保持 dev/integration 宽容（integration CI 靠 env 注入跑真容器，base 不强制非空）；
     # 生产必填 fail-fast 在 prod.py 的 validate_prod_env（issue #250）。
     'LLM_API_KEY': os.environ.get('LLM_API_KEY', ''),
+    # 容器 gateway 端口在宿主侧的发布地址（#295）。默认 127.0.0.1（loopback 收敛暴露面，本地
+    # 控制面与容器同宿主）；生产后端容器化后注入 0.0.0.0，使控制面容器能经
+    # host.docker.internal:<port>（host-gateway）寻址宿主映射端口。gateway 强制 token 认证兜底安全。
+    'PORT_BIND_HOST': os.environ.get('OPENCLAW_FLEET_PORT_BIND_HOST', '127.0.0.1'),
 }
 
 # ---- 设备配对 WS 连接（ADR 0005 配置边界：settings 声明，pairing 经 settings 取值）----

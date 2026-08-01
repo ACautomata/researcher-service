@@ -1,7 +1,7 @@
 """OpenClaw 防腐层 4 Port 的真实 Adapter（Hexagonal / spec #97 / ADR 0002）。
 
 每个 Adapter 实现对应 Port（Protocol）：
-- HttpHealthProbe（路径3，#99）—— 构造注入 http client，http://127.0.0.1:<port>/health
+- HttpHealthProbe（路径3，#99）—— 构造注入 http client + 探测 host（默认 loopback），<host>:<port>/health
 - BindMountWikiFileSystem（路径2，#100）—— 封装路径约定/五分类/越权防护，wiki/main 直读直写
 - #101 DockerContainerRuntime
 - 路径4 OpenClawWire —— 唯一实现已迁入 integration.openclaw.wire_client.OpenClawWireClient
@@ -15,16 +15,20 @@ from pathlib import Path
 
 
 class HttpHealthProbe:
-    """路径3：HTTP GET 127.0.0.1:<port>/health 探容器 gateway 可达性（spec §5.4/§12）。
+    """路径3：HTTP GET <host>:<port>/health 探容器 gateway 可达性（spec §5.4/§12）。
 
-    构造注入 http client（urllib），timeout 可配。实现 integration.openclaw.HealthProbe Port。
+    构造注入 http client（urllib）与探测 host，timeout 可配。host 默认 127.0.0.1（本地
+    控制面与容器同宿主 loopback）；生产后端容器化后由 Fleet._build_default 从 settings 注入
+    ``host.docker.internal``（#295：经 host-gateway 寻址宿主 0.0.0.0 发布的 gateway 端口）。
+    实现 integration.openclaw.HealthProbe Port。
     """
 
-    def __init__(self, timeout: float = 2.0) -> None:
+    def __init__(self, timeout: float = 2.0, host: str = '127.0.0.1') -> None:
         self._timeout = timeout
+        self._host = host
 
     def is_reachable(self, port: int) -> bool:
-        url = f'http://127.0.0.1:{port}/health'
+        url = f'http://{self._host}:{port}/health'
         try:
             with urllib.request.urlopen(url, timeout=self._timeout) as resp:
                 return 200 <= resp.status < 300

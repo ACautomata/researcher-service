@@ -53,10 +53,16 @@ _BASE_ENV = {
 
 
 class DockerRuntime:
-    """docker-py 容器运行时适配器（实现 ContainerRuntime Protocol）。"""
+    """docker-py 容器运行时适配器（实现 ContainerRuntime Protocol）。
 
-    def __init__(self, client_factory=None) -> None:
+    publish_host 默认 127.0.0.1（loopback 收敛暴露面，本地开发）；生产后端容器化后由
+    Fleet._build_default 从 settings 注入 0.0.0.0（#295：宿主侧 0.0.0.0 发布，控制面容器才能经
+    host.docker.internal:<port> 寻址 gateway）。
+    """
+
+    def __init__(self, client_factory=None, publish_host: str = '127.0.0.1') -> None:
         self._client_factory = client_factory or docker.from_env
+        self._publish_host = publish_host
         # codex R9-3：复用单 client 而非每次 docker.from_env() —— 管理页每 3s×N instance
         # 的 status 轮询会产生大量无谓 daemon 连接。lazy 构造兼容构造时不连 daemon 的约定。
         # 注意：属性名 _cached_client 区别于方法 _client()，避免 Python attribute shadow 导致
@@ -96,7 +102,7 @@ class DockerRuntime:
                 # read-only watch 热加载（r28）；host 侧写透过 bind 传播给容器，不受 ro 影响。
                 spec.config_path: {'bind': CONFIG_BIND, 'mode': 'ro'},
             },
-            'ports': {f'{GATEWAY_INTERNAL_PORT}/tcp': ('127.0.0.1', spec.host_port)},
+            'ports': {f'{GATEWAY_INTERNAL_PORT}/tcp': (self._publish_host, spec.host_port)},
             'restart_policy': {'Name': 'unless-stopped'},
             'labels': {
                 LABEL_APP_KEY: LABEL_APP_VALUE,

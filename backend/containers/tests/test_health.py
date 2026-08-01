@@ -49,3 +49,23 @@ def test_timeout_is_unreachable(monkeypatch):
 
     monkeypatch.setattr(urllib.request, 'urlopen', _timeout)
     assert HttpHealthProbe().is_reachable(19000) is False
+
+
+def test_http_health_probe_uses_injected_host(monkeypatch):
+    """#295：探测 URL 用构造注入 host（默认 127.0.0.1 保持本地零回归）。
+
+    生产后端容器化后，gateway 端口经宿主 0.0.0.0 发布，控制面须经
+    ``host.docker.internal``（host-gateway）寻址——host 不再写死 loopback。
+    用 monkeypatch 捕获 urlopen 的第一个位置参数（URL 串），断言含注入 host。
+    """
+    seen = {}
+
+    def _capture(url, *a, **k):
+        seen['url'] = url
+        resp = _FakeResponse(b'{"status":"ok"}')
+        resp.status = 200
+        return resp
+
+    monkeypatch.setattr(urllib.request, 'urlopen', _capture)
+    assert HttpHealthProbe(host='10.0.0.5').is_reachable(19000) is True
+    assert seen['url'] == 'http://10.0.0.5:19000/health'

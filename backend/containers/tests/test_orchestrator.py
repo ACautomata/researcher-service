@@ -1131,6 +1131,7 @@ def test_fleet_get_survives_missing_template_file(tmp_path, settings):
         'PORT_POOL_START': 19000,
         'PORT_POOL_END': 19999,
         'LLM_API_KEY': '',  # ADR 0005：stub 须镜像 base.py 的 fleet 键（编排改经 settings 取）
+        'PORT_BIND_HOST': '127.0.0.1',  # #295：stub 镜像 base.py 新增端口发布 host 键
     }
     Fleet.reset()
     try:
@@ -1139,6 +1140,36 @@ def test_fleet_get_survives_missing_template_file(tmp_path, settings):
         # 只有 create() 展开模板时才会失败
         items = orch.list()
         assert items == []
+    finally:
+        Fleet.reset()
+
+
+@pytest.mark.django_db
+def test_fleet_build_default_injects_hosts_from_settings(tmp_path, settings):
+    """#295 验收 4：Fleet._build_default 从 settings 装配探测 host 与端口发布 host。
+
+    生产后端容器化后，探测 host 注入 OPENCLAW_FLEET_WS['HOST']（host.docker.internal），
+    端口发布 host 注入 OPENCLAW_FLEET['PORT_BIND_HOST']（0.0.0.0）——两处装配都要落地到
+    注入点（_deps.health / _deps.runtime），否则生产 compose 注入配置不生效。
+    """
+    from containers.orchestrator import Fleet
+
+    settings.OPENCLAW_FLEET = {
+        'ROOT': str(tmp_path / 'fleet'),
+        'TEMPLATE': str(tmp_path / 'template'),
+        'TEMPLATE_JSON': str(tmp_path / 'tpl.json'),
+        'IMAGE': 'img:tag',
+        'PORT_POOL_START': 19000,
+        'PORT_POOL_END': 19999,
+        'LLM_API_KEY': '',
+        'PORT_BIND_HOST': '0.0.0.0',  # 生产：宿主侧 0.0.0.0 发布，host-gateway 可达
+    }
+    settings.OPENCLAW_FLEET_WS = {'SCHEME': 'ws', 'HOST': 'host.docker.internal'}
+    Fleet.reset()
+    try:
+        orch = Fleet.get()
+        assert orch._deps.runtime._publish_host == '0.0.0.0'
+        assert orch._deps.health._host == 'host.docker.internal'
     finally:
         Fleet.reset()
 

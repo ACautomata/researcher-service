@@ -17,7 +17,8 @@ from config.settings import base
 from config.settings._validation import validate_prod_env
 
 _ENV_KEYS = ('OPENCLAW_TEMPLATE_DIR', 'OPENCLAW_TEMPLATE_JSON', 'RESEARCHER_DIR',
-             'LLM_API_KEY', 'OPENCLAW_FLEET_WS_SCHEME', 'OPENCLAW_FLEET_WS_HOST')
+             'LLM_API_KEY', 'OPENCLAW_FLEET_WS_SCHEME', 'OPENCLAW_FLEET_WS_HOST',
+             'OPENCLAW_FLEET_PORT_BIND_HOST')
 
 
 @pytest.fixture(autouse=True)
@@ -169,3 +170,16 @@ def test_fleet_ws_env_override_reflected():
                            OPENCLAW_FLEET_WS_HOST='0.0.0.0')
     assert mod.OPENCLAW_FLEET_WS['SCHEME'] == 'wss'
     assert mod.OPENCLAW_FLEET_WS['HOST'] == '0.0.0.0'
+
+
+def test_port_bind_host_default_loopback():
+    """#295：端口发布 host 默认 127.0.0.1（本地 loopback 收敛暴露面，零回归）。"""
+    mod = _reload_with_env()
+    assert 'PORT_BIND_HOST' in mod.OPENCLAW_FLEET
+    assert mod.OPENCLAW_FLEET['PORT_BIND_HOST'] == '127.0.0.1'
+
+
+def test_port_bind_host_env_override_reflected():
+    """#295：OPENCLAW_FLEET_PORT_BIND_HOST 覆盖 → settings 反映新值（生产注入 0.0.0.0）。"""
+    mod = _reload_with_env(OPENCLAW_FLEET_PORT_BIND_HOST='0.0.0.0')
+    assert mod.OPENCLAW_FLEET['PORT_BIND_HOST'] == '0.0.0.0'

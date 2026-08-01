@@ -46,6 +46,16 @@ def test_gateway_port_maps_to_loopback_host_port():
     assert kw['ports'] == {'18789/tcp': ('127.0.0.1', 19000)}
 
 
+def test_publish_host_configurable():
+    """#295：端口发布 host 构造注入，生产可配 0.0.0.0 使 host-gateway 可达。
+
+    本地默认 loopback（收敛暴露面）；生产后端容器化后经 ``OPENCLAW_FLEET_PORT_BIND_HOST``
+    注入 0.0.0.0，控制面容器经 host.docker.internal:<port> 寻址宿主映射端口。
+    """
+    kw = DockerRuntime(publish_host='0.0.0.0').build_run_kwargs(_spec())
+    assert kw['ports'] == {'18789/tcp': ('0.0.0.0', 19000)}
+
+
 def test_home_rw_and_config_bind_mount_ro():
     # home rw（agent 写 wiki/workspace）；openclaw.json ro（spec §5.2 防容器内篡改配置）。
     # 官方镜像无 init.sh chown，ro 不会崩（ADR 0003）；配置写入全在 host 侧，gateway 只 read-only watch。
