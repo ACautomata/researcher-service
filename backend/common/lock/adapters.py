@@ -166,9 +166,14 @@ class SyncRedisLockAdapter:
         sync 形态：``redis.Redis`` 的 ``lock()`` 默认自带阻塞轮询语义（同 async），
         sync 线程无需自己拼 Event——redis-py 已把「SET NX PX + sleep 重试」封装进
         ``Lock.acquire(blocking=True)``。
+
+        **``thread_local=False``（#254 / codex P2）：** redis-py ``Lock`` 默认
+        ``thread_local=True``——token 存线程本地，threadpool 调用方在另一个 worker 线程
+        renew/release 读不到 token（``LockError`` 被吞成 no-op），锁持有到 TTL 过期。
+        handle 须能把 token 跨线程携带，故取锁时显式关线程本地 token。
         """
         redis_lock = self._client.lock(
-            self._key_for(resource), timeout=ttl.total_seconds(),
+            self._key_for(resource), timeout=ttl.total_seconds(), thread_local=False,
         )
         redis_lock.acquire(blocking=True)  # blocking 默认 True：SET NX PX 重试至取得
         return SyncRedisLeaseHandle(redis_lock)
@@ -176,7 +181,7 @@ class SyncRedisLockAdapter:
     def try_acquire(self, resource: LockResource, ttl: timedelta) -> SyncLeaseHandle | None:
         """非阻塞获取租约：已被他人持有（未过期）返回 None。"""
         redis_lock = self._client.lock(
-            self._key_for(resource), timeout=ttl.total_seconds(),
+            self._key_for(resource), timeout=ttl.total_seconds(), thread_local=False,
         )
         acquired = redis_lock.acquire(blocking=False)
         if not acquired:

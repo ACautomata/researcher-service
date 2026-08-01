@@ -19,6 +19,7 @@ import threading
 import time
 import uuid
 from datetime import timedelta
+from types import SimpleNamespace
 
 import pytest
 from redis.asyncio.lock import Lock as _RedisLock
@@ -373,14 +374,23 @@ class _SyncStubRedisLock:
 
     与 async 侧 ``_StubRedisLock`` 同一契约面（acquire/release/extend），但同步阻塞——
     测试不连真 Redis。acquire(blocking=True) 循环轮询直至取得（模拟 redis-py 阻塞语义）。
+
+    **复刻 redis-py 的 ``thread_local`` 语义**（codex P2）：``thread_local=True`` 时 token
+    存 ``threading.local()``（仅 acquire 线程可见，跨线程 release/extend 读到 None）；
+    ``False`` 时存共享 ``SimpleNamespace()``（token 可跨线程携带）。这使本 stub 能复现
+    真 ``redis.Redis`` Lock 在 threadpool 场景下「A 线程 acquire、B 线程 release」的失败。
     """
 
-    def __init__(self, client, name, timeout=None, blocking=True):
+    def __init__(self, client, name, timeout=None, blocking=True, thread_local=True):
         self._client = client
         self.name = name
         self.timeout = timeout
         self.blocking = blocking
-        self.token = None
+        self._local = threading.local() if thread_local else SimpleNamespace()
+        self._local.token = None
+
+    def _get_token(self):
+        return getattr(self._local, 'token', None)
 
     def acquire(self, blocking=None, blocking_timeout=None, token=None):
         token = uuid.uuid1().hex.encode() if token is None else token
@@ -390,7 +400,7 @@ class _SyncStubRedisLock:
         )
         while True:
             if self._client._claim_nx(self.name, token, self.timeout):
-                self.token = token
+                self._local.token = token
                 return True
             if not blocking:
                 return False
@@ -399,17 +409,19 @@ class _SyncStubRedisLock:
             time.sleep(0.001)
 
     def release(self):
-        if self.token is None:
+        token = self._get_token()
+        if token is None:
             raise LockError('Cannot release a lock that is not owned')
-        if not self._client._release_cas(self.name, self.token):
-            self.token = None
+        if not self._client._release_cas(self.name, token):
+            self._local.token = None
             raise LockNotOwnedError('Cannot release a lock that is no longer owned')
-        self.token = None
+        self._local.token = None
 
     def extend(self, additional_time, replace_ttl=False):
-        if self.token is None:
+        token = self._get_token()
+        if token is None:
             raise LockError('Cannot extend an unlocked lock')
-        if not self._client._extend_cas(self.name, self.token, float(additional_time)):
+        if not self._client._extend_cas(self.name, token, float(additional_time)):
             raise LockNotOwnedError('Cannot extend a lock that is no longer owned')
         return True
 
@@ -425,9 +437,14 @@ class _SyncRecordingRedisClient:
     def _now() -> float:
         return time.monotonic()
 
-    def lock(self, name, timeout=None, blocking=True, **_ignored):
-        self.lock_calls.append({'name': name, 'timeout': timeout, 'blocking': blocking})
-        return _SyncStubRedisLock(self, name, timeout=timeout, blocking=blocking)
+    def lock(self, name, timeout=None, blocking=True, thread_local=True, **_ignored):
+        self.lock_calls.append({
+            'name': name, 'timeout': timeout, 'blocking': blocking,
+            'thread_local': thread_local,
+        })
+        return _SyncStubRedisLock(
+            self, name, timeout=timeout, blocking=blocking, thread_local=thread_local,
+        )
 
     def _claim_nx(self, name, token, timeout) -> bool:
         entry = self._store.get(name)
@@ -598,6 +615,85 @@ class TestSyncRedisLockAdapterContract:
 
         assert adapter.try_acquire(ProvisionResource('gw-a'), ttl=timedelta(seconds=60)) is None
         second.release()
+
+    def test_lock_factory_uses_thread_local_false(self):
+        """#254 / codex P2：sync 两个 lock() 工厂路径传 ``thread_local=False``。
+
+        redis-py ``Lock`` 默认 ``thread_local=True``——token 存线程本地，跨 worker 线程
+        renew/release 读不到 token（``LockError`` 被吞成 no-op），锁持有到 TTL 过期。
+        sync adapter 是 threadpool 实现，handle 须能在任意线程续约/释放。
+        """
+        adapter, client = _sync_adapter_with_stub_client()
+        adapter.acquire(ProvisionResource('gw-a'), ttl=timedelta(seconds=60))
+        adapter.try_acquire(PairingResource(instance_id=7), ttl=timedelta(seconds=60))
+
+        assert len(client.lock_calls) == 2
+        for call in client.lock_calls:
+            assert call['thread_local'] is False, (
+                f"lock() 应传 thread_local=False（跨线程可续约/释放），收到 {call['thread_local']}"
+            )
+
+    def test_release_works_when_acquire_and_release_on_different_threads(self):
+        """#254 / codex P2：A 线程 acquire、B 线程 release——thread_local=False 使 token 跨线程携带。
+
+        复刻真 threadpool 调用方（orchestrator create / pairing）：acquire 在一个 worker
+        线程、release 在另一个。修前 ``thread_local=True``（token 存线程本地）→ B 线程
+        release 读到 None 抛 ``LockError`` 被吞 → 锁持有到 TTL 过期（红）。
+        """
+        adapter, _ = _sync_adapter_with_stub_client()
+
+        holder = adapter.acquire(ProvisionResource('gw-a'), ttl=timedelta(seconds=60))
+        assert adapter.try_acquire(ProvisionResource('gw-a'), ttl=timedelta(seconds=60)) is None
+
+        errors: list[BaseException] = []
+        result: dict = {}
+
+        def _release_in_other_thread():
+            try:
+                holder.release()
+                result['released'] = True
+            except BaseException as exc:  # 测试线程捕获，断言阶段统一上报
+                errors.append(exc)
+
+        t = threading.Thread(target=_release_in_other_thread)
+        t.start()
+        t.join(timeout=2)
+
+        assert not errors, f'跨线程 release 不应抛异常：{errors}'
+        assert not t.is_alive()
+        assert result.get('released'), '跨线程 release 应成功释放（token 跨线程可见）'
+        assert adapter.try_acquire(ProvisionResource('gw-a'), ttl=timedelta(seconds=60)) is not None
+
+    def test_renew_works_when_acquire_and_renew_on_different_threads(self):
+        """#254 / codex P2：A 线程 acquire、B 线程 renew——续约须真正生效（非静默 no-op）。
+
+        ``SyncRedisLeaseHandle.renew`` 吞掉 ``LockError``（跨线程 token 不可见时抛）成
+        no-op——只断言「不抛」区分不了成功/失败。故断言续约后租约仍持有：若 B 线程
+        renew 未生效（token 不可见），租约按原 TTL（60s 内仍持有）→ 本断言会误绿。
+        为真红，把原 TTL 设短 + B 线程 renew 延长——修前 renew 无效则按短 TTL 过期。
+        """
+        adapter, _ = _sync_adapter_with_stub_client()
+
+        holder = adapter.acquire(ProvisionResource('gw-a'), ttl=timedelta(milliseconds=30))
+
+        result: dict = {}
+
+        def _renew_in_other_thread():
+            holder.renew(timedelta(seconds=60))  # 跨线程续约；失败被吞成 no-op
+            result['renewed'] = True
+
+        t = threading.Thread(target=_renew_in_other_thread)
+        t.start()
+        t.join(timeout=2)
+        assert result.get('renewed'), '跨线程 renew 调用应完成'
+
+        # 原 TTL 30ms 已过——若 renew 生效（token 跨线程可见），60s 租约仍持有；
+        # 若 renew 未生效，锁已过期可获取。
+        time.sleep(0.05)
+        assert adapter.try_acquire(ProvisionResource('gw-a'), ttl=timedelta(seconds=60)) is None, (
+            '跨线程 renew 应真正延长租约（修前 thread_local=True 时 renew 无效、锁已过期）'
+        )
+        holder.release()
 
 
 class TestSyncKeyConstruction:

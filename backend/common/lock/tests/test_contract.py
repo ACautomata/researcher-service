@@ -323,6 +323,21 @@ class TestFakeLockBehavior:
         with pytest.raises(TypeError):
             await lock.try_acquire(ForeignResource(), ttl=timedelta(seconds=60))  # type: ignore[arg-type]
 
+    async def test_resource_subclass_rejected_like_adapter(self):
+        """#254 / codex P2：async fake 同样拒绝子类（与 adapter 精确变体检查对齐）。"""
+        from common.lock.fakes import FakeLock
+        from common.lock.ports import ProvisionResource
+
+        class SubProvisionResource(ProvisionResource):
+            """ProvisionResource 子类——生产 adapter 拒绝，fake 须同样拒绝。"""
+
+        lock = FakeLock()
+        with pytest.raises(TypeError):
+            await lock.try_acquire(
+                SubProvisionResource(container_name='gw-a'),  # type: ignore[arg-type]
+                ttl=timedelta(seconds=60),
+            )
+
     async def test_acquire_unblocks_when_lease_expires(self):
         """阻塞 acquire 在持有租约 TTL 过期后自动取得（无显式 release）。"""
         from common.lock.fakes import FakeLock
@@ -621,3 +636,29 @@ class TestFakeLockSyncBehavior:
             lock.try_acquire('gw-a', ttl=timedelta(seconds=60))  # type: ignore[arg-type]
         with pytest.raises(TypeError):
             lock.acquire('gw-a', ttl=timedelta(seconds=60))  # type: ignore[arg-type]
+
+    def test_resource_subclass_rejected_like_adapter(self):
+        """#254 / codex P2：resource 子类须像生产 adapter 一样拒绝（精确变体检查）。
+
+        ``isinstance(resource, _RESOURCE_VARIANTS)`` 会让 ProvisionResource/PairingResource
+        的子类通过，而生产 adapter 用 ``_KEY_BUILDERS.get(type(resource))`` 只接受精确
+        变体（子类抛 TypeError）——fake 与 adapter 行为不一致，测试会用 fake 全绿、
+        生产抛错。修 fake 用 ``type(resource)`` 精确变体检查，与 adapter 对齐。
+        """
+        from common.lock.fakes import FakeLockSync
+        from common.lock.ports import ProvisionResource
+
+        class SubProvisionResource(ProvisionResource):
+            """ProvisionResource 子类——生产 adapter 拒绝，fake 须同样拒绝。"""
+
+        lock = FakeLockSync()
+        with pytest.raises(TypeError):
+            lock.try_acquire(
+                SubProvisionResource(container_name='gw-a'),  # type: ignore[arg-type]
+                ttl=timedelta(seconds=60),
+            )
+        with pytest.raises(TypeError):
+            lock.acquire(
+                SubProvisionResource(container_name='gw-a'),  # type: ignore[arg-type]
+                ttl=timedelta(seconds=60),
+            )

@@ -92,8 +92,12 @@ class FakeLock:
 
     @staticmethod
     def _validate_resource(resource: LockResource) -> None:
-        """防 KV 逃逸口（#246 Q6）：只收闭合 tagged union 的具体变体，绝收裸 string。"""
-        if not isinstance(resource, _RESOURCE_VARIANTS):
+        """防 KV 逃逸口（#246 Q6）：只收闭合 tagged union 的具体变体，绝收裸 string。
+
+        用 ``type(resource)`` 精确变体检查（非 isinstance）——子类也拒绝，与生产
+        adapter 的 ``_KEY_BUILDERS.get(type(resource))`` 对齐（codex P2）。
+        """
+        if type(resource) not in _RESOURCE_VARIANTS:
             raise TypeError(
                 'resource 必须为闭合 LockResource tagged union'
                 f'（{"/".join(v.__name__ for v in _RESOURCE_VARIANTS)}），'
@@ -154,8 +158,12 @@ class FakeLockSync:
 
     @staticmethod
     def _validate_resource(resource: LockResource) -> None:
-        """防 KV 逃逸口（#246 Q6）：只收闭合 tagged union 的具体变体，绝收裸 string。"""
-        if not isinstance(resource, _RESOURCE_VARIANTS):
+        """防 KV 逃逸口（#246 Q6）：只收闭合 tagged union 的具体变体，绝收裸 string。
+
+        用 ``type(resource)`` 精确变体检查（非 isinstance）——子类也拒绝，与生产
+        adapter 的 ``_KEY_BUILDERS.get(type(resource))`` 对齐（codex P2）。
+        """
+        if type(resource) not in _RESOURCE_VARIANTS:
             raise TypeError(
                 'resource 必须为闭合 LockResource tagged union'
                 f'（{"/".join(v.__name__ for v in _RESOURCE_VARIANTS)}），'
