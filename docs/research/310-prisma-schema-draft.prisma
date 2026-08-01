@@ -1,0 +1,216 @@
+// ============================================================================
+// Prisma + SQLite 数据模型草案  (wayfinder #310 / map #308)
+//
+// 目的：为「废弃 Django、TS+Express 重写控制面」提供按用户隔离的具体形状，
+//      供下游决策引用（不直接执行）：
+//   - #311 认证/账号生命周期  → User / RefreshToken
+//   - #312 容器按用户隔离      → Container.owner
+//   - #319 全量 API 契约       → 各 @@unique / 关系
+//
+// 平移映射（Django → 本 schema）：
+//   accounts 默认 auth_user → User        （新增显式实体 + 角色 + OAuth2 预留）
+//   (无 refresh 持久化表)    → RefreshToken（新增实体，重写引入）
+//   containers.Instance     → Container    （+ ownerId 按用户隔离）
+//   chat.Pairing            → Pairing     （一对一，随 Container 级联）
+//   models.ModelProvider    → ModelProvider（多对一，unique(instance, providerId)）
+//   wiki                    → 无表（纯容器内文件树，直读直写）
+//
+// 关键取向：
+//   - Prisma 无 union check constraint → status / role / api 一律 enum。
+//   - EncryptedTextField → 「字段 + <x>Encrypted 布尔」成对；应用层加密、DB 存密文。
+//   - 所有表/列用 @@map/@map 显式命名，稳定落地名并与 Django 现状对齐。
+//   - 时间戳：DateTime @default(now()) / @updatedAt；SQLite 下 Prisma 存为
+//     ISO-8601 文本，语义与 Django auto_now_add/auto_now 一致。
+//
+// 校验：本 schema 已通过 `prisma validate`（Prisma 7.9.1）✅
+//   - enum @map 连字符值（ProviderApi）、双可空列 @@unique([oidcIssuer, oidcSubject])、
+//     全部关系/级联/@@map 均合法。
+//   - 目标版本 Prisma 7：datasource 不再写 url（已废弃），连接串迁至 prisma.config.ts 的
+//     datasource.url（Migrate）或 PrismaClient 构造 adapter。下方保留空 datasource 仅占位。
+// ============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  // Prisma 7：url 不在 schema；于 prisma.config.ts `datasource.url = "file:./panel.db"`
+}
+
+// ---------------------------------------------------------------------------
+// User —— 账号实体（管理员 + 普通用户双角色）
+//
+// 平移 Django 默认 auth_user，并显式化重写所需字段：
+//   - role        双角色（map #308 已锁：admin / user）
+//   - passwordHash bcrypt 散列（map #308 已锁；落单列，应用层 bcrypt）
+//   - OAuth2 预留：oidcSubject / oidcIssuer 可空，密码账号可空其一端
+//                 （密码账号与 OIDC 账号可共存/后续挂接，边界由 #311 定）
+// ---------------------------------------------------------------------------
+enum Role {
+  admin
+  user
+}
+
+model User {
+  id           String   @id @default(cuid())
+  username     String   @unique // 登录名（Django UnicodeUsernameValidator 同语义）
+  email        String?  @unique // 可空；OIDC 首登常以此为主键对齐
+  passwordHash String?  // bcrypt 散列；纯 OIDC 账号可空 → 应用层禁空密码登录
+  role         Role     @default(user)
+  isActive     Boolean  @default(true) // 平移 Django is_active（软禁用，不删行）
+
+  // --- OAuth2 预留（#311 定最终边界；此处仅留形状）---
+  oidcSubject  String?  // OIDC sub claim
+  oidcIssuer   String?  // OIDC issuer
+  @@unique([oidcIssuer, oidcSubject]) // 同 issuer 下 sub 唯一（双可空时 SQLite 视为 distinct，不冲突）
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  containers    Container[]
+  refreshTokens RefreshToken[]
+
+  @@map("users")
+}
+
+// ---------------------------------------------------------------------------
+// RefreshToken —— refresh token 持久化（重写新增；现状 simplejwt 无状态、无表）
+//
+// 持久化动机（供 #311 评审）：httpOnly cookie 承载 refresh（spec §3）需要服务端可
+// 撤销（logout / 改密 / 失窃）与旋转（rotation）→ 必须落库。
+//   - tokenHash  存散列不落明文（与 LLM key/GATEWAY_TOKEN 同零信任原则）
+//   - revokedAt  旋转或撤销时置位；旧 token 重放即判无效（可审计）
+//   - replacedByTokenId 旋转链：新 token 指回被它替换的旧 token（reuse 检测）
+// ---------------------------------------------------------------------------
+model RefreshToken {
+  id        String   @id @default(cuid())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId    String
+  tokenHash String   @unique // 散列唯一索引：查找 + 防重
+  expiresAt DateTime
+  revokedAt DateTime? // null=有效；置位=已撤销/已旋转
+  replacedByTokenId String? // 旋转链指针（#311 定是否启用旋转）
+
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@map("refresh_tokens")
+}
+
+// ---------------------------------------------------------------------------
+// Container —— 一个 OpenClaw 容器实例的记账行（平移 containers.Instance）
+//
+//   - ownerId  按用户隔离：每用户只见自己容器（#312 定授权语义；FK 必填）
+//   - name     全局唯一 vs 按用户唯一 —— 见草案说明「待定」；本稿默认全局唯一
+//              （@@unique([ownerId, name]) 为备选，二选一，留 #312 定夺）
+//   - status   creating/running/stopped/removing/error 状态机（spec §5.5）
+//   - token    GATEWAY_TOKEN 密文 + tokenEncrypted 标记（env 注入不落盘 JSON）
+//   - port     宿主映射端口，全局唯一（DB 兜底并发端口竞争，平移 codex R1 :77）
+//   - leaseExpiresAt 跨进程可续期 lease（create 状态收敛，平移 R8 F1）
+// ---------------------------------------------------------------------------
+enum ContainerStatus {
+  creating
+  running
+  stopped
+  removing
+  error
+}
+
+model Container {
+  id   String @id @default(cuid())
+  name String @unique // DNS-label：^[a-z][a-z0-9-]{2,29}$（应用层校验，同 NAME_VALIDATOR）
+  port Int    @unique
+
+  owner   User   @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  ownerId String
+
+  token          String // 应用层加密后的密文（原 EncryptedTextField）
+  tokenEncrypted Boolean @default(false)
+  homeDir        String // bind-mount 宿主路径 instances/<name>/home
+  containerId    String @default("") // run 前未知；空串而非 NULL（避 null-string 反模式）
+  status         ContainerStatus @default(creating)
+  image          String // 创建时 pin 的镜像 tag
+  leaseExpiresAt DateTime? // null=无保护（异常/旧行）可收敛
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  pairing        Pairing?
+  modelProviders ModelProvider[]
+
+  @@index([ownerId])
+  // 备选（name 按用户唯一时）：改为 name 不 @unique + @@unique([ownerId, name])
+  @@map("containers")
+}
+
+// ---------------------------------------------------------------------------
+// Pairing —— 一个容器实例的设备配对记账行（平移 chat.Pairing，一对一）
+//
+//   - containerId 一对一 + CASCADE（容器删则配对删）
+//   - status    unpaired/pending/paired/error 状态机（spec §8.1）
+//   - 私钥/deviceToken 密文 + 各自 *Encrypted 标记（Ed25519 设备身份按容器持久化）
+//   - scopesJson 协商 scopes（hello-ok.auth.scopes），JSON 文本
+//   - pairingRequestId 待批准时宿主 approve 引用
+//   - attemptVersion 配对尝试版本（幂等复用/竞态防护，平移 0002 migration）
+// ---------------------------------------------------------------------------
+enum PairingStatus {
+  unpaired
+  pending
+  paired
+  error
+}
+
+model Pairing {
+  id          String    @id @default(cuid())
+  container   Container @relation(fields: [containerId], references: [id], onDelete: Cascade)
+  containerId String    @unique // 一对一
+
+  deviceId                String @default("")
+  publicKeyPem            String @default("")
+  privateKeyPem           String @default("") // 密文
+  privateKeyPemEncrypted  Boolean @default(false)
+  deviceToken             String @default("") // 密文
+  deviceTokenEncrypted    Boolean @default(false)
+  scopesJson              String @default("[]")
+  pairingRequestId        String @default("")
+  status                  PairingStatus @default(unpaired)
+  attemptVersion          Int @default(0)
+
+  updatedAt DateTime @updatedAt
+
+  @@map("pairings")
+}
+
+// ---------------------------------------------------------------------------
+// ModelProvider —— 一个容器的一个 model provider 行（平移 models.ModelProvider）
+//
+//   - unique(containerId, providerId) 防同容器重名 provider
+//   - api        仅 openai-completions / anthropic-messages 两稳定取值（r28 §1.3）
+//   - apiKeyEnvId SecretRef env 变量名（不存真 key，只存 marker；现仅 LLM_API_KEY）
+//   - modelsJson 模型条目列表 JSON（{id,name,reasoning,input[],cost{},contextWindow,maxTokens}）
+//   - DB 为单一来源：CRUD 改它 → 重渲染 openclaw.json → OpenClaw watch 热加载
+// ---------------------------------------------------------------------------
+enum ProviderApi {
+  // Prisma enum 值须为合法标识符 → 用下划线名 + @map 落连字符真值
+  openai_completions  @map("openai-completions")
+  anthropic_messages  @map("anthropic-messages")
+}
+
+model ModelProvider {
+  id          String    @id @default(cuid())
+  container   Container @relation(fields: [containerId], references: [id], onDelete: Cascade)
+  containerId String
+
+  providerId  String      // openclaw.json models.providers 的 map key；DNS-label
+  api         ProviderApi
+  baseUrl     String
+  apiKeyEnvId String      // ^[A-Z][A-Z0-9_]{0,127}$（应用层校验，同 ENV_ID_VALIDATOR）
+  authHeader  Boolean     @default(true)
+  modelsJson  String      // JSON 文本（r28 §1.2 模型条目列表）
+
+  createdAt DateTime @default(now())
+
+  @@unique([containerId, providerId])
+  @@map("model_providers")
+}
