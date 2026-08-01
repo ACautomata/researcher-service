@@ -41,7 +41,14 @@ _NORMALIZE_RE = re.compile(r'[-_.]+')
 
 
 def pytest_configure(config):
-    """collection 前：探测缺失的 pinned 依赖，本地自动装 / CI·裸解释器 loud-fail。"""
+    """collection 前：探测缺失的 pinned 依赖，本地自动装 / CI·裸解释器 loud-fail。
+
+    装完依赖后必须 **re-exec pytest**：pytest 在启动早期就已扫描 ``pytest11`` entry
+    points 并激活插件；``pytest_configure`` 里才装的 pytest-django / pytest-asyncio 对
+    当前进程不可见（插件未激活）——首次运行会 ImproperlyConfigured（codex P2）。故装完
+    用 ``os.execv`` 以全新进程重跑，新进程启动时新插件已在 entry points 里、正常激活。
+    re-exec 后依赖已就绪，``_unsatisfied_pinned_distributions()`` 为空 → 直接返回，不递归。
+    """
     unsatisfied = _unsatisfied_pinned_distributions()
     if not unsatisfied:
         return
@@ -59,6 +66,17 @@ def pytest_configure(config):
             '请手动执行 `uv pip install -r requirements/dev.txt`（或 `pip install -r '
             'requirements/dev.txt`）后重跑。',
         )
+    _reexec_pytest(config)
+
+
+def _reexec_pytest(config) -> None:
+    """用全新进程重跑 pytest（回放原调用参数），激活新装的插件（codex P2）。
+
+    ``config.invocation_params.args`` 即原 pytest argv（``pytest <args>`` 的 <args>），
+    re-exec 为 ``python -m pytest <args>`` 完整保留用户意图；若用户直接调 ``pytest``
+    脚本而非 ``python -m``，``sys.executable -m pytest`` 亦等价。
+    """
+    os.execv(sys.executable, [sys.executable, '-m', 'pytest', *config.invocation_params.args])
 
 
 def _pinned_dist_names(root: Path) -> set[str]:

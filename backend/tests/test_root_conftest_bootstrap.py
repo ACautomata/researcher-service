@@ -18,6 +18,7 @@ distribution；本地激活 venv 自动安装自愈（如父仓库 .venv 早于 
 """
 import importlib.util
 import inspect
+import sys
 from pathlib import Path
 from unittest import mock
 
@@ -92,7 +93,10 @@ def test_parse_skips_constraint_recursion(tmp_path):
 # ═══════════════ 2. DECISION 分支（monkeypatch 缺 redis）═══════════════
 
 class StubConfig:
-    """pytest_configure 的轻量 stub config（钩子实际不使用它）。"""
+    """pytest_configure 的轻量 stub config（含 re-exec 需要的 invocation_params）。"""
+
+    def __init__(self, args=None):
+        self.invocation_params = mock.Mock(args=args or ['-q'])
 
 
 def _patch_redis_missing(monkeypatch):
@@ -123,7 +127,6 @@ def test_local_venv_auto_installs(monkeypatch):
     """本地激活 venv 缺 redis → 自动安装，装后复查通过。"""
     mod = _load_root()
     state = _patch_redis_missing(monkeypatch)
-    monkeypatch.setenv('CI', '', prepend=False)  # 清 CI
     monkeypatch.delenv('CI', raising=False)
     monkeypatch.setattr('sys.prefix', '/tmp/venv-prefix')
     monkeypatch.setattr('sys.base_prefix', '/usr')  # prefix != base_prefix → venv
@@ -132,9 +135,11 @@ def test_local_venv_auto_installs(monkeypatch):
         state['redis_installed'] = True  # 安装后 redis 就绪
 
     with mock.patch.object(mod, '_install_dev_requirements',
-                           side_effect=fake_install) as install:
+                           side_effect=fake_install) as install, \
+            mock.patch.object(mod.os, 'execv') as execv:
         mod.pytest_configure(StubConfig())  # 不应抛错
     assert install.called, '本地缺 redis 应自动安装'
+    assert execv.called, '装完依赖后应 re-exec pytest'
 
 
 def test_ci_fails_loud_not_install(monkeypatch):
@@ -206,3 +211,46 @@ def test_integration_fixture_does_not_probe_python_deps():
     assert 'importlib.metadata' not in src, (
         'integration conftest 不应 importlib.metadata 探测 python 依赖（归 root conftest）'
     )
+
+
+def test_install_then_reexec_pytest(monkeypatch):
+    """装完依赖后必须 re-exec pytest，激活新装的插件（codex P2 回归）。
+
+    pytest 在启动早期已扫描 ``pytest11`` entry points；``pytest_configure`` 里才装的
+    pytest-django / pytest-asyncio 对当前进程不可见（插件未激活），首次运行会
+    ImproperlyConfigured（codex P2 实测复现）。修复：装完依赖后 ``os.execv`` 以全新
+    进程重跑 pytest（回放 ``config.invocation_params.args``），新进程启动时新插件已在
+    entry points、正常激活。本断言锁住该契约。
+    """
+    mod = _load_root()
+    # 依赖缺口存在（redis 缺失）+ 本地 venv → pytest_configure 走 install → re-exec
+    state = _patch_redis_missing(monkeypatch)
+    monkeypatch.delenv('CI', raising=False)
+    monkeypatch.setattr('sys.prefix', '/tmp/venv-prefix')
+    monkeypatch.setattr('sys.base_prefix', '/usr')
+
+    def fake_install():
+        state['redis_installed'] = True  # 安装后 redis 就绪 → re-exec 后探测为空，不递归
+
+    monkeypatch.setattr(mod, '_install_dev_requirements', fake_install)
+
+    reexec_calls = []
+    monkeypatch.setattr(mod.os, 'execv', lambda exe, argv: reexec_calls.append((exe, argv)))
+
+    mod.pytest_configure(StubConfig(args=['-q', 'tests/test_integration_bootstrap_auto.py']))
+    assert reexec_calls, '装完依赖后必须 re-exec pytest（激活新装插件）'
+    _exe, argv = reexec_calls[0]
+    assert argv[:3] == [sys.executable, '-m', 'pytest'], f're-exec 命令错误: {argv}'
+    assert argv[3:] == ['-q', 'tests/test_integration_bootstrap_auto.py'], (
+        're-exec 必须回放原 pytest 参数'
+    )
+
+
+def test_no_reexec_when_no_install_needed(monkeypatch):
+    """依赖全就绪时 pytest_configure 不得 re-exec（no-op，避免无谓重启）。"""
+    mod = _load_root()
+    monkeypatch.setattr('importlib.metadata.version',
+                        __import__('importlib.metadata').metadata.version)
+    with mock.patch.object(mod.os, 'execv') as execv:
+        mod.pytest_configure(StubConfig())
+    assert not execv.called, '依赖全就绪时不应 re-exec pytest'
