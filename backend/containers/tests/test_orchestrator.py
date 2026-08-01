@@ -1149,8 +1149,10 @@ def test_fleet_build_default_injects_hosts_from_settings(tmp_path, settings):
     """#295 验收 4：Fleet._build_default 从 settings 装配探测 host 与端口发布 host。
 
     生产后端容器化后，探测 host 注入 OPENCLAW_FLEET_WS['HOST']（host.docker.internal），
-    端口发布 host 注入 OPENCLAW_FLEET['PORT_BIND_HOST']（0.0.0.0）——两处装配都要落地到
-    注入点（_deps.health / _deps.runtime），否则生产 compose 注入配置不生效。
+    端口发布 host 注入 OPENCLAW_FLEET['PORT_BIND_HOST']（0.0.0.0）——三处装配都要落地到
+    注入点（_deps.health / _deps.runtime / _deps.port_in_use），否则生产 compose 注入配置
+    不生效；其中端口占用探测与端口发布 host 须同源（codex P2：publish_host 变 0.0.0.0 时
+    probe 仍测 loopback 会误报空闲 → 选中被非 loopback 占用的端口 → run 失败）。
     """
     from containers.orchestrator import Fleet
 
@@ -1170,6 +1172,8 @@ def test_fleet_build_default_injects_hosts_from_settings(tmp_path, settings):
         orch = Fleet.get()
         assert orch._deps.runtime._publish_host == '0.0.0.0'
         assert orch._deps.health._host == 'host.docker.internal'
+        # codex P2：端口占用探测与端口发布 host 同源，0.0.0.0 时能检测非 loopback 占用
+        assert orch._deps.port_in_use._host == '0.0.0.0'
     finally:
         Fleet.reset()
 
