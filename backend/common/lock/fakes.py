@@ -195,6 +195,10 @@ class FakeLockSync:
         contender 请求 TTL（#254 / codex P2）：持有者剩余 20ms、contender 请求 60s 时，
         等满 60s 会让锁已过期仍阻塞——与 Redis adapter（按持有者剩余轮询）背离、测试
         挂死。``max(0.05, ...)`` 保底防 0 超时忙转；显式 release 仍经 Event 即时唤醒。
+
+        ``_waiters`` 集合的所有访问（add/discard/迭代）都在持 ``_mutex`` 时完成（#254 /
+        codex P2）：修前 finally 里锁外 ``discard`` 与 ``release`` 锁外 ``list()`` 并发会
+        ``RuntimeError: Set changed size during iteration``（线程安全 fake 的 release 失败）。
         """
         self._validate_resource(resource)
         with self._mutex:
@@ -212,7 +216,8 @@ class FakeLockSync:
                 if not waiter.wait(timeout=wait_timeout):
                     continue  # 等待超时（未 release）→ 重查（租约可能已过期）
             finally:
-                entry[1]._waiters.discard(waiter)
+                with self._mutex:
+                    entry[1]._waiters.discard(waiter)
 
     def try_acquire(self, resource: LockResource, ttl: timedelta) -> SyncLeaseHandle | None:
         """非阻塞获取租约：已被持有（未过期）返回 None。"""
@@ -258,7 +263,12 @@ class FakeLockSyncLease:
         self._lock.renew_calls.append((self._resource, new_ttl))
 
     def release(self) -> None:
-        """释放租约（幂等）；只释放自己的租约，并唤醒所有阻塞 acquire。"""
+        """释放租约（幂等）；只释放自己的租约，并唤醒所有阻塞 acquire。
+
+        ``_waiters`` 快照与移除都在持 ``_mutex`` 时完成（#254 / codex P2）：修前锁外
+        ``list(self._waiters)`` 迭代与 ``acquire`` 超时锁外 ``discard`` 并发会
+        ``RuntimeError: Set changed size during iteration``。
+        """
         already_released = self._released
         if not already_released:
             self._released = True
@@ -266,6 +276,9 @@ class FakeLockSyncLease:
                 entry = self._lock._held.get(self._resource)
                 if entry is not None and entry[1] is self:
                     self._lock._held.pop(self._resource, None)
-            for waiter in list(self._waiters):
+                # 锁内快照 + 清空：唤醒列表与并发 acquire 的 add/discard 互斥
+                waiters = list(self._waiters)
+                self._waiters.clear()
+            for waiter in waiters:
                 waiter.set()
         self._lock.release_calls.append((self._resource, already_released))

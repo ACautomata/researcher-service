@@ -662,3 +662,73 @@ class TestFakeLockSyncBehavior:
                 SubProvisionResource(container_name='gw-a'),  # type: ignore[arg-type]
                 ttl=timedelta(seconds=60),
             )
+
+    def test_waiters_access_holds_mutex(self):
+        """#254 / codex P2：共享 ``_waiters`` 集合的所有访问都持 ``_mutex``（线程安全不变量）。
+
+        修前 ``release()`` 在锁外 ``list(self._waiters)`` 迭代、``acquire()`` 超时后在锁外
+        ``_waiters.discard()``——两处并发修改同一 set 会 ``RuntimeError: Set changed size
+        during iteration``（线程安全 fake 的 release 失败、contender 残留睡着）。codex 静态
+        发现此竞态；CPython GIL 下极难实际触发，故用哨兵 set 确定性断言「访问即持锁」。
+
+        哨兵 set 复刻 set 的 add/discard/__iter__ 语义，但在锁外调用抛 ``AssertionError``
+        （模拟并发下 set 竞态的失败）。修复前 ``release`` 的 ``list()`` 与 ``acquire`` 的
+        ``discard`` 均在锁外 → 红；修复后全部持锁访问 → 绿。
+        """
+        from common.lock.fakes import FakeLockSync
+
+        class _LockGuardedSet:
+            """仅在持 ``_mutex`` 时可访问的 ``_waiters`` 替身：锁外操作抛 ``AssertionError``。"""
+
+            def __init__(self, mutex):
+                self._mutex = mutex
+                self._items: set[threading.Event] = set()
+
+            def _check_held(self):
+                if not self._mutex._is_owned():
+                    raise AssertionError(
+                        '_waiters 访问须持 _mutex（线程安全不变量）——锁外操作会与并发'
+                        ' acquire/release 冲突（Set changed size during iteration）',
+                    )
+
+            def add(self, item):
+                self._check_held()
+                self._items.add(item)
+
+            def discard(self, item):
+                self._check_held()
+                self._items.discard(item)
+
+            def clear(self):
+                self._check_held()
+                self._items.clear()
+
+            def __iter__(self):
+                self._check_held()
+                return iter(list(self._items))
+
+        lock = FakeLockSync()
+        holder = lock.acquire(_fresh_resource(), ttl=timedelta(seconds=60))
+        # 换哨兵 set：任何锁外访问（list/discard/add）都立即失败
+        holder._waiters = _LockGuardedSet(lock._mutex)
+
+        # 阻塞 acquire 注册 waiter（锁内 add → 通过哨兵）
+        box: dict = {}
+        started = threading.Event()
+
+        def _blocked_acquire():
+            started.set()
+            box['handle'] = lock.acquire(_fresh_resource(), ttl=timedelta(seconds=60))
+
+        blocked = threading.Thread(target=_blocked_acquire)
+        blocked.start()
+        assert started.wait(timeout=1), 'acquire 线程应已启动'
+        time.sleep(0.02)  # 让线程注册 waiter 进入阻塞
+
+        # 修复前：release 锁外 list(self._waiters) → AssertionError（红）
+        holder.release()
+
+        blocked.join(timeout=2)
+        assert not blocked.is_alive(), 'release 后 acquire 应返回（未被 waiter 竞态卡死）'
+        assert box.get('handle') is not None, '阻塞 acquire 应取得租约'
+        box['handle'].release()
