@@ -196,10 +196,52 @@ subpath exports：`.`、`./browser`（浏览器安全版）、`./timeouts`、`./
 
 ---
 
-## 5. 给后续决策 ticket 的事实结论
+## 5. 复用官方包 vs 自建（决策约束：必须复用官方两包，不自行实现 WS 协议/客户端/Ed25519）
+
+> 约束（来自用户）：新后端**必须直接复用** `@openclaw/gateway-client` + `@openclaw/gateway-protocol`，**不自行实现** WS 协议、网关客户端、Ed25519 配对。本节据 `2026.7.2-beta.6` 包内 `.mjs` 运行时实现（非仅类型）判定：两包能接管现状 `backend/chat/` 的哪些部分、哪些仍须在包之上自建。
+
+### 5.0 包内运行时行为（`.mjs` 实证，三条决定性事实）
+
+1. **Ed25519 签名不内置**：`DEFAULT_HOST_DEPS.signDevicePayload` 默认实现是 `throw new Error("GatewayClient device signature dependency is not configured")`，`publicKeyRawBase64UrlFromPem` 同样默认抛错；全包搜不到 ed25519/subtle 实现（`identity.sign(payload)` 是 identity 对象自带方法，Node 侧 `signDevicePayload(privateKeyPem, payload)` 靠注入）。→ **密钥生成/签名/公钥派生须宿主注入**，但只是用 Node `crypto`（`generateKeyPairSync('ed25519')` / `sign`）写一层薄适配，非重造协议。
+2. **配对 approve 不内置**：全包搜不到 `openclaw devices approve` / `PAIRING_REQUIRED` 的宿主侧批准调用。包对 `PAIRING_REQUIRED` 只做：读 `details.recommendedNextStep` / `pauseReconnect` 决定是否暂停重连（`session-subscriptions` 内 `shouldPauseGatewayReconnect`）+ 经 `onConnectError` 上报结构化 `PairingConnectErrorDetails`（含 `requestId`）。→ **宿主 approve 编排（在容器内跑 `openclaw devices approve <requestId>`）仍须自建**，对应现状 `ExecPairingApprover`。
+3. **deviceToken 生命周期内置**：`handleConnectHello` 收到 `hello-ok.auth.deviceToken` 后**自动**调 `hostDeps.storeDeviceAuthToken({deviceId, role, token, scopes})` 持久化；`selectConnectAuth` 连接前**先 `loadDeviceAuthToken`** 复用已存 token（免重配对）；遇 `AUTH_DEVICE_TOKEN_MISMATCH` **自动 `clearDeviceAuthToken` + budget 内重试**。存储介质由 `hostDeps` 注入（DB/文件皆可）。浏览器侧另有同构封装 `GatewayBrowserDeviceAuthLifecycle`（`buildPlan/acceptHello/clearStoredToken`）。→ **deviceToken 的存/取/失效清理/重试由包驱动，我们只提供 `hostDeps` 的持久化回调实现**。
+
+### 5.1 现状 `backend/chat/` 逐模块的「包接管 / 自建」判定
+
+| 现状模块 | 包能否接管 | 判定与落点 |
+|---|---|---|
+| `device_crypto.py`（Ed25519 生成/签名/公钥 base64url/`build_auth_payload_v3`） | **部分** | `buildDeviceAuthPayloadV3` **包已导出**（`@openclaw/gateway-client` / `session-subscriptions`），签名串构造直接复用、不自行实现。但 **密钥生成 + 签名 + 公钥 base64url 派生须自建**为 `hostDeps.{loadOrCreateDeviceIdentity, signDevicePayload, publicKeyRawBase64UrlFromPem}`——用 Node `crypto` 写 ~30 行薄适配（对齐 `device_crypto.py` 字节语义：SPKI 尾 32B raw、base64url 无 padding、sha256→deviceId）。**不重造签名串、不重造协议**。 |
+| `pairing_ws.py`（握手：等 challenge 取 nonce → connect → hello-ok/PAIRING_REQUIRED 三分支 + 冷启动 retryable 重试） | **是** | `GatewayClient` 内置整条握手：`connect.challenge` 等待（`connectChallengeTimeoutMs` 钳制）、connect 帧组装（`assembleConnectParams`/`buildDeviceConnectParams`）、hello-ok 处理、`gateway starting` 冷启动 close 1013 + `retryAfterMs` 重连（`handleConnectRequestFailure` 的 `resolveGatewayStartupRetryAfterMs`）。**不自行实现握手**。 |
+| `pairing.py`（`PairingService` 状态机 + `ExecPairingApprover` 自动 approve） | **拆分** | 状态机/落库（paired/pending/error + 并发控制）：**自建**——包无 DB 概念，配对状态记账是面板域逻辑。`ExecPairingApprover` 宿主 approve：**自建**（包明确不做，见 §5.0.2）。但「触发握手 + 三分支 + deviceToken 落库」改由 `GatewayClient` + `onHelloOk/onConnectError` 驱动，**替代现状手写 `PairingHandshake`**。 |
+| `pool.py`（`(url,deviceToken)→client` 连接池 + per-key 锁 + 主动重连 + evict） | **自建（壳）** | 单条连接的握手/重连/看门狗由 `GatewayClient` 内置（`reconnect` backoff + `startTickWatch` 2×tick 静默看门狗 + `onGap`）。**但「每容器一条连接」的多租户池（map、删除 evict、force-repair 换 token 清旧凭证）是面板域逻辑，须自建**——每容器持一个 `GatewayClient` 实例的包外 map + 生命周期钩子。现状 `ReconnectPolicy`/死连接 evict/reacquire 自愈大部分被包内置重连吸收，壳显著变薄。 |
+| `event_translate.py`（网关事件 → 前端帧：delta/final/replace、approval 卡、tool 帧） | **自建（纯函数）** | 包只经 `onEvent(evt: EventFrame)` 统一投递原始事件帧（chat/agent/审批/sessions.changed），**不做面向我们前端的业务翻译**。但 `event_translate` 是**无 I/O 纯函数**，可直接移植为 TS 纯函数挂到 `onEvent` 回调——逻辑资产保留，不属于「自行实现协议」。 |
+| `consumers.py`（前端 WS 适配 + 审批订阅 fan-out + 会话恢复注册） | **自建（壳）** | 前端⇄新后端的 WS/REST 边界、按 runId 路由到我们前端、审批 fan-out 给多前端连接——面板域逻辑，自建。但 `GatewayClient` 的 `onEvent` + session 投影协调器替代现状 `RunEventRouter`/`RecoveryCoordinator`/`ApprovalFanout` 的内部机制，壳变薄。 |
+| `wire` 子包（ConnectFrameBuilder/GatewayPolicy/异常族/常量） | **是（废弃）** | connect 帧组装、hello-ok policy 解析、事件常量、协议版本全部由 `@openclaw/gateway-protocol`（schema/常量）+ `@openclaw/gateway-client`（组装）接管。**整个手写 wire 防腐层被官方包替代**——这正是「不自行实现 WS 协议」的核心收益。 |
+
+**一句话**：官方包接管「单连接的协议机 + 握手 + 重连看门狗 + deviceToken 生命周期 + 事件投递 + 会话投影」；我们在包之上自建「多租户连接池壳、配对状态机 + 宿主 approve 编排、前端事件翻译纯函数、前端 WS/REST 边界、Ed25519 密钥/签名的 `hostDeps` 薄适配」。
+
+### 5.2 用包实现「容器创建后自动配对 → deviceToken 持久化」
+
+包**不内置端到端自动配对**（无宿主 approve），但提供了除 approve 外的全部原语。实现编排：
+
+1. **触发**（同 §4.3）：后台 provisioning 完成、容器 running/healthy 后，控制面对该实例跑一次「配对握手」。
+2. **首次握手（bootstrap）**：`new GatewayClient({url, token: GATEWAY_TOKEN(bootstrap), role:'operator', scopes: SCOPES, caps:['tool-events'], deviceIdentity, hostDeps, onHelloOk, onConnectError})` → `start()`。
+   - `hostDeps.loadOrCreateDeviceIdentity`：读/建该容器持久化 Ed25519 身份（对齐现状 `Pairing` 行的私钥）。
+   - `hostDeps.signDevicePayload`：Node `crypto.sign(null, payload, privateKeyPem)` → base64url。
+   - `hostDeps.storeDeviceAuthToken`：把 `hello-ok` 下发的 `deviceToken + scopes` 写面板 DB（对齐现状 `Pairing.device_token/scopes_json`）。
+3. **PAING_REQUIRED 分支**：`onConnectError` 收到 `details.code='PAIRING_REQUIRED'`（含 `requestId`）→ 自建编排：在容器内 `openclaw devices approve <requestId>`（复用现状 `ExecPairingApprover` 的 exec_sync 语义）→ 再次 `start()`/`request` 重握手（同一 deviceId）→ 这次 `hello-ok` 自动 `storeDeviceAuthToken`。
+   - 包的 `shouldPauseGatewayReconnect` 会在 `recommendedNextStep='wait_then_retry'` 时不盲目重连，给我们留出手动 approve 的窗口。
+4. **后续连接（免重配对）**：建对话连接时 `selectConnectAuth` 自动 `loadDeviceAuthToken` 复用已存 deviceToken 直连；`AUTH_DEVICE_TOKEN_MISMATCH`（token 被撤）时包自动 `clearDeviceAuthToken` + 重试，面板侧据 `onConnectError` 触发重配对。
+
+> 净效果：自动配对的「握手 + deviceToken 持久化 + 复用 + 失效清理」全部由包接管；我们只需自建「触发器（接 provisioning 完成钩子）+ 宿主 approve 调用 + 状态记账」。
+
+---
+
+## 6. 给后续决策 ticket 的事实结论
 
 1. **npm 包是真实现但须锁 beta 版本**：`@openclaw/gateway-client` / `@openclaw/gateway-protocol` 的 `latest` 是占位 `0.0.0`，真实代码在 `2026.7.2-beta.6`；裸 `npm install` 拿到空壳。两包无 README，文档=官方站+`.d.mts`。protocol 包是 typebox schema/校验层；client 包是带重连/session 投影/设备身份托管的重量级参考客户端。
 2. **握手与事件语义已被一手来源 + 本仓库实测互证**：v4 握手 = 持久化 Ed25519 身份 → `connect.challenge` 取 nonce → `connect`(min=maxProtocol=4, role=operator, device 签名块, `auth.token=GATEWAY_TOKEN` bootstrap) → `hello-ok.auth.deviceToken`；未配对返回嵌套 `NOT_PAIRED`/`PAIRING_REQUIRED`+`requestId`，宿主 `openclaw devices approve` 恢复。本仓库 `build_auth_payload_v3` / `ConnectFrameBuilder` / `ChatEventTranslator` 与官方 `ConnectParamsSchema`/`HelloOkSchema`/`ConnectErrorDetailCodes` 完全对得上。
-3. **TS/Express 重写最小对话桥接面 = §3.2 七件事**：设备身份+配对握手、每容器已配对长连接+连接池+重连、chat 收发+runId 路由+翻译、审批(请求/resolve/补拉)、会话+历史、断线恢复、看门狗/背压。npm `GatewayClient` + session 投影协调器可直接承担 #1/#2/#6 的大头，但引入 beta 依赖与较重内置策略；手写精简客户端则须复刻 `wire` 子包已硬化的 dead/transmitted/恢复语义。
-4. **「容器创建后自动配对」现状不存在，需新建触发器**：配对状态机（`PairingService.ensure_paired` + `ExecPairingApprover` 自动 `openclaw devices approve` + 重握手）已就绪且一键化，但全仓库唯一触发点是手动 `POST …/pairing/`。容器创建路径（#297 异步 202，后台 provisioning）从不调它。
-5. **触发点应挂在后台 provisioning 完成、容器 running/healthy 之后**：握手依赖网关已监听端口 + `GATEWAY_TOKEN` env 已注入（`Instance.token`）；`PairingHandshake` 内置冷启动 `retryable` 重试正好覆盖启动窗口。失败落 pending/error，前端 list 批量注入的 `pairing` 快照让用户可手动重试，与现有手动路径兼容。
+3. **TS/Express 重写最小对话桥接面 = §3.2 七件事**：设备身份+配对握手、每容器已配对长连接+连接池+重连、chat 收发+runId 路由+翻译、审批(请求/resolve/补拉)、会话+历史、断线恢复、看门狗/背压。在「必须复用官方包」约束下，其中握手、单连接协议机、重连看门狗、断线恢复（session 投影协调器）、deviceToken 生命周期、事件投递全部由 `GatewayClient` 接管（见 §5）。
+4. **复用官方包 vs 自建的分界（实证判定，§5）**：包接管——单连接协议机、connect 握手、重连+tick 看门狗、断线恢复/session 投影、deviceToken 存/取/失效清理/重试（经注入的 `hostDeps` 持久化回调）、`buildDeviceAuthPayloadV3` 签名串、事件经 `onEvent` 统一投递。须自建——多租户连接池壳（每容器一个 `GatewayClient` + 删除 evict + force-repair 清旧凭证）、配对状态机 + 宿主 `openclaw devices approve` 编排（包明确不做 approve）、前端事件翻译纯函数（`event_translate` 可移植）、前端 WS/REST 边界、Ed25519 密钥生成/签名/公钥 base64url 的 `hostDeps` 薄适配（包默认抛错不内置）。整个手写 `wire` 防腐层被官方包废弃替代。
+5. **「容器创建后自动配对」现状不存在，需新建触发器**：配对状态机（`PairingService.ensure_paired` + `ExecPairingApprover` 自动 approve + 重握手）已就绪且一键化，但全仓库唯一触发点是手动 `POST …/pairing/`。容器创建路径（#297 异步 202，后台 provisioning）从不调它。用包实现时（§5.2）：触发器接 provisioning 完成钩子 → `GatewayClient` bootstrap 握手（`token=GATEWAY_TOKEN`）→ `PAIRING_REQUIRED` 时自建 approve → 重握手，deviceToken 由包自动 `storeDeviceAuthToken` 落库。
+6. **触发点应挂在后台 provisioning 完成、容器 running/healthy 之后**：握手依赖网关已监听端口 + `GATEWAY_TOKEN` env 已注入（`Instance.token`）；包内置 `gateway starting`（close 1013 + `retryAfterMs`）重连正好覆盖启动窗口。失败落 pending/error，前端 list 批量注入的 `pairing` 快照让用户可手动重试，与现有手动路径兼容。
