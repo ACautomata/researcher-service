@@ -147,8 +147,11 @@ jobs:
             echo "$GHCR_PULL_TOKEN" | docker login ghcr.io -u "$GHCR_PULL_USER" --password-stdin
 
             cd "$APP_DIR"
-            docker compose pull
-            docker compose up -d --remove-orphans
+            # 显式指定 compose 文件：scp 落盘的是 docker-compose.deploy.yml（非默认名
+            # compose.yml/docker-compose.yml），缺 -f 会让 pull/up 报
+            # "no configuration file provided: not found"。
+            docker compose -f docker-compose.deploy.yml pull
+            docker compose -f docker-compose.deploy.yml up -d --remove-orphans
             docker image prune -f
 
             # 健康门：frontend 反代 /api/health（公开探针），30s 内非 200 即 fail 让 workflow 红。
@@ -160,7 +163,7 @@ jobs:
             done
             if [ "$ok" != "1" ]; then
               echo "[deploy] ERROR: /api/health did not return 200 in time" >&2
-              docker compose ps >&2 || true
+              docker compose -f docker-compose.deploy.yml ps >&2 || true
               exit 1
             fi
             echo "[deploy] healthy ✓"
