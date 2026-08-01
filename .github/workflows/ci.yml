@@ -51,6 +51,13 @@ jobs:
   # LLM_API_KEY 须在 repo secrets 配齐（缺失则集成测试 fail 暴露配置问题，符合「环境必须齐备」）。
   integration:
     runs-on: ubuntu-latest
+    # #255：integration job 真创建容器 → create 走 DistributedLock Port（LockFleet sync 槽）。
+    # 提供 redis service 让真 Redis 锁可用（单元/backend-unit 无真 Redis，经 FakeLockSync 注入）。
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
     defaults:
       run:
         working-directory: backend
