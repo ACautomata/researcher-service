@@ -305,3 +305,33 @@ def test_cd_image_repo_lowercased_not_raw_github_repository() -> None:
         assert "github.repository" not in str(env), (
             "CD 镜像名不应引用原始 github.repository（owner 可能含大写）"
         )
+
+
+def _cd_deploy_script(steps: list) -> str:
+    for step in steps:
+        if (step.get("name") or "").startswith("Deploy over SSH"):
+            # appleboy/ssh-action 的远端脚本在 with.script（非顶层 run）
+            return (step.get("with") or {}).get("script") or ""
+    return pytest.fail("CD 缺少 Deploy over SSH 步骤")
+
+
+def test_cd_ssh_script_specifies_deploy_compose_file() -> None:
+    """CD：SSH 部署脚本的 docker compose 命令必须显式 ``-f docker-compose.deploy.yml``。
+
+    scp 落盘的是 docker-compose.deploy.yml（非默认名 compose.yml/docker-compose.yml），
+    缺 -f 会让 pull/up/ps 报 "no configuration file provided: not found"，
+    SSH 部署失败（#283 合并后 CD 第 2 层故障）。健康门失败分支的 ps 同样需 -f。
+    """
+    script = _cd_deploy_script(_cd_deploy_steps(_cd_load()))
+    # 每个 docker compose 调用都必须带 -f docker-compose.deploy.yml
+    for cmd in (
+        "docker compose -f docker-compose.deploy.yml pull",
+        "docker compose -f docker-compose.deploy.yml up -d --remove-orphans",
+        "docker compose -f docker-compose.deploy.yml ps",
+    ):
+        assert cmd in script, f"缺少显式 compose 文件参数：{cmd}"
+    # 禁止裸 docker compose（无 -f）
+    for line in script.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("docker compose") and "-f" not in stripped:
+            pytest.fail(f"docker compose 调用缺 -f 显式指定：{stripped}")
