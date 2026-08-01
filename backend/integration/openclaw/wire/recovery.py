@@ -1,60 +1,21 @@
-"""断线重连恢复协作者（issue #271/#273，parent #217）。
+"""断线重连恢复协作者（issue #271/#273/#275，parent #217）。
 
 ``RecoveryCoordinator``：connect() 握手成功后按序执行重连恢复（sessions.subscribe →
 （有活跃会话）messages.subscribe → chat.history → 回放投影 + 采用 inFlightRun 重建路由）。
 由原 ``_RecoveryCoordinator`` 正名（#272，去下划线符合「禁下划线私有类」约定）。#273 改为
-**构造注入**（state/rpc/routes/translator/flush 回调），不再反向引用 ``OpenClawWireClient``
-——单向依赖 门面→协作者，本模块不 import 门面。
+**构造注入**（rpc/routes/translator/flush 回调），不再反向引用 ``OpenClawWireClient`` ——单向
+依赖 门面→协作者，本模块不 import 门面。
 
-``RecoveryState``：断线重连恢复状态容器（#272 预重构收口；#273 正名去下划线）——门面与
-``RecoveryCoordinator`` 共享的 dataclass 状态容器，门面 flush/_handle/connect 直接读写，
-coordinator 构造注入同一实例（纯数据结构，属性上限豁免）。
+#275 收尾：删除 ``RecoveryState`` 共享容器，恢复域状态（活跃会话集合 / 会话回调 / 恢复路由）
+**直接收进本类**（状态与行为同处一类）——原经 ``state.xxx`` 单点访问的散置字段归位；泵期缓冲
+（``connect_buffered``/``recovery_buffered``/``recovering`` 窗口标志）移入 ``RunEventRouter``
+（缓冲按就绪过滤行为所在），本类经注入的 ``flush_connect_buffered``/``flush_recovery_buffered``
+回调触发回放、经 ``set_recovering`` 回调置 resume 窗口——不直接读写缓冲。
 """
 from __future__ import annotations
 
-import asyncio
-from dataclasses import dataclass, field
-
 from chat.event_translate import ChatEventTranslator
 from integration.openclaw.wire.values import HISTORY_RUN_ID, OnEvent, RecoveredRun
-
-
-@dataclass
-class RecoveryState:
-    """断线重连恢复状态容器（#272 预重构 / parent #271；#273 正名去下划线）——门面组合的**一个私有状态容器**。
-
-    收口散落门面的恢复状态读写点（活跃会话集合 / 会话回调 / 恢复路由 / 双缓冲 / 恢复窗口标志 /
-    连接完成事件），门面与 RecoveryCoordinator 经 ``state.xxx`` **单点访问**，不再散读散写。
-    状态所有权单源化，为抽 ``RecoveryCoordinator`` 协作者铺平（门面与协作对象共享同一实例）。
-    """
-
-    # 记住的活跃会话集合（consumer 注册，重连后逐会话恢复投影）。codex #236 R2 P1-223：
-    # **按会话记忆**（不再单一全局 slot）——多 consumer 共享池化 client 各自用不同 sessionKey 时，
-    # 逐会话记住 + 逐会话恢复，不互相覆盖丢失。
-    active_session_keys: set[str] = field(default_factory=set)
-    # 会话 → 恢复回调**列表**（codex #236 R3 P1-242：同一会话多 consumer 各持自己的 on_event，
-    # 共享池化 client 时单槽覆盖会让后注册者顶掉前者、断连只清最后一个——改列表 fan-out，
-    # 对齐 _approval_subscribers 多订阅者模式）；仅提供回调的会话才回放投影/重建路由，
-    # key-only 会话仍 subscribe+chat.history 但不回放（对齐 record_active_session on_event=None 语义）。
-    session_callbacks: dict[str, list[OnEvent]] = field(default_factory=dict)
-    # 恢复重建的 runId → 所属 sessionKey（codex #236 R2 P2-96）：unregister 时按会话清这些重建
-    # 路由——adopted run 不进 consumer._active_runids，disconnect 不 discard，须在此对称清，
-    # 防已关闭 consumer 被池化 client 保留并续接该 run 事件。
-    recovery_routes: dict[str, str] = field(default_factory=dict)
-    # connect() 握手成功后恢复期间的入站泵信号——connect 在恢复完成前持续 recv 并经
-    # _handle_incoming 分发（含 _rpc res），置位后停泵交棒给 _recv_loop（防双 reader）。
-    connect_done: asyncio.Event | None = None
-    # 恢复泵期缓冲的 event 帧——泵只消费 res，event 缓冲待路由就绪后由 _resolve_ack 注册路由时回放
-    # （重连期到达的进行中 run 事件不丢）。
-    connect_buffered: list[dict] = field(default_factory=list)
-    # live-wire resume（resume_active_session）恢复窗口标志。浏览器腿重连复用**存活池化 client**
-    # （不经 connect()，无恢复泵）时，_recv_loop 持续消费入站帧；恢复 RPC（messages.subscribe +
-    # chat.history）完成前该会话 in-flight run 的路由尚未安装，dequeued 的 run-scoped 帧会被 _handle
-    # 以「route 未就绪」静默丢弃（终态帧被丢则 run 永无完成帧）。窗口内 run-scoped 帧改走
-    # recovery_buffered 缓冲，路由重建后由 _flush_recovery_buffered 回放。
-    recovering: bool = False
-    # live-wire resume 窗口缓冲的 run-scoped 帧。
-    recovery_buffered: list[dict] = field(default_factory=list)
 
 
 class RecoveryCoordinator:
@@ -62,8 +23,8 @@ class RecoveryCoordinator:
 
     #272 正名：由原 ``_RecoveryCoordinator``（下划线私有类）去下划线公开——符合项目
     「禁下划线私有类」约定（issue #271）。#273 改为构造注入——不再反向引用门面，经注入的
-    ``state``（共享 ``RecoveryState``）/ ``rpc`` / ``routes`` / ``translator`` / flush 回调
-    完成恢复序列（单向依赖 门面→协作者）。
+    ``rpc`` / ``routes`` / ``translator`` / flush 回调完成恢复序列（单向依赖 门面→协作者）。
+    #275 恢复域状态收进本类，``RecoveryState`` 共享容器删除。
 
     序列（每次 connect，含首连与 pool 主动重连）：sessions.subscribe →（有活跃会话）
     sessions.messages.subscribe → chat.history → 回放投影 + 采用 inFlightRun 重建路由。
@@ -74,19 +35,39 @@ class RecoveryCoordinator:
     def __init__(
         self,
         *,
-        state: RecoveryState,
         rpc,
         routes: dict[str, OnEvent],
         translator: ChatEventTranslator,
         flush_connect_buffered,
         flush_recovery_buffered,
+        set_recovering,
     ) -> None:
-        self._state = state
         self._rpc = rpc
         self._routes = routes
         self._translator = translator
         self._flush_connect_buffered = flush_connect_buffered
         self._flush_recovery_buffered = flush_recovery_buffered
+        self._set_recovering = set_recovering
+        # 记住的活跃会话集合（consumer 注册，重连后逐会话恢复投影）。codex #236 R2 P1-223：
+        # **按会话记忆**（不再单一全局 slot）——多 consumer 共享池化 client 各自用不同 sessionKey 时，
+        # 逐会话记住 + 逐会话恢复，不互相覆盖丢失。
+        self._active_session_keys: set[str] = set()
+        # 会话 → 恢复回调**列表**（codex #236 R3 P1-242：同一会话多 consumer 各持自己的 on_event，
+        # 共享池化 client 时单槽覆盖会让后注册者顶掉前者、断连只清最后一个——改列表 fan-out，
+        # 对齐 _approval_subscribers 多订阅者模式）；仅提供回调的会话才回放投影/重建路由，
+        # key-only 会话仍 subscribe+chat.history 但不回放（对齐 record_active_session on_event=None 语义）。
+        self._session_callbacks: dict[str, list[OnEvent]] = {}
+        # 恢复重建的 runId → 所属 sessionKey（codex #236 R2 P2-96）：unregister 时按会话清这些重建
+        # 路由——adopted run 不进 consumer._active_runids，disconnect 不 discard，须在此对称清，
+        # 防已关闭 consumer 被池化 client 保留并续接该 run 事件。
+        self._recovery_routes: dict[str, str] = {}
+
+    @property
+    def active_session_keys(self) -> list[str]:
+        """只读视图：当前记住的活跃会话 key 列表（副本）。#272 委托 property——既有测试
+        （test_chat_client.py 断言 ``'s1' in c._active_session_keys``）直读门面本成员保持全绿；
+        实际状态所有权在本协作者。"""
+        return list(self._active_session_keys)
 
     async def run(self) -> None:
         """执行恢复序列：sessions.subscribe（步1）后，对**每个**记住的活跃会话逐条恢复（步2-4）。
@@ -97,7 +78,7 @@ class RecoveryCoordinator:
         只是不回放投影/重建路由（_replay_projection 内 on_event None 跳过）。
         """
         await self._rpc('sessions.subscribe', {})
-        for session_key in list(self._state.active_session_keys):
+        for session_key in list(self._active_session_keys):
             await self._rpc('sessions.messages.subscribe', {'key': session_key})
             history = await self._rpc('chat.history', {'sessionKey': session_key})
             await self._replay_projection(session_key, history or {})
@@ -124,7 +105,7 @@ class RecoveryCoordinator:
         全部回调（列表），重建的 runId 路由经 ``_recovery_fanout`` 续流到**当前**全部订阅者——
         单槽覆盖会让后注册 consumer 顶掉前者、续流只投最后一个。
         """
-        callbacks = list(self._state.session_callbacks.get(session_key, []))
+        callbacks = list(self._session_callbacks.get(session_key, []))
         if callbacks and replay_history:
             for frame in self._history_frames(history.get('messages')):
                 for on_event in callbacks:
@@ -141,7 +122,7 @@ class RecoveryCoordinator:
         self._routes[recovered.run_id] = self._recovery_fanout(session_key)  # 步3：重建 runId 路由
         # codex #236 R2 P2-96：记 adopted runId→sessionKey——adopted run 不进 consumer._active_runids，
         # disconnect 不 discard；unregister_active_session 按会话对称清这些重建路由。
-        self._state.recovery_routes[recovered.run_id] = session_key
+        self._recovery_routes[recovered.run_id] = session_key
         if recovered.text:
             # codex #236 R3 P1-108：先 seed 翻译器累积器再回放——恢复 text 已投前端（replace），
             # 网关后续 final 快照须以它为基线只补尾部，否则整段重发（"Hello"+"Hello world"→"HelloHello world"）。
@@ -217,7 +198,7 @@ class RecoveryCoordinator:
         注册者）。单订阅者回调失败隔离（对齐 _fanout_approval），不杀 recv loop / 不互伤。
         """
         async def _dispatch(frame: dict) -> None:
-            for cb in list(self._state.session_callbacks.get(session_key, [])):
+            for cb in list(self._session_callbacks.get(session_key, [])):
                 try:
                     await cb(frame)
                 except Exception:  # pylint: disable=broad-exception-caught
@@ -234,13 +215,13 @@ class RecoveryCoordinator:
         （仍发 subscribe + chat.history，但不回放/不重建路由）。同 key 再调更新回调；**多 key 共存**
         （codex #236 R2 P1：不再覆盖单一 slot）——共享 client 的每 consumer 各自记住自己的会话。
         """
-        self._state.active_session_keys.add(session_key)
+        self._active_session_keys.add(session_key)
         if on_event is None:
-            self._state.session_callbacks.pop(session_key, None)
-        elif on_event not in self._state.session_callbacks.setdefault(session_key, []):
+            self._session_callbacks.pop(session_key, None)
+        elif on_event not in self._session_callbacks.setdefault(session_key, []):
             # codex #236 R3 P1-242：同一会话多 consumer 各注册自己的回调（列表 append，非覆盖）；
             # 幂等去重（同回调重复 record 不重复回放）。
-            self._state.session_callbacks[session_key].append(on_event)
+            self._session_callbacks[session_key].append(on_event)
 
     async def resume_active_session(self, session_key: str, on_event: OnEvent) -> None:
         """Register a replacement consumer and restore its live route without reconnecting.
@@ -250,16 +231,17 @@ class RecoveryCoordinator:
         rebuilds ``routes`` so future gateway events reach the new consumer.
 
         codex #249 R5 (id 3690750256)：恢复 RPC 期间 _recv_loop 持续消费入站帧，而重建路由要等
-        chat.history 返回后才安装——期间到达的该会话 in-flight run 帧（含终态）若直接经 _handle
-        路由会被静默丢弃。故恢复窗口置 recovering 缓冲 run-scoped 帧，_replay_projection 装好
-        路由后回放（对齐 connect() 恢复泵 connect_buffered 的同一不丢帧语义）。
+        chat.history 返回后才安装——期间到达的该会话 in-flight run 帧（含终态）若直接经 handle
+        路由会被静默丢弃。故恢复窗口置 recovering（经注入的 set_recovering 回调通知 RunEventRouter）
+        缓冲 run-scoped 帧，_replay_projection 装好路由后回放（对齐 connect() 恢复泵 connect_buffered
+        的同一不丢帧语义）。
         """
         self.record_active_session(session_key, on_event)
-        self._state.recovering = True
+        self._set_recovering(True)
         try:
             await self.resume_live_session(session_key)
         finally:
-            self._state.recovering = False
+            self._set_recovering(False)
 
     def recovery_sessions(self) -> list[tuple[str, list[OnEvent]]]:
         """#196 T4 / #217：返回**全部**记住的活跃会话 ``[(session_key, [on_event, ...]), ...]``（可空）。
@@ -270,8 +252,8 @@ class RecoveryCoordinator:
         多会话逐条返回。codex #236 R3 P1-242：同一会话多订阅者**全部**返回（列表副本），非只回最近
         一个——pool 重建后每 consumer 的恢复回调都被带到新 client。key-only 会话（无回调）为 ``[]``。
         """
-        return [(key, list(self._state.session_callbacks.get(key, [])))
-                for key in self._state.active_session_keys]
+        return [(key, list(self._session_callbacks.get(key, [])))
+                for key in self._active_session_keys]
 
     def unregister_active_session(self, session_key: str, on_event: OnEvent | None = None) -> None:
         """#217 / codex #236 P2-261：注销 ``record_active_session`` 记住的恢复回调（consumer 断开 /
@@ -284,17 +266,17 @@ class RecoveryCoordinator:
         此会话（别的 consumer 的同名会话）时 no-op，不误清。仅当回调列表清空（或 key-only 会话 /
         显式 on_event=None）才整体移除会话 + 该会话恢复重建的 runId 路由（R2 P2-96）。
         """
-        if session_key not in self._state.active_session_keys:
+        if session_key not in self._active_session_keys:
             return
-        callbacks = self._state.session_callbacks.get(session_key)
+        callbacks = self._session_callbacks.get(session_key)
         if on_event is not None and callbacks:
             if on_event not in callbacks:
                 return  # 本 consumer 未注册此会话：不误清别的 consumer 的订阅
             callbacks.remove(on_event)
             if callbacks:
                 return  # 仍有其他订阅者：会话与恢复路由保留，续流继续投给 peer
-        self._state.active_session_keys.discard(session_key)
-        self._state.session_callbacks.pop(session_key, None)
-        for run_id, owner in [kv for kv in self._state.recovery_routes.items() if kv[1] == session_key]:
-            self._state.recovery_routes.pop(run_id, None)
+        self._active_session_keys.discard(session_key)
+        self._session_callbacks.pop(session_key, None)
+        for run_id, owner in [kv for kv in self._recovery_routes.items() if kv[1] == session_key]:
+            self._recovery_routes.pop(run_id, None)
             self._routes.pop(run_id, None)
