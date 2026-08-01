@@ -313,6 +313,24 @@ def test_create_retries_on_docker_bind_conflict(config, health, runtime, tmp_pat
 
 
 @pytest.mark.django_db
+def test_create_retries_past_eight_bind_conflicts(config, health, runtime, tmp_path):
+    """#295 codex P2（第 5 轮）：>8 个宿主监听占最低端口时，重试直至池内空闲端口。
+
+    MAX_PORT_RETRIES=8 是 DB 并发冲突预算；bind 冲突重试须以池候选数为预算。
+    宿主 9 个非容器监听占 19000-19008，create 须落到 19009（而非在 8 次后
+    PortAllocationError，即使 19009+ 仍空闲）。
+    """
+    _seed_template(tmp_path / 'template')
+    runtime.fail_bind_ports = set(range(19000, 19009))  # 9 个最低端口被宿主监听占用
+    orch = InstanceOrchestrator(runtime=runtime, config=config, health_probe=health)
+    inst = orch.create('demo')
+    assert inst.port == 19009                 # 越过 9 个冲突端口落到第 10 个
+    assert inst.status == Instance.STATUS_RUNNING
+    assert len(runtime.run_specs) == 10       # 9 次冲突 + 1 次成功
+    assert runtime.run_specs[-1].host_port == 19009
+
+
+@pytest.mark.django_db
 def test_create_bind_conflict_preserves_row_when_dir_cleanup_fails(config, health, runtime, tmp_path):
     """#295 codex P2（第 4 轮）：bind 冲突后目录清理失败 → 保留 ERROR 行 + raise，不吞。
 
