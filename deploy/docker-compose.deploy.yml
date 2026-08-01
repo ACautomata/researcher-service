@@ -45,6 +45,18 @@ services:
       # 首次创建容器即 500；此处注入挂载文件路径（下方 ./openclaw.json 挂载到 /app/deploy/）。
       OPENCLAW_TEMPLATE_JSON: /app/deploy/openclaw.json
       DATABASE_NAME: /app/db/db.sqlite3
+      # #295 生产 gateway 寻址（后端容器化）：控制面容器经 host.docker.internal 寻址宿主上
+      # 0.0.0.0 发布的 fleet gateway 端口——健康探测/WS 配对/对话共用同一 host（base.py 默认
+      # 127.0.0.1 保持本地/单机 loopback 零回归）。0.0.0.0 把整个端口池暴露到宿主网络：
+      # 明文 ws 流量由 gateway 强制 token 认证兜底（deploy/openclaw.json
+      # controlUi.allowInsecureAuth=false；网关未开 tls.enabled，跨桥接走明文），宝塔防火墙
+      # 仅开 80/443 收敛公网面。生产若需传输加密，后续在网关开 tls 并切 OPENCLAW_FLEET_WS_SCHEME=wss。
+      OPENCLAW_FLEET_WS_HOST: host.docker.internal
+      OPENCLAW_FLEET_PORT_BIND_HOST: 0.0.0.0
+    extra_hosts:
+      # Linux host-gateway 映射：后端容器访问宿主 loopback 接口（host.docker.internal）。
+      # macOS Docker Desktop 自动提供该名，此处显式声明保证 Linux 生产宿主（BaoTa）可解析。
+      - "host.docker.internal:host-gateway"
     volumes:
       # 控制面等价 root：经宿主 docker.sock 增删查 OpenClaw 容器（spec §5.4 已明示风险）。
       - /var/run/docker.sock:/var/run/docker.sock

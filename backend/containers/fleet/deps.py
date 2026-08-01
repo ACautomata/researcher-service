@@ -31,16 +31,25 @@ from models.config_builder import ProviderConfigBuilder
 
 
 class HostPortProbe:
-    """宿主 127.0.0.1:<port> 是否已被占用（socket bind 实测；codex R2 端口分配）。
+    """宿主 <host>:<port> 是否已被占用（socket bind 实测；codex R2 端口分配）。
 
     Instance.port 只反映本面板记账的容器；无关进程/未跟踪容器占用最低候选端口时
     本探测返回 True，allocator 跳过它，避免 run() 因宿主 bind 冲突确定性失败。
+
+    host 默认 127.0.0.1（与 DockerRuntime publish_host 默认同源）；#295 生产后端容器化后
+    publish_host=0.0.0.0，若 probe 仍只测 loopback，端口被非 loopback 接口占用的候选会被
+    误报空闲 → allocator 选中 → docker -p 0.0.0.0:<port> 真实发布失败（bind address
+    already in use）→ create 回滚。故探测目标与发布目标须同源（Fleet._build_default 注入
+    PORT_BIND_HOST）。
     """
+
+    def __init__(self, host: str = '127.0.0.1') -> None:
+        self._host = host
 
     def __call__(self, port: int) -> bool:
         probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
-            probe.bind(('127.0.0.1', port))
+            probe.bind((self._host, port))
             return False
         except OSError:
             return True

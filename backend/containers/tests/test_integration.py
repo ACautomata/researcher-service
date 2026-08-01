@@ -9,6 +9,11 @@ CI integration job env 齐备（OPENCLAW_TEMPLATE_DIR/OPENCLAW_IMAGE/LLM_API_KEY
   export LLM_API_KEY=sk-...
   uv run python -m pytest containers/tests/test_integration.py -v
 
+Colima virtiofs 只共享 $HOME，pytest 默认 tmp_path（/var/folders/… 在 $HOME 外）
+bind-mount 退化为空目录 → 容器内 openclaw.json 变目录、网关报 Missing config。
+用 --basetemp 覆盖到 $HOME 下（对齐 wire 测试）：
+  uv run python -m pytest containers/tests/test_integration.py -v --basetemp=$HOME/.cache/pytest-smoke
+
 覆盖：cp -a 预填充 home → 渲染 openclaw.json → docker run → list(running) → delete(连数据删)。
 """
 import asyncio

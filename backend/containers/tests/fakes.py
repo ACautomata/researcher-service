@@ -24,9 +24,32 @@ class FakeRuntime:
         # 设非 None 时 run() 先记录容器（模拟 create 落 daemon）再抛该异常，
         # 用于验证 except 分支 best-effort 清理残留命名容器。
         self.fail_after_create: Exception | None = None
+        # codex P2 #295：模拟宿主非 Docker 进程占用池端口 → docker run bind 冲突。
+        # 命中 set 内 host_port 时 run() 抛 bind conflict（近似 docker.errors.APIError），
+        # 用于验证 create 识别冲突后重试下一空闲端口而非整段回滚。
+        self.fail_bind_ports: set[int] = set()
+        # #295 codex P2（新轮）：bind 冲突措辞可配——真实 daemon 依来源报
+        # "bind: address already in use"（docker-proxy OS 层）或
+        # "Bind for 0.0.0.0:19000 failed: port is already allocated"（libnetwork
+        # portallocator），_is_bind_conflict 须归一化匹配两者。默认取真实
+        # portallocator 措辞（"is already allocated"）。
+        self.fail_bind_message = (
+            '500 Server Error for http+docker://localhost/containers/create: '
+            'driver failed programming external connectivity on endpoint xyz: '
+            'Bind for 0.0.0.0:{port} failed: port is already allocated'
+        )
+        # #295 codex P2（新轮）：容器已创建后才报 bind 冲突（真实 docker create+start：
+        # 端口冲突在 start 阶段暴露，容器已落 daemon）。命中时容器先入 daemon 再抛
+        # bind 冲突措辞，验证清理路径对残留容器的处理。
+        self.fail_bind_after_create: set[int] = set()
+        # #295 codex P2（新轮）：remove 可注入失败（模拟 daemon 瞬态错误）——验证
+        # bind 冲突后容器清理失败时须保留 ERROR 行而非吞掉继续重试。
+        self.fail_remove: Exception | None = None
 
     def run(self, spec: ContainerSpec) -> str:
         self.run_specs.append(spec)
+        if spec.host_port in self.fail_bind_ports:
+            raise RuntimeError(self.fail_bind_message.format(port=spec.host_port))
         cid = f'fakeid-{spec.name}-{self._next}'
         self._next += 1
         # 模拟 docker create：容器先入 daemon（Created 态），与真实 containers.run(create+start) 一致
@@ -38,6 +61,8 @@ class FakeRuntime:
             image=spec.image,
             instance_name=spec.name,  # codex R9-2：模拟真实 Docker 的 openclaw.instance label
         )
+        if spec.host_port in self.fail_bind_after_create:
+            raise RuntimeError(self.fail_bind_message.format(port=spec.host_port))
         if self.fail_after_create is not None:
             exc = self.fail_after_create
             self.fail_after_create = None
@@ -46,6 +71,11 @@ class FakeRuntime:
 
     def list_fleet(self) -> list[ContainerInfo]:
         return list(self.containers.values())
+
+    def host_published_ports(self) -> set[int]:
+        # #295 codex P2：模拟 daemon 命名空间枚举宿主全部容器发布端口。
+        # 只含带 port 的容器（align 真实 Docker：PortBindings 仅当容器发布了端口）。
+        return {info.port for info in self.containers.values() if info.port is not None}
 
     def get(self, name: str) -> ContainerInfo | None:
         return self.containers.get(name)
@@ -58,6 +88,8 @@ class FakeRuntime:
         self.stopped.append(name)
 
     def remove(self, name: str) -> None:
+        if self.fail_remove is not None:
+            raise self.fail_remove
         self.containers.pop(name, None)
         self.removed.append(name)
 

@@ -253,7 +253,7 @@ def test_create_removes_partial_container_when_run_fails(config, health, tmp_pat
     # 重试同名 docker 冲突。except 分支须 best-effort remove 残留容器。
     _seed_template(tmp_path / 'template')
     runtime = FakeRuntime()
-    runtime.fail_after_create = RuntimeError('port already allocated')
+    runtime.fail_after_create = RuntimeError('random daemon error')  # 非 bind 措辞——验证 run 后回滚清残留
     orch = InstanceOrchestrator(runtime=runtime, config=config, health_probe=health)
     with pytest.raises(RuntimeError):
         orch.create('demo')
@@ -290,6 +290,117 @@ def test_create_retries_port_allocation_on_unique_conflict(orch, monkeypatch):
     assert state['calls'] >= 2                # 至少重试一次
     assert inst.port == 19000                 # 最终成功占用
     assert inst.status == Instance.STATUS_RUNNING
+
+
+@pytest.mark.django_db
+def test_create_retries_on_docker_bind_conflict(config, health, runtime, tmp_path):
+    """#295 codex P2：docker run 因宿主 bind 冲突失败时，重试下一空闲端口而非整段回滚。
+
+    宿主非 Docker 进程（无 PortBindings 可枚举）+ 后端容器化（socket.bind 命名空间盲区）
+    → 探测全看不到占用，allocator 仍选 19000；docker run 发布冲突（bind: address
+    already in use）。create 须识别该冲突、释放端口重试 19001，而不是 create 失败。
+    """
+    _seed_template(tmp_path / 'template')
+    runtime.fail_bind_ports = {19000}         # 19000 被宿主非容器进程占用
+    orch = InstanceOrchestrator(runtime=runtime, config=config, health_probe=health)
+    inst = orch.create('demo')
+    assert inst.port == 19001                 # bind 冲突后重试到 19001
+    assert inst.status == Instance.STATUS_RUNNING
+    assert runtime.run_specs[0].host_port == 19000  # 第一次尝试 19000
+    assert runtime.run_specs[1].host_port == 19001  # 冲突后重试 19001
+    assert not Instance.objects.filter(name='demo', port=19000).exists()  # 冲突行已删
+    assert Instance.objects.filter(name='demo', port=19001).exists()
+
+
+@pytest.mark.django_db
+def test_create_retries_on_port_already_allocated_wording(config, health, runtime, tmp_path):
+    """#295 codex P2（新轮 #3695357689）：daemon 报 'port is already allocated' 也是 bind 冲突。
+
+    真实 docker daemon 依来源以 "Bind for 0.0.0.0:19000 failed: port is already
+    allocated"（libnetwork portallocator，含 "is"）或 "bind: address already in use"
+    （docker-proxy OS 层）报告宿主端口发布冲突。_is_bind_conflict 归一化匹配两种措辞
+    （"already allocated" 子串覆盖 "is already allocated" 与简写），任一种都触发学习冲突
+    端口重试下一空闲端口，而非整段回滚、create 失败。
+    """
+    _seed_template(tmp_path / 'template')
+    runtime.fail_bind_ports = {19000}
+    runtime.fail_bind_message = 'Bind for 0.0.0.0:{port} failed: port is already allocated'
+    orch = InstanceOrchestrator(runtime=runtime, config=config, health_probe=health)
+    inst = orch.create('demo')
+    assert inst.port == 19001                 # 冲突措辞被识别 → 重试到 19001
+    assert inst.status == Instance.STATUS_RUNNING
+    assert runtime.run_specs[0].host_port == 19000  # 第一次尝试 19000
+    assert runtime.run_specs[1].host_port == 19001  # 冲突后重试 19001
+    assert Instance.objects.filter(name='demo', port=19001).exists()
+
+
+@pytest.mark.django_db
+def test_create_retries_past_eight_bind_conflicts(config, health, runtime, tmp_path):
+    """#295 codex P2（第 5 轮）：>8 个宿主监听占最低端口时，重试直至池内空闲端口。
+
+    MAX_PORT_RETRIES=8 是 DB 并发冲突预算；bind 冲突重试须以池候选数为预算。
+    宿主 9 个非容器监听占 19000-19008，create 须落到 19009（而非在 8 次后
+    PortAllocationError，即使 19009+ 仍空闲）。
+    """
+    _seed_template(tmp_path / 'template')
+    runtime.fail_bind_ports = set(range(19000, 19009))  # 9 个最低端口被宿主监听占用
+    orch = InstanceOrchestrator(runtime=runtime, config=config, health_probe=health)
+    inst = orch.create('demo')
+    assert inst.port == 19009                 # 越过 9 个冲突端口落到第 10 个
+    assert inst.status == Instance.STATUS_RUNNING
+    assert len(runtime.run_specs) == 10       # 9 次冲突 + 1 次成功
+    assert runtime.run_specs[-1].host_port == 19009
+
+
+@pytest.mark.django_db
+def test_create_bind_conflict_preserves_row_when_dir_cleanup_fails(config, health, runtime, tmp_path):
+    """#295 codex P2（第 4 轮）：bind 冲突后目录清理失败 → 保留 ERROR 行 + raise，不吞。
+
+    若目录清理失败仍删行：残留目录让下一轮重试撞 InstanceDirExists，且行已删则 delete
+    无法清理孤儿数据，实例名被永久阻塞。须对齐非 bind 回滚路径——保留 ERROR 行 + raise
+    InstanceCleanupError（运维可经 delete 重试）。
+    """
+    _seed_template(tmp_path / 'template')
+    runtime.fail_bind_ports = {19000}
+
+    class _FailingRemover:
+        def __call__(self, path):
+            raise OSError(f'permission denied: {path}')
+
+    orch = InstanceOrchestrator(
+        runtime=runtime, config=config, health_probe=health, dir_remover=_FailingRemover(),
+    )
+    with pytest.raises(InstanceCleanupError):
+        orch.create('demo')
+    # 行保留且标 ERROR（非删除）——运维可经 delete 重试清理
+    row = Instance.objects.get(name='demo')
+    assert row.status == Instance.STATUS_ERROR
+    # 端口已释放（不再占用），但孤儿目录留待 delete 清理
+    assert not runtime.containers  # 无残留容器
+
+
+@pytest.mark.django_db
+def test_create_bind_conflict_preserves_row_when_container_remove_fails(config, health, runtime, tmp_path):
+    """#295 codex P2（新轮 #3695394860）：bind 冲突后容器清理失败 → 保留 ERROR 行 + raise。
+
+    容器已创建后才报 bind 冲突（真实 docker create+start：端口冲突在 start 阶段暴露），
+    remove 失败（daemon 瞬态错误）时若吞掉并删行：残留容器撞下一轮 name 冲突，且行已删
+    则 delete 无所有权记录无法清理孤儿，实例名被永久阻塞。须对齐目录清理失败分支——
+    保留 ERROR 行（含 container_id 供 delete 证明所有权）+ raise InstanceCleanupError。
+    """
+    _seed_template(tmp_path / 'template')
+    runtime.fail_bind_after_create = {19000}   # 容器入 daemon 后报 bind 冲突
+    runtime.fail_remove = RuntimeError('daemon transient error')  # 清理残留容器失败
+    orch = InstanceOrchestrator(runtime=runtime, config=config, health_probe=health)
+    with pytest.raises(InstanceCleanupError):
+        orch.create('demo')
+    # 行保留且标 ERROR，container_id 记录残留容器（delete 凭所有权清理）
+    row = Instance.objects.get(name='demo')
+    assert row.status == Instance.STATUS_ERROR
+    assert row.container_id                        # 残留容器 id 已保存供 delete 清理
+    assert 'demo' in runtime.containers            # 残留容器仍在 daemon（remove 失败未清）
+    assert not runtime.removed                     # 未触发任何 remove
+    # 行未被删 → delete 端点可凭 container_id 清理孤儿
 
 
 # --- delete：:126 rmtree 失败保留 DB 行 + 标 REMOVING（不吞错、可重试）---
@@ -406,6 +517,30 @@ def test_used_ports_includes_fleet_label_port(config, health, tmp_path):
     )
     inst = orch.create('demo')
     assert inst.port == 19001
+
+
+@pytest.mark.django_db
+def test_used_ports_includes_untracked_host_published_ports(config, health, runtime, tmp_path):
+    """#295 codex P2：宿主上未跟踪容器（无 label）占用的池端口也被 allocator 跳过。
+
+    后端容器化（bridge 网络）时容器内 socket.bind 探不到宿主端口（命名空间盲区），
+    且 list_fleet 按 label 过滤看不到未跟踪容器。host_published_ports 经 daemon 无过滤
+    枚举补上这一来源——FakeRuntime 模拟 daemon 返回 port=19002 的未跟踪容器。
+    """
+    _seed_template(tmp_path / 'template')
+    runtime.containers['external'] = ContainerInfo(
+        container_id='extid',
+        name='external',
+        running=True,
+        status='running',
+        image='other:tag',
+        port=19002,  # 无 openclaw label 的未跟踪容器（模拟外部容器占宿主端口）
+    )
+    orch = InstanceOrchestrator(
+        runtime=runtime, config=config, health_probe=health, port_in_use=lambda p: False,
+    )
+    inst = orch.create('demo')
+    assert inst.port == 19000  # 19002 已被 host_published_ports 标记占用 → 跳过
 
 
 # --- delete：:204 目录已不存在视为清理成功 ---
@@ -528,7 +663,7 @@ def test_create_rollback_removes_when_run_attempted_and_start_fails(config, heal
     # → 残留命名容器须 best-effort remove（否则重试同名 docker 冲突）。
     _seed_template(tmp_path / 'template')
     runtime = FakeRuntime()
-    runtime.fail_after_create = RuntimeError('port already allocated')
+    runtime.fail_after_create = RuntimeError('random daemon error')  # 非 bind 措辞——验证 run 后回滚清残留
     orch = InstanceOrchestrator(runtime=runtime, config=config, health_probe=health)
     with pytest.raises(RuntimeError):
         orch.create('demo')
@@ -733,9 +868,9 @@ def test_create_marks_inflight_before_reserving_row(orch, monkeypatch):
     real_reserve = orch._cmd._reserve_row
     guarded_at_reserve = []
 
-    def spy_reserve(name):
+    def spy_reserve(name, extra_used=None):
         guarded_at_reserve.append(name in orch._deps.inflight)
-        return real_reserve(name)
+        return real_reserve(name, extra_used)
 
     monkeypatch.setattr(orch._cmd, '_reserve_row', spy_reserve)
     orch.create('demo')
@@ -1131,6 +1266,7 @@ def test_fleet_get_survives_missing_template_file(tmp_path, settings):
         'PORT_POOL_START': 19000,
         'PORT_POOL_END': 19999,
         'LLM_API_KEY': '',  # ADR 0005：stub 须镜像 base.py 的 fleet 键（编排改经 settings 取）
+        'PORT_BIND_HOST': '127.0.0.1',  # #295：stub 镜像 base.py 新增端口发布 host 键
     }
     Fleet.reset()
     try:
@@ -1139,6 +1275,40 @@ def test_fleet_get_survives_missing_template_file(tmp_path, settings):
         # 只有 create() 展开模板时才会失败
         items = orch.list()
         assert items == []
+    finally:
+        Fleet.reset()
+
+
+@pytest.mark.django_db
+def test_fleet_build_default_injects_hosts_from_settings(tmp_path, settings):
+    """#295 验收 4：Fleet._build_default 从 settings 装配探测 host 与端口发布 host。
+
+    生产后端容器化后，探测 host 注入 OPENCLAW_FLEET_WS['HOST']（host.docker.internal），
+    端口发布 host 注入 OPENCLAW_FLEET['PORT_BIND_HOST']（0.0.0.0）——三处装配都要落地到
+    注入点（_deps.health / _deps.runtime / _deps.port_in_use），否则生产 compose 注入配置
+    不生效；其中端口占用探测与端口发布 host 须同源（codex P2：publish_host 变 0.0.0.0 时
+    probe 仍测 loopback 会误报空闲 → 选中被非 loopback 占用的端口 → run 失败）。
+    """
+    from containers.orchestrator import Fleet
+
+    settings.OPENCLAW_FLEET = {
+        'ROOT': str(tmp_path / 'fleet'),
+        'TEMPLATE': str(tmp_path / 'template'),
+        'TEMPLATE_JSON': str(tmp_path / 'tpl.json'),
+        'IMAGE': 'img:tag',
+        'PORT_POOL_START': 19000,
+        'PORT_POOL_END': 19999,
+        'LLM_API_KEY': '',
+        'PORT_BIND_HOST': '0.0.0.0',  # 生产：宿主侧 0.0.0.0 发布，host-gateway 可达
+    }
+    settings.OPENCLAW_FLEET_WS = {'SCHEME': 'ws', 'HOST': 'host.docker.internal'}
+    Fleet.reset()
+    try:
+        orch = Fleet.get()
+        assert orch._deps.runtime._publish_host == '0.0.0.0'
+        assert orch._deps.health._host == 'host.docker.internal'
+        # codex P2：端口占用探测与端口发布 host 同源，0.0.0.0 时能检测非 loopback 占用
+        assert orch._deps.port_in_use._host == '0.0.0.0'
     finally:
         Fleet.reset()
 

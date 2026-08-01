@@ -46,6 +46,16 @@ def test_gateway_port_maps_to_loopback_host_port():
     assert kw['ports'] == {'18789/tcp': ('127.0.0.1', 19000)}
 
 
+def test_publish_host_configurable():
+    """#295：端口发布 host 构造注入，生产可配 0.0.0.0 使 host-gateway 可达。
+
+    本地默认 loopback（收敛暴露面）；生产后端容器化后经 ``OPENCLAW_FLEET_PORT_BIND_HOST``
+    注入 0.0.0.0，控制面容器经 host.docker.internal:<port> 寻址宿主映射端口。
+    """
+    kw = DockerRuntime(publish_host='0.0.0.0').build_run_kwargs(_spec())
+    assert kw['ports'] == {'18789/tcp': ('0.0.0.0', 19000)}
+
+
 def test_home_rw_and_config_bind_mount_ro():
     # home rw（agent 写 wiki/workspace）；openclaw.json ro（spec §5.2 防容器内篡改配置）。
     # 官方镜像无 init.sh chown，ro 不会崩（ADR 0003）；配置写入全在 host 侧，gateway 只 read-only watch。
@@ -94,3 +104,156 @@ def test_privilege_floor_matches_researcher_image():
     assert set(kw['cap_add']) == {'CHOWN', 'SETUID', 'SETGID', 'DAC_OVERRIDE'}
     assert kw['restart_policy'] == {'Name': 'unless-stopped'}
     assert kw['detach'] is True
+
+
+def test_host_published_ports_enumerates_unlabelled_containers(monkeypatch):
+    """#295 codex P2：宿主端口占用须经 daemon 命名空间枚举，而非容器内 socket bind。
+
+    生产后端容器化（bridge 网络）时，后端容器内 socket.bind 探测不到宿主已发布端口
+    （命名空间盲区）；且 list_fleet 按 label 过滤看不到未跟踪容器。host_published_ports
+    无 label 过滤枚举 daemon 全部容器 PortBindings → 未跟踪容器占用的池端口也能被 allocator
+    跳过。
+    """
+    from containers.docker_runtime import DockerRuntime
+
+    class _FakeContainers:
+        def list(self, all=True, filters=None):  # pylint: disable=redefined-builtin
+            return [
+                _FakeC('tracked', {'openclaw.port': '19000'}, None, 'running'),
+                _FakeC('untracked', None, {'18789/tcp': [{'HostIp': '127.0.0.1', 'HostPort': '19002'}]}, 'running'),
+            ]
+
+    class _FakeC:
+        def __init__(self, name, labels, port_bindings, status='running'):
+            self.name = name
+            self.labels = labels or {}
+            self.status = status
+            self.attrs = {'HostConfig': {'PortBindings': port_bindings}} if port_bindings else {'HostConfig': {}}
+
+    class _FakeClient:
+        containers = _FakeContainers()
+
+    rt = DockerRuntime(client_factory=_FakeClient)
+    ports = rt.host_published_ports()
+    assert 19002 in ports          # 未跟踪容器的宿主发布端口被枚举
+    assert 19000 not in ports      # 无 PortBindings 的容器不算发布端口
+
+
+def test_host_published_ports_ignores_stopped_containers(monkeypatch):
+    """#295 codex P2 :134：exited/created/dead 容器保留 PortBindings 但无活跃宿主监听。
+
+    list(all=True) 会枚举 stopped 容器，其 PortBindings 是残留配置而非真实占用——
+    _used_ports 据此误判池端口占用会跳过空闲候选，足够多 stale 容器可假耗尽
+    19000–19999 使创建失败。只跳过 daemon 已收回绑定的状态（exited/created/dead）；
+    running/restarting/paused 仍持有宿主监听，须计数（宁多算只跳过候选，少算则真实
+    占用被误判空闲 → bind 冲突）。
+    """
+    from containers.docker_runtime import DockerRuntime
+
+    class _FakeContainers:
+        def list(self, all=True, filters=None):  # pylint: disable=redefined-builtin
+            return [
+                _FakeC('running-external', None, {'18789/tcp': [{'HostIp': '127.0.0.1', 'HostPort': '19001'}]}, 'running'),
+                _FakeC('restarting', None, {'18789/tcp': [{'HostIp': '127.0.0.1', 'HostPort': '19002'}]}, 'restarting'),
+                _FakeC('paused', None, {'18789/tcp': [{'HostIp': '127.0.0.1', 'HostPort': '19003'}]}, 'paused'),
+                _FakeC('stopped', None, {'18789/tcp': [{'HostIp': '127.0.0.1', 'HostPort': '19004'}]}, 'exited'),
+                _FakeC('created', None, {'18789/tcp': [{'HostIp': '127.0.0.1', 'HostPort': '19005'}]}, 'created'),
+                _FakeC('dead', None, {'18789/tcp': [{'HostIp': '127.0.0.1', 'HostPort': '19006'}]}, 'dead'),
+            ]
+
+    class _FakeC:
+        def __init__(self, name, labels, port_bindings, status):
+            self.name = name
+            self.labels = labels or {}
+            self.status = status
+            self.attrs = {'HostConfig': {'PortBindings': port_bindings}} if port_bindings else {'HostConfig': {}}
+
+    class _FakeClient:
+        containers = _FakeContainers()
+
+    rt = DockerRuntime(client_factory=_FakeClient)
+    ports = rt.host_published_ports()
+    assert 19001 in ports          # running 容器的宿主发布端口被计数
+    assert 19002 in ports          # restarting 容器仍持绑定 → 计数
+    assert 19003 in ports          # paused 容器仍持绑定 → 计数
+    assert 19004 not in ports      # exited 容器残留 PortBindings 不计数
+    assert 19005 not in ports      # created 容器残留 PortBindings 不计数
+    assert 19006 not in ports      # dead 容器残留 PortBindings 不计数
+
+
+def test_host_published_ports_filters_by_publish_host(monkeypatch):
+    """#295 codex P2（新轮 #3695357690）：按发布地址过滤 HostIp，不相交绑定不误占端口。
+
+    publish_host=127.0.0.1 时，仅绑到别的宿主 IP 的容器可复用同端口（地址不相交）。
+    现实现丢弃 HostIp 全局标记占用 → 假耗尽 19000–19999。通配绑定（HostIp 空/0.0.0.0）
+    与所有地址冲突，必须计数。
+    """
+    from containers.docker_runtime import DockerRuntime
+
+    class _FakeContainers:
+        def list(self, all=True, filters=None):  # pylint: disable=redefined-builtin
+            return [
+                _FakeC('same-ip', None, {'18789/tcp': [{'HostIp': '127.0.0.1', 'HostPort': '19001'}]}, 'running'),
+                _FakeC('other-ip', None, {'18789/tcp': [{'HostIp': '192.168.1.5', 'HostPort': '19002'}]}, 'running'),
+                _FakeC('wildcard', None, {'18789/tcp': [{'HostIp': '0.0.0.0', 'HostPort': '19003'}]}, 'running'),
+                _FakeC('empty-hostip', None, {'18789/tcp': [{'HostIp': '', 'HostPort': '19004'}]}, 'running'),
+            ]
+
+    class _FakeC:
+        def __init__(self, name, labels, port_bindings, status):
+            self.name = name
+            self.labels = labels or {}
+            self.status = status
+            self.attrs = {'HostConfig': {'PortBindings': port_bindings}} if port_bindings else {'HostConfig': {}}
+
+    class _FakeClient:
+        containers = _FakeContainers()
+
+    rt = DockerRuntime(client_factory=_FakeClient, publish_host='127.0.0.1')
+    ports = rt.host_published_ports()
+    assert 19001 in ports          # 绑定到 127.0.0.1 → 与 publish_host 冲突
+    assert 19002 not in ports      # 仅绑到其它宿主 IP → 地址不相交，不算占用
+    assert 19003 in ports          # 通配 0.0.0.0 → 与所有地址冲突
+    assert 19004 in ports          # HostIp 空 = 通配 → 冲突
+
+
+def test_host_published_ports_wildcard_publish_conflicts_all(monkeypatch):
+    """publish_host=0.0.0.0（生产）时任意具体地址绑定都算冲突（0.0.0.0 覆盖所有接口）。"""
+    from containers.docker_runtime import DockerRuntime
+
+    class _FakeContainers:
+        def list(self, all=True, filters=None):  # pylint: disable=redefined-builtin
+            return [
+                _FakeC('loopback', None, {'18789/tcp': [{'HostIp': '127.0.0.1', 'HostPort': '19001'}]}, 'running'),
+                _FakeC('lan', None, {'18789/tcp': [{'HostIp': '192.168.1.5', 'HostPort': '19002'}]}, 'running'),
+            ]
+
+    class _FakeC:
+        def __init__(self, name, labels, port_bindings, status):
+            self.name = name
+            self.labels = labels or {}
+            self.status = status
+            self.attrs = {'HostConfig': {'PortBindings': port_bindings}} if port_bindings else {'HostConfig': {}}
+
+    class _FakeClient:
+        containers = _FakeContainers()
+
+    rt = DockerRuntime(client_factory=_FakeClient, publish_host='0.0.0.0')
+    ports = rt.host_published_ports()
+    assert 19001 in ports          # 0.0.0.0 覆盖所有接口 → loopback 绑定冲突
+    assert 19002 in ports          # 同理 lan 绑定也冲突
+
+
+def test_host_published_ports_empty_when_no_containers(monkeypatch):
+    """空 daemon → 空集合（不误报占用）。"""
+    from containers.docker_runtime import DockerRuntime
+
+    class _FakeContainers:
+        def list(self, all=True, filters=None):  # pylint: disable=redefined-builtin
+            return []
+
+    class _FakeClient:
+        containers = _FakeContainers()
+
+    rt = DockerRuntime(client_factory=_FakeClient)
+    assert rt.host_published_ports() == set()
