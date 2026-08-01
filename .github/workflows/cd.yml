@@ -155,15 +155,20 @@ jobs:
             docker image prune -f
 
             # 健康门：frontend 反代 /api/health（公开探针），30s 内非 200 即 fail 让 workflow 红。
+            # 必须带真实 Host 头（researcher.acautomata.top）：nginx 反代会发 $host=该域名，
+            # 而 Django 按 DJANGO_ALLOWED_HOSTS 校验 Host——不带会收到 127.0.0.1:18080 → 400
+            # DisallowedHost（CD run 30683454924 实测：默认 400 / 带正确 Host 200）。
             echo "[deploy] waiting for /api/health ..."
             ok=0
             for i in $(seq 1 15); do
-              if curl -fsS http://127.0.0.1:18080/api/health >/dev/null 2>&1; then ok=1; break; fi
+              if curl -fsS -H "Host: researcher.acautomata.top" http://127.0.0.1:18080/api/health >/dev/null 2>&1; then ok=1; break; fi
               sleep 2
             done
             if [ "$ok" != "1" ]; then
               echo "[deploy] ERROR: /api/health did not return 200 in time" >&2
               docker compose -f docker-compose.deploy.yml ps >&2 || true
+              echo "[deploy] --- backend logs (tail) ---" >&2
+              docker compose -f docker-compose.deploy.yml logs --tail=50 backend >&2 || true
               exit 1
             fi
             echo "[deploy] healthy ✓"

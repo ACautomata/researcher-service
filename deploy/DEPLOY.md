@@ -99,6 +99,6 @@ cd /www/panel
 docker compose -f docker-compose.deploy.yml --env-file deploy.env ps
 docker compose -f docker-compose.deploy.yml --env-file deploy.env logs backend
 docker logs panel-frontend
-curl -v http://127.0.0.1:18080/api/health   # 应用层
+curl -v -H "Host: researcher.acautomata.top" http://127.0.0.1:18080/api/health   # 应用层（须带真实 Host，否则 400 DisallowedHost）
 curl -v https://researcher.acautomata.top/api/health  # 经宝塔 TLS 全链路
 ```
