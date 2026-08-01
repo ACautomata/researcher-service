@@ -53,6 +53,7 @@ from containers.fleet.values import (
     PortAllocationError,
 )
 from containers.models import Instance
+from containers.ports import PortPoolExhausted
 from containers.runtime import ContainerSpec
 
 logger = logging.getLogger(__name__)
@@ -252,7 +253,9 @@ class FleetCommand:
                                 inst.delete()
                             raise InstanceDirExists(name, str(instance_dir)) from None
                         directory_created = True
-                    self._deps.provisioner.provision(home)
+                        # provision 只在目录首次创建时执行——bind 冲突重试复用已 provision 的
+                        # home（port 更新即可），避免 copytree 撞已存在目录（FileExistsError）。
+                        self._deps.provisioner.provision(home)
                     # #280：config 写盘从裸 write_text + chmod 升级为 ConfigStore 原子写单源
                     # （tmp + chmod 0644 + os.replace）——create 不再有 torn/partial 风险。
                     self._config_store.write(name, self._ensure_renderer().render())
@@ -284,8 +287,10 @@ class FleetCommand:
                     if self._is_bind_conflict(exc):
                         if inst is not None and inst.port is not None:
                             learned_conflicts.add(inst.port)
-                        # bind 冲突后容器/目录清理失败不能吞（#295 第 4 轮）：残留容器/目录让下一轮
-                        # 重试撞 name/InstanceDirExists，且行删则 delete 无所有权记录无法清理孤儿。
+                        # bind 冲突后残留容器清理不能吞（#295 第 4 轮）：残留容器让下一轮重试撞
+                        # name 冲突，且行删则 delete 无所有权记录无法清理孤儿。注意**不清目录**——
+                        # #297 就地保留行（POST 已返 202、行对客户端可见），目录/配置一并保留，
+                        # 重试仅换端口、复用已 provision 的 home，不清目录避免每轮重做 cp -a。
                         if run_attempted and not preexisting:
                             try:
                                 created = self._deps.runtime.get(name)
@@ -300,65 +305,82 @@ class FleetCommand:
                                 except Exception:  # pylint: disable=broad-exception-caught
                                     pass
                                 raise InstanceCleanupError(name, str(instance_dir)) from None
-                        if directory_created:
-                            try:
-                                self._deps.dir_remover(instance_dir)
-                            except OSError:
-                                inst.status = Instance.STATUS_ERROR
-                                try:
-                                    inst.save(update_fields=['status', 'container_id'])
-                                except Exception:  # pylint: disable=broad-exception-caught
-                                    pass
-                                raise InstanceCleanupError(name, str(instance_dir)) from None
                         # 就地重试：释放端口 → 学习冲突集 → 下一轮 _reserve_row 选新端口。
-                        # 行不删（对客户端可见），run 失败前未执行的步骤下一轮重做。
+                        # 行/目录/配置保留（对客户端可见 + 复用 provision），run 失败前未执行的
+                        # 步骤下一轮重做（下一轮 directory_created 已 True，跳过 mkdir）。
                         if inst is not None and inst.pk is not None:
-                            next_port = self._deps.allocator.next_free(
-                                self._used_ports(learned_conflicts),
-                            )
+                            try:
+                                next_port = self._deps.allocator.next_free(
+                                    self._used_ports(learned_conflicts),
+                                )
+                            except PortPoolExhausted:
+                                # codex P2（e947dde）：全部候选端口 bind 冲突耗尽 → 与其它
+                                # provisioning 错误走同一失败终态（后台标 ERROR / 同步删行），
+                                # 而非让行残留 creating + lease 续约、轮询 pending 达 10 分钟。
+                                self._finalize_failed_create(
+                                    name, instance_dir, inst, run_attempted, preexisting,
+                                    directory_created, preserve_error_row,
+                                    PortAllocationError(name),
+                                )
                             inst.port = next_port
                             inst.save(update_fields=['port'])
                         continue
-                    # 非 bind 冲突 → 统一回滚（保留历史语义）
-                    if run_attempted and not preexisting:
-                        try:
-                            created = self._deps.runtime.get(name)
-                            if created is not None and created.container_id:
-                                inst.container_id = created.container_id
-                            self._deps.runtime.remove(name)
-                            inst.container_id = ''
-                        except Exception:  # pylint: disable=broad-exception-caught
-                            # 若清容器失败，保留刚观测到的 id，供 ERROR 行后续 delete 证明所有权。
-                            pass
-                    # mkdir 成功是目录所有权的正向证据；mkdir 自身失败时保留既有数据。
-                    if directory_created:
-                        try:
-                            self._deps.dir_remover(instance_dir)
-                        except OSError:
-                            inst.status = Instance.STATUS_ERROR
-                            try:
-                                inst.save(update_fields=['status', 'container_id'])
-                            except Exception:  # pylint: disable=broad-exception-caught
-                                pass
-                            raise InstanceCleanupError(name, str(instance_dir)) from None
-                    if preserve_error_row:
-                        # codex P1（#297 后台）：POST 已返 202，行对客户端可见——失败保留 ERROR 行
-                        # 供 list 显示 error + delete 清理，而非让已接受的实例静默消失。
-                        inst.status = Instance.STATUS_ERROR
-                        try:
-                            inst.save(update_fields=['status', 'container_id'])
-                        except Exception:  # pylint: disable=broad-exception-caught
-                            pass
-                    else:
-                        # 同步 create()：历史契约——失败删行回滚，调用方（view）感知异常。
-                        if inst is not None and inst.pk is not None:
-                            inst.delete()
-                    raise
-            # 理论上不可达：池候选数次循环内每次 return 或 raise（池耗尽抛 PortAllocationError）。
+                    # 非 bind 冲突 → 统一失败终态（保留历史语义）
+                    self._finalize_failed_create(
+                        name, instance_dir, inst, run_attempted, preexisting,
+                        directory_created, preserve_error_row, exc,
+                    )
+            # 理论上不可达：池候选数次循环内每次 return / raise / _finalize_failed_create（raise）。
             raise PortAllocationError(name)
         finally:
             # guard 释放必须无条件执行：无论成功/回滚/重试耗尽，create 收尾都要释放在飞标记。
             self._deps.inflight.release(name)
+
+    def _finalize_failed_create(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+        self, name, instance_dir, inst, run_attempted, preexisting,
+        directory_created, preserve_error_row, exc,
+    ) -> None:
+        """create_complete 失败的统一收尾（非 bind 分支 + bind 池耗尽共用）。
+
+        清残留容器 → 清目录（失败保留 ERROR 行 + raise InstanceCleanupError）→ 按
+        preserve_error_row 落失败终态（后台标 ERROR 供 list+delete 感知 / 同步删行）→ raise
+        原异常。codex P2（e947dde）：bind 冲突重试池耗尽（PortPoolExhausted）也经此路径，
+        不再让行残留 creating + lease 续约、轮询 pending 达 10 分钟。
+        """
+        if run_attempted and not preexisting:
+            try:
+                created = self._deps.runtime.get(name)
+                if created is not None and created.container_id:
+                    inst.container_id = created.container_id
+                self._deps.runtime.remove(name)
+                inst.container_id = ''
+            except Exception:  # pylint: disable=broad-exception-caught
+                # 若清容器失败，保留刚观测到的 id，供 ERROR 行后续 delete 证明所有权。
+                pass
+        # mkdir 成功是目录所有权的正向证据；mkdir 自身失败时保留既有数据。
+        if directory_created:
+            try:
+                self._deps.dir_remover(instance_dir)
+            except OSError:
+                inst.status = Instance.STATUS_ERROR
+                try:
+                    inst.save(update_fields=['status', 'container_id'])
+                except Exception:  # pylint: disable=broad-exception-caught
+                    pass
+                raise InstanceCleanupError(name, str(instance_dir)) from None
+        if preserve_error_row:
+            # codex P1（#297 后台）：POST 已返 202，行对客户端可见——失败保留 ERROR 行
+            # 供 list 显示 error + delete 清理，而非让已接受的实例静默消失。
+            inst.status = Instance.STATUS_ERROR
+            try:
+                inst.save(update_fields=['status', 'container_id'])
+            except Exception:  # pylint: disable=broad-exception-caught
+                pass
+        else:
+            # 同步 create()：历史契约——失败删行回滚，调用方（view）感知异常。
+            if inst is not None and inst.pk is not None:
+                inst.delete()
+        raise exc
 
     def _run_create_complete(self, inst: Instance) -> None:
         """后台线程入口（#297）：清理 DB 连接 + 完成 provisioning + 兜底记录异常。
