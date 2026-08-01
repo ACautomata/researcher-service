@@ -33,10 +33,52 @@ function clearRefreshCookie(res: Response): void {
   res.clearCookie(REFRESH_COOKIE, { path: REFRESH_COOKIE_PATH })
 }
 
+// 恒定耗时的 dummy bcrypt(12) 散列：login 短路分支（用户不存在/OIDC-only/inactive）用它
+// 垫一次 bcrypt 开销，抹平与「错密跑满 cost-12」的时序差，防账号存在性探测（Codex #342 P2）。
+// 公开无害值，仅用于等权计算耗时；不对应任何真实密码。
+const DUMMY_BCRYPT_HASH = '$2b$12$lr7QN9p4itcqX4aHbSvHdemwcobKprdkDEiR1gBKYj7GnlAiEa5d2'
+
 // --- R1 旋转 + 重放检测（核心） ---
 // 有效（未撤销未过期）→ 旧 token 撤销 + 新 token 落库（replacedByTokenId 指回旧）。
 // 已撤销的 token 再现 = 重放 → 撤销该 user 全部有效 refresh（族灭），拒 10003。
 // 不存在/过期/user 失效 → 10003。
+//
+// 并发原子性（Codex #342 P1）：旋转 = 撤销旧 + 建新 必须在同一事务内，且撤销必须
+// 条件化（where revokedAt:null）。否则两个并发请求都读到 revokedAt:null → 各自无条件
+// 撤销 + create → 旋转链分叉（fork），被盗 token 仍可用。条件 updateMany 在并发已
+// 旋转后命中 count=0 → 判定重放。族灭放事务外执行（交互式事务内 throw 会 ROLLBACK，
+// 族灭写入必须持久化，故先提交无副作用的事务再用事务外 updateMany 落库）。
+// 事务体内核（可测 seam）：条件撤销 + 建新，返回哨兵而非 throw —— 调用方决定族灭时机。
+// 并发已被旋转（updateMany 命中 count=0）→ replay:true；user 失效 → replay:true。
+// 成功 → replay:false + 新 access + 新 refresh。
+export async function rotateInTx(
+  tx: Pick<PrismaClient, 'refreshToken' | 'user'>,
+  row: { id: string; userId: string },
+  now: Date,
+): Promise<
+  | { replay: true }
+  | { replay: false; access: string; refreshCookie: string }
+> {
+  const revoked = await tx.refreshToken.updateMany({
+    where: { id: row.id, revokedAt: null },
+    data: { revokedAt: now },
+  })
+  if (revoked.count === 0) return { replay: true } // 并发已被旋转 → 族灭交由事务外
+  const user = await tx.user.findUnique({ where: { id: row.userId } })
+  if (!user || !user.isActive) return { replay: true }
+  const newTok = generateRefreshToken()
+  await tx.refreshToken.create({
+    data: {
+      userId: row.userId,
+      tokenHash: newTok.hash,
+      expiresAt: refreshExpiresAt(),
+      replacedByTokenId: row.id,
+    },
+  })
+  const access = await signAccessToken(user.id)
+  return { replay: false, access, refreshCookie: newTok.token }
+}
+
 async function rotateRefresh(
   oldToken: string,
   prisma: PrismaClient,
@@ -46,7 +88,7 @@ async function rotateRefresh(
   const now = new Date()
   if (!row) throw fail(CODE.REFRESH_INVALID)
   if (row.revokedAt) {
-    // 重放：被旋转过的 token 再次出现 → 族灭该 user 全部有效 refresh
+    // 重放：被旋转过的 token 再次出现 → 族灭该 user 全部有效 refresh（持久化）
     await revokeAllUserRefresh(prisma, row.userId, now)
     throw fail(CODE.REFRESH_INVALID)
   }
@@ -54,22 +96,15 @@ async function rotateRefresh(
     await prisma.refreshToken.update({ where: { id: row.id }, data: { revokedAt: now } })
     throw fail(CODE.REFRESH_INVALID)
   }
-  const user = await prisma.user.findUnique({ where: { id: row.userId } })
-  if (!user || !user.isActive) throw fail(CODE.REFRESH_INVALID)
-  const newTok = generateRefreshToken()
-  await prisma.$transaction([
-    prisma.refreshToken.update({ where: { id: row.id }, data: { revokedAt: now } }),
-    prisma.refreshToken.create({
-      data: {
-        userId: row.userId,
-        tokenHash: newTok.hash,
-        expiresAt: refreshExpiresAt(),
-        replacedByTokenId: row.id,
-      },
-    }),
-  ])
-  const access = await signAccessToken(user.id)
-  return { access, refreshCookie: newTok.token }
+  // 原子旋转：撤销+建新同一事务；条件撤销复查 revokedAt（防并发 fork）。
+  // 事务内不 throw —— replay 以哨兵返回，族灭在事务外执行保证持久化（否则 ROLLBACK 丢失）。
+  const result = await prisma.$transaction(async (tx) => rotateInTx(tx, row, now))
+  if (result.replay) {
+    // 并发已旋转或 user 失效：族灭该 user 全部有效 refresh（事务外，持久化）
+    await revokeAllUserRefresh(prisma, row.userId, now)
+    throw fail(CODE.REFRESH_INVALID)
+  }
+  return { access: result.access, refreshCookie: result.refreshCookie }
 }
 
 // --- handlers ---
@@ -77,13 +112,15 @@ async function rotateRefresh(
 async function loginHandler(req: Request, res: Response): Promise<void> {
   const { username, password } = req.body as { username: string; password: string }
   const user = await req.prisma.user.findUnique({ where: { username } })
-  // 用户不存在/无密码(OIDC-only)/密码错/已禁用 → 同 10002（不区分用户名是否存在，防探测）
-  if (
-    !user ||
-    !user.passwordHash ||
-    !user.isActive ||
-    !(await verifyPassword(password, user.passwordHash))
-  ) {
+  // 用户不存在/无密码(OIDC-only)/密码错/已禁用 → 同 10002（不区分用户名是否存在，防探测）。
+  // 时序侧信道防护（Codex #342 P2）：短路分支（不存在/OIDC-only/inactive）直接 throw 会
+  // 跳过 bcrypt，错密则跑满 cost-12 → 时序差暴露账号存在。故短路前先对固定 dummy hash
+  // 跑一次 verifyPassword 垫恒定耗时（公开无害值，仅等权 bcrypt 开销）。
+  if (!user || !user.passwordHash || !user.isActive) {
+    await verifyPassword(password, DUMMY_BCRYPT_HASH)
+    throw fail(CODE.LOGIN_FAILED)
+  }
+  if (!(await verifyPassword(password, user.passwordHash))) {
     throw fail(CODE.LOGIN_FAILED)
   }
   const access = await signAccessToken(user.id)

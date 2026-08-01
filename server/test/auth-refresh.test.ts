@@ -66,4 +66,27 @@ describe('refresh R1 (slice 5)', () => {
       .set('Cookie', [`refresh_token=${token}`])
     expect(res.body.code).toBe(10003)
   })
+
+  it('并发旋转原子性：同 cookie 并行 refresh 恰一个成功，无 fork（旋转链不分叉）', async () => {
+    const res = await login(ctx.request, 'admin1', 'pw-admin1-secure')
+    const cookie = res.refreshCookie!
+    // 6 路并发提高两请求同时读到 revokedAt:null 的概率（SQLite 单写者下仍可能全串行）
+    const results = await Promise.all(
+      Array.from({ length: 6 }, () =>
+        ctx.request.post('/api/v1/auth/token/refresh').set('Cookie', [cookie]),
+      ),
+    )
+    const codes = results.map((r) => r.body.code)
+    const ok = codes.filter((c) => c === 0).length
+    const invalid = codes.filter((c) => c === 10003).length
+    expect(ok).toBeGreaterThanOrEqual(1) // 至少一次成功旋转
+    expect(ok).toBe(1) // 恰一个成功 —— fork 时会是 ≥2
+    expect(ok + invalid).toBe(results.length)
+    // 无 fork：该 user 有效 refresh 至多 1 条（0 = 族灭后的合法态）
+    const admin = await ctx.prisma.user.findUnique({ where: { username: 'admin1' } })
+    const active = await ctx.prisma.refreshToken.count({
+      where: { userId: admin!.id, revokedAt: null },
+    })
+    expect(active).toBeLessThanOrEqual(1)
+  })
 })

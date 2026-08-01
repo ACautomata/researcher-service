@@ -53,12 +53,13 @@ export function hashToken(token: string): string {
 
 // 撤销该 user 全部有效 refresh（R1 重放族灭 / 改密 / 重置密码共用）。
 // 返回 PrismaPromise：可独立 await，也可作为元素放进 $transaction([…]) 数组。
+// 参数取 RefreshTokenDelegate 类型：独立 client 与交互式事务（tx）都满足，两处可共用。
 export function revokeAllUserRefresh(
-  prisma: PrismaClient,
+  db: Pick<PrismaClient, 'refreshToken'>,
   userId: string,
   now: Date = new Date(),
 ) {
-  return prisma.refreshToken.updateMany({
+  return db.refreshToken.updateMany({
     where: { userId, revokedAt: null },
     data: { revokedAt: now },
   })
