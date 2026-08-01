@@ -2,6 +2,8 @@
 
 照 containers/tests/conftest.py 的 fleet fixture（models API 测试需真实 instance 落盘 +
 openclaw.json 可写，以验收「CRUD 后重渲染生效」）。api/authed 照 containers/tests/test_api.py。
+#297 异步化：注入 inline 同步 executor，使后台 provisioning 在请求线程同步跑完——
+demo_instance fixture 拿到落盘结果后，models CRUD 用例才能经 API 触达 config 重渲染。
 """
 import pytest
 from django.contrib.auth import get_user_model
@@ -36,7 +38,14 @@ def fleet(tmp_path):
         port_end=19999,
         llm_api_key='sk-test',
     )
-    orch = InstanceOrchestrator(runtime=runtime, config=config, health_probe=health)
+    # inline 同步执行器（对齐 containers/tests/conftest.py）：后台任务在 submit 时同步跑完，
+    # models 用例的落盘/状态断言拿到 provisioning 完成后的结果。
+    def submit_inline(task, *args):
+        task(*args)
+
+    orch = InstanceOrchestrator(
+        runtime=runtime, config=config, health_probe=health, submit_task=submit_inline,
+    )
     Fleet.override(orch)
     yield {'orch': orch, 'runtime': runtime, 'health': health, 'config': config}
     Fleet.reset()
@@ -56,7 +65,11 @@ def authed(api):
 
 @pytest.fixture
 def demo_instance(authed, fleet):
-    """经 API 建一个容器 demo，返回其 name（带真实落盘目录 + openclaw.json）。"""
+    """经 API 建一个容器 demo，返回其 name（带真实落盘目录 + openclaw.json）。
+
+    #297 异步化：POST 返 202（同步预占 creating 行）；inline executor 使后台 provisioning
+    在请求内同步跑完，随后行已 running（models CRUD 用例触达 config 重渲染的前提）。
+    """
     resp = authed.post('/api/v1/containers/', {'name': 'demo'}, format='json')
-    assert resp.status_code == 201
+    assert resp.status_code == 202
     return 'demo'

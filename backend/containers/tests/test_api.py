@@ -10,8 +10,8 @@ import pytest
 from django.contrib.auth import get_user_model
 from rest_framework.test import APIClient
 
+from containers.models import Instance
 from containers.orchestrator import (
-    ConfigWriteError,
     InstanceBusy,
     InstanceCleanupError,
     InstanceDirExists,
@@ -58,13 +58,19 @@ def test_delete_requires_auth(api):
 
 
 @pytest.mark.django_db
-def test_create_returns_instance(authed, fleet):
+def test_create_returns_202_with_creating(authed, fleet):
+    """#297：POST 同步预占 creating 行 → 返 202 + creating 态快照（先于 submit 构造）。
+
+    conftest 注入 inline executor 使后台 provisioning 同步跑完，落盘断言保留；但 202 body
+    必须是创建态快照（view 先 created_item 再 submit），非 provisioning 完成后的 running。
+    """
     resp = authed.post('/api/v1/containers/', {'name': 'demo'}, format='json')
-    assert resp.status_code == 201
+    assert resp.status_code == 202
     data = resp.json()
     assert data['name'] == 'demo'
     assert data['port'] == 19000  # 端口池最小空闲
-    assert data['status'] == 'running'
+    assert data['status'] == 'creating'
+    assert data['health'] == 'pending'
     assert data['image'] == 'img:tag'
     # 落盘验收（issue #39：宿主 instances/<name>/ 落盘）
     assert (fleet['config'].root / 'instances' / 'demo' / 'home' / 'workspace' / 'note.md').exists()
@@ -179,10 +185,11 @@ def test_delete_rejects_invalid_name(authed):
 @pytest.mark.django_db
 def test_create_returns_409_on_concurrent_duplicate(authed, fleet, monkeypatch):
     # codex R1 :84：orchestrator InstanceExists（并发绕 UniqueValidator）→ 409，非裸 500
+    # #297：异步化后同步阶段为 create_reserve，异常映射点随之迁移。
     def _raise(name):
         raise InstanceExists(name)
 
-    monkeypatch.setattr(fleet['orch'], 'create', _raise)
+    monkeypatch.setattr(fleet['orch'], 'create_reserve', _raise)
     resp = authed.post('/api/v1/containers/', {'name': 'demo'}, format='json')
     assert resp.status_code == 409
 
@@ -191,10 +198,11 @@ def test_create_returns_409_on_concurrent_duplicate(authed, fleet, monkeypatch):
 def test_create_returns_409_on_residual_dir(authed, fleet, monkeypatch):
     # 残留 orphan 目录（DB 无行，崩溃中断/外部残留）→ InstanceDirExists → 409，非裸 500。
     # 场景：上次 create 在 mkdir 后崩溃/手动删 DB 行，目录残留；同名再建撞 mkdir(exist_ok=False)。
+    # #297：reserve 阶段目录预检同步暴露（create_reserve），映射点随之迁移。
     def _raise(name):
         raise InstanceDirExists(name, f'/fleet/instances/{name}')
 
-    monkeypatch.setattr(fleet['orch'], 'create', _raise)
+    monkeypatch.setattr(fleet['orch'], 'create_reserve', _raise)
     resp = authed.post('/api/v1/containers/', {'name': 'demo'}, format='json')
     assert resp.status_code == 409
     assert '残留' in resp.json()['detail']
@@ -250,10 +258,11 @@ def test_delete_evicts_pool_even_when_cleanup_fails(authed, fleet, monkeypatch):
 @pytest.mark.django_db
 def test_create_returns_503_when_port_pool_exhausted(authed, fleet, monkeypatch):
     # codex R2 :40：端口池耗尽（PortPoolExhausted）→ 503（预期容量条件），非裸 500
+    # #297：异步化后同步阶段为 create_reserve，异常映射点随之迁移。
     def _raise(name):
         raise PortPoolExhausted('端口池 19000-19999 已耗尽')
 
-    monkeypatch.setattr(fleet['orch'], 'create', _raise)
+    monkeypatch.setattr(fleet['orch'], 'create_reserve', _raise)
     resp = authed.post('/api/v1/containers/', {'name': 'demo'}, format='json')
     assert resp.status_code == 503
 
@@ -261,10 +270,11 @@ def test_create_returns_503_when_port_pool_exhausted(authed, fleet, monkeypatch)
 @pytest.mark.django_db
 def test_create_returns_503_when_port_allocation_exhausted(authed, fleet, monkeypatch):
     # codex R2 :40：持续分配冲突（PortAllocationError，重试预算用尽）→ 503，非裸 500
+    # #297：异步化后同步阶段为 create_reserve，异常映射点随之迁移。
     def _raise(name):
         raise PortAllocationError(name)
 
-    monkeypatch.setattr(fleet['orch'], 'create', _raise)
+    monkeypatch.setattr(fleet['orch'], 'create_reserve', _raise)
     resp = authed.post('/api/v1/containers/', {'name': 'demo'}, format='json')
     assert resp.status_code == 503
 
@@ -281,39 +291,42 @@ def test_delete_returns_409_while_create_in_flight(authed, fleet, monkeypatch):
 
 
 @pytest.mark.django_db
-def test_create_returns_409_when_rollback_dir_cleanup_fails(authed, fleet, monkeypatch):
-    # codex R4 :265：create 回滚时目录清理失败（InstanceCleanupError，行标 ERROR 保留）→ 409，
-    # 非裸 OSError→500。与 delete :126 对称（行保留可重试）。
-    def _fail(name):
-        raise InstanceCleanupError(name, str(fleet['config'].root / 'instances' / name))
+def test_create_background_failure_marks_row_error(authed, fleet, monkeypatch):
+    """#297：后台 provisioning 失败不再同步 409/503——行已标 ERROR（客户端经 list + delete 感知/重试）。
 
-    monkeypatch.setattr(fleet['orch'], 'create', _fail)
+    替代原「create 回滚时目录清理失败 → 同步 409」（InstanceCleanupError 异步化后仅后台抛）。
+    conftest 注入 inline executor → 后台 provisioning 在请求线程同步跑完；run 失败 +
+    目录回滚失败 → 行保留标 ERROR。POST 仍返 202（提交与完成解耦）。
+    """
+    class _RunFails(fleet['runtime'].__class__):
+        def run(self, spec):
+            raise RuntimeError('daemon down')
+
+    def _fail_rmtree(path, **kwargs):
+        raise OSError('permission denied')
+
+    orch = fleet['orch']
+    # monkeypatch 替换（测试结束自动还原），不直接改 fixture 持有的 _deps 引用
+    monkeypatch.setattr(orch._deps, 'runtime', _RunFails())  # pylint: disable=protected-access
+    monkeypatch.setattr(orch._deps, 'dir_remover', _fail_rmtree)  # pylint: disable=protected-access
+
     resp = authed.post('/api/v1/containers/', {'name': 'demo'}, format='json')
-    assert resp.status_code == 409
+    assert resp.status_code == 202
+    inst = Instance.objects.get(name='demo')
+    assert inst.status == Instance.STATUS_ERROR
+    assert inst.container_id == ''
 
 
 @pytest.mark.django_db
-def test_create_returns_503_when_config_write_fails(authed, fleet, monkeypatch):
-    # codex #280 review：create 的 config 写盘失败（卷只读/满，ConfigWriteError）→ 503
-    # （契约 schema 已声明 503，models 视图同语义），非裸 500。create 行既已回滚。
-    def _raise(name):
-        raise ConfigWriteError(name, str(fleet['config'].root / 'instances' / name / 'openclaw.json'))
-
-    monkeypatch.setattr(fleet['orch'], 'create', _raise)
-    resp = authed.post('/api/v1/containers/', {'name': 'demo'}, format='json')
-    assert resp.status_code == 503
-
-
-@pytest.mark.django_db
-def test_create_returns_201_even_if_post_create_detail_fails(authed, fleet, monkeypatch):
-    # codex R4 :60：POST 已 commit 创建并启动容器后，若随后的 detail() 二次 runtime 查询
-    # 因 daemon 抖动失败，不应让已成功的创建返回 500（客户端误判失败重试 → 撞 409 重复名）。
-    # 须由 create() 返回结果构造 201，容忍 detail 查询失败。
+def test_create_returns_202_even_if_post_create_detail_fails(authed, fleet, monkeypatch):
+    # codex R4 :60 精神保留 + #297：POST 由 create_reserve 返回的 creating 行直接构造 202 快照，
+    # 不二次 detail() 查 runtime——daemon 抖动不应让已提交的创建 500（客户端误判失败重试撞 409）。
+    # 快照在 submit_create 前构造，即使 inline executor 后台同步跑完，响应仍透传创建态。
     def _flaky_detail(name):
         raise RuntimeError('daemon flaked during post-create lookup')
 
     monkeypatch.setattr(fleet['orch'], 'detail', _flaky_detail)
     resp = authed.post('/api/v1/containers/', {'name': 'demo'}, format='json')
-    assert resp.status_code == 201
+    assert resp.status_code == 202
     assert resp.json()['name'] == 'demo'
-    assert resp.json()['status'] == 'running'
+    assert resp.json()['status'] == 'creating'

@@ -72,6 +72,7 @@ class InstanceOrchestrator:
         dir_remover=None,
         port_in_use: Callable[[int], bool] | None = None,
         provider_builder=None,
+        submit_task=None,
     ) -> None:
         # 读写共享依赖单一装配点：默认绑定（HttpHealthProbe / shutil.rmtree / HostPortProbe /
         # ProviderConfigBuilder）在 FleetDeps 一处解析；runtime/config 由调用方注入。
@@ -84,17 +85,28 @@ class InstanceOrchestrator:
             provider_builder=provider_builder,
         )
         # 写侧编排（create/delete/rewrite_config/exec_*）+ config 原子写单源。
-        self._cmd = FleetCommand(self._deps, ConfigStore(self._deps))
+        # #297 异步化：submit_task 透传（生产默认线程池，测试注入 inline 同步 callable）。
+        self._cmd = FleetCommand(self._deps, ConfigStore(self._deps), submit_task)
         # 读侧聚合（list/detail/created_item + creating 行对账），独立于写侧演进。
         self._read = FleetReadModel(self._deps)
 
     # ── 写侧：委托 FleetCommand（create/delete/rewrite_config/exec_*）──
     # #280 预重构：写方法实现随私有成员（_reserve_row/_used_ports/lazy renderer）迁
     # fleet/command.py，facade 仅做薄委托；公开方法面与返回 DTO 形状不变。
+    # #297 异步化：create 拆 reserve/submit 两阶段（视图层先 202 后后台完成），
+    # create() 同步封装保留供调用方/测试。
 
     def create(self, name: str) -> Instance:
-        """创建并启动一个容器（spec §5.4/§5.5）——委托写侧协作者。"""
+        """创建并启动一个容器（spec §5.4/§5.5）——同步语义封装，委托写侧协作者（#297）。"""
         return self._cmd.create(name)
+
+    def create_reserve(self, name: str) -> Instance:
+        """create 阶段一（同步预占 creating 行）——视图层经此先返 202（#297）。"""
+        return self._cmd.create_reserve(name)
+
+    def submit_create(self, inst: Instance) -> None:
+        """create 阶段二提交（经注入 executor 后台完成 provisioning）——视图层 202 后调用（#297）。"""
+        self._cmd.submit_create(inst)
 
     def delete(self, name: str) -> bool:
         """删除容器 + 连数据删（spec §5.4）——委托写侧协作者。"""

@@ -149,13 +149,15 @@ class FleetReadModel:
             return list(pool.map(self._build_item, insts))
 
     def created_item(self, inst: Instance) -> dict:
-        """由刚创建成功的 Instance 构造 POST 响应（codex R4 :60）。
+        """由刚创建/预占的 Instance 构造 POST 响应（codex R4 :60 / #297 异步化）。
 
         不做 runtime/health 二次查询——create 已 commit 并启动容器，若随后 detail() 的
         runtime 查询因 daemon 抖动失败，会让已成功的创建返回 500（客户端误判失败重试撞 409）。
-        容器刚起、gateway 未就绪，health 即 pending（后续 list 轮询会反映真实健康）。
+        #297：POST 返回 202 + creating 态快照（异步化后行尚未 provisioning 完成），
+        status 透传 inst.status（creating），health 为 pending（容器未起，无 health 可探）；
+        后续 list 轮询反映 creating → running 状态迁移。
         """
-        return self._item(inst, Instance.STATUS_RUNNING, HEALTH_PENDING)
+        return self._item(inst, inst.status, HEALTH_PENDING)
 
     def detail(self, name: str) -> dict | None:
         """单个实例的聚合视图（post 响应复用）；不存在返回 None。"""
