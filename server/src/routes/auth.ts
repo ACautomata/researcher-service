@@ -164,21 +164,41 @@ function meHandler(req: Request, res: Response): void {
   })
 }
 
+// 改密事务体内核（可测 seam，Codex #342 二轮 P1）：条件更新复查 passwordHash 仍等于已校验
+// 的旧 hash，count=0（并发已被重置/用户失效）→ ok:false，不覆盖 reset hash。
+// 成功时同步撤销该 user 全部有效 refresh（强制重登，与改密同事务持久化）。
+export async function changePasswordInTx(
+  tx: Pick<PrismaClient, 'user' | 'refreshToken'>,
+  userId: string,
+  oldHash: string,
+  newHash: string,
+  now: Date,
+): Promise<{ ok: boolean }> {
+  const updated = await tx.user.updateMany({
+    where: { id: userId, passwordHash: oldHash },
+    data: { passwordHash: newHash, mustChangePassword: false },
+  })
+  if (updated.count === 0) return { ok: false } // 并发已被重置 → 拒绝，不覆盖
+  await revokeAllUserRefresh(tx, userId, now) // 族灭 refresh（正常提交，持久化）
+  return { ok: true }
+}
+
 async function passwordChangeHandler(req: Request, res: Response): Promise<void> {
   const { oldPassword, newPassword } = req.body as { oldPassword: string; newPassword: string }
   const user = await req.prisma.user.findUnique({ where: { id: req.user!.id } })
   if (!user || !user.passwordHash || !(await verifyPassword(oldPassword, user.passwordHash))) {
     throw fail(CODE.LOGIN_FAILED) // 旧密错 → 10002（契约 §2.2）
   }
+  // 校验与更新原子化：条件更新复查 hash（防 verify 后被 admin 重置的竞态覆盖）
   const newHash = await hashPassword(newPassword)
-  // 改密 + 撤销该 user 全部有效 refresh（强制重登）同一事务
-  await req.prisma.$transaction([
-    req.prisma.user.update({
-      where: { id: user.id },
-      data: { passwordHash: newHash, mustChangePassword: false },
-    }),
-    revokeAllUserRefresh(req.prisma, user.id, new Date()),
-  ])
+  const result = await req.prisma.$transaction(async (tx) =>
+    changePasswordInTx(tx, user.id, user.passwordHash!, newHash, new Date()),
+  )
+  if (!result.ok) {
+    // 竞态：hash 已被重置 → 拒绝（不覆盖 reset hash），并撤销全部 refresh
+    await revokeAllUserRefresh(req.prisma, user.id, new Date())
+    throw fail(CODE.LOGIN_FAILED)
+  }
   clearRefreshCookie(res)
   ok(res, null)
 }

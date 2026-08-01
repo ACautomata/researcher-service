@@ -61,4 +61,26 @@ describe('bootstrap B1 (slice 2)', () => {
     expect(count).toBe(1)
     expect(logs.some((l) => /\[bootstrap\]/.test(l))).toBe(false)
   })
+
+  // 意见⑤[P2]（Codex 二轮）：bootstrap 并发启动安全 —— count()==0 与 create 非原子，
+  // 两进程同对空库双创建 → 一个 P2002 失败 abort 启动。并发创建应视为成功（幂等）。
+  it('并发启动竞态：count()==0 但 create 撞唯一冲突（P2002）→ 视为并发成功，不抛错', async () => {
+    // 模拟并发：count() 返回 0（另一进程还没 create），create 却撞 username 唯一冲突。
+    // Prisma 代理对象上 spyOn/mockRestore 不可靠，改用临时 monkey-patch + 手写恢复。
+    const origCount = ctx.prisma.user.count.bind(ctx.prisma.user)
+    const origCreate = ctx.prisma.user.create.bind(ctx.prisma.user)
+    ctx.prisma.user.count = (async () => 0) as never
+    ctx.prisma.user.create = (async () => {
+      throw { code: 'P2002' }
+    }) as never
+    try {
+      await expect(bootstrap(ctx.prisma)).resolves.toBeUndefined()
+    } finally {
+      ctx.prisma.user.count = origCount
+      ctx.prisma.user.create = origCreate
+    }
+    // 未双写：库里用户数保持原样
+    const count = await ctx.prisma.user.count()
+    expect(count).toBe(1) // 既有 admin 保留（本文件首个用例已建）
+  })
 })
