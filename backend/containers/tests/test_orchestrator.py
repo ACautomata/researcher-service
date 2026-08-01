@@ -312,6 +312,33 @@ def test_create_retries_on_docker_bind_conflict(config, health, runtime, tmp_pat
     assert Instance.objects.filter(name='demo', port=19001).exists()
 
 
+@pytest.mark.django_db
+def test_create_bind_conflict_preserves_row_when_dir_cleanup_fails(config, health, runtime, tmp_path):
+    """#295 codex P2（第 4 轮）：bind 冲突后目录清理失败 → 保留 ERROR 行 + raise，不吞。
+
+    若目录清理失败仍删行：残留目录让下一轮重试撞 InstanceDirExists，且行已删则 delete
+    无法清理孤儿数据，实例名被永久阻塞。须对齐非 bind 回滚路径——保留 ERROR 行 + raise
+    InstanceCleanupError（运维可经 delete 重试）。
+    """
+    _seed_template(tmp_path / 'template')
+    runtime.fail_bind_ports = {19000}
+
+    class _FailingRemover:
+        def __call__(self, path):
+            raise OSError(f'permission denied: {path}')
+
+    orch = InstanceOrchestrator(
+        runtime=runtime, config=config, health_probe=health, dir_remover=_FailingRemover(),
+    )
+    with pytest.raises(InstanceCleanupError):
+        orch.create('demo')
+    # 行保留且标 ERROR（非删除）——运维可经 delete 重试清理
+    row = Instance.objects.get(name='demo')
+    assert row.status == Instance.STATUS_ERROR
+    # 端口已释放（不再占用），但孤儿目录留待 delete 清理
+    assert not runtime.containers  # 无残留容器
+
+
 # --- delete：:126 rmtree 失败保留 DB 行 + 标 REMOVING（不吞错、可重试）---
 
 
