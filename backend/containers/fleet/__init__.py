@@ -16,6 +16,10 @@ MAX_HEALTH_WORKERS / MAX_PORT_RETRIES / TOKEN_URLSAFE_BYTES）单一来源仍在
 #280 预重构（parent #277）：写侧 ``FleetCommand`` + config 原子写单源 ``ConfigStore`` 落地
 （``fleet/command.py`` / ``fleet/config_store.py``），facade 写方法委托 ``FleetCommand``。
 
+#255（parent #243）：create 双创建防护 + 租约收敛进 ``DistributedLock`` Port（sync 形态，
+``FleetDeps.lock``，生产默认 ``LockFleet.get(sync=True)`` 真 Redis、测试注入 FakeLockSync）。
+``InflightSet`` 删除、``Instance.lease_expires_at`` 不再写入（字段保留、零 DB 变更）。
+
 包名无下划线（对齐 #271 的 ``integration.openclaw.wire`` 先例）；import 置顶绝对路径。
 """
 from containers.constants import (

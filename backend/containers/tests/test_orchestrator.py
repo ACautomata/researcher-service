@@ -8,12 +8,15 @@ import json
 import os
 import threading
 import time
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
 from django.db import IntegrityError
+from django.utils import timezone
 
-from containers.constants import HOME_BIND
+from common.lock.ports import ProvisionResource
+from containers.constants import HOME_BIND, LEASE_TTL
 from containers.models import Instance
 from containers.orchestrator import (  # pylint: disable=too-many-positional-arguments
     ConfigurationError,
@@ -64,7 +67,8 @@ def health():
 @pytest.fixture
 def orch(config, runtime, health, tmp_path):
     _seed_template(tmp_path / 'template')
-    return InstanceOrchestrator(runtime=runtime, config=config, health_probe=health)
+    return InstanceOrchestrator(
+        runtime=runtime, config=config, health_probe=health)
 
 
 # ---------------------------- create（§5.5 状态机 creating→running）----------------------------
@@ -436,15 +440,19 @@ def test_delete_preserves_row_when_dir_cleanup_fails(config, health, runtime, tm
 @pytest.mark.django_db
 def test_list_shows_creating_while_provisioning(orch):
     # codex P2 :133：creating 中（容器未起）不应被 runtime.get 缺失误判 stopped。
-    # codex R3 :319：须标记为在飞（模拟 create 正在 provisioning），否则被视为中断行收敛。
+    # codex R3 :319：须持有 create 锁（模拟 create 正在 provisioning），否则被视为中断行收敛。
     Instance.objects.create(
         name='booting', port=19005, token='t', home_dir='/h',
         status=Instance.STATUS_CREATING, image='img:tag',
     )
-    orch._deps.inflight.claim('booting')      # 模拟该名字的 create 仍在飞
-    item = orch.list()[0]
-    assert item['status'] == 'creating'
-    assert item['health'] == 'pending'         # 未起，不探
+    # #255：模拟 create 仍在飞 = 持有 ProvisionResource 锁（reconcile 锁探测据此跳过对账）。
+    _lease = orch._deps.lock.acquire(ProvisionResource('booting'), LEASE_TTL)  # pylint: disable=protected-access
+    try:
+        item = orch.list()[0]
+        assert item['status'] == 'creating'
+        assert item['health'] == 'pending'         # 未起，不探
+    finally:
+        _lease.release()
 
 
 @pytest.mark.django_db
@@ -629,10 +637,14 @@ def test_list_keeps_creating_when_container_not_yet_running(orch):
         name='booting', port=19008, token='t', home_dir='/h',
         status=Instance.STATUS_CREATING, image='img:tag',
     )
-    orch._deps.inflight.claim('booting')      # 模拟在飞，区别于崩溃中断（:319）
-    item = orch.list()[0]
-    assert item['status'] == 'creating'
-    assert item['health'] == 'pending'
+    # #255：模拟在飞 = 持有 ProvisionResource 锁（reconcile 锁探测据此跳过），区别于崩溃中断（:319）。
+    lease = orch._deps.lock.acquire(ProvisionResource('booting'), LEASE_TTL)  # pylint: disable=protected-access
+    try:
+        item = orch.list()[0]
+        assert item['status'] == 'creating'
+        assert item['health'] == 'pending'
+    finally:
+        lease.release()
 
 
 # ---------------------------- codex R3 并发/失败硬化 ----------------------------
@@ -757,25 +769,30 @@ def test_create_persists_owned_container_id_when_all_cleanup_fails(config, healt
 
 
 @pytest.mark.django_db
-def test_create_keeps_inflight_until_final_save(orch, monkeypatch):
-    # codex P2 :269：DELETE 在 run() 返回后、最终 save() 前的窗口不得竞删——in-flight 标记
-    # 须保留到 save 之后。验证：最终 save（status=running）执行期间 'demo' 仍在 inflight guard；
-    # create 返回后已释放。（_reserve_row 的 INSERT 先于 add，本就不在飞，非本测试关注点。）
+def test_create_keeps_lock_until_final_save(orch, monkeypatch):
+    # codex P2 :269 精神（#255 改锁）：DELETE 在 run() 返回后、最终 save() 前的窗口不得竞删——
+    # create 锁须保留到 save 之后（后台 create_complete 持锁，delete 经锁探测拒删）。验证：
+    # 最终 save（status=running）执行期间 'demo' 的 ProvisionResource 锁仍被持有；create 返回后
+    # 已释放（锁可被重获）。（_reserve_row 的 INSERT 先于取锁，本就不在锁内，非本测试关注点。）
     real_save = Instance.save
-    inflight_at_save = []
+    lock_held_at_save = []
+    lock = orch._deps.lock  # pylint: disable=protected-access
 
     def spy_save(instance, *args, **kwargs):
         if instance.name == 'demo':
-            inflight_at_save.append('demo' in orch._deps.inflight)
+            # #255：锁探测——try_acquire 失败 = 锁仍被 create 持有（在飞）
+            lock_held_at_save.append(
+                lock.try_acquire(ProvisionResource('demo'), LEASE_TTL) is None,
+            )
         return real_save(instance, *args, **kwargs)
 
     monkeypatch.setattr(Instance, 'save', spy_save)
     orch.create('demo')
-    # 最终 save（reserve 的 INSERT 之后、add 之后）执行时必须仍标记在飞 → delete 会被拒删
-    assert inflight_at_save, 'create 应至少触发一次 save'
-    assert inflight_at_save[-1] is True, '最终 save 期间 in-flight 标记须仍保留（:269）'
-    # create 完整返回后标记已释放，后续 delete 可正常进行
-    assert 'demo' not in orch._deps.inflight
+    # 最终 save（reserve 的 INSERT 之后、取锁之后）执行时必须仍持有锁 → delete 会被拒删
+    assert lock_held_at_save, 'create 应至少触发一次 save'
+    assert lock_held_at_save[-1] is True, '最终 save 期间 create 锁须仍持有（:269 精神）'
+    # create 完整返回后锁已释放，后续 delete 可正常进行
+    assert lock.try_acquire(ProvisionResource('demo'), LEASE_TTL) is not None
 
 
 # --- delete：:257 在飞 create 拒删 ---
@@ -789,10 +806,14 @@ def test_delete_rejects_while_create_in_flight(orch):
         name='booting', port=19010, token='t', home_dir='/h',
         status=Instance.STATUS_CREATING, image='img:tag',
     )
-    orch._deps.inflight.claim('booting')          # 模拟 create 在飞
-    with pytest.raises(InstanceBusy):
-        orch.delete('booting')
-    assert Instance.objects.filter(name='booting').exists()  # 行未被删
+    # #255：模拟 create 在飞 = 持有 ProvisionResource 锁（delete 锁探测据此拒删）。
+    _lease = orch._deps.lock.acquire(ProvisionResource('booting'), LEASE_TTL)  # pylint: disable=protected-access
+    try:
+        with pytest.raises(InstanceBusy):
+            orch.delete('booting')
+        assert Instance.objects.filter(name='booting').exists()  # 行未被删
+    finally:
+        _lease.release()
 
 
 @pytest.mark.django_db
@@ -819,6 +840,32 @@ def test_delete_allows_interrupted_creating_row(orch, runtime, config):
     ok = orch.delete('stuck')
     assert ok is True
     assert not Instance.objects.filter(name='stuck').exists()
+
+
+@pytest.mark.django_db
+def test_delete_survives_lock_probe_failure(orch, monkeypatch):
+    """#255 审查修正：Redis 临时不可用（锁探测抛错）时 delete 按「无在飞 create」放行。
+
+    DB CREATING 守卫是第一道跨进程保护；锁探测仅是窄窗口额外保险。探测失败不得让
+    DELETE 500（对齐 R8 F3 读路径逐行降级哲学）——非 CREATING 行应照常删除。
+    """
+    Instance.objects.create(
+        name='normal', port=19022, token='t', home_dir='/h',
+        status=Instance.STATUS_RUNNING, image='img:tag',
+    )
+
+    class _LockProbeFails:
+        def try_acquire(self, *args, **kwargs):
+            raise RuntimeError('redis down')
+
+        def acquire(self, *args, **kwargs):
+            raise RuntimeError('redis down')
+
+    monkeypatch.setattr(orch._deps, 'lock', _LockProbeFails())  # pylint: disable=protected-access
+
+    ok = orch.delete('normal')
+    assert ok is True
+    assert not Instance.objects.filter(name='normal').exists()
 
 
 # --- list：:319 中断 creating 行按 runtime 实况收敛 ---
@@ -866,19 +913,25 @@ def test_reconcile_creating_to_error_when_no_container(orch):
 
 
 @pytest.mark.django_db
-def test_create_marks_inflight_before_reserving_row(orch, monkeypatch):
-    # codex R5 :238：DB 行一旦可见，name 必须已在 in-flight guard 中。
+def test_create_marks_lock_before_reserving_row(orch, monkeypatch):
+    # codex R5 :238 精神（#255 改锁）：DB 行一旦可见，name 的 create 锁必须已持有
+    # （跨进程在飞语义由锁承载）——并发同名 create_reserve 在锁上被互斥挡下。
     real_reserve = orch._cmd._reserve_row
-    guarded_at_reserve = []
+    locked_at_reserve = []
 
     def spy_reserve(name, extra_used=None):
-        guarded_at_reserve.append(name in orch._deps.inflight)
+        locked_at_reserve.append(
+            orch._deps.lock.try_acquire(ProvisionResource(name), LEASE_TTL) is None,  # pylint: disable=protected-access
+        )
         return real_reserve(name, extra_used)
 
     monkeypatch.setattr(orch._cmd, '_reserve_row', spy_reserve)
     orch.create('demo')
-    assert guarded_at_reserve == [True]
-    assert 'demo' not in orch._deps.inflight
+    assert locked_at_reserve == [True]
+    # create 返回后锁已释放（可被重获）
+    assert orch._deps.lock.try_acquire(  # pylint: disable=protected-access
+        ProvisionResource('demo'), LEASE_TTL,
+    ) is not None
 
 
 @pytest.mark.django_db
@@ -906,12 +959,16 @@ def test_create_rolls_back_row_when_runtime_preflight_fails(config, health, tmp_
         def get(self, name):
             raise RuntimeError('daemon unavailable')
 
-    orch = InstanceOrchestrator(runtime=_PreflightFails(), config=config, health_probe=health)
+    orch = InstanceOrchestrator(
+        runtime=_PreflightFails(), config=config, health_probe=health)
     with pytest.raises(RuntimeError):
         orch.create('demo')
 
     assert not Instance.objects.filter(name='demo').exists()
-    assert 'demo' not in orch._deps.inflight
+    # #255：create 失败后锁已释放（可被重获），不残留占位
+    assert orch._deps.lock.try_acquire(  # pylint: disable=protected-access
+        ProvisionResource('demo'), LEASE_TTL,
+    ) is not None
 
 
 @pytest.mark.django_db
@@ -1032,15 +1089,13 @@ def test_create_rejects_empty_llm_api_key(config, health, runtime, tmp_path):
 
 @pytest.mark.django_db
 def test_delete_rejects_creating_based_on_db_status(orch):
-    """codex P1 :304：inflight guard 仅本进程可见；多 worker 下另一 worker 的 create 不可见。
-
-    delete 须基于 DB CREATING 状态拒删——跨进程安全。不依赖本进程 inflight guard。
-    """
+    """codex P1 :304 精神（#255 改锁）：多 worker 下另一 worker 的 create 对 delete 不可见时，
+    须基于 DB CREATING 状态拒删——跨进程安全（第一道守卫）。不依赖进程内锁状态。"""
     Instance.objects.create(
         name='booting', port=19015, token='t', home_dir='/h',
         status=Instance.STATUS_CREATING, image='img:tag',
     )
-    # 不加入 inflight guard（模拟另一 worker 的 create）
+    # 不持有锁（模拟另一 worker 的 create 已释放/本进程无状态）——仍被 DB 状态守卫拒删
     with pytest.raises(InstanceBusy):
         orch.delete('booting')
     assert Instance.objects.filter(name='booting').exists()
@@ -1049,74 +1104,67 @@ def test_delete_rejects_creating_based_on_db_status(orch):
 # ───────────────────────────── codex R7 review 反证 + TDD ─────────────────────────────
 
 
-# ◀ R7 1 → R8 F1 (4772692556) P1 :430 —— created_at+60s 升级为跨进程可续期 DB lease ◀
-# R7 用 created_at 时间窗口保护跨 worker 的活动 create；R8 改用 lease_expires_at
-#（_reserve_row 设置、create 在 run 前 checkpoint 续约）：lease 未过期 = 有活动 create 持有，
-# 即使 created_at 远旧、本进程 inflight guard 不可见也不收敛——长 create（>60s）不再被误判。
+# ◀ R7 1 → R8 F1 (4772692556) P1 :430 → #255 —— created_at+60s → 跨进程 lease → DistributedLock ◀
+# R7 用 created_at 时间窗口保护跨 worker 的活动 create；R8 改用 lease_expires_at（DB lease）。
+# #255 进一步收敛进 ProvisionResource 分布式锁：锁被持有 = 有活动 create（跨进程可见），
+# reconcile 锁探测（try_acquire）成功 = 无持有（崩溃中断）→ 收敛。崩溃即 TTL 自动释放，
+# 取代 DB lease 的等待兜底。
 
 
 @pytest.mark.django_db
-def test_reconcile_protects_active_create_with_unexpired_lease(orch):
-    """codex R8 F1 (P1 :430)：跨进程 lease 替代 created_at+60s 时间窗口。
+def test_reconcile_protects_active_create_with_held_lock(orch):
+    """#255：锁被持有 = 有活动 create（跨进程可见）→ reconcile 不收敛。
 
-    多 worker 下另一 worker 的合法长 create（cp -a/run > 60s）不在本进程 inflight guard，
-    R7 的 created_at+60s 会误收敛为 error/stopped → delete 趁虚删目录/容器、原 worker 收尾
-    save(running) 复活行。改用可续期 DB lease：lease 未过期即有活动 create 持有，即使
-    created_at 远旧、本进程不可见也不收敛。
+    多 worker 下另一 worker 的合法长 create（cp -a/run > 60s）持有 ProvisionResource 锁；
+    reconcile 锁探测（try_acquire 失败）即知有活动 create，即使本进程无任何状态、created_at
+    远旧也不收敛——长 create 不再被误判为崩溃中断（对应原 R8 F1 的 lease 未过期保护）。
     """
-    from datetime import timedelta
-
-    from django.utils import timezone
-
-    now = timezone.now()
     inst = Instance.objects.create(
         name='active', port=19016, token='t', home_dir='/h',
         status=Instance.STATUS_CREATING, image='img:tag',
-        lease_expires_at=now + timedelta(seconds=300),  # lease 未过期（活动 create 持有）
     )
-    inst.created_at = now - timedelta(seconds=300)  # 远超 R7 的 60s grace
+    inst.created_at = timezone.now() - timedelta(seconds=300)  # 远超 R7 的 60s grace
     inst.save(update_fields=['created_at'])
-    # runtime 无容器（长 create 仍在 cp -a，未 run）；inflight guard 不含（跨 worker）
-
-    orch.list()
+    # 模拟另一 worker 的活动 create：持有该名字的 ProvisionResource 锁
+    lease = orch._deps.lock.acquire(  # pylint: disable=protected-access
+        ProvisionResource('active'), LEASE_TTL,
+    )
+    try:
+        orch.list()
+    finally:
+        lease.release()
 
     inst.refresh_from_db()
-    assert inst.status == Instance.STATUS_CREATING  # lease 保护，不收敛
+    assert inst.status == Instance.STATUS_CREATING  # 锁保护，不收敛
 
 
 @pytest.mark.django_db
-def test_reconcile_converges_when_lease_expired(orch):
-    """codex R8 F1 对照：lease 已过期（无活动 create 持有）= 崩溃中断 → 仍收敛为 error。
+def test_reconcile_converges_when_lock_unheld(orch):
+    """#255 对照：锁未被持有（无活动 create）= 崩溃中断 → 收敛为 error。
 
-    可续期 lease 不阻碍真正中断的行被收敛（lease 由 _reserve_row 设、create 续约；
-    进程崩溃后不再续约即过期，下次 list 即收敛）。
+    进程崩溃后锁随 TTL 自动过期；下次 list 的锁探测成功（try_acquire 取得）→ 按中断收敛
+    （对应原 R8 F1 的 lease 已过期收敛）。
     """
-    from datetime import timedelta
-
-    from django.utils import timezone
-
-    inst = Instance.objects.create(
+    Instance.objects.create(
         name='stale', port=19017, token='t', home_dir='/h',
         status=Instance.STATUS_CREATING, image='img:tag',
-        lease_expires_at=timezone.now() - timedelta(seconds=1),  # 已过期
     )
 
     orch.list()
 
-    inst.refresh_from_db()
+    inst = Instance.objects.get(name='stale')
     assert inst.status == Instance.STATUS_ERROR
 
 
 @pytest.mark.django_db
-def test_reconcile_converges_when_lease_missing(orch):
-    """codex R8 F1：lease_expires_at 为 None（migration 前旧行/异常）视为无保护 → 可收敛。
+def test_reconcile_converges_when_no_lock_evidence(orch):
+    """#255：无锁证据（迁移前旧行/异常，无创建活动持有）= 可收敛。
 
-    保守处理无 lease 信息的行；新行经 _reserve_row 总带有 lease。
+    保守处理无锁信息的行；新行经 create_reserve 总持有锁（与 R8 的 lease=None 收敛等价）。
     """
     Instance.objects.create(
         name='legacy', port=19018, token='t', home_dir='/h',
         status=Instance.STATUS_CREATING, image='img:tag',
-        # lease_expires_at 留空（None）
     )
 
     orch.list()
@@ -1125,39 +1173,42 @@ def test_reconcile_converges_when_lease_missing(orch):
 
 
 @pytest.mark.django_db
-def test_create_sets_lease_on_reserved_row(orch):
-    """codex R8 F1：_reserve_row 为 CREATING 行设置 lease_expires_at（跨进程 lease 起点）。
+def test_create_reserve_holds_lock_while_provisioning(orch):
+    """#255：create_reserve 获取 ProvisionResource 锁（跨进程双创建防护 + 租约起点）。
 
-    lease 在未来（_LEASE_TTL 窗口内），使其它 worker 的 _reconcile_creating 在 provisioning
-    期间不误收敛本行。
+    reserve 返回后锁被持有（in-flight 语义由锁承载）——并发同名 create_reserve 被 try_acquire
+    挡下（InstanceExists），create_complete 期间锁仍持有（reconcile 锁探测不收敛、delete 拒删）。
     """
-    from django.utils import timezone
-
-    orch.create('demo')
-    inst = Instance.objects.get(name='demo')
-    assert inst.lease_expires_at is not None
-    assert inst.lease_expires_at > timezone.now()
+    inst = orch.create_reserve('demo')
+    try:
+        # reserve 后锁仍被持有（provisioning 在飞）
+        assert orch._deps.lock.try_acquire(  # pylint: disable=protected-access
+            ProvisionResource('demo'), LEASE_TTL,
+        ) is None, 'create_reserve 后锁须仍持有（在飞）'
+        # 并发同名 reserve 被锁挡下 → InstanceExists（同双创建防护语义）
+        with pytest.raises(InstanceExists):
+            orch.create_reserve('demo')
+    finally:
+        orch._cmd._release_create_lease('demo')  # pylint: disable=protected-access
 
 
 @pytest.mark.django_db
-def test_create_renews_lease_before_run(orch, monkeypatch):
-    """codex R8 F1：create 在 render 后、run 前 checkpoint 续约 lease（覆盖随后的 docker run）。
+def test_create_renews_lock_before_run(orch, monkeypatch):
+    """#255：create_complete 在 render 后、run 前 checkpoint 续约锁（覆盖随后的 docker run）。
 
-    保护续约行不被误删——若有人移除续约 save，本测试失败。续约把 lease 起点推到 run 之前；
-    run 内 image pull 受 _LEASE_TTL 约束靠 TTL 充分性 + self-heal 兜底（见 _LEASE_TTL 注释）。
+    保护续约不被移除——若移除续约，长 docker pull 窗口锁可能过期，reconcile 会把行误收敛。
+    续约把 TTL 起点推到 run 之前（替代原 DB lease_expires_at 续约 save）。
     """
-    real_save = Instance.save
-    lease_renew_saves = []
+    renew_calls = []
+    real_renew = orch._cmd._renew_create_lease  # pylint: disable=protected-access
 
-    def spy_save(instance, *args, **kwargs):
-        fields = kwargs.get('update_fields') or []
-        if instance.name == 'demo' and 'lease_expires_at' in fields:
-            lease_renew_saves.append(instance.lease_expires_at)
-        return real_save(instance, *args, **kwargs)
+    def spy_renew(name):
+        renew_calls.append(name)
+        return real_renew(name)
 
-    monkeypatch.setattr(Instance, 'save', spy_save)
+    monkeypatch.setattr(orch._cmd, '_renew_create_lease', spy_renew)  # pylint: disable=protected-access
     orch.create('demo')
-    assert lease_renew_saves, 'create 须在 run 前续约 lease（save update_fields 含 lease_expires_at）'
+    assert renew_calls, 'create 须在 run 前续约锁（_renew_create_lease 须被调用）'
 
 
 # ◀ R9-2 (4773052706) P1 —— reconcile 拒绝同名但 label 不匹配的外来容器 ◀
@@ -1176,7 +1227,6 @@ def test_reconcile_rejects_foreign_container_without_matching_label(orch, runtim
     inst = Instance.objects.create(
         name='foreign', port=19021, token='t', home_dir='/h',
         status=Instance.STATUS_CREATING, image='img:tag',
-        lease_expires_at=timezone.now() - timedelta(seconds=1),  # 已过期 → 进入收敛
     )
     # 同名容器，但 instance_name label 不匹配——属于其他 orch / 手动创建
     runtime.containers['foreign'] = ContainerInfo(
@@ -1404,21 +1454,50 @@ def test_list_survives_runtime_lookup_failure_during_reconcile(orch):
     assert stuck['health'] == 'pending'
 
 
+@pytest.mark.django_db
+def test_list_survives_lock_probe_failure_during_reconcile(orch, monkeypatch):
+    """#255 审查修正：reconcile 锁探测抛错（Redis 临时不可用）→ 逐行降级，不 500。
+
+    对齐 R8 F3 的 runtime.get 容错——Redis down 时锁探测失败须保持 creating/pending
+    （下次 list 再对账），而非让整个 GET /containers/ 500 隐藏全部已持久化 instance。
+    """
+    Instance.objects.create(
+        name='stuck', port=19023, token='t', home_dir='/h',
+        status=Instance.STATUS_CREATING, image='img:tag',
+    )
+
+    class _LockProbeFails:
+        def try_acquire(self, *args, **kwargs):
+            raise RuntimeError('redis down')
+
+    monkeypatch.setattr(orch._deps, 'lock', _LockProbeFails())  # pylint: disable=protected-access
+
+    items = orch.list()
+    names = {it['name'] for it in items}
+    assert 'stuck' in names, 'Redis 抖动不应隐藏已持久化实例'
+    stuck = next(it for it in items if it['name'] == 'stuck')
+    # 保守保持 creating/pending（无法判定真实状态时不误收敛）
+    assert stuck['status'] == 'creating'
+    assert stuck['health'] == 'pending'
+
+
 # ───────────────────────────── #297 异步化：reserve/complete/submit ─────────────────────────────
 
 
 @pytest.mark.django_db
 def test_create_reserve_returns_creating_row(orch):
-    """#297：create_reserve 同步预占 creating 行——lease 非空 + inflight 含 name（防被收敛/拒删）。"""
-    from django.utils import timezone
+    """#297：create_reserve 同步预占 creating 行——锁被持有（防被收敛/拒删）。
 
+    #255：create 在飞语义由 ProvisionResource 锁承载（原 inflight 集合 + DB lease 已移除）。
+    """
     inst = orch.create_reserve('demo')
     assert inst.status == Instance.STATUS_CREATING
-    assert inst.lease_expires_at is not None
-    assert inst.lease_expires_at > timezone.now()
-    assert 'demo' in orch._deps.inflight  # pylint: disable=protected-access
     # 后台完成前不落盘（mkdir/cp -a 未执行）
     assert not (orch._deps.config.root / 'instances' / 'demo').exists()
+    # reserve 后锁仍被持有（provisioning 在飞：reconcile 锁探测不收敛、delete 拒删）
+    assert orch._deps.lock.try_acquire(  # pylint: disable=protected-access
+        ProvisionResource('demo'), LEASE_TTL,
+    ) is None, 'create_reserve 后 ProvisionResource 锁须仍持有（在飞）'
 
 
 @pytest.mark.django_db
@@ -1430,8 +1509,34 @@ def test_create_reserve_rejects_duplicate_name(orch):
 
 
 @pytest.mark.django_db
+def test_create_unreleased_lease_expires_then_retry_succeeds(orch):
+    """#255 AC：崩溃（未 release）租约到期后，retry 可获锁解除阻塞。
+
+    模拟进程崩溃：向同一锁 acquire 一个**短 TTL** 的租约且不 release（等同死进程持有、其
+    租约还剩 TTL）。租约随 TTL 自动过期后，并发同名 create_reserve 不再被挡——重试方
+    try_acquire 成功，恢复创建能力。FakeLockSync 以内存 TTL 模拟该语义（真 Redis 的
+    SET NX PX 崩溃自动释放由 common/lock 真 Redis smoke 覆盖）。
+    """
+    # 崩溃模拟：持有短 TTL 租约不 release（create_reserve 后进程挂掉、租约未续约）
+    crashed = orch._deps.lock.acquire(  # pylint: disable=protected-access
+        ProvisionResource('demo'), timedelta(milliseconds=20),
+    )
+    assert crashed is not None
+    with pytest.raises(InstanceExists):
+        orch.create_reserve('demo')  # 崩溃期间并发同名被挡
+
+    time.sleep(0.1)  # 让崩溃租约的 TTL（20ms）走完——5× 余量，防调度抖动（FakeLockSync 用 time.monotonic）
+
+    # 租约到期 → retry 可获锁（创建能力恢复）
+    inst = orch.create_reserve('demo')
+    assert inst is not None
+    # 收尾：后台未跑，手动释放锁防占位泄漏到后续断言
+    orch._cmd._release_create_lease('demo')  # pylint: disable=protected-access
+
+
+@pytest.mark.django_db
 def test_create_reserve_rolls_back_on_missing_template(orch, monkeypatch):
-    """#297：reserve 阶段 renderer 惰性构造失败（模板缺失）→ 回滚 creating 行 + 释放 inflight。
+    """#297：reserve 阶段 renderer 惰性构造失败（模板缺失）→ 回滚 creating 行 + 释放锁。
 
     模板损坏是确定性配置错误，须同步暴露（客户端可改配置重试），而非后台线程失败留下无主
     creating 行（占名占端口，且 DELETE 拒删 CREATING 行）。
@@ -1451,7 +1556,10 @@ def test_create_reserve_rolls_back_on_missing_template(orch, monkeypatch):
     with pytest.raises(FileNotFoundError):
         orch.create_reserve('demo')
     assert not Instance.objects.filter(name='demo').exists()
-    assert 'demo' not in orch._deps.inflight  # pylint: disable=protected-access
+    # #255：失败后锁已释放（可被重获），不残留占位
+    assert orch._deps.lock.try_acquire(  # pylint: disable=protected-access
+        ProvisionResource('demo'), LEASE_TTL,
+    ) is not None
 
 
 @pytest.mark.django_db
@@ -1465,16 +1573,25 @@ def test_create_reserve_rejects_residual_dir(orch, config):
     with pytest.raises(InstanceDirExists):
         orch.create_reserve('demo')
     assert not Instance.objects.filter(name='demo').exists()
-    assert 'demo' not in orch._deps.inflight  # pylint: disable=protected-access
+    # #255：失败后锁已释放（可被重获），不残留占位
+    assert orch._deps.lock.try_acquire(  # pylint: disable=protected-access
+        ProvisionResource('demo'), LEASE_TTL,
+    ) is not None
 
 
 @pytest.mark.django_db
-def test_create_complete_discards_inflight(orch, runtime):
-    """#297：create_complete 收尾 finally 释放 inflight——后台完成不可留下在飞标记卡住并发同名。"""
+def test_create_complete_releases_lock(orch, runtime):
+    """#297 + #255：create_complete 收尾 finally 释放锁——后台完成不可留下锁卡住并发同名。"""
     inst = orch.create_reserve('demo')
-    assert 'demo' in orch._deps.inflight  # pylint: disable=protected-access
+    # 后台完成前锁仍被持有（在飞）
+    assert orch._deps.lock.try_acquire(  # pylint: disable=protected-access
+        ProvisionResource('demo'), LEASE_TTL,
+    ) is None
     orch._cmd.create_complete(inst)  # pylint: disable=protected-access
-    assert 'demo' not in orch._deps.inflight  # pylint: disable=protected-access
+    # 完成后锁已释放（可被重获）
+    assert orch._deps.lock.try_acquire(  # pylint: disable=protected-access
+        ProvisionResource('demo'), LEASE_TTL,
+    ) is not None
     # 完成的行已 running + run_spec 落过
     inst.refresh_from_db()
     assert inst.status == Instance.STATUS_RUNNING
@@ -1482,19 +1599,22 @@ def test_create_complete_discards_inflight(orch, runtime):
 
 
 @pytest.mark.django_db
-def test_create_complete_releases_inflight_on_failure(config, health, tmp_path):
-    """#297：create_complete 后台失败（run 抛异常）finally 仍释放 inflight——不泄漏 in-flight 标记。"""
+def test_create_complete_releases_lock_on_failure(config, health, tmp_path):
+    """#297 + #255：create_complete 后台失败（run 抛异常）finally 仍释放锁——不泄漏锁占位。"""
     _seed_template(tmp_path / 'template')
 
     class _RunFails(FakeRuntime):
         def run(self, spec):
             raise RuntimeError('daemon down')
 
-    orch = InstanceOrchestrator(runtime=_RunFails(), config=config, health_probe=health)
+    orch = InstanceOrchestrator(
+        runtime=_RunFails(), config=config, health_probe=health)
     inst = orch.create_reserve('demo')
     with pytest.raises(RuntimeError):
         orch._cmd.create_complete(inst)  # pylint: disable=protected-access
-    assert 'demo' not in orch._deps.inflight  # pylint: disable=protected-access
+    assert orch._deps.lock.try_acquire(  # pylint: disable=protected-access
+        ProvisionResource('demo'), LEASE_TTL,
+    ) is not None, '失败后锁须已释放'
     assert not Instance.objects.filter(name='demo').exists()
 
 
@@ -1509,7 +1629,10 @@ def test_create_async_background_thread(orch):
     import threading
 
     inst = orch.create_reserve('demo')
-    assert 'demo' in orch._deps.inflight  # pylint: disable=protected-access
+    # #255：后台完成前锁仍被持有（在飞）
+    assert orch._deps.lock.try_acquire(  # pylint: disable=protected-access
+        ProvisionResource('demo'), LEASE_TTL,
+    ) is None
 
     done = threading.Event()
 
@@ -1529,7 +1652,9 @@ def test_create_async_background_thread(orch):
         inst.refresh_from_db()
         assert inst.status == Instance.STATUS_RUNNING
         assert (orch._deps.config.root / 'instances' / 'demo' / 'home' / 'workspace' / 'note.md').exists()
-        assert 'demo' not in orch._deps.inflight  # pylint: disable=protected-access
+        assert orch._deps.lock.try_acquire(  # pylint: disable=protected-access
+            ProvisionResource('demo'), LEASE_TTL,
+        ) is not None, '后台完成后锁须已释放'
     finally:
         # transaction=True 不回滚——显式清理行 + 目录，不污染后续测试的端口池断言
         Instance.objects.filter(name='demo').delete()
@@ -1544,7 +1669,10 @@ def test_create_sync_wrapper_still_works(orch, runtime):
     inst = orch.create('demo')
     assert inst.status == Instance.STATUS_RUNNING
     assert runtime.run_specs[0].name == 'demo'
-    assert 'demo' not in orch._deps.inflight  # pylint: disable=protected-access
+    # #255：同步 create 后锁已释放（可被重获）
+    assert orch._deps.lock.try_acquire(  # pylint: disable=protected-access
+        ProvisionResource('demo'), LEASE_TTL,
+    ) is not None
 
 
 @pytest.mark.django_db
@@ -1561,13 +1689,17 @@ def test_background_failure_preserves_error_row(config, health, tmp_path):
         def run(self, spec):
             raise RuntimeError('daemon down')  # 非 bind 冲突（ConfigStore.write/run 失败同类）
 
-    orch = InstanceOrchestrator(runtime=_RunFails(), config=config, health_probe=health)
+    orch = InstanceOrchestrator(
+        runtime=_RunFails(), config=config, health_probe=health)
     inst = orch.create_reserve('demo')
     # 后台路径：preserve_error_row=True → 失败保留 ERROR 行（不抛到外层，_run_create_complete 兜底）
     orch._cmd._run_create_complete(inst)  # pylint: disable=protected-access
     row = Instance.objects.get(name='demo')
     assert row.status == Instance.STATUS_ERROR
-    assert 'demo' not in orch._deps.inflight  # pylint: disable=protected-access
+    # #255：失败后锁已释放（可被重获），不残留占位
+    assert orch._deps.lock.try_acquire(  # pylint: disable=protected-access
+        ProvisionResource('demo'), LEASE_TTL,
+    ) is not None
     # 同步路径对照：create_complete(preserve_error_row=False) 仍删行回滚（历史契约）
     inst2 = orch.create_reserve('sync-demo')
     with pytest.raises(RuntimeError):
@@ -1598,19 +1730,23 @@ def test_bind_conflict_exhaustion_finalizes_row(config, health, tmp_path):
     runtime.fail_bind_ports = {19000, 19001, 19002}  # 池内全部端口被宿主监听占用
 
     # ── 后台路径（preserve_error_row=True）：池耗尽 → 行转 ERROR ──
-    orch = InstanceOrchestrator(runtime=runtime, config=small_config, health_probe=health)
+    orch = InstanceOrchestrator(
+        runtime=runtime, config=small_config, health_probe=health)
     inst = orch.create_reserve('demo')
     orch._cmd._run_create_complete(inst)  # pylint: disable=protected-access
     row = Instance.objects.get(name='demo')
     assert row.status == Instance.STATUS_ERROR, (
-        f'后台池耗尽须转 ERROR（不得残留 creating + lease 续约），got {row.status!r}'
+        f'后台池耗尽须转 ERROR（不得残留 creating + 锁续约），got {row.status!r}'
     )
-    assert 'demo' not in orch._deps.inflight  # pylint: disable=protected-access
+    assert orch._deps.lock.try_acquire(  # pylint: disable=protected-access
+        ProvisionResource('demo'), LEASE_TTL,
+    ) is not None, '后台池耗尽失败后锁须已释放'
 
     # ── 同步路径（preserve_error_row=False）：池耗尽 → 删行 + 抛异常 ──
     runtime2 = FakeRuntime()
     runtime2.fail_bind_ports = {19000, 19001, 19002}
-    orch2 = InstanceOrchestrator(runtime=runtime2, config=small_config, health_probe=health)
+    orch2 = InstanceOrchestrator(
+        runtime=runtime2, config=small_config, health_probe=health)
     inst2 = orch2.create_reserve('sync-demo')
     with pytest.raises(PortAllocationError):
         orch2._cmd.create_complete(inst2)  # pylint: disable=protected-access

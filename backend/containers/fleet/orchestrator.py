@@ -4,7 +4,7 @@
 本模块为**薄 facade**（组合根），读侧方法（list/detail/created_item）委托给
 ``FleetReadModel``（``fleet/read_model.py``），写侧方法（create/delete/rewrite_config/exec_*）
 委托给 ``FleetCommand``（``fleet/command.py``），读写共享依赖经 ``FleetDeps``
-（``fleet/deps.py``，含锁内化的 ``InflightSet``）单点注入。config 写盘收敛为
+（``fleet/deps.py``，含 #255 的 ``DistributedLock`` sync 装配）单点注入。config 写盘收敛为
 ``ConfigStore``（``fleet/config_store.py``，tmp + chmod 0644 + os.replace 原子写单源）。
 公开方法面与返回 DTO 形状不变，views / models / wiki / chat 与全部既有测试零改动
 （测试仅一处机械改名：``orch._reserve_row`` → ``orch._cmd._reserve_row``）。
@@ -64,7 +64,7 @@ class InstanceOrchestrator:
     持有），测试可经 ``_deps.*`` 单点替换任一依赖、经 ``_cmd.*`` 触达写侧私有 stub。
     """
 
-    def __init__(  # pylint: disable=too-many-positional-arguments
+    def __init__(  # pylint: disable=too-many-positional-arguments,too-many-arguments
         self,
         runtime,
         config: FleetConfig,
@@ -73,9 +73,12 @@ class InstanceOrchestrator:
         port_in_use: Callable[[int], bool] | None = None,
         provider_builder=None,
         submit_task=None,
+        lock=None,
     ) -> None:
         # 读写共享依赖单一装配点：默认绑定（HttpHealthProbe / shutil.rmtree / HostPortProbe /
-        # ProviderConfigBuilder）在 FleetDeps 一处解析；runtime/config 由调用方注入。
+        # ProviderConfigBuilder / DistributedLock sync 形态）在 FleetDeps 一处解析；runtime/config
+        # 由调用方注入。lock：#255 分布式锁（create 双创建防护 + 租约），生产默认 LockFleet
+        # 懒装配真 Redis，测试注入 FakeLockSync（CI 无真 Redis）。
         self._deps = FleetDeps(
             runtime=runtime,
             config=config,
@@ -83,6 +86,7 @@ class InstanceOrchestrator:
             dir_remover=dir_remover,
             port_in_use=port_in_use,
             provider_builder=provider_builder,
+            lock=lock,
         )
         # 写侧编排（create/delete/rewrite_config/exec_*）+ config 原子写单源。
         # #297 异步化：submit_task 透传（生产默认线程池，测试注入 inline 同步 callable）。

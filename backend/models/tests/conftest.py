@@ -4,15 +4,31 @@
 openclaw.json 可写，以验收「CRUD 后重渲染生效」）。api/authed 照 containers/tests/test_api.py。
 #297 异步化：注入 inline 同步 executor，使后台 provisioning 在请求线程同步跑完——
 demo_instance fixture 拿到落盘结果后，models CRUD 用例才能经 API 触达 config 重渲染。
+#255：autouse 注入 FakeLockSync 到 LockFleet sync 槽（demo_instance 经 POST create 触锁，
+CI/单测无真 Redis；锁语义由 containers 行为测试覆盖）。
 """
 import pytest
 from django.contrib.auth import get_user_model
 from rest_framework.test import APIClient
 
+from common.lock.fakes import FakeLockSync
+from common.lock.locator import LockFleet
 from containers.orchestrator import Fleet, FleetConfig, InstanceOrchestrator
 from containers.tests.fakes import FakeHealthProbe, FakeRuntime
 
 User = get_user_model()
+
+
+@pytest.fixture(autouse=True)
+def _fake_provision_lock():
+    """#255：把 FakeLockSync 注入 LockFleet sync 槽（orchestrator 默认锁来源）。
+
+    demo_instance 经 POST /containers/ 走 create_reserve → ProvisionResource 锁；注入
+    fake 后不依赖真 Redis（对齐 containers/tests/conftest.py 的 _fake_provision_lock）。
+    """
+    LockFleet.override(FakeLockSync(), sync=True)
+    yield
+    LockFleet.reset()
 
 
 def _seed_template(template_dir):

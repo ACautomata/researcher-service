@@ -5,7 +5,7 @@ rewrite_config / exec_in_container / exec_sync + 私有 _reserve_row / _used_por
 协作者，并把 config 写盘收敛为 ``ConfigStore`` 原子写单源（本子包 ``config_store.py``）。
 lazy ``ConfigRenderer`` 归本协作者——create/rewrite_config 是它唯一消费者。
 
-- ``create``：进程内 inflight guard 覆盖完整 create → 事务占位（挡重名/仲裁 port）→
+- ``create``：create 锁（#255）覆盖完整 create → 事务占位（挡重名/仲裁 port）→
   mkdir + cp -a + 渲染 + 原子写 config + run；失败只回滚本次实际创建的资源。
   从裸 ``write_text``+chmod 升级为经 ``ConfigStore.write`` 原子落盘（消掉 torn/partial 风险）。
 - ``delete``：容器 + 连数据删；home 清理失败不吞（保留 DB 行 + 标 REMOVING + raise）。
@@ -21,13 +21,23 @@ creating 行（错误语义不变：LLM key 缺失/端口池耗尽→503，重�
 
 - ``submit_task`` 注入对齐 ``dir_remover``/``port_in_use`` 风格；生产默认
   ``ThreadPoolExecutor(max_workers=2).submit``，测试注入 inline 同步 callable。
-- 后台线程安全：入口 ``close_old_connections()`` 防线程 DB 连接泄漏；保留 lease 续约（防长
-  docker pull 窗口被 ``_reconcile_creating`` 误收敛）；inflight 时序保留（同步 claim / 后台
-  finally release）。后台异常记日志 + 行标 ERROR，客户端经 list + delete 感知/重试。
+- 后台线程安全：入口 ``close_old_connections()`` 防线程 DB 连接泄漏；create 锁续约保留
+  （#255：后台 renew 防长 docker pull 窗口被 ``_reconcile_creating`` 锁探测误收敛）；
+  锁时序保留（同步 try_acquire / 后台 finally release）。后台异常记日志 + 行标 ERROR，
+  客户端经 list + delete 感知/重试。
+
+#255（parent #243）：双创建防护 + create 租约从「进程内 inflight guard + DB lease_expires_at」
+收敛进 ``DistributedLock`` Port（sync 形态，``self._deps.lock``）——``create_reserve`` 非阻塞
+``try_acquire(ProvisionResource(name), LEASE_TTL)`` 得租约（并发同名 → InstanceExists → 409，
+对齐原 inflight guard 的快速失败语义），``create_complete`` 后台 ``renew`` 续约覆盖
+docker pull 窗口，finally ``release``。崩溃即 TTL 自动释放（取代 ``_reconcile_creating`` 靠
+DB lease 的等待兜底）；租约句柄经 ``self._create_leases`` 从 reserve 线程传递到后台线程
+（redis-py 锁 token 非线程本地，句柄可跨线程携带，#254 thread_local=False）。**不动的**：
+端口认领（DB 唯一约束）与 pairing.attempt_version（DB CAS）留 DB（#246 显式排除）。
 
 依赖方向：``command`` → ``config_store`` → ``values``；``command`` → ``deps`` → ``values``。
 组合注入（FleetDeps + ConfigStore），无继承；实例属性：_deps / _config_store / _renderer /
-_submit_task（4 项）。
+_submit_task / _create_leases（5 项）。
 """
 import json
 import logging
@@ -37,8 +47,8 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from django.db import IntegrityError, close_old_connections, transaction
-from django.utils import timezone
 
+from common.lock.ports import ProvisionResource, SyncLeaseHandle
 from containers.config_renderer import ConfigRenderer
 from containers.constants import HOME_BIND, LEASE_TTL, MAX_PORT_RETRIES, TOKEN_URLSAFE_BYTES
 from containers.fleet.config_store import ConfigStore
@@ -58,6 +68,10 @@ from containers.runtime import ContainerSpec
 
 logger = logging.getLogger(__name__)
 
+# #255：delete 锁探测在 Redis 不可用时的哨兵值——区分「探测失败（Redis down，按无在飞 create
+# 放行）」与「探测成功但锁被持有（InstanceBusy）」。仅作模块内 delete 分支判别，不外泄。
+_REDIS_UNAVAILABLE = object()
+
 
 class FleetCommand:
     """容器实例生命周期写侧（create/delete/rewrite_config/exec_*）——组合 FleetDeps + ConfigStore。"""
@@ -68,6 +82,10 @@ class FleetCommand:
         # #297：create 异步化 executor 注入——默认 ThreadPoolExecutor(2).submit（后台 provisioning
         # 并发上限 2），测试注入 inline 同步 callable。对齐 dir_remover/port_in_use 注入风格。
         self._submit_task = submit_task or ThreadPoolExecutor(max_workers=2).submit
+        # #255：create 租约句柄跨线程传递表（name → 已获取的 SyncLeaseHandle）。create_reserve
+        # 在请求线程取锁、后台 create_complete 续约/释放——线程不同、线程本地状态不可见，故显式
+        # 登记。sync adapter 取锁时 thread_local=False（#254），token 存锁对象上可跨线程携带。
+        self._create_leases: dict[str, SyncLeaseHandle] = {}
         # lazy ConfigRenderer（仅 create/rewrite_config 使用）：推迟到首次 write 前构造——
         # 模板 JSON 仅供写配置使用，list/delete 不应因其损坏而 500（codex R6 :475 / R7 :509）。
         self._renderer = None
@@ -131,9 +149,6 @@ class FleetCommand:
                         container_id='',
                         status=Instance.STATUS_CREATING,
                         image=self._deps.config.image,
-                        # codex R8 F1：lease 起点随预占行落盘——其它 worker 的 _reconcile_creating
-                        # 据此在 provisioning 期间不误收敛本行（created_at+60s 无法覆盖长 create）。
-                        lease_expires_at=timezone.now() + LEASE_TTL,
                     )
             except IntegrityError:
                 if Instance.objects.filter(name=name).exists():
@@ -165,13 +180,16 @@ class FleetCommand:
         错误语义与同步 create 完全一致（view 层 409/503 映射不变）：
         - LLM_API_KEY 缺失 → ConfigurationError（503）：否则创建外表 healthy 但永远无法调 LLM
           的容器，且 LLM_API_KEY 是面板级共享的不能通过 delete 修复（codex R6 :484）。
-        - 进程内 inflight guard 先占名（并发同名 → InstanceExists → 409）。
+        - **#255：双创建防护经 ProvisionResource 分布式锁**（跨进程 + 崩溃安全）。非阻塞
+          ``try_acquire``——已被持有（并发/在飞 create）→ InstanceExists → 409（同 inflight
+          guard 的快速失败语义，不阻塞等首个 create 释放）。获取成功则登记租约句柄，
+          由 ``create_complete`` 续约 + release。
         - ``_reserve_row`` 事务占位 creating 行（DB 唯一约束仲裁 name/port；name 冲突 →
           InstanceExists→409；port 冲突保存点内重试 → 耗尽 PortAllocationError→503）。
         - 残留目录预检（DB 无行的 orphan 目录）→ InstanceDirExists（409）：同步暴露而非留到
           后台 mkdir 才失败——否则客户端拿到 202 最终落成 ERROR 行，无「先清理」提示。
         - renderer 惰性构造（读模板 JSON）在预占阶段完成并缓存：模板文件缺失/损坏是确定性
-          配置错误，同步暴露为失败（回滚行/释放 guard），后台线程直接复用缓存不重复读盘。
+          配置错误，同步暴露为失败（回滚行/释放锁），后台线程直接复用缓存不重复读盘。
 
         不含 mkdir/cp -a/docker run 等耗时 IO——这些在 ``create_complete`` 后台执行。
 
@@ -180,8 +198,10 @@ class FleetCommand:
         """
         if not self._deps.config.llm_api_key:
             raise ConfigurationError('LLM_API_KEY')
-        if not self._deps.inflight.claim(name):
+        lease = self._deps.lock.try_acquire(ProvisionResource(name), LEASE_TTL)
+        if lease is None:
             raise InstanceExists(name)
+        self._create_leases[name] = lease
         try:
             inst = self._reserve_row(name)
             try:
@@ -197,8 +217,28 @@ class FleetCommand:
                 raise
             return inst
         except Exception:
-            self._deps.inflight.release(name)
+            self._release_create_lease(name)
             raise
+
+    def _release_create_lease(self, name: str) -> None:
+        """释放 create 租约（幂等）并清登记；reserve 失败/complete 收尾共用。
+
+        崩溃（未 release）时租约随 Redis TTL 自动过期释放——重试方经 acquire 解除阻塞。
+        """
+        lease = self._create_leases.pop(name, None)
+        if lease is not None:
+            lease.release()
+
+    def _renew_create_lease(self, name: str) -> None:
+        """续约 create 租约（TTL 重置为 LEASE_TTL）；未登记时 no-op。
+
+        #255：create_complete 在 render 后、run 前 checkpoint 续约——覆盖随后的 docker run
+        （长 image pull 阻塞 IO），替代原 DB lease_expires_at 续约 save。TTL 崩溃自动过期，
+        不再靠 ``_reconcile_creating`` 等待兜底。
+        """
+        lease = self._create_leases.get(name)
+        if lease is not None:
+            lease.renew(LEASE_TTL)
 
     def create_complete(  # pylint: disable=too-many-statements,too-many-branches
         self, inst: Instance, preserve_error_row: bool = False,
@@ -210,9 +250,10 @@ class FleetCommand:
         端口（learned_conflicts 学习集并入 _used_ports），而非整段回滚。独立为方法使它在注入
         executor（``submit_create``）的线程里跑，或经 ``create()`` 同步封装在请求线程跑。
 
-        lease 续约保留（codex R8 F1）：render 完成后、run 前 checkpoint 续约，把 lease 起点
-        推到此刻覆盖随后的 docker run——后台长 create（>600s image pull）不被 ``_reconcile_creating``
-        误收敛后 resurrect。finally 释放 inflight（同步 add / 后台 discard 时序不变）。
+        #255：create 锁续约保留——render 完成后、run 前 checkpoint ``renew``，把租约 TTL
+        推到此刻覆盖随后的 docker run（长 image pull 阻塞 IO）；崩溃即 TTL 自动释放，不被
+        ``_reconcile_creating`` 锁探测误收敛后 resurrect。finally 释放锁（同步 try_acquire /
+        后台 release 时序不变）。
 
         preserve_error_row（codex P1 / #297 后台）：同步 create() 传 False 保持历史契约
         （失败删行回滚、调用方感知异常）；后台 _run_create_complete 传 True——POST 已返 202，
@@ -259,11 +300,11 @@ class FleetCommand:
                     # #280：config 写盘从裸 write_text + chmod 升级为 ConfigStore 原子写单源
                     # （tmp + chmod 0644 + os.replace）——create 不再有 torn/partial 风险。
                     self._config_store.write(name, self._ensure_renderer().render())
-                    # codex R8 F1：renewable lease——render 完成后、run 前续约，把 lease 起点推到
-                    # 此刻覆盖随后的 docker run（create+start）。run 内 image pull 仍受 LEASE_TTL
-                    # 约束（阻塞 IO 内部不续约，靠 TTL 充分性 + _reconcile self-heal 兜底）。
-                    inst.lease_expires_at = timezone.now() + LEASE_TTL
-                    inst.save(update_fields=['lease_expires_at'])
+                    # #255：续约 create 租约（替代原 DB lease_expires_at 续约 save）——render 完成
+                    # 后、run 前 checkpoint，把 TTL 推到此刻覆盖随后的 docker run（create+start）。
+                    # run 内 image pull 仍受 LEASE_TTL 约束（阻塞 IO 内部不续约，靠 TTL 充分性 +
+                    # Redis 崩溃自动释放兜底）。
+                    self._renew_create_lease(name)
                     run_attempted = True
                     container_id = self._deps.runtime.run(
                         ContainerSpec(
@@ -333,8 +374,9 @@ class FleetCommand:
             # 理论上不可达：池候选数次循环内每次 return / raise / _finalize_failed_create（raise）。
             raise PortAllocationError(name)
         finally:
-            # guard 释放必须无条件执行：无论成功/回滚/重试耗尽，create 收尾都要释放在飞标记。
-            self._deps.inflight.release(name)
+            # 租约释放必须无条件执行：无论成功/回滚/重试耗尽，create 收尾都释放 create 锁
+            # （进程内 inflight 标记已随 #255 移除；锁崩溃时经 Redis TTL 自动释放）。
+            self._release_create_lease(name)
 
     def _finalize_failed_create(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         self, name, instance_dir, inst, run_attempted, preexisting,
@@ -409,7 +451,7 @@ class FleetCommand:
         """创建并启动一个容器（spec §5.4/§5.5）——同步封装，reserve + complete（#297）。
 
         供需要同步语义的调用方/测试使用（view 层改走 reserve + submit_create 返回 202）。
-        失败回滚与 inflight 释放由 ``create_complete`` 统一负责，此处只需顺序串联两阶段。
+        失败回滚与锁释放由 ``create_complete`` 统一负责，此处只需顺序串联两阶段。
         """
         inst = self.create_reserve(name)
         return self.create_complete(inst)
@@ -439,8 +481,21 @@ class FleetCommand:
             raise InstanceBusy(name)
         # codex R3 :257：本进程在飞 create 的额外保险——status 尚未落盘 CREATING
         # 的极窄窗口（_reserve_row 前）仍由进程内标记挡。
-        if name in self._deps.inflight:
+        # #255：进程内 inflight 标记已移除——该窗口由 ProvisionResource 锁探测等效覆盖：
+        # create_reserve 先取锁再落盘行，行存在 = 锁已被持有者占（另一 create 在飞），
+        # 故此处用 try_acquire 探测活动 create（成功=无持有、可删；失败=在飞、拒删）。
+        # 成功探测的锁立即释放（不占位），仅作「是否有活动 create」判定。
+        try:
+            probe = self._deps.lock.try_acquire(ProvisionResource(name), LEASE_TTL)
+        except Exception:  # pylint: disable=broad-exception-caught
+            # #255：Redis 临时不可用（锁探测失败）时按「无在飞 create」放行——DB CREATING 守卫
+            # 是第一道跨进程保护，此处探测仅是窄窗口的额外保险，探测失败不因 Redis 抖动让
+            # DELETE 500（对齐 R8 F3 读路径逐行降级哲学）。
+            probe = _REDIS_UNAVAILABLE
+        if probe is None:
             raise InstanceBusy(name)
+        if probe is not _REDIS_UNAVAILABLE:
+            probe.release()
         # container_id 是本行拥有 runtime 容器的正向证据。ERROR + 空 id 可能只是目录清理行，
         # 同名容器可能早于本次 create，不能无条件 stop/remove。
         # codex R6 :311：DB 记录的 container_id 可能与存活容器 ID 不匹配（外部删除后重建同名容器），

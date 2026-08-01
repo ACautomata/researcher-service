@@ -1,15 +1,16 @@
-"""containers.fleet.deps —— 读写两侧共享的注入单元（FleetDeps）+ 并发 guard（InflightSet）。
+"""containers.fleet.deps —— 读写两侧共享的注入单元（FleetDeps）+ 分布式锁装配。
 
 #279 预重构（parent #277）：读侧（FleetReadModel）与写侧（facade InstanceOrchestrator）共享的
 依赖打包进 ``FleetDeps``，单一装配点解析全部默认绑定（HttpHealthProbe / shutil.rmtree /
-HostPortProbe / ProviderConfigBuilder / HomeProvisioner / PortAllocator），读侧可整体剥离、测试可
-单点替换。**真实类非 dataclass bag、非 frozen**——保住测试「config 整体 dataclasses.replace
-替换」的写法（frozen 则 read_model/facade 无法换 config 引用，测试 :445 依赖）。
+HostPortProbe / ProviderConfigBuilder / HomeProvisioner / PortAllocator / DistributedLock），
+读侧可整体剥离、测试可单点替换。**真实类非 dataclass bag、非 frozen**——保住测试「config 整体
+dataclasses.replace 替换」的写法（frozen 则 read_model/facade 无法换 config 引用，测试 :445 依赖）。
 
-- ``InflightSet``：把「在飞 create 名字集 + 锁」的分离写法（set + threading.Lock 两处、调用方
-  四处分别掏）升格为锁内化的领域对象：``claim(name) -> bool``（原子 check+add）、``release(name)``、
-  ``__contains__(name)``。读写两侧共享**同一实例**（住 FleetDeps 而非写侧）——读侧
-  _reconcile_creating 要跳过在飞行。
+- ``lock``：**#255（parent #243）**——create 双创建防护 + 租约统一收敛进 ``DistributedLock``
+  Port（sync 形态，``SyncDistributedLock``）。生产默认 ``LockFleet.get(sync=True)``（真 Redis，
+  懒装配、崩溃自动 TTL 释放、跨进程互斥）；测试注入 ``FakeLockSync``（CI 无真 Redis）。取代
+  ``InflightSet``（原仅进程内 guard、跨 worker 不可见）与 ``Instance.lease_expires_at`` 的
+  DB lease（读写两侧共享同一实例：写侧 create 取锁/续约/释放，读侧 _reconcile_creating 锁探测）。
 - ``HostPortProbe``：把模块级自由函数 ``_host_port_in_use`` 升格为领域类（host 端口占用探测，
   socket bind 实测）。宿主 127.0.0.1:<port> 已被占用时返回 True，allocator 据此跳过最低候选，
   避免 run() 因宿主 bind 冲突确定性失败（codex R2 :161）。
@@ -20,9 +21,10 @@ HostPortProbe / ProviderConfigBuilder / HomeProvisioner / PortAllocator），读
 """
 import shutil
 import socket
-import threading
 from collections.abc import Callable
 
+from common.lock.locator import LockFleet
+from common.lock.ports import SyncDistributedLock
 from containers.fleet.values import FleetConfig
 from containers.ports import PortAllocator
 from containers.provisioner import HomeProvisioner
@@ -57,37 +59,6 @@ class HostPortProbe:
             probe.close()
 
 
-class InflightSet:
-    """「在飞 create 名字集」并发 guard——mutate-under-lock 锁内化单源（codex R3 :257）。
-
-    替代「set + threading.Lock 两处分离、调用方四处分别掏」的写法：写侧 create/delete 与读侧
-    _reconcile_creating 共享同一实例（读侧据此跳过仍在 provisioning 的行），每次操作内部取锁，
-    「先检查后变更」的原子性收敛为本类唯一实现点。
-    """
-
-    def __init__(self) -> None:
-        self._names: set[str] = set()
-        self._lock = threading.Lock()
-
-    def claim(self, name: str) -> bool:
-        """原子 check+add：未在飞则标记并入飞返回 True；已在飞返回 False。"""
-        with self._lock:
-            if name in self._names:
-                return False
-            self._names.add(name)
-            return True
-
-    def release(self, name: str) -> None:
-        """释放在飞标记（create 收尾/finally）；不存在则幂等。"""
-        with self._lock:
-            self._names.discard(name)
-
-    def __contains__(self, name: str) -> bool:
-        """name 是否仍在飞（读侧 _reconcile_creating 跳过用；delete 拒删用）。"""
-        with self._lock:
-            return name in self._names
-
-
 class FleetDeps:
     """读写两侧共享依赖的**单一装配点**（parent #277 / #279）。
 
@@ -108,6 +79,7 @@ class FleetDeps:
         dir_remover=None,
         port_in_use: Callable[[int], bool] | None = None,
         provider_builder=None,
+        lock: SyncDistributedLock | None = None,
     ) -> None:
         self.runtime = runtime
         self.config = config
@@ -122,7 +94,8 @@ class FleetDeps:
         self.allocator = PortAllocator(
             config.port_start, config.port_end, config.reserved_ports,
         )
-        # codex R3：在飞 create 名字集（进程内，orchestrator 单例跨请求共享）。
-        # 区分「正在 provisioning」与「崩溃中断」的 creating 行——delete 据此拒删在飞实例，
-        # _reconcile_creating 据此只对非在飞的中断行收敛。读侧与写侧共享同一实例。
-        self.inflight = InflightSet()
+        # #255（parent #243）：create 双创建防护 + 租约统一收敛进 DistributedLock Port
+        # （sync 形态）。生产默认 LockFleet.get(sync=True)（真 Redis）；测试注入 FakeLockSync
+        # （CI 无真 Redis）。取代 InflightSet（仅进程内 guard、跨 worker 不可见）与
+        # Instance.lease_expires_at 的 DB lease（崩溃自动 TTL 释放）。
+        self.lock = lock or LockFleet.get(sync=True)
