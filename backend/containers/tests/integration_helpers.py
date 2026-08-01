@@ -6,7 +6,7 @@ RUN_INTEGRATION env）；helper 自身是无 daemon 可确定性单测的编排�
 """
 import time
 
-from chat.pairing_ws import PairingRequired
+from chat.pairing_ws import PairingError, PairingRequired
 
 
 class DockerDaemonProbe:
@@ -33,8 +33,9 @@ class ApprovalPairer:
     """驱动配对：首次 PairingRequired 时 approve 一次，轮询 ensure_paired 至 paired。
 
     容器内 approve 经 exec_in_container（detach=True fire-and-forget），不能依赖 exec 同步
-    返回——须轮询配对状态至 paired，带独立 deadline（不等全程 timeout）。PairingError 等
-    非重试错误立即传播。sleep/clock 可注入，便于用假时钟确定性单测（不真睡）。
+    返回——须轮询配对状态至 paired，带独立 deadline（不等全程 timeout）。网关显式标为
+    瞬态恢复的 PairingError（retryable=True）按轮询节奏重试；非重试 PairingError 与其它
+    错误立即传播。sleep/clock 可注入，便于用假时钟确定性单测（不真睡）。
     """
 
     def __init__(
@@ -64,6 +65,18 @@ class ApprovalPairer:
                 if not approved:
                     self._approve(e.request_id)
                     approved = True
+                if self._clock() >= deadline:
+                    raise PairingApprovalTimeout(
+                        f'pairing not paired after {self._timeout}s',
+                    ) from e
+                self._sleep(self._interval)
+            except PairingError as e:
+                # 网关显式标为瞬态恢复的 PairingError（gateway starting; retry shortly，
+                # errorShape retryable:true）——网关还在冷启动（/health 绿早于主循环就绪），
+                # 稍后重试即可成功；非 retryable 的 PairingError（连接拒绝/协议错）才是
+                # 确定失败，立即传播。与 PairingRequired 同按轮询节奏重试至 deadline。
+                if not e.retryable:
+                    raise
                 if self._clock() >= deadline:
                     raise PairingApprovalTimeout(
                         f'pairing not paired after {self._timeout}s',

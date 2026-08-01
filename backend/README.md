@@ -55,7 +55,7 @@ wiki / models / chat app 仅建骨架，留后续 ticket。
 |---|---|---|---|
 | `ROOT` | `OPENCLAW_FLEET_ROOT` | `<repo>/fleet` | `instances/<name>/` 落盘根 |
 | `TEMPLATE` | `OPENCLAW_TEMPLATE_DIR` | `<repo>/researcher` | 共享只读模板（`cp -a` 预填充源，需 `git clone ACautomata/researcher`）；dev 默认与本仓库并排克隆的 researcher，**生产/Docker 必填**绝对路径（`prod.py` `validate_prod_env` 缺则启动 fail-fast，详见下方 wire 段） |
-| `IMAGE` | `OPENCLAW_IMAGE` | `ghcr.io/openclaw/openclaw:2026.6.34-browser` | 镜像 tag（官方 browser 变体，ADR 0003；生产建议 pin digest） |
+| `IMAGE` | `OPENCLAW_IMAGE` | `ghcr.io/openclaw/openclaw:2026.7.1-browser` | 镜像 tag（官方 browser 变体，ADR 0003；生产建议 pin digest） |
 | `LLM_API_KEY` | `LLM_API_KEY` | — | 全面板共享 LLM key（env 注入容器，不落盘） |
 
 端口池 `19000–19999`（避开单容器 compose 占用的 18789）。容器命名 `openclaw-gw-<name>`，label
@@ -71,15 +71,18 @@ JSON 内仅 `${GATEWAY_TOKEN}` 占位（不落盘）。
 
 ```bash
 export OPENCLAW_TEMPLATE_DIR=/path/to/researcher     # git clone ACautomata/researcher
-export OPENCLAW_IMAGE=ghcr.io/openclaw/openclaw:2026.6.34-browser
+export OPENCLAW_IMAGE=ghcr.io/openclaw/openclaw:2026.7.1-browser
 export LLM_API_KEY=sk-...
-python -m pytest containers/tests/test_integration.py -v
+# Colima 只共享 $HOME（见下方 wire 段）；pytest 默认 tmp_path（/var/folders/…）的
+# bind-mount 会退化为空目录 → 容器内 openclaw.json 变"目录"占位 → gateway 报
+# missing gateway.mode → GatewayNotReady。用 --basetemp 覆盖到 $HOME 下：
+python -m pytest containers/tests/test_integration.py -v --basetemp=$HOME/.cache/pytest-smoke
 ```
 
 ### chat wire schema 集成测试（ghcr 真镜像）
 
 `chat/tests/test_integration_wire.py`（[issue #155](https://github.com/ACautomata/researcher-service/issues/155)）用真实
-`ghcr.io/openclaw/openclaw:2026.6.34-browser` 镜像起 OpenClaw 容器 + Ed25519 设备配对，对 chat 模块依赖的
+`ghcr.io/openclaw/openclaw:2026.7.1-browser` 镜像起 OpenClaw 容器 + Ed25519 设备配对，对 chat 模块依赖的
 9 个 wire schema 假设逐一断言（事件结构/字段名/方法名），防止 `FakeChatTransport` 掩盖的假设错误再次潜伏。
 既是已修 bug（PR #152 / #153 / #154）的回归防护，又是 wire schema 契约的长期基线。覆盖 T1–T5 五个用例：
 chat.send 冒烟、事件流 schema、只读 RPC schema、exec 审批路径 schema、工具调用事件 schema。
@@ -88,7 +91,7 @@ chat.send 冒烟、事件流 schema、只读 RPC schema、exec 审批路径 sche
 
 | env | 用途 |
 |---|---|
-| `OPENCLAW_IMAGE` | **可选**（缺省默认 `ghcr.io/openclaw/openclaw:2026.6.34-browser`，与 #94 smoke 同为官方 browser 变体） |
+| `OPENCLAW_IMAGE` | **可选**（缺省默认 `ghcr.io/openclaw/openclaw:2026.7.1-browser`，与 #94 smoke 同为官方 browser 变体） |
 | `OPENCLAW_TEMPLATE_DIR` | 容器 home 模板源（bind-mount 白名单路径，非 `/tmp`）——**生产/Docker 必填**（绝对路径），dev 默认 `<repo>/researcher`，`prod.py` 缺则启动 fail-fast |
 | `LLM_API_KEY` | 全面板共享 LLM key（注入容器，不落盘） |
 
@@ -102,11 +105,13 @@ chat.send 冒烟、事件流 schema、只读 RPC schema、exec 审批路径 sche
 **本地怎么跑**（须 docker daemon + `OPENCLAW_TEMPLATE_DIR`/`LLM_API_KEY`；`OPENCLAW_IMAGE` 可选用默认）：
 
 ```bash
-export OPENCLAW_IMAGE=ghcr.io/openclaw/openclaw:2026.6.34-browser
+export OPENCLAW_IMAGE=ghcr.io/openclaw/openclaw:2026.7.1-browser
 export OPENCLAW_TEMPLATE_DIR=/path/to/researcher     # git clone ACautomata/researcher
 export LLM_API_KEY=sk-...
-# Colima virtiofs 只共享 $HOME：pytest 默认 tmp_path（/var/folders/…）bind-mount 退化为空目录
-# → 网关报 Missing config。用 --basetemp 覆盖到 $HOME 下：
+# Colima 只共享 $HOME：pytest 默认 tmp_path（/var/folders/…）不在共享范围，bind-mount
+# 退化为空目录占位（宿主文件不可见）→ 容器内 openclaw.json 变"目录" → gateway 报
+# missing gateway.mode（重启循环）。smoke（containers/tests/test_integration.py）同样受
+# 影响，见上方 smoke 段。用 --basetemp 覆盖到 $HOME 下：
 python -m pytest chat/tests/test_integration_wire.py -v --basetemp=$HOME/.cache/pytest-wire
 ```
 

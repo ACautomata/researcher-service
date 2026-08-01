@@ -643,7 +643,7 @@ def l2a_creating_instance():
     return Instance.objects.create(
         name=f'l2a-real-{_username_suffix()}',
         port=19001,
-        image='ghcr.io/openclaw/openclaw:2026.6.34-browser',
+        image='ghcr.io/openclaw/openclaw:2026.7.1-browser',
         status=Instance.STATUS_CREATING,
     )
 

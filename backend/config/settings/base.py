@@ -172,7 +172,7 @@ OPENCLAW_FLEET = {
     'ROOT': str(FLEET_ROOT),
     'TEMPLATE': _FLEET_TEMPLATE,
     'TEMPLATE_JSON': _OPENCLAW_TEMPLATE_JSON_ENV or str(BASE_DIR.parent / 'deploy' / 'openclaw.json'),
-    'IMAGE': os.environ.get('OPENCLAW_IMAGE', 'ghcr.io/openclaw/openclaw:2026.6.34-browser'),
+    'IMAGE': os.environ.get('OPENCLAW_IMAGE', 'ghcr.io/openclaw/openclaw:2026.7.1-browser'),
     'PORT_POOL_START': 19000,
     'PORT_POOL_END': 19999,
     # 全面板共享 LLM_API_KEY（spec §5.2，敏感值）。ADR 0005 配置边界：settings 是唯一 env 读取处，

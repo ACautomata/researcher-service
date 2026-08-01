@@ -30,7 +30,7 @@ BASE_DIR = Path(__file__).resolve().parents[3]
 _WIRE_TEMPLATE_JSON = str(BASE_DIR / 'deploy' / 'openclaw.json')
 
 # ghcr 官方 browser 镜像（spec #155 / ADR 0003）：覆盖 #94 fork 默认
-_WIRE_IMAGE = os.environ.get('OPENCLAW_IMAGE', 'ghcr.io/openclaw/openclaw:2026.6.34-browser')
+_WIRE_IMAGE = os.environ.get('OPENCLAW_IMAGE', 'ghcr.io/openclaw/openclaw:2026.7.1-browser')
 
 # 网关冷启动就绪轮询（对齐 #94 smoke）
 _GATEWAY_READINESS_TIMEOUT = 60.0

@@ -99,6 +99,37 @@ class FakeTransport:
             **kwargs,
         )
 
+    @classmethod
+    def startup_pending(cls, message='gateway starting; retry shortly', **kwargs):
+        """网关冷启动期 isStartupPending 分支：显式标 retryable 的瞬态恢复错误。
+
+        对齐官方镜像 message-handler-*.js 的 errorShape（code=UNAVAILABLE, retryable:true,
+        retryAfterMs:500）——调用方（ApprovalPairer）据此重试而非判定失败。
+        """
+        return cls(
+            result_frame={'type': 'res', 'ok': False,
+                          'error': {'code': 'UNAVAILABLE', 'message': message,
+                                    'retryable': True, 'retryAfterMs': 500,
+                                    'details': {'code': 'UNAVAILABLE'}}},
+            **kwargs,
+        )
+
+    @classmethod
+    def startup_then_ok(cls, **kwargs):
+        """冷启动 retryable 错误一次 → 重试后 hello-ok：验证有界重试路径（生产/测试共用）。"""
+        return cls.sequence(
+            [
+                {'type': 'res', 'ok': False,
+                 'error': {'code': 'UNAVAILABLE', 'message': 'gateway starting; retry shortly',
+                           'retryable': True, 'retryAfterMs': 500,
+                           'details': {'code': 'UNAVAILABLE'}}},
+                {'type': 'res', 'ok': True,
+                 'payload': {'auth': {'deviceToken': 'dt-fake', 'role': 'operator',
+                                      'scopes': list(cls._DEFAULT_SCOPES)}}},
+            ],
+            **kwargs,
+        )
+
     def _current_frame(self):
         if self._result_frames:
             idx = min(self.connect_calls - 1, len(self._result_frames) - 1)

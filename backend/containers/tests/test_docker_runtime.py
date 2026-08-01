@@ -17,7 +17,7 @@ from containers.docker_runtime import DockerRuntime
 def _spec() -> ContainerSpec:
     return ContainerSpec(
         name='demo',
-        image='ghcr.io/openclaw/openclaw:2026.6.34-browser',
+        image='ghcr.io/openclaw/openclaw:2026.7.1-browser',
         host_port=19000,
         gateway_token='tok-DO-NOT-LEAK',
         home_dir='/fleet/instances/demo/home',
