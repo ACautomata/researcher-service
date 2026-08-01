@@ -55,9 +55,11 @@ class ConfigStore:
             tmp.chmod(0o644)
             tmp.replace(config_path)   # POSIX 原子：要么整体新配置生效，要么保留旧文件
         except OSError:
+            # cleanup best-effort：unlink 失败（只读 remount/ACL）不得掩盖 ConfigWriteError
+            # 主异常（codex review P2）——调用方须稳定收到 ConfigWriteError（view 层 503）。
             try:
                 tmp.unlink()
-            except FileNotFoundError:
+            except OSError:
                 pass
             raise ConfigWriteError(name, str(config_path)) from None
         return config_path

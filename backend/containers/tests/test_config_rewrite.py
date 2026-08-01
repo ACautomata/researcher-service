@@ -120,6 +120,36 @@ def test_rewrite_config_dir_mkdir_failure_raises_config_write_error(fleet, monke
         fleet['orch'].rewrite_config('solo')
 
 
+@pytest.mark.django_db
+def test_rewrite_config_cleanup_failure_does_not_mask_config_write_error(fleet, monkeypatch):
+    """codex review P2：write 失败后 cleanup 的 tmp.unlink() 若也失败（只读 remount/ACL 等，
+    非 FileNotFoundError），不得用 cleanup 的 OSError 掩盖 ConfigWriteError——调用方须稳定
+    收到 ConfigWriteError（view 层 503）。"""
+    from pathlib import Path
+
+    from containers.fleet.values import ConfigWriteError
+    from containers.models import Instance
+
+    inst = Instance.objects.create(
+        name='solo', port=19001, token='t',
+        home_dir=str(fleet['config'].root / 'instances' / 'solo' / 'home'),
+        container_id='', status=Instance.STATUS_RUNNING, image='img:tag',
+    )
+    _make_provider(inst, pid='p', models=[{'id': 'm', 'name': 'M'}])
+
+    def fail_replace(self, target):
+        raise OSError('simulated replace failure')
+
+    def fail_unlink_after_replace_failure(self, *args, **kwargs):
+        raise OSError('simulated read-only remount during cleanup')
+
+    monkeypatch.setattr(Path, 'replace', fail_replace)
+    monkeypatch.setattr(Path, 'unlink', fail_unlink_after_replace_failure)
+
+    with pytest.raises(ConfigWriteError):
+        fleet['orch'].rewrite_config('solo')
+
+
 # ── #280：create config 写盘原子性（ConfigStore 单源，打在 facade seam）──
 
 

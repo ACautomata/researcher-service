@@ -177,7 +177,7 @@ class ModelProviderDetailView(_BaseModelsView):
             return Response({'detail': str(e)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
         return Response(ModelProviderReadSerializer(provider).data)
 
-    @extend_schema(responses={204: None, 404: None})
+    @extend_schema(responses={204: None, 404: None, 409: None})
     def delete(self, request, name, pid):
         try:
             inst = self._get_instance(name, for_write=True)
