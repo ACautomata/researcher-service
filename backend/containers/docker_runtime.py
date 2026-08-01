@@ -122,12 +122,16 @@ class DockerRuntime:
         return [self._to_info(c) for c in cs]
 
     def host_published_ports(self) -> set[int]:
-        """枚举宿主上全部容器已发布的宿主端口（无 label 过滤，含未跟踪容器）。
+        """枚举宿主上活动容器已发布的宿主端口（无 label 过滤，含未跟踪容器）。
 
         #295 codex P2：端口分配须反映 daemon（宿主）命名空间的真实占用。list_fleet 按
         label 过滤只覆盖本面板容器；后端容器化（bridge 网络）时容器内 socket.bind 又探
-        不到宿主端口。此处扫 daemon 全部容器 PortBindings 提取 HostPort，allocator 据此
+        不到宿主端口。此处扫 daemon 活动容器 PortBindings 提取 HostPort，allocator 据此
         跳过被宿主进程/未跟踪容器占用的池端口，避免反复选中 → docker run 回滚。
+        #295 codex P2 #3695323012：只统计持有宿主监听的状态——exited/created/dead 容器
+        保留 PortBindings 但 daemon 已收回端口（无活跃 docker-proxy），计数会误判池端口
+        占用、假耗尽池；running/restarting/paused 仍持有绑定须计数（宁多算只跳过候选，
+        少算则真实占用被误判空闲 → bind 冲突走重试）。
         """
         published: set[int] = set()
         try:
@@ -135,6 +139,8 @@ class DockerRuntime:
         except Exception:  # pylint: disable=broad-exception-caught  # daemon 不可达 → 空集（不误报）
             return published
         for c in cs:
+            if c.status in {'exited', 'created', 'dead'}:
+                continue
             bindings = (c.attrs.get('HostConfig', {}) or {}).get('PortBindings') or {}
             for binds in bindings.values():
                 for b in binds or []:

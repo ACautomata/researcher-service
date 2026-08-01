@@ -119,14 +119,15 @@ def test_host_published_ports_enumerates_unlabelled_containers(monkeypatch):
     class _FakeContainers:
         def list(self, all=True, filters=None):  # pylint: disable=redefined-builtin
             return [
-                _FakeC('tracked', {'openclaw.port': '19000'}, None),
-                _FakeC('untracked', None, {'18789/tcp': [{'HostIp': '127.0.0.1', 'HostPort': '19002'}]}),
+                _FakeC('tracked', {'openclaw.port': '19000'}, None, 'running'),
+                _FakeC('untracked', None, {'18789/tcp': [{'HostIp': '127.0.0.1', 'HostPort': '19002'}]}, 'running'),
             ]
 
     class _FakeC:
-        def __init__(self, name, labels, port_bindings):
+        def __init__(self, name, labels, port_bindings, status='running'):
             self.name = name
             self.labels = labels or {}
+            self.status = status
             self.attrs = {'HostConfig': {'PortBindings': port_bindings}} if port_bindings else {'HostConfig': {}}
 
     class _FakeClient:
@@ -136,6 +137,48 @@ def test_host_published_ports_enumerates_unlabelled_containers(monkeypatch):
     ports = rt.host_published_ports()
     assert 19002 in ports          # 未跟踪容器的宿主发布端口被枚举
     assert 19000 not in ports      # 无 PortBindings 的容器不算发布端口
+
+
+def test_host_published_ports_ignores_stopped_containers(monkeypatch):
+    """#295 codex P2 :134：exited/created/dead 容器保留 PortBindings 但无活跃宿主监听。
+
+    list(all=True) 会枚举 stopped 容器，其 PortBindings 是残留配置而非真实占用——
+    _used_ports 据此误判池端口占用会跳过空闲候选，足够多 stale 容器可假耗尽
+    19000–19999 使创建失败。只跳过 daemon 已收回绑定的状态（exited/created/dead）；
+    running/restarting/paused 仍持有宿主监听，须计数（宁多算只跳过候选，少算则真实
+    占用被误判空闲 → bind 冲突）。
+    """
+    from containers.docker_runtime import DockerRuntime
+
+    class _FakeContainers:
+        def list(self, all=True, filters=None):  # pylint: disable=redefined-builtin
+            return [
+                _FakeC('running-external', None, {'18789/tcp': [{'HostIp': '127.0.0.1', 'HostPort': '19001'}]}, 'running'),
+                _FakeC('restarting', None, {'18789/tcp': [{'HostIp': '127.0.0.1', 'HostPort': '19002'}]}, 'restarting'),
+                _FakeC('paused', None, {'18789/tcp': [{'HostIp': '127.0.0.1', 'HostPort': '19003'}]}, 'paused'),
+                _FakeC('stopped', None, {'18789/tcp': [{'HostIp': '127.0.0.1', 'HostPort': '19004'}]}, 'exited'),
+                _FakeC('created', None, {'18789/tcp': [{'HostIp': '127.0.0.1', 'HostPort': '19005'}]}, 'created'),
+                _FakeC('dead', None, {'18789/tcp': [{'HostIp': '127.0.0.1', 'HostPort': '19006'}]}, 'dead'),
+            ]
+
+    class _FakeC:
+        def __init__(self, name, labels, port_bindings, status):
+            self.name = name
+            self.labels = labels or {}
+            self.status = status
+            self.attrs = {'HostConfig': {'PortBindings': port_bindings}} if port_bindings else {'HostConfig': {}}
+
+    class _FakeClient:
+        containers = _FakeContainers()
+
+    rt = DockerRuntime(client_factory=_FakeClient)
+    ports = rt.host_published_ports()
+    assert 19001 in ports          # running 容器的宿主发布端口被计数
+    assert 19002 in ports          # restarting 容器仍持绑定 → 计数
+    assert 19003 in ports          # paused 容器仍持绑定 → 计数
+    assert 19004 not in ports      # exited 容器残留 PortBindings 不计数
+    assert 19005 not in ports      # created 容器残留 PortBindings 不计数
+    assert 19006 not in ports      # dead 容器残留 PortBindings 不计数
 
 
 def test_host_published_ports_empty_when_no_containers(monkeypatch):
