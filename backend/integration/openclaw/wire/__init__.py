@@ -1,5 +1,11 @@
 """OpenClaw wire 域常量单一来源（防腐层集成包 / spec #97 / ADR 0002 / issue #98 / #229）。
 
+#272 预重构（parent #271）：本文件由原 ``integration.openclaw.wire.py`` 模块**原样迁移**为
+``wire/`` 子包 ``__init__.py``（包名无下划线，符合「包名禁下划线」约定，呼应 ``OpenClawWire``
+Port；issue #271）——``from integration.openclaw.wire import ...`` 的 import 路径不变、
+解析到同一模块对象、同对象语义（``is`` / isinstance / 异常 ``__cause__`` 链）完全保持。
+
+
 收口 chat 三处（pairing_ws / chat_client / event_translate）重复的 wire 知识：协议版本、
 connect 帧标识（client_id / mode / role / agent_id）、operator 权限 scopes/caps、配对必须 scope
 集、事件族名（approval / tool）、hello-ok policy 解析值对象（GatewayPolicy）与握手前默认、
