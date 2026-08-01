@@ -60,7 +60,8 @@ class InstanceListCreateView(APIView):
         request=InstanceCreateSerializer,
         responses={201: InstanceSerializer, 409: None, 503: None},
     )
-    def post(self, request):
+    def post(self, request):  # pylint: disable=too-many-return-statements
+        # 每个 except 分支的 return 都是领域异常→HTTP 转译的必要出口（chat/views.py:87 同先例）
         ser = InstanceCreateSerializer(data=request.data)
         ser.is_valid(raise_exception=True)  # spec §4：禁裸读 request.data
         name = ser.validated_data['name']
