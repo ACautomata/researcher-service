@@ -43,13 +43,14 @@ class ConfigStore:
 
         tmp 与目标同目录 → ``os.replace`` 同文件系统原子 rename；tmp 先 chmod 0644 再
         replace（防 umask 027/077 致容器内 node 读不了 bind-mount(ro)）；tmp 名每次唯一
-        （并发写者互不覆盖）；OSError 时清 tmp 并转 ``ConfigWriteError(name, path)``，
-        既有文件不被污染。
+        （并发写者互不覆盖）；**目录重建（mkdir）也在转译范围内**——rewrite_config 重建缺失
+        目录时 root 只读/满抛的 OSError 同样转 ConfigWriteError（codex review P2）；OSError
+        时清 tmp 并转 ``ConfigWriteError(name, path)``，既有文件不被污染。
         """
         config_path = self._deps.config.root / 'instances' / name / 'openclaw.json'
-        config_path.parent.mkdir(parents=True, exist_ok=True)
         tmp = config_path.with_name(f'{config_path.name}.{secrets.token_hex(8)}.tmp')
         try:
+            config_path.parent.mkdir(parents=True, exist_ok=True)
             tmp.write_text(payload, encoding='utf-8')
             tmp.chmod(0o644)
             tmp.replace(config_path)   # POSIX 原子：要么整体新配置生效，要么保留旧文件

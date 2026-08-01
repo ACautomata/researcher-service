@@ -25,8 +25,18 @@ class _InvalidName(Exception):
     """路径参数 name 非法（内部信号，非 HTTP 响应）。"""
 
 
+class _InstanceCreating(Exception):
+    """目标实例仍在 provisioning（CREATING 行）——provider 变更须拒绝（codex review P2）。
+
+    竞态：CREATING 期间 create 会写 base render 的 openclaw.json；若此时放行 rewrite_config
+    写 provider-aware payload，create 的 base render 可能后到覆盖（lost update——provider
+    事务提交成功但 openclaw.json 丢 provider）。与 delete 对 CREATING 拒删（InstanceBusy
+    409）同模式，eliminate 整个竞态窗口。仅写操作（POST/PUT/DELETE）检查；GET 只读无竞态。
+    """
+
+
 class _BaseModelsView(APIView):
-    def _get_instance(self, name: str) -> Instance:
+    def _get_instance(self, name: str, *, for_write: bool = False) -> Instance:
         try:
             NAME_VALIDATOR(name)
         except ValidationError as exc:
@@ -34,6 +44,10 @@ class _BaseModelsView(APIView):
         inst = Instance.objects.filter(name=name).first()
         if inst is None:
             raise Http404
+        # codex review P2：写操作在 CREATING 行上拒绝（create 在飞/中断），防 base render
+        # 覆盖并发 provider-aware rewrite（lost update）。READ 路径不检查（无写盘副作用）。
+        if for_write and inst.status == Instance.STATUS_CREATING:
+            raise _InstanceCreating
         return inst
 
     @staticmethod
@@ -82,9 +96,14 @@ class ModelProviderListView(_BaseModelsView):
     )
     def post(self, request, name):
         try:
-            inst = self._get_instance(name)
+            inst = self._get_instance(name, for_write=True)
         except _InvalidName:
             return Response({'detail': '非法 name'}, status=status.HTTP_400_BAD_REQUEST)
+        except _InstanceCreating:
+            return Response(
+                {'detail': '容器正在创建中，暂不能配置模型，请稍候'},
+                status=status.HTTP_409_CONFLICT,
+            )
         ser = ModelProviderWriteSerializer(data=request.data)
         ser.is_valid(raise_exception=True)  # spec §4：禁裸读 request.data
         provider = ModelProvider(instance=inst)
@@ -132,9 +151,14 @@ class ModelProviderDetailView(_BaseModelsView):
     )
     def put(self, request, name, pid):
         try:
-            inst = self._get_instance(name)
+            inst = self._get_instance(name, for_write=True)
         except _InvalidName:
             return Response({'detail': '非法 name'}, status=status.HTTP_400_BAD_REQUEST)
+        except _InstanceCreating:
+            return Response(
+                {'detail': '容器正在创建中，暂不能配置模型，请稍候'},
+                status=status.HTTP_409_CONFLICT,
+            )
         provider = self._get_provider(inst, pid)
         ser = ModelProviderWriteSerializer(data=request.data)
         ser.is_valid(raise_exception=True)
@@ -156,9 +180,14 @@ class ModelProviderDetailView(_BaseModelsView):
     @extend_schema(responses={204: None, 404: None})
     def delete(self, request, name, pid):
         try:
-            inst = self._get_instance(name)
+            inst = self._get_instance(name, for_write=True)
         except _InvalidName:
             return Response({'detail': '非法 name'}, status=status.HTTP_400_BAD_REQUEST)
+        except _InstanceCreating:
+            return Response(
+                {'detail': '容器正在创建中，暂不能配置模型，请稍候'},
+                status=status.HTTP_409_CONFLICT,
+            )
         provider = self._get_provider(inst, pid)
         try:
             self._delete_and_rewrite(provider, name)  # 级联清理 + 重渲染，事务内

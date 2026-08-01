@@ -102,6 +102,26 @@ def test_create_on_missing_instance_returns_404(authed):
 
 
 @pytest.mark.django_db
+def test_create_rejects_provider_on_creating_instance(authed, fleet):
+    """codex review P2：CREATING 行（create 在飞/中断）期间拒绝 provider CRUD——否则
+    rewrite_config 会写 provider-aware payload，随后 create 的 base render 可能覆盖它
+    （lost update：provider 事务提交成功但 openclaw.json 丢 provider）。与 delete 对
+    CREATING 拒删（InstanceBusy 409）同模式，eliminate 整个竞态窗口。"""
+    from containers.models import Instance
+
+    # 直建 CREATING 行（模拟 create 在飞：DB 行已可见但 config 尚未最终落盘）
+    Instance.objects.filter(name='demo').delete()
+    Instance.objects.create(
+        name='demo', port=19001, token='t',
+        home_dir=str(fleet['config'].root / 'instances' / 'demo' / 'home'),
+        container_id='', status=Instance.STATUS_CREATING, image='img:tag',
+    )
+    resp = authed.post(PROVIDERS, _VALID, format='json')
+    assert resp.status_code == 409
+    assert '创建中' in resp.json().get('detail', ''), resp.json()
+
+
+@pytest.mark.django_db
 def test_create_rejects_invalid_name(authed):
     resp = authed.post('/api/v1/containers/Bad..Name/models/providers/', _VALID, format='json')
     assert resp.status_code == 400

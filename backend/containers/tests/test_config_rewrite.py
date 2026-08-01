@@ -93,6 +93,33 @@ def test_rewrite_missing_instance_raises(fleet):
         fleet['orch'].rewrite_config('nope')
 
 
+@pytest.mark.django_db
+def test_rewrite_config_dir_mkdir_failure_raises_config_write_error(fleet, monkeypatch):
+    """codex review P2：rewrite_config 重建缺失目录时（test_rewrite_creates_config_dir_if_missing
+    同场景）若 root 只读/满使 mkdir 抛 OSError，须转 ConfigWriteError（view 层 503），非裸
+    OSError（DRF 500）。mkdir 须在 ConfigWriteError 转译范围内。"""
+    from containers.fleet.values import ConfigWriteError
+    from containers.models import Instance
+
+    inst = Instance.objects.create(
+        name='solo', port=19001, token='t',
+        home_dir=str(fleet['config'].root / 'instances' / 'solo' / 'home'),
+        container_id='', status=Instance.STATUS_RUNNING, image='img:tag',
+    )
+    _make_provider(inst, pid='p', models=[{'id': 'm', 'name': 'M'}])
+
+    # 打点 Path.mkdir 为抛 OSError，模拟 fleet root 只读/满（目录尚未建）
+    from pathlib import Path
+
+    def fail_mkdir(self, *args, **kwargs):
+        raise OSError('simulated read-only fleet root')
+
+    monkeypatch.setattr(Path, 'mkdir', fail_mkdir)
+
+    with pytest.raises(ConfigWriteError):
+        fleet['orch'].rewrite_config('solo')
+
+
 # ── #280：create config 写盘原子性（ConfigStore 单源，打在 facade seam）──
 
 
