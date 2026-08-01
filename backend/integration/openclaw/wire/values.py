@@ -35,17 +35,20 @@ class RecoveredRun:
 
 @dataclass(frozen=True)
 class AckOutcome:
-    """chat.send ack 的跨桶决定（值对象骨架，issue #271/#273）。
+    """chat.send ack 的跨桶决定（值对象骨架，issue #271/#273；#274 RequestRouter 回返）。
 
     #273 拆出 RequestRouter 前先立骨架：``_resolve_ack`` 先经 ``_ack_outcome`` 算出本值对象
-    （决定段），门面据其接线（回执 future / 注册路由 / 触发恢复桶 flush）。RequestRouter
+    （决定段），门面据其接线（回执 future / 注册路由 / 触发恢复桶 flush）。#274 RequestRouter
     拆出后由它回返本对象、门面接线——解开 ``_resolve_ack`` 死结的载体。
 
-    ``run_id`` 非空 = ack ok 且带 runId（路由已可注册）；``error`` 非空 = 网关拒绝 / ack 缺
-    runId（set_exception）；两者皆空 = 不应发生（防御性 no-op）。
+    ``run_id`` 非空 = ack ok 且带 runId（路由已可注册，``on_event`` 随值对象回返供门面装路由）；
+    ``error`` 非空 = 网关拒绝 / ack 缺 runId（set_exception）；两者皆空 = 不应发生（防御性 no-op）。
     """
     run_id: str | None = None
     error: str | None = None
+    # #274：随值对象携带 ack 注册时的 on_event 路由闭包——跨桶通信（RequestRouter → 门面，
+    # 门面据 run_id 装路由 + 回放恢复缓冲），协作者不经共享可变状态把回调塞进门面路由表。
+    on_event: OnEvent | None = None
 
 
 @dataclass(frozen=True)
