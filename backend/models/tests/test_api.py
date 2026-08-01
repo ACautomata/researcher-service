@@ -237,7 +237,7 @@ def test_rewrite_failure_leaves_existing_config_intact(fleet, demo_instance):
     class _BoomBuilder:
         def build(self, base, providers):
             raise OSError('disk full')  # 模拟 tmp.write_text 失败
-    fleet['orch']._provider_builder = _BoomBuilder()
+    fleet['orch']._deps.provider_builder = _BoomBuilder()
     ModelProvider.objects.create(
         instance=inst, provider_id='p', api=API_OPENAI, base_url='https://x/v1',
         api_key_env_id='LLM_API_KEY', models_json=[{'id': 'm', 'name': 'M'}],
