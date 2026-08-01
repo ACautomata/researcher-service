@@ -327,7 +327,7 @@ def test_list_shows_creating_while_provisioning(orch):
         name='booting', port=19005, token='t', home_dir='/h',
         status=Instance.STATUS_CREATING, image='img:tag',
     )
-    orch._inflight_creates.add('booting')      # 模拟该名字的 create 仍在飞
+    orch._deps.inflight.claim('booting')      # 模拟该名字的 create 仍在飞
     item = orch.list()[0]
     assert item['status'] == 'creating'
     assert item['health'] == 'pending'         # 未起，不探
@@ -337,7 +337,7 @@ def test_list_shows_creating_while_provisioning(orch):
 def test_list_probes_health_concurrently(orch):
     # codex P2 :156：N running 容器健康探测须并发，非 N×timeout 串行
     probe = _ConcurrencyProbe()
-    orch._health = probe
+    orch._deps.health = probe
     for i in range(5):
         orch.create(f'c{i}')
     orch.list()
@@ -442,7 +442,7 @@ def test_delete_uses_recorded_home_dir_not_current_root(config, health, runtime,
 
     new_root = tmp_path / 'fleet-moved'
     (new_root / 'instances').mkdir(parents=True)
-    orch._cfg = dataclasses.replace(config, root=new_root)
+    orch._deps.config = dataclasses.replace(config, root=new_root)
     ok = orch.delete('demo')
     assert ok is True
     # 旧 root 下的真实数据目录须被删除（由记录的 home_dir 派生，非新 root）
@@ -491,7 +491,7 @@ def test_list_keeps_creating_when_container_not_yet_running(orch):
         name='booting', port=19008, token='t', home_dir='/h',
         status=Instance.STATUS_CREATING, image='img:tag',
     )
-    orch._inflight_creates.add('booting')      # 模拟在飞，区别于崩溃中断（:319）
+    orch._deps.inflight.claim('booting')      # 模拟在飞，区别于崩溃中断（:319）
     item = orch.list()[0]
     assert item['status'] == 'creating'
     assert item['health'] == 'pending'
@@ -515,7 +515,7 @@ def test_create_rollback_skips_remove_when_run_not_attempted(config, health, tmp
     runtime = _RenderFail()
     orch = InstanceOrchestrator(runtime=runtime, config=config, health_probe=health)
     # 让 config_path.write_text 之前的 provision 失败：把 template_dir 指向不存在路径
-    orch._provisioner = HomeProvisioner(tmp_path / 'no-such-template')
+    orch._deps.provisioner = HomeProvisioner(tmp_path / 'no-such-template')
     with pytest.raises(FileNotFoundError):
         orch.create('demo')
     assert runtime.run_specs == []                 # pylint: disable=use-implicit-booleaness-not-comparison
@@ -621,14 +621,14 @@ def test_create_persists_owned_container_id_when_all_cleanup_fails(config, healt
 @pytest.mark.django_db
 def test_create_keeps_inflight_until_final_save(orch, monkeypatch):
     # codex P2 :269：DELETE 在 run() 返回后、最终 save() 前的窗口不得竞删——in-flight 标记
-    # 须保留到 save 之后。验证：最终 save（status=running）执行期间 'demo' 仍在 _inflight_creates；
+    # 须保留到 save 之后。验证：最终 save（status=running）执行期间 'demo' 仍在 inflight guard；
     # create 返回后已释放。（_reserve_row 的 INSERT 先于 add，本就不在飞，非本测试关注点。）
     real_save = Instance.save
     inflight_at_save = []
 
     def spy_save(instance, *args, **kwargs):
         if instance.name == 'demo':
-            inflight_at_save.append('demo' in orch._inflight_creates)
+            inflight_at_save.append('demo' in orch._deps.inflight)
         return real_save(instance, *args, **kwargs)
 
     monkeypatch.setattr(Instance, 'save', spy_save)
@@ -637,7 +637,7 @@ def test_create_keeps_inflight_until_final_save(orch, monkeypatch):
     assert inflight_at_save, 'create 应至少触发一次 save'
     assert inflight_at_save[-1] is True, '最终 save 期间 in-flight 标记须仍保留（:269）'
     # create 完整返回后标记已释放，后续 delete 可正常进行
-    assert 'demo' not in orch._inflight_creates
+    assert 'demo' not in orch._deps.inflight
 
 
 # --- delete：:257 在飞 create 拒删 ---
@@ -651,7 +651,7 @@ def test_delete_rejects_while_create_in_flight(orch):
         name='booting', port=19010, token='t', home_dir='/h',
         status=Instance.STATUS_CREATING, image='img:tag',
     )
-    orch._inflight_creates.add('booting')          # 模拟 create 在飞
+    orch._deps.inflight.claim('booting')          # 模拟 create 在飞
     with pytest.raises(InstanceBusy):
         orch.delete('booting')
     assert Instance.objects.filter(name='booting').exists()  # 行未被删
@@ -734,13 +734,13 @@ def test_create_marks_inflight_before_reserving_row(orch, monkeypatch):
     guarded_at_reserve = []
 
     def spy_reserve(name):
-        guarded_at_reserve.append(name in orch._inflight_creates)
+        guarded_at_reserve.append(name in orch._deps.inflight)
         return real_reserve(name)
 
     monkeypatch.setattr(orch, '_reserve_row', spy_reserve)
     orch.create('demo')
     assert guarded_at_reserve == [True]
-    assert 'demo' not in orch._inflight_creates
+    assert 'demo' not in orch._deps.inflight
 
 
 @pytest.mark.django_db
@@ -773,7 +773,7 @@ def test_create_rolls_back_row_when_runtime_preflight_fails(config, health, tmp_
         orch.create('demo')
 
     assert not Instance.objects.filter(name='demo').exists()
-    assert 'demo' not in orch._inflight_creates
+    assert 'demo' not in orch._deps.inflight
 
 
 @pytest.mark.django_db
@@ -894,15 +894,15 @@ def test_create_rejects_empty_llm_api_key(config, health, runtime, tmp_path):
 
 @pytest.mark.django_db
 def test_delete_rejects_creating_based_on_db_status(orch):
-    """codex P1 :304：_inflight_creates 仅本进程可见；多 worker 下另一 worker 的 create 不可见。
+    """codex P1 :304：inflight guard 仅本进程可见；多 worker 下另一 worker 的 create 不可见。
 
-    delete 须基于 DB CREATING 状态拒删——跨进程安全。不依赖本进程 _inflight_creates。
+    delete 须基于 DB CREATING 状态拒删——跨进程安全。不依赖本进程 inflight guard。
     """
     Instance.objects.create(
         name='booting', port=19015, token='t', home_dir='/h',
         status=Instance.STATUS_CREATING, image='img:tag',
     )
-    # 不加入 _inflight_creates（模拟另一 worker 的 create）
+    # 不加入 inflight guard（模拟另一 worker 的 create）
     with pytest.raises(InstanceBusy):
         orch.delete('booting')
     assert Instance.objects.filter(name='booting').exists()
@@ -914,14 +914,14 @@ def test_delete_rejects_creating_based_on_db_status(orch):
 # ◀ R7 1 → R8 F1 (4772692556) P1 :430 —— created_at+60s 升级为跨进程可续期 DB lease ◀
 # R7 用 created_at 时间窗口保护跨 worker 的活动 create；R8 改用 lease_expires_at
 #（_reserve_row 设置、create 在 run 前 checkpoint 续约）：lease 未过期 = 有活动 create 持有，
-# 即使 created_at 远旧、本进程 _inflight_creates 不可见也不收敛——长 create（>60s）不再被误判。
+# 即使 created_at 远旧、本进程 inflight guard 不可见也不收敛——长 create（>60s）不再被误判。
 
 
 @pytest.mark.django_db
 def test_reconcile_protects_active_create_with_unexpired_lease(orch):
     """codex R8 F1 (P1 :430)：跨进程 lease 替代 created_at+60s 时间窗口。
 
-    多 worker 下另一 worker 的合法长 create（cp -a/run > 60s）不在本进程 _inflight_creates，
+    多 worker 下另一 worker 的合法长 create（cp -a/run > 60s）不在本进程 inflight guard，
     R7 的 created_at+60s 会误收敛为 error/stopped → delete 趁虚删目录/容器、原 worker 收尾
     save(running) 复活行。改用可续期 DB lease：lease 未过期即有活动 create 持有，即使
     created_at 远旧、本进程不可见也不收敛。
@@ -938,7 +938,7 @@ def test_reconcile_protects_active_create_with_unexpired_lease(orch):
     )
     inst.created_at = now - timedelta(seconds=300)  # 远超 R7 的 60s grace
     inst.save(update_fields=['created_at'])
-    # runtime 无容器（长 create 仍在 cp -a，未 run）；_inflight_creates 不含（跨 worker）
+    # runtime 无容器（长 create 仍在 cp -a，未 run）；inflight guard 不含（跨 worker）
 
     orch.list()
 
@@ -1100,7 +1100,7 @@ def test_delete_skips_rmtree_when_row_gone_before_cleanup(orch, runtime, config,
 
     monkeypatch.setattr(Instance.objects, 'filter', fake_filter)
     rmtree_calls = []
-    orch._dir_remover = lambda p: rmtree_calls.append(p)  # pylint: disable=unnecessary-lambda
+    orch._deps.dir_remover = lambda p: rmtree_calls.append(p)  # pylint: disable=unnecessary-lambda
 
     result = orch.delete('demo')
     assert result is True
@@ -1219,7 +1219,7 @@ def test_list_survives_runtime_lookup_failure_during_reconcile(orch):
         def __call__(self, name):
             raise RuntimeError('daemon unavailable')
 
-    orch._runtime.get = _FlakyGet()
+    orch._deps.runtime.get = _FlakyGet()
 
     # list 不应因 reconcile 的 runtime 异常而 500
     items = orch.list()
