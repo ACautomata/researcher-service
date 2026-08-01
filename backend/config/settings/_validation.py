@@ -31,6 +31,10 @@ def validate_prod_env(env: os.environ | dict) -> None:
       配置（非凭证），缺失会让 LockFleet 首次用锁时才连接失败（issue #252；对齐
       SECRET_KEY/LLM_API_KEY fail-fast 先例，base 给开发可跑默认，生产强制非空）
     - ``CREDENTIAL_ENCRYPTION_KEYS`` —— CredentialKeySettings 内部校验
+    - ``OPENCLAW_TEMPLATE_JSON`` —— 缺失/空/相对路径/不存在 → base.py 默认指向镜像内
+      不存在的 /deploy/openclaw.json，首次创建容器才裸 500（CD 镜像 context=backend 不含
+      deploy/，<repo>/deploy 相对路径在容器内失效）；生产须注入挂载文件路径，启动期校验
+      已存在且是文件，避免「创建容器 500」在运维触发后才暴露。
     """
     allowed_hosts_str = env.get('DJANGO_ALLOWED_HOSTS', '').strip()
     # 与 prod.py 同样的 split+filter 规则：仅算非空白项；空/纯逗号/纯空白都拒
@@ -101,4 +105,32 @@ def validate_prod_env(env: os.environ | dict) -> None:
             'OPENCLAW_TEMPLATE_DIR 已存在且是目录，但当前进程无读/遍历权限'
             f'（{template_dir!r}）——HomeProvisioner.copytree 预填充会抛 PermissionError。'
             '修正目录属主/权限（chmod r-x）后重启。参见 deploy/README.md。',
+        )
+
+    # OPENCLAW_TEMPLATE_JSON：openclaw.json 模板文件（配置单一来源，与单容器 compose 共用
+    # 一份 deploy/openclaw.json）。base.py 默认 <repo>/deploy/openclaw.json 仅适用开发/CI；
+    # 生产镜像化后端（context=backend + COPY . /app）里 BASE_DIR.parent/deploy 解析成
+    # /deploy 且不存在 → 首次创建容器裸 500（FileNotFoundError，view 未捕获）。fail-fast
+    # 让运维启动时即知，而非首次创建容器才暴露。挂载文件路径由 compose 注入（与
+    # OPENCLAW_TEMPLATE_DIR 同款，非敏感固定项）。
+    template_json = env.get('OPENCLAW_TEMPLATE_JSON', '').strip()
+    if not template_json:
+        raise ImproperlyConfigured(
+            '生产必须设置 OPENCLAW_TEMPLATE_JSON（openclaw.json 模板文件路径，配置单一来源）。'
+            '镜像化后端内默认 <repo>/deploy/openclaw.json 解析到 /deploy 且不存在，首次'
+            '创建容器即 500。Docker 化部署由 compose 挂载文件并注入路径；参见 deploy/README.md '
+            '与 deploy/.env.example。',
+        )
+    template_json_path = Path(template_json)
+    if not template_json_path.is_absolute():
+        raise ImproperlyConfigured(
+            'OPENCLAW_TEMPLATE_JSON 必须是绝对路径（镜像内 BASE_DIR 是容器路径，相对路径'
+            '会被 cwd 静默吞 → 首次创建容器 500）；当前值：'
+            f'{template_json!r}。参见 deploy/README.md。',
+        )
+    if not template_json_path.is_file():
+        raise ImproperlyConfigured(
+            'OPENCLAW_TEMPLATE_JSON 必须是已存在的文件（ConfigRenderer 以 JSON 解析模板，'
+            '缺文件/目录会在首次创建容器时 FileNotFoundError）；当前值 '
+            f'{template_json!r} 不存在或不是文件。参见 deploy/README.md 与 deploy/.env.example。',
         )

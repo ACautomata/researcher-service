@@ -96,6 +96,11 @@ jobs:
         run: |
           mkdir -p _deploy
           cp deploy/docker-compose.deploy.yml _deploy/
+          # openclaw.json 模板（配置单一来源）：随 compose 一并分发，compose 挂载进后端容器
+          # 覆盖镜像内不存在的默认路径（见 compose OPENCLAW_TEMPLATE_JSON）。后端镜像构建
+          # context=backend 不含 deploy/，镜像内 TEMPLATE_JSON 默认路径 /deploy 不存在 →
+          # 首次创建容器即 500；此处分发保证宿主机 /www/panel/openclaw.json 存在。
+          cp deploy/openclaw.json _deploy/openclaw.json
           # 命名 .env：compose 变量替换（$PANEL_BACKEND_IMAGE 等）与 env_file 都自动读它，
           # v1/v2 CLI 行为一致（--env-file 仅 v2 且只管 env_file 不管替换；v1 缺 .env 直接报错）。
           {

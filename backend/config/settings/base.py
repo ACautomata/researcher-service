@@ -160,10 +160,16 @@ else:
 # 折叠 deploy/../（相对 RESEARCHER_DIR 解析产生的 ..），使 ../researcher → <repo>/researcher，
 # 与默认值同形；不 resolve 符号链接，避免改变调用方意图路径。
 _FLEET_TEMPLATE = os.path.normpath(_FLEET_TEMPLATE)
+# TEMPLATE_JSON 同理：默认 <repo>/deploy/openclaw.json 仅适用开发/CI；生产镜像化后端里该
+# 路径必然不存在（backend 镜像构建上下文不含 deploy/，context=backend + COPY . /app →
+# 镜像内 TEMPLATE_JSON 解析到 /deploy/openclaw.json，首次创建容器即裸 500）。
+# 生产经 OPENCLAW_TEMPLATE_JSON 注入挂载文件路径（CD 分发 deploy/openclaw.json 到宿主并
+# 挂载进后端容器，配置单一来源仍在本仓库）；prod.py 的 validate_prod_env fail-fast 校验。
+_OPENCLAW_TEMPLATE_JSON_ENV = os.environ.get('OPENCLAW_TEMPLATE_JSON')
 OPENCLAW_FLEET = {
     'ROOT': str(FLEET_ROOT),
     'TEMPLATE': _FLEET_TEMPLATE,
-    'TEMPLATE_JSON': str(BASE_DIR.parent / 'deploy' / 'openclaw.json'),
+    'TEMPLATE_JSON': _OPENCLAW_TEMPLATE_JSON_ENV or str(BASE_DIR.parent / 'deploy' / 'openclaw.json'),
     'IMAGE': os.environ.get('OPENCLAW_IMAGE', 'ghcr.io/openclaw/openclaw:2026.6.34-browser'),
     'PORT_POOL_START': 19000,
     'PORT_POOL_END': 19999,
