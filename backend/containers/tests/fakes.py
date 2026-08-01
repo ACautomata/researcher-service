@@ -38,6 +38,13 @@ class FakeRuntime:
             'driver failed programming external connectivity on endpoint xyz: '
             'Bind for 0.0.0.0:{port} failed: port is already allocated'
         )
+        # #295 codex P2（新轮）：容器已创建后才报 bind 冲突（真实 docker create+start：
+        # 端口冲突在 start 阶段暴露，容器已落 daemon）。命中时容器先入 daemon 再抛
+        # bind 冲突措辞，验证清理路径对残留容器的处理。
+        self.fail_bind_after_create: set[int] = set()
+        # #295 codex P2（新轮）：remove 可注入失败（模拟 daemon 瞬态错误）——验证
+        # bind 冲突后容器清理失败时须保留 ERROR 行而非吞掉继续重试。
+        self.fail_remove: Exception | None = None
 
     def run(self, spec: ContainerSpec) -> str:
         self.run_specs.append(spec)
@@ -54,6 +61,8 @@ class FakeRuntime:
             image=spec.image,
             instance_name=spec.name,  # codex R9-2：模拟真实 Docker 的 openclaw.instance label
         )
+        if spec.host_port in self.fail_bind_after_create:
+            raise RuntimeError(self.fail_bind_message.format(port=spec.host_port))
         if self.fail_after_create is not None:
             exc = self.fail_after_create
             self.fail_after_create = None
@@ -79,6 +88,8 @@ class FakeRuntime:
         self.stopped.append(name)
 
     def remove(self, name: str) -> None:
+        if self.fail_remove is not None:
+            raise self.fail_remove
         self.containers.pop(name, None)
         self.removed.append(name)
 

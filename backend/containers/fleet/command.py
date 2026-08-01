@@ -223,7 +223,18 @@ class FleetCommand:
                                 self._deps.runtime.remove(name)
                                 inst.container_id = ''
                             except Exception:  # pylint: disable=broad-exception-caught
-                                pass
+                                # codex P2（#295 新轮）：容器清理失败不能吞——残留命名容器
+                                # 会让下一轮重试撞 name 冲突，且行已删则 delete 无所有权记录
+                                # 无法清理孤儿，实例名被永久阻塞。对齐目录清理失败分支：保留
+                                # ERROR 行（container_id 已在上方 get 时写入，供 delete 证明
+                                # 所有权）+ raise InstanceCleanupError，运维可经 delete 重试。
+                                if inst is not None:
+                                    inst.status = Instance.STATUS_ERROR
+                                    try:
+                                        inst.save(update_fields=['status', 'container_id'])
+                                    except Exception:  # pylint: disable=broad-exception-caught
+                                        pass
+                                raise InstanceCleanupError(name, str(instance_dir)) from None
                         if directory_created:
                             try:
                                 self._deps.dir_remover(instance_dir)

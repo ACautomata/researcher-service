@@ -379,6 +379,30 @@ def test_create_bind_conflict_preserves_row_when_dir_cleanup_fails(config, healt
     assert not runtime.containers  # 无残留容器
 
 
+@pytest.mark.django_db
+def test_create_bind_conflict_preserves_row_when_container_remove_fails(config, health, runtime, tmp_path):
+    """#295 codex P2（新轮 #3695394860）：bind 冲突后容器清理失败 → 保留 ERROR 行 + raise。
+
+    容器已创建后才报 bind 冲突（真实 docker create+start：端口冲突在 start 阶段暴露），
+    remove 失败（daemon 瞬态错误）时若吞掉并删行：残留容器撞下一轮 name 冲突，且行已删
+    则 delete 无所有权记录无法清理孤儿，实例名被永久阻塞。须对齐目录清理失败分支——
+    保留 ERROR 行（含 container_id 供 delete 证明所有权）+ raise InstanceCleanupError。
+    """
+    _seed_template(tmp_path / 'template')
+    runtime.fail_bind_after_create = {19000}   # 容器入 daemon 后报 bind 冲突
+    runtime.fail_remove = RuntimeError('daemon transient error')  # 清理残留容器失败
+    orch = InstanceOrchestrator(runtime=runtime, config=config, health_probe=health)
+    with pytest.raises(InstanceCleanupError):
+        orch.create('demo')
+    # 行保留且标 ERROR，container_id 记录残留容器（delete 凭所有权清理）
+    row = Instance.objects.get(name='demo')
+    assert row.status == Instance.STATUS_ERROR
+    assert row.container_id                        # 残留容器 id 已保存供 delete 清理
+    assert 'demo' in runtime.containers            # 残留容器仍在 daemon（remove 失败未清）
+    assert not runtime.removed                     # 未触发任何 remove
+    # 行未被删 → delete 端点可凭 container_id 清理孤儿
+
+
 # --- delete：:126 rmtree 失败保留 DB 行 + 标 REMOVING（不吞错、可重试）---
 
 
