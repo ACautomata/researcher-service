@@ -29,6 +29,11 @@ class FakeContainerRuntime:
     def list_fleet(self) -> list:
         return list(self.containers.values())
 
+    def host_published_ports(self) -> set:
+        # #295 codex P2：模拟 daemon 命名空间枚举宿主全部容器发布端口（含未跟踪）。
+        return {getattr(info, 'port', None) for info in self.containers.values()
+                if getattr(info, 'port', None) is not None}
+
     def get(self, name: str) -> Any:
         return self.containers.get(name)
 

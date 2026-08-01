@@ -32,6 +32,16 @@ class ContainerRuntime(Protocol):
         """列出所有 fleet 容器（label app=openclaw-fleet）。"""
         ...
 
+    def host_published_ports(self) -> set[int]:
+        """枚举宿主上全部容器已发布的宿主端口（无 label 过滤，含未跟踪容器）。
+
+        #295 codex P2：后端容器化（bridge 网络）时，容器内 socket.bind 探测不到宿主端口
+        （命名空间盲区）；list_fleet 按 label 过滤也看不到未跟踪容器。端口分配须经 daemon
+        命名空间（此处返回宿主全部 PortBindings）反映真实占用，避免 allocator 反复选中
+        已被宿主进程/未跟踪容器占用的池端口 → docker run 回滚。
+        """
+        ...
+
     def get(self, name: str) -> ContainerInfo | None:
         """取单个实例的容器状态；不存在返回 None。"""
         ...

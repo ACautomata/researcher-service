@@ -408,6 +408,30 @@ def test_used_ports_includes_fleet_label_port(config, health, tmp_path):
     assert inst.port == 19001
 
 
+@pytest.mark.django_db
+def test_used_ports_includes_untracked_host_published_ports(config, health, runtime, tmp_path):
+    """#295 codex P2：宿主上未跟踪容器（无 label）占用的池端口也被 allocator 跳过。
+
+    后端容器化（bridge 网络）时容器内 socket.bind 探不到宿主端口（命名空间盲区），
+    且 list_fleet 按 label 过滤看不到未跟踪容器。host_published_ports 经 daemon 无过滤
+    枚举补上这一来源——FakeRuntime 模拟 daemon 返回 port=19002 的未跟踪容器。
+    """
+    _seed_template(tmp_path / 'template')
+    runtime.containers['external'] = ContainerInfo(
+        container_id='extid',
+        name='external',
+        running=True,
+        status='running',
+        image='other:tag',
+        port=19002,  # 无 openclaw label 的未跟踪容器（模拟外部容器占宿主端口）
+    )
+    orch = InstanceOrchestrator(
+        runtime=runtime, config=config, health_probe=health, port_in_use=lambda p: False,
+    )
+    inst = orch.create('demo')
+    assert inst.port == 19000  # 19002 已被 host_published_ports 标记占用 → 跳过
+
+
 # --- delete：:204 目录已不存在视为清理成功 ---
 
 

@@ -47,6 +47,11 @@ class FakeRuntime:
     def list_fleet(self) -> list[ContainerInfo]:
         return list(self.containers.values())
 
+    def host_published_ports(self) -> set[int]:
+        # #295 codex P2：模拟 daemon 命名空间枚举宿主全部容器发布端口。
+        # 只含带 port 的容器（align 真实 Docker：PortBindings 仅当容器发布了端口）。
+        return {info.port for info in self.containers.values() if info.port is not None}
+
     def get(self, name: str) -> ContainerInfo | None:
         return self.containers.get(name)
 

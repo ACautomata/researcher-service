@@ -121,6 +121,31 @@ class DockerRuntime:
         )
         return [self._to_info(c) for c in cs]
 
+    def host_published_ports(self) -> set[int]:
+        """枚举宿主上全部容器已发布的宿主端口（无 label 过滤，含未跟踪容器）。
+
+        #295 codex P2：端口分配须反映 daemon（宿主）命名空间的真实占用。list_fleet 按
+        label 过滤只覆盖本面板容器；后端容器化（bridge 网络）时容器内 socket.bind 又探
+        不到宿主端口。此处扫 daemon 全部容器 PortBindings 提取 HostPort，allocator 据此
+        跳过被宿主进程/未跟踪容器占用的池端口，避免反复选中 → docker run 回滚。
+        """
+        published: set[int] = set()
+        try:
+            cs = self._client().containers.list(all=True)
+        except Exception:  # pylint: disable=broad-exception-caught  # daemon 不可达 → 空集（不误报）
+            return published
+        for c in cs:
+            bindings = (c.attrs.get('HostConfig', {}) or {}).get('PortBindings') or {}
+            for binds in bindings.values():
+                for b in binds or []:
+                    raw = b.get('HostPort')
+                    try:
+                        if raw is not None:
+                            published.add(int(raw))
+                    except (TypeError, ValueError):
+                        pass
+        return published
+
     def get(self, name: str) -> ContainerInfo | None:
         try:
             c = self._client().containers.get(container_name(name))

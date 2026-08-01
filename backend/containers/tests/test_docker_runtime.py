@@ -104,3 +104,50 @@ def test_privilege_floor_matches_researcher_image():
     assert set(kw['cap_add']) == {'CHOWN', 'SETUID', 'SETGID', 'DAC_OVERRIDE'}
     assert kw['restart_policy'] == {'Name': 'unless-stopped'}
     assert kw['detach'] is True
+
+
+def test_host_published_ports_enumerates_unlabelled_containers(monkeypatch):
+    """#295 codex P2：宿主端口占用须经 daemon 命名空间枚举，而非容器内 socket bind。
+
+    生产后端容器化（bridge 网络）时，后端容器内 socket.bind 探测不到宿主已发布端口
+    （命名空间盲区）；且 list_fleet 按 label 过滤看不到未跟踪容器。host_published_ports
+    无 label 过滤枚举 daemon 全部容器 PortBindings → 未跟踪容器占用的池端口也能被 allocator
+    跳过。
+    """
+    from containers.docker_runtime import DockerRuntime
+
+    class _FakeContainers:
+        def list(self, all=True, filters=None):
+            return [
+                _FakeC('tracked', {'openclaw.port': '19000'}, None),
+                _FakeC('untracked', None, {'18789/tcp': [{'HostIp': '127.0.0.1', 'HostPort': '19002'}]}),
+            ]
+
+    class _FakeC:
+        def __init__(self, name, labels, port_bindings):
+            self.name = name
+            self.labels = labels or {}
+            self.attrs = {'HostConfig': {'PortBindings': port_bindings}} if port_bindings else {'HostConfig': {}}
+
+    class _FakeClient:
+        containers = _FakeContainers()
+
+    rt = DockerRuntime(client_factory=lambda: _FakeClient())
+    ports = rt.host_published_ports()
+    assert 19002 in ports          # 未跟踪容器的宿主发布端口被枚举
+    assert 19000 not in ports      # 无 PortBindings 的容器不算发布端口
+
+
+def test_host_published_ports_empty_when_no_containers(monkeypatch):
+    """空 daemon → 空集合（不误报占用）。"""
+    from containers.docker_runtime import DockerRuntime
+
+    class _FakeContainers:
+        def list(self, all=True, filters=None):
+            return []
+
+    class _FakeClient:
+        containers = _FakeContainers()
+
+    rt = DockerRuntime(client_factory=lambda: _FakeClient())
+    assert rt.host_published_ports() == set()

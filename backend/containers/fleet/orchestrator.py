@@ -48,8 +48,7 @@ from pathlib import Path
 from containers.docker_runtime import DockerRuntime
 from containers.fleet.command import FleetCommand
 from containers.fleet.config_store import ConfigStore
-from containers.fleet.deps import FleetDeps
-from containers.fleet.deps import HostPortProbe
+from containers.fleet.deps import FleetDeps, HostPortProbe
 from containers.fleet.read_model import FleetReadModel
 from containers.fleet.values import FleetConfig
 from containers.models import Instance
