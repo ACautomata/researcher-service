@@ -99,12 +99,12 @@ def test_rewrite_missing_instance_raises(fleet):
 @pytest.mark.django_db
 def test_create_writes_config_atomically_no_tmp_leftover(fleet):
     # #280：create 的 config 写盘经 ConfigStore（tmp + os.replace）原子落盘——
-    # 正常路径不得残留 .tmp 文件（torn/partial 风险已消）。
+    # 正常路径不得残留任何 .tmp 文件（torn/partial 风险已消；tmp 名每次唯一）。
     fleet['orch'].create('demo')
     cfg_file = fleet['config'].root / 'instances' / 'demo' / 'openclaw.json'
     assert cfg_file.exists()
     assert cfg_file.read_text().strip()                      # 非空
-    assert not cfg_file.with_name('openclaw.json.tmp').exists()
+    assert not list(cfg_file.parent.glob('openclaw.json.*.tmp'))
 
 
 @pytest.mark.django_db
@@ -134,6 +134,37 @@ def test_create_config_write_failure_preserves_existing_and_cleans_tmp(fleet, mo
 
     # 既有 openclaw.json 不受污染；tmp 已清理；demo2 的目录因回滚被删除
     assert cfg_file.read_text() == original
-    assert not cfg_file.with_name('openclaw.json.tmp').exists()
+    assert not list(cfg_file.parent.glob('openclaw.json.*.tmp'))
     assert not (fleet['config'].root / 'instances' / 'demo2').exists()
     assert not Instance.objects.filter(name='demo2').exists()
+
+
+@pytest.mark.django_db
+def test_config_store_uses_unique_tmp_per_write(fleet, monkeypatch):
+    """#280 codex review P2：create 与 rewrite_config 收敛到同一原子写 seam 后，固定 tmp
+    名 ``openclaw.json.tmp`` 会让并发写者（create 与 model CRUD 的 rewrite_config 竞争同一
+    实例）共享/互相覆盖 tmp——一个写者可能在另一写者的 write_text 与 replace 之间 replace，
+    装错 payload 或误报 ConfigWriteError 回滚合法操作。每个 write 调用须用唯一 tmp 文件
+    （os.replace 仍原子、最后者胜）。
+
+    该断言须直接观察 ConfigStore 的 tmp 生成（唯一能看 tmp 名的层）——原子性主回归仍打
+    facade seam（上方 test_create_config_write_failure_*）。
+    """
+    from pathlib import Path
+
+    orch = fleet['orch']
+    store = orch._cmd._config_store
+    real_replace = Path.replace
+    seen_tmp = []
+
+    def spy_replace(self, target):
+        seen_tmp.append(self.name)
+        return real_replace(self, target)
+
+    monkeypatch.setattr(Path, 'replace', spy_replace)
+
+    store.write('demo', '{"a": 1}')
+    store.write('demo', '{"b": 2}')
+
+    assert len(seen_tmp) == 2, '两次 write 都应完成 replace'
+    assert len(set(seen_tmp)) == 2, '两次 write 不得复用同一 tmp 文件（并发写者共享 tmp 名）'

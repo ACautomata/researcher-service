@@ -17,12 +17,16 @@
   openclaw.json，gateway 无法启动）；
 - OSError（卷只读/满/权限）时清 tmp 并转 ``ConfigWriteError(name, path)``——既有 openclaw.json
   不被污染，DB 事务据此回滚（view 层）。
+- **每次 write 用唯一 tmp 名**（``openclaw.json.<hex>.tmp``）：create 与 rewrite_config 收敛到
+  同一 seam 后可能并发写同一实例，固定 tmp 名会让两写者互相覆盖/误报（codex review P2）；
+  唯一名下各写各的 tmp、``os.replace`` 仍原子、最后者胜。
 
 root 解析：**不缓存** ``deps.config.root`` 的快照，每次 write 动态取——测试会对
 ``deps.config`` 整体 ``dataclasses.replace``（root 变更，:445）后仍走 create/delete。
 
 依赖方向：``config_store`` → ``values``（仅异常），无环。
 """
+import secrets
 from pathlib import Path
 
 from containers.fleet.values import ConfigWriteError
@@ -38,12 +42,13 @@ class ConfigStore:
         """把 ``payload``（JSON 文本）原子写到 ``instances/<name>/openclaw.json``。
 
         tmp 与目标同目录 → ``os.replace`` 同文件系统原子 rename；tmp 先 chmod 0644 再
-        replace（防 umask 027/077 致容器内 node 读不了 bind-mount(ro)）；OSError 时清 tmp
-        并转 ``ConfigWriteError(name, path)``，既有文件不被污染。
+        replace（防 umask 027/077 致容器内 node 读不了 bind-mount(ro)）；tmp 名每次唯一
+        （并发写者互不覆盖）；OSError 时清 tmp 并转 ``ConfigWriteError(name, path)``，
+        既有文件不被污染。
         """
         config_path = self._deps.config.root / 'instances' / name / 'openclaw.json'
         config_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = config_path.with_name(config_path.name + '.tmp')
+        tmp = config_path.with_name(f'{config_path.name}.{secrets.token_hex(8)}.tmp')
         try:
             tmp.write_text(payload, encoding='utf-8')
             tmp.chmod(0o644)

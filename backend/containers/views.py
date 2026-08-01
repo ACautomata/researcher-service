@@ -26,6 +26,7 @@ from integration.openclaw.translation import build_pairing_status_default
 from .models import NAME_VALIDATOR, Instance
 from .orchestrator import (
     ConfigurationError,
+    ConfigWriteError,
     Fleet,
     InstanceBusy,
     InstanceCleanupError,
@@ -83,6 +84,13 @@ class InstanceListCreateView(APIView):
             # codex R2 :40：端口池耗尽 / 持续分配冲突（预期容量条件）→ 503，非裸 500
             return Response(
                 {'detail': '端口池已耗尽，暂无法创建容器，请稍后重试或删除闲置容器'},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        except ConfigWriteError:
+            # codex #280 review：create 的 config 写盘失败（卷只读/满，ConfigWriteError）→
+            # 503（schema 已声明；models 视图同语义）。create 行/目录已回滚，客户端可重试。
+            return Response(
+                {'detail': '容器配置写盘失败（磁盘只读/已满），请重试或联系管理员'},
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,
             )
         except InstanceCleanupError:

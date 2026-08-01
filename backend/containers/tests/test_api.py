@@ -11,6 +11,7 @@ from django.contrib.auth import get_user_model
 from rest_framework.test import APIClient
 
 from containers.orchestrator import (
+    ConfigWriteError,
     InstanceBusy,
     InstanceCleanupError,
     InstanceDirExists,
@@ -289,6 +290,18 @@ def test_create_returns_409_when_rollback_dir_cleanup_fails(authed, fleet, monke
     monkeypatch.setattr(fleet['orch'], 'create', _fail)
     resp = authed.post('/api/v1/containers/', {'name': 'demo'}, format='json')
     assert resp.status_code == 409
+
+
+@pytest.mark.django_db
+def test_create_returns_503_when_config_write_fails(authed, fleet, monkeypatch):
+    # codex #280 review：create 的 config 写盘失败（卷只读/满，ConfigWriteError）→ 503
+    # （契约 schema 已声明 503，models 视图同语义），非裸 500。create 行既已回滚。
+    def _raise(name):
+        raise ConfigWriteError(name, str(fleet['config'].root / 'instances' / name / 'openclaw.json'))
+
+    monkeypatch.setattr(fleet['orch'], 'create', _raise)
+    resp = authed.post('/api/v1/containers/', {'name': 'demo'}, format='json')
+    assert resp.status_code == 503
 
 
 @pytest.mark.django_db
