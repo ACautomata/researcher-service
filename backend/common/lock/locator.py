@@ -17,63 +17,103 @@ CI/单测默认**无真 Redis**——行为测试全走 FakeLock，真 Redis 仅
 """
 from __future__ import annotations
 
+from redis import Redis as _Redis
 from redis.asyncio import from_url as _redis_from_url
 
-from common.lock.adapters import AsyncRedisLockAdapter
-from common.lock.ports import DistributedLock
+from common.lock.adapters import AsyncRedisLockAdapter, SyncRedisLockAdapter
+from common.lock.ports import DistributedLock, SyncDistributedLock
 
 
 class LockFleet:
-    """``DistributedLock`` 单例 service locator（调用点经 get() 取锁；测试用 override 注入 fake）。
+    """``DistributedLock`` / ``SyncDistributedLock`` 单例 service locator（镜像 ``Fleet`` 先例）。
 
-    lazy 构造（首个 get 才读 settings + 建共享 client），import 期无 IO/无 Redis 连接。
+    **两个独立槽位**（issue #254 / parent #243）：
+    - async 槽：``get()`` / ``override(lock)``——chat/pool/consumers 用（AsyncRedisLockAdapter）；
+    - sync 槽：``get(sync=True)`` / ``override(lock, sync=True)``——orchestrator/pairing
+      threadpool 用（SyncRedisLockAdapter）。**不互耦**：各自懒建共享 client（async 走
+      redis.asyncio、sync 走 redis.Redis），override 只换对应槽位、不串扰另一侧。
+
+    生命周期约束（#247 D2/D6）：lazy 构造（首个 get 才读 settings + 建共享 client），
+    import 期零 IO、无 lifespan/全局 shutdown 钩子；``aclose()`` 关全部共享 client 并复原
+    单例，仅测试 teardown 调用。
     """
 
     _lock: DistributedLock | None = None
-    # 共享 redis.asyncio client（懒建；默认路径持有）。override 注入替身时不清它——已建 client
-    # 留待 aclose() 关闭，防 override-after-get 泄漏真连接。
+    _sync_lock: SyncDistributedLock | None = None
+    # 共享 client（懒建；默认路径持有）。override 注入替身时不清——已建 client 留待
+    # aclose() 关闭，防 override-after-get 泄漏真连接。async 与 sync 各一。
     _client = None
+    _sync_client = None
 
     @classmethod
-    def get(cls) -> DistributedLock:
-        """取 ``DistributedLock``（默认装配 ``AsyncRedisLockAdapter`` + 懒共享 client）。"""
+    def get(cls, *, sync: bool = False) -> DistributedLock | SyncDistributedLock:
+        """取 ``DistributedLock``（默认 async；sync=True 取 sync 形态的锁）。
+
+        async 槽默认装配 ``AsyncRedisLockAdapter`` + 懒共享 redis.asyncio client；
+        sync 槽默认装配 ``SyncRedisLockAdapter`` + 懒共享 redis.Redis client。
+        """
+        if sync:
+            if cls._sync_lock is None:
+                cls._sync_lock = cls._build_sync_default()
+            return cls._sync_lock
         if cls._lock is None:
             cls._lock = cls._build_default()
         return cls._lock
 
     @classmethod
-    def override(cls, lock: DistributedLock) -> None:
-        """测试注入替身（FakeLock）。
+    def override(cls, lock, *, sync: bool = False) -> None:
+        """测试注入替身（FakeLock 走 sync=False；FakeLockSync 走 sync=True）。
 
-        注入路径不构造新默认 client；但保留任何先前已建共享 client 在 ``_client`` 上，
+        注入路径不构造新默认 client；但保留任何先前已建共享 client 在对应槽位上，
         由 ``aclose()`` 负责关闭——防 override-after-get 把真连接丢成孤儿。
         """
-        cls._lock = lock
+        if sync:
+            cls._sync_lock = lock
+        else:
+            cls._lock = lock
 
     @classmethod
     def reset(cls) -> None:
         """复原单例（不关闭已共享 client——关 client 走 aclose()；测试先行 aclose 再 reset）。"""
         cls._lock = None
+        cls._sync_lock = None
         cls._client = None
+        cls._sync_client = None
 
     @classmethod
     async def aclose(cls) -> None:
-        """关闭共享 client 并复原单例。**仅测试 teardown 调用**（生产不挂全局 shutdown 钩子）。
+        """关闭全部共享 client 并复原单例。**仅测试 teardown 调用**（生产不挂全局钩子）。
 
         幂等：未 get（无共享 client）或 override 注入替身（无共享 client）时为 no-op。
         """
-        client, cls._client, cls._lock = cls._client, None, None
-        if client is not None:
+        clients = [c for c in (cls._client, cls._sync_client) if c is not None]
+        cls._lock = None
+        cls._sync_lock = None
+        cls._client = None
+        cls._sync_client = None
+        for client in clients:
             await client.aclose()
 
     @classmethod
     def _build_default(cls) -> DistributedLock:
-        """懒构造默认 ``AsyncRedisLockAdapter`` + 单个共享 client（settings.REDIS_URL 唯一读取处）。
+        """懒构造 async 默认 adapter + 单个共享 redis.asyncio client（settings.REDIS_URL 读取处）。
 
-        ``redis.asyncio.from_url`` 只建连接池、不握手——**import/reset 期零 IO**，首个 get 才建
-        （连接池到首个 Redis 命令才触网）。单节点**无需 Redlock**（#248）。
+        ``redis.asyncio.from_url`` 只建连接池、不握手——**import/reset 期零 IO**，首个 get
+        才建（连接池到首个 Redis 命令才触网）。单节点**无需 Redlock**（#248）。
         """
         from django.conf import settings
 
         cls._client = _redis_from_url(settings.REDIS_URL)
         return AsyncRedisLockAdapter(cls._client)
+
+    @classmethod
+    def _build_sync_default(cls) -> SyncDistributedLock:
+        """懒构造 sync 默认 adapter + 单个共享 redis.Redis client（settings.REDIS_URL 读取处）。
+
+        ``Redis.from_url`` 只建连接池、不握手——**import/reset 期零 IO**，首个 get
+        才建。单节点**无需 Redlock**（#248）。
+        """
+        from django.conf import settings
+
+        cls._sync_client = _Redis.from_url(settings.REDIS_URL)
+        return SyncRedisLockAdapter(cls._sync_client)

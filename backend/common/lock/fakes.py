@@ -18,10 +18,18 @@
 from __future__ import annotations
 
 import asyncio
+import threading
+import time
 from dataclasses import dataclass
 from datetime import timedelta
 
-from common.lock.ports import LeaseHandle, LockResource, PairingResource, ProvisionResource
+from common.lock.ports import (
+    LeaseHandle,
+    LockResource,
+    PairingResource,
+    ProvisionResource,
+    SyncLeaseHandle,
+)
 
 # 闭合 tagged union 的具体变体集合：FakeLock 运行时只认这两个（防 KV 逃逸口 #246 Q6）。
 # 新增资源用途（新增 LockResource 变体）须同步登记到此元组，否则 FakeLock 抛 TypeError。
@@ -120,3 +128,113 @@ class FakeLock:
         if entry is not None and entry.expires_at > self._now():
             return None
         return self._claim(resource, ttl)
+
+
+class FakeLockSync:
+    """DistributedLock Port 的**线程安全**内存 fake（sync 形态，issue #254）。
+
+    #254 裁决：sync 侧是同一 Port 契约的 threading 形态，不做独立契约——acquire 阻塞
+    语义用 ``threading.Event``（有界等待，非空转轮询）；租约随 TTL 自动过期、不 resurrect；
+    renew 无返回值（对齐 async renew 契约）；release 幂等且只释放自己的租约。
+    与 FakeLock 同构：内存 dict 模拟 TTL/持有者 + 记录调用。测试经
+    ``LockFleet.override(FakeLockSync, sync=True)`` 或构造注入使用。
+    """
+
+    def __init__(self) -> None:
+        self._mutex = threading.RLock()
+        self._held: dict[LockResource, tuple[float, FakeLockSyncLease]] = {}
+        self.acquire_calls: list[tuple[LockResource, timedelta]] = []
+        self.try_acquire_calls: list[tuple[LockResource, timedelta]] = []
+        self.renew_calls: list[tuple[LockResource, timedelta]] = []
+        self.release_calls: list[tuple[LockResource, bool]] = []
+
+    @staticmethod
+    def _now() -> float:
+        return time.monotonic()
+
+    @staticmethod
+    def _validate_resource(resource: LockResource) -> None:
+        """防 KV 逃逸口（#246 Q6）：只收闭合 tagged union 的具体变体，绝收裸 string。"""
+        if not isinstance(resource, _RESOURCE_VARIANTS):
+            raise TypeError(
+                'resource 必须为闭合 LockResource tagged union'
+                f'（{"/".join(v.__name__ for v in _RESOURCE_VARIANTS)}），'
+                f'收到 {type(resource).__name__}',
+            )
+
+    def _entry_live(self, entry) -> bool:
+        return entry[0] > self._now()
+
+    def _is_held(self, resource: LockResource, handle) -> bool:
+        entry = self._held.get(resource)
+        return entry is not None and entry[1] is handle and self._entry_live(entry)
+
+    def _claim(self, resource: LockResource, ttl: timedelta) -> FakeLockSyncLease:
+        handle = FakeLockSyncLease(self, resource)
+        self._held[resource] = (self._now() + ttl.total_seconds(), handle)
+        return handle
+
+    def acquire(self, resource: LockResource, ttl: timedelta) -> SyncLeaseHandle:
+        """阻塞获取租约：被他人持有（未过期）则等待释放/过期后再获取（Event 有界等待）。"""
+        self._validate_resource(resource)
+        with self._mutex:
+            self.acquire_calls.append((resource, ttl))
+        while True:
+            with self._mutex:
+                entry = self._held.get(resource)
+                if entry is None or not self._entry_live(entry):
+                    return self._claim(resource, ttl)
+                waiter = threading.Event()
+                entry[1]._waiters.add(waiter)
+            try:
+                if not waiter.wait(timeout=max(0.05, ttl.total_seconds())):
+                    continue  # 等待超时（未 release）→ 重查（租约可能已过期）
+            finally:
+                entry[1]._waiters.discard(waiter)
+
+    def try_acquire(self, resource: LockResource, ttl: timedelta) -> SyncLeaseHandle | None:
+        """非阻塞获取租约：已被持有（未过期）返回 None。"""
+        self._validate_resource(resource)
+        with self._mutex:
+            self.try_acquire_calls.append((resource, ttl))
+            entry = self._held.get(resource)
+            if entry is not None and self._entry_live(entry):
+                return None
+            return self._claim(resource, ttl)
+
+
+class FakeLockSyncLease:
+    """LeaseHandle Port 的 sync fake：续约/释放转发到 FakeLockSync 并记录调用。
+
+    持一个 ``threading.Event`` 集合（``_waiters``）：release 时 set 唤醒阻塞 acquire。
+    """
+
+    def __init__(self, lock: FakeLockSync, resource: LockResource) -> None:
+        self._lock = lock
+        self._resource = resource
+        self._released = False
+        self._waiters: set[threading.Event] = set()
+
+    def renew(self, new_ttl: timedelta) -> None:
+        """续租：仍持有且未过期则延长 TTL；否则 no-op（不 resurrect 锁）。"""
+        if not self._released and self._lock._is_held(self._resource, self):
+            with self._lock._mutex:
+                entry = self._lock._held.get(self._resource)
+                if entry is not None and entry[1] is self:
+                    self._lock._held[self._resource] = (
+                        self._lock._now() + new_ttl.total_seconds(), self,
+                    )
+        self._lock.renew_calls.append((self._resource, new_ttl))
+
+    def release(self) -> None:
+        """释放租约（幂等）；只释放自己的租约，并唤醒所有阻塞 acquire。"""
+        already_released = self._released
+        if not already_released:
+            self._released = True
+            with self._lock._mutex:
+                entry = self._lock._held.get(self._resource)
+                if entry is not None and entry[1] is self:
+                    self._lock._held.pop(self._resource, None)
+            for waiter in list(self._waiters):
+                waiter.set()
+        self._lock.release_calls.append((self._resource, already_released))

@@ -134,6 +134,134 @@ class TestOverrideReset:
         assert spy and spy[0].closed, 'override 后已建 client 应由 aclose 关闭，不泄漏'
 
 
+class TestSyncSlot:
+    """#254 AC：sync 槽位（get(sync=True)/override(lock, sync=True)）独立于 async 槽位。
+
+    sync 侧是同一 Port 的 threading 形态——locator 需为 sync 调用点（orchestrator/pairing）
+    提供独立装配，不串扰 async 槽（不假装一个 asyncio Lock 服务 sync 线程，#247 D3）。
+    """
+
+    def test_get_sync_builds_sync_adapter(self, monkeypatch):
+        from common.lock.adapters import SyncRedisLockAdapter
+
+        class _FakeRedis:
+            @staticmethod
+            def from_url(url):
+                return _SpyClient(url)
+
+        monkeypatch.setattr('common.lock.locator._Redis', _FakeRedis)
+        lock = LockFleet.get(sync=True)
+
+        assert isinstance(lock, SyncRedisLockAdapter)
+
+    def test_get_sync_uses_redis_from_url(self, monkeypatch, settings):
+        """sync 槽懒建共享 client 经 ``Redis.from_url(settings.REDIS_URL)``（settings 唯一读取处）。"""
+        settings.REDIS_URL = 'redis://example:6380/3'
+        spy: list[_SpyClient] = []
+
+        class _FakeRedis:
+            @staticmethod
+            def from_url(url):
+                spy.append(_SpyClient(url))
+                return spy[0]
+
+        monkeypatch.setattr('common.lock.locator._Redis', _FakeRedis)
+
+        LockFleet.get(sync=True)
+
+        assert spy and spy[0].url == 'redis://example:6380/3'
+
+    def test_sync_slot_reuses_single_client(self, monkeypatch):
+        built: list[_SpyClient] = []
+
+        class _FakeRedis:
+            @staticmethod
+            def from_url(url):
+                built.append(_SpyClient(url))
+                return built[0]
+
+        monkeypatch.setattr('common.lock.locator._Redis', _FakeRedis)
+
+        first = LockFleet.get(sync=True)
+        second = LockFleet.get(sync=True)
+
+        assert first is second
+        assert len(built) == 1, 'sync client 应只构造一次（懒共享）'
+
+    def test_override_sync_injects_fake_and_get_returns_it(self):
+        from common.lock.fakes import FakeLockSync
+
+        fake = FakeLockSync()
+        LockFleet.override(fake, sync=True)
+
+        assert LockFleet.get(sync=True) is fake
+
+    def test_sync_and_async_slots_are_independent(self):
+        """async 与 sync 槽互不串扰：override sync 不影响 async get，反之亦然。"""
+        from common.lock.fakes import FakeLock, FakeLockSync
+
+        fake_async = FakeLock()
+        fake_sync = FakeLockSync()
+        LockFleet.override(fake_async)  # async 槽
+        LockFleet.override(fake_sync, sync=True)  # sync 槽
+
+        assert LockFleet.get() is fake_async
+        assert LockFleet.get(sync=True) is fake_sync
+
+    def test_override_sync_does_not_build_default_client(self, monkeypatch):
+        built: list[_SpyClient] = []
+
+        class _FakeRedis:
+            @staticmethod
+            def from_url(url):
+                built.append(_SpyClient(url))
+                return built[0]
+
+        monkeypatch.setattr('common.lock.locator._Redis', _FakeRedis)
+        from common.lock.fakes import FakeLockSync
+
+        LockFleet.override(FakeLockSync(), sync=True)
+        LockFleet.get(sync=True)
+
+        assert not built, 'override 注入时不应构造默认 client'
+
+    async def test_aclose_closes_sync_client(self, monkeypatch):
+        spy: list[_SpyClient] = []
+
+        class _FakeRedis:
+            @staticmethod
+            def from_url(url):
+                spy.append(_SpyClient(url))
+                return spy[0]
+
+        monkeypatch.setattr('common.lock.locator._Redis', _FakeRedis)
+        LockFleet.get(sync=True)
+
+        await LockFleet.aclose()
+
+        assert spy and spy[0].closed, 'aclose 应关闭 sync 共享 client'
+
+    async def test_aclose_closes_both_slots(self, monkeypatch):
+        spy: list[_SpyClient] = []
+
+        class _FakeRedis:
+            @staticmethod
+            def from_url(url):
+                spy.append(_SpyClient(url))
+                return spy[-1]
+
+        monkeypatch.setattr('common.lock.locator._Redis', _FakeRedis)
+        monkeypatch.setattr(
+            'common.lock.locator._redis_from_url', lambda url: spy.append(_SpyClient(url)) or spy[-1],
+        )
+        LockFleet.get()  # async 槽
+        LockFleet.get(sync=True)  # sync 槽
+
+        await LockFleet.aclose()
+
+        assert len(spy) == 2 and all(c.closed for c in spy), 'aclose 应关 async+sync 双 client'
+
+
 class TestAclose:
     """#247 D6：aclose() 关共享 client，仅测试 teardown 调用；幂等。"""
 

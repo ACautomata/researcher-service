@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import threading
+import time
 from datetime import timedelta
 
 import pytest
@@ -25,6 +27,7 @@ import pytest
 from common.lock.ports import DistributedLock as _DistributedLockPort
 from common.lock.ports import LeaseHandle as _LeaseHandlePort
 from common.lock.ports import LockResource
+from common.lock.ports import SyncLeaseHandle as _SyncLeaseHandlePort
 
 
 def _lock_attr_signature_shape(cls, name):
@@ -55,6 +58,9 @@ _LOCK_PORT_METHODS = tuple(
 _LEASE_HANDLE_METHODS = tuple(
     n for n in dir(_LeaseHandlePort) if not n.startswith('_')
 )
+_SYNC_LEASE_HANDLE_METHODS = tuple(
+    n for n in dir(_SyncLeaseHandlePort) if not n.startswith('_')
+)
 
 
 @pytest.mark.parametrize('method', _LOCK_PORT_METHODS)
@@ -83,6 +89,54 @@ def test_lock_method_signature_isomorphic_across_port_fake_adapter(method):
     )
 
 
+@pytest.mark.parametrize('method', _LOCK_PORT_METHODS)
+def test_lock_method_signature_isomorphic_across_port_sync_fake(method):
+    """#254：DistributedLock 每个方法在 Port / FakeLockSync 三方签名同构（向下闭合）。
+
+    sync 侧实现（FakeLockSync）须与 async 侧同构——sync 只是同一 Port 契约的
+    threading 形态（T4 裁决），签名形状一致才有「同构」可言。
+    """
+    from common.lock.fakes import FakeLockSync
+
+    port_shape = _lock_attr_signature_shape(_DistributedLockPort, method)
+    sync_shape = _lock_attr_signature_shape(FakeLockSync, method)
+
+    assert sync_shape == port_shape, (
+        f'FakeLockSync.{method} 签名漂离 Port：port={port_shape} sync={sync_shape}'
+    )
+
+
+@pytest.mark.parametrize('method', _LOCK_PORT_METHODS)
+def test_lock_method_signature_isomorphic_across_port_sync_adapter(method):
+    """#254：DistributedLock 每个方法在 Port / SyncRedisLockAdapter 三方签名同构（向下闭合）。
+
+    sync adapter 是同一 Port 的 threading 形态（T4 裁决）——签名形状须与 async 侧一致，
+    否则 sync 调用点（orchestrator/pairing）无法按 Port 契约取锁。
+    """
+    from common.lock.adapters import SyncRedisLockAdapter
+
+    port_shape = _lock_attr_signature_shape(_DistributedLockPort, method)
+    sync_shape = _lock_attr_signature_shape(SyncRedisLockAdapter, method)
+
+    assert sync_shape == port_shape, (
+        f'SyncRedisLockAdapter.{method} 签名漂离 Port：port={port_shape} sync={sync_shape}'
+    )
+
+
+@pytest.mark.parametrize('method', _LOCK_PORT_METHODS)
+def test_sync_lock_satisfies_sync_port(method):
+    """#254：sync 侧实现（SyncRedisLockAdapter/FakeLockSync）满足 SyncDistributedLock Port。
+
+    isinstance(runtime_checkable Protocol) 验证 sync Port 面的方法存在性。
+    """
+    from common.lock.adapters import SyncRedisLockAdapter
+    from common.lock.fakes import FakeLockSync
+    from common.lock.ports import SyncDistributedLock as _SyncPort
+
+    assert isinstance(SyncRedisLockAdapter(object()), _SyncPort)  # 构造惰性，不连 Redis
+    assert isinstance(FakeLockSync(), _SyncPort)
+
+
 @pytest.mark.parametrize('method', _LEASE_HANDLE_METHODS)
 def test_lease_handle_signature_isomorphic_across_port_fake_adapter(method):
     """#251/#253：LeaseHandle 每个方法在 Port / Fake / Adapter 三方签名同构（契约公开面全覆盖）。"""
@@ -99,6 +153,28 @@ def test_lease_handle_signature_isomorphic_across_port_fake_adapter(method):
     assert adapter_shape == port_shape, (
         f'_RedisLeaseHandle.{method} 签名漂离 Port：'
         f'port={port_shape} adapter={adapter_shape}'
+    )
+
+
+@pytest.mark.parametrize('method', _SYNC_LEASE_HANDLE_METHODS)
+def test_sync_lease_handle_signature_isomorphic_across_port_impls(method):
+    """#254：SyncLeaseHandle 每个方法在 Port / sync 实现三方签名同构（AC3 锁步全覆盖）。
+
+    sync 形态的 lease handle（SyncRedisLeaseHandle / FakeLockSyncLease）同样受同构守卫——
+    签名漂移在测试期失败而非生产 TypeError（对齐 async 侧 guard）。
+    """
+    from common.lock.adapters import SyncRedisLeaseHandle
+    from common.lock.fakes import FakeLockSyncLease
+
+    port_shape = _lock_attr_signature_shape(_SyncLeaseHandlePort, method)
+    adapter_shape = _lock_attr_signature_shape(SyncRedisLeaseHandle, method)
+    fake_shape = _lock_attr_signature_shape(FakeLockSyncLease, method)
+
+    assert adapter_shape == port_shape, (
+        f'SyncRedisLeaseHandle.{method} 签名漂离 Port：port={port_shape} impl={adapter_shape}'
+    )
+    assert fake_shape == port_shape, (
+        f'FakeLockSyncLease.{method} 签名漂离 Port：port={port_shape} impl={fake_shape}'
     )
 
 
@@ -302,3 +378,149 @@ class TestFakeLockSatisfiesPort:
         from common.lock.ports import PairingResource, ProvisionResource
 
         assert LockResource == ProvisionResource | PairingResource
+
+
+class TestFakeLockSyncBehavior:
+    """FakeLockSync 契约行为（#254 sync 形态）：threading 语义 + 内存 TTL + 记录调用。
+
+    sync 侧实现须与 async 侧同构（同一 Port 契约的 threading 形态）——acquire 阻塞语义
+    用 threading.Event（有界等待）而非空转轮询；renew 无返回值（async renew 契约）；
+    TTL 到期自动释放、不 resurrect。
+    """
+
+    def test_satisfies_port(self):
+        from common.lock.fakes import FakeLockSync
+
+        assert isinstance(FakeLockSync(), _DistributedLockPort), (
+            'FakeLockSync 应满足 DistributedLock Port（runtime_checkable Protocol）'
+        )
+
+    def test_try_acquire_returns_lease_and_records_call(self):
+        from common.lock.fakes import FakeLockSync
+
+        lock = FakeLockSync()
+        handle = lock.try_acquire(_fresh_resource(), ttl=timedelta(seconds=60))
+
+        assert handle is not None
+        assert not lock.acquire_calls
+        assert len(lock.try_acquire_calls) == 1
+        assert lock.try_acquire_calls[0][0] == _fresh_resource()
+        assert lock.try_acquire_calls[0][1] == timedelta(seconds=60)
+
+    def test_acquire_returns_lease_and_records_call(self):
+        from common.lock.fakes import FakeLockSync
+
+        lock = FakeLockSync()
+        handle = lock.acquire(_fresh_resource(), ttl=timedelta(seconds=60))
+
+        assert handle is not None
+        assert len(lock.acquire_calls) == 1
+        assert not lock.try_acquire_calls
+
+    def test_second_try_acquire_on_held_resource_returns_none(self):
+        from common.lock.fakes import FakeLockSync
+
+        lock = FakeLockSync()
+        lock.acquire(_fresh_resource(), ttl=timedelta(seconds=60))
+
+        assert lock.try_acquire(_fresh_resource(), ttl=timedelta(seconds=60)) is None
+
+    def test_distinct_resources_do_not_conflict(self):
+        from common.lock.fakes import FakeLockSync
+        from common.lock.ports import PairingResource, ProvisionResource
+
+        lock = FakeLockSync()
+        lock.acquire(ProvisionResource('gw-a'), ttl=timedelta(seconds=60))
+
+        pairing_handle = lock.try_acquire(
+            PairingResource(instance_id=7), ttl=timedelta(seconds=60),
+        )
+        assert pairing_handle is not None
+
+    def test_acquire_blocks_until_release_then_succeeds(self):
+        """#254：sync acquire 阻塞——被持有期间等待，持有方 release 后取得（Event 有界等待）。"""
+        from common.lock.fakes import FakeLockSync
+
+        lock = FakeLockSync()
+        holder = lock.acquire(_fresh_resource(), ttl=timedelta(seconds=60))
+
+        box: dict = {}
+        started = threading.Event()
+
+        def _blocked_acquire():
+            started.set()
+            box['handle'] = lock.acquire(_fresh_resource(), ttl=timedelta(seconds=60))
+
+        blocked = threading.Thread(target=_blocked_acquire)
+        blocked.start()
+        assert started.wait(timeout=1), 'acquire 线程应已启动'
+        time.sleep(0.02)  # 给线程进入阻塞等待的时间
+        assert 'handle' not in box, 'release 前阻塞 acquire 不应返回'
+
+        holder.release()
+        blocked.join(timeout=2)
+
+        assert 'handle' in box, 'release 后阻塞 acquire 应返回'
+        assert len(lock.acquire_calls) == 2
+
+    def test_release_frees_resource_and_records_call(self):
+        from common.lock.fakes import FakeLockSync
+
+        lock = FakeLockSync()
+        handle = lock.acquire(_fresh_resource(), ttl=timedelta(seconds=60))
+        assert lock.try_acquire(_fresh_resource(), ttl=timedelta(seconds=60)) is None
+
+        handle.release()
+
+        assert lock.try_acquire(_fresh_resource(), ttl=timedelta(seconds=60)) is not None
+        assert len(lock.release_calls) == 1
+
+    def test_release_is_idempotent(self):
+        from common.lock.fakes import FakeLockSync
+
+        lock = FakeLockSync()
+        handle = lock.acquire(_fresh_resource(), ttl=timedelta(seconds=60))
+
+        handle.release()
+        handle.release()
+
+        assert len(lock.release_calls) == 2
+
+    def test_renew_extends_lease_and_records_call(self):
+        from common.lock.fakes import FakeLockSync
+
+        lock = FakeLockSync()
+        handle = lock.acquire(_fresh_resource(), ttl=timedelta(seconds=60))
+        handle.renew(timedelta(seconds=300))
+
+        assert len(lock.renew_calls) == 1
+        assert lock.renew_calls[0][1] == timedelta(seconds=300)
+
+    def test_lease_expires_after_ttl_and_frees_resource(self):
+        from common.lock.fakes import FakeLockSync
+
+        lock = FakeLockSync()
+        lock.acquire(_fresh_resource(), ttl=timedelta(milliseconds=20))
+        time.sleep(0.05)
+
+        assert lock.try_acquire(_fresh_resource(), ttl=timedelta(seconds=60)) is not None
+
+    def test_renew_after_expiry_is_noop(self):
+        from common.lock.fakes import FakeLockSync
+
+        lock = FakeLockSync()
+        handle = lock.acquire(_fresh_resource(), ttl=timedelta(milliseconds=20))
+        time.sleep(0.05)
+
+        handle.renew(timedelta(seconds=60))  # 已过期：不 resurrect 锁
+
+        assert lock.try_acquire(_fresh_resource(), ttl=timedelta(seconds=60)) is not None
+
+    def test_bare_string_resource_rejected(self):
+        from common.lock.fakes import FakeLockSync
+
+        lock = FakeLockSync()
+        with pytest.raises(TypeError):
+            lock.try_acquire('gw-a', ttl=timedelta(seconds=60))  # type: ignore[arg-type]
+        with pytest.raises(TypeError):
+            lock.acquire('gw-a', ttl=timedelta(seconds=60))  # type: ignore[arg-type]

@@ -89,3 +89,39 @@ class DistributedLock(Protocol):
         :return: 获取成功返回 ``LeaseHandle``；已被他人持有返回 ``None``。
         """
         ...
+
+
+@runtime_checkable
+class SyncLeaseHandle(Protocol):
+    """LeaseHandle Port 的 **sync 形态**（issue #254 / parent #243）。
+
+    T4 裁决：sync 侧是同一 Port 契约的 threading 实现，不做独立契约——renew/release
+    由 ``async`` 换成阻塞调用，语义一致（租约折叠进 TTL+renew，无独立 Lease 子类型）。
+    """
+
+    def renew(self, new_ttl: timedelta) -> None:
+        """将租约 TTL 续至 ``new_ttl``；租约已过期时 no-op（不 resurrect 锁）。"""
+        ...
+
+    def release(self) -> None:
+        """释放租约（幂等）；此后再次 release 不再生效。"""
+        ...
+
+
+@runtime_checkable
+class SyncDistributedLock(Protocol):
+    """窄分布式锁 Port 的 **sync 形态**（issue #254 / parent #243）。
+
+    仅签名同构（方法名 / 参数类别·默认值一致），把 ``async`` 换成阻塞调用——sync
+    调用点（orchestrator create / pairing threadpool）直接取本形态，**不经** async
+    adapter 桥接（threadpool 内嵌套事件环是硬约束，#247 D3）。防 KV 逃逸口同 async：
+    仅露 acquire/try_acquire，无 get/set/通用 KV。
+    """
+
+    def acquire(self, resource: LockResource, ttl: timedelta) -> SyncLeaseHandle:
+        """阻塞获取 ``resource`` 的租约（持有至 release / TTL 过期）。"""
+        ...
+
+    def try_acquire(self, resource: LockResource, ttl: timedelta) -> SyncLeaseHandle | None:
+        """非阻塞获取 ``resource`` 的租约；已被他人持有返回 ``None``。"""
+        ...
