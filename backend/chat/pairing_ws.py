@@ -45,7 +45,23 @@ class PairingRequired(Exception):
 
 
 class PairingError(Exception):
-    """配对握手其它失败（网络/协议/认证错误）。"""
+    """配对握手其它失败（网络/协议/认证错误）。
+
+    retryable=True 表示网关显式标为瞬态恢复（errorShape retryable:true，如冷启动期
+    ``gateway starting; retry shortly``），调用方应稍后重试而非判定失败。retry_after_ms
+    为网关建议的等待毫秒（仅 retryable 时有意义），未下发时为 None。
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        retryable: bool = False,
+        retry_after_ms: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.retryable = retryable
+        self.retry_after_ms = retry_after_ms
 
 
 class PairingHandshake:
@@ -134,4 +150,11 @@ class PairingHandshake:
             if not isinstance(request_id, str) or not request_id:
                 raise PairingError('PAIRING_REQUIRED response missing requestId')
             raise PairingRequired(request_id)
-        raise PairingError(error.get('message') or error.get('code') or 'connect failed')
+        raise PairingError(
+            error.get('message') or error.get('code') or 'connect failed',
+            # gateway 冷启动期返回 ``gateway starting; retry shortly``（errorShape
+            # retryable:true, retryAfterMs:500）——显式瞬态恢复信号，透传给调用方重试，
+            # 而非当确定失败。见 message-handler-*.js isStartupPending 分支。
+            retryable=bool(error.get('retryable', False)),
+            retry_after_ms=error.get('retryAfterMs'),
+        )

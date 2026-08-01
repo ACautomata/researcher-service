@@ -115,7 +115,7 @@ def test_times_out_when_never_paired():
 
 
 def test_propagates_pairing_error_without_retry():
-    # PairingError（非 PAIRING_REQUIRED）不可重试，立即传播，且不 approve
+    # 非 retryable 的 PairingError（连接拒绝/协议错）不可重试，立即传播，且不 approve
     service = _FakePairingService([PairingError('boom')])
     pairer, approved = _make_pairer(service)
 
@@ -124,6 +124,52 @@ def test_propagates_pairing_error_without_retry():
 
     assert not approved             # PairingError 不 approve
     assert service.calls == 1
+
+
+def test_retries_retryable_pairing_error_then_succeeds():
+    # 网关显式标 retryable 的 PairingError（冷启动期 gateway starting; retry shortly）
+    # 应轮询重试至成功，而非判定失败
+    service = _FakePairingService(
+        [PairingError('gateway starting; retry shortly', retryable=True), _PAIRED],
+    )
+    pairer, approved = _make_pairer(service)
+
+    result = pairer.pair(instance=None)
+
+    assert result is _PAIRED
+    assert not approved             # retryable 错误不触发 approve
+    assert service.calls == 2
+
+
+def test_retries_retryable_pairing_error_repeatedly():
+    # 冷启动窗口可能持续多次（/health 绿但主循环未就绪），须重试直到 deadline
+    service = _FakePairingService(
+        [
+            PairingError('gateway starting; retry shortly', retryable=True),
+            PairingError('gateway starting; retry shortly', retryable=True),
+            _PAIRED,
+        ],
+    )
+    pairer, approved = _make_pairer(service)
+
+    result = pairer.pair(instance=None)
+
+    assert result is _PAIRED
+    assert service.calls == 3
+
+
+def test_times_out_when_retryable_pairing_error_never_resolves():
+    # retryable 错误持续到 deadline → PairingApprovalTimeout（与 PairingRequired 同路径）
+    service = _FakePairingService(
+        [PairingError('gateway starting; retry shortly', retryable=True)],
+    )
+    pairer, approved = _make_pairer(service, timeout=5.0, interval=1.0)
+
+    with pytest.raises(PairingApprovalTimeout):
+        pairer.pair(instance=None)
+
+    assert not approved             # 全程未到 approve 阶段
+    assert service.calls == 6       # 每次 sleep(1)，至 now>=deadline 终止
 
 
 # —— GatewayReadinessWaiter：网关冷启动就绪轮询（codex P2，配对前等 /health）——

@@ -127,6 +127,19 @@ async def test_handshake_other_error_raises_pairing_error(identity):
         await hs.pair(url='ws://127.0.0.1:19000/', token='gw-tok', identity=identity)
 
 
+@pytest.mark.asyncio
+async def test_handshake_propagates_retryable_flag_on_startup_pending(identity):
+    """网关冷启动期 ``gateway starting; retry shortly``（errorShape retryable:true）应透传
+    retryable 标志与 retryAfterMs，供调用方（ApprovalPairer）重试而非当确定失败。"""
+    hs = PairingHandshake(transport=FakeTransport.startup_pending())
+    with pytest.raises(PairingError) as exc_info:
+        await hs.pair(url='ws://127.0.0.1:19000/', token='gw-tok', identity=identity)
+
+    assert exc_info.value.retryable is True
+    assert exc_info.value.retry_after_ms == 500
+    assert 'retry shortly' in str(exc_info.value)
+
+
 # ---------------------------- 乱序帧容错（codex R protocol/correctness）----------------------------
 
 
