@@ -41,6 +41,9 @@ services:
       DJANGO_SETTINGS_MODULE: config.settings.prod
       REDIS_URL: redis://redis:6379/0
       OPENCLAW_TEMPLATE_DIR: /srv/openclaw/template
+      # openclaw.json 模板文件：镜像内默认 <repo>/deploy/openclaw.json 解析到 /deploy（不存在），
+      # 首次创建容器即 500；此处注入挂载文件路径（下方 ./openclaw.json 挂载到 /app/deploy/）。
+      OPENCLAW_TEMPLATE_JSON: /app/deploy/openclaw.json
       DATABASE_NAME: /app/db/db.sqlite3
     volumes:
       # 控制面等价 root：经宿主 docker.sock 增删查 OpenClaw 容器（spec §5.4 已明示风险）。
@@ -50,6 +53,10 @@ services:
       - panel-db:/app/db
       # researcher 模板（home 预填充 cp -a 源）：宿主克隆只读挂载。
       - /srv/openclaw/template:/srv/openclaw/template:ro
+      # openclaw.json 模板（配置单一来源，与单容器 compose 共用一份 deploy/openclaw.json）：
+      # CD 分发到宿主 /www/panel/openclaw.json（compose 同目录），挂载进后端容器覆盖镜像内
+      # 不存在的默认路径（/app/deploy/openclaw.json），首次创建容器不再 500。
+      - ./openclaw.json:/app/deploy/openclaw.json:ro
     networks:
       - panel-net
 

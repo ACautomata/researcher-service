@@ -76,7 +76,13 @@ python3 -c "import base64,os;print(base64.urlsafe_b64encode(os.urandom(32)).deco
 
 `DJANGO_SECRET_KEY` · `DJANGO_ALLOWED_HOSTS` · `LLM_API_KEY` · `REDIS_URL`（compose 固定
 `redis://redis:6379/0`）· `OPENCLAW_TEMPLATE_DIR`（compose 固定 `/srv/openclaw/template`）·
+`OPENCLAW_TEMPLATE_JSON`（compose 固定 `/app/deploy/openclaw.json`，挂载 `./openclaw.json`）·
 `CREDENTIAL_ENCRYPTION_KEYS`。
+
+> 说明：`OPENCLAW_TEMPLATE_JSON` 指向后端镜像内挂载的 openclaw.json 模板文件（配置单一来源，
+> 与单容器 compose 共用 `deploy/openclaw.json`）。镜像构建 context=backend 不含 `deploy/`，
+> 默认路径解析到 `/deploy` 不存在——首次创建容器会裸 500；CD 分发 `deploy/openclaw.json` 到
+> 宿主 `/www/panel/` 并经 compose 挂载注入（见 `docker-compose.deploy.yml`）。
 
 ## 回滚
 

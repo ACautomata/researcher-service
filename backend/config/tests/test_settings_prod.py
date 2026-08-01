@@ -18,6 +18,9 @@ from config.settings._validation import validate_prod_env
 # = backend/config）。validate_prod_env 现要求 OPENCLAW_TEMPLATE_DIR 不仅是绝对路径，
 # 还必须是已存在目录（codex P2 :292d349），故「通过用」必须给真实存在的目录。
 _EXISTING_DIR = str(Path(__file__).resolve().parent.parent)
+# OPENCLAW_TEMPLATE_JSON 校验要求已存在的文件（ConfigRenderer 以 JSON 解析模板）；
+# 用本测试文件自身作为真实存在的文件路径。
+_EXISTING_FILE = str(Path(__file__).resolve())
 
 
 def _minimal_env(**overrides):
@@ -25,6 +28,7 @@ def _minimal_env(**overrides):
     base = {
         'DJANGO_ALLOWED_HOSTS': 'example.test',
         'OPENCLAW_TEMPLATE_DIR': _EXISTING_DIR,
+        'OPENCLAW_TEMPLATE_JSON': _EXISTING_FILE,
         'LLM_API_KEY': 'sk-prod-test',
         'REDIS_URL': 'redis://redis:6379/0',
     }
@@ -239,3 +243,60 @@ def test_validate_prod_env_fail_fast_when_redis_url_whitespace_only():
     """REDIS_URL 仅空白 → 仍 fail-fast（防运维误设含缩进的空值）。"""
     with __import__('pytest').raises(ImproperlyConfigured):
         validate_prod_env(_minimal_env(REDIS_URL='   '))
+
+
+# ---- OPENCLAW_TEMPLATE_JSON 生产 fail-fast ----
+# openclaw.json 模板文件（配置单一来源，与单容器 compose 共用 deploy/openclaw.json）。
+# base.py 默认 <repo>/deploy/openclaw.json 仅适用开发/CI；生产镜像化后端（context=backend +
+# COPY . /app）里 BASE_DIR.parent/deploy 解析成 /deploy 且不存在 → 首次创建容器裸 500
+# （orchestrator.create 惰性 read_text → FileNotFoundError，view 未捕获）。生产须经 compose
+# 挂载文件 + 注入绝对路径，启动期 fail-fast 让运维立即知道，而非首次创建容器才暴露。
+
+
+def test_validate_prod_env_ok_when_template_json_set():
+    """OPENCLAW_TEMPLATE_JSON 提供已存在的绝对文件 → 正常通过（与其它必填项一起）。"""
+    validate_prod_env(_minimal_env())  # 不抛即通过
+
+
+def test_validate_prod_env_fail_fast_when_template_json_missing():
+    """OPENCLAW_TEMPLATE_JSON 缺失 → ImproperlyConfigured（运维启动即知，而非首次创建 500）。"""
+    env = _minimal_env()
+    env.pop('OPENCLAW_TEMPLATE_JSON')
+    with __import__('pytest').raises(ImproperlyConfigured) as ei:
+        validate_prod_env(env)
+    msg = str(ei.value)
+    assert 'OPENCLAW_TEMPLATE_JSON' in msg
+    assert '生产' in msg and ('必填' in msg or '必设' in msg or '必须' in msg)
+    assert 'deploy/README.md' in msg or 'deploy/.env.example' in msg, (
+        f'错误消息应指向部署文档，当前: {msg!r}'
+    )
+
+
+def test_validate_prod_env_fail_fast_when_template_json_relative():
+    """OPENCLAW_TEMPLATE_JSON 相对路径 → fail-fast（镜像内 BASE_DIR 是容器路径，相对会被 cwd 吞）。"""
+    with __import__('pytest').raises(ImproperlyConfigured) as ei:
+        validate_prod_env(_minimal_env(OPENCLAW_TEMPLATE_JSON='openclaw.json'))
+    msg = str(ei.value)
+    assert 'OPENCLAW_TEMPLATE_JSON' in msg
+    assert '绝对路径' in msg
+    assert "'openclaw.json'" in msg
+
+
+def test_validate_prod_env_fail_fast_when_template_json_nonexistent(tmp_path):
+    """OPENCLAW_TEMPLATE_JSON 绝对路径但不存在 → fail-fast（首次创建容器才 FileNotFoundError）。"""
+    missing = tmp_path / 'no_openclaw.json'
+    with __import__('pytest').raises(ImproperlyConfigured) as ei:
+        validate_prod_env(_minimal_env(OPENCLAW_TEMPLATE_JSON=str(missing)))
+    msg = str(ei.value)
+    assert 'OPENCLAW_TEMPLATE_JSON' in msg
+    assert '文件' in msg
+    assert str(missing) in msg
+
+
+def test_validate_prod_env_fail_fast_when_template_json_is_dir(tmp_path):
+    """OPENCLAW_TEMPLATE_JSON 指向目录（绝对、存在但不是文件）→ fail-fast（ConfigRenderer 需文件）。"""
+    a_dir = tmp_path / 'a_dir'
+    a_dir.mkdir()
+    with __import__('pytest').raises(ImproperlyConfigured) as ei:
+        validate_prod_env(_minimal_env(OPENCLAW_TEMPLATE_JSON=str(a_dir)))
+    assert 'OPENCLAW_TEMPLATE_JSON' in str(ei.value)

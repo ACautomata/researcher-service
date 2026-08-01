@@ -16,7 +16,7 @@ from django.core.exceptions import ImproperlyConfigured
 from config.settings import base
 from config.settings._validation import validate_prod_env
 
-_ENV_KEYS = ('OPENCLAW_TEMPLATE_DIR', 'RESEARCHER_DIR',
+_ENV_KEYS = ('OPENCLAW_TEMPLATE_DIR', 'OPENCLAW_TEMPLATE_JSON', 'RESEARCHER_DIR',
              'LLM_API_KEY', 'OPENCLAW_FLEET_WS_SCHEME', 'OPENCLAW_FLEET_WS_HOST')
 
 
@@ -61,6 +61,30 @@ def test_openclaw_template_dir_precedence():
     mod = _reload_with_env(OPENCLAW_TEMPLATE_DIR='/ci/fleet-template',
                            RESEARCHER_DIR='/should/be/ignored')
     assert mod.OPENCLAW_FLEET['TEMPLATE'] == '/ci/fleet-template'
+
+
+def test_template_json_default_is_deploy_relative():
+    """OPENCLAW_TEMPLATE_JSON 未设 → 默认 <repo>/deploy/openclaw.json（dev/CI 存在）。"""
+    mod = _reload_with_env()
+    assert mod.OPENCLAW_FLEET['TEMPLATE_JSON'] == str(
+        mod.BASE_DIR.parent / 'deploy' / 'openclaw.json')
+
+
+def test_template_json_env_override_reflected():
+    """OPENCLAW_TEMPLATE_JSON 环境覆盖 → settings 反映新值（生产挂载路径注入）。"""
+    mod = _reload_with_env(OPENCLAW_TEMPLATE_JSON='/app/deploy/openclaw.json')
+    assert mod.OPENCLAW_FLEET['TEMPLATE_JSON'] == '/app/deploy/openclaw.json'
+
+
+def test_template_json_env_whitespace_stripped():
+    """Codex P2：OPENCLAW_TEMPLATE_JSON 带前后空格 → settings 存 strip 后路径。
+
+    validate_prod_env 校验时先 strip（带空格路径能通过校验），base.py 赋值若保留未 strip
+    值，运行时 read_text() 会找带空格路径 → 首次创建容器复现 500。settings 须与 validator
+    存同一路径。
+    """
+    mod = _reload_with_env(OPENCLAW_TEMPLATE_JSON='  /app/deploy/openclaw.json  ')
+    assert mod.OPENCLAW_FLEET['TEMPLATE_JSON'] == '/app/deploy/openclaw.json'
 
 
 def test_default_when_neither_set():
