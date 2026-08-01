@@ -1,7 +1,7 @@
 # deploy/docker-compose.deploy.yml —— 面板生产栈（BaoTa 边缘 TLS 之后的应用层）
 #
 # 由 CD（.github/workflows/cd.yml）scp 到宿主 /www/panel/ 并经 `docker compose ... up -d` 启动。
-# 三服务：frontend（唯一对宿主暴露，loopback 8080 供 BaoTa 反代）/ backend（内部，daphne +
+# 三服务：frontend（唯一对宿主暴露，loopback 18080 供 BaoTa 反代）/ backend（内部，daphne +
 # docker.sock 编排 OpenClaw 容器 + SQLite 卷 + researcher 模板只读挂载）/ redis（内部，DistributedLock）。
 #
 # 运行时敏感值（DJANGO_SECRET_KEY / LLM_API_KEY / CREDENTIAL_ENCRYPTION_KEYS / DJANGO_ALLOWED_HOSTS）
@@ -22,8 +22,9 @@ services:
     depends_on:
       - backend
     ports:
-      # 仅 loopback 暴露；BaoTa 边缘（Let's Encrypt TLS）反代 https://researcher.acautomata.top → 127.0.0.1:8080
-      - "127.0.0.1:8080:80"
+      # 仅 loopback 暴露；BaoTa 边缘（Let's Encrypt TLS）反代 https://researcher.acautomata.top → 127.0.0.1:18080
+      # 18080：避开宿主 8080（已被占用——CD run 30683051941 frontend Bind 失败）。
+      - "127.0.0.1:18080:80"
     networks:
       - panel-net
 
