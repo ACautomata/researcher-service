@@ -164,9 +164,10 @@ function meHandler(req: Request, res: Response): void {
   })
 }
 
-// 改密事务体内核（可测 seam，Codex #342 二轮 P1）：条件更新复查 passwordHash 仍等于已校验
-// 的旧 hash，count=0（并发已被重置/用户失效）→ ok:false，不覆盖 reset hash。
-// 成功时同步撤销该 user 全部有效 refresh（强制重登，与改密同事务持久化）。
+// 改密事务体内核（可测 seam，Codex #342 二轮 P1 + 三轮 P1）：条件更新复查 passwordHash 仍等于
+// 已校验的旧 hash 且账号仍激活（isActive:true），count=0（并发已被重置 / 用户被禁用）→
+// ok:false，不覆盖 reset hash、不清 mustChangePassword。成功时同步撤销该 user 全部有效
+// refresh（强制重登，与改密同事务持久化）。
 export async function changePasswordInTx(
   tx: Pick<PrismaClient, 'user' | 'refreshToken'>,
   userId: string,
@@ -175,10 +176,10 @@ export async function changePasswordInTx(
   now: Date,
 ): Promise<{ ok: boolean }> {
   const updated = await tx.user.updateMany({
-    where: { id: userId, passwordHash: oldHash },
+    where: { id: userId, passwordHash: oldHash, isActive: true },
     data: { passwordHash: newHash, mustChangePassword: false },
   })
-  if (updated.count === 0) return { ok: false } // 并发已被重置 → 拒绝，不覆盖
+  if (updated.count === 0) return { ok: false } // 并发已被重置 / 账号已禁用 → 拒绝，不覆盖
   await revokeAllUserRefresh(tx, userId, now) // 族灭 refresh（正常提交，持久化）
   return { ok: true }
 }

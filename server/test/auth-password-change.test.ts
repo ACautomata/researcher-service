@@ -87,4 +87,40 @@ describe('password/change (slice 7)', () => {
     expect(await verifyPassword('pw-attacker-owned-1', after!.passwordHash!)).toBe(false)
     expect(after!.mustChangePassword).toBe(true)
   })
+
+  // 意见⑦[P1]（Codex 三轮）：改密 CAS 须复查 isActive —— admin 禁用账号后，攻击者持旧
+  // access token + 旧密码仍可改密清 mustChangePassword；条件更新须含 isActive:true，
+  // zero-row（账号已禁用）→ ok:false 拒绝，防止重新启用后回归控制。
+  it('竞态：账号被禁用（isActive=false）但 hash 匹配 → 条件更新 count=0 → ok:false 不覆盖', async () => {
+    const admin = await ctx.prisma.user.findUnique({ where: { username: 'admin1' } })
+    const oldHash = admin!.passwordHash!
+    const newHash = await hashPassword('pw-attacker-owned-1')
+    // 记录禁用前「改密成功的密码」：前面用例已将 admin1 密码设为 pw-brand-new-9（或后续重置）。
+    // 此处直接用 verifyPassword 对照 oldHash 的明文可验证性，避免依赖具体历史密码。
+    const knownPre = await verifyPassword('reset-by-admin-77', oldHash)
+      ? 'reset-by-admin-77'
+      : await verifyPassword('pw-brand-new-9', oldHash)
+        ? 'pw-brand-new-9'
+        : await verifyPassword('pw-admin1-secure', oldHash)
+          ? 'pw-admin1-secure'
+          : null
+    expect(knownPre).not.toBeNull()
+    // 模拟竞态：verify 通过后、事务前 admin 禁用该账号（isActive=false，hash 未变）
+    await ctx.prisma.user.update({
+      where: { id: admin!.id },
+      data: { isActive: false },
+    })
+    const okDisabled = await changePasswordInTx(
+      ctx.prisma as never,
+      admin!.id,
+      oldHash, // hash 仍匹配，但账号已禁用
+      newHash,
+      new Date(),
+    )
+    expect(okDisabled.ok).toBe(false)
+    // 未被覆盖：仍可验证旧密码（hash 未变）
+    const after = await ctx.prisma.user.findUnique({ where: { id: admin!.id } })
+    expect(await verifyPassword(knownPre!, after!.passwordHash!)).toBe(true)
+    expect(await verifyPassword('pw-attacker-owned-1', after!.passwordHash!)).toBe(false)
+  })
 })

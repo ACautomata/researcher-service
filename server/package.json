@@ -6,6 +6,7 @@
   "main": "dist/server.js",
   "scripts": {
     "dev": "tsx watch src/server.ts",
+    "prebuild": "prisma generate",
     "build": "tsc -p tsconfig.build.json && rm -rf dist/generated && cp -R src/generated dist/generated",
     "start": "node dist/server.js",
     "typecheck": "tsc --noEmit",
