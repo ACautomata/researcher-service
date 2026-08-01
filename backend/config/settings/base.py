@@ -165,7 +165,9 @@ _FLEET_TEMPLATE = os.path.normpath(_FLEET_TEMPLATE)
 # 镜像内 TEMPLATE_JSON 解析到 /deploy/openclaw.json，首次创建容器即裸 500）。
 # 生产经 OPENCLAW_TEMPLATE_JSON 注入挂载文件路径（CD 分发 deploy/openclaw.json 到宿主并
 # 挂载进后端容器，配置单一来源仍在本仓库）；prod.py 的 validate_prod_env fail-fast 校验。
-_OPENCLAW_TEMPLATE_JSON_ENV = os.environ.get('OPENCLAW_TEMPLATE_JSON')
+# Codex P2：validator 校验时先 strip（带空格路径能通过校验），此处须存 strip 后的同一路径，
+# 否则运行时 read_text() 找带空格路径 → 首次创建容器复现 500。None/空 → 回退默认 dev 路径。
+_OPENCLAW_TEMPLATE_JSON_ENV = (os.environ.get('OPENCLAW_TEMPLATE_JSON') or '').strip()
 OPENCLAW_FLEET = {
     'ROOT': str(FLEET_ROOT),
     'TEMPLATE': _FLEET_TEMPLATE,

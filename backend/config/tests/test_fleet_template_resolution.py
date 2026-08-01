@@ -76,6 +76,17 @@ def test_template_json_env_override_reflected():
     assert mod.OPENCLAW_FLEET['TEMPLATE_JSON'] == '/app/deploy/openclaw.json'
 
 
+def test_template_json_env_whitespace_stripped():
+    """Codex P2：OPENCLAW_TEMPLATE_JSON 带前后空格 → settings 存 strip 后路径。
+
+    validate_prod_env 校验时先 strip（带空格路径能通过校验），base.py 赋值若保留未 strip
+    值，运行时 read_text() 会找带空格路径 → 首次创建容器复现 500。settings 须与 validator
+    存同一路径。
+    """
+    mod = _reload_with_env(OPENCLAW_TEMPLATE_JSON='  /app/deploy/openclaw.json  ')
+    assert mod.OPENCLAW_FLEET['TEMPLATE_JSON'] == '/app/deploy/openclaw.json'
+
+
 def test_default_when_neither_set():
     """两者皆未设 → 默认 <repo>/researcher（回归默认路径仍工作）。"""
     mod = _reload_with_env()
