@@ -87,6 +87,7 @@ export type ProvisionJob = { type: 'create'; name: string; ownerId: string; conf
   type: 'delete'
   name: string
   ownerId: string
+  rowId: string
 }
 
 // 内存假 BullMQ：记录入队 job；测试手动 runDirect 模拟 worker 消费（stalled-job 语义归 BullMQ，不测）。
@@ -98,9 +99,9 @@ export class MemoryQueue implements ProvisionJobQueue {
     this.jobs.push({ type: 'create', name, ownerId, configText })
   }
 
-  async enqueueDelete(name: string, ownerId: string): Promise<void> {
+  async enqueueDelete(name: string, ownerId: string, rowId: string): Promise<void> {
     if (this.failEnqueueDelete) throw new Error('redis down')
-    this.jobs.push({ type: 'delete', name, ownerId })
+    this.jobs.push({ type: 'delete', name, ownerId, rowId })
   }
 
   async close(): Promise<void> {}

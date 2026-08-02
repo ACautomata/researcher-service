@@ -40,7 +40,7 @@ export class LeaseContentionError extends Error {
 
 export interface ProvisionJobQueue {
   enqueueCreate(name: string, ownerId: string, configText: string): Promise<void>
-  enqueueDelete(name: string, ownerId: string): Promise<void>
+  enqueueDelete(name: string, ownerId: string, rowId: string): Promise<void>
   close(): Promise<void>
 }
 
@@ -147,6 +147,19 @@ export class Orchestrator {
     // 进程内 Map 互斥（#313：双创建护栏，锁不依赖 Redis；在飞 create 期间保持持有）
     if (!this.leases.tryAcquire(name)) throw fail(CODE.NAME_CONFLICT)
     try {
+      // codex 四轮 P1 #3：残留 orphan 目录同步拒绝（对齐旧 Django create_reserve InstanceDirExists）。
+      // DB 无行但 instances/<name> 残留（崩溃中断/手动清 DB）→ 若拖到 worker 才拒，POST 已返 202
+      // 落 ERROR 行且无「先清理」提示。此处同步暴露 20044，客户端先删/清理再重试。
+      const instanceDir = path.join(this.cfg.fleetRoot, 'instances', name)
+      try {
+        const stat = await import('node:fs/promises').then((f) => f.stat(instanceDir))
+        if (stat.isDirectory()) {
+          throw fail(CODE.ORPHAN_DIR, '存在残留数据目录，请先删除同名实例或手动清理后重试')
+        }
+      } catch (e) {
+        if (e instanceof EnvelopeError) throw e
+        // ENOENT（目录不存在）→ 正常新建
+      }
       // 端口入队前分配 + creating 行插入（#313；SQLite port @unique 仲裁）
       // codex #5（P2）：配额 count+insert 原子化——count 与 create 同一事务，防并发不同名
       // 同时读到 count<quotaLimit 各插一行（check-then-insert 竞态）。事务内先复查配额再插入。
@@ -433,7 +446,7 @@ export class Orchestrator {
     }
     try {
       // 无在飞 create（租约取得）：running/stopped/error 及孤儿 creating 行都可入队 delete 清理
-      await this.queue.enqueueDelete(name, ownerId)
+      await this.queue.enqueueDelete(name, ownerId, row.id) // rowId 绑定：防 at-least-once 重试误删重建
     } catch (e) {
       // codex #6（P1）：入队失败（Redis 挂）不得报假成功——回滚取消标志 + 释放租约，
       // rethrow 信封错误让客户端重试（否则轮询永远等不到 removing）。
@@ -450,9 +463,13 @@ export class Orchestrator {
   // 清理失败（OSError/容器 stop/remove 失败）→ 行标 REMOVING + 抛 CLEANUP_FAILED（可重试）。
   // codex 二轮 P1（跨 worker 串行）：同 provisionCreate，DB CAS 抢占 leaseExpiresAt 实现
   // 跨进程互斥——两 worker 对同名 delete 恰一个执行，另一个 no-op（不双删）。
-  async provisionDelete(name: string): Promise<void> {
+  // codex 四轮 P1 #1：rowId 校验——BullMQ at-least-once 重试时若同名行已被新用户重建，不得误删。
+  // codex 四轮 P1 #2：DB lease 被活动 create 持有 → 抛 LeaseContentionError（retryable），非 no-op
+  // （否则 BullMQ 移除 delete job，请求的删除永久丢失）。
+  async provisionDelete(name: string, rowId?: string): Promise<void> {
     const row = await this.prisma.container.findUnique({ where: { name } })
     if (!row) return // 已清理 → 幂等
+    if (rowId && row.id !== rowId) return // codex 四轮 #1：行已被重建（新 rowId）→ 本 delete 属旧行，no-op
     const now = new Date()
     // codex 三轮 P1 #3：删除 claim 只排除**活动租约**（removing + lease 未过期 = 另一 worker 在清），
     // 不再排除所有 removing——否则 delete 中途失败（chown/stop/remove/rmtree）标 REMOVING 后，
@@ -469,7 +486,11 @@ export class Orchestrator {
       },
       data: { status: 'removing', leaseExpiresAt: new Date(now.getTime() + LEASE_TTL_MS) },
     })
-    if (claimed.count === 0) return // 另一 worker 正在删同名（活动租约）→ no-op
+    if (claimed.count === 0) {
+      // codex 四轮 #2：活动 DB lease（另一 worker 在 provisioning/清理同名）→ 抛 retryable。
+      // 若 no-op，BullMQ 移除 job，delete 请求永久丢失；retry 在 lease 过期后重跑。
+      throw new LeaseContentionError(name)
+    }
     // codex 三轮 P2：instanceDir 从行记录的 homeDir 派生（取 parent），而非当前 cfg.fleetRoot 重构——
     // FLEET_ROOT 变更后新 root 无该目录，force:true 会误判清理成功、旧 workspace 残留。
     // homeDir=<fleetRoot>/instances/<name>/home → parent = instances/<name>。
@@ -533,6 +554,18 @@ export class Orchestrator {
     if (template === home || home.startsWith(template + path.sep)) {
       // 模板是 home 的祖先 → cp 会无限递归（issue #195 同类错配）
       throw fail(CODE.LLM_KEY_MISSING, '模板目录是 home 的祖先，cp 会无限递归')
+    }
+    // codex 四轮 P1 #3：DB 已有本行（createReserve 刚插入），instanceDir 若已存在 = 残留 orphan
+    //（崩溃中断/手动清 DB）。递归 mkdir 接受旧目录 + cp force:false 会合并残留文件 → 新容器在
+    // 旧 workspace 上启动，暴露上一用户数据。检测到即拒绝（20044 orphan 目录，先清理再重试）。
+    try {
+      const stat = await import('node:fs/promises').then((f) => f.stat(instanceDir))
+      if (stat.isDirectory()) {
+        throw fail(CODE.ORPHAN_DIR, '存在残留数据目录，请先删除同名实例或手动清理后重试')
+      }
+    } catch (e) {
+      if (e instanceof EnvelopeError) throw e
+      // ENOENT（目录不存在）→ 正常新建
     }
     await mkdir(instanceDir, { recursive: true })
     await cp(template, homeDir, { recursive: true, force: false })

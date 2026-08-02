@@ -294,12 +294,19 @@ describe('异步 delete（removing 终态）', () => {
     await orch.createReserve('dupdel', adminId, 3)
     await orch.provisionCreate(queue.lastCreate('dupdel').name, queue.lastCreate('dupdel').configText)
     await orch.deleteEnqueue('dupdel', adminId)
-    // 两个 worker 并发 delete 同名：DB CAS 租约保证恰一个执行清理
-    await Promise.all([
-      orch.provisionDelete(queue.lastDelete('dupdel').name),
-      orch.provisionDelete(queue.lastDelete('dupdel').name),
+    const delJob = queue.lastDelete('dupdel')
+    // 两个 worker 并发 delete 同名：DB CAS 租约恰一个 claim，另一个抛 LeaseContentionError（retryable，
+    // codex 四轮 #2——不 no-op，否则 delete 请求丢失）。最终行被删、removed 恰一次。
+    const results = await Promise.allSettled([
+      orch.provisionDelete(delJob.name, delJob.rowId),
+      orch.provisionDelete(delJob.name, delJob.rowId),
     ])
-    // 行已删（无双删——removed 里只出现一次）
+    const rejected = results.filter((r) => r.status === 'rejected')
+    if (rejected.length > 0) {
+      // 并发竞争：一方 LeaseContention → 重试后可回收
+      expect(String((rejected[0] as PromiseRejectedResult).reason)).toContain('lease held')
+      await orch.provisionDelete(delJob.name, delJob.rowId)
+    }
     expect(await ctx.prisma.container.findUnique({ where: { name: 'dupdel' } })).toBeNull()
     expect(runtime.removed.filter((n) => n === 'dupdel')).toHaveLength(1)
   })
@@ -308,6 +315,30 @@ describe('异步 delete（removing 终态）', () => {
     const orch = makeOrch(makeCfg())
     await expect(orch.deleteEnqueue('nope', adminId)).rejects.toMatchObject({ code: CODE.CONTAINER_NOT_FOUND })
     await orch.provisionDelete('nope') // worker 幂等
+  })
+
+  it('codex 四轮 P1 #1：rowId 绑定——delete 重试不误删新重建的同名行', async () => {
+    const orch = makeOrch(makeCfg())
+    await orch.createReserve('rbind', adminId, 3)
+    await orch.provisionCreate(queue.lastCreate('rbind').name, queue.lastCreate('rbind').configText)
+    await orch.deleteEnqueue('rbind', adminId)
+    const oldJob = queue.lastDelete('rbind')
+    // 模拟：delete job 消费前，同名行被删 + 新用户重建（新 rowId）
+    await orch.provisionDelete('rbind')
+    await orch.createReserve('rbind', adminId, 3)
+    await orch.provisionCreate(queue.lastCreate('rbind').name, queue.lastCreate('rbind').configText)
+    // 旧 delete job 重试（old rowId）→ 不得误删新行
+    await orch.provisionDelete('rbind', oldJob.rowId)
+    expect(await ctx.prisma.container.findUnique({ where: { name: 'rbind' } })).not.toBeNull() // 新行保留
+  })
+
+  it('codex 四轮 P1 #3：残留 orphan 目录 → createReserve 同步拒绝（20044）', async () => {
+    const orch = makeOrch(makeCfg())
+    // 模拟 DB 无行但 instances/<name> 残留（崩溃/手动清 DB）
+    await import('node:fs/promises').then((f) => f.mkdir(path.join(dir, 'instances', 'orphan'), { recursive: true }))
+    // reservation 同步拒绝（POST 前暴露，不留无主 creating 行）
+    await expect(orch.createReserve('orphan', adminId, 3)).rejects.toMatchObject({ code: CODE.ORPHAN_DIR })
+    expect(await ctx.prisma.container.findUnique({ where: { name: 'orphan' } })).toBeNull() // 未建行
   })
 })
 

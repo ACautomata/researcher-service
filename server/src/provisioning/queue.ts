@@ -28,6 +28,7 @@ export interface DeleteJobData {
   type: 'delete'
   name: string
   ownerId: string
+  rowId: string // codex 四轮 P1：绑定保留的行 ID——BullMQ at-least-once，重试不得删新重建的同名行
 }
 
 export type ProvisionJobData = CreateJobData | DeleteJobData
@@ -69,10 +70,10 @@ export class BullMqProvisionQueue implements ProvisionJobQueue {
     )
   }
 
-  async enqueueDelete(name: string, ownerId: string): Promise<void> {
+  async enqueueDelete(name: string, ownerId: string, rowId: string): Promise<void> {
     await this.queue.add(
       `delete:${name}:${randomUUID()}`, // 唯一 jobId——delete 追着 pending create 也必入队
-      { type: 'delete', name, ownerId },
+      { type: 'delete', name, ownerId, rowId },
       {
         removeOnComplete: true,
         attempts: 10,
@@ -102,7 +103,7 @@ export function createProvisioningWorker(orchestrator: Orchestrator): Worker<Pro
         if (data.type === 'create') {
           await orchestrator.provisionCreate(data.name, data.configText)
         } else {
-          await orchestrator.provisionDelete(data.name)
+          await orchestrator.provisionDelete(data.name, data.rowId)
         }
       })
     },

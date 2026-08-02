@@ -22,6 +22,7 @@ export const CODE = {
   QUOTA_EXCEEDED: 20042, // 建容器超 User.maxContainers 配额（#312/#311 锁码）
   PROVISIONING: 20043, // 目标在 provisioning（creating 态拒写；#313 现改置取消标志，码保留备用）
   CLEANUP_FAILED: 20045, // home 清理失败（行标 REMOVING 可重试，契约 §1.3 转译）
+  ORPHAN_DIR: 20044, // 残留 orphan 目录（契约 §1.3 转译；create 撞残留目录拒建）
   CONTAINER_NOT_FOUND: 20040, // 容器不存在 / 越权（同码防探测，#312 锁码）
   // 9xxxx 系统 / 校验
   OAUTH_NOT_CONFIGURED: 90001, // OAuth provider 未配置（原 501）
@@ -50,6 +51,7 @@ export const DEFAULT_MESSAGE: Record<number, string> = {
   [CODE.QUOTA_EXCEEDED]: '容器数量已达配额上限',
   [CODE.PROVISIONING]: '容器正在创建中',
   [CODE.CLEANUP_FAILED]: '容器清理失败，请重试',
+  [CODE.ORPHAN_DIR]: '存在残留数据目录，请先清理后重试',
   [CODE.CONTAINER_NOT_FOUND]: '容器不存在',
   [CODE.OAUTH_NOT_CONFIGURED]: 'OAuth provider 未配置',
   [CODE.VALIDATION_FAILED]: '参数校验失败',
