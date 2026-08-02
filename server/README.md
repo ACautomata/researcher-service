@@ -1,43 +1,59 @@
-# server — TS/Express 控制面（M0 骨架 + M1 认证与账号）
+# server — TS/Express 控制面（M0 骨架 + M1 认证与账号 + M2 容器生命周期）
 
-Wayfinder map **#308** · 交接规格 **#331** · 本切片 **#333**。
+Wayfinder map **#308** · 交接规格 **#331** · 切片 **#333（M0+M1）/ #334（M2）**。
 
-新 Express+ws 同进程控制面（替代 Django 后端，过渡期 M0–M6 并存）。本切片交付 **M0 骨架**
-+ **M1 认证与账号** 垂直切片：双角色 login / R1 refresh 旋转 + 重放检测 / logout / me /
-password-change / bootstrap B1 + C1 强制改密 / OAuth2 O1 骨架 / admin 账号管理 4 端点。
-容器/WIKI/对话桥接是后续切片（M2–M4）；骨架已为其预留三挂点：信封中间件全局挂载、
-`authenticate()` 可被 WS 握手复用、`PrismaClient` 单例可注入。
+新 Express+ws 同进程控制面（替代 Django 后端，过渡期 M0–M6 并存）。已交付：
+- **M0 骨架 + M1 认证与账号**（#333）：双角色 login / R1 refresh 旋转 + 重放检测 / logout / me /
+  password-change / bootstrap B1 + C1 强制改密 / OAuth2 O1 骨架 / admin 账号管理 4 端点。
+- **M2 容器生命周期**（#334）：容器按用户隔离的完整生命周期——编排器 Port + BullMQ(Redis) 后台队列
+  + 端口池 + 5 态机 + 异步 delete + 取消标志。`GET /containers/`（user 自己 / admin 全部 + pairing
+  预取）、`POST /containers/`（同步返 creating 快照、端口入队前分配）、`DELETE /containers/<name>`
+  （异步信封、置取消标志）。
+
+WIKI/对话桥接是后续切片（M3/M4）；骨架已为其预留：`authenticate()` 可被 WS 握手复用、
+`getInstanceForUser` 归属前置单点（containers/wiki/models/chat/pairing 复用）、`onEvict` 钩子
+（delete 完成后触发 chat pool 逐出，ADR 0006 下为空挂点）。
 
 ## 技术栈（规格 §A 锁定）
 
 Express 5 + `ws` 8（noServer，upgrade 钩子 M4 接）+ `jose` 5（HS256，显式 `algorithms:['HS256']`）
-+ Prisma 7 + SQLite（driver adapter `@prisma/adapter-better-sqlite3`）+ `bcryptjs`(cost=12) + `zod`。
-JWT 平移 simplejwt 默认（HS256、access 5min、refresh 7d）。
++ Prisma 7 + SQLite（driver adapter `@prisma/adapter-better-sqlite3`）+ `bcryptjs`(cost=12) + `zod`
++ **BullMQ 6 + ioredis**（#313 容器后台 provisioning 队列，Redis-backed）+ **dockerode**（docker.sock
+容器编排）。JWT 平移 simplejwt 默认（HS256、access 5min、refresh 7d）。
 
 ## 目录
 
 ```
 src/
-  app.ts                 createApp({prisma}) 工厂（DI，测试注入 test DB）
-  server.ts              createServer(app) + server.on('upgrade') 占位 + bootstrap + listen
-  config.ts              env 读取（JWT_SECRET/access/refresh TTL/bcrypt cost/...）
+  app.ts                 createApp({prisma, orchestrator?}) 工厂（DI，测试注入 test DB + 假编排）
+  server.ts              createServer(app) + server.on('upgrade') 占位 + bootstrap + assembleFleet + listen
+  config.ts              env 读取（JWT_SECRET/access/refresh TTL/bcrypt cost/fleet/redis/...）
   prisma.ts              PrismaClient 工厂 + 单例（driver adapter 注入）
-  codes.ts               五位分层码常量表（#312 + #319 转译 + #333 新增 10005）
+  codes.ts               五位分层码常量表（#312 + #319 转译 + #333/#334 新增）
   envelope.ts            唯一错误面：EnvelopeError + ok()/fail()
-  auth/
-    tokens.ts            jose access 签/验 + refresh 生成/散列/R1 旋转
-    authenticate.ts      verifyAccessToken + 查库确认 user 存在且 active（REST/WS 共用）
-    bootstrap.ts         B1 空表惰性生成 admin（明文密码 log 一次）
-    password.ts          bcrypt hash/verify + 临时密码生成
-    userService.ts       createUser（register/users POST 共用）
-  middleware/
-    auth.ts              requireAuth(→10001) / requireAdmin(→10004)
-    mustChangePasswordGate.ts  C1 服务端拦截（→10005）
-    validate.ts          zod body 校验（→90002 {field:[errors]}）
-    errorHandler.ts      envelope 错误中间件 + 404 信封兜底
-  routes/                health / auth / users
-  validation/schemas.ts  zod schema（login/passwordChange/userCreate/userPatch）
-test/                    接缝 #2 信封 REST 契约（vitest + supertest）
+  auth/                  tokens / authenticate / bootstrap / password / userService / quota
+  middleware/            auth(→10001/10004) / mustChangePasswordGate(→10005) / validate(→90002) / errorHandler
+  routes/                health / auth / users / containers
+  validation/schemas.ts  zod schema（login/passwordChange/userCreate/userPatch/containerCreate）
+  containers/            #334 编排域：
+    constants.ts         纯常量（18789/openclaw-gw- 前缀/label/bind 路径/占位）
+    errors.ts            领域错误族（携带信封码；errorHandler 统一转译）
+    runtime.ts           ContainerRuntime Port（docker 接触面）+ ContainerSpec/ContainerInfo
+    dockerRuntime.ts     DockerRuntime（dockerode，真 daemon 接触面）
+    ports.ts             PortAllocator（最小空闲端口）
+    values.ts            FleetConfig + HEALTH_* 枚举
+    configRenderer.ts    openclaw.json 渲染（强制 port/bind/token 占位安全不变量）
+    configStore.ts       config 原子写（tmp + chmod 0644 + rename）
+    provisioner.ts       HomeProvisioner（cp -a 模板预填充 home）
+    leaseMap.ts          NameLeaseMap 进程内互斥（不依赖 Redis，防双创建/双删除）
+    lifecycleQueue.ts    LifecycleQueue Port + InlineLifecycleQueue + NameSerializer（按 name 串行）
+    bullmqQueue.ts       BullMqLifecycleQueue（Redis-backed，worker 并发默认 2，stalled 重跑）
+    deps.ts              FleetDeps 组合根（单点装配 + 测试替换）
+    command.ts           FleetCommand 写侧（create_reserve/create_complete/delete + 取消标志 + 补偿）
+    readModel.ts         FleetReadModel 读侧（list 聚合 + creating 对账 + ContainerSummary）
+    orchestrator.ts      Orchestrator 薄 facade + getInstanceForUser 归属前置
+    fleetAssembly.ts     生产装配（DockerRuntime + BullMQ + FleetDeps + Orchestrator）
+test/                    接缝 #2 信封 REST 契约 + #5 编排器 Port + 集成 smoke + BullMQ 联通
 prisma/                  schema.prisma + init.sql（migrate diff 产出的建表 SQL）
 scripts/apply-schema.mjs 把 init.sql 落到 dev DB（不经 prisma CLI，规避 AI 守卫）
 ```
@@ -51,6 +67,9 @@ npm run db:apply               # 把 prisma/init.sql 落到 file:./prisma/panel.
 cp .env.example .env           # 按需改 JWT_SECRET 等
 npm run dev                    # tsx watch，http://localhost:8001；首启 log 输出 admin 临时密码一次
 ```
+
+> M2 起 `npm run dev` 会装配真编排（DockerRuntime 挂 docker.sock + BullMQ 连 REDIS_URL）。
+> 本地需 docker daemon 与 Redis 可达才能 create/delete 容器；REST 认证/账号端点不依赖它们。
 
 ### schema 变更
 
@@ -72,22 +91,35 @@ rm -f prisma/panel.db && npm run db:apply
 
 ```bash
 npm run typecheck              # tsc --noEmit（含测试）
-npm test                       # vitest run（11 文件 / 43 用例，接缝 #2 信封 REST 契约）
+npm test                       # vitest run（17 文件 / 111 用例，接缝 #2 信封 + #5 编排器）
 npm run prisma:validate        # schema 合法性
 ```
 
-接缝（spec Testing Decisions #2）：注入假身份（admin/user）打路由，断 HTTP 200 + 信封码 + 归属前置。
-防探测用例逐字节断言「不存在 vs 越权」同码（10041）；R1 重放检测有专属用例；凭证零落盘贯穿断言。
+接缝（spec Testing Decisions）：
+- **#2 信封 REST 契约**：注入假身份（admin/user）打路由，断 HTTP 200 + 信封码 + 归属前置。
+  防探测用例逐字节断言「不存在 vs 越权」同码（10041 / 20040）；凭证零落盘贯穿断言。
+- **#5 编排器 Port**：注入假 docker（FakeRuntime）+ 内存假队列（InlineLifecycleQueue），断
+  5 态机 + 取消标志 + 端口入队前分配 + 补偿（bind 换端口重试 / REMOVING 可重试 / 端口耗尽 / 残留目录）。
+- **集成 smoke**（`containers-smoke.test.ts` / `bullmqQueue.test.ts`）：真 docker daemon / 真 Redis
+  **默认 skip 自动探测门控**（daemon/Redis 不可达 → skip），可达 → 真跑端到端。
 
 ## 关键约定
 
 - **统一信封**：所有 REST HTTP 200；成功 `{code:0,data}`，失败 `{code,message,data}`。码表见 `src/codes.ts`。
 - **refresh cookie**：`HttpOnly; Secure(prod); SameSite=Lax; Path=/api/v1/auth`；R1 旋转 + 重放族灭。
 - **C1 强制改密**：服务端拦截（`mustChangePasswordGate`），放行 me/logout/password-change，余者 mustChange=true → `10005`。
-- **防探测**：`/users` 非 admin、目标不存在 → 同码 `10041` 同体，区分仅进服务端日志。
-- **凭证零落盘**：响应体不含 passwordHash / refresh 明文 / private_key / device_token。
+- **防探测**：`/users` 非 admin、目标不存在 → 同码 `10041` 同体；容器「不存在 vs 越权」→ 同码 `20040` 同体，区分仅进服务端日志。
+- **凭证零落盘**：响应体不含 passwordHash / refresh 明文 / 容器 token / private_key / device_token。
+- **凭证加密（Codex C1）**：gateway token 落盘为 AES-256-GCM 密文（`CREDENTIAL_ENCRYPTION_KEYS`，
+  逗号分隔 base64(32 字节)，首个 = active 加密、余者仅解密支持轮换）。**生产必填**（缺失启动
+  fail-fast），生成示例 `openssl rand -base64 32`；dev/test 未设置时回退到固定密钥（勿用于生产）。
+- **容器隔离（#312）**：user 仅自己容器、admin 跨用户全部；归属前置 `getInstanceForUser` 单点（admin 全放行 / user 仅本人）。
+- **容器并发（#313）**：进程内 `NameLeaseMap` 互斥（不依赖 Redis）防双创建/双删除；create/delete 按 name 串行入队；端口入队前分配（SQLite 唯一约束仲裁、四来源已用集）；delete 异步 + 取消标志（provisioning 检查点检出统一回滚）；BullMQ(Redis) worker 并发默认 2 + stalled-job 崩溃重跑。
+- **容器补偿**：ERROR 行保留 / bind 端口冲突就地换端口重试（预算=池大小）/ 清理失败标 REMOVING 可重试（20045）/ 端口池耗尽 90004。
 
 ## 下游衔接
 
-- M2 容器 / M3 WIKI / M4 对话桥接：复用 `createApp`、`authenticate()`、信封中间件、`_get_instance` 归属前置（待加）。
-- 前端适配（#317 / M5）：信封解析 + `me.role` + R1 双 token 旋转 + admin users 页。
+- M3 WIKI / M4 对话桥接：复用 `createApp`、`authenticate()`、信封中间件、`getInstanceForUser` 归属前置。
+- 配对（M4）：`Pairing` 表经 `onDelete: Cascade` 级联；list 的 pairing 预取签名已就位（M2 恒 unpaired 默认）。
+- 对话桥接（M4）：`onEvict` 钩子（delete 完成后触发 chat pool 逐出，ADR 0006 B-直连下为空挂点）。
+- 前端适配（#317 / M5）：信封解析 + `me.role` + R1 双 token 旋转 + 异步 delete 轮询 + admin users 页。

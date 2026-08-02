@@ -100,6 +100,14 @@ describe('JWT secret strength env (slice config)', () => {
     if (secret === undefined) delete process.env.JWT_SECRET
     else vi.stubEnv('JWT_SECRET', secret)
     vi.stubEnv('NODE_ENV', env)
+    // C1：production 下 config 加载还校验 CREDENTIAL_ENCRYPTION_KEYS（gateway token 加密密钥）。
+    // 提供合法 32B base64 隔离 JWT_SECRET 变量——否则放行用例会因缺加密密钥被误判 THREW。
+    if (env === 'production') {
+      vi.stubEnv('CREDENTIAL_ENCRYPTION_KEYS', Buffer.alloc(32, 0x01).toString('base64'))
+      // 第六轮 P2：production 还校验 OPENCLAW_TEMPLATE_DIR（须存在可读目录）。stub process.cwd()
+      // 满足校验，隔离 JWT_SECRET 变量（同上理由）。
+      vi.stubEnv('OPENCLAW_TEMPLATE_DIR', process.cwd())
+    }
     try {
       const { config } = await import('../src/config')
       return config.jwtSecret
@@ -201,5 +209,166 @@ describe('refresh ttl env (slice config)', () => {
 
   it('非法 abc → fail-fast', async () => {
     expect(await loadRefreshTtl('abc')).toBe('THREW')
+  })
+})
+
+// 意见⑦[P2]（Codex 第三轮，针对 9550045）：端口池环境值未校验 —— Number(env) 接受 NaN/小数/负/
+// 超 65535，服务照常启动（PortAllocator 只查 end<start），create 时才异常（误报池耗尽 / 坏端口落 docker）。
+// 修复：config 加载即校验两个端口池值为合法 TCP 端口整数（[1,65535]）且 end≥start，非法 fail-fast。
+describe('port pool env (slice config)', () => {
+  async function loadPortPool(envs: { start?: string; end?: string }): Promise<unknown | 'THREW'> {
+    vi.resetModules() // 清 config 模块缓存，让动态 import 重新快照 env
+    if (envs.start === undefined) delete process.env.OPENCLAW_PORT_POOL_START
+    else vi.stubEnv('OPENCLAW_PORT_POOL_START', envs.start)
+    if (envs.end === undefined) delete process.env.OPENCLAW_PORT_POOL_END
+    else vi.stubEnv('OPENCLAW_PORT_POOL_END', envs.end)
+    try {
+      const { config } = await import('../src/config')
+      return { portStart: config.fleet.portStart, portEnd: config.fleet.portEnd }
+    } catch {
+      return 'THREW' // fail-fast
+    } finally {
+      vi.unstubAllEnvs() // 恢复 env（避免污染后续测试文件）
+    }
+  }
+
+  it('未设置 → 默认 19000–19999（既有行为）', async () => {
+    expect(await loadPortPool({})).toEqual({ portStart: 19000, portEnd: 19999 })
+  })
+
+  it('合法 20000–20100 → 加载为整数（既有行为）', async () => {
+    expect(await loadPortPool({ start: '20000', end: '20100' })).toEqual({
+      portStart: 20000,
+      portEnd: 20100,
+    })
+  })
+
+  it('非数字 abc → fail-fast（不再接受 NaN 端口池）', async () => {
+    expect(await loadPortPool({ start: 'abc' })).toBe('THREW')
+  })
+
+  it('小数 19000.5 → fail-fast（TCP 端口须整数）', async () => {
+    expect(await loadPortPool({ start: '19000.5' })).toBe('THREW')
+  })
+
+  it('负数 -1 → fail-fast', async () => {
+    expect(await loadPortPool({ end: '-1' })).toBe('THREW')
+  })
+
+  it('0 → fail-fast（端口须 ≥1）', async () => {
+    expect(await loadPortPool({ start: '0' })).toBe('THREW')
+  })
+
+  it('超 65535 → fail-fast（TCP 端口上限）', async () => {
+    expect(await loadPortPool({ end: '70000' })).toBe('THREW')
+  })
+
+  it('end < start → fail-fast（不再只靠 PortAllocator 运行时检查）', async () => {
+    expect(await loadPortPool({ start: '20000', end: '19999' })).toBe('THREW')
+  })
+})
+
+// 意见[P2]（Codex 第六轮）：生产 OPENCLAW_TEMPLATE_DIR 走 `../researcher` 兜底、缺 fail-fast ——
+// 漏设/拼错时 server 照常起（health 绿），首个 POST 才在后台 HomeProvisioner.provision() 的 cp()
+// 失败、留 error 行（部署故障被静默掩盖，与 issue #195「卡 creating」同类）。修复：生产强制
+// 绝对/存在/可读目录，非法 fail-fast（与 JWT_SECRET 生产校验同模式）；dev/test 保持兜底。
+describe('production template dir (slice config)', () => {
+  async function loadTemplateDir(opts: {
+    env?: string
+    dir?: string | undefined
+  }): Promise<string | 'THREW'> {
+    vi.resetModules()
+    const { env = 'production', dir } = opts
+    vi.stubEnv('NODE_ENV', env)
+    if (env === 'production') {
+      // 隔离 templateDir 变量：提供其余生产必填（JWT_SECRET / CREDENTIAL_ENCRYPTION_KEYS），
+      // 否则放行用例会因缺其它必填被误判 THREW（同 loadSecret 模式）。
+      vi.stubEnv('JWT_SECRET', 's'.repeat(32))
+      vi.stubEnv('CREDENTIAL_ENCRYPTION_KEYS', Buffer.alloc(32, 0x01).toString('base64'))
+    }
+    if (dir === undefined) delete process.env.OPENCLAW_TEMPLATE_DIR
+    else vi.stubEnv('OPENCLAW_TEMPLATE_DIR', dir)
+    try {
+      const { config } = await import('../src/config')
+      return config.fleet.templateDir
+    } catch {
+      return 'THREW' // fail-fast
+    } finally {
+      vi.unstubAllEnvs()
+    }
+  }
+
+  it('生产缺 OPENCLAW_TEMPLATE_DIR → fail-fast（修前走 ../researcher 兜底照常起）', async () => {
+    expect(await loadTemplateDir({ dir: undefined })).toBe('THREW')
+  })
+
+  it('生产相对路径 → fail-fast（须绝对路径，防 cwd 漂移错配）', async () => {
+    expect(await loadTemplateDir({ dir: 'template/relative' })).toBe('THREW')
+  })
+
+  it('生产不存在的绝对路径 → fail-fast（须存在）', async () => {
+    expect(await loadTemplateDir({ dir: '/definitely-not-a-real-template-dir-xyz' })).toBe('THREW')
+  })
+
+  it('生产合法存在的绝对目录 → 放行并返回', async () => {
+    expect(await loadTemplateDir({ dir: process.cwd() })).toBe(process.cwd())
+  })
+
+  it('dev/test 缺省 → 走 ../researcher 兜底（不加 fail-fast，本地友好）', async () => {
+    expect(await loadTemplateDir({ env: 'development', dir: undefined })).toBe(
+      `${process.cwd()}/../researcher`,
+    )
+  })
+})
+
+// 意见[P2]（Codex 第七轮 #4）：OPENCLAW_FLEET_ROOT 相对路径时 path.join 保留相对性 —— instances/<name>/
+// home 与 openclaw.json 作 Docker bind 的 source 非绝对（Docker bind source 须绝对），POST 返 creating、
+// detached provisioning 后台失败留 error 行（部署故障静默掩盖，与 OPENCLAW_TEMPLATE_DIR 第六轮同类）。
+// 修复：生产强制绝对路径（对齐 readTemplateDir），显式相对 fail-fast；缺省走 cwd/fleet 绝对兜底；
+// dev/test 保持容忍（本地调试可显式相对）。
+describe('production fleet root (slice config)', () => {
+  async function loadFleetRoot(opts: {
+    env?: string
+    root?: string | undefined
+  }): Promise<string | 'THREW'> {
+    vi.resetModules()
+    const { env = 'production', root } = opts
+    vi.stubEnv('NODE_ENV', env)
+    if (env === 'production') {
+      // 隔离 fleet.root 变量：提供其余生产必填，否则放行用例被误判 THREW（同 loadTemplateDir 模式）。
+      vi.stubEnv('JWT_SECRET', 's'.repeat(32))
+      vi.stubEnv('CREDENTIAL_ENCRYPTION_KEYS', Buffer.alloc(32, 0x01).toString('base64'))
+      vi.stubEnv('OPENCLAW_TEMPLATE_DIR', process.cwd())
+    }
+    if (root === undefined) delete process.env.OPENCLAW_FLEET_ROOT
+    else vi.stubEnv('OPENCLAW_FLEET_ROOT', root)
+    try {
+      const { config } = await import('../src/config')
+      return config.fleet.root
+    } catch {
+      return 'THREW' // fail-fast
+    } finally {
+      vi.unstubAllEnvs()
+    }
+  }
+
+  it('生产相对路径 → fail-fast（修前 path.join 保留相对致 Docker bind 失败）', async () => {
+    expect(await loadFleetRoot({ root: 'fleet/relative' })).toBe('THREW')
+  })
+
+  it('生产相对单段 fleet → fail-fast', async () => {
+    expect(await loadFleetRoot({ root: 'fleet' })).toBe('THREW')
+  })
+
+  it('生产合法绝对路径 → 放行', async () => {
+    expect(await loadFleetRoot({ root: '/var/fleet' })).toBe('/var/fleet')
+  })
+
+  it('生产缺省 → cwd/fleet 绝对兜底（Docker bind 安全）', async () => {
+    expect(await loadFleetRoot({ root: undefined })).toBe(`${process.cwd()}/fleet`)
+  })
+
+  it('dev 相对路径 → 容忍（本地调试不受影响）', async () => {
+    expect(await loadFleetRoot({ env: 'development', root: 'fleet/rel' })).toBe('fleet/rel')
   })
 })

@@ -6,7 +6,7 @@ import Database from 'better-sqlite3'
 import supertest, { type SuperTest, type Test } from 'supertest'
 import type { Application } from 'express'
 import { createPrismaClient } from '../src/prisma'
-import { createApp } from '../src/app'
+import { createApp, type AppDeps } from '../src/app'
 import type { PrismaClient } from '../src/generated/prisma/client'
 
 // 接缝 #2 测试基座：每测试文件独立临时 SQLite（forks 池隔离进程）。
@@ -25,7 +25,8 @@ export interface TestContext {
 
 let seq = 0
 
-export async function setupTestApp(): Promise<TestContext> {
+// extraDeps：可选注入编排器等（接缝 #5 containers 测试注入假 runtime + inline queue）。
+export async function setupTestApp(extraDeps: Omit<AppDeps, 'prisma'> = {}): Promise<TestContext> {
   const dir = mkdtempSync(path.join(tmpdir(), `panel-test-${process.pid}-${seq++}-`))
   const dbPath = path.join(dir, 'test.db')
   const sqlite = new Database(dbPath)
@@ -37,7 +38,7 @@ export async function setupTestApp(): Promise<TestContext> {
   process.env.NODE_ENV = 'test'
 
   const prisma = createPrismaClient(dbUrl)
-  const app = createApp({ prisma })
+  const app = createApp({ prisma, ...extraDeps })
   return {
     prisma,
     app,

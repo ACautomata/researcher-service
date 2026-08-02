@@ -109,6 +109,11 @@ jobs:
     defaults:
       run:
         working-directory: server
+    env:
+      # 与 test/containers-smoke 默认同源（smoke 读 process.env.OPENCLAW_IMAGE ?? 默认 tag）。
+      # CI runner 自带 docker daemon → smoke 门控放行真跑（区别于本地无 daemon 时 skip），
+      # 故须预拉镜像，否则 create 拉镜像 404 让 smoke 红（镜像缺失是环境问题，非代码问题）。
+      OPENCLAW_IMAGE: ghcr.io/openclaw/openclaw:2026.7.1-browser
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -119,5 +124,7 @@ jobs:
       - run: npm ci
       - run: npm run prisma:generate
       - run: npm run typecheck
+      # 预拉 OpenClaw 公共 ghcr 镜像供 containers-smoke 端到端测试（同 integration job 做法）。
+      - run: docker pull ${{ env.OPENCLAW_IMAGE }}
       - run: npm test
       - run: npm run build
