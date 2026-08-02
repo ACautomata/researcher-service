@@ -179,6 +179,10 @@ export class Orchestrator {
         await this.deleteRowQuietly(row.id)
         throw e instanceof EnvelopeError ? e : fail(CODE.PORT_POOL_EXHAUSTED)
       }
+      // codex 五轮 P1 #1：enqueue 成功后释放进程内 lease——多进程下 create job 可能交付给另一进程 B，
+      // 若 A 仍持有进程内 lease，A 后续 DELETE 只设 cancelRequested（即使容器已 running、无 create worker
+      // 观察标志）。worker 串行已由 DB lease 保证，请求侧 lease 在 enqueue 后即完成使命。
+      this.leases.release(name)
       return row
     } catch (e) {
       this.leases.release(name)
@@ -433,9 +437,16 @@ export class Orchestrator {
   async deleteEnqueue(name: string, ownerId: string): Promise<void> {
     const row = await this.prisma.container.findUnique({ where: { name } })
     if (!row) throw fail(CODE.CONTAINER_NOT_FOUND)
-    // 租约互斥：在飞 create/delete 已占位 → delete 不重复入队（防双删）
-    if (!this.leases.tryAcquire(name)) {
-      // create 在飞：置取消标志（create job 检查点检出 → 统一回滚删行后终止）
+    // codex 五轮 P1 #4：归属二次校验——路由先查了归属，但此处按 name 重查时行可能已被删 +
+    // 同名重建（新 owner）。require id+owner 匹配：ownerId 不匹配（重建后属另一用户）→ 同 20040
+    // 防探测（不区分「不存在 vs 越权」），不 enqueue 误删新用户的行。
+    if (row.ownerId !== ownerId) throw fail(CODE.CONTAINER_NOT_FOUND)
+    // codex 五轮 P1 #1：进程内 lease 已随 createReserve enqueue 释放（请求侧不留），故此处不再用它
+    // 判「在飞 create」——改用 DB lease：creating + lease 未过期 = 某进程在 provisioning（含他进程）。
+    const now = new Date()
+    if (row.status === 'creating' && row.leaseExpiresAt && row.leaseExpiresAt > now) {
+      // 在飞 create（DB lease 被持，任意进程）：置取消标志（create job 检查点检出 → 统一回滚删行后终止），
+      // 不入队 delete（同名 create job 活跃，delete 需等 lease 过期——取消标志更快）
       await this.prisma.container
         .update({
           where: { id: row.id },
@@ -444,18 +455,13 @@ export class Orchestrator {
         .catch(() => {}) // 行可能已被并发 delete job 删除 → 幂等
       return
     }
+    // 无在飞 create：running/stopped/error 及孤儿 creating 行（lease 过期）都可入队 delete 清理
     try {
-      // 无在飞 create（租约取得）：running/stopped/error 及孤儿 creating 行都可入队 delete 清理
       await this.queue.enqueueDelete(name, ownerId, row.id) // rowId 绑定：防 at-least-once 重试误删重建
     } catch (e) {
-      // codex #6（P1）：入队失败（Redis 挂）不得报假成功——回滚取消标志 + 释放租约，
-      // rethrow 信封错误让客户端重试（否则轮询永远等不到 removing）。
-      await this.prisma.container
-        .update({ where: { id: row.id }, data: { cancelRequested: false } })
-        .catch(() => {})
+      // codex 一轮 #6（P1）：入队失败（Redis 挂）不得报假成功——rethrow 信封错误让客户端重试
+      //（否则轮询永远等不到 removing）。
       throw e instanceof EnvelopeError ? e : fail(CODE.CLEANUP_FAILED)
-    } finally {
-      this.leases.release(name)
     }
   }
 
@@ -474,9 +480,12 @@ export class Orchestrator {
     // codex 三轮 P1 #3：删除 claim 只排除**活动租约**（removing + lease 未过期 = 另一 worker 在清），
     // 不再排除所有 removing——否则 delete 中途失败（chown/stop/remove/rmtree）标 REMOVING 后，
     // lease 过期重试也被 `not removing` 永久挡（行+容器永远残留）。removing + lease 过期 = 可回收。
+    // codex 五轮 P1 #2：claim 谓词加 `id: rowId`——rowId 检查与 CAS 是分离操作，只按 name 过滤时，
+    // 另一 delete 删掉检查过的行 + 用户重建同名 → 本 claim 误占替换行。id 入谓词使绑定原子化。
     const claimed = await this.prisma.container.updateMany({
       where: {
         name,
+        ...(rowId ? { id: rowId } : {}), // 原子绑定保留行（防误 claim 重建行）
         OR: [
           { status: { not: 'removing' }, leaseExpiresAt: null },
           { status: { not: 'removing' }, leaseExpiresAt: { lt: now } },

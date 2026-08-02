@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync } from 'node:
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { setupTestApp, type TestContext } from './setup'
-import { seedAdmin } from './helpers'
+import { seedAdmin, seedUser } from './helpers'
 import { Orchestrator, type OrchestratorConfig } from '../src/orchestrator/orchestrator'
 import { FakeRuntime, MemoryQueue, testTokenCrypto } from './fakes'
 import { CODE } from '../src/codes'
@@ -194,16 +194,22 @@ describe('5 态机 + provisioning（creating→running）', () => {
 })
 
 describe('取消标志（delete 遇在飞 create）', () => {
-  it('检查点检出 cancelRequested → 回滚后终止（不建目录/不 run）', async () => {
+  it('DB lease 被持（另一进程在飞 create）→ deleteEnqueue 置取消标志，检查点回滚后终止', async () => {
     const orch = makeOrch(makeCfg())
     await orch.createReserve('cancel', adminId, 3)
-    // delete 在飞 create：置取消标志（路由层 deleteEnqueue 的 creating 分支，不入队 delete——
-    // 同名 create job 仍活跃，jobId 重复会被 BullMQ 拒收；检查点回滚即终止）
+    // 模拟另一进程正在 provisioning（DB lease 被持）——deleteEnqueue 的进程内 lease 已随 enqueue
+    // 释放（codex 五轮 #1），但 deleteEnqueue 查 DB 发现 creating + lease 被持 → 置取消标志
+    await ctx.prisma.container.update({
+      where: { name: 'cancel' },
+      data: { leaseExpiresAt: new Date(Date.now() + 60_000) },
+    })
     await orch.deleteEnqueue('cancel', adminId)
     const row = await ctx.prisma.container.findUnique({ where: { name: 'cancel' } })
     expect(row!.cancelRequested).toBe(true)
     // provisioning 检查点检出 → 回滚删行
     const createJob = queue.lastCreate('cancel')
+    // 释放 lease（模拟原 worker 崩溃后过期）再跑 create（检查点 1 检出 cancelRequested → 终止）
+    await ctx.prisma.container.update({ where: { name: 'cancel' }, data: { leaseExpiresAt: null } })
     await orch.provisionCreate(createJob.name, createJob.configText)
     const after = await ctx.prisma.container.findUnique({ where: { name: 'cancel' } })
     expect(after).toBeNull() // 行已回滚
@@ -340,17 +346,45 @@ describe('异步 delete（removing 终态）', () => {
     await expect(orch.createReserve('orphan', adminId, 3)).rejects.toMatchObject({ code: CODE.ORPHAN_DIR })
     expect(await ctx.prisma.container.findUnique({ where: { name: 'orphan' } })).toBeNull() // 未建行
   })
+
+  it('codex 五轮 P1 #4：deleteEnqueue 归属二次校验——ownerId 不匹配 → 20040 不误删重建行', async () => {
+    const orch = makeOrch(makeCfg())
+    // admin 建行
+    await orch.createReserve('ownerchk', adminId, 3)
+    // 模拟：行被删 + 另一用户（user2）重建同名——原 admin 的 deleteEnqueue 应拒（ownerId 不匹配）
+    await ctx.prisma.container.deleteMany({ where: { name: 'ownerchk' } })
+    const other = await seedUser(ctx.prisma, 'userX', 'pw-userx-secure')
+    await orch.createReserve('ownerchk', other.id, 3)
+    // admin 再删 → 20040（行已属 userX，不误删）
+    await expect(orch.deleteEnqueue('ownerchk', adminId)).rejects.toMatchObject({ code: CODE.CONTAINER_NOT_FOUND })
+    // userX 的行未被误删
+    expect(await ctx.prisma.container.findUnique({ where: { name: 'ownerchk' } })).not.toBeNull()
+  })
+
+  it('codex 五轮 P1 #1/#2：delete claim 原子绑定 rowId——重建行不被旧 delete claim', async () => {
+    const orch = makeOrch(makeCfg())
+    await orch.createReserve('claimbind', adminId, 3)
+    await orch.provisionCreate(queue.lastCreate('claimbind').name, queue.lastCreate('claimbind').configText)
+    await orch.deleteEnqueue('claimbind', adminId)
+    const oldRow = await ctx.prisma.container.findUnique({ where: { name: 'claimbind' } })
+    // 模拟：行被删 + 重建（新 rowId）——清目录避免 orphan 拒绝
+    await ctx.prisma.container.deleteMany({ where: { name: 'claimbind' } })
+    await import('node:fs/promises').then((f) => f.rm(path.join(dir, 'instances', 'claimbind'), { recursive: true, force: true }))
+    await orch.createReserve('claimbind', adminId, 3)
+    // 旧 delete job（old rowId）claim → CAS 谓词含 id: oldRowId → 匹配不到新行 → no-op
+    await orch.provisionDelete('claimbind', oldRow!.id)
+    expect(await ctx.prisma.container.findUnique({ where: { name: 'claimbind' } })).not.toBeNull() // 新行未被删
+  })
 })
 
 describe('同名列串行化 + 租约', () => {
-  it('createReserve 期间同名列被 Map 互斥挡下（20041）', async () => {
+  it('createReserve 后进程内 lease 已释放（enqueue 即释放，codex 五轮 #1）；撞名由 DB unique 仲裁 20041', async () => {
     const orch = makeOrch(makeCfg())
     await orch.createReserve('ser', adminId, 5)
-    expect(orch['leases'].isHeld('ser')).toBe(true) // provisioning 在飞 → 租约持有
-    await expect(orch.createReserve('ser', adminId, 5)).rejects.toMatchObject({ code: CODE.NAME_CONFLICT })
-    // 释放后（provision 完成）可重建
-    await orch.provisionCreate(queue.lastCreate('ser').name, queue.lastCreate('ser').configText)
+    // 进程内 lease 已随 enqueue 释放（worker 串行靠 DB lease，请求侧不留）
     expect(orch['leases'].isHeld('ser')).toBe(false)
+    // 同名创建仍被拒（20041——DB name@unique，insertCreatingRow P2002 转译）
+    await expect(orch.createReserve('ser', adminId, 5)).rejects.toMatchObject({ code: CODE.NAME_CONFLICT })
     await orch.createReserve('ser2', adminId, 5)
   })
 

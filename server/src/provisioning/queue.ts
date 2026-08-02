@@ -61,10 +61,10 @@ export class BullMqProvisionQueue implements ProvisionJobQueue {
       { type: 'create', name, ownerId, configText },
       {
         removeOnComplete: true,
-        // codex 三轮 P1：租约竞争（LeaseContentionError）须重试——attempts>1 + fixed backoff
-        // （30s 起步，指数增长），覆盖 lease 5min 过期的重试窗口。最终失败（>10 次）落 failed
-        // 集合，运维可经 list 感知 creating 行 + delete 清理。
-        attempts: 10,
+        // codex 三轮 P1 + 五轮 P1 #3：租约竞争（LeaseContentionError）须重试——attempts+fixed backoff
+        // 窗口须 > LEASE_TTL_MS（5min）。attempts=20 × 30s 固定延迟 = 19×30=570s > 300s，租约过期后
+        // 必有一次重试可抢占。最终失败（>20 次）落 failed 集合，运维可经 list 感知 + delete 清理。
+        attempts: 20,
         backoff: { type: 'fixed', delay: 30_000 },
       },
     )
@@ -76,7 +76,7 @@ export class BullMqProvisionQueue implements ProvisionJobQueue {
       { type: 'delete', name, ownerId, rowId },
       {
         removeOnComplete: true,
-        attempts: 10,
+        attempts: 20, // 同 create：窗口 570s > lease TTL 300s
         backoff: { type: 'fixed', delay: 30_000 },
       },
     )
