@@ -19,6 +19,9 @@ export function renderGatewayConfig(templateJsonPath: string): string {
   // 即崩（"missing gateway.mode"），容器退出码 78 无限重启（M2 smoke CI 失败根因）。
   gateway.mode = 'local'
   const auth = (gateway.auth ?? {}) as Record<string, unknown>
+  // codex 七轮 P2：强制 auth.mode=token——模板缺省/漂移到其他模式时，仅设 token 字段会被忽略或
+  // 用意外认证启动。token 模式是每容器 GATEWAY_TOKEN 生效的前提（spec §5.2 凭证不变量）。
+  auth.mode = 'token'
   auth.token = GATEWAY_TOKEN_PLACEHOLDER // 强制占位：杜绝真 token 落盘
   gateway.auth = auth
   template.gateway = gateway

@@ -28,6 +28,7 @@ async function main(): Promise<void> {
     tokenCrypto: createTokenCrypto(config.jwtSecret), // GATEWAY_TOKEN 落库加密（真值不落盘）
   })
   const worker = createProvisioningWorker(orchestrator)
+  await orchestrator.reconcileStaleCreating().catch(() => {}) // codex 七轮 P2：启动对账超龄 creating 行
 
   const app = createApp({ prisma, orchestrator })
 

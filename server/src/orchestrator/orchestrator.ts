@@ -88,7 +88,8 @@ export class Orchestrator {
   }
 
   // ── 端口池（#313 四来源已用集）──
-  async usedPorts(extra: ReadonlySet<number> = new Set()): Promise<Set<number>> {    const used = new Set<number>(extra)
+  async usedPorts(extra: ReadonlySet<number> = new Set()): Promise<Set<number>> {
+    const used = new Set<number>(extra)
     // 来源 1：DB 记账
     const rows = await this.prisma.container.findMany({ select: { port: true } })
     for (const r of rows) used.add(r.port)
@@ -106,9 +107,16 @@ export class Orchestrator {
     } catch {
       // 同上
     }
-    // 来源 4：池内宿主实测占用（跳过已并集来源，避免重复 bind 探测）
+    // 来源 4：池内宿主实测占用——codex 七轮 P2：探测绑定 127.0.0.1 与 docker 发布 0.0.0.0 不等价
+    //（防冲突价值有限，docker run 时 daemon 仲裁 + bind 重试兜底），且每次 create 对整池逐个 bind
+    // 是 O(pool) 同步慢路径。改为 early-exit：只探测到首个空闲端口即停（代价≈已用缺口，非常用池大）。
     for (let p = this.cfg.portPoolStart; p <= this.cfg.portPoolEnd; p++) {
-      if (!used.has(p) && (await this.portInUse(p))) used.add(p)
+      if (used.has(p)) continue
+      if (await this.portInUse(p)) {
+        used.add(p)
+        continue
+      }
+      break // 首个空闲即停——后续端口无需探测（allocator 会取最低空闲）
     }
     return used
   }
@@ -138,6 +146,32 @@ export class Orchestrator {
     }
   }
 
+  // codex 七轮 P1：长 provisioning 期间续约 DB lease（防固定 TTL 过期被竞争 worker 回收）。
+  // 条件更新（where leaseExpiresAt = 本次设的值）防误续他人租约；best-effort。
+  private async renewLease(id: string, expectedExpiry?: Date): Promise<void> {
+    const now = new Date()
+    await this.prisma.container
+      .updateMany({
+        where: { id, ...(expectedExpiry ? { leaseExpiresAt: expectedExpiry } : {}) },
+        data: { leaseExpiresAt: new Date(now.getTime() + LEASE_TTL_MS) },
+      })
+      .catch(() => {})
+  }
+
+  // codex 七轮 P2：creating 行 watchdog——worker 未启动/Redis 丢 job 时 creating 行永久滞留
+  //（占配额/端口，GET / 一直 pending）。启动时把超龄（>lease TTL）creating 行标 error，
+  // 客户端可经 list 感知 + delete 清理回收。best-effort。
+  async reconcileStaleCreating(): Promise<void> {
+    const cutoff = new Date(Date.now() - LEASE_TTL_MS)
+    await this.prisma.container.updateMany({
+      where: {
+        status: 'creating',
+        OR: [{ leaseExpiresAt: null }, { leaseExpiresAt: { lt: cutoff } }],
+      },
+      data: { status: 'error' },
+    })
+  }
+
   // ── create 阶段一（同步预占 creating 行 + 端口入队前分配 + 入队）──
   // 错误语义：撞名 20041（不分占用者）/ 超配额 20042 / 端口池耗尽 90004 / LLM key 缺失 90003。
   async createReserve(name: string, ownerId: string, quotaLimit: number): Promise<Container> {
@@ -158,7 +192,9 @@ export class Orchestrator {
         }
       } catch (e) {
         if (e instanceof EnvelopeError) throw e
-        // ENOENT（目录不存在）→ 正常新建
+        // codex 七轮：仅吞 ENOENT（目录不存在→正常新建）；EACCES/ENOTDIR/ELOOP 是真实配置错误，
+        // 不得静默吞掉走正常新建（worker 的 mkdir 会再抛 → error 行，但同步拒绝更早暴露）。
+        if ((e as { code?: string }).code !== 'ENOENT') throw e
       }
       // 端口入队前分配 + creating 行插入（#313；SQLite port @unique 仲裁）
       // codex #5（P2）：配额 count+insert 原子化——count 与 create 同一事务，防并发不同名
@@ -249,7 +285,7 @@ export class Orchestrator {
   // updateMany 原子抢占（where leaseExpiresAt null 或已过期），抢不到即另一 worker 在飞 → no-op。
   // Redis 挂也不影响（锁在 SQLite，spec §F「SQLite 持状态」）。
   async provisionCreate(name: string, configText: string): Promise<void> {
-    const row = await this.prisma.container.findUnique({ where: { name } })
+    let row = await this.prisma.container.findUnique({ where: { name } })
     if (!row || row.status !== 'creating') return // 已清理/已收敛 → no-op
     // DB CAS 抢占租约（跨进程）：where leaseExpiresAt 空闲，update 置 leaseExpiresAt=now+TTL
     const now = new Date()
@@ -271,32 +307,41 @@ export class Orchestrator {
     let runAttempted = false
     let dirCreated = false
     try {
-      // 检查点 1：enqueue 后、任何 IO 前 —— 取消即终止（不建目录）
-      if (row.cancelRequested) {
-        await this.deleteRowQuietly(row.id)
-        return
-      }
-      // codex 六轮 P1 #4：worker 在 run() 后、存 containerId 前崩溃 → 行 creating + 空 id 但容器已
-      // 在跑（labeled）。stalled 重试时从 fleet label 恢复容器身份——否则 delete 因 containerId 空
-      // 跳过清理，容器永久孤儿。listFleet 按 openclaw.instance label 匹配本行。
+      // codex 六轮 P1 #4 + 七轮 P1：worker 在 run() 后、存 containerId 前崩溃 → 行 creating + 空 id
+      // 但容器已在跑（labeled）。此对账扫描必须在 cancelRequested early-return 之前——否则崩溃后
+      // DELETE 置 cancel、stalled retry 早退删行，运行中的 labeled 容器永远无主。listFleet 按
+      // openclaw.instance label 匹配本行，恢复 containerId 后再删容器（防孤儿）。
       if (!row.containerId) {
         try {
           const fleet = await this.runtime.listFleet()
           const mine = fleet.find((c) => c.instanceName === name)
           if (mine?.containerId) {
+            // 先存 containerId（所有权证据），再处理取消/完成——确保后续可清理该容器
             await this.prisma.container.update({
               where: { id: row.id },
-              data: { containerId: mine.containerId, status: 'running' },
+              data: { containerId: mine.containerId },
             })
-            return // 容器已在跑（上轮 run 成功，仅存 id 前崩溃）→ 对账完成
+            row = { ...row, containerId: mine.containerId }
+            runAttempted = true
           }
         } catch {
           // daemon 不可达 → 继续正常 provisioning 路径
         }
       }
+      // 检查点 1：enqueue 后、任何 IO 前 —— 取消即终止（不建目录）
+      if (row.cancelRequested) {
+        // 崩溃 create 已恢复容器身份（containerId 已存）→ 经 delete 清理而非直接删行
+        if (runAttempted) {
+          await this.provisionDelete(name)
+          return
+        }
+        await this.deleteRowQuietly(row.id)
+        return
+      }
       // 1. provision home（cp -a 模板 → home）
       await this.provisionHome(instanceDir, homeDir)
       dirCreated = true
+      await this.renewLease(row.id) // codex 七轮 P1：长 provisioning 期间续约（防 lease 过期被回收）
       // 2. 原子写 config
       const configPath = path.join(instanceDir, 'openclaw.json')
       await this.writeConfigAtomic(configPath, configText)
@@ -321,9 +366,17 @@ export class Orchestrator {
         configText,
         llmApiKey: this.cfg.llmApiKey,
       }
+      await this.renewLease(row.id) // codex 七轮 P1：run 前续约（覆盖 docker start 长窗口）
       const containerId = await this.runWithPortRetry(row, specBase)
       runAttempted = true
-      // 4. 先持久化 running + containerId（否则 delete 无所有权证据，容器成孤儿），再查取消
+      row = { ...row, containerId }
+      // codex 七轮 P1：先单独持久化 containerId（所有权证据），再 update running——若 status update
+      // 抛错（SQLite 瞬态），行已有 containerId，finalize 不会 remove 健康容器且 delete 可清孤儿。
+      // 两步分离：status 写失败 ≠ 容器启动失败。
+      await this.prisma.container
+        .update({ where: { id: row.id }, data: { containerId } })
+        .catch(() => {}) // 幂等：即使此 update 失败，下面 status update 重试带 containerId
+      // 4. 持久化 running（容器已启动）
       await this.prisma.container.update({
         where: { id: row.id },
         data: { status: 'running', containerId },
@@ -401,6 +454,7 @@ export class Orchestrator {
           throw e
         }
         row = { ...row, port: nextPort }
+        await this.renewLease(row.id) // codex 七轮 P1：bind 重试循环内续约（每轮都可能耗时）
       }
     }
     throw fail(CODE.PORT_POOL_EXHAUSTED)
@@ -416,10 +470,17 @@ export class Orchestrator {
     dirCreated: boolean,
   ): Promise<void> {
     if (runAttempted) {
+      // codex 七轮 P1：remove 前先持久化 containerId 证据——若 remove 本身失败（daemon 抖动），
+      // 行保留 id 供 delete 凭所有权清理孤儿，而非无主。
+      if (row.containerId) {
+        await this.prisma.container
+          .update({ where: { id: row.id }, data: { containerId: row.containerId } })
+          .catch(() => {})
+      }
       try {
         await this.runtime.remove(row.name)
       } catch {
-        // 清容器失败：行仍保留（containerId 若已记录供 delete 证明所有权）
+        // 清容器失败：行仍保留（containerId 已持久化供 delete 证明所有权）
       }
     }
     if (dirCreated) {
@@ -543,6 +604,8 @@ export class Orchestrator {
       path.basename(recordedParent) === name && path.basename(path.dirname(recordedParent)) === 'instances'
         ? recordedParent
         : path.join(this.cfg.fleetRoot, 'instances', name)
+    // codex 七轮 P1：delete 长清理前续约（chown/stop/remove/rmtree 可能 >TTL）
+    await this.renewLease(row.id)
     // container_id 是本行拥有 runtime 容器的正向证据；验证后再 stop/remove（防误删外来同名容器）
     if (row.containerId) {
       let live: { containerId: string } | null = null

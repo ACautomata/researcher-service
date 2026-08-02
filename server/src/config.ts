@@ -1,4 +1,5 @@
 import 'dotenv/config'
+import path from 'node:path'
 import { isQuotaValid, QUOTA_MAX } from './auth/quota'
 
 // 控制面配置：全部来自环境变量，带 dev 友好默认。生产缺关键项时 fail-fast。
@@ -114,7 +115,9 @@ export const config = {
   databaseUrl: process.env.DATABASE_URL ?? 'file:./prisma/panel.db',
   isTest: process.env.NODE_ENV === 'test',
   // ── M2 容器编排（#334）──
-  fleetRoot: process.env.FLEET_ROOT ?? `${process.cwd()}/fleet`, // instances/<name>/ 落盘根
+  // codex 七轮 P1：FLEET_ROOT resolve 绝对路径——docker bind 源必须绝对，相对路径（如 .env.example
+  // 的 ./fleet）会致每次 create 失败 "invalid bind specification"。
+  fleetRoot: path.resolve(process.env.FLEET_ROOT ?? `${process.cwd()}/fleet`), // instances/<name>/ 落盘根
   openclawTemplateDir: process.env.OPENCLAW_TEMPLATE_DIR ?? '', // cp -a 源；空 = 未配（provision 时 fail-fast）
   openclawTemplateJson: process.env.OPENCLAW_TEMPLATE_JSON ?? '', // openclaw.json 模板文件路径
   openclawImage: process.env.OPENCLAW_IMAGE ?? 'ghcr.io/openclaw/openclaw:2026.7.1-browser',
