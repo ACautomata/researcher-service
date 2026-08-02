@@ -79,12 +79,14 @@ export class FleetCommand {
   async createReserve(name: string, ownerId: string, maxContainers?: number): Promise<Container> {
     const doReserve = async (): Promise<Container> => {
       if (!this.deps.config.llmApiKey) throw new ConfigurationError('LLM_API_KEY')
-      // recreate（删后同名重建）须先清上一轮 delete 可能残留的取消标志，否则本 create 在检查点误中止。
-      this.cancel.clear(name)
       // 双创建防护：进程内租约（已被持有 = 并发/在飞 create）→ 快速失败 20041
       const lease = this.deps.lock.tryAcquire(name)
       if (lease === null) throw new InstanceExists(name)
       this.leases.set(name, lease)
+      // recreate（删后同名重建）须先清上一轮 delete 可能残留的取消标志，否则本 create 在检查点误中止。
+      // 仅在拿到租约（确认本 reservation 是新生命周期、无在飞 create）后才清——
+      // 并发 retry 在租约被在飞 create 持有时抛 20041，不得清掉对方的取消标志（Codex 第三轮 ④[P1]）。
+      this.cancel.clear(name)
       try {
         const inst = await this.reserveRow(name, ownerId)
         // 残留目录预检（DB 无行的 orphan 目录）→ 20044：同步暴露而非留到后台 mkdir 才失败
@@ -93,7 +95,14 @@ export class FleetCommand {
           await this.prisma.container.delete({ where: { id: inst.id } })
           throw new InstanceDirExists(name, instanceDir)
         }
-        await this.ensureRenderer() // 模板损坏 fail-fast（确定性配置错误同步暴露）
+        try {
+          await this.ensureRenderer() // 模板损坏 fail-fast（确定性配置错误同步暴露）
+        } catch (e) {
+          // renderer 失败（模板损坏/缺失）→ 回滚刚 reserve 的行，释放名称/端口/配额。
+          // 修前只 releaseLease，creating 行残留耗配额/占端口，recreate 被 20041 锁死（Codex 第三轮 ⑥[P2]）。
+          await this.prisma.container.delete({ where: { id: inst.id } }).catch(() => {})
+          throw e
+        }
         return inst
         // 成功路径不释放租约：租约跨到后台 create_complete，finally 释放（覆盖 provisioning 全程）。
       } catch (e) {
@@ -331,6 +340,9 @@ export class FleetCommand {
     preserveErrorRow: boolean,
     exc: unknown,
   ): Promise<never> {
+    // remove 是否确认成功。false 且「本 create 尝试跑了新容器」→ 跳过目录清理（容器可能仍驻留、
+    // 其 bind-mount home 数据在跑；删目录即删活数据，Codex 第三轮 ③[P1]）。
+    let removeConfirmed = false
     if (runAttempted && !preexisting) {
       try {
         const created = await this.deps.runtime.get(name)
@@ -342,11 +354,16 @@ export class FleetCommand {
         }
         await this.deps.runtime.remove(name)
         await this.prisma.container.update({ where: { id: inst.id }, data: { containerId: '' } })
+        removeConfirmed = true
       } catch {
-        // 清容器失败：保留观测到的 id，供 ERROR 行后续 delete 证明所有权
+        // 清容器失败（daemon 故障/remove 抛错）：保留观测到的 id 供 ERROR 行后续 delete 证明所有权。
+        // removeConfirmed 保持 false → 下方跳过目录清理（Codex 第三轮 ③[P1]）。
       }
     }
-    if (directoryCreated) {
+    // 仅「本 create 尝试跑了新容器且 remove 未确认」时保目录；其余（取消于 run 前 / 无新容器）
+    // 保持原清理语义（不留 orphan 目录）。
+    const containerMayStillRun = runAttempted && !preexisting && !removeConfirmed
+    if (directoryCreated && !containerMayStillRun) {
       try {
         await this.deps.dirRemover(instanceDir)
       } catch {
@@ -368,6 +385,17 @@ export class FleetCommand {
     await this.prisma.container
       .update({ where: { id: inst.id }, data: { status: 'error' } })
       .catch(() => {})
+  }
+
+  // stop + remove 已验证归属的容器。chown 前置（容器以 root 跑、bind-mount home 属主 root，
+  // host 非 root 删会权限错）。best-effort——stop/remove 失败不阻断目录清理（容器停删失败时
+  // 目录清理会抛 InstanceCleanupError 保留 REMOVING 行，可重试）。
+  private async stopAndRemove(name: string): Promise<void> {
+    await this.deps.runtime
+      .execSync(name, ['chown', '-R', String(process.getuid?.() ?? 0), HOME_BIND])
+      .catch(() => {})
+    await this.deps.runtime.stop(name)
+    await this.deps.runtime.remove(name)
   }
 
   private releaseLease(name: string): void {
@@ -411,21 +439,21 @@ export class FleetCommand {
       return 'not-found'
     }
     // container_id 是本行拥有 runtime 容器的正向证据。先验证再 stop/remove（防误删外来同名容器）。
+    // 崩溃窗口（Codex 第三轮 ②[P1]）：runtime.run() 已起容器，但进程在「prisma.update 存 containerId」
+    // 前崩溃 → 行 creating + containerId=''。此时不能因 ID 为空就跳过清理（否则 docker 容器泄露）；
+    // 改为 inspect runtime，用 instance label 匹配本行名来确认所有权，匹配则 stop+remove。
+    const live = await this.deps.runtime.get(name)
     if (inst.containerId) {
-      const live = await this.deps.runtime.get(name)
       if (!live || live.containerId !== inst.containerId) {
         await this.prisma.container
           .update({ where: { id: inst.id }, data: { containerId: '' } })
           .catch(() => {})
       } else {
-        // 容器以 root 跑，bind-mount home 内文件属主为 root，host 非 root 删会权限错。
-        // 容器还在（root 权限）时同步 chown home 给 host uid。best-effort——失败不阻断。
-        await this.deps.runtime
-          .execSync(name, ['chown', '-R', String(process.getuid?.() ?? 0), HOME_BIND])
-          .catch(() => {})
-        await this.deps.runtime.stop(name)
-        await this.deps.runtime.remove(name)
+        await this.stopAndRemove(name)
       }
+    } else if (live && live.instanceName === inst.name) {
+      // 无 containerId 但 runtime 实况容器 instance label 匹配本行 → 视为本行拥有，清理。
+      await this.stopAndRemove(name)
     }
     // 优先由 DB home_dir 派生 instance_dir（创建时固化的绝对路径）；防御占位/篡改回退当前 root。
     const recorded = path.dirname(inst.homeDir)

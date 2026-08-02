@@ -4,6 +4,7 @@
 // running/stopped 由 runtime 实况动态推导（DB 只持久化 creating/removing/error + 创建成功后 running）。
 
 import type { PrismaClient, Container } from '../generated/prisma/client'
+import path from 'node:path'
 import {
   HEALTH_HEALTHY,
   HEALTH_PENDING,
@@ -127,10 +128,25 @@ export class FleetReadModel {
       }
       if (info && info.instanceName === inst.name) {
         // 容器仍驻留 → delete 未跑完 → 重新入队继续清理（仍显示 removing）。
-        await this.requeueDelete?.(inst.name)
+        // 只入队不等待（Codex 第三轮 ①[P1]）：requeueDelete 会 await submitDelete，后者排在在飞
+        // delete 之后、settle 于清理完成后——list await 它 = 轮询请求阻塞在被观察的删除上
+        // （Redis 不可达更糟，永挂）。这里 detach，list 立即返回 removing 状态。
+        void this.requeueDelete?.(inst.name)
         survivors.push(inst)
       } else {
-        // 容器已不在 → 行残留（删行没跑到）→ 删行收敛，不进 list 结果。
+        // 容器已不在 → 行残留（删行没跑到）→ 收尾：先清实例目录再删行。
+        // （Codex 第三轮 ⑤[P2]）修前直接删行，instances/<name> 遗留 orphan 目录 → 后续 recreate
+        // 被 createReserve 以 InstanceDirExists(20044) 拒绝，须人工清理。这里补齐删除 worker
+        // 未跑到的目录清理；目录清理失败则保留 removing 行，下次 list 再对账。
+        if (inst.homeDir) {
+          const instanceDir = path.dirname(inst.homeDir)
+          try {
+            await this.deps.dirRemover(instanceDir)
+          } catch {
+            survivors.push(inst) // 清目录失败 → 保持 removing，下次 list 重试
+            continue
+          }
+        }
         await this.prisma.container.delete({ where: { id: inst.id } }).catch(() => {})
       }
     }

@@ -208,3 +208,59 @@ describe('refresh ttl env (slice config)', () => {
     expect(await loadRefreshTtl('abc')).toBe('THREW')
   })
 })
+
+// 意见⑦[P2]（Codex 第三轮，针对 9550045）：端口池环境值未校验 —— Number(env) 接受 NaN/小数/负/
+// 超 65535，服务照常启动（PortAllocator 只查 end<start），create 时才异常（误报池耗尽 / 坏端口落 docker）。
+// 修复：config 加载即校验两个端口池值为合法 TCP 端口整数（[1,65535]）且 end≥start，非法 fail-fast。
+describe('port pool env (slice config)', () => {
+  async function loadPortPool(envs: { start?: string; end?: string }): Promise<unknown | 'THREW'> {
+    vi.resetModules() // 清 config 模块缓存，让动态 import 重新快照 env
+    if (envs.start === undefined) delete process.env.OPENCLAW_PORT_POOL_START
+    else vi.stubEnv('OPENCLAW_PORT_POOL_START', envs.start)
+    if (envs.end === undefined) delete process.env.OPENCLAW_PORT_POOL_END
+    else vi.stubEnv('OPENCLAW_PORT_POOL_END', envs.end)
+    try {
+      const { config } = await import('../src/config')
+      return { portStart: config.fleet.portStart, portEnd: config.fleet.portEnd }
+    } catch {
+      return 'THREW' // fail-fast
+    } finally {
+      vi.unstubAllEnvs() // 恢复 env（避免污染后续测试文件）
+    }
+  }
+
+  it('未设置 → 默认 19000–19999（既有行为）', async () => {
+    expect(await loadPortPool({})).toEqual({ portStart: 19000, portEnd: 19999 })
+  })
+
+  it('合法 20000–20100 → 加载为整数（既有行为）', async () => {
+    expect(await loadPortPool({ start: '20000', end: '20100' })).toEqual({
+      portStart: 20000,
+      portEnd: 20100,
+    })
+  })
+
+  it('非数字 abc → fail-fast（不再接受 NaN 端口池）', async () => {
+    expect(await loadPortPool({ start: 'abc' })).toBe('THREW')
+  })
+
+  it('小数 19000.5 → fail-fast（TCP 端口须整数）', async () => {
+    expect(await loadPortPool({ start: '19000.5' })).toBe('THREW')
+  })
+
+  it('负数 -1 → fail-fast', async () => {
+    expect(await loadPortPool({ end: '-1' })).toBe('THREW')
+  })
+
+  it('0 → fail-fast（端口须 ≥1）', async () => {
+    expect(await loadPortPool({ start: '0' })).toBe('THREW')
+  })
+
+  it('超 65535 → fail-fast（TCP 端口上限）', async () => {
+    expect(await loadPortPool({ end: '70000' })).toBe('THREW')
+  })
+
+  it('end < start → fail-fast（不再只靠 PortAllocator 运行时检查）', async () => {
+    expect(await loadPortPool({ start: '20000', end: '19999' })).toBe('THREW')
+  })
+})

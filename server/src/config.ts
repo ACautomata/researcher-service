@@ -53,6 +53,20 @@ function readBcryptCost(): number {
   return v
 }
 
+// 意见⑦[P2]（Codex 第三轮）：端口池环境值未校验 —— Number(env) 接受 NaN/小数/负/超 65535，
+// 服务照常启动（PortAllocator 只查 end<start），create 时才异常（误报池耗尽 / 坏端口落 docker）。
+// 修复：加载即校验两个端口池值为合法 TCP 端口整数（[1, 65535]）且 end ≥ start，非法 fail-fast。
+// 与 PortAllocator 构造期检查解耦（后者仅防御 end<start，不查端口取值范围）。
+function readPortPoolValue(raw: string | undefined, fallback: number, field: string): number {
+  const v = Number(raw ?? fallback)
+  if (!Number.isInteger(v) || v < 1 || v > 65535) {
+    throw new Error(
+      `${field} 非法: ${JSON.stringify(raw)}，须为 [1, 65535] 的 TCP 端口整数`,
+    )
+  }
+  return v
+}
+
 // BOOTSTRAP_ADMIN_USERNAME（Codex #342 ㉑ P2）：空串视为缺失 —— Compose 未设置变量替换成空串
 // 时 `?? 'admin'` 不触发（空串非 nullish），bootstrap 会建 username="" 的唯一 admin，而
 // loginSchema min(1) 拒绝空串 → 永久不可登录、重启又因 users 非空跳过 bootstrap。空串回退默认。
@@ -88,25 +102,35 @@ export const config = {
   databaseUrl: process.env.DATABASE_URL ?? 'file:./prisma/panel.db',
   isTest: process.env.NODE_ENV === 'test',
   // ---- 容器编排（#334 M2；平移 Django settings.OPENCLAW_FLEET / REDIS_URL）----
-  fleet: {
-    // instances/<name>/ 落盘根（开发默认 <server>/fleet）
-    root: process.env.OPENCLAW_FLEET_ROOT ?? `${process.cwd()}/fleet`,
-    // 共享只读模板（cp -a 预填充源；生产必填绝对路径）
-    templateDir: process.env.OPENCLAW_TEMPLATE_DIR ?? `${process.cwd()}/../researcher`,
-    // openclaw.json 模板文件（配置单一来源）
-    templateJson: process.env.OPENCLAW_TEMPLATE_JSON ?? `${process.cwd()}/../deploy/openclaw.json`,
-    image: process.env.OPENCLAW_IMAGE ?? 'ghcr.io/openclaw/openclaw:2026.7.1-browser',
-    portStart: Number(process.env.OPENCLAW_PORT_POOL_START ?? 19000),
-    portEnd: Number(process.env.OPENCLAW_PORT_POOL_END ?? 19999),
-    // 全面板共享 LLM_API_KEY（敏感值）；生产必填（create 时前置校验 → 90003）
-    llmApiKey: process.env.LLM_API_KEY ?? '',
-    // 容器 gateway 端口宿主侧发布地址（本地 loopback；生产后端容器化后 0.0.0.0）
-    publishHost: process.env.OPENCLAW_FLEET_PORT_BIND_HOST ?? '127.0.0.1',
-    // 健康探测目标 host（与 WS 配对同源）
-    healthHost: process.env.OPENCLAW_FLEET_WS_HOST ?? '127.0.0.1',
-    // 凭证加密密钥（gateway token 落盘密文；生产 CREDENTIAL_ENCRYPTION_KEYS 必填，dev 固定密钥）
-    encryptionKeys: parseEncryptionKeys(process.env.CREDENTIAL_ENCRYPTION_KEYS),
-  },
+  fleet: (() => {
+    const portStart = readPortPoolValue(process.env.OPENCLAW_PORT_POOL_START, 19000, 'OPENCLAW_PORT_POOL_START')
+    const portEnd = readPortPoolValue(process.env.OPENCLAW_PORT_POOL_END, 19999, 'OPENCLAW_PORT_POOL_END')
+    // 交叉校验：end < start 须启动期 fail-fast（修前只靠 PortAllocator 运行时检查，create 时才报）。
+    if (portEnd < portStart) {
+      throw new Error(
+        `端口池非法: OPENCLAW_PORT_POOL_END(${portEnd}) < OPENCLAW_PORT_POOL_START(${portStart})`,
+      )
+    }
+    return {
+      // instances/<name>/ 落盘根（开发默认 <server>/fleet）
+      root: process.env.OPENCLAW_FLEET_ROOT ?? `${process.cwd()}/fleet`,
+      // 共享只读模板（cp -a 预填充源；生产必填绝对路径）
+      templateDir: process.env.OPENCLAW_TEMPLATE_DIR ?? `${process.cwd()}/../researcher`,
+      // openclaw.json 模板文件（配置单一来源）
+      templateJson: process.env.OPENCLAW_TEMPLATE_JSON ?? `${process.cwd()}/../deploy/openclaw.json`,
+      image: process.env.OPENCLAW_IMAGE ?? 'ghcr.io/openclaw/openclaw:2026.7.1-browser',
+      portStart,
+      portEnd,
+      // 全面板共享 LLM_API_KEY（敏感值）；生产必填（create 时前置校验 → 90003）
+      llmApiKey: process.env.LLM_API_KEY ?? '',
+      // 容器 gateway 端口宿主侧发布地址（本地 loopback；生产后端容器化后 0.0.0.0）
+      publishHost: process.env.OPENCLAW_FLEET_PORT_BIND_HOST ?? '127.0.0.1',
+      // 健康探测目标 host（与 WS 配对同源）
+      healthHost: process.env.OPENCLAW_FLEET_WS_HOST ?? '127.0.0.1',
+      // 凭证加密密钥（gateway token 落盘密文；生产 CREDENTIAL_ENCRYPTION_KEYS 必填，dev 固定密钥）
+      encryptionKeys: parseEncryptionKeys(process.env.CREDENTIAL_ENCRYPTION_KEYS),
+    }
+  })(),
   // BullMQ worker 并发上限（默认 2，对齐旧 ThreadPoolExecutor(2)）
   lifecycleWorkerConcurrency: Number(process.env.LIFECYCLE_WORKER_CONCURRENCY ?? 2),
   // BullMQ/Redis 连接（#313 自本切片引入；后台 provisioning 队列）

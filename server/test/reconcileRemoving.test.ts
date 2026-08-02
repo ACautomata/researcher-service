@@ -49,9 +49,17 @@ describe('reconcileRemoving 对账 (Codex C6)', () => {
     expect(fl.runtime.containers.has('c6-stuck')).toBe(true)
     // 模拟 delete worker 静默 return：手动标 removing，容器 / 目录仍在（清理未跑）
     await ctx.prisma.container.update({ where: { name: 'c6-stuck' }, data: { status: 'removing' } })
-    // list 触发对账 → 重新入队 delete → 清理容器 + 删行（InlineLifecycleQueue 同步跑完）
+    // list 触发对账 → 重新入队 delete（Codex 第三轮 ① 后 requeue 只入队不 await：list 不阻塞在
+    // 删除完成上，立即返回 removing 状态；delete 经队列异步随后执行）。
     await fl.orch.list({ ownerId })
+    // list 返回后 delete 已入队（异步 detach）——轮询等待行删除完成（delete 全链：停删容器 →
+    // 清目录 → 删行；行消失才算完成。窗口 2s 防并行负载偶发慢）。
+    let row = await ctx.prisma.container.findUnique({ where: { name: 'c6-stuck' } })
+    for (let i = 0; i < 400 && row; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5))
+      row = await ctx.prisma.container.findUnique({ where: { name: 'c6-stuck' } })
+    }
+    expect(row).toBeNull()
     expect(fl.runtime.containers.has('c6-stuck')).toBe(false)
-    expect(await ctx.prisma.container.findUnique({ where: { name: 'c6-stuck' } })).toBeNull()
   })
 })
