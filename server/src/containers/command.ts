@@ -426,7 +426,8 @@ export class FleetCommand {
   // ---- delete：异步化（按 name 串行入队）----
   // 同步段：查行（归属已在路由层校验）；遇在飞 create 置取消标志；标 removing；入队后台清理。
   // 清理失败 → InstanceCleanupError（行留 REMOVING 可重试），由后台入口记日志。
-  async deleteReserve(name: string): Promise<'enqueued'> {
+  // 返回被删除行 ID（Codex 第五轮①[P1]）：路由层提交后台 delete 时携带，delete 执行时代系校验。
+  async deleteReserve(name: string): Promise<{ id: string; status: string }> {
     const inst = await this.prisma.container.findUnique({ where: { name } })
     // 不应到达（路由层归属前置已 20040）；防御分支沿用同码（20040 = 不存在），非 20043 busy。
     if (!inst) throw fail(CODE.CONTAINER_NOT_FOUND)
@@ -434,7 +435,7 @@ export class FleetCommand {
     this.cancel.flag(name)
     // 标 removing（终态前奏），list 轮询可见。
     await this.prisma.container.update({ where: { id: inst.id }, data: { status: 'removing' } })
-    return 'enqueued'
+    return { id: inst.id, status: 'removing' }
   }
 
   // delete 后台执行（按 name 串行——排在同 name 在飞 create 之后）。完成时 settle 供测试 await。
@@ -498,6 +499,11 @@ export class FleetCommand {
       this.cancel.clear(name)
       return 'removed'
     }
+    // 容器已被确认 stop+remove（或本就不存在）→ 立即逐出 chat pool（Codex 第五轮②[P2]）：
+    // 放行下方 dirRemover 之前，目录清理失败（throw InstanceCleanupError）也不跳过逐出——
+    // 否则容器已不复存在、gateway 已死，而 cached client 仍持续重连已消失的网关。
+    // onEvict 幂等（M2 空挂点），重复调用无害。
+    await this.deps.onEvict({ name: inst.name, port: inst.port })
     // 目录已不存在（外部清理/建行前崩溃）视为清理成功——否则行卡 REMOVING 重试永远撞同一路径。
     if (await pathExists(instanceDir)) {
       try {
@@ -511,8 +517,6 @@ export class FleetCommand {
     }
     await this.prisma.container.delete({ where: { id: inst.id } })
     this.cancel.clear(name)
-    // delete 完成后触发 chat pool 逐出（ADR 0006 下为空挂点；供桥接切片对接）。
-    await this.deps.onEvict({ name: inst.name, port: inst.port })
     return 'removed'
   }
 

@@ -36,15 +36,18 @@ export function createContainersRouter(orch: Orchestrator): Router {
   router.get('/', async (req: Request, res: Response) => {
     const user = req.user!
     const where = user.role === 'admin' ? {} : { ownerId: user.id }
-    const items = await orch.list(where)
+    const { items, ids } = await orch.listWithIds(where)
     // pairing 批量预取（M2 恒空 → default；M4 落库后注入真实快照）。
+    // 按 containerId 代系 join（Codex 第五轮③[P2]）：仅按 name join 时，删除后同名 recreate 的
+    // 竞态窗口会把新 owner 的 pairing 附到旧行摘要——containerId 唯一跨代系，name 可复用。
     const pairings = await req.prisma.pairing.findMany({
-      where: { container: { name: { in: items.map((i) => i.name) } } },
-      select: { containerId: true, status: true, deviceId: true, scopesJson: true, pairingRequestId: true, container: { select: { name: true } } },
+      where: { containerId: { in: [...ids.values()] } },
+      select: { containerId: true, status: true, deviceId: true, scopesJson: true, pairingRequestId: true },
     })
-    const byName = new Map(pairings.map((p) => [p.container.name, p]))
+    const byContainerId = new Map(pairings.map((p) => [p.containerId, p]))
     const data: SummaryWithPairing[] = items.map((i) => {
-      const p = byName.get(i.name)
+      const id = ids.get(i.name) // list 内 name 唯一；对应行 ID（代系）
+      const p = id !== undefined ? byContainerId.get(id) : undefined
       return {
         ...i,
         pairing: p

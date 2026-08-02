@@ -13,7 +13,7 @@ import { FleetReadModel, type ContainerSummary } from './readModel'
 
 export class Orchestrator {
   private readonly cmd: FleetCommand
-  private readonly read: FleetReadModel
+  readonly read: FleetReadModel
 
   constructor(
     deps: FleetDeps,
@@ -42,7 +42,10 @@ export class Orchestrator {
   createComplete(inst: Container, preserveErrorRow: boolean): Promise<Container> {
     return this.cmd.createComplete(inst, preserveErrorRow)
   }
-  deleteReserve(name: string): Promise<'enqueued'> {
+  // 返回被删除行 ID（Codex 第五轮①[P1]，endpoint 代系绑定）：路由层提交后台 delete 时携带，
+  // delete 执行时校验目标行仍是该代系——并发 DELETE 的 duplicate job 在 recreate 后到达时跳过
+  // 清理，不误删用户重建的新行（对齐 reconcileRemoving 的 requeue 代系绑定）。
+  deleteReserve(name: string): Promise<{ id: string; status: string }> {
     return this.cmd.deleteReserve(name)
   }
   submitDelete(name: string, expectedId?: string): Promise<DeleteOutcome> {
@@ -55,6 +58,10 @@ export class Orchestrator {
   // 读侧
   list(where: { ownerId?: string } = {}): Promise<ContainerSummary[]> {
     return this.read.list(where)
+  }
+  // list + 行 ID（Codex 第五轮③[P2]，pairing 代系 join 用）
+  listWithIds(where: { ownerId?: string } = {}): Promise<{ items: ContainerSummary[]; ids: Map<string, string> }> {
+    return this.read.listWithIds(where)
   }
   createdItem(inst: Container): ContainerSummary {
     return this.read.createdItem(inst)

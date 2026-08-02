@@ -1,5 +1,5 @@
 // 读侧聚合（平移 backend/containers/fleet/read_model.py，#334）。
-// list：DB 记账 + runtime 实时状态 + gateway 健康探测聚合；并发健康探测（Promise.all，bound 总延迟）。
+// list：DB 记账 + runtime 实时状态 + gateway 健康探测聚合；并发健康探测（有界 worker 池，Codex 第五轮④）。
 // reconcileCreating：list 读路径上的 lazy-repair 对账（崩溃中断的 creating 行按 runtime 实况收敛）。
 // running/stopped 由 runtime 实况动态推导（DB 只持久化 creating/removing/error + 创建成功后 running）。
 
@@ -13,6 +13,29 @@ import {
   HEALTH_UNHEALTHY,
 } from './values'
 import type { FleetDeps } from './deps'
+
+// 有界并发 map（Codex 第五轮④[P2]）：admin 大 fleet 下 Promise.all 每个容器并发一次 docker inspect +
+// 一次 HTTP 健康探测，池最大 1000 容器时一次轮询可开数百 socket/timer——耗尽 fd 或打挂 daemon。
+// 保留并行（总延迟仍 bound 于最慢项）但经小型 worker 池（8）限流。
+const PROBE_CONCURRENCY = 8
+
+async function mapWithConcurrency<T, R>(
+  items: readonly T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results: R[] = new Array(items.length)
+  let next = 0
+  async function worker(): Promise<void> {
+    while (next < items.length) {
+      const i = next
+      next += 1
+      results[i] = await fn(items[i])
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, () => worker()))
+  return results
+}
 
 // ContainerSummary（契约 §2.3）：{name, port, status, health, image, container_id, created_at}
 export interface ContainerSummary {
@@ -62,8 +85,13 @@ export class FleetReadModel {
     } catch {
       return this.item(inst, inst.status, HEALTH_STOPPED)
     }
+    // label guard（Codex 第五轮⑤[P2]，对齐 reconcileCreating/reconcileRemoving/delete）：仅
+    // openclaw.instance label 匹配本行名的容器才被采纳为本行拥有——受管容器消失后，外来同名
+    // 容器会让 stale 行被误报为 running/healthy；不匹配 → 视为已停（stopped），并存的健康探测
+    // 不执行。
+    const owned = Boolean(info && info.instanceName === inst.name)
     const running = Boolean(info && info.running)
-    if (!running) return this.item(inst, 'stopped', HEALTH_STOPPED)
+    if (!owned || !running) return this.item(inst, 'stopped', HEALTH_STOPPED)
     const health = (await this.deps.health.isReachable(inst.port)) ? HEALTH_HEALTHY : HEALTH_UNHEALTHY
     return this.item(inst, 'running', health)
   }
@@ -161,15 +189,26 @@ export class FleetReadModel {
 
   // 聚合 DB 记账 + runtime 实时状态 + gateway 健康探测。ownerId 过滤由路由层注入（隔离）。
   async list(where: { ownerId?: string } = {}): Promise<ContainerSummary[]> {
+    const { items } = await this.listWithIds(where)
+    return items
+  }
+
+  // list + 行 ID（Codex 第五轮③[P2]）：路由层 pairing 预取按 containerId 代系 join——
+  // 仅按 name join 时，删除后同名 recreate 的竞态窗口会把新 owner 的 pairing 附到旧行摘要上。
+  // id 是内部记账字段（不进 ContainerSummary API 契约），路由层用完即弃。
+  async listWithIds(where: { ownerId?: string } = {}): Promise<{ items: ContainerSummary[]; ids: Map<string, string> }> {
     const insts = await this.prisma.container.findMany({
       where,
       orderBy: { createdAt: 'asc' },
     })
-    if (insts.length === 0) return []
+    if (insts.length === 0) return { items: [], ids: new Map() }
     await this.reconcileCreating(insts)
     const survivors = await this.reconcileRemoving(insts)
-    // 并发健康探测（Promise.all，bound 总延迟而非 N×timeout 串行）。
-    return Promise.all(survivors.map((inst) => this.buildItem(inst)))
+    // 并发健康探测（有界 worker 池，bound 总延迟而非 N×timeout 串行、亦不无界并发）。
+    return {
+      items: await mapWithConcurrency(survivors, PROBE_CONCURRENCY, (inst) => this.buildItem(inst)),
+      ids: new Map(survivors.map((inst) => [inst.name, inst.id])),
+    }
   }
 
   // 由刚预占的 Container 构造 POST 响应（creating 态快照；不做二次 runtime 查询）。
