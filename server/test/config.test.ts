@@ -168,3 +168,38 @@ describe('bootstrap admin username env (slice config)', () => {
     expect(await loadUsername('   ')).toBe('admin')
   })
 })
+
+// 意见③①[P2]（Codex ㉓ 轮）：REFRESH_TOKEN_TTL 启动期校验 —— `7days` 这类错值 config 接受、
+// server 正常起（health 绿），首个 login 才在 refreshExpiresAt() 抛 90000。修复：config 加载即
+// 校验 TTL 格式（与 tokens.parseTtlToMs 同正则 `<数字><单位>`），非法 fail-fast。
+describe('refresh ttl env (slice config)', () => {
+  async function loadRefreshTtl(env: string | undefined): Promise<string | 'THREW'> {
+    vi.resetModules()
+    if (env === undefined) delete process.env.REFRESH_TOKEN_TTL
+    else vi.stubEnv('REFRESH_TOKEN_TTL', env)
+    try {
+      const { config } = await import('../src/config')
+      return config.refreshTtl
+    } catch {
+      return 'THREW' // fail-fast
+    } finally {
+      vi.unstubAllEnvs()
+    }
+  }
+
+  it('未设置 → 默认 7d', async () => {
+    expect(await loadRefreshTtl(undefined)).toBe('7d')
+  })
+
+  it('合法 30m → 保留', async () => {
+    expect(await loadRefreshTtl('30m')).toBe('30m')
+  })
+
+  it('非法 7days → fail-fast（新校验）', async () => {
+    expect(await loadRefreshTtl('7days')).toBe('THREW')
+  })
+
+  it('非法 abc → fail-fast', async () => {
+    expect(await loadRefreshTtl('abc')).toBe('THREW')
+  })
+})

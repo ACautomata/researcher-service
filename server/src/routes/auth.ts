@@ -262,6 +262,7 @@ authRouter.post('/password/change', validateBody(passwordChangeSchema), password
 authRouter.post(
   '/register',
   requireAdmin,
-  validateBody(userCreateSchema),
+  // Codex #342 ㉒ P2：建账号用户名格式非法返 10042（契约 #328 码段），非通用 90002
+  validateBody(userCreateSchema, CODE.USERNAME_INVALID),
   registerHandler,
 )

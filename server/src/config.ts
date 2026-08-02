@@ -61,10 +61,23 @@ function readBootstrapUsername(): string {
   return 'admin'
 }
 
+// REFRESH_TOKEN_TTL（Codex #342 ㉓ P2）：启动期校验 TTL 格式（与 tokens.parseTtlToMs 同正则），
+// 非法 fail-fast —— 否则 `REFRESH_TOKEN_TTL=7days` 这类错值 server 正常起、首个 login 才在
+// refreshExpiresAt() 抛 90000，所有会话签发请求都坏而 health 却绿。
+function readRefreshTtl(): string {
+  const v = process.env.REFRESH_TOKEN_TTL ?? '7d'
+  if (!/^(\d+)([smhd])$/.test(v.trim())) {
+    throw new Error(
+      `REFRESH_TOKEN_TTL 非法: ${JSON.stringify(process.env.REFRESH_TOKEN_TTL)}，须为 <数字><单位>（s/m/h/d，如 7d）`,
+    )
+  }
+  return v
+}
+
 export const config = {
   jwtSecret: readSecret(),
   accessTtl: process.env.ACCESS_TOKEN_TTL ?? '5m',
-  refreshTtl: process.env.REFRESH_TOKEN_TTL ?? '7d',
+  refreshTtl: readRefreshTtl(),
   bcryptCost: readBcryptCost(),
   bootstrapAdminUsername: readBootstrapUsername(),
   defaultMaxContainers: readDefaultMaxContainers(),

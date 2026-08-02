@@ -49,13 +49,14 @@ describe('register (slice 9)', () => {
     expect(res.body.code).toBe(20041)
   })
 
-  it('用户名格式非法 → 90002(data.username)', async () => {
+  // Codex #342 ㉒ P2：建账号用户名格式非法返 10042（契约 #328 码段），非通用 90002
+  it('用户名格式非法 → 10042(data.username)', async () => {
     const admin = await login(ctx.request, 'admin1', 'pw-admin1-secure')
     const res = await ctx.request
       .post('/api/v1/auth/register')
       .set(bearer(admin.access))
       .send({ username: 'bad name!', password: 'pw-whatever' })
-    expect(res.body.code).toBe(90002)
+    expect(res.body.code).toBe(10042)
     expect(res.body.data).toHaveProperty('username')
   })
 

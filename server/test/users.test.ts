@@ -61,6 +61,17 @@ describe('users admin (slice 10/11/12)', () => {
     expect(res.body.data).toMatchObject({ username: 'madebyadmin', role: 'user' })
   })
 
+  // Codex #342 ㉒ P2：建账号用户名格式非法返 10042（契约 #328 码段），与 register 同语义
+  it('admin POST /users 用户名格式非法 → 10042(data.username)', async () => {
+    const admin = await login(ctx.request, 'admin1', 'pw-admin1-secure')
+    const res = await ctx.request
+      .post('/api/v1/users')
+      .set(bearer(admin.access))
+      .send({ username: 'bad name!', password: 'pw-made-secure' })
+    expect(res.body.code).toBe(10042)
+    expect(res.body.data).toHaveProperty('username')
+  })
+
   it('admin PATCH /users/:id 禁用他人 → isActive=false', async () => {
     const disableme = await seedUser(ctx.prisma, 'disableme', 'pw-disable-secure')
     const admin = await login(ctx.request, 'admin1', 'pw-admin1-secure')

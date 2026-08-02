@@ -49,7 +49,8 @@ usersRouter.get('/', async (req: Request, res: Response) => {
 })
 
 // POST / —— 建账号（与 register 同语义）
-usersRouter.post('/', validateBody(userCreateSchema), async (req, res) => {
+// Codex #342 ㉒ P2：用户名格式非法返 10042（契约 #328 码段），非通用 90002
+usersRouter.post('/', validateBody(userCreateSchema, CODE.USERNAME_INVALID), async (req, res) => {
   const user = await createUser(req.prisma, req.body as CreateUserInput)
   ok(res, { id: user.id, username: user.username, email: user.email, role: user.role })
 })
