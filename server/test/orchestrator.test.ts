@@ -252,6 +252,25 @@ describe('异步 delete（removing 终态）', () => {
     expect(row!.status).toBe('removing') // 可重试
   })
 
+  it('codex #3：delete 前容器内 chown home 给 host uid（root 属主 EACCES 防护）', async () => {
+    const orch = makeOrch(makeCfg())
+    await orch.createReserve('own', adminId, 3)
+    await orch.provisionCreate(queue.lastCreate('own').name, queue.lastCreate('own').configText)
+    await orch.deleteEnqueue('own', adminId)
+    await orch.provisionDelete(queue.lastDelete('own').name)
+    // chown 在 stop/remove 之前执行（容器还在、有 root 权限）
+    const chowns = runtime.execCalls.filter(
+      ([name, cmd]) => name === 'own' && cmd[0] === 'chown' && cmd[1] === '-R',
+    )
+    expect(chowns).toHaveLength(1)
+    const chownCmd = chowns[0][1]
+    expect(chownCmd[2]).toMatch(/^\d+$/) // host uid
+    expect(chownCmd[3]).toBe('/home/node/.openclaw') // HOME_BIND
+    // chown 先于 stop/remove
+    expect(runtime.stopped).toContain('own')
+    expect(runtime.removed).toContain('own')
+  })
+
   it('删除不存在的容器 → 幂等 no-op', async () => {
     const orch = makeOrch(makeCfg())
     await expect(orch.deleteEnqueue('nope', adminId)).rejects.toMatchObject({ code: CODE.CONTAINER_NOT_FOUND })
