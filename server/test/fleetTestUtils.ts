@@ -9,6 +9,7 @@ import { FleetDeps, type FleetDepsOverrides } from '../src/containers/deps'
 import { Orchestrator } from '../src/containers/orchestrator'
 import { InlineLifecycleQueue } from '../src/containers/lifecycleQueue'
 import { defaultReservedPorts, type FleetConfig } from '../src/containers/values'
+import { DEV_ENCRYPTION_KEYS } from '../src/crypto'
 import { FakeRuntime } from './fakeRuntime'
 
 export interface FleetTestContext {
@@ -46,6 +47,7 @@ export function makeFleetTest(
     publishHost: '127.0.0.1',
     healthHost: '127.0.0.1',
     reservedPorts: defaultReservedPorts(),
+    encryptionKeys: DEV_ENCRYPTION_KEYS,
     ...overrides.config,
   }
   const runtime = new FakeRuntime()
@@ -57,6 +59,7 @@ export function makeFleetTest(
     lock: overrides.lock,
     serializer: overrides.serializer,
     onEvict: overrides.onEvict,
+    crypto: overrides.crypto,
   })
   const orch = new Orchestrator(deps, prisma)
   return { orch, deps, runtime, fleetRoot, config }

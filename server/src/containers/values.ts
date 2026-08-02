@@ -22,6 +22,8 @@ export interface FleetConfig {
   readonly publishHost: string // 容器 gateway 端口宿主侧发布地址（127.0.0.1 / 0.0.0.0）
   readonly healthHost: string // 健康探测目标 host（与 WS 配对同源）
   readonly reservedPorts: ReadonlySet<number> // 强制保留（默认含 18789）
+  // 凭证加密密钥（AES-256-GCM；gateway token 真值不落盘，首个 active 加密、余仅解密供轮换）
+  readonly encryptionKeys: readonly Buffer[]
 }
 
 export function defaultReservedPorts(): ReadonlySet<number> {

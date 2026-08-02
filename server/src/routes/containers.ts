@@ -64,17 +64,14 @@ export function createContainersRouter(orch: Orchestrator): Router {
   router.post('/', validateBody(containerCreateSchema), async (req: Request, res: Response) => {
     const user = req.user!
     const { name } = req.body as { name: string }
-    // 配额：当前容器数 ≥ maxContainers → 20042（按 user 计数；admin 亦受其配额约束）。
-    const count = await req.prisma.container.count({ where: { ownerId: user.id } })
-    if (count >= user.maxContainers) throw fail(CODE.QUOTA_EXCEEDED)
-    const inst = await orch.createReserve(name, user.id)
+    // 配额检查内化进 createReserve（按 owner 串行 count+reserve，消除并发不同名绕过——Codex C4）。
+    const inst = await orch.createReserve(name, user.id, user.maxContainers)
     // 先构造 creating 快照（不做二次 runtime 查询），再入队后台 provisioning。
-    // inline 队列（测试）同步跑完——await 使 creating→running 在响应前完成；
-    // BullMQ（生产）提交后立即返回，provisioning 在 worker 后台续跑、list 轮询见 creating→running。
     const item: SummaryWithPairing = { ...orch.createdItem(inst), pairing: defaultPairing() }
-    await orch.submitCreate(inst).catch(() => {
-      // 后台失败已由 createComplete 标 ERROR 行；路由层不传播（客户端经 list 感知）。
-    })
+    // detach 后台 provisioning（Codex C2）：POST 立即返 creating 快照，不等 docker pull/run 完成——
+    // BullMQ 生产下 await 会阻塞到 worker 完成才响应（慢 pull/Redis 故障致请求超时 + 客户端重试冲突）。
+    // 后台失败已由 createComplete 标 ERROR 行；catch 防 unhandled rejection，客户端经 list 轮询感知。
+    void orch.submitCreate(inst).catch(() => {})
     ok(res, item)
   })
 
@@ -88,10 +85,9 @@ export function createContainersRouter(orch: Orchestrator): Router {
     // 归属前置：admin 全放行 / user 仅本人；不存在 vs 越权同码 20040。
     await getInstanceForUser(req.prisma, req.user!, name)
     await orch.deleteReserve(name) // 置取消标志 + 标 removing + 入队
-    // 入队后台 delete（按 name 串行）。inline 队列（测试）同步跑完——await 使删除在响应前完成；
-    // BullMQ（生产）提交后立即返回，删除在 worker 后台续跑、list 轮询见 removing→消失。
-    // 失败已由 delete 标 REMOVING 行（可重试），catch 吞掉不向客户端传播（客户端经 list 感知）。
-    await orch.submitDelete(name).catch(() => {})
+    // detach 后台 delete（Codex C2，同 POST 理由）：DELETE 立即返 removing 信封，不等后台清理完成。
+    // 失败已由 delete 标 REMOVING 行（可重试），catch 防 unhandled rejection，客户端经 list 轮询感知。
+    void orch.submitDelete(name).catch(() => {})
     ok(res, { status: 'removing' })
   })
 

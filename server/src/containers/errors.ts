@@ -71,3 +71,11 @@ export class InstanceBusy extends ContainerDomainError {
     super(CODE.CONTAINER_BUSY, `容器正在创建中: ${containerName}`)
   }
 }
+
+// 配额超限（User.maxContainers）：createReserve 内按 owner 串行 count+create 收紧 check-then-act
+// 竞态（Codex C4——并发不同名 create 不再双双绕过 count 双创建超配额）。20042。
+export class QuotaExceeded extends ContainerDomainError {
+  constructor(public readonly containerName: string) {
+    super(CODE.QUOTA_EXCEEDED, `容器数量已达配额上限: ${containerName}`)
+  }
+}

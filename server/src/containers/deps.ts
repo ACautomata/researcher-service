@@ -1,5 +1,5 @@
 // 读写两侧共享依赖的单一装配点（平移 backend/containers/fleet/deps.py，#334）。
-// 打包 runtime/config/provisioner/allocator/configStore/lock/queue/dirRemover/portInUse/health，
+// 打包 runtime/config/provisioner/allocator/configStore/lock/queue/crypto/dirRemover/portInUse/health，
 // 默认绑定在此一处解析；runtime 与 config 为构造必填（调用方注入），测试可单点替换任一依赖。
 
 import { rm } from 'node:fs/promises'
@@ -11,6 +11,7 @@ import { HomeProvisioner } from './provisioner'
 import { ConfigStore } from './configStore'
 import { NameLeaseMap } from './leaseMap'
 import { InlineLifecycleQueue, NameSerializer, type LifecycleQueue } from './lifecycleQueue'
+import { AesGcmCrypto, type CryptoPort } from '../crypto'
 
 // 目录删除器（默认 rm -rf 等价；可注入失败替身测清理失败 → 20045/REMOVING）
 export type DirRemover = (target: string) => Promise<void>
@@ -62,6 +63,8 @@ export interface FleetDepsOverrides {
   queue?: LifecycleQueue
   serializer?: NameSerializer
   onEvict?: EvictHook
+  crypto?: CryptoPort
+  quotaSerializer?: NameSerializer
 }
 
 export class FleetDeps {
@@ -78,6 +81,10 @@ export class FleetDeps {
   // 后台队列（生产 BullMQ；测试 inline）+ 按 name 串行器（消 delete/create 竞态）
   readonly queue: LifecycleQueue
   readonly serializer: NameSerializer
+  // 凭证加密（gateway token 落盘密文；测试可注入确定性替身）
+  readonly crypto: CryptoPort
+  // 按 owner 串行器（配额 check+reserve 原子化，消并发不同名绕过 maxContainers——Codex C4）
+  readonly quotaSerializer: NameSerializer
   readonly onEvict: EvictHook
 
   constructor(runtime: ContainerRuntime, config: FleetConfig, overrides: FleetDepsOverrides = {}) {
@@ -92,6 +99,8 @@ export class FleetDeps {
     this.lock = overrides.lock ?? new NameLeaseMap()
     this.queue = overrides.queue ?? new InlineLifecycleQueue()
     this.serializer = overrides.serializer ?? new NameSerializer()
+    this.crypto = overrides.crypto ?? new AesGcmCrypto(config.encryptionKeys)
+    this.quotaSerializer = overrides.quotaSerializer ?? new NameSerializer()
     this.onEvict = overrides.onEvict ?? noopEvict
   }
 }

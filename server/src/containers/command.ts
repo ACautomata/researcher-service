@@ -24,6 +24,7 @@ import {
   InstanceExists,
   PortAllocationError,
   PortPoolExhausted,
+  QuotaExceeded,
 } from './errors'
 import type { FleetDeps } from './deps'
 import type { ContainerSpec } from './runtime'
@@ -73,31 +74,42 @@ export class FleetCommand {
   ) {}
 
   // ---- create 阶段一：同步预占（确定性工作，请求线程安全）----
-  // LLM key 缺失 → 90003；双创建/撞名 → 20041；残留目录 → 20044；端口耗尽 → 90004。
-  // ownerId 由路由层（归属已校验）传入，落 creating 行。
-  async createReserve(name: string, ownerId: string): Promise<Container> {
-    if (!this.deps.config.llmApiKey) throw new ConfigurationError('LLM_API_KEY')
-    // recreate（删后同名重建）须先清上一轮 delete 可能残留的取消标志，否则本 create 在检查点误中止。
-    this.cancel.clear(name)
-    // 双创建防护：进程内租约（已被持有 = 并发/在飞 create）→ 快速失败 20041
-    const lease = this.deps.lock.tryAcquire(name)
-    if (lease === null) throw new InstanceExists(name)
-    this.leases.set(name, lease)
-    try {
-      const inst = await this.reserveRow(name, ownerId)
-      // 残留目录预检（DB 无行的 orphan 目录）→ 20044：同步暴露而非留到后台 mkdir 才失败
-      const instanceDir = path.join(this.deps.config.root, 'instances', name)
-      if (await pathExists(instanceDir)) {
-        await this.prisma.container.delete({ where: { id: inst.id } })
-        throw new InstanceDirExists(name, instanceDir)
+  // LLM key 缺失 → 90003；双创建/撞名 → 20041；残留目录 → 20044；端口耗尽 → 90004；超配额 → 20042。
+  // ownerId 由路由层（归属已校验）传入；maxContainers 提供时按 owner 串行 count+create 收紧配额竞态。
+  async createReserve(name: string, ownerId: string, maxContainers?: number): Promise<Container> {
+    const doReserve = async (): Promise<Container> => {
+      if (!this.deps.config.llmApiKey) throw new ConfigurationError('LLM_API_KEY')
+      // recreate（删后同名重建）须先清上一轮 delete 可能残留的取消标志，否则本 create 在检查点误中止。
+      this.cancel.clear(name)
+      // 双创建防护：进程内租约（已被持有 = 并发/在飞 create）→ 快速失败 20041
+      const lease = this.deps.lock.tryAcquire(name)
+      if (lease === null) throw new InstanceExists(name)
+      this.leases.set(name, lease)
+      try {
+        const inst = await this.reserveRow(name, ownerId)
+        // 残留目录预检（DB 无行的 orphan 目录）→ 20044：同步暴露而非留到后台 mkdir 才失败
+        const instanceDir = path.join(this.deps.config.root, 'instances', name)
+        if (await pathExists(instanceDir)) {
+          await this.prisma.container.delete({ where: { id: inst.id } })
+          throw new InstanceDirExists(name, instanceDir)
+        }
+        await this.ensureRenderer() // 模板损坏 fail-fast（确定性配置错误同步暴露）
+        return inst
+        // 成功路径不释放租约：租约跨到后台 create_complete，finally 释放（覆盖 provisioning 全程）。
+      } catch (e) {
+        this.releaseLease(name)
+        throw e
       }
-      await this.ensureRenderer() // 模板损坏 fail-fast（确定性配置错误同步暴露）
-      return inst
-    } catch (e) {
-      this.releaseLease(name)
-      throw e
     }
-    // 成功路径不释放租约：租约跨到后台 create_complete，finally 释放（覆盖 provisioning 全程）。
+    if (maxContainers === undefined) return doReserve()
+    // 配额 check-then-act 收紧（Codex C4）：按 owner 串行 count + reserve，单进程内消除并发不同名
+    // 双双绕过 count、双创建超配额的窗口。串行段只覆盖 reserve（DB count + create），不含后台
+    // provisioning（POST 不阻塞——provisioning 在 submitCreate 后台续跑）。
+    return this.deps.quotaSerializer.enqueue(ownerId, async () => {
+      const count = await this.prisma.container.count({ where: { ownerId } })
+      if (count >= maxContainers) throw new QuotaExceeded(name)
+      return doReserve()
+    })
   }
 
   // ---- create 阶段三提交：入队后台完成（按 name 串行 + 队列并发上限）----
@@ -118,7 +130,9 @@ export class FleetCommand {
   // port 冲突（并发选同 port）→ 重试下一空闲 port；name 冲突 → InstanceExists（20041，不重试）。
   private async reserveRow(name: string, ownerId: string, extraUsed?: Set<number>): Promise<Container> {
     const home = path.join(this.deps.config.root, 'instances', name, 'home')
-    const token = randomBytes(TOKEN_URLSAFE_BYTES).toString('base64url')
+    // gateway token 真值不落盘（AGENTS.md §5.2 / Codex C1）：DB 存 AES-GCM 密文，
+    // createComplete 用时 decrypt 供 spec.gatewayToken（docker env 注入明文）。
+    const token = this.deps.crypto.encrypt(randomBytes(TOKEN_URLSAFE_BYTES).toString('base64url'))
     for (let attempt = 0; attempt < MAX_PORT_RETRIES; attempt += 1) {
       const port = this.deps.allocator.nextFree(await this.usedPorts(extraUsed))
       try {
@@ -127,7 +141,7 @@ export class FleetCommand {
             name,
             port,
             token,
-            tokenEncrypted: false,
+            tokenEncrypted: true,
             homeDir: home,
             containerId: '',
             status: 'creating',
@@ -224,7 +238,8 @@ export class FleetCommand {
             name,
             image: this.deps.config.image,
             hostPort: current.port,
-            gatewayToken: current.token,
+            // DB 存密文，docker env 须注入明文 gatewayToken——用时 decrypt（Codex C1）。
+            gatewayToken: this.deps.crypto.decrypt(current.token),
             homeDir: home,
             configPath,
             llmApiKey: this.deps.config.llmApiKey,

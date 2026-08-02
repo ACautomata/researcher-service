@@ -14,6 +14,7 @@ import { Orchestrator } from '../src/containers/orchestrator'
 import { DockerRuntime } from '../src/containers/dockerRuntime'
 import { InlineLifecycleQueue } from '../src/containers/lifecycleQueue'
 import { defaultReservedPorts, type FleetConfig } from '../src/containers/values'
+import { DEV_ENCRYPTION_KEYS } from '../src/crypto'
 
 // 自动探测 docker daemon（listImages 快速失败即判不可达）。
 async function dockerReachable(): Promise<boolean> {
@@ -62,6 +63,7 @@ describe('containers 集成 smoke（真 docker daemon）', () => {
       publishHost: '127.0.0.1',
       healthHost: '127.0.0.1',
       reservedPorts: defaultReservedPorts(),
+      encryptionKeys: DEV_ENCRYPTION_KEYS,
     }
     runtime = new DockerRuntime(undefined, cfg.publishHost)
     const deps = new FleetDeps(runtime, cfg, { queue: new InlineLifecycleQueue() })

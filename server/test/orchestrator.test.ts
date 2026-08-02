@@ -14,6 +14,7 @@ import {
   InstanceCleanupError,
   PortAllocationError,
   ConfigurationError,
+  QuotaExceeded,
 } from '../src/containers/errors'
 import { HOME_BIND } from '../src/containers/constants'
 
@@ -210,5 +211,40 @@ describe('orchestrator (接缝 #5 编排器 Port)', () => {
     const stopped = (await fl.orch.list({})).find((i) => i.name === 'a-box')!
     expect(stopped.status).toBe('stopped')
     expect(stopped.health).toBe('stopped')
+  })
+
+  it('gateway token 加密落盘：DB 存密文、createComplete 解密供 spec 明文（Codex C1）', async () => {
+    const inst = await fl.orch.createReserve('crypto-box', ownerId)
+    // reserve 即落盘密文：tokenEncrypted=true，token 以 v1: 前缀（非明文）
+    const reserved = await ctx.prisma.container.findUnique({ where: { name: 'crypto-box' } })
+    expect(reserved?.tokenEncrypted).toBe(true)
+    expect(reserved?.token.startsWith('v1:')).toBe(true)
+    await fl.orch.createComplete(inst, true)
+    // runtime 收到的 spec.gatewayToken 是解密后的明文（docker env 注入真 token，非 DB 密文）
+    const rec = fl.runtime.containers.get('crypto-box')
+    expect(rec?.spec.gatewayToken).toBeTruthy()
+    expect(rec?.spec.gatewayToken.startsWith('v1:')).toBe(false)
+    // 落盘密文 ≠ 注入明文（真值不落盘，AGENTS.md §5.2）
+    const row = await ctx.prisma.container.findUnique({ where: { name: 'crypto-box' } })
+    expect(row?.token).not.toBe(rec?.spec.gatewayToken)
+  })
+
+  it('配额 check-then-act 收紧：并发不同名 create 同 owner 不绕过配额（Codex C4）', async () => {
+    // 独立 fl + 独立端口区间：隔离前面累积的 DB 行占端口，让配额逻辑成为唯一变量。
+    const qfl = makeFleetTest(ctx.prisma, { config: { portStart: 19400, portEnd: 19410 } })
+    const qOwner = await seedUser(ctx.prisma, 'qowner', 'pw-qowner-secure')
+    // maxContainers=1 + 并发两个不同名 create：按 owner 串行化后恰一个成功、一个 QuotaExceeded，
+    // 不双双绕过 count 双创建超配额（修复前 routes 层 count→create 的 check-then-act 让两者都过 count）。
+    const results = await Promise.allSettled([
+      qfl.orch.createReserve('q-a', qOwner.id, 1),
+      qfl.orch.createReserve('q-b', qOwner.id, 1),
+    ])
+    const fulfilled = results.filter((r) => r.status === 'fulfilled')
+    const rejected = results.filter((r) => r.status === 'rejected')
+    expect(fulfilled).toHaveLength(1)
+    expect(rejected).toHaveLength(1)
+    expect((rejected[0] as PromiseRejectedResult).reason).toBeInstanceOf(QuotaExceeded)
+    // DB 仅 1 行属该 owner（不超配额）
+    expect(await ctx.prisma.container.count({ where: { ownerId: qOwner.id } })).toBe(1)
   })
 })

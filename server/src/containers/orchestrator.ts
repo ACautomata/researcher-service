@@ -25,8 +25,8 @@ export class Orchestrator {
   }
 
   // 写侧
-  createReserve(name: string, ownerId: string): Promise<Container> {
-    return this.cmd.createReserve(name, ownerId)
+  createReserve(name: string, ownerId: string, maxContainers?: number): Promise<Container> {
+    return this.cmd.createReserve(name, ownerId, maxContainers)
   }
   submitCreate(inst: Container): Promise<void> {
     return this.cmd.submitCreate(inst)

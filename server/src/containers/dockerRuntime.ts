@@ -147,7 +147,11 @@ export class DockerRuntime implements ContainerRuntime {
     try {
       await this.client().getContainer(containerName(name)).stop({ t: 10 })
     } catch (e) {
-      if ((e as { statusCode?: number }).statusCode === 404) return
+      const sc = (e as { statusCode?: number }).statusCode
+      // 404 = 容器已消失；304 = 容器已处于 stopped（docker stop 对已停容器返 304 Not Modified）。
+      // 两者均幂等成功——否则被外部 stop 的容器会让 delete worker 在此反复抛错、永远到不了 remove()，
+      // 行卡 REMOVING 重试无解（Codex P2）。
+      if (sc === 404 || sc === 304) return
       throw e
     }
   }

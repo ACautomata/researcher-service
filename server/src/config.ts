@@ -1,5 +1,6 @@
 import 'dotenv/config'
 import { isQuotaValid, QUOTA_MAX } from './auth/quota'
+import { parseEncryptionKeys } from './crypto'
 
 // 控制面配置：全部来自环境变量，带 dev 友好默认。生产缺关键项时 fail-fast。
 // 规格 §A：JWT 密钥 = HS256 对称（平移现状 SECRET_KEY 语义）；access/refresh 寿命平移 simplejwt 默认。
@@ -103,6 +104,8 @@ export const config = {
     publishHost: process.env.OPENCLAW_FLEET_PORT_BIND_HOST ?? '127.0.0.1',
     // 健康探测目标 host（与 WS 配对同源）
     healthHost: process.env.OPENCLAW_FLEET_WS_HOST ?? '127.0.0.1',
+    // 凭证加密密钥（gateway token 落盘密文；生产 CREDENTIAL_ENCRYPTION_KEYS 必填，dev 固定密钥）
+    encryptionKeys: parseEncryptionKeys(process.env.CREDENTIAL_ENCRYPTION_KEYS),
   },
   // BullMQ worker 并发上限（默认 2，对齐旧 ThreadPoolExecutor(2)）
   lifecycleWorkerConcurrency: Number(process.env.LIFECYCLE_WORKER_CONCURRENCY ?? 2),

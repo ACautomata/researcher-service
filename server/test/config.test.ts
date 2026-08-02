@@ -100,6 +100,11 @@ describe('JWT secret strength env (slice config)', () => {
     if (secret === undefined) delete process.env.JWT_SECRET
     else vi.stubEnv('JWT_SECRET', secret)
     vi.stubEnv('NODE_ENV', env)
+    // C1：production 下 config 加载还校验 CREDENTIAL_ENCRYPTION_KEYS（gateway token 加密密钥）。
+    // 提供合法 32B base64 隔离 JWT_SECRET 变量——否则放行用例会因缺加密密钥被误判 THREW。
+    if (env === 'production') {
+      vi.stubEnv('CREDENTIAL_ENCRYPTION_KEYS', Buffer.alloc(32, 0x01).toString('base64'))
+    }
     try {
       const { config } = await import('../src/config')
       return config.jwtSecret

@@ -7,6 +7,25 @@ import { setupTestApp, type TestContext } from './setup'
 import { seedAdmin, seedUser, login, bearer } from './helpers'
 import { makeFleetTest } from './fleetTestUtils'
 
+// 轮询 list 直到 name 满足 predicate 或超时（detach 后台 provisioning/delete 的异步收敛；
+// spec 契约即「list 轮询见 creating→running / removing→消失」）。
+async function waitFor(
+  request: TestContext['request'],
+  access: string | undefined,
+  name: string,
+  predicate: (item: { status: string } | undefined) => boolean,
+  timeoutMs = 2000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const list = await request.get('/api/v1/containers').set(bearer(access))
+    const item = list.body.data.find((i: { name: string }) => i.name === name)
+    if (predicate(item)) return
+    await new Promise((r) => setTimeout(r, 10))
+  }
+  throw new Error(`waitFor timeout: ${name} 未在 ${timeoutMs}ms 内满足条件`)
+}
+
 describe('containers REST (接缝 #2 + #334)', () => {
   let ctx: TestContext
 
@@ -70,10 +89,8 @@ describe('containers REST (接缝 #2 + #334)', () => {
     expect(res.body.data.name).toBe('sync-snap')
     expect(res.body.data.status).toBe('creating') // 同步返 creating 快照
     expect(typeof res.body.data.port).toBe('number') // 端口入队前已分配
-    // inline 队列后台 provisioning 已同步完成 → list 可见 running
-    const list = await ctx.request.get('/api/v1/containers').set(bearer(lu.access))
-    const item = list.body.data.find((i: { name: string }) => i.name === 'sync-snap')
-    expect(item.status).toBe('running')
+    // detach 后 provisioning 后台收敛——轮询 list 直到 running（spec 契约：list 轮询见 creating→running）
+    await waitFor(ctx.request, lu.access, 'sync-snap', (i) => i?.status === 'running')
   })
 
   it('POST 撞名 20041（不分占用者）', async () => {
@@ -108,9 +125,8 @@ describe('containers REST (接缝 #2 + #334)', () => {
     expect(del.status).toBe(200)
     expect(del.body.code).toBe(0)
     expect(del.body.data).toEqual({ status: 'removing' }) // 异步信封
-    // inline 队列 delete 已同步完成 → list 轮询后消失
-    const list = await ctx.request.get('/api/v1/containers').set(bearer(lu.access))
-    expect(list.body.data.find((i: { name: string }) => i.name === 'del-me')).toBeUndefined()
+    // detach 后 delete 后台收敛——轮询 list 直到消失（spec 契约：list 轮询见 removing→消失）
+    await waitFor(ctx.request, lu.access, 'del-me', (i) => i === undefined)
   })
 
   it('DELETE 越权他人容器 → 20040 与「不存在」逐字节同码', async () => {

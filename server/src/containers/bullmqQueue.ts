@@ -3,6 +3,7 @@
 // 重新入队执行），补 provisioning 中断的对账缺口。任务在同进程内经注册表传递（#313 单进程模型，
 // Redis 只做调度/崩溃恢复，不做跨进程任务分发）。
 
+import { randomUUID } from 'node:crypto'
 import { Queue, Worker, type Job } from 'bullmq'
 import IORedis from 'ioredis'
 import type { LifecycleQueue, LifecycleTask } from './lifecycleQueue'
@@ -28,7 +29,6 @@ export class BullMqLifecycleQueue implements LifecycleQueue {
   // 存 {resolve,reject}：completed → resolve；最终失败 → reject（解挂 submit 的 awaiter，
   // 否则永久失败 job 让 awaiter 永不 settle，连带卡死该 name 的 per-name 串行链）。
   private readonly pending = new Map<string, Pick<PendingTask, 'resolve' | 'reject'>>()
-  private seq = 0
 
   constructor(opts: BullMqLifecycleOptions) {
     const queueName = opts.queueName ?? 'container-lifecycle'
@@ -62,7 +62,10 @@ export class BullMqLifecycleQueue implements LifecycleQueue {
   }
 
   async submit(task: LifecycleTask): Promise<void> {
-    const id = `task-${process.pid}-${this.seq++}`
+    // jobId 须全局唯一：进程重启后 PID 常复位（容器内 PID 1），自增 seq 也归零，而 BullMQ 默认
+    // 保留已完成 job——复用的 ID 会被当作既有 completed job 跳过调度，done promise 永不 settle，
+    // 该 name 的 per-name 串行链永久挂死、行卡 creating/removing。randomUUID 跨重启全局唯一。
+    const id = randomUUID()
     this.tasks.set(id, task)
     const done = new Promise<void>((resolve, reject) => {
       this.pending.set(id, { resolve, reject })

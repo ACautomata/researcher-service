@@ -26,6 +26,7 @@ export function assembleFleet(prisma: PrismaClient): FleetAssembly {
     publishHost: config.fleet.publishHost,
     healthHost: config.fleet.healthHost,
     reservedPorts: defaultReservedPorts(),
+    encryptionKeys: config.fleet.encryptionKeys,
   }
   const runtime = new DockerRuntime(undefined, cfg.publishHost)
   const queue = new BullMqLifecycleQueue({
