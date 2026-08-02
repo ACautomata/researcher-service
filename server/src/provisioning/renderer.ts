@@ -15,6 +15,9 @@ export function renderGatewayConfig(templateJsonPath: string): string {
   const gateway = (template.gateway ?? {}) as Record<string, unknown>
   gateway.port = GATEWAY_INTERNAL_PORT
   gateway.bind = GATEWAY_BIND
+  // 强制 gateway.mode=local（spec §5.2 安全不变量）：缺省/漂移模板若不强制，gateway 启动
+  // 即崩（"missing gateway.mode"），容器退出码 78 无限重启（M2 smoke CI 失败根因）。
+  gateway.mode = 'local'
   const auth = (gateway.auth ?? {}) as Record<string, unknown>
   auth.token = GATEWAY_TOKEN_PLACEHOLDER // 强制占位：杜绝真 token 落盘
   gateway.auth = auth

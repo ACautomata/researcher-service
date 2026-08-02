@@ -1,6 +1,6 @@
 import Docker from 'dockerode'
+import { pack } from 'tar-stream'
 import {
-  CONFIG_BIND,
   GATEWAY_BIND,
   GATEWAY_INTERNAL_PORT,
   HOME_BIND,
@@ -20,7 +20,7 @@ export interface ContainerSpec {
   hostPort: number // 宿主映射端口（端口池分配）
   gatewayToken: string // GATEWAY_TOKEN env 值（仅 env 注入，不落盘）
   homeDir: string // 宿主 bind-mount home（instances/<name>/home）
-  configPath: string // 宿主 openclaw.json（instances/<name>/openclaw.json）
+  configText: string // 渲染后的 openclaw.json 内容（docker cp 进容器，不 bind-mount——镜像读不到嵌套挂载文件）
   llmApiKey: string // 全面板共享 LLM_API_KEY
 }
 
@@ -78,8 +78,7 @@ export class DockerRuntime implements ContainerRuntime {
       ],
       HostConfig: {
         Binds: [
-          `${spec.homeDir}:${HOME_BIND}`,
-          `${spec.configPath}:${CONFIG_BIND}:ro`, // ro 防容器内篡改配置
+          `${spec.homeDir}:${HOME_BIND}`, // 仅挂 home（rw）；config 不 bind-mount（见下）
         ],
         PortBindings: {
           [`${GATEWAY_INTERNAL_PORT}/tcp`]: [
@@ -95,7 +94,24 @@ export class DockerRuntime implements ContainerRuntime {
         [LABEL_PORT_KEY]: String(spec.hostPort),
       },
     })
-    await container.start()
+    try {
+      // config 经 docker cp（putArchive）写入容器内 ~/.openclaw/openclaw.json：
+      // bind-mount 在已挂载目录里再挂载文件（homeDir rw + openclaw.json ro 嵌套）会让镜像把
+      // 该路径当目录读不到 → "Gateway start blocked: missing gateway.mode"。docker cp 是文件
+      // 写入，实测镜像可正常读到（openclaw config get gateway.mode → local）。此先于 start。
+      await container.putArchive(configTar(spec.configText), { path: '/home/node/.openclaw/' })
+      await container.start()
+    } catch (e) {
+      // codex P1 #2：createContainer 成功但 start 失败（含 bind 冲突）→ 残留 named 容器。
+      // 不清理则 runWithPortRetry 换端口重试时撞同一容器名（create 返回 name conflict），
+      // 且行无 containerId 无法经 DELETE 清孤儿。best-effort 移除刚创建的容器后上抛。
+      try {
+        await container.remove({ force: true, v: true })
+      } catch {
+        // 清理失败：保留 created 容器（行标 error + 无 containerId），运维手动清理
+      }
+      throw e
+    }
     return container.id
   }
 
@@ -168,11 +184,18 @@ export class DockerRuntime implements ContainerRuntime {
   async execSync(name: string, cmd: string[]): Promise<void> {
     try {
       const c = await this.client().getContainer(containerName(name))
-      const result = await c.exec({ Cmd: cmd, AttachStdout: true, AttachStderr: true })
-      const stream = await result.start({ Detach: false })
+      // dockerode exec：Tty:true 简化流（无 8-byte 复用头）。命令完成时 docker daemon 关闭
+      // HTTP 响应连接 → stream 'end' 触发；须先消费数据（readable 'data'）否则背压可卡流。
+      const result = await c.exec({ Cmd: cmd, AttachStdout: true, AttachStderr: true, Tty: true })
+      const stream = await result.start({ Detach: false, Tty: true })
       await new Promise<void>((resolve, reject) => {
-        let code: number | null = null
-        stream.on('end', () => (code === 0 ? resolve() : reject(new Error(`exec failed code=${code}`))))
+        stream.resume() // 消费数据：不 resume 则背压阻塞 'end'
+        stream.on('end', () => {
+          void result.inspect().then((info) => {
+            if (info.ExitCode === 0) resolve()
+            else reject(new Error(`exec failed code=${info.ExitCode} cmd=${cmd.join(' ')}`))
+          }).catch(reject)
+        })
         stream.on('error', reject)
       })
     } catch (e) {
@@ -194,4 +217,13 @@ export class DockerRuntime implements ContainerRuntime {
       instanceName: labels[LABEL_INSTANCE_KEY] ?? null,
     }
   }
+}
+
+// 构造 docker cp 用的 tar 流：把 openclaw.json 打包进 tar（根路径为文件本身，putArchive 的
+// path 参数提供目标目录）。tar-stream 的 pack() 产出 Node stream，经 putArchive(file) 上传。
+function configTar(configText: string): NodeJS.ReadableStream {
+  const packStream = pack()
+  packStream.entry({ name: 'openclaw.json' }, configText)
+  packStream.finalize()
+  return packStream as unknown as NodeJS.ReadableStream
 }

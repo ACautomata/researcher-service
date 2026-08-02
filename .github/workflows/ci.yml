@@ -99,16 +99,28 @@ jobs:
       # 联调 health 契约（vite proxy × playwright × live Django，#179）
       - run: python -m pytest -m "integration"
 
-  # Express 控制面（server/，#333 M0+M1）：prisma generate + tsc + vitest + build 全绿才算通过。
+  # Express 控制面（server/，#333 M0+M1 + #334 M2）：prisma generate + tsc + vitest + build 全绿才算通过。
   # Codex #342 ⑲ P2：此前 CI 只跑 frontend/Django，server 破坏编译/生成 client/44 认证用例 CI 仍绿。
   # src/generated 被 gitignore（fresh checkout 无此目录），但 typecheck/test 都 import 生成产物 ——
   # 故 typecheck/test 前必须先跑 prisma generate（build 的 prebuild 钩子会自动做，但顺序上 typecheck
   # 在其前，须显式生成一次）。
+  # M2（#334）：npm test 含 containers.integration.test.ts（真 docker smoke，自动探测门控）——需
+  # 预拉 OpenClaw 镜像（3.46GB，首次 createContainer 拉取会超时）+ Redis service（BullMQ 队列）。
   server:
     runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
     defaults:
       run:
         working-directory: server
+    env:
+      # 与 integration job 同源镜像 tag；smoke 用空模板 {}（renderer 强制 gateway.mode=local，
+      # 不依赖模板内容——见 src/provisioning/renderer.ts）
+      OPENCLAW_IMAGE: ghcr.io/openclaw/openclaw:2026.7.1-browser
+      REDIS_URL: redis://127.0.0.1:6379
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -117,6 +129,8 @@ jobs:
           cache: npm
           cache-dependency-path: server/package-lock.json
       - run: npm ci
+      # 预拉 OpenClaw 镜像（smoke 的 createContainer 需镜像已存在，否则首拉 3.46GB 超时）
+      - run: docker pull ${{ env.OPENCLAW_IMAGE }}
       - run: npm run prisma:generate
       - run: npm run typecheck
       - run: npm test

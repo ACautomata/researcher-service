@@ -89,12 +89,14 @@ export type ProvisionJob = { type: 'create'; name: string; ownerId: string; conf
 // 内存假 BullMQ：记录入队 job；测试手动 runDirect 模拟 worker 消费（stalled-job 语义归 BullMQ，不测）。
 export class MemoryQueue implements ProvisionJobQueue {
   jobs: ProvisionJob[] = []
+  failEnqueueDelete = false // codex #6：模拟 Redis 挂 → enqueueDelete 抛错
 
   async enqueueCreate(name: string, ownerId: string, configText: string): Promise<void> {
     this.jobs.push({ type: 'create', name, ownerId, configText })
   }
 
   async enqueueDelete(name: string, ownerId: string): Promise<void> {
+    if (this.failEnqueueDelete) throw new Error('redis down')
     this.jobs.push({ type: 'delete', name, ownerId })
   }
 

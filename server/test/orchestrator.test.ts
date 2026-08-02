@@ -116,6 +116,22 @@ describe('端口入队前分配（#313）', () => {
     await orch.createReserve('quota1', adminId, 1) // quota=1 已用满
     await expect(orch.createReserve('quota2', adminId, 1)).rejects.toMatchObject({ code: CODE.QUOTA_EXCEEDED })
   })
+
+  it('codex #5：并发不同名 create 配额原子化——quota=1 恰一个成功', async () => {
+    // check-then-insert 竞态：count 与 insert 同事务（SQLite 串行化写事务），并发不同名不会都
+    // 读到 count<1。Promise.all 并发，恰一个成功一个 20042。
+    const orch = makeOrch(makeCfg())
+    const results = await Promise.allSettled([
+      orch.createReserve('conc1', adminId, 1),
+      orch.createReserve('conc2', adminId, 1),
+    ])
+    const fulfilled = results.filter((r) => r.status === 'fulfilled')
+    const rejected = results.filter((r) => r.status === 'rejected')
+    expect(fulfilled).toHaveLength(1)
+    expect(rejected).toHaveLength(1)
+    const err = (rejected[0] as PromiseRejectedResult).reason
+    expect(err).toMatchObject({ code: CODE.QUOTA_EXCEEDED })
+  })
 })
 
 describe('5 态机 + provisioning（creating→running）', () => {

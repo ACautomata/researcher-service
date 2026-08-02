@@ -57,7 +57,7 @@ describeSmoke('containers 编排集成 smoke（真 docker daemon）', () => {
       gatewayTokenBytes: 32,
       tokenCrypto: testTokenCrypto(),
     })
-    const name = `smoke-${Date.now() % 100000}`
+    const name = `smoke-${Date.now() % 100000}-${Math.floor(Math.random() * 1000)}` // 防并行 CI 撞名
     await orch.createReserve(name, ownerId, 3)
     const job = queue.lastCreate(name)
     await orch.provisionCreate(job.name, job.configText)
@@ -67,5 +67,5 @@ describeSmoke('containers 编排集成 smoke（真 docker daemon）', () => {
     // 删除
     await orch.provisionDelete(name)
     expect(await ctx.prisma.container.findUnique({ where: { name } })).toBeNull()
-  }, 120_000)
+  }, 420_000)
 })

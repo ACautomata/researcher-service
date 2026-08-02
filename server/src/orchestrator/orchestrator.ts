@@ -7,6 +7,7 @@ import { fail, EnvelopeError } from '../envelope'
 import { CODE } from '../codes'
 import {
   ContainerNameLeases,
+  HOME_BIND,
   PoolAllocator,
   PortPoolExhausted,
   generateGatewayToken,
@@ -116,14 +117,13 @@ export class Orchestrator {
     if (!NAME_REGEX.test(name)) throw fail(CODE.VALIDATION_FAILED, undefined, { name: ['名称不合法'] })
     // LLM_API_KEY fail-fast（codex R6：空 key 建外表 healthy 但永远无法调 LLM 的容器）
     if (!this.cfg.llmApiKey) throw fail(CODE.LLM_KEY_MISSING)
-    // 配额（#312/#311：User.maxContainers 计数，含 creating/error 全态）
-    const count = await this.prisma.container.count({ where: { ownerId } })
-    if (count >= quotaLimit) throw fail(CODE.QUOTA_EXCEEDED)
     // 进程内 Map 互斥（#313：双创建护栏，锁不依赖 Redis；在飞 create 期间保持持有）
     if (!this.leases.tryAcquire(name)) throw fail(CODE.NAME_CONFLICT)
     try {
-      // 端口入队前分配（#313；SQLite port @unique 仲裁）
-      const row = await this.insertCreatingRow(name, ownerId)
+      // 端口入队前分配 + creating 行插入（#313；SQLite port @unique 仲裁）
+      // codex #5（P2）：配额 count+insert 原子化——count 与 create 同一事务，防并发不同名
+      // 同时读到 count<quotaLimit 各插一行（check-then-insert 竞态）。事务内先复查配额再插入。
+      const row = await this.insertCreatingRow(name, ownerId, quotaLimit)
       // 模板 render fail-fast（确定性配置错误同步暴露，不留给后台线程）
       let configText: string
       try {
@@ -146,8 +146,13 @@ export class Orchestrator {
     }
   }
 
-  // 端口分配 + creating 行插入；port 唯一冲突保存点内重试下一空闲端口，name 冲突 → 20041
-  private async insertCreatingRow(name: string, ownerId: string): Promise<Container> {
+  // 端口分配 + creating 行插入；port 唯一冲突保存点内重试下一空闲端口，name 冲突 → 20041。
+  // 配额复查在事务内（codex #5 P2）：`count` 与 `create` 同事务，杜绝并发不同名绕过 quotaLimit。
+  private async insertCreatingRow(
+    name: string,
+    ownerId: string,
+    quotaLimit: number,
+  ): Promise<Container> {
     const learned = new Set<number>()
     for (let i = 0; i < this.allocator.poolSize; i++) {
       const used = await this.usedPorts(learned)
@@ -160,19 +165,25 @@ export class Orchestrator {
       }
       const token = generateGatewayToken(this.cfg.gatewayTokenBytes)
       try {
-        return await this.prisma.container.create({
-          data: {
-            name,
-            port,
-            ownerId,
-            token: this.cfg.tokenCrypto.encrypt(token), // 密文落库（真值不落盘）
-            tokenEncrypted: true,
-            homeDir: this.homeDirFor(name),
-            image: this.cfg.image,
-            status: 'creating',
-          },
+        // 事务内：配额复查 + 行插入（SQLite 串行化写事务，count+create 原子）
+        return await this.prisma.$transaction(async (tx) => {
+          const count = await tx.container.count({ where: { ownerId } })
+          if (count >= quotaLimit) throw fail(CODE.QUOTA_EXCEEDED)
+          return tx.container.create({
+            data: {
+              name,
+              port,
+              ownerId,
+              token: this.cfg.tokenCrypto.encrypt(token), // 密文落库（真值不落盘）
+              tokenEncrypted: true,
+              homeDir: this.homeDirFor(name),
+              image: this.cfg.image,
+              status: 'creating',
+            },
+          })
         })
       } catch (e) {
+        if (e instanceof EnvelopeError) throw e // 配额 20042 直接上抛（非端口冲突）
         if ((e as { code?: string }).code === 'P2002') {
           const existing = await this.prisma.container.findUnique({ where: { name } })
           if (existing) throw fail(CODE.NAME_CONFLICT) // 撞名（不分占用者）
@@ -210,12 +221,13 @@ export class Orchestrator {
       // 检查点 2：run 前 —— 取消 → 统一回滚 + 删行
       const mid = await this.prisma.container.findUnique({ where: { name } })
       if (mid?.cancelRequested) {
-        await this.cleanupInstanceDir(instanceDir, row, runAttempted)
+        await this.cleanupInstanceDir(instanceDir, row, runAttempted) // 清理失败抛 CLEANUP_FAILED → 行留 REMOVING
         await this.deleteRowQuietly(row.id)
         return
       }
       // 3. docker run，bind 冲突就地换端口重试（预算 = 池大小）
       // token 解密仅在此短暂存在内存（env 注入容器），不落盘、不进日志
+      // config 内容经 docker cp 进容器（不 bind-mount——嵌套挂载镜像读不到，见 dockerRuntime.run）
       const specBase: ContainerSpec = {
         name,
         image: this.cfg.image,
@@ -224,7 +236,7 @@ export class Orchestrator {
           ? this.cfg.tokenCrypto.decrypt(row.token)
           : row.token, // 兼容迁移前明文行（tokenEncrypted=false）
         homeDir,
-        configPath,
+        configText,
         llmApiKey: this.cfg.llmApiKey,
       }
       const containerId = await this.runWithPortRetry(row, specBase)
@@ -241,7 +253,15 @@ export class Orchestrator {
         return
       }
     } catch (e) {
-      // 不可恢复失败 → 保留 ERROR 行（补偿：清残留容器/目录 best-effort）
+      // 不可恢复失败 → 保留 ERROR 行（补偿：清残留容器/目录 best-effort）。
+      // 但取消路径清理失败（CLEANUP_FAILED）时行已标 REMOVING（可重试），finalize 不得
+      // 覆盖为 error（codex #4：资源跟踪不丢）。
+      if (e instanceof EnvelopeError && e.code === CODE.CLEANUP_FAILED) {
+        return // 行已 REMOVING，交由 delete 重试清理
+      }
+      // 记录真实 cause（smoke/CI 据此可见 docker 为何失败，而非只见 error 态）
+      // eslint-disable-next-line no-console
+      console.error(`[provision] create failed for ${name}`, e)
       await this.finalizeFailedCreate(instanceDir, row, runAttempted, dirCreated)
     } finally {
       this.leases.release(name)
@@ -322,8 +342,14 @@ export class Orchestrator {
     }
     try {
       await this.dirRemover(instanceDir)
-    } catch {
-      // 取消路径目录清理失败 → 行已删，残留由 delete 重试兜底
+    } catch (e) {
+      // codex #4（P1）：取消路径目录清理失败不得吞掉并删行——残留目录无 owner 无重试目标，
+      // 且后续同名 create 会把模板拷进该目录，暴露上一用户 workspace。保留行 REMOVING +
+      // 抛可重试 CLEANUP_FAILED（资源跟踪不丢）。
+      await this.prisma.container
+        .update({ where: { id: row.id }, data: { status: 'removing' } })
+        .catch(() => {})
+      throw fail(CODE.CLEANUP_FAILED)
     }
   }
 
@@ -349,11 +375,13 @@ export class Orchestrator {
     try {
       // 无在飞 create（租约取得）：running/stopped/error 及孤儿 creating 行都可入队 delete 清理
       await this.queue.enqueueDelete(name, ownerId)
-    } catch {
-      // 入队失败（Redis 挂）→ 回滚取消标志 + 释放租约（行保留，客户端可重试 delete）
+    } catch (e) {
+      // codex #6（P1）：入队失败（Redis 挂）不得报假成功——回滚取消标志 + 释放租约，
+      // rethrow 信封错误让客户端重试（否则轮询永远等不到 removing）。
       await this.prisma.container
         .update({ where: { id: row.id }, data: { cancelRequested: false } })
         .catch(() => {})
+      throw e instanceof EnvelopeError ? e : fail(CODE.CLEANUP_FAILED)
     } finally {
       this.leases.release(name)
     }
@@ -378,6 +406,14 @@ export class Orchestrator {
         throw fail(CODE.CLEANUP_FAILED)
       }
       if (live && live.containerId === row.containerId) {
+        // codex #3（P1）：容器以 root 跑（user=0:0），bind-mount home 内由容器写入的文件属主
+        // root——host 非 root rmtree 会 EACCES，且 stop/remove 后容器没了无法补救。先同步
+        // chown home 给 host uid（容器还在、有 root 权限），再 stop/remove。best-effort。
+        try {
+          await this.runtime.execSync(name, ['chown', '-R', String(process.getuid?.() ?? 0), HOME_BIND])
+        } catch {
+          // chown 失败不阻断（尽力而为；rmtree 仍可能因属主失败走 CLEANUP_FAILED 可重试）
+        }
         try {
           await this.runtime.stop(name)
           await this.runtime.remove(name)

@@ -153,6 +153,19 @@ describe('containers 隔离（#312）', () => {
     expect((after.body.data as Record<string, unknown>[]).find((c) => c.name === 'u-del')).toBeUndefined()
   })
 
+  it('codex #6：入队 delete 失败（Redis 挂）→ rethrow 信封（不报假成功）', async () => {
+    const u = await login(request, 'user1', 'pw-user1-secure')
+    await request.post('/api/v1/containers').set(bearer(u.access)).send({ name: 'u-qfail' })
+    await provision('u-qfail')
+    queue.failEnqueueDelete = true // 模拟 Redis 挂
+    const del = await request.delete('/api/v1/containers/u-qfail').set(bearer(u.access))
+    // 入队失败 → 信封错误（20045 CLEANUP_FAILED 或 90000），非 code:0 假成功
+    expect(del.body.code).not.toBe(0)
+    expect(del.body.data).toBeNull()
+    // 行保留（未被删），客户端可重试
+    expect(await ctx.prisma.container.findUnique({ where: { name: 'u-qfail' } })).not.toBeNull()
+  })
+
   it('凭证零落盘：响应无 token 明文', async () => {
     const u = await login(request, 'user1', 'pw-user1-secure')
     const res = await request.get('/api/v1/containers').set(bearer(u.access))
