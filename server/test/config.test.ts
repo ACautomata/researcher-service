@@ -51,3 +51,39 @@ describe('default quota env (slice config)', () => {
     expect(isQuotaValid(3.5)).toBe(false) // 非整数（Prisma Int 不接受小数）
   })
 })
+
+// 意见②⑧[P2]（Codex ⑯ 轮）：DUMMY_BCRYPT_HASH 固定 cost=12，而 config.bcryptCost 原可被
+// BCRYPT_COST env 覆盖 → cost≠12 时 dummy(12) 与真实 hash 耗时差恢复账号存在性探测。修复：
+// 规格锁 12（.env.example/README 明文），config 加载即校验，非 12 fail-fast（与 JWT_SECRET 生产
+// 校验同模式）。真实 hash 与 dummy 恒同 cost，时序侧信道不再依赖「配置恰好为 12」。
+describe('bcrypt cost env (slice config)', () => {
+  async function loadBcryptCost(env: string | undefined): Promise<number | 'THREW'> {
+    vi.resetModules() // 清 config 模块缓存，让动态 import 重新快照 env
+    if (env === undefined) delete process.env.BCRYPT_COST
+    else vi.stubEnv('BCRYPT_COST', env)
+    try {
+      const { config } = await import('../src/config')
+      return config.bcryptCost
+    } catch {
+      return 'THREW' // fail-fast
+    } finally {
+      vi.unstubAllEnvs() // 恢复 env（避免污染后续测试文件）
+    }
+  }
+
+  it('未设置 → 默认 12（规格锁）', async () => {
+    expect(await loadBcryptCost(undefined)).toBe(12)
+  })
+
+  it('显式 12 → 加载为 12（合法）', async () => {
+    expect(await loadBcryptCost('12')).toBe(12)
+  })
+
+  it('非 12（如 14）→ fail-fast（不再允许 cost 漂移）', async () => {
+    expect(await loadBcryptCost('14')).toBe('THREW')
+  })
+
+  it('非数字 abc → fail-fast', async () => {
+    expect(await loadBcryptCost('abc')).toBe('THREW')
+  })
+})

@@ -28,11 +28,25 @@ function readDefaultMaxContainers(): number {
   return v
 }
 
+// BCRYPT_COST（Codex #342 ⑯ P2）：规格锁 12（.env.example/README 明文）。时序侧信道防护依赖
+// DUMMY_BCRYPT_HASH(cost=12) 与真实 hash 同 cost —— 若允许覆盖为非 12，dummy(12) 与真实 hash
+// 的耗时差恢复账号存在性探测。故启动强制 =12，非法 fail-fast（与 JWT_SECRET 生产校验同模式）。
+function readBcryptCost(): number {
+  const raw = process.env.BCRYPT_COST ?? '12'
+  const v = Number(raw)
+  if (!Number.isInteger(v) || v !== 12) {
+    throw new Error(
+      `BCRYPT_COST 非法: ${JSON.stringify(process.env.BCRYPT_COST)}，规格锁 12（时序侧信道依赖固定 cost），不可覆盖`,
+    )
+  }
+  return v
+}
+
 export const config = {
   jwtSecret: readSecret(),
   accessTtl: process.env.ACCESS_TOKEN_TTL ?? '5m',
   refreshTtl: process.env.REFRESH_TOKEN_TTL ?? '7d',
-  bcryptCost: Number(process.env.BCRYPT_COST ?? 12),
+  bcryptCost: readBcryptCost(),
   bootstrapAdminUsername: process.env.BOOTSTRAP_ADMIN_USERNAME ?? 'admin',
   defaultMaxContainers: readDefaultMaxContainers(),
   port: Number(process.env.PORT ?? 8001),

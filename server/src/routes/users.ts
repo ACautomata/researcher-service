@@ -8,6 +8,7 @@ import { userCreateSchema, userPatchSchema } from '../validation/schemas'
 import { createUser, assertQuotaValid, type CreateUserInput } from '../auth/userService'
 import { hashPassword, generateTempPassword } from '../auth/password'
 import { revokeAllUserRefresh } from '../auth/tokens'
+import type { PrismaClient } from '../generated/prisma/client'
 
 // admin 账号管理 /api/v1/users/* （#328 4 端点）。
 // 非 admin 访问 → 10041（与 not-found 同码防探测，区分仅日志）；不存在 id → 10041。
@@ -92,6 +93,26 @@ usersRouter.patch('/:id', validateBody(userPatchSchema), async (req: Request, re
 // 自己的 password/change 在 reset 写 hash 后 commit，会覆盖回显密码 → 破坏「一次性明文回显」。
 // 改为条件 updateMany（where isActive:true），与改密 CAS 同语义互斥：count=0（目标正被禁用或
 // 并发已改）→ 不覆盖，回显密码保持有效。两 op 同事务原子提交。
+
+// reset-password 事务体内核（可测 seam）：条件 updateMany 复查目标仍激活且 passwordHash 仍等于
+// 读到的旧 hash（Codex #342 ⑮ P2）。count=0（目标被禁用 / 并发已 reset，hash 已变）→ ok:false，
+// 不覆盖并发写、不回显将失效的密码。成功时同事务族灭 refresh。
+export async function resetPasswordInTx(
+  tx: Pick<PrismaClient, 'user' | 'refreshToken'>,
+  id: string,
+  expectedHash: string,
+  newHash: string,
+  now: Date,
+): Promise<{ ok: boolean }> {
+  const updated = await tx.user.updateMany({
+    where: { id, isActive: true, passwordHash: expectedHash },
+    data: { passwordHash: newHash, mustChangePassword: true },
+  })
+  if (updated.count === 0) return { ok: false }
+  await revokeAllUserRefresh(tx, id, now)
+  return { ok: true }
+}
+
 usersRouter.post('/:id/reset-password', async (req: Request, res: Response) => {
   const id = req.params.id as string
   const existing = await req.prisma.user.findUnique({ where: { id } })
@@ -102,14 +123,10 @@ usersRouter.post('/:id/reset-password', async (req: Request, res: Response) => {
   }
   const password = generateTempPassword()
   const passwordHash = await hashPassword(password)
-  const updated = await req.prisma.$transaction([
-    req.prisma.user.updateMany({
-      where: { id, isActive: true },
-      data: { passwordHash, mustChangePassword: true },
-    }),
-    revokeAllUserRefresh(req.prisma, id, new Date()),
-  ])
-  // count=0：目标被禁用或并发已改 → 回显密码未生效，拒绝而非返回「将失效」的密码
-  if (updated[0].count === 0) throw fail(CODE.USER_NOT_FOUND)
+  const result = await req.prisma.$transaction(async (tx) =>
+    resetPasswordInTx(tx, id, existing.passwordHash!, passwordHash, new Date()),
+  )
+  // ok:false：目标被禁用或并发已改 → 回显密码未生效，拒绝而非返回「将失效」的密码
+  if (!result.ok) throw fail(CODE.USER_NOT_FOUND)
   ok(res, { password }) // 一次性明文回显（仅此一次，前端弹 modal）
 })

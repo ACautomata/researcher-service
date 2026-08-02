@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { setupTestApp, type TestContext } from './setup'
 import { seedAdmin, seedUser, login, bearer } from './helpers'
-import { verifyPassword } from '../src/auth/password'
+import { verifyPassword, hashPassword } from '../src/auth/password'
+import { resetPasswordInTx } from '../src/routes/users'
 
 // 片10/11/12：users 4 端点（GET+containerCount / POST / PATCH / reset-password）
 describe('users admin (slice 10/11/12)', () => {
@@ -182,5 +183,41 @@ describe('users admin (slice 10/11/12)', () => {
     const relogin = await login(ctx.request, 'target', pw)
     expect(relogin.body.code).toBe(0)
     expect(relogin.body.data!.mustChangePassword).toBe(true)
+  })
+
+  // 意见②⑦[P2]（Codex ⑮ 轮）：并发 reset-password 竞态 —— 两个 admin 同时 reset 同一账号，
+  // 各自 findUnique 读到同一旧 hash H，更新谓词只有 id+isActive → 双双成功返回不同明文，后写覆盖
+  // 先写，破坏「一次性明文回显」（admin 回显的密码可能已失效）。修复：reset 抽 resetPasswordInTx
+  // seam，条件 updateMany 复查 passwordHash==expectedHash（与改密 CAS 同语义），count=0（并发已
+  // reset，hash 已变）→ ok:false 拒绝，不覆盖并发写。
+  it('竞态：并发已 reset（hash 已变）→ 条件更新 count=0 → ok:false 不覆盖', async () => {
+    const row = await ctx.prisma.user.findUnique({ where: { id: targetId } })
+    const oldHash = row!.passwordHash!
+    // 两笔并发 reset 各自生成独立明文（真实场景：两次 admin 操作返回不同临时密码）
+    const firstPw = 'reset-concurrent-first'
+    const stalePw = 'reset-concurrent-stale'
+    // 1. 正常：hash 未变 → ok:true（首笔 reset 成功）
+    const okFirst = await resetPasswordInTx(
+      ctx.prisma as never,
+      targetId,
+      oldHash,
+      await hashPassword(firstPw),
+      new Date(),
+    )
+    expect(okFirst.ok).toBe(true)
+    // 2. 竞态：并发已先 reset（hash 已变），旧 expectedHash 已失效 → count=0 → ok:false
+    const okStale = await resetPasswordInTx(
+      ctx.prisma as never,
+      targetId,
+      oldHash, // 仍是首笔前的旧 hash（首笔 reset 的响应还没被使用）
+      await hashPassword(stalePw),
+      new Date(),
+    )
+    expect(okStale.ok).toBe(false)
+    // 未被覆盖：仍可用首笔 reset 的密码验证（并发笔的明文未生效）
+    const after = await ctx.prisma.user.findUnique({ where: { id: targetId } })
+    expect(await verifyPassword(firstPw, after!.passwordHash!)).toBe(true)
+    expect(await verifyPassword(stalePw, after!.passwordHash!)).toBe(false)
+    expect(after!.mustChangePassword).toBe(true)
   })
 })
