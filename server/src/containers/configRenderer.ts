@@ -11,7 +11,8 @@ interface OpenClawConfig {
   gateway?: {
     port?: number
     bind?: string
-    auth?: { token?: string }
+    auth?: { token?: string; mode?: string; [k: string]: unknown }
+    controlUi?: { allowInsecureAuth?: boolean; [k: string]: unknown }
     [k: string]: unknown
   }
   [k: string]: unknown
@@ -47,9 +48,14 @@ export class ConfigRenderer {
     const gateway = (cfg.gateway ??= {})
     gateway.port = GATEWAY_INTERNAL_PORT
     gateway.bind = GATEWAY_BIND
-    // 强制占位：杜绝真 token 落盘（即便上游模板写错）
+    // 强制 token 认证 + 关 insecure-auth（Codex 第七轮 #6）：仅强制 token 字段不够——模板若选了
+    // auth.mode 非 token 或开了 controlUi.allowInsecureAuth，GATEWAY_TOKEN 可被绕过（生产 publishHost
+    // =0.0.0.0 尤甚）。renderer 是 gateway 安全不变量强制点，mode/insecure 不信模板值（对齐 port/bind）。
     const auth = (gateway.auth ??= {})
-    auth.token = GATEWAY_TOKEN_PLACEHOLDER
+    auth.token = GATEWAY_TOKEN_PLACEHOLDER // 占位防真 token 落盘（即便上游模板写错）
+    auth.mode = 'token'
+    const controlUi = (gateway.controlUi ??= {})
+    controlUi.allowInsecureAuth = false
     return cfg
   }
 

@@ -54,3 +54,30 @@ describe('ConfigRenderer 模板 shape 校验 (Codex C9)', () => {
     expect(out.gateway.auth.token).toBe(GATEWAY_TOKEN_PLACEHOLDER)
   })
 })
+
+// Codex 第七轮 #6[P2]：renderer 仅强制 token 字段不够 —— 模板若选了 auth.mode 非 token、或开了
+// controlUi.allowInsecureAuth，则 GATEWAY_TOKEN 可被绕过（生产 publishHost=0.0.0.0 尤甚）。renderer 是
+// gateway 安全不变量的强制点，须强制 mode=token / insecure=off，不信模板值（对齐 port/bind/token）。
+describe('ConfigRenderer 强制 token 认证不变量 (Codex 第七轮 #6)', () => {
+  it('模板 auth.mode=none → renderDict 强制为 token', () => {
+    const r = new ConfigRenderer(JSON.stringify({ gateway: { auth: { mode: 'none' } } }))
+    const out = r.renderDict()
+    expect(out.gateway?.auth?.mode).toBe('token')
+    expect(out.gateway?.auth?.token).toBe(GATEWAY_TOKEN_PLACEHOLDER)
+  })
+
+  it('模板 controlUi.allowInsecureAuth=true → renderDict 强制为 false', () => {
+    const r = new ConfigRenderer(
+      JSON.stringify({ gateway: { controlUi: { allowInsecureAuth: true } } }),
+    )
+    const out = r.renderDict()
+    expect(out.gateway?.controlUi?.allowInsecureAuth).toBe(false)
+  })
+
+  it('模板缺 auth.mode / controlUi → renderDict 补 mode=token / insecure=false', () => {
+    const r = new ConfigRenderer(JSON.stringify({ gateway: {} }))
+    const out = r.renderDict()
+    expect(out.gateway?.auth?.mode).toBe('token')
+    expect(out.gateway?.controlUi?.allowInsecureAuth).toBe(false)
+  })
+})

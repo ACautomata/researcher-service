@@ -15,6 +15,15 @@ export interface BullMqLifecycleOptions {
   // Redis 断连 / 协议错误 / 命令失败的统一上报（Codex C7）。默认 console.error；生产可注入日志/告警。
   // 仅记录上报，不阻断 ioredis / BullMQ 自身的自动重连。
   onError?: (err: Error) => void
+  // producer 提交超时 ms（Codex 第七轮 #1）：BullMQ 强制 producer connection maxRetriesPerRequest:null，
+  // Redis 不可达时 queue.add 永挂——submit 永挂致 detached create 的 name lease 永不释放、行卡 creating。
+  // 给 add 套超时兜底：预算内未 settle 即视入队失败，清两表 + reject（caller 补偿释放 lease/标 error）。
+  // 默认 5000ms；测试可注入小值快速复现。
+  addTimeoutMs?: number
+  // worker.close 有界超时 ms（Codex 第七轮 #3）：close() await worker.close drain 在跑 job，但坏
+  // Redis 上 worker.close 可能挂起——超时兜底防 shutdown 卡死须 SIGKILL（保留原 detach 的安全侧）。
+  // 默认 5000ms。
+  workerCloseTimeoutMs?: number
 }
 
 interface PendingTask {
@@ -34,9 +43,14 @@ export class BullMqLifecycleQueue implements LifecycleQueue {
   // 存 {resolve,reject}：completed → resolve；最终失败 → reject（解挂 submit 的 awaiter，
   // 否则永久失败 job 让 awaiter 永不 settle，连带卡死该 name 的 per-name 串行链）。
   readonly pending = new Map<string, Pick<PendingTask, 'resolve' | 'reject'>>()
+  // producer 提交超时（Codex 第七轮 #1）：见 BullMqLifecycleOptions.addTimeoutMs。
+  readonly addTimeoutMs: number
+  readonly workerCloseTimeoutMs: number
 
   constructor(opts: BullMqLifecycleOptions) {
     const queueName = opts.queueName ?? 'container-lifecycle'
+    this.addTimeoutMs = opts.addTimeoutMs ?? 5000
+    this.workerCloseTimeoutMs = opts.workerCloseTimeoutMs ?? 5000
     this.connection = new IORedis(opts.redisUrl, { maxRetriesPerRequest: null })
     this.queue = new Queue(queueName, { connection: this.connection })
     this.worker = new Worker(
@@ -96,7 +110,9 @@ export class BullMqLifecycleQueue implements LifecycleQueue {
     })
     // attempts 给 stalled/崩溃重跑留余地；backoff 固定小延迟。
     try {
-      await this.queue.add('lifecycle', {}, { jobId: id, attempts: 3, backoff: { type: 'fixed', delay: 500 } })
+      await this.raceAddTimeout(
+        this.queue.add('lifecycle', {}, { jobId: id, attempts: 3, backoff: { type: 'fixed', delay: 500 } }),
+      )
     } catch (e) {
       // 入队失败（Redis ACL / 只读 / 命令错误，Codex 第六轮 P2）：queue.add reject 时 worker 永不消费
       // 此 job，completed/failed listener 不会触发——tasks/pending 残留致内存泄漏（持续 Redis 故障下每次
@@ -109,16 +125,56 @@ export class BullMqLifecycleQueue implements LifecycleQueue {
     await done
   }
 
+  // producer 提交超时（Codex 第七轮 #1）：queue.add 在 maxRetriesPerRequest:null 下 Redis 不可达时永挂。
+  // 套超时兜底：预算内未 settle 即 reject（submit 的 catch 清两表 + rethrow，caller 补偿释放 lease/
+  // 标 error）。底层 addP 此后仍 pending；worker 恢复消费时 tasks 已空 → if(!task) return 对账收敛，
+  // 不重复执行。BullMQ 强制 producer connection 的 maxRetriesPerRequest:null，无法改有限重试预算，
+  // 故用提交超时而非连接重试上限。
+  private raceAddTimeout(addP: Promise<unknown>): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error('bullmq queue.add 超时（Redis 不可达？）')),
+        this.addTimeoutMs,
+      )
+      addP.then(
+        () => {
+          clearTimeout(timer)
+          resolve()
+        },
+        (e) => {
+          clearTimeout(timer)
+          reject(e)
+        },
+      )
+    })
+  }
+
   async start(): Promise<void> {
     await this.worker.waitUntilReady()
   }
 
   async close(): Promise<void> {
-    // 优雅关闭不被坏 Redis 连接卡死（Codex C7 附带）：worker.close 在不健康 connection 上可能
-    // 长时间挂起——生产 Redis 不可达时服务 shutdown 会卡死须 SIGKILL。先 disconnect connection
-    // 让 worker/queue 失去传输后能快速收尾；worker.close 拆离不阻塞（进程退出时 Node 回收剩余 handle）。
+    // 优雅关闭：drain 在飞任务 + 防坏 Redis 卡死（Codex 第七轮 #3）。修前 worker.close() detach
+    // （不 await）——fleet.close() resolve 后 server.close() 即可 process.exit(0)，中断仍在跑的生命周期
+    // job（每次滚动重启都丢在跑 provisioning/deletion，非仅 Redis 故障路径）。改 await worker.close drain，
+    // 但套有界超时：坏 Redis 上 worker.close 可能挂起，超时兜底防 shutdown 卡死须 SIGKILL（保留原 detach
+    // 的安全侧）。先 disconnect connection 让 worker/queue 失去传输后能快速收尾。
     this.connection.disconnect()
     await this.queue.close().catch(() => {})
-    void this.worker.close().catch(() => {})
+    await this.raceWorkerClose()
+  }
+
+  // worker.close 有界超时（Codex 第七轮 #3）：await drain 在跑 job，超时则放行防卡死。
+  private raceWorkerClose(): Promise<void> {
+    return new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, this.workerCloseTimeoutMs)
+      this.worker
+        .close()
+        .catch(() => {})
+        .then(() => {
+          clearTimeout(timer)
+          resolve()
+        })
+    })
   }
 }

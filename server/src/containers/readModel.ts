@@ -4,7 +4,6 @@
 // running/stopped 由 runtime 实况动态推导（DB 只持久化 creating/removing/error + 创建成功后 running）。
 
 import type { PrismaClient, Container } from '../generated/prisma/client'
-import path from 'node:path'
 import {
   HEALTH_HEALTHY,
   HEALTH_PENDING,
@@ -150,39 +149,22 @@ export class FleetReadModel {
         survivors.push(inst)
         continue
       }
-      let info
       try {
-        info = await this.deps.runtime.get(inst.name)
+        await this.deps.runtime.get(inst.name)
       } catch {
         // daemon 临时不可用 → 保持 removing，下次 list 再对账。
         survivors.push(inst)
         continue
       }
-      if (info && info.instanceName === inst.name) {
-        // 容器仍驻留 → delete 未跑完 → 重新入队继续清理（仍显示 removing）。
-        // 只入队不等待（Codex 第三轮 ①[P1]）：requeueDelete 会 await submitDelete，后者排在在飞
-        // delete 之后、settle 于清理完成后——list await 它 = 轮询请求阻塞在被观察的删除上
-        // （Redis 不可达更糟，永挂）。这里 detach，list 立即返回 removing 状态。
-        // 携带 inst.id（代系绑定，Codex 第四轮①[P1]）：stale duplicate job 在 recreate 后到达时
-        // delete 校验目标行代系，不匹配即跳过——不误删用户重建的新行/新容器。
-        void this.requeueDelete?.(inst.name, inst.id)
-        survivors.push(inst)
-      } else {
-        // 容器已不在 → 行残留（删行没跑到）→ 收尾：先清实例目录再删行。
-        // （Codex 第三轮 ⑤[P2]）修前直接删行，instances/<name> 遗留 orphan 目录 → 后续 recreate
-        // 被 createReserve 以 InstanceDirExists(20044) 拒绝，须人工清理。这里补齐删除 worker
-        // 未跑到的目录清理；目录清理失败则保留 removing 行，下次 list 再对账。
-        if (inst.homeDir) {
-          const instanceDir = path.dirname(inst.homeDir)
-          try {
-            await this.deps.dirRemover(instanceDir)
-          } catch {
-            survivors.push(inst) // 清目录失败 → 保持 removing，下次 list 重试
-            continue
-          }
-        }
-        await this.prisma.container.delete({ where: { id: inst.id } }).catch(() => {})
-      }
+      // 经 requeueDelete 走 delete 本体收尾（Codex 第七轮 #5[P1]）：修前「无容器」分支在读路径直接
+      // dirRemover + 删行，缺 delete 本体（command.ts delete() 的 current.id !== inst.id）代系 recheck
+      // ——dirRemover（rm -rf 慢遍历）期间旧行被并发 delete 收尾删、用户同名 recreate 建新代系并写入
+      // 新 home 数据时，此处的 rm 会误删新代系数据。统一「容器驻留 / 已不在」两分支经 requeueDelete
+      // （携带 inst.id 代系绑定）交 delete 本体仲裁：行未换新则正常清容器/目录/删行（含 orphan 目录
+      // 清理，解 InstanceDirExists 20044）；换新则跳过清理。
+      // detach（void）：list 读路径不阻塞在删除完成上（Redis 不可达更糟），行异步收敛、下次 list 复见。
+      void this.requeueDelete?.(inst.name, inst.id)
+      survivors.push(inst)
     }
     return survivors
   }

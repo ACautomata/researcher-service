@@ -120,9 +120,15 @@ describe('codex round3: 意见①—⑥ 复现/回归', () => {
     const dir = path.join(fl5.fleetRoot, 'instances', 'r3-orphan')
     expect(existsSync(dir)).toBe(true)
     await fl5.orch.list({ ownerId }) // list 触发对账
-    // 修后：目录被清 + 行被删
+    // 第七轮 #5 后：「无容器分支」经 requeueDelete detach 走 delete 本体（代系 recheck 仲裁），
+    // 目录清理 + 删行异步收敛（不再在读路径同步）——轮询等行消失（目录随行被 delete 本体清）。
+    let row = await ctx.prisma.container.findUnique({ where: { name: 'r3-orphan' } })
+    for (let i = 0; i < 400 && row; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5))
+      row = await ctx.prisma.container.findUnique({ where: { name: 'r3-orphan' } })
+    }
+    expect(row).toBeNull()
     expect(existsSync(dir)).toBe(false)
-    expect(await ctx.prisma.container.findUnique({ where: { name: 'r3-orphan' } })).toBeNull()
     // recreate 不再被 orphan 目录拒绝
     await fl5.orch.create('r3-orphan', ownerId)
     expect(fl5.runtime.containers.has('r3-orphan')).toBe(true)

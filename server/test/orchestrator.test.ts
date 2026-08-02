@@ -2,7 +2,7 @@
 // 5 态机 + 取消标志 + 端口入队前分配 + 补偿（bind 换端口重试 / REMOVING 可重试 / 端口耗尽 / 残留目录）。
 // 覆盖 issue #334 验收标准的编排层（非 HTTP 壳）。
 
-import { describe, it, expect, beforeAll, afterAll } from 'vitest'
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest'
 import { mkdirSync, existsSync } from 'node:fs'
 import path from 'node:path'
 import { setupTestApp, type TestContext } from './setup'
@@ -340,5 +340,40 @@ describe('orchestrator (接缝 #5 编排器 Port)', () => {
     expect(rows).toHaveLength(10)
     // 端口互不重复（各得一个候选）
     expect(new Set(rows.map((r) => r.port)).size).toBe(10)
+  })
+})
+
+// ---- #2 createComplete 在 runtime.run() 后未重查取消（Codex 第七轮 P2）----
+// command.ts createComplete 的取消检查点在循环开头（render 前）与 render 后 run 前，run 之后无检查点。
+// DELETE 在 runtime.run()（拉镜像/启动）期间到达时：deleteReserve 已 flag + 标 removing，但 run 返回后
+// createComplete 直接 update(status:'running') 覆盖 removing——错过取消回滚路径，list 轮询全程显示 running。
+describe('#2 createComplete run 后重查取消 (Codex 第七轮 P2)', () => {
+  let ctx: TestContext
+  let ownerId: string
+  beforeAll(async () => {
+    ctx = await setupTestApp()
+    ownerId = (await seedUser(ctx.prisma, 'r7owner2', 'pw-r7-2-secure')).id
+  })
+  afterAll(async () => {
+    await ctx.cleanup()
+  })
+
+  it('DELETE 在 run 期间到达 → run 后重查取消、走回滚（修前 update running 覆盖 removing）', async () => {
+    const fl = makeFleetTest(ctx.prisma)
+    const name = 'cancel-run'
+    const inst = await fl.orch.createReserve(name, ownerId)
+    // 注入：run 执行期间 DELETE 到达（flag + 标 removing），然后正常起容器。
+    const realRun = fl.runtime.run.bind(fl.runtime)
+    vi.spyOn(fl.runtime, 'run').mockImplementation(async (spec) => {
+      await fl.orch.deleteReserve(spec.name) // 模拟 DELETE 在 run（拉镜像/启动）中到达
+      return realRun(spec)
+    })
+    // createComplete(preserveErrorRow=true 后台路径)：run 后应重查取消 → finalizeFailedCreate。
+    await expect(fl.orch.createComplete(inst, true)).rejects.toThrow()
+    const row = await ctx.prisma.container.findUnique({ where: { name } })
+    // 修前：update running 覆盖 removing → status='running'；修后：finalizeFailedCreate 标 error。
+    expect(row?.status).toBe('error')
+    // 修前：容器驻留（run 起的）；修后：finalizeFailedCreate 清理容器。
+    expect(fl.runtime.containers.has(name)).toBe(false)
   })
 })

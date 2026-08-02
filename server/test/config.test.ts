@@ -320,3 +320,55 @@ describe('production template dir (slice config)', () => {
     )
   })
 })
+
+// 意见[P2]（Codex 第七轮 #4）：OPENCLAW_FLEET_ROOT 相对路径时 path.join 保留相对性 —— instances/<name>/
+// home 与 openclaw.json 作 Docker bind 的 source 非绝对（Docker bind source 须绝对），POST 返 creating、
+// detached provisioning 后台失败留 error 行（部署故障静默掩盖，与 OPENCLAW_TEMPLATE_DIR 第六轮同类）。
+// 修复：生产强制绝对路径（对齐 readTemplateDir），显式相对 fail-fast；缺省走 cwd/fleet 绝对兜底；
+// dev/test 保持容忍（本地调试可显式相对）。
+describe('production fleet root (slice config)', () => {
+  async function loadFleetRoot(opts: {
+    env?: string
+    root?: string | undefined
+  }): Promise<string | 'THREW'> {
+    vi.resetModules()
+    const { env = 'production', root } = opts
+    vi.stubEnv('NODE_ENV', env)
+    if (env === 'production') {
+      // 隔离 fleet.root 变量：提供其余生产必填，否则放行用例被误判 THREW（同 loadTemplateDir 模式）。
+      vi.stubEnv('JWT_SECRET', 's'.repeat(32))
+      vi.stubEnv('CREDENTIAL_ENCRYPTION_KEYS', Buffer.alloc(32, 0x01).toString('base64'))
+      vi.stubEnv('OPENCLAW_TEMPLATE_DIR', process.cwd())
+    }
+    if (root === undefined) delete process.env.OPENCLAW_FLEET_ROOT
+    else vi.stubEnv('OPENCLAW_FLEET_ROOT', root)
+    try {
+      const { config } = await import('../src/config')
+      return config.fleet.root
+    } catch {
+      return 'THREW' // fail-fast
+    } finally {
+      vi.unstubAllEnvs()
+    }
+  }
+
+  it('生产相对路径 → fail-fast（修前 path.join 保留相对致 Docker bind 失败）', async () => {
+    expect(await loadFleetRoot({ root: 'fleet/relative' })).toBe('THREW')
+  })
+
+  it('生产相对单段 fleet → fail-fast', async () => {
+    expect(await loadFleetRoot({ root: 'fleet' })).toBe('THREW')
+  })
+
+  it('生产合法绝对路径 → 放行', async () => {
+    expect(await loadFleetRoot({ root: '/var/fleet' })).toBe('/var/fleet')
+  })
+
+  it('生产缺省 → cwd/fleet 绝对兜底（Docker bind 安全）', async () => {
+    expect(await loadFleetRoot({ root: undefined })).toBe(`${process.cwd()}/fleet`)
+  })
+
+  it('dev 相对路径 → 容忍（本地调试不受影响）', async () => {
+    expect(await loadFleetRoot({ env: 'development', root: 'fleet/rel' })).toBe('fleet/rel')
+  })
+})

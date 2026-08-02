@@ -268,6 +268,22 @@ export class FleetCommand {
             llmApiKey: this.deps.config.llmApiKey,
           }
           const containerId = await this.deps.runtime.run(spec)
+          // 取消检查点（Codex 第七轮 #2）：DELETE 可能在 run()（拉镜像/启动）期间到达——循环开头
+          // 与 render 后 run 前两个检查点均已通过。run 返回后若仍直接 update running，会覆盖
+          // deleteReserve 已持久化的 removing，错过取消回滚、list 全程显示 running。run 后、持久化
+          // running 前重查取消，检出即 finalizeFailedCreate（runAttempted=true 会清 run 起的容器）。
+          if (this.cancel.isCancelled(name)) {
+            await this.finalizeFailedCreate(
+              name,
+              instanceDir,
+              current,
+              runAttempted,
+              preexisting,
+              directoryCreated,
+              preserveErrorRow,
+              new InstanceBusy(name),
+            )
+          }
           current = await this.prisma.container.update({
             where: { id: current.id },
             data: { containerId, status: 'running' },
