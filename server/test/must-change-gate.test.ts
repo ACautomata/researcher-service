@@ -31,6 +31,21 @@ describe('mustChangePassword gate (slice 8)', () => {
     expect(users.body.code).toBe(10005)
   })
 
+  // 意见②⑨[P2]（Codex ⑱ 轮）：gate 精确字符串白名单见不到尾斜杠 —— Express 默认非严格路由
+  // 会匹配 `/password/change/`，但 gate 的 full=`/api/v1/auth/password/change/` 不在白名单 →
+  // 误拦 10005，客户端沿用 Django 风格尾斜杠无法完成强制改密。修复：比对前 strip 尾斜杠。
+  // 传错 oldPassword：若 gate 误拦 → 10005；若 gate 放行 → 进入 handler，旧密错 → 10002。
+  // 断言 10002 即证明尾斜杠请求穿过了 gate（未被 10005 拦截），且不改动密码不影响后续用例。
+  it('mustChange=true 时改密带尾斜杠（/password/change/）→ gate 放行（非 10005）', async () => {
+    const res = await login(ctx.request, 'admin', bootstrapPw)
+    const change = await ctx.request
+      .post('/api/v1/auth/password/change/')
+      .set(bearer(res.access))
+      .send({ oldPassword: 'wrong-password', newPassword: 'pw-does-not-matter' })
+    // 修复前：gate 误拦 → 10005。修复后：gate 放行 → handler 校验旧密错 → 10002
+    expect(change.body.code).toBe(10002)
+  })
+
   it('mustChange=true 时仍可访问放行端点（/me、/password/change、/logout）', async () => {
     const res = await login(ctx.request, 'admin', bootstrapPw)
     const me = await ctx.request.get('/api/v1/auth/me').set(bearer(res.access))

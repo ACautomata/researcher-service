@@ -4,9 +4,19 @@ import { isQuotaValid, QUOTA_MAX } from './auth/quota'
 // 控制面配置：全部来自环境变量，带 dev 友好默认。生产缺关键项时 fail-fast。
 // 规格 §A：JWT 密钥 = HS256 对称（平移现状 SECRET_KEY 语义）；access/refresh 寿命平移 simplejwt 默认。
 
+// JWT_SECRET（Codex #342 ⑰ P1）：生产仅挡占位符不够 —— `JWT_SECRET=a` 这类弱值也能签发
+// HS256 access token，攻击者离线爆破后伪造 admin token。生产须 ≥32 字符（256 bit HS256 安全
+// 惯例，对齐 jose 对称密钥推荐），不足即 fail-fast。dev/test 保持任意非空可用（本地调试）。
 function readSecret(): string {
   const v = process.env.JWT_SECRET
-  if (v && v !== 'change-me-in-production') return v
+  if (v && v !== 'change-me-in-production') {
+    if (process.env.NODE_ENV === 'production' && v.length < 32) {
+      throw new Error(
+        `JWT_SECRET 过弱: ${v.length} 字符 < 32，生产须提供 ≥32 字符强随机密钥（HS256 256bit 安全下限）`,
+      )
+    }
+    return v
+  }
   if (process.env.NODE_ENV === 'production') {
     throw new Error('JWT_SECRET 必须在生产环境显式提供强随机值')
   }

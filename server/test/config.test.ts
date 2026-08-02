@@ -87,3 +87,51 @@ describe('bcrypt cost env (slice config)', () => {
     expect(await loadBcryptCost('abc')).toBe('THREW')
   })
 })
+
+// 意见②⑧[P1]（Codex ⑰ 轮）：生产 JWT_SECRET 仅挡占位符不够 —— `JWT_SECRET=a` 弱值也能签发
+// HS256 access token，攻击者离线爆破伪造 admin token。修复：production 下强制 ≥32 字符
+// （256bit HS256 安全下限），不足 fail-fast。dev/test 保持任意非空可用（本地调试）。
+describe('JWT secret strength env (slice config)', () => {
+  async function loadSecret(
+    opts: { secret?: string; env?: string },
+  ): Promise<string | 'THREW'> {
+    vi.resetModules() // 清 config 模块缓存，让动态 import 重新快照 env
+    const { secret, env = 'production' } = opts
+    if (secret === undefined) delete process.env.JWT_SECRET
+    else vi.stubEnv('JWT_SECRET', secret)
+    vi.stubEnv('NODE_ENV', env)
+    try {
+      const { config } = await import('../src/config')
+      return config.jwtSecret
+    } catch {
+      return 'THREW' // fail-fast
+    } finally {
+      vi.unstubAllEnvs() // 恢复 env（避免污染后续测试文件）
+    }
+  }
+
+  it('生产缺 JWT_SECRET → fail-fast（既有行为）', async () => {
+    expect(await loadSecret({ secret: undefined })).toBe('THREW')
+  })
+
+  it('生产 JWT_SECRET 为占位符 → fail-fast（既有行为）', async () => {
+    expect(await loadSecret({ secret: 'change-me-in-production' })).toBe('THREW')
+  })
+
+  it('生产 JWT_SECRET 过短（<32，如 a）→ fail-fast（新校验）', async () => {
+    expect(await loadSecret({ secret: 'a' })).toBe('THREW')
+  })
+
+  it('生产 JWT_SECRET 恰好 31 字符 → fail-fast（新校验边界）', async () => {
+    expect(await loadSecret({ secret: 'x'.repeat(31) })).toBe('THREW')
+  })
+
+  it('生产 JWT_SECRET ≥32 字符 → 放行并返回', async () => {
+    const strong = 's'.repeat(32)
+    expect(await loadSecret({ secret: strong })).toBe(strong)
+  })
+
+  it('dev/test 短密钥仍可用（本地调试不受影响）', async () => {
+    expect(await loadSecret({ secret: 'a', env: 'development' })).toBe('a')
+  })
+})
