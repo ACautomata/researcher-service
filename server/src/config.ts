@@ -86,6 +86,28 @@ export const config = {
   cookieSecure: process.env.NODE_ENV === 'production',
   databaseUrl: process.env.DATABASE_URL ?? 'file:./prisma/panel.db',
   isTest: process.env.NODE_ENV === 'test',
+  // ---- 容器编排（#334 M2；平移 Django settings.OPENCLAW_FLEET / REDIS_URL）----
+  fleet: {
+    // instances/<name>/ 落盘根（开发默认 <server>/fleet）
+    root: process.env.OPENCLAW_FLEET_ROOT ?? `${process.cwd()}/fleet`,
+    // 共享只读模板（cp -a 预填充源；生产必填绝对路径）
+    templateDir: process.env.OPENCLAW_TEMPLATE_DIR ?? `${process.cwd()}/../researcher`,
+    // openclaw.json 模板文件（配置单一来源）
+    templateJson: process.env.OPENCLAW_TEMPLATE_JSON ?? `${process.cwd()}/../deploy/openclaw.json`,
+    image: process.env.OPENCLAW_IMAGE ?? 'ghcr.io/openclaw/openclaw:2026.7.1-browser',
+    portStart: Number(process.env.OPENCLAW_PORT_POOL_START ?? 19000),
+    portEnd: Number(process.env.OPENCLAW_PORT_POOL_END ?? 19999),
+    // 全面板共享 LLM_API_KEY（敏感值）；生产必填（create 时前置校验 → 90003）
+    llmApiKey: process.env.LLM_API_KEY ?? '',
+    // 容器 gateway 端口宿主侧发布地址（本地 loopback；生产后端容器化后 0.0.0.0）
+    publishHost: process.env.OPENCLAW_FLEET_PORT_BIND_HOST ?? '127.0.0.1',
+    // 健康探测目标 host（与 WS 配对同源）
+    healthHost: process.env.OPENCLAW_FLEET_WS_HOST ?? '127.0.0.1',
+  },
+  // BullMQ worker 并发上限（默认 2，对齐旧 ThreadPoolExecutor(2)）
+  lifecycleWorkerConcurrency: Number(process.env.LIFECYCLE_WORKER_CONCURRENCY ?? 2),
+  // BullMQ/Redis 连接（#313 自本切片引入；后台 provisioning 队列）
+  redisUrl: process.env.REDIS_URL ?? 'redis://localhost:6379/0',
 }
 
 // refresh cookie 公共属性（规格 #311 锁）：HttpOnly + Secure(prod) + SameSite=Lax + Path=/api/v1/auth

@@ -1,0 +1,79 @@
+// 假 docker runtime（接缝 #5：注入编排器测 5 态机 + 取消标志 + 端口入队前分配 + 补偿，不需真 daemon）。
+// 全内存模拟 ContainerRuntime：run/get/stop/remove/listFleet/hostPublishedPorts/exec 各原语可注入故障。
+
+import type { ContainerInfo, ContainerRuntime, ContainerSpec } from '../src/containers/runtime'
+import { containerName } from '../src/containers/runtime'
+import { GATEWAY_INTERNAL_PORT, LABEL_INSTANCE_KEY, LABEL_PORT_KEY } from '../src/containers/constants'
+
+export interface FakeContainerRecord {
+  info: ContainerInfo
+  spec: ContainerSpec
+}
+
+export class FakeRuntime implements ContainerRuntime {
+  readonly containers = new Map<string, FakeContainerRecord>()
+  private idSeq = 0
+  // 故障注入：run 时对指定 hostPort 抛 bind 冲突（测就地换端口重试）。
+  bindConflictPorts = new Set<number>()
+  // run 时对指定 name 抛非 bind 错（测统一回滚）。
+  failRunFor = new Set<string>()
+  // execSync 调用记录（断言 delete 的 chown）。
+  execCalls: { name: string; cmd: string[] }[] = []
+
+  async run(spec: ContainerSpec): Promise<string> {
+    if (this.failRunFor.has(spec.name)) {
+      throw new Error(`simulated docker run failure for ${spec.name}`)
+    }
+    if (this.bindConflictPorts.has(spec.hostPort)) {
+      throw new Error(`Bind for 127.0.0.1:${spec.hostPort} failed: port is already allocated`)
+    }
+    const id = `fake-${spec.name}-${this.idSeq++}`
+    const info: ContainerInfo = {
+      containerId: id,
+      name: containerName(spec.name),
+      running: true,
+      status: 'running',
+      image: spec.image,
+      port: spec.hostPort,
+      instanceName: spec.name,
+    }
+    this.containers.set(spec.name, { info, spec })
+    return id
+  }
+
+  async listFleet(): Promise<ContainerInfo[]> {
+    return [...this.containers.values()].map((r) => r.info)
+  }
+
+  async hostPublishedPorts(): Promise<Set<number>> {
+    const s = new Set<number>()
+    for (const r of this.containers.values()) {
+      if (r.info.running && typeof r.info.port === 'number') s.add(r.info.port)
+    }
+    return s
+  }
+
+  async get(name: string): Promise<ContainerInfo | null> {
+    return this.containers.get(name)?.info ?? null
+  }
+
+  async stop(name: string): Promise<void> {
+    const r = this.containers.get(name)
+    if (r) r.info = { ...r.info, running: false, status: 'exited' }
+  }
+
+  async remove(name: string): Promise<void> {
+    this.containers.delete(name)
+  }
+
+  async execInContainer(_name: string, _cmd: string[]): Promise<void> {}
+
+  async execSync(name: string, cmd: string[]): Promise<void> {
+    this.execCalls.push({ name, cmd })
+  }
+
+  // 测试辅助：断言用的 label 常量（与真 runtime 同源）。
+  static readonly internalPort = GATEWAY_INTERNAL_PORT
+  static readonly labelInstance = LABEL_INSTANCE_KEY
+  static readonly labelPort = LABEL_PORT_KEY
+}

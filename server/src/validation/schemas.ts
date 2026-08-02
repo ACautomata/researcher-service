@@ -37,3 +37,14 @@ export const userPatchSchema = z.object({
   isActive: z.boolean().optional(),
   maxContainers: z.number().int().optional(),
 })
+
+// 容器名 DNS-label（#334 / 平移 NAME_VALIDATOR）：小写字母开头，3–30 位，仅 [a-z0-9-]。
+// 防路径分隔符 / .. / 空格 / 大写（同时防 instances/<name>/ 目录穿越与 docker-name 注入）。
+export const CONTAINER_NAME_REGEX = /^[a-z][a-z0-9-]{2,29}$/
+
+// 建容器（containers POST）：仅需 name（端口/token/home 由编排器决定）。校验失败 → 90002 + data.name。
+export const containerCreateSchema = z.object({
+  name: z
+    .string()
+    .regex(CONTAINER_NAME_REGEX, 'name 须以小写字母开头，3–30 位，仅含小写字母、数字、连字符'),
+})
