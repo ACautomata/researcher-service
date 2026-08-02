@@ -29,10 +29,11 @@ export class BullMqLifecycleQueue implements LifecycleQueue {
   readonly worker: Worker
   readonly connection: IORedis
   // 任务/结果注册表（同进程：submit 与 worker processor 共享一个 Node 进程）。
-  private readonly tasks = new Map<string, LifecycleTask>()
+  // readonly public（Codex 第六轮 P2）：测试可断言入队失败时两表清理（与 queue/worker/connection 同先例）。
+  readonly tasks = new Map<string, LifecycleTask>()
   // 存 {resolve,reject}：completed → resolve；最终失败 → reject（解挂 submit 的 awaiter，
   // 否则永久失败 job 让 awaiter 永不 settle，连带卡死该 name 的 per-name 串行链）。
-  private readonly pending = new Map<string, Pick<PendingTask, 'resolve' | 'reject'>>()
+  readonly pending = new Map<string, Pick<PendingTask, 'resolve' | 'reject'>>()
 
   constructor(opts: BullMqLifecycleOptions) {
     const queueName = opts.queueName ?? 'container-lifecycle'
@@ -94,7 +95,17 @@ export class BullMqLifecycleQueue implements LifecycleQueue {
       this.pending.set(id, { resolve, reject })
     })
     // attempts 给 stalled/崩溃重跑留余地；backoff 固定小延迟。
-    await this.queue.add('lifecycle', {}, { jobId: id, attempts: 3, backoff: { type: 'fixed', delay: 500 } })
+    try {
+      await this.queue.add('lifecycle', {}, { jobId: id, attempts: 3, backoff: { type: 'fixed', delay: 500 } })
+    } catch (e) {
+      // 入队失败（Redis ACL / 只读 / 命令错误，Codex 第六轮 P2）：queue.add reject 时 worker 永不消费
+      // 此 job，completed/failed listener 不会触发——tasks/pending 残留致内存泄漏（持续 Redis 故障下每次
+      // submit 累积一对条目）。删除两表条目后 rethrow（caller 的 await 经此 reject 感知失败；
+      // done promise 不再被 await 故无须 reject，直接删除即可）。
+      this.tasks.delete(id)
+      this.pending.delete(id)
+      throw e
+    }
     await done
   }
 

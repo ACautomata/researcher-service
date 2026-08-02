@@ -298,18 +298,34 @@ export class FleetCommand {
               }
             }
             let nextPort: number
-            try {
-              nextPort = this.deps.allocator.nextFree(await this.usedPorts(learnedConflicts))
-            } catch (poolErr) {
-              if (poolErr instanceof PortPoolExhausted) {
-                await this.finalizeFailedCreate(name, instanceDir, current, runAttempted, preexisting, directoryCreated, preserveErrorRow, new PortAllocationError(name))
+            // 端口换选 + 落库（Codex 第六轮②[P2]）：update(port) 也可能撞 P2002——并发不同名 create 的
+            // 各自 usedPorts 快照选了同一替换端口，port @unique 仲裁放行一个、拒另一个。旧实现不重试
+            // 直接中止、行卡 creating；对齐 reserveRow 把 P2002 视作 learned conflict、重选下一候选。
+            // 内层循环重选直至落库成功；learned 涨满池时 nextFree 抛 PortPoolExhausted 终止（有界）。
+            // eslint-disable-next-line no-constant-condition
+            while (true) {
+              try {
+                nextPort = this.deps.allocator.nextFree(await this.usedPorts(learnedConflicts))
+              } catch (poolErr) {
+                if (poolErr instanceof PortPoolExhausted) {
+                  await this.finalizeFailedCreate(name, instanceDir, current, runAttempted, preexisting, directoryCreated, preserveErrorRow, new PortAllocationError(name))
+                }
+                throw poolErr
               }
-              throw poolErr
+              try {
+                current = await this.prisma.container.update({
+                  where: { id: current.id },
+                  data: { port: nextPort },
+                })
+                break
+              } catch (e) {
+                if (this.isUniqueViolation(e)) {
+                  learnedConflicts.add(nextPort) // 并发抢注 → 学下一候选重选
+                  continue
+                }
+                throw e
+              }
             }
-            current = await this.prisma.container.update({
-              where: { id: current.id },
-              data: { port: nextPort },
-            })
             continue
           }
           // 非 bind 冲突 → 统一失败终态
@@ -348,26 +364,36 @@ export class FleetCommand {
     // remove 是否确认成功。false 且「本 create 尝试跑了新容器」→ 跳过目录清理（容器可能仍驻留、
     // 其 bind-mount home 数据在跑；删目录即删活数据，Codex 第三轮 ③[P1]）。
     let removeConfirmed = false
+    // 是否观测到挂本行 instance label 的「自有」容器（Codex 第六轮①[P2]）：run 撞外部同名容器（另一
+    // Docker actor 在慢 pull 期间抢先建 openclaw-gw-<name>、不带我们的 label、抛非 bind 名冲突）时，
+    // 旧实现 get(name) 返回外部容器 → 按 name force-remove 误删外部、并把外部 containerId 冒领进本行。
+    // 仅「挂本行 instance label」才视作 ours 并 remove/认领，对齐 delete 的 instanceName 所有权守卫。
+    let ownedContainerObserved = false
     if (runAttempted && !preexisting) {
       try {
         const created = await this.deps.runtime.get(name)
-        if (created?.containerId) {
-          await this.prisma.container.update({
-            where: { id: inst.id },
-            data: { containerId: created.containerId },
-          })
+        if (created && created.instanceName === inst.name) {
+          ownedContainerObserved = true
+          if (created.containerId) {
+            await this.prisma.container.update({
+              where: { id: inst.id },
+              data: { containerId: created.containerId },
+            })
+          }
+          await this.deps.runtime.remove(name)
+          await this.prisma.container.update({ where: { id: inst.id }, data: { containerId: '' } })
+          removeConfirmed = true
         }
-        await this.deps.runtime.remove(name)
-        await this.prisma.container.update({ where: { id: inst.id }, data: { containerId: '' } })
-        removeConfirmed = true
+        // created 不符（外部同名容器 / 无 label / null）→ 非 ours：不 remove、不冒领 id。
       } catch {
         // 清容器失败（daemon 故障/remove 抛错）：保留观测到的 id 供 ERROR 行后续 delete 证明所有权。
         // removeConfirmed 保持 false → 下方跳过目录清理（Codex 第三轮 ③[P1]）。
       }
     }
-    // 仅「本 create 尝试跑了新容器且 remove 未确认」时保目录；其余（取消于 run 前 / 无新容器）
-    // 保持原清理语义（不留 orphan 目录）。
-    const containerMayStillRun = runAttempted && !preexisting && !removeConfirmed
+    // 仅「观测到自有容器且 remove 未确认」时保目录；其余（取消于 run 前 / 仅外部同名容器 / 无容器）
+    // 保持原清理语义（不留 orphan 目录）。ownedContainerObserved 取代旧的 runAttempted&&!preexisting
+    // 近似——后者在外部同名容器场景误判「可能仍有自有容器在跑」、留下本应清理的 orphan 目录。
+    const containerMayStillRun = ownedContainerObserved && !removeConfirmed
     if (directoryCreated && !containerMayStillRun) {
       try {
         await this.deps.dirRemover(instanceDir)

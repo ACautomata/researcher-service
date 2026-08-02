@@ -26,6 +26,19 @@ function defaultPairing(): PairingStatusView {
   return { status: 'unpaired', device_id: '', scopes: [], pairing_request_id: '' }
 }
 
+// 防御解码持久化 scopesJson（Codex 第六轮 P2）：迁移/半写入的坏 JSON 让裸 JSON.parse 抛错、整个
+// container-list 请求 500；合法 JSON 但非 string[]（含数字/null 等元素）也违反 string[] 响应契约。
+// 仅当「全为字符串的数组」才放行，其余一律回退 []。
+function decodeScopes(raw: string | null | undefined): string[] {
+  try {
+    const v = JSON.parse(raw || '[]')
+    if (Array.isArray(v) && v.every((x) => typeof x === 'string')) return v
+  } catch {
+    // 坏 JSON → 回退 []
+  }
+  return []
+}
+
 type SummaryWithPairing = ContainerSummary & { pairing: PairingStatusView }
 
 export function createContainersRouter(orch: Orchestrator): Router {
@@ -54,7 +67,7 @@ export function createContainersRouter(orch: Orchestrator): Router {
           ? {
               status: p.status,
               device_id: p.deviceId,
-              scopes: JSON.parse(p.scopesJson || '[]') as string[],
+              scopes: decodeScopes(p.scopesJson),
               pairing_request_id: p.pairingRequestId,
             }
           : defaultPairing(),

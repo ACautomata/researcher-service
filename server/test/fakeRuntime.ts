@@ -17,6 +17,10 @@ export class FakeRuntime implements ContainerRuntime {
   bindConflictPorts = new Set<number>()
   // run 时对指定 name 抛非 bind 错（测统一回滚）。
   failRunFor = new Set<string>()
+  // run 时若 name 命中本表 → 植入外部同名容器（instanceName 用给定值，模拟另一 Docker actor 在
+  // 慢 pull 期间抢先建 openclaw-gw-<name>、不带我们的 label）并抛非 bind 的名冲突错（测
+  // finalizeFailedCreate 回滚须按 instance label 校验所有权，不误删外部容器）。Codex 第六轮①。
+  plantExternalFor = new Map<string, string>()
   // get（inspect）时对指定 name 抛错（测 daemon 故障时 list 降级保留记账状态）。
   failGetFor = new Set<string>()
   // execSync 调用记录（断言 delete 的 chown）。
@@ -28,6 +32,22 @@ export class FakeRuntime implements ContainerRuntime {
     }
     if (this.bindConflictPorts.has(spec.hostPort)) {
       throw new Error(`Bind for 127.0.0.1:${spec.hostPort} failed: port is already allocated`)
+    }
+    if (this.plantExternalFor.has(spec.name)) {
+      // 外部 actor 抢先占用 name：植入外部容器（instanceName 故意 ≠ spec.name），抛名冲突（非 bind）。
+      this.containers.set(spec.name, {
+        info: {
+          containerId: `external-${spec.name}`,
+          name: containerName(spec.name),
+          running: true,
+          status: 'running',
+          image: spec.image,
+          port: spec.hostPort,
+          instanceName: this.plantExternalFor.get(spec.name) ?? 'external-instance',
+        },
+        spec,
+      })
+      throw new Error(`Conflict. The container name "${containerName(spec.name)}" is already in use by another actor`)
     }
     const id = `fake-${spec.name}-${this.idSeq++}`
     const info: ContainerInfo = {

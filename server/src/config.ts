@@ -1,4 +1,6 @@
 import 'dotenv/config'
+import { accessSync, constants, existsSync, statSync } from 'node:fs'
+import path from 'node:path'
 import { isQuotaValid, QUOTA_MAX } from './auth/quota'
 import { parseEncryptionKeys } from './crypto'
 
@@ -89,6 +91,35 @@ function readRefreshTtl(): string {
   return v
 }
 
+// OPENCLAW_TEMPLATE_DIR（Codex 第六轮 P2）：生产 home 模板目录漏设/拼错时，旧实现走 ../researcher
+// 兜底照常启动，首 POST 才在后台 HomeProvisioner.provision() 的 cp() 失败留 error 行——部署故障被
+// 静默掩盖（与 issue #195「卡 creating」同类：漏配只在请求期才暴露）。生产强制绝对/存在/可读目录，
+// 非法 fail-fast（与 JWT_SECRET 生产校验同模式）；dev/test 保持兜底（本地模板未就位也能起服务调试）。
+function readTemplateDir(): string {
+  const raw = process.env.OPENCLAW_TEMPLATE_DIR
+  if (process.env.NODE_ENV === 'production') {
+    if (!raw) {
+      throw new Error('OPENCLAW_TEMPLATE_DIR 必须在生产环境显式提供（home 模板源目录，生产必填）')
+    }
+    if (!path.isAbsolute(raw)) {
+      throw new Error(`OPENCLAW_TEMPLATE_DIR 须为绝对路径（防 cwd 漂移错配）: ${JSON.stringify(raw)}`)
+    }
+    if (!existsSync(raw)) {
+      throw new Error(`OPENCLAW_TEMPLATE_DIR 不存在: ${raw}`)
+    }
+    if (!statSync(raw).isDirectory()) {
+      throw new Error(`OPENCLAW_TEMPLATE_DIR 不是目录: ${raw}`)
+    }
+    try {
+      accessSync(raw, constants.R_OK)
+    } catch {
+      throw new Error(`OPENCLAW_TEMPLATE_DIR 不可读: ${raw}`)
+    }
+    return raw
+  }
+  return raw ?? `${process.cwd()}/../researcher`
+}
+
 export const config = {
   jwtSecret: readSecret(),
   accessTtl: process.env.ACCESS_TOKEN_TTL ?? '5m',
@@ -114,8 +145,8 @@ export const config = {
     return {
       // instances/<name>/ 落盘根（开发默认 <server>/fleet）
       root: process.env.OPENCLAW_FLEET_ROOT ?? `${process.cwd()}/fleet`,
-      // 共享只读模板（cp -a 预填充源；生产必填绝对路径）
-      templateDir: process.env.OPENCLAW_TEMPLATE_DIR ?? `${process.cwd()}/../researcher`,
+      // 共享只读模板（cp -a 预填充源；生产必填绝对路径 → readTemplateDir fail-fast）
+      templateDir: readTemplateDir(),
       // openclaw.json 模板文件（配置单一来源）
       templateJson: process.env.OPENCLAW_TEMPLATE_JSON ?? `${process.cwd()}/../deploy/openclaw.json`,
       image: process.env.OPENCLAW_IMAGE ?? 'ghcr.io/openclaw/openclaw:2026.7.1-browser',

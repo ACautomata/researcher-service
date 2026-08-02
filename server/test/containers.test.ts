@@ -174,3 +174,49 @@ describe('containers REST (接缝 #2 + #334)', () => {
     expect(JSON.stringify(list.body)).not.toMatch(/private_key|device_token|privateKeyPem/)
   })
 })
+
+// Codex 第六轮 P2：routes containers.ts 裸 JSON.parse(scopesJson) —— 迁移/半写入的坏 JSON 让整个
+// container-list 请求 500；合法 JSON 但非 string[] 也违反 string[] 响应契约。修复：防御解码，非
+// 「全为字符串的数组」一律回退 []。
+// 注：M2 pairing 表无写入方（route 恒走 default 分支），此为 M4 落库后的前置防御；用直接种行触发。
+describe('containers GET / scopes 防御解码 (Codex 第六轮 P2)', () => {
+  let ctx: TestContext
+  beforeAll(async () => {
+    ctx = await setupTestApp()
+    const fl = makeFleetTest(ctx.prisma)
+    const { createApp } = await import('../src/app')
+    const supertest = (await import('supertest')).default
+    const app = createApp({ prisma: ctx.prisma, orchestrator: fl.orch })
+    ctx.request = supertest(app) as unknown as TestContext['request']
+  })
+  afterAll(async () => {
+    await ctx.cleanup()
+  })
+
+  it('坏 JSON scopesJson → 不 500，回退 []（修前 JSON.parse 抛错致整列 500）', async () => {
+    const u = await seedUser(ctx.prisma, 'uscope', 'pw-uscope-secure')
+    const c = await ctx.prisma.container.create({
+      data: { name: 'scope-c', port: 19060, ownerId: u.id, token: 't', homeDir: '/h/scope-c', image: 'img', status: 'running' },
+    })
+    await ctx.prisma.pairing.create({ data: { containerId: c.id, scopesJson: '{not-valid-json' } })
+    const lu = await login(ctx.request, 'uscope', 'pw-uscope-secure')
+    const res = await ctx.request.get('/api/v1/containers').set(bearer(lu.access))
+    expect(res.status).toBe(200)
+    expect(res.body.code).toBe(0)
+    const item = res.body.data.find((i: { name: string }) => i.name === 'scope-c')
+    expect(item.pairing.scopes).toEqual([])
+  })
+
+  it('合法 JSON 但含非字符串元素 → 回退 []（守 string[] 响应契约）', async () => {
+    const u = await seedUser(ctx.prisma, 'uscope2', 'pw-uscope2-secure')
+    const c = await ctx.prisma.container.create({
+      data: { name: 'scope-c2', port: 19061, ownerId: u.id, token: 't', homeDir: '/h/scope-c2', image: 'img', status: 'running' },
+    })
+    await ctx.prisma.pairing.create({ data: { containerId: c.id, scopesJson: '[1, 2, 3]' } })
+    const lu = await login(ctx.request, 'uscope2', 'pw-uscope2-secure')
+    const res = await ctx.request.get('/api/v1/containers').set(bearer(lu.access))
+    expect(res.status).toBe(200)
+    const item = res.body.data.find((i: { name: string }) => i.name === 'scope-c2')
+    expect(item.pairing.scopes).toEqual([])
+  })
+})

@@ -104,6 +104,9 @@ describe('JWT secret strength env (slice config)', () => {
     // 提供合法 32B base64 隔离 JWT_SECRET 变量——否则放行用例会因缺加密密钥被误判 THREW。
     if (env === 'production') {
       vi.stubEnv('CREDENTIAL_ENCRYPTION_KEYS', Buffer.alloc(32, 0x01).toString('base64'))
+      // 第六轮 P2：production 还校验 OPENCLAW_TEMPLATE_DIR（须存在可读目录）。stub process.cwd()
+      // 满足校验，隔离 JWT_SECRET 变量（同上理由）。
+      vi.stubEnv('OPENCLAW_TEMPLATE_DIR', process.cwd())
     }
     try {
       const { config } = await import('../src/config')
@@ -262,5 +265,58 @@ describe('port pool env (slice config)', () => {
 
   it('end < start → fail-fast（不再只靠 PortAllocator 运行时检查）', async () => {
     expect(await loadPortPool({ start: '20000', end: '19999' })).toBe('THREW')
+  })
+})
+
+// 意见[P2]（Codex 第六轮）：生产 OPENCLAW_TEMPLATE_DIR 走 `../researcher` 兜底、缺 fail-fast ——
+// 漏设/拼错时 server 照常起（health 绿），首个 POST 才在后台 HomeProvisioner.provision() 的 cp()
+// 失败、留 error 行（部署故障被静默掩盖，与 issue #195「卡 creating」同类）。修复：生产强制
+// 绝对/存在/可读目录，非法 fail-fast（与 JWT_SECRET 生产校验同模式）；dev/test 保持兜底。
+describe('production template dir (slice config)', () => {
+  async function loadTemplateDir(opts: {
+    env?: string
+    dir?: string | undefined
+  }): Promise<string | 'THREW'> {
+    vi.resetModules()
+    const { env = 'production', dir } = opts
+    vi.stubEnv('NODE_ENV', env)
+    if (env === 'production') {
+      // 隔离 templateDir 变量：提供其余生产必填（JWT_SECRET / CREDENTIAL_ENCRYPTION_KEYS），
+      // 否则放行用例会因缺其它必填被误判 THREW（同 loadSecret 模式）。
+      vi.stubEnv('JWT_SECRET', 's'.repeat(32))
+      vi.stubEnv('CREDENTIAL_ENCRYPTION_KEYS', Buffer.alloc(32, 0x01).toString('base64'))
+    }
+    if (dir === undefined) delete process.env.OPENCLAW_TEMPLATE_DIR
+    else vi.stubEnv('OPENCLAW_TEMPLATE_DIR', dir)
+    try {
+      const { config } = await import('../src/config')
+      return config.fleet.templateDir
+    } catch {
+      return 'THREW' // fail-fast
+    } finally {
+      vi.unstubAllEnvs()
+    }
+  }
+
+  it('生产缺 OPENCLAW_TEMPLATE_DIR → fail-fast（修前走 ../researcher 兜底照常起）', async () => {
+    expect(await loadTemplateDir({ dir: undefined })).toBe('THREW')
+  })
+
+  it('生产相对路径 → fail-fast（须绝对路径，防 cwd 漂移错配）', async () => {
+    expect(await loadTemplateDir({ dir: 'template/relative' })).toBe('THREW')
+  })
+
+  it('生产不存在的绝对路径 → fail-fast（须存在）', async () => {
+    expect(await loadTemplateDir({ dir: '/definitely-not-a-real-template-dir-xyz' })).toBe('THREW')
+  })
+
+  it('生产合法存在的绝对目录 → 放行并返回', async () => {
+    expect(await loadTemplateDir({ dir: process.cwd() })).toBe(process.cwd())
+  })
+
+  it('dev/test 缺省 → 走 ../researcher 兜底（不加 fail-fast，本地友好）', async () => {
+    expect(await loadTemplateDir({ env: 'development', dir: undefined })).toBe(
+      `${process.cwd()}/../researcher`,
+    )
   })
 })
