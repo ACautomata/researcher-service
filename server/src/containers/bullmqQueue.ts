@@ -12,6 +12,9 @@ export interface BullMqLifecycleOptions {
   redisUrl: string
   concurrency: number
   queueName?: string
+  // Redis 断连 / 协议错误 / 命令失败的统一上报（Codex C7）。默认 console.error；生产可注入日志/告警。
+  // 仅记录上报，不阻断 ioredis / BullMQ 自身的自动重连。
+  onError?: (err: Error) => void
 }
 
 interface PendingTask {
@@ -21,9 +24,10 @@ interface PendingTask {
 }
 
 export class BullMqLifecycleQueue implements LifecycleQueue {
-  private readonly queue: Queue
-  private readonly worker: Worker
-  private readonly connection: IORedis
+  // readonly public（Codex C7）：消费者/测试可监听额外事件、验证 error listener 接线。
+  readonly queue: Queue
+  readonly worker: Worker
+  readonly connection: IORedis
   // 任务/结果注册表（同进程：submit 与 worker processor 共享一个 Node 进程）。
   private readonly tasks = new Map<string, LifecycleTask>()
   // 存 {resolve,reject}：completed → resolve；最终失败 → reject（解挂 submit 的 awaiter，
@@ -38,7 +42,16 @@ export class BullMqLifecycleQueue implements LifecycleQueue {
       queueName,
       async (job: Job) => {
         const task = this.tasks.get(String(job.id))
-        if (!task) return // 崩溃重启后 job 重跑但任务句柄已失（进程置换）——跳过，由行状态兜底对账
+        if (!task) {
+          // 崩溃重启后 stalled/queued job 重跑：任务句柄已失（进程置换）。BullMQ 移除此 job，
+          // 行状态由 readModel.reconcileCreating/reconcileRemoving 在 list 读路径 lazy 对账收敛
+          // （Codex C6）——不再静默 success：明确记录，避免 lifecycle 操作未执行被无声吞没。
+          // eslint-disable-next-line no-console
+          console.warn(
+            `[bullmq] lifecycle job ${job.id} had no in-process task (process restarted?) — leaving row to reconciliation`,
+          )
+          return
+        }
         await task()
       },
       { connection: this.connection, concurrency: opts.concurrency },
@@ -59,6 +72,16 @@ export class BullMqLifecycleQueue implements LifecycleQueue {
         this.pending.delete(String(job.id))
       }
     })
+    // error listener（Codex C7）：Worker/Queue/IORedis connection 均为 EventEmitter，'error' 事件
+    // 无 listener 即抛 uncaughtException → 崩整个 API 进程（一次 Redis 抖动即致命）。
+    // 注册 listener 记录/上报，ioredis（maxRetriesPerRequest:null + 自动重连）与 BullMQ 继续自愈。
+    const onError = opts.onError ?? ((err: Error) => {
+      // eslint-disable-next-line no-console
+      console.error('[bullmq] lifecycle queue error', err)
+    })
+    this.connection.on('error', onError)
+    this.queue.on('error', onError)
+    this.worker.on('error', onError)
   }
 
   async submit(task: LifecycleTask): Promise<void> {
@@ -80,8 +103,11 @@ export class BullMqLifecycleQueue implements LifecycleQueue {
   }
 
   async close(): Promise<void> {
-    await this.worker.close()
-    await this.queue.close()
+    // 优雅关闭不被坏 Redis 连接卡死（Codex C7 附带）：worker.close 在不健康 connection 上可能
+    // 长时间挂起——生产 Redis 不可达时服务 shutdown 会卡死须 SIGKILL。先 disconnect connection
+    // 让 worker/queue 失去传输后能快速收尾；worker.close 拆离不阻塞（进程退出时 Node 回收剩余 handle）。
     this.connection.disconnect()
+    await this.queue.close().catch(() => {})
+    void this.worker.close().catch(() => {})
   }
 }

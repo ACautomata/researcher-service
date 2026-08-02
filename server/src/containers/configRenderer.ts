@@ -5,6 +5,7 @@
 // GATEWAY_TOKEN=<secret> 注入，真 token 绝不落盘进 JSON 文件（安全不变量）。
 
 import { GATEWAY_BIND, GATEWAY_INTERNAL_PORT, GATEWAY_TOKEN_PLACEHOLDER } from './constants'
+import { ConfigurationError } from './errors'
 
 interface OpenClawConfig {
   gateway?: {
@@ -16,12 +17,28 @@ interface OpenClawConfig {
   [k: string]: unknown
 }
 
+// 形状断言（Codex C9）：JSON.parse 成功但值非「普通对象」时，renderDict 挂到其上的 gateway 属性
+// 会被 JSON.stringify 丢弃（数组只序列化 index 属性、原始值无属性）→ openclaw.json 缺
+// port/bind/token 强制不变量。构造期同步拒绝，避免坏配置留到后台 provisioning 才暴露（POST 已返 creating）。
+function assertPlainObject(v: unknown, field: string): asserts v is Record<string, unknown> {
+  if (typeof v !== 'object' || v === null || Array.isArray(v)) {
+    throw new ConfigurationError(field)
+  }
+}
+
 export class ConfigRenderer {
   private readonly template: OpenClawConfig
 
   constructor(templateText: string) {
     // 构造期解析：损坏模板 fail-fast（不静默产出坏配置）
-    this.template = JSON.parse(templateText) as OpenClawConfig
+    const parsed: unknown = JSON.parse(templateText)
+    // shape 校验（Codex C9）：合法 JSON 但非对象 / gateway·auth 非对象 → 同步拒绝。
+    assertPlainObject(parsed, 'OPENCLAW_TEMPLATE_JSON')
+    const gateway = (parsed as { gateway?: unknown }).gateway
+    if (gateway !== undefined) assertPlainObject(gateway, 'OPENCLAW_TEMPLATE_JSON (gateway)')
+    const auth = (gateway as { auth?: unknown } | undefined)?.auth
+    if (auth !== undefined) assertPlainObject(auth, 'OPENCLAW_TEMPLATE_JSON (gateway.auth)')
+    this.template = parsed as OpenClawConfig
   }
 
   // 渲染并强制 spec 安全不变量（port/bind/token），返回 dict（供 ProviderConfigBuilder 合并）

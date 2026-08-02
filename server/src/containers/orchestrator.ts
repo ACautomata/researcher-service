@@ -21,7 +21,12 @@ export class Orchestrator {
     cancel: CancelRegistry = new CancelRegistry(),
   ) {
     this.cmd = new FleetCommand(deps, prisma, cancel)
-    this.read = new FleetReadModel(deps, prisma)
+    // requeueDelete 回调（Codex C6）：reconcileRemoving 对「removing 行 + runtime 仍驻留容器」经此
+    // 重新入队 delete 继续清理。箭头延迟求值 this.cmd（此时已构造）；submitDelete 串行幂等，
+    // catch 防 list 读路径抛错。
+    this.read = new FleetReadModel(deps, prisma, async (name) => {
+      await this.cmd.submitDelete(name).catch(() => {})
+    })
   }
 
   // 写侧

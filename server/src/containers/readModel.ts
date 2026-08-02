@@ -28,6 +28,9 @@ export class FleetReadModel {
   constructor(
     private readonly deps: FleetDeps,
     private readonly prisma: PrismaClient,
+    // 重新入队 delete 回调（Codex C6）：reconcileRemoving 对「removing 行 + runtime 仍驻留容器」
+    // 经此回调重新入队 delete 继续清理。Orchestrator 注入 cmd.submitDelete；不直接依赖 FleetCommand。
+    private readonly requeueDelete?: (name: string) => Promise<void>,
   ) {}
 
   private item(inst: Container, status: string, health: string): ContainerSummary {
@@ -96,6 +99,44 @@ export class FleetReadModel {
     }
   }
 
+  // removing 行对账（Codex C6）：进程重启后 BullMQ worker 的 tasks map 丢失，stalled/queued job
+  // 经 processor 时 if(!task) return 被当成功移除但 lifecycle 操作未执行 → delete 中断的行卡 removing
+  // 永不收敛（reconcileCreating 只处理 creating）。镜像 reconcileCreating 的 lazy-repair：
+  // - 有在飞 create（本进程持锁）→ 跳过（不该此时删）。
+  // - runtime 仍驻留容器（delete 未跑完）→ 经 requeueDelete 重新入队继续清理（串行幂等）。
+  // - runtime 无容器（delete 已 stop+remove，仅删行没跑到）→ 删行收敛，不进 list 结果。
+  // - daemon 不可达 → 保持 removing，下次 list 再对账。
+  private async reconcileRemoving(insts: Container[]): Promise<Container[]> {
+    const survivors: Container[] = []
+    for (const inst of insts) {
+      if (inst.status !== 'removing') {
+        survivors.push(inst)
+        continue
+      }
+      if (this.deps.lock.isHeld(inst.name)) {
+        survivors.push(inst)
+        continue
+      }
+      let info
+      try {
+        info = await this.deps.runtime.get(inst.name)
+      } catch {
+        // daemon 临时不可用 → 保持 removing，下次 list 再对账。
+        survivors.push(inst)
+        continue
+      }
+      if (info && info.instanceName === inst.name) {
+        // 容器仍驻留 → delete 未跑完 → 重新入队继续清理（仍显示 removing）。
+        await this.requeueDelete?.(inst.name)
+        survivors.push(inst)
+      } else {
+        // 容器已不在 → 行残留（删行没跑到）→ 删行收敛，不进 list 结果。
+        await this.prisma.container.delete({ where: { id: inst.id } }).catch(() => {})
+      }
+    }
+    return survivors
+  }
+
   // 聚合 DB 记账 + runtime 实时状态 + gateway 健康探测。ownerId 过滤由路由层注入（隔离）。
   async list(where: { ownerId?: string } = {}): Promise<ContainerSummary[]> {
     const insts = await this.prisma.container.findMany({
@@ -104,8 +145,9 @@ export class FleetReadModel {
     })
     if (insts.length === 0) return []
     await this.reconcileCreating(insts)
+    const survivors = await this.reconcileRemoving(insts)
     // 并发健康探测（Promise.all，bound 总延迟而非 N×timeout 串行）。
-    return Promise.all(insts.map((inst) => this.buildItem(inst)))
+    return Promise.all(survivors.map((inst) => this.buildItem(inst)))
   }
 
   // 由刚预占的 Container 构造 POST 响应（creating 态快照；不做二次 runtime 查询）。

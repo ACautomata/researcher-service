@@ -115,9 +115,18 @@ export class FleetCommand {
   // ---- create 阶段三提交：入队后台完成（按 name 串行 + 队列并发上限）----
   // 返回的 Promise 在 provisioning 完成时 settle（供测试/同步语义 await）；路由层不 await（异步）。
   submitCreate(inst: Container): Promise<void> {
-    return this.deps.serializer.enqueue(inst.name, () =>
-      this.deps.queue.submit(() => this.runCreateComplete(inst)),
-    )
+    return this.deps.serializer.enqueue(inst.name, async () => {
+      try {
+        await this.deps.queue.submit(() => this.runCreateComplete(inst))
+      } catch (e) {
+        // 队列不可达补偿（Codex C8）：queue.add reject 时 createComplete 从不执行，其 finally 不会
+        // 释放 name lease → 路由 detach 的 catch 吞掉唯一失败信号后，lease 永久持有、行卡 creating，
+        // recreate 被 InstanceExists(20041) 锁死。补偿：释放 lease + 标 error 行（均幂等）。
+        this.releaseLease(inst.name)
+        await this.markError(inst)
+        throw e
+      }
+    })
   }
 
   // 同步语义封装（reserve + complete），供需要同步结果的调用方/测试。
