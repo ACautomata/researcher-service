@@ -52,12 +52,21 @@ function readBcryptCost(): number {
   return v
 }
 
+// BOOTSTRAP_ADMIN_USERNAME（Codex #342 ㉑ P2）：空串视为缺失 —— Compose 未设置变量替换成空串
+// 时 `?? 'admin'` 不触发（空串非 nullish），bootstrap 会建 username="" 的唯一 admin，而
+// loginSchema min(1) 拒绝空串 → 永久不可登录、重启又因 users 非空跳过 bootstrap。空串回退默认。
+function readBootstrapUsername(): string {
+  const v = process.env.BOOTSTRAP_ADMIN_USERNAME
+  if (typeof v === 'string' && v.trim() !== '') return v
+  return 'admin'
+}
+
 export const config = {
   jwtSecret: readSecret(),
   accessTtl: process.env.ACCESS_TOKEN_TTL ?? '5m',
   refreshTtl: process.env.REFRESH_TOKEN_TTL ?? '7d',
   bcryptCost: readBcryptCost(),
-  bootstrapAdminUsername: process.env.BOOTSTRAP_ADMIN_USERNAME ?? 'admin',
+  bootstrapAdminUsername: readBootstrapUsername(),
   defaultMaxContainers: readDefaultMaxContainers(),
   port: Number(process.env.PORT ?? 8001),
   // 非 production（含 test）关闭 cookie Secure，便于本地 http 调试；规格锁 SameSite=Lax/HttpOnly/Path。

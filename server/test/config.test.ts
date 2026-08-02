@@ -135,3 +135,36 @@ describe('JWT secret strength env (slice config)', () => {
     expect(await loadSecret({ secret: 'a', env: 'development' })).toBe('a')
   })
 })
+
+// 意见③⓪[P2]（Codex ㉑ 轮）：BOOTSTRAP_ADMIN_USERNAME 空串视为缺失 —— Compose 未设置变量替换成
+// 空串时 `?? 'admin'` 不触发（空串非 nullish），bootstrap 建 username="" 的唯一 admin，而
+// loginSchema min(1) 拒绝空串 → 永久不可登录、重启又因 users 非空跳过 bootstrap。修复：空串回退默认。
+describe('bootstrap admin username env (slice config)', () => {
+  async function loadUsername(env: string | undefined): Promise<string> {
+    vi.resetModules()
+    if (env === undefined) delete process.env.BOOTSTRAP_ADMIN_USERNAME
+    else vi.stubEnv('BOOTSTRAP_ADMIN_USERNAME', env)
+    try {
+      const { config } = await import('../src/config')
+      return config.bootstrapAdminUsername
+    } finally {
+      vi.unstubAllEnvs()
+    }
+  }
+
+  it('未设置 → 默认 admin', async () => {
+    expect(await loadUsername(undefined)).toBe('admin')
+  })
+
+  it('自定义 my-admin → 保留', async () => {
+    expect(await loadUsername('my-admin')).toBe('my-admin')
+  })
+
+  it('空串 → 视为缺失回退 admin（新校验）', async () => {
+    expect(await loadUsername('')).toBe('admin')
+  })
+
+  it('纯空白 → 视为缺失回退 admin', async () => {
+    expect(await loadUsername('   ')).toBe('admin')
+  })
+})
