@@ -74,6 +74,33 @@ function readRefreshTtl(): string {
   return v
 }
 
+// REDIS_URL / PORT_POOL 等 M2 配置（#334）：dev 友好默认；缺 Redis 时编排队列容错降级。
+function readPortRange(key: string, def: number): number {
+  const v = Number(process.env[key] ?? def)
+  if (!Number.isInteger(v)) {
+    throw new Error(`${key} 非法: ${JSON.stringify(process.env[key])}，须为整数`)
+  }
+  return v
+}
+
+// PROVISION_WORKERS（#334）：BullMQ worker 并发，默认 2（规格 §F 锁）。
+function readProvisionWorkers(): number {
+  const v = Number(process.env.PROVISION_WORKERS ?? 2)
+  if (!Number.isInteger(v) || v < 1) {
+    throw new Error(`PROVISION_WORKERS 非法: ${JSON.stringify(process.env.PROVISION_WORKERS)}，须为 ≥1 整数`)
+  }
+  return v
+}
+
+// GATEWAY_TOKEN_BYTES（#334）：token 熵（spec §5.2 锁 32 字节 = 256 bit）。仅允许正整数。
+function readGatewayTokenBytes(): number {
+  const v = Number(process.env.GATEWAY_TOKEN_BYTES ?? 32)
+  if (!Number.isInteger(v) || v < 16) {
+    throw new Error(`GATEWAY_TOKEN_BYTES 非法: ${JSON.stringify(process.env.GATEWAY_TOKEN_BYTES)}，须为 ≥16 整数`)
+  }
+  return v
+}
+
 export const config = {
   jwtSecret: readSecret(),
   accessTtl: process.env.ACCESS_TOKEN_TTL ?? '5m',
@@ -86,6 +113,17 @@ export const config = {
   cookieSecure: process.env.NODE_ENV === 'production',
   databaseUrl: process.env.DATABASE_URL ?? 'file:./prisma/panel.db',
   isTest: process.env.NODE_ENV === 'test',
+  // ── M2 容器编排（#334）──
+  fleetRoot: process.env.FLEET_ROOT ?? `${process.cwd()}/fleet`, // instances/<name>/ 落盘根
+  openclawTemplateDir: process.env.OPENCLAW_TEMPLATE_DIR ?? '', // cp -a 源；空 = 未配（provision 时 fail-fast）
+  openclawTemplateJson: process.env.OPENCLAW_TEMPLATE_JSON ?? '', // openclaw.json 模板文件路径
+  openclawImage: process.env.OPENCLAW_IMAGE ?? 'ghcr.io/openclaw/openclaw:2026.7.1-browser',
+  llmApiKey: process.env.LLM_API_KEY ?? '', // 全面板共享（env 注入容器，不落盘）
+  portPoolStart: readPortRange('PORT_POOL_START', 19000),
+  portPoolEnd: readPortRange('PORT_POOL_END', 19999),
+  redisUrl: process.env.REDIS_URL ?? 'redis://127.0.0.1:6379',
+  provisionWorkers: readProvisionWorkers(),
+  gatewayTokenBytes: readGatewayTokenBytes(),
 }
 
 // refresh cookie 公共属性（规格 #311 锁）：HttpOnly + Secure(prod) + SameSite=Lax + Path=/api/v1/auth

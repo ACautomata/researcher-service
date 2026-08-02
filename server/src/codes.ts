@@ -19,9 +19,15 @@ export const CODE = {
   CANNOT_DISABLE_SELF: 10044, // 不可禁用自己
   // 2xxxx 容器（20041 锁 = name 全局唯一冲突；register/users 用户名冲突复用，契约 §2.2）
   NAME_CONFLICT: 20041,
+  QUOTA_EXCEEDED: 20042, // 建容器超 User.maxContainers 配额（#312/#311 锁码）
+  PROVISIONING: 20043, // 目标在 provisioning（creating 态拒写；#313 现改置取消标志，码保留备用）
+  CLEANUP_FAILED: 20045, // home 清理失败（行标 REMOVING 可重试，契约 §1.3 转译）
+  CONTAINER_NOT_FOUND: 20040, // 容器不存在 / 越权（同码防探测，#312 锁码）
   // 9xxxx 系统 / 校验
   OAUTH_NOT_CONFIGURED: 90001, // OAuth provider 未配置（原 501）
   VALIDATION_FAILED: 90002, // 参数校验失败（字段明细进 data）
+  LLM_KEY_MISSING: 90003, // LLM_API_KEY 未配置 / 写盘失败（契约 §1.3 转译）
+  PORT_POOL_EXHAUSTED: 90004, // 端口池耗尽 / 分配冲突（契约 §1.3 转译）
   ROUTE_NOT_FOUND: 90005, // 路由不存在（404 信封兜底）
   INTERNAL: 90000, // 未知错误兜底
 } as const
@@ -41,8 +47,14 @@ export const DEFAULT_MESSAGE: Record<number, string> = {
   [CODE.QUOTA_INVALID]: '配额不合法',
   [CODE.CANNOT_DISABLE_SELF]: '不能禁用自己的账号',
   [CODE.NAME_CONFLICT]: '名称已被占用',
+  [CODE.QUOTA_EXCEEDED]: '容器数量已达配额上限',
+  [CODE.PROVISIONING]: '容器正在创建中',
+  [CODE.CLEANUP_FAILED]: '容器清理失败，请重试',
+  [CODE.CONTAINER_NOT_FOUND]: '容器不存在',
   [CODE.OAUTH_NOT_CONFIGURED]: 'OAuth provider 未配置',
   [CODE.VALIDATION_FAILED]: '参数校验失败',
+  [CODE.LLM_KEY_MISSING]: 'LLM API Key 未配置',
+  [CODE.PORT_POOL_EXHAUSTED]: '端口池已耗尽，暂无法创建容器',
   [CODE.ROUTE_NOT_FOUND]: '路由不存在',
   [CODE.INTERNAL]: '服务器内部错误',
 }

@@ -37,3 +37,13 @@ export const userPatchSchema = z.object({
   isActive: z.boolean().optional(),
   maxContainers: z.number().int().optional(),
 })
+
+// ── 容器（#334 M2）──
+// name DNS-label（spec §4 / #310）：单一来源 = orchestrator/ports.NAME_REGEX。
+// schema 层（zod body 校验）+ 路由层（DELETE 路径参数）+ 编排层（防御二次校验）共用同一正则，
+// 避免校验逻辑分散。校验失败 → 90002(data.name)。
+import { NAME_REGEX } from '../orchestrator/ports'
+
+export const containerCreateSchema = z.object({
+  name: z.string().regex(NAME_REGEX, '名称仅允许小写字母、数字、连字符（3-30 位，小写字母开头）'),
+})

@@ -104,6 +104,9 @@ model Container {
   containerId    String @default("") // run 前未知；空串而非 NULL
   status         ContainerStatus @default(creating)
   image          String
+  // #334 M2：delete 遇在飞 create 置取消标志 → provisioning 检查点检出即统一回滚后终止。
+  // 默认 false；only creating 行会读到 true。delete job 完成后行即删（无需复位）。
+  cancelRequested Boolean @default(false)
   leaseExpiresAt DateTime? // null=无保护
 
   createdAt DateTime @default(now())
