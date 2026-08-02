@@ -421,4 +421,55 @@ describe('同名列串行化 + 租约', () => {
     await orch.provisionDelete('recl')
     expect(await ctx.prisma.container.findUnique({ where: { name: 'recl' } })).toBeNull()
   })
+
+  it('review finding 1：removing + lease=null → provisionDelete 可回收（不永久卡）', async () => {
+    const orch = makeOrch(makeCfg())
+    await orch.createReserve('reclnull', adminId, 3)
+    await orch.provisionCreate(queue.lastCreate('reclnull').name, queue.lastCreate('reclnull').configText)
+    // 模拟：上一个 worker claim 后崩溃，finally 把 lease 清成 null 但行未删（removing + lease=null）
+    await ctx.prisma.container.update({
+      where: { name: 'reclnull' },
+      data: { status: 'removing', leaseExpiresAt: null },
+    })
+    await orch.provisionDelete('reclnull')
+    expect(await ctx.prisma.container.findUnique({ where: { name: 'reclnull' } })).toBeNull()
+  })
+
+  it('review finding 2：容器已停止（chown exec 409）→ 跳过 chown 继续删除', async () => {
+    const orch = makeOrch(makeCfg())
+    await orch.createReserve('chown409', adminId, 3)
+    await orch.provisionCreate(queue.lastCreate('chown409').name, queue.lastCreate('chown409').configText)
+    // 容器已停止（unless-stopped 常态）→ exec chown 返回 409 Conflict
+    runtime.execSync409 = true
+    await orch.deleteEnqueue('chown409', adminId)
+    await orch.provisionDelete(queue.lastDelete('chown409').name)
+    // 跳过 chown 仍删除成功（409 不视为可重试错误）
+    expect(await ctx.prisma.container.findUnique({ where: { name: 'chown409' } })).toBeNull()
+  })
+
+  it('review finding 5：容器归属不匹配（同名被重建）→ 删陈旧行但不动外来容器/目录', async () => {
+    const orch = makeOrch(makeCfg())
+    await orch.createReserve('replaced', adminId, 3)
+    await orch.provisionCreate(queue.lastCreate('replaced').name, queue.lastCreate('replaced').configText)
+    // 模拟：同名容器被外部重建（新 containerId ≠ row.containerId）
+    runtime.containers.set('replaced', {
+      containerId: 'foreign-cid',
+      name: 'openclaw-gw-replaced',
+      running: true,
+      status: 'running',
+      image: 'other:img',
+      port: 19000,
+      instanceName: 'replaced',
+    })
+    await orch.deleteEnqueue('replaced', adminId)
+    await orch.provisionDelete(queue.lastDelete('replaced').name)
+    // 陈旧行被删（释放 name/port 记账）
+    expect(await ctx.prisma.container.findUnique({ where: { name: 'replaced' } })).toBeNull()
+    // 外来容器未被 stop/remove
+    expect(runtime.stopped).not.toContain('replaced')
+    expect(runtime.removed).not.toContain('replaced')
+    expect(runtime.containers.has('replaced')).toBe(true)
+    // workspace 目录未被 rmtree（外来容器可能正 bind-mount 它）
+    expect(existsSync(path.join(dir, 'instances', 'replaced'))).toBe(true)
+  })
 })

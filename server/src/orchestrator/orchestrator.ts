@@ -125,6 +125,16 @@ export class Orchestrator {
     return path.join(this.cfg.fleetRoot, 'instances', name, 'home')
   }
 
+  // 从行记录的 homeDir 派生 instanceDir（create/delete 两处共用，防 FLEET_ROOT 变更后派生不一致留孤儿）。
+  // homeDir=<fleetRoot>/instances/<name>/home → instanceDir = instances/<name>（parent）。
+  // 防御：homeDir 占位/被篡改（parent 不在 instances 根下）时回退 cfg.fleetRoot 重构。
+  private instanceDirFromRecordedHome(name: string, homeDir: string): string {
+    const parent = path.dirname(homeDir)
+    return path.basename(parent) === name && path.basename(path.dirname(parent)) === 'instances'
+      ? parent
+      : path.join(this.cfg.fleetRoot, 'instances', name)
+  }
+
   // codex 三轮 P1（GET / 探活）：查询容器运行时真实状态——DB status 只记编排态，须对账 runtime
   // 判容器是否真在跑。返回 null 表示 daemon 不可达（降级保持 DB status，不误报）。
   // health 语义对齐旧 Django read_model：running+runtime 容器在跑 → healthy；否则按 DB status。
@@ -208,12 +218,14 @@ export class Orchestrator {
         await this.deleteRowQuietly(row.id)
         throw fail(CODE.LLM_KEY_MISSING, 'openclaw.json 模板缺失或损坏')
       }
-      // 入队失败（Redis 挂）→ 删行回滚（释放端口/配额/name）+ 租约由 catch 释放
+      // 入队失败（Redis 挂）→ 删行回滚（释放端口/配额/name）+ 租约由 catch 释放。
+      // review 补：非信封错误抛 INTERNAL 而非 PORT_POOL_EXHAUSTED——端口池根本没耗尽，是队列
+      // 基础设施不可用；90004 会误导客户端重试/告警（delete 侧入队失败抛 CLEANUP_FAILED 同理）。
       try {
         await this.queue.enqueueCreate(name, ownerId, configText)
       } catch (e) {
         await this.deleteRowQuietly(row.id)
-        throw e instanceof EnvelopeError ? e : fail(CODE.PORT_POOL_EXHAUSTED)
+        throw e instanceof EnvelopeError ? e : fail(CODE.INTERNAL)
       }
       // codex 五轮 P1 #1：enqueue 成功后释放进程内 lease——多进程下 create job 可能交付给另一进程 B，
       // 若 A 仍持有进程内 lease，A 后续 DELETE 只设 cancelRequested（即使容器已 running、无 create worker
@@ -302,8 +314,12 @@ export class Orchestrator {
       // （非 no-op——no-op 会让 BullMQ 移除 job，lease 过期后无 job 重跑 → 行永远 creating）。
       throw new LeaseContentionError(name)
     }
-    const instanceDir = path.join(this.cfg.fleetRoot, 'instances', name)
-    const homeDir = path.join(instanceDir, 'home')
+    // review 补（finding 8）：instanceDir 从行记录的 homeDir 派生，而非当前 cfg.fleetRoot 重构——
+    // 对齐 provisionDelete（codex 三轮 P2）。FLEET_ROOT 变更后 create 若按新 root 建目录、delete
+    // 按旧 homeDir 清理，会留孤儿目录。homeDir 直接取行记录真值（createReserve 时写入），与
+    // delete 清理目标一致。
+    const instanceDir = this.instanceDirFromRecordedHome(name, row.homeDir)
+    const homeDir = row.homeDir
     let runAttempted = false
     let dirCreated = false
     try {
@@ -577,6 +593,8 @@ export class Orchestrator {
     // lease 过期重试也被 `not removing` 永久挡（行+容器永远残留）。removing + lease 过期 = 可回收。
     // codex 五轮 P1 #2：claim 谓词加 `id: rowId`——rowId 检查与 CAS 是分离操作，只按 name 过滤时，
     // 另一 delete 删掉检查过的行 + 用户重建同名 → 本 claim 误占替换行。id 入谓词使绑定原子化。
+    // review 补：`removing + lease=null` 也是可回收态——上一个 worker claim 后崩溃、finally 清理
+    // lease 已置 null 但行未删，属「无活动租约」应放行；原谓词漏此组合 → 行永久卡 removing。
     const claimed = await this.prisma.container.updateMany({
       where: {
         name,
@@ -584,8 +602,8 @@ export class Orchestrator {
         OR: [
           { status: { not: 'removing' }, leaseExpiresAt: null },
           { status: { not: 'removing' }, leaseExpiresAt: { lt: now } },
-          // removing 但 lease 过期：上次清理失败，可重试回收
-          { status: 'removing', leaseExpiresAt: { lt: now } },
+          // removing 且 lease 空闲（null 或已过期）：上次清理失败，可重试回收
+          { status: 'removing', OR: [{ leaseExpiresAt: null }, { leaseExpiresAt: { lt: now } }] },
         ],
       },
       data: { status: 'removing', leaseExpiresAt: new Date(now.getTime() + LEASE_TTL_MS) },
@@ -597,13 +615,8 @@ export class Orchestrator {
     }
     // codex 三轮 P2：instanceDir 从行记录的 homeDir 派生（取 parent），而非当前 cfg.fleetRoot 重构——
     // FLEET_ROOT 变更后新 root 无该目录，force:true 会误判清理成功、旧 workspace 残留。
-    // homeDir=<fleetRoot>/instances/<name>/home → parent = instances/<name>。
-    // 防御：homeDir 占位/被篡改（parent 不在 instances 根下）时回退 cfg.fleetRoot 重构。
-    const recordedParent = path.dirname(row.homeDir)
-    const instanceDir =
-      path.basename(recordedParent) === name && path.basename(path.dirname(recordedParent)) === 'instances'
-        ? recordedParent
-        : path.join(this.cfg.fleetRoot, 'instances', name)
+    // 复用 create 侧同款 helper（review finding 8），两处派生逻辑单一来源。
+    const instanceDir = this.instanceDirFromRecordedHome(name, row.homeDir)
     // codex 七轮 P1：delete 长清理前续约（chown/stop/remove/rmtree 可能 >TTL）
     await this.renewLease(row.id)
     // container_id 是本行拥有 runtime 容器的正向证据；验证后再 stop/remove（防误删外来同名容器）
@@ -616,7 +629,16 @@ export class Orchestrator {
         // 保留行 REMOVING + 抛 CLEANUP_FAILED，客户端重试 delete。
         throw fail(CODE.CLEANUP_FAILED)
       }
-      if (live && live.containerId === row.containerId) {
+      if (live) {
+        if (live.containerId !== row.containerId) {
+          // review 补（finding 5，归属不匹配）：同名容器被外部重建/替换（实际 ID ≠ row.containerId）。
+          // 这不是本行拥有的容器——不得 stop/remove（防误删外来容器），也不得 rmtree
+          // workspace（外来容器可能正 bind-mount 同一目录，删了会破坏其数据）。只删陈旧行
+          // 释放 name/port 记账；真实容器与目录留待外部管理。
+          await this.prisma.container.delete({ where: { id: row.id } })
+          return
+        }
+        // 归属匹配：本行拥有的容器 → 先 chown 再 stop/remove
         // codex 一轮 #3 + 二轮 P1（chown 失败保留容器）：容器以 root 跑（user=0:0），bind-mount
         // home 内由容器写入的文件属主 root——host 非 root rmtree 会 EACCES，且 stop/remove 后
         // 容器没了（唯一能回收 root 属主文件的环境）无法补救。先同步 chown home 给 host uid。
@@ -625,12 +647,17 @@ export class Orchestrator {
         try {
           await this.runtime.execSync(name, ['chown', '-R', String(process.getuid?.() ?? 0), HOME_BIND])
         } catch (e) {
-          const isNotFound = (e as { statusCode?: number }).statusCode === 404
-          if (!isNotFound) {
+          const code = (e as { statusCode?: number }).statusCode
+          // review 补（finding 2）：容器停止/退出（unless-stopped 常态）时 exec 返回 409 Conflict
+          //（非 404）——无进程可 exec，chown 必然失败但这不是可重试的容器内错误。containerId 已
+          // 验证归属，停止容器无 root 属主写权限需求（文件不再被容器写），跳过 chown 继续清理。
+          const isNotFound = code === 404
+          const isNotRunning = code === 409
+          if (!isNotFound && !isNotRunning) {
             // 容器在跑但 chown 失败：保留容器（可重试 chown），不删
             throw fail(CODE.CLEANUP_FAILED)
           }
-          // 容器已不在（404）→ 无法 chown，继续清理（rmtree 尽力而为）
+          // 容器已不在（404）或已停止（409）→ 无法/无需 chown，继续清理（rmtree 尽力而为）
         }
         try {
           await this.runtime.stop(name)
@@ -639,6 +666,7 @@ export class Orchestrator {
           throw fail(CODE.CLEANUP_FAILED)
         }
       }
+      // live === null：容器已不在 daemon（崩溃/手动删）→ 下方 rmtree + 删行（安全，无容器占用）
     }
     // home 目录清理（目录不存在视为成功；OSError → 标 REMOVING 可重试）
     try {

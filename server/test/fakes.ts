@@ -25,6 +25,8 @@ export class FakeRuntime implements ContainerRuntime {
   failGet = false
   // codex 二轮 P1：模拟 execSync（chown）失败——容器在跑但 chown 命令错
   failExecSync = false
+  // review finding 2：模拟 execSync 对已停止容器返回 409 Conflict（docker exec 无进程可跑）
+  execSync409 = false
   private next = 0
 
   async run(spec: ContainerSpec): Promise<string> {
@@ -78,6 +80,11 @@ export class FakeRuntime implements ContainerRuntime {
   }
 
   async execSync(_name: string, cmd: string[]): Promise<void> {
+    if (this.execSync409) {
+      const err = new Error('container is stopped') as Error & { statusCode?: number }
+      err.statusCode = 409
+      throw err
+    }
     if (this.failExecSync) throw new Error('exec chown failed (container running but cmd error)')
     this.execCalls.push([_name, cmd])
   }
