@@ -17,6 +17,8 @@ export class FakeRuntime implements ContainerRuntime {
   bindConflictPorts = new Set<number>()
   // run 时对指定 name 抛非 bind 错（测统一回滚）。
   failRunFor = new Set<string>()
+  // get（inspect）时对指定 name 抛错（测 daemon 故障时 list 降级保留记账状态）。
+  failGetFor = new Set<string>()
   // execSync 调用记录（断言 delete 的 chown）。
   execCalls: { name: string; cmd: string[] }[] = []
 
@@ -54,7 +56,13 @@ export class FakeRuntime implements ContainerRuntime {
   }
 
   async get(name: string): Promise<ContainerInfo | null> {
+    if (this.failGetFor.has(name)) throw new Error(`simulated daemon unreachable for ${name}`)
     return this.containers.get(name)?.info ?? null
+  }
+
+  async start(name: string): Promise<void> {
+    const r = this.containers.get(name)
+    if (r) r.info = { ...r.info, running: true, status: 'running' }
   }
 
   async stop(name: string): Promise<void> {

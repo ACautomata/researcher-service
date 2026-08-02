@@ -96,9 +96,31 @@ export class DockerRuntime implements ContainerRuntime {
   }
 
   async run(spec: ContainerSpec): Promise<string> {
+    await this.ensureImage(spec.image)
     const container = await this.client().createContainer(this.buildRunOptions(spec))
     await container.start()
     return container.id
+  }
+
+  // create 前确保镜像已就位（Codex 第四轮③[P1]）：Engine createContainer 对本地缺失的镜像返回
+  // image-not-found——干净 host / OPENCLAW_IMAGE 换成未缓存 tag 时 create 必 error。CI 此前靠手动
+  // docker pull 掩盖。这里仅本地缺失时拉取（getImage().inspect() 404 → 拉；已缓存 → 跳过，避免
+  // 每次 create 都重复 pull）。pull 经 modem.followProgress 消费进度流（不消费则流不 flowing、
+  // pull 永不完成）。拉取失败向上抛 → createComplete 标 error 行（可重试）。
+  private async ensureImage(image: string): Promise<void> {
+    try {
+      await this.client().getImage(image).inspect()
+      return
+    } catch (e) {
+      if ((e as { statusCode?: number }).statusCode !== 404) throw e // daemon 故障等真错不吞
+    }
+    const stream = await this.client().pull(image)
+    await new Promise<void>((resolve, reject) => {
+      const modem = (
+        this.client() as Docker & { modem: { followProgress(s: NodeJS.ReadableStream, f: (err: Error | null) => void): void } }
+      ).modem
+      modem.followProgress(stream, (err) => (err ? reject(err) : resolve()))
+    })
   }
 
   async listFleet(): Promise<ContainerInfo[]> {
@@ -139,6 +161,16 @@ export class DockerRuntime implements ContainerRuntime {
       return this.inspectToInfo(data)
     } catch (e) {
       if ((e as { statusCode?: number }).statusCode === 404) return null
+      throw e
+    }
+  }
+
+  // 启动容器（删除前置修复 chown 用；已 running 幂等）。NotFound 幂等。
+  async start(name: string): Promise<void> {
+    try {
+      await this.client().getContainer(containerName(name)).start()
+    } catch (e) {
+      if ((e as { statusCode?: number }).statusCode === 404) return
       throw e
     }
   }

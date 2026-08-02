@@ -43,6 +43,8 @@ export interface ContainerRuntime {
   hostPublishedPorts(): Promise<Set<number>>
   // 取单个容器；不存在 → null
   get(name: string): Promise<ContainerInfo | null>
+  // 启动容器（删除前置修复 chown 用——容器被外部停止后 docker 无法在 stopped 容器内 exec，须先 start）
+  start(name: string): Promise<void>
   // 停容器（NotFound 幂等）
   stop(name: string): Promise<void>
   // 删容器（v+force；NotFound 幂等）

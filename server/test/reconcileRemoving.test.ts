@@ -7,6 +7,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { setupTestApp, type TestContext } from './setup'
 import { makeFleetTest, type FleetTestContext } from './fleetTestUtils'
 import { seedUser } from './helpers'
+import { FleetReadModel } from '../src/containers/readModel'
 
 describe('reconcileRemoving 对账 (Codex C6)', () => {
   let ctx: TestContext
@@ -61,5 +62,45 @@ describe('reconcileRemoving 对账 (Codex C6)', () => {
     }
     expect(row).toBeNull()
     expect(fl.runtime.containers.has('c6-stuck')).toBe(false)
+  })
+
+  // ---- requeue 代系绑定（Codex 第四轮①[P1]）----
+  // reconcileRemoving 对「removing 行 + runtime 容器仍驻留」每轮 list 都 detach 一个 submitDelete，
+  // 无去重 → 多个 duplicate job 在 BullMQ 排队。第一个 job 删掉旧行后，用户 recreate 同名，后续 stale
+  // job 到达时 FleetCommand.delete() 用 name（而非行 ID）解析目标 → 误删新行/新容器。
+  // 修法：requeue 携带旧行 ID（expectedId），delete 执行时校验代系，不匹配则跳过清理。
+
+  it('requeueDelete 携带被观察行 ID（供 delete 校验代系）', async () => {
+    const fl1 = makeFleetTest(ctx.prisma)
+    await fl1.orch.create('r4-gen', ownerId)
+    const oldRow = await ctx.prisma.container.findUnique({ where: { name: 'r4-gen' } })
+    expect(oldRow).not.toBeNull()
+    await ctx.prisma.container.update({ where: { name: 'r4-gen' }, data: { status: 'removing' } })
+    // 注入捕获回调：list 触发 requeue 时应携带旧行 ID（不自动执行，模拟 job 排队）。
+    const requeued: Array<{ name: string; rowId?: string }> = []
+    const read = new FleetReadModel(fl1.deps, ctx.prisma, async (name, rowId) => {
+      requeued.push({ name, rowId })
+    })
+    await read.list({ ownerId })
+    expect(requeued.length).toBe(1)
+    expect(requeued[0].name).toBe('r4-gen')
+    expect(requeued[0].rowId).toBe(oldRow!.id) // 携带旧行 ID，供 delete 校验代系
+  })
+
+  it('stale delete（携带旧行 ID）在 recreate 后执行 → 跳过清理、不误删新行', async () => {
+    const fl1 = makeFleetTest(ctx.prisma)
+    await fl1.orch.create('r4-stale', ownerId)
+    const oldRow = await ctx.prisma.container.findUnique({ where: { name: 'r4-stale' } })
+    expect(oldRow).not.toBeNull()
+    // 模拟：第一个 duplicate job 已完成全量清理（容器+目录+行）；用户 recreate 同名 → 新行 + 新容器。
+    await fl1.orch.delete('r4-stale')
+    await fl1.orch.create('r4-stale', ownerId)
+    // stale job 携带旧行 ID 执行 → 代系不匹配 → 跳过清理，返回 not-found。
+    const outcome = await fl1.orch.submitDelete('r4-stale', oldRow!.id)
+    expect(outcome).toBe('not-found')
+    // 新行 + 新容器保留（修前：新行被删 + 新容器被 stop/remove）。
+    const row = await ctx.prisma.container.findUnique({ where: { name: 'r4-stale' } })
+    expect(row?.status).toBe('running')
+    expect(fl1.runtime.containers.has('r4-stale')).toBe(true)
   })
 })

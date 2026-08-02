@@ -29,9 +29,11 @@ export class FleetReadModel {
   constructor(
     private readonly deps: FleetDeps,
     private readonly prisma: PrismaClient,
-    // 重新入队 delete 回调（Codex C6）：reconcileRemoving 对「removing 行 + runtime 仍驻留容器」
+    // 重新入队 delete 回调（Codex C6 + 第四轮①[P1]）：reconcileRemoving 对「removing 行 + runtime 仍驻留容器」
     // 经此回调重新入队 delete 继续清理。Orchestrator 注入 cmd.submitDelete；不直接依赖 FleetCommand。
-    private readonly requeueDelete?: (name: string) => Promise<void>,
+    // rowId = 被观察 removing 行的 ID（代系绑定，Codex 第四轮①）：requeue 携带旧行 ID，delete 执行时校验
+    // 目标行仍是该代系——stale job 在用户 recreate 同名后到达时跳过清理，不误删新行/新容器。
+    private readonly requeueDelete?: (name: string, rowId: string) => Promise<void>,
   ) {}
 
   private item(inst: Container, status: string, health: string): ContainerSummary {
@@ -52,11 +54,13 @@ export class FleetReadModel {
     if (inst.status === 'removing') return this.item(inst, 'removing', HEALTH_REMOVING)
     if (inst.status === 'error') return this.item(inst, 'error', HEALTH_STOPPED)
     // runtime.get 可能因 daemon 不可用抛异常——单项抖动降级透传，不隐藏其它正常容器。
+    // fallback 保留 DB 记账状态（Codex 第四轮⑤[P2]）：修前硬编码 status:'running'，把「已对账/存储
+    // 为 stopped」的行在 daemon 故障期间返回成 running+health:stopped 矛盾组合，客户端误判为活动。
     let info
     try {
       info = await this.deps.runtime.get(inst.name)
     } catch {
-      return this.item(inst, 'running', HEALTH_STOPPED)
+      return this.item(inst, inst.status, HEALTH_STOPPED)
     }
     const running = Boolean(info && info.running)
     if (!running) return this.item(inst, 'stopped', HEALTH_STOPPED)
@@ -131,7 +135,9 @@ export class FleetReadModel {
         // 只入队不等待（Codex 第三轮 ①[P1]）：requeueDelete 会 await submitDelete，后者排在在飞
         // delete 之后、settle 于清理完成后——list await 它 = 轮询请求阻塞在被观察的删除上
         // （Redis 不可达更糟，永挂）。这里 detach，list 立即返回 removing 状态。
-        void this.requeueDelete?.(inst.name)
+        // 携带 inst.id（代系绑定，Codex 第四轮①[P1]）：stale duplicate job 在 recreate 后到达时
+        // delete 校验目标行代系，不匹配即跳过——不误删用户重建的新行/新容器。
+        void this.requeueDelete?.(inst.name, inst.id)
         survivors.push(inst)
       } else {
         // 容器已不在 → 行残留（删行没跑到）→ 收尾：先清实例目录再删行。

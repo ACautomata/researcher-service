@@ -110,6 +110,9 @@ npm run prisma:validate        # schema 合法性
 - **C1 强制改密**：服务端拦截（`mustChangePasswordGate`），放行 me/logout/password-change，余者 mustChange=true → `10005`。
 - **防探测**：`/users` 非 admin、目标不存在 → 同码 `10041` 同体；容器「不存在 vs 越权」→ 同码 `20040` 同体，区分仅进服务端日志。
 - **凭证零落盘**：响应体不含 passwordHash / refresh 明文 / 容器 token / private_key / device_token。
+- **凭证加密（Codex C1）**：gateway token 落盘为 AES-256-GCM 密文（`CREDENTIAL_ENCRYPTION_KEYS`，
+  逗号分隔 base64(32 字节)，首个 = active 加密、余者仅解密支持轮换）。**生产必填**（缺失启动
+  fail-fast），生成示例 `openssl rand -base64 32`；dev/test 未设置时回退到固定密钥（勿用于生产）。
 - **容器隔离（#312）**：user 仅自己容器、admin 跨用户全部；归属前置 `getInstanceForUser` 单点（admin 全放行 / user 仅本人）。
 - **容器并发（#313）**：进程内 `NameLeaseMap` 互斥（不依赖 Redis）防双创建/双删除；create/delete 按 name 串行入队；端口入队前分配（SQLite 唯一约束仲裁、四来源已用集）；delete 异步 + 取消标志（provisioning 检查点检出统一回滚）；BullMQ(Redis) worker 并发默认 2 + stalled-job 崩溃重跑。
 - **容器补偿**：ERROR 行保留 / bind 端口冲突就地换端口重试（预算=池大小）/ 清理失败标 REMOVING 可重试（20045）/ 端口池耗尽 90004。

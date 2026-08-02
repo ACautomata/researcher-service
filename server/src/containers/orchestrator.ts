@@ -21,11 +21,11 @@ export class Orchestrator {
     cancel: CancelRegistry = new CancelRegistry(),
   ) {
     this.cmd = new FleetCommand(deps, prisma, cancel)
-    // requeueDelete 回调（Codex C6）：reconcileRemoving 对「removing 行 + runtime 仍驻留容器」经此
-    // 重新入队 delete 继续清理。箭头延迟求值 this.cmd（此时已构造）；submitDelete 串行幂等，
-    // catch 防 list 读路径抛错。
-    this.read = new FleetReadModel(deps, prisma, async (name) => {
-      await this.cmd.submitDelete(name).catch(() => {})
+    // requeueDelete 回调（Codex C6 + 第四轮①[P1]）：reconcileRemoving 对「removing 行 + runtime 仍驻留
+    // 容器」经此重新入队 delete 继续清理。箭头延迟求值 this.cmd（此时已构造）；submitDelete 串行幂等，
+    // 携带被观察行 ID（代系绑定）防 stale job 误删 recreate 的新行；catch 防 list 读路径抛错。
+    this.read = new FleetReadModel(deps, prisma, async (name, rowId) => {
+      await this.cmd.submitDelete(name, rowId).catch(() => {})
     })
   }
 
@@ -45,11 +45,11 @@ export class Orchestrator {
   deleteReserve(name: string): Promise<'enqueued'> {
     return this.cmd.deleteReserve(name)
   }
-  submitDelete(name: string): Promise<DeleteOutcome> {
-    return this.cmd.submitDelete(name)
+  submitDelete(name: string, expectedId?: string): Promise<DeleteOutcome> {
+    return this.cmd.submitDelete(name, expectedId)
   }
-  delete(name: string): Promise<DeleteOutcome> {
-    return this.cmd.delete(name)
+  delete(name: string, expectedId?: string): Promise<DeleteOutcome> {
+    return this.cmd.delete(name, expectedId)
   }
 
   // 读侧

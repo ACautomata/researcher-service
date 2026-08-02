@@ -20,7 +20,5 @@ export const GATEWAY_BIND = 'lan'
 export const GATEWAY_TOKEN_PLACEHOLDER = '${GATEWAY_TOKEN}'
 
 // --- 编排状态机协议常量 ---
-// port 并发冲突最大重试次数（DB 唯一约束仲裁下，port 池充足覆盖极端并发）
-export const MAX_PORT_RETRIES = 8
 // gateway_token 熵（GATEWAY_TOKEN）：32 字节 = 256 bit
 export const TOKEN_URLSAFE_BYTES = 32

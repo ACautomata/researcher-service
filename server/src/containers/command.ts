@@ -13,7 +13,7 @@ import { randomBytes } from 'node:crypto'
 import { access, mkdir, readFile } from 'node:fs/promises'
 import path from 'node:path'
 import type { PrismaClient, Container } from '../generated/prisma/client'
-import { TOKEN_URLSAFE_BYTES, MAX_PORT_RETRIES, HOME_BIND } from './constants'
+import { TOKEN_URLSAFE_BYTES, HOME_BIND } from './constants'
 import { CODE } from '../codes'
 import { fail } from '../envelope'
 import {
@@ -27,7 +27,7 @@ import {
   QuotaExceeded,
 } from './errors'
 import type { FleetDeps } from './deps'
-import type { ContainerSpec } from './runtime'
+import type { ContainerInfo, ContainerSpec } from './runtime'
 import { ConfigRenderer } from './configRenderer'
 
 // 识别 docker 发布端口时的宿主 bind 冲突异常（归一化匹配两种来源措辞）：
@@ -151,7 +151,12 @@ export class FleetCommand {
     // gateway token 真值不落盘（AGENTS.md §5.2 / Codex C1）：DB 存 AES-GCM 密文，
     // createComplete 用时 decrypt 供 spec.gatewayToken（docker env 注入明文）。
     const token = this.deps.crypto.encrypt(randomBytes(TOKEN_URLSAFE_BYTES).toString('base64url'))
-    for (let attempt = 0; attempt < MAX_PORT_RETRIES; attempt += 1) {
+    // 重试预算 = 端口池候选数（Codex 第四轮⑥[P2]）而非固定 MAX_PORT_RETRIES：并发不同 owner 都选中
+    // 同一最小空闲端口时，SQLite 唯一约束只放行一个，其余须重试下一候选——固定 8 次预算在并发 ≥9
+    // 时耗尽（第 9 个请求 8 次全撞已分配端口 → 误报 90004 池耗尽），而池实际大量空闲。候选数上限
+    // 保证每个候选端口至多尝试一次（DB 已用集每次重算），并发再多也不会假耗尽。
+    const poolSize = this.deps.config.portEnd - this.deps.config.portStart + 1
+    for (let attempt = 0; attempt < poolSize; attempt += 1) {
       const port = this.deps.allocator.nextFree(await this.usedPorts(extraUsed))
       try {
         return await this.prisma.container.create({
@@ -214,7 +219,7 @@ export class FleetCommand {
     const instanceDir = path.join(this.deps.config.root, 'instances', name)
     const home = path.join(instanceDir, 'home')
     const configPath = path.join(instanceDir, 'openclaw.json')
-    // bind 冲突重试预算 = 端口池候选数（非 MAX_PORT_RETRIES——那是 DB 并发冲突预算）。
+    // bind 冲突重试预算 = 端口池候选数（非 reserveRow 的 DB 并发冲突预算——那是另一处独立预算）。
     const poolSize = this.deps.config.portEnd - this.deps.config.portStart + 1
     const learnedConflicts = new Set<number>()
     let directoryCreated = false
@@ -388,12 +393,27 @@ export class FleetCommand {
   }
 
   // stop + remove 已验证归属的容器。chown 前置（容器以 root 跑、bind-mount home 属主 root，
-  // host 非 root 删会权限错）。best-effort——stop/remove 失败不阻断目录清理（容器停删失败时
-  // 目录清理会抛 InstanceCleanupError 保留 REMOVING 行，可重试）。
-  private async stopAndRemove(name: string): Promise<void> {
-    await this.deps.runtime
-      .execSync(name, ['chown', '-R', String(process.getuid?.() ?? 0), HOME_BIND])
-      .catch(() => {})
+  // host 非 root 删会权限错）。
+  // 按 live.running 分叉（Codex 第四轮②[P2]）：
+  // - 容器在跑：chown best-effort。ro 挂载的 openclaw.json 会让 chown -R 报错（Read-only file system，
+  //   属预期——该文件宿主侧属控制面 uid、可删）；其余 home 内容已 chown 至控制面 uid，目录清理照常成功。
+  // - 容器已停（外部 stop / exited）：docker 无法在 stopped 容器内 exec chown，但容器 root 进程可能
+  //   已在 home 留 root 属主文件——直接 remove 会让非 root 控制面永久删不掉目录、行卡 REMOVING 重试
+  //   无解。删除前置修复 root 属主文件的唯一机会 = start 恢复容器 → chown → 再 stop；修复失败 →
+  //   抛 InstanceCleanupError 保留容器 + REMOVING 行（可重试），不 remove（保留下次修复机会）。
+  private async stopAndRemove(name: string, live: ContainerInfo): Promise<void> {
+    if (live.running) {
+      await this.deps.runtime
+        .execSync(name, ['chown', '-R', String(process.getuid?.() ?? 0), HOME_BIND])
+        .catch(() => {})
+    } else {
+      try {
+        await this.deps.runtime.start(name)
+        await this.deps.runtime.execSync(name, ['chown', '-R', String(process.getuid?.() ?? 0), HOME_BIND])
+      } catch {
+        throw new InstanceCleanupError(name, 'chown root-owned home failed before container removal')
+      }
+    }
     await this.deps.runtime.stop(name)
     await this.deps.runtime.remove(name)
   }
@@ -418,23 +438,33 @@ export class FleetCommand {
   }
 
   // delete 后台执行（按 name 串行——排在同 name 在飞 create 之后）。完成时 settle 供测试 await。
-  submitDelete(name: string): Promise<DeleteOutcome> {
-    return this.deps.serializer.enqueue(name, async () => this.delete0(name))
+  // expectedId（Codex 第四轮①[P1]，代系绑定）：reconcileRemoving 的 requeueDelete 携带被观察 removing
+  // 行的 ID。stale duplicate job 在用户 recreate 同名后到达时，delete 校验目标行代系，不匹配即跳过——
+  // 否则 job 用 name 解析到新行、误删用户重建的容器/目录/数据。
+  submitDelete(name: string, expectedId?: string): Promise<DeleteOutcome> {
+    return this.deps.serializer.enqueue(name, async () => this.delete0(name, expectedId))
   }
 
   // 经队列跑 delete 本体并取回结果（inline 队列直接返回；BullMQ 经共享 Promise）。
-  private async delete0(name: string): Promise<DeleteOutcome> {
+  private async delete0(name: string, expectedId?: string): Promise<DeleteOutcome> {
     let outcome: DeleteOutcome = 'removed'
     await this.deps.queue.submit(async () => {
-      outcome = await this.delete(name)
+      outcome = await this.delete(name, expectedId)
     })
     return outcome
   }
 
   // delete 本体：容器 + 连数据删。home 清理失败不吞——保留行 + 标 REMOVING + raise（可重试）。
-  async delete(name: string): Promise<DeleteOutcome> {
+  async delete(name: string, expectedId?: string): Promise<DeleteOutcome> {
     const inst = await this.prisma.container.findUnique({ where: { name } })
     if (!inst) {
+      this.cancel.clear(name)
+      return 'not-found'
+    }
+    // 代系防护（Codex 第四轮①[P1]）：requeue 携带的 expectedId（被观察 removing 行 ID）与当前行不符
+    // → 目标已被 recreate 换代。跳过全部清理（容器/目录/行），只清取消标志——stale duplicate job
+    // 不误删用户重建的新行。直接 DELETE（无 expectedId）不受影响，按当前行正常清理。
+    if (expectedId !== undefined && inst.id !== expectedId) {
       this.cancel.clear(name)
       return 'not-found'
     }
@@ -449,11 +479,11 @@ export class FleetCommand {
           .update({ where: { id: inst.id }, data: { containerId: '' } })
           .catch(() => {})
       } else {
-        await this.stopAndRemove(name)
+        await this.stopAndRemove(name, live)
       }
     } else if (live && live.instanceName === inst.name) {
       // 无 containerId 但 runtime 实况容器 instance label 匹配本行 → 视为本行拥有，清理。
-      await this.stopAndRemove(name)
+      await this.stopAndRemove(name, live)
     }
     // 优先由 DB home_dir 派生 instance_dir（创建时固化的绝对路径）；防御占位/篡改回退当前 root。
     const recorded = path.dirname(inst.homeDir)

@@ -247,4 +247,98 @@ describe('orchestrator (接缝 #5 编排器 Port)', () => {
     // DB 仅 1 行属该 owner（不超配额）
     expect(await ctx.prisma.container.count({ where: { ownerId: qOwner.id } })).toBe(1)
   })
+
+  // ---- chown 停止容器处理（Codex 第四轮②[P2]）----
+  // stopAndRemove 按 live.running 分叉：
+  // - running 容器：chown best-effort（ro 挂载的 openclaw.json 让 chown -R 报错属预期，目录仍可删）。
+  // - stopped 容器：docker 无法在 stopped 容器内 exec chown，但 root 进程可能已在 home 留 root 属主
+  //   文件；直接 remove 让非 root 控制面永久删不掉目录、行卡 REMOVING 无解。修法：start 恢复 → chown
+  //   修复 → 再 stop；修复失败 → 抛 InstanceCleanupError 保留容器 + REMOVING 行（不 remove 保留机会）。
+
+  it('chown: running 容器 chown 失败（ro 文件报错属预期）→ best-effort 吞掉、正常清理', async () => {
+    const fl2 = makeFleetTest(ctx.prisma, { config: { portStart: 19600, portEnd: 19610 } })
+    // execSync 一律抛错（模拟 running 容器内 chown -R 撞 ro openclaw.json）。
+    fl2.runtime.execSync = async () => {
+      throw new Error('changing ownership: Read-only file system')
+    }
+    await fl2.orch.create('r4-ro', ownerId)
+    await fl2.orch.delete('r4-ro')
+    // running 分叉 best-effort：chown 失败不阻断，stop/remove/清目录/删行照常完成。
+    expect(fl2.runtime.containers.has('r4-ro')).toBe(false)
+    expect(await ctx.prisma.container.findUnique({ where: { name: 'r4-ro' } })).toBeNull()
+  })
+
+  it('chown: 容器被外部停止 → start 恢复 → chown 修复 → 正常清理（root 属主文件可删）', async () => {
+    const fl2 = makeFleetTest(ctx.prisma, { config: { portStart: 19600, portEnd: 19610 } })
+    await fl2.orch.create('r4-extstop', ownerId)
+    // stopped 分支：start 恢复容器后执行一次 chown（修复 root 属主文件）→ 成功。
+    const chowns: string[] = []
+    fl2.runtime.execSync = async (name: string, cmd: string[]) => {
+      if (cmd[0] === 'chown') chowns.push(name)
+      fl2.runtime.execCalls.push({ name, cmd })
+    }
+    await fl2.runtime.stop('r4-extstop') // 容器已停（外部）
+    await fl2.orch.delete('r4-extstop')
+    // stopped 分叉：start 恢复 → chown 修复 → stop+remove+清目录+删行。
+    expect(chowns).toEqual(['r4-extstop']) // chown 在 start 后执行一次（修前：stopped 容器不修复属主）
+    expect(fl2.runtime.containers.has('r4-extstop')).toBe(false)
+    expect(await ctx.prisma.container.findUnique({ where: { name: 'r4-extstop' } })).toBeNull()
+  })
+
+  it('chown: 容器已停且 start 也无法修复 → 抛错保留容器（不 remove 不留 root 目录孤儿）', async () => {
+    const fl2 = makeFleetTest(ctx.prisma, { config: { portStart: 19600, portEnd: 19610 } })
+    // execSync 对任意 name 都抛（start 恢复后重试仍失败）→ stopAndRemove 整体抛 InstanceCleanupError。
+    fl2.runtime.execSync = async () => {
+      throw new Error('daemon unreachable')
+    }
+    await fl2.orch.create('r4-nofix', ownerId)
+    await fl2.runtime.stop('r4-nofix')
+    // 真实流程：deleteReserve 标 removing → submitDelete 执行 delete → start+chown 修复失败显式抛错。
+    await fl2.orch.deleteReserve('r4-nofix')
+    await expect(fl2.orch.submitDelete('r4-nofix')).rejects.toBeInstanceOf(InstanceCleanupError)
+    // 容器保留（下次可重试修复）；行留 removing。
+    expect(fl2.runtime.containers.has('r4-nofix')).toBe(true)
+    expect((await ctx.prisma.container.findUnique({ where: { name: 'r4-nofix' } }))?.status).toBe('removing')
+  })
+
+  // ---- inspect 失败降级保留记账状态（Codex 第四轮⑤[P2]）----
+  // buildItem 对 runtime.get 抛错（daemon 瞬时故障）的降级返回硬编码 status:'running'，把「已对账/
+  // 存储为 stopped」的行在故障期间返回成 running+health:stopped 矛盾组合，客户端误判活动。修法：保留
+  // DB 记账状态 inst.status，health 保持 stopped。
+
+  it('list: daemon 故障时降级保留记账状态（stopped 行不硬编码 running）', async () => {
+    const fl5 = makeFleetTest(ctx.prisma, { config: { portStart: 19620, portEnd: 19630 } })
+    await fl5.orch.create('r4-insp', ownerId)
+    // 模拟「已对账/存储为 stopped」的行（create 后行记账 running，此处改为 stopped 表示已识别为停止）。
+    await ctx.prisma.container.update({ where: { name: 'r4-insp' }, data: { status: 'stopped' } })
+    await fl5.runtime.stop('r4-insp')
+    fl5.runtime.failGetFor.add('r4-insp') // daemon 瞬时故障 → runtime.get 抛错 → 走降级分支
+    const items = await fl5.orch.list({ ownerId })
+    const item = items.find((i) => i.name === 'r4-insp')
+    expect(item).toBeDefined()
+    expect(item!.status).toBe('stopped') // 修前：硬编码 'running'（矛盾 running+stopped）
+    expect(item!.health).toBe('stopped')
+  })
+
+  // ---- 端口预留重试预算 = 池候选数（Codex 第四轮⑥[P2]）----
+  // reserveRow 固定 MAX_PORT_RETRIES=8 次重试：并发不同 owner 都选中同一最小空闲端口时，SQLite 唯一
+  // 约束只放行一个，其余须重试下一候选——固定 8 次在并发 ≥9 时耗尽（第 9 个请求 8 次全撞已分配端口
+  // → 误报 90004 池耗尽），而池实际大量空闲。修法：预算 = 端口池候选数（每候选至多尝试一次）。
+
+  it('端口预留：并发 10 不同名（池 16 候选）全部成功，不误报池耗尽', async () => {
+    const pfl = makeFleetTest(ctx.prisma, { config: { portStart: 19500, portEnd: 19515 } })
+    const pOwner = await seedUser(ctx.prisma, 'r4ports', 'pw-r4ports-secure')
+    // 并发 10 个不同名 reserve：全部撞同一最小空闲端口（19500）→ SQLite 仲裁 + 重试下一候选。
+    // 修前固定 8 次重试：至少 2 个在撞满 8 个已占端口后抛 PortAllocationError（90004）；
+    // 修后预算 16 → 10 个全部拿到不同端口成功。
+    const results = await Promise.allSettled(
+      Array.from({ length: 10 }, (_, i) => pfl.orch.createReserve(`r4p-${i}`, pOwner.id)),
+    )
+    const rejected = results.filter((r) => r.status === 'rejected')
+    expect(rejected).toHaveLength(0)
+    const rows = await ctx.prisma.container.findMany({ where: { ownerId: pOwner.id } })
+    expect(rows).toHaveLength(10)
+    // 端口互不重复（各得一个候选）
+    expect(new Set(rows.map((r) => r.port)).size).toBe(10)
+  })
 })
