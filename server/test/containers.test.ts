@@ -96,6 +96,22 @@ describe('containers 隔离（#312）', () => {
     expect(aNames).toContain('a-c1') // admin 见全部
   })
 
+  it('codex 三轮 P1：GET / health 经 runtime 对账（容器不在 → stopped 非 healthy）', async () => {
+    const u = await login(request, 'user1', 'pw-user1-secure')
+    await request.post('/api/v1/containers').set(bearer(u.access)).send({ name: 'u-health' })
+    await provision('u-health')
+    // 容器在 fake runtime 里 running → healthy
+    let list = await request.get('/api/v1/containers').set(bearer(u.access))
+    let item = (list.body.data as Record<string, unknown>[]).find((c) => c.name === 'u-health')!
+    expect(item.health).toBe('healthy')
+    // 模拟容器被外部删除（fake runtime 里移除）→ health 应变 stopped（DB 仍 running）
+    runtime.containers.delete('u-health')
+    list = await request.get('/api/v1/containers').set(bearer(u.access))
+    item = (list.body.data as Record<string, unknown>[]).find((c) => c.name === 'u-health')!
+    expect(item.status).toBe('running') // DB 编排态不变
+    expect(item.health).toBe('stopped') // runtime 对账：容器不在
+  })
+
   it('越权访问他人容器 → 20040 且与「不存在」逐字节同码', async () => {
     const u = await login(request, 'user1', 'pw-user1-secure')
     // admin 建的 a-c1 不属于 user1 → user1 删 → 20040

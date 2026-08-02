@@ -37,15 +37,29 @@ async function getInstance(
   return row
 }
 
-// ContainerSummary（契约 §2.3）：pairing 批量预取 + health 由 status 派生
+// ContainerSummary（契约 §2.3）：pairing 批量预取 + health 经 runtime 对账（codex 三轮 P1）。
+// runtime 状态（容器是否真在跑）来自 orchestrator.runtimeInfo——DB status 只记编排态。
 function toSummary(
   row: Container & { pairing?: { status: string } | null },
+  runtimeRunning: boolean | null, // null = daemon 不可达（降级，不误报）
 ): Record<string, unknown> {
+  // health：running + 容器真在跑 → healthy；running 但容器不在 → stopped（旧 Django read_model 语义）；
+  // daemon 不可达（null）→ 保持 DB status（不臆测）
+  let health: string
+  if (runtimeRunning === null) {
+    health = row.status === 'running' ? 'unknown' : row.status
+  } else if (runtimeRunning) {
+    health = 'healthy'
+  } else if (row.status === 'running') {
+    health = 'stopped' // DB 记 running 但容器已不在（崩溃/手动删）
+  } else {
+    health = row.status === 'creating' ? 'pending' : row.status
+  }
   return {
     name: row.name,
     port: row.port,
     status: row.status,
-    health: row.status === 'running' ? 'healthy' : row.status === 'creating' ? 'pending' : row.status,
+    health,
     image: row.image,
     container_id: row.containerId,
     created_at: row.createdAt,
@@ -70,7 +84,15 @@ export function createContainersRouter(deps: ContainerRouterDeps): Router {
       orderBy: { createdAt: 'asc' },
       include: { pairing: { select: { status: true } } },
     })
-    ok(res, rows.map(toSummary))
+    // codex 三轮 P1（探活）：每容器对账 runtime（DB status 只记编排态，health 须看容器真在跑）。
+    // daemon 抖动（runtimeInfo 返 null）→ 降级保持 DB status，不 500。
+    const summaries = await Promise.all(
+      rows.map(async (row) => {
+        const runtimeRunning = await orchestrator.runtimeInfo(row.name)
+        return toSummary(row, runtimeRunning?.running ?? null)
+      }),
+    )
+    ok(res, summaries)
   })
 
   // POST / —— 同步返 creating 快照（#313：端口入队前分配 + 入队串行）
@@ -82,7 +104,7 @@ export function createContainersRouter(deps: ContainerRouterDeps): Router {
       where: { id: row.id },
       include: { pairing: { select: { status: true } } },
     })
-    ok(res, full ? toSummary(full) : toSummary(row))
+    ok(res, full ? toSummary(full, false) : toSummary(row, false)) // creating 态：容器未起 → not running
   })
 
   // DELETE /<name> —— 异步：返信封立即，list 轮询观察 removing（#313）

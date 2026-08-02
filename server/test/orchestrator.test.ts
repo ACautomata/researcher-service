@@ -322,4 +322,38 @@ describe('同名列串行化 + 租约', () => {
     expect(orch['leases'].isHeld('ser')).toBe(false)
     await orch.createReserve('ser2', adminId, 5)
   })
+
+  it('codex 三轮 P1 #1：租约被持有 → provisionCreate 抛 LeaseContention（可重试，非 no-op）', async () => {
+    const orch = makeOrch(makeCfg())
+    await orch.createReserve('cont', adminId, 5)
+    // 模拟另一 worker 持有 DB lease（崩溃后在飞）：行 creating + lease 未过期
+    await ctx.prisma.container.update({
+      where: { name: 'cont' },
+      data: { leaseExpiresAt: new Date(Date.now() + 60_000) },
+    })
+    // 重指派 worker 抢占失败 → 抛 LeaseContentionError（BullMQ 据此重试，不移除 job）
+    await expect(orch.provisionCreate(queue.lastCreate('cont').name, queue.lastCreate('cont').configText))
+      .rejects.toThrow(/lease held/)
+    // 行仍在 creating（未被删/未误收敛）
+    const row = await ctx.prisma.container.findUnique({ where: { name: 'cont' } })
+    expect(row!.status).toBe('creating')
+    // lease 过期后重试可抢占成功（清空 lease 模拟过期）
+    await ctx.prisma.container.update({ where: { name: 'cont' }, data: { leaseExpiresAt: null } })
+    await orch.provisionCreate(queue.lastCreate('cont').name, queue.lastCreate('cont').configText)
+    expect((await ctx.prisma.container.findUnique({ where: { name: 'cont' } }))!.status).toBe('running')
+  })
+
+  it('codex 三轮 P1 #3：removing + lease 过期 → provisionDelete 可回收（不永久卡）', async () => {
+    const orch = makeOrch(makeCfg())
+    await orch.createReserve('recl', adminId, 3)
+    await orch.provisionCreate(queue.lastCreate('recl').name, queue.lastCreate('recl').configText)
+    // 模拟上次 delete 失败：行 removing + lease 已过期（>5min TTL）
+    await ctx.prisma.container.update({
+      where: { name: 'recl' },
+      data: { status: 'removing', leaseExpiresAt: new Date(Date.now() - 60_000) },
+    })
+    // 重试 delete → 可回收（removing + lease 过期 = 可 reclaim）
+    await orch.provisionDelete('recl')
+    expect(await ctx.prisma.container.findUnique({ where: { name: 'recl' } })).toBeNull()
+  })
 })

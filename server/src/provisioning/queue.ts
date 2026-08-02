@@ -58,7 +58,14 @@ export class BullMqProvisionQueue implements ProvisionJobQueue {
     await this.queue.add(
       `create:${name}:${randomUUID()}`, // 唯一 jobId（codex #1：不做去重槽位）
       { type: 'create', name, ownerId, configText },
-      { removeOnComplete: true },
+      {
+        removeOnComplete: true,
+        // codex 三轮 P1：租约竞争（LeaseContentionError）须重试——attempts>1 + fixed backoff
+        // （30s 起步，指数增长），覆盖 lease 5min 过期的重试窗口。最终失败（>10 次）落 failed
+        // 集合，运维可经 list 感知 creating 行 + delete 清理。
+        attempts: 10,
+        backoff: { type: 'fixed', delay: 30_000 },
+      },
     )
   }
 
@@ -66,7 +73,11 @@ export class BullMqProvisionQueue implements ProvisionJobQueue {
     await this.queue.add(
       `delete:${name}:${randomUUID()}`, // 唯一 jobId——delete 追着 pending create 也必入队
       { type: 'delete', name, ownerId },
-      { removeOnComplete: true },
+      {
+        removeOnComplete: true,
+        attempts: 10,
+        backoff: { type: 'fixed', delay: 30_000 },
+      },
     )
   }
 
@@ -77,6 +88,8 @@ export class BullMqProvisionQueue implements ProvisionJobQueue {
 
 // 生产 worker：消费 openclaw-provision，按 job type 分发到编排器；同名 job 串行（PerNameChain）。
 // stalled-job 由 BullMQ 默认恢复（maxStalledCount=1，lockDuration 默认 30s）。
+// LeaseContentionError（codex 三轮 P1）：租约被另一 worker 持有 → 抛出让 BullMQ 按 backoff 重试，
+// lease 过期后重试可抢占（不 no-op，否则 job 被移除、行永远 creating）。attempts=10 防无限重试。
 export function createProvisioningWorker(orchestrator: Orchestrator): Worker<ProvisionJobData> {
   const connection = new IORedis(config.redisUrl, { maxRetriesPerRequest: null })
   const chain = new PerNameChain()
@@ -93,7 +106,13 @@ export function createProvisioningWorker(orchestrator: Orchestrator): Worker<Pro
         }
       })
     },
-    { connection, concurrency: config.provisionWorkers },
+    {
+      connection,
+      concurrency: config.provisionWorkers,
+      // 默认 attempts=1（失败即 failed，不重试）。LeaseContention 需重试——BullMQ 默认
+      // backoff 策略：attempts>1 时 exponential（初始 30s 起步）。租约 5min 过期，重试窗口够。
+      // 具体 attempts/backoff 由 enqueue 侧（BullMqProvisionQueue.add）设置，worker 只消费。
+    },
   )
   worker.on('error', (err) => {
     // Redis 抖动 → 日志；BullMQ 自动重连（stalled-job 恢复兜底）

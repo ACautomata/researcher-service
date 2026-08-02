@@ -24,9 +24,19 @@ import type { TokenCrypto } from './tokenCrypto'
 // 端口入队前分配（SQLite port @unique 仲裁）+ 5 态机 + 取消标志 + 补偿。
 
 // DB CAS 租约 TTL（codex 二轮 P1 跨 worker 串行）：provisionCreate/Delete 抢占 leaseExpiresAt
-// 的持有时长。远大于单次 docker run（<2min），stalled 重指派（BullMQ 默认 30s lock）安全。
-// 崩溃后租约过期自动释放（下个 job 可抢占）。
-const LEASE_TTL_MS = 10 * 60 * 1000 // 10min，对齐旧 Django LEASE_TTL=600s
+// 的持有时长。须 > 单次 docker run（镜像 pull + start < 2min），并 > BullMQ stalled 窗口（30s），
+// 使崩溃 worker 的租约在 stalled 重指派后仍有效（重指派等待而非误抢）。codex 三轮 P1：租约被
+// 持有 → 抛 retryable（BullMQ 重试而非 no-op），lease 过期后下个重试可抢占。
+const LEASE_TTL_MS = 5 * 60 * 1000 // 5min：覆盖 docker run，stalled 重指派（30s）安全
+
+// 租约被另一 worker 持有（codex 三轮 P1 #1）：抛此错让 BullMQ 重试（带 backoff），
+// lease 过期后下个重试可抢占——而非 no-op（否则 BullMQ 移除 job，行永远 creating）。
+export class LeaseContentionError extends Error {
+  constructor(name: string) {
+    super(`lease held for ${name}, retry after expiry`)
+    this.name = 'LeaseContentionError'
+  }
+}
 
 export interface ProvisionJobQueue {
   enqueueCreate(name: string, ownerId: string, configText: string): Promise<void>
@@ -78,8 +88,7 @@ export class Orchestrator {
   }
 
   // ── 端口池（#313 四来源已用集）──
-  async usedPorts(extra: ReadonlySet<number> = new Set()): Promise<Set<number>> {
-    const used = new Set<number>(extra)
+  async usedPorts(extra: ReadonlySet<number> = new Set()): Promise<Set<number>> {    const used = new Set<number>(extra)
     // 来源 1：DB 记账
     const rows = await this.prisma.container.findMany({ select: { port: true } })
     for (const r of rows) used.add(r.port)
@@ -106,6 +115,19 @@ export class Orchestrator {
 
   private homeDirFor(name: string): string {
     return path.join(this.cfg.fleetRoot, 'instances', name, 'home')
+  }
+
+  // codex 三轮 P1（GET / 探活）：查询容器运行时真实状态——DB status 只记编排态，须对账 runtime
+  // 判容器是否真在跑。返回 null 表示 daemon 不可达（降级保持 DB status，不误报）。
+  // health 语义对齐旧 Django read_model：running+runtime 容器在跑 → healthy；否则按 DB status。
+  async runtimeInfo(name: string): Promise<{ running: boolean } | null> {
+    try {
+      const live = await this.runtime.get(name)
+      if (!live) return { running: false } // DB 有行但容器已不在（崩溃/手动删）
+      return { running: live.running }
+    } catch {
+      return null // daemon 抖动 → 降级（不 500）
+    }
   }
 
   private async deleteRowQuietly(id: string): Promise<void> {
@@ -222,7 +244,11 @@ export class Orchestrator {
       },
       data: { leaseExpiresAt: new Date(now.getTime() + LEASE_TTL_MS) },
     })
-    if (claimed.count === 0) return // 另一 worker 正在 provisioning 同名 → no-op（stalled 重指派安全）
+    if (claimed.count === 0) {
+      // codex 三轮 P1 #1：另一 worker 持有 lease（崩溃/在飞）。抛 retryable 让 BullMQ 重试
+      // （非 no-op——no-op 会让 BullMQ 移除 job，lease 过期后无 job 重跑 → 行永远 creating）。
+      throw new LeaseContentionError(name)
+    }
     const instanceDir = path.join(this.cfg.fleetRoot, 'instances', name)
     const homeDir = path.join(instanceDir, 'home')
     let runAttempted = false
@@ -270,6 +296,13 @@ export class Orchestrator {
       // 5. run 后取消检查（覆盖「create 已完成但 delete 在飞」窗口）→ 立即自删
       const after = await this.prisma.container.findUnique({ where: { name } })
       if (after?.cancelRequested) {
+        // codex 三轮 P1 #2：自删前必须先释放 DB CAS lease（provisionDelete 才能 claim）。
+        // 否则 create 仍持有 lease（finally 才清），provisionDelete 抛 LeaseContention → 容器
+        // running 但取消永久 pending。释放后正常走删除（行已 running，可被 claim）。
+        await this.prisma.container
+          .updateMany({ where: { name }, data: { leaseExpiresAt: null } })
+          .catch(() => {})
+        this.leases.release(name) // 进程内租约也放
         await this.provisionDelete(name)
         return
       }
@@ -421,16 +454,31 @@ export class Orchestrator {
     const row = await this.prisma.container.findUnique({ where: { name } })
     if (!row) return // 已清理 → 幂等
     const now = new Date()
+    // codex 三轮 P1 #3：删除 claim 只排除**活动租约**（removing + lease 未过期 = 另一 worker 在清），
+    // 不再排除所有 removing——否则 delete 中途失败（chown/stop/remove/rmtree）标 REMOVING 后，
+    // lease 过期重试也被 `not removing` 永久挡（行+容器永远残留）。removing + lease 过期 = 可回收。
     const claimed = await this.prisma.container.updateMany({
       where: {
         name,
-        status: { not: 'removing' }, // 已在 removing（另一 worker 在清）→ 不重复抢
-        OR: [{ leaseExpiresAt: null }, { leaseExpiresAt: { lt: now } }],
+        OR: [
+          { status: { not: 'removing' }, leaseExpiresAt: null },
+          { status: { not: 'removing' }, leaseExpiresAt: { lt: now } },
+          // removing 但 lease 过期：上次清理失败，可重试回收
+          { status: 'removing', leaseExpiresAt: { lt: now } },
+        ],
       },
       data: { status: 'removing', leaseExpiresAt: new Date(now.getTime() + LEASE_TTL_MS) },
     })
-    if (claimed.count === 0) return // 另一 worker 正在删同名 → no-op
-    const instanceDir = path.join(this.cfg.fleetRoot, 'instances', name)
+    if (claimed.count === 0) return // 另一 worker 正在删同名（活动租约）→ no-op
+    // codex 三轮 P2：instanceDir 从行记录的 homeDir 派生（取 parent），而非当前 cfg.fleetRoot 重构——
+    // FLEET_ROOT 变更后新 root 无该目录，force:true 会误判清理成功、旧 workspace 残留。
+    // homeDir=<fleetRoot>/instances/<name>/home → parent = instances/<name>。
+    // 防御：homeDir 占位/被篡改（parent 不在 instances 根下）时回退 cfg.fleetRoot 重构。
+    const recordedParent = path.dirname(row.homeDir)
+    const instanceDir =
+      path.basename(recordedParent) === name && path.basename(path.dirname(recordedParent)) === 'instances'
+        ? recordedParent
+        : path.join(this.cfg.fleetRoot, 'instances', name)
     // container_id 是本行拥有 runtime 容器的正向证据；验证后再 stop/remove（防误删外来同名容器）
     if (row.containerId) {
       let live: { containerId: string } | null = null
