@@ -96,6 +96,19 @@ describe('containers 隔离（#312）', () => {
     expect(aNames).toContain('a-c1') // admin 见全部
   })
 
+  it('codex 六轮 P1：admin 删跨用户容器放行（不被 ownerId 挡）', async () => {
+    const u = await login(request, 'user1', 'pw-user1-secure')
+    const a = await login(request, 'admin1', 'pw-admin1-secure')
+    await request.post('/api/v1/containers').set(bearer(u.access)).send({ name: 'u-xdel' })
+    await provision('u-xdel')
+    // admin 删 user1 的容器 → 放行（codex 五轮 #4 加了 ownerId 严格校验但 admin 须豁免）
+    const del = await request.delete('/api/v1/containers/u-xdel').set(bearer(a.access))
+    expect(del.body.code).toBe(0)
+    // worker 消费 delete job → 消失
+    await orchestrator.provisionDelete(queue.lastDelete('u-xdel').name, queue.lastDelete('u-xdel').rowId)
+    expect(await ctx.prisma.container.findUnique({ where: { name: 'u-xdel' } })).toBeNull()
+  })
+
   it('codex 三轮 P1：GET / health 经 runtime 对账（容器不在 → stopped 非 healthy）', async () => {
     const u = await login(request, 'user1', 'pw-user1-secure')
     await request.post('/api/v1/containers').set(bearer(u.access)).send({ name: 'u-health' })

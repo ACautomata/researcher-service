@@ -86,12 +86,20 @@ export function createContainersRouter(deps: ContainerRouterDeps): Router {
     })
     // codex 三轮 P1（探活）：每容器对账 runtime（DB status 只记编排态，health 须看容器真在跑）。
     // daemon 抖动（runtimeInfo 返 null）→ 降级保持 DB status，不 500。
-    const summaries = await Promise.all(
-      rows.map(async (row) => {
-        const runtimeRunning = await orchestrator.runtimeInfo(row.name)
-        return toSummary(row, runtimeRunning?.running ?? null)
-      }),
-    )
+    // codex 六轮：探活并发上限 8（对齐旧 Django ThreadPoolExecutor(8)）——N 容器不经 Promise.all
+    // 全量并发 docker inspect（daemon 连接风暴），分批限制。
+    const MAX_HEALTH_WORKERS = 8
+    const summaries: Record<string, unknown>[] = []
+    for (let i = 0; i < rows.length; i += MAX_HEALTH_WORKERS) {
+      const batch = rows.slice(i, i + MAX_HEALTH_WORKERS)
+      const batchSummaries = await Promise.all(
+        batch.map(async (row) => {
+          const runtimeRunning = await orchestrator.runtimeInfo(row.name)
+          return toSummary(row, runtimeRunning?.running ?? null)
+        }),
+      )
+      summaries.push(...batchSummaries)
+    }
     ok(res, summaries)
   })
 
@@ -113,7 +121,7 @@ export function createContainersRouter(deps: ContainerRouterDeps): Router {
     const name = req.params.name as string
     if (!NAME_REGEX.test(name)) throw fail(CODE.VALIDATION_FAILED, undefined, { name: ['名称不合法'] })
     await getInstance(prisma, name, user) // 归属校验（越权/不存在同码 20040）
-    await orchestrator.deleteEnqueue(name, user.id)
+    await orchestrator.deleteEnqueue(name, user.id, user.role === 'admin') // admin 全放行删跨用户
     ok(res, null) // 已入队（list 轮询 observing removing）
   })
 

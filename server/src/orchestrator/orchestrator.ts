@@ -276,6 +276,24 @@ export class Orchestrator {
         await this.deleteRowQuietly(row.id)
         return
       }
+      // codex 六轮 P1 #4：worker 在 run() 后、存 containerId 前崩溃 → 行 creating + 空 id 但容器已
+      // 在跑（labeled）。stalled 重试时从 fleet label 恢复容器身份——否则 delete 因 containerId 空
+      // 跳过清理，容器永久孤儿。listFleet 按 openclaw.instance label 匹配本行。
+      if (!row.containerId) {
+        try {
+          const fleet = await this.runtime.listFleet()
+          const mine = fleet.find((c) => c.instanceName === name)
+          if (mine?.containerId) {
+            await this.prisma.container.update({
+              where: { id: row.id },
+              data: { containerId: mine.containerId, status: 'running' },
+            })
+            return // 容器已在跑（上轮 run 成功，仅存 id 前崩溃）→ 对账完成
+          }
+        } catch {
+          // daemon 不可达 → 继续正常 provisioning 路径
+        }
+      }
       // 1. provision home（cp -a 模板 → home）
       await this.provisionHome(instanceDir, homeDir)
       dirCreated = true
@@ -316,8 +334,9 @@ export class Orchestrator {
         // codex 三轮 P1 #2：自删前必须先释放 DB CAS lease（provisionDelete 才能 claim）。
         // 否则 create 仍持有 lease（finally 才清），provisionDelete 抛 LeaseContention → 容器
         // running 但取消永久 pending。释放后正常走删除（行已 running，可被 claim）。
+        // codex 六轮 P1 #3：用 id 而非 name（防重建行误清 lease）
         await this.prisma.container
-          .updateMany({ where: { name }, data: { leaseExpiresAt: null } })
+          .updateMany({ where: { id: row.id }, data: { leaseExpiresAt: null } })
           .catch(() => {})
         this.leases.release(name) // 进程内租约也放
         await this.provisionDelete(name)
@@ -328,7 +347,11 @@ export class Orchestrator {
       // 但取消路径清理失败（CLEANUP_FAILED）时行已标 REMOVING（可重试），finalize 不得
       // 覆盖为 error（codex #4：资源跟踪不丢）。
       if (e instanceof EnvelopeError && e.code === CODE.CLEANUP_FAILED) {
-        return // 行已 REMOVING，交由 delete 重试清理
+        // codex 六轮 P1：不能 `return` 完成 create job（BullMQ 移除 job，行留 removing + workspace/
+        // 端口永久残留，除非客户端再发 DELETE）。抛 retryable LeaseContention 让 BullMQ 重试清理，
+        // 或入队 row-bound delete。此处抛 LeaseContentionError——下个重试 provisionCreate 检出
+        // cancelRequested 或走 delete 路径回收。
+        throw new LeaseContentionError(name)
       }
       // 记录真实 cause（smoke/CI 据此可见 docker 为何失败，而非只见 error 态）
       // eslint-disable-next-line no-console
@@ -337,9 +360,10 @@ export class Orchestrator {
     } finally {
       this.leases.release(name) // 进程内租约
       // 释放 DB CAS 租约（leaseExpiresAt 置 null）——本 worker 已完成/失败，下个 job 可抢占。
-      // 行状态可能已变（creating→running/error），无条件清 lease（只在 provisioning 期间有意义）。
+      // codex 六轮 P1 #3：用 `id: row.id` 而非 name——取消/自删可能删掉原行 + 重建同名行（新 id），
+      // name-only 更新会误清重建行的活动 lease，致第二 worker 并发 provision/delete 同资源。
       await this.prisma.container
-        .updateMany({ where: { name }, data: { leaseExpiresAt: null } })
+        .updateMany({ where: { id: row.id }, data: { leaseExpiresAt: null } })
         .catch(() => {})
     }
   }
@@ -365,7 +389,17 @@ export class Orchestrator {
           if (err instanceof PortPoolExhausted) throw fail(CODE.PORT_POOL_EXHAUSTED)
           throw err
         }
-        await this.prisma.container.update({ where: { id: row.id }, data: { port: nextPort } })
+        // codex 六轮 P2：bind 冲突换端口时并发 P2002——两 worker 算同 nextFree 后各自 update，
+        // 后提交者撞 port unique。学习冲突端口重试下一候选（对齐 insertCreatingRow 的 P2002 重试）。
+        try {
+          await this.prisma.container.update({ where: { id: row.id }, data: { port: nextPort } })
+        } catch (e) {
+          if ((e as { code?: string }).code === 'P2002') {
+            learned.add(nextPort)
+            continue
+          }
+          throw e
+        }
         row = { ...row, port: nextPort }
       }
     }
@@ -434,13 +468,13 @@ export class Orchestrator {
   // 并发护栏（#313/#334）：进程内 Map 租约同时防双创建与双删除——delete 先 tryAcquire（非阻塞），
   // 成功=无在飞 create/delete，入队后释放；失败=在飞（create 或 delete 正占位）→ 置取消标志
   // （不依赖 Redis；即使 Redis 挂也防双删）。
-  async deleteEnqueue(name: string, ownerId: string): Promise<void> {
+  async deleteEnqueue(name: string, ownerId: string, isAdmin = false): Promise<void> {
     const row = await this.prisma.container.findUnique({ where: { name } })
     if (!row) throw fail(CODE.CONTAINER_NOT_FOUND)
-    // codex 五轮 P1 #4：归属二次校验——路由先查了归属，但此处按 name 重查时行可能已被删 +
-    // 同名重建（新 owner）。require id+owner 匹配：ownerId 不匹配（重建后属另一用户）→ 同 20040
-    // 防探测（不区分「不存在 vs 越权」），不 enqueue 误删新用户的行。
-    if (row.ownerId !== ownerId) throw fail(CODE.CONTAINER_NOT_FOUND)
+    // codex 五轮 P1 #4 + 六轮 P1：归属二次校验——路由先查了归属，但此处按 name 重查时行可能已被删 +
+    // 同名重建（新 owner）。非 admin 须 ownerId 匹配（否则 20040 防探测，不误删重建行）；
+    // admin 全放行（codex 六轮：admin 删跨用户容器不应被 ownerId 挡）。
+    if (!isAdmin && row.ownerId !== ownerId) throw fail(CODE.CONTAINER_NOT_FOUND)
     // codex 五轮 P1 #1：进程内 lease 已随 createReserve enqueue 释放（请求侧不留），故此处不再用它
     // 判「在飞 create」——改用 DB lease：creating + lease 未过期 = 某进程在 provisioning（含他进程）。
     const now = new Date()
