@@ -23,6 +23,11 @@ import type { TokenCrypto } from './tokenCrypto'
 // 并发模型（#313/#334）：进程内 Map<name,租约> 互斥 + BullMQ 按 name 入队串行 +
 // 端口入队前分配（SQLite port @unique 仲裁）+ 5 态机 + 取消标志 + 补偿。
 
+// DB CAS 租约 TTL（codex 二轮 P1 跨 worker 串行）：provisionCreate/Delete 抢占 leaseExpiresAt
+// 的持有时长。远大于单次 docker run（<2min），stalled 重指派（BullMQ 默认 30s lock）安全。
+// 崩溃后租约过期自动释放（下个 job 可抢占）。
+const LEASE_TTL_MS = 10 * 60 * 1000 // 10min，对齐旧 Django LEASE_TTL=600s
+
 export interface ProvisionJobQueue {
   enqueueCreate(name: string, ownerId: string, configText: string): Promise<void>
   enqueueDelete(name: string, ownerId: string): Promise<void>
@@ -199,9 +204,25 @@ export class Orchestrator {
   // ── create 阶段二（后台 provisioning：creating→running + 取消标志 + bind 重试 + 补偿）──
   // 由 BullMQ worker 调用（payload 携带 reserve 阶段渲染的 configText，避免重复读模板）。
   // 不可恢复失败 → 保留 ERROR 行（补偿全平移），不向 worker 抛（行状态即对外契约）。
+  //
+  // codex 二轮 P1（跨 worker 串行）：PerNameChain 仅进程内互斥，多 worker / stalled 重指派下
+  // 同名 create/delete 可并发。此处用 DB CAS 租约（leaseExpiresAt）实现跨进程互斥——条件
+  // updateMany 原子抢占（where leaseExpiresAt null 或已过期），抢不到即另一 worker 在飞 → no-op。
+  // Redis 挂也不影响（锁在 SQLite，spec §F「SQLite 持状态」）。
   async provisionCreate(name: string, configText: string): Promise<void> {
     const row = await this.prisma.container.findUnique({ where: { name } })
     if (!row || row.status !== 'creating') return // 已清理/已收敛 → no-op
+    // DB CAS 抢占租约（跨进程）：where leaseExpiresAt 空闲，update 置 leaseExpiresAt=now+TTL
+    const now = new Date()
+    const claimed = await this.prisma.container.updateMany({
+      where: {
+        name,
+        status: 'creating',
+        OR: [{ leaseExpiresAt: null }, { leaseExpiresAt: { lt: now } }],
+      },
+      data: { leaseExpiresAt: new Date(now.getTime() + LEASE_TTL_MS) },
+    })
+    if (claimed.count === 0) return // 另一 worker 正在 provisioning 同名 → no-op（stalled 重指派安全）
     const instanceDir = path.join(this.cfg.fleetRoot, 'instances', name)
     const homeDir = path.join(instanceDir, 'home')
     let runAttempted = false
@@ -264,7 +285,12 @@ export class Orchestrator {
       console.error(`[provision] create failed for ${name}`, e)
       await this.finalizeFailedCreate(instanceDir, row, runAttempted, dirCreated)
     } finally {
-      this.leases.release(name)
+      this.leases.release(name) // 进程内租约
+      // 释放 DB CAS 租约（leaseExpiresAt 置 null）——本 worker 已完成/失败，下个 job 可抢占。
+      // 行状态可能已变（creating→running/error），无条件清 lease（只在 provisioning 期间有意义）。
+      await this.prisma.container
+        .updateMany({ where: { name }, data: { leaseExpiresAt: null } })
+        .catch(() => {})
     }
   }
 
@@ -389,11 +415,21 @@ export class Orchestrator {
 
   // ── delete 执行（worker 调用）：removing(终态) → 清理 → 删行 ──
   // 清理失败（OSError/容器 stop/remove 失败）→ 行标 REMOVING + 抛 CLEANUP_FAILED（可重试）。
+  // codex 二轮 P1（跨 worker 串行）：同 provisionCreate，DB CAS 抢占 leaseExpiresAt 实现
+  // 跨进程互斥——两 worker 对同名 delete 恰一个执行，另一个 no-op（不双删）。
   async provisionDelete(name: string): Promise<void> {
     const row = await this.prisma.container.findUnique({ where: { name } })
     if (!row) return // 已清理 → 幂等
-    // 标 REMOVING（list 轮询可见）
-    await this.prisma.container.update({ where: { id: row.id }, data: { status: 'removing' } })
+    const now = new Date()
+    const claimed = await this.prisma.container.updateMany({
+      where: {
+        name,
+        status: { not: 'removing' }, // 已在 removing（另一 worker 在清）→ 不重复抢
+        OR: [{ leaseExpiresAt: null }, { leaseExpiresAt: { lt: now } }],
+      },
+      data: { status: 'removing', leaseExpiresAt: new Date(now.getTime() + LEASE_TTL_MS) },
+    })
+    if (claimed.count === 0) return // 另一 worker 正在删同名 → no-op
     const instanceDir = path.join(this.cfg.fleetRoot, 'instances', name)
     // container_id 是本行拥有 runtime 容器的正向证据；验证后再 stop/remove（防误删外来同名容器）
     if (row.containerId) {
@@ -406,13 +442,20 @@ export class Orchestrator {
         throw fail(CODE.CLEANUP_FAILED)
       }
       if (live && live.containerId === row.containerId) {
-        // codex #3（P1）：容器以 root 跑（user=0:0），bind-mount home 内由容器写入的文件属主
-        // root——host 非 root rmtree 会 EACCES，且 stop/remove 后容器没了无法补救。先同步
-        // chown home 给 host uid（容器还在、有 root 权限），再 stop/remove。best-effort。
+        // codex 一轮 #3 + 二轮 P1（chown 失败保留容器）：容器以 root 跑（user=0:0），bind-mount
+        // home 内由容器写入的文件属主 root——host 非 root rmtree 会 EACCES，且 stop/remove 后
+        // 容器没了（唯一能回收 root 属主文件的环境）无法补救。先同步 chown home 给 host uid。
+        // chown 失败（容器在跑但命令错）→ 保留容器 + 行 REMOVING + 抛 CLEANUP_FAILED 可重试，
+        // 不继续 stop/remove（否则 rmtree EACCES 且容器已删，永久卡 REMOVING）。
         try {
           await this.runtime.execSync(name, ['chown', '-R', String(process.getuid?.() ?? 0), HOME_BIND])
-        } catch {
-          // chown 失败不阻断（尽力而为；rmtree 仍可能因属主失败走 CLEANUP_FAILED 可重试）
+        } catch (e) {
+          const isNotFound = (e as { statusCode?: number }).statusCode === 404
+          if (!isNotFound) {
+            // 容器在跑但 chown 失败：保留容器（可重试 chown），不删
+            throw fail(CODE.CLEANUP_FAILED)
+          }
+          // 容器已不在（404）→ 无法 chown，继续清理（rmtree 尽力而为）
         }
         try {
           await this.runtime.stop(name)

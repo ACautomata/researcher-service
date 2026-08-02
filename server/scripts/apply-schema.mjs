@@ -16,6 +16,14 @@ const dbPath = url.replace(/^file:/, '')
 
 const db = new Database(dbPath)
 db.exec(sql)
+// ── 增量迁移（codex 二轮 P1）：cancelRequested 列（#334 M2 取消标志）──
+// 全量 init.sql 已含此列；本段供已初始化（无此列）的既有库原地升级，保留数据。
+// JS 检查列存在再 ALTER（幂等）：SQLite 无 ADD COLUMN IF NOT EXISTS（better-sqlite3 3.49 报语法错）。
+const containersCols = db.prepare('PRAGMA table_info(containers)').all().map((c) => c.name)
+if (containersCols.length > 0 && !containersCols.includes('cancelRequested')) {
+  db.exec('ALTER TABLE "containers" ADD COLUMN "cancelRequested" BOOLEAN NOT NULL DEFAULT false')
+  console.log('[db:apply] migrated: containers.cancelRequested ADD COLUMN')
+}
 db.close()
 // eslint-disable-next-line no-console
 console.log(`[db:apply] schema applied to ${dbPath}`)

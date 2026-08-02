@@ -271,6 +271,39 @@ describe('异步 delete（removing 终态）', () => {
     expect(runtime.removed).toContain('own')
   })
 
+  it('codex 二轮 P1：chown 失败保留容器（不删）+ 行 REMOVING 可重试', async () => {
+    const orch = makeOrch(makeCfg())
+    await orch.createReserve('chownf', adminId, 3)
+    await orch.provisionCreate(queue.lastCreate('chownf').name, queue.lastCreate('chownf').configText)
+    await orch.deleteEnqueue('chownf', adminId)
+    runtime.failExecSync = true // chown 失败（容器在跑但命令错）
+    await expect(orch.provisionDelete(queue.lastDelete('chownf').name)).rejects.toMatchObject({
+      code: CODE.CLEANUP_FAILED,
+    })
+    // 容器保留（未 stop/remove——唯一能回收 root 属主文件的环境不能丢）
+    expect(runtime.stopped).not.toContain('chownf')
+    expect(runtime.removed).not.toContain('chownf')
+    expect(runtime.containers.has('chownf')).toBe(true)
+    // 行 REMOVING（可重试）
+    const row = await ctx.prisma.container.findUnique({ where: { name: 'chownf' } })
+    expect(row!.status).toBe('removing')
+  })
+
+  it('codex 二轮 P1：跨 worker DB CAS——并发 provisionDelete 恰一个执行', async () => {
+    const orch = makeOrch(makeCfg())
+    await orch.createReserve('dupdel', adminId, 3)
+    await orch.provisionCreate(queue.lastCreate('dupdel').name, queue.lastCreate('dupdel').configText)
+    await orch.deleteEnqueue('dupdel', adminId)
+    // 两个 worker 并发 delete 同名：DB CAS 租约保证恰一个执行清理
+    await Promise.all([
+      orch.provisionDelete(queue.lastDelete('dupdel').name),
+      orch.provisionDelete(queue.lastDelete('dupdel').name),
+    ])
+    // 行已删（无双删——removed 里只出现一次）
+    expect(await ctx.prisma.container.findUnique({ where: { name: 'dupdel' } })).toBeNull()
+    expect(runtime.removed.filter((n) => n === 'dupdel')).toHaveLength(1)
+  })
+
   it('删除不存在的容器 → 幂等 no-op', async () => {
     const orch = makeOrch(makeCfg())
     await expect(orch.deleteEnqueue('nope', adminId)).rejects.toMatchObject({ code: CODE.CONTAINER_NOT_FOUND })

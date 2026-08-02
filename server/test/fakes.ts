@@ -23,6 +23,8 @@ export class FakeRuntime implements ContainerRuntime {
   failRemove = false
   // 模拟 daemon 抖动：runtime.get 抛错
   failGet = false
+  // codex 二轮 P1：模拟 execSync（chown）失败——容器在跑但 chown 命令错
+  failExecSync = false
   private next = 0
 
   async run(spec: ContainerSpec): Promise<string> {
@@ -76,6 +78,7 @@ export class FakeRuntime implements ContainerRuntime {
   }
 
   async execSync(_name: string, cmd: string[]): Promise<void> {
+    if (this.failExecSync) throw new Error('exec chown failed (container running but cmd error)')
     this.execCalls.push([_name, cmd])
   }
 }
