@@ -35,6 +35,14 @@ dist/
 backend/db.sqlite3
 backend/db.sqlite3-journal
 
+# server（新 Express 控制面，issue #333）
+server/node_modules/
+server/dist/
+server/src/generated/
+server/prisma/*.db
+server/prisma/*.db-journal
+server/.env
+
 # 容器编排运行时数据（仓库根 fleet/：instances/<name>/ home + openclaw.json，spec §5）。
 # 限仓库根（/ 前缀）——否则会误伤源码子包 containers/fleet/（issue #278）。
 /fleet/

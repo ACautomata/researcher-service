@@ -98,3 +98,26 @@ jobs:
       # 真容器/真链路集成测试（pytestmark=integration）：wire schema（docker gateway）+
       # 联调 health 契约（vite proxy × playwright × live Django，#179）
       - run: python -m pytest -m "integration"
+
+  # Express 控制面（server/，#333 M0+M1）：prisma generate + tsc + vitest + build 全绿才算通过。
+  # Codex #342 ⑲ P2：此前 CI 只跑 frontend/Django，server 破坏编译/生成 client/44 认证用例 CI 仍绿。
+  # src/generated 被 gitignore（fresh checkout 无此目录），但 typecheck/test 都 import 生成产物 ——
+  # 故 typecheck/test 前必须先跑 prisma generate（build 的 prebuild 钩子会自动做，但顺序上 typecheck
+  # 在其前，须显式生成一次）。
+  server:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: lts/*
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+      - run: npm ci
+      - run: npm run prisma:generate
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build

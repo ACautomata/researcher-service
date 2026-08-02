@@ -1,0 +1,175 @@
+// ============================================================================
+// Prisma + SQLite 数据模型（wayfinder #310 草案 + #311/#328 扩展 · issue #333 落地）
+//
+// 来源：docs/research/310-prisma-schema-draft.prisma（已过 prisma validate）。
+// 本期（M0/M1）扩展：User 新增 mustChangePassword / maxContainers（#311 C1 + #319 /me 要求，
+// 310 草案 User 缺这两列）。其余 5 实体原样平移（容器/WIKI/桥接是后续切片，但 schema 一次落地）。
+//
+// 平移映射见 310 草案头部注释。目标 Prisma 7：generator=prisma-client（TS）+ driver adapter
+// （@prisma/adapter-better-sqlite3），datasource 仅 provider、url 在 prisma.config.ts / PrismaClient。
+// ============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+// ---------------------------------------------------------------------------
+// User —— 账号实体（管理员 + 普通用户双角色）
+//
+// #311/#328 扩展（相对 310 草案）：
+//   - mustChangePassword  bootstrap/重置/新建账号置 true（C1 强制改密）
+//   - maxContainers       per-user 配额，admin 可改，超额拒 20042
+// ---------------------------------------------------------------------------
+enum Role {
+  admin
+  user
+}
+
+model User {
+  id                 String   @id @default(cuid())
+  username           String   @unique // 登录名（Django UnicodeUsernameValidator 同语义）
+  email              String?  @unique // 可空；OIDC 首登常以此为主键对齐
+  passwordHash       String?  // bcrypt 散列；纯 OIDC 账号可空 → 应用层禁空密码登录
+  role               Role     @default(user)
+  isActive           Boolean  @default(true) // 平移 Django is_active（软禁用，不删行）
+  mustChangePassword Boolean  @default(false) // #311 C1：首登/重置后强制改密
+  maxContainers      Int      @default(3) // #311 配额；默认值经 env DEFAULT_MAX_CONTAINERS 在应用层覆盖
+
+  // --- OAuth2 预留（#311 O1 仅骨架；此处仅留形状）---
+  oidcSubject String? // OIDC sub claim
+  oidcIssuer  String? // OIDC issuer
+  @@unique([oidcIssuer, oidcSubject]) // 同 issuer 下 sub 唯一（双可空时 SQLite 视为 distinct）
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  containers    Container[]
+  refreshTokens RefreshToken[]
+
+  @@map("users")
+}
+
+// ---------------------------------------------------------------------------
+// RefreshToken —— refresh token 持久化（重写新增；现状 simplejwt 无状态、无表）
+//
+//   - tokenHash         存 sha256 散列不落明文（零信任）
+//   - revokedAt         旋转或撤销时置位；旧 token 重放即判无效
+//   - replacedByTokenId 旋转链：新 token 指回被它替换的旧 token（reuse 检测）
+// ---------------------------------------------------------------------------
+model RefreshToken {
+  id                String   @id @default(cuid())
+  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId            String
+  tokenHash         String   @unique // 散列唯一索引：查找 + 防重
+  expiresAt         DateTime
+  revokedAt         DateTime? // null=有效；置位=已撤销/已旋转
+  replacedByTokenId String? // 旋转链指针（R1 reuse 检测）
+
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@map("refresh_tokens")
+}
+
+// ---------------------------------------------------------------------------
+// Container —— 一个 OpenClaw 容器实例的记账行（平移 containers.Instance，+ownerId 隔离）
+//
+// name 全局唯一（#312 定夺，非按用户）。本期 M1 仅用于 GET /users 计 containerCount，
+// 容器生命周期由 M2 实现；schema 一次落地。
+// ---------------------------------------------------------------------------
+enum ContainerStatus {
+  creating
+  running
+  stopped
+  removing
+  error
+}
+
+model Container {
+  id   String @id @default(cuid())
+  name String @unique // DNS-label：^[a-z][a-z0-9-]{2,29}$（应用层校验）
+  port Int    @unique
+
+  owner   User   @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  ownerId String
+
+  token          String // 应用层加密后的密文
+  tokenEncrypted Boolean @default(false)
+  homeDir        String // bind-mount 宿主路径 instances/<name>/home
+  containerId    String @default("") // run 前未知；空串而非 NULL
+  status         ContainerStatus @default(creating)
+  image          String
+  leaseExpiresAt DateTime? // null=无保护
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  pairing        Pairing?
+  modelProviders ModelProvider[]
+
+  @@index([ownerId])
+  @@map("containers")
+}
+
+// ---------------------------------------------------------------------------
+// Pairing —— 设备配对记账行（平移 chat.Pairing，一对一 Cascade）。M4 实现。
+// ---------------------------------------------------------------------------
+enum PairingStatus {
+  unpaired
+  pending
+  paired
+  error
+}
+
+model Pairing {
+  id          String    @id @default(cuid())
+  container   Container @relation(fields: [containerId], references: [id], onDelete: Cascade)
+  containerId String    @unique // 一对一
+
+  deviceId                String @default("")
+  publicKeyPem            String @default("")
+  privateKeyPem           String @default("") // 密文
+  privateKeyPemEncrypted  Boolean @default(false)
+  deviceToken             String @default("") // 密文
+  deviceTokenEncrypted    Boolean @default(false)
+  scopesJson              String @default("[]")
+  pairingRequestId        String @default("")
+  status                  PairingStatus @default(unpaired)
+  attemptVersion          Int @default(0)
+
+  updatedAt DateTime @updatedAt
+
+  @@map("pairings")
+}
+
+// ---------------------------------------------------------------------------
+// ModelProvider —— 一个容器的一个 model provider 行（平移 models.ModelProvider）。M3 实现。
+// ---------------------------------------------------------------------------
+enum ProviderApi {
+  // Prisma enum 值须为合法标识符 → 下划线名 + @map 落连字符真值
+  openai_completions @map("openai-completions")
+  anthropic_messages @map("anthropic-messages")
+}
+
+model ModelProvider {
+  id          String    @id @default(cuid())
+  container   Container @relation(fields: [containerId], references: [id], onDelete: Cascade)
+  containerId String
+
+  providerId  String // openclaw.json models.providers 的 map key；DNS-label
+  api         ProviderApi
+  baseUrl     String
+  apiKeyEnvId String // ^[A-Z][A-Z0-9_]{0,127}$（应用层校验）
+  authHeader  Boolean     @default(true)
+  modelsJson  String // JSON 文本
+
+  createdAt DateTime @default(now())
+
+  @@unique([containerId, providerId])
+  @@map("model_providers")
+}
