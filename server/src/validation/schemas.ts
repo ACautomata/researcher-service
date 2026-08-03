@@ -104,5 +104,12 @@ export const modelProviderWriteSchema = z.object({
         })
         .passthrough(), // 未知扩展字段透传（前端表单收集的其余字段原样保留）
     )
-    .min(1, '须至少一条 model（用于派生默认模型引用）'),
+    .min(1, '须至少一条 model（用于派生默认模型引用）')
+    // #366 codex 五轮 P2：同 provider 内 model id 须唯一。重复 id 让 ProviderConfigBuilder 生成相同
+    // <pid>/<mid> ref —— primary 自指进 fallbacks + aliases 键覆盖，盘上配置歧义、DB 却报成功
+    // （与 input 枚举同根：入站拒，生成文件才可能符合 OpenClaw 形状）。path 落 models → 90002 明细。
+    .refine(
+      (models) => new Set(models.map((m) => String(m.id))).size === models.length,
+      { message: '同 provider 内 model id 须唯一', path: ['models'] },
+    ),
 })

@@ -189,4 +189,30 @@ describe('ProviderConfigBuilder（#336 纯逻辑）', () => {
       ConfigurationError,
     )
   })
+
+  // ---------------------------- #366 codex 第五轮 P2：default secret provider 须 source:env ----------------------------
+
+  it('模板 secrets.providers.default.source 非 env → ConfigurationError——renderProvider 恒发 source:env SecretRef', () => {
+    // renderProvider 恒发 apiKey SecretRef {source:'env', provider:'default'}；模板 default.source
+    // 若为 file/exec（或缺省），写出的 SecretRef 与引用的 secret provider 声明冲突 → OpenClaw 凭证
+    // 解析失败、热加载被拒，DB 却已提交报成功。仅断言 default 是对象（三轮修复）不足以覆盖此形状。
+    expect(() =>
+      new ProviderConfigBuilder().build(
+        { secrets: { providers: { default: { source: 'file', path: '/etc/key' } } } },
+        [spec()],
+      ),
+    ).toThrow(ConfigurationError)
+    expect(() =>
+      new ProviderConfigBuilder().build(
+        { secrets: { providers: { default: { source: 'exec', command: 'echo x' } } } },
+        [spec()],
+      ),
+    ).toThrow(ConfigurationError)
+    // 缺 source 声明同样不可解析
+    expect(() =>
+      new ProviderConfigBuilder().build({ secrets: { providers: { default: {} } } }, [spec()]),
+    ).toThrow(ConfigurationError)
+    // 生产模板 default.source='env'（deploy/openclaw.json）不受影响
+    expect(() => new ProviderConfigBuilder().build(SECRETS_BASE, [spec()])).not.toThrow()
+  })
 })

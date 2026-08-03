@@ -13,6 +13,7 @@
 
 import type { ProviderApiWire } from './values'
 import { assertPlainObject } from '../containers/configRenderer'
+import { ConfigurationError } from '../containers/errors'
 
 // SecretRef.provider 固定引用 deploy/openclaw.json 既有的 secrets.providers.default（r28 §2.1）
 export const DEFAULT_SECRET_PROVIDER = 'default'
@@ -46,6 +47,13 @@ export class ProviderConfigBuilder {
     const secrets = cfg.secrets as { providers?: Record<string, unknown> } | undefined
     const defaultSecretProvider = secrets?.providers?.default
     assertPlainObject(defaultSecretProvider, 'OPENCLAW_TEMPLATE_JSON (secrets.providers.default)')
+    // #366 codex 五轮 P2：仅断言 default 是对象不够——renderProvider 恒发 apiKey SecretRef
+    // {source:'env', provider:'default'}，default.source 须为 env。模板把 default 配成 file/exec
+    // （或缺 source）时，写出的 SecretRef 与引用的 secret provider 声明冲突 → OpenClaw 凭证解析
+    // 失败、热加载被拒，DB 却已提交报成功 = 不可用配置。与「default 缺失」同根，缺省即拒。
+    if ((defaultSecretProvider as Record<string, unknown>).source !== 'env') {
+      throw new ConfigurationError('OPENCLAW_TEMPLATE_JSON (secrets.providers.default.source)')
+    }
 
     const providersMap: Record<string, Record<string, unknown>> = {}
     const refs: string[] = [] // "<pid>/<mid>" 按序

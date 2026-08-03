@@ -326,6 +326,14 @@ describe('models REST（接缝 #2 + #336）', () => {
       .send({ ...VALID, models: [{ id: 'm', name: 'M', input: ['bogus'] }] })
     expect(r6.body.code).toBe(90002)
     expect(r6.body.data).toHaveProperty('models')
+    // #366 codex 第五轮 P2：同 provider 内重复 model id → builder 生成重复 ref（primary 自指
+    // fallback + alias 覆盖）→ 盘上配置歧义、DB 却报成功 → 90002 + data.models
+    const r7 = await ctx.request
+      .post(providersOf(name))
+      .set(bearer(l.access))
+      .send({ ...VALID, models: [{ id: 'm', name: 'A' }, { id: 'm', name: 'B' }] })
+    expect(r7.body.code).toBe(90002)
+    expect(r7.body.data).toHaveProperty('models')
   })
 
   it('api_key_env_id 非法格式 / 未注入 env → 90002 + data.api_key_env_id', async () => {
