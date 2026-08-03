@@ -1,6 +1,6 @@
 // openclaw.json 渲染（平移 backend/containers/config_renderer.py，#334）。
 // 配置单一来源 = 模板文件（与单容器 compose 共用一份）。每容器渲染产物落到
-// instances/<id>/openclaw.json，bind-mount(ro) 覆盖进容器。
+// instances/<id>/config/openclaw.json（#366：config 独立目录 ro bind + OPENCLAW_CONFIG_PATH）。
 // token 策略：gateway.auth.token 保留 ${GATEWAY_TOKEN} env 占位 —— 真值由 docker env
 // GATEWAY_TOKEN=<secret> 注入，真 token 绝不落盘进 JSON 文件（安全不变量）。
 
@@ -21,7 +21,9 @@ interface OpenClawConfig {
 // 形状断言（Codex C9）：JSON.parse 成功但值非「普通对象」时，renderDict 挂到其上的 gateway 属性
 // 会被 JSON.stringify 丢弃（数组只序列化 index 属性、原始值无属性）→ openclaw.json 缺
 // port/bind/token 强制不变量。构造期同步拒绝，避免坏配置留到后台 provisioning 才暴露（POST 已返 creating）。
-function assertPlainObject(v: unknown, field: string): asserts v is Record<string, unknown> {
+// export：ProviderConfigBuilder 合并 models/agents/secrets 时复用同一断言（#366 codex 三轮 P2）——
+// typeof [] === 'object'，须显式排除数组，否则挂到数组上的 named property 被 JSON.stringify 静默丢弃。
+export function assertPlainObject(v: unknown, field: string): asserts v is Record<string, unknown> {
   if (typeof v !== 'object' || v === null || Array.isArray(v)) {
     throw new ConfigurationError(field)
   }

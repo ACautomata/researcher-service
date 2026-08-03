@@ -15,8 +15,11 @@ export interface ContainerSpec {
   readonly image: string
   readonly hostPort: number // 宿主映射端口（端口池分配）
   readonly gatewayToken: string // GATEWAY_TOKEN env 值（敏感：仅 env 注入，不落盘）
-  readonly homeDir: string // 宿主 bind-mount home（instances/<id>/home，代系绑定 #360）
-  readonly configPath: string // 宿主 openclaw.json（instances/<id>/openclaw.json）
+  readonly homeDir: string // 宿主 bind-mount home（instances/<id>/home，代系绑定 #360；
+  // rw bind 承载 workspace/wiki/state/logs）
+  readonly configDir: string // 宿主 bind-mount config 目录（instances/<id>/config，#366 codex P1
+  // 只读边界）：home rw bind 下容器内进程（root + 0644 无约束）可持久改 openclaw.json → config
+  // 独立目录 ro bind + OPENCLAW_CONFIG_PATH 指其内 openclaw.json，容器侧不可写而宿主 rename 热加载保留）
   readonly llmApiKey: string // 全面板共享 LLM_API_KEY
 }
 

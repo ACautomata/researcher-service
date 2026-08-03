@@ -35,6 +35,9 @@ const BASE_ENV: Record<string, string> = {
   OPENCLAW_GATEWAY_PORT: String(GATEWAY_INTERNAL_PORT),
   OPENCLAW_GATEWAY_BIND: GATEWAY_BIND,
   OPENCLAW_GATEWAY_MODE: 'local',
+  // #366 codex P1：config 独立目录 ro bind，gateway 经此 env 从该目录读 openclaw.json
+  // （官方文档 OPENCLAW_CONFIG_PATH 覆盖默认 ~/.openclaw/openclaw.json）
+  OPENCLAW_CONFIG_PATH: `${CONFIG_BIND}/openclaw.json`,
   OPENCLAW_WORKSPACE_ROOT: HOME_BIND,
   DM_POLICY: 'disabled',
   GROUP_POLICY: 'disabled',
@@ -83,9 +86,18 @@ export class DockerRuntime implements ContainerRuntime {
       HostConfig: {
         CapAdd: ['CHOWN', 'SETUID', 'SETGID', 'DAC_OVERRIDE'],
         Binds: [
+          // #366 两轮：home 目录 rw bind + config 目录 ro bind。
+          // 第一轮修复（codex P1「热加载断链」）只 bind home 目录（rw）——openclaw.json 落 home 内、
+          // ConfigStore rename 换 inode 后目录 bind 容器内可见（gateway watch 热加载恢复；单文件 bind
+          // 在 rename 后仍挂旧 inode，m2 亦证 openclaw 镜像上文件 bind 不可靠）。但容器以 root(0:0)
+          // 跑、0644 对 root 无约束 → 容器内进程可持久改 openclaw.json 并经 watch 热加载，破坏强制
+          // 安全不变量（auth.mode/token/allowInsecureAuth），即 codex P1「Preserve the read-only
+          // boundary」。
+          // 现（第二轮）config 独立到 instances/<id>/config、目录 ro bind 到容器内固定路径，gateway
+          // 经 OPENCLAW_CONFIG_PATH 读其内 openclaw.json：目录 bind 下宿主 rename 换 inode 容器内
+          // 可见（热加载保留），ro 只约束容器侧（宿主写 host 路径不受影响）→ 只读边界恢复。
           `${spec.homeDir}:${HOME_BIND}:rw`,
-          // openclaw.json 挂 ro（防容器内篡改配置；host 侧写透经 bind 传播不受 ro 影响）
-          `${spec.configPath}:${CONFIG_BIND}:ro`,
+          `${spec.configDir}:${CONFIG_BIND}:ro`,
         ],
         PortBindings: {
           [`${GATEWAY_INTERNAL_PORT}/tcp`]: [{ HostIp: this.publishHost, HostPort: String(spec.hostPort) }],

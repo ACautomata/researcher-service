@@ -1,4 +1,11 @@
 import { z } from 'zod'
+import {
+  API_CHOICES,
+  API_KEY_ENV_ID_REGEX,
+  ALLOWED_API_KEY_ENV_IDS,
+  MODEL_INPUT_MODALITIES,
+  PROVIDER_ID_REGEX,
+} from '../models/values'
 
 // 请求体 schema（zod）。校验失败 → 90002 + flatten().fieldErrors（{field:[errors]}）。
 // username 格式：字母/数字/下划线/连字符，3–30 字符（近似 Django UnicodeUsernameValidator，更严）。
@@ -47,4 +54,62 @@ export const containerCreateSchema = z.object({
   name: z
     .string()
     .regex(CONTAINER_NAME_REGEX, 'name 须以小写字母开头，3–30 位，仅含小写字母、数字、连字符'),
+})
+
+// 建/改 model provider（models POST/PUT，#336）：snake_case wire（平移 Django
+// ModelProviderWriteSerializer）。provider_id / api_key_env_id 经格式 + 成员校验（r28 §1），
+// api 限两值（r28 §1.3），models 至少一条且每条含非空 id（无 model 无法派生默认模型引用）。
+// models 条目形状校验（#366 codex 三轮 P2）：已知字段类型严格校验（name/reasoning/input/cost/
+// contextWindow/maxTokens，对齐前端 ModelEntryDTO），未知扩展字段 passthrough 透传（前端表单
+// 收集的其余字段原样保留）。原来 `z.record(z.string(), z.unknown())` 让 {id:'m', name:{}} 这种
+// 非法形状入库——ProviderConfigBuilder 把 name 对象原样落盘为 alias/model 名（应为 string）→
+// 热加载拒绝、运行时落后 DB。入站校验拒绝，生成文件才可能符合 OpenClaw 形状。
+// base_url trim 后校验（#366 codex P2）：zod min(1) 不 trim，纯空格 '   ' 语义为空仍通过——
+// 对齐 Django CharField 默认 trim_whitespace，防「空 baseUrl 入库 + 写盘报成功热加载」。
+// 校验失败 → 90002 + 各字段明细（api_key_env_id 非法格式/未注入 env 同入 data.api_key_env_id）。
+export const modelProviderWriteSchema = z.object({
+  provider_id: z
+    .string()
+    .regex(PROVIDER_ID_REGEX, 'provider_id 须以小写字母开头，1–64 位，仅含小写字母、数字、连字符'),
+  api: z.enum(API_CHOICES),
+  base_url: z.string().trim().min(1, 'base_url 不能为空').max(512, 'base_url 过长'),
+  api_key_env_id: z
+    .string()
+    .regex(API_KEY_ENV_ID_REGEX, 'api_key_env_id 须大写字母开头，仅含大写字母、数字、下划线（1–128 位）')
+    .refine(
+      (v) => ALLOWED_API_KEY_ENV_IDS.has(v),
+      'api_key_env_id 须为容器已注入的 env（当前仅：LLM_API_KEY）',
+    ),
+  auth_header: z.boolean().default(true),
+  models: z
+    .array(
+      z
+        .object({
+          id: z.string().min(1, '每条 model 须含非空 id'),
+          name: z.string().optional(),
+          reasoning: z.boolean().optional(),
+          // #366 codex 四轮 P2：input 限 r28 §1.2 枚举（text/image/audio/video/pdf）——非法取值
+          // （如 "bogus"）原样落盘会被 OpenClaw 热加载校验拒绝，DB 却已提交报成功。
+          input: z.array(z.enum(MODEL_INPUT_MODALITIES)).optional(),
+          cost: z
+            .object({
+              input: z.number(),
+              output: z.number(),
+              cacheRead: z.number(),
+              cacheWrite: z.number(),
+            })
+            .optional(),
+          contextWindow: z.number().optional(),
+          maxTokens: z.number().optional(),
+        })
+        .passthrough(), // 未知扩展字段透传（前端表单收集的其余字段原样保留）
+    )
+    .min(1, '须至少一条 model（用于派生默认模型引用）')
+    // #366 codex 五轮 P2：同 provider 内 model id 须唯一。重复 id 让 ProviderConfigBuilder 生成相同
+    // <pid>/<mid> ref —— primary 自指进 fallbacks + aliases 键覆盖，盘上配置歧义、DB 却报成功
+    // （与 input 枚举同根：入站拒，生成文件才可能符合 OpenClaw 形状）。path 落 models → 90002 明细。
+    .refine(
+      (models) => new Set(models.map((m) => String(m.id))).size === models.length,
+      { message: '同 provider 内 model id 须唯一', path: ['models'] },
+    ),
 })

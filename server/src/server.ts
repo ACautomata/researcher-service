@@ -5,6 +5,7 @@ import { bootstrap } from './auth/bootstrap'
 import { config } from './config'
 import { assembleFleet } from './containers/fleetAssembly'
 import { makeDockerCompile } from './wiki/compile'
+import { TemplateModelConfigWriter } from './models/configWriter'
 import './types'
 
 async function main(): Promise<void> {
@@ -17,6 +18,8 @@ async function main(): Promise<void> {
     orchestrator: fleet.orchestrator,
     // wiki compile（#335）：docker exec `openclaw wiki compile`，5s 去抖、best-effort。
     wiki: { compile: makeDockerCompile(fleet.runtime) },
+    // models config 写盘（#336）：模板 + ConfigStore 原子写 instances/<id>/config/openclaw.json（#366）。
+    models: { configWriter: new TemplateModelConfigWriter(config.fleet) },
   })
 
   // M0 同进程单端口分流：createServer(expressApp) + server.on('upgrade') 分流。

@@ -58,6 +58,7 @@ export class PortPoolExhausted extends ContainerDomainError {
 }
 
 // 面板级配置缺失——LLM_API_KEY 等必填字段未设置 → 90003
+// （#366：模板读取/解析失败也包成此错误，见 configWriter.ensureRenderer 转译说明）
 export class ConfigurationError extends ContainerDomainError {
   constructor(public readonly field: string) {
     super(CODE.LLM_NOT_CONFIGURED, `${field} 未配置`)

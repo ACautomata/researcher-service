@@ -52,8 +52,9 @@ describe('orchestrator (接缝 #5 编排器 Port)', () => {
     expect(rec?.spec.hostPort).toBe(19000)
     expect(rec?.info.instanceName).toBe('web-one')
     // config 已原子落盘 + 安全不变量（port 18789 / bind lan / token 占位）
+    // #366：config 落 instances/<id>/config 独立目录（ro bind + OPENCLAW_CONFIG_PATH）
     const cfgText = require('node:fs').readFileSync(
-      path.join(fl.fleetRoot, 'instances', inst.id, 'openclaw.json'),
+      path.join(fl.fleetRoot, 'instances', inst.id, 'config', 'openclaw.json'),
       'utf8',
     )
     const cfg = JSON.parse(cfgText)
