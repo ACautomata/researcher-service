@@ -60,9 +60,11 @@ const writer: ModelConfigWriter = {
       await new Promise((r) => setTimeout(r, 5_200)) // 慢写盘：超过 Prisma 默认 5s 窗口
     }
     if (failMode === 'writeAfterDisk') {
-      // 盘上已写 + 事务回滚分裂：先真落盘（盘上领先 DB），再抛 ConfigWriteError 让事务回滚。
+      // 盘上已写 + 事务回滚分裂：先真落盘（盘上领先 DB），再抛 P2028（生产 = 交互事务超时 / commit
+      // 失败——fs 写盘不可取消、事务却回滚）让事务回滚。用 P2028 而非 ConfigWriteError：后者在生产
+      // 语义是「fs 真失败、盘未变」，service 据此跳过 reconcile（#366 codex 四轮 P2 收窄）。
       await realWriter.rewrite(opts)
-      throw new ConfigWriteError(opts.name, '/x/openclaw.json')
+      throw Object.assign(new Error('interactive transaction timeout'), { code: 'P2028' })
     }
     return realWriter.rewrite(opts)
   },
@@ -316,6 +318,14 @@ describe('models REST（接缝 #2 + #336）', () => {
       .send({ ...VALID, base_url: '   ' })
     expect(r5.body.code).toBe(90002)
     expect(r5.body.data).toHaveProperty('base_url')
+    // #366 codex 四轮 P2：input 模态限 r28 §1.2 枚举（text/image/audio/video/pdf）——非法取值
+    // 原样落盘会被 OpenClaw 热加载校验拒绝、DB 却已提交报成功 → 90002 + data.models
+    const r6 = await ctx.request
+      .post(providersOf(name))
+      .set(bearer(l.access))
+      .send({ ...VALID, models: [{ id: 'm', name: 'M', input: ['bogus'] }] })
+    expect(r6.body.code).toBe(90002)
+    expect(r6.body.data).toHaveProperty('models')
   })
 
   it('api_key_env_id 非法格式 / 未注入 env → 90002 + data.api_key_env_id', async () => {
@@ -611,10 +621,10 @@ describe('models REST（接缝 #2 + #336）', () => {
     expect(getRes.body.data.base_url).toBe('https://open.bigmodel.cn/api/paas/v4')
   })
 
-  it('#366 codex P1：写盘成功但事务回滚（writeAfterDisk）→ reconcile 恢复盘上旧配置（盘=DB 不发散）', async () => {
+  it('#366 codex P1：写盘成功但事务回滚（P2028）→ reconcile 恢复盘上旧配置（盘=DB 不发散）', async () => {
     // codex P1「rollback-safe」：显式 30s timeout 只是把分裂窗口从 5s 移到 30s——若 fs 写盘完成后
-    // 事务仍回滚（超时/commit 失败），盘上领先 DB 发散。修复：service catch 里 reconcile 读回滚后
-    // DB providers → rewrite 盘上 → 恢复一致。本用例让 writer 先真写盘成功再抛 ConfigWriteError，
+    // 事务仍回滚（P2028 超时/commit 失败），盘上领先 DB 发散。修复：service catch 里 reconcile 读回滚后
+    // DB providers → rewrite 盘上 → 恢复一致。本用例让 writer 先真写盘成功再抛 P2028，
     // 模拟「盘上已写 + 事务回滚」分裂；reconcile 的 rewrite 同样先真写盘（旧配置）再抛错被吞。
     const u = await seedUser(ctx.prisma, 'mrcn', 'pw-mrcn-secure')
     const { name, id } = await seedContainer(u.id)
@@ -712,6 +722,65 @@ describe('models REST（接缝 #2 + #336）', () => {
     expect(res.body.message).toMatch(/重建/)
     const list = await ctx.request.get(providersOf(name)).set(bearer(l.access))
     expect(list.body.data).toEqual([]) // DB 回滚：无 orphan provider 行
+  })
+
+  // #366 codex 四轮 P2：compatibility probe 的 access() 非 ENOENT（EACCES——服务账号不可遍历
+  // instances/<id>）应包成 90003（与写盘路径 ConfigWriteError→90003 同域）——否则裸 fs 错误落
+  // 全局兜底 90000，同一权限故障 probe 与 write 分类不一致。root（CAP_DAC_OVERRIDE）无视 mode bit
+  // 无法复现 EACCES，故 root 下 skip（对齐上文 90003 EACCES 写盘测试）。
+  it.skipIf(process.getuid?.() === 0)(
+    'config 目录探测 EACCES → 90003（probe 非 ENOENT 同域转译）',
+    async () => {
+      const u = await seedUser(ctx.prisma, 'mprobeacc', 'pw-mprobeacc-secure')
+      const { name, id } = await seedContainer(u.id)
+      const l = await login(ctx.request, 'mprobeacc', 'pw-mprobeacc-secure')
+      // 撤掉 instances/<id> 的 traverse 权限 → access(configDir) EACCES（config 目录本身仍在，
+      // 走非旧代 ENOENT 分支）
+      const instDir = path.join(fleetRoot, 'instances', id)
+      chmodSync(instDir, 0o000)
+      try {
+        const res = await ctx.request.post(providersOf(name)).set(bearer(l.access)).send(VALID)
+        expect(res.body.code).toBe(90003)
+      } finally {
+        chmodSync(instDir, 0o755) // 复原，保证 afterAll 清理
+      }
+      const list = await ctx.request.get(providersOf(name)).set(bearer(l.access))
+      expect(list.body.data).toEqual([]) // DB 回滚：无 orphan provider 行
+    },
+  )
+
+  // #366 codex 四轮 P2：P2002（重复 create）不需要 reconcile——mutation 抛错、rewrite 未执行，
+  // 盘=DB 一致；无条件 reconcile 是多余写盘（stale-write 竞态面）。直调 service + 计次 writer
+  // 断言重复 create 不再多写一次盘（P2028 正例见上文 writeAfterDisk 测试）。
+  it('#366 codex P2：重复 create（P2002）不触发 reconcile 多余写盘', async () => {
+    const u = await seedUser(ctx.prisma, 'mnorec', 'pw-mnorec-secure')
+    seq += 1
+    const row = await ctx.prisma.container.create({
+      data: {
+        name: `mnorec${seq}`,
+        port: 40000 + seq,
+        ownerId: u.id,
+        token: 't',
+        homeDir: '/h',
+        image: 'img',
+        status: 'running',
+      },
+    })
+    let rewriteCount = 0
+    const countingWriter: ModelConfigWriter = { rewrite: async () => { rewriteCount += 1 } }
+    const svc = new ModelProviderService(ctx.prisma, countingWriter)
+    const input: ModelProviderWriteInput = {
+      providerId: 'dup',
+      api: 'openai-completions',
+      baseUrl: 'https://x/v1',
+      apiKeyEnvId: 'LLM_API_KEY',
+      authHeader: true,
+      models: [{ id: 'm' }],
+    }
+    await svc.create(row, input)
+    expect(rewriteCount).toBe(1) // 成功 create 恰写一次
+    await expect(svc.create(row, input)).rejects.toBeInstanceOf(Error)
+    expect(rewriteCount).toBe(1) // P2002 → needsReconcile=false → 不再写第二遍
   })
 
   // P2a「写盘前校验 model 字段类型」：schema 里 models 条目除 id 外全 unknown，{id:'m', name:{}} 能过——

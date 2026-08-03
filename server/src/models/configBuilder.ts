@@ -74,6 +74,12 @@ export class ProviderConfigBuilder {
     return cfg
   }
 
+  // #366 codex 四轮 P1（已知风险，接受 + 文档化，非本 PR 编码缺陷）：apiKey 一律引用共享
+  // LLM_API_KEY（值仅管理员部署级配置，见 ALLOWED_API_KEY_ENV_IDS）；而 base_url 完全用户可控。
+  // 多租户不可信场景下，恶意 user 可把自家容器的 base_url 指向自己端点，诱使容器把共享 key
+  // 作为凭证发往该处 → key 外泄。这是 spec §5.2「全面板共享一个 LLM_API_KEY + 用户配置自己容器
+  // LLM 后端」的组合（Django 前身同设计，AGENTS.md「本地/可信部署可接受」姿态）；根治需 per-user
+  // 凭证或 admin 白名单 base_url，均超出 #336 范围 → 接受并文档化（见 server/README.md）。
   renderProvider(spec: ProviderSpec): Record<string, unknown> {
     return {
       baseUrl: spec.baseUrl,

@@ -28,6 +28,12 @@ export type ProviderApiWire = (typeof API_CHOICES)[number]
 // 层仍 env-agnostic，便于未来 fleet 注入更多 env 时仅放宽本集合）。
 export const ALLOWED_API_KEY_ENV_IDS: ReadonlySet<string> = new Set(['LLM_API_KEY'])
 
+// 模型 input 模态枚举（r28 §1.2 / `/gateway/config-agents` 权威列举）：入站校验闸。
+// 非法值（如 "bogus"）经 builder 原样透传落盘 → OpenClaw 热加载校验拒绝 → 运行时落后 DB（#366
+// codex 四轮 P2：z.array(z.string()) 只验容器类型、不验取值）。
+export const MODEL_INPUT_MODALITIES = ['text', 'image', 'audio', 'video', 'pdf'] as const
+export type ModelInputModality = (typeof MODEL_INPUT_MODALITIES)[number]
+
 // wire（连字符真值，落盘 openclaw.json）↔ Prisma enum（下划线标识符）映射。
 // Prisma enum 值须为合法标识符 → 下划线名 + @map 落连字符真值（schema 同款取向）。
 export const WIRE_TO_API_ENUM: Record<ProviderApiWire, ProviderApi> = {

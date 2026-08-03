@@ -122,6 +122,12 @@ npm run prisma:validate        # schema 合法性
   升上来的既有容器没有 `instances/<id>/config` 目录——provider 写盘落新路径不在容器 mount 内 → 热加载
   断链但 API 报成功。写盘已 fail-fast（缺目录 → 90003 + 提示重建，见 `models/configWriter.ts`）；
   **升级后须重建旧容器**（删除重建走新 mount）才能配置模型。
+- **共享 key 所有权边界（#336 codex 四轮 P1，已知风险接受）**：`LLM_API_KEY` 值仅管理员部署级配置
+  （env/启动配置注入），用户仅配置自己容器的 model provider 条目（含 `base_url`）引用之。**多租户不可信
+  场景下**，恶意用户可把自家 provider 的 `base_url` 指向自己端点，诱使容器把共享 key 作为凭证发往该处
+  → key 外泄、越配额/影响全体租户。这是 spec §5.2「全面板共享一个 key」决策的既定姿态（Django 前身同
+  设计；与 docker.sock §5.4 同理，本地/可信部署可接受）。根治需 per-user 凭证或 admin 白名单 base_url，
+  均超出 #336 范围，未实现——多租户部署前需另行决策。
 
 ## 下游衔接
 

@@ -1,5 +1,11 @@
 import { z } from 'zod'
-import { API_CHOICES, API_KEY_ENV_ID_REGEX, ALLOWED_API_KEY_ENV_IDS, PROVIDER_ID_REGEX } from '../models/values'
+import {
+  API_CHOICES,
+  API_KEY_ENV_ID_REGEX,
+  ALLOWED_API_KEY_ENV_IDS,
+  MODEL_INPUT_MODALITIES,
+  PROVIDER_ID_REGEX,
+} from '../models/values'
 
 // 请求体 schema（zod）。校验失败 → 90002 + flatten().fieldErrors（{field:[errors]}）。
 // username 格式：字母/数字/下划线/连字符，3–30 字符（近似 Django UnicodeUsernameValidator，更严）。
@@ -82,7 +88,9 @@ export const modelProviderWriteSchema = z.object({
           id: z.string().min(1, '每条 model 须含非空 id'),
           name: z.string().optional(),
           reasoning: z.boolean().optional(),
-          input: z.array(z.string()).optional(),
+          // #366 codex 四轮 P2：input 限 r28 §1.2 枚举（text/image/audio/video/pdf）——非法取值
+          // （如 "bogus"）原样落盘会被 OpenClaw 热加载校验拒绝，DB 却已提交报成功。
+          input: z.array(z.enum(MODEL_INPUT_MODALITIES)).optional(),
           cost: z
             .object({
               input: z.number(),

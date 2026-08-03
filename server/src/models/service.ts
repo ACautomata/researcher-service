@@ -79,6 +79,23 @@ function toView(row: ModelProvider): ModelProviderView {
   }
 }
 
+// #366 codex 四轮 P2「serialize recovery with normal per-container writes」：routes 每请求新建
+// ModelProviderService 实例，实例级锁跨请求不共享（wiki #346 同款坑）→ 模块级按容器串行化。
+// 锁包住「事务 + catch reconcile」整段：失败请求的 reconcile 与并发的成功 mutation 不再交错——
+// 否则 reconcile 的「读 DB → fs 写盘」可能读到旧态、在并发 mutation 落盘后把盘覆盖回旧配置
+// （静默发散）。DB 侧 better-sqlite3 单连接本就串行，这里同步的是 fs 写盘这一不受事务保护的资源。
+const perContainerLocks = new Map<string, Promise<unknown>>()
+async function withContainerLock<T>(containerId: string, fn: () => Promise<T>): Promise<T> {
+  const prev = perContainerLocks.get(containerId) ?? Promise.resolve()
+  const next = prev.then(fn, fn) // 前任失败不毒化链路：fn 照跑
+  perContainerLocks.set(containerId, next)
+  try {
+    return await next
+  } finally {
+    if (perContainerLocks.get(containerId) === next) perContainerLocks.delete(containerId)
+  }
+}
+
 export class ModelProviderService {
   constructor(
     private readonly prisma: PrismaClient,
@@ -111,7 +128,13 @@ export class ModelProviderService {
   //   ③ catch reconcile——事务仍可能回滚（超时/commit 失败）而 rewrite 已成功落盘：回滚后 DB 即旧
   //      状态，读回滚后 providers 重写盘上 → 盘=DB 恢复一致（codex P1「rollback-safe」而非仅依赖
   //      「30s 足够长」）。
+  // 三写操作共用：按容器串行化「事务 + catch reconcile」整段（withContainerLock 注释），
+  // 防失败请求的 reconcile 读-写与并发成功 mutation 交错覆盖（codex 四轮 P2）。
   async create(inst: Container, input: ModelProviderWriteInput): Promise<ModelProviderView> {
+    return withContainerLock(inst.id, () => this.createInner(inst, input))
+  }
+
+  private async createInner(inst: Container, input: ModelProviderWriteInput): Promise<ModelProviderView> {
     try {
       const row = await this.prisma.$transaction(
         async (tx) => {
@@ -134,15 +157,19 @@ export class ModelProviderService {
       )
       return toView(row)
     } catch (e) {
-      // 谓词拒写（20043）：事务在 DB mutation 前 abort、盘上未写，reconcile 反而是对 removing/
-      // creating 容器的多余写盘（正是谓词要防的）——跳过；其余回滚（超时/commit 失败/P2002/
-      // P2025/写盘失败）才 reconcile（幂等恢复盘=DB 一致）。
-      if (!(e instanceof EnvelopeError) || e.code !== CODE.CONTAINER_BUSY) await this.reconcile(inst)
+      // #366 codex 四轮 P2：reconcile 只在「rewrite 成功落盘后事务才回滚」（盘上领先 DB）触发——
+      // P2002/P2025（mutation 抛错、rewrite 未执行）、ConfigWriteError（fs 真失败、盘未变）、
+      // busy（谓词拒写）均盘=DB 一致，跳过（无条件 reconcile 正是 stale-write 竞态面）。
+      if (this.needsReconcile(e)) await this.reconcile(inst)
       this.rethrowKnown(e)
     }
   }
 
   async update(inst: Container, pid: string, input: ModelProviderWriteInput): Promise<ModelProviderView> {
+    return withContainerLock(inst.id, () => this.updateInner(inst, pid, input))
+  }
+
+  private async updateInner(inst: Container, pid: string, input: ModelProviderWriteInput): Promise<ModelProviderView> {
     try {
       const row = await this.prisma.$transaction(
         async (tx) => {
@@ -167,13 +194,16 @@ export class ModelProviderService {
       )
       return toView(row)
     } catch (e) {
-      // 谓词拒写（20043）跳过 reconcile（见 create 注释）。
-      if (!(e instanceof EnvelopeError) || e.code !== CODE.CONTAINER_BUSY) await this.reconcile(inst)
+      if (this.needsReconcile(e)) await this.reconcile(inst)
       this.rethrowKnown(e, { containerId: inst.id, pid })
     }
   }
 
   async remove(inst: Container, pid: string): Promise<void> {
+    return withContainerLock(inst.id, () => this.removeInner(inst, pid))
+  }
+
+  private async removeInner(inst: Container, pid: string): Promise<void> {
     try {
       await this.prisma.$transaction(
         async (tx) => {
@@ -186,8 +216,7 @@ export class ModelProviderService {
         { timeout: 30_000 },
       )
     } catch (e) {
-      // 谓词拒写（20043）跳过 reconcile（见 create 注释）。
-      if (!(e instanceof EnvelopeError) || e.code !== CODE.CONTAINER_BUSY) await this.reconcile(inst)
+      if (this.needsReconcile(e)) await this.reconcile(inst)
       this.rethrowKnown(e, { containerId: inst.id, pid })
     }
   }
@@ -225,10 +254,23 @@ export class ModelProviderService {
     }
   }
 
-  // #366 codex P1「rollback-safe」：事务回滚（超时/commit 失败）时事务内 rewrite 的 fs 写盘不可取消、
-  // 可能已落盘 → DB 回滚但盘上领先发散。回滚后 DB 即旧状态：读回滚后的 providers → rewrite 盘上 →
-  // 盘=DB 恢复一致。best-effort——reconcile 自身 fs 失败（同故障面）不掩盖原始错误，留日志即可，
-  // 下次任何成功 rewrite 会自然对齐。谓词拒写/P2002/P2025 等「DB 未变、盘上未写」的失败也幂等无害。
+  // #366 codex 四轮 P2「reconcile only failures known to occur after a successful rewrite」：
+  // 仅「rewrite 成功落盘后事务才回滚」（P2028 交互事务超时 / commit 失败）需要 reconcile——fs 写盘
+  // 不可取消、可能已落新配置，盘上领先 DB。P2002/P2025（mutation 抛错、rewrite 未执行）、
+  // ConfigWriteError（fs 真失败、盘未变）、CONTAINER_BUSY（谓词拒写）均盘=DB 一致，reconcile 是
+  // 多余写盘 → 跳过。多余写盘即 stale-write 竞态面：与并发的成功 mutation 交错会覆盖新配置
+  // （withContainerLock 已把本恢复与正常写串行化，此处再收窄避免无谓的盘写入）。
+  private needsReconcile(e: unknown): boolean {
+    if (e instanceof EnvelopeError && e.code === CODE.CONTAINER_BUSY) return false
+    if (e instanceof ConfigWriteError) return false
+    const code = (e as { code?: string }).code
+    return code !== 'P2002' && code !== 'P2025'
+  }
+
+  // #366 codex P1「rollback-safe」：事务回滚（P2028 超时/commit 失败）时事务内 rewrite 的 fs 写盘
+  // 不可取消、可能已落盘 → DB 回滚但盘上领先发散。回滚后 DB 即旧状态：读回滚后的 providers →
+  // rewrite 盘上 → 盘=DB 恢复一致。best-effort——reconcile 自身 fs 失败（同故障面）不掩盖原始错误，
+  // 留日志即可，下次任何成功 rewrite 会自然对齐。
   private async reconcile(inst: Container): Promise<void> {
     try {
       const rows = await this.prisma.modelProvider.findMany({
@@ -257,6 +299,11 @@ export class ModelProviderService {
     // 写盘失败（卷只读/满）→ 90003；DB 已随事务回滚，配置停留上一份一致状态
     if (e instanceof ConfigWriteError) {
       throw fail(CODE.LLM_NOT_CONFIGURED, '配置写盘失败，已回滚数据库变更')
+    }
+    // 交互事务超时（P2028）：rewrite 可能已落盘但 DB 回滚——reconcile 已恢复盘=DB；对客户端呈现
+    // 配置写盘失败信封（90003）而非裸 90000 内部错误（#366 codex 四轮 P2 收窄 reconcile 的伴生映射）。
+    if (code === 'P2028') {
+      throw fail(CODE.LLM_NOT_CONFIGURED, '配置写盘超时，已回滚数据库变更')
     }
     throw e
   }

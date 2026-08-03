@@ -64,7 +64,13 @@ export class TemplateModelConfigWriter implements ModelConfigWriter {
           `容器为旧版本（缺 ${configDir} 目录），模型配置无法热加载到运行中的容器——请重建该容器后再配置`,
         )
       }
-      throw e
+      // #366 codex 四轮 P2：非 ENOENT 的 probe 失败（EACCES——服务账号不可遍历 instances/<id>）
+      // 包成 90003 与写盘路径同域——否则裸 fs 错误落全局兜底 90000，同一权限故障 probe 与
+      // write（ConfigWriteError → 90003）分类不一致。
+      throw new ContainerDomainError(
+        CODE.LLM_NOT_CONFIGURED,
+        `config 目录探测失败 ${configDir}: ${(e as Error).message}`,
+      )
     }
   }
 
