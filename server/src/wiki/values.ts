@@ -20,3 +20,8 @@ export const EXCERPT_LEN = 200
 
 // 页面标题 frontmatter 值上限（_page_title 只读前 2000 字符，防大文件整读；保留原行为）
 export const TITLE_READ_CHARS = 2000
+
+// _page_title 有界字节前缀上限（TITLE_READ_CHARS × 4，覆盖最坏 4 字节/字符）：原实现 read_text 把
+// 整个文件 buffer 进内存再 slice，容器写超大/稀疏 .md 一个页面就能撑爆内存或杀死 Node——只读字节前缀
+// 再 decode+slice 字符（codex PR#346 P1）。
+export const TITLE_READ_BYTES = TITLE_READ_CHARS * 4

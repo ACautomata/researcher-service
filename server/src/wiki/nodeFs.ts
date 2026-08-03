@@ -15,12 +15,12 @@
 //   5. 迭代而非递归：显式栈 DFS，深度仅受文件系统路径上限约束，不触发栈溢出；每层排序。
 //   6. path 双保险：①请求层校验（paths.ts）+ ②本层 _resolve 的 managed 黑名单 + realpath 落 root 内。
 
-import { promises as fsp } from 'node:fs'
+import { promises as fsp, constants as fsConstants } from 'node:fs'
 import path from 'node:path'
 import type { Dirent, Stats } from 'node:fs'
 import type { FileHandle } from 'node:fs/promises'
 import { FrontmatterParser, frontmatterTitle } from './logic'
-import { SKIP_DIRS, SKIP_FILES, TITLE_READ_CHARS } from './values'
+import { SKIP_DIRS, SKIP_FILES, TITLE_READ_CHARS, TITLE_READ_BYTES } from './values'
 import { WikiInvalidPath, WikiPageExists, WikiPageNotFound } from './errors'
 import type {
   WikiCategoryPage,
@@ -40,7 +40,7 @@ export interface FsLike {
   readlink(p: string): Promise<string>
   writeFile(p: string, data: string, opts?: { flag?: string }): Promise<void> // 缺省编码 utf8；flag 供 createPage 独占创建（wx）
   unlink(p: string): Promise<void>
-  open(p: string, flag: string): Promise<FileHandle> // 供 pinOpen 钉住 inode 后经 fd 读写（TOCTOU 防护，codex PR#346 P1）
+  open(p: string, flag: string | number): Promise<FileHandle> // 供 pinOpen 钉住 inode 后经 fd 读写（TOCTOU 防护，codex PR#346 P1）；number flag 传 O_NONBLOCK 防 FIFO 阻塞
 }
 
 // UTF-8 严格解码：非法字节抛 TypeError（对齐 Python read_text(encoding='utf-8') 的
@@ -51,8 +51,34 @@ function decodeUtf8Strict(buf: Buffer): string {
   return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(buf)
 }
 
+// 解码字节前缀：截断处可能切断多字节 UTF-8 序列（fatal decoder 抛 TypeError）——末尾最多 3 字节
+// 不完整（UTF-8 最长 4 字节），逐步回退重试到完整序列边界。对齐 Python read_text 按字符截断不切断
+// 多字节字符的行为；解码整体失败（非截断导致的非法字节）返回 null（调用方降级，codex PR#346 P1）。
+function decodePrefix(buf: Buffer): string | null {
+  for (let trim = 0; trim <= 3 && trim < buf.length; trim += 1) {
+    try {
+      return decodeUtf8Strict(buf.subarray(0, buf.length - trim))
+    } catch {
+      // 末尾仍含不完整序列 → 继续回退（最多 3 字节）
+    }
+  }
+  return null
+}
+
+// 字典序比较（对齐 Python 的 Unicode code-point 序）。
+// JS 的 `a < b` 按 UTF-16 code-unit 序：非 BMP 字符（emoji 等代理对 [D800–DFFF]）会排在高 BMP
+// 字符（如 fullwidth U+FF21）之前，与 Python code-point 序相反。WikilinkResolver 对重复
+// stem/title 先见者优先——顺序反转让同一 [[target]] 边解析到不同页面（codex PR#346）。按 code-point 比较。
 function cmp(a: string, b: string): number {
-  return a < b ? -1 : a > b ? 1 : 0
+  const ax = [...a] // 按 Unicode code-point 迭代（解开代理对）
+  const bx = [...b]
+  const n = Math.min(ax.length, bx.length)
+  for (let i = 0; i < n; i += 1) {
+    const ca = ax[i].codePointAt(0) ?? 0
+    const cb = bx[i].codePointAt(0) ?? 0
+    if (ca !== cb) return ca < cb ? -1 : 1
+  }
+  return ax.length - bx.length
 }
 
 // 文件名去 .md 后缀（对齐 Python Path.stem：去最后一个后缀）。
@@ -154,6 +180,9 @@ export class NodeWikiFileSystem implements WikiFileSystem {
     } catch (err) {
       if ((err as { code?: string }).code === 'EEXIST') throw new WikiPageExists(relPath)
       if ((err as { code?: string }).code === 'ENOENT') throw new WikiInvalidPath(relPath)
+      // 父段是普通文件（如 notes.md/child.md）：open(wx) 抛 ENOTDIR（父段非目录）——映射为
+      // WikiInvalidPath → 路由层 90002(data.path)，而非内部错误 90000（codex PR#346）。
+      if ((err as { code?: string }).code === 'ENOTDIR') throw new WikiInvalidPath(relPath)
       throw err
     }
     try {
@@ -230,7 +259,11 @@ export class NodeWikiFileSystem implements WikiFileSystem {
     }
     let fh: FileHandle
     try {
-      fh = await this.fs.open(fpath, flag)
+      // O_NONBLOCK：FIFO/socket/设备文件命名 .md 时，open 只读会无限等 writer、卡死 libuv worker
+      // pool，fh.stat().isFile() 复核永不到达（codex PR#346 P1）。加 O_NONBLOCK 让 open 立即返回，
+      // 由随后的 isFile() 复核拒绝非 regular；普通文件 O_NONBLOCK 被忽略（总是就绪）。
+      const openFlag = (flag === 'r' ? fsConstants.O_RDONLY : fsConstants.O_RDWR) | fsConstants.O_NONBLOCK
+      fh = await this.fs.open(fpath, openFlag)
     } catch (err) {
       if ((err as { code?: string }).code === 'ENOENT') throw new WikiPageNotFound(relPath)
       if ((err as { code?: string }).code === 'ELOOP') throw new WikiInvalidPath(relPath) // 打开时末段已成 symlink
@@ -265,13 +298,23 @@ export class NodeWikiFileSystem implements WikiFileSystem {
     withContent: boolean,
   ): Promise<void> {
     try {
-      if (!(await this.fs.stat(dirpath)).isDirectory()) return
+      // lstat（不跟随）：dirpath 在调用方 readdir 给出 Dirent 后可能被容器换成 symlink 指向 root 外——
+      // stat 会跟随读外部目录、后续遍历再无 containment 校验（codex PR#346 P1）。lstat 对 symlink 返回
+      // isDirectory()=false → 拒。
+      if (!(await this.fs.lstat(dirpath)).isDirectory()) return
     } catch {
       return
     }
     const stack: Array<[string, string]> = [[dirpath, relPrefix]]
     while (stack.length > 0) {
       const [curDir, curPrefix] = stack.pop()!
+      // point of use 不跟随：push→pop 之间 curDir 可能被换 symlink，readdir(curDir) 会跟随——pop 后
+      // lstat 复核，识别 symlink/非目录则跳过该子树（codex PR#346 P1）。
+      try {
+        if (!(await this.fs.lstat(curDir)).isDirectory()) continue
+      } catch {
+        continue
+      }
       const entries = await this.readdir(curDir)
       if (entries === null) continue
       for (const f of entries) {
@@ -296,6 +339,15 @@ export class NodeWikiFileSystem implements WikiFileSystem {
     rel: string,
     withContent: boolean,
   ): Promise<WikiTreePage | WikiCategoryPage | null> {
+    // Dirent 已判 isFile，但读取前文件可能被换 symlink（point of use 防护，codex PR#346 P1）：
+    // readText/readTitlePrefix 的 readFile/open 会跟随 symlink 读外部——lstat 复核非 symlink 且仍
+    // regular，否则跳过该页（降级，不 500）。
+    try {
+      const st = await this.fs.lstat(fpath)
+      if (!st.isFile() || st.isSymbolicLink()) return null
+    } catch {
+      return null
+    }
     if (!withContent) {
       return { path: rel, title: await this.pageTitle(fpath, stemOf(path.basename(fpath))) }
     }
@@ -315,12 +367,34 @@ export class NodeWikiFileSystem implements WikiFileSystem {
     }
   }
 
-  // 从 frontmatter 取标题（只读前 TITLE_READ_CHARS 字符）；读失败/解码失败 → 文件名 fallback。
+  // 从 frontmatter 取标题（只读有界字节前缀，防大文件整读撑爆内存）；读失败/解码失败 → 文件名 fallback。
   private async pageTitle(fpath: string, fallback: string): Promise<string> {
-    const raw = await this.readText(fpath)
+    const raw = await this.readTitlePrefix(fpath)
     if (raw === null) return fallback
     const { frontmatter } = this.parser.parse(raw.slice(0, TITLE_READ_CHARS))
     return frontmatterTitle(frontmatter) ?? fallback
+  }
+
+  // 只读文件前 TITLE_READ_BYTES 字节并解码为标题文本（codex PR#346 P1）：原 pageTitle 经 readText 把
+  // 整个文件 buffer 进内存再 slice，TITLE_READ_CHARS 的边界形同虚设——容器写超大/稀疏 .md 一个页面就
+  // 能撑爆内存或杀死 Node。O_NONBLOCK 打开（FIFO/设备不阻塞 worker，纵然 scanDir 已过滤仍 defense in
+  // depth）；fh.read 限定字节数，截断多字节序列由 decodePrefix 回退处理。
+  private async readTitlePrefix(fpath: string): Promise<string | null> {
+    let fh: FileHandle
+    try {
+      fh = await this.fs.open(fpath, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK)
+    } catch {
+      return null
+    }
+    try {
+      const buf = Buffer.alloc(TITLE_READ_BYTES)
+      const { bytesRead } = await fh.read(buf, 0, TITLE_READ_BYTES, 0)
+      return decodePrefix(buf.subarray(0, bytesRead))
+    } catch {
+      return null
+    } finally {
+      await fh.close().catch(() => {})
+    }
   }
 
   // 正文首个 `# ` 标题文本（无 frontmatter 时的标题兜底）；无 H1 返回 null。

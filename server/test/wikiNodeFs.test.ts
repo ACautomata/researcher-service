@@ -103,6 +103,32 @@ describe('NodeWikiFileSystem.buildTree', () => {
     expect(all).not.toContain('concepts/evil.md')
   })
 
+  it('scanDir 入口前子目录被换 symlink → 不跟随、不泄露外部文件（codex PR#346 P1）', async () => {
+    const main = makeRoot()
+    const outside = path.join(path.dirname(path.dirname(main)), 'outside-scandir')
+    mkdirSync(outside)
+    writeFileSync(path.join(outside, 'leaked.md'), '# LEAKED\n')
+    // 父 readdir(root) 给出 concepts Dirent 后、scanDir 入口首个原语前，容器把 concepts 换 symlink →
+    // outside：stat 跟随会读外部目录（无 containment），lstat 不跟随则拒。
+    const fs = swapOnFirstTouch(path.join(main, 'concepts'), outside)
+    const tree = await new NodeWikiFileSystem(main, fs).buildTree()
+    const all = tree.groups.flatMap((g) => g.pages.map((p) => p.path))
+    expect(all.some((p) => p.includes('leaked'))).toBe(false)
+  })
+
+  it('scanDir 下钻子目录在 pop/readdir 前被换 symlink → 跳过该子树（codex PR#346 P1）', async () => {
+    const main = makeRoot()
+    const outside = path.join(path.dirname(path.dirname(main)), 'outside-pop')
+    mkdirSync(outside)
+    writeFileSync(path.join(outside, 'leaked.md'), '# LEAKED\n')
+    // concepts/sub 入口 lstat 通过（仍是真目录）；push 后、pop 出 sub 到 readdir(sub) 前，容器把
+    // sub 换 symlink → outside：无 pop 复核则 readdir 跟随读外部；pop 后 lstat 复核识别 symlink → 跳过。
+    const fs = swapOnFirstTouch(path.join(main, 'concepts', 'sub'), outside)
+    const tree = await new NodeWikiFileSystem(main, fs).buildTree()
+    const all = tree.groups.flatMap((g) => g.pages.map((p) => p.path))
+    expect(all.some((p) => p.includes('leaked'))).toBe(false)
+  })
+
   it('FIFO/非 regular file 命名 .md 不列出（读取会阻塞 worker）', async () => {
     const main = makeRoot()
     try {
@@ -154,6 +180,35 @@ describe('NodeWikiFileSystem.buildTree', () => {
     expect(paths).toEqual([...paths].sort())
   })
 
+  it('文件名含非 BMP 与高 BMP 字符按 Unicode code-point 序（对齐 Python，codex PR#346）', async () => {
+    const main = makeRoot()
+    // fullwidth Ａ = U+FF21（高 BMP）vs 😀 = U+1F600（非 BMP，UTF-16 代理对 [D83D,DE00]）：
+    //   UTF-16 code-unit 序：D83D < FF21 → 😀 在前
+    //   Unicode code-point 序：FF21 < 1F600 → Ａ 在前（Python 行为，反转）
+    // WikilinkResolver 对重复 stem/title 先见者优先——顺序反转让同一 [[target]] 解析到不同页。
+    mkdirSync(path.join(main, 'uni'))
+    writeFileSync(path.join(main, 'uni', 'Ａpage.md'), '# A\n')
+    writeFileSync(path.join(main, 'uni', '😀page.md'), '# E\n')
+    const tree = await new NodeWikiFileSystem(main).buildTree()
+    const uni = tree.groups.find((g) => g.kind === 'uni')!
+    const paths = uni.pages.map((p) => p.path)
+    // 以独立 code-point 比较为 oracle：pages 顺序须与 code-point 序一致（Python）而非 UTF-16 序。
+    const byCodePoint = (a: string, b: string): number => {
+      const ax = [...a]
+      const bx = [...b]
+      const n = Math.min(ax.length, bx.length)
+      for (let i = 0; i < n; i += 1) {
+        const d = (ax[i].codePointAt(0) ?? 0) - (bx[i].codePointAt(0) ?? 0)
+        if (d !== 0) return d < 0 ? -1 : 1
+      }
+      return ax.length - bx.length
+    }
+    expect(paths).toEqual([...paths].sort(byCodePoint))
+    // code-point 序：Ａ(FF21) 在前、😀(1F600) 在后——直接钉死，防 oracle 自身写错。
+    expect(paths[0]).toBe('uni/Ａpage.md')
+    expect(paths[1]).toBe('uni/😀page.md')
+  })
+
   it('非 UTF-8 字节的 .md 退到文件名 fallback，不让整棵树 500', async () => {
     const main = makeRoot()
     writeFileSync(path.join(main, 'concepts', 'bad.md'), Buffer.from([0xff, 0xfe, 0xfa, 32, 105]))
@@ -161,6 +216,33 @@ describe('NodeWikiFileSystem.buildTree', () => {
     const concepts = tree.groups.find((g) => g.kind === 'concepts')!
     const bad = concepts.pages.find((p) => p.path === 'concepts/bad.md')!
     expect(bad.title).toBe('bad')
+  })
+
+  it('buildTree 的 pageTitle 只读有界字节前缀，不缓冲整个大文件（codex PR#346 P1）', async () => {
+    const main = makeRoot()
+    // 远超有界前缀的文件，frontmatter title 在开头（既要读到 title，又不被整文件撑爆内存）。
+    writeFileSync(path.join(main, 'concepts', 'big.md'), `---\ntitle: Big\n---\n# Big\n` + 'x'.repeat(200 * 1024))
+    const readSizes: number[] = []
+    const fs: FsLike = {
+      readdir: (dir, opts) => fsp.readdir(dir, opts),
+      readFile: async (p) => {
+        const b = await fsp.readFile(p)
+        readSizes.push(b.length)
+        return b
+      },
+      stat: (p) => fsp.stat(p),
+      lstat: (p) => fsp.lstat(p),
+      realpath: (p) => fsp.realpath(p),
+      readlink: (p) => fsp.readlink(p),
+      writeFile: (p, d, o) => fsp.writeFile(p, d, o),
+      unlink: (p) => fsp.unlink(p),
+      open: (p, flag) => fsp.open(p, flag),
+    }
+    const tree = await new NodeWikiFileSystem(main, fs).buildTree()
+    const big = tree.groups.find((g) => g.kind === 'concepts')!.pages.find((p) => p.path === 'concepts/big.md')!
+    expect(big.title).toBe('Big') // 读了 frontmatter
+    // pageTitle 不得 readFile 缓冲整文件（200KB）；有界前缀应远小于文件大小。
+    expect(Math.max(0, ...readSizes)).toBeLessThan(100 * 1024)
   })
 
   it('任意深度嵌套不触发栈溢出（迭代 DFS）', async () => {
@@ -198,6 +280,22 @@ describe('NodeWikiFileSystem.buildTree', () => {
   })
 })
 
+describe('NodeWikiFileSystem.listCategoryPages', () => {
+  it('顶层文件读取前被换 symlink → 不读外部内容（point of use，codex PR#346 P1）', async () => {
+    const main = makeRoot()
+    writeFileSync(path.join(main, 'secret.md'), '# LOCAL\n') // 顶层散落 .md（非 SKIP_FILES）
+    const outside = path.join(path.dirname(path.dirname(main)), 'outside-cat')
+    mkdirSync(outside)
+    writeFileSync(path.join(outside, 'x.md'), '# LEAKED-CONTENT\n')
+    // readdir(root) 给出 secret.md Dirent（真文件）后、pageEntry 读取前，容器把它换 symlink → 外部文件：
+    // readFile 跟随会读外部内容进 categories；pageEntry 入口 lstat 复核识别 symlink → 跳过该页。
+    const fs = swapOnFirstTouch(path.join(main, 'secret.md'), path.join(outside, 'x.md'))
+    const cats = await new NodeWikiFileSystem(main, fs).listCategoryPages()
+    expect(cats.map((c) => c.content).some((c) => c.includes('LEAKED-CONTENT'))).toBe(false)
+    expect(cats.find((c) => c.path === 'secret.md')).toBeUndefined()
+  })
+})
+
 describe('NodeWikiFileSystem 页面 CRUD', () => {
   it('read_page 返回原文全文 + frontmatter title', async () => {
     const page = await new NodeWikiFileSystem(makeRoot()).readPage('concepts/attention.md')
@@ -212,6 +310,21 @@ describe('NodeWikiFileSystem 页面 CRUD', () => {
     await expect(fs.readPage('../../evil.md')).rejects.toBeInstanceOf(WikiInvalidPath)
     await expect(fs.readPage('.openclaw-wiki/evil.md')).rejects.toBeInstanceOf(WikiInvalidPath)
     await expect(fs.readPage('concepts/index.md')).rejects.toBeInstanceOf(WikiInvalidPath)
+  })
+
+  it('read_page/delete_page 命中 FIFO → WikiPageNotFound，open 不阻塞 worker（O_NONBLOCK，codex PR#346 P1）', async () => {
+    const main = makeRoot()
+    try {
+      execFileSync('mkfifo', [path.join(main, 'concepts', 'hang.md')])
+    } catch {
+      return // 环境无 mkfifo → 跳过
+    }
+    const fs = new NodeWikiFileSystem(main)
+    // 修复前 open('r') 对 FIFO 只读打开会无限等 writer → 卡死 libuv worker pool；超时兜底判红/绿。
+    const timeout = <T>(p: Promise<T>, ms = 1500): Promise<T> =>
+      Promise.race([p, new Promise<T>((_, rej) => setTimeout(() => rej(new Error('open 阻塞超时')), ms))])
+    await expect(timeout(fs.readPage('concepts/hang.md'))).rejects.toBeInstanceOf(WikiPageNotFound)
+    await expect(timeout(fs.deletePage('concepts/hang.md'))).rejects.toBeInstanceOf(WikiPageNotFound)
   })
 
   it('symlink 逃逸读写全拦：目标解析到 root 外 → WikiInvalidPath', async () => {
@@ -307,6 +420,14 @@ describe('NodeWikiFileSystem 页面 CRUD', () => {
     expect((await fsp.readFile(path.join(main, 'concepts', 'new.md'))).toString('utf8')).toBe('# New\n')
     await expect(fs.createPage('concepts/attention.md', 'x')).rejects.toBeInstanceOf(WikiPageExists)
     await expect(fs.createPage('nope-dir/x.md', 'x')).rejects.toBeInstanceOf(WikiInvalidPath)
+  })
+
+  it('create_page 父路径是普通文件（notes.md/child.md）→ WikiInvalidPath 而非 90000（codex PR#346）', async () => {
+    const main = makeRoot()
+    const fs = new NodeWikiFileSystem(main)
+    // concepts/attention.md 是已存在的 regular file：在其路径下建子页，open(wx) 抛 ENOTDIR
+    // （父段非目录）。须映射为 WikiInvalidPath → 路由层 90002(data.path)，而非内部错误 90000。
+    await expect(fs.createPage('concepts/attention.md/child.md', '# X\n')).rejects.toBeInstanceOf(WikiInvalidPath)
   })
 
   it('并发 create_page 同一路径：一个成功、另一个 WikiPageExists（wx 原子，codex PR#346）', async () => {
@@ -425,6 +546,68 @@ function racySwapFs(main: string, outside: string): FsLike {
     },
     open: async (p, flag) => {
       swap()
+      return fsp.open(p, flag)
+    },
+  }
+}
+
+// FsLike 替身：任何原语（stat/lstat/readdir/open/...）第一次收到 target 路径时，先把 target 换成
+// symlink → outside（rename 原目标 + symlink outside 到 target 位），之后透传。复现 codex PR#346 P1
+// 的 scanDir TOCTOU：父 readdir 给出 Dirent 后、子目录/文件被访问前，容器并发把目标换成 root 外链接。
+function swapOnFirstTouch(target: string, outside: string): FsLike {
+  let swapped = false
+  const ensureSwap = (): void => {
+    if (swapped) return
+    swapped = true
+    try {
+      renameSync(target, `${target}-orig`)
+    } catch {
+      /* 目标已不在 */
+    }
+    try {
+      symlinkSync(outside, target)
+    } catch {
+      /* 链接已存在 */
+    }
+  }
+  const maybeSwap = (p: string): void => {
+    if (p === target) ensureSwap()
+  }
+  return {
+    readdir: async (dir, opts) => {
+      maybeSwap(dir)
+      return fsp.readdir(dir, opts)
+    },
+    readFile: async (p) => {
+      maybeSwap(p)
+      return fsp.readFile(p)
+    },
+    stat: async (p) => {
+      maybeSwap(p)
+      return fsp.stat(p)
+    },
+    lstat: async (p) => {
+      maybeSwap(p)
+      return fsp.lstat(p)
+    },
+    realpath: async (p) => {
+      maybeSwap(p)
+      return fsp.realpath(p)
+    },
+    readlink: async (p) => {
+      maybeSwap(p)
+      return fsp.readlink(p)
+    },
+    writeFile: async (p, d, o) => {
+      maybeSwap(p)
+      return fsp.writeFile(p, d, o)
+    },
+    unlink: async (p) => {
+      maybeSwap(p)
+      return fsp.unlink(p)
+    },
+    open: async (p, flag) => {
+      maybeSwap(p)
       return fsp.open(p, flag)
     },
   }
