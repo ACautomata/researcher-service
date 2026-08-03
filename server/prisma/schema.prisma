@@ -100,7 +100,7 @@ model Container {
 
   token          String // 应用层加密后的密文
   tokenEncrypted Boolean @default(false)
-  homeDir        String // bind-mount 宿主路径 instances/<name>/home
+  homeDir        String // bind-mount 宿主路径 instances/<id>/home（代系绑定 #360）
   containerId    String @default("") // run 前未知；空串而非 NULL
   status         ContainerStatus @default(creating)
   image          String

@@ -1,5 +1,5 @@
 // HomeProvisioner —— 容器 home 预填充（平移 backend/containers/provisioner.py，#334）。
-// bind-mount 宿主 instances/<name>/home 决策下，新容器 home 由控制面直接 cp -a 从共享只读
+// bind-mount 宿主 instances/<id>/home 决策下，新容器 home 由控制面直接 cp -a 从共享只读
 // 模板预填充。dereference:false + preserveTimestamps 对齐 cp -a（archive：递归、保留符号链接）。
 
 import { cp } from 'node:fs/promises'

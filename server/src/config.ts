@@ -120,7 +120,7 @@ function readTemplateDir(): string {
   return raw ?? `${process.cwd()}/../researcher`
 }
 
-// OPENCLAW_FLEET_ROOT（Codex 第七轮 #4）：相对路径时 path.join 保留相对性 → instances/<name>/home 与
+// OPENCLAW_FLEET_ROOT（Codex 第七轮 #4）：相对路径时 path.join 保留相对性 → instances/<id>/home 与
 // openclaw.json 作 Docker bind source 非绝对（Docker bind source 须绝对）→ POST 返 creating、后台
 // provisioning 失败留 error 行（部署故障静默掩盖，与 OPENCLAW_TEMPLATE_DIR 第六轮同类）。生产强制
 // 绝对路径（对齐 readTemplateDir），显式相对 fail-fast；缺省走 cwd/fleet 绝对兜底；dev/test 保持容忍。
@@ -158,7 +158,7 @@ export const config = {
       )
     }
     return {
-      // instances/<name>/ 落盘根（生产须绝对路径 → readFleetRoot fail-fast；缺省 <cwd>/fleet 绝对）
+      // instances/<id>/ 落盘根（生产须绝对路径 → readFleetRoot fail-fast；缺省 <cwd>/fleet 绝对）
       root: readFleetRoot(),
       // 共享只读模板（cp -a 预填充源；生产必填绝对路径 → readTemplateDir fail-fast）
       templateDir: readTemplateDir(),

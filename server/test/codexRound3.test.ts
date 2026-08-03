@@ -88,7 +88,7 @@ describe('codex round3: 意见①—⑥ 复现/回归', () => {
     await ctx.prisma.container.delete({ where: { id: inst.id } })
     await expect(fl3.orch.createComplete(inst, true)).rejects.toThrow()
     // 修后：remove 无法确认 → 目录保留（数据未删）、容器仍驻留（未删）
-    const dir = path.join(fl3.fleetRoot, 'instances', 'r3-keepp')
+    const dir = path.join(fl3.fleetRoot, 'instances', inst.id)
     expect(existsSync(dir)).toBe(true)
     expect(fl3.runtime.containers.has('r3-keepp')).toBe(true)
   })
@@ -117,7 +117,7 @@ describe('codex round3: 意见①—⑥ 复现/回归', () => {
       where: { name: 'r3-orphan' },
       data: { status: 'removing' },
     })
-    const dir = path.join(fl5.fleetRoot, 'instances', 'r3-orphan')
+    const dir = path.join(fl5.fleetRoot, 'instances', inst.id)
     expect(existsSync(dir)).toBe(true)
     await fl5.orch.list({ ownerId }) // list 触发对账
     // 第七轮 #5 后：「无容器分支」经 requeueDelete detach 走 delete 本体（代系 recheck 仲裁），
