@@ -19,7 +19,7 @@ import { promises as fsp, constants as fsConstants } from 'node:fs'
 import path from 'node:path'
 import type { Dirent, Stats } from 'node:fs'
 import type { FileHandle } from 'node:fs/promises'
-import { FrontmatterParser, frontmatterTitle } from './logic'
+import { cmp, FrontmatterParser, frontmatterTitle } from './logic'
 import { SKIP_DIRS, SKIP_FILES, TITLE_READ_CHARS, TITLE_READ_BYTES } from './values'
 import { WikiInvalidPath, WikiPageExists, WikiPageNotFound } from './errors'
 import type {
@@ -65,25 +65,32 @@ function decodePrefix(buf: Buffer): string | null {
   return null
 }
 
-// 字典序比较（对齐 Python 的 Unicode code-point 序）。
-// JS 的 `a < b` 按 UTF-16 code-unit 序：非 BMP 字符（emoji 等代理对 [D800–DFFF]）会排在高 BMP
-// 字符（如 fullwidth U+FF21）之前，与 Python code-point 序相反。WikilinkResolver 对重复
-// stem/title 先见者优先——顺序反转让同一 [[target]] 边解析到不同页面（codex PR#346）。按 code-point 比较。
-function cmp(a: string, b: string): number {
-  const ax = [...a] // 按 Unicode code-point 迭代（解开代理对）
-  const bx = [...b]
-  const n = Math.min(ax.length, bx.length)
-  for (let i = 0; i < n; i += 1) {
-    const ca = ax[i].codePointAt(0) ?? 0
-    const cb = bx[i].codePointAt(0) ?? 0
-    if (ca !== cb) return ca < cb ? -1 : 1
-  }
-  return ax.length - bx.length
-}
+// 字典序比较（对齐 Python 的 Unicode code-point 序）见 logic.ts 的 cmp（nodeFs/service 共用）。
 
 // 文件名去 .md 后缀（对齐 Python Path.stem：去最后一个后缀）。
 function stemOf(name: string): string {
   return name.endsWith('.md') ? name.slice(0, -3) : name
+}
+
+// 并发同页写序列化（codex 第五轮 P1）：per-path 互斥把「truncate+write」变原子——否则两个 PUT 同页，
+// 两 handle 都截断后较短写入者把较长者尾部残留，内容既非 A 也非 B。模块级（非实例级）：路由层每次请求
+// 新建 NodeWikiFileSystem 实例，实例级锁跨请求不共享、形同虚设。键含 root，隔离不同容器同名页。
+const pageLocks = new Map<string, Promise<void>>()
+
+function withPageLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const prev = pageLocks.get(key) ?? Promise.resolve()
+  const run = prev.then(fn, fn) // 前一任务失败也继续执行本次
+  // 存入的 tail 恒 resolve（吞错），保证链不断；错误由调用方 await run 处理
+  const tail = run.then(
+    () => undefined,
+    () => undefined,
+  )
+  pageLocks.set(key, tail)
+  // 本任务完成后清理：仅当仍是最新链尾（无后续入队）才删除，否则保留给后续任务
+  tail.finally(() => {
+    if (pageLocks.get(key) === tail) pageLocks.delete(key)
+  })
+  return run
 }
 
 export class NodeWikiFileSystem implements WikiFileSystem {
@@ -150,14 +157,19 @@ export class NodeWikiFileSystem implements WikiFileSystem {
   // —— Port: write_page ——
 
   async writePage(relPath: string, content: string): Promise<{ path: string }> {
-    const { fh } = await this.pinOpen(relPath, 'r+') // 'r+' 打开不截断；验证后才清空写入（byte-exact）
-    try {
-      await fh.truncate(0)
-      await fh.writeFile(content) // 经 fd 写入：open 后路径换链不影响本次 I/O（inode 已钉住）
-    } finally {
-      await fh.close().catch(() => {})
-    }
-    return { path: relPath }
+    // 并发 PUT 同页：两个 handle 都 'r+' 打开、都 truncate(0) 后，较短写入者把较长者尾部残留，内容
+    // 既非 A 也非 B（codex 第五轮 P1）。per-path 锁把「pinOpen+truncate+write+close」串行化；
+    // 键含 root 隔离不同容器（见 withPageLock 模块级注释）。
+    return withPageLock(`${this.root}::${relPath}`, async () => {
+      const { fh } = await this.pinOpen(relPath, 'r+') // 'r+' 打开不截断；验证后才清空写入（byte-exact）
+      try {
+        await fh.truncate(0)
+        await fh.writeFile(content) // 经 fd 写入：open 后路径换链不影响本次 I/O（inode 已钉住）
+      } finally {
+        await fh.close().catch(() => {})
+      }
+      return { path: relPath }
+    })
   }
 
   // —— Port: create_page ——
@@ -165,12 +177,11 @@ export class NodeWikiFileSystem implements WikiFileSystem {
   async createPage(relPath: string, content: string): Promise<{ path: string }> {
     const fpath = await this.resolve(relPath)
     const parentParts = relPath.split('/').slice(0, -1)
-    // 父目录 anchor：逐段禁止 symlink 下钻到父目录（lstatDeep），返回其 inode。旧 `lstat(dirname(fpath))`
-    // 单独捕获会跟随 resolve 后被换的中间段 symlink、命中逃逸目录 inode，使随后 parentNow 复核恒匹配，
+    // 父目录锚定（open 前逐段禁 symlink 下钻到父目录，验证其存在且为目录）。旧 `lstat(dirname(fpath))`
+    // 单独捕获会跟随 resolve 后被换的中间段 symlink、命中逃逸目录 inode，使随后复核恒匹配，
     // 新文件被建到 root 外/他人容器（codex 第四轮 P1）。
-    let parentAnchor: number
     try {
-      parentAnchor = await this.lstatDeep(parentParts, 'dir', relPath)
+      await this.lstatDeep(parentParts, 'dir', relPath)
     } catch {
       throw new WikiInvalidPath(relPath) // 父不存在/非目录/含 symlink（对齐原 NotADirectoryError → WikiInvalidPath）
     }
@@ -188,18 +199,22 @@ export class NodeWikiFileSystem implements WikiFileSystem {
       throw err
     }
     try {
-      // 创建后复核：父目录仍是同一 inode（逐段再验、未被换链/换 symlink）。lstatDeep 抛（symlink/不存在）
-      // 或 ino 不等 → 误建可能落在 root 外，清理后拒（codex 第四轮 P1）。
-      const parentNow = await this.lstatDeep(parentParts, 'dir', relPath).catch(() => null)
-      if (parentNow !== parentAnchor) {
-        // 仅当 fpath 仍指向我们刚创建的 inode 才清理（防误删并发替换/他人文件），随后拒。
-        try {
-          const st = await fh.stat()
-          const now = await this.fs.lstat(fpath)
-          if (now.ino === st.ino) await this.fs.unlink(fpath).catch(() => {})
-        } catch {
-          /* 目标不可判 → 不清理 */
-        }
+      // open('wx') 成功后，验证 fd 锁定的新文件确实在 root 内：以 fh.stat().ino 与「root 下逐段禁
+      // symlink 下钻到末段」的 inode 比对（与 pinOpen 同款）。仅比对父目录 before/after inode 挡不住
+      // 「换出-建外-恢复」时序——open 运行期间父目录被瞬时换外部 symlink、新文件建到 root 外、随即
+      // 恢复，parentAnchor==parentNow 恒匹配，fd 却指向 root 外文件，writeFile 会写外部并返回成功
+      // （codex 第五轮 P1）。建外后恢复：fpath 下并无该文件（lstatDeep 末段 ENOENT）或中间段残留
+      // symlink（lstatDeep 拒）→ fd 不在 root 内 → 清理后拒。
+      const ino = (await fh.stat()).ino
+      let underRoot: number
+      try {
+        underRoot = await this.lstatDeep(relPath.split('/'), 'file', relPath)
+      } catch {
+        await this.cleanupCreated(fpath, ino)
+        throw new WikiInvalidPath(relPath)
+      }
+      if (underRoot !== ino) {
+        await this.cleanupCreated(fpath, ino)
         throw new WikiInvalidPath(relPath)
       }
       await fh.writeFile(content)
@@ -213,7 +228,10 @@ export class NodeWikiFileSystem implements WikiFileSystem {
 
   async deletePage(relPath: string): Promise<void> {
     // unlink 无 fd 原语（Node 无 unlinkat）：pinOpen 校验打开对象（open 前祖先换 symlink → 拒），
-    // 再紧贴 unlink 前 lstat 复核 inode，把 close→unlink 的换链窗口压到最小（TOCTOU，codex PR#346 P1）。
+    // 紧贴 unlink 前 lstat 复核 inode，把 close→unlink 的换链窗口压到最小（codex PR#346 P1）。
+    // 窗口内祖先仍可能被换链、路径型 unlink 跟随删到外部同名——「unlink 后复核删除生效」兜底：
+    // root 内该文件必须已消失；若仍在（同 inode），说明 unlink 删的是别处（外部 victim）→ 攻击，
+    // 抛 InvalidPath 而非静默成功（codex 第五轮 P1）。
     const { fpath, fh, anchor } = await this.pinOpen(relPath, 'r')
     await fh.close().catch(() => {})
     let now: Stats
@@ -231,9 +249,30 @@ export class NodeWikiFileSystem implements WikiFileSystem {
       if ((err as { code?: string }).code === 'ENOENT') throw new WikiPageNotFound(relPath)
       throw err
     }
+    // unlink 后复核：逐段禁 symlink 下钻（lstat 对中间段会跟随，遇换链会读到外部、复核失效）。
+    // lstatDeep 找到文件（root 内该页仍在）→ unlink 没删到它（删了外部 victim）→ 拒。
+    try {
+      await this.lstatDeep(relPath.split('/'), 'file', relPath)
+      throw new WikiInvalidPath(relPath)
+    } catch (err) {
+      if (err instanceof WikiInvalidPath) throw err
+      // WikiPageNotFound → 文件已消失，unlink 生效（正常删除）
+    }
   }
 
   // —— internal ——
+
+  // 清理刚误建的文件：仅当 fpath 仍指向我们刚创建的 inode 才 unlink（防误删并发替换/他人文件）。
+  // 建到 root 外时 fpath（基于当前路径）解析不到该 inode → no-op：writeFile 未执行，外部只留 open 创建
+  // 的空文件，不构成内容泄露。
+  private async cleanupCreated(fpath: string, ino: number): Promise<void> {
+    try {
+      const now = await this.fs.lstat(fpath)
+      if (now.ino === ino) await this.fs.unlink(fpath).catch(() => {})
+    } catch {
+      /* 目标不可判/不存在 → 不清理 */
+    }
+  }
 
   private async rootUsable(): Promise<boolean> {
     // root 与其直接父任一为 symlink，或 root 非目录 → 拒绝遍历（codex #125 P1/P2）。
@@ -420,7 +459,9 @@ export class NodeWikiFileSystem implements WikiFileSystem {
   private async pageTitle(fpath: string, fallback: string): Promise<string> {
     const raw = await this.readTitlePrefix(fpath)
     if (raw === null) return fallback
-    const { frontmatter } = this.parser.parse(raw.slice(0, TITLE_READ_CHARS))
+    // 按 Unicode code-point 截断（[...str] 解代理对）：`raw.slice(0, N)` 按 UTF-16 code unit 计，含
+    // emoji 的 frontmatter 会在 title 键前被截断 → 解析失败 fallback 文件名（codex 第五轮 P2）。
+    const { frontmatter } = this.parser.parse([...raw].slice(0, TITLE_READ_CHARS).join(''))
     return frontmatterTitle(frontmatter) ?? fallback
   }
 

@@ -240,6 +240,26 @@ describe('WikiService listCategories（fake FS）', () => {
     expect(data['__proto__'][0].path).toBe('a/p.md')
     expect(data['__proto__'][0].category).toBe('__proto__')
   })
+
+  it('category 名含非 BMP 与高 BMP 字符按 Unicode code-point 序（对齐 Python，codex 第五轮 P2）', async () => {
+    const fs = new FakeWikiFileSystem({
+      'a/emoji.md': '# P\n\n`category: 😀cat`\n\n正文。\n',
+      'b/full.md': '# Q\n\n`category: Ａcat`\n\n正文。\n',
+    })
+    const data = await new WikiService(fs).listCategories()
+    // code-point 序:fullwidth U+FF21(65313) < emoji U+1F600(128512) → 小写化的 ａcat 在前;
+    // 默认 sort() 按 UTF-16 code-unit 序,emoji 代理对(0xD83D=55357)会排在前面 → 顺序相反
+    expect(Object.keys(data)).toEqual(['ａcat', '😀cat'])
+  })
+
+  it('同 category 组内 path 按 code-point 序（非 BMP 字符，codex 第五轮 P2）', async () => {
+    const fs = new FakeWikiFileSystem({
+      'x/😀p.md': '# P\n\n`category: c`\n\n正文。\n',
+      'x/Ａp.md': '# Q\n\n`category: c`\n\n正文。\n',
+    })
+    const data = await new WikiService(fs).listCategories()
+    expect(data.c.map((i) => i.path)).toEqual(['x/Ａp.md', 'x/😀p.md'])
+  })
 })
 
 describe('WikiService buildGraph（fake FS）', () => {

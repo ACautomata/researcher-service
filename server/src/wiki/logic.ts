@@ -5,6 +5,23 @@
 
 import { CATEGORY_RE, EXCERPT_LEN, H1_RE, H2_RE, WIKILINK_RE } from './values'
 
+// 字典序比较（对齐 Python 的 Unicode code-point 序）。
+// JS 的 `a < b` 按 UTF-16 code-unit 序：非 BMP 字符（emoji 等代理对 [D800–DFFF]）会排在高 BMP
+// 字符（如 fullwidth U+FF21）之前，与 Python code-point 序相反。树/图/categories 排序与
+// WikilinkResolver 对重复 stem/title 先见者优先——顺序反转让同一 [[target]] 边解析到不同页面
+// （codex PR#346 第三轮 nodeFs / 第五轮 service）。按 code-point 比较。
+export function cmp(a: string, b: string): number {
+  const ax = [...a] // 按 Unicode code-point 迭代（解开代理对）
+  const bx = [...b]
+  const n = Math.min(ax.length, bx.length)
+  for (let i = 0; i < n; i += 1) {
+    const ca = ax[i].codePointAt(0) ?? 0
+    const cb = bx[i].codePointAt(0) ?? 0
+    if (ca !== cb) return ca < cb ? -1 : 1
+  }
+  return ax.length - bx.length
+}
+
 // frontmatter 值：标量或行内 [a,b] 列表（嵌套键如 paper:/claims: 被跳过，不解析）。
 export type FrontmatterValue = string | string[]
 export type Frontmatter = Record<string, FrontmatterValue>

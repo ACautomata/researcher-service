@@ -4,7 +4,7 @@
 // 以及 CRUD（read/write/create/delete）与路径双保险（穿越/managed/symlink 逃逸）。
 
 import { describe, it, expect } from 'vitest'
-import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, renameSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, renameSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { execFileSync } from 'node:child_process'
@@ -570,6 +570,107 @@ describe('NodeWikiFileSystem 页面 CRUD', () => {
     const nfs = new NodeWikiFileSystem(main, fs)
     await expect(nfs.deletePage('concepts/attention.md')).rejects.toBeInstanceOf(WikiPageNotFound)
   })
+
+  it('createPage:open(wx) 运行时父目录换出-建外-恢复 → 不得写 root 外文件且返回成功（swap-and-restore，codex 第五轮 P1）', async () => {
+    const main = makeRoot()
+    const outside = path.join(path.dirname(path.dirname(main)), 'outside-swap')
+    mkdirSync(outside)
+    const nfs = new NodeWikiFileSystem(main, swapDuringOpenFs(main, outside))
+    // open(wx) 期间 concepts 瞬时换 symlink→outside、建到外部后恢复:open 前后父目录 inode 相同,
+    // parentAnchor==parentNow 检查通过,旧实现会 fh.writeFile 写外部并返回成功。须以 fd ino 与
+    // root 下逐段下钻末段 inode 比对拦截(建外后恢复 → 路径下无该文件 → 复核 ENOENT → 拒)。
+    await expect(nfs.createPage('concepts/newpage.md', '# NEW\n')).rejects.toBeInstanceOf(WikiInvalidPath)
+    // root 内不残留（建到外部又恢复时本地路径下不该有该文件）
+    await expect(fsp.stat(path.join(main, 'concepts', 'newpage.md'))).rejects.toBeTruthy()
+    // 外部文件即使被 open 创建成空文件,也不得写入内容（create 被拒,writeFile 未执行）
+    const ext = path.join(outside, 'newpage.md')
+    if (await fsp.stat(ext).then(() => true).catch(() => false)) {
+      expect((await fsp.readFile(ext)).toString('utf8')).not.toContain('# NEW')
+    }
+  })
+
+  it('deletePage:inode 复核后祖先换链、unlink 删到外部 → 检测并抛 InvalidPath,本地文件安全（codex 第五轮 P1）', async () => {
+    const main = makeRoot()
+    const outside = path.join(path.dirname(path.dirname(main)), 'outside-unlink')
+    mkdirSync(outside)
+    writeFileSync(path.join(outside, 'attention.md'), '# EXTERNAL\n')
+    const nfs = new NodeWikiFileSystem(main, swapOnUnlinkFs(main, outside))
+    // pinOpen fd 已关闭、inode 复核后,路径型 unlink 仍可被换链引到外部删除 victim。Node 无 unlinkat,
+    // 无法原子化——「unlink 后复核删除生效」:root 内文件仍在(同 inode)说明 unlink 删的是别处 → 拒,
+    // 不静默成功;本地文件安全。
+    await expect(nfs.deletePage('concepts/attention.md')).rejects.toBeInstanceOf(WikiInvalidPath)
+    expect((await fsp.readFile(path.join(main, 'concepts', 'attention.md'))).toString('utf8')).toContain('title: Attention')
+  })
+
+  it('并发 write_page 同页被 per-path 锁序列化:truncate+write 原子,内容不被混合（codex 第五轮 P1）', async () => {
+    const main = makeRoot()
+    writeFileSync(path.join(main, 'concepts', 'attention.md'), '# 原\n')
+    const events: string[] = []
+    let release!: () => void
+    const gate = new Promise<void>((r) => { release = r })
+    let opens = 0
+    const fs: FsLike = {
+      readdir: (d, o) => fsp.readdir(d, o),
+      readFile: (p) => fsp.readFile(p),
+      stat: (p) => fsp.stat(p),
+      lstat: (p) => fsp.lstat(p),
+      realpath: (p) => fsp.realpath(p),
+      readlink: (p) => fsp.readlink(p),
+      writeFile: (p, d, o) => fsp.writeFile(p, d, o),
+      unlink: (p) => fsp.unlink(p),
+      open: async (p, flag) => {
+        // 包装 FileHandle:拦截 truncate/writeFile 记录顺序;第一个 writer 的写入挂起,验证第二个
+        // writer 不会并发进入 truncate+write 段（否则 events 会变成 truncate1,truncate2,write1,write2）
+        const fh = await fsp.open(p, flag)
+        const label = ++opens
+        return new Proxy(fh, {
+          get(t, prop) {
+            if (prop === 'truncate') {
+              return async (n?: number) => {
+                events.push(`truncate${label}`)
+                return t.truncate(n)
+              }
+            }
+            if (prop === 'writeFile') {
+              return async (d: string | Uint8Array) => {
+                events.push(`write${label}`)
+                if (label === 1) await gate // 第一个 writer 卡在写入中
+                return t.writeFile(d)
+              }
+            }
+            const v = Reflect.get(t, prop)
+            return typeof v === 'function' ? v.bind(t) : v
+          },
+        })
+      },
+    }
+    const nfs = new NodeWikiFileSystem(main, fs)
+    const p1 = nfs.writePage('concepts/attention.md', 'LONG'.repeat(40))
+    const p2 = nfs.writePage('concepts/attention.md', 'S')
+    // 等第一个 writer 挂起在 write1;锁生效时第二个 writer 的 pinOpen 也被挡住(opens 仍为 1)
+    await waitUntil(() => events.includes('write1'))
+    expect(events).toEqual(['truncate1', 'write1'])
+    expect(opens).toBe(1)
+    release()
+    await Promise.all([p1, p2])
+    // 锁生效:第二个 writer 的 truncate 在第一个 writer 写入完成后才发生(原子序列,非交错)
+    expect(events).toEqual(['truncate1', 'write1', 'truncate2', 'write2'])
+    // 最终内容为后写者完整内容(无混合)
+    expect((await fsp.readFile(path.join(main, 'concepts', 'attention.md'))).toString('utf8')).toBe('S')
+  })
+
+  it('pageTitle 按 code-point 截断:frontmatter title 在大量 emoji 后仍解析,不 fallback 文件名（codex 第五轮 P2）', async () => {
+    const main = makeRoot()
+    // 1100 emoji = 2200 UTF-16 code units > TITLE_READ_CHARS(2000):raw.slice 按 units 截断在 1000
+    // emoji,title 行未进入 → parser 不识别 frontmatter → fallback 文件名。按 code-point 截断后
+    // 1100+emoji 与 title 共 ~1133 code points ≤ 2000,完整 frontmatter 进入 → 正确解析。
+    writeFileSync(path.join(main, 'concepts', 'cpt.md'), `---\nprefix: ${'😀'.repeat(1100)}\ntitle: Real Title\n---\n# Body\n`)
+    const fs = new NodeWikiFileSystem(main)
+    const tree = await fs.buildTree()
+    const group = tree.groups.find((g) => g.name === 'concepts')!
+    const page = group.pages.find((p) => p.path === 'concepts/cpt.md')!
+    expect(page.title).toBe('Real Title')
+  })
 })
 
 // FsLike 替身：仅让指定目录 readdir 抛 EACCES（对齐 Django monkeypatch Path.iterdir）。
@@ -726,5 +827,71 @@ function swapAfterOpenFs(main: string, outside: string): FsLike {
       swap() // fd 已锁定 open 时的真对象；此后 lstatDeep 复核会发现 concepts 已成 symlink → 拒
       return fh
     },
+  }
+}
+
+// FsLike 替身:open(wx) 运行时把 concepts 瞬时换成外部 symlink(新文件建到 root 外)、随后恢复。
+// 复现 codex 第五轮 P1 的「换出-建外-恢复」:open 前后父目录 inode 相同,parentAnchor==parentNow,
+// 仅比对父目录 before/after 挡不住——须以 fd ino 与 root 下逐段下钻末段 inode 比对(建外后恢复,
+// 路径下无该文件 → 复核 ENOENT → 拒,writeFile 不会执行,外部只剩空文件)。
+function swapDuringOpenFs(main: string, outside: string): FsLike {
+  const concepts = path.join(main, 'concepts')
+  let swapped = false
+  return {
+    readdir: (d, o) => fsp.readdir(d, o),
+    readFile: (p) => fsp.readFile(p),
+    stat: (p) => fsp.stat(p),
+    lstat: (p) => fsp.lstat(p),
+    realpath: (p) => fsp.realpath(p),
+    readlink: (p) => fsp.readlink(p),
+    writeFile: (p, d, o) => fsp.writeFile(p, d, o),
+    unlink: (p) => fsp.unlink(p),
+    open: async (p, flag) => {
+      if (swapped) return fsp.open(p, flag)
+      swapped = true
+      renameSync(concepts, `${concepts}-orig`)
+      symlinkSync(outside, concepts)
+      const fh = await fsp.open(p, flag) // 跟随 symlink,建到 outside
+      rmSync(concepts, { force: true }) // 删 symlink 本身
+      renameSync(`${concepts}-orig`, concepts)
+      return fh
+    },
+  }
+}
+
+// FsLike 替身:unlink 运行时把 concepts 瞬时换成外部 symlink(unlink 跟随删外部同名)、随后恢复。
+// 复现 codex 第五轮 P1:pinOpen fd 已关闭、inode 复核通过后,路径型 unlink 仍可被换链引到外部。
+// Node 无 unlinkat,无法原子化——改「unlink 后复核删除生效」:若 root 内文件仍在(同 inode),说明
+// unlink 删的是别处 → 抛 InvalidPath,不静默成功。
+function swapOnUnlinkFs(main: string, outside: string): FsLike {
+  const concepts = path.join(main, 'concepts')
+  let swapped = false
+  return {
+    readdir: (d, o) => fsp.readdir(d, o),
+    readFile: (p) => fsp.readFile(p),
+    stat: (p) => fsp.stat(p),
+    lstat: (p) => fsp.lstat(p),
+    realpath: (p) => fsp.realpath(p),
+    readlink: (p) => fsp.readlink(p),
+    writeFile: (p, d, o) => fsp.writeFile(p, d, o),
+    unlink: async (p) => {
+      if (swapped) return fsp.unlink(p)
+      swapped = true
+      renameSync(concepts, `${concepts}-orig`)
+      symlinkSync(outside, concepts)
+      await fsp.unlink(p) // 跟随 symlink 删 outside/attention.md
+      rmSync(concepts, { force: true })
+      renameSync(`${concepts}-orig`, concepts)
+    },
+    open: (p, flag) => fsp.open(p, flag),
+  }
+}
+
+// 轮询等待条件成立(超时抛错);用于并发测试里等第一个 writer 挂起后再做断言。
+async function waitUntil(cond: () => boolean, timeoutMs = 2000): Promise<void> {
+  const start = Date.now()
+  while (!cond()) {
+    if (Date.now() - start > timeoutMs) throw new Error('waitUntil timeout')
+    await new Promise((r) => setTimeout(r, 5))
   }
 }

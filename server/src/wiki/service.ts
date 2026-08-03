@@ -3,7 +3,7 @@
 // CategoryMarkerExtractor / WikilinkResolver。CRUD 直接委托 Port（域异常透传）；
 // buildGraph / listCategories 是本层聚合逻辑（纯逻辑，对 fake FS 可直测）。
 
-import { CategoryMarkerExtractor, FrontmatterParser, WikilinkResolver, wikilinkTargets } from './logic'
+import { CategoryMarkerExtractor, cmp, FrontmatterParser, WikilinkResolver, wikilinkTargets } from './logic'
 import type {
   WikiCategoryItem,
   WikiFileSystem,
@@ -62,10 +62,10 @@ export class WikiService {
       else groups.set(category, [item])
     }
     const result: Record<string, WikiCategoryItem[]> = Object.create(null) as Record<string, WikiCategoryItem[]>
-    for (const cat of [...groups.keys()].sort()) {
-      result[cat] = groups
-        .get(cat)!
-        .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))
+    // 组名与组内 path 均按 Unicode code-point 序（cmp）：默认 sort()/`<` 按 UTF-16 code-unit 序，含
+    // emoji 等非 BMP 字符时顺序与 Python 相反（codex 第五轮 P2）。
+    for (const cat of [...groups.keys()].sort(cmp)) {
+      result[cat] = groups.get(cat)!.sort((a, b) => cmp(a.path, b.path))
     }
     return result
   }
