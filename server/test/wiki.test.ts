@@ -283,6 +283,51 @@ describe('wiki REST（接缝 #2 信封 + #335）', () => {
     expect(compileCalls).toEqual([])
   })
 
+  // ---------------------------- NUL / body limit（codex PR#346）----------------------------
+
+  it('path 含 NUL 字节 → 90002 + data.path（GET query 与 POST/PUT body 一致，codex PR#346）', async () => {
+    const u = await seedUser(ctx.prisma, 'unul', 'pw-unul-secure')
+    const name = await seedContainer(u.id)
+    const l = await login(ctx.request, 'unul', 'pw-unul-secure')
+    const nulPath = 'concepts/a\u0000.md'
+    const g = await ctx.request
+      .get(`${BASE}/${name}/wiki/page?path=${encodeURIComponent(nulPath)}`)
+      .set(bearer(l.access))
+    expect(g.body.code).toBe(90002)
+    expect(g.body.data).toHaveProperty('path')
+    const p = await ctx.request
+      .post(`${BASE}/${name}/wiki/page`).set(bearer(l.access)).send({ path: nulPath, content: 'x' })
+    expect(p.body.code).toBe(90002)
+    expect(p.body.data).toHaveProperty('path')
+    const put = await ctx.request
+      .put(`${BASE}/${name}/wiki/page`).set(bearer(l.access)).send({ path: nulPath, content: 'x' })
+    expect(put.body.code).toBe(90002)
+    expect(put.body.data).toHaveProperty('path')
+  })
+
+  it('PUT 大页面（>256kb 通用 body limit）保存成功：wiki 走独立大 limit（codex PR#346）', async () => {
+    const u = await seedUser(ctx.prisma, 'ubig', 'pw-ubig-secure')
+    const name = await seedContainer(u.id)
+    const l = await login(ctx.request, 'ubig', 'pw-ubig-secure')
+    const big = `# Big\n\n${'x'.repeat(300_000)}\n`
+    const res = await ctx.request
+      .put(`${BASE}/${name}/wiki/page`)
+      .set(bearer(l.access))
+      .send({ path: 'concepts/attention.md', content: big })
+    expect(res.body.code).toBe(0)
+    const read = await ctx.request
+      .get(`${BASE}/${name}/wiki/page?path=${encodeURIComponent('concepts/attention.md')}`)
+      .set(bearer(l.access))
+    expect(read.body.data.content).toHaveLength(big.length)
+  })
+
+  it('body 超限（非 wiki 端点仍受 256kb）→ 90002，非 90000（entity.too.large 显式映射）', async () => {
+    const res = await ctx.request
+      .post('/api/v1/auth/login')
+      .send({ username: 'x'.repeat(300_000), password: 'y'.repeat(300_000) })
+    expect(res.body.code).toBe(90002)
+  })
+
   // ---------------------------- GET /graph ----------------------------
 
   it('graph：节点来自 tree；wikilink 不可解析 → ghost 节点；related_pages 出边', async () => {

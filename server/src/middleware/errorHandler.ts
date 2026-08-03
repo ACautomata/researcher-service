@@ -14,8 +14,10 @@ export const envelopeErrorHandler: ErrorRequestHandler = (err, _req, res, _next)
     res.json({ code: err.code, message: err.message, data: null })
     return
   }
-  // JSON 解析失败（坏 body）→ 90002 校验失败
-  if (err instanceof SyntaxError || (err as { type?: string }).type === 'entity.parse.failed') {
+  // JSON 解析失败（坏 body）/ body 超限（entity.too.large，body-parser PayloadTooLargeError）
+  // → 90002 校验失败（codex PR#346：超限曾落 90000 未知错误）。
+  const errType = (err as { type?: string }).type
+  if (err instanceof SyntaxError || errType === 'entity.parse.failed' || errType === 'entity.too.large') {
     res.json({ code: CODE.VALIDATION_FAILED, message: defaultMessage(CODE.VALIDATION_FAILED), data: null })
     return
   }

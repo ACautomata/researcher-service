@@ -43,7 +43,8 @@ export class WikiService {
   // 只收带标记页；无标记页与插件私有目录/占位文件（fs 层已过滤）不进响应。组名按字典序、
   // 组内按 path 字典序，保证响应稳定。
   // 用 Map 累积：category 是开放词表、用户可控，`constructor`/`toString` 等值若用普通对象
-  // `??=` 会命中继承属性崩溃（codex 评审#1）——Map 无原型链污染。
+  // `??=` 会命中继承属性崩溃（codex 评审#1）——Map 无原型链污染。结果对象用 null-prototype：
+  // `__proto__` 键在普通对象上会触发原型 setter 而非建自有属性，category 静默丢失（codex PR#346）。
   async listCategories(): Promise<Record<string, WikiCategoryItem[]>> {
     const groups = new Map<string, WikiCategoryItem[]>()
     for (const page of await this.fs.listCategoryPages()) {
@@ -60,7 +61,7 @@ export class WikiService {
       if (list) list.push(item)
       else groups.set(category, [item])
     }
-    const result: Record<string, WikiCategoryItem[]> = {}
+    const result: Record<string, WikiCategoryItem[]> = Object.create(null) as Record<string, WikiCategoryItem[]>
     for (const cat of [...groups.keys()].sort()) {
       result[cat] = groups
         .get(cat)!
@@ -80,9 +81,10 @@ export class WikiService {
     const nodeIds = new Set(allPages.map((p) => p.path))
     const edges: WikiGraph['edges'] = []
     // 用 Set 记 ghost 已见（不用 `raw in ghosts`：open 词表 wikilink 目标 `constructor`/`toString`
-    // 等会命中普通对象继承属性，导致 ghost 节点被漏建——codex 评审#2）。
+    // 等会命中普通对象继承属性，导致 ghost 节点被漏建——codex 评审#2）。ghost 存储用 Map：
+    // `__proto__` 目标在普通对象上会触发原型 setter 而非建键，节点静默丢失、edge 悬空（codex PR#346）。
     const ghostSeen = new Set<string>()
-    const ghosts: Record<string, { id: string; title: string; ghost: true }> = {}
+    const ghosts = new Map<string, { id: string; title: string; ghost: true }>()
 
     for (const page of allPages) {
       let content: string
@@ -103,7 +105,7 @@ export class WikiService {
         let toId = resolver.resolve(raw)
         if (toId === null) {
           if (!nodeIds.has(raw) && !ghostSeen.has(raw)) {
-            ghosts[raw] = { id: raw, title: raw, ghost: true }
+            ghosts.set(raw, { id: raw, title: raw, ghost: true })
             ghostSeen.add(raw)
           }
           toId = raw
@@ -111,6 +113,6 @@ export class WikiService {
         edges.push({ from: page.path, to: toId })
       }
     }
-    return { nodes: [...nodes, ...Object.values(ghosts)], edges }
+    return { nodes: [...nodes, ...ghosts.values()], edges }
   }
 }

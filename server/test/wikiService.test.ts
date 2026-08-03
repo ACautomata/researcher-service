@@ -230,6 +230,16 @@ describe('WikiService listCategories（fake FS）', () => {
     expect(data['constructor'][0].path).toBe('a/p.md')
     expect(data['tostring'][0].path).toBe('b/q.md')
   })
+
+  it('category 值为 __proto__ → 仍是枚举键，不触发原型 setter 而丢失（codex PR#346）', async () => {
+    const fs = new FakeWikiFileSystem({
+      'a/p.md': '# P\n\n`category: __proto__`\n\n正文。\n',
+    })
+    const data = await new WikiService(fs).listCategories()
+    expect(Object.keys(data)).toContain('__proto__')
+    expect(data['__proto__'][0].path).toBe('a/p.md')
+    expect(data['__proto__'][0].category).toBe('__proto__')
+  })
 })
 
 describe('WikiService buildGraph（fake FS）', () => {
@@ -286,5 +296,13 @@ describe('WikiService buildGraph（fake FS）', () => {
     const ghost = graph.nodes.find((n) => n.id === 'constructor')
     expect(ghost).toMatchObject({ id: 'constructor', title: 'constructor', ghost: true })
     expect(graph.edges).toContainEqual({ from: 'a/x.md', to: 'constructor' })
+  })
+
+  it('wikilink 目标为 __proto__ → ghost 节点仍建（codex PR#346）', async () => {
+    const fs = new FakeWikiFileSystem({ 'a/x.md': '# X\n\n[[__proto__]]\n' })
+    const graph = await new WikiService(fs).buildGraph()
+    const ghost = graph.nodes.find((n) => n.id === '__proto__')
+    expect(ghost).toMatchObject({ id: '__proto__', title: '__proto__', ghost: true })
+    expect(graph.edges).toContainEqual({ from: 'a/x.md', to: '__proto__' })
   })
 })

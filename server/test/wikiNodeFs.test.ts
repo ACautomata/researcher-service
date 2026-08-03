@@ -226,6 +226,20 @@ describe('NodeWikiFileSystem 页面 CRUD', () => {
     await expect(fs.deletePage('concepts/evil.md')).rejects.toBeInstanceOf(WikiInvalidPath)
   })
 
+  it('symlink alias 指向 root 内 managed 文件 → 读改删全拦（canonical 重查，codex PR#346）', async () => {
+    const main = makeRoot()
+    // concepts/alias.md → ../index.md（SKIP_FILES）；concepts/alias2.md → .openclaw-wiki/cache.md（SKIP_DIRS）
+    symlinkSync(path.join(main, 'index.md'), path.join(main, 'concepts', 'alias.md'))
+    symlinkSync(path.join(main, '.openclaw-wiki', 'cache.md'), path.join(main, 'concepts', 'alias2.md'))
+    const fs = new NodeWikiFileSystem(main)
+    await expect(fs.readPage('concepts/alias.md')).rejects.toBeInstanceOf(WikiInvalidPath)
+    await expect(fs.writePage('concepts/alias.md', 'x')).rejects.toBeInstanceOf(WikiInvalidPath)
+    await expect(fs.deletePage('concepts/alias.md')).rejects.toBeInstanceOf(WikiInvalidPath)
+    await expect(fs.readPage('concepts/alias2.md')).rejects.toBeInstanceOf(WikiInvalidPath)
+    await expect(fs.writePage('concepts/alias2.md', 'x')).rejects.toBeInstanceOf(WikiInvalidPath)
+    await expect(fs.deletePage('concepts/alias2.md')).rejects.toBeInstanceOf(WikiInvalidPath)
+  })
+
   it('dangling symlink 指向 root 外不存在目标 → 读写全拦（TOCTOU 回归）', async () => {
     const main = makeRoot()
     const outside = path.join(path.dirname(path.dirname(main)), 'outside-missing')
@@ -249,6 +263,34 @@ describe('NodeWikiFileSystem 页面 CRUD', () => {
     await expect(fs.createPage('concepts/evil-dir/y.md', 'x')).rejects.toBeInstanceOf(WikiInvalidPath)
   })
 
+  it('root 或 root 直接父被换 symlink → CRUD 全拦，不跨实例读改（codex PR#346 P1）', async () => {
+    // root（<home>/wiki/main）本身是 symlink → 指向外部目录
+    const base = mkdtempSync(path.join(tmpdir(), 'wiki-rootsym-crud-'))
+    const outside = path.join(base, 'outside')
+    mkdirSync(outside)
+    writeFileSync(path.join(outside, 'secret.md'), '# SECRET\n')
+    const rootLink = path.join(base, 'wiki', 'main')
+    mkdirSync(path.dirname(rootLink))
+    symlinkSync(outside, rootLink)
+    const fs = new NodeWikiFileSystem(rootLink)
+    await expect(fs.readPage('secret.md')).rejects.toBeInstanceOf(WikiInvalidPath)
+    await expect(fs.writePage('secret.md', 'x')).rejects.toBeInstanceOf(WikiInvalidPath)
+    await expect(fs.createPage('new.md', 'x')).rejects.toBeInstanceOf(WikiInvalidPath)
+    await expect(fs.deletePage('secret.md')).rejects.toBeInstanceOf(WikiInvalidPath)
+
+    // root 直接父（<home>/wiki）是 symlink → 指向另一实例 wiki
+    const base2 = mkdtempSync(path.join(tmpdir(), 'wiki-ancsym-crud-'))
+    const otherHome = path.join(base2, 'other-home')
+    mkdirSync(path.join(otherHome, 'wiki', 'main', 'concepts'), { recursive: true })
+    writeFileSync(path.join(otherHome, 'wiki', 'main', 'concepts', 'secret.md'), '# SECRET\n')
+    const home = path.join(base2, 'home')
+    mkdirSync(home)
+    symlinkSync(path.join(otherHome, 'wiki'), path.join(home, 'wiki'))
+    const fs2 = new NodeWikiFileSystem(path.join(home, 'wiki', 'main'))
+    await expect(fs2.readPage('concepts/secret.md')).rejects.toBeInstanceOf(WikiInvalidPath)
+    await expect(fs2.writePage('concepts/secret.md', 'x')).rejects.toBeInstanceOf(WikiInvalidPath)
+  })
+
   it('write_page 覆写 byte-exact（保留尾换行/首尾空白）；缺失 → WikiPageNotFound', async () => {
     const main = makeRoot()
     const fs = new NodeWikiFileSystem(main)
@@ -265,6 +307,23 @@ describe('NodeWikiFileSystem 页面 CRUD', () => {
     expect((await fsp.readFile(path.join(main, 'concepts', 'new.md'))).toString('utf8')).toBe('# New\n')
     await expect(fs.createPage('concepts/attention.md', 'x')).rejects.toBeInstanceOf(WikiPageExists)
     await expect(fs.createPage('nope-dir/x.md', 'x')).rejects.toBeInstanceOf(WikiInvalidPath)
+  })
+
+  it('并发 create_page 同一路径：一个成功、另一个 WikiPageExists（wx 原子，codex PR#346）', async () => {
+    const main = makeRoot()
+    const fs = new NodeWikiFileSystem(main)
+    const results = await Promise.allSettled([
+      fs.createPage('concepts/dup.md', '# A\n'),
+      fs.createPage('concepts/dup.md', '# B\n'),
+    ])
+    const fulfilled = results.filter((r) => r.status === 'fulfilled')
+    const rejected = results.filter((r) => r.status === 'rejected')
+    expect(fulfilled).toHaveLength(1)
+    expect(rejected).toHaveLength(1)
+    expect((rejected[0] as PromiseRejectedResult).reason).toBeInstanceOf(WikiPageExists)
+    // 最终落盘内容为成功一方写入（后写不覆盖）
+    const raw = (await fsp.readFile(path.join(main, 'concepts', 'dup.md'))).toString('utf8')
+    expect(['# A\n', '# B\n']).toContain(raw)
   })
 
   it('delete_page 删除；缺失 → WikiPageNotFound', async () => {

@@ -15,6 +15,9 @@ export function normalizeRelPath(raw: unknown): RelPathResult {
   const v = raw.trim()
   if (v.startsWith('/') || v.startsWith('\\')) return { ok: false, errors: ['path 须为相对路径'] }
   if (v.includes('\\')) return { ok: false, errors: ['path 不允许反斜杠'] }
+  // NUL 字节（body/query 可携带 %00）：Node fs 会抛 ERR_INVALID_ARG_VALUE，且 GET 被误译为
+  // 页不存在/POST 走 90000 —— 这里统一拒为 90002（codex PR#346）。
+  if (v.includes('\u0000')) return { ok: false, errors: ['path 不允许空字节'] }
   const parts = v.split('/').filter((p) => p !== '' && p !== '.')
   if (parts.some((p) => p === '..')) return { ok: false, errors: ['path 不允许目录穿越'] }
   if (parts.length === 0 || !parts[parts.length - 1].endsWith('.md')) {

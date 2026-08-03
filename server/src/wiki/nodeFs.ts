@@ -7,7 +7,8 @@
 // 必须复刻的防护（#315 §5，全是安全坑）：
 //   1. symlink 不跟随：遍历遇 symlink（目录/文件）一律跳过，防经树泄露 wiki/main 之外文件。
 //   2. root 与 root 直接父 symlink 检查：`<home>/wiki` 或 `<home>/wiki/main` 被换成 symlink →
-//      build_tree/list_category_pages 返回空（不 500）。更上层不查（macOS /var→/private/var 不误判）。
+//      build_tree/list_category_pages 返回空（不 500）；CRUD 经 resolve 直接拒绝（codex PR#346 P1）。
+//      更上层不查（macOS /var→/private/var 不误判）。
 //   3. 只收 regular file：FIFO/socket/device 命名 .md 会让读取阻塞 worker——Dirent.isFile() 判定。
 //   4. 不可读降级：单目录 readdir 失败 → 跳过该子树；单文件读取/UTF-8 解码失败 → tree 用文件名
 //      fallback、categories 跳过该页，不让单个坏文件把整棵树/聚合 500。
@@ -36,7 +37,7 @@ export interface FsLike {
   lstat(p: string): Promise<Stats>
   realpath(p: string): Promise<string>
   readlink(p: string): Promise<string>
-  writeFile(p: string, data: string): Promise<void> // 缺省编码 utf8（对齐 write_text(encoding='utf-8')）
+  writeFile(p: string, data: string, opts?: { flag?: string }): Promise<void> // 缺省编码 utf8；flag 供 createPage 独占创建（wx）
   unlink(p: string): Promise<void>
 }
 
@@ -125,9 +126,15 @@ export class NodeWikiFileSystem implements WikiFileSystem {
 
   async createPage(relPath: string, content: string): Promise<{ path: string }> {
     const fpath = await this.resolve(relPath)
-    if (await this.exists(fpath)) throw new WikiPageExists(relPath) // FileExistsError 优先于父目录检查
     if (!(await this.parentIsDir(fpath))) throw new WikiInvalidPath(relPath) // NotADirectoryError
-    await this.fs.writeFile(fpath, content)
+    try {
+      // wx = O_CREAT|O_EXCL 原子独占创建：并发 POST 同路径只一个成功，后写不覆盖先写；
+      // EEXIST → WikiPageExists（codex PR#346，替代 exists()+writeFile 的检查-后-写竞态）。
+      await this.fs.writeFile(fpath, content, { flag: 'wx' })
+    } catch (err) {
+      if ((err as { code?: string }).code === 'EEXIST') throw new WikiPageExists(relPath)
+      throw err
+    }
     return { path: relPath }
   }
 
@@ -163,15 +170,6 @@ export class NodeWikiFileSystem implements WikiFileSystem {
   private async isFile(p: string): Promise<boolean> {
     try {
       return (await this.fs.stat(p)).isFile()
-    } catch {
-      return false
-    }
-  }
-
-  private async exists(p: string): Promise<boolean> {
-    try {
-      await this.fs.stat(p) // 跟随 symlink：broken symlink → ENOENT → false（对齐 Path.exists()）
-      return true
     } catch {
       return false
     }
@@ -281,12 +279,27 @@ export class NodeWikiFileSystem implements WikiFileSystem {
   // root 与结果都做「realpath 尽可能深」（对齐 Python Path.resolve(strict=False)）。
   private async resolve(relPath: string): Promise<string> {
     this.assertNotManaged(relPath)
+    // root 或其直接父被换成 symlink → 直接拒绝（不先 canonicalize）：否则 realpath 会把 symlink
+    // 目标当作新信任根，containment 检查恒接受目标下路径，CRUD 可跨实例/宿主读写（codex PR#346 P1）。
+    await this.assertRootNotSymlink()
     const root = await this.realpathPrefix(this.root)
     const fpath = await this.realpathPrefix(`${root}/${relPath}`)
     if (root !== fpath && !fpath.startsWith(`${root}/`)) {
       throw new WikiInvalidPath(relPath)
     }
+    // canonical 目标重查 managed：alias 的 blacklist 只在解析前对字面路径生效，symlink 可指到
+    // SKIP 集合内文件（concepts/a.md → ../index.md / ../.openclaw-wiki/private.md）——解析后
+    // 按 canonical 相对路径再拦一次（codex PR#346）。
+    if (fpath.startsWith(`${root}/`)) {
+      this.assertNotManaged(fpath.slice(root.length + 1))
+    }
     return fpath
+  }
+
+  // root 与其直接父任一为 symlink → 拒绝解析（对齐 rootUsable 的扫描侧防护；CRUD 走 resolve）。
+  private async assertRootNotSymlink(): Promise<void> {
+    if (await this.isSymlink(this.root)) throw new WikiInvalidPath(this.root)
+    if (await this.isSymlink(path.dirname(this.root))) throw new WikiInvalidPath(this.root)
   }
 
   // managed 黑名单（#315 §4 第②层）：任一段命中 SKIP_DIRS、或末段命中 SKIP_FILES → 拒。
