@@ -164,13 +164,15 @@ export class NodeWikiFileSystem implements WikiFileSystem {
 
   async createPage(relPath: string, content: string): Promise<{ path: string }> {
     const fpath = await this.resolve(relPath)
-    // 父目录 inode anchor：resolve 后捕获；open 后 lstat(parent) 复核——父段在校验后被换 symlink、
-    // 新文件落在 root 外（另一实例/宿主）时 inode 不匹配 → 拒（TOCTOU，codex PR#346 P1）。
+    const parentParts = relPath.split('/').slice(0, -1)
+    // 父目录 anchor：逐段禁止 symlink 下钻到父目录（lstatDeep），返回其 inode。旧 `lstat(dirname(fpath))`
+    // 单独捕获会跟随 resolve 后被换的中间段 symlink、命中逃逸目录 inode，使随后 parentNow 复核恒匹配，
+    // 新文件被建到 root 外/他人容器（codex 第四轮 P1）。
     let parentAnchor: number
     try {
-      parentAnchor = (await this.fs.lstat(path.dirname(fpath))).ino
+      parentAnchor = await this.lstatDeep(parentParts, 'dir', relPath)
     } catch {
-      throw new WikiInvalidPath(relPath) // 父目录不存在（对齐原 NotADirectoryError → WikiInvalidPath）
+      throw new WikiInvalidPath(relPath) // 父不存在/非目录/含 symlink（对齐原 NotADirectoryError → WikiInvalidPath）
     }
     let fh: FileHandle
     try {
@@ -186,12 +188,13 @@ export class NodeWikiFileSystem implements WikiFileSystem {
       throw err
     }
     try {
-      const parentNow = await this.fs.lstat(path.dirname(fpath))
-      if (parentNow.ino !== parentAnchor) {
-        // 仅当 lstat(fpath) 命中的恰是我们刚创建的 inode 才清理（防误删并发替换/他人文件），
-        // 随后拒：文件不该被建到 root 外。
-        const st = await fh.stat()
+      // 创建后复核：父目录仍是同一 inode（逐段再验、未被换链/换 symlink）。lstatDeep 抛（symlink/不存在）
+      // 或 ino 不等 → 误建可能落在 root 外，清理后拒（codex 第四轮 P1）。
+      const parentNow = await this.lstatDeep(parentParts, 'dir', relPath).catch(() => null)
+      if (parentNow !== parentAnchor) {
+        // 仅当 fpath 仍指向我们刚创建的 inode 才清理（防误删并发替换/他人文件），随后拒。
         try {
+          const st = await fh.stat()
           const now = await this.fs.lstat(fpath)
           if (now.ino === st.ino) await this.fs.unlink(fpath).catch(() => {})
         } catch {
@@ -220,7 +223,14 @@ export class NodeWikiFileSystem implements WikiFileSystem {
       throw new WikiPageNotFound(relPath) // 已被并发删除
     }
     if (now.ino !== anchor) throw new WikiInvalidPath(relPath) // 复核时目标已被换链
-    await this.fs.unlink(fpath)
+    try {
+      await this.fs.unlink(fpath)
+    } catch (err) {
+      // 并发 DELETE：另一请求在本请求 inode 复核通过后、unlink 前已删掉文件 → ENOENT。映射为
+      // WikiPageNotFound（30040），而非绕过域映射成内部错误 90000（codex 第四轮 P2）。
+      if ((err as { code?: string }).code === 'ENOENT') throw new WikiPageNotFound(relPath)
+      throw err
+    }
   }
 
   // —— internal ——
@@ -251,12 +261,6 @@ export class NodeWikiFileSystem implements WikiFileSystem {
   // 字符串。缺失/非 regular（dir/FIFO/…）→ WikiPageNotFound（对齐原 isFile 语义）。
   private async pinOpen(relPath: string, flag: 'r' | 'r+'): Promise<{ fh: FileHandle; fpath: string; anchor: number }> {
     const fpath = await this.resolve(relPath)
-    let anchor: number
-    try {
-      anchor = (await this.fs.lstat(fpath)).ino
-    } catch {
-      throw new WikiPageNotFound(relPath)
-    }
     let fh: FileHandle
     try {
       // O_NONBLOCK：FIFO/socket/设备文件命名 .md 时，open 只读会无限等 writer、卡死 libuv worker
@@ -266,18 +270,63 @@ export class NodeWikiFileSystem implements WikiFileSystem {
       fh = await this.fs.open(fpath, openFlag)
     } catch (err) {
       if ((err as { code?: string }).code === 'ENOENT') throw new WikiPageNotFound(relPath)
-      if ((err as { code?: string }).code === 'ELOOP') throw new WikiInvalidPath(relPath) // 打开时末段已成 symlink
+      if ((err as { code?: string }).code === 'ELOOP') throw new WikiInvalidPath(relPath) // 末段已成 symlink
       throw err
     }
     try {
       const st = await fh.stat()
       if (!st.isFile()) throw new WikiPageNotFound(relPath)
-      if (st.ino !== anchor) throw new WikiInvalidPath(relPath) // 打开对象 ≠ resolve 时捕获的 inode → 换链逃逸
+      // fd 已钉住「open 时」实际对象的 inode（不可变）；与「root 下逐段禁止 symlink 下钻到的 inode」
+      // 比对——不一致说明 open 跟随了 resolve 之后被换的中间段 symlink 到 root 外/他人文件。旧的
+      // `lstat(fpath)` 独立捕获 anchor 会跟随已换链的中间段、命中逃逸 inode，使 open/fstat 复核恒匹配
+      // （codex 第四轮 P1）。lstatDeep 遇任一段 symlink 即拒，故 open 前/后/段间换链均被此比对拦截。
+      if (st.ino !== (await this.lstatDeep(relPath.split('/'), 'file', relPath))) {
+        throw new WikiInvalidPath(relPath)
+      }
+      return { fh, fpath, anchor: st.ino }
     } catch (err) {
       await fh.close().catch(() => {})
       throw err
     }
-    return { fh, fpath, anchor }
+  }
+
+  // 逐段从 root 下钻 lstat（不跟随任何 symlink）：任一段是 symlink → WikiInvalidPath；中间段非目录
+  // → WikiInvalidPath；末段须匹配 expectKind（file=regular / dir=目录），否则 WikiPageNotFound/
+  // InvalidPath；返回末段 inode。parts=[] 时末段即 root（用作 createPage 顶层页的父目录）。
+  // 用于把「open/open(wx) fd 锁定的 inode」与「root 下逐段非 symlink 下钻到的 inode」比对：fd 锁定
+  // open 时刻的对象（不可变），独立下钻反映当前路径真实指向，两者不等即 open 跟随了 resolve 之后被
+  // 换的中间段 symlink 到 root 外/他人文件（TOCTOU，codex 第四轮 P1）。
+  private async lstatDeep(parts: string[], expectKind: 'file' | 'dir', label: string): Promise<number> {
+    let cur = this.root
+    let st: Stats
+    try {
+      st = await this.fs.lstat(cur)
+    } catch {
+      throw new WikiPageNotFound(label)
+    }
+    if (st.isSymbolicLink()) throw new WikiInvalidPath(label) // root 被换 symlink → 下钻会跟随到 root 外
+    if (parts.length === 0) {
+      if (expectKind === 'dir' && !st.isDirectory()) throw new WikiInvalidPath(label)
+      if (expectKind === 'file' && !st.isFile()) throw new WikiPageNotFound(label)
+      return st.ino
+    }
+    for (let i = 0; i < parts.length; i += 1) {
+      cur = path.join(cur, parts[i])
+      try {
+        st = await this.fs.lstat(cur)
+      } catch {
+        throw new WikiPageNotFound(label)
+      }
+      if (st.isSymbolicLink()) throw new WikiInvalidPath(label)
+      const isLast = i === parts.length - 1
+      if (isLast) {
+        if (expectKind === 'file' && !st.isFile()) throw new WikiPageNotFound(label)
+        if (expectKind === 'dir' && !st.isDirectory()) throw new WikiInvalidPath(label)
+      } else if (!st.isDirectory()) {
+        throw new WikiInvalidPath(label)
+      }
+    }
+    return st.ino
   }
 
   private async readdir(dir: string): Promise<Dirent[] | null> {
@@ -476,9 +525,10 @@ export class NodeWikiFileSystem implements WikiFileSystem {
       }
       if (isLink && target !== null) {
         if (links >= 40) {
-          // symlink 循环防呆（Python realpath 同有 40 上限）：拼回剩余段，交由上层校验/ops 兜底
-          resolved = path.posix.join(resolved, ...queue)
-          break
+          // symlink 循环/链过深（Python realpath 同有 40 上限）：旧实现拼回剩余段会把循环段丢弃，
+          // 令 concepts/loop/page.md（loop→loop 自循环）解析成 concepts/page.md（无关真实页），CRUD
+          // 经循环别名读写删到错误目标（codex 第四轮 P2）。直接拒绝。
+          throw new WikiInvalidPath(p)
         }
         links += 1
         if (path.posix.isAbsolute(target)) {

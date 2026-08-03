@@ -494,6 +494,82 @@ describe('NodeWikiFileSystem 页面 CRUD', () => {
       expect(await fsp.readFile(path.join(outside, 'attention.md'), 'utf8')).toBe('# VICTIM\n')
     }
   })
+
+  it('open 锁定 fd 后、lstatDeep 前祖先换 symlink → 读/写/删全拦（codex 第四轮 P1）', async () => {
+    // 读：open 已锁定真文件 fd，随后 lstatDeep 逐段检测到 concepts 被换 symlink → 拒，不得读 victim
+    {
+      const main = makeRoot()
+      const outside = path.join(path.dirname(path.dirname(main)), 'outside-anchor')
+      mkdirSync(outside)
+      writeFileSync(path.join(outside, 'attention.md'), '# VICTIM\n')
+      const nfs = new NodeWikiFileSystem(main, swapAfterOpenFs(main, outside))
+      await expect(nfs.readPage('concepts/attention.md')).rejects.toBeInstanceOf(WikiInvalidPath)
+    }
+    // 写：open 锁定真 fd 后换链 → 不得覆盖 outside victim
+    {
+      const main = makeRoot()
+      const outside = path.join(path.dirname(path.dirname(main)), 'outside-anchor')
+      mkdirSync(outside)
+      writeFileSync(path.join(outside, 'attention.md'), '# VICTIM\n')
+      const nfs = new NodeWikiFileSystem(main, swapAfterOpenFs(main, outside))
+      await expect(nfs.writePage('concepts/attention.md', 'EVIL')).rejects.toBeInstanceOf(WikiInvalidPath)
+      expect(await fsp.readFile(path.join(outside, 'attention.md'), 'utf8')).toBe('# VICTIM\n')
+    }
+    // 删：open 锁定真 fd 后换链 → 不得删 outside victim
+    {
+      const main = makeRoot()
+      const outside = path.join(path.dirname(path.dirname(main)), 'outside-anchor')
+      mkdirSync(outside)
+      writeFileSync(path.join(outside, 'attention.md'), '# VICTIM\n')
+      const nfs = new NodeWikiFileSystem(main, swapAfterOpenFs(main, outside))
+      await expect(nfs.deletePage('concepts/attention.md')).rejects.toBeInstanceOf(WikiInvalidPath)
+      expect(await fsp.readFile(path.join(outside, 'attention.md'), 'utf8')).toBe('# VICTIM\n')
+    }
+  })
+
+  it('createPage：parent anchor 下钻后、open(wx) 后祖先换 symlink → 不得在 root 外新建（codex 第四轮 P1）', async () => {
+    const main = makeRoot()
+    const outside = path.join(path.dirname(path.dirname(main)), 'outside-anchor')
+    mkdirSync(outside)
+    const nfs = new NodeWikiFileSystem(main, swapAfterOpenFs(main, outside))
+    await expect(nfs.createPage('concepts/newpage.md', '# NEW\n')).rejects.toBeInstanceOf(WikiInvalidPath)
+    await expect(fsp.stat(path.join(outside, 'newpage.md'))).rejects.toBeTruthy() // 不在 root 外残留
+  })
+
+  it('symlink 自循环 loop→loop：请求其下页面不得解析成无关真实页（codex 第四轮 P2）', async () => {
+    const main = makeRoot()
+    writeFileSync(path.join(main, 'concepts', 'page.md'), '# VICTIM\n') // 受害真实页
+    symlinkSync('loop', path.join(main, 'concepts', 'loop')) // loop → concepts/loop 自循环
+    const nfs = new NodeWikiFileSystem(main)
+    // 读：不得读回受害页内容
+    await expect(nfs.readPage('concepts/loop/page.md')).rejects.toBeInstanceOf(WikiInvalidPath)
+    // 删：不得删受害页
+    await expect(nfs.deletePage('concepts/loop/page.md')).rejects.toBeInstanceOf(WikiInvalidPath)
+    expect(await fsp.readFile(path.join(main, 'concepts', 'page.md'), 'utf8')).toBe('# VICTIM\n')
+    // 写：不得覆盖受害页
+    await expect(nfs.writePage('concepts/loop/page.md', 'EVIL')).rejects.toBeInstanceOf(WikiInvalidPath)
+    expect(await fsp.readFile(path.join(main, 'concepts', 'page.md'), 'utf8')).toBe('# VICTIM\n')
+  })
+
+  it('并发 deletePage：inode 复核后 unlink 抛 ENOENT → WikiPageNotFound 而非内部错误（codex 第四轮 P2）', async () => {
+    const main = makeRoot()
+    const fs: FsLike = {
+      readdir: (dir, opts) => fsp.readdir(dir, opts),
+      readFile: (p) => fsp.readFile(p),
+      stat: (p) => fsp.stat(p),
+      lstat: (p) => fsp.lstat(p),
+      realpath: (p) => fsp.realpath(p),
+      readlink: (p) => fsp.readlink(p),
+      writeFile: (p, d, o) => fsp.writeFile(p, d, o),
+      // 模拟另一并发 DELETE 在本请求 inode 复核（lstat）通过后、unlink 前已删掉文件
+      unlink: async () => {
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
+      },
+      open: (p, flag) => fsp.open(p, flag),
+    }
+    const nfs = new NodeWikiFileSystem(main, fs)
+    await expect(nfs.deletePage('concepts/attention.md')).rejects.toBeInstanceOf(WikiPageNotFound)
+  })
 })
 
 // FsLike 替身：仅让指定目录 readdir 抛 EACCES（对齐 Django monkeypatch Path.iterdir）。
@@ -620,4 +696,35 @@ function makeRacyContext(): { nfs: NodeWikiFileSystem; outside: string } {
   mkdirSync(outside)
   writeFileSync(path.join(outside, 'attention.md'), '# VICTIM\n')
   return { nfs: new NodeWikiFileSystem(main, racySwapFs(main, outside)), outside }
+}
+
+// FsLike 替身：open 成功返回（fd 已锁定真对象）后，立即把 concepts 目录换成指向 outside 的 symlink。
+// 复现 codex 第四轮 P1：旧的 `lstat(fpath)` 独立捕获 anchor 会跟随 resolve 后被换的中间段 symlink 命中
+// 逃逸 inode；现实现 open 后用 lstatDeep 逐段（禁止 symlink）下钻比对 fd inode——open 后换链使 lstatDeep
+// 在 concepts 段遇到 symlink 即拒。注入点选「open 之后」跨平台稳健，不依赖 mkdtemp 路径与 realpath 后
+// 路径的字符串相等（macOS /var→/private/var 会让路径字符串不一致）。
+function swapAfterOpenFs(main: string, outside: string): FsLike {
+  const concepts = path.join(main, 'concepts')
+  let swapped = false
+  const swap = (): void => {
+    if (swapped) return
+    swapped = true
+    renameSync(concepts, `${concepts}-orig`)
+    symlinkSync(outside, concepts)
+  }
+  return {
+    readdir: (dir, opts) => fsp.readdir(dir, opts),
+    readFile: (p) => fsp.readFile(p),
+    stat: (p) => fsp.stat(p),
+    lstat: (p) => fsp.lstat(p),
+    realpath: (p) => fsp.realpath(p),
+    readlink: (p) => fsp.readlink(p),
+    writeFile: (p, d, o) => fsp.writeFile(p, d, o),
+    unlink: (p) => fsp.unlink(p),
+    open: async (p, flag) => {
+      const fh = await fsp.open(p, flag)
+      swap() // fd 已锁定 open 时的真对象；此后 lstatDeep 复核会发现 concepts 已成 symlink → 拒
+      return fh
+    },
+  }
 }
