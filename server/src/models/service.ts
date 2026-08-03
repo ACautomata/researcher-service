@@ -11,7 +11,7 @@
 
 import type { Container, ModelProvider, PrismaClient } from '../generated/prisma/client'
 import { ConfigWriteError } from '../containers/configStore'
-import { fail } from '../envelope'
+import { fail, EnvelopeError } from '../envelope'
 import { CODE } from '../codes'
 import { type ProviderSpec } from './configBuilder'
 import type { ModelConfigWriter } from './configWriter'
@@ -39,8 +39,9 @@ export interface ModelProviderView {
   created_at: Date
 }
 
-// 事务内只用到 modelProvider 的投影（对齐 auth.rotateInTx 的 Pick<PrismaClient,…> 接缝写法）
-type ProviderTx = Pick<PrismaClient, 'modelProvider'>
+// 事务内只用到 modelProvider 的投影（对齐 auth.rotateInTx 的 Pick<PrismaClient,…> 接缝写法）；
+// container 供 assertWritable 事务内重查状态谓词（#366 codex P2，见下）。
+type ProviderTx = Pick<PrismaClient, 'modelProvider' | 'container'>
 
 // 防御解码 modelsJson（对齐 containers.decodeScopes）：坏 JSON 让 list 请求 500；合法 JSON 但
 // 非数组也违反 models[] 响应契约 → 回退 []。
@@ -99,13 +100,22 @@ export class ModelProviderService {
   // create/update/delete 共用事务骨架：
   //   tx 内做 DB mutation → 读 tx 全量 providers → writer.rewrite。
   //   rewrite 写盘失败抛 ConfigWriteError → 事务回滚（DB 行不留 orphan）；P2002/P2025 同路径转译。
-  // #366 修复（codex P1「事务超时分裂」）：显式 timeout——Prisma 交互式事务默认 5s，rewrite 含
-  // fs 写盘（慢卷/锁时可能超 5s），超时后 DB 回滚但 fs 操作不可取消仍可能落盘 → 盘上配置领先
-  // DB 发散。显式 30s 让写盘有足够时间完成；回滚只发生在写盘真失败（fs 已失败未落盘）。
+  // #366 两轮（codex P1/P2）事务加固：
+  //   ① 显式 timeout 30s——Prisma 交互式事务默认 5s，rewrite 含 fs 写盘（慢卷/锁时可能超 5s），
+  //      超时后 DB 回滚但 fs 操作不可取消仍可能落盘 → 盘上配置领先 DB 发散；30s 让写盘有足够
+  //      时间完成（回滚只发生在写盘真失败：fs 已失败未落盘）。
+  //   ② 事务内状态谓词 assertWritable——路由层 resolveWrite 的 removing/creating 检查基于请求前
+  //      快照（check-then-act，codex P2「removal check is not atomic with mutations」），快照通过后
+  //      removing 可被并发 DELETE 标定；事务内重查行状态消除 TOCTOU，removing/creating 拒写 20043
+  //      （removing 期间写盘会与 delete 后台 rmtree 竞态 → orphan 目录残留）。
+  //   ③ catch reconcile——事务仍可能回滚（超时/commit 失败）而 rewrite 已成功落盘：回滚后 DB 即旧
+  //      状态，读回滚后 providers 重写盘上 → 盘=DB 恢复一致（codex P1「rollback-safe」而非仅依赖
+  //      「30s 足够长」）。
   async create(inst: Container, input: ModelProviderWriteInput): Promise<ModelProviderView> {
     try {
       const row = await this.prisma.$transaction(
         async (tx) => {
+          await this.assertWritable(tx, inst.id)
           const created = await tx.modelProvider.create({
             data: {
               containerId: inst.id,
@@ -124,6 +134,10 @@ export class ModelProviderService {
       )
       return toView(row)
     } catch (e) {
+      // 谓词拒写（20043）：事务在 DB mutation 前 abort、盘上未写，reconcile 反而是对 removing/
+      // creating 容器的多余写盘（正是谓词要防的）——跳过；其余回滚（超时/commit 失败/P2002/
+      // P2025/写盘失败）才 reconcile（幂等恢复盘=DB 一致）。
+      if (!(e instanceof EnvelopeError) || e.code !== CODE.CONTAINER_BUSY) await this.reconcile(inst)
       this.rethrowKnown(e)
     }
   }
@@ -132,6 +146,7 @@ export class ModelProviderService {
     try {
       const row = await this.prisma.$transaction(
         async (tx) => {
+          await this.assertWritable(tx, inst.id)
           // 复合唯一 where 定位目标行（路径 pid）：不存在 → P2025 → 40040。
           // data.providerId 可为新 pid（PUT 改 provider_id），撞同容器既有 pid → P2002 → 40041。
           const updated = await tx.modelProvider.update({
@@ -152,6 +167,8 @@ export class ModelProviderService {
       )
       return toView(row)
     } catch (e) {
+      // 谓词拒写（20043）跳过 reconcile（见 create 注释）。
+      if (!(e instanceof EnvelopeError) || e.code !== CODE.CONTAINER_BUSY) await this.reconcile(inst)
       this.rethrowKnown(e, { containerId: inst.id, pid })
     }
   }
@@ -160,6 +177,7 @@ export class ModelProviderService {
     try {
       await this.prisma.$transaction(
         async (tx) => {
+          await this.assertWritable(tx, inst.id)
           await tx.modelProvider.delete({
             where: { containerId_providerId: { containerId: inst.id, providerId: pid } },
           })
@@ -168,6 +186,8 @@ export class ModelProviderService {
         { timeout: 30_000 },
       )
     } catch (e) {
+      // 谓词拒写（20043）跳过 reconcile（见 create 注释）。
+      if (!(e instanceof EnvelopeError) || e.code !== CODE.CONTAINER_BUSY) await this.reconcile(inst)
       this.rethrowKnown(e, { containerId: inst.id, pid })
     }
   }
@@ -191,6 +211,35 @@ export class ModelProviderService {
       orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
     })
     await this.writer.rewrite({ name: inst.name, id: inst.id, providers: rows.map(toSpec) })
+  }
+
+  // #366 codex P2「事务内状态谓词」：路由层 resolveWrite 的 creating/removing 检查基于请求前快照，
+  // 与并发 DELETE（deleteReserve 标 removing → 后台 rmtree）无共享串行化——快照通过后状态可能已变。
+  // 这里在事务内重查行状态，把「removing 拒写」与 DB mutation 收进同一事务，消除 check-then-act
+  // TOCTOU：removing 期间放行写盘会与 rmtree 竞态 → ConfigStore 重建目录 → orphan 残留。
+  // 行不存在（并发删完）与 creating/removing 同拒 20043。
+  private async assertWritable(tx: ProviderTx, containerId: string): Promise<void> {
+    const inst = await tx.container.findUnique({ where: { id: containerId } })
+    if (!inst || inst.status === 'creating' || inst.status === 'removing') {
+      throw fail(CODE.CONTAINER_BUSY, '容器正在创建/删除中，暂不能配置模型，请稍候')
+    }
+  }
+
+  // #366 codex P1「rollback-safe」：事务回滚（超时/commit 失败）时事务内 rewrite 的 fs 写盘不可取消、
+  // 可能已落盘 → DB 回滚但盘上领先发散。回滚后 DB 即旧状态：读回滚后的 providers → rewrite 盘上 →
+  // 盘=DB 恢复一致。best-effort——reconcile 自身 fs 失败（同故障面）不掩盖原始错误，留日志即可，
+  // 下次任何成功 rewrite 会自然对齐。谓词拒写/P2002/P2025 等「DB 未变、盘上未写」的失败也幂等无害。
+  private async reconcile(inst: Container): Promise<void> {
+    try {
+      const rows = await this.prisma.modelProvider.findMany({
+        where: { containerId: inst.id },
+        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      })
+      await this.writer.rewrite({ name: inst.name, id: inst.id, providers: rows.map(toSpec) })
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.warn(`[models] reconcile_failed: containerId=${inst.id} err=${(e as Error).message}`)
+    }
   }
 
   // 已知领域错误转译；其余按原样上抛（ConfigurationError 90003 走错误面 ContainerDomainError 分支）。

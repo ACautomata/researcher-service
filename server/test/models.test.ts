@@ -15,6 +15,7 @@ import { setupTestApp, type TestContext } from './setup'
 import { seedAdmin, seedUser, login, bearer } from './helpers'
 import type { ContainerStatus } from '../src/generated/prisma/client'
 import { TemplateModelConfigWriter, type ModelConfigWriter } from '../src/models/configWriter'
+import { ModelProviderService, type ModelProviderWriteInput } from '../src/models/service'
 import { ConfigWriteError } from '../src/containers/configStore'
 import { ConfigurationError } from '../src/containers/errors'
 
@@ -25,9 +26,19 @@ function makeModelsFleet(): { fleetRoot: string; writer: ModelConfigWriter } {
   seq += 1
   const fleetRoot = mkdtempSync(path.join(tmpdir(), `models-rest-${process.pid}-${seq}-`))
   const templateJson = path.join(fleetRoot, 'openclaw.template.json')
+  // gateway.auth 供 ConfigRenderer 强制安全不变量；secrets.providers.default 供非空 provider 写
+  // SecretRef(provider:default) 前的存在性校验（#366 codex P2，模板缺 default 属配置错误 90003）。
   writeFileSync(
     templateJson,
-    JSON.stringify({ gateway: { auth: {} }, models: { providers: {} } }, null, 2),
+    JSON.stringify(
+      {
+        gateway: { auth: {} },
+        models: { providers: {} },
+        secrets: { providers: { default: { source: 'env' } } },
+      },
+      null,
+      2,
+    ),
   )
   // root 与 templateDir 同值即可（ConfigStore 只用 root 拼 home 路径，不读 templateDir）
   const cfg = { root: fleetRoot, templateJson, llmApiKey: 'test-llm-key' }
@@ -36,8 +47,9 @@ function makeModelsFleet(): { fleetRoot: string; writer: ModelConfigWriter } {
 
 // 可切换失败模式的 writer：'write' → ConfigWriteError（写盘失败）；'config' → ConfigurationError
 // （LLM key 缺失）；'slow' → 挂起 5.2s（超 Prisma 默认 5s 事务窗口，测 #366 显式 timeout）；
-// 其余透传真 writer。用 try/finally 复位，防污染后续用例。
-type FailMode = 'none' | 'write' | 'config' | 'slow'
+// 'writeAfterDisk' → 先真写盘成功再抛 ConfigWriteError（模拟「盘上已写 + 事务回滚」分裂，测
+// reconcile 恢复）；其余透传真 writer。用 try/finally 复位，防污染后续用例。
+type FailMode = 'none' | 'write' | 'config' | 'slow' | 'writeAfterDisk'
 let realWriter: ModelConfigWriter = { rewrite: async () => {} }
 let failMode: FailMode = 'none'
 const writer: ModelConfigWriter = {
@@ -46,6 +58,11 @@ const writer: ModelConfigWriter = {
     if (failMode === 'config') throw new ConfigurationError('LLM_API_KEY')
     if (failMode === 'slow') {
       await new Promise((r) => setTimeout(r, 5_200)) // 慢写盘：超过 Prisma 默认 5s 窗口
+    }
+    if (failMode === 'writeAfterDisk') {
+      // 盘上已写 + 事务回滚分裂：先真落盘（盘上领先 DB），再抛 ConfigWriteError 让事务回滚。
+      await realWriter.rewrite(opts)
+      throw new ConfigWriteError(opts.name, '/x/openclaw.json')
     }
     return realWriter.rewrite(opts)
   },
@@ -104,8 +121,8 @@ describe('models REST（接缝 #2 + #336）', () => {
   }
 
   function readConfig(id: string): Record<string, any> {
-    // #366：config 落 home 目录内（instances/<id>/home/openclaw.json，目录 bind 下 rename 容器内可见）
-    const text = readFileSync(path.join(fleetRoot, 'instances', id, 'home', 'openclaw.json'), 'utf8')
+    // #366：config 落 instances/<id>/config 独立目录（ro bind + OPENCLAW_CONFIG_PATH）
+    const text = readFileSync(path.join(fleetRoot, 'instances', id, 'config', 'openclaw.json'), 'utf8')
     return JSON.parse(text)
   }
 
@@ -200,6 +217,25 @@ describe('models REST（接缝 #2 + #336）', () => {
     expect(rget.body.code).toBe(0)
   })
 
+  it('#366 codex P2：service 事务内状态谓词 —— removing 容器直调 service 拒 20043（路由快照外的 TOCTOU 防线）', async () => {
+    // 路由层 resolveWrite 基于请求前快照（check-then-act）；此处直调 service（绕过路由）验证事务内
+    // assertWritable 是独立防线——快照通过后 removing 被并发标定也不放行，removing 期间不会写盘
+    // 与 delete 后台 rmtree 竞态（orphan 目录残留）。
+    const u = await seedUser(ctx.prisma, 'mtxw', 'pw-mtxw-secure')
+    const { name } = await seedContainer(u.id, 'removing')
+    const svc = new ModelProviderService(ctx.prisma, writer)
+    const inst = (await ctx.prisma.container.findUnique({ where: { name } }))!
+    const input: ModelProviderWriteInput = {
+      providerId: 'my-openai',
+      api: 'openai-completions',
+      baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
+      apiKeyEnvId: 'LLM_API_KEY',
+      authHeader: true,
+      models: [{ id: 'glm-4-plus' }],
+    }
+    await expect(svc.create(inst, input)).rejects.toMatchObject({ code: 20043 })
+  })
+
   // ---------------------------- 列表 / 新建 ----------------------------
 
   it('list 空 → []', async () => {
@@ -269,6 +305,13 @@ describe('models REST（接缝 #2 + #336）', () => {
       .send({ ...VALID, models: [{ name: 'NoId' }] })
     expect(r4.body.code).toBe(90002)
     expect(r4.body.data).toHaveProperty('models')
+    // #366 codex P2：base_url 纯空白语义为空 → 90002 + data.base_url（trim 后 min(1) 拒绝）
+    const r5 = await ctx.request
+      .post(providersOf(name))
+      .set(bearer(l.access))
+      .send({ ...VALID, base_url: '   ' })
+    expect(r5.body.code).toBe(90002)
+    expect(r5.body.data).toHaveProperty('base_url')
   })
 
   it('api_key_env_id 非法格式 / 未注入 env → 90002 + data.api_key_env_id', async () => {
@@ -538,7 +581,7 @@ describe('models REST（接缝 #2 + #336）', () => {
     const { name, id } = await seedContainer(u.id)
     const l = await login(ctx.request, 'mfailfs', 'pw-mfailfs-secure')
     await ctx.request.post(providersOf(name)).set(bearer(l.access)).send(VALID)
-    const cfgPath = path.join(fleetRoot, 'instances', id, 'home', 'openclaw.json')
+    const cfgPath = path.join(fleetRoot, 'instances', id, 'config', 'openclaw.json')
     const good = readFileSync(cfgPath, 'utf8')
     expect(good).toContain('my-openai')
 
@@ -557,6 +600,34 @@ describe('models REST（接缝 #2 + #336）', () => {
     // DB 回滚：base_url 仍是原值
     const getRes = await ctx.request.get(providerOf(name, 'my-openai')).set(bearer(l.access))
     expect(getRes.body.data.base_url).toBe('https://open.bigmodel.cn/api/paas/v4')
+  })
+
+  it('#366 codex P1：写盘成功但事务回滚（writeAfterDisk）→ reconcile 恢复盘上旧配置（盘=DB 不发散）', async () => {
+    // codex P1「rollback-safe」：显式 30s timeout 只是把分裂窗口从 5s 移到 30s——若 fs 写盘完成后
+    // 事务仍回滚（超时/commit 失败），盘上领先 DB 发散。修复：service catch 里 reconcile 读回滚后
+    // DB providers → rewrite 盘上 → 恢复一致。本用例让 writer 先真写盘成功再抛 ConfigWriteError，
+    // 模拟「盘上已写 + 事务回滚」分裂；reconcile 的 rewrite 同样先真写盘（旧配置）再抛错被吞。
+    const u = await seedUser(ctx.prisma, 'mrcn', 'pw-mrcn-secure')
+    const { name, id } = await seedContainer(u.id)
+    const l = await login(ctx.request, 'mrcn', 'pw-mrcn-secure')
+    await ctx.request.post(providersOf(name)).set(bearer(l.access)).send(VALID)
+    const cfgPath = path.join(fleetRoot, 'instances', id, 'config', 'openclaw.json')
+    expect(readFileSync(cfgPath, 'utf8')).toContain('open.bigmodel.cn')
+    const update = { ...VALID, base_url: 'https://api.deepseek.com/v1' }
+    failMode = 'writeAfterDisk'
+    try {
+      const res = await ctx.request.put(providerOf(name, 'my-openai')).set(bearer(l.access)).send(update)
+      expect(res.body.code).toBe(90003)
+    } finally {
+      failMode = 'none'
+    }
+    // DB 回滚：base_url 仍是原值
+    const getRes = await ctx.request.get(providerOf(name, 'my-openai')).set(bearer(l.access))
+    expect(getRes.body.data.base_url).toBe('https://open.bigmodel.cn/api/paas/v4')
+    // reconcile 把盘上恢复回 DB（旧）状态：无 deepseek 新值，保留原 base_url
+    const disk = readFileSync(cfgPath, 'utf8')
+    expect(disk).toContain('open.bigmodel.cn')
+    expect(disk).not.toContain('deepseek.com')
   })
 
   // ---------------------------- 模板加载错误转译（#366 codex P2）----------------------------

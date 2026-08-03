@@ -255,6 +255,9 @@ export class FleetCommand {
             // DB 存密文，docker env 须注入明文 gatewayToken——用时 decrypt（Codex C1）。
             gatewayToken: this.deps.crypto.decrypt(current.token),
             homeDir: home,
+            // #366 codex P1：config 独立目录（instances/<id>/config），ro bind + OPENCLAW_CONFIG_PATH
+            // 指其内 openclaw.json——容器内进程不可写（恢复只读边界），目录 bind 下宿主 rename 热加载保留。
+            configDir: path.join(instanceDir, 'config'),
             llmApiKey: this.deps.config.llmApiKey,
           }
           const containerId = await this.deps.runtime.run(spec)

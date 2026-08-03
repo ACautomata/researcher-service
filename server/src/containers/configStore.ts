@@ -1,11 +1,11 @@
 // config 原子写单源（平移 backend/containers/fleet/config_store.py，#334）。
 // 唯一落盘 seam：bytes-agnostic（只管「把一段 JSON 文本原子放到
-// instances/<id>/home/openclaw.json」——home 目录内，见下）。
+// instances/<id>/config/openclaw.json」——config 独立目录，见下）。
 //
-// #366 修复（codex P1「热加载断链」）：config 落在 home 目录**内**而非其兄弟位置，容器只
-// bind home 目录（rw）——单文件 bind mount 在原子 rename 换 inode 后仍指向旧 inode，
-// 容器内永远看不到新配置（gateway watch 不触发）；目录 bind 下 rename 替换目录条目即
-// 容器内文件变（m2 亦证 openclaw 镜像上文件 bind 不可靠）。ConfigStore 仍是唯一原子写 seam。
+// #366 两轮：config 落 instances/<id>/config（非 home）——容器只 ro bind 该目录、gateway 经
+// OPENCLAW_CONFIG_PATH 读取：宿主侧 rename 换 inode 容器内可见（目录 bind，热加载保留），ro 只
+// 约束容器侧（宿主写 host 路径不受影响，恢复只读边界）。单文件 bind 在 openclaw 镜像上不可靠
+// （m2 实证：bind 源缺失时容器内变目录），故用目录 bind。ConfigStore 仍是唯一原子写 seam。
 //
 // 原子性不变量：tmp 与目标同目录（保证 rename 同文件系统原子）→ tmp 先 chmod 0644 再
 // rename（防 umask 致容器内 node 读不了 openclaw.json）；tmp 名每次唯一
@@ -27,14 +27,14 @@ export class ConfigWriteError extends Error {
 }
 
 export class ConfigStore {
-  // 仅依赖 root（instances/ 落盘根）；config 写入 instances/<id>/home/openclaw.json——
-  // home 是固定子目录名（与 command.createComplete 的 homeDir = instances/<id>/home 对齐，#360）。
+  // 仅依赖 root（instances/ 落盘根）；config 写入 instances/<id>/config/openclaw.json——
+  // config 是固定子目录名（与 command.createComplete 的 configDir = instances/<id>/config 对齐，#366）。
   constructor(private readonly config: Pick<FleetConfig, 'root'>) {}
 
-  // 把 payload（JSON 文本）原子写到 instances/<id>/home/openclaw.json（代系绑定 #360），
+  // 把 payload（JSON 文本）原子写到 instances/<id>/config/openclaw.json（代系绑定 #360），
   // 返回落地路径。name 仅用于 ConfigWriteError 诊断（与其它容器错误一致收 name，路径用 id）。
   async write(name: string, id: string, payload: string): Promise<string> {
-    const configPath = path.join(this.config.root, 'instances', id, 'home', 'openclaw.json')
+    const configPath = path.join(this.config.root, 'instances', id, 'config', 'openclaw.json')
     const tmp = path.join(
       path.dirname(configPath),
       `${path.basename(configPath)}.${randomBytes(8).toString('hex')}.tmp`,

@@ -95,6 +95,7 @@ describe('DockerRuntime ensureImage（Codex 第四轮③）', () => {
     hostPort,
     gatewayToken: 'tok',
     homeDir: '/tmp/home',
+    configDir: '/tmp/config',
     llmApiKey: 'key',
   })
 
@@ -119,15 +120,22 @@ describe('DockerRuntime ensureImage（Codex 第四轮③）', () => {
     await expect(rt.run(spec('r4-pullfail', 19002))).rejects.toThrow('registry unreachable')
   })
 
-  it('#366 热加载断链回归：只 bind home 目录，无单文件 config bind（rename 换 inode 后容器内可见）', async () => {
-    // codex P1：旧实现 `${configPath}:.../openclaw.json:ro` 单文件 bind——ConfigStore 原子
-    // rename 换 inode 后容器内仍挂旧 inode（gateway watch 永远看不到新配置）。修复后 config
-    // 落 home 目录内、只 bind 目录（rw），rename 即容器内文件变。
+  it('#366 codex P1：config 独立目录 ro bind + OPENCLAW_CONFIG_PATH（热加载保留 + 恢复只读边界）；无单文件 bind', async () => {
+    // 第一轮修复只 bind home rw——热加载恢复（rename 换 inode 目录 bind 容器内可见），但容器以
+    // root(0:0) 跑、0644 无约束 → 容器内进程可持久改 openclaw.json（codex P1 只读边界）。第二轮
+    // config 独立 instances/<id>/config 目录 ro bind + gateway 经 OPENCLAW_CONFIG_PATH 读取：
+    // 目录 bind 下宿主 rename 换 inode 容器内可见 + ro 只约束容器侧（宿主写 host 路径不受影响）。
+    // 单文件 bind 在 openclaw 镜像上不可靠（m2 实证：bind 源缺失时容器内变目录），故用目录 bind。
     const { docker } = mockPullClient({ imagePresent: true })
     const rt = new DockerRuntime(() => docker)
     await rt.run(spec('r1-bind', 19003))
     const binds = lastCreateOptions?.HostConfig?.Binds ?? []
-    expect(binds).toEqual(['/tmp/home:/home/node/.openclaw:rw']) // 仅目录 bind
+    expect(binds).toEqual([
+      '/tmp/home:/home/node/.openclaw:rw', // workspace/wiki/state/logs 可写
+      '/tmp/config:/home/node/.openclaw-config:ro', // openclaw.json 容器侧只读
+    ])
     expect(binds.some((b) => b.includes('openclaw.json'))).toBe(false) // 无单文件 bind
+    const env = (lastCreateOptions?.Env as string[]) ?? []
+    expect(env).toContain('OPENCLAW_CONFIG_PATH=/home/node/.openclaw-config/openclaw.json')
   })
 })

@@ -2,9 +2,10 @@
 //
 // 平移 backend/containers/fleet/command.py#rewrite_config 语义：DB（ModelProvider）为单一来源，
 // 读该容器全部 provider → ProviderConfigBuilder 合并进模板 base（ConfigRenderer 强制 gateway
-// 安全不变量）→ 经 ConfigStore 原子覆盖写 instances/<id>/home/openclaw.json（#366：config 落
-// home 目录内，目录 bind 下 rename 换 inode 容器内可见）。OpenClaw watch 热加载生效，无需
-// restart（#36 已证）。写盘失败抛 ConfigWriteError → DB 事务据此回滚（view/service 层）。
+// 安全不变量）→ 经 ConfigStore 原子覆盖写 instances/<id>/config/openclaw.json（#366：config
+// 独立目录 ro bind + OPENCLAW_CONFIG_PATH，目录 bind 下 rename 换 inode 容器内可见）。
+// OpenClaw watch 热加载生效，无需 restart（#36 已证）。写盘失败抛 ConfigWriteError → DB 事务
+// 据此回滚（view/service 层）。
 //
 // 路由层注入此 Port（AppDeps.models.configWriter）：测试可注入假 writer 测回滚，生产装
 // TemplateModelConfigWriter（真模板 + 原子写）。
@@ -22,7 +23,7 @@ export interface ModelConfigWriter {
 }
 
 // 模板写盘依赖面（收窄到所需字段，便于 server.ts 直接传 config.fleet；root 供 ConfigStore
-// 原子写——config 落在 home 目录内，见 configStore.ts #366 修复说明）
+// 原子写——config 落 instances/<id>/config 独立目录，见 configStore.ts #366 修复说明）
 export type ModelConfigWriterDeps = Pick<FleetConfig, 'root' | 'templateJson' | 'llmApiKey'>
 
 export class TemplateModelConfigWriter implements ModelConfigWriter {

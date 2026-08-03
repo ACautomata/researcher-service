@@ -1,6 +1,6 @@
 // openclaw.json 渲染（平移 backend/containers/config_renderer.py，#334）。
 // 配置单一来源 = 模板文件（与单容器 compose 共用一份）。每容器渲染产物落到
-// instances/<id>/home/openclaw.json（#366：config 落 home 目录内，目录 bind 下 rename 容器内可见）。
+// instances/<id>/config/openclaw.json（#366：config 独立目录 ro bind + OPENCLAW_CONFIG_PATH）。
 // token 策略：gateway.auth.token 保留 ${GATEWAY_TOKEN} env 占位 —— 真值由 docker env
 // GATEWAY_TOKEN=<secret> 注入，真 token 绝不落盘进 JSON 文件（安全不变量）。
 

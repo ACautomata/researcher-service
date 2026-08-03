@@ -12,6 +12,7 @@
 // - api 取值（openai-completions / anthropic-messages）由 serializer 校验后经 ProviderSpec.api 原样写入。
 
 import type { ProviderApiWire } from './values'
+import { ConfigurationError } from '../containers/errors'
 
 // SecretRef.provider 固定引用 deploy/openclaw.json 既有的 secrets.providers.default（r28 §2.1）
 export const DEFAULT_SECRET_PROVIDER = 'default'
@@ -35,6 +36,16 @@ export class ProviderConfigBuilder {
     // 深拷贝：返回新对象，绝不 mutate 调用方 base（对齐 Python copy.deepcopy）
     const cfg = structuredClone(baseCfg)
     if (providers.length === 0) return cfg
+
+    // #366 codex P2：非空 providers 必写 apiKey SecretRef(provider:default)（下方 renderProvider），
+    // 先确认模板 secrets.providers.default 存在——否则写出的配置引用不存在的 secret provider，
+    // openclaw 解析凭证失败、热加载被拒，但 DB 已提交报成功 = 不可用配置。缺失 → 90003
+    // （复用 ConfigurationError，与意见 4 的模板错误转译同一条配置失败信封）。
+    const secrets = cfg.secrets as { providers?: Record<string, unknown> } | undefined
+    const defaultSecretProvider = secrets?.providers?.default
+    if (typeof defaultSecretProvider !== 'object' || defaultSecretProvider === null) {
+      throw new ConfigurationError('OPENCLAW_TEMPLATE_JSON (secrets.providers.default)')
+    }
 
     const providersMap: Record<string, Record<string, unknown>> = {}
     const refs: string[] = [] // "<pid>/<mid>" 按序

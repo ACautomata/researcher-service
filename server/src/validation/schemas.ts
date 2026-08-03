@@ -54,13 +54,15 @@ export const containerCreateSchema = z.object({
 // ModelProviderWriteSerializer）。provider_id / api_key_env_id 经格式 + 成员校验（r28 §1），
 // api 限两值（r28 §1.3），models 至少一条且每条含非空 id（无 model 无法派生默认模型引用）。
 // models 其余字段（reasoning/input/cost/contextWindow/maxTokens）由前端表单收集、原样透传（r28 §1.2）。
+// base_url trim 后校验（#366 codex P2）：zod min(1) 不 trim，纯空格 '   ' 语义为空仍通过——
+// 对齐 Django CharField 默认 trim_whitespace，防「空 baseUrl 入库 + 写盘报成功热加载」。
 // 校验失败 → 90002 + 各字段明细（api_key_env_id 非法格式/未注入 env 同入 data.api_key_env_id）。
 export const modelProviderWriteSchema = z.object({
   provider_id: z
     .string()
     .regex(PROVIDER_ID_REGEX, 'provider_id 须以小写字母开头，1–64 位，仅含小写字母、数字、连字符'),
   api: z.enum(API_CHOICES),
-  base_url: z.string().min(1, 'base_url 不能为空').max(512, 'base_url 过长'),
+  base_url: z.string().trim().min(1, 'base_url 不能为空').max(512, 'base_url 过长'),
   api_key_env_id: z
     .string()
     .regex(API_KEY_ENV_ID_REGEX, 'api_key_env_id 须大写字母开头，仅含大写字母、数字、下划线（1–128 位）')

@@ -18,7 +18,7 @@ async function main(): Promise<void> {
     orchestrator: fleet.orchestrator,
     // wiki compile（#335）：docker exec `openclaw wiki compile`，5s 去抖、best-effort。
     wiki: { compile: makeDockerCompile(fleet.runtime) },
-    // models config 写盘（#336）：模板 + ConfigStore 原子写 instances/<id>/home/openclaw.json（#366）。
+    // models config 写盘（#336）：模板 + ConfigStore 原子写 instances/<id>/config/openclaw.json（#366）。
     models: { configWriter: new TemplateModelConfigWriter(config.fleet) },
   })
 

@@ -7,6 +7,12 @@
 
 import { describe, it, expect } from 'vitest'
 import { ProviderConfigBuilder, type ProviderSpec } from '../src/models/configBuilder'
+import { ConfigurationError } from '../src/containers/errors'
+
+// 生产 base 一定来自模板（deploy/openclaw.json 含 secrets.providers.default，#366 codex P2：
+// 非空 providers 写 SecretRef(provider:default) 前须确认该 secret provider 存在）。纯逻辑测试
+// 的 base 沿用「模板含 default secret provider」的常态，缺省校验单独用负例覆盖。
+const SECRETS_BASE = { secrets: { providers: { default: { source: 'env' } } } }
 
 function spec(overrides: Partial<ProviderSpec> = {}): ProviderSpec {
   return {
@@ -71,7 +77,7 @@ describe('ProviderConfigBuilder（#336 纯逻辑）', () => {
   })
 
   it('单 provider：primary 取首个 ref、fallbacks 空、aliases 生成', () => {
-    const out = new ProviderConfigBuilder().build({}, [spec({ providerId: 'p', models: [{ id: 'm', name: 'M' }] })])
+    const out = new ProviderConfigBuilder().build(SECRETS_BASE, [spec({ providerId: 'p', models: [{ id: 'm', name: 'M' }] })])
     const model = (out.agents as Record<string, any>).defaults.model
     expect(model.primary).toBe('p/m')
     expect(model.fallbacks).toEqual([])
@@ -81,12 +87,12 @@ describe('ProviderConfigBuilder（#336 纯逻辑）', () => {
   // ---------------------------- api 取值：openai vs anthropic（r28 修正点）----------------------------
 
   it('openai-completions provider 原样写入（r28 修正点：不写死 anthropic-messages）', () => {
-    const out = new ProviderConfigBuilder().build({}, [spec({ api: 'openai-completions' })])
+    const out = new ProviderConfigBuilder().build(SECRETS_BASE, [spec({ api: 'openai-completions' })])
     expect((out.models as Record<string, any>).providers['my-anthropic'].api).toBe('openai-completions')
   })
 
   it('anthropic-messages provider 原样写入', () => {
-    const out = new ProviderConfigBuilder().build({}, [spec({ api: 'anthropic-messages' })])
+    const out = new ProviderConfigBuilder().build(SECRETS_BASE, [spec({ api: 'anthropic-messages' })])
     expect((out.models as Record<string, any>).providers['my-anthropic'].api).toBe('anthropic-messages')
   })
 
@@ -95,7 +101,7 @@ describe('ProviderConfigBuilder（#336 纯逻辑）', () => {
   it('多 provider：入参序决定 primary/fallbacks；多模型展开为多个 ref', () => {
     const a = spec({ providerId: 'pa', models: [{ id: 'a1', name: 'A1' }] })
     const b = spec({ providerId: 'pb', models: [{ id: 'b1', name: 'B1' }, { id: 'b2', name: 'B2' }] })
-    const out = new ProviderConfigBuilder().build({}, [a, b])
+    const out = new ProviderConfigBuilder().build(SECRETS_BASE, [a, b])
     const model = (out.agents as Record<string, any>).defaults.model
     expect(model.primary).toBe('pa/a1')
     expect(model.fallbacks).toEqual(['pb/b1', 'pb/b2'])
@@ -111,7 +117,7 @@ describe('ProviderConfigBuilder（#336 纯逻辑）', () => {
   it('删除任一 provider 后重 build：无悬空引用', () => {
     // 模拟「先有两个 provider，删除第一个」：仅剩 b
     const b = spec({ providerId: 'pb', models: [{ id: 'b1', name: 'B1' }] })
-    const out = new ProviderConfigBuilder().build({}, [b])
+    const out = new ProviderConfigBuilder().build(SECRETS_BASE, [b])
     const providers = (out.models as Record<string, any>).providers
     expect(providers.pa).toBeUndefined()
     expect(providers.pb).toBeDefined()
@@ -125,6 +131,7 @@ describe('ProviderConfigBuilder（#336 纯逻辑）', () => {
 
   it('非空 providers 全量替换模板 providers（DB 单一来源）；无关键保留', () => {
     const base = {
+      ...SECRETS_BASE,
       models: { mode: 'merge', providers: { minimax: { api: 'anthropic-messages' } } },
       agents: { defaults: { model: { primary: 'minimax/MiniMax-M3' } } },
     }
@@ -137,11 +144,23 @@ describe('ProviderConfigBuilder（#336 纯逻辑）', () => {
   })
 
   it('apiKey 恒为 SecretRef —— 即便 env id 看起来像 key 本体（防御）', () => {
-    const out = new ProviderConfigBuilder().build({}, [spec({ apiKeyEnvId: 'MY_PROVIDER_KEY' })])
+    const out = new ProviderConfigBuilder().build(SECRETS_BASE, [spec({ apiKeyEnvId: 'MY_PROVIDER_KEY' })])
     expect((out.models as Record<string, any>).providers['my-anthropic'].apiKey).toEqual({
       source: 'env',
       provider: 'default',
       id: 'MY_PROVIDER_KEY',
     })
+  })
+
+  // ---------------------------- #366 codex P2：模板缺 secrets.providers.default ----------------------------
+
+  it('模板缺 secrets.providers.default → ConfigurationError（90003）——非空 providers 写 SecretRef 前拦截', () => {
+    // openclaw.json 写出的 apiKey 引用 provider:'default'；模板无该 secret provider 时凭证解析必失败，
+    // DB 却已提交报成功 = 不可用配置。build 是纯逻辑校验点，抛 ConfigurationError（错误面转 90003）。
+    expect(() => new ProviderConfigBuilder().build({ models: { providers: {} } }, [spec()])).toThrow(
+      ConfigurationError,
+    )
+    // 空 providers 不写 SecretRef → 不校验（模板缺 default 不影响透传）
+    expect(() => new ProviderConfigBuilder().build({ models: { providers: {} } }, [])).not.toThrow()
   })
 })
