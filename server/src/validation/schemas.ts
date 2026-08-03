@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { API_CHOICES, API_KEY_ENV_ID_REGEX, ALLOWED_API_KEY_ENV_IDS, PROVIDER_ID_REGEX } from '../models/values'
 
 // 请求体 schema（zod）。校验失败 → 90002 + flatten().fieldErrors（{field:[errors]}）。
 // username 格式：字母/数字/下划线/连字符，3–30 字符（近似 Django UnicodeUsernameValidator，更严）。
@@ -47,4 +48,32 @@ export const containerCreateSchema = z.object({
   name: z
     .string()
     .regex(CONTAINER_NAME_REGEX, 'name 须以小写字母开头，3–30 位，仅含小写字母、数字、连字符'),
+})
+
+// 建/改 model provider（models POST/PUT，#336）：snake_case wire（平移 Django
+// ModelProviderWriteSerializer）。provider_id / api_key_env_id 经格式 + 成员校验（r28 §1），
+// api 限两值（r28 §1.3），models 至少一条且每条含非空 id（无 model 无法派生默认模型引用）。
+// models 其余字段（reasoning/input/cost/contextWindow/maxTokens）由前端表单收集、原样透传（r28 §1.2）。
+// 校验失败 → 90002 + 各字段明细（api_key_env_id 非法格式/未注入 env 同入 data.api_key_env_id）。
+export const modelProviderWriteSchema = z.object({
+  provider_id: z
+    .string()
+    .regex(PROVIDER_ID_REGEX, 'provider_id 须以小写字母开头，1–64 位，仅含小写字母、数字、连字符'),
+  api: z.enum(API_CHOICES),
+  base_url: z.string().min(1, 'base_url 不能为空').max(512, 'base_url 过长'),
+  api_key_env_id: z
+    .string()
+    .regex(API_KEY_ENV_ID_REGEX, 'api_key_env_id 须大写字母开头，仅含大写字母、数字、下划线（1–128 位）')
+    .refine(
+      (v) => ALLOWED_API_KEY_ENV_IDS.has(v),
+      'api_key_env_id 须为容器已注入的 env（当前仅：LLM_API_KEY）',
+    ),
+  auth_header: z.boolean().default(true),
+  models: z
+    .array(
+      z
+        .record(z.string(), z.unknown())
+        .refine((m) => typeof m.id === 'string' && m.id.length > 0, '每条 model 须含非空 id'),
+    )
+    .min(1, '须至少一条 model（用于派生默认模型引用）'),
 })

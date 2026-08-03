@@ -20,7 +20,8 @@ export class ConfigWriteError extends Error {
 }
 
 export class ConfigStore {
-  constructor(private readonly config: FleetConfig) {}
+  // 仅依赖 root（instances/<id>/ 落盘根）；收窄构造依赖便于跨域复用（models config writer）。
+  constructor(private readonly config: Pick<FleetConfig, 'root'>) {}
 
   // 把 payload（JSON 文本）原子写到 instances/<id>/openclaw.json（代系绑定 #360），返回落地路径。
   // name 仅用于 ConfigWriteError 诊断（与其它容器错误一致收 name，路径用 id）。

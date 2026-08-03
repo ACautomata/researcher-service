@@ -1,7 +1,7 @@
 // 五位分层码表（#312 最终准据 + #319 转译码 + #333 执行期新增 10005）。
 // 单一来源：所有信封码在此定义，路由/中间件引用常量名而非裸数字。
 //
-// 段：0 成功 · 1xxxx 通用/鉴权 · 2xxxx 容器（20041 复用为 name 全局冲突）·
+// 段：0 成功 · 1xxxx 通用/鉴权/账号 · 2xxxx 容器 · 3xxxx wiki · 4xxxx models ·
 //     9xxxx 系统/校验。完整表见 docs/research/319-api-contract.md §1。
 
 export const CODE = {
@@ -20,6 +20,9 @@ export const CODE = {
   // 3xxxx wiki（#335 平移 wiki 域；#319 §1.3 转译码）
   WIKI_PAGE_NOT_FOUND: 30040, // 页不存在 / 越权（同码防探测）
   WIKI_PAGE_EXISTS: 30041, // 新建页已存在（POST 409 转译）
+  // 4xxxx models（#336 平移 models 域；#319 §1.3 转译码）
+  PROVIDER_NOT_FOUND: 40040, // provider 不存在 / 越权（同码防探测）
+  PROVIDER_ID_CONFLICT: 40041, // 同容器 provider_id 冲突（POST/PUT，unique 约束）
   // 2xxxx 容器（20041 锁 = name 全局唯一冲突；register/users 用户名冲突复用，契约 §2.2）
   CONTAINER_NOT_FOUND: 20040, // 容器不存在 / 越权（同码防探测，#312 锁）
   NAME_CONFLICT: 20041,
@@ -59,6 +62,8 @@ export const DEFAULT_MESSAGE: Record<number, string> = {
   [CODE.OAUTH_NOT_CONFIGURED]: 'OAuth provider 未配置',
   [CODE.WIKI_PAGE_NOT_FOUND]: '页面不存在',
   [CODE.WIKI_PAGE_EXISTS]: '页面已存在',
+  [CODE.PROVIDER_NOT_FOUND]: 'model provider 不存在',
+  [CODE.PROVIDER_ID_CONFLICT]: '该容器下 provider_id 已存在',
   [CODE.VALIDATION_FAILED]: '参数校验失败',
   [CODE.LLM_NOT_CONFIGURED]: 'LLM_API_KEY 未配置',
   [CODE.PORT_POOL_EXHAUSTED]: '端口池已耗尽，暂无法创建容器，请稍后重试或删除闲置容器',
