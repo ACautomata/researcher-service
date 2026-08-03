@@ -3,7 +3,9 @@
 // 路径不得被误拒 90002。
 
 import { describe, it, expect } from 'vitest'
-import { normalizeRelPath } from '../src/wiki/paths'
+import { normalizeRelPath, parseWikiWriteBody } from '../src/wiki/paths'
+import { CODE } from '../src/codes'
+import { EnvelopeError } from '../src/envelope'
 
 describe('normalizeRelPath 路径长度（Unicode code points，codex PR#346）', () => {
   it('含 emoji 等多字节字符：按 code points 计（≤512 有效，即便 code units >512）', () => {
@@ -24,5 +26,23 @@ describe('normalizeRelPath 路径长度（Unicode code points，codex PR#346）'
   it('纯 ASCII 边界：512 恰好有效、513 拒', () => {
     expect(normalizeRelPath(`${'a'.repeat(509)}.md`).ok).toBe(true) // 509+3=512
     expect(normalizeRelPath(`${'a'.repeat(510)}.md`)).toEqual({ ok: false, errors: ['path 过长'] }) // 513
+  })
+})
+
+describe('parseWikiWriteBody content 未配对 surrogate（codex 第六轮 P2）', () => {
+  it('content 含未配对 surrogate（\\ud800）→ 90002 + data.content，不落盘', () => {
+    try {
+      parseWikiWriteBody({ path: 'a.md', content: 'before\ud800after' })
+      throw new Error('应当抛 90002')
+    } catch (err) {
+      expect(err).toBeInstanceOf(EnvelopeError)
+      const e = err as EnvelopeError
+      expect(e.code).toBe(CODE.VALIDATION_FAILED)
+      expect(e.data).toMatchObject({ content: expect.any(Array) })
+    }
+  })
+
+  it('合法 surrogate 对（emoji）→ 正常通过，content 逐字保留', () => {
+    expect(parseWikiWriteBody({ path: 'a.md', content: '😀 正文\n' })).toEqual({ path: 'a.md', content: '😀 正文\n' })
   })
 })

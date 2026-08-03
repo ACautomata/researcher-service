@@ -40,6 +40,7 @@ export interface FsLike {
   readlink(p: string): Promise<string>
   writeFile(p: string, data: string, opts?: { flag?: string }): Promise<void> // 缺省编码 utf8；flag 供 createPage 独占创建（wx）
   unlink(p: string): Promise<void>
+  rename?: (from: string, to: string) => Promise<void> // deletePage quarantine-rename（Node 无 unlinkat，codex 第六轮 P1）；可选，缺省 fsp.rename
   open(p: string, flag: string | number): Promise<FileHandle> // 供 pinOpen 钉住 inode 后经 fd 读写（TOCTOU 防护，codex PR#346 P1）；number flag 传 O_NONBLOCK 防 FIFO 阻塞
 }
 
@@ -51,18 +52,48 @@ function decodeUtf8Strict(buf: Buffer): string {
   return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(buf)
 }
 
-// 解码字节前缀：截断处可能切断多字节 UTF-8 序列（fatal decoder 抛 TypeError）——末尾最多 3 字节
-// 不完整（UTF-8 最长 4 字节），逐步回退重试到完整序列边界。对齐 Python read_text 按字符截断不切断
-// 多字节字符的行为；解码整体失败（非截断导致的非法字节）返回 null（调用方降级，codex PR#346 P1）。
-function decodePrefix(buf: Buffer): string | null {
-  for (let trim = 0; trim <= 3 && trim < buf.length; trim += 1) {
-    try {
-      return decodeUtf8Strict(buf.subarray(0, buf.length - trim))
-    } catch {
-      // 末尾仍含不完整序列 → 继续回退（最多 3 字节）
-    }
+// 解码字节前缀：截断处可能切断多字节 UTF-8 序列（fatal decoder 抛 TypeError）。
+// 对齐 Python read_text 按字符截断不切断多字节字符的行为：仅在 truncated=true（读到 TITLE_READ_BYTES
+// 上限、可能切在序列中间）且末尾是「合法但不完整的多字节序列」时回退该序列；否则（读到 EOF 的损坏字节、
+// 孤立 continuation、overlong、完整但非法序列）一律 null —— 文件非法即降级，不得把损坏字节 trim 掉后把
+// 剩余前缀当有效（旧实现无条件 trim 会把 `title: SECRET` + 末尾 0xff 的文件解析出 SECRET，codex 第六轮 P2）。
+function decodePrefix(buf: Buffer, truncated: boolean): string | null {
+  try {
+    return decodeUtf8Strict(buf) // 整体合法 → 直接成功（含「未截断」与「截断处恰好是完整字符」）
+  } catch {
+    // 严格解码失败：仅当确为前缀截断且末尾是合法不完整序列才回退，否则视作损坏。
   }
-  return null
+  if (!truncated) return null // 读到 EOF 而非截断 → 解码失败即文件损坏
+  const trim = truncatedTrailingBytes(buf)
+  if (trim === 0) return null
+  try {
+    return decodeUtf8Strict(buf.subarray(0, buf.length - trim))
+  } catch {
+    return null
+  }
+}
+
+// 返回应从 buf 末尾回退掉的字节数：仅当末尾是「前导字节 + 若干 continuation、但 continuation 数不足」
+// 的被截断合法序列才返回 >0；ASCII 结尾 / 孤立 continuation / 非法字节（0xff 等）/ overlong 前导 / 序列
+// 完整但内部非法 → 0（属损坏，非截断）。
+function truncatedTrailingBytes(buf: Buffer): number {
+  const len = buf.length
+  if (len === 0) return 0
+  const last = buf[len - 1]
+  if (last < 0x80) return 0 // ASCII 结尾：无截断问题
+  if (last >= 0x80 && last <= 0xbf) {
+    // continuation 结尾：向前找前导字节，数 continuation 数
+    let i = len - 1
+    while (i >= 0 && (buf[i] & 0xc0) === 0x80) i -= 1
+    if (i < 0) return 0 // 全 continuation 无前导 → 损坏
+    const lead = buf[i]
+    const need = lead >= 0xf0 ? 4 : lead >= 0xe0 ? 3 : lead >= 0xc2 ? 2 : 0
+    const cont = len - 1 - i
+    if (need === 0 || cont >= need - 1) return 0 // 前导非法 / continuation 已齐（完整或 overlong）→ 损坏
+    return len - i // 前导 + 部分 continuation，序列未完成 → 截断
+  }
+  if (last >= 0xc2 && last <= 0xf4) return 1 // 前导字节无 continuation 即被截断 → 回退 1 字节
+  return 0 // 0xc0/0xc1（overlong 前导）/ 0xf5-0xff → 损坏
 }
 
 // 字典序比较（对齐 Python 的 Unicode code-point 序）见 logic.ts 的 cmp（nodeFs/service 共用）。
@@ -76,6 +107,9 @@ function stemOf(name: string): string {
 // 两 handle 都截断后较短写入者把较长者尾部残留，内容既非 A 也非 B。模块级（非实例级）：路由层每次请求
 // 新建 NodeWikiFileSystem 实例，实例级锁跨请求不共享、形同虚设。键含 root，隔离不同容器同名页。
 const pageLocks = new Map<string, Promise<void>>()
+
+// deletePage quarantine-rename 的隔离名序号（跨容器/实例唯一：pid + 单调计数，防与真实页名撞车）。
+let deleteSeq = 0
 
 function withPageLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
   const prev = pageLocks.get(key) ?? Promise.resolve()
@@ -96,10 +130,24 @@ function withPageLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
 export class NodeWikiFileSystem implements WikiFileSystem {
   private readonly parser = new FrontmatterParser()
 
+  // 信任锚点 = root 的祖父（`<home>`，如 `<base>/instances/<name>/home`）：控制面在实例目录下创建、
+  // 以 bind mount 挂进容器的目录，容器内进程无法替换其本身（挂载点），故可作 containment 的锚。
+  // root 字面路径的中间段（`<home>/wiki`）是容器可写的——lstat(完整路径) 只对末段不跟随、中间段仍跟随，
+  // wiki 被瞬时换 symlink 后 lstat(this.root) 会跟随到另一实例的 main，inode 复核被绕过（codex 第六轮 P1）。
+  // 因此一切「在 root 下解析路径」的 containment 从锚点逐段 lstat 下钻，而非 lstat 整段路径。
+  private readonly anchor: string
+  private readonly anchorToRootSegs: string[]
+
   constructor(
     private readonly root: string,
     private readonly fs: FsLike = fsp,
-  ) {}
+  ) {
+    this.anchor = path.dirname(path.dirname(this.root))
+    this.anchorToRootSegs = path
+      .relative(this.anchor, this.root)
+      .split(path.sep)
+      .filter((s) => s !== '' && s !== '.')
+  }
 
   // —— Port: build_tree ——
 
@@ -227,36 +275,54 @@ export class NodeWikiFileSystem implements WikiFileSystem {
   // —— Port: delete_page ——
 
   async deletePage(relPath: string): Promise<void> {
-    // unlink 无 fd 原语（Node 无 unlinkat）：pinOpen 校验打开对象（open 前祖先换 symlink → 拒），
-    // 紧贴 unlink 前 lstat 复核 inode，把 close→unlink 的换链窗口压到最小（codex PR#346 P1）。
-    // 窗口内祖先仍可能被换链、路径型 unlink 跟随删到外部同名——「unlink 后复核删除生效」兜底：
-    // root 内该文件必须已消失；若仍在（同 inode），说明 unlink 删的是别处（外部 victim）→ 攻击，
-    // 抛 InvalidPath 而非静默成功（codex 第五轮 P1）。
+    // Node 无 unlinkat：路径型 unlink 无法相对 dirfd 原子化，换链窗口内会把外部同名页删除且不可逆
+    // （codex 第五轮 P1 的「unlink 后复核」是事后检测，外部 victim 已删）。改 quarantine-rename 原语
+    // （codex 第六轮 P1）：先原子 rename 到「同目录」随机隔离名（同目录 = 同一文件系统、rename 原子；
+    // 期间换链最坏把外部同名页 rename 走——移动而非删除、数据保留），复核 rename 确实移走了锚点下的文件
+    // 后再 unlink 隔离名——此时 unlink 的目标是我们刚创建的随机名，不可能是任何实例的真实页，删除被约束
+    // 在 root 内。检测到换链即拒，不静默成功。
     const { fpath, fh, anchor } = await this.pinOpen(relPath, 'r')
-    await fh.close().catch(() => {})
-    let now: Stats
+    const parts = relPath.split('/')
     try {
-      now = await this.fs.lstat(fpath)
-    } catch {
-      throw new WikiPageNotFound(relPath) // 已被并发删除
-    }
-    if (now.ino !== anchor) throw new WikiInvalidPath(relPath) // 复核时目标已被换链
-    try {
-      await this.fs.unlink(fpath)
-    } catch (err) {
-      // 并发 DELETE：另一请求在本请求 inode 复核通过后、unlink 前已删掉文件 → ENOENT。映射为
-      // WikiPageNotFound（30040），而非绕过域映射成内部错误 90000（codex 第四轮 P2）。
-      if ((err as { code?: string }).code === 'ENOENT') throw new WikiPageNotFound(relPath)
-      throw err
-    }
-    // unlink 后复核：逐段禁 symlink 下钻（lstat 对中间段会跟随，遇换链会读到外部、复核失效）。
-    // lstatDeep 找到文件（root 内该页仍在）→ unlink 没删到它（删了外部 victim）→ 拒。
-    try {
-      await this.lstatDeep(relPath.split('/'), 'file', relPath)
-      throw new WikiInvalidPath(relPath)
-    } catch (err) {
-      if (err instanceof WikiInvalidPath) throw err
-      // WikiPageNotFound → 文件已消失，unlink 生效（正常删除）
+      // 紧贴 rename 前复核：从锚点逐段禁 symlink 下钻（替换旧的 lstat(fpath) —— lstat 对中间段会跟随，
+      // wiki 被换链时可能命中外部 inode 通过复核；锚定后换链 → lstatSegs 在 wiki 段即拒）。
+      let cur: number
+      try {
+        cur = await this.lstatDeep(parts, 'file', relPath)
+      } catch (err) {
+        if (err instanceof WikiInvalidPath) throw err // 换链 → 拒
+        throw new WikiPageNotFound(relPath) // 已被并发删除
+      }
+      if (cur !== anchor) throw new WikiInvalidPath(relPath) // 复核时目标已被换链
+      const quarantine = `${fpath}.trash-${process.pid}-${(deleteSeq += 1)}`
+      try {
+        await (this.fs.rename ?? fsp.rename)(fpath, quarantine)
+      } catch (err) {
+        // 并发 DELETE：另一请求在本请求复核通过后已删掉文件 → ENOENT。映射为 WikiPageNotFound（30040），
+        // 而非绕过域映射成内部错误 90000（codex 第四轮 P2）。
+        if ((err as { code?: string }).code === 'ENOENT') throw new WikiPageNotFound(relPath)
+        throw err
+      }
+      // 复核 rename 生效：锚点下原路径必须已消失。
+      //   - 仍在（返回 inode）→ rename 未动本地文件（期间被换链引到外部）→ 拒，不 unlink 隔离名
+      //     （此刻隔离名装着外部文件，不删）；
+      //   - lstatSegs 抛 InvalidPath → 换链仍生效 → 拒；
+      //   - WikiPageNotFound → 原路径消失，rename 移走了我们的文件 → 继续。
+      try {
+        await this.lstatDeep(parts, 'file', relPath)
+        throw new WikiInvalidPath(relPath)
+      } catch (err) {
+        if (err instanceof WikiInvalidPath) throw err
+        // WikiPageNotFound → 正常
+      }
+      try {
+        await this.fs.unlink(quarantine)
+      } catch (err) {
+        if ((err as { code?: string }).code === 'ENOENT') throw new WikiPageNotFound(relPath)
+        throw err
+      }
+    } finally {
+      await fh.close().catch(() => {})
     }
   }
 
@@ -275,19 +341,10 @@ export class NodeWikiFileSystem implements WikiFileSystem {
   }
 
   private async rootUsable(): Promise<boolean> {
-    // root 与其直接父任一为 symlink，或 root 非目录 → 拒绝遍历（codex #125 P1/P2）。
-    if (await this.isSymlink(this.root)) return false
-    if (await this.isSymlink(path.dirname(this.root))) return false
+    // 锚点 → wiki → main 逐段 lstat（不跟随）且 main 为目录；缺失/任一段 symlink/非目录 → 拒绝遍历。
     try {
-      return (await this.fs.stat(this.root)).isDirectory()
-    } catch {
-      return false
-    }
-  }
-
-  private async isSymlink(p: string): Promise<boolean> {
-    try {
-      return (await this.fs.lstat(p)).isSymbolicLink()
+      await this.lstatDeep([], 'dir', this.root)
+      return true
     } catch {
       return false
     }
@@ -329,43 +386,65 @@ export class NodeWikiFileSystem implements WikiFileSystem {
     }
   }
 
-  // 逐段从 root 下钻 lstat（不跟随任何 symlink）：任一段是 symlink → WikiInvalidPath；中间段非目录
+  // 逐段从锚点下钻 lstat（不跟随任何 symlink）：任一段是 symlink → WikiInvalidPath；中间段非目录
   // → WikiInvalidPath；末段须匹配 expectKind（file=regular / dir=目录），否则 WikiPageNotFound/
   // InvalidPath；返回末段 inode。parts=[] 时末段即 root（用作 createPage 顶层页的父目录）。
-  // 用于把「open/open(wx) fd 锁定的 inode」与「root 下逐段非 symlink 下钻到的 inode」比对：fd 锁定
+  // 用于把「open/open(wx) fd 锁定的 inode」与「锚点下逐段非 symlink 下钻到的 inode」比对：fd 锁定
   // open 时刻的对象（不可变），独立下钻反映当前路径真实指向，两者不等即 open 跟随了 resolve 之后被
   // 换的中间段 symlink 到 root 外/他人文件（TOCTOU，codex 第四轮 P1）。
   private async lstatDeep(parts: string[], expectKind: 'file' | 'dir', label: string): Promise<number> {
-    let cur = this.root
+    const st = await this.lstatSegs(this.anchorToRootSegs.concat(parts), label)
+    if (expectKind === 'file' && !st.isFile()) throw new WikiPageNotFound(label)
+    if (expectKind === 'dir' && !st.isDirectory()) throw new WikiInvalidPath(label)
+    return st.ino
+  }
+
+  // 从信任锚点逐段 lstat 到 relSegs 相对路径：任一段 symlink / 中间段非目录 / 缺失 → 抛。
+  // 与「lstat(完整绝对路径)」不同：lstat 对路径的中间段会跟随，root 字面路径的中间段（<home>/wiki）是
+  // 容器可写的，被瞬时换 symlink 后 lstat(this.root) 会跟随到另一实例的 main、inode 复核被绕过（codex
+  // 第六轮 P1）。锚点 <home> 本身是控制面创建的 bind-mount 目录，容器内进程不可替换。
+  private async lstatSegs(segs: string[], label: string): Promise<Stats> {
+    let cur = this.anchor
     let st: Stats
     try {
       st = await this.fs.lstat(cur)
     } catch {
       throw new WikiPageNotFound(label)
     }
-    if (st.isSymbolicLink()) throw new WikiInvalidPath(label) // root 被换 symlink → 下钻会跟随到 root 外
-    if (parts.length === 0) {
-      if (expectKind === 'dir' && !st.isDirectory()) throw new WikiInvalidPath(label)
-      if (expectKind === 'file' && !st.isFile()) throw new WikiPageNotFound(label)
-      return st.ino
-    }
-    for (let i = 0; i < parts.length; i += 1) {
-      cur = path.join(cur, parts[i])
+    if (st.isSymbolicLink()) throw new WikiInvalidPath(label)
+    for (let i = 0; i < segs.length; i += 1) {
+      cur = path.join(cur, segs[i])
       try {
         st = await this.fs.lstat(cur)
       } catch {
         throw new WikiPageNotFound(label)
       }
       if (st.isSymbolicLink()) throw new WikiInvalidPath(label)
-      const isLast = i === parts.length - 1
-      if (isLast) {
-        if (expectKind === 'file' && !st.isFile()) throw new WikiPageNotFound(label)
-        if (expectKind === 'dir' && !st.isDirectory()) throw new WikiInvalidPath(label)
-      } else if (!st.isDirectory()) {
-        throw new WikiInvalidPath(label)
-      }
+      if (i < segs.length - 1 && !st.isDirectory()) throw new WikiInvalidPath(label)
     }
-    return st.ino
+    return st
+  }
+
+  // scan 侧锚定判定：dirpath（绝对）从锚点逐段 lstat 可达且为目录（不跟随任何 symlink）。
+  private async isDirUnderAnchor(dirpath: string): Promise<boolean> {
+    const rel = path.relative(this.anchor, dirpath)
+    if (rel === '' || rel === '.' || rel === '..' || rel.startsWith(`..${path.sep}`)) return false
+    try {
+      return (await this.lstatSegs(rel.split(path.sep), dirpath)).isDirectory()
+    } catch {
+      return false
+    }
+  }
+
+  // scan 侧锚定判定：fpath（绝对）从锚点逐段 lstat 可达且为 regular file（不跟随任何 symlink）。
+  private async isFileUnderAnchor(fpath: string): Promise<boolean> {
+    const rel = path.relative(this.anchor, fpath)
+    if (rel === '' || rel.startsWith('..')) return false
+    try {
+      return (await this.lstatSegs(rel.split(path.sep), fpath)).isFile()
+    } catch {
+      return false
+    }
   }
 
   private async readdir(dir: string): Promise<Dirent[] | null> {
@@ -385,24 +464,16 @@ export class NodeWikiFileSystem implements WikiFileSystem {
     pagesOut: Array<WikiTreePage | WikiCategoryPage>,
     withContent: boolean,
   ): Promise<void> {
-    try {
-      // lstat（不跟随）：dirpath 在调用方 readdir 给出 Dirent 后可能被容器换成 symlink 指向 root 外——
-      // stat 会跟随读外部目录、后续遍历再无 containment 校验（codex PR#346 P1）。lstat 对 symlink 返回
-      // isDirectory()=false → 拒。
-      if (!(await this.fs.lstat(dirpath)).isDirectory()) return
-    } catch {
-      return
-    }
+    // 从锚点逐段 lstat 复核（不跟随）：dirpath 在调用方 readdir 给出 Dirent 后，root 链上任一段（含
+    // <home>/wiki）可能被容器换成 symlink 指向 root 外——单段 lstat(dirpath) 对中间段会跟随、读外部
+    // 目录，后续遍历再无 containment 校验（codex PR#346 P1 / 第六轮 P1）。锚定后任一段 symlink → 拒。
+    if (!(await this.isDirUnderAnchor(dirpath))) return
     const stack: Array<[string, string]> = [[dirpath, relPrefix]]
     while (stack.length > 0) {
       const [curDir, curPrefix] = stack.pop()!
       // point of use 不跟随：push→pop 之间 curDir 可能被换 symlink，readdir(curDir) 会跟随——pop 后
-      // lstat 复核，识别 symlink/非目录则跳过该子树（codex PR#346 P1）。
-      try {
-        if (!(await this.fs.lstat(curDir)).isDirectory()) continue
-      } catch {
-        continue
-      }
+      // 从锚点逐段复核，识别 symlink/非目录则跳过该子树（codex PR#346 P1）。
+      if (!(await this.isDirUnderAnchor(curDir))) continue
       const entries = await this.readdir(curDir)
       if (entries === null) continue
       for (const f of entries) {
@@ -427,15 +498,10 @@ export class NodeWikiFileSystem implements WikiFileSystem {
     rel: string,
     withContent: boolean,
   ): Promise<WikiTreePage | WikiCategoryPage | null> {
-    // Dirent 已判 isFile，但读取前文件可能被换 symlink（point of use 防护，codex PR#346 P1）：
-    // readText/readTitlePrefix 的 readFile/open 会跟随 symlink 读外部——lstat 复核非 symlink 且仍
-    // regular，否则跳过该页（降级，不 500）。
-    try {
-      const st = await this.fs.lstat(fpath)
-      if (!st.isFile() || st.isSymbolicLink()) return null
-    } catch {
-      return null
-    }
+    // Dirent 已判 isFile，但读取前文件/root 链可能被换 symlink（point of use 防护，codex PR#346 P1）：
+    // readText/readTitlePrefix 的 readFile/open 会跟随 symlink 读外部——从锚点逐段 lstat 复核非 symlink
+    // 且仍 regular，否则跳过该页（降级，不 500）。
+    if (!(await this.isFileUnderAnchor(fpath))) return null
     if (!withContent) {
       return { path: rel, title: await this.pageTitle(fpath, stemOf(path.basename(fpath))) }
     }
@@ -479,7 +545,8 @@ export class NodeWikiFileSystem implements WikiFileSystem {
     try {
       const buf = Buffer.alloc(TITLE_READ_BYTES)
       const { bytesRead } = await fh.read(buf, 0, TITLE_READ_BYTES, 0)
-      return decodePrefix(buf.subarray(0, bytesRead))
+      // truncated = 读到上限（可能切在序列中间，允许回退不完整序列）；未到上限 = 已读至 EOF，解码失败即损坏。
+      return decodePrefix(buf.subarray(0, bytesRead), bytesRead === TITLE_READ_BYTES)
     } catch {
       return null
     } finally {
@@ -519,10 +586,28 @@ export class NodeWikiFileSystem implements WikiFileSystem {
     return fpath
   }
 
-  // root 与其直接父任一为 symlink → 拒绝解析（对齐 rootUsable 的扫描侧防护；CRUD 走 resolve）。
+  // 锚点 → wiki → main 链上任一段为 symlink → 拒绝解析（对齐 rootUsable 的扫描侧防护；CRUD 走 resolve）。
+  // 从锚点逐段 lstat：root 字面路径的中间段（<home>/wiki）是容器可写的，lstat(root) 对中间段会跟随、
+  // 换链后命中外部 main 无法检出（codex 第六轮 P1）。只拒 symlink、不因缺失拒：根缺失属「页不存在」域，
+  // 由打开时的 ENOENT 映射。
   private async assertRootNotSymlink(): Promise<void> {
-    if (await this.isSymlink(this.root)) throw new WikiInvalidPath(this.root)
-    if (await this.isSymlink(path.dirname(this.root))) throw new WikiInvalidPath(this.root)
+    let cur = this.anchor
+    let st: Stats
+    try {
+      st = await this.fs.lstat(cur)
+    } catch {
+      return
+    }
+    if (st.isSymbolicLink()) throw new WikiInvalidPath(this.root)
+    for (const seg of this.anchorToRootSegs) {
+      cur = path.join(cur, seg)
+      try {
+        st = await this.fs.lstat(cur)
+      } catch {
+        return
+      }
+      if (st.isSymbolicLink()) throw new WikiInvalidPath(this.root)
+    }
   }
 
   // managed 黑名单（#315 §4 第②层）：任一段命中 SKIP_DIRS、或末段命中 SKIP_FILES → 拒。

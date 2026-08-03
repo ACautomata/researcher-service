@@ -245,6 +245,34 @@ describe('NodeWikiFileSystem.buildTree', () => {
     expect(Math.max(0, ...readSizes)).toBeLessThan(100 * 1024)
   })
 
+  it('损坏 UTF-8 不被 trim 掉：frontmatter title 后跟 0xff → fallback 文件名而非解析出 title（codex 第六轮 P2）', async () => {
+    const main = makeRoot()
+    // 旧 decodePrefix 无条件回退：strict 解码失败后逐字节 trim，把末尾 0xff 丢掉、剩余前缀当有效 →
+    // title: SECRET 被解析出来。Python read_text 严格解码整文件，损坏 → UnicodeDecodeError → 文件名
+    // fallback；未读到截断上限的损坏字节必须返回 null，不得 trim。raw 0xff 字节用 Buffer 拼接（string+Buffer
+    // 会把 0xff toString 成合法 UTF-8 的 ÿ，测不到损坏路径）。
+    writeFileSync(
+      path.join(main, 'concepts', 'corrupt.md'),
+      Buffer.concat([Buffer.from('---\ntitle: SECRET\n---\n'), Buffer.from([0xff])]),
+    )
+    const tree = await new NodeWikiFileSystem(main).buildTree()
+    const concepts = tree.groups.find((g) => g.kind === 'concepts')!
+    const p = concepts.pages.find((x) => x.path === 'concepts/corrupt.md')!
+    expect(p.title).toBe('corrupt')
+  })
+
+  it('截断切断多字节序列 → 回退到完整边界仍解析 title；不因损坏而误拒（codex 第六轮 P2）', async () => {
+    const main = makeRoot()
+    // frontmatter title 在前，正文 emoji padding 超 TITLE_READ_BYTES 且把 4 字节 emoji 切在截断边界。
+    // decodePrefix 仅在「读到上限 + 末尾是合法不完整多字节序列」时回退该序列，title 仍解析；若把截断
+    // 误判为损坏 → fallback 文件名（测试钉住必须解析出 title）。
+    writeFileSync(path.join(main, 'concepts', 'cut.md'), '---\ntitle: Cut\n---\n' + '😀'.repeat(3000))
+    const tree = await new NodeWikiFileSystem(main).buildTree()
+    const concepts = tree.groups.find((g) => g.kind === 'concepts')!
+    const p = concepts.pages.find((x) => x.path === 'concepts/cut.md')!
+    expect(p.title).toBe('Cut')
+  })
+
   it('任意深度嵌套不触发栈溢出（迭代 DFS）', async () => {
     const main = makeRoot()
     let cur = path.join(main, 'concepts')
@@ -589,17 +617,53 @@ describe('NodeWikiFileSystem 页面 CRUD', () => {
     }
   })
 
-  it('deletePage:inode 复核后祖先换链、unlink 删到外部 → 检测并抛 InvalidPath,本地文件安全（codex 第五轮 P1）', async () => {
+  it('deletePage:rename 时祖先换链 → 外部 victim 不被 unlink 删除（被移到隔离名、数据保留），本地页安全，操作拒（codex 第六轮 P1）', async () => {
     const main = makeRoot()
-    const outside = path.join(path.dirname(path.dirname(main)), 'outside-unlink')
+    const outside = path.join(path.dirname(path.dirname(main)), 'outside-rename')
     mkdirSync(outside)
     writeFileSync(path.join(outside, 'attention.md'), '# EXTERNAL\n')
-    const nfs = new NodeWikiFileSystem(main, swapOnUnlinkFs(main, outside))
-    // pinOpen fd 已关闭、inode 复核后,路径型 unlink 仍可被换链引到外部删除 victim。Node 无 unlinkat,
-    // 无法原子化——「unlink 后复核删除生效」:root 内文件仍在(同 inode)说明 unlink 删的是别处 → 拒,
-    // 不静默成功;本地文件安全。
+    const nfs = new NodeWikiFileSystem(main, swapOnRenameFs(main, outside))
+    // quarantine-rename：rename(fpath→隔离名) 期间祖先被换 symlink，rename 跟随把外部 attention.md 移到
+    // 外部隔离名（移动非删除、内容保留）；随后锚定 lstatDeep 复核发现原路径仍在（本地文件没动）→ 拒，
+    // 不 unlink 隔离名。旧「unlink 后复核」是事后检测，外部 victim 已被不可逆删除——本实现把它改成
+    // 可检测、可恢复的移动，删除原语（unlink）的目标锁定为我们刚建的随机隔离名。
     await expect(nfs.deletePage('concepts/attention.md')).rejects.toBeInstanceOf(WikiInvalidPath)
+    // 本地页未被删除（rename 被换链引到外部，本地仍留在原路径）
     expect((await fsp.readFile(path.join(main, 'concepts', 'attention.md'))).toString('utf8')).toContain('title: Attention')
+    // 外部 victim 未丢失——rename 把它移到外部隔离名，内容仍在 outside 下（数据保留，非删除）
+    const names = await fsp.readdir(outside)
+    const trash = names.filter((n) => n.startsWith('attention.md'))
+    expect(trash.length).toBeGreaterThan(0)
+    expect((await fsp.readFile(path.join(outside, trash[0]))).toString('utf8')).toBe('# EXTERNAL\n')
+  })
+
+  it('open 时 <home>/wiki（root 可写父目录）被换 symlink → CRUD 全拦，不跨实例读写删建（codex 第六轮 P1）', async () => {
+    // root 字面路径的中间段 <home>/wiki 是容器可写的：resolve 的 assertRootNotSymlink 通过后、open 前被换
+    // symlink 指向另一实例，open 跟随到外部 main。旧 lstatDeep 从 this.root 字面开始 lstat(root)，lstat 对
+    // 中间段会跟随 → fd 外部 inode 与下钻外部 inode 恒匹配 → 跨实例读写删建。锚定到 <home> 后逐段 lstat，
+    // wiki 段识别 symlink → 拒。
+    const ctx = (): { nfs: NodeWikiFileSystem; outside: string } => {
+      const main = makeRoot()
+      const outside = path.join(path.dirname(path.dirname(main)), 'outside-wiki')
+      mkdirSync(path.join(outside, 'main', 'concepts'), { recursive: true })
+      writeFileSync(path.join(outside, 'main', 'concepts', 'attention.md'), '# EXTERNAL\n')
+      return { nfs: new NodeWikiFileSystem(main, swapWikiOnOpen(main, outside)), outside }
+    }
+    // 读/写/删：reject 即证明不跟随外部（若跟随读/写/删外部会成功或污染）
+    await expect(ctx().nfs.readPage('concepts/attention.md')).rejects.toBeInstanceOf(WikiInvalidPath)
+    await expect(ctx().nfs.writePage('concepts/attention.md', 'EVIL')).rejects.toBeInstanceOf(WikiInvalidPath)
+    // 删：外部 victim 未被删除
+    {
+      const { nfs, outside } = ctx()
+      await expect(nfs.deletePage('concepts/attention.md')).rejects.toBeInstanceOf(WikiInvalidPath)
+      expect((await fsp.readFile(path.join(outside, 'main', 'concepts', 'attention.md'))).toString('utf8')).toBe('# EXTERNAL\n')
+    }
+    // 建：不得在外部新建（cleanupCreated 清理误建的外部空文件）
+    {
+      const { nfs, outside } = ctx()
+      await expect(nfs.createPage('concepts/newpage.md', '# NEW\n')).rejects.toBeInstanceOf(WikiInvalidPath)
+      await expect(fsp.stat(path.join(outside, 'main', 'concepts', 'newpage.md'))).rejects.toBeTruthy()
+    }
   })
 
   it('并发 write_page 同页被 per-path 锁序列化:truncate+write 原子,内容不被混合（codex 第五轮 P1）', async () => {
@@ -859,11 +923,11 @@ function swapDuringOpenFs(main: string, outside: string): FsLike {
   }
 }
 
-// FsLike 替身:unlink 运行时把 concepts 瞬时换成外部 symlink(unlink 跟随删外部同名)、随后恢复。
-// 复现 codex 第五轮 P1:pinOpen fd 已关闭、inode 复核通过后,路径型 unlink 仍可被换链引到外部。
-// Node 无 unlinkat,无法原子化——改「unlink 后复核删除生效」:若 root 内文件仍在(同 inode),说明
-// unlink 删的是别处 → 抛 InvalidPath,不静默成功。
-function swapOnUnlinkFs(main: string, outside: string): FsLike {
+// FsLike 替身:deletePage 的 quarantine-rename 的 rename(fpath→隔离名) 期间把 concepts 瞬时换成外部
+// symlink(rename 跟随把外部 attention.md 移到外部隔离名——移动非删除)、随后恢复。复现 codex 第六轮 P1:
+// Node 无 unlinkat,旧实现路径型 unlink 换链窗口内不可逆删除外部 victim、事后复核只是检测;quarantine-rename
+// 把删除原语(unlink)的目标换成刚建的随机隔离名,换链最坏把外部文件 rename 走(数据保留、可检测)。
+function swapOnRenameFs(main: string, outside: string): FsLike {
   const concepts = path.join(main, 'concepts')
   let swapped = false
   return {
@@ -874,16 +938,47 @@ function swapOnUnlinkFs(main: string, outside: string): FsLike {
     realpath: (p) => fsp.realpath(p),
     readlink: (p) => fsp.readlink(p),
     writeFile: (p, d, o) => fsp.writeFile(p, d, o),
-    unlink: async (p) => {
-      if (swapped) return fsp.unlink(p)
+    unlink: (p) => fsp.unlink(p),
+    rename: async (from, to) => {
+      if (swapped) return fsp.rename(from, to)
       swapped = true
       renameSync(concepts, `${concepts}-orig`)
       symlinkSync(outside, concepts)
-      await fsp.unlink(p) // 跟随 symlink 删 outside/attention.md
-      rmSync(concepts, { force: true })
-      renameSync(`${concepts}-orig`, concepts)
+      try {
+        await fsp.rename(from, to) // 跟随 symlink → 外部 attention.md 移到外部 to
+      } finally {
+        rmSync(concepts, { force: true })
+        renameSync(`${concepts}-orig`, concepts)
+      }
     },
     open: (p, flag) => fsp.open(p, flag),
+  }
+}
+
+// FsLike 替身:open 前把 <home>/wiki(root 的直接父)换成指向 outside 的 symlink,open 跟随到另一实例的
+// main。复现 codex 第六轮 P1:resolve 的 assertRootNotSymlink 通过后、open 前根链中间段被换链,open 成功
+// 打开外部对象;须以「锚点(<home>)逐段下钻」复核拦截(wiki 段识别 symlink),而非从 root 字面 lstat(对
+// 中间段跟随 → fd 外部 inode 与下钻外部 inode 恒匹配 → 跨实例)。
+function swapWikiOnOpen(main: string, outside: string): FsLike {
+  const wiki = path.dirname(main) // <base>/wiki
+  let swapped = false
+  return {
+    readdir: (d, o) => fsp.readdir(d, o),
+    readFile: (p) => fsp.readFile(p),
+    stat: (p) => fsp.stat(p),
+    lstat: (p) => fsp.lstat(p),
+    realpath: (p) => fsp.realpath(p),
+    readlink: (p) => fsp.readlink(p),
+    writeFile: (p, d, o) => fsp.writeFile(p, d, o),
+    unlink: (p) => fsp.unlink(p),
+    open: async (p, flag) => {
+      if (!swapped) {
+        swapped = true
+        renameSync(wiki, `${wiki}-orig`)
+        symlinkSync(outside, wiki)
+      }
+      return fsp.open(p, flag) // 跟随 symlink → 打开外部 main 下对象
+    },
   }
 }
 

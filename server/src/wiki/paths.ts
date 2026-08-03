@@ -33,9 +33,21 @@ export function normalizeRelPath(raw: unknown): RelPathResult {
 // POST/PUT page body 校验（Django WikiPageWriteSerializer）：{path, content}。
 // content allow_blank=True、trim_whitespace=False（逐字保留首尾空白/尾换行）。收集双字段错误
 // 一次性转 90002（对齐 DRF 聚合 field errors）。
+//
+// 未配对 surrogate（如 JSON 里的 "\ud800"）：JS 字符串可携带，但 Node 的 UTF-8 编码器写盘时静默替换为
+// U+FFFD——PUT 报告成功、后续 GET 返回不同内容，破坏 byte-exact 编辑契约。迁移的 DRF CharField 在文件
+// 系统访问前即拒绝，这里校验并返回 90002（codex 第六轮 P2）。合法 surrogate 对（emoji 等）放行。
+const UNPAIRED_SURROGATE_RE =
+  /(?:[\uD800-\uDBFF](?![\uDC00-\uDFFF]))|(?:(?<![\uD800-\uDBFF])[\uDC00-\uDFFF])/
+
 export function parseWikiWriteBody(body: unknown): { path: string; content: string } {
   const b = (body ?? {}) as Record<string, unknown>
-  const contentError = typeof b.content !== 'string' ? ['content 不能为空'] : undefined
+  const contentError =
+    typeof b.content !== 'string'
+      ? ['content 不能为空']
+      : UNPAIRED_SURROGATE_RE.test(b.content)
+        ? ['content 含未配对代理字符']
+        : undefined
   const pathRes = normalizeRelPath(b.path)
   if (!pathRes.ok) {
     // 对齐 DRF：path 与 content 双字段错误一次性收集进 data。
