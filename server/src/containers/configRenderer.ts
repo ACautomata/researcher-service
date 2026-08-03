@@ -21,7 +21,9 @@ interface OpenClawConfig {
 // 形状断言（Codex C9）：JSON.parse 成功但值非「普通对象」时，renderDict 挂到其上的 gateway 属性
 // 会被 JSON.stringify 丢弃（数组只序列化 index 属性、原始值无属性）→ openclaw.json 缺
 // port/bind/token 强制不变量。构造期同步拒绝，避免坏配置留到后台 provisioning 才暴露（POST 已返 creating）。
-function assertPlainObject(v: unknown, field: string): asserts v is Record<string, unknown> {
+// export：ProviderConfigBuilder 合并 models/agents/secrets 时复用同一断言（#366 codex 三轮 P2）——
+// typeof [] === 'object'，须显式排除数组，否则挂到数组上的 named property 被 JSON.stringify 静默丢弃。
+export function assertPlainObject(v: unknown, field: string): asserts v is Record<string, unknown> {
   if (typeof v !== 'object' || v === null || Array.isArray(v)) {
     throw new ConfigurationError(field)
   }

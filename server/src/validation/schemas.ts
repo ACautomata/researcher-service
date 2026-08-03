@@ -53,7 +53,11 @@ export const containerCreateSchema = z.object({
 // 建/改 model provider（models POST/PUT，#336）：snake_case wire（平移 Django
 // ModelProviderWriteSerializer）。provider_id / api_key_env_id 经格式 + 成员校验（r28 §1），
 // api 限两值（r28 §1.3），models 至少一条且每条含非空 id（无 model 无法派生默认模型引用）。
-// models 其余字段（reasoning/input/cost/contextWindow/maxTokens）由前端表单收集、原样透传（r28 §1.2）。
+// models 条目形状校验（#366 codex 三轮 P2）：已知字段类型严格校验（name/reasoning/input/cost/
+// contextWindow/maxTokens，对齐前端 ModelEntryDTO），未知扩展字段 passthrough 透传（前端表单
+// 收集的其余字段原样保留）。原来 `z.record(z.string(), z.unknown())` 让 {id:'m', name:{}} 这种
+// 非法形状入库——ProviderConfigBuilder 把 name 对象原样落盘为 alias/model 名（应为 string）→
+// 热加载拒绝、运行时落后 DB。入站校验拒绝，生成文件才可能符合 OpenClaw 形状。
 // base_url trim 后校验（#366 codex P2）：zod min(1) 不 trim，纯空格 '   ' 语义为空仍通过——
 // 对齐 Django CharField 默认 trim_whitespace，防「空 baseUrl 入库 + 写盘报成功热加载」。
 // 校验失败 → 90002 + 各字段明细（api_key_env_id 非法格式/未注入 env 同入 data.api_key_env_id）。
@@ -74,8 +78,23 @@ export const modelProviderWriteSchema = z.object({
   models: z
     .array(
       z
-        .record(z.string(), z.unknown())
-        .refine((m) => typeof m.id === 'string' && m.id.length > 0, '每条 model 须含非空 id'),
+        .object({
+          id: z.string().min(1, '每条 model 须含非空 id'),
+          name: z.string().optional(),
+          reasoning: z.boolean().optional(),
+          input: z.array(z.string()).optional(),
+          cost: z
+            .object({
+              input: z.number(),
+              output: z.number(),
+              cacheRead: z.number(),
+              cacheWrite: z.number(),
+            })
+            .optional(),
+          contextWindow: z.number().optional(),
+          maxTokens: z.number().optional(),
+        })
+        .passthrough(), // 未知扩展字段透传（前端表单收集的其余字段原样保留）
     )
     .min(1, '须至少一条 model（用于派生默认模型引用）'),
 })

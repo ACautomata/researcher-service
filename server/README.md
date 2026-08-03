@@ -116,6 +116,12 @@ npm run prisma:validate        # schema 合法性
 - **容器隔离（#312）**：user 仅自己容器、admin 跨用户全部；归属前置 `getInstanceForUser` 单点（admin 全放行 / user 仅本人）。
 - **容器并发（#313）**：进程内 `NameLeaseMap` 互斥（不依赖 Redis）防双创建/双删除；create/delete 按 name 串行入队；端口入队前分配（SQLite 唯一约束仲裁、四来源已用集）；delete 异步 + 取消标志（provisioning 检查点检出统一回滚）；BullMQ(Redis) worker 并发默认 2 + stalled-job 崩溃重跑。
 - **容器补偿**：ERROR 行保留 / bind 端口冲突就地换端口重试（预算=池大小）/ 清理失败标 REMOVING 可重试（20045）/ 端口池耗尽 90004。
+- **config 目录方案（#366）**：openclaw.json 落 `instances/<id>/config/`（目录 ro bind + `OPENCLAW_CONFIG_PATH`
+  指其内文件）——宿主 rename 换 inode 容器内可见（热加载保留）+ 容器内进程不可写（恢复只读边界）。
+  **升级要求**：由「单文件 bind」时代（config 落 `instances/<id>/openclaw.json`、无 `OPENCLAW_CONFIG_PATH`）
+  升上来的既有容器没有 `instances/<id>/config` 目录——provider 写盘落新路径不在容器 mount 内 → 热加载
+  断链但 API 报成功。写盘已 fail-fast（缺目录 → 90003 + 提示重建，见 `models/configWriter.ts`）；
+  **升级后须重建旧容器**（删除重建走新 mount）才能配置模型。
 
 ## 下游衔接
 

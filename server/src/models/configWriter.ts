@@ -10,10 +10,12 @@
 // 路由层注入此 Port（AppDeps.models.configWriter）：测试可注入假 writer 测回滚，生产装
 // TemplateModelConfigWriter（真模板 + 原子写）。
 
-import { readFile } from 'node:fs/promises'
+import { readFile, access } from 'node:fs/promises'
+import path from 'node:path'
+import { CODE } from '../codes'
 import { ConfigRenderer } from '../containers/configRenderer'
 import { ConfigStore } from '../containers/configStore'
-import { ConfigurationError } from '../containers/errors'
+import { ConfigurationError, ContainerDomainError } from '../containers/errors'
 import type { FleetConfig } from '../containers/values'
 import { ProviderConfigBuilder, type ProviderSpec } from './configBuilder'
 
@@ -38,9 +40,32 @@ export class TemplateModelConfigWriter implements ModelConfigWriter {
     // LLM key 未配置 → 90003（ConfigurationError 携带码）。生产 create 已前置 fail-fast
     // （command.ts 同款），此处兜底防「key 被清空后仍写盘成功、provider 不可用」。
     if (!this.cfg.llmApiKey) throw new ConfigurationError('LLM_API_KEY')
+    // #366 codex 三轮 P1「升级路径」：旧代容器 fail-fast（见 ensureLegacyCompatible）。
+    await this.ensureLegacyCompatible(id)
     const renderer = await this.ensureRenderer()
     const merged = new ProviderConfigBuilder().build(renderer.renderDict(), providers)
     await this.configStore.write(name, id, JSON.stringify(merged, null, 2))
+  }
+
+  // #366 codex 三轮 P1：父版本（master/1d998cd，config 落 instances/<id>/openclaw.json 单文件 ro
+  // bind、无 OPENCLAW_CONFIG_PATH）创建的容器没有 instances/<id>/config 目录。升级后对旧容器 provider
+  // 写盘落新路径（不在容器 mount 内）→ 热加载断链但 API 报成功。fail-fast：目录缺失 → 90003（与写盘
+  // 失败同域信封）提示重建；service 事务据此次异常回滚 DB 行，盘=DB 不发散。ENOENT 才判旧代——其余
+  // fs 错误（EACCES 等）上抛，让写入阶段如实暴露，不误标「旧代」。
+  // create 流程不经过本 writer（createComplete 直连 ConfigStore），且新代 create 必建该目录，故只拦旧代。
+  private async ensureLegacyCompatible(id: string): Promise<void> {
+    const configDir = path.join(this.cfg.root, 'instances', id, 'config')
+    try {
+      await access(configDir)
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === 'ENOENT') {
+        throw new ContainerDomainError(
+          CODE.LLM_NOT_CONFIGURED,
+          `容器为旧版本（缺 ${configDir} 目录），模型配置无法热加载到运行中的容器——请重建该容器后再配置`,
+        )
+      }
+      throw e
+    }
   }
 
   // 惰性读模板 + 缓存（对齐 command.ts ensureRenderer）：ConfigRenderer 构造期解析损坏模板 fail-fast。

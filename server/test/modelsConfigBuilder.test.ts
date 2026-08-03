@@ -163,4 +163,30 @@ describe('ProviderConfigBuilder（#336 纯逻辑）', () => {
     // 空 providers 不写 SecretRef → 不校验（模板缺 default 不影响透传）
     expect(() => new ProviderConfigBuilder().build({ models: { providers: {} } }, [])).not.toThrow()
   })
+
+  // ---------------------------- #366 codex 第三轮 P2：模板 models/agents 非对象 ----------------------------
+
+  it('模板 models 为数组 → ConfigurationError（JSON.stringify 数组丢 named properties → provider 静默丢失）', () => {
+    // cfg.models ??= {} 拿到数组后 models.providers = … 挂 named property；JSON.stringify 只序列化
+    // index 属性 → 盘上配置仍是空数组、无 managed provider、无 default-model 引用，但 DB 已提交报成功。
+    expect(() => new ProviderConfigBuilder().build({ ...SECRETS_BASE, models: [] }, [spec()])).toThrow(
+      ConfigurationError,
+    )
+    expect(() => new ProviderConfigBuilder().build({ ...SECRETS_BASE, agents: [] }, [spec()])).toThrow(
+      ConfigurationError,
+    )
+    // 空 providers 透传不写盘 → 不校验（模板 shapes 不影响 base 原样回传）
+    expect(() => new ProviderConfigBuilder().build({ models: [] }, [])).not.toThrow()
+  })
+
+  it('模板 secrets.providers.default 为数组 → ConfigurationError（typeof [] === object 逃过现有检查）', () => {
+    // 现有 typeof !== 'object' 检查放行数组；default 上挂 SecretRef 属性被 JSON.stringify 丢弃 →
+    // 写出的 apiKey 引用不存在的 secret provider。与 models/agents 数组同根，一并断言。
+    expect(() =>
+      new ProviderConfigBuilder().build({ secrets: { providers: { default: [] } } }, [spec()]),
+    ).toThrow(ConfigurationError)
+    expect(() => new ProviderConfigBuilder().build({ secrets: { providers: { default: null } } }, [spec()])).toThrow(
+      ConfigurationError,
+    )
+  })
 })

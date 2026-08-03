@@ -12,7 +12,7 @@
 // - api 取值（openai-completions / anthropic-messages）由 serializer 校验后经 ProviderSpec.api 原样写入。
 
 import type { ProviderApiWire } from './values'
-import { ConfigurationError } from '../containers/errors'
+import { assertPlainObject } from '../containers/configRenderer'
 
 // SecretRef.provider 固定引用 deploy/openclaw.json 既有的 secrets.providers.default（r28 §2.1）
 export const DEFAULT_SECRET_PROVIDER = 'default'
@@ -41,11 +41,11 @@ export class ProviderConfigBuilder {
     // 先确认模板 secrets.providers.default 存在——否则写出的配置引用不存在的 secret provider，
     // openclaw 解析凭证失败、热加载被拒，但 DB 已提交报成功 = 不可用配置。缺失 → 90003
     // （复用 ConfigurationError，与意见 4 的模板错误转译同一条配置失败信封）。
+    // #366 codex 三轮 P2：改用 assertPlainObject（显式排数组）——`typeof [] === 'object'` 逃过
+    // 旧检查，default 上挂 SecretRef 属性被 JSON.stringify 丢弃 → 引用不存在的 secret provider。
     const secrets = cfg.secrets as { providers?: Record<string, unknown> } | undefined
     const defaultSecretProvider = secrets?.providers?.default
-    if (typeof defaultSecretProvider !== 'object' || defaultSecretProvider === null) {
-      throw new ConfigurationError('OPENCLAW_TEMPLATE_JSON (secrets.providers.default)')
-    }
+    assertPlainObject(defaultSecretProvider, 'OPENCLAW_TEMPLATE_JSON (secrets.providers.default)')
 
     const providersMap: Record<string, Record<string, unknown>> = {}
     const refs: string[] = [] // "<pid>/<mid>" 按序
@@ -58,9 +58,16 @@ export class ProviderConfigBuilder {
         aliases[ref] = { alias: (model.name as string | undefined) || String(model.id) }
       }
     }
+    // #366 codex 三轮 P2：合并前断言 models/agents/agents.defaults 为普通对象——模板若给 JSON 合法但
+    // 形状错误的值（如 "models": []），`cfg.models ??= {}` 拿到数组后挂 named property，JSON.stringify
+    // 只序列化 index 属性 → provider 与 default-model 引用静默丢失、DB 却报成功。渲染器只校验了
+    // gateway 链，这里是合并写入点的形状闸。
+    if (cfg.models !== undefined) assertPlainObject(cfg.models, 'OPENCLAW_TEMPLATE_JSON (models)')
     const models = (cfg.models ??= {}) as Record<string, unknown>
     models.providers = providersMap
+    if (cfg.agents !== undefined) assertPlainObject(cfg.agents, 'OPENCLAW_TEMPLATE_JSON (agents)')
     const agents = (cfg.agents ??= {}) as Record<string, unknown>
+    if (agents.defaults !== undefined) assertPlainObject(agents.defaults, 'OPENCLAW_TEMPLATE_JSON (agents.defaults)')
     const defaults = (agents.defaults ??= {}) as Record<string, unknown>
     defaults.model = { primary: refs[0], fallbacks: refs.slice(1) }
     defaults.models = aliases

@@ -8,7 +8,7 @@
 // api_key_env_id 非法格式 90002 / 归属对偶 + 凭证零落盘。
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
-import { mkdtempSync, writeFileSync, readFileSync, chmodSync, readdirSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, readFileSync, chmodSync, readdirSync, mkdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { setupTestApp, type TestContext } from './setup'
@@ -117,6 +117,10 @@ describe('models REST（接缝 #2 + #336）', () => {
         status,
       },
     })
+    // #366 codex P1：真实新代容器 createComplete 必建 config 目录（instances/<id>/config 目录 ro bind
+    // + OPENCLAW_CONFIG_PATH）。seed 预建它，writer 的旧代检测（目录缺失 → 90003）不误伤本测试
+    // 模拟的「新代 running 容器」。旧代负例测试自行 rm 掉该目录再断言。
+    mkdirSync(path.join(fleetRoot, 'instances', row.id, 'config'), { recursive: true })
     return { name, id: row.id }
   }
 
@@ -573,7 +577,12 @@ describe('models REST（接缝 #2 + #336）', () => {
     expect(list.body.data).toEqual([])
   })
 
-  it('写盘失败（真实 ConfigStore 原子路径 EACCES）→ 90003 + 既有配置不被污染 + tmp 已清理', async () => {
+  // #366 codex P1（三轮）：真实 ConfigStore 原子路径 EACCES 依赖目录 mode bit 拦 root 外的用户。
+  // root（CAP_DAC_OVERRIDE）无视 0555 目录 → rename 成功 → 测试断言 90003 反而失败。容器化 CI 常以
+  // root 跑 vitest，故 root 下 skip（保留非 root 端到端覆盖）；root 环境的 EACCES 语义由注入 seam 测。
+  it.skipIf(process.getuid?.() === 0)(
+    '写盘失败（真实 ConfigStore 原子路径 EACCES）→ 90003 + 既有配置不被污染 + tmp 已清理',
+    async () => {
     // 对齐 Django test_rewrite_failure_leaves_existing_config_intact：先成功落一份合法配置，
     // 再让写盘在 tmp+rename 阶段失败（目录 chmod 只读 → rename EACCES），断言盘上保留上一份
     // 一致配置、无残留 tmp（ConfigStore 原子性在 models 写路径上的端到端验证）。
@@ -684,5 +693,37 @@ describe('models REST（接缝 #2 + #336）', () => {
     }
     const list = await ctx.request.get(providersOf(name)).set(bearer(l.access))
     expect(list.body.data).toEqual([])
+  })
+
+  // ---------------------------- #366 codex 第三轮 ----------------------------
+
+  // P1「升级路径」：父版本（master/1d998cd，config 落 instances/<id>/openclaw.json 单文件 ro bind、
+  // 无 OPENCLAW_CONFIG_PATH）创建的容器没有 instances/<id>/config 目录。新代码对旧容器 provider 写盘
+  // 写新路径（不在容器 mount 内）→ 热加载断链但 API 报成功。fail-fast：目录缺失 → 90003 + DB 回滚，
+  // 不静默成功（文档要求升级后重建既有容器）。
+  it('#366 codex P1：旧代容器（无 config 目录）→ 90003 + DB 回滚（热加载断链 fail-fast）', async () => {
+    const u = await seedUser(ctx.prisma, 'mlegacy', 'pw-mlegacy-secure')
+    const { name, id } = await seedContainer(u.id)
+    // 模拟旧代：删除新代 create 必建的 config 目录
+    rmSync(path.join(fleetRoot, 'instances', id, 'config'), { recursive: true, force: true })
+    const l = await login(ctx.request, 'mlegacy', 'pw-mlegacy-secure')
+    const res = await ctx.request.post(providersOf(name)).set(bearer(l.access)).send(VALID)
+    expect(res.body.code).toBe(90003)
+    expect(res.body.message).toMatch(/重建/)
+    const list = await ctx.request.get(providersOf(name)).set(bearer(l.access))
+    expect(list.body.data).toEqual([]) // DB 回滚：无 orphan provider 行
+  })
+
+  // P2a「写盘前校验 model 字段类型」：schema 里 models 条目除 id 外全 unknown，{id:'m', name:{}} 能过——
+  // ProviderConfigBuilder 把 name 对象原样落盘（alias/model 名应为 string）→ 热加载拒绝。入站校验拒绝。
+  it('#366 codex P2：model 条目字段类型非法（name 为对象）→ 90002', async () => {
+    const u = await seedUser(ctx.prisma, 'mbadmod', 'pw-mbadmod-secure')
+    const { name } = await seedContainer(u.id)
+    const l = await login(ctx.request, 'mbadmod', 'pw-mbadmod-secure')
+    const bad = { ...VALID, models: [{ id: 'm', name: {} }] }
+    const res = await ctx.request.post(providersOf(name)).set(bearer(l.access)).send(bad)
+    expect(res.body.code).toBe(90002)
+    const list = await ctx.request.get(providersOf(name)).set(bearer(l.access))
+    expect(list.body.data).toEqual([]) // 校验拒绝不入库
   })
 })
