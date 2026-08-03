@@ -4,7 +4,6 @@
 
 import Docker from 'dockerode'
 import {
-  CONFIG_BIND,
   GATEWAY_BIND,
   GATEWAY_INTERNAL_PORT,
   HOME_BIND,
@@ -83,9 +82,12 @@ export class DockerRuntime implements ContainerRuntime {
       HostConfig: {
         CapAdd: ['CHOWN', 'SETUID', 'SETGID', 'DAC_OVERRIDE'],
         Binds: [
+          // #366 修复（codex P1「热加载断链」）：只 bind home 目录（rw）——openclaw.json 在
+          // home 内（instances/<id>/home/openclaw.json），ConfigStore rename 换 inode 后
+          // 目录 bind 仍指向同一目录、容器内文件变 → gateway watch 热加载生效。旧实现单文件
+          // bind（:ro）在 rename 后仍指向旧 inode，容器内永远看不到新配置（m2 亦证 openclaw
+          // 镜像上文件 bind 不可靠）。config 写入都在 host 侧，容器无需 ro 保护单文件。
           `${spec.homeDir}:${HOME_BIND}:rw`,
-          // openclaw.json 挂 ro（防容器内篡改配置；host 侧写透经 bind 传播不受 ro 影响）
-          `${spec.configPath}:${CONFIG_BIND}:ro`,
         ],
         PortBindings: {
           [`${GATEWAY_INTERNAL_PORT}/tcp`]: [{ HostIp: this.publishHost, HostPort: String(spec.hostPort) }],

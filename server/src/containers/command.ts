@@ -217,7 +217,6 @@ export class FleetCommand {
     // 代系绑定（#360）：instanceDir 基于 inst.id（每代唯一），非可复用的 name。
     const instanceDir = path.join(this.deps.config.root, 'instances', inst.id)
     const home = path.join(instanceDir, 'home')
-    const configPath = path.join(instanceDir, 'openclaw.json')
     // bind 冲突重试预算 = 端口池候选数（非 reserveRow 的 DB 并发冲突预算——那是另一处独立预算）。
     const poolSize = this.deps.config.portEnd - this.deps.config.portStart + 1
     const learnedConflicts = new Set<number>()
@@ -256,7 +255,6 @@ export class FleetCommand {
             // DB 存密文，docker env 须注入明文 gatewayToken——用时 decrypt（Codex C1）。
             gatewayToken: this.deps.crypto.decrypt(current.token),
             homeDir: home,
-            configPath,
             llmApiKey: this.deps.config.llmApiKey,
           }
           const containerId = await this.deps.runtime.run(spec)

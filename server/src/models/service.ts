@@ -99,23 +99,29 @@ export class ModelProviderService {
   // create/update/delete 共用事务骨架：
   //   tx 内做 DB mutation → 读 tx 全量 providers → writer.rewrite。
   //   rewrite 写盘失败抛 ConfigWriteError → 事务回滚（DB 行不留 orphan）；P2002/P2025 同路径转译。
+  // #366 修复（codex P1「事务超时分裂」）：显式 timeout——Prisma 交互式事务默认 5s，rewrite 含
+  // fs 写盘（慢卷/锁时可能超 5s），超时后 DB 回滚但 fs 操作不可取消仍可能落盘 → 盘上配置领先
+  // DB 发散。显式 30s 让写盘有足够时间完成；回滚只发生在写盘真失败（fs 已失败未落盘）。
   async create(inst: Container, input: ModelProviderWriteInput): Promise<ModelProviderView> {
     try {
-      const row = await this.prisma.$transaction(async (tx) => {
-        const created = await tx.modelProvider.create({
-          data: {
-            containerId: inst.id,
-            providerId: input.providerId,
-            api: WIRE_TO_API_ENUM[input.api],
-            baseUrl: input.baseUrl,
-            apiKeyEnvId: input.apiKeyEnvId,
-            authHeader: input.authHeader,
-            modelsJson: JSON.stringify(input.models),
-          },
-        })
-        await this.rewrite(tx, inst)
-        return created
-      })
+      const row = await this.prisma.$transaction(
+        async (tx) => {
+          const created = await tx.modelProvider.create({
+            data: {
+              containerId: inst.id,
+              providerId: input.providerId,
+              api: WIRE_TO_API_ENUM[input.api],
+              baseUrl: input.baseUrl,
+              apiKeyEnvId: input.apiKeyEnvId,
+              authHeader: input.authHeader,
+              modelsJson: JSON.stringify(input.models),
+            },
+          })
+          await this.rewrite(tx, inst)
+          return created
+        },
+        { timeout: 30_000 },
+      )
       return toView(row)
     } catch (e) {
       this.rethrowKnown(e)
@@ -124,23 +130,26 @@ export class ModelProviderService {
 
   async update(inst: Container, pid: string, input: ModelProviderWriteInput): Promise<ModelProviderView> {
     try {
-      const row = await this.prisma.$transaction(async (tx) => {
-        // 复合唯一 where 定位目标行（路径 pid）：不存在 → P2025 → 40040。
-        // data.providerId 可为新 pid（PUT 改 provider_id），撞同容器既有 pid → P2002 → 40041。
-        const updated = await tx.modelProvider.update({
-          where: { containerId_providerId: { containerId: inst.id, providerId: pid } },
-          data: {
-            providerId: input.providerId,
-            api: WIRE_TO_API_ENUM[input.api],
-            baseUrl: input.baseUrl,
-            apiKeyEnvId: input.apiKeyEnvId,
-            authHeader: input.authHeader,
-            modelsJson: JSON.stringify(input.models),
-          },
-        })
-        await this.rewrite(tx, inst)
-        return updated
-      })
+      const row = await this.prisma.$transaction(
+        async (tx) => {
+          // 复合唯一 where 定位目标行（路径 pid）：不存在 → P2025 → 40040。
+          // data.providerId 可为新 pid（PUT 改 provider_id），撞同容器既有 pid → P2002 → 40041。
+          const updated = await tx.modelProvider.update({
+            where: { containerId_providerId: { containerId: inst.id, providerId: pid } },
+            data: {
+              providerId: input.providerId,
+              api: WIRE_TO_API_ENUM[input.api],
+              baseUrl: input.baseUrl,
+              apiKeyEnvId: input.apiKeyEnvId,
+              authHeader: input.authHeader,
+              modelsJson: JSON.stringify(input.models),
+            },
+          })
+          await this.rewrite(tx, inst)
+          return updated
+        },
+        { timeout: 30_000 },
+      )
       return toView(row)
     } catch (e) {
       this.rethrowKnown(e, { containerId: inst.id, pid })
@@ -149,12 +158,15 @@ export class ModelProviderService {
 
   async remove(inst: Container, pid: string): Promise<void> {
     try {
-      await this.prisma.$transaction(async (tx) => {
-        await tx.modelProvider.delete({
-          where: { containerId_providerId: { containerId: inst.id, providerId: pid } },
-        })
-        await this.rewrite(tx, inst)
-      })
+      await this.prisma.$transaction(
+        async (tx) => {
+          await tx.modelProvider.delete({
+            where: { containerId_providerId: { containerId: inst.id, providerId: pid } },
+          })
+          await this.rewrite(tx, inst)
+        },
+        { timeout: 30_000 },
+      )
     } catch (e) {
       this.rethrowKnown(e, { containerId: inst.id, pid })
     }

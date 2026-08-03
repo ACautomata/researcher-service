@@ -70,10 +70,13 @@ function mockPullClient(opts: { imagePresent?: boolean; pullErr?: Error }): {
     getContainer: () => ({
       start: async () => {},
     }),
-    createContainer: async () => ({
-      id: 'cid-123',
-      start: async () => {},
-    }),
+    createContainer: async (options: Docker.ContainerCreateOptions) => {
+      lastCreateOptions = options
+      return {
+        id: 'cid-123',
+        start: async () => {},
+      }
+    },
     modem: {
       followProgress: (_s: NodeJS.ReadableStream, onFinished: (err: Error | null) => void) =>
         onFinished(null),
@@ -82,6 +85,9 @@ function mockPullClient(opts: { imagePresent?: boolean; pullErr?: Error }): {
   return { docker: docker as unknown as Docker, pulls }
 }
 
+// 捕获最近一次 createContainer 的 options（供 bind 断链回归断言）
+let lastCreateOptions: Docker.ContainerCreateOptions | undefined
+
 describe('DockerRuntime ensureImage（Codex 第四轮③）', () => {
   const spec = (name: string, hostPort: number) => ({
     name,
@@ -89,7 +95,6 @@ describe('DockerRuntime ensureImage（Codex 第四轮③）', () => {
     hostPort,
     gatewayToken: 'tok',
     homeDir: '/tmp/home',
-    configPath: '/tmp/config.json',
     llmApiKey: 'key',
   })
 
@@ -112,5 +117,17 @@ describe('DockerRuntime ensureImage（Codex 第四轮③）', () => {
     const { docker } = mockPullClient({ imagePresent: false, pullErr: new Error('registry unreachable') })
     const rt = new DockerRuntime(() => docker)
     await expect(rt.run(spec('r4-pullfail', 19002))).rejects.toThrow('registry unreachable')
+  })
+
+  it('#366 热加载断链回归：只 bind home 目录，无单文件 config bind（rename 换 inode 后容器内可见）', async () => {
+    // codex P1：旧实现 `${configPath}:.../openclaw.json:ro` 单文件 bind——ConfigStore 原子
+    // rename 换 inode 后容器内仍挂旧 inode（gateway watch 永远看不到新配置）。修复后 config
+    // 落 home 目录内、只 bind 目录（rw），rename 即容器内文件变。
+    const { docker } = mockPullClient({ imagePresent: true })
+    const rt = new DockerRuntime(() => docker)
+    await rt.run(spec('r1-bind', 19003))
+    const binds = lastCreateOptions?.HostConfig?.Binds ?? []
+    expect(binds).toEqual(['/tmp/home:/home/node/.openclaw:rw']) // 仅目录 bind
+    expect(binds.some((b) => b.includes('openclaw.json'))).toBe(false) // 无单文件 bind
   })
 })

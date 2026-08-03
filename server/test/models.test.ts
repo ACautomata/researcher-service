@@ -29,19 +29,24 @@ function makeModelsFleet(): { fleetRoot: string; writer: ModelConfigWriter } {
     templateJson,
     JSON.stringify({ gateway: { auth: {} }, models: { providers: {} } }, null, 2),
   )
+  // root 与 templateDir 同值即可（ConfigStore 只用 root 拼 home 路径，不读 templateDir）
   const cfg = { root: fleetRoot, templateJson, llmApiKey: 'test-llm-key' }
   return { fleetRoot, writer: new TemplateModelConfigWriter(cfg) }
 }
 
 // 可切换失败模式的 writer：'write' → ConfigWriteError（写盘失败）；'config' → ConfigurationError
-// （LLM key 缺失）；其余透传真 writer。用 try/finally 复位，防污染后续用例。
-type FailMode = 'none' | 'write' | 'config'
+// （LLM key 缺失）；'slow' → 挂起 5.2s（超 Prisma 默认 5s 事务窗口，测 #366 显式 timeout）；
+// 其余透传真 writer。用 try/finally 复位，防污染后续用例。
+type FailMode = 'none' | 'write' | 'config' | 'slow'
 let realWriter: ModelConfigWriter = { rewrite: async () => {} }
 let failMode: FailMode = 'none'
 const writer: ModelConfigWriter = {
   async rewrite(opts) {
     if (failMode === 'write') throw new ConfigWriteError(opts.name, '/x/openclaw.json')
     if (failMode === 'config') throw new ConfigurationError('LLM_API_KEY')
+    if (failMode === 'slow') {
+      await new Promise((r) => setTimeout(r, 5_200)) // 慢写盘：超过 Prisma 默认 5s 窗口
+    }
     return realWriter.rewrite(opts)
   },
 }
@@ -99,7 +104,8 @@ describe('models REST（接缝 #2 + #336）', () => {
   }
 
   function readConfig(id: string): Record<string, any> {
-    const text = readFileSync(path.join(fleetRoot, 'instances', id, 'openclaw.json'), 'utf8')
+    // #366：config 落 home 目录内（instances/<id>/home/openclaw.json，目录 bind 下 rename 容器内可见）
+    const text = readFileSync(path.join(fleetRoot, 'instances', id, 'home', 'openclaw.json'), 'utf8')
     return JSON.parse(text)
   }
 
@@ -170,6 +176,26 @@ describe('models REST（接缝 #2 + #336）', () => {
     const res = await ctx.request.post(providersOf(name)).set(bearer(l.access)).send(VALID)
     expect(res.body.code).toBe(20043)
     // GET 只读无写盘副作用，不拒 creating
+    const rget = await ctx.request.get(providersOf(name)).set(bearer(l.access))
+    expect(rget.body.code).toBe(0)
+  })
+
+  it('#366 removing 容器 POST/PUT/DELETE → 20043（防与删除 rmtree 竞态）；GET 只读放行', async () => {
+    // codex P2：删除后台 rmtree 期间放行写 → ConfigStore 重建目录 + 写盘与 rmtree 竞态 →
+    // orphan 目录残留。removing 与 creating 同属「生命周期忙」拒写；GET 只读仍放行。
+    const u = await seedUser(ctx.prisma, 'mremov', 'pw-mremov-secure')
+    const { name } = await seedContainer(u.id, 'removing')
+    const l = await login(ctx.request, 'mremov', 'pw-mremov-secure')
+    for (const method of ['post', 'put', 'delete'] as const) {
+      const req = method === 'post'
+        ? ctx.request.post(providersOf(name)).send(VALID)
+        : method === 'put'
+          ? ctx.request.put(providerOf(name, 'my-openai')).send(VALID)
+          : ctx.request.delete(providerOf(name, 'my-openai'))
+      const res = await req.set(bearer(l.access))
+      expect(res.body.code).toBe(20043)
+    }
+    // GET 只读无写盘副作用，不拒 removing
     const rget = await ctx.request.get(providersOf(name)).set(bearer(l.access))
     expect(rget.body.code).toBe(0)
   })
@@ -421,6 +447,25 @@ describe('models REST（接缝 #2 + #336）', () => {
 
   // ---------------------------- 写盘失败回滚（90003，DB 与盘上配置绝不发散）----------------------------
 
+  it('#366 事务超时修复：rewrite 慢写盘（>默认 5s）不触发 P2028 超时回滚', async () => {
+    // codex P1：Prisma 交互式事务默认 5s 超时——rewrite 含 fs 写盘，慢卷时可能超 5s →
+    // DB 回滚但盘上已落盘（发散）。修复后 $transaction 显式 timeout 30s；本用例让 writer
+    // 挂起 5.2s（超默认窗口），若未修 create 会抛 P2028 事务超时 → 500；修后正常 200。
+    const u = await seedUser(ctx.prisma, 'mslowtx', 'pw-mslowtx-secure')
+    const { name } = await seedContainer(u.id)
+    const l = await login(ctx.request, 'mslowtx', 'pw-mslowtx-secure')
+    failMode = 'slow'
+    try {
+      const res = await ctx.request.post(providersOf(name)).set(bearer(l.access)).send(VALID)
+      expect(res.body.code).toBe(0) // 未触发事务超时（显式 30s 生效）
+      expect(res.body.data.provider_id).toBe('my-openai')
+    } finally {
+      failMode = 'none'
+    }
+    const list = await ctx.request.get(providersOf(name)).set(bearer(l.access))
+    expect(list.body.data).toHaveLength(1) // DB 行在（事务提交成功）
+  }, 15_000)
+
   it('create 写盘失败 → 90003 + DB 回滚（无 orphan provider 行）', async () => {
     const u = await seedUser(ctx.prisma, 'mfailc', 'pw-mfailc-secure')
     const { name } = await seedContainer(u.id)
@@ -493,7 +538,7 @@ describe('models REST（接缝 #2 + #336）', () => {
     const { name, id } = await seedContainer(u.id)
     const l = await login(ctx.request, 'mfailfs', 'pw-mfailfs-secure')
     await ctx.request.post(providersOf(name)).set(bearer(l.access)).send(VALID)
-    const cfgPath = path.join(fleetRoot, 'instances', id, 'openclaw.json')
+    const cfgPath = path.join(fleetRoot, 'instances', id, 'home', 'openclaw.json')
     const good = readFileSync(cfgPath, 'utf8')
     expect(good).toContain('my-openai')
 
@@ -512,5 +557,61 @@ describe('models REST（接缝 #2 + #336）', () => {
     // DB 回滚：base_url 仍是原值
     const getRes = await ctx.request.get(providerOf(name, 'my-openai')).set(bearer(l.access))
     expect(getRes.body.data.base_url).toBe('https://open.bigmodel.cn/api/paas/v4')
+  })
+
+  // ---------------------------- 模板加载错误转译（#366 codex P2）----------------------------
+  // 模板损坏/缺失时 rewrite 惰性加载应抛 ConfigurationError（90003）——否则裸 SyntaxError 被
+  // 全局错误面当 body 解析失败误译 90002、文件缺失落 90000（错误分类错误，客户端收不到
+  // 文档化的配置失败信封）。
+
+  it('#366 模板损坏（JSON.parse SyntaxError）→ 90003 而非 90002/90000', async () => {
+    const u = await seedUser(ctx.prisma, 'mtbad', 'pw-mtbad-secure')
+    const { name } = await seedContainer(u.id)
+    const l = await login(ctx.request, 'mtbad', 'pw-mtbad-secure')
+    // 独立 writer 实例 + 损坏模板（首次 rewrite 才惰性加载——复用 writer 会被已缓存
+    // renderer 污染，测不到加载路径）
+    const badTemplate = path.join(fleetRoot, 'openclaw.template.bad.json')
+    writeFileSync(badTemplate, '{ this is not json')
+    const badWriter: ModelConfigWriter = new TemplateModelConfigWriter({
+      root: fleetRoot,
+      templateJson: badTemplate,
+      llmApiKey: 'test-llm-key',
+    })
+    const saved = realWriter
+    realWriter = badWriter
+    try {
+      const res = await ctx.request.post(providersOf(name)).set(bearer(l.access)).send(VALID)
+      expect(res.body.code).toBe(90003) // 配置失败信封，非 90002（body 是合法的）
+    } finally {
+      realWriter = saved
+    }
+    // DB 回滚：无 orphan provider 行
+    const list = await ctx.request.get(providersOf(name)).set(bearer(l.access))
+    expect(list.body.data).toEqual([])
+  })
+
+  it('#366 模板缺失（readFile ENOENT）→ 90003 而非 90000', async () => {
+    const u = await seedUser(ctx.prisma, 'mtmiss', 'pw-mtmiss-secure')
+    const { name } = await seedContainer(u.id)
+    const l = await login(ctx.request, 'mtmiss', 'pw-mtmiss-secure')
+    const templatePath = path.join(fleetRoot, 'openclaw.template.json')
+    const good = readFileSync(templatePath, 'utf8')
+    // 换一个指向不存在模板的 writer（懒加载在首次 rewrite 时才触发）
+    const missingWriter: ModelConfigWriter = new TemplateModelConfigWriter({
+      root: fleetRoot,
+      templateJson: path.join(fleetRoot, 'no-such-template.json'),
+      llmApiKey: 'test-llm-key',
+    })
+    const saved = realWriter
+    realWriter = missingWriter
+    try {
+      const res = await ctx.request.post(providersOf(name)).set(bearer(l.access)).send(VALID)
+      expect(res.body.code).toBe(90003) // 配置失败信封，非 90000 未知错误
+    } finally {
+      realWriter = saved
+      writeFileSync(templatePath, good)
+    }
+    const list = await ctx.request.get(providersOf(name)).set(bearer(l.access))
+    expect(list.body.data).toEqual([])
   })
 })

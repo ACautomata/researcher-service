@@ -4,13 +4,14 @@
 // 路由层不加 name 正则（校验在 handler 内做，保「非法 → 90002」而非 Express 默认 404）。
 //
 // 隔离（#312）：经 getInstanceForUser 归属前置 —— admin 全放行 / user 仅本人，越权 20040 同码防探测。
-// 写操作（POST/PUT/DELETE）拒 creating 行（20043）：对齐 Django _InstanceCreating（codex P2）——
-// CREATING 期间 create 会写 base render 的 openclaw.json；放行 rewrite_config 会让 create 的
-// base render 后到覆盖（lost update：provider 事务提交成功但 openclaw.json 丢 provider）。
-// GET 只读无写盘副作用，不检查 creating。
+// 写操作（POST/PUT/DELETE）拒 creating/removing 行（20043）：creating 对齐 Django _InstanceCreating
+// （codex P2）——CREATING 期间 create 会写 base render 的 openclaw.json；放行 rewrite_config 会让
+// create 的 base render 后到覆盖（lost update：provider 事务提交成功但 openclaw.json 丢 provider）。
+// removing（#366 codex P2）——删除后台 rmtree 期间放行写 → ConfigStore 重建目录 + 写盘与 rmtree
+// 竞态 → orphan 目录残留。GET 只读无写盘副作用，不检查。
 //
 // 错误映射（#336 + #319 §1.3）：name 非法 → 90002(data.name) · 容器不存在/越权 → 20040 ·
-// creating 写 → 20043 · 校验失败 → 90002 · provider 不存在/越权 → 40040 ·
+// creating/removing 写 → 20043 · 校验失败 → 90002 · provider 不存在/越权 → 40040 ·
 // provider_id 冲突 → 40041 · 写盘失败/LLM key 缺失 → 90003。
 // 顺序（对齐 Django _get_instance 先于 Serializer）：name → 容器归属(20040) → creating 拒写(20043)
 // → body 校验(90002) —— 非法 body 撞不存在/越权容器一律 20040，不泄露容器存在性（防探测）。
@@ -68,11 +69,17 @@ export function createModelsRouter(deps: ModelsRouterDeps): Router {
     }
     return getInstanceForUser(req.prisma, req.user!, name)
   }
-  // 写前置：归属校验后再拒 creating（防 lost update；只读 GET 不查）
+  // 写前置：归属校验后再拒 creating/removing（防 lost update + 防与删除竞态；只读 GET 不查）。
+  // creating：CREATING 期间 create 的 base render 可能覆盖 rewrite（lost update，对齐 Django）。
+  // removing（#366 codex P2）：删除后台 rmtree 期间放行写会让 ConfigStore 重建目录 + 写盘，
+  // 与 rmtree 竞态 → orphan 目录残留；removing 与 creating 同属「生命周期忙」拒写。
   const resolveWrite = async (req: Request, name: string | string[]) => {
     const inst = await resolveInstance(req, name)
     if (inst.status === 'creating') {
       throw fail(CODE.CONTAINER_BUSY, '容器正在创建中，暂不能配置模型，请稍候')
+    }
+    if (inst.status === 'removing') {
+      throw fail(CODE.CONTAINER_BUSY, '容器正在删除中，暂不能配置模型，请稍候')
     }
     return inst
   }
