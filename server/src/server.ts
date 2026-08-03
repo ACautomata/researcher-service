@@ -6,6 +6,8 @@ import { config } from './config'
 import { assembleFleet } from './containers/fleetAssembly'
 import { makeDockerCompile } from './wiki/compile'
 import { TemplateModelConfigWriter } from './models/configWriter'
+import { createTunnelServer } from './chat/tunnel'
+import { makeWsGatewayConnector } from './chat/gatewayConnector'
 import './types'
 
 async function main(): Promise<void> {
@@ -23,16 +25,23 @@ async function main(): Promise<void> {
   })
 
   // M0 同进程单端口分流：createServer(expressApp) + server.on('upgrade') 分流。
-  // upgrade 钩子由 M4 接 ws 桥（noServer + handleUpgrade + subprotocol 回显）；本期仅 HTTP。
+  // M5 隧道（#337 · ADR 0006）：/ws/chat/ 由隧道接管（JWT subprotocol 握手 + 归属门 + 原始帧透传
+  // 到容器网关）；其余 upgrade 请求拒绝（避免裸挂导致悬空连接）。
+  const tunnel = createTunnelServer({
+    prisma,
+    connectGateway: makeWsGatewayConnector(),
+    gatewayHost: config.fleet.healthHost,
+  })
   const server = createServer(app)
-  server.on('upgrade', (_req, socket) => {
-    // M4 前：无 WS 路由，直接拒绝升级（避免裸挂导致悬空连接）
-    socket.destroy()
+  server.on('upgrade', (req, socket, head) => {
+    if (!tunnel.handleUpgrade(req, socket, head)) socket.destroy()
   })
 
   // 优雅关闭：drain BullMQ worker（在飞 provisioning 完成或标 ERROR）。
   const shutdown = async (): Promise<void> => {
     await fleet.close().catch(() => {})
+    // 先终止活动隧道（http.Server.close 会等升级后的 WS 连接自然断开——有浏览器持隧道时挂起）
+    tunnel.close()
     server.close(() => process.exit(0))
   }
   process.on('SIGINT', () => void shutdown())
