@@ -1,0 +1,290 @@
+// WikiService 聚合逻辑单测（#335 · 对 fake WikiFileSystem 直测，不碰磁盘/DB）。
+// 契约锚点 = backend/wiki/tests/test_service_fake_fs.py + test_graph_api.py + test_categories_api.py。
+// 验证：CRUD 域错误映射、listCategories 分组/排序/窗口、buildGraph 节点/边/ghost/不 dedup。
+
+import { describe, it, expect } from 'vitest'
+import { FrontmatterParser, frontmatterTitle } from '../src/wiki/logic'
+import { SKIP_DIRS, SKIP_FILES } from '../src/wiki/values'
+import { WikiInvalidPath, WikiPageExists, WikiPageNotFound } from '../src/wiki/errors'
+import { WikiService } from '../src/wiki/service'
+import type { WikiCategoryPage, WikiFileSystem, WikiTree, WikiTreeGroup, WikiTreePage } from '../src/wiki/fsPort'
+
+// 内存 fake Port（对齐 backend/integration/openclaw/fakes.py FakeWikiFileSystem）：
+// 页面 dict → build_tree 按顶层目录分组；CRUD 语义与越权防护对齐 NodeWikiFileSystem。
+class FakeWikiFileSystem implements WikiFileSystem {
+  pages = new Map<string, string>()
+
+  constructor(entries: Record<string, string>) {
+    for (const [k, v] of Object.entries(entries)) this.pages.set(k, v)
+  }
+
+  private validatePath(relPath: string): void {
+    const parts = relPath.split('/').filter(Boolean)
+    if (parts.some((p) => p === '..')) throw new WikiInvalidPath(relPath)
+    if (parts.some((p) => SKIP_DIRS.has(p))) throw new WikiInvalidPath(relPath)
+    if (parts.length && SKIP_FILES.has(parts[parts.length - 1])) throw new WikiInvalidPath(relPath)
+  }
+
+  private titleOf(content: string, stem: string): string {
+    const p = new FrontmatterParser()
+    const { frontmatter, body } = p.parse(content)
+    return frontmatterTitle(frontmatter) ?? this.h1Title(body) ?? stem
+  }
+
+  private h1Title(body: string): string | null {
+    for (const line of body.split('\n')) {
+      if (line.startsWith('# ')) {
+        const t = line.slice(2).trim()
+        return t || null
+      }
+    }
+    return null
+  }
+
+  async buildTree(): Promise<WikiTree> {
+    const groups = new Map<string, WikiTreeGroup>()
+    for (const rel of [...this.pages.keys()].sort()) {
+      const slash = rel.indexOf('/')
+      if (slash < 0) continue // 顶层散落页不收（categories 才收）
+      const top = rel.slice(0, slash)
+      if (SKIP_DIRS.has(top)) continue
+      if (SKIP_FILES.has(rel.slice(rel.lastIndexOf('/') + 1))) continue
+      const stem = rel.slice(rel.lastIndexOf('/') + 1, -3)
+      const item: WikiTreePage = { path: rel, title: this.titleOf(this.pages.get(rel)!, stem) }
+      if (!groups.has(top)) groups.set(top, { kind: top, name: top, pages: [] })
+      groups.get(top)!.pages.push(item)
+    }
+    return { groups: [...groups.values()].map((g) => ({ kind: g.kind, name: g.name, pages: g.pages })) }
+  }
+
+  async readPage(relPath: string): Promise<{ path: string; title: string; content: string }> {
+    this.validatePath(relPath)
+    const content = this.pages.get(relPath)
+    if (content === undefined) throw new WikiPageNotFound(relPath)
+    const stem = relPath.slice(relPath.lastIndexOf('/') + 1, -3)
+    return { path: relPath, title: this.titleOf(content, stem), content }
+  }
+
+  async listCategoryPages(): Promise<WikiCategoryPage[]> {
+    const out: WikiCategoryPage[] = []
+    for (const [rel, content] of this.pages) {
+      this.validatePath(rel)
+      const stem = rel.slice(rel.lastIndexOf('/') + 1, -3)
+      out.push({ path: rel, title: this.titleOf(content, stem), content })
+    }
+    return out
+  }
+
+  async writePage(relPath: string, content: string): Promise<{ path: string }> {
+    this.validatePath(relPath)
+    if (!this.pages.has(relPath)) throw new WikiPageNotFound(relPath)
+    this.pages.set(relPath, content)
+    return { path: relPath }
+  }
+
+  async createPage(relPath: string, content: string): Promise<{ path: string }> {
+    this.validatePath(relPath)
+    if (this.pages.has(relPath)) throw new WikiPageExists(relPath)
+    this.pages.set(relPath, content)
+    return { path: relPath }
+  }
+
+  async deletePage(relPath: string): Promise<void> {
+    this.validatePath(relPath)
+    if (!this.pages.has(relPath)) throw new WikiPageNotFound(relPath)
+    this.pages.delete(relPath)
+  }
+}
+
+function fixtureFs(): FakeWikiFileSystem {
+  return new FakeWikiFileSystem({
+    'concepts/attention.md': '---\ntitle: Attention\n---\n# Attention\n见 [[self-attention]]。\n',
+    'concepts/transformer.md': '---\ntitle: Transformer\n---\n# T\n',
+    'domains/cv/papers/resnet.md': '---\npaper:\n  title: ResNet\nrelated_pages: [attention]\n---\n# ResNet\n',
+    'experiments/trial-1.md': '---\ntitle: Trial 1\n---\n# Trial 1\n',
+  })
+}
+
+describe('WikiService CRUD（fake FS）', () => {
+  it('build_tree：按页面真实顶层目录分组，未知目录也成组；无页目录不成组', async () => {
+    const svc = new WikiService(fixtureFs())
+    const tree = await svc.buildTree()
+    const kinds = tree.groups.map((g) => g.kind)
+    expect(kinds).toEqual(expect.arrayContaining(['concepts', 'domains', 'experiments']))
+    expect(kinds).not.toContain('concept')
+    expect(kinds).not.toContain('entities')
+    const experiments = tree.groups.find((g) => g.kind === 'experiments')!
+    expect(experiments.name).toBe('experiments')
+    expect(experiments.pages.map((p) => p.path)).toEqual(['experiments/trial-1.md'])
+  })
+
+  it('read_page：原文 + frontmatter title', async () => {
+    const svc = new WikiService(fixtureFs())
+    const page = await svc.readPage('concepts/attention.md')
+    expect(page.path).toBe('concepts/attention.md')
+    expect(page.title).toBe('Attention')
+    expect(page.content).toContain('# Attention')
+  })
+
+  it('read_page 缺失 → WikiPageNotFound', async () => {
+    await expect(new WikiService(fixtureFs()).readPage('concepts/nope.md')).rejects.toBeInstanceOf(WikiPageNotFound)
+  })
+
+  it('write_page 覆写；缺失 → WikiPageNotFound', async () => {
+    const svc = new WikiService(fixtureFs())
+    await svc.writePage('concepts/attention.md', '# 已编辑\n')
+    expect((await svc.readPage('concepts/attention.md')).content).toBe('# 已编辑\n')
+    await expect(svc.writePage('concepts/nope.md', 'x')).rejects.toBeInstanceOf(WikiPageNotFound)
+  })
+
+  it('create_page 新建；已存在 → WikiPageExists', async () => {
+    const svc = new WikiService(fixtureFs())
+    await svc.createPage('concepts/new.md', '# New\n')
+    expect((await svc.readPage('concepts/new.md')).content).toBe('# New\n')
+    await expect(svc.createPage('concepts/attention.md', 'x')).rejects.toBeInstanceOf(WikiPageExists)
+  })
+
+  it('delete_page 删除；缺失 → WikiPageNotFound', async () => {
+    const svc = new WikiService(fixtureFs())
+    await svc.deletePage('concepts/attention.md')
+    await expect(svc.readPage('concepts/attention.md')).rejects.toBeInstanceOf(WikiPageNotFound)
+    await expect(svc.deletePage('concepts/nope.md')).rejects.toBeInstanceOf(WikiPageNotFound)
+  })
+
+  it('路径越权（穿越/managed 目录/managed 文件）在 CRUD 全路径上抛 WikiInvalidPath', async () => {
+    const svc = new WikiService(fixtureFs())
+    const cases: Array<() => Promise<unknown>> = [
+      () => svc.readPage('../../evil.md'),
+      () => svc.readPage('.openclaw-wiki/evil.md'),
+      () => svc.readPage('concepts/index.md'),
+      () => svc.writePage('../../evil.md', 'x'),
+      () => svc.createPage('.openclaw-wiki/evil.md', 'x'),
+      () => svc.createPage('concepts/index.md', 'x'),
+      () => svc.deletePage('../../evil.md', ),
+      () => svc.deletePage('.openclaw-wiki/evil.md'),
+    ]
+    for (const fn of cases) {
+      await expect(fn()).rejects.toBeInstanceOf(WikiInvalidPath)
+    }
+  })
+})
+
+describe('WikiService listCategories（fake FS）', () => {
+  function catFs(): FakeWikiFileSystem {
+    return new FakeWikiFileSystem({
+      'thoughts/idea-1.md':
+        '---\ntitle: First Idea\n---\n# First Idea\n\n`category: idea`\n\nIdea 第一段摘录。\n\n## Detail\n\n`category: 误抓`\n',
+      'thoughts/crit-1.md': '# Crit One\n\n`Category: critic`\n\nCritic 摘录。\n',
+      'domains/cv/papers/odd-1.md': '---\ntitle: Odd\n---\n# Odd\n\n`category: deep-think.v2`\n\nOdd 摘录。\n',
+      'concepts/attention.md': '---\ntitle: Attention\n---\n# Attention\n',
+      // 顶层散落页（build_tree 不收、categories 收）
+      'root-note.md': '# Root Note\n\n`category: rootcat`\n\nRoot 摘录。\n',
+      // 反例
+      'concepts/inline-mention.md': '# Mention\n\n正文里说 `category: fake` 是混在行内的。\n',
+      'concepts/before-h1.md': '`category: fake`\n\n# Late Title\n\n正文。\n',
+      'concepts/after-h2.md': '# Sec Title\n\n## section\n\n`category: fake`\n',
+    })
+  }
+
+  it('按 category 分组；开放词表；大小写归一；跨目录归一组；组名/组内按字典序', async () => {
+    const data = await new WikiService(catFs()).listCategories()
+    expect(Object.keys(data).sort()).toEqual(['critic', 'deep-think.v2', 'idea', 'rootcat'])
+    expect(data.idea.map((i) => i.path)).toEqual(['thoughts/idea-1.md'])
+    expect(data.critic[0].category).toBe('critic')
+    expect(data['deep-think.v2'][0].path).toBe('domains/cv/papers/odd-1.md')
+  })
+
+  it('条目含 path/title/category/excerpt；title 无 frontmatter → H1；excerpt 剥标题行', async () => {
+    const data = await new WikiService(catFs()).listCategories()
+    const idea = data.idea[0]
+    expect(idea.title).toBe('First Idea') // frontmatter title
+    expect(idea.excerpt).toContain('Idea 第一段摘录')
+    expect(idea.excerpt).not.toContain('# First Idea')
+    expect(data.critic[0].title).toBe('Crit One') // 无 frontmatter → H1
+  })
+
+  it('窗口反例：行内混排 / H1 之前 / 首个 ## 之后的标记不抓；无标记页不进响应', async () => {
+    const data = await new WikiService(catFs()).listCategories()
+    expect('fake' in data).toBe(false)
+    expect('误抓' in data).toBe(false)
+    const allPaths = Object.values(data).flat().map((i) => i.path)
+    expect(allPaths).not.toContain('concepts/attention.md')
+    expect(allPaths).not.toContain('concepts/inline-mention.md')
+    expect(allPaths).not.toContain('concepts/before-h1.md')
+    expect(allPaths).not.toContain('concepts/after-h2.md')
+  })
+
+  it('顶层散落页带标记也进聚合（list_category_pages 收顶层）', async () => {
+    const data = await new WikiService(catFs()).listCategories()
+    expect(data.rootcat.map((i) => i.path)).toEqual(['root-note.md'])
+  })
+
+  it('category 值为 Object.prototype 成员名（constructor/toString）不崩溃（开放词表）', async () => {
+    const fs = new FakeWikiFileSystem({
+      'a/p.md': '# P\n\n`category: constructor`\n\n正文。\n',
+      'b/q.md': '# Q\n\n`category: toString`\n\n正文。\n',
+    })
+    const data = await new WikiService(fs).listCategories()
+    // category 值小写归一：toString → tostring；两个原型成员名都不崩、都成组
+    expect(Object.keys(data).sort()).toEqual(['constructor', 'tostring'])
+    expect(data['constructor'][0].path).toBe('a/p.md')
+    expect(data['tostring'][0].path).toBe('b/q.md')
+  })
+})
+
+describe('WikiService buildGraph（fake FS）', () => {
+  it('节点 = tree 全部页；wikilink 不可解析 → ghost 节点', async () => {
+    const graph = await new WikiService(fixtureFs()).buildGraph()
+    const nodeIds = graph.nodes.map((n) => n.id)
+    expect(nodeIds).toEqual(expect.arrayContaining(['concepts/attention.md', 'domains/cv/papers/resnet.md']))
+    const ghost = graph.nodes.find((n) => n.id === 'self-attention')
+    expect(ghost).toMatchObject({ id: 'self-attention', title: 'self-attention', ghost: true })
+    expect(graph.edges).toContainEqual({ from: 'concepts/attention.md', to: 'self-attention' })
+  })
+
+  it('related_pages（字符串/列表）出边；stem 解析到真实节点', async () => {
+    const graph = await new WikiService(fixtureFs()).buildGraph()
+    expect(graph.edges).toContainEqual({ from: 'domains/cv/papers/resnet.md', to: 'concepts/attention.md' })
+  })
+
+  it('边不 dedup：同页多次引用同一目标产生多条同 from/to 边', async () => {
+    const fs = new FakeWikiFileSystem({
+      'a/x.md': '# X\n\n[[y]]\n\n再引 [[y]]\n',
+    })
+    const graph = await new WikiService(fs).buildGraph()
+    const dup = graph.edges.filter((e) => e.from === 'a/x.md' && e.to === 'y')
+    expect(dup.length).toBe(2)
+  })
+
+  it('同一 from→to 先 resolve 真节点与 ghost 并存（wikiLink 别名/related 混用）', async () => {
+    const fs = new FakeWikiFileSystem({
+      'a/p.md': '---\nrelated_pages: [b/t.md]\n---\n# P\n\n[[b/t]]\n',
+      'b/t.md': '# T\n',
+    })
+    const graph = await new WikiService(fs).buildGraph()
+    const edges = graph.edges.filter((e) => e.from === 'a/p.md')
+    // [[b/t]] 的 stem `t` 匹配 b/t.md → 真节点；related_pages 整串 b/t.md → 真节点。两条同 to。
+    expect(edges.every((e) => e.to === 'b/t.md')).toBe(true)
+    expect(edges.length).toBe(2)
+  })
+
+  it('单页读不出 → 跳过该页的边，不 500', async () => {
+    const fs = new FakeWikiFileSystem({ 'a/x.md': '# X\n\n[[y]]\n' })
+    const original = fs.readPage.bind(fs)
+    fs.readPage = async (rel) => {
+      if (rel === 'a/x.md') throw new Error('read boom')
+      return original(rel)
+    }
+    const graph = await new WikiService(fs).buildGraph()
+    expect(graph.nodes).toHaveLength(1)
+    expect(graph.edges).toHaveLength(0)
+  })
+
+  it('wikilink 目标为 Object.prototype 成员名（constructor）→ ghost 节点仍建', async () => {
+    const fs = new FakeWikiFileSystem({ 'a/x.md': '# X\n\n[[constructor]]\n' })
+    const graph = await new WikiService(fs).buildGraph()
+    const ghost = graph.nodes.find((n) => n.id === 'constructor')
+    expect(ghost).toMatchObject({ id: 'constructor', title: 'constructor', ghost: true })
+    expect(graph.edges).toContainEqual({ from: 'a/x.md', to: 'constructor' })
+  })
+})

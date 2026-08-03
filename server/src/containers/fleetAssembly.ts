@@ -7,10 +7,13 @@ import { DockerRuntime } from './dockerRuntime'
 import { BullMqLifecycleQueue } from './bullmqQueue'
 import { FleetDeps } from './deps'
 import { Orchestrator } from './orchestrator'
+import type { ContainerRuntime } from './runtime'
 import { defaultReservedPorts, type FleetConfig } from './values'
 
 export interface FleetAssembly {
   orchestrator: Orchestrator
+  // runtime 暴露（#335 wiki compile 用）：docker exec 通道（openclaw wiki compile）。
+  runtime: ContainerRuntime
   close(): Promise<void>
 }
 
@@ -37,6 +40,7 @@ export function assembleFleet(prisma: PrismaClient): FleetAssembly {
   const orchestrator = new Orchestrator(deps, prisma)
   return {
     orchestrator,
+    runtime,
     close: async () => {
       await queue.close()
     },

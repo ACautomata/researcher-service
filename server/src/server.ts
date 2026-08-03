@@ -4,6 +4,7 @@ import { getPrisma } from './prisma'
 import { bootstrap } from './auth/bootstrap'
 import { config } from './config'
 import { assembleFleet } from './containers/fleetAssembly'
+import { makeDockerCompile } from './wiki/compile'
 import './types'
 
 async function main(): Promise<void> {
@@ -11,7 +12,12 @@ async function main(): Promise<void> {
   await bootstrap(prisma) // B1 惰性首启（空表生成 admin）
   // 容器编排（#334 M2）：真 DockerRuntime + BullMQ(Redis) 队列 + worker 并发默认 2。
   const fleet = assembleFleet(prisma)
-  const app = createApp({ prisma, orchestrator: fleet.orchestrator })
+  const app = createApp({
+    prisma,
+    orchestrator: fleet.orchestrator,
+    // wiki compile（#335）：docker exec `openclaw wiki compile`，5s 去抖、best-effort。
+    wiki: { compile: makeDockerCompile(fleet.runtime) },
+  })
 
   // M0 同进程单端口分流：createServer(expressApp) + server.on('upgrade') 分流。
   // upgrade 钩子由 M4 接 ws 桥（noServer + handleUpgrade + subprotocol 回显）；本期仅 HTTP。

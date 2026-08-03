@@ -28,11 +28,39 @@ async function dockerReachable(): Promise<boolean> {
   }
 }
 
+// 镜像可获取（本地已有 or 拉取成功）：拉取失败（registry 404 / 网络 / 超时）→ 判不可用。
+// 门控从「仅 daemon 可达」扩展到「镜像可获取」：daemon 在跑但 OPENCLAW_IMAGE 指向已退役 tag
+// （registry 404）时，测试应优雅 skip 而非以 pull 失败中断整个套件（回归：镜像 tag 曾变更）。
+async function imageObtainable(image: string): Promise<boolean> {
+  try {
+    const Docker = (await import('dockerode')).default
+    const d = new Docker()
+    try {
+      await d.getImage(image).inspect() // 本地已缓存 → 就绪
+      return true
+    } catch {
+      /* 本地缺失 → 尝试拉取 */
+    }
+    const stream = await d.pull(image)
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('image pull timeout')), 120_000)
+      stream.on('end', () => { clearTimeout(timer); resolve() })
+      stream.on('error', (e) => { clearTimeout(timer); reject(e) })
+    })
+    return true
+  } catch {
+    // eslint-disable-next-line no-console
+    console.warn(`[smoke] 镜像不可获取（daemon 可达但 image 拉取失败），skip 集成 smoke: ${image}`)
+    return false
+  }
+}
+
 const IMAGE = process.env.OPENCLAW_IMAGE ?? 'ghcr.io/openclaw/openclaw:2026.7.1-browser'
 
 // 探测挪进 beforeAll（tsconfig module=commonjs 不允许顶层 await，否则 tsc --noEmit 红线）。
 describe('containers 集成 smoke（真 docker daemon）', () => {
   let daemonUp = false
+  let imageReady = false
   let ctx: TestContext
   let orch: Orchestrator
   let runtime: DockerRuntime
@@ -42,6 +70,8 @@ describe('containers 集成 smoke（真 docker daemon）', () => {
   beforeAll(async () => {
     daemonUp = await dockerReachable()
     if (!daemonUp) return // daemon 不可达 → 用例内 skip（CI 无 daemon 不阻塞）
+    imageReady = await imageObtainable(IMAGE)
+    if (!imageReady) return // 镜像不可获取 → 用例内 skip（自动配置门控，不中断套件）
     ctx = await setupTestApp()
     fleetRoot = mkdtempSync(path.join(tmpdir(), `fleet-smoke-${process.pid}-`))
     const templateDir = process.env.OPENCLAW_TEMPLATE_DIR ?? path.join(fleetRoot, 'template')
@@ -70,17 +100,17 @@ describe('containers 集成 smoke（真 docker daemon）', () => {
     orch = new Orchestrator(deps, ctx.prisma)
     const u = await seedUser(ctx.prisma, 'smoke', 'pw-smoke-secure')
     ownerId = u.id
-  }, 60_000)
+  }, 240_000)
 
   afterAll(async () => {
-    if (!daemonUp) return
+    if (!daemonUp || !imageReady) return
     // best-effort 清理残留容器
     await runtime.remove('smoke-box').catch(() => {})
     await ctx.cleanup()
   })
 
   it('create → running → delete（真容器端到端）', async (tctx) => {
-    if (!daemonUp) tctx.skip()
+    if (!daemonUp || !imageReady) tctx.skip()
     const inst = await orch.createReserve('smoke-box', ownerId)
     expect(inst.status).toBe('creating')
     expect(inst.port).toBeGreaterThanOrEqual(19700)

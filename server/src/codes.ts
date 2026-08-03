@@ -17,6 +17,9 @@ export const CODE = {
   USERNAME_INVALID: 10042, // 用户名格式非法
   QUOTA_INVALID: 10043, // 配额非法
   CANNOT_DISABLE_SELF: 10044, // 不可禁用自己
+  // 3xxxx wiki（#335 平移 wiki 域；#319 §1.3 转译码）
+  WIKI_PAGE_NOT_FOUND: 30040, // 页不存在 / 越权（同码防探测）
+  WIKI_PAGE_EXISTS: 30041, // 新建页已存在（POST 409 转译）
   // 2xxxx 容器（20041 锁 = name 全局唯一冲突；register/users 用户名冲突复用，契约 §2.2）
   CONTAINER_NOT_FOUND: 20040, // 容器不存在 / 越权（同码防探测，#312 锁）
   NAME_CONFLICT: 20041,
@@ -54,6 +57,8 @@ export const DEFAULT_MESSAGE: Record<number, string> = {
   [CODE.ORPHAN_DIR]: '该名称存在残留数据目录，请删除同名实例或手动清理后重试',
   [CODE.CLEANUP_FAILED]: '容器已停删，但数据目录清理失败（权限/属主），请重试',
   [CODE.OAUTH_NOT_CONFIGURED]: 'OAuth provider 未配置',
+  [CODE.WIKI_PAGE_NOT_FOUND]: '页面不存在',
+  [CODE.WIKI_PAGE_EXISTS]: '页面已存在',
   [CODE.VALIDATION_FAILED]: '参数校验失败',
   [CODE.LLM_NOT_CONFIGURED]: 'LLM_API_KEY 未配置',
   [CODE.PORT_POOL_EXHAUSTED]: '端口池已耗尽，暂无法创建容器，请稍后重试或删除闲置容器',
