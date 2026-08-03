@@ -20,7 +20,14 @@ import type { PrismaClient } from '../generated/prisma/client'
 import { authenticate } from '../auth/authenticate'
 import { getInstanceForUser } from '../containers/orchestrator'
 import { parseProtocolToken, chooseProtocol } from './subprotocol'
-import { WS_CHAT_PATH, WS_AUTH_FAIL_CLOSE, WS_GATEWAY_UNAVAILABLE } from './values'
+import {
+  WS_CHAT_PATH,
+  WS_AUTH_FAIL_CLOSE,
+  WS_GATEWAY_UNAVAILABLE,
+  WS_MUST_CHANGE_PASSWORD_CLOSE,
+  WS_POLICY_VIOLATION,
+  TUNNEL_PENDING_BYTE_BUDGET,
+} from './values'
 import type { GatewayConnector, GatewaySocket } from './gatewayConnector'
 
 export interface TunnelDeps {
@@ -72,10 +79,20 @@ async function handleConnection(ws: WebSocket, req: IncomingMessage, deps: Tunne
   //   - close → 网关连好后关闭它（浏览器 early-close 也捕获，防泄漏）
   let gateway: GatewaySocket | null = null
   const pending: string[] = []
+  let pendingBytes = 0
   ws.on('message', (data) => {
+    // close() 后已缓冲的 TCP 数据仍可能触发 message → 丢弃，防 close 后继续转发/缓冲
+    if (ws.readyState !== WebSocket.OPEN) return
     // 协议机只发文本帧（send(string)）；data.toString() 对 text 帧无损。帧内容不做任何解析。
     const frame = data.toString()
     if (gateway === null) {
+      // 网关连接建立前缓冲（网关连好后 flush）。字节预算上限防恶意客户端在连接窗口内狂发帧
+      // 导致内存无界增长（resource-exhaustion）——超限即策略违反 close(1008)。
+      pendingBytes += Buffer.byteLength(frame)
+      if (pendingBytes > TUNNEL_PENDING_BYTE_BUDGET) {
+        ws.close(WS_POLICY_VIOLATION)
+        return
+      }
       pending.push(frame)
       return
     }
@@ -96,6 +113,12 @@ async function handleConnection(ws: WebSocket, req: IncomingMessage, deps: Tunne
     user = await authenticate(token, deps.prisma)
   } catch {
     ws.close(WS_AUTH_FAIL_CLOSE)
+    return
+  }
+  // 强制改密门（authorization-gate-parity）：与 REST mustChangePasswordGate 同源——mustChangePassword
+  // 用户不得经隧道访问容器，否则强制改密被绕过。
+  if (user.mustChangePassword) {
+    ws.close(WS_MUST_CHANGE_PASSWORD_CLOSE)
     return
   }
 

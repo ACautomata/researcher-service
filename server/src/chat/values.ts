@@ -17,3 +17,16 @@ export const WS_AUTH_FAIL_CLOSE = 4401
 // 容器网关不可达（容器不在 running / 宿主端口不通 / 网关未起）。非认证问题，区别于 4401
 // （前端不应触发 forceRefresh，而应提示容器不可用/重试）。
 export const WS_GATEWAY_UNAVAILABLE = 4402
+
+// 强制改密门（authorization-gate-parity，安全审查）：REST 上 mustChangePassword 用户被
+// mustChangePasswordGate(10005) 拦业务请求，WS 隧道须同源拒绝——否则强制改密被隧道绕过。
+// 独立于 4401（token 有效但授权未就绪，非凭证过期；前端不应按 token 过期 forceRefresh 循环）。
+export const WS_MUST_CHANGE_PASSWORD_CLOSE = 4403
+
+// 策略违反（pending 缓冲超预算，安全审查 resource-exhaustion）：网关连接建立窗口内浏览器超量
+// 发帧。ws 标准应用码 1008 = policy violation；非认证码，不触发前端 forceRefresh。
+export const WS_POLICY_VIOLATION = 1008
+
+// 网关连接建立前浏览器入站帧缓冲的字节预算（超过即 close(1008)）。协议机正常流程下网关连好前
+// 浏览器几乎不发帧（等 challenge），预算仅防御异常/恶意客户端在连接窗口内狂发帧的内存耗尽。
+export const TUNNEL_PENDING_BYTE_BUDGET = 256 * 1024

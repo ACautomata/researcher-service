@@ -291,6 +291,47 @@ describe('M5 隧道（#337 · ADR 0006）', () => {
     }
   })
 
+  it('mustChangePassword 用户 → close(4403)（authorization-gate-parity：与 REST mustChangePasswordGate 同源，防隧道绕过强制改密）', async () => {
+    const ctx = await startTunnel()
+    const user = await seedUser(ctx.prisma, 'must-change', 'pw-secure', { mustChangePassword: true })
+    const jwt = await signAccessToken(user.id)
+    await seedContainer(ctx.prisma, user)
+    try {
+      const ws = await connectTunnel(`${ctx.baseUrl}?container=alpha`, ['access_token', jwt])
+      const closes = collectClose(ws)
+      await until(() => closes.length > 0)
+      expect(closes[0].code).toBe(4403) // 独立于 4401：token 有效但授权未就绪，不按凭证过期 forceRefresh
+    } finally {
+      await ctx.close()
+    }
+  })
+
+  it('网关连接窗口内缓冲超预算 → close(1008)（resource-exhaustion：防异常客户端狂发帧内存无界）', async () => {
+    const gateway = new FakeGateway()
+    const ctx = await startTunnel({
+      connectGateway: {
+        connect: async () => {
+          await new Promise((r) => setTimeout(r, 150)) // 拉长 pending 窗口
+          return gateway
+        },
+      },
+    })
+    const user = await seedUser(ctx.prisma)
+    const jwt = await signAccessToken(user.id)
+    await seedContainer(ctx.prisma, user)
+    try {
+      const ws = await connectTunnel(`${ctx.baseUrl}?container=alpha`, ['access_token', jwt])
+      const closes = collectClose(ws)
+      // 网关连接建立（150ms 延迟）前狂发帧，累计超过 256KB 预算
+      const chunk = 'x'.repeat(1024 * 16) // 16KB/帧
+      for (let i = 0; i < 20; i++) ws.send(chunk) // 320KB > 256KB
+      await until(() => closes.length > 0)
+      expect(closes[0].code).toBe(1008)
+    } finally {
+      await ctx.close()
+    }
+  })
+
   it('浏览器帧 → 网关原样收到；网关帧 → 浏览器原样收到（字节级零解析，长文本/emoji 无损）', async () => {
     const { ctx, jwt } = await makeAlphaCtx()
     try {
