@@ -18,6 +18,7 @@
 import { promises as fsp } from 'node:fs'
 import path from 'node:path'
 import type { Dirent, Stats } from 'node:fs'
+import type { FileHandle } from 'node:fs/promises'
 import { FrontmatterParser, frontmatterTitle } from './logic'
 import { SKIP_DIRS, SKIP_FILES, TITLE_READ_CHARS } from './values'
 import { WikiInvalidPath, WikiPageExists, WikiPageNotFound } from './errors'
@@ -39,12 +40,15 @@ export interface FsLike {
   readlink(p: string): Promise<string>
   writeFile(p: string, data: string, opts?: { flag?: string }): Promise<void> // 缺省编码 utf8；flag 供 createPage 独占创建（wx）
   unlink(p: string): Promise<void>
+  open(p: string, flag: string): Promise<FileHandle> // 供 pinOpen 钉住 inode 后经 fd 读写（TOCTOU 防护，codex PR#346 P1）
 }
 
 // UTF-8 严格解码：非法字节抛 TypeError（对齐 Python read_text(encoding='utf-8') 的
 // UnicodeDecodeError；Node 默认 toString('utf8') 用 U+FFFD 静默替换，会破坏降级语义）。
+// ignoreBOM:true 保留 U+FEFF（Python read_text 逐字节保留 BOM；默认 false 会吞掉——GET 不再原文
+// 返回、round-trip 丢 BOM、解析层把 BOM 前缀页误识别成 frontmatter。codex PR#346）。
 function decodeUtf8Strict(buf: Buffer): string {
-  return new TextDecoder('utf-8', { fatal: true }).decode(buf)
+  return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(buf)
 }
 
 function cmp(a: string, b: string): number {
@@ -84,9 +88,13 @@ export class NodeWikiFileSystem implements WikiFileSystem {
   // —— Port: read_page ——
 
   async readPage(relPath: string): Promise<WikiPage> {
-    const fpath = await this.resolve(relPath)
-    if (!(await this.isFile(fpath))) throw new WikiPageNotFound(relPath)
-    const content = await this.readTextStrict(fpath) // 读/解码失败上抛（read_page 不降级，对齐 Django）
+    const { fh, fpath } = await this.pinOpen(relPath, 'r')
+    let content: string
+    try {
+      content = decodeUtf8Strict(await fh.readFile()) // 读/解码失败上抛（read_page 不降级，对齐 Django）
+    } finally {
+      await fh.close().catch(() => {})
+    }
     const { frontmatter } = this.parser.parse(content)
     return { path: relPath, title: frontmatterTitle(frontmatter) ?? stemOf(path.basename(fpath)), content }
   }
@@ -116,9 +124,13 @@ export class NodeWikiFileSystem implements WikiFileSystem {
   // —— Port: write_page ——
 
   async writePage(relPath: string, content: string): Promise<{ path: string }> {
-    const fpath = await this.resolve(relPath)
-    if (!(await this.isFile(fpath))) throw new WikiPageNotFound(relPath)
-    await this.fs.writeFile(fpath, content)
+    const { fh } = await this.pinOpen(relPath, 'r+') // 'r+' 打开不截断；验证后才清空写入（byte-exact）
+    try {
+      await fh.truncate(0)
+      await fh.writeFile(content) // 经 fd 写入：open 后路径换链不影响本次 I/O（inode 已钉住）
+    } finally {
+      await fh.close().catch(() => {})
+    }
     return { path: relPath }
   }
 
@@ -126,14 +138,41 @@ export class NodeWikiFileSystem implements WikiFileSystem {
 
   async createPage(relPath: string, content: string): Promise<{ path: string }> {
     const fpath = await this.resolve(relPath)
-    if (!(await this.parentIsDir(fpath))) throw new WikiInvalidPath(relPath) // NotADirectoryError
+    // 父目录 inode anchor：resolve 后捕获；open 后 lstat(parent) 复核——父段在校验后被换 symlink、
+    // 新文件落在 root 外（另一实例/宿主）时 inode 不匹配 → 拒（TOCTOU，codex PR#346 P1）。
+    let parentAnchor: number
+    try {
+      parentAnchor = (await this.fs.lstat(path.dirname(fpath))).ino
+    } catch {
+      throw new WikiInvalidPath(relPath) // 父目录不存在（对齐原 NotADirectoryError → WikiInvalidPath）
+    }
+    let fh: FileHandle
     try {
       // wx = O_CREAT|O_EXCL 原子独占创建：并发 POST 同路径只一个成功，后写不覆盖先写；
       // EEXIST → WikiPageExists（codex PR#346，替代 exists()+writeFile 的检查-后-写竞态）。
-      await this.fs.writeFile(fpath, content, { flag: 'wx' })
+      fh = await this.fs.open(fpath, 'wx')
     } catch (err) {
       if ((err as { code?: string }).code === 'EEXIST') throw new WikiPageExists(relPath)
+      if ((err as { code?: string }).code === 'ENOENT') throw new WikiInvalidPath(relPath)
       throw err
+    }
+    try {
+      const parentNow = await this.fs.lstat(path.dirname(fpath))
+      if (parentNow.ino !== parentAnchor) {
+        // 仅当 lstat(fpath) 命中的恰是我们刚创建的 inode 才清理（防误删并发替换/他人文件），
+        // 随后拒：文件不该被建到 root 外。
+        const st = await fh.stat()
+        try {
+          const now = await this.fs.lstat(fpath)
+          if (now.ino === st.ino) await this.fs.unlink(fpath).catch(() => {})
+        } catch {
+          /* 目标不可判 → 不清理 */
+        }
+        throw new WikiInvalidPath(relPath)
+      }
+      await fh.writeFile(content)
+    } finally {
+      await fh.close().catch(() => {})
     }
     return { path: relPath }
   }
@@ -141,8 +180,17 @@ export class NodeWikiFileSystem implements WikiFileSystem {
   // —— Port: delete_page ——
 
   async deletePage(relPath: string): Promise<void> {
-    const fpath = await this.resolve(relPath)
-    if (!(await this.isFile(fpath))) throw new WikiPageNotFound(relPath)
+    // unlink 无 fd 原语（Node 无 unlinkat）：pinOpen 校验打开对象（open 前祖先换 symlink → 拒），
+    // 再紧贴 unlink 前 lstat 复核 inode，把 close→unlink 的换链窗口压到最小（TOCTOU，codex PR#346 P1）。
+    const { fpath, fh, anchor } = await this.pinOpen(relPath, 'r')
+    await fh.close().catch(() => {})
+    let now: Stats
+    try {
+      now = await this.fs.lstat(fpath)
+    } catch {
+      throw new WikiPageNotFound(relPath) // 已被并发删除
+    }
+    if (now.ino !== anchor) throw new WikiInvalidPath(relPath) // 复核时目标已被换链
     await this.fs.unlink(fpath)
   }
 
@@ -167,20 +215,36 @@ export class NodeWikiFileSystem implements WikiFileSystem {
     }
   }
 
-  private async isFile(p: string): Promise<boolean> {
+  // resolve + 打开 + inode 验证（TOCTOU 核心，codex PR#346 P1）：
+  // resolve 捕获「期望 inode」（anchor，校验时点的末段），fs.open 得到 fd 后 fstat 复核——inode 不匹配
+  // 说明 resolve 与 open 之间祖先目录/末段已被换成 symlink（打开的是 root 外/他人文件）→ 拒。一旦
+  // open 成功，fd 钉住 inode：后续读/写/截断不再受路径换链影响，是 race-resistant 原语而非复用路径
+  // 字符串。缺失/非 regular（dir/FIFO/…）→ WikiPageNotFound（对齐原 isFile 语义）。
+  private async pinOpen(relPath: string, flag: 'r' | 'r+'): Promise<{ fh: FileHandle; fpath: string; anchor: number }> {
+    const fpath = await this.resolve(relPath)
+    let anchor: number
     try {
-      return (await this.fs.stat(p)).isFile()
+      anchor = (await this.fs.lstat(fpath)).ino
     } catch {
-      return false
+      throw new WikiPageNotFound(relPath)
     }
-  }
-
-  private async parentIsDir(p: string): Promise<boolean> {
+    let fh: FileHandle
     try {
-      return (await this.fs.stat(path.dirname(p))).isDirectory()
-    } catch {
-      return false
+      fh = await this.fs.open(fpath, flag)
+    } catch (err) {
+      if ((err as { code?: string }).code === 'ENOENT') throw new WikiPageNotFound(relPath)
+      if ((err as { code?: string }).code === 'ELOOP') throw new WikiInvalidPath(relPath) // 打开时末段已成 symlink
+      throw err
     }
+    try {
+      const st = await fh.stat()
+      if (!st.isFile()) throw new WikiPageNotFound(relPath)
+      if (st.ino !== anchor) throw new WikiInvalidPath(relPath) // 打开对象 ≠ resolve 时捕获的 inode → 换链逃逸
+    } catch (err) {
+      await fh.close().catch(() => {})
+      throw err
+    }
+    return { fh, fpath, anchor }
   }
 
   private async readdir(dir: string): Promise<Dirent[] | null> {
@@ -249,11 +313,6 @@ export class NodeWikiFileSystem implements WikiFileSystem {
     } catch {
       return null
     }
-  }
-
-  // 读全文（失败上抛，供 read_page 用：单页读失败不降级，对齐 Django read_page）。
-  private async readTextStrict(fpath: string): Promise<string> {
-    return decodeUtf8Strict(await this.fs.readFile(fpath))
   }
 
   // 从 frontmatter 取标题（只读前 TITLE_READ_CHARS 字符）；读失败/解码失败 → 文件名 fallback。

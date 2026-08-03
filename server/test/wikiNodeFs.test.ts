@@ -4,7 +4,7 @@
 // 以及 CRUD（read/write/create/delete）与路径双保险（穿越/managed/symlink 逃逸）。
 
 import { describe, it, expect } from 'vitest'
-import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, renameSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { execFileSync } from 'node:child_process'
@@ -333,6 +333,46 @@ describe('NodeWikiFileSystem 页面 CRUD', () => {
     await expect(fsp.stat(path.join(main, 'concepts', 'attention.md'))).rejects.toBeTruthy()
     await expect(fs.deletePage('concepts/attention.md')).rejects.toBeInstanceOf(WikiPageNotFound)
   })
+
+  it('UTF-8 BOM 保留（ignoreBOM:true，逐字节对齐 Python read_text；codex PR#346）', async () => {
+    const main = makeRoot()
+    writeFileSync(path.join(main, 'concepts', 'bom.md'), '﻿---\ntitle: BOM 页\n---\n# BOM\n')
+    const fs = new NodeWikiFileSystem(main)
+    const page = await fs.readPage('concepts/bom.md')
+    expect(page.content.startsWith('﻿')).toBe(true) // BOM 不被吞
+    // BOM 前缀 → frontmatter 不识别（对齐 Python：BOM 视为正文前缀）→ title 回落 stem
+    expect(page.title).toBe('bom')
+    // 读改写 round-trip 不丢 BOM
+    await fs.writePage('concepts/bom.md', page.content)
+    expect((await fsp.readFile(path.join(main, 'concepts', 'bom.md'))).subarray(0, 3).toString('utf8')).toBe('﻿')
+  })
+
+  it('祖先目录在校验后被换 symlink → 读/写/建/删全拦（TOCTOU，codex PR#346 P1）', async () => {
+    // 读：不得把 root 外 victim 内容读回来
+    {
+      const { nfs, outside } = makeRacyContext()
+      await expect(nfs.readPage('concepts/attention.md')).rejects.toBeInstanceOf(WikiInvalidPath)
+      expect(await fsp.readFile(path.join(outside, 'attention.md'), 'utf8')).toBe('# VICTIM\n')
+    }
+    // 写：不得覆盖 root 外 victim
+    {
+      const { nfs, outside } = makeRacyContext()
+      await expect(nfs.writePage('concepts/attention.md', 'EVIL')).rejects.toBeInstanceOf(WikiInvalidPath)
+      expect(await fsp.readFile(path.join(outside, 'attention.md'), 'utf8')).toBe('# VICTIM\n')
+    }
+    // 建：不得在 root 外新建（误建须清理）
+    {
+      const { nfs, outside } = makeRacyContext()
+      await expect(nfs.createPage('concepts/newpage.md', '# NEW\n')).rejects.toBeInstanceOf(WikiInvalidPath)
+      await expect(fsp.stat(path.join(outside, 'newpage.md'))).rejects.toBeTruthy()
+    }
+    // 删：不得删除 root 外 victim
+    {
+      const { nfs, outside } = makeRacyContext()
+      await expect(nfs.deletePage('concepts/attention.md')).rejects.toBeInstanceOf(WikiInvalidPath)
+      expect(await fsp.readFile(path.join(outside, 'attention.md'), 'utf8')).toBe('# VICTIM\n')
+    }
+  })
 })
 
 // FsLike 替身：仅让指定目录 readdir 抛 EACCES（对齐 Django monkeypatch Path.iterdir）。
@@ -349,5 +389,52 @@ function throwingReaddirOn(badDir: string): FsLike {
     readlink: (p) => fsp.readlink(p),
     writeFile: (p, d) => fsp.writeFile(p, d),
     unlink: (p) => fsp.unlink(p),
+    open: (p, flag) => fsp.open(p, flag),
   }
+}
+
+// FsLike 替身：首个「变更类」原语（open/writeFile/unlink/readFile）被调时，先把 concepts 目录换成
+// symlink → root 外 outside（模拟容器在「resolve 校验后、真正打开/写入前」的并发目录替换）；之后透传。
+// 复现 codex PR#346 P1 的 TOCTOU：校验通过 ≠ 操作目标仍安全，操作须经 race-resistant 原语（fd）钉住 inode。
+function racySwapFs(main: string, outside: string): FsLike {
+  const concepts = path.join(main, 'concepts')
+  let swapped = false
+  const swap = (): void => {
+    if (swapped) return
+    swapped = true
+    renameSync(concepts, `${concepts}-orig`)
+    symlinkSync(outside, concepts)
+  }
+  return {
+    readdir: (dir, opts) => fsp.readdir(dir, opts),
+    readFile: async (p) => {
+      swap()
+      return fsp.readFile(p)
+    },
+    stat: (p) => fsp.stat(p),
+    lstat: (p) => fsp.lstat(p),
+    realpath: (p) => fsp.realpath(p),
+    readlink: (p) => fsp.readlink(p),
+    writeFile: async (p, d, o) => {
+      swap()
+      return fsp.writeFile(p, d, o)
+    },
+    unlink: async (p) => {
+      swap()
+      return fsp.unlink(p)
+    },
+    open: async (p, flag) => {
+      swap()
+      return fsp.open(p, flag)
+    },
+  }
+}
+
+// 一份可复现「校验后祖先目录换 symlink」的上下文：outside 含同名 victim（写/删目标仍在、但 inode 不同）。
+function makeRacyContext(): { nfs: NodeWikiFileSystem; outside: string } {
+  const main = makeRoot()
+  const outside = path.join(path.dirname(path.dirname(main)), 'outside-race')
+  mkdirSync(outside)
+  writeFileSync(path.join(outside, 'attention.md'), '# VICTIM\n')
+  return { nfs: new NodeWikiFileSystem(main, racySwapFs(main, outside)), outside }
 }

@@ -24,7 +24,9 @@ export function normalizeRelPath(raw: unknown): RelPathResult {
     return { ok: false, errors: ['path 须指向 .md 文件'] }
   }
   const norm = parts.join('/')
-  if (norm.length > PATH_MAX) return { ok: false, errors: ['path 过长'] }
+  // 按 Unicode code points 计长（Django CharField max_length=512 契约）：`String.length` 按 UTF-16
+  // code units，含 emoji 等非 BMP 字符的合法路径会被误拒——codex PR#346。
+  if (Array.from(norm).length > PATH_MAX) return { ok: false, errors: ['path 过长'] }
   return { ok: true, path: norm }
 }
 
