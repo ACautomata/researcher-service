@@ -3,14 +3,13 @@
 // 覆盖 issue #334 验收标准的编排层（非 HTTP 壳）。
 
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest'
-import { mkdirSync, existsSync } from 'node:fs'
+import { existsSync } from 'node:fs'
 import path from 'node:path'
 import { setupTestApp, type TestContext } from './setup'
 import { makeFleetTest, type FleetTestContext } from './fleetTestUtils'
 import { seedUser } from './helpers'
 import {
   InstanceExists,
-  InstanceDirExists,
   InstanceCleanupError,
   PortAllocationError,
   ConfigurationError,
@@ -40,8 +39,8 @@ describe('orchestrator (接缝 #5 编排器 Port)', () => {
     expect(inst.status).toBe('creating')
     expect(inst.port).toBe(19000)
     expect(inst.containerId).toBe('')
-    // home 路径固化 instances/<name>/home；token 已生成不落盘
-    expect(inst.homeDir).toContain(path.join('instances', 'web-one', 'home'))
+    // home 路径固化 instances/<id>/home（代系绑定，#360）；token 已生成不落盘
+    expect(inst.homeDir).toBe(path.join(fl.fleetRoot, 'instances', inst.id, 'home'))
     expect(inst.token.length).toBeGreaterThan(0)
 
     await fl.orch.createComplete(inst, true)
@@ -54,7 +53,7 @@ describe('orchestrator (接缝 #5 编排器 Port)', () => {
     expect(rec?.info.instanceName).toBe('web-one')
     // config 已原子落盘 + 安全不变量（port 18789 / bind lan / token 占位）
     const cfgText = require('node:fs').readFileSync(
-      path.join(fl.fleetRoot, 'instances', 'web-one', 'openclaw.json'),
+      path.join(fl.fleetRoot, 'instances', inst.id, 'openclaw.json'),
       'utf8',
     )
     const cfg = JSON.parse(cfgText)
@@ -86,12 +85,25 @@ describe('orchestrator (接缝 #5 编排器 Port)', () => {
     await expect(fl.orch.createReserve('taken', ownerId)).rejects.toBeInstanceOf(InstanceExists)
   })
 
-  it('残留 orphan 目录（DB 无行）→ InstanceDirExists（20044）', async () => {
-    // 手工造残留目录（DB 无行）
-    mkdirSync(path.join(fl.fleetRoot, 'instances', 'orphan'), { recursive: true })
-    await expect(fl.orch.createReserve('orphan', ownerId)).rejects.toBeInstanceOf(InstanceDirExists)
-    // reserve 失败已回滚 creating 行
-    expect(await ctx.prisma.container.findUnique({ where: { name: 'orphan' } })).toBeNull()
+  it('delete + 同名 recreate 使用不同物理目录（代系隔离，#360）', async () => {
+    // id 模式下每代用唯一 id 派生 instances/<id>/home；delete+同名 recreate 不重用上代目录。
+    // 修前 homeDir 基于 name（instances/<name>/home），recreate 重用同路径——在飞 wiki/长扫描操作
+    // 期间容器被删+同名 recreate 给他人会读写新 owner 数据（#360 根因）。
+    const flg = makeFleetTest(ctx.prisma, { config: { portStart: 19720, portEnd: 19730 } })
+    const inst1 = await flg.orch.create('gen-box', ownerId)
+    const dir1 = path.join(flg.fleetRoot, 'instances', inst1.id)
+    expect(inst1.homeDir).toBe(path.join(dir1, 'home'))
+    expect(existsSync(dir1)).toBe(true)
+    await flg.orch.delete('gen-box')
+    expect(existsSync(dir1)).toBe(false)
+    // 同名 recreate → 新代系 id → 新物理目录（修前重用 instances/<name>）
+    const inst2 = await flg.orch.create('gen-box', ownerId)
+    const dir2 = path.join(flg.fleetRoot, 'instances', inst2.id)
+    expect(inst2.id).not.toBe(inst1.id)
+    expect(dir2).not.toBe(dir1)
+    expect(inst2.homeDir).toBe(path.join(dir2, 'home'))
+    expect(existsSync(dir2)).toBe(true)
+    expect(existsSync(dir1)).toBe(false) // 旧代系目录未随同名 recreate 复活
   })
 
   it('bind 端口冲突就地换端口重试：最终 running，端口前移', async () => {
@@ -114,7 +126,7 @@ describe('orchestrator (接缝 #5 编排器 Port)', () => {
     const row = await ctx.prisma.container.findUnique({ where: { name: 'broken' } })
     expect(row?.status).toBe('error') // ERROR 行保留，不静默消失
     // 目录已回滚清理
-    expect(existsSync(path.join(fl.fleetRoot, 'instances', 'broken'))).toBe(false)
+    expect(existsSync(path.join(fl.fleetRoot, 'instances', inst.id))).toBe(false)
   })
 
   it('端口池耗尽 → PortAllocationError（90004）', async () => {
@@ -150,7 +162,7 @@ describe('orchestrator (接缝 #5 编排器 Port)', () => {
     await fl3.orch.delete('delme')
     expect(await ctx.prisma.container.findUnique({ where: { name: 'delme' } })).toBeNull()
     expect(fl3.runtime.containers.has('delme')).toBe(false)
-    expect(existsSync(path.join(fl3.fleetRoot, 'instances', 'delme'))).toBe(false)
+    expect(existsSync(path.join(fl3.fleetRoot, 'instances', created!.id))).toBe(false)
     // chown 已被调用（root 容器 home 清理前置）
     expect(fl3.runtime.execCalls.some((c) => c.cmd[0] === 'chown' && c.cmd.includes(HOME_BIND))).toBe(true)
     // evict 钩子已触发（携带删除前的 name/port 供逐出）
@@ -184,7 +196,7 @@ describe('orchestrator (接缝 #5 编排器 Port)', () => {
     expect(outcome).toBe('removed')
     expect(await ctx.prisma.container.findUnique({ where: { name: 'serialize-me' } })).toBeNull()
     expect(fl.runtime.containers.has('serialize-me')).toBe(false)
-    expect(existsSync(path.join(fl.fleetRoot, 'instances', 'serialize-me'))).toBe(false)
+    expect(existsSync(path.join(fl.fleetRoot, 'instances', inst.id))).toBe(false)
     // recreate（P2-5）：createReserve 入口清残留取消标志，同名重建不被误中止。
     await fl.orch.create('serialize-me', ownerId)
     expect((await ctx.prisma.container.findUnique({ where: { name: 'serialize-me' } }))?.status).toBe(

@@ -161,7 +161,7 @@ export class FleetReadModel {
       // ——dirRemover（rm -rf 慢遍历）期间旧行被并发 delete 收尾删、用户同名 recreate 建新代系并写入
       // 新 home 数据时，此处的 rm 会误删新代系数据。统一「容器驻留 / 已不在」两分支经 requeueDelete
       // （携带 inst.id 代系绑定）交 delete 本体仲裁：行未换新则正常清容器/目录/删行（含 orphan 目录
-      // 清理，解 InstanceDirExists 20044）；换新则跳过清理。
+      // 清理）；换新则跳过清理。
       // detach（void）：list 读路径不阻塞在删除完成上（Redis 不可达更糟），行异步收敛、下次 list 复见。
       void this.requeueDelete?.(inst.name, inst.id)
       survivors.push(inst)

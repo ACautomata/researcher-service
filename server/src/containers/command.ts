@@ -9,7 +9,7 @@
 // 状态机（5 态，DB 持久化 creating/removing/error + 创建成功后 running）：
 //   creating → running ⇄ stopped → removing(终) + error（残留）。running/stopped 由读侧 runtime 实况推导。
 
-import { randomBytes } from 'node:crypto'
+import { randomBytes, randomUUID } from 'node:crypto'
 import { access, mkdir, readFile } from 'node:fs/promises'
 import path from 'node:path'
 import type { PrismaClient, Container } from '../generated/prisma/client'
@@ -20,7 +20,6 @@ import {
   ConfigurationError,
   InstanceBusy,
   InstanceCleanupError,
-  InstanceDirExists,
   InstanceExists,
   PortAllocationError,
   PortPoolExhausted,
@@ -74,7 +73,7 @@ export class FleetCommand {
   ) {}
 
   // ---- create 阶段一：同步预占（确定性工作，请求线程安全）----
-  // LLM key 缺失 → 90003；双创建/撞名 → 20041；残留目录 → 20044；端口耗尽 → 90004；超配额 → 20042。
+  // LLM key 缺失 → 90003；双创建/撞名 → 20041；端口耗尽 → 90004；超配额 → 20042。
   // ownerId 由路由层（归属已校验）传入；maxContainers 提供时按 owner 串行 count+create 收紧配额竞态。
   async createReserve(name: string, ownerId: string, maxContainers?: number): Promise<Container> {
     const doReserve = async (): Promise<Container> => {
@@ -89,12 +88,6 @@ export class FleetCommand {
       this.cancel.clear(name)
       try {
         const inst = await this.reserveRow(name, ownerId)
-        // 残留目录预检（DB 无行的 orphan 目录）→ 20044：同步暴露而非留到后台 mkdir 才失败
-        const instanceDir = path.join(this.deps.config.root, 'instances', name)
-        if (await pathExists(instanceDir)) {
-          await this.prisma.container.delete({ where: { id: inst.id } })
-          throw new InstanceDirExists(name, instanceDir)
-        }
         try {
           await this.ensureRenderer() // 模板损坏 fail-fast（确定性配置错误同步暴露）
         } catch (e) {
@@ -147,7 +140,6 @@ export class FleetCommand {
   // 事务预占 creating 行：name/port 冲突由 DB 唯一约束仲裁。
   // port 冲突（并发选同 port）→ 重试下一空闲 port；name 冲突 → InstanceExists（20041，不重试）。
   private async reserveRow(name: string, ownerId: string, extraUsed?: Set<number>): Promise<Container> {
-    const home = path.join(this.deps.config.root, 'instances', name, 'home')
     // gateway token 真值不落盘（AGENTS.md §5.2 / Codex C1）：DB 存 AES-GCM 密文，
     // createComplete 用时 decrypt 供 spec.gatewayToken（docker env 注入明文）。
     const token = this.deps.crypto.encrypt(randomBytes(TOKEN_URLSAFE_BYTES).toString('base64url'))
@@ -157,10 +149,16 @@ export class FleetCommand {
     // 保证每个候选端口至多尝试一次（DB 已用集每次重算），并发再多也不会假耗尽。
     const poolSize = this.deps.config.portEnd - this.deps.config.portStart + 1
     for (let attempt = 0; attempt < poolSize; attempt += 1) {
+      // 代系 id（#360）：每代唯一，homeDir = instances/<id>/home 绑定代系——delete+同名 recreate
+      // 用不同物理目录，防在飞 wiki/长扫描期间容器被删+同名重建给他人时读写新 owner 数据。
+      // 循环内每次新生成（P2002 后换新 id+port，无死循环；UUID 碰撞概率忽略）。
+      const id = randomUUID()
+      const home = path.join(this.deps.config.root, 'instances', id, 'home')
       const port = this.deps.allocator.nextFree(await this.usedPorts(extraUsed))
       try {
         return await this.prisma.container.create({
           data: {
+            id,
             name,
             port,
             token,
@@ -216,7 +214,8 @@ export class FleetCommand {
   // bind 端口冲突就地换端口重试（预算 = 池大小）；取消标志检查点检出即统一回滚后终止。
   async createComplete(inst: Container, preserveErrorRow: boolean): Promise<Container> {
     const name = inst.name
-    const instanceDir = path.join(this.deps.config.root, 'instances', name)
+    // 代系绑定（#360）：instanceDir 基于 inst.id（每代唯一），非可复用的 name。
+    const instanceDir = path.join(this.deps.config.root, 'instances', inst.id)
     const home = path.join(instanceDir, 'home')
     const configPath = path.join(instanceDir, 'openclaw.json')
     // bind 冲突重试预算 = 端口池候选数（非 reserveRow 的 DB 并发冲突预算——那是另一处独立预算）。
@@ -235,15 +234,8 @@ export class FleetCommand {
         try {
           preexisting = (await this.deps.runtime.get(name)) !== null
           if (!directoryCreated) {
-            // Node mkdir 对已存在目录不抛错（区别于 Python exist_ok=False）——须显式预检，
-            // 否则把「上次崩溃/外部残留的 orphan 目录」当作本次新建，误删既有数据。
-            if (await pathExists(instanceDir)) {
-              // 目录已存在但 reserve 成功（DB 无行）= orphan 残留。回滚 creating 行保持一致。
-              await this.prisma.container.delete({ where: { id: current.id } }).catch(() => {})
-              throw new InstanceDirExists(name, instanceDir)
-            }
-            // 先确保父目录 instances/ 存在，再非递归建叶子（对齐 Python parents=True + exist_ok=False）：
-            // 叶子已存在已由上面 pathExists 拦截；此处只对新建路径建目录。
+            // instanceDir 基于 inst.id 每代全新（#360），无 name 时代的 orphan 冲突——直接建。
+            // 先确保父目录 instances/ 存在，再非递归建叶子（对齐 Python parents=True + exist_ok=False）。
             await mkdir(path.dirname(instanceDir), { recursive: true })
             await mkdir(instanceDir, { recursive: false })
             directoryCreated = true
@@ -251,7 +243,7 @@ export class FleetCommand {
             await this.deps.provisioner.provision(home)
           }
           // config 原子写（tmp + chmod 0644 + rename），create 无 torn/partial 风险
-          await this.deps.configStore.write(name, (await this.ensureRenderer()).render())
+          await this.deps.configStore.write(inst.name, inst.id, (await this.ensureRenderer()).render())
           // 取消检查点（render 后、run 前——覆盖随后 docker run / image pull 阻塞 IO 前的最后窗口）
           if (this.cancel.isCancelled(name)) {
             await this.finalizeFailedCreate(name, instanceDir, current, runAttempted, preexisting, directoryCreated, preserveErrorRow, new InstanceBusy(name))
@@ -528,12 +520,13 @@ export class FleetCommand {
       // 无 containerId 但 runtime 实况容器 instance label 匹配本行 → 视为本行拥有，清理。
       await this.stopAndRemove(name, live)
     }
-    // 优先由 DB home_dir 派生 instance_dir（创建时固化的绝对路径）；防御占位/篡改回退当前 root。
+    // 优先由 DB home_dir 派生 instance_dir（创建时固化的 instances/<id> 绝对路径，代系绑定 #360）；
+    // 信任本行 homeDir 末段、校验 grandparent=='instances' 防逃逸；占位/篡改回退 instances/<inst.id>。
     const recorded = path.dirname(inst.homeDir)
     const instanceDir =
-      path.basename(recorded) === name && path.basename(path.dirname(recorded)) === 'instances'
+      path.basename(path.dirname(recorded)) === 'instances'
         ? recorded
-        : path.join(this.deps.config.root, 'instances', name)
+        : path.join(this.deps.config.root, 'instances', inst.id)
     // rmtree 前重查行身份：行已被并发 delete 删除或 recreate 替换 → 跳过目录清理（资源不属本行）。
     const current = await this.prisma.container.findUnique({ where: { name } })
     if (!current || current.id !== inst.id) {
