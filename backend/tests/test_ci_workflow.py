@@ -264,16 +264,18 @@ def test_cd_workflow_file_exists_and_parseable() -> None:
     _cd_load()
 
 
-def test_cd_triggers_on_ci_success_workflow_run() -> None:
-    """CD：仅由 CI 成功后的 workflow_run 触发（不部署红码），且仅 master。"""
+def test_cd_temporarily_disabled_workflow_dispatch_only() -> None:
+    """CD：当前临时禁用——触发降级为仅 workflow_dispatch（后端迁 TS/Express，#331）。
+
+    恢复自动部署 = 在 cd.yml 还原 ``on: workflow_run``（见 cd.yml on 块注释）。临时禁用期
+    deploy job 的 if 守卫仍引用 workflow_run 数据 → 手动触发亦安全跳过（等效完全禁用），
+    该守卫由 test_cd_deploy_gated_on_ci_success 单独锁定。
+    """
     data = _cd_load()
     # YAML 1.1 把裸键 "on" 解析为布尔 True（PyYAML 已知行为），与 _trigger() 同理。
     on = data.get(True) if True in data else data.get("on")
-    assert "workflow_run" in on, "CD 必须由 workflow_run 触发"
-    wr = on["workflow_run"]
-    assert wr.get("types") == ["completed"], "workflow_run 必须监听 completed"
-    assert "CI" in (wr.get("workflows") or []), "workflow_run 必须监听 CI"
-    assert wr.get("branches") == ["master"], "CD 应仅在 master 分支上触发"
+    assert "workflow_run" not in on, "CD 已临时禁用，不应自动 workflow_run 触发"
+    assert "workflow_dispatch" in on, "CD 保留 workflow_dispatch 手动触发入口"
 
 
 def test_cd_deploy_gated_on_ci_success() -> None:
