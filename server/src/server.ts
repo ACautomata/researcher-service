@@ -31,6 +31,7 @@ async function main(): Promise<void> {
     prisma,
     connectGateway: makeWsGatewayConnector(),
     gatewayHost: config.fleet.healthHost,
+    gatewayScheme: config.fleet.healthScheme,
   })
   const server = createServer(app)
   server.on('upgrade', (req, socket, head) => {

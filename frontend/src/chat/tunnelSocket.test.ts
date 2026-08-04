@@ -25,7 +25,7 @@ class MockWS {
   readyState = CONNECTING
   onopen: (() => void) | null = null
   onmessage: ((ev: { data: string }) => void) | null = null
-  onerror: (() => void) | null = null
+  onerror: ((ev: unknown) => void) | null = null
   onclose: ((ev: { code: number; reason: string }) => void) | null = null
 
   constructor(url: string, protocols?: string | string[]) {
@@ -59,6 +59,10 @@ class MockWS {
     this.readyState = CLOSED
     this.onclose?.({ code, reason })
   }
+
+  fireError(ev?: unknown): void {
+    this.onerror?.(ev)
+  }
 }
 
 function makeHandlers(): GatewayProtocolSocketHandlers {
@@ -79,29 +83,18 @@ describe('createPanelTunnelSocket（#337 M5 隧道）', () => {
     vi.unstubAllGlobals()
   })
 
-  it('构造：URL 为绝对 ws://host（非相对路径——浏览器原生 WebSocket 拒相对 URL）+ ?container= + JWT subprotocol 两值格式', () => {
+  it('构造：URL 为相对 /ws/chat/?container=（F11：WHATWG 按文档 base URL 解析相对地址，既有 ChatWebSocket 同款）+ JWT subprotocol 两值格式', () => {
     const handlers = makeHandlers()
     createPanelTunnelSocket('alpha', 'jwt123', handlers)
-    expect(MockWS.last?.url).toBe(`ws://${window.location.host}/ws/chat/?container=alpha`)
-    expect(MockWS.last?.url.startsWith('ws://')).toBe(true) // 绝对 scheme，浏览器 WebSocket 构造函数必需
+    expect(MockWS.last?.url).toBe('/ws/chat/?container=alpha')
     expect(MockWS.last?.protocols).toEqual(['access_token', 'jwt123'])
-  })
-
-  it('HTTPS 页面 → wss:// 协议；明文页面 → ws://', () => {
-    vi.stubGlobal('window', { location: { protocol: 'https:', host: 'panel.example.com' } })
-    createPanelTunnelSocket('alpha', 'jwt', makeHandlers())
-    expect(MockWS.last?.url).toBe('wss://panel.example.com/ws/chat/?container=alpha')
-
-    vi.stubGlobal('window', { location: { protocol: 'http:', host: 'panel.example.com' } })
-    createPanelTunnelSocket('alpha', 'jwt', makeHandlers())
-    expect(MockWS.last?.url).toBe('ws://panel.example.com/ws/chat/?container=alpha')
   })
 
   it('容器名 encodeURIComponent（含特殊字符不破坏 query）', () => {
     createPanelTunnelSocket('a-b_c', 'jwt', makeHandlers())
-    expect(MockWS.last?.url).toBe(`ws://${window.location.host}/ws/chat/?container=a-b_c`)
+    expect(MockWS.last?.url).toBe('/ws/chat/?container=a-b_c')
     createPanelTunnelSocket('a b&c', 'jwt', makeHandlers())
-    expect(MockWS.last?.url).toBe(`ws://${window.location.host}/ws/chat/?container=a%20b%26c`)
+    expect(MockWS.last?.url).toBe('/ws/chat/?container=a%20b%26c')
   })
 
   it('open → handlers.open 被调；isOpen 反映 readyState', () => {
@@ -151,12 +144,22 @@ describe('createPanelTunnelSocket（#337 M5 隧道）', () => {
     expect(handlers.close).toHaveBeenCalledWith(4401, 'Unauthorized')
   })
 
-  it('error → handlers.error（隧道传输异常）', () => {
+  it('error → handlers.error（ErrorEvent message 透传真实失败原因，F7）', () => {
     const handlers = makeHandlers()
     createPanelTunnelSocket('alpha', 'jwt', handlers)
     MockWS.last!.fireOpen()
-    MockWS.last!.onerror?.()
+    MockWS.last!.fireError(new ErrorEvent('error', { message: 'WebSocket connection to ws://x failed: ECONNREFUSED' }))
     expect(handlers.error).toHaveBeenCalledTimes(1)
-    expect((handlers.error as ReturnType<typeof vi.fn>).mock.calls[0][0]).toBeInstanceOf(Error)
+    const err = (handlers.error as ReturnType<typeof vi.fn>).mock.calls[0][0] as Error
+    expect(err).toBeInstanceOf(Error)
+    expect(err.message).toBe('WebSocket connection to ws://x failed: ECONNREFUSED') // 非 'panel tunnel error' 常量
+  })
+
+  it('error 非 ErrorEvent（跨源受限等）→ 通用兜底 message（F7）', () => {
+    const handlers = makeHandlers()
+    createPanelTunnelSocket('alpha', 'jwt', handlers)
+    MockWS.last!.fireOpen()
+    MockWS.last!.fireError({}) // 无 message 的裸 Event
+    expect((handlers.error as ReturnType<typeof vi.fn>).mock.calls[0][0].message).toBe('WebSocket transport error')
   })
 })

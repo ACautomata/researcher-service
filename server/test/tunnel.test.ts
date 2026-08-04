@@ -8,7 +8,7 @@
 // 每用例独立 ctx（真实 http server + 临时 SQLite + fake 网关），try/finally 清理——不共享
 // 模块级 ctx（「容器网关不可达」曾替换共享 ctx 污染后续用例，改为自建更稳）。
 
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import http, { type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { mkdtempSync } from 'node:fs'
@@ -45,9 +45,6 @@ class FakeGateway implements GatewaySocket {
     this.closedCode = code ?? null
     this.closedReason = reason ?? ''
   }
-  onOpen(_cb: () => void): void {
-    // 测试不需要模拟网关 open 事件
-  }
   onMessage(cb: (data: string) => void): void {
     this.msgCb = cb
   }
@@ -65,10 +62,11 @@ class FakeGateway implements GatewaySocket {
   }
 }
 
-function fakeConnector(gateway: FakeGateway, fail = false): GatewayConnector {
+function fakeConnector(gateway: FakeGateway, fail = false, recordedUrls: string[] = []): GatewayConnector {
   return {
-    connect: async () => {
+    connect: async (url) => {
       if (fail) throw new Error('ECONNREFUSED 127.0.0.1')
+      recordedUrls.push(url)
       return gateway
     },
   }
@@ -85,7 +83,15 @@ interface TunnelCtx {
 }
 
 let seq = 0
-async function startTunnel(opts: { failGateway?: boolean; connectGateway?: GatewayConnector } = {}): Promise<TunnelCtx> {
+async function startTunnel(
+  opts: {
+    failGateway?: boolean
+    connectGateway?: GatewayConnector
+    gatewayScheme?: string
+    revalidateMs?: number
+    maxConnections?: number
+  } = {},
+): Promise<TunnelCtx> {
   const dir = mkdtempSync(path.join(tmpdir(), `tunnel-${process.pid}-${seq++}-`))
   const sqlite = new Database(path.join(dir, 't.db'))
   sqlite.exec(INIT_SQL)
@@ -96,6 +102,9 @@ async function startTunnel(opts: { failGateway?: boolean; connectGateway?: Gatew
     prisma,
     connectGateway: opts.connectGateway ?? fakeConnector(gateway, opts.failGateway),
     gatewayHost: '127.0.0.1',
+    gatewayScheme: opts.gatewayScheme ?? 'ws',
+    revalidateMs: opts.revalidateMs,
+    maxConnections: opts.maxConnections,
   }
   const tunnel = createTunnelServer(deps)
   const server = http.createServer()
@@ -111,6 +120,7 @@ async function startTunnel(opts: { failGateway?: boolean; connectGateway?: Gatew
     tunnel,
     baseUrl: `ws://127.0.0.1:${port}/ws/chat/`,
     close: async () => {
+      tunnel.close() // 终止隧道 + 清复查 interval（F6 竞态测试/防 interval handle 泄漏）
       await new Promise<void>((resolve) => server.close(() => resolve()))
       await prisma.$disconnect()
     },
@@ -141,12 +151,13 @@ async function makeAlphaCtx(opts: { failGateway?: boolean } = {}): Promise<{ ctx
   return { ctx, user, jwt }
 }
 
-// ws 客户端 helper：连隧道并等 open；失败 reject。protocols 可选（无 subprotocol 场景，Node ws 支持）
+// ws 客户端 helper：连隧道并等 open；失败/未 open 即断开 reject（F6 竞态场景 close-before-open）。
 function connectTunnel(url: string, protocols?: string | string[]): Promise<WebSocket> {
   return new Promise((resolve, reject) => {
     const ws = protocols === undefined ? new WebSocket(url) : new WebSocket(url, protocols)
     ws.once('open', () => resolve(ws))
     ws.once('error', reject)
+    ws.once('close', () => reject(new Error('connection closed before open')))
   })
 }
 
@@ -496,6 +507,113 @@ describe('M5 隧道（#337 · ADR 0006）', () => {
     } finally {
       process.removeListener('uncaughtException', onUncaught)
       if (ctx) await ctx.close()
+    }
+  })
+
+  it('authenticate 遇 DB 故障（非认证失败）→ close(1011) 而非 4401（F1：DB 瞬断不触发 forceRefresh 风暴）', async () => {
+    const { ctx, jwt } = await makeAlphaCtx()
+    try {
+      // 模拟 DB 连接池耗尽：findUnique 抛普通 Error（非 AuthenticationError）→ 内部故障码
+      vi.spyOn(ctx.prisma.user, 'findUnique').mockRejectedValueOnce(new Error('SQLITE BUSY'))
+      const ws = await connectTunnel(`${ctx.baseUrl}?container=alpha`, ['access_token', jwt])
+      const closes = collectClose(ws)
+      await until(() => closes.length > 0)
+      expect(closes[0].code).toBe(1011)
+    } finally {
+      await ctx.close()
+    }
+  })
+
+  it('网关 URL 用配置 scheme（F2：OPENCLAW_FLEET_WS_SCHEME=wss 生效，不硬编码 ws）', async () => {
+    const recorded: string[] = []
+    const gateway = new FakeGateway()
+    const ctx = await startTunnel({ gatewayScheme: 'wss', connectGateway: fakeConnector(gateway, false, recorded) })
+    const user = await seedUser(ctx.prisma)
+    const jwt = await signAccessToken(user.id)
+    await seedContainer(ctx.prisma, user)
+    try {
+      const ws = await connectTunnel(`${ctx.baseUrl}?container=alpha`, ['access_token', jwt])
+      await until(() => recorded.length >= 1)
+      expect(recorded[0]).toBe('wss://127.0.0.1:19001/')
+      ws.close()
+    } finally {
+      await ctx.close()
+    }
+  })
+
+  it('活动隧道周期复查：user 被禁用后隧道 close(4401)（F4：管理员禁用不被长连接绕过）', async () => {
+    const ctx = await startTunnel({ revalidateMs: 50 })
+    const user = await seedUser(ctx.prisma)
+    const jwt = await signAccessToken(user.id)
+    await seedContainer(ctx.prisma, user)
+    try {
+      const ws = await connectTunnel(`${ctx.baseUrl}?container=alpha`, ['access_token', jwt])
+      // 先发一帧确认隧道已连上网关（排除建连未完成竞态）
+      ws.send('{"type":"req","id":"p","method":"ping"}')
+      await until(() => ctx.gateway.received.length >= 1)
+      const closes = collectClose(ws)
+      // 管理员禁用用户 → 下轮复查（50ms interval）→ 隧道被关
+      await ctx.prisma.user.update({ where: { id: user.id }, data: { isActive: false } })
+      await until(() => closes.length > 0)
+      expect(closes[0].code).toBe(4401)
+    } finally {
+      await ctx.close()
+    }
+  })
+
+  it('网关自身 close 4401（容器侧 auth 失败）→ 浏览器收到 4402 而非 4401（F5：不与面板认证码混淆）', async () => {
+    const { ctx, jwt } = await makeAlphaCtx()
+    try {
+      const ws = await connectTunnel(`${ctx.baseUrl}?container=alpha`, ['access_token', jwt])
+      const closes = collectClose(ws)
+      ws.send('{"type":"req","id":"p","method":"ping"}')
+      await until(() => ctx.gateway.received.length >= 1)
+      ctx.gateway.fireClose(4401)
+      await until(() => closes.length > 0)
+      expect(closes[0].code).toBe(4402) // 网关 4401 → 面板 4402（网关不可达语义，前端不 forceRefresh）
+    } finally {
+      await ctx.close()
+    }
+  })
+
+  it('tunnel.close() 后新 upgrade 立即 terminate（F6：并发 upgrade 竞态不挂起 server.close）', async () => {
+    const { ctx, jwt } = await makeAlphaCtx()
+    try {
+      ctx.tunnel.close()
+      // closing 标志 → 新 upgrade 不被留下挂起：terminate 可能在客户端收到 101 前（close-before-open
+      // reject）或后（open 后立即 close）。两种都证明「close 后连接不存活」，否则 until 超时红。
+      let closed = false
+      try {
+        const ws = await connectTunnel(`${ctx.baseUrl}?container=alpha`, ['access_token', jwt])
+        ws.on('close', () => {
+          closed = true
+        })
+      } catch {
+        closed = true // close-before-open：被 terminate（connectTunnel 的 close→reject）
+      }
+      await until(() => closed)
+    } finally {
+      await ctx.close()
+    }
+  })
+
+  it('并发隧道连接数超上限 → 新连接 close(1008)（F8：resource-exhaustion 第二维）', async () => {
+    const ctx = await startTunnel({ maxConnections: 2 })
+    const user = await seedUser(ctx.prisma)
+    const jwt = await signAccessToken(user.id)
+    await seedContainer(ctx.prisma, user)
+    try {
+      const ws1 = await connectTunnel(`${ctx.baseUrl}?container=alpha`, ['access_token', jwt])
+      const ws2 = await connectTunnel(`${ctx.baseUrl}?container=alpha`, ['access_token', jwt])
+      // 第 3 个连接超上限（accept 后计数 3 > 2）→ 策略违反 close(1008)
+      const ws3 = await connectTunnel(`${ctx.baseUrl}?container=alpha`, ['access_token', jwt])
+      const closes = collectClose(ws3)
+      await until(() => closes.length > 0)
+      expect(closes[0].code).toBe(1008)
+      ws1.close()
+      ws2.close()
+    } finally {
+      await ctx.close()
     }
   })
 })

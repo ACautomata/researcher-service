@@ -9,10 +9,10 @@
 import WebSocket from 'ws'
 
 // 一个到容器网关的传输 socket（方向：后端⇄网关）。onMessage 即网关发来的原始协议帧。
+// （F13）onOpen 已移除——零消费者（tunnel.ts 从不订阅），投机接口面，违反 Simplicity First。
 export interface GatewaySocket {
   send(data: string): void
   close(code?: number, reason?: string): void
-  onOpen(cb: () => void): void
   onMessage(cb: (data: string) => void): void
   onClose(cb: (code: number, reason: string) => void): void
   onError(cb: (err: Error) => void): void
@@ -39,10 +39,15 @@ export function makeWsGatewayConnector(timeoutMs = CONNECT_TIMEOUT_MS): GatewayC
           reject(new Error(`gateway connect timeout: ${url}`))
         }, timeoutMs)
         // connect 阶段错误 → reject；连接建立后的错误交给 onError（透传层决定是否关隧道）。
+        // 用 on + open 内 removeListener 注册（F9）：once 的包装 listener 无法精确移除，且 once
+        // 留着会在 open 后任何 error（容器重启 ECONNRESET）上再次触发 reject/clearTimeout——今天
+        // 幂等无害，一旦 onConnectError 获得副作用（日志/计数）就双触发。open/失败都显式移除。
         const onConnectError = (err: Error): void => {
           clearTimeout(timer)
+          ws.removeListener('error', onConnectError)
           reject(err)
         }
+        ws.on('error', onConnectError)
         let msgCb: ((data: string) => void) | null = null
         const buffered: string[] = []
         ws.on('message', (data) => {
@@ -52,6 +57,8 @@ export function makeWsGatewayConnector(timeoutMs = CONNECT_TIMEOUT_MS): GatewayC
         })
         ws.once('open', () => {
           clearTimeout(timer)
+          // 连接已建立：移除 connect 阶段处理器，post-open error 只走下方 onError（记录+重放）
+          ws.removeListener('error', onConnectError)
           // 终态事件记录（P2-4，codex PR #367）：网关可能在 onClose/onError 注册前就断开（容器
           // 重启中）——EventEmitter.on 不重放已发生事件，须像下方消息缓冲一样记录终态，注册时
           // 重放。否则浏览器隧道保持 OPEN 但上游已死，官方协议机收不到 close/error 无法重连（假活）。
@@ -76,7 +83,6 @@ export function makeWsGatewayConnector(timeoutMs = CONNECT_TIMEOUT_MS): GatewayC
               if (ws.readyState === WebSocket.OPEN) ws.send(data)
             },
             close: (code, reason) => ws.close(code, reason),
-            onOpen: (cb) => ws.on('open', cb),
             onMessage: (cb) => {
               msgCb = cb
               for (const frame of buffered) cb(frame)
@@ -93,7 +99,6 @@ export function makeWsGatewayConnector(timeoutMs = CONNECT_TIMEOUT_MS): GatewayC
           }
           resolve(socket)
         })
-        ws.once('error', onConnectError)
       })
     },
   }

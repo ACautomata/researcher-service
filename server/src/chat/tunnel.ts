@@ -17,8 +17,9 @@ import type { IncomingMessage } from 'node:http'
 import type { Duplex } from 'node:stream'
 import { WebSocketServer, WebSocket } from 'ws'
 import type { PrismaClient } from '../generated/prisma/client'
-import { authenticate } from '../auth/authenticate'
+import { authenticate, AuthenticationError } from '../auth/authenticate'
 import { getInstanceForUser } from '../containers/orchestrator'
+import { EnvelopeError } from '../envelope'
 import { parseProtocolToken, chooseProtocol } from './subprotocol'
 import {
   WS_CHAT_PATH,
@@ -26,8 +27,11 @@ import {
   WS_GATEWAY_UNAVAILABLE,
   WS_MUST_CHANGE_PASSWORD_CLOSE,
   WS_POLICY_VIOLATION,
+  WS_INTERNAL_ERROR,
   TUNNEL_PENDING_BYTE_BUDGET,
   TUNNEL_MAX_PAYLOAD,
+  TUNNEL_MAX_CONNECTIONS,
+  TUNNEL_REVALIDATE_MS,
 } from './values'
 import type { GatewayConnector, GatewaySocket } from './gatewayConnector'
 
@@ -37,6 +41,12 @@ export interface TunnelDeps {
   connectGateway: GatewayConnector
   // 容器网关宿主地址（config.fleet.healthHost；生产 127.0.0.1）
   gatewayHost: string
+  // 容器网关 WS scheme（config.fleet.healthScheme，OPENCLAW_FLEET_WS_SCHEME；默认 ws，生产 TLS 后 wss）
+  gatewayScheme: string
+  // 活动隧道 user 状态复查间隔（F4；生产默认 TUNNEL_REVALIDATE_MS=30s，测试注入小值触发复查）
+  revalidateMs?: number
+  // 并发隧道连接数上限（F8；生产默认 TUNNEL_MAX_CONNECTIONS=128，测试注入小值覆盖超限分支）
+  maxConnections?: number
 }
 
 // 网关 close code 传导 sanitize（安全审查 P1-1，codex PR #367）：RFC 6455 保留码 1004/1005/1006
@@ -50,12 +60,53 @@ export function sanitizeGatewayCloseCode(code: number): number {
   return valid ? code : WS_GATEWAY_UNAVAILABLE
 }
 
+// F5（code review）：容器网关是独立的 close code 语义空间——网关自身也可能用 4401（其设备/auth
+// 失败）或 4403，但面板保留这两个码表「认证失败 / 改密门」。原样传导会让前端把容器侧问题误判为
+// 面板 token 失效，进入 recoverUnauthorized forceRefresh 循环。冲突码映射为 4402（网关不可达
+// 语义，前端不 forceRefresh）；4402 本身语义与网关不可达一致，原样传无混淆。
+const PANEL_RESERVED_CLOSE_CODES = new Set<number>([WS_AUTH_FAIL_CLOSE, WS_MUST_CHANGE_PASSWORD_CLOSE])
+
+export function sanitizeGatewayCloseCodeForForwarding(code: number): number {
+  if (PANEL_RESERVED_CLOSE_CODES.has(code)) return WS_GATEWAY_UNAVAILABLE
+  return sanitizeGatewayCloseCode(code)
+}
+
 export interface TunnelServer {
   // 接管 /ws/chat/ 路径的 upgrade 请求；返回 false = 非本路径，调用方自行处置（destroy）。
   handleUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer): boolean
   // 终止全部活动隧道（优雅关闭用）：http.Server.close() 会等升级后的 WS 连接自然断开——有浏览器
   // 持隧道时部署/重启会挂起，须先 terminate 全部隧道再 close（code review P2）。
   close(): void
+}
+
+// F4（code review）：周期复查活动隧道所属 user 的 isActive/mustChangePassword——握手门只建连时查
+// 一次，管理员禁用用户/设改密后已建隧道须尽快终止（否则强制改密/禁用被长连接绕过）。批量查库
+//（一次 findMany 覆盖全部活动用户），失效即 close(4401)。best-effort：DB 瞬断跳过本轮。
+export async function revalidateTunnelUsers(
+  clients: Set<WebSocket>,
+  tunnelUser: WeakMap<WebSocket, string>,
+  prisma: PrismaClient,
+): Promise<void> {
+  const byUser = new Map<string, WebSocket[]>()
+  for (const ws of clients) {
+    const uid = tunnelUser.get(ws)
+    if (uid) {
+      const arr = byUser.get(uid)
+      if (arr) arr.push(ws)
+      else byUser.set(uid, [ws])
+    }
+  }
+  if (byUser.size === 0) return
+  const users = await prisma.user.findMany({
+    where: { id: { in: [...byUser.keys()] } },
+    select: { id: true, isActive: true, mustChangePassword: true },
+  })
+  const valid = new Set(users.filter((u) => u.isActive && !u.mustChangePassword).map((u) => u.id))
+  for (const [uid, sockets] of byUser) {
+    if (!valid.has(uid)) {
+      for (const ws of sockets) ws.close(WS_AUTH_FAIL_CLOSE)
+    }
+  }
 }
 
 // createTunnelServer：noServer + handleUpgrade 手动鉴权（#314 调研首选路径），subprotocol
@@ -71,24 +122,59 @@ export function createTunnelServer(deps: TunnelDeps): TunnelServer {
     // 的 `string | false`：ws 8.x 运行时对 falsy 返回不 push subprotocol header 且不 abort 握手。
     handleProtocols: (protocols) => chooseProtocol(protocols) as string | false,
   })
+  // F6：优雅关闭与并发 upgrade 竞态——close() 只 terminate 当时的 clients，close 之后才完成的
+  // upgrade 若不拦会在 server.close() 处挂起（http.Server.close 等升级后的 WS 自然断开）。closing
+  // 标志让 close 后新完成的 upgrade 立即 terminate。
+  let closing = false
+  // F8：活动隧道连接数（含未认证）。pending 预算只限单连接字节，无并发上限时攻击者可开数千连接
+  // 各持 ~1.25MiB 打满堆——超限 accept 后立即 close(1008)（策略违反）。
+  let activeConnections = 0
+  // F4：活动隧道所属 user（认证成功后记录），周期复查 isActive/mustChangePassword。
+  const tunnelUser = new WeakMap<WebSocket, string>()
+  const revalidate = setInterval(() => {
+    void revalidateTunnelUsers(wss.clients, tunnelUser, deps.prisma).catch(() => {
+      // DB 瞬断 best-effort：跳过本轮，下轮复查
+    })
+  }, deps.revalidateMs ?? TUNNEL_REVALIDATE_MS)
   return {
     handleUpgrade(req, socket, head) {
       if (!req.url?.startsWith(WS_CHAT_PATH)) return false
       // upgrade 请求异常（连接被对端 abort 等）→ destroy，避免悬空 socket
       socket.on('error', () => socket.destroy())
       wss.handleUpgrade(req, socket, head, (ws) => {
-        void handleConnection(ws, req, deps)
+        activeConnections++
+        ws.on('close', () => {
+          activeConnections--
+        })
+        if (closing) {
+          // close() 已开始：新完成的 upgrade 立即终止，防 server.close() 挂起（F6）
+          ws.terminate()
+          return
+        }
+        if (activeConnections > (deps.maxConnections ?? TUNNEL_MAX_CONNECTIONS)) {
+          // 并发隧道数超上限（F8）：策略违反
+          ws.close(WS_POLICY_VIOLATION)
+          return
+        }
+        void handleConnection(ws, req, deps, tunnelUser)
       })
       return true
     },
     close() {
-      // 立即关闭全部活动隧道（terminate 不等 close 握手，防优雅关闭挂起）
+      // 立即关闭全部活动隧道（terminate 不等 close 握手，防优雅关闭挂起）+ 停止复查
+      closing = true
+      clearInterval(revalidate)
       for (const client of wss.clients) client.terminate()
     },
   }
 }
 
-async function handleConnection(ws: WebSocket, req: IncomingMessage, deps: TunnelDeps): Promise<void> {
+async function handleConnection(
+  ws: WebSocket,
+  req: IncomingMessage,
+  deps: TunnelDeps,
+  tunnelUser: WeakMap<WebSocket, string>,
+): Promise<void> {
   // 立即注册浏览器侧监听（accept 后浏览器即可发帧/断开；下述 await 期间未监听即丢帧/泄漏）：
   //   - message → 缓冲到 pending（网关连好后 flush，见下）
   //   - close → 网关连好后关闭它（浏览器 early-close 也捕获，防泄漏）
@@ -106,7 +192,9 @@ async function handleConnection(ws: WebSocket, req: IncomingMessage, deps: Tunne
     if (gateway === null) {
       // 网关连接建立前缓冲（网关连好后 flush）。字节预算上限防恶意客户端在连接窗口内狂发帧
       // 导致内存无界增长（resource-exhaustion）——超限即策略违反 close(1008)。
-      pendingBytes += Buffer.byteLength(frame)
+      // data 为 ws 文本帧的原始 Buffer：.length 即 UTF-8 wire 字节数，免 Buffer.byteLength 的
+      // O(n) 重编码（F10）；非 Buffer 分支（ArrayBuffer/Buffer[]）回退 byteLength。
+      pendingBytes += Buffer.isBuffer(data) ? data.length : Buffer.byteLength(frame)
       if (pendingBytes > TUNNEL_PENDING_BYTE_BUDGET) {
         ws.close(WS_POLICY_VIOLATION)
         return
@@ -120,7 +208,9 @@ async function handleConnection(ws: WebSocket, req: IncomingMessage, deps: Tunne
     if (gateway !== null) gateway.close()
   })
 
-  // 1. JWT subprotocol 验签（与 REST authenticate() 同源：签名 + 查库 user 存在且 active）
+  // 1. JWT subprotocol 验签（与 REST authenticate() 同源：签名 + 查库 user 存在且 active）。
+  //    认证失败（AuthenticationError）→ 4401；DB/内部故障（F1）→ 1011（非凭证过期，前端不该
+  //    forceRefresh 风暴——DB 瞬断被误判 token 失效会陷入刷新重连循环）。
   const token = parseProtocolToken(req.headers['sec-websocket-protocol'])
   if (token === null) {
     ws.close(WS_AUTH_FAIL_CLOSE)
@@ -129,8 +219,8 @@ async function handleConnection(ws: WebSocket, req: IncomingMessage, deps: Tunne
   let user
   try {
     user = await authenticate(token, deps.prisma)
-  } catch {
-    ws.close(WS_AUTH_FAIL_CLOSE)
+  } catch (e) {
+    ws.close(e instanceof AuthenticationError ? WS_AUTH_FAIL_CLOSE : WS_INTERNAL_ERROR)
     return
   }
   // 强制改密门（authorization-gate-parity）：与 REST mustChangePasswordGate 同源——mustChangePassword
@@ -139,8 +229,12 @@ async function handleConnection(ws: WebSocket, req: IncomingMessage, deps: Tunne
     ws.close(WS_MUST_CHANGE_PASSWORD_CLOSE)
     return
   }
+  // F4：认证通过 → 记录隧道所属 user，周期复查 isActive/mustChangePassword（管理员禁用/改密后
+  // 已建隧道尽快终止）。不 handle 的 ws（未认证/失败）不记录 → 复查只扫成功隧道。
+  tunnelUser.set(ws, user.id)
 
-  // 2. 归属门：容器名经 URL query 传入，user 只能开自己容器（越权/不存在同码 4401 防探测）
+  // 2. 归属门：容器名经 URL query 传入，user 只能开自己容器（越权/不存在同码 4401 防探测）。
+  //    越权/不存在（EnvelopeError）→ 4401；DB/内部故障（F1）→ 1011。
   const name = new URL(req.url!, 'ws://localhost').searchParams.get('container')
   if (!name) {
     ws.close(WS_AUTH_FAIL_CLOSE)
@@ -149,14 +243,16 @@ async function handleConnection(ws: WebSocket, req: IncomingMessage, deps: Tunne
   let inst
   try {
     inst = await getInstanceForUser(deps.prisma, user, name)
-  } catch {
-    ws.close(WS_AUTH_FAIL_CLOSE)
+  } catch (e) {
+    ws.close(e instanceof EnvelopeError ? WS_AUTH_FAIL_CLOSE : WS_INTERNAL_ERROR)
     return
   }
 
   // 3. 连容器网关（透传目标）。失败 = 容器网关不可达（容器不在 running / 端口不通）→ 4402。
   try {
-    gateway = await deps.connectGateway.connect(`ws://${deps.gatewayHost}:${inst.port}/`)
+    gateway = await deps.connectGateway.connect(
+      `${deps.gatewayScheme}://${deps.gatewayHost}:${inst.port}/`,
+    )
   } catch {
     ws.close(WS_GATEWAY_UNAVAILABLE)
     return
@@ -178,8 +274,9 @@ async function handleConnection(ws: WebSocket, req: IncomingMessage, deps: Tunne
   gateway.onClose((code) => {
     // 网关断开 → 关隧道，把 close code 传导给浏览器（浏览器侧协议机决策重连）。
     // 保留码（1006/1005/1004）先 sanitize 再 close——直接传会同步抛 TypeError 且浏览器收不到
-    // close 帧（隧道悬空，见 sanitizeGatewayCloseCode）。
-    if (ws.readyState === WebSocket.OPEN) ws.close(sanitizeGatewayCloseCode(code))
+    // close 帧（隧道悬空，见 sanitizeGatewayCloseCode）。网关自身撞面板保留码（4401/4403）映射
+    // 4402，防前端把容器侧问题误判为面板 token 失效（F5）。
+    if (ws.readyState === WebSocket.OPEN) ws.close(sanitizeGatewayCloseCodeForForwarding(code))
   })
   gateway.onError(() => {
     // 网关传输错误：关隧道让浏览器侧协议机决策重连

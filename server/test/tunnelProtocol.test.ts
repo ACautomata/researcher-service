@@ -136,6 +136,7 @@ describe('M5 协议机经隧道 v4 握手（#337 验收②）', () => {
       prisma,
       connectGateway: makeWsGatewayConnector(),
       gatewayHost: '127.0.0.1',
+      gatewayScheme: 'ws',
     }
     const tunnel = createTunnelServer(deps)
     const server: Server = http.createServer()

@@ -372,3 +372,38 @@ describe('production fleet root (slice config)', () => {
     expect(await loadFleetRoot({ env: 'development', root: 'fleet/rel' })).toBe('fleet/rel')
   })
 })
+
+// 意见[F2]（code review PR #367）：隧道连容器网关的 URL scheme 硬编码 ws，deploy/Django 已文档
+// OPENCLAW_FLEET_WS_SCHEME=wss（生产 TLS）。config 加载即校验 ws/wss，非法 fail-fast（防 `SCHEME=http`
+// 这类错值静默拼出坏 URL，隧道全 4402）。
+describe('fleet gateway WS scheme env (slice config, F2)', () => {
+  async function loadHealthScheme(env: string | undefined): Promise<string | 'THREW'> {
+    vi.resetModules() // 清 config 模块缓存，让动态 import 重新快照 env
+    if (env === undefined) delete process.env.OPENCLAW_FLEET_WS_SCHEME
+    else vi.stubEnv('OPENCLAW_FLEET_WS_SCHEME', env)
+    try {
+      const { config } = await import('../src/config')
+      return config.fleet.healthScheme
+    } catch {
+      return 'THREW' // fail-fast
+    } finally {
+      vi.unstubAllEnvs() // 恢复 env（避免污染后续测试文件）
+    }
+  }
+
+  it('未设置 → 默认 ws（loopback 明文，本地零配置）', async () => {
+    expect(await loadHealthScheme(undefined)).toBe('ws')
+  })
+
+  it('显式 ws → 加载为 ws', async () => {
+    expect(await loadHealthScheme('ws')).toBe('ws')
+  })
+
+  it('显式 wss → 加载为 wss（生产网关 TLS）', async () => {
+    expect(await loadHealthScheme('wss')).toBe('wss')
+  })
+
+  it('非法 http → fail-fast（不再静默拼出坏 URL）', async () => {
+    expect(await loadHealthScheme('http')).toBe('THREW')
+  })
+})

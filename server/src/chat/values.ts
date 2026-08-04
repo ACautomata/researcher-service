@@ -27,6 +27,11 @@ export const WS_MUST_CHANGE_PASSWORD_CLOSE = 4403
 // 发帧。ws 标准应用码 1008 = policy violation；非认证码，不触发前端 forceRefresh。
 export const WS_POLICY_VIOLATION = 1008
 
+// 内部故障（code review F1）：authenticate/getInstanceForUser 的 catch 里，DB 瞬断/连接池耗尽等
+// 内部错误不得映射 4401——否则前端把 DB 故障误判为 token 过期进入 forceRefresh/重连风暴。
+// 1011 = ws 标准 INTERNAL_ERROR（RFC 6455 应用码）；非认证码，协议机按传输故障决策重连。
+export const WS_INTERNAL_ERROR = 1011
+
 // 网关连接建立前浏览器入站帧缓冲的字节预算（超过即 close(1008)）。协议机正常流程下网关连好前
 // 浏览器几乎不发帧（等 challenge），预算仅防御异常/恶意客户端在连接窗口内狂发帧的内存耗尽。
 export const TUNNEL_PENDING_BYTE_BUDGET = 256 * 1024
@@ -36,3 +41,13 @@ export const TUNNEL_PENDING_BYTE_BUDGET = 256 * 1024
 // message handler 内的事后检查、防不住单帧内存分配。1MiB ≥ 协议机合法最大帧（tool 事件载荷），
 // 超限帧由 ws 接收层直接拒绝 close(1009)，浏览器协议机据此决策重连。
 export const TUNNEL_MAX_PAYLOAD = 1024 * 1024
+
+// 并发隧道连接数上限（code review F8）：pending 预算只限单连接字节，无并发上限时攻击者可开数千
+// 连接各持 ~1.25MiB 打满堆——resource-exhaustion 的第二维。超限 accept 后立即 close(1008)（策略
+// 违反）。值 128 ≥ 正常多用户并发（每浏览器一隧道），防御性封顶。
+export const TUNNEL_MAX_CONNECTIONS = 128
+
+// 活动隧道 user 状态复查间隔（code review F4）：握手门只在建连时查 isActive/mustChangePassword，
+// 管理员禁用用户/设改密后已建隧道须尽快终止（否则强制改密/禁用被长连接绕过）。周期批量查库，
+// 失效即 close(4401)。30s 为「尽力及时」权衡（DB 负载 vs 生效延迟；管理员操作最多 30s 内生效）。
+export const TUNNEL_REVALIDATE_MS = 30_000
