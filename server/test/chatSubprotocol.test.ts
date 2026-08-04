@@ -3,7 +3,10 @@
 // 纯函数无 I/O：直接单测，不经 HTTP。
 
 import { describe, it, expect } from 'vitest'
+import { readFileSync } from 'node:fs'
+import path from 'node:path'
 import { parseProtocolToken, chooseProtocol } from '../src/chat/subprotocol'
+import { WS_CHAT_PROTOCOL } from '../src/chat/values'
 
 describe('parseProtocolToken（两格式 wire）', () => {
   it('格式① [' + "'access_token', <jwt>]" + ' → 取第 2 项', () => {
@@ -29,10 +32,6 @@ describe('parseProtocolToken（两格式 wire）', () => {
   it('undefined / 空串 header → null', () => {
     expect(parseProtocolToken(undefined)).toBeNull()
     expect(parseProtocolToken('')).toBeNull()
-  })
-
-  it('重复 header 合并数组 → 取第 2 项（对齐 Django subprotocols 列表语义）', () => {
-    expect(parseProtocolToken(['access_token', 'eyJ0okEn'])).toBe('eyJ0okEn')
   })
 
   it('首项非 access_token 时格式①不匹配，前缀循环亦不匹配 → null（对齐 _extract_token 顺序语义）', () => {
@@ -63,5 +62,24 @@ describe('chooseProtocol（RFC 6455 原样回显）', () => {
     // 修复后两者基于同一份解析 → chooseProtocol 也 undefined，语义一致。
     expect(parseProtocolToken('other, access_token, eyJ0okEn')).toBeNull()
     expect(chooseProtocol(new Set(['other', 'access_token', 'eyJ0okEn']))).toBeUndefined()
+  })
+})
+
+describe('access_token wire 契约跨语言单一来源（#14）', () => {
+  // 契约字面量硬编码在三个运行时（server Node values / frontend TS protocol / backend Python
+  // middleware），无单一文件。改传输格式（前缀改名/加版本）须三处同步，否则 WS 握手静默 1006/4401。
+  // 放 server（Node 环境）读源码文本 pin 三处一致——不引入 frontend 无 Node 类型的环境负担。
+  // vitest 从 server/ 运行 → cwd=server，上级即仓库根。
+  const ROOT = path.resolve(process.cwd(), '..')
+
+  it('frontend/src/chat/protocol.ts 的 WS_CHAT_PROTOCOL 与 server values 一致', () => {
+    const ts = readFileSync(path.join(ROOT, 'frontend/src/chat/protocol.ts'), 'utf8')
+    expect(ts).toContain(`WS_CHAT_PROTOCOL = '${WS_CHAT_PROTOCOL}'`)
+  })
+
+  it('backend/accounts/middleware.py（Python Channels）字面量与 server values 一致（裸 access_token + access_token. 前缀两格式）', () => {
+    const py = readFileSync(path.join(ROOT, 'backend/accounts/middleware.py'), 'utf8')
+    expect(py).toContain(`'${WS_CHAT_PROTOCOL}'`)
+    expect(py).toContain(`'${WS_CHAT_PROTOCOL}.`)
   })
 })

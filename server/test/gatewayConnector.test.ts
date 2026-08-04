@@ -88,4 +88,36 @@ describe('makeWsGatewayConnector（#337 M5 · P2-4 终态事件重放）', () =>
       gserver.close()
     }
   })
+
+  it('#4 P2：网关慢读（TCP 背压）→ 发送缓冲超预算 socket 被关 close(1008)，不无界缓冲', async () => {
+    // 网关端不消费数据（慢读）→ 内核 TCP 接收窗口填满后客户端 ws.send 内部 bufferedAmount 累积。
+    // 修复前 send 无守卫、缓冲无界增长（1MiB 级帧流可打满面板进程堆）；修复后超 sendBudget
+    // （注入小预算触发）→ close(1008) 经 tunnel onClose 传导浏览器，协议机决策重连。
+    const gserver = http.createServer()
+    const wss = new WebSocketServer({ noServer: true })
+    gserver.on('upgrade', (req, socket, head) => {
+      wss.handleUpgrade(req, socket, head, () => {}) // 故意不注册 data 消费——网关读得慢
+    })
+    await new Promise<void>((r) => gserver.listen(0, '127.0.0.1', r))
+    const { port } = gserver.address() as AddressInfo
+    const url = `ws://127.0.0.1:${port}/`
+    try {
+      const connector = makeWsGatewayConnector(5000, 128 * 1024) // 128KB 小预算便于触发
+      const socket = await connector.connect(url)
+      const closes: Array<{ code: number; reason: string }> = []
+      socket.onClose((code, reason) => closes.push({ code, reason }))
+      // 连发 64KB 帧：内核 TCP 缓冲吸收一部分后 bufferedAmount 累积，超 128KB 预算 → close(1008)。
+      // 修复前：send 无守卫，200 帧全发完仍无 close → 红。同步连发（await 会让出事件循环给内核
+      // 排空缓冲、削弱累积）。
+      for (let i = 0; i < 200; i++) {
+        if (closes.length > 0) break
+        socket.send('x'.repeat(64 * 1024))
+      }
+      await sleep(200)
+      expect(closes.length).toBe(1) // 修复前：无 close → 红
+      expect(closes[0].code).toBe(1008) // 策略违反（发送缓冲超限）
+    } finally {
+      gserver.close()
+    }
+  })
 })

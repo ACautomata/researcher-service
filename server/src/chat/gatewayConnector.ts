@@ -7,7 +7,7 @@
 // 协议 v4 帧为 JSON 文本）。协议 v4 握手/重连/会话投影全由浏览器侧官方包负责，后端零解析。
 
 import WebSocket from 'ws'
-import { TUNNEL_MAX_PAYLOAD } from './values'
+import { TUNNEL_MAX_PAYLOAD, TUNNEL_SEND_BUDGET, WS_POLICY_VIOLATION } from './values'
 
 // 一个到容器网关的传输 socket（方向：后端⇄网关）。onMessage 即网关发来的原始协议帧。
 // send/onMessage 载荷为 string | Buffer（#9）：文本帧 string（协议 v4 JSON 文本），二进制帧原样
@@ -32,7 +32,7 @@ const CONNECT_TIMEOUT_MS = 5000
 // 官方协议机经隧道发出）。连接失败/超时 reject → 隧道层 close(4402) 让浏览器感知容器网关不可用。
 // 连接建立瞬间网关可能立即主动发帧（如 connect.challenge，网关不依赖客户端先发）——open→resolve→
 // 调用方注册 onMessage 的窗口内到达的帧先缓冲，注册后 flush，防丢首帧。
-export function makeWsGatewayConnector(timeoutMs = CONNECT_TIMEOUT_MS): GatewayConnector {
+export function makeWsGatewayConnector(timeoutMs = CONNECT_TIMEOUT_MS, sendBudget = TUNNEL_SEND_BUDGET): GatewayConnector {
   return {
     connect(url) {
       return new Promise((resolve, reject) => {
@@ -86,7 +86,17 @@ export function makeWsGatewayConnector(timeoutMs = CONNECT_TIMEOUT_MS): GatewayC
           })
           const socket: GatewaySocket = {
             send: (data) => {
-              if (ws.readyState === WebSocket.OPEN) ws.send(data)
+              if (ws.readyState !== WebSocket.OPEN) return
+              // #4 P2：发送背压防护——网关读得慢时 ws.send 内部缓冲无界增长（TCP 背压），1MiB 级
+              // 帧流可打满面板进程堆、影响所有租户。bufferedAmount = 未写入底层 socket 的待发字节，
+              // 超预算即 close(1008)（策略违反）——close 经 tunnel onClose 传导浏览器，协议机决策
+              // 重连。pending 预算(256KiB)只保护连接建立窗口，此为 post-connect 转发路径的守卫。
+              const size = Buffer.isBuffer(data) ? data.length : Buffer.byteLength(data)
+              if (ws.bufferedAmount + size > sendBudget) {
+                ws.close(WS_POLICY_VIOLATION)
+                return
+              }
+              ws.send(data)
             },
             close: (code, reason) => ws.close(code, reason),
             onMessage: (cb) => {

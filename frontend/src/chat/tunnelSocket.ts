@@ -7,7 +7,7 @@
 // 协议 v4 握手/重连/帧状态机/会话投影全由官方协议机负责，本类只做 transport 适配。
 //
 // URL 形态（F11，code review）：相对路径 `/ws/chat/` —— WHATWG WebSocket 构造函数按文档 base URL
-// 解析相对地址（生产前端同款用法；旧 ChatWebSocket 已于 #369 删除）。绝对 URL（codex P1-3）基于
+// 解析相对地址，既有 ChatWebSocket（chat/ws.ts）生产同款用法。绝对 URL（codex P1-3）基于
 // 「相对路径抛 SyntaxError」的错误前提，且引入 window.location 依赖、subpath 部署下同样丢前缀。
 
 import type { GatewayProtocolSocket, GatewayProtocolSocketHandlers } from '@openclaw/gateway-client/browser'
@@ -45,7 +45,11 @@ export function createPanelTunnelSocket(
       // 不掉、onclose 不触发 → 协议机重连由 handlers.close 驱动、永不调度，隧道假活）。非法码映射
       // 1000 关闭（WHATWG 合法），原码带进 reason 保排障。
       const legal = code === undefined || code === 1000 || (code >= 3000 && code <= 4999)
-      if (legal) ws.close(code, reason)
+      // #3：WHATWG close(code, reason) 的 reason 超 123 UTF-8 字节即抛 SyntaxError——异常从协议机
+      // 调用 socket.close 的路径同步抛出：socket 关不掉、onclose 不触发 → 重连永不调度。合法码分支
+      // 也须按字节省略超长 reason（保 code 语义）。浏览器无 Buffer，用 TextEncoder 量 UTF-8 字节。
+      const reasonOk = reason === undefined || new TextEncoder().encode(reason).length <= 123
+      if (legal) ws.close(code, reasonOk ? reason : undefined)
       else ws.close(1000, `closed(${code})`)
     },
   }

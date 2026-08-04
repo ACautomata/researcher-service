@@ -816,6 +816,73 @@ describe('M5 隧道（#337 · ADR 0006）', () => {
     }
   })
 
+  it('#1 P1：认证拒绝路径也须立即释放名额——未认证坏 token 不回 close ack 不得占 30s 名额（隧道 DoS）', async () => {
+    // 第二轮 #5 只修了 maxConnections 拒绝分支。认证（4401）/归属（4404）/改密门（4403）/网关（4402）
+    // 等拒绝路径仍只 ws.close() 后 return——被拒连接忽略 close frame 时 socket 停在 CLOSING 30s
+    // （ws closeTimeout 等对端 ack），名额仍被占满 TUNNEL_MAX_CONNECTIONS，期间所有合法新隧道被
+    // close(1008)；30s 后循环重放 = 持续未认证隧道 DoS。releaseSlot 须覆盖 handleConnection 全部
+    // 拒绝路径（不只 maxConnections 分支）。
+    const ctx = await startTunnel({ maxConnections: 1 })
+    const user = await seedUser(ctx.prisma)
+    const jwt = await signAccessToken(user.id)
+    await seedContainer(ctx.prisma, user)
+    try {
+      // 未认证攻击者：raw socket 发坏 token → accept 后 close(4401)，不回 close ack（停 CLOSING 占名额）
+      const raw = await rawUpgrade(`${ctx.baseUrl}?container=alpha`, ['access_token', 'bad-token'])
+      await new Promise((r) => setTimeout(r, 100)) // 等 server 完成 4401 拒绝
+      // 合法用户应能连上：raw 的名额随 4401 拒绝立即释放（修复前被占 → 新连接超限 close(1008)）
+      let ws: WebSocket | null = null
+      try {
+        ws = await connectTunnel(`${ctx.baseUrl}?container=alpha`, ['access_token', jwt])
+      } catch {
+        // 修复前：raw 占名额 → 新连接超限被拒 → connectTunnel reject
+      }
+      expect(ws).not.toBeNull()
+      expect(ws!.readyState).toBe(WebSocket.OPEN)
+      ws!.close()
+      raw.destroy()
+    } finally {
+      await ctx.close()
+    }
+  })
+
+  it('#2 P2：handleConnection 异步 reject 不得 unhandledRejection 杀进程（fire-and-forget 须 .catch 兜底）', async () => {
+    // `void handleConnection(...)` 返回值被丢弃且无 .catch——async 体内未包裹同步段任一 throw
+    // （flush 循环 gateway.send 等）即 Promise reject；Node≥15 默认 --unhandled-rejections=throw
+    // → fatal 杀进程。注入：延迟 connect 让浏览器帧进 pending，connect 后 flush 循环 gateway.send
+    // 抛错 → async reject。修复前无 .catch → unhandledRejection（vitest 降级为 spy 捕获）→ 红。
+    const unhandled: unknown[] = []
+    const onUnhandled = (e: unknown): void => {
+      unhandled.push(e)
+    }
+    process.on('unhandledRejection', onUnhandled)
+    const gateway = new FakeGateway()
+    gateway.send = () => {
+      throw new Error('send boom')
+    }
+    const ctx = await startTunnel({
+      connectGateway: {
+        connect: async () => {
+          await new Promise((r) => setTimeout(r, 100)) // 拉长 pending 窗口，让浏览器帧先进 pending
+          return gateway
+        },
+      },
+    })
+    const user = await seedUser(ctx.prisma)
+    const jwt = await signAccessToken(user.id)
+    await seedContainer(ctx.prisma, user)
+    try {
+      const ws = await connectTunnel(`${ctx.baseUrl}?container=alpha`, ['access_token', jwt])
+      ws.send('{"type":"req","id":"p","method":"ping"}') // pending → flush 时 gateway.send 抛错 → reject
+      await new Promise((r) => setTimeout(r, 300))
+      expect(unhandled).toHaveLength(0) // 修复前：unhandledRejection → 红
+      ws.close()
+    } finally {
+      process.removeListener('unhandledRejection', onUnhandled)
+      await ctx.close()
+    }
+  })
+
   it('#11 handleUpgrade 同步异常不逃逸杀进程（try/catch + destroy socket 兜底）', async () => {
     // ws 8.21 在「同一 socket 二次 handleUpgrade」等路径同步 throw（websocket-server.js completeUpgrade）；
     // 裸调会把 throw 从 server.on('upgrade') listener 逃逸成 uncaughtException 杀进程。当前路径不触发，
@@ -842,6 +909,123 @@ describe('M5 隧道（#337 · ADR 0006）', () => {
       spy.mockRestore()
     } finally {
       process.removeListener('uncaughtException', onUncaught)
+      await ctx.close()
+    }
+  })
+
+  it('#3 P3：非精确路径段不按隧道处理——/ws/chat/foo 握手失败而非 4404（WS_CHAT_PATH 前缀界定收窄）', async () => {
+    const { ctx, jwt } = await makeAlphaCtx()
+    try {
+      // 修复前：startsWith('/ws/chat/') 命中 /ws/chat/foo → 按隧道处理 → query 无 container → 先
+      // accept 后 close(4404)，connectTunnel resolve。修复后：pathname !== '/ws/chat/' →
+      // handleUpgrade 返回 false → server 侧 destroy → 握手失败（close-before-open）→ reject。
+      let resolved = false
+      try {
+        const ws = await connectTunnel(`${ctx.baseUrl}foo?container=alpha`, ['access_token', jwt])
+        resolved = true
+        ws.close()
+      } catch {
+        resolved = false
+      }
+      expect(resolved).toBe(false) // 修复前：resolved=true（4404 先 accept 后 close）→ 红
+    } finally {
+      await ctx.close()
+    }
+  })
+
+  // ===== diagnosing-bugs 新增：/code-review 报告 3 个 bug 的回归测试 =====
+
+  it('REGRESSION-B 周期复查关闭隧道也须立即释放名额：被禁用用户不回 close ack 不得占 30s 名额（F4 关闭路径的 slot 释放缺口）', async () => {
+    // #5/#1 P1 已覆盖握手拒绝路径的 slot 释放；revalidateTunnelUsers 的 close(4401) 是第 10 条
+    // 关闭路径且只靠 close 事件释放。被禁用用户若忽略 close frame（socket 停 CLOSING 30s），
+    // 名额被占满 cap → 面板级新隧道全被拒。测试：cap=1 + raw 隧道被 revalidate 关闭（不回 ack）
+    // → 另一 active 用户的新连接应能连上（修复前 slot 被占 → close(1008) reject）。
+    // 注：新连接不能用被禁用 user 的 jwt——authenticate 同源校验 isActive 也会拒（4401），
+    // 故用独立 user2 连其自己的容器 beta。
+    const ctx = await startTunnel({ maxConnections: 1, revalidateMs: 50 })
+    const user1 = await seedUser(ctx.prisma, 'reval-user1')
+    const user2 = await seedUser(ctx.prisma, 'reval-user2')
+    const jwt1 = await signAccessToken(user1.id)
+    const jwt2 = await signAccessToken(user2.id)
+    await seedContainer(ctx.prisma, user1, 'alpha', 19001)
+    await seedContainer(ctx.prisma, user2, 'beta', 19002)
+    try {
+      // raw socket 用 user1 建隧道（合法认证、占名额），之后不回 close ack
+      const raw = await rawUpgrade(`${ctx.baseUrl}?container=alpha`, ['access_token', jwt1])
+      await new Promise((r) => setTimeout(r, 200)) // 等 authenticate+建连+revalidate interval 建立
+      // 管理员禁用 user1 → 下轮复查 close(4401) raw；raw 不回 ack → CLOSING（修复前 slot 仍被占）
+      await ctx.prisma.user.update({ where: { id: user1.id }, data: { isActive: false } })
+      await new Promise((r) => setTimeout(r, 100)) // 等 revalidate 执行
+      // user2 连自己的 beta 容器应能连上：raw 的名额已随 revalidate 关闭立即释放
+      let ws: WebSocket | null = null
+      try {
+        ws = await connectTunnel(`${ctx.baseUrl}?container=beta`, ['access_token', jwt2])
+      } catch {
+        // 修复前：raw 占名额 → 新连接超限被拒 → connectTunnel reject
+      }
+      expect(ws).not.toBeNull()
+      expect(ws!.readyState).toBe(WebSocket.OPEN)
+      ws!.close()
+      raw.destroy()
+    } finally {
+      await ctx.close()
+    }
+  })
+
+  it('REGRESSION-C 竞态：浏览器在 authenticate await 期间断开 → 不得对已关闭连接启动复查 interval（空转 interval 泄漏）', async () => {
+    // 修复前：close 事件先触发（stopRevalidate no-op，timer 尚 null）→ authenticate resolve 后
+    // startRevalidate() 对已关闭 ws 启动 interval；该 ws 的 close 事件已过，再无 close 事件去
+    // stopRevalidate → 常驻 30s 空转 interval（#10「最后一个关闭清除」不变量被破坏）。
+    const setSpy = vi.spyOn(globalThis, 'setInterval')
+    const ctx = await startTunnel({ revalidateMs: 50 })
+    const user = await seedUser(ctx.prisma)
+    const jwt = await signAccessToken(user.id)
+    await seedContainer(ctx.prisma, user)
+    try {
+      // 拉长 authenticate（findUnique 延迟 200ms）：open 后立即 close → close 事件在 authenticate
+      // resolve 前触发（确定性时序；loopback close 传播 ~1ms << 200ms）
+      const orig = ctx.prisma.user.findUnique.bind(ctx.prisma.user)
+      vi.spyOn(ctx.prisma.user, 'findUnique').mockImplementation(
+        (async (args: unknown) => {
+          await new Promise((r) => setTimeout(r, 200))
+          return orig(args as never)
+        }) as never,
+      )
+      const ws = await connectTunnel(`${ctx.baseUrl}?container=alpha`, ['access_token', jwt])
+      ws.close() // open 后立即断开（authenticate 仍在 200ms 延迟中）
+      await new Promise((r) => setTimeout(r, 500)) // 等 authenticate resolve + 修复前 startRevalidate 执行
+      // 修复前：interval 已启动（setSpy.calls=1）→ 红；修复后：断开路径不启动（calls=0）
+      expect(setSpy.mock.calls.length).toBe(0)
+    } finally {
+      setSpy.mockRestore()
+      await ctx.close()
+    }
+  })
+
+  it('REGRESSION-A 网关→浏览器转发腿背压守卫：浏览器慢读时面板不无界缓冲（close(1008) 防面板内存 DoS）', async () => {
+    // #4 P2 的 TUNNEL_SEND_BUDGET 只守 gatewayConnector.send（browser→gateway 方向）；gateway→browser
+    // 转发腿（gateway.onMessage → ws.send）无 bufferedAmount 检查。浏览器慢读（后台标签页 TCP 窗口
+    // 关闭）时面板侧 ws.send 缓冲无界增长 → 面板堆耗尽。模拟：暂停客户端 TCP 读取 → 网关推超预算
+    // 帧 → 面板 bufferedAmount 累积 → 修复后 close(1008)；恢复读取让 close frame 到达客户端。
+    const { ctx, jwt } = await makeAlphaCtx()
+    try {
+      const ws = await connectTunnel(`${ctx.baseUrl}?container=alpha`, ['access_token', jwt])
+      const closes = collectClose(ws)
+      ws.send('{"type":"req","id":"p","method":"ping"}')
+      await until(() => ctx.gateway.received.length >= 1)
+      // 模拟浏览器慢读：暂停 TCP 读取 → 面板 send 受阻 → 面板侧 ws.bufferedAmount 累积
+      const sock = (ws as unknown as { _socket: net.Socket })._socket
+      sock.pause()
+      // 网关推超预算帧（32×1MiB > 4MiB send budget；同步连发不让出事件循环给内核排空）
+      for (let i = 0; i < 32; i++) {
+        if (closes.length > 0) break
+        ctx.gateway.fireMessage('x'.repeat(1024 * 1024))
+      }
+      // 恢复读取：面板 close(1008) 的 close frame 已排队 → resume 后到达客户端 → close 事件
+      sock.resume()
+      await until(() => closes.length > 0)
+      expect(closes[0].code).toBe(1008) // 修复前：无守卫，32 帧全发、无 close → 红
+    } finally {
       await ctx.close()
     }
   })
