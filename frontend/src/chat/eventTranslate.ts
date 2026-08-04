@@ -132,6 +132,12 @@ export class ChatEventTranslator {
       const tail = message.slice(sent.length)
       this.sent.set(runId, sent + tail)
       out.push({ type: 'text', runId, delta: tail })
+    } else if (message && !message.startsWith(sent)) {
+      // F9: 非前缀 final（空白规范化 / markdown 改写 / 重复 delta 使 sent 翻倍）——权威最终文本与
+      // 流式累积不一致。若只发 done，权威文本被静默丢弃、UI 停在未规范化的流式态。发整段 replace
+      // 帧（协议支持 replace 快照；前端按 replace 标志 set 而非 append），纠正流式投影。
+      this.sent.set(runId, message)
+      out.push({ type: 'text', runId, delta: message, replace: true })
     }
     out.push({ type: 'done', runId })
     this.sent.delete(runId)

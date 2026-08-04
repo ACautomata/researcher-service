@@ -120,4 +120,49 @@ describe('makeWsGatewayConnector（#337 M5 · P2-4 终态事件重放）', () =>
       gserver.close()
     }
   })
+
+  it('F13: 网关在升级前 reset → connect 快速 reject（不误报 connect timeout 等满超时）', async () => {
+    // 网关在 WS 升级握手完成前 reset TCP（容器重启/端口被占后立刻拒绝）。修复前 connect 定时器
+    // 只由 open/error 清除——若 close-before-open 不触发 error，会等满 timeoutMs 误报「gateway
+    // connect timeout」；修复后 close 也清除定时器并 reject。
+    const gserver = http.createServer()
+    gserver.on('upgrade', (req, socket) => socket.destroy()) // 不 handleUpgrade，直接 reset
+    await new Promise<void>((r) => gserver.listen(0, '127.0.0.1', r))
+    const { port } = gserver.address() as AddressInfo
+    const url = `ws://127.0.0.1:${port}/`
+    try {
+      const connector = makeWsGatewayConnector(2000) // 2s 超时——若定时器未被 close 清除会等满
+      const started = Date.now()
+      await expect(connector.connect(url)).rejects.toThrow()
+      expect(Date.now() - started).toBeLessThan(2000) // 快速失败而非等满超时
+    } finally {
+      gserver.close()
+    }
+  })
+
+  it('F13: 网关在 connect 窗口推超限帧 → 连接被终止（缓冲有字节上限，防内存无界）', async () => {
+    // 网关建连（open）即推 10 × 64KB = 640KB > TUNNEL_PENDING_BYTE_BUDGET(256KiB)，tunnel 尚未
+    // 注册 onMessage → 帧进缓冲。修复前 buffered 无字节上限（内存无界增长，对端健谈网关 DoS）；
+    // 修复后超限 terminate（无论 connect 是否已 resolve，已返回 socket 经 close 重放机制感知）。
+    const gserver = http.createServer()
+    const wss = new WebSocketServer({ noServer: true })
+    gserver.on('upgrade', (req, socket, head) => {
+      wss.handleUpgrade(req, socket, head, (ws) => {
+        for (let i = 0; i < 10; i++) ws.send(Buffer.alloc(64 * 1024))
+      })
+    })
+    await new Promise<void>((r) => gserver.listen(0, '127.0.0.1', r))
+    const { port } = gserver.address() as AddressInfo
+    const url = `ws://127.0.0.1:${port}/`
+    try {
+      const connector = makeWsGatewayConnector()
+      const socket = await connector.connect(url) // resolve 后帧进入缓冲窗口
+      const closes: number[] = []
+      socket.onClose((code) => closes.push(code))
+      await sleep(300)
+      expect(closes.length).toBeGreaterThan(0) // 修复前：缓冲无上限、连接保持 → 红
+    } finally {
+      gserver.close()
+    }
+  })
 })

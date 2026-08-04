@@ -9,6 +9,7 @@ import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import { WS_CHAT_PROTOCOL } from './protocol'
+import { WS_AUTH_FAIL, WS_GATEWAY_UNAVAILABLE, WS_MUST_CHANGE_PASSWORD, WS_CONTAINER_ACCESS_DENIED } from './closeCodes'
 
 const ROOT = path.resolve(process.cwd(), '..')
 
@@ -22,5 +23,17 @@ describe('access_token wire 契约跨语言单一来源（#14）', () => {
     const py = readFileSync(path.join(ROOT, 'backend/accounts/middleware.py'), 'utf8')
     expect(py).toContain(`'${WS_CHAT_PROTOCOL}'`)
     expect(py).toContain(`'${WS_CHAT_PROTOCOL}.`)
+  })
+})
+
+describe('close-code 词汇表跨语言单一来源（F15，防服务端改码号前端静默错乱）', () => {
+  // 前端唯一词汇表 = closeCodes.ts；服务端 values.ts 是另一个单一来源。改码号/语义须两端同步，
+  // 本测试 pin 二者一致——服务端重编号（如 4404→4403）会在此红，而非前端行为静默断裂。
+  it('server/src/chat/values.ts 的四个 close-code 常量与前端 closeCodes.ts 一致', () => {
+    const src = readFileSync(path.join(ROOT, 'server/src/chat/values.ts'), 'utf8')
+    expect(src).toContain(`WS_AUTH_FAIL_CLOSE = ${WS_AUTH_FAIL}`)
+    expect(src).toContain(`WS_GATEWAY_UNAVAILABLE = ${WS_GATEWAY_UNAVAILABLE}`)
+    expect(src).toContain(`WS_MUST_CHANGE_PASSWORD_CLOSE = ${WS_MUST_CHANGE_PASSWORD}`)
+    expect(src).toContain(`WS_CONTAINER_ACCESS_DENIED = ${WS_CONTAINER_ACCESS_DENIED}`)
   })
 })

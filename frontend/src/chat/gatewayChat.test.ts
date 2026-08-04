@@ -7,7 +7,7 @@ import { describe, expect, it, vi, beforeEach } from 'vitest'
 
 // 假协议机：捕获 options（含 onEvent/onClose/resolveClose/buildConnectPlan），request/start/stop 可控。
 // vi.hoisted：vi.mock 工厂被 hoist 到文件顶部执行，须经 vi.hoisted 共享类定义。
-const { MockGatewayProtocolClient } = vi.hoisted(() => {
+const { MockGatewayProtocolClient, MockGatewayProtocolRequestError, MockShouldPauseReconnect } = vi.hoisted(() => {
   // 官方包不导出 GatewayProtocolClientOptions 顶层类型；mock 只消费下面几个回调/字段
   type MockOpts = {
     onEvent?: (e: unknown) => void
@@ -15,9 +15,34 @@ const { MockGatewayProtocolClient } = vi.hoisted(() => {
     onClose?: (c: { code: number; reason: string }, d: unknown) => void
     resolveClose?: (c: Record<string, unknown>) => { retry: boolean }
     onConnectError?: (e: Error) => void
+    onRequestTiming?: (t: { errorCode?: string }) => void
     buildConnectPlan?: (p: unknown) => unknown | Promise<unknown>
     buildConnectParams?: (p: unknown) => unknown
     createSocket?: (h: unknown) => unknown
+    handshake?: unknown
+    requestTimeoutMs?: number
+  }
+  // 简化实现：details.code 在真实网关错误详情里是 ConnectErrorDetailCodes 之一
+  const MockShouldPauseReconnect = (params: { details?: unknown; tokenMismatchIsTerminal?: boolean; deviceTokenRetryPending?: boolean; protocolMismatchIsTerminal?: boolean; clientVersionMismatchIsTerminal?: boolean }): boolean => {
+    const code = (params.details as { code?: string } | undefined)?.code
+    return [
+      'PAIRING_REQUIRED',
+      'AUTH_TOKEN_MISMATCH',
+      'AUTH_BOOTSTRAP_TOKEN_INVALID',
+      'AUTH_DEVICE_TOKEN_MISMATCH',
+      'AUTH_SCOPE_MISMATCH',
+    ].includes(code ?? '')
+  }
+  class MockGatewayProtocolRequestError extends Error {
+    code: string
+    gatewayCode: string
+    details?: unknown
+    constructor(error: { code?: string; message?: string; gatewayCode?: string; details?: unknown }) {
+      super(error.message ?? '')
+      this.code = error.code ?? ''
+      this.gatewayCode = error.gatewayCode ?? ''
+      this.details = error.details
+    }
   }
   class MockGatewayProtocolClient {
     static last: MockGatewayProtocolClient | null = null
@@ -25,6 +50,7 @@ const { MockGatewayProtocolClient } = vi.hoisted(() => {
     request: ReturnType<typeof vi.fn> = vi.fn()
     start = vi.fn()
     stop = vi.fn()
+    closeSocket = vi.fn()
     connected = false
     connecting = false
     constructor(opts: MockOpts) {
@@ -37,6 +63,9 @@ const { MockGatewayProtocolClient } = vi.hoisted(() => {
     fireHello(): void {
       this.opts.onHello?.()
     }
+    fireRequestTiming(timing: { errorCode?: string }): void {
+      this.opts.onRequestTiming?.(timing)
+    }
     close(context: { code: number; reason: string }): void {
       const decision = this.opts.resolveClose?.(context)
       this.opts.onClose?.(context, decision)
@@ -45,11 +74,13 @@ const { MockGatewayProtocolClient } = vi.hoisted(() => {
       this.opts.onConnectError?.(new Error(message))
     }
   }
-  return { MockGatewayProtocolClient }
+  return { MockGatewayProtocolClient, MockGatewayProtocolRequestError, MockShouldPauseReconnect }
 })
 
 vi.mock('@openclaw/gateway-client/browser', () => ({
   GatewayProtocolClient: MockGatewayProtocolClient,
+  GatewayProtocolRequestError: MockGatewayProtocolRequestError,
+  shouldPauseGatewayReconnect: MockShouldPauseReconnect,
 }))
 
 vi.mock('./tunnelSocket', () => ({
@@ -149,6 +180,104 @@ describe('createGatewayChat（#369 隧道 Facade）', () => {
       decisions.push(client.opts.resolveClose!({ code, reason: '', generation: 0, socketOpened: true, helloReceived: false, connectRequestSent: false }).retry)
     }
     expect(decisions).toEqual([false, false, false, true, true])
+  })
+
+  it('F1: connect 阶段被拒（PAIRING_REQUIRED / AUTH 错误）→ retry:false（防 #369 空转重连）', () => {
+    const { client } = makeGateway()
+    const connError = new MockGatewayProtocolRequestError({
+      code: 'connect',
+      message: 'gateway connect failed',
+      gatewayCode: 'ERR_PAIRING_REQUIRED',
+      details: { code: 'PAIRING_REQUIRED' },
+    })
+    const decision = client.opts.resolveClose!({
+      code: 1000, // tunnelSocket 把 connect 失败码 1008 映射为 1000
+      reason: 'closed(1008)',
+      generation: 0,
+      socketOpened: true,
+      helloReceived: false,
+      connectRequestSent: true,
+      connectFailure: { error: connError },
+    })
+    expect(decision.retry).toBe(false)
+    expect(decision.notify).toBe(true)
+  })
+
+  it('F1: connect 被拒但错误非非恢复类（如网关启动中）→ 仍 retry（交退避自愈）', () => {
+    const { client } = makeGateway()
+    const connError = new MockGatewayProtocolRequestError({
+      code: 'connect',
+      message: 'gateway starting',
+      gatewayCode: '',
+      details: { code: 'SOMETHING_ELSE' },
+    })
+    const decision = client.opts.resolveClose!({
+      code: 1013,
+      reason: 'gateway starting',
+      generation: 0,
+      socketOpened: true,
+      helloReceived: false,
+      connectRequestSent: true,
+      connectFailure: { error: connError },
+    })
+    expect(decision.retry).toBe(true)
+    expect(decision.reconnectDelayMs).toBeUndefined()
+  })
+
+  it('F2: resolveClose 省略 reconnectDelayMs（交协议机指数退避，防退避/尝试上限成死代码）', () => {
+    const { client } = makeGateway()
+    const ctx = {
+      code: 4402,
+      reason: '',
+      generation: 0,
+      socketOpened: true,
+      helloReceived: false,
+      connectRequestSent: false,
+    }
+    const d1 = client.opts.resolveClose!(ctx)
+    expect(d1.retry).toBe(true)
+    expect(d1.reconnectDelayMs).toBeUndefined()
+    const d2 = client.opts.resolveClose!({ ...ctx, code: 1006 })
+    expect(d2.retry).toBe(true)
+    expect(d2.reconnectDelayMs).toBeUndefined()
+  })
+
+  it('F2: 连续失败达阈值 → 停止自动重连转手动（give-up 防无限空转）；hello 重置计数', () => {
+    const { client } = makeGateway()
+    const ctx = {
+      code: 4402,
+      reason: '',
+      generation: 0,
+      socketOpened: true,
+      helloReceived: false,
+      connectRequestSent: false,
+    }
+    const retries: boolean[] = []
+    for (let i = 0; i < 5; i++) retries.push(client.opts.resolveClose!(ctx).retry)
+    expect(retries).toEqual([true, true, true, true, false])
+    client.fireHello() // 重连成功 → 重置计数，可再次退避重试
+    expect(client.opts.resolveClose!(ctx).retry).toBe(true)
+  })
+
+  it('F4: 构造带 requestTimeoutMs（RPC 有界等待，防半开连接 promise 永挂）', () => {
+    const { client } = makeGateway()
+    expect(client.opts.requestTimeoutMs).toBe(30_000)
+  })
+
+  it('F4: RPC 超时（CLIENT_TIMEOUT）→ 主动关隧道触发协议机重连（黑洞网络自愈）', () => {
+    const { client } = makeGateway()
+    client.fireRequestTiming({ errorCode: 'CLIENT_TIMEOUT' })
+    expect(client.closeSocket).toHaveBeenCalledWith(1000, 'request timeout')
+    // 非超时（网关错误码）不关隧道
+    client.closeSocket.mockClear()
+    client.fireRequestTiming({ errorCode: 'SESSION_NOT_FOUND' })
+    expect(client.closeSocket).not.toHaveBeenCalled()
+  })
+
+  it('F10: 握手超时 ≥ 隧道侧网关连接超时（server CONNECT_TIMEOUT_MS=5000）+ 余量', () => {
+    const { client } = makeGateway()
+    expect(client.opts.handshake).toMatchObject({ mode: 'require-challenge' })
+    expect((client.opts.handshake as { timeoutMs: number }).timeoutMs).toBeGreaterThanOrEqual(5000)
   })
 
   it('onConnectError → handlers.onError（传输级错误上报）', () => {

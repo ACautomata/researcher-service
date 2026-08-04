@@ -38,6 +38,34 @@ describe('ChatEventTranslator', () => {
     ])
   })
 
+  it('F9: 非前缀 final（空白规范化）→ 整段 replace 帧 + done（不静默丢权威文本）', () => {
+    const t = new ChatEventTranslator()
+    // 流式双空格 → final 规范化单空格（message 非 sent 前缀）
+    t.translate(chat('delta', 'r1', { deltaText: 'Hello  world' }))
+    expect(t.translate(chat('final', 'r1', { message: 'Hello world' }))).toEqual([
+      { type: 'text', runId: 'r1', delta: 'Hello world', replace: true },
+      { type: 'done', runId: 'r1' },
+    ])
+  })
+
+  it('F9: 重复 delta 使 sent 翻倍 → final 前缀不匹配 → replace 纠正', () => {
+    const t = new ChatEventTranslator()
+    t.translate(chat('delta', 'r1', { deltaText: 'abc' }))
+    t.translate(chat('delta', 'r1', { deltaText: 'abc' })) // 同内容重复 → sent='abcabc'
+    expect(t.translate(chat('final', 'r1', { message: 'abc' }))).toEqual([
+      { type: 'text', runId: 'r1', delta: 'abc', replace: true },
+      { type: 'done', runId: 'r1' },
+    ])
+  })
+
+  it('F9: final 与 sent 完全相等 → 仅 done（无漂移不 replace）', () => {
+    const t = new ChatEventTranslator()
+    t.translate(chat('delta', 'r1', { deltaText: 'ok' }))
+    expect(t.translate(chat('final', 'r1', { message: 'ok' }))).toEqual([
+      { type: 'done', runId: 'r1' },
+    ])
+  })
+
   it('final.message 为 dict{content:[{type:text,text}]} 时从 content[].text 提取（实测校准）', () => {
     const t = new ChatEventTranslator()
     t.translate(chat('delta', 'r1', { deltaText: '你好' }))

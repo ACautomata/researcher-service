@@ -18,6 +18,7 @@ import {
   type ChatFrame,
 } from '@/chat/gatewayChat'
 import { splitThinking } from '@/chat/thinking'
+import { WS_AUTH_FAIL, WS_MUST_CHANGE_PASSWORD, WS_CONTAINER_ACCESS_DENIED } from '@/chat/closeCodes'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
 interface Msg {
@@ -68,6 +69,9 @@ let disposed = false
 // runId 路由：仅当前 run 的增量写入回复；切会话/容器时把旧 run 标记 abandoned，丢弃其迟到帧（codex P2）
 let activeRunId = '' // 已收到首帧的当前 run
 const abandonedRunIds = new Set<string>() // 切换前遗留的 runId：迟到帧丢弃（codex P2 #3）
+// F7: 空闲期（无在途用户 send）观察到的外来自主 run 的 runId——其后（用户 send 后）的续帧/终态
+// 按 runId 丢弃，防止外来 run 在用户 send 后劫持 activeRunId、污染用户气泡/吞用户回复。终态清理。
+const foreignRunIds = new Set<string>()
 let pendingSend = false // 已 send 但首帧未到（runId 未知）
 let pendingAbandonCount = 0 // 切会话时仍 pending 的 run 数；其迟到首帧按 FIFO 视为孤儿丢弃（codex P2 #3）
 // selectContainer 的请求代：丢弃切容器途中迟到的响应（codex P2）
@@ -81,6 +85,17 @@ let historyGen = 0
 // resolve 供 selectContainer 续流程）与「重连成功恢复」（onReady 拉权威历史重建投影）。
 let everConnected = false
 let pendingConnect: ((ok: boolean) => void) | null = null
+// F8: 在途 run（pendingSend 首帧未到）收到 error 时延迟收尾占位的窗口——给用户 run 首帧留时间
+// （外来 run 的 error 不误伤），窗口过仍无首帧才收尾（真失败不卡死）。handleText/handleTool 认领
+// 首帧时清除。
+const PENDING_RUN_ERROR_FINALIZE_MS = 5000
+let pendingErrorTimer: ReturnType<typeof setTimeout> | null = null
+function clearPendingErrorTimer() {
+  if (pendingErrorTimer !== null) {
+    clearTimeout(pendingErrorTimer)
+    pendingErrorTimer = null
+  }
+}
 
 // T3 会话历史回看（issue #82 / spec #76）：分页态——hasMore 标记可向回翻更旧消息，
 // historyAnchor=nextOffset 为下一更旧页的 messageId 锚点；historyLoading 控「加载更多」禁用。
@@ -142,12 +157,17 @@ const slashOpen = computed(
 )
 
 // 拉取当前容器命令清单（协议机就绪后 onReady 首连触发）；失败静默降级为空清单。
+// F12: 绑定容器名+代际——旧 gateway stop() flush reject 会走 catch 置空 commands，若发生在
+// （另一容器的）新命令已填充后即误清空；快速切容器时旧 gateway 在途响应也会覆盖新命令。
 async function loadCommands() {
+  const name = selectedContainer.value
+  const gen = containerGen
   if (!gateway) return
   try {
-    commands.value = await gateway.listCommands()
+    const list = await gateway.listCommands()
+    if (name === selectedContainer.value && gen === containerGen) commands.value = list
   } catch {
-    commands.value = []
+    if (name === selectedContainer.value && gen === containerGen) commands.value = []
   }
 }
 
@@ -273,13 +293,28 @@ async function selectContainer(name: string) {
   abandonActiveRun()
   errorMsg.value = ''
   try {
-    // 先建协议连接（bootstrap-token 前置 + 握手就绪）再列会话——B-直连下会话 CRUD 全走协议机 RPC
+    // F5: 只等首连决议（openGateway 内部由 onReady/onClose/onError resolve）；会话列表/历史加载
+    // 统一由 syncSessions 在 onReady 完成（首连成功与重连成功同路径）——首连失败后协议机自连/
+    // 「重新连接」也都能补拉会话，否则「看似已连接」的空 chat 无会话、send 静默 no-op。
     const ok = await openGateway()
     if (gen !== containerGen) return
     if (!ok) return // openGateway 已显示错误（容器不可访问/连接失败）
-    const list = await gateway!.listSessions()
-    if (gen !== containerGen) return // 切容器途中迟到的响应：丢弃（codex P2）
-    sessions.value = list
+  } catch (e) {
+    if (gen !== containerGen) return
+    connecting.value = false // 出错解除 connecting（composer 解禁后用户可重试）
+    if (e instanceof ApiError && e.status === 401) return
+    errorMsg.value = (e as Error).message
+  }
+}
+
+// F5: 会话列表 + 首个会话历史加载（B-直连下会话 CRUD 全走协议机 RPC）。首连成功、自动重连成功、
+// 手动重连成功都在 onReady 触发（统一路径）；带 name+gen 守卫丢弃切容器途中迟到的响应。
+async function syncSessions(name: string, gen: number) {
+  if (gen !== containerGen || selectedContainer.value !== name || !gateway) return
+  try {
+    const list = await gateway.listSessions()
+    if (gen !== containerGen || selectedContainer.value !== name) return // 切容器途中迟到：丢弃
+    sessions.value = Array.isArray(list) ? list : [] // 对网关输入 0 信任：非数组回退空列表
     selectedSession.value = sessions.value[0]?.session_key ?? ''
     if (!selectedSession.value) await newSession()
     if (gen !== containerGen) return // newSession 期间又切容器：不连
@@ -303,6 +338,14 @@ async function openGateway(): Promise<boolean> {
   // 判定为旧连接），不报误断线（与 selectContainer 同款「先置空再停」模式）
   const oldGw = gateway
   gateway = null
+  // F6: 替换前决议旧等待方——旧 openGateway 的 pendingConnect（await ready 挂起者）立即 resolve：
+  // 旧 gateway.stop() 不触发 onClose（协议机未配 notifyStoppedClose）+ ChatView stale guard 也拦截
+  // 旧连接回调，无任何 resolve 路径；不在这里决议会让并发 openGateway 的早调用者 await ready 永挂
+  // （泄漏 async frame + 切容器续体死锁）。
+  if (pendingConnect) {
+    pendingConnect(false)
+    pendingConnect = null
+  }
   oldGw?.stop()
   connecting.value = true
   disconnected.value = false
@@ -341,11 +384,15 @@ async function openGateway(): Promise<boolean> {
         disconnected.value = false
         errorMsg.value = ''
         if (everConnected) {
+          // 自动重连成功：以权威历史恢复投影（断线期间在途 run 已 abandoned 丢弃迟到帧）
           if (selectedSession.value) void loadHistory(selectedSession.value)
         } else {
           everConnected = true
           pendingConnect?.(true)
           pendingConnect = null
+          // F5: 会话列表/历史加载与首连解耦——首连成功与首连失败后的重连成功都在这里补拉会话，
+          // 否则失败后 selectContainer 已 return、重连 onReady 也不 listSessions → 空 chat 假连接。
+          void syncSessions(name, gen)
           void loadCommands()
         }
       },
@@ -389,12 +436,12 @@ async function openGateway(): Promise<boolean> {
         }
         // issue #240：4401（access token 过期）走刷新重连链路（forceRefresh → 新 token 重建），
         // refresh 确认失效才跳登录——协议机对 4401 决策 retry:false，防拿过期 token 死循环。
-        if (code === 4401) {
+        if (code === WS_AUTH_FAIL) {
           if (!disposed) void recoverUnauthorized()
           return
         }
         // 4404（容器归属门拒绝）/ 4403（强制改密）：协议机 retry:false 不重连，提示切容器
-        if (code === 4404 || code === 4403) {
+        if (code === WS_CONTAINER_ACCESS_DENIED || code === WS_MUST_CHANGE_PASSWORD) {
           if (!disposed) errorMsg.value = '容器不可访问，请切换容器'
           return
         }
@@ -447,6 +494,15 @@ function handleText(runId: string, delta: string, replace?: boolean) {
       abandonedRunIds.add(runId)
       return
     }
+    // F7: 空闲（无在途用户 send）时的首帧——外来自主 run 不认领：记录其 runId 供后续帧过滤
+    //（用户 send 后其续帧按 runId 丢弃，防劫持 activeRunId / 污染用户气泡 / 吞用户回复）。
+    if (!pendingSend) {
+      foreignRunIds.add(runId)
+      return
+    }
+    // F7: 空闲期已观察到的外来 run 的续帧（用户 send 后到达）——丢弃，不抢占 activeRunId
+    if (foreignRunIds.has(runId)) return
+    clearPendingErrorTimer() // F8: 在途 error 的延迟收尾取消——首帧已到，本 run 正常
     activeRunId = runId
     pendingSend = false
   }
@@ -465,6 +521,10 @@ function handleText(runId: string, delta: string, replace?: boolean) {
 function handleDone(runId: string) {
   if (abandonedRunIds.has(runId)) {
     abandonedRunIds.delete(runId)
+    return
+  }
+  if (foreignRunIds.has(runId)) {
+    foreignRunIds.delete(runId) // F7: 外来 run 终态：清理记录
     return
   }
   if (activeRunId && runId !== activeRunId) return
@@ -494,19 +554,47 @@ function handleError(message: string, runId?: string) {
       abandonedRunIds.delete(runId)
       return
     }
+    if (foreignRunIds.has(runId)) {
+      foreignRunIds.delete(runId) // F7: 外来 run error 终态：清理记录，不终结占位
+      return
+    }
     if (activeRunId && runId !== activeRunId) return
+    if (!activeRunId) {
+      // 切会话孤儿 run（首帧未到）的 error：计数丢弃（同 handleDone 的孤儿 done）
+      if (pendingAbandonCount > 0) {
+        pendingAbandonCount--
+        return
+      }
+      // F8: 无在途 activeRunId——不终结占位/清 flag：
+      //  - 空闲（!pendingSend）：外来/自主 run 的 error，不动当前占位（防误伤）
+      //  - 在途（pendingSend）：可能是本 run 失败也可能是外来 run；只显示错误，5s 无首帧才收尾
+      //    （防外来 error 清 flag 后用户 run 首帧被静默丢弃——原 bug：气泡空终结、回复丢失）
+      if (!pendingSend) return
+      errorMsg.value = message
+      connecting.value = false
+      if (pendingErrorTimer === null) {
+        pendingErrorTimer = setTimeout(() => {
+          pendingErrorTimer = null
+          if (pendingSend && !activeRunId) {
+            pendingSend = false
+            finalizeLast()
+          }
+        }, PENDING_RUN_ERROR_FINALIZE_MS)
+      }
+      return
+    }
+    // activeRunId === runId：在途 run 失败 → 收尾占位 + 清 flag
+    errorMsg.value = message
+    connecting.value = false
+    finalizeLast()
+    activeRunId = ''
+    return
   }
   errorMsg.value = message
   connecting.value = false
   finalizeLast()
-  if (runId) {
-    if (activeRunId === runId) activeRunId = ''
-    else if (pendingAbandonCount > 0) pendingAbandonCount--
-    else if (pendingSend) pendingSend = false
-  } else {
-    activeRunId = ''
-    pendingSend = false
-  }
+  activeRunId = ''
+  pendingSend = false
 }
 
 function handleApproval(card: { id: string; kind: string; command: string; sessionKey: string | null }) {
@@ -544,6 +632,13 @@ function handleTool(tool: { runId: string; name: string; state: 'running' | 'don
       abandonedRunIds.add(tool.runId)
       return
     }
+    // F7: 同 handleText——空闲期外来自主 run 不认领、记录 runId 供后续帧过滤
+    if (!pendingSend) {
+      foreignRunIds.add(tool.runId)
+      return
+    }
+    if (foreignRunIds.has(tool.runId)) return // F7: 已观察到的外来 run 续帧：丢弃
+    clearPendingErrorTimer() // F8: 首帧已到，取消在途 error 的延迟收尾
     activeRunId = tool.runId
     pendingSend = false
   }
@@ -624,6 +719,9 @@ function send() {
   // chat.send RPC（幂等 key 在 gatewayChat 内生成）；网关拒绝（未配对/scope 不足）→ catch 收尾提示
   void gateway.send(selectedSession.value, text).catch((e) => {
     if (disposed) return
+    // F3: RPC 失败复位 pendingSend——泄漏会让切会话变 phantom orphan（pendingAbandonCount++），
+    // 下次发送首帧被当作孤儿丢弃、composer 永久锁死。
+    pendingSend = false
     finalizeLast()
     errorMsg.value = (e as Error).message
   })
@@ -784,6 +882,7 @@ async function loadMoreHistory() {
 onMounted(loadInstances)
 onBeforeUnmount(() => {
   disposed = true
+  clearPendingErrorTimer() // F8: 卸载清延迟收尾 timer，防组件销毁后触发
   gateway?.stop()
 })
 

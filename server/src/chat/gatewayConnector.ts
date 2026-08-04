@@ -7,7 +7,12 @@
 // 协议 v4 帧为 JSON 文本）。协议 v4 握手/重连/会话投影全由浏览器侧官方包负责，后端零解析。
 
 import WebSocket from 'ws'
-import { TUNNEL_MAX_PAYLOAD, TUNNEL_SEND_BUDGET, WS_POLICY_VIOLATION } from './values'
+import {
+  TUNNEL_MAX_PAYLOAD,
+  TUNNEL_SEND_BUDGET,
+  TUNNEL_PENDING_BYTE_BUDGET,
+  WS_POLICY_VIOLATION,
+} from './values'
 
 // 一个到容器网关的传输 socket（方向：后端⇄网关）。onMessage 即网关发来的原始协议帧。
 // send/onMessage 载荷为 string | Buffer（#9）：文本帧 string（协议 v4 JSON 文本），二进制帧原样
@@ -45,13 +50,29 @@ export function makeWsGatewayConnector(timeoutMs = CONNECT_TIMEOUT_MS, sendBudge
         // 用 on + open 内 removeListener 注册（F9）：once 的包装 listener 无法精确移除，且 once
         // 留着会在 open 后任何 error（容器重启 ECONNRESET）上再次触发 reject/clearTimeout——今天
         // 幂等无害，一旦 onConnectError 获得副作用（日志/计数）就双触发。open/失败都显式移除。
+        const removeConnectListeners = (): void => {
+          ws.removeListener('error', onConnectError)
+          ws.removeListener('close', onConnectClose)
+        }
         const onConnectError = (err: Error): void => {
           clearTimeout(timer)
-          ws.removeListener('error', onConnectError)
+          removeConnectListeners()
           reject(err)
         }
+        // F13: 打开握手中的 close-before-open（网关 reset TCP 时不触发 'error'）——也须清除超时
+        // 定时器并 reject，否则快速拒绝被误报为「gateway connect timeout」（4402 延迟 5s）。
+        const onConnectClose = (): void => {
+          clearTimeout(timer)
+          removeConnectListeners()
+          reject(new Error(`gateway connect closed before open: ${url}`))
+        }
         ws.on('error', onConnectError)
+        ws.on('close', onConnectClose)
         let msgCb: ((data: string | Buffer) => void) | null = null
+        // F13: connect 阶段缓冲也须有字节上限——健谈的网关可在 open→resolve→注册窗口内推送无界帧
+        // 打满面板进程堆（browser→gateway 方向有 TUNNEL_PENDING_BYTE_BUDGET，此方向此前无）。超限
+        // terminate + reject（隧道层按网关不可达 4402 决策）。
+        let bufferedBytes = 0
         const buffered: Array<string | Buffer> = []
         ws.on('message', (data, isBinary) => {
           // #9：文本帧 toString（无损）；二进制帧原样 Buffer——Node ws 默认 binaryType=nodebuffer，
@@ -59,12 +80,22 @@ export function makeWsGatewayConnector(timeoutMs = CONNECT_TIMEOUT_MS, sendBudge
           // 重发，违背「字节管道」契约。
           const frame = isBinary ? (data as Buffer) : (data as Buffer).toString()
           if (msgCb) msgCb(frame)
-          else buffered.push(frame)
+          else {
+            bufferedBytes += (data as Buffer).length
+            if (bufferedBytes > TUNNEL_PENDING_BYTE_BUDGET) {
+              clearTimeout(timer)
+              removeConnectListeners()
+              ws.terminate()
+              reject(new Error(`gateway connect buffer overflow (${bufferedBytes} bytes)`))
+              return
+            }
+            buffered.push(frame)
+          }
         })
         ws.once('open', () => {
           clearTimeout(timer)
           // 连接已建立：移除 connect 阶段处理器，post-open error 只走下方 onError（记录+重放）
-          ws.removeListener('error', onConnectError)
+          removeConnectListeners()
           // 终态事件记录（P2-4，codex PR #367）：网关可能在 onClose/onError 注册前就断开（容器
           // 重启中）——EventEmitter.on 不重放已发生事件，须像下方消息缓冲一样记录终态，注册时
           // 重放。否则浏览器隧道保持 OPEN 但上游已死，官方协议机收不到 close/error 无法重连（假活）。

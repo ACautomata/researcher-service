@@ -5,9 +5,14 @@
 //
 // B-直连（ADR 0006）：协议机握手/重连/帧状态机全在官方包，本模块只做编排与翻译。
 
-import { GatewayProtocolClient } from '@openclaw/gateway-client/browser'
+import {
+  GatewayProtocolClient,
+  GatewayProtocolRequestError,
+  shouldPauseGatewayReconnect,
+} from '@openclaw/gateway-client/browser'
 import { createPanelTunnelSocket } from './tunnelSocket'
 import { ChatEventTranslator, type ChatFrame, type GatewayEventFrame } from './eventTranslate'
+import { NO_RETRY_CLOSE_CODES } from './closeCodes'
 
 export type { ChatFrame, GatewayEventFrame } from './eventTranslate'
 
@@ -75,11 +80,21 @@ export interface CreateGatewayChatParams {
   handlers: GatewayChatHandlers
 }
 
-// 面板隧道 close code（对齐 server/src/chat/values.ts）：4401 认证失败 / 4404 容器归属 / 4402 网关不可达
-// / 4403 强制改密。协议机对这些 code 的决策：认证/归属/改密 = 非传输问题，不自动重连（retry:false，
-// 前端决定 forceRefresh 或提示）；其余（网络断开 1006/1005、网关 4402）→ 协议机内置指数退避重连。
-const NO_RETRY_CLOSE_CODES = new Set([4401, 4404, 4403])
-const GATEWAY_UNAVAILABLE_CLOSE = 4402
+// 面板隧道 close code（单一来源 = closeCodes.ts，F15）：4401 认证失败 / 4404 容器归属 / 4402
+// 网关不可达 / 4403 强制改密。协议机对这些 code 的决策：认证/归属/改密 = 非传输问题，不自动重连
+// （retry:false，前端决定 forceRefresh 或提示）；其余（网络断开 1006/1005、网关 4402）→ 协议机
+// 内置指数退避重连。
+
+// F4: RPC 请求超时——requestTimeoutMs 缺省时 protocol request() 的 promise 无界等待（半开连接下
+// catch 永不跑、UI 卡死）。30s 覆盖正常网关响应（对话 send 后 agent 思考不影响 send RPC 本身）。
+const REQUEST_TIMEOUT_MS = 30_000
+// F10: 握手超时 ≥ 隧道侧网关连接超时（server gatewayConnector CONNECT_TIMEOUT_MS=5000）+ 认证 DB
+// 查询余量——browser 在 socket open 后 armed 的 require-challenge 定时器若 < 隧道侧 connect 超时，
+// 3–5s 慢网关每次首连先被误判失败（close 1008→重连），而 4402 永远收不到。
+const HANDSHAKE_TIMEOUT_MS = 10_000
+// F2: 连续重连失败阈值——超过即停止自动重连转手动（防无限空转；协议机 RetrySupervisor 的
+// maxAttempts 恒 Infinity 无 give-up，只能前端计数）。
+const MAX_RECONNECT_FAILURES = 5
 
 // 连接参数中的 operator scope（协议文档）：sessions/chat 需 read/write；exec.approval.resolve 需
 // operator.approvals（审批回覆）。tool-events 声明该连接接收 run 的结构化工具事件。
@@ -89,8 +104,11 @@ const CONNECT_CAPS = ['tool-events']
 export function createGatewayChat(params: CreateGatewayChatParams): GatewayChat {
   const { container, jwt, bootstrapToken, handlers } = params
   const translator = new ChatEventTranslator()
+  // F2: 连续重连失败计数（闭包）——重连成功（hello）时重置；达阈值 stop 自动重连转手动。
+  let consecutiveFailures = 0
 
-  const client = new GatewayProtocolClient<ConnectPlan>({
+  let client: GatewayProtocolClient<ConnectPlan>
+  client = new GatewayProtocolClient<ConnectPlan>({
     createSocket: (socketHandlers) => createPanelTunnelSocket(container, jwt, socketHandlers),
     createRequestId: () => crypto.randomUUID(),
     buildConnectPlan: async () => ({
@@ -109,26 +127,57 @@ export function createGatewayChat(params: CreateGatewayChatParams): GatewayChat 
       caps: plan.caps,
       auth: { token: plan.token },
     }),
-    handshake: { mode: 'require-challenge', timeoutMs: 3000 },
+    // F10: 握手超时对齐隧道侧网关连接超时（server CONNECT_TIMEOUT_MS=5000）+ 余量。
+    handshake: { mode: 'require-challenge', timeoutMs: HANDSHAKE_TIMEOUT_MS },
     reconnect: { initialMs: 1000, multiplier: 2, maxMs: 30000 },
+    // F4: RPC 请求有界等待——缺省时 request() promise 无界（半开连接 UI 卡死，F4 根因之一）。
+    requestTimeoutMs: REQUEST_TIMEOUT_MS,
     // close 决策：认证/归属/改密 = 非传输问题，不自动重连（前端 forceRefresh 或提示）；其余重连。
     // notify:true 让 onClose 上报 UI（断线提示）。
     resolveClose: (context) => {
+      // F1: 网关 connect 阶段被拒（auth/pairing 拒绝，如 PAIRING_REQUIRED / AUTH_TOKEN_MISMATCH）→
+      // 非传输问题，不自动重连（防 #369「退避重连空转」）。context.connectFailure 携带网关错误详情
+      // （协议机在 sendConnectPlan 的 request reject 时设置）；用官方 shouldPauseGatewayReconnect
+      // 判定（与顶层 GatewayClient 同源）——浏览器侧裸协议机此前不设此防护。
+      const connErr = context.connectFailure?.error
+      if (connErr instanceof GatewayProtocolRequestError && connErr.details !== undefined) {
+        if (
+          shouldPauseGatewayReconnect({
+            details: connErr.details,
+            deviceTokenRetryPending: false,
+            tokenMismatchIsTerminal: true,
+            clientVersionMismatchIsTerminal: true,
+          })
+        ) {
+          return { retry: false, notify: true }
+        }
+      }
       if (NO_RETRY_CLOSE_CODES.has(context.code)) return { retry: false, notify: true }
-      // 网关不可达（容器不在 running/端口不通）→ 退避重连；其他传输断开（1006 等）同协议机默认。
-      return context.code === GATEWAY_UNAVAILABLE_CLOSE
-        ? { retry: true, notify: true, reconnectDelayMs: 2000 }
-        : { retry: true, notify: true, reconnectDelayMs: 1000 }
+      // F2: 省略 reconnectDelayMs 交协议机 RetrySupervisor 指数退避（1000→2000→4000→…→30s 上限）。
+      // 显式 reconnectDelayMs 是一次性 override（attempts 不递增），恒固定间隔重试且退避成死代码。
+      // 连续失败达阈值 → 停止自动重连（协议机 maxAttempts 恒 Infinity，只能前端计数 give-up），
+      // 转 ChatView 手动重连（disconnected 条）。
+      consecutiveFailures++
+      if (consecutiveFailures >= MAX_RECONNECT_FAILURES) return { retry: false, notify: true }
+      return { retry: true, notify: true }
     },
     onClose: (context, decision) => {
       if (decision.notify) handlers.onClose(context.code, context.reason)
     },
     onConnectError: (error) => handlers.onError(error.message),
     onSocketFactoryError: (error) => handlers.onError(error.message),
+    // F4: RPC 超时 = 连接疑似半开/死链（Wi-Fi 掉线无 RST 时浏览器 WS 不触发 onclose）→ 主动关隧道
+    // 触发协议机重连自愈。黑洞网络下用户发送的 RPC 超时后能恢复，而非永久卡死。
+    onRequestTiming: (timing) => {
+      if (timing.errorCode === 'CLIENT_TIMEOUT' && client) client.closeSocket(1000, 'request timeout')
+    },
     onEvent: (event: GatewayEventFrame) => {
       for (const frame of translator.translate(event)) handlers.onFrame(frame)
     },
-    onHello: () => handlers.onReady(),
+    onHello: () => {
+      consecutiveFailures = 0 // F2: 重连成功（hello-ok）→ 重置连续失败计数
+      handlers.onReady()
+    },
   })
 
   return {
