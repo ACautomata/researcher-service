@@ -45,12 +45,15 @@ function asRecord(value: unknown): Record<string, unknown> {
 
 // 从 final/delta 的 message 提取文本（实测校准 spike ghcr 2026.6.34-browser, 2026-07-27）：
 // message 实测是 dict {role, content:[{type:text,text}], timestamp}；str 直返；dict 拼 content 中
-// type=text 的 text；None/空 → ''。
+// type=text 的 text；content 为 string（user 消息）直返；None/空 → ''。
+// E1: 与 ChatView.loadHistory 历史消息复用——history 消息 content 多态（user=string /
+// assistant=数组），此函数是内容提取的单一实现，历史路径不再另写只认 string 的逻辑。
 export function extractMessageText(message: unknown): string {
   if (!message) return ''
   if (typeof message === 'string') return message
   const obj = asRecord(message)
   const content = obj.content
+  if (typeof content === 'string') return content
   if (Array.isArray(content)) {
     return content
       .map((b) => (asRecord(b).type === 'text' && typeof asRecord(b).text === 'string' ? (asRecord(b).text as string) : ''))

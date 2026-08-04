@@ -16,6 +16,7 @@ const { MockGatewayProtocolClient, MockGatewayProtocolRequestError, MockShouldPa
     resolveClose?: (c: Record<string, unknown>) => { retry: boolean; notify?: boolean; reconnectDelayMs?: number }
     onConnectError?: (e: Error) => void
     onRequestTiming?: (t: { errorCode?: string }) => void
+    onActivity?: () => void
     buildConnectPlan?: (p: unknown) => unknown | Promise<unknown>
     buildConnectParams?: (p: unknown) => unknown
     createSocket?: (h: unknown) => unknown
@@ -65,6 +66,9 @@ const { MockGatewayProtocolClient, MockGatewayProtocolRequestError, MockShouldPa
     }
     fireRequestTiming(timing: { errorCode?: string }): void {
       this.opts.onRequestTiming?.(timing)
+    }
+    fireActivity(): void {
+      this.opts.onActivity?.()
     }
     close(context: { code: number; reason: string }): void {
       const decision = this.opts.resolveClose?.(context)
@@ -165,21 +169,28 @@ describe('createGatewayChat（#369 隧道 Facade）', () => {
   it('close 决策：4401/4404/4403 → retry:false + notify；4402 → retry:true；其他 → retry:true', () => {
     const { client, handlers } = makeGateway()
     client.close({ code: 4401, reason: 'Unauthorized' })
-    expect(handlers.onClose).toHaveBeenLastCalledWith(4401, 'Unauthorized')
+    expect(handlers.onClose).toHaveBeenLastCalledWith(4401, 'Unauthorized', false)
     client.close({ code: 4404, reason: 'container denied' })
-    expect(handlers.onClose).toHaveBeenLastCalledWith(4404, 'container denied')
+    expect(handlers.onClose).toHaveBeenLastCalledWith(4404, 'container denied', false)
     client.close({ code: 4403, reason: 'must change password' })
-    expect(handlers.onClose).toHaveBeenLastCalledWith(4403, 'must change password')
+    expect(handlers.onClose).toHaveBeenLastCalledWith(4403, 'must change password', false)
     client.close({ code: 4402, reason: 'gateway down' })
-    expect(handlers.onClose).toHaveBeenLastCalledWith(4402, 'gateway down')
+    expect(handlers.onClose).toHaveBeenLastCalledWith(4402, 'gateway down', true)
     client.close({ code: 1006, reason: 'abnormal' })
-    expect(handlers.onClose).toHaveBeenLastCalledWith(1006, 'abnormal')
+    expect(handlers.onClose).toHaveBeenLastCalledWith(1006, 'abnormal', true)
     // 各 code 的 retry 决策
     const decisions: boolean[] = []
     for (const code of [4401, 4404, 4403, 4402, 1006]) {
       decisions.push(client.opts.resolveClose!({ code, reason: '', generation: 0, socketOpened: true, helloReceived: false, connectRequestSent: false }).retry)
     }
     expect(decisions).toEqual([false, false, false, true, true])
+  })
+
+  it('D2: give-up（连续失败超阈值）→ onClose 透传 retry:false（UI 如实提示手动重连）', () => {
+    const { client, handlers } = makeGateway()
+    for (let i = 0; i < 5; i++) client.close({ code: 4402, reason: 'down' })
+    // 第 5 次 close：resolveClose 达阈值返回 retry:false → onClose 第三个参数 false
+    expect(handlers.onClose).toHaveBeenLastCalledWith(4402, 'down', false)
   })
 
   it('F1: connect 阶段被拒（PAIRING_REQUIRED / AUTH 错误）→ retry:false（防 #369 空转重连）', () => {
@@ -264,14 +275,53 @@ describe('createGatewayChat（#369 隧道 Facade）', () => {
     expect(client.opts.requestTimeoutMs).toBe(30_000)
   })
 
-  it('F4: RPC 超时（CLIENT_TIMEOUT）→ 主动关隧道触发协议机重连（黑洞网络自愈）', () => {
+  it('A2: RPC 超时（CLIENT_TIMEOUT）→ 仅 reject 请求，不 teardown 整条连接（防慢请求全量重连循环）', () => {
     const { client } = makeGateway()
     client.fireRequestTiming({ errorCode: 'CLIENT_TIMEOUT' })
-    expect(client.closeSocket).toHaveBeenCalledWith(1000, 'request timeout')
-    // 非超时（网关错误码）不关隧道
+    expect(client.closeSocket).not.toHaveBeenCalled()
+    // 非超时错误码同样不关
     client.closeSocket.mockClear()
     client.fireRequestTiming({ errorCode: 'SESSION_NOT_FOUND' })
     expect(client.closeSocket).not.toHaveBeenCalled()
+  })
+
+  it('A2/看门狗: 60s 无网关帧 → closeSocket 强制重连（黑洞自愈）；onActivity 刷新则不误杀', () => {
+    vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval', 'setTimeout', 'clearTimeout'] })
+    try {
+      const { gw, client } = makeGateway()
+      gw.start()
+      // 刚 start：未超时
+      vi.advanceTimersByTime(15_000)
+      expect(client.closeSocket).not.toHaveBeenCalled()
+      // 收到网关帧 → 刷新活动时间
+      client.fireActivity()
+      vi.advanceTimersByTime(45_000) // onActivity 后 45s，仍未到 60s 阈值
+      expect(client.closeSocket).not.toHaveBeenCalled()
+      // 继续无帧 → 超 60s → 强制重连
+      vi.advanceTimersByTime(15_001)
+      expect(client.closeSocket).toHaveBeenCalledWith(1000, 'silence timeout')
+      gw.stop()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('A3: crypto.randomUUID 不可用（非安全上下文）→ 兜底生成 requestId / 幂等 key（RPC 层不崩）', async () => {
+    vi.stubGlobal('crypto', undefined)
+    try {
+      const { gw, client } = makeGateway()
+      client.request.mockResolvedValue({})
+      // send 的幂等 key 走 createRequestId 兜底（不抛 TypeError）
+      await expect(gw.send('sk-1', 'hi')).resolves.toBeUndefined()
+      expect(client.request).toHaveBeenCalledWith(
+        'chat.send',
+        expect.objectContaining({ idempotencyKey: expect.any(String) }),
+      )
+      const params = client.request.mock.calls[0][1] as { idempotencyKey: string }
+      expect(params.idempotencyKey.length).toBeGreaterThan(8)
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 
   it('F10: 握手超时 ≥ 隧道侧网关连接超时（server CONNECT_TIMEOUT_MS=5000）+ 余量', () => {

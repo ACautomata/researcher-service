@@ -3,7 +3,7 @@
 // final 尾部/tool phase/approval 卡/approvalResolved）。无 I/O 纯函数，直测模块边界。
 
 import { describe, expect, it } from 'vitest'
-import { ChatEventTranslator, type GatewayEventFrame } from './eventTranslate'
+import { ChatEventTranslator, extractMessageText, type GatewayEventFrame } from './eventTranslate'
 
 function chat(state: string, runId = 'r1', extra: Record<string, unknown> = {}): GatewayEventFrame {
   return { type: 'event', event: 'chat', payload: { runId, state, ...extra } }
@@ -203,5 +203,29 @@ describe('ChatEventTranslator', () => {
       { type: 'approvalResolved', id: 'ap-1', decision: 'expired' },
     )
     expect(t.translate({ type: 'event', event: 'plugin.approval.resolved', payload: { decision: 'approve' } })).toEqual([])
+  })
+})
+
+// E1: extractMessageText 是内容提取单一实现（流式 final/delta 与 loadHistory 历史复用）。
+// history 消息 content 多态（ADR 0003）：user=string / assistant=数组。
+describe('extractMessageText（E1: content 多态，ChatView 历史复用）', () => {
+  it('string message 直返', () => {
+    expect(extractMessageText('你好')).toBe('你好')
+  })
+  it('dict content 为 string（user 历史消息）直返', () => {
+    expect(extractMessageText({ role: 'user', content: '我的问题' })).toBe('我的问题')
+  })
+  it('dict content 为数组（assistant 历史）拼 type=text，跳过 thinking', () => {
+    expect(
+      extractMessageText({
+        role: 'assistant',
+        content: [{ type: 'thinking', text: '内心' }, { type: 'text', text: '回答' }, { type: 'text', text: '续' }],
+      }),
+    ).toBe('回答续')
+  })
+  it('None/空/无 content → 空串（不渲染空泡）', () => {
+    expect(extractMessageText(null)).toBe('')
+    expect(extractMessageText({ role: 'assistant' })).toBe('')
+    expect(extractMessageText({})).toBe('')
   })
 })

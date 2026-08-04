@@ -18,6 +18,7 @@ import {
   type ChatFrame,
 } from '@/chat/gatewayChat'
 import { splitThinking } from '@/chat/thinking'
+import { extractMessageText } from '@/chat/eventTranslate'
 import { WS_AUTH_FAIL, WS_MUST_CHANGE_PASSWORD, WS_CONTAINER_ACCESS_DENIED } from '@/chat/closeCodes'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
@@ -85,16 +86,61 @@ let historyGen = 0
 // resolve 供 selectContainer 续流程）与「重连成功恢复」（onReady 拉权威历史重建投影）。
 let everConnected = false
 let pendingConnect: ((ok: boolean) => void) | null = null
-// F8: 在途 run（pendingSend 首帧未到）收到 error 时延迟收尾占位的窗口——给用户 run 首帧留时间
-// （外来 run 的 error 不误伤），窗口过仍无首帧才收尾（真失败不卡死）。handleText/handleTool 认领
-// 首帧时清除。
-const PENDING_RUN_ERROR_FINALIZE_MS = 5000
-let pendingErrorTimer: ReturnType<typeof setTimeout> | null = null
-function clearPendingErrorTimer() {
-  if (pendingErrorTimer !== null) {
-    clearTimeout(pendingErrorTimer)
-    pendingErrorTimer = null
+// B3/B4: pendingSend 窗口收尾宽限——pendingSend && !activeRunId 期间收到无法匹配自己 run 的
+// error/done 时武装定时器：宽限内用户 run 首帧到达正常认领（复活占位），宽限过仍无首帧才落定占位
+// （防 B3 外来 done-first 终结用户空泡；防 B4 外来 error 清 flag 后用户 run 首帧被当 foreign）。
+// fire 时置 graceExpired（不保留 pendingSend）——慢 run 首帧 >宽限后仍走认领路径而非 foreign
+// （F8 定时器反噬修复），同时避免 fire 后残留 pendingSend 让切会话产生 phantom orphan 吞新 run。
+// 切换代际时清除（B4：防旧容器武装的定时器跨容器 fire 终结新容器 pending placeholder）。
+const PENDING_RUN_GRACE_MS = 8000
+let pendingGraceTimer: ReturnType<typeof setTimeout> | null = null
+let graceExpired = false // B4: 宽限已 fire 仍无首帧——后续迟到的首帧仍认领（不 foreign）
+function armPendingGrace() {
+  if (pendingGraceTimer !== null) return
+  pendingGraceTimer = setTimeout(() => {
+    pendingGraceTimer = null
+    if (pendingSend && !activeRunId) {
+      finalizeLast() // 占位落定（防永久 streaming 锁死 composer）
+      graceExpired = true // 迟到首帧仍可认领；pendingSend 清（切会话不产生 phantom orphan）
+      pendingSend = false
+    }
+  }, PENDING_RUN_GRACE_MS)
+}
+function clearPendingGraceTimer() {
+  if (pendingGraceTimer !== null) {
+    clearTimeout(pendingGraceTimer)
+    pendingGraceTimer = null
   }
+}
+// B5: 意外断线时在途 run 的恢复信息——网关重连可能 resume 同一 run 补发续帧（session projection）。
+// onReady 消费：保留占位等待续帧（不 loadHistory 清空重建）；续帧到达 / 用户主动操作即取消。
+// 已删 ws.ts 的 resumePending/claimResumedRun/preserveTail 正是为此存在，本 PR 以简化版重建。
+const RESUME_WAIT_MS = 30_000
+let resumeRun: { runId: string } | null = null
+let resumeTimer: ReturnType<typeof setTimeout> | null = null
+// 存活检测 #14: 初始连接期超时兜底——SYN 黑洞（socket 永不 open、onopen/onclose/onerror 均不
+// 触发）下协议机无任何信号、pendingConnect 永挂、connecting 永久 true。兜底超时 resolve(false)
+// 解锁 UI（提示可重试）。阈值 > F10 握手超时 10s + 隧道侧网关连接超时 5s + 认证查询余量。
+const CONNECT_TIMEOUT_MS = 15_000
+let connectTimeoutTimer: ReturnType<typeof setTimeout> | null = null
+function armResumeWait(run: { runId: string }) {
+  if (resumeTimer !== null) clearTimeout(resumeTimer)
+  resumeTimer = setTimeout(() => {
+    resumeTimer = null
+    // 窗口内无 resume 续帧（续帧到达会在 handleText/handleTool 取消本 timer）→ run 已死，
+    // 恢复为历史重建（清占位与残留投影）。
+    if (!disposed && activeRunId === run.runId && selectedSession.value) {
+      resumeRun = null
+      void loadHistory(selectedSession.value)
+    }
+  }, RESUME_WAIT_MS)
+}
+function clearResumeWait() {
+  if (resumeTimer !== null) {
+    clearTimeout(resumeTimer)
+    resumeTimer = null
+  }
+  resumeRun = null
 }
 
 // T3 会话历史回看（issue #82 / spec #76）：分页态——hasMore 标记可向回翻更旧消息，
@@ -215,6 +261,7 @@ function onComposerKeydown(e: KeyboardEvent) {
 function abandonActiveRun() {
   if (activeRunId) abandonedRunIds.add(activeRunId)
   else if (pendingSend) pendingAbandonCount++ // 首帧未到、runId 未知：迟到首帧按 FIFO 计数丢弃
+  graceExpired = false // 切会话/容器：宽限过期的「迟到认领」语义作废（新 run 语境）
   activeRunId = ''
   pendingSend = false
 }
@@ -291,6 +338,9 @@ async function selectContainer(name: string) {
   slashDismissed.value = false
   input.value = '' // 切容器：清空 composer 残留输入（否则旧 `/` 会让新容器菜单误弹，T07）
   abandonActiveRun()
+  clearPendingGraceTimer() // B4: 切容器清除旧容器武装的延迟收尾定时器（防跨容器 fire）
+  clearResumeWait() // B5: 切容器放弃在途 run 的 resume 等待（新容器连接是新 run 语境）
+  pendingAbandonCount = 0 // B1: 切容器后孤儿计数清零（旧连接的 run 永不再来帧，防吞新容器首帧）
   errorMsg.value = ''
   try {
     // F5: 只等首连决议（openGateway 内部由 onReady/onClose/onError resolve）；会话列表/历史加载
@@ -307,19 +357,26 @@ async function selectContainer(name: string) {
   }
 }
 
-// F5: 会话列表 + 首个会话历史加载（B-直连下会话 CRUD 全走协议机 RPC）。首连成功、自动重连成功、
+// F5: 会话列表 + 当前会话历史加载（B-直连下会话 CRUD 全走协议机 RPC）。首连成功、自动重连成功、
 // 手动重连成功都在 onReady 触发（统一路径）；带 name+gen 守卫丢弃切容器途中迟到的响应。
+// C1: 保留原选中会话——4401 重建 / 手动重连不把用户踢回 session[0]（仅当原会话已删除才回退首个）。
+// C2: 无论首连还是重连都恢复当前会话历史（首连瞬败后跨自动重连也能补拉，防「看似已连接」空 chat）。
 async function syncSessions(name: string, gen: number) {
   if (gen !== containerGen || selectedContainer.value !== name || !gateway) return
   try {
     const list = await gateway.listSessions()
     if (gen !== containerGen || selectedContainer.value !== name) return // 切容器途中迟到：丢弃
+    const prev = selectedSession.value
     sessions.value = Array.isArray(list) ? list : [] // 对网关输入 0 信任：非数组回退空列表
-    selectedSession.value = sessions.value[0]?.session_key ?? ''
+    if (prev && sessions.value.some((s) => s.session_key === prev)) {
+      selectedSession.value = prev // C1: 原会话仍在列表中 → 保留选中
+    } else {
+      selectedSession.value = sessions.value[0]?.session_key ?? ''
+    }
     if (!selectedSession.value) await newSession()
     if (gen !== containerGen) return // newSession 期间又切容器：不连
     if (!selectedSession.value) return // 会话创建失败（newSession 已显示错误）：不加载历史
-    void loadHistory(selectedSession.value) // T3：加载首个会话历史
+    void loadHistory(selectedSession.value) // T3：加载当前会话历史（C2：重连补拉也恢复投影）
   } catch (e) {
     if (gen !== containerGen) return
     connecting.value = false // 出错解除 connecting（composer 解禁后用户可重试）
@@ -352,6 +409,9 @@ async function openGateway(): Promise<boolean> {
   errorMsg.value = ''
   everConnected = false
   pendingConnect = null
+  clearPendingGraceTimer() // B4: 建连代际切换清除延迟收尾定时器（防跨代 fire）
+  clearResumeWait() // B5: 新连接是新 run 语境，旧连接在途 run 的 resume 等待作废
+  pendingAbandonCount = 0 // B1: 新连接孤儿计数清零（防吞新 run 首帧；切容器/4401重建/手动重连同路径）
   // 协议机首连须 bootstrap auth（ADR 事实 2）；归属门/不存在 → 20040（前端显示容器不可访问）
   let bootstrapToken: string
   try {
@@ -384,8 +444,17 @@ async function openGateway(): Promise<boolean> {
         disconnected.value = false
         errorMsg.value = ''
         if (everConnected) {
-          // 自动重连成功：以权威历史恢复投影（断线期间在途 run 已 abandoned 丢弃迟到帧）
-          if (selectedSession.value) void loadHistory(selectedSession.value)
+          // 自动重连成功：B5 若断线时在途 run 需 resume → 保留占位等续帧（不 loadHistory 清空
+          // 重建，续帧继续渲染）；否则 syncSessions 恢复会话/历史（C2：重连补拉，首连瞬败后不再
+          // 永久空列表、也不再只 loadHistory 空转）。
+          if (resumeRun) {
+            const r = resumeRun
+            resumeRun = null
+            armResumeWait(r)
+          } else {
+            void syncSessions(name, gen)
+          }
+          void loadCommands() // C2: 重连补拉命令清单（首连瞬败后斜杠菜单不再永久死）
         } else {
           everConnected = true
           pendingConnect?.(true)
@@ -420,14 +489,21 @@ async function openGateway(): Promise<boolean> {
             break
         }
       },
-      onClose: (code) => {
+      onClose: (code, _reason, retry) => {
         if (gateway !== myGw) return // 旧 gateway 的关闭（切容器）不报断线
         connecting.value = false
         disconnected.value = true // 意外断线：禁用发送（codex P2 #4）
         recoverPendingApprovals() // 连接断开：恢复所有 resolving 卡片可重试
-        // 断线若正在流式——收尾气泡（光标落定、不被 streaming 永久锁死）+ 把在途 run 标记 abandoned
-        finalizeLast()
-        abandonActiveRun()
+        // B5: 意外断线不永久 abandon 在途 run——网关重连可能 resume 同一 run 补发续帧
+        // （session projection）。记录 resumeRun 供 onReady 保留占位等待续帧（而非 loadHistory
+        // 清空重建）；授权门拒绝（4401/4403/4404）不记录（连接未建立/不可恢复，无续帧可等）。
+        if (code !== WS_AUTH_FAIL && code !== WS_MUST_CHANGE_PASSWORD && code !== WS_CONTAINER_ACCESS_DENIED) {
+          if (activeRunId || pendingSend) {
+            resumeRun = { runId: activeRunId }
+            finalizeLast() // 占位落定（光标不闪烁）；resume 续帧到达时复活
+            // 保留 activeRunId + 占位（不清空），等重连 onReady 消费 resumeRun
+          }
+        }
         pendingAbandonCount = 0 // 连接已死：孤儿计数是「同连接内迟到首帧」语义，清零防吞新 run
         if (!everConnected) {
           // 握手就绪前关闭（连接建立失败）→ 决议 openGateway 失败
@@ -440,13 +516,22 @@ async function openGateway(): Promise<boolean> {
           if (!disposed) void recoverUnauthorized()
           return
         }
-        // 4404（容器归属门拒绝）/ 4403（强制改密）：协议机 retry:false 不重连，提示切容器
-        if (code === WS_CONTAINER_ACCESS_DENIED || code === WS_MUST_CHANGE_PASSWORD) {
+        // D1: 4403 强制改密是账号级门（非容器归属）——切任何容器都 4403，误导「切换容器」让用户
+        // 永远得不到「去改密码」指引，故独立文案。
+        if (code === WS_MUST_CHANGE_PASSWORD) {
+          if (!disposed) errorMsg.value = '账号需先修改密码后才能使用对话（请前往账号设置修改密码）'
+          return
+        }
+        // 4404（容器归属门拒绝）：提示切换容器
+        if (code === WS_CONTAINER_ACCESS_DENIED) {
           if (!disposed) errorMsg.value = '容器不可访问，请切换容器'
           return
         }
-        // 4402 网关不可达 / 其他传输断开：协议机已内置退避重连（重连成功 onReady 恢复投影）
-        if (!disposed) errorMsg.value = '连接已断开，自动重连中…'
+        // 其他断开：D2 按协议机 retry 决策如实提示——false = 已停止自动重连（非恢复错误 /
+        // 连续失败 give-up / 未配对），true = 退避重连中。不再对已停重连谎报「自动重连中…」。
+        if (!disposed) {
+          errorMsg.value = retry ? '连接已断开，自动重连中…' : '连接已断开，自动重连已停止，请手动重连'
+        }
       },
       onError: (message) => {
         if (gateway !== myGw) return
@@ -461,7 +546,24 @@ async function openGateway(): Promise<boolean> {
   })
   gateway = myGw
   myGw.start()
-  const ok = await ready
+  // 存活检测 #14: 连接期超时竞速——SYN 黑洞初始连接（socket 永不 open）下 onReady/onClose/onError
+  // 都不触发，pendingConnect 永挂、connecting 永久 true。超时 resolve(false) 解锁 UI 提示可重试。
+  const timeout = new Promise<boolean>((resolve) => {
+    connectTimeoutTimer = setTimeout(() => {
+      connectTimeoutTimer = null
+      if (gen === containerGen && !disposed) {
+        connecting.value = false
+        errorMsg.value = '连接建立超时，请检查容器状态后重试'
+      }
+      resolve(false)
+    }, CONNECT_TIMEOUT_MS)
+  })
+  const ok = await Promise.race([ready, timeout])
+  if (connectTimeoutTimer !== null) {
+    clearTimeout(connectTimeoutTimer)
+    connectTimeoutTimer = null
+  }
+  if (!ok && pendingConnect) pendingConnect = null // 超时分支：迟到的 onReady 不再影响本决议
   return ok && gateway === myGw
 }
 
@@ -486,7 +588,20 @@ function connect() {
 // 增量文本：chat.delta 事件（deltaText 追加；replace 快照整段替换）。thinking 剥离纯函数无跨帧态。
 function handleText(runId: string, delta: string, replace?: boolean) {
   if (abandonedRunIds.has(runId)) return // 切换前遗留 run 的增量：丢弃
-  if (activeRunId && runId !== activeRunId) return // 仅当前 run 的增量写入回复
+  if (activeRunId && runId !== activeRunId) {
+    // B2: 已认领 run 但占位仍无任何文本（先到者可能是同会话自主 run 的预热/status 首帧）→ 切换
+    // 认领到后到 run（更像用户 send 触发的 run），防用户回复被静默丢弃（原代码直接 return）。
+    const last = messages.value[messages.value.length - 1]
+    const claimedEmpty = Boolean(last && last.role === 'assistant' && last.raw === '' && last.tools.length === 0)
+    if (claimedEmpty) {
+      foreignRunIds.add(activeRunId) // 先到空 run 降级为外来
+      activeRunId = runId
+      clearPendingGraceTimer()
+      clearResumeWait()
+    } else {
+      return // 仅当前 run 的增量写入回复
+    }
+  }
   if (!activeRunId) {
     // 首帧到达：若属于切会话时仍 pending 的孤儿 run（FIFO 先到）→ 标记 abandoned 丢弃（codex P2 #3）
     if (pendingAbandonCount > 0) {
@@ -494,20 +609,32 @@ function handleText(runId: string, delta: string, replace?: boolean) {
       abandonedRunIds.add(runId)
       return
     }
-    // F7: 空闲（无在途用户 send）时的首帧——外来自主 run 不认领：记录其 runId 供后续帧过滤
+    // B4: 宽限已 fire（graceExpired）后迟到的用户 run 首帧——pendingSend 已清，但仍认领不 foreign
+    const lateClaim = !pendingSend && graceExpired
+    // F7: 空闲（无在途用户 send 且非迟到认领）时的首帧——外来自主 run 不认领：记录其 runId 供后续帧过滤
     //（用户 send 后其续帧按 runId 丢弃，防劫持 activeRunId / 污染用户气泡 / 吞用户回复）。
-    if (!pendingSend) {
+    if (!pendingSend && !lateClaim) {
       foreignRunIds.add(runId)
       return
     }
     // F7: 空闲期已观察到的外来 run 的续帧（用户 send 后到达）——丢弃，不抢占 activeRunId
     if (foreignRunIds.has(runId)) return
-    clearPendingErrorTimer() // F8: 在途 error 的延迟收尾取消——首帧已到，本 run 正常
+    clearPendingGraceTimer() // B3/B4: 在途 error/done 的延迟收尾取消——首帧已到，本 run 正常
+    clearResumeWait() // B5: resume 等待期间收到本 run 首帧 → 续帧已到，取消超时重建
+    if (lateClaim) graceExpired = false
     activeRunId = runId
     pendingSend = false
+    // B4: 占位可能已被宽限 finalize（streaming=false）——认领后复活占位继续追加（慢 run 首帧
+    // >宽限后仍正常渲染，而非被当作 foreign 丢弃）。
+    const ph = messages.value[messages.value.length - 1]
+    if (ph && ph.role === 'assistant' && !ph.streaming) ph.streaming = true
   }
   const last = messages.value[messages.value.length - 1]
-  if (last && last.role === 'assistant' && last.streaming) {
+  // B5: 追加条件放宽到 activeRunId===runId（本 run 帧）——断线 onClose 已 finalizeLast 落定占位
+  //（streaming=false），resume 续帧到达时若只认 streaming 会丢帧；本 run 帧允许复活占位继续追加。
+  if (last && last.role === 'assistant' && (last.streaming || activeRunId === runId)) {
+    if (!last.streaming) last.streaming = true // 复活（B4 宽限 fire / B5 断线落定后）
+    clearResumeWait() // B5: resume 续帧到达 → 取消超时重建（否则 30s 后误触发 loadHistory 打断）
     // T08 思考链剥离（spec §8.3 (a) / r26 §4）：思考以 <thinking> 标签内联在 text 增量里 →
     // 累积原始串 raw，再整体重解析拆出 thinking/text（replace 快照与 delta 追加统一走重解析）
     last.raw = replace ? delta : last.raw + delta
@@ -531,6 +658,7 @@ function handleDone(runId: string) {
   if (activeRunId === runId) {
     finalizeLast()
     activeRunId = ''
+    clearResumeWait() // B5: run 正常终态，resume 无需继续
     return
   }
   // activeRunId 空：run 首帧即终态（无 delta）
@@ -539,8 +667,11 @@ function handleDone(runId: string) {
     return // 孤儿 run 终态：计数丢弃
   }
   if (pendingSend) {
-    finalizeLast()
-    pendingSend = false // 当前 pending run 无 delta 收尾
+    // B3: 无 delta 外来 run 的 done-first 不立即终结用户空 placeholder/清 pendingSend（原代码
+    // 直接 finalize——外来 run 首帧即终态会吞掉用户回复、placeholder 空终结）。武装宽限：
+    // 宽限内用户 run 首帧到达正常认领，宽限过仍无动静才落定占位。
+    armPendingGrace()
+    return
   }
 }
 
@@ -565,22 +696,15 @@ function handleError(message: string, runId?: string) {
         pendingAbandonCount--
         return
       }
-      // F8: 无在途 activeRunId——不终结占位/清 flag：
+      // B3/B4: 无在途 activeRunId——不终结占位/清 flag：
       //  - 空闲（!pendingSend）：外来/自主 run 的 error，不动当前占位（防误伤）
-      //  - 在途（pendingSend）：可能是本 run 失败也可能是外来 run；只显示错误，5s 无首帧才收尾
-      //    （防外来 error 清 flag 后用户 run 首帧被静默丢弃——原 bug：气泡空终结、回复丢失）
+      //  - 在途（pendingSend）：可能是本 run 失败也可能是外来 run；只显示错误，宽限内无首帧
+      //    才落定占位（防外来 error 清 flag 后用户 run 首帧被静默丢弃）。fire 时保留 pendingSend，
+      //    慢 run 首帧 >宽限后仍走认领路径而非 foreign（F8 定时器反噬修复）。
       if (!pendingSend) return
       errorMsg.value = message
       connecting.value = false
-      if (pendingErrorTimer === null) {
-        pendingErrorTimer = setTimeout(() => {
-          pendingErrorTimer = null
-          if (pendingSend && !activeRunId) {
-            pendingSend = false
-            finalizeLast()
-          }
-        }, PENDING_RUN_ERROR_FINALIZE_MS)
-      }
+      armPendingGrace()
       return
     }
     // activeRunId === runId：在途 run 失败 → 收尾占位 + 清 flag
@@ -588,6 +712,7 @@ function handleError(message: string, runId?: string) {
     connecting.value = false
     finalizeLast()
     activeRunId = ''
+    clearResumeWait() // B5: run 失败终态，resume 无需继续
     return
   }
   errorMsg.value = message
@@ -595,6 +720,7 @@ function handleError(message: string, runId?: string) {
   finalizeLast()
   activeRunId = ''
   pendingSend = false
+  clearResumeWait() // B5: 消费者级错误（如会话不存在）→ 放弃 resume 等待
 }
 
 function handleApproval(card: { id: string; kind: string; command: string; sessionKey: string | null }) {
@@ -625,25 +751,45 @@ function handleApprovalResolved(id: string, decision: string) {
 // （agent 先调工具再回复）→ 与 handleText 同款锚定当前 run；按 name 聚合 start→result 渲染一行标题+状态。
 function handleTool(tool: { runId: string; name: string; state: 'running' | 'done' | 'error'; id: string | null; title: unknown; input: unknown; result: unknown }) {
   if (abandonedRunIds.has(tool.runId)) return
-  if (activeRunId && tool.runId !== activeRunId) return
+  if (activeRunId && tool.runId !== activeRunId) {
+    // B2: 同 handleText——已认领 run 但占位仍无文本/工具行 → 切换认领到后到 run
+    const last = messages.value[messages.value.length - 1]
+    const claimedEmpty = Boolean(last && last.role === 'assistant' && last.raw === '' && last.tools.length === 0)
+    if (claimedEmpty) {
+      foreignRunIds.add(activeRunId)
+      activeRunId = tool.runId
+      clearPendingGraceTimer()
+      clearResumeWait()
+    } else {
+      return
+    }
+  }
   if (!activeRunId) {
     if (pendingAbandonCount > 0) {
       pendingAbandonCount--
       abandonedRunIds.add(tool.runId)
       return
     }
+    // B4: 宽限已 fire（graceExpired）后迟到的用户 run 首帧——仍认领不 foreign
+    const lateClaim = !pendingSend && graceExpired
     // F7: 同 handleText——空闲期外来自主 run 不认领、记录 runId 供后续帧过滤
-    if (!pendingSend) {
+    if (!pendingSend && !lateClaim) {
       foreignRunIds.add(tool.runId)
       return
     }
     if (foreignRunIds.has(tool.runId)) return // F7: 已观察到的外来 run 续帧：丢弃
-    clearPendingErrorTimer() // F8: 首帧已到，取消在途 error 的延迟收尾
+    clearPendingGraceTimer() // B3/B4: 首帧已到，取消在途 error/done 的延迟收尾
+    clearResumeWait() // B5: resume 等待期间收到本 run 帧 → 取消超时重建
+    if (lateClaim) graceExpired = false
     activeRunId = tool.runId
     pendingSend = false
+    // B4: 占位可能已被宽限 finalize（streaming=false）——认领后复活（后续 text delta 可继续追加）
+    const ph = messages.value[messages.value.length - 1]
+    if (ph && ph.role === 'assistant' && !ph.streaming) ph.streaming = true
   }
   const last = messages.value[messages.value.length - 1]
   if (!last || last.role !== 'assistant') return
+  clearResumeWait() // B5: 本 run 工具续帧到达 → 取消 resume 超时重建
   if (tool.state === 'running') {
     last.tools.push({ id: tool.id, name: tool.name, state: 'running', title: tool.title,
                       input: tool.input, result: tool.result })
@@ -712,9 +858,11 @@ function send() {
   const text = input.value.trim()
   if (!text || !gateway || !selectedSession.value || connecting.value || streaming.value || disconnected.value) return
   slashDismissed.value = true // 发送后关闭补全菜单（输入已被清空，下次输 / 时经 onComposerInput 复位）
+  clearResumeWait() // B5: 用户发新消息 = 放弃旧 run 的 resume 等待（新 run 是新语境）
   messages.value.push({ role: 'user', raw: text, text, thinking: '', thinkingOpen: false, streaming: false, tools: [] })
   messages.value.push({ role: 'assistant', raw: '', text: '', thinking: '', thinkingOpen: false, streaming: true, tools: [] })
   activeRunId = '' // 等首帧 onText 锚定新 run
+  graceExpired = false // B4: 新 run 语境，宽限过期标记作废
   pendingSend = true // 首帧未到前，切会话会按 pending 孤儿计数（codex P2 #3）
   // chat.send RPC（幂等 key 在 gatewayChat 内生成）；网关拒绝（未配对/scope 不足）→ catch 收尾提示
   void gateway.send(selectedSession.value, text).catch((e) => {
@@ -730,8 +878,9 @@ function send() {
 
 // 新建会话（issue #81 / spec #76）：经协议机 sessions.create RPC；网关权威新建仅回 session_key。
 async function newSession() {
-  if (!selectedContainer.value || !gateway) return
+  if (!selectedContainer.value || !gateway || disconnected.value) return // E2: 断线不操作（防裸错误）
   abandonActiveRun()
+  clearResumeWait() // B5: 主动建会话 = 放弃 resume 等待
   messages.value = []
   // codex R3 P1：不清空审批卡——新会话不换容器，切会话特意留存的同容器卡须保留（按 sessionKey 过滤渲染），
   // 否则卡住的 agent 对应那张卡会被这里误清、再也无法回覆
@@ -750,7 +899,7 @@ async function newSession() {
 // T3 删除会话（issue #82 / spec #76，admin 级提升权限）：二次确认后调 sessions.delete（archivedOnly），
 // 网关先写压缩归档（可恢复）再删。成功 → 从列表移除；删的是当前会话则切到剩余首个（无则新建）。
 async function removeSession(key: string) {
-  if (!key || !gateway) return
+  if (!key || !gateway || disconnected.value) return // E2: 断线不操作（防裸错误）
   try {
     await ElMessageBox.confirm(
       '确认删除该会话？网关会先归档（可恢复）再删除。',
@@ -777,8 +926,9 @@ async function removeSession(key: string) {
 }
 
 function pickSession(key: string) {
-  if (!key || selectedSession.value === key) return
+  if (!key || selectedSession.value === key || disconnected.value) return // E2: 断线不切换（防裸错误）
   abandonActiveRun()
+  clearResumeWait() // B5: 主动切会话 = 放弃 resume 等待
   selectedSession.value = key
   // codex R2 P1：不清空审批卡——同容器其它会话的卡保留，渲染时按 selectedSession 过滤即可
   void loadHistory(key) // T3：切会话加载该会话历史（loadHistory 内部清空 messages + 维护分页态）
@@ -792,7 +942,8 @@ function pickSession(key: string) {
 async function loadHistory(key: string) {
   const gen = containerGen
   const hgen = ++historyGen // codex #249 P2：本请求代；之后再有 loadHistory 即取代本请求
-  if (!gateway) return
+  if (!gateway || disconnected.value) return // E2: 断线不重载（防先清空 transcript 再 RPC 失败留白）
+  clearResumeWait() // B5: 主动重载历史 = 放弃 resume 等待
   messages.value = []
   historyHasMore.value = false
   historyAnchor.value = null
@@ -825,11 +976,10 @@ async function loadHistory(key: string) {
 // text 主取 text、回退 content/message。历史消息为终态：streaming=false、无 tools、thinking 暂不剥离。
 // 实测确认字段名后改此处即可。
 function translateHistoryMessage(m: HistoryMessageDTO): Msg {
-  const text =
-    typeof m.text === 'string' ? m.text
-    : typeof m.content === 'string' ? m.content
-    : typeof m.message === 'string' ? m.message
-    : ''
+  // E1: 网关 history 消息 content 多态（user=string / assistant=[{type:text},{type:thinking}]，
+  // ADR 0003）——复用 eventTranslate.extractMessageText（已处理 string/数组 content 并跳过
+  // thinking 块），不再只认 string 导致 assistant 历史渲染成空泡。text 字段回退保留（旧透传 shape）。
+  const text = extractMessageText(m) || (typeof m.text === 'string' ? m.text : '')
   return {
     role: historyRole(m.role),
     raw: text,
@@ -853,7 +1003,7 @@ function historyRole(role: unknown): 'user' | 'assistant' {
 // 取代在途分页；若分页只校验不变的 container/session，其迟到响应会 prepend 旧页并覆盖 historyAnchor
 // 回第一页锚点，下次「加载更多」重复拉取/prepend 同一旧页（转录重复）。故分页也捕获并校验请求代。
 async function loadMoreHistory() {
-  if (!historyHasMore.value || historyAnchor.value == null || historyLoading.value || !gateway) return
+  if (!historyHasMore.value || historyAnchor.value == null || historyLoading.value || !gateway || disconnected.value) return // E2: 断线不翻页（防裸错误）
   const key = selectedSession.value
   const gen = containerGen
   const hgen = historyGen // codex #249 R3 P2：捕获当前代；不自增（分页不得取代进行中的完整 loadHistory）
@@ -882,7 +1032,9 @@ async function loadMoreHistory() {
 onMounted(loadInstances)
 onBeforeUnmount(() => {
   disposed = true
-  clearPendingErrorTimer() // F8: 卸载清延迟收尾 timer，防组件销毁后触发
+  clearPendingGraceTimer() // B4: 卸载清延迟收尾 timer，防组件销毁后触发
+  clearResumeWait() // B5: 卸载清 resume 等待 timer
+  if (connectTimeoutTimer !== null) clearTimeout(connectTimeoutTimer) // #14: 连接期超时 timer
   gateway?.stop()
 })
 

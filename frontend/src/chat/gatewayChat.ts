@@ -48,8 +48,11 @@ export interface GatewayChatHandlers {
   // 翻译后的渲染帧（text/done/error/approval/approvalResolved/tool）
   onFrame: (frame: ChatFrame) => void
   // 连接关闭（隧道/网关 close code；4401 认证失败 / 4404 容器归属拒绝 / 4402 网关不可达 /
-  // 4403 强制改密 / 其他传输断开）。retry 由协议机内部决策，这里只上报给 UI。
-  onClose: (code: number, reason: string) => void
+  // 4403 强制改密 / 其他传输断开）。retry = 协议机是否将继续自动重连（D2）：
+  //   - true：协议机退避重连中，UI 显示「自动重连中…」
+  //   - false：协议机已决策不再重连（非恢复错误 / 连续失败 give-up），UI 应如实提示手动重连，
+  //     而非继续谎报「自动重连中…」
+  onClose: (code: number, reason: string, retry: boolean) => void
   // 连接级错误（非 run 级）：如 handshake 超时、socket 工厂失败
   onError: (message: string) => void
 }
@@ -87,6 +90,8 @@ export interface CreateGatewayChatParams {
 
 // F4: RPC 请求超时——requestTimeoutMs 缺省时 protocol request() 的 promise 无界等待（半开连接下
 // catch 永不跑、UI 卡死）。30s 覆盖正常网关响应（对话 send 后 agent 思考不影响 send RPC 本身）。
+// 注意（A2）：请求超时只 reject 该 promise（协议机行为，连接保持），不再 teardown 整条连接——
+// 慢 history/send 超时不应触发全量重连 + 历史重下载循环。
 const REQUEST_TIMEOUT_MS = 30_000
 // F10: 握手超时 ≥ 隧道侧网关连接超时（server gatewayConnector CONNECT_TIMEOUT_MS=5000）+ 认证 DB
 // 查询余量——browser 在 socket open 后 armed 的 require-challenge 定时器若 < 隧道侧 connect 超时，
@@ -95,22 +100,42 @@ const HANDSHAKE_TIMEOUT_MS = 10_000
 // F2: 连续重连失败阈值——超过即停止自动重连转手动（防无限空转；协议机 RetrySupervisor 的
 // maxAttempts 恒 Infinity 无 give-up，只能前端计数）。
 const MAX_RECONNECT_FAILURES = 5
+// 沉默看门狗（对齐已删 ws.ts 的 60s 静默超时）：黑洞链路（Wi-Fi 漫游无 RST）下浏览器 WS 不触发
+// onclose、协议机不重连。onActivity 每次收到网关帧刷新 lastActivityAt；超过 SILENCE_TIMEOUT_MS
+// 无任何帧 → 主动关隧道触发协议机重连自愈（网关侧 hello-ok 承诺 tickIntervalMs≤30s，正常连接
+// 60s 内必有帧，不会误杀）。
+const SILENCE_TIMEOUT_MS = 60_000
+const WATCHDOG_INTERVAL_MS = 15_000
 
 // 连接参数中的 operator scope（协议文档）：sessions/chat 需 read/write；exec.approval.resolve 需
 // operator.approvals（审批回覆）。tool-events 声明该连接接收 run 的结构化工具事件。
 const OPERATOR_SCOPES = ['operator.read', 'operator.write', 'operator.approvals']
 const CONNECT_CAPS = ['tool-events']
 
+// A3: 非安全上下文（http://<lan-ip> 自托管面板常见）下 crypto.randomUUID 不可用（undefined），
+// 协议机首个 RPC 的 requestId / 写操作的幂等 key 即抛 → M5 RPC 层全死。兜底生成唯一 id
+//（幂等 key 只需唯一性，不要求 UUID 格式）。
+function createRequestId(): string {
+  // 直接方法引用调用（c.randomUUID()）保 this 绑定（解构后 this 会丢 Crypto 上下文）。
+  const c = typeof crypto !== 'undefined' ? (crypto as { randomUUID?: () => string }) : undefined
+  if (c?.randomUUID) return c.randomUUID()
+  const rnd = () => Math.random().toString(36).slice(2)
+  return `${rnd()}${rnd()}${Date.now().toString(36)}`
+}
+
 export function createGatewayChat(params: CreateGatewayChatParams): GatewayChat {
   const { container, jwt, bootstrapToken, handlers } = params
   const translator = new ChatEventTranslator()
   // F2: 连续重连失败计数（闭包）——重连成功（hello）时重置；达阈值 stop 自动重连转手动。
   let consecutiveFailures = 0
+  // 沉默看门狗（A2/黑洞自愈）：onActivity 刷新最后活动时间；watchdog 超时无帧 → 强制重连。
+  let lastActivityAt = 0
+  let watchdogTimer: ReturnType<typeof setInterval> | null = null
 
   let client: GatewayProtocolClient<ConnectPlan>
   client = new GatewayProtocolClient<ConnectPlan>({
     createSocket: (socketHandlers) => createPanelTunnelSocket(container, jwt, socketHandlers),
-    createRequestId: () => crypto.randomUUID(),
+    createRequestId,
     buildConnectPlan: async () => ({
       role: 'operator',
       scopes: OPERATOR_SCOPES,
@@ -162,14 +187,21 @@ export function createGatewayChat(params: CreateGatewayChatParams): GatewayChat 
       return { retry: true, notify: true }
     },
     onClose: (context, decision) => {
-      if (decision.notify) handlers.onClose(context.code, context.reason)
+      // D2: 透传 retry 决策给 UI——协议机已 give-up / 非恢复错误（retry:false）时 ChatView 如实
+      // 提示「自动重连已停止，请手动重连」，不再谎报「自动重连中…」。
+      if (decision.notify) handlers.onClose(context.code, context.reason, decision.retry)
     },
     onConnectError: (error) => handlers.onError(error.message),
     onSocketFactoryError: (error) => handlers.onError(error.message),
-    // F4: RPC 超时 = 连接疑似半开/死链（Wi-Fi 掉线无 RST 时浏览器 WS 不触发 onclose）→ 主动关隧道
-    // 触发协议机重连自愈。黑洞网络下用户发送的 RPC 超时后能恢复，而非永久卡死。
-    onRequestTiming: (timing) => {
-      if (timing.errorCode === 'CLIENT_TIMEOUT' && client) client.closeSocket(1000, 'request timeout')
+    // 沉默看门狗数据源：收到任何网关帧刷新最后活动时间（黑洞链路唯一信号源）。
+    onActivity: () => {
+      lastActivityAt = Date.now()
+    },
+    // A2: 请求超时只 reject 该 promise（协议机行为，连接保持）——不再 closeSocket teardown 整条
+    // 连接：慢 history/send 超 30s 不应触发全量重连 + 历史重下载循环（flapping 网络下成循环、每轮
+    // 消耗重连失败预算）。黑洞链路自愈由沉默看门狗（onActivity 60s 无帧 → 强制重连）承担。
+    onRequestTiming: () => {
+      // 无操作——见上注释。保留回调以便未来接入请求级诊断。
     },
     onEvent: (event: GatewayEventFrame) => {
       for (const frame of translator.translate(event)) handlers.onFrame(frame)
@@ -181,8 +213,28 @@ export function createGatewayChat(params: CreateGatewayChatParams): GatewayChat 
   })
 
   return {
-    start: () => client.start(),
-    stop: () => client.stop(),
+    start: () => {
+      lastActivityAt = Date.now()
+      // 沉默看门狗：连接期持续监控（黑洞链路自愈，A2）。
+      if (!watchdogTimer) {
+        watchdogTimer = setInterval(() => {
+          // >=：interval 按 15s 周期对齐，fire 点 gap 恰为整 60s 也应触发（> 会让 60s 整被跳过）。
+          if (client && Date.now() - lastActivityAt >= SILENCE_TIMEOUT_MS) {
+            // 60s 无任何网关帧 → 连接疑似黑洞（半开 TCP 无 RST，WS 不触发 onclose）→ 主动关隧道
+            // 触发协议机重连。正常连接网关侧 tick ≤30s 保证 60s 内有帧，不误杀。
+            client.closeSocket(1000, 'silence timeout')
+          }
+        }, WATCHDOG_INTERVAL_MS)
+      }
+      client.start()
+    },
+    stop: () => {
+      if (watchdogTimer) {
+        clearInterval(watchdogTimer)
+        watchdogTimer = null
+      }
+      client.stop()
+    },
     async listSessions(): Promise<SessionDTO[]> {
       const res = await client.request<{ sessions?: Array<Record<string, unknown>> }>('sessions.list', {
         includeDerivedTitles: true,
@@ -203,9 +255,10 @@ export function createGatewayChat(params: CreateGatewayChatParams): GatewayChat 
       return out
     },
     async createSession(label = ''): Promise<string> {
-      // 幂等 key（网关写操作建议带 idempotency）；label 可空（网关后续派生标题）
+      // 幂等 key（网关写操作建议带 idempotency）；label 可空（网关后续派生标题）。
+      // A3: 幂等 key 用 createRequestId 兜底（非安全上下文 randomUUID 不可用）。
       const res = await client.request<{ key?: unknown; sessionKey?: unknown }>('sessions.create', {
-        key: crypto.randomUUID().replace(/[^a-z0-9]/g, ''),
+        key: createRequestId().replace(/[^a-z0-9]/g, ''),
         label: label || undefined,
       })
       const key = typeof res?.key === 'string' ? res.key : typeof res?.sessionKey === 'string' ? res.sessionKey : ''
@@ -235,8 +288,9 @@ export function createGatewayChat(params: CreateGatewayChatParams): GatewayChat 
       }
     },
     async send(sessionKey: string, message: string): Promise<void> {
-      // chat.send 幂等（schema 必填 idempotencyKey）；返回后流式 delta/final 事件经 onEvent 到达
-      await client.request('chat.send', { sessionKey, message, idempotencyKey: crypto.randomUUID() })
+      // chat.send 幂等（schema 必填 idempotencyKey）；返回后流式 delta/final 事件经 onEvent 到达。
+      // A3: 幂等 key 用 createRequestId 兜底（非安全上下文 randomUUID 不可用）。
+      await client.request('chat.send', { sessionKey, message, idempotencyKey: createRequestId() })
     },
     async listCommands(): Promise<CommandDTO[]> {
       const res = await client.request<{ commands?: Array<Record<string, unknown>> }>('commands.list', {})

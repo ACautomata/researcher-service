@@ -22,7 +22,7 @@ vi.mock('element-plus', async (importOriginal) => {
 type MockHandlers = {
   onReady: () => void
   onFrame: (frame: unknown) => void
-  onClose: (code: number, reason: string) => void
+  onClose: (code: number, reason: string, retry: boolean) => void
   onError: (message: string) => void
 }
 
@@ -51,8 +51,8 @@ const { MockGatewayChat } = vi.hoisted(() => {
     fireFrame(frame: unknown): void {
       this.handlers.onFrame(frame)
     }
-    fireClose(code: number, reason = ''): void {
-      this.handlers.onClose(code, reason)
+    fireClose(code: number, reason = '', retry = true): void {
+      this.handlers.onClose(code, reason, retry)
     }
     fireError(message: string): void {
       this.handlers.onError(message)
@@ -588,5 +588,339 @@ describe('ChatView', () => {
     const { w, gw } = await mountReady()
     w.unmount()
     expect(gw.stop).toHaveBeenCalled()
+  })
+
+  // ---- 第二轮 review（B1-B5 / C1-C2 / D1-D2 / E1-E2）回归 ----
+
+  it('B1: 切容器时 pendingAbandonCount 清零，新容器首个 run 首帧不被吞', async () => {
+    const { w, gw } = await mountReady()
+    await w.find('[data-test="input"]').setValue('问题')
+    await w.find('[data-test="send"]').trigger('click')
+    // 切到另一容器：abandonActiveRun() 若 pendingSend 会 ++，但 selectContainer/openGateway 清零
+    await w.find('[data-test="container-other"]').trigger('click')
+    await flushPromises()
+    const gw2 = MockGatewayChat.last!
+    expect(gw2).not.toBe(gw)
+    gw2.listSessions.mockResolvedValue([])
+    gw2.createSession.mockResolvedValue('sk-other')
+    gw2.getHistory.mockResolvedValue({ messages: [], hasMore: false, nextOffset: null })
+    gw2.listCommands.mockResolvedValue([])
+    gw2.send.mockResolvedValue(undefined)
+    gw2.fireReady()
+    await flushPromises()
+    // 新容器发送 → 首个 run 首帧不被 stale pendingAbandonCount 当孤儿吞
+    await w.find('[data-test="input"]').setValue('新容器问题')
+    await w.find('[data-test="send"]').trigger('click')
+    gw2.fireFrame({ type: 'text', runId: 'r-new', delta: '新回复' })
+    await nextTick()
+    expect(w.find('[data-test="stream"]').text()).toContain('新回复')
+    gw2.fireFrame({ type: 'done', runId: 'r-new' })
+  })
+
+  it('B2: pendingSend 期间外来空 run 首帧先到 → 用户 run 后到切换认领（回复不丢）', async () => {
+    const { w, gw } = await mountReady()
+    await w.find('[data-test="input"]').setValue('我的问题')
+    await w.find('[data-test="send"]').trigger('click')
+    // 外来 run 首帧先到（空 delta，认领后占位仍空——如 status 预热）
+    gw.fireFrame({ type: 'text', runId: 'foreign-1', delta: '' })
+    await nextTick()
+    // 用户 run 首帧后到 → 切换认领（先到空 run 降级外来），真实回复渲染
+    gw.fireFrame({ type: 'text', runId: 'user-run', delta: '真实回复' })
+    await nextTick()
+    expect(w.find('[data-test="stream"]').text()).toContain('真实回复')
+    gw.fireFrame({ type: 'done', runId: 'user-run' })
+  })
+
+  it('B3: pendingSend 时外来 done-first 不终结用户空占位（用户 run 仍正常渲染）', async () => {
+    const { w, gw } = await mountReady()
+    await w.find('[data-test="input"]').setValue('我的问题')
+    await w.find('[data-test="send"]').trigger('click')
+    // 外来 run 首帧即终态 done（无 delta）→ 不终结占位/不清 pendingSend
+    gw.fireFrame({ type: 'done', runId: 'foreign-1' })
+    await nextTick()
+    expect(w.find('.cursor').exists()).toBe(true) // 占位仍 streaming
+    // 用户 run 首帧 → 正常认领渲染（原 bug：占位被终结 + pendingSend 被清 → 首帧被当 foreign 丢）
+    gw.fireFrame({ type: 'text', runId: 'user-run', delta: '真实回复' })
+    await nextTick()
+    expect(w.find('[data-test="stream"]').text()).toContain('真实回复')
+    gw.fireFrame({ type: 'done', runId: 'user-run' })
+  })
+
+  it('B4: 宽限 fire 后迟到首帧仍认领（graceExpired，不 foreign 丢弃；F8 定时器反噬修复）', async () => {
+    vi.useFakeTimers()
+    try {
+      const w = mount(ChatView)
+      await flushPromises()
+      const gw = MockGatewayChat.last!
+      gw.listSessions.mockResolvedValue([SESSION])
+      gw.getHistory.mockResolvedValue({ messages: [], hasMore: false, nextOffset: null })
+      gw.listCommands.mockResolvedValue([])
+      gw.send.mockResolvedValue(undefined)
+      gw.fireReady()
+      await flushPromises()
+      await w.find('[data-test="input"]').setValue('问题')
+      await w.find('[data-test="send"]').trigger('click')
+      // 外来 error 武装宽限定时器
+      gw.fireFrame({ type: 'error', runId: 'foreign-1', message: '外来失败' })
+      await nextTick()
+      // 超宽限（8s）→ 占位落定 + graceExpired
+      vi.advanceTimersByTime(8_001)
+      await nextTick()
+      // 慢速用户 run 首帧 >宽限才到 → 仍走认领路径渲染（原 bug：pendingSend 被清 → 当 foreign 丢）
+      gw.fireFrame({ type: 'text', runId: 'user-run', delta: '慢回复' })
+      await nextTick()
+      expect(w.find('[data-test="stream"]').text()).toContain('慢回复')
+      w.unmount()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('B4: 宽限 fire 后切会话再发送 → 无 phantom orphan（graceExpired 不清 pendingSend，首帧不被吞）', async () => {
+    vi.useFakeTimers()
+    try {
+      const w = mount(ChatView)
+      await flushPromises()
+      const gw = MockGatewayChat.last!
+      gw.listSessions.mockResolvedValue([SESSION])
+      gw.getHistory.mockResolvedValue({ messages: [], hasMore: false, nextOffset: null })
+      gw.listCommands.mockResolvedValue([])
+      gw.send.mockResolvedValue(undefined)
+      gw.fireReady()
+      await flushPromises()
+      await w.find('[data-test="input"]').setValue('问题')
+      await w.find('[data-test="send"]').trigger('click')
+      gw.fireFrame({ type: 'error', runId: 'foreign-1', message: '外来失败' })
+      await nextTick()
+      vi.advanceTimersByTime(8_001) // 宽限 fire：pendingSend 清 + graceExpired
+      await nextTick()
+      // 切会话（abandonActiveRun：pendingSend 已清 → 不 ++）
+      gw.createSession.mockResolvedValueOnce('sk-2')
+      await w.find('[data-test="new-session"]').trigger('click')
+      await flushPromises()
+      // 新会话发送 → 首个 run 首帧不被 stale 计数吞
+      await w.find('[data-test="input"]').setValue('第二条')
+      await w.find('[data-test="send"]').trigger('click')
+      gw.fireFrame({ type: 'text', runId: 'r2', delta: '第二条回复' })
+      await nextTick()
+      expect(w.find('[data-test="stream"]').text()).toContain('第二条回复')
+      w.unmount()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('B5: 断线时在途 run → 重连 onReady 保留占位等 resume 续帧（不 loadHistory 清空重建）', async () => {
+    const { w, gw } = await mountReady()
+    await w.find('[data-test="input"]').setValue('问题')
+    await w.find('[data-test="send"]').trigger('click')
+    gw.fireFrame({ type: 'text', runId: 'r1', delta: '部分回答' })
+    await nextTick()
+    expect(w.find('[data-test="stream"]').text()).toContain('部分回答')
+    // 意外断线 → 记录 resumeRun（占位保留，不 abandon）
+    gw.getHistory.mockClear()
+    gw.fireClose(1006, 'network', true)
+    await nextTick()
+    expect(w.find('[data-test="reconnect-bar"]').exists()).toBe(true)
+    // 重连成功 onReady → resumeRun 消费：不 loadHistory 清空，等续帧
+    gw.fireReady()
+    await flushPromises()
+    expect(gw.getHistory).not.toHaveBeenCalled()
+    // resume 续帧 → 继续渲染（占位复活追加）
+    gw.fireFrame({ type: 'text', runId: 'r1', delta: '续帧' })
+    await nextTick()
+    expect(w.find('[data-test="stream"]').text()).toContain('部分回答续帧')
+    gw.fireFrame({ type: 'done', runId: 'r1' })
+    w.unmount()
+  })
+
+  it('B5: resume 等待超时（网关未 resume）→ 恢复为历史重建（占位清空不卡死）', async () => {
+    vi.useFakeTimers()
+    try {
+      const w = mount(ChatView)
+      await flushPromises()
+      const gw = MockGatewayChat.last!
+      gw.listSessions.mockResolvedValue([SESSION])
+      gw.getHistory.mockResolvedValue({ messages: [], hasMore: false, nextOffset: null })
+      gw.listCommands.mockResolvedValue([])
+      gw.send.mockResolvedValue(undefined)
+      gw.fireReady()
+      await flushPromises()
+      // 发送 + 首帧 → 在途流式
+      await w.find('[data-test="input"]').setValue('问题')
+      await w.find('[data-test="send"]').trigger('click')
+      gw.fireFrame({ type: 'text', runId: 'r1', delta: '部分回答' })
+      await nextTick()
+      // 断线 → resumeRun 记录
+      gw.getHistory.mockClear()
+      gw.fireClose(1006, 'net', true)
+      await nextTick()
+      gw.fireReady() // onReady → armResumeWait（30s）
+      await flushPromises()
+      expect(gw.getHistory).not.toHaveBeenCalled()
+      // 超过 resume 等待 30s → loadHistory 重建（清占位）
+      gw.getHistory.mockResolvedValue({
+        messages: [{ role: 'assistant', text: '历史重建' }],
+        hasMore: false,
+        nextOffset: null,
+      })
+      vi.advanceTimersByTime(30_001)
+      await flushPromises()
+      expect(gw.getHistory).toHaveBeenCalled()
+      expect(w.find('[data-test="stream"]').text()).toContain('历史重建')
+      w.unmount()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('C1: 重连后保留原选中会话（不踢回 session[0]、不丢当前 transcript）', async () => {
+    const w = mount(ChatView)
+    await flushPromises()
+    const gw1 = MockGatewayChat.last!
+    gw1.listSessions.mockResolvedValue([SESSION, { session_key: 'sk-2', title: '', updated_at: '' }])
+    gw1.getHistory.mockResolvedValue({ messages: [{ role: 'user', text: 'sk1 历史' }], hasMore: false, nextOffset: null })
+    gw1.listCommands.mockResolvedValue([])
+    gw1.send.mockResolvedValue(undefined)
+    gw1.fireReady()
+    await flushPromises()
+    // 切到 sk-2
+    gw1.getHistory.mockResolvedValue({ messages: [{ role: 'user', text: 'sk2 历史' }], hasMore: false, nextOffset: null })
+    await w.find('[data-test="session-sk-2"]').trigger('click')
+    await flushPromises()
+    expect(w.find('[data-test="stream"]').text()).toContain('sk2 历史')
+    // 断开 + 手动重连（openGateway 重建）
+    gw1.fireClose(1006, 'net', true)
+    await nextTick()
+    await w.find('[data-test="reconnect"]').trigger('click')
+    await flushPromises()
+    const gw2 = MockGatewayChat.last!
+    expect(gw2).not.toBe(gw1)
+    gw2.listSessions.mockResolvedValue([SESSION, { session_key: 'sk-2', title: '', updated_at: '' }])
+    gw2.getHistory.mockImplementation(async (key: string) => ({
+      messages: [{ role: 'assistant', text: `${key} 恢复` }],
+      hasMore: false,
+      nextOffset: null,
+    }))
+    gw2.listCommands.mockResolvedValue([])
+    gw2.send.mockResolvedValue(undefined)
+    gw2.fireReady()
+    await flushPromises()
+    // C1: 保留 sk-2（而非踢回 sk-1）→ 恢复 sk-2 历史
+    expect(w.find('[data-test="stream"]').text()).toContain('sk-2 恢复')
+    expect(w.find('[data-test="stream"]').text()).not.toContain('sk1 历史')
+  })
+
+  it('C2: syncSessions 首连瞬败后自动重连 onReady 补拉会话与命令（不永久空）', async () => {
+    const w = mount(ChatView)
+    await flushPromises()
+    const gw = MockGatewayChat.last!
+    gw.getHistory.mockResolvedValue({ messages: [], hasMore: false, nextOffset: null })
+    gw.send.mockResolvedValue(undefined)
+    // 首连 onReady：syncSessions 发起但 listSessions RPC 瞬败（链路断）→ 列表空
+    gw.listSessions.mockRejectedValueOnce(new Error('gateway not connected'))
+    gw.fireReady()
+    await flushPromises()
+    expect(w.find('[data-test="session-sk-1"]').exists()).toBe(false)
+    // 自动重连成功（everConnected=true 分支）→ C2 补拉会话 + 命令
+    gw.listSessions.mockResolvedValue([SESSION])
+    gw.listCommands.mockResolvedValue([{ name: 'model', description: '切换模型', aliases: ['/model'] }])
+    gw.fireReady()
+    await flushPromises()
+    expect(w.find('[data-test="session-sk-1"]').exists()).toBe(true)
+    await w.find('[data-test="input"]').setValue('/m')
+    await nextTick()
+    expect(w.find('[data-test="slash-item"]').text()).toContain('/model')
+  })
+
+  it('D1: 4403 改密门 → 独立「修改密码」文案（非误导切换容器）', async () => {
+    const { w, gw } = await mountReady()
+    gw.fireClose(4403, 'must change password', false)
+    await nextTick()
+    expect(w.find('[data-test="error-bar"]').text()).toContain('修改密码')
+    expect(w.find('[data-test="error-bar"]').text()).not.toContain('切换容器')
+  })
+
+  it('D2: retry:false（协议机已停重连）→ 如实提示手动重连；retry:true → 自动重连中', async () => {
+    const w = mount(ChatView)
+    await flushPromises()
+    const gw = MockGatewayChat.last!
+    gw.listSessions.mockResolvedValue([SESSION])
+    gw.getHistory.mockResolvedValue({ messages: [], hasMore: false, nextOffset: null })
+    gw.listCommands.mockResolvedValue([])
+    gw.send.mockResolvedValue(undefined)
+    gw.fireReady()
+    await flushPromises()
+    gw.fireClose(1006, 'net', false) // 协议机 give-up / 未配对
+    await nextTick()
+    expect(w.find('[data-test="error-bar"]').text()).toContain('自动重连已停止')
+    expect(w.find('[data-test="error-bar"]').text()).toContain('手动重连')
+    gw.fireClose(1006, 'net', true) // 退避重连中
+    await nextTick()
+    expect(w.find('[data-test="error-bar"]').text()).toContain('自动重连中')
+  })
+
+  it('E1: 历史 assistant 消息 content 数组（ADR 0003 多态）→ 渲染文本而非空泡', async () => {
+    const w = mount(ChatView)
+    await flushPromises()
+    const gw = MockGatewayChat.last!
+    gw.listSessions.mockResolvedValue([SESSION])
+    gw.getHistory.mockResolvedValue({
+      messages: [
+        { role: 'user', content: '我的问题' },
+        { role: 'assistant', content: [{ type: 'thinking', text: '内心' }, { type: 'text', text: '回答内容' }] },
+      ],
+      hasMore: false,
+      nextOffset: null,
+    })
+    gw.listCommands.mockResolvedValue([])
+    gw.send.mockResolvedValue(undefined)
+    gw.fireReady()
+    await flushPromises()
+    const streamText = w.find('[data-test="stream"]').text()
+    expect(streamText).toContain('我的问题') // user string content
+    expect(streamText).toContain('回答内容') // assistant 数组 content → 复用 extractMessageText
+    expect(streamText).not.toContain('内心') // thinking 块不渲染为正文
+  })
+
+  it('E2: 断线时新建会话被守卫（不裸错误、不清 transcript）', async () => {
+    const w = mount(ChatView)
+    await flushPromises()
+    const gw = MockGatewayChat.last!
+    gw.listSessions.mockResolvedValue([SESSION])
+    gw.getHistory.mockResolvedValue({ messages: [{ role: 'user', text: '既有历史' }], hasMore: false, nextOffset: null })
+    gw.listCommands.mockResolvedValue([])
+    gw.send.mockResolvedValue(undefined)
+    gw.fireReady()
+    await flushPromises()
+    expect(w.find('[data-test="stream"]').text()).toContain('既有历史')
+    // 断线（give-up，retry:false → 不自动重连）
+    gw.fireClose(1006, 'net', false)
+    await nextTick()
+    expect(MockGatewayChat.last).toBe(gw) // 未重建
+    // 断线时新建会话 → E2 守卫：不调 createSession、transcript 保留
+    await w.find('[data-test="new-session"]').trigger('click')
+    await flushPromises()
+    expect(gw.createSession).not.toHaveBeenCalled()
+    expect(w.find('[data-test="stream"]').text()).toContain('既有历史')
+  })
+
+  it('#14: 初始连接黑洞（socket 永不 open，无 onReady/onClose 信号）→ 连接期超时解锁 UI', async () => {
+    vi.useFakeTimers()
+    try {
+      const w = mount(ChatView)
+      await flushPromises() // selectContainer → openGateway 挂起（pendingConnect 未决议）
+      // 不 fireReady：黑洞连接无任何信号，openGateway 的 await ready 挂起
+      await w.find('[data-test="input"]').setValue('x')
+      expect(w.find('[data-test="send"]').attributes('disabled')).toBeDefined() // connecting 中禁发
+      // 超过连接期超时 15s → 决议 false + 解锁 UI
+      vi.advanceTimersByTime(15_001)
+      await flushPromises()
+      expect(w.find('[data-test="error-bar"]').text()).toContain('连接建立超时')
+      expect(w.find('[data-test="send"]').attributes('disabled')).toBeUndefined() // 可重试
+      w.unmount()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
