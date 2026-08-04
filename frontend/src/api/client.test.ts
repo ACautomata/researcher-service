@@ -136,4 +136,55 @@ describe('api client', () => {
     )
     await expect(apiJson('/x')).rejects.toThrow('非法 name')
   })
+
+  it('apiJson throws ApiError with envelope code on HTTP 200 business error（#312 信封）', async () => {
+    // P0 回归：TS 后端错误恒 HTTP 200 + {code,message,data}——apiJson 不得把信封错误当成功透传
+    // （旧实现只按 resp.ok 判错 → 20040/401 分支全成死代码，用户看到内部错误文案）。
+    ;(globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+      mockResp({ code: 20040, message: '容器不存在或无权访问', data: null }),
+    )
+    await expect(apiJson('/api/v1/containers/x/bootstrap-token')).rejects.toMatchObject({
+      code: 20040,
+      status: 200,
+    } as ApiError)
+  })
+
+  it('apiFetch refreshes and retries on HTTP 200 envelope 10001（吊销 token 走刷新链）', async () => {
+    // P0 回归：token 吊销时 server 以 HTTP 200 + {code:10001} 拒业务请求（#312 信封）——apiFetch
+    // 须与 HTTP 401 同语义触发刷新链，否则刷新/跳登录永不触发、用户留在原地。
+    const auth = useAuthStore()
+    auth.token = 'revoked-access'
+    const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>
+    fetchMock
+      .mockResolvedValueOnce(mockResp({ code: 10001, message: '未认证', data: null }))
+      .mockResolvedValueOnce(mockResp({ access: liveToken() }, 200)) // refresh 成功
+      .mockResolvedValueOnce(mockResp({ code: 0, message: 'ok', data: [] })) // 重试成功
+    const resp = await apiFetch('/api/v1/containers/')
+    expect(resp.status).toBe(200)
+    expect(auth.token).not.toBe('revoked-access')
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+    // 重试用的是 refresh 换到的新 token
+    const retryInit = fetchMock.mock.calls[2][1] as RequestInit
+    expect((retryInit.headers as Headers).get('Authorization')).toBe(`Bearer ${auth.token}`)
+  })
+
+  it('apiFetch redirects to login when envelope 10001 + refresh exhausted', async () => {
+    const auth = useAuthStore()
+    auth.token = 'revoked-access'
+    ;(globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+      mockResp({ code: 10001, message: '未认证', data: null }),
+    )
+    const assignSpy = vi.fn()
+    Object.defineProperty(window, 'location', {
+      configurable: true,
+      value: { pathname: '/', assign: assignSpy },
+    })
+    await expect(apiFetch('/api/v1/containers/')).rejects.toMatchObject({ status: 401 } as ApiError)
+    expect(assignSpy).toHaveBeenCalledWith('/login')
+  })
+
+  it('apiJson passes non-envelope 2xx body through（Django 兼容）', async () => {
+    ;(globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(mockResp([1, 2, 3]))
+    expect(await apiJson<number[]>('/legacy')).toEqual([1, 2, 3])
+  })
 })

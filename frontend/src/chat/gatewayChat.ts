@@ -10,6 +10,10 @@ import {
   GatewayProtocolRequestError,
   shouldPauseGatewayReconnect,
 } from '@openclaw/gateway-client/browser'
+import {
+  ConnectErrorDetailCodes,
+  readConnectErrorDetailCode,
+} from '@openclaw/gateway-protocol/connect-error-details'
 import { createPanelTunnelSocket } from './tunnelSocket'
 import { ChatEventTranslator, type ChatFrame, type GatewayEventFrame } from './eventTranslate'
 import { NO_RETRY_CLOSE_CODES } from './closeCodes'
@@ -52,7 +56,8 @@ export interface GatewayChatHandlers {
   //   - true：协议机退避重连中，UI 显示「自动重连中…」
   //   - false：协议机已决策不再重连（非恢复错误 / 连续失败 give-up），UI 应如实提示手动重连，
   //     而非继续谎报「自动重连中…」
-  onClose: (code: number, reason: string, retry: boolean) => void
+  // pairingRequired = 本次关闭是否因网关 PAIRING_REQUIRED（未配对）——UI 应提示先完成设备配对
+  onClose: (code: number, reason: string, retry: boolean, pairingRequired?: boolean) => void
   // 连接级错误（非 run 级）：如 handshake 超时、socket 工厂失败
   onError: (message: string) => void
 }
@@ -60,6 +65,9 @@ export interface GatewayChatHandlers {
 export interface GatewayChat {
   start(): void
   stop(): void
+  // 主动关隧道触发协议机重连决策（连接期超时兜底：SYN 黑洞下 socket 永不 open、无任何信号，
+  // 主动关闭让协议机走退避重连自愈——P1 code review）
+  closeSocket(code?: number, reason?: string): void
   listSessions(): Promise<SessionDTO[]>
   createSession(label?: string): Promise<string>
   deleteSession(key: string): Promise<void>
@@ -113,12 +121,20 @@ const OPERATOR_SCOPES = ['operator.read', 'operator.write', 'operator.approvals'
 const CONNECT_CAPS = ['tool-events']
 
 // A3: 非安全上下文（http://<lan-ip> 自托管面板常见）下 crypto.randomUUID 不可用（undefined），
-// 协议机首个 RPC 的 requestId / 写操作的幂等 key 即抛 → M5 RPC 层全死。兜底生成唯一 id
-//（幂等 key 只需唯一性，不要求 UUID 格式）。
+// 协议机首个 RPC 的 requestId / 写操作的幂等 key 即抛 → M5 RPC 层全死。
+// P2（code review）：兜底统一用 crypto.getRandomValues 编码 32-hex——与 randomUUID.replace 后的
+// 32-hex 格式一致（仓库自钉契约 /^[a-z0-9]{32}$/），且比 Math.random 兜底（非 CSPRNG、同毫秒碰撞
+// 空间坍缩）安全；createSession 与 chat.send 的幂等 key 共用同一格式（不再跨路径不一致）。
 function createRequestId(): string {
-  // 直接方法引用调用（c.randomUUID()）保 this 绑定（解构后 this 会丢 Crypto 上下文）。
-  const c = typeof crypto !== 'undefined' ? (crypto as { randomUUID?: () => string }) : undefined
+  const c = typeof crypto !== 'undefined' ? crypto : undefined
   if (c?.randomUUID) return c.randomUUID()
+  // 兜底：getRandomValues 取 16 随机字节 → 32-hex（btoa 后去填充取 a-z0-9 与 randomUUID 同构）。
+  // 直接方法引用调用（c.randomUUID()）保 this 绑定（解构后 this 会丢 Crypto 上下文）。
+  const bytes = c?.getRandomValues?.(new Uint8Array(16))
+  if (bytes) {
+    // Uint8Array → hex（非 btoa：btoa 对 >255 码位抛错，且输出含大小写/+/=，非 32-hex 契约）
+    return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')
+  }
   const rnd = () => Math.random().toString(36).slice(2)
   return `${rnd()}${rnd()}${Date.now().toString(36)}`
 }
@@ -127,10 +143,21 @@ export function createGatewayChat(params: CreateGatewayChatParams): GatewayChat 
   const { container, jwt, bootstrapToken, handlers } = params
   const translator = new ChatEventTranslator()
   // F2: 连续重连失败计数（闭包）——重连成功（hello）时重置；达阈值 stop 自动重连转手动。
+  // P1（code review）：计数器语义改为「按连接存活时长」——只有「未达 hello 的失败」（连接从未
+  // 建立即断）累加；hello 后稳定存活过阈值再断（含沉默看门狗自发 closeSocket 的修复动作）不算
+  // 故障、不消耗 give-up 预算。反向：crash-loop 型（hello 即崩，存活极短）每次握手成功不得归零
+  // ——否则永远到不了 give-up，无限重连空转（违背 #369「退避重连空转」目标）。
   let consecutiveFailures = 0
+  // 上次 hello-ok 时刻；稳定存活阈值——hello 后存活超过它，此后断开即视为「已建立过连接」，
+  // 不再计失败（见下）。crash-loop（hello 后 <阈值 即崩）不计稳定，计数继续累积。
+  let lastHelloAt = 0
+  const STABLE_CONNECTION_MS = 30_000
   // 沉默看门狗（A2/黑洞自愈）：onActivity 刷新最后活动时间；watchdog 超时无帧 → 强制重连。
   let lastActivityAt = 0
   let watchdogTimer: ReturnType<typeof setInterval> | null = null
+  // P2（code review）：translator.sent 累积器无界增长（断线中断/外来 run 永不到终态条目泄漏）+
+  // 断线 resume 从头重放会双重追加——每次连接生命周期边界（hello-ok）清空重来。
+  const resetTranslator = () => translator.reset()
 
   let client: GatewayProtocolClient<ConnectPlan>
   client = new GatewayProtocolClient<ConnectPlan>({
@@ -182,14 +209,28 @@ export function createGatewayChat(params: CreateGatewayChatParams): GatewayChat 
       // 显式 reconnectDelayMs 是一次性 override（attempts 不递增），恒固定间隔重试且退避成死代码。
       // 连续失败达阈值 → 停止自动重连（协议机 maxAttempts 恒 Infinity，只能前端计数 give-up），
       // 转 ChatView 手动重连（disconnected 条）。
-      consecutiveFailures++
-      if (consecutiveFailures >= MAX_RECONNECT_FAILURES) return { retry: false, notify: true }
+      // P1（code review）：仅「未达 hello 的失败」计费（连接从未建立即断）；hello 后稳定存活过的
+      // 连接断开（含看门狗自发 closeSocket 的修复动作）不算故障，不消耗 give-up 预算。
+      const stable = lastHelloAt !== 0 && Date.now() - lastHelloAt >= STABLE_CONNECTION_MS
+      if (!stable) {
+        consecutiveFailures++
+        if (consecutiveFailures >= MAX_RECONNECT_FAILURES) return { retry: false, notify: true }
+      }
       return { retry: true, notify: true }
     },
     onClose: (context, decision) => {
       // D2: 透传 retry 决策给 UI——协议机已 give-up / 非恢复错误（retry:false）时 ChatView 如实
       // 提示「自动重连已停止，请手动重连」，不再谎报「自动重连中…」。
-      if (decision.notify) handlers.onClose(context.code, context.reason, decision.retry)
+      if (decision.notify) {
+        // P1-7（code review）：握手被拒且详情为 PAIRING_REQUIRED（未配对）→ 随 onClose 传递，
+        // UI 提示先完成设备配对（#369 配对是 chat 前置；通用「自动重连已停止」文案让用户无从
+        // 得知正确路径）。用官方 readConnectErrorDetailCode 判定（不硬编码错误码字符串）。
+        const connErr = context.connectFailure?.error
+        const pairing =
+          connErr instanceof GatewayProtocolRequestError &&
+          readConnectErrorDetailCode(connErr.details) === ConnectErrorDetailCodes.PAIRING_REQUIRED
+        handlers.onClose(context.code, context.reason, decision.retry, pairing)
+      }
     },
     onConnectError: (error) => handlers.onError(error.message),
     onSocketFactoryError: (error) => handlers.onError(error.message),
@@ -207,7 +248,15 @@ export function createGatewayChat(params: CreateGatewayChatParams): GatewayChat 
       for (const frame of translator.translate(event)) handlers.onFrame(frame)
     },
     onHello: () => {
-      consecutiveFailures = 0 // F2: 重连成功（hello-ok）→ 重置连续失败计数
+      // F2: 重连成功（hello-ok）→ 重置连续失败计数。
+      // P1-6（code review）：仅当「上次连接稳定存活过」才归零（距上次 hello 超过稳定阈值）——
+      // crash-loop 型（hello 即崩，间隔 < 阈值）每次握手成功不得归零，否则永不 give-up、无限
+      // 重连空转（违背 #369「退避重连空转」目标）；首次连接（lastHelloAt===0）归零。
+      if (lastHelloAt === 0 || Date.now() - lastHelloAt >= STABLE_CONNECTION_MS) {
+        consecutiveFailures = 0
+      }
+      lastHelloAt = Date.now() // 记录 hello 时刻，供「稳定存活」判定
+      resetTranslator() // P2: 新连接生命周期边界清空 sent 累积（断线中断的 run 条目作废）
       handlers.onReady()
     },
   })
@@ -235,6 +284,11 @@ export function createGatewayChat(params: CreateGatewayChatParams): GatewayChat 
       }
       client.stop()
     },
+    // P1-5（code review）：连接期超时兜底——SYN 黑洞（socket 永不 open）下协议机无任何信号、
+    // 不触发重连；主动关隧道让协议机走退避重连自愈（对齐已删 ws.ts 的连接超时自愈）。
+    closeSocket: (code = 1000, reason = '') => {
+      client.closeSocket(code, reason)
+    },
     async listSessions(): Promise<SessionDTO[]> {
       const res = await client.request<{ sessions?: Array<Record<string, unknown>> }>('sessions.list', {
         includeDerivedTitles: true,
@@ -256,7 +310,9 @@ export function createGatewayChat(params: CreateGatewayChatParams): GatewayChat 
     },
     async createSession(label = ''): Promise<string> {
       // 幂等 key（网关写操作建议带 idempotency）；label 可空（网关后续派生标题）。
-      // A3: 幂等 key 用 createRequestId 兜底（非安全上下文 randomUUID 不可用）。
+      // A3/P2: 幂等 key 用 createRequestId 兜底（非安全上下文 randomUUID 不可用）并统一 32-hex
+      //（randomUUID 路径去连字符；getRandomValues 兜底本就 32-hex——跨路径格式一致，网关按
+      // idempotencyKey 幂等去重不因格式分歧而失效）。
       const res = await client.request<{ key?: unknown; sessionKey?: unknown }>('sessions.create', {
         key: createRequestId().replace(/[^a-z0-9]/g, ''),
         label: label || undefined,
@@ -266,8 +322,12 @@ export function createGatewayChat(params: CreateGatewayChatParams): GatewayChat 
       return key
     },
     async deleteSession(key: string): Promise<void> {
-      // archivedOnly:true —— operator.write 删会话须置位（archive-then-delete，可恢复；ADR 事实 4）
-      await client.request('sessions.delete', { key, archivedOnly: true })
+      // 不带 archivedOnly：官方网关 sessions-delete 对未归档会话带 archivedOnly:true 直接
+      // INVALID_REQUEST（"Session X is not archived. Archive it first, then delete it."）——面板
+      // 从不先归档，恒带 archivedOnly 会让所有正常会话删除失败（P0 code review）。对齐旧 wire
+      // （wire_client.py sessions.delete {key}）与官方 webchat（仅 archived 行才带 archivedOnly）。
+      // 缺失会话为 ok 无操作（幂等）。
+      await client.request('sessions.delete', { key })
     },
     async getHistory(sessionKey: string, limit?: number, messageId?: string): Promise<SessionHistoryDTO> {
       const res = await client.request<{ messages?: unknown; hasMore?: unknown; nextOffset?: unknown }>(
@@ -289,8 +349,13 @@ export function createGatewayChat(params: CreateGatewayChatParams): GatewayChat 
     },
     async send(sessionKey: string, message: string): Promise<void> {
       // chat.send 幂等（schema 必填 idempotencyKey）；返回后流式 delta/final 事件经 onEvent 到达。
-      // A3: 幂等 key 用 createRequestId 兜底（非安全上下文 randomUUID 不可用）。
-      await client.request('chat.send', { sessionKey, message, idempotencyKey: createRequestId() })
+      // A3/P2: 幂等 key 与 createSession 统一 32-hex 格式（randomUUID 去连字符——跨路径 key 规范
+      // 一致，网关幂等去重不因格式分歧而失效）。
+      await client.request('chat.send', {
+        sessionKey,
+        message,
+        idempotencyKey: createRequestId().replace(/[^a-z0-9]/g, ''),
+      })
     },
     async listCommands(): Promise<CommandDTO[]> {
       const res = await client.request<{ commands?: Array<Record<string, unknown>> }>('commands.list', {})

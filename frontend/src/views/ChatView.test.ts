@@ -22,7 +22,7 @@ vi.mock('element-plus', async (importOriginal) => {
 type MockHandlers = {
   onReady: () => void
   onFrame: (frame: unknown) => void
-  onClose: (code: number, reason: string, retry: boolean) => void
+  onClose: (code: number, reason: string, retry: boolean, pairingRequired?: boolean) => void
   onError: (message: string) => void
 }
 
@@ -40,6 +40,7 @@ const { MockGatewayChat } = vi.hoisted(() => {
     resolveApproval = vi.fn()
     start = vi.fn()
     stop = vi.fn()
+    closeSocket = vi.fn() // P1-5: 连接期超时兜底主动关隧道
     constructor(handlers: MockHandlers) {
       this.handlers = handlers
       MockGatewayChat.instances.push(this)
@@ -51,8 +52,8 @@ const { MockGatewayChat } = vi.hoisted(() => {
     fireFrame(frame: unknown): void {
       this.handlers.onFrame(frame)
     }
-    fireClose(code: number, reason = '', retry = true): void {
-      this.handlers.onClose(code, reason, retry)
+    fireClose(code: number, reason = '', retry = true, pairingRequired?: boolean): void {
+      this.handlers.onClose(code, reason, retry, pairingRequired)
     }
     fireError(message: string): void {
       this.handlers.onError(message)
@@ -477,7 +478,8 @@ describe('ChatView', () => {
   })
 
   it('bootstrap-token 20040（容器归属拒绝）→ 容器不可访问，不建 gateway', async () => {
-    ;(getBootstrapToken as ReturnType<typeof vi.fn>).mockRejectedValue(new ApiError(20040, 'denied'))
+    // P0 回归：真实生产路径是 apiJson 抛 ApiError(code:20040, status:200)（信封错误恒 HTTP 200）
+    ;(getBootstrapToken as ReturnType<typeof vi.fn>).mockRejectedValue(new ApiError(20040, 'denied', 20040))
     const w = mount(ChatView)
     await flushPromises()
     expect(createGatewayChat).not.toHaveBeenCalled()
@@ -922,5 +924,125 @@ describe('ChatView', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  // ---- 三轮 code-review 回归（P0/P1/P2）----
+
+  it('P1-5: 连接期超时主动关隧道触发协议机重连（不再留 CONNECTING 静默丢消息窗口）', async () => {
+    vi.useFakeTimers()
+    try {
+      const w = mount(ChatView)
+      await flushPromises()
+      const gw = MockGatewayChat.last!
+      // 黑洞：不 fireReady。15s 超时 → 主动 closeSocket 让协议机走退避重连
+      vi.advanceTimersByTime(15_001)
+      await flushPromises()
+      expect(gw.closeSocket).toHaveBeenCalledWith(1000, 'connect timeout')
+      w.unmount()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('P1-1: 授权门 close（4401）落定流式占位（不再永久闪烁）+ 清 activeRunId（残留 runId 不吞用户回复）', async () => {
+    const { w, gw } = await mountReady()
+    await w.find('[data-test="input"]').setValue('问题')
+    await w.find('[data-test="send"]').trigger('click')
+    gw.fireFrame({ type: 'text', runId: 'r1', delta: '部分' }) // 流式中
+    await nextTick()
+    expect(w.find('.cursor').exists()).toBe(true) // 占位流式（闪烁光标）
+    gw.fireClose(4401) // 授权门（token 过期）
+    await nextTick()
+    // P1-1: 授权门同样落定占位 → 光标消失（旧实现跳过 finalizeLast → 永久闪烁 + composer 禁发）
+    expect(w.find('.cursor').exists()).toBe(false)
+    // 重连 onReady → 用户再发送 → 首帧正常渲染（授权门已清 activeRunId，残留 runId 不吞帧）
+    gw.getHistory.mockResolvedValue({ messages: [], hasMore: false, nextOffset: null })
+    gw.fireReady()
+    await flushPromises()
+    await w.find('[data-test="input"]').setValue('新问题')
+    await w.find('[data-test="send"]').trigger('click')
+    gw.fireFrame({ type: 'text', runId: 'r2', delta: '新回答' })
+    await nextTick()
+    expect(w.find('[data-test="stream"]').text()).toContain('新回答')
+    w.unmount()
+  })
+
+  it('P1-2: send() 的 RPC catch 有 stale-gateway 守卫（切容器后旧 gateway reject 不污染新容器）', async () => {
+    const { w, gw } = await mountReady()
+    // 构造 A 容器 send 在途 → 切 B 容器 → A 的 send reject → 不得对 B state finalizeLast/写错误
+    const sendReject = gw.send.mockRejectedValue(new Error('old connection stopped'))
+    await w.find('[data-test="input"]').setValue('hello')
+    await w.find('[data-test="send"]').trigger('click')
+    // 切到 other 容器（new gateway）
+    await w.find('[data-test="container-other"]').trigger('click')
+    await flushPromises()
+    const gw2 = MockGatewayChat.last!
+    gw2.listSessions.mockResolvedValue([SESSION])
+    gw2.getHistory.mockResolvedValue({ messages: [], hasMore: false, nextOffset: null })
+    gw2.listCommands.mockResolvedValue([])
+    gw2.fireReady()
+    await flushPromises()
+    // 旧 send 的 catch 触发
+    await sendReject
+    await nextTick()
+    // B 容器 errorMsg 不得出现旧连接错误
+    expect(w.find('[data-test="error-bar"]').exists()).toBe(false)
+    w.unmount()
+  })
+
+  it('P1-3: 首帧未到（pendingSend 空 runId）断线 → 不武装 resume 等待（30s 后无额外 loadHistory）', async () => {
+    vi.useFakeTimers()
+    try {
+      const w = mount(ChatView)
+      await flushPromises()
+      const gw = MockGatewayChat.last!
+      gw.listSessions.mockResolvedValue([SESSION])
+      gw.getHistory.mockResolvedValue({ messages: [], hasMore: false, nextOffset: null })
+      gw.listCommands.mockResolvedValue([])
+      gw.send.mockResolvedValue(undefined)
+      gw.fireReady()
+      await flushPromises()
+      await w.find('[data-test="input"]').setValue('问题')
+      await w.find('[data-test="send"]').trigger('click') // pendingSend=true, 首帧未到
+      gw.getHistory.mockClear()
+      gw.fireClose(1006, 'net', true) // 断线：首帧未到 → 不记录 resumeRun（P1-3）
+      await flushPromises()
+      expect(w.find('.cursor').exists()).toBe(false) // 孤儿占位落定（光标不闪烁）
+      gw.fireReady() // 重连 onReady：无 resumeRun → 走 syncSessions（非 armResumeWait）
+      await flushPromises()
+      const callsAfterReady = gw.getHistory.mock.calls.length
+      // 30s 后：未武装 resume 等待 → 不再触发额外 loadHistory（旧实现 {runId:''} 匹配 → 30s 后
+      // 又清空一次 + 期间占位挂空）
+      vi.advanceTimersByTime(30_001)
+      await flushPromises()
+      expect(gw.getHistory.mock.calls.length).toBe(callsAfterReady)
+      w.unmount()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("P1-4: 半截 <thinking 残片（视觉空白但 raw 非空）不阻挡切换认领——用户 run 首帧不丢", async () => {
+    const { w, gw } = await mountReady()
+    await w.find('[data-test="input"]').setValue('问题')
+    await w.find('[data-test="send"]').trigger('click')
+    // 外来预热 run 首帧是截断的 <thinking 增量（splitThinking 视觉空白，raw!==''）
+    gw.fireFrame({ type: 'text', runId: 'warm', delta: '<thi' })
+    await nextTick()
+    // 用户 run 首帧 → claimedEmpty 应按可见内容判定（text/thinking/tools 全空）→ 切换认领
+    gw.fireFrame({ type: 'text', runId: 'user-run', delta: '回答' })
+    await nextTick()
+    expect(w.find('[data-test="stream"]').text()).toContain('回答') // 不被静默丢弃
+    w.unmount()
+  })
+
+  it('P1-7: 未配对容器（PAIRING_REQUIRED）→ 提示先完成配对（非通用 give-up 文案）', async () => {
+    const { w } = await mountReady()
+    // onClose 第四参 pairingRequired=true（gatewayChat resolveClose 从 connectFailure 详情判定）
+    const gw = MockGatewayChat.last!
+    gw.fireClose(4402, 'gateway down', false, true)
+    await nextTick()
+    expect(w.find('[data-test="error-bar"]').text()).toContain('配对')
+    w.unmount()
   })
 })

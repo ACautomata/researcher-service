@@ -97,3 +97,43 @@ describe('auth register/login 错误透传', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2)
   })
 })
+
+// #312 信封（TS 后端）：login/refresh 一律 HTTP 200，成功 access 在 data.access、错误在信封码——
+// auth store 旧实现只认 resp.ok + 顶层 access，在信封下成功永远读不到 token、失败永远不抛错
+// （P0 code review 修复）。
+describe('auth #312 信封语义', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.stubGlobal('fetch', vi.fn())
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('login 成功：access 在信封 data.access（非顶层）', async () => {
+    const auth = useAuthStore()
+    ;(globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+      mockResp({ code: 0, message: 'ok', data: { access: 'tok-env' } }),
+    )
+    await auth.login('okuser', 'strong-pass-123')
+    expect(auth.token).toBe('tok-env')
+  })
+
+  it('login 失败：HTTP 200 + 信封 code（10002 登录失败）→ 抛信封 message', async () => {
+    ;(globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+      mockResp({ code: 10002, message: '用户名或密码错误', data: null }),
+    )
+    await expect(useAuthStore().login('x', 'y')).rejects.toThrow('用户名或密码错误')
+  })
+
+  it('forceRefresh 失败：HTTP 200 + 信封 10003（refresh 无效）→ 标 refreshExhausted', async () => {
+    const auth = useAuthStore()
+    ;(globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+      mockResp({ code: 10003, message: '刷新凭证无效', data: null }),
+    )
+    await auth.forceRefresh()
+    expect(auth.token).toBe('')
+    expect(auth.refreshExhausted).toBe(true)
+  })
+})

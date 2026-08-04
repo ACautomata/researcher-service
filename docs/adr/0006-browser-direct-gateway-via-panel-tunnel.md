@@ -17,7 +17,7 @@
 1. **transport 可注入（`./browser` 导出）**：`GatewayProtocolClientOptions.createSocket: (handlers) => GatewayProtocolSocket`（`protocol-client-*.d.mts:72`），`GatewayProtocolSocket` 仅 `{isOpen, send, close}` 三方法。类注释：*"Environment adapters own transport and auth policy; this class owns the single socket/handshake/reconnect/frame state machine."* → 浏览器可塞入「面板隧道 socket」，官方协议机照跑握手/重连/帧状态机/会话投影。
 2. **bootstrap token 对首连是强制的**：官方文档——*"Bootstrap auth is mandatory. The device must send the shared Gateway token or password for bootstrap authentication. An entirely unauthenticated connection would fail before reaching pairing."* 包内 `buildDeviceAuthPayloadV3` 的 `token ?? ""` 是「有 bootstrap token 时纳入签名」的分支，**非**「可省」。→ 「无 token 首连触发配对」不成立，bootstrap token 必须下发浏览器。
 3. **approve 无网关 RPC**：官方文档——*"Approval happens host-side via CLI… `openclaw devices approve <requestId>`… no gateway protocol RPC for self-approval; pairing requires out-of-band host authorization."* → approve 只能走后端（docker exec 宿主 CLI），浏览器物理碰不到容器 exec 通道。
-4. **`sessions.delete` 只需 operator scope**：`SessionsDeleteParamsSchema.archivedOnly` 注释——*"operator.write callers must set this; deletes without it require operator.admin."* → `archivedOnly:true`（archive-then-delete，可恢复，正合 #331 story 65）下，普通 operator 即可删会话。`sessions.list/create/history/delete` + `approval.resolve` + `commands` 全在 operator scope 内，浏览器直连全做。
+4. **`sessions.delete` 不带 archivedOnly**：`SessionsDeleteParamsSchema.archivedOnly` 注释——*"operator.write callers must set this; deletes without it require operator.admin."* 但实测校准（#370 三轮 P0）：官方 webchat（`sessions-page.ts`）**仅当 `row.archived === true` 才带 archivedOnly**，且网关对未归档会话带 archivedOnly:true 直接 `INVALID_REQUEST`（"Session X is not archived. Archive it first, then delete it."）——面板从不先归档，恒带 archivedOnly 会让**所有**正常会话删除失败。旧 wire（`wire_client.py` `sessions.delete {key}`）也不带，缺失会话为 `ok` 无操作（幂等）。**故删除不带 archivedOnly**；若真实网关对无 archivedOnly 的 delete 要求 operator.admin scope（注释所示），则普通 operator 删除会被拒，列为遗留实测项 ③ 验证。
 
 ## 决定
 
@@ -62,5 +62,5 @@
 - **spec §5.2 修订**（见「决定 7」），需在 #331 spec 与 deploy 契约文档同步标注。
 - **多 tab**：共享同一 profile 设备身份；审批连接级事件的「多并发连接是否广播」**包内无法确定**（网关侧行为），列实现期实测项，resolve 走 `first-answer-wins` 权威广播即可。
 - **网关 devices 列表膨胀**：每浏览器 profile × 每容器 = 一条 pending/paired 设备记录，为用户已接受代价。
-- **遗留实测项**：①浏览器无 token + bootstrap token 首连在真实网关（`ghcr.io/openclaw/openclaw:2026.7.1-browser`）上的 `PAIRING_REQUIRED` 行为实测；②审批事件多 tab 广播语义实测；③`archivedOnly:true` 的 sessions.delete 在真实网关的 archive-then-delete 行为实测。
+- **遗留实测项**：①浏览器无 token + bootstrap token 首连在真实网关（`ghcr.io/openclaw/openclaw:2026.7.1-browser`）上的 `PAIRING_REQUIRED` 行为实测；②审批事件多 tab 广播语义实测；③`sessions.delete` 不带 archivedOnly 在真实网关的行为实测（未归档会话删除成功与否、无 archivedOnly 是否要求 operator.admin scope）。
 - 本 ADR 与 [0002-openclaw-anti-corruption-layer](./0002-openclaw-anti-corruption-layer.md)、[0004-openclaw-wire-convergence](./0004-openclaw-wire-convergence.md) 相关：0002/0004 的「后端 Python 防腐层持有协议机」前提在 B-直连下被抽掉——协议机移至前端官方包，后端不再实现 WS protocol v4，防腐层仅剩「隧道透传 + approve exec + bootstrap 发放」三个薄触点。

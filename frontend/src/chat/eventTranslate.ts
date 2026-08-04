@@ -7,7 +7,8 @@
 export type ChatFrame =
   | { type: 'text'; runId: string; delta: string; replace?: boolean }
   | { type: 'done'; runId: string }
-  | { type: 'error'; runId: string; message: string }
+  // runId 可选：run 级错误挂 runId（前端按 runId 过滤）；无 runId 为连接/会话级错误（照常显示）
+  | { type: 'error'; runId?: string; message: string }
   | { type: 'approval'; id: string; kind: string; command: string; sessionKey: string | null }
   | { type: 'approvalResolved'; id: string; decision: string }
   | {
@@ -63,8 +64,18 @@ export function extractMessageText(message: unknown): string {
 }
 
 export class ChatEventTranslator {
-  // runId → 已发文本累积；final 尾部补发 / replace 整段替换时用于求差集或覆盖
+  // runId → 已发文本累积；final 尾部补发 / replace 整段替换时用于求差集或覆盖。
+  // P2（code review）：有界清理——只在 aborted/error/final 终态删除会泄漏断线中断/外来 run 的
+  // 条目（长连接内无界增长）；容量上限防御极端场景，连接生命周期边界（reset）由 gatewayChat
+  // onHello 调用（断线 resume 从头重放也不双重追加）。
   private readonly sent = new Map<string, string>()
+  private readonly MAX_SENT_ENTRIES = 500
+
+  // 连接生命周期边界清空累积器（断线重连后旧 run 的已发文本作废——若网关 resume 从头重放，
+  // 不清空会双重追加，直到 final 才 replace 纠正）。
+  reset(): void {
+    this.sent.clear()
+  }
 
   translate(frame: GatewayEventFrame): ChatFrame[] {
     if (frame.type !== 'event') return []
@@ -89,15 +100,28 @@ export class ChatEventTranslator {
     }
     if (event !== 'chat') return []
     const runId = typeof payload.runId === 'string' ? payload.runId : ''
-    if (!runId) return []
     const state = payload.state
-    if (state === 'delta') return this.translateDelta(runId, payload)
-    if (state === 'final') return this.translateFinal(runId, payload)
+    if (state === 'delta') {
+      if (!runId) return [] // 无 runId 的 delta 无锚点，无法渲染
+      return this.translateDelta(runId, payload)
+    }
+    if (state === 'final') {
+      if (!runId) return []
+      return this.translateFinal(runId, payload)
+    }
     if (state === 'aborted') {
+      if (!runId) return []
       this.sent.delete(runId)
       return [{ type: 'done', runId }]
     }
     if (state === 'error') {
+      // P2（code review）：无 runId 的 chat.error（会话级，如「会话不存在」）不再返回 [] 静默丢弃
+      // ——译成连接级错误帧（runId 缺省），ChatView.handleError 的 no-runId 分支（原为不可达死代码）
+      // 现在真正消费；run 级错误挂 runId 走 runId 过滤。
+      if (!runId) {
+        const message = String(payload.errorMessage ?? payload.errorKind ?? '')
+        return [{ type: 'error', message }]
+      }
       this.sent.delete(runId)
       // 网关 error 字段为 errorMessage（缺则退 errorKind），对齐 openclaw_service / r13:118
       const message = String(payload.errorMessage ?? payload.errorKind ?? '')
@@ -122,7 +146,11 @@ export class ChatEventTranslator {
     }
     const delta = typeof payload[DELTA_TEXT] === 'string' ? (payload[DELTA_TEXT] as string) : ''
     if (!delta) return []
-    this.sent.set(runId, (this.sent.get(runId) ?? '') + delta)
+    if (this.sent.size >= this.MAX_SENT_ENTRIES && !this.sent.has(runId)) {
+      // P2：有界防御——条目超上限且是全新 run，不增长（等价于该 run 无已发文本，final 走 replace）
+    } else {
+      this.sent.set(runId, (this.sent.get(runId) ?? '') + delta)
+    }
     return [{ type: 'text', runId, delta }]
   }
 

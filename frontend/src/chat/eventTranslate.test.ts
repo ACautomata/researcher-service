@@ -204,6 +204,48 @@ describe('ChatEventTranslator', () => {
     )
     expect(t.translate({ type: 'event', event: 'plugin.approval.resolved', payload: { decision: 'approve' } })).toEqual([])
   })
+
+  it('P2-1: 无 runId 的 chat.error → 连接级错误帧（不静默丢弃，handleError no-runId 分支可达）', () => {
+    const t = new ChatEventTranslator()
+    // 会话级错误（如「会话不存在」）无 runId——旧实现返回 [] 保证不可见
+    expect(
+      t.translate({ type: 'event', event: 'chat', payload: { state: 'error', errorMessage: '会话不存在' } }),
+    ).toEqual([{ type: 'error', message: '会话不存在' }])
+    // run 级错误仍挂 runId（走 runId 过滤）
+    expect(
+      t.translate({ type: 'event', event: 'chat', payload: { runId: 'r1', state: 'error', errorMessage: 'failed' } }),
+    ).toEqual([{ type: 'error', runId: 'r1', message: 'failed' }])
+  })
+
+  it('P2-2: reset 清空 sent 累积（断线重连边界，防 resume 重放双重追加）', () => {
+    const t = new ChatEventTranslator()
+    // 流式累积 sent['r1']='abc'
+    t.translate({ type: 'event', event: 'chat', payload: { runId: 'r1', state: 'delta', deltaText: 'abc' } })
+    // 断线重连（生命周期边界）→ reset
+    t.reset()
+    // 网关 resume 从头重放 delta + final → 不清空会双重追加（sent='abc' 时 final tail 只补 ' def'，
+    // 渲染端把重放 delta 再 append → 'abcabc def' 翻倍）；reset 后 final 对空 sent 发完整 'abc def'
+    const out = t.translate({ type: 'event', event: 'chat', payload: { runId: 'r1', state: 'final', message: 'abc def' } })
+    expect(out).toEqual([
+      { type: 'text', runId: 'r1', delta: 'abc def' }, // 完整文本（非 ' def' 尾部残差）
+      { type: 'done', runId: 'r1' },
+    ])
+  })
+
+  it('P2-2: 有界——sent 超上限时全新 run 不增长（终态前断线的 run 不无界泄漏）', () => {
+    const t = new ChatEventTranslator()
+    // 私有字段（测试同模块访问）；上限 500
+    const MAX = (t as unknown as { MAX_SENT_ENTRIES: number }).MAX_SENT_ENTRIES
+    for (let i = 0; i < MAX; i++) {
+      t.translate({ type: 'event', event: 'chat', payload: { runId: `r${i}`, state: 'delta', deltaText: 'x' } })
+    }
+    const sent = (t as unknown as { sent: Map<string, string> }).sent
+    expect(sent.size).toBe(MAX)
+    // 再进全新 run → 不增长
+    t.translate({ type: 'event', event: 'chat', payload: { runId: 'overflow', state: 'delta', deltaText: 'x' } })
+    expect(sent.size).toBe(MAX)
+    expect(sent.has('overflow')).toBe(false)
+  })
 })
 
 // E1: extractMessageText 是内容提取单一实现（流式 final/delta 与 loadHistory 历史复用）。

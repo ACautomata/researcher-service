@@ -169,15 +169,15 @@ describe('createGatewayChat（#369 隧道 Facade）', () => {
   it('close 决策：4401/4404/4403 → retry:false + notify；4402 → retry:true；其他 → retry:true', () => {
     const { client, handlers } = makeGateway()
     client.close({ code: 4401, reason: 'Unauthorized' })
-    expect(handlers.onClose).toHaveBeenLastCalledWith(4401, 'Unauthorized', false)
+    expect(handlers.onClose).toHaveBeenLastCalledWith(4401, 'Unauthorized', false, false)
     client.close({ code: 4404, reason: 'container denied' })
-    expect(handlers.onClose).toHaveBeenLastCalledWith(4404, 'container denied', false)
+    expect(handlers.onClose).toHaveBeenLastCalledWith(4404, 'container denied', false, false)
     client.close({ code: 4403, reason: 'must change password' })
-    expect(handlers.onClose).toHaveBeenLastCalledWith(4403, 'must change password', false)
+    expect(handlers.onClose).toHaveBeenLastCalledWith(4403, 'must change password', false, false)
     client.close({ code: 4402, reason: 'gateway down' })
-    expect(handlers.onClose).toHaveBeenLastCalledWith(4402, 'gateway down', true)
+    expect(handlers.onClose).toHaveBeenLastCalledWith(4402, 'gateway down', true, false)
     client.close({ code: 1006, reason: 'abnormal' })
-    expect(handlers.onClose).toHaveBeenLastCalledWith(1006, 'abnormal', true)
+    expect(handlers.onClose).toHaveBeenLastCalledWith(1006, 'abnormal', true, false)
     // 各 code 的 retry 决策
     const decisions: boolean[] = []
     for (const code of [4401, 4404, 4403, 4402, 1006]) {
@@ -190,7 +190,7 @@ describe('createGatewayChat（#369 隧道 Facade）', () => {
     const { client, handlers } = makeGateway()
     for (let i = 0; i < 5; i++) client.close({ code: 4402, reason: 'down' })
     // 第 5 次 close：resolveClose 达阈值返回 retry:false → onClose 第三个参数 false
-    expect(handlers.onClose).toHaveBeenLastCalledWith(4402, 'down', false)
+    expect(handlers.onClose).toHaveBeenLastCalledWith(4402, 'down', false, false)
   })
 
   it('F1: connect 阶段被拒（PAIRING_REQUIRED / AUTH 错误）→ retry:false（防 #369 空转重连）', () => {
@@ -270,6 +270,36 @@ describe('createGatewayChat（#369 隧道 Facade）', () => {
     expect(client.opts.resolveClose!(ctx).retry).toBe(true)
   })
 
+  it('P1-6: 稳定连接（hello 后存活超阈值）断开不计失败预算；crash-loop（hello 即崩）计数累积', () => {
+    vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval', 'setTimeout', 'clearTimeout'] })
+    try {
+      const { client } = makeGateway()
+      const ctx = {
+        code: 4402,
+        reason: '',
+        generation: 0,
+        socketOpened: true,
+        helloReceived: true, // 已 hello
+        connectRequestSent: true,
+      }
+      // 场景 A：hello 后存活超过 30s 稳定阈值再断（如看门狗自发 closeSocket / 网络抖动）→ 不计费
+      client.fireHello()
+      vi.advanceTimersByTime(31_000)
+      expect(client.opts.resolveClose!(ctx).retry).toBe(true) // 稳定断开不消耗预算
+      // 场景 B：crash-loop——hello 后立即崩（<30s 阈值），连续 5 次仍累积到 give-up
+      for (let i = 0; i < 4; i++) {
+        client.fireHello()
+        vi.advanceTimersByTime(1_000) // 存活 1s 即崩
+        expect(client.opts.resolveClose!(ctx).retry).toBe(true)
+      }
+      client.fireHello()
+      vi.advanceTimersByTime(1_000)
+      expect(client.opts.resolveClose!(ctx).retry).toBe(false) // 第 5 次 → give-up（crash-loop 不再无限空转）
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('F4: 构造带 requestTimeoutMs（RPC 有界等待，防半开连接 promise 永挂）', () => {
     const { client } = makeGateway()
     expect(client.opts.requestTimeoutMs).toBe(30_000)
@@ -307,7 +337,9 @@ describe('createGatewayChat（#369 隧道 Facade）', () => {
   })
 
   it('A3: crypto.randomUUID 不可用（非安全上下文）→ 兜底生成 requestId / 幂等 key（RPC 层不崩）', async () => {
-    vi.stubGlobal('crypto', undefined)
+    // 非安全上下文：crypto 存在但无 randomUUID（jsdom 有 getRandomValues）——A3 修复用
+    // getRandomValues 兜底（32-hex），不依赖 Math.random 坍缩路径
+    vi.stubGlobal('crypto', { getRandomValues: (arr: Uint8Array) => { for (let i = 0; i < arr.length; i++) arr[i] = (i * 7) % 256; return arr } } as unknown as Crypto)
     try {
       const { gw, client } = makeGateway()
       client.request.mockResolvedValue({})
@@ -318,7 +350,34 @@ describe('createGatewayChat（#369 隧道 Facade）', () => {
         expect.objectContaining({ idempotencyKey: expect.any(String) }),
       )
       const params = client.request.mock.calls[0][1] as { idempotencyKey: string }
-      expect(params.idempotencyKey.length).toBeGreaterThan(8)
+      // P2-4（code review）：兜底路径也须 32-hex（原 Math.random 兜底 ~30 位 base36，违反自钉契约
+      // /^[a-z0-9]{32}$/ 且跨路径与 randomUUID 格式不一致）
+      expect(params.idempotencyKey).toMatch(/^[a-z0-9]{32}$/)
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('P2-4: getRandomValues 兜底产出 32-hex（无 randomUUID 时 createSession/send 幂等 key 同格式）', async () => {
+    // 只去掉 randomUUID（保留 getRandomValues）——A3 测试已覆盖兜底路径
+    const cryptoNoUUID = {
+      getRandomValues: (arr: Uint8Array) => {
+        // 真实随机填充（确定性 mock 会让两次调用产出同 key，无法断言不碰撞）
+        for (let i = 0; i < arr.length; i++) arr[i] = Math.floor(Math.random() * 256)
+        return arr
+      },
+    } as unknown as Crypto
+    vi.stubGlobal('crypto', cryptoNoUUID)
+    try {
+      const { gw, client } = makeGateway()
+      client.request.mockResolvedValue({ key: 'sk-new' })
+      await gw.createSession()
+      await gw.send('sk-1', 'hi')
+      const createKey = (client.request.mock.calls[0][1] as { key: string }).key
+      const sendKey = (client.request.mock.calls[1][1] as { idempotencyKey: string }).idempotencyKey
+      expect(createKey).toMatch(/^[a-z0-9]{32}$/)
+      expect(sendKey).toMatch(/^[a-z0-9]{32}$/) // 跨路径统一 32-hex
+      expect(createKey).not.toBe(sendKey) // 不同调用不同 key（不碰撞）
     } finally {
       vi.unstubAllGlobals()
     }
@@ -369,11 +428,12 @@ describe('createGatewayChat（#369 隧道 Facade）', () => {
     await expect(gw.createSession()).rejects.toThrow('会话创建失败')
   })
 
-  it('deleteSession → sessions.delete{key, archivedOnly:true}', async () => {
+  it('deleteSession → sessions.delete{key}（不带 archivedOnly——网关对未归档会话恒拒，P0）', async () => {
     const { gw, client } = makeGateway()
     client.request.mockResolvedValue({})
     await gw.deleteSession('sk-1')
-    expect(client.request).toHaveBeenCalledWith('sessions.delete', { key: 'sk-1', archivedOnly: true })
+    // P0 回归：恒带 archivedOnly:true 让所有正常会话删除被网关 INVALID_REQUEST 拒绝
+    expect(client.request).toHaveBeenCalledWith('sessions.delete', { key: 'sk-1' })
   })
 
   it('getHistory → chat.history{sessionKey,limit?,messageId?} + 响应校准（messages 过滤非 dict、分页字段）', async () => {

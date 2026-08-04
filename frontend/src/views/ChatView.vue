@@ -120,9 +120,11 @@ let resumeRun: { runId: string } | null = null
 let resumeTimer: ReturnType<typeof setTimeout> | null = null
 // 存活检测 #14: 初始连接期超时兜底——SYN 黑洞（socket 永不 open、onopen/onclose/onerror 均不
 // 触发）下协议机无任何信号、pendingConnect 永挂、connecting 永久 true。兜底超时 resolve(false)
-// 解锁 UI（提示可重试）。阈值 > F10 握手超时 10s + 隧道侧网关连接超时 5s + 认证查询余量。
+// 解锁 UI（提示可重试）+ 主动关隧道触发协议机退避重连（P1：不关 socket 会让用户消息在 CONNECTING
+// 下被 tunnelSocket.send 静默丢弃）。阈值 > F10 握手超时 10s + 隧道侧网关连接超时 5s + 认证查询余量。
+// P0（code review）：connectTimeoutTimer 收 openGateway 局部作用域——并发 openGateway 互踩模块级
+// 单槽会让后调用方的 ready/timeout 双双永不 resolve、selectContainer 续体死锁。
 const CONNECT_TIMEOUT_MS = 15_000
-let connectTimeoutTimer: ReturnType<typeof setTimeout> | null = null
 function armResumeWait(run: { runId: string }) {
   if (resumeTimer !== null) clearTimeout(resumeTimer)
   resumeTimer = setTimeout(() => {
@@ -412,15 +414,16 @@ async function openGateway(): Promise<boolean> {
   clearPendingGraceTimer() // B4: 建连代际切换清除延迟收尾定时器（防跨代 fire）
   clearResumeWait() // B5: 新连接是新 run 语境，旧连接在途 run 的 resume 等待作废
   pendingAbandonCount = 0 // B1: 新连接孤儿计数清零（防吞新 run 首帧；切容器/4401重建/手动重连同路径）
-  // 协议机首连须 bootstrap auth（ADR 事实 2）；归属门/不存在 → 20040（前端显示容器不可访问）
+  // 协议机首连须 bootstrap auth（ADR 事实 2）；归属门/不存在 → 20040（前端显示容器不可访问）。
+  // 信封错误（HTTP 200 + code）经 apiJson 抛 ApiError(code)——status 分支不再需要（P0 code review）。
   let bootstrapToken: string
   try {
     bootstrapToken = await getBootstrapToken(name)
   } catch (e) {
     if (gen !== containerGen || disposed) return false
     connecting.value = false
-    if (e instanceof ApiError && e.status === 401) return false
-    if (e instanceof ApiError && e.status === 20040) {
+    if (e instanceof ApiError && (e.status === 401 || e.code === 10001)) return false
+    if (e instanceof ApiError && e.code === 20040) {
       errorMsg.value = '容器不可访问，请切换容器'
       return false
     }
@@ -489,20 +492,29 @@ async function openGateway(): Promise<boolean> {
             break
         }
       },
-      onClose: (code, _reason, retry) => {
+      onClose: (code, _reason, retry, pairingRequired) => {
         if (gateway !== myGw) return // 旧 gateway 的关闭（切容器）不报断线
         connecting.value = false
         disconnected.value = true // 意外断线：禁用发送（codex P2 #4）
         recoverPendingApprovals() // 连接断开：恢复所有 resolving 卡片可重试
+        const authGate =
+          code === WS_AUTH_FAIL || code === WS_MUST_CHANGE_PASSWORD || code === WS_CONTAINER_ACCESS_DENIED
+        // 占位落定（所有断开路径，光标不闪烁）：授权门拒绝（4401/4403/4404）也要落定——旧实现
+        // 授权门分支不 finalizeLast，流式占位永久闪烁（composer 因 streaming 禁发）（P1-1）。
+        if (activeRunId || pendingSend) finalizeLast()
         // B5: 意外断线不永久 abandon 在途 run——网关重连可能 resume 同一 run 补发续帧
         // （session projection）。记录 resumeRun 供 onReady 保留占位等待续帧（而非 loadHistory
         // 清空重建）；授权门拒绝（4401/4403/4404）不记录（连接未建立/不可恢复，无续帧可等）。
-        if (code !== WS_AUTH_FAIL && code !== WS_MUST_CHANGE_PASSWORD && code !== WS_CONTAINER_ACCESS_DENIED) {
-          if (activeRunId || pendingSend) {
-            resumeRun = { runId: activeRunId }
-            finalizeLast() // 占位落定（光标不闪烁）；resume 续帧到达时复活
-            // 保留 activeRunId + 占位（不清空），等重连 onReady 消费 resumeRun
-          }
+        if (authGate) {
+          // P1-1: 授权门清残留 activeRunId——否则 loadHistory 清 messages 但不清 runId，跨重连
+          // 存活的 runId 让自主 run 首帧被静默丢弃（claimedEmpty=false）。
+          activeRunId = ''
+        } else {
+          // P1-3（code review）：仅 activeRunId 非空才记录 resumeRun——pendingSend=true 但首帧未到
+          // （activeRunId===''）时断线，该 run 无法 resume（网关从未处理/无 runId 可投影），记录
+          // {runId:''} 会让重连 30s 后 armResumeWait 以 '' 匹配 → loadHistory 清空用户刚发的消息。
+          if (activeRunId) resumeRun = { runId: activeRunId }
+          // 保留 activeRunId + 占位（不清空），等重连 onReady 消费 resumeRun（B5 续帧匹配）
         }
         pendingAbandonCount = 0 // 连接已死：孤儿计数是「同连接内迟到首帧」语义，清零防吞新 run
         if (!everConnected) {
@@ -527,6 +539,12 @@ async function openGateway(): Promise<boolean> {
           if (!disposed) errorMsg.value = '容器不可访问，请切换容器'
           return
         }
+        // P1-7（code review）：PAIRING_REQUIRED（未配对）→ 提示先完成设备配对——通用「自动重连
+        // 已停止」文案让用户无从得知正确路径（旧 pairingNeeded + pair-guide 被删后无替代）。
+        if (pairingRequired) {
+          if (!disposed) errorMsg.value = '该容器尚未完成设备配对，请先到容器详情页完成配对后再对话'
+          return
+        }
         // 其他断开：D2 按协议机 retry 决策如实提示——false = 已停止自动重连（非恢复错误 /
         // 连续失败 give-up / 未配对），true = 退避重连中。不再对已停重连谎报「自动重连中…」。
         if (!disposed) {
@@ -546,23 +564,24 @@ async function openGateway(): Promise<boolean> {
   })
   gateway = myGw
   myGw.start()
-  // 存活检测 #14: 连接期超时竞速——SYN 黑洞初始连接（socket 永不 open）下 onReady/onClose/onError
-  // 都不触发，pendingConnect 永挂、connecting 永久 true。超时 resolve(false) 解锁 UI 提示可重试。
+  // P0（code review）：连接期超时竞速——SYN 黑洞初始连接（socket 永不 open）下 onReady/onClose/
+  // onError 都不触发，pendingConnect 永挂、connecting 永久 true。timer 收本调用局部作用域（闭包
+  // 持有），并发 openGateway 不再互踩模块级单槽。超时：resolve(false) 解锁 UI + 主动关隧道触发
+  // 协议机退避重连（P1：不关 socket 则 CONNECTING 下用户消息被 tunnelSocket.send 静默丢弃）。
+  let resolveTimeout: (ok: boolean) => void
   const timeout = new Promise<boolean>((resolve) => {
-    connectTimeoutTimer = setTimeout(() => {
-      connectTimeoutTimer = null
-      if (gen === containerGen && !disposed) {
-        connecting.value = false
-        errorMsg.value = '连接建立超时，请检查容器状态后重试'
-      }
-      resolve(false)
-    }, CONNECT_TIMEOUT_MS)
+    resolveTimeout = resolve
   })
+  const connectTimeoutTimer = setTimeout(() => {
+    if (gen === containerGen && !disposed) {
+      connecting.value = false
+      errorMsg.value = '连接建立超时，请检查容器状态后重试'
+      myGw.closeSocket(1000, 'connect timeout') // P1-5: 触发协议机退避重连自愈
+    }
+    resolveTimeout(false)
+  }, CONNECT_TIMEOUT_MS)
   const ok = await Promise.race([ready, timeout])
-  if (connectTimeoutTimer !== null) {
-    clearTimeout(connectTimeoutTimer)
-    connectTimeoutTimer = null
-  }
+  clearTimeout(connectTimeoutTimer) // race 已 settle：清自己的 timer 防泄漏
   if (!ok && pendingConnect) pendingConnect = null // 超时分支：迟到的 onReady 不再影响本决议
   return ok && gateway === myGw
 }
@@ -585,21 +604,33 @@ function connect() {
 }
 
 // ---- 渲染帧处理（runId 路由 / 消息投影 / 审批卡 / 工具行）----
-// 增量文本：chat.delta 事件（deltaText 追加；replace 快照整段替换）。thinking 剥离纯函数无跨帧态。
-function handleText(runId: string, delta: string, replace?: boolean) {
-  if (abandonedRunIds.has(runId)) return // 切换前遗留 run 的增量：丢弃
+// P2-3（code review）：run-claim 单一助手——handleText/handleTool 共用（原两处 ~37 行逐行复制，
+// 漂移会静默吞用户回复；如 claimedEmpty 判定一处改动另一处不随）。
+// 返回 true = 本帧应继续渲染（已认领 activeRunId / 已是当前 run）；false = 本帧应丢弃
+// （abandoned/foreign/孤儿计数）。
+// P1-4（code review）：B2 claimedEmpty 用「渲染可见内容」判定——半截 <thinking 残片
+// （splitThinking 实测 {text:'',thinking:'',inThinking:false} 视觉空白但 raw!==''）不再阻挡切换
+// 认领，用户 run 首帧不被静默丢弃（原 last.raw==='' 判定失效）。
+function claimRun(runId: string): boolean {
+  if (abandonedRunIds.has(runId)) return false // 切换前遗留 run 的帧：丢弃
   if (activeRunId && runId !== activeRunId) {
-    // B2: 已认领 run 但占位仍无任何文本（先到者可能是同会话自主 run 的预热/status 首帧）→ 切换
-    // 认领到后到 run（更像用户 send 触发的 run），防用户回复被静默丢弃（原代码直接 return）。
+    // B2: 已认领 run 但占位仍无任何可见内容（先到者可能是同会话自主 run 的预热/status 首帧）→
+    // 切换认领到后到 run（更像用户 send 触发的 run），防用户回复被静默丢弃（原代码直接 return）。
     const last = messages.value[messages.value.length - 1]
-    const claimedEmpty = Boolean(last && last.role === 'assistant' && last.raw === '' && last.tools.length === 0)
+    const claimedEmpty = Boolean(
+      last &&
+        last.role === 'assistant' &&
+        last.text === '' && // P1-4: 渲染可见内容（splitThinking 剥离后正文/思考均空）
+        last.thinking === '' &&
+        last.tools.length === 0,
+    )
     if (claimedEmpty) {
       foreignRunIds.add(activeRunId) // 先到空 run 降级为外来
       activeRunId = runId
       clearPendingGraceTimer()
       clearResumeWait()
     } else {
-      return // 仅当前 run 的增量写入回复
+      return false // 仅当前 run 的帧写入回复
     }
   }
   if (!activeRunId) {
@@ -607,18 +638,18 @@ function handleText(runId: string, delta: string, replace?: boolean) {
     if (pendingAbandonCount > 0) {
       pendingAbandonCount--
       abandonedRunIds.add(runId)
-      return
+      return false
     }
     // B4: 宽限已 fire（graceExpired）后迟到的用户 run 首帧——pendingSend 已清，但仍认领不 foreign
     const lateClaim = !pendingSend && graceExpired
-    // F7: 空闲（无在途用户 send 且非迟到认领）时的首帧——外来自主 run 不认领：记录其 runId 供后续帧过滤
-    //（用户 send 后其续帧按 runId 丢弃，防劫持 activeRunId / 污染用户气泡 / 吞用户回复）。
+    // F7: 空闲（无在途用户 send 且非迟到认领）时的首帧——外来自主 run 不认领：记录其 runId 供
+    // 后续帧过滤（用户 send 后其续帧按 runId 丢弃，防劫持 activeRunId / 污染用户气泡 / 吞回复）。
     if (!pendingSend && !lateClaim) {
       foreignRunIds.add(runId)
-      return
+      return false
     }
     // F7: 空闲期已观察到的外来 run 的续帧（用户 send 后到达）——丢弃，不抢占 activeRunId
-    if (foreignRunIds.has(runId)) return
+    if (foreignRunIds.has(runId)) return false
     clearPendingGraceTimer() // B3/B4: 在途 error/done 的延迟收尾取消——首帧已到，本 run 正常
     clearResumeWait() // B5: resume 等待期间收到本 run 首帧 → 续帧已到，取消超时重建
     if (lateClaim) graceExpired = false
@@ -629,6 +660,12 @@ function handleText(runId: string, delta: string, replace?: boolean) {
     const ph = messages.value[messages.value.length - 1]
     if (ph && ph.role === 'assistant' && !ph.streaming) ph.streaming = true
   }
+  return true
+}
+
+// 增量文本：chat.delta 事件（deltaText 追加；replace 快照整段替换）。thinking 剥离纯函数无跨帧态。
+function handleText(runId: string, delta: string, replace?: boolean) {
+  if (!claimRun(runId)) return
   const last = messages.value[messages.value.length - 1]
   // B5: 追加条件放宽到 activeRunId===runId（本 run 帧）——断线 onClose 已 finalizeLast 落定占位
   //（streaming=false），resume 续帧到达时若只认 streaming 会丢帧；本 run 帧允许复活占位继续追加。
@@ -748,45 +785,10 @@ function handleApprovalResolved(id: string, decision: string) {
 }
 
 // T08 工具执行（issue #44 / spec §9.4）：工具挂在所属 chat run 内，带 runId。首帧可能是工具
-// （agent 先调工具再回复）→ 与 handleText 同款锚定当前 run；按 name 聚合 start→result 渲染一行标题+状态。
+// （agent 先调工具再回复）→ 与 handleText 同款锚定当前 run（共用 claimRun 助手，P2-3）；
+// 按 name 聚合 start→result 渲染一行标题+状态。
 function handleTool(tool: { runId: string; name: string; state: 'running' | 'done' | 'error'; id: string | null; title: unknown; input: unknown; result: unknown }) {
-  if (abandonedRunIds.has(tool.runId)) return
-  if (activeRunId && tool.runId !== activeRunId) {
-    // B2: 同 handleText——已认领 run 但占位仍无文本/工具行 → 切换认领到后到 run
-    const last = messages.value[messages.value.length - 1]
-    const claimedEmpty = Boolean(last && last.role === 'assistant' && last.raw === '' && last.tools.length === 0)
-    if (claimedEmpty) {
-      foreignRunIds.add(activeRunId)
-      activeRunId = tool.runId
-      clearPendingGraceTimer()
-      clearResumeWait()
-    } else {
-      return
-    }
-  }
-  if (!activeRunId) {
-    if (pendingAbandonCount > 0) {
-      pendingAbandonCount--
-      abandonedRunIds.add(tool.runId)
-      return
-    }
-    // B4: 宽限已 fire（graceExpired）后迟到的用户 run 首帧——仍认领不 foreign
-    const lateClaim = !pendingSend && graceExpired
-    // F7: 同 handleText——空闲期外来自主 run 不认领、记录 runId 供后续帧过滤
-    if (!pendingSend && !lateClaim) {
-      foreignRunIds.add(tool.runId)
-      return
-    }
-    if (foreignRunIds.has(tool.runId)) return // F7: 已观察到的外来 run 续帧：丢弃
-    clearPendingGraceTimer() // B3/B4: 首帧已到，取消在途 error/done 的延迟收尾
-    clearResumeWait() // B5: resume 等待期间收到本 run 帧 → 取消超时重建
-    if (lateClaim) graceExpired = false
-    activeRunId = tool.runId
-    pendingSend = false
-    // B4: 占位可能已被宽限 finalize（streaming=false）——认领后复活（后续 text delta 可继续追加）
-    const ph = messages.value[messages.value.length - 1]
-    if (ph && ph.role === 'assistant' && !ph.streaming) ph.streaming = true
-  }
+  if (!claimRun(tool.runId)) return
   const last = messages.value[messages.value.length - 1]
   if (!last || last.role !== 'assistant') return
   clearResumeWait() // B5: 本 run 工具续帧到达 → 取消 resume 超时重建
@@ -864,9 +866,14 @@ function send() {
   activeRunId = '' // 等首帧 onText 锚定新 run
   graceExpired = false // B4: 新 run 语境，宽限过期标记作废
   pendingSend = true // 首帧未到前，切会话会按 pending 孤儿计数（codex P2 #3）
+  const myGw = gateway
   // chat.send RPC（幂等 key 在 gatewayChat 内生成）；网关拒绝（未配对/scope 不足）→ catch 收尾提示
-  void gateway.send(selectedSession.value, text).catch((e) => {
+  void myGw.send(selectedSession.value, text).catch((e) => {
     if (disposed) return
+    // P1-2（code review）：stale-gateway 守卫——旧 gateway stop() flush-reject 在途 send 时，当前
+    // 容器可能已切换（gateway !== myGw）；无守卫会对新容器 state 执行 finalizeLast + 写旧连接停止
+    // 错误进新容器的 errorMsg（对齐 onFrame/onClose 的 stale guard）。
+    if (gateway !== myGw) return
     // F3: RPC 失败复位 pendingSend——泄漏会让切会话变 phantom orphan（pendingAbandonCount++），
     // 下次发送首帧被当作孤儿丢弃、composer 永久锁死。
     pendingSend = false
@@ -1034,7 +1041,8 @@ onBeforeUnmount(() => {
   disposed = true
   clearPendingGraceTimer() // B4: 卸载清延迟收尾 timer，防组件销毁后触发
   clearResumeWait() // B5: 卸载清 resume 等待 timer
-  if (connectTimeoutTimer !== null) clearTimeout(connectTimeoutTimer) // #14: 连接期超时 timer
+  // #14: 连接期超时 timer 已收 openGateway 局部作用域（P0：闭包内 clearTimeout，并发 openGateway
+  // 不再互踩模块级单槽），组件卸载无需清理——gateway.stop() 停协议机即可。
   gateway?.stop()
 })
 
