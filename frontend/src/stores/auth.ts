@@ -95,9 +95,14 @@ export const useAuthStore = defineStore('auth', {
         })
         const body = await safeJson(resp)
         // #312 信封：失败（10003 刷新无效）也 HTTP 200 → 以信封码判耗尽；Django 语义按状态码。
+        // #370 评论 52（P1）：仅确定失效码（10003 refresh 无效/重放/族灭）置耗尽——90000（后端
+        // 瞬态内部错误，如 DB 瞬断）/90002（校验）与网络异常一样按瞬态处理不标记，否则凭据仍有效
+        // 的用户被瞬态故障强制登出且无自动重试（对照 client.ts「瞬态失败保留会话供上层重试」）。
         const env = parseEnvelope(body)
-        if (env && env.code !== 0) {
+        if (env && env.code === 10003) {
           this.refreshExhausted = true
+        } else if (env && env.code !== 0) {
+          // 其它信封码（90000/90002…）= 瞬态：不标记，下次重试
         } else if (resp.ok) {
           const access = readAccessToken(body)
           if (access) this.token = access

@@ -136,4 +136,26 @@ describe('auth #312 信封语义', () => {
     expect(auth.token).toBe('')
     expect(auth.refreshExhausted).toBe(true)
   })
+
+  it('forceRefresh 失败：HTTP 200 + 信封 90000（后端瞬态故障）→ 不标 refreshExhausted（保留会话供重试）', async () => {
+    // #370 评论 52（P1）：旧实现 env.code!==0 一律置耗尽——DB 瞬断等瞬态 90000 会把仍有效的
+    // 会话踢出登录（后续任何 apiFetch 刷新链见 refreshExhausted 直接 clearSession + 跳 /login）。
+    // 对照 client.ts 语义：「瞬态失败（cookie 仍可能有效）→ 不标记，下次重试」。
+    const auth = useAuthStore()
+    ;(globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+      mockResp({ code: 90000, message: '服务器内部错误', data: null }),
+    )
+    await auth.forceRefresh()
+    expect(auth.token).toBe('')
+    expect(auth.refreshExhausted).toBe(false)
+  })
+
+  it('forceRefresh 失败：HTTP 200 + 信封 90002（校验）→ 不标 refreshExhausted（瞬态）', async () => {
+    const auth = useAuthStore()
+    ;(globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+      mockResp({ code: 90002, message: '参数校验失败', data: null }),
+    )
+    await auth.forceRefresh()
+    expect(auth.refreshExhausted).toBe(false)
+  })
 })

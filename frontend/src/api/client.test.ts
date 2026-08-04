@@ -171,9 +171,12 @@ describe('api client', () => {
   it('apiFetch redirects to login when envelope 10001 + refresh exhausted', async () => {
     const auth = useAuthStore()
     auth.token = 'revoked-access'
-    ;(globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
-      mockResp({ code: 10001, message: '未认证', data: null }),
-    )
+    const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>
+    // 业务请求被拒（HTTP 200 + 10001，token 吊销）→ 触发刷新链；refresh 端点确认失效（10003，
+    // #370 评论 52：仅此码置 refreshExhausted——server refresh 端点只可能返回 10003/90000/90002）
+    fetchMock
+      .mockResolvedValueOnce(mockResp({ code: 10001, message: '未认证', data: null }))
+      .mockResolvedValueOnce(mockResp({ code: 10003, message: '刷新凭证无效', data: null }))
     const assignSpy = vi.fn()
     Object.defineProperty(window, 'location', {
       configurable: true,

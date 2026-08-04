@@ -74,6 +74,10 @@ const abandonedRunIds = new Set<string>() // 切换前遗留的 runId：迟到�
 // 按 runId 丢弃，防止外来 run 在用户 send 后劫持 activeRunId、污染用户气泡/吞用户回复。终态清理。
 const foreignRunIds = new Set<string>()
 let pendingSend = false // 已 send 但首帧未到（runId 未知）
+// #53: 本 send 的 RPC ack 返回的 runId（官方 chat.send ackPayload={runId,status:"started"}）——
+// pendingSend 期间首帧归属判别信号：首帧 runId ≠ 本 run 时判定为外来/旧 run（切容器后旧连接在途
+// run 首帧经新连接到达的唯一判别方式；ack 未回/无 runId 时为空串，沿用旧行为）。
+let myRunId = '' // 本 send 的网关 runId（ack 返回）；'' = 未知/无 ack
 let pendingAbandonCount = 0 // 切会话时仍 pending 的 run 数；其迟到首帧按 FIFO 视为孤儿丢弃（codex P2 #3）
 // selectContainer 的请求代：丢弃切容器途中迟到的响应（codex P2）
 let containerGen = 0
@@ -103,6 +107,7 @@ function armPendingGrace() {
       finalizeLast() // 占位落定（防永久 streaming 锁死 composer）
       graceExpired = true // 迟到首帧仍可认领；pendingSend 清（切会话不产生 phantom orphan）
       pendingSend = false
+      myRunId = '' // #53: 宽限 fire 放弃本 run 的 ack runId
     }
   }, PENDING_RUN_GRACE_MS)
 }
@@ -270,6 +275,7 @@ function abandonActiveRun() {
   graceExpired = false // 切会话/容器：宽限过期的「迟到认领」语义作废（新 run 语境）
   activeRunId = ''
   pendingSend = false
+  myRunId = '' // #53: 切会话/容器放弃本 run 的 ack runId
 }
 
 // 收尾最后一条 streaming 助手消息（done/error/关闭时）
@@ -418,6 +424,7 @@ async function openGateway(): Promise<boolean> {
   clearPendingGraceTimer() // B4: 建连代际切换清除延迟收尾定时器（防跨代 fire）
   clearResumeWait() // B5: 新连接是新 run 语境，旧连接在途 run 的 resume 等待作废
   pendingAbandonCount = 0 // B1: 新连接孤儿计数清零（防吞新 run 首帧；切容器/4401重建/手动重连同路径）
+  myRunId = '' // #53: 新连接生命周期边界，本 run 的 ack runId 作废
   graceExpired = false // #11（第四轮）：宽限过期标记是 run 语境，连接边界复位——防重连后首个自主 run 被 lateClaim 认领进旧占位
   // 协议机首连须 bootstrap auth（ADR 事实 2）；归属门/不存在 → 20040（前端显示容器不可访问）。
   // 信封错误（HTTP 200 + code）经 apiJson 抛 ApiError(code)——status 分支不再需要（P0 code review）。
@@ -522,6 +529,7 @@ async function openGateway(): Promise<boolean> {
         // 切会话 abandonActiveRun 走 `else if (pendingSend)` → pendingAbandonCount++ → 下次 send 首帧
         // 被孤儿计数吞。
         pendingSend = false
+        myRunId = '' // #53: 连接已死，本 run 的 ack runId 作废
         // B5: 意外断线不永久 abandon 在途 run——网关重连可能 resume 同一 run 补发续帧
         // （session projection）。记录 resumeRun 供 onReady 保留占位等待续帧（而非 loadHistory
         // 清空重建）；授权门拒绝（4401/4403/4404）不记录（连接未建立/不可恢复，无续帧可等）。
@@ -635,6 +643,7 @@ function connect() {
 // tool 行不是「回复正文」，不算占位已被占用。
 function claimRun(runId: string): boolean {
   if (abandonedRunIds.has(runId)) return false // 切换前遗留 run 的帧：丢弃
+  if (foreignRunIds.has(runId)) return false // #53: 已判定外来/旧 run 的续帧：丢弃（含 B2 切换认领前）
   if (activeRunId && runId !== activeRunId) {
     // B2: 已认领 run 但占位仍无可见正文（先到者可能是同会话自主 run 的预热/status 首帧）→
     // 切换认领到后到 run（更像用户 send 触发的 run），防用户回复被静默丢弃（原代码直接 return）。
@@ -661,6 +670,13 @@ function claimRun(runId: string): boolean {
       abandonedRunIds.add(runId)
       return false
     }
+    // #53: pendingSend 期间本 run ack 已知（myRunId）且首帧 runId 非本 run → 外来/旧 run 首帧
+    //（切容器后旧连接在途 run 首帧经新连接到达，runId 不在 abandonedRunIds——切走时首帧未到）
+    // 丢弃，不抢占 activeRunId（否则用户 run 首帧因 claimedEmpty=false 被静默丢弃）。
+    if (pendingSend && myRunId && runId !== myRunId) {
+      foreignRunIds.add(runId) // 记外来 run：其续帧/终态按 runId 过滤
+      return false
+    }
     // B4: 宽限已 fire（graceExpired）后迟到的用户 run 首帧——pendingSend 已清，但仍认领不 foreign
     const lateClaim = !pendingSend && graceExpired
     // F7: 空闲（无在途用户 send 且非迟到认领）时的首帧——外来自主 run 不认领：记录其 runId 供
@@ -676,6 +692,7 @@ function claimRun(runId: string): boolean {
     if (lateClaim) graceExpired = false
     activeRunId = runId
     pendingSend = false
+    myRunId = '' // #53: 首帧已认领，归属判别信号不再需要
     // B4: 占位可能已被宽限 finalize（streaming=false）——认领后复活占位继续追加（慢 run 首帧
     // >宽限后仍正常渲染，而非被当作 foreign 丢弃）。
     const ph = messages.value[messages.value.length - 1]
@@ -891,25 +908,35 @@ function send() {
   activeRunId = '' // 等首帧 onText 锚定新 run
   graceExpired = false // B4: 新 run 语境，宽限过期标记作废
   pendingSend = true // 首帧未到前，切会话会按 pending 孤儿计数（codex P2 #3）
+  myRunId = '' // #53: 新 send 语境，ack runId 未知
   const myGw = gateway
   // chat.send RPC（幂等 key 在 gatewayChat 内生成）；网关拒绝（未配对/scope 不足）→ catch 收尾提示
-  void myGw.send(selectedSession.value, text).catch((e) => {
-    if (disposed) return
-    // P1-2（code review）：stale-gateway 守卫——旧 gateway stop() flush-reject 在途 send 时，当前
-    // 容器可能已切换（gateway !== myGw）；无守卫会对新容器 state 执行 finalizeLast + 写旧连接停止
-    // 错误进新容器的 errorMsg（对齐 onFrame/onClose 的 stale guard）。
-    if (gateway !== myGw) return
-    errorMsg.value = (e as Error).message
-    // R4-5（第四轮）：run 已 claim 且仍在流（activeRunId 非空——首帧已到）时，RPC 超时但网关可能
-    // 继续流式续帧。此时 finalize 占位会落定 streaming，续帧要么被当下次 send 的占位认领（跨 run
-    // 文本污染 + 吞用户回复），要么占位永久卡。仅在「首帧未到即失败」（activeRunId 空，run 没起来）
-    // 时 finalize + 清 pendingSend 放弃占位。
-    if (activeRunId) return
-    // F3: RPC 失败复位 pendingSend——泄漏会让切会话变 phantom orphan（pendingAbandonCount++），
-    // 下次发送首帧被当作孤儿丢弃、composer 永久锁死。
-    pendingSend = false
-    finalizeLast()
-  })
+  void myGw
+    .send(selectedSession.value, text)
+    .then((runId) => {
+      // #53: ack 返回本 run 的网关 runId（官方 chat.send ackPayload）——供首帧归属判别。
+      // stale-gateway 守卫同 catch：切容器后旧 gateway 的 ack 不污染新 run 语境。
+      if (gateway !== myGw || !pendingSend) return
+      myRunId = runId ?? ''
+    })
+    .catch((e) => {
+      if (disposed) return
+      // P1-2（code review）：stale-gateway 守卫——旧 gateway stop() flush-reject 在途 send 时，当前
+      // 容器可能已切换（gateway !== myGw）；无守卫会对新容器 state 执行 finalizeLast + 写旧连接停止
+      // 错误进新容器的 errorMsg（对齐 onFrame/onClose 的 stale guard）。
+      if (gateway !== myGw) return
+      errorMsg.value = (e as Error).message
+      // R4-5（第四轮）：run 已 claim 且仍在流（activeRunId 非空——首帧已到）时，RPC 超时但网关可能
+      // 继续流式续帧。此时 finalize 占位会落定 streaming，续帧要么被当下次 send 的占位认领（跨 run
+      // 文本污染 + 吞用户回复），要么占位永久卡。仅在「首帧未到即失败」（activeRunId 空，run 没起来）
+      // 时 finalize + 清 pendingSend 放弃占位。
+      if (activeRunId) return
+      // F3: RPC 失败复位 pendingSend——泄漏会让切会话变 phantom orphan（pendingAbandonCount++），
+      // 下次发送首帧被当作孤儿丢弃、composer 永久锁死。
+      pendingSend = false
+      myRunId = '' // #53: RPC 失败，ack runId 无意义
+      finalizeLast()
+    })
   input.value = ''
 }
 

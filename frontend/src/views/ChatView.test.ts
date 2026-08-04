@@ -629,6 +629,51 @@ describe('ChatView', () => {
     gw2.fireFrame({ type: 'done', runId: 'r-new' })
   })
 
+  it('B6: 切走再切回后，旧容器在途 run 首帧不抢新 run（未认领孤儿 → 回复不丢）', async () => {
+    // 评论 #53 真实场景：demo 发送（pendingSend=true，首帧未到）→ 切 other（abandonActiveRun
+    // pendingAbandonCount++，但 openGateway 清零）→ 切回 demo（新连接）→ 发送 →
+    // 旧 demo run 首帧（带文本）经新连接迟到到达 → 首帧认领（!activeRunId）无 abandonedRunIds
+    // 检查 → 抢走 activeRunId → 用户 B run 首帧因 claimedEmpty=false 被静默丢弃
+    const { w, gw } = await mountReady()
+    await w.find('[data-test="input"]').setValue('A 问题')
+    await w.find('[data-test="send"]').trigger('click') // pendingSend=true，首帧未到
+    // 切 other（abandonActiveRun：pendingSend → pendingAbandonCount++）
+    await w.find('[data-test="container-other"]').trigger('click')
+    await flushPromises()
+    const gwOther = MockGatewayChat.last!
+    gwOther.listSessions.mockResolvedValue([])
+    gwOther.createSession.mockResolvedValue('sk-other')
+    gwOther.getHistory.mockResolvedValue({ messages: [], hasMore: false, nextOffset: null })
+    gwOther.listCommands.mockResolvedValue([])
+    gwOther.send.mockResolvedValue(undefined)
+    gwOther.fireReady()
+    await flushPromises()
+    // 切回 demo：新连接（pendingAbandonCount 清零）
+    await w.find('[data-test="container-demo"]').trigger('click')
+    await flushPromises()
+    const gwDemo2 = MockGatewayChat.last!
+    expect(gwDemo2).not.toBe(gw)
+    gwDemo2.listSessions.mockResolvedValue([SESSION])
+    gwDemo2.getHistory.mockResolvedValue({ messages: [], hasMore: false, nextOffset: null })
+    gwDemo2.listCommands.mockResolvedValue([])
+    gwDemo2.send.mockResolvedValue(undefined)
+    gwDemo2.fireReady()
+    await flushPromises()
+    // demo 新发送 → pendingSend=true（新 run 语境）。send mock 返回 ack runId（#53 判别信号）
+    gwDemo2.send.mockResolvedValueOnce('rB')
+    await w.find('[data-test="input"]').setValue('B 问题')
+    await w.find('[data-test="send"]').trigger('click')
+    await flushPromises() // ack 已回 → myRunId='rB'
+    // 旧 demo run 首帧（带文本）经新连接迟到到达 → runId≠ack → 外来，不得抢占 activeRunId
+    gwDemo2.fireFrame({ type: 'text', runId: 'rOld', delta: '旧回复' })
+    await nextTick()
+    // 用户 B run 首帧 → 正常认领渲染（修复前被旧 run 抢占 → 静默丢弃）
+    gwDemo2.fireFrame({ type: 'text', runId: 'rB', delta: 'B 回复' })
+    await nextTick()
+    expect(w.find('[data-test="stream"]').text()).toContain('B 回复')
+    gwDemo2.fireFrame({ type: 'done', runId: 'rB' })
+  })
+
   it('B2: pendingSend 期间外来空 run 首帧先到 → 用户 run 后到切换认领（回复不丢）', async () => {
     const { w, gw } = await mountReady()
     await w.find('[data-test="input"]').setValue('我的问题')

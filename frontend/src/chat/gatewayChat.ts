@@ -72,7 +72,10 @@ export interface GatewayChat {
   createSession(label?: string): Promise<string>
   deleteSession(key: string): Promise<void>
   getHistory(sessionKey: string, limit?: number, messageId?: string): Promise<SessionHistoryDTO>
-  send(sessionKey: string, message: string): Promise<void>
+  // chat.send RPC 响应携带网关分配的 runId（ackPayload = {runId, status:"started"}，
+  // 官方 chat-send-handler）——供 ChatView 首帧归属判别（#53：pendingSend 期间外来/旧 run
+  // 首帧与自己的 run 区分，防抢 activeRunId 吞回复）。ack 无 runId（旧网关/异常形状）→ undefined。
+  send(sessionKey: string, message: string): Promise<string | undefined>
   listCommands(): Promise<CommandDTO[]>
   resolveApproval(id: string, kind: string, decision: string): Promise<void>
 }
@@ -362,15 +365,18 @@ export function createGatewayChat(params: CreateGatewayChatParams): GatewayChat 
         nextOffset: typeof res?.nextOffset === 'string' || typeof res?.nextOffset === 'number' ? res.nextOffset : null,
       }
     },
-    async send(sessionKey: string, message: string): Promise<void> {
+    async send(sessionKey: string, message: string): Promise<string | undefined> {
       // chat.send 幂等（schema 必填 idempotencyKey）；返回后流式 delta/final 事件经 onEvent 到达。
       // A3/P2: 幂等 key 与 createSession 统一 32-hex 格式（randomUUID 去连字符——跨路径 key 规范
       // 一致，网关幂等去重不因格式分歧而失效）。
-      await client.request('chat.send', {
+      // #53: RPC 响应 = ackPayload {runId, status:"started"}（官方 chat-send-handler）——返回
+      // runId 供 ChatView 首帧归属判别；ack 无 runId（异常形状）返回 undefined。
+      const res = await client.request<{ runId?: unknown }>('chat.send', {
         sessionKey,
         message,
         idempotencyKey: createRequestId().replace(/[^a-z0-9]/g, ''),
       })
+      return typeof res?.runId === 'string' && res.runId ? res.runId : undefined
     },
     async listCommands(): Promise<CommandDTO[]> {
       const res = await client.request<{ commands?: Array<Record<string, unknown>> }>('commands.list', {})
