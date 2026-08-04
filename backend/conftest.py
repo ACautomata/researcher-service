@@ -14,8 +14,9 @@
 与 ``tests/integration/conftest.py`` 的 session 级 ``integration_bootstrap`` fixture 分工：
 本文件管 **python 依赖缺口**（必须 collection 前处理）；那个 fixture 管 integration-infra
 专属项（playwright 客户端 / chromium / frontend node_modules，只在真跑 integration case
-时准备）。backend-unit job 装 dev.txt（含 base）、integration job 装 integration.txt（dev
-超集）→ 两个 job 里本钩子探测的 pinned dist 全在 → 是 ~N 次 stdlib metadata 探测的 no-op。
+时准备）。backend-unit job 装 dev.txt（含 base）→ 本钩子探测的 pinned dist 全在 → 是
+~N 次 stdlib metadata 探测的 no-op。（真容器集成测试流程已从 CI 删除；本地真跑 integration
+case 仍用 requirements/integration.txt，见 backend/README.md。）
 
 探测只查「distribution 缺失」（``importlib.metadata.PackageNotFoundError``），不做版本
 比较——版本修复交给幂等的 uv/pip install（resolver 正确性优于手写 SpecifierSet 版本数学，

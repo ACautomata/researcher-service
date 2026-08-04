@@ -1,6 +1,7 @@
 # GitHub Actions CD —— 打包前后端 Docker 镜像推 GHCR，经 SSH 部署到宝塔宿主。
 #
-# 触发：CI（.github/workflows/ci.yml）在 master 上成功完成后（workflow_run），保证「不部署红码」。
+# 触发：当前临时禁用（仅 workflow_dispatch，见下方 on 块注释）。恢复后为 CI 在 master 上成功
+# 完成后（workflow_run），保证「不部署红码」。
 # 镜像：backend（Django/Daphne）+ frontend（Vue/Vite→nginx）双镜像，tag `:latest` + `:<CI head_sha>`
 # （head_sha 取自通过的 CI run，使 latest/sha 精确对应该 commit，便于 :sha 回滚）。
 # 部署：appleboy/scp-action 推 compose + 渲染 .env → /www/panel；appleboy/ssh-action 远端
@@ -15,10 +16,10 @@
 name: CD
 
 on:
-  workflow_run:
-    workflows: ["CI"]
-    types: [completed]
-    branches: [master]
+  # 暂时禁用 CD（后端迁 TS/Express 期间不自动部署 Django 镜像）：触发从 workflow_run 临时降级为
+  # 仅 workflow_dispatch（手动）。deploy job 的 if 守卫引用 workflow_run 事件数据 → 手动触发也会
+  # 安全跳过，等效完全禁用。恢复自动部署：把此块还原为原 workflow_run 触发（见 git history）。
+  workflow_dispatch:
 
 # 仅在 CI 成功时部署；失败/取消即跳过（job 级 if 守卫）。
 concurrency:
