@@ -126,7 +126,7 @@ describe('makeWsGatewayConnector（#337 M5 · P2-4 终态事件重放）', () =>
     // 只由 open/error 清除——若 close-before-open 不触发 error，会等满 timeoutMs 误报「gateway
     // connect timeout」；修复后 close 也清除定时器并 reject。
     const gserver = http.createServer()
-    gserver.on('upgrade', (req, socket) => socket.destroy()) // 不 handleUpgrade，直接 reset
+    gserver.on('upgrade', (_req, socket) => socket.destroy()) // 不 handleUpgrade，直接 reset
     await new Promise<void>((r) => gserver.listen(0, '127.0.0.1', r))
     const { port } = gserver.address() as AddressInfo
     const url = `ws://127.0.0.1:${port}/`

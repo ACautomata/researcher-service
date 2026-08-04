@@ -13,7 +13,7 @@ const { MockGatewayProtocolClient, MockGatewayProtocolRequestError, MockShouldPa
     onEvent?: (e: unknown) => void
     onHello?: () => void
     onClose?: (c: { code: number; reason: string }, d: unknown) => void
-    resolveClose?: (c: Record<string, unknown>) => { retry: boolean }
+    resolveClose?: (c: Record<string, unknown>) => { retry: boolean; notify?: boolean; reconnectDelayMs?: number }
     onConnectError?: (e: Error) => void
     onRequestTiming?: (t: { errorCode?: string }) => void
     buildConnectPlan?: (p: unknown) => unknown | Promise<unknown>
