@@ -120,6 +120,17 @@ function readTemplateDir(): string {
   return raw ?? `${process.cwd()}/../researcher`
 }
 
+// OPENCLAW_FLEET_WS_SCHEME（code review F2）：隧道连容器网关的 URL scheme。平移 Django
+// settings.OPENCLAW_FLEET['SCHEME']（deploy 注释：生产在网关开 tls 后切 wss）。默认 ws
+//（loopback 明文）；非法值 fail-fast（防 `SCHEME=http` 这类错值静默拼出坏 URL，隧道全 4402）。
+function readHealthScheme(): string {
+  const v = process.env.OPENCLAW_FLEET_WS_SCHEME ?? 'ws'
+  if (v !== 'ws' && v !== 'wss') {
+    throw new Error(`OPENCLAW_FLEET_WS_SCHEME 非法: ${JSON.stringify(v)}，须为 ws 或 wss`)
+  }
+  return v
+}
+
 // OPENCLAW_FLEET_ROOT（Codex 第七轮 #4）：相对路径时 path.join 保留相对性 → instances/<id>/home 与
 // openclaw.json 作 Docker bind source 非绝对（Docker bind source 须绝对）→ POST 返 creating、后台
 // provisioning 失败留 error 行（部署故障静默掩盖，与 OPENCLAW_TEMPLATE_DIR 第六轮同类）。生产强制
@@ -173,6 +184,8 @@ export const config = {
       publishHost: process.env.OPENCLAW_FLEET_PORT_BIND_HOST ?? '127.0.0.1',
       // 健康探测目标 host（与 WS 配对同源）
       healthHost: process.env.OPENCLAW_FLEET_WS_HOST ?? '127.0.0.1',
+      // 容器网关 WS 传输 scheme（ws/wss；生产 TLS 后切 wss，readHealthScheme 校验）
+      healthScheme: readHealthScheme(),
       // 凭证加密密钥（gateway token 落盘密文；生产 CREDENTIAL_ENCRYPTION_KEYS 必填，dev 固定密钥）
       encryptionKeys: parseEncryptionKeys(process.env.CREDENTIAL_ENCRYPTION_KEYS),
     }

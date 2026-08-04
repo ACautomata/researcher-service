@@ -1,0 +1,91 @@
+// P2-4 网关终态事件重放（codex PR #367）——makeWsGatewayConnector 在网关 open 后立即断开时，
+// 终态事件（close/error）须在 onClose/onError 注册后被重放。否则浏览器隧道保持 OPEN 但上游
+// 已死（容器重启中），官方协议机收不到 close/error 无法重连——隧道假活。
+//
+// 与消息缓冲同模式（gatewayConnector 已缓冲 open→注册窗口内的首帧）：终态也须记录并在注册时重放。
+
+import { describe, it, expect } from 'vitest'
+import http, { type Server } from 'node:http'
+import type { AddressInfo } from 'node:net'
+import { WebSocketServer } from 'ws'
+import { makeWsGatewayConnector } from '../src/chat/gatewayConnector'
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+
+// 模拟容器网关：upgrade 握手后 delayMs 即 terminate（容器重启中——协议机对端突然死亡）
+async function startGateway(delayMs: number): Promise<{ server: Server; url: string }> {
+  const server = http.createServer()
+  const wss = new WebSocketServer({ noServer: true })
+  server.on('upgrade', (req, socket, head) => {
+    wss.handleUpgrade(req, socket, head, (ws) => {
+      setTimeout(() => ws.terminate(), delayMs)
+    })
+  })
+  await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
+  const { port } = server.address() as AddressInfo
+  return { server, url: `ws://127.0.0.1:${port}/` }
+}
+
+describe('makeWsGatewayConnector（#337 M5 · P2-4 终态事件重放）', () => {
+  it('网关 open 后立即断开（容器重启中）→ 延迟注册 onClose 仍收到 close 事件（不丢终态）', async () => {
+    const { server, url } = await startGateway(20)
+    try {
+      const connector = makeWsGatewayConnector()
+      const socket = await connector.connect(url)
+      // 模拟 tunnel 的 await 链：connect resolve 后（网关已死）才注册 onClose
+      await sleep(100)
+      const closes: Array<{ code: number; reason: string }> = []
+      socket.onClose((code, reason) => closes.push({ code, reason }))
+      await sleep(100)
+      expect(closes.length).toBe(1) // 修复前 = 0（事件在注册前已发生，ws.on('close') 不重放）
+      expect(closes[0].code).toBe(1006) // terminate 无 close frame → Node ws 报 1006
+    } finally {
+      server.close()
+    }
+  })
+
+  it('终态只重放一次（多次注册 onClose 各触发一次，连接已终态不再叠加）', async () => {
+    const { server, url } = await startGateway(20)
+    try {
+      const connector = makeWsGatewayConnector()
+      const socket = await connector.connect(url)
+      await sleep(100)
+      const closes: number[] = []
+      socket.onClose((code) => closes.push(code))
+      socket.onClose((code) => closes.push(code))
+      await sleep(100)
+      expect(closes.length).toBe(2) // 两次注册各一次（重放语义与 on('close') 一致：每 listener 一次）
+      expect(closes.every((c) => c === 1006)).toBe(true)
+    } finally {
+      server.close()
+    }
+  })
+
+  it('#7 gateway→panel ws client 须带 maxPayload=1MiB：网关推超限帧 → socket 被关（否则默认 100MiB 上限绕过浏览器腿 1MiB 封顶）', async () => {
+    // 容器网关被攻陷/异常时推 >1MiB 帧：gatewayConnector 的 ws client 若沿用 ws 默认 100MiB
+    // maxPayload，该帧被原样透传到浏览器——浏览器腿的 1MiB 封顶（TUNNEL_MAX_PAYLOAD）被绕过。
+    const gserver = http.createServer()
+    const wss = new WebSocketServer({ noServer: true })
+    gserver.on('upgrade', (req, socket, head) => {
+      wss.handleUpgrade(req, socket, head, (ws) => {
+        ws.send(Buffer.alloc(2 * 1024 * 1024)) // 2MiB > 1MiB（网关一建连即推超限帧）
+      })
+    })
+    await new Promise<void>((r) => gserver.listen(0, '127.0.0.1', r))
+    const { port } = gserver.address() as AddressInfo
+    const url = `ws://127.0.0.1:${port}/`
+    try {
+      const connector = makeWsGatewayConnector()
+      const socket = await connector.connect(url)
+      const closes: Array<{ code: number; reason: string }> = []
+      socket.onClose((code, reason) => closes.push({ code, reason }))
+      const messages: Array<string | Buffer> = []
+      socket.onMessage((m) => messages.push(m))
+      await sleep(200)
+      expect(messages.length).toBe(0) // 超限帧不得被接收/透传
+      expect(closes.length).toBe(1) // 修复前：client 默认 maxPayload 100MiB → 帧通过、无 close → 红
+    } finally {
+      gserver.close()
+    }
+  })
+})
