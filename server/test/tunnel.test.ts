@@ -466,4 +466,36 @@ describe('M5 隧道（#337 · ADR 0006）', () => {
       await ctx.close()
     }
   })
+
+  it('客户端超限帧 error 被监听兜底 → 无 uncaught 崩溃（error listener 回归，codex P1）', async () => {
+    // codex PR #367 意见 1：maxPayload 超限时 ws 接收层 emit WS_ERR_UNSUPPORTED_MESSAGE_LENGTH，
+    // 无 error listener 则该 error 成为 uncaught——Node 默认终止整个控制面进程。本测试用
+    // process 级 spy 断言 error 被 tunnel 的 `ws.on('error')` 兜底（vitest 自身 handler 会把
+    // uncaught 降级为 error 而非 test failure，故须显式 spy 才能 red-capable）。
+    const uncaught: unknown[] = []
+    const onUncaught = (e: unknown): void => {
+      uncaught.push(e)
+    }
+    process.on('uncaughtException', onUncaught)
+    let ctx: TunnelCtx | null = null
+    try {
+      const made = await makeAlphaCtx()
+      ctx = made.ctx
+      const { baseUrl, gateway } = made.ctx // const 解构：闭包里用不可变引用，避免 TS possibly-null
+      const ws = await connectTunnel(`${baseUrl}?container=alpha`, ['access_token', made.jwt])
+      const closes = collectClose(ws)
+      // 先发一帧确认隧道已连上网关（否则大帧走 pending 缓冲 256KB 预算 → 1008，非本次断言目标）
+      ws.send('{"type":"req","id":"p","method":"ping"}')
+      await until(() => gateway.received.length >= 1)
+      ws.send('x'.repeat(2 * 1024 * 1024)) // 超 maxPayload → error 事件（非认证客户端在验签前即可触发）
+      await until(() => closes.length > 0)
+      expect(closes[0].code).toBe(1009)
+      // 给 error 事件一个传播窗口，断言未被抛成 uncaught
+      await new Promise((r) => setTimeout(r, 100))
+      expect(uncaught).toHaveLength(0)
+    } finally {
+      process.removeListener('uncaughtException', onUncaught)
+      if (ctx) await ctx.close()
+    }
+  })
 })
