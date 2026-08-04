@@ -52,6 +52,25 @@ export function makeWsGatewayConnector(timeoutMs = CONNECT_TIMEOUT_MS): GatewayC
         })
         ws.once('open', () => {
           clearTimeout(timer)
+          // 终态事件记录（P2-4，codex PR #367）：网关可能在 onClose/onError 注册前就断开（容器
+          // 重启中）——EventEmitter.on 不重放已发生事件，须像下方消息缓冲一样记录终态，注册时
+          // 重放。否则浏览器隧道保持 OPEN 但上游已死，官方协议机收不到 close/error 无法重连（假活）。
+          let closed = false
+          let closeCode = 0
+          let closeReason = ''
+          let errored: Error | null = null
+          const closeCbs: Array<(code: number, reason: string) => void> = []
+          const errorCbs: Array<(err: Error) => void> = []
+          ws.on('close', (code, reason) => {
+            closed = true
+            closeCode = code
+            closeReason = reason.toString()
+            for (const cb of closeCbs) cb(closeCode, closeReason)
+          })
+          ws.on('error', (err) => {
+            errored = err
+            for (const cb of errorCbs) cb(err)
+          })
           const socket: GatewaySocket = {
             send: (data) => {
               if (ws.readyState === WebSocket.OPEN) ws.send(data)
@@ -63,8 +82,14 @@ export function makeWsGatewayConnector(timeoutMs = CONNECT_TIMEOUT_MS): GatewayC
               for (const frame of buffered) cb(frame)
               buffered.length = 0
             },
-            onClose: (cb) => ws.on('close', cb),
-            onError: (cb) => ws.on('error', cb),
+            onClose: (cb) => {
+              if (closed) cb(closeCode, closeReason)
+              else closeCbs.push(cb)
+            },
+            onError: (cb) => {
+              if (errored) cb(errored)
+              else errorCbs.push(cb)
+            },
           }
           resolve(socket)
         })

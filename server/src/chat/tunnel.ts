@@ -27,6 +27,7 @@ import {
   WS_MUST_CHANGE_PASSWORD_CLOSE,
   WS_POLICY_VIOLATION,
   TUNNEL_PENDING_BYTE_BUDGET,
+  TUNNEL_MAX_PAYLOAD,
 } from './values'
 import type { GatewayConnector, GatewaySocket } from './gatewayConnector'
 
@@ -36,6 +37,17 @@ export interface TunnelDeps {
   connectGateway: GatewayConnector
   // 容器网关宿主地址（config.fleet.healthHost；生产 127.0.0.1）
   gatewayHost: string
+}
+
+// 网关 close code 传导 sanitize（安全审查 P1-1，codex PR #367）：RFC 6455 保留码 1004/1005/1006
+// 不能放进 close frame——ws sender.close 对非法码同步抛 TypeError（实测网关异常断开时 Node ws 报
+// 1006，直接 ws.close(1006) 抛错且浏览器收不到 close、隧道悬空）。合法区间原样传
+//（1000-1014 非保留 + 3000-4999）；非法 → 4402 网关不可达（异常断开即网关挂，语义正确）。
+export function sanitizeGatewayCloseCode(code: number): number {
+  const valid =
+    (code >= 1000 && code <= 1014 && code !== 1004 && code !== 1005 && code !== 1006) ||
+    (code >= 3000 && code <= 4999)
+  return valid ? code : WS_GATEWAY_UNAVAILABLE
 }
 
 export interface TunnelServer {
@@ -51,6 +63,9 @@ export interface TunnelServer {
 export function createTunnelServer(deps: TunnelDeps): TunnelServer {
   const wss = new WebSocketServer({
     noServer: true,
+    // 单帧载荷上限（P1-2）：不设则 ws 默认 100MiB，未认证客户端可在验签 await 窗口内发近 100MiB
+    // 帧打满内存（pending 预算 256KiB 是 handler 内事后检查）。超限帧 ws 直接 close(1009)。
+    maxPayload: TUNNEL_MAX_PAYLOAD,
     // chooseProtocol 返回 undefined（无 access_token 声明）→ 不选 subprotocol 仍 accept，由 token
     // 校验层决定 4401（对齐现状「无 subprotocol 地 accept」，不在握手层拒绝）。断言适配 @types/ws
     // 的 `string | false`：ws 8.x 运行时对 falsy 返回不 push subprotocol header 且不 abort 握手。
@@ -77,6 +92,9 @@ async function handleConnection(ws: WebSocket, req: IncomingMessage, deps: Tunne
   // 立即注册浏览器侧监听（accept 后浏览器即可发帧/断开；下述 await 期间未监听即丢帧/泄漏）：
   //   - message → 缓冲到 pending（网关连好后 flush，见下）
   //   - close → 网关连好后关闭它（浏览器 early-close 也捕获，防泄漏）
+  //   - error → receiver 传输错误（如 maxPayload 超限 WS_ERR_UNSUPPORTED_MESSAGE_LENGTH）emit 到
+  //     ws 实例；无 listener 会抛成 uncaught 终止进程。隧道只透传，error 由 close 事件兜底清理。
+  ws.on('error', () => {})
   let gateway: GatewaySocket | null = null
   const pending: string[] = []
   let pendingBytes = 0
@@ -158,8 +176,10 @@ async function handleConnection(ws: WebSocket, req: IncomingMessage, deps: Tunne
     if (ws.readyState === WebSocket.OPEN) ws.send(data)
   })
   gateway.onClose((code) => {
-    // 网关断开 → 关隧道，把 close code 传导给浏览器（浏览器侧协议机决策重连）
-    if (ws.readyState === WebSocket.OPEN) ws.close(code)
+    // 网关断开 → 关隧道，把 close code 传导给浏览器（浏览器侧协议机决策重连）。
+    // 保留码（1006/1005/1004）先 sanitize 再 close——直接传会同步抛 TypeError 且浏览器收不到
+    // close 帧（隧道悬空，见 sanitizeGatewayCloseCode）。
+    if (ws.readyState === WebSocket.OPEN) ws.close(sanitizeGatewayCloseCode(code))
   })
   gateway.onError(() => {
     // 网关传输错误：关隧道让浏览器侧协议机决策重连

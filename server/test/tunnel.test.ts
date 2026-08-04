@@ -432,4 +432,38 @@ describe('M5 隧道（#337 · ADR 0006）', () => {
       await ctx.close()
     }
   })
+
+  it('网关异常断开（close code 1006 保留码）→ 浏览器收到 4402 而非 1006（sanitize：保留码不可进 close frame）', async () => {
+    const { ctx, jwt } = await makeAlphaCtx()
+    try {
+      const ws = await connectTunnel(`${ctx.baseUrl}?container=alpha`, ['access_token', jwt])
+      const closes = collectClose(ws)
+      ws.send('{"type":"req","id":"p","method":"ping"}')
+      await until(() => ctx.gateway.received.length >= 1)
+      // 网关进程死/TCP reset → Node ws 客户端报 1006（RFC 6455 保留码）。
+      // 直接 ws.close(1006) 会同步抛 TypeError（sender.validateStatusCode）——sanitize 到 4402。
+      ctx.gateway.fireClose(1006)
+      await until(() => closes.length > 0)
+      expect(closes[0].code).toBe(4402)
+    } finally {
+      await ctx.close()
+    }
+  })
+
+  it('单帧超 maxPayload → close(1009)（message too big：未认证客户端不能以 100MiB 级帧打满内存）', async () => {
+    const { ctx, jwt } = await makeAlphaCtx()
+    try {
+      const ws = await connectTunnel(`${ctx.baseUrl}?container=alpha`, ['access_token', jwt])
+      const closes = collectClose(ws)
+      // 先发一帧确认隧道已连上网关（否则大帧走 pending 缓冲 256KB 预算 → 1008，非本次断言目标）
+      ws.send('{"type":"req","id":"p","method":"ping"}')
+      await until(() => ctx.gateway.received.length >= 1)
+      // 2 MiB 单帧 > maxPayload（默认 100MiB 无上限；修复后 1MiB）→ ws 接收层拒绝 close(1009)
+      ws.send('x'.repeat(2 * 1024 * 1024))
+      await until(() => closes.length > 0)
+      expect(closes[0].code).toBe(1009)
+    } finally {
+      await ctx.close()
+    }
+  })
 })

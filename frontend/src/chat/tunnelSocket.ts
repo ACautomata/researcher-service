@@ -13,8 +13,12 @@ export function createPanelTunnelSocket(
   jwt: string,
   handlers: GatewayProtocolSocketHandlers,
 ): GatewayProtocolSocket {
-  // 容器名 encodeURIComponent：DNS-label 本就安全，防御性编码防 URL 注入
-  const ws = new WebSocket(`/ws/chat/?container=${encodeURIComponent(container)}`, ['access_token', jwt])
+  // 容器名 encodeURIComponent：DNS-label 本就安全，防御性编码防 URL 注入。
+  // 原生 WebSocket 构造函数要求绝对 URL（ws:/wss: scheme），相对路径抛 SyntaxError（P1-3，
+  // codex PR #367；单元测试曾用 mock 掩盖）。按页面协议选 wss:/ws:（HTTPS 页面明文 ws 被浏览器拒）。
+  const scheme = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+  const url = `${scheme}//${window.location.host}/ws/chat/?container=${encodeURIComponent(container)}`
+  const ws = new WebSocket(url, ['access_token', jwt])
   ws.onopen = () => handlers.open()
   // 协议机只发文本帧（send(string)）；网关回帧亦为文本 → ev.data 为 string
   ws.onmessage = (ev) => handlers.message(ev.data as string)

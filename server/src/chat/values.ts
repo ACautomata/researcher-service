@@ -30,3 +30,9 @@ export const WS_POLICY_VIOLATION = 1008
 // 网关连接建立前浏览器入站帧缓冲的字节预算（超过即 close(1008)）。协议机正常流程下网关连好前
 // 浏览器几乎不发帧（等 challenge），预算仅防御异常/恶意客户端在连接窗口内狂发帧的内存耗尽。
 export const TUNNEL_PENDING_BYTE_BUDGET = 256 * 1024
+
+// 单帧载荷上限（WebSocketServer maxPayload，安全审查 P1-2：codex PR #367）。不设则 ws 默认
+// 100MiB——未认证客户端可在 JWT 验证 await 窗口内发近 100MiB 帧，pending 预算(256KiB)是
+// message handler 内的事后检查、防不住单帧内存分配。1MiB ≥ 协议机合法最大帧（tool 事件载荷），
+// 超限帧由 ws 接收层直接拒绝 close(1009)，浏览器协议机据此决策重连。
+export const TUNNEL_MAX_PAYLOAD = 1024 * 1024
