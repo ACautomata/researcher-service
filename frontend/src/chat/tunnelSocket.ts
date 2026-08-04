@@ -11,6 +11,7 @@
 // 「相对路径抛 SyntaxError」的错误前提，且引入 window.location 依赖、subpath 部署下同样丢前缀。
 
 import type { GatewayProtocolSocket, GatewayProtocolSocketHandlers } from '@openclaw/gateway-client/browser'
+import { buildSubprotocols } from './protocol'
 
 export function createPanelTunnelSocket(
   container: string,
@@ -19,7 +20,7 @@ export function createPanelTunnelSocket(
 ): GatewayProtocolSocket {
   // 容器名 encodeURIComponent：DNS-label 本就安全，防御性编码防 URL 注入。
   const url = `/ws/chat/?container=${encodeURIComponent(container)}`
-  const ws = new WebSocket(url, ['access_token', jwt])
+  const ws = new WebSocket(url, buildSubprotocols(jwt))
   ws.onopen = () => handlers.open()
   // 协议机只发文本帧（send(string)）；网关回帧亦为文本 → ev.data 为 string
   ws.onmessage = (ev) => handlers.message(ev.data as string)
@@ -38,6 +39,14 @@ export function createPanelTunnelSocket(
     send: (data) => {
       if (ws.readyState === WebSocket.OPEN) ws.send(data)
     },
-    close: (code, reason) => ws.close(code, reason),
+    close: (code, reason) => {
+      // #4：WHATWG 只允许 1000/3000-4999 的 close code——官方协议机 connect 失败路径用 1008/1013 等
+      // RFC 应用码调 socket.close，直接透传原生 WebSocket.close 会抛 InvalidAccessError（socket 关
+      // 不掉、onclose 不触发 → 协议机重连由 handlers.close 驱动、永不调度，隧道假活）。非法码映射
+      // 1000 关闭（WHATWG 合法），原码带进 reason 保排障。
+      const legal = code === undefined || code === 1000 || (code >= 3000 && code <= 4999)
+      if (legal) ws.close(code, reason)
+      else ws.close(1000, `closed(${code})`)
+    },
   }
 }

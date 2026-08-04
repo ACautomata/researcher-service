@@ -2,7 +2,10 @@
 // 经 /ws/chat/ 连后端 ChatConsumer（握手复用 T02 JwtAuthMiddleware）；收 ready/text/done/error
 // 分发到 handlers。无新依赖（不用 @vueuse/core），原生 WebSocket 即可满足 MVP。
 //
-// subprotocol 对齐 accounts/middleware._extract_token 格式 1：['access_token', <jwt>]。
+// subprotocol 对齐 accounts/middleware._extract_token 格式 1：['access_token', <jwt>]（#14 契约单一
+// 来源见 ./protocol，cross-test pin 跨语言一致）。
+
+import { buildSubprotocols } from './protocol'
 
 export type ChatFrame =
   | { type: 'ready'; container: string }
@@ -99,7 +102,7 @@ export class ChatWebSocket {
     this.handlers = handlers
     this.silenceTimeout = opts?.silenceTimeoutMs ?? SILENCE_TIMEOUT_MS
     this.pingInterval = opts?.pingIntervalMs ?? PING_INTERVAL_MS
-    this.ws = new WebSocket(path, ['access_token', jwt])
+    this.ws = new WebSocket(path, buildSubprotocols(jwt))
     this.connectTimer = setTimeout(() => {
       this.connectTimer = null
       // 定时器可能与 onopen 同一轮排队；只关闭仍未完成握手的 socket。

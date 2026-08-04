@@ -10,9 +10,15 @@ export const WS_CHAT_PATH = '/ws/chat/'
 // subprotocol 前缀（对齐 Django accounts/middleware 的 access_token 两格式）
 export const WS_CHAT_PROTOCOL = 'access_token'
 
-// 拒绝码（对齐 Django WS_CLOSE_UNAUTHORIZED）：认证/授权失败——无效/过期 token、越权/不存在容器。
+// 拒绝码（对齐 Django WS_CLOSE_UNAUTHORIZED）：认证失败——无效/过期 token。
 // 先 accept 再 close(4401)，保前端 recoverUnauthorized 刷新重连链路（HTTP 401 只得 1006 故不简化）。
+// 容器归属（越权/不存在）不在此码——见 WS_CONTAINER_ACCESS_DENIED（#3）。
 export const WS_AUTH_FAIL_CLOSE = 4401
+
+// 容器归属门拒绝（#3，code review）：越权/不存在容器同码 4404 防探测——token 有效但该容器不是
+// 当前用户可访问。独立于 4401（非凭证过期，前端不应 forceRefresh 死循环）；独立于 4402（非网关
+// 传输层不可达，而是「无此容器 / 无权限访问」）。含容器名缺失（?container= 未传）。
+export const WS_CONTAINER_ACCESS_DENIED = 4404
 
 // 容器网关不可达（容器不在 running / 宿主端口不通 / 网关未起）。非认证问题，区别于 4401
 // （前端不应触发 forceRefresh，而应提示容器不可用/重试）。

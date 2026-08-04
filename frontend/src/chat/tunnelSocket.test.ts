@@ -40,8 +40,16 @@ class MockWS {
     this.sent.push(data)
   }
 
-  close(code?: number, _reason?: string): void {
+  closedReason = ''
+
+  close(code?: number, reason?: string): void {
+    // WHATWG：非 1000/3000-4999 的 close code 抛 InvalidAccessError（对齐浏览器原生行为——此前
+    // MockWS 不校验，掩盖了协议机传 1008/1013 等应用码时 createPanelTunnelSocket.close 崩溃的 bug）
+    if (code !== undefined && code !== 1000 && !(code >= 3000 && code <= 4999)) {
+      throw new DOMException(`The provided close code (${code}) is not valid.`, 'InvalidAccessError')
+    }
     this.closedCode = code
+    this.closedReason = reason ?? ''
     this.readyState = CLOSED
     this.onclose?.({ code: code ?? 1000, reason: '' })
   }
@@ -134,6 +142,17 @@ describe('createPanelTunnelSocket（#337 M5 隧道）', () => {
     const socket = createPanelTunnelSocket('alpha', 'jwt', makeHandlers())
     socket.close(4401, 'Unauthorized')
     expect(MockWS.last!.closedCode).toBe(4401)
+  })
+
+  it('#4 close(1008/1013 等协议机应用码) → 映射为合法码关闭，不抛 InvalidAccessError（否则 socket 关不掉、onclose 不触发 → 重连永不调度）', () => {
+    // 官方协议机 connect 失败路径（challenge 超时 1008、gateway starting 1013 等）用 RFC 应用码调
+    // socket.close——非 1000/3000-4999 的码经原生 WebSocket.close 抛 InvalidAccessError（MockWS 现
+    // 已校验码），socket 关不掉、协议机重连（由 handlers.close 驱动）永不调度，隧道假活。
+    const handlers = makeHandlers()
+    const socket = createPanelTunnelSocket('alpha', 'jwt', handlers)
+    expect(() => socket.close(1008, 'connect challenge timeout')).not.toThrow() // 修复前：抛 InvalidAccessError → 红
+    expect(MockWS.last!.closedCode).toBe(1000) // 非法码映射 1000 关闭（WHATWG 合法）
+    expect(MockWS.last!.closedReason).toContain('1008') // 原码带进 reason 保排障
   })
 
   it('服务端 close(4401) → handlers.close 收到 code/reason（认证失败刷新重连链路）', () => {

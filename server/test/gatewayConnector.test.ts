@@ -60,4 +60,32 @@ describe('makeWsGatewayConnector（#337 M5 · P2-4 终态事件重放）', () =>
       server.close()
     }
   })
+
+  it('#7 gateway→panel ws client 须带 maxPayload=1MiB：网关推超限帧 → socket 被关（否则默认 100MiB 上限绕过浏览器腿 1MiB 封顶）', async () => {
+    // 容器网关被攻陷/异常时推 >1MiB 帧：gatewayConnector 的 ws client 若沿用 ws 默认 100MiB
+    // maxPayload，该帧被原样透传到浏览器——浏览器腿的 1MiB 封顶（TUNNEL_MAX_PAYLOAD）被绕过。
+    const gserver = http.createServer()
+    const wss = new WebSocketServer({ noServer: true })
+    gserver.on('upgrade', (req, socket, head) => {
+      wss.handleUpgrade(req, socket, head, (ws) => {
+        ws.send(Buffer.alloc(2 * 1024 * 1024)) // 2MiB > 1MiB（网关一建连即推超限帧）
+      })
+    })
+    await new Promise<void>((r) => gserver.listen(0, '127.0.0.1', r))
+    const { port } = gserver.address() as AddressInfo
+    const url = `ws://127.0.0.1:${port}/`
+    try {
+      const connector = makeWsGatewayConnector()
+      const socket = await connector.connect(url)
+      const closes: Array<{ code: number; reason: string }> = []
+      socket.onClose((code, reason) => closes.push({ code, reason }))
+      const messages: Array<string | Buffer> = []
+      socket.onMessage((m) => messages.push(m))
+      await sleep(200)
+      expect(messages.length).toBe(0) // 超限帧不得被接收/透传
+      expect(closes.length).toBe(1) // 修复前：client 默认 maxPayload 100MiB → 帧通过、无 close → 红
+    } finally {
+      gserver.close()
+    }
+  })
 })

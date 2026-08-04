@@ -56,4 +56,12 @@ describe('chooseProtocol（RFC 6455 原样回显）', () => {
   it('无 access_token 声明 → undefined（不选 subprotocol 仍 accept，token 校验层决定 4401）', () => {
     expect(chooseProtocol(new Set(['other']))).toBeUndefined()
   })
+
+  it('#8 一致性：token 提取失败时 chooseProtocol 不得回显（两份解析判定必须一致，防 accept 后 4401 矛盾）', () => {
+    // 非规范头 ['other', 'access_token', <jwt>]：parseProtocolToken 因首项非 access_token → null（4401），
+    // chooseProtocol 修复前却回显 access_token（握手 accept 后 token 校验层 4401——先 accept 再拒的矛盾）。
+    // 修复后两者基于同一份解析 → chooseProtocol 也 undefined，语义一致。
+    expect(parseProtocolToken('other, access_token, eyJ0okEn')).toBeNull()
+    expect(chooseProtocol(new Set(['other', 'access_token', 'eyJ0okEn']))).toBeUndefined()
+  })
 })

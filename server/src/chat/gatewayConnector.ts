@@ -7,13 +7,16 @@
 // 协议 v4 帧为 JSON 文本）。协议 v4 握手/重连/会话投影全由浏览器侧官方包负责，后端零解析。
 
 import WebSocket from 'ws'
+import { TUNNEL_MAX_PAYLOAD } from './values'
 
 // 一个到容器网关的传输 socket（方向：后端⇄网关）。onMessage 即网关发来的原始协议帧。
+// send/onMessage 载荷为 string | Buffer（#9）：文本帧 string（协议 v4 JSON 文本），二进制帧原样
+// Buffer——字节管道契约，后端不得 toString 有损。
 // （F13）onOpen 已移除——零消费者（tunnel.ts 从不订阅），投机接口面，违反 Simplicity First。
 export interface GatewaySocket {
-  send(data: string): void
+  send(data: string | Buffer): void
   close(code?: number, reason?: string): void
-  onMessage(cb: (data: string) => void): void
+  onMessage(cb: (data: string | Buffer) => void): void
   onClose(cb: (code: number, reason: string) => void): void
   onError(cb: (err: Error) => void): void
 }
@@ -33,7 +36,7 @@ export function makeWsGatewayConnector(timeoutMs = CONNECT_TIMEOUT_MS): GatewayC
   return {
     connect(url) {
       return new Promise((resolve, reject) => {
-        const ws = new WebSocket(url)
+        const ws = new WebSocket(url, { maxPayload: TUNNEL_MAX_PAYLOAD })
         const timer = setTimeout(() => {
           ws.terminate()
           reject(new Error(`gateway connect timeout: ${url}`))
@@ -48,12 +51,15 @@ export function makeWsGatewayConnector(timeoutMs = CONNECT_TIMEOUT_MS): GatewayC
           reject(err)
         }
         ws.on('error', onConnectError)
-        let msgCb: ((data: string) => void) | null = null
-        const buffered: string[] = []
-        ws.on('message', (data) => {
-          const text = data.toString()
-          if (msgCb) msgCb(text)
-          else buffered.push(text)
+        let msgCb: ((data: string | Buffer) => void) | null = null
+        const buffered: Array<string | Buffer> = []
+        ws.on('message', (data, isBinary) => {
+          // #9：文本帧 toString（无损）；二进制帧原样 Buffer——Node ws 默认 binaryType=nodebuffer，
+          // isBinary 时 data 即原始字节。toString 会把 0xff/0x80 有损为 U+FFFD mojibake 并以文本帧
+          // 重发，违背「字节管道」契约。
+          const frame = isBinary ? (data as Buffer) : (data as Buffer).toString()
+          if (msgCb) msgCb(frame)
+          else buffered.push(frame)
         })
         ws.once('open', () => {
           clearTimeout(timer)

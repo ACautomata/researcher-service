@@ -11,14 +11,15 @@
 import { describe, it, expect, vi } from 'vitest'
 import http, { type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
+import net from 'node:net'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { readFileSync } from 'node:fs'
 import Database from 'better-sqlite3'
-import WebSocket, { type RawData } from 'ws'
+import WebSocket, { WebSocketServer, type RawData } from 'ws'
 import { SignJWT } from 'jose'
-import { createSecretKey } from 'node:crypto'
+import { createSecretKey, randomBytes } from 'node:crypto'
 import { createPrismaClient } from '../src/prisma'
 import { signAccessToken } from '../src/auth/tokens'
 import { seedUser } from './helpers'
@@ -31,13 +32,13 @@ const INIT_SQL = readFileSync(path.join(process.cwd(), 'prisma', 'init.sql'), 'u
 
 // --- fake 容器网关（内存双端：send=后端转发来的浏览器帧；fireMessage=模拟网关发帧）---
 class FakeGateway implements GatewaySocket {
-  received: string[] = [] // 后端→网关（= 浏览器发出的原帧）
+  received: Array<string | Buffer> = [] // 后端→网关（= 浏览器发出的原帧）
   closed = false // 网关侧 close 被调用（浏览器断开 → 后端清理）
   closedCode: number | null = null
   closedReason = ''
-  private msgCb: ((data: string) => void) | null = null
+  private msgCb: ((data: string | Buffer) => void) | null = null
   private closeCb: ((code: number, reason: string) => void) | null = null
-  send(data: string): void {
+  send(data: string | Buffer): void {
     this.received.push(data)
   }
   close(code?: number, reason?: string): void {
@@ -45,7 +46,7 @@ class FakeGateway implements GatewaySocket {
     this.closedCode = code ?? null
     this.closedReason = reason ?? ''
   }
-  onMessage(cb: (data: string) => void): void {
+  onMessage(cb: (data: string | Buffer) => void): void {
     this.msgCb = cb
   }
   onClose(cb: (code: number, reason: string) => void): void {
@@ -127,7 +128,13 @@ async function startTunnel(
   }
 }
 
-async function seedContainer(prisma: PrismaClient, owner: User, name = 'alpha', port = 19001): Promise<void> {
+async function seedContainer(
+  prisma: PrismaClient,
+  owner: User,
+  name = 'alpha',
+  port = 19001,
+  status: 'running' | 'creating' | 'stopped' | 'removing' | 'error' = 'running',
+): Promise<void> {
   await prisma.container.create({
     data: {
       name,
@@ -136,7 +143,7 @@ async function seedContainer(prisma: PrismaClient, owner: User, name = 'alpha', 
       token: 'enc', // 隧道不读 token（不注入凭证）；bootstrap token 发放属 #338
       tokenEncrypted: false,
       homeDir: '/tmp/alpha-home',
-      status: 'running',
+      status,
       image: 'ghcr.io/openclaw/openclaw:2026.7.1-browser',
     },
   })
@@ -159,6 +166,55 @@ function connectTunnel(url: string, protocols?: string | string[]): Promise<WebS
     ws.once('error', reject)
     ws.once('close', () => reject(new Error('connection closed before open')))
   })
+}
+
+// --- raw socket WS 客户端（#1/#5：模拟恶意客户端——收到 close frame 不回 ack、可发任意帧）---
+// Node ws client 在 CLOSING 态 send 不发送，无法模拟「被拒 socket 上仍发超限帧」的攻击；raw socket
+// 手动完成 upgrade 后不回 close ack，让 server 侧 socket 停在 CLOSING 窗口，期间注入超限帧。
+async function rawUpgrade(url: string, protocols: string[]): Promise<net.Socket> {
+  const u = new URL(url)
+  const sock = net.connect(Number(u.port), u.hostname)
+  await new Promise<void>((resolve, reject) => {
+    sock.once('connect', resolve)
+    sock.once('error', reject)
+  })
+  // ws 校验 Sec-WebSocket-Key 须 base64 解码后恰 16 字节，否则 400（握手到不了 accept 路径）
+  const key = randomBytes(16).toString('base64')
+  sock.write(
+    `GET ${u.pathname}${u.search} HTTP/1.1\r\n` +
+      `Host: ${u.hostname}:${u.port}\r\n` +
+      'Upgrade: websocket\r\n' +
+      'Connection: Upgrade\r\n' +
+      `Sec-WebSocket-Key: ${key}\r\n` +
+      'Sec-WebSocket-Version: 13\r\n' +
+      `Sec-WebSocket-Protocol: ${protocols.join(', ')}\r\n\r\n`,
+  )
+  await new Promise<void>((resolve, reject) => {
+    let buf = ''
+    const onData = (d: Buffer): void => {
+      buf += d.toString('latin1')
+      if (buf.includes('\r\n\r\n')) {
+        sock.removeListener('data', onData)
+        resolve()
+      }
+    }
+    sock.on('data', onData)
+    sock.once('error', reject)
+  })
+  return sock
+}
+
+// 构造一个 >1MiB 的 masked 二进制帧（超 TUNNEL_MAX_PAYLOAD，触发 receiver WS_ERR_UNSUPPORTED_MESSAGE_LENGTH）
+function oversizedFrame(size = 2 * 1024 * 1024): Buffer {
+  const payload = Buffer.alloc(size, 0x41)
+  const mask = Buffer.from([0x11, 0x22, 0x33, 0x44])
+  const frame = Buffer.alloc(2 + 8 + 4 + payload.length)
+  frame[0] = 0x82 // FIN + binary
+  frame[1] = 0x80 | 127 // masked + 64-bit length
+  frame.writeBigUInt64BE(BigInt(payload.length), 2)
+  mask.copy(frame, 10)
+  for (let i = 0; i < payload.length; i++) frame[14 + i] = payload[i] ^ mask[i % 4]
+  return frame
 }
 
 // 等待异步条件（ws 帧转发/close 事件）
@@ -241,7 +297,7 @@ describe('M5 隧道（#337 · ADR 0006）', () => {
     }
   })
 
-  it('越权（他人容器）→ close(4401)；不存在容器 → close(4401)（同码防探测）', async () => {
+  it('越权（他人容器）→ close(4404)；不存在容器 → close(4404)（同码防探测，#3：非认证码，前端不 forceRefresh）', async () => {
     const { ctx, jwt } = await makeAlphaCtx()
     try {
       const other = await seedUser(ctx.prisma, 'user2')
@@ -252,25 +308,25 @@ describe('M5 隧道（#337 · ADR 0006）', () => {
       const ws1 = await connectTunnel(`${ctx.baseUrl}?container=alpha`, ['access_token', otherJwt])
       const closes1 = collectClose(ws1)
       await until(() => closes1.length > 0)
-      expect(closes1[0].code).toBe(4401)
+      expect(closes1[0].code).toBe(4404)
 
       // 不存在：合法 token 连 ghost 容器
       const ws2 = await connectTunnel(`${ctx.baseUrl}?container=ghost`, ['access_token', jwt])
       const closes2 = collectClose(ws2)
       await until(() => closes2.length > 0)
-      expect(closes2[0].code).toBe(4401)
+      expect(closes2[0].code).toBe(4404)
     } finally {
       await ctx.close()
     }
   })
 
-  it('容器名缺失 → close(4401)', async () => {
+  it('容器名缺失 → close(4404)（#3：容器维度问题，非凭证过期，与 4401 认证码分离）', async () => {
     const { ctx, jwt } = await makeAlphaCtx()
     try {
       const ws = await connectTunnel(ctx.baseUrl, ['access_token', jwt])
       const closes = collectClose(ws)
       await until(() => closes.length > 0)
-      expect(closes[0].code).toBe(4401)
+      expect(closes[0].code).toBe(4404)
     } finally {
       await ctx.close()
     }
@@ -297,6 +353,23 @@ describe('M5 隧道（#337 · ADR 0006）', () => {
       const closes = collectClose(ws)
       await until(() => closes.length > 0)
       expect(closes[0].code).toBe(4402)
+    } finally {
+      await ctx.close()
+    }
+  })
+
+  it('#12 容器非 running 状态（creating/stopped/removing/error）→ close(4402)，不连网关', async () => {
+    const ctx = await startTunnel()
+    const user = await seedUser(ctx.prisma)
+    const jwt = await signAccessToken(user.id)
+    // creating：端口已预留但 in-container 网关未起——连了也 ECONNREFUSED/accept 无 upgrade 卡 5s 超时；
+    // error/removing 容器宿主端口可能被无关进程占用 → 原始帧转发到错误目标。故连网关前校验就绪。
+    await seedContainer(ctx.prisma, user, 'alpha', 19001, 'creating')
+    try {
+      const ws = await connectTunnel(`${ctx.baseUrl}?container=alpha`, ['access_token', jwt])
+      const closes = collectClose(ws)
+      await until(() => closes.length > 0)
+      expect(closes[0].code).toBe(4402) // 修复前：不查 status 直接连网关（fake connector 成功）→ 隧道建立无 close → 红
     } finally {
       await ctx.close()
     }
@@ -373,6 +446,25 @@ describe('M5 隧道（#337 · ADR 0006）', () => {
       await until(() => browserReceived.length >= 2)
       expect(browserReceived[1]).toBe(emojiFrame)
 
+      ws.close()
+    } finally {
+      await ctx.close()
+    }
+  })
+
+  it('#9 二进制帧原样 Buffer 透传（不 toString 有损 UTF-8，字节管道契约）', async () => {
+    const { ctx, jwt } = await makeAlphaCtx()
+    try {
+      const ws = await connectTunnel(`${ctx.baseUrl}?container=alpha`, ['access_token', jwt])
+      ws.send('{"type":"req","id":"p","method":"ping"}') // 确认连上网关
+      await until(() => ctx.gateway.received.length >= 1)
+      // 非 UTF-8 字节序列：修复前 data.toString() 把 0xff/0x80 有损为 U+FFFD mojibake 并以文本帧重发
+      const bin = Buffer.from([0x00, 0xff, 0x80, 0x7f, 0x00, 0x01])
+      ws.send(bin) // Node ws client send(Buffer) → 二进制帧（opcode 2）
+      await until(() => ctx.gateway.received.length >= 2)
+      const got = ctx.gateway.received[1]
+      expect(Buffer.isBuffer(got)).toBe(true) // 修复前：toString 后是 string → 红
+      expect((got as Buffer).equals(bin)).toBe(true) // 逐字节无损
       ws.close()
     } finally {
       await ctx.close()
@@ -561,6 +653,55 @@ describe('M5 隧道（#337 · ADR 0006）', () => {
     }
   })
 
+  it('#6 周期复查区分失效码：mustChangePassword 用户隧道 close(4403)（对齐握手门，非 4401 不 forceRefresh）', async () => {
+    const ctx = await startTunnel({ revalidateMs: 50 })
+    const user = await seedUser(ctx.prisma, 'must-reval')
+    const jwt = await signAccessToken(user.id)
+    await seedContainer(ctx.prisma, user)
+    try {
+      const ws = await connectTunnel(`${ctx.baseUrl}?container=alpha`, ['access_token', jwt])
+      ws.send('{"type":"req","id":"p","method":"ping"}')
+      await until(() => ctx.gateway.received.length >= 1)
+      const closes = collectClose(ws)
+      // 管理员设改密 → 下轮复查 → 隧道被关。与握手门同源（4403）：token 有效但授权未就绪。
+      // 修复前复用 4401 → 前端误判 token 过期 forceRefresh 风暴。
+      await ctx.prisma.user.update({ where: { id: user.id }, data: { mustChangePassword: true } })
+      await until(() => closes.length > 0)
+      expect(closes[0].code).toBe(4403)
+    } finally {
+      await ctx.close()
+    }
+  })
+
+  it('#10 复查 interval 惰性启停：createTunnelServer 不创建定时器、首个认证隧道启动、最后一个关闭清除', async () => {
+    // findMany 在 0 隧道时被 revalidateTunnelUsers 的 byUser.size===0 早退跳过，测不出 interval 是否
+    // 空转；须 spy setInterval/clearInterval 直测「定时器是否被创建/清除」这一机制差异。
+    const setSpy = vi.spyOn(globalThis, 'setInterval')
+    const clearSpy = vi.spyOn(globalThis, 'clearInterval')
+    const ctx = await startTunnel({ revalidateMs: 50 })
+    const user = await seedUser(ctx.prisma)
+    const jwt = await signAccessToken(user.id)
+    await seedContainer(ctx.prisma, user)
+    try {
+      // 1. 无隧道：createTunnelServer 不得创建复查定时器（修复前 boot 即 setInterval → 红）
+      expect(setSpy).not.toHaveBeenCalled()
+      // 2. 建隧道 → 认证成功 → interval 惰性启动
+      const ws = await connectTunnel(`${ctx.baseUrl}?container=alpha`, ['access_token', jwt])
+      ws.send('{"type":"req","id":"p","method":"ping"}')
+      await until(() => ctx.gateway.received.length >= 1)
+      await until(() => setSpy.mock.calls.length > 0)
+      // 3. 全关 → interval 清除（不常驻空转）
+      ws.close()
+      await until(() => ws.readyState === WebSocket.CLOSED)
+      await new Promise((r) => setTimeout(r, 50)) // 等 close 事件传播到 stopRevalidate
+      expect(clearSpy.mock.calls.length).toBeGreaterThan(0)
+    } finally {
+      setSpy.mockRestore()
+      clearSpy.mockRestore()
+      await ctx.close()
+    }
+  })
+
   it('网关自身 close 4401（容器侧 auth 失败）→ 浏览器收到 4402 而非 4401（F5：不与面板认证码混淆）', async () => {
     const { ctx, jwt } = await makeAlphaCtx()
     try {
@@ -613,6 +754,94 @@ describe('M5 隧道（#337 · ADR 0006）', () => {
       ws1.close()
       ws2.close()
     } finally {
+      await ctx.close()
+    }
+  })
+
+  it('#1 P0：maxConnections 拒绝路径的超限帧被 error 兜底，不 uncaught 崩溃（被拒 socket 也须有 error listener）', async () => {
+    // 拒绝路径（activeConnections > cap）在进 handleConnection 前 return，其内部才注册的
+    // ws.on('error') 不覆盖被拒 socket——攻击者对被拒 socket 发超限帧 → receiver emit
+    // WS_ERR_UNSUPPORTED_MESSAGE_LENGTH → 无 listener 的 EventEmitter 抛 uncaughtException 杀进程。
+    // raw socket 不回 close ack，让被拒连接停在 CLOSING 窗口（Node ws client 会回 ack 触发不到）。
+    const uncaught: unknown[] = []
+    const onUncaught = (e: unknown): void => {
+      uncaught.push(e)
+    }
+    process.on('uncaughtException', onUncaught)
+    const ctx = await startTunnel({ maxConnections: 1 })
+    const user = await seedUser(ctx.prisma)
+    const jwt = await signAccessToken(user.id)
+    await seedContainer(ctx.prisma, user)
+    try {
+      const ws1 = await connectTunnel(`${ctx.baseUrl}?container=alpha`, ['access_token', jwt]) // 占用名额
+      const raw = await rawUpgrade(`${ctx.baseUrl}?container=alpha`, ['access_token', jwt]) // 被拒
+      await new Promise((r) => setTimeout(r, 100)) // 等 server 完成拒绝（close(1008) 已发出）
+      raw.write(oversizedFrame()) // 被拒 socket 上发超限帧 → 触发 receiver error
+      await new Promise((r) => setTimeout(r, 300))
+      expect(uncaught).toHaveLength(0) // 修复前：无 error listener → uncaught（vitest 降级为 spy 捕获）
+      raw.destroy()
+      ws1.close()
+    } finally {
+      process.removeListener('uncaughtException', onUncaught)
+      await ctx.close()
+    }
+  })
+
+  it('#5 maxConnections 名额在拒绝时立即释放：被拒连接不回 close ack 不占 30s 名额（CLOSING 僵尸反噬 cap）', async () => {
+    // 修复前 activeConnections-- 只在 ws 'close' 事件（对端回 close ack 后）触发；被拒连接若忽略
+    // close frame，socket 停在 CLOSING 30s（ws closeTimeout）仍占名额 → cap 变成自我可用性损失。
+    const ctx = await startTunnel({ maxConnections: 1 })
+    const user = await seedUser(ctx.prisma)
+    const jwt = await signAccessToken(user.id)
+    await seedContainer(ctx.prisma, user)
+    try {
+      const ws1 = await connectTunnel(`${ctx.baseUrl}?container=alpha`, ['access_token', jwt]) // 占名额
+      const raw = await rawUpgrade(`${ctx.baseUrl}?container=alpha`, ['access_token', jwt]) // 被拒、挂起不回 ack
+      await new Promise((r) => setTimeout(r, 100)) // 等 server 完成拒绝
+      ws1.close()
+      await until(() => ws1.readyState === WebSocket.CLOSED) // 等 ws1 close 握手完成（server 端 close 事件已处理）
+      // 新连接应能连上（raw 的名额已随拒绝释放）
+      let ws3: WebSocket | null = null
+      try {
+        ws3 = await connectTunnel(`${ctx.baseUrl}?container=alpha`, ['access_token', jwt])
+      } catch {
+        // 修复前：raw 还占名额 → ws3 超限被拒 → connectTunnel reject
+      }
+      expect(ws3).not.toBeNull()
+      expect(ws3!.readyState).toBe(WebSocket.OPEN)
+      ws3!.close()
+      raw.destroy()
+    } finally {
+      await ctx.close()
+    }
+  })
+
+  it('#11 handleUpgrade 同步异常不逃逸杀进程（try/catch + destroy socket 兜底）', async () => {
+    // ws 8.21 在「同一 socket 二次 handleUpgrade」等路径同步 throw（websocket-server.js completeUpgrade）；
+    // 裸调会把 throw 从 server.on('upgrade') listener 逃逸成 uncaughtException 杀进程。当前路径不触发，
+    // 属加固项——mock throw 验证 tunnel 侧 try/catch 兜底。
+    const uncaught: unknown[] = []
+    const onUncaught = (e: unknown): void => {
+      uncaught.push(e)
+    }
+    process.on('uncaughtException', onUncaught)
+    const ctx = await startTunnel()
+    const user = await seedUser(ctx.prisma)
+    const jwt = await signAccessToken(user.id)
+    await seedContainer(ctx.prisma, user)
+    try {
+      const spy = vi
+        .spyOn(WebSocketServer.prototype, 'handleUpgrade')
+        .mockImplementationOnce(() => {
+          throw new Error('server.handleUpgrade() was called more than once with the same socket')
+        })
+      // 触发 upgrade（忽略结果：修复后 socket 被 destroy → 连接失败 reject；修复前 throw 逃逸 uncaught）
+      connectTunnel(`${ctx.baseUrl}?container=alpha`, ['access_token', jwt]).catch(() => {})
+      await new Promise((r) => setTimeout(r, 500))
+      expect(uncaught).toHaveLength(0) // 修复前：throw 逃逸 → uncaught → 红
+      spy.mockRestore()
+    } finally {
+      process.removeListener('uncaughtException', onUncaught)
       await ctx.close()
     }
   })
