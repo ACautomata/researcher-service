@@ -31,6 +31,7 @@ import {
   WS_INTERNAL_ERROR,
   TUNNEL_PENDING_BYTE_BUDGET,
   TUNNEL_MAX_PAYLOAD,
+  TUNNEL_SEND_BUDGET,
   TUNNEL_MAX_CONNECTIONS,
   TUNNEL_REVALIDATE_MS,
 } from './values'
@@ -93,6 +94,11 @@ export async function revalidateTunnelUsers(
   clients: Set<WebSocket>,
   tunnelUser: WeakMap<WebSocket, string>,
   prisma: PrismaClient,
+  // #5 名额释放全路径（#3 补）：revalidate 关闭也须像握手拒绝路径一样先手动释放名额——否则被
+  // 禁用用户忽略 close frame（socket 停 CLOSING 30s 等对端 ack）时名额被占满 cap，面板级新隧道
+  // 全被拒（F4 关闭路径是第 10 条 close 路径，此前只靠 ws close 事件释放，与「全路径」不变量相悖）。
+  // handleUpgrade 回调把每个 ws 的 releaseSlot 登记进 WeakMap（闭包无法直接传参），close 前取用。
+  releaseSlotFor?: WeakMap<WebSocket, () => void>,
 ): Promise<void> {
   const byUser = new Map<string, WebSocket[]>()
   for (const ws of clients) {
@@ -113,7 +119,10 @@ export async function revalidateTunnelUsers(
     const u = byId.get(uid)
     if (u && u.isActive && !u.mustChangePassword) continue
     const code = !u || !u.isActive ? WS_AUTH_FAIL_CLOSE : WS_MUST_CHANGE_PASSWORD_CLOSE
-    for (const ws of sockets) ws.close(code)
+    for (const ws of sockets) {
+      releaseSlotFor?.get(ws)?.()
+      ws.close(code)
+    }
   }
 }
 
@@ -139,6 +148,9 @@ export function createTunnelServer(deps: TunnelDeps): TunnelServer {
   let activeConnections = 0
   // F4：活动隧道所属 user（认证成功后记录），周期复查 isActive/mustChangePassword。
   const tunnelUser = new WeakMap<WebSocket, string>()
+  // #3 名额释放：每个 ws 的 releaseSlot 闭包登记（handleUpgrade 回调作用域无法直接传参给
+  // revalidateTunnelUsers），复查关闭路径 close 前取用（与握手拒绝路径的释放语义一致）。
+  const slotReleasers = new WeakMap<WebSocket, () => void>()
   // #10：复查 interval 惰性启停——无条件常驻 30s 定时器在 0 隧道时也空转（进程生命周期内永不
   // 停止）。改为首个认证隧道建立时启动（startRevalidate）、最后一个关闭时清除（stopRevalidate）。
   let revalidateTimer: NodeJS.Timeout | null = null
@@ -146,7 +158,7 @@ export function createTunnelServer(deps: TunnelDeps): TunnelServer {
   const startRevalidate = (): void => {
     if (revalidateTimer !== null) return
     revalidateTimer = setInterval(() => {
-      void revalidateTunnelUsers(wss.clients, tunnelUser, deps.prisma).catch(() => {
+      void revalidateTunnelUsers(wss.clients, tunnelUser, deps.prisma, slotReleasers).catch(() => {
         // DB 瞬断 best-effort：跳过本轮，下轮复查
       })
     }, revalidateMs)
@@ -190,6 +202,8 @@ export function createTunnelServer(deps: TunnelDeps): TunnelServer {
             activeConnections--
           }
         }
+        // #3 名额释放：登记本 ws 的 releaseSlot，复查关闭路径（revalidateTunnelUsers）取用
+        slotReleasers.set(ws, releaseSlot)
         ws.on('close', releaseSlot)
         if (closing) {
           // close() 已开始：新完成的 upgrade 立即终止，防 server.close() 挂起（F6）
@@ -307,6 +321,11 @@ async function handleConnection(
   }
   // F4：认证通过 → 记录隧道所属 user，周期复查 isActive/mustChangePassword（管理员禁用/改密后
   // 已建隧道尽快终止）。不 handle 的 ws（未认证/失败）不记录 → 复查只扫成功隧道。
+  // #10 竞态：authenticate/getInstanceForUser await 期间浏览器可能已断开——close 事件先触发
+  // （stopRevalidate 当时 timer 尚 null，no-op）。若此时对已关闭 ws 启动复查 interval，该连接
+  // 的 close 事件已过、再无事件去 stopRevalidate → 常驻空转 interval（#10「最后一个关闭清除」
+  // 不变量被破坏）。断开即中止握手（slot 已由 close 事件释放；网关未建立无需清理）。
+  if (ws.readyState !== WebSocket.OPEN) return
   tunnelUser.set(ws, user.id)
   // #10：首个认证隧道建立 → 惰性启动复查定时器
   startRevalidate()
@@ -361,7 +380,19 @@ async function handleConnection(
   // 4. 双向透传（零解析：帧内容原样转发，不做 JSON/协议/授权处理）。
   //    断连/重连由浏览器侧官方协议机处理；后端只做字节管道。
   gateway.onMessage((data) => {
-    if (ws.readyState === WebSocket.OPEN) ws.send(data)
+    if (ws.readyState !== WebSocket.OPEN) return
+    // #3 转发腿背压守卫（与 gatewayConnector.send 的 #4 P2 对称）：TUNNEL_SEND_BUDGET 此前只守
+    // browser→gateway 方向；此腿（gateway→browser）浏览器慢读（后台标签页 TCP 接收窗口关闭）时
+    // ws.send 内部 bufferedAmount 无界增长 → 面板进程堆耗尽（slow-reader 内存 DoS——第三轮 #4 意图
+    // 的缺口）。超预算关隧道（关网关 + close(1008)），浏览器协议机决策重连。
+    const size = Buffer.isBuffer(data) ? data.length : Buffer.byteLength(data)
+    if (ws.bufferedAmount + size > TUNNEL_SEND_BUDGET) {
+      releaseSlot()
+      gateway.close()
+      ws.close(WS_POLICY_VIOLATION)
+      return
+    }
+    ws.send(data)
   })
   gateway.onClose((code) => {
     // 网关断开 → 关隧道，把 close code 传导给浏览器（浏览器侧协议机决策重连）。
