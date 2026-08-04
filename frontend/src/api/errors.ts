@@ -13,6 +13,8 @@
 //   非对象 / 非 JSON（如 5xx HTML）                          状态码兜底
 
 // 把 DRF 错误响应体压平成单条可读消息；body 为空或不可解析时用状态码兜底。
+// #312 信封优先：#312 全局信封（TS 后端）HTTP 200 + {code,message,data}——message 即人类可读
+// 总述，先取它；非信封响应走 DRF 形状解析（登录/注册错误仍经 HTTP 状态码 + 字段级 body）。
 export function extractApiError(status: number, body: unknown): string {
   if (typeof body === 'string' && body.trim()) return body
 
@@ -23,6 +25,9 @@ export function extractApiError(status: number, body: unknown): string {
 
   if (body && typeof body === 'object') {
     const obj = body as Record<string, unknown>
+    if (typeof obj.code === 'number' && obj.code !== 0 && typeof obj.message === 'string' && obj.message.trim()) {
+      return obj.message // #312 信封：message 即总述
+    }
     if (typeof obj.detail === 'string' && obj.detail.trim()) return obj.detail
     // 字段级 / non_field_errors：收集所有字符串消息，多条用分号拼接。
     const messages: string[] = []
@@ -39,6 +44,23 @@ export function extractApiError(status: number, body: unknown): string {
   }
 
   return `请求失败（${status}）`
+}
+
+// #312 全局信封形状：{code:number, message:string, data:T|null}。所有 REST 一律 HTTP 200，
+// 错误信号在 body 信封（code!==0）。非信封响应（旧 Django 形状）返回 null。
+export interface EnvelopeBody<T = unknown> {
+  readonly code: number
+  readonly message: string
+  readonly data: T | null
+}
+
+// body 信封形状检查（0 信任：非对象/缺 code → 不是信封）。零依赖纯函数——auth store 与
+// api client 共用（client.ts import auth.ts 会成环，故落在中立模块）。
+export function parseEnvelope(body: unknown): EnvelopeBody<unknown> | null {
+  if (typeof body !== 'object' || body === null) return null
+  const b = body as Record<string, unknown>
+  if (typeof b.code !== 'number') return null
+  return { code: b.code, message: typeof b.message === 'string' ? b.message : '', data: b.data as unknown }
 }
 
 // codex P2：标记「已解析的 API 错误」——区别于 fetch 因后端不可达 reject 抛的原生

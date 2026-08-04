@@ -61,6 +61,15 @@ describe('models api URLs', () => {
     expect(init.method).toBe('DELETE')
   })
 
+  // PR #370 第四轮 #9（P0）：TS 后端越权/不存在删除恒 HTTP 200 + code:20040——旧 apiFetch+resp.ok
+  // 当成功。改 apiJson 后须对 code!==0 抛。
+  it('removeProvider throws ApiError(20040) on envelope forbidden/not-found', async () => {
+    ;(globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+      mockResp({ code: 20040, message: '容器不存在或无权访问', data: null }),
+    )
+    await expect(removeProvider('demo', 'my-openai')).rejects.toMatchObject({ code: 20040 })
+  })
+
   it('encodes pid path segment', async () => {
     ;(globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(mockResp(null, 204))
     await removeProvider('demo', 'a b/c')

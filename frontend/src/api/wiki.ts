@@ -1,7 +1,7 @@
 // wiki API —— 每容器 wiki/main tree/page CRUD/graph（spec §6 / issue #45）。
 // 直读/直写宿主 instances/<name>/home/wiki/main；path 为相对 wiki/main 的 posix 相对路径，
 // 经 encodeURIComponent 编码进 query。删除幂等：404（他人刚删）不报错。
-import { apiFetch, apiJson, ApiError } from '@/api/client'
+import { apiJson } from '@/api/client'
 
 export interface WikiPageDTO {
   path: string
@@ -78,13 +78,11 @@ export function createPage(name: string, path: string, content: string): Promise
 }
 
 export async function deletePage(name: string, path: string): Promise<void> {
-  // 删除幂等：404（他人刚删）不报错
-  const resp = await apiFetch(`${base(name)}/page?path=${encodeURIComponent(path)}`, {
+  // 经 apiJson：TS 后端越权/不存在删除恒 HTTP 200 + code:20040（同码防探测），旧 apiFetch+resp.ok
+  // 把它当成功（PR #370 第四轮 #9 P0）。apiJson 对 code!==0 抛，调用方据 toast 提示失败。
+  await apiJson<void>(`${base(name)}/page?path=${encodeURIComponent(path)}`, {
     method: 'DELETE',
   })
-  if (!resp.ok && resp.status !== 404) {
-    throw new ApiError(resp.status, '删除失败')
-  }
 }
 
 export function getGraph(name: string): Promise<WikiGraphDTO> {

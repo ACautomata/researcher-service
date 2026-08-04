@@ -48,14 +48,27 @@ const router = createRouter({
 })
 
 // 守卫：进入受保护路由前用 httpOnly refresh cookie 恢复登录态（codex P2-2），再判重定向。
+// decideGuard 抽纯函数（可单测）：未认证时分「确认失效（refreshExhausted）→ 踢登录」与「瞬态」放行。
 router.beforeEach(async (to) => {
   const auth = useAuthStore()
   if (to.meta.requiresAuth) {
     await auth.hydrate()
   }
-  if (to.meta.requiresAuth && !auth.isAuthenticated) {
-    return { name: 'login' }
-  }
+  return decideGuard(!!to.meta?.requiresAuth, auth)
 })
+
+// 守卫决策（纯函数）：受保护路由 + 未认证时，仅 refreshExhausted（refresh 端点确认 cookie 失效）
+// 才跳登录；瞬态（token 空 + !refreshExhausted，如 forceRefresh 遇网络瞬态失败、cookie 仍可能有效）
+// 放行——让首个 API 请求的 401 刷新链兜底重试，而非把 cookie 仍有效的用户冤枉踢下线（PR #370
+// 第四轮 #10 P2）。非受保护路由 / 已认证 → 放行。
+export function decideGuard(
+  requiresAuth: boolean,
+  auth: { isAuthenticated: boolean; refreshExhausted: boolean },
+): { name: 'login' } | undefined {
+  if (!requiresAuth) return undefined
+  if (auth.isAuthenticated) return undefined
+  if (auth.refreshExhausted) return { name: 'login' }
+  return undefined // 瞬态：放行，交 apiFetch 401 刷新链
+}
 
 export default router

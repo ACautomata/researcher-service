@@ -158,4 +158,5 @@ python -m playwright install chromium
 > `--basetemp=$HOME/.cache/pytest-integration`。
 
 > vite dev server 由 conftest 经 `VITE_API_TARGET` 注入 live server 随机端口（dev 行为不变——
-> `vite.config.ts` proxy target 缺省 `http://localhost:8000`，`npm run dev` 完全不受影响）。
+> `vite.config.ts` proxy target 缺省 `http://localhost:8001`（TS 控制面，server/src/config.ts port=8001，
+> 后端迁 TS/Express #372），`npm run dev` 完全不受影响）。

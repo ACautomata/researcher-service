@@ -12,7 +12,8 @@ import { containerCreateSchema, CONTAINER_NAME_REGEX } from '../validation/schem
 import { fail } from '../envelope'
 import { getInstanceForUser, type Orchestrator } from '../containers/orchestrator'
 import type { ContainerSummary } from '../containers/readModel'
-import type { Container } from '../generated/prisma/client'
+import { AesGcmCrypto } from '../crypto'
+import { config } from '../config'
 
 // Pairing 状态快照（契约 §2.4）。M2 pairing 表无写入方 → 恒 unpaired 默认；
 // M4 配对切片落库后经批量预取替换（本函数签名已按预取设计，避免 list N+1）。
@@ -40,6 +41,14 @@ function decodeScopes(raw: string | null | undefined): string[] {
 }
 
 type SummaryWithPairing = ContainerSummary & { pairing: PairingStatusView }
+
+// 路径参数 name 非法 → 90002 + data.name（区别于「合法但不存在/越权 → 20040」，两码不可混）。
+// DELETE 与 bootstrap-token 共用（#369）。
+function assertValidContainerName(name: string): void {
+  if (!CONTAINER_NAME_REGEX.test(name)) {
+    throw fail(CODE.VALIDATION_FAILED, undefined, { name: ['name 须以小写字母开头，3–30 位，仅含小写字母、数字、连字符'] })
+  }
+}
 
 export function createContainersRouter(orch: Orchestrator): Router {
   const router = Router()
@@ -95,9 +104,7 @@ export function createContainersRouter(orch: Orchestrator): Router {
   router.delete('/:name', async (req: Request, res: Response) => {
     const name = req.params.name as string
     // 路径参数 name 非法 → 90002 + data.name（区别于「合法但不存在/越权 → 20040」，两码不可混）。
-    if (!CONTAINER_NAME_REGEX.test(name)) {
-      throw fail(CODE.VALIDATION_FAILED, undefined, { name: ['name 须以小写字母开头，3–30 位，仅含小写字母、数字、连字符'] })
-    }
+    assertValidContainerName(name)
     // 归属前置：admin 全放行 / user 仅本人；不存在 vs 越权同码 20040。
     await getInstanceForUser(req.prisma, req.user!, name)
     await orch.deleteReserve(name) // 置取消标志 + 标 removing + 入队
@@ -107,8 +114,26 @@ export function createContainersRouter(orch: Orchestrator): Router {
     ok(res, { status: 'removing' })
   })
 
+  // POST /<name>/bootstrap-token —— ADR 0006 D1（#369 接线前置）：所有权门控发放容器 bootstrap token。
+  // 协议机首连须 bootstrap auth（ADR 事实 2：无 token 首连在配对前即失败）；token 真值只下发属主浏览器
+  // （bootstrap 后可经网关配对换 deviceToken，真值仍不落前端以外的盘/日志）。
+  router.post('/:name/bootstrap-token', async (req: Request, res: Response) => {
+    const name = req.params.name as string
+    // 路径参数 name 非法 → 90002 + data.name（区别于「合法但不存在/越权 → 20040」，与 DELETE 同款）。
+    assertValidContainerName(name)
+    // 归属前置（admin 全放行 / user 仅本人）：越权/不存在同码 20040 防探测。
+    const inst = await getInstanceForUser(req.prisma, req.user!, name)
+    // #13（第四轮）：仅 running 容器下发 token——隧道侧对非 running（creating/stopped/removing）恒 4402，
+    // 端点盲目发 token 会让用户陷入 4402 退避循环。非 running 返 CONTAINER_NOT_RUNNING，前端显示
+    // 「容器未运行」而非通用连接失败。
+    if (inst.status !== 'running') throw fail(CODE.CONTAINER_NOT_RUNNING)
+    // 容器 GATEWAY_TOKEN 存密文（DB 不落明文），用时解密（command.ts 同款模式）；tokenEncrypted=false
+    // 为遗留明文行直接透传。
+    const bootstrapToken = inst.tokenEncrypted
+      ? new AesGcmCrypto(config.fleet.encryptionKeys).decrypt(inst.token)
+      : inst.token
+    ok(res, { bootstrapToken })
+  })
+
   return router
 }
-
-// 类型占位（防未使用告警）：Container 仅供将来衔接使用。
-export type { Container }

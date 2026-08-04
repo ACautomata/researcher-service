@@ -1,12 +1,10 @@
 // auth store —— 认证状态单例（spec §9.1 Pinia store: auth）。
 // P0：login 调后端 /api/v1/auth/login 拿 access token；isAuthenticated 驱动路由守卫。
+// #312 信封（TS 后端）：所有 REST 一律 HTTP 200，成功 access 在 data.access、错误在信封码——
+// login/register/forceRefresh 均按信封判（Django 旧语义 HTTP 状态 + 顶层 access 兼容兜底）。
 import { defineStore } from 'pinia'
 
-import { extractApiError, ApiError } from '@/api/errors'
-
-interface LoginResponse {
-  access: string
-}
+import { extractApiError, ApiError, parseEnvelope } from '@/api/errors'
 
 // codex P2-1：检查 access token 是否过期（JWT exp claim）
 // issue #240：导出供 ChatView connect() 前置检查——过期先 forceRefresh 再建连，避免无谓 4401 往返。
@@ -20,16 +18,31 @@ export function isTokenExpired(token: string): boolean {
 }
 
 // 读取失败响应并抛出含后端真实错误消息的 Error（DRF 校验消息，见 api/errors.ts）。
+// #312 信封：HTTP 200 + code!==0 → 抛信封 message；非信封（Django）→ HTTP 状态 + DRF body。
+// body 由调用方一次读取传入（Response body 只可读一次，避免二次 json() 抛错）。
 // 修复 BUG：旧实现只抛写死文案，丢弃 {"password":["这个密码太常见了。"]} 等真实原因，
 // 致 LoginView 误显示「用户名可能已存在」——实际是密码被拒。
-async function rejectWithApiError(resp: Response): Promise<never> {
-  let body: unknown
-  try {
-    body = await resp.json()
-  } catch {
-    // 非 JSON（如 5xx HTML 错误页）→ body 留空，extractApiError 走状态码兜底
-  }
+function rejectWithApiError(resp: Response, body: unknown): never {
+  const env = parseEnvelope(body)
+  if (env && env.code !== 0) throw new ApiError(env.message)
   throw new ApiError(extractApiError(resp.status, body))
+}
+
+// 安全读响应 body：非 JSON（5xx HTML 等）返回 null。
+async function safeJson(resp: Response): Promise<unknown> {
+  try {
+    return await resp.json()
+  } catch {
+    return null
+  }
+}
+
+// 成功响应 body 取 access token：#312 信封在 data.access，Django 旧形状在顶层 access。
+function readAccessToken(body: unknown): string | null {
+  const env = parseEnvelope(body)
+  const raw = env ? env.data : (body as Record<string, unknown>)
+  const access = raw && typeof raw === 'object' ? (raw as Record<string, unknown>).access : undefined
+  return typeof access === 'string' ? access : null
 }
 
 export const useAuthStore = defineStore('auth', {
@@ -48,11 +61,14 @@ export const useAuthStore = defineStore('auth', {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username, password }),
       })
-      if (!resp.ok) {
-        return rejectWithApiError(resp)
-      }
-      const data = (await resp.json()) as LoginResponse
-      this.token = data.access
+      const body = await safeJson(resp)
+      // #312 信封：失败（code!==0）也可能 HTTP 200 → 以信封码为准；Django 语义按 resp.ok。
+      const env = parseEnvelope(body)
+      if (env && env.code !== 0) return rejectWithApiError(resp, body)
+      if (!resp.ok) return rejectWithApiError(resp, body)
+      const access = readAccessToken(body)
+      if (!access) return rejectWithApiError(resp, body)
+      this.token = access
       this.refreshExhausted = false
     },
     // codex round-4 F5（spec §9.2 注册/登录表单）：注册成功后自动登录建立会话
@@ -62,9 +78,10 @@ export const useAuthStore = defineStore('auth', {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username, password }),
       })
-      if (!resp.ok) {
-        return rejectWithApiError(resp)
-      }
+      const body = await safeJson(resp)
+      const env = parseEnvelope(body)
+      if (env && env.code !== 0) return rejectWithApiError(resp, body)
+      if (!resp.ok) return rejectWithApiError(resp, body)
       await this.login(username, password)
     },
     async forceRefresh(): Promise<void> {
@@ -76,9 +93,20 @@ export const useAuthStore = defineStore('auth', {
           method: 'POST',
           credentials: 'include',
         })
-        if (resp.ok) {
-          const data = (await resp.json()) as { access: string }
-          this.token = data.access
+        const body = await safeJson(resp)
+        // #312 信封：失败（10003 刷新无效）也 HTTP 200 → 以信封码判耗尽；Django 语义按状态码。
+        // #370 评论 52（P1）：仅确定失效码（10003 refresh 无效/重放/族灭）置耗尽——90000（后端
+        // 瞬态内部错误，如 DB 瞬断）/90002（校验）与网络异常一样按瞬态处理不标记，否则凭据仍有效
+        // 的用户被瞬态故障强制登出且无自动重试（对照 client.ts「瞬态失败保留会话供上层重试」）。
+        const env = parseEnvelope(body)
+        if (env && env.code === 10003) {
+          this.refreshExhausted = true
+        } else if (env && env.code !== 0) {
+          // 其它信封码（90000/90002…）= 瞬态：不标记，下次重试
+        } else if (resp.ok) {
+          const access = readAccessToken(body)
+          if (access) this.token = access
+          else this.refreshExhausted = true // 成功形状但无 access（异常）→ 按失效处理
         } else if (resp.status === 400 || resp.status === 401 || resp.status === 403) {
           this.refreshExhausted = true
         }

@@ -136,4 +136,110 @@ describe('api client', () => {
     )
     await expect(apiJson('/x')).rejects.toThrow('非法 name')
   })
+
+  it('apiJson throws ApiError with envelope code on HTTP 200 business error（#312 信封）', async () => {
+    // P0 回归：TS 后端错误恒 HTTP 200 + {code,message,data}——apiJson 不得把信封错误当成功透传
+    // （旧实现只按 resp.ok 判错 → 20040/401 分支全成死代码，用户看到内部错误文案）。
+    ;(globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+      mockResp({ code: 20040, message: '容器不存在或无权访问', data: null }),
+    )
+    await expect(apiJson('/api/v1/containers/x/bootstrap-token')).rejects.toMatchObject({
+      code: 20040,
+      status: 200,
+    } as ApiError)
+  })
+
+  it('apiFetch refreshes and retries on HTTP 200 envelope 10001（吊销 token 走刷新链）', async () => {
+    // P0 回归：token 吊销时 server 以 HTTP 200 + {code:10001} 拒业务请求（#312 信封）——apiFetch
+    // 须与 HTTP 401 同语义触发刷新链，否则刷新/跳登录永不触发、用户留在原地。
+    const auth = useAuthStore()
+    auth.token = 'revoked-access'
+    const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>
+    fetchMock
+      .mockResolvedValueOnce(mockResp({ code: 10001, message: '未认证', data: null }))
+      .mockResolvedValueOnce(mockResp({ access: liveToken() }, 200)) // refresh 成功
+      .mockResolvedValueOnce(mockResp({ code: 0, message: 'ok', data: [] })) // 重试成功
+    const resp = await apiFetch('/api/v1/containers/')
+    expect(resp.status).toBe(200)
+    expect(auth.token).not.toBe('revoked-access')
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+    // 重试用的是 refresh 换到的新 token
+    const retryInit = fetchMock.mock.calls[2][1] as RequestInit
+    expect((retryInit.headers as Headers).get('Authorization')).toBe(`Bearer ${auth.token}`)
+  })
+
+  it('apiFetch redirects to login when envelope 10001 + refresh exhausted', async () => {
+    const auth = useAuthStore()
+    auth.token = 'revoked-access'
+    const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>
+    // 业务请求被拒（HTTP 200 + 10001，token 吊销）→ 触发刷新链；refresh 端点确认失效（10003，
+    // #370 评论 52：仅此码置 refreshExhausted——server refresh 端点只可能返回 10003/90000/90002）
+    fetchMock
+      .mockResolvedValueOnce(mockResp({ code: 10001, message: '未认证', data: null }))
+      .mockResolvedValueOnce(mockResp({ code: 10003, message: '刷新凭证无效', data: null }))
+    const assignSpy = vi.fn()
+    Object.defineProperty(window, 'location', {
+      configurable: true,
+      value: { pathname: '/', assign: assignSpy },
+    })
+    await expect(apiFetch('/api/v1/containers/')).rejects.toMatchObject({ status: 401 } as ApiError)
+    expect(assignSpy).toHaveBeenCalledWith('/login')
+  })
+
+  it('apiJson passes non-envelope 2xx body through（Django 兼容）', async () => {
+    ;(globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(mockResp([1, 2, 3]))
+    expect(await apiJson<number[]>('/legacy')).toEqual([1, 2, 3])
+  })
+
+  // PR #370 第四轮 R4-1（P0）：TS 后端 #312 信封 {code:0,message,data} 下，apiJson 成功时必须
+  // 解包 data 返回业务载荷，而不是整个信封——否则所有非 chat.ts 调用方（containers/wiki/models/
+  // pairing + ChatView.loadInstances）裸消费信封对象，listInstances.length / ContainersView.map 失败，
+  // 主线「容器列表 → selectContainer → 隧道」全断。非信封（Django 裸载荷）仍原样透传（上一用例）。
+  it('apiJson unwraps envelope data on HTTP 200 success（#312 信封）', async () => {
+    ;(globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+      mockResp({ code: 0, message: 'ok', data: { a: 1 } }),
+    )
+    expect(await apiJson<{ a: number }>('/x')).toEqual({ a: 1 })
+  })
+
+  it('apiJson unwraps envelope data array（listInstances 契约）', async () => {
+    ;(globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+      mockResp({ code: 0, message: 'ok', data: [1, 2, 3] }),
+    )
+    expect(await apiJson<number[]>('/x')).toEqual([1, 2, 3])
+  })
+
+  // PR #370 第四轮 R4-3（P0）：10005（mustChangePassword）是授权门状态，非凭据失效——刷新换新 token
+  // 不会改变它。不得放入 ENVELOPE_UNAUTHENTICATED_CODES 触发刷新链（否则改密用户每请求都无谓刷新
+  // 再抛 401「未登录」，看不到「需改密」指引）。apiFetch 对 10005 应直接返回响应交 apiJson 抛 code。
+  it('apiFetch does not trigger refresh chain on envelope 10005（mustChangePassword 非凭据失效）', async () => {
+    const auth = useAuthStore()
+    auth.token = 't'
+    const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>
+    fetchMock.mockResolvedValue(mockResp({ code: 10005, message: '请先修改密码', data: null }))
+    const resp = await apiFetch('/api/v1/x')
+    expect(resp.status).toBe(200) // 原响应直接返回，交 apiJson 抛码
+    expect(fetchMock).toHaveBeenCalledTimes(1) // 不调 refresh 端点
+    expect(auth.token).toBe('t') // 不清 token / 不刷新
+  })
+
+  // PR #370 第四轮 R4-4（P1）：并发 401/10001 下 N 个 refreshAndRetry 各调 forceRefresh → N 个同
+  // cookie refresh POST → 服务端 rotateRefresh 重放检测「族灭」全部 refresh（10003）→ 凭据有效的
+  // 用户被强制登出。须模块级 in-flight refresh promise 单飞：首个 refreshAndRetry 触发，其余复用。
+  it('refreshAndRetry coalesces concurrent 10001s into a single refresh POST', async () => {
+    const auth = useAuthStore()
+    auth.token = 'expired-access'
+    const newToken = liveToken()
+    const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>
+    fetchMock.mockImplementation(async (url: string, init: RequestInit) => {
+      if (url === '/api/v1/auth/token/refresh') return mockResp({ access: newToken }, 200)
+      const hdrs = new Headers(init.headers)
+      return hdrs.get('Authorization') === 'Bearer expired-access'
+        ? mockResp({ code: 10001, message: '未认证', data: null })
+        : mockResp({ code: 0, message: 'ok', data: { ok: true } })
+    })
+    await Promise.all([apiFetch('/api/v1/x'), apiFetch('/api/v1/y')])
+    const refreshCalls = fetchMock.mock.calls.filter(([p]) => p === '/api/v1/auth/token/refresh')
+    expect(refreshCalls).toHaveLength(1) // 单飞：并发 refresh 合并为一次，防服务端族灭
+  })
 })
