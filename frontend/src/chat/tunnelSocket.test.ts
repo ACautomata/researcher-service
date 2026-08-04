@@ -48,6 +48,11 @@ class MockWS {
     if (code !== undefined && code !== 1000 && !(code >= 3000 && code <= 4999)) {
       throw new DOMException(`The provided close code (${code}) is not valid.`, 'InvalidAccessError')
     }
+    // WHATWG：reason 超 123 UTF-8 字节抛 SyntaxError——合法码分支若原样透传超长 reason，协议机
+    // close 流程内同步抛错、socket 关不掉、onclose 不触发 → 重连永不调度（隧道假活）
+    if (reason !== undefined && new TextEncoder().encode(reason).length > 123) {
+      throw new DOMException(`The provided reason is longer than 123 UTF-8 bytes.`, 'SyntaxError')
+    }
     this.closedCode = code
     this.closedReason = reason ?? ''
     this.readyState = CLOSED
@@ -153,6 +158,20 @@ describe('createPanelTunnelSocket（#337 M5 隧道）', () => {
     expect(() => socket.close(1008, 'connect challenge timeout')).not.toThrow() // 修复前：抛 InvalidAccessError → 红
     expect(MockWS.last!.closedCode).toBe(1000) // 非法码映射 1000 关闭（WHATWG 合法）
     expect(MockWS.last!.closedReason).toContain('1008') // 原码带进 reason 保排障
+  })
+
+  it('#3 close 合法码分支超长 reason（>123 UTF-8 字节）→ 省略 reason 不抛 SyntaxError（WHATWG close() 规定，含多字节字符按字节计）', () => {
+    // 合法码分支（4401 等）原样透传 reason——WHATWG WebSocket.close(code, reason) 的 reason 超 123
+    // UTF-8 字节即抛 SyntaxError。异常从协议机调用 socket.close 的路径同步抛出：socket 关不掉、
+    // handlers.close（onclose）不触发 → 协议机重连永不调度（隧道假活）。须按字节省略超长 reason。
+    const handlers = makeHandlers()
+    const socket = createPanelTunnelSocket('alpha', 'jwt', handlers)
+    // 200 字节 ASCII（>123 字节上限）；另验多字节：80 个中文 '界'（80×3=240 字节 > 123）
+    expect(() => socket.close(4401, 'x'.repeat(200))).not.toThrow() // 修复前：原生 close 抛 SyntaxError → 红
+    expect(() => socket.close(4401, '界'.repeat(80))).not.toThrow()
+    // 省略超长 reason 后仍以合法码关闭，code 语义保留（reason 空）
+    expect(MockWS.last!.closedCode).toBe(4401)
+    expect(MockWS.last!.closedReason).toBe('')
   })
 
   it('服务端 close(4401) → handlers.close 收到 code/reason（认证失败刷新重连链路）', () => {

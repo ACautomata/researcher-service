@@ -34,10 +34,6 @@ describe('parseProtocolToken（两格式 wire）', () => {
     expect(parseProtocolToken('')).toBeNull()
   })
 
-  it('重复 header 合并数组 → 取第 2 项（对齐 Django subprotocols 列表语义）', () => {
-    expect(parseProtocolToken(['access_token', 'eyJ0okEn'])).toBe('eyJ0okEn')
-  })
-
   it('首项非 access_token 时格式①不匹配，前缀循环亦不匹配 → null（对齐 _extract_token 顺序语义）', () => {
     expect(parseProtocolToken('other, access_token, eyJ0okEn')).toBeNull()
   })

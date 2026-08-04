@@ -45,7 +45,11 @@ export function createPanelTunnelSocket(
       // 不掉、onclose 不触发 → 协议机重连由 handlers.close 驱动、永不调度，隧道假活）。非法码映射
       // 1000 关闭（WHATWG 合法），原码带进 reason 保排障。
       const legal = code === undefined || code === 1000 || (code >= 3000 && code <= 4999)
-      if (legal) ws.close(code, reason)
+      // #3：WHATWG close(code, reason) 的 reason 超 123 UTF-8 字节即抛 SyntaxError——异常从协议机
+      // 调用 socket.close 的路径同步抛出：socket 关不掉、onclose 不触发 → 重连永不调度。合法码分支
+      // 也须按字节省略超长 reason（保 code 语义）。浏览器无 Buffer，用 TextEncoder 量 UTF-8 字节。
+      const reasonOk = reason === undefined || new TextEncoder().encode(reason).length <= 123
+      if (legal) ws.close(code, reasonOk ? reason : undefined)
       else ws.close(1000, `closed(${code})`)
     },
   }

@@ -42,6 +42,12 @@ export const WS_INTERNAL_ERROR = 1011
 // 浏览器几乎不发帧（等 challenge），预算仅防御异常/恶意客户端在连接窗口内狂发帧的内存耗尽。
 export const TUNNEL_PENDING_BYTE_BUDGET = 256 * 1024
 
+// 面板→网关发送缓冲预算（超过即 close(1008)，#4 P2）：Node ws.send 在 TCP 背压（网关读得慢）时
+// 内部 bufferedAmount 无界增长，1MiB 级帧流可打满面板进程堆、影响所有租户。pending 预算(256KiB)
+// 只保护连接建立窗口；此预算覆盖 post-connect 转发路径。取 4×TUNNEL_MAX_PAYLOAD：正常业务流量
+// 远小于此（对话文本帧），异常/攻陷网关慢读时超限由浏览器侧协议机决策重连。
+export const TUNNEL_SEND_BUDGET = 4 * 1024 * 1024
+
 // 单帧载荷上限（WebSocketServer maxPayload，安全审查 P1-2：codex PR #367）。不设则 ws 默认
 // 100MiB——未认证客户端可在 JWT 验证 await 窗口内发近 100MiB 帧，pending 预算(256KiB)是
 // message handler 内的事后检查、防不住单帧内存分配。1MiB ≥ 协议机合法最大帧（tool 事件载荷），

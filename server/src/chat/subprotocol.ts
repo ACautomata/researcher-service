@@ -9,7 +9,9 @@
 
 import { WS_CHAT_PROTOCOL } from './values'
 
-type HeaderValue = string | string[] | undefined
+// #3 P3：Node llhttp 对重复 Sec-WebSocket-Protocol 头以 ', ' 合并为单一字符串
+// （req.headers['sec-websocket-protocol'] 恒为 string）——联合里的 string[] 分支是死代码。
+type HeaderValue = string | undefined
 
 // 单一解析源（#8）：两种 wire format 的「token 提取 + 回显选择」共用同一份判定，杜绝
 // parseProtocolToken（提取）与 chooseProtocol（回显）两份拷贝漂移——非规范头（如首项非
@@ -31,8 +33,7 @@ function parseFromParts(parts: string[]): { token: string | null; echo: string |
 // 从原始 Sec-WebSocket-Protocol header 提取 JWT。
 export function parseProtocolToken(header: HeaderValue): string | null {
   if (header === undefined) return null
-  const raw = Array.isArray(header) ? header.join(',') : header
-  const parts = raw
+  const parts = header
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean)

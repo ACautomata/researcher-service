@@ -159,7 +159,16 @@ export function createTunnelServer(deps: TunnelDeps): TunnelServer {
   }
   return {
     handleUpgrade(req, socket, head) {
-      if (!req.url?.startsWith(WS_CHAT_PATH)) return false
+      // #3 P3：只接管精确路径段 /ws/chat/——startsWith('/ws/chat/') 会误纳 /ws/chat/foo 等一切
+      // 前缀命中路径（容器名全取 query），未来新增 /ws/chat/<something> 路由时被意外接管。pathname
+      // 精确匹配，非隧道路径返回 false 由调用方 destroy。
+      let pathname: string
+      try {
+        pathname = new URL(req.url ?? '/', 'ws://localhost').pathname
+      } catch {
+        return false // 非法 request-target 非隧道路径
+      }
+      if (pathname !== WS_CHAT_PATH) return false
       // upgrade 请求异常（连接被对端 abort 等）→ destroy，避免悬空 socket
       socket.on('error', () => socket.destroy())
       try {
@@ -194,7 +203,14 @@ export function createTunnelServer(deps: TunnelDeps): TunnelServer {
           ws.close(WS_POLICY_VIOLATION)
           return
         }
-        void handleConnection(ws, req, deps, tunnelUser, startRevalidate, stopRevalidate)
+        // #2 P2：fire-and-forget 必须 .catch()——async 体内未包裹同步段任一 throw（URL 解析、flush
+        // 循环等）即 Promise reject；Node≥15 默认 --unhandled-rejections=throw → unhandledRejection
+        // 杀整个控制面进程。正常失败路径已自行 close；此仅兜底意外 throw 后仍未关闭的隧道。
+        void handleConnection(ws, req, deps, tunnelUser, startRevalidate, stopRevalidate, releaseSlot).catch(
+          () => {
+            if (ws.readyState === WebSocket.OPEN) ws.close(WS_INTERNAL_ERROR)
+          },
+        )
         })
       } catch {
         // #11：wss.handleUpgrade 同步 throw（ws 8.21「同一 socket 二次 handleUpgrade」等路径）不得
@@ -221,13 +237,17 @@ async function handleConnection(
   tunnelUser: WeakMap<WebSocket, string>,
   startRevalidate: () => void,
   stopRevalidate: () => void,
+  // #1 P1：名额释放接缝（定义在 handleUpgrade 回调闭包）。handleConnection 内全部拒绝路径
+  // （4401/1011/4403/4404/4402/1008）在 ws.close() 前调用——被拒连接忽略 close frame 时 socket
+  // 停 CLOSING 30s（ws closeTimeout）不触发 close 事件，名额靠 close 事件释放会让未认证攻击者
+  // 打满全局 cap（隧道 DoS）。slotReleased 防 close 事件二次递减。
+  releaseSlot: () => void,
 ): Promise<void> {
   // 立即注册浏览器侧监听（accept 后浏览器即可发帧/断开；下述 await 期间未监听即丢帧/泄漏）：
   //   - message → 缓冲到 pending（网关连好后 flush，见下）
   //   - close → 网关连好后关闭它（浏览器 early-close 也捕获，防泄漏）
-  //   - error → receiver 传输错误（如 maxPayload 超限 WS_ERR_UNSUPPORTED_MESSAGE_LENGTH）emit 到
-  //     ws 实例；无 listener 会抛成 uncaught 终止进程。隧道只透传，error 由 close 事件兜底清理。
-  ws.on('error', () => {})
+  //   - error listener 已在 handleUpgrade 回调注册（#3 P3）——closing/maxConnections 拒绝分支在进
+  //     handleConnection 前 return，必须在那注册才覆盖全部路径（#1 P0），此处不重复注册。
   let gateway: GatewaySocket | null = null
   const pending: Array<string | Buffer> = []
   let pendingBytes = 0
@@ -242,9 +262,11 @@ async function handleConnection(
       // 网关连接建立前缓冲（网关连好后 flush）。字节预算上限防恶意客户端在连接窗口内狂发帧
       // 导致内存无界增长（resource-exhaustion）——超限即策略违反 close(1008)。
       // data 为 ws 文本帧的原始 Buffer：.length 即 UTF-8 wire 字节数，免 Buffer.byteLength 的
-      // O(n) 重编码（F10）；非 Buffer 分支（ArrayBuffer/Buffer[]）回退 byteLength。
-      pendingBytes += Buffer.isBuffer(data) ? data.length : Buffer.byteLength(frame)
+      // O(n) 重编码（F10）。Node ws 默认 binaryType=nodebuffer，message data 恒为 Buffer——
+      // ArrayBuffer/Buffer[] 回退分支是死代码（#3 P3）。
+      pendingBytes += (data as Buffer).length
       if (pendingBytes > TUNNEL_PENDING_BYTE_BUDGET) {
+        releaseSlot()
         ws.close(WS_POLICY_VIOLATION)
         return
       }
@@ -264,6 +286,7 @@ async function handleConnection(
   //    forceRefresh 风暴——DB 瞬断被误判 token 失效会陷入刷新重连循环）。
   const token = parseProtocolToken(req.headers['sec-websocket-protocol'])
   if (token === null) {
+    releaseSlot()
     ws.close(WS_AUTH_FAIL_CLOSE)
     return
   }
@@ -271,12 +294,14 @@ async function handleConnection(
   try {
     user = await authenticate(token, deps.prisma)
   } catch (e) {
+    releaseSlot()
     ws.close(e instanceof AuthenticationError ? WS_AUTH_FAIL_CLOSE : WS_INTERNAL_ERROR)
     return
   }
   // 强制改密门（authorization-gate-parity）：与 REST mustChangePasswordGate 同源——mustChangePassword
   // 用户不得经隧道访问容器，否则强制改密被绕过。
   if (user.mustChangePassword) {
+    releaseSlot()
     ws.close(WS_MUST_CHANGE_PASSWORD_CLOSE)
     return
   }
@@ -291,6 +316,7 @@ async function handleConnection(
   //    非凭证过期）；DB/内部故障（F1）→ 1011。4404 独立于 4401——前端不得 forceRefresh 死循环。
   const name = new URL(req.url!, 'ws://localhost').searchParams.get('container')
   if (!name) {
+    releaseSlot()
     ws.close(WS_CONTAINER_ACCESS_DENIED)
     return
   }
@@ -298,6 +324,7 @@ async function handleConnection(
   try {
     inst = await getInstanceForUser(deps.prisma, user, name)
   } catch (e) {
+    releaseSlot()
     ws.close(e instanceof EnvelopeError ? WS_CONTAINER_ACCESS_DENIED : WS_INTERNAL_ERROR)
     return
   }
@@ -307,6 +334,7 @@ async function handleConnection(
   // CONNECT_TIMEOUT_MS），且 error/removing 容器宿主端口可能被无关进程重新占用 → 原始帧转发到错误
   // 目标。就绪判据 = running。
   if (inst.status !== 'running') {
+    releaseSlot()
     ws.close(WS_GATEWAY_UNAVAILABLE)
     return
   }
@@ -317,6 +345,7 @@ async function handleConnection(
       `${deps.gatewayScheme}://${deps.gatewayHost}:${inst.port}/`,
     )
   } catch {
+    releaseSlot()
     ws.close(WS_GATEWAY_UNAVAILABLE)
     return
   }

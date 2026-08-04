@@ -816,6 +816,73 @@ describe('M5 隧道（#337 · ADR 0006）', () => {
     }
   })
 
+  it('#1 P1：认证拒绝路径也须立即释放名额——未认证坏 token 不回 close ack 不得占 30s 名额（隧道 DoS）', async () => {
+    // 第二轮 #5 只修了 maxConnections 拒绝分支。认证（4401）/归属（4404）/改密门（4403）/网关（4402）
+    // 等拒绝路径仍只 ws.close() 后 return——被拒连接忽略 close frame 时 socket 停在 CLOSING 30s
+    // （ws closeTimeout 等对端 ack），名额仍被占满 TUNNEL_MAX_CONNECTIONS，期间所有合法新隧道被
+    // close(1008)；30s 后循环重放 = 持续未认证隧道 DoS。releaseSlot 须覆盖 handleConnection 全部
+    // 拒绝路径（不只 maxConnections 分支）。
+    const ctx = await startTunnel({ maxConnections: 1 })
+    const user = await seedUser(ctx.prisma)
+    const jwt = await signAccessToken(user.id)
+    await seedContainer(ctx.prisma, user)
+    try {
+      // 未认证攻击者：raw socket 发坏 token → accept 后 close(4401)，不回 close ack（停 CLOSING 占名额）
+      const raw = await rawUpgrade(`${ctx.baseUrl}?container=alpha`, ['access_token', 'bad-token'])
+      await new Promise((r) => setTimeout(r, 100)) // 等 server 完成 4401 拒绝
+      // 合法用户应能连上：raw 的名额随 4401 拒绝立即释放（修复前被占 → 新连接超限 close(1008)）
+      let ws: WebSocket | null = null
+      try {
+        ws = await connectTunnel(`${ctx.baseUrl}?container=alpha`, ['access_token', jwt])
+      } catch {
+        // 修复前：raw 占名额 → 新连接超限被拒 → connectTunnel reject
+      }
+      expect(ws).not.toBeNull()
+      expect(ws!.readyState).toBe(WebSocket.OPEN)
+      ws!.close()
+      raw.destroy()
+    } finally {
+      await ctx.close()
+    }
+  })
+
+  it('#2 P2：handleConnection 异步 reject 不得 unhandledRejection 杀进程（fire-and-forget 须 .catch 兜底）', async () => {
+    // `void handleConnection(...)` 返回值被丢弃且无 .catch——async 体内未包裹同步段任一 throw
+    // （flush 循环 gateway.send 等）即 Promise reject；Node≥15 默认 --unhandled-rejections=throw
+    // → fatal 杀进程。注入：延迟 connect 让浏览器帧进 pending，connect 后 flush 循环 gateway.send
+    // 抛错 → async reject。修复前无 .catch → unhandledRejection（vitest 降级为 spy 捕获）→ 红。
+    const unhandled: unknown[] = []
+    const onUnhandled = (e: unknown): void => {
+      unhandled.push(e)
+    }
+    process.on('unhandledRejection', onUnhandled)
+    const gateway = new FakeGateway()
+    gateway.send = () => {
+      throw new Error('send boom')
+    }
+    const ctx = await startTunnel({
+      connectGateway: {
+        connect: async () => {
+          await new Promise((r) => setTimeout(r, 100)) // 拉长 pending 窗口，让浏览器帧先进 pending
+          return gateway
+        },
+      },
+    })
+    const user = await seedUser(ctx.prisma)
+    const jwt = await signAccessToken(user.id)
+    await seedContainer(ctx.prisma, user)
+    try {
+      const ws = await connectTunnel(`${ctx.baseUrl}?container=alpha`, ['access_token', jwt])
+      ws.send('{"type":"req","id":"p","method":"ping"}') // pending → flush 时 gateway.send 抛错 → reject
+      await new Promise((r) => setTimeout(r, 300))
+      expect(unhandled).toHaveLength(0) // 修复前：unhandledRejection → 红
+      ws.close()
+    } finally {
+      process.removeListener('unhandledRejection', onUnhandled)
+      await ctx.close()
+    }
+  })
+
   it('#11 handleUpgrade 同步异常不逃逸杀进程（try/catch + destroy socket 兜底）', async () => {
     // ws 8.21 在「同一 socket 二次 handleUpgrade」等路径同步 throw（websocket-server.js completeUpgrade）；
     // 裸调会把 throw 从 server.on('upgrade') listener 逃逸成 uncaughtException 杀进程。当前路径不触发，
@@ -842,6 +909,26 @@ describe('M5 隧道（#337 · ADR 0006）', () => {
       spy.mockRestore()
     } finally {
       process.removeListener('uncaughtException', onUncaught)
+      await ctx.close()
+    }
+  })
+
+  it('#3 P3：非精确路径段不按隧道处理——/ws/chat/foo 握手失败而非 4404（WS_CHAT_PATH 前缀界定收窄）', async () => {
+    const { ctx, jwt } = await makeAlphaCtx()
+    try {
+      // 修复前：startsWith('/ws/chat/') 命中 /ws/chat/foo → 按隧道处理 → query 无 container → 先
+      // accept 后 close(4404)，connectTunnel resolve。修复后：pathname !== '/ws/chat/' →
+      // handleUpgrade 返回 false → server 侧 destroy → 握手失败（close-before-open）→ reject。
+      let resolved = false
+      try {
+        const ws = await connectTunnel(`${ctx.baseUrl}foo?container=alpha`, ['access_token', jwt])
+        resolved = true
+        ws.close()
+      } catch {
+        resolved = false
+      }
+      expect(resolved).toBe(false) // 修复前：resolved=true（4404 先 accept 后 close）→ 红
+    } finally {
       await ctx.close()
     }
   })
