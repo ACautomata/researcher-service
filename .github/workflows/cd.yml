@@ -15,10 +15,10 @@
 name: CD
 
 on:
-  workflow_run:
-    workflows: ["CI"]
-    types: [completed]
-    branches: [master]
+  # 暂时禁用 CD（后端迁 TS/Express 期间不自动部署 Django 镜像）：触发从 workflow_run 临时降级为
+  # 仅 workflow_dispatch（手动）。deploy job 的 if 守卫引用 workflow_run 事件数据 → 手动触发也会
+  # 安全跳过，等效完全禁用。恢复自动部署：把此块还原为原 workflow_run 触发（见 git history）。
+  workflow_dispatch:
 
 # 仅在 CI 成功时部署；失败/取消即跳过（job 级 if 守卫）。
 concurrency:
