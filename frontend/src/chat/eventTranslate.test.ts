@@ -1,0 +1,179 @@
+// seam: chat/eventTranslate —— ChatEventTranslator 纯函数翻译（#369 M5 前端接线）。
+// 移植 backend/chat/tests/test_event_translate.py 契约断言（delta/final/aborted/error/replace 快照/
+// final 尾部/tool phase/approval 卡/approvalResolved）。无 I/O 纯函数，直测模块边界。
+
+import { describe, expect, it } from 'vitest'
+import { ChatEventTranslator, type GatewayEventFrame } from './eventTranslate'
+
+function chat(state: string, runId = 'r1', extra: Record<string, unknown> = {}): GatewayEventFrame {
+  return { type: 'event', event: 'chat', payload: { runId, state, ...extra } }
+}
+
+function agentTool(phase: string, data: Record<string, unknown> = {}): GatewayEventFrame {
+  return {
+    type: 'event',
+    event: 'agent',
+    payload: { runId: 'r1', stream: 'tool', data: { phase, ...data } },
+  }
+}
+
+function approvalRequested(extra: Record<string, unknown> = {}): GatewayEventFrame {
+  return { type: 'event', event: 'exec.approval.requested', payload: { id: 'ap-1', kind: 'exec', ...extra } }
+}
+
+describe('ChatEventTranslator', () => {
+  it('delta(deltaText) → text 增量', () => {
+    const t = new ChatEventTranslator()
+    expect(t.translate(chat('delta', 'r1', { deltaText: '你好' }))).toEqual([
+      { type: 'text', runId: 'r1', delta: '你好' },
+    ])
+  })
+
+  it('final → done；含未投递尾部先补 text 再 done', () => {
+    const t = new ChatEventTranslator()
+    t.translate(chat('delta', 'r1', { deltaText: '你好' }))
+    expect(t.translate(chat('final', 'r1', { message: '你好世界' }))).toEqual([
+      { type: 'text', runId: 'r1', delta: '世界' },
+      { type: 'done', runId: 'r1' },
+    ])
+  })
+
+  it('final.message 为 dict{content:[{type:text,text}]} 时从 content[].text 提取（实测校准）', () => {
+    const t = new ChatEventTranslator()
+    t.translate(chat('delta', 'r1', { deltaText: '你好' }))
+    const msg = { role: 'assistant', content: [{ type: 'text', text: '你好世界' }], timestamp: 1785148522491 }
+    expect(t.translate(chat('final', 'r1', { message: msg }))).toEqual([
+      { type: 'text', runId: 'r1', delta: '世界' },
+      { type: 'done', runId: 'r1' },
+    ])
+  })
+
+  it('delta replace=true + message 快照 → replace 帧（整段替换，前缀/非前缀均正确）', () => {
+    const t = new ChatEventTranslator()
+    t.translate(chat('delta', 'r1', { deltaText: 'The cat' }))
+    expect(t.translate(chat('delta', 'r1', { message: 'The dog', replace: true }))).toEqual([
+      { type: 'text', runId: 'r1', delta: 'The dog', replace: true },
+    ])
+  })
+
+  it('delta replace=true 无快照 → 退回 deltaText 增量', () => {
+    const t = new ChatEventTranslator()
+    expect(t.translate(chat('delta', 'r1', { deltaText: 'x', replace: true }))).toEqual([
+      { type: 'text', runId: 'r1', delta: 'x' },
+    ])
+  })
+
+  it('final 无 message → 仅 done（不重复发已投递文本）', () => {
+    const t = new ChatEventTranslator()
+    t.translate(chat('delta', 'r1', { deltaText: '你好' }))
+    expect(t.translate(chat('final', 'r1'))).toEqual([{ type: 'done', runId: 'r1' }])
+  })
+
+  it('error → error 帧（errorMessage 优先，退 errorKind）', () => {
+    const t = new ChatEventTranslator()
+    expect(t.translate(chat('error', 'r1', { errorMessage: '模型超时' }))).toEqual([
+      { type: 'error', runId: 'r1', message: '模型超时' },
+    ])
+    expect(t.translate(chat('error', 'r1', { errorKind: 'RATE_LIMIT' }))).toEqual([
+      { type: 'error', runId: 'r1', message: 'RATE_LIMIT' },
+    ])
+  })
+
+  it('aborted → done（视作收尾，非错误）', () => {
+    const t = new ChatEventTranslator()
+    expect(t.translate(chat('aborted'))).toEqual([{ type: 'done', runId: 'r1' }])
+  })
+
+  it('未知 state / 缺 runId / 非 event 帧 / 非 chat 事件 → []', () => {
+    const t = new ChatEventTranslator()
+    expect(t.translate(chat('streaming'))).toEqual([])
+    expect(t.translate({ type: 'event', event: 'chat', payload: { state: 'delta', deltaText: 'x' } })).toEqual([])
+    expect(t.translate({ type: 'res', id: 'x', ok: true } as unknown as GatewayEventFrame)).toEqual([])
+    expect(t.translate({ type: 'event', event: 'health.changed', payload: {} })).toEqual([])
+  })
+
+  it('delta message 变体（非 replace）→ []；replace 无快照无 deltaText → []', () => {
+    const t = new ChatEventTranslator()
+    expect(t.translate(chat('delta', 'r1', { message: '消息级 delta' }))).toEqual([])
+    expect(t.translate(chat('delta', 'r1', { replace: true }))).toEqual([])
+  })
+
+  // ---- T06 权限审批 ----
+  it('exec.approval.requested → approval 卡（request.command 优先）', () => {
+    const t = new ChatEventTranslator()
+    const frame = approvalRequested({ request: { command: 'rm -rf /tmp/x', sessionKey: 'sk-1' } })
+    expect(t.translate(frame)).toEqual([
+      { type: 'approval', id: 'ap-1', kind: 'exec', command: 'rm -rf /tmp/x', sessionKey: 'sk-1' },
+    ])
+  })
+
+  it('approval 卡 command 取值链：request 缺失退 systemRunPlan.rawCommand → command → 顶层 command', () => {
+    const t = new ChatEventTranslator()
+    expect(t.translate(approvalRequested({ systemRunPlan: { rawCommand: 'ls -la' } }))).toEqual([
+      { type: 'approval', id: 'ap-1', kind: 'exec', command: 'ls -la', sessionKey: null },
+    ])
+    expect(t.translate(approvalRequested({ systemRunPlan: { command: 'pwd' } }))).toEqual([
+      { type: 'approval', id: 'ap-1', kind: 'exec', command: 'pwd', sessionKey: null },
+    ])
+    expect(t.translate(approvalRequested({ command: 'top' }))).toEqual([
+      { type: 'approval', id: 'ap-1', kind: 'exec', command: 'top', sessionKey: null },
+    ])
+  })
+
+  it('approval 卡 kind 缺省 → 从事件名族派生（plugin.approval.requested → plugin）', () => {
+    const t = new ChatEventTranslator()
+    const frame = { type: 'event', event: 'plugin.approval.requested', payload: { id: 'ap-2', command: 'x' } }
+    expect(t.translate(frame)).toEqual([
+      { type: 'approval', id: 'ap-2', kind: 'plugin', command: 'x', sessionKey: null },
+    ])
+  })
+
+  it('approval 卡缺 id → []（无法 resolve，不出卡）；缺 command 容忍为空', () => {
+    const t = new ChatEventTranslator()
+    expect(t.translate({ type: 'event', event: 'exec.approval.requested', payload: { kind: 'exec' } })).toEqual([])
+    expect(t.translate(approvalRequested({ request: { sessionKey: 'sk' } }))).toEqual([
+      { type: 'approval', id: 'ap-1', kind: 'exec', command: '', sessionKey: 'sk' },
+    ])
+  })
+
+  // ---- T08 工具 ----
+  it('tool start → running 帧（data.name/toolCallId/args → name/id/input）', () => {
+    const t = new ChatEventTranslator()
+    expect(t.translate(agentTool('start', { name: 'wiki.search', toolCallId: 'call-1', args: { query: '对比学习' } }))).toEqual([
+      { type: 'tool', runId: 'r1', name: 'wiki.search', state: 'running', id: 'call-1', title: null, input: { query: '对比学习' }, result: null, isError: false },
+    ])
+  })
+
+  it('tool result → done 帧；isError=true → error 帧', () => {
+    const t = new ChatEventTranslator()
+    expect(t.translate(agentTool('result', { name: 'wiki.search', toolCallId: 'call-2', result: { count: 3 }, isError: false }))).toEqual([
+      { type: 'tool', runId: 'r1', name: 'wiki.search', state: 'done', id: 'call-2', title: null, input: null, result: { count: 3 }, isError: false },
+    ])
+    expect(t.translate(agentTool('result', { name: 'bash', toolCallId: 'call-4', result: { exitCode: 1 }, isError: true }))).toEqual([
+      { type: 'tool', runId: 'r1', name: 'bash', state: 'error', id: 'call-4', title: null, input: null, result: { exitCode: 1 }, isError: true },
+    ])
+  })
+
+  it('tool update → []（跳过中间增量）；非 tool stream → []；缺 runId/name → []', () => {
+    const t = new ChatEventTranslator()
+    expect(t.translate(agentTool('update', { name: 'bash', toolCallId: 'call-3' }))).toEqual([])
+    expect(t.translate({ type: 'event', event: 'agent', payload: { runId: 'r1', stream: 'item', data: { kind: 'command' } } })).toEqual([])
+    expect(t.translate({ type: 'event', event: 'agent', payload: { stream: 'tool', data: { phase: 'start' } } })).toEqual([])
+    expect(t.translate(agentTool('start'))).toEqual([])
+  })
+
+  // ---- approval resolved ----
+  it('exec/plugin.approval.resolved → approvalResolved 帧（透传权威 decision，未知值不默认批准）', () => {
+    const t = new ChatEventTranslator()
+    expect(t.translate({ type: 'event', event: 'plugin.approval.resolved', payload: { id: 'ap-1', decision: 'deny' } })).toEqual([
+      { type: 'approvalResolved', id: 'ap-1', decision: 'deny' },
+    ])
+    expect(t.translate({ type: 'event', event: 'exec.approval.resolved', payload: { id: 'ap-2', decision: 'allow-once' } })).toEqual([
+      { type: 'approvalResolved', id: 'ap-2', decision: 'allow-once' },
+    ])
+    expect(t.translate({ type: 'event', event: 'plugin.approval.resolved', payload: { id: 'ap-1', decision: 'expired' } })[0]).toEqual(
+      { type: 'approvalResolved', id: 'ap-1', decision: 'expired' },
+    )
+    expect(t.translate({ type: 'event', event: 'plugin.approval.resolved', payload: { decision: 'approve' } })).toEqual([])
+  })
+})

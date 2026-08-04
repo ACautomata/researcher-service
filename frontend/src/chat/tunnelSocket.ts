@@ -7,7 +7,7 @@
 // 协议 v4 握手/重连/帧状态机/会话投影全由官方协议机负责，本类只做 transport 适配。
 //
 // URL 形态（F11，code review）：相对路径 `/ws/chat/` —— WHATWG WebSocket 构造函数按文档 base URL
-// 解析相对地址，既有 ChatWebSocket（chat/ws.ts）生产同款用法。绝对 URL（codex P1-3）基于
+// 解析相对地址（生产前端同款用法；旧 ChatWebSocket 已于 #369 删除）。绝对 URL（codex P1-3）基于
 // 「相对路径抛 SyntaxError」的错误前提，且引入 window.location 依赖、subpath 部署下同样丢前缀。
 
 import type { GatewayProtocolSocket, GatewayProtocolSocketHandlers } from '@openclaw/gateway-client/browser'
