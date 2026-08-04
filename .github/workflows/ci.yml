@@ -70,7 +70,7 @@ jobs:
       - run: npm ci
       - run: npm run prisma:generate
       - run: npm run typecheck
-      # 预拉 OpenClaw 公共 ghcr 镜像供 containers-smoke 端到端测试（同 integration job 做法）。
+      # 预拉 OpenClaw 公共 ghcr 镜像供 containers-smoke 端到端测试。
       - run: docker pull ${{ env.OPENCLAW_IMAGE }}
       - run: npm test
       - run: npm run build
