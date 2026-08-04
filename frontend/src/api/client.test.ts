@@ -187,4 +187,56 @@ describe('api client', () => {
     ;(globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(mockResp([1, 2, 3]))
     expect(await apiJson<number[]>('/legacy')).toEqual([1, 2, 3])
   })
+
+  // PR #370 第四轮 R4-1（P0）：TS 后端 #312 信封 {code:0,message,data} 下，apiJson 成功时必须
+  // 解包 data 返回业务载荷，而不是整个信封——否则所有非 chat.ts 调用方（containers/wiki/models/
+  // pairing + ChatView.loadInstances）裸消费信封对象，listInstances.length / ContainersView.map 失败，
+  // 主线「容器列表 → selectContainer → 隧道」全断。非信封（Django 裸载荷）仍原样透传（上一用例）。
+  it('apiJson unwraps envelope data on HTTP 200 success（#312 信封）', async () => {
+    ;(globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+      mockResp({ code: 0, message: 'ok', data: { a: 1 } }),
+    )
+    expect(await apiJson<{ a: number }>('/x')).toEqual({ a: 1 })
+  })
+
+  it('apiJson unwraps envelope data array（listInstances 契约）', async () => {
+    ;(globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+      mockResp({ code: 0, message: 'ok', data: [1, 2, 3] }),
+    )
+    expect(await apiJson<number[]>('/x')).toEqual([1, 2, 3])
+  })
+
+  // PR #370 第四轮 R4-3（P0）：10005（mustChangePassword）是授权门状态，非凭据失效——刷新换新 token
+  // 不会改变它。不得放入 ENVELOPE_UNAUTHENTICATED_CODES 触发刷新链（否则改密用户每请求都无谓刷新
+  // 再抛 401「未登录」，看不到「需改密」指引）。apiFetch 对 10005 应直接返回响应交 apiJson 抛 code。
+  it('apiFetch does not trigger refresh chain on envelope 10005（mustChangePassword 非凭据失效）', async () => {
+    const auth = useAuthStore()
+    auth.token = 't'
+    const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>
+    fetchMock.mockResolvedValue(mockResp({ code: 10005, message: '请先修改密码', data: null }))
+    const resp = await apiFetch('/api/v1/x')
+    expect(resp.status).toBe(200) // 原响应直接返回，交 apiJson 抛码
+    expect(fetchMock).toHaveBeenCalledTimes(1) // 不调 refresh 端点
+    expect(auth.token).toBe('t') // 不清 token / 不刷新
+  })
+
+  // PR #370 第四轮 R4-4（P1）：并发 401/10001 下 N 个 refreshAndRetry 各调 forceRefresh → N 个同
+  // cookie refresh POST → 服务端 rotateRefresh 重放检测「族灭」全部 refresh（10003）→ 凭据有效的
+  // 用户被强制登出。须模块级 in-flight refresh promise 单飞：首个 refreshAndRetry 触发，其余复用。
+  it('refreshAndRetry coalesces concurrent 10001s into a single refresh POST', async () => {
+    const auth = useAuthStore()
+    auth.token = 'expired-access'
+    const newToken = liveToken()
+    const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>
+    fetchMock.mockImplementation(async (url: string, init: RequestInit) => {
+      if (url === '/api/v1/auth/token/refresh') return mockResp({ access: newToken }, 200)
+      const hdrs = new Headers(init.headers)
+      return hdrs.get('Authorization') === 'Bearer expired-access'
+        ? mockResp({ code: 10001, message: '未认证', data: null })
+        : mockResp({ code: 0, message: 'ok', data: { ok: true } })
+    })
+    await Promise.all([apiFetch('/api/v1/x'), apiFetch('/api/v1/y')])
+    const refreshCalls = fetchMock.mock.calls.filter(([p]) => p === '/api/v1/auth/token/refresh')
+    expect(refreshCalls).toHaveLength(1) // 单飞：并发 refresh 合并为一次，防服务端族灭
+  })
 })

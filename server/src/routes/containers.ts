@@ -123,6 +123,10 @@ export function createContainersRouter(orch: Orchestrator): Router {
     assertValidContainerName(name)
     // 归属前置（admin 全放行 / user 仅本人）：越权/不存在同码 20040 防探测。
     const inst = await getInstanceForUser(req.prisma, req.user!, name)
+    // #13（第四轮）：仅 running 容器下发 token——隧道侧对非 running（creating/stopped/removing）恒 4402，
+    // 端点盲目发 token 会让用户陷入 4402 退避循环。非 running 返 CONTAINER_NOT_RUNNING，前端显示
+    // 「容器未运行」而非通用连接失败。
+    if (inst.status !== 'running') throw fail(CODE.CONTAINER_NOT_RUNNING)
     // 容器 GATEWAY_TOKEN 存密文（DB 不落明文），用时解密（command.ts 同款模式）；tokenEncrypted=false
     // 为遗留明文行直接透传。
     const bootstrapToken = inst.tokenEncrypted

@@ -38,6 +38,19 @@ describe('containers api', () => {
     expect(path).toBe('/api/v1/containers/')
   })
 
+  // PR #370 第四轮 R4-1（P0）：TS 控制面 #312 信封下，listInstances 必须返回 data 解包后的数组，
+  // 不是整个信封 {code,message,data}。调用方 ContainersView.map / ChatView.loadInstances.length
+  // 依赖它是数组——apiJson 不解包会让主线「容器列表 → selectContainer → 隧道」全断。
+  // 旧用例 mock 喂裸数组（Django 形状）掩盖此路径；此用例用真实 TS 信封形状钉死契约。
+  it('listInstances unwraps TS envelope data into the array', async () => {
+    ;(globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+      mockResp({ code: 0, message: 'ok', data: [SAMPLE] }),
+    )
+    const items = await listInstances()
+    expect(Array.isArray(items)).toBe(true)
+    expect(items).toEqual([SAMPLE])
+  })
+
   it('createInstance POSTs name body to /api/v1/containers/', async () => {
     ;(globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(mockResp(SAMPLE, 201))
     const inst = await createInstance('demo')
@@ -54,5 +67,15 @@ describe('containers api', () => {
     const [path, init] = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0]
     expect(path).toBe('/api/v1/containers/demo')
     expect(init.method).toBe('DELETE')
+  })
+
+  // PR #370 第四轮 #9（P0）：TS 后端越权/不存在删除恒 HTTP 200 + code:20040（同码防探测）——
+  // 旧 apiFetch+resp.ok 把它当成功（删非属主容器「成功」）。改用 apiJson 后须对 code!==0 抛，
+  // 调用方（ContainersView）据 toast 提示失败。
+  it('removeInstance throws ApiError(20040) on envelope forbidden/not-found', async () => {
+    ;(globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+      mockResp({ code: 20040, message: '容器不存在或无权访问', data: null }),
+    )
+    await expect(removeInstance('others')).rejects.toMatchObject({ code: 20040 })
   })
 })

@@ -53,14 +53,10 @@ describe('getBootstrapToken（ADR 0006 D1 / #369）', () => {
     vi.clearAllMocks()
   })
 
-  it('POST bootstrap-token and unwraps envelope data.bootstrapToken', async () => {
-    // P0 回归：apiJson 返回整个信封 body（{code,message,data}），token 在 data 下——mock 必须
-    // 用信封 shape（旧的 {bootstrapToken} 顶层 shape 是 apiJson 永不产生的，两端各自 mock 对方绿）。
-    ;(apiJson as ReturnType<typeof vi.fn>).mockResolvedValue({
-      code: 0,
-      message: 'ok',
-      data: { bootstrapToken: 'tok-1' },
-    })
+  it('POST bootstrap-token and unwraps data.bootstrapToken', async () => {
+    // apiJson 成功时已解包信封 data（PR #370 第四轮 R4-1）→ 返回业务载荷 {bootstrapToken}。
+    // mock 须用 data shape（旧测试 mock 整个信封是「apiJson 不解包」假设的产物，与真实契约相悖）。
+    ;(apiJson as ReturnType<typeof vi.fn>).mockResolvedValue({ bootstrapToken: 'tok-1' })
     const token = await getBootstrapToken('demo')
     expect(apiJson).toHaveBeenCalledWith('/api/v1/containers/demo/bootstrap-token', {
       method: 'POST',
@@ -69,17 +65,13 @@ describe('getBootstrapToken（ADR 0006 D1 / #369）', () => {
     expect(token).toBe('tok-1')
   })
 
-  it('信封缺少 data.bootstrapToken → 抛错（防首连 auth.token 为空静默失败）', async () => {
-    ;(apiJson as ReturnType<typeof vi.fn>).mockResolvedValue({ code: 0, message: 'ok', data: {} })
+  it('data 缺少 bootstrapToken → 抛错（防首连 auth.token 为空静默失败）', async () => {
+    ;(apiJson as ReturnType<typeof vi.fn>).mockResolvedValue({})
     await expect(getBootstrapToken('demo')).rejects.toThrow('bootstrap-token 响应缺少')
   })
 
   it('encodes the container name in the URL', async () => {
-    ;(apiJson as ReturnType<typeof vi.fn>).mockResolvedValue({
-      code: 0,
-      message: 'ok',
-      data: { bootstrapToken: 'tok-1' },
-    })
+    ;(apiJson as ReturnType<typeof vi.fn>).mockResolvedValue({ bootstrapToken: 'tok-1' })
     await getBootstrapToken('a b')
     expect(apiJson).toHaveBeenCalledWith('/api/v1/containers/a%20b/bootstrap-token', {
       method: 'POST',

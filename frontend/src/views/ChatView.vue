@@ -133,6 +133,10 @@ function armResumeWait(run: { runId: string }) {
     // 恢复为历史重建（清占位与残留投影）。
     if (!disposed && activeRunId === run.runId && selectedSession.value) {
       resumeRun = null
+      // R4-6（第四轮）：清 activeRunId——否则残留死 runId 让 loadHistory 重建后，迟到的续帧命中
+      // activeRunId===runId 通过 claimRun，append 进历史 assistant 消息（污染）；且后续自主 run 首帧
+      // 命中 activeRunId 不同于自身 + claimedEmpty=false 被屏蔽。
+      activeRunId = ''
       void loadHistory(selectedSession.value)
     }
   }, RESUME_WAIT_MS)
@@ -414,6 +418,7 @@ async function openGateway(): Promise<boolean> {
   clearPendingGraceTimer() // B4: 建连代际切换清除延迟收尾定时器（防跨代 fire）
   clearResumeWait() // B5: 新连接是新 run 语境，旧连接在途 run 的 resume 等待作废
   pendingAbandonCount = 0 // B1: 新连接孤儿计数清零（防吞新 run 首帧；切容器/4401重建/手动重连同路径）
+  graceExpired = false // #11（第四轮）：宽限过期标记是 run 语境，连接边界复位——防重连后首个自主 run 被 lateClaim 认领进旧占位
   // 协议机首连须 bootstrap auth（ADR 事实 2）；归属门/不存在 → 20040（前端显示容器不可访问）。
   // 信封错误（HTTP 200 + code）经 apiJson 抛 ApiError(code)——status 分支不再需要（P0 code review）。
   let bootstrapToken: string
@@ -425,6 +430,12 @@ async function openGateway(): Promise<boolean> {
     if (e instanceof ApiError && (e.status === 401 || e.code === 10001)) return false
     if (e instanceof ApiError && e.code === 20040) {
       errorMsg.value = '容器不可访问，请切换容器'
+      return false
+    }
+    // #13：容器非 running（creating/stopped/removing）——bootstrap-token 前置门，给清晰文案而非
+    // 陷入隧道 4402 退避循环后显示通用「连接失败」。
+    if (e instanceof ApiError && e.code === 20046) {
+      errorMsg.value = '容器未运行，请启动后再对话'
       return false
     }
     errorMsg.value = (e as Error).message
@@ -446,6 +457,10 @@ async function openGateway(): Promise<boolean> {
         connecting.value = false
         disconnected.value = false
         errorMsg.value = ''
+        // #11（第四轮）：宽限过期标记是 run 语境，重连（新连接生命周期边界）复位——协议机自动重连
+        // 走此路径（非 openGateway），不重置会让重连后首个自主 run 被 lateClaim（!pendingSend &&
+        // graceExpired）认领进历史 assistant 占位。
+        graceExpired = false
         if (everConnected) {
           // 自动重连成功：B5 若断线时在途 run 需 resume → 保留占位等续帧（不 loadHistory 清空
           // 重建，续帧继续渲染）；否则 syncSessions 恢复会话/历史（C2：重连补拉，首连瞬败后不再
@@ -502,6 +517,11 @@ async function openGateway(): Promise<boolean> {
         // 占位落定（所有断开路径，光标不闪烁）：授权门拒绝（4401/4403/4404）也要落定——旧实现
         // 授权门分支不 finalizeLast，流式占位永久闪烁（composer 因 streaming 禁发）（P1-1）。
         if (activeRunId || pendingSend) finalizeLast()
+        // R4-7（第四轮）：清 pendingSend——首帧未到的 send 在本连接已死，重连是新 run 语境（resumeRun
+        // 仅在 activeRunId 非空时记，pendingSend 期间断线本就不期望 resume）。泄漏会让 4401 重建后
+        // 切会话 abandonActiveRun 走 `else if (pendingSend)` → pendingAbandonCount++ → 下次 send 首帧
+        // 被孤儿计数吞。
+        pendingSend = false
         // B5: 意外断线不永久 abandon 在途 run——网关重连可能 resume 同一 run 补发续帧
         // （session projection）。记录 resumeRun 供 onReady 保留占位等待续帧（而非 loadHistory
         // 清空重建）；授权门拒绝（4401/4403/4404）不记录（连接未建立/不可恢复，无续帧可等）。
@@ -608,21 +628,22 @@ function connect() {
 // 漂移会静默吞用户回复；如 claimedEmpty 判定一处改动另一处不随）。
 // 返回 true = 本帧应继续渲染（已认领 activeRunId / 已是当前 run）；false = 本帧应丢弃
 // （abandoned/foreign/孤儿计数）。
-// P1-4（code review）：B2 claimedEmpty 用「渲染可见内容」判定——半截 <thinking 残片
-// （splitThinking 实测 {text:'',thinking:'',inThinking:false} 视觉空白但 raw!==''）不再阻挡切换
-// 认领，用户 run 首帧不被静默丢弃（原 last.raw==='' 判定失效）。
+// P1-4（code review）+ R4-8（第四轮）：B2 claimedEmpty 用「渲染可见正文/思考」判定——半截
+// <thinking 残片（splitThinking 实测 {text:'',thinking:'',inThinking:false} 视觉空白但 raw!==''）
+// 不阻挡切换认领。**不要求 tools.length===0**：工具优先的外来 run 首帧（agent 先调工具再回复，
+// 常见）会在占位留 tool 行，若把 tool 行当内容占用，用户 run 首帧的切换认领被拒 → 回复被静默吞。
+// tool 行不是「回复正文」，不算占位已被占用。
 function claimRun(runId: string): boolean {
   if (abandonedRunIds.has(runId)) return false // 切换前遗留 run 的帧：丢弃
   if (activeRunId && runId !== activeRunId) {
-    // B2: 已认领 run 但占位仍无任何可见内容（先到者可能是同会话自主 run 的预热/status 首帧）→
+    // B2: 已认领 run 但占位仍无可见正文（先到者可能是同会话自主 run 的预热/status 首帧）→
     // 切换认领到后到 run（更像用户 send 触发的 run），防用户回复被静默丢弃（原代码直接 return）。
     const last = messages.value[messages.value.length - 1]
     const claimedEmpty = Boolean(
       last &&
         last.role === 'assistant' &&
-        last.text === '' && // P1-4: 渲染可见内容（splitThinking 剥离后正文/思考均空）
-        last.thinking === '' &&
-        last.tools.length === 0,
+        last.text === '' && // P1-4: 渲染可见正文（splitThinking 剥离后空）
+        last.thinking === '',
     )
     if (claimedEmpty) {
       foreignRunIds.add(activeRunId) // 先到空 run 降级为外来
@@ -752,6 +773,10 @@ function handleError(message: string, runId?: string) {
     clearResumeWait() // B5: run 失败终态，resume 无需继续
     return
   }
+  // 消费者级错误（无 runId，如「会话不存在」/连接级故障）：照常显示。
+  // #14（第四轮）：终结在途占位 + 清 activeRunId/pendingSend 是**可辩护行为**——会话级错误意味着
+  // 该会话/连接已坏，在途 run 不应再有续帧（网关不会在会话错误后继续推流）。即便随后有迟到帧，
+  // 因 activeRunId 已清会被 claimRun 当 foreign 丢弃，是安全降级而非回复丢失。保留行为。
   errorMsg.value = message
   connecting.value = false
   finalizeLast()
@@ -874,11 +899,16 @@ function send() {
     // 容器可能已切换（gateway !== myGw）；无守卫会对新容器 state 执行 finalizeLast + 写旧连接停止
     // 错误进新容器的 errorMsg（对齐 onFrame/onClose 的 stale guard）。
     if (gateway !== myGw) return
+    errorMsg.value = (e as Error).message
+    // R4-5（第四轮）：run 已 claim 且仍在流（activeRunId 非空——首帧已到）时，RPC 超时但网关可能
+    // 继续流式续帧。此时 finalize 占位会落定 streaming，续帧要么被当下次 send 的占位认领（跨 run
+    // 文本污染 + 吞用户回复），要么占位永久卡。仅在「首帧未到即失败」（activeRunId 空，run 没起来）
+    // 时 finalize + 清 pendingSend 放弃占位。
+    if (activeRunId) return
     // F3: RPC 失败复位 pendingSend——泄漏会让切会话变 phantom orphan（pendingAbandonCount++），
     // 下次发送首帧被当作孤儿丢弃、composer 永久锁死。
     pendingSend = false
     finalizeLast()
-    errorMsg.value = (e as Error).message
   })
   input.value = ''
 }

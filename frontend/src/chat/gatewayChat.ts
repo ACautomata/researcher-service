@@ -117,7 +117,12 @@ const WATCHDOG_INTERVAL_MS = 15_000
 
 // 连接参数中的 operator scope（协议文档）：sessions/chat 需 read/write；exec.approval.resolve 需
 // operator.approvals（审批回覆）。tool-events 声明该连接接收 run 的结构化工具事件。
-const OPERATOR_SCOPES = ['operator.read', 'operator.write', 'operator.approvals']
+// operator.admin（PR #370 第四轮 R4-2 P1）：sessions.delete 不带 archivedOnly（面板从不先归档，
+// 带 archivedOnly 反被网关对未归档会话恒拒 INVALID_REQUEST）——协议 schema 明示「deletes without
+// [archivedOnly] require operator.admin」。旧 backend wire SCOPES 含 admin，前端移植时漏掉 → 删除
+// 被 scope 拒。安全：operator.admin = full host access；面板作为容器所有者全权代理，UI 不暴露
+// terminal/worktree 等高危方法。真网关验证待 ADR 0006 遗留实测项 ③。
+const OPERATOR_SCOPES = ['operator.read', 'operator.write', 'operator.approvals', 'operator.admin']
 const CONNECT_CAPS = ['tool-events']
 
 // A3: 非安全上下文（http://<lan-ip> 自托管面板常见）下 crypto.randomUUID 不可用（undefined），
@@ -148,9 +153,13 @@ export function createGatewayChat(params: CreateGatewayChatParams): GatewayChat 
   // 故障、不消耗 give-up 预算。反向：crash-loop 型（hello 即崩，存活极短）每次握手成功不得归零
   // ——否则永远到不了 give-up，无限重连空转（违背 #369「退避重连空转」目标）。
   let consecutiveFailures = 0
-  // 上次 hello-ok 时刻；稳定存活阈值——hello 后存活超过它，此后断开即视为「已建立过连接」，
-  // 不再计失败（见下）。crash-loop（hello 后 <阈值 即崩）不计稳定，计数继续累积。
+  // 跨连接的上次 hello-ok 时刻——仅供 onHello 归零计数时的 crash-loop 判定（距上次 hello ≥阈值
+  // 才归零，hello 即崩的 crash-loop 不归零）。不用于 close 计费（见 thisConnHelloAt）。
   let lastHelloAt = 0
+  // 本次连接的 hello-ok 时刻（R4-9 第四轮）：close 时 stable 计费基准——只有「本次连接 hello 后存活
+  // 过阈值」的断开才算稳定（不计费，P1-6）。retry（新连接尝试）/ start 重置为 0，防稳定连接历史
+  // （lastHelloAt）让此后无 hello 的连续重连失败永远 stable=true、永不 give-up（无限 30s 退避）。
+  let thisConnHelloAt = 0
   const STABLE_CONNECTION_MS = 30_000
   // 沉默看门狗（A2/黑洞自愈）：onActivity 刷新最后活动时间；watchdog 超时无帧 → 强制重连。
   let lastActivityAt = 0
@@ -211,11 +220,14 @@ export function createGatewayChat(params: CreateGatewayChatParams): GatewayChat 
       // 转 ChatView 手动重连（disconnected 条）。
       // P1（code review）：仅「未达 hello 的失败」计费（连接从未建立即断）；hello 后稳定存活过的
       // 连接断开（含看门狗自发 closeSocket 的修复动作）不算故障，不消耗 give-up 预算。
-      const stable = lastHelloAt !== 0 && Date.now() - lastHelloAt >= STABLE_CONNECTION_MS
+      // R4-9（第四轮）：stable 基准 thisConnHelloAt（本次连接），非历史 lastHelloAt——否则稳定连接一次
+      // 后 lastHelloAt 永久存在，此后无 hello 的连续重连失败恒 stable=true、永不 give-up。
+      const stable = thisConnHelloAt !== 0 && Date.now() - thisConnHelloAt >= STABLE_CONNECTION_MS
       if (!stable) {
         consecutiveFailures++
         if (consecutiveFailures >= MAX_RECONNECT_FAILURES) return { retry: false, notify: true }
       }
+      thisConnHelloAt = 0 // retry = 新连接尝试，本次 hello 作废（下次 stable 判定基于新连接）
       return { retry: true, notify: true }
     },
     onClose: (context, decision) => {
@@ -256,6 +268,7 @@ export function createGatewayChat(params: CreateGatewayChatParams): GatewayChat 
         consecutiveFailures = 0
       }
       lastHelloAt = Date.now() // 记录 hello 时刻，供「稳定存活」判定
+      thisConnHelloAt = Date.now() // R4-9: 本次连接 hello 时刻（close stable 计费基准）
       resetTranslator() // P2: 新连接生命周期边界清空 sent 累积（断线中断的 run 条目作废）
       handlers.onReady()
     },
@@ -264,6 +277,7 @@ export function createGatewayChat(params: CreateGatewayChatParams): GatewayChat 
   return {
     start: () => {
       lastActivityAt = Date.now()
+      thisConnHelloAt = 0 // R4-9: 首次连接尝试，尚未 hello（close 计费基准复位）
       // 沉默看门狗：连接期持续监控（黑洞链路自愈，A2）。
       if (!watchdogTimer) {
         watchdogTimer = setInterval(() => {
@@ -326,7 +340,8 @@ export function createGatewayChat(params: CreateGatewayChatParams): GatewayChat 
       // INVALID_REQUEST（"Session X is not archived. Archive it first, then delete it."）——面板
       // 从不先归档，恒带 archivedOnly 会让所有正常会话删除失败（P0 code review）。对齐旧 wire
       // （wire_client.py sessions.delete {key}）与官方 webchat（仅 archived 行才带 archivedOnly）。
-      // 缺失会话为 ok 无操作（幂等）。
+      // 缺失会话为 ok 无操作（幂等）。不带 archivedOnly 需 operator.admin scope（见 OPERATOR_SCOPES，
+      // R4-2）——否则删除被 scope 拒。
       await client.request('sessions.delete', { key })
     },
     async getHistory(sessionKey: string, limit?: number, messageId?: string): Promise<SessionHistoryDTO> {

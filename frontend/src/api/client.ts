@@ -20,10 +20,14 @@ export class ApiError extends Error {
   }
 }
 
-// #312 信封系统码：code 以 1xxxx 开头 = 认证/授权层错误（未认证/角色不足/强制改密）。
-// 对 HTTP 200 信封里的这些码，apiFetch 按 HTTP 401 同语义触发刷新重试链（否则吊销的 token
-// 只在业务层被拒、刷新链永不触发，用户被留在原地反复看到内部错误文案——P0）。
-const ENVELOPE_UNAUTHENTICATED_CODES: ReadonlySet<number> = new Set([10001, 10004, 10005])
+// #312 信封系统码：code 以 1xxxx 开头 = 认证层错误（10001 未认证 / 10004 角色不足）——这些
+// 「换新 token 可解决」（凭据失效/吊销），对 HTTP 200 信封里的它们 apiFetch 按 HTTP 401 同语义
+// 触发刷新重试链（否则吊销的 token 只在业务层被拒、刷新链永不触发，用户被留在原地反复看到内部
+// 错误文案——P0）。
+// 10005（强制改密）**不**在此列：它是 mustChangePassword 授权门状态，非凭据失效——刷新换新 token
+// 不会改变它，放进刷新集只会让改密用户每请求无谓刷新一轮再被抛 401「未登录」，且 bootstrap/
+// loadInstances 对 401 静默 return 让用户永远看不到「需改密」指引（PR #370 第四轮 R4-3 P0）。
+const ENVELOPE_UNAUTHENTICATED_CODES: ReadonlySet<number> = new Set([10001, 10004])
 
 function buildHeaders(init: RequestInit, token: string): Headers {
   const headers = new Headers(init.headers)
@@ -59,9 +63,26 @@ async function envelopeCodeOf(resp: Response): Promise<number> {
 // 401 刷新链：forceRefresh 换新 token 后重试一次；成功返回新响应。刷新失败（refreshExhausted 确认
 // 失效）→ 清会话跳登录；瞬态失败（cookie 仍可能有效）→ 返回 null 抛错，保留会话供上层重试
 // （codex R8 F2，避免 auth 服务临时中断即踢人）。
+//
+// PR #370 第四轮 R4-4（P1）：单飞去重——并发 401/10001（过期 access 下多 tab / 并行 apiFetch）
+// 下，N 个 refreshAndRetry 各调 forceRefresh 会发 N 个同 cookie refresh POST，服务端 rotateRefresh
+// 重放检测「族灭」全部 refresh（10003）→ 凭据有效的用户被强制登出。模块级 in-flight promise：首个
+// 触发，并发者复用同一结果，refresh 端点只被打一次。
+let inflightRefresh: Promise<void> | null = null
+function singleFlightRefresh(): Promise<void> {
+  if (!inflightRefresh) {
+    inflightRefresh = useAuthStore()
+      .forceRefresh()
+      .finally(() => {
+        inflightRefresh = null
+      }) as Promise<void>
+  }
+  return inflightRefresh
+}
+
 async function refreshAndRetry(path: string, init: RequestInit): Promise<Response | null> {
   const auth = useAuthStore()
-  await auth.forceRefresh()
+  await singleFlightRefresh()
   if (auth.token) {
     const retried = await fetch(path, { ...init, headers: buildHeaders(init, auth.token) })
     const rejected =
@@ -116,5 +137,8 @@ export async function apiJson<T>(path: string, init: RequestInit = {}): Promise<
   // 用户看到原始内部文案（P0 code review）。非信封（Django 响应）按成功透传兼容。
   const env = parseEnvelope(body)
   if (env && env.code !== 0) throw new ApiError(resp.status, env.message, env.code)
-  return body as T
+  // PR #370 第四轮 R4-1（P0）：成功信封（code===0）须解包 data 返回业务载荷，而非整个信封——
+  // 否则调用方裸消费 {code,message,data}，listInstances.length / ContainersView.map 失败，
+  // 主线「容器列表 → selectContainer → 隧道」全断。非信封（Django 裸载荷，env===null）原样透传。
+  return (env ? env.data : body) as T
 }

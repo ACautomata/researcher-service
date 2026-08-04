@@ -16,9 +16,11 @@ describe('router guard', () => {
   beforeEach(async () => {
     // 每个用例独立的 Pinia（token 默认空 = 未认证）
     setActivePinia(createPinia())
-    // 守卫 hydrate 会调 fetch；默认 mock 失败，token 保持空
+    // 守卫 hydrate 会调 fetch；默认 mock 为 refresh 400（cookie 无效 = 确认未认证）→
+    // refreshExhausted=true（#10：守卫区分「确认失效踢 login」与「瞬态放行」，默认走前者）。
     global.fetch = vi.fn().mockResolvedValue({
       ok: false,
+      status: 400,
       json: async () => ({}),
     } as unknown as Response)
     // 重置到 login 起点，避免上一用例残留 '/' 导致同路由 no-op 跳过守卫

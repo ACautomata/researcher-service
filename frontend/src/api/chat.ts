@@ -26,14 +26,14 @@ export function triggerPair(name: string): Promise<PairingDTO> {
 // 容器 bootstrap token（ADR 0006 D1）：后端验 JWT + 归属门后返回该容器 GATEWAY_TOKEN，
 // 浏览器协议机首连凭证。越权/不存在 → 20040（同码防探测）。
 // 信封：server ok(res, { bootstrapToken }) → {code:0, message, data:{bootstrapToken}}；
-// apiJson 返回整个信封 body（不解包），故从 data 取。缺失即抛错（首连 token 恒 undefined
-// 会让协议机首连帧 auth.token 为空 → 网关拒 AUTH_BOOTSTRAP_TOKEN_INVALID，是 P0 错配）。
+// apiJson 成功时已解包 data（PR #370 第四轮 R4-1），故此处直接拿业务载荷。缺失即抛错（首连
+// token 恒 undefined 会让协议机首连帧 auth.token 为空 → 网关拒 AUTH_BOOTSTRAP_TOKEN_INVALID）。
 export async function getBootstrapToken(name: string): Promise<string> {
-  const env = await apiJson<{ data?: { bootstrapToken?: string } }>(
+  const data = await apiJson<{ bootstrapToken?: string }>(
     `/api/v1/containers/${encodeURIComponent(name)}/bootstrap-token`,
     { method: 'POST', body: JSON.stringify({}) },
   )
-  const token = env.data?.bootstrapToken
+  const token = data?.bootstrapToken
   if (!token) throw new Error('bootstrap-token 响应缺少 data.bootstrapToken（信封形状不匹配）')
   return token
 }

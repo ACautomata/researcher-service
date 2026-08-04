@@ -70,6 +70,15 @@ describe('wiki api client', () => {
     expect(init.method).toBe('DELETE')
   })
 
+  // PR #370 第四轮 #9（P0）：TS 后端越权/不存在删除恒 HTTP 200 + code:20040——旧 apiFetch+resp.ok
+  // 当成功。改 apiJson 后须对 code!==0 抛。
+  it('deletePage throws ApiError(20040) on envelope forbidden/not-found', async () => {
+    ;(globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+      mockResp({ code: 20040, message: '容器不存在或无权访问', data: null }),
+    )
+    await expect(deletePage('demo', 'concepts/a.md')).rejects.toMatchObject({ code: 20040 })
+  })
+
   it('getGraph hits graph endpoint', async () => {
     ;(globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(mockResp({ nodes: [], edges: [] }))
     await getGraph('demo')

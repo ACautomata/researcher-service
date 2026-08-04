@@ -129,7 +129,7 @@ describe('createGatewayChat（#369 隧道 Facade）', () => {
     const plan = await client.opts.buildConnectPlan!({ nonce: 'n', generation: 0 })
     expect(plan).toEqual({
       role: 'operator',
-      scopes: ['operator.read', 'operator.write', 'operator.approvals'],
+      scopes: ['operator.read', 'operator.write', 'operator.approvals', 'operator.admin'],
       caps: ['tool-events'],
       token: 'boot-1',
     })
@@ -295,6 +295,26 @@ describe('createGatewayChat（#369 隧道 Facade）', () => {
       client.fireHello()
       vi.advanceTimersByTime(1_000)
       expect(client.opts.resolveClose!(ctx).retry).toBe(false) // 第 5 次 → give-up（crash-loop 不再无限空转）
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('R4-9: 稳定连接后连续重连失败（无 hello）达阈值 give-up（stable 基准本次连接，非历史 lastHelloAt）', () => {
+    vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval', 'setTimeout', 'clearTimeout'] })
+    try {
+      const { client } = makeGateway()
+      const ctxHello = { code: 1006, reason: '', generation: 0, socketOpened: true, helloReceived: true, connectRequestSent: true }
+      const ctxNoHello = { code: 4402, reason: '', generation: 0, socketOpened: true, helloReceived: false, connectRequestSent: false }
+      // 稳定连接：hello + 存活 30s+ → 断开不计费（P1-6 不变）
+      client.fireHello()
+      vi.advanceTimersByTime(31_000)
+      expect(client.opts.resolveClose!(ctxHello).retry).toBe(true)
+      // 此后容器永久不可达：连续重连失败（无 hello）→ 修复前 lastHelloAt 历史让 stable 恒 true、永不计费；
+      // 修复后 stable 基准本次连接（retry 重置），无 hello 的 close 累积到 give-up。
+      const retries: boolean[] = []
+      for (let i = 0; i < 5; i++) retries.push(client.opts.resolveClose!(ctxNoHello).retry)
+      expect(retries).toEqual([true, true, true, true, false]) // 第 5 次 give-up
     } finally {
       vi.useRealTimers()
     }

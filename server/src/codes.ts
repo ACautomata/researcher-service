@@ -30,6 +30,7 @@ export const CODE = {
   CONTAINER_BUSY: 20043, // 目标在 provisioning（delete 改取消标志后仅作在飞冲突备用，#313）
   ORPHAN_DIR: 20044, // create 撞残留 orphan 目录（转译）
   CLEANUP_FAILED: 20045, // home 清理失败（delete 行标 REMOVING 可重试，转译）
+  CONTAINER_NOT_RUNNING: 20046, // #13：容器非 running（creating/stopped/removing）——bootstrap-token 前置
   // 9xxxx 系统 / 校验
   OAUTH_NOT_CONFIGURED: 90001, // OAuth provider 未配置（原 501）
   VALIDATION_FAILED: 90002, // 参数校验失败（字段明细进 data）
@@ -59,6 +60,7 @@ export const DEFAULT_MESSAGE: Record<number, string> = {
   [CODE.CONTAINER_BUSY]: '容器正在创建中，请稍候再删除',
   [CODE.ORPHAN_DIR]: '该名称存在残留数据目录，请删除同名实例或手动清理后重试',
   [CODE.CLEANUP_FAILED]: '容器已停删，但数据目录清理失败（权限/属主），请重试',
+  [CODE.CONTAINER_NOT_RUNNING]: '容器未运行，请启动后再对话',
   [CODE.OAUTH_NOT_CONFIGURED]: 'OAuth provider 未配置',
   [CODE.WIKI_PAGE_NOT_FOUND]: '页面不存在',
   [CODE.WIKI_PAGE_EXISTS]: '页面已存在',

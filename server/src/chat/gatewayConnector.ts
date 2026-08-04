@@ -83,6 +83,9 @@ export function makeWsGatewayConnector(timeoutMs = CONNECT_TIMEOUT_MS, sendBudge
           else {
             bufferedBytes += (data as Buffer).length
             if (bufferedBytes > TUNNEL_PENDING_BYTE_BUDGET) {
+              // #15（第四轮）：ws 的 'message' 恒在 'open' 之后 → 此刻 promise 多已 resolve，reject 是
+              // no-op；真正的保护是 ws.terminate()（kill 已 resolve 的 socket → tunnel onClose → 隧道按
+              // 4402 网关不可达决策）。reject 保留作防御性兜底（极端时序下 promise 未 settle 时仍生效）。
               clearTimeout(timer)
               removeConnectListeners()
               ws.terminate()
@@ -134,6 +137,7 @@ export function makeWsGatewayConnector(timeoutMs = CONNECT_TIMEOUT_MS, sendBudge
               msgCb = cb
               for (const frame of buffered) cb(frame)
               buffered.length = 0
+              bufferedBytes = 0 // #15：flush 后归零（flush 后不再读，但保持与 buffered 一致，避免残留误读）
             },
             onClose: (cb) => {
               if (closed) cb(closeCode, closeReason)
