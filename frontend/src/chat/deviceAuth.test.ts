@@ -5,7 +5,7 @@
 
 import { describe, expect, it, beforeEach } from 'vitest'
 import { GatewayBrowserDeviceAuthLifecycle } from '@openclaw/gateway-client/browser'
-import { createDeviceAuthLifecycle } from './deviceAuth'
+import { createDeviceAuthLifecycle, hasStoredDeviceTokenFor } from './deviceAuth'
 import { createDeviceTokenStore } from './deviceTokenStore'
 
 const client = { id: 'webchat-ui', mode: 'webchat', platform: 'browser', version: 'test' } as const
@@ -110,5 +110,33 @@ describe('deviceAuth（#375 组合层：官方 GatewayBrowserDeviceAuthLifecycle
     expect(plan.identity).toBeNull()
     expect(plan.device).toBeUndefined()
     expect(plan.auth!.bootstrapToken).toBe('boot-1')
+  })
+
+  it('hasStoredDeviceTokenFor：无存储 token → false；acceptHello 持久化后 → true；clearStoredToken 后 → false', async () => {
+    // 未配对（localStorage 空）→ 无 deviceToken → false（gatewayChat 据此走首连 token）
+    expect(await hasStoredDeviceTokenFor(client.id, 'operator')).toBe(false)
+    const lifecycle = createDeviceAuthLifecycle()
+    const plan = await lifecycle.buildPlan({
+      client,
+      role: 'operator',
+      defaultScopes: ['operator.read'],
+      bootstrapToken: 'boot-1',
+      nonce: 'n1',
+    })
+    await lifecycle.acceptHello(
+      { auth: { deviceToken: 'dt-1', role: 'operator', scopes: ['operator.read'] } },
+      plan,
+    )
+    // acceptHello 已把 deviceToken 落到 localStorage → 重连凭证判断返回 true（走 deviceToken）
+    expect(await hasStoredDeviceTokenFor(client.id, 'operator')).toBe(true)
+    // 键含 (clientId, deviceId, role)：role 不匹配 → false（不误判其他角色已配对）
+    expect(await hasStoredDeviceTokenFor(client.id, 'admin')).toBe(false)
+    // token 失效清除后 → false（回首连 token 路径，重配对）
+    await lifecycle.clearStoredToken(plan)
+    expect(await hasStoredDeviceTokenFor(client.id, 'operator')).toBe(false)
+  })
+
+  it('hasStoredDeviceTokenFor：storage 不可用（null）→ false（无身份降级，走 bootstrap）', async () => {
+    expect(await hasStoredDeviceTokenFor(client.id, 'operator', null)).toBe(false)
   })
 })

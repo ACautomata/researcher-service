@@ -119,8 +119,11 @@ vi.mock('./tunnelSocket', () => ({
 
 // #377: gatewayChat 默认 createDeviceAuthLifecycle() 取官方 lifecycle —— mock 成可控假实现
 // （buildPlan/acceptHello/clearStoredToken 可断言；配对编排断言「approve → 重连」）。
+// hasStoredDeviceTokenFor：真网关适配凭证选择「首连 token / 重连 deviceToken」的判断来源——
+// mock 默认未配对（false），已配对重连测试 mockResolvedValueOnce(true)。
 vi.mock('./deviceAuth', () => ({
   createDeviceAuthLifecycle: () => MockLifecycle,
+  hasStoredDeviceTokenFor: vi.fn(),
 }))
 
 // approve 端点（#371-1）：gatewayChat 配对编排经 REST 调后端 approve。
@@ -130,6 +133,7 @@ vi.mock('@/api/chat', () => ({
 
 import { createGatewayChat } from './gatewayChat'
 import { approvePairing } from '@/api/chat'
+import { hasStoredDeviceTokenFor } from './deviceAuth'
 
 function makeHandlers() {
   return {
@@ -149,7 +153,8 @@ function makeGateway(handlers = makeHandlers()) {
 beforeEach(() => {
   vi.clearAllMocks()
   MockGatewayProtocolClient.last = null
-  // 默认 lifecycle.buildPlan：首连用 bootstrap token + 设备签名块（已配对重连由测试 mockResolvedValueOnce 覆盖）。
+  // 默认未配对（首连）：gatewayChat 传 token 参数 → mock buildPlan 输出 auth:{token} + 设备签名块
+  //（真网关 2026.7.1 实测适配，pairingSmoke.test.ts 同款）。已配对重连由测试 mockResolvedValueOnce 覆盖。
   // clearAllMocks 保留 implementation，这里显式重置防测试间 mockImplementation 泄漏。
   MockLifecycle.buildPlan.mockImplementation(async (params) => ({
     clientId: params.client.id,
@@ -157,24 +162,27 @@ beforeEach(() => {
     identity: { deviceId: 'dev-1', publicKey: 'pk-1', sign: vi.fn() },
     selectedAuth: {},
     scopes: [...params.defaultScopes],
-    auth: { bootstrapToken: params.bootstrapToken },
+    auth: params.token ? { token: params.token } : {},
     device: { id: 'dev-1', publicKey: 'pk-1', signature: 'sig-1', signedAt: 123, nonce: params.nonce ?? '' },
   }))
+  // 凭证选择判断：默认未配对（首连 token）；已配对重连测试 mockResolvedValueOnce(true)。
+  vi.mocked(hasStoredDeviceTokenFor).mockReset().mockResolvedValue(false)
 })
 
 describe('createGatewayChat（#369 隧道 Facade）', () => {
-  it('构造：buildConnectPlan 经 lifecycle（首连 bootstrap + 设备签名块）→ buildConnectParams 透传 auth/device', async () => {
+  it('构造：buildConnectPlan 经 lifecycle（首连 token + 设备签名块）→ buildConnectParams 透传 auth/device', async () => {
     const handlers = makeHandlers()
     const gw = createGatewayChat({ container: 'alpha', jwt: 'jwt-1', bootstrapToken: 'boot-1', handlers })
     const client = MockGatewayProtocolClient.last!
     const plan = await client.opts.buildConnectPlan!({ nonce: 'n', generation: 0 })
-    // #377: 凭证选择交给官方 lifecycle（buildPlan 传 bootstrapToken + 设备身份参数）
+    // #377 + 真网关适配：凭证选择交给官方 lifecycle——未配对（hasStoredDeviceTokenFor=false）首连传
+    // token 参数（真网关 2026.7.1 认 auth.token 字段，bootstrapToken 字段被当 setup code 拒）
     expect(MockLifecycle.buildPlan).toHaveBeenCalledWith(
       expect.objectContaining({
         client: expect.objectContaining({ id: 'webchat-ui' }),
         role: 'operator',
         defaultScopes: ['operator.read', 'operator.write', 'operator.approvals', 'operator.admin'],
-        bootstrapToken: 'boot-1',
+        token: 'boot-1',
         nonce: 'n',
       }),
     )
@@ -182,7 +190,7 @@ describe('createGatewayChat（#369 隧道 Facade）', () => {
       role: 'operator',
       scopes: ['operator.read', 'operator.write', 'operator.approvals', 'operator.admin'],
       caps: ['tool-events'],
-      auth: { bootstrapToken: 'boot-1' },
+      auth: { token: 'boot-1' },
       device: { id: 'dev-1', signature: 'sig-1' },
     })
     const params = client.opts.buildConnectParams!(plan)
@@ -190,7 +198,7 @@ describe('createGatewayChat（#369 隧道 Facade）', () => {
       minProtocol: 4,
       maxProtocol: 4,
       client: expect.objectContaining({ id: 'webchat-ui' }),
-      auth: { bootstrapToken: 'boot-1' },
+      auth: { token: 'boot-1' },
       device: expect.objectContaining({ id: 'dev-1', signature: 'sig-1' }),
     })
     expect((params as { caps: string[] }).caps).toEqual(['tool-events'])
@@ -648,8 +656,11 @@ describe('#377 设备配对生命周期（GatewayBrowserDeviceAuthLifecycle 接�
     })
   }
 
-  it('已配对重连：lifecycle 返回 deviceToken → buildConnectParams 透传 auth.deviceToken（不再走 bootstrap）', async () => {
+  it('已配对重连：hasStoredDeviceToken=true 不传 token 凭证 → lifecycle 返回 deviceToken → buildConnectParams 透传 auth.deviceToken（不再走 bootstrap）', async () => {
     const { client } = makeGateway()
+    // 真网关适配凭证选择：已配对（tokenStore 有 deviceToken）→ gatewayChat 不传 token/bootstrapToken
+    // 凭证，交官方 lifecycle 从 tokenStore 选 deviceToken（buildPlan 参数无 token/bootstrapToken）。
+    vi.mocked(hasStoredDeviceTokenFor).mockResolvedValueOnce(true)
     MockLifecycle.buildPlan.mockResolvedValueOnce({
       clientId: 'webchat-ui',
       role: 'operator',
@@ -659,10 +670,13 @@ describe('#377 设备配对生命周期（GatewayBrowserDeviceAuthLifecycle 接�
       auth: { deviceToken: 'dt-1' },
     })
     const plan = await client.opts.buildConnectPlan!({ nonce: 'n', generation: 1 })
+    expect(MockLifecycle.buildPlan).toHaveBeenCalledWith(
+      expect.not.objectContaining({ token: expect.anything(), bootstrapToken: expect.anything() }),
+    )
     expect(plan).toMatchObject({ auth: { deviceToken: 'dt-1' } })
     const params = client.opts.buildConnectParams!(plan)
     expect(params).toMatchObject({ auth: { deviceToken: 'dt-1' } })
-    expect((params as { auth: { bootstrapToken?: string } }).auth.bootstrapToken).toBeUndefined()
+    expect((params as { auth: { token?: string } }).auth.token).toBeUndefined()
   })
 
   it('onConnectHello → lifecycle.acceptHello（hello-ok 下发 deviceToken 持久化）', async () => {
@@ -684,7 +698,7 @@ describe('#377 设备配对生命周期（GatewayBrowserDeviceAuthLifecycle 接�
       identity: null,
       selectedAuth: {},
       scopes: ['operator.read'],
-      auth: { bootstrapToken: 'boot-1' },
+      auth: { token: 'boot-1' },
     })
     const plan = await client.opts.buildConnectPlan!({ nonce: 'n', generation: 1 })
     // hello-ok 不带 deviceToken（异常网关）→ 不持久化、不标记配对完成

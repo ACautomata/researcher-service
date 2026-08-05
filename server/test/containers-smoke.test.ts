@@ -1,6 +1,6 @@
 // 集成 smoke（接缝 #5 集成侧）：真 docker daemon + 真 DockerRuntime，端到端验证 create→running→delete。
 // **必须真跑，无 skip 门控**（codex PR#346 P2）：daemon 不可达或镜像不可获取 → 套件失败，绝不静默跳过。
-// 拉取未缓存镜像经 modem.followProgress 消费进度流。
+// 拉取未缓存镜像经 modem.followProgress 消费进度流（helper 见 smokeDocker.ts，与 pairingSmoke 共享）。
 // 需 env：OPENCLAW_TEMPLATE_DIR（home 模板源）/ LLM_API_KEY（可注入 dummy，容器未必真调 LLM）。
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
@@ -16,58 +16,7 @@ import { DockerRuntime } from '../src/containers/dockerRuntime'
 import { InlineLifecycleQueue } from '../src/containers/lifecycleQueue'
 import { defaultReservedPorts, type FleetConfig } from '../src/containers/values'
 import { DEV_ENCRYPTION_KEYS } from '../src/crypto'
-import type Docker from 'dockerode'
-
-// pull 消费面（可注入替身测进度流消费）：dockerode 的 pull 返回可读流，须经 modem.followProgress 排干，
-// 否则流不 flowing、pull 永不完成（等 end 空挂到超时）；注册表失败以「进度记录」而非 error 事件出现，
-// followProgress 会把它们回调成 err（codex PR#346 P2）。
-interface PullProgressClient {
-  getImage(image: string): { inspect(): Promise<unknown> }
-  pull(ref: string): Promise<NodeJS.ReadableStream>
-  modem: { followProgress(s: NodeJS.ReadableStream, f: (err: Error | null) => void): void }
-}
-
-async function defaultPullClient(): Promise<PullProgressClient> {
-  const Docker = (await import('dockerode')).default
-  const d = new Docker()
-  return {
-    getImage: (image) => d.getImage(image),
-    pull: (ref) => d.pull(ref),
-    modem: (d as Docker & { modem: PullProgressClient['modem'] }).modem,
-  }
-}
-
-// 排干 pull 进度流并浮现 daemon 报告的错误（镜像 DockerRuntime.ensureImage 同款模式，codex PR#346 P2）。
-// followProgress 消费流（不消费则流不 flowing、pull 永不完成）+ 回调注册表错误；保留 120s 挂起超时
-// （daemon 既无进度也无错误时不无限挂住）。
-function drainPull(
-  stream: NodeJS.ReadableStream,
-  modem: PullProgressClient['modem'],
-  timeoutMs = 120_000,
-): Promise<void> {
-  return new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('image pull timeout')), timeoutMs)
-    modem.followProgress(stream, (err) => {
-      clearTimeout(timer)
-      if (err) reject(err)
-      else resolve()
-    })
-  })
-}
-
-// 确保镜像可获取（本地已缓存 or 拉取成功）；失败 → 抛错（集成 smoke 必须真跑，绝不静默 skip）。
-// client 可注入（测试替身）；缺省建真 dockerode 客户端。
-async function ensureImageAvailable(image: string, client?: PullProgressClient): Promise<void> {
-  const c = client ?? (await defaultPullClient())
-  try {
-    await c.getImage(image).inspect() // 本地已缓存 → 就绪
-    return
-  } catch {
-    /* 本地缺失 → 拉取 */
-  }
-  const stream = await c.pull(image)
-  await drainPull(stream, c.modem)
-}
+import { ensureImageAvailable, type PullProgressClient } from './smokeDocker'
 
 describe('ensureImageAvailable / drainPull（pull progress 消费，codex PR#346 P2）', () => {
   const modemWith = (err: Error | null): PullProgressClient['modem'] => ({

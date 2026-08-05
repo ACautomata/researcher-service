@@ -17,7 +17,7 @@ import { readPairingConnectErrorDetails } from '@openclaw/gateway-protocol/conne
 import { createPanelTunnelSocket } from './tunnelSocket'
 import { ChatEventTranslator, type ChatFrame, type GatewayEventFrame } from './eventTranslate'
 import { NO_RETRY_CLOSE_CODES, WS_GATEWAY_UNAVAILABLE } from './closeCodes'
-import { createDeviceAuthLifecycle } from './deviceAuth'
+import { createDeviceAuthLifecycle, hasStoredDeviceTokenFor } from './deviceAuth'
 import { approvePairing } from '@/api/chat'
 
 export type { ChatFrame, GatewayEventFrame } from './eventTranslate'
@@ -97,6 +97,10 @@ export interface CreateGatewayChatParams {
   // #377: 设备配对 lifecycle（ADR 0006 决定 3/6）——缺省 createDeviceAuthLifecycle()（真实 localStorage
   // 身份 + tokenStore）；测试注入假 lifecycle（假 tokenStore / 内存 storage）断言配对编排（#377 acceptance）。
   deviceAuth?: GatewayBrowserDeviceAuthLifecycle
+  // 真网关 2026.7.1 适配（实测）：凭证选择「首连 auth.token / 重连 deviceToken」需要判断「该设备已持有
+  // deviceToken」。官方 lifecycle 不暴露 tokenStore，缺省经 hasStoredDeviceTokenFor 读 localStorage
+  //（与 deviceAuth 同源）；测试注入确定性替身（首连 false / 已配对 true）。
+  hasStoredDeviceToken?: () => boolean | Promise<boolean>
 }
 
 // 面板隧道 close code（单一来源 = closeCodes.ts，F15）：4401 认证失败 / 4404 容器归属 / 4402
@@ -209,15 +213,23 @@ export function createGatewayChat(params: CreateGatewayChatParams): GatewayChat 
     createSocket: (socketHandlers) => createPanelTunnelSocket(container, jwt, socketHandlers),
     createRequestId,
     buildConnectPlan: async ({ nonce }) => {
-      // #377: 接入官方设备认证生命周期——首连用 bootstrap token + 设备签名块；已配对（tokenStore 有
-      // deviceToken）用 deviceToken（不再走 bootstrap/配对）。gatewayChat 只透传 lifecycle 产出，
-      // 凭证选择逻辑归官方包（ADR 决定 3/6，deviceAuth.test.ts 已覆盖）。
+      // #377: 接入官方设备认证生命周期。真网关 2026.7.1-browser 实测（pairingSmoke.test.ts 同款适配）：
+      // 首连 auth 必须用 `token` 字段（GATEWAY_TOKEN，即 bootstrapToken 参数值），官方 lifecycle 的
+      // bootstrapToken 参数输出 `bootstrapToken` 字段被 2026.7.1 当「setup code」拒
+      // （AUTH_BOOTSTRAP_TOKEN_INVALID）——官方 gateway-client 2026.7.2-beta.6 面向 2026.7.2 网关，
+      // 无 2026.7.2-browser 镜像可升，故凭证选择适配：
+      //   - 有 deviceToken（tokenStore 持久化过）→ 不传 token/bootstrapToken 凭证，官方 lifecycle 的
+      //     selectGatewayConnectAuth 从 tokenStore 选 deviceToken（重连复用，不再走 bootstrap/配对）
+      //   - 无（首连/网关重置清 token 后）→ 传 `token` 参数 → lifecycle 输出 auth:{token} + 设备签名块
+      //        （签名 payload 含 GATEWAY_TOKEN，与 auth 一致；官方 bootstrapToken 参数会签名含
+      //        bootstrapToken 的 payload 而输出 bootstrapToken 字段——两处都须改，不能只改 auth）
       // beta.6 打包版 buildPlan 无 challengeTs 参数（signedAtMs = nowMs ?? Date.now），只传 nonce。
+      const stored = await (params.hasStoredDeviceToken ?? (() => hasStoredDeviceTokenFor(CLIENT_INFO.id, OPERATOR_ROLE)))()
       const authPlan = await lifecycle.buildPlan({
         client: CLIENT_INFO,
         role: OPERATOR_ROLE,
         defaultScopes: OPERATOR_SCOPES,
-        bootstrapToken,
+        ...(stored ? {} : { token: bootstrapToken }),
         nonce,
       })
       lastAuthPlan = authPlan
