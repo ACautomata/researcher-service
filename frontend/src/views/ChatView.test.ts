@@ -313,6 +313,38 @@ describe('ChatView', () => {
     expect(w.find('[data-test="approval-ap-2"]').text()).toContain('未知')
   })
 
+  it('#405-T1: subagent 审批卡唯一家在 main——subagent 会话恒空、切回 main 可见（留存不变量）', async () => {
+    const w = mount(ChatView)
+    await flushPromises()
+    const gw = MockGatewayChat.last!
+    // 会话列表初始即含 subagent 会话（#394 实测形态，sidebar 渲染 + pickSession 切会话）
+    gw.listSessions.mockResolvedValue([
+      SESSION,
+      { session_key: 'agent:sub-agent-1:subagent:child-1', title: '', updated_at: '' },
+    ])
+    gw.getHistory.mockResolvedValue({ messages: [], hasMore: false, nextOffset: null })
+    gw.listCommands.mockResolvedValue([])
+    gw.send.mockResolvedValue(undefined)
+    gw.fireReady()
+    await flushPromises() // 选中 sk-1（main）+ loadHistory(空)
+    // subagent 发起的审批（agentId 标识 + 归属 subagent 会话形态）
+    gw.fireFrame({
+      type: 'approval', id: 'ap-sub', kind: 'exec', command: 'rm -rf /tmp/x',
+      sessionKey: 'agent:sub-agent-1:subagent:child-1', agentId: 'sub-1',
+    })
+    await nextTick()
+    // main 会话选中时：subagent 卡可见（可回覆）
+    expect(w.find('[data-test="approval-ap-sub"]').exists()).toBe(true)
+    // 切到 subagent 会话：审批区恒空（任何卡不显示）
+    await w.find('[data-test="session-agent:sub-agent-1:subagent:child-1"]').trigger('click')
+    await flushPromises()
+    expect(w.find('[data-test="approval-ap-sub"]').exists()).toBe(false)
+    // 切回 main 会话：卡原位可见（留存不变量——被过滤仅渲染层隐藏）
+    await w.find('[data-test="session-sk-1"]').trigger('click')
+    await flushPromises()
+    expect(w.find('[data-test="approval-ap-sub"]').exists()).toBe(true)
+  })
+
   it('resolve RPC 失败 → 恢复该卡为 pending 可重试', async () => {
     const { w, gw } = await mountReady()
     gw.fireFrame({ type: 'approval', id: 'ap-3', kind: 'exec', command: 'x', sessionKey: null })

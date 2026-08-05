@@ -48,11 +48,10 @@ const currentSessionTitle = computed(() => {
 // 是否有助手消息正在流式；并发 send 会让旧 streaming 消息永久卡住光标，故流式中禁发
 const streaming = computed(() => chat.messages.some((m) => m.role === 'assistant' && m.streaming))
 
-// codex R2 P1：审批卡按 sessionKey **留存全部**（不丢弃非当前会话的），仅渲染时按当前会话过滤——
-// 切到该会话即可看到/回覆，agent 不再因切会话而永久丢失待审批卡。无 sessionKey（连接级）任何会话可见。
-const visibleApprovals = computed(() =>
-  chat.approvals.filter((a) => !a.sessionKey || a.sessionKey === chat.selectedSession),
-)
+// #405-T1：审批卡可见性过滤归 chatStore getter（#395 钉死 + #394 实测——当前会话是 subagent
+// 会话时审批区恒空；非 subagent 会话显示归属卡 + 无 sessionKey 连接级卡 + subagent 卡；
+// 被过滤卡留存列表仅渲染层隐藏）
+const visibleApprovals = computed(() => chat.visibleApprovals)
 
 // 删除会话：确认（ElMessageBox）由本壳注入（composable 内不持有 UI）
 async function confirmRemoveSession(): Promise<boolean> {

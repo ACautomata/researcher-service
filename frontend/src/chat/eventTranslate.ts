@@ -9,7 +9,7 @@ export type ChatFrame =
   | { type: 'done'; runId: string }
   // runId 可选：run 级错误挂 runId（前端按 runId 过滤）；无 runId 为连接/会话级错误（照常显示）
   | { type: 'error'; runId?: string; message: string }
-  | { type: 'approval'; id: string; kind: string; command: string; sessionKey: string | null }
+  | { type: 'approval'; id: string; kind: string; command: string; sessionKey: string | null; agentId: string | null }
   | { type: 'approvalResolved'; id: string; decision: string }
   | {
       type: 'tool'
@@ -178,6 +178,8 @@ export class ChatEventTranslator {
   // 待审批事件 payload → 前端审批卡帧；无稳定审批 id 返回 null（无法 resolve，不出卡）。
   // kind 缺省时从事件名族派生（exec/plugin）；sessionKey 透传自 request.sessionKey
   // （issue #154 实测校准：systemRunPlan 实测为 null，command/sessionKey 在 payload.request 下）。
+  // agentId（#405-T1）：request.agentId 恒下发（#394 实测，string 才取 0 信任）为首选；
+  // request 缺失走 systemRunPlan 回退路径读 runPlan.agentId（host=node 时存在，本部署恒 null）。
   private approvalCard(event: string, payload: Record<string, unknown>): ChatFrame | null {
     const approvalId = typeof payload.id === 'string' ? payload.id : ''
     if (!approvalId) return null
@@ -185,15 +187,18 @@ export class ChatEventTranslator {
     const runPlan = asRecord(payload.systemRunPlan)
     let command = ''
     let sessionKey: string | null = null
+    let agentId: string | null = null
     if (Object.keys(req).length > 0) {
       command = typeof req.command === 'string' ? req.command : ''
       sessionKey = typeof req.sessionKey === 'string' ? req.sessionKey : null
+      agentId = typeof req.agentId === 'string' ? req.agentId : null
     } else {
       command =
         (typeof runPlan.rawCommand === 'string' ? runPlan.rawCommand : '') ||
         (typeof runPlan.command === 'string' ? runPlan.command : '') ||
         (typeof payload.command === 'string' ? payload.command : '')
       sessionKey = typeof runPlan.sessionKey === 'string' ? runPlan.sessionKey : null
+      agentId = typeof runPlan.agentId === 'string' ? runPlan.agentId : null
     }
     return {
       type: 'approval',
@@ -201,6 +206,7 @@ export class ChatEventTranslator {
       kind: typeof payload.kind === 'string' && payload.kind ? (payload.kind as string) : event.split('.')[0],
       command,
       sessionKey,
+      agentId,
     }
   }
 

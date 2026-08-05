@@ -148,6 +148,7 @@ const card: ApprovalItem = {
   kind: 'exec',
   command: 'rm -rf /tmp/x',
   sessionKey: null,
+  agentId: null,
   status: 'pending',
   decision: '',
   detailOpen: false,
