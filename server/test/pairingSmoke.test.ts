@@ -251,34 +251,50 @@ describe('真网关配对闭环 smoke（#371-5 / #378）', () => {
     expect(created.status).toBe('running')
 
     // 等容器网关 WS 就绪（docker-proxy 起 + 网关监听）：makeWsGatewayConnector 直连根路径。
-    // CI（共享 runner 与 containers-smoke 并行）容器首启 + 网关初始化可达 2-4 分钟 → 240s 超时
-    //（本地实测 ~10s）。等待期间若容器退出（openclaw 启动失败）→ 立即失败并打印容器日志定位
-    // 根因（CI 上才可诊断，不盲等 240s）。
-    await waitFor(
-      async () => {
-        const live = await runtime.get(BOX).catch(() => null)
-        // Restarting 循环中 State.Running 可能仍 true（重启间隙才 false）——须查 status 原值
-        //（"Restarting (78) 10 seconds ago" / "Exited (78)"）识别 openclaw 启动崩溃。
-        if (live && (live.status.includes('restarting') || live.status.includes('exited') || !live.running)) {
-          let logs = ''
-          try {
-            logs = execFileSync('docker', ['logs', '--tail', '40', containerName(BOX)], { encoding: 'utf8' })
-          } catch {
-            // 容器日志不可得 → 仅报状态
-          }
-          throw new Error(`容器 ${BOX} 已退出（网关未就绪），status=${live.status}，docker logs:\n${logs}`)
-        }
+    // CI（共享 runner 与 containers-smoke 并行）容器首启 + 网关初始化慢 → 240s 预算；等待期间
+    // 容器退出（openclaw 启动崩溃，status 原值含 restarting/exited）→ 立即失败；预算耗尽仍未就绪
+    // → 附完整诊断（容器日志 + 最近探测错误 + 容器状态）定位根因，不盲等成无信息超时。
+    const probeErrors: string[] = []
+    const deadline = Date.now() + 240_000
+    let lastLive: string | null = null
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      const live = await runtime.get(BOX).catch(() => null)
+      if (live) lastLive = `running=${live.running} status=${live.status}`
+      // Restarting 循环中 State.Running 可能仍 true（重启间隙才 false）——须查 status 原值
+      //（"Restarting (78) 10 seconds ago" / "Exited (78)"）识别 openclaw 启动崩溃。
+      if (live && (live.status.includes('restarting') || live.status.includes('exited') || !live.running)) {
+        let logs = ''
         try {
-          const gw = await makeWsGatewayConnector().connect(`ws://127.0.0.1:${containerPort}/`)
-          gw.close()
-          return true
+          logs = execFileSync('docker', ['logs', '--tail', '40', containerName(BOX)], { encoding: 'utf8' })
         } catch {
-          return null
+          // 容器日志不可得 → 仅报状态
         }
-      },
-      240_000,
-      1000,
-    )
+        throw new Error(`容器 ${BOX} 已退出（网关未就绪），status=${live.status}，docker logs:\n${logs}`)
+      }
+      try {
+        const gw = await makeWsGatewayConnector(undefined, undefined, WS_ORIGIN).connect(
+          `ws://127.0.0.1:${containerPort}/`,
+        )
+        gw.close()
+        break // 网关 WS 就绪
+      } catch (e) {
+        probeErrors.push((e as Error).message.slice(0, 120))
+        if (probeErrors.length > 10) probeErrors.shift()
+      }
+      if (Date.now() >= deadline) {
+        let logs = ''
+        try {
+          logs = execFileSync('docker', ['logs', '--tail', '40', containerName(BOX)], { encoding: 'utf8' })
+        } catch {
+          // 容器日志不可得 → 仅报状态
+        }
+        throw new Error(
+          `网关 WS 240s 未就绪: ${BOX} lastLive=${lastLive} 最近探测错误=${JSON.stringify(probeErrors)} docker logs:\n${logs}`,
+        )
+      }
+      await new Promise((r) => setTimeout(r, 1000))
+    }
 
     // bootstrap token（真解密，bootstrap-token 端点）。
     const bt = await ctx.request
