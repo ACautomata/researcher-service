@@ -20,6 +20,20 @@ describe('renderMarkdown 基本语法', () => {
     expect(html).toContain('const')
   })
 
+  it('带语言标签代码块内部含 hljs-* token 高亮类（#403）', () => {
+    const html = renderMarkdown('```js\nconst x = 1\n```')
+    // 高亮回调注入 span.hljs-keyword / span.hljs-number（pre 上 .hljs 是主题样式钩子）
+    expect(html).toContain('<span class="hljs-keyword">const</span>')
+    expect(html).toContain('<span class="hljs-number">1</span>')
+  })
+
+  it('无语言标签代码块 → 原样文本不高亮（#403）', () => {
+    const html = renderMarkdown('```\nconst x = 1\n```')
+    expect(html).toContain('<pre')
+    expect(html).not.toContain('hljs-keyword') // 无 token 着色，仅转义文本
+    expect(html).toContain('const x = 1')
+  })
+
   it('未知语言代码块 → 转义文本不崩', () => {
     const html = renderMarkdown('```definitelynotalang\n<b>raw</b>\n```')
     expect(html).toContain('<pre')
@@ -82,6 +96,14 @@ describe('renderMarkdown 半成品容错（流式中间态）', () => {
     const html = renderMarkdown('```js\nconst x = 1')
     expect(html).toContain('const')
     expect(html).toContain('1') // 内容仍在（markdown-it 容错为代码块文本），不抛错不丢内容
+  })
+
+  it('流式中未闭合带语言标签代码块 → 高亮回调不崩溃（#403）', () => {
+    // 半成品经 highlight 回调（ignoreIllegals 不抛错）仍产出 <pre>，内容不丢（spec 用户故事 6：
+    // 代码块未闭合时按文本显示不崩溃；markdown-it 容错为代码块文本，这里不 pin token 细节）
+    const html = renderMarkdown('```js\nconst x = ')
+    expect(html).toContain('<pre')
+    expect(html).toContain('x = ') // 尾部内容不丢
   })
 
   it('未闭合括号/星号 → 文本不崩', () => {
