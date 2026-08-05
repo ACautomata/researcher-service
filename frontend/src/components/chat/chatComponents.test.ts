@@ -111,10 +111,34 @@ describe('ChatMessageItem', () => {
     expect(w.text()).toContain('正文')
   })
 
-  it('流式助手消息渲染光标', () => {
+  it('assistant 正文走 markdown 渲染（**加粗** → strong 节点，非源码）', () => {
+    const m = newMsg('assistant', '**加粗** 和 `code`')
+    const w = mount(ChatMessageItem, { props: { msg: m } })
+    expect(w.find('.markdown-body strong').exists()).toBe(true)
+    expect(w.find('.markdown-body strong').text()).toBe('加粗')
+    expect(w.find('.markdown-body code').exists()).toBe(true)
+  })
+
+  it('user 消息保持纯文本（* # _ 不渲染成语法）', () => {
+    const m = newMsg('user', '我输入 **星号** 和 # 井号')
+    const w = mount(ChatMessageItem, { props: { msg: m } })
+    expect(w.find('.markdown-body').exists()).toBe(false)
+    expect(w.find('strong').exists()).toBe(false)
+    expect(w.text()).toContain('**星号**') // 源码原样，不解析
+    expect(w.text()).toContain('# 井号')
+  })
+
+  it('流式助手消息渲染光标（MarkdownRenderer streaming）', () => {
     const m = newMsg('assistant', '')
     const w = mount(ChatMessageItem, { props: { msg: m } })
     expect(w.find('.cursor').exists()).toBe(true)
+  })
+
+  it('已落定助手消息无光标', () => {
+    const m = newMsg('assistant', '完整')
+    m.streaming = false
+    const w = mount(ChatMessageItem, { props: { msg: m } })
+    expect(w.find('.cursor').exists()).toBe(false)
   })
 })
 
