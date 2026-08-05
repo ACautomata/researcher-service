@@ -20,6 +20,8 @@
 > - **#319** 全量 REST+WS API 契约 · 契约 `docs/research/319-api-contract.md`
 > - **#321** 浏览器↔面板 WS 承载
 > - **#328** admin 账号管理界面形状 + 路由骨架
+>
+> **ADRs**：本规格的配对/对话桥接形态已被 [ADR 0006](adr/0006-browser-direct-gateway-via-panel-tunnel.md)（B-直连）重写——面板从「后端胖桥接中介」退为「认证隧道 + approve 编排 + bootstrap 发放」三件薄事，配对单位从「每容器一次」改为「每浏览器设备」；协议版本/镜像以 [ADR 0007](adr/0007-gateway-ts-source-authority.md) 为准。文中配对/对话桥接章节（故事 52–72、§G、§J pairing 行、§K）已按 ADR 0006 改写；`docs/research/319-api-contract.md` 的旧契约（§2.4 pairing / §2.5 chat REST 代理）留档标注，以本文档为最新准据。
 
 ---
 
@@ -43,7 +45,7 @@
 - **后端形态** = Express + `ws` **同进程单端口**（REST 走 Express，对话桥接 WebSocket 共存同一 Node 进程，JWT 握手迁移）。
 - **数据库** = SQLite + Prisma（沿用零运维；Prisma 提供事务/迁移/类型安全）。**扩容**：新引入 **Redis** 承载短 TTL 易失态（配对进行中快照、每会话连接登记）；持久/审计态仍落 Prisma/SQLite。
 - **认证** = 管理员 + 普通用户**双角色**（密码 bcrypt、OAuth2 预留端口、首个管理员密码明文仅首启 log 输出一次）。
-- **对话桥接** = 直接复用官方 `@openclaw/gateway-client` + `@openclaw/gateway-protocol` 两个 npm 包，**不自行实现** WS protocol v4 / 网关客户端 / Ed25519 配对。自建的只是包之上的编排（多租户连接池壳、配对状态机 + 宿主 approve、前端事件翻译、前端 WS/REST 边界、Ed25519 `hostDeps` 薄适配）。
+- **对话桥接** = **浏览器直连网关（ADR 0006 B-直连）**：浏览器跑官方 `@openclaw/gateway-client` 的 `./browser` 协议机，经面板隧道（后端仅「认证隧道 + approve 编排 + bootstrap 发放」三件薄事）直连容器网关；**不自行实现** WS protocol v4 / 网关客户端 / Ed25519 配对。自建的是包之上的编排（面板隧道 socket、设备身份/tokenStore 持久化、自动 approve、4402 有限重连）。
 - **前端** = 聚焦拆分 ChatView（8 组件 slot 组合）+ 适配新认证/隔离/配对模型，其余视图保持。
 
 **本期范围**：仅后端从零重写 + 前端拆分/适配。OpenClaw 容器内部、`deploy/` 编排契约不变。**执行（实际编码）另起 effort，不在本规格内。**
@@ -121,27 +123,29 @@
 
 ### 对话桥接与配对（#318 / #321 / #309）
 
-52. As a user, I want to open a WebSocket to `/ws/chat/` authenticated by a JWT carried in the `access_token` subprotocol, so that my token never appears in URLs/logs.
+> **形态已被 ADR 0006 重写**（见头部 ADR 标注）：以下 52–72 的旧形态故事中，「面板连接池/事件翻译/自定义 wire/配对状态机/自动触发」均被取代；保留的用户可见行为（JWT 握手 4401、会话删除、配对可观察、凭证不落盘）在 B-直连下仍成立，改写如下。
+
+52. As a user, I want to open a WebSocket tunnel to my container authenticated by a JWT carried in the `access_token` subprotocol, so that my token never appears in URLs/logs.
 53. As a user, I want the WS handshake to accept-then-close(4401) on expired/invalid credentials, so that my frontend can force-refresh the token and reconnect immediately (distinct from ordinary backoff reconnect).
 54. As the panel, I want WS credential verification to check the DB for user existence + active (same source as REST `get_user()`), so that disabling/deleting a user takes effect immediately on WS too.
-55. As a user, I want to `start` a bridge by naming a container (optionally resuming with a `sessionKey`), so that the panel establishes a per-session gateway connection.
-56. As the panel, I want the connection-pool key to be `(user, container, socketSession)` with the socketSession issued by the panel at handshake (not client-forgeable), one gateway connection per session, evicted on container delete, with a 30s grace on disconnect, so that multi-tenant bridging is isolated and leak-free.
-57. As a user, I want to `send` a chat message and receive streamed `text` deltas (append) and `replace` snapshots (set), keyed by `runId`, so that I see live assistant output.
-58. As a user, I want a `done` frame when a run reaches a terminal state, so that the UI can finalize that runId.
-59. As a user, I want application-level `ping`/`pong` heartbeat frames, so that the frontend watchdog can detect half-open connections (browsers can't send protocol-level pings).
-60. As a user, I want approval cards (`approval`) to appear as connection-level frames with `{id, kind, command}`, so that I can approve/deny exec/plugin permission requests.
-61. As a user, I want to `resolve` an approval with `{id, kind, decision}`, and to receive `approvalResolved` (the gateway's authoritative decision, first-answer-wins), so that concurrent approvers see one consistent outcome.
-62. As a user, I want tool execution frames (`tool` with `{runId, name, state, title, input, result}`), so that I can watch tool calls within their chat run.
-63. As the panel, I want gateway events delivered via the official client's `onEvent` and translated by a pure TS function (no I/O) into browser frames routed to the correct socketSession, so that the translation logic is unit-testable and the protocol machine stays in the official package.
-64. As a user, I want chat sessions CRUD via REST proxy (`GET/POST sessions/`, `GET history`, `DELETE sessions/<key>`), so that I can manage conversation threads; the "chat session" concept is named distinctly from the "connection socketSession".
-65. As a user, I want `DELETE sessions/<key>` to be admin-elevated on the gateway (archived then deleted, recoverable), so that deletion is safe.
-66. As a user, I want to resolve approvals and list slash commands via REST proxy (`approval/resolve`, `GET commands`), so that the frontend can use REST where WS isn't required.
-67. As a user, I want container creation to auto-trigger device pairing after provisioning completes and the container is running/healthy, so that I don't have to pair manually.
-68. As the panel, I want pairing to follow a two-layer (A3) state machine `PAIRING_REQUIRED→APPROVING→PAIRED` (retryable, no FAILED terminal), with in-progress snapshots in Redis and the final PAIRED state + deviceToken association in Prisma, so that pairing is resilient and observable.
-69. As the panel, I want the actual deviceToken lifecycle (store/load/invalidate/retry) driven by the official package via `hostDeps`, with the panel only supplying persistence callbacks, so that protocol truth stays in the package.
-70. As the panel, I want the host-side approve (`openclaw devices approve <requestId>` inside the container) orchestrated by the panel, so that PAIRING_REQUIRED can be resolved automatically.
-71. As a user, I want to query pairing status (`GET pairing/`) and trigger pairing (`POST pairing/`), seeing `pending` (with `pairing_request_id` + approve hint) while awaiting host approval, so that I can observe and retry pairing.
-72. As the panel, I want `private_key_pem` and `device_token` never exposed in any response, so that device credentials stay secret.
+55. ~~As a user, I want to `start` a bridge by naming a container (optionally resuming with a `sessionKey`), so that the panel establishes a per-session gateway connection.~~ **已由 ADR 0006 取代**：浏览器官方协议机经隧道直连，无面板连接池。
+56. ~~As the panel, I want the connection-pool key to be `(user, container, socketSession)`…~~ **已删除**（池壳整块删除，见 ADR 0006 决定 6）。
+57. ~~As a user, I want to `send` a chat message and receive streamed `text` deltas (append) and `replace` snapshots (set), keyed by `runId`, so that I see live assistant output.~~ **已由协议机透传取代**（隧道原样透传网关原始帧）。
+58. ~~As a user, I want a `done` frame when a run reaches a terminal state, so that the UI can finalize that runId.~~ **同上**（会话投影归官方包）。
+59. ~~As a user, I want application-level `ping`/`pong` heartbeat frames…~~ **已删除**（应用层心跳移交官方协议机/隧道承载，ADR 0006 决定 6）。
+60. ~~As a user, I want approval cards (`approval`) as connection-level frames…~~ **已由协议机事件取代**（`exec.approval.resolve` 等经隧道透传，浏览器消费网关原始帧）。
+61. ~~As a user, I want to `resolve` an approval with `{id, kind, decision}`…~~ **同上**。
+62. ~~As a user, I want tool execution frames (`tool` with `{runId, name, state, title, input, result}`)…~~ **同上**。
+63. ~~As the panel, I want gateway events delivered via the official client's `onEvent` and translated by a pure TS function…~~ **已删除**（事件翻译移交前端官方包，ADR 0006 决定 6）。
+64. ~~As a user, I want chat sessions CRUD via REST proxy (`GET/POST sessions/`, `GET history`, `DELETE sessions/<key>`)…~~ **已删除**（chat REST 代理面 #339 整张作废，ADR 0006 决定 6）。
+65. ~~As a user, I want `DELETE sessions/<key>` to be admin-elevated on the gateway…~~ **已删除**；会话管理经浏览器官方协议机 `sessions.delete`（不带 archivedOnly，ADR 0006 事实 4；真实网关对未归档会话的删除行为列为遗留实测项 ③）。
+66. ~~As a user, I want to resolve approvals and list slash commands via REST proxy (`approval/resolve`, `GET commands`)…~~ **已删除**（同上，浏览器直连走协议）。
+67. ~~As a user, I want container creation to auto-trigger device pairing after provisioning completes…~~ **已删除**（ADR 0006 决定 3/5：配对触发点改为「浏览器首连遇 PAIRING_REQUIRED 时按需配对」，不再有创建后自动配对的后端触发器）。
+68. As the panel, I want pairing to follow the B-直连形态：**每浏览器设备 × 每容器**独立配对，浏览器官方协议机首连（bootstrap token）遇 `PAIRING_REQUIRED{requestId}` → 自动 `POST …/pairing/approve` → 后端容器内 `openclaw devices approve <requestId>` → 重连拿 deviceToken（localStorage 持久化），so that 开箱即聊、配对可观察可重试。
+69. As the panel, I want the deviceToken lifecycle (store/load/invalidate/retry) driven by the official package's `GatewayBrowserDeviceAuthLifecycle`（前端 `tokenStore` 回调，localStorage 按 `(clientId, deviceId, role)` 键存），so that protocol truth stays in the package.
+70. As the panel, I want the host-side approve (`openclaw devices approve <requestId>` inside the container) orchestrated by the backend (`POST …/pairing/approve`，docker exec；浏览器永不接触容器 exec 通道——ADR 事实 3 物理约束)，so that PAIRING_REQUIRED can be resolved automatically.
+71. As a user, I want container list to carry a pairing snapshot (`pending`/`paired`/`unpaired`)，容器页能确认配对进度，so that I can observe pairing state at a glance.
+72. As the panel, I want `device_token`/`private_key_pem` never exposed in any response（真值仅经协议机 hello-ok 下发浏览器、存浏览器 localStorage，服务端 Pairing 表恒存密文），so that device credentials stay secret.
 
 ### 前端拆分（#316 / #317）
 
@@ -183,7 +187,7 @@
 - **`User`**：`id cuid`、`username @unique`、`email? @unique`、`passwordHash?`(bcrypt；纯 OIDC 可空→应用层禁空密码登录)、`role Role @default(user)`、`isActive @default(true)`、`oidcSubject?`/`oidcIssuer?`（`@@unique([oidcIssuer, oidcSubject])`，双可空 SQLite 视为 distinct）、`containers[]`/`refreshTokens[]`。
 - **`RefreshToken`**（新增）：`userId FK Cascade`、`tokenHash @unique`(存散列不落明文)、`expiresAt`、`revokedAt?`(null=有效)、`replacedByTokenId?`（旋转链指针，reuse 检测）。
 - **`Container`**：`name @unique`(DNS-label `^[a-z][a-z0-9-]{2,29}$` 应用层校验)、`port @unique`、`ownerId FK Cascade`、`token`+`tokenEncrypted`、`homeDir`、`containerId @default("")`(空串非 NULL)、`status ContainerStatus @default(creating)`、`image`、`leaseExpiresAt?`、`pairing?`/`modelProviders[]`。**`name` 全局唯一**（#312 定夺，非按用户）。
-- **`Pairing`**（一对一 Cascade）：`containerId @unique`、`deviceId`/`publicKeyPem`/`privateKeyPem`+`*Encrypted`/`deviceToken`+`*Encrypted`/`scopesJson`/`pairingRequestId`/`status PairingStatus @default(unpaired)`/`attemptVersion`。
+- **`Pairing`**（一对一 Cascade）：`containerId @unique`、`deviceId`/`publicKeyPem`/`privateKeyPem`+`*Encrypted`/`deviceToken`+`*Encrypted`/`scopesJson`/`pairingRequestId`/`status PairingStatus @default(unpaired)`/`attemptVersion`。**B-直连下（ADR 0006）**：设备配对行由后端 approve 端点 upsert（pending→paired + pairingRequestId 记账），`deviceToken`/`privateKeyPem` 真值不下发服务端、列恒为密文占位。
 - **`ModelProvider`**：`containerId FK Cascade`、`providerId`、`api ProviderApi`、`baseUrl`、`apiKeyEnvId`(`^[A-Z][A-Z0-9_]{0,127}$` 应用层校验)、`authHeader @default(true)`、`modelsJson`、`@@unique([containerId, providerId])`。
 - **`wiki`**：无表，纯容器内文件树直读直写。
 
@@ -246,26 +250,23 @@
 
 ### G. 对话桥接面（#318 / #321 / #309）
 
-**包接管 vs 自建分界（#309 §5 运行时实证）**：
-- **包接管** = connect 握手、单连接协议机、重连+看门狗、断线恢复+session 投影、deviceToken 生命周期（存/取/失效清理/重试全包驱动）、`buildDeviceAuthPayloadV3` 签名串、协议常量/版本、事件 `onEvent` 投递。
-- **须自建**（包之上编排，非重造协议）= 多租户连接池壳、配对状态机+宿主 approve 编排、前端事件翻译纯函数、前端 WS/REST 边界+审批 fan-out、Ed25519 `hostDeps` 薄适配（Node `crypto` ~30 行）。
+> **已被 ADR 0006（B-直连）重写**。旧「包接管 vs 自建」分界（后端持 `GatewayClient` 池壳 + 事件翻译 + 自定义 wire）作废；新形态：浏览器终结协议，后端退为「认证隧道 + approve 编排 + bootstrap 发放」三件薄事。
 
-**①连接池壳 = 每会话一条**：key=`(user,container,socketSession)`，sessionId 面板握手签发（防前端伪造撞 key）、握手即建、断连 30s 兜底、删容器 evict 全部。
+**包接管 vs 自建分界（B-直连下重划）**：
+- **包接管（浏览器侧官方 `./browser` 协议机）** = connect 握手、单连接协议机、重连+看门狗、断线恢复+session 投影、deviceToken 生命周期（`GatewayBrowserDeviceAuthLifecycle` 的 `loadIdentity`/`tokenStore`/`buildPlan`/`acceptHello`/`clearStoredToken`）、`buildDeviceAuthPayloadV3` 签名串、协议常量/版本、事件 `onEvent` 投递。
+- **须自建（包之上编排，非重造协议）** = 面板隧道 socket（`createSocket` 注入，JWT 握手 + 归属门）、设备身份/tokenStore 持久化（localStorage，Ed25519 身份多 tab 共享）、自动 approve 编排（`PAIRING_REQUIRED` → `POST …/pairing/approve`）、4402 有限重连预算、配对状态快照（容器列表 pairing 字段）。
 
-**②配对状态机 = A3 双层 + 可重试**：Redis 存进度快照 + Prisma 落最终 PAIRED，deviceToken 真值仍归官方包；`PAIRING_REQUIRED→APPROVING→PAIRED` 失败可重试无 FAILED 终态。
+**①隧道 = 原样透传**：浏览器↔后端一条 WS（JWT subprotocol 握手 + `authenticate()` 同源验签 + **归属门**：user 只能开到自己容器的隧道，越权 `4401`）；隧道建立后**原样透传网关原始协议帧**——不解析、不翻译、不注入凭证、不做 method 级授权（ADR 0006 决定 2）。
 
-**③REST 代理面全保留 + 概念拆分**：`pairing/`/`chat/sessions/`/`approval/resolve`/`commands` 全留；「对话 session」（对话线程 CRUD）≠「连接 session」`socketSession`（连接池 key 第三维），命名拆开。
+**②配对 = 每浏览器设备 × 每容器**：浏览器首连（bootstrap token）遇 `PAIRING_REQUIRED{requestId}` → 自动 approve → 重连拿 deviceToken（localStorage）。**无 Redis 快照、无 A3 状态机**——配对记账落 Prisma `Pairing` 表（status/deviceToken+`*Encrypted`/pairingRequestId），容器列表预取展示；deviceToken 真值仍归官方包。
 
-**④事件翻译 = E1 纯函数直译**：`event_translate` 移植 TS 无 I/O，包 `onEvent` → 纯函数 → 发对应 socketSession 浏览器。
+**③REST 薄端点**：`POST /containers/<name>/bootstrap-token`（D1，所有权门控下发 bootstrap token）+ `POST /containers/<name>/pairing/approve/<requestId>`（B2，docker exec approve）。**chat REST 代理面（#339）整张作废**。
 
-**浏览器↔面板承载（#321）**：
-- **维持自建 `ws` + JWT subprotocol 握手**，前端 `ws.ts` wire 不变（原生 `new WebSocket`、两 subprotocol 格式、应用层 ping/pong + 看门狗 + 退避重连全保留）。面板继续做多租户桥接中介。
-- **拒绝语义 = 保留「先 accept 再 close(4401)」**（`handleUpgrade` 后 `ws.close(4401)`），保前端 `recoverUnauthorized` 刷新重连链路零改动；HTTP 层 401 只得 1006，故不简化。
-- **验签 = 查库确认 user 存在+active**，与 REST `get_user()` 严格同源（jose HS256 + Prisma 查 user 共享一个 `authenticate()`），禁用/删用户立即生效。
+**④浏览器↔面板承载（#321）**：**隧道建立语义保留**——JWT subprotocol 握手、`authenticate()` 同源验签 + 归属门、拒绝 = accept-then-close(4401)。**应用层 ping/pong / 看门狗 / 退避重连移交官方协议机**（协议机内置重连；面板不再有自定义 wire 帧）。
 
-**自动配对触发点（#309）**：创建后自动配对现状不存在需新建触发器，触发点挂 provisioning 完成、容器 running/healthy 之后。宿主 approve 编排 = 在容器内 `openclaw devices approve <requestId>`（复用 `ExecPairingApprover` exec 语义）。
+**配对触发点（ADR 0006 决定 3/5）**：不再有「创建后自动配对」的后端触发器——配对在**浏览器首连遇 `PAIRING_REQUIRED` 时按需触发**；后端 approve 编排 = 容器内 `openclaw devices approve <requestId>`（复用 `ExecPairingApprover` exec 语义 + `_REQUEST_ID_RE` 白名单防注入）。
 
-**关键 wire 事实（#309，供执行校准）**：握手 = 等 `connect.challenge` 取 nonce → connect req(minProtocol=4,maxProtocol=4 + role operator + scopes + caps `['tool-events']` + device 签名块 + `auth.token`=bootstrap GATEWAY_TOKEN) → 成功 `hello-ok`(下发 deviceToken+scopes+policy) / 未配对 `PAIRING_REQUIRED`(嵌套 `details.requestId`)。签名串 `buildDeviceAuthPayloadV3` = 11 段 `|` 连接，包已导出直接复用。
+**关键 wire 事实（#309，供执行校准）**：握手 = 等 `connect.challenge` 取 nonce → connect req(minProtocol=4,maxProtocol=4 + role operator + scopes + caps `['tool-events']` + device 签名块 + `auth.token`=bootstrap GATEWAY_TOKEN) → 成功 `hello-ok`(下发 deviceToken+scopes+policy) / 未配对 `PAIRING_REQUIRED`(嵌套 `details.requestId`)。签名串 `buildDeviceAuthPayloadV3` = 11 段 `|` 连接，包已导出直接复用。**（真网关实测已由 #378 `pairingSmoke.test.ts` 门控 smoke 覆盖，含 #378 发现：2026.7.1 网关首连 `auth` 须用 `token` 字段，官方 lifecycle 的 `bootstrapToken` 字段被当 setup code 拒。）**
 
 ### H. WIKI 迁移（#315）
 
@@ -300,19 +301,19 @@
 
 - **系统**：`GET /api/health`(不变，公开)；`GET /api/protected`(**移除**)；`GET /api/schema[…]`(重设计，Express 等价)。
 - **auth** `/api/v1/auth/`：`POST /login`(隔离调整，返 `{access, mustChangePassword}`，refresh 走 cookie) · `POST /token/refresh`(R1 旋转，无 body，返 `{access}`) · `POST /logout`(R1 撤销) · `GET /me`(扩 role/mustChangePassword/maxContainers) · `POST /register`(重设计：公开→admin-only) · `POST /password/change`(新增) · `GET /oauth/<p>/login|callback`(O1 骨架，`90001`)。
-- **containers** `/api/v1/containers/`：`GET /`(隔离调整，user 自己/admin 全部，`ContainerSummary`+`pairing` 预取) · `POST /`(隔离调整，同步返 creating 快照，端口入队前分配) · `DELETE /<name>`(重设计：同步 204→异步信封，置取消标志)。
-- **pairing** `/api/v1/containers/<name>/pairing/`：`GET /`(查 Redis 快照 + Prisma 最终态) · `POST /`(A3 双层，进行中返 `data.status:"pending"+pairing_request_id+detail`)。`PairingStatus={status,device_id,scopes[],pairing_request_id,detail?}`，`status∈{unpaired,pending,paired,error}`；绝不外泄 `private_key_pem`/`device_token`。
-- **chat REST 代理** `/api/v1/containers/<name>/chat/`(全保留 + 概念拆分)：`GET /sessions/` · `POST /sessions/` · `GET /sessions/<key>/history` · `DELETE /sessions/<key>/`(admin 级) · `POST /approval/resolve`(不回送权威 decision) · `GET /commands`。
+- **containers** `/api/v1/containers/`：`GET /`(隔离调整，user 自己/admin 全部，`ContainerSummary`+`pairing` 预取) · `POST /`(隔离调整，同步返 creating 快照，端口入队前分配) · `DELETE /<name>`(重设计：同步 204→异步信封，置取消标志) · `POST /<name>/bootstrap-token`(新增，ADR 0006 D1：所有权门控下发 bootstrap token；非 running → `20046`；token 明文不进日志) · `POST /<name>/pairing/approve/<requestId>`(新增，ADR 0006 B2：容器内 docker exec approve；越权/不存在同码 `20040` 防探测、非法 requestId → `90002`、非 running → `20046`、同 requestId 重复 approve 幂等；响应仅 `{status}`，无 token 字段)。
+- **pairing**（B-直连下无独立端点；快照随容器列表携带）`GET /containers/` 的 `pairing` 字段：`{status, device_id, scopes[], pairing_request_id}`，`status∈{unpaired,pending,paired,error}`（Prisma `Pairing` 表落库状态原样透传，approve 后 pending→paired；`error` 为 schema 枚举预留值，当前无写入方）；绝不外泄 `private_key_pem`/`device_token`。
+- **chat REST 代理** `/api/v1/containers/<name>/chat/`(**作废**，#339 整张删除——浏览器直连走协议，ADR 0006 决定 6；旧表见 `docs/research/319-api-contract.md` §2.5，留档不执行)。
 - **WIKI** `/api/v1/containers/<name>/wiki/`(逐字节不变)：`GET /tree` · `GET /page?path=` · `PUT /page` · `POST /page` · `DELETE /page?path=` · `GET /graph` · `GET /categories`。
 - **users** `/api/v1/users/`(新增，#328)：`GET /users`(连带 containerCount) · `POST /users` · `PATCH /users/<id>` · `POST /users/<id>/reset-password`。
 
 ### K. WebSocket `/ws/chat/`（#321 / #318 / #314）
 
-- **握手**：原生 `new WebSocket('/ws/chat/', ['access_token', <jwt>])`（兼容 `['access_token.<jwt>']` 单值格式）。Node 侧 `noServer:true` + `server.on('upgrade')` 手动 `handleUpgrade`；subprotocol 须**原样回显**否则浏览器拒握手(1006)。验签 = jose `jwtVerify`(HS256) + Prisma 查 user 存在且 active。拒绝 = 先 accept 再 `close(4401)`。握手即建连接，sessionId(socketSession) 面板握手签发。
-- **入站帧**（浏览器→面板）：`start{container,sessionKey?}` · `send{sessionKey,message}` · `resolve{id,kind,decision}` · `ping`。
-- **出站帧**（面板→浏览器）：`ready{container}` · `text{runId,text,replace?}` · `done{runId}` · `error{message,runId?,retryable?,id?}` · `approval{id,kind,command}` · `approvalResolved{id,decision}` · `tool{runId,name,state,title,input,result}` · `pong`。
-- **事件翻译**：网关事件经包 `onEvent` → TS 纯函数直译（无 I/O 无状态）→ 发对应 socketSession。思考链无独立帧（protocol v4），整段按 text 透传（前端折叠卡降级）。
-- **心跳**：保留应用层 `ping/pong`（浏览器 WS API 无法发协议 ping）；`ws` 协议级 ping 仅用于面板↔网关腿。
+> **已被 ADR 0006 重写**：浏览器不再消费面板自定义帧，`/ws/chat/` 退为**隧道**（原始协议帧原样透传）。原「入站/出站自定义帧 + 事件翻译」作废。
+
+- **隧道（tunnel）**：浏览器↔后端一条 WS（JWT subprotocol 握手 + `authenticate()` 同源验签 + **归属门**：user 只能开到自己容器的隧道，越权 `4401`/信封等价）。隧道建立后**原样透传网关原始协议帧**——不解析、不翻译、不注入凭证、不做 method 级授权。
+- **握手**：原生 `new WebSocket('/ws/chat/', ['access_token', <jwt>])`（兼容 `['access_token.<jwt>']` 单值格式）。Node 侧 `noServer:true` + `server.on('upgrade')` 手动 `handleUpgrade`；subprotocol 须**原样回显**否则浏览器拒握手(1006)。验签 = jose `jwtVerify`(HS256) + Prisma 查 user 存在且 active。拒绝 = 先 accept 再 `close(4401)`。
+- **帧**：隧道后不再有面板自定义 wire（`text/done/approval/tool/ping/pong` 全删）；浏览器消费网关原始帧（官方协议机负责握手/重连/session 投影/事件投递）。应用层心跳移交官方协议机/隧道承载。
 
 ## Testing Decisions
 
@@ -323,7 +324,7 @@
 1. **`WikiFileSystem` Port** — 纯逻辑（`build_tree`/`build_graph`/`categories`/`FrontmatterParser`/`CategoryMarkerExtractor`/`WikilinkResolver`）对 **fake FS** 直测，注入 5 类坑（symlink / 非 regular file / 不可读 / SKIP 集合 / 降级）。**Prior art**：`backend/wiki/tests/`（含 `test_graph_api.py`/`test_categories*`）契约断言逐条对 Express 实现重跑（#315 §8 回归锚点）。
 2. **Envelope REST 契约**（`app.inject` 风格）— 注入假身份（admin/user）打路由，断言 HTTP 200 + 信封码 + 归属前置。单点归属前置（#312 `_get_instance`）→ 一条接缝覆盖 containers/wiki/models/chat/pairing 全端点。**Prior art**：现状 DRF `APIClient` 视图测试。
 3. **WS 桥**（`wss` 事件发射器）— 面板↔浏览器腿：拨 upgrade/JWT/4401/subprotocol 回显，注入假 `onEvent`，断言出站帧翻译（`text`/`done`/`approval`/`tool`/`pong`）。**Prior art**：`backend/chat/tests` consumer 测试。注入官方包 `onEvent` 即假网关事件源。
-4. **`GatewayClient.hostDeps`** — 注入假 `GatewayClient`，断言多租户池壳（key 形状/evict/换 token 清旧凭证）+ 配对状态机（A3 双层、可重试无 FAILED）+ 宿主 approve 编排（PAIRING_REQUIRED→approve→重握手）。官方包**已设计成可注入**（`hostDeps`/`GatewayClient` 即接缝）；**协议机本身不测**（官方包职责，连同 v4 握手/重连/deviceToken 生命周期一起豁免）。**Prior art**：`backend/chat/tests` `pool.py`/`pairing.py` 测试。
+4. **`GatewayClient.hostDeps` / 配对编排** — B-直连下协议机归浏览器官方包：后端接缝 = 容器路由（注入假 runtime docker exec，断言 approve 端点归属门/requestId 传参/exec 调用/配对落库/响应无 token 明文——**Prior art**：`server/test/pairingApprove.test.ts`）；前端接缝 = `gatewayChat` 模块边界（注入假 `createSocket` + 假 tokenStore + fake 网关帧序列，断言 PAIRING_REQUIRED → approve → hello-ok 下发 deviceToken → tokenStore 收到 store → 下次连接用 deviceToken——**Prior art**：`frontend/src/chat/gatewayChat.test.ts`）。官方协议机本身不测（官方包职责，连同 v4 握手/重连/deviceToken 生命周期一起豁免）。**Prior art（旧形态）**：`backend/chat/tests` `pool.py`/`pairing.py` 测试。
 5. **编排器 Port**（容器生命周期）— 注入假 docker + 假 BullMQ（内存 fake），断言 5 态机 + 取消标志 + 端口入队前分配 + 补偿（换端口重试 / REMOVING 可重试）。**Prior art**：`backend/containers/` 测试（现有 docker fake + 集成 smoke 门控）；集成 smoke 需真 docker daemon，默认 skip（自动探测门控，对齐 `backend/README.md`）。
 6. **前端接缝**：`chatStore` + `useChatConnection` — 注入假 ws，测 store 投影纯 mutation + runId 路由 + 连接生命周期；组件 props/emits 哑测。**Prior art**：`useWikiStore`/`FileTree` 测试形态。
 
@@ -332,11 +333,11 @@
 - 归属前置单点 — 每个域至少一条「user 越权访问他人资源 → 同码」与「admin 跨用户 → 放行」对偶用例。
 - 异步生命周期 — create 返 creating 快照、delete 变异步，测试用 list 轮询观察状态迁移（#313）。
 - 凭证零落盘 — 断言 `private_key_pem`/`device_token`/refresh token 明文不出现在任何响应体。
-- 集成 smoke 门控 — 真 docker daemon 才跑的编排集成测试默认 skip，自动探测（对齐现状）。
+- 集成 smoke 门控 — 真 docker daemon 才跑的编排集成测试默认 skip，自动探测（对齐现状）。**配对闭环 smoke**（`server/test/pairingSmoke.test.ts`，#378）在真容器验证 bootstrap 首连 → `PAIRING_REQUIRED` → approve → hello-ok → deviceToken 全流程（ADR 0006 遗留实测项 ①，默认 skip、真跑无 skip）。
 
 ## Out of Scope
 
-- **OpenClaw 容器内部逻辑、`deploy/openclaw.json` 编排契约** —— 本期不动（map #308 明示）。
+- **OpenClaw 容器内部逻辑、`deploy/openclaw.json` 编排契约** —— 本期不动（map #308 明示）。**注**：ADR 0006 决定 7 修订了「凭证真值不落盘」的表述（bootstrap token/deviceToken 可下发给容器属主浏览器设备），属安全不变量语义更新，非编排契约变更；deploy 契约文档（`deploy/README.md`）已同步。
 - **实际的代码编写/执行** —— 本规格只产决策与规格，执行另起 effort（#308 终点）。
 - **现有数据迁移** —— 开发阶段废弃，不做 Django→Prisma 数据搬运（#312）。
 - **OAuth2 真实 IdP 接入** —— 仅 O1 骨架 `90001`，不接 IdP、无 service 抽象（#311）。
@@ -364,7 +365,7 @@
 2. **M1 认证与账号**：login/refresh/logout/me/register(admin)/password/change + R1 旋转 + bootstrap B1 + C1 + OAuth2 骨架 + users 4 端点。→ verify：信封 REST 契约测试（接缝 2）+ R1 重放检测用例。
 3. **M2 容器生命周期**：编排器 Port + BullMQ worker + 端口池 + 5 态机 + 异步 delete + 取消标志。→ verify：编排器 Port 测试（接缝 5）+ 集成 smoke（门控）。
 4. **M3 WIKI**：`WikiFileSystem` Port + 纯逻辑平移 + 5 端点 + compile 去抖。→ verify：wiki 契约断言逐条重跑（接缝 1）。
-5. **M4 对话桥接**：`GatewayClient` 集成 + 多租户池壳 + 配对状态机 + 自动配对触发器 + WS 桥 + 事件翻译 + chat REST 代理。→ verify：WS 桥测试（接缝 3）+ hostDeps 测试（接缝 4）。
+5. **M4 对话桥接**：~~`GatewayClient` 集成 + 多租户池壳 + 配对状态机 + 自动配对触发器 + WS 桥 + 事件翻译 + chat REST 代理~~ **已由 ADR 0006 重写**——浏览器直连网关（官方 `./browser` 协议机）+ 隧道 + 每浏览器设备配对 + 4402 有限重连；后端仅 bootstrap 发放 / approve 编排两薄端点。→ verify：pairing approve 测试（`server/test/pairingApprove.test.ts`）+ `gatewayChat` 测试（`frontend/src/chat/gatewayChat.test.ts`）+ 真网关配对闭环 smoke（`server/test/pairingSmoke.test.ts`，门控）。
 6. **M5 前端适配**（可与 M3/M4 部分并行）：`api/client.ts` 拦截器重写 + `me.role` 消费 + 异步 delete 轮询 + ChatView 拆分 + admin users 页。→ verify：vue-tsc + vitest（接缝 6）。
 7. **M6 切换退役**：前端指向新后端、按域回归、退役 Django。
 

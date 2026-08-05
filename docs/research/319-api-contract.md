@@ -143,6 +143,8 @@
 
 ### 2.4 配对 `pairing`（挂 `/api/v1/containers/<name>/pairing/`）
 
+> ⚠️ **已由 ADR 0006（B-直连）取代**：本节为旧形态（A3 双层状态机 + Redis 快照 + `GET|POST /pairing/`）留档。B-直连下配对在浏览器侧（官方协议机），后端仅两个薄端点：`POST /<name>/bootstrap-token`（D1 发放）与 `POST /<name>/pairing/approve/<requestId>`（B2 docker exec approve，`Pairing` 表 pending→paired 记账）；配对快照随容器列表 `GET /containers/` 携带（形状仍为下方 `PairingStatus`，`error` 为 schema 枚举预留值、当前无写入方）。最新准据见 `docs/research/320-implementation-spec.md` §G。
+
 | 路由 × 方法 | 标签 | 请求 | 成功 `data` | 错误码 | 备注 / 依据 |
 |-------------|------|------|-------------|--------|-------------|
 | `GET /` | **隔离/认证调整** | — | `PairingStatus` | `20040` 容器不存在/越权 · `90002` name 非法 | **#318**：查 Redis 进度快照 + Prisma 最终态 |
@@ -154,6 +156,8 @@
 - **绝不外泄** `private_key_pem` / `device_token`（现状安全约束平移）。
 
 ### 2.5 对话 `chat` REST 代理面（挂 `/api/v1/containers/<name>/chat/`，**#318 全保留 + 概念拆分**）
+
+> ⚠️ **已由 ADR 0006 作废**：本节为旧形态留档。chat REST 代理面（#339）整张删除——浏览器经隧道直连网关走官方协议机（会话 CRUD/审批/命令全部浏览器侧），后端无 chat 路由。最新准据见 `docs/research/320-implementation-spec.md` §G/§K。
 
 > **概念拆分（#318）**：REST「对话 session」（对话线程 CRUD）≠「连接 session」`socketSession`（连接池 key 第三维，WS 侧）。两者无关，命名拆开。
 
@@ -187,6 +191,8 @@
 ---
 
 ## 3. WebSocket `/ws/chat/`（**#321 锁定不变**）
+
+> ⚠️ **形态已由 ADR 0006 重写**：本节旧契约（面板自建连接池壳 + 帧协议 + 事件翻译）留档。B-直连下 `/ws/chat/` 退为**隧道**——浏览器↔后端一条 WS（JWT subprotocol 握手 + 归属门，`4401` 拒绝语义保留），建立后**原样透传网关原始协议帧**（不解析/不翻译/不注入凭证）；浏览器侧官方协议机负责握手/重连/session 投影/事件消费，应用层 ping/pong 作废。最新准据见 `docs/research/320-implementation-spec.md` §K。
 
 > 浏览器 ↔ 面板腿。面板↔网关腿由官方 `@openclaw/gateway-client` 包接管（不在本契约）。
 
