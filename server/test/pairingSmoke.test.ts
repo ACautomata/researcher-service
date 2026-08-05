@@ -32,6 +32,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import http, { type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
 import path from 'node:path'
 import { generateKeyPairSync, createHash, sign as ed25519Sign } from 'node:crypto'
 import supertest from 'supertest'
@@ -48,6 +49,7 @@ import { seedUser, login, bearer } from './helpers'
 import { FleetDeps } from '../src/containers/deps'
 import { Orchestrator } from '../src/containers/orchestrator'
 import { DockerRuntime } from '../src/containers/dockerRuntime'
+import { containerName } from '../src/containers/runtime'
 import { InlineLifecycleQueue } from '../src/containers/lifecycleQueue'
 import { defaultReservedPorts, type FleetConfig } from '../src/containers/values'
 import { createApp } from '../src/app'
@@ -249,8 +251,23 @@ describe('真网关配对闭环 smoke（#371-5 / #378）', () => {
     expect(created.status).toBe('running')
 
     // 等容器网关 WS 就绪（docker-proxy 起 + 网关监听）：makeWsGatewayConnector 直连根路径。
+    // CI（共享 runner 与 containers-smoke 并行）容器首启 + 网关初始化可达 2-4 分钟 → 240s 超时
+    //（本地实测 ~10s）。等待期间若容器退出（openclaw 启动失败）→ 立即失败并打印容器日志定位
+    // 根因（CI 上才可诊断，不盲等 240s）。
     await waitFor(
       async () => {
+        const live = await runtime.get(BOX).catch(() => null)
+        // Restarting 循环中 State.Running 可能仍 true（重启间隙才 false）——须查 status 原值
+        //（"Restarting (78) 10 seconds ago" / "Exited (78)"）识别 openclaw 启动崩溃。
+        if (live && (live.status.includes('restarting') || live.status.includes('exited') || !live.running)) {
+          let logs = ''
+          try {
+            logs = execFileSync('docker', ['logs', '--tail', '40', containerName(BOX)], { encoding: 'utf8' })
+          } catch {
+            // 容器日志不可得 → 仅报状态
+          }
+          throw new Error(`容器 ${BOX} 已退出（网关未就绪），status=${live.status}，docker logs:\n${logs}`)
+        }
         try {
           const gw = await makeWsGatewayConnector().connect(`ws://127.0.0.1:${containerPort}/`)
           gw.close()
@@ -259,7 +276,7 @@ describe('真网关配对闭环 smoke（#371-5 / #378）', () => {
           return null
         }
       },
-      120_000,
+      240_000,
       1000,
     )
 
