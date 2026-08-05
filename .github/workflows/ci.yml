@@ -73,16 +73,20 @@ jobs:
       # 预拉 OpenClaw 公共 ghcr 镜像供 containers-smoke 端到端测试。
       - run: docker pull ${{ env.OPENCLAW_IMAGE }}
       # 端口映射探针（#378 CI 定位）：确认 runner 上容器宿主端口映射可用（docker-proxy）。
-      # 若映射失效，pairingSmoke 容器内网关 ready 但宿主 127.0.0.1:<port> 恒 ECONNREFUSED——环境问题，
-      # 先在此 step 暴露而非等 smoke 超时。
+      # 容器内须有真实监听服务（busybox httpd）才可信——之前用 sh /dev/tcp 自连是误报。
       - name: Docker port mapping probe
         run: |
-          docker run -d --name port-probe -p 19899:18789 alpine:latest sh -c 'echo probe > /dev/tcp/0.0.0.0/18789 && sleep 60' || exit 1
-          sleep 2
-          for i in $(seq 1 10); do
-            if (echo > /dev/tcp/127.0.0.1/19899) 2>/dev/null; then echo "PORT MAPPING OK"; docker rm -f port-probe >/dev/null 2>&1; exit 0; fi
-            sleep 1
-          done
-          echo "PORT MAPPING FAILED (127.0.0.1:19899 unreachable)"; docker logs port-probe 2>&1 | tail -5; docker rm -f port-probe >/dev/null 2>&1; exit 1
+          docker run -d --name port-probe -p 19899:80 busybox:latest httpd -f -p 80 -h /tmp || { echo "PROBE RUN FAILED"; exit 1; }
+          sleep 3
+          if (echo > /dev/tcp/127.0.0.1/19899) 2>/dev/null; then
+            echo "PORT MAPPING OK"
+            docker rm -f port-probe >/dev/null 2>&1
+            exit 0
+          else
+            echo "PORT MAPPING FAILED (127.0.0.1:19899 unreachable)"
+            docker logs port-probe 2>&1 | tail -5
+            docker rm -f port-probe >/dev/null 2>&1
+            exit 1
+          fi
       - run: npm test
       - run: npm run build

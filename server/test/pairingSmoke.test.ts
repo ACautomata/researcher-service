@@ -299,13 +299,21 @@ describe('真网关配对闭环 smoke（#371-5 / #378）', () => {
       }
       if (Date.now() >= deadline) {
         let logs = ''
+        let portInfo = ''
         try {
           logs = execFileSync('docker', ['logs', '--tail', '40', containerName(BOX)], { encoding: 'utf8' })
+          // 容器端口映射实况（CI 定位：宿主 127.0.0.1:<port> ECONNREFUSED 时看 docker-proxy 是否注册映射）
+          portInfo = execFileSync('docker', ['port', containerName(BOX)], { encoding: 'utf8' })
+          portInfo += execFileSync(
+            'docker',
+            ['inspect', containerName(BOX), '--format', '{{json .NetworkSettings.Ports}}'],
+            { encoding: 'utf8' },
+          )
         } catch {
-          // 容器日志不可得 → 仅报状态
+          // 容器日志/映射信息不可得 → 仅报状态
         }
         throw new Error(
-          `网关 WS 360s 未就绪: ${BOX} lastLive=${lastLive} 最近探测错误=${JSON.stringify(probeErrors)} docker logs:\n${logs}`,
+          `网关 WS 360s 未就绪: ${BOX} lastLive=${lastLive} 最近探测错误=${JSON.stringify(probeErrors)} docker port/inspect:\n${portInfo}\ndocker logs:\n${logs}`,
         )
       }
       await new Promise((r) => setTimeout(r, 1000))
