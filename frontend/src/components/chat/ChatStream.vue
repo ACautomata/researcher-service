@@ -2,14 +2,19 @@
 // 消息流（#316：#340 拆分边界，props-in/emits-out 哑组件）。
 // ADR 0009 / #399：messages + approvals 双列表经 mergeTimeline（纯函数）合并为单一时间线——
 // 审批卡按到达序号 seq 插入消息流（流式占位强制沉底），不再沉在全部消息底部聚团。
+// ADR 0009 / #400：窗口自动向下滚动（范式 B 上滚让位 + rAF 节流）——宿主在本组件内部，
+// 滚动容器即根元素 .stream；仅用户停留底部时跟随，上滚不抢滚动条，回到底部恢复；展开审批
+// 详情（detailOpen）不联动滚动；一帧内多次流式 delta 合并滚一次（rAF 节流，平滑不抖动）。
 // 渲染 messages（ChatMessageItem 注入 msg-item/thinking/tool-line slot）+ 审批卡（ApprovalCard）
 // + 历史分页「加载更多」。thinking+回答保持同气泡、工具行挂 run 内（不扁平化）。
+import { onBeforeUnmount, onUpdated, ref } from 'vue'
 import type { Msg, ApprovalItem } from '@/stores/chat'
 import { isApprovalEntry, mergeTimeline } from '@/chat/timeline'
+import { shouldFollowBottom } from '@/chat/scroll'
 import ChatMessageItem from '@/components/chat/ChatMessageItem.vue'
 import ApprovalCard from '@/components/chat/ApprovalCard.vue'
 
-defineProps<{
+const props = defineProps<{
   messages: Msg[]
   approvals: ApprovalItem[]
   disconnected: boolean
@@ -32,6 +37,40 @@ function onToggleDetail(a: ApprovalItem): void {
   emit('toggleApprovalDetail', a)
 }
 
+// ---- 自动滚动（ADR 0009 / #400，范式 B 上滚让位 + rAF 节流）----
+// 滚动容器即根元素 .stream（overflow-y:auto）。stickyBottom 记录「用户是否停留在底部」：
+// 由 scroll 事件实时判定；上滚离开底部 → false（新内容不抢滚动条），回到底部 → true（恢复跟随）。
+const streamEl = ref<HTMLElement | null>(null)
+const stickyBottom = ref(true)
+let rafId = 0
+
+// 滚动判定（范式 B）：距底 < 阈值视为停留底部。scroll 事件驱动——用户滚动操作与
+// 程序性滚动（跟随触底）都经过这里；跟随触底时距底=0 保持 stickyBottom=true 不抖动。
+function onScroll(): void {
+  const el = streamEl.value
+  if (!el) return
+  stickyBottom.value = shouldFollowBottom(el.scrollTop, el.scrollHeight, el.clientHeight)
+}
+
+// rAF 节流跟随：一帧内多次流式 delta/审批卡插入合并滚一次到底（平滑不抖动）。
+// 仅 stickyBottom（用户停留底部）时滚；上滚回看历史时不抢滚动条。
+function scrollToBottom(): void {
+  if (!stickyBottom.value) return
+  if (rafId) return // 本帧已调度
+  rafId = requestAnimationFrame(() => {
+    rafId = 0
+    const el = streamEl.value
+    if (el && stickyBottom.value) el.scrollTop = el.scrollHeight
+  })
+}
+
+// DOM 更新后（新消息/流式追加/审批卡插入/历史加载更多 prepend）跟随；展开审批详情
+// 是 detailOpen 状态变化，不触发 onUpdated，天然不联动滚动（标准聊天 UX，spec 明示）。
+onUpdated(scrollToBottom)
+onBeforeUnmount(() => {
+  if (rafId) cancelAnimationFrame(rafId)
+})
+
 defineSlots<{
   'msg-item'?: (props: { msg: Msg }) => unknown
   thinking?: (props: { thinking: string; thinkingOpen: boolean }) => unknown
@@ -41,7 +80,9 @@ defineSlots<{
 </script>
 
 <template>
-  <div class="stream" data-test="stream">
+  <!-- ADR 0009 / #400：.stream 即滚动容器（根元素，overflow-y:auto）——ref 供范式 B 跟随滚底，
+       @scroll 实时判定 stickyBottom（用户停留底部则跟随、上滚则让位） -->
+  <div class="stream" data-test="stream" ref="streamEl" @scroll="onScroll">
     <!-- T3 历史分页（issue #82）：hasMore 时顶部「加载更多」向回翻更旧消息，prepend 到头部。 -->
     <button
       v-if="historyHasMore"
