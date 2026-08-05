@@ -2,8 +2,7 @@ import { fileURLToPath, URL } from 'node:url'
 import vue from '@vitejs/plugin-vue'
 import { defineConfig } from 'vitest/config'
 
-// 联调集成测试（issue #179）：proxy target 读 VITE_API_TARGET——dev 缺省 :8001（TS 控制面，
-// #372 后端迁 TS/Express），测试时由 backend conftest 注入 pytest-django live server 随机端口。
+// 联调集成测试（issue #179）：proxy target 读 VITE_API_TARGET——dev 缺省 :8001（TS 控制面，server/）。
 const apiTarget = process.env.VITE_API_TARGET ?? 'http://localhost:8001'
 
 // https://vitejs.dev/config/

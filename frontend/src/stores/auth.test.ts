@@ -38,7 +38,7 @@ describe('auth.clearSession', () => {
 })
 
 // 修复 BUG：登录无论输入什么都显示「账号已被注册」。
-// 根因：auth.login 旧实现只抛写死文案，丢弃 DRF 错误体（多为弱密码被拒）；
+// 根因：auth.login 旧实现只抛写死文案，丢弃校验错误体（多为弱密码被拒）；
 // 现须透传后端真实校验消息。#340：register action 已随公开注册关闭（#331 admin-only）移除。
 describe('auth login 错误透传', () => {
   beforeEach(() => {

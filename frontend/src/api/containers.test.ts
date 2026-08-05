@@ -41,7 +41,7 @@ describe('containers api', () => {
   // PR #370 第四轮 R4-1（P0）：TS 控制面 #312 信封下，listInstances 必须返回 data 解包后的数组，
   // 不是整个信封 {code,message,data}。调用方 ContainersView.map / ChatView.loadInstances.length
   // 依赖它是数组——apiJson 不解包会让主线「容器列表 → selectContainer → 隧道」全断。
-  // 旧用例 mock 喂裸数组（Django 形状）掩盖此路径；此用例用真实 TS 信封形状钉死契约。
+  // 旧用例 mock 喂裸数组掩盖此路径；此用例用真实 TS 信封形状钉死契约。
   it('listInstances unwraps TS envelope data into the array', async () => {
     ;(globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
       mockResp({ code: 0, message: 'ok', data: [SAMPLE] }),

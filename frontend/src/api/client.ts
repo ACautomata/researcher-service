@@ -103,7 +103,7 @@ export async function apiFetch(path: string, init: RequestInit = {}): Promise<Re
   const auth = useAuthStore()
   const resp = await fetch(path, { ...init, headers: buildHeaders(init, auth.token) })
   // HTTP 200 但信封码是认证/授权层错误（TS 后端 #312 信封：吊销的 token 以 10001 拒业务请求，
-  // HTTP 层恒 200）→ 与 HTTP 401 同语义触发刷新重试链。Django 非信封响应不在此列（走 HTTP 状态）。
+  // HTTP 层恒 200）→ 与 HTTP 401 同语义触发刷新重试链。非信封响应不在此列（走 HTTP 状态）。
   if (resp.status === 200 && ENVELOPE_UNAUTHENTICATED_CODES.has(await envelopeCodeOf(resp))) {
     const retried = await refreshAndRetry(path, init)
     if (retried) return retried
@@ -121,7 +121,7 @@ export async function apiFetch(path: string, init: RequestInit = {}): Promise<Re
 export async function apiJson<T>(path: string, init: RequestInit = {}): Promise<T> {
   const resp = await apiFetch(path, init)
   if (!resp.ok) {
-    // 非信封路径（Django 旧响应 / 未走信封的 HTTP 语义）：按 HTTP 状态抛错 + detail 透传。
+    // 未走信封的 HTTP 语义：按 HTTP 状态抛错 + detail 透传。
     let detail = `请求失败 (${resp.status})`
     try {
       const body = (await parseEnvelopeBody(resp)) as Record<string, unknown> | null
@@ -134,11 +134,11 @@ export async function apiJson<T>(path: string, init: RequestInit = {}): Promise<
   const body = await parseEnvelopeBody(resp)
   // TS 后端 #312 信封：HTTP 200 但 code!==0 → 业务错误（20040 越权 / 90002 校验 / 10001 未认证…）。
   // 只按 HTTP 状态判错会让 apiFetch 的 401 分支与上层 status 分支（ChatView 20040 等）全成死代码，
-  // 用户看到原始内部文案（P0 code review）。非信封（Django 响应）按成功透传兼容。
+  // 用户看到原始内部文案（P0 code review）。
   const env = parseEnvelope(body)
   if (env && env.code !== 0) throw new ApiError(resp.status, env.message, env.code)
   // PR #370 第四轮 R4-1（P0）：成功信封（code===0）须解包 data 返回业务载荷，而非整个信封——
   // 否则调用方裸消费 {code,message,data}，listInstances.length / ContainersView.map 失败，
-  // 主线「容器列表 → selectContainer → 隧道」全断。非信封（Django 裸载荷，env===null）原样透传。
+  // 主线「容器列表 → selectContainer → 隧道」全断。非信封（裸载荷，env===null）原样透传。
   return (env ? env.data : body) as T
 }

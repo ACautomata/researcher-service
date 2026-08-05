@@ -1,18 +1,26 @@
-# server — TS/Express 控制面（M0 骨架 + M1 认证与账号 + M2 容器生命周期）
+# server — TS/Express 控制面（M0–M5 全域 + M9 生产部署）
 
-Wayfinder map **#308** · 交接规格 **#331** · 切片 **#333（M0+M1）/ #334（M2）**。
+Wayfinder map **#308** · 交接规格 **#331** · 切片 **#333（M0+M1）/ #334（M2）/ #335（M3 wiki）/
+#336（M4 models）/ #337（M5 对话隧道）/ #341（M9 生产部署 + Django 退役）**。
 
-新 Express+ws 同进程控制面（替代 Django 后端，过渡期 M0–M6 并存）。已交付：
+Express+ws 同进程控制面（替代已退役的 Django 后端）。已交付：
 - **M0 骨架 + M1 认证与账号**（#333）：双角色 login / R1 refresh 旋转 + 重放检测 / logout / me /
   password-change / bootstrap B1 + C1 强制改密 / OAuth2 O1 骨架 / admin 账号管理 4 端点。
 - **M2 容器生命周期**（#334）：容器按用户隔离的完整生命周期——编排器 Port + BullMQ(Redis) 后台队列
   + 端口池 + 5 态机 + 异步 delete + 取消标志。`GET /containers/`（user 自己 / admin 全部 + pairing
   预取）、`POST /containers/`（同步返 creating 快照、端口入队前分配）、`DELETE /containers/<name>`
   （异步信封、置取消标志）。
+- **M3 WIKI**（#335）：5 路由 7 方法逐字节平移——`WikiFileSystem` Port + 纯逻辑
+  （`FrontmatterParser`/`CategoryMarkerExtractor`/`WikilinkResolver`）+ compile 去抖 5s（docker exec，best-effort）
+  + FS 安全（symlink 不跟随 / SKIP 集合 / path 双保险）。
+- **M4 Models**（#336）：provider CRUD + `provider_id` 唯一 40041 + openclaw.json 热加载（config 目录
+  ro bind + `OPENCLAW_CONFIG_PATH`）+ key 零落盘 + 写盘回滚 90003。
+- **M5 对话桥接**（#337/#369/#371/#378/#385）：**ADR 0006 浏览器直连**——`/ws/chat/` 隧道只做 JWT
+  握手 4401 + 归属门 + 原始帧透传（协议机在浏览器官方 `@openclaw/gateway-client`）；配对走
+  approve 端点（docker exec）+ bootstrap-token 端点；`PANEL_PUBLIC_ORIGIN` 生产 Origin 接线。
 
-WIKI/对话桥接是后续切片（M3/M4）；骨架已为其预留：`authenticate()` 可被 WS 握手复用、
-`getInstanceForUser` 归属前置单点（containers/wiki/models/chat/pairing 复用）、`onEvict` 钩子
-（delete 完成后触发 chat pool 逐出，ADR 0006 下为空挂点）。
+生产部署（#341）：`deploy/docker-compose.deploy.yml`（frontend nginx + server + redis 三服务）+
+CD 构建 `server` 镜像推 GHCR；Django 后端已退役删除。见下方「生产部署」。
 
 ## 技术栈（规格 §A 锁定）
 
@@ -26,15 +34,19 @@ Express 5 + `ws` 8（noServer，upgrade 钩子 M4 接）+ `jose` 5（HS256，显
 ```
 src/
   app.ts                 createApp({prisma, orchestrator?}) 工厂（DI，测试注入 test DB + 假编排）
-  server.ts              createServer(app) + server.on('upgrade') 占位 + bootstrap + assembleFleet + listen
-  config.ts              env 读取（JWT_SECRET/access/refresh TTL/bcrypt cost/fleet/redis/...）
+  server.ts              createServer(app) + server.on('upgrade') 隧道分流 + bootstrap + assembleFleet + listen
+  config.ts              env 读取（JWT_SECRET/access/refresh TTL/bcrypt cost/fleet/redis/...，生产 fail-fast）
   prisma.ts              PrismaClient 工厂 + 单例（driver adapter 注入）
-  codes.ts               五位分层码常量表（#312 + #319 转译 + #333/#334 新增）
+  codes.ts               五位分层码常量表（#312 + #319 转译 + 各切片新增）
   envelope.ts            唯一错误面：EnvelopeError + ok()/fail()
   auth/                  tokens / authenticate / bootstrap / password / userService / quota
   middleware/            auth(→10001/10004) / mustChangePasswordGate(→10005) / validate(→90002) / errorHandler
   routes/                health / auth / users / containers
   validation/schemas.ts  zod schema（login/passwordChange/userCreate/userPatch/containerCreate）
+  wiki/                  #335 WIKI：routes / service（纯逻辑）/ nodeFs（WikiFileSystem Port 实现）/
+                         compile（docker exec 去抖）
+  models/                #336 Models：routes / configWriter（openclaw.json 重渲染写盘）
+  chat/                  #337 M5：tunnelAssembly（/ws/chat/ 隧道）+ subprotocol + values（close 码常量）
   containers/            #334 编排域：
     constants.ts         纯常量（18789/openclaw-gw- 前缀/label/bind 路径/占位）
     errors.ts            领域错误族（携带信封码；errorHandler 统一转译）
@@ -53,9 +65,10 @@ src/
     readModel.ts         FleetReadModel 读侧（list 聚合 + creating 对账 + ContainerSummary）
     orchestrator.ts      Orchestrator 薄 facade + getInstanceForUser 归属前置
     fleetAssembly.ts     生产装配（DockerRuntime + BullMQ + FleetDeps + Orchestrator）
-test/                    接缝 #2 信封 REST 契约 + #5 编排器 Port + 集成 smoke + BullMQ 联通
+test/                    接缝 #1–#5（wiki Port / 信封 REST / WS 桥 / hostDeps / 编排器 Port）+ 集成 smoke
 prisma/                  schema.prisma + init.sql（migrate diff 产出的建表 SQL）
 scripts/apply-schema.mjs 把 init.sql 落到 dev DB（不经 prisma CLI，规避 AI 守卫）
+Dockerfile               生产镜像（多阶段；entrypoint 幂等落表 + node dist/server.js，见「生产部署」）
 ```
 
 ## 开发
@@ -91,13 +104,16 @@ rm -f prisma/panel.db && npm run db:apply
 
 ```bash
 npm run typecheck              # tsc --noEmit（含测试）
-npm test                       # vitest run（17 文件 / 111 用例，接缝 #2 信封 + #5 编排器）
+npm test                       # vitest run（49 文件 / ~497 用例，接缝 #1–#5）
 npm run prisma:validate        # schema 合法性
 ```
 
 接缝（spec Testing Decisions）：
+- **#1 WikiFileSystem Port**：纯逻辑对 fake FS 直测（symlink / 非 regular / 不可读 / SKIP 集合 / 降级）。
 - **#2 信封 REST 契约**：注入假身份（admin/user）打路由，断 HTTP 200 + 信封码 + 归属前置。
   防探测用例逐字节断言「不存在 vs 越权」同码（10041 / 20040）；凭证零落盘贯穿断言。
+- **#3 WS 桥**：面板↔浏览器腿——upgrade/JWT/4401/subprotocol 回显 + 出站帧翻译。
+- **#4 hostDeps / 配对**：注入假 GatewayClient，断多租户池壳 + A3 双层状态机 + 宿主 approve 编排。
 - **#5 编排器 Port**：注入假 docker（FakeRuntime）+ 内存假队列（InlineLifecycleQueue），断
   5 态机 + 取消标志 + 端口入队前分配 + 补偿（bind 换端口重试 / REMOVING 可重试 / 端口耗尽 / 残留目录）。
 - **集成 smoke**（`containers-smoke.test.ts` / `bullmqQueue.test.ts`）：真 docker daemon / 真 Redis
@@ -129,9 +145,30 @@ npm run prisma:validate        # schema 合法性
   设计；与 docker.sock §5.4 同理，本地/可信部署可接受）。根治需 per-user 凭证或 admin 白名单 base_url，
   均超出 #336 范围，未实现——多租户部署前需另行决策。
 
+## 生产部署（#341 M9）
+
+生产镜像 `server/Dockerfile`（多阶段：build 全量 npm ci + prisma generate + tsc → runtime `npm ci
+--omit=dev` + dist + prisma/scripts）。入口 `docker-entrypoint.sh`：先幂等落表（`scripts/apply-schema.mjs`
++ SQLite `user_version` 标记；init.sql 非幂等，重启跳过）再 `exec node dist/server.js`。
+
+生产 compose：`deploy/docker-compose.deploy.yml` 三服务（frontend nginx → server:8001 → redis）。
+**必填 env**（`NODE_ENV=production` 下 fail-fast）：`JWT_SECRET`（≥32 字符）· `PANEL_PUBLIC_ORIGIN`
+（面板对外 origin）· `CREDENTIAL_ENCRYPTION_KEYS` · `OPENCLAW_TEMPLATE_DIR`（绝对存在可读）·
+`DATABASE_URL`（显式绝对路径，如 `file:/app/db/db.sqlite3`）· `OPENCLAW_FLEET_ROOT`（compose pin
+`/fleet` 并挂载宿主 fleet 根）。LLM_API_KEY create 时 90003 前置校验。部署全流程（CD、secrets、
+回滚、排障）见 `deploy/DEPLOY.md`。
+
+> 坑：`node:lts-slim`（Debian/glibc）——better-sqlite3 原生模块不兼容 alpine/musl；runtime 阶段
+> 需 build-essential + python3（postinstall 编译工具链，Dockerfile 已含）。
+
 ## 下游衔接
 
-- M3 WIKI / M4 对话桥接：复用 `createApp`、`authenticate()`、信封中间件、`getInstanceForUser` 归属前置。
-- 配对（M4）：`Pairing` 表经 `onDelete: Cascade` 级联；list 的 pairing 预取签名已就位（M2 恒 unpaired 默认）。
-- 对话桥接（M4）：`onEvict` 钩子（delete 完成后触发 chat pool 逐出，ADR 0006 B-直连下为空挂点）。
-- 前端适配（#317 / M5）：信封解析 + `me.role` + R1 双 token 旋转 + 异步 delete 轮询 + admin users 页。
+- WIKI（#335）与 Models（#336）已交付：复用 `createApp`、`authenticate()`、信封中间件、
+  `getInstanceForUser` 归属前置（containers/wiki/models/chat/pairing 全域单点）。
+- 配对（#378/#385）：`Pairing` 表经 `onDelete: Cascade` 级联；list 的 pairing 预取；宿主 approve
+  经 `runtime` docker exec 通道（`POST /containers/<name>/pairing/approve/<requestId>`）。
+- 对话桥接（#337，ADR 0006）：`/ws/chat/` 隧道 JWT 握手 4401 + 归属门 + 原始帧透传；浏览器跑官方
+  `@openclaw/gateway-client` 协议机；`PANEL_PUBLIC_ORIGIN` 强制进容器 allowedOrigins。
+- 前端（#340/M5/M8）：信封解析 + `me.role` + R1 双 token 旋转 + 异步 delete 轮询 + ChatView 拆分
+  （8 组件）+ admin users 页。
+- 生产（#341）：`deploy/docker-compose.deploy.yml` + CD 构建 `server` 镜像；Django 后端已退役。
