@@ -1101,6 +1101,36 @@ describe('ChatView', () => {
     w.unmount()
   })
 
+  it('#376: 4402 预算超限（retry:false）→ 提示「容器网关不可用」；手动重连新建实例 → 预算内再断显示自动重连中', async () => {
+    const { w, gw } = await mountReady()
+    // 预算内：4402 退避重连 → UI「自动重连中…」
+    gw.fireClose(4402, 'gateway down', true)
+    await nextTick()
+    expect(w.find('[data-test="error-bar"]').text()).toContain('自动重连中')
+    // 超预算 give-up（retry:false）→ 专属「容器网关不可用」提示 + 手动重连入口（区别于通用「已停止」）
+    gw.fireClose(4402, 'gateway down', false)
+    await nextTick()
+    expect(w.find('[data-test="error-bar"]').text()).toContain('容器网关不可用')
+    expect(w.find('[data-test="error-bar"]').text()).not.toContain('自动重连已停止')
+    expect(w.find('[data-test="reconnect-bar"]').exists()).toBe(true) // disconnected 条：手动重连入口
+    // 手动重连（重新连接）→ openGateway 新建 GatewayChat（全新闭包 → 4402 预算重置）
+    await w.find('[data-test="reconnect"]').trigger('click')
+    await flushPromises()
+    const gw2 = MockGatewayChat.last!
+    expect(gw2).not.toBe(gw)
+    gw2.listSessions.mockResolvedValue([SESSION])
+    gw2.getHistory.mockResolvedValue({ messages: [], hasMore: false, nextOffset: null })
+    gw2.listCommands.mockResolvedValue([])
+    gw2.send.mockResolvedValue(undefined)
+    gw2.fireReady()
+    await flushPromises()
+    // 新实例预算内 4402 → 协议机退避重连 → 「自动重连中…」（非「不可用」）
+    gw2.fireClose(4402, 'gateway down', true)
+    await nextTick()
+    expect(w.find('[data-test="error-bar"]').text()).toContain('自动重连中')
+    w.unmount()
+  })
+
   // ---- PR #370 第四轮 run 状态机修复（R4-5/6/7/8 + #11）----
 
   it('R4-8: pendingSend 期间工具优先的外来 run 首帧（tool）后，用户 run 首帧仍切换认领', async () => {

@@ -320,6 +320,61 @@ describe('createGatewayChat（#369 隧道 Facade）', () => {
     }
   })
 
+  // ---- #376: 4402 有限重连预算（独立于通用传输预算；手动重连/切容器重置）----
+
+  it('#376: 4402 预算独立于 1006 网络抖动（互不消耗；各自 ~5 次 give-up）', () => {
+    const { client } = makeGateway()
+    const ctx4402 = { code: 4402, reason: '', generation: 0, socketOpened: true, helloReceived: false, connectRequestSent: false }
+    const ctx1006 = { code: 1006, reason: '', generation: 0, socketOpened: true, helloReceived: false, connectRequestSent: false }
+    // 1006 网络抖动 ×4（未达 1006 预算）→ 不消耗 4402 预算
+    for (let i = 0; i < 4; i++) expect(client.opts.resolveClose!(ctx1006).retry).toBe(true)
+    // 4402 ×5 → 第 5 次 give-up（若 1006 掺入同一预算，总失败 5 次早已 give-up、等不到 9 次）
+    const retries: boolean[] = []
+    for (let i = 0; i < 5; i++) retries.push(client.opts.resolveClose!(ctx4402).retry)
+    expect(retries).toEqual([true, true, true, true, false])
+  })
+
+  it('#376: PAIRING_REQUIRED / 4401 / 4403 / 4404（非传输问题）不消耗 4402 预算', () => {
+    const { client } = makeGateway()
+    const base = { code: 4402, reason: '', generation: 0, socketOpened: true, helloReceived: false, connectRequestSent: false }
+    // 认证/归属/改密：先行拦截 retry:false，不进入任何预算
+    for (const code of [4401, 4403, 4404]) {
+      expect(client.opts.resolveClose!({ ...base, code }).retry).toBe(false)
+    }
+    // PAIRING_REQUIRED 握手拒绝（配对中，非传输问题）
+    const connError = new MockGatewayProtocolRequestError({
+      code: 'connect',
+      message: 'pairing required',
+      gatewayCode: 'ERR_PAIRING_REQUIRED',
+      details: { code: 'PAIRING_REQUIRED' },
+    })
+    expect(
+      client.opts.resolveClose!({ ...base, code: 1000, connectFailure: { error: connError } }).retry,
+    ).toBe(false)
+    // 上述均未消耗预算：首个 4402 仍 retry:true（若被消耗，此处早已超预算 give-up）
+    expect(client.opts.resolveClose!(base).retry).toBe(true)
+  })
+
+  it('#376: 4402 超预算 → resolveClose retry:false 且 onClose 上报（ChatView 据 code+retry 提示）', () => {
+    const { client, handlers } = makeGateway()
+    for (let i = 0; i < 5; i++) client.close({ code: 4402, reason: 'gateway down' })
+    expect(handlers.onClose).toHaveBeenCalledTimes(5) // 每次 close 都 notify 上报
+    expect(handlers.onClose).toHaveBeenLastCalledWith(4402, 'gateway down', false, false) // 超预算 retry:false
+  })
+
+  it('#376: 手动重连/切换容器 = 新 GatewayChat 实例 → 4402 预算重置，可再次自动重连', () => {
+    const { gw: gw1, client: c1 } = makeGateway()
+    const ctx = { code: 4402, reason: '', generation: 0, socketOpened: true, helloReceived: false, connectRequestSent: false }
+    for (let i = 0; i < 4; i++) expect(c1.opts.resolveClose!(ctx).retry).toBe(true)
+    expect(c1.opts.resolveClose!(ctx).retry).toBe(false) // gw1 第 5 次 4402 give-up
+    gw1.stop()
+    // ChatView openGateway 每次新建 GatewayChat（全新闭包计数）→ 预算重置
+    createGatewayChat({ container: 'alpha', jwt: 'jwt-1', bootstrapToken: 'boot-1', handlers: makeHandlers() })
+    const c2 = MockGatewayProtocolClient.last!
+    expect(c2).not.toBe(c1)
+    expect(c2.opts.resolveClose!(ctx).retry).toBe(true) // 新实例预算从零开始
+  })
+
   it('F4: 构造带 requestTimeoutMs（RPC 有界等待，防半开连接 promise 永挂）', () => {
     const { client } = makeGateway()
     expect(client.opts.requestTimeoutMs).toBe(30_000)
