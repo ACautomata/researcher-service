@@ -47,3 +47,7 @@ server/.env
 # 限仓库根（/ 前缀）——否则会误伤源码子包 containers/fleet/（issue #278）。
 /fleet/
 
+# 集成 smoke 临时 fleetRoot（pairingSmoke/containers-smoke 本地真容器验证用；放 worktree 内而非
+# /tmp——macOS Docker Desktop 只对 /Users 下路径 bind mount 生效，/tmp 挂进容器静默为空）。
+.smoke-tmp/
+

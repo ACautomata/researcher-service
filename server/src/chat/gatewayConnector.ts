@@ -37,11 +37,22 @@ const CONNECT_TIMEOUT_MS = 5000
 // 官方协议机经隧道发出）。连接失败/超时 reject → 隧道层 close(4402) 让浏览器感知容器网关不可用。
 // 连接建立瞬间网关可能立即主动发帧（如 connect.challenge，网关不依赖客户端先发）——open→resolve→
 // 调用方注册 onMessage 的窗口内到达的帧先缓冲，注册后 flush，防丢首帧。
-export function makeWsGatewayConnector(timeoutMs = CONNECT_TIMEOUT_MS, sendBudget = TUNNEL_SEND_BUDGET): GatewayConnector {
+// origin（可选，真网关 2026.7.1 实测）：openclaw 网关对 WS connect 校验 Origin 须在
+// gateway.controlUi.allowedOrigins 内（默认 seed http://127.0.0.1:18789），否则
+// CONTROL_UI_ORIGIN_NOT_ALLOWED 拒连。Node ws 客户端默认不带 Origin header——生产面板后端经隧道
+// 连网关须传面板 origin（并把该 origin 加进容器 openclaw.json 的 allowedOrigins）；测试注入允许值。
+export function makeWsGatewayConnector(
+  timeoutMs = CONNECT_TIMEOUT_MS,
+  sendBudget = TUNNEL_SEND_BUDGET,
+  origin?: string,
+): GatewayConnector {
   return {
     connect(url) {
       return new Promise((resolve, reject) => {
-        const ws = new WebSocket(url, { maxPayload: TUNNEL_MAX_PAYLOAD })
+        const ws = new WebSocket(url, {
+          maxPayload: TUNNEL_MAX_PAYLOAD,
+          ...(origin ? { headers: { Origin: origin } } : {}),
+        })
         const timer = setTimeout(() => {
           ws.terminate()
           reject(new Error(`gateway connect timeout: ${url}`))

@@ -78,6 +78,10 @@ export class DockerRuntime implements ContainerRuntime {
       name: containerName(spec.name),
       Env: envRecordToArray(environment),
       User: '0:0',
+      // #378 CI 定位：PortBindings 之外还须 ExposedPorts——docker CLI `-p` 两者同设；仅 PortBindings
+      // 时部分 dockerd（CI ubuntu dockerd，非 Docker Desktop）NetworkSettings.Ports={}（docker-proxy
+      // 不注册映射），宿主端口恒 ECONNREFUSED（配对 smoke 容器内网关 ready 但连不上）。
+      ExposedPorts: { [`${GATEWAY_INTERNAL_PORT}/tcp`]: {} },
       Labels: {
         [LABEL_APP_KEY]: LABEL_APP_VALUE,
         [LABEL_INSTANCE_KEY]: spec.name,
