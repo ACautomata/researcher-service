@@ -65,21 +65,16 @@ describe('chooseProtocol（RFC 6455 原样回显）', () => {
   })
 })
 
-describe('access_token wire 契约跨语言单一来源（#14）', () => {
-  // 契约字面量硬编码在三个运行时（server Node values / frontend TS protocol / backend Python
-  // middleware），无单一文件。改传输格式（前缀改名/加版本）须三处同步，否则 WS 握手静默 1006/4401。
-  // 放 server（Node 环境）读源码文本 pin 三处一致——不引入 frontend 无 Node 类型的环境负担。
+describe('access_token wire 契约单一来源（#14）', () => {
+  // 契约字面量硬编码在运行时（server Node values / frontend TS protocol），无单一文件。改传输
+  // 格式（前缀改名/加版本）须两端同步，否则 WS 握手静默 1006/4401。
+  // 放 server（Node 环境）读源码文本 pin 两处一致——不引入 frontend 无 Node 类型的环境负担。
+  // （#341 M9：Django backend 退役，Python middleware 一侧从契约对消失。）
   // vitest 从 server/ 运行 → cwd=server，上级即仓库根。
   const ROOT = path.resolve(process.cwd(), '..')
 
   it('frontend/src/chat/protocol.ts 的 WS_CHAT_PROTOCOL 与 server values 一致', () => {
     const ts = readFileSync(path.join(ROOT, 'frontend/src/chat/protocol.ts'), 'utf8')
     expect(ts).toContain(`WS_CHAT_PROTOCOL = '${WS_CHAT_PROTOCOL}'`)
-  })
-
-  it('backend/accounts/middleware.py（Python Channels）字面量与 server values 一致（裸 access_token + access_token. 前缀两格式）', () => {
-    const py = readFileSync(path.join(ROOT, 'backend/accounts/middleware.py'), 'utf8')
-    expect(py).toContain(`'${WS_CHAT_PROTOCOL}'`)
-    expect(py).toContain(`'${WS_CHAT_PROTOCOL}.`)
   })
 })
