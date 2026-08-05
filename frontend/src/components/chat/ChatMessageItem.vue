@@ -1,9 +1,12 @@
 <script setup lang="ts">
 // 单条聊天消息（#316：#340 拆分边界，props-in/emits-out 哑组件）。
 // thinking/tool-line slot 注入点：默认渲染 ThinkingCard/ToolLine；父可经 slot 覆盖表现。
+// #401 / ticket #402：assistant 正文走 MarkdownRenderer（v-html + DOMPurify 消毒），
+// user 保持纯文本（用户输入的 * # _ 不当语法）；流式光标由 MarkdownRenderer streaming 控制。
 import type { Msg } from '@/stores/chat'
 import ThinkingCard from '@/components/chat/ThinkingCard.vue'
 import ToolLine from '@/components/chat/ToolLine.vue'
+import MarkdownRenderer from '@/components/chat/MarkdownRenderer.vue'
 
 defineProps<{
   msg: Msg
@@ -28,7 +31,9 @@ defineSlots<{
           <ToolLine :tool="t" />
         </slot>
       </template>
-      {{ msg.text }}<span v-if="msg.streaming" class="cursor"></span>
+      <!-- #401：assistant 渲染 markdown（含流式光标），user 保持纯文本 + 光标 -->
+      <MarkdownRenderer v-if="msg.role === 'assistant'" :text="msg.text" :streaming="msg.streaming" />
+      <template v-else>{{ msg.text }}<span v-if="msg.streaming" class="cursor"></span></template>
     </div>
   </div>
 </template>
