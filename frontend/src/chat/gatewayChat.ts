@@ -82,6 +82,21 @@ export interface GatewayChat {
   send(sessionKey: string, message: string): Promise<string | undefined>
   listCommands(): Promise<CommandDTO[]>
   resolveApproval(id: string, kind: string, decision: string): Promise<void>
+  // B0: 补拉待处理审批（exec.approval.list，协议 schema exec-approval 域）——切页/断线重连后
+  // 恢复审批卡：审批事件是连接级广播，切页期间 WS 已断、网关 push 的 exec.approval.requested
+  // 收不到；不补拉则 agent 卡在 exec 审批时前端无卡可回，agent 卡死被网关 stuck-session
+  // recovery abort（生产实测：330s 卡死 → abort_embedded_run）。返回 addApproval 同形状的
+  // 卡片（id/kind/command/sessionKey），上层直接 chat.addApproval（幂等去重，与实时 push 不冲突）。
+  listPendingApprovals(): Promise<ApprovalCardDTO[]>
+}
+
+// B0: 审批卡 DTO（对齐 chat.addApproval 入参形状；kind/command 由网关 exec.approval.list
+// 返回的 request 解析，缺省 kind=exec——exec 审批是面板唯一入口，plugin 审批走同类事件）
+export interface ApprovalCardDTO {
+  id: string
+  kind: string
+  command: string
+  sessionKey: string | null
 }
 
 // #377: ConnectPlan = 官方设备认证 lifecycle plan（role/scopes/auth/device）+ 面板 caps 声明。
@@ -531,6 +546,33 @@ export function createGatewayChat(params: CreateGatewayChatParams): GatewayChat 
       // exec→exec.approval.resolve / plugin→plugin.approval.resolve；params 仅 id/decision
       // （kind 已含于 method 名，不入 params——ExecApprovalResolveParams 校验无 kind 字段）。
       await client.request(`${kind}.approval.resolve`, { id, decision })
+    },
+    // B0: 补拉待处理审批（exec.approval.list）——见接口注释。实测校准（生产网关
+    // exec-approval dist）：listVisiblePendingApprovalRequests 返回 [{id, request, createdAtMs,
+    // expiresAtMs}]，request 内含 command/sessionKey（与 exec.approval.requested 事件 payload 的
+    // request 同构）。list 只回 pending（终态由 exec.approval.resolved 事件收敛）。返回空数组
+    // 视为无可补拉（含网关版本不支持该方法——请求超时/INVALID_REQUEST 均 catch 降级）。
+    async listPendingApprovals(): Promise<ApprovalCardDTO[]> {
+      try {
+        const res = await client.request<{ items?: unknown; approvals?: unknown }>('exec.approval.list', {})
+        // 0 信任：优先 items（ApprovalHistoryResult 形状），回退 approvals；非对象项跳过
+        const raw = Array.isArray(res?.items) ? res.items : Array.isArray(res?.approvals) ? res.approvals : []
+        const out: ApprovalCardDTO[] = []
+        for (const item of raw) {
+          if (!item || typeof item !== 'object') continue
+          const rec = item as Record<string, unknown>
+          const id = typeof rec.id === 'string' && rec.id ? rec.id : ''
+          if (!id) continue
+          const req = rec.request && typeof rec.request === 'object' ? (rec.request as Record<string, unknown>) : {}
+          const kind = typeof rec.kind === 'string' && rec.kind ? (rec.kind as string) : 'exec'
+          const command = typeof req.command === 'string' ? req.command : ''
+          const sessionKey = typeof req.sessionKey === 'string' ? req.sessionKey : null
+          out.push({ id, kind, command, sessionKey })
+        }
+        return out
+      } catch {
+        return [] // 网关不支持/超时：静默降级（实时 push 仍工作）
+      }
     },
   }
 }
