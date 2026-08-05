@@ -17,8 +17,9 @@
 //
 // **真网关实测发现（本文件 buildConnectPlan 的适配依据）**：
 //   1. WS connect 须带 Origin header 且在 gateway.controlUi.allowedOrigins 内（默认 seed
-//      http://127.0.0.1:18789），否则 CONTROL_UI_ORIGIN_NOT_ALLOWED 拒连。真实浏览器带面板自身
-//      origin——生产须把面板 origin 加进容器 openclaw.json 的 allowedOrigins。
+//      http://127.0.0.1:18789），否则 CONTROL_UI_ORIGIN_NOT_ALLOWED 拒连。面板 origin 来自配置
+//      （config.fleet.panelOrigin，#386 本文件与生产装配同源），#385 起 ConfigRenderer 已把该值
+//      自动强制进容器 openclaw.json（本文件 beforeAll 断言 allowedOrigins 含该值）。
 //   2. 首连 auth 必须用 `token` 字段（值 = GATEWAY_TOKEN，即 bootstrap-token 端点发放的凭证）；
 //      `bootstrapToken` 字段在 2026.7.1 网关被当「setup code」→ AUTH_BOOTSTRAP_TOKEN_INVALID。
 //      官方 gateway-client 2026.7.2-beta.6 的 lifecycle 首连输出 bootstrapToken 字段（面向
@@ -31,7 +32,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import http, { type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import path from 'node:path'
 import { generateKeyPairSync, createHash, sign as ed25519Sign } from 'node:crypto'
@@ -53,7 +54,7 @@ import { containerName } from '../src/containers/runtime'
 import { InlineLifecycleQueue } from '../src/containers/lifecycleQueue'
 import { defaultReservedPorts, type FleetConfig } from '../src/containers/values'
 import { createApp } from '../src/app'
-import { createTunnelServer } from '../src/chat/tunnel'
+import { assembleTunnelServer } from '../src/chat/tunnelAssembly'
 import { makeWsGatewayConnector } from '../src/chat/gatewayConnector'
 import { DEV_ENCRYPTION_KEYS } from '../src/crypto'
 import { ensureImageAvailable } from './smokeDocker'
@@ -68,6 +69,10 @@ const BOX = 'pairing-smoke'
 const SMOKE_ROOT = path.join(path.resolve(process.cwd(), '..'), '.smoke-tmp')
 
 // ---- 浏览器侧协议机 transport（Node 版，与 frontend/src/chat/tunnelSocket.ts 同构）----
+// 真网关实测：WS connect 须带 Origin header 且在 gateway.controlUi.allowedOrigins 内，否则网关回
+// CONTROL_UI_ORIGIN_NOT_ALLOWED 拒连。origin 不再硬编码测试值（#386）：取 cfg.panelOrigin——
+// 即生产装配同源值（config.fleet.panelOrigin），容器 allowedOrigins 也由 ConfigRenderer 强制进
+// 该值（#385 同源强制点）——真容器上验证的是「生产配置下面板后端隧道连网关」的完整闭环。
 interface SocketHandlers {
   open: () => void
   message: (data: string) => void
@@ -77,9 +82,10 @@ interface SocketHandlers {
 
 class NodeTunnelSocket {
   private readonly ws: WebSocket
-  constructor(url: string, jwt: string, handlers: SocketHandlers) {
+  constructor(url: string, jwt: string, origin: string, handlers: SocketHandlers) {
     // 真网关要求 Origin header（allowedOrigins 校验），浏览器自动带、Node ws 客户端不带 → 显式加。
-    this.ws = new WebSocket(url, ['access_token', jwt], { headers: { Origin: WS_ORIGIN } })
+    // origin 取自配置（#386）：与生产装配同源——生产浏览器带面板自身 origin，Node 客户端须代填。
+    this.ws = new WebSocket(url, ['access_token', jwt], { headers: { Origin: origin } })
     this.ws.on('open', () => handlers.open())
     this.ws.on('message', (data) => handlers.message(data.toString()))
     this.ws.on('close', (code, reason) => handlers.close(code, reason.toString()))
@@ -139,11 +145,6 @@ const CLIENT_INFO = { id: 'webchat-ui', mode: 'webchat', platform: 'browser', ve
 const OPERATOR_ROLE = 'operator'
 const OPERATOR_SCOPES = ['operator.read', 'operator.write', 'operator.approvals', 'operator.admin']
 const CONNECT_CAPS = ['tool-events']
-// 真网关实测：WS connect 须带 Origin header 且在 gateway.controlUi.allowedOrigins 内，否则网关
-// 回 CONTROL_UI_ORIGIN_NOT_ALLOWED 拒连。镜像内网关对 bind=lan 默认 seed
-// ["http://localhost:18789","http://127.0.0.1:18789"]（见容器启动日志），测试用 127.0.0.1 值。
-// 真实浏览器带自身面板 origin——生产面板须把自身 origin 加进容器 openclaw.json 的 allowedOrigins。
-const WS_ORIGIN = 'http://127.0.0.1:18789'
 
 // buildConnectPlan 产出（官方 lifecycle plan + 面板 caps）——本地最小类型（server node10 拿不到
 // 官方 .mts，用字段集约束测试逻辑；运行时 GatewayProtocolClient 类型为 any，不强制精确形状）。
@@ -189,12 +190,15 @@ describe('真网关配对闭环 smoke（#371-5 / #378）', () => {
   let ctx: TestContext
   let orch: Orchestrator
   let runtime: DockerRuntime
+  // #386：cfg 提升为共享（隧道/网关探测/浏览器 transport 的 origin 同源取值，并在 beforeAll 内
+  // 断言容器 openclaw.json 的 allowedOrigins 含该值——生产形态证明）。
+  let cfg: FleetConfig
   let bootstrapToken: string
   let access: string
   let containerPort: number
   let tunnelUrl: string
   let server: Server
-  let tunnel: ReturnType<typeof createTunnelServer>
+  let tunnel: ReturnType<typeof assembleTunnelServer>
   // 共享设备身份 + 内存 tokenStore（模拟浏览器 localStorage；官方 lifecycle 回调）。
   let identity: DeviceIdentity
   let storedToken: { token: string; scopes: string[] } | null
@@ -217,7 +221,7 @@ describe('真网关配对闭环 smoke（#371-5 / #378）', () => {
     // 生产模板 deploy/openclaw.json 含 mode:local；containers-smoke 简模板只验容器 running 未验网关）。
     writeFileSync(templateJson, JSON.stringify({ gateway: { mode: 'local', auth: {} }, models: { providers: {} } }))
 
-    const cfg: FleetConfig = {
+    cfg = {
       root: fleetRoot,
       templateDir,
       templateJson,
@@ -250,6 +254,14 @@ describe('真网关配对闭环 smoke（#371-5 / #378）', () => {
     const created = await orch.createComplete(inst, true)
     containerPort = created.port
     expect(created.status).toBe('running')
+
+    // #386 生产形态证明：容器 openclaw.json（宿主 instances/<id>/config/openclaw.json，ro bind 进
+    // 容器）的 gateway.controlUi.allowedOrigins 须含配置 panelOrigin——ConfigRenderer 强制点
+    //（#385），隧道连网关的 Origin header 与容器允许列表同源闭环。
+    const containerConfig = JSON.parse(
+      readFileSync(path.join(cfg.root, 'instances', created.id, 'config', 'openclaw.json'), 'utf8'),
+    ) as { gateway?: { controlUi?: { allowedOrigins?: string[] } } }
+    expect(containerConfig.gateway?.controlUi?.allowedOrigins).toContain(cfg.panelOrigin)
 
     // 端口映射实况检查（CI 定位 #378）：daemon 侧 NetworkSettings.Ports 若为空（{}），docker-proxy
     // 未注册映射 → 宿主 127.0.0.1:<port> 必然 ECONNREFUSED，盲等网关就绪无意义。空映射立即抛错附
@@ -304,7 +316,9 @@ describe('真网关配对闭环 smoke（#371-5 / #378）', () => {
         )
       }
       try {
-        const gw = await makeWsGatewayConnector(undefined, undefined, WS_ORIGIN).connect(
+        // 网关就绪探测：直连根路径连网关须带 Origin（真网关 allowedOrigins 校验）——#386 取
+        // cfg.panelOrigin（与隧道同源；网关启动时容器 openclaw.json 已由 ConfigRenderer 写入该值）。
+        const gw = await makeWsGatewayConnector(undefined, undefined, cfg.panelOrigin).connect(
           `ws://127.0.0.1:${containerPort}/`,
         )
         gw.close()
@@ -342,15 +356,16 @@ describe('真网关配对闭环 smoke（#371-5 / #378）', () => {
     expect(bt.body.code).toBe(0)
     bootstrapToken = bt.body.data.bootstrapToken
 
-    // 真实隧道：浏览器 ↔ 面板 WS → 容器网关。后端连网关须带 Origin（真网关 allowedOrigins 校验，
-    // 见 makeWsGatewayConnector 的 origin 参数）——用测试允许值（网关默认 seed 的 127.0.0.1）。
-    const tunnelDeps = {
+    // 真实隧道：浏览器 ↔ 面板 WS → 容器网关。装配走生产接缝 assembleTunnelServer（#385/#386）——
+    // 与 server.ts 同源：panelOrigin 传入隧道 → makeWsGatewayConnector 携带 WS Origin；不再注入
+    // 测试硬编码 origin。真网关 2026.7.1 校验 Origin 须在容器 allowedOrigins 内（见下断言：
+    // ConfigRenderer 已把 panelOrigin 强制进容器 openclaw.json）。
+    tunnel = assembleTunnelServer({
       prisma: ctx.prisma,
-      connectGateway: makeWsGatewayConnector(undefined, undefined, WS_ORIGIN),
+      panelOrigin: cfg.panelOrigin,
       gatewayHost: cfg.healthHost,
       gatewayScheme: 'ws',
-    }
-    tunnel = createTunnelServer(tunnelDeps)
+    })
     server = http.createServer()
     server.on('upgrade', (req, socket, head) => {
       if (!tunnel.handleUpgrade(req, socket, head)) socket.destroy()
@@ -398,7 +413,7 @@ describe('真网关配对闭环 smoke（#371-5 / #378）', () => {
     })
     let requestSeq = 0
     const client = new GatewayProtocolClient<AuthPlan>({
-      createSocket: (sh: SocketHandlers) => new NodeTunnelSocket(tunnelUrl, access, sh),
+      createSocket: (sh: SocketHandlers) => new NodeTunnelSocket(tunnelUrl, access, cfg.panelOrigin, sh),
       createRequestId: () => `smoke-req-${requestSeq++}`,
       buildConnectPlan: async ({ nonce }: { nonce: string }) => {
         // 真网关实测（2026.7.1-browser）：首连 auth 必须用 `token` 字段（值 = GATEWAY_TOKEN/bootstrap
