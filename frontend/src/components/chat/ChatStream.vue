@@ -7,13 +7,14 @@
 // 详情（detailOpen）不联动滚动；一帧内多次流式 delta 合并滚一次（rAF 节流，平滑不抖动）。
 // 渲染 messages（ChatMessageItem 注入 msg-item/thinking/tool-line slot）+ 审批卡（ApprovalCard）
 // + 历史分页「加载更多」。thinking+回答保持同气泡、工具行挂 run 内（不扁平化）。
-import { onBeforeUnmount, onUpdated, ref } from 'vue'
+import { onBeforeUnmount, onUpdated, ref, watch } from 'vue'
 import type { Msg, ApprovalItem } from '@/stores/chat'
 import { isApprovalEntry, mergeTimeline } from '@/chat/timeline'
 import { shouldFollowBottom } from '@/chat/scroll'
 import ChatMessageItem from '@/components/chat/ChatMessageItem.vue'
 import ApprovalCard from '@/components/chat/ApprovalCard.vue'
 
+// props 供 script 侧 watch 追踪布局快照（模板按名访问，无需此绑定）
 const props = defineProps<{
   messages: Msg[]
   approvals: ApprovalItem[]
@@ -64,8 +65,20 @@ function scrollToBottom(): void {
   })
 }
 
-// DOM 更新后（新消息/流式追加/审批卡插入/历史加载更多 prepend）跟随；展开审批详情
-// 是 detailOpen 状态变化，不触发 onUpdated，天然不联动滚动（标准聊天 UX，spec 明示）。
+// DOM 更新后（新消息/审批卡插入/历史加载更多 prepend）跟随。onUpdated 只对「本组件 render effect
+// 失效」触发——流式 delta 是 useChatConnection 对消息对象**原地 mutation**（last.raw/text 就地改，
+// 数组与对象身份不变），本组件渲染不读 text/thinking，render effect 不失效，onUpdated 不触发，
+// 流式逐字追加会漏滚（#400 验收①第三场景，code-review 实证）。故补 layoutWatch：投影快照
+// 只追踪「渲染布局相关字段」（role/streaming/raw 决定气泡高度与占位沉底；seq 决定审批卡插入位），
+// detailOpen/tools/decision 等不属布局变化、天然不进快照——展开审批详情不联动滚动（验收④）
+// 由快照字段白名单保证，不因 deep watch 被破坏。watch 回调统一走 scrollToBottom（rAF 节流）。
+watch(
+  () =>
+    props.messages.map((m) => `${m.role}|${m.streaming}|${m.raw.length}|${m.raw}`).concat(
+      props.approvals.map((a) => `${a.id}|${a.seq}|${a.status}`),
+    ),
+  scrollToBottom,
+)
 onUpdated(scrollToBottom)
 onBeforeUnmount(() => {
   if (rafId) cancelAnimationFrame(rafId)

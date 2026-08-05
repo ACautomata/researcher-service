@@ -4,7 +4,7 @@
 // ChatStream 合并时间线渲染 + 自动滚动（#400 范式 B + rAF 节流）。
 import { describe, expect, it, vi, afterEach } from 'vitest'
 import { mount } from '@vue/test-utils'
-import { nextTick } from 'vue'
+import { nextTick, reactive } from 'vue'
 import { newMsg, type ApprovalItem, type Msg } from '@/stores/chat'
 import ChatSidebar from '@/components/chat/ChatSidebar.vue'
 import ChatComposer from '@/components/chat/ChatComposer.vue'
@@ -289,18 +289,45 @@ describe('ChatStream 自动滚动（ADR 0009 / #400 范式 B + rAF 节流）', (
     expect(stream.scrollTop).toBe(900) // 滚到底 = scrollHeight - clientHeight（浏览器 clamp 后真实位置） // 自动滚到底
   })
 
+  it('流式逐字追加（原地 mutation）→ 自动滚到底（#400 验收①第三场景）', async () => {
+    vi.useFakeTimers()
+    const w = mountStream()
+    stubGeometry()
+    userScrollTo(892)
+    const m = reactive(newMsg('assistant')) // 流式占位：reactive 包装贴近真实 store（Pinia 内消息是 reactive 对象）
+    await w.setProps({ messages: [m] }) // 初始渲染
+    await tick()
+    spyRaf()
+    m.raw += '你' // 等价 handleText 的 last.raw 原地追加（对象身份不变，raw 字段变化）
+    m.text = m.raw
+    await nextTick() // layoutWatch 快照变化 → 调度 rAF
+    expect(rafSpy).toHaveBeenCalledTimes(1)
+    await tick()
+    expect(stream.scrollTop).toBe(900) // 流式增量也滚到底
+  })
+
   it('一帧内多次增量合并滚一次（rAF 节流不抖动）', async () => {
     vi.useFakeTimers()
     const w = mountStream()
     stubGeometry()
     userScrollTo(892)
+    const m = reactive(newMsg('assistant'))
+    await w.setProps({ messages: [m] })
+    await tick()
     spyRaf()
-    await w.setProps({ messages: [newMsg('assistant', 'a')] })
-    await w.setProps({ messages: [newMsg('assistant', 'ab')] }) // 同帧第二次增量
-    await w.setProps({ messages: [newMsg('assistant', 'abc')] }) // 同帧第三次增量
+    // 同帧三次原地追加（等价流式逐字 delta 高频到达）
+    m.raw += 'a'
+    m.text = m.raw
+    await nextTick()
+    m.raw += 'b'
+    m.text = m.raw
+    await nextTick()
+    m.raw += 'c'
+    m.text = m.raw
+    await nextTick()
     expect(rafSpy).toHaveBeenCalledTimes(1) // 一帧只调度一次
     await tick()
-    expect(stream.scrollTop).toBe(900) // 滚到底 = scrollHeight - clientHeight（浏览器 clamp 后真实位置）
+    expect(stream.scrollTop).toBe(900)
   })
 
   it('上滚离开底部 → 新内容不抢滚动条', async () => {
