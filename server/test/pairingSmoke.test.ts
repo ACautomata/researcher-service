@@ -250,6 +250,21 @@ describe('真网关配对闭环 smoke（#371-5 / #378）', () => {
     containerPort = created.port
     expect(created.status).toBe('running')
 
+    // 端口映射实况检查（CI 定位 #378）：daemon 侧 NetworkSettings.Ports 若为空（{}），docker-proxy
+    // 未注册映射 → 宿主 127.0.0.1:<port> 必然 ECONNREFUSED，盲等网关就绪无意义。空映射立即抛错附
+    // HostConfig.PortBindings（daemon 收到的配置）定位根因（dockerode 创建参数 vs daemon 实际映射）。
+    const mapCheck = execFileSync(
+      'docker',
+      ['inspect', containerName(BOX), '--format', '{{json .NetworkSettings.Ports}}|{{json .HostConfig.PortBindings}}'],
+      { encoding: 'utf8' },
+    ).trim()
+    const [portsJson, portBindingsJson] = mapCheck.split('|')
+    if (portsJson === '{}' || portsJson === 'null') {
+      throw new Error(
+        `容器 ${BOX} 端口映射为空（docker-proxy 未注册）：NetworkSettings.Ports=${portsJson} HostConfig.PortBindings=${portBindingsJson} 容器端口=${containerPort}`,
+      )
+    }
+
     // 等容器网关 WS 就绪（docker-proxy 起 + 网关监听）：makeWsGatewayConnector 直连根路径。
     // CI（共享 runner 与 containers-smoke 并行）容器首启 + 网关初始化慢 → 轮询预算 360s
     //（beforeAll 480s，给诊断留余量）。等待期间容器退出（openclaw 启动崩溃，status 原值含
