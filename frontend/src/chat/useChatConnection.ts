@@ -6,7 +6,7 @@
 import { computed, ref } from 'vue'
 import { getBootstrapToken } from '@/api/chat'
 import { useAuthStore, isTokenExpired } from '@/stores/auth'
-import { useChatStore, newMsg, type Msg, type ApprovalItem } from '@/stores/chat'
+import { useChatStore, newMsg, type Msg, type ApprovalItem, type ToolRow } from '@/stores/chat'
 import { ApiError } from '@/api/client'
 import {
   createGatewayChat,
@@ -393,11 +393,29 @@ export function useChatConnection(status: ChatStatus) {
       if (gen !== containerGen) return // newSession 期间又切容器：不连
       if (!chat.selectedSession) return // 会话创建失败（newSession 已显示错误）：不加载历史
       void loadHistory(chat.selectedSession) // T3：加载当前会话历史（C2：重连补拉也恢复投影）
+      // B0: 补拉待处理审批（切页/断线期间网关 push 的 exec.approval.requested 收不到）——
+      // 不补拉则 agent 卡在 exec 审批时前端无卡可回，agent 卡死被网关 stuck-session recovery
+      // abort（生产实测）。chat.addApproval 幂等（按 id 去重），与实时 push 不冲突。
+      void restorePendingApprovals(gen)
     } catch (e) {
       if (gen !== containerGen) return
       status.onConnecting(false) // 出错解除 connecting（composer 解禁后用户可重试）
       if (e instanceof ApiError && e.status === 401) return
       status.onError((e as Error).message)
+    }
+  }
+
+  // B0: 补拉待处理审批卡（切页/断线恢复路径，见 syncSessions 调用点注释）。gen 守卫同
+  // syncSessions：切容器途中迟到的响应丢弃（卡片不污染新容器）。listPendingApprovals 内部已
+  // catch（网关不支持/超时静默降级），此处不抛错误条。
+  async function restorePendingApprovals(gen: number) {
+    if (gen !== containerGen || !gateway) return
+    try {
+      const cards = await gateway.listPendingApprovals()
+      if (gen !== containerGen || !gateway) return // 切容器途中迟到：丢弃
+      for (const c of cards) chat.addApproval(c)
+    } catch {
+      // 静默：实时 push 仍工作，不因补拉失败打扰用户
     }
   }
 
@@ -670,7 +688,10 @@ export function useChatConnection(status: ChatStatus) {
   }
 
   async function selectContainer(name: string) {
-    if (!name || chat.selectedContainer === name) return
+    // B0: 同名 early-return 仅当连接还活着（gateway 非空）才跳过——切页（unmount dispose 断网关）
+    // 后 store 残留 selectedContainer，remount 走本路径时必须重建连接，否则连接死而 UI 看似活着
+    // （send/resolveApproval 因 !gateway 静默 no-op，审批卡无人处理 → agent 卡死被网关 abort）。
+    if (!name || (chat.selectedContainer === name && gateway)) return
     const gen = ++containerGen // 每次切换自增，await 后据此丢弃过期响应
     chat.setSelectedContainer(name)
     // 立即停用旧连接 + 清空状态：避免旧 gateway 迟到帧/迟到响应污染新容器（codex P2 #5 同款）
@@ -805,12 +826,16 @@ export function useChatConnection(status: ChatStatus) {
   // T3 历史消息翻译（防腐层，issue #82）：网关 display-normalized 消息字段名「待实测」（对齐后端
   // _parse_history 透传策略），前端单点容错——role 归一 operator/user/human→user、其余→assistant；
   // text 主取 text、回退 content/message。历史消息为终态：streaming=false、无 tools、thinking 暂不剥离。
-  // 实测确认字段名后改此处即可。
+  // E1b: toolCall-only assistant 消息（生产实测：exec 审批无人处理 → 网关 stuck-session recovery
+  // abort run → 最后一条 assistant content=[thinking,toolCall×N] 无 text 块）→ 提取 text 为空，
+  // 若照原样渲染成空文本气泡（用户误以为回复丢失）。转译 toolCall 块为工具行（done 态）——
+  // 语义正确展示 agent 实际调过什么工具，而非空白气泡。
   function translateHistoryMessage(m: HistoryMessageDTO): Msg {
     // E1: 网关 history 消息 content 多态（user=string / assistant=[{type:text},{type:thinking}]，
     // ADR 0003）——复用 eventTranslate.extractMessageText（已处理 string/数组 content 并跳过
     // thinking 块），不再只认 string 导致 assistant 历史渲染成空泡。text 字段回退保留（旧透传 shape）。
     const text = extractMessageText(m) || (typeof m.text === 'string' ? m.text : '')
+    const tools = text === '' ? extractToolRows(m) : []
     return {
       role: historyRole(m.role),
       raw: text,
@@ -818,8 +843,30 @@ export function useChatConnection(status: ChatStatus) {
       thinking: '',
       thinkingOpen: false,
       streaming: false,
-      tools: [],
+      tools,
     }
+  }
+
+  // E1b: 从 assistant 消息 content 提取 toolCall 块 → 工具行（done 态）。仅当正文为空时调用
+  //（有正文则工具行为噪音）。toolCall 块字段：type/toolCallId/name/arguments（实测 jsonl）。
+  function extractToolRows(m: HistoryMessageDTO): ToolRow[] {
+    const content = (m as { content?: unknown }).content
+    if (!Array.isArray(content)) return []
+    const rows: ToolRow[] = []
+    for (const block of content) {
+      if (!block || typeof block !== 'object') continue
+      const b = block as Record<string, unknown>
+      if (b.type !== 'toolCall') continue
+      rows.push({
+        id: typeof b.toolCallId === 'string' ? b.toolCallId : typeof b.id === 'string' ? b.id : null,
+        name: typeof b.name === 'string' ? b.name : '',
+        state: 'done',
+        title: null,
+        input: b.arguments ?? null,
+        result: null,
+      })
+    }
+    return rows.filter((r) => r.name !== '') // 无名的 toolCall 块丢弃（0 信任）
   }
 
   function historyRole(role: unknown): 'user' | 'assistant' {

@@ -38,6 +38,7 @@ const { MockGatewayChat } = vi.hoisted(() => {
     send = vi.fn()
     listCommands = vi.fn()
     resolveApproval = vi.fn()
+    listPendingApprovals = vi.fn() // B0: 审批补拉（切页/断线恢复）
     start = vi.fn()
     stop = vi.fn()
     closeSocket = vi.fn() // P1-5: 连接期超时兜底主动关隧道
@@ -97,6 +98,7 @@ async function mountReady() {
   gw.send.mockResolvedValue(undefined)
   gw.deleteSession.mockResolvedValue(undefined)
   gw.resolveApproval.mockResolvedValue(undefined)
+  gw.listPendingApprovals.mockResolvedValue([]) // B0: 缺省无待补拉审批
   gw.fireReady() // openGateway 连接就绪
   await flushPromises() // selectContainer 续 listSessions + loadHistory
   return { w, gw }
@@ -320,6 +322,42 @@ describe('ChatView', () => {
     await flushPromises()
     // 恢复 pending：批准按钮重新可用
     expect(w.find('[data-test="approve-ap-3"]').attributes('disabled')).toBeUndefined()
+  })
+
+  // B0: 切页回来（unmount→remount）→ 重建隧道连接 + 补拉待处理审批卡。
+  // 流式中切页：agent 发起 exec 需审批（生产实测：exec 审批卡无人处理 → 卡 330s → 网关
+  // stuck-session recovery abort）。切页期间 WS 已断，网关 push 的 exec.approval.requested
+  // 收不到 → remount 后必须补拉，否则审批卡永远不出现、agent 卡死。
+  it('B0: 切页回来（unmount→remount）→ 重建隧道连接 + 补拉待处理审批卡', async () => {
+    const { w, gw } = await mountReady()
+    // 流式中切页：发送后 agent 卡在 exec 审批（实时卡在切页前出现，unmount 后消失）
+    await w.find('[data-test="input"]').setValue('录入论文')
+    await w.find('[data-test="send"]').trigger('click')
+    gw.fireFrame({ type: 'approval', id: 'ap-page', kind: 'exec', command: 'curl -L arxiv.pdf', sessionKey: null })
+    await nextTick()
+    expect(w.find('[data-test="approval-ap-page"]').exists()).toBe(true)
+    // 切页 = unmount → onBeforeUnmount dispose → gateway.stop()（网关侧断链）
+    w.unmount()
+    // 回页 = remount：store 残留 selectedContainer='demo' → 必须重建连接（而非残留死连接）
+    const w2 = mount(ChatView)
+    await flushPromises()
+    const gw2 = MockGatewayChat.last!
+    // 断言 1：连接已重建（新 GatewayChat 实例），而非残留 gw 的死连接
+    expect(gw2).not.toBe(gw)
+    expect(MockGatewayChat.instances).toHaveLength(2)
+    // 断言 2：remount 后补拉待处理审批（切页期间网关 push 的事件收不到）
+    gw2.listSessions.mockResolvedValue([SESSION])
+    gw2.getHistory.mockResolvedValue({ messages: [], hasMore: false, nextOffset: null })
+    gw2.listCommands.mockResolvedValue([])
+    gw2.listPendingApprovals.mockResolvedValue([
+      { type: 'approval', id: 'ap-page', kind: 'exec', command: 'curl -L arxiv.pdf', sessionKey: null },
+    ])
+    gw2.fireReady()
+    await flushPromises()
+    expect(gw2.listPendingApprovals).toHaveBeenCalled()
+    // 审批卡恢复渲染（幂等去重后仍有一张可回）
+    expect(w2.find('[data-test="approval-ap-page"]').exists()).toBe(true)
+    w2.unmount()
   })
 
   it('切容器清空审批卡', async () => {
@@ -938,6 +976,44 @@ describe('ChatView', () => {
     expect(streamText).toContain('我的问题') // user string content
     expect(streamText).toContain('回答内容') // assistant 数组 content → 复用 extractMessageText
     expect(streamText).not.toContain('内心') // thinking 块不渲染为正文
+  })
+
+  // E1b: abort 固化的 toolCall-only assistant 消息（生产实测：exec 审批卡无人处理 → 网关
+  // stuck-session recovery abort run → 最后一条 assistant content=[thinking,toolCall×3] 无 text
+  // 块）→ 不得渲染空白气泡（user 消息下出现空 assistant 气泡，用户误以为回复丢失）。
+  it('E1b: 历史 toolCall-only assistant 消息（abort 固化）→ 不渲染空白气泡', async () => {
+    const w = mount(ChatView)
+    await flushPromises()
+    const gw = MockGatewayChat.last!
+    gw.listSessions.mockResolvedValue([SESSION])
+    gw.getHistory.mockResolvedValue({
+      messages: [
+        { role: 'user', content: '能不能帮我录入一下这篇论文 https://arxiv.org/pdf/2605.20834' },
+        {
+          role: 'assistant',
+          content: [
+            { type: 'thinking', text: '好的，我需要先下载 PDF' },
+            { type: 'toolCall', id: 'call_1', name: 'wiki_search', arguments: { query: '2605.20834' } },
+            { type: 'toolCall', id: 'call_2', name: 'exec', arguments: { command: 'curl -L arxiv.pdf' } },
+            { type: 'toolCall', id: 'call_3', name: 'read', arguments: { path: '~/skills/ingest/SKILL.md' } },
+          ],
+        },
+      ],
+      hasMore: false,
+      nextOffset: null,
+    })
+    gw.listCommands.mockResolvedValue([])
+    gw.send.mockResolvedValue(undefined)
+    gw.fireReady()
+    await flushPromises()
+    const streamText = w.find('[data-test="stream"]').text()
+    expect(streamText).toContain('录入一下这篇论文') // user 消息正常渲染
+    // 不得渲染空白气泡：toolCall-only 消息渲染为工具行（done 态）而非空 assistant 气泡
+    const bubbles = w.findAll('.msg.assistant')
+    expect(bubbles.length).toBe(1) // 只有一个 assistant 消息（该 toolCall-only 消息）
+    expect(bubbles[0].text().trim()).not.toBe('') // 不得是空白气泡
+    expect(bubbles[0].find('[data-test="tool-line"]').exists()).toBe(true) // 渲染为工具行
+    expect(bubbles[0].text()).toContain('wiki_search') // 工具名可见（agent 实际调过什么）
   })
 
   it('E2: 断线时新建会话被守卫（不裸错误、不清 transcript）', async () => {
