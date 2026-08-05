@@ -46,6 +46,7 @@ export function makeFleetTest(
     llmApiKey: 'test-llm-key',
     publishHost: '127.0.0.1',
     healthHost: '127.0.0.1',
+    panelOrigin: 'http://127.0.0.1:18789', // #385 测试默认与网关 seed 一致
     reservedPorts: defaultReservedPorts(),
     encryptionKeys: DEV_ENCRYPTION_KEYS,
     ...overrides.config,

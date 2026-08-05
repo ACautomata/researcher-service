@@ -26,7 +26,7 @@ export interface ModelConfigWriter {
 
 // 模板写盘依赖面（收窄到所需字段，便于 server.ts 直接传 config.fleet；root 供 ConfigStore
 // 原子写——config 落 instances/<id>/config 独立目录，见 configStore.ts #366 修复说明）
-export type ModelConfigWriterDeps = Pick<FleetConfig, 'root' | 'templateJson' | 'llmApiKey'>
+export type ModelConfigWriterDeps = Pick<FleetConfig, 'root' | 'templateJson' | 'llmApiKey' | 'panelOrigin'>
 
 export class TemplateModelConfigWriter implements ModelConfigWriter {
   private readonly configStore: ConfigStore
@@ -43,7 +43,8 @@ export class TemplateModelConfigWriter implements ModelConfigWriter {
     // #366 codex 三轮 P1「升级路径」：旧代容器 fail-fast（见 ensureLegacyCompatible）。
     await this.ensureLegacyCompatible(id)
     const renderer = await this.ensureRenderer()
-    const merged = new ProviderConfigBuilder().build(renderer.renderDict(), providers)
+    // #385：allowedOrigins 强制含面板 origin（渲染产物与 create 路径同源强制点）
+    const merged = new ProviderConfigBuilder().build(renderer.renderDict(this.cfg.panelOrigin), providers)
     await this.configStore.write(name, id, JSON.stringify(merged, null, 2))
   }
 

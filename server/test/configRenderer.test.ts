@@ -81,3 +81,73 @@ describe('ConfigRenderer 强制 token 认证不变量 (Codex 第七轮 #6)', () 
     expect(out.gateway?.controlUi?.allowInsecureAuth).toBe(false)
   })
 })
+
+// #385 生产 Origin 接线：面板 origin 须在容器 gateway.controlUi.allowedOrigins 内（真网关 2026.7.1
+// 校验 WS Origin，PR #384 实测）——否则面板后端隧道连容器网关被 CONTROL_UI_ORIGIN_NOT_ALLOWED 拒。
+// deploy/openclaw.json 模板仅含 localhost/127.0.0.1 seed，面板 origin 由 env 注入 → 强制点必在
+// renderer（配置单一来源），与 allowInsecureAuth=false 同模式：追加/覆盖，不信模板值。
+describe('ConfigRenderer 强制 allowedOrigins 含面板 origin (#385)', () => {
+  it('模板已有 allowedOrigins → 面板 origin 追加保留（不重复、不覆盖既有条目）', () => {
+    const r = new ConfigRenderer(
+      JSON.stringify({
+        gateway: { controlUi: { allowedOrigins: ['http://localhost:18789'] } },
+      }),
+    )
+    const out = r.renderDict('https://panel.example.com')
+    expect(out.gateway?.controlUi?.allowedOrigins).toEqual([
+      'http://localhost:18789',
+      'https://panel.example.com',
+    ])
+  })
+
+  it('模板缺失 allowedOrigins → 建数组（仅面板 origin）', () => {
+    const r = new ConfigRenderer(JSON.stringify({ gateway: {} }))
+    const out = r.renderDict('https://panel.example.com')
+    expect(out.gateway?.controlUi?.allowedOrigins).toEqual(['https://panel.example.com'])
+  })
+
+  it('面板 origin 已在模板中 → 不重复追加', () => {
+    const r = new ConfigRenderer(
+      JSON.stringify({
+        gateway: { controlUi: { allowedOrigins: ['https://panel.example.com'] } },
+      }),
+    )
+    const out = r.renderDict('https://panel.example.com')
+    expect(out.gateway?.controlUi?.allowedOrigins).toEqual(['https://panel.example.com'])
+  })
+
+  it('模板 allowedOrigins 为非法形状（非数组）→ 重写为仅面板 origin（不静默丢不变量）', () => {
+    const r = new ConfigRenderer(
+      JSON.stringify({ gateway: { controlUi: { allowedOrigins: 'http://localhost' } } }),
+    )
+    const out = r.renderDict('https://panel.example.com')
+    expect(out.gateway?.controlUi?.allowedOrigins).toEqual(['https://panel.example.com'])
+  })
+
+  it('未传面板 origin（空串）→ 不动 allowedOrigins（旧 call 面保持模板原样）', () => {
+    const r = new ConfigRenderer(
+      JSON.stringify({
+        gateway: { controlUi: { allowedOrigins: ['http://localhost:18789'] } },
+      }),
+    )
+    const out = r.renderDict()
+    expect(out.gateway?.controlUi?.allowedOrigins).toEqual(['http://localhost:18789'])
+  })
+
+  it('强制 allowedOrigins 时 allowInsecureAuth=false 不变量保持', () => {
+    const r = new ConfigRenderer(JSON.stringify({ gateway: {} }))
+    const out = r.renderDict('https://panel.example.com')
+    expect(out.gateway?.controlUi?.allowInsecureAuth).toBe(false)
+    expect(out.gateway?.controlUi?.allowedOrigins).toEqual(['https://panel.example.com'])
+    // port/bind/token 不变量不受影响
+    expect(out.gateway?.port).toBe(GATEWAY_INTERNAL_PORT)
+    expect(out.gateway?.bind).toBe(GATEWAY_BIND)
+    expect(out.gateway?.auth?.token).toBe(GATEWAY_TOKEN_PLACEHOLDER)
+  })
+
+  it('模板已有 allowedOrigins 含面板 origin → render() 序列化产物含它（create 写盘路径）', () => {
+    const r = new ConfigRenderer(JSON.stringify({ gateway: {} }))
+    const out = JSON.parse(r.render('https://panel.example.com'))
+    expect(out.gateway.controlUi.allowedOrigins).toEqual(['https://panel.example.com'])
+  })
+})

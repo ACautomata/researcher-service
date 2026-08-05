@@ -227,6 +227,7 @@ describe('真网关配对闭环 smoke（#371-5 / #378）', () => {
       llmApiKey: process.env.LLM_API_KEY ?? 'smoke-dummy-key',
       publishHost: '127.0.0.1',
       healthHost: '127.0.0.1',
+      panelOrigin: 'http://127.0.0.1:18789', // 与容器 allowedOrigins 默认 seed 一致（配对 smoke 直连真网关）
       reservedPorts: defaultReservedPorts(),
       encryptionKeys: DEV_ENCRYPTION_KEYS,
     }

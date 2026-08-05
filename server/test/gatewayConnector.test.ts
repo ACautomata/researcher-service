@@ -166,3 +166,52 @@ describe('makeWsGatewayConnector（#337 M5 · P2-4 终态事件重放）', () =>
     }
   })
 })
+
+// #385 生产 Origin 接线：makeWsGatewayConnector 的 origin 参数（第三位）须作为 WS connect 的
+// Origin header 发出——真网关 2026.7.1 对 WS connect 校验 Origin 须在 gateway.controlUi.allowedOrigins
+// 内（默认 seed 不含面板 origin），否则 CONTROL_UI_ORIGIN_NOT_ALLOWED 拒连。
+describe('makeWsGatewayConnector origin 参数（#385）', () => {
+  it('传 origin → WS connect 携带该 Origin header', async () => {
+    let seen: string | undefined
+    const gserver = http.createServer()
+    const wss = new WebSocketServer({ noServer: true })
+    gserver.on('upgrade', (req, socket, head) => {
+      seen = req.headers.origin
+      wss.handleUpgrade(req, socket, head, (ws) => {
+        ws.on('message', () => {})
+      })
+    })
+    await new Promise<void>((r) => gserver.listen(0, '127.0.0.1', r))
+    const { port } = gserver.address() as AddressInfo
+    const url = `ws://127.0.0.1:${port}/`
+    try {
+      const connector = makeWsGatewayConnector(2000, 128 * 1024, 'https://panel.example.com')
+      const socket = await connector.connect(url)
+      expect(seen).toBe('https://panel.example.com')
+      socket.close()
+    } finally {
+      gserver.close()
+    }
+  })
+
+  it('不传 origin → 不带 Origin header（既有行为，Node ws 默认）', async () => {
+    let seen: string | undefined = 'sentinel'
+    const gserver = http.createServer()
+    const wss = new WebSocketServer({ noServer: true })
+    gserver.on('upgrade', (req, socket, head) => {
+      seen = req.headers.origin
+      wss.handleUpgrade(req, socket, head, () => {})
+    })
+    await new Promise<void>((r) => gserver.listen(0, '127.0.0.1', r))
+    const { port } = gserver.address() as AddressInfo
+    const url = `ws://127.0.0.1:${port}/`
+    try {
+      const connector = makeWsGatewayConnector()
+      const socket = await connector.connect(url)
+      expect(seen).toBeUndefined()
+      socket.close()
+    } finally {
+      gserver.close()
+    }
+  })
+})

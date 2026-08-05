@@ -21,6 +21,8 @@ export interface FleetConfig {
   readonly llmApiKey: string // 全面板共享 LLM_API_KEY
   readonly publishHost: string // 容器 gateway 端口宿主侧发布地址（127.0.0.1 / 0.0.0.0）
   readonly healthHost: string // 健康探测目标 host（与 WS 配对同源）
+  // 面板对外 origin（#385）：隧道连网关的 WS Origin + 容器 allowedOrigins 强制条目（生产必填）
+  readonly panelOrigin: string
   readonly reservedPorts: ReadonlySet<number> // 强制保留（默认含 18789）
   // 凭证加密密钥（AES-256-GCM；gateway token 真值不落盘，首个 active 加密、余仅解密供轮换）
   readonly encryptionKeys: readonly Buffer[]
