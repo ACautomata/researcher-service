@@ -9,7 +9,6 @@
 # PRAGMA user_version=1 作迁移位标记（对齐 SQLite 迁移惯例，供未来真实迁移使用）。
 set -e
 
-SCHEMA_CHECK='node:better-sqlite3-schema-check'
 SCHEMA_SCRIPT=$(cat <<'EOF'
 const D = require('better-sqlite3')
 const db = new D(process.env.DATABASE_URL.replace(/^file:/, ''))

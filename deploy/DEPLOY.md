@@ -106,7 +106,8 @@ python3 -c "import base64,os;print(base64.urlsafe_b64encode(os.urandom(32)).deco
 > 源路径在宿主侧不存在 → **Docker 自动建空目录** → gateway 读到目录而非配置文件 →
 > `missing gateway.mode` 崩溃循环（Restarting）→ 无端口监听 → 健康探测失败 unhealthy →
 > 配对/对话 502 → 最终 stop，全程无日志报错（生产 2026-08-01 实测）。`readFleetRoot` 对显式
-> 相对路径 fail-fast——挂载缺失时容器拒绝启动，健康门判红，不再静默坏到首次创建容器。
+> 相对路径 fail-fast——`/fleet` 挂载缺失时 server 仍正常启动（幂等落表不受影响），故障在
+> 首次创建容器时才暴露；compose 显式 pin `/fleet` 并挂载宿主 fleet 根是唯一正确配置。
 
 ## 回滚
 
