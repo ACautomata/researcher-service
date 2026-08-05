@@ -3,8 +3,9 @@
 // 连接生命周期 × runId 路由 × 消息投影的非响应式簇全在 useChatConnection（composable 闭包）；
 // 响应式投影（messages/approvals/sessions/commands/输入）在 chatStore（纯 mutation）；
 // 8 个展示组件全 props-in/emits-out 哑组件（ChatSidebar/ChatHeader/ChatStream/ChatComposer +
-// ChatMessageItem/ThinkingCard/ToolLine/ApprovalCard），7 slot 全开（msg-item/thinking/tool-line/
-// approvals/empty/slash-menu/banner），表现父注入、逻辑留宿主。
+// ChatMessageItem/ThinkingCard/ToolLine/ApprovalCard），6 slot 全开（msg-item/thinking/tool-line/
+// empty/slash-menu/banner——#399 起审批卡并入 ChatStream 合并时间线渲染，approvals slot 删除），
+// 表现父注入、逻辑留宿主。
 // 行为与拆分前一致：同 wire（隧道 + 官方协议机）、同 reconnect（4401 刷新重建/退避重连）、同 ping/pong。
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'

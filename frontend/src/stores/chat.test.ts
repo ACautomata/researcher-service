@@ -34,6 +34,30 @@ describe('chatStore 纯 mutation', () => {
     expect(chat.approvals[1].decision).toBe('unknown')
   })
 
+  it('addApproval 赋全局单调递增 seq（先到者小）；幂等去重不推进', () => {
+    const chat = useChatStore()
+    chat.addApproval({ id: 'a1', kind: 'exec', command: 'x', sessionKey: null })
+    chat.addApproval({ id: 'a2', kind: 'exec', command: 'y', sessionKey: 'sk-1' })
+    chat.addApproval({ id: 'a1', kind: 'exec', command: 'dup', sessionKey: null }) // 幂等：不新赋 seq
+    expect(chat.approvals.map((a) => a.seq)).toEqual([1, 2])
+  })
+
+  it('seqCounter 随切容器重置（与审批卡清空同生命周期）', () => {
+    const chat = useChatStore()
+    chat.addApproval({ id: 'a1', kind: 'exec', command: 'x', sessionKey: null })
+    chat.resetForContainer()
+    chat.addApproval({ id: 'a2', kind: 'exec', command: 'y', sessionKey: null })
+    expect(chat.approvals.map((a) => a.seq)).toEqual([1])
+  })
+
+  it('切会话不清空审批卡（留存按 sessionKey 过滤）→ seq 继续递增不撞序', () => {
+    const chat = useChatStore()
+    chat.addApproval({ id: 'old', kind: 'exec', command: 'x', sessionKey: 'sk-1' })
+    chat.resetForSession() // 只清消息/分页态，不碰审批卡
+    chat.addApproval({ id: 'fresh', kind: 'exec', command: 'y', sessionKey: null })
+    expect(chat.approvals.map((a) => a.seq)).toEqual([1, 2])
+  })
+
   it('recoverPendingApprovals：仅复位匹配卡（无 id → 全部）', () => {
     const chat = useChatStore()
     chat.addApproval({ id: 'a1', kind: 'exec', command: 'x', sessionKey: null })

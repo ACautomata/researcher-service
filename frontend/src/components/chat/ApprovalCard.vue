@@ -1,7 +1,6 @@
 <script setup lang="ts">
-// T06 权限审批卡（spec §9.4）：独立于 messages 的列表卡片——橙边待处理，处理后变淡显示结果。
-// 拆出 messages 是为不破坏流式锚定/finalizeLast（审查 #5）。props-in/emits-out 哑组件
-// （#316：#340 拆分边界）；resolve 由父注入（slot `approvals` 外）+ 本组件内置按钮发出。
+// T06 权限审批卡（spec §9.4）：橙边待处理，处理后变淡显示结果。props-in/emits-out 哑组件
+// （#316：#340 拆分边界）；resolve 由父注入（#399 起并入 ChatStream 合并时间线渲染）。
 import type { ApprovalItem } from '@/stores/chat'
 
 defineProps<{

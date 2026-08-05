@@ -1,8 +1,11 @@
 <script setup lang="ts">
 // 消息流（#316：#340 拆分边界，props-in/emits-out 哑组件）。
-// 渲染 messages（ChatMessageItem 注入 msg-item/thinking/tool-line slot）+ 审批卡列表
-// （ApprovalCard）+ 历史分页「加载更多」。审批卡经 approvals slot 全开，父可注入表现。
+// ADR 0009 / #399：messages + approvals 双列表经 mergeTimeline（纯函数）合并为单一时间线——
+// 审批卡按到达序号 seq 插入消息流（流式占位强制沉底），不再沉在全部消息底部聚团。
+// 渲染 messages（ChatMessageItem 注入 msg-item/thinking/tool-line slot）+ 审批卡（ApprovalCard）
+// + 历史分页「加载更多」。thinking+回答保持同气泡、工具行挂 run 内（不扁平化）。
 import type { Msg, ApprovalItem } from '@/stores/chat'
+import { isApprovalEntry, mergeTimeline } from '@/chat/timeline'
 import ChatMessageItem from '@/components/chat/ChatMessageItem.vue'
 import ApprovalCard from '@/components/chat/ApprovalCard.vue'
 
@@ -33,7 +36,6 @@ defineSlots<{
   'msg-item'?: (props: { msg: Msg }) => unknown
   thinking?: (props: { thinking: string; thinkingOpen: boolean }) => unknown
   'tool-line'?: (props: { tool: Msg['tools'][number] }) => unknown
-  approvals?: (props: { approvals: ApprovalItem[] }) => unknown
   empty?: (props: {}) => unknown
 }>()
 </script>
@@ -50,23 +52,21 @@ defineSlots<{
     >
       {{ historyLoading ? '加载中…' : '加载更多' }}
     </button>
-    <!-- msg-item slot：父注入消息表现（默认 ChatMessageItem）；thinking/tool-line 透传给叶子 -->
-    <template v-for="(m, i) in messages" :key="`m-${i}`">
-      <slot name="msg-item" :msg="m">
-        <ChatMessageItem :msg="m" />
+    <!-- ADR 0009：合并时间线单列表——审批卡按 seq 插入消息流（流式占位强制沉底） -->
+    <template v-for="(e, i) in mergeTimeline(messages, approvals)" :key="isApprovalEntry(e) ? `a-${e.id}` : `m-${i}`">
+      <!-- msg-item slot：父注入消息表现（默认 ChatMessageItem）；thinking/tool-line 透传给叶子 -->
+      <slot v-if="!isApprovalEntry(e)" name="msg-item" :msg="e">
+        <ChatMessageItem :msg="e" />
       </slot>
-    </template>
-    <!-- T06 权限审批卡（spec §9.4）：独立于 messages 的列表，橙边待处理，处理后变淡显示结果。 -->
-    <slot name="approvals" :approvals="approvals">
+      <!-- T06 权限审批卡（spec §9.4）：橙边待处理，处理后变淡显示结果 -->
       <ApprovalCard
-        v-for="a in approvals"
-        :key="a.id"
-        :approval="a"
+        v-else
+        :approval="e"
         :disconnected="disconnected"
         @resolve="onResolve"
         @toggle-detail="onToggleDetail"
       />
-    </slot>
+    </template>
     <slot name="empty" />
   </div>
 </template>

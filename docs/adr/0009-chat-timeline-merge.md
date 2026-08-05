@@ -17,7 +17,7 @@
 
 **双列表保留 + 渲染期纯函数合并为单一时间线**，审批卡按**全局单调到达序号** `seq` 插入；流式占位**强制沉底**；滚动用**范式 B（上滚让位）+ rAF 节流**。具体：
 
-1. **数据模型（store）**：`ApprovalItem` 增 `seq: number`；store 增全局 `seqCounter`，`addApproval` 时赋 `++seqCounter`；`seqCounter` 随 `resetForContainer`/`resetForSession` 重置（与审批清空同生命周期，编号干净）。`messages` 数组的 mutation **全部零改动**——几十处状态机代码不碰。
+1. **数据模型（store）**：`ApprovalItem` 增 `seq: number`；store 增全局 `seqCounter`，`addApproval` 时赋 `++seqCounter`；`seqCounter` **只随 `resetForContainer` 重置**（与审批卡清空同生命周期，编号干净）——**不随 `resetForSession` 重置**：切会话不清空审批卡（留存旧卡按 sessionKey 过滤），若重置会与留存旧卡撞序，`seq` 必须严格单调递增（#399 定案）。`messages` 数组的 mutation **全部零改动**——几十处状态机代码不碰。
 
 2. **渲染期合并（新纯函数模块 `frontend/src/chat/timeline.ts`）**：输入 `messages[]` + `approvals[]` → 输出单一有序条目列表。规则：
    - 消息按原序；审批卡按 `seq` 插入；
@@ -49,7 +49,7 @@
 
 ## 后果
 
-- **`frontend/src/stores/chat.ts`**：`ApprovalItem` 加 `seq`；新增 `seqCounter`（随容器/会话切换重置）；`addApproval` 赋 `seq`；`messages` mutation 零改动。
+- **`frontend/src/stores/chat.ts`**：`ApprovalItem` 加 `seq`；新增 `seqCounter`（随切容器重置；**不随切会话重置**——留存旧卡 + 新卡须 seq 严格单调不撞序）；`addApproval` 赋 `seq`；`messages` mutation 零改动。
 - **新增 `frontend/src/chat/timeline.ts`**（与 `eventTranslate.ts` 并列的纯翻译层）：合并排序 + 占位沉底 + 锚定规则，可单测。
 - **`frontend/src/components/chat/ChatStream.vue`**：模板从「消息 v-for + 审批 v-for」改成「合并时间线 v-for」；根元素 `.stream` 加范式 B 自动滚动（滚轮阈值检测 + rAF 节流 + `onUpdated` 跟随）。
 - **`frontend/src/chat/useChatConnection.ts`**：状态机零改动；`handleApproval` 不动（`seq` 在 store 内赋值）。
