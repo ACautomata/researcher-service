@@ -1,10 +1,12 @@
-// seam: 路由守卫决策——未认证分「确认失效踢登录」与「瞬态放行」（spec §9.1/§9.2 + #10）。
+// seam: 路由守卫决策——未认证分「确认失效踢登录」与「瞬态放行」；requiresAdmin 分「非 admin 踢回容器页」
+// （spec §9.1/§9.2 + #10 + #340-D #328）。
 import { describe, expect, it } from 'vitest'
 import { decideGuard } from '@/router/index'
 
-const authed = { isAuthenticated: true, refreshExhausted: false }
-const transient = { isAuthenticated: false, refreshExhausted: false }
-const exhausted = { isAuthenticated: false, refreshExhausted: true }
+const authed = { isAuthenticated: true, refreshExhausted: false, role: 'user' }
+const authedAdmin = { isAuthenticated: true, refreshExhausted: false, role: 'admin' }
+const transient = { isAuthenticated: false, refreshExhausted: false, role: '' }
+const exhausted = { isAuthenticated: false, refreshExhausted: true, role: '' }
 
 describe('decideGuard（守卫决策纯函数）', () => {
   it('受保护路由 + 已认证 → 放行', () => {
@@ -24,5 +26,28 @@ describe('decideGuard（守卫决策纯函数）', () => {
   it('公开路由 → 一律放行', () => {
     expect(decideGuard(false, transient)).toBeUndefined()
     expect(decideGuard(false, exhausted)).toBeUndefined()
+  })
+
+  // #340-D（#328）：requiresAdmin 路由——已认证非 admin → 重定向容器页；admin → 放行；
+  // 未认证仍按原守卫语义（确认失效踢登录 / 瞬态放行交刷新链）。
+  it('requiresAdmin + 已认证非 admin → 重定向容器页', () => {
+    expect(decideGuard(true, authed, true)).toEqual({ name: 'containers' })
+  })
+
+  it('requiresAdmin + admin → 放行', () => {
+    expect(decideGuard(true, authedAdmin, true)).toBeUndefined()
+  })
+
+  it('requiresAdmin + 确认失效 → 跳登录（先于角色判定）', () => {
+    expect(decideGuard(true, exhausted, true)).toEqual({ name: 'login' })
+  })
+
+  it('requiresAdmin + 瞬态 → 放行（交 401 刷新链，刷新后角色再定）', () => {
+    expect(decideGuard(true, transient, true)).toBeUndefined()
+  })
+
+  it('普通路由不受 requiresAdmin 影响（默认 false）', () => {
+    expect(decideGuard(true, authed)).toBeUndefined()
+    expect(decideGuard(true, authedAdmin)).toBeUndefined()
   })
 })

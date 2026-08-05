@@ -37,10 +37,10 @@ describe('auth.clearSession', () => {
   })
 })
 
-// 修复 BUG：注册无论输入什么都显示「账号已被注册」。
-// 根因：auth.register/login 旧实现只抛写死文案，丢弃 DRF 错误体（多为弱密码被拒）；
-// 现须透传后端真实校验消息。
-describe('auth register/login 错误透传', () => {
+// 修复 BUG：登录无论输入什么都显示「账号已被注册」。
+// 根因：auth.login 旧实现只抛写死文案，丢弃 DRF 错误体（多为弱密码被拒）；
+// 现须透传后端真实校验消息。#340：register action 已随公开注册关闭（#331 admin-only）移除。
+describe('auth login 错误透传', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
     vi.stubGlobal('fetch', vi.fn())
@@ -50,20 +50,20 @@ describe('auth register/login 错误透传', () => {
     vi.unstubAllGlobals()
   })
 
-  it('register 透传密码校验消息而非写死「注册失败」', async () => {
+  it('login 透传密码校验消息而非写死文案', async () => {
     ;(globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
       mockResp({ password: ['这个密码太常见了。'] }, 400),
     )
-    await expect(useAuthStore().register('weakuser', '12345678')).rejects.toThrow(
+    await expect(useAuthStore().login('weakuser', '12345678')).rejects.toThrow(
       '这个密码太常见了。',
     )
   })
 
-  it('register 透传重复用户名错误', async () => {
+  it('login 透传字段级错误', async () => {
     ;(globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
       mockResp({ username: ['该字段必须唯一。'] }, 400),
     )
-    await expect(useAuthStore().register('dup', 'strong-pass-1')).rejects.toThrow(
+    await expect(useAuthStore().login('dup', 'strong-pass-1')).rejects.toThrow(
       '该字段必须唯一。',
     )
   })
@@ -83,17 +83,18 @@ describe('auth register/login 错误透传', () => {
         throw new SyntaxError('Unexpected token <')
       },
     } as unknown as Response)
-    await expect(useAuthStore().register('u', 'p')).rejects.toThrow('请求失败（500）')
+    await expect(useAuthStore().login('u', 'p')).rejects.toThrow('请求失败（500）')
   })
 
-  it('register 成功后自动登录建立会话（happy path 未破坏）', async () => {
+  it('login 成功：token 就位 + role 消费（happy path 未破坏）', async () => {
     const auth = useAuthStore()
     const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>
     fetchMock
-      .mockResolvedValueOnce(mockResp({ id: 1, username: 'ok' }, 201)) // register 201
-      .mockResolvedValueOnce(mockResp({ access: 'tok-ok' }, 200)) // login 200
-    await auth.register('okuser', 'strong-pass-123')
+      .mockResolvedValueOnce(mockResp({ code: 0, message: 'ok', data: { access: 'tok-ok' } })) // login
+      .mockResolvedValueOnce(mockResp({ code: 0, message: 'ok', data: { role: 'user' } })) // fetchMe（#340-D）
+    await auth.login('okuser', 'strong-pass-123')
     expect(auth.token).toBe('tok-ok')
+    expect(auth.role).toBe('user') // #340-D：login 后 me 填充 role
     expect(fetchMock).toHaveBeenCalledTimes(2)
   })
 })

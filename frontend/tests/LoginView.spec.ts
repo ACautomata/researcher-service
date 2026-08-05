@@ -1,5 +1,7 @@
-// seam: 前端登录页组件 —— issue #37 P0 骨架。
+// seam: 前端登录页组件 —— issue #37 P0 骨架 + #340-A 强制改密（C1 首登改密）。
 // 出处 spec §9.2：本地账号登录表单 + 登录后存 access token。
+// #340-A：公开注册已随后端 admin-only 关闭（#311），登录页无注册模式；me.mustChangePassword=true
+// 的账号登录后进强制改密表单（旧+新+确认），改密成功撤销全部 refresh + 清 cookie 后须重登。
 import { createMemoryHistory, createRouter } from 'vue-router'
 import { mount, flushPromises } from '@vue/test-utils'
 import ElementPlus from 'element-plus'
@@ -68,41 +70,6 @@ describe('LoginView', () => {
     expect(w.text()).toContain('用户名或密码错误')
   })
 
-  it('注册失败显示真实校验原因（弱密码不再误报「账号已被注册」）', async () => {
-    // BUG 修复核心：旧实现任意注册失败都显示「用户名可能已存在」，
-    // 实则多为弱密码被拒。现须透传 DRF 密码校验消息，且不得再出现误导文案。
-    global.fetch = vi.fn().mockResolvedValue({
-      ok: false,
-      status: 400,
-      json: async () => ({ password: ['这个密码太常见了。'] }),
-    } as unknown as Response)
-    const w = mountLogin()
-    await w.find('[data-test="switch-register"]').trigger('click')
-    await w.find('input[type="text"]').setValue('weakuser')
-    await w.find('input[type="password"]').setValue('12345678')
-    await w.find('button').trigger('click')
-    await flushPromises()
-    expect(w.text()).toContain('这个密码太常见了。')
-    expect(w.text()).not.toContain('已存在')
-  })
-
-  it('网络异常（fetch reject）显示本地化兜底而非浏览器原始报错文本', async () => {
-    // codex P2：fetch 因后端不可达 reject 时浏览器抛 TypeError ("Failed to fetch"
-    // / "Load failed")。仅「已解析的 API 错误」可逐字透传；网络/意外错误须走
-    // 模式专属中文兜底,不应把英文浏览器消息直接展示给用户、也不能盖掉可重试提示。
-    const w = mountLogin()
-    // 切到注册模式,验证注册兜底
-    await w.find('[data-test="switch-register"]').trigger('click')
-    global.fetch = vi.fn().mockRejectedValue(new TypeError('Failed to fetch'))
-    await w.find('input[type="text"]').setValue('alice')
-    await w.find('input[type="password"]').setValue('pw123456')
-    await w.find('button').trigger('click')
-    await flushPromises()
-    expect(w.text()).toContain('注册失败，请稍后重试')
-    expect(w.text()).not.toContain('Failed to fetch')
-    expect(w.text()).not.toContain('Load failed')
-  })
-
   it('登录网络异常显示登录兜底而非浏览器原始报错文本', async () => {
     // codex P2 镜像用例：登录模式同根因,须显示「登录失败，请稍后重试」。
     const w = mountLogin()
@@ -115,16 +82,123 @@ describe('LoginView', () => {
     expect(w.text()).not.toContain('Load failed')
   })
 
-  it('registers a new account when switched to register mode (codex round-4 F5)', async () => {
-    // spec §9.2：登录页须含本地账号注册表单。切到注册模式提交应调 /register。
+  // #340-A 强制改密（C1 首登改密）：me.mustChangePassword=true → 登录后进改密表单，不跳容器页
+  it('mustChangePassword=true 登录后进强制改密表单（不跳容器页）', async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        code: 0,
+        message: 'ok',
+        data: { access: 'tk', role: 'user', mustChangePassword: true, maxContainers: 5 },
+      }),
+    } as unknown as Response)
     const w = mountLogin()
-    await w.find('[data-test="switch-register"]').trigger('click')
-    await w.find('input[type="text"]').setValue('newbie')
-    await w.find('input[type="password"]').setValue('newpass-1')
+    await w.find('input[type="text"]').setValue('alice')
+    await w.find('input[type="password"]').setValue('init-pass-1')
     await w.find('button').trigger('click')
     await flushPromises()
+    expect(w.text()).toContain('修改密码')
+    expect(w.text()).toContain('首次登录须先修改密码')
+  })
+
+  it('强制改密：两次新密码不一致 → 本地提示，不发改密请求', async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        code: 0,
+        message: 'ok',
+        data: { access: 'tk', role: 'user', mustChangePassword: true, maxContainers: 5 },
+      }),
+    } as unknown as Response)
+    const w = mountLogin()
+    await w.find('input[type="text"]').setValue('alice')
+    await w.find('input[type="password"]').setValue('init-pass-1')
+    await w.find('button').trigger('click')
+    await flushPromises()
+    const inputs = w.findAll('input[type="password"]')
+    await inputs[0].setValue('init-pass-1')
+    await inputs[1].setValue('new-pass-123')
+    await inputs[2].setValue('new-pass-456') // 确认不一致
+    await w.find('button').trigger('click')
+    await flushPromises()
+    expect(w.text()).toContain('两次输入的新密码不一致')
+    // 未调用改密端点
     const calls = (global.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls
-    expect(calls[0][0]).toBe('/api/v1/auth/register')
-    expect(JSON.parse(calls[0][1].body)).toEqual({ username: 'newbie', password: 'newpass-1' })
+    expect(calls.some((c: unknown[]) => c[0] === '/api/v1/auth/password/change')).toBe(false)
+  })
+
+  it('强制改密成功：调 password/change（old+new）→ 清会话 → 以新密码重登 → 跳容器页', async () => {
+    // 登录 → 改密 → 重登 三段 fetch
+    const fetchMock = vi
+      .fn()
+      // 1) login（mustChangePassword=true → 进改密模式）
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          code: 0,
+          message: 'ok',
+          data: { access: 'tk', role: 'user', mustChangePassword: true, maxContainers: 5 },
+        }),
+      } as unknown as Response)
+      // 2) me（fetchMe 在 login 后）
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          code: 0,
+          message: 'ok',
+          data: { role: 'user', mustChangePassword: true, maxContainers: 5 },
+        }),
+      } as unknown as Response)
+      // 3) password/change 成功（data=null）
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ code: 0, message: 'ok', data: null }),
+      } as unknown as Response)
+      // 4) 重登 login（mustChangePassword=false → 跳容器页）
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          code: 0,
+          message: 'ok',
+          data: { access: 'tk2', role: 'user', mustChangePassword: false, maxContainers: 5 },
+        }),
+      } as unknown as Response)
+      // 5) 重登后 fetchMe
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          code: 0,
+          message: 'ok',
+          data: { role: 'user', mustChangePassword: false, maxContainers: 5 },
+        }),
+      } as unknown as Response)
+    global.fetch = fetchMock
+    const w = mountLogin()
+    await w.find('input[type="text"]').setValue('alice')
+    await w.find('input[type="password"]').setValue('init-pass-1')
+    await w.find('button').trigger('click')
+    await flushPromises()
+    // 改密模式：3 个密码输入框（原/新/确认）
+    const inputs = w.findAll('input[type="password"]')
+    await inputs[0].setValue('init-pass-1')
+    await inputs[1].setValue('new-pass-123')
+    await inputs[2].setValue('new-pass-123')
+    await w.find('button').trigger('click')
+    await flushPromises()
+    const calls = (fetchMock as ReturnType<typeof vi.fn>).mock.calls
+    // 第 3 次调用 = password/change
+    const changeCall = calls[2]
+    expect(changeCall[0]).toBe('/api/v1/auth/password/change')
+    expect(JSON.parse(changeCall[1].body)).toEqual({
+      oldPassword: 'init-pass-1',
+      newPassword: 'new-pass-123',
+    })
+    // 重登调用
+    const relogin = calls[3]
+    expect(relogin[0]).toBe('/api/v1/auth/login')
+    expect(JSON.parse(relogin[1].body)).toEqual({ username: 'alice', password: 'new-pass-123' })
+    // 改密后 mustChangePassword 清 + 会话重建
+    expect(useAuthStore().token).toBe('tk2')
+    expect(useAuthStore().mustChangePassword).toBe(false)
   })
 })

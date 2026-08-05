@@ -54,6 +54,21 @@ function pairingStatus(name: string): string {
   return pairings.value[name]?.status ?? 'unpaired'
 }
 
+// #340-C：配对徽标（只读徽标 + 失败重试）——paired 绿、pending 黄、error 黄+重试入口、
+// unpaired 灰。status 文本 + el-tag type 双断言（测试/可访问性）。
+function pairingTagType(status: string): 'success' | 'warning' | 'info' {
+  if (status === 'paired') return 'success'
+  if (status === 'pending' || status === 'error') return 'warning'
+  return 'info'
+}
+
+function pairingLabel(status: string): string {
+  if (status === 'paired') return '已配对'
+  if (status === 'pending') return '配对中'
+  if (status === 'error') return '配对失败'
+  return '未配对'
+}
+
 async function pair(name: string): Promise<void> {
   try {
     const result = await triggerPair(name)
@@ -147,14 +162,31 @@ defineExpose({ confirmRemove, pair, pairingStatus })
       <el-table-column prop="health" label="健康" width="100" />
       <el-table-column prop="port" label="端口" width="80" />
       <el-table-column prop="image" label="镜像" />
-      <el-table-column label="配对" width="100">
+      <el-table-column label="配对" width="130">
         <template #default="{ row }">
-          <span :data-test="`pairing-${row.name}`">{{ pairingStatus(row.name) }}</span>
+          <el-tag
+            :type="pairingTagType(pairingStatus(row.name))"
+            size="small"
+            :data-test="`pairing-badge-${row.name}`"
+          >
+            {{ pairingLabel(pairingStatus(row.name)) }}
+          </el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="操作" width="220">
+      <el-table-column label="操作" width="260">
         <template #default="{ row }">
+          <!-- #340-C：配对失败（error）显式「重试配对」入口（黄色警示语义），其余态显式「配对」 -->
           <el-button
+            v-if="pairingStatus(row.name) === 'error'"
+            type="warning"
+            size="small"
+            :data-test="`retry-pair-${row.name}`"
+            @click="pair(row.name)"
+          >
+            重试配对
+          </el-button>
+          <el-button
+            v-else
             size="small"
             :data-test="`pair-${row.name}`"
             :disabled="pairingStatus(row.name) === 'paired'"

@@ -166,7 +166,7 @@ describe('ContainersView', () => {
     expect((listInstances as ReturnType<typeof vi.fn>).mock.calls.length).toBe(1)
   })
 
-  // ---------------------------- 配对状态（issue #40）----------------------------
+  // ---------------------------- 配对状态（issue #40 + #340-C 徽标）----------------------------
 
   it('loads pairing status from listInstances payload', async () => {
     ;(listInstances as ReturnType<typeof vi.fn>).mockResolvedValue([
@@ -175,6 +175,45 @@ describe('ContainersView', () => {
     const wrapper = mount(ContainersView, { global: { plugins: [createPinia()], stubs } })
     await flushPromises()
     expect(listInstances).toHaveBeenCalled()
+    expect((wrapper.vm as unknown as { pairingStatus: (n: string) => string }).pairingStatus('demo')).toBe('paired')
+  })
+
+  it('#340-C: 配对徽标按状态着色（paired→success/pending→warning/error→warning/unpaired→info）', async () => {
+    ;(listInstances as ReturnType<typeof vi.fn>).mockResolvedValue([
+      { ...SAMPLE, pairing: { status: 'paired' } },
+      { ...SAMPLE, name: 'pending-box', pairing: { status: 'pending', pairing_request_id: 'r1' } },
+      { ...SAMPLE, name: 'err-box', pairing: { status: 'error', detail: 'boom' } },
+      { ...SAMPLE, name: 'unpaired-box', pairing: { status: 'unpaired' } },
+    ])
+    const wrapper = mount(ContainersView, { global: { plugins: [createPinia()], stubs } })
+    await flushPromises()
+    const vm = wrapper.vm as unknown as {
+      pairingTagType: (s: string) => string
+      pairingLabel: (s: string) => string
+      pairingStatus: (n: string) => string
+    }
+    expect(vm.pairingTagType('paired')).toBe('success')
+    expect(vm.pairingTagType('pending')).toBe('warning')
+    expect(vm.pairingTagType('error')).toBe('warning')
+    expect(vm.pairingTagType('unpaired')).toBe('info')
+    expect(vm.pairingLabel('paired')).toBe('已配对')
+    expect(vm.pairingLabel('pending')).toBe('配对中')
+    expect(vm.pairingLabel('error')).toBe('配对失败')
+    expect(vm.pairingLabel('unpaired')).toBe('未配对')
+    expect(vm.pairingStatus('err-box')).toBe('error')
+  })
+
+  it('#340-C: 配对失败（error）行内重试 → triggerPair 重新触发', async () => {
+    ;(listInstances as ReturnType<typeof vi.fn>).mockResolvedValue([
+      { ...SAMPLE, pairing: { status: 'error', detail: 'handshake failed' } },
+    ])
+    ;(triggerPair as ReturnType<typeof vi.fn>).mockResolvedValue({ status: 'paired' })
+    const wrapper = mount(ContainersView, { global: { plugins: [createPinia()], stubs } })
+    await flushPromises()
+    await (wrapper.vm as unknown as { pair: (n: string) => Promise<void> }).pair('demo')
+    await flushPromises()
+    expect(triggerPair).toHaveBeenCalledWith('demo')
+    // 重试成功 → 状态翻转为 paired
     expect((wrapper.vm as unknown as { pairingStatus: (n: string) => string }).pairingStatus('demo')).toBe('paired')
   })
 

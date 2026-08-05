@@ -110,13 +110,14 @@ describe('router guard', () => {
         ok: true,
         json: async () => ({ access: 'fresh' }),
       } as unknown as Response)
+      .mockResolvedValueOnce({ ok: true } as unknown as Response) // fetchMe（#340-D，无 role 静默）
       .mockResolvedValueOnce({ ok: true } as unknown as Response)
     global.fetch = fetchMock
     const auth = useAuthStore()
     auth.token = `header.${expired}.sig`
     await auth.logout()
     expect(fetchMock).toHaveBeenNthCalledWith(
-      2,
+      3,
       '/api/v1/auth/logout',
       expect.objectContaining({ headers: { Authorization: 'Bearer fresh' } }),
     )
