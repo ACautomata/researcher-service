@@ -12,6 +12,7 @@ import { containerCreateSchema, CONTAINER_NAME_REGEX } from '../validation/schem
 import { fail } from '../envelope'
 import { getInstanceForUser, type Orchestrator } from '../containers/orchestrator'
 import type { ContainerSummary } from '../containers/readModel'
+import type { ContainerRuntime } from '../containers/runtime'
 import { AesGcmCrypto } from '../crypto'
 import { config } from '../config'
 
@@ -50,7 +51,16 @@ function assertValidContainerName(name: string): void {
   }
 }
 
-export function createContainersRouter(orch: Orchestrator): Router {
+// requestId 字符集（对齐 backend/chat/pairing.py _REQUEST_ID_RE）：网关 pending 请求 id 为
+// URL-safe 的字母/数字/._~-（RFC 3986 unreserved + ~）。非法 → 90002(data.requestId) 防注入
+// （dockerode exec 本就走 argv 数组无 shell，此为正则纵深防御 + 契约校验）。
+const REQUEST_ID_REGEX = /^[A-Za-z0-9_.~-]+$/
+
+// 容器内 approve CLI（对齐 backend/chat/pairing.py ExecPairingApprover）：gateway 据 requestId
+// 批准该 pending 设备配对请求（spec §8.1 宿主侧动作）。argv 数组直传 docker exec，无 shell 拼接。
+const OPENCLAW_APPROVE_CMD = ['openclaw', 'devices', 'approve']
+
+export function createContainersRouter(orch: Orchestrator, runtime: ContainerRuntime): Router {
   const router = Router()
   router.use(requireAuth, mustChangePasswordGate)
 
@@ -133,6 +143,53 @@ export function createContainersRouter(orch: Orchestrator): Router {
       ? new AesGcmCrypto(config.fleet.encryptionKeys).decrypt(inst.token)
       : inst.token
     ok(res, { bootstrapToken })
+  })
+
+  // POST /<name>/pairing/approve/:requestId —— ADR 0006 B2 / #371-1 后端 approve 编排。
+  // 协议机首连(bootstrap token) 遇 PAIRING_REQUIRED{requestId} → 前端自动调本端点；后端在容器内
+  // execSync `openclaw devices approve <requestId>`（ExecPairingApprover exec 语义：同步等命令完成、
+  // 非 0 退出码抛错——approve 须先落库 gateway 设备表，浏览器重握手才能 hello-ok 拿 deviceToken）。
+  // 成功后 Pairing 行 pending→paired + pairingRequestId 记账。校验顺序：name 非法 90002 → 归属 20040
+  // → requestId 非法 90002 → 幂等（已 paired 同 requestId → ok 不 exec，含 stopped 容器）→ 非 running
+  // 20046 → exec + 落库。
+  // deviceToken 不在本端点可得（网关经 hello-ok 直接下发浏览器，见 #371 流程图）→ 响应体仅 status、
+  // 无任何 token 字段；Pairing 行 deviceToken/privateKeyPem 恒为密文列（schema 不变量），本端点不改写。
+  router.post('/:name/pairing/approve/:requestId', async (req: Request, res: Response) => {
+    const name = req.params.name as string
+    assertValidContainerName(name)
+    // 归属前置（admin 全放行 / user 仅本人）：越权/不存在同码 20040 防探测（与 bootstrap-token 同款）。
+    const inst = await getInstanceForUser(req.prisma, req.user!, name)
+    const requestId = req.params.requestId as string
+    if (!REQUEST_ID_REGEX.test(requestId)) {
+      throw fail(CODE.VALIDATION_FAILED, undefined, { requestId: ['requestId 仅允许字母、数字及 ._~-'] })
+    }
+    // 幂等前置（Spec review #374）：同一 requestId 已 paired → 直接 ok，不重复 exec、不报错——即便容器
+    // 已 stopped（该 approve 早已完成，重复提交是幂等 ok 而非 20046）。网关是 approve 的事实源——并发
+    // 双发时第二个 exec 由 CLI 判 requestId 已消费而失败，前端重连自愈。
+    const existing = await req.prisma.pairing.findUnique({ where: { containerId: inst.id } })
+    if (existing?.status === 'paired' && existing.pairingRequestId === requestId) {
+      ok(res, { status: 'paired' })
+      return
+    }
+    // 非 running 同 bootstrap-token：approve CLI 须在容器内连本地 gateway，stopped/removing 无法 exec。
+    if (inst.status !== 'running') throw fail(CODE.CONTAINER_NOT_RUNNING)
+    // execSync 抛错（CLI 退出码非 0：requestId 已过期/无效、token 不匹配、网关断连）→ 包一层明确
+    // message（默认 90000 是「服务器内部错误」，对可重试的「requestId 失效」误导）；失败不落 paired。
+    // warn 保留底层错误供生产排查（exec 输出含容器名/CLI 退出码，不落响应体）。
+    try {
+      await runtime.execSync(name, [...OPENCLAW_APPROVE_CMD, requestId])
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.warn(`[containers] pairing approve exec failed: ${name} requestId=${requestId}`, (e as Error)?.message)
+      throw fail(CODE.INTERNAL, '容器内 approve 执行失败（requestId 无效或网关不可达）')
+    }
+    // 配对状态落库：pending→paired + pairingRequestId 记账；deviceId/scopesJson 保留（记账不丢）。
+    await req.prisma.pairing.upsert({
+      where: { containerId: inst.id },
+      create: { containerId: inst.id, status: 'paired', pairingRequestId: requestId },
+      update: { status: 'paired', pairingRequestId: requestId },
+    })
+    ok(res, { status: 'paired' })
   })
 
   return router

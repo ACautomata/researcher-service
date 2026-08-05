@@ -35,7 +35,7 @@ describe('containers REST (接缝 #2 + #334)', () => {
     const fl = makeFleetTest(ctx.prisma)
     const { createApp } = await import('../src/app')
     const supertest = (await import('supertest')).default
-    const app = createApp({ prisma: ctx.prisma, orchestrator: fl.orch })
+    const app = createApp({ prisma: ctx.prisma, orchestrator: fl.orch, runtime: fl.runtime })
     ctx.request = supertest(app) as unknown as TestContext['request']
   })
   afterAll(async () => {
@@ -186,7 +186,7 @@ describe('containers GET / scopes 防御解码 (Codex 第六轮 P2)', () => {
     const fl = makeFleetTest(ctx.prisma)
     const { createApp } = await import('../src/app')
     const supertest = (await import('supertest')).default
-    const app = createApp({ prisma: ctx.prisma, orchestrator: fl.orch })
+    const app = createApp({ prisma: ctx.prisma, orchestrator: fl.orch, runtime: fl.runtime })
     ctx.request = supertest(app) as unknown as TestContext['request']
   })
   afterAll(async () => {

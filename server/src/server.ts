@@ -18,6 +18,8 @@ async function main(): Promise<void> {
   const app = createApp({
     prisma,
     orchestrator: fleet.orchestrator,
+    // approve 端点 docker exec 通道（#374）：容器内 `openclaw devices approve <requestId>`。
+    runtime: fleet.runtime,
     // wiki compile（#335）：docker exec `openclaw wiki compile`，5s 去抖、best-effort。
     wiki: { compile: makeDockerCompile(fleet.runtime) },
     // models config 写盘（#336）：模板 + ConfigStore 原子写 instances/<id>/config/openclaw.json（#366）。
