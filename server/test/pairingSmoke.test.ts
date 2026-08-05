@@ -251,12 +251,14 @@ describe('真网关配对闭环 smoke（#371-5 / #378）', () => {
     expect(created.status).toBe('running')
 
     // 等容器网关 WS 就绪（docker-proxy 起 + 网关监听）：makeWsGatewayConnector 直连根路径。
-    // CI（共享 runner 与 containers-smoke 并行）容器首启 + 网关初始化慢 → 240s 预算；等待期间
-    // 容器退出（openclaw 启动崩溃，status 原值含 restarting/exited）→ 立即失败；预算耗尽仍未就绪
-    // → 附完整诊断（容器日志 + 最近探测错误 + 容器状态）定位根因，不盲等成无信息超时。
+    // CI（共享 runner 与 containers-smoke 并行）容器首启 + 网关初始化慢 → 轮询预算 360s
+    //（beforeAll 480s，给诊断留余量）。等待期间容器退出（openclaw 启动崩溃，status 原值含
+    // restarting/exited）→ 立即失败；每 30s 打印中间状态（容器状态 + 容器日志 tail）供 CI 观测；
+    // 预算耗尽 → 附完整诊断（容器日志 + 最近探测错误）定位根因，不盲等成无信息超时。
     const probeErrors: string[] = []
-    const deadline = Date.now() + 240_000
+    const deadline = Date.now() + 360_000
     let lastLive: string | null = null
+    let lastProgressLog = Date.now()
     // eslint-disable-next-line no-constant-condition
     while (true) {
       const live = await runtime.get(BOX).catch(() => null)
@@ -271,6 +273,19 @@ describe('真网关配对闭环 smoke（#371-5 / #378）', () => {
           // 容器日志不可得 → 仅报状态
         }
         throw new Error(`容器 ${BOX} 已退出（网关未就绪），status=${live.status}，docker logs:\n${logs}`)
+      }
+      if (Date.now() - lastProgressLog >= 30_000) {
+        lastProgressLog = Date.now()
+        let logs = ''
+        try {
+          logs = execFileSync('docker', ['logs', '--tail', '5', containerName(BOX)], { encoding: 'utf8' })
+        } catch {
+          // 容器日志不可得 → 仅报状态
+        }
+        // eslint-disable-next-line no-console
+        console.log(
+          `[pairingSmoke] 等待网关 WS 就绪 ${Math.round((Date.now() - (deadline - 360_000)) / 1000)}s: ${lastLive} 最近探测错误=${JSON.stringify(probeErrors)} 容器日志 tail:\n${logs.trim()}`,
+        )
       }
       try {
         const gw = await makeWsGatewayConnector(undefined, undefined, WS_ORIGIN).connect(
@@ -290,7 +305,7 @@ describe('真网关配对闭环 smoke（#371-5 / #378）', () => {
           // 容器日志不可得 → 仅报状态
         }
         throw new Error(
-          `网关 WS 240s 未就绪: ${BOX} lastLive=${lastLive} 最近探测错误=${JSON.stringify(probeErrors)} docker logs:\n${logs}`,
+          `网关 WS 360s 未就绪: ${BOX} lastLive=${lastLive} 最近探测错误=${JSON.stringify(probeErrors)} docker logs:\n${logs}`,
         )
       }
       await new Promise((r) => setTimeout(r, 1000))
@@ -324,7 +339,9 @@ describe('真网关配对闭环 smoke（#371-5 / #378）', () => {
     const gen = generateIdentity()
     identity = gen.identity
     storedToken = null
-  }, 240_000)
+    // beforeAll 480s：CI 慢 runner 上容器创建 + 网关就绪可超 4 分钟，须给 360s 轮询预算 + 诊断留余量
+    //（vitest hook timeout 无诊断会吞掉超时原因）
+  }, 480_000)
 
   afterAll(async () => {
     // 关隧道/HTTP（terminate 全部活动 WS 防 close 挂起）。server 可能未创建（beforeAll 中途失败）：
