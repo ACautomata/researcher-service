@@ -241,8 +241,13 @@ export class FleetCommand {
             // provision 只在目录首次创建时执行（bind 冲突重试复用已 provision 的 home）
             await this.deps.provisioner.provision(home)
           }
-          // config 原子写（tmp + chmod 0644 + rename），create 无 torn/partial 风险
-          await this.deps.configStore.write(inst.name, inst.id, (await this.ensureRenderer()).render())
+          // config 原子写（tmp + chmod 0644 + rename），create 无 torn/partial 风险；
+          // #385：allowedOrigins 强制含面板 origin（隧道 Origin 校验 + 生产 ChatView 开箱可聊）
+          await this.deps.configStore.write(
+            inst.name,
+            inst.id,
+            (await this.ensureRenderer()).render(this.deps.config.panelOrigin),
+          )
           // 取消检查点（render 后、run 前——覆盖随后 docker run / image pull 阻塞 IO 前的最后窗口）
           if (this.cancel.isCancelled(name)) {
             await this.finalizeFailedCreate(name, instanceDir, current, runAttempted, preexisting, directoryCreated, preserveErrorRow, new InstanceBusy(name))

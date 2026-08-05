@@ -12,7 +12,7 @@ interface OpenClawConfig {
     port?: number
     bind?: string
     auth?: { token?: string; mode?: string; [k: string]: unknown }
-    controlUi?: { allowInsecureAuth?: boolean; [k: string]: unknown }
+    controlUi?: { allowInsecureAuth?: boolean; allowedOrigins?: string[]; [k: string]: unknown }
     [k: string]: unknown
   }
   [k: string]: unknown
@@ -29,6 +29,35 @@ export function assertPlainObject(v: unknown, field: string): asserts v is Recor
   }
 }
 
+// #385 生产 Origin 接线：面板 origin 须在容器 gateway.controlUi.allowedOrigins 内（真网关 2026.7.1
+// 对 WS connect 校验 Origin，PR #384 实测）——否则面板后端隧道连容器网关被
+// CONTROL_UI_ORIGIN_NOT_ALLOWED 拒。deploy/openclaw.json 模板仅含 localhost/127.0.0.1 默认 seed，
+// 面板 origin 未知（env 注入）→ 强制点必在 renderer（配置单一来源），与 allowInsecureAuth=false
+// 同模式：追加/覆盖，不信模板值。
+function enforceAllowedOrigins(
+  controlUi: Record<string, unknown>,
+  panelOrigin: string,
+): string[] {
+  const origins = controlUi.allowedOrigins
+  if (origins === undefined) {
+    const created = [panelOrigin]
+    controlUi.allowedOrigins = created
+    return created
+  }
+  // 非数组（坏模板形状）→ 弃用重写为仅面板 origin（renderer 是安全不变量强制点，不静默丢条目）
+  if (!Array.isArray(origins)) {
+    const created = [panelOrigin]
+    controlUi.allowedOrigins = created
+    return created
+  }
+  // 追加保留：仅追加配置的面板 origin（模板已有则不重复）。非字符串条目（坏模板形状）一并
+  // 丢弃——allowedOrigins 契约是字符串数组，非字符串条目网关侧语义未定义，renderer 不代答。
+  const list = origins.filter((o): o is string => typeof o === 'string')
+  if (!list.includes(panelOrigin)) list.push(panelOrigin)
+  controlUi.allowedOrigins = list
+  return list
+}
+
 export class ConfigRenderer {
   private readonly template: OpenClawConfig
 
@@ -41,11 +70,13 @@ export class ConfigRenderer {
     if (gateway !== undefined) assertPlainObject(gateway, 'OPENCLAW_TEMPLATE_JSON (gateway)')
     const auth = (gateway as { auth?: unknown } | undefined)?.auth
     if (auth !== undefined) assertPlainObject(auth, 'OPENCLAW_TEMPLATE_JSON (gateway.auth)')
+    const controlUi = (gateway as { controlUi?: unknown } | undefined)?.controlUi
+    if (controlUi !== undefined) assertPlainObject(controlUi, 'OPENCLAW_TEMPLATE_JSON (gateway.controlUi)')
     this.template = parsed as OpenClawConfig
   }
 
-  // 渲染并强制 spec 安全不变量（port/bind/token），返回 dict（供 ProviderConfigBuilder 合并）
-  renderDict(): OpenClawConfig {
+  // 渲染并强制 spec 安全不变量（port/bind/token/allowedOrigins），返回 dict（供 ProviderConfigBuilder 合并）
+  renderDict(panelOrigin = ''): OpenClawConfig {
     const cfg = structuredClone(this.template)
     const gateway = (cfg.gateway ??= {})
     gateway.port = GATEWAY_INTERNAL_PORT
@@ -58,10 +89,13 @@ export class ConfigRenderer {
     auth.mode = 'token'
     const controlUi = (gateway.controlUi ??= {})
     controlUi.allowInsecureAuth = false
+    // #385：allowedOrigins 含面板 origin（模板已有 → 追加保留；缺失/非数组 → 建/重写）。空串 = 未配置
+    //（旧 call 面/模板单元测不传）→ 不强制，保持模板原样。
+    if (panelOrigin !== '') enforceAllowedOrigins(controlUi, panelOrigin)
     return cfg
   }
 
-  render(): string {
-    return JSON.stringify(this.renderDict(), null, 2)
+  render(panelOrigin = ''): string {
+    return JSON.stringify(this.renderDict(panelOrigin), null, 2)
   }
 }

@@ -41,7 +41,7 @@ function makeModelsFleet(): { fleetRoot: string; writer: ModelConfigWriter } {
     ),
   )
   // root 与 templateDir 同值即可（ConfigStore 只用 root 拼 home 路径，不读 templateDir）
-  const cfg = { root: fleetRoot, templateJson, llmApiKey: 'test-llm-key' }
+  const cfg = { root: fleetRoot, templateJson, llmApiKey: 'test-llm-key', panelOrigin: 'http://127.0.0.1:18789' }
   return { fleetRoot, writer: new TemplateModelConfigWriter(cfg) }
 }
 
@@ -674,6 +674,7 @@ describe('models REST（接缝 #2 + #336）', () => {
       root: fleetRoot,
       templateJson: badTemplate,
       llmApiKey: 'test-llm-key',
+      panelOrigin: 'http://127.0.0.1:18789',
     })
     const saved = realWriter
     realWriter = badWriter
@@ -699,6 +700,7 @@ describe('models REST（接缝 #2 + #336）', () => {
       root: fleetRoot,
       templateJson: path.join(fleetRoot, 'no-such-template.json'),
       llmApiKey: 'test-llm-key',
+      panelOrigin: 'http://127.0.0.1:18789',
     })
     const saved = realWriter
     realWriter = missingWriter

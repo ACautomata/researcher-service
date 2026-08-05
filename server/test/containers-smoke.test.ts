@@ -88,6 +88,7 @@ describe('containers 集成 smoke（真 docker daemon）', () => {
       llmApiKey: process.env.LLM_API_KEY ?? 'smoke-dummy-key',
       publishHost: '127.0.0.1',
       healthHost: '127.0.0.1',
+      panelOrigin: 'http://127.0.0.1:18789',
       reservedPorts: defaultReservedPorts(),
       encryptionKeys: DEV_ENCRYPTION_KEYS,
     }

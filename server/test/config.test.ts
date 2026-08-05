@@ -107,6 +107,8 @@ describe('JWT secret strength env (slice config)', () => {
       // 第六轮 P2：production 还校验 OPENCLAW_TEMPLATE_DIR（须存在可读目录）。stub process.cwd()
       // 满足校验，隔离 JWT_SECRET 变量（同上理由）。
       vi.stubEnv('OPENCLAW_TEMPLATE_DIR', process.cwd())
+      // #385：production 还校验 PANEL_PUBLIC_ORIGIN（缺省 fail-fast）——提供合法值隔离本变量。
+      vi.stubEnv('PANEL_PUBLIC_ORIGIN', 'https://panel.example.com')
     }
     try {
       const { config } = await import('../src/config')
@@ -285,6 +287,8 @@ describe('production template dir (slice config)', () => {
       // 否则放行用例会因缺其它必填被误判 THREW（同 loadSecret 模式）。
       vi.stubEnv('JWT_SECRET', 's'.repeat(32))
       vi.stubEnv('CREDENTIAL_ENCRYPTION_KEYS', Buffer.alloc(32, 0x01).toString('base64'))
+      // #385：隔离 panelOrigin 变量（同 loadSecret 模式）。
+      vi.stubEnv('PANEL_PUBLIC_ORIGIN', 'https://panel.example.com')
     }
     if (dir === undefined) delete process.env.OPENCLAW_TEMPLATE_DIR
     else vi.stubEnv('OPENCLAW_TEMPLATE_DIR', dir)
@@ -339,6 +343,8 @@ describe('production fleet root (slice config)', () => {
       vi.stubEnv('JWT_SECRET', 's'.repeat(32))
       vi.stubEnv('CREDENTIAL_ENCRYPTION_KEYS', Buffer.alloc(32, 0x01).toString('base64'))
       vi.stubEnv('OPENCLAW_TEMPLATE_DIR', process.cwd())
+      // #385：隔离 panelOrigin 变量（同 loadTemplateDir 模式）。
+      vi.stubEnv('PANEL_PUBLIC_ORIGIN', 'https://panel.example.com')
     }
     if (root === undefined) delete process.env.OPENCLAW_FLEET_ROOT
     else vi.stubEnv('OPENCLAW_FLEET_ROOT', root)
@@ -405,5 +411,86 @@ describe('fleet gateway WS scheme env (slice config, F2)', () => {
 
   it('非法 http → fail-fast（不再静默拼出坏 URL）', async () => {
     expect(await loadHealthScheme('http')).toBe('THREW')
+  })
+})
+
+// #385 生产 Origin 接线：PANEL_PUBLIC_ORIGIN —— 后端隧道连容器网关的 WS Origin + 容器
+// allowedOrigins 强制条目（真网关 2026.7.1 校验 Origin，PR #384 实测）。生产缺省/非法 → 启动期
+// fail-fast（对齐 readFleetRoot/LLM_API_KEY 前置校验模式）——缺配时 ChatView 对真网关
+// CONTROL_UI_ORIGIN_NOT_ALLOWED 拒连，且容器配置渲染须在 create 前就知道该值。
+describe('panel public origin env (slice config, #385)', () => {
+  async function loadPanelOrigin(opts: {
+    env?: string
+    origin?: string | undefined
+  }): Promise<string | 'THREW'> {
+    vi.resetModules()
+    const { env = 'production', origin } = opts
+    vi.stubEnv('NODE_ENV', env)
+    if (env === 'production') {
+      // 隔离 panelOrigin 变量：提供其余生产必填，否则放行用例被误判 THREW（同 loadTemplateDir 模式）。
+      vi.stubEnv('JWT_SECRET', 's'.repeat(32))
+      vi.stubEnv('CREDENTIAL_ENCRYPTION_KEYS', Buffer.alloc(32, 0x01).toString('base64'))
+      vi.stubEnv('OPENCLAW_TEMPLATE_DIR', process.cwd())
+    }
+    if (origin === undefined) delete process.env.PANEL_PUBLIC_ORIGIN
+    else vi.stubEnv('PANEL_PUBLIC_ORIGIN', origin)
+    try {
+      const { config } = await import('../src/config')
+      return config.fleet.panelOrigin
+    } catch (e) {
+      // fail-fast：错误消息须指向该 env（验收：生产缺省/非法 → 启动期 fail-fast 含 env 名）
+      if (env === 'production') expect((e as Error).message).toContain('PANEL_PUBLIC_ORIGIN')
+      return 'THREW'
+    } finally {
+      vi.unstubAllEnvs()
+    }
+  }
+
+  it('生产缺省 → fail-fast（错误消息指向 PANEL_PUBLIC_ORIGIN）', async () => {
+    expect(await loadPanelOrigin({ origin: undefined })).toBe('THREW')
+  })
+
+  it('生产非 URL 值 → fail-fast', async () => {
+    expect(await loadPanelOrigin({ origin: 'panel.example.com' })).toBe('THREW')
+  })
+
+  it('生产非法协议 ftp:// → fail-fast（须 http/https，WS Origin 语义）', async () => {
+    expect(await loadPanelOrigin({ origin: 'ftp://panel.example.com' })).toBe('THREW')
+  })
+
+  it('生产合法 https origin → 放行并规范化（去 path/query）', async () => {
+    expect(await loadPanelOrigin({ origin: 'https://panel.example.com' })).toBe(
+      'https://panel.example.com',
+    )
+  })
+
+  it('生产带 path 的 origin → 规范化为裸 origin（Origin header 形态）', async () => {
+    expect(await loadPanelOrigin({ origin: 'https://panel.example.com/some/path?q=1' })).toBe(
+      'https://panel.example.com',
+    )
+  })
+
+  it('生产带端口的 origin → 保留端口', async () => {
+    expect(await loadPanelOrigin({ origin: 'http://panel.example.com:8080' })).toBe(
+      'http://panel.example.com:8080',
+    )
+  })
+
+  it('dev 缺省 → 127.0.0.1:18789（与网关默认 seed 一致，本地零配置）', async () => {
+    expect(await loadPanelOrigin({ env: 'development', origin: undefined })).toBe(
+      'http://127.0.0.1:18789',
+    )
+  })
+
+  it('dev 非法值 → 回退默认不 fail-fast（本地调试不受影响）', async () => {
+    expect(await loadPanelOrigin({ env: 'development', origin: 'not a url' })).toBe(
+      'http://127.0.0.1:18789',
+    )
+  })
+
+  it('dev 合法自定义 origin → 保留', async () => {
+    expect(await loadPanelOrigin({ env: 'development', origin: 'http://localhost:5173' })).toBe(
+      'http://localhost:5173',
+    )
   })
 })

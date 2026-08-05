@@ -146,6 +146,44 @@ function readFleetRoot(): string {
   return raw ?? fallback
 }
 
+// PANEL_PUBLIC_ORIGIN（#385 生产 Origin 接线）：面板对外的 origin（浏览器经它访问面板），后端
+// 隧道连容器网关时作为 WS Origin header 携带，且须在容器 openclaw.json 的
+// gateway.controlUi.allowedOrigins 内（真网关 2026.7.1 实测校验，PR #384）。生产缺省/非法 →
+// fail-fast（对齐 readTemplateDir/readSecret 前置校验模式）——缺配时 ChatView 对真网关
+// CONTROL_UI_ORIGIN_NOT_ALLOWED 拒连，且容器配置渲染须在 create 前就知道该值。dev 默认
+// 127.0.0.1:18789（与网关默认 seed 一致，本地零配置）。URL 规范化：取 new URL().origin
+// （去掉 path/query），保证 Origin header 与 allowedOrigins 条目形态一致。
+function readPanelOrigin(): string {
+  const raw = process.env.PANEL_PUBLIC_ORIGIN
+  const fallback = 'http://127.0.0.1:18789'
+  const value = raw ?? fallback
+  let url: URL
+  try {
+    url = new URL(value)
+  } catch {
+    if (process.env.NODE_ENV === 'production') {
+      throw new Error(
+        `PANEL_PUBLIC_ORIGIN 非法（须为 http(s)://<host>[:<port>] 完整 URL，如 https://panel.example.com）: ${JSON.stringify(raw)}`,
+      )
+    }
+    return fallback
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    if (process.env.NODE_ENV === 'production') {
+      throw new Error(
+        `PANEL_PUBLIC_ORIGIN 协议非法（须 http/https，WS Origin 语义）: ${JSON.stringify(raw)}`,
+      )
+    }
+    return fallback
+  }
+  if (process.env.NODE_ENV === 'production' && raw === undefined) {
+    throw new Error(
+      'PANEL_PUBLIC_ORIGIN 必须在生产环境显式提供（面板对外 origin，如 https://panel.example.com；隧道连网关 + 容器 allowedOrigins 依赖它）',
+    )
+  }
+  return url.origin
+}
+
 export const config = {
   jwtSecret: readSecret(),
   accessTtl: process.env.ACCESS_TOKEN_TTL ?? '5m',
@@ -184,6 +222,8 @@ export const config = {
       publishHost: process.env.OPENCLAW_FLEET_PORT_BIND_HOST ?? '127.0.0.1',
       // 健康探测目标 host（与 WS 配对同源）
       healthHost: process.env.OPENCLAW_FLEET_WS_HOST ?? '127.0.0.1',
+      // 面板对外 origin（#385）：隧道连网关的 WS Origin + 容器 allowedOrigins 强制条目（生产必填）
+      panelOrigin: readPanelOrigin(),
       // 容器网关 WS 传输 scheme（ws/wss；生产 TLS 后切 wss，readHealthScheme 校验）
       healthScheme: readHealthScheme(),
       // 凭证加密密钥（gateway token 落盘密文；生产 CREDENTIAL_ENCRYPTION_KEYS 必填，dev 固定密钥）

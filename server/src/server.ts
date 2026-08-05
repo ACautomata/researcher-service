@@ -6,8 +6,7 @@ import { config } from './config'
 import { assembleFleet } from './containers/fleetAssembly'
 import { makeDockerCompile } from './wiki/compile'
 import { TemplateModelConfigWriter } from './models/configWriter'
-import { createTunnelServer } from './chat/tunnel'
-import { makeWsGatewayConnector } from './chat/gatewayConnector'
+import { assembleTunnelServer } from './chat/tunnelAssembly'
 import './types'
 
 async function main(): Promise<void> {
@@ -29,9 +28,11 @@ async function main(): Promise<void> {
   // M0 同进程单端口分流：createServer(expressApp) + server.on('upgrade') 分流。
   // M5 隧道（#337 · ADR 0006）：/ws/chat/ 由隧道接管（JWT subprotocol 握手 + 归属门 + 原始帧透传
   // 到容器网关）；其余 upgrade 请求拒绝（避免裸挂导致悬空连接）。
-  const tunnel = createTunnelServer({
+  const tunnel = assembleTunnelServer({
     prisma,
-    connectGateway: makeWsGatewayConnector(),
+    // #385：隧道连容器网关携带面板 origin（生产 PANEL_PUBLIC_ORIGIN；真网关 2026.7.1 校验
+    // Origin 须在容器 allowedOrigins 内——该值同时由 ConfigRenderer 强制进容器 openclaw.json）。
+    panelOrigin: config.fleet.panelOrigin,
     gatewayHost: config.fleet.healthHost,
     gatewayScheme: config.fleet.healthScheme,
   })
