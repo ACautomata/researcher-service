@@ -16,7 +16,7 @@ import {
 } from '@openclaw/gateway-protocol/connect-error-details'
 import { createPanelTunnelSocket } from './tunnelSocket'
 import { ChatEventTranslator, type ChatFrame, type GatewayEventFrame } from './eventTranslate'
-import { NO_RETRY_CLOSE_CODES } from './closeCodes'
+import { NO_RETRY_CLOSE_CODES, WS_GATEWAY_UNAVAILABLE } from './closeCodes'
 
 export type { ChatFrame, GatewayEventFrame } from './eventTranslate'
 
@@ -54,8 +54,8 @@ export interface GatewayChatHandlers {
   // 连接关闭（隧道/网关 close code；4401 认证失败 / 4404 容器归属拒绝 / 4402 网关不可达 /
   // 4403 强制改密 / 其他传输断开）。retry = 协议机是否将继续自动重连（D2）：
   //   - true：协议机退避重连中，UI 显示「自动重连中…」
-  //   - false：协议机已决策不再重连（非恢复错误 / 连续失败 give-up），UI 应如实提示手动重连，
-  //     而非继续谎报「自动重连中…」
+  //   - false：协议机已决策不再重连（非恢复错误 / 连续失败 give-up / #376 4402 预算超限），UI 应
+  //     如实提示手动重连，而非继续谎报「自动重连中…」
   // pairingRequired = 本次关闭是否因网关 PAIRING_REQUIRED（未配对）——UI 应提示先完成设备配对
   onClose: (code: number, reason: string, retry: boolean, pairingRequired?: boolean) => void
   // 连接级错误（非 run 级）：如 handshake 超时、socket 工厂失败
@@ -110,6 +110,7 @@ const REQUEST_TIMEOUT_MS = 30_000
 const HANDSHAKE_TIMEOUT_MS = 10_000
 // F2: 连续重连失败阈值——超过即停止自动重连转手动（防无限空转；协议机 RetrySupervisor 的
 // maxAttempts 恒 Infinity 无 give-up，只能前端计数）。
+// #376: 该阈值同时是 4402 网关不可达重试预算的上限（独立计数器，见 gatewayUnavailableCount）。
 const MAX_RECONNECT_FAILURES = 5
 // 沉默看门狗（对齐已删 ws.ts 的 60s 静默超时）：黑洞链路（Wi-Fi 漫游无 RST）下浏览器 WS 不触发
 // onclose、协议机不重连。onActivity 每次收到网关帧刷新 lastActivityAt；超过 SILENCE_TIMEOUT_MS
@@ -156,6 +157,13 @@ export function createGatewayChat(params: CreateGatewayChatParams): GatewayChat 
   // 故障、不消耗 give-up 预算。反向：crash-loop 型（hello 即崩，存活极短）每次握手成功不得归零
   // ——否则永远到不了 give-up，无限重连空转（违背 #369「退避重连空转」目标）。
   let consecutiveFailures = 0
+  // #376: 4402 网关不可达重试预算——独立于通用传输失败计数（consecutiveFailures）。容器网关不可达
+  //（stopped/重启中/端口不通）是「容器恢复前重试无益」的信号：连续 4402 达预算 → 停自动重连 +
+  // ChatView 提示「容器网关不可用」。与网络抖动（1006 等）预算互相独立——抖动不消耗 4402 预算、
+  // 反之亦然（否则偶发断网会让容器恢复后的自动重连提前 give-up）。PAIRING_REQUIRED / 4401/4403/4404
+  //（非传输问题）在 resolveClose 上方分支先行拦截，不消耗本预算。
+  // 手动重连 / 切换容器 = ChatView openGateway 新建 GatewayChat 实例（全新闭包）→ 预算随之重置。
+  let gatewayUnavailableCount = 0
   // 跨连接的上次 hello-ok 时刻——仅供 onHello 归零计数时的 crash-loop 判定（距上次 hello ≥阈值
   // 才归零，hello 即崩的 crash-loop 不归零）。不用于 close 计费（见 thisConnHelloAt）。
   let lastHelloAt = 0
@@ -227,8 +235,15 @@ export function createGatewayChat(params: CreateGatewayChatParams): GatewayChat 
       // 后 lastHelloAt 永久存在，此后无 hello 的连续重连失败恒 stable=true、永不 give-up。
       const stable = thisConnHelloAt !== 0 && Date.now() - thisConnHelloAt >= STABLE_CONNECTION_MS
       if (!stable) {
-        consecutiveFailures++
-        if (consecutiveFailures >= MAX_RECONNECT_FAILURES) return { retry: false, notify: true }
+        // #376: 4402 网关不可达走独立预算（容器恢复前重试无益，达预算即提示「容器网关不可用」）；
+        // 其余传输失败（1006 等）走通用预算——两者互不干扰。
+        if (context.code === WS_GATEWAY_UNAVAILABLE) {
+          gatewayUnavailableCount++
+          if (gatewayUnavailableCount >= MAX_RECONNECT_FAILURES) return { retry: false, notify: true }
+        } else {
+          consecutiveFailures++
+          if (consecutiveFailures >= MAX_RECONNECT_FAILURES) return { retry: false, notify: true }
+        }
       }
       thisConnHelloAt = 0 // retry = 新连接尝试，本次 hello 作废（下次 stable 判定基于新连接）
       return { retry: true, notify: true }
@@ -269,6 +284,7 @@ export function createGatewayChat(params: CreateGatewayChatParams): GatewayChat 
       // 重连空转（违背 #369「退避重连空转」目标）；首次连接（lastHelloAt===0）归零。
       if (lastHelloAt === 0 || Date.now() - lastHelloAt >= STABLE_CONNECTION_MS) {
         consecutiveFailures = 0
+        gatewayUnavailableCount = 0 // #376: 稳定存活后 hello 重置 4402 预算（crash-loop 不重置，同通用预算）
       }
       lastHelloAt = Date.now() // 记录 hello 时刻，供「稳定存活」判定
       thisConnHelloAt = Date.now() // R4-9: 本次连接 hello 时刻（close stable 计费基准）

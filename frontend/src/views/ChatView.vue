@@ -19,7 +19,7 @@ import {
 } from '@/chat/gatewayChat'
 import { splitThinking } from '@/chat/thinking'
 import { extractMessageText } from '@/chat/eventTranslate'
-import { WS_AUTH_FAIL, WS_MUST_CHANGE_PASSWORD, WS_CONTAINER_ACCESS_DENIED } from '@/chat/closeCodes'
+import { WS_AUTH_FAIL, WS_MUST_CHANGE_PASSWORD, WS_CONTAINER_ACCESS_DENIED, WS_GATEWAY_UNAVAILABLE } from '@/chat/closeCodes'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
 interface Msg {
@@ -571,6 +571,14 @@ async function openGateway(): Promise<boolean> {
         // 已停止」文案让用户无从得知正确路径（旧 pairingNeeded + pair-guide 被删后无替代）。
         if (pairingRequired) {
           if (!disposed) errorMsg.value = '该容器尚未完成设备配对，请先到容器详情页完成配对后再对话'
+          return
+        }
+        // #376: 4402 网关不可达预算超限（retry:false = 连续 4402 达重试预算）→ 提示「容器网关不可用」
+        // （容器 stopped/重启中/端口不通，容器恢复前重试无益；disconnected 条的「重新连接」= 手动重连
+        // 入口，切容器/重连即新建 GatewayChat 重置预算）。预算内（retry:true）不在此分支，落下方
+        // 「自动重连中…」。
+        if (code === WS_GATEWAY_UNAVAILABLE && !retry) {
+          if (!disposed) errorMsg.value = '容器网关不可用，请确认容器已启动后手动重连'
           return
         }
         // 其他断开：D2 按协议机 retry 决策如实提示——false = 已停止自动重连（非恢复错误 /
