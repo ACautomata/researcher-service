@@ -1,0 +1,14 @@
+# 版本控制与运行环境杂物，勿进构建上下文/镜像（镜像内产物由 Dockerfile COPY 显式带入）
+node_modules
+dist
+src/generated
+.env
+.envrc
+*.db
+*.db-journal
+coverage
+test
+.smoke-tmp
+.git
+# 运行时 fleet 数据（/fleet 由 compose 挂载，不进镜像）
+fleet

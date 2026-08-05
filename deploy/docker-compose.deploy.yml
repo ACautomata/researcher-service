@@ -1,10 +1,11 @@
 # deploy/docker-compose.deploy.yml —— 面板生产栈（BaoTa 边缘 TLS 之后的应用层）
 #
 # 由 CD（.github/workflows/cd.yml）scp 到宿主 /www/panel/ 并经 `docker compose ... up -d` 启动。
-# 三服务：frontend（唯一对宿主暴露，loopback 18080 供 BaoTa 反代）/ backend（内部，daphne +
-# docker.sock 编排 OpenClaw 容器 + SQLite 卷 + researcher 模板只读挂载）/ redis（内部，DistributedLock）。
+# 三服务：frontend（唯一对宿主暴露，loopback 18080 供 BaoTa 反代）/ server（内部，TS/Express 控制面，
+# docker.sock 编排 OpenClaw 容器 + SQLite 卷 + researcher 模板只读挂载）/ redis（内部，BullMQ 队列）。
+# （#341 M9：backend 服务退役 Django，切换为 server 服务跑 Express 控制面。）
 #
-# 运行时敏感值（DJANGO_SECRET_KEY / LLM_API_KEY / CREDENTIAL_ENCRYPTION_KEYS / DJANGO_ALLOWED_HOSTS）
+# 运行时敏感值（JWT_SECRET / PANEL_PUBLIC_ORIGIN / LLM_API_KEY / CREDENTIAL_ENCRYPTION_KEYS）
 # 经同目录 .env（env_file）注入，不落盘进 git；非敏感固定项（REDIS_URL/OPENCLAW_TEMPLATE_DIR/端口）
 # 直接写在本文件。
 #
@@ -20,7 +21,7 @@ services:
     container_name: panel-frontend
     restart: unless-stopped
     depends_on:
-      - backend
+      - server
     ports:
       # 仅 loopback 暴露；BaoTa 边缘（Let's Encrypt TLS）反代 https://researcher.acautomata.top → 127.0.0.1:18080
       # 18080：避开宿主 8080（已被占用——CD run 30683051941 frontend Bind 失败）。
@@ -28,56 +29,59 @@ services:
     networks:
       - panel-net
 
-  backend:
-    image: ${PANEL_BACKEND_IMAGE:-ghcr.io/acautomata/researcher-service/backend:latest}
-    container_name: panel-backend
+  server:
+    image: ${PANEL_SERVER_IMAGE:-ghcr.io/acautomata/researcher-service/server:latest}
+    container_name: panel-server
     restart: unless-stopped
     env_file:
       - .env
     depends_on:
-      - redis   # 启动顺序：redis 先于 backend（仅启动序，非就绪等待；entrypoint migrate 阶段给 redis 留出窗口）
+      - redis   # 启动顺序：redis 先于 server（仅启动序，非就绪等待；entrypoint 落表阶段给 redis 留出窗口）
     environment:
-      # 非敏感固定项：settings 唯一 env 读取处（config/settings）。
-      DJANGO_SETTINGS_MODULE: config.settings.prod
+      # 非敏感固定项：config.ts 唯一 env 读取处（server/src/config.ts）。
+      NODE_ENV: production
+      PORT: "8001"
       REDIS_URL: redis://redis:6379/0
       OPENCLAW_TEMPLATE_DIR: /srv/openclaw/template
-      # openclaw.json 模板文件：镜像内默认 <repo>/deploy/openclaw.json 解析到 /deploy（不存在），
-      # 首次创建容器即 500；此处注入挂载文件路径（下方 ./openclaw.json 挂载到 /app/deploy/）。
+      # openclaw.json 模板文件：镜像内默认 <cwd>/../deploy/openclaw.json 解析到 /app/../deploy（不存在），
+      # 首次创建容器即 90003；此处注入挂载文件路径（下方 ./openclaw.json 挂载到 /app/deploy/）。
       OPENCLAW_TEMPLATE_JSON: /app/deploy/openclaw.json
-      DATABASE_NAME: /app/db/db.sqlite3
-      # #295 生产 gateway 寻址（后端容器化）：控制面容器经 host.docker.internal 寻址宿主上
-      # 0.0.0.0 发布的 fleet gateway 端口——健康探测/WS 配对/对话共用同一 host（base.py 默认
+      # SQLite 持久化：server 经 DATABASE_URL（Prisma driver adapter）读本 named volume 挂载点，
+      # 容器重建数据不丢。必须显式绝对路径——apply-schema.mjs 的 file: 前缀剥离对绝对路径正确。
+      DATABASE_URL: file:/app/db/db.sqlite3
+      # #295 生产 gateway 寻址（server 容器化）：控制面容器经 host.docker.internal 寻址宿主上
+      # 0.0.0.0 发布的 fleet gateway 端口——健康探测/WS 配对/对话共用同一 host（config.ts 默认
       # 127.0.0.1 保持本地/单机 loopback 零回归）。0.0.0.0 把整个端口池暴露到宿主网络：
       # 明文 ws 流量由 gateway 强制 token 认证兜底（deploy/openclaw.json
       # controlUi.allowInsecureAuth=false；网关未开 tls.enabled，跨桥接走明文），宝塔防火墙
       # 仅开 80/443 收敛公网面。生产若需传输加密，后续在网关开 tls 并切 OPENCLAW_FLEET_WS_SCHEME=wss。
       OPENCLAW_FLEET_WS_HOST: host.docker.internal
       OPENCLAW_FLEET_PORT_BIND_HOST: 0.0.0.0
-      # fleet 根显式 pin：与下方 volumes 挂载 /fleet:/fleet 及 prod.py fail-fast 校验默认值
-      # 三者恒同源（spec §5.4/§5.6 契约，Django 直操作宿主 OPENCLAW_FLEET_ROOT/instances/<name>/）。
+      # fleet 根显式 pin：与下方 volumes 挂载 /fleet:/fleet 及 readFleetRoot 生产校验默认值
+      # 三者恒同源（spec §5.4/§5.6 契约，server 直操作宿主 OPENCLAW_FLEET_ROOT/instances/<name>/）。
       # 显式声明防「运维设了错误路径但校验通过」——compose 覆盖为唯一正确值。
       OPENCLAW_FLEET_ROOT: /fleet
     extra_hosts:
-      # Linux host-gateway 映射：后端容器访问宿主 loopback 接口（host.docker.internal）。
+      # Linux host-gateway 映射：server 容器访问宿主 loopback 接口（host.docker.internal）。
       # macOS Docker Desktop 自动提供该名，此处显式声明保证 Linux 生产宿主（BaoTa）可解析。
       - "host.docker.internal:host-gateway"
     volumes:
       # 控制面等价 root：经宿主 docker.sock 增删查 OpenClaw 容器（spec §5.4 已明示风险）。
       - /var/run/docker.sock:/var/run/docker.sock
-      # fleet 根（spec §5.4/§5.6 契约）：Django 在宿主文件系统操作 OPENCLAW_FLEET_ROOT
+      # fleet 根（spec §5.4/§5.6 契约）：server 在宿主文件系统操作 OPENCLAW_FLEET_ROOT
       # /instances/<name>/ —— cp -a 预填充 home + 原子写 openclaw.json + rmtree 删除。
-      # 缺此挂载时 backend 容器把配置写到容器私有 /fleet（与宿主 /fleet 隔离），docker run
+      # 缺此挂载时 server 容器把配置写到容器私有 /fleet（与宿主 /fleet 隔离），docker run
       # 的 bind-mount 源路径在宿主侧不存在 → Docker 自动建空目录 → gateway 读到目录而非
       # 配置文件 → missing gateway.mode 崩溃循环 → unhealthy/502/stop（生产 2026-08-01 实测）。
       - /fleet:/fleet
-      # SQLite 持久化：prod settings 经 DATABASE_NAME 覆盖（默认 BASE_DIR/db.sqlite3），
-      # 指向本 named volume 挂载点 /app/db/db.sqlite3，容器重建数据不丢。
+      # SQLite 持久化：server 经 DATABASE_URL 指向本 named volume 挂载点 /app/db/db.sqlite3，
+      # 容器重建数据不丢。
       - panel-db:/app/db
       # researcher 模板（home 预填充 cp -a 源）：宿主克隆只读挂载。
       - /srv/openclaw/template:/srv/openclaw/template:ro
       # openclaw.json 模板（配置单一来源，与单容器 compose 共用一份 deploy/openclaw.json）：
-      # CD 分发到宿主 /www/panel/openclaw.json（compose 同目录），挂载进后端容器覆盖镜像内
-      # 不存在的默认路径（/app/deploy/openclaw.json），首次创建容器不再 500。
+      # CD 分发到宿主 /www/panel/openclaw.json（compose 同目录），挂载进 server 容器覆盖镜像内
+      # 不存在的默认路径（/app/deploy/openclaw.json），首次创建容器不再 90003。
       - ./openclaw.json:/app/deploy/openclaw.json:ro
     networks:
       - panel-net
@@ -86,7 +90,7 @@ services:
     image: redis:7-alpine
     container_name: panel-redis
     restart: unless-stopped
-    # DistributedLock 后端；仅内部网络，不对宿主暴露。
+    # BullMQ 队列后端；仅内部网络，不对宿主暴露。
     networks:
       - panel-net
 
