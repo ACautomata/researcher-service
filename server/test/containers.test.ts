@@ -77,6 +77,45 @@ describe('containers REST (接缝 #2 + #334)', () => {
     expect(res.body.code).toBe(10001)
   })
 
+  // #379 收尾：配对状态可观察——approve 端点真实落库后，容器列表 pairing 快照反映真实状态。
+  // 走真实 approve 端点（#371-1）而非直种行：pending 快照 → approve → paired 快照，端到端闭环
+  // （containers.test 与 pairingApprove.test 共享同一 app 装配：fl.runtime 为 FakeRuntime，记录 exec）。
+  it('pairing 快照随落库状态变化：pending → approve → paired（#379）', async () => {
+    const u = await seedUser(ctx.prisma, 'u-snap', 'pw-usnap-secure')
+    const c = await ctx.prisma.container.create({
+      data: { name: 'snap-c', port: 19062, ownerId: u.id, token: 't', homeDir: '/h/snap-c', image: 'img', status: 'running' },
+    })
+    const l = await login(ctx.request, 'u-snap', 'pw-usnap-secure')
+    const bearerAuth = { Authorization: `Bearer ${l.access}` }
+    // 待配对（无 Pairing 行 → default unpaired）
+    let r = await ctx.request.get('/api/v1/containers').set(bearerAuth)
+    expect(r.body.data.find((i: { name: string }) => i.name === 'snap-c').pairing).toEqual({
+      status: 'unpaired', device_id: '', scopes: [], pairing_request_id: '',
+    })
+    // 真实落库 pending（模拟网关已发 PAIRING_REQUIRED，approve 端点记账语义的输入态）
+    await ctx.prisma.pairing.create({
+      data: {
+        containerId: c.id,
+        status: 'pending',
+        deviceId: 'dev-snap',
+        scopesJson: JSON.stringify(['operator.read', 'operator.write']),
+        pairingRequestId: 'req-snap-1',
+      },
+    })
+    r = await ctx.request.get('/api/v1/containers').set(bearerAuth)
+    expect(r.body.data.find((i: { name: string }) => i.name === 'snap-c').pairing).toEqual({
+      status: 'pending', device_id: 'dev-snap', scopes: ['operator.read', 'operator.write'], pairing_request_id: 'req-snap-1',
+    })
+    // 真实 approve 端点 → 落库 paired → 列表快照 paired（#371-1 端点真实执行，非直改行）
+    const ap = await ctx.request.post('/api/v1/containers/snap-c/pairing/approve/req-snap-1').set(bearerAuth)
+    expect(ap.body.code).toBe(0)
+    expect(ap.body.data).toEqual({ status: 'paired' })
+    r = await ctx.request.get('/api/v1/containers').set(bearerAuth)
+    expect(r.body.data.find((i: { name: string }) => i.name === 'snap-c').pairing).toEqual({
+      status: 'paired', device_id: 'dev-snap', scopes: ['operator.read', 'operator.write'], pairing_request_id: 'req-snap-1',
+    })
+  })
+
   it('POST 同步返 creating 快照（端口已分配）；inline 队列后台完成 → list 可见 running', async () => {
     await seedUser(ctx.prisma, 'ucreate', 'pw-ucreate-secure')
     const lu = await login(ctx.request, 'ucreate', 'pw-ucreate-secure')

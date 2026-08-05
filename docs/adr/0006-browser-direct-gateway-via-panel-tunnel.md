@@ -62,5 +62,5 @@
 - **spec §5.2 修订**（见「决定 7」），需在 #331 spec 与 deploy 契约文档同步标注。
 - **多 tab**：共享同一 profile 设备身份；审批连接级事件的「多并发连接是否广播」**包内无法确定**（网关侧行为），列实现期实测项，resolve 走 `first-answer-wins` 权威广播即可。
 - **网关 devices 列表膨胀**：每浏览器 profile × 每容器 = 一条 pending/paired 设备记录，为用户已接受代价。
-- **遗留实测项**：①浏览器无 token + bootstrap token 首连在真实网关（`ghcr.io/openclaw/openclaw:2026.7.1-browser`）上的 `PAIRING_REQUIRED` 行为实测；②审批事件多 tab 广播语义实测；③`sessions.delete` 不带 archivedOnly 在真实网关的行为实测（未归档会话删除成功与否、无 archivedOnly 是否要求 operator.admin scope）。
+- **遗留实测项**：①~~浏览器无 token + bootstrap token 首连在真实网关（`ghcr.io/openclaw/openclaw:2026.7.1-browser`）上的 `PAIRING_REQUIRED` 行为实测~~——**已完成**（#371-5 / #378：`server/test/pairingSmoke.test.ts` 门控 smoke 在真容器验证 bootstrap 首连 → `PAIRING_REQUIRED` → approve → hello-ok 下发 deviceToken → deviceToken 复用直连全流程）；②审批事件多 tab 广播语义实测；③`sessions.delete` 不带 archivedOnly 在真实网关的行为实测（未归档会话删除成功与否、无 archivedOnly 是否要求 operator.admin scope）。
 - 本 ADR 与 [0002-openclaw-anti-corruption-layer](./0002-openclaw-anti-corruption-layer.md)、[0004-openclaw-wire-convergence](./0004-openclaw-wire-convergence.md) 相关：0002/0004 的「后端 Python 防腐层持有协议机」前提在 B-直连下被抽掉——协议机移至前端官方包，后端不再实现 WS protocol v4，防腐层仅剩「隧道透传 + approve exec + bootstrap 发放」三个薄触点。

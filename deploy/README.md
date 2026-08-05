@@ -2,10 +2,10 @@
 
 本目录承载多 OpenClaw 容器面板的**编排契约**：
 
-- `openclaw.json` —— **全面板共享的配置单一来源 / 模板**。Django 控制面 `ConfigRenderer`
-  （`backend/containers/config_renderer.py`）以它为底渲染每容器配置，compose 栈也单独 bind-mount 它。
+- `openclaw.json` —— **全面板共享的配置单一来源 / 模板**。Express 控制面 `ConfigRenderer`
+  （`server/src/containers/config_renderer.ts`）以它为底渲染每容器配置，compose 栈也单独 bind-mount 它。
 - `docker-compose.yml` —— **单容器联调 / 模板栈**。用于本地手动起一个 OpenClaw 网关做协议联调；
-  多容器 fleet 由 Django 经 Docker SDK 直接编排（不走本 compose），但镜像、env、挂载契约与此保持一致。
+  多容器 fleet 由控制面经 Docker SDK 直接编排（不走本 compose），但镜像、env、挂载契约与此保持一致。
 - `.env.example` —— 网关环境变量模板（`GATEWAY_TOKEN` / `LLM_API_KEY` 等）。
 
 镜像 `ghcr.io/openclaw/openclaw:2026.7.1-browser`（官方稳定 browser 变体，ADR 0003），把 [ACautomata/researcher](https://github.com/ACautomata/researcher)
@@ -14,7 +14,7 @@
 ## 在新架构中的位置
 
 ```
-Django 控制面 (backend/containers)
+Express 控制面 (server/src/containers)
     │ 1. 以 deploy/openclaw.json 为底渲染 instances/<name>/openclaw.json（强制 port/bind/token 占位）
     │ 2. Docker SDK 挂 /var/run/docker.sock 建/删容器 openclaw-gw-<name>
     │ 3. 共享只读模板 OPENCLAW_TEMPLATE_DIR（researcher 克隆）cp -a 预填充实例 home
@@ -24,21 +24,28 @@ OpenClaw 容器 fleet（容器内统一 18789，宿主端口池 19000–19999 �
 
 - **配置单一来源在本目录**：`deploy/openclaw.json` 是精简版配置。每容器渲染产物落到
   `instances/<name>/openclaw.json`，bind-mount(ro) 覆盖进容器；`GATEWAY_TOKEN` 每容器独立生成、
-  经 env 注入，JSON 内仅 `${GATEWAY_TOKEN}` 占位（真值绝不落盘，spec §5.2 安全不变量）。
+  经 env 注入，JSON 内仅 `${GATEWAY_TOKEN}` 占位。**凭证边界（ADR 0006 决定 7 修订）**：真值仍不落
+  服务端盘/日志，但 bootstrap token / deviceToken **可下发给容器属主的浏览器设备**（B-直连下浏览器经
+  隧道直连网关所必需，有效安全级≈面板 JWT；网关藏隧道后凭证离了隧道无从使用）。
 - **端口池**：宿主侧池 `19000–19999`（避开被本单容器 compose 占用的 18789），创建取最小空闲、
   删除容器即回收。容器内统一 18789，靠 Docker 网络命名空间隔离。
 - **docker.sock 安全**：控制面挂 `/var/run/docker.sock` = 等价 root（spec §5.4 明示风险）。本地/可信
-  部署可接受；生产应限制 Django 网络面或改用 rootless / 远程 TLS daemon。
+  部署可接受；生产应限制网络面或改用 rootless / 远程 TLS daemon。
 
-## 设备配对（chat 前置）
+## 设备配对（B-直连，浏览器侧）
 
 OpenClaw 的 operator scope **不在 WS connect 握手声明授予**，而来自**设备配对记录**（Ed25519 签名
-challenge → 宿主 approve → deviceToken，spec §8.1 / issue #36 已证）。因此 Django 侧对话、审批、
-斜杠补全、工具事件都须先完成一次配对：
+challenge → 宿主 approve → deviceToken，spec §8.1 / issue #36 已证）。B-直连下配对发生在**浏览器**
+（官方 `@openclaw/gateway-client` 协议机，设备身份/tokenStore 存 localStorage），后端只做三件薄事：
 
-- 后端 `PairingService`（`backend/chat/pairing.py`）驱动配对状态机，幂等复用已配对连接。
-- 触发/查询：`GET|POST /api/v1/chat/containers/<name>/pairing/`；`PAIRING_REQUIRED` 时返回 202 +
-  `pairing_request_id`，需在宿主侧 approve 后重试。
+- **bootstrap 发放**：`POST /api/v1/containers/<name>/bootstrap-token`（所有权门控，非 running → `20046`）。
+- **approve 编排**：浏览器首连遇 `PAIRING_REQUIRED{requestId}` → 自动
+  `POST /api/v1/containers/<name>/pairing/approve/<requestId>` → 后端容器内 docker exec
+  `openclaw devices approve <requestId>`（浏览器永不接触容器 exec 通道，ADR 事实 3 物理约束）。
+- **进度记账**：`Pairing` 表 status（unpaired/pending/paired）+ pairingRequestId 落库，容器列表
+  `GET /api/v1/containers/` 的 pairing 快照随行展示（容器页可确认配对进度）。
+
+配对闭环真网关实测见 `server/test/pairingSmoke.test.ts`（#378，门控 smoke）。
 
 ## 凭证加密与密钥轮换
 
@@ -54,16 +61,19 @@ export CREDENTIAL_ENCRYPTION_KEYS="<current-base64url-key>,<previous-base64url-k
 
 1. 备份数据库，并记录当前 key ring。
 2. 生成新 32 字节 key；将它放在 `CREDENTIAL_ENCRYPTION_KEYS` 的第一个位置，旧 key 保留在后面。
-3. 重启后端使新配置生效，执行 `cd backend && python manage.py rotate_credential_keys`。
-4. 验证命令成功、应用可读取既有实例和配对记录，并完成数据库备份校验。
-5. 从环境变量移除旧 key，再次重启后端；此时旧 key 可以安全下线。
+3. 重启控制面使新配置生效（Express 控制面仅读 env，无独立旋转命令；写入用新 key、旧 key 继续读历史密文）。
+4. 验证应用可读取既有实例和配对记录，并完成数据库备份校验。
+5. 从环境变量移除旧 key，再次重启；此时旧 key 可以安全下线。
+
+> 注：`deviceToken`/`privateKeyPem` 真值不下发服务端（B-直连，存浏览器 localStorage），服务端 Pairing 行
+> 的对应列为密文占位；轮换影响的明文列主要是 `Container.token`（GATEWAY_TOKEN 密文）与历史遗留行。
 
 若怀疑 key 泄露：立即限制密钥访问权限，按以上流程生成并启用新 key、执行重加密、移除泄露 key；同时撤销并重新配对受影响设备、轮换网关 token，并审计部署平台与数据库访问日志。
 
 ## 前置
 
 - Docker + compose plugin
-- 后端 Django 经容器宿主映射端口（池 `19000–19999`）+ 每容器 `GATEWAY_TOKEN` 访问网关；本单容器栈默认
+- 控制面经容器宿主映射端口（池 `19000–19999`）+ 每容器 `GATEWAY_TOKEN` 访问网关；本单容器栈默认
   收敛到 `127.0.0.1:18789`。
 
 ## 单容器联调步骤
@@ -111,9 +121,10 @@ curl http://127.0.0.1:18789/health
 - wiki 在 `/home/node/.openclaw/wiki/main`（memory-wiki 插件），宿主侧即 `./researcher/wiki/main`。
 - 运行时 `state/`、`logs/` 用匿名卷，避免污染宿主 researcher git 树。
 
-## 与后端的衔接
+## 与控制面的衔接
 
-- 控制面配置走 `settings.OPENCLAW_FLEET`（`backend/config/settings/base.py`）：`TEMPLATE_JSON` 默认指向
-  本目录 `deploy/openclaw.json`，`ROOT` 为 `instances/<name>/` 落盘根，`IMAGE`/`PORT_POOL_*` 控制镜像与端口池。
-- model provider 的 CRUD 经后端 `models` app 重渲染每容器 `openclaw.json` 生效（热加载，无需重启，
+- 控制面配置走环境变量（`server/src/config.ts`）：`OPENCLAW_TEMPLATE_JSON` 默认指向
+  本目录 `deploy/openclaw.json`，`OPENCLAW_FLEET_ROOT` 为 `instances/<id>/` 落盘根（生产须绝对路径，
+  fail-fast），镜像/端口池见 `server/.env.example`。
+- model provider 的 CRUD 经控制面 `models` 域重渲染每容器 `openclaw.json` 生效（热加载，无需重启，
   spec §7 / issue #47）。
