@@ -23,6 +23,17 @@ export function triggerPair(name: string): Promise<PairingDTO> {
   })
 }
 
+// #371-1 后端 approve 端点（ADR 0006 B2）：协议机首连遇 PAIRING_REQUIRED{requestId} → 前端自动调本端点
+// 完成设备配对（后端容器内 exec `openclaw devices approve <requestId>`；归属门 + 越权同码 20040）。
+// 响应 {status:'paired'}；deviceToken 不经 REST（网关经 hello-ok 直接下发浏览器，见 #371 流程图）。
+// 调用方（配对编排）只关心成败，返回值类型为 void（响应载荷无消费方）。
+export async function approvePairing(name: string, requestId: string): Promise<void> {
+  await apiJson<{ status: string }>(
+    `/api/v1/containers/${encodeURIComponent(name)}/pairing/approve/${encodeURIComponent(requestId)}`,
+    { method: 'POST', body: JSON.stringify({}) },
+  )
+}
+
 // 容器 bootstrap token（ADR 0006 D1）：后端验 JWT + 归属门后返回该容器 GATEWAY_TOKEN，
 // 浏览器协议机首连凭证。越权/不存在 → 20040（同码防探测）。
 // 信封：server ok(res, { bootstrapToken }) → {code:0, message, data:{bootstrapToken}}；

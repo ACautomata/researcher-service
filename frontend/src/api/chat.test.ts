@@ -15,7 +15,7 @@ vi.mock('@/api/client', () => ({
 }))
 
 import { apiJson } from '@/api/client'
-import { getPairing, triggerPair, getBootstrapToken } from '@/api/chat'
+import { getPairing, triggerPair, getBootstrapToken, approvePairing } from '@/api/chat'
 
 describe('chat pairing api', () => {
   beforeEach(() => {
@@ -45,6 +45,30 @@ describe('chat pairing api', () => {
     ;(apiJson as ReturnType<typeof vi.fn>).mockResolvedValue({ status: 'unpaired' })
     await getPairing('a b')
     expect(apiJson).toHaveBeenCalledWith('/api/v1/containers/a%20b/pairing/')
+  })
+})
+
+describe('approvePairing（#371-1 后端 approve 端点，ADR 0006 B2）', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('POST pairing/approve/:requestId（容器名 + requestId 编码进 URL）', async () => {
+    ;(apiJson as ReturnType<typeof vi.fn>).mockResolvedValue({ status: 'paired' })
+    await approvePairing('demo', 'req-123')
+    expect(apiJson).toHaveBeenCalledWith('/api/v1/containers/demo/pairing/approve/req-123', {
+      method: 'POST',
+      body: JSON.stringify({}),
+    })
+  })
+
+  it('encodes container name and requestId in the URL', async () => {
+    ;(apiJson as ReturnType<typeof vi.fn>).mockResolvedValue({ status: 'paired' })
+    await approvePairing('a b', 'req/x y')
+    expect(apiJson).toHaveBeenCalledWith('/api/v1/containers/a%20b/pairing/approve/req%2Fx%20y', {
+      method: 'POST',
+      body: JSON.stringify({}),
+    })
   })
 })
 

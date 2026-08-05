@@ -7,11 +7,12 @@ import { describe, expect, it, vi, beforeEach } from 'vitest'
 
 // 假协议机：捕获 options（含 onEvent/onClose/resolveClose/buildConnectPlan），request/start/stop 可控。
 // vi.hoisted：vi.mock 工厂被 hoist 到文件顶部执行，须经 vi.hoisted 共享类定义。
-const { MockGatewayProtocolClient, MockGatewayProtocolRequestError, MockShouldPauseReconnect } = vi.hoisted(() => {
+const { MockGatewayProtocolClient, MockGatewayProtocolRequestError, MockShouldPauseReconnect, MockLifecycle } = vi.hoisted(() => {
   // 官方包不导出 GatewayProtocolClientOptions 顶层类型；mock 只消费下面几个回调/字段
   type MockOpts = {
     onEvent?: (e: unknown) => void
     onHello?: () => void
+    onConnectHello?: (h: unknown, c: unknown) => void
     onClose?: (c: { code: number; reason: string }, d: unknown) => void
     resolveClose?: (c: Record<string, unknown>) => { retry: boolean; notify?: boolean; reconnectDelayMs?: number }
     onConnectError?: (e: Error) => void
@@ -70,15 +71,32 @@ const { MockGatewayProtocolClient, MockGatewayProtocolRequestError, MockShouldPa
     fireActivity(): void {
       this.opts.onActivity?.()
     }
-    close(context: { code: number; reason: string }): void {
+    close(context: { code: number; reason: string; connectFailure?: { error: Error; reconnectDelayMs?: number } }): void {
       const decision = this.opts.resolveClose?.(context)
       this.opts.onClose?.(context, decision)
+    }
+    fireConnectHello(hello: unknown, plan: unknown): void {
+      this.opts.onConnectHello?.(hello, { generation: 1, nonce: null, challengeTs: null, plan })
     }
     connectError(message: string): void {
       this.opts.onConnectError?.(new Error(message))
     }
   }
-  return { MockGatewayProtocolClient, MockGatewayProtocolRequestError, MockShouldPauseReconnect }
+  return {
+    MockGatewayProtocolClient,
+    MockGatewayProtocolRequestError,
+    MockShouldPauseReconnect,
+    // 官方 GatewayBrowserDeviceAuthLifecycle 的假实现（经 vi.mock('./deviceAuth') 注入）：
+    // buildPlan 默认「首连用 bootstrap token + 设备签名块」；已配对重连（deviceToken）由测试
+    // mockResolvedValueOnce 覆盖。acceptHello/clearStoredToken 仅断言调用，不真落存储。
+    MockLifecycle: {
+      // buildPlan 默认行为（首连 bootstrap + 设备签名块）在 beforeEach 设 mockImplementation，测试用
+      // mockResolvedValueOnce 覆盖（如已配对重连返回 deviceToken auth）。
+      buildPlan: vi.fn(),
+      acceptHello: vi.fn(async () => {}),
+      clearStoredToken: vi.fn(async () => {}),
+    },
+  }
 })
 
 vi.mock('@openclaw/gateway-client/browser', () => ({
@@ -99,7 +117,19 @@ vi.mock('./tunnelSocket', () => ({
   })),
 }))
 
+// #377: gatewayChat 默认 createDeviceAuthLifecycle() 取官方 lifecycle —— mock 成可控假实现
+// （buildPlan/acceptHello/clearStoredToken 可断言；配对编排断言「approve → 重连」）。
+vi.mock('./deviceAuth', () => ({
+  createDeviceAuthLifecycle: () => MockLifecycle,
+}))
+
+// approve 端点（#371-1）：gatewayChat 配对编排经 REST 调后端 approve。
+vi.mock('@/api/chat', () => ({
+  approvePairing: vi.fn(),
+}))
+
 import { createGatewayChat } from './gatewayChat'
+import { approvePairing } from '@/api/chat'
 
 function makeHandlers() {
   return {
@@ -119,22 +149,50 @@ function makeGateway(handlers = makeHandlers()) {
 beforeEach(() => {
   vi.clearAllMocks()
   MockGatewayProtocolClient.last = null
+  // 默认 lifecycle.buildPlan：首连用 bootstrap token + 设备签名块（已配对重连由测试 mockResolvedValueOnce 覆盖）。
+  // clearAllMocks 保留 implementation，这里显式重置防测试间 mockImplementation 泄漏。
+  MockLifecycle.buildPlan.mockImplementation(async (params) => ({
+    clientId: params.client.id,
+    role: params.role,
+    identity: { deviceId: 'dev-1', publicKey: 'pk-1', sign: vi.fn() },
+    selectedAuth: {},
+    scopes: [...params.defaultScopes],
+    auth: { bootstrapToken: params.bootstrapToken },
+    device: { id: 'dev-1', publicKey: 'pk-1', signature: 'sig-1', signedAt: 123, nonce: params.nonce ?? '' },
+  }))
 })
 
 describe('createGatewayChat（#369 隧道 Facade）', () => {
-  it('构造：buildConnectPlan 用 bootstrapToken + operator scopes + tool-events；start/stop 透传协议机', async () => {
+  it('构造：buildConnectPlan 经 lifecycle（首连 bootstrap + 设备签名块）→ buildConnectParams 透传 auth/device', async () => {
     const handlers = makeHandlers()
     const gw = createGatewayChat({ container: 'alpha', jwt: 'jwt-1', bootstrapToken: 'boot-1', handlers })
     const client = MockGatewayProtocolClient.last!
     const plan = await client.opts.buildConnectPlan!({ nonce: 'n', generation: 0 })
-    expect(plan).toEqual({
+    // #377: 凭证选择交给官方 lifecycle（buildPlan 传 bootstrapToken + 设备身份参数）
+    expect(MockLifecycle.buildPlan).toHaveBeenCalledWith(
+      expect.objectContaining({
+        client: expect.objectContaining({ id: 'webchat-ui' }),
+        role: 'operator',
+        defaultScopes: ['operator.read', 'operator.write', 'operator.approvals', 'operator.admin'],
+        bootstrapToken: 'boot-1',
+        nonce: 'n',
+      }),
+    )
+    expect(plan).toMatchObject({
       role: 'operator',
       scopes: ['operator.read', 'operator.write', 'operator.approvals', 'operator.admin'],
       caps: ['tool-events'],
-      token: 'boot-1',
+      auth: { bootstrapToken: 'boot-1' },
+      device: { id: 'dev-1', signature: 'sig-1' },
     })
     const params = client.opts.buildConnectParams!(plan)
-    expect(params).toMatchObject({ minProtocol: 4, maxProtocol: 4, auth: { token: 'boot-1' } })
+    expect(params).toMatchObject({
+      minProtocol: 4,
+      maxProtocol: 4,
+      client: expect.objectContaining({ id: 'webchat-ui' }),
+      auth: { bootstrapToken: 'boot-1' },
+      device: expect.objectContaining({ id: 'dev-1', signature: 'sig-1' }),
+    })
     expect((params as { caps: string[] }).caps).toEqual(['tool-events'])
     gw.start()
     expect(client.start).toHaveBeenCalledTimes(1)
@@ -571,5 +629,132 @@ describe('createGatewayChat（#369 隧道 Facade）', () => {
       id: 'ap-2',
       decision: 'deny',
     })
+  })
+})
+
+describe('#377 设备配对生命周期（GatewayBrowserDeviceAuthLifecycle 接线 + 自动 approve 编排）', () => {
+  beforeEach(() => {
+    // clearAllMocks 不清 mockImplementation——重置 approve 默认实现为 resolve（挂起/拒绝由测试覆盖），
+    // 防跨测试泄漏（如「切容器已 stop」的挂起 promise 实现污染后续测试）。
+    ;(approvePairing as ReturnType<typeof vi.fn>).mockImplementation(() => Promise.resolve({ status: 'paired' }))
+  })
+
+  function pairingError(requestId: string) {
+    return new MockGatewayProtocolRequestError({
+      code: 'connect',
+      message: 'pairing required',
+      gatewayCode: 'ERR_PAIRING_REQUIRED',
+      details: { code: 'PAIRING_REQUIRED', requestId },
+    })
+  }
+
+  it('已配对重连：lifecycle 返回 deviceToken → buildConnectParams 透传 auth.deviceToken（不再走 bootstrap）', async () => {
+    const { client } = makeGateway()
+    MockLifecycle.buildPlan.mockResolvedValueOnce({
+      clientId: 'webchat-ui',
+      role: 'operator',
+      identity: { deviceId: 'dev-1', publicKey: 'pk-1', sign: vi.fn() },
+      selectedAuth: { usingStoredDeviceToken: true },
+      scopes: ['operator.read'],
+      auth: { deviceToken: 'dt-1' },
+    })
+    const plan = await client.opts.buildConnectPlan!({ nonce: 'n', generation: 1 })
+    expect(plan).toMatchObject({ auth: { deviceToken: 'dt-1' } })
+    const params = client.opts.buildConnectParams!(plan)
+    expect(params).toMatchObject({ auth: { deviceToken: 'dt-1' } })
+    expect((params as { auth: { bootstrapToken?: string } }).auth.bootstrapToken).toBeUndefined()
+  })
+
+  it('onConnectHello → lifecycle.acceptHello（hello-ok 下发 deviceToken 持久化）', async () => {
+    const { client } = makeGateway()
+    const plan = await client.opts.buildConnectPlan!({ nonce: 'n', generation: 1 })
+    client.fireConnectHello({ auth: { deviceToken: 'dt-1', role: 'operator', scopes: [] } }, plan)
+    expect(MockLifecycle.acceptHello).toHaveBeenCalledWith(
+      expect.objectContaining({ auth: expect.objectContaining({ deviceToken: 'dt-1' }) }),
+      expect.objectContaining({ clientId: 'webchat-ui', role: 'operator' }),
+    )
+  })
+
+  it('hello 无 deviceToken / 本连接无身份 → acceptHello 不调（不标记配对完成，预算保留）', async () => {
+    const { client } = makeGateway()
+    // 本连接无设备身份（storage 不可用降级）→ buildPlan 返回 identity: null
+    MockLifecycle.buildPlan.mockResolvedValueOnce({
+      clientId: 'webchat-ui',
+      role: 'operator',
+      identity: null,
+      selectedAuth: {},
+      scopes: ['operator.read'],
+      auth: { bootstrapToken: 'boot-1' },
+    })
+    const plan = await client.opts.buildConnectPlan!({ nonce: 'n', generation: 1 })
+    // hello-ok 不带 deviceToken（异常网关）→ 不持久化、不标记配对完成
+    client.fireConnectHello({ auth: { role: 'operator', scopes: [] } }, plan)
+    expect(MockLifecycle.acceptHello).not.toHaveBeenCalled()
+    // 配对预算未被 hello 重置/配对状态未完成 → 再遇 PAIRING_REQUIRED 仍自动 approve
+    client.close({ code: 1000, reason: 'closed(1008)', connectFailure: { error: pairingError('req-3') } })
+    await vi.waitFor(() => expect(approvePairing).toHaveBeenCalledWith('alpha', 'req-3'))
+  })
+
+  it('未配对首连：PAIRING_REQUIRED{requestId} → 自动 approve → 重连；onClose 不报 pairingRequired（编排接管）', async () => {
+    const { client, handlers } = makeGateway()
+    client.close({ code: 1000, reason: 'closed(1008)', connectFailure: { error: pairingError('req-1') } })
+    await vi.waitFor(() => expect(approvePairing).toHaveBeenCalledWith('alpha', 'req-1'))
+    await vi.waitFor(() => expect(client.start).toHaveBeenCalled()) // approve 已落库 → 重连（bootstrap 首连）
+    expect(handlers.onClose).not.toHaveBeenCalled() // 配对编排进行中不向 UI 报 pairingRequired
+  })
+
+  it('approve 失败（HTTP 错误）→ 报 pairingRequired=true（转 UI 手动处理），不自动重连', async () => {
+    const { client, handlers } = makeGateway()
+    ;(approvePairing as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('approve failed'))
+    client.close({ code: 1000, reason: 'closed(1008)', connectFailure: { error: pairingError('req-1') } })
+    await vi.waitFor(() => expect(handlers.onClose).toHaveBeenLastCalledWith(1000, 'closed(1008)', false, true))
+    expect(client.start).not.toHaveBeenCalled()
+  })
+
+  it('配对完成后 onClose 不再报 pairingRequired（配对状态已清除）', async () => {
+    const { client, handlers } = makeGateway()
+    const plan = await client.opts.buildConnectPlan!({ nonce: 'n', generation: 1 })
+    client.fireConnectHello({ auth: { deviceToken: 'dt-1', role: 'operator', scopes: [] } }, plan)
+    // 配对完成后连接断开（非配对原因）→ pairingRequired 恒 false
+    client.close({ code: 4402, reason: 'gateway down' })
+    expect(handlers.onClose).toHaveBeenLastCalledWith(4402, 'gateway down', true, false)
+  })
+
+  it('deviceToken 失效（网关重置）：paired 后 PAIRING_REQUIRED → clearStoredToken 清失效 token + 自动重配对', async () => {
+    const { client, handlers } = makeGateway()
+    const plan = await client.opts.buildConnectPlan!({ nonce: 'n', generation: 1 })
+    client.fireConnectHello({ auth: { deviceToken: 'dt-1', role: 'operator', scopes: [] } }, plan)
+    client.close({ code: 1000, reason: 'closed(1008)', connectFailure: { error: pairingError('req-2') } })
+    await vi.waitFor(() => expect(MockLifecycle.clearStoredToken).toHaveBeenCalled())
+    await vi.waitFor(() => expect(approvePairing).toHaveBeenCalledWith('alpha', 'req-2'))
+    await vi.waitFor(() => expect(client.start).toHaveBeenCalled())
+    expect(handlers.onClose).not.toHaveBeenCalled()
+  })
+
+  it('切容器已 stop()：approve 在途 → 不重建已停协议机的连接（防 ws 泄漏）', async () => {
+    const { gw, client } = makeGateway()
+    let resolveApprove!: (v: { status: string }) => void
+    ;(approvePairing as ReturnType<typeof vi.fn>).mockImplementation(
+      () => new Promise((resolve) => { resolveApprove = resolve }),
+    )
+    client.close({ code: 1000, reason: 'closed(1008)', connectFailure: { error: pairingError('req-1') } })
+    await vi.waitFor(() => expect(approvePairing).toHaveBeenCalled())
+    gw.stop() // 切容器：旧 gateway 停用
+    resolveApprove({ status: 'paired' })
+    await vi.waitFor(() => expect(client.start).not.toHaveBeenCalled()) // 不重建已停连接
+  })
+
+  it('配对预算用尽（approve 反复无效）→ 停止自动配对，报 pairingRequired（防无限循环）', async () => {
+    const { client, handlers } = makeGateway()
+    // 连续 3 次 PAIRING_REQUIRED（approve 成功但网关仍拒 → 重连又被拒），消耗配对预算
+    for (let i = 0; i < 3; i++) {
+      client.close({ code: 1000, reason: 'x', connectFailure: { error: pairingError('req-1') } })
+      await vi.waitFor(() => expect(client.start).toHaveBeenCalled())
+      client.start.mockClear()
+    }
+    // 第 4 次：预算用尽 → 不再自动 approve/重连，转 UI 手动处理
+    client.close({ code: 1000, reason: 'x', connectFailure: { error: pairingError('req-1') } })
+    await vi.waitFor(() => expect(handlers.onClose).toHaveBeenLastCalledWith(1000, 'x', false, true))
+    expect(client.start).not.toHaveBeenCalled()
   })
 })

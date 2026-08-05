@@ -9,14 +9,16 @@ import {
   GatewayProtocolClient,
   GatewayProtocolRequestError,
   shouldPauseGatewayReconnect,
+  type GatewayBrowserDeviceAuthLifecycle,
+  type GatewayBrowserDeviceAuthPlan,
+  type GatewayProtocolCloseContext,
 } from '@openclaw/gateway-client/browser'
-import {
-  ConnectErrorDetailCodes,
-  readConnectErrorDetailCode,
-} from '@openclaw/gateway-protocol/connect-error-details'
+import { readPairingConnectErrorDetails } from '@openclaw/gateway-protocol/connect-error-details'
 import { createPanelTunnelSocket } from './tunnelSocket'
 import { ChatEventTranslator, type ChatFrame, type GatewayEventFrame } from './eventTranslate'
 import { NO_RETRY_CLOSE_CODES, WS_GATEWAY_UNAVAILABLE } from './closeCodes'
+import { createDeviceAuthLifecycle } from './deviceAuth'
+import { approvePairing } from '@/api/chat'
 
 export type { ChatFrame, GatewayEventFrame } from './eventTranslate'
 
@@ -56,7 +58,9 @@ export interface GatewayChatHandlers {
   //   - true：协议机退避重连中，UI 显示「自动重连中…」
   //   - false：协议机已决策不再重连（非恢复错误 / 连续失败 give-up / #376 4402 预算超限），UI 应
   //     如实提示手动重连，而非继续谎报「自动重连中…」
-  // pairingRequired = 本次关闭是否因网关 PAIRING_REQUIRED（未配对）——UI 应提示先完成设备配对
+  // pairingRequired = 自动设备配对失败（approve HTTP 错误 / requestId 无效 / 预算用尽）——#377 自动
+  // 配对接管 PAIRING_REQUIRED（未配对自动 approve → 重连 → 拿 deviceToken），UI 仅在自动配对失败时
+  // 收到 pairingRequired=true，如实提示重试（不误导「去详情页手动配对」）
   onClose: (code: number, reason: string, retry: boolean, pairingRequired?: boolean) => void
   // 连接级错误（非 run 级）：如 handshake 超时、socket 工厂失败
   onError: (message: string) => void
@@ -80,18 +84,19 @@ export interface GatewayChat {
   resolveApproval(id: string, kind: string, decision: string): Promise<void>
 }
 
-interface ConnectPlan {
-  role: string
-  scopes: string[]
-  caps: string[]
-  token: string
-}
+// #377: ConnectPlan = 官方设备认证 lifecycle plan（role/scopes/auth/device）+ 面板 caps 声明。
+// buildConnectParams 透传 lifecycle 的 auth（bootstrapToken/deviceToken）与 device 签名块；凭证选择
+// （首连 bootstrap / 已配对 deviceToken）归官方 lifecycle（ADR 决定 3/6，deviceAuth.test.ts 已覆盖）。
+type ConnectPlan = GatewayBrowserDeviceAuthPlan & { caps: string[] }
 
 export interface CreateGatewayChatParams {
   container: string
   jwt: string
   bootstrapToken: string
   handlers: GatewayChatHandlers
+  // #377: 设备配对 lifecycle（ADR 0006 决定 3/6）——缺省 createDeviceAuthLifecycle()（真实 localStorage
+  // 身份 + tokenStore）；测试注入假 lifecycle（假 tokenStore / 内存 storage）断言配对编排（#377 acceptance）。
+  deviceAuth?: GatewayBrowserDeviceAuthLifecycle
 }
 
 // 面板隧道 close code（单一来源 = closeCodes.ts，F15）：4401 认证失败 / 4404 容器归属 / 4402
@@ -126,8 +131,11 @@ const WATCHDOG_INTERVAL_MS = 15_000
 // [archivedOnly] require operator.admin」。旧 backend wire SCOPES 含 admin，前端移植时漏掉 → 删除
 // 被 scope 拒。安全：operator.admin = full host access；面板作为容器所有者全权代理，UI 不暴露
 // terminal/worktree 等高危方法。真网关验证待 ADR 0006 遗留实测项 ③。
+const OPERATOR_ROLE = 'operator'
 const OPERATOR_SCOPES = ['operator.read', 'operator.write', 'operator.approvals', 'operator.admin']
 const CONNECT_CAPS = ['tool-events']
+// 连接 client 声明（buildConnectParams 与 lifecycle.buildPlan 共用，防两处漂移）。
+const CLIENT_INFO = { id: 'webchat-ui', mode: 'webchat', platform: 'browser', version: '2026.7.2-beta.6' } as const
 
 // A3: 非安全上下文（http://<lan-ip> 自托管面板常见）下 crypto.randomUUID 不可用（undefined），
 // 协议机首个 RPC 的 requestId / 写操作的幂等 key 即抛 → M5 RPC 层全死。
@@ -150,6 +158,9 @@ function createRequestId(): string {
 
 export function createGatewayChat(params: CreateGatewayChatParams): GatewayChat {
   const { container, jwt, bootstrapToken, handlers } = params
+  // #377: 设备配对 lifecycle——缺省 createDeviceAuthLifecycle()（真实 localStorage 身份 + tokenStore）；
+  // 测试注入假 lifecycle（假 tokenStore / 内存 storage）断言配对编排（#377 acceptance）。
+  const lifecycle = params.deviceAuth ?? createDeviceAuthLifecycle()
   const translator = new ChatEventTranslator()
   // F2: 连续重连失败计数（闭包）——重连成功（hello）时重置；达阈值 stop 自动重连转手动。
   // P1（code review）：计数器语义改为「按连接存活时长」——只有「未达 hello 的失败」（连接从未
@@ -172,6 +183,20 @@ export function createGatewayChat(params: CreateGatewayChatParams): GatewayChat 
   // （lastHelloAt）让此后无 hello 的连续重连失败永远 stable=true、永不 give-up（无限 30s 退避）。
   let thisConnHelloAt = 0
   const STABLE_CONNECTION_MS = 30_000
+  // #377 自动设备配对编排状态机（ADR 0006 B-直连 / issue #377）：首连 bootstrap → PAIRING_REQUIRED
+  // {requestId} → 自动 approve → 重连 → hello-ok 下发 deviceToken → acceptHello 持久化（localStorage）→
+  // 后续 buildConnectPlan 用 deviceToken。网关重置（token 失效）再遇 PAIRING_REQUIRED → 自动重配对
+  // （clearStoredToken 清失效 token → 回 bootstrap 首连闭环）。预算防无限循环：approve 反复无效
+  // （requestId 过期/网关不可达）达阈值 → 停止自动配对、转 UI 手动处理。
+  let pairingState: 'idle' | 'pairing' | 'paired' = 'idle'
+  let pairingAttempts = 0
+  const MAX_PAIRING_ATTEMPTS = 3
+  // 最近一次 buildConnectPlan 的 lifecycle plan——clearStoredToken 需要 plan.clientId/identity/role
+  // （onClose context 不含 plan，闭包缓存供「token 失效重配对」清除路径）。
+  let lastAuthPlan: GatewayBrowserDeviceAuthPlan | null = null
+  // stop 标志：切容器 stop() 后配对编排（approve HTTP 在途）不得再 client.start() 重建已停协议机的
+  // 连接（否则旧 gateway 在后台建连接、无人管理，ws 泄漏）。
+  let isStopped = false
   // 沉默看门狗（A2/黑洞自愈）：onActivity 刷新最后活动时间；watchdog 超时无帧 → 强制重连。
   let lastActivityAt = 0
   let watchdogTimer: ReturnType<typeof setInterval> | null = null
@@ -183,21 +208,31 @@ export function createGatewayChat(params: CreateGatewayChatParams): GatewayChat 
   client = new GatewayProtocolClient<ConnectPlan>({
     createSocket: (socketHandlers) => createPanelTunnelSocket(container, jwt, socketHandlers),
     createRequestId,
-    buildConnectPlan: async () => ({
-      role: 'operator',
-      scopes: OPERATOR_SCOPES,
-      caps: CONNECT_CAPS,
-      token: bootstrapToken,
-    }),
-    // 对齐 tunnelProtocol.test：v4 握手参数（minProtocol/maxProtocol/client/role/scopes/caps/auth.token）
+    buildConnectPlan: async ({ nonce }) => {
+      // #377: 接入官方设备认证生命周期——首连用 bootstrap token + 设备签名块；已配对（tokenStore 有
+      // deviceToken）用 deviceToken（不再走 bootstrap/配对）。gatewayChat 只透传 lifecycle 产出，
+      // 凭证选择逻辑归官方包（ADR 决定 3/6，deviceAuth.test.ts 已覆盖）。
+      // beta.6 打包版 buildPlan 无 challengeTs 参数（signedAtMs = nowMs ?? Date.now），只传 nonce。
+      const authPlan = await lifecycle.buildPlan({
+        client: CLIENT_INFO,
+        role: OPERATOR_ROLE,
+        defaultScopes: OPERATOR_SCOPES,
+        bootstrapToken,
+        nonce,
+      })
+      lastAuthPlan = authPlan
+      return { ...authPlan, caps: CONNECT_CAPS }
+    },
+    // 对齐 tunnelProtocol.test：v4 握手参数（minProtocol/maxProtocol/client/role/scopes/caps/auth/device）
     buildConnectParams: (plan) => ({
       minProtocol: 4,
       maxProtocol: 4,
-      client: { id: 'webchat-ui', mode: 'webchat', platform: 'browser', version: '2026.7.2-beta.6' },
+      client: CLIENT_INFO,
       role: plan.role,
       scopes: plan.scopes,
       caps: plan.caps,
-      auth: { token: plan.token },
+      ...(plan.auth ? { auth: plan.auth } : {}),
+      ...(plan.device ? { device: plan.device } : {}),
     }),
     // F10: 握手超时对齐隧道侧网关连接超时（server CONNECT_TIMEOUT_MS=5000）+ 余量。
     handshake: { mode: 'require-challenge', timeoutMs: HANDSHAKE_TIMEOUT_MS },
@@ -252,14 +287,26 @@ export function createGatewayChat(params: CreateGatewayChatParams): GatewayChat 
       // D2: 透传 retry 决策给 UI——协议机已 give-up / 非恢复错误（retry:false）时 ChatView 如实
       // 提示「自动重连已停止，请手动重连」，不再谎报「自动重连中…」。
       if (decision.notify) {
-        // P1-7（code review）：握手被拒且详情为 PAIRING_REQUIRED（未配对）→ 随 onClose 传递，
-        // UI 提示先完成设备配对（#369 配对是 chat 前置；通用「自动重连已停止」文案让用户无从
-        // 得知正确路径）。用官方 readConnectErrorDetailCode 判定（不硬编码错误码字符串）。
         const connErr = context.connectFailure?.error
         const pairing =
-          connErr instanceof GatewayProtocolRequestError &&
-          readConnectErrorDetailCode(connErr.details) === ConnectErrorDetailCodes.PAIRING_REQUIRED
-        handlers.onClose(context.code, context.reason, decision.retry, pairing)
+          connErr instanceof GatewayProtocolRequestError
+            ? readPairingConnectErrorDetails(connErr.details)
+            : null
+        if (pairing) {
+          // #377 自动配对编排：PAIRING_REQUIRED{requestId} → 清失效 token → approve → 重连（bootstrap
+          // 首连）→ hello-ok 下发 deviceToken。编排进行中不向 UI 报 pairingRequired（自动在跑，UI 提示
+          // 「去容器详情页手动配对」会误导）；预算用尽（approve 反复无效）才转 UI 手动处理。
+          if (pairingState === 'pairing') return
+          if (pairingAttempts >= MAX_PAIRING_ATTEMPTS) {
+            notifyPairingFailed(context)
+            return
+          }
+          pairingAttempts++
+          pairingState = 'pairing'
+          void runAutoPairing(context, pairing.requestId)
+          return
+        }
+        handlers.onClose(context.code, context.reason, decision.retry, false)
       }
     },
     onConnectError: (error) => handlers.onError(error.message),
@@ -277,6 +324,25 @@ export function createGatewayChat(params: CreateGatewayChatParams): GatewayChat 
     onEvent: (event: GatewayEventFrame) => {
       for (const frame of translator.translate(event)) handlers.onFrame(frame)
     },
+    onConnectHello: (hello, context) => {
+      // #377: hello-ok 下发 deviceToken → acceptHello 持久化（tokenStore）→ 配对完成。此后
+      // buildConnectPlan 用 deviceToken（不再走 bootstrap/配对）。
+      // **仅当 hello 携带 deviceToken 且本连接有设备身份才算配对完成**——官方 acceptHello 在无
+      // token / identity null 时静默 return（不持久化）。若无条件重置预算，storage 不可用或网关
+      // 异常时每次 hello 都清零 pairingAttempts，网关持续 PAIRING_REQUIRED 则无限 approve 循环
+      // （预算失效）。acceptHello 失败（localStorage 配额满）静默降级（catch 吞 rejection），
+      // 下次连接走 bootstrap/重配对自愈。
+      const helloToken = hello.auth?.deviceToken
+      if (context.plan.identity && helloToken) {
+        void lifecycle
+          .acceptHello(hello, context.plan)
+          .then(() => {
+            pairingState = 'paired'
+            pairingAttempts = 0
+          })
+          .catch(() => {})
+      }
+    },
     onHello: () => {
       // F2: 重连成功（hello-ok）→ 重置连续失败计数。
       // P1-6（code review）：仅当「上次连接稳定存活过」才归零（距上次 hello 超过稳定阈值）——
@@ -293,10 +359,44 @@ export function createGatewayChat(params: CreateGatewayChatParams): GatewayChat 
     },
   })
 
+  // 配对失败（approve HTTP 错误 / requestId 无效 / 预算用尽）→ 复位状态并如实上报 UI（可手动重试 /
+  // 切容器重置预算）。onClose 预算分支与 runAutoPairing catch 共用（code-review 去重）。
+  const notifyPairingFailed = (context: GatewayProtocolCloseContext) => {
+    pairingState = 'idle'
+    pairingAttempts = 0
+    handlers.onClose(context.code, context.reason, false, true)
+  }
+
+  // #377 自动设备配对编排：approve 落库（容器内 exec 完成）后重连——buildConnectPlan 走 bootstrap 首连
+  // → 网关接受（设备已 approve）→ hello-ok 下发 deviceToken → acceptHello 持久化（onConnectHello）。
+  // approve 失败（HTTP/网络错误、requestId 过期）→ notifyPairingFailed 让 UI 如实提示。
+  const runAutoPairing = async (context: GatewayProtocolCloseContext, requestId?: string) => {
+    try {
+      // 先校验 requestId（无 requestId 的畸形 PAIRING_REQUIRED 无法 approve）再清失效 token——
+      // 避免对畸形输入先执行清 token 副作用（code-review guard ordering）。
+      if (!requestId) throw new Error('网关未返回配对 requestId')
+      // 失效/残留 deviceToken 清除（paired 后网关重置场景）——清掉让重连 buildConnectPlan 回 bootstrap。
+      if (lastAuthPlan) await lifecycle.clearStoredToken(lastAuthPlan)
+      await approvePairing(container, requestId)
+      // 切容器已 stop()：approve 在途时旧 gateway 被弃，不得再 start() 重建连接（ws 泄漏）。
+      if (isStopped) return
+      pairingState = 'idle'
+      client.start()
+    } catch {
+      notifyPairingFailed(context)
+    }
+  }
+
   return {
     start: () => {
       lastActivityAt = Date.now()
       thisConnHelloAt = 0 // R4-9: 首次连接尝试，尚未 hello（close 计费基准复位）
+      isStopped = false
+      // #377: 新连接生命周期开始，配对状态复位——防 stop() 落在 approve 中途残留 'pairing' 吞掉
+      // 后续 PAIRING_REQUIRED（code-review）。已配对凭据在 localStorage，buildConnectPlan 仍走
+      // deviceToken（配对状态由 lifecycle 的 token 选择反映，非本标志）。
+      pairingState = 'idle'
+      pairingAttempts = 0
       // 沉默看门狗：连接期持续监控（黑洞链路自愈，A2）。
       if (!watchdogTimer) {
         watchdogTimer = setInterval(() => {
@@ -315,6 +415,7 @@ export function createGatewayChat(params: CreateGatewayChatParams): GatewayChat 
         clearInterval(watchdogTimer)
         watchdogTimer = null
       }
+      isStopped = true
       client.stop()
     },
     // P1-5（code review）：连接期超时兜底——SYN 黑洞（socket 永不 open）下协议机无任何信号、

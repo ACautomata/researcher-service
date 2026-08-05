@@ -567,10 +567,11 @@ async function openGateway(): Promise<boolean> {
           if (!disposed) errorMsg.value = '容器不可访问，请切换容器'
           return
         }
-        // P1-7（code review）：PAIRING_REQUIRED（未配对）→ 提示先完成设备配对——通用「自动重连
-        // 已停止」文案让用户无从得知正确路径（旧 pairingNeeded + pair-guide 被删后无替代）。
+        // P1-7 + #377：PAIRING_REQUIRED 已由 gatewayChat 自动配对编排接管（approve → 重连）——
+        // 此处 pairingRequired 仅在「自动配对失败」（approve HTTP 错误 / requestId 无效 / 预算用尽）
+        // 时透传，如实提示重试而非让用户去容器详情页手动配对（详情页无 approve 入口，配对是自动的）。
         if (pairingRequired) {
-          if (!disposed) errorMsg.value = '该容器尚未完成设备配对，请先到容器详情页完成配对后再对话'
+          if (!disposed) errorMsg.value = '设备配对失败，请重试连接'
           return
         }
         // #376: 4402 网关不可达预算超限（retry:false = 连续 4402 达重试预算）→ 提示「容器网关不可用」
