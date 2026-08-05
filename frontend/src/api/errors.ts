@@ -1,20 +1,20 @@
-// 共享错误词表 —— DRF 错误响应体 → 可读消息（零依赖纯模块）。
+// 共享错误词表 —— 错误响应体 → 可读消息（零依赖纯模块）。
 //
-// 注册/登录（stores/auth.ts）与将来 api/client.ts 均依赖此处统一解析，避免各自重写。
+// 注册/登录（stores/auth.ts）与 api/client.ts 均依赖此处统一解析，避免各自重写。
 // 独立成模块而非内联进 auth.ts：client.ts 已 import useAuthStore（auth.ts），
 // 若 auth.ts 反向依赖 client.ts 会成环，故错误词表须落在中立、无依赖的模块。
 //
-// DRF 错误体形态（见后端 accounts/serializers.py 校验器实测）：
-//   {"password": ["这个密码太常见了。", "密码只包含数字。"]}   字段级
-//   {"username": ["该字段必须唯一。"]}                       字段级
-//   {"non_field_errors": ["用户名或密码错误"]}               serializer 级
-//   {"detail": "未登录或登录已过期"}                          权限/通用
-//   ["msg"] / "msg"                                         裸数组/字符串
-//   非对象 / 非 JSON（如 5xx HTML）                          状态码兜底
+// 错误体形态（TS 后端 #312 信封 + HTTP 状态兜底）：
+//   {"code":90002,"message":"参数校验失败","data":{...}}        信封：message 即总述
+//   {"detail": "未登录或登录已过期"}                              权限/通用
+//   {"password": ["这个密码太常见了。"]}                         字段级
+//   {"non_field_errors": ["用户名或密码错误"]}                    serializer 级
+//   ["msg"] / "msg"                                             裸数组/字符串
+//   非对象 / 非 JSON（如 5xx HTML）                              状态码兜底
 
-// 把 DRF 错误响应体压平成单条可读消息；body 为空或不可解析时用状态码兜底。
+// 把错误响应体压平成单条可读消息；body 为空或不可解析时用状态码兜底。
 // #312 信封优先：#312 全局信封（TS 后端）HTTP 200 + {code,message,data}——message 即人类可读
-// 总述，先取它；非信封响应走 DRF 形状解析（登录/注册错误仍经 HTTP 状态码 + 字段级 body）。
+// 总述，先取它；非信封响应走字段级形状解析（登录/注册错误仍经 HTTP 状态码 + 字段级 body）。
 export function extractApiError(status: number, body: unknown): string {
   if (typeof body === 'string' && body.trim()) return body
 
@@ -47,7 +47,7 @@ export function extractApiError(status: number, body: unknown): string {
 }
 
 // #312 全局信封形状：{code:number, message:string, data:T|null}。所有 REST 一律 HTTP 200，
-// 错误信号在 body 信封（code!==0）。非信封响应（旧 Django 形状）返回 null。
+// 错误信号在 body 信封（code!==0）。非信封响应（非 0 code 缺省）返回 null。
 export interface EnvelopeBody<T = unknown> {
   readonly code: number
   readonly message: string

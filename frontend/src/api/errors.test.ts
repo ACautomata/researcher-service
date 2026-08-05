@@ -1,6 +1,6 @@
-// seam: DRF 错误体解析器 —— 修复注册 BUG 的核心：把后端真实校验消息（密码强度等）
+// seam: 错误体解析器 —— 修复登录/注册 BUG 的核心：把后端真实校验消息（密码强度等）
 // 压平成可读消息，替代旧的写死「用户名可能已存在」。
-// 错误体形态来自后端实测（accounts/serializers.py 校验器 + LANGUAGE_CODE=zh-hans）。
+// 错误体形态来自后端实测（#312 信封 + 字段级校验消息）。
 import { describe, expect, it } from 'vitest'
 
 import { extractApiError, ApiError } from '@/api/errors'

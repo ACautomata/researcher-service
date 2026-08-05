@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
-# run-ai-research-pipeline driver —— 启动/停止/健康检查 前后端开发服务器
+# run-ai-research-pipeline driver —— 启动/停止/健康检查 控制面 + 前端开发服务器
 #
 # 用法：
-#   .claude/skills/run-ai-research-pipeline/driver.sh start    # 后台启动前后端
-#   .claude/skills/run-ai-research-pipeline/driver.sh stop     # 停止前后端
+#   .claude/skills/run-ai-research-pipeline/driver.sh start    # 后台启动控制面+前端
+#   .claude/skills/run-ai-research-pipeline/driver.sh stop     # 停止控制面+前端
 #   .claude/skills/run-ai-research-pipeline/driver.sh status   # 健康检查
 #   .claude/skills/run-ai-research-pipeline/driver.sh wait     # 阻塞等待两端就绪（超时 30s）
 #
-# PID 文件写入 /tmp/ai-research-pipeline-{backend,frontend}.pid
-# 日志写入 /tmp/ai-research-pipeline-{backend,frontend}.log
+# PID 文件写入 /tmp/ai-research-pipeline-{server,frontend}.pid
+# 日志写入 /tmp/ai-research-pipeline-{server,frontend}.log
+# （#341 M9：Django backend 退役，控制面 = server/ TS/Express，端口 8001。）
 
 set -euo pipefail
 
@@ -16,43 +17,37 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # 项目根目录（.claude/skills/run-ai-research-pipeline/ → 项目根）
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 
-BACKEND_DIR="$PROJECT_ROOT/backend"
+SERVER_DIR="$PROJECT_ROOT/server"
 FRONTEND_DIR="$PROJECT_ROOT/frontend"
-BACKEND_PID_FILE="/tmp/ai-research-pipeline-backend.pid"
+SERVER_PID_FILE="/tmp/ai-research-pipeline-server.pid"
 FRONTEND_PID_FILE="/tmp/ai-research-pipeline-frontend.pid"
-BACKEND_LOG="/tmp/ai-research-pipeline-backend.log"
+SERVER_LOG="/tmp/ai-research-pipeline-server.log"
 FRONTEND_LOG="/tmp/ai-research-pipeline-frontend.log"
-BACKEND_PORT=8000
+SERVER_PORT=8001
 FRONTEND_PORT=5173
 WAIT_TIMEOUT=30
-
-_ensure_venv() {
-  if [ ! -f "$BACKEND_DIR/.venv/bin/python" ]; then
-    echo "[driver] 创建 backend virtualenv …"
-    python3 -m venv "$BACKEND_DIR/.venv"
-    "$BACKEND_DIR/.venv/bin/pip" install -r "$BACKEND_DIR/requirements/dev.txt"
-  fi
-}
 
 _ensure_node_modules() {
   # 不仅仅检查目录存在——检查 package.json 中的依赖是否已全部安装。
   # node_modules 目录可能因 npm 中途中断、手动删除子目录、或 worktree 软链而部分缺失。
-  if [ -d "$FRONTEND_DIR/node_modules" ]; then
-    cd "$FRONTEND_DIR"
+  local dir="$1"
+  if [ -d "$dir/node_modules" ]; then
+    cd "$dir"
     if npm ls --depth=0 --silent 2>/dev/null; then
       return 0
     fi
-    echo "[driver] node_modules 不完整，重新安装 …"
+    echo "[driver] $dir node_modules 不完整，重新安装 …"
   else
-    echo "[driver] 安装 frontend 依赖 …"
+    echo "[driver] 安装 $dir 依赖 …"
   fi
-  cd "$FRONTEND_DIR" && npm install
+  cd "$dir" && npm install
 }
 
 _ensure_db() {
-  echo "[driver] 运行 Django migrate …"
-  cd "$BACKEND_DIR"
-  DJANGO_SETTINGS_MODULE=config.settings.dev .venv/bin/python manage.py migrate --noinput 2>&1 | tail -3
+  echo "[driver] 生成 Prisma client + 落表 …"
+  cd "$SERVER_DIR"
+  npm run prisma:generate >/dev/null 2>&1
+  npm run db:apply 2>&1 | tail -2
 }
 
 _load_env() {
@@ -105,10 +100,10 @@ _ensure_fleet_image() {
 }
 
 _warn_llm_key() {
-  # LLM_API_KEY 缺失 → orchestrator.create 第一行 raise ConfigurationError → POST /containers 返 503，
-  # 前端按钮 loading 结束但容器未起，易误判为「卡 creating」。提前显式警告。
+  # LLM_API_KEY 缺失 → create 容器前置校验返 90003（信封码，HTTP 200），前端显示业务错误。
+  # 提前显式警告。
   if [ -z "${LLM_API_KEY:-}" ]; then
-    echo "[driver] 警告: LLM_API_KEY 未设置 —— 创建容器将返 503（'LLM_API_KEY is required but not configured'）"
+    echo "[driver] 警告: LLM_API_KEY 未设置 —— 创建容器将返 90003（'LLM_API_KEY is required but not configured'）"
     echo "          请在 deploy/.env 或环境变量中设置 LLM_API_KEY 后重启 driver"
   fi
 }
@@ -118,8 +113,8 @@ _is_pid_alive() {
   kill -0 "$pid" 2>/dev/null
 }
 
-_health_backend() {
-  curl -sf -o /dev/null "http://localhost:$BACKEND_PORT/api/health" 2>/dev/null
+_health_server() {
+  curl -sf -o /dev/null "http://localhost:$SERVER_PORT/api/health" 2>/dev/null
 }
 
 _health_frontend() {
@@ -128,23 +123,22 @@ _health_frontend() {
 
 cmd_start() {
   _load_env
-  _ensure_venv
-  _ensure_node_modules
+  _ensure_node_modules "$SERVER_DIR"
+  _ensure_node_modules "$FRONTEND_DIR"
   _ensure_db
   _ensure_fleet_image
   _warn_llm_key
 
-  # ---- backend ----
-  if [ -f "$BACKEND_PID_FILE" ] && _is_pid_alive "$(cat "$BACKEND_PID_FILE")"; then
-    echo "[driver] backend 已在运行 (pid $(cat "$BACKEND_PID_FILE"))"
+  # ---- server（TS/Express 控制面）----
+  if [ -f "$SERVER_PID_FILE" ] && _is_pid_alive "$(cat "$SERVER_PID_FILE")"; then
+    echo "[driver] server 已在运行 (pid $(cat "$SERVER_PID_FILE"))"
   else
-    echo "[driver] 启动 Django (port $BACKEND_PORT) …"
-    cd "$BACKEND_DIR"
-    DJANGO_SETTINGS_MODULE=config.settings.dev \
-      nohup .venv/bin/python manage.py runserver "localhost:$BACKEND_PORT" \
-      > "$BACKEND_LOG" 2>&1 &
-    echo $! > "$BACKEND_PID_FILE"
-    echo "[driver] backend pid=$(cat "$BACKEND_PID_FILE")"
+    echo "[driver] 启动 Express 控制面 (port $SERVER_PORT) …"
+    cd "$SERVER_DIR"
+    nohup npm run dev \
+      > "$SERVER_LOG" 2>&1 &
+    echo $! > "$SERVER_PID_FILE"
+    echo "[driver] server pid=$(cat "$SERVER_PID_FILE")"
   fi
 
   # ---- frontend ----
@@ -162,17 +156,17 @@ cmd_start() {
 
 cmd_wait() {
   local elapsed=0
-  echo "[driver] 等待 backend …"
-  while ! _health_backend; do
+  echo "[driver] 等待 server …"
+  while ! _health_server; do
     sleep 1; elapsed=$((elapsed + 1))
     if [ $elapsed -ge $WAIT_TIMEOUT ]; then
-      echo "[driver] ERROR: backend 超时（${WAIT_TIMEOUT}s）"
-      echo "--- backend log tail ---"
-      tail -20 "$BACKEND_LOG" 2>/dev/null || true
+      echo "[driver] ERROR: server 超时（${WAIT_TIMEOUT}s）"
+      echo "--- server log tail ---"
+      tail -20 "$SERVER_LOG" 2>/dev/null || true
       exit 1
     fi
   done
-  echo "[driver] backend 就绪 (${elapsed}s)"
+  echo "[driver] server 就绪 (${elapsed}s)"
 
   elapsed=0
   echo "[driver] 等待 frontend …"
@@ -187,17 +181,17 @@ cmd_wait() {
   done
   echo "[driver] frontend 就绪 (${elapsed}s)"
 
-  echo "[driver] ✓ 前后端均已就绪"
-  echo "  backend:  http://localhost:$BACKEND_PORT"
+  echo "[driver] ✓ 控制面与前端均已就绪"
+  echo "  server:   http://localhost:$SERVER_PORT"
   echo "  frontend: http://localhost:$FRONTEND_PORT"
 }
 
 cmd_stop() {
-  if [ -f "$BACKEND_PID_FILE" ]; then
+  if [ -f "$SERVER_PID_FILE" ]; then
     local pid
-    pid=$(cat "$BACKEND_PID_FILE")
+    pid=$(cat "$SERVER_PID_FILE")
     if _is_pid_alive "$pid"; then
-      echo "[driver] 停止 backend (pid $pid) …"
+      echo "[driver] 停止 server (pid $pid) …"
       kill "$pid" 2>/dev/null || true
       for _ in $(seq 1 50); do
         _is_pid_alive "$pid" || break
@@ -205,10 +199,10 @@ cmd_stop() {
       done
       _is_pid_alive "$pid" && kill -9 "$pid" 2>/dev/null || true
     fi
-    rm -f "$BACKEND_PID_FILE"
-    echo "[driver] backend 已停止"
+    rm -f "$SERVER_PID_FILE"
+    echo "[driver] server 已停止"
   else
-    echo "[driver] backend 未在运行（无 PID 文件）"
+    echo "[driver] server 未在运行（无 PID 文件）"
   fi
 
   if [ -f "$FRONTEND_PID_FILE" ]; then
@@ -229,16 +223,16 @@ cmd_stop() {
     echo "[driver] frontend 未在运行（无 PID 文件）"
   fi
 
-  # 清理僵死子进程（Django runserver 会留子进程）
-  pkill -f "manage.py runserver" 2>/dev/null || true
+  # 清理僵死子进程（tsx watch 会留子进程）
+  pkill -f "tsx watch src/server.ts" 2>/dev/null || true
   pkill -f "vite.*--port $FRONTEND_PORT" 2>/dev/null || true
 }
 
 cmd_status() {
-  echo "=== backend ==="
-  if [ -f "$BACKEND_PID_FILE" ] && _is_pid_alive "$(cat "$BACKEND_PID_FILE")"; then
-    echo "  状态: 运行中 (pid $(cat "$BACKEND_PID_FILE"))"
-    _health_backend && echo "  健康检查: ✓ /api/health 200" || echo "  健康检查: ✗ /api/health 不可达"
+  echo "=== server ==="
+  if [ -f "$SERVER_PID_FILE" ] && _is_pid_alive "$(cat "$SERVER_PID_FILE")"; then
+    echo "  状态: 运行中 (pid $(cat "$SERVER_PID_FILE"))"
+    _health_server && echo "  健康检查: ✓ /api/health 200" || echo "  健康检查: ✗ /api/health 不可达"
   else
     echo "  状态: 未运行"
   fi

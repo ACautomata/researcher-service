@@ -1,25 +1,26 @@
 # GitHub Actions CD —— 打包前后端 Docker 镜像推 GHCR，经 SSH 部署到宝塔宿主。
 #
-# 触发：当前临时禁用（仅 workflow_dispatch，见下方 on 块注释）。恢复后为 CI 在 master 上成功
-# 完成后（workflow_run），保证「不部署红码」。
-# 镜像：backend（Django/Daphne）+ frontend（Vue/Vite→nginx）双镜像，tag `:latest` + `:<CI head_sha>`
-# （head_sha 取自通过的 CI run，使 latest/sha 精确对应该 commit，便于 :sha 回滚）。
+# 触发：CI 在 master 上成功完成后（workflow_run），保证「不部署红码」。
+# 镜像：server（TS/Express 控制面，替代退役的 Django backend，#341 M9）+ frontend（Vue/Vite→nginx）
+# 双镜像，tag `:latest` + `:<CI head_sha>`（head_sha 取自通过的 CI run，使 latest/sha 精确对应该
+# commit，便于 :sha 回滚）。
 # 部署：appleboy/scp-action 推 compose + 渲染 .env → /www/panel；appleboy/ssh-action 远端
 # docker login（持久，供运行时 OpenClaw 拉取复用宿主 daemon 凭证）→ pull → up -d → prune → /api/health 健康门。
 #
 # 所需 secrets（见 deploy/DEPLOY.md 清单）：
 #   REMOTE_HOST REMOTE_USER DEPLOY_KEY            —— SSH 登录宿主
 #   GHCR_PULL_USER GHCR_PULL_TOKEN                —— 宿主拉私有 GHCR（read:packages PAT）
-#   DJANGO_SECRET_KEY DJANGO_ALLOWED_HOSTS LLM_API_KEY CREDENTIAL_ENCRYPTION_KEYS —— 后端运行时
+#   JWT_SECRET PANEL_PUBLIC_ORIGIN LLM_API_KEY CREDENTIAL_ENCRYPTION_KEYS —— server 运行时
 #   RESEARCHER_REPO（可选，默认 https://github.com/ACautomata/researcher.git）
 
 name: CD
 
 on:
-  # 暂时禁用 CD（后端迁 TS/Express 期间不自动部署 Django 镜像）：触发从 workflow_run 临时降级为
-  # 仅 workflow_dispatch（手动）。deploy job 的 if 守卫引用 workflow_run 事件数据 → 手动触发也会
-  # 安全跳过，等效完全禁用。恢复自动部署：把此块还原为原 workflow_run 触发（见 git history）。
-  workflow_dispatch:
+  # #341 M9 恢复自动部署：后端迁 TS/Express 完成，CI 成功即自动部署 server + frontend 镜像。
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [master]
 
 # 仅在 CI 成功时部署；失败/取消即跳过（job 级 if 守卫）。
 concurrency:
@@ -37,7 +38,7 @@ jobs:
       REGISTRY: ghcr.io
       # CI run 的 head_sha：使镜像 tag 精确对应通过 CI 的 commit（而非 CD run 自身 sha）。
       IMAGE_TAG: ${{ github.event.workflow_run.head_sha }}
-      # BACKEND_IMAGE / FRONTEND_IMAGE 不进 job env：它们依赖归一小写后的 IMAGE_REPO，
+      # SERVER_IMAGE / FRONTEND_IMAGE 不进 job env：它们依赖归一小写后的 IMAGE_REPO，
       # 而 job env 在 job 启动时即求值（彼时 IMAGE_REPO 未设，会得空值）。故在下方
       # "Normalize image repo" step 里经 $GITHUB_ENV 一并写入，step 运行时才是正确值。
     steps:
@@ -54,7 +55,7 @@ jobs:
         run: |
           IMAGE_REPO="$(printf '%s' "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')"
           echo "IMAGE_REPO=${IMAGE_REPO}" >> "$GITHUB_ENV"
-          echo "BACKEND_IMAGE=ghcr.io/${IMAGE_REPO}/backend" >> "$GITHUB_ENV"
+          echo "SERVER_IMAGE=ghcr.io/${IMAGE_REPO}/server" >> "$GITHUB_ENV"
           echo "FRONTEND_IMAGE=ghcr.io/${IMAGE_REPO}/frontend" >> "$GITHUB_ENV"
 
       - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c  # v4.2.0
@@ -66,17 +67,17 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build & push backend image
+      - name: Build & push server image
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a  # v7.3.0
         with:
-          context: backend
-          file: backend/Dockerfile
+          context: server
+          file: server/Dockerfile
           push: true
           tags: |
-            ${{ env.BACKEND_IMAGE }}:latest
-            ${{ env.BACKEND_IMAGE }}:${{ env.IMAGE_TAG }}
-          cache-from: type=gha,scope=backend
-          cache-to: type=gha,mode=max,scope=backend
+            ${{ env.SERVER_IMAGE }}:latest
+            ${{ env.SERVER_IMAGE }}:${{ env.IMAGE_TAG }}
+          cache-from: type=gha,scope=server
+          cache-to: type=gha,mode=max,scope=server
 
       - name: Build & push frontend image
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a  # v7.3.0
@@ -97,19 +98,21 @@ jobs:
         run: |
           mkdir -p _deploy
           cp deploy/docker-compose.deploy.yml _deploy/
-          # openclaw.json 模板（配置单一来源）：随 compose 一并分发，compose 挂载进后端容器
-          # 覆盖镜像内不存在的默认路径（见 compose OPENCLAW_TEMPLATE_JSON）。后端镜像构建
-          # context=backend 不含 deploy/，镜像内 TEMPLATE_JSON 默认路径 /deploy 不存在 →
-          # 首次创建容器即 500；此处分发保证宿主机 /www/panel/openclaw.json 存在。
+          # openclaw.json 模板（配置单一来源）：随 compose 一并分发，compose 挂载进 server 容器
+          # 覆盖镜像内不存在的默认路径（见 compose OPENCLAW_TEMPLATE_JSON）。server 镜像构建
+          # context=server 不含 deploy/，镜像内 TEMPLATE_JSON 默认路径 <cwd>/../deploy 不存在 →
+          # 首次创建容器即 90003；此处分发保证宿主机 /www/panel/openclaw.json 存在。
           cp deploy/openclaw.json _deploy/openclaw.json
-          # 命名 .env：compose 变量替换（$PANEL_BACKEND_IMAGE 等）与 env_file 都自动读它，
+          # 命名 .env：compose 变量替换（$PANEL_SERVER_IMAGE 等）与 env_file 都自动读它，
           # v1/v2 CLI 行为一致（--env-file 仅 v2 且只管 env_file 不管替换；v1 缺 .env 直接报错）。
+          # #341 M9：DJANGO_SECRET_KEY → JWT_SECRET（server config.ts 生产必填 ≥32 字符），
+          # DJANGO_ALLOWED_HOSTS 删除（Express 不校验 Host），新增 PANEL_PUBLIC_ORIGIN（生产必填）。
           {
-            echo "DJANGO_SECRET_KEY=${{ secrets.DJANGO_SECRET_KEY }}"
-            echo "DJANGO_ALLOWED_HOSTS=${{ secrets.DJANGO_ALLOWED_HOSTS }}"
+            echo "JWT_SECRET=${{ secrets.JWT_SECRET }}"
+            echo "PANEL_PUBLIC_ORIGIN=${{ secrets.PANEL_PUBLIC_ORIGIN }}"
             echo "LLM_API_KEY=${{ secrets.LLM_API_KEY }}"
             echo "CREDENTIAL_ENCRYPTION_KEYS=${{ secrets.CREDENTIAL_ENCRYPTION_KEYS }}"
-            echo "PANEL_BACKEND_IMAGE=${{ env.BACKEND_IMAGE }}:latest"
+            echo "PANEL_SERVER_IMAGE=${{ env.SERVER_IMAGE }}:latest"
             echo "PANEL_FRONTEND_IMAGE=${{ env.FRONTEND_IMAGE }}:latest"
           } > _deploy/.env
           chmod 600 _deploy/.env
@@ -161,9 +164,8 @@ jobs:
             docker image prune -f
 
             # 健康门：frontend 反代 /api/health（公开探针），30s 内非 200 即 fail 让 workflow 红。
-            # 必须带真实 Host 头（researcher.acautomata.top）：nginx 反代会发 $host=该域名，
-            # 而 Django 按 DJANGO_ALLOWED_HOSTS 校验 Host——不带会收到 127.0.0.1:18080 → 400
-            # DisallowedHost（CD run 30683454924 实测：默认 400 / 带正确 Host 200）。
+            # 保留真实 Host 头（researcher.acautomata.top）：nginx 反代会发 $host=该域名；
+            # Express 不校验 Host（#341 M9 后无 ALLOWED_HOSTS），头保留无害、回滚兼容更好。
             echo "[deploy] waiting for /api/health ..."
             ok=0
             for i in $(seq 1 15); do
@@ -173,8 +175,8 @@ jobs:
             if [ "$ok" != "1" ]; then
               echo "[deploy] ERROR: /api/health did not return 200 in time" >&2
               docker compose -f docker-compose.deploy.yml ps >&2 || true
-              echo "[deploy] --- backend logs (tail) ---" >&2
-              docker compose -f docker-compose.deploy.yml logs --tail=50 backend >&2 || true
+              echo "[deploy] --- server logs (tail) ---" >&2
+              docker compose -f docker-compose.deploy.yml logs --tail=50 server >&2 || true
               exit 1
             fi
             echo "[deploy] healthy ✓"

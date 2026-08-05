@@ -1,6 +1,6 @@
 ---
 name: run-ai-research-pipeline
-description: Build, launch, and stop the full-stack dev servers (Django backend + Vite frontend), check health, and interact via curl/chromium-cli.
+description: Build, launch, and stop the full-stack dev servers (TS/Express control plane + Vite frontend), check health, and interact via curl/chromium-cli.
 ---
 
 Paths below are relative to the **repository root** (`ai-research-pipeline/`).
@@ -8,7 +8,7 @@ Paths below are relative to the **repository root** (`ai-research-pipeline/`).
 ## Quick start (agent path)
 
 ```bash
-# 后台启动前后端（自动 venv / npm install / migrate）
+# 后台启动控制面 + 前端（自动 npm install / prisma generate / 落表）
 .claude/skills/run-ai-research-pipeline/driver.sh start
 
 # 阻塞等待两端就绪（超时 30s）
@@ -19,7 +19,7 @@ Now the stack is live:
 
 | Layer | URL |
 |---|---|
-| Backend (Django DRF) | `http://localhost:8000` |
+| Server (TS/Express 控制面) | `http://localhost:8001` |
 | Frontend (Vite dev)   | `http://localhost:5173` |
 
 ## Commands
@@ -38,22 +38,21 @@ driver.sh wait        # 轮询直到两端 200（30s 超时）
 
 ```bash
 # 健康检查（无需认证）
-curl -s http://localhost:8000/api/health
+curl -s http://localhost:8001/api/health
 
-# 注册/登录
-curl -s -X POST http://localhost:8000/api/v1/auth/register \
+# 登录 → 提取 access token（#312 信封：成功在 data.access）
+TOKEN=$(curl -s -X POST http://localhost:8001/api/v1/auth/login \
   -H 'Content-Type: application/json' \
-  -d '{"username":"alice","password":"Pass1234!@","confirm_password":"Pass1234!@"}'
-
-# 登录 → 提取 JWT
-TOKEN=$(curl -s -X POST http://localhost:8000/api/v1/auth/login \
-  -H 'Content-Type: application/json' \
-  -d '{"username":"alice","password":"Pass1234!@"}' \
-  | python3 -c "import json,sys; print(json.load(sys.stdin)['access'])")
+  -d '{"username":"admin","password":"<bootstrap-密码>"}' \
+  | python3 -c "import json,sys; print(json.load(sys.stdin)['data']['access'])")
 
 # 访问受保护端点
-curl -s http://localhost:8000/api/v1/containers/ -H "Authorization: Bearer $TOKEN"
+curl -s http://localhost:8001/api/v1/containers/ -H "Authorization: Bearer $TOKEN"
 ```
+
+> 公开注册已关闭（admin-only，spec #331）：账号由 bootstrap（首启 log 输出 admin 临时密码一次）
+> 或 admin users 页创建。bootstrap 临时密码在 `server/` 首启日志（`driver.sh start` 后
+> `tail -f /tmp/ai-research-pipeline-server.log`）。
 
 ### Browser (chromium-cli)
 
@@ -64,20 +63,20 @@ chromium-cli --viewport=1280x900 \
   'Screenshot /tmp/ai-research-pipeline-screenshot.png'
 ```
 
-The Vite dev server proxies `/api` → `localhost:8000` and `/ws` → `localhost:8000` (WS upgrade), so `chromium-cli` against `:5173` exercises the full stack.
+The Vite dev server proxies `/api` → `localhost:8001` and `/ws` → `localhost:8001` (WS upgrade), so `chromium-cli` against `:5173` exercises the full stack.
 
 ### WebSocket (chat)
 
 ```bash
 TOKEN="<JWT-from-login>"
-wscat -c "ws://localhost:5173/ws/chat/?token=$TOKEN"
+wscat -c "ws://localhost:5173/ws/chat/" -H "Sec-WebSocket-Protocol: access_token, $TOKEN"
 ```
 
 ## Run (human path)
 
 ```bash
-# 终端 1: backend
-cd backend && DJANGO_SETTINGS_MODULE=config.settings.dev .venv/bin/python manage.py runserver localhost:8000
+# 终端 1: server（TS/Express 控制面）
+cd server && npm install && npm run prisma:generate && npm run db:apply && npm run dev
 
 # 终端 2: frontend
 cd frontend && npx vite
@@ -88,26 +87,26 @@ The human path opens a Vite dev server that prints a local URL — open it in a 
 ## Test suite
 
 ```bash
-# backend
-cd backend && DJANGO_SETTINGS_MODULE=config.settings.dev .venv/bin/python -m pytest
+# server（TS 控制面）
+cd server && npm run typecheck && npm test && npm run build
 
 # frontend
-cd frontend && npm run test
+cd frontend && npm run test && npm run build
 ```
 
 ## Gotchas
 
-- **DB migration**: On first launch or after schema changes, the driver runs `migrate --noinput` automatically. If you're running the backend manually, run `python manage.py migrate` first — otherwise `/api/v1/auth/register` 500s with `no such table: auth_user`.
-- **Worktree node_modules**: If you're inside a git worktree, `node_modules/` isn't shared — run `npm install` in the worktree's `frontend/` before starting. The driver's `_ensure_node_modules` handles this.
-- **Port conflicts**: The driver uses `--strictPort` for Vite and `manage.py runserver` bound to `localhost:8000`. If either port is taken, the start command fails. Check with `driver.sh status` or `lsof -i :8000 -i :5173`.
-- **SQLite path**: `dev.py` derives the DB from `BASE_DIR` (= `backend/`). Running `manage.py` from the wrong directory creates a different `db.sqlite3`.
-- **Vite proxy**: Requests to `http://localhost:5173/api/*` are proxied to the Django backend. API-only testing should hit `:8000` directly — the proxy exists for the browser's same-origin convenience.
+- **DB 落表**: On first launch or after schema changes, the driver runs `prisma:generate` + `db:apply` automatically（`server/prisma/init.sql` 落到 `DATABASE_URL` 指向的 SQLite）。If you're running the server manually, run `npm run db:apply` first — otherwise bootstrap 报 `no such table: users`。
+- **Worktree node_modules**: If you're inside a git worktree, `node_modules/` isn't shared — run `npm install` in the worktree's `server/` and `frontend/` before starting. The driver's `_ensure_node_modules` handles this.
+- **Port conflicts**: The driver uses `--strictPort` for Vite and `npm run dev`（Express）bound to `localhost:8001`. If either port is taken, the start command fails. Check with `driver.sh status` or `lsof -i :8001 -i :5173`。
+- **Redis / docker daemon**: 容器生命周期（POST /containers）依赖 Redis（BullMQ）与 docker daemon；不可达时 REST 认证/账号端点仍可用，仅容器创建不可用（driver 会警告）。
+- **Vite proxy**: Requests to `http://localhost:5173/api/*` are proxied to the Express server. API-only testing should hit `:8001` directly — the proxy exists for the browser's same-origin convenience.
 
 ## Troubleshooting
 
 | Symptom | Fix |
 |---|---|
-| `curl :8000/api/health` 无响应 | 执行 `driver.sh status` 检查进程存活 |
-| `register` 返回 500, `auth_user` 表不存在 | 运行 migrate：`cd backend && DJANGO_SETTINGS_MODULE=config.settings.dev .venv/bin/python manage.py migrate` |
+| `curl :8001/api/health` 无响应 | 执行 `driver.sh status` 检查进程存活 |
+| 登录报 `10005 强制改密` | bootstrap/新建账号首登须先 `POST /api/v1/auth/password/change`（C1 强制改密流程） |
 | Vite 返回 500 | 检查 worktree `node_modules` 是否存在——软链主仓库的 `node_modules` 缺失依赖会导致 `main.ts` mount 失败 |
-| `driver.sh start` 提示 backend 已在运行 | 旧进程残留，用 `driver.sh stop` 强制清理，或手动 `pkill -f "manage.py runserver"` |
+| `driver.sh start` 提示 server 已在运行 | 旧进程残留，用 `driver.sh stop` 强制清理，或手动 `pkill -f "tsx watch src/server.ts"` |
