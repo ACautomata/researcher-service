@@ -1,8 +1,10 @@
 // seam: chat 展示组件哑测（#316 / #340 验收：props-in/emits-out 零逻辑，贴 FileTree 测试形态）。
 // 覆盖：ChatSidebar 容器/会话渲染 + emits；ChatComposer 输入 v-model + 发送禁用门 + slash-menu slot；
-// ChatMessageItem thinking/tool-line slot 透传 + 光标；ApprovalCard resolve emits + 已解决态。
-import { describe, expect, it } from 'vitest'
+// ChatMessageItem thinking/tool-line slot 透传 + 光标；ApprovalCard resolve emits + 已解决态；
+// ChatStream 合并时间线渲染 + 自动滚动（#400 范式 B + rAF 节流）。
+import { describe, expect, it, vi, afterEach } from 'vitest'
 import { mount } from '@vue/test-utils'
+import { nextTick, reactive } from 'vue'
 import { newMsg, type ApprovalItem, type Msg } from '@/stores/chat'
 import ChatSidebar from '@/components/chat/ChatSidebar.vue'
 import ChatComposer from '@/components/chat/ChatComposer.vue'
@@ -127,7 +129,6 @@ const card: ApprovalItem = {
   detailOpen: false,
   seq: 0,
 }
-
 describe('ApprovalCard', () => {
 
   it('批准/拒绝 emit + 断线禁用按钮', async () => {
@@ -209,4 +210,198 @@ describe('ChatStream 合并时间线渲染（ADR 0009 / #399）', () => {
       expect(seq).toEqual(t.expected)
     })
   }
+})
+
+describe('ChatStream 自动滚动（ADR 0009 / #400 范式 B + rAF 节流）', () => {
+  // 假滚动容器：jsdom 无布局引擎，scrollHeight/clientHeight 是只读 getter、scrollTop setter 是
+  // noop（读写恒 0）——用 defineProperty stub 滚动几何 + 自定义存取器记录 scrollTop 赋值，
+  // scroll 事件用原生 dispatchEvent 驱动 onScroll（jsdom 的 scrollTop setter 不触发事件）。
+  // rAF 在 jsdom 基于 setTimeout(16ms) 实现——fake timers + advanceTimersByTime 推进一帧。
+  let stream: HTMLElement
+  let rafSpy: ReturnType<typeof vi.spyOn>
+  let scrollTopValue = 0
+  let maxScroll = 0
+
+  function mountStream(props: Record<string, unknown> = {}) {
+    const w = mount(ChatStream, {
+      props: {
+        messages: [],
+        approvals: [],
+        disconnected: false,
+        historyHasMore: false,
+        historyLoading: false,
+        ...props,
+      },
+      slots: { 'msg-item': `<div data-test="msg"></div>` },
+    })
+    stream = w.get('[data-test="stream"]').element as HTMLElement
+    // 可控 scrollTop：自定义存取器（记录组件内赋值，jsdom 默认 setter 是 noop）；
+    // 真实浏览器会 clamp 到 [0, scrollHeight-clientHeight]，这里模拟该语义（maxScroll 为外层
+    // describe 变量，mount 后由 stubGeometry 更新）
+    Object.defineProperty(stream, 'scrollTop', {
+      configurable: true,
+      get: () => scrollTopValue,
+      set: (v: number) => {
+        scrollTopValue = Math.min(Math.max(v, 0), maxScroll)
+      },
+    })
+    return w
+  }
+
+  // 设滚动几何：scrollHeight=1000、clientHeight=100（距底 = 900 - scrollTop）
+  function stubGeometry(height = 1000) {
+    Object.defineProperty(stream, 'scrollHeight', { configurable: true, value: height })
+    Object.defineProperty(stream, 'clientHeight', { configurable: true, value: 100 })
+    maxScroll = height - 100
+  }
+
+  // 模拟用户滚动到某位置：设置 scrollTop + 派发 scroll 事件（驱动组件内 onScroll 更新 stickyBottom）
+  function userScrollTo(top: number) {
+    scrollTopValue = top
+    stream.dispatchEvent(new Event('scroll'))
+  }
+
+  // 推进一帧：fake timers 下 flush Vue 更新（onUpdated 调度 rAF）→ 推进 16ms（rAF 回调执行）
+  async function tick() {
+    await nextTick()
+    vi.advanceTimersByTime(20)
+  }
+
+  afterEach(() => {
+    rafSpy?.mockRestore()
+    vi.useRealTimers()
+  })
+
+  // spy 观测 rAF 调度次数（回调照常执行，不改变语义）
+  function spyRaf() {
+    rafSpy = vi.spyOn(globalThis, 'requestAnimationFrame')
+  }
+
+  it('停留底部 → 新内容追加自动滚到底（rAF 帧内调度）', async () => {
+    vi.useFakeTimers()
+    const w = mountStream()
+    stubGeometry()
+    userScrollTo(892) // 距底 8 = 阈值 → stickyBottom
+    spyRaf()
+    await w.setProps({ messages: [newMsg('assistant', '新回答')] })
+    expect(rafSpy).toHaveBeenCalledTimes(1)
+    await tick() // rAF 帧执行
+    expect(stream.scrollTop).toBe(900) // 滚到底 = scrollHeight - clientHeight（浏览器 clamp 后真实位置） // 自动滚到底
+  })
+
+  it('流式逐字追加（原地 mutation）→ 自动滚到底（#400 验收①第三场景）', async () => {
+    vi.useFakeTimers()
+    const w = mountStream()
+    stubGeometry()
+    userScrollTo(892)
+    const m = reactive(newMsg('assistant')) // 流式占位：reactive 包装贴近真实 store（Pinia 内消息是 reactive 对象）
+    await w.setProps({ messages: [m] }) // 初始渲染
+    await tick()
+    spyRaf()
+    m.raw += '你' // 等价 handleText 的 last.raw 原地追加（对象身份不变，raw 字段变化）
+    m.text = m.raw
+    await nextTick() // layoutWatch 快照变化 → 调度 rAF
+    expect(rafSpy).toHaveBeenCalledTimes(1)
+    await tick()
+    expect(stream.scrollTop).toBe(900) // 流式增量也滚到底
+  })
+
+  it('一帧内多次增量合并滚一次（rAF 节流不抖动）', async () => {
+    vi.useFakeTimers()
+    const w = mountStream()
+    stubGeometry()
+    userScrollTo(892)
+    const m = reactive(newMsg('assistant'))
+    await w.setProps({ messages: [m] })
+    await tick()
+    spyRaf()
+    // 同帧三次原地追加（等价流式逐字 delta 高频到达）
+    m.raw += 'a'
+    m.text = m.raw
+    await nextTick()
+    m.raw += 'b'
+    m.text = m.raw
+    await nextTick()
+    m.raw += 'c'
+    m.text = m.raw
+    await nextTick()
+    expect(rafSpy).toHaveBeenCalledTimes(1) // 一帧只调度一次
+    await tick()
+    expect(stream.scrollTop).toBe(900)
+  })
+
+  it('上滚离开底部 → 新内容不抢滚动条', async () => {
+    vi.useFakeTimers()
+    const w = mountStream()
+    stubGeometry()
+    userScrollTo(892) // 底部 → 跟随
+    await tick() // 初始在底部，无内容变化不滚动
+    userScrollTo(500) // 上滚回看历史（距底 400 > 阈值）→ stickyBottom=false
+    spyRaf()
+    await w.setProps({ messages: [newMsg('assistant', '新回答')] })
+    expect(rafSpy).not.toHaveBeenCalled() // 不调度滚动
+    await tick()
+    expect(stream.scrollTop).toBe(500) // 滚动条不被抢走
+  })
+
+  it('回到底部后恢复自动跟随', async () => {
+    vi.useFakeTimers()
+    const w = mountStream()
+    stubGeometry()
+    userScrollTo(892)
+    await tick()
+    userScrollTo(500) // 上滚 → 不抢
+    await w.setProps({ messages: [newMsg('assistant', '回看')] })
+    await tick()
+    userScrollTo(892) // 回到底部 → 恢复跟随
+    spyRaf()
+    await w.setProps({ messages: [newMsg('assistant', '继续')] })
+    await tick()
+    expect(stream.scrollTop).toBe(900) // 滚到底 = scrollHeight - clientHeight（浏览器 clamp 后真实位置）
+  })
+
+  it('内容不足一屏（无滚动余地）→ 始终跟随', async () => {
+    vi.useFakeTimers()
+    const w = mountStream()
+    // 真实浏览器 scrollHeight ≥ clientHeight 恒成立：内容不足一屏时 scrollHeight=clientHeight
+    stubGeometry(100) // scrollHeight = clientHeight = 100（无可滚空间）
+    userScrollTo(0) // 距底 0 < 阈值 → 跟随
+    spyRaf()
+    await w.setProps({ messages: [newMsg('assistant', '短内容')] })
+    expect(rafSpy).toHaveBeenCalledTimes(1)
+    await tick()
+    expect(stream.scrollTop).toBe(0) // 无内容可滚，scrollTop 恒 0（赋值被浏览器 clamp）
+  })
+
+  it('新审批卡插入 → 停留底部时滚到底', async () => {
+    vi.useFakeTimers()
+    const w = mountStream()
+    stubGeometry()
+    userScrollTo(892)
+    spyRaf()
+    await w.setProps({ approvals: [{ ...card, seq: 1 }] })
+    expect(rafSpy).toHaveBeenCalledTimes(1)
+    await tick()
+    expect(stream.scrollTop).toBe(900) // 滚到底 = scrollHeight - clientHeight（浏览器 clamp 后真实位置）
+  })
+
+  it('展开审批详情（detailOpen）不联动滚动跟随', async () => {
+    vi.useFakeTimers()
+    const w = mountStream()
+    stubGeometry()
+    userScrollTo(892)
+    spyRaf()
+    // 展开详情 = approval.detailOpen 状态变化——detailOpen 是审批卡内部状态（store 内 toggle），
+    // 不改变组件 props，Vue 不重渲染、onUpdated 不触发 → 不调度滚动（不联动，标准聊天 UX）
+    const a = { ...card, seq: 1 }
+    await w.setProps({ approvals: [a] })
+    await tick() // 该次 props 变更已随帧滚过一次
+    a.detailOpen = true // 直接改对象字段（等价 store toggle），不触发 props 变更
+    await tick()
+    expect(rafSpy).toHaveBeenCalledTimes(1) // detailOpen 变化不新增滚动调度
+    // 后续内容变化仍正常跟随——展开详情与跟随互不影响
+    await w.setProps({ messages: [newMsg('assistant', '新回答')] })
+    await tick()
+    expect(stream.scrollTop).toBe(900) // 滚到底 = scrollHeight - clientHeight（浏览器 clamp 后真实位置）
+  })
 })
