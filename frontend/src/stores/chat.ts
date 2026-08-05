@@ -35,6 +35,7 @@ export interface ApprovalItem {
   status: 'pending' | 'resolving' | 'resolved' // pending 待处理 / resolving 已点击等回执 / resolved 已处理
   decision: '' | 'allow-once' | 'allow-always' | 'deny' | 'unknown' // codex P1 (issue #154)：网关权威值 allow-once/allow-always/deny
   detailOpen: boolean
+  seq: number // ADR 0009：全局单调到达序号（先到者小、后到者大）——渲染期合并时间线排序用
 }
 
 export function newMsg(role: 'user' | 'assistant', text = ''): Msg {
@@ -57,6 +58,10 @@ export const useChatStore = defineStore('chat', {
     selectedSession: '' as string,
     messages: [] as Msg[],
     approvals: [] as ApprovalItem[],
+    // ADR 0009：审批卡全局到达序号计数器（addApproval 时赋 ++seqCounter）。
+    // 只随 resetForContainer 重置（与审批卡清空同生命周期）；切会话（resetForSession）不清空审批卡，
+    // 若重置会与留存旧卡撞序——seq 必须严格单调递增（ticket #399 明确要求）。
+    seqCounter: 0 as number,
     commands: [] as CommandDTO[],
     input: '' as string,
     // T3 会话历史回看（issue #82 / spec #76）：分页态——hasMore 标记可向回翻更旧消息，
@@ -120,6 +125,7 @@ export const useChatStore = defineStore('chat', {
         status: 'pending',
         decision: '',
         detailOpen: false,
+        seq: ++this.seqCounter, // ADR 0009：到达序号（先到者小、后到者大；重连补拉排所有现有卡之后）
       })
     },
     // 网关回执：以权威 decision 落定（first-answer-wins，codex P1，可能与请求不同）
@@ -175,6 +181,7 @@ export const useChatStore = defineStore('chat', {
       this.selectedSession = ''
       this.messages = []
       this.approvals = [] // 切容器：清空审批卡（审查 #6）
+      this.seqCounter = 0 // 与审批卡清空同生命周期，编号干净（ADR 0009）
       this.commands = [] // 切容器：清空命令缓存（命令按容器隔离，T07）
       this.input = ''
       this.slashDismissed = false

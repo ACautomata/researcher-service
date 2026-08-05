@@ -3,11 +3,12 @@
 // ChatMessageItem thinking/tool-line slot 透传 + 光标；ApprovalCard resolve emits + 已解决态。
 import { describe, expect, it } from 'vitest'
 import { mount } from '@vue/test-utils'
-import { newMsg, type ApprovalItem } from '@/stores/chat'
+import { newMsg, type ApprovalItem, type Msg } from '@/stores/chat'
 import ChatSidebar from '@/components/chat/ChatSidebar.vue'
 import ChatComposer from '@/components/chat/ChatComposer.vue'
 import ChatMessageItem from '@/components/chat/ChatMessageItem.vue'
 import ApprovalCard from '@/components/chat/ApprovalCard.vue'
+import ChatStream from '@/components/chat/ChatStream.vue'
 
 const INSTANCE = {
   name: 'demo',
@@ -115,16 +116,19 @@ describe('ChatMessageItem', () => {
   })
 })
 
+// 审批卡测试与 ChatStream 合并时间线测试共用的卡片基底
+const card: ApprovalItem = {
+  id: 'a1',
+  kind: 'exec',
+  command: 'rm -rf /tmp/x',
+  sessionKey: null,
+  status: 'pending',
+  decision: '',
+  detailOpen: false,
+  seq: 0,
+}
+
 describe('ApprovalCard', () => {
-  const card: ApprovalItem = {
-    id: 'a1',
-    kind: 'exec',
-    command: 'rm -rf /tmp/x',
-    sessionKey: null,
-    status: 'pending',
-    decision: '',
-    detailOpen: false,
-  }
 
   it('批准/拒绝 emit + 断线禁用按钮', async () => {
     const w = mount(ApprovalCard, { props: { approval: card, disconnected: false } })
@@ -143,4 +147,66 @@ describe('ApprovalCard', () => {
     expect(w.find('[data-test="approve-a1"]').exists()).toBe(false)
     expect(w.text()).toContain('已批准')
   })
+})
+
+describe('ChatStream 合并时间线渲染（ADR 0009 / #399）', () => {
+  // 按渲染顺序提取根元素下可直接寻址的条目 data-test（气泡 data-test 由 msg-item slot 注入）
+  const tests: Array<{ name: string; messages: Msg[]; approvals: ApprovalItem[]; expected: string[] }> = [
+    {
+      name: '已落定回答 + 审批卡 → 卡插在回答之前',
+      messages: (() => {
+        const m = newMsg('assistant', '回答')
+        m.streaming = false
+        return [newMsg('user', 'hi'), m]
+      })(),
+      approvals: [{ ...card, seq: 1 }],
+      expected: ['msg', 'approval-a1', 'msg'],
+    },
+    {
+      name: '流式占位 → 审批卡插在占位之前（强制沉底）',
+      messages: [newMsg('user', 'hi'), newMsg('assistant')], // 末条 streaming=true
+      approvals: [{ ...card, seq: 2 }],
+      expected: ['msg', 'approval-a1', 'msg'],
+    },
+    {
+      name: '无 assistant → 审批卡插末尾',
+      messages: [newMsg('user', 'hi')],
+      approvals: [{ ...card, seq: 1 }],
+      expected: ['msg', 'approval-a1'],
+    },
+    {
+      name: '多卡插在同一锚点（最后一条已落定气泡前），卡间按 seq 序',
+      messages: (() => {
+        const m = newMsg('assistant', '回答一')
+        m.streaming = false
+        const m2 = newMsg('assistant', '回答二')
+        m2.streaming = false
+        return [m, m2]
+      })(),
+      approvals: [
+        { ...card, id: 'a2', seq: 2 }, // 故意乱序传入：渲染按 seq 排序
+        { ...card, id: 'a1', seq: 1 },
+      ],
+      expected: ['msg', 'approval-a1', 'approval-a2', 'msg'],
+    },
+  ]
+  for (const t of tests) {
+    it(`${t.name}：data-test 序列 ${t.expected.join('→')}`, () => {
+      const w = mount(ChatStream, {
+        props: {
+          messages: t.messages,
+          approvals: t.approvals,
+          disconnected: false,
+          historyHasMore: false,
+          historyLoading: false,
+        },
+        slots: { 'msg-item': `<div data-test="msg"></div>` },
+      })
+      const seq = w
+        .findAll('.stream > *')
+        .map((el) => el.attributes('data-test'))
+        .filter(Boolean)
+      expect(seq).toEqual(t.expected)
+    })
+  }
 })
