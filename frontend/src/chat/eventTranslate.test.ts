@@ -131,20 +131,20 @@ describe('ChatEventTranslator', () => {
     const t = new ChatEventTranslator()
     const frame = approvalRequested({ request: { command: 'rm -rf /tmp/x', sessionKey: 'sk-1' } })
     expect(t.translate(frame)).toEqual([
-      { type: 'approval', id: 'ap-1', kind: 'exec', command: 'rm -rf /tmp/x', sessionKey: 'sk-1' },
+      { type: 'approval', id: 'ap-1', kind: 'exec', command: 'rm -rf /tmp/x', sessionKey: 'sk-1', agentId: null },
     ])
   })
 
   it('approval 卡 command 取值链：request 缺失退 systemRunPlan.rawCommand → command → 顶层 command', () => {
     const t = new ChatEventTranslator()
     expect(t.translate(approvalRequested({ systemRunPlan: { rawCommand: 'ls -la' } }))).toEqual([
-      { type: 'approval', id: 'ap-1', kind: 'exec', command: 'ls -la', sessionKey: null },
+      { type: 'approval', id: 'ap-1', kind: 'exec', command: 'ls -la', sessionKey: null, agentId: null },
     ])
     expect(t.translate(approvalRequested({ systemRunPlan: { command: 'pwd' } }))).toEqual([
-      { type: 'approval', id: 'ap-1', kind: 'exec', command: 'pwd', sessionKey: null },
+      { type: 'approval', id: 'ap-1', kind: 'exec', command: 'pwd', sessionKey: null, agentId: null },
     ])
     expect(t.translate(approvalRequested({ command: 'top' }))).toEqual([
-      { type: 'approval', id: 'ap-1', kind: 'exec', command: 'top', sessionKey: null },
+      { type: 'approval', id: 'ap-1', kind: 'exec', command: 'top', sessionKey: null, agentId: null },
     ])
   })
 
@@ -152,7 +152,7 @@ describe('ChatEventTranslator', () => {
     const t = new ChatEventTranslator()
     const frame = { type: 'event', event: 'plugin.approval.requested', payload: { id: 'ap-2', command: 'x' } }
     expect(t.translate(frame)).toEqual([
-      { type: 'approval', id: 'ap-2', kind: 'plugin', command: 'x', sessionKey: null },
+      { type: 'approval', id: 'ap-2', kind: 'plugin', command: 'x', sessionKey: null, agentId: null },
     ])
   })
 
@@ -160,7 +160,32 @@ describe('ChatEventTranslator', () => {
     const t = new ChatEventTranslator()
     expect(t.translate({ type: 'event', event: 'exec.approval.requested', payload: { kind: 'exec' } })).toEqual([])
     expect(t.translate(approvalRequested({ request: { sessionKey: 'sk' } }))).toEqual([
-      { type: 'approval', id: 'ap-1', kind: 'exec', command: '', sessionKey: 'sk' },
+      { type: 'approval', id: 'ap-1', kind: 'exec', command: '', sessionKey: 'sk', agentId: null },
+    ])
+  })
+
+  it('approval 卡 agentId 透传：request.agentId（#394 实测恒下发，string 才取）', () => {
+    const t = new ChatEventTranslator()
+    expect(t.translate(approvalRequested({ request: { command: 'x', agentId: 'sub-1' } }))).toEqual([
+      { type: 'approval', id: 'ap-1', kind: 'exec', command: 'x', sessionKey: null, agentId: 'sub-1' },
+    ])
+    // 缺省 → null（主会话审批）；非 string（0 信任防御）→ null
+    expect(t.translate(approvalRequested({ request: { command: 'x' } }))).toEqual([
+      { type: 'approval', id: 'ap-1', kind: 'exec', command: 'x', sessionKey: null, agentId: null },
+    ])
+    expect(t.translate(approvalRequested({ request: { command: 'x', agentId: 42 } }))).toEqual([
+      { type: 'approval', id: 'ap-1', kind: 'exec', command: 'x', sessionKey: null, agentId: null },
+    ])
+  })
+
+  it('approval 卡 agentId 回退路径：request 缺失时读 systemRunPlan.agentId（host=node 时存在）', () => {
+    const t = new ChatEventTranslator()
+    expect(t.translate(approvalRequested({ systemRunPlan: { rawCommand: 'ls', agentId: 'sub-2' } }))).toEqual([
+      { type: 'approval', id: 'ap-1', kind: 'exec', command: 'ls', sessionKey: null, agentId: 'sub-2' },
+    ])
+    // 回退路径同样防御：agentId 缺省/非 string → null
+    expect(t.translate(approvalRequested({ systemRunPlan: { rawCommand: 'ls', agentId: false } }))).toEqual([
+      { type: 'approval', id: 'ap-1', kind: 'exec', command: 'ls', sessionKey: null, agentId: null },
     ])
   })
 

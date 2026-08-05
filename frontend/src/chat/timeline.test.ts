@@ -12,6 +12,7 @@ function mkApproval(partial: Partial<ApprovalItem> & { id: string }): ApprovalIt
     kind: 'exec',
     command: 'rm -rf /tmp/x',
     sessionKey: null,
+    agentId: null,
     status: 'pending',
     decision: '',
     detailOpen: false,

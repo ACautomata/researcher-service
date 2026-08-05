@@ -311,7 +311,13 @@ export function useChatConnection(status: ChatStatus) {
     clearResumeWait() // B5: 消费者级错误（如会话不存在）→ 放弃 resume 等待
   }
 
-  function handleApproval(card: { id: string; kind: string; command: string; sessionKey: string | null }) {
+  function handleApproval(card: {
+    id: string
+    kind: string
+    command: string
+    sessionKey: string | null
+    agentId: string | null // #405-T1：发起方 agentId（frame 直通 addApproval）
+  }) {
     chat.addApproval(card)
   }
 

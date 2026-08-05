@@ -5,6 +5,7 @@
 import { defineStore } from 'pinia'
 import type { InstanceDTO } from '@/api/containers'
 import type { CommandDTO, SessionDTO } from '@/chat/gatewayChat'
+import { isSubagentApproval, isSubagentSessionKey } from '@/chat/subagentApproval'
 
 export interface ToolRow {
   id: string | null // 工具调用 id（codex P2：同名并发调用按 id 配对 result，无 id 退 name）
@@ -32,6 +33,9 @@ export interface ApprovalItem {
   kind: string
   command: string
   sessionKey: string | null
+  // #405-T1：发起方 agentId（subagent 审批来源标识；null = 主会话审批或未知来源）。
+  // #394 实测定案：request.agentId 恒下发（string|null），事件/补拉两路透传，识别首选此字段。
+  agentId: string | null
   status: 'pending' | 'resolving' | 'resolved' // pending 待处理 / resolving 已点击等回执 / resolved 已处理
   decision: '' | 'allow-once' | 'allow-always' | 'deny' | 'unknown' // codex P1 (issue #154)：网关权威值 allow-once/allow-always/deny
   detailOpen: boolean
@@ -73,6 +77,22 @@ export const useChatStore = defineStore('chat', {
     slashIndex: 0 as number,
     slashDismissed: false as boolean,
   }),
+  getters: {
+    // #405-T1（#395 钉死 + #394 实测）：审批卡唯一家在 main——当前会话**不是** subagent 会话时
+    // 显示归属卡：无 sessionKey 连接级卡任何会话可见；归属当前会话的卡显示；**subagent 发起的卡
+    // （agentId 即来源语义）恒在 main 框可见**——其 sessionKey 是 subagent 会话形态
+    // （`agent:<id>:subagent:<uuid>`，纯 sessionKey 匹配永不可达，故 spec 决定 7 公式延伸
+    // isSubagentApproval 分支，这是满足「唯一家在 main」问题陈述的必要补充）。当前会话是 subagent
+    // 会话（#394 实测形态判定，非裸 `agent:` 头——主会话也可带 agent: 头，前缀匹配有误报）时
+    // 审批区**恒空**（无条件，任何卡都不显示，含其自身历史残留卡）。被过滤的卡留存于 approvals
+    // 列表，仅渲染层隐藏（codex R2 P1 留存不变量）——切回 main 即可见可回覆。
+    visibleApprovals(state): ApprovalItem[] {
+      if (isSubagentSessionKey(state.selectedSession)) return [] // subagent 会话审批区恒空
+      return state.approvals.filter(
+        (a) => !a.sessionKey || a.sessionKey === state.selectedSession || isSubagentApproval(a),
+      )
+    },
+  },
   actions: {
     // ---- 容器 / 会话 ----
     setInstances(list: InstanceDTO[]): void {
@@ -114,7 +134,13 @@ export const useChatStore = defineStore('chat', {
     },
 
     // ---- 审批卡（T06）----
-    addApproval(card: { id: string; kind: string; command: string; sessionKey: string | null }): void {
+    addApproval(card: {
+      id: string
+      kind: string
+      command: string
+      sessionKey: string | null
+      agentId?: string | null // #405-T1：发起方 agentId（缺省 null = 主会话审批）
+    }): void {
       // codex R2 P1：按 id 去重后**留存全部**（含其它会话的），仅渲染时按 sessionKey 过滤
       if (this.approvals.some((a) => a.id === card.id)) return // 幂等（重连补拉 + 实时推送去重）
       this.approvals.push({
@@ -122,6 +148,7 @@ export const useChatStore = defineStore('chat', {
         kind: card.kind,
         command: card.command || '（网关未提供命令详情）',
         sessionKey: card.sessionKey,
+        agentId: typeof card.agentId === 'string' && card.agentId ? card.agentId : null, // 0 信任：仅 string 才取
         status: 'pending',
         decision: '',
         detailOpen: false,

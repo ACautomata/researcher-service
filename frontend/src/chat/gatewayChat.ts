@@ -97,6 +97,9 @@ export interface ApprovalCardDTO {
   kind: string
   command: string
   sessionKey: string | null
+  // #405-T1：发起方 agentId（补拉路径与 requested 事件同构——#394 实测 request 内含
+  // agentId 入参原样回显；缺省 null = 主会话审批）
+  agentId?: string | null
 }
 
 // #377: ConnectPlan = 官方设备认证 lifecycle plan（role/scopes/auth/device）+ 面板 caps 声明。
@@ -567,7 +570,9 @@ export function createGatewayChat(params: CreateGatewayChatParams): GatewayChat 
           const kind = typeof rec.kind === 'string' && rec.kind ? (rec.kind as string) : 'exec'
           const command = typeof req.command === 'string' ? req.command : ''
           const sessionKey = typeof req.sessionKey === 'string' ? req.sessionKey : null
-          out.push({ id, kind, command, sessionKey })
+          // #405-T1：补拉与 requested 事件同构（#394 实测），request.agentId string 才取（0 信任）
+          const agentId = typeof req.agentId === 'string' ? req.agentId : null
+          out.push({ id, kind, command, sessionKey, agentId })
         }
         return out
       } catch {
