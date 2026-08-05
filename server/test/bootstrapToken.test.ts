@@ -9,6 +9,7 @@ import { seedAdmin, seedUser, login, bearer } from './helpers'
 import { AesGcmCrypto } from '../src/crypto'
 import { config } from '../src/config'
 import { createApp } from '../src/app'
+import { FakeRuntime } from './fakeRuntime'
 
 describe('containers bootstrap-token（ADR 0006 D1 / #369）', () => {
   let ctx: TestContext
@@ -16,8 +17,8 @@ describe('containers bootstrap-token（ADR 0006 D1 / #369）', () => {
   beforeAll(async () => {
     ctx = await setupTestApp()
     // containers 路由在 orchestrator 注入时才挂载（app.ts）；bootstrap-token 仅用归属门 + 解密，
-    // 不触编排器任何方法——注入空壳仅让路由挂载。
-    const app = createApp({ prisma: ctx.prisma, orchestrator: {} as never })
+    // 不触编排器任何方法——注入空壳仅让路由挂载；runtime 亦仅让 approve 路由注册（本文件不测）。
+    const app = createApp({ prisma: ctx.prisma, orchestrator: {} as never, runtime: new FakeRuntime() })
     ctx.request = supertest(app) as unknown as TestContext['request']
   })
   afterAll(async () => {

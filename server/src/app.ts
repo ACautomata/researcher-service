@@ -19,6 +19,9 @@ export interface AppDeps {
   // 容器编排接缝（#334）：测试注入假 runtime + inline queue + tmp fleet config；
   // 生产由 server.ts 装真 DockerRuntime + BullMQ 队列。缺省 = 无编排（containers 路由不挂）。
   orchestrator?: Orchestrator
+  // approve 端点 docker exec 通道（#371-1 / #374）：与 orchestrator 成对注入（生产 DockerRuntime、
+  // 测试 FakeRuntime）。编排器存在时缺 runtime → 装配期 fail-fast（approve 静默禁用不安全）。
+  runtime?: ContainerRuntime
   // wiki 接缝（#335）：compile 触发等。缺省 = no-op（无编排）。
   wiki?: WikiRouterDeps
   // models 接缝（#336）：config 写盘（provider CRUD 后重渲染 openclaw.json）。
@@ -27,7 +30,7 @@ export interface AppDeps {
 }
 
 // createApp 工厂：PrismaClient 经依赖注入，测试可传 test DB（接缝 #2）。
-export function createApp({ prisma, orchestrator, wiki, models }: AppDeps): Application {
+export function createApp({ prisma, orchestrator, runtime, wiki, models }: AppDeps): Application {
   const app = express()
   // wiki 内容契约无大小上限（codex PR#346）：挂载路径内请求先走 5mb limit，其余端点仍 256kb。
   // 须先于全局 parser —— body-parser 对已解析 body（req._body）会跳过，故 wiki 命中后不二次解析。
@@ -43,7 +46,11 @@ export function createApp({ prisma, orchestrator, wiki, models }: AppDeps): Appl
   app.use('/api/v1/auth', authRouter)
   app.use('/api/v1/users', usersRouter)
   if (orchestrator) {
-    app.use('/api/v1/containers', createContainersRouter(orchestrator))
+    // approve 端点依赖 runtime（docker exec），与 orchestrator 成对注入（#374）；缺 runtime 属装配错误。
+    if (!runtime) {
+      throw new Error('[app] orchestrator 注入时必须同时注入 runtime（approve 端点 docker exec 通道）')
+    }
+    app.use('/api/v1/containers', createContainersRouter(orchestrator, runtime))
   }
   // wiki（#335）：只依赖 prisma + 容器行 homeDir，不依赖编排器；compile 触发经 wiki 注入。
   // 注意：Express 5 不把 app.use 挂载路径的 :name 合并进 router 的 req.params，故挂到

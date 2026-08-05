@@ -21,7 +21,12 @@ describe('wiki 认证单链（生产 orchestrator + wiki 同挂；codex PR#346 P
     const fl = makeFleetTest(ctx.prisma)
     const { createApp } = await import('../src/app')
     const supertest = (await import('supertest')).default
-    const app = createApp({ prisma: ctx.prisma, orchestrator: fl.orch, wiki: { compile: { trigger: () => {} } } })
+    const app = createApp({
+      prisma: ctx.prisma,
+      orchestrator: fl.orch,
+      runtime: fl.runtime,
+      wiki: { compile: { trigger: () => {} } },
+    })
     ctx.request = supertest(app) as unknown as TestContext['request']
 
     const u = await seedUser(ctx.prisma, 'usingle', 'pw-usingle-secure')

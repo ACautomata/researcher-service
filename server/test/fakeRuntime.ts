@@ -23,7 +23,9 @@ export class FakeRuntime implements ContainerRuntime {
   plantExternalFor = new Map<string, string>()
   // get（inspect）时对指定 name 抛错（测 daemon 故障时 list 降级保留记账状态）。
   failGetFor = new Set<string>()
-  // execSync 调用记录（断言 delete 的 chown）。
+  // execSync 故障注入：对指定 name 抛错（测 approve CLI 失败 → 不推进配对状态）。
+  failExecSyncFor = new Set<string>()
+  // execSync 调用记录（断言 delete 的 chown / approve 的 CLI argv）。
   execCalls: { name: string; cmd: string[] }[] = []
 
   async run(spec: ContainerSpec): Promise<string> {
@@ -97,6 +99,7 @@ export class FakeRuntime implements ContainerRuntime {
   async execInContainer(_name: string, _cmd: string[]): Promise<void> {}
 
   async execSync(name: string, cmd: string[]): Promise<void> {
+    if (this.failExecSyncFor.has(name)) throw new Error(`simulated approve exec failure for ${name}`)
     this.execCalls.push({ name, cmd })
   }
 
