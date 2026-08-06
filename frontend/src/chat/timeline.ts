@@ -44,6 +44,13 @@ function insertionIndex(messages: Msg[]): number {
 // 有 assistant 消息（含流式占位）→ 不需要合成落点（锚定三分支覆盖）；anchorState 须与待展示
 // 卡数量同真才合成——anchorState=true 但 approvals 为空时不产出虚拟气泡（无卡可承载）。
 // 合成锚不参与 seq 排序（位置恒定在尾部、卡承载其后）；agentId 不参与锚点计算（#407 验收）。
+// 在插入点输出：synthetic 时先推虚拟气泡（锚在卡前——「虚拟助手气泡承载审批卡」语义）。
+// 卡全 resolved 后锚仍留存（anchorState 不随卡 resolved 变化，由 visibleApprovals 数量驱动）。
+function pushAt(out: TimelineEntry[], synthetic: boolean, sorted: ApprovalItem[]): void {
+  if (synthetic) out.push({ anchor: true })
+  out.push(...sorted)
+}
+
 export function mergeTimeline(
   messages: Msg[],
   approvals: ApprovalItem[],
@@ -54,23 +61,12 @@ export function mergeTimeline(
   // 纯函数：排序用副本，不改动调用方数组
   const sorted = [...approvals].sort((a, b) => a.seq - b.seq)
   const insertIdx = insertionIndex(messages)
-  const out: TimelineEntry[] = []
-
-  // 无 assistant 消息（insertIdx === length）且 anchorState=true → 消息尾部合成虚拟气泡承载卡
-  // （锚在前、卡在后——「虚拟助手气泡承载审批卡」语义；锚在尾部合成，卡全 resolved 后锚仍留存，
-  // 时间线不跳动）。有 assistant 消息（含流式占位）→ 锚定三分支已提供落点，不合成虚拟气泡。
-  // anchorState 不随卡 resolved 状态变化（由 visibleApprovals 数量驱动，卡留存即仍待展示）。
   const synthetic = insertIdx === messages.length && anchorState
+  const out: TimelineEntry[] = []
   messages.forEach((m, i) => {
-    if (i === insertIdx) {
-      if (synthetic) out.push({ anchor: true })
-      out.push(...sorted)
-    }
+    if (i === insertIdx) pushAt(out, synthetic, sorted)
     out.push(m)
   })
-  if (insertIdx === messages.length) {
-    if (synthetic) out.push({ anchor: true })
-    out.push(...sorted)
-  }
+  if (insertIdx === messages.length) pushAt(out, synthetic, sorted)
   return out
 }

@@ -150,6 +150,8 @@ defineSlots<{
 .load-more { align-self: center; background: transparent; border: 1px dashed var(--el-border-color); border-radius: 8px; padding: 5px 18px; cursor: pointer; color: var(--el-text-color-secondary); font-size: 12.5px; }
 .load-more:disabled { cursor: default; opacity: .6; }
 /* #405-T2 虚拟助手气泡（SyntheticAnchor）：淡色虚线边框、无文本、高度贴近审批卡片的虚拟气泡——
-   无 assistant 消息时承载审批卡的稳定落点；卡全 resolved 后仍留存（时间线不跳动） */
-.synthetic-anchor { align-self: flex-start; min-height: 92px; border: 1.5px dashed var(--el-border-color-lighter); border-radius: 11px; background: var(--el-fill-color-lighter); }
+   无 assistant 消息时承载审批卡的稳定落点；卡全 resolved 后仍留存（时间线不跳动）。
+   宽度对齐 assistant 气泡（max-width 840px，默认 stretch 填满流宽）——空内容 div 若
+   align-self:flex-start 且无宽度会收缩成 0 宽细条（code-review c1 实证） */
+.synthetic-anchor { min-height: 92px; max-width: 840px; border: 1.5px dashed var(--el-border-color-lighter); border-radius: 11px; background: var(--el-fill-color-lighter); }
 </style>
