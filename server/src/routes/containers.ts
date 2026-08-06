@@ -192,5 +192,47 @@ export function createContainersRouter(orch: Orchestrator, runtime: ContainerRun
     ok(res, { status: 'paired' })
   })
 
+  // GET /<name>/pairing/token —— 多容器配对 bug 修复（用户定案）：下发该容器 deviceToken。
+  // 根因：deviceToken 原存前端 localStorage，键 (clientId='webchat-ui', deviceId, role) 不含容器名 →
+  // 跨容器共用一条 token，容器 2 复用容器 1 的 token → 网关 AUTH_DEVICE_TOKEN_MISMATCH → 连接即停。
+  // 修复：token 上移服务端 DB（Pairing.deviceToken 密文列，按 containerId 一对一），作用域解析按 URL
+  // 容器名——clientId 恒定也无妨（根因消除）。无 token（未配对/网关重置）→ data.token=null，前端走
+  // bootstrap 首连 + 自动配对（#377 编排复用）。归属门 + 越权/不存在同码 20040。
+  router.get('/:name/pairing/token', async (req: Request, res: Response) => {
+    const name = req.params.name as string
+    assertValidContainerName(name)
+    const inst = await getInstanceForUser(req.prisma, req.user!, name)
+    const row = await req.prisma.pairing.findUnique({ where: { containerId: inst.id } })
+    if (!row || !row.deviceToken) {
+      ok(res, { token: null })
+      return
+    }
+    // 密文列（deviceTokenEncrypted=true）解密；遗留明文行（false）直接透传（AesGcmCrypto 兼容无 v1: 前缀）。
+    const token = row.deviceTokenEncrypted
+      ? new AesGcmCrypto(config.fleet.encryptionKeys).decrypt(row.deviceToken)
+      : row.deviceToken
+    ok(res, { token })
+  })
+
+  // PUT /<name>/pairing/token —— hello-ok 下发 deviceToken 后前端回传落库（密文）。
+  // 覆盖写（网关重置重新配对落新 token）；配对行尚不存在时 upsert 建行（status 保持默认 unpaired，
+  // 由 approve 端点推进 paired——本端点只记账 token，不推进状态机）。token 非字符串 → 90002。
+  router.put('/:name/pairing/token', async (req: Request, res: Response) => {
+    const name = req.params.name as string
+    assertValidContainerName(name)
+    const inst = await getInstanceForUser(req.prisma, req.user!, name)
+    const body = (req.body ?? {}) as { deviceToken?: unknown }
+    if (typeof body.deviceToken !== 'string' || body.deviceToken.length === 0) {
+      throw fail(CODE.VALIDATION_FAILED, undefined, { deviceToken: ['deviceToken 须为非空字符串'] })
+    }
+    const sealed = new AesGcmCrypto(config.fleet.encryptionKeys).encrypt(body.deviceToken)
+    await req.prisma.pairing.upsert({
+      where: { containerId: inst.id },
+      create: { containerId: inst.id, deviceToken: sealed, deviceTokenEncrypted: true },
+      update: { deviceToken: sealed, deviceTokenEncrypted: true },
+    })
+    ok(res, { status: 'stored' })
+  })
+
   return router
 }
