@@ -1029,4 +1029,53 @@ describe('M5 隧道（#337 · ADR 0006）', () => {
       await ctx.close()
     }
   })
+
+  it('records a text trace log for a completed chat run', async () => {
+    const { ctx, jwt, user } = await makeAlphaCtx()
+    try {
+      const ws = await connectTunnel(`${ctx.baseUrl}?container=alpha`, ['access_token', jwt])
+      const browserReceived = collectMessages(ws)
+
+      ws.send(
+        JSON.stringify({
+          type: 'req',
+          id: 'send-1',
+          method: 'chat.send',
+          params: { sessionKey: 'sk-1', message: '学习的技术' },
+        }),
+      )
+      await until(() => ctx.gateway.received.length >= 1)
+      ctx.gateway.fireMessage(JSON.stringify({ type: 'res', id: 'send-1', ok: true, payload: { runId: 'run-1' } }))
+      ctx.gateway.fireMessage(
+        JSON.stringify({
+          type: 'event',
+          event: 'chat',
+          payload: { runId: 'run-1', sessionKey: 'sk-1', state: 'final', message: '学习技术的笔记' },
+        }),
+      )
+
+      for (let i = 0; i < 200 && (await ctx.prisma.textTraceLog.count()) === 0; i++) {
+        await new Promise((r) => setTimeout(r, 5))
+      }
+      expect(await ctx.prisma.textTraceLog.count()).toBe(1)
+      expect(browserReceived).toHaveLength(2)
+      const log = await ctx.prisma.textTraceLog.findFirstOrThrow()
+      expect(log).toMatchObject({
+        userId: user.id,
+        username: user.username,
+        ipAddress: '127.0.0.1',
+        containerName: 'alpha',
+        sessionKey: 'sk-1',
+        runId: 'run-1',
+        inputText: '学习的技术',
+        outputText: '学习技术的笔记',
+        status: 'success',
+      })
+      expect(log.traceId).toMatch(/^[a-f0-9]{64}$/)
+      expect(log.outputHash).toMatch(/^[a-f0-9]{64}$/)
+      ws.close()
+    } finally {
+      await ctx.close()
+    }
+  })
 })

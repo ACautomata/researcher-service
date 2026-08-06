@@ -27,6 +27,24 @@ CREATE TABLE "refresh_tokens" (
 );
 
 -- CreateTable
+CREATE TABLE "text_trace_logs" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "traceId" TEXT NOT NULL,
+    "userId" TEXT NOT NULL,
+    "username" TEXT NOT NULL,
+    "ipAddress" TEXT NOT NULL,
+    "containerName" TEXT,
+    "sessionKey" TEXT,
+    "runId" TEXT,
+    "inputText" TEXT NOT NULL DEFAULT '',
+    "outputText" TEXT NOT NULL DEFAULT '',
+    "outputHash" TEXT NOT NULL DEFAULT '',
+    "status" TEXT NOT NULL DEFAULT 'success',
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT "text_trace_logs_userId_fkey" FOREIGN KEY ("userId") REFERENCES "users" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+
+-- CreateTable
 CREATE TABLE "containers" (
     "id" TEXT NOT NULL PRIMARY KEY,
     "name" TEXT NOT NULL,
@@ -90,6 +108,21 @@ CREATE UNIQUE INDEX "refresh_tokens_tokenHash_key" ON "refresh_tokens"("tokenHas
 
 -- CreateIndex
 CREATE INDEX "refresh_tokens_userId_idx" ON "refresh_tokens"("userId");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "text_trace_logs_traceId_key" ON "text_trace_logs"("traceId");
+
+-- CreateIndex
+CREATE INDEX "text_trace_logs_userId_idx" ON "text_trace_logs"("userId");
+
+-- CreateIndex
+CREATE INDEX "text_trace_logs_ipAddress_idx" ON "text_trace_logs"("ipAddress");
+
+-- CreateIndex
+CREATE INDEX "text_trace_logs_createdAt_idx" ON "text_trace_logs"("createdAt");
+
+-- CreateIndex
+CREATE INDEX "text_trace_logs_status_idx" ON "text_trace_logs"("status");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "containers_name_key" ON "containers"("name");

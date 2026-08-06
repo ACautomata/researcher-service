@@ -4,6 +4,7 @@ import type { PrismaClient } from './generated/prisma/client'
 import { healthRouter } from './routes/health'
 import { authRouter } from './routes/auth'
 import { usersRouter } from './routes/users'
+import { traceLogsRouter } from './routes/traceLogs'
 import { createContainersRouter } from './routes/containers'
 import { createWikiRouter, type WikiRouterDeps } from './wiki/routes'
 import { createModelsRouter, type ModelsRouterDeps } from './models/routes'
@@ -45,6 +46,7 @@ export function createApp({ prisma, orchestrator, runtime, wiki, models }: AppDe
   app.use('/api', healthRouter)
   app.use('/api/v1/auth', authRouter)
   app.use('/api/v1/users', usersRouter)
+  app.use('/api/v1/trace-logs', traceLogsRouter)
   if (orchestrator) {
     // approve 端点依赖 runtime（docker exec），与 orchestrator 成对注入（#374）；缺 runtime 属装配错误。
     if (!runtime) {
