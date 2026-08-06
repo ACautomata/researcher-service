@@ -771,4 +771,96 @@ describe('#377 设备配对生命周期（GatewayBrowserDeviceAuthLifecycle 接�
     await vi.waitFor(() => expect(handlers.onClose).toHaveBeenLastCalledWith(1000, 'x', false, true))
     expect(client.start).not.toHaveBeenCalled()
   })
+
+  // ---- 多容器配对 bug 二段修复（生产实锤 gamma）：token MISMATCH 自愈 ----
+  // 根因：断连重连用失效 deviceToken → 网关 AUTH_DEVICE_TOKEN_MISMATCH（NON_RECOVERABLE，官方
+  // retry:false）→ 面板 onClose 只捕获 PAIRING_REQUIRED，对 token-mismatch 无分支 → 落 retry:false
+  // → useChatConnection 显示「自动重连已停止，请手动重连」（连接即停）。
+  // 修复：onClose 识别 AUTH_DEVICE_TOKEN_MISMATCH / AUTH_TOKEN_MISMATCH → 清失效 token → client.start()
+  // 重连（bootstrap 首连 → PAIRING_REQUIRED → 既有自动配对编排闭环），复用配对预算防无限循环。
+  function tokenMismatchError(code: 'AUTH_DEVICE_TOKEN_MISMATCH' | 'AUTH_TOKEN_MISMATCH') {
+    return new MockGatewayProtocolRequestError({
+      code: 'connect',
+      message: 'device token mismatch',
+      gatewayCode: 'ERR_UNAUTHORIZED',
+      details: { code },
+    })
+  }
+
+  // 辅助：先调 buildConnectPlan 让 gatewayChat 缓存 lastAuthPlan（recoverTokenMismatch/runAutoPairing
+  // 的 clearStoredToken 依赖它）——对齐既有 PAIRING 测试在 hello/close 前调 plan 的模式。
+  async function primeAuthPlan(client: InstanceType<typeof MockGatewayProtocolClient>) {
+    await client.opts.buildConnectPlan!({ nonce: 'n', generation: 1 })
+  }
+
+  it('MISMATCH 自愈：AUTH_DEVICE_TOKEN_MISMATCH → 清失效 token + 重连，onClose 不报连接即停', async () => {
+    const { client, handlers } = makeGateway()
+    await primeAuthPlan(client)
+    client.close({ code: 1000, reason: 'closed(1008)', connectFailure: { error: tokenMismatchError('AUTH_DEVICE_TOKEN_MISMATCH') } })
+    await vi.waitFor(() => expect(MockLifecycle.clearStoredToken).toHaveBeenCalled())
+    await vi.waitFor(() => expect(client.start).toHaveBeenCalled()) // 清 token 后 bootstrap 重连（→ PAIRING_REQUIRED 编排）
+    expect(handlers.onClose).not.toHaveBeenCalled() // 自愈进行中不向 UI 报「连接即停」
+  })
+
+  it('MISMATCH 自愈：AUTH_TOKEN_MISMATCH 同款（一并覆盖）', async () => {
+    const { client, handlers } = makeGateway()
+    await primeAuthPlan(client)
+    client.close({ code: 1000, reason: 'closed(1008)', connectFailure: { error: tokenMismatchError('AUTH_TOKEN_MISMATCH') } })
+    await vi.waitFor(() => expect(MockLifecycle.clearStoredToken).toHaveBeenCalled())
+    await vi.waitFor(() => expect(client.start).toHaveBeenCalled())
+    expect(handlers.onClose).not.toHaveBeenCalled()
+  })
+
+  it('MISMATCH 自愈后重连遇 PAIRING_REQUIRED → 走既有自动配对编排（approve → 重连）', async () => {
+    const { client } = makeGateway()
+    await primeAuthPlan(client)
+    client.close({ code: 1000, reason: 'closed(1008)', connectFailure: { error: tokenMismatchError('AUTH_DEVICE_TOKEN_MISMATCH') } })
+    await vi.waitFor(() => expect(client.start).toHaveBeenCalled())
+    client.start.mockClear()
+    // 清 token 后 bootstrap 重连 → 网关 PAIRING_REQUIRED → 既有自动配对编排接管
+    client.close({ code: 1000, reason: 'closed(1008)', connectFailure: { error: pairingError('req-new') } })
+    await vi.waitFor(() => expect(approvePairing).toHaveBeenCalledWith('alpha', 'req-new'))
+    await vi.waitFor(() => expect(client.start).toHaveBeenCalled())
+  })
+
+  it('MISMATCH 反复（清 token 重连仍 MISMATCH）达预算 → 停止自愈，报连接即停（防无限循环）', async () => {
+    const { client, handlers } = makeGateway()
+    await primeAuthPlan(client)
+    for (let i = 0; i < 3; i++) {
+      client.close({ code: 1000, reason: 'x', connectFailure: { error: tokenMismatchError('AUTH_DEVICE_TOKEN_MISMATCH') } })
+      await vi.waitFor(() => expect(client.start).toHaveBeenCalledTimes(i + 1))
+    }
+    // 第 4 次：预算用尽 → 不再自愈，转 UI 手动重连（连接即停）
+    client.close({ code: 1000, reason: 'x', connectFailure: { error: tokenMismatchError('AUTH_DEVICE_TOKEN_MISMATCH') } })
+    await vi.waitFor(() => expect(handlers.onClose).toHaveBeenLastCalledWith(1000, 'x', false, false))
+    expect(client.start).toHaveBeenCalledTimes(3)
+  })
+
+  // 真实时序回归（advisor 复核要求·锁死预算语义防回归）：pairingAttempts 由 onConnectHello 在
+  // acceptHello 成功（hello 带 deviceToken）后清零——onHello（无 token 的中间握手）不清。故：
+  //   恢复成功（最终拿到 token）→ 预算清 0，下次 MISMATCH 可重新自愈（满预算）；
+  //   恢复持续失败（永远拿不到 token）→ 预算不被中途 hello 误清，达阈值 give-up。
+  it('真实时序：MISMATCH→自愈→PAIRING→approve→hello-ok带token→acceptHello成功 → 预算清0，可再次满预算自愈', async () => {
+    const { client } = makeGateway()
+    await primeAuthPlan(client)
+    // ① MISMATCH → 自愈（清 token + 重连），budget=1
+    client.close({ code: 1000, reason: 'closed(1008)', connectFailure: { error: tokenMismatchError('AUTH_DEVICE_TOKEN_MISMATCH') } })
+    await vi.waitFor(() => expect(client.start).toHaveBeenCalledTimes(1))
+    // ② 中间握手 onHello（无 token）——不得清预算（否则 budget 永不到阈值、无 give-up 上限）
+    client.fireHello()
+    // ③ bootstrap 重连遇 PAIRING_REQUIRED → 既有编排 approve → 重连，budget=2
+    client.start.mockClear()
+    client.close({ code: 1000, reason: 'closed(1008)', connectFailure: { error: pairingError('req-final') } })
+    await vi.waitFor(() => expect(approvePairing).toHaveBeenCalledWith('alpha', 'req-final'))
+    await vi.waitFor(() => expect(client.start).toHaveBeenCalled())
+    // ④ approve 后 hello-ok 带新 deviceToken → acceptHello 成功 → 预算清 0（恢复彻底完成）
+    const plan = await client.opts.buildConnectPlan!({ nonce: 'n', generation: 2 })
+    client.fireConnectHello({ auth: { deviceToken: 'dt-new', role: 'operator', scopes: [] } }, plan)
+    await vi.waitFor(() => expect(MockLifecycle.acceptHello).toHaveBeenCalled())
+    // ⑤ 预算已清 0：再次 MISMATCH → 重新满预算自愈（不是「只剩 1 次」）——连续 3 次才 give-up
+    for (let i = 0; i < 3; i++) {
+      client.close({ code: 1000, reason: 'x', connectFailure: { error: tokenMismatchError('AUTH_DEVICE_TOKEN_MISMATCH') } })
+      await vi.waitFor(() => expect(client.start).toHaveBeenCalledTimes(2 + i))
+    }
+  })
 })
