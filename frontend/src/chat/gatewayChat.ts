@@ -13,7 +13,7 @@ import {
   type GatewayBrowserDeviceAuthPlan,
   type GatewayProtocolCloseContext,
 } from '@openclaw/gateway-client/browser'
-import { readPairingConnectErrorDetails } from '@openclaw/gateway-protocol/connect-error-details'
+import { readConnectErrorDetailCode, readPairingConnectErrorDetails } from '@openclaw/gateway-protocol/connect-error-details'
 import { createPanelTunnelSocket } from './tunnelSocket'
 import { ChatEventTranslator, type ChatFrame, type GatewayEventFrame } from './eventTranslate'
 import { NO_RETRY_CLOSE_CODES, WS_GATEWAY_UNAVAILABLE } from './closeCodes'
@@ -336,6 +336,24 @@ export function createGatewayChat(params: CreateGatewayChatParams): GatewayChat 
           void runAutoPairing(context, pairing.requestId)
           return
         }
+        // 多容器配对 bug 二段修复（生产实锤 gamma）：token MISMATCH 自愈。
+        // 断连重连用失效 deviceToken → 网关 AUTH_DEVICE_TOKEN_MISMATCH（NON_RECOVERABLE，官方
+        // retry:false；tokenMismatchIsTerminal 只对 AUTH_TOKEN_MISMATCH 生效、对 _DEVICE_ 变体无豁免）
+        // → 原实现只捕获 PAIRING_REQUIRED，对 token-mismatch 无分支 → 落 retry:false「连接即停」。
+        // 自愈：清失效 token → client.start() 重连（bootstrap 首连 → PAIRING_REQUIRED → 上方既有
+        // 配对编排 approve → hello-ok 拿新 token）。复用配对预算防「清 token 重连仍 MISMATCH」死循环
+        // （如网关侧 token 轮换与面板持久化持续失同步），预算用尽转 UI 手动重连。
+        const detailCode =
+          connErr instanceof GatewayProtocolRequestError ? readConnectErrorDetailCode(connErr.details) : null
+        if (detailCode === 'AUTH_DEVICE_TOKEN_MISMATCH' || detailCode === 'AUTH_TOKEN_MISMATCH') {
+          if (pairingAttempts >= MAX_PAIRING_ATTEMPTS) {
+            handlers.onClose(context.code, context.reason, false, false) // 预算用尽：如实报连接即停
+            return
+          }
+          pairingAttempts++
+          void recoverTokenMismatch(context)
+          return
+        }
         handlers.onClose(context.code, context.reason, decision.retry, false)
       }
     },
@@ -414,6 +432,22 @@ export function createGatewayChat(params: CreateGatewayChatParams): GatewayChat 
       client.start()
     } catch {
       notifyPairingFailed(context)
+    }
+  }
+
+  // token MISMATCH 自愈（多容器配对 bug 二段）：失效 deviceToken 清除 → client.start() 重连。
+  // 清 token 后 buildConnectPlan 回 bootstrap 首连（hasStoredDeviceToken=false），网关对未配对设备回
+  // PAIRING_REQUIRED → 上方既有配对编排 approve → hello-ok 下发新 deviceToken。不 directly approve——
+  // MISMATCH 时网关无 pending 配对请求、无 requestId 可 approve，须经 bootstrap 重新触发配对。
+  const recoverTokenMismatch = async (context: GatewayProtocolCloseContext) => {
+    try {
+      if (lastAuthPlan) await lifecycle.clearStoredToken(lastAuthPlan)
+      // 切容器已 stop()：清 token 在途时旧 gateway 被弃，不得再 start() 重建连接（ws 泄漏）。
+      if (isStopped) return
+      client.start()
+    } catch {
+      // 清 token 失败（localStorage/网络异常）：如实报连接即停，转 UI 手动重连
+      handlers.onClose(context.code, context.reason, false, false)
     }
   }
 
