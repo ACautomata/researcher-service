@@ -2,6 +2,9 @@
 // 消息流（#316：#340 拆分边界，props-in/emits-out 哑组件）。
 // ADR 0009 / #399：messages + approvals 双列表经 mergeTimeline（纯函数）合并为单一时间线——
 // 审批卡按到达序号 seq 插入消息流（流式占位强制沉底），不再沉在全部消息底部聚团。
+// #405-T2（#407）：anchorState（是否有待展示审批卡）——main 会话还没有任何 assistant 消息时，
+// 时间线尾部合成 SyntheticAnchor 虚拟气泡承载审批卡（淡色虚线边框、无文本、高度贴近卡片）；
+// 卡全 resolved 后虚拟气泡仍留存（时间线不跳动）。messages 数组零改动（#340 消息/审批分离）。
 // ADR 0009 / #400：窗口自动向下滚动（范式 B 上滚让位 + rAF 节流）——宿主在本组件内部，
 // 滚动容器即根元素 .stream；仅用户停留底部时跟随，上滚不抢滚动条，回到底部恢复；展开审批
 // 详情（detailOpen）不联动滚动；一帧内多次流式 delta 合并滚一次（rAF 节流，平滑不抖动）。
@@ -9,7 +12,7 @@
 // + 历史分页「加载更多」。thinking+回答保持同气泡、工具行挂 run 内（不扁平化）。
 import { onBeforeUnmount, onUpdated, ref, watch } from 'vue'
 import type { Msg, ApprovalItem } from '@/stores/chat'
-import { isApprovalEntry, mergeTimeline } from '@/chat/timeline'
+import { isApprovalEntry, isSyntheticAnchor, mergeTimeline, type TimelineEntry } from '@/chat/timeline'
 import { shouldFollowBottom } from '@/chat/scroll'
 import ChatMessageItem from '@/components/chat/ChatMessageItem.vue'
 import ApprovalCard from '@/components/chat/ApprovalCard.vue'
@@ -18,6 +21,9 @@ import ApprovalCard from '@/components/chat/ApprovalCard.vue'
 const props = defineProps<{
   messages: Msg[]
   approvals: ApprovalItem[]
+  // #405-T2：是否有待展示审批卡（ChatView 由 visibleApprovals 计算传入）——
+  // 无 assistant 消息时驱动时间线尾部合成 SyntheticAnchor 虚拟气泡承载审批卡
+  anchorState: boolean
   disconnected: boolean
   historyHasMore: boolean
   historyLoading: boolean
@@ -36,6 +42,14 @@ function onResolve(a: ApprovalItem, d: 'allow-once' | 'deny'): void {
 
 function onToggleDetail(a: ApprovalItem): void {
   emit('toggleApprovalDetail', a)
+}
+
+// 时间线条目 key 生成器：审批卡按 id、虚拟气泡恒为「synthetic」、消息按下标。
+// key 稳定性保证流式原地 mutation（useChatConnection 对消息对象就地改 raw/text）不重建 DOM——
+// 消息身份不变、key 不变，diff 复用节点；卡 key 与其 id 绑定，resolve 状态变化不换 key。
+function entryKey(e: TimelineEntry, i: number): string {
+  if (isSyntheticAnchor(e)) return 'synthetic'
+  return isApprovalEntry(e) ? `a-${e.id}` : `m-${i}`
 }
 
 // ---- 自动滚动（ADR 0009 / #400，范式 B 上滚让位 + rAF 节流）----
@@ -71,12 +85,14 @@ function scrollToBottom(): void {
 // 流式逐字追加会漏滚（#400 验收①第三场景，code-review 实证）。故补 layoutWatch：投影快照
 // 只追踪「渲染布局相关字段」（role/streaming/raw 决定气泡高度与占位沉底；seq 决定审批卡插入位），
 // detailOpen/tools/decision 等不属布局变化、天然不进快照——展开审批详情不联动滚动（验收④）
-// 由快照字段白名单保证，不因 deep watch 被破坏。watch 回调统一走 scrollToBottom（rAF 节流）。
+// 由快照字段白名单保证，不因 deep watch 被破坏。anchorState 决定虚拟气泡（SyntheticAnchor）
+// 是否合成——虚拟气泡出现/消失是布局变化，须入快照（#405-T2）。watch 回调统一走 scrollToBottom
+// （rAF 节流）。
 watch(
   () =>
     props.messages.map((m) => `${m.role}|${m.streaming}|${m.raw.length}|${m.raw}`).concat(
       props.approvals.map((a) => `${a.id}|${a.seq}|${a.status}`),
-    ),
+    ) + `|anchor:${props.anchorState}`,
   scrollToBottom,
 )
 onUpdated(scrollToBottom)
@@ -106,10 +122,14 @@ defineSlots<{
     >
       {{ historyLoading ? '加载中…' : '加载更多' }}
     </button>
-    <!-- ADR 0009：合并时间线单列表——审批卡按 seq 插入消息流（流式占位强制沉底） -->
-    <template v-for="(e, i) in mergeTimeline(messages, approvals)" :key="isApprovalEntry(e) ? `a-${e.id}` : `m-${i}`">
+    <!-- ADR 0009：合并时间线单列表——审批卡按 seq 插入消息流（流式占位强制沉底）；
+         #405-T2：anchorState 驱动尾部 SyntheticAnchor 虚拟气泡承载审批卡（无 assistant 消息时） -->
+    <template v-for="(e, i) in mergeTimeline(messages, approvals, anchorState)" :key="entryKey(e, i)">
+      <!-- 虚拟气泡（#405-T2）：无 assistant 消息时承载审批卡的合成落点——淡色虚线边框、
+           无文本、高度贴近卡片的虚拟助手气泡；卡全 resolved 后仍留存（时间线不跳动） -->
+      <div v-if="isSyntheticAnchor(e)" class="synthetic-anchor" data-test="synthetic-anchor" aria-hidden="true"></div>
       <!-- msg-item slot：父注入消息表现（默认 ChatMessageItem）；thinking/tool-line 透传给叶子 -->
-      <slot v-if="!isApprovalEntry(e)" name="msg-item" :msg="e">
+      <slot v-else-if="!isApprovalEntry(e)" name="msg-item" :msg="e">
         <ChatMessageItem :msg="e" />
       </slot>
       <!-- T06 权限审批卡（spec §9.4）：橙边待处理，处理后变淡显示结果 -->
@@ -129,4 +149,7 @@ defineSlots<{
 .stream { flex: 1; overflow-y: auto; padding: 18px; display: flex; flex-direction: column; gap: 14px; }
 .load-more { align-self: center; background: transparent; border: 1px dashed var(--el-border-color); border-radius: 8px; padding: 5px 18px; cursor: pointer; color: var(--el-text-color-secondary); font-size: 12.5px; }
 .load-more:disabled { cursor: default; opacity: .6; }
+/* #405-T2 虚拟助手气泡（SyntheticAnchor）：淡色虚线边框、无文本、高度贴近审批卡片的虚拟气泡——
+   无 assistant 消息时承载审批卡的稳定落点；卡全 resolved 后仍留存（时间线不跳动） */
+.synthetic-anchor { align-self: flex-start; min-height: 92px; border: 1.5px dashed var(--el-border-color-lighter); border-radius: 11px; background: var(--el-fill-color-lighter); }
 </style>
