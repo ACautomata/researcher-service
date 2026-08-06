@@ -19,12 +19,14 @@ EOF
 
 echo "[entrypoint] checking schema (users table present?)..."
 if node -e "$SCHEMA_SCRIPT"; then
-  echo "[entrypoint] schema already applied, skipping"
+  echo "[entrypoint] base schema already applied"
 else
   echo "[entrypoint] applying schema..."
   node scripts/apply-schema.mjs
   node -e "const D=require('better-sqlite3');const db=new D(process.env.DATABASE_URL.replace(/^file:/,''));db.exec('PRAGMA user_version=1');db.close()"
 fi
+echo "[entrypoint] applying incremental schema upgrades..."
+node scripts/upgrade-schema.mjs
 
 echo "[entrypoint] starting control plane on :8001..."
 exec node dist/server.js
