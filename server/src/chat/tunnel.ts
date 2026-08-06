@@ -36,6 +36,16 @@ import {
   TUNNEL_REVALIDATE_MS,
 } from './values'
 import type { GatewayConnector, GatewaySocket } from './gatewayConnector'
+import {
+  clientIp,
+  extractChatError,
+  extractChatFinal,
+  extractChatSend,
+  extractChatSendAck,
+  recordTextTrace,
+  type ChatRunContext,
+  type PendingChatSend,
+} from '../traceLogs/service'
 
 export interface TunnelDeps {
   prisma: PrismaClient
@@ -265,6 +275,10 @@ async function handleConnection(
   let gateway: GatewaySocket | null = null
   const pending: Array<string | Buffer> = []
   let pendingBytes = 0
+  const ipAddress = clientIp(req)
+  const pendingSends = new Map<string, PendingChatSend>()
+  const runContexts = new Map<string, ChatRunContext>()
+  const loggedRuns = new Set<string>()
   ws.on('message', (data, isBinary) => {
     // close() 后已缓冲的 TCP 数据仍可能触发 message → 丢弃，防 close 后继续转发/缓冲
     if (ws.readyState !== WebSocket.OPEN) return
@@ -272,6 +286,8 @@ async function handleConnection(
     // 有损 UTF-8 转文本（mojibake）违背「字节管道」契约。帧内容不做任何解析，二进制帧由对端协议
     // 机决策处置。
     const frame: string | Buffer = isBinary ? (data as Buffer) : data.toString()
+    const chatSend = extractChatSend(frame)
+    if (chatSend) pendingSends.set(chatSend.requestId, chatSend)
     if (gateway === null) {
       // 网关连接建立前缓冲（网关连好后 flush）。字节预算上限防恶意客户端在连接窗口内狂发帧
       // 导致内存无界增长（resource-exhaustion）——超限即策略违反 close(1008)。
@@ -381,6 +397,44 @@ async function handleConnection(
   //    断连/重连由浏览器侧官方协议机处理；后端只做字节管道。
   gateway.onMessage((data) => {
     if (ws.readyState !== WebSocket.OPEN) return
+    const ack = extractChatSendAck(data)
+    if (ack) {
+      const send = pendingSends.get(ack.requestId)
+      if (send) {
+        runContexts.set(ack.runId, { sessionKey: send.sessionKey, inputText: send.inputText })
+        pendingSends.delete(ack.requestId)
+      }
+    }
+    const final = extractChatFinal(data)
+    if (final && !loggedRuns.has(final.runId)) {
+      loggedRuns.add(final.runId)
+      const ctx = runContexts.get(final.runId)
+      void recordTextTrace(deps.prisma, {
+        user,
+        ipAddress,
+        containerName: name,
+        sessionKey: final.sessionKey ?? ctx?.sessionKey ?? null,
+        runId: final.runId,
+        inputText: ctx?.inputText ?? '',
+        outputText: final.outputText,
+        status: 'success',
+      }).catch(() => {})
+    }
+    const error = extractChatError(data)
+    if (error && !loggedRuns.has(error.runId)) {
+      loggedRuns.add(error.runId)
+      const ctx = runContexts.get(error.runId)
+      void recordTextTrace(deps.prisma, {
+        user,
+        ipAddress,
+        containerName: name,
+        sessionKey: error.sessionKey ?? ctx?.sessionKey ?? null,
+        runId: error.runId,
+        inputText: ctx?.inputText ?? '',
+        outputText: error.message,
+        status: 'failed',
+      }).catch(() => {})
+    }
     // #3 转发腿背压守卫（与 gatewayConnector.send 的 #4 P2 对称）：TUNNEL_SEND_BUDGET 此前只守
     // browser→gateway 方向；此腿（gateway→browser）浏览器慢读（后台标签页 TCP 接收窗口关闭）时
     // ws.send 内部 bufferedAmount 无界增长 → 面板进程堆耗尽（slow-reader 内存 DoS——第三轮 #4 意图

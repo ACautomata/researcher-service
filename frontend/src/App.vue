@@ -16,6 +16,7 @@ const isAdmin = computed(() => auth.role === 'admin')
     <router-link to="/categories">Categories</router-link>
     <router-link to="/models">Model 配置</router-link>
     <router-link v-if="isAdmin" to="/admin/users" data-test="nav-admin-users">账号管理</router-link>
+    <router-link v-if="isAdmin" to="/admin/trace-logs" data-test="nav-trace-logs">内容消息</router-link>
   </nav>
   <router-view />
 </template>

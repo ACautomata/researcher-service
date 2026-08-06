@@ -10,6 +10,7 @@ import WikiView from '@/views/WikiView.vue'
 import CategoriesView from '@/views/CategoriesView.vue'
 import ModelView from '@/views/ModelView.vue'
 import AdminUsersView from '@/views/AdminUsersView.vue'
+import TraceLogsView from '@/views/TraceLogsView.vue'
 
 const routes: RouteRecordRaw[] = [
   { path: '/login', name: 'login', component: LoginView, meta: { public: true } },
@@ -48,6 +49,12 @@ const routes: RouteRecordRaw[] = [
     path: '/admin/users',
     name: 'admin-users',
     component: AdminUsersView,
+    meta: { requiresAuth: true, requiresAdmin: true },
+  },
+  {
+    path: '/admin/trace-logs',
+    name: 'admin-trace-logs',
+    component: TraceLogsView,
     meta: { requiresAuth: true, requiresAdmin: true },
   },
 ]

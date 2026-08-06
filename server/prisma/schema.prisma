@@ -50,8 +50,45 @@ model User {
 
   containers    Container[]
   refreshTokens RefreshToken[]
+  textTraceLogs TextTraceLog[]
 
   @@map("users")
+}
+
+// ---------------------------------------------------------------------------
+// TextTraceLog - generated-content provenance/audit records.
+//
+// Each completed assistant generation gets one row that links the final output
+// to the triggering user, client IP, container/session/run, and a stable hash.
+// The text itself is not modified; this supports the "content message" and
+// "digital signature/hash" screenshots in the provenance sample document.
+// ---------------------------------------------------------------------------
+enum TextTraceStatus {
+  success
+  failed
+}
+
+model TextTraceLog {
+  id            String          @id @default(cuid())
+  traceId       String          @unique
+  user          User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId        String
+  username      String
+  ipAddress     String
+  containerName String?
+  sessionKey    String?
+  runId         String?
+  inputText     String          @default("")
+  outputText    String          @default("")
+  outputHash    String          @default("")
+  status        TextTraceStatus @default(success)
+  createdAt     DateTime        @default(now())
+
+  @@index([userId])
+  @@index([ipAddress])
+  @@index([createdAt])
+  @@index([status])
+  @@map("text_trace_logs")
 }
 
 // ---------------------------------------------------------------------------
