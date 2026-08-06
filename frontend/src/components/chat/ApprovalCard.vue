@@ -1,7 +1,10 @@
 <script setup lang="ts">
 // T06 权限审批卡（spec §9.4）：橙边待处理，处理后变淡显示结果。props-in/emits-out 哑组件
 // （#316：#340 拆分边界）；resolve 由父注入（#399 起并入 ChatStream 合并时间线渲染）。
+// #405-T3（#408）：subagent 审批卡带来源徽标（agentId 主显示，缺失降级「subagent」），
+// main 审批无徽标；纯表现，不动状态机。
 import type { ApprovalItem } from '@/stores/chat'
+import { isSubagentApproval } from '@/chat/subagentApproval'
 
 defineProps<{
   approval: ApprovalItem
@@ -12,6 +15,13 @@ const emit = defineEmits<{
   resolve: [approval: ApprovalItem, decision: 'allow-once' | 'deny']
   toggleDetail: [approval: ApprovalItem]
 }>()
+
+// 徽标文本：agentId 非空显示发起 subagent 的 agentId；缺失（sessionKey 形态判定的 subagent 卡）
+// 降级「subagent」泛化文案（#396 Q2 定案）。|| 与 isSubagentApproval 门控同为 truthy 判定——
+// 空串 ''（防御值）也走降级，不渲染空徽标。
+function sourceBadgeText(a: ApprovalItem): string {
+  return a.agentId || 'subagent'
+}
 
 // 审批卡副标题（说明 agent 请求执行 elevated 命令）
 function approvalSubtitle(a: ApprovalItem): string {
@@ -33,6 +43,9 @@ function resolvedTagText(a: ApprovalItem): string {
   <div class="approval" :class="{ resolved: approval.status === 'resolved' }" :data-test="`approval-${approval.id}`">
     <div class="a-head">
       ⚠️ 请求提升权限
+      <span v-if="isSubagentApproval(approval)" class="source-badge" data-test="approval-source">
+        <span class="source-dot" />{{ sourceBadgeText(approval) }}
+      </span>
       <span v-if="approval.status === 'resolved'" class="resolved-tag" :class="approval.decision">
         {{ resolvedTagText(approval) }}
       </span>
@@ -65,6 +78,8 @@ function resolvedTagText(a: ApprovalItem): string {
 <style scoped>
 .approval { align-self: flex-start; border: 1px solid var(--el-color-warning); background: var(--el-color-warning-light-9); border-radius: 11px; padding: 12px 14px; margin: 4px 0; max-width: 560px; }
 .approval .a-head { display: flex; align-items: center; gap: 8px; color: var(--el-color-warning); font-weight: 600; font-size: 13px; margin-bottom: 6px; }
+.approval .source-badge { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; font-weight: 600; color: var(--el-text-color-secondary); background: var(--el-fill-color); border: 1px solid var(--el-border-color); border-radius: 10px; padding: 1px 8px; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.approval .source-badge .source-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--el-color-warning); flex-shrink: 0; }
 .approval .resolved-tag { margin-left: auto; font-size: 11.5px; color: var(--el-color-success); font-weight: 600; }
 .approval .resolved-tag.deny { color: var(--el-color-danger); }
 .approval .resolved-tag.unknown { color: var(--el-text-color-secondary); }
