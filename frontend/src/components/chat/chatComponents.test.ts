@@ -173,6 +173,41 @@ describe('ApprovalCard', () => {
     expect(w.find('[data-test="approve-a1"]').exists()).toBe(false)
     expect(w.text()).toContain('已批准')
   })
+
+  // #405-T3（#408）：来源徽标——subagent 审批卡带 agentId 徽标，main 审批无徽标
+  it('subagent 审批卡（agentId 非空）→ 徽标显示 agentId 值', () => {
+    const w = mount(ApprovalCard, {
+      props: { approval: { ...card, agentId: 'sub-agent-7' }, disconnected: false },
+    })
+    const badge = w.find('[data-test="approval-source"]')
+    expect(badge.exists()).toBe(true)
+    expect(badge.text()).toContain('sub-agent-7')
+  })
+
+  it('subagent 审批卡（agentId 缺失、sessionKey 判定）→ 徽标降级「subagent」', () => {
+    const w = mount(ApprovalCard, {
+      props: { approval: { ...card, sessionKey: 'agent:main:subagent:abc-123' }, disconnected: false },
+    })
+    const badge = w.find('[data-test="approval-source"]')
+    expect(badge.exists()).toBe(true)
+    // 精确断言：降级标签是「subagent」而非 sessionKey 原样（toContain 会被子串掩盖）
+    expect(badge.text()).toEqual('subagent')
+  })
+
+  it('subagent 审批卡（agentId 空串 + subagent 形态 sessionKey）→ 徽标降级「subagent」', () => {
+    // 空串 agentId 视同缺失（0 信任）：门控靠 sessionKey 形态通过，文本走 || 降级
+    const w = mount(ApprovalCard, {
+      props: { approval: { ...card, agentId: '', sessionKey: 'agent:main:subagent:abc-123' }, disconnected: false },
+    })
+    const badge = w.find('[data-test="approval-source"]')
+    expect(badge.exists()).toBe(true)
+    expect(badge.text()).toEqual('subagent')
+  })
+
+  it('main 会话审批（agentId 空且非 subagent 形态）→ 无徽标', () => {
+    const w = mount(ApprovalCard, { props: { approval: card, disconnected: false } })
+    expect(w.find('[data-test="approval-source"]').exists()).toBe(false)
+  })
 })
 
 describe('ChatStream 合并时间线渲染（ADR 0009 / #399）', () => {
