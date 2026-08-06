@@ -180,9 +180,9 @@ function createRequestId(): string {
 
 export function createGatewayChat(params: CreateGatewayChatParams): GatewayChat {
   const { container, jwt, bootstrapToken, handlers } = params
-  // #377: 设备配对 lifecycle——缺省 createDeviceAuthLifecycle()（真实 localStorage 身份 + tokenStore）；
-  // 测试注入假 lifecycle（假 tokenStore / 内存 storage）断言配对编排（#377 acceptance）。
-  const lifecycle = params.deviceAuth ?? createDeviceAuthLifecycle()
+  // #377: 设备配对 lifecycle——缺省 createDeviceAuthLifecycle(container)（localStorage 身份 + 服务端
+  // DB tokenStore，多容器修复）；测试注入假 lifecycle（假 tokenStore）断言配对编排（#377 acceptance）。
+  const lifecycle = params.deviceAuth ?? createDeviceAuthLifecycle(container)
   const translator = new ChatEventTranslator()
   // F2: 连续重连失败计数（闭包）——重连成功（hello）时重置；达阈值 stop 自动重连转手动。
   // P1（code review）：计数器语义改为「按连接存活时长」——只有「未达 hello 的失败」（连接从未
@@ -242,7 +242,7 @@ export function createGatewayChat(params: CreateGatewayChatParams): GatewayChat 
       //        （签名 payload 含 GATEWAY_TOKEN，与 auth 一致；官方 bootstrapToken 参数会签名含
       //        bootstrapToken 的 payload 而输出 bootstrapToken 字段——两处都须改，不能只改 auth）
       // beta.6 打包版 buildPlan 无 challengeTs 参数（signedAtMs = nowMs ?? Date.now），只传 nonce。
-      const stored = await (params.hasStoredDeviceToken ?? (() => hasStoredDeviceTokenFor(CLIENT_INFO.id, OPERATOR_ROLE)))()
+      const stored = await (params.hasStoredDeviceToken ?? (() => hasStoredDeviceTokenFor(container, CLIENT_INFO.id, OPERATOR_ROLE)))()
       const authPlan = await lifecycle.buildPlan({
         client: CLIENT_INFO,
         role: OPERATOR_ROLE,

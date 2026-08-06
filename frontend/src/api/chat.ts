@@ -48,3 +48,24 @@ export async function getBootstrapToken(name: string): Promise<string> {
   if (!token) throw new Error('bootstrap-token 响应缺少 data.bootstrapToken（信封形状不匹配）')
   return token
 }
+
+// ---- 多容器配对 bug 修复（用户定案）：deviceToken 上移服务端 DB（Pairing.deviceToken 密文列，
+// 按 containerId 一对一），替代原 localStorage（键缺容器维度 → 跨容器共用 → AUTH_DEVICE_TOKEN_MISMATCH）。
+// GET 回该容器 token（未配对/网关重置 → null，前端走 bootstrap + 自动配对）；PUT 在 hello-ok 下发
+// token 后回传落库。归属门 + 越权/不存在同码 20040；身份密钥对仍留 localStorage（签名握手须本地）。
+
+// 该容器已配对的 deviceToken；未配对（库中无 token）→ null（前端据此走 bootstrap 首连）。
+export async function getDeviceToken(name: string): Promise<string | null> {
+  const data = await apiJson<{ token?: string | null }>(
+    `/api/v1/containers/${encodeURIComponent(name)}/pairing/token`,
+  )
+  return data?.token ?? null
+}
+
+// hello-ok 下发 deviceToken 后回传面板落库（AES 密文）。调用方（onConnectHello）只关心成败。
+export async function putDeviceToken(name: string, deviceToken: string): Promise<void> {
+  await apiJson<{ status: string }>(`/api/v1/containers/${encodeURIComponent(name)}/pairing/token`, {
+    method: 'PUT',
+    body: JSON.stringify({ deviceToken }),
+  })
+}
