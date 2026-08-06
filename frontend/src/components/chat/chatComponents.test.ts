@@ -140,6 +140,21 @@ describe('ChatMessageItem', () => {
     const w = mount(ChatMessageItem, { props: { msg: m } })
     expect(w.find('.cursor').exists()).toBe(false)
   })
+
+  it('settled assistant message shows AI reference notice', () => {
+    const m = newMsg('assistant', '完整回答')
+    m.streaming = false
+    const w = mount(ChatMessageItem, { props: { msg: m } })
+    expect(w.find('[data-test="ai-notice"]').text()).toBe('内容由 AI 生成，仅供参考')
+  })
+
+  it('streaming assistant and user messages do not show AI reference notice', () => {
+    const streamingAssistant = mount(ChatMessageItem, { props: { msg: newMsg('assistant', '生成中') } })
+    expect(streamingAssistant.find('[data-test="ai-notice"]').exists()).toBe(false)
+
+    const user = mount(ChatMessageItem, { props: { msg: newMsg('user', '用户输入') } })
+    expect(user.find('[data-test="ai-notice"]').exists()).toBe(false)
+  })
 })
 
 // 审批卡测试与 ChatStream 合并时间线测试共用的卡片基底
