@@ -52,6 +52,9 @@ const streaming = computed(() => chat.messages.some((m) => m.role === 'assistant
 // 会话时审批区恒空；非 subagent 会话显示归属卡 + 无 sessionKey 连接级卡 + subagent 卡；
 // 被过滤卡留存列表仅渲染层隐藏）
 const visibleApprovals = computed(() => chat.visibleApprovals)
+// #405-T2：是否有待展示审批卡——驱动 ChatStream 在 main 会话无 assistant 消息时合成
+// SyntheticAnchor 虚拟气泡承载审批卡（锚定三分支之外的稳定落点；卡全 resolved 后仍留存）
+const anchorState = computed(() => visibleApprovals.value.length > 0)
 
 // 删除会话：确认（ElMessageBox）由本壳注入（composable 内不持有 UI）
 async function confirmRemoveSession(): Promise<boolean> {
@@ -133,6 +136,7 @@ defineExpose({
       <ChatStream
         :messages="chat.messages"
         :approvals="visibleApprovals"
+        :anchor-state="anchorState"
         :disconnected="conn.disconnected.value"
         :history-has-more="chat.historyHasMore"
         :history-loading="chat.historyLoading"

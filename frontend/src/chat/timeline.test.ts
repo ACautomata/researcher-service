@@ -1,9 +1,11 @@
 // seam: timeline —— 双列表（messages + approvals）渲染期合并为单一时间线（ADR 0009 / #397 / #399）。
-// 好测试标准：只测外部行为——给定 messages[] + approvals[]，合并出的时间线顺序正确。不 assert
-// seqCounter 内部值、不测滚动内部实现。与 eventTranslate.test.ts 并列的纯函数测试最高接缝。
+// #405-T2（#407）：可选 anchorState（是否有待展示审批卡）——main 会话还没有任何助手消息时，
+// 时间线尾部合成 SyntheticAnchor 虚拟气泡承载审批卡（卡全 resolved 后仍留存，时间线不跳动）。
+// 好测试标准：只测外部行为——给定 messages[] + approvals[] + anchorState，合并出的时间线顺序正确。
+// 不 assert seqCounter 内部值、不测滚动内部实现。与 eventTranslate.test.ts 并列的纯函数测试最高接缝。
 import { describe, expect, it } from 'vitest'
 import { newMsg, type ApprovalItem, type Msg } from '@/stores/chat'
-import { mergeTimeline } from '@/chat/timeline'
+import { isSyntheticAnchor, mergeTimeline } from '@/chat/timeline'
 
 // ---- 测试工厂 ----
 
@@ -111,5 +113,68 @@ describe('mergeTimeline', () => {
     expect(out).not.toBe(shuffled) // 不返回原数组
     expect(JSON.stringify(shuffled)).toBe(before) // 调用方数组未被原地排序
     expect(out).toEqual([user, toolA, toolB, settled]) // 输出按 seq 排序
+  })
+})
+
+// ---- #405-T2（#407）：SyntheticAnchor 虚拟气泡（main 无 assistant 消息时承载审批卡）----
+describe('mergeTimeline anchorState（#405-T2 合成虚拟气泡）', () => {
+  it('无 assistant 消息 + anchorState=true → 尾部合成 SyntheticAnchor 承载审批卡', () => {
+    const out = mergeTimeline([user], [toolA], true)
+    expect(out.length).toBe(3)
+    const anchor = out[1]
+    expect(isSyntheticAnchor(anchor)).toBe(true) // 变体判别守卫
+    expect(out[2]).toBe(toolA) // 卡承载于虚拟气泡之后
+    expect(out[0]).toBe(user)
+  })
+
+  it('anchorState=true 但无待展示卡 → 不合成虚拟气泡（anchorState 与卡数量须同真）', () => {
+    expect(mergeTimeline([user], [], true)).toEqual([user])
+  })
+
+  it('无 assistant 消息 + anchorState=false → 不合成，卡仍插末尾（旧行为）', () => {
+    expect(mergeTimeline([user], [toolA], false)).toEqual([user, toolA])
+  })
+
+  it('无 assistant + anchorState=true + 多条卡：锚在最前、卡按 seq 序其后', () => {
+    const late = mkApproval({ id: 'a3', seq: 3 })
+    const out = mergeTimeline([user], [toolB, late, toolA], true)
+    expect(isSyntheticAnchor(out[1])).toBe(true)
+    expect(out.slice(2)).toEqual([toolA, toolB, late])
+  })
+
+  it('有已落定 assistant 气泡 → 即使 anchorState=true 也不合成虚拟气泡', () => {
+    const settled = settledAssistant('回答')
+    expect(mergeTimeline([user, settled], [toolA], true)).toEqual([user, toolA, settled])
+  })
+
+  it('有流式占位 → 即使 anchorState=true 也不合成虚拟气泡（占位即落点）', () => {
+    const streaming = newMsg('assistant')
+    expect(mergeTimeline([user, streaming], [toolA], true)).toEqual([user, toolA, streaming])
+  })
+
+  it('虚拟气泡在卡全 resolved 后仍留存（时间线不跳动）：anchorState 不因卡状态改变', () => {
+    const resolved = mkApproval({ id: 'a1', seq: 1, status: 'resolved', decision: 'allow-once' })
+    const out = mergeTimeline([user], [resolved], true)
+    expect(isSyntheticAnchor(out[1])).toBe(true)
+    expect(out[2]).toBe(resolved) // resolved 卡仍承载于锚内
+  })
+
+  it('agentId 不参与锚点计算：带/不带 agentId 的卡同序（锚定只看 seq）', () => {
+    const sub = mkApproval({ id: 's1', seq: 1, agentId: 'sub-agent-7' }) // subagent 发起卡
+    const main = mkApproval({ id: 'm2', seq: 2 }) // main 审批（agentId null）
+    const out = mergeTimeline([user], [main, sub], true)
+    expect(isSyntheticAnchor(out[1])).toBe(true)
+    expect(out.slice(2)).toEqual([sub, main]) // seq 序，与 agentId 无关
+  })
+
+  it('anchorState 缺省（undefined）→ 旧行为：无 assistant 时不合成', () => {
+    expect(mergeTimeline([user], [toolA])).toEqual([user, toolA])
+  })
+
+  it('messages 数组零改动（#340 消息/审批分离）：anchorState=true 不触碰输入数组', () => {
+    const input = [user]
+    const before = JSON.stringify(input)
+    mergeTimeline(input, [toolA], true)
+    expect(JSON.stringify(input)).toBe(before)
   })
 })

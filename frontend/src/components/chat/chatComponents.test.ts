@@ -222,6 +222,63 @@ describe('ChatStream 合并时间线渲染（ADR 0009 / #399）', () => {
         props: {
           messages: t.messages,
           approvals: t.approvals,
+          anchorState: false,
+          disconnected: false,
+          historyHasMore: false,
+          historyLoading: false,
+        },
+        slots: { 'msg-item': `<div data-test="msg"></div>` },
+      })
+      const seq = w
+        .findAll('.stream > *')
+        .map((el) => el.attributes('data-test'))
+        .filter(Boolean)
+      expect(seq).toEqual(t.expected)
+    })
+  }
+
+  // #405-T2（#407）：anchorState —— 无 assistant 消息时合成虚拟气泡承载审批卡
+  const anchorTests: Array<{ name: string; messages: Msg[]; approvals: ApprovalItem[]; anchorState: boolean; expected: string[] }> = [
+    {
+      name: '无 assistant 消息 + anchorState=true → 合成虚拟气泡承载审批卡（卡在锚后）',
+      messages: [newMsg('user', 'hi')],
+      approvals: [{ ...card, seq: 1 }],
+      anchorState: true,
+      expected: ['msg', 'synthetic-anchor', 'approval-a1'],
+    },
+    {
+      name: '无 assistant 消息 + anchorState=false → 不合成，卡直接插末尾',
+      messages: [newMsg('user', 'hi')],
+      approvals: [{ ...card, seq: 1 }],
+      anchorState: false,
+      expected: ['msg', 'approval-a1'],
+    },
+    {
+      name: '有已落定 assistant 气泡 + anchorState=true → 不合成虚拟气泡',
+      messages: (() => {
+        const m = newMsg('assistant', '回答')
+        m.streaming = false
+        return [newMsg('user', 'hi'), m]
+      })(),
+      approvals: [{ ...card, seq: 1 }],
+      anchorState: true,
+      expected: ['msg', 'approval-a1', 'msg'],
+    },
+    {
+      name: '无 assistant 消息 + anchorState=true + 卡全 resolved → 虚拟气泡仍留存',
+      messages: [newMsg('user', 'hi')],
+      approvals: [{ ...card, seq: 1, status: 'resolved', decision: 'allow-once' }],
+      anchorState: true,
+      expected: ['msg', 'synthetic-anchor', 'approval-a1'],
+    },
+  ]
+  for (const t of anchorTests) {
+    it(`${t.name}：data-test 序列 ${t.expected.join('→')}`, () => {
+      const w = mount(ChatStream, {
+        props: {
+          messages: t.messages,
+          approvals: t.approvals,
+          anchorState: t.anchorState,
           disconnected: false,
           historyHasMore: false,
           historyLoading: false,
@@ -252,6 +309,7 @@ describe('ChatStream 自动滚动（ADR 0009 / #400 范式 B + rAF 节流）', (
       props: {
         messages: [],
         approvals: [],
+        anchorState: false,
         disconnected: false,
         historyHasMore: false,
         historyLoading: false,
