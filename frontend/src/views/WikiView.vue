@@ -20,13 +20,24 @@ const { current, groups, activePath, draft, dirty, saving, saveSeq } = storeToRe
 const containers = ref<string[]>([])
 const graph = ref<WikiGraphDTO>({ nodes: [], edges: [] })
 const graphOpen = ref(true)
+let graphRequestSeq = 0
 
 async function refreshGraph(): Promise<void> {
-  if (!current.value) return
-  try {
-    graph.value = await getGraph(current.value)
-  } catch {
+  const requestSeq = ++graphRequestSeq
+  const container = current.value
+  if (!container) {
     graph.value = { nodes: [], edges: [] }
+    return
+  }
+  try {
+    const nextGraph = await getGraph(container)
+    if (requestSeq === graphRequestSeq && current.value === container) {
+      graph.value = nextGraph
+    }
+  } catch {
+    if (requestSeq === graphRequestSeq && current.value === container) {
+      graph.value = { nodes: [], edges: [] }
+    }
   }
 }
 

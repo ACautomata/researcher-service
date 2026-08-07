@@ -43,6 +43,12 @@ const TREE = {
 }
 const GRAPH = { nodes: [{ id: 'concepts/a.md', title: 'A' }], edges: [] }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((done) => { resolve = done })
+  return { promise, resolve }
+}
+
 const stubs = {
   FileTree: {
     name: 'FileTree',
@@ -139,6 +145,28 @@ describe('WikiView', () => {
     await flushPromises()
     expect(useWikiStore().current).toBe('other')
     expect(getTree).toHaveBeenCalledWith('other')
+  })
+
+  it('keeps the latest graph when container responses arrive out of order', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+    const otherGraph = deferred<typeof GRAPH>()
+    const demoGraph = { nodes: [{ id: 'concepts/latest.md', title: 'Latest' }], edges: [] }
+    ;(getGraph as ReturnType<typeof vi.fn>).mockImplementation(
+      (name: string) => name === 'other' ? otherGraph.promise : Promise.resolve(demoGraph),
+    )
+
+    const select = wrapper.find('[data-test="container-switch"]')
+    await select.setValue('other')
+    await flushPromises()
+    expect(getGraph).toHaveBeenCalledWith('other')
+    await select.setValue('demo')
+    await flushPromises()
+    expect(wrapper.findComponent({ name: 'WikiGraph' }).props('graph')).toEqual(demoGraph)
+
+    otherGraph.resolve(GRAPH)
+    await flushPromises()
+    expect(wrapper.findComponent({ name: 'WikiGraph' }).props('graph')).toEqual(demoGraph)
   })
 
   it('shows an error when switching container fails', async () => {
