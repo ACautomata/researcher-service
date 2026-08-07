@@ -7,6 +7,7 @@ import { mount } from '@vue/test-utils'
 import { nextTick, reactive } from 'vue'
 import { newMsg, type ApprovalItem, type Msg } from '@/stores/chat'
 import ChatSidebar from '@/components/chat/ChatSidebar.vue'
+import ChatHeader from '@/components/chat/ChatHeader.vue'
 import ChatComposer from '@/components/chat/ChatComposer.vue'
 import ChatMessageItem from '@/components/chat/ChatMessageItem.vue'
 import ApprovalCard from '@/components/chat/ApprovalCard.vue'
@@ -23,6 +24,17 @@ const INSTANCE = {
   pairing: { status: 'unpaired' },
 }
 const SESSION = { session_key: 'sk-1', title: '文献综述', updated_at: '' }
+
+describe('ChatHeader', () => {
+  it('长标题保留完整提示，容器与连接状态保持独立标签', () => {
+    const title = '一个非常长的会话标题，用于验证窄窗口下不会挤压容器和连接状态'
+    const w = mount(ChatHeader, {
+      props: { title, container: 'research-container', connecting: true },
+    })
+    expect(w.get('[data-test="chat-title"]').attributes('title')).toBe(title)
+    expect(w.findAll('.tag').map((tag) => tag.text())).toEqual(['research-container', '连接中…'])
+  })
+})
 
 describe('ChatSidebar', () => {
   it('渲染容器/会话 + 选中态 + 删除/新建 emits', async () => {
@@ -461,6 +473,21 @@ describe('ChatStream 自动滚动（ADR 0009 / #400 范式 B + rAF 节流）', (
     expect(rafSpy).toHaveBeenCalledTimes(1) // 一帧只调度一次
     await tick()
     expect(stream.scrollTop).toBe(900)
+  })
+
+  it('正文等长替换不创建完整文本快照或触发滚动', async () => {
+    vi.useFakeTimers()
+    const m = reactive(newMsg('assistant', '旧字'))
+    const w = mountStream({ messages: [m] })
+    stubGeometry()
+    userScrollTo(892)
+    await tick()
+    spyRaf()
+    m.raw = '新字'
+    m.text = m.raw
+    await nextTick()
+    expect(rafSpy).not.toHaveBeenCalled()
+    w.unmount()
   })
 
   it('上滚离开底部 → 新内容不抢滚动条', async () => {

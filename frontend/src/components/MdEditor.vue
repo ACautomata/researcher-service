@@ -22,6 +22,14 @@ const host = ref<HTMLDivElement | null>(null)
 let editor: Editor | null = null
 // 受控重载期间抑制 update 冒泡（replaceAll 会触发 markdownUpdated，不能当成用户编辑回写）
 let suppress = false
+// 用户最近一次向父级发出的 markdown。父级把同一值写回 content 时属于受控回显，编辑器
+// 已经包含该内容，不能再 replaceAll 全文重建（会丢光标并让大文档每次击键都 O(N) 重载）。
+let lastEmitted: string | null = null
+
+function emitMarkdown(markdown: string): void {
+  lastEmitted = markdown
+  emit('update', markdown)
+}
 
 async function build(initial: string): Promise<void> {
   if (!host.value) return
@@ -32,7 +40,7 @@ async function build(initial: string): Promise<void> {
       ctx.set(editorViewOptionsCtx, { editable: () => !props.readonly })
       ctx.get(listenerCtx).markdownUpdated((_ctx, markdown) => {
         if (suppress) return
-        emit('update', markdown)
+        emitMarkdown(markdown)
       })
     })
     // 上游 @milkdown/theme-nord 把 nord 的 .d.ts 标为 (ctx)=>void，与 use() 要求的
@@ -51,15 +59,30 @@ watch(
   () => props.content,
   (next, prev) => {
     if (!editor || next === prev) return
+    if (next === lastEmitted) {
+      lastEmitted = null
+      return
+    }
+    lastEmitted = null
     suppress = true
-    editor.action(replaceAll(next))
-    suppress = false
+    try {
+      editor.action(replaceAll(next))
+    } finally {
+      suppress = false
+    }
   },
 )
 
-// 测试/调试 seam：以 markdown 注入（模拟用户输入后的 markdownUpdated）
+// 测试/调试 seam：让编辑器先包含新 markdown，再按用户编辑语义发出 update。
 function _emitMarkdown(markdown: string): void {
-  emit('update', markdown)
+  if (!editor) return
+  suppress = true
+  try {
+    editor.action(replaceAll(markdown))
+  } finally {
+    suppress = false
+  }
+  emitMarkdown(markdown)
 }
 
 onBeforeUnmount(() => {
