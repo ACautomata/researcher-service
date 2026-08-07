@@ -18,6 +18,13 @@ describe('MarkdownRenderer', () => {
     expect(w.find('.markdown-body pre.hljs').exists()).toBe(true)
   })
 
+  it('表格包在消息级横向滚动容器内', () => {
+    const table = '| 第一列 | 第二列 |\n| --- | --- |\n| 内容 | 内容 |'
+    const w = mount(MarkdownRenderer, { props: { text: table, streaming: false } })
+    expect(w.find('.markdown-body .table-scroll > table').exists()).toBe(true)
+    expect(w.findAll('.markdown-body .table-scroll').length).toBe(1)
+  })
+
   it('XSS 载荷不进入 DOM（html:false 转义）', () => {
     const w = mount(MarkdownRenderer, { props: { text: '<script>alert(1)</script>', streaming: false } })
     expect(w.find('.markdown-body script').exists()).toBe(false)
