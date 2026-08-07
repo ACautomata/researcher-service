@@ -1,7 +1,7 @@
 // seam: 路由守卫决策——未认证分「确认失效踢登录」与「瞬态放行」；requiresAdmin 分「非 admin 踢回容器页」
 // （spec §9.1/§9.2 + #10 + #340-D #328）。
 import { describe, expect, it } from 'vitest'
-import router, { decideGuard } from '@/router/index'
+import router, { decideGuard, routes } from '@/router/index'
 
 const authed = { isAuthenticated: true, refreshExhausted: false, role: 'user' }
 const authedAdmin = { isAuthenticated: true, refreshExhausted: false, role: 'admin' }
@@ -19,6 +19,7 @@ describe('页面路由按需加载', () => {
       'containers',
       'login',
       'models',
+      'not-found',
       'wiki',
     ])
     expect(records.every((route) => typeof route.components?.default === 'function')).toBe(true)
@@ -66,5 +67,17 @@ describe('decideGuard（守卫决策纯函数）', () => {
   it('普通路由不受 requiresAdmin 影响（默认 false）', () => {
     expect(decideGuard(true, authed)).toBeUndefined()
     expect(decideGuard(true, authedAdmin)).toBeUndefined()
+  })
+})
+
+describe('route fallback', () => {
+  it('maps unknown paths to an authenticated not-found page', () => {
+    const fallback = routes.find((route) => route.name === 'not-found')
+    expect(fallback).toMatchObject({
+      path: '/:pathMatch(.*)*',
+      meta: { requiresAuth: true },
+    })
+    expect(fallback?.component).toBeTypeOf('function')
+    expect(router.resolve('/definitely-missing').name).toBe('not-found')
   })
 })
