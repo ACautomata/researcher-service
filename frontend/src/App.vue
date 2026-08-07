@@ -23,30 +23,43 @@ async function handleLogout(): Promise<void> {
 </script>
 
 <template>
-  <nav v-if="$route.name !== 'login'" class="app-nav">
-    <router-link to="/">容器管理</router-link>
-    <router-link to="/chat">对话</router-link>
-    <router-link to="/wiki">Wiki</router-link>
-    <router-link to="/categories">Categories</router-link>
-    <router-link to="/models">Model 配置</router-link>
-    <router-link v-if="isAdmin" to="/admin/users" data-test="nav-admin-users">账号管理</router-link>
-    <router-link v-if="isAdmin" to="/admin/trace-logs" data-test="nav-trace-logs">内容消息</router-link>
-    <button
-      type="button"
-      class="nav-logout"
-      data-test="nav-logout"
-      :disabled="loggingOut"
-      @click="handleLogout"
-    >
-      {{ loggingOut ? '正在退出…' : '退出登录' }}
-    </button>
-  </nav>
-  <router-view />
+<div class="app-shell" :class="{ public: $route.name === 'login' }">
+    <nav v-if="$route.name !== 'login'" class="app-nav">
+      <router-link to="/">容器管理</router-link>
+      <router-link to="/chat">对话</router-link>
+      <router-link to="/wiki">Wiki</router-link>
+      <router-link to="/categories">Categories</router-link>
+      <router-link to="/models">Model 配置</router-link>
+      <router-link v-if="isAdmin" to="/admin/users" data-test="nav-admin-users">账号管理</router-link>
+      <router-link v-if="isAdmin" to="/admin/trace-logs" data-test="nav-trace-logs">内容消息</router-link>
+      <button
+        type="button"
+        class="nav-logout"
+        data-test="nav-logout"
+        :disabled="loggingOut"
+        @click="handleLogout"
+      >
+        {{ loggingOut ? '正在退出…' : '退出登录' }}
+      </button>
+    </nav>
+    <div class="app-content">
+      <router-view />
+    </div>
+  </div>
 </template>
 
 <style scoped>
+.app-shell {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100svh;
+  min-height: 0;
+  overflow: hidden;
+}
 .app-nav {
   display: flex;
+  flex: none;
   gap: 18px;
   padding: 10px 20px;
   border-bottom: 1px solid var(--el-border-color);
@@ -61,6 +74,12 @@ async function handleLogout(): Promise<void> {
   color: var(--el-color-primary);
   font-weight: 600;
 }
+.app-content {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
 .nav-logout {
   margin-left: auto;
   padding: 0;

@@ -178,7 +178,7 @@ defineExpose({
 </template>
 
 <style scoped>
-.chat { display: flex; height: calc(100vh - 40px); }
+.chat { display: flex; height: 100%; min-height: 0; }
 .main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 .error { margin: 0; padding: 8px 18px; color: var(--el-color-danger); background: var(--el-color-danger-light-9); }
 .error .reconnect { margin-left: 10px; background: transparent; border: 1px solid currentColor; border-radius: 6px; padding: 1px 10px; cursor: pointer; color: inherit; font-size: 12.5px; }
