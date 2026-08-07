@@ -54,6 +54,39 @@ describe('LoginView', () => {
     expect(useAuthStore().isAuthenticated).toBe(true)
   })
 
+  it('#419-2: 输入框内回车（原生 form submit）即可提交登录', async () => {
+    const w = mountLogin()
+    await w.find('input[type="text"]').setValue('alice')
+    await w.find('input[type="password"]').setValue('pw123456')
+    await w.find('form').trigger('submit') // 回车提交 = form submit 事件
+    await flushPromises()
+    expect(global.fetch).toHaveBeenCalledWith(
+      '/api/v1/auth/login',
+      expect.objectContaining({ method: 'POST' }),
+    )
+    expect(useAuthStore().isAuthenticated).toBe(true)
+  })
+
+  it('#419-2: 提交中按钮 loading/禁用，重复点击不重复提交', async () => {
+    // 首次登录请求悬挂（pending）期间：按钮禁用（防重复点击），再触发点击不发起第二个请求
+    let resolveLogin!: (v: unknown) => void
+    global.fetch = vi.fn().mockReturnValue(
+      new Promise((resolve) => {
+        resolveLogin = resolve
+      }),
+    )
+    const w = mountLogin()
+    await w.find('input[type="text"]').setValue('alice')
+    await w.find('input[type="password"]').setValue('pw123456')
+    await w.find('button').trigger('click')
+    await w.find('button').trigger('click') // 提交中重复点击
+    expect((global.fetch as ReturnType<typeof vi.fn>).mock.calls.length).toBe(1)
+    // 请求完成后按钮恢复可用
+    resolveLogin({ ok: true, json: async () => ({ access: 'tk', refresh: 'rf' }) })
+    await flushPromises()
+    expect(w.find('button').attributes('disabled')).toBeUndefined()
+  })
+
   it('登录失败显示后端真实错误而非写死文案', async () => {
     // codex P2-8 + BUG 修复：登录失败须显示后端真实错误（api/errors.ts 透传），
     // 而非写死「登录失败」掩盖真实原因。

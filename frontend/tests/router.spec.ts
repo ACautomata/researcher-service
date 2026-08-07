@@ -43,6 +43,17 @@ describe('router guard', () => {
     expect(router.currentRoute.value.name).toBe('containers')
   })
 
+  it('redirects authenticated visits to /login back to the home page (#419-1)', async () => {
+    // 已登录用户不应停留在登录页（守卫缺 public 分支时 /login 对已登录用户不跳走）。
+    // 先进入受保护路由（守卫放行），再从 containers 访问 /login → 应被弹回首页。
+    const auth = useAuthStore()
+    auth.token = unexpiredJwt()
+    await router.push('/')
+    expect(router.currentRoute.value.name).toBe('containers')
+    await router.push('/login')
+    expect(router.currentRoute.value.name).toBe('containers')
+  })
+
   it('hydrates token from refresh cookie on first navigation', async () => {
     // codex P2-2：刷新页面后用 httpOnly refresh cookie 换 access 恢复登录态
     global.fetch = vi.fn().mockResolvedValue({

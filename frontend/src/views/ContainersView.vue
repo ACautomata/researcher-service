@@ -30,20 +30,49 @@ let pollTimer: ReturnType<typeof setInterval> | null = null
 // codex R3 :89：在飞请求标记——一次 list 超过 3s（多个不可达实例串行 2s 健康探测）时
 // 跳过下一 tick，避免叠加并发 Docker/health 请求、乱序完成覆盖较新状态。
 let refreshInFlight = false
+// #419-6：标签页隐藏时暂停轮询（后台 3s 轮询无意义且浪费）；可见时恢复 + 立即刷新一次
+let pageVisible = true
+
+function startPolling(): void {
+  if (pollTimer !== null) return
+  pollTimer = setInterval(() => {
+    void refresh()
+  }, POLL_INTERVAL_MS)
+}
+
+function stopPolling(): void {
+  if (pollTimer !== null) {
+    clearInterval(pollTimer)
+    pollTimer = null
+  }
+}
+
+function onVisibilityChange(): void {
+  pageVisible = document.visibilityState === 'visible'
+  if (pageVisible) {
+    void refresh() // 回前台立即刷新，补上隐藏期间的运行时变化
+    startPolling()
+  } else {
+    stopPolling()
+  }
+}
 
 async function refresh(): Promise<void> {
   if (refreshInFlight) return // codex R3 :89：上一次未完成则跳过本次
   refreshInFlight = true
   loading.value = true
-  errorMsg.value = ''
+  // #419-6：错误文案不清空重写——同文案期间 errorMsg 值不变，v-if 节点不重建（不闪烁）；
+  // 成功才清空（错误消失），文案变化才覆盖。
   try {
     instances.value = await listInstances()
     // 批量同步：后端 list 已携带 pairing 快照，避免 N+1 请求
     pairings.value = Object.fromEntries(
       instances.value.map((inst) => [inst.name, inst.pairing]),
     )
+    errorMsg.value = ''
   } catch (e) {
-    errorMsg.value = (e as Error).message
+    const msg = (e as Error).message
+    if (msg !== errorMsg.value) errorMsg.value = msg
   } finally {
     loading.value = false
     refreshInFlight = false
@@ -131,17 +160,14 @@ async function confirmRemove(name: string): Promise<void> {
 
 onMounted(() => {
   void refresh()
-  // codex R2 :78：周期性刷新，反映 runtime 状态/健康变化
-  pollTimer = setInterval(() => {
-    void refresh()
-  }, POLL_INTERVAL_MS)
+  startPolling()
+  // #419-6：监听标签页可见性——隐藏停轮询、回前台恢复并立即刷新（onVisibilityChange 内）
+  document.addEventListener('visibilitychange', onVisibilityChange)
 })
 
 onBeforeUnmount(() => {
-  if (pollTimer !== null) {
-    clearInterval(pollTimer)
-    pollTimer = null
-  }
+  stopPolling()
+  document.removeEventListener('visibilitychange', onVisibilityChange)
 })
 
 // 暴露删除/配对动作 + 配对状态查询：el-table row slot 在测试 stub 下不便点击，暴露供测试与潜在父组件触发

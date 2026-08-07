@@ -130,6 +130,19 @@ describe('api client', () => {
     expect(await apiJson<{ a: number }>('/x')).toEqual({ a: 1 })
   })
 
+  it('apiJson resolves undefined on 204 No Content empty body (#419-5)', async () => {
+    // 204 空体 resp.json() 会 reject（No Content 语义）——apiJson 须短路返回，不读 body。
+    // 断言 json 未被调用：实现若仍调 json()（即便 catch 兜底）本用例即失败。
+    const jsonSpy = vi.fn().mockRejectedValue(new Error('json should not be called on 204'))
+    ;(globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
+      status: 204,
+      ok: true,
+      json: jsonSpy,
+    } as unknown as Response)
+    expect(await apiJson<void>('/x')).toBeUndefined()
+    expect(jsonSpy).not.toHaveBeenCalled()
+  })
+
   it('apiJson throws ApiError with backend detail on non-2xx', async () => {
     ;(globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
       mockResp({ detail: '非法 name' }, 400),

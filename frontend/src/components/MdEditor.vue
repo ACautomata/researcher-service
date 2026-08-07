@@ -2,7 +2,8 @@
 // MdEditor —— Milkdown Typora 式实时渲染 md 编辑器（spec §9.6 / issue #45）。
 // content prop 受控：打开新页（content 变化）时 replaceAll 重载；用户编辑经
 // listenerCtx.markdownUpdated 取最新 markdown 冒泡 update（供 store 防抖自动保存）。
-// wikilink/frontmatter 经 remark 插件渲染（r30 选型）。
+// wikilink（[[foo]]）/ frontmatter 以普通文本渲染（Milkdown commonmark/gfm 未特殊处理，
+// #419-3：依赖已移除，注释与实现对齐）。
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { Editor, defaultValueCtx, editorViewOptionsCtx, rootCtx } from '@milkdown/core'
 import { commonmark } from '@milkdown/preset-commonmark'
