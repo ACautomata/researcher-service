@@ -15,9 +15,6 @@ let network: Network | null = null
 let nodeData: DataSet<NodeItem> | null = null
 let edgeData: DataSet<EdgeItem> | null = null
 
-// 高亮当前节点的强调色（与 Element Plus primary 一致）
-const ACTIVE_COLOR = '#409eff'
-
 interface NodeItem {
   id: string
   label?: string
@@ -31,12 +28,17 @@ interface EdgeItem {
   to: string
 }
 
+function cssVar(name: string, fallback: string): string {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback
+}
+
 function toNodes(): NodeItem[] {
+  const activeColor = cssVar('--el-color-primary', '#409eff')
   return props.graph.nodes.map((n) => ({
     id: n.id,
     label: n.title,
     // 当前页高亮描边；ghost 虚节点淡色
-    color: n.id === props.activePath ? ACTIVE_COLOR : undefined,
+    color: n.id === props.activePath ? activeColor : undefined,
     borderWidth: n.id === props.activePath ? 3 : 1,
   }))
 }
@@ -52,6 +54,8 @@ function toEdges(): EdgeItem[] {
 
 function rebuild(): void {
   if (!host.value) return
+  const textColor = cssVar('--el-text-color-regular', '#606266')
+  const borderColor = cssVar('--el-border-color', '#c0c4cc')
   network?.destroy()
   nodeData = new DataSet<NodeItem>(toNodes())
   edgeData = new DataSet<EdgeItem>(toEdges())
@@ -59,8 +63,8 @@ function rebuild(): void {
     host.value,
     { nodes: nodeData as never, edges: edgeData as never },
     {
-      nodes: { shape: 'dot', size: 12, font: { size: 12 } },
-      edges: { arrows: 'to', color: '#c0c4cc' },
+      nodes: { shape: 'dot', size: 12, font: { size: 12, color: textColor } },
+      edges: { arrows: 'to', color: borderColor },
       physics: { barnesHut: { gravitationalConstant: -8000 } },
     },
   )

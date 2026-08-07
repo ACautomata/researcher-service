@@ -38,6 +38,35 @@ describe('MdEditor', () => {
     wrapper.unmount()
   })
 
+  it('skips parent echoes after consecutive edits without rebuilding the document DOM', async () => {
+    const wrapper = mount(MdEditor, { props: { content: '# 初始' } })
+    await flushPromises()
+    const vm = wrapper.vm as unknown as { _emitMarkdown: (m: string) => void }
+
+    vm._emitMarkdown('# 第一次编辑')
+    await flushPromises()
+    const firstHeading = wrapper.find('h1').element
+    expect(wrapper.find('h1').text()).toBe('第一次编辑')
+    await wrapper.setProps({ content: '# 第一次编辑' })
+    await flushPromises()
+    expect(wrapper.find('h1').element).toBe(firstHeading)
+
+    vm._emitMarkdown('# 第二次编辑')
+    await flushPromises()
+    const secondHeading = wrapper.find('h1').element
+    expect(wrapper.find('h1').text()).toBe('第二次编辑')
+    await wrapper.setProps({ content: '# 第二次编辑' })
+    await flushPromises()
+    expect(wrapper.find('h1').element).toBe(secondHeading)
+
+    // lastEmitted 已在父级回显时消费；真正打开另一页仍必须 replaceAll。
+    await wrapper.setProps({ content: '# 另一页' })
+    await flushPromises()
+    expect(wrapper.find('h1').text()).toBe('另一页')
+    expect(wrapper.find('h1').element).not.toBe(secondHeading)
+    wrapper.unmount()
+  })
+
   it('is editable by default (contenteditable=true)', async () => {
     const wrapper = mount(MdEditor, { props: { content: '# A' } })
     await flushPromises()

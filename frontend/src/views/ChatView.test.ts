@@ -434,7 +434,7 @@ describe('ChatView', () => {
     expect(w.find('[data-test="stream"]').text()).not.toContain('<thinking>')
   })
 
-  it('会话历史加载：切会话 → gateway.getHistory 渲染', async () => {
+  it('会话历史加载：首次与切换会话使用固定页大小并渲染历史', async () => {
     const w = mount(ChatView)
     await flushPromises()
     const gw = MockGatewayChat.last!
@@ -444,6 +444,7 @@ describe('ChatView', () => {
     gw.send.mockResolvedValue(undefined)
     gw.fireReady()
     await flushPromises() // 选中 sk-1 + loadHistory(空)
+    expect(gw.getHistory).toHaveBeenLastCalledWith('sk-1', 50)
     gw.getHistory.mockResolvedValue({
       messages: [{ role: 'assistant', text: '历史回答' }],
       hasMore: false,
@@ -451,7 +452,7 @@ describe('ChatView', () => {
     })
     await w.find('[data-test="session-sk-2"]').trigger('click')
     await flushPromises()
-    expect(gw.getHistory).toHaveBeenCalled()
+    expect(gw.getHistory).toHaveBeenLastCalledWith('sk-2', 50)
     expect(w.find('[data-test="stream"]').text()).toContain('历史回答')
   })
 
