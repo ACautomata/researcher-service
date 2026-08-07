@@ -55,6 +55,13 @@ describe('renderMarkdown 基本语法', () => {
     expect(html).toContain('rel="noopener"')
   })
 
+  it('裸 URL 自动转为可点击链接', () => {
+    const html = renderMarkdown('参考 https://arxiv.org/abs/1512.03385')
+    expect(html).toContain('<a href="https://arxiv.org/abs/1512.03385"')
+    expect(html).toContain('target="_blank"')
+    expect(html).toContain('rel="noopener"')
+  })
+
   it('表格', () => {
     const html = renderMarkdown('| a | b |\n| - | - |\n| 1 | 2 |')
     expect(html).toContain('<table>')

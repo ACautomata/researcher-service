@@ -33,7 +33,7 @@ hljs.registerLanguage('css', css)
 // highlight 回调对已知语言走 hljs 高亮、未知/未闭合代码块退转义文本（流式半成品不崩）。
 const md = new MarkdownIt({
   html: false,
-  linkify: false,
+  linkify: true,
   highlight(str: string, lang: string): string {
     if (lang && hljs.getLanguage(lang)) {
       try {
