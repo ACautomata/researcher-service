@@ -42,6 +42,11 @@ describe('ChatSidebar', () => {
     expect(w.emitted('removeSession')?.[0]).toEqual(['sk-1'])
     await w.find('[data-test="container-demo"]').trigger('click')
     expect(w.emitted('selectContainer')?.[0]).toEqual(['demo'])
+    await w.find('[data-test="session-sk-1"]').trigger('click')
+    expect(w.emitted('selectSession')?.[0]).toEqual(['sk-1'])
+    expect(w.get('[data-test="container-demo"]').element.tagName).toBe('BUTTON')
+    expect(w.get('[data-test="session-sk-1"]').element.tagName).toBe('BUTTON')
+    expect(w.get('[data-test="delete-session-sk-1"]').element.tagName).toBe('BUTTON')
   })
 })
 
