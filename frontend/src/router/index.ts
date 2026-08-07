@@ -12,7 +12,7 @@ import ModelView from '@/views/ModelView.vue'
 import AdminUsersView from '@/views/AdminUsersView.vue'
 import TraceLogsView from '@/views/TraceLogsView.vue'
 
-const routes: RouteRecordRaw[] = [
+export const routes: RouteRecordRaw[] = [
   { path: '/login', name: 'login', component: LoginView, meta: { public: true } },
   {
     path: '/',
@@ -56,6 +56,12 @@ const routes: RouteRecordRaw[] = [
     name: 'admin-trace-logs',
     component: TraceLogsView,
     meta: { requiresAuth: true, requiresAdmin: true },
+  },
+  {
+    path: '/:pathMatch(.*)*',
+    name: 'not-found',
+    component: () => import('@/views/NotFoundView.vue'),
+    meta: { requiresAuth: true },
   },
 ]
 
