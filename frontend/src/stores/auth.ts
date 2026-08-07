@@ -5,6 +5,7 @@
 import { defineStore } from 'pinia'
 
 import { extractApiError, ApiError, parseEnvelope } from '@/api/errors'
+import { fetchWithTimeout } from '@/api/request'
 
 // codex P2-1：检查 access token 是否过期（JWT exp claim）
 // issue #240：导出供 ChatView connect() 前置检查——过期先 forceRefresh 再建连，避免无谓 4401 往返。
@@ -67,7 +68,7 @@ export const useAuthStore = defineStore('auth', {
     async fetchMe(): Promise<void> {
       if (!this.token) return
       try {
-        const resp = await fetch('/api/v1/auth/me', {
+        const resp = await fetchWithTimeout('/api/v1/auth/me', {
           headers: { Authorization: `Bearer ${this.token}` },
         })
         const body = await safeJson(resp)
@@ -86,7 +87,7 @@ export const useAuthStore = defineStore('auth', {
       }
     },
     async login(username: string, password: string): Promise<void> {
-      const resp = await fetch('/api/v1/auth/login', {
+      const resp = await fetchWithTimeout('/api/v1/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username, password }),
@@ -109,7 +110,7 @@ export const useAuthStore = defineStore('auth', {
       this.token = ''
       if (this.refreshExhausted) return
       try {
-        const resp = await fetch('/api/v1/auth/token/refresh', {
+        const resp = await fetchWithTimeout('/api/v1/auth/token/refresh', {
           method: 'POST',
           credentials: 'include',
         })
@@ -152,7 +153,7 @@ export const useAuthStore = defineStore('auth', {
       }
       if (this.token) {
         try {
-          await fetch('/api/v1/auth/logout', {
+          await fetchWithTimeout('/api/v1/auth/logout', {
             method: 'POST',
             credentials: 'include',
             headers: { Authorization: `Bearer ${this.token}` },
