@@ -50,7 +50,9 @@ describe('FileTree', () => {
 
   it('emits open with page path when a node is clicked', async () => {
     const wrapper = mount(FileTree, { props: { groups: GROUPS, activePath: '' } })
-    await wrapper.find('[data-test="node-concepts/a.md"]').trigger('click')
+    const node = wrapper.find('[data-test="node-concepts/a.md"]')
+    expect(node.element.tagName).toBe('BUTTON')
+    await node.trigger('click')
     expect(wrapper.emitted('open')).toEqual([['concepts/a.md']])
   })
 
@@ -66,5 +68,15 @@ describe('FileTree', () => {
     expect(wrapper.emitted('create')).toBeTruthy()
     await wrapper.find('[data-test="delete-concepts/a.md"]').trigger('click')
     expect(wrapper.emitted('delete')).toEqual([['concepts/a.md']])
+  })
+
+  it('uses native buttons for keyboard page and delete actions', () => {
+    const wrapper = mount(FileTree, { props: { groups: GROUPS, activePath: 'concepts/a.md' } })
+    const node = wrapper.get('[data-test="node-concepts/a.md"]')
+    const remove = wrapper.get('[data-test="delete-concepts/a.md"]')
+
+    expect(node.element.tagName).toBe('BUTTON')
+    expect(node.attributes('aria-current')).toBe('page')
+    expect(remove.element.tagName).toBe('BUTTON')
   })
 })

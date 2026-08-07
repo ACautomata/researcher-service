@@ -111,13 +111,18 @@ onMounted(async () => {
             <li
               v-for="item in items"
               :key="item.path"
-              class="cat-item"
-              :class="{ active: item.path === activePath }"
-              data-test="cat-item"
-              @click="onOpen(item.path)"
             >
-              <div class="item-title">{{ item.title }}</div>
-              <div class="item-excerpt">{{ item.excerpt }}</div>
+              <button
+                type="button"
+                class="cat-item"
+                :class="{ active: item.path === activePath }"
+                :aria-current="item.path === activePath ? 'page' : undefined"
+                data-test="cat-item"
+                @click="onOpen(item.path)"
+              >
+                <span class="item-title">{{ item.title }}</span>
+                <span class="item-excerpt">{{ item.excerpt }}</span>
+              </button>
             </li>
           </ul>
         </section>
@@ -214,8 +219,14 @@ onMounted(async () => {
   padding: 0 0 4px;
 }
 .cat-item {
+  display: block;
+  width: 100%;
   padding: 6px 12px 6px 30px;
+  border: none;
+  background: transparent;
   cursor: pointer;
+  font: inherit;
+  text-align: left;
 }
 .cat-item:hover {
   background: var(--el-fill-color-light);
@@ -223,11 +234,17 @@ onMounted(async () => {
 .cat-item.active {
   background: var(--el-color-primary-light-9);
 }
+.cat-item:focus-visible {
+  outline: 2px solid #409eff;
+  outline-offset: -2px;
+}
 .item-title {
+  display: block;
   font-size: 13px;
   color: var(--el-text-color-primary);
 }
 .item-excerpt {
+  display: block;
   font-size: 12px;
   color: var(--el-text-color-secondary);
   overflow: hidden;

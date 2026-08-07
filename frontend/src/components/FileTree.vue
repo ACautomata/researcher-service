@@ -23,13 +23,21 @@ const emit = defineEmits<{
       <div
         v-for="p in g.pages"
         :key="p.path"
-        class="node"
+        class="node-row"
         :class="{ active: p.path === activePath }"
-        :data-test="`node-${p.path}`"
-        @click="emit('open', p.path)"
       >
-        <span class="node-title">{{ p.title }}</span>
         <button
+          type="button"
+          class="node"
+          :class="{ active: p.path === activePath }"
+          :aria-current="p.path === activePath ? 'page' : undefined"
+          :data-test="`node-${p.path}`"
+          @click="emit('open', p.path)"
+        >
+          <span class="node-title">{{ p.title }}</span>
+        </button>
+        <button
+          type="button"
           class="del-btn"
           :data-test="`delete-${p.path}`"
           title="删除页面"
@@ -71,32 +79,55 @@ const emit = defineEmits<{
   color: var(--el-text-color-secondary);
   font-size: 12px;
 }
-.node {
+.node-row {
   display: flex;
-  justify-content: space-between;
   align-items: center;
-  padding: 4px 10px 4px 20px;
   cursor: pointer;
   color: var(--el-text-color-regular);
 }
-.node:hover {
+.node-row:hover,
+.node-row:focus-within {
   background: var(--el-fill-color-light);
 }
-.node.active {
+.node-row.active {
   background: var(--el-color-primary-light-9);
   color: var(--el-color-primary);
 }
+.node {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 4px 4px 20px;
+  border: none;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+.node:focus-visible,
+.del-btn:focus-visible {
+  outline: 2px solid #409eff;
+  outline-offset: -2px;
+}
 .del-btn {
+  flex: none;
+  margin-right: 8px;
   border: none;
   background: none;
   cursor: pointer;
   color: var(--el-text-color-placeholder);
   visibility: hidden;
 }
-.node:hover .del-btn {
+.node-row:hover .del-btn,
+.node-row:focus-within .del-btn {
   visibility: visible;
 }
 .del-btn:hover {
   color: var(--el-color-danger);
+}
+@media (hover: none) {
+  .del-btn {
+    visibility: visible;
+  }
 }
 </style>

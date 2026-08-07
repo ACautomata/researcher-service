@@ -114,6 +114,15 @@ describe('CategoriesView', () => {
     expect(ed.props('readonly')).toBe(true)
   })
 
+  it('renders category entries as native keyboard-operable buttons', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+    const item = wrapper.get('[data-test="cat-item"]')
+    expect(item.element.tagName).toBe('BUTTON')
+    await item.trigger('click')
+    expect(readPage).toHaveBeenCalledWith('demo', 'a.md')
+  })
+
   it('shows an error when opening an item fails', async () => {
     const wrapper = mountView()
     await flushPromises()
