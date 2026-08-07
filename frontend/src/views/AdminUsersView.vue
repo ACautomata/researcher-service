@@ -125,6 +125,10 @@ function beginQuotaEdit(u: UserRowDTO): void {
   quotaEditing.value = { ...quotaEditing.value, [u.id]: String(u.quota.limit) }
 }
 
+function isQuotaEditing(userId: string): boolean {
+  return quotaEditing.value[userId] !== undefined
+}
+
 async function saveQuota(u: UserRowDTO): Promise<void> {
   const raw = quotaEditing.value[u.id] ?? ''
   const n = Number(raw)
@@ -148,7 +152,15 @@ onMounted(refresh)
 
 // 暴露行内动作 + 配额编辑态供测试/父组件触发（el-table row scoped slot 在 stub 下渲染脆弱，
 // 贴 ContainersView 模式；quotaEditing 暴露使配额编辑可在 stub 下经 VM 驱动）
-defineExpose({ refresh, toggleActive, openReset, beginQuotaEdit, saveQuota, quotaEditing })
+defineExpose({
+  refresh,
+  toggleActive,
+  openReset,
+  beginQuotaEdit,
+  isQuotaEditing,
+  saveQuota,
+  quotaEditing,
+})
 </script>
 
 <template>
@@ -171,7 +183,7 @@ defineExpose({ refresh, toggleActive, openReset, beginQuotaEdit, saveQuota, quot
       </el-table-column>
       <el-table-column label="配额" width="170">
         <template #default="{ row }">
-          <span v-if="!quotaEditing[row.id]" data-test="quota-view">
+          <span v-if="!isQuotaEditing(row.id)" data-test="quota-view">
             {{ row.quota.used }}/{{ row.quota.limit }}
           </span>
           <span v-else class="quota-edit">
@@ -202,7 +214,7 @@ defineExpose({ refresh, toggleActive, openReset, beginQuotaEdit, saveQuota, quot
       <el-table-column label="操作" width="240">
         <template #default="{ row }">
           <el-button
-            v-if="!quotaEditing[row.id]"
+            v-if="!isQuotaEditing(row.id)"
             size="small"
             :data-test="`edit-quota-${row.username}`"
             @click="beginQuotaEdit(row)"

@@ -106,8 +106,11 @@ export const useWikiStore = defineStore('wiki', {
     async _flush(): Promise<void> {
       this._cancelSave()
       // 把本次落盘接到保存链尾；无论之前是否在飞，都等链上既有保存完成再存剩余脏快照。
-      this._saveChain = this._saveChain.then(() => this._persistDirty())
-      await this._saveChain
+      const save = this._saveChain.then(() => this._persistDirty())
+      // 当前调用仍 await 原始 save，让视图能感知本次失败；内部链吸收 rejection，避免旧异常
+      // 永久毒化后续自动保存和导航。下一次 _flush 会从已恢复的链重新尝试 dirty 草稿。
+      this._saveChain = save.catch(() => {})
+      await save
     },
 
     async _persistDirty(): Promise<void> {

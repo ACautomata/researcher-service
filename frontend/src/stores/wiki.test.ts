@@ -231,4 +231,27 @@ describe('wiki store — codex PR #62 意见2/3 回归', () => {
     expect(s.dirty).toBe(false)
     expect(s.current).toBe('other')
   })
+
+  it('recovers the save chain after a failure and lets navigation retry the dirty draft', async () => {
+    ;(updatePage as ReturnType<typeof vi.fn>)
+      .mockRejectedValueOnce(new Error('保存失败'))
+      .mockResolvedValueOnce(undefined)
+    const s = useWikiStore()
+    await s.loadTree('demo')
+    await s.openPage('concepts/a.md')
+    s.edit('等待重试的内容')
+
+    // 本次调用仍收到当前错误，供视图显示；内部 _saveChain 不保留 rejected 状态。
+    await expect(s._flush()).rejects.toThrow('保存失败')
+    expect(s.dirty).toBe(true)
+
+    ;(readPage as ReturnType<typeof vi.fn>).mockResolvedValue({
+      path: 'concepts/b.md', title: 'B', content: '# B',
+    })
+    await expect(s.openPage('concepts/b.md')).resolves.toBeUndefined()
+    expect(updatePage).toHaveBeenCalledTimes(2)
+    expect(updatePage).toHaveBeenLastCalledWith('demo', 'concepts/a.md', '等待重试的内容')
+    expect(s.activePath).toBe('concepts/b.md')
+    expect(s.dirty).toBe(false)
+  })
 })

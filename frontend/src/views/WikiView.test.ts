@@ -15,11 +15,20 @@ vi.mock('@/api/wiki', () => ({
   getGraph: vi.fn(),
 }))
 vi.mock('@/api/containers', () => ({ listInstances: vi.fn() }))
+vi.mock('element-plus', async (importOriginal) => {
+  const actual = (await importOriginal()) as Record<string, unknown>
+  return {
+    ...actual,
+    ElMessage: { success: vi.fn(), error: vi.fn() },
+    ElMessageBox: { prompt: vi.fn(), confirm: vi.fn() },
+  }
+})
 
 import WikiView from '@/views/WikiView.vue'
 import { useWikiStore } from '@/stores/wiki'
 import { getGraph, getTree, readPage } from '@/api/wiki'
 import { listInstances } from '@/api/containers'
+import { ElMessage } from 'element-plus'
 
 const INSTANCES = [
   { name: 'demo', port: 19000, status: 'running', health: 'healthy',
@@ -109,6 +118,15 @@ describe('WikiView', () => {
     expect(useWikiStore().activePath).toBe('concepts/a.md')
   })
 
+  it('shows an error when opening a page fails', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+    ;(readPage as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('页面读取失败'))
+    await wrapper.findComponent({ name: 'FileTree' }).vm.$emit('open', 'concepts/a.md')
+    await flushPromises()
+    expect(ElMessage.error).toHaveBeenCalledWith('页面读取失败')
+  })
+
   it('routes editor update into store.edit (autosave)', async () => {
     const wrapper = mountView()
     await flushPromises()
@@ -149,6 +167,15 @@ describe('WikiView', () => {
     otherGraph.resolve(GRAPH)
     await flushPromises()
     expect(wrapper.findComponent({ name: 'WikiGraph' }).props('graph')).toEqual(demoGraph)
+  })
+
+  it('shows an error when switching container fails', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+    ;(getTree as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('容器切换失败'))
+    await wrapper.find('[data-test="container-switch"]').setValue('other')
+    await flushPromises()
+    expect(ElMessage.error).toHaveBeenCalledWith('容器切换失败')
   })
 
   it('toggles graph panel collapsed', async () => {

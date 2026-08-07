@@ -1,12 +1,29 @@
 // seam: 路由守卫决策——未认证分「确认失效踢登录」与「瞬态放行」；requiresAdmin 分「非 admin 踢回容器页」
 // （spec §9.1/§9.2 + #10 + #340-D #328）。
 import { describe, expect, it } from 'vitest'
-import { decideGuard } from '@/router/index'
+import router, { decideGuard } from '@/router/index'
 
 const authed = { isAuthenticated: true, refreshExhausted: false, role: 'user' }
 const authedAdmin = { isAuthenticated: true, refreshExhausted: false, role: 'admin' }
 const transient = { isAuthenticated: false, refreshExhausted: false, role: '' }
 const exhausted = { isAuthenticated: false, refreshExhausted: true, role: '' }
+
+describe('页面路由按需加载', () => {
+  it('所有页面组件均使用动态导入', () => {
+    const records = router.getRoutes().filter((route) => route.name)
+    expect(records.map((route) => String(route.name)).sort()).toEqual([
+      'admin-trace-logs',
+      'admin-users',
+      'categories',
+      'chat',
+      'containers',
+      'login',
+      'models',
+      'wiki',
+    ])
+    expect(records.every((route) => typeof route.components?.default === 'function')).toBe(true)
+  })
+})
 
 describe('decideGuard（守卫决策纯函数）', () => {
   it('受保护路由 + 已认证 → 放行', () => {
