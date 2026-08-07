@@ -463,6 +463,21 @@ describe('ChatStream 自动滚动（ADR 0009 / #400 范式 B + rAF 节流）', (
     expect(stream.scrollTop).toBe(900)
   })
 
+  it('正文等长替换不创建完整文本快照或触发滚动', async () => {
+    vi.useFakeTimers()
+    const m = reactive(newMsg('assistant', '旧字'))
+    const w = mountStream({ messages: [m] })
+    stubGeometry()
+    userScrollTo(892)
+    await tick()
+    spyRaf()
+    m.raw = '新字'
+    m.text = m.raw
+    await nextTick()
+    expect(rafSpy).not.toHaveBeenCalled()
+    w.unmount()
+  })
+
   it('上滚离开底部 → 新内容不抢滚动条', async () => {
     vi.useFakeTimers()
     const w = mountStream()
