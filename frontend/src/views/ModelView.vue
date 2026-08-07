@@ -21,7 +21,9 @@ const containers = ref<InstanceDTO[]>([])
 const current = ref<string>('')
 const providers = ref<ModelProviderDTO[]>([])
 const loading = ref(false)
+const providersLoading = ref(false)
 const errorMsg = ref('')
+let providerRequestSeq = 0
 
 // 新增/编辑对话框（共用一表单）
 const dialogVisible = ref(false)
@@ -52,22 +54,41 @@ async function loadContainers(): Promise<void> {
   }
 }
 
-async function loadProviders(): Promise<void> {
-  if (!current.value) {
+async function loadProviders(container = current.value): Promise<void> {
+  const requestSeq = ++providerRequestSeq
+  if (!container) {
     providers.value = []
+    providersLoading.value = false
     return
   }
+  providersLoading.value = true
+  providers.value = []
+  errorMsg.value = ''
   try {
-    providers.value = await listProviders(current.value)
+    const nextProviders = await listProviders(container)
+    if (requestSeq === providerRequestSeq && current.value === container) {
+      providers.value = nextProviders
+    }
   } catch (e) {
-    errorMsg.value = (e as Error).message
-    providers.value = []
+    if (requestSeq === providerRequestSeq && current.value === container) {
+      errorMsg.value = (e as Error).message
+      providers.value = []
+    }
+  } finally {
+    if (requestSeq === providerRequestSeq && current.value === container) {
+      providersLoading.value = false
+    }
   }
 }
 
 async function selectContainer(name: string): Promise<void> {
+  if (!name) return
   current.value = name
-  await loadProviders()
+  // 旧容器的列表和编辑上下文不能在新容器下继续操作。
+  providers.value = []
+  dialogVisible.value = false
+  editingPid.value = null
+  await loadProviders(name)
 }
 
 function resetForm(): void {
@@ -184,23 +205,35 @@ defineExpose({ selectContainer, openCreate, openEdit, save, confirmRemove })
         >
           <option v-for="c in containers" :key="c.name" :value="c.name">{{ c.name }}</option>
         </select>
-        <el-button type="primary" data-test="open-create" @click="openCreate">新增 provider</el-button>
+        <el-button
+          type="primary"
+          data-test="open-create"
+          :disabled="providersLoading"
+          @click="openCreate"
+        >新增 provider</el-button>
       </div>
     </div>
     <p v-if="errorMsg" class="error">{{ errorMsg }}</p>
     <p class="hint">改后自动热加载，无需重启容器。</p>
+    <p v-if="providersLoading" class="hint" data-test="providers-loading">正在加载 provider…</p>
 
-    <el-table :data="providers" data-test="provider-table">
+    <el-table v-loading="providersLoading" :data="providers" data-test="provider-table">
       <el-table-column prop="provider_id" label="Provider ID" />
       <el-table-column prop="api" label="接口类型" width="180" />
       <el-table-column prop="base_url" label="baseUrl" />
       <el-table-column prop="api_key_env_id" label="apiKey env id" width="160" />
       <el-table-column label="操作" width="180">
         <template #default="{ row }">
-          <el-button size="small" :data-test="`edit-${row.provider_id}`" @click="openEdit(row)">编辑</el-button>
+          <el-button
+            size="small"
+            :disabled="providersLoading"
+            :data-test="`edit-${row.provider_id}`"
+            @click="openEdit(row)"
+          >编辑</el-button>
           <el-button
             type="danger"
             size="small"
+            :disabled="providersLoading"
             :data-test="`delete-${row.provider_id}`"
             @click="confirmRemove(row.provider_id)"
           >删除</el-button>
