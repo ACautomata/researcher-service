@@ -6,20 +6,10 @@
 // 系统码（10001 未认证 / 10004 角色不足等）按 HTTP 401 同语义映射 apiFetch 的刷新链：
 // 吊销的 token 在 body 信封里拒绝业务请求，经刷新链换新重试/确认失效跳登录（P0 code review）。
 import { useAuthStore } from '@/stores/auth'
-import { parseEnvelope } from '@/api/errors'
+import { ApiError, parseEnvelope } from '@/api/errors'
 import { fetchWithTimeout } from '@/api/request'
 
-export class ApiError extends Error {
-  status: number
-  code: number
-
-  constructor(status: number, message: string, code?: number) {
-    super(message)
-    this.name = 'ApiError'
-    this.status = status
-    this.code = code ?? -1
-  }
-}
+export { ApiError } from '@/api/errors'
 
 // #312 信封系统码：code 以 1xxxx 开头 = 认证层错误（10001 未认证 / 10004 角色不足）——这些
 // 「换新 token 可解决」（凭据失效/吊销），对 HTTP 200 信封里的它们 apiFetch 按 HTTP 401 同语义

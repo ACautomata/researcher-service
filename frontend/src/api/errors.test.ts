@@ -4,6 +4,7 @@
 import { describe, expect, it } from 'vitest'
 
 import { extractApiError, ApiError } from '@/api/errors'
+import { ApiError as ClientApiError } from '@/api/client'
 
 describe('extractApiError', () => {
   it('压平字段级多条错误并用分号拼接', () => {
@@ -43,12 +44,26 @@ describe('extractApiError', () => {
 
 // codex P2：ApiError 是「已解析的 API 错误」标记,视图据此区别网络 TypeError 走本地化兜底。
 describe('ApiError', () => {
+  it('client 与 errors 导出同一个构造器', () => {
+    expect(ClientApiError).toBe(ApiError)
+  })
+
   it('是 Error 子类且 message 可读', () => {
     const e = new ApiError('这个密码太常见了。')
     expect(e).toBeInstanceOf(Error)
     expect(e).toBeInstanceOf(ApiError)
     expect(e.message).toBe('这个密码太常见了。')
     expect(e.name).toBe('ApiError')
+    expect(e.status).toBeUndefined()
+    expect(e.code).toBeUndefined()
+  })
+
+  it('兼容 HTTP 状态与业务码构造参数', () => {
+    const e = new ClientApiError(200, '容器不存在或无权访问', 20040)
+    expect(e).toBeInstanceOf(ApiError)
+    expect(e.message).toBe('容器不存在或无权访问')
+    expect(e.status).toBe(200)
+    expect(e.code).toBe(20040)
   })
 
   it('与原生 TypeError 区分（视图 instanceof 分流的契约）', () => {
