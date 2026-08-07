@@ -172,8 +172,8 @@ model Pairing {
   publicKeyPem            String @default("")
   privateKeyPem           String @default("") // 密文
   privateKeyPemEncrypted  Boolean @default(false)
-  deviceToken             String @default("") // 密文
-  deviceTokenEncrypted    Boolean @default(false)
+  deviceToken             String @default("") // @deprecated 方向 A：deviceToken 回浏览器 localStorage（chat/deviceAuth.ts），此列不再读写（保留避免生产 DROP COLUMN 迁移）
+  deviceTokenEncrypted    Boolean @default(false) // @deprecated 同上
   scopesJson              String @default("[]")
   pairingRequestId        String @default("")
   status                  PairingStatus @default(unpaired)

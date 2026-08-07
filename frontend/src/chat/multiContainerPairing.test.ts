@@ -1,9 +1,7 @@
-// 多容器配对 bug 回归测试（修复断言 · 用户定案：token 上移服务端 DB）。
-// 根因（红态已证）：deviceToken 原存 localStorage，键 (clientId='webchat-ui', deviceId, role) 缺容器维度 →
-// 跨容器共用 → 容器 2 复用容器 1 的 token → 网关 AUTH_DEVICE_TOKEN_MISMATCH（NON_RECOVERABLE）→ 连接即停。
-// 修复：tokenStore 换服务端 DB 实现（createPanelTokenStore，按 URL 容器名读写 Pairing.deviceToken）。
-// 断言：容器 1 配对（服务端有 alpha token）后，连容器 2（服务端无 beta token）→ buildConnectPlan 发
-// beta 的 bootstrap token（不复用跨容器 token）；配对后连容器 1 → 复用 alpha token（不丢复用能力）。
+// 多容器 + 多浏览器配对回归（方向 A · 回归 ADR 0006「每浏览器设备 × 每容器」）。
+// deviceToken 按 (container, deviceId, role) 存浏览器 localStorage——多容器（container 维度）+ 多浏览器
+//（deviceId 维度）天然隔离。切换浏览器 = 新 deviceId = 无 token = 自动走 bootstrap 重新配对。
+// 历史：#425 曾上移服务端 DB（违背 ADR 0006 行 53 否决），切换浏览器匹配不上——已回退。
 
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 
@@ -62,24 +60,15 @@ vi.mock('@openclaw/gateway-client/browser', async (importOriginal) => {
 vi.mock('./tunnelSocket', () => ({
   createPanelTunnelSocket: vi.fn(() => ({ isOpen: () => false, send: vi.fn(), close: vi.fn() })),
 }))
-
-// ---- mock 服务端配对 token REST（@/api/chat）：内存 Map<container, token> 模拟 Pairing.deviceToken ----
-const { pairingTokenDB, MockApiChat } = vi.hoisted(() => {
-  const pairingTokenDB = new Map<string, string>()
-  const MockApiChat = {
-    getDeviceToken: vi.fn(async (name: string) => pairingTokenDB.get(name) ?? null),
-    putDeviceToken: vi.fn(async (name: string, token: string) => {
-      pairingTokenDB.set(name, token)
-    }),
-    approvePairing: vi.fn(async () => {}),
-  }
-  return { pairingTokenDB, MockApiChat }
-})
-vi.mock('@/api/chat', () => MockApiChat)
+// approvePairing 仍走 @/api chat（PAIRING_REQUIRED 自动配对编排）；deviceToken 不再经服务端（localStorage）。
+vi.mock('@/api/chat', () => ({
+  approvePairing: vi.fn(async () => {}),
+}))
 
 import { createGatewayChat } from './gatewayChat'
 import { createDeviceAuthLifecycle, hasStoredDeviceTokenFor } from './deviceAuth'
-import { loadDeviceIdentity } from './deviceIdentity'
+
+const client = { id: 'webchat-ui', mode: 'webchat', platform: 'browser', version: 'test' } as const
 
 function makeMemoryStorage(): Storage {
   const map = new Map<string, string>()
@@ -92,48 +81,47 @@ function makeMemoryStorage(): Storage {
     setItem: (k: string, v: string) => { map.set(k, String(v)) },
   }
 }
-const identityStorage = makeMemoryStorage() // 设备身份（密钥对）仍 localStorage
 
 function makeHandlers() {
   return { onReady: vi.fn(), onFrame: vi.fn(), onClose: vi.fn(), onError: vi.fn() }
 }
 
-beforeEach(async () => {
+// 配对 arrange：在 storage 里为 container 配对一个 deviceToken（acceptHello 路径）。
+async function pairContainer(storage: Storage, container: string, token: string): Promise<void> {
+  const lc = createDeviceAuthLifecycle(container, storage)
+  const plan = await lc.buildPlan({ client, role: 'operator', defaultScopes: ['operator.read'], bootstrapToken: 'boot', nonce: 'n1' })
+  await lc.acceptHello({ auth: { deviceToken: token, role: 'operator', scopes: [] } }, plan)
+}
+
+beforeEach(() => {
   vi.clearAllMocks()
   MockGatewayProtocolClient.last = null
-  pairingTokenDB.clear()
-  identityStorage.clear()
-  await loadDeviceIdentity(identityStorage) // 生成共享设备身份（跨容器同一份，签名握手本地）
 })
 
-describe('多容器配对 bug 回归（token 上移服务端 DB）', () => {
-  it('核心修复断言：容器 1 配对后，连容器 2 发 bootstrap token（不复用容器 1 的跨容器 token）', async () => {
-    // Arrange：容器 1 (alpha) 已配对——服务端 Pairing.deviceToken 有 alpha 的 token（beta 无）
-    pairingTokenDB.set('alpha', 'token-from-ALPHA')
-    expect(await hasStoredDeviceTokenFor('beta', 'webchat-ui', 'operator')).toBe(false) // beta 未配对
+describe('多容器 + 多浏览器配对（localStorage · ADR 0006 每浏览器设备 × 每容器）', () => {
+  it('多容器隔离：浏览器配对 alpha 不影响 beta 凭证选择（不同 container 键）', async () => {
+    const storage = makeMemoryStorage()
+    await pairContainer(storage, 'alpha', 'dt-alpha')
 
-    // Act：连容器 2 (beta)
     const handlers = makeHandlers()
     const gw = createGatewayChat({
       container: 'beta',
       jwt: 'jwt-1',
       bootstrapToken: 'boot-BETA',
       handlers,
-      deviceAuth: createDeviceAuthLifecycle('beta', identityStorage),
+      deviceAuth: createDeviceAuthLifecycle('beta', storage),
+      hasStoredDeviceToken: () => hasStoredDeviceTokenFor('beta', client.id, 'operator', storage),
     })
-    const client = MockGatewayProtocolClient.last!
-    const plan = (await client.opts.buildConnectPlan!({ nonce: 'n', generation: 0 })) as { auth?: Record<string, unknown> }
-
-    // Assert：发 beta 的 bootstrap token，不复用跨容器 token（绿 = 修复生效；红态时此处是 deviceToken:ALPHA）。
-    // 官方 buildGatewayConnectAuth 恒带 deviceToken key（未配对时 = undefined），故断言值非 key 存在性。
+    const c = MockGatewayProtocolClient.last!
+    const plan = (await c.opts.buildConnectPlan!({ nonce: 'n', generation: 0 })) as { auth?: Record<string, unknown> }
+    // beta 无 token（同浏览器同 deviceId，但 container=beta 键空）→ bootstrap
     expect(plan.auth?.token).toBe('boot-BETA')
-    expect(plan.auth?.deviceToken).toBeUndefined()
     gw.stop()
   })
 
-  it('复用能力保留：容器 1 配对后，重连容器 1 复用其 deviceToken（不走 bootstrap）', async () => {
-    pairingTokenDB.set('alpha', 'token-from-ALPHA')
-    expect(await hasStoredDeviceTokenFor('alpha', 'webchat-ui', 'operator')).toBe(true)
+  it('复用能力保留：配对 alpha 后重连复用 deviceToken（不走 bootstrap）', async () => {
+    const storage = makeMemoryStorage()
+    await pairContainer(storage, 'alpha', 'dt-alpha')
 
     const handlers = makeHandlers()
     const gw = createGatewayChat({
@@ -141,26 +129,34 @@ describe('多容器配对 bug 回归（token 上移服务端 DB）', () => {
       jwt: 'jwt-1',
       bootstrapToken: 'boot-ALPHA',
       handlers,
-      deviceAuth: createDeviceAuthLifecycle('alpha', identityStorage),
+      deviceAuth: createDeviceAuthLifecycle('alpha', storage),
+      hasStoredDeviceToken: () => hasStoredDeviceTokenFor('alpha', client.id, 'operator', storage),
     })
-    const client = MockGatewayProtocolClient.last!
-    const plan = (await client.opts.buildConnectPlan!({ nonce: 'n', generation: 0 })) as { auth?: Record<string, unknown> }
-
-    // 已配对容器复用自己的 token（官方 lifecycle usingStoredDeviceToken 路径），不发 bootstrap
-    expect(plan.auth?.token).toBe('token-from-ALPHA')
+    const c = MockGatewayProtocolClient.last!
+    const plan = (await c.opts.buildConnectPlan!({ nonce: 'n', generation: 0 })) as { auth?: Record<string, unknown> }
+    expect(plan.auth?.token).toBe('dt-alpha') // deviceToken 复用（gatewayChat 层 auth.token）
     gw.stop()
   })
 
-  it('跨容器隔离端到端：连 alpha 配对落 token 不影响 beta 凭证选择', async () => {
-    // alpha 配对：hello-ok 下发 token → acceptHello → createPanelTokenStore.store → PUT 落服务端
-    pairingTokenDB.set('alpha', 'token-from-ALPHA')
-
-    // beta 凭证选择不受 alpha token 影响（服务端按容器名隔离，clientId 恒定也无妨）
-    const betaStore = (await import('./deviceAuth')).createPanelTokenStore('beta')
-    expect(await betaStore.load({ clientId: 'webchat-ui', deviceId: 'dev-1', role: 'operator' })).toBeNull()
-    const alphaStore = (await import('./deviceAuth')).createPanelTokenStore('alpha')
-    expect((await alphaStore.load({ clientId: 'webchat-ui', deviceId: 'dev-1', role: 'operator' }))?.token).toBe('token-from-ALPHA')
-    expect(MockApiChat.getDeviceToken).toHaveBeenCalledWith('beta')
-    expect(MockApiChat.getDeviceToken).toHaveBeenCalledWith('alpha')
+  it('切换浏览器（新设备身份）不复用旧设备 token（核心修复 · 用户报「切换浏览器匹配不上」）', async () => {
+    // 浏览器 A 配对 alpha
+    const storageA = makeMemoryStorage()
+    await pairContainer(storageA, 'alpha', 'dt-from-deviceA')
+    // 浏览器 B：新 storage → 新 deviceId-B → 无 alpha token（即使 A 配对过）
+    const storageB = makeMemoryStorage()
+    const handlers = makeHandlers()
+    const gw = createGatewayChat({
+      container: 'alpha',
+      jwt: 'jwt-1',
+      bootstrapToken: 'boot-ALPHA',
+      handlers,
+      deviceAuth: createDeviceAuthLifecycle('alpha', storageB),
+      hasStoredDeviceToken: () => hasStoredDeviceTokenFor('alpha', client.id, 'operator', storageB),
+    })
+    const c = MockGatewayProtocolClient.last!
+    const plan = (await c.opts.buildConnectPlan!({ nonce: 'n', generation: 0 })) as { auth?: Record<string, unknown> }
+    // 绿（方向 A）：B 走 bootstrap（localStorage 按 deviceId 隔离，B 无 A 的 token）→ 重新配对
+    expect(plan.auth?.token).toBe('boot-ALPHA')
+    gw.stop()
   })
 })
