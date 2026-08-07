@@ -64,3 +64,11 @@ _Avoid_: 设备——脱离了「每浏览器 profile 一设备」就没意义�
 **bootstrap token**:
 容器网关的共享认证秘密（旧称 `GATEWAY_TOKEN`，容器创建时生成、env 注入容器、DB 加密存值）。ADR 0006 修订 spec §5.2 后，它**可经所有权门控 REST（`POST /containers/<name>/bootstrap-token`）下发给容器属主的浏览器**做首次连接认证（bootstrap auth 对首连是强制的，官方文档）。每个容器一个共享 bootstrap token，该容器所有属主浏览器首连共用。
 _Avoid_: 真值不落盘/不外泄（旧 §5.2 字面）——已修订为「可下发属主浏览器，真值仍不落前端以外的盘、不经日志」。
+
+**会话删除 (session delete)**:
+从网关删除整个会话、历史不可恢复的面板操作。与「归档 (archive)」严格区分——归档是**未来功能**（保留数据、移出列表），未实现，届时再定义；当前所有删除一律是会话删除。UI 确认文案必须明示「不可恢复」，不得出现「先归档（可恢复）再删除」的误导表述。
+_Avoid_: 删除会话/移除会话——与归档混为一谈；术语必须指明「删=不可恢复」。
+
+**附件 (attachment)**:
+`chat.send` 携带的多模态内容块（wire 字段 `attachments`：`{type, mimeType, fileName, content, width, height}`），经隧道**内联**发送。用户经浏览器采集（粘贴/拖拽/选择）上传，图片发送前**前端压缩**；content 是自由形状（0 信任），渲染端须按块类型分派。
+_Avoid_: 文件/图片消息——掩盖「内联于 chat.send 帧、多类型块数组」的协议形态。
