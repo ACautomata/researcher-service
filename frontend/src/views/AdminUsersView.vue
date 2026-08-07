@@ -28,6 +28,7 @@ const creating = ref(false)
 const resetVisible = ref(false)
 const resetTarget = ref<UserRowDTO | null>(null)
 const resetPassword = ref('')
+const resettingUserId = ref('')
 // 配额 inline 编辑：key=userId，value=输入中的数字（undefined=未在编辑）
 const quotaEditing = ref<Record<string, string>>({})
 
@@ -104,6 +105,9 @@ async function toggleActive(u: UserRowDTO): Promise<void> {
 }
 
 async function openReset(u: UserRowDTO): Promise<void> {
+  // 重置会立即作废上一次临时密码；一次只允许一个请求，确保展示的就是有效结果。
+  if (resettingUserId.value) return
+  resettingUserId.value = u.id
   try {
     const { password } = await resetUserPassword(u.id)
     resetTarget.value = u
@@ -111,6 +115,8 @@ async function openReset(u: UserRowDTO): Promise<void> {
     resetVisible.value = true
   } catch (e) {
     ElMessage.error((e as Error).message)
+  } finally {
+    resettingUserId.value = ''
   }
 }
 
@@ -148,7 +154,15 @@ onMounted(refresh)
 
 // 暴露行内动作 + 配额编辑态供测试/父组件触发（el-table row scoped slot 在 stub 下渲染脆弱，
 // 贴 ContainersView 模式；quotaEditing 暴露使配额编辑可在 stub 下经 VM 驱动）
-defineExpose({ refresh, toggleActive, openReset, beginQuotaEdit, saveQuota, quotaEditing })
+defineExpose({
+  refresh,
+  toggleActive,
+  openReset,
+  resettingUserId,
+  beginQuotaEdit,
+  saveQuota,
+  quotaEditing,
+})
 </script>
 
 <template>
@@ -217,7 +231,13 @@ defineExpose({ refresh, toggleActive, openReset, beginQuotaEdit, saveQuota, quot
           >
             {{ row.isActive ? '禁用' : '启用' }}
           </el-button>
-          <el-button size="small" :data-test="`reset-password-${row.username}`" @click="openReset(row)">
+          <el-button
+            size="small"
+            :loading="resettingUserId === row.id"
+            :disabled="resettingUserId !== ''"
+            :data-test="`reset-password-${row.username}`"
+            @click="openReset(row)"
+          >
             重置密码
           </el-button>
         </template>

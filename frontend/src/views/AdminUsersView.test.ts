@@ -97,6 +97,7 @@ function vm(wrapper: ReturnType<typeof mount>) {
     refresh: () => Promise<void>
     toggleActive: (u: (typeof USERS)[0]) => Promise<void>
     openReset: (u: (typeof USERS)[0]) => Promise<void>
+    resettingUserId: string
     beginQuotaEdit: (u: (typeof USERS)[0]) => void
     saveQuota: (u: (typeof USERS)[0]) => Promise<void>
     quotaEditing: Record<string, string>
@@ -174,6 +175,25 @@ describe('AdminUsersView', () => {
     await flushPromises()
     // 关闭后不可再取：明文已从 dialog 清空
     expect(w.find('[data-test="reset-password-plaintext"]').exists()).toBe(false)
+  })
+
+  it('重置密码：重复触发时只发送一个请求并展示该请求的有效密码', async () => {
+    let resolveReset!: (value: { password: string }) => void
+    ;(resetUserPassword as ReturnType<typeof vi.fn>).mockReturnValue(
+      new Promise((resolve) => { resolveReset = resolve }),
+    )
+    const w = await mountView()
+
+    const first = vm(w).openReset(USERS[0])
+    const duplicate = vm(w).openReset(USERS[0])
+    expect(vm(w).resettingUserId).toBe('u1')
+    expect(resetUserPassword).toHaveBeenCalledTimes(1)
+
+    resolveReset({ password: 'only-valid-password' })
+    await Promise.all([first, duplicate])
+    await flushPromises()
+    expect(vm(w).resettingUserId).toBe('')
+    expect(w.find('[data-test="reset-password-plaintext"]').text()).toContain('only-valid-password')
   })
 
   it('配额 inline 编辑：保存合法值 → patchUser(maxContainers) + 刷新', async () => {
