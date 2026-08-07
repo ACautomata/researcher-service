@@ -190,6 +190,65 @@ describe('ContainersView', () => {
     )
   })
 
+  // ---------------------------- #419-6 轮询可见性 + 错误去闪烁 ----------------------------
+
+  it('#419-6: 标签页隐藏时暂停轮询，回前台恢复并立即刷新', async () => {
+    vi.useFakeTimers()
+    ;(listInstances as ReturnType<typeof vi.fn>).mockResolvedValue([])
+    mount(ContainersView, { global: { plugins: [createPinia()], stubs } })
+    await flushPromises()
+    const callsAfterMount = (listInstances as ReturnType<typeof vi.fn>).mock.calls.length
+
+    // 隐藏 → 不再轮询
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      value: 'hidden',
+    })
+    document.dispatchEvent(new Event('visibilitychange'))
+    await vi.advanceTimersByTimeAsync(12_000)
+    expect((listInstances as ReturnType<typeof vi.fn>).mock.calls.length).toBe(callsAfterMount)
+
+    // 回前台 → 立即刷新一次 + 恢复轮询
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      value: 'visible',
+    })
+    document.dispatchEvent(new Event('visibilitychange'))
+    await flushPromises()
+    expect((listInstances as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThan(
+      callsAfterMount,
+    )
+    const callsAfterVisible = (listInstances as ReturnType<typeof vi.fn>).mock.calls.length
+    await vi.advanceTimersByTimeAsync(6_000)
+    expect((listInstances as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThan(
+      callsAfterVisible,
+    )
+  })
+
+  it('#419-6: 错误文案仅在内容变化时更新（同文案不闪烁）', async () => {
+    // 后端持续故障：每次 refresh 失败都写入相同错误——文案不得以轮询频率重复更新
+    // （旧实现每次 refresh 开头 errorMsg='' 再写回，同文案 3s 闪烁）。
+    // 断言 DOM 节点引用：同文案不重建 <p class="error">。
+    vi.useFakeTimers()
+    ;(listInstances as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('backend down'))
+    const wrapper = mount(ContainersView, { global: { plugins: [createPinia()], stubs } })
+    await flushPromises()
+    expect(wrapper.text()).toContain('backend down')
+
+    const p1 = wrapper.find('p.error').element
+    await vi.advanceTimersByTimeAsync(6_000) // 两轮失败（同文案）
+    await flushPromises()
+    const p2 = wrapper.find('p.error').element
+    expect(p2).toBe(p1) // 同文案不重建节点（不闪烁）
+    expect(wrapper.text()).toContain('backend down')
+
+    // 文案变化（错误内容不同）→ 更新显示
+    ;(listInstances as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('disk full'))
+    await vi.advanceTimersByTimeAsync(3_000)
+    await flushPromises()
+    expect(wrapper.text()).toContain('disk full')
+  })
+
   // ---------------------------- 配对状态（issue #40 + #340-C 徽标）----------------------------
 
   it('loads pairing status from listInstances payload', async () => {

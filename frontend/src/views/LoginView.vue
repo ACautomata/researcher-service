@@ -16,9 +16,13 @@ const form = reactive({ username: '', password: '' })
 // 改密表单（#340-A）：old + new + 确认；new 至少 8 字符（与后端 passwordChangeSchema 对齐）
 const changeForm = reactive({ oldPassword: '', newPassword: '', confirm: '' })
 const errorMsg = ref('')
+// #419-2：提交中 loading——按钮禁用防重复点击；表单走原生 submit 语义（输入框内回车即可提交）
+const submitting = ref(false)
 
 async function onSubmit(): Promise<void> {
+  if (submitting.value) return // 防重复提交（loading 禁用之外的双保险）
   errorMsg.value = ''
+  submitting.value = true
   try {
     await auth.login(form.username, form.password)
     await afterLogin()
@@ -33,6 +37,8 @@ async function onSubmit(): Promise<void> {
         : mode.value === 'login'
           ? '登录失败，请稍后重试'
           : '修改密码失败，请稍后重试'
+  } finally {
+    submitting.value = false
   }
 }
 
@@ -48,6 +54,7 @@ async function afterLogin(): Promise<void> {
 // #340-A：提交强制改密。成功后服务端已撤销全部 refresh + 清 cookie（R1），本地清 token
 // 再以新密码重新 login（refresh 无效，原会话不得复用）。
 async function onChangeSubmit(): Promise<void> {
+  if (submitting.value) return // 防重复提交
   errorMsg.value = ''
   if (changeForm.newPassword !== changeForm.confirm) {
     errorMsg.value = '两次输入的新密码不一致'
@@ -57,6 +64,7 @@ async function onChangeSubmit(): Promise<void> {
     errorMsg.value = '新密码至少 8 个字符'
     return
   }
+  submitting.value = true
   try {
     await changePassword(changeForm.oldPassword, changeForm.newPassword)
     const newPassword = changeForm.newPassword // 清空前捕获：服务端已撤销全部 refresh，须以新密码重登
@@ -70,6 +78,8 @@ async function onChangeSubmit(): Promise<void> {
   } catch (err) {
     errorMsg.value =
       err instanceof ApiError && err.message ? err.message : '修改密码失败，请稍后重试'
+  } finally {
+    submitting.value = false
   }
 }
 </script>
@@ -78,7 +88,10 @@ async function onChangeSubmit(): Promise<void> {
   <div class="login">
     <h1>{{ mode === 'login' ? '登录' : '修改密码' }}</h1>
     <template v-if="mode === 'login'">
-      <el-form>
+      <!-- #419-2：原生 form submit——输入框内回车即提交（@submit.prevent）；按钮 @click 直调
+           onSubmit 兼容 jsdom/测试（trigger('click') 不派发 submit 默认动作）。submitting 防重入
+           保证真实浏览器中 click + submit 双触发只跑一次。 -->
+      <el-form tag="form" @submit.prevent="onSubmit">
         <el-form-item label="用户名">
           <el-input v-model="form.username" placeholder="用户名" />
         </el-form-item>
@@ -88,13 +101,13 @@ async function onChangeSubmit(): Promise<void> {
         <el-form-item v-if="errorMsg">
           <span class="error">{{ errorMsg }}</span>
         </el-form-item>
-        <el-button type="primary" @click="onSubmit">登录</el-button>
+        <el-button type="primary" native-type="submit" :loading="submitting" :disabled="submitting" @click="onSubmit">登录</el-button>
       </el-form>
     </template>
     <!-- #340-A 强制改密（C1 首登改密）：旧密 + 新密 + 确认。改密成功即撤销全部会话，需重登 -->
     <template v-else>
       <p class="hint">首次登录须先修改密码（初始/临时密码不可继续使用）。</p>
-      <el-form>
+      <el-form tag="form" @submit.prevent="onChangeSubmit">
         <el-form-item label="原密码">
           <el-input v-model="changeForm.oldPassword" type="password" placeholder="原密码" />
         </el-form-item>
@@ -111,7 +124,7 @@ async function onChangeSubmit(): Promise<void> {
         <el-form-item v-if="errorMsg">
           <span class="error">{{ errorMsg }}</span>
         </el-form-item>
-        <el-button type="primary" @click="onChangeSubmit">确认修改</el-button>
+        <el-button type="primary" native-type="submit" :loading="submitting" :disabled="submitting" @click="onChangeSubmit">确认修改</el-button>
       </el-form>
     </template>
   </div>

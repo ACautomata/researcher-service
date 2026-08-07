@@ -111,6 +111,8 @@ export async function apiFetch(path: string, init: RequestInit = {}): Promise<Re
 
 export async function apiJson<T>(path: string, init: RequestInit = {}): Promise<T> {
   const resp = await apiFetch(path, init)
+  // #419-5：204 No Content 空体——不读 body 直接返回 undefined（resp.json() 对空体会 reject）。
+  if (resp.status === 204) return undefined as T
   if (!resp.ok) {
     // 未走信封的 HTTP 语义：按 HTTP 状态抛错 + detail 透传。
     let detail = `请求失败 (${resp.status})`

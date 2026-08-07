@@ -64,10 +64,14 @@ const router = createRouter({
 
 // 守卫：进入受保护路由前用 httpOnly refresh cookie 恢复登录态（codex P2-2），再判重定向。
 // decideGuard 抽纯函数（可单测）：未认证时分「确认失效（refreshExhausted）→ 踢登录」与「瞬态」放行。
+// #419-1：已登录访问 public 路由（/login）→ 重定向首页，避免登录页对已登录用户重复可见。
 router.beforeEach(async (to) => {
   const auth = useAuthStore()
   if (to.meta.requiresAuth) {
     await auth.hydrate()
+  }
+  if (to.meta.public && auth.isAuthenticated) {
+    return { name: 'containers' }
   }
   return decideGuard(!!to.meta?.requiresAuth, auth, !!to.meta?.requiresAdmin)
 })
