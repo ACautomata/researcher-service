@@ -13,7 +13,7 @@ defineSlots<{
 
 <template>
   <div class="topbar">
-    <span class="title">{{ title || '对话' }}</span>
+    <span class="title" data-test="chat-title" :title="title || '对话'">{{ title || '对话' }}</span>
     <span v-if="container" class="tag">{{ container }}</span>
     <span v-if="connecting" class="tag warn">连接中…</span>
     <slot name="banner" />
@@ -21,8 +21,8 @@ defineSlots<{
 </template>
 
 <style scoped>
-.topbar { display: flex; align-items: center; gap: 10px; padding: 10px 18px; border-bottom: 1px solid var(--el-border-color); }
-.title { font-weight: 600; }
-.tag { font-size: 11px; padding: 2px 8px; border-radius: 10px; background: var(--el-fill-color-light); color: var(--el-text-color-secondary); }
+.topbar { display: flex; align-items: center; gap: 10px; min-width: 0; padding: 10px 18px; border-bottom: 1px solid var(--el-border-color); }
+.title { flex: 1; min-width: 0; overflow: hidden; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.tag { flex: 0 0 auto; white-space: nowrap; font-size: 11px; padding: 2px 8px; border-radius: 10px; background: var(--el-fill-color-light); color: var(--el-text-color-secondary); }
 .tag.warn { color: var(--el-color-warning); }
 </style>

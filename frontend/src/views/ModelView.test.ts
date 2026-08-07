@@ -63,7 +63,7 @@ const PAYLOAD = {
 const stubs = {
   ElButton: {
     props: ['type', 'loading', 'size', 'disabled'],
-    template: '<button @click="$emit(\'click\')"><slot /></button>',
+    template: '<button :disabled="disabled" @click="$emit(\'click\')"><slot /></button>',
   },
   ElTable: {
     props: { data: { type: Array, default: () => [] } },
@@ -96,6 +96,12 @@ const stubs = {
   },
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((done) => { resolve = done })
+  return { promise, resolve }
+}
+
 describe('ModelView', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
@@ -123,6 +129,32 @@ describe('ModelView', () => {
     await (wrapper.vm as unknown as { selectContainer: (n: string) => Promise<void> }).selectContainer('other')
     await flushPromises()
     expect(listProviders).toHaveBeenCalledWith('other')
+  })
+
+  it('clears stale rows and keeps the latest container response', async () => {
+    const wrapper = mount(ModelView, { global: { plugins: [createPinia()], stubs } })
+    await flushPromises()
+    const slowOther = deferred<ModelProviderDTO[]>()
+    const latestProvider = { ...PROVIDER, provider_id: 'latest-provider' }
+    ;(listProviders as ReturnType<typeof vi.fn>).mockImplementation(
+      (name: string) => name === 'other' ? slowOther.promise : Promise.resolve([latestProvider]),
+    )
+
+    const vm = wrapper.vm as unknown as { selectContainer: (n: string) => Promise<void> }
+    const otherRequest = vm.selectContainer('other')
+    await flushPromises()
+    expect(wrapper.find('[data-test="providers-loading"]').exists()).toBe(true)
+    expect(wrapper.find('[data-test="provider-table"]').text()).not.toContain('my-openai')
+    expect(wrapper.find('[data-test="open-create"]').attributes('disabled')).toBeDefined()
+
+    await vm.selectContainer('demo')
+    await flushPromises()
+    expect(wrapper.find('[data-test="provider-table"]').text()).toContain('latest-provider')
+    slowOther.resolve([PROVIDER])
+    await otherRequest
+    await flushPromises()
+    expect(wrapper.find('[data-test="provider-table"]').text()).toContain('latest-provider')
+    expect(wrapper.find('[data-test="provider-table"]').text()).not.toContain('my-openai')
   })
 
   it('opens create dialog', async () => {

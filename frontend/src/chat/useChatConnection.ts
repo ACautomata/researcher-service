@@ -37,6 +37,7 @@ export interface ChatStatus {
 const PENDING_RUN_GRACE_MS = 8000
 const RESUME_WAIT_MS = 30_000
 const CONNECT_TIMEOUT_MS = 15_000
+const INITIAL_HISTORY_LIMIT = 50
 
 export function useChatConnection(status: ChatStatus) {
   const chat = useChatStore()
@@ -812,7 +813,7 @@ export function useChatConnection(status: ChatStatus) {
     chat.setHistoryLoading(true)
     status.onClearError()
     try {
-      const res = await gateway.getHistory(key)
+      const res = await gateway.getHistory(key, INITIAL_HISTORY_LIMIT)
       if (gen !== containerGen || chat.selectedSession !== key) return // 切走了：丢弃迟到响应
       if (hgen !== historyGen) return // codex #249 P2：已被更新的 loadHistory 取代：丢弃本在途响应
       // codex P2 #108：保留 await 期间 send() 追加的进行中 turn（user + 流式 assistant 占位）。
