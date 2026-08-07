@@ -46,12 +46,20 @@ async function selectContainer(name: string): Promise<void> {
 
 async function onSwitch(name: string): Promise<void> {
   if (name === current.value) return
-  await store.switchContainer(name)
-  await refreshGraph()
+  try {
+    await store.switchContainer(name)
+    await refreshGraph()
+  } catch (e) {
+    ElMessage.error((e as Error).message)
+  }
 }
 
 async function onOpen(path: string): Promise<void> {
-  await store.openPage(path)
+  try {
+    await store.openPage(path)
+  } catch (e) {
+    ElMessage.error((e as Error).message)
+  }
 }
 
 function onEdit(markdown: string): void {
