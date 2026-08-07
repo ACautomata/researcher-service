@@ -18,6 +18,17 @@ describe('MarkdownRenderer', () => {
     expect(w.find('.markdown-body pre.hljs').exists()).toBe(true)
   })
 
+  it('一级到四级标题保持对应语义层级', () => {
+    const text = '# 一级\n\n## 二级\n\n### 三级\n\n#### 四级'
+    const w = mount(MarkdownRenderer, { props: { text, streaming: false } })
+    expect(['h1', 'h2', 'h3', 'h4'].map((tag) => w.get(`.markdown-body ${tag}`).text())).toEqual([
+      '一级',
+      '二级',
+      '三级',
+      '四级',
+    ])
+  })
+
   it('表格包在消息级横向滚动容器内', () => {
     const table = '| 第一列 | 第二列 |\n| --- | --- |\n| 内容 | 内容 |'
     const w = mount(MarkdownRenderer, { props: { text: table, streaming: false } })
