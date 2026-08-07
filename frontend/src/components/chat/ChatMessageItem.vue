@@ -44,9 +44,9 @@ defineSlots<{
 <style scoped>
 .msg { display: flex; max-width: 840px; }
 .msg.user { align-self: flex-end; }
-.bubble { padding: 10px 14px; border-radius: 12px; white-space: pre-wrap; word-break: break-word; }
-.msg.assistant .bubble { background: var(--el-fill-color-light); }
-.msg.user .bubble { background: var(--el-color-primary-light-8); }
+.bubble { padding: 10px 14px; border-radius: 12px; word-break: break-word; }
+.msg.assistant .bubble { background: var(--el-fill-color-light); white-space: normal; }
+.msg.user .bubble { background: var(--el-color-primary-light-8); white-space: pre-wrap; }
 .ai-notice {
   margin-top: 8px;
   padding-top: 7px;
