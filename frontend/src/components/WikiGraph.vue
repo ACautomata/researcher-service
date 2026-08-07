@@ -13,9 +13,6 @@ const emit = defineEmits<{ open: [path: string] }>()
 const host = ref<HTMLDivElement | null>(null)
 let network: Network | null = null
 
-// 高亮当前节点的强调色（与 Element Plus primary 一致）
-const ACTIVE_COLOR = '#409eff'
-
 interface NodeItem {
   id: string
   label: string
@@ -23,12 +20,17 @@ interface NodeItem {
   borderWidth?: number
 }
 
+function cssVar(name: string, fallback: string): string {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback
+}
+
 function toNodes(): NodeItem[] {
+  const activeColor = cssVar('--el-color-primary', '#409eff')
   return props.graph.nodes.map((n) => ({
     id: n.id,
     label: n.title,
     // 当前页高亮描边；ghost 虚节点淡色
-    color: n.id === props.activePath ? ACTIVE_COLOR : undefined,
+    color: n.id === props.activePath ? activeColor : undefined,
     borderWidth: n.id === props.activePath ? 3 : 1,
   }))
 }
@@ -39,13 +41,15 @@ function toEdges(): Array<{ from: string; to: string }> {
 
 function render(): void {
   if (!host.value) return
+  const textColor = cssVar('--el-text-color-regular', '#606266')
+  const borderColor = cssVar('--el-border-color', '#c0c4cc')
   network?.destroy()
   network = new Network(
     host.value,
     { nodes: new DataSet(toNodes() as never), edges: new DataSet(toEdges() as never) },
     {
-      nodes: { shape: 'dot', size: 12, font: { size: 12 } },
-      edges: { arrows: 'to', color: '#c0c4cc' },
+      nodes: { shape: 'dot', size: 12, font: { size: 12, color: textColor } },
+      edges: { arrows: 'to', color: borderColor },
       physics: { barnesHut: { gravitationalConstant: -8000 } },
     },
   )

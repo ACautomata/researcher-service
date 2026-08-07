@@ -90,7 +90,7 @@ function scrollToBottom(): void {
 // （rAF 节流）。
 watch(
   () =>
-    props.messages.map((m) => `${m.role}|${m.streaming}|${m.raw.length}|${m.raw}`).concat(
+    props.messages.map((m) => `${m.role}|${m.streaming}|${m.raw.length}`).concat(
       props.approvals.map((a) => `${a.id}|${a.seq}|${a.status}`),
     ) + `|anchor:${props.anchorState}`,
   scrollToBottom,

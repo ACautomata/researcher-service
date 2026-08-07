@@ -8,6 +8,24 @@ const authedAdmin = { isAuthenticated: true, refreshExhausted: false, role: 'adm
 const transient = { isAuthenticated: false, refreshExhausted: false, role: '' }
 const exhausted = { isAuthenticated: false, refreshExhausted: true, role: '' }
 
+describe('页面路由按需加载', () => {
+  it('所有页面组件均使用动态导入', () => {
+    const records = router.getRoutes().filter((route) => route.name)
+    expect(records.map((route) => String(route.name)).sort()).toEqual([
+      'admin-trace-logs',
+      'admin-users',
+      'categories',
+      'chat',
+      'containers',
+      'login',
+      'models',
+      'not-found',
+      'wiki',
+    ])
+    expect(records.every((route) => typeof route.components?.default === 'function')).toBe(true)
+  })
+})
+
 describe('decideGuard（守卫决策纯函数）', () => {
   it('受保护路由 + 已认证 → 放行', () => {
     expect(decideGuard(true, authed)).toBeUndefined()

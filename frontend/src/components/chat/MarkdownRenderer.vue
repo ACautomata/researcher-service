@@ -20,6 +20,10 @@ const html = computed(() => renderMarkdown(props.text))
 
 <style scoped>
 /* #401：少量 scoped 样式贴合气泡配色（Element CSS 变量，不引 github-markdown-css 全量） */
+.markdown-body {
+  min-width: 0;
+  max-width: 100%;
+}
 .markdown-body :deep(p) {
   margin: 0.4em 0;
 }
@@ -72,10 +76,15 @@ const html = computed(() => renderMarkdown(props.text))
   border-left: 3px solid var(--el-border-color);
   color: var(--el-text-color-secondary);
 }
-/* 表格边框 */
+/* 表格只在自己的 wrapper 内横向滚动，不把气泡或消息流撑宽。 */
+.markdown-body :deep(.table-scroll) {
+  max-width: 100%;
+  margin: 0.4em 0;
+  overflow-x: auto;
+}
 .markdown-body :deep(table) {
   border-collapse: collapse;
-  margin: 0.4em 0;
+  margin: 0;
 }
 .markdown-body :deep(th),
 .markdown-body :deep(td) {

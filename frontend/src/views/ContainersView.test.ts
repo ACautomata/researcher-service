@@ -166,6 +166,30 @@ describe('ContainersView', () => {
     expect((listInstances as ReturnType<typeof vi.fn>).mock.calls.length).toBe(1)
   })
 
+  it('resumes polling after a timed-out refresh releases the in-flight guard', async () => {
+    vi.useFakeTimers()
+    ;(listInstances as ReturnType<typeof vi.fn>)
+      .mockImplementationOnce(
+        () => new Promise((_, reject) => {
+          setTimeout(() => reject(new DOMException('请求超时', 'TimeoutError')), 15_000)
+        }),
+      )
+      .mockResolvedValueOnce([])
+    mount(ContainersView, { global: { plugins: [createPinia()], stubs } })
+    await flushPromises()
+    expect(listInstances).toHaveBeenCalledTimes(1)
+
+    await vi.advanceTimersByTimeAsync(15_000)
+    await flushPromises()
+    const callsAfterTimeout = (listInstances as ReturnType<typeof vi.fn>).mock.calls.length
+    expect(callsAfterTimeout).toBeGreaterThan(1)
+    await vi.advanceTimersByTimeAsync(3_000)
+    await flushPromises()
+    expect((listInstances as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThan(
+      callsAfterTimeout,
+    )
+  })
+
   // ---------------------------- 配对状态（issue #40 + #340-C 徽标）----------------------------
 
   it('loads pairing status from listInstances payload', async () => {
