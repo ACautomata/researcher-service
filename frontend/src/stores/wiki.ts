@@ -29,18 +29,26 @@ export const useWikiStore = defineStore('wiki', {
     _saveTimer: null as ReturnType<typeof setTimeout> | null,
     // 保存串行链（codex 意见2）：所有落盘经此链排队，导航 await 它不丢在飞期间改动
     _saveChain: Promise.resolve() as Promise<void>,
+    // 异步导航只允许最后一次请求提交，避免慢响应覆盖用户较新的选择。
+    _treeSeq: 0 as number,
+    _pageSeq: 0 as number,
   }),
   actions: {
     async loadTree(name: string): Promise<void> {
+      const requestSeq = ++this._treeSeq
       const tree = await getTree(name)
+      if (requestSeq !== this._treeSeq) return
       this.current = name
       this.groups = tree.groups
     },
 
     async openPage(path: string): Promise<void> {
+      const requestSeq = ++this._pageSeq
       // 打开另一页前先落盘当前脏页（验收 2：编辑不丢）
       await this._flush()
-      const page = await readPage(this.current, path)
+      const container = this.current
+      const page = await readPage(container, path)
+      if (requestSeq !== this._pageSeq || container !== this.current) return
       this.activePath = path
       this.draft = page.content
       this.dirty = false
@@ -72,6 +80,7 @@ export const useWikiStore = defineStore('wiki', {
 
     async switchContainer(name: string): Promise<void> {
       if (name === this.current) return
+      this._pageSeq += 1
       // 切容器前先落盘当前脏页（验收 4：切前落盘）
       await this._flush()
       this.activePath = ''
@@ -83,6 +92,7 @@ export const useWikiStore = defineStore('wiki', {
     // 重挂载/初始化：清掉 Pinia 残留的旧编辑器态（activePath/draft/dirty），再切到目标容器
     // （codex PR #62 意见3：否则旧容器 draft 会在新容器下显示/被覆盖写）。
     async resetForContainer(name: string): Promise<void> {
+      this._pageSeq += 1
       await this._flush() // 残留脏页先落盘（不丢编辑）
       this._cancelSave()
       this.activePath = ''

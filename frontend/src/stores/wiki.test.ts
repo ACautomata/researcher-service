@@ -22,6 +22,12 @@ const TREE = {
   ],
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((done) => { resolve = done })
+  return { promise, resolve }
+}
+
 describe('wiki store', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
@@ -57,6 +63,51 @@ describe('wiki store', () => {
     expect(s.activePath).toBe('concepts/a.md')
     expect(s.draft).toBe('# A\n')
     expect(s.dirty).toBe(false)
+  })
+
+  it('keeps the latest tree when container responses arrive out of order', async () => {
+    const first = deferred<typeof TREE>()
+    const secondTree = {
+      groups: [{ kind: 'concept', name: 'concepts', pages: [{ path: 'concepts/b.md', title: 'B' }] }],
+    }
+    const second = deferred<typeof secondTree>()
+    ;(getTree as ReturnType<typeof vi.fn>)
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(second.promise)
+
+    const s = useWikiStore()
+    const loadFirst = s.loadTree('first')
+    const loadSecond = s.loadTree('second')
+    second.resolve(secondTree)
+    await loadSecond
+    first.resolve(TREE)
+    await loadFirst
+
+    expect(s.current).toBe('second')
+    expect(s.groups).toEqual(secondTree.groups)
+  })
+
+  it('keeps the latest page when reads arrive out of order', async () => {
+    const pageA = deferred<{ path: string; title: string; content: string }>()
+    const pageB = deferred<{ path: string; title: string; content: string }>()
+    ;(readPage as ReturnType<typeof vi.fn>).mockImplementation(
+      (_container: string, path: string) => path === 'concepts/a.md' ? pageA.promise : pageB.promise,
+    )
+
+    const s = useWikiStore()
+    await s.loadTree('demo')
+    const openA = s.openPage('concepts/a.md')
+    const openB = s.openPage('concepts/b.md')
+    await Promise.resolve()
+    await Promise.resolve()
+
+    pageB.resolve({ path: 'concepts/b.md', title: 'B', content: '# B' })
+    await openB
+    pageA.resolve({ path: 'concepts/a.md', title: 'A', content: '# A' })
+    await openA
+
+    expect(s.activePath).toBe('concepts/b.md')
+    expect(s.draft).toBe('# B')
   })
 
   it('debounces autosave ~800ms after edit, writing to same container', async () => {
