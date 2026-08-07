@@ -67,9 +67,18 @@ export function parseEnvelope(body: unknown): EnvelopeBody<unknown> | null {
 // TypeError（"Failed to fetch" / "Load failed"）。视图据此二分:ApiError 逐字透传消息,
 // 其余（网络/意外）走模式专属本地化兜底,避免把英文浏览器报错文本直接展示给用户。
 export class ApiError extends Error {
-  constructor(message: string) {
-    super(message)
+  readonly status?: number
+  readonly code?: number
+
+  constructor(message: string)
+  constructor(status: number, message: string, code?: number)
+  constructor(statusOrMessage: number | string, message?: string, code?: number) {
+    super(typeof statusOrMessage === 'number' ? (message ?? '') : statusOrMessage)
     this.name = 'ApiError'
+    if (typeof statusOrMessage === 'number') {
+      this.status = statusOrMessage
+      this.code = code ?? -1
+    }
     // 维持 instanceof 语义(es5 target 下子类化内建 Error 的常见坑由 tsconfig target 保证)
   }
 }
