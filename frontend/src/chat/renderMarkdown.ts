@@ -47,6 +47,11 @@ const md = new MarkdownIt({
 })
 md.use(emojiPlugin).use(taskListsPlugin)
 
+// 宽表格使用局部滚动容器，避免撑破消息气泡或把整个消息流变成横向滚动区。
+// wrapper 由渲染器生成而非组件运行时改 DOM，流式重渲染与消毒出口保持同一路径。
+md.renderer.rules.table_open = () => '<div class="table-scroll"><table>\n'
+md.renderer.rules.table_close = () => '</table></div>\n'
+
 // DOMPurify 渲染出口兜底（jsdom/浏览器均可：默认取全局 window，vitest 环境自动回退内部实现）。
 // afterSanitizeAttributes 钩子在消毒出口统一强制链接 target="_blank" rel="noopener"
 // （用户故事 8：新标签页打开不丢对话位置；jsdom 的 DOMPurify 会剥 target 非白名单属性，钩子补回；

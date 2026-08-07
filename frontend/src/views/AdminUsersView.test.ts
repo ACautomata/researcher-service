@@ -99,6 +99,7 @@ function vm(wrapper: ReturnType<typeof mount>) {
     openReset: (u: (typeof USERS)[0]) => Promise<void>
     resettingUserId: string
     beginQuotaEdit: (u: (typeof USERS)[0]) => void
+    isQuotaEditing: (userId: string) => boolean
     saveQuota: (u: (typeof USERS)[0]) => Promise<void>
     quotaEditing: Record<string, string>
   }
@@ -205,6 +206,16 @@ describe('AdminUsersView', () => {
     await vm(w).saveQuota(USERS[0])
     await flushPromises()
     expect(patchUser).toHaveBeenCalledWith('u1', { maxContainers: 10 })
+  })
+
+  it('配额 inline 编辑：清空输入后仍保持编辑态', async () => {
+    const w = await mountView()
+    vm(w).beginQuotaEdit(USERS[0])
+    ;(vm(w).quotaEditing as Record<string, string>)[USERS[0].id] = ''
+    await nextTick()
+
+    expect(vm(w).isQuotaEditing(USERS[0].id)).toBe(true)
+    expect(vm(w).isQuotaEditing(USERS[1].id)).toBe(false)
   })
 
   it('配额 inline 编辑：非法值（负数）→ 本地提示，不调 API', async () => {
