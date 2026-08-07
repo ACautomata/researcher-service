@@ -9,7 +9,7 @@ const isAdmin = computed(() => auth.role === 'admin')
 </script>
 
 <template>
-  <nav v-if="$route.name !== 'login'" class="app-nav">
+  <nav v-if="$route.name !== 'login' && !$route.meta.immersive" class="app-nav">
     <router-link to="/">容器管理</router-link>
     <router-link to="/chat">对话</router-link>
     <router-link to="/wiki">Wiki</router-link>

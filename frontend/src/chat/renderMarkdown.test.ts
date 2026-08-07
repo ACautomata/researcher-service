@@ -89,6 +89,15 @@ describe('renderMarkdown 基本语法', () => {
     const html = renderMarkdown('## 二级标题')
     expect(html).toContain('<h2>二级标题</h2>')
   })
+
+  it('KaTeX 行内公式与块级公式', () => {
+    const inline = renderMarkdown('残差映射 $H(x)=F(x)+x$')
+    const block = renderMarkdown('$$L_{train}=L_{ce}+\\lambda\\lVert W\\rVert_2^2$$')
+    expect(inline).toContain('class="katex"')
+    expect(inline).toContain('H')
+    expect(block).toContain('class="katex-display"')
+    expect(block).toContain('lambda')
+  })
 })
 
 describe('renderMarkdown 半成品容错（流式中间态）', () => {

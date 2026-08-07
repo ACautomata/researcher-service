@@ -11,9 +11,13 @@ import CategoriesView from '@/views/CategoriesView.vue'
 import ModelView from '@/views/ModelView.vue'
 import AdminUsersView from '@/views/AdminUsersView.vue'
 import TraceLogsView from '@/views/TraceLogsView.vue'
+import ResNetDemoView from '@/views/ResNetDemoView.vue'
+import ResNetWikiDemoView from '@/views/ResNetWikiDemoView.vue'
 
 const routes: RouteRecordRaw[] = [
   { path: '/login', name: 'login', component: LoginView, meta: { public: true } },
+  { path: '/resnet-demo', name: 'resnet-demo', component: ResNetDemoView, meta: { public: true, immersive: true } },
+  { path: '/resnet-demo/wiki', name: 'resnet-demo-wiki', component: ResNetWikiDemoView, meta: { public: true, immersive: true } },
   {
     path: '/',
     name: 'containers',

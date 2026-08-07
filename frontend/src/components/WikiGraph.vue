@@ -40,12 +40,20 @@ function toEdges(): Array<{ from: string; to: string }> {
 function render(): void {
   if (!host.value) return
   network?.destroy()
+  const dark = window.matchMedia?.('(prefers-color-scheme: dark)').matches ?? false
   network = new Network(
     host.value,
     { nodes: new DataSet(toNodes() as never), edges: new DataSet(toEdges() as never) },
     {
-      nodes: { shape: 'dot', size: 12, font: { size: 12 } },
-      edges: { arrows: 'to', color: '#c0c4cc' },
+      nodes: {
+        shape: 'dot',
+        size: 12,
+        font: { size: 12, color: dark ? '#d1d5db' : '#303133', strokeWidth: dark ? 3 : 0, strokeColor: dark ? '#16171d' : '#ffffff' },
+        color: dark
+          ? { background: '#8ab4f8', border: '#b7d2ff', highlight: { background: '#409eff', border: '#d8e9ff' } }
+          : { background: '#97bce8', border: '#6d9fd5', highlight: { background: '#409eff', border: '#1f78d1' } },
+      },
+      edges: { arrows: 'to', color: dark ? '#687386' : '#aab4c1', width: 1.2 },
       physics: { barnesHut: { gravitationalConstant: -8000 } },
     },
   )

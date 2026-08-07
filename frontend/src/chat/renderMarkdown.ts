@@ -5,6 +5,8 @@
 import MarkdownIt from 'markdown-it'
 import { full as emojiPlugin } from 'markdown-it-emoji'
 import taskListsPlugin from 'markdown-it-task-lists'
+import katexPlugin from 'markdown-it-katex'
+import 'katex/dist/katex.min.css'
 import createDOMPurify from 'dompurify'
 import hljs from 'highlight.js/lib/core'
 // 常用语言子集（全量 ≈ 1MB，R30 §3.2「体积按需考虑」）：js/ts/py/bash/json/xml/css + 常见别名。
@@ -45,7 +47,7 @@ const md = new MarkdownIt({
     return `<pre class="hljs"><code>${md.utils.escapeHtml(str)}</code></pre>`
   },
 })
-md.use(emojiPlugin).use(taskListsPlugin)
+md.use(emojiPlugin).use(taskListsPlugin).use(katexPlugin, { throwOnError: false, errorColor: '#cc0000' })
 
 // DOMPurify 渲染出口兜底（jsdom/浏览器均可：默认取全局 window，vitest 环境自动回退内部实现）。
 // afterSanitizeAttributes 钩子在消毒出口统一强制链接 target="_blank" rel="noopener"

@@ -29,9 +29,40 @@ const html = computed(() => renderMarkdown(props.text))
 .markdown-body :deep(p:last-child) {
   margin-bottom: 0;
 }
+/* 覆盖全局落地页 h1/h2 大字号，避免聊天/Wiki Markdown 标题行高与正文重叠。 */
+.markdown-body :deep(h1),
+.markdown-body :deep(h2),
+.markdown-body :deep(h3),
+.markdown-body :deep(h4) {
+  font-family: inherit;
+  color: var(--el-text-color-primary);
+  line-height: 1.35;
+  letter-spacing: 0;
+}
+.markdown-body :deep(h1) {
+  margin: 0.2em 0 0.7em;
+  font-size: 1.65em;
+  font-weight: 650;
+}
+.markdown-body :deep(h2) {
+  margin: 1.15em 0 0.5em;
+  font-size: 1.3em;
+  font-weight: 650;
+}
+.markdown-body :deep(h3) {
+  margin: 1em 0 0.42em;
+  font-size: 1.08em;
+  font-weight: 650;
+}
+.markdown-body :deep(h4) {
+  margin: 0.85em 0 0.35em;
+  font-size: 1em;
+  font-weight: 650;
+}
 /* 代码块：底色 + 圆角 + 内边距（贴合 assistant 气泡 var(--el-fill-color-light) 底） */
 .markdown-body :deep(pre) {
   background: var(--el-fill-color-dark);
+  color: var(--el-text-color-primary);
   border-radius: 8px;
   padding: 10px 12px;
   overflow-x: auto;
@@ -39,12 +70,14 @@ const html = computed(() => renderMarkdown(props.text))
   line-height: 1.5;
 }
 .markdown-body :deep(pre code) {
+  display: block;
   background: transparent;
   padding: 0;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 /* 行内代码 */
 .markdown-body :deep(code) {
+  display: inline;
   background: var(--el-fill-color-dark);
   border-radius: 4px;
   padding: 1px 5px;
@@ -75,6 +108,7 @@ const html = computed(() => renderMarkdown(props.text))
 /* 表格边框 */
 .markdown-body :deep(table) {
   border-collapse: collapse;
+  width: 100%;
   margin: 0.4em 0;
 }
 .markdown-body :deep(th),
@@ -87,10 +121,58 @@ const html = computed(() => renderMarkdown(props.text))
   border-top: 1px solid var(--el-border-color);
   margin: 0.6em 0;
 }
+.markdown-body :deep(.katex-display) {
+  margin: 0.9em 0;
+  padding: 0.7em 0.9em;
+  overflow-x: auto;
+  overflow-y: hidden;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 7px;
+  background: var(--el-fill-color-lighter);
+  text-align: center;
+}
+.markdown-body :deep(.katex) {
+  color: var(--el-text-color-primary);
+  font-size: 1.02em;
+  line-height: 1.35;
+}
 /* 任务列表 checkbox 不可勾选（只读展示） */
 .markdown-body :deep(.task-list-item input[type='checkbox']) {
   pointer-events: none;
   margin-right: 6px;
+}
+@media (prefers-color-scheme: dark) {
+  .markdown-body :deep(pre),
+  .markdown-body :deep(code) {
+    background: #11141a;
+    color: #d8dee9;
+  }
+  .markdown-body :deep(pre code) {
+    background: transparent;
+  }
+  .markdown-body :deep(th) {
+    background: #23262f;
+  }
+  .markdown-body :deep(th),
+  .markdown-body :deep(td) {
+    border-color: #3b404b;
+  }
+  .markdown-body :deep(blockquote) {
+    border-left-color: #566171;
+    color: #aeb6c2;
+  }
+  .markdown-body :deep(.hljs-keyword),
+  .markdown-body :deep(.hljs-selector-tag),
+  .markdown-body :deep(.hljs-literal) { color: #c792ea; }
+  .markdown-body :deep(.hljs-string),
+  .markdown-body :deep(.hljs-title),
+  .markdown-body :deep(.hljs-section) { color: #a7d98b; }
+  .markdown-body :deep(.hljs-number),
+  .markdown-body :deep(.hljs-symbol) { color: #f2b36d; }
+  .markdown-body :deep(.hljs-comment),
+  .markdown-body :deep(.hljs-quote) { color: #7f8b99; }
+  .markdown-body :deep(.hljs-built_in),
+  .markdown-body :deep(.hljs-type) { color: #82c7e5; }
 }
 /* 流式光标（assistant 由本组件负责；user 分支的 .cursor 保留在 ChatMessageItem） */
 .cursor {
