@@ -101,12 +101,13 @@ function syncGraph(): void {
 function updateActivePath(activePath: string, previousPath: string): void {
   if (!nodeData || activePath === previousPath) return
   const nodeIds = new Set(nodeData.getIds().map(String))
+  const activeColor = cssVar('--el-color-primary', '#409eff')
   const updates: NodeItem[] = []
   if (previousPath && nodeIds.has(previousPath)) {
     updates.push({ id: previousPath, color: undefined, borderWidth: 1 })
   }
   if (activePath && nodeIds.has(activePath)) {
-    updates.push({ id: activePath, color: ACTIVE_COLOR, borderWidth: 3 })
+    updates.push({ id: activePath, color: activeColor, borderWidth: 3 })
   }
   if (updates.length) nodeData.update(updates)
 }
