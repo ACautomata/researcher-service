@@ -150,6 +150,44 @@ describe('ChatView', () => {
     expect(w.find('.cursor').exists()).toBe(false)
   })
 
+  it('输入法组词 Enter 不发送；Safari 229 不发送；Shift+Enter 换行；普通 Enter 仍发送', async () => {
+    const { w, gw } = await mountReady()
+    const input = w.find('[data-test="input"]')
+    await input.setValue('你好')
+
+    await input.trigger('keydown', { key: 'Enter', shiftKey: true })
+    await input.trigger('keydown', { key: 'Enter', isComposing: true })
+    await input.trigger('keydown', { key: 'Enter', keyCode: 229 })
+    expect(gw.send).not.toHaveBeenCalled()
+
+    await input.trigger('keydown', { key: 'Enter' })
+    expect(gw.send).toHaveBeenCalledWith('sk-1', '你好')
+  })
+
+  it('斜杠菜单开启时，输入法组词 Enter 不选择命令也不发送', async () => {
+    const w = mount(ChatView)
+    await flushPromises()
+    const gw = MockGatewayChat.last!
+    gw.listCommands.mockResolvedValue([
+      { name: 'model', description: '切换模型', aliases: ['/model'] },
+    ])
+    gw.listSessions.mockResolvedValue([SESSION])
+    gw.getHistory.mockResolvedValue({ messages: [], hasMore: false, nextOffset: null })
+    gw.send.mockResolvedValue(undefined)
+    gw.fireReady()
+    await flushPromises()
+
+    const input = w.find('[data-test="input"]')
+    await input.setValue('/m')
+    await nextTick()
+    expect(w.find('[data-test="slash-menu"]').exists()).toBe(true)
+
+    await input.trigger('keydown', { key: 'Enter', isComposing: true })
+    expect((input.element as HTMLTextAreaElement).value).toBe('/m')
+    expect(w.find('[data-test="slash-menu"]').exists()).toBe(true)
+    expect(gw.send).not.toHaveBeenCalled()
+  })
+
   it('error 帧（消费者级，无 runId）→ 错误条', async () => {
     const { w, gw } = await mountReady()
     gw.fireFrame({ type: 'error', message: '模型超时' })
