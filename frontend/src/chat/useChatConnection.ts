@@ -997,6 +997,10 @@ export function useChatConnection(status: ChatStatus) {
 
   // 键位处理：菜单开启时斜杠补全导航/选中/关闭优先于发送；关闭时 Enter（无修饰键）发送
   function onComposerKeydown(e: KeyboardEvent) {
+    // 中文/日文等 IME 用 Enter 确认候选词时，不得把同一次 keydown 当成发送或命令选择。
+    // isComposing 是标准信号；keyCode=229 兼容 Safari/部分输入法未正确暴露 composition 状态。
+    if (e.isComposing || e.keyCode === 229) return
+
     if (slashOpen.value) {
       if (e.key === 'ArrowDown') {
         e.preventDefault()
