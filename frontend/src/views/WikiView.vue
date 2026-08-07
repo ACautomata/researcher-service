@@ -169,29 +169,32 @@ onMounted(async () => {
   align-items: center;
   gap: 12px;
   padding: 8px 16px;
-  border-bottom: 1px solid #e4e7ed;
+  border-bottom: 1px solid var(--el-border-color);
 }
 .brand {
   font-weight: 600;
 }
 .switcher {
   padding: 4px 8px;
-  border: 1px solid #dcdfe6;
+  border: 1px solid var(--el-border-color);
   border-radius: 4px;
+  color: var(--el-text-color-regular);
+  background: var(--el-bg-color);
 }
 .save-state {
   font-size: 12px;
-  color: #67c23a;
+  color: var(--el-color-success);
 }
 .save-state.dirty {
-  color: #e6a23c;
+  color: var(--el-color-warning);
 }
 .toggle-graph {
   margin-left: auto;
   padding: 4px 10px;
-  border: 1px solid #dcdfe6;
+  border: 1px solid var(--el-border-color);
   border-radius: 4px;
-  background: #fff;
+  color: var(--el-text-color-regular);
+  background: var(--el-bg-color);
   cursor: pointer;
 }
 .wiki-body {
@@ -201,7 +204,7 @@ onMounted(async () => {
 }
 .left {
   width: 220px;
-  border-right: 1px solid #e4e7ed;
+  border-right: 1px solid var(--el-border-color);
   overflow-y: auto;
 }
 .center {
@@ -211,10 +214,10 @@ onMounted(async () => {
 }
 .right {
   width: 320px;
-  border-left: 1px solid #e4e7ed;
+  border-left: 1px solid var(--el-border-color);
 }
 .empty {
-  color: #909399;
+  color: var(--el-text-color-secondary);
   padding: 40px;
   text-align: center;
 }

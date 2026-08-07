@@ -53,22 +53,22 @@ const emit = defineEmits<{
   justify-content: space-between;
   align-items: center;
   padding: 8px 10px;
-  border-bottom: 1px solid #e4e7ed;
+  border-bottom: 1px solid var(--el-border-color);
 }
 .tree-title {
   font-weight: 600;
-  color: #303133;
+  color: var(--el-text-color-primary);
 }
 .create-btn {
   border: none;
   background: none;
   font-size: 16px;
   cursor: pointer;
-  color: #409eff;
+  color: var(--el-color-primary);
 }
 .group-name {
   padding: 6px 10px 2px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
   font-size: 12px;
 }
 .node {
@@ -77,26 +77,26 @@ const emit = defineEmits<{
   align-items: center;
   padding: 4px 10px 4px 20px;
   cursor: pointer;
-  color: #606266;
+  color: var(--el-text-color-regular);
 }
 .node:hover {
-  background: #f5f7fa;
+  background: var(--el-fill-color-light);
 }
 .node.active {
-  background: #ecf5ff;
-  color: #409eff;
+  background: var(--el-color-primary-light-9);
+  color: var(--el-color-primary);
 }
 .del-btn {
   border: none;
   background: none;
   cursor: pointer;
-  color: #c0c4cc;
+  color: var(--el-text-color-placeholder);
   visibility: hidden;
 }
 .node:hover .del-btn {
   visibility: visible;
 }
 .del-btn:hover {
-  color: #f56c6c;
+  color: var(--el-color-danger);
 }
 </style>
