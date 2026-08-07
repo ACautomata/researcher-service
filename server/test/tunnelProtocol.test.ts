@@ -163,7 +163,7 @@ describe('M5 协议机经隧道 v4 握手（#337 验收②）', () => {
         buildConnectParams: (plan: ConnectPlan) => ({
           minProtocol: 4,
           maxProtocol: 4,
-          client: { id: 'webchat-ui', mode: 'webchat', platform: 'browser', version: '2026.7.2-beta.6' },
+          client: { id: 'openclaw-control-ui', mode: 'webchat', platform: 'browser', version: '2026.7.2-beta.6' },
           role: plan.role,
           scopes: plan.scopes,
           caps: plan.caps,

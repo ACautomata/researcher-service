@@ -56,11 +56,12 @@ const visibleApprovals = computed(() => chat.visibleApprovals)
 // SyntheticAnchor 虚拟气泡承载审批卡（锚定三分支之外的稳定落点；卡全 resolved 后仍留存）
 const anchorState = computed(() => visibleApprovals.value.length > 0)
 
-// 删除会话：确认（ElMessageBox）由本壳注入（composable 内不持有 UI）
+// 删除会话：确认（ElMessageBox）由本壳注入（composable 内不持有 UI）。
+// #461：文案明示硬删除不可恢复（删除即硬删，无「归档/可恢复」中间态，与真实网关语义一致）。
 async function confirmRemoveSession(): Promise<boolean> {
   try {
     await ElMessageBox.confirm(
-      '确认删除该会话？网关会先归档（可恢复）再删除。',
+      '确认删除该会话？删除后不可恢复。',
       '删除会话',
       { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
     )
@@ -71,8 +72,10 @@ async function confirmRemoveSession(): Promise<boolean> {
 }
 
 async function removeSession(key: string): Promise<void> {
-  const ok = await conn.removeSession(key, confirmRemoveSession)
-  if (ok) ElMessage.success('会话已删除')
+  const res = await conn.removeSession(key, confirmRemoveSession)
+  if (res === true) ElMessage.success('会话已删除') // #461：成功 → 醒目 toast
+  else if (typeof res === 'string') ElMessage.error(res) // #461：失败 → 醒目错误 toast（替换顶部小字 bar）
+  // null = 用户取消 / 断线：无反馈
 }
 
 function toggleApprovalDetail(a: { id: string }): void {
@@ -143,7 +146,22 @@ defineExpose({
         @load-more="conn.loadMoreHistory"
         @resolve-approval="conn.resolveApproval"
         @toggle-approval-detail="toggleApprovalDetail"
-      />
+      >
+        <!-- #461：无选中会话（含删除当前会话后）→ 空态视图 + 「新建会话」入口 -->
+        <template #empty>
+          <div v-if="!chat.selectedSession" class="empty-state" data-test="empty-state">
+            <p class="empty-title">未选择会话</p>
+            <p class="empty-hint">选择一个会话继续对话，或新建会话</p>
+            <button
+              type="button"
+              class="empty-new"
+              data-test="empty-new-session"
+              :disabled="conn.disconnected.value"
+              @click="conn.newSession"
+            >＋ 新建会话</button>
+          </div>
+        </template>
+      </ChatStream>
       <ChatComposer
         v-model="chat.input"
         :matches="slashMatches"
@@ -189,4 +207,11 @@ defineExpose({
 .slash-item.sel, .slash-item:hover { background: var(--el-fill-color); }
 .slash-item .cmd { font-family: ui-monospace, monospace; color: var(--el-color-primary); font-size: 13px; }
 .slash-item .desc { margin-left: auto; color: var(--el-text-color-secondary); font-size: 12px; }
+
+/* #461：无选中会话空态视图（删除当前会话后停留空聊天区）——居中提示 + 新建会话入口 */
+.empty-state { margin: auto; text-align: center; color: var(--el-text-color-secondary); }
+.empty-title { margin: 0 0 6px; font-size: 14px; }
+.empty-hint { margin: 0 0 12px; font-size: 12.5px; }
+.empty-new { background: transparent; border: 1px dashed var(--el-border-color); border-radius: 7px; padding: 6px 16px; cursor: pointer; color: var(--el-text-color-secondary); font-size: 13px; }
+.empty-new:disabled { cursor: default; opacity: .6; }
 </style>

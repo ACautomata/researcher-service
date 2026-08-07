@@ -17,10 +17,10 @@
     "db:apply": "node scripts/apply-schema.mjs"
   },
   "dependencies": {
-    "@prisma/adapter-better-sqlite3": "^7.5.0",
+    "@prisma/adapter-better-sqlite3": "^7.9.1",
     "@prisma/client": "^7.9.1",
     "bcryptjs": "^3.0.2",
-    "better-sqlite3": "^11.8.1",
+    "better-sqlite3": "^12.10.1",
     "bullmq": "^6.0.5",
     "cookie-parser": "^1.4.7",
     "dockerode": "^5.0.1",

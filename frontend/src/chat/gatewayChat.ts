@@ -152,12 +152,21 @@ const WATCHDOG_INTERVAL_MS = 15_000
 // 带 archivedOnly 反被网关对未归档会话恒拒 INVALID_REQUEST）——协议 schema 明示「deletes without
 // [archivedOnly] require operator.admin」。旧 backend wire SCOPES 含 admin，前端移植时漏掉 → 删除
 // 被 scope 拒。安全：operator.admin = full host access；面板作为容器所有者全权代理，UI 不暴露
-// terminal/worktree 等高危方法。真网关验证待 ADR 0006 遗留实测项 ③。
+// terminal/worktree 等高危方法。真网关验证 ADR 0006 实测项 ③ 已完成（#461）：webchat 客户端删除
+// 被网关硬拒（rejectWebchatSessionMutation），豁免仅 openclaw-control-ui 身份——面板客户端 ID
+// 因此从 webchat-ui 改为 openclaw-control-ui（见 CLIENT_INFO）。
 const OPERATOR_ROLE = 'operator'
 const OPERATOR_SCOPES = ['operator.read', 'operator.write', 'operator.approvals', 'operator.admin']
 const CONNECT_CAPS = ['tool-events']
 // 连接 client 声明（buildConnectParams 与 lifecycle.buildPlan 共用，防两处漂移）。
-const CLIENT_INFO = { id: 'webchat-ui', mode: 'webchat', platform: 'browser', version: '2026.7.2-beta.6' } as const
+// #461 真网关实测（ADR 0006 实测项③）：sessions.delete/patch/compact/restore 对 webchat 客户端
+//（webchat-ui 或 mode=webchat）硬拒「webchat clients cannot delete sessions」，豁免仅
+// client.id === 'openclaw-control-ui'（官方 control-ui 页面身份）。面板改 control-ui 身份：
+// 删除可用；配对不受影响（网关 BROWSER_DEVICE_CLIENT_IDS 含 control-ui；生产远程非 loopback
+// 仍要求配对，本地 loopback 下被 isControlUiBrowserContainerLocalEquivalent 判为本地等价免配对）。
+const CLIENT_INFO = { id: 'openclaw-control-ui', mode: 'webchat', platform: 'browser', version: '2026.7.2-beta.6' } as const
+// version 对齐官方 @openclaw/gateway-client 包版本（2026.7.2-beta.6）；升级官方包时须同步 bump。
+// 真网关 2026.7.1 接受该 version 字段（未校验版本匹配，仅记录）。
 
 // A3: 非安全上下文（http://<lan-ip> 自托管面板常见）下 crypto.randomUUID 不可用（undefined），
 // 协议机首个 RPC 的 requestId / 写操作的幂等 key 即抛 → M5 RPC 层全死。

@@ -68,7 +68,7 @@ vi.mock('@/api/chat', () => ({
 import { createGatewayChat } from './gatewayChat'
 import { createDeviceAuthLifecycle, hasStoredDeviceTokenFor } from './deviceAuth'
 
-const client = { id: 'webchat-ui', mode: 'webchat', platform: 'browser', version: 'test' } as const
+const client = { id: 'openclaw-control-ui', mode: 'webchat', platform: 'browser', version: 'test' } as const
 
 function makeMemoryStorage(): Storage {
   const map = new Map<string, string>()

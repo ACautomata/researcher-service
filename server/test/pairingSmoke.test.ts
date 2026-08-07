@@ -141,7 +141,15 @@ async function waitFor<T>(check: () => Promise<T | null>, timeoutMs: number, int
 }
 
 // ---- 连接常量（对齐 frontend/src/chat/gatewayChat.ts）----
+// 配对闭环验证用 webchat-ui 身份（真网关对 webchat 客户端强制配对流程——control-ui 身份在
+// 本地 loopback 下被 isControlUiBrowserContainerLocalEquivalent 判为「浏览器本地等价」跳过配对）。
 const CLIENT_INFO = { id: 'webchat-ui', mode: 'webchat', platform: 'browser', version: '2026.7.2-beta.6' } as const
+// #461 真网关实测（ADR 0006 实测项③）：sessions.delete/patch/compact/restore 对 webchat 客户端
+// 硬拒（rejectWebchatSessionMutation：「webchat clients cannot delete sessions; use chat.send
+// for session-scoped updates」），豁免仅 client.id === 'openclaw-control-ui'（官方 control-ui 页面
+// 身份）。面板前端改 control-ui 身份（见 frontend/src/chat/gatewayChat.ts CLIENT_INFO）后删除可用，
+// 配对不受影响（BROWSER_DEVICE_CLIENT_IDS 含 control-ui；生产远程非 loopback 仍要求配对）。
+const CONTROL_UI_CLIENT_INFO = { id: 'openclaw-control-ui', mode: 'webchat', platform: 'browser', version: '2026.7.2-beta.6' } as const
 const OPERATOR_ROLE = 'operator'
 const OPERATOR_SCOPES = ['operator.read', 'operator.write', 'operator.approvals', 'operator.admin']
 const CONNECT_CAPS = ['tool-events']
@@ -398,7 +406,8 @@ describe('真网关配对闭环 smoke（#371-5 / #378）', () => {
   // resolveClose 对齐前端 gatewayChat：PAIRING_REQUIRED/认证类 = 非传输问题 retry:false；
   // 其余（含网关未就绪 4402）retry:true 交协议机退避重连（首连窗口容器网关未完全就绪时自愈）。
   // onConnectHello 对齐 #377：hello-ok 下发 deviceToken → acceptHello 持久化（tokenStore）。
-  const makeClient = (handlers: ClientHandlers) => {
+  // clientInfo 缺省 CLIENT_INFO（webchat-ui 身份，配对闭环用）；control-ui 身份（删除验证）显式传入。
+  const makeClient = (handlers: ClientHandlers, clientInfo: { id: string; mode: string; platform: string; version: string } = CLIENT_INFO) => {
     const lifecycle = new GatewayBrowserDeviceAuthLifecycle({
       loadIdentity: async () => identity,
       tokenStore: {
@@ -425,7 +434,7 @@ describe('真网关配对闭环 smoke（#371-5 / #378）', () => {
         // token/bootstrapToken 时从 tokenStore 取 deviceToken（auth:{deviceToken}），满足验收③
         // 「deviceToken 后续连接直接通」。
         const plan = await lifecycle.buildPlan({
-          client: CLIENT_INFO,
+          client: clientInfo,
           role: OPERATOR_ROLE,
           defaultScopes: OPERATOR_SCOPES,
           ...(storedToken ? {} : { token: bootstrapToken }),
@@ -436,7 +445,7 @@ describe('真网关配对闭环 smoke（#371-5 / #378）', () => {
       buildConnectParams: (plan: AuthPlan) => ({
         minProtocol: 4,
         maxProtocol: 4,
-        client: CLIENT_INFO,
+        client: clientInfo,
         role: plan.role,
         scopes: plan.scopes,
         caps: plan.caps,
@@ -553,6 +562,46 @@ describe('真网关配对闭环 smoke（#371-5 / #378）', () => {
     // 全程仅一次 PAIRING_REQUIRED（首连）；deviceToken 复用后不再配对。
     expect(pairings).toHaveLength(1)
   }, 240_000)
+
+  it('ADR 0006 实测项③：sessions.create + delete（不带 archivedOnly）在真网关硬删除成功', async () => {
+    // #461 验收：不带 archivedOnly 的 sessions.delete 在真实网关上删除成功。真网关实测（2026.7.1）：
+    // webchat 客户端（webchat-ui/普通 mode=webchat）删除被 rejectWebchatSessionMutation 硬拒
+    // （"webchat clients cannot delete sessions"），豁免仅 openclaw-control-ui 身份。故本用例用
+    // control-ui 身份连接（本地 loopback 下被网关判为「浏览器本地等价」跳过配对直接 hello-ok；
+    // 生产远程非 loopback 配对照常）。验证「已配对设备 + admin scope + control-ui 身份」可删除。
+    const helloAuths: { deviceToken?: string }[] = []
+    const c = makeClient(
+      {
+        onHello: (hello) => {
+          if (hello.auth) helloAuths.push(hello.auth)
+        },
+      },
+      CONTROL_UI_CLIENT_INFO,
+    )
+    c.client.start()
+    await waitFor(async () => (helloAuths.length > 0 ? helloAuths[0] : null), 60_000)
+    // 创建会话（idempotency key 32-hex，对齐前端 gatewayChat createSession）
+    const createRes = await c.client.request<{ key?: string; sessionKey?: string }>('sessions.create', {
+      key: `smoke-del-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`.replace(/[^a-z0-9]/g, ''),
+    })
+    const key = createRes?.key ?? createRes?.sessionKey
+    expect(key).toBeTruthy()
+    // 删除（不带 archivedOnly——面板语义：硬删除，无「归档」中间态）
+    await c.client.request('sessions.delete', { key })
+    // 删除后列表不再含该会话（硬删除闭环验证）
+    const listRes = await c.client.request<{ sessions?: Array<{ key?: string; sessionKey?: string }> }>(
+      'sessions.list',
+      { includeDerivedTitles: true },
+    )
+    const items = Array.isArray(listRes?.sessions) ? listRes.sessions : []
+    const keys: string[] = []
+    for (const s of items) {
+      const k = typeof s?.key === 'string' ? s.key : typeof s?.sessionKey === 'string' ? s.sessionKey : ''
+      if (k) keys.push(k)
+    }
+    expect(keys).not.toContain(key)
+    c.client.stop()
+  }, 120_000)
 
   it('容器停止（网关不可达）→ 隧道对浏览器 close(4402)（#376 前端预算的信号源）', async () => {
     // 停容器 → 宿主端口不可连 → 隧道 connectGateway 失败 → close(4402)。
