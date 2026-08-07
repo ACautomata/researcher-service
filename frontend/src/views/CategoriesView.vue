@@ -45,11 +45,19 @@ async function selectContainer(name: string): Promise<void> {
 async function onSwitch(name: string): Promise<void> {
   // 早退判 pending（含在飞的目标容器）而非 current：加载在飞时再选回 current 必须推进作废旧请求
   if (name === store.pending) return
-  await store.switchContainer(name)
+  try {
+    await store.switchContainer(name)
+  } catch (e) {
+    ElMessage.error((e as Error).message)
+  }
 }
 
 async function onOpen(path: string): Promise<void> {
-  await store.openItem(path)
+  try {
+    await store.openItem(path)
+  } catch (e) {
+    ElMessage.error((e as Error).message)
+  }
 }
 
 onMounted(async () => {
@@ -139,15 +147,17 @@ onMounted(async () => {
   align-items: center;
   gap: 12px;
   padding: 8px 16px;
-  border-bottom: 1px solid #e4e7ed;
+  border-bottom: 1px solid var(--el-border-color);
 }
 .brand {
   font-weight: 600;
 }
 .switcher {
   padding: 4px 8px;
-  border: 1px solid #dcdfe6;
+  border: 1px solid var(--el-border-color);
   border-radius: 4px;
+  color: var(--el-text-color-regular);
+  background: var(--el-bg-color);
 }
 .categories-body {
   display: flex;
@@ -156,7 +166,7 @@ onMounted(async () => {
 }
 .left {
   width: 280px;
-  border-right: 1px solid #e4e7ed;
+  border-right: 1px solid var(--el-border-color);
   overflow-y: auto;
 }
 .center {
@@ -165,12 +175,12 @@ onMounted(async () => {
   padding: 16px 24px;
 }
 .empty {
-  color: #909399;
+  color: var(--el-text-color-secondary);
   padding: 40px;
   text-align: center;
 }
 .cat-group {
-  border-bottom: 1px solid #f0f2f5;
+  border-bottom: 1px solid var(--el-border-color-lighter);
 }
 .cat-toggle {
   display: flex;
@@ -185,7 +195,7 @@ onMounted(async () => {
   text-align: left;
 }
 .caret {
-  color: #909399;
+  color: var(--el-text-color-secondary);
   width: 12px;
 }
 .chip {
@@ -200,7 +210,7 @@ onMounted(async () => {
 .cat-count {
   margin-left: auto;
   font-size: 12px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
 }
 .cat-items {
   list-style: none;
@@ -218,10 +228,10 @@ onMounted(async () => {
   text-align: left;
 }
 .cat-item:hover {
-  background: #f5f7fa;
+  background: var(--el-fill-color-light);
 }
 .cat-item.active {
-  background: #ecf5ff;
+  background: var(--el-color-primary-light-9);
 }
 .cat-item:focus-visible {
   outline: 2px solid #409eff;
@@ -230,12 +240,12 @@ onMounted(async () => {
 .item-title {
   display: block;
   font-size: 13px;
-  color: #303133;
+  color: var(--el-text-color-primary);
 }
 .item-excerpt {
   display: block;
   font-size: 12px;
-  color: #909399;
+  color: var(--el-text-color-secondary);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

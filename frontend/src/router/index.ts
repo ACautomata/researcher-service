@@ -3,58 +3,50 @@
 // nav 条件渲染 + 非 admin 重定向 `/`，消费 `me.role`）。
 import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
-import LoginView from '@/views/LoginView.vue'
-import ContainersView from '@/views/ContainersView.vue'
-import ChatView from '@/views/ChatView.vue'
-import WikiView from '@/views/WikiView.vue'
-import CategoriesView from '@/views/CategoriesView.vue'
-import ModelView from '@/views/ModelView.vue'
-import AdminUsersView from '@/views/AdminUsersView.vue'
-import TraceLogsView from '@/views/TraceLogsView.vue'
 
 const routes: RouteRecordRaw[] = [
-  { path: '/login', name: 'login', component: LoginView, meta: { public: true } },
+  { path: '/login', name: 'login', component: () => import('@/views/LoginView.vue'), meta: { public: true } },
   {
     path: '/',
     name: 'containers',
-    component: ContainersView,
+    component: () => import('@/views/ContainersView.vue'),
     meta: { requiresAuth: true },
   },
   {
     path: '/chat',
     name: 'chat',
-    component: ChatView,
+    component: () => import('@/views/ChatView.vue'),
     meta: { requiresAuth: true },
   },
   {
     path: '/wiki',
     name: 'wiki',
-    component: WikiView,
+    component: () => import('@/views/WikiView.vue'),
     meta: { requiresAuth: true },
   },
   {
     path: '/categories',
     name: 'categories',
-    component: CategoriesView,
+    component: () => import('@/views/CategoriesView.vue'),
     meta: { requiresAuth: true },
   },
   {
     path: '/models',
     name: 'models',
-    component: ModelView,
+    component: () => import('@/views/ModelView.vue'),
     meta: { requiresAuth: true },
   },
   // #328：顶层路由（无 /admin 嵌套壳）；meta.requiresAdmin 首例——非 admin 重定向 /
   {
     path: '/admin/users',
     name: 'admin-users',
-    component: AdminUsersView,
+    component: () => import('@/views/AdminUsersView.vue'),
     meta: { requiresAuth: true, requiresAdmin: true },
   },
   {
     path: '/admin/trace-logs',
     name: 'admin-trace-logs',
-    component: TraceLogsView,
+    component: () => import('@/views/TraceLogsView.vue'),
     meta: { requiresAuth: true, requiresAdmin: true },
   },
 ]

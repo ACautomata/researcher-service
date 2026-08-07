@@ -7,6 +7,7 @@
 // 吊销的 token 在 body 信封里拒绝业务请求，经刷新链换新重试/确认失效跳登录（P0 code review）。
 import { useAuthStore } from '@/stores/auth'
 import { parseEnvelope } from '@/api/errors'
+import { fetchWithTimeout } from '@/api/request'
 
 export class ApiError extends Error {
   status: number
@@ -84,7 +85,7 @@ async function refreshAndRetry(path: string, init: RequestInit): Promise<Respons
   const auth = useAuthStore()
   await singleFlightRefresh()
   if (auth.token) {
-    const retried = await fetch(path, { ...init, headers: buildHeaders(init, auth.token) })
+    const retried = await fetchWithTimeout(path, { ...init, headers: buildHeaders(init, auth.token) })
     const rejected =
       retried.status === 401 ||
       (retried.status === 200 && ENVELOPE_UNAUTHENTICATED_CODES.has(await envelopeCodeOf(retried)))
@@ -101,7 +102,7 @@ async function refreshAndRetry(path: string, init: RequestInit): Promise<Respons
 
 export async function apiFetch(path: string, init: RequestInit = {}): Promise<Response> {
   const auth = useAuthStore()
-  const resp = await fetch(path, { ...init, headers: buildHeaders(init, auth.token) })
+  const resp = await fetchWithTimeout(path, { ...init, headers: buildHeaders(init, auth.token) })
   // HTTP 200 但信封码是认证/授权层错误（TS 后端 #312 信封：吊销的 token 以 10001 拒业务请求，
   // HTTP 层恒 200）→ 与 HTTP 401 同语义触发刷新重试链。非信封响应不在此列（走 HTTP 状态）。
   if (resp.status === 200 && ENVELOPE_UNAUTHENTICATED_CODES.has(await envelopeCodeOf(resp))) {

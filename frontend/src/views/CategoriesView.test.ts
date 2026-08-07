@@ -10,11 +10,16 @@ vi.mock('@/api/wiki', () => ({
   readPage: vi.fn(),
 }))
 vi.mock('@/api/containers', () => ({ listInstances: vi.fn() }))
+vi.mock('element-plus', async (importOriginal) => {
+  const actual = (await importOriginal()) as Record<string, unknown>
+  return { ...actual, ElMessage: { error: vi.fn() } }
+})
 
 import CategoriesView from '@/views/CategoriesView.vue'
 import { useCategoriesStore } from '@/stores/categories'
 import { getCategories, readPage } from '@/api/wiki'
 import { listInstances } from '@/api/containers'
+import { ElMessage } from 'element-plus'
 
 const INSTANCES = [
   { name: 'demo', port: 19000, status: 'running', health: 'healthy',
@@ -118,6 +123,15 @@ describe('CategoriesView', () => {
     expect(readPage).toHaveBeenCalledWith('demo', 'a.md')
   })
 
+  it('shows an error when opening an item fails', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+    ;(readPage as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('条目读取失败'))
+    await wrapper.find('[data-test="cat-item"]').trigger('click')
+    await flushPromises()
+    expect(ElMessage.error).toHaveBeenCalledWith('条目读取失败')
+  })
+
   it('collapses and expands a group', async () => {
     const wrapper = mountView()
     await flushPromises()
@@ -140,6 +154,15 @@ describe('CategoriesView', () => {
     await flushPromises()
     expect(useCategoriesStore().current).toBe('other')
     expect(getCategories).toHaveBeenCalledWith('other')
+  })
+
+  it('shows an error when switching container fails', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+    ;(getCategories as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('栏目切换失败'))
+    await wrapper.find('[data-test="container-switch"]').setValue('other')
+    await flushPromises()
+    expect(ElMessage.error).toHaveBeenCalledWith('栏目切换失败')
   })
 
   // codex P2：category 是开放词表，__proto__ 也能正常折叠/展开（不能用普通对象存折叠态）
