@@ -7,7 +7,7 @@ import { describe, expect, it } from 'vitest'
 import { GatewayBrowserDeviceAuthLifecycle } from '@openclaw/gateway-client/browser'
 import { createDeviceAuthLifecycle, hasStoredDeviceTokenFor, createContainerTokenStore } from './deviceAuth'
 
-const client = { id: 'webchat-ui', mode: 'webchat', platform: 'browser', version: 'test' } as const
+const client = { id: 'openclaw-control-ui', mode: 'webchat', platform: 'browser', version: 'test' } as const
 
 function makeMemoryStorage(): Storage {
   const map = new Map<string, string>()
@@ -148,15 +148,15 @@ describe('deviceAuth（官方 lifecycle + localStorage tokenStore · ADR 0006）
   it('createContainerTokenStore：load/store/clear 按 (container, deviceId, role) 隔离 + clear 真删', async () => {
     const storage = makeMemoryStorage()
     const alphaStore = createContainerTokenStore('alpha', storage)
-    await alphaStore.store({ clientId: 'webchat-ui', deviceId: 'dev-1', role: 'operator', token: 'dt-a1', scopes: [] })
-    expect((await alphaStore.load({ clientId: 'webchat-ui', deviceId: 'dev-1', role: 'operator' }))?.token).toBe('dt-a1')
+    await alphaStore.store({ clientId: 'openclaw-control-ui', deviceId: 'dev-1', role: 'operator', token: 'dt-a1', scopes: [] })
+    expect((await alphaStore.load({ clientId: 'openclaw-control-ui', deviceId: 'dev-1', role: 'operator' }))?.token).toBe('dt-a1')
     // 不同 container / deviceId 隔离
     expect(
-      await createContainerTokenStore('beta', storage).load({ clientId: 'webchat-ui', deviceId: 'dev-1', role: 'operator' }),
+      await createContainerTokenStore('beta', storage).load({ clientId: 'openclaw-control-ui', deviceId: 'dev-1', role: 'operator' }),
     ).toBeNull()
-    expect(await alphaStore.load({ clientId: 'webchat-ui', deviceId: 'dev-2', role: 'operator' })).toBeNull()
+    expect(await alphaStore.load({ clientId: 'openclaw-control-ui', deviceId: 'dev-2', role: 'operator' })).toBeNull()
     // clear 真删（非 no-op）
-    await alphaStore.clear({ clientId: 'webchat-ui', deviceId: 'dev-1', role: 'operator' })
-    expect(await alphaStore.load({ clientId: 'webchat-ui', deviceId: 'dev-1', role: 'operator' })).toBeNull()
+    await alphaStore.clear({ clientId: 'openclaw-control-ui', deviceId: 'dev-1', role: 'operator' })
+    expect(await alphaStore.load({ clientId: 'openclaw-control-ui', deviceId: 'dev-1', role: 'operator' })).toBeNull()
   })
 })

@@ -87,9 +87,10 @@ export function createDeviceTokenStore(
 /**
  * 容器作用域 deviceTokenStore（ADR 0006 决定 3：每浏览器设备 × 每容器）。
  *
- * 键按 (container, deviceId, role)——容器名作隔离维度（替代 #425「clientId 恒 webchat-ui」致跨容器撞
- * key），多容器天然隔离；不同浏览器不同 deviceId（不同 localStorage）→ 多浏览器天然隔离。切换浏览器
- * = 新 deviceId = 无 token = 自动走 bootstrap 重新配对（「匹配不上就重新匹配」）。
+ * 键按 (container, deviceId, role)——容器名作隔离维度（#425「clientId 恒 webchat-ui 无隔离意义」
+ * 的结论），多容器天然隔离；不同浏览器不同 deviceId（不同 localStorage）→ 多浏览器天然隔离。切换浏览器
+ * = 新 deviceId = 无 token = 自动走 bootstrap 重新配对（「匹配不上就重新匹配」）。#461 起 clientId 为
+ * openclaw-control-ui（删除豁免身份），键不含 clientId 故无需迁移。
  *
  * clear 真删（非 no-op）——MISMATCH 自愈（recoverTokenMismatch）须清掉旧 token 才能回 bootstrap 重新
  * 配对，否则反复 MISMATCH 连接即停（#425 clear no-op + #426 自愈失效的 bug 根因）。
@@ -104,8 +105,8 @@ export function createContainerTokenStore(
   const keyFor = (deviceId: string, role: string): string =>
     `${TOKEN_STORAGE_KEY_PREFIX}${container}:${deviceId}:${role}`
   return {
-    // 官方 lifecycle 以 (clientId, deviceId, role) 调入；面板用 container 替 clientId 维度（clientId 恒定
-    // webchat-ui 无隔离意义），故忽略 clientId。
+    // 官方 lifecycle 以 (clientId, deviceId, role) 调入；面板用 container 替 clientId 维度（#425 定案：
+    // clientId 恒为面板自身身份（webchat-ui → #461 改 openclaw-control-ui），无隔离意义），故忽略 clientId。
     load: ({ deviceId, role }) => {
       if (!storage) return null
       const stored = parseStoredToken(storage.getItem(keyFor(deviceId, role)))

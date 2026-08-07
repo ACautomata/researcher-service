@@ -179,7 +179,7 @@ describe('createGatewayChat（#369 隧道 Facade）', () => {
     // token 参数（真网关 2026.7.1 认 auth.token 字段，bootstrapToken 字段被当 setup code 拒）
     expect(MockLifecycle.buildPlan).toHaveBeenCalledWith(
       expect.objectContaining({
-        client: expect.objectContaining({ id: 'webchat-ui' }),
+        client: expect.objectContaining({ id: 'openclaw-control-ui' }),
         role: 'operator',
         defaultScopes: ['operator.read', 'operator.write', 'operator.approvals', 'operator.admin'],
         token: 'boot-1',
@@ -197,7 +197,7 @@ describe('createGatewayChat（#369 隧道 Facade）', () => {
     expect(params).toMatchObject({
       minProtocol: 4,
       maxProtocol: 4,
-      client: expect.objectContaining({ id: 'webchat-ui' }),
+      client: expect.objectContaining({ id: 'openclaw-control-ui' }),
       auth: { token: 'boot-1' },
       device: expect.objectContaining({ id: 'dev-1', signature: 'sig-1' }),
     })
@@ -662,7 +662,7 @@ describe('#377 设备配对生命周期（GatewayBrowserDeviceAuthLifecycle 接�
     // 凭证，交官方 lifecycle 从 tokenStore 选 deviceToken（buildPlan 参数无 token/bootstrapToken）。
     vi.mocked(hasStoredDeviceTokenFor).mockResolvedValueOnce(true)
     MockLifecycle.buildPlan.mockResolvedValueOnce({
-      clientId: 'webchat-ui',
+      clientId: 'openclaw-control-ui',
       role: 'operator',
       identity: { deviceId: 'dev-1', publicKey: 'pk-1', sign: vi.fn() },
       selectedAuth: { usingStoredDeviceToken: true },
@@ -685,7 +685,7 @@ describe('#377 设备配对生命周期（GatewayBrowserDeviceAuthLifecycle 接�
     client.fireConnectHello({ auth: { deviceToken: 'dt-1', role: 'operator', scopes: [] } }, plan)
     expect(MockLifecycle.acceptHello).toHaveBeenCalledWith(
       expect.objectContaining({ auth: expect.objectContaining({ deviceToken: 'dt-1' }) }),
-      expect.objectContaining({ clientId: 'webchat-ui', role: 'operator' }),
+      expect.objectContaining({ clientId: 'openclaw-control-ui', role: 'operator' }),
     )
   })
 
@@ -693,7 +693,7 @@ describe('#377 设备配对生命周期（GatewayBrowserDeviceAuthLifecycle 接�
     const { client } = makeGateway()
     // 本连接无设备身份（storage 不可用降级）→ buildPlan 返回 identity: null
     MockLifecycle.buildPlan.mockResolvedValueOnce({
-      clientId: 'webchat-ui',
+      clientId: 'openclaw-control-ui',
       role: 'operator',
       identity: null,
       selectedAuth: {},

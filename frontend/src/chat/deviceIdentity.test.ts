@@ -58,7 +58,7 @@ describe('deviceIdentity（#375 设备身份 localStorage 持久化）', () => {
 
   it('sign(payload) 签名可由公钥验签，输出 base64url（网关逐字节比对签名）', async () => {
     const id = await loadDeviceIdentity()
-    const payload = 'v3|device|webchat-ui|webchat|operator|operator.read|123|token|nonce|browser|'
+    const payload = 'v3|device|openclaw-control-ui|webchat|operator|operator.read|123|token|nonce|browser|'
     const sig = await id!.sign(payload)
     expect(sig).toMatch(/^[A-Za-z0-9_-]+$/)
     const ok = await verifyAsync(b64urlDecode(sig), new TextEncoder().encode(payload), b64urlDecode(id!.publicKey))

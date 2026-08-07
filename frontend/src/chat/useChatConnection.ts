@@ -921,26 +921,25 @@ export function useChatConnection(status: ChatStatus) {
     })
   }
 
-  // T3 删除会话（issue #82 / spec #76，admin 级提升权限）：确认后调 sessions.delete（archivedOnly），
-  // 网关先写压缩归档（可恢复）再删。成功 → 从列表移除；删的是当前会话则切到剩余首个（无则新建）。
-  async function removeSession(key: string, confirm: () => Promise<boolean>): Promise<boolean> {
-    if (!key || !gateway) return false // E2: 断线不操作（防裸错误）
+  // T3 删除会话（issue #82 / spec #76，admin 级提升权限）：确认后调 sessions.delete（不带
+  // archivedOnly——网关对未归档会话恒拒 INVALID_REQUEST，删除即硬删除、不可恢复，无「归档」中间态）。
+  // 成功 → 从列表移除；删的是当前会话则停留空聊天区（空态视图 + 「新建会话」入口），不自动切/建。
+  // 失败 → 返回错误信息（上层 toast 呈现；不落顶部小字 bar——删除失败须醒目可感知，spec #461）。
+  // 返回：true=删除成功；string=删除失败（错误消息）；null=用户取消或断线（无反馈）。
+  async function removeSession(key: string, confirm: () => Promise<boolean>): Promise<true | string | null> {
+    if (!key || !gateway) return null // E2: 断线不操作（防裸错误）
     const ok = await confirm()
-    if (!ok) return false // 用户取消
+    if (!ok) return null // 用户取消
     try {
       await gateway.deleteSession(key)
     } catch (e) {
-      status.onError((e as Error).message)
-      return false
+      return (e as Error).message || '删除失败'
     }
     chat.removeSession(key)
     if (chat.selectedSession === key) {
-      const next = chat.sessions[0]?.session_key ?? ''
-      if (next) pickSession(next)
-      else {
-        chat.setSelectedSession('')
-        await newSession()
-      }
+      chat.setSelectedSession('')
+      chat.resetForSession() // 清空消息投影 → 空聊天区（不再自动切到剩余首个或新建）
+      status.onClearError() // 删除当前会话后清残留错误条（spec #461：错误呈现统一走 toast，不留双通道）
     }
     return true
   }

@@ -13,13 +13,13 @@ describe('deviceTokenStore（#375 deviceToken (clientId,deviceId,role) 持久化
   it('store → load 正确读写（返回 {token, scopes}）', async () => {
     const s = createDeviceTokenStore()
     await s.store({
-      clientId: 'webchat-ui',
+      clientId: 'openclaw-control-ui',
       deviceId: 'dev-1',
       role: 'operator',
       token: 'tok-1',
       scopes: ['operator.read'],
     })
-    const rec = await s.load({ clientId: 'webchat-ui', deviceId: 'dev-1', role: 'operator' })
+    const rec = await s.load({ clientId: 'openclaw-control-ui', deviceId: 'dev-1', role: 'operator' })
     expect(rec).toEqual({ token: 'tok-1', scopes: ['operator.read'] })
   })
 

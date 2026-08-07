@@ -73,7 +73,7 @@ import { getBootstrapToken } from '@/api/chat'
 import { createGatewayChat } from '@/chat/gatewayChat'
 import { useAuthStore } from '@/stores/auth'
 import { ApiError } from '@/api/client'
-import { ElMessageBox } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 
 const INSTANCE = {
   name: 'demo', port: 19000, status: 'running', health: 'healthy',
@@ -514,20 +514,68 @@ describe('ChatView', () => {
     expect(w.find('[data-test="stream"]').text()).toContain('更旧页')
   })
 
-  it('删除会话：确认后 gateway.deleteSession + 列表移除', async () => {
+  it('删除会话：确认后 gateway.deleteSession + 列表移除 + 成功 toast + 空态（不自动新建）', async () => {
     const { w, gw } = await mountReady()
     await w.find('[data-test="delete-session-sk-1"]').trigger('click')
     await flushPromises()
     expect(gw.deleteSession).toHaveBeenCalledWith('sk-1')
     expect(w.find('[data-test="session-sk-1"]').exists()).toBe(false)
+    expect(ElMessage.success).toHaveBeenCalled() // 删除成功 → 醒目成功反馈（toast）
+    // #461：删除当前会话（无剩余）→ 停留空聊天区（空态视图），不自动新建会话
+    expect(w.find('[data-test="empty-state"]').exists()).toBe(true)
+    expect(gw.createSession).not.toHaveBeenCalled()
   })
 
-  it('取消删除确认 → 不调 deleteSession', async () => {
+  it('删除确认文案明示「删除后不可恢复」，不含归档字样（#461）', async () => {
+    const { w } = await mountReady()
+    await w.find('[data-test="delete-session-sk-1"]').trigger('click')
+    await flushPromises()
+    const msg = (ElMessageBox.confirm as ReturnType<typeof vi.fn>).mock.calls[0][0]
+    expect(msg).toContain('不可恢复') // 明示不可恢复
+    expect(msg).not.toContain('归档') // 全文无「归档」表述
+    expect(msg).not.toMatch(/会先归档（可恢复）再删除/) // 旧留档误导文案已清除
+  })
+
+  it('删除失败 → 醒目错误 toast + 会话保留在列表（#461）', async () => {
+    const { w, gw } = await mountReady()
+    gw.deleteSession.mockRejectedValue(new Error('scope denied'))
+    await w.find('[data-test="delete-session-sk-1"]').trigger('click')
+    await flushPromises()
+    expect(ElMessage.error).toHaveBeenCalled() // 失败 → 醒目 toast（替换/叠加顶部小字 bar）
+    expect(w.find('[data-test="session-sk-1"]').exists()).toBe(true) // 会话未被移除
+  })
+
+  it('删除当前会话（列表仍有其他会话）→ 停留空聊天区，不自动切换（#461）', async () => {
+    const w = mount(ChatView)
+    await flushPromises()
+    const gw = MockGatewayChat.last!
+    gw.listSessions.mockResolvedValue([SESSION, { session_key: 'sk-2', title: '另一个', updated_at: '' }])
+    gw.getHistory.mockResolvedValue({ messages: [], hasMore: false, nextOffset: null })
+    gw.listCommands.mockResolvedValue([])
+    gw.send.mockResolvedValue(undefined)
+    gw.deleteSession.mockResolvedValue(undefined)
+    gw.resolveApproval.mockResolvedValue(undefined)
+    gw.listPendingApprovals.mockResolvedValue([])
+    gw.fireReady()
+    await flushPromises()
+    expect(w.find('[data-test="session-sk-2"]').exists()).toBe(true) // 列表有 2 个会话，选中 sk-1
+    await w.find('[data-test="delete-session-sk-1"]').trigger('click')
+    await flushPromises()
+    expect(w.find('[data-test="empty-state"]').exists()).toBe(true) // 停留空聊天区
+    expect(w.find('[data-test="session-sk-2"]').exists()).toBe(true) // 其他会话仍在列表
+    expect(w.find('[data-test="session-sk-2"]').classes()).not.toContain('active') // 未被自动选中
+    expect(gw.createSession).not.toHaveBeenCalled()
+    w.unmount()
+  })
+
+  it('取消删除确认 → 不调 deleteSession、无反馈 toast', async () => {
     const { w, gw } = await mountReady()
     ;(ElMessageBox.confirm as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('cancel'))
     await w.find('[data-test="delete-session-sk-1"]').trigger('click')
     await flushPromises()
     expect(gw.deleteSession).not.toHaveBeenCalled()
+    expect(ElMessage.success).not.toHaveBeenCalled()
+    expect(ElMessage.error).not.toHaveBeenCalled()
   })
 
   it('4401 close → forceRefresh 成功 → 新 token 重建 gateway', async () => {
