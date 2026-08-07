@@ -4,29 +4,63 @@
 import { flushPromises, mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-// vis-network canvas 渲染替身：捕获构造的 nodes/edges 与 click handler
+interface MockItem {
+  id: string
+  color?: unknown
+  borderWidth?: number
+  from?: string
+  to?: string
+}
+
+interface MockDataSet {
+  get(): MockItem[]
+  getIds(): string[]
+  updateCalls: MockItem[][]
+}
+
+// vis-network canvas 渲染替身：捕获 DataSet、构造/销毁次数与 click handler
 const netState = {
-  nodes: [] as Array<{ id: string; color?: unknown }>,
-  edges: [] as Array<{ from: string; to: string }>,
+  nodeData: null as MockDataSet | null,
+  edgeData: null as MockDataSet | null,
   clickHandler: null as ((p: { nodes: string[] }) => void) | null,
+  constructorCount: 0,
+  destroyCount: 0,
 }
 vi.mock('vis-network', () => ({
   Network: class {
     constructor(_el: unknown, data: { nodes: unknown; edges: unknown }) {
-      netState.nodes = (data.nodes as { get(): unknown[] }).get() as typeof netState.nodes
-      netState.edges = (data.edges as { get(): unknown[] }).get() as typeof netState.edges
+      netState.constructorCount += 1
+      netState.nodeData = data.nodes as MockDataSet
+      netState.edgeData = data.edges as MockDataSet
     }
     on(event: string, cb: (p: { nodes: string[] }) => void): void {
       if (event === 'click') netState.clickHandler = cb
     }
-    destroy(): void {}
+    destroy(): void { netState.destroyCount += 1 }
   },
 }))
 vi.mock('vis-data', () => ({
   DataSet: class {
-    private items: unknown[]
-    constructor(items: unknown[]) { this.items = items }
-    get(): unknown[] { return this.items }
+    private items = new Map<string, MockItem>()
+    updateCalls: MockItem[][] = []
+
+    constructor(items: MockItem[]) {
+      this.update(items)
+      this.updateCalls = []
+    }
+
+    get(): MockItem[] { return [...this.items.values()] }
+    getIds(): string[] { return [...this.items.keys()] }
+    update(items: MockItem | MockItem[]): void {
+      const entries = Array.isArray(items) ? items : [items]
+      this.updateCalls.push(entries)
+      for (const item of entries) {
+        this.items.set(item.id, { ...this.items.get(item.id), ...item })
+      }
+    }
+    remove(ids: string | string[]): void {
+      for (const id of Array.isArray(ids) ? ids : [ids]) this.items.delete(id)
+    }
   },
 }))
 
@@ -44,27 +78,77 @@ const GRAPH: WikiGraphDTO = {
 
 describe('WikiGraph', () => {
   beforeEach(() => {
-    netState.nodes = []
-    netState.edges = []
+    netState.nodeData = null
+    netState.edgeData = null
     netState.clickHandler = null
+    netState.constructorCount = 0
+    netState.destroyCount = 0
   })
 
   it('builds vis-network nodes/edges from graph data', async () => {
     mount(WikiGraph, { props: { graph: GRAPH, activePath: '' } })
     await flushPromises()
-    const ids = netState.nodes.map((n) => n.id)
+    const ids = netState.nodeData?.get().map((n) => n.id) ?? []
     expect(ids).toContain('concepts/a.md')
     expect(ids).toContain('concepts/b.md')
-    expect(netState.edges).toEqual([{ from: 'concepts/a.md', to: 'concepts/b.md' }])
+    expect(netState.edgeData?.get()).toEqual([
+      expect.objectContaining({ from: 'concepts/a.md', to: 'concepts/b.md' }),
+    ])
   })
 
-  it('highlights the active node', async () => {
-    mount(WikiGraph, { props: { graph: GRAPH, activePath: 'concepts/a.md' } })
+  it('updates only active-node styles without rebuilding the network', async () => {
+    const wrapper = mount(WikiGraph, { props: { graph: GRAPH, activePath: 'concepts/a.md' } })
     await flushPromises()
-    const active = netState.nodes.find((n) => n.id === 'concepts/a.md')
-    const other = netState.nodes.find((n) => n.id === 'concepts/b.md')
-    expect(active?.color).toBeTruthy()
-    expect(other?.color).toBeFalsy()
+    await wrapper.setProps({ activePath: 'concepts/b.md' })
+    await flushPromises()
+
+    expect(netState.constructorCount).toBe(1)
+    expect(netState.destroyCount).toBe(0)
+    expect(netState.nodeData?.updateCalls.at(-1)).toEqual([
+      { id: 'concepts/a.md', color: undefined, borderWidth: 1 },
+      { id: 'concepts/b.md', color: '#409eff', borderWidth: 3 },
+    ])
+    const nodes = netState.nodeData?.get() ?? []
+    expect(nodes.find((n) => n.id === 'concepts/a.md')?.color).toBeUndefined()
+    expect(nodes.find((n) => n.id === 'concepts/b.md')?.color).toBe('#409eff')
+  })
+
+  it('updates labels and edges in place while the node set is unchanged', async () => {
+    const wrapper = mount(WikiGraph, { props: { graph: GRAPH, activePath: '' } })
+    await flushPromises()
+    await wrapper.setProps({
+      graph: {
+        nodes: GRAPH.nodes.map((node) =>
+          node.id === 'concepts/a.md' ? { ...node, title: 'A updated' } : node,
+        ),
+        edges: [{ from: 'concepts/b.md', to: 'ghost-node' }],
+      },
+    })
+    await flushPromises()
+
+    expect(netState.constructorCount).toBe(1)
+    expect(netState.destroyCount).toBe(0)
+    expect(netState.nodeData?.get().find((n) => n.id === 'concepts/a.md')).toEqual(
+      expect.objectContaining({ label: 'A updated' }),
+    )
+    expect(netState.edgeData?.get()).toEqual([
+      expect.objectContaining({ from: 'concepts/b.md', to: 'ghost-node' }),
+    ])
+  })
+
+  it('rebuilds only when the node set changes', async () => {
+    const wrapper = mount(WikiGraph, { props: { graph: GRAPH, activePath: '' } })
+    await flushPromises()
+    await wrapper.setProps({
+      graph: {
+        nodes: [...GRAPH.nodes, { id: 'concepts/c.md', title: 'C' }],
+        edges: GRAPH.edges,
+      },
+    })
+    await flushPromises()
+
+    expect(netState.constructorCount).toBe(2)
+    expect(netState.destroyCount).toBe(1)
   })
 
   it('emits open when a node is clicked', async () => {

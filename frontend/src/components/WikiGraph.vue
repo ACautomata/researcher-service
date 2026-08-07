@@ -12,15 +12,23 @@ const emit = defineEmits<{ open: [path: string] }>()
 
 const host = ref<HTMLDivElement | null>(null)
 let network: Network | null = null
+let nodeData: DataSet<NodeItem> | null = null
+let edgeData: DataSet<EdgeItem> | null = null
 
 // 高亮当前节点的强调色（与 Element Plus primary 一致）
 const ACTIVE_COLOR = '#409eff'
 
 interface NodeItem {
   id: string
-  label: string
+  label?: string
   color?: string
   borderWidth?: number
+}
+
+interface EdgeItem {
+  id: string
+  from: string
+  to: string
 }
 
 function toNodes(): NodeItem[] {
@@ -33,16 +41,23 @@ function toNodes(): NodeItem[] {
   }))
 }
 
-function toEdges(): Array<{ from: string; to: string }> {
-  return props.graph.edges.map((e) => ({ from: e.from, to: e.to }))
+function toEdges(): EdgeItem[] {
+  return props.graph.edges.map((e, index) => ({
+    // index 保留重复 wikilink 边；同一快照内仍有稳定 id，供 DataSet 增量同步。
+    id: JSON.stringify([e.from, e.to, index]),
+    from: e.from,
+    to: e.to,
+  }))
 }
 
-function render(): void {
+function rebuild(): void {
   if (!host.value) return
   network?.destroy()
+  nodeData = new DataSet<NodeItem>(toNodes())
+  edgeData = new DataSet<EdgeItem>(toEdges())
   network = new Network(
     host.value,
-    { nodes: new DataSet(toNodes() as never), edges: new DataSet(toEdges() as never) },
+    { nodes: nodeData as never, edges: edgeData as never },
     {
       nodes: { shape: 'dot', size: 12, font: { size: 12 } },
       edges: { arrows: 'to', color: '#c0c4cc' },
@@ -55,12 +70,52 @@ function render(): void {
   })
 }
 
-onMounted(render)
-watch(() => [props.graph, props.activePath], render, { deep: true })
+function hasSameNodeSet(): boolean {
+  if (!nodeData) return false
+  const currentIds = new Set(nodeData.getIds().map(String))
+  return (
+    currentIds.size === props.graph.nodes.length &&
+    props.graph.nodes.every((n) => currentIds.has(n.id))
+  )
+}
+
+function syncGraph(): void {
+  if (!network || !nodeData || !edgeData || !hasSameNodeSet()) {
+    rebuild()
+    return
+  }
+
+  nodeData.update(toNodes())
+
+  const nextEdges = toEdges()
+  const nextEdgeIds = new Set(nextEdges.map((edge) => edge.id))
+  const removedEdgeIds = edgeData.getIds().filter((id) => !nextEdgeIds.has(String(id)))
+  if (removedEdgeIds.length) edgeData.remove(removedEdgeIds)
+  if (nextEdges.length) edgeData.update(nextEdges)
+}
+
+function updateActivePath(activePath: string, previousPath: string): void {
+  if (!nodeData || activePath === previousPath) return
+  const nodeIds = new Set(nodeData.getIds().map(String))
+  const updates: NodeItem[] = []
+  if (previousPath && nodeIds.has(previousPath)) {
+    updates.push({ id: previousPath, color: undefined, borderWidth: 1 })
+  }
+  if (activePath && nodeIds.has(activePath)) {
+    updates.push({ id: activePath, color: ACTIVE_COLOR, borderWidth: 3 })
+  }
+  if (updates.length) nodeData.update(updates)
+}
+
+onMounted(rebuild)
+watch(() => props.graph, syncGraph, { deep: true })
+watch(() => props.activePath, updateActivePath)
 
 onBeforeUnmount(() => {
   network?.destroy()
   network = null
+  nodeData = null
+  edgeData = null
 })
 </script>
 
