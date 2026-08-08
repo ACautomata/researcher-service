@@ -27,17 +27,17 @@ function formatToolInput(input: unknown): string {
   <div class="tool" :class="tool.state" data-test="tool-line">
     <span class="t-icon">🔧</span>
     <span class="t-name" :title="typeof tool.title === 'string' ? tool.title : ''">{{ typeof tool.title === 'string' ? tool.title : tool.name }}</span>
-    <span v-if="formatToolInput(tool.input)" class="t-args">{{ formatToolInput(tool.input) }}</span>
+    <span v-if="formatToolInput(tool.input)" class="t-args" :title="formatToolInput(tool.input)">{{ formatToolInput(tool.input) }}</span>
     <span class="t-state">{{ tool.state === 'running' ? '⟳ 运行中' : tool.state === 'error' ? '✗ 失败' : '✓ 完成' }}</span>
   </div>
 </template>
 
 <style scoped>
-.tool { display: flex; align-items: center; gap: 9px; background: var(--el-fill-color); border: 1px solid var(--el-border-color); border-radius: 9px; padding: 6px 12px; margin: 4px 0; font-size: 12.5px; }
+.tool { display: flex; align-items: center; min-width: 0; gap: 9px; background: var(--el-fill-color); border: 1px solid var(--el-border-color); border-radius: 9px; padding: 6px 12px; margin: 4px 0; font-size: 12.5px; }
 .tool .t-icon { color: var(--el-color-primary); }
 .tool .t-name { font-family: ui-monospace, monospace; }
-.tool .t-args { color: var(--el-text-color-secondary); }
-.tool .t-state { margin-left: auto; display: flex; align-items: center; gap: 5px; }
+.tool .t-args { min-width: 0; overflow: hidden; color: var(--el-text-color-secondary); text-overflow: ellipsis; white-space: nowrap; }
+.tool .t-state { flex: none; margin-left: auto; display: flex; align-items: center; gap: 5px; }
 .tool.running .t-state { color: var(--el-color-warning); }
 .tool.error .t-state { color: var(--el-color-danger); }
 .tool.done .t-state { color: var(--el-color-success); }
