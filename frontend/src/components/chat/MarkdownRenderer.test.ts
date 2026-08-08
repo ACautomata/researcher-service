@@ -42,9 +42,34 @@ describe('MarkdownRenderer', () => {
     expect(w.text()).toContain('script')
   })
 
-  it('streaming=true → 渲染 .cursor 光标节点', () => {
-    const w = mount(MarkdownRenderer, { props: { text: '半成品', streaming: true } })
+  it('streaming=true → 光标位于最后一个段落内部', () => {
+    const w = mount(MarkdownRenderer, { props: { text: '第一段\n\n第二段', streaming: true } })
+    const paragraphs = w.findAll('.markdown-body p')
     expect(w.find('.cursor').exists()).toBe(true)
+    expect(w.find('.cursor').element.parentElement).toBe(paragraphs.at(-1)?.element)
+  })
+
+  it('最后内容是链接时，光标跳出链接但仍留在段落内', () => {
+    const w = mount(MarkdownRenderer, {
+      props: { text: '参考 [论文](https://example.com)', streaming: true },
+    })
+    expect(w.find('.markdown-body p > .cursor').exists()).toBe(true)
+    expect(w.find('.markdown-body a .cursor').exists()).toBe(false)
+  })
+
+  it('最后内容是列表或表格时，光标跟随最后一项内容', () => {
+    const list = mount(MarkdownRenderer, { props: { text: '- 一\n- 二', streaming: true } })
+    expect(list.findAll('.markdown-body li').at(-1)?.find('.cursor').exists()).toBe(true)
+
+    const table = mount(MarkdownRenderer, {
+      props: { text: '| A | B |\n| - | - |\n| 1 | 2 |', streaming: true },
+    })
+    expect(table.findAll('.markdown-body td').at(-1)?.find('.cursor').exists()).toBe(true)
+  })
+
+  it('空流式回答仍渲染光标占位', () => {
+    const w = mount(MarkdownRenderer, { props: { text: '', streaming: true } })
+    expect(w.find('.markdown-body > .cursor').exists()).toBe(true)
   })
 
   it('streaming=false → 无光标节点', () => {

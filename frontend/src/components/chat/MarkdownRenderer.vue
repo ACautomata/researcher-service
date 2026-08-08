@@ -1,7 +1,7 @@
 <script setup lang="ts">
 // #401 / ticket #402：AI 回复 markdown 渲染组件（#340 拆分约定：props-in/emits-out 哑组件）。
 // v-html 绑定 renderMarkdown(text)（渲染出口已 DOMPurify 消毒——全项目首个 v-html）；
-// streaming 为真时在渲染内容尾部挂 .cursor 光标（流式边生成边渲染，markdown-it 对半成品容错为文本）。
+// streaming 为真时把 .cursor 插入最后一段实际内容，避免块级 Markdown 让光标脱离回答末尾。
 import { computed } from 'vue'
 import { renderMarkdown } from '@/chat/renderMarkdown'
 
@@ -10,12 +10,45 @@ const props = defineProps<{
   streaming: boolean
 }>()
 
-const html = computed(() => renderMarkdown(props.text))
+const blockTags = new Set(['P', 'LI', 'TD', 'TH', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'BLOCKQUOTE', 'PRE', 'DIV'])
+
+function appendStreamingCursor(rendered: string): string {
+  const template = document.createElement('template')
+  template.innerHTML = rendered
+
+  const cursor = document.createElement('span')
+  cursor.className = 'cursor'
+
+  // 跳过 markdown-it 在块元素间生成的换行，只选最后一个含可见内容的文本节点。
+  const walker = document.createTreeWalker(template.content, NodeFilter.SHOW_TEXT)
+  let lastText: Text | null = null
+  while (walker.nextNode()) {
+    const node = walker.currentNode as Text
+    if (node.data.trim()) lastText = node
+  }
+
+  if (!lastText?.parentNode) {
+    template.content.append(cursor)
+    return template.innerHTML
+  }
+
+  // 跳出链接、强调等内联元素，但停留在最后一个段落/列表项/单元格/代码块内部。
+  let insertionPoint: Node = lastText
+  while (insertionPoint.parentElement && !blockTags.has(insertionPoint.parentElement.tagName)) {
+    insertionPoint = insertionPoint.parentElement
+  }
+  insertionPoint.parentNode?.insertBefore(cursor, insertionPoint.nextSibling)
+  return template.innerHTML
+}
+
+const html = computed(() => {
+  const rendered = renderMarkdown(props.text)
+  return props.streaming ? appendStreamingCursor(rendered) : rendered
+})
 </script>
 
 <template>
   <div class="markdown-body" v-html="html"></div>
-  <span v-if="streaming" class="cursor"></span>
 </template>
 
 <style scoped>
@@ -122,7 +155,7 @@ const html = computed(() => renderMarkdown(props.text))
   margin-right: 6px;
 }
 /* 流式光标（assistant 由本组件负责；user 分支的 .cursor 保留在 ChatMessageItem） */
-.cursor {
+.markdown-body :deep(.cursor) {
   display: inline-block;
   width: 7px;
   height: 14px;
