@@ -16,7 +16,7 @@ import {
   type ChatFrame,
 } from '@/chat/gatewayChat'
 import { splitThinking } from '@/chat/thinking'
-import { extractMessageText } from '@/chat/eventTranslate'
+import { extractMessageAttachments, extractMessageText, attachmentToMediaBlock, type MediaBlock } from '@/chat/eventTranslate'
 import type { Attachment } from '@/chat/attachments'
 import { WS_AUTH_FAIL, WS_MUST_CHANGE_PASSWORD, WS_CONTAINER_ACCESS_DENIED, WS_GATEWAY_UNAVAILABLE } from '@/chat/closeCodes'
 
@@ -231,6 +231,19 @@ export function useChatConnection(status: ChatStatus) {
       last.thinking = parts.thinking
       last.thinkingOpen = parts.inThinking
       last.text = parts.text
+    }
+  }
+
+  // #459-T3 #464：附件媒体帧——final/delta(replace) 消息 content 含 image/audio/video 块时
+  // 写入当前 assistant 消息的 media（与 handleText 同款 runId 路由/锚定语义：claimRun 守卫
+  // abandoned/foreign/孤儿；append 条件放宽到 activeRunId===runId 防断线 finalize 后 resume 丢帧）。
+  // 纯媒体 run（无文本）的首帧即媒体 → 同样走 claimRun 认领占位，媒体 append 进占位气泡。
+  function handleAttachment(runId: string, media: MediaBlock[]) {
+    if (!claimRun(runId)) return
+    const last = chat.messages[chat.messages.length - 1]
+    if (last && last.role === 'assistant' && (last.streaming || activeRunId === runId)) {
+      clearResumeWait() // B5: 本 run 媒体续帧到达 → 取消 resume 超时重建（同 handleText）
+      last.media.push(...media)
     }
   }
 
@@ -545,6 +558,9 @@ export function useChatConnection(status: ChatStatus) {
             case 'text':
               handleText(frame.runId, frame.delta, frame.replace)
               break
+            case 'attachment': // #459-T3 #464：附件媒体帧（image/audio/video 块）
+              handleAttachment(frame.runId, frame.media)
+              break
             case 'done':
               handleDone(frame.runId)
               break
@@ -742,7 +758,17 @@ export function useChatConnection(status: ChatStatus) {
     if ((!text && !hasAttachments) || !gateway || !chat.selectedSession || disconnected.value || streamingEnabled) return false
     chat.setSlashDismissed(true) // 发送后关闭补全菜单（输入已被清空，下次输 / 时经 onComposerInput 复位）
     clearResumeWait() // B5: 用户发新消息 = 放弃旧 run 的 resume 等待（新 run 是新语境）
-    chat.pushMessage(newMsg('user', text))
+    const userMsg = newMsg('user', text)
+    // #459-T3 #464：发送的附件（image/audio/video）塞进 user echo 消息 media——本地即时渲染
+    // 自己发送的附件（验收 12）。投影走 attachmentToMediaBlock（与历史/流式 extract 共用同一
+    // MediaBlock 投影，mimeType 主段派生 type / string content 门 / fileName 拷贝不重写）。
+    if (hasAttachments) {
+      for (const a of attachments!) {
+        const block = attachmentToMediaBlock(a)
+        if (block) userMsg.media.push(block)
+      }
+    }
+    chat.pushMessage(userMsg)
     chat.pushMessage(newMsg('assistant'))
     activeRunId = '' // 等首帧 onText 锚定新 run
     graceExpired = false // B4: 新 run 语境，宽限过期标记作废
@@ -860,6 +886,9 @@ export function useChatConnection(status: ChatStatus) {
     // thinking 块），不再只认 string 导致 assistant 历史渲染成空泡。text 字段回退保留（旧透传 shape）。
     const text = extractMessageText(m) || (typeof m.text === 'string' ? m.text : '')
     const tools = text === '' ? extractToolRows(m) : []
+    // #459-T3 #464：历史消息 image/audio/video 块 → media（与 text 独立通道，extractToolRows 同款
+    // 防腐层位置）。此前非 text 块被渲染层丢弃；纯图片历史消息（text 空 + media 非空）照常渲染。
+    const media = extractMessageAttachments(m)
     return {
       role: historyRole(m.role),
       raw: text,
@@ -868,6 +897,7 @@ export function useChatConnection(status: ChatStatus) {
       thinkingOpen: false,
       streaming: false,
       tools,
+      media,
     }
   }
 

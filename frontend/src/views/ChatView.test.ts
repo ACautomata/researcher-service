@@ -1643,4 +1643,94 @@ describe('ChatView', () => {
       expect(w.findAll('[data-test="preview-item"]')).toHaveLength(1)
     })
   })
+
+  // ---- #459-T3 #464：附件渲染——历史/流式消息 image/audio/video 内容块 ----
+  describe('附件媒体渲染（#459-T3 #464）', () => {
+    // 挂载并在 fireReady 前注入历史消息（mountReady 内部 history 恒为空数组，无法注入媒体块）。
+    async function mountWithHistory(messages: Array<Record<string, unknown>>) {
+      const w = mount(ChatView)
+      await flushPromises()
+      const gw = MockGatewayChat.last!
+      gw.listSessions.mockResolvedValue([SESSION])
+      gw.getHistory.mockResolvedValue({ messages, hasMore: false, nextOffset: null })
+      gw.listCommands.mockResolvedValue([])
+      gw.listPendingApprovals.mockResolvedValue([])
+      gw.fireReady() // onReady → syncSessions → loadHistory（消费上面的 history mock）
+      await flushPromises()
+      await nextTick()
+      return { w, gw }
+    }
+
+    it('历史消息 image/audio/video 块 → 渲染 img/audio/video 标签', async () => {
+      const { w } = await mountWithHistory([
+        { role: 'user', content: '看这个' },
+        {
+          role: 'assistant',
+          content: [
+            { type: 'text', text: '截图如下' },
+            { type: 'image', mimeType: 'image/png', content: 'iVBORw0KGgo=' },
+            { type: 'audio', mimeType: 'audio/mpeg', content: 'QUJD' },
+            { type: 'video', mimeType: 'video/mp4', content: 'REVG' },
+          ],
+        },
+      ])
+      const img = w.find('[data-test="media-image"]')
+      expect(img.exists()).toBe(true)
+      expect(img.attributes('src')).toBe('data:image/png;base64,iVBORw0KGgo=')
+      expect(w.find('[data-test="media-audio"]').exists()).toBe(true)
+      expect(w.find('[data-test="media-audio"]').attributes('src')).toBe('data:audio/mpeg;base64,QUJD')
+      expect(w.find('[data-test="media-video"]').exists()).toBe(true)
+      expect(w.find('[data-test="media-video"]').attributes('src')).toBe('data:video/mp4;base64,REVG')
+      expect(w.find('[data-test="stream"]').text()).toContain('截图如下') // 文本块照常渲染
+    })
+
+    it('历史纯图片消息（无文本）→ 渲染出图片，不渲染空泡', async () => {
+      const { w } = await mountWithHistory([
+        { role: 'user', content: '发张图' },
+        { role: 'assistant', content: [{ type: 'image', mimeType: 'image/png', content: 'AAA' }] },
+      ])
+      expect(w.find('[data-test="media-image"]').exists()).toBe(true)
+      expect(w.find('[data-test="media-image"]').attributes('src')).toBe('data:image/png;base64,AAA')
+    })
+
+    it('流式 AI 回复含 image 块（browser 截图）→ final 后渲染 img', async () => {
+      const { w, gw } = await mountReady()
+      await w.find('[data-test="input"]').setValue('截图给我')
+      await w.find('[data-test="send"]').trigger('click')
+      await flushPromises()
+      gw.fireFrame({ type: 'text', runId: 'r1', delta: '截图如下' })
+      await nextTick()
+      // final 帧由 eventTranslate 产出 attachment 帧（含 image 块）→ ChatView 经 handleAttachment 渲染
+      gw.fireFrame({ type: 'attachment', runId: 'r1', media: [{ type: 'image', mimeType: 'image/png', src: 'iVBOR' }] })
+      gw.fireFrame({ type: 'done', runId: 'r1' })
+      await nextTick()
+      const img = w.find('[data-test="media-image"]')
+      expect(img.exists()).toBe(true)
+      expect(img.attributes('src')).toBe('data:image/png;base64,iVBOR')
+      expect(w.find('[data-test="stream"]').text()).toContain('截图如下') // 文本与图片共存
+    })
+
+    it('发送附件消息 → user echo 立即渲染出附件（img/audio）', async () => {
+      const { w, gw } = await mountReady()
+      const pasteEvt = (files: File[]) => {
+        const evt = new Event('paste', { bubbles: true, cancelable: true })
+        Object.defineProperty(evt, 'clipboardData', { value: { files } })
+        w.find('[data-test="composer"]').element.dispatchEvent(evt)
+      }
+      // 图片（mock 压缩回 dataURL content）+ 音频（mock 转换回 dataURL content）
+      pasteEvt([
+        new File(['x'], 'shot.png', { type: 'image/png' }),
+        new File(['y'], 'song.mp3', { type: 'audio/mpeg' }),
+      ])
+      await flushPromises()
+      await nextTick()
+      await w.find('[data-test="send"]').trigger('click')
+      await flushPromises()
+      await nextTick()
+      expect(gw.send).toHaveBeenCalled()
+      // user echo 消息渲染出自己发送的图片 + 音频
+      expect(w.find('[data-test="media-image"]').exists()).toBe(true)
+      expect(w.find('[data-test="media-audio"]').exists()).toBe(true)
+    })
+  })
 })

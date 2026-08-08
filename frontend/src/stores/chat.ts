@@ -5,6 +5,7 @@
 import { defineStore } from 'pinia'
 import type { InstanceDTO } from '@/api/containers'
 import type { CommandDTO, SessionDTO } from '@/chat/gatewayChat'
+import type { MediaBlock } from '@/chat/eventTranslate'
 import { isSubagentApproval, isSubagentSessionKey } from '@/chat/subagentApproval'
 
 export interface ToolRow {
@@ -24,6 +25,10 @@ export interface Msg {
   thinkingOpen: boolean // 流式中 <thinking> 未闭合（思考中）
   streaming: boolean
   tools: ToolRow[] // T08 工具行（仅 assistant 会有，user 恒空；保持接口统一）
+  // #459-T3 #464：附件媒体块（image/audio/video）——历史（loadHistory）与流式（final/delta
+  // replace 快照）双路径提取；与 text 独立数据通道（文本提取语义不污染，附件渲染走这里）。
+  // 纯图片消息（text 空但 media 非空）照常渲染。user 发送的附件也入此（echo 渲染）。
+  media: MediaBlock[]
 }
 
 // T06 审批卡（连接级，无 runId）：独立列表渲染，不混入 messages——避免破坏流式锚定/finalizeLast
@@ -51,6 +56,7 @@ export function newMsg(role: 'user' | 'assistant', text = ''): Msg {
     thinkingOpen: false,
     streaming: role === 'assistant',
     tools: [],
+    media: [], // #459-T3 #464：附件媒体块初始空（send/loadHistory/流式各自填充）
   }
 }
 
