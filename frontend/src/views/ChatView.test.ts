@@ -67,10 +67,24 @@ vi.mock('@/chat/gatewayChat', () => ({
   createGatewayChat: vi.fn(),
 }))
 
+// #459-T2 #463：mock 采集层（压缩/文件转换）——真实压缩由 chat/attachments.test.ts 覆盖，
+// 本 seam 只断言「采集结果 → 预览条 → buildAttachments 校验 → chat.send payload」的宿主编排。
+// compressImageFile/fileToRawAttachment 返回固定 RawAttachment；buildAttachments 用真实实现（纯函数）。
+vi.mock('@/chat/attachments', async (importOriginal) => {
+  const actual = (await importOriginal()) as Record<string, unknown>
+  return {
+    ...actual,
+    compressImageFile: vi.fn(),
+    fileToRawAttachment: vi.fn(),
+  }
+})
+
 import ChatView from '@/views/ChatView.vue'
 import { listInstances } from '@/api/containers'
 import { getBootstrapToken } from '@/api/chat'
 import { createGatewayChat } from '@/chat/gatewayChat'
+import { compressImageFile, fileToRawAttachment, MAX_ATTACHMENT_BYTES } from '@/chat/attachments'
+import { useChatStore } from '@/stores/chat'
 import { useAuthStore } from '@/stores/auth'
 import { ApiError } from '@/api/client'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -117,6 +131,23 @@ describe('ChatView', () => {
       (params: { handlers: MockHandlers }) => new MockGatewayChat(params.handlers),
     )
     ;(ElMessageBox.confirm as ReturnType<typeof vi.fn>).mockResolvedValue(undefined)
+    // #459-T2 #463：采集 mock 默认——图片压缩回固定小附件（dataURL content），文件转换回 dataURL。
+    ;(compressImageFile as ReturnType<typeof vi.fn>).mockImplementation(async (f: File) => ({
+      type: 'image',
+      mimeType: 'image/jpeg',
+      fileName: f.name,
+      content: 'data:image/jpeg;base64,compressed',
+      sizeBytes: 100,
+      width: 1280,
+      height: 720,
+    }))
+    ;(fileToRawAttachment as ReturnType<typeof vi.fn>).mockImplementation(async (f: File) => ({
+      type: f.type.split('/')[0],
+      mimeType: f.type,
+      fileName: f.name,
+      content: `data:${f.type};base64,raw`,
+      sizeBytes: f.size,
+    }))
   })
   afterEach(() => {
     vi.unstubAllGlobals()
@@ -140,7 +171,7 @@ describe('ChatView', () => {
     const { w, gw } = await mountReady()
     await w.find('[data-test="input"]').setValue('你好')
     await w.find('[data-test="send"]').trigger('click')
-    expect(gw.send).toHaveBeenCalledWith('sk-1', '你好')
+    expect(gw.send).toHaveBeenCalledWith('sk-1', '你好', undefined)
     gw.fireFrame({ type: 'text', runId: 'r1', delta: '回答' })
     await nextTick()
     expect(w.find('[data-test="stream"]').text()).toContain('回答')
@@ -161,7 +192,7 @@ describe('ChatView', () => {
     expect(gw.send).not.toHaveBeenCalled()
 
     await input.trigger('keydown', { key: 'Enter' })
-    expect(gw.send).toHaveBeenCalledWith('sk-1', '你好')
+    expect(gw.send).toHaveBeenCalledWith('sk-1', '你好', undefined)
   })
 
   it('斜杠菜单开启时，输入法组词 Enter 不选择命令也不发送', async () => {
@@ -1459,5 +1490,157 @@ describe('ChatView', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  // ---- #459-T2 #463：附件采集（三通道）+ 预览条 + 发送 ----
+  describe('附件采集/预览/发送（#459-T2 #463）', () => {
+    // 触发粘贴（剪贴板文件）：jsdom 无 ClipboardEvent，构造 paste Event 挂 clipboardData。
+    async function pasteFiles(w: Awaited<ReturnType<typeof mountReady>>['w'], files: File[]) {
+      const evt = new Event('paste', { bubbles: true, cancelable: true })
+      Object.defineProperty(evt, 'clipboardData', { value: { files } })
+      w.find('[data-test="composer"]').element.dispatchEvent(evt)
+      await flushPromises()
+      await nextTick()
+    }
+    // 触发拖拽释放：jsdom 无 DragEvent/DataTransfer，构造 drop Event 挂 dataTransfer。
+    async function dropFiles(w: Awaited<ReturnType<typeof mountReady>>['w'], files: File[]) {
+      const evt = new Event('drop', { bubbles: true, cancelable: true })
+      Object.defineProperty(evt, 'dataTransfer', { value: { files } })
+      w.find('[data-test="composer"]').element.dispatchEvent(evt)
+      await flushPromises()
+      await nextTick()
+    }
+    // 文件选择按钮：直接驱动隐藏 file-input 的 change。
+    async function chooseFiles(w: Awaited<ReturnType<typeof mountReady>>['w'], files: File[]) {
+      const input = w.find('[data-test="file-input"]')
+      Object.defineProperty(input.element, 'files', { value: files, configurable: true })
+      await input.trigger('change')
+      await flushPromises()
+      await nextTick()
+    }
+
+    it('粘贴图片 → 预览条出现缩略项 + 合计状态', async () => {
+      const { w } = await mountReady()
+      expect(w.find('[data-test="preview-strip"]').exists()).toBe(false)
+      await pasteFiles(w, [new File(['x'], 'shot.png', { type: 'image/png' })])
+      expect(compressImageFile).toHaveBeenCalled()
+      expect(w.find('[data-test="preview-strip"]').exists()).toBe(true)
+      expect(w.findAll('[data-test="preview-item"]')).toHaveLength(1)
+      expect(w.find('[data-test="attach-count"]').text()).toContain('1')
+    })
+
+    it('拖拽文件到输入区 → 预览条列出（图片压缩、非图片直接转换）', async () => {
+      const { w } = await mountReady()
+      await dropFiles(w, [
+        new File(['x'], 'shot.png', { type: 'image/png' }),
+        new File(['y'], 'clip.mp4', { type: 'video/mp4' }),
+      ])
+      expect(compressImageFile).toHaveBeenCalledTimes(1)
+      expect(fileToRawAttachment).toHaveBeenCalledTimes(1)
+      expect(w.findAll('[data-test="preview-item"]')).toHaveLength(2)
+      expect(w.find('[data-test="attach-count"]').text()).toContain('2')
+    })
+
+    it('文件选择按钮 → 预览条列出所选附件', async () => {
+      const { w } = await mountReady()
+      await chooseFiles(w, [new File(['y'], 'song.mp3', { type: 'audio/mpeg' })])
+      expect(fileToRawAttachment).toHaveBeenCalled()
+      expect(w.findAll('[data-test="preview-item"]')).toHaveLength(1)
+    })
+
+    it('预览条可逐个移除附件', async () => {
+      const { w } = await mountReady()
+      await pasteFiles(w, [
+        new File(['x'], 'a.png', { type: 'image/png' }),
+        new File(['x'], 'b.png', { type: 'image/png' }),
+      ])
+      expect(w.findAll('[data-test="preview-item"]')).toHaveLength(2)
+      await w.findAll('[data-test="preview-remove"]')[0].trigger('click')
+      await nextTick()
+      expect(w.findAll('[data-test="preview-item"]')).toHaveLength(1)
+    })
+
+    it('发送附件消息 → chat.send payload 含 attachments 数组；发送成功后预览条清空', async () => {
+      const { w, gw } = await mountReady()
+      await pasteFiles(w, [new File(['x'], 'shot.png', { type: 'image/png' })])
+      await w.find('[data-test="send"]').trigger('click')
+      await flushPromises()
+      expect(gw.send).toHaveBeenCalledWith('sk-1', '', [
+        expect.objectContaining({ fileName: 'shot.png', mimeType: 'image/jpeg', type: 'image' }),
+      ])
+      await nextTick()
+      expect(w.find('[data-test="preview-strip"]').exists()).toBe(false)
+    })
+
+    it('纯图片消息（无文本）可正常发送（不依赖文本非空）', async () => {
+      const { w, gw } = await mountReady()
+      await pasteFiles(w, [new File(['x'], 'shot.png', { type: 'image/png' })])
+      // 不输入任何文本，直接发送
+      await w.find('[data-test="send"]').trigger('click')
+      await flushPromises()
+      expect(gw.send).toHaveBeenCalled()
+      const [, message, attachments] = gw.send.mock.calls[0]
+      expect(message).toBe('')
+      expect(Array.isArray(attachments)).toBe(true)
+      expect(attachments.length).toBe(1)
+    })
+
+    it('非图片附件 >700KB 拒发 → 提示「文件过大」，不进 payload', async () => {
+      const { w, gw } = await mountReady()
+      // fileToRawAttachment 回真实大小（超 MAX_ATTACHMENT_BYTES）→ buildAttachments 拒发
+      ;(fileToRawAttachment as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        type: 'video',
+        mimeType: 'video/mp4',
+        fileName: 'big.mp4',
+        content: 'data:video/mp4;base64,raw',
+        sizeBytes: MAX_ATTACHMENT_BYTES + 1,
+      })
+      await dropFiles(w, [new File(['y'], 'big.mp4', { type: 'video/mp4' })])
+      await w.find('[data-test="send"]').trigger('click')
+      await flushPromises()
+      expect(gw.send).not.toHaveBeenCalled()
+      expect((ElMessage.error as ReturnType<typeof vi.fn>)).toHaveBeenCalledWith(
+        expect.stringContaining('文件过大'),
+      )
+    })
+
+    it('文本 + 附件一起发送 → payload 同帧携带 message 与 attachments', async () => {
+      const { w, gw } = await mountReady()
+      await pasteFiles(w, [new File(['x'], 'shot.png', { type: 'image/png' })])
+      await w.find('[data-test="input"]').setValue('看这张图')
+      await w.find('[data-test="send"]').trigger('click')
+      await flushPromises()
+      expect(gw.send).toHaveBeenCalledWith('sk-1', '看这张图', [
+        expect.objectContaining({ fileName: 'shot.png' }),
+      ])
+    })
+
+    it('#1 Enter 键发送也走附件管道（不绕开）：payload 含 attachments + 预览条清空', async () => {
+      const { w, gw } = await mountReady()
+      await pasteFiles(w, [new File(['x'], 'shot.png', { type: 'image/png' })])
+      await w.find('[data-test="input"]').setValue('看这张图')
+      // Enter 发送（非按钮点击）——onComposerKeydown 路径
+      await w.find('[data-test="input"]').trigger('keydown', { key: 'Enter' })
+      await flushPromises()
+      expect(gw.send).toHaveBeenCalledWith('sk-1', '看这张图', [
+        expect.objectContaining({ fileName: 'shot.png' }),
+      ])
+      await nextTick()
+      expect(w.find('[data-test="preview-strip"]').exists()).toBe(false)
+    })
+
+    it('#2 无选中会话时发送：附件不丢失（preview strip 保留），不静默清空', async () => {
+      const { w, gw } = await mountReady()
+      // 模拟「删除当前会话后停留在空聊天区」：选中会话置空（无会话可发）
+      useChatStore().setSelectedSession('')
+      await nextTick()
+      await pasteFiles(w, [new File(['x'], 'shot.png', { type: 'image/png' })])
+      await w.find('[data-test="send"]').trigger('click')
+      await flushPromises()
+      // 无会话 → 未发送，且附件不应被清空
+      expect(gw.send).not.toHaveBeenCalled()
+      expect(w.find('[data-test="preview-strip"]').exists()).toBe(true)
+      expect(w.findAll('[data-test="preview-item"]')).toHaveLength(1)
+    })
   })
 })

@@ -3,12 +3,17 @@
 // 体积校验（按字节估算 base64 膨胀，非图片 ≤700KB，图片压缩后同限）→ 组装官方 chat.send 的
 // attachments[] 形状。超限附件拒发（返回 rejected 供 UI 提示「文件过大」）；非法输入返回空数组。
 
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   buildAttachments,
+  compressImageFile,
+  fileToRawAttachment,
+  fitWithin,
   isAllowedAttachmentType,
   MAX_ATTACHMENT_BYTES,
+  MAX_IMAGE_EDGE,
   MAX_TOTAL_BYTES,
+  type CompressEngine,
   type RawAttachment,
 } from './attachments'
 
@@ -169,5 +174,114 @@ describe('buildAttachments（组装 chat.send attachments[]）', () => {
       width: undefined,
       height: undefined,
     })
+  })
+})
+
+// ---- #459-T2 #463：采集层（压缩 + 文件转换）纯函数 ----
+
+describe('fitWithin（最长边降采样几何，不放大）', () => {
+  it('宽图超 1280 → 按比例缩到长边 1280', () => {
+    expect(fitWithin(2560, 1280, MAX_IMAGE_EDGE)).toEqual({ width: 1280, height: 640 })
+  })
+
+  it('高图超 1280 → 按比例缩到长边 1280', () => {
+    expect(fitWithin(720, 2560, MAX_IMAGE_EDGE)).toEqual({ width: 360, height: 1280 })
+  })
+
+  it('长边恰 1280 → 原样（不缩不放大）', () => {
+    expect(fitWithin(1280, 800, MAX_IMAGE_EDGE)).toEqual({ width: 1280, height: 800 })
+  })
+
+  it('小于 1280 → 不放大，原样返回', () => {
+    expect(fitWithin(800, 600, MAX_IMAGE_EDGE)).toEqual({ width: 800, height: 600 })
+    expect(fitWithin(100, 50, MAX_IMAGE_EDGE)).toEqual({ width: 100, height: 50 })
+  })
+
+  it('缩放结果取整（像素为整数）', () => {
+    const out = fitWithin(2000, 1001, MAX_IMAGE_EDGE)
+    expect(Number.isInteger(out.width)).toBe(true)
+    expect(Number.isInteger(out.height)).toBe(true)
+    expect(Math.max(out.width, out.height)).toBe(MAX_IMAGE_EDGE)
+  })
+
+  it('极端宽高比 → 短边下限 1px（不塌缩成 0 面积 canvas）', () => {
+    // 1×10000 全页截图：scale=0.128，短边 round(0.128)=0 → 须钳到 ≥1
+    const out = fitWithin(1, 10000, MAX_IMAGE_EDGE)
+    expect(out.height).toBe(MAX_IMAGE_EDGE)
+    expect(out.width).toBeGreaterThanOrEqual(1)
+    expect(Number.isInteger(out.width)).toBe(true)
+  })
+
+  it('0 尺寸输入（无 intrinsic 尺寸的 SVG）→ 不产出 0 边', () => {
+    const out = fitWithin(0, 0, MAX_IMAGE_EDGE)
+    expect(out.width).toBeGreaterThanOrEqual(1)
+    expect(out.height).toBeGreaterThanOrEqual(1)
+  })
+})
+
+// 假压缩引擎：记录调用（缩放几何 + 输出 mime/quality），回固定 dataURL——断言纯逻辑编排，
+// 不断言真实像素（canvas 在 jsdom 为 null，真实缩放由浏览器端引擎完成）。
+function fakeEngine(overrides: Partial<CompressEngine> = {}): CompressEngine {
+  return {
+    loadSize: vi.fn(async () => ({ width: 2560, height: 1280 })),
+    render: vi.fn(async (_file: File, w: number, h: number, mime: string) =>
+      `data:${mime};base64,${'z'.repeat(w + h)}`),
+    ...overrides,
+  }
+}
+
+function imgFile(name = 'shot.png', type = 'image/png', bytes = 2048): File {
+  return new File(['x'.repeat(bytes)], name, { type })
+}
+
+describe('compressImageFile（图片压缩 → RawAttachment）', () => {
+  it('大图 → 缩放至长边 1280，content 为纯 base64（剥 dataURL 前缀）+ 尺寸 + sizeBytes 真实字节', async () => {
+    const engine = fakeEngine()
+    const out = await compressImageFile(imgFile(), engine)
+    expect(engine.render).toHaveBeenCalledWith(
+      expect.any(File), MAX_IMAGE_EDGE, 640, expect.stringMatching(/^image\/(jpeg|webp)$/),
+    )
+    expect(out.type).toBe('image')
+    expect(out.mimeType).toMatch(/^image\/(jpeg|webp)$/)
+    expect(out.fileName).toBe('shot.png')
+    expect(out.width).toBe(MAX_IMAGE_EDGE)
+    expect(out.height).toBe(640)
+    // #4 协议契约（r13 §2.4）：content 是纯 base64，不带 data:...;base64, 前缀
+    expect(typeof out.content).toBe('string')
+    expect(out.content).not.toContain('data:')
+    expect(out.content).not.toContain('base64,')
+    // #7 sizeBytes 单位统一：真实解码字节数（≈ base64 长度 ×3/4），非 base64 字符串长度
+    // fakeEngine dataURL payload = 'z'.repeat(1280+640=1920) → 真实字节 ≈ 1920*3/4 = 1440
+    expect(out.sizeBytes).toBe(1440)
+  })
+
+  it('小图（≤1280）→ 不放大：render 用原始尺寸', async () => {
+    const engine = fakeEngine({ loadSize: vi.fn(async () => ({ width: 800, height: 600 })) })
+    await compressImageFile(imgFile(), engine)
+    expect(engine.render).toHaveBeenCalledWith(expect.any(File), 800, 600, expect.any(String))
+  })
+
+  it('默认引擎（不传 engine）走浏览器 canvas 实现——存在即可调用', () => {
+    // jsdom 无 canvas，此用例仅钉死「engine 可选」签名（真实 canvas 路径在浏览器运行）。
+    expect(typeof compressImageFile).toBe('function')
+  })
+})
+
+describe('fileToRawAttachment（非图片/通用文件 → RawAttachment）', () => {
+  it('content 为纯 base64（剥 dataURL 前缀），带 fileName/mimeType/sizeBytes 真实字节/type', async () => {
+    const f = new File(['a'.repeat(100)], 'clip.mp4', { type: 'video/mp4' })
+    const out = await fileToRawAttachment(f)
+    expect(out.type).toBe('video')
+    expect(out.mimeType).toBe('video/mp4')
+    expect(out.fileName).toBe('clip.mp4')
+    expect(out.sizeBytes).toBe(100) // 真实字节（file.size）
+    expect(typeof out.content).toBe('string')
+    // #4 协议契约：纯 base64，无 data: 前缀
+    expect(out.content).not.toContain('data:')
+    expect(out.content).not.toContain('base64,')
+  })
+
+  it('type 从 mimeType 主段派生（image/audio/video）', async () => {
+    expect((await fileToRawAttachment(new File(['a'], 's.mp3', { type: 'audio/mpeg' }))).type).toBe('audio')
   })
 })

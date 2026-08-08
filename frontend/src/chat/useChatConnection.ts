@@ -17,6 +17,7 @@ import {
 } from '@/chat/gatewayChat'
 import { splitThinking } from '@/chat/thinking'
 import { extractMessageText } from '@/chat/eventTranslate'
+import type { Attachment } from '@/chat/attachments'
 import { WS_AUTH_FAIL, WS_MUST_CHANGE_PASSWORD, WS_CONTAINER_ACCESS_DENIED, WS_GATEWAY_UNAVAILABLE } from '@/chat/closeCodes'
 
 // T07 斜杠命令选项（ChatComposer 菜单渲染 props；单一来源计算在 useChatConnection）
@@ -31,6 +32,9 @@ export interface ChatStatus {
   onConnecting(v: boolean): void
   onError(message: string): void
   onClearError(): void
+  // #459-T2 #463 #1：宿主接管的统一发送入口（含附件校验/清空预览条）。提供后 Enter/斜杠发送改走
+  // 它（与发送按钮同路径），缺省回退 composable 内 send（纯文本）——Enter 与按钮行为不再分叉。
+  onSend?(): void
 }
 
 // B4/B5 定时器阈值（同原 ChatView 常量）
@@ -728,9 +732,14 @@ export function useChatConnection(status: ChatStatus) {
     }
   }
 
-  function send(streamingEnabled: boolean) {
+  // #459-T2 #463：可选 attachments——宿主已采集/校验（buildAttachments 过滤+拒发提示），本层透传。
+  // 纯图片消息（text 空但有附件）放行发送；文本与附件同帧携带（gateway.send 非空才含 attachments 键）。
+  // 返回是否真发出（false=守卫早退未发，宿主据此决定是否清空预览条——#2：早退时附件不丢）。
+  function send(streamingEnabled: boolean, attachments?: Attachment[]): boolean {
     const text = chat.input.trim()
-    if (!text || !gateway || !chat.selectedSession || disconnected.value || streamingEnabled) return
+    const hasAttachments = Array.isArray(attachments) && attachments.length > 0
+    // 既无文本也无附件 → 无内容可发（保持既有空文本禁发语义）；其余判定不变。
+    if ((!text && !hasAttachments) || !gateway || !chat.selectedSession || disconnected.value || streamingEnabled) return false
     chat.setSlashDismissed(true) // 发送后关闭补全菜单（输入已被清空，下次输 / 时经 onComposerInput 复位）
     clearResumeWait() // B5: 用户发新消息 = 放弃旧 run 的 resume 等待（新 run 是新语境）
     chat.pushMessage(newMsg('user', text))
@@ -743,7 +752,7 @@ export function useChatConnection(status: ChatStatus) {
     const sessionKey = chat.selectedSession
     // chat.send RPC（幂等 key 在 gatewayChat 内生成）；网关拒绝（未配对/scope 不足）→ catch 收尾提示
     void myGw
-      .send(sessionKey, text)
+      .send(sessionKey, text, hasAttachments ? attachments : undefined)
       .then((runId) => {
         // #53: ack 返回本 run 的网关 runId（官方 chat.send ackPayload）——供首帧归属判别。
         // stale-gateway 守卫同 catch：切容器后旧 gateway 的 ack 不污染新 run 语境。
@@ -769,6 +778,14 @@ export function useChatConnection(status: ChatStatus) {
         finalizeLast()
       })
     chat.setInput('')
+    return true
+  }
+
+  // 统一发送入口（#459-T2 #463 #1）：宿主提供 onSend（含附件校验/清空预览条）则走它（Enter/斜杠/
+  // 按钮同路径），缺省回退 composable 内 send（纯文本）——各触发点行为不再分叉。
+  function triggerSend(): void {
+    if (status.onSend) status.onSend()
+    else send(streaming.value)
   }
 
   // 新建会话（issue #81 / spec #76）：经协议机 sessions.create RPC；网关权威新建仅回 session_key。
@@ -1021,7 +1038,7 @@ export function useChatConnection(status: ChatStatus) {
     // 菜单关闭：Enter（无修饰键）发送；Shift+Enter 换行（与原 @keydown.enter.exact 行为一致）
     if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
       e.preventDefault()
-      send(streaming.value)
+      triggerSend()
     }
   }
 

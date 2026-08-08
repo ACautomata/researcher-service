@@ -13,6 +13,14 @@ import { listInstances } from '@/api/containers'
 import { ApiError } from '@/api/client'
 import { useChatStore } from '@/stores/chat'
 import { useChatConnection } from '@/chat/useChatConnection'
+import {
+  buildAttachments,
+  compressImageFile,
+  fileToRawAttachment,
+  isAllowedAttachmentType,
+  toPreviewDataUrl,
+  type PendingAttachment,
+} from '@/chat/attachments'
 import ChatSidebar from '@/components/chat/ChatSidebar.vue'
 import ChatHeader from '@/components/chat/ChatHeader.vue'
 import ChatStream from '@/components/chat/ChatStream.vue'
@@ -32,6 +40,11 @@ const conn = useChatConnection({
   },
   onClearError() {
     errorMsg.value = ''
+  },
+  // #459-T2 #463 #1：Enter/斜杠发送统一走 sendMessage（含附件校验/清空预览条），与发送按钮同路径。
+  // 箭头闭包延迟求值——sendMessage 为 function 声明提升，Enter 触发时 conn 已就绪。
+  onSend() {
+    void sendMessage()
   },
 })
 
@@ -82,6 +95,50 @@ function toggleApprovalDetail(a: { id: string }): void {
   chat.toggleApprovalDetail(a.id)
 }
 
+// ---- #459-T2 #463：附件采集（预览条状态归宿主，贴 connecting/errorMsg 先例——本地瞬态 UI 态）----
+// 预览项 PendingAttachment（结构上提 attachments.ts 单一来源）= 采集到的 RawAttachment（content 纯
+// base64）+ 本地缩略 previewUrl（图片经 toPreviewDataUrl 重建 dataURL，免 objectURL 管理）；发送前经
+// buildAttachments 统一校验（类型/体积），拒发项提示、放行项发送。
+const pendingAttachments = ref<PendingAttachment[]>([])
+let attachKey = 0
+
+// 三通道共用入口：粘贴/拖拽/文件选择的 File 列表 → 压缩（图片）/转换（非图片）→ 入预览条。
+// 不支持的类型（非 image/audio/video）即时提示，不入预览条（体积校验留发送前 buildAttachments 兜底）。
+async function addFiles(files: File[]): Promise<void> {
+  for (const file of files) {
+    if (!isAllowedAttachmentType(file.type)) {
+      ElMessage.error(`不支持的附件类型：${file.name}`)
+      continue
+    }
+    try {
+      const att = file.type.startsWith('image/')
+        ? await compressImageFile(file)
+        : await fileToRawAttachment(file)
+      pendingAttachments.value.push({ key: ++attachKey, att, previewUrl: toPreviewDataUrl(att) })
+    } catch {
+      ElMessage.error(`附件读取失败：${file.name}`)
+    }
+  }
+}
+
+function removeAttachment(key: number): void {
+  pendingAttachments.value = pendingAttachments.value.filter((p) => p.key !== key)
+}
+
+// 发送（Enter/按钮/斜杠统一入口，#1）：buildAttachments 校验预览条 → 有拒发则提示「文件过大/类型不
+// 支持」不发；全放行（或无附件走纯文本）则 conn.send 透传。仅真发出才清空预览条（#2：conn.send 守卫
+// 早退——无会话/断线/流式——返回 false，附件不丢）。
+async function sendMessage(): Promise<void> {
+  const { attachments, rejected } = buildAttachments(pendingAttachments.value.map((p) => p.att))
+  if (rejected.length > 0) {
+    const oversize = rejected.some((r) => r.reason === 'size')
+    ElMessage.error(oversize ? '文件过大，无法发送' : '存在不支持的附件类型')
+    return
+  }
+  const sent = conn.send(streaming.value, attachments)
+  if (sent) pendingAttachments.value = [] // 真发出 → 预览条清空；早退保留
+}
+
 async function loadInstances() {
   try {
     chat.setInstances(await listInstances())
@@ -104,7 +161,8 @@ onBeforeUnmount(() => {
 
 defineExpose({
   selectContainer: conn.selectContainer,
-  send: () => conn.send(streaming.value),
+  // #9：暴露的发送统一走 sendMessage（含附件校验/清空预览条），与按钮/Enter 同路径，不分叉。
+  send: () => sendMessage(),
   newSession: conn.newSession,
 })
 </script>
@@ -170,10 +228,13 @@ defineExpose({
         :connecting="connecting"
         :streaming="streaming"
         :disconnected="conn.disconnected.value"
+        :pending-attachments="pendingAttachments"
         @input="conn.onComposerInput"
         @keydown="conn.onComposerKeydown"
-        @send="conn.send(streaming)"
+        @send="sendMessage"
         @pick-slash="conn.pickSlash"
+        @add-files="addFiles"
+        @remove-attachment="removeAttachment"
       >
         <!-- T07 斜杠补全菜单表现（父注入，逻辑留宿主 useChatConnection） -->
         <template #slash-menu="{ matches, slashIndex }">
