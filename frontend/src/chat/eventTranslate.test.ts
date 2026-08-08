@@ -3,7 +3,7 @@
 // final 尾部/tool phase/approval 卡/approvalResolved）。无 I/O 纯函数，直测模块边界。
 
 import { describe, expect, it } from 'vitest'
-import { ChatEventTranslator, extractMessageText, type GatewayEventFrame } from './eventTranslate'
+import { ChatEventTranslator, attachmentToMediaBlock, extractMessageAttachments, extractMessageText, type GatewayEventFrame } from './eventTranslate'
 
 function chat(state: string, runId = 'r1', extra: Record<string, unknown> = {}): GatewayEventFrame {
   return { type: 'event', event: 'chat', payload: { runId, state, ...extra } }
@@ -55,6 +55,85 @@ describe('ChatEventTranslator', () => {
     expect(t.translate(chat('final', 'r1', { message: 'abc' }))).toEqual([
       { type: 'text', runId: 'r1', delta: 'abc', replace: true },
       { type: 'done', runId: 'r1' },
+    ])
+  })
+
+  // ---- #459-T3 #464：流式消息 image/audio/video 块 → attachment 帧（独立于 text 帧的媒体通道）----
+  it('final 含 image 块（browser 截图）→ attachment 帧 + done（无文本 tail）', () => {
+    const t = new ChatEventTranslator()
+    t.translate(chat('delta', 'r1', { deltaText: '这是截图' }))
+    expect(
+      t.translate(
+        chat('final', 'r1', {
+          message: { role: 'assistant', content: [{ type: 'text', text: '这是截图' }, { type: 'image', mimeType: 'image/png', content: 'iVBOR' }] },
+        }),
+      ),
+    ).toEqual([
+      { type: 'attachment', runId: 'r1', media: [{ type: 'image', mimeType: 'image/png', src: 'iVBOR' }] },
+      { type: 'done', runId: 'r1' },
+    ])
+  })
+
+  it('final 纯图片（无文本）→ 仅 attachment 帧 + done（纯图片 run 也渲染）', () => {
+    const t = new ChatEventTranslator()
+    expect(
+      t.translate(
+        chat('final', 'r1', {
+          message: { role: 'assistant', content: [{ type: 'image', mimeType: 'image/png', content: 'AAA' }] },
+        }),
+      ),
+    ).toEqual([
+      { type: 'attachment', runId: 'r1', media: [{ type: 'image', mimeType: 'image/png', src: 'AAA' }] },
+      { type: 'done', runId: 'r1' },
+    ])
+  })
+
+  it('final 含 audio + video 块 → attachment 帧携两媒体 + done', () => {
+    const t = new ChatEventTranslator()
+    expect(
+      t.translate(
+        chat('final', 'r1', {
+          message: {
+            role: 'assistant',
+            content: [
+              { type: 'audio', mimeType: 'audio/mpeg', content: 'QUJD' },
+              { type: 'video', mimeType: 'video/mp4', content: 'REVG' },
+            ],
+          },
+        }),
+      ),
+    ).toEqual([
+      {
+        type: 'attachment',
+        runId: 'r1',
+        media: [
+          { type: 'audio', mimeType: 'audio/mpeg', src: 'QUJD' },
+          { type: 'video', mimeType: 'video/mp4', src: 'REVG' },
+        ],
+      },
+      { type: 'done', runId: 'r1' },
+    ])
+  })
+
+  it('final 纯文本（无媒体块）→ 不产 attachment 帧（回归无差）', () => {
+    const t = new ChatEventTranslator()
+    t.translate(chat('delta', 'r1', { deltaText: '你好' }))
+    expect(t.translate(chat('final', 'r1', { message: { role: 'assistant', content: [{ type: 'text', text: '你好' }] } }))).toEqual([
+      { type: 'done', runId: 'r1' },
+    ])
+  })
+
+  it('delta replace 快照含媒体无文本 → attachment 帧（不回退 deltaText）', () => {
+    const t = new ChatEventTranslator()
+    expect(
+      t.translate(
+        chat('delta', 'r1', {
+          replace: true,
+          message: { role: 'assistant', content: [{ type: 'image', mimeType: 'image/png', content: 'SNAP' }] },
+        }),
+      ),
+    ).toEqual([
+      { type: 'attachment', runId: 'r1', media: [{ type: 'image', mimeType: 'image/png', src: 'SNAP' }] },
     ])
   })
 
@@ -294,5 +373,119 @@ describe('extractMessageText（E1: content 多态，ChatView 历史复用）', (
     expect(extractMessageText(null)).toBe('')
     expect(extractMessageText({ role: 'assistant' })).toBe('')
     expect(extractMessageText({})).toBe('')
+  })
+})
+
+// #459-T3 #464：extractMessageAttachments 是附件块提取单一实现（历史 loadHistory 与流式
+// final/delta 复用，与 extractMessageText 并列——文本与附件走独立数据通道，互不污染）。
+// 附件块渲染数据（type/mime/src=纯 base64）供 img/audio/video 标签；src 重建 dataURL 在组件侧。
+describe('extractMessageAttachments（#459-T3 #464: image/audio/video 块 → 渲染数据）', () => {
+  it('assistant content 含 image 块 → 产出 image 媒体（src=纯 base64）', () => {
+    expect(
+      extractMessageAttachments({
+        role: 'assistant',
+        content: [{ type: 'image', mimeType: 'image/png', content: 'iVBORw0KGgo=' }],
+      }),
+    ).toEqual([{ type: 'image', mimeType: 'image/png', src: 'iVBORw0KGgo=' }])
+  })
+  it('audio/video 块 → 各产出对应媒体', () => {
+    expect(
+      extractMessageAttachments({
+        role: 'assistant',
+        content: [
+          { type: 'audio', mimeType: 'audio/mpeg', content: 'QUJD' },
+          { type: 'video', mimeType: 'video/mp4', content: 'REVG' },
+        ],
+      }),
+    ).toEqual([
+      { type: 'audio', mimeType: 'audio/mpeg', src: 'QUJD' },
+      { type: 'video', mimeType: 'video/mp4', src: 'REVG' },
+    ])
+  })
+  it('文本 + 附件混合：附件入媒体通道，文本块不混入', () => {
+    expect(
+      extractMessageAttachments({
+        role: 'assistant',
+        content: [
+          { type: 'text', text: '这是截图：' },
+          { type: 'image', mimeType: 'image/png', content: 'AAA' },
+        ],
+      }),
+    ).toEqual([{ type: 'image', mimeType: 'image/png', src: 'AAA' }])
+  })
+  it('非 media 块（text/thinking/toolCall）→ 空数组（不丢进媒体通道）', () => {
+    expect(
+      extractMessageAttachments({
+        role: 'assistant',
+        content: [{ type: 'thinking', text: '内心' }, { type: 'text', text: '回答' }, { type: 'toolCall', name: 'exec' }],
+      }),
+    ).toEqual([])
+  })
+  it('mimeType 前缀与块 type 不一致 → 按块 type 归类（0 信任，不猜测）', () => {
+    expect(
+      extractMessageAttachments({
+        role: 'assistant',
+        content: [{ type: 'image', mimeType: 'application/octet-stream', content: 'AAA' }],
+      }),
+    ).toEqual([{ type: 'image', mimeType: 'application/octet-stream', src: 'AAA' }])
+  })
+  it('0 信任：content 非 string（缺失/对象/数字）→ 跳过该块', () => {
+    expect(
+      extractMessageAttachments({
+        role: 'assistant',
+        content: [
+          { type: 'image', mimeType: 'image/png' }, // 无 content
+          { type: 'image', mimeType: 'image/png', content: { data: 'x' } }, // content 非 string
+          { type: 'image', mimeType: 'image/png', content: 123 }, // content 数字
+          { type: 'image', mimeType: 'image/png', content: '' }, // 空 content
+        ],
+      }),
+    ).toEqual([])
+  })
+  it('string message / 无 content / null → 空数组（无附件）', () => {
+    expect(extractMessageAttachments('你好')).toEqual([])
+    expect(extractMessageAttachments({ role: 'user', content: '问题' })).toEqual([])
+    expect(extractMessageAttachments(null)).toEqual([])
+    expect(extractMessageAttachments({})).toEqual([])
+  })
+  it('mimeType 缺失/非 string → 回退 type/ 前缀（img/audio/video src 须完整 dataURL mime）', () => {
+    expect(
+      extractMessageAttachments({
+        role: 'assistant',
+        content: [{ type: 'image', content: 'AAA' }], // 无 mimeType
+      }),
+    ).toEqual([{ type: 'image', mimeType: 'image/*', src: 'AAA' }])
+  })
+})
+
+// #459-T3 #464：attachmentToMediaBlock——发送 echo 路径（useChatConnection.send）与历史/流式
+// extractMessageAttachments 共用同一 MediaBlock 投影（code-review：消除两路派生逻辑双写 drift）。
+describe('attachmentToMediaBlock（#459-T3 #464: 发送侧 Attachment → MediaBlock echo 投影）', () => {
+  it('image 附件 → MediaBlock（type/mime/src/fileName 全带）', () => {
+    expect(
+      attachmentToMediaBlock({ type: 'image', mimeType: 'image/png', fileName: 'shot.png', content: 'iVBOR' }),
+    ).toEqual({ type: 'image', mimeType: 'image/png', src: 'iVBOR', fileName: 'shot.png' })
+  })
+  it('audio/video 附件 → 对应 MediaBlock（无 fileName 省略）', () => {
+    expect(attachmentToMediaBlock({ type: 'audio', mimeType: 'audio/mpeg', content: 'QUJD' })).toEqual({
+      type: 'audio', mimeType: 'audio/mpeg', src: 'QUJD',
+    })
+    expect(attachmentToMediaBlock({ type: 'video', mimeType: 'video/mp4', content: 'REVG' })).toEqual({
+      type: 'video', mimeType: 'video/mp4', src: 'REVG',
+    })
+  })
+  it('非 media type / 缺失 type → null（不 echo）', () => {
+    expect(attachmentToMediaBlock({ type: 'application', mimeType: 'application/pdf', content: 'AAA' })).toBeNull()
+    expect(attachmentToMediaBlock({ mimeType: 'image/png', content: 'AAA' })).toBeNull()
+  })
+  it('content 非 string / 空 → null（无法渲染，跳过）', () => {
+    expect(attachmentToMediaBlock({ type: 'image', mimeType: 'image/png', content: { data: 'x' } })).toBeNull()
+    expect(attachmentToMediaBlock({ type: 'image', mimeType: 'image/png', content: '' })).toBeNull()
+    expect(attachmentToMediaBlock({ type: 'image', mimeType: 'image/png' })).toBeNull()
+  })
+  it('mimeType 缺失 → 回退 type/ 前缀', () => {
+    expect(attachmentToMediaBlock({ type: 'image', content: 'AAA' })).toEqual({
+      type: 'image', mimeType: 'image/*', src: 'AAA',
+    })
   })
 })

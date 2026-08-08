@@ -11,6 +11,9 @@ export type ChatFrame =
   | { type: 'error'; runId?: string; message: string }
   | { type: 'approval'; id: string; kind: string; command: string; sessionKey: string | null; agentId: string | null }
   | { type: 'approvalResolved'; id: string; decision: string }
+  // #459-T3 #464：附件媒体帧——final/delta(replace) 消息 content 含 image/audio/video 块时产出
+  // （run 级，挂 runId 走同款 runId 路由/锚定语义；与 text 帧独立数据通道，互不污染）
+  | { type: 'attachment'; runId: string; media: MediaBlock[] }
   | {
       type: 'tool'
       runId: string
@@ -61,6 +64,73 @@ export function extractMessageText(message: unknown): string {
       .join('')
   }
   return ''
+}
+
+// ---- #459-T3 #464：附件块提取（与 extractMessageText 并列的独立数据通道）----
+// 历史消息（loadHistory）与流式消息（final/delta replace 快照）中的 image/audio/video 内容块
+// → 渲染媒体数据。附件块此前被渲染层丢弃（extractMessageText 只认 text 块），本函数补齐非 text
+// 媒体块的提取。**文本与附件不互相污染**：extractMessageText 仍只含 text 块（摘要/审计/claimedEmpty
+// 判定等文本用途），媒体块只经本函数进 Msg.media，不进 Msg.text。
+// 块 type 是归类依据（0 信任：mimeType 前缀与块 type 不一致时按块 type 归类，不猜测）。
+export interface MediaBlock {
+  type: 'image' | 'audio' | 'video'
+  mimeType: string
+  src: string // 纯 base64（剥 data:...;base64, 前缀）；组件侧重建完整 dataURL 供 <img>/<audio>/<video>
+  fileName?: string // 原始文件名（有则供下载/无障碍标注）
+}
+
+const MEDIA_TYPES = ['image', 'audio', 'video'] as const
+
+// 从 message.content[] 提取 image/audio/video 块 → MediaBlock[]（渲染数据）。
+// 0 信任：仅取 string content（纯 base64）的块；缺失/非 string/空 content 跳过。
+// content 多态同 extractMessageText（string message / 无 content → 无附件）。
+export function extractMessageAttachments(message: unknown): MediaBlock[] {
+  if (!message || typeof message === 'string') return []
+  const obj = asRecord(message)
+  const content = obj.content
+  if (!Array.isArray(content)) return []
+  const out: MediaBlock[] = []
+  for (const block of content) {
+    if (!block || typeof block !== 'object') continue
+    const b = asRecord(block)
+    const type = typeof b.type === 'string' ? b.type : ''
+    if (!(MEDIA_TYPES as readonly string[]).includes(type)) continue
+    const src = typeof b.content === 'string' ? b.content : ''
+    if (!src) continue // 无 string base64 内容 → 无法渲染，跳过
+    // mimeType 缺失/非 string → 回退 `${type}/*`（组件重建完整 dataURL 须有 mime 段）。
+    const mimeType = typeof b.mimeType === 'string' && b.mimeType ? b.mimeType : `${type}/*`
+    out.push({
+      type: type as MediaBlock['type'],
+      mimeType,
+      src,
+      ...(typeof b.fileName === 'string' && b.fileName ? { fileName: b.fileName } : {}),
+    })
+  }
+  return out
+}
+
+// 发送侧单附件（attachments.ts 采集/校验后的官方形状，type 已从 mimeType 主段派生）→ MediaBlock。
+// 与 extractMessageAttachments 共用同一 MediaBlock 投影，避免发送 echo（useChatConnection.send）与
+// 历史/流式提取两路各自重写「mimeType 主段派生 type / string content 门 / fileName 条件拷贝」而 drift
+// （code-review Standards 轴）。content 非 string/空 → null（该附件无 echo 渲染数据，跳过）。
+// 块 type 取自 a.type（采集层已校验白名单 image/audio/video）；mimeType 缺失回退 `${type}/*`。
+export function attachmentToMediaBlock(a: {
+  type?: string
+  mimeType?: string
+  fileName?: string
+  content?: unknown
+}): MediaBlock | null {
+  const type = typeof a.type === 'string' ? a.type : ''
+  if (!(MEDIA_TYPES as readonly string[]).includes(type)) return null
+  const src = typeof a.content === 'string' ? a.content : ''
+  if (!src) return null
+  const mimeType = typeof a.mimeType === 'string' && a.mimeType ? a.mimeType : `${type}/*`
+  return {
+    type: type as MediaBlock['type'],
+    mimeType,
+    src,
+    ...(typeof a.fileName === 'string' && a.fileName ? { fileName: a.fileName } : {}),
+  }
 }
 
 export class ChatEventTranslator {
@@ -138,6 +208,10 @@ export class ChatEventTranslator {
         this.sent.set(runId, snapshot)
         return [{ type: 'text', runId, delta: snapshot, replace: true }]
       }
+      // #459-T3 #464：replace 快照无文本但含媒体块（纯图片 run 的流式快照）→ 产 attachment 帧，
+      // 不回退 deltaText（媒体块不在 deltaText 增量字段里）。
+      const media = extractMessageAttachments(payload.message)
+      if (media.length) return [{ type: 'attachment', runId, media }]
       // 无快照 → 退回 deltaText 增量（追加），对齐 r13:127「若无 message，发 deltaText」
       const delta = typeof payload[DELTA_TEXT] === 'string' ? (payload[DELTA_TEXT] as string) : ''
       if (!delta) return []
@@ -170,6 +244,10 @@ export class ChatEventTranslator {
       this.sent.set(runId, message)
       out.push({ type: 'text', runId, delta: message, replace: true })
     }
+    // #459-T3 #464：final.message 含 image/audio/video 块（browser 截图/AI 工具产出多媒体）→
+    // 产 attachment 帧（权威最终媒体，与 text 帧独立通道）。纯媒体 run（无文本）也经此渲染。
+    const media = extractMessageAttachments(payload.message)
+    if (media.length) out.push({ type: 'attachment', runId, media })
     out.push({ type: 'done', runId })
     this.sent.delete(runId)
     return out
