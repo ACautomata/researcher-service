@@ -82,7 +82,9 @@ function mediaSrc(m: MediaBlock): string {
 </template>
 
 <style scoped>
-.msg { display: flex; max-width: 840px; }
+/* 自适应宽度：fit-content 但钳在 [min,max] 区间——短回复不塌成细条（min-width 下限），
+   长回复仍满 840px（max-width 上限），AI/user 左右对齐形成清晰视觉分区。 */
+.msg { display: flex; min-width: 280px; max-width: 840px; }
 .msg.user { align-self: flex-end; }
 .bubble { padding: 10px 14px; border-radius: 12px; word-break: break-word; }
 .msg.assistant .bubble { background: var(--el-fill-color-light); white-space: normal; }
