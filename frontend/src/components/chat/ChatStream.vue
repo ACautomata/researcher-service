@@ -153,5 +153,5 @@ defineSlots<{
    无 assistant 消息时承载审批卡的稳定落点；卡全 resolved 后仍留存（时间线不跳动）。
    宽度对齐 assistant 气泡（max-width 840px，默认 stretch 填满流宽）——空内容 div 若
    align-self:flex-start 且无宽度会收缩成 0 宽细条（code-review c1 实证） */
-.synthetic-anchor { min-height: 92px; max-width: 840px; border: 1.5px dashed var(--el-border-color-lighter); border-radius: 11px; background: var(--el-fill-color-lighter); }
+.synthetic-anchor { min-height: 92px; min-width: 280px; max-width: 840px; border: 1.5px dashed var(--el-border-color-lighter); border-radius: 11px; background: var(--el-fill-color-lighter); }
 </style>
