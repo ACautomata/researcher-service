@@ -607,6 +607,53 @@ describe('createGatewayChat（#369 隧道 Facade）', () => {
     })
   })
 
+  // ---- #459-T1 #462：chat.send 携带官方 attachments 字段 ----
+
+  it('#462: send 带 attachments → payload 含官方字段形状数组', async () => {
+    const { gw, client } = makeGateway()
+    client.request.mockResolvedValue({})
+    const atts = [
+      { type: 'image', mimeType: 'image/png', fileName: 'shot.png', content: 'base64...', sizeBytes: 1234, width: 800, height: 600 },
+      { type: 'audio', mimeType: 'audio/mpeg', fileName: 'voice.mp3', content: 'base64...' },
+    ]
+    await gw.send('sk-1', '看这张图', atts)
+    expect(client.request).toHaveBeenCalledWith('chat.send', {
+      sessionKey: 'sk-1',
+      message: '看这张图',
+      idempotencyKey: expect.any(String),
+      attachments: atts,
+    })
+  })
+
+  it('#462: send 不带 attachments → payload 无 attachments 字段（回归无差）', async () => {
+    const { gw, client } = makeGateway()
+    client.request.mockResolvedValue({})
+    await gw.send('sk-1', '你好')
+    const params = client.request.mock.calls[0][1] as Record<string, unknown>
+    expect(params).not.toHaveProperty('attachments')
+  })
+
+  it('#462: send attachments 为空数组 → payload 无 attachments 字段（不带附件输入时不携带）', async () => {
+    const { gw, client } = makeGateway()
+    client.request.mockResolvedValue({})
+    await gw.send('sk-1', '你好', [])
+    const params = client.request.mock.calls[0][1] as Record<string, unknown>
+    expect(params).not.toHaveProperty('attachments')
+  })
+
+  it('#462: send 纯附件（无文本）→ message 为空字符串仍带 attachments（US15 纯图片消息）', async () => {
+    const { gw, client } = makeGateway()
+    client.request.mockResolvedValue({})
+    const atts = [{ type: 'image', mimeType: 'image/png', fileName: 'only.png', content: 'base64...' }]
+    await gw.send('sk-1', '', atts)
+    expect(client.request).toHaveBeenCalledWith('chat.send', {
+      sessionKey: 'sk-1',
+      message: '',
+      idempotencyKey: expect.any(String),
+      attachments: atts,
+    })
+  })
+
   it('listCommands → commands.list + 响应校准（textAliases 缺省回退 /name）', async () => {
     const { gw, client } = makeGateway()
     client.request.mockResolvedValue({

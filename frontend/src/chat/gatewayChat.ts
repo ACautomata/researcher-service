@@ -19,8 +19,10 @@ import { ChatEventTranslator, type ChatFrame, type GatewayEventFrame } from './e
 import { NO_RETRY_CLOSE_CODES, WS_GATEWAY_UNAVAILABLE } from './closeCodes'
 import { createDeviceAuthLifecycle, hasStoredDeviceTokenFor } from './deviceAuth'
 import { approvePairing } from '@/api/chat'
+import type { Attachment } from './attachments'
 
 export type { ChatFrame, GatewayEventFrame } from './eventTranslate'
+export type { Attachment } from './attachments'
 
 // ---- DTO（对齐旧 api/chat.ts 契约，REST 代理删除后由协议机 RPC 承载）----
 export interface SessionDTO {
@@ -79,7 +81,10 @@ export interface GatewayChat {
   // chat.send RPC 响应携带网关分配的 runId（ackPayload = {runId, status:"started"}，
   // 官方 chat-send-handler）——供 ChatView 首帧归属判别（#53：pendingSend 期间外来/旧 run
   // 首帧与自己的 run 区分，防抢 activeRunId 吞回复）。ack 无 runId（旧网关/异常形状）→ undefined。
-  send(sessionKey: string, message: string): Promise<string | undefined>
+  // #459-T1 #462：可选 attachments（官方 chat.send 字段，附件经 WS 隧道帧内透传，1MiB 帧上限内）——
+  // 形状由 chat/attachments.ts 组装（类型过滤 + 体积校验在采集层完成，本层原样透传）。不带/空数组
+  // 不携带该字段（不带附件输入时与既有文本发送路径一致，回归无差）。
+  send(sessionKey: string, message: string, attachments?: Attachment[]): Promise<string | undefined>
   listCommands(): Promise<CommandDTO[]>
   resolveApproval(id: string, kind: string, decision: string): Promise<void>
   // B0: 补拉待处理审批（exec.approval.list，协议 schema exec-approval 域）——切页/断线重连后
@@ -555,16 +560,19 @@ export function createGatewayChat(params: CreateGatewayChatParams): GatewayChat 
         nextOffset: typeof res?.nextOffset === 'string' || typeof res?.nextOffset === 'number' ? res.nextOffset : null,
       }
     },
-    async send(sessionKey: string, message: string): Promise<string | undefined> {
+    async send(sessionKey: string, message: string, attachments?: Attachment[]): Promise<string | undefined> {
       // chat.send 幂等（schema 必填 idempotencyKey）；返回后流式 delta/final 事件经 onEvent 到达。
       // A3/P2: 幂等 key 与 createSession 统一 32-hex 格式（randomUUID 去连字符——跨路径 key 规范
       // 一致，网关幂等去重不因格式分歧而失效）。
       // #53: RPC 响应 = ackPayload {runId, status:"started"}（官方 chat-send-handler）——返回
       // runId 供 ChatView 首帧归属判别；ack 无 runId（异常形状）返回 undefined。
+      // #459-T1 #462：attachments 仅在非空时携带（官方可选字段，空数组/不带与既有文本路径同形状，
+      // 回归无差）；附件体积/类型已由 chat/attachments.ts 校验，本层原样透传（帧内 1MiB 上限内）。
       const res = await client.request<{ runId?: unknown }>('chat.send', {
         sessionKey,
         message,
         idempotencyKey: createRequestId().replace(/[^a-z0-9]/g, ''),
+        ...(attachments && attachments.length > 0 ? { attachments } : {}),
       })
       return typeof res?.runId === 'string' && res.runId ? res.runId : undefined
     },
