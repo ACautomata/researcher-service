@@ -5,7 +5,7 @@
 import MarkdownIt from 'markdown-it'
 import { full as emojiPlugin } from 'markdown-it-emoji'
 import taskListsPlugin from 'markdown-it-task-lists'
-import katexPlugin from '@vscode/markdown-it-katex'
+import katexPluginModule from '@vscode/markdown-it-katex'
 import 'katex/dist/katex.min.css'
 import createDOMPurify from 'dompurify'
 import hljs from 'highlight.js/lib/core'
@@ -17,6 +17,16 @@ import bash from 'highlight.js/lib/languages/bash'
 import json from 'highlight.js/lib/languages/json'
 import xml from 'highlight.js/lib/languages/xml'
 import css from 'highlight.js/lib/languages/css'
+
+// @vscode/markdown-it-katex 是带 __esModule 的 CJS 包，dev（esbuild）与 prod（rolldown）
+// 互操作语义不一致：rolldown 的 __toESM(mod,1) 把 default 硬设为 exports 对象
+// （rolldown#8061 同型），default 导入可能拿到命名空间对象而非插件函数 →
+// md.use 抛 `e.apply is not a function`（生产对话页白屏）。显式解包兼容两种语义。
+const katexPlugin = (
+  typeof katexPluginModule === 'function'
+    ? katexPluginModule
+    : (katexPluginModule as { default?: unknown }).default ?? katexPluginModule
+) as typeof katexPluginModule
 
 hljs.registerLanguage('javascript', javascript)
 hljs.registerLanguage('js', javascript)
