@@ -102,6 +102,12 @@ async function onChangeSubmit(): Promise<void> {
           <span class="error">{{ errorMsg }}</span>
         </el-form-item>
         <el-button type="primary" native-type="submit" :loading="submitting" :disabled="submitting" @click="onSubmit">登录</el-button>
+        <p class="legal-links">
+          登录即表示你已阅读并同意
+          <a href="/legal/terms.md" target="_blank" rel="noopener">用户服务协议</a>
+          和
+          <a href="/legal/privacy.md" target="_blank" rel="noopener">隐私政策</a>
+        </p>
       </el-form>
     </template>
     <!-- #340-A 强制改密（C1 首登改密）：旧密 + 新密 + 确认。改密成功即撤销全部会话，需重登 -->
@@ -138,5 +144,18 @@ async function onChangeSubmit(): Promise<void> {
   color: var(--el-color-warning);
   font-size: 13px;
   margin-bottom: 12px;
+}
+.legal-links {
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+  line-height: 1.6;
+  margin: 14px 0 0;
+}
+.legal-links a {
+  color: var(--el-color-primary);
+  text-decoration: none;
+}
+.legal-links a:hover {
+  text-decoration: underline;
 }
 </style>
