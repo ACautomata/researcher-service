@@ -149,6 +149,12 @@ const html = computed(() => {
   border-top: 1px solid var(--el-border-color);
   margin: 0.6em 0;
 }
+/* 长公式只在公式区域内滚动，避免撑破消息气泡。 */
+.markdown-body :deep(.katex-display) {
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
 /* 任务列表 checkbox 不可勾选（只读展示） */
 .markdown-body :deep(.task-list-item input[type='checkbox']) {
   pointer-events: none;
