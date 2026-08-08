@@ -46,6 +46,150 @@ export function isAllowedAttachmentType(mimeType: string | undefined): boolean {
   return mimeType.startsWith('image/') || mimeType.startsWith('audio/') || mimeType.startsWith('video/')
 }
 
+// ---- #459-T2 #463：采集层（压缩 + 文件转换）----
+
+// 图片压缩目标：最长边降采样到 1280（spec「最长边 1280」），小于等于不放大。
+export const MAX_IMAGE_EDGE = 1280
+
+// 压缩输出 mime：WebP（同尺寸比 JPEG 更小，且支持 alpha——PNG 透明截图/图标转 JPEG 会压黑底，
+// spec 允许 JPEG/WebP 取 WebP 保真；engine.render 已参数化 mime，零额外成本）。
+const COMPRESS_MIME = 'image/webp'
+// 压缩质量（0–1）：默认画质与体积的常用平衡点。
+const COMPRESS_QUALITY = 0.85
+
+// 最长边降采样几何：按比例把长边收到 max 内，短边随比例；长边 ≤ max 不放大、原样返回。像素取整。
+// 短边钳 ≥1px——极端宽高比（如 1×10000 全页截图）round 会塌缩成 0、0 尺寸输入（无 intrinsic 尺寸的
+// SVG）也得非 0 边，否则产出 0 面积 canvas（drawImage no-op、toDataURL 空 content）。
+export function fitWithin(width: number, height: number, max: number): { width: number; height: number } {
+  const w = Math.max(1, Math.round(width))
+  const h = Math.max(1, Math.round(height))
+  const long = Math.max(w, h)
+  if (long <= max) return { width: w, height: h }
+  const scale = max / long
+  return { width: Math.max(1, Math.round(w * scale)), height: Math.max(1, Math.round(h * scale)) }
+}
+
+// 图像引擎接缝（DI，为可测性）：图片解码取原始尺寸 + canvas 缩放重编码为 dataURL。
+// jsdom canvas.getContext 返回 null，真实像素操作只能在浏览器跑——逻辑（缩放几何/输出形状）经
+// 注入假引擎单测覆盖，本接口默认实现走浏览器 canvas。
+export interface CompressEngine {
+  // 读出图片原始像素尺寸。
+  loadSize(file: File): Promise<{ width: number; height: number }>
+  // 把图片缩放到 w×h 并按 mime 重编码为 dataURL。
+  render(file: File, width: number, height: number, mime: string): Promise<string>
+}
+
+// 预览条条目（#15 单一来源，ChatView/ChatComposer 共用——避免两处重复声明 drift）：采集到的
+// RawAttachment（content 为纯 base64）+ 本地缩略 previewUrl（图片须宿主重建 dataURL 用于 <img>）+ key。
+export interface PendingAttachment {
+  key: number
+  att: RawAttachment
+  previewUrl: string // 图片=data:<mime>;base64,<content> 缩略；非图片=空（渲染文件名/类型）
+}
+
+// 重建预览用 dataURL（content 是纯 base64，<img src> 须完整 dataURL）：宿主/composer 渲染缩略用。
+export function toPreviewDataUrl(att: RawAttachment): string {
+  return att.type === 'image' && typeof att.content === 'string'
+    ? `data:${att.mimeType};base64,${att.content}`
+    : ''
+}
+
+// 图片文件 → 压缩后 RawAttachment：引擎解码+缩放一次完成 → fitWithin 目标尺寸 → 组 type:'image' +
+// width/height（压缩后尺寸）+ content 纯 base64（#4 协议契约 r13 §2.4：剥 data:...;base64, 前缀）+
+// sizeBytes 真实字节（#7：与文件路径 file.size 同单位，从 base64 长度反推，避免图片被多算 ~4/3）。
+// 压缩后仍超 MAX_ATTACHMENT_BYTES 由下游 buildAttachments 拒发（采集层不重复判）。
+export async function compressImageFile(
+  file: File,
+  engine: CompressEngine = canvasEngine,
+): Promise<RawAttachment> {
+  const { width, height } = await engine.loadSize(file)
+  const target = fitWithin(width, height, MAX_IMAGE_EDGE)
+  const dataUrl = await engine.render(file, target.width, target.height, COMPRESS_MIME)
+  const content = stripDataUrlPrefix(dataUrl)
+  return {
+    type: 'image',
+    mimeType: COMPRESS_MIME,
+    fileName: file.name,
+    content,
+    sizeBytes: base64ByteCount(content),
+    width: target.width,
+    height: target.height,
+  }
+}
+
+// 非图片/通用文件 → RawAttachment：FileReader 读为 dataURL → content 剥前缀存纯 base64（#4）+
+// fileName/mimeType/sizeBytes（真实字节 file.size，#7）+ type 从 mimeType 主段派生（image/audio/video）。
+// 体积校验交下游 buildAttachments（>700KB 拒发），本函数不判。
+export function fileToRawAttachment(file: File): Promise<RawAttachment> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onerror = () => reject(reader.error ?? new Error('read failed'))
+    reader.onload = () => {
+      const dataUrl = typeof reader.result === 'string' ? reader.result : ''
+      resolve({
+        type: file.type.split('/')[0],
+        mimeType: file.type,
+        fileName: file.name,
+        content: stripDataUrlPrefix(dataUrl),
+        sizeBytes: file.size,
+      })
+    }
+    reader.readAsDataURL(file)
+  })
+}
+
+// 剥 dataURL 前缀（data:<mime>;base64,）只留纯 base64——#4 协议契约（r13 §2.4，源自上游 live 网关
+// attachment-normalize.ts）：content 须为纯 base64，网关/Agent 严格 base64 解码 content，前缀会污染解码。
+// 非 dataURL 字符串（已是纯 base64）原样返回。
+function stripDataUrlPrefix(dataUrl: string): string {
+  const comma = dataUrl.indexOf(',')
+  return dataUrl.startsWith('data:') && comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl
+}
+
+// base64 字符串对应的真实字节数（#7 体积校验单位统一）：≈ len ×3/4（剥 padding），与 file.size 同口径——
+// 图片与文件按同一 MAX_ATTACHMENT_BYTES 预算计费，不再因 base64 膨胀（×4/3）让图片被多算 33%。
+function base64ByteCount(base64: string): number {
+  const len = base64.length
+  if (len === 0) return 0
+  const padding = base64.endsWith('==') ? 2 : base64.endsWith('=') ? 1 : 0
+  return Math.floor((len * 3) / 4) - padding
+}
+
+// 浏览器 canvas 默认引擎：单次解码（一个 objectURL + 一次 Image 加载）供 loadSize/render 共用——
+// #10 避免两次解码（2× CPU + 峰值位图内存）。loadSize 缓存解码结果，render 复用；仅在浏览器可用
+// （jsdom canvas 为 null）——采集层在浏览器运行，单测注入假引擎覆盖逻辑。
+function decodeImage(file: File): Promise<{ img: HTMLImageElement; revoke: () => void }> {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file)
+    const img = new Image()
+    img.onload = () => resolve({ img, revoke: () => URL.revokeObjectURL(url) })
+    img.onerror = () => {
+      URL.revokeObjectURL(url)
+      reject(new Error('image decode failed'))
+    }
+    img.src = url
+  })
+}
+
+const canvasEngine: CompressEngine = {
+  async loadSize(file: File): Promise<{ width: number; height: number }> {
+    const { img, revoke } = await decodeImage(file)
+    revoke()
+    return { width: img.naturalWidth, height: img.naturalHeight }
+  },
+  async render(file: File, width: number, height: number, mime: string): Promise<string> {
+    const { img, revoke } = await decodeImage(file)
+    revoke()
+    const canvas = document.createElement('canvas')
+    canvas.width = width
+    canvas.height = height
+    const ctx = canvas.getContext('2d')
+    if (!ctx) throw new Error('canvas 2d unavailable')
+    ctx.drawImage(img, 0, 0, width, height)
+    return canvas.toDataURL(mime, COMPRESS_QUALITY)
+  },
+}
+
 // 附件字节数（体积校验依据）：优先显式 sizeBytes（采集层已知真实大小），回退 string content 长度
 // （base64 字符串长度 ≈ 原始字节 4/3，保守用其长度本身当字节数——略高估 base64 前体积，安全方向）。
 // content 自由形状（0 信任）：非 string 且无 sizeBytes → 视为 0（无法估量，交网关/隧道边界兜底）。
