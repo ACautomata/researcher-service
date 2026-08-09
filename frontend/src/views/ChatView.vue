@@ -12,6 +12,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { listInstances } from '@/api/containers'
 import { ApiError } from '@/api/client'
 import { useChatStore } from '@/stores/chat'
+import { useAuthStore } from '@/stores/auth'
 import { useChatConnection } from '@/chat/useChatConnection'
 import {
   buildAttachments,
@@ -27,6 +28,7 @@ import ChatStream from '@/components/chat/ChatStream.vue'
 import ChatComposer from '@/components/chat/ChatComposer.vue'
 
 const chat = useChatStore()
+const auth = useAuthStore()
 // 视图专属态（connecting/errorMsg 上抛至此，disconnected 在 composable 内）
 const connecting = ref(false)
 const errorMsg = ref('')
@@ -69,7 +71,18 @@ const visibleApprovals = computed(() => chat.visibleApprovals)
 // SyntheticAnchor 虚拟气泡承载审批卡（锚定三分支之外的稳定落点；卡全 resolved 后仍留存）
 const anchorState = computed(() => visibleApprovals.value.length > 0)
 
-function draftKey(): string { return `researcher:draft:${chat.selectedContainer}:${chat.selectedSession}` }
+function draftOwner(): string {
+  try {
+    const part = auth.token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')
+    const payload = JSON.parse(atob(part.padEnd(Math.ceil(part.length / 4) * 4, '='))) as Record<string, unknown>
+    const identity = payload.sub ?? payload.username
+    if (typeof identity === 'string' && identity) return identity
+  } catch { /* malformed token falls through to token-scoped isolation */ }
+  return auth.token || 'signed-out'
+}
+function draftKey(session = chat.selectedSession): string {
+  return `researcher:draft:${draftOwner()}:${chat.selectedContainer}:${session}`
+}
 function draftStorage(): Storage | null {
   try { return globalThis.localStorage ?? null } catch { return null }
 }
@@ -99,7 +112,10 @@ async function confirmRemoveSession(): Promise<boolean> {
 
 async function removeSession(key: string): Promise<void> {
   const res = await conn.removeSession(key, confirmRemoveSession)
-  if (res === true) ElMessage.success('会话已删除') // #461：成功 → 醒目 toast
+  if (res === true) {
+    draftStorage()?.removeItem(draftKey(key))
+    ElMessage.success('会话已删除')
+  }
   else if (typeof res === 'string') ElMessage.error(res) // #461：失败 → 醒目错误 toast（替换顶部小字 bar）
   // null = 用户取消 / 断线：无反馈
 }
