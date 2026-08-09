@@ -11,6 +11,7 @@ import ChatHeader from '@/components/chat/ChatHeader.vue'
 import ChatComposer from '@/components/chat/ChatComposer.vue'
 import ChatMessageItem from '@/components/chat/ChatMessageItem.vue'
 import ApprovalCard from '@/components/chat/ApprovalCard.vue'
+import ApprovalDock from '@/components/chat/ApprovalDock.vue'
 import ChatStream from '@/components/chat/ChatStream.vue'
 
 const INSTANCE = {
@@ -261,6 +262,38 @@ describe('ApprovalCard', () => {
   it('main 会话审批（agentId 空且非 subagent 形态）→ 无徽标', () => {
     const w = mount(ApprovalCard, { props: { approval: card, disconnected: false } })
     expect(w.find('[data-test="approval-source"]').exists()).toBe(false)
+  })
+})
+
+describe('ApprovalDock', () => {
+  it('固定渲染在独立审批区并转发批准、拒绝和详情事件', async () => {
+    const approval = { ...card }
+    const w = mount(ApprovalDock, { props: { approvals: [approval], disconnected: false } })
+
+    expect(w.find('[data-test="approval-dock"]').exists()).toBe(true)
+    await w.get('[data-test="approve-a1"]').trigger('click')
+    await w.get('[data-test="deny-a1"]').trigger('click')
+    await w.get('[data-test="detail-a1"]').trigger('click')
+
+    expect(w.emitted('resolve')?.[0]).toEqual([approval, 'allow-once'])
+    expect(w.emitted('resolve')?.[1]).toEqual([approval, 'deny'])
+    expect(w.emitted('toggleDetail')?.[0]).toEqual([approval])
+  })
+
+  it('没有待处理请求时不占用输入区上方空间', () => {
+    const w = mount(ApprovalDock, { props: { approvals: [], disconnected: false } })
+    expect(w.find('[data-test="approval-dock"]').exists()).toBe(false)
+  })
+
+  it('多条请求显示数量并限制在可滚动列表中', () => {
+    const w = mount(ApprovalDock, {
+      props: {
+        approvals: [{ ...card }, { ...card, id: 'a2', seq: 2 }],
+        disconnected: false,
+      },
+    })
+    expect(w.find('.dock-count').text()).toBe('2 项')
+    expect(w.findAll('.approval-list .approval')).toHaveLength(2)
   })
 })
 

@@ -25,6 +25,7 @@ import ChatSidebar from '@/components/chat/ChatSidebar.vue'
 import ChatHeader from '@/components/chat/ChatHeader.vue'
 import ChatStream from '@/components/chat/ChatStream.vue'
 import ChatComposer from '@/components/chat/ChatComposer.vue'
+import ApprovalDock from '@/components/chat/ApprovalDock.vue'
 
 const chat = useChatStore()
 // 视图专属态（connecting/errorMsg 上抛至此，disconnected 在 composable 内）
@@ -65,9 +66,15 @@ const streaming = computed(() => chat.messages.some((m) => m.role === 'assistant
 // 会话时审批区恒空；非 subagent 会话显示归属卡 + 无 sessionKey 连接级卡 + subagent 卡；
 // 被过滤卡留存列表仅渲染层隐藏）
 const visibleApprovals = computed(() => chat.visibleApprovals)
-// #405-T2：是否有待展示审批卡——驱动 ChatStream 在 main 会话无 assistant 消息时合成
-// SyntheticAnchor 虚拟气泡承载审批卡（锚定三分支之外的稳定落点；卡全 resolved 后仍留存）
-const anchorState = computed(() => visibleApprovals.value.length > 0)
+// #547：pending/resolving 请求固定在 composer 上方，避免被长回答顶出可视区域；已处理或失效卡
+// 回到原消息时间线留存操作记录。只改变渲染位置，不改变审批状态机与可见性过滤语义。
+const activeApprovals = computed(() =>
+  visibleApprovals.value.filter((a) => a.status === 'pending' || a.status === 'resolving'),
+)
+const historicalApprovals = computed(() =>
+  visibleApprovals.value.filter((a) => a.status === 'resolved' || a.status === 'expired'),
+)
+const anchorState = computed(() => historicalApprovals.value.length > 0)
 
 // 删除会话：确认（ElMessageBox）由本壳注入（composable 内不持有 UI）。
 // #461：文案明示硬删除不可恢复（删除即硬删，无「归档/可恢复」中间态，与真实网关语义一致）。
@@ -196,7 +203,7 @@ defineExpose({
       </p>
       <ChatStream
         :messages="chat.messages"
-        :approvals="visibleApprovals"
+        :approvals="historicalApprovals"
         :anchor-state="anchorState"
         :disconnected="conn.disconnected.value"
         :history-has-more="chat.historyHasMore"
@@ -220,6 +227,12 @@ defineExpose({
           </div>
         </template>
       </ChatStream>
+      <ApprovalDock
+        :approvals="activeApprovals"
+        :disconnected="conn.disconnected.value"
+        @resolve="conn.resolveApproval"
+        @toggle-detail="toggleApprovalDetail"
+      />
       <ChatComposer
         v-model="chat.input"
         :matches="slashMatches"
