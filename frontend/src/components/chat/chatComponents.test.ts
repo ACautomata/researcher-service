@@ -113,6 +113,20 @@ describe('ChatComposer', () => {
     const w = mount(ChatComposer, { props: baseProps })
     expect(w.find('[data-test="slash-menu"]').exists()).toBe(false)
   })
+
+  it('#511: 输入内容变化时自动增高，并限制最大高度', async () => {
+    const w = mount(ChatComposer, { props: baseProps })
+    const textarea = w.find<HTMLTextAreaElement>('[data-test="input"]')
+    Object.defineProperty(textarea.element, 'scrollHeight', { configurable: true, value: 260 })
+    await w.setProps({ modelValue: '多行\n'.repeat(20) })
+    await nextTick()
+    expect(textarea.element.style.height).toBe('180px')
+
+    Object.defineProperty(textarea.element, 'scrollHeight', { configurable: true, value: 64 })
+    await w.setProps({ modelValue: '两行' })
+    await nextTick()
+    expect(textarea.element.style.height).toBe('64px')
+  })
 })
 
 describe('ChatMessageItem', () => {
