@@ -43,7 +43,11 @@ async function handleLogout(): Promise<void> {
       </button>
     </nav>
     <div class="app-content">
-      <router-view />
+      <router-view v-slot="{ Component }">
+        <KeepAlive include="ChatView">
+          <component :is="Component" />
+        </KeepAlive>
+      </router-view>
     </div>
   </div>
 </template>

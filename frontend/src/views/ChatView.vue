@@ -1,4 +1,5 @@
 <script setup lang="ts">
+defineOptions({ name: 'ChatView' })
 // 对话页编排壳（#316 候选 B / #340：#316 拆分定案——8 组件边界，本文件只做编排）。
 // 连接生命周期 × runId 路由 × 消息投影的非响应式簇全在 useChatConnection（composable 闭包）；
 // 响应式投影（messages/approvals/sessions/commands/输入）在 chatStore（纯 mutation）；
