@@ -68,6 +68,14 @@ const visibleApprovals = computed(() => chat.visibleApprovals)
 // #405-T2：是否有待展示审批卡——驱动 ChatStream 在 main 会话无 assistant 消息时合成
 // SyntheticAnchor 虚拟气泡承载审批卡（锚定三分支之外的稳定落点；卡全 resolved 后仍留存）
 const anchorState = computed(() => visibleApprovals.value.length > 0)
+const executionStatus = computed(() => {
+  if (conn.disconnected.value) return '连接已断开'
+  if (connecting.value) return '正在连接…'
+  if (visibleApprovals.value.some((a) => a.status === 'pending')) return '等待批准'
+  if (chat.messages.some((m) => m.tools.some((t) => t.state === 'running'))) return '正在执行工具…'
+  if (streaming.value) return '模型正在回答…'
+  return '已连接'
+})
 
 // 删除会话：确认（ElMessageBox）由本壳注入（composable 内不持有 UI）。
 // #461：文案明示硬删除不可恢复（删除即硬删，无「归档/可恢复」中间态，与真实网关语义一致）。
@@ -194,6 +202,7 @@ defineExpose({
         连接已断开
         <button class="reconnect" data-test="reconnect" @click="conn.connect()">重新连接</button>
       </p>
+      <div class="execution-status" role="status" aria-live="polite" data-test="execution-status">{{ executionStatus }}</div>
       <ChatStream
         :messages="chat.messages"
         :approvals="visibleApprovals"
@@ -261,6 +270,7 @@ defineExpose({
 .main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 .error { margin: 0; padding: 8px 18px; color: var(--el-color-danger); background: var(--el-color-danger-light-9); }
 .error .reconnect { margin-left: 10px; background: transparent; border: 1px solid currentColor; border-radius: 6px; padding: 1px 10px; cursor: pointer; color: inherit; font-size: 12.5px; }
+.execution-status { padding: 5px 18px; border-bottom: 1px solid var(--el-border-color-lighter); color: var(--el-text-color-secondary); font-size: 12px; }
 
 /* T07 斜杠补全菜单（spec §9.4 / 原型 oc-chat-page.html）：弹在输入框上方，cmd mono + 描述 */
 .slash-menu { position: absolute; bottom: calc(100% + 6px); left: 18px; right: 18px; max-height: 280px; overflow-y: auto; background: var(--el-bg-color-overlay); border: 1px solid var(--el-border-color); border-radius: 11px; box-shadow: 0 -8px 30px rgba(0, 0, 0, .18); z-index: 10; }
