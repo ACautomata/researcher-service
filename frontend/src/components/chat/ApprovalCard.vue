@@ -37,6 +37,7 @@ function resolvedTagText(a: ApprovalItem): string {
         ? '已拒绝'
         : '未知'
 }
+function commandSummary(command: string): string { return command.replace(/\s+/g, ' ').slice(0, 120) }
 </script>
 
 <template>
@@ -55,7 +56,7 @@ function resolvedTagText(a: ApprovalItem): string {
       </span>
     </div>
     <div class="a-sub">{{ approvalSubtitle(approval) }}</div>
-    <div class="a-cmd">{{ approval.command }}</div>
+    <div class="a-cmd" :title="approval.command">{{ commandSummary(approval.command) }}</div>
     <div v-if="approval.detailOpen" class="a-detail" :data-test="`approval-detail-${approval.id}`">
       命令全文：<code>{{ approval.command }}</code><br>
       审批 id：<code>{{ approval.id }}</code> · 类型：<code>{{ approval.kind }}</code>
@@ -65,12 +66,14 @@ function resolvedTagText(a: ApprovalItem): string {
       <button
         class="btn-approve"
         :disabled="approval.status !== 'pending' || disconnected"
+        :title="disconnected ? '连接已断开，请重新连接后操作' : '仅批准本次操作'"
         :data-test="`approve-${approval.id}`"
         @click="emit('resolve', approval, 'allow-once')"
-      >批准</button>
+      >{{ approval.status === 'resolving' ? '处理中…' : '批准一次' }}</button>
       <button
         class="btn-deny"
         :disabled="approval.status !== 'pending' || disconnected"
+        :title="disconnected ? '连接已断开，请重新连接后操作' : '拒绝本次操作'"
         :data-test="`deny-${approval.id}`"
         @click="emit('resolve', approval, 'deny')"
       >拒绝</button>
@@ -94,6 +97,7 @@ function resolvedTagText(a: ApprovalItem): string {
 .approval .a-detail code { background: var(--el-fill-color); border-radius: 4px; padding: 1px 4px; }
 .approval .a-actions { display: flex; gap: 9px; margin-top: 8px; }
 .approval .a-actions button { border: none; border-radius: 7px; padding: 6px 14px; cursor: pointer; font-size: 13px; }
+.approval .a-actions button:disabled { cursor: not-allowed; opacity: .5; }
 .approval .btn-approve { background: var(--el-color-success); color: #fff; }
 .approval .btn-deny { background: transparent; border: 1px solid var(--el-color-danger); color: var(--el-color-danger); }
 .approval .btn-ghost { background: transparent; border: 1px solid var(--el-border-color); color: var(--el-text-color-secondary); }
