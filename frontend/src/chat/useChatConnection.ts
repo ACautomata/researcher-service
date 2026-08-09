@@ -495,6 +495,10 @@ export function useChatConnection(status: ChatStatus) {
     } catch (e) {
       if (gen !== containerGen || disposed) return false
       status.onConnecting(false)
+      // #492：建连失败须恢复断开态——openGateway 开头无条件 disconnected=false（假定会连上），
+      // 失败出口不复位会让 UI 假活（断线条消失、审批/发送按钮可点）但 gateway 为 null，
+      // resolveApproval/send 静默 no-op → 「点击无响应」。onReady 成功路径会再置 false。
+      disconnected.value = true
       if (e instanceof ApiError && (e.status === 401 || e.code === 10001)) return false
       if (e instanceof ApiError && e.code === 20040) {
         status.onError('容器不可访问，请切换容器')
@@ -676,6 +680,8 @@ export function useChatConnection(status: ChatStatus) {
     const connectTimeoutTimer = setTimeout(() => {
       if (gen === containerGen && !disposed) {
         status.onConnecting(false)
+        // #492：连接超时同属建连失败出口——恢复断开态（UI 不假活；协议机退避重连成功后 onReady 再置 false）
+        disconnected.value = true
         status.onError('连接建立超时，请检查容器状态后重试')
         myGw.closeSocket(1000, 'connect timeout') // P1-5: 触发协议机退避重连自愈
       }
@@ -743,6 +749,9 @@ export function useChatConnection(status: ChatStatus) {
     } catch (e) {
       if (gen !== containerGen) return
       status.onConnecting(false) // 出错解除 connecting（composer 解禁后用户可重试）
+      // #492：selectContainer 建连失败也恢复断开态（同 openGateway 失败出口——防 UI 假活，
+      // 断线条保持、审批/发送按钮禁用，用户可重试而非「可点但无响应」）
+      if (!disposed) disconnected.value = true
       if (e instanceof ApiError && e.status === 401) return
       status.onError((e as Error).message)
     }
@@ -957,14 +966,27 @@ export function useChatConnection(status: ChatStatus) {
   }
 
   // T06：批准/拒绝 → 回发 exec.approval.resolve RPC + 进 resolving 态（禁用按钮等回执，不乐观假成功，
-  // codex P2）。成功由 handleApprovalResolved 落定；RPC 失败由 catch 恢复 pending 让卡片可重试。
+  // codex P2）。成功由 handleApprovalResolved 落定；RPC 失败按错误分类（#492）：
+  //  - 终态错误（审批过期/不存在/无权——网关协议 ErrorCodes.APPROVAL_NOT_FOUND / INVALID_REQUEST /
+  //    FORBIDDEN）：卡已无可回覆，落定 expired（终态不可重试）+ 提示，不静默复位造成「反复点击无反馈」
+  //  - 瞬态错误（网关不可用/网络/超时等其余码）：恢复 pending 让卡可重试（原行为）
   function resolveApproval(a: ApprovalItem, decision: 'allow-once' | 'deny') {
     // codex R3 P2：socket 已断则不可点——否则会进 resolving 后 request 抛错
     if (!gateway || a.status !== 'pending') return
     a.status = 'resolving'
     a.decision = decision
-    void gateway.resolveApproval(a.id, a.kind ?? 'exec', decision).catch(() => {
-      chat.recoverPendingApprovals(a.id)
+    void gateway.resolveApproval(a.id, a.kind ?? 'exec', decision).catch((e) => {
+      const code = (e as { code?: unknown } | null)?.code ?? (e as { gatewayCode?: unknown } | null)?.gatewayCode
+      if (
+        code === 'APPROVAL_NOT_FOUND' ||
+        code === 'INVALID_REQUEST' ||
+        code === 'FORBIDDEN'
+      ) {
+        chat.expireApproval(a.id)
+        status.onError('该审批已失效（过期或已被处理），无法再回覆')
+      } else {
+        chat.recoverPendingApprovals(a.id)
+      }
     })
   }
 

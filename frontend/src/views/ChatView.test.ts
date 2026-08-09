@@ -461,6 +461,146 @@ describe('ChatView', () => {
     w2.unmount()
   })
 
+  // #492: 断线重连后，恢复出的待确认审批卡点击确认无响应。
+  // 复现：审批卡 pending → 断线 → 手动重连（新 GatewayChat）→ 补拉恢复卡 → 点批准。
+  it('#492: 断线重连后待确认审批卡可点击并正常 resolve', async () => {
+    const { w, gw } = await mountReady()
+    // 1. 触发工具调用确认（审批卡 pending）
+    gw.fireFrame({ type: 'approval', id: 'ap-r1', kind: 'exec', command: 'rm -rf /tmp/x', sessionKey: null })
+    await nextTick()
+    expect(w.find('[data-test="approval-ap-r1"]').exists()).toBe(true)
+    // 2. 确认前断线
+    gw.fireClose(1006, 'network', true)
+    await nextTick()
+    expect(w.find('[data-test="reconnect-bar"]').exists()).toBe(true)
+    // 3. 手动重连（「重新连接」→ connect → openGateway 新建 GatewayChat）
+    await w.find('[data-test="reconnect"]').trigger('click')
+    await flushPromises()
+    const gw2 = MockGatewayChat.last!
+    expect(gw2).not.toBe(gw)
+    gw2.listSessions.mockResolvedValue([SESSION])
+    gw2.getHistory.mockResolvedValue({ messages: [], hasMore: false, nextOffset: null })
+    gw2.listCommands.mockResolvedValue([])
+    gw2.send.mockResolvedValue(undefined)
+    gw2.resolveApproval.mockResolvedValue(undefined)
+    // 4. 断线期间网关 push 的 requested 事件收不到 → 重连补拉恢复审批卡
+    gw2.listPendingApprovals.mockResolvedValue([
+      { type: 'approval', id: 'ap-r1', kind: 'exec', command: 'rm -rf /tmp/x', sessionKey: null },
+    ])
+    gw2.fireReady()
+    await flushPromises()
+    expect(w.find('[data-test="approval-ap-r1"]').exists()).toBe(true)
+    // 5. 点击确认 → 应发出 RPC 且卡落定（不得「点击无响应」）
+    await w.find('[data-test="approve-ap-r1"]').trigger('click')
+    expect(gw2.resolveApproval).toHaveBeenCalledWith('ap-r1', 'exec', 'allow-once')
+    await flushPromises()
+    gw2.fireFrame({ type: 'approvalResolved', id: 'ap-r1', decision: 'allow-once' })
+    await nextTick()
+    expect(w.find('[data-test="approval-ap-r1"]').text()).toContain('已批准')
+    w.unmount()
+  })
+
+  // #492 变体 A：重连恢复的审批卡在断线瞬间处于 resolving（已点击、等回执）——
+  // 断线后 resolved 回执事件在断线窗口丢失 → 重连后卡卡死在 resolving（按钮 disabled）。
+  // 用户看到的正是「点击无响应」：卡看似 pending，但底层状态已是 resolving。
+  it('#492-A: 断线时处于 resolving 的审批卡重连后不得卡死（应复位 pending 可重试）', async () => {
+    const { w, gw } = await mountReady()
+    gw.fireFrame({ type: 'approval', id: 'ap-r2', kind: 'exec', command: 'rm -rf /tmp/x', sessionKey: null })
+    await nextTick()
+    // 用户点击批准 → resolving（RPC 在途未回）
+    let rejectResolve!: (e: Error) => void
+    gw.resolveApproval.mockReturnValueOnce(new Promise<void>((_, rej) => { rejectResolve = rej }))
+    await w.find('[data-test="approve-ap-r2"]').trigger('click')
+    await nextTick()
+    expect(w.find('[data-test="approve-ap-r2"]').attributes('disabled')).toBeDefined() // resolving：按钮禁用
+    // 断线：回执丢失，RPC 被 stop flush-reject
+    gw.fireClose(1006, 'network', true)
+    await nextTick()
+    expect(w.find('[data-test="reconnect-bar"]').exists()).toBe(true)
+    // 重连 + 补拉（网关侧审批仍 pending，同 id 幂等去重）
+    await w.find('[data-test="reconnect"]').trigger('click')
+    await flushPromises()
+    const gw2 = MockGatewayChat.last!
+    gw2.listSessions.mockResolvedValue([SESSION])
+    gw2.getHistory.mockResolvedValue({ messages: [], hasMore: false, nextOffset: null })
+    gw2.listCommands.mockResolvedValue([])
+    gw2.send.mockResolvedValue(undefined)
+    gw2.resolveApproval.mockResolvedValue(undefined)
+    gw2.listPendingApprovals.mockResolvedValue([
+      { type: 'approval', id: 'ap-r2', kind: 'exec', command: 'rm -rf /tmp/x', sessionKey: null },
+    ])
+    gw2.fireReady()
+    await flushPromises()
+    // 卡应已复位为 pending（可重试）——断线时 resolving 卡复位（onClose recoverPendingApprovals）
+    expect(w.find('[data-test="approve-ap-r2"]').attributes('disabled')).toBeUndefined()
+    // 再次点击 → RPC 发出 + 落定
+    await w.find('[data-test="approve-ap-r2"]').trigger('click')
+    expect(gw2.resolveApproval).toHaveBeenCalledWith('ap-r2', 'exec', 'allow-once')
+    gw2.fireFrame({ type: 'approvalResolved', id: 'ap-r2', decision: 'allow-once' })
+    await nextTick()
+    expect(w.find('[data-test="approval-ap-r2"]').text()).toContain('已批准')
+    w.unmount()
+  })
+
+  // #492 变体 B：断线期间审批在网关侧过期/被回收（补拉返回空），前端旧卡仍显示 pending。
+  // 点击 → RPC 失败（网关 APPROVAL_NOT_FOUND 终态）→ 卡落定「已失效」+ 错误提示（不得静默无响应）。
+  it('#492-B: 网关侧审批已过期（APPROVAL_NOT_FOUND）→ 卡落定失效态并提示，不再静默无响应', async () => {
+    const { w, gw } = await mountReady()
+    gw.fireFrame({ type: 'approval', id: 'ap-r3', kind: 'exec', command: 'rm -rf /tmp/x', sessionKey: null })
+    await nextTick()
+    // 断线 → 重连：审批在断线期间被网关回收（过期/他端处理）→ 补拉返回空
+    gw.fireClose(1006, 'network', true)
+    await nextTick()
+    await w.find('[data-test="reconnect"]').trigger('click')
+    await flushPromises()
+    const gw2 = MockGatewayChat.last!
+    gw2.listSessions.mockResolvedValue([SESSION])
+    gw2.getHistory.mockResolvedValue({ messages: [], hasMore: false, nextOffset: null })
+    gw2.listCommands.mockResolvedValue([])
+    gw2.send.mockResolvedValue(undefined)
+    gw2.listPendingApprovals.mockResolvedValue([]) // 网关侧已无此审批（过期/被处理）
+    gw2.fireReady()
+    await flushPromises()
+    // 旧卡仍在（store 从未清除）且显示 pending 可点
+    expect(w.find('[data-test="approval-ap-r3"]').exists()).toBe(true)
+    expect(w.find('[data-test="approve-ap-r3"]').attributes('disabled')).toBeUndefined()
+    // 点击 → RPC 被网关拒绝（审批不存在，终态错误码）
+    const gwErr = new Error('approval not found')
+    ;(gwErr as { code?: string }).code = 'APPROVAL_NOT_FOUND'
+    gw2.resolveApproval.mockRejectedValue(gwErr)
+    await w.find('[data-test="approve-ap-r3"]').trigger('click')
+    await flushPromises()
+    // 卡落定失效态：按钮区消失、「已失效」标签出现、错误条提示（不再静默无响应）
+    expect(w.find('[data-test="approval-expired"]').exists()).toBe(true)
+    expect(w.find('[data-test="approve-ap-r3"]').exists()).toBe(false)
+    expect(w.find('[data-test="error-bar"]').text()).toContain('已失效')
+    w.unmount()
+  })
+
+  // #492 根因 A：手动重连时 openGateway 失败（bootstrap-token 网络错误）——
+  // openGateway 开头无条件 disconnected=false，失败路径不恢复 → UI 假活（断线条消失、按钮可点）
+  // 但 gateway=null → 点击审批卡 resolveApproval 静默 no-op（`if (!gateway) return`）→「按钮无响应」。
+  it('#492-C: 重连失败（bootstrap-token 错误）→ UI 保持断开态，审批卡不可点（不得假活）', async () => {
+    const { w, gw } = await mountReady()
+    gw.fireFrame({ type: 'approval', id: 'ap-r4', kind: 'exec', command: 'rm -rf /tmp/x', sessionKey: null })
+    await nextTick()
+    // 断线
+    gw.fireClose(1006, 'network', true)
+    await nextTick()
+    expect(w.find('[data-test="reconnect-bar"]').exists()).toBe(true)
+    // 手动重连 → bootstrap-token fetch 网络失败（Load failed）
+    ;(getBootstrapToken as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('Load failed'))
+    await w.find('[data-test="reconnect"]').trigger('click')
+    await flushPromises()
+    // 错误条显示 Load failed
+    expect(w.find('[data-test="error-bar"]').text()).toContain('Load failed')
+    // 修复前：disconnected 残留 false → 断线条消失（假活）、审批按钮可点但点击静默 no-op
+    // 修复后：disconnected=true → 断线条保持、审批按钮禁用（明确断开态）
+    expect(w.find('[data-test="reconnect-bar"]').exists()).toBe(true)
+    expect(w.find('[data-test="approve-ap-r4"]').attributes('disabled')).toBeDefined()
+    w.unmount()
+  })
+
   it('切容器清空审批卡', async () => {
     const { w, gw } = await mountReady()
     gw.fireFrame({ type: 'approval', id: 'ap-9', kind: 'exec', command: 'x', sessionKey: null })
@@ -1196,11 +1336,14 @@ describe('ChatView', () => {
       // 不 fireReady：黑洞连接无任何信号，openGateway 的 await ready 挂起
       await w.find('[data-test="input"]').setValue('x')
       expect(w.find('[data-test="send"]').attributes('disabled')).toBeDefined() // connecting 中禁发
-      // 超过连接期超时 15s → 决议 false + 解锁 UI
+      // 超过连接期超时 15s → 决议 false + 显示断开态（重新连接入口），composer 保持禁用。
+      // #492：超时是建连失败出口，恢复断开态防「UI 假活可点但无响应」——重试路径是重新连接按钮
+      // （旧行为解锁 composer 但发送必失败，属伪解锁）。
       vi.advanceTimersByTime(15_001)
       await flushPromises()
       expect(w.find('[data-test="error-bar"]').text()).toContain('连接建立超时')
-      expect(w.find('[data-test="send"]').attributes('disabled')).toBeUndefined() // 可重试
+      expect(w.find('[data-test="reconnect-bar"]').exists()).toBe(true) // 断开条：重新连接入口
+      expect(w.find('[data-test="send"]').attributes('disabled')).toBeDefined() // 断开态禁发（不假活）
       w.unmount()
     } finally {
       vi.useRealTimers()
