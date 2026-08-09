@@ -97,4 +97,8 @@ async function handleLogout(): Promise<void> {
   cursor: default;
   opacity: 0.6;
 }
+@media (max-width: 720px) {
+  .app-nav { gap: 12px; padding: 9px 12px; overflow-x: auto; white-space: nowrap; }
+  .nav-logout { flex: none; }
+}
 </style>

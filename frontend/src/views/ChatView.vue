@@ -268,6 +268,13 @@ defineExpose({
 .slash-item.sel, .slash-item:hover { background: var(--el-fill-color); }
 .slash-item .cmd { font-family: ui-monospace, monospace; color: var(--el-color-primary); font-size: 13px; }
 .slash-item .desc { margin-left: auto; color: var(--el-text-color-secondary); font-size: 12px; }
+@media (max-width: 720px) {
+  .chat { flex: 1; min-height: 0; flex-direction: column; }
+  .chat :deep(.side) { width: auto; max-height: 34vh; border-right: 0; border-bottom: 1px solid var(--el-border-color); }
+  .chat :deep(.stream) { padding: 12px; }
+  .chat :deep(.composer) { padding: 10px 12px; }
+  .chat :deep(.msg), .chat :deep(.approval) { min-width: 0; max-width: 100%; box-sizing: border-box; }
+}
 
 /* #461：无选中会话空态视图（删除当前会话后停留空聊天区）——居中提示 + 新建会话入口 */
 .empty-state { margin: auto; text-align: center; color: var(--el-text-color-secondary); }
