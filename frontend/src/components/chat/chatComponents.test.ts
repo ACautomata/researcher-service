@@ -185,6 +185,18 @@ describe('ChatMessageItem', () => {
   })
 })
 
+describe('ToolLine', () => {
+  it('#509: defaults to a compact summary and exposes input/output on demand', async () => {
+    const m = newMsg('assistant', '')
+    m.tools.push({ id: 't1', name: 'exec', state: 'done', title: '执行命令', input: { command: 'echo ok' }, result: 'ok' })
+    const w = mount(ChatMessageItem, { props: { msg: m } })
+    const details = w.get('details[data-test="tool-line"]')
+    expect(details.attributes('open')).toBeUndefined()
+    expect(w.get('[data-test="tool-detail"]').text()).toContain('echo ok')
+    expect(w.get('[data-test="tool-detail"]').text()).toContain('ok')
+  })
+})
+
 // 审批卡测试与 ChatStream 合并时间线测试共用的卡片基底
 const card: ApprovalItem = {
   id: 'a1',
