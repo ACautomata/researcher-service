@@ -172,6 +172,17 @@ describe('ChatMessageItem', () => {
     const user = mount(ChatMessageItem, { props: { msg: newMsg('user', '用户输入') } })
     expect(user.find('[data-test="ai-notice"]').exists()).toBe(false)
   })
+
+  // #498：超长连续命令不再撑破气泡——.bubble 作为 .msg 的 flex item 须 min-width:0，
+  // 让收缩约束贯穿到 ToolLine 的 .t-args 截断链。jsdom 无布局引擎、也不注入 SFC scoped
+  // 样式到 document，故直接读组件源码锁定该约束（防未来重构误删 min-width:0 回归）。
+  it('.bubble 规则含 min-width:0（flex item 可收缩，#498 防回归）', async () => {
+    const { readFileSync } = await import('node:fs')
+    const { join } = await import('node:path')
+    const src = readFileSync(join(process.cwd(), 'src/components/chat/ChatMessageItem.vue'), 'utf8')
+    const bubbleRule = src.match(/\.bubble\s*\{[^}]*\}/)?.[0] ?? ''
+    expect(bubbleRule).toContain('min-width: 0')
+  })
 })
 
 // 审批卡测试与 ChatStream 合并时间线测试共用的卡片基底
