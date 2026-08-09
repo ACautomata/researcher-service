@@ -7,7 +7,7 @@
 // empty/slash-menu/banner——#399 起审批卡并入 ChatStream 合并时间线渲染，approvals slot 删除），
 // 表现父注入、逻辑留宿主。
 // 行为与拆分前一致：同 wire（隧道 + 官方协议机）、同 reconnect（4401 刷新重建/退避重连）、同 ping/pong。
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { listInstances } from '@/api/containers'
 import { ApiError } from '@/api/client'
@@ -68,6 +68,19 @@ const visibleApprovals = computed(() => chat.visibleApprovals)
 // #405-T2：是否有待展示审批卡——驱动 ChatStream 在 main 会话无 assistant 消息时合成
 // SyntheticAnchor 虚拟气泡承载审批卡（锚定三分支之外的稳定落点；卡全 resolved 后仍留存）
 const anchorState = computed(() => visibleApprovals.value.length > 0)
+
+function draftKey(): string { return `researcher:draft:${chat.selectedContainer}:${chat.selectedSession}` }
+function draftStorage(): Storage | null {
+  try { return globalThis.localStorage ?? null } catch { return null }
+}
+watch(() => [chat.selectedContainer, chat.selectedSession] as const, () => {
+  if (chat.selectedContainer && chat.selectedSession) chat.setInput(draftStorage()?.getItem(draftKey()) ?? '')
+})
+watch(() => chat.input, (value) => {
+  if (!chat.selectedContainer || !chat.selectedSession) return
+  const storage = draftStorage(); if (!storage) return
+  if (value) storage.setItem(draftKey(), value); else storage.removeItem(draftKey())
+})
 
 // 删除会话：确认（ElMessageBox）由本壳注入（composable 内不持有 UI）。
 // #461：文案明示硬删除不可恢复（删除即硬删，无「归档/可恢复」中间态，与真实网关语义一致）。
