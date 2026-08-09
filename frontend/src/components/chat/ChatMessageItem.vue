@@ -12,7 +12,7 @@ import ThinkingCard from '@/components/chat/ThinkingCard.vue'
 import ToolLine from '@/components/chat/ToolLine.vue'
 import MarkdownRenderer from '@/components/chat/MarkdownRenderer.vue'
 
-defineProps<{
+const props = defineProps<{
   msg: Msg
 }>()
 
@@ -25,6 +25,9 @@ defineSlots<{
 // 0 信任：src 已是完整 dataURL（带 data: 前缀）时原样返回，否则补前缀（采集/网关两源 content 形态兼容）。
 function mediaSrc(m: MediaBlock): string {
   return m.src.startsWith('data:') ? m.src : `data:${m.mimeType};base64,${m.src}`
+}
+async function copyMessage(): Promise<void> {
+  await navigator.clipboard.writeText(props.msg.text)
 }
 </script>
 
@@ -75,7 +78,8 @@ function mediaSrc(m: MediaBlock): string {
         </template>
       </div>
       <div v-if="msg.role === 'assistant' && !msg.streaming" class="ai-notice" data-test="ai-notice">
-        内容由 AI 生成，仅供参考
+        <span>内容由 AI 生成，仅供参考</span>
+        <button type="button" class="copy-message" data-test="copy-message" aria-label="复制回答" title="复制回答" @click="copyMessage"></button>
       </div>
     </div>
   </div>
@@ -93,6 +97,8 @@ function mediaSrc(m: MediaBlock): string {
 .msg.assistant .bubble { background: var(--el-fill-color-light); white-space: normal; }
 .msg.user .bubble { background: var(--el-color-primary-light-8); white-space: pre-wrap; }
 .ai-notice {
+  display: flex;
+  justify-content: space-between;
   margin-top: 8px;
   padding-top: 7px;
   border-top: 1px solid var(--el-border-color-lighter);
@@ -100,6 +106,8 @@ function mediaSrc(m: MediaBlock): string {
   font-size: 12px;
   line-height: 1.4;
 }
+.copy-message { border: 0; background: transparent; color: var(--el-color-primary); cursor: pointer; }
+.copy-message::before { content: '复制'; }
 .cursor { display: inline-block; width: 7px; height: 14px; background: var(--el-color-primary); vertical-align: -2px; animation: blink 1s steps(1) infinite; }
 @keyframes blink { 50% { opacity: 0; } }
 

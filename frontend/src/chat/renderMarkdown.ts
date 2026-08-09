@@ -63,6 +63,9 @@ md.use(emojiPlugin).use(taskListsPlugin).use(katexPlugin, { throwOnError: false 
 // wrapper 由渲染器生成而非组件运行时改 DOM，流式重渲染与消毒出口保持同一路径。
 md.renderer.rules.table_open = () => '<div class="table-scroll"><table>\n'
 md.renderer.rules.table_close = () => '</table></div>\n'
+const defaultFence = md.renderer.rules.fence!
+md.renderer.rules.fence = (tokens, idx, options, env, self) =>
+  `<div class="code-wrap"><button type="button" class="copy-code" data-copy-code>复制代码</button>${defaultFence(tokens, idx, options, env, self)}</div>`
 
 // DOMPurify 渲染出口兜底（jsdom/浏览器均可：默认取全局 window，vitest 环境自动回退内部实现）。
 // afterSanitizeAttributes 钩子在消毒出口统一强制链接 target="_blank" rel="noopener"

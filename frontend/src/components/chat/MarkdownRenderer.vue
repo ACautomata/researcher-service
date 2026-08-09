@@ -45,10 +45,18 @@ const html = computed(() => {
   const rendered = renderMarkdown(props.text)
   return props.streaming ? appendStreamingCursor(rendered) : rendered
 })
+
+async function onClick(event: MouseEvent): Promise<void> {
+  const button = (event.target as HTMLElement).closest<HTMLElement>('[data-copy-code]')
+  if (!button) return
+  const code = button.parentElement?.querySelector('code')?.textContent ?? ''
+  await navigator.clipboard.writeText(code)
+  button.textContent = '已复制'
+}
 </script>
 
 <template>
-  <div class="markdown-body" v-html="html"></div>
+  <div class="markdown-body" v-html="html" @click="onClick"></div>
 </template>
 
 <style scoped>
@@ -57,6 +65,8 @@ const html = computed(() => {
   min-width: 0;
   max-width: 100%;
 }
+.markdown-body :deep(.code-wrap) { position: relative; }
+.markdown-body :deep(.copy-code) { position: absolute; top: 6px; right: 6px; z-index: 1; border: 1px solid var(--el-border-color); border-radius: 5px; background: var(--el-bg-color-overlay); color: var(--el-text-color-secondary); cursor: pointer; }
 .markdown-body :deep(h1),
 .markdown-body :deep(h2),
 .markdown-body :deep(h3),
