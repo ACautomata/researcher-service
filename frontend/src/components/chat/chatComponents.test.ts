@@ -116,6 +116,12 @@ describe('ChatComposer', () => {
 })
 
 describe('ChatMessageItem', () => {
+  it('#515: completed assistant response can request regeneration of its user prompt', async () => {
+    const m = newMsg('assistant', 'answer'); m.streaming = false
+    const w = mount(ChatMessageItem, { props: { msg: m, regenerateText: 'question' } })
+    await w.get('[data-test="regenerate"]').trigger('click')
+    expect(w.emitted('regenerate')?.[0]).toEqual(['question'])
+  })
   it('thinking/tool-line slot 透传（默认渲染 ThinkingCard/ToolLine）', async () => {
     const m = newMsg('assistant', '正文')
     m.thinking = '思考内容'

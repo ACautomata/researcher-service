@@ -33,7 +33,14 @@ const emit = defineEmits<{
   loadMore: []
   resolveApproval: [approval: ApprovalItem, decision: 'allow-once' | 'deny']
   toggleApprovalDetail: [approval: ApprovalItem]
+  regenerate: [text: string]
 }>()
+
+function previousUserText(message: Msg): string {
+  const index = props.messages.indexOf(message)
+  for (let i = index - 1; i >= 0; i--) if (props.messages[i].role === 'user') return props.messages[i].text
+  return ''
+}
 
 // 子组件发射多参数时 $event 仅取首参（Vue 3 组件事件语义），须经方法转发保持双参
 function onResolve(a: ApprovalItem, d: 'allow-once' | 'deny'): void {
@@ -130,7 +137,7 @@ defineSlots<{
       <div v-if="isSyntheticAnchor(e)" class="synthetic-anchor" data-test="synthetic-anchor" aria-hidden="true"></div>
       <!-- msg-item slot：父注入消息表现（默认 ChatMessageItem）；thinking/tool-line 透传给叶子 -->
       <slot v-else-if="!isApprovalEntry(e)" name="msg-item" :msg="e">
-        <ChatMessageItem :msg="e" />
+        <ChatMessageItem :msg="e" :regenerate-text="e.role === 'assistant' ? previousUserText(e) : ''" @regenerate="emit('regenerate', $event)" />
       </slot>
       <!-- T06 权限审批卡（spec §9.4）：橙边待处理，处理后变淡显示结果 -->
       <ApprovalCard

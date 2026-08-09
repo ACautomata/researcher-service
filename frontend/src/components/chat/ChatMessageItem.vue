@@ -14,7 +14,10 @@ import MarkdownRenderer from '@/components/chat/MarkdownRenderer.vue'
 
 defineProps<{
   msg: Msg
+  regenerateText?: string
 }>()
+
+const emit = defineEmits<{ regenerate: [text: string] }>()
 
 defineSlots<{
   thinking?: (props: { thinking: string; thinkingOpen: boolean }) => unknown
@@ -75,7 +78,8 @@ function mediaSrc(m: MediaBlock): string {
         </template>
       </div>
       <div v-if="msg.role === 'assistant' && !msg.streaming" class="ai-notice" data-test="ai-notice">
-        内容由 AI 生成，仅供参考
+        <span>内容由 AI 生成，仅供参考</span>
+        <button v-if="regenerateText" type="button" class="regenerate" data-test="regenerate" @click="emit('regenerate', regenerateText)">重新生成</button>
       </div>
     </div>
   </div>
@@ -93,6 +97,9 @@ function mediaSrc(m: MediaBlock): string {
 .msg.assistant .bubble { background: var(--el-fill-color-light); white-space: normal; }
 .msg.user .bubble { background: var(--el-color-primary-light-8); white-space: pre-wrap; }
 .ai-notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   margin-top: 8px;
   padding-top: 7px;
   border-top: 1px solid var(--el-border-color-lighter);
@@ -100,6 +107,7 @@ function mediaSrc(m: MediaBlock): string {
   font-size: 12px;
   line-height: 1.4;
 }
+.regenerate { border: 0; background: transparent; color: var(--el-color-primary); cursor: pointer; }
 .cursor { display: inline-block; width: 7px; height: 14px; background: var(--el-color-primary); vertical-align: -2px; animation: blink 1s steps(1) infinite; }
 @keyframes blink { 50% { opacity: 0; } }
 
