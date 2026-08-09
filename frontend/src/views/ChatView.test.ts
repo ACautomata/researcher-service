@@ -507,9 +507,9 @@ describe('ChatView', () => {
     const { w, gw } = await mountReady()
     gw.fireFrame({ type: 'approval', id: 'ap-r2', kind: 'exec', command: 'rm -rf /tmp/x', sessionKey: null })
     await nextTick()
-    // 用户点击批准 → resolving（RPC 在途未回）
-    let rejectResolve!: (e: Error) => void
-    gw.resolveApproval.mockReturnValueOnce(new Promise<void>((_, rej) => { rejectResolve = rej }))
+    // 用户点击批准 → resolving（RPC 在途未回，promise 挂起不落定——断线时 onClose 的
+    // recoverPendingApprovals() 负责复位，无需 reject 句柄）
+    gw.resolveApproval.mockReturnValueOnce(new Promise<void>(() => {}))
     await w.find('[data-test="approve-ap-r2"]').trigger('click')
     await nextTick()
     expect(w.find('[data-test="approve-ap-r2"]').attributes('disabled')).toBeDefined() // resolving：按钮禁用
