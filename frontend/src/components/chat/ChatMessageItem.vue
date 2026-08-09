@@ -86,7 +86,10 @@ function mediaSrc(m: MediaBlock): string {
    长回复仍满 840px（max-width 上限），AI/user 左右对齐形成清晰视觉分区。 */
 .msg { display: flex; min-width: 280px; max-width: 840px; }
 .msg.user { align-self: flex-end; }
-.bubble { padding: 10px 14px; border-radius: 12px; word-break: break-word; }
+/* #498：.bubble 是 .msg 的 flex item，须 min-width:0 才能收缩到内容 min-content 以下——
+   否则 ToolLine 内连续无空格超长命令（min-content 可达上千 px）会把 .bubble 顶出 .msg 的
+   840px 上限（item 默认 min-width:auto 溢出父界），且 .t-args 的 ellipsis 截断无从生效。 */
+.bubble { padding: 10px 14px; border-radius: 12px; word-break: break-word; min-width: 0; }
 .msg.assistant .bubble { background: var(--el-fill-color-light); white-space: normal; }
 .msg.user .bubble { background: var(--el-color-primary-light-8); white-space: pre-wrap; }
 .ai-notice {
