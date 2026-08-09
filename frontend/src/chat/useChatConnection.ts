@@ -1025,6 +1025,8 @@ export function useChatConnection(status: ChatStatus) {
   }
 
   const streaming = computed(() => chat.messages.some((m) => m.role === 'assistant' && m.streaming))
+  let promptHistoryIndex = -1
+  let promptDraft = ''
 
   // ---- T07 斜杠命令匹配（单一来源，供 ChatView 键位处理 + ChatComposer 菜单渲染）----
   // 当前斜杠前缀：仅当输入形如 `/xxx`（无空格）时激活，返回去掉前导 / 的小写查询；否则 null
@@ -1059,6 +1061,8 @@ export function useChatConnection(status: ChatStatus) {
 
   // 输入变化：若不再是斜杠前缀（删字符/加空格），复位 Esc 关闭态，下次输 / 可再弹
   function onComposerInput() {
+    promptHistoryIndex = -1
+    promptDraft = ''
     if (!slashQuery.value) chat.setSlashDismissed(false)
     chat.setSlashIndex(0)
   }
@@ -1086,6 +1090,20 @@ export function useChatConnection(status: ChatStatus) {
         chat.setSlashDismissed(true)
       }
       return
+    }
+    // #524：空输入框按 ↑ 浏览当前会话的历史用户输入；↓ 返回较新的输入并最终恢复草稿。
+    // 仅在空输入或已经进入浏览态时接管键位，避免破坏多行文本中的正常光标移动。
+    if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
+      const prompts = chat.messages.filter((m) => m.role === 'user').map((m) => m.text).filter(Boolean)
+      if (prompts.length && (chat.input === '' || promptHistoryIndex >= 0)) {
+        e.preventDefault()
+        if (promptHistoryIndex < 0) promptDraft = chat.input
+        promptHistoryIndex = e.key === 'ArrowUp'
+          ? Math.min(promptHistoryIndex + 1, prompts.length - 1)
+          : promptHistoryIndex - 1
+        chat.setInput(promptHistoryIndex < 0 ? promptDraft : prompts[prompts.length - 1 - promptHistoryIndex])
+        return
+      }
     }
     // 菜单关闭：Enter（无修饰键）发送；Shift+Enter 换行（与原 @keydown.enter.exact 行为一致）
     if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {

@@ -1600,6 +1600,31 @@ describe('ChatView', () => {
     }
   })
 
+  it('#524: 空输入框用方向键浏览当前会话历史输入并返回草稿', async () => {
+    const { w, gw } = await mountReady()
+    const input = w.find<HTMLTextAreaElement>('[data-test="input"]')
+    await input.setValue('第一条')
+    await w.find('[data-test="send"]').trigger('click')
+    gw.fireFrame({ type: 'text', runId: 'r1', delta: '回复一' })
+    gw.fireFrame({ type: 'done', runId: 'r1' })
+    await nextTick()
+    await input.setValue('第二条')
+    await w.find('[data-test="send"]').trigger('click')
+    gw.fireFrame({ type: 'text', runId: 'r2', delta: '回复二' })
+    gw.fireFrame({ type: 'done', runId: 'r2' })
+    await nextTick()
+
+    await input.trigger('keydown', { key: 'ArrowUp' })
+    expect(input.element.value).toBe('第二条')
+    await input.trigger('keydown', { key: 'ArrowUp' })
+    expect(input.element.value).toBe('第一条')
+    await input.trigger('keydown', { key: 'ArrowDown' })
+    expect(input.element.value).toBe('第二条')
+    await input.trigger('keydown', { key: 'ArrowDown' })
+    expect(input.element.value).toBe('')
+    w.unmount()
+  })
+
   it('#11: 宽限 fire 后断线重连，首个自主 run 不被当迟到用户 run 认领（graceExpired 连接边界重置）', async () => {
     vi.useFakeTimers()
     try {
