@@ -122,6 +122,16 @@ describe('ChatMessageItem', () => {
     await w.get('[data-test="regenerate"]').trigger('click')
     expect(w.emitted('regenerate')?.[0]).toEqual(['question'])
   })
+
+  it('#515: 含附件的用户消息不显示误导性的重新生成入口', () => {
+    const user = newMsg('user', '请分析附件')
+    user.media.push({ type: 'image', mimeType: 'image/png', src: 'AA==' })
+    const answer = newMsg('assistant', '完成'); answer.streaming = false
+    const w = mount(ChatStream, {
+      props: { messages: [user, answer], approvals: [], anchorState: false, disconnected: false, historyHasMore: false, historyLoading: false },
+    })
+    expect(w.find('[data-test="regenerate"]').exists()).toBe(false)
+  })
   it('thinking/tool-line slot 透传（默认渲染 ThinkingCard/ToolLine）', async () => {
     const m = newMsg('assistant', '正文')
     m.thinking = '思考内容'

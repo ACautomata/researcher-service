@@ -38,7 +38,13 @@ const emit = defineEmits<{
 
 function previousUserText(message: Msg): string {
   const index = props.messages.indexOf(message)
-  for (let i = index - 1; i >= 0; i--) if (props.messages[i].role === 'user') return props.messages[i].text
+  for (let i = index - 1; i >= 0; i--) {
+    const candidate = props.messages[i]
+    if (candidate.role !== 'user') continue
+    // 现有前端只能重发文本，无法从历史 Msg 安全重建原始附件；含附件时不显示入口，
+    // 避免“重新生成”静默退化为只发送文字。
+    return candidate.media.length === 0 ? candidate.text : ''
+  }
   return ''
 }
 
