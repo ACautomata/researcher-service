@@ -72,13 +72,21 @@ function onScroll(): void {
 // rAF 节流跟随：一帧内多次流式 delta/审批卡插入合并滚一次到底（平滑不抖动）。
 // 仅 stickyBottom（用户停留底部）时滚；上滚回看历史时不抢滚动条。
 function scrollToBottom(): void {
-  if (!stickyBottom.value) { hasNewContent.value = true; return }
+  if (!stickyBottom.value) return
   if (rafId) return // 本帧已调度
   rafId = requestAnimationFrame(() => {
     rafId = 0
     const el = streamEl.value
     if (el && stickyBottom.value) el.scrollTop = el.scrollHeight
   })
+}
+
+function onTimelineContentChanged(): void {
+  if (!stickyBottom.value) {
+    hasNewContent.value = true
+    return
+  }
+  scrollToBottom()
 }
 
 function jumpToBottom(): void {
@@ -103,9 +111,10 @@ watch(
     props.messages.map((m) => `${m.role}|${m.streaming}|${m.raw.length}`).concat(
       props.approvals.map((a) => `${a.id}|${a.seq}|${a.status}`),
     ) + `|anchor:${props.anchorState}`,
-  scrollToBottom,
+  onTimelineContentChanged,
 )
-onUpdated(scrollToBottom)
+// 非时间线更新（例如断线状态、审批详情展开）不得制造“有新消息”；在底部时仍允许布局更新后校正滚底。
+onUpdated(() => { if (stickyBottom.value) scrollToBottom() })
 onBeforeUnmount(() => {
   if (rafId) cancelAnimationFrame(rafId)
 })
