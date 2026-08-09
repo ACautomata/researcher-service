@@ -138,12 +138,15 @@ function onPick(e: Event): void {
         data-test="input"
         rows="2"
         placeholder="发消息…（Enter 发送 / Shift+Enter 换行；输 / 弹命令补全；可粘贴/拖拽/选附件）"
+        aria-label="消息输入框"
         @input="onInput"
         @keydown="emit('keydown', $event)"
       ></textarea>
       <button
         data-test="send"
         :disabled="connecting || streaming || disconnected"
+        :title="connecting ? '正在连接' : streaming ? '正在生成回答' : disconnected ? '连接已断开' : '发送消息'"
+        aria-label="发送消息"
         @click="emit('send')"
       >发送</button>
     </div>
@@ -155,6 +158,8 @@ function onPick(e: Event): void {
 .composer-row { display: flex; gap: 8px; align-items: flex-end; }
 .composer-row textarea { flex: 1; resize: none; padding: 8px; border: 1px solid var(--el-border-color); border-radius: 8px; }
 .composer-row button { padding: 8px 16px; background: var(--el-color-primary); color: #fff; border: none; border-radius: 8px; cursor: pointer; }
+.composer-row button:disabled { cursor: not-allowed; opacity: .55; }
+.composer-row textarea:focus-visible, .composer-row button:focus-visible { outline: 2px solid var(--el-color-primary); outline-offset: 2px; }
 
 /* #459-T2 #463：附件采集 + 预览条 */
 .attach-btn { padding: 8px 12px !important; background: transparent !important; border: 1px solid var(--el-border-color) !important; color: var(--el-text-color-regular) !important; font-size: 16px; }

@@ -185,7 +185,7 @@ defineExpose({
         :container="chat.selectedContainer"
         :connecting="connecting"
       />
-      <p v-if="errorMsg" class="error" data-test="error-bar">{{ errorMsg }}</p>
+      <p v-if="errorMsg" class="error" role="alert" data-test="error-bar">{{ errorMsg }}</p>
       <!-- issue #239：断线手动重连入口——直接调 connect()（绕开 selectContainer 同名 early-return）。
            codex #249 R3 P2：由 disconnected 独立渲染，不套在 errorMsg 的 <p v-if> 里——断线后切会话
            loadHistory 会清 errorMsg，若入口随错误条消失则 disconnected 仍 true、发送仍禁用，单容器用户
