@@ -41,7 +41,7 @@ export interface ApprovalItem {
   // #405-T1：发起方 agentId（subagent 审批来源标识；null = 主会话审批或未知来源）。
   // #394 实测定案：request.agentId 恒下发（string|null），事件/补拉两路透传，识别首选此字段。
   agentId: string | null
-  status: 'pending' | 'resolving' | 'resolved' // pending 待处理 / resolving 已点击等回执 / resolved 已处理
+  status: 'pending' | 'resolving' | 'resolved' | 'expired' // pending 待处理 / resolving 已点击等回执 / resolved 已处理 / expired 网关侧已失效（过期/已处理，终态不可回覆）
   decision: '' | 'allow-once' | 'allow-always' | 'deny' | 'unknown' // codex P1 (issue #154)：网关权威值 allow-once/allow-always/deny
   detailOpen: boolean
   seq: number // ADR 0009：全局单调到达序号（先到者小、后到者大）——渲染期合并时间线排序用
@@ -173,11 +173,17 @@ export const useChatStore = defineStore('chat', {
       }
     },
     // resolve 失败（带 approval id 的 RPC 错误）或断线（无 id → 全部）：恢复 resolving 卡为 pending 可重试
-    // （codex R2 P2：仅复位匹配卡，不误复位并发在途的其它卡）
+    // （codex R2 P2：仅复位匹配卡，不误复位并发在途的其它卡）。expired 是终态，不复位。
     recoverPendingApprovals(id?: string): void {
       for (const a of this.approvals) {
         if (a.status === 'resolving' && (id === undefined || a.id === id)) a.status = 'pending'
       }
+    },
+    // #492：网关侧审批已失效（过期/他端处理，APPROVAL_NOT_FOUND 等终态错误）→ 卡落定 expired，
+    // 终态不可回覆（按钮禁用、卡片明示失效），不再静默复位造成「反复点击无反馈」。
+    expireApproval(id: string): void {
+      const a = this.approvals.find((x) => x.id === id)
+      if (a && a.status === 'resolving') a.status = 'expired'
     },
     toggleApprovalDetail(id: string): void {
       const a = this.approvals.find((x) => x.id === id)

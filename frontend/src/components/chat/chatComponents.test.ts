@@ -206,6 +206,17 @@ describe('ApprovalCard', () => {
     expect(w.text()).toContain('已批准')
   })
 
+  // #492：失效态（网关侧审批过期/已处理）——终态不可回覆：按钮消失 + 「已失效」标签
+  it('失效态：按钮消失 + 「已失效」标签', () => {
+    const w = mount(ApprovalCard, {
+      props: { approval: { ...card, status: 'expired' }, disconnected: false },
+    })
+    expect(w.find('[data-test="approve-a1"]').exists()).toBe(false)
+    expect(w.find('[data-test="deny-a1"]').exists()).toBe(false)
+    expect(w.find('[data-test="approval-expired"]').exists()).toBe(true)
+    expect(w.text()).toContain('已失效')
+  })
+
   // #405-T3（#408）：来源徽标——subagent 审批卡带 agentId 徽标，main 审批无徽标
   it('subagent 审批卡（agentId 非空）→ 徽标显示 agentId 值', () => {
     const w = mount(ApprovalCard, {

@@ -49,6 +49,10 @@ function resolvedTagText(a: ApprovalItem): string {
       <span v-if="approval.status === 'resolved'" class="resolved-tag" :class="approval.decision">
         {{ resolvedTagText(approval) }}
       </span>
+      <!-- #492：网关侧审批已失效（过期/他端处理）→ 终态不可回覆，明示「已失效」而非死卡 -->
+      <span v-if="approval.status === 'expired'" class="resolved-tag expired" data-test="approval-expired">
+        已失效
+      </span>
     </div>
     <div class="a-sub">{{ approvalSubtitle(approval) }}</div>
     <div class="a-cmd">{{ approval.command }}</div>
@@ -57,7 +61,7 @@ function resolvedTagText(a: ApprovalItem): string {
       审批 id：<code>{{ approval.id }}</code> · 类型：<code>{{ approval.kind }}</code>
       · 经审批事件推送，审批接口回覆
     </div>
-    <div v-if="approval.status !== 'resolved'" class="a-actions">
+    <div v-if="approval.status !== 'resolved' && approval.status !== 'expired'" class="a-actions">
       <button
         class="btn-approve"
         :disabled="approval.status !== 'pending' || disconnected"
@@ -94,4 +98,5 @@ function resolvedTagText(a: ApprovalItem): string {
 .approval .btn-deny { background: transparent; border: 1px solid var(--el-color-danger); color: var(--el-color-danger); }
 .approval .btn-ghost { background: transparent; border: 1px solid var(--el-border-color); color: var(--el-text-color-secondary); }
 .approval.resolved { opacity: .55; border-color: var(--el-border-color); }
+.approval .resolved-tag.expired { color: var(--el-text-color-secondary); }
 </style>

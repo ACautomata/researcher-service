@@ -116,6 +116,22 @@ describe('chatStore 纯 mutation', () => {
     expect(chat.approvals[1].status).toBe('pending')
   })
 
+  // #492：expireApproval 终态——resolving → expired（不可重试）；非 resolving 不动；recover 不复位 expired
+  it('expireApproval：resolving → expired 终态；recoverPendingApprovals 不复位 expired', () => {
+    const chat = useChatStore()
+    chat.addApproval({ id: 'a1', kind: 'exec', command: 'x', sessionKey: null })
+    chat.addApproval({ id: 'a2', kind: 'exec', command: 'y', sessionKey: null })
+    // 仅 resolving 卡可落定 expired
+    chat.approvals[1].status = 'resolving'
+    chat.expireApproval('a1') // pending 卡：不动
+    expect(chat.approvals[0].status).toBe('pending')
+    chat.expireApproval('a2')
+    expect(chat.approvals[1].status).toBe('expired')
+    // expired 是终态：recover（断线/通用错误）不复位为 pending
+    chat.recoverPendingApprovals()
+    expect(chat.approvals[1].status).toBe('expired')
+  })
+
   it('resetForContainer：清会话/消息/审批/命令/输入/分页态', () => {
     const chat = useChatStore()
     chat.setSessions([{ session_key: 'sk-1', title: '', updated_at: '' }])
