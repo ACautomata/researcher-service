@@ -183,6 +183,19 @@ describe('ChatMessageItem', () => {
     const bubbleRule = src.match(/\.bubble\s*\{[^}]*\}/)?.[0] ?? ''
     expect(bubbleRule).toContain('min-width: 0')
   })
+
+  it('使用紧凑布局：用户气泡右对齐，assistant 不显示气泡背景', async () => {
+    const { readFileSync } = await import('node:fs')
+    const { join } = await import('node:path')
+    const src = readFileSync(join(process.cwd(), 'src/components/chat/ChatMessageItem.vue'), 'utf8')
+    const userRowRule = src.match(/\.msg\.user\s*\{[^}]*\}/)?.[0] ?? ''
+    const assistantBubbleRule = src.match(/\.msg\.assistant \.bubble\s*\{[^}]*\}/)?.[0] ?? ''
+    const userBubbleRule = src.match(/\.msg\.user \.bubble\s*\{[^}]*\}/)?.[0] ?? ''
+
+    expect(userRowRule).toContain('justify-content: flex-end')
+    expect(assistantBubbleRule).toContain('background: transparent')
+    expect(userBubbleRule).toContain('background:')
+  })
 })
 
 // 审批卡测试与 ChatStream 合并时间线测试共用的卡片基底

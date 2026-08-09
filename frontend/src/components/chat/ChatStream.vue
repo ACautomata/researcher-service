@@ -146,7 +146,7 @@ defineSlots<{
 </template>
 
 <style scoped>
-.stream { flex: 1; overflow-y: auto; padding: 18px; display: flex; flex-direction: column; gap: 14px; }
+.stream { flex: 1; overflow-y: auto; padding: 18px; display: flex; flex-direction: column; gap: 10px; }
 .load-more { align-self: center; background: transparent; border: 1px dashed var(--el-border-color); border-radius: 8px; padding: 5px 18px; cursor: pointer; color: var(--el-text-color-secondary); font-size: 12.5px; }
 .load-more:disabled { cursor: default; opacity: .6; }
 /* #405-T2 虚拟助手气泡（SyntheticAnchor）：淡色虚线边框、无文本、高度贴近审批卡片的虚拟气泡——
