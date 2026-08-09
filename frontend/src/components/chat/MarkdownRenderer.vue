@@ -50,8 +50,13 @@ async function onClick(event: MouseEvent): Promise<void> {
   const button = (event.target as HTMLElement).closest<HTMLElement>('[data-copy-code]')
   if (!button) return
   const code = button.parentElement?.querySelector('code')?.textContent ?? ''
-  await navigator.clipboard.writeText(code)
-  button.textContent = '已复制'
+  try {
+    if (!navigator.clipboard?.writeText) throw new Error('Clipboard API unavailable')
+    await navigator.clipboard.writeText(code)
+    button.textContent = '已复制'
+  } catch {
+    button.textContent = '复制失败'
+  }
 }
 </script>
 

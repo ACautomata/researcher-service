@@ -8,6 +8,7 @@
 // 均渲染（user 发送的附件 echo / AI 工具产出的多媒体如 browser 截图）。
 import type { Msg } from '@/stores/chat'
 import type { MediaBlock } from '@/chat/eventTranslate'
+import { ref } from 'vue'
 import ThinkingCard from '@/components/chat/ThinkingCard.vue'
 import ToolLine from '@/components/chat/ToolLine.vue'
 import MarkdownRenderer from '@/components/chat/MarkdownRenderer.vue'
@@ -27,8 +28,15 @@ function mediaSrc(m: MediaBlock): string {
   return m.src.startsWith('data:') ? m.src : `data:${m.mimeType};base64,${m.src}`
 }
 async function copyMessage(): Promise<void> {
-  await navigator.clipboard.writeText(props.msg.text)
+  try {
+    if (!navigator.clipboard?.writeText) throw new Error('Clipboard API unavailable')
+    await navigator.clipboard.writeText(props.msg.text)
+    copyState.value = 'copied'
+  } catch {
+    copyState.value = 'failed'
+  }
 }
+const copyState = ref<'idle' | 'copied' | 'failed'>('idle')
 </script>
 
 <template>
@@ -79,7 +87,9 @@ async function copyMessage(): Promise<void> {
       </div>
       <div v-if="msg.role === 'assistant' && !msg.streaming" class="ai-notice" data-test="ai-notice">
         <span>内容由 AI 生成，仅供参考</span>
-        <button type="button" class="copy-message" data-test="copy-message" aria-label="复制回答" title="复制回答" @click="copyMessage"></button>
+        <button type="button" class="copy-message" data-test="copy-message" aria-live="polite" @click="copyMessage">
+          {{ copyState === 'copied' ? '已复制' : copyState === 'failed' ? '复制失败' : '复制' }}
+        </button>
       </div>
     </div>
   </div>
@@ -107,7 +117,6 @@ async function copyMessage(): Promise<void> {
   line-height: 1.4;
 }
 .copy-message { border: 0; background: transparent; color: var(--el-color-primary); cursor: pointer; }
-.copy-message::before { content: '复制'; }
 .cursor { display: inline-block; width: 7px; height: 14px; background: var(--el-color-primary); vertical-align: -2px; animation: blink 1s steps(1) infinite; }
 @keyframes blink { 50% { opacity: 0; } }
 
