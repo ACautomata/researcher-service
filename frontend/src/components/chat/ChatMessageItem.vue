@@ -15,7 +15,10 @@ import MarkdownRenderer from '@/components/chat/MarkdownRenderer.vue'
 
 const props = defineProps<{
   msg: Msg
+  regenerateText?: string
 }>()
+
+const emit = defineEmits<{ regenerate: [text: string] }>()
 
 defineSlots<{
   thinking?: (props: { thinking: string; thinkingOpen: boolean }) => unknown
@@ -87,9 +90,12 @@ const copyState = ref<'idle' | 'copied' | 'failed'>('idle')
       </div>
       <div v-if="msg.role === 'assistant' && !msg.streaming" class="ai-notice" data-test="ai-notice">
         <span>内容由 AI 生成，仅供参考</span>
-        <button type="button" class="copy-message" data-test="copy-message" aria-live="polite" @click="copyMessage">
-          {{ copyState === 'copied' ? '已复制' : copyState === 'failed' ? '复制失败' : '复制' }}
-        </button>
+        <span class="ai-actions">
+          <button v-if="regenerateText" type="button" class="regenerate" data-test="regenerate" @click="emit('regenerate', regenerateText)">重新生成</button>
+          <button type="button" class="copy-message" data-test="copy-message" aria-live="polite" @click="copyMessage">
+            {{ copyState === 'copied' ? '已复制' : copyState === 'failed' ? '复制失败' : '复制' }}
+          </button>
+        </span>
       </div>
     </div>
   </div>
@@ -108,6 +114,7 @@ const copyState = ref<'idle' | 'copied' | 'failed'>('idle')
 .msg.user .bubble { background: var(--el-color-primary-light-8); white-space: pre-wrap; }
 .ai-notice {
   display: flex;
+  align-items: center;
   justify-content: space-between;
   margin-top: 8px;
   padding-top: 7px;
@@ -116,7 +123,9 @@ const copyState = ref<'idle' | 'copied' | 'failed'>('idle')
   font-size: 12px;
   line-height: 1.4;
 }
+.ai-actions { display: flex; align-items: center; gap: 10px; }
 .copy-message { border: 0; background: transparent; color: var(--el-color-primary); cursor: pointer; }
+.regenerate { border: 0; background: transparent; color: var(--el-color-primary); cursor: pointer; }
 .cursor { display: inline-block; width: 7px; height: 14px; background: var(--el-color-primary); vertical-align: -2px; animation: blink 1s steps(1) infinite; }
 @keyframes blink { 50% { opacity: 0; } }
 

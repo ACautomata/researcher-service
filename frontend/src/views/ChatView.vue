@@ -8,7 +8,7 @@ defineOptions({ name: 'ChatView' })
 // empty/slash-menu/banner——#399 起审批卡并入 ChatStream 合并时间线渲染，approvals slot 删除），
 // 表现父注入、逻辑留宿主。
 // 行为与拆分前一致：同 wire（隧道 + 官方协议机）、同 reconnect（4401 刷新重建/退避重连）、同 ping/pong。
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { listInstances } from '@/api/containers'
 import { ApiError } from '@/api/client'
@@ -175,6 +175,13 @@ async function sendMessage(): Promise<void> {
   if (sent) pendingAttachments.value = [] // 真发出 → 预览条清空；早退保留
 }
 
+async function regenerate(text: string): Promise<void> {
+  if (!text || streaming.value || conn.disconnected.value) return
+  chat.setInput(text)
+  await nextTick()
+  await sendMessage()
+}
+
 async function loadInstances() {
   try {
     chat.setInstances(await listInstances())
@@ -236,6 +243,7 @@ defineExpose({
         @load-more="conn.loadMoreHistory"
         @resolve-approval="conn.resolveApproval"
         @toggle-approval-detail="toggleApprovalDetail"
+        @regenerate="regenerate"
       >
         <!-- #461：无选中会话（含删除当前会话后）→ 空态视图 + 「新建会话」入口 -->
         <template #empty>
