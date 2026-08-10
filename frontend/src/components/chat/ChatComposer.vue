@@ -164,7 +164,7 @@ watch(() => props.modelValue, () => void nextTick(resize), { immediate: true })
 
 <style scoped>
 .composer { position: relative; display: flex; flex-direction: column; gap: 8px; padding: 12px 18px; border-top: 1px solid var(--el-border-color); }
-.composer-row { display: flex; gap: 8px; align-items: flex-end; }
+.composer-row { display: flex; width: 100%; max-width: 840px; margin: 0 auto; gap: 8px; align-items: flex-end; }
 .composer-row textarea { flex: 1; resize: none; min-height: 42px; max-height: 180px; overflow-y: auto; padding: 8px; border: 1px solid var(--el-border-color); border-radius: 8px; box-sizing: border-box; }
 .composer-row button { padding: 8px 16px; background: var(--el-color-primary); color: #fff; border: none; border-radius: 8px; cursor: pointer; }
 .composer-row button:disabled { cursor: not-allowed; opacity: .55; }
@@ -174,7 +174,7 @@ watch(() => props.modelValue, () => void nextTick(resize), { immediate: true })
 .attach-btn { padding: 8px 12px !important; background: transparent !important; border: 1px solid var(--el-border-color) !important; color: var(--el-text-color-regular) !important; font-size: 16px; }
 .attach-btn:disabled { opacity: .5; cursor: default; }
 .file-input { display: none; }
-.preview-strip { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.preview-strip { display: flex; width: 100%; max-width: 840px; margin: 0 auto; flex-wrap: wrap; align-items: center; gap: 8px; }
 .preview-item { position: relative; display: flex; align-items: center; border: 1px solid var(--el-border-color); border-radius: 8px; padding: 4px; background: var(--el-fill-color-light); }
 .preview-thumb { width: 48px; height: 48px; object-fit: cover; border-radius: 6px; display: block; }
 .preview-file { max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--el-text-color-regular); padding: 0 4px; }

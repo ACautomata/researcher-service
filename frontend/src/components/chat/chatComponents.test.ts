@@ -223,6 +223,19 @@ describe('ChatMessageItem', () => {
     expect(tool.match(/\.tool\s*\{[^}]*\}/)?.[0]).toContain('min-width: 0')
     expect(tool.match(/\.tool \.t-args\s*\{[^}]*\}/)?.[0]).toContain('text-overflow: ellipsis')
   })
+
+  it('使用紧凑布局：用户气泡右对齐，assistant 不显示气泡背景', async () => {
+    const { readFileSync } = await import('node:fs')
+    const { join } = await import('node:path')
+    const src = readFileSync(join(process.cwd(), 'src/components/chat/ChatMessageItem.vue'), 'utf8')
+    const userRowRule = src.match(/\.msg\.user\s*\{[^}]*\}/)?.[0] ?? ''
+    const assistantBubbleRule = src.match(/\.msg\.assistant \.bubble\s*\{[^}]*\}/)?.[0] ?? ''
+    const userBubbleRule = src.match(/\.msg\.user \.bubble\s*\{[^}]*\}/)?.[0] ?? ''
+
+    expect(userRowRule).toContain('justify-content: flex-end')
+    expect(assistantBubbleRule).toContain('background: transparent')
+    expect(userBubbleRule).toContain('background:')
+  })
 })
 
 describe('ToolLine', () => {
