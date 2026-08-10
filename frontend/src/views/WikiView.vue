@@ -9,6 +9,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { listInstances } from '@/api/containers'
 import { getGraph } from '@/api/wiki'
 import type { WikiGraphDTO } from '@/api/wiki'
+import { ApiError } from '@/api/errors'
 import { useWikiStore } from '@/stores/wiki'
 import FileTree from '@/components/FileTree.vue'
 import MdEditor from '@/components/MdEditor.vue'
@@ -16,6 +17,13 @@ import WikiGraph from '@/components/WikiGraph.vue'
 
 const store = useWikiStore()
 const { current, groups, activePath, draft, dirty, saving, saveSeq } = storeToRefs(store)
+
+// #493: 错误二分（对齐 LoginView codex P2 惯用法）——仅「已解析的 API 错误」（信封/HTTP 语义，
+// 如 20040 越权）逐字透传后端真实消息；其余（AbortError "Fetch is aborted" / TypeError "Load failed"
+// 等浏览器原生网络/超时错误，非 ApiError）走本地化兜底，不把英文浏览器原文漏给用户。
+function wikiErrorMessage(e: unknown, fallback: string): string {
+  return e instanceof ApiError && e.message ? e.message : fallback
+}
 
 const containers = ref<string[]>([])
 const graph = ref<WikiGraphDTO>({ nodes: [], edges: [] })
@@ -61,7 +69,7 @@ async function onSwitch(name: string): Promise<void> {
     await store.switchContainer(name)
     await refreshGraph()
   } catch (e) {
-    ElMessage.error((e as Error).message)
+    ElMessage.error(wikiErrorMessage(e, '容器切换失败，请重试'))
   }
 }
 
@@ -69,7 +77,7 @@ async function onOpen(path: string): Promise<void> {
   try {
     await store.openPage(path)
   } catch (e) {
-    ElMessage.error((e as Error).message)
+    ElMessage.error(wikiErrorMessage(e, '页面打开失败，请重试'))
   }
 }
 
@@ -97,7 +105,7 @@ async function onCreate(): Promise<void> {
     await store.openPage(path)
     ElMessage.success('页面已创建')
   } catch (e) {
-    ElMessage.error((e as Error).message)
+    ElMessage.error(wikiErrorMessage(e, '页面创建失败，请重试'))
   }
 }
 
@@ -113,7 +121,7 @@ async function onDelete(path: string): Promise<void> {
     await refreshGraph()
     ElMessage.success('页面已删除')
   } catch (e) {
-    ElMessage.error((e as Error).message)
+    ElMessage.error(wikiErrorMessage(e, '页面删除失败，请重试'))
   }
 }
 
@@ -125,7 +133,7 @@ onMounted(async () => {
       await selectContainer(containers.value[0])
     }
   } catch (e) {
-    ElMessage.error((e as Error).message)
+    ElMessage.error(wikiErrorMessage(e, 'Wiki 加载失败，请重试'))
   }
 })
 </script>

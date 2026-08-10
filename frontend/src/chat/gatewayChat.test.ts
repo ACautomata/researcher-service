@@ -477,6 +477,57 @@ describe('createGatewayChat（#369 隧道 Facade）', () => {
     }
   })
 
+  it('#493: 页面后台（document.hidden）期间 60s 无帧 → 看门狗不误杀；恢复可见后监测恢复', () => {
+    vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval', 'setTimeout', 'clearTimeout'] })
+    try {
+      const { gw, client } = makeGateway()
+      gw.start()
+      // Safari 后台/遮挡页节流定时器并延迟 WS 帧投递：此时「60s 无帧」是页面被后台化而非链路黑洞。
+      // 等价为 document.hidden=true + 时钟照走但 onActivity 不到。看门狗不得据此 closeSocket。
+      // 按 15s 巡检网格精确推进：hidden 期间 8 个巡检点（15…120s）全部跳过判定。
+      Object.defineProperty(document, 'hidden', { configurable: true, value: true })
+      vi.advanceTimersByTime(120_000)
+      expect(client.closeSocket).not.toHaveBeenCalled() // 后台 120s 无帧不误杀
+
+      // 恢复可见：首个可见巡检点（135s）把沉默基准重置为当时（后台陈旧 gap 不计入）。
+      Object.defineProperty(document, 'hidden', { configurable: true, value: false })
+      vi.advanceTimersByTime(15_000) // → 135s：resume 重置基准，不杀
+      expect(client.closeSocket).not.toHaveBeenCalled()
+      // 监测恢复：自重置基准起满 60s 无帧 = 真黑洞，看门狗照常 closeSocket 自愈。
+      // 基准=135s，再推进到 195s（45,60,75 三个巡检点过 60s 阈值线：135+60=195）。
+      vi.advanceTimersByTime(45_000) // → 180s：gap 45s，未杀
+      expect(client.closeSocket).not.toHaveBeenCalled()
+      vi.advanceTimersByTime(15_001) // → 195.001s：gap ≥60s，触发黑洞自愈
+      expect(client.closeSocket).toHaveBeenCalledWith(1000, 'silence timeout')
+      gw.stop()
+    } finally {
+      Object.defineProperty(document, 'hidden', { configurable: true, value: false })
+      vi.useRealTimers()
+    }
+  })
+
+  it('#493: 后台停留超 60s 后回前台，不得因后台陈旧 gap 立即误杀（resume 须重置沉默基准）', () => {
+    vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval', 'setTimeout', 'clearTimeout'] })
+    try {
+      const { gw, client } = makeGateway()
+      gw.start()
+      client.fireActivity() // 前台存活一帧，建立基准
+      Object.defineProperty(document, 'hidden', { configurable: true, value: true })
+      vi.advanceTimersByTime(120_000) // 后台停留 120s（时钟照走、帧不到）——不应计入沉默
+      Object.defineProperty(document, 'hidden', { configurable: true, value: false }) // 回前台
+      // 回前台后首帧（resume/同步）到来前的最近一个巡检点：不得用后台陈旧 gap 立即误杀
+      vi.advanceTimersByTime(15_000)
+      expect(client.closeSocket).not.toHaveBeenCalled()
+      // 恢复可见后真黑洞（60s 无帧）仍自愈
+      vi.advanceTimersByTime(60_001)
+      expect(client.closeSocket).toHaveBeenCalledWith(1000, 'silence timeout')
+      gw.stop()
+    } finally {
+      Object.defineProperty(document, 'hidden', { configurable: true, value: false })
+      vi.useRealTimers()
+    }
+  })
+
   it('A3: crypto.randomUUID 不可用（非安全上下文）→ 兜底生成 requestId / 幂等 key（RPC 层不崩）', async () => {
     // 非安全上下文：crypto 存在但无 randomUUID（jsdom 有 getRandomValues）——A3 修复用
     // getRandomValues 兜底（32-hex），不依赖 Math.random 坍缩路径

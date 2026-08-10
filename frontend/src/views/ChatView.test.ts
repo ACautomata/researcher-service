@@ -425,28 +425,31 @@ describe('ChatView', () => {
     expect(w.find('[data-test="approve-ap-3"]').attributes('disabled')).toBeUndefined()
   })
 
-  // B0: 切页回来（unmount→remount）→ 重建隧道连接 + 补拉待处理审批卡。
-  // 流式中切页：agent 发起 exec 需审批（生产实测：exec 审批卡无人处理 → 卡 330s → 网关
-  // stuck-session recovery abort）。切页期间 WS 已断，网关 push 的 exec.approval.requested
-  // 收不到 → remount 后必须补拉，否则审批卡永远不出现、agent 卡死。
-  it('B0: 切页回来（unmount→remount）→ 重建隧道连接 + 补拉待处理审批卡', async () => {
+  // B0: 登出后再登录（unmount→remount）→ 重建隧道连接 + 补拉待处理审批卡。
+  // 生命周期对齐 KeepAlive（App.vue）：登录态下切页走 activated/deactivated、连接保持、不 unmount；
+  // 仅登出才把 ChatView 剔除缓存并 unmount → dispose 断网关。故本用例手动 w.unmount() 模拟的是
+  // 「登出后再登录」的 remount——gateway 已死、store 残留 selectedContainer，必须重建连接。
+  // 场景（生产实测）：exec 审批卡无人处理 → 卡 330s → 网关 stuck-session recovery abort。
+  // 断连期间 WS 已断，网关 push 的 exec.approval.requested 收不到 → remount 后必须补拉，否则
+  // 审批卡永远不出现、agent 卡死。
+  it('B0: 登出后再登录（unmount→remount）→ 重建隧道连接 + 补拉待处理审批卡', async () => {
     const { w, gw } = await mountReady()
-    // 流式中切页：发送后 agent 卡在 exec 审批（实时卡在切页前出现，unmount 后消失）
+    // 流式中断连：发送后 agent 卡在 exec 审批（实时卡在断连前出现，unmount 后消失）
     await w.find('[data-test="input"]').setValue('录入论文')
     await w.find('[data-test="send"]').trigger('click')
     gw.fireFrame({ type: 'approval', id: 'ap-page', kind: 'exec', command: 'curl -L arxiv.pdf', sessionKey: null })
     await nextTick()
     expect(w.find('[data-test="approval-ap-page"]').exists()).toBe(true)
-    // 切页 = unmount → onBeforeUnmount dispose → gateway.stop()（网关侧断链）
+    // 登出后剔除缓存 = unmount → onBeforeUnmount dispose → gateway.stop()（网关侧断链）
     w.unmount()
-    // 回页 = remount：store 残留 selectedContainer='demo' → 必须重建连接（而非残留死连接）
+    // 再登录 = remount：store 残留 selectedContainer='demo' → 必须重建连接（而非残留死连接）
     const w2 = mount(ChatView)
     await flushPromises()
     const gw2 = MockGatewayChat.last!
     // 断言 1：连接已重建（新 GatewayChat 实例），而非残留 gw 的死连接
     expect(gw2).not.toBe(gw)
     expect(MockGatewayChat.instances).toHaveLength(2)
-    // 断言 2：remount 后补拉待处理审批（切页期间网关 push 的事件收不到）
+    // 断言 2：remount 后补拉待处理审批（断连期间网关 push 的事件收不到）
     gw2.listSessions.mockResolvedValue([SESSION])
     gw2.getHistory.mockResolvedValue({ messages: [], hasMore: false, nextOffset: null })
     gw2.listCommands.mockResolvedValue([])
