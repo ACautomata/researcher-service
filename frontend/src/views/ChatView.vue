@@ -7,11 +7,12 @@
 // empty/slash-menu/banner——#399 起审批卡并入 ChatStream 合并时间线渲染，approvals slot 删除），
 // 表现父注入、逻辑留宿主。
 // 行为与拆分前一致：同 wire（隧道 + 官方协议机）、同 reconnect（4401 刷新重建/退避重连）、同 ping/pong。
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { listInstances } from '@/api/containers'
 import { ApiError } from '@/api/client'
 import { useChatStore } from '@/stores/chat'
+import { useAuthStore } from '@/stores/auth'
 import { useChatConnection } from '@/chat/useChatConnection'
 import {
   buildAttachments,
@@ -27,6 +28,7 @@ import ChatStream from '@/components/chat/ChatStream.vue'
 import ChatComposer from '@/components/chat/ChatComposer.vue'
 
 const chat = useChatStore()
+const auth = useAuthStore()
 // 视图专属态（connecting/errorMsg 上抛至此，disconnected 在 composable 内）
 const connecting = ref(false)
 const errorMsg = ref('')
@@ -69,6 +71,30 @@ const visibleApprovals = computed(() => chat.visibleApprovals)
 // SyntheticAnchor 虚拟气泡承载审批卡（锚定三分支之外的稳定落点；卡全 resolved 后仍留存）
 const anchorState = computed(() => visibleApprovals.value.length > 0)
 
+function draftOwner(): string {
+  try {
+    const part = auth.token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')
+    const payload = JSON.parse(atob(part.padEnd(Math.ceil(part.length / 4) * 4, '='))) as Record<string, unknown>
+    const identity = payload.sub ?? payload.username
+    if (typeof identity === 'string' && identity) return identity
+  } catch { /* malformed token falls through to token-scoped isolation */ }
+  return auth.token || 'signed-out'
+}
+function draftKey(session = chat.selectedSession): string {
+  return `researcher:draft:${draftOwner()}:${chat.selectedContainer}:${session}`
+}
+function draftStorage(): Storage | null {
+  try { return globalThis.localStorage ?? null } catch { return null }
+}
+watch(() => [chat.selectedContainer, chat.selectedSession] as const, () => {
+  if (chat.selectedContainer && chat.selectedSession) chat.setInput(draftStorage()?.getItem(draftKey()) ?? '')
+})
+watch(() => chat.input, (value) => {
+  if (!chat.selectedContainer || !chat.selectedSession) return
+  const storage = draftStorage(); if (!storage) return
+  if (value) storage.setItem(draftKey(), value); else storage.removeItem(draftKey())
+})
+
 // 删除会话：确认（ElMessageBox）由本壳注入（composable 内不持有 UI）。
 // #461：文案明示硬删除不可恢复（删除即硬删，无「归档/可恢复」中间态，与真实网关语义一致）。
 async function confirmRemoveSession(): Promise<boolean> {
@@ -86,7 +112,10 @@ async function confirmRemoveSession(): Promise<boolean> {
 
 async function removeSession(key: string): Promise<void> {
   const res = await conn.removeSession(key, confirmRemoveSession)
-  if (res === true) ElMessage.success('会话已删除') // #461：成功 → 醒目 toast
+  if (res === true) {
+    draftStorage()?.removeItem(draftKey(key))
+    ElMessage.success('会话已删除')
+  }
   else if (typeof res === 'string') ElMessage.error(res) // #461：失败 → 醒目错误 toast（替换顶部小字 bar）
   // null = 用户取消 / 断线：无反馈
 }
