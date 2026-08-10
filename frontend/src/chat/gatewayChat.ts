@@ -87,8 +87,8 @@ export interface GatewayChat {
   send(sessionKey: string, message: string, attachments?: Attachment[]): Promise<string | undefined>
   listCommands(): Promise<CommandDTO[]>
   resolveApproval(id: string, kind: string, decision: string): Promise<void>
-  // B0: 补拉待处理审批（exec.approval.list，协议 schema exec-approval 域）——切页/断线重连后
-  // 恢复审批卡：审批事件是连接级广播，切页期间 WS 已断、网关 push 的 exec.approval.requested
+  // B0: 补拉待处理审批（exec.approval.list，协议 schema exec-approval 域）——登出后重连/断线重连后
+  // 恢复审批卡：审批事件是连接级广播，断连期间 WS 已断、网关 push 的 exec.approval.requested
   // 收不到；不补拉则 agent 卡在 exec 审批时前端无卡可回，agent 卡死被网关 stuck-session
   // recovery abort（生产实测：330s 卡死 → abort_embedded_run）。返回 addApproval 同形状的
   // 卡片（id/kind/command/sessionKey），上层直接 chat.addApproval（幂等去重，与实时 push 不冲突）。
@@ -148,6 +148,9 @@ const MAX_RECONNECT_FAILURES = 5
 // onclose、协议机不重连。onActivity 每次收到网关帧刷新 lastActivityAt；超过 SILENCE_TIMEOUT_MS
 // 无任何帧 → 主动关隧道触发协议机重连自愈（网关侧 hello-ok 承诺 tickIntervalMs≤30s，正常连接
 // 60s 内必有帧，不会误杀）。
+// #493: 该「tick≤30s」承诺只在页面可见时成立——Safari 后台/遮挡页节流定时器并延迟 WS 帧投递，
+// 使健康连接在 document.hidden 期间也能累积 60s 沉默。故巡检对后台期间跳过判定、resume 重置
+// 基准（见下 wasHidden），仅前台真黑洞才触发关隧道。
 const SILENCE_TIMEOUT_MS = 60_000
 const WATCHDOG_INTERVAL_MS = 15_000
 
@@ -236,6 +239,9 @@ export function createGatewayChat(params: CreateGatewayChatParams): GatewayChat 
   // 沉默看门狗（A2/黑洞自愈）：onActivity 刷新最后活动时间；watchdog 超时无帧 → 强制重连。
   let lastActivityAt = 0
   let watchdogTimer: ReturnType<typeof setInterval> | null = null
+  // #493: 标记「经历过后台」。hidden 巡检点置真、不判沉默；恢复可见后首个巡检点据此把
+  // lastActivityAt 重置到现在（后台陈旧 gap 不计入沉默），避免 resume 立即误杀健康连接。
+  let wasHidden = false
   // P2（code review）：translator.sent 累积器无界增长（断线中断/外来 run 永不到终态条目泄漏）+
   // 断线 resume 从头重放会双重追加——每次连接生命周期边界（hello-ok）清空重来。
   const resetTranslator = () => translator.reset()
@@ -478,8 +484,21 @@ export function createGatewayChat(params: CreateGatewayChatParams): GatewayChat 
       // 沉默看门狗：连接期持续监控（黑洞链路自愈，A2）。
       if (!watchdogTimer) {
         watchdogTimer = setInterval(() => {
+          // #493: 页面后台（document.hidden，Safari 遮挡/切 tab 节流定时器并延迟 WS 帧投递）期间
+          // 「收不到帧」是页面被后台化而非链路黑洞——不判沉默、不杀连接，只记下「经历过后台」。
+          if (typeof document !== 'undefined' && document.hidden) {
+            wasHidden = true
+            return
+          }
+          const now = Date.now()
+          // resume（后台回前台）后首个可见巡检点：无条件把沉默基准重置到现在——后台期间时钟照走但
+          // 帧不到，陈旧 gap 已超阈值；不重置则回前台立即误杀一条健康连接（用户切回看到「已断开」）。
+          if (wasHidden) {
+            wasHidden = false
+            lastActivityAt = now
+          }
           // >=：interval 按 15s 周期对齐，fire 点 gap 恰为整 60s 也应触发（> 会让 60s 整被跳过）。
-          if (client && Date.now() - lastActivityAt >= SILENCE_TIMEOUT_MS) {
+          if (client && now - lastActivityAt >= SILENCE_TIMEOUT_MS) {
             // 60s 无任何网关帧 → 连接疑似黑洞（半开 TCP 无 RST，WS 不触发 onclose）→ 主动关隧道
             // 触发协议机重连。正常连接网关侧 tick ≤30s 保证 60s 内有帧，不误杀。
             client.closeSocket(1000, 'silence timeout')

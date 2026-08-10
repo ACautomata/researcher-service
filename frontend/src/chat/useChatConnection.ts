@@ -721,9 +721,11 @@ export function useChatConnection(status: ChatStatus) {
   }
 
   async function selectContainer(name: string) {
-    // B0: 同名 early-return 仅当连接还活着（gateway 非空）才跳过——切页（unmount dispose 断网关）
-    // 后 store 残留 selectedContainer，remount 走本路径时必须重建连接，否则连接死而 UI 看似活着
-    // （send/resolveApproval 因 !gateway 静默 no-op，审批卡无人处理 → agent 卡死被网关 abort）。
+    // B0: 同名 early-return 仅当连接还活着（gateway 非空）才跳过。生命周期对齐 KeepAlive（App.vue）：
+    // 登录态下 ChatView 被缓存，切页走 activated/deactivated、连接保持，不 unmount；仅登出才 unmount
+    // → dispose 断网关。故「store 残留 selectedContainer 而 gateway 已死」只在登出后再登录的 remount
+    // 出现，此时必须重建连接，否则连接死而 UI 看似活着（send/resolveApproval 因 !gateway 静默 no-op，
+    // 审批卡无人处理 → agent 卡死被网关 abort）。
     if (!name || (chat.selectedContainer === name && gateway)) return
     const gen = ++containerGen // 每次切换自增，await 后据此丢弃过期响应
     chat.setSelectedContainer(name)

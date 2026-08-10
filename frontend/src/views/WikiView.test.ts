@@ -121,7 +121,9 @@ describe('WikiView', () => {
   it('shows an error when opening a page fails', async () => {
     const wrapper = mountView()
     await flushPromises()
-    ;(readPage as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('页面读取失败'))
+    // 真实业务失败经 apiJson 抛 ApiError（client.ts #312 信封），其 message 逐字透传。
+    const { ApiError } = await import('@/api/errors')
+    ;(readPage as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new ApiError(200, '页面读取失败', 20040))
     await wrapper.findComponent({ name: 'FileTree' }).vm.$emit('open', 'concepts/a.md')
     await flushPromises()
     expect(ElMessage.error).toHaveBeenCalledWith('页面读取失败')
@@ -172,7 +174,9 @@ describe('WikiView', () => {
   it('shows an error when switching container fails', async () => {
     const wrapper = mountView()
     await flushPromises()
-    ;(getTree as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('容器切换失败'))
+    // 真实业务失败经 apiJson 抛 ApiError（client.ts #312 信封），其 message 逐字透传。
+    const { ApiError } = await import('@/api/errors')
+    ;(getTree as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new ApiError(200, '容器切换失败', 20040))
     await wrapper.find('[data-test="container-switch"]').setValue('other')
     await flushPromises()
     expect(ElMessage.error).toHaveBeenCalledWith('容器切换失败')
@@ -184,6 +188,31 @@ describe('WikiView', () => {
     expect(wrapper.find('[data-test="wiki-graph"]').exists()).toBe(true)
     await wrapper.find('[data-test="toggle-graph"]').trigger('click')
     expect(wrapper.find('[data-test="wiki-graph"]').exists()).toBe(false)
+  })
+
+  it('#493: 挂载链遇超时/AbortError → 弹本地化提示而非浏览器原生 "Fetch is aborted"', async () => {
+    // 15s 统一超时（api/request.ts AbortSignal.timeout）触发时，fetch reject 原生 DOMException
+    // （Safari 文案 "Fetch is aborted"）。它不是 ApiError，不应把浏览器原文漏给用户。
+    const abort = new DOMException('Fetch is aborted', 'AbortError')
+    ;(listInstances as ReturnType<typeof vi.fn>).mockRejectedValueOnce(abort)
+    mountView()
+    await flushPromises()
+    expect(ElMessage.error).toHaveBeenCalled()
+    const shown = (ElMessage.error as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[0]
+    expect(shown).not.toBe('Fetch is aborted') // 不得原样弹浏览器原生 AbortError 文案
+    expect(typeof shown).toBe('string')
+    expect((shown as string).length).toBeGreaterThan(0) // 给出可理解的本地化提示
+  })
+
+  it('#493: 挂载链的真实业务错误（ApiError）仍逐字透传，不回归', async () => {
+    // 20040 越权等真实业务错误经信封解析为 ApiError，其 message 是后端真实可读消息，逐字透传。
+    const { ApiError } = await import('@/api/errors')
+    ;(listInstances as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new ApiError(200, '容器不可访问', 20040),
+    )
+    mountView()
+    await flushPromises()
+    expect(ElMessage.error).toHaveBeenCalledWith('容器不可访问')
   })
 })
 

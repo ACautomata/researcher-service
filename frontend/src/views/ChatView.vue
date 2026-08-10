@@ -205,9 +205,11 @@ async function regenerate(text: string): Promise<void> {
 async function loadInstances() {
   try {
     chat.setInstances(await listInstances())
-    // B0: 总是走 selectContainer——同名且连接活着（gateway 非空）时其内部 early-return 跳过；
-    // 切页（unmount dispose 断网关）后 remount 时 store 残留 selectedContainer，gateway 已死，
-    // 必须重建连接，否则连接死而 UI 看似活着（send/resolveApproval 静默 no-op）。
+    // B0: 总是走 selectContainer——同名且连接活着（gateway 非空）时其内部 early-return 跳过。
+    // 生命周期对齐 KeepAlive（App.vue）：登录态下 ChatView 被缓存，切页走 activated/deactivated、
+    // 连接保持，不 unmount；仅登出时才剔除缓存并 unmount → dispose 断网关。故「store 残留
+    // selectedContainer 而 gateway 已死」只在登出后再登录的 remount 出现，此时必须重建连接，
+    // 否则连接死而 UI 看似活着（send/resolveApproval 静默 no-op）。
     if (chat.instances.length) {
       await conn.selectContainer(chat.selectedContainer || chat.instances[0].name)
     }
