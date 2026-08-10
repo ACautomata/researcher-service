@@ -57,6 +57,7 @@ function entryKey(e: TimelineEntry, i: number): string {
 // 由 scroll 事件实时判定；上滚离开底部 → false（新内容不抢滚动条），回到底部 → true（恢复跟随）。
 const streamEl = ref<HTMLElement | null>(null)
 const stickyBottom = ref(true)
+const hasNewContent = ref(false)
 let rafId = 0
 
 // 滚动判定（范式 B）：距底 < 阈值视为停留底部。scroll 事件驱动——用户滚动操作与
@@ -65,6 +66,7 @@ function onScroll(): void {
   const el = streamEl.value
   if (!el) return
   stickyBottom.value = shouldFollowBottom(el.scrollTop, el.scrollHeight, el.clientHeight)
+  if (stickyBottom.value) hasNewContent.value = false
 }
 
 // rAF 节流跟随：一帧内多次流式 delta/审批卡插入合并滚一次到底（平滑不抖动）。
@@ -77,6 +79,22 @@ function scrollToBottom(): void {
     const el = streamEl.value
     if (el && stickyBottom.value) el.scrollTop = el.scrollHeight
   })
+}
+
+function onTimelineContentChanged(): void {
+  if (!stickyBottom.value) {
+    hasNewContent.value = true
+    return
+  }
+  scrollToBottom()
+}
+
+function jumpToBottom(): void {
+  const el = streamEl.value
+  if (!el) return
+  stickyBottom.value = true
+  hasNewContent.value = false
+  el.scrollTop = el.scrollHeight
 }
 
 // DOM 更新后（新消息/审批卡插入/历史加载更多 prepend）跟随。onUpdated 只对「本组件 render effect
@@ -93,9 +111,10 @@ watch(
     props.messages.map((m) => `${m.role}|${m.streaming}|${m.raw.length}`).concat(
       props.approvals.map((a) => `${a.id}|${a.seq}|${a.status}`),
     ) + `|anchor:${props.anchorState}`,
-  scrollToBottom,
+  onTimelineContentChanged,
 )
-onUpdated(scrollToBottom)
+// 非时间线更新（例如断线状态、审批详情展开）不得制造“有新消息”；在底部时仍允许布局更新后校正滚底。
+onUpdated(() => { if (stickyBottom.value) scrollToBottom() })
 onBeforeUnmount(() => {
   if (rafId) cancelAnimationFrame(rafId)
 })
@@ -142,6 +161,9 @@ defineSlots<{
       />
     </template>
     <slot name="empty" />
+    <button v-if="!stickyBottom" class="jump-bottom" data-test="jump-bottom" @click="jumpToBottom">
+      {{ hasNewContent ? '有新消息 · 回到底部' : '回到底部' }}
+    </button>
   </div>
 </template>
 
@@ -149,6 +171,7 @@ defineSlots<{
 .stream { flex: 1; overflow-y: auto; padding: 18px; display: flex; flex-direction: column; gap: 14px; }
 .load-more { align-self: center; background: transparent; border: 1px dashed var(--el-border-color); border-radius: 8px; padding: 5px 18px; cursor: pointer; color: var(--el-text-color-secondary); font-size: 12.5px; }
 .load-more:disabled { cursor: default; opacity: .6; }
+.jump-bottom { position: sticky; bottom: 4px; align-self: center; border: 1px solid var(--el-border-color); border-radius: 18px; padding: 7px 14px; background: var(--el-bg-color-overlay); color: var(--el-color-primary); box-shadow: var(--el-box-shadow-light); cursor: pointer; z-index: 2; }
 /* #405-T2 虚拟助手气泡（SyntheticAnchor）：淡色虚线边框、无文本、高度贴近审批卡片的虚拟气泡——
    无 assistant 消息时承载审批卡的稳定落点；卡全 resolved 后仍留存（时间线不跳动）。
    宽度对齐 assistant 气泡（max-width 840px，默认 stretch 填满流宽）——空内容 div 若

@@ -553,6 +553,16 @@ describe('ChatStream 自动滚动（ADR 0009 / #400 范式 B + rAF 节流）', (
     expect(stream.scrollTop).toBe(500) // 滚动条不被抢走
   })
 
+  it('#517: 上滚后非消息状态更新不误报“有新消息”', async () => {
+    vi.useFakeTimers()
+    const w = mountStream()
+    stubGeometry()
+    userScrollTo(500)
+    await w.setProps({ disconnected: true })
+    await tick()
+    expect(w.find('[data-test="jump-bottom"]').text()).toBe('回到底部')
+  })
+
   it('回到底部后恢复自动跟随', async () => {
     vi.useFakeTimers()
     const w = mountStream()
