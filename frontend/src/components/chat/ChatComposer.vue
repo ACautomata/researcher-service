@@ -7,7 +7,7 @@
 // 宿主 ChatView；预览条只渲染宿主给的 pendingAttachments（含 previewUrl），移除上抛 key。
 import type { SlashOption } from '@/chat/useChatConnection'
 import type { PendingAttachment } from '@/chat/attachments'
-import { ref } from 'vue'
+import { nextTick, ref, watch } from 'vue'
 
 // 预览项 PendingAttachment（结构上提 attachments.ts 单一来源，本组件只渲染）：
 // att 附件数据 + previewUrl 缩略（图片 dataURL，非图片空）+ key。
@@ -77,6 +77,14 @@ function onPick(e: Event): void {
   if (files.length) emit('addFiles', files)
   input.value = ''
 }
+const inputEl = ref<HTMLTextAreaElement | null>(null)
+function resize(): void {
+  const el = inputEl.value
+  if (!el) return
+  el.style.height = 'auto'
+  el.style.height = `${Math.min(el.scrollHeight, 180)}px`
+}
+watch(() => props.modelValue, () => void nextTick(resize), { immediate: true })
 </script>
 
 <template>
@@ -134,6 +142,7 @@ function onPick(e: Event): void {
         @change="onPick"
       />
       <textarea
+        ref="inputEl"
         :value="modelValue"
         data-test="input"
         rows="2"
@@ -156,7 +165,7 @@ function onPick(e: Event): void {
 <style scoped>
 .composer { position: relative; display: flex; flex-direction: column; gap: 8px; padding: 12px 18px; border-top: 1px solid var(--el-border-color); }
 .composer-row { display: flex; gap: 8px; align-items: flex-end; }
-.composer-row textarea { flex: 1; resize: none; padding: 8px; border: 1px solid var(--el-border-color); border-radius: 8px; }
+.composer-row textarea { flex: 1; resize: none; min-height: 42px; max-height: 180px; overflow-y: auto; padding: 8px; border: 1px solid var(--el-border-color); border-radius: 8px; box-sizing: border-box; }
 .composer-row button { padding: 8px 16px; background: var(--el-color-primary); color: #fff; border: none; border-radius: 8px; cursor: pointer; }
 .composer-row button:disabled { cursor: not-allowed; opacity: .55; }
 .composer-row textarea:focus-visible, .composer-row button:focus-visible { outline: 2px solid var(--el-color-primary); outline-offset: 2px; }
