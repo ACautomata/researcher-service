@@ -111,7 +111,7 @@ defineSlots<{
 <template>
   <!-- ADR 0009 / #400：.stream 即滚动容器（根元素，overflow-y:auto）——ref 供范式 B 跟随滚底，
        @scroll 实时判定 stickyBottom（用户停留底部则跟随、上滚则让位） -->
-  <div class="stream" data-test="stream" ref="streamEl" @scroll="onScroll">
+  <div class="stream" data-test="stream" ref="streamEl" role="log" aria-live="polite" aria-label="对话消息" @scroll="onScroll">
     <!-- T3 历史分页（issue #82）：hasMore 时顶部「加载更多」向回翻更旧消息，prepend 到头部。 -->
     <button
       v-if="historyHasMore"
