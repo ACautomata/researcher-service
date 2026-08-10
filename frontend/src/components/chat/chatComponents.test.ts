@@ -11,6 +11,7 @@ import ChatHeader from '@/components/chat/ChatHeader.vue'
 import ChatComposer from '@/components/chat/ChatComposer.vue'
 import ChatMessageItem from '@/components/chat/ChatMessageItem.vue'
 import ApprovalCard from '@/components/chat/ApprovalCard.vue'
+import ApprovalDock from '@/components/chat/ApprovalDock.vue'
 import ChatStream from '@/components/chat/ChatStream.vue'
 
 const INSTANCE = {
@@ -130,6 +131,22 @@ describe('ChatComposer', () => {
 })
 
 describe('ChatMessageItem', () => {
+  it('#515: completed assistant response can request regeneration of its user prompt', async () => {
+    const m = newMsg('assistant', 'answer'); m.streaming = false
+    const w = mount(ChatMessageItem, { props: { msg: m, regenerateText: 'question' } })
+    await w.get('[data-test="regenerate"]').trigger('click')
+    expect(w.emitted('regenerate')?.[0]).toEqual(['question'])
+  })
+
+  it('#515: 含附件的用户消息不显示误导性的重新生成入口', () => {
+    const user = newMsg('user', '请分析附件')
+    user.media.push({ type: 'image', mimeType: 'image/png', src: 'AA==' })
+    const answer = newMsg('assistant', '完成'); answer.streaming = false
+    const w = mount(ChatStream, {
+      props: { messages: [user, answer], approvals: [], anchorState: false, disconnected: false, historyHasMore: false, historyLoading: false },
+    })
+    expect(w.find('[data-test="regenerate"]').exists()).toBe(false)
+  })
   it('thinking/tool-line slot 透传（默认渲染 ThinkingCard/ToolLine）', async () => {
     const m = newMsg('assistant', '正文')
     m.thinking = '思考内容'
@@ -206,6 +223,19 @@ describe('ChatMessageItem', () => {
     expect(message.match(/\.bubble\s*\{[^}]*\}/)?.[0]).toContain('min-width: 0')
     expect(tool.match(/\.tool\s*\{[^}]*\}/)?.[0]).toContain('min-width: 0')
     expect(tool.match(/\.tool \.t-args\s*\{[^}]*\}/)?.[0]).toContain('text-overflow: ellipsis')
+  })
+
+  it('使用紧凑布局：用户气泡右对齐，assistant 不显示气泡背景', async () => {
+    const { readFileSync } = await import('node:fs')
+    const { join } = await import('node:path')
+    const src = readFileSync(join(process.cwd(), 'src/components/chat/ChatMessageItem.vue'), 'utf8')
+    const userRowRule = src.match(/\.msg\.user\s*\{[^}]*\}/)?.[0] ?? ''
+    const assistantBubbleRule = src.match(/\.msg\.assistant \.bubble\s*\{[^}]*\}/)?.[0] ?? ''
+    const userBubbleRule = src.match(/\.msg\.user \.bubble\s*\{[^}]*\}/)?.[0] ?? ''
+
+    expect(userRowRule).toContain('justify-content: flex-end')
+    expect(assistantBubbleRule).toContain('background: transparent')
+    expect(userBubbleRule).toContain('background:')
   })
 })
 
@@ -297,6 +327,38 @@ describe('ApprovalCard', () => {
   it('main 会话审批（agentId 空且非 subagent 形态）→ 无徽标', () => {
     const w = mount(ApprovalCard, { props: { approval: card, disconnected: false } })
     expect(w.find('[data-test="approval-source"]').exists()).toBe(false)
+  })
+})
+
+describe('ApprovalDock', () => {
+  it('固定渲染在独立审批区并转发批准、拒绝和详情事件', async () => {
+    const approval = { ...card }
+    const w = mount(ApprovalDock, { props: { approvals: [approval], disconnected: false } })
+
+    expect(w.find('[data-test="approval-dock"]').exists()).toBe(true)
+    await w.get('[data-test="approve-a1"]').trigger('click')
+    await w.get('[data-test="deny-a1"]').trigger('click')
+    await w.get('[data-test="detail-a1"]').trigger('click')
+
+    expect(w.emitted('resolve')?.[0]).toEqual([approval, 'allow-once'])
+    expect(w.emitted('resolve')?.[1]).toEqual([approval, 'deny'])
+    expect(w.emitted('toggleDetail')?.[0]).toEqual([approval])
+  })
+
+  it('没有待处理请求时不占用输入区上方空间', () => {
+    const w = mount(ApprovalDock, { props: { approvals: [], disconnected: false } })
+    expect(w.find('[data-test="approval-dock"]').exists()).toBe(false)
+  })
+
+  it('多条请求显示数量并限制在可滚动列表中', () => {
+    const w = mount(ApprovalDock, {
+      props: {
+        approvals: [{ ...card }, { ...card, id: 'a2', seq: 2 }],
+        disconnected: false,
+      },
+    })
+    expect(w.find('.dock-count').text()).toBe('2 项')
+    expect(w.findAll('.approval-list .approval')).toHaveLength(2)
   })
 })
 

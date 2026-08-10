@@ -8,7 +8,7 @@ defineOptions({ name: 'ChatView' })
 // empty/slash-menu/banner——#399 起审批卡并入 ChatStream 合并时间线渲染，approvals slot 删除），
 // 表现父注入、逻辑留宿主。
 // 行为与拆分前一致：同 wire（隧道 + 官方协议机）、同 reconnect（4401 刷新重建/退避重连）、同 ping/pong。
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { listInstances } from '@/api/containers'
 import { ApiError } from '@/api/client'
@@ -27,6 +27,7 @@ import ChatSidebar from '@/components/chat/ChatSidebar.vue'
 import ChatHeader from '@/components/chat/ChatHeader.vue'
 import ChatStream from '@/components/chat/ChatStream.vue'
 import ChatComposer from '@/components/chat/ChatComposer.vue'
+import ApprovalDock from '@/components/chat/ApprovalDock.vue'
 
 const chat = useChatStore()
 const auth = useAuthStore()
@@ -70,7 +71,23 @@ const streaming = computed(() => chat.messages.some((m) => m.role === 'assistant
 const visibleApprovals = computed(() => chat.visibleApprovals)
 // #405-T2：是否有待展示审批卡——驱动 ChatStream 在 main 会话无 assistant 消息时合成
 // SyntheticAnchor 虚拟气泡承载审批卡（锚定三分支之外的稳定落点；卡全 resolved 后仍留存）
-const anchorState = computed(() => visibleApprovals.value.length > 0)
+const connectionState = computed(() => {
+  if (connecting.value) return { tone: 'info', label: '正在连接…', detail: '' }
+  if (conn.disconnected.value) return { tone: 'danger', label: '连接已断开', detail: errorMsg.value }
+  if (errorMsg.value) return { tone: 'danger', label: '加载失败', detail: errorMsg.value }
+  return null
+})
+
+// #542：执行状态指示——连接生命周期 × 审批/工具/流式活动的单行汇总（与上方连接横幅互补，
+// 横幅只报连接态，此行额外反映「正在干活」的瞬时态）
+const executionStatus = computed(() => {
+  if (conn.disconnected.value) return '连接已断开'
+  if (connecting.value) return '正在连接…'
+  if (visibleApprovals.value.some((a) => a.status === 'pending')) return '等待批准'
+  if (chat.messages.some((m) => m.tools.some((t) => t.state === 'running'))) return '正在执行工具…'
+  if (streaming.value) return '模型正在回答…'
+  return '已连接'
+})
 
 function draftOwner(): string {
   try {
@@ -95,6 +112,15 @@ watch(() => chat.input, (value) => {
   const storage = draftStorage(); if (!storage) return
   if (value) storage.setItem(draftKey(), value); else storage.removeItem(draftKey())
 })
+// #547：pending/resolving 请求固定在 composer 上方，避免被长回答顶出可视区域；已处理或失效卡
+// 回到原消息时间线留存操作记录。只改变渲染位置，不改变审批状态机与可见性过滤语义。
+const activeApprovals = computed(() =>
+  visibleApprovals.value.filter((a) => a.status === 'pending' || a.status === 'resolving'),
+)
+const historicalApprovals = computed(() =>
+  visibleApprovals.value.filter((a) => a.status === 'resolved' || a.status === 'expired'),
+)
+const anchorState = computed(() => historicalApprovals.value.length > 0)
 
 // 删除会话：确认（ElMessageBox）由本壳注入（composable 内不持有 UI）。
 // #461：文案明示硬删除不可恢复（删除即硬删，无「归档/可恢复」中间态，与真实网关语义一致）。
@@ -169,6 +195,13 @@ async function sendMessage(): Promise<void> {
   if (sent) pendingAttachments.value = [] // 真发出 → 预览条清空；早退保留
 }
 
+async function regenerate(text: string): Promise<void> {
+  if (!text || streaming.value || conn.disconnected.value) return
+  chat.setInput(text)
+  await nextTick()
+  await sendMessage()
+}
+
 async function loadInstances() {
   try {
     chat.setInstances(await listInstances())
@@ -215,18 +248,15 @@ defineExpose({
         :container="chat.selectedContainer"
         :connecting="connecting"
       />
-      <p v-if="errorMsg" class="error" role="alert" data-test="error-bar">{{ errorMsg }}</p>
-      <!-- issue #239：断线手动重连入口——直接调 connect()（绕开 selectContainer 同名 early-return）。
-           codex #249 R3 P2：由 disconnected 独立渲染，不套在 errorMsg 的 <p v-if> 里——断线后切会话
-           loadHistory 会清 errorMsg，若入口随错误条消失则 disconnected 仍 true、发送仍禁用，单容器用户
-           只能刷新页面。断开期间始终提供重连路径。 -->
-      <p v-if="conn.disconnected.value" class="error" data-test="reconnect-bar">
-        连接已断开
-        <button class="reconnect" data-test="reconnect" @click="conn.connect()">重新连接</button>
-      </p>
+      <div v-if="connectionState" class="connection-banner" :class="connectionState.tone" role="status" aria-live="polite" :data-test="conn.disconnected.value ? 'reconnect-bar' : 'connection-banner'">
+        <span class="connection-label">{{ connectionState.label }}</span>
+        <span v-if="connectionState.detail" class="connection-detail" data-test="error-bar">{{ connectionState.detail }}</span>
+        <button v-if="conn.disconnected.value" class="reconnect" data-test="reconnect" @click="conn.connect()">重新连接</button>
+      </div>
+      <div class="execution-status" role="status" aria-live="polite" data-test="execution-status">{{ executionStatus }}</div>
       <ChatStream
         :messages="chat.messages"
-        :approvals="visibleApprovals"
+        :approvals="historicalApprovals"
         :anchor-state="anchorState"
         :disconnected="conn.disconnected.value"
         :history-has-more="chat.historyHasMore"
@@ -234,6 +264,7 @@ defineExpose({
         @load-more="conn.loadMoreHistory"
         @resolve-approval="conn.resolveApproval"
         @toggle-approval-detail="toggleApprovalDetail"
+        @regenerate="regenerate"
       >
         <!-- #461：无选中会话（含删除当前会话后）→ 空态视图 + 「新建会话」入口 -->
         <template #empty>
@@ -250,6 +281,12 @@ defineExpose({
           </div>
         </template>
       </ChatStream>
+      <ApprovalDock
+        :approvals="activeApprovals"
+        :disconnected="conn.disconnected.value"
+        @resolve="conn.resolveApproval"
+        @toggle-detail="toggleApprovalDetail"
+      />
       <ChatComposer
         v-model="chat.input"
         :matches="slashMatches"
@@ -289,8 +326,13 @@ defineExpose({
 <style scoped>
 .chat { display: flex; height: 100%; min-height: 0; }
 .main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
-.error { margin: 0; padding: 8px 18px; color: var(--el-color-danger); background: var(--el-color-danger-light-9); }
-.error .reconnect { margin-left: 10px; background: transparent; border: 1px solid currentColor; border-radius: 6px; padding: 1px 10px; cursor: pointer; color: inherit; font-size: 12.5px; }
+.connection-banner { display: flex; align-items: center; gap: 10px; padding: 8px 18px; font-size: 13px; }
+.connection-banner.info { color: var(--el-color-primary); background: var(--el-color-primary-light-9); }
+.connection-banner.danger { color: var(--el-color-danger); background: var(--el-color-danger-light-9); }
+.connection-label { font-weight: 600; }
+.connection-detail { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.connection-banner .reconnect { margin-left: auto; background: transparent; border: 1px solid currentColor; border-radius: 6px; padding: 2px 10px; cursor: pointer; color: inherit; font-size: 12.5px; }
+.execution-status { padding: 5px 18px; border-bottom: 1px solid var(--el-border-color-lighter); color: var(--el-text-color-secondary); font-size: 12px; }
 
 /* T07 斜杠补全菜单（spec §9.4 / 原型 oc-chat-page.html）：弹在输入框上方，cmd mono + 描述 */
 .slash-menu { position: absolute; bottom: calc(100% + 6px); left: 18px; right: 18px; max-height: 280px; overflow-y: auto; background: var(--el-bg-color-overlay); border: 1px solid var(--el-border-color); border-radius: 11px; box-shadow: 0 -8px 30px rgba(0, 0, 0, .18); z-index: 10; }

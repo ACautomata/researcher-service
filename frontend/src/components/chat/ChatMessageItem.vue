@@ -15,7 +15,10 @@ import MarkdownRenderer from '@/components/chat/MarkdownRenderer.vue'
 
 const props = defineProps<{
   msg: Msg
+  regenerateText?: string
 }>()
+
+const emit = defineEmits<{ regenerate: [text: string] }>()
 
 defineSlots<{
   thinking?: (props: { thinking: string; thinkingOpen: boolean }) => unknown
@@ -87,27 +90,37 @@ const copyState = ref<'idle' | 'copied' | 'failed'>('idle')
       </div>
       <div v-if="msg.role === 'assistant' && !msg.streaming" class="ai-notice" data-test="ai-notice">
         <span>内容由 AI 生成，仅供参考</span>
-        <button type="button" class="copy-message" data-test="copy-message" aria-live="polite" @click="copyMessage">
-          {{ copyState === 'copied' ? '已复制' : copyState === 'failed' ? '复制失败' : '复制' }}
-        </button>
+        <span class="ai-actions">
+          <button v-if="regenerateText" type="button" class="regenerate" data-test="regenerate" @click="emit('regenerate', regenerateText)">重新生成</button>
+          <button type="button" class="copy-message" data-test="copy-message" aria-live="polite" @click="copyMessage">
+            {{ copyState === 'copied' ? '已复制' : copyState === 'failed' ? '复制失败' : '复制' }}
+          </button>
+        </span>
       </div>
     </div>
   </div>
 </template>
 
 <style scoped>
-/* 自适应宽度：fit-content 但钳在 [min,max] 区间——短回复不塌成细条（min-width 下限），
-   长回复仍满 840px（max-width 上限），AI/user 左右对齐形成清晰视觉分区。 */
-.msg { display: flex; min-width: 280px; max-width: 840px; }
-.msg.user { align-self: flex-end; }
+/* #545：消息与 composer 共用 840px 内容列。assistant 作为正文铺满内容列；user 在列内靠右，
+   仅用户输入保留气泡，形成 ChatGPT 风格的紧凑对话层级。 */
+.msg { display: flex; width: 100%; max-width: 840px; align-self: center; min-width: 0; }
+.msg.user { justify-content: flex-end; }
 /* #498：.bubble 是 .msg 的 flex item，须 min-width:0 才能收缩到内容 min-content 以下——
    否则 ToolLine 内连续无空格超长命令（min-content 可达上千 px）会把 .bubble 顶出 .msg 的
    840px 上限（item 默认 min-width:auto 溢出父界），且 .t-args 的 ellipsis 截断无从生效。 */
-.bubble { padding: 10px 14px; border-radius: 12px; word-break: break-word; min-width: 0; }
-.msg.assistant .bubble { background: var(--el-fill-color-light); white-space: normal; }
-.msg.user .bubble { background: var(--el-color-primary-light-8); white-space: pre-wrap; }
+.bubble { word-break: break-word; min-width: 0; }
+.msg.assistant .bubble { width: 100%; background: transparent; white-space: normal; }
+.msg.user .bubble {
+  max-width: min(75%, 640px);
+  padding: 9px 13px;
+  border-radius: 16px;
+  background: var(--el-color-primary-light-8);
+  white-space: pre-wrap;
+}
 .ai-notice {
   display: flex;
+  align-items: center;
   justify-content: space-between;
   margin-top: 8px;
   padding-top: 7px;
@@ -116,7 +129,9 @@ const copyState = ref<'idle' | 'copied' | 'failed'>('idle')
   font-size: 12px;
   line-height: 1.4;
 }
+.ai-actions { display: flex; align-items: center; gap: 10px; }
 .copy-message { border: 0; background: transparent; color: var(--el-color-primary); cursor: pointer; }
+.regenerate { border: 0; background: transparent; color: var(--el-color-primary); cursor: pointer; }
 .cursor { display: inline-block; width: 7px; height: 14px; background: var(--el-color-primary); vertical-align: -2px; animation: blink 1s steps(1) infinite; }
 @keyframes blink { 50% { opacity: 0; } }
 
@@ -126,5 +141,9 @@ const copyState = ref<'idle' | 'copied' | 'failed'>('idle')
 .media-image { max-width: 100%; max-height: 320px; border-radius: 8px; object-fit: contain; display: block; }
 .media-audio { max-width: 100%; width: 320px; display: block; }
 .media-video { max-width: 100%; max-height: 320px; border-radius: 8px; display: block; }
+
+@media (max-width: 720px) {
+  .msg.user .bubble { max-width: 88%; }
+}
 
 </style>

@@ -33,7 +33,20 @@ const emit = defineEmits<{
   loadMore: []
   resolveApproval: [approval: ApprovalItem, decision: 'allow-once' | 'deny']
   toggleApprovalDetail: [approval: ApprovalItem]
+  regenerate: [text: string]
 }>()
+
+function previousUserText(message: Msg): string {
+  const index = props.messages.indexOf(message)
+  for (let i = index - 1; i >= 0; i--) {
+    const candidate = props.messages[i]
+    if (candidate.role !== 'user') continue
+    // 现有前端只能重发文本，无法从历史 Msg 安全重建原始附件；含附件时不显示入口，
+    // 避免“重新生成”静默退化为只发送文字。
+    return candidate.media.length === 0 ? candidate.text : ''
+  }
+  return ''
+}
 
 // 子组件发射多参数时 $event 仅取首参（Vue 3 组件事件语义），须经方法转发保持双参
 function onResolve(a: ApprovalItem, d: 'allow-once' | 'deny'): void {
@@ -149,7 +162,7 @@ defineSlots<{
       <div v-if="isSyntheticAnchor(e)" class="synthetic-anchor" data-test="synthetic-anchor" aria-hidden="true"></div>
       <!-- msg-item slot：父注入消息表现（默认 ChatMessageItem）；thinking/tool-line 透传给叶子 -->
       <slot v-else-if="!isApprovalEntry(e)" name="msg-item" :msg="e">
-        <ChatMessageItem :msg="e" />
+        <ChatMessageItem :msg="e" :regenerate-text="e.role === 'assistant' ? previousUserText(e) : ''" @regenerate="emit('regenerate', $event)" />
       </slot>
       <!-- T06 权限审批卡（spec §9.4）：橙边待处理，处理后变淡显示结果 -->
       <ApprovalCard
@@ -168,7 +181,7 @@ defineSlots<{
 </template>
 
 <style scoped>
-.stream { flex: 1; overflow-y: auto; padding: 18px; display: flex; flex-direction: column; gap: 14px; }
+.stream { flex: 1; overflow-y: auto; padding: 18px; display: flex; flex-direction: column; gap: 10px; }
 .load-more { align-self: center; background: transparent; border: 1px dashed var(--el-border-color); border-radius: 8px; padding: 5px 18px; cursor: pointer; color: var(--el-text-color-secondary); font-size: 12.5px; }
 .load-more:disabled { cursor: default; opacity: .6; }
 .jump-bottom { position: sticky; bottom: 4px; align-self: center; border: 1px solid var(--el-border-color); border-radius: 18px; padding: 7px 14px; background: var(--el-bg-color-overlay); color: var(--el-color-primary); box-shadow: var(--el-box-shadow-light); cursor: pointer; z-index: 2; }
