@@ -183,6 +183,16 @@ describe('ChatMessageItem', () => {
     const bubbleRule = src.match(/\.bubble\s*\{[^}]*\}/)?.[0] ?? ''
     expect(bubbleRule).toContain('min-width: 0')
   })
+
+  it('#510: 消息与工具收缩链完整，长内容不会撑宽对话区', async () => {
+    const { readFileSync } = await import('node:fs')
+    const { join } = await import('node:path')
+    const message = readFileSync(join(process.cwd(), 'src/components/chat/ChatMessageItem.vue'), 'utf8')
+    const tool = readFileSync(join(process.cwd(), 'src/components/chat/ToolLine.vue'), 'utf8')
+    expect(message.match(/\.bubble\s*\{[^}]*\}/)?.[0]).toContain('min-width: 0')
+    expect(tool.match(/\.tool\s*\{[^}]*\}/)?.[0]).toContain('min-width: 0')
+    expect(tool.match(/\.tool \.t-args\s*\{[^}]*\}/)?.[0]).toContain('text-overflow: ellipsis')
+  })
 })
 
 // 审批卡测试与 ChatStream 合并时间线测试共用的卡片基底
