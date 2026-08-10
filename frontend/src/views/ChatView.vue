@@ -78,6 +78,17 @@ const connectionState = computed(() => {
   return null
 })
 
+// #542：执行状态指示——连接生命周期 × 审批/工具/流式活动的单行汇总（与上方连接横幅互补，
+// 横幅只报连接态，此行额外反映「正在干活」的瞬时态）
+const executionStatus = computed(() => {
+  if (conn.disconnected.value) return '连接已断开'
+  if (connecting.value) return '正在连接…'
+  if (visibleApprovals.value.some((a) => a.status === 'pending')) return '等待批准'
+  if (chat.messages.some((m) => m.tools.some((t) => t.state === 'running'))) return '正在执行工具…'
+  if (streaming.value) return '模型正在回答…'
+  return '已连接'
+})
+
 function draftOwner(): string {
   try {
     const part = auth.token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')
@@ -233,6 +244,7 @@ defineExpose({
         <span v-if="connectionState.detail" class="connection-detail" data-test="error-bar">{{ connectionState.detail }}</span>
         <button v-if="conn.disconnected.value" class="reconnect" data-test="reconnect" @click="conn.connect()">重新连接</button>
       </div>
+      <div class="execution-status" role="status" aria-live="polite" data-test="execution-status">{{ executionStatus }}</div>
       <ChatStream
         :messages="chat.messages"
         :approvals="visibleApprovals"
@@ -305,6 +317,7 @@ defineExpose({
 .connection-label { font-weight: 600; }
 .connection-detail { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .connection-banner .reconnect { margin-left: auto; background: transparent; border: 1px solid currentColor; border-radius: 6px; padding: 2px 10px; cursor: pointer; color: inherit; font-size: 12.5px; }
+.execution-status { padding: 5px 18px; border-bottom: 1px solid var(--el-border-color-lighter); color: var(--el-text-color-secondary); font-size: 12px; }
 
 /* T07 斜杠补全菜单（spec §9.4 / 原型 oc-chat-page.html）：弹在输入框上方，cmd mono + 描述 */
 .slash-menu { position: absolute; bottom: calc(100% + 6px); left: 18px; right: 18px; max-height: 280px; overflow-y: auto; background: var(--el-bg-color-overlay); border: 1px solid var(--el-border-color); border-radius: 11px; box-shadow: 0 -8px 30px rgba(0, 0, 0, .18); z-index: 10; }
