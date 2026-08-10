@@ -9,10 +9,11 @@
 _Avoid_: 实例——"实例"指面板侧的 `Instance` 数据模型，是 OpenClaw 容器在控制面的投影，二者不等同。
 
 **镜像谱系 (image lineage)**:
-承载 OpenClaw 容器的镜像有两个互不兼容的变体，决定容器的能力边界与挂载契约：
+承载 OpenClaw 容器的镜像决定容器的能力边界与挂载契约。有两个互不兼容的**现成**变体，另可自建第三条：
 - **cn-im fork**（`acautomata/openclaw-docker-cn-im`）：历史部署镜像，启动时自带配置同步与权限降权（init 脚本），预装中国 IM 渠道插件，**不含 browser 运行时**（researcher 配置的 browser 插件在此镜像上无效）。
-- **官方原版**（`ghcr.io/openclaw/openclaw`，分 `-browser`/`-slim` 变体）：OpenClaw 官方镜像，不自带配置同步逻辑；`-browser` 变体预装 Playwright，browser 能力可用。
-_Avoid_: 「OpenClaw 镜像」——掩盖两谱系在 browser 能力、挂载契约依赖、启动方式上的本质差异；讨论迁移/换镜像时必须指明谱系。
+- **官方原版**（`ghcr.io/openclaw/openclaw`，分 `-browser`/`-slim` 变体）：OpenClaw 官方镜像，不自带配置同步逻辑；`-browser` 变体预装 Playwright，browser 能力可用（ADR 0003 选定 `2026.7.1-browser` 为部署基线）。
+- **自建派生 (derived image)**：`FROM ghcr.io/openclaw/openclaw:2026.7.1-browser`（保 browser 能力，ADR 0003 基线）之上叠加本面板专属内容：`pdftotext`（poppler，PDF 文本提取 CLI，供 agent `tools.exec` 调用）+ wiki/workspace 骨架（COPY 进 `~/.openclaw`，供 named volume 首挂自动初始化，见「named volume 拓扑」）。经 `OPENCLAW_IMAGE` 注入。派生镜像**不新开谱系**，只在其基镜像谱系（官方）上加层；基镜像的 browser 能力、token 占位、SecretRef 等已校准性质原样继承。
+_Avoid_: 「OpenClaw 镜像」——掩盖谱系在 browser 能力、挂载契约依赖、启动方式上的本质差异；讨论迁移/换镜像/重新打包时必须指明谱系（含派生镜像的**基镜像**谱系）。
 
 **接触路径 (contact path)**:
 控制面与 OpenClaw 容器交互的四条通道：(1) Docker SDK 编排（增删查容器）、(2) 宿主文件 bind-mount 直读写（wiki / openclaw.json）、(3) HTTP `/health` 探测、(4) WebSocket（协议 v4 + 设备配对 + 事件流，见「隧道」）。
@@ -72,3 +73,16 @@ _Avoid_: 删除会话/移除会话——与归档混为一谈；术语必须指�
 **附件 (attachment)**:
 `chat.send` 携带的多模态内容块（wire 字段 `attachments`：`{type, mimeType, fileName, content, width, height}`），经隧道**内联**发送。用户经浏览器采集（粘贴/拖拽/选择）上传，图片发送前**前端压缩**；content 是自由形状（0 信任），渲染端须按块类型分派。
 _Avoid_: 文件/图片消息——掩盖「内联于 chat.send 帧、多类型块数组」的协议形态。
+
+**文件查询通道 (file query channel)**:
+控制面读取 OpenClaw 容器内 wiki / workspace 文件的机制。**经 Docker 自带原语，不经 gateway 插件 API**：列目录与读文件用 dockerode `getArchive`（以容器为视角打 tar 流拉出，穿过 named volume 挂载点读卷数据），写文件用 `putArchive`，删文件用容器内 `exec rm`。以**容器存在（running/stopped）为前提**——容器删除时其数据卷一并删除，故「卷还在但容器没了」的情形不出现。不引入第三方 gateway 插件（曾评估 `openclaw-better-gateway`：捆绑 IDE/终端/写删、CORS 全开、自实现 token 校验与本项目 `${GATEWAY_TOKEN}` 占位不兼容，为一个只读查询暴露面过大，否决）。
+_Avoid_: 走 gateway 插件/RPC 读文件——OpenClaw 官方无文件 RPC，第三方插件暴露面与认证均不可接受。
+
+**named volume 拓扑 (named-volume topology)**:
+OpenClaw 容器持久化**全用 Docker named volume，宿主零数据 bind-mount**（整洁动机：数据不散落宿主 instances 树、卷可定位）。每容器（按代系 id）：`openclaw-wiki-<id>` → `~/.openclaw/wiki/main`、`openclaw-workspace-<id>` → `~/.openclaw/workspace`、`openclaw-home-<id>` → `~/.openclaw`（承载 state/logs/extensions/skills，前两者在子路径遮蔽它，属正常叠加）。空卷首次挂载由 Docker 用镜像内 `~/.openclaw` 骨架**自动初始化**（wiki/workspace 骨架烤进自建镜像，免去独立模板 clone 与手工预填充）。删容器时 `docker volume rm` 连卷删除（`remove({v:true})` 只删匿名卷，named volume 须显式删）。
+_Avoid_: bind-mount home——它要求「server 与宿主 docker daemon 解析同一宿主路径」（`/fleet` 坑，2026-08-01 生产实测），与「零 host 数据挂载」目标根本冲突。
+
+**禁止挂 host (no host mounts)**:
+生产部署除 `/var/run/docker.sock`（编排 OpenClaw 的唯一通道，无 volume 替代，spec §5.4 已接受等价 root 风险）外**零 host 挂载**。由此：模板与 `openclaw.json` 单一来源**构建期 COPY 进 server 镜像**（不再运行时挂载 `/srv/openclaw/template`、`./openclaw.json`）；`openclaw.json` 写读**不经文件 bind**——写用 `putArchive` 打进容器、读用 `getArchive` 拉出；`/fleet:/fleet` bind 随 homeDir bind 一并消失。dev 控制面也容器化（与 prod 同形态）。
+**静态 config 后果**：`openclaw.json` 改经 `putArchive` 写后，#366 的「宿主 rename 换 inode + 目录 ro bind」热加载机制**放弃**——配置改为**静态**，改配置须重启容器生效（不复用 gateway watch 热加载）。这是 #366 决策的一次明确回退。
+_Avoid_: 把 `docker.sock` 也当可删的 host 挂载——删它即失去编排能力；混用「运行时挂载模板」——违背配置入镜像的单一来源；假设配置仍可热加载——已改静态。
