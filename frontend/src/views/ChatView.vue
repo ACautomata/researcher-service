@@ -71,6 +71,12 @@ const visibleApprovals = computed(() => chat.visibleApprovals)
 // #405-T2：是否有待展示审批卡——驱动 ChatStream 在 main 会话无 assistant 消息时合成
 // SyntheticAnchor 虚拟气泡承载审批卡（锚定三分支之外的稳定落点；卡全 resolved 后仍留存）
 const anchorState = computed(() => visibleApprovals.value.length > 0)
+const connectionState = computed(() => {
+  if (connecting.value) return { tone: 'info', label: '正在连接…', detail: '' }
+  if (conn.disconnected.value) return { tone: 'danger', label: '连接已断开', detail: errorMsg.value }
+  if (errorMsg.value) return { tone: 'danger', label: '加载失败', detail: errorMsg.value }
+  return null
+})
 
 function draftOwner(): string {
   try {
@@ -215,15 +221,11 @@ defineExpose({
         :container="chat.selectedContainer"
         :connecting="connecting"
       />
-      <p v-if="errorMsg" class="error" role="alert" data-test="error-bar">{{ errorMsg }}</p>
-      <!-- issue #239：断线手动重连入口——直接调 connect()（绕开 selectContainer 同名 early-return）。
-           codex #249 R3 P2：由 disconnected 独立渲染，不套在 errorMsg 的 <p v-if> 里——断线后切会话
-           loadHistory 会清 errorMsg，若入口随错误条消失则 disconnected 仍 true、发送仍禁用，单容器用户
-           只能刷新页面。断开期间始终提供重连路径。 -->
-      <p v-if="conn.disconnected.value" class="error" data-test="reconnect-bar">
-        连接已断开
-        <button class="reconnect" data-test="reconnect" @click="conn.connect()">重新连接</button>
-      </p>
+      <div v-if="connectionState" class="connection-banner" :class="connectionState.tone" role="status" aria-live="polite" :data-test="conn.disconnected.value ? 'reconnect-bar' : 'connection-banner'">
+        <span class="connection-label">{{ connectionState.label }}</span>
+        <span v-if="connectionState.detail" class="connection-detail" data-test="error-bar">{{ connectionState.detail }}</span>
+        <button v-if="conn.disconnected.value" class="reconnect" data-test="reconnect" @click="conn.connect()">重新连接</button>
+      </div>
       <ChatStream
         :messages="chat.messages"
         :approvals="visibleApprovals"
@@ -289,8 +291,12 @@ defineExpose({
 <style scoped>
 .chat { display: flex; height: 100%; min-height: 0; }
 .main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
-.error { margin: 0; padding: 8px 18px; color: var(--el-color-danger); background: var(--el-color-danger-light-9); }
-.error .reconnect { margin-left: 10px; background: transparent; border: 1px solid currentColor; border-radius: 6px; padding: 1px 10px; cursor: pointer; color: inherit; font-size: 12.5px; }
+.connection-banner { display: flex; align-items: center; gap: 10px; padding: 8px 18px; font-size: 13px; }
+.connection-banner.info { color: var(--el-color-primary); background: var(--el-color-primary-light-9); }
+.connection-banner.danger { color: var(--el-color-danger); background: var(--el-color-danger-light-9); }
+.connection-label { font-weight: 600; }
+.connection-detail { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.connection-banner .reconnect { margin-left: auto; background: transparent; border: 1px solid currentColor; border-radius: 6px; padding: 2px 10px; cursor: pointer; color: inherit; font-size: 12.5px; }
 
 /* T07 斜杠补全菜单（spec §9.4 / 原型 oc-chat-page.html）：弹在输入框上方，cmd mono + 描述 */
 .slash-menu { position: absolute; bottom: calc(100% + 6px); left: 18px; right: 18px; max-height: 280px; overflow-y: auto; background: var(--el-bg-color-overlay); border: 1px solid var(--el-border-color); border-radius: 11px; box-shadow: 0 -8px 30px rgba(0, 0, 0, .18); z-index: 10; }
