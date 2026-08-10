@@ -6,6 +6,16 @@ import { mount } from '@vue/test-utils'
 import MarkdownRenderer from '@/components/chat/MarkdownRenderer.vue'
 
 describe('MarkdownRenderer', () => {
+  it('#514: 代码块带独立复制操作', () => {
+    const w = mount(MarkdownRenderer, { props: { text: '```js\nconst x = 1\n```', streaming: false } })
+    expect(w.get('[data-copy-code]').text()).toBe('复制代码')
+  })
+
+  it('#514: Clipboard API 不可用时显示失败反馈而不是抛出异常', async () => {
+    const w = mount(MarkdownRenderer, { props: { text: '```\nhello\n```', streaming: false } })
+    await w.get('[data-copy-code]').trigger('click')
+    expect(w.get('[data-copy-code]').text()).toBe('复制失败')
+  })
   it('text 渲染出对应 DOM 节点（**bold** → strong）', () => {
     const w = mount(MarkdownRenderer, { props: { text: '**bold**', streaming: false } })
     expect(w.find('.markdown-body strong').exists()).toBe(true)

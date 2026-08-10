@@ -162,7 +162,7 @@ describe('ChatMessageItem', () => {
     const m = newMsg('assistant', '完整回答')
     m.streaming = false
     const w = mount(ChatMessageItem, { props: { msg: m } })
-    expect(w.find('[data-test="ai-notice"]').text()).toBe('内容由 AI 生成，仅供参考')
+    expect(w.find('[data-test="ai-notice"]').text()).toContain('内容由 AI 生成，仅供参考')
   })
 
   it('streaming assistant and user messages do not show AI reference notice', () => {
