@@ -52,6 +52,13 @@ describe('prod compose 去 host 挂载（issue #593，ADR 0013）', () => {
     expect(compose).toMatch(/OPENCLAW_TEMPLATE_DIR: \/app\/templates\/researcher/)
     expect(compose).toMatch(/OPENCLAW_TEMPLATE_JSON: \/app\/deploy\/openclaw\.json/)
   })
+
+  it('fleet 根为容器内工作目录、无宿主 bind（/fleet 绑定已移除；与 devDeploy.test.ts 同形断言）', () => {
+    // issue #595 收口锚定：#593 删 /fleet:/fleet bind 后 OPENCLAW_FLEET_ROOT 仍是容器内路径——
+    // named volume 拓扑（ADR 0011）下 OpenClaw 容器不 bind 宿主树，createComplete 的 instanceDir/
+    // provision 落容器私有 /fleet（容器重建即空、create 幂等重建；卷内容由 #588 派生镜像骨架播种）。
+    expect(compose).toMatch(/OPENCLAW_FLEET_ROOT: \/fleet/)
+  })
 })
 
 describe('server 镜像构建期入模板（issue #593，ADR 0013）', () => {

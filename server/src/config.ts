@@ -131,10 +131,13 @@ function readHealthScheme(): string {
   return v
 }
 
-// OPENCLAW_FLEET_ROOT（Codex 第七轮 #4）：相对路径时 path.join 保留相对性 → instances/<id>/home 与
-// openclaw.json 作 Docker bind source 非绝对（Docker bind source 须绝对）→ POST 返 creating、后台
-// provisioning 失败留 error 行（部署故障静默掩盖，与 OPENCLAW_TEMPLATE_DIR 第六轮同类）。生产强制
-// 绝对路径（对齐 readTemplateDir），显式相对 fail-fast；缺省走 cwd/fleet 绝对兜底；dev/test 保持容忍。
+// OPENCLAW_FLEET_ROOT：instances/<id>/ 落盘根。named volume 拓扑（#590/#592 默认开，ADR 0011）下为
+// 容器内工作目录——instanceDir/provision 落容器私有根，OpenClaw 容器不 bind 宿主树（/fleet 绑定已随
+// #593/#595 从 prod compose 移除），容器重建即空、create 幂等重建。显式 false 回退旧 bind 模式时
+// 该根作 Docker bind source——相对路径时 path.join 保留相对性 → instances/<id>/home 与 openclaw.json
+// source 非绝对（Docker bind source 须绝对）→ POST 返 creating、后台 provisioning 失败留 error 行
+// （部署故障静默掩盖，与 OPENCLAW_TEMPLATE_DIR 第六轮同类）。生产强制绝对路径（对齐 readTemplateDir），
+// 显式相对 fail-fast；缺省走 cwd/fleet 绝对兜底；dev/test 保持容忍。
 function readFleetRoot(): string {
   const raw = process.env.OPENCLAW_FLEET_ROOT
   const fallback = `${process.cwd()}/fleet`
