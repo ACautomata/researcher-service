@@ -27,7 +27,7 @@ cd server
 npm install
 npm run prisma:generate                        # 生成 Prisma client（fresh checkout 必须）
 npm run db:apply                               # 落表（better-sqlite3 直连 prisma/init.sql）
-npm run dev                                    # tsx watch，http://localhost:8001（REST + WS 同端口）
+npm run dev                                    # tsx watch 宿主直跑（仅纯逻辑调试——摸不到 named volume；起服务/真编排走下方容器化 dev 栈）
 npm run typecheck                              # tsc --noEmit
 npm test                                       # vitest 全量（containers-smoke 需真 docker daemon）
 npm run build                                  # tsc + prisma generate 产物拷贝
@@ -35,9 +35,15 @@ npm run build                                  # tsc + prisma generate 产物拷
 # ---- frontend（Vue3 + Vite）----
 cd frontend
 npm install
-npm run dev                                    # Vite dev server（proxy /api、/ws → :8001）
+npm run dev                                    # Vite dev server（proxy /api、/ws → :8001，指向容器化 server）
 npm run test                                   # vitest
 npm run build                                  # vue-tsc 类型检查 + vite build
+
+# ---- dev 控制面（容器化，与 prod 同形态；issue #594 / ADR 0013）----
+# 起服务 / 真编排 OpenClaw 容器（named volume 拓扑）一律走此；纯逻辑迭代仍用上方宿主 npm test/typecheck。
+docker compose -f deploy/docker-compose.dev.yml up -d --build   # server+redis，挂 docker.sock，server:8001
+# 前置：researcher 克隆到仓库根（build context template=../researcher，或设 RESEARCHER_DIR）；
+#       真编排另需派生镜像（docker build deploy/openclaw-image）+ export LLM_API_KEY。详见 deploy/README.md。
 ```
 
 ## 架构总览
