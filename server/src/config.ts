@@ -213,7 +213,10 @@ export const config = {
       templateDir: readTemplateDir(),
       // openclaw.json 模板文件（配置单一来源）
       templateJson: process.env.OPENCLAW_TEMPLATE_JSON ?? `${process.cwd()}/../deploy/openclaw.json`,
-      image: process.env.OPENCLAW_IMAGE ?? 'ghcr.io/openclaw/openclaw:2026.7.1-browser',
+      // OpenClaw 容器镜像：默认本仓库派生镜像（ghcr.io/.../openclaw，ADR 0013：pdftotext +
+      // wiki/workspace 骨架，CD 随发布构建推送）；可用 OPENCLAW_IMAGE 覆盖（如官方基线）
+      image:
+        process.env.OPENCLAW_IMAGE ?? 'ghcr.io/acautomata/researcher-service/openclaw:latest',
       portStart,
       portEnd,
       // 全面板共享 LLM_API_KEY（敏感值）；生产必填（create 时前置校验 → 90003）

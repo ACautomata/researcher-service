@@ -2,8 +2,9 @@
 #
 # 触发：CI 在 master 上成功完成后（workflow_run），保证「不部署红码」。
 # 镜像：server（TS/Express 控制面，替代退役的 Django backend，#341 M9）+ frontend（Vue/Vite→nginx）
-# 双镜像，tag `:latest` + `:<CI head_sha>`（head_sha 取自通过的 CI run，使 latest/sha 精确对应该
-# commit，便于 :sha 回滚）。
+# + openclaw（自建派生 OpenClaw 镜像，issue #588：pdftotext + wiki/workspace 骨架，ADR 0011/0013）
+# 三镜像，tag `:latest` + `:<CI head_sha>`（head_sha 取自通过的 CI run，使 latest/sha 精确对应该
+# commit，便于 :sha 回滚）。server 容器运行时经 OPENCLAW_IMAGE 默认值拉派生 openclaw 镜像。
 # 部署：appleboy/scp-action 推 compose + 渲染 .env → /www/panel；appleboy/ssh-action 远端
 # docker login（持久，供运行时 OpenClaw 拉取复用宿主 daemon 凭证）→ pull → up -d → prune → /api/health 健康门。
 #
@@ -57,6 +58,8 @@ jobs:
           echo "IMAGE_REPO=${IMAGE_REPO}" >> "$GITHUB_ENV"
           echo "SERVER_IMAGE=ghcr.io/${IMAGE_REPO}/server" >> "$GITHUB_ENV"
           echo "FRONTEND_IMAGE=ghcr.io/${IMAGE_REPO}/frontend" >> "$GITHUB_ENV"
+          # openclaw 派生镜像（issue #588）：server config.ts OPENCLAW_IMAGE 默认值指向它的 :latest
+          echo "OPENCLAW_IMAGE=ghcr.io/${IMAGE_REPO}/openclaw" >> "$GITHUB_ENV"
 
       - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c  # v4.2.0
 
@@ -90,6 +93,21 @@ jobs:
             ${{ env.FRONTEND_IMAGE }}:${{ env.IMAGE_TAG }}
           cache-from: type=gha,scope=frontend
           cache-to: type=gha,mode=max,scope=frontend
+
+      - name: Build & push openclaw derived image (issue #588)
+        # 自建派生镜像：FROM 官方 2026.7.1-browser，叠加 pdftotext + wiki/workspace 骨架
+        # （ADR 0011/0013）。构建期断言在 Dockerfile RUN 内（pdftotext 可用 + 骨架齐全），
+        # 任一失败即构建失败 → CD 红，不带病推送。
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a  # v7.3.0
+        with:
+          context: deploy/openclaw-image
+          file: deploy/openclaw-image/Dockerfile
+          push: true
+          tags: |
+            ${{ env.OPENCLAW_IMAGE }}:latest
+            ${{ env.OPENCLAW_IMAGE }}:${{ env.IMAGE_TAG }}
+          cache-from: type=gha,scope=openclaw
+          cache-to: type=gha,mode=max,scope=openclaw
 
       - name: Stage deploy artifacts (compose + rendered .env)
         # 运行时敏感值渲染为 .env（compose env_file 读取）；.env 不进 git，仅经 scp 落到宿主。
@@ -134,11 +152,12 @@ jobs:
           GHCR_PULL_USER: ${{ secrets.GHCR_PULL_USER }}
           GHCR_PULL_TOKEN: ${{ secrets.GHCR_PULL_TOKEN }}
           RESEARCHER_REPO: ${{ secrets.RESEARCHER_REPO }}
+          OPENCLAW_IMAGE: ${{ env.OPENCLAW_IMAGE }}
         with:
           host: ${{ secrets.REMOTE_HOST }}
           username: ${{ secrets.REMOTE_USER }}
           key: ${{ secrets.DEPLOY_KEY }}
-          envs: GHCR_PULL_USER,GHCR_PULL_TOKEN,RESEARCHER_REPO
+          envs: GHCR_PULL_USER,GHCR_PULL_TOKEN,RESEARCHER_REPO,OPENCLAW_IMAGE
           script: |
             set -euo pipefail
 
@@ -160,6 +179,12 @@ jobs:
             # compose.yml/docker-compose.yml），缺 -f 会让 pull/up 报
             # "no configuration file provided: not found"。
             docker compose -f docker-compose.deploy.yml pull
+            # 运行时镜像验证 + 刷新 :latest 缓存（issue #588 派生镜像，私有 GHCR 包）：
+            # ① server 容器经 dockerode 裸 pull（无 X-Registry-Auth）取 daemon 侧凭据——此步验证
+            #    该路径可用（/api/health 绿但首次 create 401 的部署假绿即由此排除）；
+            # ② ensureImage 仅在本地缺失时拉取，:latest 被宿主缓存一次后 CD 新推送永远到不了
+            #    fleet——此步显式重拉，保证新容器跑到当前发布。
+            docker pull "${OPENCLAW_IMAGE}:latest"
             docker compose -f docker-compose.deploy.yml up -d --remove-orphans
             docker image prune -f
 
