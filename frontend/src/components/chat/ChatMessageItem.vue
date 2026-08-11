@@ -8,6 +8,9 @@
 // 均渲染（user 发送的附件 echo / AI 工具产出的多媒体如 browser 截图）。
 import type { Msg } from '@/stores/chat'
 import type { MediaBlock } from '@/chat/eventTranslate'
+// #555:工具聚合摘要——summarizeToolGroup 纯函数 + ToolRow→{name,args,isError} 三元组适配
+import { summarizeToolGroup } from '@/chat/toolRender/tool-call-grouping'
+import { toolRowToGroupInput } from '@/chat/toolRender/adapt'
 import { ref } from 'vue'
 import ThinkingCard from '@/components/chat/ThinkingCard.vue'
 import ToolLine from '@/components/chat/ToolLine.vue'
@@ -50,10 +53,29 @@ const copyState = ref<'idle' | 'copied' | 'failed'>('idle')
         <ThinkingCard v-if="msg.role === 'assistant' && msg.thinking" :thinking="msg.thinking" :thinking-open="msg.thinkingOpen" />
       </slot>
       <!-- T08 工具执行（spec §9.4 / 原型 oc-chat-page） -->
-      <template v-for="(t, ti) in msg.tools" :key="`tool-${ti}`">
-        <slot name="tool-line" :tool="t">
-          <ToolLine :tool="t" />
-        </slot>
+      <!-- #555：>=2 个工具调用聚合折叠为一条摘要（连续同类合并计数、失败追加 · N failed，
+           用户故事 6），展开后逐行 ToolLine；单工具调用保持直接渲染。聚合只在渲染层
+           落位（msg.tools 循环层），不碰 timeline.ts。 -->
+      <template v-if="msg.tools.length >= 2">
+        <details class="tool-group" data-test="tool-group">
+          <summary data-test="tool-group-summary">
+            {{ summarizeToolGroup(msg.tools.map(toolRowToGroupInput)) }}
+          </summary>
+          <div class="tool-group-list">
+            <template v-for="(t, ti) in msg.tools" :key="`tool-${ti}`">
+              <slot name="tool-line" :tool="t">
+                <ToolLine :tool="t" />
+              </slot>
+            </template>
+          </div>
+        </details>
+      </template>
+      <template v-else>
+        <template v-for="(t, ti) in msg.tools" :key="`tool-${ti}`">
+          <slot name="tool-line" :tool="t">
+            <ToolLine :tool="t" />
+          </slot>
+        </template>
       </template>
       <!-- #401：assistant 渲染 markdown（含流式光标），user 保持纯文本 + 光标 -->
       <MarkdownRenderer v-if="msg.role === 'assistant'" :text="msg.text" :streaming="msg.streaming" />
@@ -141,6 +163,11 @@ const copyState = ref<'idle' | 'copied' | 'failed'>('idle')
 .media-image { max-width: 100%; max-height: 320px; border-radius: 8px; object-fit: contain; display: block; }
 .media-audio { max-width: 100%; width: 320px; display: block; }
 .media-video { max-width: 100%; max-height: 320px; border-radius: 8px; display: block; }
+
+/* #555：工具聚合摘要折叠卡（>=2 个工具调用时）——摘要行 + 展开逐行 ToolLine */
+.tool-group { min-width: 0; background: var(--el-fill-color); border: 1px solid var(--el-border-color); border-radius: 9px; padding: 6px 12px; margin: 4px 0; font-size: 12.5px; }
+.tool-group summary { display: flex; align-items: center; min-width: 0; gap: 9px; cursor: pointer; color: var(--el-text-color-secondary); }
+.tool-group .tool-group-list { margin-top: 6px; border-top: 1px solid var(--el-border-color); padding-top: 4px; }
 
 @media (max-width: 720px) {
   .msg.user .bubble { max-width: 88%; }

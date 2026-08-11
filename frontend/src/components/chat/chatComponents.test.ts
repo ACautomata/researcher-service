@@ -249,6 +249,72 @@ describe('ToolLine', () => {
     expect(w.get('[data-test="tool-detail"]').text()).toContain('echo ok')
     expect(w.get('[data-test="tool-detail"]').text()).toContain('ok')
   })
+
+  it('#555: command rows show the unwrapped command as the summary main text', () => {
+    const m = newMsg('assistant', '')
+    m.tools.push({ id: 't1', name: 'bash', state: 'done', title: null, input: { command: 'sh -lc "echo hi"' }, result: '' })
+    const w = mount(ChatMessageItem, { props: { msg: m } })
+    expect(w.get('[data-test="tool-line"] .t-name').text()).toBe('echo hi')
+  })
+
+  it('#555: read rows show basename bold + directory dimmed', () => {
+    const m = newMsg('assistant', '')
+    m.tools.push({ id: 't1', name: 'read', state: 'done', title: null, input: { file_path: '/repo/src/util.ts' }, result: '' })
+    const w = mount(ChatMessageItem, { props: { msg: m } })
+    expect(w.get('[data-test="tool-line"] .t-name').text()).toBe('util.ts')
+    expect(w.get('[data-test="tool-line"] .t-args').text()).toBe('/repo/src')
+  })
+
+  it('#555: edit rows render an inline diff with stat when result carries details.diff', () => {
+    const m = newMsg('assistant', '')
+    m.tools.push({
+      id: 't1', name: 'edit', state: 'done', title: null,
+      input: { file_path: '/repo/a.ts' },
+      result: { diff: '+457 foo\n-455 bar\n' },
+    })
+    const w = mount(ChatMessageItem, { props: { msg: m } })
+    expect(w.get('[data-test="tool-diff"]').text()).toContain('foo')
+    expect(w.get('[data-test="tool-diff"]').text()).toContain('bar')
+    expect(w.get('[data-test="tool-stat"]').text()).toContain('+1')
+    expect(w.get('[data-test="tool-stat"]').text()).toContain('−1')
+  })
+})
+
+// #555:聚合摘要(>=2 个工具调用折叠为一条摘要,展开逐行;单工具调用直接渲染)
+describe('ToolGroup', () => {
+  it('aggregates 2+ tool calls into a collapsed summary row', () => {
+    const m = newMsg('assistant', '')
+    m.tools.push({ id: 't1', name: 'bash', state: 'done', title: null, input: { command: 'ls' }, result: '' })
+    m.tools.push({ id: 't2', name: 'bash', state: 'done', title: null, input: { command: 'pwd' }, result: '' })
+    m.tools.push({ id: 't3', name: 'read', state: 'error', title: null, input: { path: '/repo/a.ts' }, result: '' })
+    const w = mount(ChatMessageItem, { props: { msg: m } })
+    const group = w.get('details[data-test="tool-group"]')
+    expect(group.attributes('open')).toBeUndefined()
+    expect(w.get('[data-test="tool-group-summary"]').text()).toBe('Ran 2 commands, read a file · 1 failed')
+    expect(w.findAll('[data-test="tool-line"]')).toHaveLength(3)
+  })
+
+  it('keeps single tool calls ungrouped (direct ToolLine row)', () => {
+    const m = newMsg('assistant', '')
+    m.tools.push({ id: 't1', name: 'bash', state: 'done', title: null, input: { command: 'ls' }, result: '' })
+    const w = mount(ChatMessageItem, { props: { msg: m } })
+    expect(w.find('[data-test="tool-group"]').exists()).toBe(false)
+    expect(w.findAll('[data-test="tool-line"]')).toHaveLength(1)
+  })
+
+  it('aggregation keeps tool-line slot passthrough per row', async () => {
+    const m = newMsg('assistant', '')
+    m.tools.push({ id: 't1', name: 'bash', state: 'done', title: null, input: { command: 'ls' }, result: '' })
+    m.tools.push({ id: 't2', name: 'bash', state: 'done', title: null, input: { command: 'pwd' }, result: '' })
+    const w = mount(ChatMessageItem, {
+      props: { msg: m },
+      slots: {
+        'tool-line': ({ tool }: { tool: Msg['tools'][number] }) => `custom:${tool.id}`,
+      },
+    })
+    expect(w.text()).toContain('custom:t1')
+    expect(w.text()).toContain('custom:t2')
+  })
 })
 
 // 审批卡测试与 ChatStream 合并时间线测试共用的卡片基底
