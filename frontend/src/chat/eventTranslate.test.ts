@@ -8,6 +8,7 @@ import {
   attachmentToMediaBlock,
   extractMessageAttachments,
   extractMessageText,
+  extractThinking,
   type GatewayEventFrame,
   type SessionProjectionReducer,
   type SessionProjectionRun,
@@ -175,6 +176,143 @@ describe('ChatEventTranslator', () => {
     expect(t.translate(chat('final', 'r1', { message: { role: 'assistant', content: [{ type: 'text', text: '你好' }] } }))).toEqual([
       { type: 'done', runId: 'r1' },
     ])
+  })
+
+  // ---- #565: 结构化 thinking 块随 text 帧携带（方案 A：翻译层提取、随帧携带）----
+  // 结构化块只在 replace 快照 / final 消息的 content[] 出现（delta 增量字段是纯文本串，无 content[]），
+  // 故增量帧恒不挂 thinking（undefined），handleText 对 undefined 走内联路（splitThinking）现状。
+  it('#565: delta replace 快照含 thinking 块 → replace 帧带 thinking', () => {
+    const t = makeTranslator()
+    expect(
+      t.translate(
+        chat('delta', 'r1', {
+          replace: true,
+          message: { role: 'assistant', content: [{ type: 'thinking', thinking: '推理' }, { type: 'text', text: '快照正文' }] },
+        }),
+      ),
+    ).toEqual([
+      { type: 'text', runId: 'r1', delta: '快照正文', replace: true, thinking: '推理' },
+    ])
+  })
+
+  it('#565: delta replace 快照无 thinking 块 → replace 帧不带 thinking（回归无差）', () => {
+    const t = makeTranslator()
+    expect(t.translate(chat('delta', 'r1', { message: 'The dog', replace: true }))).toEqual([
+      { type: 'text', runId: 'r1', delta: 'The dog', replace: true },
+    ])
+  })
+
+  // thinking-only replace 快照（思考先于正文的模型输出，text 块未出现）：无文本可渲染——发
+  // delta='' 增量帧携带思考（delta='' 不改变前端 raw 累积，仅覆盖 thinking；sent 不更新）
+  it('#565: delta replace 快照 thinking-only（无 text 块）→ delta=\'\' 帧带 thinking', () => {
+    const t = makeTranslator()
+    expect(
+      t.translate(
+        chat('delta', 'r1', {
+          replace: true,
+          message: { role: 'assistant', content: [{ type: 'thinking', thinking: '先想后答' }] },
+        }),
+      ),
+    ).toEqual([{ type: 'text', runId: 'r1', delta: '', thinking: '先想后答' }])
+  })
+
+  it('#565: final 含 thinking 块（尾部补发）→ tail 帧带 thinking + done', () => {
+    const t = makeTranslator()
+    t.translate(chat('delta', 'r1', { deltaText: '正文' }))
+    expect(
+      t.translate(
+        chat('final', 'r1', {
+          message: { role: 'assistant', content: [{ type: 'thinking', thinking: '最终推理' }, { type: 'text', text: '正文尾部' }] },
+        }),
+      ),
+    ).toEqual([
+      { type: 'text', runId: 'r1', delta: '尾部', thinking: '最终推理' },
+      { type: 'done', runId: 'r1' },
+    ])
+  })
+
+  it('#565: final 非前缀（F9 replace 纠正）含 thinking → replace 帧带 thinking', () => {
+    const t = makeTranslator()
+    t.translate(chat('delta', 'r1', { deltaText: '旧' }))
+    expect(
+      t.translate(
+        chat('final', 'r1', {
+          message: { role: 'assistant', content: [{ type: 'thinking', thinking: '推理' }, { type: 'text', text: '新正文' }] },
+        }),
+      ),
+    ).toEqual([
+      { type: 'text', runId: 'r1', delta: '新正文', replace: true, thinking: '推理' },
+      { type: 'done', runId: 'r1' },
+    ])
+  })
+
+  // final 权威文本与 sent 相等（流式 deltaText 已发完，F9 无漂移）→ 不产 text 帧（tail/replace
+  // 无变化）；但思考常在 final 的 content[] 才出现（delta 增量是纯文本串）——结构化 thinking 经
+  // done 帧独立通道携带（消费端 handleDone 在 finalizeLast 前写入；不谎报文本变更的 replace 帧）
+  it('#565: final 含 thinking 块且文本与 sent 相等 → done 帧带 thinking', () => {
+    const t = makeTranslator()
+    t.translate(chat('delta', 'r1', { deltaText: 'ok' }))
+    expect(
+      t.translate(
+        chat('final', 'r1', {
+          message: { role: 'assistant', content: [{ type: 'thinking', thinking: '思考' }, { type: 'text', text: 'ok' }] },
+        }),
+      ),
+    ).toEqual([
+      { type: 'done', runId: 'r1', thinking: '思考' },
+    ])
+  })
+
+  it('#565: final 无文本（thinking-only 消息，E1b abort 形状）→ done 帧带 thinking', () => {
+    const t = makeTranslator()
+    expect(
+      t.translate(
+        chat('final', 'r1', {
+          message: { role: 'assistant', content: [{ type: 'thinking', thinking: '推理' }, { type: 'toolCall', name: 'exec' }] },
+        }),
+      ),
+    ).toEqual([
+      { type: 'done', runId: 'r1', thinking: '推理' },
+    ])
+  })
+
+  // final 已产 tail 帧（已带 thinking）→ done 不重复挂（幂等，文本变化仍走 text 帧）
+  it('#565: final 相等含 thinking 但已产 text 帧 → done 帧不带 thinking（不重复）', () => {
+    const t = makeTranslator()
+    t.translate(chat('delta', 'r1', { deltaText: '正文' }))
+    expect(
+      t.translate(
+        chat('final', 'r1', {
+          message: { role: 'assistant', content: [{ type: 'thinking', thinking: '最终推理' }, { type: 'text', text: '正文尾部' }] },
+        }),
+      ),
+    ).toEqual([
+      { type: 'text', runId: 'r1', delta: '尾部', thinking: '最终推理' },
+      { type: 'done', runId: 'r1' },
+    ])
+  })
+
+  // F9 现有相等回归：message 为 string 时无结构化块 → 仍只发 done（不挂字段，行为不变）
+  it('#565: final 与 sent 相等且无 thinking 块 → 仅 done（回归无差）', () => {
+    const t = makeTranslator()
+    t.translate(chat('delta', 'r1', { deltaText: 'ok' }))
+    expect(t.translate(chat('final', 'r1', { message: 'ok' }))).toEqual([{ type: 'done', runId: 'r1' }])
+  })
+
+  it('#565: final 无 thinking 块（tail 补发）→ tail 帧不带 thinking（回归无差）', () => {
+    const t = makeTranslator()
+    t.translate(chat('delta', 'r1', { deltaText: '你好' }))
+    expect(t.translate(chat('final', 'r1', { message: '你好世界' }))).toEqual([
+      { type: 'text', runId: 'r1', delta: '世界' },
+      { type: 'done', runId: 'r1' },
+    ])
+  })
+
+  it('#565: delta 增量帧不挂 thinking（undefined）', () => {
+    const t = makeTranslator()
+    const [frame] = t.translate(chat('delta', 'r1', { deltaText: 'x' }))
+    expect(frame).toEqual({ type: 'text', runId: 'r1', delta: 'x' })
+    expect('thinking' in frame).toBe(false)
   })
 
   it('delta replace 快照含媒体无文本 → attachment 帧（不回退 deltaText）', () => {
@@ -509,6 +647,49 @@ describe('extractMessageText（E1: content 多态，ChatView 历史复用）', (
     expect(extractMessageText(null)).toBe('')
     expect(extractMessageText({ role: 'assistant' })).toBe('')
     expect(extractMessageText({})).toBe('')
+  })
+})
+
+// #565: extractThinking —— 结构化 thinking 块提取单一实现（history 全量 + 流式 replace/final 复用，
+// 与 extractMessageText 并列：只读 content[] 中 type==='thinking' 块的 thinking 字段（非 text）、
+// 逐块 trim、丢空串、多块 '\n' join、全空/无块/content 非数组/message 非对象 → null（区别于 ''））。
+// 与内联 <thinking> 标签路（splitThinking）双路并存、各司其职（对齐官方 stripThinkingTags +
+// extractThinking 双函数分工）。
+describe('extractThinking（#565: 结构化 thinking 块提取）', () => {
+  it('trim + 多块 \n join（跳过 text 块，不读 text 字段兜底）', () => {
+    expect(
+      extractThinking({
+        role: 'assistant',
+        content: [
+          { type: 'thinking', thinking: '  想A  ' },
+          { type: 'text', text: '正文' },
+          { type: 'thinking', thinking: '想B' },
+        ],
+      }),
+    ).toBe('想A\n想B')
+  })
+  it('全空/无 thinking 块/content 非数组/message 为 string 或 null → null', () => {
+    expect(extractThinking({ role: 'assistant', content: [{ type: 'thinking', thinking: '   ' }] })).toBeNull()
+    expect(extractThinking({ role: 'assistant', content: [{ type: 'thinking', thinking: '' }] })).toBeNull()
+    expect(extractThinking({ role: 'assistant', content: [{ type: 'text', text: 'x' }] })).toBeNull()
+    expect(extractThinking({ role: 'assistant' })).toBeNull()
+    expect(extractThinking({ role: 'user', content: '字符串' })).toBeNull()
+    expect(extractThinking('字符串')).toBeNull()
+    expect(extractThinking(null)).toBeNull()
+  })
+  it('thinking 字段非 string（缺省/null/数字）→ 跳过该块；混入有效块时跳过不拦截', () => {
+    expect(
+      extractThinking({
+        role: 'assistant',
+        content: [{ type: 'thinking' }, { type: 'thinking', thinking: null }, { type: 'thinking', thinking: 42 }],
+      }),
+    ).toBeNull()
+    expect(
+      extractThinking({
+        role: 'assistant',
+        content: [{ type: 'thinking', thinking: null }, { type: 'thinking', thinking: '有效' }],
+      }),
+    ).toBe('有效')
   })
 })
 

@@ -17,7 +17,7 @@ import {
   type ChatFrame,
 } from '@/chat/gatewayChat'
 import { splitThinking } from '@/chat/thinking'
-import { extractMessageAttachments, extractMessageText, attachmentToMediaBlock, type MediaBlock } from '@/chat/eventTranslate'
+import { extractMessageAttachments, extractMessageText, extractThinking, attachmentToMediaBlock, type MediaBlock } from '@/chat/eventTranslate'
 import type { Attachment } from '@/chat/attachments'
 import { createOutboxStore } from '@/chat/outboxStore'
 import { WS_AUTH_FAIL, WS_MUST_CHANGE_PASSWORD, WS_CONTAINER_ACCESS_DENIED, WS_GATEWAY_UNAVAILABLE } from '@/chat/closeCodes'
@@ -146,7 +146,10 @@ export function useChatConnection(status: ChatStatus) {
       // 未闭合 <thinking> 内容仍留思考（标签不泄露正文）。
       const parts = splitThinking(last.raw, { terminal: true })
       last.text = parts.text
-      last.thinking = parts.thinking
+      // #565: terminal 重解析只作用于内联 <thinking> 标签路；结构化 thinking 块（content[] 提取，
+      // handleText 以 ?? 覆盖写入）在 raw 无内联标签时被空内联结果冲掉（思考卡消失）——内联结果
+      // 非空仍覆盖（混合场景同源，方向差异无碍），为空保留结构化产物。
+      last.thinking = parts.thinking || last.thinking
     }
   }
 
@@ -221,7 +224,14 @@ export function useChatConnection(status: ChatStatus) {
   }
 
   // 增量文本：chat.delta 事件（deltaText 追加；replace 快照整段替换）。thinking 剥离纯函数无跨帧态。
-  function handleText(runId: string, delta: string, replace?: boolean) {
+  // #565: thinking?: string | null —— 结构化 thinking 块（replace 快照/final 的 content[]，翻译层
+  // 提取随帧携带）。合并规则按帧类型分：
+  //  - 带 thinking 字段的帧（replace 快照 / final tail-replace）：帧为权威——非 null 覆盖内联剥离
+  //    结果（结构化块权威，防双路拼接翻倍）、null 走内联路（该权威快照无结构化块）；
+  //  - delta 增量帧（thinking=undefined，增量是纯文本串无 content[]）：只更新内联路——内联结果
+  //    非空覆盖（<thinking> 标签增量），为空保留上一帧值（结构化思考跨帧存活，对齐内联标签靠
+  //    raw 累积跨帧存活的持久性——否则 replace 快照带的思考会被下一普通增量帧清空）。
+  function handleText(runId: string, delta: string, replace?: boolean, thinking?: string | null) {
     if (!claimRun(runId)) return
     const last = chat.messages[chat.messages.length - 1]
     // B5: 追加条件放宽到 activeRunId===runId（本 run 帧）——断线 onClose 已 finalizeLast 落定占位
@@ -233,7 +243,8 @@ export function useChatConnection(status: ChatStatus) {
       // 累积原始串 raw，再整体重解析拆出 thinking/text（replace 快照与 delta 追加统一走重解析）
       last.raw = replace ? delta : last.raw + delta
       const parts = splitThinking(last.raw)
-      last.thinking = parts.thinking
+      last.thinking =
+        thinking !== undefined ? (thinking ?? parts.thinking) : (parts.thinking || last.thinking)
       last.thinkingOpen = parts.inThinking
       last.text = parts.text
     }
@@ -252,7 +263,10 @@ export function useChatConnection(status: ChatStatus) {
     }
   }
 
-  function handleDone(runId: string) {
+  // #565: done 帧可携带 thinking——final 相等/thinking-only 场景（翻译层未产 text 帧）的结构化
+  // 思考经独立通道到达。写入时机 = finalizeLast 之前（terminal 重解析为空时经 || 保留该值；
+  // 非空时内联路终态结果优先，混合场景二者大概率同源，覆盖方向差异无视觉影响）。
+  function handleDone(runId: string, thinking?: string | null) {
     if (abandonedRunIds.has(runId)) {
       abandonedRunIds.delete(runId)
       return
@@ -263,6 +277,10 @@ export function useChatConnection(status: ChatStatus) {
     }
     if (activeRunId && runId !== activeRunId) return
     if (activeRunId === runId) {
+      if (thinking !== undefined && thinking !== null) {
+        const last = chat.messages[chat.messages.length - 1]
+        if (last && last.role === 'assistant') last.thinking = thinking
+      }
       finalizeLast()
       activeRunId = ''
       clearResumeWait() // B5: run 正常终态，resume 无需继续
@@ -573,13 +591,13 @@ export function useChatConnection(status: ChatStatus) {
           if (gateway !== myGw) return
           switch (frame.type) {
             case 'text':
-              handleText(frame.runId, frame.delta, frame.replace)
+              handleText(frame.runId, frame.delta, frame.replace, frame.thinking)
               break
             case 'attachment': // #459-T3 #464：附件媒体帧（image/audio/video 块）
               handleAttachment(frame.runId, frame.media)
               break
             case 'done':
-              handleDone(frame.runId)
+              handleDone(frame.runId, frame.thinking)
               break
             case 'error':
               handleError(frame.message, frame.runId)
@@ -956,7 +974,10 @@ export function useChatConnection(status: ChatStatus) {
 
   // T3 历史消息翻译（防腐层，issue #82）：网关 display-normalized 消息字段名「待实测」（对齐后端
   // _parse_history 透传策略），前端单点容错——role 归一 operator/user/human→user、其余→assistant；
-  // text 主取 text、回退 content/message。历史消息为终态：streaming=false、无 tools、thinking 暂不剥离。
+  // text 主取 text、回退 content/message。历史消息为终态：streaming=false、无 tools。
+  // #565: 结构化 thinking 块（content[] 的 type==='thinking' 块）经 extractThinking 提取填
+  // Msg.thinking（history 全量覆盖）；内联 <thinking> 标签剥离（splitThinking 的残片/未闭合
+  // 语义）属流式路，历史为终态不剥离（既有现状：旧格式历史正文含字面标签，本规格不动）。
   // E1b: toolCall-only assistant 消息（生产实测：exec 审批无人处理 → 网关 stuck-session recovery
   // abort run → 最后一条 assistant content=[thinking,toolCall×N] 无 text 块）→ 提取 text 为空，
   // 若照原样渲染成空文本气泡（用户误以为回复丢失）。转译 toolCall 块为工具行（done 态）——
@@ -970,11 +991,14 @@ export function useChatConnection(status: ChatStatus) {
     // #459-T3 #464：历史消息 image/audio/video 块 → media（与 text 独立通道，extractToolRows 同款
     // 防腐层位置）。此前非 text 块被渲染层丢弃；纯图片历史消息（text 空 + media 非空）照常渲染。
     const media = extractMessageAttachments(m)
+    // #565: 结构化 thinking 块提取——与 text 独立通道（thinking 块不混入正文，正文块不混入思考）；
+    // null（无结构化块）回退 ''（现状：无思考卡），非 null 填折叠卡渲染。
+    const structThinking = extractThinking(m)
     return {
       role: historyRole(m.role),
       raw: text,
       text,
-      thinking: '',
+      thinking: structThinking ?? '',
       thinkingOpen: false,
       streaming: false,
       tools,
