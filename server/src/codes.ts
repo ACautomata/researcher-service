@@ -23,6 +23,9 @@ export const CODE = {
   // 4xxxx models（#336 平移 models 域；#319 §1.3 转译码）
   PROVIDER_NOT_FOUND: 40040, // provider 不存在 / 越权（同码防探测）
   PROVIDER_ID_CONFLICT: 40041, // 同容器 provider_id 冲突（POST/PUT，unique 约束）
+  // 6xxxx files（#589 统一文件 CRUD；6xxxx 段为 319 §1.1 未分配段，按「40 不存在 / 41 冲突」锁式）
+  FILE_NOT_FOUND: 60040, // 文件不存在（GET/PUT/DELETE）
+  FILE_EXISTS: 60041, // 新建文件已存在（POST 冲突）
   // 2xxxx 容器（20041 锁 = name 全局唯一冲突；register/users 用户名冲突复用，契约 §2.2）
   CONTAINER_NOT_FOUND: 20040, // 容器不存在 / 越权（同码防探测，#312 锁）
   NAME_CONFLICT: 20041,
@@ -66,6 +69,8 @@ export const DEFAULT_MESSAGE: Record<number, string> = {
   [CODE.WIKI_PAGE_EXISTS]: '页面已存在',
   [CODE.PROVIDER_NOT_FOUND]: 'model provider 不存在',
   [CODE.PROVIDER_ID_CONFLICT]: '该容器下 provider_id 已存在',
+  [CODE.FILE_NOT_FOUND]: '文件不存在',
+  [CODE.FILE_EXISTS]: '文件已存在',
   [CODE.VALIDATION_FAILED]: '参数校验失败',
   [CODE.LLM_NOT_CONFIGURED]: 'LLM_API_KEY 未配置',
   [CODE.PORT_POOL_EXHAUSTED]: '端口池已耗尽，暂无法创建容器，请稍后重试或删除闲置容器',

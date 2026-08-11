@@ -65,6 +65,7 @@ OpenClaw 容器 fleet (openclaw-gw-<name>，每容器独立 home/openclaw.json/�
 | `wiki/` | 每容器 `wiki/main` 文件树 + CRUD + graph（`WikiFileSystem` Port + 纯逻辑） | `service.ts` `logic.ts` `nodeFs.ts` `compile.ts` `routes.ts` |
 | `models/` | 每容器 model provider CRUD + 热加载 + 写盘回滚 | `configWriter.ts` `routes.ts` |
 | `chat/` | 网关隧道（JWT 握手 4401 + 原始帧透传，ADR 0006 浏览器直连） | `tunnelAssembly.ts` `subprotocol.ts` `values.ts` |
+| `files/` | 统一文件 CRUD（wiki/workspace 两树，经 Docker getArchive/putArchive/exec rm，ADR 0012） | `fsPort.ts` `dockerArchive.ts` `paths.ts` `tar.ts` `routes.ts` |
 
 配置集中在 `src/config.ts`（env 读取 + 生产 fail-fast）。Prisma schema 在 `prisma/schema.prisma`
 （建表 SQL 由 `scripts/apply-schema.mjs` 落库，不经 prisma CLI——规避 Prisma 7 AI 守卫）。
@@ -78,12 +79,14 @@ OpenClaw 容器 fleet (openclaw-gw-<name>，每容器独立 home/openclaw.json/�
 - `/api/v1/containers/<name>/pairing/` — 设备配对查询/触发/approve。
 - `/api/v1/containers/<name>/wiki/{tree,page,graph,categories}` — wiki 文件树/读写/图谱。
 - `/api/v1/containers/<name>/models/providers[/<pid>]` — model provider CRUD。
+- `/api/v1/containers/<name>/files?root=<wiki|workspace>&path=&recursive=` — 统一文件 CRUD
+  （GET 列目录/读文件 + PUT/POST 覆写/新建 + DELETE 删除；binary/oversized 不返回内容）。
 - `/api/v1/containers/<name>/chat/{sessions,approval/resolve,commands}` — chat REST 代理。
 - 对话 WS 走 `/ws/chat/` 隧道（JWT subprotocol 握手；先 accept 再 close(4401) 拒未认证）。
 
 全局 #312 信封：所有 REST 一律 HTTP 200，错误信号在 body `{code,message,data}`；「不存在 vs 越权」
-同码防探测（20040/30040/40040）。码段：`0` 成功 · `1xxxx` 通用/鉴权 · `2xxxx` 容器 · `3xxxx` wiki ·
-`4xxxx` models · `5xxxx` chat/pairing · `9xxxx` 系统/校验。
+同码防探测（20040/30040/40040/60040）。码段：`0` 成功 · `1xxxx` 通用/鉴权 · `2xxxx` 容器 · `3xxxx` wiki ·
+`4xxxx` models · `5xxxx` chat/pairing · `6xxxx` files · `9xxxx` 系统/校验。
 
 ## frontend 结构（`frontend/src/`）
 

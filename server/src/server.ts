@@ -6,6 +6,7 @@ import { config } from './config'
 import { assembleFleet } from './containers/fleetAssembly'
 import { makeDockerCompile } from './wiki/compile'
 import { TemplateModelConfigWriter } from './models/configWriter'
+import { DockerFileArchive } from './files/dockerArchive'
 import { assembleTunnelServer } from './chat/tunnelAssembly'
 import './types'
 
@@ -23,6 +24,8 @@ async function main(): Promise<void> {
     wiki: { compile: makeDockerCompile(fleet.runtime) },
     // models config 写盘（#336）：模板 + ConfigStore 原子写 instances/<id>/config/openclaw.json（#366）。
     models: { configWriter: new TemplateModelConfigWriter(config.fleet) },
+    // files（#589 · ADR 0012）：统一文件 CRUD 经 Docker getArchive/putArchive/exec rm。
+    files: { archive: new DockerFileArchive() },
   })
 
   // M0 同进程单端口分流：createServer(expressApp) + server.on('upgrade') 分流。
