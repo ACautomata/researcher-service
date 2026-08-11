@@ -266,13 +266,32 @@ export function useChatConnection(status: ChatStatus) {
   // #565: done 帧可携带 thinking——final 相等/thinking-only 场景（翻译层未产 text 帧）的结构化
   // 思考经独立通道到达。写入时机 = finalizeLast 之前（terminal 重解析为空时经 || 保留该值；
   // 非空时内联路终态结果优先，混合场景二者大概率同源，覆盖方向差异无视觉影响）。
-  function handleDone(runId: string, thinking?: string | null) {
+  // #569: message?: unknown —— 外来 run 可见 final 的权威消息本体（done 帧扩展携带，来源 #560
+  // currentRun.message）。仅 foreignRunIds 分支消费（局部插入）；本 run/abandoned/孤儿分支不读，
+  // 沿用既有终态逻辑。
+  function handleDone(runId: string, thinking?: string | null, message?: unknown) {
     if (abandonedRunIds.has(runId)) {
       abandonedRunIds.delete(runId)
       return
     }
     if (foreignRunIds.has(runId)) {
       foreignRunIds.delete(runId) // F7: 外来 run 终态：清理记录
+      // #569: 外来可见 final 局部插入 history（对齐官方 #1909，非整段重拉）——可见 final 的权威
+      // message 经 translateHistoryMessage 转 Msg 局部插入一条助手消息，不调 loadHistory（不打断
+      // 在途占位/滚动位置/historyGen 竞争）。「可见」= 提取后有实质内容（text/media/tools 非空）；
+      // 空 final（无内容）维持丢弃。去重 = 翻译层 #560 isReplayedFinal 重放网（同一外来 run 的
+      // final 二次到达不产 done 帧）+ 本分支终态清理的天然一次性（同一 runId 不会二次进入）。
+      // 不触碰 activeRunId/pendingSend/resumeRun——外来 final 与在途 turn 并存（纯追加一条）。
+      // 在途（activeRunId 非空，占位在尾部）时插到占位之前：「尾部 = 在途气泡」是 handleText/
+      // handleAttachment 续帧 append 的锚定不变量，外来消息尾部 push 会被后续续帧（activeRunId
+      // ===runId 放行 streaming=false）污染（B5 断线落定占位同理）；空闲/终态走尾部 push。
+      if (message) {
+        const msg = translateHistoryMessage(message as HistoryMessageDTO) // 薄适配：与历史消息同构
+        if (msg.text !== '' || msg.media.length > 0 || msg.tools.length > 0) {
+          if (activeRunId) chat.insertBeforeLast(msg)
+          else chat.pushMessage(msg)
+        }
+      }
       return
     }
     if (activeRunId && runId !== activeRunId) return
@@ -597,7 +616,7 @@ export function useChatConnection(status: ChatStatus) {
               handleAttachment(frame.runId, frame.media)
               break
             case 'done':
-              handleDone(frame.runId, frame.thinking)
+              handleDone(frame.runId, frame.thinking, frame.message)
               break
             case 'error':
               handleError(frame.message, frame.runId)

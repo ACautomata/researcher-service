@@ -12,7 +12,10 @@ export type ChatFrame =
   // #565: done 帧可携带 thinking——final 权威文本与流式累积相等/无文本（thinking-only）时翻译层
   // 不产 text 帧（无帧可挂），经 done 帧独立数据通道携带（不经 handleText 的 raw 逻辑，与
   // attachment 帧同哲学；不等价于谎报文本变更的 replace 帧）
-  | { type: 'done'; runId: string; thinking?: string | null }
+  // #569: message?: unknown —— 外来 run 可见 final 的归约权威消息本体（#560 currentRun.message）
+  // 透出数据通道。翻译层无外来概念（纯函数），有归约 message 即带；消费端仅 handleDone 外来分支
+  // 读该字段做局部插入，本 run final 分支沿用现有 tail 补发逻辑、不读。
+  | { type: 'done'; runId: string; thinking?: string | null; message?: unknown }
   // runId 可选：run 级错误挂 runId（前端按 runId 过滤）；无 runId 为连接/会话级错误（照常显示）
   | { type: 'error'; runId?: string; message: string }
   | { type: 'approval'; id: string; kind: string; command: string; sessionKey: string | null; agentId: string | null }
@@ -463,9 +466,13 @@ export class ChatEventTranslator {
     // 本分支未产 text 帧（tail/replace 已带 thinking 时无需重复）；思考常只在 final 的 content[]
     // 才出现（delta 增量是纯文本串），经 done 帧独立通道携带（消费端 handleDone 在 finalizeLast
     // 前写入，terminal 重解析为空时保留——不谎报文本变更，不经 handleText 的 raw 逻辑）。
+    // #569: 归约权威 message 透出（外来可见 final 局部插入的数据通道；本 run 消费端不读）。
+    // 仅本终态路径（final 事件）产 done 帧时携带——aborted/yielded 分支的 done 帧不带（非 final
+    // 终态，无 final 权威 message 可透出；E1b thinking-only 形状走本路径，message 一并携带）。
     out.push({
       type: 'done',
       runId,
+      ...(run.message !== undefined ? { message: run.message } : {}),
       ...(structThinking !== null && !out.some((f) => f.type === 'text') ? { thinking: structThinking } : {}),
     })
     // #560: 终态手动 sent.delete 删除——SDK 终态 identity 记入 acceptedFinalMessageIdentities
