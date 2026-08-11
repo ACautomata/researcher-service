@@ -13,6 +13,8 @@ import { seedUser } from './helpers'
 import { FleetDeps } from '../src/containers/deps'
 import { Orchestrator } from '../src/containers/orchestrator'
 import { DockerRuntime } from '../src/containers/dockerRuntime'
+import { DockerFileArchive } from '../src/files/dockerArchive'
+import { FileNotFound } from '../src/files/errors'
 import { InlineLifecycleQueue } from '../src/containers/lifecycleQueue'
 import { defaultReservedPorts, type FleetConfig } from '../src/containers/values'
 import { DEV_ENCRYPTION_KEYS } from '../src/crypto'
@@ -123,5 +125,39 @@ describe('containers 集成 smoke（真 docker daemon）', () => {
     await orch.delete('smoke-box')
     expect(await ctx.prisma.container.findUnique({ where: { name: 'smoke-box' } })).toBeNull()
     expect(await runtime.get('smoke-box')).toBeNull()
+  }, 120_000)
+
+  it('files 统一 CRUD 端到端（getArchive/putArchive/exec rm 真 daemon，#589）', async () => {
+    const fa = new DockerFileArchive()
+    const inst = await orch.createReserve('smoke-files', ownerId)
+    await orch.createComplete(inst, true)
+    try {
+      // create → 写进容器 ~/.openclaw/workspace（父目录经 exec mkdir -p 保障）
+      await fa.create('smoke-files', 'workspace', 'out/report.md', '# Smoke 报告\n')
+      // list：workspace 根含刚建文件；递归 walk 出深层相对路径
+      const dir = await fa.read('smoke-files', 'workspace', '', true)
+      expect(dir.kind).toBe('dir')
+      if (dir.kind !== 'dir') return
+      expect(dir.files.map((f) => f.path)).toContain('out/report.md')
+      // read：内容原文
+      const file = await fa.read('smoke-files', 'workspace', 'out/report.md', false)
+      expect(file).toMatchObject({ kind: 'file', content: '# Smoke 报告\n' })
+      // write：覆写已存在
+      await fa.write('smoke-files', 'workspace', 'out/report.md', '# 覆写\n')
+      const after = await fa.read('smoke-files', 'workspace', 'out/report.md', false)
+      if (after.kind === 'file') expect(after.content).toBe('# 覆写\n')
+      // delete：删文件；不存在 → FileNotFound
+      await fa.delete('smoke-files', 'workspace', 'out/report.md')
+      await expect(fa.read('smoke-files', 'workspace', 'out/report.md', false)).rejects.toBeInstanceOf(FileNotFound)
+      // wiki 树同样可用（基线镜像无 wiki 骨架：create 自动建目录，再列根）
+      await fa.create('smoke-files', 'wiki', 'index.md', '# Wiki\n')
+      const wikiDir = await fa.read('smoke-files', 'wiki', '', false)
+      expect(wikiDir.kind).toBe('dir')
+      if (wikiDir.kind === 'dir') {
+        expect(wikiDir.files.map((f) => f.path)).toContain('index.md')
+      }
+    } finally {
+      await orch.delete('smoke-files')
+    }
   }, 120_000)
 })
