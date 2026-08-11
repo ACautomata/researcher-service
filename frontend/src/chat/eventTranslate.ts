@@ -139,6 +139,19 @@ function mediaMeta(b: Record<string, unknown>): {
   }
 }
 
+// #568 安全修复（security review）：url 形态只收**完整 http(s) URL**——在单一提取 choke point 校验
+// （new URL 可解析且协议为 http:/https:），其他 scheme（javascript:/file:/data: 等）、相对/协议相对
+// url、畸形 url 一律跳过。渲染层（img/audio/video 自动加载、document href）拿到的 url 恒为 http(s)。
+function isSafeHttpUrl(value: unknown): value is string {
+  if (typeof value !== 'string' || !value) return false
+  try {
+    const u = new URL(value)
+    return u.protocol === 'http:' || u.protocol === 'https:'
+  } catch {
+    return false
+  }
+}
+
 // 从 message.content[] 提取 image/audio/video/document 块 → MediaBlock[]（渲染数据）。
 // 0 信任：content/url 缺失或非 string → 跳过。块 type 是归类依据；mimeType 缺失回退 `${type}/*`。
 // content 多态同 extractMessageText（string message / 无 content → 无附件）。
@@ -160,7 +173,7 @@ export function extractMessageAttachments(message: unknown): MediaBlock[] {
       const att = asRecord(b.attachment)
       const kind = typeof att.kind === 'string' ? att.kind : ''
       if ((MEDIA_TYPES as readonly string[]).includes(kind)) {
-        const src = typeof att.url === 'string' ? att.url : ''
+        const src = isSafeHttpUrl(att.url) ? att.url : ''
         if (!src) continue
         const mimeType = typeof att.mimeType === 'string' && att.mimeType ? att.mimeType : `${kind}/*`
         out.push({
@@ -175,9 +188,9 @@ export function extractMessageAttachments(message: unknown): MediaBlock[] {
     const type = typeof b.type === 'string' ? b.type : ''
     if (!(MEDIA_TYPES as readonly string[]).includes(type)) continue
     // ①: b.content 裸 base64 优先（现有路）；③: 无 content 时退 url 形态（{type:audio|video|document,
-    // url}，官方 (b) 路）——src 直存完整 url，组件侧 mediaSrc 按 http(s) 原样返回不拼 base64
+    // url}，官方 (b) 路）——src 直存完整 http(s) url，组件侧 mediaSrc 原样返回不拼 base64
     const contentStr = typeof b.content === 'string' ? b.content : ''
-    const url = contentStr ? '' : (typeof b.url === 'string' ? b.url : '')
+    const url = contentStr ? '' : (isSafeHttpUrl(b.url) ? b.url : '')
     const src = contentStr || url
     if (!src) continue // 无 string content/url → 无法渲染，跳过
     // mimeType 缺失/非 string → 回退 `${type}/*`（组件重建完整 dataURL 须有 mime 段）。

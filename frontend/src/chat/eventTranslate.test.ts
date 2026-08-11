@@ -843,6 +843,37 @@ describe('extractMessageAttachments（#459-T3 #464: image/audio/video 块 → �
       }),
     ).toEqual([])
   })
+  // ---- #568 安全修复（security review）：url 形态只收完整 http(s)——其他 scheme/相对/畸形 url 一律跳过 ----
+  it('#568(security): url 形态非 http(s)（javascript:/file:/data:/相对 url）→ 跳过该块', () => {
+    expect(
+      extractMessageAttachments({
+        role: 'assistant',
+        content: [
+          { type: 'image', url: 'javascript:alert(1)' },
+          { type: 'document', url: 'file:///etc/passwd' },
+          { type: 'audio', url: 'data:audio/mpeg;base64,QUJD' },
+          { type: 'video', url: '//evil.com/x.mp4' }, // 协议相对
+          { type: 'image', url: '/relative.png' }, // 相对路径
+        ],
+      }),
+    ).toEqual([])
+  })
+  it('#568(security): attachment 形态 url 非 http(s) → 跳过该块', () => {
+    expect(
+      extractMessageAttachments({
+        role: 'assistant',
+        content: [{ type: 'attachment', attachment: { kind: 'image', url: 'javascript:alert(1)' } }],
+      }),
+    ).toEqual([])
+  })
+  it('#568(security): attachment 形态 url 为完整 http(s)（含 mimeType 缺失回退）→ 保留', () => {
+    expect(
+      extractMessageAttachments({
+        role: 'assistant',
+        content: [{ type: 'attachment', attachment: { kind: 'image', url: 'http://img.example.com/x.png' } }],
+      }),
+    ).toEqual([{ type: 'image', mimeType: 'image/*', src: 'http://img.example.com/x.png' }])
+  })
 })
 
 // #459-T3 #464：attachmentToMediaBlock——发送 echo 路径（useChatConnection.send）与历史/流式
