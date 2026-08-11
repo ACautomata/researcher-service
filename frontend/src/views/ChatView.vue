@@ -78,11 +78,10 @@ const connectionState = computed(() => {
   return null
 })
 
-// #542：执行状态指示——连接生命周期 × 审批/工具/流式活动的单行汇总（与上方连接横幅互补，
-// 横幅只报连接态，此行额外反映「正在干活」的瞬时态）
+// #542：执行状态指示——与上方连接横幅互补，横幅只报连接态（正在连接/断开/加载失败），
+// 此行只反映「正在干活」的瞬时态；横幅可见时返回空串整行隐藏，不重复横幅文案。
 const executionStatus = computed(() => {
-  if (conn.disconnected.value) return '连接已断开'
-  if (connecting.value) return '正在连接…'
+  if (connectionState.value) return ''
   if (visibleApprovals.value.some((a) => a.status === 'pending')) return '等待批准'
   if (chat.messages.some((m) => m.tools.some((t) => t.state === 'running'))) return '正在执行工具…'
   if (streaming.value) return '模型正在回答…'
@@ -255,7 +254,7 @@ defineExpose({
         <span v-if="connectionState.detail" class="connection-detail" data-test="error-bar">{{ connectionState.detail }}</span>
         <button v-if="conn.disconnected.value" class="reconnect" data-test="reconnect" @click="conn.connect()">重新连接</button>
       </div>
-      <div class="execution-status" role="status" aria-live="polite" data-test="execution-status">{{ executionStatus }}</div>
+      <div v-if="executionStatus" class="execution-status" role="status" aria-live="polite" data-test="execution-status">{{ executionStatus }}</div>
       <ChatStream
         :messages="chat.messages"
         :approvals="historicalApprovals"
