@@ -10,6 +10,7 @@ import {
   GatewayProtocolRequestError,
   resolveSafeTimeoutDelayMs,
   shouldPauseGatewayReconnect,
+  shouldRetryGatewayWithDeviceToken,
   type GatewayBrowserDeviceAuthLifecycle,
   type GatewayBrowserDeviceAuthPlan,
   type GatewayProtocolCloseContext,
@@ -114,7 +115,11 @@ export interface ApprovalCardDTO {
 // #377: ConnectPlan = 官方设备认证 lifecycle plan（role/scopes/auth/device）+ 面板 caps 声明。
 // buildConnectParams 透传 lifecycle 的 auth（bootstrapToken/deviceToken）与 device 签名块；凭证选择
 // （首连 bootstrap / 已配对 deviceToken）归官方 lifecycle（ADR 决定 3/6，deviceAuth.test.ts 已覆盖）。
-type ConnectPlan = GatewayBrowserDeviceAuthPlan & { caps: string[] }
+// #567: explicitBootstrapToken 为内部字段——记录「本次 connect 是否注入了显式 bootstrap token」
+//（buildConnectPlan 处赋值，供 onConnectFailure 的 shouldRetryGatewayWithDeviceToken 判定）。
+// 不可直接读闭包 bootstrapToken：它恒有值，会让 shouldRetry 的 !explicitToken 硬门失效（官方语义
+// 是「本次 connect 是否带了显式 token」，不是「面板是否配置了 bootstrap token」）。
+type ConnectPlan = GatewayBrowserDeviceAuthPlan & { caps: string[]; explicitBootstrapToken?: string }
 
 export interface CreateGatewayChatParams {
   container: string
@@ -242,6 +247,16 @@ export function createGatewayChat(params: CreateGatewayChatParams): GatewayChat 
   let pairingState: 'idle' | 'pairing' | 'paired' = 'idle'
   let pairingAttempts = 0
   const MAX_PAIRING_ATTEMPTS = 3
+  // #567: 官方 AUTH_TOKEN_MISMATCH 单次重发闸与预算（对齐官方 gateway.ts 的 pendingDeviceTokenRetry /
+  // deviceTokenRetryBudgetUsed）。token 失同步（本地有持久化旧 deviceToken、本次 connect 带显式
+  // bootstrap token 被网关拒）时，onConnectFailure 经 shouldRetryGatewayWithDeviceToken 判定后置
+  // pendingDeviceTokenRetry，resolveClose 据此让协议机自动重连；重连时 buildConnectPlan 把
+  // pendingDeviceTokenRetry 传给 lifecycle.buildPlan，触发 selectGatewayConnectAuth 的「重发旧 token」
+  // 通道（authDeviceToken: storedToken，走网关旧 token 换新 token 的 device-token-retry）。
+  // 与 pairingAttempts（防「approve 反复无效」死循环）是不同机制、不同预算——混用会语义错位
+  // （规格 R3：清零时机也不同，见 onConnectHello）。
+  let pendingDeviceTokenRetry = false
+  let deviceTokenRetryBudgetUsed = false
   // 最近一次 buildConnectPlan 的 lifecycle plan——clearStoredToken 需要 plan.clientId/identity/role
   // （onClose context 不含 plan，闭包缓存供「token 失效重配对」清除路径）。
   let lastAuthPlan: GatewayBrowserDeviceAuthPlan | null = null
@@ -287,9 +302,21 @@ export function createGatewayChat(params: CreateGatewayChatParams): GatewayChat 
         defaultScopes: OPERATOR_SCOPES,
         ...(stored ? {} : { token: bootstrapToken }),
         nonce,
+        // #567: 官方 device-token retry 通道——pendingDeviceTokenRetry 置位（onConnectFailure 的
+        // shouldRetry 判定）时，selectGatewayConnectAuth 走「重发旧 token」分支（authDeviceToken:
+        // storedToken 作为 auth.deviceToken 重发，网关旧 token 换新 token）。trustedEndpoint 面板
+        // 恒 trusted（经控制面隧道连自己容器网关，威胁模型等价官方 loopback，见 onConnectFailure）。
+        // 一次性：传完即清（对齐官方 buildConnectPlan 末尾），预算计数由 deviceTokenRetryBudgetUsed 承担。
+        ...(pendingDeviceTokenRetry ? { pendingDeviceTokenRetry: true, trustedDeviceTokenRetry: true } : {}),
       })
+      pendingDeviceTokenRetry = false // 一次性消费（对齐官方 buildConnectPlan：重建 plan 时清）
       lastAuthPlan = authPlan
-      return { ...authPlan, caps: CONNECT_CAPS }
+      return {
+        ...authPlan,
+        caps: CONNECT_CAPS,
+        // #567: 记录「本次 connect 是否注入显式 bootstrap token」（供 onConnectFailure 判定）。
+        explicitBootstrapToken: stored ? undefined : bootstrapToken,
+      }
     },
     // 对齐 tunnelProtocol.test：v4 握手参数（minProtocol/maxProtocol/client/role/scopes/caps/auth/device）
     buildConnectParams: (plan) => ({
@@ -307,6 +334,38 @@ export function createGatewayChat(params: CreateGatewayChatParams): GatewayChat 
     reconnect: { initialMs: 1000, multiplier: 2, maxMs: 30000 },
     // F4: RPC 请求有界等待——缺省时 request() promise 无界（半开连接 UI 卡死，F4 根因之一）。
     requestTimeoutMs: REQUEST_TIMEOUT_MS,
+    // #567: connect 失败（connect request 被网关 reject）回调接线（此前未接，官方 gateway.ts
+    // handleConnectFailure 同款）。时序：协议机在 connect request reject 时同步触发（早于 socket
+    // close → 早于 resolveClose/onClose），pendingDeviceTokenRetry 在 resolveClose 读之前已就绪，
+    // 无竞态（规格 R1）。
+    onConnectFailure: (error, context) => {
+      const plan = context.plan
+      // (a) AUTH_TOKEN_MISMATCH 官方单次重试判定——仅 GatewayProtocolRequestError 且有 plan 才判
+      //（与官方一致，0 信任）。硬门（SDK 实现）：预算未用 / 本次未在用 deviceToken / 本次 connect
+      // 带显式 token / 本地有持久化 storedToken / trustedEndpoint。
+      if (
+        plan &&
+        error instanceof GatewayProtocolRequestError &&
+        shouldRetryGatewayWithDeviceToken({
+          retryBudgetUsed: deviceTokenRetryBudgetUsed,
+          currentDeviceToken: plan.selectedAuth?.authDeviceToken,
+          explicitToken: plan.explicitBootstrapToken,
+          storedToken: plan.selectedAuth?.storedToken,
+          // trustedEndpoint 恒 true：面板浏览器不直连网关，经控制面隧道（JWT 握手 + 归属门 + 原始帧
+          // 透传，ADR 0006）连自己的容器网关，威胁模型等价官方 loopback 直连。恒 true 不引入新风险
+          //（重发的 auth.deviceToken 仍只流向本容器网关）。
+          trustedEndpoint: true,
+          errorDetails: error.details,
+        })
+      ) {
+        pendingDeviceTokenRetry = true
+        deviceTokenRetryBudgetUsed = true
+      }
+      // (b) 返回 SDK 默认 connect 失败决策（closeCode 1008）——与未接该回调时协议机行为逐字节一致，
+      // 让 resolveClose/onClose 走既有流程。AUTH_DEVICE_TOKEN_MISMATCH 不在此判定（SDK beta.6 对
+      // 该码恒 false），由 onClose 保留的自愈闭环处理。
+      return { closeCode: 1008, closeReason: 'connect failed' }
+    },
     // close 决策：认证/归属/改密 = 非传输问题，不自动重连（前端 forceRefresh 或提示）；其余重连。
     // notify:true 让 onClose 上报 UI（断线提示）。
     resolveClose: (context) => {
@@ -319,7 +378,12 @@ export function createGatewayChat(params: CreateGatewayChatParams): GatewayChat 
         if (
           shouldPauseGatewayReconnect({
             details: connErr.details,
-            deviceTokenRetryPending: false,
+            // #567: AUTH_TOKEN_MISMATCH 的重连闸——pendingDeviceTokenRetry=true 时 SDK
+            // shouldPauseGatewayReconnect 对 AUTH_TOKEN_MISMATCH 返 false（tokenMismatchIsTerminal
+            // && !deviceTokenRetryPending）→ retry:true（协议机自动重连，重连时 buildConnectPlan
+            // 重发旧 token 换新）。AUTH_DEVICE_TOKEN_MISMATCH 不受影响（NON_RECOVERABLE 集合，
+            // 仍 retry:false → 落 onClose 的 _DEVICE_ 自愈闭环）。
+            deviceTokenRetryPending: pendingDeviceTokenRetry,
             tokenMismatchIsTerminal: true,
             clientVersionMismatchIsTerminal: true,
           })
@@ -381,9 +445,18 @@ export function createGatewayChat(params: CreateGatewayChatParams): GatewayChat 
         // 自愈：清失效 token → client.start() 重连（bootstrap 首连 → PAIRING_REQUIRED → 上方既有
         // 配对编排 approve → hello-ok 拿新 token）。复用配对预算防「清 token 重连仍 MISMATCH」死循环
         // （如网关侧 token 轮换与面板持久化持续失同步），预算用尽转 UI 手动重连。
+        // #567 分码处理：AUTH_TOKEN_MISMATCH 已由 onConnectFailure + resolveClose 的官方单次重试
+        // 通道接管（pendingDeviceTokenRetry=true 时 resolveClose 已 retry:true，协议机自动重连，
+        // 此分支不再触发）；仅当重试通道不可用/用尽（pendingDeviceTokenRetry=false：无 storedToken /
+        // 预算已用 / 非首连）才落本分支——R2 兜底，与 _DEVICE_ 收敛同一自愈闭环（清 token → bootstrap
+        // → 重配对）。面板可带外 approve，自动重配对 UX 优于官方「认证失败需手动」。AUTH_DEVICE_TOKEN_
+        // MISMATCH 不能用 shouldRetry（SDK beta.6 对该码恒 false），恒保留本自愈闭环。
         const detailCode =
           connErr instanceof GatewayProtocolRequestError ? readConnectErrorDetailCode(connErr.details) : null
-        if (detailCode === 'AUTH_DEVICE_TOKEN_MISMATCH' || detailCode === 'AUTH_TOKEN_MISMATCH') {
+        if (
+          detailCode === 'AUTH_DEVICE_TOKEN_MISMATCH' ||
+          (detailCode === 'AUTH_TOKEN_MISMATCH' && !pendingDeviceTokenRetry)
+        ) {
           if (pairingAttempts >= MAX_PAIRING_ATTEMPTS) {
             handlers.onClose(context.code, context.reason, false, false) // 预算用尽：如实报连接即停
             return
@@ -422,6 +495,11 @@ export function createGatewayChat(params: CreateGatewayChatParams): GatewayChat 
           : DEFAULT_TICK_INTERVAL_MS,
         { minMs: MIN_TICK_WATCH_INTERVAL_MS },
       )
+      // #567: 预算成功即清零（对齐官方 handleConnectHello）——无条件（hello-ok 即连接成功，无论是否
+      // 下发 deviceToken）。与 pairingAttempts 的 acceptHello-gated 清零（下方，防 approve 无效无限
+      // 循环）清零时机不同是有意为之（R3）：本预算防「重发旧 token」无限重试，成功连接即重置。
+      pendingDeviceTokenRetry = false
+      deviceTokenRetryBudgetUsed = false
       // #377: hello-ok 下发 deviceToken → acceptHello 持久化（tokenStore）→ 配对完成。此后
       // buildConnectPlan 用 deviceToken（不再走 bootstrap/配对）。
       // **仅当 hello 携带 deviceToken 且本连接有设备身份才算配对完成**——官方 acceptHello 在无
@@ -510,6 +588,9 @@ export function createGatewayChat(params: CreateGatewayChatParams): GatewayChat 
       // deviceToken（配对状态由 lifecycle 的 token 选择反映，非本标志）。
       pairingState = 'idle'
       pairingAttempts = 0
+      // #567: 手动重连/切容器重置单次重发预算（对齐官方 stop()/start() 重置）。
+      pendingDeviceTokenRetry = false
+      deviceTokenRetryBudgetUsed = false
       // 沉默看门狗：连接期持续监控（黑洞链路自愈，A2）。
       if (!watchdogTimer) {
         watchdogTimer = setInterval(() => {
@@ -544,6 +625,9 @@ export function createGatewayChat(params: CreateGatewayChatParams): GatewayChat 
         watchdogTimer = null
       }
       isStopped = true
+      // #567: 停止连接时重置单次重发预算（对齐官方 stop()；切容器新建实例同样重置）。
+      pendingDeviceTokenRetry = false
+      deviceTokenRetryBudgetUsed = false
       client.stop()
     },
     // P1-5（code review）：连接期超时兜底——SYN 黑洞（socket 永不 open）下协议机无任何信号、

@@ -14,6 +14,7 @@ const { MockGatewayProtocolClient, MockGatewayProtocolRequestError, MockShouldPa
     onHello?: () => void
     onConnectHello?: (h: unknown, c: unknown) => void
     onClose?: (c: { code: number; reason: string }, d: unknown) => void
+    onConnectFailure?: (error: Error, context: { generation: number; nonce: null; challengeTs: null; plan?: unknown }) => unknown
     resolveClose?: (c: Record<string, unknown>) => { retry: boolean; notify?: boolean; reconnectDelayMs?: number }
     onConnectError?: (e: Error) => void
     onRequestTiming?: (t: { errorCode?: string }) => void
@@ -24,12 +25,17 @@ const { MockGatewayProtocolClient, MockGatewayProtocolRequestError, MockShouldPa
     handshake?: unknown
     requestTimeoutMs?: number
   }
-  // 简化实现：details.code 在真实网关错误详情里是 ConnectErrorDetailCodes 之一
+  // 简化实现：details.code 在真实网关错误详情里是 ConnectErrorDetailCodes 之一。
+  // #567: AUTH_TOKEN_MISMATCH 单列对齐真实 SDK（shouldPauseGatewayReconnect 源码：
+  // tokenMismatchIsTerminal === true && !deviceTokenRetryPending）——deviceTokenRetryPending=true
+  // 时返 false（允许 retry，走官方单次重发通道）；其余码仍在 NON_RECOVERABLE 集合。
   const MockShouldPauseReconnect = (params: { details?: unknown; tokenMismatchIsTerminal?: boolean; deviceTokenRetryPending?: boolean; protocolMismatchIsTerminal?: boolean; clientVersionMismatchIsTerminal?: boolean }): boolean => {
     const code = (params.details as { code?: string } | undefined)?.code
+    if (code === 'AUTH_TOKEN_MISMATCH') {
+      return params.tokenMismatchIsTerminal === true && !params.deviceTokenRetryPending
+    }
     return [
       'PAIRING_REQUIRED',
-      'AUTH_TOKEN_MISMATCH',
       'AUTH_BOOTSTRAP_TOKEN_INVALID',
       'AUTH_DEVICE_TOKEN_MISMATCH',
       'AUTH_SCOPE_MISMATCH',
@@ -77,6 +83,13 @@ const { MockGatewayProtocolClient, MockGatewayProtocolRequestError, MockShouldPa
     }
     fireConnectHello(hello: unknown, plan: unknown): void {
       this.opts.onConnectHello?.(hello, { generation: 1, nonce: null, challengeTs: null, plan })
+    }
+    // #567: connect 阶段被网关 reject（协议机在 sendConnectPlan 的 request reject 时同步触发，
+    // context 带本次 connect 的 plan——真实协议机时序：onConnectFailure → socket.close(1008) →
+    // resolveClose → onClose）。返回 onConnectFailure 决策（真实协议机用其 closeCode/closeReason
+    // 关 socket，缺失时 ?? 默认 {closeCode:1008, closeReason:'connect failed'}）。
+    fireConnectFailure(error: Error, plan: unknown): unknown {
+      return this.opts.onConnectFailure?.(error, { generation: 1, nonce: null, challengeTs: null, plan })
     }
     connectError(message: string): void {
       this.opts.onConnectError?.(new Error(message))
@@ -1107,13 +1120,127 @@ describe('#377 设备配对生命周期（GatewayBrowserDeviceAuthLifecycle 接�
     expect(handlers.onClose).not.toHaveBeenCalled() // 自愈进行中不向 UI 报「连接即停」
   })
 
-  it('MISMATCH 自愈：AUTH_TOKEN_MISMATCH 同款（一并覆盖）', async () => {
+  // ---- #567 行为变化点（标红，PR 明示）：AUTH_TOKEN_MISMATCH 从「clearStoredToken + start 自愈」
+  // 改为官方单次重试机制（onConnectFailure → shouldRetryGatewayWithDeviceToken → resolveClose retry
+  // → 协议机自动重连重发旧 token），非等价重构。_DEVICE_ 变体保留自愈闭环（V3，下方既有用例回归）。
+  // #567 V1–V6 实证用例（规格 §五）：shouldRetryGatewayWithDeviceToken 用真实 SDK 实现（vi.mock
+  // 部分替换保留原导出），断言走协议机接缝（fireConnectFailure + resolveClose + buildConnectPlan）。
+  // 规格缝隙（PR 明示）：V1 的「storedToken + bootstrap 并存」场景在当前凭证选择下生产不可达——
+  // hasStoredDeviceTokenFor 与 lifecycle tokenStore 同源同键（deviceAuth.ts：同一
+  // createContainerTokenStore + loadDeviceIdentity）：有 storedToken ⟺ stored 判定 true ⟺ 不传
+  // bootstrap token。故 shouldRetry 恒被硬门拒、AUTH_TOKEN_MISMATCH 生产恒落 R2 兜底（规格 §四 R2
+  // 既定路径，行为与改造前等价）；V1/V2 手工拼 plan 验证的是机制接线本身（未来凭证选择变化——如
+  // 显式 deviceToken / scope 升级——时该通道即生效，此即行为契约）。
+  it('#567 行为变化点: AUTH_TOKEN_MISMATCH（有 storedToken + bootstrap，预算未用）→ 官方单次重试：onConnectFailure 置 pending → resolveClose retry:true → 重连 buildPlan 带 pendingDeviceTokenRetry（重发旧 token），不再经 clearStoredToken/recoverTokenMismatch', async () => {
+    const { client, handlers } = makeGateway()
+    // 首连 plan：本次 connect 带显式 bootstrap token（explicitBootstrapToken='boot-1'）+ 本地有持久化
+    // 旧 deviceToken（selectedAuth.storedToken='dt-1'）——网关对 bootstrap token 回 AUTH_TOKEN_MISMATCH
+    //（token 失同步）。真实 SDK shouldRetry：硬门全过（预算未用/无 currentDeviceToken/有 explicit/
+    // 有 storedToken/trusted）→ 错误码 AUTH_TOKEN_MISMATCH 命中触发集 → true。
+    const plan = {
+      ...((await client.opts.buildConnectPlan!({ nonce: 'n', generation: 1 })) as object),
+      selectedAuth: { storedToken: 'dt-1' },
+    }
+    // 协议机时序：connect request reject → onConnectFailure（shouldRetry 判定 → pending 置位）→
+    // socket close(1008) → resolveClose → onClose
+    // 返回 SDK 默认 connect 失败决策（与未接该回调时协议机 ?? 兜底逐字节一致，socket 关法不变）
+    expect(client.fireConnectFailure(tokenMismatchError('AUTH_TOKEN_MISMATCH'), plan)).toEqual({
+      closeCode: 1008,
+      closeReason: 'connect failed',
+    })
+    client.close({ code: 1000, reason: 'closed(1008)', connectFailure: { error: tokenMismatchError('AUTH_TOKEN_MISMATCH') } })
+    // resolveClose 读 pendingDeviceTokenRetry → SDK shouldPause 对 AUTH_TOKEN_MISMATCH 返 false →
+    // retry:true（协议机自动重连，UI 显示「自动重连中」而非连接即停）
+    expect(handlers.onClose).toHaveBeenLastCalledWith(1000, 'closed(1008)', true, false)
+    // 不落自愈闭环：不清 storedToken、不 client.start（重连由协议机自动完成）
+    expect(MockLifecycle.clearStoredToken).not.toHaveBeenCalled()
+    expect(client.start).not.toHaveBeenCalled()
+    // 协议机自动重连 → buildConnectPlan：pendingDeviceTokenRetry 传给 lifecycle（触发 SDK
+    // selectGatewayConnectAuth 的「重发旧 token」通道 authDeviceToken: storedToken），一次性消费后清位
+    await client.opts.buildConnectPlan!({ nonce: 'n2', generation: 2 })
+    expect(MockLifecycle.buildPlan).toHaveBeenLastCalledWith(
+      expect.objectContaining({ pendingDeviceTokenRetry: true, trustedDeviceTokenRetry: true }),
+    )
+  })
+
+  it('#567 V2: AUTH_TOKEN_MISMATCH 重发一次后仍 MISMATCH（预算用尽）→ shouldRetry 拒绝 → R2 兜底 recoverTokenMismatch（清 token → bootstrap 重连）', async () => {
     const { client, handlers } = makeGateway()
     await primeAuthPlan(client)
+    const plan = {
+      ...((await client.opts.buildConnectPlan!({ nonce: 'n', generation: 1 })) as object),
+      selectedAuth: { storedToken: 'dt-1' },
+    }
+    // ① 第一次：官方单次重试通道（deviceTokenRetryBudgetUsed 置位）
+    client.fireConnectFailure(tokenMismatchError('AUTH_TOKEN_MISMATCH'), plan)
+    client.close({ code: 1000, reason: 'x', connectFailure: { error: tokenMismatchError('AUTH_TOKEN_MISMATCH') } })
+    expect(handlers.onClose).toHaveBeenLastCalledWith(1000, 'x', true, false) // 协议机自动重连
+    // ② 协议机重连 → buildConnectPlan 消费 pending（一次性，重发旧 token）
+    await client.opts.buildConnectPlan!({ nonce: 'n2', generation: 2 })
+    expect(MockLifecycle.buildPlan).toHaveBeenLastCalledWith(
+      expect.objectContaining({ pendingDeviceTokenRetry: true }),
+    )
+    // ③ 第二次 connect 仍被拒（重发旧 token 无效）：shouldRetry 因 retryBudgetUsed 拒绝 → pending
+    // 不置位 → shouldPause 判终端 → resolveClose retry:false → onClose 落 R2 兜底 recoverTokenMismatch
+    handlers.onClose.mockClear()
+    client.fireConnectFailure(tokenMismatchError('AUTH_TOKEN_MISMATCH'), plan)
+    client.close({ code: 1000, reason: 'x', connectFailure: { error: tokenMismatchError('AUTH_TOKEN_MISMATCH') } })
+    expect(handlers.onClose).not.toHaveBeenCalled() // 自愈进行中不向 UI 报连接即停
+    await vi.waitFor(() => expect(MockLifecycle.clearStoredToken).toHaveBeenCalled())
+    await vi.waitFor(() => expect(client.start).toHaveBeenCalled())
+  })
+
+  it('#567 V4: hello 成功无条件清零单次重发预算（无 deviceToken 的 hello 也清——非 acceptHello-gated；pairingAttempts 清零仍 gated，二者独立）', async () => {
+    const { client } = makeGateway()
+    const plan = {
+      ...((await client.opts.buildConnectPlan!({ nonce: 'n', generation: 1 })) as object),
+      selectedAuth: { storedToken: 'dt-1' },
+    }
+    const ctx = { code: 1000, reason: 'closed(1008)', connectFailure: { error: tokenMismatchError('AUTH_TOKEN_MISMATCH') } }
+    // ① 触发一次重试：预算用掉（pending + budgetUsed 置位）
+    client.fireConnectFailure(tokenMismatchError('AUTH_TOKEN_MISMATCH'), plan)
+    expect(client.opts.resolveClose!(ctx).retry).toBe(true)
+    // ② hello 成功（不带 deviceToken——无条件清零，对齐官方 handleConnectHello；若 acceptHello-gated
+    // 则此处不清，③ 的 shouldRetry 会因预算用尽被拒 → retry:false，本断言精确区分）
+    client.fireConnectHello({ policy: {} }, plan)
+    // ③ 预算已清：再遇 AUTH_TOKEN_MISMATCH 重新可重试（满预算单次重发）
+    client.fireConnectFailure(tokenMismatchError('AUTH_TOKEN_MISMATCH'), plan)
+    expect(client.opts.resolveClose!(ctx).retry).toBe(true)
+  })
+
+  it('#567 V5: AUTH_TOKEN_MISMATCH 无 storedToken（从未配对）→ shouldRetry 硬门拒绝 → R2 兜底 recoverTokenMismatch', async () => {
+    const { client, handlers } = makeGateway()
+    await primeAuthPlan(client)
+    // mock 默认 plan.selectedAuth={}（无 storedToken）→ 真实 SDK shouldRetry 的 !storedToken 硬门拒绝
+    const plan = await client.opts.buildConnectPlan!({ nonce: 'n', generation: 1 })
+    client.fireConnectFailure(tokenMismatchError('AUTH_TOKEN_MISMATCH'), plan)
     client.close({ code: 1000, reason: 'closed(1008)', connectFailure: { error: tokenMismatchError('AUTH_TOKEN_MISMATCH') } })
     await vi.waitFor(() => expect(MockLifecycle.clearStoredToken).toHaveBeenCalled())
     await vi.waitFor(() => expect(client.start).toHaveBeenCalled())
-    expect(handlers.onClose).not.toHaveBeenCalled()
+    expect(handlers.onClose).not.toHaveBeenCalled() // 自愈进行中不向 UI 报连接即停
+  })
+  // #567 V3（_DEVICE_ 回归网：上方「MISMATCH 自愈：AUTH_DEVICE_TOKEN_MISMATCH」用例不动，触发码收窄
+  // 后 _DEVICE_ 仍走 recoverTokenMismatch）+ V6（凭证选择回归：首连 token / 已配对 deviceToken 用例
+  // 不动）由既有用例保持绿承担，此处不重复。
+
+  it('#567: start()/stop() 重置单次重发预算（规格 §三 重置点——手动重连/切容器后重新满预算）', async () => {
+    const { gw, client } = makeGateway()
+    const plan = {
+      ...((await client.opts.buildConnectPlan!({ nonce: 'n', generation: 1 })) as object),
+      selectedAuth: { storedToken: 'dt-1' },
+    }
+    const ctx = { code: 1000, reason: 'closed(1008)', connectFailure: { error: tokenMismatchError('AUTH_TOKEN_MISMATCH') } }
+    // ① 触发一次重试：预算用掉
+    client.fireConnectFailure(tokenMismatchError('AUTH_TOKEN_MISMATCH'), plan)
+    expect(client.opts.resolveClose!(ctx).retry).toBe(true)
+    // ② stop() 清预算（若不清，③ 的 shouldRetry 会因预算用尽被拒 → retry:false）
+    gw.stop()
+    client.fireConnectFailure(tokenMismatchError('AUTH_TOKEN_MISMATCH'), plan)
+    expect(client.opts.resolveClose!(ctx).retry).toBe(true)
+    // ③ start() 同样重置（同实例手动重连）
+    gw.start()
+    client.fireConnectFailure(tokenMismatchError('AUTH_TOKEN_MISMATCH'), plan)
+    expect(client.opts.resolveClose!(ctx).retry).toBe(true)
+    gw.stop() // 清理看门狗定时器
   })
 
   it('MISMATCH 自愈后重连遇 PAIRING_REQUIRED → 走既有自动配对编排（approve → 重连）', async () => {
