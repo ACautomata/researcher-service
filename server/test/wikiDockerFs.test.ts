@@ -180,7 +180,7 @@ describe('DockerWikiFileSystem.readPage', () => {
 describe('DockerWikiFileSystem 写侧（委托 FileArchive + managed + 异常映射）', () => {
   it('write/create/delete 委托 archive（root=wiki，透传 name/rel/content）', async () => {
     const archive = new FakeArchive()
-    const fs = makeDocker({ archive })
+    const fs = makeDocker({ archive, probeFile: async () => ({ kind: 'dir' }) }) // createPage 父链放行
     await fs.writePage('concepts/a.md', '# A\n')
     await fs.createPage('concepts/new.md', '# N\n')
     await fs.deletePage('concepts/a.md')
@@ -207,6 +207,7 @@ describe('DockerWikiFileSystem 写侧（委托 FileArchive + managed + 异常映
         create: () => new FileExists(''),
         delete: () => new FileInvalidPath(''),
       }),
+      probeFile: async () => ({ kind: 'dir' }), // createPage 父链放行，让 archive.create 抛 FileExists
     })
     await expect(fs.writePage('concepts/miss.md', 'x')).rejects.toBeInstanceOf(WikiPageNotFound)
     await expect(fs.createPage('concepts/a.md', 'x')).rejects.toBeInstanceOf(WikiPageExists)
@@ -215,9 +216,21 @@ describe('DockerWikiFileSystem 写侧（委托 FileArchive + managed + 异常映
 
   it('create 父目录不存在自动 mkdir（#621 行为变化：不再 90002）', async () => {
     const archive = new FakeArchive()
-    const fs = makeDocker({ archive })
+    const fs = makeDocker({ archive, probeFile: async () => null }) // 父链全不存在 → mkdir -p 创建
     await expect(fs.createPage('newdir/sub/page.md', '# P\n')).resolves.toEqual({ path: 'newdir/sub/page.md' })
     // FileArchive.create 语义：自动 mkdir -p 父目录（旧 NodeFs 会抛 WikiInvalidPath → 90002）。
     expect(archive.calls[0]).toMatchObject({ method: 'create', relPath: 'newdir/sub/page.md' })
+  })
+
+  it('createPage 父段是普通文件 → WikiInvalidPath（保 nodeFs ENOTDIR→90002，不退 90000）', async () => {
+    const archive = new FakeArchive()
+    const fs = makeDocker({
+      archive,
+      probeFile: async (rel) => (rel === 'notes.md' ? { kind: 'file', data: Buffer.alloc(0) } : null),
+    })
+    // notes.md 已是文件：DockerFileArchive.create 的 mkdir -p notes.md 会 exec 失败抛裸 Error→90000；
+    // 前置父链守卫（assertParentsAreDirs）保 nodeFs ENOTDIR → WikiInvalidPath → 90002 契约。
+    await expect(fs.createPage('notes.md/child.md', '# C\n')).rejects.toBeInstanceOf(WikiInvalidPath)
+    expect(archive.calls).toEqual([]) // 前置拦截，不触达 archive
   })
 })

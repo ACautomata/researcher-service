@@ -167,6 +167,7 @@ export class DockerWikiFileSystem implements WikiFileSystem {
 
   async createPage(relPath: string, content: string): Promise<{ path: string }> {
     this.assertNotManaged(relPath)
+    await this.assertParentsAreDirs(relPath) // 父段为文件/link → WikiInvalidPath（保 90002，见下）
     try {
       // FileArchive.create 语义：已存在 → FileExists；父目录不存在自动 mkdir -p（#621 有意
       // 放宽——旧 NodeFs 父目录缺失 → 90002，现为「输入合法路径即可建」，消除误导性 90002）。
@@ -227,6 +228,22 @@ export class DockerWikiFileSystem implements WikiFileSystem {
     const parts = relPath.split('/')
     if (parts.some((seg) => SKIP_DIRS.has(seg))) throw new WikiInvalidPath(relPath)
     if (SKIP_FILES.has(parts[parts.length - 1])) throw new WikiInvalidPath(relPath)
+  }
+
+  // createPage 父链守卫（保 nodeFs ENOTDIR → 90002 契约）：DockerFileArchive.create 的 mkdir -p
+  // 遇父段为普通文件（如 notes.md/child.md，notes.md 已是文件）时 exec 退出码非 0 → 抛裸 Error
+  // （不在 files 异常族，dockerArchive.ts execSync）→ 路由 90000；nodeFs 旧实现 open(wx) 抛
+  // ENOTDIR → WikiInvalidPath → 90002。此处 createPage 前置逐段 probe 已存在的父段：file/link →
+  // WikiInvalidPath（保 90002）；null（父段不存在）放行（mkdir -p 创建）；dir 放行。仅 createPage
+  // 需要——writePage 目标须已存在（父链必是目录），deletePage 目标不存在已 30040。
+  private async assertParentsAreDirs(relPath: string): Promise<void> {
+    const parts = relPath.split('/').filter(Boolean)
+    for (let i = 1; i < parts.length; i++) {
+      const parent = parts.slice(0, i).join('/')
+      const probed = await this.probeFile(parent)
+      if (probed === null) continue
+      if (probed.kind !== 'dir') throw new WikiInvalidPath(relPath)
+    }
   }
 
   // files 域异常 → wiki 域异常映射膜（路由只认 wiki 族：30040/30041/90002）。
