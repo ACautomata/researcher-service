@@ -8,6 +8,7 @@
 import {
   GatewayProtocolClient,
   GatewayProtocolRequestError,
+  resolveSafeTimeoutDelayMs,
   shouldPauseGatewayReconnect,
   type GatewayBrowserDeviceAuthLifecycle,
   type GatewayBrowserDeviceAuthPlan,
@@ -147,14 +148,18 @@ const HANDSHAKE_TIMEOUT_MS = 10_000
 // maxAttempts 恒 Infinity 无 give-up，只能前端计数）。
 // #376: 该阈值同时是 4402 网关不可达重试预算的上限（独立计数器，见 gatewayUnavailableCount）。
 const MAX_RECONNECT_FAILURES = 5
-// 沉默看门狗（对齐已删 ws.ts 的 60s 静默超时）：黑洞链路（Wi-Fi 漫游无 RST）下浏览器 WS 不触发
-// onclose、协议机不重连。onActivity 每次收到网关帧刷新 lastActivityAt；超过 SILENCE_TIMEOUT_MS
-// 无任何帧 → 主动关隧道触发协议机重连自愈（网关侧 hello-ok 承诺 tickIntervalMs≤30s，正常连接
-// 60s 内必有帧，不会误杀）。
-// #493: 该「tick≤30s」承诺只在页面可见时成立——Safari 后台/遮挡页节流定时器并延迟 WS 帧投递，
-// 使健康连接在 document.hidden 期间也能累积 60s 沉默。故巡检对后台期间跳过判定、resume 重置
-// 基准（见下 wasHidden），仅前台真黑洞才触发关隧道。
-const SILENCE_TIMEOUT_MS = 60_000
+// 沉默看门狗（对齐已删 ws.ts 的 60s 静默超时；#566 基准改跟网关 advertised tick 走）：黑洞链路
+//（Wi-Fi 漫游无 RST）下浏览器 WS 不触发 onclose、协议机不重连。onActivity 每次收到网关帧刷新
+// lastActivityAt；超过 tickIntervalMs*2 无任何帧 → 主动关隧道触发协议机重连自愈。
+// #566: 基准不再硬编码 60s——onConnectHello 读 hello-ok 承诺的 policy.tickIntervalMs，clamp 后
+// 阈值 = tick*2（跟网关走，网关慢心跳时不再误判连接已死）。缺失/无效回退 DEFAULT_TICK_INTERVAL_MS
+//（30s，对齐官方 DEFAULT_GATEWAY_TICK_INTERVAL_MS）；超小值钳到 MIN_TICK_WATCH_INTERVAL_MS（1s，
+// 防巡检热循环误杀）。默认 tick 30s 时阈值恰 60s，与现状等价。
+// #493: 该「tick 承诺」只在页面可见时成立——Safari 后台/遮挡页节流定时器并延迟 WS 帧投递，使健康
+// 连接在 document.hidden 期间也能累积沉默。故巡检对后台期间跳过判定、resume 重置基准（见下
+// wasHidden），仅前台真黑洞才触发关隧道。
+const DEFAULT_TICK_INTERVAL_MS = 30_000 // 对齐官方 DEFAULT_GATEWAY_TICK_INTERVAL_MS（ui/src/api/gateway.ts:210）
+const MIN_TICK_WATCH_INTERVAL_MS = 1_000 // 对齐官方 MIN_GATEWAY_TICK_WATCH_INTERVAL_MS（ui/src/api/gateway.ts:211）
 const WATCHDOG_INTERVAL_MS = 15_000
 
 // 连接参数中的 operator scope（协议文档）：sessions/chat 需 read/write；exec.approval.resolve 需
@@ -246,6 +251,9 @@ export function createGatewayChat(params: CreateGatewayChatParams): GatewayChat 
   // 沉默看门狗（A2/黑洞自愈）：onActivity 刷新最后活动时间；watchdog 超时无帧 → 强制重连。
   let lastActivityAt = 0
   let watchdogTimer: ReturnType<typeof setInterval> | null = null
+  // #566: 当前连接的 advertised tick（clamp 后）——看门狗阈值基准。未 hello 前用默认 30s 安全初值
+  //（阈值 60s 与旧硬编码等价），每次 onConnectHello 覆写（首连与自动重连都重算，覆盖网关升级改 tick）。
+  let tickIntervalMs = DEFAULT_TICK_INTERVAL_MS
   // #493: 标记「经历过后台」。hidden 巡检点置真、不判沉默；恢复可见后首个巡检点据此把
   // lastActivityAt 重置到现在（后台陈旧 gap 不计入沉默），避免 resume 立即误杀健康连接。
   let wasHidden = false
@@ -403,6 +411,17 @@ export function createGatewayChat(params: CreateGatewayChatParams): GatewayChat 
       for (const frame of translator.translate(event)) handlers.onFrame(frame)
     },
     onConnectHello: (hello, context) => {
+      // #566: 看门狗基准跟 hello-ok 承诺的 policy.tickIntervalMs 走（对齐官方 startTickWatch 的
+      // 守卫 + clamp：缺失/无效回退 30s 默认；超小值抬到 1s 地板防巡检热循环误杀；超大值只经
+      // resolveSafeTimeoutDelayMs 硬顶 2³¹-1，业务上不约束）。首连与每次自动重连 hello 都触发，
+      // 天然覆盖「网关升级改 tick」。
+      const advertised = hello.policy?.tickIntervalMs
+      tickIntervalMs = resolveSafeTimeoutDelayMs(
+        typeof advertised === 'number' && Number.isFinite(advertised) && advertised > 0
+          ? advertised
+          : DEFAULT_TICK_INTERVAL_MS,
+        { minMs: MIN_TICK_WATCH_INTERVAL_MS },
+      )
       // #377: hello-ok 下发 deviceToken → acceptHello 持久化（tokenStore）→ 配对完成。此后
       // buildConnectPlan 用 deviceToken（不再走 bootstrap/配对）。
       // **仅当 hello 携带 deviceToken 且本连接有设备身份才算配对完成**——官方 acceptHello 在无
@@ -507,10 +526,12 @@ export function createGatewayChat(params: CreateGatewayChatParams): GatewayChat 
             wasHidden = false
             lastActivityAt = now
           }
-          // >=：interval 按 15s 周期对齐，fire 点 gap 恰为整 60s 也应触发（> 会让 60s 整被跳过）。
-          if (client && now - lastActivityAt >= SILENCE_TIMEOUT_MS) {
-            // 60s 无任何网关帧 → 连接疑似黑洞（半开 TCP 无 RST，WS 不触发 onclose）→ 主动关隧道
-            // 触发协议机重连。正常连接网关侧 tick ≤30s 保证 60s 内有帧，不误杀。
+          // #566: 阈值 = clamp 后 tick*2（替换 60s 硬编码，跟网关承诺走）。默认 tick 30s 时 2×=60s
+          // 与现状等价；网关 advertise 更快 tick（如 10s）则 2×=20s，判死更贴合网关实际承诺。
+          // >=：interval 按 15s 周期对齐，fire 点 gap 恰为整阈值也应触发（> 会让整阈值被跳过）。
+          if (client && now - lastActivityAt >= tickIntervalMs * 2) {
+            // 2×tick 无任何网关帧 → 连接疑似黑洞（半开 TCP 无 RST，WS 不触发 onclose）→ 主动关隧道
+            // 触发协议机重连。正常连接网关 tick 承诺保证 2×tick 内有帧，不误杀。
             client.closeSocket(1000, 'silence timeout')
           }
         }, WATCHDOG_INTERVAL_MS)

@@ -528,11 +528,12 @@ describe('createGatewayChat（#369 隧道 Facade）', () => {
     expect(client.closeSocket).not.toHaveBeenCalled()
   })
 
-  it('A2/看门狗: 60s 无网关帧 → closeSocket 强制重连（黑洞自愈）；onActivity 刷新则不误杀', () => {
+  it('A2/看门狗: 未 hello 前默认 tick 30s 初值 → 阈值 60s 无网关帧 → closeSocket 强制重连（黑洞自愈）；onActivity 刷新则不误杀', () => {
     vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval', 'setTimeout', 'clearTimeout'] })
     try {
       const { gw, client } = makeGateway()
       gw.start()
+      // 未注入 hello → tickIntervalMs 保持默认 30s 初值 → 阈值 60s（与旧 SILENCE_TIMEOUT_MS 等价）。
       // 刚 start：未超时
       vi.advanceTimersByTime(15_000)
       expect(client.closeSocket).not.toHaveBeenCalled()
@@ -554,6 +555,7 @@ describe('createGatewayChat（#369 隧道 Facade）', () => {
     try {
       const { gw, client } = makeGateway()
       gw.start()
+      // 未注入 hello → 默认 tick 30s 初值 → 阈值 60s（#566 后基准跟 hello 走，未 hello 前为安全初值）。
       // Safari 后台/遮挡页节流定时器并延迟 WS 帧投递：此时「60s 无帧」是页面被后台化而非链路黑洞。
       // 等价为 document.hidden=true + 时钟照走但 onActivity 不到。看门狗不得据此 closeSocket。
       // 按 15s 巡检网格精确推进：hidden 期间 8 个巡检点（15…120s）全部跳过判定。
@@ -592,6 +594,118 @@ describe('createGatewayChat（#369 隧道 Facade）', () => {
       expect(client.closeSocket).not.toHaveBeenCalled()
       // 恢复可见后真黑洞（60s 无帧）仍自愈
       vi.advanceTimersByTime(60_001)
+      expect(client.closeSocket).toHaveBeenCalledWith(1000, 'silence timeout')
+      gw.stop()
+    } finally {
+      Object.defineProperty(document, 'hidden', { configurable: true, value: false })
+      vi.useRealTimers()
+    }
+  })
+
+  it('#566: 看门狗阈值跟 hello policy.tickIntervalMs 走（10s→20s / 30s→60s / 60s→120s），每次 hello 重算用最新承诺', () => {
+    vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval', 'setTimeout', 'clearTimeout'] })
+    try {
+      const { gw, client } = makeGateway()
+      gw.start()
+      // 每轮：注入 hello（advertised tick）→ hello 帧本身刷新活动基准（协议机对任何入站帧调
+      // onActivity，测试手动 fireActivity 模拟）→ 阈值前一个 15s 巡检点不杀、越线后触发。
+      // 三轮 tick 递增且每轮都是新的 hello——第三轮即「重连 hello 用最新值」（网关升级改 tick）。
+      // 巡检点按 15s 网格：阈值 20s → 15s(gap15<20)不杀 / 30s(gap30≥20)触发；60s → 45/60；120s → 105/120。
+      const cases: Array<{ tick: number; before: number }> = [
+        { tick: 10_000, before: 15_000 }, // advertised 10s → 阈值 2×=20s
+        { tick: 30_000, before: 45_000 }, // advertised 30s → 阈值 2×=60s（与旧硬编码等价）
+        { tick: 60_000, before: 105_000 }, // advertised 60s → 阈值 2×=120s
+      ]
+      for (const c of cases) {
+        client.fireConnectHello({ policy: { tickIntervalMs: c.tick } }, {})
+        client.fireActivity() // hello 帧刷新活动基准（基准落 15s 网格点，巡检相位可预期）
+        vi.advanceTimersByTime(c.before)
+        expect(client.closeSocket).not.toHaveBeenCalled()
+        vi.advanceTimersByTime(15_000)
+        expect(client.closeSocket).toHaveBeenCalledWith(1000, 'silence timeout')
+        client.closeSocket.mockClear()
+      }
+      gw.stop()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('#566: 恶意超小 tickIntervalMs 钳到 1s 地板（收到帧后一个巡检周期内不误杀，防热循环）', () => {
+    vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval', 'setTimeout', 'clearTimeout'] })
+    try {
+      const { gw, client } = makeGateway()
+      gw.start()
+      // 网关 advertise 50ms（恶意/异常）→ clamp 后有效值 1s（MIN_TICK_WATCH_INTERVAL_MS 地板）→ 阈值 2s。
+      client.fireConnectHello({ policy: { tickIntervalMs: 50 } }, {})
+      client.fireActivity() // hello 帧刷新活动基准
+      // 距基准 14s 收到一帧（刷新基准）→ 15s 巡检点 gap=1s：
+      //   钳制生效（阈值 2s）→ 不误杀；未钳制（阈值=50ms*2=100ms）→ 立即误杀热循环——本断言精确区分。
+      vi.advanceTimersByTime(14_000)
+      client.fireActivity()
+      vi.advanceTimersByTime(1_000)
+      expect(client.closeSocket).not.toHaveBeenCalled()
+      // 继续无帧 → 30s 巡检点 gap=16s ≥ 2s → 真黑洞自愈（地板不影响判死能力，只防热循环）
+      vi.advanceTimersByTime(15_000)
+      expect(client.closeSocket).toHaveBeenCalledWith(1000, 'silence timeout')
+      gw.stop()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('#566: tickIntervalMs 缺失/无效一律回退 30s（阈值 60s，与旧硬编码等价）', () => {
+    vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval', 'setTimeout', 'clearTimeout'] })
+    try {
+      // 7 种无效形态：缺 policy / policy 缺字段 / 非数 / 0 / 负数 / NaN / Infinity——守卫全部回退默认。
+      const invalidHellos = [
+        {},
+        { policy: {} },
+        { policy: { tickIntervalMs: 'abc' } },
+        { policy: { tickIntervalMs: 0 } },
+        { policy: { tickIntervalMs: -5 } },
+        { policy: { tickIntervalMs: NaN } },
+        { policy: { tickIntervalMs: Infinity } },
+      ]
+      for (const hello of invalidHellos) {
+        const { gw, client } = makeGateway() // 每轮新实例（上轮已触发 closeSocket）
+        gw.start()
+        client.fireConnectHello(hello, {})
+        client.fireActivity() // hello 帧刷新活动基准（基准落 15s 网格点）
+        // 45s 巡检点 gap=45s < 60s：不触发（若守卫失效、无效值直接进 clamp → 钳到 1s 地板 →
+        // 阈值 2s → gap45 已越线触发——本断言精确区分「回退 30s」与「误钳小值」）
+        vi.advanceTimersByTime(45_000)
+        expect(client.closeSocket).not.toHaveBeenCalled()
+        // 60s 巡检点 gap=60s ≥ 60s → 黑洞自愈
+        vi.advanceTimersByTime(15_000)
+        expect(client.closeSocket).toHaveBeenCalledWith(1000, 'silence timeout')
+        gw.stop()
+      }
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('#566+#493: 小 tick（10s→阈值 20s）下后台期间不判死；回前台后真黑洞按新阈值自愈', () => {
+    vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval', 'setTimeout', 'clearTimeout'] })
+    try {
+      const { gw, client } = makeGateway()
+      gw.start()
+      // 注入小 tick：阈值 20s（比旧 60s 灵敏）——#493 跳过逻辑与新基准正交叠加，后台期间照样不杀。
+      client.fireConnectHello({ policy: { tickIntervalMs: 10_000 } }, {})
+      client.fireActivity()
+      Object.defineProperty(document, 'hidden', { configurable: true, value: true })
+      vi.advanceTimersByTime(60_000) // 后台 60s（gap 已远超 20s 阈值）——不误杀
+      expect(client.closeSocket).not.toHaveBeenCalled()
+      // 回前台：首个可见巡检点重置基准（后台陈旧 gap 不计入）
+      Object.defineProperty(document, 'hidden', { configurable: true, value: false })
+      vi.advanceTimersByTime(15_000)
+      expect(client.closeSocket).not.toHaveBeenCalled()
+      // 恢复可见后真黑洞（自重置基准起 ≥20s 无帧）→ 按新阈值自愈（15s 巡检点 gap=15<20 未到，
+      // 30s 处 gap=30≥20 触发）
+      vi.advanceTimersByTime(15_000)
+      expect(client.closeSocket).not.toHaveBeenCalled()
+      vi.advanceTimersByTime(15_000)
       expect(client.closeSocket).toHaveBeenCalledWith(1000, 'silence timeout')
       gw.stop()
     } finally {
