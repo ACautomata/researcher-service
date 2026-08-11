@@ -65,9 +65,10 @@ import { ensureImageAvailable } from './smokeDocker'
 const IMAGE = process.env.OPENCLAW_IMAGE ?? 'ghcr.io/openclaw/openclaw:2026.7.1-browser'
 const BOX = 'pairing-smoke'
 
-// Docker Desktop（macOS）只对 /Users 下路径 bind mount 生效——/tmp、/var/folders 挂进容器静默为空
-//（网关读不到 home/config → openclaw exit 78「Missing config」）。临时 fleetRoot 放 worktree 内
-//（.gitignore 忽略 .smoke-tmp/），容器才能读到 home/config（实测校准，用户指示「临时挂 worktree 下」）。
+// 临时 fleetRoot 放 worktree 下（.gitignore 忽略 .smoke-tmp/）。旧 bind 时代容器经宿主路径挂载
+// home/config、Docker Desktop（macOS）只对 /Users 下路径 bind mount 生效（实测校准）；#592 起
+// 默认 named volume 拓扑、config 经 putArchive 落容器内，宿主路径不再挂进容器——布局保留仅作
+// 模板目录/openclaw.json 渲染源的宿主位置（控制面自己读，无 Docker 挂载约束）。
 const SMOKE_ROOT = path.join(path.resolve(process.cwd(), '..'), '.smoke-tmp')
 
 // ---- 浏览器侧协议机 transport（Node 版，与 frontend/src/chat/tunnelSocket.ts 同构）----
@@ -242,7 +243,7 @@ describe('真网关配对闭环 smoke（#371-5 / #378）', () => {
       publishHost: '127.0.0.1',
       healthHost: '127.0.0.1',
       panelOrigin: 'http://127.0.0.1:18789', // 与容器 allowedOrigins 默认 seed 一致（配对 smoke 直连真网关）
-      namedVolumes: false, // #590 默认旧 bind（smoke 保持默认行为）
+      namedVolumes: true, // #592 本地/CI 默认 named volume 拓扑（config 经 putArchive 落容器内、穿卷读）
       reservedPorts: defaultReservedPorts(),
       encryptionKeys: DEV_ENCRYPTION_KEYS,
     }

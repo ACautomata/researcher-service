@@ -149,7 +149,9 @@ describe('orchestrator (接缝 #5 编排器 Port)', () => {
 
   it('delete 完整生命周期：stop+remove 容器、清目录、删行、触发 evict', async () => {
     const evicted: { name: string; port: number }[] = []
+    // 显式旧 bind：本用例断言 chown 前置（宿主目录清理语义；named volume 模式跳过 chown，#590）
     const fl3 = makeFleetTest(ctx.prisma, {
+      config: { namedVolumes: false },
       onEvict: async (i) => {
         evicted.push(i)
       },
@@ -259,14 +261,17 @@ describe('orchestrator (接缝 #5 编排器 Port)', () => {
   })
 
   // ---- chown 停止容器处理（Codex 第四轮②[P2]）----
-  // stopAndRemove 按 live.running 分叉：
+  // stopAndRemove 按 live.running 分叉（本组为旧 bind 清理语义，显式 namedVolumes: false——卷模式
+  // 跳过 chown 前置，#590）：
   // - running 容器：chown best-effort（ro 挂载的 openclaw.json 让 chown -R 报错属预期，目录仍可删）。
   // - stopped 容器：docker 无法在 stopped 容器内 exec chown，但 root 进程可能已在 home 留 root 属主
   //   文件；直接 remove 让非 root 控制面永久删不掉目录、行卡 REMOVING 无解。修法：start 恢复 → chown
   //   修复 → 再 stop；修复失败 → 抛 InstanceCleanupError 保留容器 + REMOVING 行（不 remove 保留机会）。
+  const chownFleet = () =>
+    makeFleetTest(ctx.prisma, { config: { portStart: 19600, portEnd: 19610, namedVolumes: false } })
 
   it('chown: running 容器 chown 失败（ro 文件报错属预期）→ best-effort 吞掉、正常清理', async () => {
-    const fl2 = makeFleetTest(ctx.prisma, { config: { portStart: 19600, portEnd: 19610 } })
+    const fl2 = chownFleet()
     // execSync 一律抛错（模拟 running 容器内 chown -R 撞 ro openclaw.json）。
     fl2.runtime.execSync = async () => {
       throw new Error('changing ownership: Read-only file system')
@@ -279,7 +284,7 @@ describe('orchestrator (接缝 #5 编排器 Port)', () => {
   })
 
   it('chown: 容器被外部停止 → start 恢复 → chown 修复 → 正常清理（root 属主文件可删）', async () => {
-    const fl2 = makeFleetTest(ctx.prisma, { config: { portStart: 19600, portEnd: 19610 } })
+    const fl2 = chownFleet()
     await fl2.orch.create('r4-extstop', ownerId)
     // stopped 分支：start 恢复容器后执行一次 chown（修复 root 属主文件）→ 成功。
     const chowns: string[] = []
@@ -296,7 +301,7 @@ describe('orchestrator (接缝 #5 编排器 Port)', () => {
   })
 
   it('chown: 容器已停且 start 也无法修复 → 抛错保留容器（不 remove 不留 root 目录孤儿）', async () => {
-    const fl2 = makeFleetTest(ctx.prisma, { config: { portStart: 19600, portEnd: 19610 } })
+    const fl2 = chownFleet()
     // execSync 对任意 name 都抛（start 恢复后重试仍失败）→ stopAndRemove 整体抛 InstanceCleanupError。
     fl2.runtime.execSync = async () => {
       throw new Error('daemon unreachable')
@@ -389,11 +394,11 @@ describe('#2 createComplete create 后重查取消 (Codex 第七轮 P2)', () => 
   })
 })
 
-// #590 named volume 拓扑编排（ADR 0011，OPENCLAW_NAMED_VOLUMES）
-// flag 开：createComplete 的 spec 携带代系 id（#360）派生三卷名；delete / bind 冲突清残留
-// 连带 docker volume rm 三卷（fake runtime 记录断言）。flag 关（默认）：spec 不携带 volumes、
-// delete 不删卷（旧行为）。每用例独立 makeFleetTest（removedVolumes 记录无跨用例耦合）。
-describe('named volume 编排（#590）', () => {
+// #590/#592 named volume 拓扑编排（ADR 0011，OPENCLAW_NAMED_VOLUMES）
+// 默认（本地/CI，#592）：createComplete 的 spec 携带代系 id（#360）派生三卷名；delete / bind
+// 冲突清残留连带 docker volume rm 三卷（fake runtime 记录断言）。显式 false（旧 bind）：spec 不
+// 携带 volumes、delete 不删卷。每用例独立 makeFleetTest（removedVolumes 记录无跨用例耦合）。
+describe('named volume 编排（#590/#592）', () => {
   let ctx: TestContext
   let ownerId: string
   beforeAll(async () => {
@@ -405,21 +410,22 @@ describe('named volume 编排（#590）', () => {
   })
 
   const nvFleet = () => makeFleetTest(ctx.prisma, { config: { namedVolumes: true } })
+  const oldBindFleet = () => makeFleetTest(ctx.prisma, { config: { namedVolumes: false } })
   const volNames = (id: string) => ({
     wiki: `openclaw-wiki-${id}`,
     workspace: `openclaw-workspace-${id}`,
     home: `openclaw-home-${id}`,
   })
 
-  it('flag 开启：createComplete 的 spec 携带代系 id 派生三卷名', async () => {
-    const fl = nvFleet()
-    const inst = await fl.orch.createReserve('nv-one', ownerId)
+  it('默认（#592 新默认）：createComplete 的 spec 携带代系 id 派生三卷名', async () => {
+    const fl = makeFleetTest(ctx.prisma)
+    const inst = await fl.orch.createReserve('nv-default', ownerId)
     await fl.orch.createComplete(inst, true)
-    expect(fl.runtime.containers.get('nv-one')?.spec.volumes).toEqual(volNames(inst.id))
+    expect(fl.runtime.containers.get('nv-default')?.spec.volumes).toEqual(volNames(inst.id))
   })
 
-  it('flag 关闭（默认）：spec 不携带 volumes（旧 bind 行为不变）', async () => {
-    const fl = makeFleetTest(ctx.prisma)
+  it('显式 false（旧 bind）：spec 不携带 volumes（旧行为保留）', async () => {
+    const fl = oldBindFleet()
     const inst = await fl.orch.createReserve('old-bind', ownerId)
     await fl.orch.createComplete(inst, true)
     expect(fl.runtime.containers.get('old-bind')?.spec.volumes).toBeUndefined()
@@ -489,8 +495,8 @@ describe('named volume 编排（#590）', () => {
     expect(fl.runtime.removedVolumes).toHaveLength(3)
   })
 
-  it('flag 关闭（默认）：delete 不删卷（旧行为）', async () => {
-    const fl = makeFleetTest(ctx.prisma)
+  it('显式 false（旧 bind）：delete 不删卷（旧行为）', async () => {
+    const fl = oldBindFleet()
     const inst = await fl.orch.createReserve('old-del', ownerId)
     await fl.orch.createComplete(inst, true)
     await fl.orch.delete('old-del')

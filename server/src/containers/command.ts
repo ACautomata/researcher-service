@@ -482,9 +482,9 @@ export class FleetCommand {
     this.leases.delete(name)
   }
 
-  // #590 named volume 拓扑（ADR 0011，OPENCLAW_NAMED_VOLUMES）：flag 开启时为代系 id（#360）
-  // 派生三卷名（spec 挂载 / 删除连带 volume rm 共用）；关闭（默认）→ undefined（旧 bind，不改
-  // 默认行为）。卷名每代唯一——删容器连卷删、同名 recreate 用新卷组（防代系串读）。
+  // #590/#592 named volume 拓扑（ADR 0011，OPENCLAW_NAMED_VOLUMES）：默认开启，为代系 id（#360）
+  // 派生三卷名（spec 挂载 / 删除连带 volume rm 共用）；显式关闭 → undefined（旧 bind）。
+  // 卷名每代唯一——删容器连卷删、同名 recreate 用新卷组（防代系串读）。
   private volumesFor(instId: string): NamedVolumes | undefined {
     return this.deps.config.namedVolumes ? namedVolumesFor(instId) : undefined
   }
