@@ -6,6 +6,11 @@ export const GATEWAY_INTERNAL_PORT = 18789
 
 // 容器名前缀：与原 compose 栈 openclaw-gateway 隔离
 export const CONTAINER_PREFIX = 'openclaw-gw-'
+// #590 named volume 名前缀（ADR 0011）：openclaw-<kind>-<id>，按代系 id（#360）派生
+// （runtime.namedVolumesFor）。容器删除时连带 docker volume rm 清理。
+export const VOLUME_WIKI_PREFIX = 'openclaw-wiki-'
+export const VOLUME_WORKSPACE_PREFIX = 'openclaw-workspace-'
+export const VOLUME_HOME_PREFIX = 'openclaw-home-'
 // 按 label 过滤管理容器生命周期
 export const LABEL_APP_KEY = 'app'
 export const LABEL_APP_VALUE = 'openclaw-fleet'

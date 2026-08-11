@@ -93,6 +93,7 @@ describe('containers 集成 smoke（真 docker daemon）', () => {
       publishHost: '127.0.0.1',
       healthHost: '127.0.0.1',
       panelOrigin: 'http://127.0.0.1:18789',
+      namedVolumes: false, // #590 默认旧 bind（smoke 保持默认行为）
       reservedPorts: defaultReservedPorts(),
       encryptionKeys: DEV_ENCRYPTION_KEYS,
     }

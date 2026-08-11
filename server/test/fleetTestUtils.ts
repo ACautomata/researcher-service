@@ -47,6 +47,7 @@ export function makeFleetTest(
     publishHost: '127.0.0.1',
     healthHost: '127.0.0.1',
     panelOrigin: 'http://127.0.0.1:18789', // #385 测试默认与网关 seed 一致
+    namedVolumes: false, // #590 默认旧 bind（不改默认行为）；用例按需覆盖开启
     reservedPorts: defaultReservedPorts(),
     encryptionKeys: DEV_ENCRYPTION_KEYS,
     ...overrides.config,

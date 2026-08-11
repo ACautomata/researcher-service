@@ -2,11 +2,35 @@
 // 业务层只依赖本接口（ContainerRuntime），docker 接触面在 DockerRuntime（dockerode），
 // 测试注入 FakeRuntime（接缝 #5 编排器 Port）。
 
-import { CONTAINER_PREFIX } from './constants'
+import { CONTAINER_PREFIX, VOLUME_HOME_PREFIX, VOLUME_WIKI_PREFIX, VOLUME_WORKSPACE_PREFIX } from './constants'
 
 // 实例名 → docker 容器名（openclaw-gw-<name>）
 export function containerName(name: string): string {
   return `${CONTAINER_PREFIX}${name}`
+}
+
+// #590 named volume 拓扑（ADR 0011）：每容器三卷。wiki/workspace 卷在子路径遮蔽 home 卷，
+// 属正常叠加；空卷首挂由镜像内 ~/.openclaw 骨架自动初始化（#588 派生镜像）。
+export interface NamedVolumes {
+  readonly wiki: string
+  readonly workspace: string
+  readonly home: string
+}
+
+// 按代系 id（#360）派生三卷名（openclaw-<kind>-<id>）——每代唯一，删容器连卷删、同名 recreate
+// 用新卷组，防在飞 wiki/长扫描期间容器被删+同名重建给他人时读写新 owner 数据。
+export function namedVolumesFor(instanceId: string): NamedVolumes {
+  return {
+    wiki: `${VOLUME_WIKI_PREFIX}${instanceId}`,
+    workspace: `${VOLUME_WORKSPACE_PREFIX}${instanceId}`,
+    home: `${VOLUME_HOME_PREFIX}${instanceId}`,
+  }
+}
+
+// 三卷删除顺序单一来源（docker volume rm 顺序：wiki → workspace → home；FakeRuntime 记录与
+// 测试断言同源，防四处手写顺序漂移）
+export function volumeOrder(v: NamedVolumes): [string, string, string] {
+  return [v.wiki, v.workspace, v.home]
 }
 
 // 创建一个容器所需的语义参数（orchestrator → runtime）
@@ -16,10 +40,15 @@ export interface ContainerSpec {
   readonly hostPort: number // 宿主映射端口（端口池分配）
   readonly gatewayToken: string // GATEWAY_TOKEN env 值（敏感：仅 env 注入，不落盘）
   readonly homeDir: string // 宿主 bind-mount home（instances/<id>/home，代系绑定 #360；
-  // rw bind 承载 workspace/wiki/state/logs）
+  // rw bind 承载 workspace/wiki/state/logs；OPENCLAW_NAMED_VOLUMES 开启时不用）
   readonly configDir: string // 宿主 bind-mount config 目录（instances/<id>/config，#366 codex P1
   // 只读边界）：home rw bind 下容器内进程（root + 0644 无约束）可持久改 openclaw.json → config
-  // 独立目录 ro bind + OPENCLAW_CONFIG_PATH 指其内 openclaw.json，容器侧不可写而宿主 rename 热加载保留）
+  // 独立目录 ro bind + OPENCLAW_CONFIG_PATH 指其内 openclaw.json，容器侧不可写而宿主 rename 热加载保留；
+  // OPENCLAW_NAMED_VOLUMES 开启时不用）
+  // #590 named volume 拓扑（ADR 0011）：提供时 buildRunOptions 生成三卷 Mounts 替代 home/config
+  // bind（挂载点 ~/.openclaw/wiki/main + ~/.openclaw/workspace + ~/.openclaw）；缺省 undefined =
+  // 旧 bind 模式（homeDir/configDir 生效）
+  readonly volumes?: NamedVolumes
   readonly llmApiKey: string // 全面板共享 LLM_API_KEY
 }
 
@@ -50,8 +79,10 @@ export interface ContainerRuntime {
   start(name: string): Promise<void>
   // 停容器（NotFound 幂等）
   stop(name: string): Promise<void>
-  // 删容器（v+force；NotFound 幂等）
-  remove(name: string): Promise<void>
+  // 删容器（v+force；NotFound 幂等）。volumes（#590 named volume 模式）提供时连带显式
+  // docker volume rm 三卷（ADR 0011：remove({v:true}) 只删匿名卷，named volume 须显式删；
+  // 容器 404 也尽力删卷——外部删容器不删卷，防卷越攒越多；卷 404 幂等）
+  remove(name: string, volumes?: NamedVolumes): Promise<void>
   // fire-and-forget 容器内执行（如 wiki compile）；NotFound 幂等
   execInContainer(name: string, cmd: string[]): Promise<void>
   // 同步等命令完成；退出码非 0 → 抛错（如 approve CLI）；NotFound 幂等
