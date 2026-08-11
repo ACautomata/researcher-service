@@ -10,6 +10,7 @@ import { useChatStore, newMsg, type Msg, type ApprovalItem, type ToolRow } from 
 import { ApiError } from '@/api/client'
 import {
   createGatewayChat,
+  createRequestId,
   type GatewayChat,
   type SessionDTO,
   type HistoryMessageDTO,
@@ -18,6 +19,7 @@ import {
 import { splitThinking } from '@/chat/thinking'
 import { extractMessageAttachments, extractMessageText, attachmentToMediaBlock, type MediaBlock } from '@/chat/eventTranslate'
 import type { Attachment } from '@/chat/attachments'
+import { createOutboxStore } from '@/chat/outboxStore'
 import { WS_AUTH_FAIL, WS_MUST_CHANGE_PASSWORD, WS_CONTAINER_ACCESS_DENIED, WS_GATEWAY_UNAVAILABLE } from '@/chat/closeCodes'
 
 // T07 斜杠命令选项（ChatComposer 菜单渲染 props；单一来源计算在 useChatConnection）
@@ -46,6 +48,9 @@ const INITIAL_HISTORY_LIMIT = 50
 export function useChatConnection(status: ChatStatus) {
   const chat = useChatStore()
   const auth = useAuthStore()
+  // #564: outbox 离线待发队列（sessionStorage 窄窗落盘）——「已点发送但网关还没回执」的消息
+  // 刷新/重连后自动重发。工厂默认取全局 sessionStorage；scope = 容器+会话。
+  const outbox = createOutboxStore()
 
   // 连接生命周期态（本属连接簇）：意外断线禁用发送、提示重连（codex P2 #4）；onReady/onClose 维护
   const disconnected = ref(false)
@@ -416,7 +421,15 @@ export function useChatConnection(status: ChatStatus) {
       if (!chat.selectedSession) await newSession()
       if (gen !== containerGen) return // newSession 期间又切容器：不连
       if (!chat.selectedSession) return // 会话创建失败（newSession 已显示错误）：不加载历史
-      void loadHistory(chat.selectedSession) // T3：加载当前会话历史（C2：重连补拉也恢复投影）
+      // #564: 先 loadHistory 再重发 outbox 残留——历史铺底后乐观 echo 才排到正确位置，且内容级
+      // 去重（§三.3）可识别「网关已受理但 ack 丢」的历史消息（防 UI 双条）。await 保证 resendOutbox
+      // 看到的是历史铺底后的 messages（fire-and-forget 会让去重对比空列表、重发排在较新回复之后）。
+      // loadHistory 内部 try/catch 不会 reject（401/错误各自收尾），await 安全。
+      await loadHistory(chat.selectedSession)
+      // resendOutbox 前重查守卫：await 期间切容器/断线则跳过（不重发错容器；断线由下次重连触发）。
+      if (gen === containerGen && chat.selectedContainer === name && gateway && !disconnected.value) {
+        resendOutbox(name, chat.selectedSession)
+      }
       // B0: 补拉待处理审批（切页/断线期间网关 push 的 exec.approval.requested 收不到）——
       // 不补拉则 agent 卡在 exec 审批时前端无卡可回，agent 卡死被网关 stuck-session recovery
       // abort（生产实测）。chat.addApproval 幂等（按 id 去重），与实时 push 不冲突。
@@ -787,10 +800,19 @@ export function useChatConnection(status: ChatStatus) {
     myRunId = '' // #53: 新 send 语境，ack runId 未知
     const myGw = gateway
     const sessionKey = chat.selectedSession
-    // chat.send RPC（幂等 key 在 gatewayChat 内生成）；网关拒绝（未配对/scope 不足）→ catch 收尾提示
+    const container = chat.selectedContainer
+    // #564: 幂等 key 在发送前生成并外注——ack 丢后的重发复用同一 id，经网关幂等去重防转录双跑。
+    // 入队时机 = gateway.send 调用前（与 pendingSend=true 同步点）：「在线但 ack 未回」窄窗落盘，
+    // ack 已回即删队（不打扰正常慢网关）。带附件消息不持久化（File/dataUrl 跨刷新失效，规格 §九）。
+    const id = createRequestId().replace(/[^a-z0-9]/g, '')
+    if (!hasAttachments) outbox.addPending(container, sessionKey, { id, text, createdAt: Date.now() })
+    // chat.send RPC（幂等 key 外注 #564）；网关拒绝（未配对/scope 不足）→ catch 收尾提示
     void myGw
-      .send(sessionKey, text, hasAttachments ? attachments : undefined)
+      .send(sessionKey, text, hasAttachments ? attachments : undefined, id)
       .then((runId) => {
+        // ack = 网关已受理（status:"started"）→ 确认送达，删队（无条件：ack 是权威；切容器后旧
+        // gateway 的 ack 也删旧容器队——消息已送达旧容器，留待无意义，且 scope 隔离互不影响）。
+        outbox.removePending(container, sessionKey, id)
         // #53: ack 返回本 run 的网关 runId（官方 chat.send ackPayload）——供首帧归属判别。
         // stale-gateway 守卫同 catch：切容器后旧 gateway 的 ack 不污染新 run 语境。
         if (gateway !== myGw || !pendingSend) return
@@ -807,7 +829,12 @@ export function useChatConnection(status: ChatStatus) {
         // 继续流式续帧。此时 finalize 占位会落定 streaming，续帧要么被当下次 send 的占位认领（跨 run
         // 文本污染 + 吞用户回复），要么占位永久卡。仅在「首帧未到即失败」（activeRunId 空，run 没起来）
         // 时 finalize + 清 pendingSend 放弃占位。
-        if (activeRunId) return
+        // #564: catch 按 activeRunId 细分删队——非空（网关已受理在续流）→ 删队（ack 慢而已）；空
+        //（run 未起来）→ 留队，下次重连/刷新经 resendOutbox 自动重发（规格 §三.2）。
+        if (activeRunId) {
+          outbox.removePending(container, sessionKey, id)
+          return
+        }
         // F3: RPC 失败复位 pendingSend——泄漏会让切会话变 phantom orphan（pendingAbandonCount++），
         // 下次发送首帧被当作孤儿丢弃、composer 永久锁死。
         pendingSend = false
@@ -816,6 +843,49 @@ export function useChatConnection(status: ChatStatus) {
       })
     chat.setInput('')
     return true
+  }
+
+  // #564: 重发 outbox 残留待发（刷新/断线重连统一触发点 = syncSessions 选定会话 + loadHistory 之后；
+  // 此时历史已铺底，乐观 echo 不会排到较新 assistant 回复之后）。逐条：
+  //  - 文本已在历史（网关已受理、ack 丢而已）→ remove 不重发（内容级去重防 UI 双条，规格 §三.3）；
+  //  - 否则按 send() 同款乐观 echo + gateway.send(sessionKey, text, undefined, item.id)——复用原
+  //    幂等 key（网关幂等去重防转录双跑）；ack 后 remove，失败留队下次再试（取走不删，重发不经宿主，
+  //    纯文本无附件，天然不碰附件预览条）。
+  async function resendOutbox(container: string, sessionKey: string) {
+    const items = outbox.takePending(container, sessionKey)
+    if (!items.length || !gateway || disconnected.value) return
+    const myGw = gateway
+    // 内容级去重（规格 §三.3）：取历史中 user 消息文本全集。历史侧无 createdAt 可比（Msg 不产
+    // 该字段），故只按 text 匹配——同文本歧义（两条同文本只受理一条/loadHistory 保留的本地在途
+    // 消息同文本）为 content-level 最小版的固有取舍：误删不会让消息「从 UI 消失」（同文本在渲染
+    // 中可见），误重发由网关幂等去重兜底，两端都可接受。
+    const inHistory = new Set(chat.messages.filter((m) => m.role === 'user').map((m) => m.text))
+    for (const item of items) {
+      if (inHistory.has(item.text)) {
+        outbox.removePending(container, sessionKey, item.id) // 已送达历史：确认点达成
+        continue
+      }
+      if (gateway !== myGw || disconnected.value) return // 中途断开/切走：剩余留待下次
+      chat.pushMessage(newMsg('user', item.text))
+      chat.pushMessage(newMsg('assistant'))
+      activeRunId = '' // 与 send() 同款：等首帧锚定新 run
+      pendingSend = true
+      myRunId = '' // #53: 重发是新 send 语境，ack runId 未知
+      void myGw
+        .send(sessionKey, item.text, undefined, item.id)
+        .then(() => outbox.removePending(container, sessionKey, item.id))
+        .catch(() => {
+          if (gateway !== myGw) return // 切走：旧容器消息留待下次进容器重发
+          // 与 send() 同款 catch 细分（规格 §三.2）：activeRunId 非空 = 重发已受理在续流 → 删队
+          //（ack 慢而已）；空 = run 未起来 → 留队，下次重连再试（幂等 key + 内容去重兜底不双跑）。
+          if (activeRunId) {
+            outbox.removePending(container, sessionKey, item.id)
+            return
+          }
+          pendingSend = false
+          finalizeLast() // 未受理：落定占位（composer 解锁），留队下次重连再试
+        })
+    }
   }
 
   // 统一发送入口（#459-T2 #463 #1）：宿主提供 onSend（含附件校验/清空预览条）则走它（Enter/斜杠/
