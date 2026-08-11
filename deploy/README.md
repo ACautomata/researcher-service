@@ -17,18 +17,21 @@
 
 ```
 Express 控制面 (server/src/containers)
-    │ 1. 以 deploy/openclaw.json 为底渲染 instances/<name>/openclaw.json（强制 port/bind/token 占位）
+    │ 1. 以 deploy/openclaw.json 为底渲染每容器 openclaw.json（强制 port/bind/token 占位），
+    │    putArchive 落容器内 ~/.openclaw/openclaw.json（静态 config，#591，零宿主路径）
     │ 2. Docker SDK 挂 /var/run/docker.sock 建/删容器 openclaw-gw-<name>
-    │ 3. 共享只读模板 OPENCLAW_TEMPLATE_DIR（researcher 克隆）cp -a 预填充实例 home
+    │ 3. named volume 拓扑（ADR 0011，#590/#592）：openclaw-wiki/workspace/home-<id> 三卷，
+    │    空卷首挂由镜像内 ~/.openclaw 骨架自动初始化；home 模板（researcher 克隆）生产经
+    │    server 镜像构建期入镜像（ADR 0013，#593），不再挂载宿主
     ▼
 OpenClaw 容器 fleet（容器内统一 18789，宿主端口池 19000–19999 取最小空闲）
 ```
 
-- **配置单一来源在本目录**：`deploy/openclaw.json` 是精简版配置。每容器渲染产物落到
-  `instances/<name>/openclaw.json`，bind-mount(ro) 覆盖进容器；`GATEWAY_TOKEN` 每容器独立生成、
-  经 env 注入，JSON 内仅 `${GATEWAY_TOKEN}` 占位。**凭证边界（ADR 0006 决定 7 修订）**：真值仍不落
-  服务端盘/日志，但 bootstrap token / deviceToken **可下发给容器属主的浏览器设备**（B-直连下浏览器经
-  隧道直连网关所必需，有效安全级≈面板 JWT；网关藏隧道后凭证离了隧道无从使用）。
+- **配置单一来源在本目录**：`deploy/openclaw.json` 是精简版配置。每容器渲染产物经 putArchive 落
+  容器内 `~/.openclaw/openclaw.json`（named volume / bind home 内，零宿主路径）；`GATEWAY_TOKEN`
+  每容器独立生成、经 env 注入，JSON 内仅 `${GATEWAY_TOKEN}` 占位。**凭证边界（ADR 0006 决定 7
+  修订）**：真值仍不落服务端盘/日志，但 bootstrap token / deviceToken **可下发给容器属主的浏览器
+  设备**（B-直连下浏览器经隧道直连网关所必需，有效安全级≈面板 JWT；网关藏隧道后凭证离了隧道无从使用）。
 - **端口池**：宿主侧池 `19000–19999`（避开被本单容器 compose 占用的 18789），创建取最小空闲、
   删除容器即回收。容器内统一 18789，靠 Docker 网络命名空间隔离。
 - **docker.sock 安全**：控制面挂 `/var/run/docker.sock` = 等价 root（spec §5.4 明示风险）。本地/可信

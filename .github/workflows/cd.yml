@@ -4,7 +4,9 @@
 # 镜像：server（TS/Express 控制面，替代退役的 Django backend，#341 M9）+ frontend（Vue/Vite→nginx）
 # + openclaw（自建派生 OpenClaw 镜像，issue #588：pdftotext + wiki/workspace 骨架，ADR 0011/0013）
 # 三镜像，tag `:latest` + `:<CI head_sha>`（head_sha 取自通过的 CI run，使 latest/sha 精确对应该
-# commit，便于 :sha 回滚）。server 容器运行时经 OPENCLAW_IMAGE 默认值拉派生 openclaw 镜像。
+# commit，便于 :sha 回滚）。server 镜像构建期经 buildx 多 context 注入 home 模板（researcher 克隆）
+# 与 deploy/openclaw.json（ADR 0013：#593 模板入镜像，生产不再挂载任何宿主数据路径）；server 容器
+# 运行时经 OPENCLAW_IMAGE 默认值拉派生 openclaw 镜像。
 # 部署：appleboy/scp-action 推 compose + 渲染 .env → /www/panel；appleboy/ssh-action 远端
 # docker login（持久，供运行时 OpenClaw 拉取复用宿主 daemon 凭证）→ pull → up -d → prune → /api/health 健康门。
 #
@@ -12,7 +14,7 @@
 #   REMOTE_HOST REMOTE_USER DEPLOY_KEY            —— SSH 登录宿主
 #   GHCR_PULL_USER GHCR_PULL_TOKEN                —— 宿主拉私有 GHCR（read:packages PAT）
 #   JWT_SECRET PANEL_PUBLIC_ORIGIN LLM_API_KEY CREDENTIAL_ENCRYPTION_KEYS —— server 运行时
-#   RESEARCHER_REPO（可选，默认 https://github.com/ACautomata/researcher.git）
+#   RESEARCHER_REPO（可选，默认 https://github.com/ACautomata/researcher.git）—— 构建机 clone home 模板
 
 name: CD
 
@@ -70,11 +72,31 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Clone researcher home template (build-time, ADR 0013)
+        # issue #593：home 模板构建期 clone 并作为 buildx 多 context 注入 server 镜像
+        # （Dockerfile COPY --from=template），不再 scp/挂载到宿主 /srv/openclaw/template。
+        # 每次构建 clone 最新 → 模板随镜像 :sha 版本化（回滚镜像即回滚模板）；
+        # clone 失败即构建失败 → CD 红（模板是构建必需，不带病出镜像）。
+        # 清理 .git：COPY --from=template 整棵入镜像 + provision cp -a 会一并拷进容器
+        # ~/.openclaw/.git（模板只作内容源，版本由镜像 :sha 记录，无需携带仓库元数据）。
+        env:
+          RESEARCHER_REPO: ${{ secrets.RESEARCHER_REPO }}
+        run: |
+          REPO="${RESEARCHER_REPO:-https://github.com/ACautomata/researcher.git}"
+          git clone --depth 1 "$REPO" "${{ github.workspace }}/_templates/researcher"
+          rm -rf "${{ github.workspace }}/_templates/researcher/.git"
+
       - name: Build & push server image
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a  # v7.3.0
         with:
           context: server
           file: server/Dockerfile
+          # 多 context（buildx named context，Dockerfile 以 COPY --from=<name> 消费）：
+          #   template=researcher 克隆（home 模板，ADR 0013 入镜像）
+          #   deploy=本仓库 deploy/（openclaw.json 配置单一来源入镜像）
+          build-contexts: |
+            template=${{ github.workspace }}/_templates/researcher
+            deploy=${{ github.workspace }}/deploy
           push: true
           tags: |
             ${{ env.SERVER_IMAGE }}:latest
@@ -116,11 +138,9 @@ jobs:
         run: |
           mkdir -p _deploy
           cp deploy/docker-compose.deploy.yml _deploy/
-          # openclaw.json 模板（配置单一来源）：随 compose 一并分发，compose 挂载进 server 容器
-          # 覆盖镜像内不存在的默认路径（见 compose OPENCLAW_TEMPLATE_JSON）。server 镜像构建
-          # context=server 不含 deploy/，镜像内 TEMPLATE_JSON 默认路径 <cwd>/../deploy 不存在 →
-          # 首次创建容器即 90003；此处分发保证宿主机 /www/panel/openclaw.json 存在。
-          cp deploy/openclaw.json _deploy/openclaw.json
+          # openclaw.json 模板（配置单一来源）不再随 CD 分发：#593（ADR 0013）构建期 COPY 进
+          # server 镜像（上方 build-contexts deploy=），compose OPENCLAW_TEMPLATE_JSON 指向镜像内
+          # /app/deploy/openclaw.json。
           # 命名 .env：compose 变量替换（$PANEL_SERVER_IMAGE 等）与 env_file 都自动读它，
           # v1/v2 CLI 行为一致（--env-file 仅 v2 且只管 env_file 不管替换；v1 缺 .env 直接报错）。
           # #341 M9：DJANGO_SECRET_KEY → JWT_SECRET（server config.ts 生产必填 ≥32 字符），
@@ -151,25 +171,19 @@ jobs:
         env:
           GHCR_PULL_USER: ${{ secrets.GHCR_PULL_USER }}
           GHCR_PULL_TOKEN: ${{ secrets.GHCR_PULL_TOKEN }}
-          RESEARCHER_REPO: ${{ secrets.RESEARCHER_REPO }}
           OPENCLAW_IMAGE: ${{ env.OPENCLAW_IMAGE }}
         with:
           host: ${{ secrets.REMOTE_HOST }}
           username: ${{ secrets.REMOTE_USER }}
           key: ${{ secrets.DEPLOY_KEY }}
-          envs: GHCR_PULL_USER,GHCR_PULL_TOKEN,RESEARCHER_REPO,OPENCLAW_IMAGE
+          envs: GHCR_PULL_USER,GHCR_PULL_TOKEN,OPENCLAW_IMAGE
           script: |
             set -euo pipefail
 
             APP_DIR=/www/panel
-            TEMPLATE_DIR=/srv/openclaw/template
-            # 防御性 bootstrap：缺则建（首次部署）；后续幂等。
-            mkdir -p "$APP_DIR" /srv/openclaw
-            if [ ! -d "$TEMPLATE_DIR/.git" ]; then
-              echo "[deploy] cloning researcher template -> $TEMPLATE_DIR"
-              rm -rf "$TEMPLATE_DIR"
-              git clone --depth 1 "${RESEARCHER_REPO:-https://github.com/ACautomata/researcher.git}" "$TEMPLATE_DIR"
-            fi
+            # 防御性 bootstrap：缺则建（首次部署）；后续幂等。home 模板不再落宿主
+            # （ADR 0013：#593 构建期入 server 镜像，见构建步骤 clone + build-contexts）。
+            mkdir -p "$APP_DIR"
 
             # 持久登录 ghcr：deploy 拉面板镜像 + 运行时后端经宿主 daemon 拉 OpenClaw 镜像共用此凭证。
             echo "$GHCR_PULL_TOKEN" | docker login ghcr.io -u "$GHCR_PULL_USER" --password-stdin
