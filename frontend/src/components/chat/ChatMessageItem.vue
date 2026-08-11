@@ -28,10 +28,25 @@ defineSlots<{
   'tool-line'?: (props: { tool: Msg['tools'][number] }) => unknown
 }>()
 
-// 媒体块 src（纯 base64）→ 完整 dataURL。<img>/<audio>/<video> 的 src 须带 data:<mime>;base64, 前缀。
-// 0 信任：src 已是完整 dataURL（带 data: 前缀）时原样返回，否则补前缀（采集/网关两源 content 形态兼容）。
+// 媒体块 src（纯 base64 或完整 url）→ 渲染可用 src。
+// 0 信任：url 形态（http/https 开头）原样返回（真 url 附件不拼 base64）；src 已是完整 dataURL
+// （带 data: 前缀）时原样返回；否则补 data:<mime>;base64, 前缀（采集/网关 base64 源兼容）。
+// #568: 新增 http(s) 分支——url 形态附件此前会被拼成 data:image/*;base64,https://... 错误前缀。
 function mediaSrc(m: MediaBlock): string {
+  if (/^https?:\/\//i.test(m.src)) return m.src
   return m.src.startsWith('data:') ? m.src : `data:${m.mimeType};base64,${m.src}`
+}
+// #568: 附件体积人类可读（字节 → B/KB/MB）；durationMs → mm:ss（播放器惯用格式）。
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
+function formatDuration(ms: number): string {
+  const totalSec = Math.max(0, Math.round(ms / 1000))
+  const min = Math.floor(totalSec / 60)
+  const sec = totalSec % 60
+  return `${min}:${String(sec).padStart(2, '0')}`
 }
 async function copyMessage(): Promise<void> {
   try {
@@ -81,7 +96,9 @@ const copyState = ref<'idle' | 'copied' | 'failed'>('idle')
       <MarkdownRenderer v-if="msg.role === 'assistant'" :text="msg.text" :streaming="msg.streaming" />
       <template v-else>{{ msg.text }}<span v-if="msg.streaming" class="cursor"></span></template>
       <!-- #459-T3 #464：附件媒体块（image/audio/video）——历史/流式/发送 echo 三源统一渲染。
-           纯图片消息（text 空）也经此渲染出图片，不影响对话展示。 -->
+           纯图片消息（text 空）也经此渲染出图片，不影响对话展示。
+           #568: 附件元数据呈现——image 尺寸/体积、audio 时长/体积、video 尺寸/时长（有才显示，
+           元数据缺省则与现状无差）；document 第 4 分支渲染成下载链接卡（label/fileName + sizeBytes）。 -->
       <div v-if="msg.media.length" class="media-list" data-test="media-list">
         <template v-for="(m, mi) in msg.media" :key="`media-${mi}`">
           <img
@@ -92,22 +109,58 @@ const copyState = ref<'idle' | 'copied' | 'failed'>('idle')
             :alt="m.fileName || '图片附件'"
             loading="lazy"
           />
+          <div
+            v-if="m.type === 'image' && ((m.width && m.height) || m.sizeBytes != null)"
+            class="media-meta"
+            data-test="media-meta"
+          >
+            <span v-if="m.width && m.height">{{ m.width }} × {{ m.height }}</span>
+            <span v-if="m.sizeBytes != null">{{ formatBytes(m.sizeBytes) }}</span>
+          </div>
           <audio
-            v-else-if="m.type === 'audio'"
+            v-if="m.type === 'audio'"
             class="media-audio"
             data-test="media-audio"
             :src="mediaSrc(m)"
             controls
             preload="metadata"
           ></audio>
+          <div
+            v-if="m.type === 'audio' && (m.durationMs != null || m.sizeBytes != null)"
+            class="media-meta"
+            data-test="media-meta"
+          >
+            <span v-if="m.durationMs != null">{{ formatDuration(m.durationMs) }}</span>
+            <span v-if="m.sizeBytes != null">{{ formatBytes(m.sizeBytes) }}</span>
+          </div>
           <video
-            v-else-if="m.type === 'video'"
+            v-if="m.type === 'video'"
             class="media-video"
             data-test="media-video"
             :src="mediaSrc(m)"
             controls
             preload="metadata"
           ></video>
+          <div
+            v-if="m.type === 'video' && ((m.width && m.height) || m.durationMs != null)"
+            class="media-meta"
+            data-test="media-meta"
+          >
+            <span v-if="m.width && m.height">{{ m.width }} × {{ m.height }}</span>
+            <span v-if="m.durationMs != null">{{ formatDuration(m.durationMs) }}</span>
+          </div>
+          <!-- #568: document 下载链接卡——base64 形态 href 为 dataURL（mime 段重建）、url 形态直用
+               完整 url；download 属性触发下载。label 优先于 fileName 展示。 -->
+          <a
+            v-if="m.type === 'document'"
+            class="media-document"
+            data-test="media-document"
+            :href="mediaSrc(m)"
+            :download="m.fileName"
+          >
+            <span class="media-document-name">{{ m.label || m.fileName || '附件' }}</span>
+            <span v-if="m.sizeBytes != null" class="media-document-size">{{ formatBytes(m.sizeBytes) }}</span>
+          </a>
         </template>
       </div>
       <div v-if="msg.role === 'assistant' && !msg.streaming" class="ai-notice" data-test="ai-notice">
@@ -163,6 +216,14 @@ const copyState = ref<'idle' | 'copied' | 'failed'>('idle')
 .media-image { max-width: 100%; max-height: 320px; border-radius: 8px; object-fit: contain; display: block; }
 .media-audio { max-width: 100%; width: 320px; display: block; }
 .media-video { max-width: 100%; max-height: 320px; border-radius: 8px; display: block; }
+
+/* #568: 附件元数据行（尺寸/时长/体积）——小字次要色，位于媒体元素下方 */
+.media-meta { display: flex; gap: 10px; margin-top: 4px; font-size: 12px; color: var(--el-text-color-secondary); }
+
+/* #568: document 下载链接卡——文件名可截断、体积右对齐 */
+.media-document { display: flex; align-items: center; justify-content: space-between; gap: 10px; max-width: 100%; min-width: 0; padding: 8px 12px; border: 1px solid var(--el-border-color); border-radius: 8px; background: var(--el-fill-color); color: var(--el-color-primary); text-decoration: none; font-size: 13px; }
+.media-document-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.media-document-size { flex-shrink: 0; font-size: 12px; color: var(--el-text-color-secondary); }
 
 /* #555：工具聚合摘要折叠卡（>=2 个工具调用时）——摘要行 + 展开逐行 ToolLine */
 .tool-group { min-width: 0; background: var(--el-fill-color); border: 1px solid var(--el-border-color); border-radius: 9px; padding: 6px 12px; margin: 4px 0; font-size: 12.5px; }
