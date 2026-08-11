@@ -1,5 +1,5 @@
 // #371-5 门控集成 smoke（真网关配对闭环实测，issue #378）。
-// 在真容器网关（ghcr.io/openclaw/openclaw:2026.7.1-browser）上验证 ADR 0006 遗留实测项①：
+// 在真容器网关（默认官方基线，见下方 IMAGE；派生镜像内容与配对协议无关）上验证 ADR 0006 遗留实测项①：
 // 浏览器无 token + bootstrap 首连 → 网关 PAIRING_REQUIRED{requestId} → 后端 approve（容器内
 // docker exec `openclaw devices approve`）→ 重连 → hello-ok 下发 deviceToken → 后续连接用
 // deviceToken 直接通（无再次配对）。
@@ -59,7 +59,8 @@ import { makeWsGatewayConnector } from '../src/chat/gatewayConnector'
 import { DEV_ENCRYPTION_KEYS } from '../src/crypto'
 import { ensureImageAvailable } from './smokeDocker'
 
-// ---- 镜像 / 容器参数（对齐 containers-smoke）----
+// ---- 镜像 / 容器参数（对齐 containers-smoke：默认官方基线——编排与镜像内容无关，
+// 避免私有派生 GHCR tag 的本地前置；派生镜像由 config OPENCLAW_IMAGE 注入 + 静态断言兜底）----
 const IMAGE = process.env.OPENCLAW_IMAGE ?? 'ghcr.io/openclaw/openclaw:2026.7.1-browser'
 const BOX = 'pairing-smoke'
 

@@ -56,6 +56,8 @@ describe('ensureImageAvailable / drainPull（pull progress 消费，codex PR#346
   })
 })
 
+// 编排逻辑与镜像内容无关：smoke 默认官方基线，避免「私有派生 GHCR tag 未推/需凭证」的
+// 本地前置（派生镜像由 config.ts OPENCLAW_IMAGE 注入 + openclawImage.test.ts 静态断言兜底）。
 const IMAGE = process.env.OPENCLAW_IMAGE ?? 'ghcr.io/openclaw/openclaw:2026.7.1-browser'
 
 describe('containers 集成 smoke（真 docker daemon）', () => {
