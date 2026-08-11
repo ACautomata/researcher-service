@@ -69,6 +69,17 @@ class FakeFileArchive implements FileArchive {
     if (!this.files.has(relPath)) throw new FileNotFound(relPath)
     this.files.delete(relPath)
   }
+
+  // #591 config 方法（files REST 不消费；仅满足 Port 契约——按容器名存 openclaw.json 文本）
+  readonly configs = new Map<string, string>()
+  async writeConfig(name: string, content: string): Promise<void> {
+    this.configs.set(name, content)
+  }
+  async readConfig(name: string): Promise<string> {
+    const c = this.configs.get(name)
+    if (c === undefined) throw new FileNotFound('openclaw.json')
+    return c
+  }
 }
 
 let seq = 0

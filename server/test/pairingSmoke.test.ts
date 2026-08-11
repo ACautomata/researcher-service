@@ -32,7 +32,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import http, { type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import path from 'node:path'
 import { generateKeyPairSync, createHash, sign as ed25519Sign } from 'node:crypto'
@@ -50,6 +50,7 @@ import { seedUser, login, bearer } from './helpers'
 import { FleetDeps } from '../src/containers/deps'
 import { Orchestrator } from '../src/containers/orchestrator'
 import { DockerRuntime } from '../src/containers/dockerRuntime'
+import { DockerFileArchive } from '../src/files/dockerArchive'
 import { containerName } from '../src/containers/runtime'
 import { InlineLifecycleQueue } from '../src/containers/lifecycleQueue'
 import { defaultReservedPorts, type FleetConfig } from '../src/containers/values'
@@ -248,7 +249,9 @@ describe('真网关配对闭环 smoke（#371-5 / #378）', () => {
     runtime = new DockerRuntime(undefined, cfg.publishHost)
     // 残留容器兜底（上次失败 may 残留 unless-stopped 容器 → docker run name 冲突）：先清再建。
     await runtime.remove(BOX).catch(() => {})
-    const deps = new FleetDeps(runtime, cfg, { queue: new InlineLifecycleQueue() })
+    // #591：config 写读经 FileArchive（createComplete 落容器内 openclaw.json；此处读容器内验证）
+    const archive = new DockerFileArchive()
+    const deps = new FleetDeps(runtime, cfg, { queue: new InlineLifecycleQueue(), archive })
     orch = new Orchestrator(deps, ctx.prisma)
     // 挂载 containers 路由（bootstrap-token / approve 走真实 HTTP + 真 docker exec）。
     const app = createApp({ prisma: ctx.prisma, orchestrator: orch, runtime })
@@ -265,12 +268,12 @@ describe('真网关配对闭环 smoke（#371-5 / #378）', () => {
     containerPort = created.port
     expect(created.status).toBe('running')
 
-    // #386 生产形态证明：容器 openclaw.json（宿主 instances/<id>/config/openclaw.json，ro bind 进
-    // 容器）的 gateway.controlUi.allowedOrigins 须含配置 panelOrigin——ConfigRenderer 强制点
-    //（#385），隧道连网关的 Origin header 与容器允许列表同源闭环。
-    const containerConfig = JSON.parse(
-      readFileSync(path.join(cfg.root, 'instances', created.id, 'config', 'openclaw.json'), 'utf8'),
-    ) as { gateway?: { controlUi?: { allowedOrigins?: string[] } } }
+    // #386 生产形态证明：容器内 openclaw.json（#591 起经 putArchive 落 ~/.openclaw/openclaw.json，
+    // 不再落宿主 instances/<id>/config）的 gateway.controlUi.allowedOrigins 须含配置 panelOrigin——
+    // ConfigRenderer 强制点（#385），隧道连网关的 Origin header 与容器允许列表同源闭环。
+    const containerConfig = JSON.parse(await archive.readConfig(BOX)) as {
+      gateway?: { controlUi?: { allowedOrigins?: string[] } }
+    }
     expect(containerConfig.gateway?.controlUi?.allowedOrigins).toContain(cfg.panelOrigin)
 
     // 端口映射实况检查（CI 定位 #378）：daemon 侧 NetworkSettings.Ports 若为空（{}），docker-proxy

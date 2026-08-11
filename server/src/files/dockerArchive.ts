@@ -11,10 +11,14 @@
 import Docker from 'dockerode'
 import { Readable } from 'node:stream'
 import { containerName } from '../containers/runtime'
+import { HOME_BIND } from '../containers/constants'
 import { FileExists, FileInvalidPath, FileNotFound } from './errors'
 import type { DirListing, FileArchive, FileEntry, FileReading, FileRoot } from './fsPort'
 import { FILE_ROOTS, MAX_FILE_READ_BYTES, WALK_LIMIT } from './values'
 import { alignTo, createTarFile, parseNumeric, parseTar, type TarEntry } from './tar'
+
+// #591 静态 config：容器内 openclaw.json 固定路径（gateway 默认读取位，无 OPENCLAW_CONFIG_PATH）
+const CONFIG_PATH = `${HOME_BIND}/openclaw.json`
 
 // tar 条目名归一化（对齐 Go archive/tar 产出）：去 './' 前缀、去尾 '/'；根 '.' → null（跳过）。
 // 归一化后条目名即「相对 root 的完整相对路径」（getArchive 的 tar 名相对传入路径展开）。
@@ -245,5 +249,29 @@ export class DockerFileArchive implements FileArchive {
     if (probed.kind === 'ok' && probed.root.type === 'directory') throw new FileInvalidPath(relPath) // 只支持删文件
     await this.start(name)
     await this.execSync(name, ['rm', '-f', '--', absPath])
+  }
+
+  // ---- #591 静态 config（内部机制，REST 不可达）----
+
+  // upsert 写容器内 ~/.openclaw/openclaw.json：不 probe 存在性、不 start、不 exec mkdir——
+  // HOME_BIND 挂载点恒存在（镜像骨架/镜像默认），putArchive 对 created/stopped/running 容器
+  // 均可用（daemon 直接解包到容器 rootfs，无需进程）。create 流程即「create 容器 → writeConfig
+  // → start」，首启 gateway 就读到渲染配置；改配置后须重启容器生效（静态 config，#366 回退）。
+  async writeConfig(name: string, content: string): Promise<void> {
+    const container = this.client().getContainer(containerName(name))
+    await container.putArchive(Readable.from([createTarFile('openclaw.json', Buffer.from(content, 'utf8'))]), {
+      path: HOME_BIND,
+    })
+  }
+
+  // 读容器内 openclaw.json 全文；不存在（daemon 404）→ FileNotFound。
+  async readConfig(name: string): Promise<string> {
+    const probed = await this.probe(name, CONFIG_PATH)
+    if (probed === null) throw new FileNotFound('openclaw.json')
+    if (probed.kind === 'oversized' || probed.root.type !== 'file') throw new FileInvalidPath('openclaw.json')
+    const full = parseTar(probed.buf, { collectData: true, maxDataBytes: MAX_FILE_READ_BYTES })
+    const entry = full[0]
+    if (!entry) throw new FileNotFound('openclaw.json')
+    return (entry.data ?? Buffer.alloc(0)).toString('utf8')
   }
 }
