@@ -5,8 +5,14 @@
 
 // 翻译输出的渲染帧（对齐 ChatView 现有 onText/onDone/onError/onApproval/onApprovalResolved/onTool 签名）。
 export type ChatFrame =
-  | { type: 'text'; runId: string; delta: string; replace?: boolean }
-  | { type: 'done'; runId: string }
+  // #565: thinking?: string | null —— 结构化 thinking 块提取（方案 A：翻译层提取随帧携带）。
+  // 仅在 replace 快照 / final 帧可能非 undefined；delta 增量帧恒 undefined（增量字段是纯文本串，
+  // 无 content[]），消费端对 undefined 跳过覆盖、走内联 <thinking> 路（splitThinking）现状。
+  | { type: 'text'; runId: string; delta: string; replace?: boolean; thinking?: string | null }
+  // #565: done 帧可携带 thinking——final 权威文本与流式累积相等/无文本（thinking-only）时翻译层
+  // 不产 text 帧（无帧可挂），经 done 帧独立数据通道携带（不经 handleText 的 raw 逻辑，与
+  // attachment 帧同哲学；不等价于谎报文本变更的 replace 帧）
+  | { type: 'done'; runId: string; thinking?: string | null }
   // runId 可选：run 级错误挂 runId（前端按 runId 过滤）；无 runId 为连接/会话级错误（照常显示）
   | { type: 'error'; runId?: string; message: string }
   | { type: 'approval'; id: string; kind: string; command: string; sessionKey: string | null; agentId: string | null }
@@ -64,6 +70,29 @@ export function extractMessageText(message: unknown): string {
       .join('')
   }
   return ''
+}
+
+// #565 结构化 thinking 块提取（对齐官方 message-extract.ts extractThinking，C 档自写）：
+// 取 message.content[] 里 type==='thinking' 块的 thinking 字段（string 才取）、逐块 trim、丢空串、
+// 多块 '\n' join；全空/无块/content 非数组/message 非对象 → null（区别于 extractMessageText 的 ''）。
+// 0 信任：非对象 message / 块非对象 / thinking 非 string 一律跳过。**不读 text 字段兜底**（官方只读
+// thinking；无实测证据不预设变体）。与内联 <thinking> 标签剥离（thinking.ts splitThinking）双路并存、
+// 各司其职——本函数作用在结构化 content[] 块，splitThinking 作用在累积内联标签文本串。
+export function extractThinking(message: unknown): string | null {
+  if (!message || typeof message === 'string') return null
+  const obj = asRecord(message)
+  const content = obj.content
+  if (!Array.isArray(content)) return null
+  const parts: string[] = []
+  for (const block of content) {
+    if (!block || typeof block !== 'object') continue
+    const b = asRecord(block)
+    if (b.type !== 'thinking') continue
+    if (typeof b.thinking !== 'string') continue
+    const cleaned = b.thinking.trim()
+    if (cleaned) parts.push(cleaned)
+  }
+  return parts.length > 0 ? parts.join('\n') : null
 }
 
 // ---- #459-T3 #464：附件块提取（与 extractMessageText 并列的独立数据通道）----
@@ -265,10 +294,25 @@ export class ChatEventTranslator {
   private translateDelta(runId: string, payload: Record<string, unknown>): ChatFrame[] {
     if (payload.replace) {
       const snapshot = extractMessageText(payload.message)
+      // #565: 结构化 thinking 块（replace 快照 content[]）随帧携带；无块（null）不挂字段
+      const thinking = extractThinking(payload.message)
       if (snapshot) {
         // replace=true + 快照：整段替换（前缀/非前缀均正确）。前端按 replace 标志 set 而非 append
         this.sent.set(runId, snapshot)
-        return [{ type: 'text', runId, delta: snapshot, replace: true }]
+        return [
+          {
+            type: 'text',
+            runId,
+            delta: snapshot,
+            replace: true,
+            ...(thinking !== null ? { thinking } : {}),
+          },
+        ]
+      }
+      if (thinking !== null) {
+        // #565: thinking-only replace 快照（思考先于正文的模型输出）：无文本可渲染——发 delta=''
+        // 增量帧携带思考（delta='' 不改变前端 raw 累积，仅覆盖 thinking；sent 不更新）。
+        return [{ type: 'text', runId, delta: '', thinking }]
       }
       // #459-T3 #464：replace 快照无文本但含媒体块（纯图片 run 的流式快照）→ 产 attachment 帧，
       // 不回退 deltaText（媒体块不在 deltaText 增量字段里）。
@@ -298,23 +342,39 @@ export class ChatEventTranslator {
     // #560: 终态 message 来源从 payload.message 换成归约后的 currentRun.message（SDK updateRun 已把
     //「delta 期快照 → final 权威 message」归一，含「final 无 message 时沿用 delta 快照」的保留逻辑）——
     // 替换散在 delta-replace 快照与 final 提取两处的 message 归一化（规格 §2.2）。
-    const message = extractMessageText(run.message ?? payload.message)
+    // 局部提升：文本/思考/附件三路共用同一 message 来源（防多点漂移，code-review）
+    const rawMessage = run.message ?? payload.message
+    const message = extractMessageText(rawMessage)
+    // #565: 结构化 thinking 块提取（final 权威 content[]）——随产出的 text 帧携带（handleText 以
+    // ?? 覆盖内联剥离结果）；null = 无结构化块，帧不挂字段（增量帧/无块帧保持现状）。
+    const structThinking = extractThinking(rawMessage)
     const sent = this.sent.get(runId) ?? ''
     // final.message 可能含此前未在 delta 投递的尾部文本 → 先补 text 再收尾（r13:128-129）
     if (message && message.startsWith(sent) && message.length > sent.length) {
       const tail = message.slice(sent.length)
       this.sent.set(runId, sent + tail)
-      out.push({ type: 'text', runId, delta: tail })
+      out.push({
+        type: 'text',
+        runId,
+        delta: tail,
+        ...(structThinking !== null ? { thinking: structThinking } : {}),
+      })
     } else if (message && !message.startsWith(sent)) {
       // F9: 非前缀 final（空白规范化 / markdown 改写 / 重复 delta 使 sent 翻倍）——权威最终文本与
       // 流式累积不一致。若只发 done，权威文本被静默丢弃、UI 停在未规范化的流式态。发整段 replace
       // 帧（协议支持 replace 快照；前端按 replace 标志 set 而非 append），纠正流式投影。
       this.sent.set(runId, message)
-      out.push({ type: 'text', runId, delta: message, replace: true })
+      out.push({
+        type: 'text',
+        runId,
+        delta: message,
+        replace: true,
+        ...(structThinking !== null ? { thinking: structThinking } : {}),
+      })
     }
     // #459-T3 #464：final.message 含 image/audio/video 块（browser 截图/AI 工具产出多媒体）→
     // 产 attachment 帧（权威最终媒体，与 text 帧独立通道）。纯媒体 run（无文本）也经此渲染。
-    const media = extractMessageAttachments(run.message ?? payload.message)
+    const media = extractMessageAttachments(rawMessage)
     if (media.length) out.push({ type: 'attachment', runId, media })
     // #560: error/timeout 细分——译成 error 帧而非 done（规格 §2.1 三分支坍成「读 currentRun.status
     // 一个 switch」的 error 分支）。尾部/媒体已先行补发（权威内容不丢，同 done 收尾路径）。
@@ -324,7 +384,15 @@ export class ChatEventTranslator {
       const message = run.errorMessage ?? run.errorKind ?? 'run 执行失败'
       return [...out, { type: 'error', runId, message }]
     }
-    out.push({ type: 'done', runId })
+    // #565: done 帧携带结构化 thinking——final 权威文本与流式累积相等/无文本（thinking-only）时
+    // 本分支未产 text 帧（tail/replace 已带 thinking 时无需重复）；思考常只在 final 的 content[]
+    // 才出现（delta 增量是纯文本串），经 done 帧独立通道携带（消费端 handleDone 在 finalizeLast
+    // 前写入，terminal 重解析为空时保留——不谎报文本变更，不经 handleText 的 raw 逻辑）。
+    out.push({
+      type: 'done',
+      runId,
+      ...(structThinking !== null && !out.some((f) => f.type === 'text') ? { thinking: structThinking } : {}),
+    })
     // #560: 终态手动 sent.delete 删除——SDK 终态 identity 记入 acceptedFinalMessageIdentities
     //（规格 §2.3）。_sent 条目转冷条目，靠容量上限 + reset 兜底清理。
     return out

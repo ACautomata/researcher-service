@@ -654,6 +654,65 @@ describe('ChatView', () => {
     expect(w.find('[data-test="stream"]').text()).not.toContain('<thinking>')
   })
 
+  // #565: 结构化 thinking 块（新版网关 message.content[] 的 type==='thinking' 块）——流式路最小覆盖：
+  // 结构化块只在 replace 快照/final 的 content[] 出现，翻译层提取随 text 帧携带（thinking 字段），
+  // handleText 以 ?? 覆盖内联剥离结果。思考卡渲染（Msg.thinking 非空即渲染，折叠卡逻辑未改）。
+  it('#565: 流式 replace 快照含结构化 thinking 块 → 思考卡渲染（结构化块权威覆盖）', async () => {
+    const { w, gw } = await mountReady()
+    await w.find('[data-test="input"]').setValue('hi')
+    await w.find('[data-test="send"]').trigger('click')
+    gw.fireFrame({ type: 'text', runId: 'r1', delta: '回答', replace: true, thinking: '推理过程' })
+    await nextTick()
+    expect(w.find('[data-test="cot-card"]').exists()).toBe(true)
+    expect(w.find('[data-test="cot-card"]').text()).toContain('推理过程')
+    expect(w.find('[data-test="stream"]').text()).toContain('回答')
+    // done 收尾不冲掉结构化思考（finalizeLast 的 terminal 重解析只作用于内联路）
+    gw.fireFrame({ type: 'done', runId: 'r1' })
+    await nextTick()
+    expect(w.find('[data-test="cot-card"]').exists()).toBe(true)
+    expect(w.find('[data-test="cot-card"]').text()).toContain('推理过程')
+  })
+
+  // #565: 结构化思考跨帧存活——replace 快照帧带思考后，普通 delta 增量帧（无 thinking 字段，
+  // 纯文本增量）不把思考清空（对齐内联 <thinking> 标签靠 raw 累积跨帧存活的持久性）
+  it('#565: 流式 replace 快照带思考 → 后续 delta 增量帧思考保留（不被动清空）', async () => {
+    const { w, gw } = await mountReady()
+    await w.find('[data-test="input"]').setValue('hi')
+    await w.find('[data-test="send"]').trigger('click')
+    gw.fireFrame({ type: 'text', runId: 'r1', delta: '回答', replace: true, thinking: '推理' })
+    gw.fireFrame({ type: 'text', runId: 'r1', delta: '继续' }) // 普通增量：thinking=undefined
+    await nextTick()
+    expect(w.find('[data-test="cot-card"]').exists()).toBe(true)
+    expect(w.find('[data-test="cot-card"]').text()).toContain('推理')
+    expect(w.find('[data-test="stream"]').text()).toContain('回答继续')
+  })
+
+  // #565: 思考只在 final 的 content[] 出现（流式 deltaText 无思考信息）→ final 文本与已发相等，
+  // 翻译层经 done 帧独立通道携带思考（不经 handleText 的 raw 逻辑），思考卡终态渲染
+  it('#565: 流式文本发完后 final 才带思考（相等场景）→ done 帧思考卡渲染', async () => {
+    const { w, gw } = await mountReady()
+    await w.find('[data-test="input"]').setValue('hi')
+    await w.find('[data-test="send"]').trigger('click')
+    gw.fireFrame({ type: 'text', runId: 'r1', delta: '回答' }) // deltaText 流式（无思考信息）
+    gw.fireFrame({ type: 'done', runId: 'r1', thinking: '最终思考' }) // final 相等 → done 帧带思考
+    await nextTick()
+    expect(w.find('[data-test="cot-card"]').exists()).toBe(true)
+    expect(w.find('[data-test="cot-card"]').text()).toContain('最终思考')
+    expect(w.find('[data-test="stream"]').text()).toContain('回答')
+  })
+
+  it('#565: 流式内联 <thinking> 标签（无结构化块）→ thinking 仍来自 splitThinking（回归逐字节不变）', async () => {
+    const { w, gw } = await mountReady()
+    await w.find('[data-test="input"]').setValue('hi')
+    await w.find('[data-test="send"]').trigger('click')
+    // 内联标签路照旧：thinking 来自 splitThinking 剥离（无 thinking 字段的帧不覆盖）
+    gw.fireFrame({ type: 'text', runId: 'r1', delta: '<thinking>内心</thinking>回答' })
+    gw.fireFrame({ type: 'done', runId: 'r1' })
+    await nextTick()
+    expect(w.find('[data-test="cot-card"]').text()).toContain('内心')
+    expect(w.find('[data-test="stream"]').text()).toContain('回答')
+  })
+
   it('会话历史加载：首次与切换会话使用固定页大小并渲染历史', async () => {
     const w = mount(ChatView)
     await flushPromises()
@@ -1277,6 +1336,60 @@ describe('ChatView', () => {
     expect(streamText).toContain('我的问题') // user string content
     expect(streamText).toContain('回答内容') // assistant 数组 content → 复用 extractMessageText
     expect(streamText).not.toContain('内心') // thinking 块不渲染为正文
+  })
+
+  // #565: 历史路全量覆盖——网关 history 下发完整消息，content[] 的 type==='thinking' 结构化块
+  //（thinking 字段）经 extractThinking 提取填 Msg.thinking → 思考折叠卡渲染（thinking 不进正文）。
+  it('#565: 历史 assistant 消息含结构化 thinking 块（thinking 字段）→ 思考卡渲染', async () => {
+    const w = mount(ChatView)
+    await flushPromises()
+    const gw = MockGatewayChat.last!
+    gw.listSessions.mockResolvedValue([SESSION])
+    gw.getHistory.mockResolvedValue({
+      messages: [
+        { role: 'user', content: '我的问题' },
+        {
+          role: 'assistant',
+          content: [{ type: 'thinking', thinking: '历史推理' }, { type: 'text', text: '历史回答' }],
+        },
+      ],
+      hasMore: false,
+      nextOffset: null,
+    })
+    gw.listCommands.mockResolvedValue([])
+    gw.send.mockResolvedValue(undefined)
+    gw.fireReady()
+    await flushPromises()
+    // 思考只出现在折叠卡（data-test="cot-card"），正文（stream）为提取出的 text 内容
+    expect(w.find('[data-test="cot-card"]').exists()).toBe(true)
+    expect(w.find('[data-test="cot-card"]').text()).toContain('历史推理')
+    expect(w.find('[data-test="stream"]').text()).toContain('历史回答')
+  })
+
+  // #565 回归：历史消息无结构化 thinking 块（仅 text 字段的旧 shape）→ 思考卡不出现（thinking ''，
+  // 现状逐字节不变；不读 text 字段兜底——官方 extractThinking 只读 thinking 字段）
+  it('#565: 历史消息无 thinking 字段的结构化块 → 不渲染思考卡（回归无差）', async () => {
+    const w = mount(ChatView)
+    await flushPromises()
+    const gw = MockGatewayChat.last!
+    gw.listSessions.mockResolvedValue([SESSION])
+    gw.getHistory.mockResolvedValue({
+      messages: [
+        { role: 'user', content: '问题' },
+        {
+          role: 'assistant',
+          content: [{ type: 'thinking', text: '内心' }, { type: 'text', text: '回答' }],
+        },
+      ],
+      hasMore: false,
+      nextOffset: null,
+    })
+    gw.listCommands.mockResolvedValue([])
+    gw.send.mockResolvedValue(undefined)
+    gw.fireReady()
+    await flushPromises()
+    expect(w.find('[data-test="cot-card"]').exists()).toBe(false) // 无思考卡（现状）
+    expect(w.find('[data-test="stream"]').text()).toContain('回答')
   })
 
   // E1b: abort 固化的 toolCall-only assistant 消息（生产实测：exec 审批卡无人处理 → 网关
