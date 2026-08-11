@@ -133,3 +133,33 @@ curl http://127.0.0.1:18789/health
   fail-fast），镜像/端口池见 `server/.env.example`。
 - model provider 的 CRUD 经控制面 `models` 域重渲染每容器 `openclaw.json` 生效（热加载，无需重启，
   spec §7 / issue #47）。
+
+## 面板 dev 栈（容器化控制面，issue #594 / ADR 0013）
+
+dev 不再 `npm run dev` 宿主直跑控制面，改 `docker-compose.dev.yml` 起 server+redis 容器、挂
+docker.sock，与 prod（`docker-compose.deploy.yml`）**同形态**——消除「宿主直跑摸不到 named
+volume（卷物理路径在 Docker VM 内）→ dev/prod 寻址/路径分叉」（ADR 0012）。
+
+```bash
+# 1. 克隆 researcher（build additional_contexts template= 默认 ../researcher；或设 RESEARCHER_DIR）
+git clone --depth 1 https://github.com/ACautomata/researcher ./researcher
+
+# 2.（仅真编排需）备派生镜像 + LLM key；仅起控制面/登录可跳过
+docker build -t ghcr.io/acautomata/researcher-service/openclaw:latest deploy/openclaw-image
+export LLM_API_KEY=...
+
+# 3. 起 dev 控制面（server:8001，挂 docker.sock + panel-dev-db 卷）
+docker compose -f deploy/docker-compose.dev.yml up -d --build
+
+# 4. 前端仍宿主 vite dev（proxy /api、/ws → 127.0.0.1:8001）
+cd frontend && npm run dev
+
+# 改 server 代码 → 重建镜像
+docker compose -f deploy/docker-compose.dev.yml up -d --build server
+```
+
+- **与 prod 对齐**：寻址（`host.docker.internal` + `0.0.0.0` 发布 + host-gateway）、模板/config
+  镜像内路径、`REDIS_URL`、`DATABASE_URL`、`OPENCLAW_FLEET_ROOT` 逐键一致；仅
+  `NODE_ENV=development`（走 config.ts dev 分支）与「server 暴露 8001 给宿主 vite」为 dev 特有。
+- **双轨工作流**：纯逻辑快速迭代仍走宿主 `cd server && npm test` / `npm run typecheck`（不起服务、
+  不摸卷）；凡要起服务 / 真编排 OpenClaw 容器（named volume 拓扑），一律走本容器化 dev 栈。

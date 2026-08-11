@@ -54,6 +54,10 @@ COPY --from=build /app/scripts ./scripts
 # template：provision 的 cp -a 预填充源（容器化后落在容器私有 fleet 根，compose 里
 # OPENCLAW_TEMPLATE_DIR 指向此路径）；openclaw.json：配置单一来源（compose OPENCLAW_TEMPLATE_JSON）。
 COPY --from=template / /app/templates/researcher
+# 防 .git 经 provision cp -a 进容器 home（对齐 #593 CD 的 rm -rf .git 意图）：本地 dev build 的
+# template context 带 .git（用户自行 clone，issue #594 dev 容器化路径，无 cd.yml 预处理步骤）；
+# prod 经 cd.yml clone 后已 rm（此 rm 幂等无害）。统一在 COPY 后清理，保证 dev/prod 镜像同形态。
+RUN rm -rf /app/templates/researcher/.git
 COPY --from=deploy /openclaw.json /app/deploy/openclaw.json
 
 COPY docker-entrypoint.sh /usr/local/bin/panel-entrypoint

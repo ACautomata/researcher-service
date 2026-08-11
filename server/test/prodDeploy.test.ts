@@ -61,6 +61,10 @@ describe('server 镜像构建期入模板（issue #593，ADR 0013）', () => {
     expect(df).toMatch(/COPY --from=template \/ \/app\/templates\/researcher/)
   })
 
+  it('COPY template 后清理 .git（issue #594：dev 本地 build 的 template context 带 .git 且无 cd.yml 预处理；防经 provision cp 进容器 home，对齐 CD 的 rm -rf .git 意图）', () => {
+    expect(df).toMatch(/RUN rm -rf \/app\/templates\/researcher\/\.git/)
+  })
+
   it('COPY --from=deploy 的 openclaw.json 到 /app/deploy/openclaw.json（配置单一来源入镜像）', () => {
     expect(df).toMatch(/COPY --from=deploy \/openclaw\.json \/app\/deploy\/openclaw\.json/)
   })
