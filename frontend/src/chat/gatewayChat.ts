@@ -85,7 +85,9 @@ export interface GatewayChat {
   // #459-T1 #462：可选 attachments（官方 chat.send 字段，附件经 WS 隧道帧内透传，1MiB 帧上限内）——
   // 形状由 chat/attachments.ts 组装（类型过滤 + 体积校验在采集层完成，本层原样透传）。不带/空数组
   // 不携带该字段（不带附件输入时与既有文本发送路径一致，回归无差）。
-  send(sessionKey: string, message: string, attachments?: Attachment[]): Promise<string | undefined>
+  // #564: idempotencyKey 外注——外部传入优先（outbox 重发复用 OutboxItem.id 经网关幂等去重），
+  // 缺省内部生成（既有行为）。
+  send(sessionKey: string, message: string, attachments?: Attachment[], idempotencyKey?: string): Promise<string | undefined>
   listCommands(): Promise<CommandDTO[]>
   resolveApproval(id: string, kind: string, decision: string): Promise<void>
   // B0: 补拉待处理审批（exec.approval.list，协议 schema exec-approval 域）——登出后重连/断线重连后
@@ -182,7 +184,7 @@ const CLIENT_INFO = { id: 'openclaw-control-ui', mode: 'webchat', platform: 'bro
 // P2（code review）：兜底统一用 crypto.getRandomValues 编码 32-hex——与 randomUUID.replace 后的
 // 32-hex 格式一致（仓库自钉契约 /^[a-z0-9]{32}$/），且比 Math.random 兜底（非 CSPRNG、同毫秒碰撞
 // 空间坍缩）安全；createSession 与 chat.send 的幂等 key 共用同一格式（不再跨路径不一致）。
-function createRequestId(): string {
+export function createRequestId(): string {
   const c = typeof crypto !== 'undefined' ? crypto : undefined
   if (c?.randomUUID) return c.randomUUID()
   // 兜底：getRandomValues 取 16 随机字节 → 32-hex（btoa 后去填充取 a-z0-9 与 randomUUID 同构）。
@@ -587,10 +589,11 @@ export function createGatewayChat(params: CreateGatewayChatParams): GatewayChat 
         nextOffset: typeof res?.nextOffset === 'string' || typeof res?.nextOffset === 'number' ? res.nextOffset : null,
       }
     },
-    async send(sessionKey: string, message: string, attachments?: Attachment[]): Promise<string | undefined> {
+    async send(sessionKey: string, message: string, attachments?: Attachment[], idempotencyKey?: string): Promise<string | undefined> {
       // chat.send 幂等（schema 必填 idempotencyKey）；返回后流式 delta/final 事件经 onEvent 到达。
       // A3/P2: 幂等 key 与 createSession 统一 32-hex 格式（randomUUID 去连字符——跨路径 key 规范
       // 一致，网关幂等去重不因格式分歧而失效）。
+      // #564: 外部传入优先（outbox 重发复用原 id——网关幂等去重防转录双跑）；缺省内部生成。
       // #53: RPC 响应 = ackPayload {runId, status:"started"}（官方 chat-send-handler）——返回
       // runId 供 ChatView 首帧归属判别；ack 无 runId（异常形状）返回 undefined。
       // #459-T1 #462：attachments 仅在非空时携带（官方可选字段，空数组/不带与既有文本路径同形状，
@@ -598,7 +601,7 @@ export function createGatewayChat(params: CreateGatewayChatParams): GatewayChat 
       const res = await client.request<{ runId?: unknown }>('chat.send', {
         sessionKey,
         message,
-        idempotencyKey: createRequestId().replace(/[^a-z0-9]/g, ''),
+        idempotencyKey: idempotencyKey ?? createRequestId().replace(/[^a-z0-9]/g, ''),
         ...(attachments && attachments.length > 0 ? { attachments } : {}),
       })
       return typeof res?.runId === 'string' && res.runId ? res.runId : undefined

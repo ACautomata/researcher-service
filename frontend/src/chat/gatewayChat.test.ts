@@ -730,6 +730,27 @@ describe('createGatewayChat（#369 隧道 Facade）', () => {
     })
   })
 
+  // ---- #564: 幂等 key 外注（重发复用原 id 经网关幂等去重，防转录双跑）----
+
+  it('#564: send 外部传入 idempotencyKey 优先（重发复用 OutboxItem.id）', async () => {
+    const { gw, client } = makeGateway()
+    client.request.mockResolvedValue({ runId: 'r1' })
+    await gw.send('sk-1', '你好', undefined, 'a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4')
+    expect(client.request).toHaveBeenCalledWith('chat.send', {
+      sessionKey: 'sk-1',
+      message: '你好',
+      idempotencyKey: 'a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4',
+    })
+  })
+
+  it('#564: send 缺省 idempotencyKey 仍内部生成（既有行为回归）', async () => {
+    const { gw, client } = makeGateway()
+    client.request.mockResolvedValue({})
+    await gw.send('sk-1', '你好')
+    const params = client.request.mock.calls[0][1] as { idempotencyKey: string }
+    expect(params.idempotencyKey).toMatch(/^[a-z0-9]{32}$/)
+  })
+
   // ---- #459-T1 #462：chat.send 携带官方 attachments 字段 ----
 
   it('#462: send 带 attachments → payload 含官方字段形状数组', async () => {
