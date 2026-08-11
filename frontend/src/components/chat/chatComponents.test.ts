@@ -237,6 +237,68 @@ describe('ChatMessageItem', () => {
     expect(assistantBubbleRule).toContain('background: transparent')
     expect(userBubbleRule).toContain('background:')
   })
+
+  // ---- #568: 附件元数据呈现（image 尺寸/体积、audio 时长/体积、video 尺寸/时长、document 下载卡、url 形态）----
+  it('#568: image 附件带 width/height/sizeBytes → 元数据行显示尺寸与体积', () => {
+    const m = newMsg('assistant', '')
+    m.media.push({ type: 'image', mimeType: 'image/png', src: 'AAA', width: 1280, height: 720, sizeBytes: 2048 })
+    const w = mount(ChatMessageItem, { props: { msg: m } })
+    const meta = w.get('[data-test="media-meta"]')
+    expect(meta.text()).toContain('1280 × 720')
+    expect(meta.text()).toContain('2 KB')
+  })
+  it('#568: audio 附件带 durationMs/sizeBytes → 元数据行显示时长与体积', () => {
+    const m = newMsg('assistant', '')
+    m.media.push({ type: 'audio', mimeType: 'audio/mpeg', src: 'QUJD', durationMs: 150000, sizeBytes: 1024 })
+    const w = mount(ChatMessageItem, { props: { msg: m } })
+    const meta = w.get('[data-test="media-meta"]')
+    expect(meta.text()).toContain('2:30')
+    expect(meta.text()).toContain('1 KB')
+  })
+  it('#568: video 附件带 width/height/durationMs → 元数据行显示尺寸与时长', () => {
+    const m = newMsg('assistant', '')
+    m.media.push({ type: 'video', mimeType: 'video/mp4', src: 'REVG', width: 640, height: 360, durationMs: 60000 })
+    const w = mount(ChatMessageItem, { props: { msg: m } })
+    const meta = w.get('[data-test="media-meta"]')
+    expect(meta.text()).toContain('640 × 360')
+    expect(meta.text()).toContain('1:00')
+  })
+  it('#568: 无元数据的附件 → 不渲染元数据行（现状无差）', () => {
+    const m = newMsg('assistant', '')
+    m.media.push({ type: 'image', mimeType: 'image/png', src: 'AAA' })
+    const w = mount(ChatMessageItem, { props: { msg: m } })
+    expect(w.find('[data-test="media-meta"]').exists()).toBe(false)
+  })
+  it('#568: document 附件 → 下载链接卡（fileName + sizeBytes + dataURL href）', () => {
+    const m = newMsg('assistant', '请下载：')
+    m.media.push({ type: 'document', mimeType: 'application/pdf', src: 'JVBER', fileName: 'report.pdf', sizeBytes: 2048 })
+    const w = mount(ChatMessageItem, { props: { msg: m } })
+    const link = w.get('[data-test="media-document"]')
+    expect(link.text()).toContain('report.pdf')
+    expect(link.text()).toContain('2 KB')
+    expect(link.attributes('href')).toBe('data:application/pdf;base64,JVBER')
+    expect(link.attributes('download')).toBe('report.pdf')
+  })
+  it('#568: document 附件 label 优先于 fileName 展示', () => {
+    const m = newMsg('assistant', '')
+    m.media.push({ type: 'document', mimeType: 'application/pdf', src: 'JVBER', fileName: 'report.pdf', label: '研究报告', sizeBytes: 2048 })
+    const w = mount(ChatMessageItem, { props: { msg: m } })
+    expect(w.get('[data-test="media-document"]').text()).toContain('研究报告')
+  })
+  it('#568: url 形态附件 src 原样使用不拼 base64（mediaSrc http 分支）', () => {
+    const m = newMsg('assistant', '')
+    m.media.push({ type: 'image', mimeType: 'image/png', src: 'https://img.example.com/x.png' })
+    const w = mount(ChatMessageItem, { props: { msg: m } })
+    expect(w.get('[data-test="media-image"]').attributes('src')).toBe('https://img.example.com/x.png')
+  })
+  it('#568: url 形态 document → href 直用 url（不拼 base64），download 仍生效', () => {
+    const m = newMsg('assistant', '')
+    m.media.push({ type: 'document', mimeType: 'application/pdf', src: 'https://files.example.com/report.pdf', fileName: 'report.pdf' })
+    const w = mount(ChatMessageItem, { props: { msg: m } })
+    const link = w.get('[data-test="media-document"]')
+    expect(link.attributes('href')).toBe('https://files.example.com/report.pdf')
+    expect(link.attributes('download')).toBe('report.pdf')
+  })
 })
 
 describe('ToolLine', () => {

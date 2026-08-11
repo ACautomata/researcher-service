@@ -773,6 +773,76 @@ describe('extractMessageAttachments（#459-T3 #464: image/audio/video 块 → �
       }),
     ).toEqual([{ type: 'image', mimeType: 'image/*', src: 'AAA' }])
   })
+
+  // ---- #568: history 附件元数据增强——同形状条件透传（有才带上、缺则不带，0 信任）----
+  it('#568: 块带 sizeBytes/durationMs/width/height/label → 条件透传进 MediaBlock', () => {
+    expect(
+      extractMessageAttachments({
+        role: 'assistant',
+        content: [{
+          type: 'image', mimeType: 'image/png', content: 'AAA',
+          sizeBytes: 1024, durationMs: 500, width: 1280, height: 720, label: '截图',
+        }],
+      }),
+    ).toEqual([{
+      type: 'image', mimeType: 'image/png', src: 'AAA',
+      sizeBytes: 1024, durationMs: 500, width: 1280, height: 720, label: '截图',
+    }])
+  })
+  it('#568: 非法元数据值（负数/非 number/空 label）→ 条件透传不带（回退现状形状）', () => {
+    expect(
+      extractMessageAttachments({
+        role: 'assistant',
+        content: [{
+          type: 'video', mimeType: 'video/mp4', content: 'REVG',
+          sizeBytes: -1, durationMs: '500', width: 0, height: -720, label: '',
+        }],
+      }),
+    ).toEqual([{ type: 'video', mimeType: 'video/mp4', src: 'REVG' }])
+  })
+  // ---- #568: document 型 + attachment/url 形态（纯防御：面板 history 未实测，条件透传保证无形态则零影响）----
+  it('#568: document 型块（content base64）→ type document + fileName/sizeBytes', () => {
+    expect(
+      extractMessageAttachments({
+        role: 'assistant',
+        content: [{ type: 'document', mimeType: 'application/pdf', fileName: 'report.pdf', content: 'JVBER', sizeBytes: 2048 }],
+      }),
+    ).toEqual([{ type: 'document', mimeType: 'application/pdf', fileName: 'report.pdf', src: 'JVBER', sizeBytes: 2048 }])
+  })
+  it('#568: attachment 形态块（{type:attachment, attachment:{kind,url,...}}）→ 从子对象提取', () => {
+    expect(
+      extractMessageAttachments({
+        role: 'assistant',
+        content: [{
+          type: 'attachment',
+          attachment: { kind: 'image', url: 'https://img.example.com/x.png', mimeType: 'image/png', label: '外链图', sizeBytes: 512, width: 640, height: 480 },
+        }],
+      }),
+    ).toEqual([{
+      type: 'image', mimeType: 'image/png', src: 'https://img.example.com/x.png',
+      label: '外链图', sizeBytes: 512, width: 640, height: 480,
+    }])
+  })
+  it('#568: url 形态块（{type:document, url,...}）→ src 直存完整 url 不拼 base64', () => {
+    expect(
+      extractMessageAttachments({
+        role: 'assistant',
+        content: [{ type: 'document', url: 'https://files.example.com/report.pdf', label: '报告', sizeBytes: 4096 }],
+      }),
+    ).toEqual([{ type: 'document', mimeType: 'document/*', src: 'https://files.example.com/report.pdf', label: '报告', sizeBytes: 4096 }])
+  })
+  it('#568: attachment 形态缺 kind / url 形态缺 url → 跳过该块（0 信任）', () => {
+    expect(
+      extractMessageAttachments({
+        role: 'assistant',
+        content: [
+          { type: 'attachment', attachment: { url: 'https://x/y.png' } }, // 无 kind
+          { type: 'attachment' }, // 无 attachment 子对象
+          { type: 'document', label: '无 url' }, // url 形态无 url
+        ],
+      }),
+    ).toEqual([])
+  })
 })
 
 // #459-T3 #464：attachmentToMediaBlock——发送 echo 路径（useChatConnection.send）与历史/流式
@@ -803,6 +873,26 @@ describe('attachmentToMediaBlock（#459-T3 #464: 发送侧 Attachment → MediaB
   it('mimeType 缺失 → 回退 type/ 前缀', () => {
     expect(attachmentToMediaBlock({ type: 'image', content: 'AAA' })).toEqual({
       type: 'image', mimeType: 'image/*', src: 'AAA',
+    })
+  })
+  // ---- #568: 发送 echo 路接通——Attachment 带 4 元数据 → 透传进 MediaBlock（§2.1 数据已确证）----
+  it('#568: Attachment 带 sizeBytes/durationMs/width/height → 条件透传', () => {
+    expect(
+      attachmentToMediaBlock({ type: 'image', mimeType: 'image/png', fileName: 'shot.png', content: 'iVBOR', sizeBytes: 1024, width: 640, height: 480 }),
+    ).toEqual({
+      type: 'image', mimeType: 'image/png', src: 'iVBOR', fileName: 'shot.png', sizeBytes: 1024, width: 640, height: 480,
+    })
+  })
+  it('#568: Attachment 非法元数据值（负数）→ 不带（回退现状形状）', () => {
+    expect(
+      attachmentToMediaBlock({ type: 'image', mimeType: 'image/png', content: 'iVBOR', sizeBytes: -5, width: 0 }),
+    ).toEqual({ type: 'image', mimeType: 'image/png', src: 'iVBOR' })
+  })
+  it('#568: document 附件 → document MediaBlock（发送 echo 路防御）', () => {
+    expect(
+      attachmentToMediaBlock({ type: 'document', mimeType: 'application/pdf', fileName: 'doc.pdf', content: 'JVBER', sizeBytes: 2048 }),
+    ).toEqual({
+      type: 'document', mimeType: 'application/pdf', fileName: 'doc.pdf', src: 'JVBER', sizeBytes: 2048,
     })
   })
 })

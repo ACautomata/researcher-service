@@ -101,18 +101,51 @@ export function extractThinking(message: unknown): string | null {
 // 媒体块的提取。**文本与附件不互相污染**：extractMessageText 仍只含 text 块（摘要/审计/claimedEmpty
 // 判定等文本用途），媒体块只经本函数进 Msg.media，不进 Msg.text。
 // 块 type 是归类依据（0 信任：mimeType 前缀与块 type 不一致时按块 type 归类，不猜测）。
+// #568: 附件元数据增强——type 扩 document + sizeBytes/durationMs/width/height/label（全可选条件
+// 透传：有才带上、缺则不带）。src 语义扩为「纯 base64 或完整 url」（url 形态块直存完整 url，
+// 组件侧 mediaSrc 按 http(s) 前缀原样返回、不拼 base64）。
 export interface MediaBlock {
-  type: 'image' | 'audio' | 'video'
+  type: 'image' | 'audio' | 'video' | 'document'
   mimeType: string
-  src: string // 纯 base64（剥 data:...;base64, 前缀）；组件侧重建完整 dataURL 供 <img>/<audio>/<video>
+  src: string // 纯 base64（剥 data:...;base64, 前缀）或完整 url；组件侧重建完整 dataURL 供
+              // <img>/<audio>/<video>/<a download>（document 下载卡）
   fileName?: string // 原始文件名（有则供下载/无障碍标注）
+  label?: string // 展示名（优先于 fileName，document 下载卡主标题）
+  sizeBytes?: number // 体积（字节），条件透传
+  durationMs?: number // 时长（毫秒），条件透传
+  width?: number // 像素宽（仅 image/video 有意义），条件透传
+  height?: number // 像素高（同上），条件透传
+}
+const MEDIA_TYPES = ['image', 'audio', 'video', 'document'] as const
+
+// #568: 附件展示元数据条件透传（提取两路共用，防 drift）——官方「有才带上」同构（规格 §4.2/§4.3）：
+// fileName/label 须非空 string；sizeBytes/durationMs 须为非负 number；width/height 须为正 number
+// （0/负为无意义值）。非法值一律不带（0 信任，网关不回填则与现状一致）。
+function mediaMeta(b: Record<string, unknown>): {
+  fileName?: string
+  label?: string
+  sizeBytes?: number
+  durationMs?: number
+  width?: number
+  height?: number
+} {
+  return {
+    ...(typeof b.fileName === 'string' && b.fileName ? { fileName: b.fileName } : {}),
+    ...(typeof b.label === 'string' && b.label ? { label: b.label } : {}),
+    ...(typeof b.sizeBytes === 'number' && b.sizeBytes >= 0 ? { sizeBytes: b.sizeBytes } : {}),
+    ...(typeof b.durationMs === 'number' && b.durationMs >= 0 ? { durationMs: b.durationMs } : {}),
+    ...(typeof b.width === 'number' && b.width > 0 ? { width: b.width } : {}),
+    ...(typeof b.height === 'number' && b.height > 0 ? { height: b.height } : {}),
+  }
 }
 
-const MEDIA_TYPES = ['image', 'audio', 'video'] as const
-
-// 从 message.content[] 提取 image/audio/video 块 → MediaBlock[]（渲染数据）。
-// 0 信任：仅取 string content（纯 base64）的块；缺失/非 string/空 content 跳过。
+// 从 message.content[] 提取 image/audio/video/document 块 → MediaBlock[]（渲染数据）。
+// 0 信任：content/url 缺失或非 string → 跳过。块 type 是归类依据；mimeType 缺失回退 `${type}/*`。
 // content 多态同 extractMessageText（string message / 无 content → 无附件）。
+// #568: 三种来源形态——① b.content 裸 base64（含 document 型，同形状条件透传元数据）；
+// ② {type:'attachment', attachment:{kind,url,...}}（官方 (a) 路）；③ {type:audio|video|document,
+// url}（官方 (b) 路，src 直存完整 url）。②③ 为纯防御：面板 history 未实测此形态，条件透传保证
+// 「无此形态则零影响」。
 export function extractMessageAttachments(message: unknown): MediaBlock[] {
   if (!message || typeof message === 'string') return []
   const obj = asRecord(message)
@@ -122,17 +155,38 @@ export function extractMessageAttachments(message: unknown): MediaBlock[] {
   for (const block of content) {
     if (!block || typeof block !== 'object') continue
     const b = asRecord(block)
+    // ②: {type:'attachment', attachment:{kind,url,...}}——kind 是类型归类依据（官方 (a) 路）
+    if (b.type === 'attachment') {
+      const att = asRecord(b.attachment)
+      const kind = typeof att.kind === 'string' ? att.kind : ''
+      if ((MEDIA_TYPES as readonly string[]).includes(kind)) {
+        const src = typeof att.url === 'string' ? att.url : ''
+        if (!src) continue
+        const mimeType = typeof att.mimeType === 'string' && att.mimeType ? att.mimeType : `${kind}/*`
+        out.push({
+          type: kind as MediaBlock['type'],
+          mimeType,
+          src,
+          ...mediaMeta(att),
+        })
+      }
+      continue
+    }
     const type = typeof b.type === 'string' ? b.type : ''
     if (!(MEDIA_TYPES as readonly string[]).includes(type)) continue
-    const src = typeof b.content === 'string' ? b.content : ''
-    if (!src) continue // 无 string base64 内容 → 无法渲染，跳过
+    // ①: b.content 裸 base64 优先（现有路）；③: 无 content 时退 url 形态（{type:audio|video|document,
+    // url}，官方 (b) 路）——src 直存完整 url，组件侧 mediaSrc 按 http(s) 原样返回不拼 base64
+    const contentStr = typeof b.content === 'string' ? b.content : ''
+    const url = contentStr ? '' : (typeof b.url === 'string' ? b.url : '')
+    const src = contentStr || url
+    if (!src) continue // 无 string content/url → 无法渲染，跳过
     // mimeType 缺失/非 string → 回退 `${type}/*`（组件重建完整 dataURL 须有 mime 段）。
     const mimeType = typeof b.mimeType === 'string' && b.mimeType ? b.mimeType : `${type}/*`
     out.push({
       type: type as MediaBlock['type'],
       mimeType,
       src,
-      ...(typeof b.fileName === 'string' && b.fileName ? { fileName: b.fileName } : {}),
+      ...mediaMeta(b),
     })
   }
   return out
@@ -142,12 +196,20 @@ export function extractMessageAttachments(message: unknown): MediaBlock[] {
 // 与 extractMessageAttachments 共用同一 MediaBlock 投影，避免发送 echo（useChatConnection.send）与
 // 历史/流式提取两路各自重写「mimeType 主段派生 type / string content 门 / fileName 条件拷贝」而 drift
 // （code-review Standards 轴）。content 非 string/空 → null（该附件无 echo 渲染数据，跳过）。
-// 块 type 取自 a.type（采集层已校验白名单 image/audio/video）；mimeType 缺失回退 `${type}/*`。
+// 块 type 取自 a.type（采集层已校验白名单 image/audio/video；document 属函数级防御，采集层暂不放行）；
+// mimeType 缺失回退 `${type}/*`。
+// #568: 补透传 sizeBytes/durationMs/width/height（Attachment 已在 attachments.ts 声明，buildAttachments
+// 原样透传——§2.1 数据已确证在 wire 上，此前被本函数丢弃）——与 extractMessageAttachments 共用
+// mediaMeta 条件透传判定，防两路 drift。
 export function attachmentToMediaBlock(a: {
   type?: string
   mimeType?: string
   fileName?: string
   content?: unknown
+  sizeBytes?: number
+  durationMs?: number
+  width?: number
+  height?: number
 }): MediaBlock | null {
   const type = typeof a.type === 'string' ? a.type : ''
   if (!(MEDIA_TYPES as readonly string[]).includes(type)) return null
@@ -158,7 +220,7 @@ export function attachmentToMediaBlock(a: {
     type: type as MediaBlock['type'],
     mimeType,
     src,
-    ...(typeof a.fileName === 'string' && a.fileName ? { fileName: a.fileName } : {}),
+    ...mediaMeta(a),
   }
 }
 
