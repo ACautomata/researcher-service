@@ -99,11 +99,18 @@ const { MockGatewayProtocolClient, MockGatewayProtocolRequestError, MockShouldPa
   }
 })
 
-vi.mock('@openclaw/gateway-client/browser', () => ({
-  GatewayProtocolClient: MockGatewayProtocolClient,
-  GatewayProtocolRequestError: MockGatewayProtocolRequestError,
-  shouldPauseGatewayReconnect: MockShouldPauseReconnect,
-}))
+// 部分 mock 官方包：协议机类与重连判定用假实现（close 决策可控），SessionProjection 套件
+//（createSessionProjection/reduceSessionProjectionRunEvent/hasSessionProjectionAcceptedFinal）保留
+// 真实 SDK 实现（#560 projection 接线测试须测真实归约语义——假归约器会让接线测试失去意义）。
+vi.mock('@openclaw/gateway-client/browser', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@openclaw/gateway-client/browser')>()
+  return {
+    ...actual,
+    GatewayProtocolClient: MockGatewayProtocolClient,
+    GatewayProtocolRequestError: MockGatewayProtocolRequestError,
+    shouldPauseGatewayReconnect: MockShouldPauseReconnect,
+  }
+})
 
 vi.mock('./tunnelSocket', () => ({
   createPanelTunnelSocket: vi.fn((container: string, jwt: string, handlers: unknown) => ({
@@ -230,6 +237,71 @@ describe('createGatewayChat（#369 隧道 Facade）', () => {
     const { client, handlers } = makeGateway()
     client.emitEvent({ type: 'event', event: 'chat', payload: { runId: 'r1', state: 'delta', deltaText: '你好' } })
     expect(handlers.onFrame).toHaveBeenCalledWith({ type: 'text', runId: 'r1', delta: '你好' })
+  })
+
+  // ---- #560: SDK SessionProjection 接线（真实 SDK 归约器，部分 mock 保留原实现）----
+  // 实证用例（规格 §4.3-4.5）：onHello 重建 projection、终态 message 归一、重放去重、timeout 细分。
+  it('#560 §4.3: 归约器接管终态 message 归一——delta 快照被 final 权威 message 覆盖', () => {
+    const { client, handlers } = makeGateway()
+    client.emitEvent({ type: 'event', event: 'chat', payload: { runId: 'r1', state: 'delta', deltaText: 'He' } })
+    // delta 后 final 带权威 message（含未投递尾部）→ tail 补发（来源 currentRun.message）
+    client.emitEvent({ type: 'event', event: 'chat', payload: { runId: 'r1', state: 'final', message: 'Hello' } })
+    expect(handlers.onFrame).toHaveBeenNthCalledWith(2, { type: 'text', runId: 'r1', delta: 'llo' })
+    expect(handlers.onFrame).toHaveBeenNthCalledWith(3, { type: 'done', runId: 'r1' })
+  })
+
+  it('#560 §4.4: 重放去重——同一 run 的 final 重复到达（resume 重放）第二次被 hasSessionProjectionAcceptedFinal 拦截', () => {
+    const { client, handlers } = makeGateway()
+    // 真实 SDK：final 带 id（__openclaw）→ identity=id:role:id，非指纹
+    const finalMsg = {
+      role: 'assistant',
+      content: [{ type: 'text', text: '最终回答' }],
+      __openclaw: { id: 'msg-1', role: 'assistant', seq: 5 },
+    }
+    client.emitEvent({ type: 'event', event: 'chat', payload: { runId: 'r1', state: 'delta', deltaText: '最终回答' } })
+    client.emitEvent({ type: 'event', event: 'chat', payload: { runId: 'r1', state: 'final', message: finalMsg } })
+    const before = handlers.onFrame.mock.calls.length
+    // resume 重放：同一 run 的 final 再次到达（无 delta 重发）→ 投影已记住终态 identity →
+    // hasSessionProjectionAcceptedFinal 拦截（若无去重网，此帧会再产一个 done）
+    client.emitEvent({ type: 'event', event: 'chat', payload: { runId: 'r1', state: 'final', message: finalMsg } })
+    expect(handlers.onFrame.mock.calls.length).toBe(before) // 重放 final 被拦截，不产帧
+  })
+
+  it('#560 §4.5: timeout 细分——error + errorKind=timeout → error 帧带超时标记（此前无此区分）', () => {
+    const { client, handlers } = makeGateway()
+    client.emitEvent({ type: 'event', event: 'chat', payload: { runId: 'r1', state: 'error', errorKind: 'timeout' } })
+    expect(handlers.onFrame).toHaveBeenLastCalledWith({ type: 'error', runId: 'r1', message: 'timeout（超时）' })
+  })
+
+  it('#560 回归（review H1/H2）: delta 后首次 error → 恒产 error 帧（不走重放网，不误吞）', () => {
+    const { client, handlers } = makeGateway()
+    client.emitEvent({ type: 'event', event: 'chat', payload: { runId: 'r1', state: 'delta', deltaText: '部分文本' } })
+    // 首次 error：SDK identity 判定可能命中 delta 快照指纹，但 error 不走重放网 → 恒产 error 帧
+    client.emitEvent({ type: 'event', event: 'chat', payload: { runId: 'r1', state: 'error', errorMessage: 'boom' } })
+    expect(handlers.onFrame).toHaveBeenLastCalledWith({ type: 'error', runId: 'r1', message: 'boom' })
+  })
+
+  it('#560 回归（review H1/H2）: delta 后 aborted → 恒产 done 帧（不走重放网，气泡正常收尾）', () => {
+    const { client, handlers } = makeGateway()
+    client.emitEvent({ type: 'event', event: 'chat', payload: { runId: 'r1', state: 'delta', deltaText: '部分文本' } })
+    client.emitEvent({ type: 'event', event: 'chat', payload: { runId: 'r1', state: 'aborted' } })
+    expect(handlers.onFrame).toHaveBeenLastCalledWith({ type: 'done', runId: 'r1' })
+  })
+
+  it('#560: onHello 重建 projection（新连接生命周期边界——旧 run 终态身份作废，重放不再被误拦）', () => {
+    const { client, handlers } = makeGateway()
+    const finalMsg = {
+      role: 'assistant',
+      content: [{ type: 'text', text: 'A' }],
+      __openclaw: { id: 'msg-1', role: 'assistant', seq: 5 },
+    }
+    client.emitEvent({ type: 'event', event: 'chat', payload: { runId: 'r1', state: 'delta', deltaText: 'A' } })
+    client.emitEvent({ type: 'event', event: 'chat', payload: { runId: 'r1', state: 'final', message: finalMsg } })
+    client.fireHello() // 连接生命周期边界 → projection 重建
+    // 新连接同 runId 的 final 重新渲染（旧投影的 acceptedFinalMessageIdentities 已作废）
+    client.emitEvent({ type: 'event', event: 'chat', payload: { runId: 'r1', state: 'delta', deltaText: 'B' } })
+    client.emitEvent({ type: 'event', event: 'chat', payload: { runId: 'r1', state: 'final', message: 'B' } })
+    expect(handlers.onFrame).toHaveBeenCalledWith({ type: 'done', runId: 'r1' })
   })
 
   it('close 决策：4401/4404/4403 → retry:false + notify；4402 → retry:true；其他 → retry:true', () => {
