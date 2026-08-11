@@ -29,6 +29,7 @@ export function assembleFleet(prisma: PrismaClient): FleetAssembly {
     publishHost: config.fleet.publishHost,
     healthHost: config.fleet.healthHost,
     panelOrigin: config.fleet.panelOrigin,
+    namedVolumes: config.fleet.namedVolumes,
     reservedPorts: defaultReservedPorts(),
     encryptionKeys: config.fleet.encryptionKeys,
   }

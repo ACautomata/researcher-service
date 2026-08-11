@@ -13,7 +13,14 @@ import {
   LABEL_INSTANCE_KEY,
   LABEL_PORT_KEY,
 } from './constants'
-import { containerName, type ContainerInfo, type ContainerRuntime, type ContainerSpec } from './runtime'
+import {
+  containerName,
+  volumeOrder,
+  type ContainerInfo,
+  type ContainerRuntime,
+  type ContainerSpec,
+  type NamedVolumes,
+} from './runtime'
 
 // 4 个 sync flag 全关（防覆写挂载的 openclaw.json / 防明文写凭证；对官方镜像无害、兼容 fork init.sh）。
 const SYNC_FLAGS_OFF: Record<string, string> = {
@@ -36,8 +43,8 @@ const BASE_ENV: Record<string, string> = {
   OPENCLAW_GATEWAY_BIND: GATEWAY_BIND,
   OPENCLAW_GATEWAY_MODE: 'local',
   // #366 codex P1：config 独立目录 ro bind，gateway 经此 env 从该目录读 openclaw.json
-  // （官方文档 OPENCLAW_CONFIG_PATH 覆盖默认 ~/.openclaw/openclaw.json）
-  OPENCLAW_CONFIG_PATH: `${CONFIG_BIND}/openclaw.json`,
+  // （官方文档 OPENCLAW_CONFIG_PATH 覆盖默认 ~/.openclaw/openclaw.json）。#590 named volume
+  // 模式（spec.volumes）无 config bind —— 不设此 env，gateway 走默认 ~/.openclaw/openclaw.json。
   OPENCLAW_WORKSPACE_ROOT: HOME_BIND,
   DM_POLICY: 'disabled',
   GROUP_POLICY: 'disabled',
@@ -72,7 +79,21 @@ export class DockerRuntime implements ContainerRuntime {
       // 容器内 sidecar CLI（approve/exec 审批注册）自连 gateway 须同值 token
       OPENCLAW_GATEWAY_TOKEN: spec.gatewayToken,
       LLM_API_KEY: spec.llmApiKey,
+      // #366 codex P1：旧 bind 模式 config 独立目录 ro bind，gateway 经此 env 从该目录读
+      // openclaw.json（官方文档 OPENCLAW_CONFIG_PATH 覆盖默认 ~/.openclaw/openclaw.json）。
+      // #590 named volume 模式（spec.volumes）无 config bind → 不设，走默认 ~/.openclaw/openclaw.json。
+      ...(spec.volumes ? {} : { OPENCLAW_CONFIG_PATH: `${CONFIG_BIND}/openclaw.json` }),
     }
+    // #590 named volume 模式（ADR 0011）：三卷 Mounts 替代 home/config host bind；config bind 去除
+    // → 无 OPENCLAW_CONFIG_PATH（gateway 走默认 ~/.openclaw/openclaw.json）。空卷首挂由镜像内
+    // ~/.openclaw 骨架自动初始化（#588 派生镜像）。
+    const mounts: Docker.MountSettings[] | undefined = spec.volumes
+      ? [
+          { Type: 'volume', Source: spec.volumes.wiki, Target: `${HOME_BIND}/wiki/main` },
+          { Type: 'volume', Source: spec.volumes.workspace, Target: `${HOME_BIND}/workspace` },
+          { Type: 'volume', Source: spec.volumes.home, Target: HOME_BIND },
+        ]
+      : undefined
     return {
       Image: spec.image,
       name: containerName(spec.name),
@@ -89,20 +110,22 @@ export class DockerRuntime implements ContainerRuntime {
       },
       HostConfig: {
         CapAdd: ['CHOWN', 'SETUID', 'SETGID', 'DAC_OVERRIDE'],
-        Binds: [
-          // #366 两轮：home 目录 rw bind + config 目录 ro bind。
-          // 第一轮修复（codex P1「热加载断链」）只 bind home 目录（rw）——openclaw.json 落 home 内、
-          // ConfigStore rename 换 inode 后目录 bind 容器内可见（gateway watch 热加载恢复；单文件 bind
-          // 在 rename 后仍挂旧 inode，m2 亦证 openclaw 镜像上文件 bind 不可靠）。但容器以 root(0:0)
-          // 跑、0644 对 root 无约束 → 容器内进程可持久改 openclaw.json 并经 watch 热加载，破坏强制
-          // 安全不变量（auth.mode/token/allowInsecureAuth），即 codex P1「Preserve the read-only
-          // boundary」。
-          // 现（第二轮）config 独立到 instances/<id>/config、目录 ro bind 到容器内固定路径，gateway
-          // 经 OPENCLAW_CONFIG_PATH 读其内 openclaw.json：目录 bind 下宿主 rename 换 inode 容器内
-          // 可见（热加载保留），ro 只约束容器侧（宿主写 host 路径不受影响）→ 只读边界恢复。
-          `${spec.homeDir}:${HOME_BIND}:rw`,
-          `${spec.configDir}:${CONFIG_BIND}:ro`,
-        ],
+        ...(spec.volumes
+          ? // named volume 模式：无 home/config bind
+            { Mounts: mounts }
+          : {
+              // #366 两轮：home 目录 rw bind + config 目录 ro bind。
+              // 第一轮修复（codex P1「热加载断链」）只 bind home 目录（rw）——openclaw.json 落 home 内、
+              // ConfigStore rename 换 inode 后目录 bind 容器内可见（gateway watch 热加载恢复；单文件 bind
+              // 在 rename 后仍挂旧 inode，m2 亦证 openclaw 镜像上文件 bind 不可靠）。但容器以 root(0:0)
+              // 跑、0644 对 root 无约束 → 容器内进程可持久改 openclaw.json 并经 watch 热加载，破坏强制
+              // 安全不变量（auth.mode/token/allowInsecureAuth），即 codex P1「Preserve the read-only
+              // boundary」。
+              // 现（第二轮）config 独立到 instances/<id>/config、目录 ro bind 到容器内固定路径，gateway
+              // 经 OPENCLAW_CONFIG_PATH 读其内 openclaw.json：目录 bind 下宿主 rename 换 inode 容器内
+              // 可见（热加载保留），ro 只约束容器侧（宿主写 host 路径不受影响）→ 只读边界恢复。
+              Binds: [`${spec.homeDir}:${HOME_BIND}:rw`, `${spec.configDir}:${CONFIG_BIND}:ro`],
+            }),
         PortBindings: {
           [`${GATEWAY_INTERNAL_PORT}/tcp`]: [{ HostIp: this.publishHost, HostPort: String(spec.hostPort) }],
         },
@@ -204,12 +227,24 @@ export class DockerRuntime implements ContainerRuntime {
     }
   }
 
-  async remove(name: string): Promise<void> {
+  // 删容器（v+force；NotFound 幂等）。volumes（#590 named volume 模式）提供时连带显式
+  // docker volume rm 三卷（ADR 0011：remove({v:true}) 只删匿名卷，named volume 须显式删否则越攒
+  // 越多）。容器 404（外部已删）也继续删卷——外部删容器不删卷，防卷泄漏；卷 404 幂等。
+  async remove(name: string, volumes?: NamedVolumes): Promise<void> {
     try {
       await this.client().getContainer(containerName(name)).remove({ v: true, force: true })
     } catch (e) {
-      if ((e as { statusCode?: number }).statusCode === 404) return
-      throw e
+      if ((e as { statusCode?: number }).statusCode !== 404) throw e
+      // 404（容器已不存在）：不提前返回——外部删容器不删卷，卷仍须尽力清理（防泄漏）
+    }
+    if (volumes) {
+      for (const v of volumeOrder(volumes)) {
+        try {
+          await this.client().getVolume(v).remove()
+        } catch (e) {
+          if ((e as { statusCode?: number }).statusCode !== 404) throw e
+        }
+      }
     }
   }
 

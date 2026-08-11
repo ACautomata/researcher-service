@@ -1,8 +1,8 @@
 // 假 docker runtime（接缝 #5：注入编排器测 5 态机 + 取消标志 + 端口入队前分配 + 补偿，不需真 daemon）。
 // 全内存模拟 ContainerRuntime：run/get/stop/remove/listFleet/hostPublishedPorts/exec 各原语可注入故障。
 
-import type { ContainerInfo, ContainerRuntime, ContainerSpec } from '../src/containers/runtime'
-import { containerName } from '../src/containers/runtime'
+import type { ContainerInfo, ContainerRuntime, ContainerSpec, NamedVolumes } from '../src/containers/runtime'
+import { containerName, volumeOrder } from '../src/containers/runtime'
 import { GATEWAY_INTERNAL_PORT, LABEL_INSTANCE_KEY, LABEL_PORT_KEY } from '../src/containers/constants'
 
 export interface FakeContainerRecord {
@@ -27,6 +27,8 @@ export class FakeRuntime implements ContainerRuntime {
   failExecSyncFor = new Set<string>()
   // execSync 调用记录（断言 delete 的 chown / approve 的 CLI argv）。
   execCalls: { name: string; cmd: string[] }[] = []
+  // #590：remove 收到 volumes 时的卷删除记录（断言 named volume 模式连带 docker volume rm 三卷）。
+  removedVolumes: string[] = []
 
   async run(spec: ContainerSpec): Promise<string> {
     if (this.failRunFor.has(spec.name)) {
@@ -92,8 +94,9 @@ export class FakeRuntime implements ContainerRuntime {
     if (r) r.info = { ...r.info, running: false, status: 'exited' }
   }
 
-  async remove(name: string): Promise<void> {
+  async remove(name: string, volumes?: NamedVolumes): Promise<void> {
     this.containers.delete(name)
+    if (volumes) this.removedVolumes.push(...volumeOrder(volumes))
   }
 
   async execInContainer(_name: string, _cmd: string[]): Promise<void> {}

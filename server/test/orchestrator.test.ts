@@ -390,3 +390,112 @@ describe('#2 createComplete run 后重查取消 (Codex 第七轮 P2)', () => {
     expect(fl.runtime.containers.has(name)).toBe(false)
   })
 })
+
+// #590 named volume 拓扑编排（ADR 0011，OPENCLAW_NAMED_VOLUMES）
+// flag 开：createComplete 的 spec 携带代系 id（#360）派生三卷名；delete / bind 冲突清残留
+// 连带 docker volume rm 三卷（fake runtime 记录断言）。flag 关（默认）：spec 不携带 volumes、
+// delete 不删卷（旧行为）。每用例独立 makeFleetTest（removedVolumes 记录无跨用例耦合）。
+describe('named volume 编排（#590）', () => {
+  let ctx: TestContext
+  let ownerId: string
+  beforeAll(async () => {
+    ctx = await setupTestApp()
+    ownerId = (await seedUser(ctx.prisma, 'owner-nv', 'pw-nv-secure')).id
+  })
+  afterAll(async () => {
+    await ctx.cleanup()
+  })
+
+  const nvFleet = () => makeFleetTest(ctx.prisma, { config: { namedVolumes: true } })
+  const volNames = (id: string) => ({
+    wiki: `openclaw-wiki-${id}`,
+    workspace: `openclaw-workspace-${id}`,
+    home: `openclaw-home-${id}`,
+  })
+
+  it('flag 开启：createComplete 的 spec 携带代系 id 派生三卷名', async () => {
+    const fl = nvFleet()
+    const inst = await fl.orch.createReserve('nv-one', ownerId)
+    await fl.orch.createComplete(inst, true)
+    expect(fl.runtime.containers.get('nv-one')?.spec.volumes).toEqual(volNames(inst.id))
+  })
+
+  it('flag 关闭（默认）：spec 不携带 volumes（旧 bind 行为不变）', async () => {
+    const fl = makeFleetTest(ctx.prisma)
+    const inst = await fl.orch.createReserve('old-bind', ownerId)
+    await fl.orch.createComplete(inst, true)
+    expect(fl.runtime.containers.get('old-bind')?.spec.volumes).toBeUndefined()
+  })
+
+  it('flag 开启：delete 连带 docker volume rm 三卷（代系 id 派生），容器也删', async () => {
+    const fl = nvFleet()
+    const inst = await fl.orch.createReserve('nv-del', ownerId)
+    await fl.orch.createComplete(inst, true)
+    await fl.orch.delete('nv-del')
+    expect(fl.runtime.removedVolumes).toEqual([
+      volNames(inst.id).wiki,
+      volNames(inst.id).workspace,
+      volNames(inst.id).home,
+    ])
+    expect(fl.runtime.containers.has('nv-del')).toBe(false)
+  })
+
+  it('flag 开启：run bind 冲突换端口重试，清残留容器连带删卷', async () => {
+    const fl = nvFleet()
+    const inst = await fl.orch.createReserve('nv-bind', ownerId)
+    fl.runtime.bindConflictPorts.add(inst.port)
+    await fl.orch.createComplete(inst, true)
+    const rec = fl.runtime.containers.get('nv-bind')
+    expect(rec?.spec.hostPort).not.toBe(inst.port) // 换端口成功
+    // 第一次 run 的残留容器被 remove 时连带删卷
+    expect(fl.runtime.removedVolumes).toEqual([
+      volNames(inst.id).wiki,
+      volNames(inst.id).workspace,
+      volNames(inst.id).home,
+    ])
+  })
+
+  it('flag 开启：容器已被外部删除（live null）→ delete 仍连带删卷（防卷泄漏，对齐 flag 关 dirRemover 语义）', async () => {
+    const fl = nvFleet()
+    const inst = await fl.orch.createReserve('nv-ext-del', ownerId)
+    await fl.orch.createComplete(inst, true)
+    fl.runtime.containers.delete('nv-ext-del') // 外部 actor 删容器（不入库标记）
+    await fl.orch.delete('nv-ext-del')
+    expect(fl.runtime.removedVolumes).toEqual([
+      volNames(inst.id).wiki,
+      volNames(inst.id).workspace,
+      volNames(inst.id).home,
+    ])
+    // 行已删（外部删容器不阻断 delete 收尾）
+    expect(await ctx.prisma.container.findUnique({ where: { name: 'nv-ext-del' } })).toBeNull()
+  })
+
+  it('flag 开启：run 失败且容器未驻留（外部已删）→ finalizeFailedCreate 连带删卷', async () => {
+    const fl = nvFleet()
+    const inst = await fl.orch.createReserve('nv-fail-ext', ownerId)
+    fl.runtime.failRunFor.add('nv-fail-ext') // run 抛非 bind 错 → finalizeFailedCreate
+    await expect(fl.orch.createComplete(inst, true)).rejects.toThrow()
+    expect(fl.runtime.removedVolumes).toEqual([
+      volNames(inst.id).wiki,
+      volNames(inst.id).workspace,
+      volNames(inst.id).home,
+    ])
+  })
+
+  it('flag 开启：delete 跳过 chown 前置（卷随删，chown 只服务宿主 bind 目录清理）', async () => {
+    const fl = nvFleet()
+    const inst = await fl.orch.createReserve('nv-nochown', ownerId)
+    await fl.orch.createComplete(inst, true)
+    await fl.orch.delete('nv-nochown')
+    expect(fl.runtime.execCalls).toEqual([]) // 无 chown execSync（flag 关时必有一条）
+    expect(fl.runtime.removedVolumes).toHaveLength(3)
+  })
+
+  it('flag 关闭（默认）：delete 不删卷（旧行为）', async () => {
+    const fl = makeFleetTest(ctx.prisma)
+    const inst = await fl.orch.createReserve('old-del', ownerId)
+    await fl.orch.createComplete(inst, true)
+    await fl.orch.delete('old-del')
+    expect(fl.runtime.removedVolumes).toEqual([])
+  })
+})
