@@ -50,4 +50,11 @@ export interface FileArchive {
   create(name: string, root: FileRoot, relPath: string, content: string): Promise<void>
   // 删除文件（不存在 → FileNotFound；指向目录 → FileInvalidPath，只支持删文件）。
   delete(name: string, root: FileRoot, relPath: string): Promise<void>
+  // config 写读（#591 · 静态 config，对 #366「宿主 rename + ro bind 热加载」的回退）：
+  // 容器内 ~/.openclaw/openclaw.json（home 卷 / bind home 内）的 upsert 写与全量读。
+  // 内部机制（models 写盘 / create 渲染落盘），REST 不可达——不扩展 FileRoot 枚举。
+  // writeConfig 不依赖 exec/start（putArchive 对 created/stopped 容器可用）→ 支持
+  // 「create 容器后写 config 再 start」，首启即读到渲染配置。读不存在 → FileNotFound。
+  writeConfig(name: string, content: string): Promise<void>
+  readConfig(name: string): Promise<string>
 }

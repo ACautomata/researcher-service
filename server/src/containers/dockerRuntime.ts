@@ -4,7 +4,6 @@
 
 import Docker from 'dockerode'
 import {
-  CONFIG_BIND,
   GATEWAY_BIND,
   GATEWAY_INTERNAL_PORT,
   HOME_BIND,
@@ -42,9 +41,9 @@ const BASE_ENV: Record<string, string> = {
   OPENCLAW_GATEWAY_PORT: String(GATEWAY_INTERNAL_PORT),
   OPENCLAW_GATEWAY_BIND: GATEWAY_BIND,
   OPENCLAW_GATEWAY_MODE: 'local',
-  // #366 codex P1：config 独立目录 ro bind，gateway 经此 env 从该目录读 openclaw.json
-  // （官方文档 OPENCLAW_CONFIG_PATH 覆盖默认 ~/.openclaw/openclaw.json）。#590 named volume
-  // 模式（spec.volumes）无 config bind —— 不设此 env，gateway 走默认 ~/.openclaw/openclaw.json。
+  // #591：config 无独立 bind、无 OPENCLAW_CONFIG_PATH——openclaw.json 落容器内默认
+  // ~/.openclaw/openclaw.json（home 卷 / bind home），gateway 走默认路径读取（静态 config，
+  // 对 #366「宿主 rename + ro bind 热加载」的明确回退：改配置须重启容器生效）。
   OPENCLAW_WORKSPACE_ROOT: HOME_BIND,
   DM_POLICY: 'disabled',
   GROUP_POLICY: 'disabled',
@@ -79,14 +78,9 @@ export class DockerRuntime implements ContainerRuntime {
       // 容器内 sidecar CLI（approve/exec 审批注册）自连 gateway 须同值 token
       OPENCLAW_GATEWAY_TOKEN: spec.gatewayToken,
       LLM_API_KEY: spec.llmApiKey,
-      // #366 codex P1：旧 bind 模式 config 独立目录 ro bind，gateway 经此 env 从该目录读
-      // openclaw.json（官方文档 OPENCLAW_CONFIG_PATH 覆盖默认 ~/.openclaw/openclaw.json）。
-      // #590 named volume 模式（spec.volumes）无 config bind → 不设，走默认 ~/.openclaw/openclaw.json。
-      ...(spec.volumes ? {} : { OPENCLAW_CONFIG_PATH: `${CONFIG_BIND}/openclaw.json` }),
     }
-    // #590 named volume 模式（ADR 0011）：三卷 Mounts 替代 home/config host bind；config bind 去除
-    // → 无 OPENCLAW_CONFIG_PATH（gateway 走默认 ~/.openclaw/openclaw.json）。空卷首挂由镜像内
-    // ~/.openclaw 骨架自动初始化（#588 派生镜像）。
+    // #590 named volume 模式（ADR 0011）：三卷 Mounts 替代 home host bind；config 无独立 bind
+    // （#591：openclaw.json 落 ~/.openclaw/ 默认路径，静态 config）。
     const mounts: Docker.MountSettings[] | undefined = spec.volumes
       ? [
           { Type: 'volume', Source: spec.volumes.wiki, Target: `${HOME_BIND}/wiki/main` },
@@ -111,20 +105,13 @@ export class DockerRuntime implements ContainerRuntime {
       HostConfig: {
         CapAdd: ['CHOWN', 'SETUID', 'SETGID', 'DAC_OVERRIDE'],
         ...(spec.volumes
-          ? // named volume 模式：无 home/config bind
+          ? // named volume 模式：无 home bind
             { Mounts: mounts }
           : {
-              // #366 两轮：home 目录 rw bind + config 目录 ro bind。
-              // 第一轮修复（codex P1「热加载断链」）只 bind home 目录（rw）——openclaw.json 落 home 内、
-              // ConfigStore rename 换 inode 后目录 bind 容器内可见（gateway watch 热加载恢复；单文件 bind
-              // 在 rename 后仍挂旧 inode，m2 亦证 openclaw 镜像上文件 bind 不可靠）。但容器以 root(0:0)
-              // 跑、0644 对 root 无约束 → 容器内进程可持久改 openclaw.json 并经 watch 热加载，破坏强制
-              // 安全不变量（auth.mode/token/allowInsecureAuth），即 codex P1「Preserve the read-only
-              // boundary」。
-              // 现（第二轮）config 独立到 instances/<id>/config、目录 ro bind 到容器内固定路径，gateway
-              // 经 OPENCLAW_CONFIG_PATH 读其内 openclaw.json：目录 bind 下宿主 rename 换 inode 容器内
-              // 可见（热加载保留），ro 只约束容器侧（宿主写 host 路径不受影响）→ 只读边界恢复。
-              Binds: [`${spec.homeDir}:${HOME_BIND}:rw`, `${spec.configDir}:${CONFIG_BIND}:ro`],
+              // 旧 bind 模式（#591）：仅 home 目录 rw bind。config 不再独立 ro bind——
+              // openclaw.json 落 home bind 内默认路径（#366「config 独立目录 + OPENCLAW_CONFIG_PATH
+              // 热加载」已回退为静态 config：改配置经 putArchive 写容器内、重启容器生效）。
+              Binds: [`${spec.homeDir}:${HOME_BIND}:rw`],
             }),
         PortBindings: {
           [`${GATEWAY_INTERNAL_PORT}/tcp`]: [{ HostIp: this.publishHost, HostPort: String(spec.hostPort) }],
@@ -135,9 +122,16 @@ export class DockerRuntime implements ContainerRuntime {
   }
 
   async run(spec: ContainerSpec): Promise<string> {
+    const id = await this.create(spec)
+    await this.client().getContainer(id).start()
+    return id
+  }
+
+  // 只创建不启动（#591：createComplete 先 create → FileArchive.putArchive 写容器内 config →
+  // 再 start——首启 gateway 即读渲染配置，无需重启）。ensureImage 前置同 run。
+  async create(spec: ContainerSpec): Promise<string> {
     await this.ensureImage(spec.image)
     const container = await this.client().createContainer(this.buildRunOptions(spec))
-    await container.start()
     return container.id
   }
 
@@ -210,6 +204,17 @@ export class DockerRuntime implements ContainerRuntime {
       await this.client().getContainer(containerName(name)).start()
     } catch (e) {
       if ((e as { statusCode?: number }).statusCode === 404) return
+      throw e
+    }
+  }
+
+  // 按容器 id 启动（#591：create 返回 id → startById，消除 name 竞态）。404/304 幂等同 start。
+  async startById(containerId: string): Promise<void> {
+    try {
+      await this.client().getContainer(containerId).start()
+    } catch (e) {
+      const sc = (e as { statusCode?: number }).statusCode
+      if (sc === 404 || sc === 304) return
       throw e
     }
   }

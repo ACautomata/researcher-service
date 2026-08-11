@@ -47,20 +47,17 @@ describe('orchestrator (接缝 #5 编排器 Port)', () => {
     const row = await ctx.prisma.container.findUnique({ where: { name: 'web-one' } })
     expect(row?.status).toBe('running')
     expect(row?.containerId).not.toBe('')
-    // runtime 已起容器，bind-mount home + config(ro) + 端口映射 + label 所有权
+    // runtime 已起容器，bind-mount home + 端口映射 + label 所有权
     const rec = fl.runtime.containers.get('web-one')
     expect(rec?.spec.hostPort).toBe(19000)
     expect(rec?.info.instanceName).toBe('web-one')
-    // config 已原子落盘 + 安全不变量（port 18789 / bind lan / token 占位）
-    // #366：config 落 instances/<id>/config 独立目录（ro bind + OPENCLAW_CONFIG_PATH）
-    const cfgText = require('node:fs').readFileSync(
-      path.join(fl.fleetRoot, 'instances', inst.id, 'config', 'openclaw.json'),
-      'utf8',
-    )
-    const cfg = JSON.parse(cfgText)
+    // config 已经 FileArchive.putArchive 落容器内（#591 静态 config）+ 安全不变量（port 18789 /
+    // bind lan / token 占位）；createComplete 顺序：create（不启动）→ 写 config → start
+    const cfg = JSON.parse(await fl.archive.readConfig('web-one'))
     expect(cfg.gateway.port).toBe(18789)
     expect(cfg.gateway.bind).toBe('lan')
     expect(cfg.gateway.auth.token).toBe('${GATEWAY_TOKEN}')
+    expect(rec?.info.running).toBe(true) // start 后 running（config 已先落容器内）
   })
 
   it('LLM key 缺失 → ConfigurationError（90003），不占端口不建行', async () => {
@@ -356,11 +353,12 @@ describe('orchestrator (接缝 #5 编排器 Port)', () => {
   })
 })
 
-// ---- #2 createComplete 在 runtime.run() 后未重查取消（Codex 第七轮 P2）----
-// command.ts createComplete 的取消检查点在循环开头（render 前）与 render 后 run 前，run 之后无检查点。
-// DELETE 在 runtime.run()（拉镜像/启动）期间到达时：deleteReserve 已 flag + 标 removing，但 run 返回后
-// createComplete 直接 update(status:'running') 覆盖 removing——错过取消回滚路径，list 轮询全程显示 running。
-describe('#2 createComplete run 后重查取消 (Codex 第七轮 P2)', () => {
+// ---- #2 createComplete 在 runtime.create() 后未重查取消（Codex 第七轮 P2）----
+// command.ts createComplete 的取消检查点在循环开头（render 前）与 render 后 create 前、start 后
+// （#591：create → writeConfig → start）。DELETE 在 runtime.create()（拉镜像/创建容器）期间到达时：
+// deleteReserve 已 flag + 标 removing，但 create 返回后 createComplete 仍会 start + update
+// (status:'running') 覆盖 removing——错过取消回滚路径，list 轮询全程显示 running。
+describe('#2 createComplete create 后重查取消 (Codex 第七轮 P2)', () => {
   let ctx: TestContext
   let ownerId: string
   beforeAll(async () => {
@@ -371,17 +369,17 @@ describe('#2 createComplete run 后重查取消 (Codex 第七轮 P2)', () => {
     await ctx.cleanup()
   })
 
-  it('DELETE 在 run 期间到达 → run 后重查取消、走回滚（修前 update running 覆盖 removing）', async () => {
+  it('DELETE 在 create 期间到达 → create 后重查取消、走回滚（修前 update running 覆盖 removing）', async () => {
     const fl = makeFleetTest(ctx.prisma)
     const name = 'cancel-run'
     const inst = await fl.orch.createReserve(name, ownerId)
-    // 注入：run 执行期间 DELETE 到达（flag + 标 removing），然后正常起容器。
-    const realRun = fl.runtime.run.bind(fl.runtime)
-    vi.spyOn(fl.runtime, 'run').mockImplementation(async (spec) => {
-      await fl.orch.deleteReserve(spec.name) // 模拟 DELETE 在 run（拉镜像/启动）中到达
-      return realRun(spec)
+    // 注入：create 执行期间 DELETE 到达（flag + 标 removing），然后正常创建容器。
+    const realCreate = fl.runtime.create.bind(fl.runtime)
+    vi.spyOn(fl.runtime, 'create').mockImplementation(async (spec) => {
+      await fl.orch.deleteReserve(spec.name) // 模拟 DELETE 在 create（拉镜像/创建）中到达
+      return realCreate(spec)
     })
-    // createComplete(preserveErrorRow=true 后台路径)：run 后应重查取消 → finalizeFailedCreate。
+    // createComplete(preserveErrorRow=true 后台路径)：start 后应重查取消 → finalizeFailedCreate。
     await expect(fl.orch.createComplete(inst, true)).rejects.toThrow()
     const row = await ctx.prisma.container.findUnique({ where: { name } })
     // 修前：update running 覆盖 removing → status='running'；修后：finalizeFailedCreate 标 error。

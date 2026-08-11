@@ -31,6 +31,15 @@ export class FakeRuntime implements ContainerRuntime {
   removedVolumes: string[] = []
 
   async run(spec: ContainerSpec): Promise<string> {
+    const id = await this.create(spec)
+    const rec = this.containers.get(spec.name)
+    if (rec) rec.info = { ...rec.info, running: true, status: 'running' }
+    return id
+  }
+
+  // #591：只创建不启动（createComplete 先 create → archive.writeConfig → start，静态 config）。
+  // 故障注入路径与 run 对齐（bind 冲突/非 bind 错/外部同名），status 'created'、running false。
+  async create(spec: ContainerSpec): Promise<string> {
     if (this.failRunFor.has(spec.name)) {
       throw new Error(`simulated docker run failure for ${spec.name}`)
     }
@@ -57,8 +66,8 @@ export class FakeRuntime implements ContainerRuntime {
     const info: ContainerInfo = {
       containerId: id,
       name: containerName(spec.name),
-      running: true,
-      status: 'running',
+      running: false,
+      status: 'created',
       image: spec.image,
       port: spec.hostPort,
       instanceName: spec.name,
@@ -87,6 +96,16 @@ export class FakeRuntime implements ContainerRuntime {
   async start(name: string): Promise<void> {
     const r = this.containers.get(name)
     if (r) r.info = { ...r.info, running: true, status: 'running' }
+  }
+
+  // #591：按容器 id 启动（createComplete 用 create 返回的 id——消除 name 竞态）；id 不存在 no-op
+  async startById(containerId: string): Promise<void> {
+    for (const r of this.containers.values()) {
+      if (r.info.containerId === containerId) {
+        r.info = { ...r.info, running: true, status: 'running' }
+        return
+      }
+    }
   }
 
   async stop(name: string): Promise<void> {

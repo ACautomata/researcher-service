@@ -96,7 +96,6 @@ describe('DockerRuntime ensureImage（Codex 第四轮③）', () => {
     hostPort,
     gatewayToken: 'tok',
     homeDir: '/tmp/home',
-    configDir: '/tmp/config',
     llmApiKey: 'key',
   })
 
@@ -121,23 +120,32 @@ describe('DockerRuntime ensureImage（Codex 第四轮③）', () => {
     await expect(rt.run(spec('r4-pullfail', 19002))).rejects.toThrow('registry unreachable')
   })
 
-  it('#366 codex P1：config 独立目录 ro bind + OPENCLAW_CONFIG_PATH（热加载保留 + 恢复只读边界）；无单文件 bind', async () => {
-    // 第一轮修复只 bind home rw——热加载恢复（rename 换 inode 目录 bind 容器内可见），但容器以
-    // root(0:0) 跑、0644 无约束 → 容器内进程可持久改 openclaw.json（codex P1 只读边界）。第二轮
-    // config 独立 instances/<id>/config 目录 ro bind + gateway 经 OPENCLAW_CONFIG_PATH 读取：
-    // 目录 bind 下宿主 rename 换 inode 容器内可见 + ro 只约束容器侧（宿主写 host 路径不受影响）。
-    // 单文件 bind 在 openclaw 镜像上不可靠（m2 实证：bind 源缺失时容器内变目录），故用目录 bind。
+  it('#591：bind 模式仅 home rw bind；无 config 独立 bind、无 OPENCLAW_CONFIG_PATH（静态 config）', async () => {
+    // #366 的 config 独立目录 ro bind + OPENCLAW_CONFIG_PATH 已回退（#591）：openclaw.json 落
+    // 容器内默认 ~/.openclaw/openclaw.json（home bind / 卷内），gateway 走默认路径读取——改配置
+    // 须重启容器生效（静态 config）。
     const { docker } = mockPullClient({ imagePresent: true })
     const rt = new DockerRuntime(() => docker)
     await rt.run(spec('r1-bind', 19003))
     const binds = lastCreateOptions?.HostConfig?.Binds ?? []
-    expect(binds).toEqual([
-      '/tmp/home:/home/node/.openclaw:rw', // workspace/wiki/state/logs 可写
-      '/tmp/config:/home/node/.openclaw-config:ro', // openclaw.json 容器侧只读
-    ])
-    expect(binds.some((b) => b.includes('openclaw.json'))).toBe(false) // 无单文件 bind
+    expect(binds).toEqual(['/tmp/home:/home/node/.openclaw:rw']) // workspace/wiki/state/logs 可写
     const env = (lastCreateOptions?.Env as string[]) ?? []
-    expect(env).toContain('OPENCLAW_CONFIG_PATH=/home/node/.openclaw-config/openclaw.json')
+    expect(env.some((e) => e.startsWith('OPENCLAW_CONFIG_PATH='))).toBe(false)
+  })
+
+  it('#591 create：createContainer 不 start（config 写盘前置；首启读渲染配置）', async () => {
+    const { docker, pulls } = mockPullClient({ imagePresent: true })
+    const rt = new DockerRuntime(() => docker)
+    const id = await rt.create(spec('r1-create', 19004))
+    expect(id).toBe('cid-123') // createContainer 已调用
+    expect(pulls).toEqual([]) // 镜像已缓存 → 未拉（ensureImage 同 run）
+  })
+
+  it('#591 run：create + start 的组合（id 级 start）', async () => {
+    const { docker } = mockPullClient({ imagePresent: true })
+    const rt = new DockerRuntime(() => docker)
+    const id = await rt.run(spec('r1-runcombo', 19005))
+    expect(id).toBe('cid-123')
   })
 })
 
@@ -185,7 +193,6 @@ describe('DockerRuntime named volumes（#590）', () => {
     hostPort,
     gatewayToken: 'tok',
     homeDir: '/tmp/home',
-    configDir: '/tmp/config',
     llmApiKey: 'key',
   })
 
@@ -197,7 +204,7 @@ describe('DockerRuntime named volumes（#590）', () => {
     })
   })
 
-  it('spec.volumes 提供时：buildRunOptions 生成三卷 Mounts（wiki/main、workspace、home），无 home/config bind', () => {
+  it('spec.volumes 提供时：buildRunOptions 生成三卷 Mounts（wiki/main、workspace、home），无 home bind', () => {
     const rt = new DockerRuntime(() => mockPullClient({ imagePresent: true }).docker)
     const opts = rt.buildRunOptions({ ...spec('nv-box', 19100), volumes: namedVolumesFor('gen-1') })
     expect(opts.HostConfig?.Mounts).toEqual([
@@ -205,19 +212,16 @@ describe('DockerRuntime named volumes（#590）', () => {
       { Type: 'volume', Source: 'openclaw-workspace-gen-1', Target: '/home/node/.openclaw/workspace' },
       { Type: 'volume', Source: 'openclaw-home-gen-1', Target: '/home/node/.openclaw' },
     ])
-    expect(opts.HostConfig?.Binds).toBeUndefined() // home/config bind 去除
+    expect(opts.HostConfig?.Binds).toBeUndefined() // home bind 去除
     const env = (opts.Env as string[]) ?? []
-    expect(env.some((e) => e.startsWith('OPENCLAW_CONFIG_PATH='))).toBe(false) // 不再指 CONFIG_BIND
+    expect(env.some((e) => e.startsWith('OPENCLAW_CONFIG_PATH='))).toBe(false) // 静态 config（#591）
   })
 
-  it('spec.volumes 缺省（flag 关）：保持旧 bind 行为（三卷 Mounts 不存在）', () => {
+  it('spec.volumes 缺省（flag 关）：仅 home rw bind（config bind 已随 #591 移除）', () => {
     const rt = new DockerRuntime(() => mockPullClient({ imagePresent: true }).docker)
     const opts = rt.buildRunOptions(spec('old-box', 19101))
     expect(opts.HostConfig?.Mounts).toBeUndefined()
-    expect(opts.HostConfig?.Binds).toEqual([
-      '/tmp/home:/home/node/.openclaw:rw',
-      '/tmp/config:/home/node/.openclaw-config:ro',
-    ])
+    expect(opts.HostConfig?.Binds).toEqual(['/tmp/home:/home/node/.openclaw:rw'])
   })
 
   it('remove：删容器后连带 docker volume rm 三卷（wiki/workspace/home 顺序）', async () => {

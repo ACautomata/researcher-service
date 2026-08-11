@@ -262,6 +262,57 @@ describe('DockerFileArchive write/create/delete（mock dockerode）', () => {
   })
 })
 
+describe('DockerFileArchive readConfig/writeConfig（#591 静态 config 落容器内）', () => {
+  const CFG_PATH = '/home/node/.openclaw/openclaw.json'
+  const CFG_TAR = () => dirTar([{ name: './openclaw.json', content: '{"gateway":{}}' }])
+
+  it('writeConfig：直 putArchive（无 start/exec/probe），tar 单文件条目 openclaw.json 内容原文', async () => {
+    const { docker, calls } = mockClient({})
+    const fa = new DockerFileArchive(() => docker)
+    await fa.writeConfig('box', '{"gateway":{"auth":{"mode":"token"}}}')
+    expect(calls.map((c) => c.kind)).toEqual(['putArchive']) // upsert：不 probe 存在性、不 start（容器可 created/stopped）
+    const put = calls.find((c) => c.kind === 'putArchive')!
+    expect(put.path).toBe('/home/node/.openclaw')
+    const parsed = parseTar(put.stream!, { collectData: true })
+    expect(parsed).toHaveLength(1)
+    expect(parsed[0]).toMatchObject({ name: 'openclaw.json', type: 'file' })
+    expect(parsed[0].data?.toString('utf8')).toBe('{"gateway":{"auth":{"mode":"token"}}}')
+  })
+
+  it('readConfig：getArchive 读 ~/.openclaw/openclaw.json 返回全文', async () => {
+    const archives = new Map<string, Buffer>([[CFG_PATH, CFG_TAR()]])
+    const { docker, calls } = mockClient({ archives })
+    const fa = new DockerFileArchive(() => docker)
+    await expect(fa.readConfig('box')).resolves.toBe('{"gateway":{}}')
+    expect(calls[0]).toEqual({ kind: 'getArchive', path: CFG_PATH })
+  })
+
+  it('readConfig：config 不存在（404）→ FileNotFound', async () => {
+    const { docker } = mockClient({ archive404: new Set([CFG_PATH]) })
+    const fa = new DockerFileArchive(() => docker)
+    await expect(fa.readConfig('box')).rejects.toBeInstanceOf(FileNotFound)
+  })
+
+  it('readConfig：config 超 MAX_FILE_READ_BYTES → FileInvalidPath（不可读信号，非内容）', async () => {
+    // 复用 oversized 单文件 tar 构造：size 头超上限、data 不给全（probe 短路 oversized 分支）
+    const big = Buffer.alloc(512)
+    big.write('openclaw.json', 0, 'utf8')
+    big.write('0000644', 100, 'utf8')
+    big.write(encodeOctalForTest(MAX_FILE_READ_BYTES + 1), 124, 'utf8')
+    big.write(encodeOctalForTest(1_704_067_200), 136, 'utf8')
+    big.write('0', 156, 'utf8')
+    big.write('ustar', 257, 'utf8')
+    big.fill(0x20, 148, 156)
+    let sum = 0
+    for (let i = 0; i < 512; i++) sum += big[i]
+    big.write(sum.toString(8).padStart(6, '0') + '\0 ', 148, 'utf8')
+    const archives = new Map<string, Buffer>([[CFG_PATH, Buffer.concat([big, Buffer.alloc(1024)])]])
+    const { docker } = mockClient({ archives })
+    const fa = new DockerFileArchive(() => docker)
+    await expect(fa.readConfig('box')).rejects.toBeInstanceOf(FileInvalidPath)
+  })
+})
+
 // 测试辅助：11 位八进制（与 tar.ts encodeOctal 同源，测试自造头用）
 function encodeOctalForTest(value: number): string {
   if (value === 0) return '00000000000'

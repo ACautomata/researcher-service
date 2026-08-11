@@ -41,13 +41,10 @@ export interface ContainerSpec {
   readonly gatewayToken: string // GATEWAY_TOKEN env 值（敏感：仅 env 注入，不落盘）
   readonly homeDir: string // 宿主 bind-mount home（instances/<id>/home，代系绑定 #360；
   // rw bind 承载 workspace/wiki/state/logs；OPENCLAW_NAMED_VOLUMES 开启时不用）
-  readonly configDir: string // 宿主 bind-mount config 目录（instances/<id>/config，#366 codex P1
-  // 只读边界）：home rw bind 下容器内进程（root + 0644 无约束）可持久改 openclaw.json → config
-  // 独立目录 ro bind + OPENCLAW_CONFIG_PATH 指其内 openclaw.json，容器侧不可写而宿主 rename 热加载保留；
-  // OPENCLAW_NAMED_VOLUMES 开启时不用）
-  // #590 named volume 拓扑（ADR 0011）：提供时 buildRunOptions 生成三卷 Mounts 替代 home/config
-  // bind（挂载点 ~/.openclaw/wiki/main + ~/.openclaw/workspace + ~/.openclaw）；缺省 undefined =
-  // 旧 bind 模式（homeDir/configDir 生效）
+  // #590 named volume 拓扑（ADR 0011）：提供时 buildRunOptions 生成三卷 Mounts 替代 home bind
+  // （挂载点 ~/.openclaw/wiki/main + ~/.openclaw/workspace + ~/.openclaw）；缺省 undefined =
+  // 旧 bind 模式（homeDir 生效）。config 无独立 bind（#591：落容器内 ~/.openclaw/openclaw.json，
+  // 经 FileArchive.putArchive 写、gateway 走默认路径读——静态 config）
   readonly volumes?: NamedVolumes
   readonly llmApiKey: string // 全面板共享 LLM_API_KEY
 }
@@ -69,6 +66,10 @@ export interface ContainerInfo {
 export interface ContainerRuntime {
   // 创建并启动一个容器，返回 docker container id
   run(spec: ContainerSpec): Promise<string>
+  // 只创建容器（不启动），返回 docker container id（#591：createComplete 先 create → 经
+  // FileArchive.putArchive 写容器内 openclaw.json → 再 start，首启 gateway 即读渲染配置——
+  // 静态 config 顺序，无需重启）
+  create(spec: ContainerSpec): Promise<string>
   // 列出本面板（label app=openclaw-fleet）全部容器
   listFleet(): Promise<ContainerInfo[]>
   // 枚举宿主上与发布地址冲突的活动容器宿主端口（含未跟踪容器；daemon 不可达 → 空集）
@@ -77,6 +78,9 @@ export interface ContainerRuntime {
   get(name: string): Promise<ContainerInfo | null>
   // 启动容器（删除前置修复 chown 用——容器被外部停止后 docker 无法在 stopped 容器内 exec，须先 start）
   start(name: string): Promise<void>
+  // 按容器 id 启动（#591：createComplete 的 create 返回 id → writeConfig → startById(id)——按 id
+  // 启动消除「create 与 start 之间外部删/重建同名容器」的 TOCTOU；NotFound 幂等）
+  startById(containerId: string): Promise<void>
   // 停容器（NotFound 幂等）
   stop(name: string): Promise<void>
   // 删容器（v+force；NotFound 幂等）。volumes（#590 named volume 模式）提供时连带显式

@@ -246,14 +246,11 @@ export class FleetCommand {
             // provision 只在目录首次创建时执行（bind 冲突重试复用已 provision 的 home）
             await this.deps.provisioner.provision(home)
           }
-          // config 原子写（tmp + chmod 0644 + rename），create 无 torn/partial 风险；
-          // #385：allowedOrigins 强制含面板 origin（隧道 Origin 校验 + 生产 ChatView 开箱可聊）
-          await this.deps.configStore.write(
-            inst.name,
-            inst.id,
-            (await this.ensureRenderer()).render(this.deps.config.panelOrigin),
-          )
-          // 取消检查点（render 后、run 前——覆盖随后 docker run / image pull 阻塞 IO 前的最后窗口）
+          // config 渲染（模板损坏 fail-fast 在此暴露，容器尚未创建——runAttempted 保持 false，
+          // 失败走「未 run」清理分支）；#385：allowedOrigins 强制含面板 origin（隧道 Origin 校验
+          // + 生产 ChatView 开箱可聊）
+          const rendered = (await this.ensureRenderer()).render(this.deps.config.panelOrigin)
+          // 取消检查点（render 后、create 前——覆盖随后 docker create / image pull 阻塞 IO 前的最后窗口）
           if (this.cancel.isCancelled(name)) {
             await this.finalizeFailedCreate(name, instanceDir, current, runAttempted, preexisting, directoryCreated, preserveErrorRow, new InstanceBusy(name))
           }
@@ -265,19 +262,24 @@ export class FleetCommand {
             // DB 存密文，docker env 须注入明文 gatewayToken——用时 decrypt（Codex C1）。
             gatewayToken: this.deps.crypto.decrypt(current.token),
             homeDir: home,
-            // #366 codex P1：config 独立目录（instances/<id>/config），ro bind + OPENCLAW_CONFIG_PATH
-            // 指其内 openclaw.json——容器内进程不可写（恢复只读边界），目录 bind 下宿主 rename 热加载保留。
-            configDir: path.join(instanceDir, 'config'),
-            // #590 named volume 拓扑（flag 开）：三卷 Mounts 替代 home/config host bind（buildRunOptions
-            // 按 volumes 存在与否分支）；空卷首挂由镜像内 ~/.openclaw 骨架自动初始化（#588）
+            // #590 named volume 拓扑（flag 开）：三卷 Mounts 替代 home host bind（buildRunOptions
+            // 按 volumes 存在与否分支）；空卷首挂由镜像内 ~/.openclaw 骨架自动初始化（#588）。
+            // config 无独立 bind（#591：落容器内默认路径，经 archive.writeConfig 写）
             volumes: this.volumesFor(inst.id),
             llmApiKey: this.deps.config.llmApiKey,
           }
-          const containerId = await this.deps.runtime.run(spec)
-          // 取消检查点（Codex 第七轮 #2）：DELETE 可能在 run()（拉镜像/启动）期间到达——循环开头
-          // 与 render 后 run 前两个检查点均已通过。run 返回后若仍直接 update running，会覆盖
-          // deleteReserve 已持久化的 removing，错过取消回滚、list 全程显示 running。run 后、持久化
-          // running 前重查取消，检出即 finalizeFailedCreate（runAttempted=true 会清 run 起的容器）。
+          // #591 静态 config 顺序（对 #366「宿主 rename + ro bind 热加载」回退）：create（不启动）
+          // → putArchive 写容器内 ~/.openclaw/openclaw.json → start——首启 gateway 即读渲染配置，
+          // 无需重启；config 零宿主路径（named volume / bind home 内）。
+          const containerId = await this.deps.runtime.create(spec)
+          await this.deps.archive.writeConfig(inst.name, rendered)
+          // 按 id 启动（#591）：create 返回的 id 精确指向本代容器——按 name 启动在外部 actor
+          // 删/重建同名容器的窗口会错启他人容器
+          await this.deps.runtime.startById(containerId)
+          // 取消检查点（Codex 第七轮 #2）：DELETE 可能在 create（拉镜像/建容器）/ writeConfig /
+          // start 期间到达——render 后检查点已过。start 后、持久化 running 前重查取消：检出即
+          // finalizeFailedCreate（runAttempted=true 清已起/已 created 的容器），不覆盖
+          // deleteReserve 已持久化的 removing、list 全程不显示 running。
           if (this.cancel.isCancelled(name)) {
             await this.finalizeFailedCreate(
               name,
