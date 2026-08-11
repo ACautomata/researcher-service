@@ -14,7 +14,8 @@ panel-frontend 容器（nginx，唯一对宿主暴露，loopback:18080）
     ├─ /        → SPA（dist/，history fallback）
     ├─ /api/    → panel-server:8001（TS/Express，#312 信封）
     └─ /ws/     → panel-server:8001（JWT subprotocol 隧道，Upgrade 透传）
-                     │  panel-server 挂 docker.sock（编排 OpenClaw 容器）+ SQLite 卷 + researcher 模板(RO)
+                     │  panel-server 挂 docker.sock（编排 OpenClaw 容器）+ SQLite 卷；
+                     │  home 模板与 openclaw.json 构建期入镜像（ADR 0013，无宿主数据挂载）
                      ▼
               panel-redis（BullMQ 队列，内部网络）
 ```
@@ -32,12 +33,14 @@ panel-frontend 容器（nginx，唯一对宿主暴露，loopback:18080）
 
 每次 CI 在 `master` 上成功后自动：
 
-1. 构建 + 推送 `server`、`frontend` 两镜像到 GHCR（`:latest` 与 `:<CI head_sha>`）。
+1. 构建 + 推送 `server`、`frontend`、`openclaw`（派生）三镜像到 GHCR（`:latest` 与
+   `:<CI head_sha>`）。server 镜像构建期 clone researcher home 模板并连同 `deploy/openclaw.json`
+   经 buildx 多 context 拷入镜像（ADR 0013：#593 模板入镜像，模板随镜像 `:sha` 版本化）。
 2. 渲染运行时 `.env`（敏感值来自 secrets，不进 git）。
 3. scp `docker-compose.deploy.yml` + `.env` → 宿主 `/www/panel/`。
 4. SSH 远端：`docker login ghcr.io`（持久）→ `pull` → `up -d --remove-orphans` → `image prune` →
    健康门 `curl 127.0.0.1:18080/api/health`（30s 内非 200 即 workflow 红）。
-5. 防御性 bootstrap：`/www/panel`、`/srv/openclaw/template` 缺则自动建/克隆。
+5. 防御性 bootstrap：`/www/panel` 缺则自动创建（幂等）。
 
 ## 一次性 bootstrap（手工，仅首次）
 
@@ -50,8 +53,8 @@ panel-frontend 容器（nginx，唯一对宿主暴露，loopback:18080）
 | 5 | 反代 | 站点 → 反向代理 → 目标 `http://127.0.0.1:18080`，发送域名 `$host`。**并把代理读/写超时放宽到 `3600s`**（见上方「超时分层」）。 |
 | 6 | GitHub secrets | 见下表。 |
 
-> researcher 模板、/www/panel 目录 **无需手工预建**——CD 首次会自动克隆/创建（防御性 bootstrap）。
-> 若你想手动控制模板版本：`git clone https://github.com/ACautomata/researcher.git /srv/openclaw/template`。
+> `/www/panel` 目录无需手工预建——CD 首次会自动创建（防御性 bootstrap）。researcher home 模板
+> 不再落宿主：CD 构建期 clone 并拷入 server 镜像（ADR 0013，#593），镜像 `:sha` 即模板版本。
 
 ## GitHub secrets 清单
 
@@ -68,7 +71,7 @@ panel-frontend 容器（nginx，唯一对宿主暴露，loopback:18080）
 | `PANEL_PUBLIC_ORIGIN` | `https://researcher.acautomata.top` | 面板对外 origin（隧道连网关 + 容器 allowedOrigins 强制条目，server 生产必填） |
 | `LLM_API_KEY` | 面板共享 LLM key | 注入 OpenClaw 容器 |
 | `CREDENTIAL_ENCRYPTION_KEYS` | base64url 32 字节 | 凭证 AES-256-GCM 密钥环 |
-| `RESEARCHER_REPO`（可选） | 克隆 URL | 默认 `https://github.com/ACautomata/researcher.git` |
+| `RESEARCHER_REPO`（可选） | 克隆 URL | 构建机 clone home 模板（默认 `https://github.com/ACautomata/researcher.git`；模板入 server 镜像，不再落宿主） |
 
 生成 `JWT_SECRET` 与 `CREDENTIAL_ENCRYPTION_KEYS`：
 
@@ -89,29 +92,27 @@ python3 -c "import base64,os;print(base64.urlsafe_b64encode(os.urandom(32)).deco
 
 `JWT_SECRET`（≥32 字符）· `PANEL_PUBLIC_ORIGIN`（http(s) URL）· `CREDENTIAL_ENCRYPTION_KEYS` ·
 `LLM_API_KEY`（create 容器时 90003 前置校验）· `REDIS_URL`（compose 固定
-`redis://redis:6379/0`）· `OPENCLAW_TEMPLATE_DIR`（compose 固定 `/srv/openclaw/template`）·
-`OPENCLAW_TEMPLATE_JSON`（compose 固定 `/app/deploy/openclaw.json`，挂载 `./openclaw.json`）·
-`OPENCLAW_FLEET_ROOT`（compose 固定 `/fleet`，**须经 compose 挂载宿主 fleet 根**，见下）·
+`redis://redis:6379/0`）· `OPENCLAW_TEMPLATE_DIR`（compose 固定 `/app/templates/researcher`，
+镜像内——构建期 COPY 的 researcher home 模板）· `OPENCLAW_TEMPLATE_JSON`（compose 固定
+`/app/deploy/openclaw.json`，镜像内——构建期 COPY 的 `deploy/openclaw.json`）·
+`OPENCLAW_FLEET_ROOT`（compose 固定 `/fleet`，server 容器内工作目录，无宿主挂载）·
 `DATABASE_URL`（compose 固定 `file:/app/db/db.sqlite3`，指向 panel-db 卷）。
 
-> 说明：`OPENCLAW_TEMPLATE_JSON` 指向 server 镜像内挂载的 openclaw.json 模板文件（配置单一来源，
-> 与单容器 compose 共用 `deploy/openclaw.json`）。镜像构建 context=server 不含 `deploy/`，
-> 默认路径解析到 `/app/../deploy` 不存在——首次创建容器会裸 90003；CD 分发 `deploy/openclaw.json`
-> 到宿主 `/www/panel/` 并经 compose 挂载注入（见 `docker-compose.deploy.yml`）。
+> 说明：`OPENCLAW_TEMPLATE_DIR` / `OPENCLAW_TEMPLATE_JSON` 都指向 **server 镜像内**路径（ADR 0013
+> `#593` 模板入镜像）。镜像内默认路径 `<cwd>/../deploy/openclaw.json` 解析到 `/app/../deploy`
+> 不存在——compose 显式 pin 到镜像内 COPY 产物，首次创建容器不再 90003。镜像外唯一的宿主数据
+> 挂载是 `/var/run/docker.sock`（spec §5.4 已接受等价 root）。
 
-> **`/fleet` 挂载（spec §5.4/§5.6 契约，缺失即静默失败）：** server 容器**必须**挂载宿主 fleet
-> 根（`volumes` 加 `/fleet:/fleet`）。server 在宿主文件系统直接操作
-> `OPENCLAW_FLEET_ROOT/instances/<name>/`（cp -a 预填充 home、ConfigStore 原子写 openclaw.json、
-> 删除 rmtree）。缺此挂载时配置写到容器私有 `/fleet`（与宿主隔离），docker run 的 bind-mount
-> 源路径在宿主侧不存在 → **Docker 自动建空目录** → gateway 读到目录而非配置文件 →
-> `missing gateway.mode` 崩溃循环（Restarting）→ 无端口监听 → 健康探测失败 unhealthy →
-> 配对/对话 502 → 最终 stop，全程无日志报错（生产 2026-08-01 实测）。`readFleetRoot` 对显式
-> 相对路径 fail-fast——`/fleet` 挂载缺失时 server 仍正常启动（幂等落表不受影响），故障在
-> 首次创建容器时才暴露；compose 显式 pin `/fleet` 并挂载宿主 fleet 根是唯一正确配置。
+> **`/fleet`（容器内工作目录，非宿主挂载）：** server 容器的 `OPENCLAW_FLEET_ROOT=/fleet` 是
+> 容器私有目录——named volume 拓扑（ADR 0011/0013，#590/#592）下 OpenClaw 容器不 bind 宿主树，
+> `instances/<id>/` 目录与 provision 的 cp 只落在容器内，容器重建即空、create 幂等重建。生产
+> 2026-08-01 的「/fleet 缺挂载 → gateway 崩溃循环」故障属于旧 bind 时代契约（宿主 fleet 根须与
+> compose 挂载同源）；挂载已删除，此故障面不再存在。
 
 ## 回滚
 
-镜像按 `:<commit sha>` 留了不可变记录，回滚 = 固定到上一个 sha 重启：
+镜像按 `:<commit sha>` 留了不可变记录，回滚 = 固定到上一个 sha 重启（模板与 openclaw.json 已随
+server 镜像构建期入镜像——回滚镜像即回滚模板/配置，无宿主侧残留状态需要同步）：
 
 ```bash
 ssh root@<REMOTE_HOST>

@@ -47,6 +47,15 @@ COPY --from=build /app/src/generated ./src/generated
 COPY --from=build /app/prisma ./prisma
 COPY --from=build /app/scripts ./scripts
 
+# ADR 0013（issue #593）：home 模板与 openclaw.json 构建期入镜像——生产不再挂载任何宿主数据
+# 路径（唯一豁免 docker.sock）。两处 COPY 的源是 buildx 多 context（CD 经 build-contexts 注入：
+# template=<researcher 克隆>、deploy=<本仓库 deploy/>）；本地构建须自备同名 context
+# （docker buildx build --build-context template=<dir> --build-context deploy=<dir>）。
+# template：provision 的 cp -a 预填充源（容器化后落在容器私有 fleet 根，compose 里
+# OPENCLAW_TEMPLATE_DIR 指向此路径）；openclaw.json：配置单一来源（compose OPENCLAW_TEMPLATE_JSON）。
+COPY --from=template / /app/templates/researcher
+COPY --from=deploy /openclaw.json /app/deploy/openclaw.json
+
 COPY docker-entrypoint.sh /usr/local/bin/panel-entrypoint
 RUN chmod +x /usr/local/bin/panel-entrypoint
 
