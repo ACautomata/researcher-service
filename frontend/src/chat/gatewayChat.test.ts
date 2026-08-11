@@ -260,7 +260,23 @@ describe('createGatewayChat（#369 隧道 Facade）', () => {
     // delta 后 final 带权威 message（含未投递尾部）→ tail 补发（来源 currentRun.message）
     client.emitEvent({ type: 'event', event: 'chat', payload: { runId: 'r1', state: 'final', message: 'Hello' } })
     expect(handlers.onFrame).toHaveBeenNthCalledWith(2, { type: 'text', runId: 'r1', delta: 'llo' })
-    expect(handlers.onFrame).toHaveBeenNthCalledWith(3, { type: 'done', runId: 'r1' })
+    // #569: done 帧携带归约权威 message（外来局部插入数据通道；本 run 消费端不读）
+    expect(handlers.onFrame).toHaveBeenNthCalledWith(3, { type: 'done', runId: 'r1', message: 'Hello' })
+  })
+
+  // #569: 外来 run final 的归约 message 透出到 done 帧（外来局部插入的数据通道）+ 重放被去重网拦截。
+  // 归约器对每个 run 独立归约（外来 run 同样经 reduceSessionProjectionRunEvent），重放网对外来 run
+  // 同样生效——同一外来 run 的 final 二次到达被 hasSessionProjectionAcceptedFinal 拦截（只插入一次）。
+  it('#569: 外来 run final 归约 message 透出到 done 帧 + 重放二次到达被拦截', () => {
+    const { client, handlers } = makeGateway()
+    const finalMsg = { role: 'assistant', content: [{ type: 'text', text: '外来最终结果' }] }
+    client.emitEvent({ type: 'event', event: 'chat', payload: { runId: 'foreign-1', state: 'delta', deltaText: '外来' } })
+    client.emitEvent({ type: 'event', event: 'chat', payload: { runId: 'foreign-1', state: 'final', message: finalMsg } })
+    expect(handlers.onFrame).toHaveBeenCalledWith({ type: 'done', runId: 'foreign-1', message: finalMsg })
+    // resume 重放：同一外来 run 的 final 再次到达 → 去重网拦截，不产帧（本 run 分支亦无插入）
+    const before = handlers.onFrame.mock.calls.length
+    client.emitEvent({ type: 'event', event: 'chat', payload: { runId: 'foreign-1', state: 'final', message: finalMsg } })
+    expect(handlers.onFrame.mock.calls.length).toBe(before)
   })
 
   it('#560 §4.4: 重放去重——同一 run 的 final 重复到达（resume 重放）第二次被 hasSessionProjectionAcceptedFinal 拦截', () => {
@@ -314,7 +330,7 @@ describe('createGatewayChat（#369 隧道 Facade）', () => {
     // 新连接同 runId 的 final 重新渲染（旧投影的 acceptedFinalMessageIdentities 已作废）
     client.emitEvent({ type: 'event', event: 'chat', payload: { runId: 'r1', state: 'delta', deltaText: 'B' } })
     client.emitEvent({ type: 'event', event: 'chat', payload: { runId: 'r1', state: 'final', message: 'B' } })
-    expect(handlers.onFrame).toHaveBeenCalledWith({ type: 'done', runId: 'r1' })
+    expect(handlers.onFrame).toHaveBeenCalledWith({ type: 'done', runId: 'r1', message: 'B' })
   })
 
   it('close 决策：4401/4404/4403 → retry:false + notify；4402 → retry:true；其他 → retry:true', () => {

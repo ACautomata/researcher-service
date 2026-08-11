@@ -288,6 +288,93 @@ describe('ChatView', () => {
     gw.fireFrame({ type: 'done', runId: 'user-run' })
   })
 
+  // ---- #569: 外来可见 final 局部插入 history（非整段重拉）----
+  it('#569: 外来 run 可见 final → 尾部局部插入一条助手消息（不调 loadHistory）', async () => {
+    const { w, gw } = await mountReady()
+    // 空闲期外来 run 首帧 → foreignRunIds 记录
+    gw.fireFrame({ type: 'text', runId: 'foreign-1', delta: '' })
+    await nextTick()
+    // 外来 run 可见 final（带权威 message）→ 局部插入助手消息（尾部 push，不重拉历史）
+    gw.fireFrame({
+      type: 'done',
+      runId: 'foreign-1',
+      message: { role: 'assistant', content: [{ type: 'text', text: '子代理结果' }] },
+    })
+    await nextTick()
+    expect(w.find('[data-test="stream"]').text()).toContain('子代理结果')
+    // 不重拉 history：getHistory 仅首连 loadHistory 被调一次（historyGen 不自增、无二次 RPC）
+    expect(gw.getHistory).toHaveBeenCalledTimes(1)
+    // 在途 turn 不受影响：用户发送正常渲染（外来插入是独立一条，不占用/不污染 active 气泡）
+    await w.find('[data-test="input"]').setValue('我的问题')
+    await w.find('[data-test="send"]').trigger('click')
+    gw.fireFrame({ type: 'text', runId: 'user-run', delta: '真实回复' })
+    await nextTick()
+    const streamText = w.find('[data-test="stream"]').text()
+    expect(streamText).toContain('真实回复')
+    expect(streamText).toContain('我的问题')
+    gw.fireFrame({ type: 'done', runId: 'user-run' })
+  })
+
+  it('#569: 外来 run 空 final（无实质内容）→ 维持丢弃（不插入空气泡）', async () => {
+    const { w, gw } = await mountReady()
+    gw.fireFrame({ type: 'text', runId: 'foreign-1', delta: '' })
+    await nextTick()
+    const before = w.find('[data-test="stream"]').text()
+    gw.fireFrame({ type: 'done', runId: 'foreign-1', message: { role: 'assistant', content: [] } })
+    await nextTick()
+    expect(w.find('[data-test="stream"]').text()).toBe(before)
+    // 无 message（现状 done 帧形状）同样维持丢弃
+    gw.fireFrame({ type: 'text', runId: 'foreign-2', delta: '' })
+    gw.fireFrame({ type: 'done', runId: 'foreign-2' })
+    await nextTick()
+    expect(w.find('[data-test="stream"]').text()).toBe(before)
+  })
+
+  // #569 §3 网 2: 重放只插一次——foreignRunIds 终态清理的天然一次性（同一外来 runId 的 done 二次
+  // 到达：首次插入后记录已删，二次走不到 foreign 分支，不重复插入）。跨事件重放（resume 重放）
+  // 由翻译层 #560 isReplayedFinal 网 1 拦截（gatewayChat.test.ts 接线实证），composable 层无法
+  // 模拟（mock seam 无翻译层），本用例实证网 2 兜底。
+  it('#569: 同一外来 run 的 done 二次到达（重放）→ 只插入一次', async () => {
+    const { w, gw } = await mountReady()
+    gw.fireFrame({ type: 'text', runId: 'foreign-1', delta: '' })
+    await nextTick()
+    const msg = { role: 'assistant', content: [{ type: 'text', text: '子代理结果' }] }
+    gw.fireFrame({ type: 'done', runId: 'foreign-1', message: msg })
+    await nextTick()
+    expect(w.find('[data-test="stream"]').text()).toContain('子代理结果')
+    // 二次 done（同一 runId，重放）→ 记录已删，不再插入（text 不重复）
+    gw.fireFrame({ type: 'done', runId: 'foreign-1', message: msg })
+    await nextTick()
+    expect(w.find('[data-test="stream"]').text().match(/子代理结果/g)?.length ?? 0).toBe(1)
+  })
+
+  it('#569: 外来 run 先记录、用户 send 后在途，其可见 final 到达 → 流式 turn 继续正常收尾', async () => {
+    const { w, gw } = await mountReady()
+    // 空闲期外来 run 首帧 → foreignRunIds 记录
+    gw.fireFrame({ type: 'text', runId: 'foreign-1', delta: '' })
+    await nextTick()
+    // 用户发送 → 在途流式
+    await w.find('[data-test="input"]').setValue('我的问题')
+    await w.find('[data-test="send"]').trigger('click')
+    gw.fireFrame({ type: 'text', runId: 'user-run', delta: '流式回复' })
+    await nextTick()
+    // 在途期间外来 final 到达 → 插入独立消息（不抢占/不污染 activeRunId 气泡）
+    gw.fireFrame({
+      type: 'done',
+      runId: 'foreign-1',
+      message: { role: 'assistant', content: [{ type: 'text', text: '并行子代理结果' }] },
+    })
+    await nextTick()
+    expect(w.find('[data-test="stream"]').text()).toContain('并行子代理结果')
+    // 用户 run 继续流式收尾（未被外来插入中断）
+    gw.fireFrame({ type: 'text', runId: 'user-run', delta: '继续' })
+    await nextTick()
+    expect(w.find('[data-test="stream"]').text()).toContain('流式回复继续')
+    gw.fireFrame({ type: 'done', runId: 'user-run' })
+    await nextTick()
+    expect(w.find('.cursor').exists()).toBe(false) // done 收尾，光标消失
+  })
+
   it('F3: send RPC 失败 → pendingSend 复位（切会话不产生 phantom orphan，下次首帧不被吞）', async () => {
     const { w, gw } = await mountReady()
     gw.send.mockRejectedValueOnce(new Error('未配对'))

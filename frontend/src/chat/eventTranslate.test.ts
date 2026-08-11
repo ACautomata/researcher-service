@@ -89,7 +89,8 @@ describe('ChatEventTranslator', () => {
     t.translate(chat('delta', 'r1', { deltaText: '你好' }))
     expect(t.translate(chat('final', 'r1', { message: '你好世界' }))).toEqual([
       { type: 'text', runId: 'r1', delta: '世界' },
-      { type: 'done', runId: 'r1' },
+      // #569: done 帧携带归约权威 message（外来局部插入数据通道；本 run 消费端不读）
+      { type: 'done', runId: 'r1', message: '你好世界' },
     ])
   })
 
@@ -99,7 +100,7 @@ describe('ChatEventTranslator', () => {
     t.translate(chat('delta', 'r1', { deltaText: 'Hello  world' }))
     expect(t.translate(chat('final', 'r1', { message: 'Hello world' }))).toEqual([
       { type: 'text', runId: 'r1', delta: 'Hello world', replace: true },
-      { type: 'done', runId: 'r1' },
+      { type: 'done', runId: 'r1', message: 'Hello world' },
     ])
   })
 
@@ -109,7 +110,7 @@ describe('ChatEventTranslator', () => {
     t.translate(chat('delta', 'r1', { deltaText: 'abc' })) // 同内容重复 → sent='abcabc'
     expect(t.translate(chat('final', 'r1', { message: 'abc' }))).toEqual([
       { type: 'text', runId: 'r1', delta: 'abc', replace: true },
-      { type: 'done', runId: 'r1' },
+      { type: 'done', runId: 'r1', message: 'abc' },
     ])
   })
 
@@ -117,47 +118,35 @@ describe('ChatEventTranslator', () => {
   it('final 含 image 块（browser 截图）→ attachment 帧 + done（无文本 tail）', () => {
     const t = makeTranslator()
     t.translate(chat('delta', 'r1', { deltaText: '这是截图' }))
-    expect(
-      t.translate(
-        chat('final', 'r1', {
-          message: { role: 'assistant', content: [{ type: 'text', text: '这是截图' }, { type: 'image', mimeType: 'image/png', content: 'iVBOR' }] },
-        }),
-      ),
-    ).toEqual([
+    const message = {
+      role: 'assistant',
+      content: [{ type: 'text', text: '这是截图' }, { type: 'image', mimeType: 'image/png', content: 'iVBOR' }],
+    }
+    expect(t.translate(chat('final', 'r1', { message }))).toEqual([
       { type: 'attachment', runId: 'r1', media: [{ type: 'image', mimeType: 'image/png', src: 'iVBOR' }] },
-      { type: 'done', runId: 'r1' },
+      { type: 'done', runId: 'r1', message },
     ])
   })
 
   it('final 纯图片（无文本）→ 仅 attachment 帧 + done（纯图片 run 也渲染）', () => {
     const t = makeTranslator()
-    expect(
-      t.translate(
-        chat('final', 'r1', {
-          message: { role: 'assistant', content: [{ type: 'image', mimeType: 'image/png', content: 'AAA' }] },
-        }),
-      ),
-    ).toEqual([
+    const message = { role: 'assistant', content: [{ type: 'image', mimeType: 'image/png', content: 'AAA' }] }
+    expect(t.translate(chat('final', 'r1', { message }))).toEqual([
       { type: 'attachment', runId: 'r1', media: [{ type: 'image', mimeType: 'image/png', src: 'AAA' }] },
-      { type: 'done', runId: 'r1' },
+      { type: 'done', runId: 'r1', message },
     ])
   })
 
   it('final 含 audio + video 块 → attachment 帧携两媒体 + done', () => {
     const t = makeTranslator()
-    expect(
-      t.translate(
-        chat('final', 'r1', {
-          message: {
-            role: 'assistant',
-            content: [
-              { type: 'audio', mimeType: 'audio/mpeg', content: 'QUJD' },
-              { type: 'video', mimeType: 'video/mp4', content: 'REVG' },
-            ],
-          },
-        }),
-      ),
-    ).toEqual([
+    const message = {
+      role: 'assistant',
+      content: [
+        { type: 'audio', mimeType: 'audio/mpeg', content: 'QUJD' },
+        { type: 'video', mimeType: 'video/mp4', content: 'REVG' },
+      ],
+    }
+    expect(t.translate(chat('final', 'r1', { message }))).toEqual([
       {
         type: 'attachment',
         runId: 'r1',
@@ -166,16 +155,15 @@ describe('ChatEventTranslator', () => {
           { type: 'video', mimeType: 'video/mp4', src: 'REVG' },
         ],
       },
-      { type: 'done', runId: 'r1' },
+      { type: 'done', runId: 'r1', message },
     ])
   })
 
   it('final 纯文本（无媒体块）→ 不产 attachment 帧（回归无差）', () => {
     const t = makeTranslator()
     t.translate(chat('delta', 'r1', { deltaText: '你好' }))
-    expect(t.translate(chat('final', 'r1', { message: { role: 'assistant', content: [{ type: 'text', text: '你好' }] } }))).toEqual([
-      { type: 'done', runId: 'r1' },
-    ])
+    const message = { role: 'assistant', content: [{ type: 'text', text: '你好' }] }
+    expect(t.translate(chat('final', 'r1', { message }))).toEqual([{ type: 'done', runId: 'r1', message }])
   })
 
   // ---- #565: 结构化 thinking 块随 text 帧携带（方案 A：翻译层提取、随帧携带）----
@@ -219,30 +207,20 @@ describe('ChatEventTranslator', () => {
   it('#565: final 含 thinking 块（尾部补发）→ tail 帧带 thinking + done', () => {
     const t = makeTranslator()
     t.translate(chat('delta', 'r1', { deltaText: '正文' }))
-    expect(
-      t.translate(
-        chat('final', 'r1', {
-          message: { role: 'assistant', content: [{ type: 'thinking', thinking: '最终推理' }, { type: 'text', text: '正文尾部' }] },
-        }),
-      ),
-    ).toEqual([
+    const message = { role: 'assistant', content: [{ type: 'thinking', thinking: '最终推理' }, { type: 'text', text: '正文尾部' }] }
+    expect(t.translate(chat('final', 'r1', { message }))).toEqual([
       { type: 'text', runId: 'r1', delta: '尾部', thinking: '最终推理' },
-      { type: 'done', runId: 'r1' },
+      { type: 'done', runId: 'r1', message },
     ])
   })
 
   it('#565: final 非前缀（F9 replace 纠正）含 thinking → replace 帧带 thinking', () => {
     const t = makeTranslator()
     t.translate(chat('delta', 'r1', { deltaText: '旧' }))
-    expect(
-      t.translate(
-        chat('final', 'r1', {
-          message: { role: 'assistant', content: [{ type: 'thinking', thinking: '推理' }, { type: 'text', text: '新正文' }] },
-        }),
-      ),
-    ).toEqual([
+    const message = { role: 'assistant', content: [{ type: 'thinking', thinking: '推理' }, { type: 'text', text: '新正文' }] }
+    expect(t.translate(chat('final', 'r1', { message }))).toEqual([
       { type: 'text', runId: 'r1', delta: '新正文', replace: true, thinking: '推理' },
-      { type: 'done', runId: 'r1' },
+      { type: 'done', runId: 'r1', message },
     ])
   })
 
@@ -252,27 +230,17 @@ describe('ChatEventTranslator', () => {
   it('#565: final 含 thinking 块且文本与 sent 相等 → done 帧带 thinking', () => {
     const t = makeTranslator()
     t.translate(chat('delta', 'r1', { deltaText: 'ok' }))
-    expect(
-      t.translate(
-        chat('final', 'r1', {
-          message: { role: 'assistant', content: [{ type: 'thinking', thinking: '思考' }, { type: 'text', text: 'ok' }] },
-        }),
-      ),
-    ).toEqual([
-      { type: 'done', runId: 'r1', thinking: '思考' },
+    const message = { role: 'assistant', content: [{ type: 'thinking', thinking: '思考' }, { type: 'text', text: 'ok' }] }
+    expect(t.translate(chat('final', 'r1', { message }))).toEqual([
+      { type: 'done', runId: 'r1', thinking: '思考', message },
     ])
   })
 
   it('#565: final 无文本（thinking-only 消息，E1b abort 形状）→ done 帧带 thinking', () => {
     const t = makeTranslator()
-    expect(
-      t.translate(
-        chat('final', 'r1', {
-          message: { role: 'assistant', content: [{ type: 'thinking', thinking: '推理' }, { type: 'toolCall', name: 'exec' }] },
-        }),
-      ),
-    ).toEqual([
-      { type: 'done', runId: 'r1', thinking: '推理' },
+    const message = { role: 'assistant', content: [{ type: 'thinking', thinking: '推理' }, { type: 'toolCall', name: 'exec' }] }
+    expect(t.translate(chat('final', 'r1', { message }))).toEqual([
+      { type: 'done', runId: 'r1', thinking: '推理', message },
     ])
   })
 
@@ -280,23 +248,20 @@ describe('ChatEventTranslator', () => {
   it('#565: final 相等含 thinking 但已产 text 帧 → done 帧不带 thinking（不重复）', () => {
     const t = makeTranslator()
     t.translate(chat('delta', 'r1', { deltaText: '正文' }))
-    expect(
-      t.translate(
-        chat('final', 'r1', {
-          message: { role: 'assistant', content: [{ type: 'thinking', thinking: '最终推理' }, { type: 'text', text: '正文尾部' }] },
-        }),
-      ),
-    ).toEqual([
+    const message = { role: 'assistant', content: [{ type: 'thinking', thinking: '最终推理' }, { type: 'text', text: '正文尾部' }] }
+    expect(t.translate(chat('final', 'r1', { message }))).toEqual([
       { type: 'text', runId: 'r1', delta: '尾部', thinking: '最终推理' },
-      { type: 'done', runId: 'r1' },
+      { type: 'done', runId: 'r1', message },
     ])
   })
 
-  // F9 现有相等回归：message 为 string 时无结构化块 → 仍只发 done（不挂字段，行为不变）
+  // F9 现有相等回归：message 为 string 时无结构化块 → 仍只发 done（不挂 thinking 字段，行为不变）
   it('#565: final 与 sent 相等且无 thinking 块 → 仅 done（回归无差）', () => {
     const t = makeTranslator()
     t.translate(chat('delta', 'r1', { deltaText: 'ok' }))
-    expect(t.translate(chat('final', 'r1', { message: 'ok' }))).toEqual([{ type: 'done', runId: 'r1' }])
+    expect(t.translate(chat('final', 'r1', { message: 'ok' }))).toEqual([
+      { type: 'done', runId: 'r1', message: 'ok' },
+    ])
   })
 
   it('#565: final 无 thinking 块（tail 补发）→ tail 帧不带 thinking（回归无差）', () => {
@@ -304,8 +269,27 @@ describe('ChatEventTranslator', () => {
     t.translate(chat('delta', 'r1', { deltaText: '你好' }))
     expect(t.translate(chat('final', 'r1', { message: '你好世界' }))).toEqual([
       { type: 'text', runId: 'r1', delta: '世界' },
-      { type: 'done', runId: 'r1' },
+      { type: 'done', runId: 'r1', message: '你好世界' },
     ])
+  })
+
+  // #569: done 帧扩展——外来 run final 的归约权威 message（currentRun.message）透出到 done 帧，
+  // 供 handleDone 外来分支局部插入（数据通道）。翻译层无外来概念（纯函数），有归约 message 即带；
+  // 消费端只在外来分支读该字段，本 run 分支沿用 tail 补发逻辑不读。
+  it('#569: final 归约 message 透出到 done 帧（外来可见 final 局部插入的数据通道）', () => {
+    const t = makeTranslator()
+    const message = { role: 'assistant', content: [{ type: 'text', text: '外来结果' }] }
+    expect(t.translate(chat('final', 'foreign-1', { message }))).toEqual([
+      { type: 'text', runId: 'foreign-1', delta: '外来结果' },
+      { type: 'done', runId: 'foreign-1', message },
+    ])
+  })
+
+  // #569: 归约无 message（final 未带权威 message 且无 delta 快照）→ done 帧不带 message 字段
+  //（外来分支无可插入内容，行为同现状）。
+  it('#569: final 归约无 message → done 帧不带 message（外来分支无可插入，回归无差）', () => {
+    const t = makeTranslator()
+    expect(t.translate(chat('final', 'foreign-1'))).toEqual([{ type: 'done', runId: 'foreign-1' }])
   })
 
   it('#565: delta 增量帧不挂 thinking（undefined）', () => {
@@ -333,7 +317,7 @@ describe('ChatEventTranslator', () => {
     const t = makeTranslator()
     t.translate(chat('delta', 'r1', { deltaText: 'ok' }))
     expect(t.translate(chat('final', 'r1', { message: 'ok' }))).toEqual([
-      { type: 'done', runId: 'r1' },
+      { type: 'done', runId: 'r1', message: 'ok' },
     ])
   })
 
@@ -343,7 +327,7 @@ describe('ChatEventTranslator', () => {
     const msg = { role: 'assistant', content: [{ type: 'text', text: '你好世界' }], timestamp: 1785148522491 }
     expect(t.translate(chat('final', 'r1', { message: msg }))).toEqual([
       { type: 'text', runId: 'r1', delta: '世界' },
-      { type: 'done', runId: 'r1' },
+      { type: 'done', runId: 'r1', message: msg },
     ])
   })
 
@@ -525,7 +509,8 @@ describe('ChatEventTranslator', () => {
     proj.results.set('r1', { run: { runId: 'r1', status: 'completed', message: 'Hello world' } })
     expect(t.translate(chat('final', 'r1', { message: 'stale' }))).toEqual([
       { type: 'text', runId: 'r1', delta: ' world' },
-      { type: 'done', runId: 'r1' },
+      // #569: done 帧携带归约权威 message（currentRun.message，非 payload）
+      { type: 'done', runId: 'r1', message: 'Hello world' },
     ])
   })
 
@@ -606,7 +591,7 @@ describe('ChatEventTranslator', () => {
     const out = t.translate({ type: 'event', event: 'chat', payload: { runId: 'r1', state: 'final', message: 'abc def' } })
     expect(out).toEqual([
       { type: 'text', runId: 'r1', delta: 'abc def' }, // 完整文本（非 ' def' 尾部残差）
-      { type: 'done', runId: 'r1' },
+      { type: 'done', runId: 'r1', message: 'abc def' },
     ])
   })
 
