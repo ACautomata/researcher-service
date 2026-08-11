@@ -3,10 +3,64 @@
 // final 尾部/tool phase/approval 卡/approvalResolved）。无 I/O 纯函数，直测模块边界。
 
 import { describe, expect, it } from 'vitest'
-import { ChatEventTranslator, attachmentToMediaBlock, extractMessageAttachments, extractMessageText, type GatewayEventFrame } from './eventTranslate'
-
+import {
+  ChatEventTranslator,
+  attachmentToMediaBlock,
+  extractMessageAttachments,
+  extractMessageText,
+  type GatewayEventFrame,
+  type SessionProjectionReducer,
+  type SessionProjectionRun,
+  type SessionProjectionRunTransition,
+} from './eventTranslate'
 function chat(state: string, runId = 'r1', extra: Record<string, unknown> = {}): GatewayEventFrame {
   return { type: 'event', event: 'chat', payload: { runId, state, ...extra } }
+}
+
+// #560: 直通假归约器——把终态 payload 原样映射为归约结果（等价「SDK 归一后的理想归约」）。
+// 既有终态用例（aborted→done / error→error 帧 / final tail-replace）经它断言「经 projection 归约后
+// 的等价 ChatFrame」（规格 §5：终态相关用例改为断言归约后产物）；errorMessage 模拟 SDK
+// readNonemptyString 归一（trim 后空 → undefined）。
+class PassthroughProjection implements SessionProjectionReducer {
+  reduce(event: GatewayEventFrame): SessionProjectionRunTransition | null {
+    const payload = (event.payload ?? {}) as Record<string, unknown>
+    const runId = typeof payload.runId === 'string' ? payload.runId : ''
+    const state = payload.state
+    if (!runId || (state !== 'final' && state !== 'aborted' && state !== 'error')) return null
+    const run: SessionProjectionRun = { runId, status: state === 'aborted' ? 'aborted' : state === 'error' ? 'error' : 'completed' }
+    if (payload.message !== undefined) run.message = payload.message
+    if (typeof payload.errorMessage === 'string' && payload.errorMessage.trim()) {
+      run.errorMessage = payload.errorMessage.trim()
+    }
+    if (typeof payload.errorKind === 'string' && payload.errorKind.trim()) {
+      run.errorKind = payload.errorKind.trim()
+    }
+    return { currentRun: run, isReplayedFinal: false }
+  }
+  reset(): void {}
+}
+
+function makeTranslator(): ChatEventTranslator {
+  return new ChatEventTranslator(new PassthroughProjection())
+}
+
+// #560: 假归约器——测试注入证明「终态判定/终态 message/去重读 currentRun 而非手写 payload 判读」。
+// 由测试直接构造 currentRun 结果（status/message/errorMessage/isReplayedFinal 逐用例可控）。
+class FakeSessionProjection implements SessionProjectionReducer {
+  results = new Map<string, { run?: SessionProjectionRun; transition?: { isReplayedFinal?: boolean } }>()
+  reduce(event: GatewayEventFrame): SessionProjectionRunTransition | null {
+    const payload = (event.payload ?? {}) as Record<string, unknown>
+    const runId = typeof payload.runId === 'string' ? payload.runId : ''
+    const entry = this.results.get(runId)
+    if (!entry?.run) return null
+    return {
+      currentRun: entry.run,
+      isReplayedFinal: entry.transition?.isReplayedFinal ?? false,
+    }
+  }
+  reset(): void {
+    this.results.clear()
+  }
 }
 
 function agentTool(phase: string, data: Record<string, unknown> = {}): GatewayEventFrame {
@@ -23,14 +77,14 @@ function approvalRequested(extra: Record<string, unknown> = {}): GatewayEventFra
 
 describe('ChatEventTranslator', () => {
   it('delta(deltaText) → text 增量', () => {
-    const t = new ChatEventTranslator()
+    const t = makeTranslator()
     expect(t.translate(chat('delta', 'r1', { deltaText: '你好' }))).toEqual([
       { type: 'text', runId: 'r1', delta: '你好' },
     ])
   })
 
   it('final → done；含未投递尾部先补 text 再 done', () => {
-    const t = new ChatEventTranslator()
+    const t = makeTranslator()
     t.translate(chat('delta', 'r1', { deltaText: '你好' }))
     expect(t.translate(chat('final', 'r1', { message: '你好世界' }))).toEqual([
       { type: 'text', runId: 'r1', delta: '世界' },
@@ -39,7 +93,7 @@ describe('ChatEventTranslator', () => {
   })
 
   it('F9: 非前缀 final（空白规范化）→ 整段 replace 帧 + done（不静默丢权威文本）', () => {
-    const t = new ChatEventTranslator()
+    const t = makeTranslator()
     // 流式双空格 → final 规范化单空格（message 非 sent 前缀）
     t.translate(chat('delta', 'r1', { deltaText: 'Hello  world' }))
     expect(t.translate(chat('final', 'r1', { message: 'Hello world' }))).toEqual([
@@ -49,7 +103,7 @@ describe('ChatEventTranslator', () => {
   })
 
   it('F9: 重复 delta 使 sent 翻倍 → final 前缀不匹配 → replace 纠正', () => {
-    const t = new ChatEventTranslator()
+    const t = makeTranslator()
     t.translate(chat('delta', 'r1', { deltaText: 'abc' }))
     t.translate(chat('delta', 'r1', { deltaText: 'abc' })) // 同内容重复 → sent='abcabc'
     expect(t.translate(chat('final', 'r1', { message: 'abc' }))).toEqual([
@@ -60,7 +114,7 @@ describe('ChatEventTranslator', () => {
 
   // ---- #459-T3 #464：流式消息 image/audio/video 块 → attachment 帧（独立于 text 帧的媒体通道）----
   it('final 含 image 块（browser 截图）→ attachment 帧 + done（无文本 tail）', () => {
-    const t = new ChatEventTranslator()
+    const t = makeTranslator()
     t.translate(chat('delta', 'r1', { deltaText: '这是截图' }))
     expect(
       t.translate(
@@ -75,7 +129,7 @@ describe('ChatEventTranslator', () => {
   })
 
   it('final 纯图片（无文本）→ 仅 attachment 帧 + done（纯图片 run 也渲染）', () => {
-    const t = new ChatEventTranslator()
+    const t = makeTranslator()
     expect(
       t.translate(
         chat('final', 'r1', {
@@ -89,7 +143,7 @@ describe('ChatEventTranslator', () => {
   })
 
   it('final 含 audio + video 块 → attachment 帧携两媒体 + done', () => {
-    const t = new ChatEventTranslator()
+    const t = makeTranslator()
     expect(
       t.translate(
         chat('final', 'r1', {
@@ -116,7 +170,7 @@ describe('ChatEventTranslator', () => {
   })
 
   it('final 纯文本（无媒体块）→ 不产 attachment 帧（回归无差）', () => {
-    const t = new ChatEventTranslator()
+    const t = makeTranslator()
     t.translate(chat('delta', 'r1', { deltaText: '你好' }))
     expect(t.translate(chat('final', 'r1', { message: { role: 'assistant', content: [{ type: 'text', text: '你好' }] } }))).toEqual([
       { type: 'done', runId: 'r1' },
@@ -124,7 +178,7 @@ describe('ChatEventTranslator', () => {
   })
 
   it('delta replace 快照含媒体无文本 → attachment 帧（不回退 deltaText）', () => {
-    const t = new ChatEventTranslator()
+    const t = makeTranslator()
     expect(
       t.translate(
         chat('delta', 'r1', {
@@ -138,7 +192,7 @@ describe('ChatEventTranslator', () => {
   })
 
   it('F9: final 与 sent 完全相等 → 仅 done（无漂移不 replace）', () => {
-    const t = new ChatEventTranslator()
+    const t = makeTranslator()
     t.translate(chat('delta', 'r1', { deltaText: 'ok' }))
     expect(t.translate(chat('final', 'r1', { message: 'ok' }))).toEqual([
       { type: 'done', runId: 'r1' },
@@ -146,7 +200,7 @@ describe('ChatEventTranslator', () => {
   })
 
   it('final.message 为 dict{content:[{type:text,text}]} 时从 content[].text 提取（实测校准）', () => {
-    const t = new ChatEventTranslator()
+    const t = makeTranslator()
     t.translate(chat('delta', 'r1', { deltaText: '你好' }))
     const msg = { role: 'assistant', content: [{ type: 'text', text: '你好世界' }], timestamp: 1785148522491 }
     expect(t.translate(chat('final', 'r1', { message: msg }))).toEqual([
@@ -156,7 +210,7 @@ describe('ChatEventTranslator', () => {
   })
 
   it('delta replace=true + message 快照 → replace 帧（整段替换，前缀/非前缀均正确）', () => {
-    const t = new ChatEventTranslator()
+    const t = makeTranslator()
     t.translate(chat('delta', 'r1', { deltaText: 'The cat' }))
     expect(t.translate(chat('delta', 'r1', { message: 'The dog', replace: true }))).toEqual([
       { type: 'text', runId: 'r1', delta: 'The dog', replace: true },
@@ -164,20 +218,20 @@ describe('ChatEventTranslator', () => {
   })
 
   it('delta replace=true 无快照 → 退回 deltaText 增量', () => {
-    const t = new ChatEventTranslator()
+    const t = makeTranslator()
     expect(t.translate(chat('delta', 'r1', { deltaText: 'x', replace: true }))).toEqual([
       { type: 'text', runId: 'r1', delta: 'x' },
     ])
   })
 
   it('final 无 message → 仅 done（不重复发已投递文本）', () => {
-    const t = new ChatEventTranslator()
+    const t = makeTranslator()
     t.translate(chat('delta', 'r1', { deltaText: '你好' }))
     expect(t.translate(chat('final', 'r1'))).toEqual([{ type: 'done', runId: 'r1' }])
   })
 
   it('error → error 帧（errorMessage 优先，退 errorKind）', () => {
-    const t = new ChatEventTranslator()
+    const t = makeTranslator()
     expect(t.translate(chat('error', 'r1', { errorMessage: '模型超时' }))).toEqual([
       { type: 'error', runId: 'r1', message: '模型超时' },
     ])
@@ -187,12 +241,12 @@ describe('ChatEventTranslator', () => {
   })
 
   it('aborted → done（视作收尾，非错误）', () => {
-    const t = new ChatEventTranslator()
+    const t = makeTranslator()
     expect(t.translate(chat('aborted'))).toEqual([{ type: 'done', runId: 'r1' }])
   })
 
   it('未知 state / 缺 runId / 非 event 帧 / 非 chat 事件 → []', () => {
-    const t = new ChatEventTranslator()
+    const t = makeTranslator()
     expect(t.translate(chat('streaming'))).toEqual([])
     expect(t.translate({ type: 'event', event: 'chat', payload: { state: 'delta', deltaText: 'x' } })).toEqual([])
     expect(t.translate({ type: 'res', id: 'x', ok: true } as unknown as GatewayEventFrame)).toEqual([])
@@ -200,14 +254,14 @@ describe('ChatEventTranslator', () => {
   })
 
   it('delta message 变体（非 replace）→ []；replace 无快照无 deltaText → []', () => {
-    const t = new ChatEventTranslator()
+    const t = makeTranslator()
     expect(t.translate(chat('delta', 'r1', { message: '消息级 delta' }))).toEqual([])
     expect(t.translate(chat('delta', 'r1', { replace: true }))).toEqual([])
   })
 
   // ---- T06 权限审批 ----
   it('exec.approval.requested → approval 卡（request.command 优先）', () => {
-    const t = new ChatEventTranslator()
+    const t = makeTranslator()
     const frame = approvalRequested({ request: { command: 'rm -rf /tmp/x', sessionKey: 'sk-1' } })
     expect(t.translate(frame)).toEqual([
       { type: 'approval', id: 'ap-1', kind: 'exec', command: 'rm -rf /tmp/x', sessionKey: 'sk-1', agentId: null },
@@ -215,7 +269,7 @@ describe('ChatEventTranslator', () => {
   })
 
   it('approval 卡 command 取值链：request 缺失退 systemRunPlan.rawCommand → command → 顶层 command', () => {
-    const t = new ChatEventTranslator()
+    const t = makeTranslator()
     expect(t.translate(approvalRequested({ systemRunPlan: { rawCommand: 'ls -la' } }))).toEqual([
       { type: 'approval', id: 'ap-1', kind: 'exec', command: 'ls -la', sessionKey: null, agentId: null },
     ])
@@ -228,7 +282,7 @@ describe('ChatEventTranslator', () => {
   })
 
   it('approval 卡 kind 缺省 → 从事件名族派生（plugin.approval.requested → plugin）', () => {
-    const t = new ChatEventTranslator()
+    const t = makeTranslator()
     const frame = { type: 'event', event: 'plugin.approval.requested', payload: { id: 'ap-2', command: 'x' } }
     expect(t.translate(frame)).toEqual([
       { type: 'approval', id: 'ap-2', kind: 'plugin', command: 'x', sessionKey: null, agentId: null },
@@ -236,7 +290,7 @@ describe('ChatEventTranslator', () => {
   })
 
   it('approval 卡缺 id → []（无法 resolve，不出卡）；缺 command 容忍为空', () => {
-    const t = new ChatEventTranslator()
+    const t = makeTranslator()
     expect(t.translate({ type: 'event', event: 'exec.approval.requested', payload: { kind: 'exec' } })).toEqual([])
     expect(t.translate(approvalRequested({ request: { sessionKey: 'sk' } }))).toEqual([
       { type: 'approval', id: 'ap-1', kind: 'exec', command: '', sessionKey: 'sk', agentId: null },
@@ -244,7 +298,7 @@ describe('ChatEventTranslator', () => {
   })
 
   it('approval 卡 agentId 透传：request.agentId（#394 实测恒下发，string 才取）', () => {
-    const t = new ChatEventTranslator()
+    const t = makeTranslator()
     expect(t.translate(approvalRequested({ request: { command: 'x', agentId: 'sub-1' } }))).toEqual([
       { type: 'approval', id: 'ap-1', kind: 'exec', command: 'x', sessionKey: null, agentId: 'sub-1' },
     ])
@@ -258,7 +312,7 @@ describe('ChatEventTranslator', () => {
   })
 
   it('approval 卡 agentId 回退路径：request 缺失时读 systemRunPlan.agentId（host=node 时存在）', () => {
-    const t = new ChatEventTranslator()
+    const t = makeTranslator()
     expect(t.translate(approvalRequested({ systemRunPlan: { rawCommand: 'ls', agentId: 'sub-2' } }))).toEqual([
       { type: 'approval', id: 'ap-1', kind: 'exec', command: 'ls', sessionKey: null, agentId: 'sub-2' },
     ])
@@ -270,14 +324,14 @@ describe('ChatEventTranslator', () => {
 
   // ---- T08 工具 ----
   it('tool start → running 帧（data.name/toolCallId/args → name/id/input）', () => {
-    const t = new ChatEventTranslator()
+    const t = makeTranslator()
     expect(t.translate(agentTool('start', { name: 'wiki.search', toolCallId: 'call-1', args: { query: '对比学习' } }))).toEqual([
       { type: 'tool', runId: 'r1', name: 'wiki.search', state: 'running', id: 'call-1', title: null, input: { query: '对比学习' }, result: null, isError: false },
     ])
   })
 
   it('tool result → done 帧；isError=true → error 帧', () => {
-    const t = new ChatEventTranslator()
+    const t = makeTranslator()
     expect(t.translate(agentTool('result', { name: 'wiki.search', toolCallId: 'call-2', result: { count: 3 }, isError: false }))).toEqual([
       { type: 'tool', runId: 'r1', name: 'wiki.search', state: 'done', id: 'call-2', title: null, input: null, result: { count: 3 }, isError: false },
     ])
@@ -287,7 +341,7 @@ describe('ChatEventTranslator', () => {
   })
 
   it('tool update → []（跳过中间增量）；非 tool stream → []；缺 runId/name → []', () => {
-    const t = new ChatEventTranslator()
+    const t = makeTranslator()
     expect(t.translate(agentTool('update', { name: 'bash', toolCallId: 'call-3' }))).toEqual([])
     expect(t.translate({ type: 'event', event: 'agent', payload: { runId: 'r1', stream: 'item', data: { kind: 'command' } } })).toEqual([])
     expect(t.translate({ type: 'event', event: 'agent', payload: { stream: 'tool', data: { phase: 'start' } } })).toEqual([])
@@ -296,7 +350,7 @@ describe('ChatEventTranslator', () => {
 
   // ---- approval resolved ----
   it('exec/plugin.approval.resolved → approvalResolved 帧（透传权威 decision，未知值不默认批准）', () => {
-    const t = new ChatEventTranslator()
+    const t = makeTranslator()
     expect(t.translate({ type: 'event', event: 'plugin.approval.resolved', payload: { id: 'ap-1', decision: 'deny' } })).toEqual([
       { type: 'approvalResolved', id: 'ap-1', decision: 'deny' },
     ])
@@ -310,7 +364,7 @@ describe('ChatEventTranslator', () => {
   })
 
   it('P2-1: 无 runId 的 chat.error → 连接级错误帧（不静默丢弃，handleError no-runId 分支可达）', () => {
-    const t = new ChatEventTranslator()
+    const t = makeTranslator()
     // 会话级错误（如「会话不存在」）无 runId——旧实现返回 [] 保证不可见
     expect(
       t.translate({ type: 'event', event: 'chat', payload: { state: 'error', errorMessage: '会话不存在' } }),
@@ -321,8 +375,90 @@ describe('ChatEventTranslator', () => {
     ).toEqual([{ type: 'error', runId: 'r1', message: 'failed' }])
   })
 
+  // ---- #560: SDK SessionProjection 减负——终态判定/终态 message/去重读注入归约器的 currentRun ----
+  // 实证用例（规格 §4.3-4.5）：假归约器注入证明「判定来源是 currentRun 而非手写 payload 判读」、
+  // timeout/yielded 细分、重放去重跳过渲染。
+
+  it('#560 §4.3: 注入归约器后 final 的 message 来自 currentRun.message（delta 快照被 final 权威覆盖）', () => {
+    const proj = new FakeSessionProjection()
+    const t = new ChatEventTranslator(proj)
+    t.translate(chat('delta', 'r1', { deltaText: 'Hello' }))
+    // 归约器模拟「SDK updateRun 归一」：currentRun.message 是 final 权威（delta 快照已被覆盖）
+    proj.results.set('r1', { run: { runId: 'r1', status: 'completed', message: 'Hello world' } })
+    expect(t.translate(chat('final', 'r1', { message: 'stale' }))).toEqual([
+      { type: 'text', runId: 'r1', delta: ' world' },
+      { type: 'done', runId: 'r1' },
+    ])
+  })
+
+  it('#560 §4.3: error 事件的 errorMessage 经归约器归一（trim 后空 → 回退 errorKind，非手写取舍）', () => {
+    const proj = new FakeSessionProjection()
+    const t = new ChatEventTranslator(proj)
+    // 归约器模拟 readNonemptyString 归一：payload 的 errorMessage 空白被 trim → undefined；
+    // errorKind 也经归一（真实 SDK 把两者都归一到 currentRun）
+    proj.results.set('r1', { run: { runId: 'r1', status: 'error', errorKind: 'RATE_LIMIT' } })
+    expect(t.translate(chat('error', 'r1', { errorMessage: '   ', errorKind: 'RATE_LIMIT' }))).toEqual([
+      { type: 'error', runId: 'r1', message: 'RATE_LIMIT' },
+    ])
+    // currentRun.errorMessage 权威优先（与 payload 不一致时以归约结果为准）
+    proj.results.set('r2', { run: { runId: 'r2', status: 'error', errorMessage: '归一化文案' } })
+    expect(t.translate(chat('error', 'r2', { errorMessage: '原始文案' }))).toEqual([
+      { type: 'error', runId: 'r2', message: '归一化文案' },
+    ])
+  })
+
+  it('#560 §4.5: timeout 细分——error + errorKind=timeout → error 帧带超时标记', () => {
+    const proj = new FakeSessionProjection()
+    const t = new ChatEventTranslator(proj)
+    proj.results.set('r1', { run: { runId: 'r1', status: 'timeout', errorMessage: 'request timed out' } })
+    expect(t.translate(chat('error', 'r1', { errorKind: 'timeout' }))).toEqual([
+      { type: 'error', runId: 'r1', message: 'request timed out（超时）' },
+    ])
+  })
+
+  it('#560 §4.5: yielded 细分——final + yielded → done 帧（SDK 语义：yielded=true && stopReason=end_turn）', () => {
+    const proj = new FakeSessionProjection()
+    const t = new ChatEventTranslator(proj)
+    proj.results.set('r1', { run: { runId: 'r1', status: 'yielded', message: '让出给下个 agent' } })
+    expect(t.translate(chat('final', 'r1', { yielded: true, stopReason: 'end_turn' }))).toEqual([
+      { type: 'done', runId: 'r1' },
+    ])
+  })
+
+  it('#560 §4.4: 重放去重——isReplayedFinal=true 时同一 final 再次到达 → 跳过渲染（[]）', () => {
+    const proj = new FakeSessionProjection()
+    const t = new ChatEventTranslator(proj)
+    // 模拟「previousRun 已终态 + hasSessionProjectionAcceptedFinal 命中」——resume 重放/断线重发
+    proj.results.set('r1', {
+      run: { runId: 'r1', status: 'completed', message: 'done' },
+      transition: { isReplayedFinal: true },
+    })
+    expect(t.translate(chat('final', 'r1', { message: 'done' }))).toEqual([])
+    // error/aborted 事件不走重放网（SDK acceptedFinalMessageIdentities 只记 completed/yielded）——
+    // isReplayedFinal=true 也不拦截，恒产帧（handleError/handleDone 幂等，多产无害）
+    proj.results.set('r2', {
+      run: { runId: 'r2', status: 'error', errorKind: 'RATE_LIMIT' },
+      transition: { isReplayedFinal: true },
+    })
+    expect(t.translate(chat('error', 'r2', { errorKind: 'RATE_LIMIT' }))).toEqual([
+      { type: 'error', runId: 'r2', message: 'RATE_LIMIT' },
+    ])
+    expect(t.translate(chat('aborted', 'r3'))).toEqual([{ type: 'done', runId: 'r3' }])
+  })
+
+  it('#560: final + stopReason=error → error 帧而非 done（SDK 归约为 status=error；尾部/媒体先行补发，权威内容不丢）', () => {
+    const proj = new FakeSessionProjection()
+    const t = new ChatEventTranslator(proj)
+    t.translate(chat('delta', 'r1', { deltaText: '部分文本' }))
+    proj.results.set('r1', { run: { runId: 'r1', status: 'error', message: '部分文本尾部', errorMessage: 'tool failed' } })
+    expect(t.translate(chat('final', 'r1', { message: '部分文本尾部', stopReason: 'error' }))).toEqual([
+      { type: 'text', runId: 'r1', delta: '尾部' },
+      { type: 'error', runId: 'r1', message: 'tool failed' },
+    ])
+  })
+
   it('P2-2: reset 清空 sent 累积（断线重连边界，防 resume 重放双重追加）', () => {
-    const t = new ChatEventTranslator()
+    const t = makeTranslator()
     // 流式累积 sent['r1']='abc'
     t.translate({ type: 'event', event: 'chat', payload: { runId: 'r1', state: 'delta', deltaText: 'abc' } })
     // 断线重连（生命周期边界）→ reset
@@ -337,7 +473,7 @@ describe('ChatEventTranslator', () => {
   })
 
   it('P2-2: 有界——sent 超上限时全新 run 不增长（终态前断线的 run 不无界泄漏）', () => {
-    const t = new ChatEventTranslator()
+    const t = makeTranslator()
     // 私有字段（测试同模块访问）；上限 500
     const MAX = (t as unknown as { MAX_SENT_ENTRIES: number }).MAX_SENT_ENTRIES
     for (let i = 0; i < MAX; i++) {

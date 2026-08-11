@@ -16,6 +16,7 @@ import {
 import { readConnectErrorDetailCode, readPairingConnectErrorDetails } from '@openclaw/gateway-protocol/connect-error-details'
 import { createPanelTunnelSocket } from './tunnelSocket'
 import { ChatEventTranslator, type ChatFrame, type GatewayEventFrame } from './eventTranslate'
+import { SessionProjectionReducerAdapter } from './sessionProjection'
 import { NO_RETRY_CLOSE_CODES, WS_GATEWAY_UNAVAILABLE } from './closeCodes'
 import { createDeviceAuthLifecycle, hasStoredDeviceTokenFor } from './deviceAuth'
 import { approvePairing } from '@/api/chat'
@@ -200,7 +201,11 @@ export function createGatewayChat(params: CreateGatewayChatParams): GatewayChat 
   // #377: 设备配对 lifecycle——缺省 createDeviceAuthLifecycle(container)（localStorage 身份 + 服务端
   // DB tokenStore，多容器修复）；测试注入假 lifecycle（假 tokenStore）断言配对编排（#377 acceptance）。
   const lifecycle = params.deviceAuth ?? createDeviceAuthLifecycle(container)
-  const translator = new ChatEventTranslator()
+  // #560: SDK SessionProjection 归约器（薄）——run 终态归一化/终态消息归一化/重放去重交 SDK（官方
+  // chat-gateway.ts 同款姿势：归约器挂连接编排层，不放翻译纯函数模块）。生命周期 = 连接闭包，
+  // onHello 重建（不跨连接维护——重连后 transcript 走全量 loadHistory 重建）。
+  const projection = new SessionProjectionReducerAdapter()
+  const translator = new ChatEventTranslator(projection)
   // F2: 连续重连失败计数（闭包）——重连成功（hello）时重置；达阈值 stop 自动重连转手动。
   // P1（code review）：计数器语义改为「按连接存活时长」——只有「未达 hello 的失败」（连接从未
   // 建立即断）累加；hello 后稳定存活过阈值再断（含沉默看门狗自发 closeSocket 的修复动作）不算
@@ -244,6 +249,9 @@ export function createGatewayChat(params: CreateGatewayChatParams): GatewayChat 
   let wasHidden = false
   // P2（code review）：translator.sent 累积器无界增长（断线中断/外来 run 永不到终态条目泄漏）+
   // 断线 resume 从头重放会双重追加——每次连接生命周期边界（hello-ok）清空重来。
+  // #560: projection 归约器同边界重建（translator.reset 联动，见 ChatEventTranslator.reset）——与
+  // SDK 语义一致：不跨连接维护，重连后 transcript 走 loadHistory 全量重建，projection 只管
+  //「本连接内 run 的归约/去重」。
   const resetTranslator = () => translator.reset()
 
   let client: GatewayProtocolClient<ConnectPlan>

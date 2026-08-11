@@ -133,18 +133,59 @@ export function attachmentToMediaBlock(a: {
   }
 }
 
+// #560: SDK SessionProjection 减负——翻译层经注入的归约器读「归一化后的 run 终态」，不再手写
+// 判 payload。归约器接口刻意收窄为翻译层所需：终态 status（aborted/error/timeout/yielded/
+// completed）、终态权威 message（errorMessage 已 readNonemptyString 归一）、重放去重判定。
+// 真实实现由 gatewayChat 连接闭包持有（SDK createSessionProjection + reduceSessionProjectionRunEvent，
+// 见 sessionProjection.ts），生命周期 = 连接（onHello 重建）；测试注入假实现断言「终态判定读
+// currentRun 而非手写 payload」。
+export interface SessionProjectionReducer {
+  // 归约一个 chat run 事件（final/aborted/error——终态判定权威）；无 runId / 非法 state → null
+  reduce(event: GatewayEventFrame): SessionProjectionRunTransition | null
+  // 连接生命周期边界清空（onHello 重建 projection）
+  reset(): void
+}
+
+export interface SessionProjectionRunTransition {
+  currentRun: SessionProjectionRun
+  // 重放去重网（SDK hasSessionProjectionAcceptedFinal）：上次终态已接受过的 final 再次到达（resume
+  // 重放/断线重发）→ 跳过本次终态渲染。**仅对已终态 run 生效**——首次终态时 previousRun 为
+  // streaming（message 是 delta 快照），SDK 对无 id/seq 的消息退化为内容指纹判定，同内容快照会被
+  // 误判为重放（规格 §2.6 关键否定：同连接内 dedup 仍靠 _sent 前缀求差，本网只兜「重放 final」）。
+  isReplayedFinal: boolean
+}
+
+export interface SessionProjectionRun {
+  runId: string
+  status: 'streaming' | 'completed' | 'error' | 'aborted' | 'timeout' | 'yielded'
+  message?: unknown
+  errorMessage?: string
+  errorKind?: string
+}
+
 export class ChatEventTranslator {
   // runId → 已发文本累积；final 尾部补发 / replace 整段替换时用于求差集或覆盖。
-  // P2（code review）：有界清理——只在 aborted/error/final 终态删除会泄漏断线中断/外来 run 的
-  // 条目（长连接内无界增长）；容量上限防御极端场景，连接生命周期边界（reset）由 gatewayChat
+  // P2（code review）：有界清理——容量上限防御极端场景，连接生命周期边界（reset）由 gatewayChat
   // onHello 调用（断线 resume 从头重放也不双重追加）。
+  // #560: 终态不再 delete（改由 SDK acceptedFinalMessageIdentities 记终态 identity）——条目转「冷
+  // 条目」，靠 MAX_SENT_ENTRIES 容量上限 + reset 兜底清理（与 SDK 终态不删、靠 200 run 淘汰同构）。
   private readonly sent = new Map<string, string>()
   private readonly MAX_SENT_ENTRIES = 500
+
+  // #560: 归约器注入（必填）——终态判定/终态 message/重放去重全部读归约结果，翻译层不再手写判
+  // payload。生产注入真实实现（gatewayChat → sessionProjection.ts），测试注入假实现断言
+  // currentRun 消费。归约器未认可的事件（无 runId / 非法 state）不产终态帧（保守丢弃）。
+  private readonly reducer: SessionProjectionReducer
+
+  constructor(reducer: SessionProjectionReducer) {
+    this.reducer = reducer
+  }
 
   // 连接生命周期边界清空累积器（断线重连后旧 run 的已发文本作废——若网关 resume 从头重放，
   // 不清空会双重追加，直到 final 才 replace 纠正）。
   reset(): void {
     this.sent.clear()
+    this.reducer.reset()
   }
 
   translate(frame: GatewayEventFrame): ChatFrame[] {
@@ -177,11 +218,20 @@ export class ChatEventTranslator {
     }
     if (state === 'final') {
       if (!runId) return []
-      return this.translateFinal(runId, payload)
+      // #560: 终态判定/终态 message/重放去重读归约后的 currentRun（翻译层不再手写判 payload；
+      // 归约器未认可的事件不产终态帧——生产恒注入真实归约器）。
+      const run = this.reducer.reduce(frame)
+      if (!run) return []
+      if (run.isReplayedFinal) return [] // 重放 final：已接受过，跳过渲染
+      return this.translateFinal(runId, payload, run.currentRun)
     }
     if (state === 'aborted') {
       if (!runId) return []
-      this.sent.delete(runId)
+      // #560: aborted 恒产 done（SDK 归约 status='aborted'）——**不走 isReplayedFinal 网**：
+      // SDK acceptedFinalMessageIdentities 只在 completed/yielded 记终态身份（规格 §2.4/§2.6
+      //「去重网只兜重放 final」），error/aborted 事件 consult 该网会在「事件带与 delta 快照相同
+      // message」时误判重放、吞掉真实 done 帧（气泡卡 streaming）。重复 aborted 的 done 帧在
+      // handleDone 幂等（activeRunId 已清则无操作），多产无害。
       return [{ type: 'done', runId }]
     }
     if (state === 'error') {
@@ -192,9 +242,21 @@ export class ChatEventTranslator {
         const message = String(payload.errorMessage ?? payload.errorKind ?? '')
         return [{ type: 'error', message }]
       }
-      this.sent.delete(runId)
-      // 网关 error 字段为 errorMessage（缺则退 errorKind），对齐 openclaw_service / r13:118
-      const message = String(payload.errorMessage ?? payload.errorKind ?? '')
+      // #560: run 级 error 读归约后的 currentRun——errorMessage/errorKind 已由 SDK readNonemptyString
+      // 归一（trim 后空串 → undefined）；errorKind=timeout → timeout 细分终态。
+      // **不走 isReplayedFinal 网**：SDK acceptedFinalMessageIdentities 只在 completed/yielded 记
+      // 终态身份（规格 §2.4/§2.6「去重网只兜重放 final」），error 事件 consult 该网会在「带与 delta
+      // 快照相同 message」时误判重放、吞掉真实 error 帧。重复 error 的帧在 handleError 幂等
+      //（activeRunId 已清则无操作），多产无害。
+      const run = this.reducer.reduce(frame)
+      if (!run) return [] // 归约器未认可（无 runId/非法 state 已在上方过滤，防御兜底）
+      const status = run.currentRun.status
+      if (status === 'timeout') {
+        const message = run.currentRun.errorMessage ?? run.currentRun.errorKind ?? ''
+        return [{ type: 'error', runId, message: `${message}（超时）`.trim() }]
+      }
+      if (status === 'yielded') return [{ type: 'done', runId }]
+      const message = run.currentRun.errorMessage ?? run.currentRun.errorKind ?? ''
       return [{ type: 'error', runId, message }]
     }
     return []
@@ -228,11 +290,17 @@ export class ChatEventTranslator {
     return [{ type: 'text', runId, delta }]
   }
 
-  private translateFinal(runId: string, payload: Record<string, unknown>): ChatFrame[] {
+  private translateFinal(runId: string, payload: Record<string, unknown>, run: SessionProjectionRun): ChatFrame[] {
+    // #560: yielded 细分——SDK 语义「yielded=true && stopReason='end_turn'」= 让出给后续执行者，
+    // 终态文本不属本 run 权威渲染（下一个 run 承接），不补 tail/replace 直接 done。
+    if (run.status === 'yielded') return [{ type: 'done', runId }]
     const out: ChatFrame[] = []
-    const message = extractMessageText(payload.message)
+    // #560: 终态 message 来源从 payload.message 换成归约后的 currentRun.message（SDK updateRun 已把
+    //「delta 期快照 → final 权威 message」归一，含「final 无 message 时沿用 delta 快照」的保留逻辑）——
+    // 替换散在 delta-replace 快照与 final 提取两处的 message 归一化（规格 §2.2）。
+    const message = extractMessageText(run.message ?? payload.message)
     const sent = this.sent.get(runId) ?? ''
-    // final.message 可能含此前未在 delta 投递的尾部文本 → 先补 text 再 done（r13:128-129）
+    // final.message 可能含此前未在 delta 投递的尾部文本 → 先补 text 再收尾（r13:128-129）
     if (message && message.startsWith(sent) && message.length > sent.length) {
       const tail = message.slice(sent.length)
       this.sent.set(runId, sent + tail)
@@ -246,10 +314,19 @@ export class ChatEventTranslator {
     }
     // #459-T3 #464：final.message 含 image/audio/video 块（browser 截图/AI 工具产出多媒体）→
     // 产 attachment 帧（权威最终媒体，与 text 帧独立通道）。纯媒体 run（无文本）也经此渲染。
-    const media = extractMessageAttachments(payload.message)
+    const media = extractMessageAttachments(run.message ?? payload.message)
     if (media.length) out.push({ type: 'attachment', runId, media })
+    // #560: error/timeout 细分——译成 error 帧而非 done（规格 §2.1 三分支坍成「读 currentRun.status
+    // 一个 switch」的 error 分支）。尾部/媒体已先行补发（权威内容不丢，同 done 收尾路径）。
+    // final+stopReason='error' 的 errorMessage 常缺失（SDK 只从 error 事件字段归一）→ 兜底文案防
+    // 空错误帧（handleError 会把空 message 显示为空条）。
+    if (run.status === 'error' || run.status === 'timeout') {
+      const message = run.errorMessage ?? run.errorKind ?? 'run 执行失败'
+      return [...out, { type: 'error', runId, message }]
+    }
     out.push({ type: 'done', runId })
-    this.sent.delete(runId)
+    // #560: 终态手动 sent.delete 删除——SDK 终态 identity 记入 acceptedFinalMessageIdentities
+    //（规格 §2.3）。_sent 条目转冷条目，靠容量上限 + reset 兜底清理。
     return out
   }
 
