@@ -495,11 +495,11 @@ describe('panel public origin env (slice config, #385)', () => {
   })
 })
 
-// #590：OPENCLAW_NAMED_VOLUMES —— named volume 拓扑编排开关（ADR 0011）。默认 false = 旧宿主
-// bind（本票不改默认行为）；true 走 openclaw-wiki/workspace/home-<id> 三卷。非 true/false 值
-// fail-fast（对齐 readHealthScheme 白名单模式）——否则 `TRUE`/`1` 这类错值静默按默认 false 走，
-// flag 开了却没生效。
-describe('named volumes flag (slice config, #590)', () => {
+// #590/#592：OPENCLAW_NAMED_VOLUMES —— named volume 拓扑编排开关（ADR 0011）。默认 true =
+// named volume 拓扑（#592 本地/CI 编排默认：三卷 + putArchive config）；显式 false 回退旧宿主
+// bind。非 true/false 值 fail-fast（对齐 readHealthScheme 白名单模式）——否则 `TRUE`/`1` 这类
+// 错值静默按默认 true 走，flag 关了却没生效。
+describe('named volumes flag (slice config, #590/#592)', () => {
   async function loadNamedVolumes(env: string | undefined): Promise<boolean | 'THREW'> {
     vi.resetModules() // 清 config 模块缓存，让动态 import 重新快照 env
     if (env === undefined) delete process.env.OPENCLAW_NAMED_VOLUMES
@@ -514,8 +514,8 @@ describe('named volumes flag (slice config, #590)', () => {
     }
   }
 
-  it('未设置 → 默认 false（旧 bind 模式，不改默认行为）', async () => {
-    expect(await loadNamedVolumes(undefined)).toBe(false)
+  it('未设置 → 默认 true（named volume 拓扑，#592 本地/CI 默认）', async () => {
+    expect(await loadNamedVolumes(undefined)).toBe(true)
   })
 
   it('显式 true → 开启 named volume 拓扑', async () => {
