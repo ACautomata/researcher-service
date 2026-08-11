@@ -402,6 +402,25 @@ describe('ChatView', () => {
     expect(w.find('[data-test="send"]').attributes('disabled')).toBeDefined()
   })
 
+  // #542 意图回归：执行状态行只报「正在干活」瞬时态，连接态归横幅独享——两行不重复同一文案。
+  it('正在连接：横幅显示「正在连接…」，执行状态行不重复显示', async () => {
+    const w = mount(ChatView)
+    await flushPromises() // selectContainer → openGateway：connecting=true，尚未 fireReady
+    expect(w.find('[data-test="connection-banner"]').exists()).toBe(true)
+    expect(w.find('[data-test="connection-banner"]').text()).toContain('正在连接')
+    expect(w.find('[data-test="execution-status"]').exists()).toBe(false)
+    w.unmount()
+  })
+
+  it('断线：reconnect 横幅显示「连接已断开」，执行状态行不重复显示', async () => {
+    const { w, gw } = await mountReady()
+    gw.fireClose(1006)
+    await nextTick()
+    expect(w.find('[data-test="reconnect-bar"]').text()).toContain('连接已断开')
+    expect(w.find('[data-test="execution-status"]').exists()).toBe(false)
+    w.unmount()
+  })
+
   it('新建会话 → gateway.createSession + 列表追加', async () => {
     const { w, gw } = await mountReady()
     await w.find('[data-test="new-session"]').trigger('click')
