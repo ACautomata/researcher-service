@@ -299,6 +299,27 @@ describe('ChatMessageItem', () => {
     expect(link.attributes('href')).toBe('https://files.example.com/report.pdf')
     expect(link.attributes('download')).toBe('report.pdf')
   })
+  // ---- #568 安全修复（security review）：document dataURL href mime 白名单 + mediaSrc scheme 防御 ----
+  it('#568(security): document 非白名单 mime（text/html / image/svg+xml）→ 不渲染下载卡（防下载脚本类文件）', () => {
+    const m = newMsg('assistant', '')
+    m.media.push({ type: 'document', mimeType: 'text/html', src: 'PGh0bWw+', fileName: 'x.html', sizeBytes: 100 })
+    m.media.push({ type: 'document', mimeType: 'image/svg+xml', src: 'PHN2Zz4=', fileName: 'x.svg', sizeBytes: 100 })
+    const w = mount(ChatMessageItem, { props: { msg: m } })
+    expect(w.find('[data-test="media-document"]').exists()).toBe(false)
+  })
+  it('#568(security): document 白名单 mime（application/pdf / text/plain）→ 渲染下载卡', () => {
+    const m = newMsg('assistant', '')
+    m.media.push({ type: 'document', mimeType: 'application/pdf', src: 'JVBER', fileName: 'a.pdf', sizeBytes: 100 })
+    m.media.push({ type: 'document', mimeType: 'text/plain', src: 'aGVsbG8=', fileName: 'b.txt', sizeBytes: 100 })
+    const w = mount(ChatMessageItem, { props: { msg: m } })
+    expect(w.findAll('[data-test="media-document"]').length).toBe(2)
+  })
+  it('#568(security): mediaSrc 对 javascript: scheme src 不原样透出（拼进 base64 段，解码失败不渲染）', () => {
+    const m = newMsg('assistant', '')
+    m.media.push({ type: 'image', mimeType: 'image/png', src: 'javascript:alert(1)' })
+    const w = mount(ChatMessageItem, { props: { msg: m } })
+    expect(w.get('[data-test="media-image"]').attributes('src')?.startsWith('data:image/png;base64,')).toBe(true)
+  })
 })
 
 describe('ToolLine', () => {

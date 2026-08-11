@@ -29,12 +29,31 @@ defineSlots<{
 }>()
 
 // 媒体块 src（纯 base64 或完整 url）→ 渲染可用 src。
-// 0 信任：url 形态（http/https 开头）原样返回（真 url 附件不拼 base64）；src 已是完整 dataURL
-// （带 data: 前缀）时原样返回；否则补 data:<mime>;base64, 前缀（采集/网关 base64 源兼容）。
-// #568: 新增 http(s) 分支——url 形态附件此前会被拼成 data:image/*;base64,https://... 错误前缀。
+// 0 信任（security review：#568 url 形态防御纵深——翻译层已只放行 http(s) url 与纯 base64，本函数
+// 兜底不信任外来 scheme）：http(s) 经 URL 解析校验后原样返回；data: 前缀原样返回；其余一律按纯
+// base64 重建 dataURL——非 http(s) 非 data: 的字符串绝不作为可执行 href 原样透出（被拼进 base64
+// 段，解码失败即不渲染）。
+function isHttpUrl(s: string): boolean {
+  try {
+    const u = new URL(s)
+    return u.protocol === 'http:' || u.protocol === 'https:'
+  } catch {
+    return false
+  }
+}
 function mediaSrc(m: MediaBlock): string {
-  if (/^https?:\/\//i.test(m.src)) return m.src
-  return m.src.startsWith('data:') ? m.src : `data:${m.mimeType};base64,${m.src}`
+  if (isHttpUrl(m.src)) return m.src
+  if (m.src.startsWith('data:')) return m.src
+  return `data:${m.mimeType};base64,${m.src}`
+}
+// #568 安全修复（security review）：document 下载卡 mime 白名单——base64 形态的 dataURL href 只对
+// 白名单 mime 放行（防下载到 text/html / image/svg+xml 等可执行/脚本类文件被用户打开执行）。url
+// 形态为显式点击链接（download 属性），不受限。非白名单 base64 document 回退旧行为（静默不渲染）。
+const SAFE_DOCUMENT_MIMES = ['application/pdf', 'text/plain', 'text/csv', 'application/json', 'application/zip', 'application/gzip', 'application/x-tar']
+function isSafeDocumentMime(mimeType: string): boolean {
+  if (mimeType === 'image/svg+xml') return false // 可嵌脚本，排除
+  if (mimeType.startsWith('image/') || mimeType.startsWith('audio/') || mimeType.startsWith('video/')) return true
+  return SAFE_DOCUMENT_MIMES.includes(mimeType)
 }
 // #568: 附件体积人类可读（字节 → B/KB/MB）；durationMs → mm:ss（播放器惯用格式）。
 function formatBytes(bytes: number): string {
@@ -108,6 +127,7 @@ const copyState = ref<'idle' | 'copied' | 'failed'>('idle')
             :src="mediaSrc(m)"
             :alt="m.fileName || '图片附件'"
             loading="lazy"
+            referrerpolicy="no-referrer"
           />
           <div
             v-if="m.type === 'image' && ((m.width && m.height) || m.sizeBytes != null)"
@@ -124,6 +144,7 @@ const copyState = ref<'idle' | 'copied' | 'failed'>('idle')
             :src="mediaSrc(m)"
             controls
             preload="metadata"
+            referrerpolicy="no-referrer"
           ></audio>
           <div
             v-if="m.type === 'audio' && (m.durationMs != null || m.sizeBytes != null)"
@@ -140,6 +161,7 @@ const copyState = ref<'idle' | 'copied' | 'failed'>('idle')
             :src="mediaSrc(m)"
             controls
             preload="metadata"
+            referrerpolicy="no-referrer"
           ></video>
           <div
             v-if="m.type === 'video' && ((m.width && m.height) || m.durationMs != null)"
@@ -149,14 +171,18 @@ const copyState = ref<'idle' | 'copied' | 'failed'>('idle')
             <span v-if="m.width && m.height">{{ m.width }} × {{ m.height }}</span>
             <span v-if="m.durationMs != null">{{ formatDuration(m.durationMs) }}</span>
           </div>
-          <!-- #568: document 下载链接卡——base64 形态 href 为 dataURL（mime 段重建）、url 形态直用
-               完整 url；download 属性触发下载。label 优先于 fileName 展示。 -->
+          <!-- #568: document 下载链接卡——base64 形态 href 为 dataURL（mime 白名单外不渲染）、url
+               形态直用完整 url；download 属性触发下载；label 优先于 fileName 展示。外部 url 显式
+               点击才请求，referrerpolicy/rel 防来源泄漏与 opener 劫持。 -->
           <a
-            v-if="m.type === 'document'"
+            v-if="m.type === 'document' && (isHttpUrl(m.src) || isSafeDocumentMime(m.mimeType))"
             class="media-document"
             data-test="media-document"
             :href="mediaSrc(m)"
             :download="m.fileName"
+            target="_blank"
+            rel="noopener noreferrer"
+            referrerpolicy="no-referrer"
           >
             <span class="media-document-name">{{ m.label || m.fileName || '附件' }}</span>
             <span v-if="m.sizeBytes != null" class="media-document-size">{{ formatBytes(m.sizeBytes) }}</span>
