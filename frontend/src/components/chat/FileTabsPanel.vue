@@ -11,6 +11,7 @@ const emit = defineEmits<{
   activate: [path: string]
   close: [path: string]
   closeAll: []
+  retry: [path: string] // #628 T3：FileViewer error 重试 → 上浮 active tab path
 }>()
 
 function basename(path: string): string {
@@ -51,7 +52,7 @@ const activeTab = computed(() => props.tabs.find((t) => t.path === props.activeP
       >全部关闭</button>
     </div>
     <div class="pbody">
-      <FileViewer v-if="activeTab" :tab="activeTab" />
+      <FileViewer v-if="activeTab" :tab="activeTab" @retry="emit('retry', $event)" />
     </div>
   </section>
 </template>

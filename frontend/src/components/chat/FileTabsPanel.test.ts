@@ -60,4 +60,11 @@ describe('FileTabsPanel', () => {
     const w = mount(FileTabsPanel, { props: { tabs, activePath: null } })
     expect(w.find('[data-test="file-viewer"]').exists()).toBe(false)
   })
+
+  it('forwards retry from FileViewer with the active tab path（#628 T3）', async () => {
+    const tabs = [tab('a.md', { state: 'error', content: null, errorMessage: '失败' })]
+    const w = mount(FileTabsPanel, { props: { tabs, activePath: 'a.md' } })
+    await w.find('[data-test="viewer-retry"]').trigger('click')
+    expect(w.emitted('retry')).toEqual([['a.md']])
+  })
 })
