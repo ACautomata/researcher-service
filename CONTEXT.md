@@ -74,6 +74,10 @@ _Avoid_: 删除会话/移除会话——与归档混为一谈；术语必须指�
 `chat.send` 携带的多模态内容块（wire 字段 `attachments`：`{type, mimeType, fileName, content, width, height}`），经隧道**内联**发送。用户经浏览器采集（粘贴/拖拽/选择）上传，图片发送前**前端压缩**；content 是自由形状（0 信任），渲染端须按块类型分派。
 _Avoid_: 文件/图片消息——掩盖「内联于 chat.send 帧、多类型块数组」的协议形态。
 
+**审批卡 (approval card)**:
+OpenClaw agent 执行 elevated 命令前的权限门。网关经**连接级**事件（`exec.approval.requested` / `plugin.approval.requested`，不挂 runId）下发 `{id, kind, command, sessionKey, agentId}`；用户批准/拒绝后经 `*.approval.resolved` 广播落定（first-answer-wins，网关权威 decision，可能与他端不同）。生命周期：`pending`（待处理）→ `resolving`（已点击等回执）→ `resolved`（终态）；断线复位 `resolving → pending` 可重试，网关侧失效 `→ expired`（终态不可回覆）。**终态不留痕**（[ADR 0014](./docs/adr/0014-resolved-approval-no-trace.md)，supersede #547 / [ADR 0009](./docs/adr/0009-chat-timeline-merge.md) 的留痕条目）：resolved/expired 卡从界面消失，不在对话转录中留存任何记录；未决卡（pending/resolving）留在 composer 上方待办区，落定即撤。subagent 发起的卡（agentId 即来源语义）唯一可见于 main 会话。
+_Avoid_: 「审批消息」——审批卡是连接级权限事件，不挂 runId、不进 messages 转录、独立追踪；「操作记录 / 留痕」（resolved 卡留在时间线作审计回看）语义已随 ADR 0014 退役。
+
 **文件查询通道 (file query channel)**:
 控制面读取 OpenClaw 容器内 wiki / workspace 文件的机制。**经 Docker 自带原语，不经 gateway 插件 API**：列目录与读文件用 dockerode `getArchive`（以容器为视角打 tar 流拉出，穿过 named volume 挂载点读卷数据），写文件用 `putArchive`，删文件用容器内 `exec rm`。以**容器存在（running/stopped）为前提**——容器删除时其数据卷一并删除，故「卷还在但容器没了」的情形不出现。不引入第三方 gateway 插件（曾评估 `openclaw-better-gateway`：捆绑 IDE/终端/写删、CORS 全开、自实现 token 校验与本项目 `${GATEWAY_TOKEN}` 占位不兼容，为一个只读查询暴露面过大，否决）。
 _Avoid_: 走 gateway 插件/RPC 读文件——OpenClaw 官方无文件 RPC，第三方插件暴露面与认证均不可接受。

@@ -484,16 +484,18 @@ describe('ChatView', () => {
     expect(gw.resolveApproval).toHaveBeenCalledWith('ap-1', 'exec', 'allow-once')
     gw.fireFrame({ type: 'approvalResolved', id: 'ap-1', decision: 'allow-once' })
     await nextTick()
-    expect(w.find('[data-test="approval-ap-1"]').text()).toContain('已批准')
+    // ADR 0014：resolved 卡不留痕——落定即从界面消失（dock 不再显示该卡）
+    expect(w.find('[data-test="approval-ap-1"]').exists()).toBe(false)
   })
 
-  it('审批卡未知权威 decision → 显示「未知」而非已批准', async () => {
+  it('审批卡未知权威 decision → 卡按终态消失（ADR 0014 不渲染「未知」标签）', async () => {
     const { w, gw } = await mountReady()
     gw.fireFrame({ type: 'approval', id: 'ap-2', kind: 'exec', command: 'x', sessionKey: null })
     await nextTick()
     gw.fireFrame({ type: 'approvalResolved', id: 'ap-2', decision: 'expired' })
     await nextTick()
-    expect(w.find('[data-test="approval-ap-2"]').text()).toContain('未知')
+    // ADR 0014：resolved 卡不留痕——无论 decision 是否已知，落定即消失（不渲染「未知」标签）
+    expect(w.find('[data-test="approval-ap-2"]').exists()).toBe(false)
   })
 
   it('#405-T1: subagent 审批卡唯一家在 main——subagent 会话恒空、切回 main 可见（留存不变量）', async () => {
@@ -613,7 +615,8 @@ describe('ChatView', () => {
     await flushPromises()
     gw2.fireFrame({ type: 'approvalResolved', id: 'ap-r1', decision: 'allow-once' })
     await nextTick()
-    expect(w.find('[data-test="approval-ap-r1"]').text()).toContain('已批准')
+    // ADR 0014：resolved 卡不留痕——落定即从界面消失
+    expect(w.find('[data-test="approval-ap-r1"]').exists()).toBe(false)
     w.unmount()
   })
 
@@ -655,7 +658,8 @@ describe('ChatView', () => {
     expect(gw2.resolveApproval).toHaveBeenCalledWith('ap-r2', 'exec', 'allow-once')
     gw2.fireFrame({ type: 'approvalResolved', id: 'ap-r2', decision: 'allow-once' })
     await nextTick()
-    expect(w.find('[data-test="approval-ap-r2"]').text()).toContain('已批准')
+    // ADR 0014：resolved 卡不留痕——落定即从界面消失
+    expect(w.find('[data-test="approval-ap-r2"]').exists()).toBe(false)
     w.unmount()
   })
 
@@ -687,8 +691,8 @@ describe('ChatView', () => {
     gw2.resolveApproval.mockRejectedValue(gwErr)
     await w.find('[data-test="approve-ap-r3"]').trigger('click')
     await flushPromises()
-    // 卡落定失效态：按钮区消失、「已失效」标签出现、错误条提示（不再静默无响应）
-    expect(w.find('[data-test="approval-expired"]').exists()).toBe(true)
+    // ADR 0014：expired 卡不留痕——落定即从界面消失；错误条提示保留（不再静默无响应）
+    expect(w.find('[data-test="approval-expired"]').exists()).toBe(false)
     expect(w.find('[data-test="approve-ap-r3"]').exists()).toBe(false)
     expect(w.find('[data-test="error-bar"]').text()).toContain('已失效')
     w.unmount()

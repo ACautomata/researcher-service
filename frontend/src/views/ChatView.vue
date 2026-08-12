@@ -132,15 +132,11 @@ watch(() => chat.input, (value) => {
   const storage = draftStorage(); if (!storage) return
   if (value) storage.setItem(draftKey(), value); else storage.removeItem(draftKey())
 })
-// #547：pending/resolving 请求固定在 composer 上方，避免被长回答顶出可视区域；已处理或失效卡
-// 回到原消息时间线留存操作记录。只改变渲染位置，不改变审批状态机与可见性过滤语义。
+// #547 / ADR 0014：pending/resolving 请求固定在 composer 上方 ApprovalDock，避免被长回答顶出可视区域。
+// resolved/expired 卡不留痕（ADR 0014 supersede #547 的留痕意图）——落定即从界面消失，不回时间线。
 const activeApprovals = computed(() =>
   visibleApprovals.value.filter((a) => a.status === 'pending' || a.status === 'resolving'),
 )
-const historicalApprovals = computed(() =>
-  visibleApprovals.value.filter((a) => a.status === 'resolved' || a.status === 'expired'),
-)
-const anchorState = computed(() => historicalApprovals.value.length > 0)
 
 // 删除会话：确认（ElMessageBox）由本壳注入（composable 内不持有 UI）。
 // #461：文案明示硬删除不可恢复（删除即硬删，无「归档/可恢复」中间态，与真实网关语义一致）。
@@ -284,14 +280,9 @@ defineExpose({
       <div v-if="executionStatus" class="execution-status" role="status" aria-live="polite" data-test="execution-status">{{ executionStatus }}</div>
       <ChatStream
         :messages="chat.messages"
-        :approvals="historicalApprovals"
-        :anchor-state="anchorState"
-        :disconnected="conn.disconnected.value"
         :history-has-more="chat.historyHasMore"
         :history-loading="chat.historyLoading"
         @load-more="conn.loadMoreHistory"
-        @resolve-approval="conn.resolveApproval"
-        @toggle-approval-detail="toggleApprovalDetail"
         @regenerate="regenerate"
       >
         <!-- #461：无选中会话（含删除当前会话后）→ 空态视图 + 「新建会话」入口 -->
