@@ -36,10 +36,10 @@ describe('normalizeFilePath 防护矩阵（US10）', () => {
     expect(normalizeFilePath('a\u0000b.md').ok).toBe(false)
   })
 
-  it('非字符串 / null / undefined → 拒', () => {
+  it('缺省（undefined/null）→ 树根（query 未传 path = 列根目录）；非字符串 → 拒', () => {
+    expect(normalizeFilePath(undefined)).toEqual({ ok: true, path: '' })
+    expect(normalizeFilePath(null)).toEqual({ ok: true, path: '' })
     expect(normalizeFilePath(42).ok).toBe(false)
-    expect(normalizeFilePath(null).ok).toBe(false)
-    expect(normalizeFilePath(undefined).ok).toBe(false)
   })
 
   it('归一化折叠：// 与 . 段折叠重 join', () => {
@@ -105,6 +105,16 @@ describe('parseFileWriteBody（POST/PUT body）', () => {
   it('path 空串（树根）→ 90002（写操作必须指向文件）', () => {
     try {
       parseFileWriteBody({ root: 'wiki', path: '', content: 'x' })
+      throw new Error('应当抛 90002')
+    } catch (err) {
+      expect((err as EnvelopeError).code).toBe(CODE.VALIDATION_FAILED)
+      expect((err as EnvelopeError).data).toHaveProperty('path')
+    }
+  })
+
+  it('path 缺省（undefined）→ 90002（body 校验不因归一化放行写树根）', () => {
+    try {
+      parseFileWriteBody({ root: 'wiki', content: 'x' })
       throw new Error('应当抛 90002')
     } catch (err) {
       expect((err as EnvelopeError).code).toBe(CODE.VALIDATION_FAILED)

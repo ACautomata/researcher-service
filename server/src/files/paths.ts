@@ -1,6 +1,6 @@
 // files 请求层校验（#589 · 平移 wiki/paths.ts normalizeRelPath，#586 US10 穿越防护）。
 // 拒绝对路径/反斜杠/`..` 穿越/NUL 字节/超长，归一化重 join；**放宽 wiki 的 .md 限制**
-// （workspace 含任意文本扩展），并允许空串 = 树根（列根目录）。root 经枚举校验。
+// （workspace 含任意文本扩展），并允许缺省/空串 = 树根（列根目录）。root 经枚举校验。
 // 返回 Result（不抛），调用方统一转 90002 + data.path / data.root。
 
 import { fail } from '../envelope'
@@ -13,7 +13,8 @@ export type RelPathResult = { ok: true; path: string } | { ok: false; errors: st
 const PATH_MAX = 512
 
 export function normalizeFilePath(raw: unknown): RelPathResult {
-  if (raw === undefined || raw === null) return { ok: false, errors: ['path 不能为空'] }
+  // 缺省（undefined/null，如 query 未传 path）= 树根，与空串等价——GET 列根目录时前端不传 path
+  if (raw === undefined || raw === null) return { ok: true, path: '' }
   if (typeof raw !== 'string') return { ok: false, errors: ['path 须为字符串'] }
   // 空串 = 树根（列根目录 / 不适用文件读写的 target）；不做 trim（文件名首尾空白合法）
   if (raw === '') return { ok: true, path: '' }

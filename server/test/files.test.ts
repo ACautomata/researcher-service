@@ -193,6 +193,20 @@ describe('files REST（接缝 #2 信封 + #589）', () => {
 
   // ---------------------------- GET 读 ----------------------------
 
+  it('GET 缺省 path（前端 listWorkspaceTree 形态 ?root=workspace&recursive=true）→ 200 列根目录', async () => {
+    const u = await seedUser(ctx.prisma, 'fgnp', 'pw-fgnp-secure')
+    const name = await seedContainer(u.id)
+    const l = await login(ctx.request, 'fgnp', 'pw-fgnp-secure')
+    // 前端 api/files.ts:37 不传 path —— 缺省 = 树根（路由注释「空 path = 树根」语义）
+    const res = await ctx.request.get(`${BASE}/${name}/files?root=workspace&recursive=true`).set(bearer(l.access))
+    expect(res.body.code).toBe(0)
+    expect(res.body.data).toMatchObject({ kind: 'dir', path: '', truncated: false })
+    expect(res.body.data.files).toContainEqual(
+      expect.objectContaining({ path: 'report.md', type: 'file', size: expect.any(Number), modified: expect.any(String) }),
+    )
+    expect(archive.calls.at(-1)).toMatchObject({ method: 'read', root: 'workspace', relPath: '', recursive: true })
+  })
+
   it('GET path=目录 → dir 分支：{files:[{path,type,size,modified}]}', async () => {
     const u = await seedUser(ctx.prisma, 'fg1', 'pw-fg1-secure')
     const name = await seedContainer(u.id)
