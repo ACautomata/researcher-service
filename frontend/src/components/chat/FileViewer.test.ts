@@ -53,6 +53,14 @@ describe('FileViewer', () => {
     expect(w.find('[data-test="viewer-content"]').exists()).toBe(false)
   })
 
+  it('error 态渲染「重试」按钮，点击 emit retry（#628 T3）', async () => {
+    const w = mount(FileViewer, { props: { tab: tab({ state: 'error', content: null, errorMessage: '文件不存在' }) } })
+    expect(w.find('[data-test="viewer-retry"]').exists()).toBe(true)
+    expect(w.find('[data-test="viewer-retry"]').text()).toContain('重试')
+    await w.find('[data-test="viewer-retry"]').trigger('click')
+    expect(w.emitted('retry')).toEqual([['notes/plan.md']])
+  })
+
   it('shows loading hint when loaded but content still null (fetch in flight)', () => {
     const w = mount(FileViewer, { props: { tab: tab({ content: null }) } })
     expect(w.find('[data-test="viewer-loading"]').exists()).toBe(true)

@@ -22,6 +22,9 @@ export interface FileTab {
   binary: boolean
   oversized: boolean
   errorMessage?: string // error 态文案（fetch 失败 / 文件不存在）
+  // #628 T3：agent 开路上下文——loadAndHighlight 入口记下 input+kind，供 error 态重试复刻高亮。
+  // tree 开路的 tab 无此字段 → retry 走无高亮重拉（reloadFromTree）。
+  retryCtx?: { input: unknown; kind: 'edit' | 'write' }
 }
 
 function describeError(e: unknown): string {
@@ -162,17 +165,26 @@ export const useFileTabsStore = defineStore('fileTabs', {
         oversized: false,
       })
       this.activePath = path
+      await this.loadPlain(path)
+    },
+
+    // 无高亮拉取已存在 tab 的全文（openFromTree 首载 + #628 T3 retry 的 tree 开路分支共用；与
+    // loadAndHighlight 的差异仅在 lineMarks）。成功 → loaded + content；失败 → error + errorMessage。
+    // await 中途切容器 / 用户关 tab → 静默丢弃。
+    async loadPlain(path: string): Promise<void> {
       const chat = useChatStore()
       const name = chat.selectedContainer
       if (!name) return
       try {
         const fr = await readWorkspaceFile(name, path)
-        if (chat.selectedContainer !== name) return
+        if (chat.selectedContainer !== name) return // 切走了：丢弃旧容器响应
         const tab = this.tabs.find((t) => t.path === path)
         if (!tab) return // await 中途用户已关掉 → 静默丢弃
         tab.content = fr.content
         tab.binary = fr.binary
         tab.oversized = fr.oversized
+        tab.state = 'loaded'
+        tab.errorMessage = undefined
       } catch (e) {
         if (chat.selectedContainer !== name) return
         const tab = this.tabs.find((t) => t.path === path)
@@ -181,6 +193,15 @@ export const useFileTabsStore = defineStore('fileTabs', {
         tab.content = null
         tab.errorMessage = describeError(e)
       }
+    },
+
+    // #628 T3：error 态重试按钮——据开路上下文复刻「对应 fetch」。agent 开路（有 retryCtx）→ loadAndHighlight
+    // 含行级高亮；tree 开路（无 retryCtx）→ loadPlain 无高亮。无 tab / 找不到 → noop。
+    async retry(path: string): Promise<void> {
+      const tab = this.tabs.find((t) => t.path === path)
+      if (!tab) return
+      if (tab.retryCtx) await this.loadAndHighlight(path, tab.retryCtx.input, tab.retryCtx.kind)
+      else await this.loadPlain(path)
     },
 
     // onToolEvent —— live 工具事件唯一入口（handleTool 单点调；决议 A）。自筛 kind∈{edit,write}（决议 C：
@@ -222,6 +243,8 @@ export const useFileTabsStore = defineStore('fileTabs', {
         if (chat.selectedContainer !== container) return // 切走了：丢弃旧容器回填
         const tab = this.tabs.find((t) => t.path === path)
         if (!tab) return // await 中途用户已关掉 → 静默
+        // 记 agent 开路上下文：error 态重试按钮据此复刻高亮（#628 T3；仅 fetch 失败时种值）
+        tab.retryCtx = { input, kind }
         tab.state = 'error'
         tab.content = null
         tab.lineMarks = []

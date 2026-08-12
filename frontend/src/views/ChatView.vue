@@ -356,6 +356,7 @@ defineExpose({
       @activate="activateTab"
       @close="fileTabs.closeTab"
       @close-all="fileTabs.closeAll"
+      @retry="fileTabs.retry"
     />
   </div>
 </template>

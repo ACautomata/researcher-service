@@ -1,6 +1,8 @@
 // seam: fileTabs store —— workspace 树数据 + 只读 tab 状态机（#626 T1 / #618 规格 §3）。
 // T1 子集直测：loadTree（成功/失败/截断/空容器名/中途切容器丢弃）、openFromTree（新建/复用只切 active/
 // binary/oversized/error/中途关 tab）、closeTab（删 active 切相邻）、closeAll（保留 tree）、reset（清 tree）。
+// T2 子集：onToolEvent（决议 C 触发集/绝对路径过滤/不降级/pending→done 高亮/error 收起/同路径刷新/切容器丢弃）。
+// T3 子集（#628）：retry 双路径（agent 开路复刻高亮 / tree 开路无高亮）、重试仍失败、不存在 path noop。
 // 仅测外部状态转移，mock api/files（信封解包由 api/ 单测覆盖，此处不重复）。
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
@@ -464,6 +466,61 @@ describe('fileTabs store', () => {
   it('error result + 无 tab → 不开（noop）', () => {
     const ft = useFileTabsStore()
     ft.onToolEvent({ name: 'edit', state: 'error', input: { file_path: 'a.md', old_string: 'x', new_string: 'y' }, result: null })
+    expect(ft.tabs).toHaveLength(0)
+  })
+
+  // ---- retry（#628 T3：error 态重试按钮，复刻「对应 fetch」）----
+  it('retry：agent-opened error tab → 复刻 loadAndHighlight（重拉 + 行级高亮恢复）', async () => {
+    const chat = useChatStore()
+    chat.setSelectedContainer('demo')
+    const ft = useFileTabsStore()
+    const input = { file_path: 'a.md', old_string: 'x', new_string: 'NEW' }
+    // done 时 fetch 失败 → error
+    vi.mocked(filesApi.readWorkspaceFile).mockRejectedValueOnce(new Error('暂时失败'))
+    ft.onToolEvent({ name: 'edit', state: 'running', input, result: null })
+    ft.onToolEvent({ name: 'edit', state: 'done', input, result: null })
+    await flushPromises()
+    expect(ft.tabs[0]).toMatchObject({ state: 'error', content: null })
+    // 重试：fetch 现在成功 → loaded + 高亮恢复（NEW 在第 2 行）
+    vi.mocked(filesApi.readWorkspaceFile).mockResolvedValueOnce(file('a.md', { content: 'keep\nNEW\nmore\n' }))
+    await ft.retry('a.md')
+    await flushPromises()
+    expect(ft.tabs[0].state).toBe('loaded')
+    expect(ft.tabs[0].content).toBe('keep\nNEW\nmore\n')
+    expect(ft.tabs[0].lineMarks).toEqual([2]) // agent 开路 → 重试复刻高亮
+    expect(ft.tabs[0].errorMessage).toBeUndefined()
+  })
+
+  it('retry：tree-opened error tab → 走无高亮重拉（lineMarks 恒空）', async () => {
+    const chat = useChatStore()
+    chat.setSelectedContainer('demo')
+    const ft = useFileTabsStore()
+    vi.mocked(filesApi.readWorkspaceFile).mockRejectedValueOnce(new Error('暂时失败'))
+    await ft.openFromTree('a.md') // tree 开路 → fetch 失败 → error
+    expect(ft.tabs[0]).toMatchObject({ state: 'error' })
+    vi.mocked(filesApi.readWorkspaceFile).mockResolvedValueOnce(file('a.md', { content: 'x\ny\n' }))
+    await ft.retry('a.md')
+    await flushPromises()
+    expect(ft.tabs[0].state).toBe('loaded')
+    expect(ft.tabs[0].content).toBe('x\ny\n')
+    expect(ft.tabs[0].lineMarks).toEqual([]) // tree 开路 → 无高亮
+  })
+
+  it('retry：重试仍失败 → 维持 error 态（可再次重试）', async () => {
+    const chat = useChatStore()
+    chat.setSelectedContainer('demo')
+    const ft = useFileTabsStore()
+    vi.mocked(filesApi.readWorkspaceFile).mockRejectedValue(new Error('还是失败'))
+    await ft.openFromTree('a.md')
+    await ft.retry('a.md')
+    await flushPromises()
+    expect(ft.tabs[0]).toMatchObject({ state: 'error', errorMessage: '还是失败' })
+  })
+
+  it('retry：不存在的 path → noop（不崩不新开）', async () => {
+    const ft = useFileTabsStore()
+    await expect(ft.retry('nope.md')).resolves.toBeUndefined()
+    expect(filesApi.readWorkspaceFile).not.toHaveBeenCalled()
     expect(ft.tabs).toHaveLength(0)
   })
 })
