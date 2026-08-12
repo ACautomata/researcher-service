@@ -21,6 +21,15 @@ function isMarked(n: number): boolean {
       <span class="ic">⚠️</span>
       <span>无法读取该文件：{{ tab.errorMessage ?? '未知错误' }}</span>
     </div>
+    <div v-else-if="tab.state === 'pending'" class="skel" data-test="viewer-pending">
+      <div
+        v-for="w in [ '55%', '82%', '68%', '44%' ]"
+        :key="w"
+        class="skel-line"
+        :style="{ width: w }"
+      />
+      <span class="skel-hint">正在修改…</span>
+    </div>
     <div v-else-if="tab.binary" class="state" data-test="viewer-binary">
       <span class="ic">📦</span>
       <span>二进制文件，不支持预览</span>
@@ -55,4 +64,9 @@ function isMarked(n: number): boolean {
 .lc { flex: 1; padding-right: 14px; color: var(--el-text-color-primary); }
 .state { height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; color: var(--el-text-color-secondary); font-size: 13px; text-align: center; padding: 24px 16px; }
 .state .ic { font-size: 26px; }
+/* pending 骨架屏（agent running；原型 619 .skel shimmer）——零依赖纯 CSS */
+.skel { height: 100%; display: flex; flex-direction: column; gap: 9px; padding: 14px 16px; }
+.skel-line { height: 14px; border-radius: 4px; background: linear-gradient(90deg, var(--el-fill-color) 25%, var(--el-fill-color-light) 37%, var(--el-fill-color) 63%); background-size: 400% 100%; animation: fv-skel 1.4s ease infinite; }
+.skel-hint { font-size: 12.5px; color: var(--el-text-color-secondary); margin-top: 6px; }
+@keyframes fv-skel { 0% { background-position: 100% 0; } 100% { background-position: 0 0; } }
 </style>

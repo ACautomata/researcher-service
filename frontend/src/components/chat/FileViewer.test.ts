@@ -59,6 +59,14 @@ describe('FileViewer', () => {
     expect(w.find('[data-test="viewer-content"]').exists()).toBe(false)
   })
 
+  it('shows pending skeleton when agent running (state=pending)', () => {
+    const w = mount(FileViewer, { props: { tab: tab({ state: 'pending', content: null }) } })
+    expect(w.find('[data-test="viewer-pending"]').exists()).toBe(true)
+    expect(w.findAll('.skel-line').length).toBeGreaterThan(0)
+    expect(w.find('[data-test="viewer-content"]').exists()).toBe(false)
+    expect(w.find('[data-test="viewer-loading"]').exists()).toBe(false) // 与 fetch-in-flight 区分
+  })
+
   it('renders an empty file (content === "") without crashing', () => {
     const w = mount(FileViewer, { props: { tab: tab({ content: '' }) } })
     expect(w.find('[data-test="viewer-content"]').exists()).toBe(true)
