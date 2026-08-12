@@ -92,7 +92,9 @@ type ResolvedEditDiff = { lines: DiffLine[]; stat?: DiffStat };
 const MAX_LOCAL_DIFF_PAIRS = 8;
 const MAX_LOCAL_DIFF_INPUT_CHARS = 120_000;
 
-function readEditPairs(args: Record<string, unknown>): { pairs: EditPair[]; truncated: boolean } {
+// #627 T2：导出供 fileTabs store 的 edit 行级高亮复用（取 new 文本在 fetched 首次出现定位）——
+// 单一抽取实现，避免在 store 侧重复 arg 拼写枚举（newText/new_string/… + edits[] 数组）。
+export function readEditPairs(args: Record<string, unknown>): { pairs: EditPair[]; truncated: boolean } {
   const pairs: EditPair[] = [];
   let inputChars = 0;
   let truncated = false;

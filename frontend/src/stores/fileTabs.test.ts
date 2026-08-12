@@ -4,6 +4,7 @@
 // 仅测外部状态转移，mock api/files（信封解包由 api/ 单测覆盖，此处不重复）。
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
+import { flushPromises } from '@vue/test-utils'
 import { useChatStore } from '@/stores/chat'
 import { useFileTabsStore } from '@/stores/fileTabs'
 import type { FileEntry, FileReading } from '@/api/files'
@@ -229,5 +230,240 @@ describe('fileTabs store', () => {
     expect(ft.tree).toBeNull()
     expect(ft.treeTruncated).toBe(false)
     expect(ft.treeError).toBeNull()
+  })
+
+  // ---- onToolEvent：决议 C 触发集（#627 T2）----
+  it('onToolEvent running edit → 开 pending tab + active（lineMarks 空 / content null）', () => {
+    const ft = useFileTabsStore()
+    ft.onToolEvent({ name: 'edit', state: 'running', input: { file_path: 'a.md', old_string: 'x', new_string: 'y' }, result: null })
+    expect(ft.tabs).toHaveLength(1)
+    expect(ft.tabs[0]).toMatchObject({ path: 'a.md', state: 'pending', content: null, lineMarks: [], binary: false, oversized: false })
+    expect(ft.activePath).toBe('a.md')
+  })
+
+  it('onToolEvent running write → 开 pending tab', () => {
+    const ft = useFileTabsStore()
+    ft.onToolEvent({ name: 'write', state: 'running', input: { file_path: 'a.md', content: 'hi\n' }, result: null })
+    expect(ft.tabs[0]).toMatchObject({ path: 'a.md', state: 'pending' })
+  })
+
+  it('onToolEvent running apply_patch（多文件）→ 每路径各开 pending tab（dedupe）', () => {
+    const ft = useFileTabsStore()
+    const input = { patch: '*** Begin Patch\n*** Add File: a.md\n+hello\n*** Add File: b.md\n+foo\n*** End Patch' }
+    ft.onToolEvent({ name: 'apply_patch', state: 'running', input, result: null })
+    expect(ft.tabs.map((t) => t.path).sort()).toEqual(['a.md', 'b.md'])
+    expect(ft.tabs.every((t) => t.state === 'pending')).toBe(true)
+  })
+
+  it('onToolEvent read/command/search/fetch 不开 tab（决议 C）', () => {
+    const ft = useFileTabsStore()
+    ft.onToolEvent({ name: 'read', state: 'running', input: { file_path: 'a.md' }, result: null })
+    ft.onToolEvent({ name: 'bash', state: 'running', input: { command: 'ls' }, result: null })
+    ft.onToolEvent({ name: 'grep', state: 'running', input: { pattern: 'x' }, result: null })
+    ft.onToolEvent({ name: 'web_fetch', state: 'running', input: { url: 'http://x' }, result: null })
+    expect(ft.tabs).toHaveLength(0)
+  })
+
+  it('onToolEvent 绝对路径过滤（非 workspace，不开 tab）', () => {
+    const ft = useFileTabsStore()
+    ft.onToolEvent({ name: 'write', state: 'running', input: { file_path: '/etc/passwd', content: 'x' }, result: null })
+    expect(ft.tabs).toHaveLength(0)
+  })
+
+  it('running 命中已 loaded tab → 保持 loaded 不降级骨架', async () => {
+    const chat = useChatStore()
+    chat.setSelectedContainer('demo')
+    vi.mocked(filesApi.readWorkspaceFile).mockResolvedValue(file('a.md'))
+    const ft = useFileTabsStore()
+    await ft.openFromTree('a.md') // loaded
+    ft.onToolEvent({ name: 'edit', state: 'running', input: { file_path: 'a.md', old_string: 'x', new_string: 'y' }, result: null })
+    expect(ft.tabs).toHaveLength(1)
+    expect(ft.tabs[0].state).toBe('loaded') // 不降级 pending
+  })
+
+  // ---- done → loaded + 行级高亮 ----
+  it('done write → loaded + 全行高亮（行号与 fetched 对齐）', async () => {
+    const chat = useChatStore()
+    chat.setSelectedContainer('demo')
+    vi.mocked(filesApi.readWorkspaceFile).mockResolvedValue(file('w.md', { content: 'line1\nline2\nline3\n' }))
+    const ft = useFileTabsStore()
+    const input = { file_path: 'w.md', content: 'line1\nline2\nline3\n' }
+    ft.onToolEvent({ name: 'write', state: 'running', input, result: null })
+    ft.onToolEvent({ name: 'write', state: 'done', input, result: { changed: true } })
+    await flushPromises()
+    expect(ft.tabs[0].state).toBe('loaded')
+    expect(ft.tabs[0].content).toBe('line1\nline2\nline3\n')
+    expect(ft.tabs[0].lineMarks).toEqual([1, 2, 3])
+  })
+
+  it('done edit → loaded + new_string 首次出现处高亮', async () => {
+    const chat = useChatStore()
+    chat.setSelectedContainer('demo')
+    // fetched 是编辑后状态：含 NEW
+    vi.mocked(filesApi.readWorkspaceFile).mockResolvedValue(file('a.md', { content: 'keep\nNEW\nmore\n' }))
+    const ft = useFileTabsStore()
+    const input = { file_path: 'a.md', old_string: 'old', new_string: 'NEW' }
+    ft.onToolEvent({ name: 'edit', state: 'running', input, result: null })
+    ft.onToolEvent({ name: 'edit', state: 'done', input, result: null })
+    await flushPromises()
+    expect(ft.tabs[0].state).toBe('loaded')
+    expect(ft.tabs[0].lineMarks).toEqual([2]) // NEW 在第 2 行
+  })
+
+  it('done edit：new 文本在 fetched 找不到 → lineMarks 空（降级不报错，全文照常展示）', async () => {
+    const chat = useChatStore()
+    chat.setSelectedContainer('demo')
+    vi.mocked(filesApi.readWorkspaceFile).mockResolvedValue(file('a.md', { content: 'a\nb\nc\n' }))
+    const ft = useFileTabsStore()
+    const input = { file_path: 'a.md', old_string: 'x', new_string: 'XYZ-not-in-file' }
+    ft.onToolEvent({ name: 'edit', state: 'running', input, result: null })
+    ft.onToolEvent({ name: 'edit', state: 'done', input, result: null })
+    await flushPromises()
+    expect(ft.tabs[0].state).toBe('loaded')
+    expect(ft.tabs[0].lineMarks).toEqual([])
+    expect(ft.tabs[0].content).toBe('a\nb\nc\n')
+  })
+
+  it('done 多 edit（edits[]）→ 各 new 文本各自定位并合并', async () => {
+    const chat = useChatStore()
+    chat.setSelectedContainer('demo')
+    vi.mocked(filesApi.readWorkspaceFile).mockResolvedValue(file('a.md', { content: 'A\nB\n' }))
+    const ft = useFileTabsStore()
+    const input = { file_path: 'a.md', edits: [{ old_string: 'x', new_string: 'A' }, { old_string: 'y', new_string: 'B' }] }
+    ft.onToolEvent({ name: 'edit', state: 'running', input, result: null })
+    ft.onToolEvent({ name: 'edit', state: 'done', input, result: null })
+    await flushPromises()
+    expect(ft.tabs[0].lineMarks).toEqual([1, 2])
+  })
+
+  it('done 单文件 apply_patch → add 行定位高亮', async () => {
+    const chat = useChatStore()
+    chat.setSelectedContainer('demo')
+    vi.mocked(filesApi.readWorkspaceFile).mockResolvedValue(file('p.md', { content: 'line1\nline2\n' }))
+    const ft = useFileTabsStore()
+    const input = { patch: '*** Begin Patch\n*** Add File: p.md\n+line1\n+line2\n*** End Patch' }
+    ft.onToolEvent({ name: 'apply_patch', state: 'running', input, result: null })
+    ft.onToolEvent({ name: 'apply_patch', state: 'done', input, result: null })
+    await flushPromises()
+    expect(ft.tabs[0].state).toBe('loaded')
+    expect(ft.tabs[0].lineMarks).toEqual([1, 2])
+  })
+
+  it('done 多文件 apply_patch → 每文件 tab 各取本段 add 行定位（dedupe 不串文件）', async () => {
+    const chat = useChatStore()
+    chat.setSelectedContainer('demo')
+    // a.md 段 add hello；b.md 段 add foo / bar
+    const input = { patch: '*** Begin Patch\n*** Add File: a.md\n+hello\n*** Add File: b.md\n+foo\n+bar\n*** End Patch' }
+    vi.mocked(filesApi.readWorkspaceFile).mockImplementation(async (_n, p) => file(p, p === 'a.md' ? { content: 'hello\n' } : { content: 'foo\nbar\n' }))
+    const ft = useFileTabsStore()
+    ft.onToolEvent({ name: 'apply_patch', state: 'running', input, result: null })
+    ft.onToolEvent({ name: 'apply_patch', state: 'done', input, result: null })
+    await flushPromises()
+    const a = ft.tabs.find((t) => t.path === 'a.md')
+    const b = ft.tabs.find((t) => t.path === 'b.md')
+    expect(a?.lineMarks).toEqual([1]) // 仅 hello，未串入 b 段
+    expect(b?.lineMarks).toEqual([1, 2]) // foo+bar
+  })
+
+  it('done fetch 失败（60040 等）→ error 态 + errorMessage', async () => {
+    const chat = useChatStore()
+    chat.setSelectedContainer('demo')
+    vi.mocked(filesApi.readWorkspaceFile).mockRejectedValue(new Error('文件不存在'))
+    const ft = useFileTabsStore()
+    const input = { file_path: 'a.md', old_string: 'x', new_string: 'y' }
+    ft.onToolEvent({ name: 'edit', state: 'running', input, result: null })
+    ft.onToolEvent({ name: 'edit', state: 'done', input, result: null })
+    await flushPromises()
+    expect(ft.tabs[0]).toMatchObject({ state: 'error', content: null, lineMarks: [], errorMessage: '文件不存在' })
+  })
+
+  it('done binary 文件 → loaded + content null + []（查看器出空态）', async () => {
+    const chat = useChatStore()
+    chat.setSelectedContainer('demo')
+    vi.mocked(filesApi.readWorkspaceFile).mockResolvedValue(file('out.bin', { content: null, binary: true, size: 9 }))
+    const ft = useFileTabsStore()
+    const input = { file_path: 'out.bin', content: 'x' }
+    ft.onToolEvent({ name: 'write', state: 'running', input, result: null })
+    ft.onToolEvent({ name: 'write', state: 'done', input, result: null })
+    await flushPromises()
+    expect(ft.tabs[0]).toMatchObject({ state: 'loaded', binary: true, content: null, lineMarks: [] })
+  })
+
+  it('同路径后续 done → 复用单 tab 重拉刷新（不新开）', async () => {
+    const chat = useChatStore()
+    chat.setSelectedContainer('demo')
+    const ft = useFileTabsStore()
+    const input = { file_path: 'a.md', old_string: 'x', new_string: 'V1' }
+    vi.mocked(filesApi.readWorkspaceFile).mockResolvedValueOnce(file('a.md', { content: 'V1\n' }))
+    ft.onToolEvent({ name: 'edit', state: 'running', input, result: null })
+    ft.onToolEvent({ name: 'edit', state: 'done', input, result: null })
+    await flushPromises()
+    expect(ft.tabs).toHaveLength(1)
+    expect(ft.tabs[0].content).toBe('V1\n')
+    // 第二次 done：新内容刷新
+    vi.mocked(filesApi.readWorkspaceFile).mockResolvedValueOnce(file('a.md', { content: 'V2\n' }))
+    const input2 = { file_path: 'a.md', old_string: 'x', new_string: 'V2' }
+    ft.onToolEvent({ name: 'edit', state: 'done', input: input2, result: null })
+    await flushPromises()
+    expect(ft.tabs).toHaveLength(1) // 仍单 tab
+    expect(ft.tabs[0].content).toBe('V2\n')
+    expect(ft.tabs[0].lineMarks).toEqual([1])
+  })
+
+  it('done 中途切容器 → 旧容器回填丢弃', async () => {
+    const chat = useChatStore()
+    chat.setSelectedContainer('a')
+    vi.mocked(filesApi.readWorkspaceFile).mockResolvedValue(file('a.md', { content: 'x\n' }))
+    const ft = useFileTabsStore()
+    const input = { file_path: 'a.md', old_string: 'x', new_string: 'y' }
+    ft.onToolEvent({ name: 'edit', state: 'running', input, result: null })
+    ft.onToolEvent({ name: 'edit', state: 'done', input, result: null })
+    chat.setSelectedContainer('b') // await 前切走
+    await flushPromises()
+    expect(ft.tabs[0].state).toBe('pending') // 未被回填成 loaded
+    expect(ft.tabs[0].content).toBeNull()
+  })
+
+  it('done await 中途用户关 tab → 静默不崩（回填找不到 tab）', async () => {
+    const chat = useChatStore()
+    chat.setSelectedContainer('demo')
+    vi.mocked(filesApi.readWorkspaceFile).mockResolvedValue(file('a.md', { content: 'x\n' }))
+    const ft = useFileTabsStore()
+    const input = { file_path: 'a.md', old_string: 'x', new_string: 'y' }
+    ft.onToolEvent({ name: 'edit', state: 'running', input, result: null })
+    ft.onToolEvent({ name: 'edit', state: 'done', input, result: null })
+    ft.closeTab('a.md') // fetch 完成前关闭
+    await flushPromises()
+    expect(ft.tabs).toHaveLength(0) // 不留空 tab、不崩
+  })
+
+  // ---- error result 收起语义 ----
+  it('error result + tab 仍 pending → 收起（active 切相邻或空）', () => {
+    const ft = useFileTabsStore()
+    ft.onToolEvent({ name: 'edit', state: 'running', input: { file_path: 'a.md', old_string: 'x', new_string: 'y' }, result: null })
+    ft.onToolEvent({ name: 'edit', state: 'error', input: { file_path: 'a.md', old_string: 'x', new_string: 'y' }, result: null })
+    expect(ft.tabs).toHaveLength(0)
+    expect(ft.activePath).toBeNull()
+  })
+
+  it('error result + tab 已 loaded → 保留（失败编辑未改文件）', async () => {
+    const chat = useChatStore()
+    chat.setSelectedContainer('demo')
+    vi.mocked(filesApi.readWorkspaceFile).mockResolvedValue(file('a.md', { content: 'keep\n' }))
+    const ft = useFileTabsStore()
+    const input = { file_path: 'a.md', old_string: 'x', new_string: 'y' }
+    ft.onToolEvent({ name: 'edit', state: 'running', input, result: null })
+    ft.onToolEvent({ name: 'edit', state: 'done', input, result: null })
+    await flushPromises()
+    expect(ft.tabs[0].state).toBe('loaded')
+    ft.onToolEvent({ name: 'edit', state: 'error', input, result: null })
+    expect(ft.tabs).toHaveLength(1) // 保留
+    expect(ft.tabs[0].state).toBe('loaded')
+  })
+
+  it('error result + 无 tab → 不开（noop）', () => {
+    const ft = useFileTabsStore()
+    ft.onToolEvent({ name: 'edit', state: 'error', input: { file_path: 'a.md', old_string: 'x', new_string: 'y' }, result: null })
+    expect(ft.tabs).toHaveLength(0)
   })
 })

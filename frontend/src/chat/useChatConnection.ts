@@ -395,6 +395,7 @@ export function useChatConnection(status: ChatStatus) {
     const last = chat.messages[chat.messages.length - 1]
     if (!last || last.role !== 'assistant') return
     clearResumeWait() // B5: 本 run 工具续帧到达 → 取消 resume 超时重建
+    fileTabs.onToolEvent(tool) // #627 T2：drive 文件 tab（决议 A；自筛修改类 edit/write/apply_patch + 路径；历史不经此，决议 B）
     if (tool.state === 'running') {
       last.tools.push({ id: tool.id, name: tool.name, state: 'running', title: tool.title,
                         input: tool.input, result: tool.result })
