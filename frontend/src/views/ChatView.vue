@@ -13,6 +13,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { listInstances } from '@/api/containers'
 import { ApiError } from '@/api/client'
 import { useChatStore } from '@/stores/chat'
+import { useFileTabsStore } from '@/stores/fileTabs'
 import { useAuthStore } from '@/stores/auth'
 import { useChatConnection } from '@/chat/useChatConnection'
 import {
@@ -28,12 +29,32 @@ import ChatHeader from '@/components/chat/ChatHeader.vue'
 import ChatStream from '@/components/chat/ChatStream.vue'
 import ChatComposer from '@/components/chat/ChatComposer.vue'
 import ApprovalDock from '@/components/chat/ApprovalDock.vue'
+import FileTabsPanel from '@/components/chat/FileTabsPanel.vue'
 
 const chat = useChatStore()
 const auth = useAuthStore()
 // 视图专属态（connecting/errorMsg 上抛至此，disconnected 在 composable 内）
 const connecting = ref(false)
 const errorMsg = ref('')
+
+// #626 T1：左栏「会话｜文件」分段态（视图专属，默认「会话」）+ workspace 文件 tab store（决议 A：与 chatStore 同级）
+const sidebarTab = ref<'sessions' | 'files'>('sessions')
+const fileTabs = useFileTabsStore()
+// 切到「文件」分段：树未加载则拉一次（同容器切回不重拉）；切容器：reset 已清树，在 files 分段时重拉
+watch(sidebarTab, (tab) => {
+  if (tab === 'files' && chat.selectedContainer && !fileTabs.tree && !fileTabs.treeLoading) {
+    void fileTabs.loadTree()
+  }
+})
+watch(() => chat.selectedContainer, (name) => {
+  if (sidebarTab.value === 'files' && name) void fileTabs.loadTree()
+})
+function switchSidebarTab(tab: 'sessions' | 'files'): void {
+  sidebarTab.value = tab
+}
+function activateTab(path: string): void {
+  fileTabs.activePath = path
+}
 
 const conn = useChatConnection({
   onConnecting(v: boolean) {
@@ -238,10 +259,16 @@ defineExpose({
       :sessions="chat.sessions"
       :selected-container="chat.selectedContainer"
       :selected-session="chat.selectedSession"
+      :sidebar-tab="sidebarTab"
+      :tree="fileTabs.tree"
+      :tree-error="fileTabs.treeError"
+      :active-file-path="fileTabs.activePath ?? ''"
       @select-container="conn.selectContainer"
       @select-session="conn.pickSession"
       @remove-session="removeSession"
       @new-session="conn.newSession"
+      @switch-tab="switchSidebarTab"
+      @open-file="(path: string) => void fileTabs.openFromTree(path)"
     />
     <main class="main">
       <ChatHeader
@@ -321,12 +348,22 @@ defineExpose({
         </template>
       </ChatComposer>
     </main>
+    <FileTabsPanel
+      v-if="fileTabs.tabs.length"
+      class="file-panel"
+      :tabs="fileTabs.tabs"
+      :active-path="fileTabs.activePath"
+      @activate="activateTab"
+      @close="fileTabs.closeTab"
+      @close-all="fileTabs.closeAll"
+    />
   </div>
 </template>
 
 <style scoped>
 .chat { display: flex; height: 100%; min-height: 0; }
 .main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+.file-panel { width: 360px; flex: none; }
 .connection-banner { display: flex; align-items: center; gap: 10px; padding: 8px 18px; font-size: 13px; }
 .connection-banner.info { color: var(--el-color-primary); background: var(--el-color-primary-light-9); }
 .connection-banner.danger { color: var(--el-color-danger); background: var(--el-color-danger-light-9); }
