@@ -7,6 +7,7 @@ import { computed, ref } from 'vue'
 import { getBootstrapToken } from '@/api/chat'
 import { useAuthStore, isTokenExpired } from '@/stores/auth'
 import { useChatStore, newMsg, type Msg, type ApprovalItem, type ToolRow } from '@/stores/chat'
+import { useFileTabsStore } from '@/stores/fileTabs'
 import { ApiError } from '@/api/client'
 import {
   createGatewayChat,
@@ -47,6 +48,7 @@ const INITIAL_HISTORY_LIMIT = 50
 
 export function useChatConnection(status: ChatStatus) {
   const chat = useChatStore()
+  const fileTabs = useFileTabsStore()
   const auth = useAuthStore()
   // #564: outbox 离线待发队列（sessionStorage 窄窗落盘）——「已点发送但网关还没回执」的消息
   // 刷新/重连后自动重发。工厂默认取全局 sessionStorage；scope = 容器+会话。
@@ -786,6 +788,7 @@ export function useChatConnection(status: ChatStatus) {
     status.onConnecting(true)
     disconnected.value = false
     chat.resetForContainer()
+    fileTabs.reset() // #626 T1：切容器清文件 tab + workspace 树（下次进「文件」分段重拉）
     abandonActiveRun()
     clearPendingGraceTimer() // B4: 切容器清除旧容器武装的延迟收尾定时器（防跨容器 fire）
     clearResumeWait() // B5: 切容器放弃在途 run 的 resume 等待（新容器连接是新 run 语境）
@@ -971,6 +974,7 @@ export function useChatConnection(status: ChatStatus) {
     const hgen = ++historyGen // codex #249 P2：本请求代；之后再有 loadHistory 即取代本请求
     if (!gateway) return // E2: 断线不重载（防先清空 transcript 再 RPC 失败留白）
     chat.resetForSession()
+    fileTabs.closeAll() // #626 T1：切会话清文件 tab（workspace 树是 per-container，保留）
     chat.setHistoryLoading(true)
     status.onClearError()
     try {
@@ -1123,6 +1127,7 @@ export function useChatConnection(status: ChatStatus) {
     if (chat.selectedSession === key) {
       chat.setSelectedSession('')
       chat.resetForSession() // 清空消息投影 → 空聊天区（不再自动切到剩余首个或新建）
+      fileTabs.closeAll() // #626 T1：删当前会话=离开会话，清文件 tab（workspace 树保留）
       status.onClearError() // 删除当前会话后清残留错误条（spec #461：错误呈现统一走 toast，不留双通道）
     }
     return true
