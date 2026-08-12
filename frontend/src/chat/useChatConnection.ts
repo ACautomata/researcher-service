@@ -985,6 +985,10 @@ export function useChatConnection(status: ChatStatus) {
       // codex P2 #108：保留 await 期间 send() 追加的进行中 turn（user + 流式 assistant 占位）。
       // 直接整体替换会被历史快照覆盖 → delta 找不到 streaming 尾，整轮实时回复从 UI 消失。
       const inFlight = chat.messages
+      // TODO(ii) 消息级 __openclaw.seq 排序：当前按到达序拼接（history + inFlight），不按 seq。
+      // 暂缓——#560 §3 判不可行（历史/本地消息拿不到可靠 seq）+ 本地无网关无法实测；
+      // 前置票：乐观消息接入 projection 元数据 + 真网关抓包确认流式 seq 下发。详见 memory
+      // message-seq-ordering-deferred。
       chat.setMessages([...res.messages.map(translateHistoryMessage), ...inFlight])
       chat.setHistoryState(res.hasMore, res.nextOffset, false)
     } catch (e) {
@@ -998,7 +1002,8 @@ export function useChatConnection(status: ChatStatus) {
 
   // T3 历史消息翻译（防腐层，issue #82）：网关 display-normalized 消息字段名「待实测」（对齐后端
   // _parse_history 透传策略），前端单点容错——role 归一 operator/user/human→user、其余→assistant；
-  // text 主取 text、回退 content/message。历史消息为终态：streaming=false、无 tools。
+  // text 主取 text、回退 content/message。历史消息为终态：streaming=false；tools 无条件提取
+  //（Q2-1(a)，与流式路一致——流式工具挂 msg.tools，历史也提取 toolCall 块进 tools）。
   // #565: 结构化 thinking 块（content[] 的 type==='thinking' 块）经 extractThinking 提取填
   // Msg.thinking（history 全量覆盖）；内联 <thinking> 标签剥离（splitThinking 的残片/未闭合
   // 语义）属流式路，历史为终态不剥离（既有现状：旧格式历史正文含字面标签，本规格不动）。
@@ -1011,7 +1016,10 @@ export function useChatConnection(status: ChatStatus) {
     // ADR 0003）——复用 eventTranslate.extractMessageText（已处理 string/数组 content 并跳过
     // thinking 块），不再只认 string 导致 assistant 历史渲染成空泡。text 字段回退保留（旧透传 shape）。
     const text = extractMessageText(m) || (typeof m.text === 'string' ? m.text : '')
-    const tools = text === '' ? extractToolRows(m) : []
+    // Q2-1(a)：无条件提取 toolCall 块——与流式路一致（流式工具挂 msg.tools），消除「正文+工具」
+    // 消息刷新后工具行凭空消失的布局分歧。原 text==='' 门（仅 toolCall-only 消息留工具）与流式
+    // 不对称：有正文即丢全部工具，刷新后工具整段消失。
+    const tools = extractToolRows(m)
     // #459-T3 #464：历史消息 image/audio/video 块 → media（与 text 独立通道，extractToolRows 同款
     // 防腐层位置）。此前非 text 块被渲染层丢弃；纯图片历史消息（text 空 + media 非空）照常渲染。
     const media = extractMessageAttachments(m)
@@ -1030,8 +1038,8 @@ export function useChatConnection(status: ChatStatus) {
     }
   }
 
-  // E1b: 从 assistant 消息 content 提取 toolCall 块 → 工具行（done 态）。仅当正文为空时调用
-  //（有正文则工具行为噪音）。toolCall 块字段：type/toolCallId/name/arguments（实测 jsonl）。
+  // 从 assistant 消息 content 提取 toolCall 块 → 工具行（done 态）。Q2-1(a)：无条件调用（与流式
+  // 路一致），有正文也提取——消除刷新后工具消失。toolCall 块字段：type/toolCallId/name/arguments（实测 jsonl）。
   function extractToolRows(m: HistoryMessageDTO): ToolRow[] {
     const content = (m as { content?: unknown }).content
     if (!Array.isArray(content)) return []
