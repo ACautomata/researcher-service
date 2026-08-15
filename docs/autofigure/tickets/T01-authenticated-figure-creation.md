@@ -70,4 +70,4 @@ Source of truth: `docs/autofigure/grilling-decisions.md` §1 / §2 / §3 / §9 /
 - first code review: /code-review 双轴（Standards + Spec）均过——0 硬 violation、9/9 AC 实现、零 scope creep；仅 judgement-call 项见 fixes
 - fixes: (1) 响应 `status` 由 DB 行回读替代路由硬编码 'queued'（消除第二来源，Standards Primitive Obsession + Spec 稳健性备注）；(2) 新增 AC6 真事务回滚测试（job 表中止触发器 → figure insert 回滚无孤儿；补 REST mock 未触达的真实 rollback 路径）
 - second code review:
-- commit:
+- commit: `7b94c02`（branch `af/t01-authenticated-figure-creation`，基于 fixed point `75cf596`）
