@@ -37,7 +37,7 @@
 - **Figure.ownerId 只来自认证的 researcher-service 身份**（JWT 派生），永不来自客户端提交。
 - Job 经 Figure 间接确定 owner；worker 不依赖浏览器 session 恢复身份。
 - 访问控制复用既有 `getInstanceForUser` 同款归属门（不存在 vs 越权同码防探测）。
-- v1 无共享、无跨用户访问；admin 跨用户全部可见/可删（对齐面板 admin 语义）。
+- v1 无共享、无跨用户访问；admin 跨用户全部**可见**（对齐面板 admin 语义）；**V1 无 Figure 删除（owner 与 admin 均无）**。
 - **v1 无用量配额**；仅并发护栏（见 §5）。
 - 既有 researcher-service 认证体系保持权威，不引入第二外部认证系统。
 
@@ -73,7 +73,7 @@
 - **产物存储**：SQLite BLOB（PNG）+ 文本列（XML）。面板无对象存储，不引入；未来对象存储可迁（预留扩展点，不建抽象层）。
 - **FileArchive 不是 v1 产物交换/存储机制**（见 §14）——其语义为「OpenClaw 容器内文件」通道，AutoFigure 不在容器内产文件。
 - **下载契约**：独立 `GET /figures/:id/png`，仅 owner 且仅 succeeded 可下载；未完成/失败给明确应用级响应，不返回模糊 500。
-- **删除**：属主删自己的 Figure；admin 删任意；硬删，对齐「会话删除」不可恢复术语。
+- **删除不在 V1**：owner 与 admin 均无 Figure 删除；无硬删、无级联删除公开行为；删除后的幂等键复用语义见 §17.13（V1 不定义）。
 
 ## 7. Python boundary decisions（Python 边界决策）
 

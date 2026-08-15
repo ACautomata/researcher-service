@@ -18,7 +18,7 @@
 
 在 researcher-service 控制面新增 **AutoFigure 域**：
 
-- **公开 REST API**：`POST /figures`（异步提交，HTTP 200 信封 + `status:'queued'`）、`GET /figures`（当前用户历史）、`GET /figures/:id`（详情 + 应用级生成状态）、`GET /figures/:id/png`（仅 owner、仅 succeeded 下载）、`DELETE /figures/:id`。全部走全局 #312 信封。
+- **公开 REST API**：`POST /figures`（异步提交，HTTP 200 信封 + `status:'queued'`）、`GET /figures`（当前用户历史）、`GET /figures/:id`（详情 + 应用级生成状态）、`GET /figures/:id/png`（仅 owner、仅 succeeded 下载）。全部走全局 #312 信封。
 - **轻量 Job Runner**：SQLite/Prisma 为 Job 状态的唯一持久化事实源；`concurrency = 1`；无自动重试；30 分钟超时（自进入 running 起算）；启动时遗留 running reconcile 为 failed。不引入 Redis/BullMQ 依赖。
 - **内部 HTTP sidecar**：panel-net 内私有服务，不暴露宿主端口；Python 无状态（每 Job 独立 session）；不收 JWT/userId；只收生成参数 + 服务端注入的 provider 凭证。
 - **Vue-native 前端**：新增 `AutoFigureView`（输入 → 预览 → 下载 → 历史），复用既有 auth store / 信封解析 / 轮询 / 下载先例。
@@ -36,28 +36,26 @@
 5. 作为面板用户，我想下载已成功生成的 PNG，以便用于论文、报告或幻灯片。
 6. 作为面板用户，我想查看我的历史生成列表（以图为单位），以便回看之前的结果。
 7. 作为面板用户，我想打开某个历史生成的详情页，以便重看该图的输入与结果。
-8. 作为面板用户，我想删除自己的生成记录（硬删、不可恢复），以便清理过期内容。
-9. 作为面板用户，我想在没有认证时被要求登录，而不是拿到生成数据。
-10. 作为面板用户，我想看到失败的非敏感错误信息，以便知道是超时、校验失败还是内部错误。
-11. 作为面板用户，我想在生成失败后能重新发起生成（新建 Figure + Job），而不是被静默重试。
-12. 作为面板用户，我想双击提交只产生一次生成（幂等键去重），以免被重复计费。
-13. 作为面板用户，我想在并发受限（concurrency=1）时任务排队等待，以便系统不会过载。
-14. 作为面板用户，我想在未完成任务时尝试下载 PNG 得到明确的应用级提示，而不是模糊的 500。
-15. 作为面板用户，我想知道该功能是否可用（flag 关闭时看到明确提示），而不是裸 404。
+8. 作为面板用户，我想在没有认证时被要求登录，而不是拿到生成数据。
+9. 作为面板用户，我想看到失败的非敏感错误信息，以便知道是超时、校验失败还是内部错误。
+10. 作为面板用户，我想在生成失败后能重新发起生成（新建 Figure + Job），而不是被静默重试。
+11. 作为面板用户，我想双击提交只产生一次生成（幂等键去重），以免被重复计费。
+12. 作为面板用户，我想在并发受限（concurrency=1）时任务排队等待，以便系统不会过载。
+13. 作为面板用户，我想在未完成任务时尝试下载 PNG 得到明确的应用级提示，而不是模糊的 500。
+14. 作为面板用户，我想知道该功能是否可用（flag 关闭时看到明确提示），而不是裸 404。
 
 **管理员（面板 admin）**
 
-16. 作为管理员，我想看到所有用户的生成（跨用户可见），以便监督与管理。
-17. 作为管理员，我想删除任意用户的生成，以便处置违规/过期内容。
-18. 作为管理员，我想通过 feature flag 控制功能启停，以便分阶段发布、必要时快速关闭。
-19. 作为管理员，我想让系统级共享 LLM 凭证由服务端配置注入，以便用户无需（也无法）自行配置 key。
+15. 作为管理员，我想看到所有用户的生成（跨用户可见），以便监督与管理。
+16. 作为管理员，我想通过 feature flag 控制功能启停，以便分阶段发布、必要时快速关闭。
+17. 作为管理员，我想让系统级共享 LLM 凭证由服务端配置注入，以便用户无需（也无法）自行配置 key。
 
 **运维**
 
-20. 作为运维，我想确认 provider 凭证不落入请求体、不落 Job payload、不落盘，以便满足安全审计要求。
-21. 作为运维，我想通过 sidecar 健康检查与面板 `/api/health` 监控 AutoFigure 域可用性。
-22. 作为运维，我想确认 AutoFigure 不新增对 Redis/BullMQ 的依赖，以便保持既有部署面。
-23. 作为运维，我想在服务重启后看到遗留 running 任务被 reconcile 为 failed，以便状态机不卡死。
+18. 作为运维，我想确认 provider 凭证不落入请求体、不落 Job payload、不落盘，以便满足安全审计要求。
+19. 作为运维，我想通过 sidecar 健康检查与面板 `/api/health` 监控 AutoFigure 域可用性。
+20. 作为运维，我想确认 AutoFigure 不新增对 Redis/BullMQ 的依赖，以便保持既有部署面。
+21. 作为运维，我想在服务重启后看到遗留 running 任务被 reconcile 为 failed，以便状态机不卡死。
 
 ## Implementation Decisions
 
@@ -69,7 +67,7 @@
 - **Prisma 命名**：`Figure`→`figures`、`GenerationJob`→`generation_jobs`（PascalCase 单数 + `@@map` snake_case 复数）；`@@index([ownerId])` 归属索引。
 - 产物存储：PNG 存 SQLite **BLOB** 列，XML 存**文本**列。面板无对象存储、V1 不引入；未来可迁移（预留扩展点，不建抽象层）。
 - **产物提交时机**：XML/PNG 仅在 Job **提交 succeeded 终态时**一并持久化；running/failed 不落成功产物。Job 已进入 failed 后 Python 迟到的成功产物**不得**回写为 Figure 成功产物（丢弃，状态不变）。
-- 删除：硬删，对齐「会话删除」不可恢复术语；属主删自己的、admin 删任意。
+- **删除不在 V1**：owner 与 admin 均无 Figure 删除 API；无硬删、无级联删除公开行为（见 Out of Scope）。
 
 ### 2. 状态机（grilling §5）
 
@@ -107,7 +105,6 @@ queued ──▶ running ──▶ succeeded
 - **`GET /figures`**：当前认证用户自己的 Figure 历史（以 Figure 为单位，非 Job）。
 - **`GET /figures/:id`**：Figure metadata + 应用级生成状态。
 - **`GET /figures/:id/png`**：仅 owner、仅 succeeded 可下载；未完成/失败给明确应用级响应，不返回模糊 500。
-- **`DELETE /figures/:id`**：owner 删自己的；admin 删任意。
 - 失败保留**非敏感**错误信息（前端稳定失败态），不暴露 provider secret / raw stack trace / Python internals。
 - **归属与防探测**：`ownerId` **只由认证的 researcher-service 身份派生**（JWT），永不来自客户端提交的 userId；`GET /figures` 只返回当前认证用户的 Figure；`GET /figures/:id` 与 `GET /figures/:id/png` 对「不存在 vs 他人资源」复用既有 `getInstanceForUser` 同款模式**同码防探测**（70040）。
 
@@ -173,7 +170,7 @@ queued ──▶ running ──▶ succeeded
 **测试接缝（已与用户确认）**：
 
 - **主接缝（新增，唯一新接缝）：`AutoFigureGenerationPort`** —— 只代表外部 AutoFigure **计算能力**（text → generation → normalized result）：生产 = HTTP 调 sidecar；测试 = 内存 fake。经依赖注入（AppDeps 模式）供给 Job Runner，覆盖：状态机转换、领取原子性（至多一次）、30min 超时、启动 reconcile、幂等去重、错误→信封码映射；全程不依赖真 sidecar。**该 Port 不拥有** Job 生命周期/状态机/持久化/幂等/领取/reconcile/超时策略/归属/REST 信封（均属 researcher-service 应用/执行层）。**不为 Job 状态机另设第二架构 Port**；状态转换的聚焦纯函数测试允许，但不为测试发明通用 JobStateMachine 架构。
-- **复用既有接缝：REST 信封接缝**（`setupTestApp` + `seedUser`/`seedAdmin` + `bearer` + 信封断言）——测公开 API：认证、归属门（越权同码）、信封形状、状态暴露、仅 owner+succeeded 可下载 PNG、删除权限。
+- **复用既有接缝：REST 信封接缝**（`setupTestApp` + `seedUser`/`seedAdmin` + `bearer` + 信封断言）——测公开 API：认证、归属门（越权同码）、信封形状、状态暴露、仅 owner+succeeded 可下载 PNG。
 - **Python sidecar HTTP 契约（辅助，非新接缝）**：给定输入 → 断言响应 JSON 形状（schema 校验）；集成测试 mock 或真起 sidecar；**不补 AutoFigure 内部单测**。
 - **E2E 门控 smoke（辅助）**：需真 sidecar + 真 key，自动探测门控（对齐 containers-smoke 门控模式）。
 - **常规测试套件不需真实 provider 凭证**（fake Port + 门控契约覆盖）；超时测试经 config 注入短超时，**绝不等待真实 30 分钟**。
@@ -202,6 +199,7 @@ queued ──▶ running ──▶ succeeded
 - 通用 operationType 抽象
 - 每用户凭证 / 凭证管理 UI
 - 共享（跨用户访问）
+- **Figure / 生成记录删除**（V1 无删除 API；owner 与 admin 均无；无硬删/级联删除公开行为）
 - 用量配额
 - 对象存储 / 分布式产物存储
 - SSE / WS 进度（v1 仅 REST 轮询，粒度 = Job 状态，无中间百分比）
