@@ -538,3 +538,47 @@ describe('named volumes flag (slice config, #590/#592)', () => {
     expect(await loadNamedVolumes('yes')).toBe('THREW')
   })
 })
+
+// T01（docs/autofigure/tickets/T01-authenticated-figure-creation.md）：AUTOFIGURE_ENABLED ——
+// AutoFigure 域开关（默认关 = figures 路由未装配 → /api/v1/figures 90005）。非 true/false 值
+// fail-fast（对齐 readNamedVolumes 白名单模式）——否则 `1`/`TRUE` 这类错值静默按默认 false 走，
+// flag 开了却没生效（错误方向是「路由缺席」，fail-fast 更安全）。
+describe('AutoFigure enabled flag (slice config, T01)', () => {
+  async function loadAutofigureEnabled(env: string | undefined): Promise<boolean | 'THREW'> {
+    vi.resetModules() // 清 config 模块缓存，让动态 import 重新快照 env
+    if (env === undefined) delete process.env.AUTOFIGURE_ENABLED
+    else vi.stubEnv('AUTOFIGURE_ENABLED', env)
+    try {
+      const { config } = await import('../src/config')
+      return config.autofigure.enabled
+    } catch {
+      return 'THREW' // fail-fast
+    } finally {
+      vi.unstubAllEnvs() // 恢复 env（避免污染后续测试文件）
+    }
+  }
+
+  it('未设置 → 默认 false（flag 关 = 路由未装配）', async () => {
+    expect(await loadAutofigureEnabled(undefined)).toBe(false)
+  })
+
+  it('显式 true → 装配 /api/v1/figures', async () => {
+    expect(await loadAutofigureEnabled('true')).toBe(true)
+  })
+
+  it('显式 false → 保持关闭', async () => {
+    expect(await loadAutofigureEnabled('false')).toBe(false)
+  })
+
+  it('非法 1 → fail-fast（防错值静默按默认 false 走）', async () => {
+    expect(await loadAutofigureEnabled('1')).toBe('THREW')
+  })
+
+  it('非法 TRUE（大小写敏感）→ fail-fast', async () => {
+    expect(await loadAutofigureEnabled('TRUE')).toBe('THREW')
+  })
+
+  it('非法 yes → fail-fast', async () => {
+    expect(await loadAutofigureEnabled('yes')).toBe('THREW')
+  })
+})

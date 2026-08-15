@@ -64,10 +64,10 @@ Source of truth: `docs/autofigure/grilling-decisions.md` §1 / §2 / §3 / §9 /
 
 ## Completion evidence
 
-- targeted tests:
-- typecheck/build:
-- broader tests:
-- first code review:
-- fixes:
+- targeted tests: `test/figures.test.ts` 14/14（flag 开 REST · flag 关 90005 · 认证 10001 · 事务 seam · AC6 真事务回滚）；`test/config.test.ts` AutoFigure flag 6/6；`test/schemaUpgrade.test.ts` 2/2（含 v2→v3 增量幂等）
+- typecheck/build: `npm run typecheck` 0 错误；`npm run build`（tsc + prisma generate 产物拷贝）成功
+- broader tests: 全量 vitest 577 通过 / 6 skipped；仅 `containers-smoke` + `pairingSmoke` 失败——`connect ENOENT /var/run/docker.sock`（本机 docker daemon DOWN，环境门控，与 T01 无关）
+- first code review: /code-review 双轴（Standards + Spec）均过——0 硬 violation、9/9 AC 实现、零 scope creep；仅 judgement-call 项见 fixes
+- fixes: (1) 响应 `status` 由 DB 行回读替代路由硬编码 'queued'（消除第二来源，Standards Primitive Obsession + Spec 稳健性备注）；(2) 新增 AC6 真事务回滚测试（job 表中止触发器 → figure insert 回滚无孤儿；补 REST mock 未触达的真实 rollback 路径）
 - second code review:
 - commit:

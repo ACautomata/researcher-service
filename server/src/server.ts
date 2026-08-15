@@ -33,6 +33,10 @@ async function main(): Promise<void> {
     },
     // files（#589 · ADR 0012）：统一文件 CRUD 经 Docker getArchive/putArchive/exec rm。
     files: { archive: fleet.archive },
+    // figures（AutoFigure T01）：flag 开才装配（config.autofigure.enabled）——flag 关不注入 →
+    // 路由未挂载（/api/v1/figures → 90005）。T01 无注入项（路由只依赖 req.prisma + 认证身份），
+    // 装配形态 `{}` 表达「已启用」；T02 幂等 / T03 runner 的依赖在此扩展。
+    figures: config.autofigure.enabled ? {} : undefined,
   })
 
   // M0 同进程单端口分流：createServer(expressApp) + server.on('upgrade') 分流。
