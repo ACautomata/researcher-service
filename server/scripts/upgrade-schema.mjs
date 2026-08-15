@@ -34,11 +34,33 @@ CREATE INDEX IF NOT EXISTS "text_trace_logs_userId_idx" ON "text_trace_logs"("us
 CREATE INDEX IF NOT EXISTS "text_trace_logs_ipAddress_idx" ON "text_trace_logs"("ipAddress");
 CREATE INDEX IF NOT EXISTS "text_trace_logs_createdAt_idx" ON "text_trace_logs"("createdAt");
 CREATE INDEX IF NOT EXISTS "text_trace_logs_status_idx" ON "text_trace_logs"("status");
+
+CREATE TABLE IF NOT EXISTS "figures" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "ownerId" TEXT NOT NULL,
+    "prompt" TEXT NOT NULL,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" DATETIME NOT NULL,
+    CONSTRAINT "figures_ownerId_fkey" FOREIGN KEY ("ownerId") REFERENCES "users" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS "generation_jobs" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "figureId" TEXT NOT NULL,
+    "status" TEXT NOT NULL DEFAULT 'queued',
+    "errorMessage" TEXT,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" DATETIME NOT NULL,
+    CONSTRAINT "generation_jobs_figureId_fkey" FOREIGN KEY ("figureId") REFERENCES "figures" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS "figures_ownerId_idx" ON "figures"("ownerId");
+CREATE UNIQUE INDEX IF NOT EXISTS "generation_jobs_figureId_key" ON "generation_jobs"("figureId");
 `)
-  db.pragma('user_version = 2')
+  db.pragma('user_version = 3')
 } finally {
   db.close()
 }
 
 // eslint-disable-next-line no-console
-console.log(`[db:upgrade] schema upgraded to user_version=2 at ${dbPath}`)
+console.log(`[db:upgrade] schema upgraded to user_version=3 at ${dbPath}`)

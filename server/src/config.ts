@@ -203,6 +203,20 @@ function readNamedVolumes(): boolean {
   )
 }
 
+// AUTOFIGURE_ENABLED（T01，docs/autofigure/tickets/T01-authenticated-figure-creation.md）：
+// AutoFigure 域开关。默认 false = 装配层不注入 figures deps → /api/v1/figures 路由未挂载（90005）；
+// 显式 true 装配。非 true/false 值 fail-fast（对齐 readNamedVolumes 白名单模式）——否则 `1`/`TRUE`
+// 这类错值静默按默认 false 走，flag 开了却没生效（错误方向是「路由缺席」，fail-fast 更安全）。
+function readAutofigureEnabled(): boolean {
+  const v = process.env.AUTOFIGURE_ENABLED
+  if (v === undefined) return false
+  if (v === 'true') return true
+  if (v === 'false') return false
+  throw new Error(
+    `AUTOFIGURE_ENABLED 非法: ${JSON.stringify(v)}，须为 true 或 false（AutoFigure 域开关，默认关）`,
+  )
+}
+
 export const config = {
   jwtSecret: readSecret(),
   accessTtl: process.env.ACCESS_TOKEN_TTL ?? '5m',
@@ -258,6 +272,12 @@ export const config = {
   lifecycleWorkerConcurrency: Number(process.env.LIFECYCLE_WORKER_CONCURRENCY ?? 2),
   // BullMQ/Redis 连接（#313 自本切片引入；后台 provisioning 队列）
   redisUrl: process.env.REDIS_URL ?? 'redis://localhost:6379/0',
+  // ---- AutoFigure（T01，docs/autofigure/tickets/T01-authenticated-figure-creation.md）----
+  autofigure: {
+    // 域开关：flag 关 → 装配层 server.ts 不注入 figures deps → 路由未挂载（/api/v1/figures 90005）。
+    // flag 只在装配层消费（app.ts 不读 config，只认 deps 注入，对齐 models/files 条件挂载先例）。
+    enabled: readAutofigureEnabled(),
+  },
 }
 
 // refresh cookie 公共属性（规格 #311 锁）：HttpOnly + Secure(prod) + SameSite=Lax + Path=/api/v1/auth

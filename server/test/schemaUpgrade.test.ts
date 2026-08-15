@@ -13,13 +13,41 @@ function runUpgrade(dbPath: string): void {
   })
 }
 
-describe('schema upgrade script', () => {
-  it('adds text trace tables to an existing base database and is idempotent', () => {
-    const dir = mkdtempSync(path.join(tmpdir(), `schema-upgrade-${process.pid}-`))
-    const dbPath = path.join(dir, 'panel.db')
-    const db = new Database(dbPath)
-    try {
-      db.exec(`
+// 从「只有 base 表」的旧库跑全量增量脚本（幂等跑两遍）→ 三批表全到位 + user_version 归 3。
+function assertUpgraded(dbPath: string): void {
+  const db = new Database(dbPath)
+  try {
+    // better-sqlite3 命名参数经对象绑定（$name）；表/索引名来自上方常量数组，无注入面。
+    for (const table of ['text_trace_logs', 'figures', 'generation_jobs']) {
+      expect(
+        db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=$name").get({ name: table }),
+      ).toEqual({ name: table })
+    }
+    for (const index of [
+      'text_trace_logs_traceId_key',
+      'figures_ownerId_idx',
+      'generation_jobs_figureId_key',
+    ]) {
+      expect(
+        db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name=$name").get({ name: index }),
+      ).toEqual({ name: index })
+    }
+    // figures/generation_jobs 的持久化契约：queued 默认 + nullable errorMessage
+    const jobCols = db.prepare('PRAGMA table_info(generation_jobs)').all() as Array<{ name: string; dflt_value: string | null; notnull: number }>
+    const status = jobCols.find((c) => c.name === 'status')!
+    expect(status.dflt_value).toBe("'queued'")
+    const errorMessage = jobCols.find((c) => c.name === 'errorMessage')!
+    expect(errorMessage.notnull).toBe(0) // nullable
+    expect(db.pragma('user_version', { simple: true })).toBe(3)
+  } finally {
+    db.close()
+  }
+}
+
+function makeBaseDb(dbPath: string): void {
+  const db = new Database(dbPath)
+  try {
+    db.exec(`
 CREATE TABLE "users" (
     "id" TEXT NOT NULL PRIMARY KEY,
     "username" TEXT NOT NULL,
@@ -36,26 +64,54 @@ CREATE TABLE "users" (
 );
 PRAGMA user_version=1;
 `)
+  } finally {
+    db.close()
+  }
+}
+
+describe('schema upgrade script', () => {
+  it('adds text trace + AutoFigure tables to an existing base database and is idempotent', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), `schema-upgrade-${process.pid}-`))
+    const dbPath = path.join(dir, 'panel.db')
+    makeBaseDb(dbPath)
+
+    runUpgrade(dbPath)
+    runUpgrade(dbPath)
+
+    assertUpgraded(dbPath)
+  })
+
+  it('upgrades an already-text-trace DB (v2) to AutoFigure tables + user_version=3', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), `schema-upgrade-${process.pid}-`))
+    const dbPath = path.join(dir, 'panel.db')
+    // 模拟上一轮增量已交付 text_trace_logs 的既有部署（v2）——增量脚本须只补 figures/generation_jobs。
+    const db = new Database(dbPath)
+    try {
+      db.exec(`
+CREATE TABLE "text_trace_logs" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "traceId" TEXT NOT NULL,
+    "userId" TEXT NOT NULL,
+    "username" TEXT NOT NULL,
+    "ipAddress" TEXT NOT NULL,
+    "containerName" TEXT,
+    "sessionKey" TEXT,
+    "runId" TEXT,
+    "inputText" TEXT NOT NULL DEFAULT '',
+    "outputText" TEXT NOT NULL DEFAULT '',
+    "outputHash" TEXT NOT NULL DEFAULT '',
+    "status" TEXT NOT NULL DEFAULT 'success',
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+PRAGMA user_version=2;
+`)
     } finally {
       db.close()
     }
 
     runUpgrade(dbPath)
-    runUpgrade(dbPath)
+    runUpgrade(dbPath) // 幂等：第二遍不报错、不重复建表
 
-    const upgraded = new Database(dbPath)
-    try {
-      const table = upgraded
-        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'text_trace_logs'")
-        .get()
-      expect(table).toEqual({ name: 'text_trace_logs' })
-      const uniqueIndex = upgraded
-        .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'text_trace_logs_traceId_key'")
-        .get()
-      expect(uniqueIndex).toEqual({ name: 'text_trace_logs_traceId_key' })
-      expect(upgraded.pragma('user_version', { simple: true })).toBe(2)
-    } finally {
-      upgraded.close()
-    }
+    assertUpgraded(dbPath)
   })
 })
