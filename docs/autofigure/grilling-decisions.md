@@ -62,7 +62,7 @@
 - **超时**：`AUTOFIGURE_JOB_TIMEOUT_MS`，默认 **30 分钟**，经既有 config boundary 配置（不散落 hard-code）。
 - **超时从进入 running 起算**，不含 queued 等待时间；超时 → 确定 failed，不停留 running。
 - **崩溃恢复**：succeeded/failed 状态保留；queued 不因重启丢失；遗留 running 启动时 reconcile → failed。
-- **幂等**：提交带幂等键，防双击重复扣费。
+- **幂等**：POST /figures 必带 `Idempotency-Key` 请求头，按 `(userId, key)` 作用域去重，防重复扣费；完整契约见 §17。
 - **AutoFigure 不新增 Redis/BullMQ 依赖**（注意：Redis 已存在于部署栈，为容器生命周期队列所用；本决策是「AutoFigure 不新增依赖」，非「面板无 Redis」）。
 
 > 实现级命名（`AUTOFIGURE_JOB_TIMEOUT_MS`）为已批准的**设计方向**；确切拼写由 /to-spec 对照 `config.ts` 声明核实。
@@ -92,7 +92,7 @@
 
 ## 9. Public API semantics（公开 API 语义）
 
-- **POST /figures**：校验认证 + 输入 → 持久化 Figure + queued Job → **HTTP 200 信封**（遵循全局信封不变量），`data` 含 `{figureId, jobId, status:'queued'}`。语义等价 202 Accepted，**不引入 HTTP 202 特例**。
+- **POST /figures**：校验认证 + 输入 → 持久化 Figure + queued Job → **HTTP 200 信封**（遵循全局信封不变量），`data` 含 `{figureId, jobId, status:'queued'}`。语义等价 202 Accepted，**不引入 HTTP 202 特例**。必带 `Idempotency-Key` 请求头（见 §17）。
 - **GET /figures**：当前认证用户自己的 Figure 历史（以 Figure 为单位，非 Job）。
 - **GET /figures/:id**：Figure metadata + 应用级生成状态。
 - **GET /figures/:id/png**：仅 owner、仅 succeeded 下载。
@@ -111,7 +111,7 @@
 
 ## 11. Testing decisions（测试决策）
 
-- 主接缝：server 侧 `FigureAdapter` Port（生产 = HTTP 调 sidecar / 测试 = fake），照 `FileArchive`/`LifecycleQueue`/`FakeGateway` 范式。
+- 主接缝：server 侧 `AutoFigureGenerationPort`（生产 = HTTP 调 sidecar / 测试 = fake）——只代表外部 AutoFigure 计算能力，**不拥有** Job 生命周期/状态机/持久化/幂等/领取/reconcile/超时/归属/REST 信封；照 `FileArchive`/`LifecycleQueue`/`FakeGateway` 范式。
 - Python contract 测试：sidecar HTTP 契约 schema 校验（给定输入 → 断言响应 JSON 形状），集成测试 mock 或真起 sidecar；**不补 AutoFigure 内部单测**。
 - 认证 HTTP 测试：`setupTestApp` + seedUser + 归属断言（越权同码）。
 - E2E boundary：门控 smoke（需真 sidecar + 真 key），对齐 containers-smoke 门控模式。
@@ -185,4 +185,26 @@
 
 ---
 
-> 本文件不含任何新增架构决定；所有条目均来自 grilling 阶段已批准内容。实现级命名（env 变量、错误码段、feature flag）标注为「设计方向」，由 /to-spec 对照仓库约定核实后再定准。§16 为已核实的命名约定事实记录，供 /to-spec 直接引用。
+## 17. Idempotency contract（幂等契约 —— V1 已批准）
+
+> 本节为 2026-08-15 规格一致性审查中 OPEN DECISION 的裁决结果，属**已批准的产品/API 决策**。原 §5「提交带幂等键」仅批准方向，本节定准语义。
+
+1. POST /figures **必带 `Idempotency-Key` 请求头**。
+2. 幂等键**按认证用户作用域**：`(userId, idempotencyKey)` 唯一。
+3. userId **只由认证上下文派生**；客户端不得把 userId 作为幂等身份的一部分发送。
+4. 不同认证用户可独立使用相同 key（user A + key abc 与 user B + key abc 为独立幂等作用域）。
+5. 幂等信息**持久化于 SQLite/Prisma**，survive researcher-service 重启；**不得**以进程内存 map 实现。
+6. 首次有效 POST 在**同一逻辑原子创建边界**内：校验认证 → 校验 prompt → 持久化 Figure → 持久化其 1:1 queued GenerationJob → 持久化幂等关联。
+7. 同用户 + 同 key + **语义相同输入**重放：**不**建第二个 Figure/Job，以 HTTP 200 信封返回已创建的 Figure/Job 及当前应用级状态（原始 Job 无论 queued/running/succeeded/failed 均正确）。
+8. 同用户 + 同 key + **不同输入**：拒绝，返回稳定 Figures 域**幂等冲突**错误；**不得**静默返回旧资源、不得覆盖原 Figure、不得改写原 prompt、不得建第二个 Figure/Job。
+9. V1 幂等比较输入 = 规范化 text-to-figure 创建载荷（**至少**含用户可见生成 prompt 与影响生成结果的其他 V1 请求字段）；**不含** userId（已在作用域内）、provider 凭证、时间戳、内部 Job 字段、服务端生成 ID。
+10. 实现可持久化规范化请求字段**或**确定性 fingerprint/hash；规格要求**确定性比较语义**，不强制特定哈希算法（除非仓库约定要求）。
+11. 幂等键**仅 POST /figures 必填**；**不**引入平台级通用幂等框架。
+12. V1 **无**自动过期/TTL：幂等关联随对应 Figure 存续；未来保留/删除需求另行定义。
+13. Figure 删除后的幂等键复用语义 **V1 不定义**（删除本身不在 V1 规格范围）。
+14. **成本保护不变量**：同 key 的多次投递/重试/双击 ⇒ **至多一个 Figure、至多一个初始 GenerationJob**。
+15. 验收测试：缺失 Idempotency-Key · 首次创建成功 · 同用户+同 key+同输入返回同 Figure · queued/running/succeeded/failed 各状态重放返回同 Figure · 同用户+同 key+不同输入 → 幂等冲突 · 不同用户+同 key 独立 · 幂等 survive 重启 · 重放绝不产生第二个 GenerationJob。
+
+---
+
+> 本文件不含任何新增架构决定；所有条目均来自 grilling 阶段已批准内容。实现级命名（env 变量、错误码段、feature flag）标注为「设计方向」，由 /to-spec 对照仓库约定核实后再定准。§16 为已核实的命名约定事实记录；§17 为规格审查阶段裁决的幂等契约（V1 已批准）。
