@@ -224,11 +224,18 @@ model Figure {
   ownerId String
   prompt  String // 用户可见的 text-to-figure 生成输入（zod 校验后入库）
 
+  // T02 幂等（docs/autofigure/tickets/T02-idempotent-figure-creation.md · grilling §17）：
+  // Idempotency-Key 按 (ownerId, idempotencyKey) 唯一（唯一索引是并发重复创建去重的最终仲裁）。
+  // nullable 容 T02 前既有行（升级脚本走 ALTER TABLE ADD COLUMN，无 NOT NULL 默认可给）；
+  // 应用层恒非空（Idempotency-Key 请求头必带，缺 → 90002）。
+  idempotencyKey String?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   job GenerationJob? // 1:1（figureId @unique）
 
+  @@unique([ownerId, idempotencyKey])
   @@index([ownerId])
   @@map("figures")
 }

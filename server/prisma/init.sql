@@ -99,6 +99,7 @@ CREATE TABLE "figures" (
     "id" TEXT NOT NULL PRIMARY KEY,
     "ownerId" TEXT NOT NULL,
     "prompt" TEXT NOT NULL,
+    "idempotencyKey" TEXT,
     "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" DATETIME NOT NULL,
     CONSTRAINT "figures_ownerId_fkey" FOREIGN KEY ("ownerId") REFERENCES "users" ("id") ON DELETE CASCADE ON UPDATE CASCADE
@@ -159,6 +160,9 @@ CREATE UNIQUE INDEX "pairings_containerId_key" ON "pairings"("containerId");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "model_providers_containerId_providerId_key" ON "model_providers"("containerId", "providerId");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "figures_ownerId_idempotencyKey_key" ON "figures"("ownerId", "idempotencyKey");
 
 -- CreateIndex
 CREATE INDEX "figures_ownerId_idx" ON "figures"("ownerId");

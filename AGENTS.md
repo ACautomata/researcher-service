@@ -92,7 +92,8 @@ OpenClaw 容器 fleet (openclaw-gw-<name>，每容器独立 home/openclaw.json/�
 
 全局 #312 信封：所有 REST 一律 HTTP 200，错误信号在 body `{code,message,data}`；「不存在 vs 越权」
 同码防探测（20040/30040/40040/60040）。码段：`0` 成功 · `1xxxx` 通用/鉴权 · `2xxxx` 容器 · `3xxxx` wiki ·
-`4xxxx` models · `5xxxx` chat/pairing · `6xxxx` files · `9xxxx` 系统/校验。
+`4xxxx` models · `5xxxx` chat/pairing · `6xxxx` files · `7xxxx` figures（AutoFigure，70041 幂等冲突；
+70040 预留 T05 不存在/越权同码防探测）· `9xxxx` 系统/校验。
 
 ## frontend 结构（`frontend/src/`）
 
