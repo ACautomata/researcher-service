@@ -26,7 +26,8 @@
 
 - **Figure** = 用户面对的唯一聚合。属性含输入 prompt、归属、生成状态、产物（XML + PNG + evaluation/metadata）、时间线。
 - **Job（Generation）= 执行记录**，不承载 Figure 生命周期。
-- 概念形态：`Figure └── Job`（1:N），**不是** `Job └── Figure lifecycle`。
+- 概念形态：`Figure 1:1 Job` —— 一张 Figure 恰好对应一个 GenerationJob，**不是** `Job └── Figure lifecycle`。
+- Figure 与 Job 仍分两张表（`figures` / `generation_jobs`），理由为职责分离：Figure 承载领域资源语义，Job 承载执行状态关注；分表**不是**为未来 1:N 预留，V1 不承诺扩展为 1:N。
 - 一次 initial generation 对应一个独立 Job。
 - **v1 不引入**：FigureProject（多图分组）、FigureRevision、通用 `operationType = initial|continue|refine|enhance` 抽象。
 - continue/refine/manual-edit/enhance 的领域模型在 v2 重新设计，v1 不为未来预留。
@@ -97,9 +98,9 @@
 - **GET /figures/:id/png**：仅 owner、仅 succeeded 下载。
 - Public API 只暴露**应用级 job 状态**，不泄露 queue/worker/Python/BullMQ 实现细节。
 - 失败保留**非敏感**错误信息（前端稳定失败态），不暴露 provider secret / raw stack trace / Python internals。
-- 错误码段：**`7xxxx` 新段**（0/1/2/3/4/5/6/9 已占用，7 空闲）。
+- 错误码段：**`7xxxx` 新段**（既有 REST 信封码段为 0/1/2/3/4/6/9；`5xxxx` 并非信封段 —— chat 域错误经 WS close codes 4401–4404/1011/1008 表达；`7xxxx` 空闲，供 AutoFigure 使用）。
 
-> 错误码段 `7xxxx` 为已批准的**设计方向**（「40 不存在/越权同码」「41 冲突」的锁式与既有各域一致）；确切码值/常量名由 /to-spec 对照 `server/src/codes.ts` 核实。
+> 错误码段 `7xxxx` 为已批准的**设计方向**（「40 不存在/越权同码」「41 冲突」的锁式与既有各域一致）；确切码值/常量名由 /to-spec 对照 `server/src/codes.ts` 核实。已核实：`codes.ts` 现存信封码段为 0/1/2/3/4/6/9，**无 `5xxxx` 信封常量**（chat 错误域经 WS close codes 4401–4404/1011/1008 表达，非信封段），故 `7xxxx` 可用、无冲突。
 
 ## 10. Deployment decisions（部署决策）
 
@@ -173,4 +174,15 @@
 
 ---
 
-> 本文件不含任何新增架构决定；所有条目均来自 grilling 阶段已批准内容。实现级命名（env 变量、错误码段、feature flag）标注为「设计方向」，由 /to-spec 对照仓库约定核实后再定准。
+## 16. Verified naming conventions（已验证命名约定 —— 规格前置核实，非新增决策）
+
+> 本节仅为**已核实的仓库约定**记录（供 /to-spec 直接引用），不含任何新增架构决定，不改动已批准行为。本节不改变上文任何已批准决策；仅把规格阶段已对照仓库确认的命名事实固化于此。
+
+- **config 声明**：`server/src/config.ts` 是唯一 env 读取处（`read*()` 顶层校验 + 生产 fail-fast）；AutoFigure 新增配置走同模式，`AUTOFIGURE_*` env 归入 config 对象新子域（对齐 `fleet:` 子域先例）。
+- **feature flag**：`AUTOFIGURE_ENABLED`（布尔），装配点对齐 `app.ts` 条件挂载先例（`if (orchestrator) {...}` 使能/禁用整组路由与依赖），flag 关闭时 AutoFigure 路由/worker/sidecar 依赖不装配。
+- **Prisma 命名**：模型 PascalCase 单数 + `@@map` snake_case 复数 → `Figure`→`figures`、`GenerationJob`→`generation_jobs`（对齐既有模型约定；`@@index([ownerId])` 归属索引先例可沿用）。
+- **路由组织**：AutoFigure 域路由遵循 researcher-service 的 Express 域/信封/防探测约定，**不**沿用 AutoFigure Flask 的 `autofigure_routes.py` 路由组织。
+
+---
+
+> 本文件不含任何新增架构决定；所有条目均来自 grilling 阶段已批准内容。实现级命名（env 变量、错误码段、feature flag）标注为「设计方向」，由 /to-spec 对照仓库约定核实后再定准。§16 为已核实的命名约定事实记录，供 /to-spec 直接引用。
