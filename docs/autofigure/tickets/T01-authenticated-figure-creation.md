@@ -69,5 +69,8 @@ Source of truth: `docs/autofigure/grilling-decisions.md` §1 / §2 / §3 / §9 /
 - broader tests: 全量 vitest 577 通过 / 6 skipped；仅 `containers-smoke` + `pairingSmoke` 失败——`connect ENOENT /var/run/docker.sock`（本机 docker daemon DOWN，环境门控，与 T01 无关）
 - first code review: /code-review 双轴（Standards + Spec）均过——0 硬 violation、9/9 AC 实现、零 scope creep；仅 judgement-call 项见 fixes
 - fixes: (1) 响应 `status` 由 DB 行回读替代路由硬编码 'queued'（消除第二来源，Standards Primitive Obsession + Spec 稳健性备注）；(2) 新增 AC6 真事务回滚测试（job 表中止触发器 → figure insert 回滚无孤儿；补 REST mock 未触达的真实 rollback 路径）
-- second code review:
+- second code review: blocking —— AC6 真回滚测试空洞通过。root cause：mock 测试对共享 PrismaClient 做 `vi.spyOn(ctx.prisma,'$transaction').mockRejectedValueOnce(...)` 后 `mockRestore()` 无法恢复（PrismaClient 是 Proxy，$transaction 残留为 undefined），后续真回滚测试在进入真事务前即 TypeError → 90000 + 计数未变 = 假绿。
+  fix（仅测试隔离/证据，无 production 改动）：两个 AC6 用例各自隔离到独立 `setupTestApp`（独立 client）——mock 用例的 $transaction 污染止步于本 describe；真回滚用例用全新 client（其 $transaction 在其生命周期从未被 mock），并加前置置信断言（`typeof` 检查 + 真实 preflight 读事务 `$transaction(async tx => tx.figure.count())`）。实测真回滚路径错误为 `SQLITE_CONSTRAINT_TRIGGER`，被 driver adapter 归为 ForeignKeyConstraintViolation（P2003，源码 `case SQLITE_CONSTRAINT_TRIGGER` 与 FOREIGNKEY 同分类）——确为 job 表 BEFORE INSERT 中止触发器触发：figure insert 已入真事务、job insert abort → 整体 ROLLBACK 无孤儿。
+- tests rerun: focused `test/figures.test.ts` 14/14；重复 `-t "真事务回滚"` 1/1 与 `-t "AC6"` 隔离 3/3；`test/config.test.ts` 67/67 + `test/schemaUpgrade.test.ts` 2/2；全量 vitest 577 passed / 6 skipped（仅 containers-smoke + pairingSmoke 因 docker daemon DOWN 环境门控失败，与 T01 无关）；`npm run typecheck` 0 错误；`npm run build` 成功
+- final result: **未标记 ready to merge**（待最终裁决）；无 production 代码改动，仅 test 隔离与证据修复
 - commit: `7b94c02`（branch `af/t01-authenticated-figure-creation`，基于 fixed point `75cf596`）

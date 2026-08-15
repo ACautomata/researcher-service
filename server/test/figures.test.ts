@@ -105,11 +105,33 @@ describe('T01 POST /figures（flag 开，REST 信封接缝）', () => {
     expect(res.body.code).toBe(90002)
     expect(await ctx.prisma.figure.count()).toBe(beforeF)
   })
+})
 
-  it('AC6：事务层失败 → 失败信封（90000），无孤儿 Figure、无游离 Job', async () => {
+// AC6 两个互补用例各自隔离到独立 setupTestApp（独立 ctx/prisma）。
+// 二次审查 blocking：`vi.spyOn(ctx.prisma, '$transaction').mockRejectedValueOnce(...)` 后
+// `mockRestore()` 在此 Prisma client 上无法恢复（$transaction 变 undefined）——若与真回滚用例
+// 共享 client，后者会进不了真事务而空洞通过。故：mock 用例独占一个 client（其污染被隔离在
+// 本 describe 内），真回滚用例用全新 client（本生命周期内 $transaction 从未被 mock）。
+
+describe('T01 AC6：事务层失败信封（mock $transaction，隔离 client）', () => {
+  let ctx: TestContext
+  let access: string
+
+  beforeAll(async () => {
+    ctx = await setupTestApp({ figures: {} })
+    await seedUser(ctx.prisma, 'figmocktx', 'pw-mocktx-secure')
+    const lg = await login(ctx.request, 'figmocktx', 'pw-mocktx-secure')
+    access = lg.access!
+  })
+  afterAll(async () => {
+    await ctx.cleanup()
+  })
+
+  it('AC6：事务层中断 → 失败信封（90000），零行落库', async () => {
     const beforeF = await ctx.prisma.figure.count()
     const beforeJ = await ctx.prisma.generationJob.count()
-    // 模拟 DB 事务层中断：$transaction 整体 reject → 两个 create 均回滚
+    // 本 describe 独占 client：即便 spy 使该 client 的 $transaction 失效（mockRestore 无法
+    // 恢复），污染也只停留在此 describe，不影响任何其他测试。
     const spy = vi.spyOn(ctx.prisma, '$transaction').mockRejectedValueOnce(new Error('simulated tx failure'))
     const res = await ctx.request
       .post('/api/v1/figures')
@@ -121,13 +143,33 @@ describe('T01 POST /figures（flag 开，REST 信封接缝）', () => {
     expect(await ctx.prisma.figure.count()).toBe(beforeF)
     expect(await ctx.prisma.generationJob.count()).toBe(beforeJ)
   })
+})
+
+describe('T01 AC6：真事务回滚（隔离 client，$transaction 从未 mock）', () => {
+  let ctx: TestContext
+  let access: string
+
+  beforeAll(async () => {
+    ctx = await setupTestApp({ figures: {} })
+    await seedUser(ctx.prisma, 'figrollback', 'pw-rollback-secure')
+    const lg = await login(ctx.request, 'figrollback', 'pw-rollback-secure')
+    access = lg.access!
+  })
+  afterAll(async () => {
+    await ctx.cleanup()
+  })
 
   it('AC6：真事务内 Job 写失败（job 表中止触发器）→ 失败信封 + 真实回滚无孤儿', async () => {
+    // 前置置信断言：本 describe 的 prisma.$transaction 在其生命周期从未被 mock，须可真实调用。
+    //（若未来有人在共享 client 上重加 mock 污染此处，此断言立即失败——防空洞通过回潮。）
+    expect(typeof ctx.prisma.$transaction).toBe('function')
+    const preflight = await ctx.prisma.$transaction(async (tx) => tx.figure.count())
+    expect(preflight).toBeGreaterThanOrEqual(0)
+
     const beforeF = await ctx.prisma.figure.count()
     const beforeJ = await ctx.prisma.generationJob.count()
-    // 上例 mock 整个 $transaction reject——figure.create 从未执行，只测了路由失败面。
-    // 本测试在 generation_jobs 上挂 BEFORE INSERT 中止触发器，让「figure 已插入、job 写入
-    // 失败」在真实交互式事务内发生：验证 AC6 的「无孤儿 Figure」由 SQLite 事务原子性兑现
+    // 在 generation_jobs 上挂 BEFORE INSERT 中止触发器：让「figure 已插入、job 写入失败」
+    // 在真实交互式事务内发生——验证 AC6 的「无孤儿 Figure」由 SQLite 事务原子性兑现
     //（figure insert 未提交，job insert abort → 整体 ROLLBACK）。
     const dbPath = ctx.dbUrl.replace(/^file:/, '')
     const sqlite = new Database(dbPath)
