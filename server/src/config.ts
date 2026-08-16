@@ -253,7 +253,8 @@ function readAutofigureJobTimeoutMs(): number {
 
 // AUTOFIGURE_SIDECAR_URL（T07，docs/autofigure/tickets/T07-autofigure-http-adapter.md）：
 // 私有 AutoFigure sidecar 的 HTTP base URL（panel-net 内、不暴露宿主端口，如
-// http://autofigure:8796）。flag 开 + 生产缺省/非法 URL → fail-fast（否则错配只在 enabled 时
+// http://autofigure:8080——T10 dev compose 接线默认值，见 deploy/docker-compose.dev.yml）。flag 开 +
+// 生产缺省/非法 URL → fail-fast（否则错配只在 enabled 时
 // adapter 构造/首请求才暴露——对齐 readPanelOrigin 前置校验模式）；dev/test 缺省容忍空串
 //（装配测试经 DI 注入 sidecarUrl，不经 config）。只存 config.autofigure.sidecarUrl，由装配层注入
 // 生产 HTTP adapter；不落盘/不入日志。T07 不引入 adapter-local HTTP timeout——sidecar 请求超时
