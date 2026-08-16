@@ -111,4 +111,4 @@ V1 发布判定的唯一门：证明已批准能力集在完整栈上端到端�
   - Standards axis: **2 findings（review 后、commit 前修复）**——①server 聚焦结果双数字表述歧义（test files vs tests）→ 拆明「6 test files passed | 1 skipped」+「134 tests passed | 1 skipped」；②AC4 覆盖「55 处断言」计数不精确 → 改为「幂等用例全覆盖」。另核验：无 stale/contradictory 声明、凭证零泄露（evidence 未印 key）、所有计数与运行输出一致（134/1、121、722/7/2、861/17、42、17 pytest）、diff 仅触及本 ticket。
 - fixes（review 后、commit 前）: 上述 2 处 evidence 表述精确化，均无行为变化。
 - second code review: 无（仅 evidence 文档，修复为表述精确化，未引入新内容；修复后逐条复核通过）。
-- commit: 见 evidence-fix commit 回填。
+- commit: 无 implementation commit（T12 纯验证）；`d425869`（completion-evidence commit：docs: record T12 completion evidence）
