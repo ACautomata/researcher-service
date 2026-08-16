@@ -70,10 +70,23 @@ CREATE UNIQUE INDEX IF NOT EXISTS "generation_jobs_figureId_key" ON "generation_
     `CREATE UNIQUE INDEX IF NOT EXISTS "figures_ownerId_idempotencyKey_key" ON "figures"("ownerId", "idempotencyKey")`,
   )
 
-  db.pragma('user_version = 4')
+  // T03（docs/autofigure/tickets/T03-single-worker-generation-lifecycle.md）：generation_jobs
+  // 增加执行生命周期时间戳。列语义：startedAt = 原子领取（queued→running）时刻置位，running 期间
+  // 非空；finishedAt = 终态（succeeded|failed）写入时刻置位，queued/running 恒 null。两列均
+  // nullable（不迁移旧行、不给旧 queued 伪造时间）；ADD COLUMN 非幂等，PRAGMA guard 先查再补
+  //（对齐 T02 idempotencyKey 模式）。fresh 库（上方 CREATE TABLE 已带列）此处列存在 → guard 跳过。
+  const jobCols = db.prepare(`PRAGMA table_info("generation_jobs")`).all()
+  if (!jobCols.some((c) => c.name === 'startedAt')) {
+    db.exec(`ALTER TABLE "generation_jobs" ADD COLUMN "startedAt" DATETIME`)
+  }
+  if (!jobCols.some((c) => c.name === 'finishedAt')) {
+    db.exec(`ALTER TABLE "generation_jobs" ADD COLUMN "finishedAt" DATETIME`)
+  }
+
+  db.pragma('user_version = 5')
 } finally {
   db.close()
 }
 
 // eslint-disable-next-line no-console
-console.log(`[db:upgrade] schema upgraded to user_version=4 at ${dbPath}`)
+console.log(`[db:upgrade] schema upgraded to user_version=5 at ${dbPath}`)

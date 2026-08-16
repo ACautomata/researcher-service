@@ -258,6 +258,8 @@ model GenerationJob {
   figureId String @unique // 1:1 Figure ↔ Job（grilling §2：非为未来 1:N 预留）
   status       GenerationJobStatus @default(queued)
   errorMessage String? // 失败原因（非敏感）；runner 填充，T01 恒 null
+  startedAt    DateTime? // T03：原子领取（queued→running）时刻置位，恒在 running 期间非空
+  finishedAt   DateTime? // T03：终态（succeeded|failed）写入时刻置位；running/queued 恒 null
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 

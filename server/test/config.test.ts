@@ -582,3 +582,65 @@ describe('AutoFigure enabled flag (slice config, T01)', () => {
     expect(await loadAutofigureEnabled('yes')).toBe('THREW')
   })
 })
+
+// T03（docs/autofigure/tickets/T03-single-worker-generation-lifecycle.md）：AUTOFIGURE_LLM_KEY ——
+// AutoFigure 生成凭证（服务端执行上下文）。flag 开 + 生产缺 key → fail-fast（否则 queued Job 永不
+// 被跑、错配只在请求期暴露）；dev/test 缺省容忍空串（runner 纯逻辑测试经 DI 注入，不经 config）。
+// 超时值管道属 T04，本 describe 不测任何 timeout 配置。
+describe('AutoFigure llm key env (slice config, T03)', () => {
+  async function loadAutofigureLlmKey(opts: {
+    env?: string
+    flag?: string | undefined
+    key?: string | undefined
+  }): Promise<string | 'THREW'> {
+    vi.resetModules() // 清 config 模块缓存，让动态 import 重新快照 env
+    const { env = 'development', flag, key } = opts
+    vi.stubEnv('NODE_ENV', env)
+    if (flag === undefined) delete process.env.AUTOFIGURE_ENABLED
+    else vi.stubEnv('AUTOFIGURE_ENABLED', flag)
+    if (env === 'production') {
+      // 隔离 llmKey 变量：提供其余生产必填（对齐 loadSecret/loadTemplateDir 模式），
+      // 否则放行用例会因缺其它必填被误判 THREW。
+      vi.stubEnv('JWT_SECRET', 's'.repeat(32))
+      vi.stubEnv('CREDENTIAL_ENCRYPTION_KEYS', Buffer.alloc(32, 0x01).toString('base64'))
+      vi.stubEnv('OPENCLAW_TEMPLATE_DIR', process.cwd())
+      vi.stubEnv('PANEL_PUBLIC_ORIGIN', 'https://panel.example.com')
+    }
+    if (key === undefined) delete process.env.AUTOFIGURE_LLM_KEY
+    else vi.stubEnv('AUTOFIGURE_LLM_KEY', key)
+    try {
+      const { config } = await import('../src/config')
+      return config.autofigure.llmKey
+    } catch (e) {
+      // fail-fast：错误消息须指向该 env（验收：生产 enabled+缺 key → 启动期 fail-fast 含 env 名）
+      if (env === 'production' && flag === 'true') expect((e as Error).message).toContain('AUTOFIGURE_LLM_KEY')
+      return 'THREW'
+    } finally {
+      vi.unstubAllEnvs() // 恢复 env（避免污染后续测试文件）
+    }
+  }
+
+  it('dev 缺省 → 空串（本地纯逻辑调试容忍）', async () => {
+    expect(await loadAutofigureLlmKey({})).toBe('')
+  })
+
+  it('dev 显式 key → 保留', async () => {
+    expect(await loadAutofigureLlmKey({ key: 'sk-dev-test' })).toBe('sk-dev-test')
+  })
+
+  it('生产 enabled + 缺 key → fail-fast（错误消息指向 AUTOFIGURE_LLM_KEY）', async () => {
+    expect(await loadAutofigureLlmKey({ env: 'production', flag: 'true', key: undefined })).toBe(
+      'THREW',
+    )
+  })
+
+  it('生产 enabled + 提供 key → 放行并返回', async () => {
+    expect(await loadAutofigureLlmKey({ env: 'production', flag: 'true', key: 'sk-prod' })).toBe(
+      'sk-prod',
+    )
+  })
+
+  it('生产 disabled + 缺 key → 容忍空串（flag 关不要求凭证）', async () => {
+    expect(await loadAutofigureLlmKey({ env: 'production', flag: 'false', key: undefined })).toBe('')
+  })
+})
