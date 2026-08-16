@@ -15,7 +15,7 @@ AutoFigure V1 的真实计算单元：私有 panel-net Python 服务，桥接上
 cd deploy/autofigure-sidecar
 python3 -m venv .venv
 .venv/bin/pip install openai Pillow cairosvg requests flask pytest   # 契约接缝最小依赖
-.venv/bin/pytest                                                     # 16 个契约接缝测试
+.venv/bin/pytest                                                     # 17 个契约接缝测试
 ```
 
 运行 pytest 需宿主机有 libcairo（`brew install cairo`，`import cairosvg` 必需）。
