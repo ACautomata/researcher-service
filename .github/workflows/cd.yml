@@ -3,10 +3,14 @@
 # 触发：CI 在 master 上成功完成后（workflow_run），保证「不部署红码」。
 # 镜像：server（TS/Express 控制面，替代退役的 Django backend，#341 M9）+ frontend（Vue/Vite→nginx）
 # + openclaw（自建派生 OpenClaw 镜像，issue #588：pdftotext + wiki/workspace 骨架，ADR 0011/0013）
-# 三镜像，tag `:latest` + `:<CI head_sha>`（head_sha 取自通过的 CI run，使 latest/sha 精确对应该
+# + autofigure（AutoFigure sidecar，T08/T11：Python + Playwright chromium 构建期 + vendored 上游 +
+# 许可/署名文件；构建源 = deploy/autofigure-sidecar，**不 fetch mutable upstream**）
+# 四镜像，tag `:latest` + `:<CI head_sha>`（head_sha 取自通过的 CI run，使 latest/sha 精确对应该
 # commit，便于 :sha 回滚）。server 镜像构建期经 buildx 多 context 注入 home 模板（researcher 克隆）
 # 与 deploy/openclaw.json（ADR 0013：#593 模板入镜像，生产不再挂载任何宿主数据路径）；server 容器
-# 运行时经 OPENCLAW_IMAGE 默认值拉派生 openclaw 镜像。
+# 运行时经 OPENCLAW_IMAGE 默认值拉派生 openclaw 镜像。autofigure 镜像运行时经 compose
+# PANEL_AUTOFIGURE_IMAGE 默认值引用（T11）。AUTOFIGURE_LLM_KEY 为可选 secret（flag 关空串安全，
+# 经渲染 .env 注入 server；不落盘 git、不进日志）。
 # 部署：appleboy/scp-action 推 compose + 渲染 .env → /www/panel；appleboy/ssh-action 远端
 # docker login（持久，供运行时 OpenClaw 拉取复用宿主 daemon 凭证）→ pull → up -d → prune → /api/health 健康门。
 #
@@ -14,6 +18,7 @@
 #   REMOTE_HOST REMOTE_USER DEPLOY_KEY            —— SSH 登录宿主
 #   GHCR_PULL_USER GHCR_PULL_TOKEN                —— 宿主拉私有 GHCR（read:packages PAT）
 #   JWT_SECRET PANEL_PUBLIC_ORIGIN LLM_API_KEY CREDENTIAL_ENCRYPTION_KEYS —— server 运行时
+#   AUTOFIGURE_LLM_KEY（可选，flag 开才必需；缺失不导致部署失败）—— AutoFigure 生成凭证，经渲染 .env 注入
 #   RESEARCHER_REPO（可选，默认 https://github.com/ACautomata/researcher.git）—— 构建机 clone home 模板
 
 name: CD
@@ -62,6 +67,8 @@ jobs:
           echo "FRONTEND_IMAGE=ghcr.io/${IMAGE_REPO}/frontend" >> "$GITHUB_ENV"
           # openclaw 派生镜像（issue #588）：server config.ts OPENCLAW_IMAGE 默认值指向它的 :latest
           echo "OPENCLAW_IMAGE=ghcr.io/${IMAGE_REPO}/openclaw" >> "$GITHUB_ENV"
+          # autofigure sidecar 镜像（T11）：compose PANEL_AUTOFIGURE_IMAGE 默认值指向它的 :latest
+          echo "AUTOFIGURE_IMAGE=ghcr.io/${IMAGE_REPO}/autofigure" >> "$GITHUB_ENV"
 
       - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c  # v4.2.0
 
@@ -131,6 +138,23 @@ jobs:
           cache-from: type=gha,scope=openclaw
           cache-to: type=gha,mode=max,scope=openclaw
 
+      - name: Build & push autofigure sidecar image (T08/T11)
+        # AutoFigure sidecar：构建源 deploy/autofigure-sidecar（vendored T08 源，不 fetch
+        # mutable upstream）。Dockerfile 构建期断言 + 许可/署名文件（LICENSE / CITATION.cff /
+        # CITATION_AND_ATTRIBUTION.md / TRADEMARK.md）入镜像，任一缺失构建即失败 → CD 红。
+        # 对齐既有 server/frontend/openclaw 模式（GHCR login / buildx / cache scope / tag 惯例）；
+        # compose 经 PANEL_AUTOFIGURE_IMAGE 默认值引用（:latest / :<sha> 回滚）。
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a  # v7.3.0
+        with:
+          context: deploy/autofigure-sidecar
+          file: deploy/autofigure-sidecar/Dockerfile
+          push: true
+          tags: |
+            ${{ env.AUTOFIGURE_IMAGE }}:latest
+            ${{ env.AUTOFIGURE_IMAGE }}:${{ env.IMAGE_TAG }}
+          cache-from: type=gha,scope=autofigure
+          cache-to: type=gha,mode=max,scope=autofigure
+
       - name: Stage deploy artifacts (compose + rendered .env)
         # 运行时敏感值渲染为 .env（compose env_file 读取）；.env 不进 git，仅经 scp 落到宿主。
         # 两个文件先汇入扁平 staging 目录，scp 以 strip_components=1 整目录平铺到 /www/panel/ 根部，
@@ -150,8 +174,15 @@ jobs:
             echo "PANEL_PUBLIC_ORIGIN=${{ secrets.PANEL_PUBLIC_ORIGIN }}"
             echo "LLM_API_KEY=${{ secrets.LLM_API_KEY }}"
             echo "CREDENTIAL_ENCRYPTION_KEYS=${{ secrets.CREDENTIAL_ENCRYPTION_KEYS }}"
+            # AUTOFIGURE_LLM_KEY 可选 secret：flag 关（生产默认）空串安全——config 只在
+            # enabled && production 下 fail-fast，缺失不导致部署失败；flag 开则宿主 .env 设
+            # AUTOFIGURE_ENABLED=true 时必需。经 env_file .env 注入 server，不落盘 git/不进日志。
+            echo "AUTOFIGURE_LLM_KEY=${{ secrets.AUTOFIGURE_LLM_KEY }}"
             echo "PANEL_SERVER_IMAGE=${{ env.SERVER_IMAGE }}:latest"
             echo "PANEL_FRONTEND_IMAGE=${{ env.FRONTEND_IMAGE }}:latest"
+            # autofigure 镜像覆盖位（对齐 PANEL_*_IMAGE 先例）：生产 compose 默认值指向
+            # ghcr.io/.../autofigure:latest，回滚固定到 :<sha>（env.IMAGE_TAG 已入 tags）。
+            echo "PANEL_AUTOFIGURE_IMAGE=${{ env.AUTOFIGURE_IMAGE }}:latest"
           } > _deploy/.env
           chmod 600 _deploy/.env
 
