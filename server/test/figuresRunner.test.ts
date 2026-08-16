@@ -27,6 +27,7 @@ import {
   timeoutRunningJobs,
   JOB_TIMEOUT_REASON,
   JOB_RECONCILE_REASON,
+  GENERATION_EXECUTION_ERROR,
   assembleAutoFigureRunner,
   createGenerationRunner,
   type GenerationRunner,
@@ -361,7 +362,7 @@ describe('T03 start/stop 生命周期', () => {
     }
   })
 
-  it('stop 等待在飞周期 settle（优雅关闭）', async () => {
+  it('stop 中止在飞生成并等待周期 settle（shutdown-driven abort；Job 保持 running 交 reconcile）', async () => {
     const userId = await createUser()
     const jobId = await seedQueuedJob('prompt', userId)
     const fake = new FakeAutoFigureGenerationPort()
@@ -369,16 +370,18 @@ describe('T03 start/stop 生命周期', () => {
     fake.mode = 'pending'
 
     const entered = fake.generateEntered() // 先注册等待点（避免 resolve 先于 generate 进入）
-    const t1 = runner.tick() // 挂起于 generate
-    const stopP = runner.stop() // 应等待在飞周期
-    await entered // A 的 generate 已进入
-    fake.resolveNext(okArtifacts())
-    await t1
-    await stopP // 不挂死 → stop 等待生效
+    const t1 = runner.tick() // claim → 创建 controller → 挂起于 generate
+    await entered // generate 已进入（signal 已注册 abort 监听）
+    expect(fake.calls[0].signal).toBeDefined()
 
-    expect((await prisma.generationJob.findUniqueOrThrow({ where: { id: jobId } })).status).toBe(
-      'succeeded',
-    )
+    const stopP = runner.stop() // shutdown abort：立即 abort 在飞 → pending 即时 reject → 周期 settle
+    await stopP // stop 等在飞周期；abort 后即时返回，不等待 T04 timeout
+    await t1
+
+    expect(fake.calls[0].signal?.aborted).toBe(true) // 复用同一 AbortController 被 shutdown 触发
+    const job = await prisma.generationJob.findUniqueOrThrow({ where: { id: jobId } })
+    expect(job.status).toBe('running') // shutdown abort 不改业务终态（不 running→failed）
+    expect(job.finishedAt).toBeNull()
   })
 })
 
@@ -696,5 +699,235 @@ describe('T04 sweeper 装配 + 无 running→queued 回迁', () => {
   it('不存在 running→queued 回迁：状态机守卫拒绝', () => {
     expect(() => assertLegalTransition('running', 'queued')).toThrow(/非法 GenerationJob 状态转换/)
     expect(() => assertLegalTransition('failed', 'queued')).toThrow(/非法 GenerationJob 状态转换/)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// T07 已批准扩 Scope（docs/autofigure/tickets/T07-autofigure-http-adapter.md · 风险 A）：
+// T04 应用超时驱动 abort 在飞外部执行——解 pump 卡死（半开网络 fetch 永 不 settle）+ 防 shutdown
+// 挂起。runner 不新增超时契约/错误态/重试（V1 唯一 execution timeout 仍是 timeoutMs）；只把
+// AbortController signal 透传 Port，超时中止后归一 JOB_TIMEOUT_REASON（T05 白名单单源）。
+// 零 wall-clock：vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] }) 只接管 abort timer，
+// Date/interval 保持真实（不干扰 Prisma/better-sqlite3 时间戳）。
+// ---------------------------------------------------------------------------
+
+describe('T07 扩 Scope：T04 应用超时 abort 在飞生成（解 pump 卡死 / 防 shutdown 挂起）', () => {
+  it('挂起生成在 timeoutMs 触发后被 abort → failed + JOB_TIMEOUT_REASON；后续 queued 下一周期串行处理', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      const userId = await createUser()
+      const jobA = await seedQueuedJob('a', userId)
+      const jobB = await seedQueuedJob('b', userId)
+      const fake = new FakeAutoFigureGenerationPort()
+      const runner = makeRunner(fake, { timeoutMs: 5000 })
+      fake.mode = 'pending'
+
+      const entered = fake.generateEntered()
+      const t1 = runner.tick() // A：claim → 创建 abort timer(5000ms) → 挂起于 generate
+      await entered
+      expect(fake.calls[0].signal).toBeDefined() // runner 把 T04 超时 signal 透传给 Port
+
+      await vi.advanceTimersByTimeAsync(5000) // 触发 abort → fake reject(AbortError) → runOne 归一
+      await t1
+
+      // A：failed + 稳定超时原因（非「传输层异常」；T05 白名单单源，Public API 可展示）
+      const a = await prisma.generationJob.findUniqueOrThrow({ where: { id: jobA } })
+      expect(a.status).toBe('failed')
+      expect(a.errorMessage).toBe(JOB_TIMEOUT_REASON)
+      expect(a.finishedAt).not.toBeNull()
+
+      // B 未被重叠执行（concurrency=1）；abort 解卡后下一周期串行处理
+      expect((await prisma.generationJob.findUniqueOrThrow({ where: { id: jobB } })).status).toBe(
+        'queued',
+      )
+      fake.mode = 'auto'
+      await runner.tick()
+      expect((await prisma.generationJob.findUniqueOrThrow({ where: { id: jobB } })).status).toBe(
+        'succeeded',
+      )
+      expect(fake.calls).toHaveLength(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('timeoutMs=0（关闭超时）时 signal 仍透传（shutdown 取消能力不依赖 timeout policy）→ 正常成功', async () => {
+    const userId = await createUser()
+    const jobId = await seedQueuedJob('p', userId)
+    const fake = new FakeAutoFigureGenerationPort()
+    const runner = makeRunner(fake, { timeoutMs: 0 })
+    await runner.tick()
+    expect(fake.calls[0].signal).toBeDefined() // runner 恒持有 controller（shutdown 可取消在飞）
+    expect(fake.calls[0].signal?.aborted).toBe(false) // timeoutMs=0 → 无 timer，正常路径不中止
+    expect((await prisma.generationJob.findUniqueOrThrow({ where: { id: jobId } })).status).toBe(
+      'succeeded',
+    )
+  })
+})
+
+// ---------------------------------------------------------------------------
+// T07 shutdown-driven abort（已批准扩 Scope · 风险 A 受控补全）：
+// runner.stop() 不得因无响应 sidecar 等待到 AUTOFIGURE_JOB_TIMEOUT_MS（默认 30min）。
+// 复用同一 AbortController：T04 超时 与 shutdown 是同一个 controller 的两个触发源，不建第二套
+// 取消抽象；stop() 不改 Job 业务终态（running 交由下次 startup 的 T04 reconcile）。对应实现约束
+// 3/4/5/6 的确定性测试 A–G（F 由上方「timeoutMs 触发 abort」用例承担，此处补聚焦复核）。
+// ---------------------------------------------------------------------------
+
+describe('T07 shutdown-driven abort（stop() 不等待 application timeout；不改业务终态）', () => {
+  it('A. 挂起 fetch → stop() 立即 abort → signal.aborted=true → 周期即时 settle，不等待 30min timeout', async () => {
+    // 30min timer 在 fake timers 下永不自燃：若 stop() 依赖 timeout 到点，await 将永不 resolve → 测试
+    // 超时失败。resolve 即证明 shutdown 走 abort、不等待 application timeout。
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      const userId = await createUser()
+      const jobId = await seedQueuedJob('p', userId)
+      const fake = new FakeAutoFigureGenerationPort()
+      const runner = makeRunner(fake, { timeoutMs: 30 * 60 * 1000 }) // 30min = 生产默认
+      fake.mode = 'pending'
+
+      const entered = fake.generateEntered()
+      const t1 = runner.tick()
+      await entered
+      expect(fake.calls[0].signal).toBeDefined()
+
+      const stopP = runner.stop() // shutdown abort
+      await stopP
+      await t1
+
+      expect(fake.calls[0].signal?.aborted).toBe(true)
+      const job = await prisma.generationJob.findUniqueOrThrow({ where: { id: jobId } })
+      expect(job.status).toBe('running') // shutdown 不改业务终态
+      expect(job.finishedAt).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('B. idle 状态 stop() → 即时 resolve（无在飞周期、无 abort）', async () => {
+    const runner = makeRunner(new FakeAutoFigureGenerationPort())
+    await expect(runner.stop()).resolves.toBeUndefined()
+  })
+
+  it('C. stop() 连续两次 → 幂等、无错', async () => {
+    const userId = await createUser()
+    const jobId = await seedQueuedJob('p', userId)
+    const fake = new FakeAutoFigureGenerationPort()
+    const runner = makeRunner(fake)
+    fake.mode = 'pending'
+
+    const entered = fake.generateEntered()
+    const t1 = runner.tick()
+    await entered
+
+    const stop1 = runner.stop()
+    const stop2 = runner.stop() // 并发二次 stop：共享同一 currentTick/controller，幂等
+    await Promise.all([stop1, stop2])
+    await t1
+    await runner.stop() // 第三次（前两次已完成）：timer/controller/tick 均已清理，即时返回
+
+    expect(fake.calls[0].signal?.aborted).toBe(true)
+    const job = await prisma.generationJob.findUniqueOrThrow({ where: { id: jobId } })
+    expect(job.status).toBe('running') // 并发 stop 不改业务终态
+  })
+
+  it('D. stop() 后 tick() 不再领取新的 queued Job', async () => {
+    const userId = await createUser()
+    const jobId = await seedQueuedJob('p', userId)
+    const fake = new FakeAutoFigureGenerationPort()
+    const runner = makeRunner(fake)
+
+    await runner.stop()
+    await runner.tick() // stopping 闩：no-op
+
+    expect(fake.calls).toHaveLength(0) // 未领取未生成
+    const job = await prisma.generationJob.findUniqueOrThrow({ where: { id: jobId } })
+    expect(job.status).toBe('queued') // 恒不迁移
+  })
+
+  it('E. shutdown abort 不自行 running→failed；模拟新进程 startup reconcile 后才终态化', async () => {
+    const userId = await createUser()
+    const jobId = await seedQueuedJob('p', userId)
+    const fake = new FakeAutoFigureGenerationPort()
+    const runner = makeRunner(fake)
+    fake.mode = 'pending'
+
+    const entered = fake.generateEntered()
+    const t1 = runner.tick()
+    await entered
+    await runner.stop()
+    await t1
+
+    const during = await prisma.generationJob.findUniqueOrThrow({ where: { id: jobId } })
+    expect(during.status).toBe('running') // shutdown 期间 Job 保持 running（无 stop() 内 running→failed）
+
+    // 模拟新进程 startup：T04 reconcile 是 crash/restart interruption 的唯一事实语义
+    const reconciled = await reconcileRunningJobs(prisma)
+    expect(reconciled).toBe(1)
+    const after = await prisma.generationJob.findUniqueOrThrow({ where: { id: jobId } })
+    expect(after.status).toBe('failed')
+    expect(after.errorMessage).toBe(JOB_RECONCILE_REASON)
+    expect(after.finishedAt).not.toBeNull()
+  })
+
+  it('F. 普通 T04 timeout 路径仍：running→failed + abort，reason 恒为 TIMEOUT（不被 AbortError 覆盖）', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      const userId = await createUser()
+      const jobId = await seedQueuedJob('p', userId)
+      const fake = new FakeAutoFigureGenerationPort()
+      const runner = makeRunner(fake, { timeoutMs: 5000 })
+      fake.mode = 'pending'
+
+      const entered = fake.generateEntered()
+      const t1 = runner.tick()
+      await entered
+      await vi.advanceTimersByTimeAsync(5000) // timeout 触发 abort → fake reject(AbortError)
+      await t1
+
+      const job = await prisma.generationJob.findUniqueOrThrow({ where: { id: jobId } })
+      expect(job.status).toBe('failed')
+      expect(job.errorMessage).toBe(JOB_TIMEOUT_REASON) // 不被 AbortError/传输异常覆盖
+      expect(job.errorMessage).not.toBe(GENERATION_EXECUTION_ERROR)
+      expect(job.finishedAt).not.toBeNull()
+      expect(fake.calls[0].signal?.aborted).toBe(true) // timeout 同样走 abort（同一 controller）
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('G. late-result fencing 仍通过：超时先翻 failed 后，shutdown abort 不覆盖终态、迟到产物丢弃', async () => {
+    const userId = await createUser()
+    const jobId = await seedQueuedJob('p', userId)
+    const fake = new FakeAutoFigureGenerationPort()
+    const runner = makeRunner(fake)
+    fake.mode = 'pending'
+
+    const entered = fake.generateEntered()
+    const t1 = runner.tick()
+    await entered
+    const running = await prisma.generationJob.findUniqueOrThrow({ where: { id: jobId } })
+    const startedAt = running.startedAt!
+
+    // 超时 sweeper 先翻转（确定时刻驱动 seam）→ failed + TIMEOUT（终态固化）
+    await timeoutRunningJobs(prisma, new Date(startedAt.getTime() + 60_000 + 1), 60_000)
+    expect((await prisma.generationJob.findUniqueOrThrow({ where: { id: jobId } })).status).toBe(
+      'failed',
+    )
+
+    // 此刻 shutdown 到达：stop() 中止仍在 pending 的 generate → runOne 见 stopping 返回（不写终态）
+    await runner.stop()
+    await t1
+
+    const after = await prisma.generationJob.findUniqueOrThrow({ where: { id: jobId } })
+    expect(after.status).toBe('failed') // 终态不被 shutdown 触碰
+    expect(after.errorMessage).toBe(JOB_TIMEOUT_REASON) // 原因不被 AbortError/停止覆盖
+    expect(after.finishedAt).not.toBeNull()
+
+    // fake port honor abort：stop() 中止时 promise 已 settle（无悬挂 pending → 无 unhandled
+    // rejection），不存在「shutdown 后再 resolve 的成功」可落——终态与产物保持冻结。「迟到结果
+    // 围栏」由既有 T04 迟到测试覆盖；此处仅确认 shutdown 路径不引入任何新状态转换、不发布产物。
+    const figure = await prisma.figure.findUniqueOrThrow({ where: { id: after.figureId } })
+    expect(figure.png).toBeNull()
+    expect(figure.xml).toBeNull()
   })
 })

@@ -600,11 +600,13 @@ describe('AutoFigure llm key env (slice config, T03)', () => {
     else vi.stubEnv('AUTOFIGURE_ENABLED', flag)
     if (env === 'production') {
       // 隔离 llmKey 变量：提供其余生产必填（对齐 loadSecret/loadTemplateDir 模式），
-      // 否则放行用例会因缺其它必填被误判 THREW。
+      // 否则放行用例会因缺其它必填被误判 THREW。T07 起 AUTOFIGURE_SIDECAR_URL 同为生产
+      // enabled 必填，一并注入（该变量自身有独立 T07 describe 块）。
       vi.stubEnv('JWT_SECRET', 's'.repeat(32))
       vi.stubEnv('CREDENTIAL_ENCRYPTION_KEYS', Buffer.alloc(32, 0x01).toString('base64'))
       vi.stubEnv('OPENCLAW_TEMPLATE_DIR', process.cwd())
       vi.stubEnv('PANEL_PUBLIC_ORIGIN', 'https://panel.example.com')
+      vi.stubEnv('AUTOFIGURE_SIDECAR_URL', 'http://autofigure:8796')
     }
     if (key === undefined) delete process.env.AUTOFIGURE_LLM_KEY
     else vi.stubEnv('AUTOFIGURE_LLM_KEY', key)
@@ -678,5 +680,99 @@ describe('AutoFigure job timeout env (slice config, T04)', () => {
 
   it('非法非数 → fail-fast', async () => {
     expect(await loadAutofigureJobTimeoutMs('abc')).toBe('THREW')
+  })
+})
+
+// T07（docs/autofigure/tickets/T07-autofigure-http-adapter.md）：AUTOFIGURE_SIDECAR_URL ——
+// 私有 AutoFigure sidecar 的 HTTP base URL（生产 HTTP adapter 唯一地址源，私有 sidecar 契约见
+// docs/autofigure/sidecar-contract.md）。flag 开 + 生产缺省/非法 URL → fail-fast（否则错配只在
+// enabled 时 adapter 构造/首请求才暴露——对齐 readPanelOrigin 前置校验模式）；dev/test 缺省容忍
+// 空串（装配测试经 DI 注入 sidecarUrl，不经 config）。只存 config.autofigure.sidecarUrl，由装配层
+// 注入生产 adapter；不落盘/不入日志。T07 不引入 adapter-local timeout——本 env 不承载超时语义
+//（sidecar 请求超时由 T04 AUTOFIGURE_JOB_TIMEOUT_MS 应用 runner 唯一承担）。
+describe('AutoFigure sidecar url env (slice config, T07)', () => {
+  async function loadAutofigureSidecarUrl(opts: {
+    env?: string
+    flag?: string | undefined
+    url?: string | undefined
+  }): Promise<string | 'THREW'> {
+    vi.resetModules() // 清 config 模块缓存，让动态 import 重新快照 env
+    const { env = 'development', flag, url } = opts
+    vi.stubEnv('NODE_ENV', env)
+    if (flag === undefined) delete process.env.AUTOFIGURE_ENABLED
+    else vi.stubEnv('AUTOFIGURE_ENABLED', flag)
+    if (env === 'production') {
+      // 隔离 sidecarUrl 变量：提供其余生产必填（对齐 loadAutofigureLlmKey 模式），否则放行用例
+      // 会因缺其它必填被误判 THREW。生产 enabled 下 AUTOFIGURE_LLM_KEY 同样必填，一并注入。
+      vi.stubEnv('JWT_SECRET', 's'.repeat(32))
+      vi.stubEnv('CREDENTIAL_ENCRYPTION_KEYS', Buffer.alloc(32, 0x01).toString('base64'))
+      vi.stubEnv('OPENCLAW_TEMPLATE_DIR', process.cwd())
+      vi.stubEnv('PANEL_PUBLIC_ORIGIN', 'https://panel.example.com')
+      vi.stubEnv('AUTOFIGURE_LLM_KEY', 'sk-prod')
+    }
+    if (url === undefined) delete process.env.AUTOFIGURE_SIDECAR_URL
+    else vi.stubEnv('AUTOFIGURE_SIDECAR_URL', url)
+    try {
+      const { config } = await import('../src/config')
+      return config.autofigure.sidecarUrl
+    } catch (e) {
+      // fail-fast：错误消息须指向该 env（验收：生产 enabled+缺/非法 → 启动期 fail-fast 含 env 名）
+      if (env === 'production' && flag === 'true') {
+        expect((e as Error).message).toContain('AUTOFIGURE_SIDECAR_URL')
+      }
+      return 'THREW'
+    } finally {
+      vi.unstubAllEnvs() // 恢复 env（避免污染后续测试文件）
+    }
+  }
+
+  it('dev 缺省 → 空串（本地纯逻辑调试/装配测试经 DI 注入容忍）', async () => {
+    expect(await loadAutofigureSidecarUrl({})).toBe('')
+  })
+
+  it('dev 显式 http URL → 保留', async () => {
+    expect(await loadAutofigureSidecarUrl({ url: 'http://autofigure:8796' })).toBe(
+      'http://autofigure:8796',
+    )
+  })
+
+  it('生产 enabled + 缺 URL → fail-fast（错误消息指向 AUTOFIGURE_SIDECAR_URL）', async () => {
+    expect(
+      await loadAutofigureSidecarUrl({ env: 'production', flag: 'true', url: undefined }),
+    ).toBe('THREW')
+  })
+
+  it('生产 enabled + 非法 URL（非完整 URL）→ fail-fast', async () => {
+    expect(
+      await loadAutofigureSidecarUrl({ env: 'production', flag: 'true', url: 'not a url' }),
+    ).toBe('THREW')
+  })
+
+  it('生产 enabled + 非 http(s) 协议 → fail-fast', async () => {
+    expect(
+      await loadAutofigureSidecarUrl({ env: 'production', flag: 'true', url: 'ftp://autofigure:8796' }),
+    ).toBe('THREW')
+  })
+
+  it('生产 enabled + 合法 http URL → 放行并返回', async () => {
+    expect(
+      await loadAutofigureSidecarUrl({ env: 'production', flag: 'true', url: 'http://autofigure:8796' }),
+    ).toBe('http://autofigure:8796')
+  })
+
+  it('生产 enabled + 合法 https URL → 放行并返回', async () => {
+    expect(
+      await loadAutofigureSidecarUrl({
+        env: 'production',
+        flag: 'true',
+        url: 'https://autofigure.example.com',
+      }),
+    ).toBe('https://autofigure.example.com')
+  })
+
+  it('生产 disabled + 缺 URL → 容忍空串（flag 关不要求 sidecar 地址）', async () => {
+    expect(
+      await loadAutofigureSidecarUrl({ env: 'production', flag: 'false', url: undefined }),
+    ).toBe('')
   })
 })

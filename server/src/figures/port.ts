@@ -43,9 +43,21 @@ export interface AutoFigureGenerationFailure {
 
 export type AutoFigureGenerationResult = AutoFigureGenerationSuccess | AutoFigureGenerationFailure
 
+// T07 追加（docs/autofigure/tickets/T07-autofigure-http-adapter.md · 已批准扩 Scope）：可选执行
+// 取消信号。runner 恒持有 AbortController 并在每次 invocation 透传；同一 controller 的两个触发源——
+// (A) T04 应用超时（AUTOFIGURE_JOB_TIMEOUT_MS，V1 唯一 execution timeout，不新增 adapter-local
+// 超时契约/错误态/重试）(B) graceful shutdown / runner.stop()（不改 Job 业务终态，遗留 running 交
+// 下次 startup 的 T04 reconcile）。可选项：实现可忽略（生产 adapter 与测试 fake 均 honor abort）；
+// 中止后的结果由 runner 统一归一——超时 abort → JOB_TIMEOUT_REASON，shutdown abort → 不写终态。
+// 成功结果恒在 abort 前 settle（微任务先于 timer 宏任务，绝不误标超时）。
+export interface AutoFigureGenerationOptions {
+  signal?: AbortSignal
+}
+
 export interface AutoFigureGenerationPort {
   generate(
     input: AutoFigureGenerationInput,
     credential: AutoFigureGenerationCredential,
+    options?: AutoFigureGenerationOptions,
   ): Promise<AutoFigureGenerationResult>
 }
