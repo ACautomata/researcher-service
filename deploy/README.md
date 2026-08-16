@@ -168,10 +168,10 @@ docker compose -f deploy/docker-compose.dev.yml up -d --build server
 
 dev 栈额外起 **autofigure**（T08 sidecar）服务：仅挂 `panel-dev-net`、**无宿主端口暴露、零 host 挂载**
 （ADR 0013），`/health` 容器 healthcheck；`mem_limit: 2g` 为 T10 judgement call（真实生成 = Playwright
-渲染 + LLM 调用的内存上限，仅 dev 栈约束，不构成 prod 契约——prod 打包归 T11）。server 经 env 注入
-`AUTOFIGURE_ENABLED`（默认关）`AUTOFIGURE_LLM_KEY` `AUTOFIGURE_SIDECAR_URL`（默认
-`http://autofigure:8080`）`AUTOFIGURE_JOB_TIMEOUT_MS`（默认 1800000）；凭证仅经 env 插值、由 server
-经 `X-Autofigure-Api-Key` header 注入 sidecar，不落盘/不入日志/不 commit 假值。
+渲染 + LLM 调用的内存上限，T11 生产 compose 复用同值，见下）。server 经 env 注入 `AUTOFIGURE_ENABLED`
+（默认关）`AUTOFIGURE_LLM_KEY` `AUTOFIGURE_SIDECAR_URL`（默认 `http://autofigure:8080`）
+`AUTOFIGURE_JOB_TIMEOUT_MS`（默认 1800000）；凭证仅经 env 插值、由 server 经 `X-Autofigure-Api-Key`
+header 注入 sidecar，不落盘/不入日志/不 commit 假值。
 
 **flag 默认关**：`AUTOFIGURE_ENABLED=false` 时 server 不装配 AutoFigure runtime（queued 不迁移），
 sidecar 不参与面板启动/health 依赖（`depends_on` 仅 `service_started`，dev 栈不因 sidecar 卡死）——
@@ -200,3 +200,28 @@ AUTOFIGURE_SMOKE=1 AUTOFIGURE_LLM_KEY=sk-... npm test -- figuresSmoke
   smoke 不等待真实 30min；轮询截止独立（应用超时 + 60s），二者不引入第二 timeout 契约。
 - **sidecar 容器清理**：测试 `afterAll` 强制移除（含半途失败）；异常退出（SIGKILL）残留时手动
   `docker rm -f autofigure-smoke-*`。
+
+## AutoFigure 生产打包（T11，docs/autofigure/tickets/T11-production-packaging-cd.md）
+
+生产 compose（`docker-compose.deploy.yml`）经 CD 起 **panel-autofigure** 第 4 镜像
+`ghcr.io/acautomata/researcher-service/autofigure`（CD 既有管线构建推送，vendored T08 源**不 fetch
+mutable upstream**；许可/署名文件构建期入镜像 + Dockerfile 构建期断言）。接线与 dev 同构：仅挂
+`panel-net`、**无宿主端口、零 host 挂载**（ADR 0013）、`/health` 容器 healthcheck、`mem_limit: 2g`
+（T10/T11 judgement call）、`restart: unless-stopped`、内部 URL `http://autofigure:8080`、
+`AUTOFIGURE_JOB_TIMEOUT_MS` 生产显式 1800000（生产唯一 AutoFigure timeout 契约，不引入第二 timeout）。
+镜像覆盖位 `PANEL_AUTOFIGURE_IMAGE`（`:latest` / `:<sha>` 回滚）对齐 `PANEL_*_IMAGE` 先例。
+
+**flag 生产默认关**：compose 显式 `AUTOFIGURE_ENABLED: ${AUTOFIGURE_ENABLED:-false}`，须宿主 `.env`
+显式设 `true` 才开启。flag 关 → server **不装配** AutoFigure runtime（不启动 runner、不要求
+key/sidecar 可达，figures 路由 90005）、`/api/health`（面板应用健康）**不依赖 sidecar 运行状态**
+（sidecar 容器 unhealthy/未就绪不影响 panel 健康门）。部署面：autofigure 是栈内声明服务，CD 的
+`docker compose pull`/`up` 仍会部署它——sidecar 镜像不可拉/容器 start 失败 → CD/up 变红，与 flag
+无关（flag 关并不豁免该服务被部署）。**sidecar 容器仍随 `up -d` 启动但未被使用**（compose 无
+profile/条件服务机制，如实文档化——不声称「flag 关 sidecar 不运行」）。flag 开 → sidecar 不可用经
+既有部署面探针检测（`docker compose ps` 显示 `unhealthy`），生成失败走 T07 规范化信封码，**不模糊
+500、不扩 `/api/health`**。
+
+**凭证**：`AUTOFIGURE_LLM_KEY` 经 CD 渲染 `.env` → `env_file` 注入 server（可选 secret，flag 关空串
+安全、缺失不导致部署失败——config 只在 enabled && production 下 fail-fast），由 server 经
+`X-Autofigure-Api-Key` header 注入 sidecar，不落盘/不入日志/不 commit。运维/健康面见
+`deploy/DEPLOY.md`「AutoFigure 生产接线与运维」。
