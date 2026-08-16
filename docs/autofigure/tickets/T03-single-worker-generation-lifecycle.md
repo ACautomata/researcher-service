@@ -67,10 +67,48 @@ Source of truth: `docs/autofigure/grilling-decisions.md` §5 / §11
 
 ## Completion evidence
 
-- targeted tests:
-- typecheck/build:
-- broader tests:
-- first code review:
-- fixes:
-- second code review:
-- commit:
+- **implementation summary**（固定点 80d6b65，未提交工作树）:
+  - 新架构 Port `server/src/figures/port.ts`：`AutoFigureGenerationPort.generate(input, credential)` —— 纯计算接缝，
+    输入/凭证分离（credential 为服务端执行上下文），不拥有持久化/生命周期/claim/轮询/超时/reconcile/幂等/归属/信封。
+  - 单写者 runner `server/src/figures/runner.ts`：`claimQueuedJob`（`updateMany({where:{id,status:'queued'}})+count===1`
+    原子领取，至多一次）、`persistTerminalState`（`WHERE status='running'` 条件写终态，本地完整性非迟到围栏）、
+    `assertLegalTransition`（AC5 局部转换守卫：queued→running、running→succeeded|failed，拒绝四个非法终态转换）、
+    `DefaultGenerationRunner`（concurrency=1：`tick()` 内同步 check-and-set 无 await 间隙；start 幂等 + interval unref +
+    stop 等在飞周期）、`assembleAutoFigureRunner`（flag 装配门：关 → null 无 pump，queued 恒不迁移）。
+  - schema 演进：`generation_jobs` 新增 `startedAt`/`finishedAt`（nullable，运行时间序列）——`schema.prisma` + `init.sql`
+    同步 + `upgrade-schema.mjs` v5 迁移（PRAGMA guard 幂等可重入）。
+  - config：`AUTOFIGURE_LLM_KEY` → `config.autofigure.llmKey`（服务端注入凭证；生产 fail-fast，dev 宽容；
+    **无任何超时 env/config**——`AUTOFIGURE_JOB_TIMEOUT_MS` 值管道与超时行为全属 T04，本票不引入）。
+  - 无自动重试：终态不可逆、claim guard 排除终态、catch 吞错不重试；重新生成 = T02 幂等创建新 Figure+Job。
+  - 生产 HTTP adapter / sidecar / 凭证传输形态（T07）、超时/reconcile（T04）、幂等（T02）均不在本票。
+- **targeted tests**: `server/test/figuresRunner.test.ts` 15/15（AC1 成功→succeeded 时间戳双阶段；AC2 失败→failed 非敏感
+  errorMessage；AC3 并发领取恰一赢家 + 并发 tick 只生成一次；AC4 pending 下二次 tick no-op + B 不重叠；AC5 合法/非法转换 +
+  终态写入条件不覆盖；AC6 失败反复 tick 不重试；AC7 凭证/输入分离注入 + JSON.stringify(job/figure) 不含 key + 失败消息不含
+  key；AC8 flag 关无 pump / 开则构造启动 + close；start/stop 幂等与优雅关闭）；`schemaUpgrade.test.ts` 2/2（断言
+  startedAt/finishedAt 可空 + `user_version===5`）；`config.test.ts` 新增 5 用例（llm key dev 默认/passthrough、prod
+  enabled 缺 key 抛 env 名、prod enabled+key ok、prod disabled 缺 key ok）。
+- **typecheck/build**: `tsc --noEmit` 干净；`npm run build` 干净（均用 Node v22.23.2 绕过 Prisma 7 toolchain bug）。
+- **broader tests**: `vitest run` 全量 620 passed / 6 skipped（2 个失败 suite = containers/pairing docker smoke 基线，
+  需真 daemon，未触碰相关文件）；figures（T01/T02 回归）37/37；config 72/72。
+- **first code review**（固定点 80d6b65，双轴并行）:
+  - **Standards 轴：无 hard violation**。ADR 0005 配置边界 / ADR 0001 凭证纪律（runtime config 同既有 `fleet.llmApiKey`
+    形态）/ 既有 CAS 模式（users/auth 同款）/ fail-fast 同构 / config IIFE 同构 / Port 不蔓延均合规。
+  - **Spec 轴：无 violation、无越界实现**。8 条 AC 全覆盖；9 个关注点逐一验证：atomic claim 正确（单语句原子，无竞态）、
+    concurrency=1 正确（同步 check-and-set + finally 复位，无旁路）、无 T04 creep、凭证分离/无泄漏、无 HTTP 假定、
+    无猜测性 schema/config、无自动重试、Port 责任不蔓延。
+- **accepted judgement calls**（Standards 轴，均判可辩护，不改）:
+  - #1 凭证 fail-fast 超前于消费方接线（eager 读 key 但 runner 未在 server.ts 接线）——凭证管道属 T03 交付物、校验便宜，
+    对 T07 正确，接受（本票明示不接线）。
+  - #2 upgrade-schema.mjs 三处 PRAGMA guard+ADD COLUMN 结构重复——与 T02 模式一致，轻，接受。
+  - #3 config.test.ts 测试 helper 骨架重复——测试基建豁免边界，接受。
+  - #4 `fleet.llmApiKey` vs `autofigure.llmKey` 命名不对称——命名空间隔离 + 注释说明，接受。
+  - Spec 轴 2 个 observation：`apiKey` 字段名偏「传输字段预决」（纯内部类型非 wire 格式，接受）；LEGAL_TRANSITIONS 局部
+    转换表形态近状态机（票证仅禁通用 JobStateMachine 架构，局部守卫可接受）。
+- **fixes**: 首次 review 无必修项（0 violation）；无代码改动。已记录待办：commit 前 `git add` 全部文件（含 4 个 untracked
+  实现/测试文件，否则漏提交）。
+- **T07 前置交接注记（下游集成前置，非 T03 新增范围）**: T07 must provide the production AutoFigureGenerationPort
+  adapter and complete the production runtime wiring that assembles/starts the T03 runner when
+  AUTOFIGURE_ENABLED=true, while keeping the disabled path inactive.
+- **second code review**: 未触发（首次 review 用户批准，无需第二轮）。
+- **commit**: 实现 `f3530e4`（feat: AutoFigure T03 — single-worker generation lifecycle，含 4 个新文件
+  port.ts / runner.ts / figuresFakePort.ts / figuresRunner.test.ts）；evidence 见后述 docs commit（本文件）。
