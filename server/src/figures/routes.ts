@@ -4,7 +4,8 @@
 // T02 在其上强制 Idempotency-Key（缺失 → 90002，不建任何行）并做 check-or-create 幂等：
 //   同用户 + 同 key + 同输入 → 返回既有 Figure/Job 及当前应用级状态（零写入）；
 //   同用户 + 同 key + 不同输入 → 稳定幂等冲突 70041（零写入）；不同用户同 key 独立作用域。
-// runner（T03）/ 读路径（T05）均不在本文件范围。
+// T05 读路径（GET / 列表 + GET /:id 详情）在本文件（docs/autofigure/tickets/
+// T05-figure-history-ownership.md）；runner（T03）不在本文件范围。
 // 装配：AppDeps.figures 注入则挂载（flag 门在装配层 server.ts，flag 关不注入 → 路由不装配 → 90005）。
 
 import { Router, type Request, type Response, type NextFunction } from 'express'
@@ -15,7 +16,13 @@ import { requireAuth } from '../middleware/auth'
 import { mustChangePasswordGate } from '../middleware/mustChangePasswordGate'
 import { validateBody } from '../middleware/validate'
 import { figureCreateSchema } from '../validation/schemas'
-import { createFigureWithJobInTx, createOrReplayFigure, IDEMPOTENCY_KEY_MAX_LENGTH } from './service'
+import {
+  createFigureWithJobInTx,
+  createOrReplayFigure,
+  getFigureForUser,
+  listFigures,
+  IDEMPOTENCY_KEY_MAX_LENGTH,
+} from './service'
 
 export interface FiguresRouterDeps {
   // T01/T02 无注入项（路由只依赖 req.prisma + 认证身份）；存在即装配（对齐 models/files 条件挂载先例）。
@@ -71,6 +78,24 @@ export function createFiguresRouter(_deps: FiguresRouterDeps): Router {
       ok(res, result)
     },
   )
+
+  // GET / —— 当前认证用户自己的 Figure 历史（admin = 所有用户，spec US15 / grilling §3 显式批准）。
+  // 排序 = 已批准 V1 规则：createdAt DESC（最新在前）+ id DESC 稳定 tiebreaker（确定性；
+  // 无分页/过滤/搜索/用户可配置排序）。无数据 → 空数组 code 0。只读，无任何删除/变更路径。
+  router.get('/', async (req: Request, res: Response) => {
+    const data = await listFigures(req.prisma, req.user!)
+    ok(res, data)
+  })
+
+  // GET /:id —— Figure metadata + 应用级状态 + 非敏感失败原因（T05 AC3/AC4）。
+  // 归属门 getFigureForUser（镜像 getInstanceForUser 单点模式）：admin 全放行 / user 仅本人；
+  // 「不存在 vs 越权」同码 70040 防枚举（对外不可区分，见 service.ts getFigureForUser）。
+  // :id 为 cuid；非法 id 自然落入「不存在」→ 70040（与合法但不存在同码，不引入格式特例）。
+  router.get('/:id', async (req: Request, res: Response) => {
+    const id = req.params.id as string // Express 5 params 可含 string[]；cuid 单段路径恒 string
+    const figure = await getFigureForUser(req.prisma, req.user!, id)
+    ok(res, figure)
+  })
 
   return router
 }

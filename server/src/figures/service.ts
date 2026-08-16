@@ -2,10 +2,15 @@
 // T02-idempotent-figure-creation.md）。
 // T01 交付「原子创建 Figure + 其 1:1 queued GenerationJob」这一最小写契约；
 // T02 在其上加入幂等：seam 创建时落 (ownerId, idempotencyKey)，并新增 createOrReplayFigure
-// 编排「先查后建 + P2002 并发仲裁」。runner/状态机（T03）、读路径（T05）均不在本文件范围。
+// 编排「先查后建 + P2002 并发仲裁」。runner/状态机（T03）不在本文件范围；
+// T05 读路径（历史列表 + 详情归属门 + 失败原因护栏）见下方「T05 读路径」段。
 
 import { CODE } from '../codes'
 import { fail } from '../envelope'
+import type { PrismaClient, GenerationJobStatus } from '../generated/prisma/client'
+import type { AuthUser } from '../types'
+// 失败原因白名单单源：runner 写入的稳定非敏感原因（T03/T04 契约），读路径据此做透出护栏。
+import { GENERATION_EXECUTION_ERROR, JOB_RECONCILE_REASON, JOB_TIMEOUT_REASON } from './runner'
 
 export interface CreateFigureInput {
   ownerId: string // 只由认证的 researcher-service 身份（JWT）派生，永不来自客户端提交
@@ -116,4 +121,121 @@ function resolveReplay(existing: IdempotentFigure, prompt: string): FigureCreate
     throw fail(CODE.INTERNAL, '幂等命中 Figure 缺关联 Job')
   }
   return { figureId: existing.id, jobId: existing.job.id, status: existing.job.status }
+}
+
+// ---------------------------------------------------------------------------
+// T05 读路径（docs/autofigure/tickets/T05-figure-history-ownership.md）
+// ---------------------------------------------------------------------------
+
+// 应用级状态（Public API 只暴露这些，不泄露 queue/worker/Python/BullMQ 实现细节）。
+export type FigureAppStatus = GenerationJobStatus
+
+// 列表项：以 Figure 为单位（非 Job）的公开投影——Figure metadata + 其 1:1 Job 的应用级状态。
+export interface FigureSummary {
+  figureId: string
+  jobId: string
+  prompt: string
+  status: FigureAppStatus
+  createdAt: string
+}
+
+// 详情：在列表项之上追加非敏感失败原因与更新时间。errorMessage 仅 failed 时非空
+//（runner 契约：成功态恒清空；公开投影只在 failed 透出持久化的稳定非敏感原因）。
+export interface FigureDetail extends FigureSummary {
+  errorMessage: string | null
+  updatedAt: string
+}
+
+// 公开投影读取的 Job 最小形状：list 只取 id/status；detail 追加 errorMessage（只读这几列，
+// 不拉整行——与 listFigures 的 select 对称，见 getFigureForUser）。
+interface FigureJobProjection {
+  id: string
+  status: GenerationJobStatus
+  errorMessage: string | null
+}
+
+// 失败原因读路径护栏（T05 + 安全审查）：公开层只透出 runner 写入的稳定非敏感原因
+//（JOB_TIMEOUT_REASON / JOB_RECONCILE_REASON / GENERATION_EXECUTION_ERROR，单源见 runner.ts）；
+// 未知/异常内容一律归为通用非敏感原因（GENERIC_FAILURE_REASON），原始值只存服务端——
+// runner 契约本应只写非敏感值，此处为纵深防御（即使持久化行异常带敏感值也不外泄）。
+// 新增稳定原因须同步更新 KNOWN_STABLE_REASONS（public API 只展示白名单原因）。
+// 非 failed 恒 null（成功态 runner 清空 errorMessage，此处再防御一道）。
+const KNOWN_STABLE_REASONS = new Set<string>([
+  JOB_TIMEOUT_REASON,
+  JOB_RECONCILE_REASON,
+  GENERATION_EXECUTION_ERROR,
+])
+const GENERIC_FAILURE_REASON = GENERATION_EXECUTION_ERROR
+
+function publicFailureReason(job: FigureJobProjection): string | null {
+  if (job.status !== 'failed') return null
+  if (!job.errorMessage || !KNOWN_STABLE_REASONS.has(job.errorMessage)) {
+    return GENERIC_FAILURE_REASON
+  }
+  return job.errorMessage
+}
+
+// list 与 detail 共用的 Figure→公开摘要投影（避免同一映射写两遍，见 listFigures/getFigureForUser）。
+function toSummary(
+  figure: { id: string; prompt: string; createdAt: Date },
+  job: { id: string; status: GenerationJobStatus },
+): FigureSummary {
+  return {
+    figureId: figure.id,
+    jobId: job.id,
+    prompt: figure.prompt,
+    status: job.status,
+    createdAt: figure.createdAt.toISOString(),
+  }
+}
+
+// 历史列表（T05 AC1/AC2 · 已批准排序规则）：当前认证用户自己的 Figure（admin = 所有用户）。
+// 排序 = 已批准 V1 规则：createdAt DESC（最新在前），确定性；createdAt 撞车用 id DESC 作
+// 稳定二级 tiebreaker（cuid 不可变标识；不暴露任何公开排序选项——无分页/过滤/搜索/用户排序）。
+export async function listFigures(prisma: PrismaClient, user: AuthUser): Promise<FigureSummary[]> {
+  const where = user.role === 'admin' ? {} : { ownerId: user.id }
+  const rows = await prisma.figure.findMany({
+    where,
+    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+    include: { job: { select: { id: true, status: true } } },
+  })
+  return rows.map((r) => {
+    if (!r.job) throw fail(CODE.INTERNAL, 'Figure 缺关联 Job') // 理论不可达（T01 原子创建）
+    return toSummary(r, r.job)
+  })
+}
+
+// 详情归属门（T05 AC3/AC5/AC6 · 防枚举）：figure 域单点归属前置，镜像 getInstanceForUser
+//（containers/orchestrator.ts）——admin 全放行 / user 仅本人；「不存在 vs 越权」同码 70040，
+// 对外逐字节一致，区分仅进服务端日志（not_found vs owner_mismatch）。
+// ownerId 只由认证身份派生：本函数只按 id 查行，不接收任何客户端 userId 作为授权覆写。
+export async function getFigureForUser(
+  prisma: PrismaClient,
+  user: AuthUser,
+  id: string,
+): Promise<FigureDetail> {
+  const figure = await prisma.figure.findUnique({
+    where: { id },
+    include: { job: { select: { id: true, status: true, errorMessage: true } } },
+  })
+  if (!figure) {
+    // eslint-disable-next-line no-console
+    console.warn(`[figures] not_found: id=${id} uid=${user.id}`)
+    throw fail(CODE.FIGURE_NOT_FOUND)
+  }
+  if (user.role !== 'admin' && figure.ownerId !== user.id) {
+    // eslint-disable-next-line no-console
+    console.warn(`[figures] owner_mismatch: id=${id} uid=${user.id} owner=${figure.ownerId}`)
+    throw fail(CODE.FIGURE_NOT_FOUND)
+  }
+  if (!figure.job) {
+    // 理论不可达（T01 起 Figure 与 Job 恒同事务创建）：防御性失败——不返回缺 Job 的畸形详情。
+    throw fail(CODE.INTERNAL, 'Figure 缺关联 Job')
+  }
+  return {
+    ...toSummary(figure, figure.job),
+    // 非敏感失败原因仅在 failed 透出稳定白名单原因；未知/敏感内容归通用非敏感原因（见 publicFailureReason）。
+    errorMessage: publicFailureReason(figure.job),
+    updatedAt: figure.updatedAt.toISOString(),
+  }
 }
