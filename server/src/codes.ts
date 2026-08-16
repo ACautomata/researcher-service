@@ -26,6 +26,9 @@ export const CODE = {
   // 6xxxx files（#589 统一文件 CRUD；6xxxx 段为 319 §1.1 未分配段，按「40 不存在 / 41 冲突」锁式）
   FILE_NOT_FOUND: 60040, // 文件不存在（GET/PUT/DELETE）
   FILE_EXISTS: 60041, // 新建文件已存在（POST 冲突）
+  // 7xxxx figures（AutoFigure T02 幂等，docs/autofigure/tickets/T02-idempotent-figure-creation.md）：
+  // 70040 预留 T05 不存在/越权同码防探测；本票只定冲突码 70041（对齐「41 冲突」锁 20041/30041/40041/60041）。
+  IDEMPOTENCY_CONFLICT: 70041, // 同用户 + 同 key + 不同输入 → 稳定幂等冲突（不建任何行）
   // 2xxxx 容器（20041 锁 = name 全局唯一冲突；register/users 用户名冲突复用，契约 §2.2）
   CONTAINER_NOT_FOUND: 20040, // 容器不存在 / 越权（同码防探测，#312 锁）
   NAME_CONFLICT: 20041,
@@ -36,7 +39,7 @@ export const CODE = {
   CONTAINER_NOT_RUNNING: 20046, // #13：容器非 running（creating/stopped/removing）——bootstrap-token 前置
   // 9xxxx 系统 / 校验
   OAUTH_NOT_CONFIGURED: 90001, // OAuth provider 未配置（原 501）
-  VALIDATION_FAILED: 90002, // 参数校验失败（字段明细进 data）
+  VALIDATION_FAILED: 90002, // 参数校验失败（字段明细进 data）；Idempotency-Key 缺/超长特例 data=null（figures 前置中间件）
   LLM_NOT_CONFIGURED: 90003, // LLM key 未配置 / 写盘失败（create 前置，转译）
   PORT_POOL_EXHAUSTED: 90004, // 端口池耗尽 / 持续分配冲突（转译，复用系统域）
   ROUTE_NOT_FOUND: 90005, // 路由不存在（404 信封兜底）
@@ -71,6 +74,7 @@ export const DEFAULT_MESSAGE: Record<number, string> = {
   [CODE.PROVIDER_ID_CONFLICT]: '该容器下 provider_id 已存在',
   [CODE.FILE_NOT_FOUND]: '文件不存在',
   [CODE.FILE_EXISTS]: '文件已存在',
+  [CODE.IDEMPOTENCY_CONFLICT]: '幂等键已用于不同输入，请勿复用同一 Idempotency-Key 提交不同创建载荷',
   [CODE.VALIDATION_FAILED]: '参数校验失败',
   [CODE.LLM_NOT_CONFIGURED]: 'LLM_API_KEY 未配置',
   [CODE.PORT_POOL_EXHAUSTED]: '端口池已耗尽，暂无法创建容器，请稍后重试或删除闲置容器',

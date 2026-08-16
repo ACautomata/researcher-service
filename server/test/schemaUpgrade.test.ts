@@ -13,7 +13,7 @@ function runUpgrade(dbPath: string): void {
   })
 }
 
-// 从「只有 base 表」的旧库跑全量增量脚本（幂等跑两遍）→ 三批表全到位 + user_version 归 3。
+// 从「只有 base 表」的旧库跑全量增量脚本（幂等跑两遍）→ 三批表全到位 + T02 幂等列/索引 + user_version 归 4。
 function assertUpgraded(dbPath: string): void {
   const db = new Database(dbPath)
   try {
@@ -26,19 +26,24 @@ function assertUpgraded(dbPath: string): void {
     for (const index of [
       'text_trace_logs_traceId_key',
       'figures_ownerId_idx',
+      // T02 幂等唯一索引（grilling §17）：并发重复创建去重的最终仲裁
+      'figures_ownerId_idempotencyKey_key',
       'generation_jobs_figureId_key',
     ]) {
       expect(
         db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name=$name").get({ name: index }),
       ).toEqual({ name: index })
     }
-    // figures/generation_jobs 的持久化契约：queued 默认 + nullable errorMessage
+    // figures/generation_jobs 的持久化契约：queued 默认 + nullable errorMessage + T02 idempotencyKey 列
     const jobCols = db.prepare('PRAGMA table_info(generation_jobs)').all() as Array<{ name: string; dflt_value: string | null; notnull: number }>
     const status = jobCols.find((c) => c.name === 'status')!
     expect(status.dflt_value).toBe("'queued'")
     const errorMessage = jobCols.find((c) => c.name === 'errorMessage')!
     expect(errorMessage.notnull).toBe(0) // nullable
-    expect(db.pragma('user_version', { simple: true })).toBe(3)
+    const figureCols = db.prepare('PRAGMA table_info(figures)').all() as Array<{ name: string; notnull: number }>
+    const idemKey = figureCols.find((c) => c.name === 'idempotencyKey')!
+    expect(idemKey.notnull).toBe(0) // nullable——容 T02 前既有行（应用层恒非空）
+    expect(db.pragma('user_version', { simple: true })).toBe(4)
   } finally {
     db.close()
   }
@@ -81,7 +86,7 @@ describe('schema upgrade script', () => {
     assertUpgraded(dbPath)
   })
 
-  it('upgrades an already-text-trace DB (v2) to AutoFigure tables + user_version=3', () => {
+  it('upgrades an already-text-trace DB (v2) to AutoFigure tables + user_version=4', () => {
     const dir = mkdtempSync(path.join(tmpdir(), `schema-upgrade-${process.pid}-`))
     const dbPath = path.join(dir, 'panel.db')
     // 模拟上一轮增量已交付 text_trace_logs 的既有部署（v2）——增量脚本须只补 figures/generation_jobs。
