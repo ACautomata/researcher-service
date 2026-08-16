@@ -8,17 +8,22 @@
 // 本文件明确不做（防越界）：
 //   - 生产 HTTP 适配器 / sidecar / 凭证传输形态：T07。
 //   - 幂等：T02（本 runner 不触碰 idempotencyKey 逻辑）。
-//   - 产物持久化：T06（本文件只保证迟到成功产物「不发布状态」，不实现产物写入）。
 //   - 通用 JobStateMachine：只保留 AC5 所需的最小局部转换守卫（assertLegalTransition）。
 //   - T04 超时 / 启动 reconcile / 迟到结果围栏：本文件已实现（见下方 T04 段）。职责分界——
 //     T03 的 persistTerminalState `status='running'` 条件写 = 本地终态完整性；T04 在其上复用同一
 //     CAS 条件写作为迟到结果围栏（sweeper/reconcile 先翻 failed → 迟到写 count=0 被丢弃）。
+//   - 产物持久化：T06（见 persistSucceededWithArtifacts）——成功终态 + 产物在同一事务边界原子
+//     提交，CAS `WHERE status='running'` 复用 T04 围栏：failed 后迟到成功产物丢弃、状态不变。
 //
 // SQLite/Prisma 是 Job 状态的唯一持久化真相源：本 runner 的一切状态变化都经
 // updateMany({ where: { id, status }, ... })+count 判定，绝不依赖进程内存状态做裁决。
 
 import type { GenerationJobStatus, PrismaClient } from '../generated/prisma/client'
-import type { AutoFigureGenerationPort, AutoFigureGenerationResult } from './port'
+import type {
+  AutoFigureGenerationPort,
+  AutoFigureGenerationResult,
+  AutoFigureGenerationSuccess,
+} from './port'
 
 // ---------------------------------------------------------------------------
 // 局部转换守卫（AC5）
@@ -75,6 +80,40 @@ export async function persistTerminalState(
     },
   })
   return done.count === 1
+}
+
+// ---------------------------------------------------------------------------
+// T06 产物持久化（docs/autofigure/tickets/T06-artifact-persistence-png.md · grilling §6）
+// ---------------------------------------------------------------------------
+
+// 成功产物三元组 = Port 成功契约的产物子集（单一来源，二次 review 后 Pick 消除重复声明）：
+// evaluation 为 Port 边界已归一化的非敏感 JSON 载荷；png 精确对齐 Figure.png（Prisma Bytes 等价）。
+export type AutoFigureArtifacts = Pick<AutoFigureGenerationSuccess, 'xml' | 'png' | 'evaluation'>
+
+// T06 原子产物提交：Job 到 succeeded 与产物可见性在**同一事务边界**内提交——绝不出现
+// 「succeeded 但无产物」或「产物已写但 Job 仍 running」的中间态。CAS `WHERE status='running'`
+// 复用 T04 迟到结果围栏：执行期间 Job 已被超时 sweeper / reconcile 翻为 failed → count=0 →
+// 事务整体不写任何产物、状态不变（failed 后迟到成功产物丢弃，spec §2）。产物只在 count=1
+// 时随事务写入 Figure（原子：两写同生共灭；figure.update 抛错则连同 succeeded 一并回滚，
+// Job 保持 running 交由 reconcile 终态化）。返回是否成功提交（false = 围栏丢弃）。
+export async function persistSucceededWithArtifacts(
+  prisma: PrismaClient,
+  jobId: string,
+  figureId: string,
+  artifacts: AutoFigureArtifacts,
+): Promise<boolean> {
+  return prisma.$transaction(async (tx) => {
+    const done = await tx.generationJob.updateMany({
+      where: { id: jobId, status: 'running' },
+      data: { status: 'succeeded', finishedAt: new Date(), errorMessage: null },
+    })
+    if (done.count !== 1) return false
+    await tx.figure.update({
+      where: { id: figureId },
+      data: { xml: artifacts.xml, png: artifacts.png, evaluation: artifacts.evaluation },
+    })
+    return true
+  })
 }
 
 // ---------------------------------------------------------------------------
@@ -230,11 +269,12 @@ class DefaultGenerationRunner implements GenerationRunner {
     // 本进程绝不会对账到自己刚 claim 的 Job（一次性守卫，幂等）。
     await this.ensureReconcile()
 
-    // 取最老的 queued Job（FIFO，确定性顺序），连带其 1:1 Figure 的 prompt。
+    // 取最老的 queued Job（FIFO，确定性顺序），连带其 1:1 Figure 的 prompt 与 id
+    //（id 供 T06 产物原子提交定位 Figure 行）。
     const job = await this.prisma.generationJob.findFirst({
       where: { status: 'queued' },
       orderBy: { createdAt: 'asc' },
-      select: { id: true, figure: { select: { prompt: true } } },
+      select: { id: true, figure: { select: { id: true, prompt: true } } },
     })
     if (!job) return
 
@@ -255,7 +295,13 @@ class DefaultGenerationRunner implements GenerationRunner {
     //（正确性不依赖取消——即使 port 迟到/挂到超时后才返回，状态围栏照常成立）。
     if (result.ok) {
       assertLegalTransition('running', 'succeeded')
-      await persistTerminalState(this.prisma, job.id, 'succeeded')
+      // T06：succeeded 终态 + 产物在同一事务边界原子提交；围栏同样生效——failed 后迟到成功
+      // count=0 → 不写任何产物、状态不变。
+      await persistSucceededWithArtifacts(this.prisma, job.id, job.figure.id, {
+        xml: result.xml,
+        png: result.png,
+        evaluation: result.evaluation,
+      })
     } else {
       assertLegalTransition('running', 'failed')
       await persistTerminalState(this.prisma, job.id, 'failed', result.errorMessage)

@@ -29,8 +29,13 @@ export const CODE = {
   // 7xxxx figures（AutoFigure，docs/autofigure/tickets/）：
   // T05 读路径（T05-figure-history-ownership.md）：70040 = 不存在/越权同码防探测（镜像各域
   // 20040/30040/40040/60040 的 getInstanceForUser 锁式）。T02 幂等冲突 70041（对齐「41 冲突」锁）。
+  // T06 PNG 下载（T06-artifact-persistence-png.md · spec §3「未完成/失败给明确应用级响应，不返回
+  // 模糊 500」）：70042/70043 为 70040/70041 之后的域专用续号（对齐 20042 quota/20043 busy 的
+  // 「40 不存在 / 41 冲突 / 42+ 域专用」锁式；确切码值经 spec §4 / grilling §9 委托实现定准）。
   FIGURE_NOT_FOUND: 70040, // Figure 不存在 / 越权（同码防探测，T05）
   IDEMPOTENCY_CONFLICT: 70041, // 同用户 + 同 key + 不同输入 → 稳定幂等冲突（不建任何行）
+  FIGURE_PNG_NOT_READY: 70042, // PNG 未就绪（queued/running 未完成，明确应用级「未就绪」响应）
+  FIGURE_PNG_NOT_AVAILABLE: 70043, // PNG 不可用（failed / succeeded 但产物缺失，明确应用级「不可用」响应）
   // 2xxxx 容器（20041 锁 = name 全局唯一冲突；register/users 用户名冲突复用，契约 §2.2）
   CONTAINER_NOT_FOUND: 20040, // 容器不存在 / 越权（同码防探测，#312 锁）
   NAME_CONFLICT: 20041,
@@ -78,6 +83,8 @@ export const DEFAULT_MESSAGE: Record<number, string> = {
   [CODE.FILE_EXISTS]: '文件已存在',
   [CODE.FIGURE_NOT_FOUND]: 'Figure 不存在',
   [CODE.IDEMPOTENCY_CONFLICT]: '幂等键已用于不同输入，请勿复用同一 Idempotency-Key 提交不同创建载荷',
+  [CODE.FIGURE_PNG_NOT_READY]: 'Figure 尚未生成完成，请稍后再试',
+  [CODE.FIGURE_PNG_NOT_AVAILABLE]: 'Figure 无可用 PNG（生成失败或产物缺失）',
   [CODE.VALIDATION_FAILED]: '参数校验失败',
   [CODE.LLM_NOT_CONFIGURED]: 'LLM_API_KEY 未配置',
   [CODE.PORT_POOL_EXHAUSTED]: '端口池已耗尽，暂无法创建容器，请稍后重试或删除闲置容器',

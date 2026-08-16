@@ -91,9 +91,12 @@ OpenClaw 容器 fleet (openclaw-gw-<name>，每容器独立 home/openclaw.json/�
 - 对话 WS 走 `/ws/chat/` 隧道（JWT subprotocol 握手；先 accept 再 close(4401) 拒未认证）。
 
 全局 #312 信封：所有 REST 一律 HTTP 200，错误信号在 body `{code,message,data}`；「不存在 vs 越权」
-同码防探测（20040/30040/40040/60040）。码段：`0` 成功 · `1xxxx` 通用/鉴权 · `2xxxx` 容器 · `3xxxx` wiki ·
+同码防探测（20040/30040/40040/60040）。例外：二进制成功路径直发原生字节（`GET /figures/:id/png` 成功
+返 `image/png` 字节，不包信封、不 base64-in-JSON；错误面仍走信封）。码段：`0` 成功 · `1xxxx` 通用/鉴权 ·
+`2xxxx` 容器 · `3xxxx` wiki ·
 `4xxxx` models · `5xxxx` chat/pairing（非信封段，错误经 WS close codes）· `6xxxx` files ·
-`7xxxx` figures（AutoFigure，70040 不存在/越权同码防探测（T05 读路径）· 70041 幂等冲突）·
+`7xxxx` figures（AutoFigure，70040 不存在/越权同码防探测（T05 读路径，PNG 复用同一归属门）· 70041 幂等冲突 ·
+70042 PNG 未就绪（queued/running）· 70043 PNG 不可用（failed/产物缺失））·
 `9xxxx` 系统/校验。
 
 ## frontend 结构（`frontend/src/`）

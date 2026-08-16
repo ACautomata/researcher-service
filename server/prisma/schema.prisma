@@ -230,6 +230,16 @@ model Figure {
   // 应用层恒非空（Idempotency-Key 请求头必带，缺 → 90002）。
   idempotencyKey String?
 
+  // T06 产物持久化（docs/autofigure/tickets/T06-artifact-persistence-png.md · grilling §6）：
+  // xml（文本）+ png（SQLite BLOB）+ evaluation（文本 JSON）仅在 Job 提交 succeeded 终态时
+  // 一并原子写入（runner persistSucceededWithArtifacts，T04 围栏保证 failed 后迟到成功不写）；
+  // queued/running/failed 恒 null。png 用 Prisma Bytes（= Uint8Array）。evaluation 是 Port 边界
+  // 已归一化的非敏感 JSON 载荷（T07 适配器负责从 raw 执行输出归一化；本行绝不落 raw provider/
+  // Python 响应/栈/凭证）。list/detail 公开投影不含本三列（下载契约：仅 owner 且仅 succeeded）。
+  xml        String? // 生成产物 XML（文本）
+  png        Bytes? // 生成产物 PNG（SQLite BLOB）
+  evaluation String? // 生成产物 evaluation（文本 JSON）
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 

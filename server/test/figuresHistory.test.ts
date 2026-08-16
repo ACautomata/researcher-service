@@ -3,8 +3,8 @@
 //（直接种子 Figure + 1:1 Job 任意状态，不依赖 runner——fixture 是测试技术，不是依赖边）。
 // 覆盖：仅自己列表 / 他人不出现 / createdAt DESC + id tiebreaker / 四态投影（list+detail）/
 // 本人详情 / 不存在与越权同码 70040 / admin 跨用户（spec US15）/ failed 非敏感投影 +
-// 白名单护栏（未知/敏感内容归通用非敏感原因）/ 无凭证泄露 / 无删除端点 / 无 PNG 端点
-//（T06 越界）/ 未认证 10001 / flag 关 90005。
+// 白名单护栏（未知/敏感内容归通用非敏感原因）/ 无凭证泄露 / 无删除端点 / 未认证 10001 /
+// flag 关 90005。PNG 下载端点（T06）不再越界——见 figuresPng.test.ts。
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { setupTestApp, type TestContext } from './setup'
@@ -321,25 +321,7 @@ describe('T05 admin 跨用户可见（spec US15 / grilling §3 显式批准）',
 })
 
 describe('T05 越界端点与 flag 关', () => {
-  let ctx: TestContext
-  let user: { id: string }
-  let access: string
-
-  beforeAll(async () => {
-    ctx = await setupTestApp({ figures: {} })
-    user = await seedUser(ctx.prisma, 'histedge', 'pw-edge-secure')
-    access = (await login(ctx.request, 'histedge', 'pw-edge-secure')).access!
-  })
-  afterAll(async () => {
-    await ctx.cleanup()
-  })
-
-  it('T06 越界：GET /figures/:id/png → 90005（T05 无 PNG/artifact 端点）', async () => {
-    const fig = await seedFigure(ctx, { ownerId: user.id, prompt: 'png-should-not-exist', status: 'succeeded' })
-    const res = await ctx.request.get(`/api/v1/figures/${fig.id}/png`).set(bearer(access))
-    expect(res.body.code).toBe(90005)
-  })
-
+  // PNG 下载端点（T06）已非越界 → 见 figuresPng.test.ts；本 describe 只保留 flag 关验证。
   it('flag 关（figures deps 未装配）→ GET 列表与详情均 90005', async () => {
     const off = await setupTestApp() // 不注入 figures
     try {

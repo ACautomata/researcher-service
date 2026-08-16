@@ -14,7 +14,7 @@ function runUpgrade(dbPath: string): void {
 }
 
 // 从「只有 base 表」的旧库跑全量增量脚本（幂等跑两遍）→ 三批表全到位 + T02 幂等列/索引
-// + T03 生命周期时间戳列 + user_version 归 5。
+// + T03 生命周期时间戳列 + T06 产物三列 + user_version 归 6。
 function assertUpgraded(dbPath: string): void {
   const db = new Database(dbPath)
   try {
@@ -50,7 +50,14 @@ function assertUpgraded(dbPath: string): void {
     const figureCols = db.prepare('PRAGMA table_info(figures)').all() as Array<{ name: string; notnull: number }>
     const idemKey = figureCols.find((c) => c.name === 'idempotencyKey')!
     expect(idemKey.notnull).toBe(0) // nullable——容 T02 前既有行（应用层恒非空）
-    expect(db.pragma('user_version', { simple: true })).toBe(5)
+    // T06 产物三列（grilling §6）：xml（文本）+ png（SQLite BLOB）+ evaluation（文本 JSON）。
+    // 全 nullable——仅在 Job 提交 succeeded 终态时由 runner 原子写入，queued/running/failed 恒
+    // null（不迁移旧行、不给旧 succeeded 伪造产物）。断言存在 + nullable 即验收 v6 增量到位。
+    for (const col of ['xml', 'png', 'evaluation']) {
+      const c = figureCols.find((x) => x.name === col)!
+      expect(c.notnull).toBe(0)
+    }
+    expect(db.pragma('user_version', { simple: true })).toBe(6)
   } finally {
     db.close()
   }
@@ -93,7 +100,7 @@ describe('schema upgrade script', () => {
     assertUpgraded(dbPath)
   })
 
-  it('upgrades an already-text-trace DB (v2) to AutoFigure tables + user_version=5', () => {
+  it('upgrades an already-text-trace DB (v2) to AutoFigure tables + user_version=6', () => {
     const dir = mkdtempSync(path.join(tmpdir(), `schema-upgrade-${process.pid}-`))
     const dbPath = path.join(dir, 'panel.db')
     // 模拟上一轮增量已交付 text_trace_logs 的既有部署（v2）——增量脚本须只补 figures/generation_jobs。
