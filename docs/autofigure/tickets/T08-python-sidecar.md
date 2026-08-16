@@ -61,10 +61,17 @@ Source of truth: `docs/autofigure/grilling-decisions.md` §7 / §10 / §11 / §1
 
 ## Completion evidence
 
-- targeted tests:
-- typecheck/build:
-- broader tests:
-- first code review:
-- fixes:
-- second code review:
-- commit:
+- **fixed point**：`fe1e0eb`（T07 HTTP adapter 合并点，af/t08-python-sidecar 基线）。
+- **implementation commit**：`210d8ca`（feat: AutoFigure T08 — private Python sidecar bridging upstream pipeline）。
+- **evidence commit**：本段所在 docs commit（git log 可查；不硬编码自身 SHA——evidence 无法自引用，T07 已证明）。
+- **targeted tests**：17/17 契约接缝（`deploy/autofigure-sidecar`，pytest：test_bridge 9 · test_app 8）——纯逻辑、无真 LLM/网络/浏览器；上游 pipeline 三函数桩化为独立已知字面量（conftest 共享 `_pipeline_stub`）。覆盖：成功形状 `{xml, png_base64, evaluation}` + PNG 8 字节签名、失败短不透明码、CONFIG snapshot/restore、跨调用隔离（两次生成互不污染）、stdout 抑制防凭证泄漏、UTF-16 长度与 zod 精确等价（2000 emoji=4000 units 通过 / 2001=4002 拒绝）、reference 加载失败归一。
+- **typecheck/build**：`tsc --noEmit` clean（T08 零 TS 变更；基线确认）。Python 侧无 build；Dockerfile 构建期断言（上游包可导入 / playwright / 署名文件 `test -f`）镜像 openclaw-image 先例。
+- **broader tests**：full repo suite 714 passed / 6 skipped（仅 2 个预存在 docker smoke 失败 —— `ENOENT /var/run/docker.sock`，无 docker daemon，环境固有；与 T07 证据一致，T08 无回归）。
+- **first code review**（fixed point `fe1e0eb` 双轴并行子代理）：
+  - Standards：**无硬违规**。行动项 4：①`topic` 参数内联为常量（Speculative Generality，上游默认 content type）②两测试文件 `_pipeline_stub`/`KNOWN_PNG` 去重上移 conftest（Duplicated Code）③`_load_references` 移入锁内+重定向、失败归一 `GenerationError('reference_load_failed')` ④Dockerfile 增非 root `USER autofigure`（对齐 `USER node` 先例）+ `PLAYWRIGHT_BROWSERS_PATH` 前置 + `passwd`。确认项 2：provider if/elif/else（镜像上游 `update_config_from_sdk`）；prompt 双边界校验（400 vs 2xx 语义不同）。
+  - Spec：**无 scope creep、AC 全满足**；vendored `autofigure/` 与上游 `diff -rq` 一致、`requirements-upstream.txt` 逐字；凭证卫生与跨调用隔离双检通过。行动项 2：①bridge `len()`（码点）与 zod UTF-16 长度不等价 → `_utf16_len` 精确对齐 ②README `-p` 端口注记 dev-only（AC「无宿主端口暴露」指生产形态）。确认项：无 sidecar 超时→挂死 provider 永久占锁（契约授权，README「运行语义」文档化）；Dockerfile 无 HEALTHCHECK（归 T10 compose）；契约示例端口 8796 vs 实际 8080（T10 接线对齐）。
+- **fixes**：上述 6 行动项全部落实；新增 UTF-16 边界测试（红→绿）。修复后 17/17 绿。
+- **second code review**：修复后逐点复核——UTF-16 校验有独立边界测试；Dockerfile USER 降权对齐 openclaw-image；测试 fixture 去重后 conftest 为单一来源；无新发现。
+- **验证环境**：venv Python 3.14.6 + 全量 `requirements-upstream.txt` 安装兼容性验证通过（含 PyMuPDF/pdfplumber/google-genai/anthropic/playwright）。Dockerfile 未实构建（本机无 docker daemon——同 server smoke 门控先例；构建属 T10）。
+- **commit**：`210d8ca`（实现）+ 本 evidence docs commit。
+- **T09 handoff**：sidecar 就绪待 T10 组装 panel-net compose + 门控真实生成 smoke（需真 provider key + chromium + 真上游；自动探测门控对齐 containers-smoke）。researcher 侧 `AutoFigureGenerationPort` 契约已冻结（T03-T07），sidecar 不改动契约。
