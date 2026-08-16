@@ -111,6 +111,8 @@ CREATE TABLE "generation_jobs" (
     "figureId" TEXT NOT NULL,
     "status" TEXT NOT NULL DEFAULT 'queued',
     "errorMessage" TEXT,
+    "startedAt" DATETIME,
+    "finishedAt" DATETIME,
     "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" DATETIME NOT NULL,
     CONSTRAINT "generation_jobs_figureId_fkey" FOREIGN KEY ("figureId") REFERENCES "figures" ("id") ON DELETE CASCADE ON UPDATE CASCADE

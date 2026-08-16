@@ -217,6 +217,22 @@ function readAutofigureEnabled(): boolean {
   )
 }
 
+// AUTOFIGURE_LLM_KEY（T03，docs/autofigure/tickets/T03-single-worker-generation-lifecycle.md）：
+// AutoFigure 生成凭证（服务端执行上下文）。flag 开而生产缺 key → fail-fast（否则 queued Job 永
+// 不被跑、错配只在请求期暴露——对齐 readTemplateDir/readPanelOrigin 前置校验模式）；dev/test 缺省
+// 容忍空串（纯逻辑 runner 测试经 DI 注入 llmKey，不经 config）。值只存 config.autofigure.llmKey，
+// 由装配层注入 AutoFigureGenerationPort（generate(input, credential)）；本文件是唯一读取点，不落盘、
+// 不入请求体、不入 Job payload、不入日志（T03 凭证纪律）。超时值管道属 T04（本票不引入）。
+function readAutofigureLlmKey(enabled: boolean): string {
+  const v = process.env.AUTOFIGURE_LLM_KEY ?? ''
+  if (enabled && process.env.NODE_ENV === 'production' && v === '') {
+    throw new Error(
+      'AUTOFIGURE_LLM_KEY 必须在生产环境显式提供（AUTOFIGURE_ENABLED=true 时 AutoFigure 生成凭证必填）',
+    )
+  }
+  return v
+}
+
 export const config = {
   jwtSecret: readSecret(),
   accessTtl: process.env.ACCESS_TOKEN_TTL ?? '5m',
@@ -273,11 +289,17 @@ export const config = {
   // BullMQ/Redis 连接（#313 自本切片引入；后台 provisioning 队列）
   redisUrl: process.env.REDIS_URL ?? 'redis://localhost:6379/0',
   // ---- AutoFigure（T01，docs/autofigure/tickets/T01-authenticated-figure-creation.md）----
-  autofigure: {
-    // 域开关：flag 关 → 装配层 server.ts 不注入 figures deps → 路由未挂载（/api/v1/figures 90005）。
-    // flag 只在装配层消费（app.ts 不读 config，只认 deps 注入，对齐 models/files 条件挂载先例）。
-    enabled: readAutofigureEnabled(),
-  },
+  autofigure: (() => {
+    const enabled = readAutofigureEnabled()
+    return {
+      // 域开关：flag 关 → 装配层 server.ts 不注入 figures deps → 路由未挂载（/api/v1/figures 90005）。
+      // flag 只在装配层消费（app.ts 不读 config，只认 deps 注入，对齐 models/files 条件挂载先例）。
+      enabled,
+      // 生成凭证（T03）：服务端执行上下文，flag 开 + 生产缺 → fail-fast（readAutofigureLlmKey）。
+      // 只被装配层注入 Port credential；不落盘/不入请求体/不入 Job payload/不入日志。
+      llmKey: readAutofigureLlmKey(enabled),
+    }
+  })(),
 }
 
 // refresh cookie 公共属性（规格 #311 锁）：HttpOnly + Secure(prod) + SameSite=Lax + Path=/api/v1/auth

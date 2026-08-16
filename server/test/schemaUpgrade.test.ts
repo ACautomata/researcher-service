@@ -13,7 +13,8 @@ function runUpgrade(dbPath: string): void {
   })
 }
 
-// 从「只有 base 表」的旧库跑全量增量脚本（幂等跑两遍）→ 三批表全到位 + T02 幂等列/索引 + user_version 归 4。
+// 从「只有 base 表」的旧库跑全量增量脚本（幂等跑两遍）→ 三批表全到位 + T02 幂等列/索引
+// + T03 生命周期时间戳列 + user_version 归 5。
 function assertUpgraded(dbPath: string): void {
   const db = new Database(dbPath)
   try {
@@ -40,10 +41,16 @@ function assertUpgraded(dbPath: string): void {
     expect(status.dflt_value).toBe("'queued'")
     const errorMessage = jobCols.find((c) => c.name === 'errorMessage')!
     expect(errorMessage.notnull).toBe(0) // nullable
+    // T03 执行生命周期时间戳：两列均 nullable（不迁移旧行、不给旧 queued 伪造时间）；跑增量的旧库
+    // 由 ALTER TABLE ADD COLUMN 补齐，fresh 库建表已带。断言存在 + nullable 即验收 v5 增量到位。
+    const startedAt = jobCols.find((c) => c.name === 'startedAt')!
+    expect(startedAt.notnull).toBe(0) // nullable——queued 恒 null，仅原子领取后置位
+    const finishedAt = jobCols.find((c) => c.name === 'finishedAt')!
+    expect(finishedAt.notnull).toBe(0) // nullable——终态写入后置位
     const figureCols = db.prepare('PRAGMA table_info(figures)').all() as Array<{ name: string; notnull: number }>
     const idemKey = figureCols.find((c) => c.name === 'idempotencyKey')!
     expect(idemKey.notnull).toBe(0) // nullable——容 T02 前既有行（应用层恒非空）
-    expect(db.pragma('user_version', { simple: true })).toBe(4)
+    expect(db.pragma('user_version', { simple: true })).toBe(5)
   } finally {
     db.close()
   }
@@ -86,7 +93,7 @@ describe('schema upgrade script', () => {
     assertUpgraded(dbPath)
   })
 
-  it('upgrades an already-text-trace DB (v2) to AutoFigure tables + user_version=4', () => {
+  it('upgrades an already-text-trace DB (v2) to AutoFigure tables + user_version=5', () => {
     const dir = mkdtempSync(path.join(tmpdir(), `schema-upgrade-${process.pid}-`))
     const dbPath = path.join(dir, 'panel.db')
     // 模拟上一轮增量已交付 text_trace_logs 的既有部署（v2）——增量脚本须只补 figures/generation_jobs。
