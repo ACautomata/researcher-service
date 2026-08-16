@@ -80,6 +80,7 @@ Source of truth: `docs/autofigure/grilling-decisions.md` §4 / §7 / §11 / §14
 
 - **fixed point**：`b06dad2c242c674d9c353778fc5014dcba721bee`（T06 artifact persistence 合并点）。
 - **implementation commit**：`71c7351`（feat: AutoFigure T07 — production HTTP adapter and runtime wiring）。
+- **evidence commit**：`7f5e131`（docs: record T07 completion evidence）。
 - **FIRST review 结果**：双轴 APPROVE；修复 2 处 review points（credential redirect 外泄 75% —— `redirect:'error'` + 测试 + 契约文档；byte-exactness 测试字节以 0 开头致 PNG magic 校验拒绝 —— 加真实 magic 前缀），其余 judgement-calls 均确认。
 - **Risk A 裁决**（已批准扩 Scope）：T04-owned application timeout（`AUTOFIGURE_JOB_TIMEOUT_MS` 唯一 execution timeout）+ AbortSignal cancellation 经 `AutoFigureGenerationPort` 契约传递。无 adapter-local 超时、无重试、无新错误态。
 - **Risk B 裁决**（已批准扩 Scope）：private wire `png_base64`（仅 sidecar 边界；adapter 立即 decode 为 `Uint8Array<ArrayBuffer>`，字段名不泄漏应用层）+ PNG 8-byte magic 校验（`89 50 4E 47 0D 0A 1A 0A`，解码空/不匹配 → 稳定失败，绝不放行 succeeded 落库）。
