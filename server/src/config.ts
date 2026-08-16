@@ -233,6 +233,24 @@ function readAutofigureLlmKey(enabled: boolean): string {
   return v
 }
 
+// AUTOFIGURE_JOB_TIMEOUT_MS（T04，docs/autofigure/tickets/T04-timeout-reconcile-late-result.md）：
+// AutoFigure 执行超时（ms）。默认 30 分钟——本文件是唯一默认值声明处，runner 逻辑不硬编码生产
+// 超时（runner 经 DI 收 timeoutMs）。超时自进入 running（startedAt 置位）起算，queued 等待不计入。
+// 非法值（非正整数，如 0/负/小数/abc）fail-fast（对齐 readDefaultMaxContainers 加载即校验）——
+// 否则错值静默按默认 30min 走，超时语义错配只在运行期暴露。只存 config.autofigure.jobTimeoutMs，
+// 由装配层注入 runner；执行层配置，不暴露于公开 API（绝进信封 data）。
+function readAutofigureJobTimeoutMs(): number {
+  const raw = process.env.AUTOFIGURE_JOB_TIMEOUT_MS
+  if (raw === undefined) return 30 * 60 * 1000 // 默认 30 分钟
+  const v = Number(raw)
+  if (!Number.isInteger(v) || v <= 0) {
+    throw new Error(
+      `AUTOFIGURE_JOB_TIMEOUT_MS 非法: ${JSON.stringify(process.env.AUTOFIGURE_JOB_TIMEOUT_MS)}，须为正整数毫秒`,
+    )
+  }
+  return v
+}
+
 export const config = {
   jwtSecret: readSecret(),
   accessTtl: process.env.ACCESS_TOKEN_TTL ?? '5m',
@@ -298,6 +316,9 @@ export const config = {
       // 生成凭证（T03）：服务端执行上下文，flag 开 + 生产缺 → fail-fast（readAutofigureLlmKey）。
       // 只被装配层注入 Port credential；不落盘/不入请求体/不入 Job payload/不入日志。
       llmKey: readAutofigureLlmKey(enabled),
+      // 执行超时（T04）：默认 30 分钟（readAutofigureJobTimeoutMs 唯一声明处），自进入 running
+      //（startedAt 置位）起算。只被装配层注入 runner timeoutMs；不暴露公开 API。
+      jobTimeoutMs: readAutofigureJobTimeoutMs(),
     }
   })(),
 }
