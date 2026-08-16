@@ -8,6 +8,7 @@
 import { CODE } from '../codes'
 import { fail } from '../envelope'
 import type { PrismaClient, GenerationJobStatus } from '../generated/prisma/client'
+import type { FigurePngBytes } from './port'
 import type { AuthUser } from '../types'
 // 失败原因白名单单源：runner 写入的稳定非敏感原因（T03/T04 契约），读路径据此做透出护栏。
 import { GENERATION_EXECUTION_ERROR, JOB_RECONCILE_REASON, JOB_TIMEOUT_REASON } from './runner'
@@ -194,10 +195,13 @@ function toSummary(
 // 稳定二级 tiebreaker（cuid 不可变标识；不暴露任何公开排序选项——无分页/过滤/搜索/用户排序）。
 export async function listFigures(prisma: PrismaClient, user: AuthUser): Promise<FigureSummary[]> {
   const where = user.role === 'admin' ? {} : { ownerId: user.id }
+  // T06 二次 review（Spec (c)2 / Standards 4）：select 只取列表投影所需标量列，排除 xml/png/evaluation
+  // 产物列——列表 N 行时避免整段 BLOB/大文本从 SQLite 拉进内存（投影本就不含产物，见 toSummary）。
+  // job 关系并入 select（Prisma 禁 select+include 混用）。
   const rows = await prisma.figure.findMany({
     where,
     orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-    include: { job: { select: { id: true, status: true } } },
+    select: { id: true, prompt: true, createdAt: true, job: { select: { id: true, status: true } } },
   })
   return rows.map((r) => {
     if (!r.job) throw fail(CODE.INTERNAL, 'Figure 缺关联 Job') // 理论不可达（T01 原子创建）
@@ -205,18 +209,44 @@ export async function listFigures(prisma: PrismaClient, user: AuthUser): Promise
   })
 }
 
-// 详情归属门（T05 AC3/AC5/AC6 · 防枚举）：figure 域单点归属前置，镜像 getInstanceForUser
+// 共享归属门（T05 单点 + T06 复用）：figure 域单点归属前置，镜像 getInstanceForUser
 //（containers/orchestrator.ts）——admin 全放行 / user 仅本人；「不存在 vs 越权」同码 70040，
 // 对外逐字节一致，区分仅进服务端日志（not_found vs owner_mismatch）。
 // ownerId 只由认证身份派生：本函数只按 id 查行，不接收任何客户端 userId 作为授权覆写。
-export async function getFigureForUser(
+// detail（getFigureForUser）与 png（getFigurePngForUser）两读路径共用同一实现——不建第二套
+// 归属逻辑（T06 约束；admin PNG 授权依据 spec §3 归属防探测段 + T06 AC「非 owner（含 admin 以外
+// 角色）→ 70040」+ grilling §3「admin 跨用户全部可见」）。
+interface FigureOwnedRow {
+  id: string
+  ownerId: string
+  prompt: string
+  createdAt: Date
+  updatedAt: Date
+  // T06：PNG 读路径需要产物列；detail 投影（toSummary/publicFailureReason）不用，但归属门共享
+  // 同一查询——公开投影不含产物，字段只在内部读取（list/detail 响应不暴露 PNG/xml/evaluation）。
+  png: FigurePngBytes | null
+  job: FigureJobProjection | null
+}
+
+async function findFigureForUser(
   prisma: PrismaClient,
   user: AuthUser,
   id: string,
-): Promise<FigureDetail> {
+): Promise<FigureOwnedRow> {
+  // select 只取归属门消费者需要的列：detail 投影列 + PNG 路径所需的 png（单行）；排除 xml/evaluation
+  // 大文本列（T06 二次 review，Spec (c)2：detail 读路径不拉产物大文本；png 路径本就需回读 png BLOB）。
+  // job 关系并入 select（Prisma 禁 select+include 混用）。
   const figure = await prisma.figure.findUnique({
     where: { id },
-    include: { job: { select: { id: true, status: true, errorMessage: true } } },
+    select: {
+      id: true,
+      ownerId: true,
+      prompt: true,
+      createdAt: true,
+      updatedAt: true,
+      png: true,
+      job: { select: { id: true, status: true, errorMessage: true } },
+    },
   })
   if (!figure) {
     // eslint-disable-next-line no-console
@@ -228,6 +258,15 @@ export async function getFigureForUser(
     console.warn(`[figures] owner_mismatch: id=${id} uid=${user.id} owner=${figure.ownerId}`)
     throw fail(CODE.FIGURE_NOT_FOUND)
   }
+  return figure
+}
+
+export async function getFigureForUser(
+  prisma: PrismaClient,
+  user: AuthUser,
+  id: string,
+): Promise<FigureDetail> {
+  const figure = await findFigureForUser(prisma, user, id)
   if (!figure.job) {
     // 理论不可达（T01 起 Figure 与 Job 恒同事务创建）：防御性失败——不返回缺 Job 的畸形详情。
     throw fail(CODE.INTERNAL, 'Figure 缺关联 Job')
@@ -238,4 +277,29 @@ export async function getFigureForUser(
     errorMessage: publicFailureReason(figure.job),
     updatedAt: figure.updatedAt.toISOString(),
   }
+}
+
+// T06 PNG 读路径（docs/autofigure/tickets/T06-artifact-persistence-png.md · spec §3）：
+// 复用共享归属门（admin 全放行 / user 仅本人；不存在 vs 越权同码 70040 防探测）。状态门仅放行
+// succeeded 且 png 非空；未完成（queued/running）→ 70042 明确「未就绪」应用级响应，失败 →
+// 70043 明确「不可用」应用级响应——二者都不返回模糊 500（spec §3 下载契约）。
+// succeeded 但 png 为 null（T06 升级前遗留成功行 / 数据完整性防御）→ 70043 确定性不可用。
+// 返回 PNG 字节（Uint8Array 对齐 Prisma Bytes；路由层 Buffer.from 后按既有下载契约直发字节）。
+export async function getFigurePngForUser(
+  prisma: PrismaClient,
+  user: AuthUser,
+  id: string,
+): Promise<Uint8Array> {
+  const figure = await findFigureForUser(prisma, user, id)
+  const status = figure.job?.status
+  if (status !== 'succeeded') {
+    // queued/running → 未就绪（仍在生成，可稍后重试）；failed / 缺 Job（理论不可达）→ 不可用。
+    if (status === 'queued' || status === 'running') throw fail(CODE.FIGURE_PNG_NOT_READY)
+    throw fail(CODE.FIGURE_PNG_NOT_AVAILABLE)
+  }
+  if (!figure.png) {
+    // succeeded 但无产物：升级前遗留成功行 / 数据完整性异常——确定性应用级「不可用」，不模糊 500。
+    throw fail(CODE.FIGURE_PNG_NOT_AVAILABLE)
+  }
+  return figure.png
 }

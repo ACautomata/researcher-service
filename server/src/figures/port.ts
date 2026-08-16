@@ -19,8 +19,21 @@ export interface AutoFigureGenerationCredential {
   apiKey: string // 服务端执行上下文，非域输入；仅装配层注入，杜绝其他来源
 }
 
+// PNG 字节类型：Prisma Bytes 的结构等价（Bytes = ReturnType<Uint8Array['slice']> = Uint8Array<ArrayBuffer>）。
+// Port 侧独立声明，避免引用 Prisma 命名空间（保持计算边界轻量）；与 Figure.png 持久化类型精确兼容。
+export type FigurePngBytes = Uint8Array<ArrayBuffer>
+
+// T06 成功结果携带产物（docs/autofigure/tickets/T06-artifact-persistence-png.md）：
+// xml（文本）+ png（BLOB 源，用 Prisma Bytes = Uint8Array<ArrayBuffer> 精确对齐持久化类型）+
+// evaluation（文本 JSON）三字段必填——成功即产物齐备，runner 在提交 succeeded 终态时一并原子落
+// Figure（running/failed 不落成功产物）。
+// evaluation 契约：Port 边界已归一化的非敏感 JSON 载荷（T07 适配器负责从 raw 执行输出构造），
+// runner 原样持久化，不落 raw provider/Python 响应/栈/凭证。
 export interface AutoFigureGenerationSuccess {
   ok: true
+  xml: string
+  png: FigurePngBytes
+  evaluation: string
 }
 
 export interface AutoFigureGenerationFailure {

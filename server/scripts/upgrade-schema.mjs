@@ -40,6 +40,9 @@ CREATE TABLE IF NOT EXISTS "figures" (
     "ownerId" TEXT NOT NULL,
     "prompt" TEXT NOT NULL,
     "idempotencyKey" TEXT,
+    "xml" TEXT,
+    "png" BLOB,
+    "evaluation" TEXT,
     "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" DATETIME NOT NULL,
     CONSTRAINT "figures_ownerId_fkey" FOREIGN KEY ("ownerId") REFERENCES "users" ("id") ON DELETE CASCADE ON UPDATE CASCADE
@@ -83,10 +86,27 @@ CREATE UNIQUE INDEX IF NOT EXISTS "generation_jobs_figureId_key" ON "generation_
     db.exec(`ALTER TABLE "generation_jobs" ADD COLUMN "finishedAt" DATETIME`)
   }
 
-  db.pragma('user_version = 5')
+  // T06（docs/autofigure/tickets/T06-artifact-persistence-png.md · grilling §6）：figures 增加产物
+  // 三列——xml（文本）+ png（SQLite BLOB）+ evaluation（文本 JSON）。全 nullable：仅在 Job 提交
+  // succeeded 终态时由 runner 原子写入，queued/running/failed 恒 null（不迁移旧行、不给旧
+  // succeeded 伪造产物）。ADD COLUMN 非幂等，PRAGMA guard 先查再补（对齐 T02/T03 模式）。
+  // 本脚本上方 CREATE TABLE（既有部署早于 T01 前已建表，走 ALTER 分支）也随 init.sql 同步带三列，
+  // 保持 fresh 与 upgrade 两路径列集一致——此处列存在 → guard 跳过。
+  const figCols = db.prepare(`PRAGMA table_info("figures")`).all()
+  if (!figCols.some((c) => c.name === 'xml')) {
+    db.exec(`ALTER TABLE "figures" ADD COLUMN "xml" TEXT`)
+  }
+  if (!figCols.some((c) => c.name === 'png')) {
+    db.exec(`ALTER TABLE "figures" ADD COLUMN "png" BLOB`)
+  }
+  if (!figCols.some((c) => c.name === 'evaluation')) {
+    db.exec(`ALTER TABLE "figures" ADD COLUMN "evaluation" TEXT`)
+  }
+
+  db.pragma('user_version = 6')
 } finally {
   db.close()
 }
 
 // eslint-disable-next-line no-console
-console.log(`[db:upgrade] schema upgraded to user_version=5 at ${dbPath}`)
+console.log(`[db:upgrade] schema upgraded to user_version=6 at ${dbPath}`)

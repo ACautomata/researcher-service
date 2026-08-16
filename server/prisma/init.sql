@@ -100,6 +100,9 @@ CREATE TABLE "figures" (
     "ownerId" TEXT NOT NULL,
     "prompt" TEXT NOT NULL,
     "idempotencyKey" TEXT,
+    "xml" TEXT,
+    "png" BLOB,
+    "evaluation" TEXT,
     "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" DATETIME NOT NULL,
     CONSTRAINT "figures_ownerId_fkey" FOREIGN KEY ("ownerId") REFERENCES "users" ("id") ON DELETE CASCADE ON UPDATE CASCADE

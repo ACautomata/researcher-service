@@ -13,7 +13,21 @@ import type {
   AutoFigureGenerationInput,
   AutoFigureGenerationPort,
   AutoFigureGenerationResult,
+  AutoFigureGenerationSuccess,
 } from '../src/figures/port'
+
+// T06 默认成功产物（fake 无脚本时的兜底成功）：确定性字节/文本——PNG 带真实 magic 前缀 + 固定
+// 尾字节，供「精确字节回读」断言（测试可覆盖部分字段注入自定义产物）。
+export function okArtifacts(overrides: Partial<Omit<AutoFigureGenerationSuccess, 'ok'>> = {}): AutoFigureGenerationSuccess {
+  return {
+    ok: true,
+    xml: '<mxfile host="fake" type="device"><diagram/></mxfile>',
+    // PNG magic (89 50 4E 47 0D 0A 1A 0A) + 固定差异字节，字节级可断言。
+    png: new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x01, 0x02, 0x03]),
+    evaluation: '{"ok":true,"quality":"good"}',
+    ...overrides,
+  }
+}
 
 export class FakeAutoFigureGenerationPort implements AutoFigureGenerationPort {
   /** 每次 generate 的 (input, credential) 记录——分别断言，不混同 */
@@ -45,7 +59,7 @@ export class FakeAutoFigureGenerationPort implements AutoFigureGenerationPort {
         this.resolvers.push(resolve)
       })
     }
-    return this.script.length > 0 ? (this.script.shift() as AutoFigureGenerationResult) : { ok: true }
+    return this.script.length > 0 ? (this.script.shift() as AutoFigureGenerationResult) : okArtifacts()
   }
 
   /** 注册一个「下一次 generate 已进入」的等待点（必须在触发 generate 之前调用） */
@@ -55,8 +69,8 @@ export class FakeAutoFigureGenerationPort implements AutoFigureGenerationPort {
     })
   }
 
-  /** pending 模式下 resolve 下一次挂起的 generate（缺省成功结果） */
-  resolveNext(result: AutoFigureGenerationResult = { ok: true }): void {
+  /** pending 模式下 resolve 下一次挂起的 generate（缺省成功结果 + 确定性产物） */
+  resolveNext(result: AutoFigureGenerationResult = okArtifacts()): void {
     this.resolvers.shift()?.(result)
   }
 }

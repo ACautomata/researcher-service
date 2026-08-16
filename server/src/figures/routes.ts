@@ -5,7 +5,8 @@
 //   同用户 + 同 key + 同输入 → 返回既有 Figure/Job 及当前应用级状态（零写入）；
 //   同用户 + 同 key + 不同输入 → 稳定幂等冲突 70041（零写入）；不同用户同 key 独立作用域。
 // T05 读路径（GET / 列表 + GET /:id 详情）在本文件（docs/autofigure/tickets/
-// T05-figure-history-ownership.md）；runner（T03）不在本文件范围。
+// T05-figure-history-ownership.md）；T06 PNG 下载（GET /:id/png）在本文件（T06-artifact-
+// persistence-png.md）；runner（T03）不在本文件范围。
 // 装配：AppDeps.figures 注入则挂载（flag 门在装配层 server.ts，flag 关不注入 → 路由不装配 → 90005）。
 
 import { Router, type Request, type Response, type NextFunction } from 'express'
@@ -20,6 +21,7 @@ import {
   createFigureWithJobInTx,
   createOrReplayFigure,
   getFigureForUser,
+  getFigurePngForUser,
   listFigures,
   IDEMPOTENCY_KEY_MAX_LENGTH,
 } from './service'
@@ -95,6 +97,19 @@ export function createFiguresRouter(_deps: FiguresRouterDeps): Router {
     const id = req.params.id as string // Express 5 params 可含 string[]；cuid 单段路径恒 string
     const figure = await getFigureForUser(req.prisma, req.user!, id)
     ok(res, figure)
+  })
+
+  // GET /:id/png —— 仅 owner、仅 succeeded 下载 PNG 字节（T06 · spec §3 下载契约 · AC9）。
+  // 成功路径豁免 #312 信封：原生 PNG 字节 + Content-Type image/png（「下载成功路径除外」），
+  // 绝不 base64-in-JSON。错误面走信封：不存在/越权 → 70040（复用共享归属门 getFigurePngForUser，
+  // 与 /:id 同码防枚举）；queued/running → 70042 未就绪；failed → 70043 不可用——均明确应用级
+  // 响应，非模糊 500。Express res.send 对 Uint8Array 会 JSON 序列化（Buffer.isBuffer false）→
+  // 必须先 Buffer.from 转换才按字节直发。
+  router.get('/:id/png', async (req: Request, res: Response) => {
+    const id = req.params.id as string
+    const png = await getFigurePngForUser(req.prisma, req.user!, id)
+    res.set('Content-Type', 'image/png')
+    res.send(Buffer.from(png))
   })
 
   return router

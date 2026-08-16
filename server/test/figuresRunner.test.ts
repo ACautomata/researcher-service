@@ -22,6 +22,7 @@ import {
   assertLegalTransition,
   claimQueuedJob,
   persistTerminalState,
+  persistSucceededWithArtifacts,
   reconcileRunningJobs,
   timeoutRunningJobs,
   JOB_TIMEOUT_REASON,
@@ -30,7 +31,7 @@ import {
   createGenerationRunner,
   type GenerationRunner,
 } from '../src/figures/runner'
-import { FakeAutoFigureGenerationPort } from './figuresFakePort'
+import { FakeAutoFigureGenerationPort, okArtifacts } from './figuresFakePort'
 
 // 临时库建表源（与 setup.ts 同源：better-sqlite3 直读 init.sql，不经 prisma CLI）。
 const INIT_SQL = readFileSync(path.join(process.cwd(), 'prisma', 'init.sql'), 'utf8')
@@ -123,6 +124,11 @@ describe('T03 runner（AC1/AC2）fake 结果 → 终态持久化 + 时间戳', (
     expect(job.errorMessage).toBeNull()
     expect(fake.calls).toHaveLength(1)
     expect(fake.calls[0].input).toEqual({ prompt })
+    // T06：succeeded 终态与产物同一事务原子落 Figure（xml/png/evaluation 齐备）
+    const figure = await prisma.figure.findUniqueOrThrow({ where: { id: job.figureId } })
+    expect(figure.xml).toBe('<mxfile host="fake" type="device"><diagram/></mxfile>')
+    expect(figure.evaluation).toBe('{"ok":true,"quality":"good"}')
+    expect(Array.from(figure.png!)).toEqual([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x01, 0x02, 0x03])
   })
 
   it('fake 失败 → failed；非敏感 errorMessage 落库；时间戳齐全', async () => {
@@ -138,6 +144,11 @@ describe('T03 runner（AC1/AC2）fake 结果 → 终态持久化 + 时间戳', (
     expect(job.errorMessage).toBe('provider quota exceeded')
     expect(job.startedAt).not.toBeNull()
     expect(job.finishedAt).not.toBeNull()
+    // T06：failed 不落任何成功产物
+    const figure = await prisma.figure.findUniqueOrThrow({ where: { id: job.figureId } })
+    expect(figure.xml).toBeNull()
+    expect(figure.png).toBeNull()
+    expect(figure.evaluation).toBeNull()
   })
 
   it('Port 抛异常 → 归一 failed（非敏感消息，不暴露内部栈/凭证）', async () => {
@@ -205,7 +216,7 @@ describe('T03 concurrency=1（AC4）不同 queued Job 不重叠执行', () => {
     await t2 // t2 未启动任何 runOne
 
     await entered // 确定性：A 的 generate 已进入（resolver 已就位）
-    fake.resolveNext({ ok: true }) // A 成功
+    fake.resolveNext(okArtifacts()) // A 成功
     await t1
 
     expect((await prisma.generationJob.findUniqueOrThrow({ where: { id: jobA } })).status).toBe(
@@ -361,13 +372,67 @@ describe('T03 start/stop 生命周期', () => {
     const t1 = runner.tick() // 挂起于 generate
     const stopP = runner.stop() // 应等待在飞周期
     await entered // A 的 generate 已进入
-    fake.resolveNext({ ok: true })
+    fake.resolveNext(okArtifacts())
     await t1
     await stopP // 不挂死 → stop 等待生效
 
     expect((await prisma.generationJob.findUniqueOrThrow({ where: { id: jobId } })).status).toBe(
       'succeeded',
     )
+  })
+})
+
+// ---------------------------------------------------------------------------
+// T06（docs/autofigure/tickets/T06-artifact-persistence-png.md）：成功产物 + succeeded 终态
+// 原子提交 seam（persistSucceededWithArtifacts）。产物提交时机 + 迟到围栏的不变量断言见上：
+// 成功测试断言三产物落库、failed 测试断言无产物、T04 迟到成功测试断言产物不写。
+// ---------------------------------------------------------------------------
+
+describe('T06 产物原子提交（persistSucceededWithArtifacts seam）', () => {
+  it('CAS 命中（running）→ succeeded + 三产物同事务落库，返回 true', async () => {
+    const userId = await createUser()
+    const jobId = await seedJob('p', userId, { status: 'running' })
+    const figureId = (await prisma.generationJob.findUniqueOrThrow({ where: { id: jobId } })).figureId
+    const artifacts = okArtifacts()
+
+    const committed = await persistSucceededWithArtifacts(prisma, jobId, figureId, artifacts)
+    expect(committed).toBe(true)
+
+    const job = await prisma.generationJob.findUniqueOrThrow({ where: { id: jobId } })
+    expect(job.status).toBe('succeeded')
+    expect(job.finishedAt).not.toBeNull()
+    expect(job.errorMessage).toBeNull() // 成功态清空 errorMessage（runner 契约）
+    const figure = await prisma.figure.findUniqueOrThrow({ where: { id: figureId } })
+    expect(figure.xml).toBe(artifacts.xml)
+    expect(figure.evaluation).toBe(artifacts.evaluation)
+    expect(Array.from(figure.png!)).toEqual(Array.from(artifacts.png))
+  })
+
+  it('CAS 不命中（Job 已 failed）→ 返回 false，不写任何产物、失败原因不被覆盖', async () => {
+    const userId = await createUser()
+    const jobId = await seedJob('p', userId, { status: 'failed', errorMessage: '原始失败原因' })
+    const figureId = (await prisma.generationJob.findUniqueOrThrow({ where: { id: jobId } })).figureId
+
+    const committed = await persistSucceededWithArtifacts(prisma, jobId, figureId, okArtifacts())
+    expect(committed).toBe(false)
+
+    const job = await prisma.generationJob.findUniqueOrThrow({ where: { id: jobId } })
+    expect(job.status).toBe('failed')
+    expect(job.errorMessage).toBe('原始失败原因') // 迟到成功不覆盖失败原因
+    const figure = await prisma.figure.findUniqueOrThrow({ where: { id: figureId } })
+    expect(figure.xml).toBeNull()
+    expect(figure.png).toBeNull()
+    expect(figure.evaluation).toBeNull()
+  })
+
+  it('产物写入失败 → 事务整体回滚：Job 不转 succeeded（绝不出现「succeeded 但无产物」）', async () => {
+    const userId = await createUser()
+    const jobId = await seedJob('p', userId, { status: 'running' })
+
+    // figure.update 命中不存在 id → P2025 抛错 → 事务回滚，succeeded 连同回滚
+    await expect(persistSucceededWithArtifacts(prisma, jobId, 'no-such-figure', okArtifacts())).rejects.toThrow()
+    const job = await prisma.generationJob.findUniqueOrThrow({ where: { id: jobId } })
+    expect(job.status).toBe('running') // 原子性：无「succeeded 但无产物」中间态
   })
 })
 
@@ -485,12 +550,17 @@ describe('T04 迟到结果围栏（AC4 关键不变量）—— 终态即终态'
     await timeoutRunningJobs(prisma, new Date(startedAt.getTime() + 60_000 + 1), 60_000)
     expect((await prisma.generationJob.findUniqueOrThrow({ where: { id: jobId } })).status).toBe('failed')
 
-    await settle({ ok: true }) // Port 迟到返回成功（围栏必须丢弃）
+    await settle(okArtifacts()) // Port 迟到返回成功（围栏必须丢弃）
 
     const after = await prisma.generationJob.findUniqueOrThrow({ where: { id: jobId } })
     expect(after.status).toBe('failed') // failed 不回滚
     expect(after.errorMessage).toBe(JOB_TIMEOUT_REASON) // 迟到成功不覆盖失败原因
     expect(after.finishedAt).not.toBeNull()
+    // T06：迟到成功产物被丢弃——Figure 无 xml/png/evaluation，未转 succeeded
+    const figure = await prisma.figure.findUniqueOrThrow({ where: { id: after.figureId } })
+    expect(figure.xml).toBeNull()
+    expect(figure.png).toBeNull()
+    expect(figure.evaluation).toBeNull()
   })
 
   it('迟到失败不覆盖终态：超时 failed 后 Port 返回失败 → 原因保持超时原因', async () => {
@@ -517,11 +587,16 @@ describe('T04 迟到结果围栏（AC4 关键不变量）—— 终态即终态'
     expect(reconciled).toBe(1)
     expect((await prisma.generationJob.findUniqueOrThrow({ where: { id: jobId } })).status).toBe('failed')
 
-    await settle({ ok: true }) // 迟到成功被丢弃
+    await settle(okArtifacts()) // 迟到成功被丢弃
 
     const after = await prisma.generationJob.findUniqueOrThrow({ where: { id: jobId } })
     expect(after.status).toBe('failed')
     expect(after.errorMessage).toBe(JOB_RECONCILE_REASON)
+    // T06：reconcile 竞态下迟到成功同样不落产物
+    const figure = await prisma.figure.findUniqueOrThrow({ where: { id: after.figureId } })
+    expect(figure.xml).toBeNull()
+    expect(figure.png).toBeNull()
+    expect(figure.evaluation).toBeNull()
   })
 })
 
