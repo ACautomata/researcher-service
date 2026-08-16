@@ -52,10 +52,24 @@ Source of truth: `docs/autofigure/grilling-decisions.md` §10 / §11 / §12
 
 ## Completion evidence
 
-- targeted tests:
-- typecheck/build:
-- broader tests:
-- first code review:
-- fixes:
-- second code review:
-- commit:
+- fixed point: `e4c5a0e`（T09 merge commit，实施基线）
+- implementation commit: `41231f6` — `feat: AutoFigure T10 — dev compose sidecar wiring + gated real-generation smoke`（8 文件，+474/−8）
+  - `deploy/docker-compose.dev.yml` / `.env.example` / `README.md`：dev 栈 sidecar 接线（仅 panel-dev-net、无宿主端口、零 host 挂载、mem_limit 2g judgement call、/health 容器 healthcheck；server env 四键注入，JOB_TIMEOUT_MS 显式 1800000 防空串）
+  - `server/src/config.ts`（注释对齐 8080）+ `server/test/config.test.ts`（SIDECAR_URL 用例 → 8080；新增 JOB_TIMEOUT_MS 空串 fail-fast 用例）
+  - `server/test/smokeGating.ts` / `smokeGating.test.ts`：门控三条件（docker 可用 + `AUTOFIGURE_SMOKE==='1'` + `AUTOFIGURE_LLM_KEY` 非空，不含宿主侧 SIDECAR_URL）
+  - `server/test/figuresSmoke.test.ts`：门控真实生成 smoke（dockerode 编排 sidecar 到 bridge、无 -p 发布；走 bootstrap B1 → login → password/change C1 → 二次 login → POST /figures → 轮询 → GET /:id/png 签名校验）
+- first code review（双轴）:
+  - Standards: 0 硬违规；4 judgement calls（readSmokeTimeoutMs 轻度重复、smoke env 轻度散落、.env.example smoke 提示与实际生效路径不一致、figuresSmoke C1 密码注释措辞）
+  - Spec: 0 阻塞/缺失硬项；3 minor/文档级缺口（smoke 不经 assembleAutoFigureRuntime 整链——合理偏离、compose panel-net 拓扑无自动化验证、AUTOFIGURE_SMOKE_TIMEOUT_MS 未列入 .env.example）
+- fixes（review 后、commit 前）: `.env.example` smoke 提示行改为宿主 vitest 语义 + 补 `AUTOFIGURE_SMOKE_TIMEOUT_MS`；figuresSmoke 头注释收敛——均文档级 nit，无行为变化
+- second code review: 无（T10 仅一轮 /code-review；修复均为文档级、未引入行为变化，无需复检）
+- typecheck/build: `npm run typecheck` 干净；`npm run build` EXIT=0
+- broader tests: 全量 server 套件 722 passed；2 项既有环境门控失败（containers-smoke / pairingSmoke 需真 docker daemon，本机 daemon 不可用，非 T10 改动）
+- targeted tests（post-fix）: config.test 85 + smokeGating.test 7 + figuresSmoke 门控跳过 → 92 passed | 1 skipped
+- real gated smoke: **SKIPPED / NOT EXECUTED** —— 本机 Docker daemon 不可用（`/var/run/docker.sock` 指向缺失 socket），门控三条件不满足（docker 探测 false），`describe.skipIf` 整套跳过。**不声称真实 submit → succeeded → PNG 链通过**。Docker 可用后按 `deploy/README.md`「门控真实生成 smoke」执行：
+  ```
+  docker compose -f deploy/docker-compose.dev.yml build autofigure   # 或 docker build deploy/autofigure-sidecar -t autofigure-sidecar:dev
+  cd server && AUTOFIGURE_SMOKE=1 AUTOFIGURE_LLM_KEY=sk-... npm test -- figuresSmoke
+  ```
+- T11/T12: 明确 out of scope，未开始
+- commit: `41231f6`（implementation commit；completion-evidence commit 见后续 fix 提交——commit 不能自引用自身 SHA）
