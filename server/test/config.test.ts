@@ -644,3 +644,39 @@ describe('AutoFigure llm key env (slice config, T03)', () => {
     expect(await loadAutofigureLlmKey({ env: 'production', flag: 'false', key: undefined })).toBe('')
   })
 })
+
+// T04（docs/autofigure/tickets/T04-timeout-reconcile-late-result.md）：AUTOFIGURE_JOB_TIMEOUT_MS ——
+// AutoFigure 执行超时（ms）。默认 30 分钟（config boundary 唯一声明处，runner 逻辑不硬编码生产
+// 超时）；超时自进入 running（startedAt）起算。非法值（非正整数）fail-fast（对齐
+// readDefaultMaxContainers 加载即校验）——否则错值静默按默认 30min 走，超时语义错配只在运行期暴露。
+describe('AutoFigure job timeout env (slice config, T04)', () => {
+  async function loadAutofigureJobTimeoutMs(env: string | undefined): Promise<number | 'THREW'> {
+    vi.resetModules() // 清 config 模块缓存，让动态 import 重新快照 env
+    if (env === undefined) delete process.env.AUTOFIGURE_JOB_TIMEOUT_MS
+    else vi.stubEnv('AUTOFIGURE_JOB_TIMEOUT_MS', env)
+    try {
+      const { config } = await import('../src/config')
+      return config.autofigure.jobTimeoutMs
+    } catch {
+      return 'THREW' // fail-fast
+    } finally {
+      vi.unstubAllEnvs() // 恢复 env（避免污染后续测试文件）
+    }
+  }
+
+  it('未设置 → 默认 30 分钟（30 * 60 * 1000 ms）', async () => {
+    expect(await loadAutofigureJobTimeoutMs(undefined)).toBe(30 * 60 * 1000)
+  })
+
+  it('显式正整数值 → 保留（测试注入短超时的管道）', async () => {
+    expect(await loadAutofigureJobTimeoutMs('50')).toBe(50)
+  })
+
+  it('非法 0 → fail-fast（超时须为正整数毫秒，防静默按默认 30min 走）', async () => {
+    expect(await loadAutofigureJobTimeoutMs('0')).toBe('THREW')
+  })
+
+  it('非法非数 → fail-fast', async () => {
+    expect(await loadAutofigureJobTimeoutMs('abc')).toBe('THREW')
+  })
+})
