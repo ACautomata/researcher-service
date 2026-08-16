@@ -163,3 +163,40 @@ docker compose -f deploy/docker-compose.dev.yml up -d --build server
   `NODE_ENV=development`（走 config.ts dev 分支）与「server 暴露 8001 给宿主 vite」为 dev 特有。
 - **双轨工作流**：纯逻辑快速迭代仍走宿主 `cd server && npm test` / `npm run typecheck`（不起服务、
   不摸卷）；凡要起服务 / 真编排 OpenClaw 容器（named volume 拓扑），一律走本容器化 dev 栈。
+
+## AutoFigure 接线（T10，docs/autofigure/tickets/T10-dev-sidecar-smoke.md）
+
+dev 栈额外起 **autofigure**（T08 sidecar）服务：仅挂 `panel-dev-net`、**无宿主端口暴露、零 host 挂载**
+（ADR 0013），`/health` 容器 healthcheck；`mem_limit: 2g` 为 T10 judgement call（真实生成 = Playwright
+渲染 + LLM 调用的内存上限，仅 dev 栈约束，不构成 prod 契约——prod 打包归 T11）。server 经 env 注入
+`AUTOFIGURE_ENABLED`（默认关）`AUTOFIGURE_LLM_KEY` `AUTOFIGURE_SIDECAR_URL`（默认
+`http://autofigure:8080`）`AUTOFIGURE_JOB_TIMEOUT_MS`（默认 1800000）；凭证仅经 env 插值、由 server
+经 `X-Autofigure-Api-Key` header 注入 sidecar，不落盘/不入日志/不 commit 假值。
+
+**flag 默认关**：`AUTOFIGURE_ENABLED=false` 时 server 不装配 AutoFigure runtime（queued 不迁移），
+sidecar 不参与面板启动/health 依赖（`depends_on` 仅 `service_started`，dev 栈不因 sidecar 卡死）——
+生产/公开 API 契约不变。
+
+### 门控真实生成 smoke（宿主 vitest + 真 sidecar 容器）
+
+```bash
+# 1. 构建 sidecar 镜像（T08 交付；dev 镜像非 registry，smoke 绝不 pull）
+docker compose -f deploy/docker-compose.dev.yml build autofigure
+#    或 docker build deploy/autofigure-sidecar -t autofigure-sidecar:dev
+
+# 2. 设真 key + 打开 smoke（三条件门控：docker 可用 + AUTOFIGURE_SMOKE=1 + key 非空，缺一自动跳过）
+cd server
+AUTOFIGURE_SMOKE=1 AUTOFIGURE_LLM_KEY=sk-... npm test -- figuresSmoke
+```
+
+- **sidecar 可达**（对齐 containers-smoke 模式）：测试经 dockerode 自建 sidecar 容器到默认 bridge，
+  **无 `-p` 端口发布**（AC2「sidecar 无宿主端口暴露」保持），经容器 bridge IP 访问内部 8080；
+  显式设 `AUTOFIGURE_SIDECAR_URL`（指向任一可达 sidecar）可跳过编排复用既有实例（灵活路径，非默认）。
+- **走真实公开 API 全链**：`bootstrap B1`（日志临时密码）→ `login` → `password/change`（C1）→
+  二次 `login` → `POST /api/v1/figures`（Idempotency-Key）→ 轮询 `GET /:id` → succeeded →
+  `GET /:id/png` 原生 PNG 字节。直接调 `/v1/generate` **不算** T10 smoke。
+- **超时**：应用执行超时 `AUTOFIGURE_SMOKE_TIMEOUT_MS`（默认 600000，T10 实施选择，nginx 300s×2
+  余量；非法/空串回退默认），生产唯一执行超时仍为 `AUTOFIGURE_JOB_TIMEOUT_MS`（默认 1800000）——
+  smoke 不等待真实 30min；轮询截止独立（应用超时 + 60s），二者不引入第二 timeout 契约。
+- **sidecar 容器清理**：测试 `afterAll` 强制移除（含半途失败）；异常退出（SIGKILL）残留时手动
+  `docker rm -f autofigure-smoke-*`。

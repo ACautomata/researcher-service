@@ -606,7 +606,7 @@ describe('AutoFigure llm key env (slice config, T03)', () => {
       vi.stubEnv('CREDENTIAL_ENCRYPTION_KEYS', Buffer.alloc(32, 0x01).toString('base64'))
       vi.stubEnv('OPENCLAW_TEMPLATE_DIR', process.cwd())
       vi.stubEnv('PANEL_PUBLIC_ORIGIN', 'https://panel.example.com')
-      vi.stubEnv('AUTOFIGURE_SIDECAR_URL', 'http://autofigure:8796')
+      vi.stubEnv('AUTOFIGURE_SIDECAR_URL', 'http://autofigure:8080')
     }
     if (key === undefined) delete process.env.AUTOFIGURE_LLM_KEY
     else vi.stubEnv('AUTOFIGURE_LLM_KEY', key)
@@ -678,6 +678,10 @@ describe('AutoFigure job timeout env (slice config, T04)', () => {
     expect(await loadAutofigureJobTimeoutMs('0')).toBe('THREW')
   })
 
+  it('非法空串 → fail-fast（T10 compose 接线陷阱：`${VAR:-}` 无默认值注入空串 → Number(\'\')=0 静默按 0ms 走；须显式默认 1800000）', async () => {
+    expect(await loadAutofigureJobTimeoutMs('')).toBe('THREW')
+  })
+
   it('非法非数 → fail-fast', async () => {
     expect(await loadAutofigureJobTimeoutMs('abc')).toBe('THREW')
   })
@@ -731,8 +735,8 @@ describe('AutoFigure sidecar url env (slice config, T07)', () => {
   })
 
   it('dev 显式 http URL → 保留', async () => {
-    expect(await loadAutofigureSidecarUrl({ url: 'http://autofigure:8796' })).toBe(
-      'http://autofigure:8796',
+    expect(await loadAutofigureSidecarUrl({ url: 'http://autofigure:8080' })).toBe(
+      'http://autofigure:8080',
     )
   })
 
@@ -750,14 +754,14 @@ describe('AutoFigure sidecar url env (slice config, T07)', () => {
 
   it('生产 enabled + 非 http(s) 协议 → fail-fast', async () => {
     expect(
-      await loadAutofigureSidecarUrl({ env: 'production', flag: 'true', url: 'ftp://autofigure:8796' }),
+      await loadAutofigureSidecarUrl({ env: 'production', flag: 'true', url: 'ftp://autofigure:8080' }),
     ).toBe('THREW')
   })
 
   it('生产 enabled + 合法 http URL → 放行并返回', async () => {
     expect(
-      await loadAutofigureSidecarUrl({ env: 'production', flag: 'true', url: 'http://autofigure:8796' }),
-    ).toBe('http://autofigure:8796')
+      await loadAutofigureSidecarUrl({ env: 'production', flag: 'true', url: 'http://autofigure:8080' }),
+    ).toBe('http://autofigure:8080')
   })
 
   it('生产 enabled + 合法 https URL → 放行并返回', async () => {
