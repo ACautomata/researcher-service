@@ -58,10 +58,51 @@ Source of truth: `docs/autofigure/grilling-decisions.md` §3 / §9
 
 ## Completion evidence
 
-- targeted tests:
-- typecheck/build:
-- broader tests:
-- first code review:
-- fixes:
-- second code review:
-- commit:
+- **implementation summary**（固定点 0992afcc，未提交工作树，源码/测试 + 文档组，各单独提交）:
+  - 读路径（`server/src/figures/service.ts`）：`listFigures`（user 仅自己 / admin 全用户，spec US15 / grilling §3；
+    排序 = 已批准 V1 规则 createdAt DESC + id DESC 稳定 tiebreaker，确定性，无分页/过滤/搜索/用户排序）+ `getFigureForUser`
+    （单点归属门镜像 `getInstanceForUser`：不存在 vs 越权同码 70040 防枚举，区分仅进服务端日志）。
+  - 状态投影：`FigureAppStatus` = 应用级 queued/running/succeeded/failed（不泄露 queue/worker/Python/BullMQ）；
+    failed 态经 `publicFailureReason` **白名单护栏**（只透出 runner 三条稳定原因 JOB_TIMEOUT_REASON / JOB_RECONCILE_REASON /
+    GENERATION_EXECUTION_ERROR，未知/敏感内容归通用非敏感原因，单源见 runner.ts）——安全审查 + 首轮 Spec 轴最坏问题的修复。
+  - 共享 `toSummary` 投影（消重复映射）+ detail select 对称收窄（只读 id/status/errorMessage 三列）。
+  - 路由（`server/src/figures/routes.ts`）：GET / 列表 + GET /:id 详情（`req.params.id as string` 对齐 Express 5 cast 惯例）；
+    经顶部 `router.use(requireAuth, mustChangePasswordGate)` 鉴权（GET 与 POST 同款，未认证 10001 已断言）。
+  - 码：`CODE.FIGURE_NOT_FOUND: 70040`（T05 读路径激活）+ DEFAULT_MESSAGE；AGENTS.md 码段图「70040 预留」→「T05 生效」。
+  - 无 schema delta（Figure/GenerationJob 全列 T01/T03 已就绪）。
+- **targeted tests**: `server/test/figuresHistory.test.ts` 21/21（20 首轮 + 1 护栏新增）——5 describe：仅自己列表（他人不出现 /
+  createdAt DESC / id tiebreaker / 空列表 code 0）· 四态投影（list+detail，errorMessage 仅 failed 非空）· 归属门防枚举
+  （他人 70040 / 不存在 70040 / 逐字节一致 / 本人放行 / 未认证 10001）· admin 跨用户（全见仅读、DELETE→90005 行仍在、
+  详情不暴露 ownerId）· 越界与 flag 关（无 PNG 端点 90005、flag 关 GET 90005）+ 护栏（未知/敏感 errorMessage→通用非敏感，不外泄）。
+- **typecheck/build**: `tsc --noEmit` 干净；`npm run build` EXIT=0（Node v22.23.2 经 `npx node@22.23.2 npm-cli.js run build`
+  绕过 @prisma/dev×zeptomatch ESM bug——与 T03/T04 同法）。
+- **broader tests**: `vitest run` 全量 660 passed / 6 skipped（2 个失败 suite = containers/pairing docker smoke 基线，
+  需真 daemon，`/var/run/docker.sock` ENOENT，未触碰相关文件；must-change-gate 并行 flaky 单跑 4/4 恢复）；figures
+  （T01/T02 回归）37/37 + runner（T03/T04 回归）30/30。
+- **first code review**: 固定点 0992afcc 双轴（Standards + Spec）并行。
+  - Standards 轴：**1 硬问题**——AGENTS.md 码段图「70040 预留 T05」未随本票激活更新（Shotgun Surgery：codes.ts + 码段图应同步）；
+    镜像核验通过（getFigureForUser 与 getInstanceForUser 逐项一致）；5 判断点（figure→投影映射写两遍 / 同码门第 5 份复制可接受 /
+    detail 投影未收窄 / 测试顺序依赖弱 / FigureAppStatus 别名）。
+  - Spec 轴：AC 无缺项、无越界；**1 部分保护**——failed 态 errorMessage 只做状态门、无内容级护栏，「非敏感」保证完全依赖 T03 写侧纪律；
+    1 文档张力（spec §3 L105/L109 未注 admin 例外，与 US15 / grilling §3 内部不一致）。
+  - 安全审查补充（背景自动）：GET 缺 requireAuth 属误报（router.use 已覆盖，未认证 10001 已断言）；errorMessage 透传为 MEDIUM，并入护栏修复。
+- fixes: 应用 6 处修复（复验：focused 21/21 + figures/runner 67/67 + typecheck 干净 + build EXIT=0）——
+  1) AGENTS.md 码段图「70040 预留 T05」→「70040 不存在/越权同码防探测（T05 读路径）」；codes.ts 头注释补 6xxxx/7xxxx 段；
+     service.ts 头注释「读路径不在本文件范围」过时改正。
+  2) **护栏**：`publicFailureReason` 白名单透出（service.ts），`GENERATION_EXECUTION_ERROR` 从 runner.ts 导出（单源，service→runner
+     单向无循环）；未知/敏感内容归通用非敏感原因；新增护栏测试（AC4+）。
+  3) 共享 `toSummary` 投影（消重复映射）+ detail select 对称收窄（id/status/errorMessage）。
+  4) spec.md §3 两处补 admin carve-out（与 US15 / grilling §3 一致）。
+  5) AGENTS.md 5xxxx 改「非信封段（错误经 WS close codes）」——消除与 spec §4 / codes.ts 的矛盾（二轮 Standards 残留）。
+  6) spec.md §3 补一句「读路径仅透出白名单稳定原因，其余归通用」（对齐已批准护栏取舍；二轮 Spec 残留）。
+  接受不修（记录在案）：`GENERIC_FAILURE_REASON = GENERATION_EXECUTION_ERROR` 命名别名（注释已解释）；测试顺序依赖（既有 fixture 家风格）；
+  同码门第 5 份复制（repo「每域自持单点门」约定覆盖 baseline）。
+- **second code review**: 双轴第二轮复核（修复后，针对当前工作树）。
+  - Standards 轴：首轮硬问题与判断项全部确认已修复（码段图双向吻合 / toSummary 共用 / detail 收窄注释化）；新引入核查干净——
+    无循环依赖（service→runner 单向、runner 零运行时导入，单源纪律同构 codes.ts）、护栏正确惯用、护栏测试命中真实读路径。
+    残留 1（judgement）：AGENTS.md 5xxxx 仍列信封段——已随本轮修复（见 fixes 5）。
+  - Spec 轴：护栏不遮蔽已批准稳定原因（三条逐字节透传有测试；AC4+ 折叠路径有测试）；admin carve-out 编辑与 US15/grilling §3 一致；
+    9 AC 全覆盖；排序决策保留；无删除/PNG/分页越界。非阻塞：白名单把「非敏感错误」收窄为三字符串，与 Port 写侧契约（任意非敏感原因）
+    不对称——已通过 spec §3 补注声明（fixes 6），T07 适配器须显式映射到白名单。
+- commit: `fb1d475`（`feat: AutoFigure T05 — figure history and ownership read path`）——源码/测试 5 文件
+  （codes/routes/service/runner + figuresHistory.test.ts），固定点 `0992afcc`；文档（AGENTS.md + spec.md + 本票）单独提交。
