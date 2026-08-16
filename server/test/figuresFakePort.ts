@@ -11,6 +11,7 @@
 import type {
   AutoFigureGenerationCredential,
   AutoFigureGenerationInput,
+  AutoFigureGenerationOptions,
   AutoFigureGenerationPort,
   AutoFigureGenerationResult,
   AutoFigureGenerationSuccess,
@@ -30,11 +31,17 @@ export function okArtifacts(overrides: Partial<Omit<AutoFigureGenerationSuccess,
 }
 
 export class FakeAutoFigureGenerationPort implements AutoFigureGenerationPort {
-  /** 每次 generate 的 (input, credential) 记录——分别断言，不混同 */
-  calls: Array<{ input: AutoFigureGenerationInput; credential: AutoFigureGenerationCredential }> = []
+  /** 每次 generate 的 (input, credential, signal) 记录——分开断言，不混同 */
+  calls: Array<{
+    input: AutoFigureGenerationInput
+    credential: AutoFigureGenerationCredential
+    signal?: AbortSignal
+  }> = []
   /** 抛错模式：generate 抛异常（模拟执行体崩溃/网络异常 → runner 归一 failed） */
   throwOnGenerate = false
-  /** 挂起模式：generate 返回受控 pending promise，由 resolveNext() 手动 settle */
+  /** 挂起模式：generate 返回受控 pending promise，由 resolveNext() 手动 settle；
+   *  T07 扩 Scope：pending 期间若传入 signal 且被 abort → reject（模拟真 fetch 被取消，
+   *  供 runner T04 超时中止在飞生成的集成测试断言 pump 解卡） */
   mode: 'auto' | 'pending' = 'auto'
 
   private readonly script: AutoFigureGenerationResult[]
@@ -48,15 +55,27 @@ export class FakeAutoFigureGenerationPort implements AutoFigureGenerationPort {
   async generate(
     input: AutoFigureGenerationInput,
     credential: AutoFigureGenerationCredential,
+    options?: AutoFigureGenerationOptions,
   ): Promise<AutoFigureGenerationResult> {
-    this.calls.push({ input, credential })
+    this.calls.push({ input, credential, signal: options?.signal })
     // 同步块内先发「已进入」信号，再注册 pending resolver——测试先 await generateEntered()
     // 再 resolveNext()，即保证 resolver 已就位，消除竞态。
     this.enteredWaiters.shift()?.()
     if (this.throwOnGenerate) throw new Error('simulated port crash')
     if (this.mode === 'pending') {
-      return new Promise((resolve) => {
-        this.resolvers.push(resolve)
+      return new Promise((resolve, reject) => {
+        if (options?.signal) {
+          if (options.signal.aborted) {
+            reject(Object.assign(new Error('The operation was aborted.'), { name: 'AbortError' }))
+            return
+          }
+          options.signal.addEventListener(
+            'abort',
+            () => reject(Object.assign(new Error('The operation was aborted.'), { name: 'AbortError' })),
+            { once: true },
+          )
+        }
+        this.resolvers.push((r) => resolve(r))
       })
     }
     return this.script.length > 0 ? (this.script.shift() as AutoFigureGenerationResult) : okArtifacts()

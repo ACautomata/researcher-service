@@ -251,6 +251,38 @@ function readAutofigureJobTimeoutMs(): number {
   return v
 }
 
+// AUTOFIGURE_SIDECAR_URL（T07，docs/autofigure/tickets/T07-autofigure-http-adapter.md）：
+// 私有 AutoFigure sidecar 的 HTTP base URL（panel-net 内、不暴露宿主端口，如
+// http://autofigure:8796）。flag 开 + 生产缺省/非法 URL → fail-fast（否则错配只在 enabled 时
+// adapter 构造/首请求才暴露——对齐 readPanelOrigin 前置校验模式）；dev/test 缺省容忍空串
+//（装配测试经 DI 注入 sidecarUrl，不经 config）。只存 config.autofigure.sidecarUrl，由装配层注入
+// 生产 HTTP adapter；不落盘/不入日志。T07 不引入 adapter-local HTTP timeout——sidecar 请求超时
+// 语义由 T04 AUTOFIGURE_JOB_TIMEOUT_MS（应用 runner 超时）唯一承担。
+function readAutofigureSidecarUrl(enabled: boolean): string {
+  const v = process.env.AUTOFIGURE_SIDECAR_URL ?? ''
+  if (enabled && process.env.NODE_ENV === 'production') {
+    if (v === '') {
+      throw new Error(
+        'AUTOFIGURE_SIDECAR_URL 必须在生产环境显式提供（AUTOFIGURE_ENABLED=true 时 sidecar 地址必填）',
+      )
+    }
+    let url: URL
+    try {
+      url = new URL(v)
+    } catch {
+      throw new Error(
+        `AUTOFIGURE_SIDECAR_URL 非法（须为 http(s)://<host>[:<port>] 完整 URL）: ${JSON.stringify(v)}`,
+      )
+    }
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+      throw new Error(
+        `AUTOFIGURE_SIDECAR_URL 协议非法（须 http/https，私有 sidecar 传输）: ${JSON.stringify(v)}`,
+      )
+    }
+  }
+  return v
+}
+
 export const config = {
   jwtSecret: readSecret(),
   accessTtl: process.env.ACCESS_TOKEN_TTL ?? '5m',
@@ -319,6 +351,11 @@ export const config = {
       // 执行超时（T04）：默认 30 分钟（readAutofigureJobTimeoutMs 唯一声明处），自进入 running
       //（startedAt 置位）起算。只被装配层注入 runner timeoutMs；不暴露公开 API。
       jobTimeoutMs: readAutofigureJobTimeoutMs(),
+      // sidecar 地址（T07）：私有 HTTP base URL，flag 开 + 生产缺/非法 → fail-fast
+      //（readAutofigureSidecarUrl）。只被装配层注入生产 HTTP adapter（assembleAutoFigureRuntime）；
+      // 不落盘/不入日志。T07 无 adapter-local timeout——sidecar 请求超时语义由上方 jobTimeoutMs
+      //（T04 应用 runner 超时）唯一承担。
+      sidecarUrl: readAutofigureSidecarUrl(enabled),
     }
   })(),
 }

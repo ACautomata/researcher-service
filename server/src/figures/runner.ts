@@ -207,6 +207,11 @@ class DefaultGenerationRunner implements GenerationRunner {
   // T04 启动对账一次性守卫：pump 首周期 claim 前 / sweeper 首跑前都先执行 reconcile——孤儿
   // running→failed 先于本进程任何新 claim / 超时翻转（启动序不变量；见 ensureReconcile）。
   private reconciled = false
+  // T07 扩 Scope（shutdown-driven abort）：stop() 一次性闩——置位后不再领取新 Job、tick 为 no-op。
+  private stopping = false
+  // 当前 in-flight invocation 的 AbortController（runner 持有；stop() 借其立即 abort 在飞生成——
+  // 与 T04 超时 timer 共用同一 controller，不建两套互相竞争的取消抽象）。
+  private currentController: AbortController | undefined
 
   constructor(deps: GenerationRunnerDeps) {
     this.prisma = deps.prisma
@@ -235,6 +240,9 @@ class DefaultGenerationRunner implements GenerationRunner {
   }
 
   async stop(): Promise<void> {
+    // 幂等：二次 stop（含并发）时 timer/controller/tick 均已清理，各分支有守卫。
+    // 1) 停止新的 interval/tick + 阻止领取新的 Job（stopping 闩）。
+    this.stopping = true
     if (this.timer !== undefined) {
       clearInterval(this.timer)
       this.timer = undefined
@@ -243,12 +251,18 @@ class DefaultGenerationRunner implements GenerationRunner {
       clearInterval(this.sweeperTimer)
       this.sweeperTimer = undefined
     }
+    // 2) shutdown-driven abort：立即取消在飞 invocation——复用同一 AbortController（T04 超时与
+    //    shutdown 是同一个 controller 的两个触发源）。stop() 不改 Job 业务终态（不 running→failed；
+    //    遗留 running 交由下次 startup 的 T04 reconcile，见 runOne 的 stopping 分支）。
+    this.currentController?.abort()
+    // 3) await 当前 cycle settle：abort 使在飞 promise 即时 settle → 不等待 T04 timeout 到点。
     const inflight = this.currentTick
-    if (inflight) await inflight // 等在飞周期 settle（优雅关闭）
+    if (inflight) await inflight
     this.currentTick = null
   }
 
   tick(): Promise<void> {
+    if (this.stopping) return Promise.resolve() // stop 后不再领取新的 queued Job（shutdown 语义）
     if (this.active) return Promise.resolve() // concurrency=1：已有周期在执行，本次 no-op
     this.active = true
     // DB 层错误（updateMany 抛错等）：状态由已执行的持久化步骤决定，吞错后由 T04 reconcile/超时兜底
@@ -268,6 +282,7 @@ class DefaultGenerationRunner implements GenerationRunner {
     // T04 启动序：reconcile 先于任何 claim——孤儿 running→failed 在首个 queued 被领取前完成，
     // 本进程绝不会对账到自己刚 claim 的 Job（一次性守卫，幂等）。
     await this.ensureReconcile()
+    if (this.stopping) return // shutdown 已开始：不再领取新的 queued Job
 
     // 取最老的 queued Job（FIFO，确定性顺序），连带其 1:1 Figure 的 prompt 与 id
     //（id 供 T06 产物原子提交定位 Figure 行）。
@@ -277,18 +292,50 @@ class DefaultGenerationRunner implements GenerationRunner {
       select: { id: true, figure: { select: { id: true, prompt: true } } },
     })
     if (!job) return
+    if (this.stopping) return // 领取前 shutdown：放弃本周期（Job 仍 queued，留待下个进程）
 
     assertLegalTransition('queued', 'running')
     const claimed = await claimQueuedJob(this.prisma, job.id)
     if (!claimed) return // 并发重复领取的输家：他人已领，本 writer 放弃（至多一次执行）
+    if (this.stopping) {
+      // claim 后 shutdown 到达：本 Job 保持 running（不生成、不改终态）——下次 startup 由 T04
+      // reconcile 终态化（crash/restart interruption 唯一事实语义）。
+      return
+    }
 
-    // 凭证只在此处注入 Port；prompt 是域输入，分开传。
+    // 凭证只在此处注入 Port；prompt 是域输入，分开传。T07 扩 Scope（shutdown-driven abort）：
+    // 每个 in-flight invocation 持有 runner 的 AbortController——同一 controller 可被 (A) T04 应用
+    // 超时 (B) graceful shutdown / stop() 触发，不建两套互相竞争的取消抽象；signal 恒透传 Port
+    //（shutdown 取消能力不依赖 timeout policy；timeoutMs=0 时无 timer、仅 shutdown 可触发 abort）。
+    // 不新增 adapter-local 超时契约（V1 唯一 execution timeout 仍是 timeoutMs）。
+    // 时序不变量：promise settle 的微任务先于 timer 宏任务 → 合法成功恒在 clearTimeout 前 settle，
+    // 绝不会把成功结果误标超时；仅「settle 晚于 timeoutMs 触发」才归一为超时原因。
+    const controller = new AbortController()
+    this.currentController = controller
+    const abortTimer = this.timeoutMs > 0 ? setTimeout(() => controller.abort(), this.timeoutMs) : undefined
     let result: AutoFigureGenerationResult
     try {
-      result = await this.port.generate({ prompt: job.figure.prompt }, { apiKey: this.llmKey })
+      result = await this.port.generate(
+        { prompt: job.figure.prompt },
+        { apiKey: this.llmKey },
+        { signal: controller.signal },
+      )
     } catch {
       result = { ok: false, errorMessage: GENERATION_EXECUTION_ERROR }
+    } finally {
+      if (abortTimer) clearTimeout(abortTimer)
+      if (this.currentController === controller) this.currentController = undefined
     }
+
+    // shutdown-driven abort：不改 Job 业务终态——abort 传输/计算让进程可退出；仍 running 的 Job
+    // 交由下次 startup 的 T04 reconcile 终态化（stop() 绝不 running→failed，见 T07 ticket
+    // 「Approved scope extension — shutdown-driven abort」约束 4）。shutdown 内部错误（AbortError）
+    // 在此被消费，不写成任何 public failure reason（同节约束 6）。
+    if (this.stopping) return
+
+    // 超时中止在飞：信号已触发 → 本结果统一为超时原因（JOB_TIMEOUT_REASON，T05 白名单单源）。
+    // sweeper 若已先翻转（CAS 不命中）则本写入 no-op，原因仍为 TIMEOUT——两种竞态下原因确定性一致。
+    if (controller.signal.aborted) result = { ok: false, errorMessage: JOB_TIMEOUT_REASON }
 
     // T04 迟到结果围栏：若执行期间 Job 已被超时 sweeper / reconcile 翻为 failed，persistTerminalState
     // 的 WHERE status='running' 不命中 → count=0 返回 false，本结果被丢弃、终态不回滚、不转 succeeded
