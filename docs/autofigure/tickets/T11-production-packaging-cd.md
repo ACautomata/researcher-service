@@ -78,4 +78,4 @@ Source of truth: `docs/autofigure/grilling-decisions.md` §10 / §12
 - production runtime smoke: **NOT EXECUTED** —— 同上
 - reason: 本机 Docker daemon 不可用（`/var/run/docker.sock` 指向缺失 socket）。以上三项属 **CI-owned / 后续运行时验证**，**不声称本地通过**——镜像构建/推送与运行时健康行为由 CD 管线首次部署时验证
 - T12: 明确 out of scope，未进入
-- commit: `d959f10`（implementation commit）
+- commit: `d959f10`（implementation commit）+ `6176851`（completion-evidence commit：docs: record T11 completion evidence）
