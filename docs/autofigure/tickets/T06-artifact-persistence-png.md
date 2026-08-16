@@ -124,6 +124,6 @@ Source of truth: `docs/autofigure/grilling-decisions.md` §6
     幂等、user_version=6 不变、schemaUpgrade.test.ts 匹配（notnull===0 + version 6）；listFigures/findFigureForUser select
     排除产物列且无消费者读 xml/evaluation（grep 核验；runner 仅 succeeded 提交路径写）、PNG 仍字节精确（Uint8Array→Buffer.from）、
     70040/70042/70043 门不变、list/detail 行为无回归。两处 finding 全部 RESOLVED、无新 spec 问题。
-- commit: `<pending>`（`feat: AutoFigure T06 — artifact persistence and PNG download`）——源码/测试 13 文件
-  （schema.prisma/init.sql/upgrade-schema.mjs + codes/port/runner/service/routes + figuresFakePort/figuresRunner/figuresHistory/
-  schemaUpgrade/figuresPng.test.ts），固定点 `25133af`；文档（AGENTS.md + 本票）单独提交。
+- implementation commit: `d38dde6` (`feat: AutoFigure T06 — artifact persistence and PNG download`)
+- completion-evidence commit: `309ca62` (`docs: record T06 completion evidence`)
+- fixed point: `25133af`
