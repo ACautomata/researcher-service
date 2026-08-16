@@ -72,4 +72,4 @@ Source of truth: `docs/autofigure/grilling-decisions.md` §10 / §11 / §12
   cd server && AUTOFIGURE_SMOKE=1 AUTOFIGURE_LLM_KEY=sk-... npm test -- figuresSmoke
   ```
 - T11/T12: 明确 out of scope，未开始
-- commit: `41231f6`（implementation commit；completion-evidence commit 见后续 fix 提交——commit 不能自引用自身 SHA）
+- commit: `41231f6`（implementation commit）+ `4815f06`（completion-evidence commit：docs: record T10 completion evidence）
