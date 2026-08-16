@@ -144,7 +144,8 @@ export interface GenerationRunnerDeps {
 }
 
 // Port 抛异常（执行体崩溃/网络异常）→ 归一为 failed（非敏感消息；不暴露内部栈/凭证）。
-const GENERATION_EXECUTION_ERROR = '生成执行异常（内部错误）'
+// 读路径（service.ts publicFailureReason）以本常量作为已知稳定原因之一 + 未知内容的通用兜底。
+export const GENERATION_EXECUTION_ERROR = '生成执行异常（内部错误）'
 
 const DEFAULT_POLL_INTERVAL_MS = 1000
 

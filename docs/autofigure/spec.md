@@ -102,11 +102,11 @@ queued ──▶ running ──▶ succeeded
   - 幂等键**仅 POST /figures 必填**；**不**引入平台级通用幂等框架。
   - V1 **无**自动过期/TTL：幂等关联随对应 Figure 存续；未来保留/删除需求另行定义。Figure 删除后的幂等键复用语义 **V1 不定义**。
   - **成本保护不变量**：同 key 的多次投递/重试/双击 ⇒ **至多一个 Figure、至多一个初始 GenerationJob**。
-- **`GET /figures`**：当前认证用户自己的 Figure 历史（以 Figure 为单位，非 Job）。
+- **`GET /figures`**：当前认证用户自己的 Figure 历史（以 Figure 为单位，非 Job；admin 返回所有用户，见 US15 / grilling §3）。
 - **`GET /figures/:id`**：Figure metadata + 应用级生成状态。
 - **`GET /figures/:id/png`**：仅 owner、仅 succeeded 可下载；未完成/失败给明确应用级响应，不返回模糊 500。
-- 失败保留**非敏感**错误信息（前端稳定失败态），不暴露 provider secret / raw stack trace / Python internals。
-- **归属与防探测**：`ownerId` **只由认证的 researcher-service 身份派生**（JWT），永不来自客户端提交的 userId；`GET /figures` 只返回当前认证用户的 Figure；`GET /figures/:id` 与 `GET /figures/:id/png` 对「不存在 vs 他人资源」复用既有 `getInstanceForUser` 同款模式**同码防探测**（70040）。
+- 失败保留**非敏感**错误信息（前端稳定失败态），不暴露 provider secret / raw stack trace / Python internals。读路径仅透出 runner 写侧**白名单稳定原因**（超时/中断/执行异常，见 T04），白名单外内容一律归为通用非敏感原因（纵深防御；T07 适配器须把新原因显式映射进白名单）。
+- **归属与防探测**：`ownerId` **只由认证的 researcher-service 身份派生**（JWT），永不来自客户端提交的 userId；`GET /figures` 只返回当前认证用户的 Figure（admin 例外：返回所有用户，见 US15 / grilling §3）；`GET /figures/:id` 与 `GET /figures/:id/png` 对「不存在 vs 他人资源」复用既有 `getInstanceForUser` 同款模式**同码防探测**（70040）。
 
 ### 4. 错误码（grilling §9，已核实 `codes.ts`）
 
