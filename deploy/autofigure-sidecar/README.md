@@ -15,7 +15,7 @@ AutoFigure V1 的真实计算单元：私有 panel-net Python 服务，桥接上
 cd deploy/autofigure-sidecar
 python3 -m venv .venv
 .venv/bin/pip install openai Pillow cairosvg requests flask pytest   # 契约接缝最小依赖
-.venv/bin/pytest                                                     # 17 个契约接缝测试
+.venv/bin/pytest                                                     # 29 个契约接缝测试
 ```
 
 运行 pytest 需宿主机有 libcairo（`brew install cairo`，`import cairosvg` 必需）。
@@ -39,11 +39,28 @@ curl -s -X POST localhost:8080/v1/generate \
 
 | 变量 | 默认 | 说明 |
 |------|------|------|
-| `AUTOFIGURE_PROVIDER` | `openrouter` | `openrouter` / `bianxie` / `gemini` |
-| `AUTOFIGURE_MODEL` | 各 provider 默认 | 可选 |
-| `AUTOFIGURE_BASE_URL` | 各 provider 默认 | 可选 |
+| `AUTOFIGURE_PROVIDER` | `openrouter` | `openrouter` / `bianxie` / `gemini` / `kimi`（Kimi Coding API，opt-in；OpenRouter 仍为默认） |
+| `AUTOFIGURE_MODEL` | 各 provider 默认 | 可选；provider=`kimi` 时**必填**（显式，无产品默认） |
+| `AUTOFIGURE_BASE_URL` | 各 provider 默认 | 可选；kimi 缺省 `https://api.kimi.com/coding/v1` |
 
 API key **只**经 `X-Autofigure-Api-Key` header 请求级注入（T07 契约），绝不落盘/日志/响应。
+
+## Kimi Coding provider（T13，opt-in）
+
+`AUTOFIGURE_PROVIDER=kimi` 走 **Kimi Coding API**（`https://api.kimi.com/coding/v1`）。
+
+- **Base URL 默认**：`https://api.kimi.com/coding/v1`——唯一在真实兼容实验（T13）中验证通过的端点。
+  本支持**不隐含 Moonshot 端点**（`api.moonshot.cn` / `api.moonshot.ai`）支持；该 credential 只对
+  Kimi Coding API 认证。
+- **Model 必填**：`AUTOFIGURE_MODEL` 必须显式提供；缺省/空串在 OpenAI 兼容调用前本地 fail-fast
+  （短不透明配置错误，不泄漏内部细节/凭证）。**无产品默认 model**——视觉模型 ID 更新频繁。
+  已验证示例：`kimi-for-coding`（真实实验中成功通过全链的模型；**不是**永久/默认 model 承诺）。
+- **凭证单一**：仍只经 `X-Autofigure-Api-Key` header 请求级注入（`AUTOFIGURE_LLM_KEY` 为唯一
+  env credential）；无每用户/每 provider 独立凭证支持。
+- **opt-in**：未设 `AUTOFIGURE_PROVIDER` 时默认 `openrouter`，kimi 仅在显式 `AUTOFIGURE_PROVIDER=kimi`
+  时激活。Kimi 是 **sidecar 级 transport 适配器**：内部复用既有 `BIANXIE_*` CONFIG 槽位
+  （`LLM_PROVIDER=kimi` + `BIANXIE_API_KEY/BIANXIE_BASE_URL/BIANXIE_CHAT_MODEL`），该复用是内部
+  实现细节，**不是用户可见的 provider**；vendored `autofigure/**` 零改动。
 
 ## 运行语义（运维须知）
 

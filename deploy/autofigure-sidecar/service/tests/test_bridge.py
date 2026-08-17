@@ -142,3 +142,160 @@ def test_reference_load_failure_is_opaque_failure(monkeypatch):
     result = generate('draw a pipeline', provider='openrouter', api_key='sk-test')
     assert result['ok'] is False
     assert result['error'] == 'reference_load_failed'
+
+
+# ---------------------------------------------------------------------------
+# Formal Kimi Coding provider（T13，docs/autofigure/tickets/T13-kimi-coding-provider.md）
+# 确定性纯逻辑测试：无真 LLM/网络。证明 provider='kimi' 的映射语义 + 既有 provider 不受影响。
+# 映射进既有 BIANXIE_* 槽位是内部 transport 实现细节（用户可见 provider 是 kimi）。
+# ---------------------------------------------------------------------------
+
+
+def _capture_config_initial(seen):
+    """generate_initial_code 假体：记录调用时刻 CONFIG 快照，返回 CANNED_XML（观察 _configure_generator 映射）。"""
+    def recording_initial(paper_content, reference_figures, topic='paper', output_format=None):
+        seen.append(dict(gen.CONFIG))
+        return CANNED_XML
+    return recording_initial
+
+
+def test_kimi_provider_accepted(_pipeline_stub):
+    """Formal Kimi：provider='kimi' 被接受并产出契约形状（显式 model/base_url）。"""
+    baseline = _pipeline_stub
+    result = generate('draw a pipeline', provider='kimi', api_key='sk-kimi-1234',
+                      model='kimi-for-coding', base_url='https://api.kimi.com/coding/v1')
+    _assert_success_shape(result)
+    assert gen.CONFIG == baseline  # 生成后 CONFIG 还原，凭证/OUTPUT_FORMAT 不残留
+
+
+def test_kimi_key_mapped_to_bianxie_api_key(monkeypatch):
+    """key 映射进上游 call_unified_llm else 分支消费的 BIANXIE_API_KEY 槽位。"""
+    secret = 'sk-kimi-secret-1234'
+    seen = []
+    monkeypatch.setattr(gen, 'generate_initial_code', _capture_config_initial(seen))
+    result = generate('draw a pipeline', provider='kimi', api_key=secret,
+                      model='kimi-for-coding', base_url='https://api.kimi.com/coding/v1')
+    assert result['ok'] is True
+    assert seen and seen[0]['LLM_PROVIDER'] == 'kimi'
+    assert seen[0]['BIANXIE_API_KEY'] == secret
+
+
+def test_kimi_base_url_mapped_explicit(monkeypatch):
+    """显式 base_url 映射进 BIANXIE_BASE_URL 槽位。"""
+    seen = []
+    monkeypatch.setattr(gen, 'generate_initial_code', _capture_config_initial(seen))
+    result = generate('draw a pipeline', provider='kimi', api_key='sk-kimi-1',
+                      base_url='https://api.kimi.com/coding/v1', model='kimi-for-coding')
+    assert result['ok'] is True
+    assert seen[0]['BIANXIE_BASE_URL'] == 'https://api.kimi.com/coding/v1'
+
+
+def test_kimi_model_mapped_explicit(monkeypatch):
+    """显式 model 映射进 BIANXIE_CHAT_MODEL 槽位。"""
+    seen = []
+    monkeypatch.setattr(gen, 'generate_initial_code', _capture_config_initial(seen))
+    result = generate('draw a pipeline', provider='kimi', api_key='sk-kimi-1',
+                      model='kimi-for-coding', base_url='https://api.kimi.com/coding/v1')
+    assert result['ok'] is True
+    assert seen[0]['BIANXIE_CHAT_MODEL'] == 'kimi-for-coding'
+
+
+def test_kimi_default_base_url_uses_official_endpoint(monkeypatch):
+    """base_url 缺省 → 官方 Kimi Coding API 端点 api.kimi.com/coding/v1（唯一验证通过的端点；
+    不隐含 Moonshot 端点支持）。"""
+    seen = []
+    monkeypatch.setattr(gen, 'generate_initial_code', _capture_config_initial(seen))
+    result = generate('draw a pipeline', provider='kimi', api_key='sk-kimi-1', model='kimi-for-coding')
+    assert result['ok'] is True
+    assert seen[0]['BIANXIE_BASE_URL'] == 'https://api.kimi.com/coding/v1'
+
+
+def test_kimi_missing_model_fails_before_provider_call(monkeypatch):
+    """缺 model → 本地短不透明配置错误 missing_model；pipeline（OpenAI 调用）绝不被触发。"""
+    baseline = dict(gen.CONFIG)
+    seen = []
+    monkeypatch.setattr(gen, 'generate_initial_code', _capture_config_initial(seen))
+    result = generate('draw a pipeline', provider='kimi', api_key='sk-kimi-1',
+                      base_url='https://api.kimi.com/coding/v1')
+    assert result['ok'] is False
+    assert result['error'] == 'missing_model'
+    assert seen == []  # provider 调用前 fail-fast
+    assert gen.CONFIG == baseline  # 失败后 CONFIG 还原
+
+
+def test_kimi_blank_model_fails_equivalently(monkeypatch):
+    """空串 model 与缺失等价：同一 short opaque 配置错误，pipeline 不被触发。"""
+    baseline = dict(gen.CONFIG)
+    seen = []
+    monkeypatch.setattr(gen, 'generate_initial_code', _capture_config_initial(seen))
+    result = generate('draw a pipeline', provider='kimi', api_key='sk-kimi-1',
+                      model='', base_url='https://api.kimi.com/coding/v1')
+    assert result['ok'] is False
+    assert result['error'] == 'missing_model'
+    assert seen == []
+    assert gen.CONFIG == baseline
+
+
+def test_kimi_credential_never_logged(capsys, monkeypatch):
+    """凭证卫生：即便上游把 key suffix 打到 stdout，kimi 路径进程 stdout 也绝不含凭证。"""
+    secret = 'sk-kimi-top-secret-7777'
+
+    def leaky_initial(paper_content, reference_figures, topic='paper', output_format=None):
+        key = gen.CONFIG.get('BIANXIE_API_KEY', '')
+        print(f'[leaky upstream] api_key suffix: ...{key[-4:] if len(key) > 4 else "N/A"}')
+        return CANNED_XML
+
+    monkeypatch.setattr(gen, 'generate_initial_code', leaky_initial)
+    result = generate('draw a pipeline', provider='kimi', api_key=secret,
+                      model='kimi-for-coding', base_url='https://api.kimi.com/coding/v1')
+
+    assert result['ok'] is True
+    out = capsys.readouterr().out
+    assert secret not in out
+    assert '7777' not in out
+    assert secret not in json.dumps(result)
+
+
+def test_unsupported_provider_still_rejected_after_kimi():
+    """kimi 是精确字面量匹配：非 'kimi' 的未知 provider 仍归一为 unsupported_provider（不弱化既有失败契约）。"""
+    result = generate('draw a pipeline', provider='kimi-pro', api_key='sk-test')
+    assert result['ok'] is False
+    assert result['error'] == 'unsupported_provider'
+
+
+def test_openrouter_mapping_unchanged_by_kimi(monkeypatch):
+    """回归：openrouter 仍映射既有 OPENROUTER_* 槽位，不受 kimi provider 影响。"""
+    secret = 'sk-or-1234'
+    seen = []
+    monkeypatch.setattr(gen, 'generate_initial_code', _capture_config_initial(seen))
+    result = generate('draw a pipeline', provider='openrouter', api_key=secret)
+    assert result['ok'] is True
+    assert seen[0]['LLM_PROVIDER'] == 'openrouter'
+    assert seen[0]['OPENROUTER_API_KEY'] == secret
+    # openrouter 分支不写 BIANXIE_*（保持 CONFIG 默认空）
+    assert seen[0]['BIANXIE_API_KEY'] == ''
+
+
+def test_bianxie_mapping_unchanged_by_kimi(monkeypatch):
+    """回归：bianxie 仍映射既有 BIANXIE_* 槽位（显式 base_url/model 透传），不受 kimi provider 影响。"""
+    secret = 'sk-bx-5678'
+    seen = []
+    monkeypatch.setattr(gen, 'generate_initial_code', _capture_config_initial(seen))
+    result = generate('draw a pipeline', provider='bianxie', api_key=secret,
+                      model='custom-model', base_url='https://custom.bianxie.ai/v1')
+    assert result['ok'] is True
+    assert seen[0]['LLM_PROVIDER'] == 'bianxie'
+    assert seen[0]['BIANXIE_API_KEY'] == secret
+    assert seen[0]['BIANXIE_BASE_URL'] == 'https://custom.bianxie.ai/v1'
+    assert seen[0]['BIANXIE_CHAT_MODEL'] == 'custom-model'
+
+
+def test_gemini_mapping_unchanged_by_kimi(monkeypatch):
+    """回归：gemini 仍映射既有 GOOGLE_API_KEY/GEMINI_* 槽位，不受 kimi provider 影响。"""
+    secret = 'sk-gm-9012'
+    seen = []
+    monkeypatch.setattr(gen, 'generate_initial_code', _capture_config_initial(seen))
+    result = generate('draw a pipeline', provider='gemini', api_key=secret)
+    assert result['ok'] is True
+    assert seen[0]['LLM_PROVIDER'] == 'gemini'
+    assert seen[0]['GOOGLE_API_KEY'] == secret
