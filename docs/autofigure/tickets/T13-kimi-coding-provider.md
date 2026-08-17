@@ -150,4 +150,33 @@ researcher smoke 经显式 `AUTOFIGURE_SIDECAR_URL` 指向之；门控 = docker 
 
 ## Completion evidence
 
-<!-- docs-only follow-up commit 回填（T10/T11/T12 同款流程，不 amend 历史）。 -->
+- fixed point: `a696802`（feature/autofigure-integration HEAD，T12 完成证据）。
+- implementation commit: `122f309`（`feat: AutoFigure T13 — Kimi Coding provider support`）。
+- 性质：**feature 票**（sidecar 侧 provider 正式化）——researcher `server/` / `frontend/` / 契约 /
+  打包零改动；vendored `autofigure/**` 零改动；T12 evidence 零改动。
+- acceptance criteria 状态：
+  - **确定性 AC：PASS** —— `deploy/autofigure-sidecar/.venv/bin/pytest service/tests -q` →
+    **29 passed**（test_bridge 21：9 基线 + 12 kimi；test_app 8）。覆盖：provider 接受 / key→
+    `BIANXIE_API_KEY` / base_url 显式映射 / model 显式映射 / base_url 缺省=coding/v1 /
+    缺 model 与空 model 均 fail-fast（pipeline 不触发 + CONFIG 还原）/ 凭证不泄漏 /
+    未知 provider 仍拒 / openrouter・bianxie・gemini 回归不变 / 跨调用隔离。
+  - **门控真实 Kimi smoke：PASS** —— 真实完整链路经 researcher API：
+    submit → queued/running → sidecar（kimi env，loopback）→ **Kimi Coding API** →
+    **succeeded** → PNG 8 字节签名断言通过。测试体 **249.2s**（vitest 250712ms；
+    Start 11:18:15；Duration 251.70s）。
+- 真实 smoke 参数（PASS）：
+  - endpoint: `https://api.kimi.com/coding/v1`
+  - provider: `kimi`（opt-in；未设 `AUTOFIGURE_PROVIDER` 时默认仍是 `openrouter`）
+  - model: `kimi-for-coding` —— **验证使用，不作为默认模型**；`AUTOFIGURE_MODEL` 必填
+  - credential: `AUTOFIGURE_LLM_KEY`（唯一凭证，经 `X-Autofigure-Api-Key` header 请求级注入；
+    临时 sidecar 容器内零凭证 env；sidecar 日志 / smoke 输出 0 次 `sk-kimi` 匹配）
+- **Caveat（evaluation fallback）**：evaluation fallback 行为保持既有 AutoFigure 行为不变
+  （`create_fallback_evaluation(5.0)` + `evaluate_code` catch fallback + bridge `evaluation is None`
+  fallback，全 provider 共通，非 kimi 特有）；smoke 只断言 `succeeded` + PNG 签名，**不独立证明
+  evaluation score 的来源**（真实 LLM vs fallback）。已接受为验证局限，如实记录。
+- FIRST dual-axis review（vs a696802）：1 项 minor（test_bridge 残留 EXPERIMENTAL/`shim` 标签）
+  已修复并重跑全绿；Standards + Spec/product 轴全部通过（BIANXIE 槽位为内部实现细节 / 无隐藏默认 /
+  凭证零泄漏 / CONFIG 成功・失败后均还原 / vendored 零 diff / kimi opt-in / OpenRouter 默认不变 /
+  端点正确 / model 必填 fail-fast / server・frontend・契约零改动 / 无 T12 重释 / 无 V2 scope creep）。
+- `git diff --check`：PASS；`git diff --stat a696802` 恰为批准文件集（README +25 / bridge.py +15 /
+  test_bridge.py +157 / 新 T13 票）。
