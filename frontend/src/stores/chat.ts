@@ -131,6 +131,13 @@ export const useChatStore = defineStore('chat', {
     insertBeforeLast(m: Msg): void {
       this.messages.splice(this.messages.length - 1, 0, m)
     },
+    // PHASE 2 retry-run handoff：空 final 失败 fallback 移除最后一条消息。**仅限**删除「本次
+    // pendingSend 创建且仍完全空（text/media/tools 全空）」的 assistant 占位——调用方
+    // （useChatConnection.armRetryWindow）在删除前按该条件校验，绝不删除任何已有可见消息。
+    // 刻意不做成任意 index 删除，保持最小 API。
+    popMessage(): void {
+      this.messages.pop()
+    },
     setMessages(list: Msg[]): void {
       this.messages = list
     },
