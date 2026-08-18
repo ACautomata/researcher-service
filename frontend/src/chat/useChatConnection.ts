@@ -45,6 +45,13 @@ const PENDING_RUN_GRACE_MS = 8000
 const RESUME_WAIT_MS = 30_000
 const CONNECT_TIMEOUT_MS = 15_000
 const INITIAL_HISTORY_LIMIT = 50
+// PHASE 2 retry-run handoff：本 run 空 final（首帧即终态、无内容）后 gateway 自动重试的新 runId
+// 的认领窗口。取值依据：PHASE 1 实测空 final 后 gateway 重试 run 约 480–550ms 到达（mock 请求日志
+// 16:32:21.166 → 16:32:21.646）；2s = 实测值 ~3.6 倍抖动余量（覆盖真实 provider 延迟差异），且明显
+// 短于 PENDING_RUN_GRACE_MS=8000（空 final 不应让用户空等 8s）。超时宁可给明确失败提示让用户手动
+// 重试，也不静默留下空白占位；误报时 retryPending 已清、迟到的重试 run 走 foreign 丢弃，不会出现
+// 「提示失败后又冒图」的时序错乱。
+const RETRY_HANDOFF_MS = 2000
 
 // Phase 2 图片显示修复：agent mediaUrls 的容器内 workspace 绝对路径前缀。与 server files/routes.ts
 // FILE_ROOTS.workspace = ${HOME_BIND}/workspace = /home/node/.openclaw/workspace 严格对齐——以此前缀
@@ -105,6 +112,13 @@ export function useChatConnection(status: ChatStatus) {
   // （F8 定时器反噬修复），同时避免 fire 后残留 pendingSend 让切会话产生 phantom orphan 吞新 run。
   let pendingGraceTimer: ReturnType<typeof setTimeout> | null = null
   let graceExpired = false // B4: 宽限已 fire 仍无首帧——后续迟到的首帧仍认领（不 foreign）
+  // PHASE 2 retry-run handoff：本 run 已收到「属于自己（runId===myRunId）且无内容」的空 final，
+  // 正在等 gateway 自动重试的新 runId（RETRY_HANDOFF_MS 窗口内到达 → claimRun 认领；超时 → 明确
+  // 失败提示 + 清空白占位）。严格区别于 foreign run：仅由空 final 归属信号开启，窗口内陌生 runId
+  // 才可认领，其余时刻 foreignRunIds 保护不变。生命周期与 pendingSend 同界（send/abandon/建连/
+  // 断线/消费者级错误/重发/dispose 全部清理，防跨请求污染）。
+  let retryPending = false
+  let retryTimer: ReturnType<typeof setTimeout> | null = null
   // B5: 意外断线时在途 run 的恢复信息——网关重连可能 resume 同一 run 补发续帧（session projection）。
   // onReady 消费：保留占位等待续帧（不 loadHistory 清空重建）；续帧到达 / 用户主动操作即取消。
   let resumeRun: { runId: string } | null = null
@@ -117,6 +131,10 @@ export function useChatConnection(status: ChatStatus) {
       if (pendingSend && !activeRunId) {
         chat.finalizeLast() // 占位落定（防永久 streaming 锁死 composer）
         graceExpired = true // 迟到首帧仍可认领；pendingSend 清（切会话不产生 phantom orphan）
+        // PHASE 2：8s 宽限 fire 时 retry 语境同步作废（防御——retryTimer 本应先 fire 并已清
+        // retryPending；此处兜底防异常时序下残留 retryPending 污染下一次请求）
+        retryPending = false
+        clearRetryTimer()
         pendingSend = false
         myRunId = '' // #53: 宽限 fire 放弃本 run 的 ack runId
       }
@@ -126,6 +144,41 @@ export function useChatConnection(status: ChatStatus) {
     if (pendingGraceTimer !== null) {
       clearTimeout(pendingGraceTimer)
       pendingGraceTimer = null
+    }
+  }
+  // PHASE 2 retry-run handoff：本 run 空 final 后武装 retry 认领窗口。到期仍无 retry run 到达 →
+  // 明确失败提示（status.onError 顶部错误条，非伪装成 assistant 回复）+ 移除「本次 send 创建且仍
+  // 完全空」的 assistant 占位（不留空白消息）+ 清 pendingSend 恢复 composer。
+  function armRetryWindow() {
+    if (retryTimer !== null) return
+    retryTimer = setTimeout(() => {
+      retryTimer = null
+      if (!retryPending) return // 已被认领/清理：迟到 fire 不落失败提示
+      retryPending = false
+      clearPendingGraceTimer() // 阻止 8s 宽限重复 finalize 占位
+      if (pendingSend) {
+        status.onError('消息未生成成功，请稍后重试')
+        status.onConnecting(false)
+        chat.finalizeLast() // 落定占位（解锁 composer）
+        const last = chat.messages[chat.messages.length - 1]
+        if (
+          last &&
+          last.role === 'assistant' &&
+          last.text === '' &&
+          last.media.length === 0 &&
+          last.tools.length === 0
+        ) {
+          chat.popMessage() // 仅删除本次 send 创建且仍完全空的占位；可见消息绝不删除
+        }
+        pendingSend = false
+        myRunId = '' // 本 run 的 ack runId 作废（retry 已放弃）
+      }
+    }, RETRY_HANDOFF_MS)
+  }
+  function clearRetryTimer() {
+    if (retryTimer !== null) {
+      clearTimeout(retryTimer)
+      retryTimer = null
     }
   }
   function armResumeWait(run: { runId: string }) {
@@ -208,6 +261,23 @@ export function useChatConnection(status: ChatStatus) {
         pendingAbandonCount--
         abandonedRunIds.add(runId)
         return false
+      }
+      // PHASE 2 retry-run handoff：retryPending 仅由「本 run 空 final（runId===myRunId 且无内容）」
+      // 开启——本 run 已被 gateway 判空终态，自动重试的新 runId 在 RETRY_HANDOFF_MS 窗口内到达即认领
+      // 为 retry run，text/media/final 走既有 pipeline。严格区别于真 foreign：非 retryPending 状态下的
+      // 陌生 runId 仍走下方既有 foreign 丢弃；窗口由 armRetryWindow 限定（超时已失败 fallback 清
+      // retryPending，故此处 retryPending 为 true 恒意味着「窗口内 + 空 final 归属已确认」）。
+      if (retryPending) {
+        retryPending = false
+        clearRetryTimer()
+        clearPendingGraceTimer() // 8s 宽限不再需要（retry run 已接管）
+        clearResumeWait()
+        activeRunId = runId
+        pendingSend = false
+        myRunId = '' // 旧 run 的 ack runId 作废；resolvedMediaPaths 按新 runId 分桶（per-run dedupe 不污染）
+        const ph = chat.messages[chat.messages.length - 1]
+        if (ph && ph.role === 'assistant' && !ph.streaming) ph.streaming = true
+        return true
       }
       // #53: pendingSend 期间本 run ack 已知（myRunId）且首帧 runId 非本 run → 外来/旧 run 首帧
       //（切容器后旧连接在途 run 首帧经新连接到达，runId 不在 abandonedRunIds——切走时首帧未到）
@@ -389,6 +459,26 @@ export function useChatConnection(status: ChatStatus) {
       return // 孤儿 run 终态：计数丢弃
     }
     if (pendingSend) {
+      // PHASE 2 retry-run handoff：区分「本 run 空终态」与「外来 done-first」。本 run 空终态 = 收到
+      // 的 final runId === myRunId（ack 返回的本 run runId），且本 run 从未产任何可见帧（activeRunId
+      // 空已保证——若有 text/media/tool 帧到达，activeRunId 会被认领、此处走上方 activeRunId===runId
+      // 分支）。此信号下 gateway 可能自动用新 runId 重试同一请求 → 开启 retryPending + 2s 认领窗口；
+      // 外来 done-first（runId !== myRunId，B3）维持现状——只武装 8s 宽限等用户 run 首帧，不开
+      // retryPending（防 foreign empty final 误开 retry handoff）。
+      if (runId === myRunId) {
+        const last = chat.messages[chat.messages.length - 1]
+        const stillEmpty = Boolean(
+          last &&
+            last.role === 'assistant' &&
+            last.text === '' && // 无可见正文
+            last.media.length === 0 && // 无媒体
+            last.tools.length === 0, // 无 tool/result 内容
+        )
+        if (stillEmpty) {
+          retryPending = true
+          armRetryWindow()
+        }
+      }
       // B3: 无 delta 外来 run 的 done-first 不立即终结用户空 placeholder/清 pendingSend（原代码
       // 直接 finalize——外来 run 首帧即终态会吞掉用户回复、placeholder 空终结）。武装宽限：
       // 宽限内用户 run 首帧到达正常认领，宽限过仍无动静才落定占位。
@@ -445,6 +535,10 @@ export function useChatConnection(status: ChatStatus) {
     status.onConnecting(false)
     finalizeLast()
     activeRunId = ''
+    // PHASE 2：消费者级错误（会话/连接已坏）→ retry 语境同 pendSend 一并作废（retry run 不会再
+    // 来，防残留 retryPending 认领后续陌生 run）
+    retryPending = false
+    clearRetryTimer()
     pendingSend = false
     clearResumeWait() // B5: 消费者级错误（如会话不存在）→ 放弃 resume 等待
   }
@@ -612,6 +706,9 @@ export function useChatConnection(status: ChatStatus) {
     everConnected = false
     pendingConnect = null
     clearPendingGraceTimer() // B4: 建连代际切换清除延迟收尾定时器（防跨代 fire）
+    // PHASE 2: retry 是 run 语境，连接边界复位（防跨代 retryPending 认领新连接陌生 run）
+    retryPending = false
+    clearRetryTimer()
     clearResumeWait() // B5: 新连接是新 run 语境，旧连接在途 run 的 resume 等待作废
     pendingAbandonCount = 0 // B1: 新连接孤儿计数清零（防吞新 run 首帧；切容器/4401重建/手动重连同路径）
     myRunId = '' // #53: 新连接生命周期边界，本 run 的 ack runId 作废
@@ -729,6 +826,10 @@ export function useChatConnection(status: ChatStatus) {
           // 切会话 abandonActiveRun 走 `else if (pendingSend)` → pendingAbandonCount++ → 下次 send 首帧
           // 被孤儿计数吞。
           pendingSend = false
+          // PHASE 2：连接已死，retry 语境同 pendingSend 一并作废（重连是新 run 语境，retry run 不会
+          // 再来；防残留 retryPending 认领新连接陌生 run）
+          retryPending = false
+          clearRetryTimer()
           myRunId = '' // #53: 连接已死，本 run 的 ack runId 作废
           // B5: 意外断线不永久 abandon 在途 run——网关重连可能 resume 同一 run 补发续帧
           // （session projection）。记录 resumeRun 供 onReady 保留占位等待续帧（而非 loadHistory
@@ -847,6 +948,10 @@ export function useChatConnection(status: ChatStatus) {
     if (activeRunId) abandonedRunIds.add(activeRunId)
     else if (pendingSend) pendingAbandonCount++ // 首帧未到、runId 未知：迟到首帧按 FIFO 计数丢弃
     graceExpired = false // 切会话/容器：宽限过期的「迟到认领」语义作废（新 run 语境）
+    // PHASE 2：retry 语境是「本 send 的伴随状态」，切会话/容器即作废（防旧请求 retryPending 认领
+    // 新会话陌生 run）
+    retryPending = false
+    clearRetryTimer()
     activeRunId = ''
     pendingSend = false
     myRunId = '' // #53: 切会话/容器放弃本 run 的 ack runId
@@ -903,6 +1008,10 @@ export function useChatConnection(status: ChatStatus) {
     if ((!text && !hasAttachments) || !gateway || !chat.selectedSession || disconnected.value || streamingEnabled) return false
     chat.setSlashDismissed(true) // 发送后关闭补全菜单（输入已被清空，下次输 / 时经 onComposerInput 复位）
     clearResumeWait() // B5: 用户发新消息 = 放弃旧 run 的 resume 等待（新 run 是新语境）
+    // PHASE 2: 新 send 是新 run 语境——上一个请求的 retryPending/retryTimer 作废（防残留 retry 状态
+    // 认领本次请求的陌生 runId 或误触发失败提示）
+    retryPending = false
+    clearRetryTimer()
     const userMsg = newMsg('user', text)
     // #459-T3 #464：发送的附件（image/audio/video）塞进 user echo 消息 media——本地即时渲染
     // 自己发送的附件（验收 12）。投影走 attachmentToMediaBlock（与历史/流式 extract 共用同一
@@ -990,6 +1099,9 @@ export function useChatConnection(status: ChatStatus) {
       chat.pushMessage(newMsg('user', item.text))
       chat.pushMessage(newMsg('assistant'))
       activeRunId = '' // 与 send() 同款：等首帧锚定新 run
+      // PHASE 2: 重发是新 send 语境——旧请求 retry 状态作废（同 send()）
+      retryPending = false
+      clearRetryTimer()
       pendingSend = true
       myRunId = '' // #53: 重发是新 send 语境，ack runId 未知
       void myGw
@@ -1229,6 +1341,7 @@ export function useChatConnection(status: ChatStatus) {
     disposed = true
     revokeAllObjectUrls() // Phase 2：卸载释放全部媒体 objectURL（组件销毁，blob URL 无消费者）
     clearPendingGraceTimer() // B4: 卸载清延迟收尾 timer，防组件销毁后触发
+    clearRetryTimer() // PHASE 2: 卸载清 retry-handoff timer（防组件销毁后触发失败提示/认领）
     clearResumeWait() // B5: 卸载清 resume 等待 timer
     // #14: 连接期超时 timer 已收 openGateway 局部作用域（P0：闭包内 clearTimeout，并发 openGateway
     // 不再互踩模块级单槽），组件卸载无需清理——gateway.stop() 停协议机即可。
