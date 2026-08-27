@@ -95,7 +95,7 @@ function setup(): { status: ChatStatus & Record<string, ReturnType<typeof vi.fn>
 // 首连：openGateway（mock bootstrap token）→ fireReady → onReady 就绪 → syncSessions/loadHistory
 // 铺底（空历史）完成。返回当前 gateway。注意必须先 await flushPromises 让 loadHistory 落地——否则其
 // 内部 resetForSession 会在测试进行中清空 send() 推入的消息（ChatView.test.ts mountReady 同款）。
-async function connect(conn: ReturnType<typeof useChatConnection>): Promise<MockGatewayChat> {
+async function connect(conn: ReturnType<typeof useChatConnection>): Promise<InstanceType<typeof MockGatewayChat>> {
   const ready = conn.openGateway()
   await flushPromises() // getBootstrapToken → createGatewayChat + start → 挂起等 onReady
   const gw = MockGatewayChat.last!
@@ -110,7 +110,7 @@ async function connect(conn: ReturnType<typeof useChatConnection>): Promise<Mock
 }
 
 // 发送一条用户消息并等 ack 返回 runId（myRunId 就绪）。返回该 runId。
-async function sendAndAck(conn: ReturnType<typeof useChatConnection>, chat: ReturnType<typeof useChatStore>, gw: MockGatewayChat, runId: string): Promise<void> {
+async function sendAndAck(conn: ReturnType<typeof useChatConnection>, chat: ReturnType<typeof useChatStore>, gw: InstanceType<typeof MockGatewayChat>, runId: string): Promise<void> {
   chat.setInput('帮我生成图片')
   gw.send.mockResolvedValue(runId)
   conn.send(false)
