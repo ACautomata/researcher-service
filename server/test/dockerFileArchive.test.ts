@@ -330,8 +330,15 @@ describe('DockerFileArchive seedWorkspace（#6xx named volume 模板 workspace �
     expect(calls.map((c) => c.kind)).toEqual(['putArchive']) // 无 start/exec/probe（created 容器可用）
     const put = calls.find((c) => c.kind === 'putArchive')!
     expect(put.path).toBe('/home/node/.openclaw/workspace')
-    expect(put.chown).toBe(true) // 灌入文件属主跟随目标目录（node:node），agent 可写
-    const parsed = parseTar(put.stream!, { collectData: true })
+    expect(put.chown).toBe(true) // daemon 语义：应用 tar 头内 uid/gid（bt 宿主实测非「跟随目标目录」）
+    const tarBuf = put.stream!
+    // tar 头 uid/gid 必须 = 容器内 node(1000:1000)——硬编码 0 会落 root:root，agent 不可写
+    // （#660 回归：部署机实测灌入文件 root:root。八进制 1000 = '0001750'）
+    expect(tarBuf.subarray(108, 116).toString('latin1').replace(/\0.*$/, '')).toBe('0001750')
+    expect(tarBuf.subarray(116, 124).toString('latin1').replace(/\0.*$/, '')).toBe('0001750')
+    expect(tarBuf.subarray(265, 297).toString('latin1').replace(/\0.*$/, '')).toBe('node')
+    expect(tarBuf.subarray(297, 329).toString('latin1').replace(/\0.*$/, '')).toBe('node')
+    const parsed = parseTar(tarBuf, { collectData: true })
     expect(parsed.map((e) => `${e.type}:${e.name}`)).toEqual([
       'file:AGENTS.md',
       'directory:skills',
