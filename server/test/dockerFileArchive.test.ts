@@ -5,6 +5,9 @@
 // 真容器端到端由 containers-smoke 覆盖；此处用 mock client 隔离 daemon。
 
 import { describe, it, expect } from 'vitest'
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
 import { Readable } from 'node:stream'
 import type Docker from 'dockerode'
 import { DockerFileArchive } from '../src/files/dockerArchive'
@@ -43,8 +46,8 @@ function mockClient(opts: {
   archives?: Map<string, Buffer>
   archive404?: Set<string>
   startErr?: { statusCode: number }
-}): { docker: Docker; calls: { kind: string; path?: string; cmd?: string[]; stream?: Buffer }[] } {
-  const calls: { kind: string; path?: string; cmd?: string[]; stream?: Buffer }[] = []
+}): { docker: Docker; calls: { kind: string; path?: string; cmd?: string[]; stream?: Buffer; chown?: boolean }[] } {
+  const calls: { kind: string; path?: string; cmd?: string[]; stream?: Buffer; chown?: boolean }[] = []
   const docker = {
     getContainer: (_name: string) => ({
       getArchive: async (o: { path: string }) => {
@@ -56,10 +59,10 @@ function mockClient(opts: {
         }
         return Readable.from([opts.archives?.get(o.path) ?? Buffer.alloc(0)])
       },
-      putArchive: async (stream: NodeJS.ReadableStream, o: { path: string }) => {
+      putArchive: async (stream: NodeJS.ReadableStream, o: { path: string; chown?: boolean }) => {
         const chunks: Buffer[] = []
         for await (const c of stream as AsyncIterable<Buffer>) chunks.push(c)
-        calls.push({ kind: 'putArchive', path: o.path, stream: Buffer.concat(chunks) })
+        calls.push({ kind: 'putArchive', path: o.path, stream: Buffer.concat(chunks), chown: o.chown })
       },
       start: async () => {
         calls.push({ kind: 'start' })
@@ -310,6 +313,40 @@ describe('DockerFileArchive readConfig/writeConfig（#591 静态 config 落容�
     const { docker } = mockClient({ archives })
     const fa = new DockerFileArchive(() => docker)
     await expect(fa.readConfig('box')).rejects.toBeInstanceOf(FileInvalidPath)
+  })
+})
+
+describe('DockerFileArchive seedWorkspace（#6xx named volume 模板 workspace 灌卷）', () => {
+  it('递归 walk 模板目录 → 多条目 tar putArchive 到 ~/.openclaw/workspace（目录先序 + chown）', async () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'seedws-'))
+    mkdirSync(path.join(root, 'skills', 'demo'), { recursive: true })
+    writeFileSync(path.join(root, 'AGENTS.md'), '# ws\n')
+    writeFileSync(path.join(root, 'skills', 'demo', 'SKILL.md'), '# skill\n')
+
+    const { docker, calls } = mockClient({})
+    const fa = new DockerFileArchive(() => docker)
+    await fa.seedWorkspace('box', root)
+
+    expect(calls.map((c) => c.kind)).toEqual(['putArchive']) // 无 start/exec/probe（created 容器可用）
+    const put = calls.find((c) => c.kind === 'putArchive')!
+    expect(put.path).toBe('/home/node/.openclaw/workspace')
+    expect(put.chown).toBe(true) // 灌入文件属主跟随目标目录（node:node），agent 可写
+    const parsed = parseTar(put.stream!, { collectData: true })
+    expect(parsed.map((e) => `${e.type}:${e.name}`)).toEqual([
+      'file:AGENTS.md',
+      'directory:skills',
+      'directory:skills/demo',
+      'file:skills/demo/SKILL.md',
+    ])
+    expect(parsed[0].data?.toString('utf8')).toBe('# ws\n')
+    expect(parsed[3].data?.toString('utf8')).toBe('# skill\n')
+  })
+
+  it('hostDir 不存在 → 原样抛（fail-fast 不带病出容器），不发 putArchive', async () => {
+    const { docker, calls } = mockClient({})
+    const fa = new DockerFileArchive(() => docker)
+    await expect(fa.seedWorkspace('box', '/nonexistent/seed-src')).rejects.toThrow()
+    expect(calls).toEqual([])
   })
 })
 

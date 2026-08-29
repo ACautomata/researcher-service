@@ -23,6 +23,9 @@ Express 控制面 (server/src/containers)
     │ 3. named volume 拓扑（ADR 0011，#590/#592）：openclaw-wiki/workspace/home-<id> 三卷，
     │    空卷首挂由镜像内 ~/.openclaw 骨架自动初始化；home 模板（researcher 克隆）生产经
     │    server 镜像构建期入镜像（ADR 0013，#593），不再挂载宿主
+    │ 4. 模板 workspace 灌卷（#6xx）：createComplete 在 create 后 start 前，把镜像内模板的
+    │    workspace/ 树（researcher 各项 md + skills）经 putArchive(chown) 灌进容器
+    │    ~/.openclaw/workspace（骨架占位被 researcher 内容覆盖；旧 bind 模式 provision 已预填充，不重复灌）
     ▼
 OpenClaw 容器 fleet（容器内统一 18789，宿主端口池 19000–19999 取最小空闲）
 ```
