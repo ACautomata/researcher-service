@@ -53,7 +53,9 @@ function mediaSrc(m: MediaBlock): string {
 // #568 安全修复（security review）：document 下载卡 mime 白名单——base64 形态的 dataURL href 只对
 // 白名单 mime 放行（防下载到 text/html / image/svg+xml 等可执行/脚本类文件被用户打开执行）。url
 // 形态为显式点击链接（download 属性），不受限。非白名单 base64 document 回退旧行为（静默不渲染）。
-const SAFE_DOCUMENT_MIMES = ['application/pdf', 'text/plain', 'text/csv', 'application/json', 'application/zip', 'application/gzip', 'application/x-tar']
+// 发送侧白名单（chat/attachments.ts DOCUMENT_MIMES）与本清单同步改：两侧一致文档附件才
+// 「发得出 + 渲染得出下载卡」（text/markdown 为浏览器无注册 mime 的典型，发送侧按扩展名派生）。
+const SAFE_DOCUMENT_MIMES = ['application/pdf', 'text/plain', 'text/markdown', 'text/csv', 'application/json', 'application/zip', 'application/gzip', 'application/x-tar']
 function isSafeDocumentMime(mimeType: string): boolean {
   if (mimeType === 'image/svg+xml') return false // 可嵌脚本，排除
   if (mimeType.startsWith('image/') || mimeType.startsWith('audio/') || mimeType.startsWith('video/')) return true
