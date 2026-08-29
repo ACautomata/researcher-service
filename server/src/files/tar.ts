@@ -198,15 +198,17 @@ function headerOf(name: string, size: number, typeflag: string, mtime: number): 
   const h = Buffer.alloc(BLOCK)
   h.write(name.slice(0, 100), 0, 'utf8')
   h.write('0000644', 100, 'utf8') // mode 0644
-  h.write('0000000', 108, 'utf8') // uid 0
-  h.write('0000000', 116, 'utf8') // gid 0
+  // uid/gid = 容器内 node(1000:1000)：putArchive chown:true 是「应用头内 uid/gid」语义
+  // （bt 宿主实测非「跟随目标目录」），写 0 会落 root:root、agent 不可写（#660 回归）
+  h.write('0001750', 108, 'utf8') // uid 1000
+  h.write('0001750', 116, 'utf8') // gid 1000
   h.write(encodeOctal(size), 124, 'utf8')
   h.write(encodeOctal(mtime), 136, 'utf8')
   h.write(typeflag, 156, 'utf8')
   h.write('ustar', 257, 'utf8')
   h.write('00', 263, 'utf8')
-  h.write('root', 265, 'utf8')
-  h.write('root', 297, 'utf8')
+  h.write('node', 265, 'utf8')
+  h.write('node', 297, 'utf8')
   // chksum（148-155）：字段先置空格（tar 规范），求全头字节和，写 6 位八进制 + NUL + 空格
   h.fill(0x20, 148, 156)
   let sum = 0

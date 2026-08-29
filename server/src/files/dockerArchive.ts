@@ -302,7 +302,8 @@ export class DockerFileArchive implements FileArchive {
 
   // 模板 workspace 灌卷（#6xx · named volume 拓扑下 researcher workspace 预填充）：递归 walk
   // hostDir → 目录树 tar（目录先序条目，父目录先建）→ putArchive 解包进 ~/.openclaw/workspace。
-  // chown:true 使灌入文件属主跟随目标目录（node:node）——agent 在容器内可写自己的工作区。
+  // chown:true（daemon 语义：应用 tar 头内 uid/gid）+ 头写 node(1000)，灌入文件 node:node——
+  // agent 在容器内可写自己的工作区（#660 曾误注「跟随目标目录」，bt 宿主实测不符）。
   // 时序同 writeConfig（create 后 start 前，putArchive 对 created 容器可用）；骨架首挂内容被
   // 同名覆盖（researcher 模板为权威源）。hostDir 不存在/非目录 → 原样抛（fail-fast 不带病出容器）。
   async seedWorkspace(name: string, hostDir: string): Promise<void> {
