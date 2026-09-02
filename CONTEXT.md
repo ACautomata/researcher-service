@@ -82,6 +82,22 @@ _Avoid_: 文件/图片消息——掩盖「内联于 chat.send 帧、多类型�
 OpenClaw agent 执行 elevated 命令前的权限门。网关经**连接级**事件（`exec.approval.requested` / `plugin.approval.requested`，不挂 runId）下发 `{id, kind, command, sessionKey, agentId}`；用户批准/拒绝后经 `*.approval.resolved` 广播落定（first-answer-wins，网关权威 decision，可能与他端不同）。生命周期：`pending`（待处理）→ `resolving`（已点击等回执）→ `resolved`（终态）；断线复位 `resolving → pending` 可重试，网关侧失效 `→ expired`（终态不可回覆）。**终态不留痕**（[ADR 0014](./docs/adr/0014-resolved-approval-no-trace.md)，supersede #547 / [ADR 0009](./docs/adr/0009-chat-timeline-merge.md) 的留痕条目）：resolved/expired 卡从界面消失，不在对话转录中留存任何记录；未决卡（pending/resolving）留在 composer 上方待办区，落定即撤。subagent 发起的卡（agentId 即来源语义）唯一可见于 main 会话。
 _Avoid_: 「审批消息」——审批卡是连接级权限事件，不挂 runId、不进 messages 转录、独立追踪；「操作记录 / 留痕」（resolved 卡留在时间线作审计回看）语义已随 ADR 0014 退役。
 
+**轮次 (turn)**:
+用户一次发送触发的完整 agent loop——一条 user 消息 + 一条 assistant 回复（含轨迹与正文），消息流上恰对应一条 assistant 消息。轮次是折叠、计时与异常判定的天然单位。
+_Avoid_: 回合——暗示多方轮流对局，此处只有 user→agent 一拍。
+
+**轨迹 (trace)**:
+assistant 回复中的中间产物——思考（thinking）与工具调用（tools）。正文与附件不属于轨迹；中间文本与最终正文合并为一条正文存储、不可拆分，故同样不在轨迹之列（折叠收轨迹、正文整段留外的既成边界）。
+_Avoid_: 过程/日志——笼统，掩盖「思考+工具 vs 正文」这条折叠边界。
+
+**折叠条 (trace fold)**:
+轮次**正常完成**后把轨迹收进的单个折叠块，正文与附件恒在折叠外。条面显示执行时长；历史轮无时长数据则显示步骤计数（如「执行过程 · 思考 · 3 次工具调用」）。展开只露一层——内部条目保持自身默认折叠态、可单独点开，折叠层内不再嵌套分组聚合。异常结束（报错/打断/断线宽限收尾）的轮次不折叠、保持展开，便于看原因。
+_Avoid_: 二级聚合——折叠条展开后是平铺的思考卡与逐行工具行；无轨迹的轮次不渲染折叠条。
+
+**执行时长 (turn duration)**:
+用户点「发送」→ 本轮正常完成的墙钟时间，含建连排队与人工审批等待——用户感知的真实等待。流式进行中不显示，随折叠完成一并出现；<60s 显示「已执行 42s」，≥60s 显示「已执行 1 分 12 秒」。
+_Avoid_: 响应耗时——暗示起算于首个响应帧、排除排队/审批，与本术语语义相反。
+
 **文件查询通道 (file query channel)**:
 控制面读取 OpenClaw 容器内 wiki / workspace 文件的机制。**经 Docker 自带原语，不经 gateway 插件 API**：列目录与读文件用 dockerode `getArchive`（以容器为视角打 tar 流拉出，穿过 named volume 挂载点读卷数据），写文件用 `putArchive`，删文件用容器内 `exec rm`。以**容器存在（running/stopped）为前提**——容器删除时其数据卷一并删除，故「卷还在但容器没了」的情形不出现。不引入第三方 gateway 插件（曾评估 `openclaw-better-gateway`：捆绑 IDE/终端/写删、CORS 全开、自实现 token 校验与本项目 `${GATEWAY_TOKEN}` 占位不兼容，为一个只读查询暴露面过大，否决）。
 _Avoid_: 走 gateway 插件/RPC 读文件——OpenClaw 官方无文件 RPC，第三方插件暴露面与认证均不可接受。
