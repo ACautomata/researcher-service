@@ -106,6 +106,7 @@ const copyState = ref<'idle' | 'copied' | 'failed'>('idle')
         <TraceFold
           :has-thinking="msg.thinking !== ''"
           :tool-count="msg.tools.length"
+          :turn-duration-ms="msg.turnDurationMs"
           :folded="msg.traceFolded === true"
           @toggle="emit('toggleTraceFold')"
         />
