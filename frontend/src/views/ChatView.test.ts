@@ -1462,6 +1462,8 @@ describe('ChatView', () => {
 
   // #565: 历史路全量覆盖——网关 history 下发完整消息，content[] 的 type==='thinking' 结构化块
   //（thinking 字段）经 extractThinking 提取填 Msg.thinking → 思考折叠卡渲染（thinking 不进正文）。
+  // #666 T3：有轨迹的历史消息默认折叠——思考卡收进折叠条（条面步骤计数无「已执行」），
+  // 展开折叠条后思考卡仍在（提取数据不丢）。
   it('#565: 历史 assistant 消息含结构化 thinking 块（thinking 字段）→ 思考卡渲染', async () => {
     const w = mount(ChatView)
     await flushPromises()
@@ -1482,10 +1484,14 @@ describe('ChatView', () => {
     gw.send.mockResolvedValue(undefined)
     gw.fireReady()
     await flushPromises()
-    // 思考只出现在折叠卡（data-test="cot-card"），正文（stream）为提取出的 text 内容
+    // T3（#666）：有轨迹历史轮默认折叠——条面计数「执行过程 · 思考」（无时长），正文恒在折叠外
+    expect(w.get('[data-test="trace-fold-label"]').text()).toBe('执行过程 · 思考')
+    expect(w.find('[data-test="cot-card"]').exists()).toBe(false) // 思考卡默认收进折叠条
+    expect(w.find('[data-test="stream"]').text()).toContain('历史回答')
+    // 展开折叠条：思考只出现在折叠卡（data-test="cot-card"），正文（stream）为提取出的 text 内容
+    await w.find('[data-test="trace-fold"]').trigger('click')
     expect(w.find('[data-test="cot-card"]').exists()).toBe(true)
     expect(w.find('[data-test="cot-card"]').text()).toContain('历史推理')
-    expect(w.find('[data-test="stream"]').text()).toContain('历史回答')
   })
 
   // #565 回归：历史消息无结构化 thinking 块（仅 text 字段的旧 shape）→ 思考卡不出现（thinking ''，
@@ -1517,6 +1523,8 @@ describe('ChatView', () => {
   // E1b: abort 固化的 toolCall-only assistant 消息（生产实测：exec 审批卡无人处理 → 网关
   // stuck-session recovery abort run → 最后一条 assistant content=[thinking,toolCall×3] 无 text
   // 块）→ 不得渲染空白气泡（user 消息下出现空 assistant 气泡，用户误以为回复丢失）。
+  // #666 T3：有轨迹历史轮默认折叠——气泡渲染折叠条（非空白），展开后工具行（done 态）逐行可见。
+  //（thinking 块用 text 字段、非官方 thinking 字段 → 不提取（#565 回归语义），计数无「思考」段）
   it('E1b: 历史 toolCall-only assistant 消息（abort 固化）→ 不渲染空白气泡', async () => {
     const w = mount(ChatView)
     await flushPromises()
@@ -1544,12 +1552,16 @@ describe('ChatView', () => {
     await flushPromises()
     const streamText = w.find('[data-test="stream"]').text()
     expect(streamText).toContain('录入一下这篇论文') // user 消息正常渲染
-    // 不得渲染空白气泡：toolCall-only 消息渲染为工具行（done 态）而非空 assistant 气泡
+    // 不得渲染空白气泡：toolCall-only 消息渲染折叠条（T3 默认折叠），条面步骤计数可见
     const bubbles = w.findAll('.msg.assistant')
     expect(bubbles.length).toBe(1) // 只有一个 assistant 消息（该 toolCall-only 消息）
     expect(bubbles[0].text().trim()).not.toBe('') // 不得是空白气泡
-    expect(bubbles[0].find('[data-test="tool-line"]').exists()).toBe(true) // 渲染为工具行
-    expect(bubbles[0].text()).toContain('wiki_search') // 工具名可见（agent 实际调过什么）
+    expect(bubbles[0].get('[data-test="trace-fold-label"]').text()).toBe('执行过程 · 3 次工具')
+    expect(bubbles[0].find('[data-test="tool-line"]').exists()).toBe(false) // 工具行默认收进折叠条
+    // 展开折叠条：渲染为工具行（done 态），工具名可见（agent 实际调过什么）
+    await bubbles[0].find('[data-test="trace-fold"]').trigger('click')
+    expect(bubbles[0].findAll('[data-test="tool-line"]')).toHaveLength(3)
+    expect(bubbles[0].text()).toContain('wiki_search')
   })
 
   it('E2: 断线时新建会话被守卫（不裸错误、不清 transcript）', async () => {

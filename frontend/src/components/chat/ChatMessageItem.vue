@@ -101,7 +101,8 @@ const copyState = ref<'idle' | 'copied' | 'failed'>('idle')
       <!-- T1 轮次折叠（#664）：完成且有轨迹 → 折叠条（正文/附件/AI 提示条恒在折叠条外）。
            折叠态只渲染条面；展开态条面（可再收起）+ 平铺思考卡 + 逐行工具行（绕过工具分组
            聚合，仅一层）。traceFolded 三态统一「缺省即展开」（undefined/false 渲染轨迹、true
-           只留条面）——历史翻译消息缺省 undefined 恒展开（历史默认折叠属后续票）。 -->
+           只留条面）——T3（#666）起历史翻译的有轨迹 assistant 消息默认置 true（历史轮默认
+           折叠）；异常收尾轮不置值（保持展开便于看原因）。 -->
       <template v-if="traceFoldable">
         <TraceFold
           :has-thinking="msg.thinking !== ''"
