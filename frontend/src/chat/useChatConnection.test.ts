@@ -537,3 +537,46 @@ describe('useChatConnection 执行时长（#665 T2）', () => {
     expect(chat.messages[1].turnDurationMs).toBe(7_000) // 重发路径同款 send 起算
   })
 })
+
+// issue #535：历史会话内容被吞——进入会话只拉首 50 条，翻到顶部即截断，最早的消息不可见。
+// 期望：进入会话自动把整个 session 历史拉全（循环分页直到 hasMore=false），不留隐藏历史。
+describe('历史拉全（issue #535）', () => {
+  setupConnTestEnv()
+
+  it('进入会话自动拉全整个 session 历史（非首 50 条截断）', async () => {
+    const TOTAL = 130
+    // 最旧在前（旧→新，同网关 history 排序）；text 兼作分页锚点 id
+    const all = Array.from({ length: TOTAL }, (_, i) => ({
+      role: 'user',
+      text: `msg-${String(i).padStart(3, '0')}`,
+    }))
+    const { conn, chat } = setup()
+    const ready = conn.openGateway()
+    await flushPromises()
+    const gw = MockGatewayChat.last!
+    gw.listSessions.mockResolvedValue([{ session_key: 'sk-1', title: '', updated_at: '' }])
+    // mock 网关 chat.history 分页协议（对齐 loadHistory/loadMoreHistory 现契约）：
+    // 无锚点 → 最新 limit 条（loadHistory 传 50）；带锚点 → 锚点之前更旧一页；页内旧→新。
+    // 分页请求现不带 limit → 网关默认页大小 50。
+    gw.getHistory.mockImplementation((key: string, limit?: number, messageId?: string) => {
+      expect(key).toBe('sk-1')
+      const idx = messageId !== undefined ? all.findIndex((m) => m.text === messageId) : all.length
+      const n = limit ?? 50
+      const start = Math.max(0, idx - n)
+      return Promise.resolve({
+        messages: all.slice(start, idx),
+        hasMore: start > 0,
+        nextOffset: start > 0 ? all[start]!.text : null,
+      })
+    })
+    gw.listCommands.mockResolvedValue([])
+    gw.listPendingApprovals.mockResolvedValue([])
+    gw.fireReady()
+    await ready
+    await flushPromises() // syncSessions → loadHistory（应拉全 130 条）
+
+    expect(chat.messages).toHaveLength(TOTAL) // 整个 session 拉全，非首 50 条截断
+    expect(chat.messages[0]!.text).toBe('msg-000') // 最旧一条在顶
+    expect(chat.historyHasMore).toBe(false) // 无隐藏历史 → 顶部「加载更多」不出现
+  })
+})
