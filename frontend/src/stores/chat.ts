@@ -33,6 +33,10 @@ export interface Msg {
   // 折叠态。可选（缺省展开）：done 帧自动置 true；手动开合经 toggleTraceFold mutation；
   // error/断线/宽限收尾不置值。正文与附件恒在折叠外，不受此字段影响。
   traceFolded?: boolean
+  // T2 执行时长（#665 / CONTEXT.md「执行时长」）：本轮 send → done 的墙钟毫秒数（含建连排队/
+  // 审批等待/断线重连间隔——墙钟语义）。可选：done 帧落定（时长信号同折叠信号独占 done）；
+  // 历史轮/error/断线/宽限收尾缺省 undefined（条面回退「执行过程 · …」计数文案）。
+  turnDurationMs?: number
 }
 
 // T06 审批卡（连接级，无 runId）：独立列表渲染，不混入 messages——避免破坏流式锚定/finalizeLast
@@ -171,6 +175,13 @@ export const useChatStore = defineStore('chat', {
     // done 发生一次，手动开合不被自动覆盖。
     toggleTraceFold(m: Msg): void {
       m.traceFolded = !m.traceFolded
+    },
+    // T2 执行时长（#665）：done 正常完成落定本轮墙钟毫秒。仅 useChatConnection.handleDone 的
+    // 本 run 终态分支调用（与 foldLastTrace 同点，起点在连接簇闭包 turnStartedAt）；error/
+    // 断线/宽限收尾不落定（异常轮无「已执行」可言，条面回退计数文案）。
+    setLastTurnDuration(ms: number): void {
+      const last = this.messages[this.messages.length - 1]
+      if (last && last.role === 'assistant') last.turnDurationMs = ms
     },
     setInput(v: string): void {
       this.input = v

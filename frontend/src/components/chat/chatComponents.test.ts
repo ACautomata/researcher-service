@@ -429,6 +429,32 @@ describe('TraceFold', () => {
   })
 })
 
+// T2 执行时长（#665）：条面文案升级——有时长主文案「已执行 42s」（≥60s 中文分秒）+ 次要计数；
+// 无时长数据（历史轮）回退「执行过程」计数文案。时长格式化经条面文案断言（spec 决议：不新增
+// 纯函数测试接缝）。
+describe('TraceFold 执行时长（#665 T2）', () => {
+  it('不足 60s：「已执行 42s · 思考 · 5 次工具」（42s 边界）', () => {
+    const w = mount(TraceFold, { props: { hasThinking: true, toolCount: 5, folded: true, turnDurationMs: 42_000 } })
+    expect(w.get('[data-test="trace-fold-label"]').text()).toBe('已执行 42s · 思考 · 5 次工具')
+  })
+  it('≥60s：「已执行 1 分 12 秒 · 思考 · 5 次工具」（1 分 12 秒边界）', () => {
+    const w = mount(TraceFold, { props: { hasThinking: true, toolCount: 5, folded: true, turnDurationMs: 72_000 } })
+    expect(w.get('[data-test="trace-fold-label"]').text()).toBe('已执行 1 分 12 秒 · 思考 · 5 次工具')
+  })
+  it('整分钟省略秒段：60s → 「已执行 1 分 · …」（60s 边界）', () => {
+    const w = mount(TraceFold, { props: { hasThinking: true, toolCount: 5, folded: true, turnDurationMs: 60_000 } })
+    expect(w.get('[data-test="trace-fold-label"]').text()).toBe('已执行 1 分 · 思考 · 5 次工具')
+  })
+  it('纯工具轮带时长：计数段按实际内容（无思考段）', () => {
+    const w = mount(TraceFold, { props: { hasThinking: false, toolCount: 3, folded: true, turnDurationMs: 42_000 } })
+    expect(w.get('[data-test="trace-fold-label"]').text()).toBe('已执行 42s · 3 次工具')
+  })
+  it('无时长数据（durationMs 缺省，历史轮）回退「执行过程」计数文案，不显示「已执行」', () => {
+    const w = mount(TraceFold, { props: { hasThinking: true, toolCount: 5, folded: true, turnDurationMs: undefined } })
+    expect(w.get('[data-test="trace-fold-label"]').text()).toBe('执行过程 · 思考 · 5 次工具')
+  })
+})
+
 // T1 轮次折叠（#664）：折叠条渲染规则（ChatMessageItem 集成，展示接缝）——
 // 折叠态只渲染条面（正文/附件/AI 提示条恒在外）；展开态平铺思考卡+逐行工具行（无分组二级聚合）；
 // 无轨迹不渲染；流式进行中现状渲染不动。
@@ -508,6 +534,13 @@ describe('ChatMessageItem 轮次折叠（#664 T1）', () => {
     expect(w.find('[data-test="cot-card"]').exists()).toBe(true) // 条目展开（无「箭头闭合却展开」矛盾态）
     expect(w.findAll('[data-test="tool-line"]')).toHaveLength(2)
     expect(w.find('[data-test="tool-group"]').exists()).toBe(false) // 折叠条场景绕过分组聚合
+  })
+
+  it('完成轮带执行时长（msg.turnDurationMs）→ 条面显示「已执行 …」（#665 prop 传递）', () => {
+    const m = tracedAssistant()
+    m.turnDurationMs = 42_000
+    const w = mount(ChatMessageItem, { props: { msg: m } })
+    expect(w.get('[data-test="trace-fold-label"]').text()).toBe('已执行 42s · 思考 · 2 次工具')
   })
 
   it('流式进行中渲染现状不动：无折叠条，思考卡 + >=2 工具分组聚合照旧', () => {

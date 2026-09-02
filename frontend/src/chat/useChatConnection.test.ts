@@ -117,7 +117,11 @@ async function sendAndAck(conn: ReturnType<typeof useChatConnection>, chat: Retu
   await flushPromises() // gateway.send ack → myRunId = runId
 }
 
-describe('useChatConnection retry-run handoff', () => {
+// 三组 describe（retry-run handoff / 轮次折叠 #664 T1 / 执行时长 #665 T2）共享的 mock 环境
+//（#665 审查 S1：第三份逐字样板收敛）。fake timers（含 Date——墙钟差精确断言依赖）+ 每用例
+// 独立 pinia + MockGatewayChat 工厂 + apiFetch/Blob/URL stub。在 describe 内首行调用
+//（vitest 钩子注册进当前 suite，同款描述内作用域语义不变）。
+function setupConnTestEnv() {
   beforeEach(() => {
     vi.useFakeTimers()
     setActivePinia(createPinia())
@@ -149,6 +153,10 @@ describe('useChatConnection retry-run handoff', () => {
     vi.useRealTimers()
     vi.unstubAllGlobals()
   })
+}
+
+describe('useChatConnection retry-run handoff', () => {
+  setupConnTestEnv()
 
   it('A: 正常单 run——ack → delta/media → final 行为不变', async () => {
     const { conn, chat } = setup()
@@ -314,35 +322,7 @@ describe('useChatConnection retry-run handoff', () => {
 // 覆盖：done 自动折叠（有轨迹）/ error·断线·8s 宽限三路收尾不折叠 / 手动开合 mutation +
 // 自动折叠一次性（done 后手动展开不再被自动收起）。只测外部行为（store 投影），不测闭包内部态。
 describe('useChatConnection 轮次折叠（#664 T1）', () => {
-  beforeEach(() => {
-    vi.useFakeTimers()
-    setActivePinia(createPinia())
-    MockGatewayChat.instances = []
-    MockGatewayChat.last = null
-    vi.clearAllMocks()
-    useAuthStore().$patch({ token: 'jwt-test' })
-    ;(getBootstrapToken as unknown as ReturnType<typeof vi.fn>).mockResolvedValue('boot-1')
-    ;(createGatewayChat as unknown as ReturnType<typeof vi.fn>).mockImplementation(
-      (params: { handlers: MockHandlers }) => new MockGatewayChat(params.handlers),
-    )
-    ;(apiFetch as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
-      ok: true,
-      blob: async () => new Blob(['png'], { type: 'image/png' }),
-    })
-    const origURL = globalThis.URL
-    vi.stubGlobal(
-      'URL',
-      Object.assign(Object.create(origURL), {
-        createObjectURL: vi.fn(() => 'blob:mock-media'),
-        revokeObjectURL: vi.fn(),
-      }),
-    )
-    sessionStorage.clear()
-  })
-  afterEach(() => {
-    vi.useRealTimers()
-    vi.unstubAllGlobals()
-  })
+  setupConnTestEnv()
 
   // 发送并流式注入一轮带轨迹的内容（replace 快照带结构化思考 + 一条工具行），不发 done
   async function sendAndStreamTrace(
@@ -439,5 +419,121 @@ describe('useChatConnection 轮次折叠（#664 T1）', () => {
 
     chat.toggleTraceFold(chat.messages[1]) // 再手动收起（可再收起）
     expect(chat.messages[1].traceFolded).toBe(true)
+  })
+})
+
+// T2 执行时长（#665）——行为接缝：直实例化 composable + mock 网关驱动帧 + fake timers（同上两先例）。
+// 覆盖：send 起算墙钟、done 落定精确时长（fake Date 差值）、error 收尾不落定、retry-run handoff
+// 与原请求同轮连续计时（不重置）、断线 resume 续帧含中断间隔（墙钟连续）、离线重发路径同样起算。
+// 只测外部行为（store 投影 turnDurationMs），不测闭包内部态。
+describe('useChatConnection 执行时长（#665 T2）', () => {
+  setupConnTestEnv()
+
+  it('send 后推进 T 毫秒到 done → 落定 turnDurationMs 精确等于 T（折叠信号不变）', async () => {
+    const { conn, chat } = setup()
+    const gw = await connect(conn)
+    await sendAndAck(conn, chat, gw, 'run-A')
+
+    gw.fireFrame({ type: 'text', runId: 'run-A', delta: '流式正文', replace: true, thinking: '思考' })
+    gw.fireFrame({ type: 'tool', runId: 'run-A', name: 'exec', state: 'done', id: 't1', title: null, input: 'ls', result: '' })
+    await vi.advanceTimersByTimeAsync(42_000) // fake Date 同步推进：执行 42s 后 done
+    gw.fireFrame({ type: 'done', runId: 'run-A' })
+    await flushPromises()
+
+    expect(chat.messages[1].streaming).toBe(false)
+    expect(chat.messages[1].turnDurationMs).toBe(42_000) // 墙钟差精确 = T
+    expect(chat.messages[1].traceFolded).toBe(true) // 折叠信号（#664）不变
+  })
+
+  it('error 收尾 → 不落定时长（异常轮无「已执行」可言）', async () => {
+    const { conn, chat } = setup()
+    const gw = await connect(conn)
+    await sendAndAck(conn, chat, gw, 'run-A')
+    gw.fireFrame({ type: 'text', runId: 'run-A', delta: '正文', replace: false })
+    await vi.advanceTimersByTimeAsync(5_000)
+    gw.fireFrame({ type: 'error', runId: 'run-A', message: 'run 失败' })
+    await flushPromises()
+
+    expect(chat.messages[1].streaming).toBe(false)
+    expect(chat.messages[1].turnDurationMs).toBeUndefined() // 时长信号独占 done（同折叠信号）
+  })
+
+  it('空 final → retry-run handoff 认领的重试 run 的 done 落定时长从原 send 起算（计时不重置）', async () => {
+    const { conn, chat } = setup()
+    const gw = await connect(conn)
+    await sendAndAck(conn, chat, gw, 'run-A') // 原请求 send（计时起点）
+
+    // 本 run 空 final（retryPending 开启）——不落定不清起点
+    gw.fireFrame({ type: 'done', runId: 'run-A' })
+    await flushPromises()
+    await vi.advanceTimersByTimeAsync(500) // t+500ms：gateway 自动重试的新 runId 到达
+    gw.fireFrame({ type: 'text', runId: 'run-B', delta: '重试正文', replace: false })
+    await flushPromises()
+    await vi.advanceTimersByTimeAsync(41_500) // t+42s：retry run done
+    gw.fireFrame({ type: 'done', runId: 'run-B' })
+    await flushPromises()
+
+    expect(chat.messages[1].text).toBe('重试正文')
+    expect(chat.messages[1].turnDurationMs).toBe(42_000) // 含空 final 后的 handoff 间隙（同一轮连续计时）
+  })
+
+  it('断线 resume 续帧后 done → 时长含中断间隔（墙钟连续）', async () => {
+    const { conn, chat } = setup()
+    const gw = await connect(conn)
+    await sendAndAck(conn, chat, gw, 'run-A')
+    gw.fireFrame({ type: 'text', runId: 'run-A', delta: '前半', replace: false })
+    await flushPromises()
+    gw.fireClose(1006) // 意外断线：finalizeLast + 记 resumeRun（不动计时起点）
+    await flushPromises()
+
+    await vi.advanceTimersByTimeAsync(30_000) // 30s 中断间隔
+    // 协议机自动重连（B5）：同一 GatewayChat 实例的 onReady 再次触发——everConnected 已 true 且
+    // resumeRun 在案 → 保留占位 armResumeWait 等续帧（手动 openGateway 是新连接新 run 语境，
+    // 会清 resumeRun 走 loadHistory，非本用例模拟的路径）
+    gw.fireReady()
+    await flushPromises()
+
+    gw.fireFrame({ type: 'text', runId: 'run-A', delta: '后半', replace: false }) // resume 续帧复活占位
+    await flushPromises()
+    await vi.advanceTimersByTimeAsync(12_000)
+    gw.fireFrame({ type: 'done', runId: 'run-A' })
+    await flushPromises()
+
+    expect(chat.messages[1].text).toBe('前半后半') // 续帧照常追加（B5 语义不变）
+    expect(chat.messages[1].turnDurationMs).toBe(42_000) // 含 30s 中断：send→done 墙钟
+  })
+
+  it('离线重发（outbox resendOutbox）路径同样起算计时', async () => {
+    // 预置 outbox 残留（「已点发送但网关没回执」的刷新场景）——首连 syncSessions 铺底后自动重发
+    sessionStorage.setItem(
+      'openclaw.panel.outbox.v1:demo',
+      JSON.stringify({
+        version: 1,
+        sessions: { 'sk-1': [{ id: 'oid-1', text: '离线期间的消息', createdAt: Date.now() }] },
+      }),
+    )
+    const { conn, chat } = setup()
+    // 不用 connect() helper：resendOutbox 在 onReady 链内同步触发，gateway.send 的 mock（ack 返
+    // runId）须在 fireReady 前就位，否则重发的 fire-and-forget .then 打在 undefined 上
+    const ready = conn.openGateway()
+    await flushPromises()
+    const gw = MockGatewayChat.last!
+    gw.listSessions.mockResolvedValue([{ session_key: 'sk-1', title: '', updated_at: '' }])
+    gw.getHistory.mockResolvedValue({ messages: [], hasMore: false, nextOffset: null })
+    gw.listCommands.mockResolvedValue([])
+    gw.listPendingApprovals.mockResolvedValue([])
+    gw.send.mockResolvedValue('run-resend') // 重发 ack
+    gw.fireReady()
+    await ready
+    await flushPromises() // syncSessions → loadHistory（空历史）→ resendOutbox（乐观 echo）
+
+    expect(chat.messages[0].text).toBe('离线期间的消息') // user echo
+    expect(chat.messages[1].role).toBe('assistant') // 占位
+    await vi.advanceTimersByTimeAsync(7_000) // 重发后执行 7s 到 done
+    gw.fireFrame({ type: 'text', runId: 'run-resend', delta: '重发的回复', replace: false })
+    gw.fireFrame({ type: 'done', runId: 'run-resend' })
+    await flushPromises()
+
+    expect(chat.messages[1].turnDurationMs).toBe(7_000) // 重发路径同款 send 起算
   })
 })
