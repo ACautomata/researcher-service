@@ -14,7 +14,8 @@ import { listInstances } from '@/api/containers'
 import { ApiError } from '@/api/client'
 import { useChatStore } from '@/stores/chat'
 import { useFileTabsStore } from '@/stores/fileTabs'
-import { useAuthStore } from '@/stores/auth'
+import { useAuthStore, tokenOwner } from '@/stores/auth'
+import { safeLocalStorage } from '@/storage'
 import { useChatConnection } from '@/chat/useChatConnection'
 import {
   buildAttachments,
@@ -109,27 +110,17 @@ const executionStatus = computed(() => {
   return '已连接'
 })
 
-function draftOwner(): string {
-  try {
-    const part = auth.token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')
-    const payload = JSON.parse(atob(part.padEnd(Math.ceil(part.length / 4) * 4, '='))) as Record<string, unknown>
-    const identity = payload.sub ?? payload.username
-    if (typeof identity === 'string' && identity) return identity
-  } catch { /* malformed token falls through to token-scoped isolation */ }
-  return auth.token || 'signed-out'
-}
+// #668：JWT 身份解析与 localStorage 安全访问收敛到共享实现（stores/auth.tokenOwner /
+// storage.safeLocalStorage），面板三态宽度持久化共用同一套隔离语义。
 function draftKey(session = chat.selectedSession): string {
-  return `researcher:draft:${draftOwner()}:${chat.selectedContainer}:${session}`
-}
-function draftStorage(): Storage | null {
-  try { return globalThis.localStorage ?? null } catch { return null }
+  return `researcher:draft:${tokenOwner(auth.token)}:${chat.selectedContainer}:${session}`
 }
 watch(() => [chat.selectedContainer, chat.selectedSession] as const, () => {
-  if (chat.selectedContainer && chat.selectedSession) chat.setInput(draftStorage()?.getItem(draftKey()) ?? '')
+  if (chat.selectedContainer && chat.selectedSession) chat.setInput(safeLocalStorage()?.getItem(draftKey()) ?? '')
 })
 watch(() => chat.input, (value) => {
   if (!chat.selectedContainer || !chat.selectedSession) return
-  const storage = draftStorage(); if (!storage) return
+  const storage = safeLocalStorage(); if (!storage) return
   if (value) storage.setItem(draftKey(), value); else storage.removeItem(draftKey())
 })
 // #547 / ADR 0014：pending/resolving 请求固定在 composer 上方 ApprovalDock，避免被长回答顶出可视区域。
@@ -156,7 +147,7 @@ async function confirmRemoveSession(): Promise<boolean> {
 async function removeSession(key: string): Promise<void> {
   const res = await conn.removeSession(key, confirmRemoveSession)
   if (res === true) {
-    draftStorage()?.removeItem(draftKey(key))
+    safeLocalStorage()?.removeItem(draftKey(key))
     ElMessage.success('会话已删除')
   }
   else if (typeof res === 'string') ElMessage.error(res) // #461：失败 → 醒目错误 toast（替换顶部小字 bar）
@@ -284,6 +275,7 @@ defineExpose({
         :history-loading="chat.historyLoading"
         @load-more="conn.loadMoreHistory"
         @regenerate="regenerate"
+        @toggle-trace-fold="chat.toggleTraceFold"
       >
         <!-- #461：无选中会话（含删除当前会话后）→ 空态视图 + 「新建会话」入口 -->
         <template #empty>

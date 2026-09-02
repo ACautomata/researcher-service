@@ -123,6 +123,12 @@ export function useChatConnection(status: ChatStatus) {
   // onReady 消费：保留占位等待续帧（不 loadHistory 清空重建）；续帧到达 / 用户主动操作即取消。
   let resumeRun: { runId: string } | null = null
   let resumeTimer: ReturnType<typeof setTimeout> | null = null
+  // T2 执行时长（#665）：本轮 send 起算的墙钟起点（非响应式连接簇，Date.now 墙钟语义——建连排队/
+  // 审批等待/断线重连间隔天然计入）。send 与离线重发两路起算；retry-run handoff 认领与断线 resume
+  // 续帧不重置（同一轮连续计时）；done 本 run 终态落定墙钟差。单槽覆盖语义：每轮 send/重发覆盖
+  // 上一轮起点；落定仅发生在本 run done 分支，异常路（error/断线/宽限）残留起点会被下一轮覆盖，
+  // 不被任何路径误消费。
+  let turnStartedAt: number | null = null
 
   function armPendingGrace() {
     if (pendingGraceTimer !== null) return
@@ -449,6 +455,15 @@ export function useChatConnection(status: ChatStatus) {
         if (last && last.role === 'assistant') last.thinking = thinking
       }
       finalizeLast()
+      // T1 轮次折叠（#664）：折叠信号独占 done 帧（run 正常 completed）——不得挂共享收尾
+      // finalizeLast（error/断线 onClose/8s 宽限收尾均走它，必须保持展开）。
+      chat.foldLastTrace()
+      // T2 执行时长（#665）：时长落定同折叠信号独占本 run done 分支——终点 = 本帧到达的墙钟
+      //（retry 认领/resume 续帧不重置起点，落定即含 handoff 间隙与断线间隔）。
+      if (turnStartedAt !== null) {
+        chat.setLastTurnDuration(Math.max(0, Date.now() - turnStartedAt))
+        turnStartedAt = null
+      }
       activeRunId = ''
       clearResumeWait() // B5: run 正常终态，resume 无需继续
       return
@@ -1028,6 +1043,7 @@ export function useChatConnection(status: ChatStatus) {
     graceExpired = false // B4: 新 run 语境，宽限过期标记作废
     pendingSend = true // 首帧未到前，切会话会按 pending 孤儿计数（codex P2 #3）
     myRunId = '' // #53: 新 send 语境，ack runId 未知
+    turnStartedAt = Date.now() // T2（#665）：新 send = 新轮计时起点（覆盖上一轮残留）
     const myGw = gateway
     const sessionKey = chat.selectedSession
     const container = chat.selectedContainer
@@ -1104,6 +1120,7 @@ export function useChatConnection(status: ChatStatus) {
       clearRetryTimer()
       pendingSend = true
       myRunId = '' // #53: 重发是新 send 语境，ack runId 未知
+      turnStartedAt = Date.now() // T2（#665）：重发同款 send 起算（离线重发路径同样计时）
       void myGw
         .send(sessionKey, item.text, undefined, item.id)
         .then(() => outbox.removePending(container, sessionKey, item.id))

@@ -29,6 +29,14 @@ export interface Msg {
   // replace 快照）双路径提取；与 text 独立数据通道（文本提取语义不污染，附件渲染走这里）。
   // 纯图片消息（text 空但 media 非空）照常渲染。user 发送的附件也入此（echo 渲染）。
   media: MediaBlock[]
+  // T1 轮次折叠（#664 / CONTEXT.md「折叠条」）：轮次正常完成后轨迹（思考+工具）收进折叠条的
+  // 折叠态。可选（缺省展开）：done 帧自动置 true；手动开合经 toggleTraceFold mutation；
+  // error/断线/宽限收尾不置值。正文与附件恒在折叠外，不受此字段影响。
+  traceFolded?: boolean
+  // T2 执行时长（#665 / CONTEXT.md「执行时长」）：本轮 send → done 的墙钟毫秒数（含建连排队/
+  // 审批等待/断线重连间隔——墙钟语义）。可选：done 帧落定（时长信号同折叠信号独占 done）；
+  // 历史轮/error/断线/宽限收尾缺省 undefined（条面回退「执行过程 · …」计数文案）。
+  turnDurationMs?: number
 }
 
 // T06 审批卡（连接级，无 runId）：独立列表渲染，不混入 messages——避免破坏流式锚定/finalizeLast
@@ -58,6 +66,12 @@ export function newMsg(role: 'user' | 'assistant', text = ''): Msg {
     tools: [],
     media: [], // #459-T3 #464：附件媒体块初始空（send/loadHistory/流式各自填充）
   }
+}
+
+// 轨迹判定（#664 / CONTEXT.md「轨迹」）：思考非空或工具行非空即有轨迹；正文与附件不算轨迹。
+// 无轨迹的轮次不渲染折叠条。store（foldLastTrace）与渲染层（折叠条渲染门）共用此单一实现。
+export function hasTrace(m: Msg): boolean {
+  return m.thinking !== '' || m.tools.length > 0
 }
 
 export const useChatStore = defineStore('chat', {
@@ -148,6 +162,26 @@ export const useChatStore = defineStore('chat', {
         last.streaming = false
         last.thinkingOpen = false
       }
+    },
+    // T1 轮次折叠（#664）：done 正常完成后收起该轮轨迹（最后一条 assistant 消息有轨迹时）。
+    // 折叠信号独占 done 帧——仅 useChatConnection.handleDone 的本 run 终态分支调用，不得挂共享
+    // 收尾 finalizeLast（error/断线/8s 宽限收尾不折叠）。每次 run 终态只发生一次，手动展开后
+    // 无第二次自动收起。
+    foldLastTrace(): void {
+      const last = this.messages[this.messages.length - 1]
+      if (last && last.role === 'assistant' && hasTrace(last)) last.traceFolded = true
+    },
+    // T1 手动开合（#664）：折叠条 emit 回父层落 store（贴既有纯 mutation 形态）。自动折叠只在
+    // done 发生一次，手动开合不被自动覆盖。
+    toggleTraceFold(m: Msg): void {
+      m.traceFolded = !m.traceFolded
+    },
+    // T2 执行时长（#665）：done 正常完成落定本轮墙钟毫秒。仅 useChatConnection.handleDone 的
+    // 本 run 终态分支调用（与 foldLastTrace 同点，起点在连接簇闭包 turnStartedAt）；error/
+    // 断线/宽限收尾不落定（异常轮无「已执行」可言，条面回退计数文案）。
+    setLastTurnDuration(ms: number): void {
+      const last = this.messages[this.messages.length - 1]
+      if (last && last.role === 'assistant') last.turnDurationMs = ms
     },
     setInput(v: string): void {
       this.input = v

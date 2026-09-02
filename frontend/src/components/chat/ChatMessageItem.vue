@@ -7,13 +7,15 @@
 // controls；src 为纯 base64，此处重建完整 dataURL（data:<mime>;base64,<src>）。user 与 assistant
 // 均渲染（user 发送的附件 echo / AI 工具产出的多媒体如 browser 截图）。
 import type { Msg } from '@/stores/chat'
+import { hasTrace } from '@/stores/chat'
 import type { MediaBlock } from '@/chat/eventTranslate'
 // #555:工具聚合摘要——summarizeToolGroup 纯函数 + ToolRow→{name,args,isError} 三元组适配
 import { summarizeToolGroup } from '@/chat/toolRender/tool-call-grouping'
 import { toolRowToGroupInput } from '@/chat/toolRender/adapt'
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import ThinkingCard from '@/components/chat/ThinkingCard.vue'
 import ToolLine from '@/components/chat/ToolLine.vue'
+import TraceFold from '@/components/chat/TraceFold.vue'
 import MarkdownRenderer from '@/components/chat/MarkdownRenderer.vue'
 
 const props = defineProps<{
@@ -21,7 +23,15 @@ const props = defineProps<{
   regenerateText?: string
 }>()
 
-const emit = defineEmits<{ regenerate: [text: string] }>()
+// T1 轮次折叠（#664）：开合 emit 回父层（ChatStream→ChatView）落 store mutation。
+const emit = defineEmits<{ regenerate: [text: string]; toggleTraceFold: [] }>()
+
+// T1 轮次折叠（#664）：完成（非流式）且有轨迹的 assistant 消息渲染折叠条——轨迹判定
+// hasTrace（思考非空或工具行非空），正文与附件不算轨迹；流式进行中渲染现状完全不动；
+// 无轨迹不渲染折叠条。
+const traceFoldable = computed(
+  () => props.msg.role === 'assistant' && !props.msg.streaming && hasTrace(props.msg),
+)
 
 defineSlots<{
   thinking?: (props: { thinking: string; thinkingOpen: boolean }) => unknown
@@ -88,33 +98,48 @@ const copyState = ref<'idle' | 'copied' | 'failed'>('idle')
 <template>
   <div class="msg" :class="msg.role">
     <div class="bubble">
-      <!-- T08 思考链折叠卡（spec §8.3 (a) / r26 §4） -->
-      <slot name="thinking" :thinking="msg.thinking" :thinking-open="msg.thinkingOpen">
-        <ThinkingCard v-if="msg.role === 'assistant' && msg.thinking" :thinking="msg.thinking" :thinking-open="msg.thinkingOpen" />
-      </slot>
-      <!-- T08 工具执行（spec §9.4 / 原型 oc-chat-page） -->
-      <!-- #555：>=2 个工具调用聚合折叠为一条摘要（连续同类合并计数、失败追加 · N failed，
-           用户故事 6），展开后逐行 ToolLine；单工具调用保持直接渲染。聚合只在渲染层
-           落位（msg.tools 循环层），不碰 timeline.ts。 -->
-      <template v-if="msg.tools.length >= 2">
-        <details class="tool-group" data-test="tool-group">
-          <summary data-test="tool-group-summary">
-            {{ summarizeToolGroup(msg.tools.map(toolRowToGroupInput)) }}
-          </summary>
-          <div class="tool-group-list">
-            <template v-for="(t, ti) in msg.tools" :key="`tool-${ti}`">
-              <slot name="tool-line" :tool="t">
-                <ToolLine :tool="t" />
-              </slot>
-            </template>
-          </div>
-        </details>
+      <!-- T1 轮次折叠（#664）：完成且有轨迹 → 折叠条（正文/附件/AI 提示条恒在折叠条外）。
+           折叠态只渲染条面；展开态条面（可再收起）+ 平铺思考卡 + 逐行工具行（绕过工具分组
+           聚合，仅一层）。traceFolded 三态统一「缺省即展开」（undefined/false 渲染轨迹、true
+           只留条面）——历史翻译消息缺省 undefined 恒展开（历史默认折叠属后续票）。 -->
+      <template v-if="traceFoldable">
+        <TraceFold
+          :has-thinking="msg.thinking !== ''"
+          :tool-count="msg.tools.length"
+          :turn-duration-ms="msg.turnDurationMs"
+          :folded="msg.traceFolded === true"
+          @toggle="emit('toggleTraceFold')"
+        />
       </template>
-      <template v-else>
-        <template v-for="(t, ti) in msg.tools" :key="`tool-${ti}`">
-          <slot name="tool-line" :tool="t">
-            <ToolLine :tool="t" />
-          </slot>
+      <!-- 轨迹条目：流式/无轨迹完成轮恒渲染（现状）；折叠条展开态平铺渲染（无二级聚合） -->
+      <template v-if="!traceFoldable || msg.traceFolded !== true">
+        <!-- T08 思考链折叠卡（spec §8.3 (a) / r26 §4） -->
+        <slot name="thinking" :thinking="msg.thinking" :thinking-open="msg.thinkingOpen">
+          <ThinkingCard v-if="msg.role === 'assistant' && msg.thinking" :thinking="msg.thinking" :thinking-open="msg.thinkingOpen" />
+        </slot>
+        <!-- T08 工具执行（spec §9.4 / 原型 oc-chat-page） -->
+        <!-- #555：>=2 个工具调用聚合折叠为一条摘要——**仅流式/无轨迹完成轮**（折叠条展开态
+             平铺逐行 ToolLine，绕过分组聚合：#664 单层展开）。聚合只在渲染层落位，不碰 timeline.ts。 -->
+        <template v-if="!traceFoldable && msg.tools.length >= 2">
+          <details class="tool-group" data-test="tool-group">
+            <summary data-test="tool-group-summary">
+              {{ summarizeToolGroup(msg.tools.map(toolRowToGroupInput)) }}
+            </summary>
+            <div class="tool-group-list">
+              <template v-for="(t, ti) in msg.tools" :key="`tool-${ti}`">
+                <slot name="tool-line" :tool="t">
+                  <ToolLine :tool="t" />
+                </slot>
+              </template>
+            </div>
+          </details>
+        </template>
+        <template v-else>
+          <template v-for="(t, ti) in msg.tools" :key="`tool-${ti}`">
+            <slot name="tool-line" :tool="t">
+              <ToolLine :tool="t" />
+            </slot>
+          </template>
         </template>
       </template>
       <!-- #401：assistant 渲染 markdown（含流式光标），user 保持纯文本 + 光标 -->
