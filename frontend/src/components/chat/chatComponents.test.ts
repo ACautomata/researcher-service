@@ -10,6 +10,7 @@ import ChatSidebar from '@/components/chat/ChatSidebar.vue'
 import ChatHeader from '@/components/chat/ChatHeader.vue'
 import ChatComposer from '@/components/chat/ChatComposer.vue'
 import ChatMessageItem from '@/components/chat/ChatMessageItem.vue'
+import TraceFold from '@/components/chat/TraceFold.vue'
 import ApprovalCard from '@/components/chat/ApprovalCard.vue'
 import ApprovalDock from '@/components/chat/ApprovalDock.vue'
 import ChatStream from '@/components/chat/ChatStream.vue'
@@ -403,6 +404,131 @@ describe('ToolGroup', () => {
     })
     expect(w.text()).toContain('custom:t1')
     expect(w.text()).toContain('custom:t2')
+  })
+})
+
+// T1 轮次折叠（#664）：TraceFold 条面哑组件——计数文案 + 点击开合 emit（props-in/emits-out）。
+// 时长格式化（后续票）不单开纯函数测试，经条面文案断言。
+describe('TraceFold', () => {
+  it('条面计数文案：思考+工具 → 「执行过程 · 思考 · N 次工具」', () => {
+    const w = mount(TraceFold, { props: { hasThinking: true, toolCount: 5, folded: true } })
+    expect(w.get('[data-test="trace-fold-label"]').text()).toBe('执行过程 · 思考 · 5 次工具')
+  })
+  it('纯思考轮按实际内容计数：「执行过程 · 思考」', () => {
+    const w = mount(TraceFold, { props: { hasThinking: true, toolCount: 0, folded: true } })
+    expect(w.get('[data-test="trace-fold-label"]').text()).toBe('执行过程 · 思考')
+  })
+  it('纯工具轮按实际内容计数：思考段省略', () => {
+    const w = mount(TraceFold, { props: { hasThinking: false, toolCount: 3, folded: true } })
+    expect(w.get('[data-test="trace-fold-label"]').text()).toBe('执行过程 · 3 次工具')
+  })
+  it('点击条面 → emit toggle（开合由父层落 store）', async () => {
+    const w = mount(TraceFold, { props: { hasThinking: true, toolCount: 1, folded: true } })
+    await w.get('[data-test="trace-fold"]').trigger('click')
+    expect(w.emitted('toggle')).toBeTruthy()
+  })
+})
+
+// T1 轮次折叠（#664）：折叠条渲染规则（ChatMessageItem 集成，展示接缝）——
+// 折叠态只渲染条面（正文/附件/AI 提示条恒在外）；展开态平铺思考卡+逐行工具行（无分组二级聚合）；
+// 无轨迹不渲染；流式进行中现状渲染不动。
+describe('ChatMessageItem 轮次折叠（#664 T1）', () => {
+  // 构造一条完成且带轨迹（思考 + 2 工具行）的 assistant 消息
+  function tracedAssistant(): Msg {
+    const m = newMsg('assistant', '总结正文')
+    m.streaming = false
+    m.thinking = '思考内容'
+    m.tools.push({ id: 't1', name: 'bash', state: 'done', title: null, input: { command: 'ls' }, result: '' })
+    m.tools.push({ id: 't2', name: 'read', state: 'done', title: null, input: { file_path: '/a.ts' }, result: '' })
+    return m
+  }
+
+  it('折叠态只渲染条面（思考卡/工具行不渲染）；正文、附件、AI 提示条仍可见', () => {
+    const m = tracedAssistant()
+    m.traceFolded = true
+    m.media.push({ type: 'image', mimeType: 'image/png', src: 'AAA' })
+    const w = mount(ChatMessageItem, { props: { msg: m } })
+    expect(w.find('[data-test="trace-fold"]').exists()).toBe(true) // 条面在
+    expect(w.get('[data-test="trace-fold-label"]').text()).toBe('执行过程 · 思考 · 2 次工具')
+    expect(w.find('[data-test="cot-card"]').exists()).toBe(false) // 轨迹收起
+    expect(w.find('[data-test="tool-line"]').exists()).toBe(false)
+    expect(w.text()).toContain('总结正文') // 正文恒在外
+    expect(w.find('[data-test="media-image"]').exists()).toBe(true) // 附件恒在外
+    expect(w.find('[data-test="ai-notice"]').text()).toContain('内容由 AI 生成') // AI 提示条恒在外
+  })
+
+  it('展开态平铺思考卡 + 逐行工具行（无工具分组 details）；条面仍在、可再收起', async () => {
+    const m = tracedAssistant()
+    m.traceFolded = false
+    const w = mount(ChatMessageItem, { props: { msg: m } })
+    expect(w.find('[data-test="trace-fold"]').exists()).toBe(true) // 条面仍在（可再收起）
+    expect(w.find('[data-test="cot-card"]').text()).toContain('思考内容') // 思考卡平铺
+    // 2 个工具行平铺直渲染，绕过 >=2 工具的分组聚合 details（单层展开）
+    expect(w.find('[data-test="tool-group"]').exists()).toBe(false)
+    expect(w.findAll('[data-test="tool-line"]')).toHaveLength(2)
+    await w.get('[data-test="trace-fold"]').trigger('click')
+    expect(w.emitted('toggleTraceFold')).toBeTruthy() // 可再收起（emit 回父层落 store）
+  })
+
+  it('点击折叠条 → emit toggleTraceFold（父层落 store mutation）', async () => {
+    const m = tracedAssistant()
+    m.traceFolded = true
+    const w = mount(ChatMessageItem, { props: { msg: m } })
+    await w.get('[data-test="trace-fold"]').trigger('click')
+    expect(w.emitted('toggleTraceFold')).toBeTruthy()
+  })
+
+  it('无轨迹（思考空且无工具）的完成消息不渲染折叠条', () => {
+    const m = newMsg('assistant', '纯文本回复')
+    m.streaming = false
+    const w = mount(ChatMessageItem, { props: { msg: m } })
+    expect(w.find('[data-test="trace-fold"]').exists()).toBe(false)
+  })
+
+  it('纯思考轮照常渲染折叠条（计数文案无工具段）', () => {
+    const m = newMsg('assistant', '正文')
+    m.streaming = false
+    m.thinking = '只有思考'
+    const w = mount(ChatMessageItem, { props: { msg: m } })
+    expect(w.get('[data-test="trace-fold-label"]').text()).toBe('执行过程 · 思考')
+  })
+
+  it('纯工具轮照常渲染折叠条（单工具直接平铺）', () => {
+    const m = newMsg('assistant', '正文')
+    m.streaming = false
+    m.tools.push({ id: 't1', name: 'bash', state: 'done', title: null, input: { command: 'ls' }, result: '' })
+    const w = mount(ChatMessageItem, { props: { msg: m } })
+    expect(w.get('[data-test="trace-fold-label"]').text()).toBe('执行过程 · 1 次工具')
+  })
+
+  it('历史翻译消息形态（traceFolded 缺省 undefined）→ 条面渲染且轨迹展开可见（缺省即展开；历史默认折叠属后续票）', () => {
+    const m = tracedAssistant() // 不设 traceFolded——loadHistory 翻译产物同形态
+    const w = mount(ChatMessageItem, { props: { msg: m } })
+    expect(w.find('[data-test="trace-fold"]').exists()).toBe(true)
+    expect(w.find('[data-test="cot-card"]').exists()).toBe(true) // 条目展开（无「箭头闭合却展开」矛盾态）
+    expect(w.findAll('[data-test="tool-line"]')).toHaveLength(2)
+    expect(w.find('[data-test="tool-group"]').exists()).toBe(false) // 折叠条场景绕过分组聚合
+  })
+
+  it('流式进行中渲染现状不动：无折叠条，思考卡 + >=2 工具分组聚合照旧', () => {
+    const m = tracedAssistant()
+    m.streaming = true // 流式中
+    m.traceFolded = undefined
+    const w = mount(ChatMessageItem, { props: { msg: m } })
+    expect(w.find('[data-test="trace-fold"]').exists()).toBe(false) // 不渲染折叠条
+    expect(w.find('[data-test="cot-card"]').exists()).toBe(true) // 思考卡照旧
+    expect(w.find('[data-test="tool-group"]').exists()).toBe(true) // 既有分组聚合照旧
+    expect(w.findAll('[data-test="tool-line"]')).toHaveLength(2)
+  })
+
+  it('ChatStream 转发 toggleTraceFold（携带所属消息，供父层落 store）', async () => {
+    const m = tracedAssistant()
+    m.traceFolded = true
+    const w = mount(ChatStream, {
+      props: { messages: [m], historyHasMore: false, historyLoading: false },
+    })
+    await w.get('[data-test="trace-fold"]').trigger('click')
+    expect(w.emitted('toggleTraceFold')?.[0]).toEqual([m])
   })
 })
 

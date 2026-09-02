@@ -21,6 +21,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   loadMore: []
   regenerate: [text: string]
+  toggleTraceFold: [msg: Msg] // T1 轮次折叠（#664）：折叠条开合转发（携带所属消息，父层落 store）
 }>()
 
 function previousUserText(message: Msg): string {
@@ -121,7 +122,7 @@ defineSlots<{
     <!-- msg-item slot：父注入消息表现（默认 ChatMessageItem）；thinking/tool-line 透传给叶子 -->
     <template v-for="(m, i) in messages" :key="`m-${i}`">
       <slot name="msg-item" :msg="m">
-        <ChatMessageItem :msg="m" :regenerate-text="m.role === 'assistant' ? previousUserText(m) : ''" @regenerate="emit('regenerate', $event)" />
+        <ChatMessageItem :msg="m" :regenerate-text="m.role === 'assistant' ? previousUserText(m) : ''" @regenerate="emit('regenerate', $event)" @toggle-trace-fold="emit('toggleTraceFold', m)" />
       </slot>
     </template>
     <slot name="empty" />

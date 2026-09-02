@@ -449,6 +449,9 @@ export function useChatConnection(status: ChatStatus) {
         if (last && last.role === 'assistant') last.thinking = thinking
       }
       finalizeLast()
+      // T1 轮次折叠（#664）：折叠信号独占 done 帧（run 正常 completed）——不得挂共享收尾
+      // finalizeLast（error/断线 onClose/8s 宽限收尾均走它，必须保持展开）。
+      chat.foldLastTrace()
       activeRunId = ''
       clearResumeWait() // B5: run 正常终态，resume 无需继续
       return

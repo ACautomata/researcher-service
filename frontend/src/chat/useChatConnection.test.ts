@@ -309,3 +309,135 @@ describe('useChatConnection retry-run handoff', () => {
     expect(chat.messages[1].text).toBe('本 run 首帧')
   })
 })
+
+// T1 轮次折叠（#664）——行为接缝：直实例化 composable + mock 网关驱动帧（贴 retry-run handoff 先例）。
+// 覆盖：done 自动折叠（有轨迹）/ error·断线·8s 宽限三路收尾不折叠 / 手动开合 mutation +
+// 自动折叠一次性（done 后手动展开不再被自动收起）。只测外部行为（store 投影），不测闭包内部态。
+describe('useChatConnection 轮次折叠（#664 T1）', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+    setActivePinia(createPinia())
+    MockGatewayChat.instances = []
+    MockGatewayChat.last = null
+    vi.clearAllMocks()
+    useAuthStore().$patch({ token: 'jwt-test' })
+    ;(getBootstrapToken as unknown as ReturnType<typeof vi.fn>).mockResolvedValue('boot-1')
+    ;(createGatewayChat as unknown as ReturnType<typeof vi.fn>).mockImplementation(
+      (params: { handlers: MockHandlers }) => new MockGatewayChat(params.handlers),
+    )
+    ;(apiFetch as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ok: true,
+      blob: async () => new Blob(['png'], { type: 'image/png' }),
+    })
+    const origURL = globalThis.URL
+    vi.stubGlobal(
+      'URL',
+      Object.assign(Object.create(origURL), {
+        createObjectURL: vi.fn(() => 'blob:mock-media'),
+        revokeObjectURL: vi.fn(),
+      }),
+    )
+    sessionStorage.clear()
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.unstubAllGlobals()
+  })
+
+  // 发送并流式注入一轮带轨迹的内容（replace 快照带结构化思考 + 一条工具行），不发 done
+  async function sendAndStreamTrace(
+    conn: ReturnType<typeof useChatConnection>,
+    chat: ReturnType<typeof useChatStore>,
+    gw: InstanceType<typeof MockGatewayChat>,
+    runId: string,
+  ): Promise<void> {
+    await sendAndAck(conn, chat, gw, runId)
+    gw.fireFrame({ type: 'text', runId, delta: '中间思考与正文', replace: true, thinking: '思考内容' })
+    gw.fireFrame({ type: 'tool', runId, name: 'exec', state: 'done', id: 't1', title: null, input: 'ls', result: '' })
+  }
+
+  it('done 帧到达后有轨迹 → 最后一条 assistant 消息折叠态置 true；正文与附件数据不变', async () => {
+    const { conn, chat } = setup()
+    const gw = await connect(conn)
+    await sendAndStreamTrace(conn, chat, gw, 'run-A')
+    expect(chat.messages[1].traceFolded).toBeFalsy() // 流式中未折叠
+
+    gw.fireFrame({ type: 'done', runId: 'run-A' })
+    await flushPromises()
+
+    expect(chat.messages[1].streaming).toBe(false)
+    expect(chat.messages[1].traceFolded).toBe(true) // done 独占折叠信号
+    expect(chat.messages[1].text).toBe('中间思考与正文') // 正文数据不变
+    expect(chat.messages[1].thinking).toBe('思考内容') // 思考数据不变
+    expect(chat.messages[1].tools).toHaveLength(1) // 工具行数据不变
+  })
+
+  it('done 帧到达后无轨迹（纯文本回复）→ 不置折叠态', async () => {
+    const { conn, chat } = setup()
+    const gw = await connect(conn)
+    await sendAndAck(conn, chat, gw, 'run-A')
+    gw.fireFrame({ type: 'text', runId: 'run-A', delta: '纯文本回复', replace: false })
+    gw.fireFrame({ type: 'done', runId: 'run-A' })
+    await flushPromises()
+
+    expect(chat.messages[1].streaming).toBe(false)
+    expect(chat.messages[1].traceFolded).toBeFalsy() // 无轨迹：无折叠条可言
+  })
+
+  it('error 帧收尾（有轨迹）→ 不折叠（保持展开）', async () => {
+    const { conn, chat } = setup()
+    const gw = await connect(conn)
+    await sendAndStreamTrace(conn, chat, gw, 'run-A')
+
+    gw.fireFrame({ type: 'error', runId: 'run-A', message: 'run 失败' })
+    await flushPromises()
+
+    expect(chat.messages[1].streaming).toBe(false)
+    expect(chat.messages[1].traceFolded).toBeFalsy() // 异常收尾保持展开
+  })
+
+  it('断线 onClose 收尾（有轨迹）→ 不折叠（保持展开）', async () => {
+    const { conn, chat } = setup()
+    const gw = await connect(conn)
+    await sendAndStreamTrace(conn, chat, gw, 'run-A')
+
+    gw.fireClose(1006) // 意外断线（非授权门）
+    await flushPromises()
+
+    expect(chat.messages[1].streaming).toBe(false)
+    expect(chat.messages[1].traceFolded).toBeFalsy() // 断线收尾保持展开
+  })
+
+  it('8s 宽限收尾 → 不折叠（外来 done-first 落定占位走共享收尾）', async () => {
+    const { conn, chat } = setup()
+    const gw = await connect(conn)
+    await sendAndAck(conn, chat, gw, 'run-A')
+
+    // 外来 done-first（runId !== myRunId）→ 只武装 8s 宽限
+    gw.fireFrame({ type: 'done', runId: 'run-foreign' })
+    await flushPromises()
+    expect(chat.messages[1].streaming).toBe(true) // 宽限内占位仍在
+    await vi.advanceTimersByTimeAsync(8000) // 宽限 fire：finalizeLast 落定占位
+
+    expect(chat.messages[1].streaming).toBe(false)
+    expect(chat.messages[1].traceFolded).toBeFalsy() // 宽限收尾（共享 finalize 路）不置折叠态
+  })
+
+  it('手动开合 mutation 生效；done 后手动展开不再被自动收起（自动折叠一次性）', async () => {
+    const { conn, chat } = setup()
+    const gw = await connect(conn)
+    await sendAndStreamTrace(conn, chat, gw, 'run-A')
+    gw.fireFrame({ type: 'done', runId: 'run-A' })
+    await flushPromises()
+    expect(chat.messages[1].traceFolded).toBe(true)
+
+    chat.toggleTraceFold(chat.messages[1]) // 手动展开
+    expect(chat.messages[1].traceFolded).toBe(false)
+    // 推进时钟 + 后续迟到帧（同一 runId 的 done 不会二次到达；此处防任何延迟自动收起）
+    await vi.advanceTimersByTimeAsync(10000)
+    expect(chat.messages[1].traceFolded).toBe(false) // 手动展开不被自动覆盖
+
+    chat.toggleTraceFold(chat.messages[1]) // 再手动收起（可再收起）
+    expect(chat.messages[1].traceFolded).toBe(true)
+  })
+})
