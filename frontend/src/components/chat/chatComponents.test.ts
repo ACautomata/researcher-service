@@ -13,6 +13,7 @@ import ChatMessageItem from '@/components/chat/ChatMessageItem.vue'
 import ApprovalCard from '@/components/chat/ApprovalCard.vue'
 import ApprovalDock from '@/components/chat/ApprovalDock.vue'
 import ChatStream from '@/components/chat/ChatStream.vue'
+import AnchorRail from '@/components/chat/AnchorRail.vue'
 
 const INSTANCE = {
   name: 'demo',
@@ -700,5 +701,273 @@ describe('ChatStream 自动滚动（ADR 0009 / #400 范式 B + rAF 节流）', (
     expect(rafSpy).toHaveBeenCalledTimes(1)
     await tick()
     expect(stream.scrollTop).toBe(0) // 无内容可滚，scrollTop 恒 0（赋值被浏览器 clamp）
+  })
+})
+
+// ---- 消息锚点导航（issue #669 / #667 spec）：AnchorRail 刻度轨哑组件 ----
+describe('AnchorRail（锚点刻度轨，props-in/emits-out 哑组件）', () => {
+  const anchors = [
+    { index: 0, ratio: 0, summary: '第一条输入' },
+    { index: 2, ratio: 0.5, summary: '中间那条输入，比较长会被截断…' },
+    { index: 5, ratio: 1, summary: '[图片]' },
+  ]
+  const baseProps = { anchors, activeIndex: -1, railHeight: 400 }
+
+  it('刻度数 = anchors 数；top 按比例分布；aria-label 带摘要', () => {
+    const w = mount(AnchorRail, { props: baseProps })
+    const dots = w.findAll('[data-test^="anchor-dot-"]')
+    expect(dots).toHaveLength(3)
+    expect(dots[0].attributes('style')).toContain('top: 0%')
+    expect(dots[1].attributes('style')).toContain('top: 50%')
+    expect(dots[2].attributes('style')).toContain('top: 100%')
+    expect(dots[0].attributes('aria-label')).toBe('第一条输入')
+  })
+
+  it('轨高 = 宿主注入的 railHeight（sticky 0 高占位包含块不可用 %，须显式 px）', () => {
+    const w = mount(AnchorRail, { props: { ...baseProps, railHeight: 480 } })
+    expect(w.get('[data-test="anchor-rail"]').attributes('style')).toContain('height: 480px')
+  })
+
+  it('hover 刻度 → 显示摘要 tooltip；移出 → 隐藏', async () => {
+    const w = mount(AnchorRail, { props: baseProps })
+    expect(w.find('[data-test="anchor-tip-5"]').exists()).toBe(false)
+    await w.find('[data-test="anchor-dot-5"]').trigger('mouseenter')
+    expect(w.find('[data-test="anchor-tip-5"]').text()).toBe('[图片]')
+    await w.find('[data-test="anchor-dot-5"]').trigger('mouseleave')
+    expect(w.find('[data-test="anchor-tip-5"]').exists()).toBe(false)
+  })
+
+  it('点击刻度 → emits jump 带锚定消息下标', async () => {
+    const w = mount(AnchorRail, { props: baseProps })
+    await w.find('[data-test="anchor-dot-5"]').trigger('click')
+    expect(w.emitted('jump')?.[0]).toEqual([5])
+  })
+
+  it('activeIndex 匹配的刻度有 active 态（scrollspy 指示）', () => {
+    const w = mount(AnchorRail, { props: { ...baseProps, activeIndex: 1 } })
+    expect(w.find('[data-test="anchor-dot-0"]').classes()).not.toContain('active')
+    expect(w.find('[data-test="anchor-dot-2"]').classes()).toContain('active')
+    expect(w.find('[data-test="anchor-dot-5"]').classes()).not.toContain('active')
+  })
+
+  it('无锚点 → 轨不渲染', () => {
+    const w = mount(AnchorRail, { props: { ...baseProps, anchors: [] } })
+    expect(w.find('[data-test="anchor-rail"]').exists()).toBe(false)
+  })
+})
+
+// ---- 消息锚点导航（issue #669 / #667 spec）：ChatStream 宿主接线（DOM 度量注入）----
+describe('ChatStream 锚点导航接线（issue #669）', () => {
+  // jsdom 无布局：stream 滚动几何 + 每条消息 offsetTop 全部 stub 注入（贴上方范式 B 测试模式）。
+  let stream: HTMLElement
+  let maxScroll = 0
+  let scrollTopValue = 0
+
+  function stubStreamGeometry(height = 1000, clientHeight = 100) {
+    Object.defineProperty(stream, 'scrollHeight', { configurable: true, value: height })
+    Object.defineProperty(stream, 'clientHeight', { configurable: true, value: clientHeight })
+    maxScroll = height - clientHeight
+    Object.defineProperty(stream, 'scrollTop', {
+      configurable: true,
+      get: () => scrollTopValue,
+      set: (v: number) => {
+        scrollTopValue = Math.min(Math.max(v, 0), maxScroll)
+        stream.dispatchEvent(new Event('scroll')) // 真实浏览器赋值触发 scroll 事件
+      },
+    })
+  }
+
+  // stub 指定消息下标的 offsetTop（度量为相对滚动文档顶部的布局位置）
+  function stubMsgOffsets(w: Awaited<ReturnType<typeof mount>>, offsets: Record<number, number>) {
+    for (const [index, top] of Object.entries(offsets)) {
+      const node = w.get(`[data-index="${index}"]`).element as HTMLElement
+      Object.defineProperty(node, 'offsetTop', { configurable: true, value: top })
+    }
+  }
+
+  const U = (text: string) => newMsg('user', text)
+  const A = (text: string) => {
+    const m = newMsg('assistant', text)
+    m.streaming = false
+    return m
+  }
+
+  it('刻度数 = user 消息数（assistant 不进轨）；轨挂在 stream 内', async () => {
+    const w = mount(ChatStream, {
+      props: { messages: [], historyHasMore: false, historyLoading: false },
+    })
+    stream = w.get('[data-test="stream"]').element as HTMLElement
+    stubStreamGeometry()
+    await w.setProps({ messages: [U('一'), A('答'), U('二'), A('答'), U('三')] })
+    await nextTick()
+    // 刻度按消息下标命名（anchor-dot-<msgIndex>）：1、3 缺席 = assistant 不进轨
+    expect(w.find('[data-test="stream"] [data-test="anchor-dot-0"]').exists()).toBe(true)
+    expect(w.find('[data-test="stream"] [data-test="anchor-dot-1"]').exists()).toBe(false)
+    expect(w.find('[data-test="stream"] [data-test="anchor-dot-2"]').exists()).toBe(true)
+    expect(w.find('[data-test="stream"] [data-test="anchor-dot-3"]').exists()).toBe(false)
+    expect(w.find('[data-test="stream"] [data-test="anchor-dot-4"]').exists()).toBe(true)
+  })
+
+  it('无 user 消息 → 轨不渲染', async () => {
+    const w = mount(ChatStream, {
+      props: { messages: [A('只有回答')], historyHasMore: false, historyLoading: false },
+    })
+    expect(w.find('[data-test="anchor-rail"]').exists()).toBe(false)
+  })
+
+  it('刻度按消息 offsetTop 比例分布（DOM 度量注入）', async () => {
+    const w = mount(ChatStream, {
+      props: { messages: [], historyHasMore: false, historyLoading: false },
+    })
+    stream = w.get('[data-test="stream"]').element as HTMLElement
+    stubStreamGeometry() // maxScroll = 900
+    const msgs = [U('顶'), A('长回答'), U('中'), A('长回答'), U('底')]
+    await w.setProps({ messages: msgs })
+    await nextTick()
+    stubMsgOffsets(w, { 0: 0, 2: 450, 4: 900 })
+    await w.setProps({ messages: [...msgs] }) // 新引用触发重测
+    await nextTick()
+    expect(w.get('[data-test="anchor-dot-0"]').attributes('style')).toContain('top: 0%')
+    expect(w.get('[data-test="anchor-dot-2"]').attributes('style')).toContain('top: 50%')
+    expect(w.get('[data-test="anchor-dot-4"]').attributes('style')).toContain('top: 100%')
+  })
+
+  it('hover 刻度 → 摘要文本（前几十字截断 / 纯媒体占位）', async () => {
+    const long = '长'.repeat(50)
+    const media = U('')
+    media.media.push({ type: 'image', mimeType: 'image/png', src: 'AA==' })
+    const w = mount(ChatStream, {
+      props: { messages: [], historyHasMore: false, historyLoading: false },
+    })
+    stream = w.get('[data-test="stream"]').element as HTMLElement
+    stubStreamGeometry()
+    await w.setProps({ messages: [U(long), A('答'), media] })
+    await nextTick()
+    await w.find('[data-test="anchor-dot-0"]').trigger('mouseenter')
+    expect(w.get('[data-test="anchor-tip-0"]').text()).toBe('长'.repeat(40) + '…')
+    await w.find('[data-test="anchor-dot-2"]').trigger('mouseenter')
+    expect(w.get('[data-test="anchor-tip-2"]').text()).toBe('[图片]')
+  })
+
+  it('点击刻度 → 滚动定位到目标消息 + 目标高亮渐隐', async () => {
+    vi.useFakeTimers()
+    try {
+      const w = mount(ChatStream, {
+        props: { messages: [], historyHasMore: false, historyLoading: false },
+      })
+      stream = w.get('[data-test="stream"]').element as HTMLElement
+      stubStreamGeometry()
+      const msgs = [U('一'), A('答'), U('二')]
+      await w.setProps({ messages: msgs })
+      await nextTick()
+      stubMsgOffsets(w, { 0: 0, 2: 900 })
+      await w.setProps({ messages: [...msgs] })
+      await nextTick()
+      scrollTopValue = 0
+      await w.get('[data-test="anchor-dot-2"]').trigger('click')
+      // 程序性滚动定位到目标消息 offsetTop（经 scroll 事件自然落范式 B 语义）
+      expect(scrollTopValue).toBe(900)
+      // 目标消息高亮
+      expect(w.get('[data-index="2"]').classes()).toContain('anchor-flash')
+      // 1–2s 渐隐：class 移除
+      vi.advanceTimersByTime(2_100)
+      await nextTick()
+      expect(w.find('[data-index="2"]').classes()).not.toContain('anchor-flash')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  // 范式 B 语义保持（#667）：跳转到中部锚点属程序性滚动，经 scroll 事件自然落 stickyBottom=false
+  // → 后续流式追加不抢滚动条（上滚让位），无须新逻辑。
+  it('跳转到中部锚点 → 上滚让位：流式追加不抢滚动条', async () => {
+    const w = mount(ChatStream, {
+      props: { messages: [], historyHasMore: false, historyLoading: false },
+    })
+    stream = w.get('[data-test="stream"]').element as HTMLElement
+    stubStreamGeometry() // scrollHeight=1000、clientHeight=100（maxScroll=900）
+    const msgs = [U('顶'), A('长回答'), U('中')]
+    await w.setProps({ messages: msgs })
+    await nextTick()
+    stubMsgOffsets(w, { 0: 0, 2: 450 })
+    await w.setProps({ messages: [...msgs] })
+    await nextTick()
+    scrollTopValue = 900 // 从底部起跳（stickyBottom=true）
+    stream.dispatchEvent(new Event('scroll'))
+    await w.get('[data-test="anchor-dot-2"]').trigger('click')
+    expect(scrollTopValue).toBe(450) // 定位到中部锚点
+    expect(scrollTopValue - maxScroll).toBe(-450) // 距底 450 > 阈值
+    // 追加流式新消息（底部有新内容）→ 范式 B 让位：不自动滚底
+    await w.setProps({ messages: [...msgs, A('新回答')] })
+    await nextTick()
+    expect(scrollTopValue).toBe(450)
+  })
+
+  it('内容不足一屏（无滚动空间）→ 轨隐藏', async () => {
+    const w = mount(ChatStream, {
+      props: { messages: [], historyHasMore: false, historyLoading: false },
+    })
+    stream = w.get('[data-test="stream"]').element as HTMLElement
+    stubStreamGeometry(400, 800) // scrollHeight < clientHeight：一屏全见，无需导航
+    await w.setProps({ messages: [U('短内容'), A('答')] })
+    await nextTick()
+    expect(w.find('[data-test="anchor-rail"]').exists()).toBe(false)
+  })
+
+  it('scrollspy：滚动时刻度指示当前位置（active 刻度）', async () => {
+    const w = mount(ChatStream, {
+      props: { messages: [], historyHasMore: false, historyLoading: false },
+    })
+    stream = w.get('[data-test="stream"]').element as HTMLElement
+    stubStreamGeometry() // maxScroll=900；刻度 [0, .5, 1]
+    const msgs = [U('顶'), A('答'), U('中'), A('答'), U('底')]
+    await w.setProps({ messages: msgs })
+    await nextTick()
+    stubMsgOffsets(w, { 0: 0, 2: 450, 4: 900 })
+    await w.setProps({ messages: [...msgs] })
+    await nextTick()
+    scrollTopValue = 810 // indicator = .9 → 最近刻度 1（index=4 消息）
+    stream.dispatchEvent(new Event('scroll'))
+    await nextTick()
+    expect(w.get('[data-test="anchor-dot-4"]').classes()).toContain('active')
+    scrollTopValue = 90 // indicator = .1 → 最近刻度 0（index=0 消息）
+    stream.dispatchEvent(new Event('scroll'))
+    await nextTick()
+    expect(w.get('[data-test="anchor-dot-0"]').classes()).toContain('active')
+    expect(w.get('[data-test="anchor-dot-4"]').classes()).not.toContain('active')
+  })
+
+  it('「加载更多」后锚点增长（prepend 消息 → 刻度重测）', async () => {
+    const initial = [U('已有'), A('答')]
+    const w = mount(ChatStream, {
+      props: { messages: initial, historyHasMore: true, historyLoading: false },
+    })
+    stream = w.get('[data-test="stream"]').element as HTMLElement
+    stubStreamGeometry()
+    await w.setProps({ messages: [...initial] }) // 新引用触发重测（jsdom 度量注入后）
+    await nextTick()
+    expect(w.find('[data-test="anchor-dot-0"]').exists()).toBe(true)
+    expect(w.find('[data-test="anchor-dot-2"]').exists()).toBe(false)
+    // 加载更多：更旧消息 prepend 到头部
+    await w.setProps({ messages: [U('更旧'), U('旧'), A('答'), U('已有'), A('答')] })
+    await nextTick()
+    expect(w.find('[data-test="anchor-dot-0"]').exists()).toBe(true)
+    expect(w.find('[data-test="anchor-dot-1"]').exists()).toBe(true)
+    expect(w.find('[data-test="anchor-dot-3"]').exists()).toBe(true)
+  })
+
+  it('切会话/容器（messages 清空）→ 轨重置消失', async () => {
+    const initial = [U('一'), A('答')]
+    const w = mount(ChatStream, {
+      props: { messages: initial, historyHasMore: false, historyLoading: false },
+    })
+    stream = w.get('[data-test="stream"]').element as HTMLElement
+    stubStreamGeometry()
+    await w.setProps({ messages: [...initial] }) // 新引用触发重测（jsdom 度量注入后）
+    await nextTick()
+    expect(w.find('[data-test="anchor-rail"]').exists()).toBe(true)
+    await w.setProps({ messages: [] })
+    await nextTick()
+    expect(w.find('[data-test="anchor-rail"]').exists()).toBe(false)
   })
 })
