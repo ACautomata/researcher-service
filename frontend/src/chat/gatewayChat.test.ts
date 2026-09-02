@@ -855,6 +855,16 @@ describe('createGatewayChat（#369 隧道 Facade）', () => {
     expect(h).toEqual({ messages: [{ role: 'assistant', text: 'a' }], hasMore: true, nextOffset: 5 })
   })
 
+  it('getHistory：number cursor → offset 参数（协议区分数值偏移与字符串锚点，不可 stringify 成 messageId）', async () => {
+    const { gw, client } = makeGateway()
+    client.request.mockResolvedValue({ messages: [], hasMore: true, nextOffset: 45 })
+    const h = await gw.getHistory('sk-1', 50, 95)
+    // 网关 chat.history 把数值 offset 与字符串 messageId 当两个独立参数（docs.openclaw.ai/gateway/protocol）：
+    // number cursor 须作为 offset 发送；若错传为 messageId，offset 分页会话第二页起拉错/拉不到。
+    expect(client.request).toHaveBeenCalledWith('chat.history', { sessionKey: 'sk-1', limit: 50, offset: 95 })
+    expect(h).toEqual({ messages: [], hasMore: true, nextOffset: 45 })
+  })
+
   it('getHistory 缺省分页字段 → 回退', async () => {
     const { gw, client } = makeGateway()
     client.request.mockResolvedValue({ messages: [] })

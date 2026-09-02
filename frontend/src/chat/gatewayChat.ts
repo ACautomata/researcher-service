@@ -80,7 +80,11 @@ export interface GatewayChat {
   listSessions(): Promise<SessionDTO[]>
   createSession(label?: string): Promise<string>
   deleteSession(key: string): Promise<void>
-  getHistory(sessionKey: string, limit?: number, messageId?: string): Promise<SessionHistoryDTO>
+  // 历史分页锚点 cursor 多态（`string | number`）：网关 chat.history 区分数值 offset 与字符串
+  // messageId 两种锚点（docs.openclaw.ai/gateway/protocol）——实现按运行时类型分发：number →
+  // offset（数值偏移分页）、string → messageId（锚点）。调用方须保留 nextOffset 原始类型，不得
+  // String() 化（否则数值偏移错走 messageId 字段，offset 分页会话第二页起拉错，Codex #678 P1）。
+  getHistory(sessionKey: string, limit?: number, cursor?: string | number): Promise<SessionHistoryDTO>
   // chat.send RPC 响应携带网关分配的 runId（ackPayload = {runId, status:"started"}，
   // 官方 chat-send-handler）——供 ChatView 首帧归属判别（#53：pendingSend 期间外来/旧 run
   // 首帧与自己的 run 区分，防抢 activeRunId 吞回复）。ack 无 runId（旧网关/异常形状）→ undefined。
@@ -676,13 +680,19 @@ export function createGatewayChat(params: CreateGatewayChatParams): GatewayChat 
       // R4-2）——否则删除被 scope 拒。
       await client.request('sessions.delete', { key })
     },
-    async getHistory(sessionKey: string, limit?: number, messageId?: string): Promise<SessionHistoryDTO> {
+    async getHistory(sessionKey: string, limit?: number, cursor?: string | number): Promise<SessionHistoryDTO> {
       const res = await client.request<{ messages?: unknown; hasMore?: unknown; nextOffset?: unknown }>(
         'chat.history',
         {
           sessionKey,
           ...(limit !== undefined ? { limit } : {}),
-          ...(messageId !== undefined && messageId !== null ? { messageId } : {}),
+          // cursor 类型分发（Codex #678 P1）：number → offset（数值偏移）、string → messageId（锚点）。
+          // 二者是协议两个独立字段；数值偏移若错传为 messageId，offset 分页会话第二页起拉错/拉不到。
+          ...(typeof cursor === 'number'
+            ? { offset: cursor }
+            : cursor !== undefined && cursor !== null
+              ? { messageId: cursor }
+              : {}),
         },
       )
       // 校准（对齐旧代理 _parse_history）：messages 原样透传（display-normalized），非 dict 项跳过
