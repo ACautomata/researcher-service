@@ -2298,4 +2298,26 @@ describe('ChatView', () => {
       expect(outbox.takePending('other', 'sk-1')).toHaveLength(1) // other 容器的残留不动
     })
   })
+
+  // ---- 消息锚点导航（issue #669）view 接线断言（行为覆盖在 chatComponents/anchorNav 测试）----
+  it('#669: 锚点轨接线——user 消息入流后 stream 内出现刻度，切会话重置消失', async () => {
+    const { w, gw } = await mountReady()
+    expect(w.find('[data-test="stream"] [data-test="anchor-rail"]').exists()).toBe(false)
+    // jsdom 无布局（scrollHeight=clientHeight=0 → 轨隐藏）：stub 滚动几何放行轨渲染
+    const streamEl = w.get('[data-test="stream"]').element as HTMLElement
+    Object.defineProperty(streamEl, 'scrollHeight', { configurable: true, value: 1000 })
+    Object.defineProperty(streamEl, 'clientHeight', { configurable: true, value: 100 })
+    await w.find('[data-test="input"]').setValue('第一条输入')
+    await w.find('[data-test="send"]').trigger('click')
+    gw.fireFrame({ type: 'text', runId: 'r1', delta: '回答' })
+    gw.fireFrame({ type: 'done', runId: 'r1' })
+    await nextTick()
+    // 轨挂在 stream 内，刻度按消息下标锚定（user 消息 = 下标 0）
+    expect(w.find('[data-test="stream"] [data-test="anchor-dot-0"]').exists()).toBe(true)
+    // 切新会话 → messages 清空 → 轨重置消失
+    gw.createSession.mockResolvedValueOnce('sk-2')
+    await w.find('[data-test="new-session"]').trigger('click')
+    await flushPromises()
+    expect(w.find('[data-test="stream"] [data-test="anchor-rail"]').exists()).toBe(false)
+  })
 })
