@@ -110,3 +110,11 @@ _Avoid_: bind-mount home——它要求「server 与宿主 docker daemon 解析�
 生产部署除 `/var/run/docker.sock`（编排 OpenClaw 的唯一通道，无 volume 替代，spec §5.4 已接受等价 root 风险）外**零 host 挂载**。由此：模板与 `openclaw.json` 单一来源**构建期 COPY 进 server 镜像**（不再运行时挂载 `/srv/openclaw/template`、`./openclaw.json`）；`openclaw.json` 写读**不经文件 bind**——写用 `putArchive` 打进容器、读用 `getArchive` 拉出；`/fleet:/fleet` bind 随 homeDir bind 一并消失。dev 控制面也容器化（与 prod 同形态）。
 **静态 config 后果**：`openclaw.json` 改经 `putArchive` 写后，#366 的「宿主 rename 换 inode + 目录 ro bind」热加载机制**放弃**——配置改为**静态**，改配置须重启容器生效（不复用 gateway watch 热加载）。这是 #366 决策的一次明确回退。
 _Avoid_: 把 `docker.sock` 也当可删的 host 挂载——删它即失去编排能力；混用「运行时挂载模板」——违背配置入镜像的单一来源；假设配置仍可热加载——已改静态。
+
+**消息锚点导航 (message anchor nav)**:
+chat 页消息流右缘的垂直刻度轨，每个刻度锚定一条已加载的用户输入消息，支持点击定位与当前位置指示；刻度按消息在滚动文档中的位置比例分布。
+_Avoid_: 对话索引、进度条——「索引」未指明只锚定用户输入；「进度条」暗示播放进度语义，实为导航目录。
+
+**面板三态 (panel tri-state)**:
+固定宽侧栏面板在本项目的三种呈现态：inline（常驻文档流可拖宽）/ collapsed（边缘窄条）/ popped（贴边全高非模态浮层）；转换链 inline → collapsed → popped → inline，窄屏 (<720px) 下整体禁用。
+_Avoid_: 侧边窗口——不区分 inline/popped 两种形态；抽屉/弹窗——模态语义错误（popped 无遮罩、不因点外关闭）。
