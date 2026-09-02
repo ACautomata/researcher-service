@@ -55,6 +55,7 @@ function onPointerUp(): void {
   drag = null
   window.removeEventListener('pointermove', onPointerMove)
   window.removeEventListener('pointerup', onPointerUp)
+  window.removeEventListener('pointercancel', onPointerUp)
   emit('drag-end')
 }
 
@@ -65,6 +66,8 @@ function startDrag(kind: 'inline' | 'popped', e: PointerEvent): void {
   drag = { kind, startX: e.clientX, startWidth }
   window.addEventListener('pointermove', onPointerMove)
   window.addEventListener('pointerup', onPointerUp)
+  // 触控被打断（来电/手势接管）时 pointercancel 收尾，避免 drag 句柄与 window 监听残留
+  window.addEventListener('pointercancel', onPointerUp)
 }
 
 onUnmounted(() => {
@@ -287,7 +290,8 @@ const arrows = computed(() => props.side === 'left'
   user-select: none;
 }
 
-/* popped 贴边全高非模态浮层：fixed 贴缘、阴影浮起；无遮罩，外部内容可交互 */
+/* popped 贴边全高非模态浮层：fixed 显式贴缘（不靠 static 位置兜底，right 面板复用不错位）、
+   阴影浮起；无遮罩，外部内容可交互 */
 .panel.popped {
   position: fixed;
   top: 0;
@@ -296,6 +300,12 @@ const arrows = computed(() => props.side === 'left'
   display: flex;
   flex-direction: column;
   box-shadow: 0 0 24px rgba(0, 0, 0, .18);
+}
+.panel.popped[data-side='left'] {
+  left: 0;
+}
+.panel.popped[data-side='right'] {
+  right: 0;
 }
 .panel.popped .panel-body {
   flex: 1;

@@ -3,7 +3,7 @@
 // 联动：点树/图谱节点 openPage；编辑器 update → store.edit（防抖自动保存）；切容器 switchContainer。
 // store 用真 Pinia（api/wiki mock 替身）；子组件 stub 聚焦组装逻辑。
 import { flushPromises, mount } from '@vue/test-utils'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 
 vi.mock('@/api/wiki', () => ({
@@ -217,6 +217,12 @@ describe('WikiView', () => {
 })
 
 describe('WikiView — #668 面板三态接线（wiki 文件树）', () => {
+  // 视口宽是全局状态：每个用例后复位，防窄屏用例失败时向后续用例泄漏
+  afterEach(() => {
+    window.innerWidth = 1024
+    globalThis.localStorage.clear()
+  })
+
   beforeEach(() => {
     setActivePinia(createPinia())
     ;(listInstances as ReturnType<typeof vi.fn>).mockResolvedValue(INSTANCES)
@@ -256,7 +262,6 @@ describe('WikiView — #668 面板三态接线（wiki 文件树）', () => {
     expect(wrapper.find('[data-test="drag-handle"]').exists()).toBe(false)
     expect(wrapper.find('[data-test="collapse-btn"]').exists()).toBe(false)
     expect(wrapper.find('[data-test="file-tree"]').exists()).toBe(true)
-    window.innerWidth = 1024
   })
 })
 

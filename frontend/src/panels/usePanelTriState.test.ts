@@ -8,6 +8,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import PanelTriState from '@/components/PanelTriState.vue'
 import { usePanelTriState } from '@/panels/usePanelTriState'
 import { panelWidthKey } from '@/panels/panelWidth'
+import { INLINE_RANGE_NARROW } from '@/panels/triState'
 
 function mountHarness(options: Parameters<typeof usePanelTriState>[0]) {
   let api!: ReturnType<typeof usePanelTriState>
@@ -27,8 +28,7 @@ function keyOf(owner: string): string {
 const BASE = {
   view: 'wiki',
   panel: 'file-tree',
-  minInlineWidth: 160,
-  maxInlineWidth: 560,
+  inlineRange: INLINE_RANGE_NARROW,
   defaultInlineWidth: 220,
   token: () => 'header.' + btoa(JSON.stringify({ sub: 'alice' })) + '.sig',
 } as const

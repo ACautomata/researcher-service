@@ -10,8 +10,8 @@ import {
   POPPED_MAX_VW,
   POPPED_MIN_VW,
   TRI_STATE_MIN_VIEWPORT,
-  clampInlineWidth,
   clampPoppedVw,
+  clampRange,
   draggedWidth,
   pxToVw,
   transitionPanelState,
@@ -49,21 +49,21 @@ describe('transitionPanelState（三态状态机）', () => {
   })
 })
 
-describe('clampInlineWidth（inline 拖宽硬边界）', () => {
+describe('clampRange（inline 拖宽硬边界）', () => {
   it('界内原样返回', () => {
-    expect(clampInlineWidth(220, INLINE_RANGE_NARROW.min, INLINE_RANGE_NARROW.max)).toBe(220)
-    expect(clampInlineWidth(160, INLINE_RANGE_NARROW.min, INLINE_RANGE_NARROW.max)).toBe(160)
-    expect(clampInlineWidth(560, INLINE_RANGE_NARROW.min, INLINE_RANGE_NARROW.max)).toBe(560)
+    expect(clampRange(220, INLINE_RANGE_NARROW.min, INLINE_RANGE_NARROW.max)).toBe(220)
+    expect(clampRange(160, INLINE_RANGE_NARROW.min, INLINE_RANGE_NARROW.max)).toBe(160)
+    expect(clampRange(560, INLINE_RANGE_NARROW.min, INLINE_RANGE_NARROW.max)).toBe(560)
   })
 
   it('越界钳制到 min/max（中间编辑区不被挤没）', () => {
-    expect(clampInlineWidth(100, INLINE_RANGE_NARROW.min, INLINE_RANGE_NARROW.max)).toBe(160)
-    expect(clampInlineWidth(9999, INLINE_RANGE_NARROW.min, INLINE_RANGE_NARROW.max)).toBe(560)
+    expect(clampRange(100, INLINE_RANGE_NARROW.min, INLINE_RANGE_NARROW.max)).toBe(160)
+    expect(clampRange(9999, INLINE_RANGE_NARROW.min, INLINE_RANGE_NARROW.max)).toBe(560)
   })
 
   it('wide 档（图谱/文件预览 240–720）同样生效', () => {
-    expect(clampInlineWidth(100, INLINE_RANGE_WIDE.min, INLINE_RANGE_WIDE.max)).toBe(240)
-    expect(clampInlineWidth(800, INLINE_RANGE_WIDE.min, INLINE_RANGE_WIDE.max)).toBe(720)
+    expect(clampRange(100, INLINE_RANGE_WIDE.min, INLINE_RANGE_WIDE.max)).toBe(240)
+    expect(clampRange(800, INLINE_RANGE_WIDE.min, INLINE_RANGE_WIDE.max)).toBe(720)
   })
 })
 
@@ -89,9 +89,9 @@ describe('vw↔px 换算（viewport 由宿主注入）', () => {
     expect(pxToVw(900, 1000)).toBe(90)
   })
 
-  it('非整数 px 舍入到整数 vw 百分比', () => {
-    expect(pxToVw(645, 1280)).toBe(50) // 50.39 → 50
-    expect(pxToVw(700, 1280)).toBe(55) // 54.69 → 55
+  it('非整数 px 保留浮点 vw（拖拽连续调整，不取整步进）', () => {
+    expect(pxToVw(645, 1280)).toBeCloseTo(50.390625)
+    expect(vwToPx(pxToVw(645, 1280), 1280)).toBeCloseTo(645)
   })
 })
 

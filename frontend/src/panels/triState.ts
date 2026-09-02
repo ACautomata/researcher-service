@@ -28,10 +28,15 @@ export function transitionPanelState(state: PanelState, event: PanelEvent): Pane
 
 // inline 宽度档（spec #667）：chat 左栏与 wiki 文件树 160–560px；wiki 图谱与 chat 文件预览 240–720px。
 // 后续面板票复用同档常量，不各写字面量。
-export const INLINE_RANGE_NARROW = { min: 160, max: 560 }
-export const INLINE_RANGE_WIDE = { min: 240, max: 720 }
+export interface WidthRange {
+  min: number
+  max: number
+}
 
-export function clampInlineWidth(width: number, min: number, max: number): number {
+export const INLINE_RANGE_NARROW: WidthRange = { min: 160, max: 560 }
+export const INLINE_RANGE_WIDE: WidthRange = { min: 240, max: 720 }
+
+export function clampRange(width: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, width))
 }
 
@@ -41,16 +46,17 @@ export const POPPED_MAX_VW = 90
 export const POPPED_DEFAULT_VW = 50
 
 export function clampPoppedVw(vw: number): number {
-  return clampInlineWidth(vw, POPPED_MIN_VW, POPPED_MAX_VW)
+  return clampRange(vw, POPPED_MIN_VW, POPPED_MAX_VW)
 }
 
 // vw 数值（50 = 50vw）↔ px；viewportWidth 由宿主注入（jsdom 无布局）。
+// pxToVw 保留浮点不取整——拖拽「连续调整」（spec 验收），取整会在大屏产生 ~13px 步进。
 export function vwToPx(vw: number, viewportWidth: number): number {
   return (vw / 100) * viewportWidth
 }
 
 export function pxToVw(px: number, viewportWidth: number): number {
-  return Math.round((px / viewportWidth) * 100)
+  return (px / viewportWidth) * 100
 }
 
 // 拖拽几何：起始宽度 + 起始/当前指针 x → 拖后宽度。side=left 右拖为正（变宽），right 镜像。

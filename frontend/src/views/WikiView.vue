@@ -26,13 +26,14 @@ const { current, groups, activePath, draft, dirty, saving, saveSeq } = storeToRe
 // #668：文件树三态（inline 拖宽 160–560px / collapsed 窄条 / popped 浮层）。
 // 宽度按用户+页面+面板落 localStorage，collapsed/popped 态不持久化。
 const auth = useAuthStore()
+// 沿用页面原 220px 固定宽（无存储值时的默认宽度，窄屏 disabled 态同样用它）
+const FILE_TREE_DEFAULT_WIDTH = 220
 const filePanel = usePanelTriState({
   view: 'wiki',
   panel: 'file-tree',
   side: 'left',
-  minInlineWidth: INLINE_RANGE_NARROW.min,
-  maxInlineWidth: INLINE_RANGE_NARROW.max,
-  defaultInlineWidth: 220, // 沿用页面原 220px 固定宽
+  inlineRange: INLINE_RANGE_NARROW,
+  defaultInlineWidth: FILE_TREE_DEFAULT_WIDTH,
   token: () => auth.token,
 })
 const {
@@ -201,7 +202,7 @@ onMounted(async () => {
         label="文件树"
         :disabled="panelDisabled"
         :inline-width="inlineWidth"
-        :default-width="220"
+        :default-width="FILE_TREE_DEFAULT_WIDTH"
         :popped-vw="poppedVw"
         :viewport-width="viewportWidth"
         @collapse="onCollapse"
@@ -280,6 +281,9 @@ onMounted(async () => {
 }
 .center {
   flex: 1;
+  /* #668：min-width:0 放开 flex 默认 min-content 下限——面板拖到 560px 时编辑区收缩
+     到剩余空间而不是把 .wiki-body 顶溢出（「中间编辑区不被挤没」的实现保障）。 */
+  min-width: 0;
   overflow-y: auto;
   padding: 16px 24px;
 }
