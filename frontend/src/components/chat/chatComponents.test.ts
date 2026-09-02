@@ -528,13 +528,40 @@ describe('ChatMessageItem 轮次折叠（#664 T1）', () => {
     expect(w.get('[data-test="trace-fold-label"]').text()).toBe('执行过程 · 1 次工具')
   })
 
-  it('历史翻译消息形态（traceFolded 缺省 undefined）→ 条面渲染且轨迹展开可见（缺省即展开；历史默认折叠属后续票）', () => {
-    const m = tracedAssistant() // 不设 traceFolded——loadHistory 翻译产物同形态
+  it('traceFolded 缺省（undefined，error/断线/宽限收尾轮不置折叠态）→ 条面渲染且轨迹展开可见（缺省即展开）', () => {
+    const m = tracedAssistant() // 不设 traceFolded——异常收尾轮同形态
     const w = mount(ChatMessageItem, { props: { msg: m } })
     expect(w.find('[data-test="trace-fold"]').exists()).toBe(true)
     expect(w.find('[data-test="cot-card"]').exists()).toBe(true) // 条目展开（无「箭头闭合却展开」矛盾态）
     expect(w.findAll('[data-test="tool-line"]')).toHaveLength(2)
     expect(w.find('[data-test="tool-group"]').exists()).toBe(false) // 折叠条场景绕过分组聚合
+  })
+
+  // T3 历史轮默认折叠（#666）：历史翻译产物形态 = traceFolded=true + turnDurationMs 缺省。
+  it('历史翻译消息形态（traceFolded=true、无时长数据）→ 默认折叠：条面步骤计数无「已执行」，轨迹收起、正文在外', () => {
+    const m = tracedAssistant()
+    m.traceFolded = true // #666 起 loadHistory/外来 final 插入的翻译产物同形态（时长恒缺省）
+    const w = mount(ChatMessageItem, { props: { msg: m } })
+    const label = w.get('[data-test="trace-fold-label"]').text()
+    expect(label).toBe('执行过程 · 思考 · 2 次工具') // 步骤计数（无时长数据回退文案）
+    expect(label).not.toContain('已执行') // 历史轮不显示执行时长
+    expect(w.find('[data-test="cot-card"]').exists()).toBe(false) // 轨迹默认收起
+    expect(w.find('[data-test="tool-line"]').exists()).toBe(false)
+    expect(w.text()).toContain('总结正文') // 正文恒在折叠外
+  })
+
+  it('历史折叠条手动开合与实时轮一致：折叠态点击 → emit toggleTraceFold；展开态单层平铺（无分组）', async () => {
+    const m = tracedAssistant()
+    m.traceFolded = true // 历史默认折叠态
+    const w = mount(ChatMessageItem, { props: { msg: m } })
+    await w.get('[data-test="trace-fold"]').trigger('click')
+    expect(w.emitted('toggleTraceFold')).toBeTruthy() // 与实时轮同一开合链路（→父层落 store）
+    // 展开态（store mutation 后 traceFolded=false）：平铺思考卡 + 逐行工具行，无二级聚合
+    const w2 = mount(ChatMessageItem, { props: { msg: { ...m, traceFolded: false } } })
+    expect(w2.find('[data-test="trace-fold"]').exists()).toBe(true) // 条面仍在（可再收起）
+    expect(w2.find('[data-test="cot-card"]').exists()).toBe(true)
+    expect(w2.findAll('[data-test="tool-line"]')).toHaveLength(2)
+    expect(w2.find('[data-test="tool-group"]').exists()).toBe(false)
   })
 
   it('完成轮带执行时长（msg.turnDurationMs）→ 条面显示「已执行 …」（#665 prop 传递）', () => {

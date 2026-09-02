@@ -538,6 +538,138 @@ describe('useChatConnection 执行时长（#665 T2）', () => {
   })
 })
 
+// T3 历史轮默认折叠（#666）——行为接缝：直实例化 composable + mock 网关驱动帧（贴上三例）。
+// 覆盖：历史翻译（loadHistory）有轨迹 assistant → 默认折叠、时长为空；无轨迹不置折叠态；
+// 外来可见 final 局部插入（done 帧携带消息本体）同构默认折叠；切会话离开再回来（重新翻译）
+// 恢复默认折叠。只测外部行为（store 投影 traceFolded/turnDurationMs），不测闭包内部态。
+describe('useChatConnection 历史轮默认折叠（#666 T3）', () => {
+  setupConnTestEnv()
+
+  // 历史消息夹具：对齐网关 history DTO content 多态（user=string / assistant=content[]，
+  // ADR 0003）——translateHistoryMessage 的输入形状。含：思考+工具轨迹 / 纯工具轨迹 /
+  // 无轨迹纯文本 assistant / user 消息。
+  const HISTORY = [
+    { role: 'user', content: '问题一' },
+    {
+      role: 'assistant',
+      content: [
+        { type: 'thinking', thinking: '历史思考' },
+        { type: 'text', text: '历史正文' },
+        { type: 'toolCall', toolCallId: 'tc1', name: 'exec', arguments: { command: 'ls' } },
+        { type: 'toolCall', toolCallId: 'tc2', name: 'read', arguments: { file_path: '/a.ts' } },
+      ],
+    },
+    {
+      role: 'assistant',
+      content: [{ type: 'toolCall', toolCallId: 'tc3', name: 'exec', arguments: { command: 'pwd' } }],
+    },
+    { role: 'assistant', content: [{ type: 'text', text: '纯文本回复' }] },
+  ]
+
+  // 首连接入带历史的会话（connect() helper 的空历史换成本组夹具；sk-1 为选中会话）
+  async function connectWithHistory(
+    conn: ReturnType<typeof useChatConnection>,
+    history: unknown[] = HISTORY,
+  ): Promise<InstanceType<typeof MockGatewayChat>> {
+    const ready = conn.openGateway()
+    await flushPromises()
+    const gw = MockGatewayChat.last!
+    gw.listSessions.mockResolvedValue([{ session_key: 'sk-1', title: '', updated_at: '' }])
+    gw.getHistory.mockResolvedValue({ messages: history, hasMore: false, nextOffset: null })
+    gw.listCommands.mockResolvedValue([])
+    gw.listPendingApprovals.mockResolvedValue([])
+    gw.fireReady()
+    await ready
+    await flushPromises() // syncSessions → loadHistory 铺底完成
+    return gw
+  }
+
+  it('历史翻译：含 thinking/toolCall 块的 assistant 消息 → 折叠态默认已折叠、时长数据为空', async () => {
+    const { conn, chat } = setup()
+    await connectWithHistory(conn)
+
+    const traced = chat.messages[1]
+    expect(traced.traceFolded).toBe(true) // 思考+工具轨迹 → 默认折叠
+    expect(traced.turnDurationMs).toBeUndefined() // 历史轮无时长数据（条面回退计数文案）
+    expect(traced.text).toBe('历史正文') // 正文数据不变
+    expect(traced.thinking).toBe('历史思考') // 思考数据不变
+    expect(traced.tools).toHaveLength(2) // 工具行数据不变
+    expect(chat.messages[2].traceFolded).toBe(true) // 纯工具轨迹同样默认折叠
+  })
+
+  it('历史翻译：无轨迹的历史 assistant 消息不置折叠态（渲染层不渲染折叠条）', async () => {
+    const { conn, chat } = setup()
+    await connectWithHistory(conn)
+
+    expect(chat.messages[3].text).toBe('纯文本回复')
+    expect(chat.messages[3].traceFolded).toBeFalsy() // 无轨迹：无折叠条可言
+    expect(chat.messages[0].traceFolded).toBeFalsy() // user 消息恒不折叠
+  })
+
+  it('外来可见 final 局部插入（done 帧携带消息本体）的有轨迹消息同构默认折叠', async () => {
+    const { conn, chat } = setup()
+    const gw = await connect(conn)
+    // 空闲期外来 run 首帧 → foreignRunIds 记录（贴 #569 用例形态）
+    gw.fireFrame({ type: 'text', runId: 'foreign-1', delta: '' })
+    await flushPromises()
+    gw.fireFrame({
+      type: 'done',
+      runId: 'foreign-1',
+      message: {
+        role: 'assistant',
+        content: [
+          { type: 'thinking', thinking: '外来思考' },
+          { type: 'text', text: '外来正文' },
+          { type: 'toolCall', toolCallId: 'tc1', name: 'exec', arguments: {} },
+        ],
+      },
+    })
+    await flushPromises()
+
+    expect(chat.messages).toHaveLength(1) // 局部插入一条（非整段重拉，#569 语义不变）
+    expect(chat.messages[0].text).toBe('外来正文')
+    expect(chat.messages[0].traceFolded).toBe(true) // 与历史消息同构转换 → 同样默认折叠
+    expect(chat.messages[0].turnDurationMs).toBeUndefined() // 外来插入无计时起点 → 无时长
+  })
+
+  it('切会话离开再回来（历史重新翻译）→ 恢复默认折叠（手动展开随投影重建被覆盖）', async () => {
+    const { conn, chat } = setup()
+    const ready = conn.openGateway()
+    await flushPromises()
+    const gw = MockGatewayChat.last!
+    gw.listSessions.mockResolvedValue([
+      { session_key: 'sk-1', title: '', updated_at: '' },
+      { session_key: 'sk-2', title: '', updated_at: '' },
+    ])
+    gw.getHistory.mockImplementation((key: string) =>
+      Promise.resolve(
+        key === 'sk-1'
+          ? { messages: HISTORY, hasMore: false, nextOffset: null }
+          : { messages: [], hasMore: false, nextOffset: null },
+      ),
+    )
+    gw.listCommands.mockResolvedValue([])
+    gw.listPendingApprovals.mockResolvedValue([])
+    gw.fireReady()
+    await ready
+    await flushPromises()
+
+    expect(chat.selectedSession).toBe('sk-1')
+    expect(chat.messages[1].traceFolded).toBe(true) // 首次铺底：默认折叠
+    chat.toggleTraceFold(chat.messages[1]) // 手动展开
+    expect(chat.messages[1].traceFolded).toBe(false)
+
+    conn.pickSession('sk-2')
+    await flushPromises()
+    expect(chat.messages).toHaveLength(0) // sk-2 空历史
+    conn.pickSession('sk-1') // 切回：loadHistory 重新翻译（投影重建）
+    await flushPromises()
+
+    expect(chat.messages[1].traceFolded).toBe(true) // 恢复默认折叠（无需额外持久化）
+    expect(chat.messages[1].turnDurationMs).toBeUndefined()
+  })
+})
+
 // issue #535：历史会话内容被吞——进入会话只拉首 50 条，翻到顶部即截断，最早的消息不可见。
 // 期望：进入会话自动把整个 session 历史拉全（循环分页直到 hasMore=false），不留隐藏历史。
 describe('历史拉全（issue #535）', () => {

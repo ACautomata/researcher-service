@@ -30,7 +30,8 @@ export interface Msg {
   // 纯图片消息（text 空但 media 非空）照常渲染。user 发送的附件也入此（echo 渲染）。
   media: MediaBlock[]
   // T1 轮次折叠（#664 / CONTEXT.md「折叠条」）：轮次正常完成后轨迹（思考+工具）收进折叠条的
-  // 折叠态。可选（缺省展开）：done 帧自动置 true；手动开合经 toggleTraceFold mutation；
+  // 折叠态。可选（缺省展开）：done 帧自动置 true；T3（#666）起历史翻译（loadHistory/分页/外来
+  // 可见 final 局部插入）有轨迹的 assistant 消息默认置 true；手动开合经 toggleTraceFold mutation；
   // error/断线/宽限收尾不置值。正文与附件恒在折叠外，不受此字段影响。
   traceFolded?: boolean
   // T2 执行时长（#665 / CONTEXT.md「执行时长」）：本轮 send → done 的墙钟毫秒数（含建连排队/
@@ -72,6 +73,13 @@ export function newMsg(role: 'user' | 'assistant', text = ''): Msg {
 // 无轨迹的轮次不渲染折叠条。store（foldLastTrace）与渲染层（折叠条渲染门）共用此单一实现。
 export function hasTrace(m: Msg): boolean {
   return m.thinking !== '' || m.tools.length > 0
+}
+
+// 默认折叠判定（审查 Standards 轴：foldLastTrace 与历史翻译两处的「assistant 且有轨迹」条件
+// 收敛单一实现）——#664 done 帧自动折叠与 #666 历史翻译默认折叠共用；user 消息与无轨迹
+// 消息不折叠（渲染层本就不渲染折叠条）。
+export function shouldFoldTrace(m: Msg): boolean {
+  return m.role === 'assistant' && hasTrace(m)
 }
 
 export const useChatStore = defineStore('chat', {
@@ -169,7 +177,7 @@ export const useChatStore = defineStore('chat', {
     // 无第二次自动收起。
     foldLastTrace(): void {
       const last = this.messages[this.messages.length - 1]
-      if (last && last.role === 'assistant' && hasTrace(last)) last.traceFolded = true
+      if (last && shouldFoldTrace(last)) last.traceFolded = true
     },
     // T1 手动开合（#664）：折叠条 emit 回父层落 store（贴既有纯 mutation 形态）。自动折叠只在
     // done 发生一次，手动开合不被自动覆盖。

@@ -6,7 +6,7 @@
 import { computed, ref } from 'vue'
 import { getBootstrapToken } from '@/api/chat'
 import { useAuthStore, isTokenExpired } from '@/stores/auth'
-import { useChatStore, newMsg, type Msg, type ApprovalItem, type ToolRow } from '@/stores/chat'
+import { useChatStore, newMsg, shouldFoldTrace, type Msg, type ApprovalItem, type ToolRow } from '@/stores/chat'
 import { useFileTabsStore } from '@/stores/fileTabs'
 import { ApiError, apiFetch } from '@/api/client'
 import {
@@ -1246,6 +1246,12 @@ export function useChatConnection(status: ChatStatus) {
   // abort run → 最后一条 assistant content=[thinking,toolCall×N] 无 text 块）→ 提取 text 为空，
   // 若照原样渲染成空文本气泡（用户误以为回复丢失）。转译 toolCall 块为工具行（done 态）——
   // 语义正确展示 agent 实际调过什么工具，而非空白气泡。
+  // T3 历史轮默认折叠（#666 / CONTEXT.md「折叠条」）：历史翻译产物中有轨迹的 assistant 消息
+  // 默认置 traceFolded=true——与 foldLastTrace 共用 shouldFoldTrace 单一判定（assistant 且有轨迹）。
+  // 本函数是三条历史路径的单一翻译 choke point：loadHistory（进会话/刷新/断线重连恢复）、
+  // loadMoreHistory（分页更旧）、handleDone 外来可见 final 局部插入（#569）——同构默认折叠。
+  // 无轨迹不置折叠态（渲染层不渲染折叠条）；时长恒缺省（历史轮无计时，条面回退「执行过程 · …」
+  // 计数文案，#665 已有回退）。刷新/切会话回来重新翻译即恢复默认折叠（随投影重建，无需持久化）。
   function translateHistoryMessage(m: HistoryMessageDTO): Msg {
     // E1: 网关 history 消息 content 多态（user=string / assistant=[{type:text},{type:thinking}]，
     // ADR 0003）——复用 eventTranslate.extractMessageText（已处理 string/数组 content 并跳过
@@ -1261,7 +1267,7 @@ export function useChatConnection(status: ChatStatus) {
     // #565: 结构化 thinking 块提取——与 text 独立通道（thinking 块不混入正文，正文块不混入思考）；
     // null（无结构化块）回退 ''（现状：无思考卡），非 null 填折叠卡渲染。
     const structThinking = extractThinking(m)
-    return {
+    const msg: Msg = {
       role: historyRole(m.role),
       raw: text,
       text,
@@ -1271,6 +1277,8 @@ export function useChatConnection(status: ChatStatus) {
       tools,
       media,
     }
+    if (shouldFoldTrace(msg)) msg.traceFolded = true // T3（#666）：默认折叠
+    return msg
   }
 
   // 从 assistant 消息 content 提取 toolCall 块 → 工具行（done 态）。Q2-1(a)：无条件调用（与流式
