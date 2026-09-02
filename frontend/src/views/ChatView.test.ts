@@ -766,7 +766,8 @@ describe('ChatView', () => {
 
   // #565: 结构化 thinking 块（新版网关 message.content[] 的 type==='thinking' 块）——流式路最小覆盖：
   // 结构化块只在 replace 快照/final 的 content[] 出现，翻译层提取随 text 帧携带（thinking 字段），
-  // handleText 以 ?? 覆盖内联剥离结果。思考卡渲染（Msg.thinking 非空即渲染，折叠卡逻辑未改）。
+  // handleText 以 ?? 覆盖内联剥离结果。思考卡流式渲染；#664 起完成轮自动折叠——done 后展开
+  // 折叠条仍见思考卡（done 收尾不冲掉结构化思考：terminal 重解析只作用于内联路）。
   it('#565: 流式 replace 快照含结构化 thinking 块 → 思考卡渲染（结构化块权威覆盖）', async () => {
     const { w, gw } = await mountReady()
     await w.find('[data-test="input"]').setValue('hi')
@@ -776,11 +777,15 @@ describe('ChatView', () => {
     expect(w.find('[data-test="cot-card"]').exists()).toBe(true)
     expect(w.find('[data-test="cot-card"]').text()).toContain('推理过程')
     expect(w.find('[data-test="stream"]').text()).toContain('回答')
-    // done 收尾不冲掉结构化思考（finalizeLast 的 terminal 重解析只作用于内联路）
+    // done 收尾不冲掉结构化思考：自动折叠（#664）后展开折叠条，思考卡仍在
     gw.fireFrame({ type: 'done', runId: 'r1' })
     await nextTick()
-    expect(w.find('[data-test="cot-card"]').exists()).toBe(true)
+    expect(w.find('[data-test="cot-card"]').exists()).toBe(false) // 已收进折叠条
+    await w.find('[data-test="trace-fold"]').trigger('click') // 手动展开
     expect(w.find('[data-test="cot-card"]').text()).toContain('推理过程')
+    await w.find('[data-test="trace-fold"]').trigger('click') // 再点收起（单层开合可逆）
+    expect(w.find('[data-test="cot-card"]').exists()).toBe(false) // 轨迹收回
+    expect(w.find('[data-test="trace-fold"]').exists()).toBe(true) // 条面仍在
   })
 
   // #565: 结构化思考跨帧存活——replace 快照帧带思考后，普通 delta 增量帧（无 thinking 字段，
@@ -798,7 +803,8 @@ describe('ChatView', () => {
   })
 
   // #565: 思考只在 final 的 content[] 出现（流式 deltaText 无思考信息）→ final 文本与已发相等，
-  // 翻译层经 done 帧独立通道携带思考（不经 handleText 的 raw 逻辑），思考卡终态渲染
+  // 翻译层经 done 帧独立通道携带思考（不经 handleText 的 raw 逻辑）；#664 起完成轮自动折叠——
+  // 展开折叠条仍见思考卡（思考数据终态存活）。
   it('#565: 流式文本发完后 final 才带思考（相等场景）→ done 帧思考卡渲染', async () => {
     const { w, gw } = await mountReady()
     await w.find('[data-test="input"]').setValue('hi')
@@ -806,7 +812,8 @@ describe('ChatView', () => {
     gw.fireFrame({ type: 'text', runId: 'r1', delta: '回答' }) // deltaText 流式（无思考信息）
     gw.fireFrame({ type: 'done', runId: 'r1', thinking: '最终思考' }) // final 相等 → done 帧带思考
     await nextTick()
-    expect(w.find('[data-test="cot-card"]').exists()).toBe(true)
+    expect(w.find('[data-test="trace-fold"]').exists()).toBe(true) // done 自动折叠（#664）
+    await w.find('[data-test="trace-fold"]').trigger('click')
     expect(w.find('[data-test="cot-card"]').text()).toContain('最终思考')
     expect(w.find('[data-test="stream"]').text()).toContain('回答')
   })
@@ -819,6 +826,8 @@ describe('ChatView', () => {
     gw.fireFrame({ type: 'text', runId: 'r1', delta: '<thinking>内心</thinking>回答' })
     gw.fireFrame({ type: 'done', runId: 'r1' })
     await nextTick()
+    expect(w.find('[data-test="trace-fold"]').exists()).toBe(true) // done 自动折叠（#664）
+    await w.find('[data-test="trace-fold"]').trigger('click')
     expect(w.find('[data-test="cot-card"]').text()).toContain('内心')
     expect(w.find('[data-test="stream"]').text()).toContain('回答')
   })

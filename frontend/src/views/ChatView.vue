@@ -284,6 +284,7 @@ defineExpose({
         :history-loading="chat.historyLoading"
         @load-more="conn.loadMoreHistory"
         @regenerate="regenerate"
+        @toggle-trace-fold="chat.toggleTraceFold"
       >
         <!-- #461：无选中会话（含删除当前会话后）→ 空态视图 + 「新建会话」入口 -->
         <template #empty>
