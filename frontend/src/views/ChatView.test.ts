@@ -854,20 +854,23 @@ describe('ChatView', () => {
     expect(w.find('[data-test="stream"]').text()).toContain('历史回答')
   })
 
-  it('历史分页：hasMore 时 load-more 用 nextOffset 锚点拉更旧页', async () => {
+  it('历史分页：loadHistory 拉全后按钮不再出现；中途失败降级留 hasMore，load-more 用锚点续拉', async () => {
     const w = mount(ChatView)
     await flushPromises()
     const gw = MockGatewayChat.last!
     gw.listSessions.mockResolvedValue([SESSION])
     gw.listCommands.mockResolvedValue([])
     gw.send.mockResolvedValue(undefined)
-    // 首次 loadHistory 返回 hasMore:true（触发「加载更多」按钮）；load-more 拉更旧页
+    // issue #535：loadHistory 现自动循环拉全——手动「加载更多」的可达入口只剩中途失败降级
+    //（catch 保留已拉页 + hasMore=true）。mock：首页成功 → 第二页失败 → 续拉恢复。
     gw.getHistory
       .mockResolvedValueOnce({ messages: [{ role: 'user', text: '旧页' }], hasMore: true, nextOffset: 10 })
+      .mockRejectedValueOnce(new Error('网关抖动'))
       .mockResolvedValueOnce({ messages: [{ role: 'user', text: '更旧页' }], hasMore: false, nextOffset: null })
     gw.fireReady()
-    await flushPromises() // selectContainer 续 listSessions + loadHistory(hasMore:true)
-    expect(w.find('[data-test="load-more"]').exists()).toBe(true)
+    await flushPromises() // loadHistory：首页成功 + 第二页失败 → 降级铺底
+    expect(w.find('[data-test="stream"]').text()).toContain('旧页') // 已拉到的页不空白
+    expect(w.find('[data-test="load-more"]').exists()).toBe(true) // 降级留 hasMore → 按钮可续拉
     await w.find('[data-test="load-more"]').trigger('click')
     await flushPromises()
     expect(gw.getHistory).toHaveBeenLastCalledWith('sk-1', undefined, '10')

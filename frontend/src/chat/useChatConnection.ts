@@ -14,6 +14,7 @@ import {
   createRequestId,
   type GatewayChat,
   type SessionDTO,
+  type SessionHistoryDTO,
   type HistoryMessageDTO,
   type ChatFrame,
 } from '@/chat/gatewayChat'
@@ -1188,10 +1189,27 @@ export function useChatConnection(status: ChatStatus) {
     fileTabs.closeAll() // #626 T1：切会话清文件 tab（workspace 树是 per-container，保留）
     chat.setHistoryLoading(true)
     status.onClearError()
+    // issue #535：首 50 条只是截断视图（翻到顶部缺最早消息，手动「加载更多」才逐页续拉）。
+    // 循环锚点分页把整个 session 历史拉全——每页显式带 limit（不依赖网关默认页大小）；
+    // 锚点耗尽 / 空页终止，防异常网关死循环。中途失败优雅降级：已拉到的页照常铺底 +
+    // hasMore=true，顶部「加载更多」仍可手动续拉。
+    const pages: Msg[][] = [] // 按拉取序：pages[0]=最新一页，越后越旧（合并时 reverse）
+    let hasMore = false
+    let anchor: string | number | null = null
     try {
-      const res = await gateway.getHistory(key, INITIAL_HISTORY_LIMIT)
-      if (gen !== containerGen || chat.selectedSession !== key) return // 切走了：丢弃迟到响应
-      if (hgen !== historyGen) return // codex #249 P2：已被更新的 loadHistory 取代：丢弃本在途响应
+      for (;;) {
+        // 显式标注断开 TS7022 推断环（res 初始化引用 anchor，anchor 又被 res.nextOffset 赋值）
+        const res: SessionHistoryDTO =
+          anchor == null
+            ? await gateway.getHistory(key, INITIAL_HISTORY_LIMIT)
+            : await gateway.getHistory(key, INITIAL_HISTORY_LIMIT, String(anchor))
+        if (gen !== containerGen || chat.selectedSession !== key) return // 切走了：丢弃迟到响应
+        if (hgen !== historyGen) return // codex #249 P2：已被更新的 loadHistory 取代：丢弃本在途响应
+        pages.push(res.messages.map(translateHistoryMessage))
+        hasMore = res.hasMore
+        anchor = res.nextOffset
+        if (!hasMore || anchor == null || res.messages.length === 0) break
+      }
       // codex P2 #108：保留 await 期间 send() 追加的进行中 turn（user + 流式 assistant 占位）。
       // 直接整体替换会被历史快照覆盖 → delta 找不到 streaming 尾，整轮实时回复从 UI 消失。
       const inFlight = chat.messages
@@ -1199,14 +1217,21 @@ export function useChatConnection(status: ChatStatus) {
       // 暂缓——#560 §3 判不可行（历史/本地消息拿不到可靠 seq）+ 本地无网关无法实测；
       // 前置票：乐观消息接入 projection 元数据 + 真网关抓包确认流式 seq 下发。详见 memory
       // message-seq-ordering-deferred。
-      chat.setMessages([...res.messages.map(translateHistoryMessage), ...inFlight])
-      chat.setHistoryState(res.hasMore, res.nextOffset, false)
+      chat.setMessages([...pages.reverse().flat(), ...inFlight])
+      chat.setHistoryState(hasMore, hasMore ? anchor : null, false)
     } catch (e) {
       if (gen !== containerGen || chat.selectedSession !== key) return
       if (hgen !== historyGen) return // codex #249 P2：被取代的请求：不落错误、不干扰新请求
       if (e instanceof ApiError && e.status === 401) return // 401 由 client 处理会话
       status.onError((e as Error).message)
-      chat.setHistoryLoading(false)
+      if (pages.length > 0) {
+        // 中途页失败：已拉到的页铺底（失败即全空白更糟），留 hasMore 让「加载更多」手动续拉
+        const inFlight = chat.messages
+        chat.setMessages([...pages.reverse().flat(), ...inFlight])
+        chat.setHistoryState(true, anchor, false)
+      } else {
+        chat.setHistoryLoading(false)
+      }
     }
   }
 
