@@ -647,6 +647,13 @@ export function useChatConnection(status: ChatStatus) {
       if (!chat.selectedSession) await newSession()
       if (gen !== containerGen) return // newSession 期间又切容器：不连
       if (!chat.selectedSession) return // 会话创建失败（newSession 已显示错误）：不加载历史
+      // B0: 补拉待处理审批（切页/断线期间网关 push 的 exec.approval.requested 收不到）——
+      // 不补拉则 agent 卡在 exec 审批时前端无卡可回，agent 卡死被网关 stuck-session recovery
+      // abort（生产实测 330s）。chat.addApproval 幂等（按 id 去重），与实时 push 不冲突。
+      // Codex #678 P2：审批补拉提前到 await loadHistory 之前、与全量历史下载并行启动——长
+      // transcript 下若排在顺序分页循环之后，离线期间的审批会一直不可见直到所有历史页拉完，
+      // 耗尽 330s stuck-session abort 窗口，用户还没看到卡片 run 就被 abort。
+      void restorePendingApprovals(gen)
       // #564: 先 loadHistory 再重发 outbox 残留——历史铺底后乐观 echo 才排到正确位置，且内容级
       // 去重（§三.3）可识别「网关已受理但 ack 丢」的历史消息（防 UI 双条）。await 保证 resendOutbox
       // 看到的是历史铺底后的 messages（fire-and-forget 会让去重对比空列表、重发排在较新回复之后）。
@@ -656,10 +663,6 @@ export function useChatConnection(status: ChatStatus) {
       if (gen === containerGen && chat.selectedContainer === name && gateway && !disconnected.value) {
         resendOutbox(name, chat.selectedSession)
       }
-      // B0: 补拉待处理审批（切页/断线期间网关 push 的 exec.approval.requested 收不到）——
-      // 不补拉则 agent 卡在 exec 审批时前端无卡可回，agent 卡死被网关 stuck-session recovery
-      // abort（生产实测）。chat.addApproval 幂等（按 id 去重），与实时 push 不冲突。
-      void restorePendingApprovals(gen)
     } catch (e) {
       if (gen !== containerGen) return
       status.onConnecting(false) // 出错解除 connecting（composer 解禁后用户可重试）
@@ -1196,13 +1199,23 @@ export function useChatConnection(status: ChatStatus) {
     const pages: Msg[][] = [] // 按拉取序：pages[0]=最新一页，越后越旧（合并时 reverse）
     let hasMore = false
     let anchor: string | number | null = null
+    // Codex #678 P2：cursor 不前进/循环守卫——异常网关忽略锚点、反复回同一页且 hasMore:true 时，
+    // 仅判 null/空页拦不住（每页非空、锚点恒非 null），会死循环、内存重复追加、永不释放 loading。
+    // 记录已请求过的锚点，再次命中（不前进 / A→B→A 循环）即停。
+    const seenAnchors = new Set<string | number>()
     try {
       for (;;) {
+        if (anchor != null) {
+          if (seenAnchors.has(anchor)) break // 锚点已请求过 → 不前进/循环，停（防死循环）
+          seenAnchors.add(anchor)
+        }
         // 显式标注断开 TS7022 推断环（res 初始化引用 anchor，anchor 又被 res.nextOffset 赋值）
+        // Codex #678 P1：anchor 保留原始类型（number offset / string messageId）直传，getHistory
+        // 内部分发到对应协议字段——不 String() 化，否则数值偏移错走 messageId、第二页起拉错页。
         const res: SessionHistoryDTO =
           anchor == null
             ? await gateway.getHistory(key, INITIAL_HISTORY_LIMIT)
-            : await gateway.getHistory(key, INITIAL_HISTORY_LIMIT, String(anchor))
+            : await gateway.getHistory(key, INITIAL_HISTORY_LIMIT, anchor)
         if (gen !== containerGen || chat.selectedSession !== key) return // 切走了：丢弃迟到响应
         if (hgen !== historyGen) return // codex #249 P2：已被更新的 loadHistory 取代：丢弃本在途响应
         pages.push(res.messages.map(translateHistoryMessage))
@@ -1319,7 +1332,9 @@ export function useChatConnection(status: ChatStatus) {
     const key = chat.selectedSession
     const gen = containerGen
     const hgen = historyGen // codex #249 R3 P2：捕获当前代；不自增（分页不得取代进行中的完整 loadHistory）
-    const anchor = String(chat.historyAnchor)
+    // Codex #678 P1：锚点保留原始类型（number offset / string messageId）直传 getHistory 分发——
+    // 不 String() 化，否则数值偏移错走 messageId 协议字段（上方守卫已排除 null）。
+    const anchor = chat.historyAnchor
     chat.setHistoryLoading(true)
     try {
       const res = await gateway.getHistory(key, undefined, anchor)

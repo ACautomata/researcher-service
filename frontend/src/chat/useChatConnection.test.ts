@@ -711,4 +711,94 @@ describe('历史拉全（issue #535）', () => {
     expect(chat.messages[0]!.text).toBe('msg-000') // 最旧一条在顶
     expect(chat.historyHasMore).toBe(false) // 无隐藏历史 → 顶部「加载更多」不出现
   })
+
+  // Codex PR #678 P1：网关 chat.history 把数值 offset 与字符串 messageId 当两个独立参数
+  //（docs.openclaw.ai/gateway/protocol）。nextOffset 为 number 时须原样以 number 续传（getHistory
+  // 内部映射为 offset）；String() 化会走错协议字段（messageId），offset 分页会话第二页起拉错/拉不到。
+  it('numeric nextOffset 以 number 类型续传（不被 stringify 成 messageId）', async () => {
+    const TOTAL = 130
+    const all = Array.from({ length: TOTAL }, (_, i) => ({ role: 'user', text: `msg-${i}` }))
+    const { conn, chat } = setup()
+    const ready = conn.openGateway()
+    await flushPromises()
+    const gw = MockGatewayChat.last!
+    gw.listSessions.mockResolvedValue([{ session_key: 'sk-1', title: '', updated_at: '' }])
+    // mock 网关为「只认数值 offset」的偏移分页：第三参数是 number 才当偏移；被 String() 化的
+    // string 按协议不识别 → 当作无锚点返回最新页。调用上限兜底防修复前死循环。
+    let calls = 0
+    gw.getHistory.mockImplementation((key: string, limit?: number, cursor?: string | number) => {
+      expect(key).toBe('sk-1')
+      calls++
+      if (calls > 20) return Promise.resolve({ messages: [], hasMore: false, nextOffset: null })
+      const n = limit ?? 50
+      const idx = typeof cursor === 'number' ? cursor : all.length
+      const start = Math.max(0, idx - n)
+      return Promise.resolve({
+        messages: all.slice(start, idx),
+        hasMore: start > 0,
+        nextOffset: start > 0 ? start : null, // number offset
+      })
+    })
+    gw.listCommands.mockResolvedValue([])
+    gw.listPendingApprovals.mockResolvedValue([])
+    gw.fireReady()
+    await ready
+    await flushPromises()
+
+    expect(chat.messages).toHaveLength(TOTAL) // number offset 正确续传 → 拉全整个 session
+    expect(chat.messages[0]!.text).toBe('msg-0')
+    expect(chat.historyHasMore).toBe(false)
+  })
+
+  // Codex PR #678 P2：异常网关忽略 cursor、反复回同一页且 hasMore:true（如不认该锚点）——
+  // 无前进守卫会死循环、内存重复追加、永不释放 loading。检测 cursor 不前进即停。
+  it('cursor 不前进（hasMore:true 但 nextOffset 重复）时终止分页并释放 loading', async () => {
+    const page = [{ role: 'user', text: 'm' }]
+    const { conn, chat } = setup()
+    const ready = conn.openGateway()
+    await flushPromises()
+    const gw = MockGatewayChat.last!
+    gw.listSessions.mockResolvedValue([{ session_key: 'sk-1', title: '', updated_at: '' }])
+    let calls = 0
+    gw.getHistory.mockImplementation(() => {
+      calls++
+      if (calls > 5) return Promise.resolve({ messages: [], hasMore: false, nextOffset: null }) // 兜底防红死循环
+      return Promise.resolve({ messages: page, hasMore: true, nextOffset: 'X' }) // 同一锚点重复返回
+    })
+    gw.listCommands.mockResolvedValue([])
+    gw.listPendingApprovals.mockResolvedValue([])
+    gw.fireReady()
+    await ready
+    await flushPromises()
+
+    // 首页 + 发现锚点不前进即停 = 2 次；修复前会一直请求直到兜底（6 次）
+    expect(gw.getHistory.mock.calls.length).toBe(2)
+    expect(chat.historyLoading).toBe(false) // loading 释放（不死等）
+  })
+
+  // Codex PR #678 P2：syncSessions 原先 await 整个 loadHistory 循环后才 restorePendingApprovals——
+  // 长 transcript 下离线期间的审批请求被卡住（330s stuck-session abort 窗口被耗尽，run 被 abort
+  // 才轮到卡片）。修复后审批补拉与全量历史下载并行启动。
+  it('恢复路径：审批补拉不被长历史拉取阻塞', async () => {
+    const { conn } = setup()
+    const ready = conn.openGateway()
+    await flushPromises()
+    const gw = MockGatewayChat.last!
+    gw.listSessions.mockResolvedValue([{ session_key: 'sk-1', title: '', updated_at: '' }])
+    // loadHistory 挂起（模拟长历史/慢网关）：getHistory 返回手动控制 resolve 的 promise。
+    // resolve 存对象属性——局部变量在闭包内赋值会被 TS 控制流 narrow 成 never（TS2349），属性访问不会。
+    const deferred: { resolve?: (v: { messages: never[]; hasMore: boolean; nextOffset: null }) => void } = {}
+    gw.getHistory.mockImplementation(
+      () => new Promise((r) => { deferred.resolve = r }),
+    )
+    gw.listCommands.mockResolvedValue([])
+    gw.listPendingApprovals.mockResolvedValue([])
+    gw.fireReady()
+    await flushPromises() // 推进到 loadHistory 首次 getHistory 挂起点
+
+    expect(gw.listPendingApprovals).toHaveBeenCalled() // 审批补拉已启动，不等历史拉完
+    deferred.resolve?.({ messages: [], hasMore: false, nextOffset: null }) // 放行历史，防悬挂
+    await ready
+    await flushPromises()
+  })
 })

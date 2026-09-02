@@ -873,7 +873,7 @@ describe('ChatView', () => {
     expect(w.find('[data-test="load-more"]').exists()).toBe(true) // 降级留 hasMore → 按钮可续拉
     await w.find('[data-test="load-more"]').trigger('click')
     await flushPromises()
-    expect(gw.getHistory).toHaveBeenLastCalledWith('sk-1', undefined, '10')
+    expect(gw.getHistory).toHaveBeenLastCalledWith('sk-1', undefined, 10) // Codex #678 P1：锚点保留 number 类型（offset），不再 String 化
     expect(w.find('[data-test="stream"]').text()).toContain('更旧页')
   })
 
