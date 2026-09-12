@@ -12,7 +12,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { listInstances } from '@/api/containers'
 import { ApiError } from '@/api/client'
-import { useChatStore } from '@/stores/chat'
+import { useChatStore, type Msg } from '@/stores/chat'
 import { useFileTabsStore } from '@/stores/fileTabs'
 import { useAuthStore, tokenOwner } from '@/stores/auth'
 import { safeLocalStorage } from '@/storage'
@@ -24,6 +24,7 @@ import {
   isAllowedAttachmentType,
   toPreviewDataUrl,
   type PendingAttachment,
+  type RawAttachment,
 } from '@/chat/attachments'
 import ChatSidebar from '@/components/chat/ChatSidebar.vue'
 import ChatHeader from '@/components/chat/ChatHeader.vue'
@@ -67,11 +68,21 @@ const conn = useChatConnection({
   onClearError() {
     errorMsg.value = ''
   },
+  // #694（Spec 轴 review）：动作类失败（用户主动发起的回退）走瞬时 toast，不进顶部连接横幅——
+  // 横幅 label 恒「加载失败」，把「回退失败：…」套在其下语义相左；贴 #461 删除会话失败 toast 先例。
+  onActionError(message: string) {
+    ElMessage.error(message)
+  },
   // #459-T2 #463 #1：Enter/斜杠发送统一走 sendMessage（含附件校验/清空预览条），与发送按钮同路径。
   // 箭头闭包延迟求值——sendMessage 为 function 声明提升，Enter 触发时 conn 已就绪。
   onSend() {
     void sendMessage()
   },
+  // #694 回退编排的 composer 协同（#693 spec §1.4）：草稿（文本 + 附件）归本壳，composable 经这两个
+  // 回调抓指纹 / 回填——直接引用两个函数声明（提升，rewind 触发时 pendingAttachments 已就绪），
+  // 不再经一层转手。
+  onRewindDraftFingerprint: draftFingerprint,
+  onRewindBackfill: applyRewindBackfill,
 })
 
 // 嵌套 ref 在模板中不解包（conn 是普通对象）——顶层解构后模板自动解包（slash 匹配单一来源在
@@ -86,6 +97,18 @@ const currentSessionTitle = computed(() => {
 
 // 是否有助手消息正在流式；并发 send 会让旧 streaming 消息永久卡住光标，故流式中禁发
 const streaming = computed(() => chat.messages.some((m) => m.role === 'assistant' && m.streaming))
+
+// #694 回退入口的渲染门（#693 spec §1.5，官方同构：agent 工作时入口不渲染而非禁用）：网关
+// 支持会话控制（hello-ok features 快照）且不在忙碌态（streaming/连接中/已断线）时才渲染。
+const rewindAvailable = computed(
+  () => conn.sessionControlAvailable.value && !streaming.value && !connecting.value && !conn.disconnected.value,
+)
+
+// #694 回退入口 emit（ChatStream→消息携带）：取网关条目 id 发起编排（无 id 时入口本就不渲染，防御性早退）。
+function rewind(msg: Msg): void {
+  if (!msg.entryId) return
+  void conn.rewind(msg.entryId)
+}
 
 // #405-T1：审批卡可见性过滤归 chatStore getter（#395 钉死 + #394 实测——当前会话是 subagent
 // 会话时审批区恒空；非 subagent 会话显示归属卡 + 无 sessionKey 连接级卡 + subagent 卡；
@@ -165,6 +188,12 @@ function toggleApprovalDetail(a: { id: string }): void {
 const pendingAttachments = ref<PendingAttachment[]>([])
 let attachKey = 0
 
+// 预览条追加（单一入口）：采集三通道（粘贴/拖拽/选择）与 #694 回退回填共用同一落点——key 单调递增
+// （移除按钮按 key 定位）、图片经 toPreviewDataUrl 重建 dataURL 缩略。
+function pushAttachment(att: RawAttachment): void {
+  pendingAttachments.value.push({ key: ++attachKey, att, previewUrl: toPreviewDataUrl(att) })
+}
+
 // 三通道共用入口：粘贴/拖拽/文件选择的 File 列表 → 压缩（图片）/转换（非图片）→ 入预览条。
 // 不支持的类型（非 image/audio/video）即时提示，不入预览条（体积校验留发送前 buildAttachments 兜底）。
 async function addFiles(files: File[]): Promise<void> {
@@ -177,7 +206,7 @@ async function addFiles(files: File[]): Promise<void> {
       const att = file.type.startsWith('image/')
         ? await compressImageFile(file)
         : await fileToRawAttachment(file)
-      pendingAttachments.value.push({ key: ++attachKey, att, previewUrl: toPreviewDataUrl(att) })
+      pushAttachment(att)
     } catch {
       ElMessage.error(`附件读取失败：${file.name}`)
     }
@@ -207,6 +236,26 @@ async function regenerate(text: string): Promise<void> {
   chat.setInput(text)
   await nextTick()
   await sendMessage()
+}
+
+// #694 回退的草稿指纹（#693 spec §1.4）：文本 + 附件内容的水位线快照——composable 在 rewind RPC
+// 前后各取一次、比对是否变化（变化即跳过回填，保留用户新草稿）。附件是宿主局部态（不在 store），
+// 故指纹只能算在宿主侧；内容整体入指纹（不做长度摘要），保证「同长不同内容」也判为改动。
+function draftFingerprint(): string {
+  return JSON.stringify([
+    chat.input,
+    pendingAttachments.value.map((p) => [p.att.mimeType ?? '', p.att.fileName ?? '', p.att.content ?? '']),
+  ])
+}
+
+// #694 回退回填（指纹未变时才被 composable 调用）：被剪首条用户消息文本覆盖式写入草稿 + 网关返回的
+// 图片附件并入预览条（按内容去重——本地预览条已有同图时不重复插入，官方 merge 同款意图）。
+function applyRewindBackfill(text: string, attachments: RawAttachment[]): void {
+  chat.setInput(text)
+  for (const att of attachments) {
+    if (pendingAttachments.value.some((p) => p.att.mimeType === att.mimeType && p.att.content === att.content)) continue
+    pushAttachment(att)
+  }
 }
 
 async function loadInstances() {
@@ -273,9 +322,11 @@ defineExpose({
         :messages="chat.messages"
         :history-has-more="chat.historyHasMore"
         :history-loading="chat.historyLoading"
+        :rewind-available="rewindAvailable"
         @load-more="conn.loadMoreHistory"
         @regenerate="regenerate"
         @toggle-trace-fold="chat.toggleTraceFold"
+        @rewind="rewind"
       >
         <!-- #461：无选中会话（含删除当前会话后）→ 空态视图 + 「新建会话」入口 -->
         <template #empty>

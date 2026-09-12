@@ -1322,3 +1322,91 @@ describe('#377 设备配对生命周期（GatewayBrowserDeviceAuthLifecycle 接�
     }
   })
 })
+
+// #694 会话控制能力探测 + sessions.rewind RPC——对话回退端到端（#693 spec §1.1/§1.4）的协议层。
+// capability 单一来源 = hello-ok 的 features.methods 快照：4 个会话控制方法全部在位才判「可用」
+// （9.4+ 网关；过渡期存量 7.1 镜像无该字段或缺项 → 不可用 → UI 隐藏全部回退/fork/分支入口）。
+// 0 信任：字段形状非数组 / 含非字符串项一律按不可用处理，不抛错。
+describe('#694 会话控制能力探测', () => {
+  const SESSION_CONTROL_METHODS = [
+    'sessions.rewind',
+    'sessions.fork',
+    'sessions.branches.list',
+    'sessions.branches.switch',
+  ]
+
+  it('hello-ok.features.methods 含全部 4 个会话控制方法 → 可用', () => {
+    const { gw, client } = makeGateway()
+    expect(gw.sessionControlAvailable()).toBe(false) // 未握手：不可用（入口隐藏，不必等 hello）
+    client.fireConnectHello({ features: { methods: [...SESSION_CONTROL_METHODS, 'chat.send'] } }, {})
+    expect(gw.sessionControlAvailable()).toBe(true)
+  })
+
+  it('旧网关（无 features 字段 / methods 缺项）→ 不可用（过渡期存量 7.1 镜像）', () => {
+    const { gw, client } = makeGateway()
+    client.fireConnectHello({ auth: {} }, {}) // 7.1 网关形状：无 features
+    expect(gw.sessionControlAvailable()).toBe(false)
+
+    client.fireConnectHello({ features: { methods: ['sessions.rewind', 'chat.send'] } }, {})
+    expect(gw.sessionControlAvailable()).toBe(false) // 缺 fork/branches → 整体不可用
+  })
+
+  it('0 信任：methods 非数组 / 含非字符串项 → 不崩，按 0 信任判定', () => {
+    const { gw, client } = makeGateway()
+    client.fireConnectHello({ features: { methods: 'sessions.rewind' } }, {})
+    expect(gw.sessionControlAvailable()).toBe(false)
+
+    client.fireConnectHello({ features: { methods: [...SESSION_CONTROL_METHODS, 123, null] } }, {})
+    expect(gw.sessionControlAvailable()).toBe(true) // 非字符串项跳过，4 个名字齐 → 可用
+  })
+
+  it('重连后能力跟着新 hello 走（同实例二次握手：网关升级/降级都如实反映）', () => {
+    const { gw, client } = makeGateway()
+    client.fireConnectHello({ features: { methods: [...SESSION_CONTROL_METHODS] } }, {})
+    expect(gw.sessionControlAvailable()).toBe(true)
+    // 重连到旧网关（如容器被换回 7.1 镜像）：能力撤销，入口重新隐藏
+    client.fireConnectHello({ features: { methods: ['chat.send'] } }, {})
+    expect(gw.sessionControlAvailable()).toBe(false)
+  })
+})
+
+describe('#694 sessions.rewind RPC', () => {
+  it('rewind → sessions.rewind{sessionKey,entryId} + 结果 0 信任校准（editorText/editorAttachments）', async () => {
+    const { gw, client } = makeGateway()
+    client.request.mockResolvedValue({
+      editorText: '被剪的那句话',
+      editorAttachments: [
+        { mimeType: 'image/png', data: 'AAAA' },
+        { mimeType: 'image/jpeg' }, // 缺 data → 跳过
+        { data: 'BBBB' }, // 缺 mimeType → 跳过
+        'not-a-dict',
+        { mimeType: '', data: 'CCCC' }, // 空 mimeType → 跳过
+      ],
+    })
+    const res = await gw.rewind('sk-1', 'entry-9')
+    expect(client.request).toHaveBeenCalledWith('sessions.rewind', { sessionKey: 'sk-1', entryId: 'entry-9' })
+    expect(res).toEqual({
+      editorText: '被剪的那句话',
+      editorAttachments: [{ mimeType: 'image/png', data: 'AAAA' }],
+    })
+  })
+
+  it('rewind 响应缺字段/异形（旧网关、异常形状）→ 空结果，不崩', async () => {
+    const { gw, client } = makeGateway()
+    client.request.mockResolvedValueOnce({ editorText: 42, editorAttachments: 'x' })
+    await expect(gw.rewind('sk-1', 'e1')).resolves.toEqual({ editorText: '', editorAttachments: [] })
+    client.request.mockResolvedValueOnce(undefined)
+    await expect(gw.rewind('sk-1', 'e1')).resolves.toEqual({ editorText: '', editorAttachments: [] })
+  })
+
+  it('rewind 被网关拒绝（entryId 不在活跃路径等）→ 原样上抛（调用层据 details.reason 分类）', async () => {
+    const { gw, client } = makeGateway()
+    client.request.mockRejectedValue(
+      new MockGatewayProtocolRequestError({
+        gatewayCode: 'INVALID_REQUEST',
+        message: 'message entry is not on the active path: e1',
+      }),
+    )
+    await expect(gw.rewind('sk-1', 'e1')).rejects.toThrow('message entry is not on the active path: e1')
+  })
+})

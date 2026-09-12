@@ -194,6 +194,20 @@ function base64ByteCount(base64: string): number {
   return Math.floor((len * 3) / 4) - padding
 }
 
+// ---- #694 回退回填 ----
+
+// 修改类会话控制 RPC（`sessions.rewind` / `sessions.fork`）响应里 `editorAttachments` 元素
+// （官方 wire 形状 `{mimeType, data}`，data 为纯 base64）→ RawAttachment（与采集层同形状，预览条/
+// 发送校验共用）。**必须补 sizeBytes**（Codex #703 P2）：缺它时下游 attachmentByteCount 退化为
+// 「按 base64 字符数当字节数」（×4/3 高估），会让真实体积落在 (525KB, 700KB] 的图——本面板压缩后
+// 正常发出过的图——在回退后重发被误判超限。折算与采集层 compressImageFile 同一口径
+// （base64ByteCount）。白名单外的 mime（网关异常/新类型）→ null，调用方丢弃。
+export function editorAttachmentToRaw(a: { mimeType: string; data: string }): RawAttachment | null {
+  const type = attachmentTypeOf(a.mimeType)
+  if (!type) return null
+  return { type, mimeType: a.mimeType, content: a.data, sizeBytes: base64ByteCount(a.data) }
+}
+
 // 浏览器 canvas 默认引擎：单次解码（一个 objectURL + 一次 Image 加载）供 loadSize/render 共用——
 // #10 避免两次解码（2× CPU + 峰值位图内存）。loadSize 缓存解码结果，render 复用；仅在浏览器可用
 // （jsdom canvas 为 null）——采集层在浏览器运行，单测注入假引擎覆盖逻辑。
