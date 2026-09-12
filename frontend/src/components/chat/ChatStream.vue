@@ -17,16 +17,24 @@ import ChatMessageItem from '@/components/chat/ChatMessageItem.vue'
 import AnchorRail from '@/components/chat/AnchorRail.vue'
 
 // props 供 script 侧 watch 追踪布局快照（模板按名访问，无需此绑定）
-const props = defineProps<{
-  messages: Msg[]
-  historyHasMore: boolean
-  historyLoading: boolean
-}>()
+const props = withDefaults(
+  defineProps<{
+    messages: Msg[]
+    historyHasMore: boolean
+    historyLoading: boolean
+    // #694：回退入口可用性（宿主算好：网关支持会话控制 且 agent 未工作、连接未断）——透传给每条
+    // 消息，仅已持久化的 user 消息据此渲染入口。缺省 false = fail-closed（宿主不显式开启就不渲染，
+    // 不出现点了必然报错的按钮）。
+    rewindAvailable?: boolean
+  }>(),
+  { rewindAvailable: false },
+)
 
 const emit = defineEmits<{
   loadMore: []
   regenerate: [text: string]
   toggleTraceFold: [msg: Msg] // T1 轮次折叠（#664）：折叠条开合转发（携带所属消息，父层落 store）
+  rewind: [msg: Msg] // #694 对话回退：携带所属消息（父层取 entryId 发起 sessions.rewind）
 }>()
 
 function previousUserText(message: Msg): string {
@@ -215,8 +223,10 @@ defineSlots<{
           :data-index="i"
           :class="{ 'anchor-flash': i === flashIndex }"
           :regenerate-text="m.role === 'assistant' ? previousUserText(m) : ''"
+          :rewind-available="rewindAvailable"
           @regenerate="emit('regenerate', $event)"
           @toggle-trace-fold="emit('toggleTraceFold', m)"
+          @rewind="emit('rewind', m)"
         />
       </slot>
     </template>

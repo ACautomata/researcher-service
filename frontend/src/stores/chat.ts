@@ -38,6 +38,13 @@ export interface Msg {
   // 审批等待/断线重连间隔——墙钟语义）。可选：done 帧落定（时长信号同折叠信号独占 done）；
   // 历史轮/error/断线/宽限收尾缺省 undefined（条面回退「执行过程 · …」计数文案）。
   turnDurationMs?: number
+  // #694 网关 transcript 条目 id（网关 chat.history 每条消息 __openclaw.id → translateHistoryMessage
+  // 单点提取，官方 Control UI 亦取此值作 data-entry-id）。语义 = 该消息在网关 transcript DAG 里的
+  // 持久化条目身份，回退/fork/分支切换（sessions.rewind 等）的定位参数。**仅已持久化消息有值**：
+  // 本地乐观 echo（send/resendOutbox 新建的 Msg）与流式占位缺省 undefined——UI 据此不显示任何
+  // 消息级操作入口（不可对未落库的消息发起 rewind）。与分页锚点（historyAnchor/nextOffset，number
+  // offset | string messageId 两态）是**不同字段**，禁止混用（Codex #678 P1 教训）。
+  entryId?: string
 }
 
 // T06 审批卡（连接级，无 runId）：独立列表渲染，不混入 messages——避免破坏流式锚定/finalizeLast

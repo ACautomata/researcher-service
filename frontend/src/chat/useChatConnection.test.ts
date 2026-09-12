@@ -45,6 +45,8 @@ const { MockGatewayChat } = vi.hoisted(() => {
     deleteSession = vi.fn()
     getHistory = vi.fn()
     send = vi.fn()
+    rewind = vi.fn() // #694 对话回退（sessions.rewind）
+    sessionControlAvailable = vi.fn(() => true) // #694 会话控制能力（默认 9.4+ 网关可用）
     listCommands = vi.fn()
     resolveApproval = vi.fn()
     listPendingApprovals = vi.fn()
@@ -84,6 +86,10 @@ function setup(): { status: ChatStatus & Record<string, ReturnType<typeof vi.fn>
     onConnecting: vi.fn(),
     onError: vi.fn(),
     onClearError: vi.fn(),
+    // #694 回退编排的 composer 协同（宿主注入）：缺省「草稿全程未变」→ 回填恒执行；指纹/回填
+    // 断言由各用例覆盖（改写 mockReturnValueOnce/mock.calls）。
+    onRewindDraftFingerprint: vi.fn(() => 'draft-stable'),
+    onRewindBackfill: vi.fn(),
   }
   const conn = useChatConnection(status)
   const chat = useChatStore()
@@ -800,5 +806,256 @@ describe('历史拉全（issue #535）', () => {
     deferred.resolve?.({ messages: [], hasMore: false, nextOffset: null }) // 放行历史，防悬挂
     await ready
     await flushPromises()
+  })
+})
+
+// #694 对话回退的入口前置：transcript entryId 提取（#682 spec §1.2）。
+// 网关 chat.history 每条消息带 __openclaw 元数据（官方 Control UI 取 __openclaw.id 作 data-entry-id）；
+// 面板单点 choke point = translateHistoryMessage——三条历史路径（loadHistory / loadMoreHistory /
+// 外来 final 局部插入）自动全覆盖。无 entryId 的消息不显示任何消息级操作入口（回退/fork）。
+describe('#694 transcript entryId 提取', () => {
+  setupConnTestEnv()
+
+  const withEntry = (text: string, id: unknown) => ({ role: 'user', text, __openclaw: { id } })
+
+  it('历史消息保留网关条目 id（__openclaw.id）；缺字段/非 string → undefined（0 信任）', async () => {
+    const { conn, chat } = setup()
+    const ready = conn.openGateway()
+    await flushPromises()
+    const gw = MockGatewayChat.last!
+    gw.listSessions.mockResolvedValue([{ session_key: 'sk-1', title: '', updated_at: '' }])
+    gw.getHistory.mockResolvedValue({
+      messages: [
+        withEntry('有 id 的用户消息', 'entry-1'),
+        { role: 'assistant', text: '回复', __openclaw: { id: 'entry-2' } },
+        { role: 'user', text: '无 __openclaw' },
+        withEntry('id 非 string', 42),
+        { role: 'user', text: '空 id', __openclaw: { id: '' } },
+      ],
+      hasMore: false,
+      nextOffset: null,
+    })
+    gw.listCommands.mockResolvedValue([])
+    gw.listPendingApprovals.mockResolvedValue([])
+    gw.fireReady()
+    await ready
+    await flushPromises()
+
+    expect(chat.messages.map((m) => m.entryId)).toEqual(['entry-1', 'entry-2', undefined, undefined, undefined])
+  })
+
+  it('分页（loadMoreHistory）拉回的更旧页同样带 entryId', async () => {
+    const { conn, chat } = setup()
+    const ready = conn.openGateway()
+    await flushPromises()
+    const gw = MockGatewayChat.last!
+    gw.listSessions.mockResolvedValue([{ session_key: 'sk-1', title: '', updated_at: '' }])
+    gw.getHistory.mockResolvedValueOnce({
+      messages: [withEntry('新页消息', 'entry-new')],
+      hasMore: true,
+      nextOffset: 'entry-new',
+    })
+    gw.listCommands.mockResolvedValue([])
+    gw.listPendingApprovals.mockResolvedValue([])
+    gw.fireReady()
+    await ready
+    await flushPromises()
+
+    gw.getHistory.mockResolvedValueOnce({
+      messages: [withEntry('更旧页消息', 'entry-old')],
+      hasMore: false,
+      nextOffset: null,
+    })
+    await conn.loadMoreHistory()
+
+    expect(chat.messages.map((m) => m.entryId)).toEqual(['entry-old', 'entry-new'])
+  })
+
+  it('外来 run 可见 final 局部插入（#569 路径）与历史同构带 entryId', async () => {
+    const { conn, chat } = setup()
+    const gw = await connect(conn)
+    // 空闲期外来 run 首帧（记入 foreignRunIds）→ 该 run 的 done 携带权威 message → 局部插入
+    gw.fireFrame({ type: 'text', runId: 'foreign-1', delta: '' })
+    gw.fireFrame({
+      type: 'done',
+      runId: 'foreign-1',
+      message: { role: 'assistant', content: [{ type: 'text', text: '外来回复' }], __openclaw: { id: 'entry-f' } },
+    })
+    await flushPromises()
+
+    const inserted = chat.messages.find((m) => m.text === '外来回复')
+    expect(inserted?.entryId).toBe('entry-f')
+  })
+})
+
+// #694 对话回退编排（#682 spec §1.4）：rewind RPC → 放弃在途 run → 全量重拉历史重建 transcript
+// → 草稿指纹守卫 → 回填 composer。失败/断线不改 transcript。
+describe('#694 对话回退编排', () => {
+  setupConnTestEnv()
+
+  const HISTORY = [
+    { role: 'user', text: '第一问', __openclaw: { id: 'entry-1' } },
+    { role: 'assistant', text: '第一答', __openclaw: { id: 'entry-2' } },
+    { role: 'user', text: '第二问', __openclaw: { id: 'entry-3' } },
+    { role: 'assistant', text: '第二答', __openclaw: { id: 'entry-4' } },
+  ]
+
+  // 首连铺底完整历史；返回网关替身（后续按需改写 getHistory 的后续应答）。
+  async function connectWithHistory(conn: ReturnType<typeof useChatConnection>): Promise<InstanceType<typeof MockGatewayChat>> {
+    const ready = conn.openGateway()
+    await flushPromises()
+    const gw = MockGatewayChat.last!
+    gw.listSessions.mockResolvedValue([{ session_key: 'sk-1', title: '', updated_at: '' }])
+    gw.getHistory.mockResolvedValue({ messages: HISTORY, hasMore: false, nextOffset: null })
+    gw.listCommands.mockResolvedValue([])
+    gw.listPendingApprovals.mockResolvedValue([])
+    gw.fireReady()
+    await ready
+    await flushPromises()
+    return gw
+  }
+
+  it('回退成功：RPC 参数 → 全量重拉历史重建 transcript → 被剪消息文本与图片附件回填 composer', async () => {
+    const { conn, chat, status } = setup()
+    const gw = await connectWithHistory(conn)
+    expect(chat.messages).toHaveLength(4) // 铺底：4 条历史
+    chat.setHistoryState(true, 'anchor-x', false) // 假装还有更旧页（验证重建后分页态被重置）
+
+    // 回退到「第一问」之前：网关侧只留前缀（本用例留空 transcript 语义不必要，留 entry-1 前的空集）
+    gw.getHistory.mockResolvedValue({ messages: [], hasMore: false, nextOffset: null })
+    gw.rewind.mockResolvedValue({
+      editorText: '第一问',
+      editorAttachments: [{ mimeType: 'image/png', data: 'AAAA' }],
+    })
+
+    await conn.rewind('entry-1')
+
+    expect(gw.rewind).toHaveBeenCalledWith('sk-1', 'entry-1')
+    expect(gw.getHistory).toHaveBeenCalledTimes(2) // 首连 1 次 + 回退后全量重拉 1 次
+    expect(chat.messages).toHaveLength(0) // transcript 重建为新活跃路径（被剪历史消失）
+    expect(chat.historyHasMore).toBe(false) // 分页态随重建重置（非旧 transcript 的残留锚点）
+    expect(chat.historyAnchor).toBeNull()
+    expect(status.onRewindBackfill).toHaveBeenCalledWith('第一问', [
+      { type: 'image', mimeType: 'image/png', content: 'AAAA' },
+    ])
+  })
+
+  it('无被剪内容（editorText 空 + 无附件）→ 仍按空结果回填（composer 清空语义与官方一致）', async () => {
+    const { conn, status } = setup()
+    const gw = await connectWithHistory(conn)
+    gw.getHistory.mockResolvedValue({ messages: [], hasMore: false, nextOffset: null })
+    gw.rewind.mockResolvedValue({ editorText: '', editorAttachments: [] })
+
+    await conn.rewind('entry-1')
+
+    expect(status.onRewindBackfill).toHaveBeenCalledWith('', [])
+  })
+
+  it('重建期间在途 run 被放弃：其迟到帧不得写入已重建的 transcript', async () => {
+    const { conn, chat } = setup()
+    const gw = await connectWithHistory(conn)
+    // 在途 run（正常 UI 下入口被 busy 门隐藏；此处直调编排验证放弃语义——pickSession 先例）
+    await sendAndAck(conn, chat, gw, 'run-A')
+    gw.fireFrame({ type: 'text', runId: 'run-A', delta: '正在回答' })
+    await flushPromises()
+    const before = chat.messages.length
+
+    gw.getHistory.mockResolvedValue({ messages: [], hasMore: false, nextOffset: null })
+    gw.rewind.mockResolvedValue({ editorText: '第一问', editorAttachments: [] })
+    await conn.rewind('entry-1')
+
+    expect(chat.messages).toHaveLength(0) // 重建后为空活跃路径
+    gw.fireFrame({ type: 'text', runId: 'run-A', delta: '迟到增量' })
+    gw.fireFrame({ type: 'done', runId: 'run-A' })
+    await flushPromises()
+    expect(chat.messages).toHaveLength(0) // 迟到帧被 abandonedRunIds 丢弃，不重建出幽灵消息
+    expect(before).toBeGreaterThan(0) // 前置条件：回退前确有在途消息
+  })
+
+  it('草稿指纹守卫：RPC 期间用户改了草稿 → 跳过回填（新草稿原地保留），transcript 照常回退', async () => {
+    const { conn, chat, status } = setup()
+    const gw = await connectWithHistory(conn)
+    vi.mocked(status.onRewindDraftFingerprint!).mockReturnValueOnce('draft-A').mockReturnValueOnce('draft-B') // RPC 前后草稿变了
+    gw.getHistory.mockResolvedValue({ messages: [], hasMore: false, nextOffset: null })
+    gw.rewind.mockResolvedValue({ editorText: '第一问', editorAttachments: [] })
+
+    await conn.rewind('entry-1')
+
+    expect(status.onRewindBackfill).not.toHaveBeenCalled() // 不覆盖用户新草稿
+    expect(chat.messages).toHaveLength(0) // transcript 回退不受守卫影响
+  })
+
+  it('回退失败：明确错误提示，transcript 不动（不重拉、不重建）', async () => {
+    const { conn, chat, status } = setup()
+    const gw = await connectWithHistory(conn)
+    gw.rewind.mockRejectedValue(new Error('message entry is not on the active path: entry-1'))
+
+    await conn.rewind('entry-1')
+
+    expect(status.onError).toHaveBeenCalledWith('回退失败：message entry is not on the active path: entry-1')
+    expect(gw.getHistory).toHaveBeenCalledTimes(1) // 只有首连那次
+    expect(chat.messages).toHaveLength(4) // 原 transcript 原样
+    expect(status.onRewindBackfill).not.toHaveBeenCalled()
+  })
+
+  it('前置守卫：断线 / 无 entryId / 无会话 → 不发起 RPC（不产生必然失败的请求）', async () => {
+    const { conn, status } = setup()
+    const gw = await connectWithHistory(conn)
+
+    await conn.rewind('') // 无 entryId
+    gw.fireClose(1006) // 断线
+    await flushPromises()
+    await conn.rewind('entry-1')
+
+    expect(gw.rewind).not.toHaveBeenCalled()
+    expect(status.onRewindBackfill).not.toHaveBeenCalled()
+  })
+
+  it('同条目在途去重（不重复发破坏性 RPC）；不同条目不被吞（静默 no-op 比多一次 RPC 更糟）', async () => {
+    const { conn, status } = setup()
+    const gw = await connectWithHistory(conn)
+    const resolvers: Array<(v: { editorText: string; editorAttachments: never[] }) => void> = []
+    gw.rewind.mockImplementation(() => new Promise((r) => { resolvers.push(r) }))
+    gw.getHistory.mockResolvedValue({ messages: [], hasMore: false, nextOffset: null })
+    const fill = { editorText: '第一问', editorAttachments: [] as never[] }
+
+    const first = conn.rewind('entry-1')
+    const dup = conn.rewind('entry-1') // 同一条消息：在途，忽略
+    await flushPromises()
+    expect(gw.rewind).toHaveBeenCalledTimes(1)
+
+    const other = conn.rewind('entry-3') // 另一条消息：用户意图不同 → 照常发起
+    await flushPromises()
+    expect(gw.rewind).toHaveBeenCalledTimes(2)
+    expect(gw.rewind).toHaveBeenLastCalledWith('sk-1', 'entry-3')
+
+    for (const r of resolvers) r(fill)
+    await Promise.all([first, dup, other])
+    expect(status.onError).not.toHaveBeenCalled()
+    expect(gw.rewind).toHaveBeenCalledTimes(2) // 收尾后不再多发
+  })
+
+  it('回退后分页态安全：旧 transcript 的在途分页响应不污染新 transcript', async () => {
+    const { conn, chat } = setup()
+    const gw = await connectWithHistory(conn)
+    chat.setHistoryState(true, 'older', false) // 旧 transcript 仍有更旧页
+    // 在途分页响应挂起（模拟慢网关：回退重建先落地，旧分页后到）
+    const deferred: { resolve?: (v: { messages: unknown[]; hasMore: boolean; nextOffset: string }) => void } = {}
+    gw.getHistory.mockImplementationOnce(() => new Promise((r) => { deferred.resolve = r }))
+    const paging = conn.loadMoreHistory()
+
+    // 回退触发全量重建（getHistory 的后续应答 = 新活跃路径）
+    gw.getHistory.mockResolvedValue({ messages: [HISTORY[0]], hasMore: false, nextOffset: null })
+    gw.rewind.mockResolvedValue({ editorText: '第二问', editorAttachments: [] })
+    await conn.rewind('entry-3')
+    expect(chat.messages.map((m) => m.text)).toEqual(['第一问'])
+
+    // 旧分页响应此刻才到（historyGen 已被重建取代）→ 丢弃，不得 prepend 进新 transcript
+    deferred.resolve?.({ messages: [{ role: 'user', text: '更旧消息' }], hasMore: true, nextOffset: 'older-2' })
+    await paging
+    await flushPromises()
+
+    expect(chat.messages.map((m) => m.text)).toEqual(['第一问'])
+    expect(chat.historyHasMore).toBe(false) // 分页态仍是新 transcript 的（未被旧响应覆写）
   })
 })

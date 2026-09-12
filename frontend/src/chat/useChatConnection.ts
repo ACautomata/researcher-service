@@ -20,7 +20,7 @@ import {
 } from '@/chat/gatewayChat'
 import { splitThinking } from '@/chat/thinking'
 import { extractMessageAttachments, extractMessageText, extractThinking, attachmentToMediaBlock, type MediaBlock } from '@/chat/eventTranslate'
-import type { Attachment } from '@/chat/attachments'
+import { attachmentTypeOf, type Attachment, type RawAttachment } from '@/chat/attachments'
 import { createOutboxStore } from '@/chat/outboxStore'
 import { WS_AUTH_FAIL, WS_MUST_CHANGE_PASSWORD, WS_CONTAINER_ACCESS_DENIED, WS_GATEWAY_UNAVAILABLE } from '@/chat/closeCodes'
 
@@ -39,6 +39,15 @@ export interface ChatStatus {
   // #459-T2 #463 #1：宿主接管的统一发送入口（含附件校验/清空预览条）。提供后 Enter/斜杠发送改走
   // 它（与发送按钮同路径），缺省回退 composable 内 send（纯文本）——Enter 与按钮行为不再分叉。
   onSend?(): void
+  // #694 对话回退的 composer 协同（#682 spec §1.4）：composer 草稿归宿主——文本在 chatStore.input，
+  // 附件是宿主局部态（ChatView.pendingAttachments），composable 读不到整体草稿。故回退编排经这两个
+  // 回调与宿主协作（依赖注入，贴 onSend 先例；不新增接缝）：
+  //   onRewindDraftFingerprint：RPC 前抓草稿指纹（文本 + 附件的水位线），RPC 后比对——期间用户改过
+  //     草稿即跳过回填（新草稿原地保留，transcript 回退照常）。缺省 '' → 恒判「未变」。
+  //   onRewindBackfill：指纹未变时回填——editorText 覆盖式写入 + editorAttachments 并入现有附件。
+  //     缺省回退纯文本（chat.setInput），附件丢弃（无宿主则无附件放置点）。
+  onRewindDraftFingerprint?(): string
+  onRewindBackfill?(text: string, attachments: RawAttachment[]): void
 }
 
 // B4/B5 定时器阈值（同原 ChatView 常量）
@@ -79,6 +88,11 @@ export function useChatConnection(status: ChatStatus) {
 
   // 连接生命周期态（本属连接簇）：意外断线禁用发送、提示重连（codex P2 #4）；onReady/onClose 维护
   const disconnected = ref(false)
+  // #694 会话控制能力（回退/fork/分支菜单入口的渲染门，#682 spec §1.1）：hello-ok 的 features.methods
+  // 快照派生，每次 onReady（首连/自动重连/手动重连）刷新——过渡期存量 7.1 镜像容器判 false，入口整体
+  // 隐藏（不出现点了必然报错的按钮）。未握手期间恒 false（入口不闪一下再消失）。命名对齐 Port 方法
+  // sessionControlAvailable()：同一词汇表，读作「网关支持会话控制吗」。
+  const sessionControlAvailable = ref(false)
 
   // ---- 非响应式连接簇（同宿主：本 composable 闭包）----
   let gateway: GatewayChat | null = null
@@ -774,6 +788,8 @@ export function useChatConnection(status: ChatStatus) {
           status.onConnecting(false)
           disconnected.value = false
           status.onClearError()
+          // #694：会话控制能力跟着本次握手刷新（重连到旧网关也会如实撤销——入口随之隐藏）
+          sessionControlAvailable.value = myGw.sessionControlAvailable()
           // #11（第四轮）：宽限过期标记是 run 语境，重连（新连接生命周期边界）复位——协议机自动重连
           // 走此路径（非 openGateway），不重置会让重连后首个自主 run 被 lateClaim（!pendingSend &&
           // graceExpired）认领进历史 assistant 占位。
@@ -1178,6 +1194,64 @@ export function useChatConnection(status: ChatStatus) {
     void loadHistory(key) // T3：切会话加载该会话历史（loadHistory 内部清空 messages + 维护分页态）
   }
 
+  // 在途回退的 entryId（见 rewind 的同条目去重）——非响应式，UI 不需要它（入口忙碌门只认
+  // streaming/connecting/disconnected，spec §1.5「无需新增状态」）。
+  let rewindInFlight: string | null = null
+
+  // #694 对话回退（#682 spec §1.4）：把该持久化 user 消息（entryId）之后的历史从活跃路径剪除，
+  // 被剪的首条用户消息文本与图片附件回填 composer 供编辑重发（官方同构形态）。
+  // 顺序（每一步都有意为之，不可换位）：
+  //   ① 前置守卫——断线/无会话/无 entryId 直接返回（不发必然失败的请求）；busy 门在 UI 层（入口
+  //      在 streaming/connecting/disconnected 时不渲染，见 ChatMessageItem），本层不重复判定。
+  //   ② RPC 前抓草稿指纹（宿主注入）——水位线语义：RPC 是单次 awaited，期间用户可能继续打字。
+  //   ③ sessions.rewind（失败 → 明确错误提示 + transcript 一字不动，不重拉不重建）。
+  //   ④ 重建管线——放弃在途 run（其迟到 delta/final 不得写入已重建的 transcript：abandonedRunIds
+  //      既有机制消化，pickSession 先例）+ 放弃 resume 等待 + loadHistory 全量重拉。
+  //      #678 循环锚点分页对 reset 天然安全：loadHistory 先 resetForSession（清分页态）再 ++historyGen
+  //      取代在途分页请求——旧 transcript 的迟到分页响应落地即丢。
+  //   ⑤ 草稿指纹守卫——指纹变了（用户在回退等待期间改了草稿/附件）则跳过回填：新草稿原地保留，
+  //      transcript 回退照常完成（官方 docs「your newer draft and attachments stay in place」）。
+  async function rewind(entryId: string): Promise<void> {
+    const key = chat.selectedSession
+    // 同条目在途去重：回退是破坏性 RPC，慢网关下用户可能对**同一条**消息再点一次 —— 第二次忽略
+    // （第一次在途，结果一样），不发重复请求也不弹「重复回退」的假错误。**不同**消息不吞：那是
+    // 另一个用户意图，照常发起（静默 no-op 比多一次 RPC 更糟）。
+    if (rewindInFlight === entryId || !entryId || !key || !gateway || disconnected.value) return
+    const myGw = gateway
+    const gen = containerGen
+    const draft = status.onRewindDraftFingerprint?.() ?? ''
+    rewindInFlight = entryId
+    try {
+      const res = await myGw.rewind(key, entryId).catch((e: unknown) => {
+        // stale 守卫：切容器/重连换实例后旧 RPC 的失败不写进新容器的错误面（对齐 send 的 stale 守卫）；
+        // 切走了也谈不上「transcript 不动」——新语境有自己的投影。
+        if (gateway === myGw && gen === containerGen && chat.selectedSession === key) {
+          status.onError(`回退失败：${(e as Error).message || '未知错误'}`)
+        }
+        return null
+      })
+      if (!res) return
+      if (gateway !== myGw || gen !== containerGen || chat.selectedSession !== key) return // 回退途中切走：丢弃
+      abandonActiveRun()
+      clearResumeWait()
+      await loadHistory(key)
+      if (chat.selectedSession !== key) return // 重建期间又切走：不回填（新会话语境）
+      if ((status.onRewindDraftFingerprint?.() ?? '') !== draft) return // ⑤ 草稿已变：跳过回填
+      // DTO → RawAttachment（与采集层同一形状）：type 经 mime 白名单派生，content = 纯 base64。
+      // 白名单外的 mime（网关异常/新类型）派生 null → 丢弃，不把 render 不出的块塞进预览条。
+      const attachments: RawAttachment[] = []
+      for (const a of res.editorAttachments) {
+        const type = attachmentTypeOf(a.mimeType)
+        if (!type) continue
+        attachments.push({ type, mimeType: a.mimeType, content: a.data })
+      }
+      if (status.onRewindBackfill) status.onRewindBackfill(res.editorText, attachments)
+      else chat.setInput(res.editorText) // 无宿主时的最小回填（纯文本）
+    } finally {
+      rewindInFlight = null
+    }
+  }
+
   // T3 会话历史回看（issue #82 / spec #76）：经协议机 chat.history RPC 渲染历史消息 + 维护分页态。
   // stale 守卫：切会话/容器后迟到的 history 响应按 containerGen + selectedSession 双校验丢弃
   // （同 selectContainer 的 containerGen 套路）。401 由 client 处理；其它失败落 errorMsg。
@@ -1291,7 +1365,19 @@ export function useChatConnection(status: ChatStatus) {
       media,
     }
     if (shouldFoldTrace(msg)) msg.traceFolded = true // T3（#666）：默认折叠
+    // #694：网关条目 id 提取（0 信任 string 门 + 非空）——回退/fork/分支的定位参数。本函数是三条
+    // 历史路径的单一 choke point（loadHistory / loadMoreHistory / 外来 final 局部插入），提取一处
+    // 即三路全覆盖；无 id / 异形 → undefined（该消息不显示任何消息级操作入口）。
+    msg.entryId = extractEntryId(m)
     return msg
+  }
+
+  // #694 网关条目 id（官方 __openclaw.id，Control UI 同源）——非 string / 空串一律 undefined。
+  function extractEntryId(m: HistoryMessageDTO): string | undefined {
+    const meta = (m as { __openclaw?: unknown }).__openclaw
+    if (!meta || typeof meta !== 'object') return undefined
+    const id = (meta as { id?: unknown }).id
+    return typeof id === 'string' && id ? id : undefined
   }
 
   // 从 assistant 消息 content 提取 toolCall 块 → 工具行（done 态）。Q2-1(a)：无条件调用（与流式
@@ -1505,6 +1591,7 @@ export function useChatConnection(status: ChatStatus) {
   return {
     chat,
     disconnected,
+    sessionControlAvailable,
     streaming,
     slashQuery,
     slashMatches,
@@ -1518,6 +1605,7 @@ export function useChatConnection(status: ChatStatus) {
     send,
     newSession,
     pickSession,
+    rewind,
     removeSession,
     resolveApproval,
     loadMoreHistory,

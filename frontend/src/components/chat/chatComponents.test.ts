@@ -2,7 +2,7 @@
 // 覆盖：ChatSidebar 容器/会话渲染 + emits；ChatComposer 输入 v-model + 发送禁用门 + slash-menu slot；
 // ChatMessageItem thinking/tool-line slot 透传 + 光标；ApprovalCard resolve emits + 已解决态；
 // ChatStream 消息流渲染 + 自动滚动（ADR 0014 审批卡撤离时间线；#400 范式 B + rAF 节流）。
-import { describe, expect, it, vi, afterEach } from 'vitest'
+import { describe, expect, it, vi, afterEach, beforeEach } from 'vitest'
 import { mount } from '@vue/test-utils'
 import { nextTick, reactive } from 'vue'
 import { newMsg, type ApprovalItem, type Msg } from '@/stores/chat'
@@ -1155,5 +1155,194 @@ describe('ChatStream 锚点导航接线（issue #669）', () => {
     await w.setProps({ messages: [] })
     await nextTick()
     expect(w.find('[data-test="anchor-rail"]').exists()).toBe(false)
+  })
+})
+
+// #694 回退入口与确认 popover（#682 spec §1.5 / §685 官方形态还原）：入口只对「已持久化的 user
+// 消息」渲染（有网关条目 id），agent 工作中 / 会话控制不可用时整体隐藏；确认 popover 含取消与
+// 「不再询问」，勾选后偏好落 localStorage（官方同 key），下次直接执行不再询问。
+describe('#694 回退入口与确认 popover', () => {
+  const userWithEntry = (text = '第一问') => {
+    const m = newMsg('user', text)
+    m.entryId = 'entry-1'
+    return m
+  }
+
+  beforeEach(() => {
+    localStorage.clear()
+  })
+
+  // 挂载助手：rewindAvailable 缺省 false（能力门 fail-closed）——本组用例默认显式开门，
+  // 门本身的行为由下方专门用例断言。attachTo 才挂进文档（jsdom 的 focus/几何都需要元素在文档里）。
+  const mountItem = (msg: Msg, props: Record<string, unknown> = {}, attachTo?: HTMLElement) =>
+    mount(ChatMessageItem, {
+      props: { msg, rewindAvailable: true, ...props },
+      ...(attachTo ? { attachTo } : {}),
+    })
+
+  it('已持久化 user 消息（有 entryId）→ hover 操作条渲染「回退」入口', () => {
+    const w = mountItem(userWithEntry())
+    expect(w.find('[data-test="msg-actions"]').exists()).toBe(true)
+    expect(w.get('[data-test="rewind"]').text()).toBe('回退')
+    expect(w.get('[data-test="rewind"]').attributes('aria-label')).toBe('Rewind') // aria 保持英文
+  })
+
+  it('无 entryId（本地乐观 echo / 异常形状）→ 不渲染任何消息级操作入口', () => {
+    const w = mountItem(newMsg('user', '刚发出还没落库'))
+    expect(w.find('[data-test="msg-actions"]').exists()).toBe(false)
+  })
+
+  it('assistant 消息即使有 entryId 也无回退入口（回退只针对用户消息）', () => {
+    const m = newMsg('assistant', '回答')
+    m.streaming = false
+    m.entryId = 'entry-2'
+    const w = mountItem(m)
+    expect(w.find('[data-test="msg-actions"]').exists()).toBe(false)
+  })
+
+  it('agent 工作中 / 会话控制不可用（rewindAvailable=false）→ 入口整体隐藏（非禁用态）', () => {
+    const w = mountItem(userWithEntry(), { rewindAvailable: false })
+    expect(w.find('[data-test="rewind"]').exists()).toBe(false)
+  })
+
+  it('未传 rewindAvailable（宿主没开门）→ 入口隐藏（fail-closed）', () => {
+    const w = mount(ChatMessageItem, { props: { msg: userWithEntry() } })
+    expect(w.find('[data-test="msg-actions"]').exists()).toBe(false)
+  })
+
+  it('首次点击 → 出确认 popover（危险色确认 + 取消 + 不再询问），此时不触发回退', async () => {
+    const w = mountItem(userWithEntry())
+    await w.get('[data-test="rewind"]').trigger('click')
+    expect(w.find('[data-test="rewind-confirm"]').exists()).toBe(true)
+    expect(w.get('[data-test="rewind-confirm"]').text()).toContain('不再询问')
+    expect(w.get('[data-test="rewind-confirm"]').text()).toContain('剪除') // 确认文案说明后果（破坏性动作）
+    expect(w.get('[data-test="rewind-cancel"]').text()).toBe('取消')
+    expect(w.get('[data-test="rewind-confirm-yes"]').classes()).toContain('danger')
+    expect(w.emitted('rewind')).toBeFalsy() // 未确认不发动作
+  })
+
+  it('焦点：打开即交给确认按钮，关闭后归还触发按钮（键盘可达，非只鼠标可用）', async () => {
+    const w = mountItem(userWithEntry(), {}, document.body)
+    const trigger = w.get('[data-test="rewind"]').element as HTMLButtonElement
+    await w.get('[data-test="rewind"]').trigger('click')
+    expect(document.activeElement).toBe(w.get('[data-test="rewind-confirm-yes"]').element)
+    await w.get('[data-test="rewind-cancel"]').trigger('click')
+    await nextTick()
+    expect(document.activeElement).toBe(trigger)
+    w.unmount()
+  })
+
+  it('确认 → emit rewind（不记住偏好时下次仍询问）', async () => {
+    const w = mountItem(userWithEntry())
+    await w.get('[data-test="rewind"]').trigger('click')
+    await w.get('[data-test="rewind-confirm-yes"]').trigger('click')
+    expect(w.emitted('rewind')).toHaveLength(1)
+    expect(w.find('[data-test="rewind-confirm"]').exists()).toBe(false)
+    expect(localStorage.getItem('openclaw:skip-rewind-confirm')).toBeNull() // 未勾选不落盘
+  })
+
+  it('取消 → 关闭且不 emit（用户可安全退出）', async () => {
+    const w = mountItem(userWithEntry())
+    await w.get('[data-test="rewind"]').trigger('click')
+    await w.get('[data-test="rewind-cancel"]').trigger('click')
+    expect(w.find('[data-test="rewind-confirm"]').exists()).toBe(false)
+    expect(w.emitted('rewind')).toBeFalsy()
+  })
+
+  it('Escape 关闭确认 popover（官方同款关闭路径），不触发回退', async () => {
+    const w = mountItem(userWithEntry())
+    await w.get('[data-test="rewind"]').trigger('click')
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
+    await nextTick()
+    expect(w.find('[data-test="rewind-confirm"]').exists()).toBe(false)
+    expect(w.emitted('rewind')).toBeFalsy()
+  })
+
+  it('点击 popover 外部关闭（不误触发回退）', async () => {
+    const w = mountItem(userWithEntry())
+    await w.get('[data-test="rewind"]').trigger('click')
+    document.body.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))
+    await nextTick()
+    expect(w.find('[data-test="rewind-confirm"]').exists()).toBe(false)
+    expect(w.emitted('rewind')).toBeFalsy()
+  })
+
+  it('再点入口 → 收起 popover（官方 toggle 语义；不是「关掉又被重新打开」）', async () => {
+    const w = mountItem(userWithEntry(), {}, document.body)
+    await w.get('[data-test="rewind"]').trigger('click')
+    expect(w.find('[data-test="rewind-confirm"]').exists()).toBe(true)
+    // 真实交互序：按下（mousedown）→ 抬起（click）都落在触发按钮上
+    const btn = w.get('[data-test="rewind"]')
+    btn.element.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))
+    await btn.trigger('click')
+    expect(w.find('[data-test="rewind-confirm"]').exists()).toBe(false)
+    expect(w.emitted('rewind')).toBeFalsy()
+    w.unmount()
+  })
+
+  it('放置：默认上翻；上方放不下（消息贴近滚动容器顶缘）→ 翻到下方（否则确认按钮被 overflow 裁掉不可点）', async () => {
+    // 挂到文档 + 伪造几何：jsdom 无布局，getBoundingClientRect 恒 0——直接 stub 滚动宿主的 top 与按钮 top。
+    const mountWithRoomAbove = async (roomAbove: number) => {
+      const w = mountItem(userWithEntry(), {}, document.body)
+      const host = w.element.parentElement as HTMLElement // 外层容器：注入滚动语义
+      host.style.overflowY = 'auto'
+      host.getBoundingClientRect = () => ({ top: 0 }) as DOMRect
+      const btn = w.get('[data-test="rewind"]').element as HTMLElement
+      btn.getBoundingClientRect = () => ({ top: roomAbove }) as DOMRect
+      await w.get('[data-test="rewind"]').trigger('click')
+      const cls = w.get('[data-test="rewind-confirm"]').classes()
+      w.unmount()
+      return cls
+    }
+
+    expect(await mountWithRoomAbove(200)).toContain('above')
+    expect(await mountWithRoomAbove(2)).toContain('below')
+  })
+
+  it('勾选「不再询问」并确认 → 偏好落盘（官方 key）+ 本次回退照常发出', async () => {
+    const w = mountItem(userWithEntry())
+    await w.get('[data-test="rewind"]').trigger('click')
+    await w.get('[data-test="rewind-remember"]').setValue(true)
+    await w.get('[data-test="rewind-confirm-yes"]').trigger('click')
+    expect(w.emitted('rewind')).toHaveLength(1)
+    expect(localStorage.getItem('openclaw:skip-rewind-confirm')).toBe('1')
+  })
+
+  it('已记住偏好 → 点击直接回退，不再弹确认', async () => {
+    localStorage.setItem('openclaw:skip-rewind-confirm', '1')
+    const w = mountItem(userWithEntry())
+    await w.get('[data-test="rewind"]').trigger('click')
+    expect(w.find('[data-test="rewind-confirm"]').exists()).toBe(false)
+    expect(w.emitted('rewind')).toHaveLength(1)
+  })
+
+  it('存储不可用（隐私模式）→ 静默退化为每次确认（不崩）', async () => {
+    const orig = Object.getOwnPropertyDescriptor(globalThis, 'localStorage')
+    Object.defineProperty(globalThis, 'localStorage', {
+      configurable: true,
+      get() {
+        throw new Error('SecurityError')
+      },
+    })
+    try {
+      const w = mountItem(userWithEntry())
+      await w.get('[data-test="rewind"]').trigger('click')
+      expect(w.find('[data-test="rewind-confirm"]').exists()).toBe(true)
+      await w.get('[data-test="rewind-remember"]').setValue(true)
+      await w.get('[data-test="rewind-confirm-yes"]').trigger('click')
+      expect(w.emitted('rewind')).toHaveLength(1)
+    } finally {
+      if (orig) Object.defineProperty(globalThis, 'localStorage', orig)
+    }
+  })
+
+  it('ChatStream 转发 rewind（携带所属消息，父层据此取 entryId）', async () => {
+    const msg = userWithEntry()
+    const w = mount(ChatStream, {
+      props: { messages: [msg], historyHasMore: false, historyLoading: false, rewindAvailable: true },
+    })
+    await w.get('[data-test="rewind"]').trigger('click')
+    await w.get('[data-test="rewind-confirm-yes"]').trigger('click')
+    expect(w.emitted('rewind')?.[0]).toEqual([msg])
   })
 })

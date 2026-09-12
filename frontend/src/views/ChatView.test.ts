@@ -36,6 +36,8 @@ const { MockGatewayChat } = vi.hoisted(() => {
     deleteSession = vi.fn()
     getHistory = vi.fn()
     send = vi.fn()
+    rewind = vi.fn() // #694 对话回退（sessions.rewind）
+    sessionControlAvailable = vi.fn(() => true) // #694 会话控制能力（默认 9.4+ 网关可用）
     listCommands = vi.fn()
     resolveApproval = vi.fn()
     listPendingApprovals = vi.fn() // B0: 审批补拉（切页/断线恢复）
@@ -2334,5 +2336,96 @@ describe('ChatView', () => {
     await w.find('[data-test="new-session"]').trigger('click')
     await flushPromises()
     expect(w.find('[data-test="stream"] [data-test="anchor-rail"]').exists()).toBe(false)
+  })
+
+  // ---- #694 对话回退端到端（view 接线：入口渲染门 / 草稿指纹 / 回填 composer + 预览条）----
+  describe('#694 对话回退接线', () => {
+    const HISTORY_WITH_ENTRY = [
+      { role: 'user', text: '第一问', __openclaw: { id: 'entry-1' } },
+      { role: 'assistant', text: '第一答', __openclaw: { id: 'entry-2' } },
+    ]
+
+    // 首连即带一条已持久化 user 消息（有 entryId）的会话历史。
+    async function mountWithHistory() {
+      const w = mount(ChatView)
+      await flushPromises()
+      const gw = MockGatewayChat.last!
+      gw.listSessions.mockResolvedValue([SESSION])
+      gw.getHistory.mockResolvedValue({ messages: HISTORY_WITH_ENTRY, hasMore: false, nextOffset: null })
+      gw.listCommands.mockResolvedValue([])
+      gw.listPendingApprovals.mockResolvedValue([])
+      gw.send.mockResolvedValue(undefined) // 「agent 工作中」用例要真的发一条（未 stub 会 unhandled rejection）
+      gw.fireReady()
+      await flushPromises()
+      return { w, gw }
+    }
+
+    it('入口渲染门：网关支持会话控制时渲染；不支持（存量旧镜像）时整体隐藏', async () => {
+      const { w, gw } = await mountWithHistory()
+      expect(w.find('[data-test="rewind"]').exists()).toBe(true)
+      // 重连到不支持会话控制的旧网关（capability 撤销）→ 入口消失（不出现必然报错的按钮）
+      gw.sessionControlAvailable.mockReturnValue(false)
+      gw.fireReady()
+      await flushPromises()
+      expect(w.find('[data-test="rewind"]').exists()).toBe(false)
+    })
+
+    it('agent 工作中（流式）→ 入口隐藏', async () => {
+      const { w } = await mountWithHistory()
+      await w.find('[data-test="input"]').setValue('新问题')
+      await w.find('[data-test="send"]').trigger('click')
+      await nextTick()
+      expect(w.find('[data-test="rewind"]').exists()).toBe(false) // 占位已入流 → streaming
+    })
+
+    it('确认回退 → sessions.rewind + transcript 重建 + 被剪文本与图片附件回填 composer', async () => {
+      const { w, gw } = await mountWithHistory()
+      gw.rewind.mockResolvedValue({
+        editorText: '第一问',
+        editorAttachments: [{ mimeType: 'image/png', data: 'AAAA' }],
+      })
+      // 回退后全量重拉 = 新活跃路径（该消息之前为空）
+      gw.getHistory.mockResolvedValue({ messages: [], hasMore: false, nextOffset: null })
+
+      await w.find('[data-test="rewind"]').trigger('click')
+      await w.find('[data-test="rewind-confirm-yes"]').trigger('click')
+      await flushPromises()
+
+      expect(gw.rewind).toHaveBeenCalledWith('sk-1', 'entry-1')
+      expect(w.find('[data-test="stream"]').text()).not.toContain('第一问') // 被剪历史消失
+      expect((w.find('[data-test="input"]').element as HTMLTextAreaElement).value).toBe('第一问') // 文本回填
+      expect(w.find('[data-test="preview-strip"]').exists()).toBe(true) // 图片附件一并回填
+      expect(w.findAll('[data-test="preview-item"]').length).toBe(1)
+    })
+
+    it('回退等待期间改动草稿 → 跳过回填（新草稿原地保留），transcript 回退照常完成', async () => {
+      const { w, gw } = await mountWithHistory()
+      const deferred: { resolve?: (v: { editorText: string; editorAttachments: never[] }) => void } = {}
+      gw.rewind.mockImplementation(() => new Promise((r) => { deferred.resolve = r }))
+      gw.getHistory.mockResolvedValue({ messages: [], hasMore: false, nextOffset: null })
+
+      await w.find('[data-test="rewind"]').trigger('click')
+      await w.find('[data-test="rewind-confirm-yes"]').trigger('click')
+      await flushPromises()
+      // RPC 在途期间用户继续打字（草稿指纹改变）
+      await w.find('[data-test="input"]').setValue('我改主意了')
+      deferred.resolve?.({ editorText: '第一问', editorAttachments: [] })
+      await flushPromises()
+
+      expect((w.find('[data-test="input"]').element as HTMLTextAreaElement).value).toBe('我改主意了')
+      expect(w.find('[data-test="stream"]').text()).not.toContain('第一问') // transcript 照常回退
+    })
+
+    it('回退失败 → 明确错误提示，transcript 不动', async () => {
+      const { w, gw } = await mountWithHistory()
+      gw.rewind.mockRejectedValue(new Error('Rewind is unavailable while the agent is working.'))
+
+      await w.find('[data-test="rewind"]').trigger('click')
+      await w.find('[data-test="rewind-confirm-yes"]').trigger('click')
+      await flushPromises()
+
+      expect(w.find('[data-test="error-bar"]').text()).toContain('回退失败')
+      expect(w.find('[data-test="stream"]').text()).toContain('第一问') // 原历史原样
+    })
   })
 })
