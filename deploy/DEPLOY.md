@@ -105,8 +105,11 @@ python3 -c "import base64,os;print(base64.urlsafe_b64encode(os.urandom(32)).deco
 镜像内——构建期 COPY 的 researcher home 模板）· `OPENCLAW_TEMPLATE_JSON`（compose 固定
 `/app/deploy/openclaw.json`，镜像内——构建期 COPY 的 `deploy/openclaw.json`）·
 `OPENCLAW_FLEET_ROOT`（compose 固定 `/fleet`，server 容器内工作目录，无宿主挂载）·
-`DATABASE_URL`（compose 固定 `file:/app/db/db.sqlite3`，指向 panel-db 卷）· `OPENCLAW_IMAGE`
-（缺省 = 派生镜像钉版本 tag；**生产浮动 tag（无 tag 或 `:latest`）→ fail-fast**，#695）。
+`DATABASE_URL`（compose 固定 `file:/app/db/db.sqlite3`，指向 panel-db 卷）。
+
+> **`OPENCLAW_IMAGE` 不在上列**：它有缺省值（= 派生镜像钉版本 tag），缺省并不拒启动——但
+> **生产浮动 tag（无 tag 或 `:latest`）→ 启动 fail-fast**（#695，准据 `server/src/config.ts` 的
+> `readFleetImage`；与 `server/README.md` 同处置）。
 
 > 说明：`OPENCLAW_TEMPLATE_DIR` / `OPENCLAW_TEMPLATE_JSON` 都指向 **server 镜像内**路径（ADR 0013
 > `#593` 模板入镜像）。镜像内默认路径 `<cwd>/../deploy/openclaw.json` 解析到 `/app/../deploy`
@@ -170,7 +173,7 @@ docker compose -f docker-compose.deploy.yml --env-file .env up -d
 
 > 面板 fleet 的目标镜像不随部署自动切换：它钉在 server 镜像内的 `config.ts` 默认值（= 派生镜像
 > 版本 tag，issue #695）。存量容器何时/如何换到新目标由容器升级编排决定（#682 epic），生产禁浮动
-> tag 的 fail-fast 见上方「运行时 server 必需 env」。
+> tag 的 fail-fast 见上方「运行时 server 必需 env」的 `OPENCLAW_IMAGE` 说明。
 
 ## 排障
 

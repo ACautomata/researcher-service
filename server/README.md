@@ -54,8 +54,8 @@ src/
     dockerRuntime.ts     DockerRuntime（dockerode，真 daemon 接触面）
     ports.ts             PortAllocator（最小空闲端口）
     values.ts            FleetConfig + HEALTH_* 枚举
+    imageRef.ts          镜像引用钉版判定（isFloatingImageRef / imageTag 纯知识；#695）
     configRenderer.ts    openclaw.json 渲染（强制 port/bind/token 占位安全不变量）
-    configStore.ts       config 原子写（tmp + chmod 0644 + rename）
     provisioner.ts       HomeProvisioner（cp -a 模板预填充 home）
     leaseMap.ts          NameLeaseMap 进程内互斥（不依赖 Redis，防双创建/双删除）
     lifecycleQueue.ts    LifecycleQueue Port + InlineLifecycleQueue + NameSerializer（按 name 串行）
