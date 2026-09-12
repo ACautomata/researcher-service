@@ -22,9 +22,10 @@
   （`deploy/docker-compose.yml`）、dev 管线 driver 预拉的默认镜像
   （`.claude/skills/run-ai-research-pipeline/driver.sh`）、测试内的版本常量 `PINNED_TAG`；
   CD 也从该行提取版本并推送派生镜像版本 tag。**文档里的版本属示意值**（不在锁内，换版时须一并同步：
-  本文档、根 `README.md` 环境表、`CONTEXT.md`、`docs/adr/0003` 的更新块、两份 `.env.example`）。
-  测试夹具（`config.test.ts` 的样本引用、两个 smoke 的缺省常量）与 CD 注释里的版本形态示例是
-  **历史快照 / 示例**，不随 bump 改。
+  本文档、根 `README.md` 环境表、`CONTEXT.md`、`docs/adr/` 里含版本正文的 0003（更新块 + 决定句）与
+  0013（派生镜像描述）、两份 `.env.example`）。测试夹具（`config.test.ts` / `tunnel*.test.ts` 的样本
+  引用、两个 smoke 的缺省常量）与其它**历史快照**（CD 注释里的版本形态示例、`docs/research/` 与代码 /
+  ADR 注释里带日期的一次性实测记录）不随 bump 改。
 - **版本 tag 一经发布不可移动**：`ghcr.io/acautomata/researcher-service/openclaw:<基线 tag>`
   （当前 `2026.9.4-browser`）发布后内容冻结，**不得原地覆盖同名 tag**。容器升级编排的检测判定是
   「容器记录镜像 ≠ 当前目标」，移动 tag 会让历史容器与目标的关系不可复现；回滚走 `:<CI head_sha>`。
