@@ -27,9 +27,10 @@
 - **版本 tag 一经发布不可移动**：`ghcr.io/acautomata/researcher-service/openclaw:<基线 tag>`
   （当前 `2026.9.4-browser`）发布后内容冻结，**不得原地覆盖同名 tag**。容器升级编排的检测判定是
   「容器记录镜像 ≠ 当前目标」，移动 tag 会让历史容器与目标的关系不可复现；回滚走 `:<CI head_sha>`。
-  bump 路径 = **基线换版**：改 Dockerfile `FROM` 行 → 版本 tag 自然前进，随之同步 config 默认值与
-  模板栈 compose 默认值（两处均有静态断言兜底）。**只换叠加层而基线不变**时，当前单源约定无 tag
-  可表达——不要覆盖旧 tag，须另立决策（把版本单源改成独立常量，属后续演进）。
+  bump 路径 = **基线换版**：改 Dockerfile `FROM` 行 → 版本 tag 自然前进，随之同步**四处**运行期明文
+  （config 默认值 / 模板栈 compose / dev driver / 测试常量 `PINNED_TAG`，四处均有静态断言兜底）。
+  **只换叠加层而基线不变**时，当前单源约定无 tag 可表达——不要覆盖旧 tag，须另立决策（把版本单源
+  改成独立常量，属后续演进）。
 - **CD 推三个 tag**：`:<基线 tag>`（钉版 = fleet 目标）+ `:latest` + `:<CI head_sha>`；版本号以
   `grep` 从 Dockerfile `FROM` 行提取（单源，不引入第二配置源）。部署段显式重拉的就是版本 tag
   （宿主 daemon 缓存与 fleet 目标同源）。
