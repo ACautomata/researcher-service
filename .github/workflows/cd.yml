@@ -78,7 +78,9 @@ jobs:
         # （server/src/config.ts OPENCLAW_IMAGE 默认值）与模板栈 compose 默认值
         # （deploy/docker-compose.yml）与之同版本（openclawImage.test.ts 交叉断言锁死运行期明文），
         # CD 一并推该版本 tag——升级编排按版本 tag 判定目标、回滚仍走 :<sha>。
-        # 不引入第二配置源（build-arg / 常量）：版本 bump 只改 Dockerfile 一行。
+        # 不引入第二配置源（build-arg / 常量）：版本的**提取源**只有 Dockerfile 一行。（bump 本身
+        # 不止改一行——还须同步 config 默认值 / 模板栈 compose / dev driver / 测试常量四处运行期明文，
+        # 见 deploy/README.md「派生镜像版本 tag 约定」，由 openclawImage.test.ts 交叉断言锁死。）
         # 提取失败（缺 FROM 行 / 无 tag / digest 行）即 fail：绝不推空 tag 或 sha 当版本。
         run: |
           FROM_REF="$(grep -m1 -E '^[[:space:]]*FROM[[:space:]]' deploy/openclaw-image/Dockerfile | awk '{print $2}')"

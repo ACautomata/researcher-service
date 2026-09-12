@@ -53,14 +53,16 @@
   - **拆 ticket 后续回写**（避免本 PR 膨胀）：工具翻译重构、approval card 字段路径、resolve 方法名/params、`APPROVAL_RESOLVED_EVENTS` 补 exec —— 每项一个 TDD fix。
 - **browser 免 SYS_ADMIN**：官方 browser 变体用 Playwright + Xvfb + `noSandbox`，hardened compose 已 drop `NET_RAW`/`NET_ADMIN`，**不需要 `SYS_ADMIN` cap**（与 fork 的 caps 设计无关，是独立利好）。
 - **`2026.7.1-browser` 重验（2026-08-01, CI integration job, 真容器）**：上游删除 `2026.6.34-browser` 后全仓升级到 `2026.7.1-browser`（PR #299 `6be88d0`）。CI integration 三 job 全绿——**wire schema 校准在 7.1 上无漂移**：T1-T5（`chat.send` 事件流 / 只读 RPC / approval 路径）、`event_translate` 的 `deltaText`/`state:final`/工具帧、`request_router` 的 `exec.approval.resolve` 方法名、`pairing_ws` 嵌套错误码均仍通过，无需修改任何校准代码。7.1 与 6.34 同属 wire 协议族（`PROTOCOL=4`），本 ADR 的 spike 实测结论（token 占位 / SecretRef / 配对 / 工具事件结构）对 7.1 继续成立。
-- **`2026.9.4-browser` 重验（2026-09-12, 本机门控 smoke + 派生镜像本地构建, 真容器）**：官方 9.4 基线上
-  `containers-smoke`（5/5）与 `pairingSmoke`（3/3）全绿——配对闭环（bootstrap → `PAIRING_REQUIRED` →
+- **`2026.9.4-browser` 重验（2026-09-12, 本机门控 smoke + 派生镜像本地构建, 真容器）**：两套 smoke 的
+  缺省常量仍 pin `2026.7.1-browser`（见下「未重验面」），故本次**显式**设
+  `OPENCLAW_IMAGE=ghcr.io/openclaw/openclaw:2026.9.4-browser` 覆盖后再跑——9.4 基线上
+  `containers-smoke`（5/5）与 `pairingSmoke`（3/3）全绿：配对闭环（bootstrap → `PAIRING_REQUIRED` →
   approve → deviceToken 直连）与既有 wire 行为无漂移；派生镜像（`deploy/openclaw-image/`，`FROM` 已
   bump 至 9.4，issue #695）在该基线上构建通过全部构建期断言（`pdftotext` 可用 + 12 个骨架文件齐全）。
   **未重验面（如实记录）**：CI `server` job 的两个 smoke 仍 pin `2026.7.1-browser`
   （`.github/workflows/ci.yml` 的 `OPENCLAW_IMAGE`，注释理由：CI 阶段派生镜像尚不存在、smoke 测编排
-  逻辑，官方/派生镜像等价；本地 `containers-smoke`/`pairingSmoke` 的缺省常量同源），故「wire schema
-  校准在 9.4 上无漂移」尚未由 CI 确认——切换该 pin 属 epic #682 的后续范围，不在 #695 内。
+  逻辑，官方/派生镜像等价；本地缺省常量同源），故「wire schema 校准在 9.4 上无漂移」尚未由 CI
+  确认——切换该 pin 属 epic #682 的后续范围，不在 #695 内。
 - **历史实测文档须重验**：R6（挂载契约）、`r26`（ws 协议/operator scope 来自配对）、`r28`（热加载不重启）均基于 fork + init.sh，迁移后须在新镜像上重新验证回填。
 - **配置小坑**：`openclaw.json:33` `browser.executablePath:"/usr/bin/chromium"` 需对齐 Playwright 路径（`/home/node/.cache/ms-playwright`）或删除让其自解析。
 - 本 ADR 与 [0001-persistent-credential-encryption](./0001-persistent-credential-encryption.md) 相关：LLM key 注入方式若从 SecretRef 改为 auth-profiles，必须守住 0001 的"凭证不落明文"不变量（经 env/SecretRef 读，不写盘）。
