@@ -314,6 +314,18 @@ describe('DockerRuntime.runOnce（#696 一次性临时容器）', () => {
   })
 })
 
+// docker 多路复用帧编码（非 TTY 日志形状：8 字节头 [stream,0,0,0,size_be32] + 负载）。按字节构造：
+// 多字节用例要把同一字符拆到相邻两帧，故文本便捷版也走这一实现（单一构造点）。
+function frameBytes(stream: number, payload: Buffer): Buffer {
+  const head = Buffer.alloc(8)
+  head[0] = stream // 1=stdout 2=stderr
+  head.writeUInt32BE(payload.length, 4)
+  return Buffer.concat([head, payload])
+}
+function frame(stream: number, text: string): Buffer {
+  return frameBytes(stream, Buffer.from(text, 'utf8'))
+}
+
 // 一次性临时容器的 mock client：createContainer 返回可编程 container（start/wait/logs/remove）。
 // logs 返回 docker 多路复用帧（非 TTY 容器形状：8 字节头 [stream,0,0,0,size_be32] + 负载）。
 function mockOneShotClient(opts: {
@@ -326,13 +338,6 @@ function mockOneShotClient(opts: {
   rawLogs?: Buffer // 覆盖帧编码（测非帧/异常形状）
 }): { docker: Docker; calls: { started: boolean; removed: boolean; removeOpts: unknown; createOpts: unknown } } {
   const calls = { started: false, removed: false, removeOpts: undefined as unknown, createOpts: undefined as unknown }
-  const frame = (stream: number, text: string): Buffer => {
-    const payload = Buffer.from(text, 'utf8')
-    const head = Buffer.alloc(8)
-    head[0] = stream // 1=stdout 2=stderr
-    head.writeUInt32BE(payload.length, 4)
-    return Buffer.concat([head, payload])
-  }
   const logs =
     opts.rawLogs ??
     Buffer.concat([
@@ -419,19 +424,10 @@ describe('DockerRuntime.runOnce 退出码与清理（#696）', () => {
 
   it('多字节字符被拆到相邻两帧 → 整体解码，不裂成替换符', async () => {
     // 「报」的 UTF-8 是 3 字节 E6 8A A5——故意拆成一帧 1 字节 + 一帧 2 字节（docker 按写系统调用切帧）
-    const head = (stream: number, size: number): Buffer => {
-      const h = Buffer.alloc(8)
-      h[0] = stream
-      h.writeUInt32BE(size, 4)
-      return h
-    }
     const raw = Buffer.concat([
-      head(1, 1),
-      Buffer.from([0xe6]),
-      head(1, 2),
-      Buffer.from([0x8a, 0xa5]),
-      head(1, 1),
-      Buffer.from('\n'),
+      frameBytes(1, Buffer.from([0xe6])),
+      frameBytes(1, Buffer.from([0x8a, 0xa5])),
+      frameBytes(1, Buffer.from('\n')),
     ])
     const { docker } = mockOneShotClient({ rawLogs: raw })
     const rt = new DockerRuntime(() => docker)

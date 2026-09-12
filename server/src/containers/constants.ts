@@ -24,6 +24,10 @@ export const LABEL_ONESHOT_VALUE = 'true'
 // 容器内固定 bind-mount 路径（#591：仅 home 目录 rw bind 承载 workspace/wiki/state/logs；
 // openclaw.json 落 home 内默认路径 ~/.openclaw/openclaw.json——静态 config，无独立 config bind）
 export const HOME_BIND = '/home/node/.openclaw'
+// 三卷在容器内的挂载点（#590 拓扑）：挂载布局是共享内核纯知识——真容器 buildRunOptions 与
+// files 域树根（FILE_ROOTS）都从这里取，防路径字面量多处手写漂移；home 卷直接挂 HOME_BIND。
+export const MOUNT_WIKI = `${HOME_BIND}/wiki/main`
+export const MOUNT_WORKSPACE = `${HOME_BIND}/workspace`
 // gateway 网络绑定模式（容器内 gateway 绑 lan，宿主侧靠 Docker 端口映射隔离）
 export const GATEWAY_BIND = 'lan'
 // env 占位：真 token 绝不落盘 JSON，保留 ${GATEWAY_TOKEN} 由 gateway 进程运行时插值

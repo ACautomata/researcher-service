@@ -206,6 +206,12 @@ describe('containers 集成 smoke（真 docker daemon）', () => {
     // ① 跑动期间不可见：后台起一个短睡临时容器（不 await），轮询 daemon 上的标记容器作为「真起过」
     //    的事实源；一旦观察到，fleet 列表（app=openclaw-fleet 过滤）此刻不得含它，且它无端口发布。
     const running = runtime.runOnce({ image: IMAGE, cmd: ['sh', '-c', 'sleep 4'] })
+    // 起手即挂 rejection 处理：runOnce 若在下方最长 30s 的轮询窗口里早失败（如镜像拉取失败），
+    // 不能让 unhandled rejection 冒出来掩盖真实原因——它的结局在本用例末尾统一断言。
+    const runOutcome = running.then(
+      (r) => ({ ok: true as const, output: r.output }),
+      (e: unknown) => ({ ok: false as const, error: e }),
+    )
     let observed: Docker.ContainerInfo | null = null
     const deadline = Date.now() + 30_000
     while (observed === null && Date.now() < deadline) {
@@ -221,8 +227,10 @@ describe('containers 集成 smoke（真 docker daemon）', () => {
         await new Promise((r) => setTimeout(r, 100))
       }
     }
+    const outcome = await runOutcome // runOnce 已在轮询期间跑完：失败就把真实原因抛出来
+    if (!outcome.ok) throw outcome.error
     expect(observed).not.toBeNull() // 临时容器真在 daemon 上起过（非「没跑起来所以看不到」）
-    await expect(running).resolves.toEqual({ output: '' })
+    expect(outcome.output).toBe('') // `sleep 4` 无输出
 
     // ② 退出码 0：收 stdout+stderr 合并输出
     const ok = await runtime.runOnce({ image: IMAGE, cmd: ['sh', '-c', 'echo oneshot-ok; echo oneshot-err >&2'] })

@@ -13,6 +13,8 @@ import {
   LABEL_ONESHOT_KEY,
   LABEL_ONESHOT_VALUE,
   LABEL_PORT_KEY,
+  MOUNT_WIKI,
+  MOUNT_WORKSPACE,
 } from './constants'
 import {
   containerName,
@@ -69,7 +71,7 @@ function volumeMount(source: string, target: string, readOnly = false): Docker.M
 // [stream(1=stdout/2=stderr),0,0,0,size_be32] + 负载；先收齐各帧负载再整体解码（跨帧切开的多字节
 // 字符不裂成替换符），stdout/stderr 合并成诊断文本。首个帧头即无效（daemon 直返原文）→ 原样返回；
 // 空帧/残缺帧视为帧流结束，已收齐的帧照常返回——绝不因解析错位把整段日志吞掉。
-export function demuxLogFrames(raw: Buffer): string {
+function demuxLogFrames(raw: Buffer): string {
   const payloads: Buffer[] = []
   let off = 0
   while (off + 8 <= raw.length) {
@@ -110,8 +112,8 @@ export class DockerRuntime implements ContainerRuntime {
     // （#591：openclaw.json 落 ~/.openclaw/ 默认路径，静态 config）。
     const mounts: Docker.MountSettings[] | undefined = spec.volumes
       ? [
-          volumeMount(spec.volumes.wiki, `${HOME_BIND}/wiki/main`),
-          volumeMount(spec.volumes.workspace, `${HOME_BIND}/workspace`),
+          volumeMount(spec.volumes.wiki, MOUNT_WIKI),
+          volumeMount(spec.volumes.workspace, MOUNT_WORKSPACE),
           volumeMount(spec.volumes.home, HOME_BIND),
         ]
       : undefined

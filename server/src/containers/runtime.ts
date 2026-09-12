@@ -64,7 +64,8 @@ export interface ContainerInfo {
 
 // 一次性临时容器的 named volume 挂载（#696）：doctor 挂真容器三卷（同布局）；备份挂 home 卷 + 备份卷。
 // source 是卷名原文（不限于三卷——备份卷等各代资产另有命名）——调用方须经命名单一来源派生
-// （真容器三卷走 namedVolumesFor，防卷名规则四处手写漂移）。
+// （真容器三卷走 namedVolumesFor，防卷名规则四处手写漂移）；target 同理取容器内挂载点单一来源
+// （containers/constants 的 HOME_BIND / MOUNT_WIKI / MOUNT_WORKSPACE），不要手写路径字面量。
 export interface OneShotMount {
   readonly source: string // named volume 名
   readonly target: string // 容器内挂载点

@@ -1,7 +1,9 @@
 // 容器/编排域异常族（平移 backend/containers/fleet/values.py + ports.py，#334）。
 // 区别于旧 Django「异常→HTTP 状态码」：本服务全部经信封码（#312 所有 REST HTTP 200）。
-// 每个异常携带 code 字段，路由层不再逐类 catch —— 抛出的领域异常统一由
-// toEnvelopeError 转译为 EnvelopeError（code 即信封码）。
+// 带信封码的异常一律继承 ContainerDomainError，路由层不再逐类 catch —— 由 toEnvelopeError
+// 转译为 EnvelopeError（code 即信封码）。**不携带 code 的例外**直接继承 Error、与库内其他异常
+// 同形（无码面语义、调用方按类型捕获）：ConfigWriteError（models service 判「盘未变」）、
+// RunOnceError（升级编排判命令失败）。
 
 import { CODE } from '../codes'
 
