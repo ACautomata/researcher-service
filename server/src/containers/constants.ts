@@ -21,8 +21,9 @@ export const LABEL_PORT_KEY = 'openclaw.port'
 //（daemon 侧泄漏排查 / 冒烟断言）。
 export const LABEL_ONESHOT_KEY = 'openclaw.oneshot'
 export const LABEL_ONESHOT_VALUE = 'true'
-// 容器内固定 bind-mount 路径（#591：仅 home 目录 rw bind 承载 workspace/wiki/state/logs；
-// openclaw.json 落 home 内默认路径 ~/.openclaw/openclaw.json——静态 config，无独立 config bind）
+// 容器内 home 路径（openclaw.json 落其内默认路径 ~/.openclaw/openclaw.json——静态 config，无独立
+// config bind）。#591 时指「home 目录 rw host bind」（承载 workspace/wiki/state/logs）；#590/ADR 0011
+// 起默认走 named volume 拓扑（三卷，见 MOUNT_*），host bind 仅遗留路径/调试用。
 export const HOME_BIND = '/home/node/.openclaw'
 // 三卷在容器内的挂载点（#590 拓扑）：挂载布局是共享内核纯知识——真容器 buildRunOptions 与
 // files 域树根（FILE_ROOTS）都从这里取，防路径字面量多处手写漂移；home 卷直接挂 HOME_BIND。

@@ -62,6 +62,13 @@ function envRecordToArray(env: Record<string, string>): string[] {
   return Object.entries(env).map(([k, v]) => `${k}=${v}`)
 }
 
+// 面板创建的容器（fleet 实例 / 一次性临时容器）共用的环境基线：镜像行为不变的 BASE_ENV + 关闭镜像侧
+// config 同步的 SYNC_FLAGS_OFF。单一构造点——两处各写一份会在新增容器类型时漂移（一次性容器漏关
+// SYNC_*，doctor 就会去改写挂载卷里的配置）。
+function panelEnv(): Record<string, string> {
+  return { ...BASE_ENV, ...SYNC_FLAGS_OFF }
+}
+
 // named volume 挂载的唯一构造点（fleet 三卷与一次性临时容器共用同一形状——两处手写会漂移）。
 function volumeMount(source: string, target: string, readOnly = false): Docker.MountSettings {
   return { Type: 'volume', Source: source, Target: target, ...(readOnly ? { ReadOnly: true } : {}) }
@@ -101,8 +108,7 @@ export class DockerRuntime implements ContainerRuntime {
   // 构造 docker create 参数（纯逻辑，可单测）。
   buildRunOptions(spec: ContainerSpec): Docker.ContainerCreateOptions {
     const environment = {
-      ...BASE_ENV,
-      ...SYNC_FLAGS_OFF,
+      ...panelEnv(),
       GATEWAY_TOKEN: spec.gatewayToken,
       // 容器内 sidecar CLI（approve/exec 审批注册）自连 gateway 须同值 token
       OPENCLAW_GATEWAY_TOKEN: spec.gatewayToken,
@@ -159,7 +165,7 @@ export class DockerRuntime implements ContainerRuntime {
   //     命令，也不让镜像 Cmd（node openclaw.mjs gateway）被当作参数追加到命令之后。
   // 无 RestartPolicy（默认 no）：一次性容器跑完即弃，绝不自动重启。
   buildOneShotOptions(spec: OneShotSpec): Docker.ContainerCreateOptions {
-    const environment = { ...BASE_ENV, ...SYNC_FLAGS_OFF, ...spec.env }
+    const environment = { ...panelEnv(), ...spec.env }
     return {
       Image: spec.image,
       Entrypoint: [...spec.cmd],

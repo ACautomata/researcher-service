@@ -313,7 +313,7 @@ export class DockerFileArchive implements FileArchive {
     const entries = await walkTree(root, '')
     const container = this.client().getContainer(containerName(name))
     await container.putArchive(Readable.from([createTarTree(entries)]), {
-      path: `${HOME_BIND}/workspace`,
+      path: FILE_ROOTS.workspace, // 树根 = 挂载点单一来源（values.ts ← containers/constants 的 MOUNT_*）
       chown: true,
     })
   }

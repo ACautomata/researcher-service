@@ -326,8 +326,8 @@ function frame(stream: number, text: string): Buffer {
   return frameBytes(stream, Buffer.from(text, 'utf8'))
 }
 
-// 一次性临时容器的 mock client：createContainer 返回可编程 container（start/wait/logs/remove）。
-// logs 返回 docker 多路复用帧（非 TTY 容器形状：8 字节头 [stream,0,0,0,size_be32] + 负载）。
+// 一次性临时容器的 mock client：createContainer 返回可编程 container（start/wait/logs/remove），
+// logs 默认回上方帧编码拼出的流。
 function mockOneShotClient(opts: {
   exitCode?: number
   stdout?: string
@@ -432,6 +432,15 @@ describe('DockerRuntime.runOnce 退出码与清理（#696）', () => {
     const { docker } = mockOneShotClient({ rawLogs: raw })
     const rt = new DockerRuntime(() => docker)
     await expect(rt.runOnce(spec)).resolves.toEqual({ output: '报\n' })
+  })
+
+  it('帧流末尾残帧（声明长度超出实到字节）→ 已收齐的帧照常返回，不整段吞掉', async () => {
+    // 末帧头声明 8 字节、实际只到 2 字节：按「帧流结束」处理，前面完整帧仍返回
+    const full = Buffer.concat([frame(1, 'kept\n'), frameBytes(1, Buffer.from('abcdefgh'))])
+    const truncated = full.subarray(0, full.length - 6)
+    const { docker } = mockOneShotClient({ rawLogs: truncated })
+    const rt = new DockerRuntime(() => docker)
+    await expect(rt.runOnce(spec)).resolves.toEqual({ output: 'kept\n' })
   })
 
   it('日志读取失败 → 不改变命令结果（诊断尽力而为：成功仍 resolve，非 0 仍抛退出码）', async () => {

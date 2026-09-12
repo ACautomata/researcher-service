@@ -2,7 +2,7 @@
 // 注入假 runtime + inline queue（后台 provisioning 同步跑完），断 HTTP 200 + 信封码 + 归属前置 +
 // create 同步返 creating 快照 / delete 异步信封 / list 轮询观察 creating→running、removing→消失。
 
-import { describe, it, expect, beforeAll, afterAll } from 'vitest'
+import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest'
 import { setupTestApp, type TestContext } from './setup'
 import { seedAdmin, seedUser, login, bearer } from './helpers'
 import { makeFleetTest, type FleetTestContext } from './fleetTestUtils'
@@ -270,6 +270,14 @@ describe('runOnce 一次性临时容器（#696 假运行时）', () => {
   beforeAll(async () => {
     ctx = await setupTestApp()
     fl = makeFleetTest(ctx.prisma)
+  })
+  // fake 的 oneshot 注入位与记录数组整个 describe 共享 → 每用例复位，断言才不靠执行顺序侥幸成立
+  //（重排或单跑同样成立；同 pairingApprove.test 的 execCalls 复位先例）。
+  beforeEach(() => {
+    fl.runtime.oneshotExitCode = 0
+    fl.runtime.oneshotOutput = ''
+    fl.runtime.oneshotWaitError = null
+    fl.runtime.oneshotRuns.length = 0
   })
   afterAll(async () => {
     await ctx.cleanup()
