@@ -155,8 +155,10 @@ npm run prisma:validate        # schema 合法性
 **必填 env**（`NODE_ENV=production` 下 fail-fast）：`JWT_SECRET`（≥32 字符）· `PANEL_PUBLIC_ORIGIN`
 （面板对外 origin）· `CREDENTIAL_ENCRYPTION_KEYS` · `OPENCLAW_TEMPLATE_DIR`（绝对存在可读）·
 `DATABASE_URL`（显式绝对路径，如 `file:/app/db/db.sqlite3`）· `OPENCLAW_FLEET_ROOT`（compose pin
-`/fleet` 并挂载宿主 fleet 根）。LLM_API_KEY create 时 90003 前置校验。部署全流程（CD、secrets、
-回滚、排障）见 `deploy/DEPLOY.md`。
+`/fleet` 并挂载宿主 fleet 根）。LLM_API_KEY create 时 90003 前置校验。`OPENCLAW_IMAGE` 有缺省值
+（= 派生镜像钉版本 tag）故不在上列，但**生产禁浮动 tag**：无 tag 或 `:latest` 启动即 fail-fast
+（#695，准据见 `server/src/config.ts` 的 `readFleetImage`）。部署全流程（CD、secrets、回滚、排障）
+见 `deploy/DEPLOY.md`。
 
 > 坑：`node:lts-slim`（Debian/glibc）——better-sqlite3 原生模块不兼容 alpine/musl；runtime 阶段
 > 需 build-essential + python3（postinstall 编译工具链，Dockerfile 已含）。

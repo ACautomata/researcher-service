@@ -179,7 +179,9 @@ describe('目标镜像钉版（issue #695）', () => {
     expect(envDefaultImage(FLEET_DRIVER)).toBe(DERIVED_DEFAULT)
   })
 
-  it('四处目标镜像均非浮动引用（生产 fail-fast 的默认路径恒通过）', () => {
+  // 「目标镜像」按 CONTEXT 词条专指 config.fleet.image；此处断言的四点是**镜像引用**（含版本单源
+  // Dockerfile FROM，它本身不是「目标镜像」）——生产 fail-fast 的默认路径恒通过
+  it('四处镜像引用均非浮动（Dockerfile FROM / config 默认 / 模板栈 compose / dev driver）', () => {
     expect(isFloatingImageRef(dockerfileFromRef())).toBe(false)
     expect(isFloatingImageRef(configDefaultImage())).toBe(false)
     expect(isFloatingImageRef(envDefaultImage(STANDALONE_COMPOSE))).toBe(false)
