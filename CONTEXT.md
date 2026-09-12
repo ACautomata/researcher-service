@@ -19,9 +19,13 @@ _Avoid_: 跨 context 直接 import 域服务（渲染、状态查询）——行
 **镜像谱系 (image lineage)**:
 承载 OpenClaw 容器的镜像决定容器的能力边界与挂载契约。有两个互不兼容的**现成**变体，另可自建第三条：
 - **cn-im fork**（`acautomata/openclaw-docker-cn-im`）：历史部署镜像，启动时自带配置同步与权限降权（init 脚本），预装中国 IM 渠道插件，**不含 browser 运行时**（researcher 配置的 browser 插件在此镜像上无效）。
-- **官方原版**（`ghcr.io/openclaw/openclaw`，分 `-browser`/`-slim` 变体）：OpenClaw 官方镜像，不自带配置同步逻辑；`-browser` 变体预装 Playwright，browser 能力可用（ADR 0003 选定 `2026.7.1-browser` 为部署基线）。
-- **自建派生 (derived image)**：`FROM ghcr.io/openclaw/openclaw:2026.7.1-browser`（保 browser 能力，ADR 0003 基线）之上叠加本面板专属内容：`pdftotext`（poppler，PDF 文本提取 CLI，供 agent `tools.exec` 调用）+ wiki/workspace 骨架（COPY 进 `~/.openclaw`，供 named volume 首挂自动初始化，见「named volume 拓扑」）。经 `OPENCLAW_IMAGE` 注入。派生镜像**不新开谱系**，只在其基镜像谱系（官方）上加层；基镜像的 browser 能力、token 占位、SecretRef 等已校准性质原样继承。
+- **官方原版**（`ghcr.io/openclaw/openclaw`，分 `-browser`/`-slim` 变体）：OpenClaw 官方镜像，不自带配置同步逻辑；`-browser` 变体预装 Playwright，browser 能力可用（ADR 0003 选定 browser 变体为部署基线；当前基线版本 `2026.9.4-browser`）。
+- **自建派生 (derived image)**：`FROM ghcr.io/openclaw/openclaw:2026.9.4-browser`（保 browser 能力，ADR 0003 基线）之上叠加本面板专属内容：`pdftotext`（poppler，PDF 文本提取 CLI，供 agent `tools.exec` 调用）+ wiki/workspace 骨架（COPY 进 `~/.openclaw`，供 named volume 首挂自动初始化，见「named volume 拓扑」）。经 `OPENCLAW_IMAGE` 注入。派生镜像**不新开谱系**，只在其基镜像谱系（官方）上加层；基镜像的 browser 能力、token 占位、SecretRef 等已校准性质原样继承。
 _Avoid_: 「OpenClaw 镜像」——掩盖谱系在 browser 能力、挂载契约依赖、启动方式上的本质差异；讨论迁移/换镜像/重新打包时必须指明谱系（含派生镜像的**基镜像**谱系）。
+
+**目标镜像与版本 tag (target image / version tag)**:
+面板 fleet 的**目标镜像** = `config.fleet.image`（env `OPENCLAW_IMAGE`）：新建容器时写进容器记录，容器升级编排（#682）的检测判定即「容器记录镜像 ≠ 当前目标」。**版本 tag** = 派生镜像的 `:<基线 tag>`（基线 = `deploy/openclaw-image/Dockerfile` 的 `FROM` 行），**一经发布不可移动**；bump = 改 FROM 单源 + 四处**运行期**明文（config 默认值 / 模板栈 compose / dev driver / 测试常量）随之同步，由 `openclawImage.test.ts` 交叉断言锁死。**浮动 tag (floating tag)** = 无 tag（Docker 默认解析 `:latest`）或显式 `:latest`：内容随上游移动、使「当前目标」不可复现 → **生产启动即 fail-fast**（准据 `isFloatingImageRef`；dev/test 放行）；滚动 tag（`latest-browser` 等）不由代码拦截，靠 review 拦。
+_Avoid_: 用「镜像版本」泛指——须区分**基线版本**（官方镜像 tag）与**派生镜像版本 tag**（发布后冻结）；也不要把「最新」当目标（浮动 = 不可复现）。
 
 **接触路径 (contact path)**:
 控制面与 OpenClaw 容器交互的四条通道：(1) Docker SDK 编排（增删查容器）、(2) 宿主文件 bind-mount 直读写（wiki / openclaw.json）、(3) HTTP `/health` 探测、(4) WebSocket（协议 v4 + 设备配对 + 事件流，见「隧道」）。
