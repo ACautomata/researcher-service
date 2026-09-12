@@ -215,9 +215,11 @@ describe('CD 推送 openclaw 版本 tag（issue #695 AC4）', () => {
     expect(cd).toMatch(/OPENCLAW_VERSION_TAG=\$\{VERSION_TAG\}/)
   })
 
-  it('提取失败即 fail：缺 FROM 行 / 无 tag / digest FROM 行 —— 不推空 tag 也不拿 sha 当版本', () => {
+  it('提取失败即 fail：缺 FROM 行 / 无 tag / digest FROM 行 / 端口形态 —— 不推垃圾 tag', () => {
     expect(cd).toMatch(/无法从 Dockerfile FROM 行提取版本 tag[\s\S]{0,200}?exit 1/)
     expect(cd).toMatch(/digest[\s\S]{0,200}?exit 1/)
+    // 末段 `:` 是 registry 端口（`registry:5000/repo` 无 tag）：tag 不含 `/`，提取结果含 `/` 即拒
+    expect(cd).toMatch(/\*\/\*\)[\s\S]{0,200}?exit 1/)
   })
 
   it('openclaw build & push 恰推三个 tag：:latest / :<sha> / 版本 tag（块内无注释行）', () => {

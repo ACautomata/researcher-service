@@ -67,8 +67,9 @@ jobs:
           echo "IMAGE_REPO=${IMAGE_REPO}" >> "$GITHUB_ENV"
           echo "SERVER_IMAGE=ghcr.io/${IMAGE_REPO}/server" >> "$GITHUB_ENV"
           echo "FRONTEND_IMAGE=ghcr.io/${IMAGE_REPO}/frontend" >> "$GITHUB_ENV"
-          # openclaw 派生镜像（issue #588）：server config.ts OPENCLAW_IMAGE 默认值指向它的版本 tag
-          #（issue #695 钉版；:latest 仍推送，供 standalone 模板栈 / 本地构建）
+          # openclaw 派生镜像（issue #588）：server config.ts OPENCLAW_IMAGE 默认值指向它的版本 tag，
+          # standalone 模板栈 compose 默认值同钉该 tag（issue #695）。:latest 与 :<sha> 仍照推
+          # （:<sha> 供回滚；:latest 为滚动别名，fleet 与模板栈都不用）
           echo "OPENCLAW_IMAGE=ghcr.io/${IMAGE_REPO}/openclaw" >> "$GITHUB_ENV"
           # autofigure sidecar 镜像（T11）：compose PANEL_AUTOFIGURE_IMAGE 默认值指向它的 :latest
           echo "AUTOFIGURE_IMAGE=ghcr.io/${IMAGE_REPO}/autofigure" >> "$GITHUB_ENV"
@@ -81,7 +82,7 @@ jobs:
         # 不引入第二配置源（build-arg / 常量）：版本的**提取源**只有 Dockerfile 一行。（bump 本身
         # 不止改一行——还须同步 config 默认值 / 模板栈 compose / dev driver / 测试常量四处运行期明文，
         # 见 deploy/README.md「派生镜像版本 tag 约定」，由 openclawImage.test.ts 交叉断言锁死。）
-        # 提取失败（缺 FROM 行 / 无 tag / digest 行）即 fail：绝不推空 tag 或 sha 当版本。
+        # 提取失败（缺 FROM 行 / 无 tag / digest 行 / 端口形态）即 fail：绝不推空 tag、sha 或含 '/' 的串当版本。
         run: |
           FROM_REF="$(grep -m1 -E '^[[:space:]]*FROM[[:space:]]' deploy/openclaw-image/Dockerfile | awk '{print $2}')"
           # digest FROM 行（`…@sha256:…`）无版本可提取，且 sha 不可当版本 tag 推 → 显式拒。
@@ -96,6 +97,17 @@ jobs:
             echo "[cd] ERROR: 无法从 Dockerfile FROM 行提取版本 tag: '${FROM_REF}'" >&2
             exit 1
           fi
+          # 提取结果含 '/' ⇒ FROM 行形如「registry:5000/repo」（末段 `:` 是 registry 端口、非 tag）：
+          # tag 字符集不含 '/'，放行会在 push 处以 invalid reference 失败（诊断噪音），故与 digest 行
+          # 同族显式拒（imageTag 纯知识亦以「最后一段路径分量」认端口，两处行为一致）。**排在 no-tag
+          # 组之后**——无 tag 的引用（`VERSION_TAG == FROM_REF` 且含 `/`）先被上一组拦下，此处只判真正
+          # 的端口形态，避免错误信息指错原因。
+          case "$VERSION_TAG" in
+            */*)
+              echo "[cd] ERROR: 无法从 Dockerfile FROM 行提取版本 tag（末段 ':' 疑为 registry 端口）: '${FROM_REF}'" >&2
+              exit 1
+              ;;
+          esac
           echo "OPENCLAW_VERSION_TAG=${VERSION_TAG}" >> "$GITHUB_ENV"
           echo "[cd] openclaw 版本 tag: ${VERSION_TAG}"
 

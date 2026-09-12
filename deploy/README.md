@@ -43,7 +43,8 @@
   GHCR 拉取（无凭证即失败）。
 
   ```bash
-  # 版本 tag 单源 = Dockerfile FROM 行（与 CD 同一提取方式；CD 另对 digest FROM 行显式拒绝）
+  # 版本 tag 单源 = Dockerfile FROM 行（与 CD 同一提取方式；CD 另对 digest 行与「末段是 registry
+  # 端口」的形态显式拒绝）
   TAG="$(grep -m1 -E '^[[:space:]]*FROM[[:space:]]' deploy/openclaw-image/Dockerfile | awk '{print $2}')"; TAG="${TAG##*:}"
   docker build -t "ghcr.io/acautomata/researcher-service/openclaw:${TAG}" deploy/openclaw-image
   # 已构建过镜像时补打（等价；源为先前构建的任意 tag，此处以 :latest 为例）：
