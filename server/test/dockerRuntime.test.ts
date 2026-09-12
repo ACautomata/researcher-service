@@ -332,6 +332,7 @@ function mockOneShotClient(opts: {
   exitCode?: number
   stdout?: string
   stderr?: string
+  startErr?: Error
   waitErr?: Error
   logsErr?: Error
   removeErr?: { statusCode: number; message: string }
@@ -352,6 +353,7 @@ function mockOneShotClient(opts: {
         id: 'oneshot-cid',
         start: async () => {
           calls.started = true
+          if (opts.startErr) throw opts.startErr
         },
         wait: async () => {
           if (opts.waitErr) throw opts.waitErr
@@ -406,6 +408,14 @@ describe('DockerRuntime.runOnce 退出码与清理（#696）', () => {
     expect((err as RunOnceError).exitCode).toBe(7)
     expect((err as RunOnceError).output).toContain('doctor failed')
     expect(calls.removed).toBe(true)
+  })
+
+  it('启动失败（create 成功但 start 抛错）→ 原错上抛，容器仍被清理', async () => {
+    const { docker, calls } = mockOneShotClient({ startErr: new Error('start blew up') })
+    const rt = new DockerRuntime(() => docker)
+    await expect(rt.runOnce(spec)).rejects.toThrow('start blew up')
+    expect(calls.started).toBe(true) // 确已走到 start（异常来自启动而非更早的 create）
+    expect(calls.removed).toBe(true) // 已创建的容器不留残骸
   })
 
   it('等待退出时 daemon 报错（异常路径）→ 原错上抛，容器仍被清理', async () => {
