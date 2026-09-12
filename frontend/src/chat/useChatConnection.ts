@@ -102,6 +102,17 @@ export function useChatConnection(status: ChatStatus) {
   // 隐藏（不出现点了必然报错的按钮）。未握手期间恒 false（入口不闪一下再消失）。命名对齐 Port 方法
   // sessionControlAvailable()：同一词汇表，读作「网关支持会话控制吗」。
   const sessionControlAvailable = ref(false)
+  // Codex #703 P1（F2）：回退在途（rewindBusy）——破坏性 RPC + 重建管线的窗口期。窗口内禁止发送
+  //（send() 守卫 + composer 置灰）且回退入口隐藏：此刻投影仍是回退前的旧代，落下的新 send 会被
+  // 随后的 abandonActiveRun 吞掉（服务器端竞速），用户消息与 agent 回复双双丢失。由既有非响应式
+  // 闭包变量 rewindInFlight 提升为 ref——进 UI 门必须先可观测（#693 spec §1.5「复用三态」的盲区，
+  // 见 CONTEXT.md「会话控制能力」修订）。
+  const rewindBusy = ref(false)
+  // Codex #703 P1（F4）：投影权威（transcriptSynced）——回退/fork 这类定位历史条目的动作只许在
+  // 「当前投影 = 网关权威转录」时可用。重连握手后、syncSessions 落地前恒 false（fail-closed：
+  // 断线期间网关真实转录可能已前进，陈旧条目上的回退会剪除用户未见的轮次）；任何一次权威
+  // loadHistory 成功铺底后置真。同步失败保持假，由下次重连/切会话的自愈路径再置真。
+  const transcriptSynced = ref(false)
 
   // ---- 非响应式连接簇（同宿主：本 composable 闭包）----
   let gateway: GatewayChat | null = null
@@ -657,6 +668,9 @@ export function useChatConnection(status: ChatStatus) {
   // C2: 无论首连还是重连都恢复当前会话历史（首连瞬败后跨自动重连也能补拉，防「看似已连接」空 chat）。
   async function syncSessions(name: string, gen: number) {
     if (gen !== containerGen || chat.selectedContainer !== name || !gateway) return
+    // Codex #703 P1（F4）：同步窗口内投影未 authoritative——重连/首连的 listSessions/history 落地前，
+    // 可见的仍是握手前的陈旧条目（断线期间网关真实转录可能已前进）。入口门消费 transcriptSynced。
+    transcriptSynced.value = false
     try {
       const list = await gateway.listSessions()
       if (gen !== containerGen || chat.selectedContainer !== name) return // 切容器途中迟到：丢弃
@@ -1049,7 +1063,10 @@ export function useChatConnection(status: ChatStatus) {
     const text = chat.input.trim()
     const hasAttachments = Array.isArray(attachments) && attachments.length > 0
     // 既无文本也无附件 → 无内容可发（保持既有空文本禁发语义）；其余判定不变。
-    if ((!text && !hasAttachments) || !gateway || !chat.selectedSession || disconnected.value || streamingEnabled) return false
+    // Codex #703 P1（F2）：回退在途拒发——此刻落下的 send 会被回退成功路径的 abandonActiveRun()
+    // 吞掉（run 被弃、乐观投影被重建冲掉，agent 却在服务端继续跑），用户消息与回复双双丢失。
+    if ((!text && !hasAttachments) || !gateway || !chat.selectedSession || disconnected.value || streamingEnabled || rewindBusy.value)
+      return false
     chat.setSlashDismissed(true) // 发送后关闭补全菜单（输入已被清空，下次输 / 时经 onComposerInput 复位）
     clearResumeWait() // B5: 用户发新消息 = 放弃旧 run 的 resume 等待（新 run 是新语境）
     // PHASE 2: 新 send 是新 run 语境——上一个请求的 retryPending/retryTimer 作废（防残留 retry 状态
@@ -1171,7 +1188,10 @@ export function useChatConnection(status: ChatStatus) {
   //    纯文本无附件，天然不碰附件预览条）。
   async function resendOutbox(container: string, sessionKey: string) {
     const items = outbox.takePending(container, sessionKey)
-    if (!items.length || !gateway || disconnected.value) return
+    // rewindBusy 栅栏（Codex #703 P1）：断线恰好落在回退 RPC 在途的极端 corner 下，重连的
+    // syncSessions 可能抢在回退落地前重发旧代残留——重发 determinism 交给回退成功路径的统一
+    // 清理（残留随被剪旧代作废）；回退失败 finally 解锁后，下一次同步照常重发，队列不丢。
+    if (!items.length || !gateway || disconnected.value || rewindBusy.value) return
     const myGw = gateway
     // 内容级去重（规格 §三.3）：取历史中 user 消息文本全集。历史侧无 createdAt 可比（Msg 不产
     // 该字段），故只按 text 匹配——同文本歧义（两条同文本只受理一条/loadHistory 保留的本地在途
@@ -1252,15 +1272,34 @@ export function useChatConnection(status: ChatStatus) {
     void loadHistory(key) // T3：切会话加载该会话历史（loadHistory 内部清空 messages + 维护分页态）
   }
 
-  // 在途回退锁（非响应式，故不进 UI 忙碌门——#693 spec §1.5「busy 门复用三态、无需新增状态」，窗口
-  // 语义见 CONTEXT.md「会话控制能力」）。锁只保证编排层单飞：同一时刻最多一次回退在途。
-  let rewindInFlight = false
-
   // 动作类失败的统一出口（见 ChatStatus.onActionError）：宿主注入了专用通道就走它（瞬时提示），
   // 否则回退 onError（连接横幅）——不静默丢错误。
   function reportActionError(message: string): void {
     if (status.onActionError) status.onActionError(message)
     else status.onError(message)
+  }
+
+  // Codex #703 P2（F3）：回退会改写该会话的权威元数据（updated_at 可能前移、派生标题可能随被剪的
+  // 首条消息改变），成功后重拉会话列表，让侧栏日期分组与头部标题不陈旧。仅刷新列表 + 保留选中
+  // （C1 同 syncSessions），失败 fail-soft（回退本身已成功，元数据陈旧可等下次同步自愈；多标签页
+  // 列表陈旧属 #693 Out of Scope 的已知可接受瑕疵，本端自己发起的 mutation 后立即刷新不是订阅）。
+  async function refreshSessions(): Promise<void> {
+    const name = chat.selectedContainer
+    const gen = containerGen
+    if (!name || !gateway) return
+    try {
+      const list = await gateway.listSessions()
+      if (gen !== containerGen || chat.selectedContainer !== name) return // 切容器途中迟到：丢弃
+      const prev = chat.selectedSession
+      chat.setSessions(Array.isArray(list) ? list : []) // 对网关输入 0 信任：非数组回退空列表
+      if (prev && chat.sessions.some((s) => s.session_key === prev)) {
+        chat.setSelectedSession(prev) // C1: 原会话仍在列表中 → 保留选中
+      } else {
+        chat.setSelectedSession(chat.sessions[0]?.session_key ?? '')
+      }
+    } catch {
+      // 尽力而为：不回填错误、不动 transcript（回退已成功，元数据刷新非关键路径）
+    }
   }
 
   // #694 对话回退（#693 spec §1.4）：把该持久化 user 消息（entryId）之后的历史从活跃路径剪除，
@@ -1281,13 +1320,14 @@ export function useChatConnection(status: ChatStatus) {
     // 单飞（Codex #703 P2）：窗口期内再触发（同条目重复点击 / 点另一条）一律忽略。两次在途回退会在
     // 网关侧竞争同一活跃路径（乐观并发 sessionId+lifecycleRevision 冲突 → 顺序相关的成败），面板侧
     // 两次重建 + 两次回填的落地序又由网络决定（可能回填的不是用户最后一次意图）；且任一次的 finally
-    // 都会清掉共享标记，锁形同虚设。窗口 = 一次 RPC + 一次历史重拉，期间 transcript 本就要整体换新，
-    // 落地后入口立即恢复可点（对新 transcript 再发起即可），故静默忽略是安全的。
-    if (rewindInFlight || !entryId || !key || !gateway || disconnected.value) return
+    // 都会清掉共享标记，锁形同虚设。窗口 = 一次 RPC + 一次历史重拉：入口经 rewindBusy 隐藏（不再
+    // 「渲染可点、点到被吞」——Codex #703 P1 修订），落地后立即恢复可点（对新 transcript 再发起）。
+    if (rewindBusy.value || !entryId || !key || !gateway || disconnected.value) return
     const myGw = gateway
     const gen = containerGen
+    const container = chat.selectedContainer
     const draft = status.onRewindDraftFingerprint?.() ?? ''
-    rewindInFlight = true
+    rewindBusy.value = true
     try {
       const res = await myGw.rewind(key, entryId).catch((e: unknown) => {
         // stale 守卫：切容器/重连换实例后旧 RPC 的失败不写进新容器的错误面（对齐 send 的 stale 守卫）；
@@ -1299,8 +1339,16 @@ export function useChatConnection(status: ChatStatus) {
       })
       if (!res) return
       if (gateway !== myGw || gen !== containerGen || chat.selectedSession !== key) return // 回退途中切走：丢弃
+      // Codex #703 P1（F1）：回退成功 = 活跃路径换新代——本会话 outbox 里的待发残留（未送达 /
+      // ack 丢失的 #564 重放条目）属于被剪的旧代。不清掉的话，下次重连 resendOutbox 会把它重发到
+      // 回退后的分支上：用户刚剪除的消息复活并意外触发一轮 agent run。逐条作废（复用既有
+      // takePending/removePending，outboxStore 零改动）。
+      for (const item of outbox.takePending(container, key)) {
+        outbox.removePending(container, key, item.id)
+      }
       abandonActiveRun()
       clearResumeWait()
+      await refreshSessions() // F3：回退改写会话权威元数据（标题/updated_at）→ 重拉刷新
       // #703 P2：同会话内的 transcript 重建不动文件面板（用户没离开会话，workspace 文件与回退无关）
       await loadHistory(key, { keepFileTabs: true })
       // 重建期间又切走：不回填（新语境有自己的投影与草稿）。**容器/连接守卫不可省**（Codex #703 P1）：
@@ -1318,7 +1366,7 @@ export function useChatConnection(status: ChatStatus) {
       if (status.onRewindBackfill) status.onRewindBackfill(res.editorText, attachments)
       else chat.setInput(res.editorText) // 无宿主时的最小回填（纯文本）
     } finally {
-      rewindInFlight = false
+      rewindBusy.value = false
     }
   }
 
@@ -1379,6 +1427,9 @@ export function useChatConnection(status: ChatStatus) {
       // message-seq-ordering-deferred。
       chat.setMessages([...pages.reverse().flat(), ...inFlight])
       chat.setHistoryState(hasMore, hasMore ? anchor : null, false)
+      // Codex #703 P1（F4）：权威历史已铺底（含分页拉全的全路径）——投影恢复权威，回退/fork
+      // 入口门放行。RPC 全程失败/被取代的请求走不到这里，保持 false（fail-closed）。
+      transcriptSynced.value = true
     } catch (e) {
       if (gen !== containerGen || chat.selectedSession !== key) return
       if (hgen !== historyGen) return // codex #249 P2：被取代的请求：不落错误、不干扰新请求
@@ -1389,6 +1440,7 @@ export function useChatConnection(status: ChatStatus) {
         const inFlight = chat.messages
         chat.setMessages([...pages.reverse().flat(), ...inFlight])
         chat.setHistoryState(true, anchor, false)
+        transcriptSynced.value = true // 降级铺底同样是权威快照（最新页在列，入口定位安全）
       } else {
         chat.setHistoryLoading(false)
       }
@@ -1670,6 +1722,8 @@ export function useChatConnection(status: ChatStatus) {
     chat,
     disconnected,
     sessionControlAvailable,
+    rewindBusy,
+    transcriptSynced,
     streaming,
     slashQuery,
     slashMatches,

@@ -2430,5 +2430,28 @@ describe('ChatView', () => {
       expect(w.find('[data-test="error-bar"]').exists()).toBe(false)
       expect(w.find('[data-test="stream"]').text()).toContain('第一问') // 原历史原样
     })
+
+    it('断线重连后会话/历史同步完成前，旧投影上的回退入口继续隐藏（Codex #703 review P1）', async () => {
+      const { w, gw } = await mountWithHistory()
+      expect(w.find('[data-test="rewind"]').exists()).toBe(true) // 首连后投影权威，入口渲染
+
+      // 断线：入口被 disconnected 门挡住；投影保留（重连前用户看到的仍是断线前的旧条目）
+      gw.fireClose(1006, '', true)
+      await flushPromises()
+      expect(w.find('[data-test="rewind"]').exists()).toBe(false)
+
+      // 重连握手完成，但 listSessions 迟迟不回（慢网关）——此刻投影是断线前的旧条目，
+      // 期间网关真实转录可能已前进；若入口恢复可点，用户可能剪除自己还没看到的更新轮次。
+      let listing: ((v: Array<typeof SESSION>) => void) | null = null
+      gw.listSessions.mockImplementation(() => new Promise((resolve) => { listing = resolve }))
+      gw.fireReady()
+      await flushPromises()
+      expect(w.find('[data-test="rewind"]').exists()).toBe(false) // ← 修复前：此处入口已恢复（bug）
+
+      // 同步落地 → 投影权威 → 入口恢复
+      listing?.([SESSION])
+      await flushPromises()
+      expect(w.find('[data-test="rewind"]').exists()).toBe(true)
+    })
   })
 })

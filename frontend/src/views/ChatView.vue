@@ -98,10 +98,19 @@ const currentSessionTitle = computed(() => {
 // 是否有助手消息正在流式；并发 send 会让旧 streaming 消息永久卡住光标，故流式中禁发
 const streaming = computed(() => chat.messages.some((m) => m.role === 'assistant' && m.streaming))
 
-// #694 回退入口的渲染门（#693 spec §1.5，官方同构：agent 工作时入口不渲染而非禁用）：网关
-// 支持会话控制（hello-ok features 快照）且不在忙碌态（streaming/连接中/已断线）时才渲染。
+// #694 回退入口的渲染门（#693 spec §1.5 官方同构 + Codex #703 P1 修订）：网关支持会话控制
+//（hello-ok features 快照）且不在忙碌态时才渲染。忙碌态 = 流式 / 连接中 / 已断线（复用三态）
+// + 回退自身在途（rewindBusy：窗口内投影还是旧代，重入即被编排层吞掉）+ 投影未同步
+//（transcriptSynced：重连后 syncSessions 落地前，可见的是断线前的陈旧条目——此刻回退可能剪除
+// 用户未见的更新轮次；fail-closed，同步失败保持隐藏直至下次权威 loadHistory）。
 const rewindAvailable = computed(
-  () => conn.sessionControlAvailable.value && !streaming.value && !connecting.value && !conn.disconnected.value,
+  () =>
+    conn.sessionControlAvailable.value &&
+    conn.transcriptSynced.value &&
+    !conn.rewindBusy.value &&
+    !streaming.value &&
+    !connecting.value &&
+    !conn.disconnected.value,
 )
 
 // #694 回退入口 emit（ChatStream→消息携带）：取网关条目 id 发起编排（无 id 时入口本就不渲染，防御性早退）。
@@ -357,6 +366,7 @@ defineExpose({
         :connecting="connecting"
         :streaming="streaming"
         :disconnected="conn.disconnected.value"
+        :rewind-busy="conn.rewindBusy.value"
         :pending-attachments="pendingAttachments"
         @input="conn.onComposerInput"
         @keydown="conn.onComposerKeydown"

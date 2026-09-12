@@ -1263,3 +1263,136 @@ describe('#694 对话回退编排', () => {
     expect(buildAttachments(attachments).rejected).toHaveLength(0) // 端到端语义：可原样重发
   })
 })
+
+// Codex #703 review（5185814928）发现的复现/回归：回退与「离线残留 / 在途窗口 / 会话元数据」三个
+// 语境的交互。三条发现均不在 #694 已声明的编排契约内（CONTEXT.md「会话控制能力」只覆盖
+// 「回退窗口内再次回退」，未覆盖窗口内 send、outbox 残留、会话列表元数据）。
+describe('#694 回退与离线/在途语境的交互（Codex #703 review）', () => {
+  setupConnTestEnv()
+
+  const HISTORY = [
+    { role: 'user', text: '第一问', __openclaw: { id: 'entry-1' } },
+    { role: 'assistant', text: '第一答', __openclaw: { id: 'entry-2' } },
+  ]
+
+  async function connectWithHistory(conn: ReturnType<typeof useChatConnection>): Promise<InstanceType<typeof MockGatewayChat>> {
+    const ready = conn.openGateway()
+    await flushPromises()
+    const gw = MockGatewayChat.last!
+    gw.listSessions.mockResolvedValue([{ session_key: 'sk-1', title: '', updated_at: '' }])
+    gw.getHistory.mockResolvedValue({ messages: HISTORY, hasMore: false, nextOffset: null })
+    gw.listCommands.mockResolvedValue([])
+    gw.listPendingApprovals.mockResolvedValue([])
+    gw.fireReady()
+    await ready
+    await flushPromises()
+    return gw
+  }
+
+  function deferred<T>() {
+    let resolve!: (v: T) => void
+    const promise = new Promise<T>((r) => {
+      resolve = r
+    })
+    return { promise, resolve }
+  }
+
+  function outboxItems(container: string, sessionKey: string): unknown[] {
+    const raw = sessionStorage.getItem(`openclaw.panel.outbox.v1:${container}`) ?? '{}'
+    const blob = JSON.parse(raw) as { sessions?: Record<string, unknown[]> }
+    return blob.sessions?.[sessionKey] ?? []
+  }
+
+  it('P1-a 回退成功后作废本会话 outbox 残留——被回退的消息不得在下次重连时重发', async () => {
+    const { conn, chat } = setup()
+    const gw = await connectWithHistory(conn)
+
+    // 前置：一条「已点发送但网关没回执 / run 未起来」的文本消息留在队里（#564 失败留队语义）。
+    chat.setInput('被回退的消息')
+    gw.send.mockRejectedValue(new Error('网关未受理'))
+    conn.send(false)
+    await flushPromises()
+    expect(outboxItems('demo', 'sk-1')).toHaveLength(1) // 前置：确实残留
+
+    // 回退剪掉活跃路径上的那条消息——outbox 里的同一条必须随之作废。
+    gw.rewind.mockResolvedValue({ editorText: '第一问', editorAttachments: [] })
+    gw.getHistory.mockResolvedValue({ messages: [], hasMore: false, nextOffset: null })
+    await conn.rewind('entry-1')
+
+    expect(outboxItems('demo', 'sk-1')).toEqual([])
+
+    // 症状复现面：下一次握手（重连）走 syncSessions → resendOutbox，会把残留消息重发到回退后的分支。
+    gw.send.mockReset()
+    gw.send.mockResolvedValue('run-replay')
+    gw.fireReady() // 重连就绪
+    await flushPromises()
+    expect(gw.send).not.toHaveBeenCalled() // 绝不可重发
+    expect(chat.messages.some((m) => m.text === '被回退的消息')).toBe(false)
+  })
+
+  it('P1-b 回退在途（RPC 未回）时禁止发送——窗口内落下的新消息不得被后续 abandonActiveRun 吞掉', async () => {
+    const { conn, chat } = setup()
+    const gw = await connectWithHistory(conn)
+
+    const inflight = deferred<{ editorText: string; editorAttachments: never[] }>()
+    gw.rewind.mockReturnValue(inflight.promise)
+    gw.getHistory.mockResolvedValue({ messages: [], hasMore: false, nextOffset: null })
+
+    const rewinding = conn.rewind('entry-1')
+    await flushPromises() // RPC 已发出、尚未应答——窗口期开始
+
+    // 用户在该窗口内按了发送（composer 的 disabled 门只看 connecting/streaming/disconnected，全为假）。
+    chat.setInput('回退期间的新消息')
+    gw.send.mockResolvedValue('run-new')
+    const accepted = conn.send(false)
+
+    inflight.resolve({ editorText: '第一问', editorAttachments: [] })
+    await rewinding
+
+    expect(accepted).toBe(false) // 窗口内拒发
+    expect(gw.send).not.toHaveBeenCalled() // 窗口内不落 RPC（发送即被服务器端竞速吞掉的根源）
+  })
+
+  it('P2 回退成功后刷新会话元数据——标题/更新时间取网关权威快照', async () => {
+    const { conn, chat } = setup()
+    const gw = await connectWithHistory(conn)
+    expect(chat.sessions[0]).toMatchObject({ title: '', updated_at: '' })
+
+    gw.rewind.mockResolvedValue({ editorText: '', editorAttachments: [] })
+    gw.getHistory.mockResolvedValue({ messages: [], hasMore: false, nextOffset: null })
+    gw.listSessions.mockResolvedValue([
+      { session_key: 'sk-1', title: '回退后的标题', updated_at: '2026-09-12T09:00:00.000Z' },
+    ])
+
+    await conn.rewind('entry-1')
+
+    expect(chat.sessions.find((s) => s.session_key === 'sk-1')).toMatchObject({
+      title: '回退后的标题',
+      updated_at: '2026-09-12T09:00:00.000Z',
+    })
+  })
+
+  it('P1-c-2 重连同步失败 → 投影保持非权威（fail-closed），待下次权威加载才恢复', async () => {
+    const { conn } = setup()
+    const gw = await connectWithHistory(conn)
+    expect(conn.transcriptSynced.value).toBe(true) // 首连铺底后权威
+
+    gw.fireClose(1006, '', true)
+    await flushPromises()
+
+    // 重连握手完成，但同步 RPC 失败（listSessions 拒绝）——不恢复权威（可见的是断线前旧条目）
+    gw.listSessions.mockRejectedValue(new Error('网关列表拉取失败'))
+    gw.fireReady()
+    await flushPromises()
+    expect(conn.transcriptSynced.value).toBe(false) // fail-closed
+
+    // 自愈路径：切会话触发权威 loadHistory 成功 → 恢复权威
+    gw.listSessions.mockResolvedValue([
+      { session_key: 'sk-1', title: '', updated_at: '' },
+      { session_key: 'sk-2', title: '', updated_at: '' },
+    ])
+    conn.pickSession('sk-2')
+    await flushPromises()
+    expect(conn.transcriptSynced.value).toBe(true)
+  })
+})
