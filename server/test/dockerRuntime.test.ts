@@ -386,6 +386,14 @@ describe('DockerRuntime.runOnce 退出码与清理（#696）', () => {
     expect(res.output).toBe('backup done\nwarn: none\n')
     expect(calls.started).toBe(true)
     expect(calls.removed).toBe(true)
+    // 装配断点：runOnce 真把 buildOneShotOptions 的结果交给 createContainer（两者各自单测不覆盖此处，
+    // 否则这条链只有真 daemon 冒烟兜底）。标签/无端口/Cmd 清空等形状细节由 buildOneShotOptions 用例负责。
+    expect(calls.createOpts).toMatchObject({
+      Image: spec.image,
+      Entrypoint: [...spec.cmd],
+      Cmd: [],
+      Labels: { [LABEL_ONESHOT_KEY]: LABEL_ONESHOT_VALUE },
+    })
     // 只删容器（force），不删卷——备份卷等调用方资产须留存
     expect(calls.removeOpts).toEqual({ force: true })
   })

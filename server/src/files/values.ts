@@ -4,8 +4,8 @@
 
 import { MOUNT_WIKI, MOUNT_WORKSPACE } from '../containers/constants'
 
-// 两棵树在容器内的固定路径（= 三卷挂载点，单一来源见 containers/constants 的 MOUNT_*；
-// 空卷首挂由 #588 派生镜像的骨架初始化）。wiki 树根 = ~/.openclaw/wiki/main；workspace 同上卷。
+// 两棵树在容器内的固定路径 = 三卷挂载点（ADR 0011：wiki / workspace / home 是三个互相独立的卷；
+// 单一来源见 containers/constants 的 MOUNT_*，空卷首挂由 #588 派生镜像的骨架初始化）。
 export const FILE_ROOTS: Record<'wiki' | 'workspace', string> = {
   wiki: MOUNT_WIKI,
   workspace: MOUNT_WORKSPACE,
