@@ -16,6 +16,11 @@ export const LABEL_APP_KEY = 'app'
 export const LABEL_APP_VALUE = 'openclaw-fleet'
 export const LABEL_INSTANCE_KEY = 'openclaw.instance'
 export const LABEL_PORT_KEY = 'openclaw.port'
+// #696 一次性临时容器标记（runOnce）：与 fleet 三标签互斥——临时容器不写 app/instance/port 标签、
+// 不发布宿主端口，故 listFleet（按 app 过滤）与端口对账均不可见；本标签仅用于「认出临时容器」
+//（daemon 侧泄漏排查 / 冒烟断言）。
+export const LABEL_ONESHOT_KEY = 'openclaw.oneshot'
+export const LABEL_ONESHOT_VALUE = 'true'
 // 容器内固定 bind-mount 路径（#591：仅 home 目录 rw bind 承载 workspace/wiki/state/logs；
 // openclaw.json 落 home 内默认路径 ~/.openclaw/openclaw.json——静态 config，无独立 config bind）
 export const HOME_BIND = '/home/node/.openclaw'

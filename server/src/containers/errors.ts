@@ -94,3 +94,19 @@ export class ConfigWriteError extends Error {
     this.name = 'ConfigWriteError'
   }
 }
+
+// 一次性临时容器（runOnce）以非 0 退出（#696）：携带退出码与输出，供升级编排判定失败语义并如实
+// 记录日志（如 `openclaw doctor --fix` 的输出）。与 ConfigWriteError 同类：刻意不继承
+// ContainerDomainError（无信封码，编排层消费，不经 REST 直达用户）。
+export class RunOnceError extends Error {
+  constructor(
+    public readonly exitCode: number,
+    public readonly output: string,
+    public readonly cmd: readonly string[],
+  ) {
+    super(
+      `runOnce exited with code ${exitCode}: cmd=${JSON.stringify(cmd)} output=${JSON.stringify(output.slice(0, 500))}`,
+    )
+    this.name = 'RunOnceError'
+  }
+}

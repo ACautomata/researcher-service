@@ -7,7 +7,9 @@ import { describe, it, expect } from 'vitest'
 import { Readable } from 'node:stream'
 import type Docker from 'dockerode'
 import { DockerRuntime } from '../src/containers/dockerRuntime'
+import { RunOnceError } from '../src/containers/errors'
 import { namedVolumesFor } from '../src/containers/runtime'
+import { LABEL_ONESHOT_KEY, LABEL_ONESHOT_VALUE } from '../src/containers/constants'
 
 // 最小 mock：仅需 getContainer().stop() 能注入指定 statusCode 错误。
 function mockDocker(stopErr?: { statusCode: number; message: string }): Docker {
@@ -262,5 +264,189 @@ describe('DockerRuntime named volumes（#590）', () => {
     const { docker } = mockVolumeClient({ volumeErr: { statusCode: 500, message: 'daemon error' } })
     const rt = new DockerRuntime(() => docker)
     await expect(rt.remove('nv-box', namedVolumesFor('gen-1'))).rejects.toThrow('daemon error')
+  })
+})
+
+// ---- #696 oneshot 原语（升级编排前置）：以指定镜像 + 指定命令跑一次性临时容器 ----
+// 关键不变量：临时容器不带任何 fleet 标签（app=openclaw-fleet / openclaw.instance / openclaw.port），
+// 也不发布宿主端口——listFleet（按 app 标签过滤）与宿主端口对账（按发布端口聚合）对它天然不可见。
+
+describe('DockerRuntime.runOnce（#696 一次性临时容器）', () => {
+  it('buildOneShotOptions：仅 oneshot 标记标签、无端口发布；覆写镜像 ENTRYPOINT 且清空 Cmd', () => {
+    const rt = new DockerRuntime(() => mockPullClient({ imagePresent: true }).docker)
+    const opts = rt.buildOneShotOptions({
+      image: 'ghcr.io/openclaw/openclaw:test',
+      cmd: ['sh', '-c', 'echo hi'],
+      mounts: [
+        { source: 'openclaw-home-gen-1', target: '/home/node/.openclaw' },
+        { source: 'openclaw-home-backup-gen-1', target: '/backup', readOnly: true },
+      ],
+    })
+    expect(opts.Image).toBe('ghcr.io/openclaw/openclaw:test')
+    // 独立标记标签——fleet 列表按 app=openclaw-fleet 过滤 → 临时容器不可见
+    expect(opts.Labels).toEqual({ [LABEL_ONESHOT_KEY]: LABEL_ONESHOT_VALUE })
+    // 无端口发布/暴露——宿主端口对账不可见
+    expect(opts.HostConfig?.PortBindings).toBeUndefined()
+    expect(opts.ExposedPorts).toBeUndefined()
+    // 覆写镜像 ENTRYPOINT（官方镜像为 tini）+ 清空镜像 Cmd（否则会作为参数追加到 entrypoint 之后）
+    expect(opts.Entrypoint).toEqual(['sh', '-c', 'echo hi'])
+    expect(opts.Cmd).toEqual([])
+    // 挂载按传入顺序（doctor 三卷 / 备份卷+home 卷），readOnly 仅显式要求时出现
+    expect(opts.HostConfig?.Mounts).toEqual([
+      { Type: 'volume', Source: 'openclaw-home-gen-1', Target: '/home/node/.openclaw' },
+      { Type: 'volume', Source: 'openclaw-home-backup-gen-1', Target: '/backup', ReadOnly: true },
+    ])
+  })
+
+  it('buildOneShotOptions：无 mounts → 无 Mounts/Binds（纯命令容器）', () => {
+    const rt = new DockerRuntime(() => mockPullClient({ imagePresent: true }).docker)
+    const opts = rt.buildOneShotOptions({ image: 'img', cmd: ['true'] })
+    expect(opts.HostConfig?.Mounts).toBeUndefined()
+    expect(opts.HostConfig?.Binds).toBeUndefined()
+  })
+
+  it('buildOneShotOptions：spec.env 覆盖/追加到基础 env（卷内配置占位插值所需）', () => {
+    const rt = new DockerRuntime(() => mockPullClient({ imagePresent: true }).docker)
+    const opts = rt.buildOneShotOptions({ image: 'img', cmd: ['true'], env: { GATEWAY_TOKEN: 'tok-1' } })
+    const env = (opts.Env as string[]) ?? []
+    expect(env).toContain('GATEWAY_TOKEN=tok-1')
+    expect(env).toContain('HOME=/home/node') // 基础 env 仍在（CLI 靠 HOME 定位 ~/.openclaw）
+  })
+})
+
+// 一次性临时容器的 mock client：createContainer 返回可编程 container（start/wait/logs/remove）。
+// logs 返回 docker 多路复用帧（非 TTY 容器形状：8 字节头 [stream,0,0,0,size_be32] + 负载）。
+function mockOneShotClient(opts: {
+  exitCode?: number
+  stdout?: string
+  stderr?: string
+  waitErr?: Error
+  logsErr?: Error
+  removeErr?: { statusCode: number; message: string }
+  rawLogs?: Buffer // 覆盖帧编码（测非帧/异常形状）
+}): { docker: Docker; calls: { started: boolean; removed: boolean; removeOpts: unknown; createOpts: unknown } } {
+  const calls = { started: false, removed: false, removeOpts: undefined as unknown, createOpts: undefined as unknown }
+  const frame = (stream: number, text: string): Buffer => {
+    const payload = Buffer.from(text, 'utf8')
+    const head = Buffer.alloc(8)
+    head[0] = stream // 1=stdout 2=stderr
+    head.writeUInt32BE(payload.length, 4)
+    return Buffer.concat([head, payload])
+  }
+  const logs =
+    opts.rawLogs ??
+    Buffer.concat([
+      ...(opts.stdout ? [frame(1, opts.stdout)] : []),
+      ...(opts.stderr ? [frame(2, opts.stderr)] : []),
+    ])
+  const docker = {
+    getImage: () => ({ inspect: async () => ({}) }),
+    createContainer: async (options: Docker.ContainerCreateOptions) => {
+      calls.createOpts = options
+      return {
+        id: 'oneshot-cid',
+        start: async () => {
+          calls.started = true
+        },
+        wait: async () => {
+          if (opts.waitErr) throw opts.waitErr
+          return { StatusCode: opts.exitCode ?? 0 }
+        },
+        logs: async () => {
+          if (opts.logsErr) throw opts.logsErr
+          return logs
+        },
+        remove: async (o: unknown) => {
+          calls.removed = true
+          calls.removeOpts = o
+          if (opts.removeErr) {
+            const e = new Error(opts.removeErr.message) as Error & { statusCode: number }
+            e.statusCode = opts.removeErr.statusCode
+            throw e
+          }
+        },
+      }
+    },
+  } as unknown as Docker
+  return { docker, calls }
+}
+
+describe('DockerRuntime.runOnce 退出码与清理（#696）', () => {
+  const spec = { image: 'ghcr.io/openclaw/openclaw:test', cmd: ['sh', '-c', 'echo hi'] }
+
+  it('退出码 0 → 返回 stdout+stderr 合并文本（去多路复用帧头），容器被强制删', async () => {
+    const { docker, calls } = mockOneShotClient({ stdout: 'backup done\n', stderr: 'warn: none\n' })
+    const rt = new DockerRuntime(() => docker)
+    const res = await rt.runOnce(spec)
+    expect(res.output).toBe('backup done\nwarn: none\n')
+    expect(calls.started).toBe(true)
+    expect(calls.removed).toBe(true)
+    // 只删容器（force），不删卷——备份卷等调用方资产须留存
+    expect(calls.removeOpts).toEqual({ force: true })
+  })
+
+  it('非 0 退出 → 抛 RunOnceError（携带退出码与输出），容器仍被清理', async () => {
+    const { docker, calls } = mockOneShotClient({ exitCode: 7, stderr: 'doctor failed: legacy store\n' })
+    const rt = new DockerRuntime(() => docker)
+    const err = await rt.runOnce(spec).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(RunOnceError)
+    expect((err as RunOnceError).exitCode).toBe(7)
+    expect((err as RunOnceError).output).toContain('doctor failed')
+    expect(calls.removed).toBe(true)
+  })
+
+  it('等待退出时 daemon 报错（异常路径）→ 原错上抛，容器仍被清理', async () => {
+    const { docker, calls } = mockOneShotClient({ waitErr: new Error('daemon blew up') })
+    const rt = new DockerRuntime(() => docker)
+    await expect(rt.runOnce(spec)).rejects.toThrow('daemon blew up')
+    expect(calls.removed).toBe(true)
+  })
+
+  it('清理失败（remove 500）→ 不掩盖主错误：非 0 退出仍抛 RunOnceError，成功仍 resolve', async () => {
+    const failed = mockOneShotClient({ exitCode: 3, removeErr: { statusCode: 500, message: 'remove failed' } })
+    const rt1 = new DockerRuntime(() => failed.docker)
+    await expect(rt1.runOnce(spec)).rejects.toBeInstanceOf(RunOnceError)
+    const ok = mockOneShotClient({ removeErr: { statusCode: 500, message: 'remove failed' } })
+    const rt2 = new DockerRuntime(() => ok.docker)
+    await expect(rt2.runOnce(spec)).resolves.toEqual({ output: '' })
+  })
+
+  it('logs 形状非多路复用帧（daemon 直返原文）→ 原样返回，不丢诊断日志', async () => {
+    const { docker } = mockOneShotClient({ rawLogs: Buffer.from('plain text output', 'utf8') })
+    const rt = new DockerRuntime(() => docker)
+    await expect(rt.runOnce(spec)).resolves.toEqual({ output: 'plain text output' })
+  })
+
+  it('多字节字符被拆到相邻两帧 → 整体解码，不裂成替换符', async () => {
+    // 「报」的 UTF-8 是 3 字节 E6 8A A5——故意拆成一帧 1 字节 + 一帧 2 字节（docker 按写系统调用切帧）
+    const head = (stream: number, size: number): Buffer => {
+      const h = Buffer.alloc(8)
+      h[0] = stream
+      h.writeUInt32BE(size, 4)
+      return h
+    }
+    const raw = Buffer.concat([
+      head(1, 1),
+      Buffer.from([0xe6]),
+      head(1, 2),
+      Buffer.from([0x8a, 0xa5]),
+      head(1, 1),
+      Buffer.from('\n'),
+    ])
+    const { docker } = mockOneShotClient({ rawLogs: raw })
+    const rt = new DockerRuntime(() => docker)
+    await expect(rt.runOnce(spec)).resolves.toEqual({ output: '报\n' })
+  })
+
+  it('日志读取失败 → 不改变命令结果（诊断尽力而为：成功仍 resolve，非 0 仍抛退出码）', async () => {
+    const ok = mockOneShotClient({ stdout: 'x', logsErr: new Error('logs unavailable') })
+    const rt1 = new DockerRuntime(() => ok.docker)
+    await expect(rt1.runOnce(spec)).resolves.toEqual({ output: '' })
+
+    const bad = mockOneShotClient({ exitCode: 9, logsErr: new Error('logs unavailable') })
+    const rt2 = new DockerRuntime(() => bad.docker)
+    const err = await rt2.runOnce(spec).catch((e: unknown) => e)
+    expect((err as RunOnceError).exitCode).toBe(9) // 退出码不被日志故障吞掉
+    expect((err as RunOnceError).output).toBe('')
   })
 })

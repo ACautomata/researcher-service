@@ -5,7 +5,8 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { setupTestApp, type TestContext } from './setup'
 import { seedAdmin, seedUser, login, bearer } from './helpers'
-import { makeFleetTest } from './fleetTestUtils'
+import { makeFleetTest, type FleetTestContext } from './fleetTestUtils'
+import { RunOnceError } from '../src/containers/errors'
 
 // 轮询 list 直到 name 满足 predicate 或超时（detach 后台 provisioning/delete 的异步收敛；
 // spec 契约即「list 轮询见 creating→running / removing→消失」）。
@@ -257,5 +258,68 @@ describe('containers GET / scopes 防御解码 (Codex 第六轮 P2)', () => {
     expect(res.status).toBe(200)
     const item = res.body.data.find((i: { name: string }) => i.name === 'scope-c2')
     expect(item.pairing.scopes).toEqual([])
+  })
+})
+
+// #696 runOnce（一次性临时容器原语，升级编排前置）：经假运行时（接缝 #5）断言编排层可依赖的契约——
+// 成功返回输出 / 非 0 携带退出码抛出 / 三路清理，且临时容器对 fleet 列表与端口对账不可见。
+describe('runOnce 一次性临时容器（#696 假运行时）', () => {
+  let ctx: TestContext
+  let fl: FleetTestContext
+
+  beforeAll(async () => {
+    ctx = await setupTestApp()
+    fl = makeFleetTest(ctx.prisma)
+  })
+  afterAll(async () => {
+    await ctx.cleanup()
+  })
+
+  it('成功：临时容器记入 oneshot 记录并被清理；fleet 列表与端口对账不受影响', async () => {
+    const u = await seedUser(ctx.prisma, 'u-oneshot', 'pw-oneshot-secure')
+    await fl.orch.create('oneshot-fleet', u.id) // 对照：一个真 fleet 容器
+    const fleetBefore = await fl.runtime.listFleet()
+    const portsBefore = await fl.runtime.hostPublishedPorts()
+    fl.runtime.oneshotOutput = 'tar: 0 files\n'
+
+    const res = await fl.runtime.runOnce({
+      image: 'ghcr.io/openclaw/openclaw:target',
+      cmd: ['sh', '-c', 'tar czf /backup/home.tar.gz -C /home/node/.openclaw .'],
+      mounts: [
+        { source: 'openclaw-home-gen-9', target: '/home/node/.openclaw', readOnly: true },
+        { source: 'openclaw-home-backup-gen-9', target: '/backup' },
+      ],
+    })
+
+    expect(res.output).toBe('tar: 0 files\n')
+    expect(fl.runtime.oneshotRuns).toHaveLength(1)
+    const rec = fl.runtime.oneshotRuns[0]
+    expect(rec.spec.image).toBe('ghcr.io/openclaw/openclaw:target')
+    expect(rec.spec.mounts?.[1]).toEqual({ source: 'openclaw-home-backup-gen-9', target: '/backup' })
+    expect(rec.removed).toBe(true) // 全路径清理
+    // 对 fleet 列表与端口对账不可见（真 runtime 靠无 fleet 标签 + 无端口发布达成同一效果）
+    expect(await fl.runtime.listFleet()).toEqual(fleetBefore)
+    expect(await fl.runtime.hostPublishedPorts()).toEqual(portsBefore)
+  })
+
+  it('非 0 退出 → 抛 RunOnceError（退出码 + 输出），容器仍被清理', async () => {
+    fl.runtime.oneshotExitCode = 7
+    fl.runtime.oneshotOutput = 'legacy session store found\n'
+    const err = await fl.runtime
+      .runOnce({ image: 'img', cmd: ['openclaw', 'doctor', '--fix'] })
+      .catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(RunOnceError)
+    expect((err as RunOnceError).exitCode).toBe(7)
+    expect((err as RunOnceError).output).toContain('legacy session store')
+    expect(fl.runtime.oneshotRuns.at(-1)?.removed).toBe(true)
+  })
+
+  it('等待退出时 daemon 异常 → 原错上抛，容器仍被清理', async () => {
+    fl.runtime.oneshotWaitError = new Error('daemon unreachable')
+    const err = await fl.runtime
+      .runOnce({ image: 'img', cmd: ['sh', '-c', 'tar czf /backup/home.tar.gz .'] })
+      .catch((e: unknown) => e)
+    expect((err as Error).message).toBe('daemon unreachable')
+    expect(fl.runtime.oneshotRuns.at(-1)?.removed).toBe(true)
   })
 })
