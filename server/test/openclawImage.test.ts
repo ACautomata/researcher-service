@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { readFileSync, existsSync, readdirSync, statSync } from 'node:fs'
 import { join, resolve } from 'node:path'
+import { imageTag, isFloatingImageRef } from '../src/containers/imageRef'
 
 // issue #588 派生 OpenClaw 镜像静态断言（issue #586 测试接缝 5 的先例：config.test.ts）。
 // 断言对象是 deploy/openclaw-image/ 的声明式产物（Dockerfile + 骨架），不触真 docker：
@@ -8,10 +9,14 @@ import { join, resolve } from 'node:path'
 // 路径解析沿 chatSubprotocol.test.ts 模式：vitest 自 server/ 目录运行，cwd 上溯取仓库根。
 const IMAGE_DIR = resolve(process.cwd(), '../deploy/openclaw-image')
 const SKELETON_ROOT = join(IMAGE_DIR, 'skeleton/.openclaw')
+// 钉定的目标版本 tag（issue #695）：版本 tag 一经发布不可移动——bump = 改 Dockerfile FROM 基线
+// （版本前进）+ 本常量 + config.ts 默认目标镜像 + 模板栈 compose 默认值（三处运行期明文同锁，
+// 见下方 describe），路径见 deploy/README.md「派生镜像版本 tag 约定」。
+const PINNED_TAG = '2026.9.4-browser'
 // 官方 browser 基线（ADR 0003 保 browser 能力；派生镜像不新开谱系，ADR 0013）
-const OFFICIAL_BASE = 'ghcr.io/openclaw/openclaw:2026.7.1-browser'
+const OFFICIAL_BASE = `ghcr.io/openclaw/openclaw:${PINNED_TAG}`
 // 本仓库 GHCR 派生镜像（与 CD 推送 tag 同源；ghcr.io 要求 repository 全小写）
-const DERIVED_DEFAULT = 'ghcr.io/acautomata/researcher-service/openclaw:latest'
+const DERIVED_DEFAULT = `ghcr.io/acautomata/researcher-service/openclaw:${PINNED_TAG}`
 const QUOTE = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
 function readDockerfile(): string {
@@ -50,13 +55,8 @@ function walkFiles(dir: string, prefix = ''): string[] {
 }
 
 describe('派生 OpenClaw 镜像（issue #588）', () => {
-  it('Dockerfile 基于官方 2026.7.1-browser 基线（不新开谱系，ADR 0003/0013）', () => {
-    const df = readDockerfile()
-    const fromLine = df
-      .split('\n')
-      .map((l) => l.trim())
-      .find((l) => l.startsWith('FROM '))
-    expect(fromLine).toBe(`FROM ${OFFICIAL_BASE}`)
+  it(`Dockerfile 基于官方 ${PINNED_TAG} 基线（不新开谱系，ADR 0003/0013）`, () => {
+    expect(dockerfileFromRef()).toBe(OFFICIAL_BASE)
   })
 
   it('Dockerfile 安装 poppler-utils 且 pdftotext 探针直接以返回码断言（不经管道）', () => {
@@ -119,5 +119,110 @@ describe('OPENCLAW_IMAGE 默认值（issue #588 AC3）', () => {
     expect(src).toMatch(
       new RegExp(`OPENCLAW_IMAGE\\s*\\?\\?\\s*'${QUOTE(DERIVED_DEFAULT)}'`),
     )
+  })
+})
+
+// ---- 目标镜像钉版（issue #695，spec §2.1 升级编排的版本前提）----
+// 版本单源 = Dockerfile FROM 基线行。三处**运行期**明文与之同版本并由本文件交叉断言锁死（防双源
+// 漂移）：控制面默认目标镜像（config.ts OPENCLAW_IMAGE 默认值）、模板栈 compose 默认值、测试内的
+// 版本常量；tag 解析统一走 src/containers/imageRef.ts 的 imageTag（纯知识单一实现，CONTEXT「共享
+// 内核」）。文档与 .env.example 里的版本是示意值（不在锁内，换版时随 deploy/README.md 更新）。
+// 沿本文件既有模式：读声明式产物文本，不触真 docker（构建期断言由 Dockerfile RUN 在构建时执行）。
+const STANDALONE_COMPOSE = 'deploy/docker-compose.yml'
+
+function readRepoFile(rel: string): string {
+  const file = join(resolve(process.cwd(), '..'), rel)
+  expect(existsSync(file), `缺文件: ${rel}`).toBe(true)
+  return readFileSync(file, 'utf8')
+}
+
+function dockerfileFromRef(): string {
+  const line = readDockerfile()
+    .split('\n')
+    .map((l) => l.trim())
+    .find((l) => l.startsWith('FROM '))
+  expect(line, 'Dockerfile 缺 FROM 行').toBeDefined()
+  return (line as string).slice('FROM '.length).split(/\s+/)[0]
+}
+
+// config.ts 里 OPENCLAW_IMAGE 默认值明文（与运行时 env 注入解耦，静态防漂移）
+function configDefaultImage(): string {
+  const m = readRepoFile('server/src/config.ts').match(/OPENCLAW_IMAGE\s*\?\?\s*'([^']+)'/)
+  expect(m, 'config.ts 缺 OPENCLAW_IMAGE 默认值明文').not.toBeNull()
+  return (m as RegExpMatchArray)[1]
+}
+
+// 模板栈 compose 默认镜像（`${OPENCLAW_IMAGE:-<默认>}`）：本地手动起网关的镜像来源
+function standaloneComposeDefaultImage(): string {
+  const m = readRepoFile(STANDALONE_COMPOSE).match(/\$\{OPENCLAW_IMAGE:-([^}]+)\}/)
+  expect(m, `${STANDALONE_COMPOSE} 缺 OPENCLAW_IMAGE 默认值`).not.toBeNull()
+  return (m as RegExpMatchArray)[1]
+}
+
+describe('目标镜像钉版（issue #695）', () => {
+  it('Dockerfile FROM 版本 tag == config 默认目标镜像 tag（两处明文交叉锁死，防双源漂移）', () => {
+    const df = dockerfileFromRef()
+    const cfg = configDefaultImage()
+    expect(df).toBe(OFFICIAL_BASE)
+    expect(cfg).toBe(DERIVED_DEFAULT)
+    expect(imageTag(df)).toBe(PINNED_TAG)
+    expect(imageTag(cfg)).toBe(PINNED_TAG) // 与上行同值 ⇒ 两处互相锁死
+  })
+
+  it('模板栈 compose 默认镜像同版本（本地手动栈不落在别的版本上）', () => {
+    expect(standaloneComposeDefaultImage()).toBe(DERIVED_DEFAULT)
+  })
+
+  it('三处目标镜像均非浮动引用（生产 fail-fast 的默认路径恒通过）', () => {
+    expect(isFloatingImageRef(dockerfileFromRef())).toBe(false)
+    expect(isFloatingImageRef(configDefaultImage())).toBe(false)
+    expect(isFloatingImageRef(standaloneComposeDefaultImage())).toBe(false)
+  })
+})
+
+describe('CD 推送 openclaw 版本 tag（issue #695 AC4）', () => {
+  const cd = readRepoFile('.github/workflows/cd.yml')
+  const openclawStep = cd
+    .split('Build & push openclaw derived image')[1]
+    .split('Build & push autofigure')[0]
+
+  // openclaw 步骤 tags 字面块（`tags: |` 起、至缩进 ≤ 该键的行止）：逐行即一个 tag，块内写注释
+  // 会把 `# ...` 当 tag 文本传给 build-push-action（本断言即为防此回归）。
+  function tagsBlock(step: string): string[] {
+    const lines = step.split('\n')
+    const start = lines.findIndex((l) => l.trim() === 'tags: |')
+    expect(start, 'CD 缺 openclaw tags 字面块').toBeGreaterThanOrEqual(0)
+    const indent = lines[start].search(/\S/)
+    const out: string[] = []
+    for (let i = start + 1; i < lines.length; i++) {
+      if (lines[i].trim() !== '' && lines[i].search(/\S/) <= indent) break
+      out.push(lines[i].trim())
+    }
+    return out.filter((l) => l !== '')
+  }
+
+  it('版本 tag 从 Dockerfile FROM 基线行单源提取（不引入第二配置源）', () => {
+    expect(cd).toMatch(/grep[^\n]*FROM[^\n]*deploy\/openclaw-image\/Dockerfile/)
+    expect(cd).toMatch(/OPENCLAW_VERSION_TAG=\$\{VERSION_TAG\}/)
+  })
+
+  it('提取失败即 fail：缺 FROM 行 / 无 tag / digest FROM 行 —— 不推空 tag 也不拿 sha 当版本', () => {
+    expect(cd).toMatch(/无法从 Dockerfile FROM 行提取版本 tag[\s\S]{0,200}?exit 1/)
+    expect(cd).toMatch(/digest[\s\S]{0,200}?exit 1/)
+  })
+
+  it('openclaw build & push 恰推三个 tag：:latest / :<sha> / 版本 tag（块内无注释行）', () => {
+    expect(tagsBlock(openclawStep)).toEqual([
+      '${{ env.OPENCLAW_IMAGE }}:latest',
+      '${{ env.OPENCLAW_IMAGE }}:${{ env.IMAGE_TAG }}',
+      '${{ env.OPENCLAW_IMAGE }}:${{ env.OPENCLAW_VERSION_TAG }}',
+    ])
+  })
+
+  it('部署段显式重拉的运行时镜像 = 版本 tag（宿主缓存与 fleet 目标同源）', () => {
+    expect(cd).toMatch(/docker pull "\$\{OPENCLAW_IMAGE\}:\$\{OPENCLAW_VERSION_TAG\}"/)
+    // 变量须经 ssh-action 透传进远端脚本（env 声明 + envs 白名单）
+    expect(cd).toMatch(/OPENCLAW_VERSION_TAG: \$\{\{ env\.OPENCLAW_VERSION_TAG \}\}/)
+    expect(cd).toMatch(/envs: [^\n]*OPENCLAW_VERSION_TAG/)
   })
 })
