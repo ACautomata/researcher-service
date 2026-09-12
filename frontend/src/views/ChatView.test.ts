@@ -2442,14 +2442,16 @@ describe('ChatView', () => {
 
       // 重连握手完成，但 listSessions 迟迟不回（慢网关）——此刻投影是断线前的旧条目，
       // 期间网关真实转录可能已前进；若入口恢复可点，用户可能剪除自己还没看到的更新轮次。
-      let listing: ((v: Array<typeof SESSION>) => void) | null = null
-      gw.listSessions.mockImplementation(() => new Promise((resolve) => { listing = resolve }))
+      // 用 holder 对象而非裸 let 变量：TS 5.4+ 闭包赋值对闭包外引用点不可见（CFA 保留窄化），
+      // `let listing = null` + 闭包内赋值会让 `listing?.()` 被判 never（TS2349）；属性访问不受此限。
+      const listing: { resolve?: (v: Array<typeof SESSION>) => void } = {}
+      gw.listSessions.mockImplementation(() => new Promise((resolve) => { listing.resolve = resolve }))
       gw.fireReady()
       await flushPromises()
       expect(w.find('[data-test="rewind"]').exists()).toBe(false) // ← 修复前：此处入口已恢复（bug）
 
       // 同步落地 → 投影权威 → 入口恢复
-      listing?.([SESSION])
+      listing.resolve?.([SESSION])
       await flushPromises()
       expect(w.find('[data-test="rewind"]').exists()).toBe(true)
     })
