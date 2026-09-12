@@ -7,7 +7,8 @@ import { imageTag, isFloatingImageRef } from '../src/containers/imageRef'
 // 断言对象是 deploy/openclaw-image/ 的声明式产物（Dockerfile + 骨架），不触真 docker：
 // 构建期断言（pdftotext 可用、骨架齐全）由 Dockerfile RUN 在构建时执行，此处兜底防回归。
 // 路径解析沿 chatSubprotocol.test.ts 模式：vitest 自 server/ 目录运行，cwd 上溯取仓库根。
-const IMAGE_DIR = resolve(process.cwd(), '../deploy/openclaw-image')
+const ROOT = resolve(process.cwd(), '..')
+const IMAGE_DIR = join(ROOT, 'deploy/openclaw-image')
 const SKELETON_ROOT = join(IMAGE_DIR, 'skeleton/.openclaw')
 // 钉定的目标版本 tag（issue #695）：版本 tag 一经发布不可移动——bump = 改 Dockerfile FROM 基线
 // （版本前进）+ 本常量 + config.ts 默认目标镜像 + 模板栈 compose 默认值 + dev driver 预拉默认值
@@ -103,7 +104,7 @@ describe('派生 OpenClaw 镜像（issue #588）', () => {
   })
 
   it('vault 路径契约交叉校验：openclaw.json memory-wiki vault.path 指向骨架 wiki/main（ADR 0011 挂载点）', () => {
-    const cfg = JSON.parse(readFileSync(resolve(process.cwd(), '../deploy/openclaw.json'), 'utf8'))
+    const cfg = JSON.parse(readRepoFile('deploy/openclaw.json'))
     const vaultPath = cfg.plugins?.entries?.['memory-wiki']?.config?.vault?.path
     expect(vaultPath).toBe('~/.openclaw/wiki/main')
     expect(existsSync(join(SKELETON_ROOT, 'wiki/main'))).toBe(true)
@@ -130,9 +131,12 @@ const STANDALONE_COMPOSE = 'deploy/docker-compose.yml'
 // dev 管线 driver 脚本（run-ai-research-pipeline）预拉 fleet 镜像的默认值：第四处运行期明文
 const FLEET_DRIVER = '.claude/skills/run-ai-research-pipeline/driver.sh'
 
+// 仓库根读文件：与 prodDeploy.test.ts / devDeploy.test.ts 的同名 helper 保持逐字一致（本目录的
+// 静态断言测试各文件自包含、零业务依赖——不共用 helpers.ts：那份是 DB/auth 种子工具，引进来会
+// 把 bcrypt/prisma 拖进纯文本断言；三份再现即考虑提取，届时以本注释为准）。
 function readRepoFile(rel: string): string {
-  const file = join(resolve(process.cwd(), '..'), rel)
-  expect(existsSync(file), `缺文件: ${rel}`).toBe(true)
+  const file = join(ROOT, rel)
+  expect(existsSync(file), `缺文件: ${file}`).toBe(true)
   return readFileSync(file, 'utf8')
 }
 
@@ -185,9 +189,11 @@ describe('目标镜像钉版（issue #695）', () => {
 
 describe('CD 推送 openclaw 版本 tag（issue #695 AC4）', () => {
   const cd = readRepoFile('.github/workflows/cd.yml')
-  const openclawStep = cd
-    .split('Build & push openclaw derived image')[1]
-    .split('Build & push autofigure')[0]
+  // 收集期切出 openclaw 步骤块：先兜底（同本文件 tagsBlock / prodDeploy 的 serverMountLines 惯用法），
+  // 步骤名一变即给可读断言失败，而非 `undefined.split(...)` 的 TypeError
+  const openclawSection = cd.split('Build & push openclaw derived image')[1]
+  expect(openclawSection, 'CD 缺 openclaw build & push 步骤').toBeDefined()
+  const openclawStep = (openclawSection as string).split('Build & push autofigure')[0]
 
   // openclaw 步骤 tags 字面块（`tags: |` 起、至缩进 ≤ 该键的行止）：逐行即一个 tag，块内写注释
   // 会把 `# ...` 当 tag 文本传给 build-push-action（本断言即为防此回归）。
