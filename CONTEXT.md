@@ -8,6 +8,10 @@
 面板编排的单位。每个容器内跑一个 `main` agent、一个 gateway（WS，容器内 18789）、以及独立的 home / wiki / openclaw.json。它是本系统唯一的外部 bounded context。
 _Avoid_: 实例——"实例"指面板侧的 `Instance` 数据模型，是 OpenClaw 容器在控制面的投影，二者不等同。
 
+**一次性临时容器 (one-shot container)**:
+由运行时原语 `runOnce` 以指定镜像 + 指定命令跑完即弃的容器（升级编排在「真容器尚未启动」的窗口里执行备份与 `openclaw doctor --fix` 的通道——stopped 容器不可 exec，新镜像网关遇 legacy 存储又拒绝就绪）。**它不是 OpenClaw 容器**：不写 fleet 三标签（`app` / `openclaw.instance` / `openclaw.port`）、不发布宿主端口，故对 fleet 列表与端口对账不可见；退出码非 0 即失败（`RunOnceError` 携带退出码与输出），容器由原语在成功/失败/异常三路强制回收（卷不删）。
+_Avoid_: 临时实例——易与面板侧 `Instance` 模型混淆；影子容器——掩盖它由面板显式创建、必须回收的事实。
+
 **面板 bounded context (panel bounded context)**:
 面板内部的六个 bounded context（2026-08-13 划分，wayfinder #637）：containers（核心）/ 身份与访问 / wiki / models（支撑）/ files / traceLogs 审计（通用）。跨 context 契约：**行为协作一律经领域消息**（异步）；无 IO 纯函数/常量/渲染机制下沉**共享内核**；容器归属门 `getInstanceForUser` 是共享中间件**唯一单点**（tenant 引入时只替换此门）。隧道、前端 chat 协议机、health 探针**不是 context**（基础设施 / 接触路径 (4) 客户端侧 ACL）。
 _Avoid_: 跨 context 直接 import 域服务（渲染、状态查询）——行为协作走领域消息；在 context 内复制共享内核纯知识（容器命名规则 `containerName`、配置安全不变量）——必须单一实现。
