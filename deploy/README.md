@@ -16,11 +16,13 @@
 
 ## 派生镜像版本 tag 约定（issue #695）
 
-- **版本单源 = `deploy/openclaw-image/Dockerfile` 的 `FROM` 基线行**。三处**运行期**明文与之同版本，
+- **版本单源 = `deploy/openclaw-image/Dockerfile` 的 `FROM` 基线行**。四处**运行期**明文与之同版本，
   由 `server/test/openclawImage.test.ts` 交叉断言锁死（防双源漂移）：控制面默认目标镜像
   （`server/src/config.ts` 的 `OPENCLAW_IMAGE` 默认值）、模板栈 compose 默认值
-  （`deploy/docker-compose.yml`）、测试内的版本常量；CD 也从该行提取版本并推送派生镜像版本 tag。
-  本文档与 `.env.example` 里的版本为**示意值**（不在锁内，换版时随本文档更新）。
+  （`deploy/docker-compose.yml`）、dev 管线 driver 预拉的默认镜像
+  （`.claude/skills/run-ai-research-pipeline/driver.sh`）、测试内的版本常量 `PINNED_TAG`；
+  CD 也从该行提取版本并推送派生镜像版本 tag。本文档与 `.env.example` 里的版本为**示意值**
+  （不在锁内，换版时随本文档更新）。
 - **版本 tag 一经发布不可移动**：`ghcr.io/acautomata/researcher-service/openclaw:<基线 tag>`
   （当前 `2026.9.4-browser`）发布后内容冻结，**不得原地覆盖同名 tag**。容器升级编排的检测判定是
   「容器记录镜像 ≠ 当前目标」，移动 tag 会让历史容器与目标的关系不可复现；回滚走 `:<CI head_sha>`。
@@ -39,7 +41,7 @@
   GHCR 拉取（无凭证即失败）。
 
   ```bash
-  # 版本 tag 单源 = Dockerfile FROM 行（与 CD 的提取逻辑同款）
+  # 版本 tag 单源 = Dockerfile FROM 行（与 CD 同一提取方式；CD 另对 digest FROM 行显式拒绝）
   TAG="$(grep -m1 -E '^[[:space:]]*FROM[[:space:]]' deploy/openclaw-image/Dockerfile | awk '{print $2}')"; TAG="${TAG##*:}"
   docker build -t "ghcr.io/acautomata/researcher-service/openclaw:${TAG}" deploy/openclaw-image
   # 已构建过镜像时补打（等价；源为先前构建的任意 tag，此处以 :latest 为例）：
@@ -182,10 +184,8 @@ volume（卷物理路径在 Docker VM 内）→ dev/prod 寻址/路径分叉」�
 git clone --depth 1 https://github.com/ACautomata/researcher ./researcher
 
 # 2.（仅真编排需）备派生镜像 + LLM key；仅起控制面/登录可跳过
-#    镜像 tag 须 = Dockerfile FROM 基线版本 tag（config 默认目标镜像钉的就是它，issue #695；
-#    手工打 tag 步骤见上「派生镜像版本 tag 约定」）
-TAG="$(grep -m1 -E '^[[:space:]]*FROM[[:space:]]' deploy/openclaw-image/Dockerfile | awk '{print $2}')"; TAG="${TAG##*:}"
-docker build -t "ghcr.io/acautomata/researcher-service/openclaw:${TAG}" deploy/openclaw-image
+#    镜像 tag 须 = Dockerfile FROM 基线版本 tag（config 默认目标镜像钉的就是它，issue #695）——
+#    构建命令见上「派生镜像版本 tag 约定」（该命令只在那里维护一处，不在此重复拷贝）
 export LLM_API_KEY=...
 
 # 3. 起 dev 控制面（server:8001，挂 docker.sock + panel-dev-db 卷）

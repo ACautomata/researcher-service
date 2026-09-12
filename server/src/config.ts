@@ -156,7 +156,9 @@ function readFleetRoot(): string {
 // 防双源漂移；版本 tag 一经发布不可移动，换内容须 bump 版本，见 deploy/README.md）。
 // 生产浮动引用（无 tag 或 :latest）→ 启动 fail-fast：浮动 tag 让「当前目标」随上游移动，升级
 // 不可复现/不可 review（对齐 readTemplateDir/readFleetRoot 前置校验模式）；dev/test 容忍浮动
-//（本地调试可覆盖回官方 :latest）。
+//（本地调试可覆盖回官方 :latest）。**无 dev 旁路分支**（父 spec #693 §2.1「dev 不旁路检测机制」
+// = 不为 dev 另写一条路径）：dev/prod 共用本函数与同一准据 isFloatingImageRef，仅按 NODE_ENV
+// 决定是否抛错——「生产必拦 / dev 放行」是同一判定的两种门控结果，不是两套实现。
 function readFleetImage(): string {
   const v =
     process.env.OPENCLAW_IMAGE ?? 'ghcr.io/acautomata/researcher-service/openclaw:2026.9.4-browser'

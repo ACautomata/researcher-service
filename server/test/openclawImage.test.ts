@@ -10,8 +10,8 @@ import { imageTag, isFloatingImageRef } from '../src/containers/imageRef'
 const IMAGE_DIR = resolve(process.cwd(), '../deploy/openclaw-image')
 const SKELETON_ROOT = join(IMAGE_DIR, 'skeleton/.openclaw')
 // 钉定的目标版本 tag（issue #695）：版本 tag 一经发布不可移动——bump = 改 Dockerfile FROM 基线
-// （版本前进）+ 本常量 + config.ts 默认目标镜像 + 模板栈 compose 默认值（三处运行期明文同锁，
-// 见下方 describe），路径见 deploy/README.md「派生镜像版本 tag 约定」。
+// （版本前进）+ 本常量 + config.ts 默认目标镜像 + 模板栈 compose 默认值 + dev driver 预拉默认值
+// （四处运行期明文同锁，见下方 describe），路径见 deploy/README.md「派生镜像版本 tag 约定」。
 const PINNED_TAG = '2026.9.4-browser'
 // 官方 browser 基线（ADR 0003 保 browser 能力；派生镜像不新开谱系，ADR 0013）
 const OFFICIAL_BASE = `ghcr.io/openclaw/openclaw:${PINNED_TAG}`
@@ -20,9 +20,7 @@ const DERIVED_DEFAULT = `ghcr.io/acautomata/researcher-service/openclaw:${PINNED
 const QUOTE = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
 function readDockerfile(): string {
-  const file = join(IMAGE_DIR, 'Dockerfile')
-  expect(existsSync(file), `缺派生 Dockerfile: ${file}`).toBe(true)
-  return readFileSync(file, 'utf8')
+  return readRepoFile('deploy/openclaw-image/Dockerfile')
 }
 
 // 骨架文件清单：wiki vault 顶层 + memory-wiki 五核心目录（r7-wiki-read-mechanism 实测结构，
@@ -113,22 +111,24 @@ describe('派生 OpenClaw 镜像（issue #588）', () => {
 })
 
 describe('OPENCLAW_IMAGE 默认值（issue #588 AC3）', () => {
-  it('server 配置默认值指向派生镜像', () => {
-    // 直接读 config.ts 源码断言默认值字符串：与运行时 env 注入解耦，静态防漂移
-    const src = readFileSync(resolve(process.cwd(), 'src/config.ts'), 'utf8')
-    expect(src).toMatch(
-      new RegExp(`OPENCLAW_IMAGE\\s*\\?\\?\\s*'${QUOTE(DERIVED_DEFAULT)}'`),
-    )
+  it('server 配置默认值指向本仓库派生镜像', () => {
+    // #588 的归属断言：默认值指向本仓库派生镜像（而非官方基线）。读源码明文、与运行时 env
+    // 注入解耦；与版本 tag 的完整交叉断言见下方「目标镜像钉版（issue #695）」——两处共用同一
+    // 提取实现 configDefaultImage（不重复解析正则）
+    expect(configDefaultImage()).toMatch(/^ghcr\.io\/acautomata\/researcher-service\/openclaw:/)
   })
 })
 
 // ---- 目标镜像钉版（issue #695，spec §2.1 升级编排的版本前提）----
-// 版本单源 = Dockerfile FROM 基线行。三处**运行期**明文与之同版本并由本文件交叉断言锁死（防双源
-// 漂移）：控制面默认目标镜像（config.ts OPENCLAW_IMAGE 默认值）、模板栈 compose 默认值、测试内的
-// 版本常量；tag 解析统一走 src/containers/imageRef.ts 的 imageTag（纯知识单一实现，CONTEXT「共享
-// 内核」）。文档与 .env.example 里的版本是示意值（不在锁内，换版时随 deploy/README.md 更新）。
+// 版本单源 = Dockerfile FROM 基线行。四处**运行期**明文与之同版本并由本文件交叉断言锁死（防双源
+// 漂移）：控制面默认目标镜像（config.ts OPENCLAW_IMAGE 默认值）、模板栈 compose 默认值、dev 管线
+// driver 预拉默认值、测试内的版本常量；tag 解析统一走 src/containers/imageRef.ts 的 imageTag
+// （纯知识单一实现，CONTEXT「共享内核」）。文档与 .env.example 里的版本是示意值（不在锁内，
+// 换版时随 deploy/README.md 更新）。
 // 沿本文件既有模式：读声明式产物文本，不触真 docker（构建期断言由 Dockerfile RUN 在构建时执行）。
 const STANDALONE_COMPOSE = 'deploy/docker-compose.yml'
+// dev 管线 driver 脚本（run-ai-research-pipeline）预拉 fleet 镜像的默认值：第四处运行期明文
+const FLEET_DRIVER = '.claude/skills/run-ai-research-pipeline/driver.sh'
 
 function readRepoFile(rel: string): string {
   const file = join(resolve(process.cwd(), '..'), rel)
@@ -152,10 +152,11 @@ function configDefaultImage(): string {
   return (m as RegExpMatchArray)[1]
 }
 
-// 模板栈 compose 默认镜像（`${OPENCLAW_IMAGE:-<默认>}`）：本地手动起网关的镜像来源
-function standaloneComposeDefaultImage(): string {
-  const m = readRepoFile(STANDALONE_COMPOSE).match(/\$\{OPENCLAW_IMAGE:-([^}]+)\}/)
-  expect(m, `${STANDALONE_COMPOSE} 缺 OPENCLAW_IMAGE 默认值`).not.toBeNull()
+// `${OPENCLAW_IMAGE:-<默认>}` 形态的运行期默认镜像明文：模板栈 compose 与 dev driver 脚本同款
+// 环境变量回退。单一提取实现、两处调用（与 imageTag 同理：纯知识不写第二份，防漂移）
+function envDefaultImage(rel: string): string {
+  const m = readRepoFile(rel).match(/\$\{OPENCLAW_IMAGE:-([^}]+)\}/)
+  expect(m, `${rel} 缺 OPENCLAW_IMAGE 默认值`).not.toBeNull()
   return (m as RegExpMatchArray)[1]
 }
 
@@ -169,14 +170,16 @@ describe('目标镜像钉版（issue #695）', () => {
     expect(imageTag(cfg)).toBe(PINNED_TAG) // 与上行同值 ⇒ 两处互相锁死
   })
 
-  it('模板栈 compose 默认镜像同版本（本地手动栈不落在别的版本上）', () => {
-    expect(standaloneComposeDefaultImage()).toBe(DERIVED_DEFAULT)
+  it('模板栈 compose 与 dev driver 的默认镜像同版本（本地手动栈/dev 管线不落在别的版本上）', () => {
+    expect(envDefaultImage(STANDALONE_COMPOSE)).toBe(DERIVED_DEFAULT)
+    expect(envDefaultImage(FLEET_DRIVER)).toBe(DERIVED_DEFAULT)
   })
 
-  it('三处目标镜像均非浮动引用（生产 fail-fast 的默认路径恒通过）', () => {
+  it('四处目标镜像均非浮动引用（生产 fail-fast 的默认路径恒通过）', () => {
     expect(isFloatingImageRef(dockerfileFromRef())).toBe(false)
     expect(isFloatingImageRef(configDefaultImage())).toBe(false)
-    expect(isFloatingImageRef(standaloneComposeDefaultImage())).toBe(false)
+    expect(isFloatingImageRef(envDefaultImage(STANDALONE_COMPOSE))).toBe(false)
+    expect(isFloatingImageRef(envDefaultImage(FLEET_DRIVER))).toBe(false)
   })
 })
 
