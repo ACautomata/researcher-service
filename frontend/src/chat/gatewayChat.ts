@@ -65,7 +65,7 @@ export interface RewindResultDTO {
   editorAttachments: EditorAttachmentDTO[]
 }
 
-// #694 会话控制能力探测方法集（#682 spec §1.1）：hello-ok.features.methods 须**全部**在位才判「可用」
+// #694 会话控制能力探测方法集（#693 spec §1.1）：hello-ok.features.methods 须**全部**在位才判「可用」
 // ——四个方法同属一个功能族（会话控制 RPC），任一缺失即该代网关不支持该族（过渡期存量 7.1 镜像
 // 无 features 字段），UI 据此隐藏回退/fork/分支全部入口，而非点出必然报错的按钮。单一来源：本票
 // 只消费 sessions.rewind，fork/branches 由后续票复用同一判定（避免各自维护子集而语义漂移）。
@@ -101,7 +101,7 @@ export interface GatewayChat {
   // 主动关隧道触发协议机重连决策（连接期超时兜底：SYN 黑洞下 socket 永不 open、无任何信号，
   // 主动关闭让协议机走退避重连自愈——P1 code review）
   closeSocket(code?: number, reason?: string): void
-  // #694 会话控制能力（#682 spec §1.1）：当前连接对端网关是否支持 rewind/fork/分支 RPC。单一来源 =
+  // #694 会话控制能力（#693 spec §1.1）：当前连接对端网关是否支持 rewind/fork/分支 RPC。单一来源 =
   // 最近一次 hello-ok 的 features.methods 快照（onConnectHello 刷新，每次重连跟着新 hello 走）。
   // 未握手 / 旧网关（7.1 无 features）/ 方法集不全 → false → UI 隐藏全部会话控制入口。
   sessionControlAvailable(): boolean
@@ -113,7 +113,7 @@ export interface GatewayChat {
   // offset（数值偏移分页）、string → messageId（锚点）。调用方须保留 nextOffset 原始类型，不得
   // String() 化（否则数值偏移错走 messageId 字段，offset 分页会话第二页起拉错，Codex #678 P1）。
   getHistory(sessionKey: string, limit?: number, cursor?: string | number): Promise<SessionHistoryDTO>
-  // #694 对话回退（#682 spec §1.4）：把该持久化 user message（entryId）之后的历史从活跃路径剪除，
+  // #694 对话回退（#693 spec §1.4）：把该持久化 user message（entryId）之后的历史从活跃路径剪除，
   // 返回被剪首条用户消息文本与图片附件供回填 composer 编辑重发。entryId 来自历史消息的
   // __openclaw.id（translateHistoryMessage 提取的 Msg.entryId）——本地乐观 echo 无 entryId，
   // 不可作参数。权限 operator.admin（已在 OPERATOR_SCOPES）。失败原样上抛（GatewayProtocolRequestError，

@@ -45,6 +45,13 @@ export interface Msg {
   // 消息级操作入口（不可对未落库的消息发起 rewind）。与分页锚点（historyAnchor/nextOffset，number
   // offset | string messageId 两态）是**不同字段**，禁止混用（Codex #678 P1 教训）。
   entryId?: string
+  // #694（Codex #703 P1）：本轮发送键 = chat.send 的 idempotencyKey，仅本地乐观 echo 有值（同轮
+  // assistant 占位不需要；历史翻译的消息 entryId 直接来自网关，无需回读）。网关取该键作 clientRunId
+  // （openclaw dist `chat-send-handler` 实证），故落库的用户条目 __openclaw.idempotencyKey 为
+  // `${sendKey}:user`——ack 到达后据此回读最新一页历史，把网关条目 id 补进 entryId
+  // （见 markUserEntryId）。否则「刚发出的那条」在切会话/重连前没有 entryId，回退入口不渲染，
+  // 而它恰是回退的主用例。
+  sendKey?: string
 }
 
 // T06 审批卡（连接级，无 runId）：独立列表渲染，不混入 messages——避免破坏流式锚定/finalizeLast
@@ -169,6 +176,13 @@ export const useChatStore = defineStore('chat', {
     },
     setMessages(list: Msg[]): void {
       this.messages = list
+    },
+    // #694（Codex #703 P1）：把网关回读的 transcript 条目 id 补回本地乐观 user 消息——按发送键
+    // （Msg.sendKey）精确定位。命中才写：消息已出列（切会话/容器重建后旧对象不在投影内）或已有
+    // entryId（历史翻译给过）时不动，避免无意义的响应式触发。
+    markUserEntryId(sendKey: string, entryId: string): void {
+      const m = this.messages.find((x) => x.role === 'user' && x.sendKey === sendKey && !x.entryId)
+      if (m) m.entryId = entryId
     },
     // 最后一条助手消息：仅当仍是占位/流式时落定（done/error/断线收尾共用）
     finalizeLast(): void {

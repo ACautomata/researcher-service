@@ -10,6 +10,7 @@ import {
   fileToRawAttachment,
   fitWithin,
   attachmentTypeOf,
+  editorAttachmentToRaw,
   isAllowedAttachmentType,
   MAX_ATTACHMENT_BYTES,
   MAX_IMAGE_EDGE,
@@ -76,6 +77,33 @@ describe('attachmentTypeOf（mime → 官方附件块类型）', () => {
     expect(attachmentTypeOf('application/octet-stream')).toBeNull()
     expect(attachmentTypeOf('')).toBeNull()
     expect(attachmentTypeOf(undefined)).toBeNull()
+  })
+})
+
+// #694：回退 / 分叉响应 `editorAttachments` 元素（wire `{mimeType, data}`）→ RawAttachment。
+describe('editorAttachmentToRaw（网关修改类 RPC 的编辑器附件 → RawAttachment）', () => {
+  it('图片：type 派生 + content 原样纯 base64 + sizeBytes 按解码字节数反推（非 base64 长度）', () => {
+    expect(editorAttachmentToRaw({ mimeType: 'image/png', data: 'AAAA' })).toEqual({
+      type: 'image',
+      mimeType: 'image/png',
+      content: 'AAAA',
+      sizeBytes: 3, // 4 个字符 → 3 字节（padding 计）
+    })
+  })
+
+  it('白名单外 mime → null（调用方丢弃，不把渲染不出的块塞进预览条）', () => {
+    expect(editorAttachmentToRaw({ mimeType: 'application/octet-stream', data: 'AAAA' })).toBeNull()
+    expect(editorAttachmentToRaw({ mimeType: '', data: 'AAAA' })).toBeNull()
+  })
+
+  it('文档 mime → document（回填后仍能经发送校验，不被当未知类型拒发）', () => {
+    const att = editorAttachmentToRaw({ mimeType: 'application/pdf', data: 'AAAA' })
+    expect(att?.type).toBe('document')
+    expect(buildAttachments([att!]).rejected).toHaveLength(0)
+  })
+
+  it('空 data → sizeBytes 0（不臆造体积；下游按 0 字节放行）', () => {
+    expect(editorAttachmentToRaw({ mimeType: 'image/png', data: '' })).toMatchObject({ sizeBytes: 0 })
   })
 })
 

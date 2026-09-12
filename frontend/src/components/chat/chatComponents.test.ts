@@ -1158,7 +1158,7 @@ describe('ChatStream 锚点导航接线（issue #669）', () => {
   })
 })
 
-// #694 回退入口与确认 popover（#682 spec §1.5 / §685 官方形态还原）：入口只对「已持久化的 user
+// #694 回退入口与确认 popover（#693 spec §1.5 / §685 官方形态还原）：入口只对「已持久化的 user
 // 消息」渲染（有网关条目 id），agent 工作中 / 会话控制不可用时整体隐藏；确认 popover 含取消与
 // 「不再询问」，勾选后偏好落 localStorage（官方同 key），下次直接执行不再询问。
 describe('#694 回退入口与确认 popover', () => {
@@ -1297,6 +1297,33 @@ describe('#694 回退入口与确认 popover', () => {
 
     expect(await mountWithRoomAbove(200)).toContain('above')
     expect(await mountWithRoomAbove(2)).toContain('below')
+  })
+
+  it('放置：窄屏左伸空间不足 → 卡片右移夹取在滚动容器内（否则确认按钮被 overflow 裁掉点不到）', async () => {
+    // jsdom 无布局：卡片宽度（offsetWidth）也得伪造——onMounted 里量一次，故在挂载前打好桩。
+    const widthSpy = vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockReturnValue(232)
+    const styleAt = async (hostLeft: number, hostRight: number, anchorRight: number) => {
+      const w = mountItem(userWithEntry(), {}, document.body)
+      const host = w.element.parentElement as HTMLElement // 外层容器：注入滚动语义
+      host.style.overflowY = 'auto'
+      host.getBoundingClientRect = () => ({ top: 0, left: hostLeft, right: hostRight }) as DOMRect
+      const btn = w.get('[data-test="rewind"]').element as HTMLElement
+      btn.getBoundingClientRect = () => ({ top: 300, right: anchorRight }) as DOMRect
+      await w.get('[data-test="rewind"]').trigger('click')
+      const style = w.get('[data-test="rewind-confirm"]').attributes('style') ?? ''
+      w.unmount()
+      return style
+    }
+
+    try {
+      // 宽屏：操作条在右半区（左伸 468px 远在容器内）→ 维持默认贴右缘，不位移
+      expect(await styleAt(0, 800, 700)).not.toContain('right: -')
+      // 窄屏：user 气泡占满列宽 → 操作条贴左缘（右缘 60px），232px 卡片左伸到 -172px 会被裁 →
+      // 右移到容器左内边距（8px）处，位移 180px（可覆盖气泡，但确认按钮必须可见可点）
+      expect(await styleAt(0, 360, 60)).toContain('right: -180px')
+    } finally {
+      widthSpy.mockRestore()
+    }
   })
 
   it('勾选「不再询问」并确认 → 偏好落盘（官方 key）+ 本次回退照常发出', async () => {

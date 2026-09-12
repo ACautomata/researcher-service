@@ -68,12 +68,17 @@ const conn = useChatConnection({
   onClearError() {
     errorMsg.value = ''
   },
+  // #694（Spec 轴 review）：动作类失败（用户主动发起的回退）走瞬时 toast，不进顶部连接横幅——
+  // 横幅 label 恒「加载失败」，把「回退失败：…」套在其下语义相左；贴 #461 删除会话失败 toast 先例。
+  onActionError(message: string) {
+    ElMessage.error(message)
+  },
   // #459-T2 #463 #1：Enter/斜杠发送统一走 sendMessage（含附件校验/清空预览条），与发送按钮同路径。
   // 箭头闭包延迟求值——sendMessage 为 function 声明提升，Enter 触发时 conn 已就绪。
   onSend() {
     void sendMessage()
   },
-  // #694 回退编排的 composer 协同（#682 spec §1.4）：草稿（文本 + 附件）归本壳，composable 经这两个
+  // #694 回退编排的 composer 协同（#693 spec §1.4）：草稿（文本 + 附件）归本壳，composable 经这两个
   // 回调抓指纹 / 回填——直接引用两个函数声明（提升，rewind 触发时 pendingAttachments 已就绪），
   // 不再经一层转手。
   onRewindDraftFingerprint: draftFingerprint,
@@ -93,7 +98,7 @@ const currentSessionTitle = computed(() => {
 // 是否有助手消息正在流式；并发 send 会让旧 streaming 消息永久卡住光标，故流式中禁发
 const streaming = computed(() => chat.messages.some((m) => m.role === 'assistant' && m.streaming))
 
-// #694 回退入口的渲染门（#682 spec §1.5，官方同构：agent 工作时入口不渲染而非禁用）：网关
+// #694 回退入口的渲染门（#693 spec §1.5，官方同构：agent 工作时入口不渲染而非禁用）：网关
 // 支持会话控制（hello-ok features 快照）且不在忙碌态（streaming/连接中/已断线）时才渲染。
 const rewindAvailable = computed(
   () => conn.sessionControlAvailable.value && !streaming.value && !connecting.value && !conn.disconnected.value,
@@ -233,7 +238,7 @@ async function regenerate(text: string): Promise<void> {
   await sendMessage()
 }
 
-// #694 回退的草稿指纹（#682 spec §1.4）：文本 + 附件内容的水位线快照——composable 在 rewind RPC
+// #694 回退的草稿指纹（#693 spec §1.4）：文本 + 附件内容的水位线快照——composable 在 rewind RPC
 // 前后各取一次、比对是否变化（变化即跳过回填，保留用户新草稿）。附件是宿主局部态（不在 store），
 // 故指纹只能算在宿主侧；内容整体入指纹（不做长度摘要），保证「同长不同内容」也判为改动。
 function draftFingerprint(): string {

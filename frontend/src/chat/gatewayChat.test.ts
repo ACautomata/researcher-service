@@ -1323,7 +1323,7 @@ describe('#377 设备配对生命周期（GatewayBrowserDeviceAuthLifecycle 接�
   })
 })
 
-// #694 会话控制能力探测 + sessions.rewind RPC——对话回退端到端（#682 spec §1.1/§1.4）的协议层。
+// #694 会话控制能力探测 + sessions.rewind RPC——对话回退端到端（#693 spec §1.1/§1.4）的协议层。
 // capability 单一来源 = hello-ok 的 features.methods 快照：4 个会话控制方法全部在位才判「可用」
 // （9.4+ 网关；过渡期存量 7.1 镜像无该字段或缺项 → 不可用 → UI 隐藏全部回退/fork/分支入口）。
 // 0 信任：字段形状非数组 / 含非字符串项一律按不可用处理，不抛错。

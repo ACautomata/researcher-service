@@ -2416,7 +2416,7 @@ describe('ChatView', () => {
       expect(w.find('[data-test="stream"]').text()).not.toContain('第一问') // transcript 照常回退
     })
 
-    it('回退失败 → 明确错误提示，transcript 不动', async () => {
+    it('回退失败 → 瞬时错误提示（动作类通道），transcript 不动', async () => {
       const { w, gw } = await mountWithHistory()
       gw.rewind.mockRejectedValue(new Error('Rewind is unavailable while the agent is working.'))
 
@@ -2424,7 +2424,10 @@ describe('ChatView', () => {
       await w.find('[data-test="rewind-confirm-yes"]').trigger('click')
       await flushPromises()
 
-      expect(w.find('[data-test="error-bar"]').text()).toContain('回退失败')
+      // 动作类失败走 toast（贴 #461 删除会话失败先例）；不进顶部连接横幅——横幅 label 恒「加载失败」，
+      // 把「回退失败：…」套在其下语义相左（Spec 轴 review）。
+      expect(ElMessage.error).toHaveBeenCalledWith('回退失败：Rewind is unavailable while the agent is working.')
+      expect(w.find('[data-test="error-bar"]').exists()).toBe(false)
       expect(w.find('[data-test="stream"]').text()).toContain('第一问') // 原历史原样
     })
   })

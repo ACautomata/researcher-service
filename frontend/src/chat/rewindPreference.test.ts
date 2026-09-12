@@ -1,4 +1,4 @@
-// seam: chat/rewindPreference —— 回退「不再询问」偏好的纯函数读写（#694 / #682 spec §1.5）。
+// seam: chat/rewindPreference —— 回退「不再询问」偏好的纯函数读写（#694 / #693 spec §1.5）。
 // 外部契约：官方同款 localStorage key + 值 '1'；存储不可用/抛错一律静默降级为「每次都确认」
 // （读到 null → 确认；写失败 → 不打扰用户）。不测内部实现，只测可观察的键值行为。
 import { describe, expect, it, beforeEach } from 'vitest'

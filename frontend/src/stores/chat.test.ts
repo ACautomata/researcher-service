@@ -160,4 +160,33 @@ describe('chatStore 纯 mutation', () => {
     chat.removeSession('sk-1')
     expect(chat.sessions.map((s) => s.session_key)).toEqual(['sk-2'])
   })
+
+  // #694（Codex #703 P1）：ack 回读把网关条目 id 补回本地乐观消息——只认「有该发送键且尚无 entryId
+  // 的 user 消息」。三条守卫各有用例：已有 entryId 不改写（历史翻译的权威值不被回读覆盖）、发送键
+  // 对不上不动、消息已出列（切会话/重建后的旧对象不在投影内）→ 找不到即 no-op。
+  it('#694 markUserEntryId：按发送键回填 entryId；已有 id / 键不符 / 出列消息均不改写', () => {
+    const chat = useChatStore()
+    const sent = newMsg('user', '刚发出的')
+    sent.sendKey = 'run-A'
+    chat.pushMessage(sent)
+    chat.pushMessage(newMsg('assistant'))
+
+    chat.markUserEntryId('run-A', 'entry-p1')
+    expect(chat.messages[0].entryId).toBe('entry-p1')
+
+    chat.markUserEntryId('run-A', 'entry-other') // 已有 entryId：不改写
+    expect(chat.messages[0].entryId).toBe('entry-p1')
+
+    chat.markUserEntryId('run-unknown', 'entry-x') // 发送键对不上：no-op
+    expect(chat.messages.map((m) => m.entryId)).toEqual(['entry-p1', undefined])
+
+    chat.messages[1].sendKey = 'run-B' // assistant 占位即使带同键也不匹配（只认 user）
+    chat.markUserEntryId('run-B', 'entry-b')
+    expect(chat.messages[1].entryId).toBeUndefined()
+
+    const stale = newMsg('user', '旧投影') // 已出列：不在 messages 内 → no-op（不崩）
+    stale.sendKey = 'run-C'
+    chat.markUserEntryId('run-C', 'entry-c')
+    expect(chat.messages.some((m) => m.entryId === 'entry-c')).toBe(false)
+  })
 })
