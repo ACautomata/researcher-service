@@ -11,7 +11,7 @@
 `docs/research/683-image-upgrade-2026-9.md` 实测筛出（9.4 与 7.1 同属 wire 协议族 `PROTOCOL=4`，
 握手 shape 一致）。本 ADR 决定目标随之更新为 `2026.9.4-browser`，重验见「后果」。
 
-**决定**：把部署与集成测试镜像迁移到 `ghcr.io/openclaw/openclaw:2026.9.4-browser`（官方稳定版 browser 变体；原 `2026.6.34-browser` 因上游删除已废弃，`2026.7.1-browser` 由 issue #695 主动升级取代）。迁移以「最小 DoD」先行：容器跑起来 + WS connect 握手通过 + 设备配对完成 + 一个 `chat.send` 收到真实事件流（顺带验证 `browser.noSandbox` 能起）；**chat wire schema 校准在官方镜像上做**。
+**决定**：把部署与集成测试镜像迁移到 `ghcr.io/openclaw/openclaw:2026.9.4-browser`（官方稳定版 browser 变体；原 `2026.6.34-browser` 因上游删除已废弃，`2026.7.1-browser` 由 issue #695 主动升级取代）；**集成测试的 CI pin 本轮未随迁**（`.github/workflows/ci.yml` 仍 pin `2026.7.1-browser`，见「后果」的「未重验面」）。迁移以「最小 DoD」先行：容器跑起来 + WS connect 握手通过 + 设备配对完成 + 一个 `chat.send` 收到真实事件流（顺带验证 `browser.noSandbox` 能起）；**chat wire schema 校准在官方镜像上做**。
 
 **为什么**：
 - browser 能力是产品需求，fork 镜像给不了（无 Playwright），官方 `-browser` 变体是唯一稳健路径。

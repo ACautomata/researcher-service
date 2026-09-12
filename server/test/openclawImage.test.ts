@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { readFileSync, existsSync, readdirSync, statSync } from 'node:fs'
 import { join, resolve } from 'node:path'
-import { imageTag, isFloatingImageRef } from '../src/containers/imageRef'
+import { isFloatingImageRef } from '../src/containers/imageRef'
 
 // issue #588 派生 OpenClaw 镜像静态断言（issue #586 测试接缝 5 的先例：config.test.ts）。
 // 断言对象是 deploy/openclaw-image/ 的声明式产物（Dockerfile + 骨架），不触真 docker：
@@ -123,7 +123,8 @@ describe('OPENCLAW_IMAGE 默认值（issue #588 AC3）', () => {
 // ---- 目标镜像钉版（issue #695，spec §2.1 升级编排的版本前提）----
 // 版本单源 = Dockerfile FROM 基线行。四处**运行期**明文与之同版本并由本文件交叉断言锁死（防双源
 // 漂移）：控制面默认目标镜像（config.ts OPENCLAW_IMAGE 默认值）、模板栈 compose 默认值、dev 管线
-// driver 预拉默认值、测试内的版本常量；tag 解析统一走 src/containers/imageRef.ts 的 imageTag
+// driver 预拉默认值、测试内的版本常量；浮动判定统一走 src/containers/imageRef.ts 的
+// isFloatingImageRef
 // （纯知识单一实现，CONTEXT「共享内核」）。文档与 .env.example 里的版本是示意值（不在锁内，
 // 换版时随 deploy/README.md 更新）。
 // 沿本文件既有模式：读声明式产物文本，不触真 docker（构建期断言由 Dockerfile RUN 在构建时执行）。
@@ -165,13 +166,11 @@ function envDefaultImage(rel: string): string {
 }
 
 describe('目标镜像钉版（issue #695）', () => {
-  it('Dockerfile FROM 版本 tag == config 默认目标镜像 tag（两处明文交叉锁死，防双源漂移）', () => {
-    const df = dockerfileFromRef()
-    const cfg = configDefaultImage()
-    expect(df).toBe(OFFICIAL_BASE)
-    expect(cfg).toBe(DERIVED_DEFAULT)
-    expect(imageTag(df)).toBe(PINNED_TAG)
-    expect(imageTag(cfg)).toBe(PINNED_TAG) // 与上行同值 ⇒ 两处互相锁死
+  it('Dockerfile FROM == config 默认目标镜像（两处明文交叉锁死，防双源漂移）', () => {
+    // 锁死机制：两处明文须各自等于由 PINNED_TAG 拼出的期望值 ⇒ 任一处 tag 漂移即红。「非浮动」
+    // 由下方独立断言兜底（isFloatingImageRef），故此处不再额外断言 tag 本身（那会恒真）
+    expect(dockerfileFromRef()).toBe(OFFICIAL_BASE)
+    expect(configDefaultImage()).toBe(DERIVED_DEFAULT)
   })
 
   it('模板栈 compose 与 dev driver 的默认镜像同版本（本地手动栈/dev 管线不落在别的版本上）', () => {
