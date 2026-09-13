@@ -190,3 +190,22 @@ describe('chatStore 纯 mutation', () => {
     expect(chat.messages.some((m) => m.entryId === 'entry-c')).toBe(false)
   })
 })
+
+// #698 分支菜单：branches 是会话级渲染投影（贴 sessions 先例），随 resetForSession /
+// resetForContainer 清空——分支属于单个会话，切会话/容器不得残留旧值（length 门会误渲染按钮）。
+describe('chatStore branches（#698 分支菜单）', () => {
+  it('setBranches 整替 + resetForSession / resetForContainer 清空', () => {
+    const chat = useChatStore()
+    const b = [{ leafEntryId: 'leaf-1', headline: 'A', messageCount: 2, active: true }]
+    chat.setBranches(b)
+    expect(chat.branches).toEqual(b)
+    chat.setBranches([]) // 整替（非追加）：重拉后旧列表不残留
+    expect(chat.branches).toEqual([])
+    chat.setBranches(b)
+    chat.resetForSession()
+    expect(chat.branches).toEqual([]) // 分支随会话换掉
+    chat.setBranches(b)
+    chat.resetForContainer()
+    expect(chat.branches).toEqual([])
+  })
+})

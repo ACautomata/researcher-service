@@ -1373,3 +1373,66 @@ describe('#694 回退入口与确认 popover', () => {
     expect(w.emitted('rewind')?.[0]).toEqual([msg])
   })
 })
+
+// #698 分支菜单（#693 spec §1.5）：ChatHeader trailing 哑组件——仅 branches.length > 1 渲染；
+// 每项 = headline（空 →「未命名分支」）+「N 条消息」+ 时间（缺失槽位不渲染）；active 项打勾且
+// disabled（UI 从不发起 no-op switch）；branchBusy 时触发器禁用。
+describe('#698 ChatHeader 分支菜单', () => {
+  const BRANCHES = [
+    { leafEntryId: 'leaf-1', headline: '聊聊 A 方案', messageCount: 12, updatedAt: '2026-09-12T01:02:03Z', active: true },
+    { leafEntryId: 'leaf-2', headline: '', messageCount: 3, active: false }, // 空 headline + 无时间
+  ]
+  const mountHeader = (props: Record<string, unknown> = {}) =>
+    mount(ChatHeader, { props: { title: '会话', container: 'demo', connecting: false, ...props }, attachTo: document.body })
+
+  it('单分支 / 空列表 → 不渲染分支按钮（界面噪音门；0 = 拉取失败降级同路径）', () => {
+    expect(mountHeader().find('[data-test="branch-menu"]').exists()).toBe(false)
+    expect(mountHeader({ branches: [BRANCHES[0]] }).find('[data-test="branch-menu"]').exists()).toBe(false)
+    expect(mountHeader({ branches: [] }).find('[data-test="branch-menu"]').exists()).toBe(false)
+  })
+
+  it('多分支渲染：每项 = 摘要 + N 条消息 + 时间；空 headline →「未命名分支」；无 updatedAt → 时间槽位不渲染', async () => {
+    const w = mountHeader({ branches: BRANCHES })
+    await w.get('[data-test="branch-menu"]').trigger('click')
+    const items = w.findAll('[data-test^="branch-item"]') // 前缀选择：含 active 项（branch-item-active）
+    expect(items).toHaveLength(2)
+    expect(items[0].text()).toContain('聊聊 A 方案')
+    expect(items[0].text()).toContain('12 条消息')
+    expect(items[0].text()).toContain('2026') // toLocaleString 含年份
+    expect(items[1].text()).toContain('未命名分支') // 空 headline 回退文案
+    expect(items[1].text()).toContain('3 条消息')
+    expect(items[1].text()).not.toContain('2026') // 无 updatedAt：时间槽位不渲染
+    w.unmount()
+  })
+
+  it('messageCount 缺失 → 「N 条消息」槽位不渲染（item 保留）', async () => {
+    const w = mountHeader({ branches: [
+      { leafEntryId: 'leaf-1', headline: 'A', active: true },
+      { leafEntryId: 'leaf-2', headline: 'B', active: false },
+    ] })
+    await w.get('[data-test="branch-menu"]').trigger('click')
+    expect(w.text()).not.toContain('条消息')
+    w.unmount()
+  })
+
+  it('active 项打勾且不可选；非 active 项点击 emit branchSwitch(leafEntryId)', async () => {
+    const w = mountHeader({ branches: BRANCHES })
+    await w.get('[data-test="branch-menu"]').trigger('click')
+    const active = w.get('[data-test="branch-item-active"]')
+    expect(active.attributes('disabled')).toBeDefined() // 不可选（no-op switch 网关是 typed error，UI 从不发起）
+    expect(active.text()).toContain('✓')
+    await w.findAll('[data-test^="branch-item"]')[1].trigger('click')
+    expect(w.emitted('branchSwitch')).toEqual([['leaf-2']])
+    w.unmount()
+  })
+
+  it('branchBusy → 触发器禁用（不隐藏：顶栏布局稳定）；busy 翻转收起已开菜单', async () => {
+    const w = mountHeader({ branches: BRANCHES })
+    await w.get('[data-test="branch-menu"]').trigger('click')
+    expect(w.find('[data-test="branch-item"]').exists()).toBe(true)
+    await w.setProps({ branchBusy: true })
+    expect(w.get('[data-test="branch-menu"]').attributes('disabled')).toBeDefined()
+    expect(w.find('[data-test="branch-item"]').exists()).toBe(false) // 已开菜单强制收起
+    w.unmount()
+  })
+})

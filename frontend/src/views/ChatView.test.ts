@@ -37,6 +37,8 @@ const { MockGatewayChat } = vi.hoisted(() => {
     getHistory = vi.fn()
     send = vi.fn()
     rewind = vi.fn() // #694 对话回退（sessions.rewind）
+    listBranches = vi.fn() // #698 分支菜单（sessions.branches.list）
+    switchBranch = vi.fn() // #698 分支切换（sessions.branches.switch）
     sessionControlAvailable = vi.fn(() => true) // #694 会话控制能力（默认 9.4+ 网关可用）
     listCommands = vi.fn()
     resolveApproval = vi.fn()
@@ -117,6 +119,7 @@ async function mountReady() {
   gw.createSession.mockResolvedValue('sk-new')
   gw.listCommands.mockResolvedValue([])
   gw.send.mockResolvedValue(undefined)
+  gw.switchBranch.mockResolvedValue(undefined) // #698：缺省分支切换成功（各用例按需改写）
   gw.deleteSession.mockResolvedValue(undefined)
   gw.resolveApproval.mockResolvedValue(undefined)
   gw.listPendingApprovals.mockResolvedValue([]) // B0: 缺省无待补拉审批
@@ -2456,4 +2459,73 @@ describe('ChatView', () => {
       expect(w.find('[data-test="rewind"]').exists()).toBe(true)
     })
   })
+
+// #698 分支菜单接线（#693 spec §1.4/§1.5）：分支数据随首连/切会话并行预拉；多分支才渲染按钮；
+// 切换 → switchBranch + transcript 重建 + 分支列表重拉；失败 → 瞬时错误提示且本地状态不动。
+// 「仅 >1 分支渲染」的 length 门已在 chatComponents.test.ts 哑组件层单点覆盖，此处只测接线联动。
+describe('ChatView #698 分支菜单接线', () => {
+  const BRANCHES = [
+    { leafEntryId: 'leaf-1', headline: 'A 方向', messageCount: 4, updatedAt: '2026-09-12T01:02:03Z', active: true },
+    { leafEntryId: 'leaf-2', headline: 'B 方向', messageCount: 2, updatedAt: '2026-09-11T00:00:00Z', active: false },
+  ]
+
+  it('多分支 → 头部渲染分支按钮；单分支/能力撤销 → 不渲染', async () => {
+    const { w, gw } = await mountReady()
+    gw.listBranches.mockResolvedValue(BRANCHES)
+    gw.fireReady() // 重连触发 syncSessions 再预拉
+    await flushPromises()
+    gw.listBranches.mockClear() // mountReady 首连 + 本次重连各预拉一次，清零后从零计数
+    expect(w.find('[data-test="branch-menu"]').exists()).toBe(true)
+
+    // 单分支（回退剪除后 / 网关只剩一条）→ 按钮消失
+    gw.listBranches.mockResolvedValue([BRANCHES[0]])
+    gw.fireReady() // 重连再同步：预拉到单分支
+    await flushPromises()
+    expect(w.find('[data-test="branch-menu"]').exists()).toBe(false)
+  })
+
+  it('切换分支 → sessions.branches.switch + transcript 重建 + 分支列表重拉为新状态', async () => {
+    const { w, gw } = await mountReady()
+    gw.listBranches.mockResolvedValue(BRANCHES)
+    gw.fireReady()
+    await flushPromises()
+    gw.listBranches.mockClear() // mountReady 首连 + 本次重连各预拉一次，清零后从零计数
+
+    // 切换后：新活跃路径历史 + leaf-2 成为 active
+    gw.getHistory.mockResolvedValue({
+      messages: [{ role: 'user', text: 'B 方向第一问', __openclaw: { id: 'entry-b1' } }],
+      hasMore: false, nextOffset: null,
+    })
+    gw.listBranches.mockResolvedValue([
+      { leafEntryId: 'leaf-1', headline: 'A 方向', messageCount: 4, active: false },
+      { leafEntryId: 'leaf-2', headline: 'B 方向', messageCount: 3, active: true },
+    ])
+
+    await w.find('[data-test="branch-menu"]').trigger('click')
+    await w.findAll('[data-test^="branch-item"]')[1].trigger('click')
+    await flushPromises()
+
+    expect(gw.switchBranch).toHaveBeenCalledWith('sk-1', 'leaf-2')
+    expect(w.find('[data-test="stream"]').text()).toContain('B 方向第一问') // transcript 重建为新活跃路径
+    expect(gw.listBranches).toHaveBeenCalledTimes(1) // 分支列表重拉（清零后仅切换这一次）
+    expect(w.find('[data-test="branch-menu"]').exists()).toBe(true) // 重拉后仍多分支 → 按钮还在
+  })
+
+  it('切换失败 → 瞬时错误提示（动作类通道），transcript 与分支列表不动', async () => {
+    const { w, gw } = await mountReady()
+    gw.listBranches.mockResolvedValue(BRANCHES)
+    gw.fireReady()
+    await flushPromises()
+    gw.listBranches.mockClear() // mountReady 首连 + 本次重连各预拉一次，清零后从零计数
+    gw.switchBranch.mockRejectedValue(new Error('branch is no longer switchable'))
+
+    await w.find('[data-test="branch-menu"]').trigger('click')
+    await w.findAll('[data-test^="branch-item"]')[1].trigger('click')
+    await flushPromises()
+
+    expect(ElMessage.error).toHaveBeenCalledWith('切换分支失败：branch is no longer switchable')
+    expect(w.find('[data-test="error-bar"]').exists()).toBe(false) // 不进连接横幅
+    expect(gw.listBranches).not.toHaveBeenCalled() // 不重拉
+  })
+})
 })

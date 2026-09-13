@@ -119,6 +119,23 @@ function rewind(msg: Msg): void {
   void conn.rewind(msg.entryId)
 }
 
+// #698 分支菜单 busy 门（#706 词汇「会话控制能力」四合一套件同族）：忙碌态禁用而非隐藏——顶栏
+// 按钮闪现会推挤布局（与消息级入口的隐藏形态有意分歧）；transcriptSynced 关门（重连同步窗口内
+// 分支列表可能陈旧，fail-closed）。渲染门（length > 1）在 ChatHeader 哑组件内单点判定。
+const branchMenuBusy = computed(
+  () =>
+    conn.rewindBusy.value ||
+    !conn.transcriptSynced.value ||
+    streaming.value ||
+    connecting.value ||
+    conn.disconnected.value,
+)
+
+// #698 分支切换 emit：无确认直接切换（#693 spec §1.4）
+function branchSwitch(leafEntryId: string): void {
+  void conn.switchBranch(leafEntryId)
+}
+
 // #405-T1：审批卡可见性过滤归 chatStore getter（#395 钉死 + #394 实测——当前会话是 subagent
 // 会话时审批区恒空；非 subagent 会话显示归属卡 + 无 sessionKey 连接级卡 + subagent 卡；
 // 被过滤卡留存列表仅渲染层隐藏）
@@ -320,6 +337,9 @@ defineExpose({
         :title="currentSessionTitle"
         :container="chat.selectedContainer"
         :connecting="connecting"
+        :branches="chat.branches"
+        :branch-busy="branchMenuBusy"
+        @branch-switch="branchSwitch"
       />
       <div v-if="connectionState" class="connection-banner" :class="connectionState.tone" role="status" aria-live="polite" :data-test="conn.disconnected.value ? 'reconnect-bar' : 'connection-banner'">
         <span class="connection-label">{{ connectionState.label }}</span>
