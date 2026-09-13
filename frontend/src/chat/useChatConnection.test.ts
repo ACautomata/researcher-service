@@ -48,6 +48,7 @@ const { MockGatewayChat } = vi.hoisted(() => {
     getHistory = vi.fn()
     send = vi.fn()
     rewind = vi.fn() // #694 对话回退（sessions.rewind）
+    forkEntry = vi.fn() // #697 对话 fork（sessions.fork）
     sessionControlAvailable = vi.fn(() => true) // #694 会话控制能力（默认 9.4+ 网关可用）
     listCommands = vi.fn()
     resolveApproval = vi.fn()
@@ -93,7 +94,7 @@ function setup(opts: { withoutActionError?: boolean } = {}): { status: ChatStatu
     // #694 回退编排的 composer 协同（宿主注入）：缺省「草稿全程未变」→ 回填恒执行；指纹/回填
     // 断言由各用例覆盖（改写 mockReturnValueOnce/mock.calls）。
     onRewindDraftFingerprint: vi.fn(() => 'draft-stable'),
-    onRewindBackfill: vi.fn(),
+    onEntryBackfill: vi.fn(),
   }
   const conn = useChatConnection(status)
   const chat = useChatStore()
@@ -1042,7 +1043,7 @@ describe('#694 对话回退编排', () => {
     expect(chat.messages).toHaveLength(0) // transcript 重建为新活跃路径（被剪历史消失）
     expect(chat.historyHasMore).toBe(false) // 分页态随重建重置（非旧 transcript 的残留锚点）
     expect(chat.historyAnchor).toBeNull()
-    expect(status.onRewindBackfill).toHaveBeenCalledWith('第一问', [
+    expect(status.onEntryBackfill).toHaveBeenCalledWith('第一问', [
       // #703 P2：回填附件带解码后字节数（缺 sizeBytes 时下游退化为按 base64 字符数计费 → 误判超限）
       { type: 'image', mimeType: 'image/png', content: 'AAAA', sizeBytes: 3 },
     ])
@@ -1056,7 +1057,7 @@ describe('#694 对话回退编排', () => {
 
     await conn.rewind('entry-1')
 
-    expect(status.onRewindBackfill).toHaveBeenCalledWith('', [])
+    expect(status.onEntryBackfill).toHaveBeenCalledWith('', [])
   })
 
   it('重建期间在途 run 被放弃：其迟到帧不得写入已重建的 transcript', async () => {
@@ -1089,7 +1090,7 @@ describe('#694 对话回退编排', () => {
 
     await conn.rewind('entry-1')
 
-    expect(status.onRewindBackfill).not.toHaveBeenCalled() // 不覆盖用户新草稿
+    expect(status.onEntryBackfill).not.toHaveBeenCalled() // 不覆盖用户新草稿
     expect(chat.messages).toHaveLength(0) // transcript 回退不受守卫影响
   })
 
@@ -1105,7 +1106,7 @@ describe('#694 对话回退编排', () => {
     expect(status.onError).not.toHaveBeenCalled()
     expect(gw.getHistory).toHaveBeenCalledTimes(1) // 只有首连那次
     expect(chat.messages).toHaveLength(4) // 原 transcript 原样
-    expect(status.onRewindBackfill).not.toHaveBeenCalled()
+    expect(status.onEntryBackfill).not.toHaveBeenCalled()
   })
 
   it('宿主未注入动作类通道 → 回退失败回到 onError（任何宿主下都不静默丢错误）', async () => {
@@ -1128,7 +1129,7 @@ describe('#694 对话回退编排', () => {
     await conn.rewind('entry-1')
 
     expect(gw.rewind).not.toHaveBeenCalled()
-    expect(status.onRewindBackfill).not.toHaveBeenCalled()
+    expect(status.onEntryBackfill).not.toHaveBeenCalled()
   })
 
   it('在途回退单飞：窗口期内再触发（同条目 / 另一条目）一律忽略，落地后解锁', async () => {
@@ -1216,7 +1217,7 @@ describe('#694 对话回退编排', () => {
     await pending
     await flushPromises()
 
-    expect(status.onRewindBackfill).not.toHaveBeenCalled() // 旧容器回退结果不得落进新容器 composer
+    expect(status.onEntryBackfill).not.toHaveBeenCalled() // 旧容器回退结果不得落进新容器 composer
     expect(status.onError).not.toHaveBeenCalled()
     expect(status.onActionError).not.toHaveBeenCalled() // 陈旧回退不得弹「假失败」（动作类通道）
   })
@@ -1257,7 +1258,7 @@ describe('#694 对话回退编排', () => {
 
     await conn.rewind('entry-1')
 
-    const [text, attachments] = vi.mocked(status.onRewindBackfill!).mock.calls[0]!
+    const [text, attachments] = vi.mocked(status.onEntryBackfill!).mock.calls[0]!
     expect(text).toBe('第一问')
     expect(attachments[0]).toMatchObject({ type: 'image', mimeType: 'image/png', sizeBytes: 716799 })
     expect(buildAttachments(attachments).rejected).toHaveLength(0) // 端到端语义：可原样重发
@@ -1394,5 +1395,341 @@ describe('#694 回退与离线/在途语境的交互（Codex #703 review）', ()
     conn.pickSession('sk-2')
     await flushPromises()
     expect(conn.transcriptSynced.value).toBe(true)
+  })
+})
+
+// #697 对话 fork 编排（#693 spec 前端线）：sessions.fork RPC → prependSession 占位置顶 → 标准
+// pickSession 切到新会话（resetForSession + 全量 loadHistory）→ 三重守卫后播种 composer →
+// refreshSessions 权威刷新。与 rewind 的关键差异（grilling 决议）：
+//  - 源会话零动：不作废 outbox、不清 run/resume（fork 不剪源 transcript，待发残留仍属合法旧代）；
+//  - 无草稿指纹守卫（await 期间用户草稿属源会话，切换时按既有机制存回源 key，新会话草稿为空）；
+//  - resendOutbox 不加 forkBusy 栅栏（源会话待发消息合法，重连照常重发）。
+describe('#697 对话 fork 编排', () => {
+  setupConnTestEnv()
+
+  const HISTORY = [
+    { role: 'user', text: '第一问', __openclaw: { id: 'entry-1' } },
+    { role: 'assistant', text: '第一答', __openclaw: { id: 'entry-2' } },
+    { role: 'user', text: '第二问', __openclaw: { id: 'entry-3' } },
+    { role: 'assistant', text: '第二答', __openclaw: { id: 'entry-4' } },
+  ]
+
+  async function connectWithHistory(conn: ReturnType<typeof useChatConnection>): Promise<InstanceType<typeof MockGatewayChat>> {
+    const ready = conn.openGateway()
+    await flushPromises()
+    const gw = MockGatewayChat.last!
+    gw.listSessions.mockResolvedValue([{ session_key: 'sk-1', title: '', updated_at: '' }])
+    gw.getHistory.mockResolvedValue({ messages: HISTORY, hasMore: false, nextOffset: null })
+    gw.listCommands.mockResolvedValue([])
+    gw.listPendingApprovals.mockResolvedValue([])
+    gw.fireReady()
+    await ready
+    await flushPromises()
+    return gw
+  }
+
+  function deferred<T>() {
+    let resolve!: (v: T) => void
+    const promise = new Promise<T>((r) => {
+      resolve = r
+    })
+    return { promise, resolve }
+  }
+
+  function outboxItems(container: string, sessionKey: string): unknown[] {
+    const raw = sessionStorage.getItem(`openclaw.panel.outbox.v1:${container}`) ?? '{}'
+    const blob = JSON.parse(raw) as { sessions?: Record<string, unknown[]> }
+    return blob.sessions?.[sessionKey] ?? []
+  }
+
+  it('成功：RPC 原样透传 → 新会话 prepend 置顶 + 原地切换 + 新 transcript 铺底 + 播种 composer + 元数据刷新', async () => {
+    const { conn, chat, status } = setup()
+    const gw = await connectWithHistory(conn)
+    // fork 切点 = entry-3（第二问）之前：新会话 transcript = 第一问答；被点的第二问播种 composer
+    const forkPrefix = [HISTORY[0], HISTORY[1]]
+    gw.getHistory.mockResolvedValue({ messages: forkPrefix, hasMore: false, nextOffset: null })
+    gw.forkEntry.mockResolvedValue({
+      sessionKey: 'sk-fork-1',
+      editorText: '第二问',
+      editorAttachments: [{ mimeType: 'image/png', data: 'AAAA' }],
+    })
+    // refreshSessions 权威列表已含新会话（网关侧 fork 已落定）；C1 保留选中
+    gw.listSessions.mockResolvedValue([
+      { session_key: 'sk-fork-1', title: '', updated_at: '' },
+      { session_key: 'sk-1', title: '', updated_at: '' },
+    ])
+
+    await conn.fork('entry-3')
+
+    expect(gw.forkEntry).toHaveBeenCalledWith('sk-1', 'entry-3')
+    expect(chat.sessions.map((s) => s.session_key)).toEqual(['sk-fork-1', 'sk-1']) // 置顶 + 源行保留
+    expect(chat.selectedSession).toBe('sk-fork-1') // 原地切换
+    expect(gw.getHistory).toHaveBeenLastCalledWith('sk-fork-1', expect.anything()) // 新会话权威铺底
+    expect(chat.messages.map((m) => m.text)).toEqual(['第一问', '第一答']) // 切点前缀
+    expect(status.onEntryBackfill).toHaveBeenCalledWith('第二问', [
+      { type: 'image', mimeType: 'image/png', content: 'AAAA', sizeBytes: 3 },
+    ])
+    expect(gw.listSessions).toHaveBeenCalledTimes(2) // 成功后 refreshSessions 权威刷新
+  })
+
+  it('源会话零动：fork 成功后源会话 outbox 待发残留仍在（不被作废——与 rewind 的代际作废语义相反）', async () => {
+    const { conn, chat } = setup()
+    const gw = await connectWithHistory(conn)
+    // 前置：一条留在 outbox 的源会话待发消息（#564 失败留队）
+    chat.setInput('源会话的待发消息')
+    gw.send.mockRejectedValueOnce(new Error('网关未受理'))
+    conn.send(false)
+    await flushPromises()
+    expect(outboxItems('demo', 'sk-1')).toHaveLength(1)
+
+    gw.getHistory.mockResolvedValue({ messages: [], hasMore: false, nextOffset: null })
+    gw.forkEntry.mockResolvedValue({ sessionKey: 'sk-fork-1', editorText: '', editorAttachments: [] })
+    await conn.fork('entry-1')
+
+    expect(outboxItems('demo', 'sk-1')).toHaveLength(1) // 源会话残留不随 fork 作废
+  })
+
+  it('失败（网关拒绝）：明确提示（动作类通道）且零状态变更——列表/选中/transcript/草稿全原样', async () => {
+    const { conn, chat, status } = setup()
+    const gw = await connectWithHistory(conn)
+    chat.setInput('源会话草稿')
+    gw.forkEntry.mockRejectedValue(new Error('Fork is unavailable while the agent is working.'))
+
+    await conn.fork('entry-3')
+
+    expect(status.onActionError).toHaveBeenCalledWith('分叉失败：Fork is unavailable while the agent is working.')
+    expect(status.onError).not.toHaveBeenCalled()
+    expect(gw.getHistory).toHaveBeenCalledTimes(1) // 只有首连铺底那次（不重拉不重建）
+    expect(chat.messages).toHaveLength(4) // 源 transcript 原样
+    expect(chat.selectedSession).toBe('sk-1')
+    expect(chat.sessions.map((s) => s.session_key)).toEqual(['sk-1']) // 无占位行
+    expect(chat.input).toBe('源会话草稿') // 草稿不动
+    expect(status.onEntryBackfill).not.toHaveBeenCalled()
+  })
+
+  it('RPC 成功但新会话历史拉取失败 → 不回切（网关侧 fork 已发生不可回滚），走既有 loadHistory 失败路径', async () => {
+    const { conn, chat } = setup()
+    const gw = await connectWithHistory(conn)
+    gw.forkEntry.mockResolvedValue({ sessionKey: 'sk-fork-1', editorText: '第二问', editorAttachments: [] })
+    gw.getHistory.mockRejectedValue(new Error('history unavailable'))
+    // 权威列表已含新会话——refreshSessions 不把选中回退到源会话
+    gw.listSessions.mockResolvedValue([
+      { session_key: 'sk-fork-1', title: '', updated_at: '' },
+      { session_key: 'sk-1', title: '', updated_at: '' },
+    ])
+
+    await conn.fork('entry-3')
+
+    expect(chat.selectedSession).toBe('sk-fork-1') // 不假装没 fork 过
+    expect(chat.sessions.some((s) => s.session_key === 'sk-fork-1')).toBe(true) // 列表保留新会话
+  })
+
+  it('导航在途用户切走 → 静默放弃播种（不弹假错误），切换保留', async () => {
+    const { conn, chat, status } = setup()
+    const gw = await connectWithHistory(conn)
+    gw.forkEntry.mockResolvedValue({ sessionKey: 'sk-fork-1', editorText: '第二问', editorAttachments: [] })
+    // fork 的 loadHistory 挂起；期间用户手动切到 sk-2
+    const d = deferred<{ messages: unknown[]; hasMore: boolean; nextOffset: null }>()
+    gw.getHistory.mockImplementationOnce(() => d.promise)
+    gw.getHistory.mockResolvedValue({ messages: [], hasMore: false, nextOffset: null })
+    const pending = conn.fork('entry-3')
+    await flushPromises()
+    conn.pickSession('sk-2')
+    await flushPromises()
+    expect(chat.selectedSession).toBe('sk-2')
+
+    d.resolve({ messages: [], hasMore: false, nextOffset: null }) // fork 的历史响应迟到
+    await pending
+    await flushPromises()
+
+    expect(chat.selectedSession).toBe('sk-2') // 不被迟到的 fork 续体拉回
+    expect(status.onEntryBackfill).not.toHaveBeenCalled()
+    expect(status.onActionError).not.toHaveBeenCalled() // 用户主动离开，不弹假错误
+  })
+
+  it('RPC 在途切容器 → 迟到的成功结果不导航不播种（containerGen 守卫），不弹假失败', async () => {
+    const { conn, chat, status } = setup()
+    const gw = await connectWithHistory(conn)
+    const d = deferred<{ sessionKey: string; editorText: string; editorAttachments: never[] }>()
+    gw.forkEntry.mockReturnValue(d.promise)
+    const pending = conn.fork('entry-3')
+    await flushPromises()
+
+    const switching = conn.selectContainer('demo2')
+    await flushPromises()
+    const gw2 = MockGatewayChat.last!
+    gw2.listSessions.mockResolvedValue([{ session_key: 'main', title: '', updated_at: '' }])
+    gw2.getHistory.mockResolvedValue({ messages: [], hasMore: false, nextOffset: null })
+    gw2.listCommands.mockResolvedValue([])
+    gw2.listPendingApprovals.mockResolvedValue([])
+    gw2.fireReady()
+    await switching
+    await flushPromises()
+
+    d.resolve({ sessionKey: 'sk-fork-1', editorText: '第二问', editorAttachments: [] })
+    await pending
+    await flushPromises()
+
+    expect(chat.selectedSession).not.toBe('sk-fork-1') // 不把用户拽去旧容器的新会话
+    expect(status.onEntryBackfill).not.toHaveBeenCalled()
+    expect(status.onActionError).not.toHaveBeenCalled() // 陈旧结果不弹假失败
+  })
+
+  it('在途 fork 单飞：窗口期内再触发一律忽略，落地后解锁', async () => {
+    const { conn, status } = setup()
+    const gw = await connectWithHistory(conn)
+    const d = deferred<{ sessionKey: string; editorText: string; editorAttachments: never[] }>()
+    gw.forkEntry.mockReturnValue(d.promise)
+    gw.getHistory.mockResolvedValue({ messages: [], hasMore: false, nextOffset: null })
+
+    const first = conn.fork('entry-1')
+    const dup = conn.fork('entry-1')
+    const other = conn.fork('entry-3')
+    await flushPromises()
+    expect(gw.forkEntry).toHaveBeenCalledTimes(1)
+
+    d.resolve({ sessionKey: 'sk-fork-1', editorText: '', editorAttachments: [] })
+    await Promise.all([first, dup, other])
+    expect(status.onActionError).not.toHaveBeenCalled() // 被吞的重复触发不弹假失败
+
+    // 落地即解锁
+    gw.forkEntry.mockResolvedValue({ sessionKey: 'sk-fork-2', editorText: '', editorAttachments: [] })
+    await conn.fork('entry-3')
+    expect(gw.forkEntry).toHaveBeenCalledTimes(2)
+  })
+
+  it('rewind / fork 互斥：回退在途时 fork 被拦，fork 在途时回退被拦（同动 transcript，网关侧乐观并发冲突）', async () => {
+    const { conn } = setup()
+    const gw = await connectWithHistory(conn)
+    // 回退在途（rewindBusy 置位）→ fork 不发
+    const dRewind = deferred<{ editorText: string; editorAttachments: never[] }>()
+    gw.rewind.mockReturnValue(dRewind.promise)
+    const rewinding = conn.rewind('entry-1')
+    await flushPromises()
+    expect(conn.rewindBusy.value).toBe(true)
+    await conn.fork('entry-3')
+    expect(gw.forkEntry).not.toHaveBeenCalled()
+    gw.getHistory.mockResolvedValue({ messages: [], hasMore: false, nextOffset: null })
+    dRewind.resolve({ editorText: '', editorAttachments: [] })
+    await rewinding
+
+    // fork 在途（forkBusy 置位）→ rewind 不发
+    const dFork = deferred<{ sessionKey: string; editorText: string; editorAttachments: never[] }>()
+    gw.forkEntry.mockReturnValue(dFork.promise)
+    const forking = conn.fork('entry-3')
+    await flushPromises()
+    expect(conn.forkBusy.value).toBe(true)
+    await conn.rewind('entry-1')
+    expect(gw.rewind).toHaveBeenCalledTimes(1) // 只有前一次
+    dFork.resolve({ sessionKey: 'sk-fork-1', editorText: '', editorAttachments: [] })
+    await forking
+  })
+
+  it('fork 在途禁止发送（forkBusy 栅栏对齐 rewindBusy 语义）', async () => {
+    const { conn, chat } = setup()
+    const gw = await connectWithHistory(conn)
+    const d = deferred<{ sessionKey: string; editorText: string; editorAttachments: never[] }>()
+    gw.forkEntry.mockReturnValue(d.promise)
+    gw.getHistory.mockResolvedValue({ messages: [], hasMore: false, nextOffset: null })
+
+    const forking = conn.fork('entry-1')
+    await flushPromises()
+    chat.setInput('fork 期间的新消息')
+    gw.send.mockResolvedValue('run-new')
+    const accepted = conn.send(false)
+    expect(accepted).toBe(false)
+    expect(gw.send).not.toHaveBeenCalled()
+
+    d.resolve({ sessionKey: 'sk-fork-1', editorText: '', editorAttachments: [] })
+    await forking
+  })
+
+  it('forkBusy 不栅栏 resendOutbox——源会话待发残留重连照常重发（与 rewindBusy 语义相反）', async () => {
+    const { conn, chat } = setup()
+    const gw = await connectWithHistory(conn)
+    // 前置：源会话待发残留
+    chat.setInput('源会话的待发消息')
+    gw.send.mockRejectedValueOnce(new Error('网关未受理'))
+    conn.send(false)
+    await flushPromises()
+    expect(outboxItems('demo', 'sk-1')).toHaveLength(1)
+
+    // fork 在途时断线重连（RPC 未回）
+    const d = deferred<{ sessionKey: string; editorText: string; editorAttachments: never[] }>()
+    gw.forkEntry.mockReturnValue(d.promise)
+    gw.getHistory.mockResolvedValue({ messages: HISTORY, hasMore: false, nextOffset: null })
+    const forking = conn.fork('entry-1')
+    await flushPromises()
+    expect(conn.forkBusy.value).toBe(true)
+
+    gw.fireClose(1006)
+    await flushPromises()
+    gw.send.mockReset()
+    gw.send.mockResolvedValue('run-replay')
+    gw.fireReady() // 重连就绪 → syncSessions → resendOutbox
+    await flushPromises()
+
+    expect(gw.send).toHaveBeenCalledWith('sk-1', '源会话的待发消息', undefined, expect.any(String)) // 照常重发（幂等 key 复用）
+
+    d.resolve({ sessionKey: 'sk-fork-1', editorText: '', editorAttachments: [] })
+    await forking
+  })
+
+  it('前置守卫：断线 / 无 entryId / 无会话 → 不发起 RPC', async () => {
+    const { conn } = setup()
+    const gw = await connectWithHistory(conn)
+
+    await conn.fork('') // 无 entryId
+    gw.fireClose(1006)
+    await flushPromises()
+    await conn.fork('entry-1')
+
+    expect(gw.forkEntry).not.toHaveBeenCalled()
+  })
+
+  // review P2：fork 成功后的入口恢复依赖「投影权威」由新会话铺底置真——直接断言，别靠间接推断。
+  it('fork 成功切入新会话后 transcriptSynced 恢复 true（新会话权威铺底，入口可再点）', async () => {
+    const { conn } = setup()
+    const gw = await connectWithHistory(conn)
+    expect(conn.transcriptSynced.value).toBe(true) // 前置：源会话权威
+    gw.getHistory.mockResolvedValue({ messages: [HISTORY[0]], hasMore: false, nextOffset: null })
+    gw.forkEntry.mockResolvedValue({ sessionKey: 'sk-fork-1', editorText: '', editorAttachments: [] })
+    gw.listSessions.mockResolvedValue([
+      { session_key: 'sk-fork-1', title: '', updated_at: '' },
+      { session_key: 'sk-1', title: '', updated_at: '' },
+    ])
+
+    await conn.fork('entry-3')
+
+    expect(conn.transcriptSynced.value).toBe(true)
+  })
+
+  // review P2：同容器变体（此前只测了切容器）——RPC 在途切会话走同一条 selectedSession 守卫。
+  it('RPC 在途同容器切会话 → 迟到的成功结果不导航不播种不弹错（新会话留待下次列表同步可见）', async () => {
+    const { conn, chat, status } = setup()
+    const gw = await connectWithHistory(conn)
+    const d = deferred<{ sessionKey: string; editorText: string; editorAttachments: never[] }>()
+    gw.forkEntry.mockReturnValue(d.promise)
+    gw.getHistory.mockResolvedValue({ messages: [], hasMore: false, nextOffset: null })
+    // 权威列表含用户切往的 sk-2（stale 分支的 fail-soft refreshSessions 会重拉——真实网关列表
+    // 必含在列会话，C1 保留选中；mock 若不含会错误触发 C1 兜底重置选中，非本用例研究对象）
+    gw.listSessions.mockResolvedValue([
+      { session_key: 'sk-1', title: '', updated_at: '' },
+      { session_key: 'sk-2', title: '', updated_at: '' },
+    ])
+    const pending = conn.fork('entry-3')
+    await flushPromises()
+
+    conn.pickSession('sk-2') // 同容器切到另一会话
+    await flushPromises()
+    expect(chat.selectedSession).toBe('sk-2')
+
+    d.resolve({ sessionKey: 'sk-fork-1', editorText: '第二问', editorAttachments: [] })
+    await pending
+    await flushPromises()
+
+    expect(chat.selectedSession).toBe('sk-2') // 不被迟到的 fork 续体拉走
+    expect(status.onEntryBackfill).not.toHaveBeenCalled() // 播种不落进 sk-2 的 composer
+    expect(status.onActionError).not.toHaveBeenCalled() // 用户主动离开，不弹假错误
   })
 })

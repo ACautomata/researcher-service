@@ -26,8 +26,10 @@ const props = withDefaults(
     // 消息，仅已持久化的 user 消息据此渲染入口。缺省 false = fail-closed（宿主不显式开启就不渲染，
     // 不出现点了必然报错的按钮）。
     rewindAvailable?: boolean
+    // #697：fork 入口可用性（同 rewind 语义，fail-closed；busy 互斥由宿主独立计算）
+    forkAvailable?: boolean
   }>(),
-  { rewindAvailable: false },
+  { rewindAvailable: false, forkAvailable: false },
 )
 
 const emit = defineEmits<{
@@ -35,6 +37,7 @@ const emit = defineEmits<{
   regenerate: [text: string]
   toggleTraceFold: [msg: Msg] // T1 轮次折叠（#664）：折叠条开合转发（携带所属消息，父层落 store）
   rewind: [msg: Msg] // #694 对话回退：携带所属消息（父层取 entryId 发起 sessions.rewind）
+  fork: [msg: Msg] // #697 对话 fork：携带所属消息（父层取 entryId 发起 sessions.fork）
 }>()
 
 function previousUserText(message: Msg): string {
@@ -224,9 +227,11 @@ defineSlots<{
           :class="{ 'anchor-flash': i === flashIndex }"
           :regenerate-text="m.role === 'assistant' ? previousUserText(m) : ''"
           :rewind-available="rewindAvailable"
+          :fork-available="forkAvailable"
           @regenerate="emit('regenerate', $event)"
           @toggle-trace-fold="emit('toggleTraceFold', m)"
           @rewind="emit('rewind', m)"
+          @fork="emit('fork', m)"
         />
       </slot>
     </template>

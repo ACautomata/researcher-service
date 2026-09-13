@@ -37,6 +37,7 @@ const { MockGatewayChat } = vi.hoisted(() => {
     getHistory = vi.fn()
     send = vi.fn()
     rewind = vi.fn() // #694 对话回退（sessions.rewind）
+    forkEntry = vi.fn() // #697 对话 fork（sessions.fork）
     sessionControlAvailable = vi.fn(() => true) // #694 会话控制能力（默认 9.4+ 网关可用）
     listCommands = vi.fn()
     resolveApproval = vi.fn()
@@ -2456,4 +2457,141 @@ describe('ChatView', () => {
       expect(w.find('[data-test="rewind"]').exists()).toBe(true)
     })
   })
+
+  // ---- #697 对话 fork 端到端（view 接线：入口 / 导航 / 播种 / 源会话保留 / 失败不变更）----
+  describe('#697 对话 fork 接线', () => {
+    const HISTORY_WITH_ENTRY = [
+      { role: 'user', text: '第一问', __openclaw: { id: 'entry-1' } },
+      { role: 'assistant', text: '第一答', __openclaw: { id: 'entry-2' } },
+      { role: 'user', text: '第二问', __openclaw: { id: 'entry-3' } },
+    ]
+
+    async function mountWithHistory() {
+      const w = mount(ChatView)
+      await flushPromises()
+      const gw = MockGatewayChat.last!
+      gw.listSessions.mockResolvedValue([SESSION])
+      gw.getHistory.mockResolvedValue({ messages: HISTORY_WITH_ENTRY, hasMore: false, nextOffset: null })
+      gw.listCommands.mockResolvedValue([])
+      gw.listPendingApprovals.mockResolvedValue([])
+      gw.fireReady()
+      await flushPromises()
+      return { w, gw }
+    }
+
+    it('AC1/AC2：点「从此分叉」免确认 → sessions.fork + 列表顶部新会话 + 原地切换 + 新 transcript 前缀 + composer 播种', async () => {
+      const { w, gw } = await mountWithHistory()
+      // fork 切点 = 第二问（entry-3）之前：新会话 transcript = 第一问答；第二问播种 composer
+      gw.getHistory.mockResolvedValue({ messages: HISTORY_WITH_ENTRY.slice(0, 2), hasMore: false, nextOffset: null })
+      gw.forkEntry.mockResolvedValue({
+        sessionKey: 'sk-fork-1',
+        editorText: '第二问',
+        editorAttachments: [{ mimeType: 'image/png', data: 'AAAA' }],
+      })
+      gw.listSessions.mockResolvedValue([
+        { session_key: 'sk-fork-1', title: '', updated_at: '' },
+        SESSION,
+      ])
+
+      await w.findAll('[data-test="fork"]')[1].trigger('click') // 免确认：一步直达（第二问的入口）
+      await flushPromises()
+
+      expect(gw.forkEntry).toHaveBeenCalledWith('sk-1', 'entry-3')
+      expect(w.find('[data-test="session-sk-fork-1"]').exists()).toBe(true) // 列表出现新会话
+      expect(w.find('[data-test="stream"]').text()).toContain('第一问') // 新 transcript = 切点前缀
+      expect(w.find('[data-test="stream"]').text()).not.toContain('第二问') // 被点消息不在新会话里（去播种了）
+      expect((w.find('[data-test="input"]').element as HTMLTextAreaElement).value).toBe('第二问') // 播种
+      expect(w.findAll('[data-test="preview-item"]').length).toBe(1) // 图片附件一并播种
+    })
+
+    it('AC3：切回源会话 → transcript 完整、源草稿保留', async () => {
+      const { w, gw } = await mountWithHistory()
+      await w.find('[data-test="input"]').setValue('源会话草稿') // 切走前留下的草稿
+      gw.getHistory.mockImplementation((key: unknown) =>
+        Promise.resolve(
+          key === 'sk-fork-1'
+            ? { messages: HISTORY_WITH_ENTRY.slice(0, 2), hasMore: false, nextOffset: null }
+            : { messages: HISTORY_WITH_ENTRY, hasMore: false, nextOffset: null },
+        ),
+      )
+      gw.forkEntry.mockResolvedValue({ sessionKey: 'sk-fork-1', editorText: '第二问', editorAttachments: [] })
+      gw.listSessions.mockResolvedValue([
+        { session_key: 'sk-fork-1', title: '', updated_at: '' },
+        SESSION,
+      ])
+
+      await w.find('[data-test="fork"]').trigger('click')
+      await flushPromises()
+      // 切回源会话（fork 排在列表 sk-fork-1 之后）
+      await w.find('[data-test="session-sk-1"]').trigger('click')
+      await flushPromises()
+
+      expect(w.find('[data-test="stream"]').text()).toContain('第二问') // 源 transcript 完整（含被点消息）
+      expect((w.find('[data-test="input"]').element as HTMLTextAreaElement).value).toBe('源会话草稿') // 源草稿按 draftKey 存回/恢复
+    })
+
+    it('AC3（续）：fork 成功切回源会话后仍可正常发送消息（源会话后续发送不受影响）', async () => {
+      const { w, gw } = await mountWithHistory()
+      gw.getHistory.mockImplementation((key: unknown) =>
+        Promise.resolve(
+          key === 'sk-fork-1'
+            ? { messages: HISTORY_WITH_ENTRY.slice(0, 2), hasMore: false, nextOffset: null }
+            : { messages: HISTORY_WITH_ENTRY, hasMore: false, nextOffset: null },
+        ),
+      )
+      gw.forkEntry.mockResolvedValue({ sessionKey: 'sk-fork-1', editorText: '第二问', editorAttachments: [] })
+      gw.listSessions.mockResolvedValue([
+        { session_key: 'sk-fork-1', title: '', updated_at: '' },
+        SESSION,
+      ])
+      gw.send.mockResolvedValue('run-after-fork') // 源会话继续发送成功路径
+
+      await w.find('[data-test="fork"]').trigger('click')
+      await flushPromises()
+      await w.find('[data-test="session-sk-1"]').trigger('click')
+      await flushPromises()
+
+      await w.find('[data-test="input"]').setValue('源会话的后续问题')
+      await w.find('[data-test="send"]').trigger('click')
+      await flushPromises()
+
+      // 发到了源会话（不是 fork 出的新会话），乐观 echo 已入流（无附件 → attachments 为 undefined）
+      expect(gw.send.mock.calls[0]?.[0]).toBe('sk-1')
+      expect(gw.send.mock.calls[0]?.[1]).toBe('源会话的后续问题')
+      expect(w.find('[data-test="stream"]').text()).toContain('源会话的后续问题')
+    })
+
+    it('AC4：fork 失败 → 瞬时错误提示（动作类通道），视图/列表/输入框全部原样', async () => {
+      const { w, gw } = await mountWithHistory()
+      await w.find('[data-test="input"]').setValue('我的草稿')
+      gw.forkEntry.mockRejectedValue(new Error('Fork is unavailable while the agent is working.'))
+
+      await w.find('[data-test="fork"]').trigger('click')
+      await flushPromises()
+
+      expect(ElMessage.error).toHaveBeenCalledWith('分叉失败：Fork is unavailable while the agent is working.')
+      expect(w.find('[data-test="error-bar"]').exists()).toBe(false) // 不进连接横幅
+      expect(w.find('[data-test="stream"]').text()).toContain('第二问') // 源 transcript 原样
+      expect(w.find('[data-test="session-sk-fork-1"]').exists()).toBe(false) // 无占位行
+      expect((w.find('[data-test="input"]').element as HTMLTextAreaElement).value).toBe('我的草稿') // 草稿不动
+    })
+
+    it('AC5：fork 在途 → 发送键置灰 + 入口隐藏；落地后恢复', async () => {
+      const { w, gw } = await mountWithHistory()
+      const deferred: { resolve?: (v: { sessionKey: string; editorText: string; editorAttachments: never[] }) => void } = {}
+      gw.forkEntry.mockImplementation(() => new Promise((r) => { deferred.resolve = r }))
+      gw.getHistory.mockResolvedValue({ messages: [], hasMore: false, nextOffset: null })
+      gw.listSessions.mockResolvedValue([{ session_key: 'sk-fork-1', title: '', updated_at: '' }, SESSION])
+
+      await w.find('[data-test="fork"]').trigger('click')
+      await flushPromises()
+      expect(w.find('[data-test="fork"]').exists()).toBe(false) // 窗口内入口隐藏
+      expect((w.find('[data-test="send"]').element as HTMLButtonElement).disabled).toBe(true) // 发送键置灰
+
+      deferred.resolve?.({ sessionKey: 'sk-fork-1', editorText: '', editorAttachments: [] })
+      await flushPromises()
+      expect((w.find('[data-test="send"]').element as HTMLButtonElement).disabled).toBe(false) // 落地恢复
+    })
+  })
+
 })

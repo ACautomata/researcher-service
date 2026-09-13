@@ -65,10 +65,34 @@ export interface RewindResultDTO {
   editorAttachments: EditorAttachmentDTO[]
 }
 
+// #697 对话 fork（#693 spec 前端线）：sessions.fork 与 rewind 同形请求、同形 editor 载荷，
+// 差异仅结果多必有 sessionKey（新会话 key——prependSession/pickSession 导航编排的前提）。
+export interface ForkResultDTO extends RewindResultDTO {
+  sessionKey: string
+}
+
+// rewind/fork 结果的 editor 载荷 0 信任校准（#694 rewind 先例，#697 抽为共享——两路校准口径
+// 必须同源，漂移即重蹈 #694 sizeBytes 高估 bug）：缺失/异形一律回落空载荷，语义 =「无回填」。
+function parseEditorPayload(res: unknown): { editorText: string; editorAttachments: EditorAttachmentDTO[] } {
+  const rec = (res && typeof res === 'object' ? res : {}) as Record<string, unknown>
+  const editorText = typeof rec.editorText === 'string' ? rec.editorText : ''
+  const raw = Array.isArray(rec.editorAttachments) ? rec.editorAttachments : []
+  const editorAttachments: EditorAttachmentDTO[] = []
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') continue
+    const att = item as Record<string, unknown>
+    const mimeType = typeof att.mimeType === 'string' ? att.mimeType : ''
+    const data = typeof att.data === 'string' ? att.data : ''
+    if (!mimeType || !data) continue // 空 mimeType/空 data 渲染不出也发不出，丢弃
+    editorAttachments.push({ mimeType, data })
+  }
+  return { editorText, editorAttachments }
+}
+
 // #694 会话控制能力探测方法集（#693 spec §1.1）：hello-ok.features.methods 须**全部**在位才判「可用」
 // ——四个方法同属一个功能族（会话控制 RPC），任一缺失即该代网关不支持该族（过渡期存量 7.1 镜像
-// 无 features 字段），UI 据此隐藏回退/fork/分支全部入口，而非点出必然报错的按钮。单一来源：本票
-// 只消费 sessions.rewind，fork/branches 由后续票复用同一判定（避免各自维护子集而语义漂移）。
+// 无 features 字段），UI 据此隐藏回退/fork/分支全部入口，而非点出必然报错的按钮。单一来源：
+// rewind（#694）与 fork（#697）都消费这同一判定；branches 由后续票复用（避免各自维护子集而语义漂移）。
 const SESSION_CONTROL_METHODS = [
   'sessions.rewind',
   'sessions.fork',
@@ -119,6 +143,11 @@ export interface GatewayChat {
   // 不可作参数。权限 operator.admin（已在 OPERATOR_SCOPES）。失败原样上抛（GatewayProtocolRequestError，
   // details 携带网关语义），调用层不重试、如实提示。
   rewind(sessionKey: string, entryId: string): Promise<RewindResultDTO>
+  // #697 对话 fork（#693 spec 前端线）：从该持久化 user message（entryId）之前的活跃路径前缀
+  // 创建新会话，返回新 sessionKey + 被点消息的文本/图片附件（播种新会话 composer）。entryId 语义
+  // 同 rewind（resolveMessageCut 同源），原样透传。权限 operator.write。源会话完全不动（不清队列、
+  // 不换 generation）。sessionKey 异形 → 整单判失败（导航无前提，不得回落空结果）。
+  forkEntry(sessionKey: string, entryId: string): Promise<ForkResultDTO>
   // chat.send RPC 响应携带网关分配的 runId（ackPayload = {runId, status:"started"}，
   // 官方 chat-send-handler）——供 ChatView 首帧归属判别（#53：pendingSend 期间外来/旧 run
   // 首帧与自己的 run 区分，防抢 activeRunId 吞回复）。ack 无 runId（旧网关/异常形状）→ undefined。
@@ -751,25 +780,26 @@ export function createGatewayChat(params: CreateGatewayChatParams): GatewayChat 
       }
     },
     async rewind(sessionKey: string, entryId: string): Promise<RewindResultDTO> {
-      // 简单透传（resolveApproval/deleteSession 惯例）+ 结果 0 信任校准：会话控制方法的结果形状由
-      // 网关决定，面板侧只取需要的两个字段并逐项 typeof 门（非 dict / 缺字段项跳过），缺失/异形
-      // 一律回落空结果——上游文档对这些字段均为可选（无被剪内容时不返回），空结果语义即「无回填」。
-      const res = await client.request<{ editorText?: unknown; editorAttachments?: unknown }>('sessions.rewind', {
+      // 简单透传（resolveApproval/deleteSession 惯例）+ 结果 0 信任校准（parseEditorPayload，与
+      // forkEntry 同源——缺失/异形一律回落空结果，空结果语义即「无回填」）。
+      const res = await client.request('sessions.rewind', {
         sessionKey,
         entryId,
       })
-      const editorText = typeof res?.editorText === 'string' ? res.editorText : ''
-      const raw = Array.isArray(res?.editorAttachments) ? res.editorAttachments : []
-      const editorAttachments: EditorAttachmentDTO[] = []
-      for (const item of raw) {
-        if (!item || typeof item !== 'object') continue
-        const rec = item as Record<string, unknown>
-        const mimeType = typeof rec.mimeType === 'string' ? rec.mimeType : ''
-        const data = typeof rec.data === 'string' ? rec.data : ''
-        if (!mimeType || !data) continue // 空 mimeType/空 data 渲染不出也发不出，丢弃
-        editorAttachments.push({ mimeType, data })
+      return parseEditorPayload(res)
+    },
+    async forkEntry(sessionKey: string, entryId: string): Promise<ForkResultDTO> {
+      // #697：同形透传；sessionKey 是新会话身份（后续导航前提），异形即失败上抛——与 editor
+      // 载荷「回落空」的口径相反，缺失时调用层无从导航，回落会掩盖网关异常。
+      const res = await client.request('sessions.fork', {
+        sessionKey,
+        entryId,
+      })
+      const rec = (res && typeof res === 'object' ? res : {}) as Record<string, unknown>
+      if (typeof rec.sessionKey !== 'string' || !rec.sessionKey) {
+        throw new Error('sessions.fork: response missing sessionKey')
       }
-      return { editorText, editorAttachments }
+      return { sessionKey: rec.sessionKey, ...parseEditorPayload(res) }
     },
     async send(sessionKey: string, message: string, attachments?: Attachment[], idempotencyKey?: string): Promise<string | undefined> {
       // chat.send 幂等（schema 必填 idempotencyKey）；返回后流式 delta/final 事件经 onEvent 到达。

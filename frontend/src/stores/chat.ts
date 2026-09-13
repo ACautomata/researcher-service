@@ -149,7 +149,10 @@ export const useChatStore = defineStore('chat', {
     setSelectedSession(key: string): void {
       this.selectedSession = key
     },
+    // #697 幂等：同 key 重复插入（fork prepend 后 refreshSessions 合并前的重复路径）不重复行，
+    // 且保留首次行字段（占位行不覆盖已在位的权威行）。
     prependSession(s: SessionDTO): void {
+      if (this.sessions.some((x) => x.session_key === s.session_key)) return
       this.sessions = [s, ...this.sessions]
     },
     removeSession(key: string): void {
