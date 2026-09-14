@@ -1884,7 +1884,7 @@ describe('#698 分支菜单编排', () => {
 
     await conn.rewind('entry-1')
 
-    expect(status.onRewindBackfill).not.toHaveBeenCalled() // 守卫行为不变：新草稿原地保留，不回填旧 editorText
+    expect(status.onEntryBackfill).not.toHaveBeenCalled() // 守卫行为不变：新草稿原地保留，不回填旧 editorText
     expect(chat.messages).toHaveLength(0) // transcript 重建行为不变
     expect(gw.listBranches).toHaveBeenCalledTimes(2) // ← 修复前：停在 1（被草稿守卫的 early return 短路）
     expect(chat.branches).toEqual([{ leafEntryId: 'leaf-1', headline: 'A 方向', messageCount: 3, active: true }]) // 重拉落地为新状态（发生在 rewind 成功后的 rebuild 流程内）
