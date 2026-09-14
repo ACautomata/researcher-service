@@ -24,6 +24,14 @@ import { editorAttachmentToRaw, type Attachment, type RawAttachment } from '@/ch
 import { createOutboxStore } from '@/chat/outboxStore'
 import { WS_AUTH_FAIL, WS_MUST_CHANGE_PASSWORD, WS_CONTAINER_ACCESS_DENIED, WS_GATEWAY_UNAVAILABLE } from '@/chat/closeCodes'
 
+// #700 分支 CAS 冲突判定（spec §1.3/§1.4）：网关对「期望 leaf ≠ 当前活跃 leaf」的发送拒绝为
+// INVALID_REQUEST，details.reason === 'active-leaf-changed'（官方 #689 决策 C 简化版语义）。纯函数
+// 零依赖，测试与生产共用同一准据（防双源漂移）。
+export function isActiveLeafChanged(e: unknown): boolean {
+  const reason = (e as { details?: { reason?: unknown } } | undefined)?.details?.reason
+  return reason === 'active-leaf-changed'
+}
+
 // T07 斜杠命令选项（ChatComposer 菜单渲染 props；单一来源计算在 useChatConnection）
 export interface SlashOption {
   alias: string // 展示/填入的精确斜杠别名（含前导 /）
@@ -148,6 +156,11 @@ export function useChatConnection(status: ChatStatus) {
   // 「同一会话并发两次 listBranches」（switch 成功后的重拉 vs 还在途的预拉）——乱序到达时旧响应
   // 不得覆盖 switch 后的新状态，只留最新代。
   let branchesGen = 0
+  // #700 分支 CAS（spec §1.3）：武装态 = 「回退/切分支成功后的第一次 send 应携带的期望 leaf」。
+  // undefined = 未武装/关闭校验（正常 send、outbox 重放、分支未加载、网关不支持一律 undefined →
+  // 键不出现，wire 与现状一致）；string = 期望活跃 leaf 精确比对；null = 权威空 transcript。
+  // 消费即清（仅首条携带），防第二条起继续带旧 leaf 误触 active-leaf-changed 永久重发失败。
+  let pendingCasLeaf: string | null | undefined = undefined
   // #369：协议机内置重连（退避）；openGateway 用 everConnected 区分「首连等待就绪」（pendingConnect
   // resolve 供 selectContainer 续流程）与「重连成功恢复」（onReady 拉权威历史重建投影）。
   let everConnected = false
@@ -742,19 +755,36 @@ export function useChatConnection(status: ChatStatus) {
   // 形状）。stale 守卫三重：containerGen（切容器）+ selectedSession（切会话）+ branchesGen（同会话
   // 并发乱序，见声明处注释）。失败静默降级：不报错误条——length 门下按钮不渲染即降级语义，分支
   // 列表非关键路径（不因预拉失败打扰用户，对齐审批补拉哲学）。
-  async function loadBranches(key: string) {
+  // #700 返回是否成功（true = 分支态新鲜落地）——rewind/switchBranch 成功后据此决定是否武装 CAS：
+  // 分支重拉失败时 chat.branches 仍是旧值，武装会拿旧 leaf 误发（spec §1.2「未加载/失败时不携带」）。
+  async function loadBranches(key: string): Promise<boolean> {
     const gen = containerGen
     const bgen = ++branchesGen
     const myGw = gateway
-    if (!myGw) return
+    if (!myGw) return false
     try {
       const list = await myGw.listBranches(key)
-      if (gen !== containerGen || chat.selectedSession !== key) return // 切容器/切会话途中迟到：丢弃
-      if (bgen !== branchesGen) return // 被更新的 loadBranches 取代：丢弃
+      if (gen !== containerGen || chat.selectedSession !== key) return false // 切容器/切会话途中迟到：丢弃
+      if (bgen !== branchesGen) return false // 被更新的 loadBranches 取代：丢弃
       chat.setBranches(list)
+      return true
     } catch {
       // 静默：分支不可知 → 按钮不渲染，下次同步/切换再拉
+      return false
     }
+  }
+
+  // #700 CAS 武装（spec §1.2）：从刚落地的新鲜分支态派生「下一次 send 应携带的期望 leaf」。
+  // CAS leaf 基准唯一权威 = branches 的 active:true 项 leafEntryId；空分支（权威空 transcript）→ null；
+  // 已加载但无 active 项（异常形状）→ undefined 关闭校验（不误发）。调用方保证在 loadBranches 成功
+  // 之后调（fresh 态）——否则旧 branches 会让武装拿到过期 leaf。
+  function armCasForNextSend(): void {
+    // ?? [] 防御：测试/异常宿主可能未初始化 branches 态（生产 store 恒为数组，此处为双源防抖）
+    const branches = chat.branches ?? []
+    const active = branches.find((b) => b.active)
+    if (active?.leafEntryId) pendingCasLeaf = active.leafEntryId
+    else if (branches.length === 0) pendingCasLeaf = null
+    else pendingCasLeaf = undefined
   }
 
   // T07 斜杠命令：拉取当前容器命令清单（协议机就绪后 onReady 首连触发）；失败静默降级为空清单。
@@ -1138,9 +1168,13 @@ export function useChatConnection(status: ChatStatus) {
     // 入队时机 = gateway.send 调用前（与 pendingSend=true 同步点）：「在线但 ack 未回」窄窗落盘，
     // ack 已回即删队（不打扰正常慢网关）。带附件消息不持久化（File/dataUrl 跨刷新失效，规格 §九）。
     if (!hasAttachments) outbox.addPending(container, sessionKey, { id, text, createdAt: Date.now() })
-    // chat.send RPC（幂等 key 外注 #564）；网关拒绝（未配对/scope 不足）→ catch 收尾提示
+    // #700：武装消费——仅「回退/切分支成功后的第一次 send」携带期望 leaf，读后即清（第二条起不携带；
+    // 正常 send / outbox 重放 / regenerate 路径 pendingCasLeaf 恒 undefined → 键不出现，wire 与现状一致）。
+    const casLeaf = pendingCasLeaf
+    pendingCasLeaf = undefined
+    // chat.send RPC（幂等 key 外注 #564）；网关拒绝（未配对/scope 不足/CAS 冲突）→ catch 收尾提示
     void myGw
-      .send(sessionKey, text, hasAttachments ? attachments : undefined, id)
+      .send(sessionKey, text, hasAttachments ? attachments : undefined, id, casLeaf)
       .then((runId) => {
         // ack = 网关已受理（status:"started"）→ 确认送达，删队（无条件：ack 是权威；切容器后旧
         // gateway 的 ack 也删旧容器队——消息已送达旧容器，留待无意义，且 scope 隔离互不影响）。
@@ -1161,6 +1195,20 @@ export function useChatConnection(status: ChatStatus) {
         // 容器可能已切换（gateway !== myGw）；无守卫会对新容器 state 执行 finalizeLast + 写旧连接停止
         // 错误进新容器的 errorMsg（对齐 onFrame/onClose 的 stale guard）。
         if (gateway !== myGw) return
+        // #700 分支 CAS 冲突（spec §1.4「#689 选项 B 简化版」）：另一客户端/标签页已改变分支 → 网关
+        // INVALID_REQUEST details.reason='active-leaf-changed' 拒绝本 send。处理链 = 明确提示「分支已
+        // 切换」+ 原文恢复 composer（send 末尾已 setInput('')，此处回填供审阅后手动重发，重发即重试）
+        // + 自动重拉 transcript 与分支列表（本地转录已过期，乐观 echo 与占位由 loadHistory 重建冲掉）。
+        // 不建 park queue、不动 outbox（重放存储零改动——规格显式要求）。
+        if (isActiveLeafChanged(e)) {
+          chat.setInput(text)
+          pendingSend = false // run 未起（admission 拒绝），复位在途态防 phantom orphan
+          myRunId = ''
+          reportActionError('分支已切换，请审阅后重发')
+          void loadHistory(sessionKey, { keepFileTabs: true })
+          void loadBranches(sessionKey)
+          return
+        }
         status.onError((e as Error).message)
         // R4-5（第四轮）：run 已 claim 且仍在流（activeRunId 非空——首帧已到）时，RPC 超时但网关可能
         // 继续流式续帧。此时 finalize 占位会落定 streaming，续帧要么被当下次 send 的占位认领（跨 run
@@ -1392,8 +1440,9 @@ export function useChatConnection(status: ChatStatus) {
       // #698：回退后活跃路径改变（可能剪出新分叉点）→ 分支列表**无条件**重拉（#693 spec §1.4
       //「rewind/branch-switch/fork 应答后本地重拉」）——须在草稿守卫之前：守卫只拦 composer 回填，
       // 不得连带短路 branches 重拉（final review P1：草稿已变路径的 early return 曾把它跳过）。
-      // fire-and-forget：分支列表非重建关键路径，迟到无碍（branchesGen 丢弃乱序旧响应）。
-      void loadBranches(key)
+      // #700：回退成功 = 活跃路径换新代 → 武装 CAS（仅首条 send 携带新 active leaf）。需新鲜分支态，
+      // 故由 fire-and-forget 改为 await；重拉失败（chat.branches 仍是旧值）→ 不武装（不误发旧 leaf）。
+      if (await loadBranches(key)) armCasForNextSend()
       // 重建期间又切走：不回填（新语境有自己的投影与草稿）。**容器/连接守卫不可省**（Codex #703 P1）：
       // loadHistory 自己在 await 后比对 containerGen 并丢弃迟到响应，但本续体若只比 sessionKey，
       // 两容器同名会话（main 类）就会放行——旧容器的被剪文本与附件落进新容器 composer，随后发错容器。
@@ -1494,7 +1543,8 @@ export function useChatConnection(status: ChatStatus) {
       clearResumeWait()
       await refreshSessions() // 切换改写会话权威元数据（updated_at）→ 重拉刷新
       await loadHistory(key, { keepFileTabs: true }) // transcript 重建为新活跃路径
-      await loadBranches(key) // 分支列表重拉为新状态（active 换位）
+      // #700：切换成功 = 活跃分支换位 → 武装 CAS（仅首条 send 携带新 active leaf）；重拉失败 → 不武装。
+      if (await loadBranches(key)) armCasForNextSend() // 分支列表重拉为新状态（active 换位）
     } finally {
       rewindBusy.value = false
     }

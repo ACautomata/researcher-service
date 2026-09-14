@@ -184,8 +184,9 @@ describe('ChatView', () => {
     const { w, gw } = await mountReady()
     await w.find('[data-test="input"]').setValue('你好')
     await w.find('[data-test="send"]').trigger('click')
-    // #564: send 第 4 参 = outbox 幂等 id（32-hex，兼作重发去重 key）
-    expect(gw.send).toHaveBeenCalledWith('sk-1', '你好', undefined, expect.any(String))
+    // #564: send 第 4 参 = outbox 幂等 id（32-hex，兼作重发去重 key）；第 5 参 = 分支 CAS（#700，
+    // 未武装时 undefined——正常发送恒不携带，wire 由 gatewayChat 条件展开保证与现状一致）
+    expect(gw.send).toHaveBeenCalledWith('sk-1', '你好', undefined, expect.any(String), undefined)
     gw.fireFrame({ type: 'text', runId: 'r1', delta: '回答' })
     await nextTick()
     expect(w.find('[data-test="stream"]').text()).toContain('回答')
@@ -206,7 +207,7 @@ describe('ChatView', () => {
     expect(gw.send).not.toHaveBeenCalled()
 
     await input.trigger('keydown', { key: 'Enter' })
-    expect(gw.send).toHaveBeenCalledWith('sk-1', '你好', undefined, expect.any(String))
+    expect(gw.send).toHaveBeenCalledWith('sk-1', '你好', undefined, expect.any(String), undefined)
   })
 
   it('斜杠菜单开启时，输入法组词 Enter 不选择命令也不发送', async () => {
@@ -1999,7 +2000,7 @@ describe('ChatView', () => {
       await flushPromises()
       expect(gw.send).toHaveBeenCalledWith('sk-1', '', [
         expect.objectContaining({ fileName: 'shot.png', mimeType: 'image/jpeg', type: 'image' }),
-      ], expect.any(String))
+      ], expect.any(String), undefined)
       await nextTick()
       expect(w.find('[data-test="preview-strip"]').exists()).toBe(false)
     })
@@ -2044,7 +2045,7 @@ describe('ChatView', () => {
       await flushPromises()
       expect(gw.send).toHaveBeenCalledWith('sk-1', '看这张图', [
         expect.objectContaining({ fileName: 'shot.png' }),
-      ], expect.any(String))
+      ], expect.any(String), undefined)
     })
 
     it('#1 Enter 键发送也走附件管道（不绕开）：payload 含 attachments + 预览条清空', async () => {
@@ -2056,7 +2057,7 @@ describe('ChatView', () => {
       await flushPromises()
       expect(gw.send).toHaveBeenCalledWith('sk-1', '看这张图', [
         expect.objectContaining({ fileName: 'shot.png' }),
-      ], expect.any(String))
+      ], expect.any(String), undefined)
       await nextTick()
       expect(w.find('[data-test="preview-strip"]').exists()).toBe(false)
     })
@@ -2180,8 +2181,9 @@ describe('ChatView', () => {
       expect(raw.sessions['sk-1'][0].text).toBe('你好')
       const id = raw.sessions['sk-1'][0].id
       expect(id).toMatch(/^[a-z0-9]{32}$/)
-      // 幂等 key 外注：send 第 4 参 = outbox id（重发复用同一 id 经网关幂等去重）
-      expect(gw.send).toHaveBeenCalledWith('sk-1', '你好', undefined, id)
+      // 幂等 key 外注：send 第 4 参 = outbox id（重发复用同一 id 经网关幂等去重）；第 5 参 = 分支 CAS
+      //（#700 正常发送恒 undefined，wire 由 gatewayChat 条件展开保证与现状一致）
+      expect(gw.send).toHaveBeenCalledWith('sk-1', '你好', undefined, id, undefined)
       // ack 返回 → 删队（键整体清除）
       resolveSend('r1')
       await flushPromises()

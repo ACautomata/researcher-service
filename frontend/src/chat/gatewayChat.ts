@@ -174,7 +174,17 @@ export interface GatewayChat {
   // 不携带该字段（不带附件输入时与既有文本发送路径一致，回归无差）。
   // #564: idempotencyKey 外注——外部传入优先（outbox 重发复用 OutboxItem.id 经网关幂等去重），
   // 缺省内部生成（既有行为）。
-  send(sessionKey: string, message: string, attachments?: Attachment[], idempotencyKey?: string): Promise<string | undefined>
+  // #700 分支 CAS（spec §1.1/§1.3）：expectedLeafEntryId 追加可选参数——undefined 时 payload 键不出现
+  // （wire 与现状逐字节一致）；string = 期望活跃 leaf 精确比对；null = 权威空 transcript。仅「回退/
+  // 切分支成功后的第一次 send」由 UI 层传入，其余路径一律 undefined（重放/regenerate 传旧 leaf 会
+  // 误触 active-leaf-changed 永久重发失败）。
+  send(
+    sessionKey: string,
+    message: string,
+    attachments?: Attachment[],
+    idempotencyKey?: string,
+    expectedLeafEntryId?: string | null,
+  ): Promise<string | undefined>
   listCommands(): Promise<CommandDTO[]>
   resolveApproval(id: string, kind: string, decision: string): Promise<void>
   // B0: 补拉待处理审批（exec.approval.list，协议 schema exec-approval 域）——登出后重连/断线重连后
@@ -844,7 +854,7 @@ export function createGatewayChat(params: CreateGatewayChatParams): GatewayChat 
     async switchBranch(sessionKey: string, leafEntryId: string): Promise<void> {
       await client.request('sessions.branches.switch', { sessionKey, leafEntryId })
     },
-    async send(sessionKey: string, message: string, attachments?: Attachment[], idempotencyKey?: string): Promise<string | undefined> {
+    async send(sessionKey: string, message: string, attachments?: Attachment[], idempotencyKey?: string, expectedLeafEntryId?: string | null): Promise<string | undefined> {
       // chat.send 幂等（schema 必填 idempotencyKey）；返回后流式 delta/final 事件经 onEvent 到达。
       // A3/P2: 幂等 key 与 createSession 统一 32-hex 格式（randomUUID 去连字符——跨路径 key 规范
       // 一致，网关幂等去重不因格式分歧而失效）。
@@ -853,11 +863,14 @@ export function createGatewayChat(params: CreateGatewayChatParams): GatewayChat 
       // runId 供 ChatView 首帧归属判别；ack 无 runId（异常形状）返回 undefined。
       // #459-T1 #462：attachments 仅在非空时携带（官方可选字段，空数组/不带与既有文本路径同形状，
       // 回归无差）；附件体积/类型已由 chat/attachments.ts 校验，本层原样透传（帧内 1MiB 上限内）。
+      // #700 分支 CAS：expectedLeafEntryId 仅 undefined 时键不出现（wire 与现状逐字节一致，正常 send/
+      // outbox 重放/regenerate 一律不传）；string/null 条件展开（官方 schema 本为 string|null）。
       const res = await client.request<{ runId?: unknown }>('chat.send', {
         sessionKey,
         message,
         idempotencyKey: idempotencyKey ?? createRequestId().replace(/[^a-z0-9]/g, ''),
         ...(attachments && attachments.length > 0 ? { attachments } : {}),
+        ...(expectedLeafEntryId !== undefined ? { expectedLeafEntryId } : {}),
       })
       return typeof res?.runId === 'string' && res.runId ? res.runId : undefined
     },
