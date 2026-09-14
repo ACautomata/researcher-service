@@ -10,7 +10,7 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from
 import { setupTestApp, type TestContext } from './setup'
 import { seedAdmin, seedUser, login, bearer } from './helpers'
 import { makeFleetTest, type FleetTestContext } from './fleetTestUtils'
-import { backupVolumeFor, namedVolumesFor } from '../src/containers/runtime'
+import { backupVolumeFor, namedVolumesFor, volumeOrder } from '../src/containers/runtime'
 import { ContainerDomainError, InstanceBusy, RunOnceError } from '../src/containers/errors'
 import { CODE } from '../src/codes'
 import { HOME_BIND, MOUNT_WIKI, MOUNT_WORKSPACE, ONESHOT_BACKUP_TARGET } from '../src/containers/constants'
@@ -353,6 +353,45 @@ describe('#699 容器升级编排（接缝 #5 假运行时）', () => {
     row = await ctx.prisma.container.findUnique({ where: { name: 'rc-daemon' } })
     expect(row?.status).toBe('upgrading')
     expect(row?.upgradeAttempts).toBe(0)
+  })
+
+  // ---- 备份卷保留（spec §2.4：备份卷名独立于代系三卷，不在 namedVolumesFor / volumeOrder 连删范围）----
+
+  it('正常 DELETE 不触碰备份卷：升级已备过份，删除仍只连删代系三卷', async () => {
+    const row = await seedLegacyContainer(fl, ctx, 'up-bk-del', ownerId)
+    // 真跑一次成功升级 → 备份步骤真实 mount 过备份卷（其命名即 backupVolumeFor(代系 id)）
+    await runUpgrade(fl, 'up-bk-del')
+    expect(fl.runtime.oneshotRuns[0].spec.mounts?.[1]).toEqual({
+      source: backupVolumeFor(row.id),
+      target: ONESHOT_BACKUP_TARGET,
+    })
+    // 升级自身 remove 不带卷（三卷保留）、更不触碰备份卷
+    expect(fl.runtime.removedVolumes).toEqual([])
+    const backupVol = backupVolumeFor(row.id)
+    fl.runtime.removedVolumes.length = 0
+    await fl.orch.delete('up-bk-del')
+    // 删除连删范围恒为 namedVolumesFor 三卷（volumeOrder）——备份卷独立命名，不随容器删除
+    expect(fl.runtime.removedVolumes).toEqual(volumeOrder(namedVolumesFor(row.id)))
+    expect(fl.runtime.removedVolumes).not.toContain(backupVol)
+  })
+
+  it('upgrade_failed DELETE 不触碰备份卷：终态放行删除，备份卷仍留存', async () => {
+    const row = await seedLegacyContainer(fl, ctx, 'up-fault-del', ownerId)
+    // 预置前两次失败 → 本次 doctor 失败为第 3 次 → 终态；本次备份步骤已真实 mount 备份卷
+    await ctx.prisma.container.update({ where: { name: 'up-fault-del' }, data: { upgradeAttempts: 2 } })
+    fl.runtime.failOneshotCmdSubstring = 'doctor'
+    await runUpgrade(fl, 'up-fault-del')
+    const backupVol = backupVolumeFor(row.id)
+    let after = await ctx.prisma.container.findUnique({ where: { name: 'up-fault-del' } })
+    expect(after?.status).toBe('upgrade_failed')
+    expect(after?.upgradeAttempts).toBe(3)
+    expect(fl.runtime.oneshotRuns[0].spec.mounts?.[1]?.source).toBe(backupVol)
+    expect(fl.runtime.removedVolumes).not.toContain(backupVol)
+    // 终态放行删除（既有清理路径）——连删仍仅代系三卷，备份卷保留供手工救回
+    await fl.orch.delete('up-fault-del')
+    expect(fl.runtime.removedVolumes).toEqual(volumeOrder(namedVolumesFor(row.id)))
+    expect(fl.runtime.removedVolumes).not.toContain(backupVol)
+    expect(await ctx.prisma.container.findUnique({ where: { name: 'up-fault-del' } })).toBeNull()
   })
 })
 
