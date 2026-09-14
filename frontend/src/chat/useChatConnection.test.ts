@@ -1928,3 +1928,187 @@ describe('#698 分支菜单编排', () => {
     expect(chat.branches.map((b) => b.leafEntryId)).toEqual(['leaf-2'])
   })
 })
+
+// #700 分支 CAS（spec §1.1/§1.3/§1.4）：发送携带期望 leaf 的三态传参 + 首条语义 + 冲突处理链。
+//   - 三态：undefined=关闭校验（正常 send/outbox 重放/分支未加载/网关不支持，键不出现）；
+//     string=期望活跃 leaf 精确比对（回退/切分支后首条）；null=权威空 transcript。
+//   - 首条语义：武装只经「回退/切分支成功」设置，send() 消费即清（第二条起不携带）。
+//   - 冲突：details.reason='active-leaf-changed' → 提示 + 自动重拉 transcript 与分支列表 + 原文保留。
+describe('#700 分支 CAS（发送携带期望 leaf + 冲突处理）', () => {
+  setupConnTestEnv()
+
+  const BRANCHES = [
+    { leafEntryId: 'leaf-1', headline: 'A 方向', messageCount: 4, active: true },
+    { leafEntryId: 'leaf-2', headline: 'B 方向', messageCount: 2, active: false },
+  ]
+  const HISTORY = [
+    { role: 'user', text: '第一问', __openclaw: { id: 'entry-1' } },
+    { role: 'assistant', text: '第一答', __openclaw: { id: 'entry-2' } },
+  ]
+
+  // 读 outbox 残留（断线重放回归用；storage 格式见 outboxStore OUTBOX_STORAGE_KEY_PREFIX）
+  function outboxItems(container: string, sessionKey: string): Array<{ id: string; text: string }> {
+    const raw = sessionStorage.getItem(`openclaw.panel.outbox.v1:${container}`)
+    if (!raw) return []
+    try {
+      const parsed = JSON.parse(raw) as { sessions?: Record<string, unknown> }
+      return (parsed?.sessions?.[sessionKey] as Array<{ id: string; text: string }>) ?? []
+    } catch {
+      return []
+    }
+  }
+
+  async function connectWithBranches(conn: ReturnType<typeof useChatConnection>): Promise<InstanceType<typeof MockGatewayChat>> {
+    const ready = conn.openGateway()
+    await flushPromises()
+    const gw = MockGatewayChat.last!
+    gw.listSessions.mockResolvedValue([{ session_key: 'sk-1', title: '', updated_at: '' }])
+    gw.getHistory.mockResolvedValue({ messages: [], hasMore: false, nextOffset: null })
+    gw.listCommands.mockResolvedValue([])
+    gw.listPendingApprovals.mockResolvedValue([])
+    gw.listBranches.mockResolvedValue(BRANCHES) // 首连预拉：分支态就绪
+    gw.fireReady()
+    await ready
+    await flushPromises()
+    return gw
+  }
+
+  it('回退成功后首条发送携带期望 leaf（active 项）；第二条起不携带（消费即清）', async () => {
+    const { conn, chat } = setup()
+    const gw = await connectWithBranches(conn)
+    // 回退成功 → 分支重拉为新状态（leaf-1 仍 active）→ CAS 武装
+    gw.rewind.mockResolvedValue({ editorText: '重说', editorAttachments: [] })
+    gw.getHistory.mockResolvedValue({ messages: [], hasMore: false, nextOffset: null })
+    gw.listBranches.mockResolvedValue(BRANCHES)
+    await conn.rewind('entry-1')
+
+    gw.send.mockResolvedValue('run-1')
+    chat.setInput('重发消息')
+    conn.send(false)
+    await flushPromises()
+    expect(gw.send.mock.calls[0][4]).toBe('leaf-1') // 首条：携带期望 leaf
+
+    gw.send.mockResolvedValue('run-2')
+    chat.setInput('再发一条')
+    conn.send(false)
+    await flushPromises()
+    expect(gw.send.mock.calls[1][4]).toBeUndefined() // 第二条起：不携带
+  })
+
+  it('切分支成功后首条发送携带新 active leaf；第二条起不携带', async () => {
+    const { conn, chat } = setup()
+    const gw = await connectWithBranches(conn)
+    gw.getHistory.mockResolvedValue({ messages: [{ role: 'user', text: 'B 方向第一问', __openclaw: { id: 'b1' } }], hasMore: false, nextOffset: null })
+    gw.switchBranch.mockResolvedValue(undefined)
+    gw.listBranches.mockResolvedValue([
+      { leafEntryId: 'leaf-1', headline: 'A 方向', messageCount: 4, active: false },
+      { leafEntryId: 'leaf-2', headline: 'B 方向', messageCount: 3, active: true },
+    ])
+    await conn.switchBranch('leaf-2')
+
+    gw.send.mockResolvedValue('run-1')
+    chat.setInput('B 分支继续')
+    conn.send(false)
+    await flushPromises()
+    expect(gw.send.mock.calls[0][4]).toBe('leaf-2') // 首条：携带新 active leaf
+
+    gw.send.mockResolvedValue('run-2')
+    chat.setInput('再发')
+    conn.send(false)
+    await flushPromises()
+    expect(gw.send.mock.calls[1][4]).toBeUndefined()
+  })
+
+  it('空 transcript（分支重拉为空）→ 首条发送携带 null（权威空值）', async () => {
+    const { conn, chat } = setup()
+    const gw = await connectWithBranches(conn)
+    gw.rewind.mockResolvedValue({ editorText: '', editorAttachments: [] })
+    gw.getHistory.mockResolvedValue({ messages: [], hasMore: false, nextOffset: null })
+    gw.listBranches.mockResolvedValue([]) // 回退后权威空 transcript
+    await conn.rewind('entry-1')
+
+    gw.send.mockResolvedValue('run-1')
+    chat.setInput('新开话题')
+    conn.send(false)
+    await flushPromises()
+    expect(gw.send.mock.calls[0][4]).toBeNull()
+  })
+
+  it('分支重拉失败（branches 不可知）→ 不武装，发送不携带（关闭校验，不误发旧 leaf）', async () => {
+    const { conn, chat } = setup()
+    const gw = await connectWithBranches(conn)
+    gw.rewind.mockResolvedValue({ editorText: '重说', editorAttachments: [] })
+    gw.getHistory.mockResolvedValue({ messages: [], hasMore: false, nextOffset: null })
+    gw.listBranches.mockRejectedValue(new Error('branches unavailable'))
+    await conn.rewind('entry-1')
+
+    gw.send.mockResolvedValue('run-1')
+    chat.setInput('重发')
+    conn.send(false)
+    await flushPromises()
+    expect(gw.send.mock.calls[0][4]).toBeUndefined()
+  })
+
+  it('正常发送（无回退/切分支）→ 不携带期望 leaf（wire 与现状一致）', async () => {
+    const { conn, chat } = setup()
+    const gw = await connectWithBranches(conn) // 分支已加载（active leaf-1）但不武装
+    gw.send.mockResolvedValue('run-1')
+    chat.setInput('普通消息')
+    conn.send(false)
+    await flushPromises()
+    expect(gw.send.mock.calls[0][4]).toBeUndefined()
+  })
+
+  it('outbox 重放不携带期望 leaf（回归：重放路径恒 4 参、wire 与现状一致）', async () => {
+    const { conn, chat } = setup()
+    const gw = await connectWithBranches(conn)
+    // 造待发残留：send 被拒（run 未起）→ 条目留队
+    chat.setInput('断线前的消息')
+    gw.send.mockRejectedValueOnce(new Error('网关未受理'))
+    conn.send(false)
+    await flushPromises()
+    expect(outboxItems('demo', 'sk-1')).toHaveLength(1)
+
+    // 断线重连 → syncSessions → resendOutbox 重放（复用原幂等 key）
+    gw.fireClose(1006)
+    await flushPromises()
+    gw.send.mockReset()
+    gw.send.mockResolvedValue('run-replay')
+    gw.fireReady()
+    await flushPromises()
+
+    // 重放 = 4 参调用、无第 5 参（armed leaf 只经 send() 首条消费路径，重放路径从不携带）
+    expect(gw.send.mock.calls[0]).toEqual(['sk-1', '断线前的消息', undefined, expect.any(String)])
+  })
+
+  it('CAS 冲突（active-leaf-changed）→ 提示「分支已切换」+ 自动重拉 transcript 与分支列表 + 原文保留 composer', async () => {
+    const { conn, chat, status } = setup()
+    const gw = await connectWithBranches(conn)
+    // 回退武装 CAS → 首条发送携带 leaf-1
+    gw.rewind.mockResolvedValue({ editorText: '重说', editorAttachments: [] })
+    gw.getHistory.mockResolvedValue({ messages: [], hasMore: false, nextOffset: null })
+    gw.listBranches.mockResolvedValue(BRANCHES)
+    await conn.rewind('entry-1')
+
+    // 首条发送被网关以 CAS 冲突拒绝（另一客户端已改变分支）
+    const conflictErr = Object.assign(new Error('active branch changed; review and retry'), {
+      details: { reason: 'active-leaf-changed' },
+    })
+    gw.send.mockRejectedValue(conflictErr)
+    const historyBefore = gw.getHistory.mock.calls.length
+    const branchesBefore = gw.listBranches.mock.calls.length
+    chat.setInput('被拒的原消息')
+    conn.send(false)
+    await flushPromises()
+
+    expect(gw.send.mock.calls[0][4]).toBe('leaf-1') // 携带期望 leaf（武装消费）
+    // 明确提示（动作类通道，不污染连接横幅）
+    expect(status.onActionError).toHaveBeenCalledWith('分支已切换，请审阅后重发')
+    expect(status.onError).not.toHaveBeenCalled()
+    // 原文保留 composer（send 末尾清空后恢复，供审阅后手动重发）
+    expect(chat.input).toBe('被拒的原消息')
+    // 自动重拉 transcript 与分支列表（本地转录已过期）
+    expect(gw.getHistory.mock.calls.length).toBeGreaterThan(historyBefore)
+    expect(gw.listBranches.mock.calls.length).toBeGreaterThan(branchesBefore)
+  })
+})
