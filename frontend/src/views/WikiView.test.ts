@@ -335,6 +335,53 @@ describe('WikiView — #670 面板三态接线（wiki 图谱 + 同页互斥）',
     expect(tree.attributes('data-state')).toBe('inline')
   })
 
+  it('图谱折叠 → 弹出 → 收回：全链路回 inline（浮层只经显式收回离开）', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+    await panels(wrapper).graph.find('[data-test="collapse-btn"]').trigger('click')
+    expect(panels(wrapper).graph.attributes('data-state')).toBe('collapsed')
+    await panels(wrapper).graph.find('[data-test="rail"]').trigger('click')
+    expect(panels(wrapper).graph.attributes('data-state')).toBe('popped')
+    await panels(wrapper).graph.find('[data-test="restore-btn"]').trigger('click')
+    expect(panels(wrapper).graph.attributes('data-state')).toBe('inline')
+  })
+
+  it('图谱 inline 拖宽严格钳制在 WIDE 档 240–720px', async () => {
+    window.innerWidth = 1280
+    const wrapper = mountView()
+    await flushPromises()
+    expect(panels(wrapper).graph.attributes('style')).toContain('width: 320px') // 默认宽在界内
+    const handle = panels(wrapper).graph.find('[data-test="drag-handle"]')
+    // 贴右缘面板：手柄在左缘——左拖变宽、右拖变窄（起始 320px）
+    handle.element.dispatchEvent(
+      new MouseEvent('pointerdown', { bubbles: true, cancelable: true, clientX: 800 }),
+    )
+    window.dispatchEvent(new MouseEvent('pointermove', { clientX: 500 })) // 320+300=620，界内原样
+    await flushPromises()
+    expect(panels(wrapper).graph.attributes('style')).toContain('width: 620px')
+    window.dispatchEvent(new MouseEvent('pointermove', { clientX: 0 })) // 320+800 → 钳上界 720
+    await flushPromises()
+    expect(panels(wrapper).graph.attributes('style')).toContain('width: 720px')
+    window.dispatchEvent(new MouseEvent('pointermove', { clientX: 1600 })) // 320-800 → 钳下界 240
+    await flushPromises()
+    expect(panels(wrapper).graph.attributes('style')).toContain('width: 240px')
+    window.dispatchEvent(new MouseEvent('pointerup', {}))
+  })
+
+  it('图谱处于浮层时隐藏：连浮层控件一起摘除（无幽灵浮层/手柄）', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+    await panels(wrapper).graph.find('[data-test="collapse-btn"]').trigger('click')
+    await panels(wrapper).graph.find('[data-test="rail"]').trigger('click')
+    expect(panels(wrapper).graph.attributes('data-state')).toBe('popped')
+    await wrapper.find('[data-test="toggle-graph"]').trigger('click')
+    expect(wrapper.find('[data-test="panel"][data-side="right"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="pop-handle"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="restore-btn"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="rail"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="wiki-graph"]').exists()).toBe(false)
+  })
+
   it('US25 同页互斥：图谱弹出时自动收回已弹出的文件树', async () => {
     const wrapper = mountView()
     await flushPromises()
