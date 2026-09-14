@@ -16,6 +16,8 @@ export interface InstanceDTO {
   image: string
   container_id: string
   created_at: string
+  // #702：读侧记账判定（行镜像 ≠ 当前目标镜像，与启动方向无关）——#699 起由 list 携带。
+  needs_upgrade?: boolean
   pairing: PairingSnapshotDTO
 }
 
@@ -27,6 +29,17 @@ export function createInstance(name: string): Promise<InstanceDTO> {
   return apiJson<InstanceDTO>('/api/v1/containers/', {
     method: 'POST',
     body: JSON.stringify({ name }),
+  })
+}
+
+// #702 惰性升级（#699 服务端编排）：POST /containers/<name>/upgrade。
+// 同步段返回升级中快照（status='upgrading'）并 detach 后台六步；服务端守卫语义：
+//   upgrading → 幂等返回同快照（不重复入队）；upgrade_failed → 20043「容器升级失败，仅可删除重建」；
+//   目标镜像已对齐 → 幂等 no-op（status 保持 running）；状态 ∉ {running, stopped} → 20043 busy。
+// 调用方（ChatView，经 useContainerUpgrade）据 code 分支：20043 如实刷新状态再决策，其余透传文案。
+export function upgradeInstance(name: string): Promise<InstanceDTO> {
+  return apiJson<InstanceDTO>(`/api/v1/containers/${encodeURIComponent(name)}/upgrade`, {
+    method: 'POST',
   })
 }
 

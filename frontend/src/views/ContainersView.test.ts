@@ -46,10 +46,11 @@ const stubs = {
   },
   ElTable: {
     props: { data: { type: Array, default: () => [] } },
+    // 渲染默认 slot：列定义（ElTableColumn stub）随之挂载，供「升级」列接线断言；行内容仍不渲染
     template:
-      '<div data-test="instance-table">{{ (data||[]).map((r) => r.name).join(",") }}</div>',
+      '<div data-test="instance-table"><slot />{{ (data||[]).map((r) => r.name).join(",") }}</div>',
   },
-  ElTableColumn: { template: '<span />' },
+  ElTableColumn: { name: 'ElTableColumn', template: '<span />' },
   ElDialog: {
     props: ['modelValue', 'title', 'width'],
     template:
@@ -312,5 +313,50 @@ describe('ContainersView', () => {
     // pending 态提示宿主 approve（验收 3 重试路径）
     const { ElMessage } = await import('element-plus')
     expect(ElMessage.warning).toHaveBeenCalled()
+  })
+
+  // ---------------------------- #702 升级状态标记（需升级 / 升级中 / 升级失败）----------------------------
+
+  it('#702: 三种升级标记文案与视觉状态两两互异；无需升级不渲染', async () => {
+    const wrapper = mount(ContainersView, { global: { plugins: [createPinia()], stubs } })
+    await flushPromises()
+    const vm = wrapper.vm as unknown as {
+      upgradeBadgeOf: (r: { status: string; needs_upgrade?: boolean }) => { label: string; tone: string } | null
+    }
+    expect(vm.upgradeBadgeOf({ status: 'running', needs_upgrade: true })).toEqual({
+      label: '需升级',
+      tone: 'warning',
+    })
+    expect(vm.upgradeBadgeOf({ status: 'upgrading', needs_upgrade: true })).toEqual({
+      label: '升级中',
+      tone: 'primary',
+    })
+    expect(vm.upgradeBadgeOf({ status: 'upgrade_failed', needs_upgrade: true })).toEqual({
+      label: '升级失败',
+      tone: 'danger',
+    })
+    expect(vm.upgradeBadgeOf({ status: 'running', needs_upgrade: false })).toBeNull()
+  })
+
+  it('#702: 列表挂载「升级」列（徽标经 scoped slot 取自 upgradeBadgeOf，非硬编码文案）', async () => {
+    ;(listInstances as ReturnType<typeof vi.fn>).mockResolvedValue([
+      { ...SAMPLE, name: 'need', needs_upgrade: true },
+      { ...SAMPLE, name: 'doing', status: 'upgrading', needs_upgrade: true },
+      { ...SAMPLE, name: 'failed', status: 'upgrade_failed', needs_upgrade: true },
+    ])
+    const wrapper = mount(ContainersView, { global: { plugins: [createPinia()], stubs } })
+    await flushPromises()
+    // el-table 各列在 stub 下不渲染行内容，故断言「升级」列存在（列 slot 的取值函数在上一用例已钉死）
+    const labels = wrapper
+      .findAllComponents({ name: 'ElTableColumn' })
+      .map((c) => c.attributes('label'))
+    expect(labels).toContain('升级')
+    // 三态徽标经同一 mapper 产出（数据驱动，逐行按 status/needs_upgrade 分派）
+    const vm = wrapper.vm as unknown as {
+      upgradeBadgeOf: (r: { status: string; needs_upgrade?: boolean }) => { label: string } | null
+    }
+    expect(vm.upgradeBadgeOf({ status: 'running', needs_upgrade: true })?.label).toBe('需升级')
+    expect(vm.upgradeBadgeOf({ status: 'upgrading', needs_upgrade: true })?.label).toBe('升级中')
+    expect(vm.upgradeBadgeOf({ status: 'upgrade_failed', needs_upgrade: true })?.label).toBe('升级失败')
   })
 })

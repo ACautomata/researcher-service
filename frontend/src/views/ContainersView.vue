@@ -12,6 +12,7 @@ import {
 } from '@/api/containers'
 import { triggerPair, type PairingDTO } from '@/api/chat'
 import { ApiError } from '@/api/client'
+import { upgradeBadge, type UpgradeBadge } from '@/containers/upgradeGate'
 
 const instances = ref<InstanceDTO[]>([])
 // 配对状态由 listInstances 的 pairing 字段批量携带，不再单独轮询
@@ -98,6 +99,12 @@ function pairingLabel(status: string): string {
   return '未配对'
 }
 
+// #702：升级状态徽标（需升级 warning / 升级中 primary / 升级失败 danger，三态文案与色调互异）——
+// 判定与文案单一来源在纯函数 upgradeBadge（含 status 优先级），本组件只做取值渲染。
+function upgradeBadgeOf(row: Pick<InstanceDTO, 'status' | 'needs_upgrade'>): UpgradeBadge | null {
+  return upgradeBadge({ status: row.status, needsUpgrade: row.needs_upgrade })
+}
+
 async function pair(name: string): Promise<void> {
   try {
     const result = await triggerPair(name)
@@ -171,7 +178,7 @@ onBeforeUnmount(() => {
 })
 
 // 暴露删除/配对动作 + 配对状态查询：el-table row slot 在测试 stub 下不便点击，暴露供测试与潜在父组件触发
-defineExpose({ confirmRemove, pair, pairingStatus })
+defineExpose({ confirmRemove, pair, pairingStatus, upgradeBadgeOf })
 </script>
 
 <template>
@@ -188,6 +195,19 @@ defineExpose({ confirmRemove, pair, pairingStatus })
       <el-table-column prop="health" label="健康" width="100" />
       <el-table-column prop="port" label="端口" width="80" />
       <el-table-column prop="image" label="镜像" />
+      <el-table-column label="升级" width="100">
+        <template #default="{ row }">
+          <!-- #702：三态互斥（upgrade_failed > upgrading > needs_upgrade），无需升级不渲染徽标 -->
+          <el-tag
+            v-if="upgradeBadgeOf(row)"
+            :type="upgradeBadgeOf(row)!.tone"
+            size="small"
+            :data-test="`upgrade-badge-${row.name}`"
+          >
+            {{ upgradeBadgeOf(row)!.label }}
+          </el-tag>
+        </template>
+      </el-table-column>
       <el-table-column label="配对" width="130">
         <template #default="{ row }">
           <el-tag

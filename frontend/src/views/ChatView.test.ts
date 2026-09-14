@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { nextTick } from 'vue'
 import { createPinia, setActivePinia } from 'pinia'
 
-vi.mock('@/api/containers', () => ({ listInstances: vi.fn() }))
+vi.mock('@/api/containers', () => ({ listInstances: vi.fn(), upgradeInstance: vi.fn() }))
 vi.mock('@/api/chat', () => ({ getBootstrapToken: vi.fn() }))
 vi.mock('element-plus', async (importOriginal) => {
   const actual = (await importOriginal()) as Record<string, unknown>
@@ -89,7 +89,7 @@ vi.mock('@/chat/attachments', async (importOriginal) => {
 })
 
 import ChatView from '@/views/ChatView.vue'
-import { listInstances } from '@/api/containers'
+import { listInstances, upgradeInstance } from '@/api/containers'
 import { getBootstrapToken } from '@/api/chat'
 import { createGatewayChat } from '@/chat/gatewayChat'
 import { compressImageFile, fileToRawAttachment, MAX_ATTACHMENT_BYTES } from '@/chat/attachments'
@@ -2881,5 +2881,242 @@ describe('ChatView #698 分支菜单接线', () => {
       expect(w.find('[data-test="file-tabs-panel"]').exists()).toBe(true)
       expect(left(w).attributes('data-state')).toBe('disabled')
     })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// #702 惰性升级触发与状态透出（前端）
+// 覆盖：需升级打开即触发（绝不先建连）→ 横幅 → 轮询收敛后自动恢复连接；终态文案完整且不再触发、
+// 不再轮询、不建连；busy(20043) 如实刷新后切入轮询；触发异常不卡死、不产生请求风暴、可手动重试；
+// 升级失败回落 stopped 时不自动重触发；卸载清轮询定时器。
+// ---------------------------------------------------------------------------
+describe('ChatView #702 惰性升级', () => {
+  const UPGRADABLE = { ...INSTANCE, needs_upgrade: true }
+  const UPGRADING = { ...INSTANCE, status: 'upgrading', needs_upgrade: true }
+  const UPGRADED = { ...INSTANCE, status: 'running', needs_upgrade: false }
+  const FAILED = { ...INSTANCE, status: 'upgrade_failed', needs_upgrade: true }
+
+  const list = listInstances as unknown as ReturnType<typeof vi.fn>
+  const up = upgradeInstance as unknown as ReturnType<typeof vi.fn>
+
+  // 微任务冲洗：本 describe 全程 fake timers，flushPromises（内部 setTimeout）不可用，
+  // 故用 advanceTimersByTimeAsync(0) 反复让出微任务队列把 promise 链推到底。
+  async function settle(): Promise<void> {
+    for (let i = 0; i < 8; i++) await vi.advanceTimersByTimeAsync(0)
+  }
+
+  // 建连成功后补齐网关首屏（会话列表非空 → 断言对话确实可用）。
+  async function primeGateway(): Promise<void> {
+    const gw = MockGatewayChat.last!
+    gw.listSessions.mockResolvedValue([SESSION])
+    gw.getHistory.mockResolvedValue({ messages: [], hasMore: false, nextOffset: null })
+    gw.listCommands.mockResolvedValue([])
+    gw.listPendingApprovals.mockResolvedValue([])
+  }
+
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    MockGatewayChat.instances = []
+    MockGatewayChat.last = null
+    vi.clearAllMocks()
+    vi.useFakeTimers()
+    sessionStorage.clear()
+    useAuthStore().$patch({ token: 'jwt-test' })
+    ;(getBootstrapToken as ReturnType<typeof vi.fn>).mockResolvedValue('boot-1')
+    ;(createGatewayChat as ReturnType<typeof vi.fn>).mockImplementation(
+      (params: { handlers: MockHandlers }) => new MockGatewayChat(params.handlers),
+    )
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.unstubAllGlobals()
+  })
+
+  it('需升级容器打开 → 自动触发 upgrade、显示横幅、绝不建立 chat 连接', async () => {
+    list.mockResolvedValue([UPGRADABLE])
+    up.mockResolvedValue(UPGRADING)
+    const w = mount(ChatView)
+    await settle()
+
+    expect(up).toHaveBeenCalledWith('demo')
+    expect(up).toHaveBeenCalledTimes(1)
+    const banner = w.find('[data-test="upgrade-banner"]')
+    expect(banner.exists()).toBe(true)
+    expect(banner.text()).toContain('容器升级中')
+    // 升级期间不得建连（容器会被停机重建）——无 bootstrap 握手、无网关、无重连风暴
+    expect(getBootstrapToken).not.toHaveBeenCalled()
+    expect(createGatewayChat).not.toHaveBeenCalled()
+    expect(w.find('[data-test="upgrade-failed"]').exists()).toBe(false)
+    w.unmount()
+  })
+
+  it('轮询收敛到 running/needs_upgrade=false → 停轮询、横幅消失、自动恢复 chat 连接', async () => {
+    list.mockResolvedValue([UPGRADABLE])
+    up.mockResolvedValue(UPGRADING)
+    const w = mount(ChatView)
+    await settle()
+    expect(createGatewayChat).not.toHaveBeenCalled()
+
+    // 服务端六步跑完：读侧收敛为 running + 无需升级
+    list.mockResolvedValue([UPGRADED])
+    await vi.advanceTimersByTimeAsync(3000)
+    await settle()
+
+    expect(createGatewayChat).toHaveBeenCalledTimes(1) // 自动恢复连接，无需用户刷新
+    expect(w.find('[data-test="upgrade-banner"]').exists()).toBe(false)
+    await primeGateway()
+    MockGatewayChat.last!.fireReady()
+    await settle()
+    expect(w.find('[data-test="session-sk-1"]').exists()).toBe(true) // 对话确实可用
+
+    // 已停轮询：再过一个周期不再拉列表
+    const calls = list.mock.calls.length
+    await vi.advanceTimersByTimeAsync(9000)
+    expect(list.mock.calls.length).toBe(calls)
+    expect(up).toHaveBeenCalledTimes(1) // 不重复触发
+    w.unmount()
+  })
+
+  it('#701 终态 upgrade_failed → 完整文案、不触发、不轮询、不建连、无重连风暴', async () => {
+    list.mockResolvedValue([FAILED])
+    const w = mount(ChatView)
+    await settle()
+
+    expect(up).not.toHaveBeenCalled() // 不再自动触发
+    expect(createGatewayChat).not.toHaveBeenCalled() // 不建连
+    const card = w.find('[data-test="upgrade-failed"]')
+    expect(card.exists()).toBe(true)
+    const text = card.text()
+    expect(text).toContain('仅可删除重建')
+    expect(text).toContain('丢失') // 重建会丢数据
+    expect(text).toContain('备份')
+    expect(text).toContain('救回') // 数据可从升级前备份手工救回
+    expect(w.find('[data-test="upgrade-banner"]').exists()).toBe(false)
+    expect(w.find('[data-test="upgrade-retry"]').exists()).toBe(false) // 仅可删除重建 → 不给重试入口
+
+    // 不进入无限轮询
+    const calls = list.mock.calls.length
+    await vi.advanceTimersByTimeAsync(12_000)
+    expect(list.mock.calls.length).toBe(calls)
+    expect(up).not.toHaveBeenCalled()
+    w.unmount()
+  })
+
+  it('轮询途中落入终态 → 停轮询并透出终态，全程仅触发一次', async () => {
+    let current: unknown[] = [UPGRADABLE]
+    list.mockImplementation(async () => current)
+    up.mockResolvedValue(UPGRADING)
+    const w = mount(ChatView)
+    await settle()
+    expect(up).toHaveBeenCalledTimes(1)
+    expect(w.find('[data-test="upgrade-banner"]').exists()).toBe(true)
+
+    current = [FAILED]
+    await vi.advanceTimersByTimeAsync(3000)
+    await settle()
+    expect(w.find('[data-test="upgrade-failed"]').exists()).toBe(true)
+
+    const calls = list.mock.calls.length
+    await vi.advanceTimersByTimeAsync(12_000)
+    expect(list.mock.calls.length).toBe(calls) // 已停轮询
+    expect(up).toHaveBeenCalledTimes(1) // 不重复触发
+    w.unmount()
+  })
+
+  it('触发遇 busy(20043) → 如实刷新状态；服务端已 upgrading 则切入轮询', async () => {
+    let current: unknown[] = [UPGRADABLE]
+    list.mockImplementation(async () => current)
+    up.mockImplementation(async () => {
+      current = [UPGRADING] // busy 的真实成因：另一路径已把它推进 upgrading
+      throw new ApiError(200, '容器升级中', 20043)
+    })
+    const w = mount(ChatView)
+    await settle()
+
+    expect(up).toHaveBeenCalledTimes(1) // busy 不重试同一请求
+    expect(w.find('[data-test="upgrade-banner"]').exists()).toBe(true) // 事实刷新后切入升级流程
+    expect(w.find('[data-test="upgrade-error"]').exists()).toBe(false)
+    expect(createGatewayChat).not.toHaveBeenCalled()
+
+    // 切入轮询后照常收敛
+    list.mockResolvedValue([UPGRADED])
+    await vi.advanceTimersByTimeAsync(3000)
+    await settle()
+    expect(createGatewayChat).toHaveBeenCalledTimes(1)
+    expect(up).toHaveBeenCalledTimes(1)
+    w.unmount()
+  })
+
+  it('触发报错（非 busy）→ 明确提示 + 重试入口，不卡死、无请求风暴', async () => {
+    list.mockResolvedValue([UPGRADABLE])
+    up.mockRejectedValue(new Error('容器不可访问'))
+    const w = mount(ChatView)
+    await settle()
+
+    const err = w.find('[data-test="upgrade-error"]')
+    expect(err.exists()).toBe(true)
+    expect(err.text()).toContain('容器不可访问')
+    expect(w.find('[data-test="upgrade-banner"]').exists()).toBe(false)
+    expect(createGatewayChat).not.toHaveBeenCalled()
+
+    // 不产生重复 upgrade 请求风暴（无定时器空转、无自动重触发）
+    const listCalls = list.mock.calls.length
+    await vi.advanceTimersByTimeAsync(12_000)
+    expect(up).toHaveBeenCalledTimes(1)
+    expect(list.mock.calls.length).toBe(listCalls)
+
+    // 用户可重试（重新进入）
+    up.mockResolvedValue(UPGRADING)
+    await w.find('[data-test="upgrade-retry"]').trigger('click')
+    await settle()
+    expect(up).toHaveBeenCalledTimes(2)
+    expect(w.find('[data-test="upgrade-banner"]').exists()).toBe(true)
+    w.unmount()
+  })
+
+  it('升级未完成回 stopped（attempts<3、needs_upgrade 仍在）→ 不自动重触发，交还手动重试', async () => {
+    let current: unknown[] = [UPGRADABLE]
+    list.mockImplementation(async () => current)
+    up.mockResolvedValue(UPGRADING)
+    const w = mount(ChatView)
+    await settle()
+    expect(up).toHaveBeenCalledTimes(1)
+
+    // 服务端本次尝试失败但未达终态：回 stopped，仍待升级
+    current = [{ ...INSTANCE, status: 'stopped', needs_upgrade: true }]
+    await vi.advanceTimersByTimeAsync(3000)
+    await settle()
+    expect(up).toHaveBeenCalledTimes(1) // 绝不二次自动触发
+    expect(w.find('[data-test="upgrade-error"]').text()).toContain('可重试')
+
+    await vi.advanceTimersByTimeAsync(12_000)
+    expect(up).toHaveBeenCalledTimes(1) // 也不空转轮询
+    w.unmount()
+  })
+
+  it('组件卸载 → 升级轮询定时器清理（不再拉取、不再触发）', async () => {
+    list.mockResolvedValue([UPGRADABLE])
+    up.mockResolvedValue(UPGRADING)
+    const w = mount(ChatView)
+    await settle()
+    expect(w.find('[data-test="upgrade-banner"]').exists()).toBe(true)
+    const calls = list.mock.calls.length
+
+    w.unmount()
+    await vi.advanceTimersByTimeAsync(12_000)
+    expect(list.mock.calls.length).toBe(calls)
+    expect(up).toHaveBeenCalledTimes(1)
+  })
+
+  it('无需升级容器打开 → 直接建连（惰性升级门不误伤既有路径）', async () => {
+    list.mockResolvedValue([INSTANCE])
+    const w = mount(ChatView)
+    await settle()
+    expect(up).not.toHaveBeenCalled()
+    expect(createGatewayChat).toHaveBeenCalledTimes(1)
+    expect(w.find('[data-test="upgrade-banner"]').exists()).toBe(false)
+    expect(w.find('[data-test="upgrade-failed"]').exists()).toBe(false)
+    w.unmount()
   })
 })

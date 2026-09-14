@@ -10,7 +10,7 @@ defineOptions({ name: 'ChatView' })
 // 行为与拆分前一致：同 wire（隧道 + 官方协议机）、同 reconnect（4401 刷新重建/退避重连）、同 ping/pong。
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { listInstances } from '@/api/containers'
+import { listInstances, upgradeInstance } from '@/api/containers'
 import { ApiError } from '@/api/client'
 import { useChatStore, type Msg } from '@/stores/chat'
 import { useFileTabsStore } from '@/stores/fileTabs'
@@ -21,6 +21,13 @@ import { INLINE_RANGE_NARROW, INLINE_RANGE_WIDE } from '@/panels/triState'
 import { usePanelGroup } from '@/panels/usePanelGroup'
 import { usePanelTriState } from '@/panels/usePanelTriState'
 import PanelTriState from '@/components/PanelTriState.vue'
+import { useContainerUpgrade } from '@/chat/useContainerUpgrade'
+import {
+  UPGRADE_BANNER_TEXT,
+  UPGRADE_FAILED_DETAIL,
+  UPGRADE_FAILED_TITLE,
+  upgradeDecision,
+} from '@/containers/upgradeGate'
 import {
   buildAttachments,
   compressImageFile,
@@ -145,6 +152,29 @@ const conn = useChatConnection({
   onRewindDraftFingerprint: draftFingerprint,
   onEntryBackfill: applyEntryBackfill,
 })
+
+// #702 惰性升级：打开容器前先过纯决策（containers/upgradeGate.upgradeDecision）——需升级则触发 +
+// 轮询（期间绝不建网关连接，杜绝容器停机期的重连风暴），收敛到可连态再回填 onConnectable 自动恢复
+// 对话；upgrade_failed 终态只透出文案、不触发不轮询。宿主只做接线，无散乱 if。
+const upgrade = useContainerUpgrade({
+  fetch: listInstances,
+  trigger: upgradeInstance,
+  onConnectable: (name) => void conn.selectContainer(name),
+})
+
+// 打开容器的唯一入口（侧栏选择 / 首次挂载自动选中 / defineExpose 全走此门）：
+// 无需升级 → 直接建连（既有行为不变）；否则交升级编排接管，连接由编排在收敛后自行发起。
+async function openContainer(name: string): Promise<void> {
+  if (!name) return
+  // 先用已缓存的列表事实做同步判定（mount 时 loadInstances 已灌 chat.instances）：无需升级的
+  // 常见路径不额外发请求、不改变既有建连时序；升级相关路径才交给编排去拉最新状态。
+  const cached = chat.instances.find((i) => i.name === name)
+  if (upgradeDecision({ status: cached?.status, needsUpgrade: cached?.needs_upgrade }).kind === 'connect') {
+    await conn.selectContainer(name)
+    return
+  }
+  await upgrade.open(name)
+}
 
 // 嵌套 ref 在模板中不解包（conn 是普通对象）——顶层解构后模板自动解包（slash 匹配单一来源在
 // useChatConnection，此处只消费）
@@ -376,7 +406,8 @@ async function loadInstances() {
     // selectedContainer 而 gateway 已死」只在登出后再登录的 remount 出现，此时必须重建连接，
     // 否则连接死而 UI 看似活着（send/resolveApproval 静默 no-op）。
     if (chat.instances.length) {
-      await conn.selectContainer(chat.selectedContainer || chat.instances[0].name)
+      // #702：首次自动选中同样过惰性升级门（打开即需升级的容器不应先建连再被停机打断）
+      await openContainer(chat.selectedContainer || chat.instances[0].name)
     }
   } catch (e) {
     if (e instanceof ApiError && e.status === 401) return
@@ -386,11 +417,14 @@ async function loadInstances() {
 
 onMounted(loadInstances)
 onBeforeUnmount(() => {
+  upgrade.dispose() // #702：卸载清升级轮询定时器（过 3s 仍会 tick → 对已卸载组件 setState）
   conn.dispose()
 })
 
 defineExpose({
-  selectContainer: conn.selectContainer,
+  // #702：暴露的仍是「打开容器」语义，但统一过惰性升级门（测试/父组件不再有绕过升级的旁路）
+  selectContainer: openContainer,
+  retryUpgrade: upgrade.retry,
   // #9：暴露的发送统一走 sendMessage（含附件校验/清空预览条），与按钮/Enter 同路径，不分叉。
   send: () => sendMessage(),
   newSession: conn.newSession,
@@ -426,7 +460,7 @@ defineExpose({
         :tree="fileTabs.tree"
         :tree-error="fileTabs.treeError"
         :active-file-path="fileTabs.activePath ?? ''"
-        @select-container="conn.selectContainer"
+        @select-container="openContainer"
         @select-session="conn.pickSession"
         @remove-session="removeSession"
         @new-session="conn.newSession"
@@ -447,6 +481,21 @@ defineExpose({
         <span class="connection-label">{{ connectionState.label }}</span>
         <span v-if="connectionState.detail" class="connection-detail" data-test="error-bar">{{ connectionState.detail }}</span>
         <button v-if="conn.disconnected.value" class="reconnect" data-test="reconnect" @click="conn.connect()">重新连接</button>
+      </div>
+      <!-- #702 惰性升级横幅：升级在飞期间不建网关连接，故与连接横幅天然互斥 -->
+      <div v-if="upgrade.phase.value === 'upgrading'" class="connection-banner info" role="status" aria-live="polite" data-test="upgrade-banner">
+        <span class="connection-label">{{ UPGRADE_BANNER_TEXT }}</span>
+        <span class="connection-detail">正在升级容器 {{ upgrade.container.value }}，完成后将自动恢复对话</span>
+      </div>
+      <!-- #701 终态：只透出（删重建丢数据 + 备份可手工救回），不给重试入口——仅可删除重建 -->
+      <div v-else-if="upgrade.phase.value === 'failed'" class="upgrade-notice failed" role="alert" data-test="upgrade-failed">
+        <p class="upgrade-title" data-test="upgrade-failed-title">{{ UPGRADE_FAILED_TITLE }}</p>
+        <p class="upgrade-detail" data-test="upgrade-failed-detail">{{ UPGRADE_FAILED_DETAIL }}</p>
+      </div>
+      <!-- 触发/轮询异常或升级未完成：如实透出 + 手动重试入口（不卡死、不自动重触发） -->
+      <div v-else-if="upgrade.phase.value === 'error'" class="upgrade-notice error" role="alert" data-test="upgrade-error">
+        <span class="upgrade-detail" data-test="upgrade-error-detail">{{ upgrade.detail.value }}</span>
+        <button class="reconnect" data-test="upgrade-retry" @click="upgrade.retry()">重试升级</button>
       </div>
       <div v-if="executionStatus" class="execution-status" role="status" aria-live="polite" data-test="execution-status">{{ executionStatus }}</div>
       <ChatStream
@@ -560,6 +609,13 @@ defineExpose({
 .connection-detail { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .connection-banner .reconnect { margin-left: auto; background: transparent; border: 1px solid currentColor; border-radius: 6px; padding: 2px 10px; cursor: pointer; color: inherit; font-size: 12.5px; }
 .execution-status { padding: 5px 18px; border-bottom: 1px solid var(--el-border-color-lighter); color: var(--el-text-color-secondary); font-size: 12px; }
+
+/* #702 惰性升级：终态/异常提示条（与连接横幅同族排版，色调区分语义） */
+.upgrade-notice { display: flex; align-items: center; gap: 10px; padding: 8px 18px; font-size: 13px; }
+.upgrade-notice.failed { color: var(--el-color-danger); background: var(--el-color-danger-light-9); flex-direction: column; align-items: flex-start; gap: 4px; }
+.upgrade-notice.error { color: var(--el-color-warning); background: var(--el-color-warning-light-9); }
+.upgrade-notice .upgrade-title { margin: 0; font-weight: 600; }
+.upgrade-notice .upgrade-detail { margin: 0; color: inherit; }
 
 /* T07 斜杠补全菜单（spec §9.4 / 原型 oc-chat-page.html）：弹在输入框上方，cmd mono + 描述 */
 .slash-menu { position: absolute; bottom: calc(100% + 6px); left: 18px; right: 18px; max-height: 280px; overflow-y: auto; background: var(--el-bg-color-overlay); border: 1px solid var(--el-border-color); border-radius: 11px; box-shadow: 0 -8px 30px rgba(0, 0, 0, .18); z-index: 10; }
