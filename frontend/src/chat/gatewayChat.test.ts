@@ -1411,6 +1411,61 @@ describe('#694 sessions.rewind RPC', () => {
   })
 })
 
+// #697 sessions.fork RPC——对话 fork 端到端（#693 spec 前端线）协议层。与 rewind 同形请求
+// （sessionKey+entryId 原样透传，切点 = 被点消息之前的活跃路径前缀），差异仅在结果多必有
+// sessionKey（新会话 key，后续 prependSession/pickSession 编排的前提——异形即整单判失败）。
+describe('#697 sessions.fork RPC', () => {
+  it('fork → sessions.fork{sessionKey,entryId} 原样透传 + 结果校准（sessionKey/editorText/editorAttachments）', async () => {
+    const { gw, client } = makeGateway()
+    client.request.mockResolvedValue({
+      sessionKey: 'sk-fork-1',
+      editorText: '被分叉的那句话',
+      editorAttachments: [
+        { mimeType: 'image/png', data: 'AAAA' },
+        { mimeType: 'image/jpeg' }, // 缺 data → 跳过
+      ],
+    })
+    const res = await gw.forkEntry('sk-1', 'entry-9')
+    expect(client.request).toHaveBeenCalledWith('sessions.fork', { sessionKey: 'sk-1', entryId: 'entry-9' })
+    expect(res).toEqual({
+      sessionKey: 'sk-fork-1',
+      editorText: '被分叉的那句话',
+      editorAttachments: [{ mimeType: 'image/png', data: 'AAAA' }],
+    })
+  })
+
+  it('fork 响应缺 sessionKey / 非字符串 → 整单判失败（后续导航无前提，不得回落到空结果）', async () => {
+    const { gw, client } = makeGateway()
+    client.request.mockResolvedValueOnce({ editorText: 'x' })
+    await expect(gw.forkEntry('sk-1', 'e1')).rejects.toThrow()
+    client.request.mockResolvedValueOnce({ sessionKey: 42 })
+    await expect(gw.forkEntry('sk-1', 'e1')).rejects.toThrow()
+    client.request.mockResolvedValueOnce(undefined)
+    await expect(gw.forkEntry('sk-1', 'e1')).rejects.toThrow()
+  })
+
+  it('fork 响应 editor 字段缺省/异形 → 校准为空（与 rewind 同口径，不失败）', async () => {
+    const { gw, client } = makeGateway()
+    client.request.mockResolvedValueOnce({ sessionKey: 'sk-fork-2', editorText: 42, editorAttachments: 'x' })
+    await expect(gw.forkEntry('sk-1', 'e1')).resolves.toEqual({
+      sessionKey: 'sk-fork-2',
+      editorText: '',
+      editorAttachments: [],
+    })
+  })
+
+  it('fork 被网关拒绝（agent 工作中 / off-active-path 等）→ 原样上抛', async () => {
+    const { gw, client } = makeGateway()
+    client.request.mockRejectedValue(
+      new MockGatewayProtocolRequestError({
+        gatewayCode: 'UNAVAILABLE',
+        message: 'Fork is unavailable while the agent is working.',
+      }),
+    )
+    await expect(gw.forkEntry('sk-1', 'e1')).rejects.toThrow('agent is working')
+  })
+})
+
 // #698 分支菜单协议层（#693 spec §1.1/§4）：sessions.branches.list 走「0 信任校准」惯例
 //（逐字段 typeof 门，非法项/字段降级——leafEntryId 是 switch 的定位参数，缺它才砍整项）；
 // sessions.branches.switch 简单透传（resolveApproval 惯例），参数名注意是 leafEntryId（非 entryId）。

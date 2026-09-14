@@ -29,13 +29,17 @@ const props = withDefaults(
     // fail-closed：能力门未被宿主打开就不渲染，不出现点了必然报错的按钮（与 regenerateText 缺省
     // 隐藏同款「缺省即不给动作」语义）。
     rewindAvailable?: boolean
+    // #697：fork 入口是否可用（宿主单独开门——与回退共享能力/身份门，但 busy 互斥独立计算）。
+    // 同款 fail-closed。
+    forkAvailable?: boolean
   }>(),
-  { rewindAvailable: false },
+  { rewindAvailable: false, forkAvailable: false },
 )
 
 // T1 轮次折叠（#664）：开合 emit 回父层（ChatStream→ChatView）落 store mutation。
 // #694：rewind 无参（父层按消息取 entryId），确认 popover 的「不再询问」由本组件落盘。
-const emit = defineEmits<{ regenerate: [text: string]; toggleTraceFold: []; rewind: [] }>()
+// #697：fork 无参同上；免确认（源会话完整保留，非破坏性），点击直接 emit。
+const emit = defineEmits<{ regenerate: [text: string]; toggleTraceFold: []; rewind: []; fork: [] }>()
 
 // T1 轮次折叠（#664）：完成（非流式）且有轨迹的 assistant 消息渲染折叠条——轨迹判定
 // hasTrace（思考非空或工具行非空），正文与附件不算轨迹；流式进行中渲染现状完全不动；
@@ -50,6 +54,11 @@ const traceFoldable = computed(
 // 会话控制）。见模板 hover 操作条。
 const rewindVisible = computed(
   () => props.msg.role === 'user' && Boolean(props.msg.entryId) && props.rewindAvailable,
+)
+// #697 fork 入口：身份门与回退一致（已持久化 user 消息），能力门独立（宿主分别开门——
+// rewind/fork 在途互斥时只隐藏其中一侧）。
+const forkVisible = computed(
+  () => props.msg.role === 'user' && Boolean(props.msg.entryId) && props.forkAvailable,
 )
 // 确认 popover 显隐（本地瞬态；关闭路径见 RewindConfirmPopover）+ 触发按钮 ref（传给 popover 作
 // anchor：落在触发按钮上的按下不算外部点击，保住「再点入口收起」的 toggle 语义）。
@@ -147,14 +156,25 @@ const copyState = ref<'idle' | 'copied' | 'failed'>('idle')
   <div class="msg" :class="msg.role">
     <!-- #694 消息级操作条（hover 显现，官方 chat-group-footer-actions 同构）：位于 user 气泡左侧的
          留白 gutter——不遮正文、不占额外纵向空间（显隐只改 opacity，无布局跳动）。仅已持久化的
-         user 消息渲染（rewindVisible）。 -->
+         user 消息渲染（#694 回退 rewindVisible / #697 分叉 forkVisible，两门独立开门）。 -->
     <div
-      v-if="rewindVisible"
+      v-if="rewindVisible || forkVisible"
       class="msg-actions"
       :class="{ open: confirmOpen }"
       data-test="msg-actions"
     >
+      <!-- #697 fork：免确认（源会话完整保留，非破坏性）——点击直接 emit -->
       <button
+        v-if="forkVisible"
+        type="button"
+        class="fork"
+        aria-label="Fork"
+        title="从这条消息之前分叉出新会话"
+        data-test="fork"
+        @click="emit('fork')"
+      >从此分叉</button>
+      <button
+        v-if="rewindVisible"
         type="button"
         ref="rewindBtn"
         class="rewind"
@@ -331,6 +351,9 @@ const copyState = ref<'idle' | 'copied' | 'failed'>('idle')
 .msg.user:hover .msg-actions, .msg.user:focus-within .msg-actions, .msg-actions.open { opacity: 1; pointer-events: auto; }
 .msg-actions .rewind { border: 0; background: transparent; color: var(--el-text-color-secondary); cursor: pointer; font-size: 12.5px; padding: 3px 8px; border-radius: 6px; }
 .msg-actions .rewind:hover { background: var(--el-fill-color); color: var(--el-color-primary); }
+/* #697 fork 入口：与回退同款交互形态 */
+.msg-actions .fork { border: 0; background: transparent; color: var(--el-text-color-secondary); cursor: pointer; font-size: 12.5px; padding: 3px 8px; border-radius: 6px; }
+.msg-actions .fork:hover { background: var(--el-fill-color); color: var(--el-color-primary); }
 /* 确认 popover 的定位在 RewindConfirmPopover 内（贴 .msg-actions 右缘，默认上翻、空间不足下翻） */
 .ai-notice {
   display: flex;

@@ -82,7 +82,7 @@ const conn = useChatConnection({
   // 回调抓指纹 / 回填——直接引用两个函数声明（提升，rewind 触发时 pendingAttachments 已就绪），
   // 不再经一层转手。
   onRewindDraftFingerprint: draftFingerprint,
-  onRewindBackfill: applyRewindBackfill,
+  onEntryBackfill: applyEntryBackfill,
 })
 
 // 嵌套 ref 在模板中不解包（conn 是普通对象）——顶层解构后模板自动解包（slash 匹配单一来源在
@@ -108,6 +108,20 @@ const rewindAvailable = computed(
     conn.sessionControlAvailable.value &&
     conn.transcriptSynced.value &&
     !conn.rewindBusy.value &&
+    !conn.forkBusy.value &&
+    !streaming.value &&
+    !connecting.value &&
+    !conn.disconnected.value,
+)
+
+// #697 fork 入口的渲染门：与回退共享能力门 / 投影权威门 / 忙碌三态，另与回退在途互斥
+//（rewindBusy 与 forkBusy 双向——两者同动 transcript，同时进行 = 网关侧乐观并发冲突）。
+const forkAvailable = computed(
+  () =>
+    conn.sessionControlAvailable.value &&
+    conn.transcriptSynced.value &&
+    !conn.rewindBusy.value &&
+    !conn.forkBusy.value &&
     !streaming.value &&
     !connecting.value &&
     !conn.disconnected.value,
@@ -119,12 +133,19 @@ function rewind(msg: Msg): void {
   void conn.rewind(msg.entryId)
 }
 
+// #697 fork 入口 emit：同 rewind 取 entryId 发起编排。
+function fork(msg: Msg): void {
+  if (!msg.entryId) return
+  void conn.fork(msg.entryId)
+}
+  
 // #698 分支菜单 busy 门（#706 词汇「会话控制能力」四合一套件同族）：忙碌态禁用而非隐藏——顶栏
 // 按钮闪现会推挤布局（与消息级入口的隐藏形态有意分歧）；transcriptSynced 关门（重连同步窗口内
 // 分支列表可能陈旧，fail-closed）。渲染门（length > 1）在 ChatHeader 哑组件内单点判定。
 const branchMenuBusy = computed(
   () =>
     conn.rewindBusy.value ||
+    conn.forkBusy.value ||
     !conn.transcriptSynced.value ||
     streaming.value ||
     connecting.value ||
@@ -274,9 +295,10 @@ function draftFingerprint(): string {
   ])
 }
 
-// #694 回退回填（指纹未变时才被 composable 调用）：被剪首条用户消息文本覆盖式写入草稿 + 网关返回的
+// #694 回退回填（指纹未变时才被 composable 调用；#697 fork 播种共用，改名 applyEntryBackfill——
+// 两路回填语义同构，不维护两份近似实现）：被剪/被点首条用户消息文本覆盖式写入草稿 + 网关返回的
 // 图片附件并入预览条（按内容去重——本地预览条已有同图时不重复插入，官方 merge 同款意图）。
-function applyRewindBackfill(text: string, attachments: RawAttachment[]): void {
+function applyEntryBackfill(text: string, attachments: RawAttachment[]): void {
   chat.setInput(text)
   for (const att of attachments) {
     if (pendingAttachments.value.some((p) => p.att.mimeType === att.mimeType && p.att.content === att.content)) continue
@@ -352,10 +374,12 @@ defineExpose({
         :history-has-more="chat.historyHasMore"
         :history-loading="chat.historyLoading"
         :rewind-available="rewindAvailable"
+        :fork-available="forkAvailable"
         @load-more="conn.loadMoreHistory"
         @regenerate="regenerate"
         @toggle-trace-fold="chat.toggleTraceFold"
         @rewind="rewind"
+        @fork="fork"
       >
         <!-- #461：无选中会话（含删除当前会话后）→ 空态视图 + 「新建会话」入口 -->
         <template #empty>
@@ -387,6 +411,7 @@ defineExpose({
         :streaming="streaming"
         :disconnected="conn.disconnected.value"
         :rewind-busy="conn.rewindBusy.value"
+        :fork-busy="conn.forkBusy.value"
         :pending-attachments="pendingAttachments"
         @input="conn.onComposerInput"
         @keydown="conn.onComposerKeydown"

@@ -1374,6 +1374,55 @@ describe('#694 回退入口与确认 popover', () => {
   })
 })
 
+// #697 fork 入口（#693 spec 前端线）：与回退同一条 hover 操作条、同一渲染门（已持久化 user 消息
+// + 能力门），点击**直接 emit**——非破坏性动作（源会话完整保留），无确认 popover、无「不再询问」。
+describe('#697 fork 入口', () => {
+  const userWithEntry = (text = '第一问') => {
+    const m = newMsg('user', text)
+    m.entryId = 'entry-1'
+    return m
+  }
+
+  const mountItem = (msg: Msg, props: Record<string, unknown> = {}) =>
+    mount(ChatMessageItem, { props: { msg, rewindAvailable: true, forkAvailable: true, ...props } })
+
+  it('已持久化 user 消息 → 操作条同时渲染「回退」与「从此分叉」', () => {
+    const w = mountItem(userWithEntry())
+    expect(w.find('[data-test="msg-actions"]').exists()).toBe(true)
+    expect(w.get('[data-test="fork"]').text()).toBe('从此分叉')
+    expect(w.get('[data-test="fork"]').attributes('aria-label')).toBe('Fork')
+  })
+
+  it('无 entryId / assistant 消息 → 无 fork 入口（与回退同一身份门）', () => {
+    const w1 = mountItem(newMsg('user', '没落库'))
+    expect(w1.find('[data-test="fork"]').exists()).toBe(false)
+    const m = newMsg('assistant', '回答')
+    m.streaming = false
+    m.entryId = 'entry-2'
+    const w2 = mountItem(m)
+    expect(w2.find('[data-test="fork"]').exists()).toBe(false)
+  })
+
+  it('forkAvailable=false（能力门关 / 对方 busy）→ fork 入口隐藏（fail-closed，非禁用态）', () => {
+    const w = mountItem(userWithEntry(), { forkAvailable: false })
+    expect(w.find('[data-test="fork"]').exists()).toBe(false)
+    expect(w.find('[data-test="rewind"]').exists()).toBe(true) // 回退门独立（宿主分别开门）
+  })
+
+  it('点击 → 直接 emit fork（免确认：非破坏性，无 popover 分支）', async () => {
+    const w = mountItem(userWithEntry())
+    await w.get('[data-test="fork"]').trigger('click')
+    expect(w.emitted('fork')).toHaveLength(1)
+    expect(w.find('[data-test="rewind-confirm"]').exists()).toBe(false) // 不误触回退确认层
+  })
+
+  it('仅回退可用（forkAvailable 缺省 false）→ 操作条仍渲染回退，不渲染 fork', () => {
+    const w = mount(ChatMessageItem, { props: { msg: userWithEntry(), rewindAvailable: true } })
+    expect(w.find('[data-test="rewind"]').exists()).toBe(true)
+    expect(w.find('[data-test="fork"]').exists()).toBe(false)
+  })
+})
+
 // #698 分支菜单（#693 spec §1.5）：ChatHeader trailing 哑组件——仅 branches.length > 1 渲染；
 // 每项 = headline（空 →「未命名分支」）+「N 条消息」+ 时间（缺失槽位不渲染）；active 项打勾且
 // disabled（UI 从不发起 no-op switch）；branchBusy 时触发器禁用。

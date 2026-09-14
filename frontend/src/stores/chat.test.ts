@@ -161,6 +161,18 @@ describe('chatStore 纯 mutation', () => {
     expect(chat.sessions.map((s) => s.session_key)).toEqual(['sk-2'])
   })
 
+  // #697 fork：prependSession 幂等——同 key 二次插入（fork 成功 prepend 后 refreshSessions
+  // 合并前的重复路径）不得出现两行，且保留既有行字段（refreshSessions 重拉前的权威行不被占位覆盖）。
+  it('#697 prependSession 幂等：同 key 重复插入不重复行，置顶且保留首次字段', () => {
+    const chat = useChatStore()
+    chat.prependSession({ session_key: 'sk-1', title: '权威标题', updated_at: '2026-09-13T00:00:00Z' })
+    chat.prependSession({ session_key: 'sk-fork', title: '', updated_at: '' })
+    // 重复 prepend 同 key（占位行再插一次）：仅一行、置顶，且沿用首次的权威字段
+    chat.prependSession({ session_key: 'sk-1', title: '', updated_at: '' })
+    expect(chat.sessions.map((s) => s.session_key)).toEqual(['sk-fork', 'sk-1'])
+    expect(chat.sessions.find((s) => s.session_key === 'sk-1')?.title).toBe('权威标题')
+  })
+
   // #694（Codex #703 P1）：ack 回读把网关条目 id 补回本地乐观消息——只认「有该发送键且尚无 entryId
   // 的 user 消息」。三条守卫各有用例：已有 entryId 不改写（历史翻译的权威值不被回读覆盖）、发送键
   // 对不上不动、消息已出列（切会话/重建后的旧对象不在投影内）→ 找不到即 no-op。

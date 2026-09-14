@@ -39,15 +39,18 @@ export interface ChatStatus {
   // #459-T2 #463 #1：宿主接管的统一发送入口（含附件校验/清空预览条）。提供后 Enter/斜杠发送改走
   // 它（与发送按钮同路径），缺省回退 composable 内 send（纯文本）——Enter 与按钮行为不再分叉。
   onSend?(): void
-  // #694 对话回退的 composer 协同（#693 spec §1.4）：composer 草稿归宿主——文本在 chatStore.input，
-  // 附件是宿主局部态（ChatView.pendingAttachments），composable 读不到整体草稿。故回退编排经这两个
-  // 回调与宿主协作（依赖注入，贴 onSend 先例；不新增接缝）：
+  // #694 对话回退的 composer 协同（#693 spec §1.4）；#697 fork 播种共用同一回填通道（改名
+  // onEntryBackfill——rewind/fork 的被剪消息回填语义同构，两份近似实现必然漂移）：
+  // composer 草稿归宿主——文本在 chatStore.input，附件是宿主局部态（ChatView.pendingAttachments），
+  // composable 读不到整体草稿。故回退编排经这两个回调与宿主协作（依赖注入，贴 onSend 先例）：
   //   onRewindDraftFingerprint：RPC 前抓草稿指纹（文本 + 附件的水位线），RPC 后比对——期间用户改过
   //     草稿即跳过回填（新草稿原地保留，transcript 回退照常）。缺省 '' → 恒判「未变」。
-  //   onRewindBackfill：指纹未变时回填——editorText 覆盖式写入 + editorAttachments 并入现有附件。
-  //     缺省回退纯文本（chat.setInput），附件丢弃（无宿主则无附件放置点）。
+  //     （仅 rewind 使用：fork 切到新会话，草稿属源会话域，无同会话冲突可守。）
+  //   onEntryBackfill：回填——editorText 覆盖式写入 + editorAttachments 并入现有附件
+  //     （rewind：指纹未变时；fork：新会话铺底后无条件）。缺省回退纯文本（chat.setInput），
+  //     附件丢弃（无宿主则无附件放置点）。
   onRewindDraftFingerprint?(): string
-  onRewindBackfill?(text: string, attachments: RawAttachment[]): void
+  onEntryBackfill?(text: string, attachments: RawAttachment[]): void
   // #694（Spec 轴 review）：**动作类**失败（用户主动发起的动作）的呈现通道——与「连接/加载」失败
   // 分流：后者留在顶部连接横幅（label 恒「加载失败」），把「回退失败：…」套在其下语义相左。
   // 宿主接它做瞬时提示（ChatView 用 ElMessage，贴 #461 删除会话失败先例）。缺省回退 onError：
@@ -108,6 +111,11 @@ export function useChatConnection(status: ChatStatus) {
   // 闭包变量 rewindInFlight 提升为 ref——进 UI 门必须先可观测（#693 spec §1.5「复用三态」的盲区，
   // 见 CONTEXT.md「会话控制能力」修订）。
   const rewindBusy = ref(false)
+  // #697 fork 在途（forkBusy）——照抄 rewindBusy 三件套（send 拒发 + composer 置灰 + 入口隐藏），
+  // 但与 rewindBusy **互相闭锁**（两入口门均要求对方不在途：rewind/fork 同动 transcript，同时进行
+  // 即网关侧乐观并发冲突）。差异：resendOutbox **不**加 forkBusy 栅栏——fork 不剪源会话，待发残留
+  // 仍属合法旧代，重连照常重发（#706 rewindBusy 栅栏针对的是「断线恰落在回退在途」的旧代残留竞态）。
+  const forkBusy = ref(false)
   // Codex #703 P1（F4）：投影权威（transcriptSynced）——回退/fork 这类定位历史条目的动作只许在
   // 「当前投影 = 网关权威转录」时可用。重连握手后、syncSessions 落地前恒 false（fail-closed：
   // 断线期间网关真实转录可能已前进，陈旧条目上的回退会剪除用户未见的轮次）；任何一次权威
@@ -1092,7 +1100,7 @@ export function useChatConnection(status: ChatStatus) {
     // 既无文本也无附件 → 无内容可发（保持既有空文本禁发语义）；其余判定不变。
     // Codex #703 P1（F2）：回退在途拒发——此刻落下的 send 会被回退成功路径的 abandonActiveRun()
     // 吞掉（run 被弃、乐观投影被重建冲掉，agent 却在服务端继续跑），用户消息与回复双双丢失。
-    if ((!text && !hasAttachments) || !gateway || !chat.selectedSession || disconnected.value || streamingEnabled || rewindBusy.value)
+    if ((!text && !hasAttachments) || !gateway || !chat.selectedSession || disconnected.value || streamingEnabled || rewindBusy.value || forkBusy.value)
       return false
     chat.setSlashDismissed(true) // 发送后关闭补全菜单（输入已被清空，下次输 / 时经 onComposerInput 复位）
     clearResumeWait() // B5: 用户发新消息 = 放弃旧 run 的 resume 等待（新 run 是新语境）
@@ -1290,14 +1298,16 @@ export function useChatConnection(status: ChatStatus) {
     }
   }
 
-  function pickSession(key: string) {
-    if (!key || chat.selectedSession === key || !gateway || disconnected.value) return // E2: 断线不切换（防裸错误）
+  // 返回 loadHistory 的 promise（#697 fork 导航需要 await 铺底完成后再播种）；既有调用方
+  // fire-and-forget，行为不变。
+  function pickSession(key: string): Promise<void> {
+    if (!key || chat.selectedSession === key || !gateway || disconnected.value) return Promise.resolve() // E2: 断线不切换（防裸错误）
     abandonActiveRun()
     clearResumeWait() // B5: 主动切会话 = 放弃 resume 等待
     chat.setSelectedSession(key)
     // codex R2 P1：不清空审批卡——同容器其它会话的卡保留，渲染时按 selectedSession 过滤即可
-    void loadHistory(key) // T3：切会话加载该会话历史（loadHistory 内部清空 messages + 维护分页态）
     void loadBranches(key) // #698：分支随会话切换并行预拉（loadHistory 内 resetForSession 已清旧 branches）
+    return loadHistory(key) // T3：切会话加载该会话历史（loadHistory 内部清空 messages + 维护分页态）
   }
 
   // 动作类失败的统一出口（见 ChatStatus.onActionError）：宿主注入了专用通道就走它（瞬时提示），
@@ -1350,7 +1360,7 @@ export function useChatConnection(status: ChatStatus) {
     // 两次重建 + 两次回填的落地序又由网络决定（可能回填的不是用户最后一次意图）；且任一次的 finally
     // 都会清掉共享标记，锁形同虚设。窗口 = 一次 RPC + 一次历史重拉：入口经 rewindBusy 隐藏（不再
     // 「渲染可点、点到被吞」——Codex #703 P1 修订），落地后立即恢复可点（对新 transcript 再发起）。
-    if (rewindBusy.value || !entryId || !key || !gateway || disconnected.value) return
+    if (rewindBusy.value || forkBusy.value || !entryId || !key || !gateway || disconnected.value) return
     const myGw = gateway
     const gen = containerGen
     const container = chat.selectedContainer
@@ -1396,13 +1406,61 @@ export function useChatConnection(status: ChatStatus) {
         const att = editorAttachmentToRaw(a)
         if (att) attachments.push(att)
       }
-      if (status.onRewindBackfill) status.onRewindBackfill(res.editorText, attachments)
+      if (status.onEntryBackfill) status.onEntryBackfill(res.editorText, attachments)
       else chat.setInput(res.editorText) // 无宿主时的最小回填（纯文本）
     } finally {
       rewindBusy.value = false
     }
   }
 
+  // #697 对话 fork（#693 spec 前端线）：从该持久化 user message（entryId）之前的活跃路径前缀创建
+  // 新会话，原地切过去，被点消息的文本/图片附件播种新会话 composer。与 rewind 的编排差异（有意为之）：
+  //  - 源会话零动：不作废 outbox、不 abandonActiveRun/clearResumeWait（fork 不剪源 transcript；
+  //    入口门已含 !streaming，无在途 run 可弃——pickSession 内的标准切换语义除外，与手动切会话一致）；
+  //  - 无草稿指纹守卫：await 期间用户草稿属源会话（切换时按既有 draftKey 机制存回源 key），
+  //    新会话草稿为空，editorText 回填不覆盖任何东西——指纹比对在 fork 场景是死代码；
+  //  - 失败分层：RPC 失败零状态变更（不 prepend/不切换/草稿不动）；RPC 成功后按「网关已发生」
+  //    处理（loadHistory 失败不回切，走既有失败路径；续体 stale 静默放弃播种不弹假错误）。
+  async function fork(entryId: string): Promise<void> {
+    const key = chat.selectedSession
+    // 单飞 + 与 rewind 互斥（两者同动 transcript，同时进行 = 网关侧乐观并发冲突）。
+    if (rewindBusy.value || forkBusy.value || !entryId || !key || !gateway || disconnected.value) return
+    const myGw = gateway
+    const gen = containerGen
+    forkBusy.value = true
+    try {
+      const res = await myGw.forkEntry(key, entryId).catch((e: unknown) => {
+        // stale 守卫：切容器/重连换实例后旧 RPC 的失败不写进新语境的错误面（对齐 rewind）。
+        if (gateway === myGw && gen === containerGen && chat.selectedSession === key) {
+          reportActionError(`分叉失败：${(e as Error).message || '未知错误'}`)
+        }
+        return null
+      })
+      if (!res) return
+      if (gateway !== myGw || gen !== containerGen || chat.selectedSession !== key) {
+        // RPC 在途切走：网关侧已建新会话（不可回滚），但本地不导航（不把用户拽去别的语境）；
+        // fail-soft 刷新列表让新会话至少可见，其余等下次同步。
+        void refreshSessions()
+        return
+      }
+      // 导航：占位行置顶（幂等）→ 标准会话切换（resetForSession + 全量 loadHistory，跨会话切换
+      // 连带清文件 tab = 手动切换语义）。await 铺底完成后再播种（新会话草稿为空，无冲突可守）。
+      chat.prependSession({ session_key: res.sessionKey, title: '', updated_at: '' })
+      await pickSession(res.sessionKey)
+      // 三重守卫（对齐 rewind 续体，Codex #703 P1）：播种不得落进另一个语境。
+      if (gateway !== myGw || gen !== containerGen || chat.selectedSession !== res.sessionKey) return
+      const attachments: RawAttachment[] = []
+      for (const a of res.editorAttachments) {
+        const att = editorAttachmentToRaw(a)
+        if (att) attachments.push(att)
+      }
+      if (status.onEntryBackfill) status.onEntryBackfill(res.editorText, attachments)
+      else chat.setInput(res.editorText) // 无宿主时的最小回填（纯文本）
+      await refreshSessions() // 权威刷新（占位行字段补全；fail-soft）
+    } finally {
+      forkBusy.value = false
+    }
+  }
   // #698 分支切换（#693 spec §1.4）：把活跃路径切到目标分支，与 rewind 同族的「破坏性 RPC + 重建
   // 管线」——全套继承 #694/#706 语义：outbox 代际作废（被切走分支的待发残留不得经重连重发进新分支）
   // + 放弃在途 run 与 resume 等待（迟到帧不得写入重建后的 transcript）+ refreshSessions（切换前移
@@ -1795,6 +1853,7 @@ export function useChatConnection(status: ChatStatus) {
     disconnected,
     sessionControlAvailable,
     rewindBusy,
+    forkBusy,
     transcriptSynced,
     streaming,
     slashQuery,
@@ -1810,6 +1869,7 @@ export function useChatConnection(status: ChatStatus) {
     newSession,
     pickSession,
     rewind,
+    fork,
     switchBranch,
     removeSession,
     resolveApproval,
