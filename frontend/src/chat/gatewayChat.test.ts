@@ -951,6 +951,44 @@ describe('createGatewayChat（#369 隧道 Facade）', () => {
     })
   })
 
+  // ---- #700 分支 CAS（spec §1.1/§1.3）：expectedLeafEntryId 条件展开 ----
+
+  it('#700: send 不传 expectedLeafEntryId → payload 无该键（正常 send/outbox 重放 wire 与现状逐字节一致）', async () => {
+    const { gw, client } = makeGateway()
+    client.request.mockResolvedValue({})
+    await gw.send('sk-1', '你好')
+    const params = client.request.mock.calls[0][1] as Record<string, unknown>
+    expect(params).not.toHaveProperty('expectedLeafEntryId')
+    // 显式 undefined 同「不传」——键不出现
+    await gw.send('sk-1', '你好', undefined, undefined, undefined)
+    const params2 = client.request.mock.calls[1][1] as Record<string, unknown>
+    expect(params2).not.toHaveProperty('expectedLeafEntryId')
+  })
+
+  it('#700: send 传 string leaf → payload 含 expectedLeafEntryId: "<leaf>"（首条 CAS 精确比对）', async () => {
+    const { gw, client } = makeGateway()
+    client.request.mockResolvedValue({})
+    await gw.send('sk-1', '你好', undefined, undefined, 'leaf-entry-42')
+    expect(client.request).toHaveBeenCalledWith('chat.send', {
+      sessionKey: 'sk-1',
+      message: '你好',
+      idempotencyKey: expect.any(String),
+      expectedLeafEntryId: 'leaf-entry-42',
+    })
+  })
+
+  it('#700: send 传 null → payload 含 expectedLeafEntryId: null（权威空 transcript 语义）', async () => {
+    const { gw, client } = makeGateway()
+    client.request.mockResolvedValue({})
+    await gw.send('sk-1', '你好', undefined, undefined, null)
+    expect(client.request).toHaveBeenCalledWith('chat.send', {
+      sessionKey: 'sk-1',
+      message: '你好',
+      idempotencyKey: expect.any(String),
+      expectedLeafEntryId: null,
+    })
+  })
+
   it('listCommands → commands.list + 响应校准（textAliases 缺省回退 /name）', async () => {
     const { gw, client } = makeGateway()
     client.request.mockResolvedValue({
