@@ -1742,6 +1742,17 @@ describe('#697 对话 fork 编排', () => {
 // busy 复用 rewindBusy（#706：同族破坏性 RPC + 重建管线，发送在途被拒）；branchesGen 请求代丢弃
 // 乱序迟到响应（historyGen 同型论证）。
 describe('#698 分支菜单编排', () => {
+  // 与 #694 回退交互 / #697 fork 编排 describe 内同款辅助：泛型 deferred 让 resolve 签名与
+  // Promise executor 的 r 精确对齐（手写 { resolve?: () => void } 会 TS2322——executor 的
+  // r 是 (value: unknown) => void，零参目标收不下它）。
+  function deferred<T>() {
+    let resolve!: (v: T) => void
+    const promise = new Promise<T>((r) => {
+      resolve = r
+    })
+    return { promise, resolve }
+  }
+
   setupConnTestEnv()
 
   const BRANCHES = [
@@ -1837,8 +1848,8 @@ describe('#698 分支菜单编排', () => {
   it('switch 在途（rewindBusy 窗口）：发送被拒 + 重入被吞（继承 #706 门语义）', async () => {
     const { conn, chat, status } = setup()
     const gw = await connectWithBranches(conn)
-    const deferred: { resolve?: () => void } = {}
-    gw.switchBranch.mockImplementation(() => new Promise((r) => { deferred.resolve = r }))
+    const d = deferred<void>()
+    gw.switchBranch.mockImplementation(() => d.promise)
 
     const first = conn.switchBranch('leaf-2')
     await flushPromises()
@@ -1852,7 +1863,7 @@ describe('#698 分支菜单编排', () => {
     expect(status.onActionError).not.toHaveBeenCalled() // 被吞的重入不得冒「假失败」
 
     gw.getHistory.mockResolvedValue({ messages: [], hasMore: false, nextOffset: null })
-    deferred.resolve?.()
+    d.resolve()
     await first
     expect(conn.rewindBusy.value).toBe(false) // 落地解锁
   })
