@@ -1941,10 +1941,6 @@ describe('#700 分支 CAS（发送携带期望 leaf + 冲突处理）', () => {
     { leafEntryId: 'leaf-1', headline: 'A 方向', messageCount: 4, active: true },
     { leafEntryId: 'leaf-2', headline: 'B 方向', messageCount: 2, active: false },
   ]
-  const HISTORY = [
-    { role: 'user', text: '第一问', __openclaw: { id: 'entry-1' } },
-    { role: 'assistant', text: '第一答', __openclaw: { id: 'entry-2' } },
-  ]
 
   // 读 outbox 残留（断线重放回归用；storage 格式见 outboxStore OUTBOX_STORAGE_KEY_PREFIX）
   function outboxItems(container: string, sessionKey: string): Array<{ id: string; text: string }> {
