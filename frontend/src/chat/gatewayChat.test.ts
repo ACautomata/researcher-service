@@ -1465,3 +1465,85 @@ describe('#697 sessions.fork RPC', () => {
     await expect(gw.forkEntry('sk-1', 'e1')).rejects.toThrow('agent is working')
   })
 })
+
+// #698 分支菜单协议层（#693 spec §1.1/§4）：sessions.branches.list 走「0 信任校准」惯例
+//（逐字段 typeof 门，非法项/字段降级——leafEntryId 是 switch 的定位参数，缺它才砍整项）；
+// sessions.branches.switch 简单透传（resolveApproval 惯例），参数名注意是 leafEntryId（非 entryId）。
+describe('#698 sessions.branches.list RPC', () => {
+  it('listBranches → sessions.branches.list{sessionKey} + 正常形状逐字段透传', async () => {
+    const { gw, client } = makeGateway()
+    client.request.mockResolvedValue({
+      branches: [
+        { leafEntryId: 'leaf-1', headline: '聊聊 A 方案', messageCount: 12, updatedAt: '2026-09-12T01:02:03Z', active: true },
+        { leafEntryId: 'leaf-2', headline: '聊聊 B 方案', messageCount: 3, updatedAt: '2026-09-11T00:00:00Z', active: false },
+      ],
+    })
+    const res = await gw.listBranches('sk-1')
+    expect(client.request).toHaveBeenCalledWith('sessions.branches.list', { sessionKey: 'sk-1' })
+    expect(res).toEqual([
+      { leafEntryId: 'leaf-1', headline: '聊聊 A 方案', messageCount: 12, updatedAt: '2026-09-12T01:02:03Z', active: true },
+      { leafEntryId: 'leaf-2', headline: '聊聊 B 方案', messageCount: 3, updatedAt: '2026-09-11T00:00:00Z', active: false },
+    ])
+  })
+
+  it('0 信任门表：leafEntryId 缺/空/非 string → 跳整项（看得见切不了的死菜单项不入列）', async () => {
+    const { gw, client } = makeGateway()
+    client.request.mockResolvedValue({
+      branches: [
+        'not-a-dict', // 非对象元素跳过
+        null,
+        { headline: '没有 leaf' }, // 缺 leafEntryId
+        { leafEntryId: '', headline: '空 leaf' }, // 空 leafEntryId
+        { leafEntryId: 42 }, // 非 string
+        { leafEntryId: 'leaf-ok', headline: 'ok', messageCount: 1, active: false }, // 合法项保留
+      ],
+    })
+    const res = await gw.listBranches('sk-1')
+    expect(res.map((b) => b.leafEntryId)).toEqual(['leaf-ok'])
+  })
+
+  it('0 信任门表：纯展示字段异形 → 降级不砍项（headline→空串 / messageCount、updatedAt→undefined / active→false）', async () => {
+    const { gw, client } = makeGateway()
+    client.request.mockResolvedValue({
+      branches: [
+        {
+          leafEntryId: 'leaf-1',
+          headline: 42, // 非 string → ''（UI 层回退「未命名分支」）
+          messageCount: 'many', // 非 number → 不渲染「N 条消息」槽位
+          updatedAt: 12345, // 非 string → 不渲染时间槽位
+          active: 'yes', // 非 boolean → false（不砍项：标记损坏的分支仍可被切换）
+        },
+      ],
+    })
+    const res = await gw.listBranches('sk-1')
+    expect(res).toEqual([{ leafEntryId: 'leaf-1', headline: '', messageCount: undefined, updatedAt: undefined, active: false }])
+  })
+
+  it('0 信任：branches 非数组 / 缺字段（旧网关、异常形状）→ 空列表，不崩不抛错', async () => {
+    const { gw, client } = makeGateway()
+    client.request.mockResolvedValueOnce({ branches: 'x' })
+    await expect(gw.listBranches('sk-1')).resolves.toEqual([])
+    client.request.mockResolvedValueOnce(undefined)
+    await expect(gw.listBranches('sk-1')).resolves.toEqual([])
+  })
+})
+
+describe('#698 sessions.branches.switch RPC', () => {
+  it('switchBranch → sessions.branches.switch{sessionKey,leafEntryId}（参数名是 leafEntryId，非 entryId）', async () => {
+    const { gw, client } = makeGateway()
+    client.request.mockResolvedValue({})
+    await gw.switchBranch('sk-1', 'leaf-2')
+    expect(client.request).toHaveBeenCalledWith('sessions.branches.switch', { sessionKey: 'sk-1', leafEntryId: 'leaf-2' })
+  })
+
+  it('switch 被网关拒绝（no-op 选已活跃分支等）→ 原样上抛（调用层如实提示，不静默）', async () => {
+    const { gw, client } = makeGateway()
+    client.request.mockRejectedValue(
+      new MockGatewayProtocolRequestError({
+        gatewayCode: 'INVALID_REQUEST',
+        message: 'branch is already active',
+      }),
+    )
+    await expect(gw.switchBranch('sk-1', 'leaf-1')).rejects.toThrow('branch is already active')
+  })
+})

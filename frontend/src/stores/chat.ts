@@ -4,7 +4,7 @@
 // （gateway/定时器/请求代）归 useChatConnection 同宿主（#340 关键约束）。
 import { defineStore } from 'pinia'
 import type { InstanceDTO } from '@/api/containers'
-import type { CommandDTO, SessionDTO } from '@/chat/gatewayChat'
+import type { CommandDTO, SessionBranchDTO, SessionDTO } from '@/chat/gatewayChat'
 import type { MediaBlock } from '@/chat/eventTranslate'
 import { isSubagentApproval, isSubagentSessionKey } from '@/chat/subagentApproval'
 
@@ -100,6 +100,10 @@ export const useChatStore = defineStore('chat', {
   state: () => ({
     instances: [] as InstanceDTO[],
     sessions: [] as SessionDTO[],
+    // #698 分支菜单：会话级渲染投影（贴 sessions 先例，#693 spec §1.2「branches 数组入 chat
+    // store」）。active:true 项的 leafEntryId 是分支 CAS 的唯一权威基准（#700 消费）。拉取失败
+    // /单分支/能力缺失统一表现为空或单元素 → 头部按钮不渲染（length > 1 门）。
+    branches: [] as SessionBranchDTO[],
     selectedContainer: '' as string,
     selectedSession: '' as string,
     messages: [] as Msg[],
@@ -142,6 +146,10 @@ export const useChatStore = defineStore('chat', {
     },
     setSessions(list: SessionDTO[]): void {
       this.sessions = list
+    },
+    // #698：整替（非追加）——重拉后旧列表不残留；stale 丢弃由调用层守卫负责（branchesGen）。
+    setBranches(list: SessionBranchDTO[]): void {
+      this.branches = list
     },
     setSelectedContainer(name: string): void {
       this.selectedContainer = name
@@ -307,12 +315,14 @@ export const useChatStore = defineStore('chat', {
       this.historyHasMore = false
       this.historyAnchor = null
       this.historyLoading = false
+      this.branches = [] // #698：切容器必换会话，分支随之作废
     },
     resetForSession(): void {
       this.messages = []
       this.historyHasMore = false
       this.historyAnchor = null
       this.historyLoading = false
+      this.branches = [] // #698：分支属于单个会话，切会话不得残留（length 门会误渲染按钮）
     },
   },
 })

@@ -49,6 +49,8 @@ const { MockGatewayChat } = vi.hoisted(() => {
     send = vi.fn()
     rewind = vi.fn() // #694 对话回退（sessions.rewind）
     forkEntry = vi.fn() // #697 对话 fork（sessions.fork）
+    listBranches = vi.fn() // #698 分支菜单（sessions.branches.list）
+    switchBranch = vi.fn() // #698 分支切换（sessions.branches.switch）
     sessionControlAvailable = vi.fn(() => true) // #694 会话控制能力（默认 9.4+ 网关可用）
     listCommands = vi.fn()
     resolveApproval = vi.fn()
@@ -1731,5 +1733,187 @@ describe('#697 对话 fork 编排', () => {
     expect(chat.selectedSession).toBe('sk-2') // 不被迟到的 fork 续体拉走
     expect(status.onEntryBackfill).not.toHaveBeenCalled() // 播种不落进 sk-2 的 composer
     expect(status.onActionError).not.toHaveBeenCalled() // 用户主动离开，不弹假错误
+  })
+})
+
+// #698 分支菜单编排（#693 spec §1.4）：branches.list 随 syncSessions/pickSession 与 loadHistory
+// 并行预拉（fire-and-forget，restorePendingApprovals 先例）；失败静默降级（按钮不渲染即降级语义）；
+// branches.switch 复用 #694 rewind 重建管线（abandon + loadHistory 全量重建 + branches 重拉），
+// busy 复用 rewindBusy（#706：同族破坏性 RPC + 重建管线，发送在途被拒）；branchesGen 请求代丢弃
+// 乱序迟到响应（historyGen 同型论证）。
+describe('#698 分支菜单编排', () => {
+  setupConnTestEnv()
+
+  const BRANCHES = [
+    { leafEntryId: 'leaf-1', headline: 'A 方向', messageCount: 4, active: true },
+    { leafEntryId: 'leaf-2', headline: 'B 方向', messageCount: 2, active: false },
+  ]
+
+  async function connectWithBranches(conn: ReturnType<typeof useChatConnection>): Promise<InstanceType<typeof MockGatewayChat>> {
+    const ready = conn.openGateway()
+    await flushPromises()
+    const gw = MockGatewayChat.last!
+    gw.listSessions.mockResolvedValue([{ session_key: 'sk-1', title: '', updated_at: '' }])
+    gw.getHistory.mockResolvedValue({ messages: [], hasMore: false, nextOffset: null })
+    gw.listCommands.mockResolvedValue([])
+    gw.listPendingApprovals.mockResolvedValue([])
+    gw.listBranches.mockResolvedValue(BRANCHES)
+    gw.switchBranch.mockResolvedValue(undefined)
+    gw.fireReady()
+    await ready
+    await flushPromises()
+    return gw
+  }
+
+  it('并行预拉：首连 syncSessions 后 branches 入 store；切会话随 pickSession 再拉', async () => {
+    const { conn, chat } = setup()
+    const gw = await connectWithBranches(conn)
+    expect(gw.listBranches).toHaveBeenCalledWith('sk-1')
+    expect(chat.branches).toEqual(BRANCHES)
+
+    gw.listSessions.mockResolvedValue([
+      { session_key: 'sk-1', title: '', updated_at: '' },
+      { session_key: 'sk-2', title: '', updated_at: '' },
+    ])
+    conn.pickSession('sk-2')
+    await flushPromises()
+    expect(gw.listBranches).toHaveBeenLastCalledWith('sk-2')
+  })
+
+  it('预拉失败 → 静默降级：不报错误条、不崩（length 门下按钮不渲染即降级语义）', async () => {
+    const { conn, chat, status } = setup()
+    const ready = conn.openGateway()
+    await flushPromises()
+    const gw = MockGatewayChat.last!
+    gw.listSessions.mockResolvedValue([{ session_key: 'sk-1', title: '', updated_at: '' }])
+    gw.getHistory.mockResolvedValue({ messages: [], hasMore: false, nextOffset: null })
+    gw.listCommands.mockResolvedValue([])
+    gw.listPendingApprovals.mockResolvedValue([])
+    gw.listBranches.mockRejectedValue(new Error('gateway boom'))
+    gw.fireReady()
+    await ready
+    await flushPromises()
+    expect(chat.branches).toEqual([])
+    expect(status.onError).not.toHaveBeenCalled()
+  })
+
+  it('switch 成功：RPC(leafEntryId) → transcript 全量重建 → branches 重拉为新状态', async () => {
+    const { conn, chat, status } = setup()
+    const gw = await connectWithBranches(conn)
+    expect(chat.branches).toHaveLength(2)
+    // 切换后：新活跃路径历史 + 新分支列表（leaf-2 成为 active）
+    gw.getHistory.mockResolvedValue({
+      messages: [{ role: 'user', text: 'B 方向的第一问', __openclaw: { id: 'entry-b1' } }],
+      hasMore: false, nextOffset: null,
+    })
+    gw.listBranches.mockResolvedValue([
+      { leafEntryId: 'leaf-1', headline: 'A 方向', messageCount: 4, active: false },
+      { leafEntryId: 'leaf-2', headline: 'B 方向', messageCount: 3, active: true },
+    ])
+
+    await conn.switchBranch('leaf-2')
+
+    expect(gw.switchBranch).toHaveBeenCalledWith('sk-1', 'leaf-2')
+    expect(chat.messages.map((m) => m.text)).toEqual(['B 方向的第一问']) // transcript 重建为新活跃路径
+    expect(gw.listBranches).toHaveBeenCalledTimes(2) // 预拉 1 次 + 切换后重拉 1 次
+    expect(chat.branches.find((b) => b.active)?.leafEntryId).toBe('leaf-2') // 分支列表已是新状态
+    expect(status.onError).not.toHaveBeenCalled()
+  })
+
+  it('switch 失败：明确错误提示（动作类通道），transcript 与 branches 均不动（不假装切成功）', async () => {
+    const { conn, chat, status } = setup()
+    const gw = await connectWithBranches(conn)
+    gw.switchBranch.mockRejectedValue(new Error('branch is no longer switchable'))
+    const historyCallsBefore = gw.getHistory.mock.calls.length
+
+    await conn.switchBranch('leaf-2')
+
+    expect(status.onActionError).toHaveBeenCalledWith('切换分支失败：branch is no longer switchable')
+    expect(gw.getHistory.mock.calls.length).toBe(historyCallsBefore) // 不重拉历史
+    expect(gw.listBranches).toHaveBeenCalledTimes(1) // 只有预拉那次，不重拉
+    expect(chat.branches).toEqual(BRANCHES) // 本地状态原样（active 仍是 leaf-1）
+  })
+
+  it('switch 在途（rewindBusy 窗口）：发送被拒 + 重入被吞（继承 #706 门语义）', async () => {
+    const { conn, chat, status } = setup()
+    const gw = await connectWithBranches(conn)
+    const deferred: { resolve?: () => void } = {}
+    gw.switchBranch.mockImplementation(() => new Promise((r) => { deferred.resolve = r }))
+
+    const first = conn.switchBranch('leaf-2')
+    await flushPromises()
+    expect(conn.rewindBusy.value).toBe(true) // busy 复用同一 ref（send() 守卫/composer 置灰自动继承）
+    conn.switchBranch('leaf-1') // 重入：吞掉
+    chat.setInput('在途想说的话')
+    conn.send(false) // 发送：被拒
+    await flushPromises()
+    expect(gw.send).not.toHaveBeenCalled()
+    expect(gw.switchBranch).toHaveBeenCalledTimes(1)
+    expect(status.onActionError).not.toHaveBeenCalled() // 被吞的重入不得冒「假失败」
+
+    gw.getHistory.mockResolvedValue({ messages: [], hasMore: false, nextOffset: null })
+    deferred.resolve?.()
+    await first
+    expect(conn.rewindBusy.value).toBe(false) // 落地解锁
+  })
+
+  it('前置守卫：断线 / 无 leafEntryId / 无会话 → 不发起 RPC', async () => {
+    const { conn } = setup()
+    const gw = await connectWithBranches(conn)
+    await conn.switchBranch('')
+    gw.fireClose(1006)
+    await flushPromises()
+    await conn.switchBranch('leaf-2')
+    expect(gw.switchBranch).not.toHaveBeenCalled()
+  })
+
+  // P1 回归（review 发现）：rewind 成功后的 branches 重拉是无条件的（#693 spec §1.4 / #698 AC14）
+  // ——草稿指纹守卫只拦 composer 回填，不得连带短路 branches 重拉（回退剪出新分叉点后分支数
+  // 可能从 1 变 2，按钮该出现却没出现直到下次切会话）。
+  it('rewind 成功且草稿已变（守卫触发、不回填）→ branches 仍被重拉（草稿守卫不拦 branches refresh）', async () => {
+    const { conn, chat, status } = setup()
+    const gw = await connectWithBranches(conn)
+    expect(gw.listBranches).toHaveBeenCalledTimes(1) // 前置：首连预拉已入
+    expect(chat.branches).toHaveLength(2)
+    // RPC 前后草稿指纹不同：守卫触发，跳过回填
+    vi.mocked(status.onRewindDraftFingerprint!).mockReturnValueOnce('draft-A').mockReturnValueOnce('draft-B')
+    gw.rewind.mockResolvedValue({ editorText: '第一问', editorAttachments: [] })
+    gw.getHistory.mockResolvedValue({ messages: [], hasMore: false, nextOffset: null })
+    // 重拉应答 = 回退后的新分支状态（leaf-1 仍 active 但条数变了）
+    gw.listBranches.mockResolvedValue([{ leafEntryId: 'leaf-1', headline: 'A 方向', messageCount: 3, active: true }])
+
+    await conn.rewind('entry-1')
+
+    expect(status.onRewindBackfill).not.toHaveBeenCalled() // 守卫行为不变：新草稿原地保留，不回填旧 editorText
+    expect(chat.messages).toHaveLength(0) // transcript 重建行为不变
+    expect(gw.listBranches).toHaveBeenCalledTimes(2) // ← 修复前：停在 1（被草稿守卫的 early return 短路）
+    expect(chat.branches).toEqual([{ leafEntryId: 'leaf-1', headline: 'A 方向', messageCount: 3, active: true }]) // 重拉落地为新状态（发生在 rewind 成功后的 rebuild 流程内）
+  })
+
+  it('branchesGen 请求代：同会话并发两次 listBranches 乱序返回 → 只留最新代（旧响应不覆盖新状态）', async () => {
+    const { conn, chat } = setup()
+    const ready = conn.openGateway()
+    await flushPromises()
+    const gw = MockGatewayChat.last!
+    gw.listSessions.mockResolvedValue([{ session_key: 'sk-1', title: '', updated_at: '' }])
+    gw.getHistory.mockResolvedValue({ messages: [], hasMore: false, nextOffset: null })
+    gw.listCommands.mockResolvedValue([])
+    gw.listPendingApprovals.mockResolvedValue([])
+    // 首连预拉挂起（慢网关）
+    const first: { resolve?: (v: typeof BRANCHES) => void } = {}
+    gw.listBranches.mockImplementationOnce(() => new Promise((r) => { first.resolve = r }))
+    gw.fireReady()
+    await ready
+    await flushPromises()
+    // switch 成功后的重拉（第 2 代）先落地
+    gw.getHistory.mockResolvedValue({ messages: [], hasMore: false, nextOffset: null })
+    gw.switchBranch.mockResolvedValue(undefined)
+    gw.listBranches.mockResolvedValueOnce([{ leafEntryId: 'leaf-2', headline: 'B', active: true }])
+    await conn.switchBranch('leaf-2')
+    expect(chat.branches.map((b) => b.leafEntryId)).toEqual(['leaf-2'])
+    // 旧代（首连预拉）此刻才到 → 丢弃，不覆盖 switch 后的新状态
+    first.resolve?.(BRANCHES)
+    await flushPromises()
+    expect(chat.branches.map((b) => b.leafEntryId)).toEqual(['leaf-2'])
   })
 })
