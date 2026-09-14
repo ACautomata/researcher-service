@@ -65,6 +65,16 @@ export interface RewindResultDTO {
   editorAttachments: EditorAttachmentDTO[]
 }
 
+// #698 分支菜单（#693 spec §4）：sessions.branches.list 的逐分支投影。headline 空串的回退文案
+//（「未命名分支」）归 UI 层；messageCount/updatedAt 是可选展示字段（校准层置 undefined → 槽位不渲染）。
+export interface SessionBranchDTO {
+  leafEntryId: string // sessions.branches.switch 的定位参数（注意参数名非 entryId）
+  headline: string // 最新消息摘要（网关侧 ≤120 字符契约；前端不二次截断，单行省略归 CSS）
+  messageCount?: number
+  updatedAt?: string // ISO
+  active: boolean // CAS leaf 基准唯一权威（active:true 项的 leafEntryId，#693 spec §1.2）
+}
+
 // #694 会话控制能力探测方法集（#693 spec §1.1）：hello-ok.features.methods 须**全部**在位才判「可用」
 // ——四个方法同属一个功能族（会话控制 RPC），任一缺失即该代网关不支持该族（过渡期存量 7.1 镜像
 // 无 features 字段），UI 据此隐藏回退/fork/分支全部入口，而非点出必然报错的按钮。单一来源：本票
@@ -119,6 +129,15 @@ export interface GatewayChat {
   // 不可作参数。权限 operator.admin（已在 OPERATOR_SCOPES）。失败原样上抛（GatewayProtocolRequestError，
   // details 携带网关语义），调用层不重试、如实提示。
   rewind(sessionKey: string, entryId: string): Promise<RewindResultDTO>
+  // #698 分支菜单（#693 spec §1.1）：列出会话全部分支（含 active 标记）。0 信任校准惯例：逐字段
+  // typeof 门——leafEntryId 是 switch 的定位参数，缺/空/非 string 跳整项（看得见切不了的死菜单项
+  // 不入列）；纯展示字段（headline/messageCount/updatedAt）异形只降级不砍项。权限 operator.read。
+  // 失败原样上抛（调用层静默降级：按钮不渲染即降级语义）。
+  listBranches(sessionKey: string): Promise<SessionBranchDTO[]>
+  // #698 分支切换：把活跃路径切到该分支（leafEntryId 定位）。简单透传（resolveApproval 惯例）；
+  // no-op 选已活跃分支 = INVALID_REQUEST typed error（UI 层 active 项 disabled，从不发起）。
+  // 权限 operator.admin。
+  switchBranch(sessionKey: string, leafEntryId: string): Promise<void>
   // chat.send RPC 响应携带网关分配的 runId（ackPayload = {runId, status:"started"}，
   // 官方 chat-send-handler）——供 ChatView 首帧归属判别（#53：pendingSend 期间外来/旧 run
   // 首帧与自己的 run 区分，防抢 activeRunId 吞回复）。ack 无 runId（旧网关/异常形状）→ undefined。
@@ -770,6 +789,31 @@ export function createGatewayChat(params: CreateGatewayChatParams): GatewayChat 
         editorAttachments.push({ mimeType, data })
       }
       return { editorText, editorAttachments }
+    },
+    // #698：0 信任门表——只有承担后续操作语义的字段（leafEntryId）缺失才砍整项；纯展示字段
+    //（headline/messageCount/updatedAt）异形只降级自己的槽位（#693 spec §1.1「非法项跳过」的
+    // 判定锚点 = 该分支还能否被安全选中与切换）。
+    async listBranches(sessionKey: string): Promise<SessionBranchDTO[]> {
+      const res = await client.request<{ branches?: unknown }>('sessions.branches.list', { sessionKey })
+      const raw = Array.isArray(res?.branches) ? res.branches : []
+      const out: SessionBranchDTO[] = []
+      for (const item of raw) {
+        if (!item || typeof item !== 'object') continue
+        const rec = item as Record<string, unknown>
+        const leafEntryId = typeof rec.leafEntryId === 'string' ? rec.leafEntryId : ''
+        if (!leafEntryId) continue // switch 的定位参数缺不得：死菜单项不入列
+        out.push({
+          leafEntryId,
+          headline: typeof rec.headline === 'string' ? rec.headline : '',
+          messageCount: typeof rec.messageCount === 'number' && Number.isFinite(rec.messageCount) ? rec.messageCount : undefined,
+          updatedAt: typeof rec.updatedAt === 'string' ? rec.updatedAt : undefined,
+          active: typeof rec.active === 'boolean' ? rec.active : false,
+        })
+      }
+      return out
+    },
+    async switchBranch(sessionKey: string, leafEntryId: string): Promise<void> {
+      await client.request('sessions.branches.switch', { sessionKey, leafEntryId })
     },
     async send(sessionKey: string, message: string, attachments?: Attachment[], idempotencyKey?: string): Promise<string | undefined> {
       // chat.send 幂等（schema 必填 idempotencyKey）；返回后流式 delta/final 事件经 onEvent 到达。

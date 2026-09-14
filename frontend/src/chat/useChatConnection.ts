@@ -136,6 +136,10 @@ export function useChatConnection(status: ChatStatus) {
   // 接受，后落地的快照 prepend 到先落地的已渲染历史上 → 转录重复/混杂。每次 loadHistory 自增并捕获
   // 请求代，只有最新一次才允许提交其快照，其余（被取代的在途请求）落地即丢弃。
   let historyGen = 0
+  // #698：loadBranches 的请求代（historyGen 同型论证）：containerGen+selectedSession 双守卫拦不住
+  // 「同一会话并发两次 listBranches」（switch 成功后的重拉 vs 还在途的预拉）——乱序到达时旧响应
+  // 不得覆盖 switch 后的新状态，只留最新代。
+  let branchesGen = 0
   // #369：协议机内置重连（退避）；openGateway 用 everConnected 区分「首连等待就绪」（pendingConnect
   // resolve 供 selectContainer 续流程）与「重连成功恢复」（onReady 拉权威历史重建投影）。
   let everConnected = false
@@ -691,6 +695,10 @@ export function useChatConnection(status: ChatStatus) {
       // transcript 下若排在顺序分页循环之后，离线期间的审批会一直不可见直到所有历史页拉完，
       // 耗尽 330s stuck-session abort 窗口，用户还没看到卡片 run 就被 abort。
       void restorePendingApprovals(gen)
+      // #698 分支菜单：分支列表与全量历史下载并行预拉（restorePendingApprovals 同款 fire-and-forget
+      // 先例）——懒拉会让按钮的出现被慢历史分页拖累，且头部按钮需要提前知道分支数才能满足「仅 >1
+      // 渲染」门。失败静默降级（loadBranches 内 catch）。
+      void loadBranches(chat.selectedSession)
       // #564: 先 loadHistory 再重发 outbox 残留——历史铺底后乐观 echo 才排到正确位置，且内容级
       // 去重（§三.3）可识别「网关已受理但 ack 丢」的历史消息（防 UI 双条）。await 保证 resendOutbox
       // 看到的是历史铺底后的 messages（fire-and-forget 会让去重对比空列表、重发排在较新回复之后）。
@@ -719,6 +727,25 @@ export function useChatConnection(status: ChatStatus) {
       for (const c of cards) chat.addApproval(c)
     } catch {
       // 静默：实时 push 仍工作，不因补拉失败打扰用户
+    }
+  }
+
+  // #698 分支菜单：拉当前会话分支列表（0 信任校准在 gatewayChat 层，此处收到的已是门表过滤后的
+  // 形状）。stale 守卫三重：containerGen（切容器）+ selectedSession（切会话）+ branchesGen（同会话
+  // 并发乱序，见声明处注释）。失败静默降级：不报错误条——length 门下按钮不渲染即降级语义，分支
+  // 列表非关键路径（不因预拉失败打扰用户，对齐审批补拉哲学）。
+  async function loadBranches(key: string) {
+    const gen = containerGen
+    const bgen = ++branchesGen
+    const myGw = gateway
+    if (!myGw) return
+    try {
+      const list = await myGw.listBranches(key)
+      if (gen !== containerGen || chat.selectedSession !== key) return // 切容器/切会话途中迟到：丢弃
+      if (bgen !== branchesGen) return // 被更新的 loadBranches 取代：丢弃
+      chat.setBranches(list)
+    } catch {
+      // 静默：分支不可知 → 按钮不渲染，下次同步/切换再拉
     }
   }
 
@@ -1270,6 +1297,7 @@ export function useChatConnection(status: ChatStatus) {
     chat.setSelectedSession(key)
     // codex R2 P1：不清空审批卡——同容器其它会话的卡保留，渲染时按 selectedSession 过滤即可
     void loadHistory(key) // T3：切会话加载该会话历史（loadHistory 内部清空 messages + 维护分页态）
+    void loadBranches(key) // #698：分支随会话切换并行预拉（loadHistory 内 resetForSession 已清旧 branches）
   }
 
   // 动作类失败的统一出口（见 ChatStatus.onActionError）：宿主注入了专用通道就走它（瞬时提示），
@@ -1351,6 +1379,11 @@ export function useChatConnection(status: ChatStatus) {
       await refreshSessions() // F3：回退改写会话权威元数据（标题/updated_at）→ 重拉刷新
       // #703 P2：同会话内的 transcript 重建不动文件面板（用户没离开会话，workspace 文件与回退无关）
       await loadHistory(key, { keepFileTabs: true })
+      // #698：回退后活跃路径改变（可能剪出新分叉点）→ 分支列表**无条件**重拉（#693 spec §1.4
+      //「rewind/branch-switch/fork 应答后本地重拉」）——须在草稿守卫之前：守卫只拦 composer 回填，
+      // 不得连带短路 branches 重拉（final review P1：草稿已变路径的 early return 曾把它跳过）。
+      // fire-and-forget：分支列表非重建关键路径，迟到无碍（branchesGen 丢弃乱序旧响应）。
+      void loadBranches(key)
       // 重建期间又切走：不回填（新语境有自己的投影与草稿）。**容器/连接守卫不可省**（Codex #703 P1）：
       // loadHistory 自己在 await 后比对 containerGen 并丢弃迟到响应，但本续体若只比 sessionKey，
       // 两容器同名会话（main 类）就会放行——旧容器的被剪文本与附件落进新容器 composer，随后发错容器。
@@ -1365,6 +1398,45 @@ export function useChatConnection(status: ChatStatus) {
       }
       if (status.onRewindBackfill) status.onRewindBackfill(res.editorText, attachments)
       else chat.setInput(res.editorText) // 无宿主时的最小回填（纯文本）
+    } finally {
+      rewindBusy.value = false
+    }
+  }
+
+  // #698 分支切换（#693 spec §1.4）：把活跃路径切到目标分支，与 rewind 同族的「破坏性 RPC + 重建
+  // 管线」——全套继承 #694/#706 语义：outbox 代际作废（被切走分支的待发残留不得经重连重发进新分支）
+  // + 放弃在途 run 与 resume 等待（迟到帧不得写入重建后的 transcript）+ refreshSessions（切换前移
+  // updated_at）+ loadHistory 全量重建（keepFileTabs：不离开会话，#703 P2 同款）+ branches 重拉。
+  // busy 复用 rewindBusy 单一 ref（#706 词汇「回退在途」写明同族复用；send() 守卫与 composer 置灰
+  // 自动继承，不另设 branchBusy——两个门变量拼装易错）。失败 → 明确错误提示，transcript 与 branches
+  // 均不动（不假装切成功）。active 项 UI 层 disabled（no-op switch 网关是 typed error），本函数不
+  // 重复判 no-op；重入在窗口期内一律吞掉（rewind 单飞同论证）。
+  async function switchBranch(leafEntryId: string): Promise<void> {
+    const key = chat.selectedSession
+    if (rewindBusy.value || !leafEntryId || !key || !gateway || disconnected.value) return
+    const myGw = gateway
+    const gen = containerGen
+    const container = chat.selectedContainer
+    rewindBusy.value = true
+    try {
+      const ok = await myGw.switchBranch(key, leafEntryId).then(() => true).catch((e: unknown) => {
+        // stale 守卫：切容器/重连换实例后旧 RPC 的失败不写进新容器的错误面（rewind 同款）
+        if (gateway === myGw && gen === containerGen && chat.selectedSession === key) {
+          reportActionError(`切换分支失败：${(e as Error).message || '未知错误'}`) // 动作类失败 → 瞬时提示通道
+        }
+        return false
+      })
+      if (!ok) return
+      if (gateway !== myGw || gen !== containerGen || chat.selectedSession !== key) return // 切换途中切走：丢弃
+      // #706（F1 同型）：被切走分支的 outbox 待发残留属于旧分支语境，逐条作废（rewind 同款）
+      for (const item of outbox.takePending(container, key)) {
+        outbox.removePending(container, key, item.id)
+      }
+      abandonActiveRun()
+      clearResumeWait()
+      await refreshSessions() // 切换改写会话权威元数据（updated_at）→ 重拉刷新
+      await loadHistory(key, { keepFileTabs: true }) // transcript 重建为新活跃路径
+      await loadBranches(key) // 分支列表重拉为新状态（active 换位）
     } finally {
       rewindBusy.value = false
     }
@@ -1738,6 +1810,7 @@ export function useChatConnection(status: ChatStatus) {
     newSession,
     pickSession,
     rewind,
+    switchBranch,
     removeSession,
     resolveApproval,
     loadMoreHistory,
