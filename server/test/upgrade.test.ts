@@ -57,6 +57,8 @@ describe('#699 容器升级编排（接缝 #5 假运行时）', () => {
     fl.runtime.ensureImageCalls.length = 0
     fl.runtime.failEnsureImageFor.clear()
     fl.runtime.failOneshotCmdSubstring = null
+    fl.runtime.failOneshotMaxTimes = null
+    fl.runtime.oneshotFailHits = 0
     fl.runtime.removedVolumes.length = 0
     fl.runtime.failRunFor.clear()
   })
@@ -175,19 +177,34 @@ describe('#699 容器升级编排（接缝 #5 假运行时）', () => {
 
   // ---- 失败 attempt（步骤 4/5，spec §2.4：attempts+1、复启旧容器、≥3 终态）----
 
-  it('doctor 失败 → attempt+1、状态 stopped 可重试、旧容器复启、镜像不变', async () => {
+  it('doctor 失败 → 原样重试一次仍败才计失败：attempt+1、状态 stopped 可重试、旧容器复启、镜像不变', async () => {
     const row = await seedLegacyContainer(fl, ctx, 'up-doctor', ownerId)
     fl.runtime.failOneshotCmdSubstring = 'doctor'
     await runUpgrade(fl, 'up-doctor')
-    expect(fl.runtime.oneshotRuns).toHaveLength(2) // 备份过、doctor 非 0
+    expect(fl.runtime.oneshotRuns).toHaveLength(3) // 备份过、doctor 非 0、doctor 幂等重试仍非 0
     expect(fl.runtime.oneshotRuns[1].spec.cmd.join(' ')).toContain('doctor')
+    expect(fl.runtime.oneshotRuns[2].spec.cmd.join(' ')).toContain('doctor')
     // doctor 失败后尝试复启旧容器（store 可能已迁移、旧镜像可能起不来——尽力而为）
     expect(fl.runtime.containers.get('up-doctor')?.info.running).toBe(true)
     const after = await ctx.prisma.container.findUnique({ where: { name: 'up-doctor' } })
     expect(after?.status).toBe('stopped') // 可重试
-    expect(after?.upgradeAttempts).toBe(1) // 计一次失败
+    expect(after?.upgradeAttempts).toBe(1) // 两次失败只计一次 attempt
     expect(after?.image).toBe(OLD_IMAGE) // 镜像未变（需升级判定仍为真）
     expect(after?.containerId).toBe(row.containerId)
+  })
+
+  it('doctor 首败重试成功（非确定性租约丢失，#718）→ 六步继续、升级完成', async () => {
+    await seedLegacyContainer(fl, ctx, 'up-doctor-retry', ownerId)
+    fl.runtime.failOneshotCmdSubstring = 'doctor'
+    fl.runtime.failOneshotMaxTimes = 1 // 第一次失败，重试放行
+    await runUpgrade(fl, 'up-doctor-retry')
+    expect(fl.runtime.oneshotRuns).toHaveLength(3) // 备份 + doctor(败) + doctor(成)
+    // 重试成功 → 不计失败 attempt，六步继续走完：running + 目标镜像
+    const after = await ctx.prisma.container.findUnique({ where: { name: 'up-doctor-retry' } })
+    expect(after?.status).toBe('running')
+    expect(after?.upgradeAttempts).toBe(0)
+    expect(after?.image).toBe(fl.config.image)
+    expect(fl.runtime.containers.get('up-doctor-retry')?.info.running).toBe(true)
   })
 
   it('recreate 失败 → attempt+1、三卷保留、行可重试（镜像不变）', async () => {

@@ -54,6 +54,10 @@ export class FakeRuntime implements ContainerRuntime {
   // #699 按命令子串定向 fail runOnce（升级测试：备份 vs doctor 失败分流）。命中时按当前
   // oneshotExitCode 抛 RunOnceError——不整段替换 oneshotExitCode（保三路清理断言共享）。
   failOneshotCmdSubstring: string | null = null
+  // #718 命中失败子串的最大失败次数（null = 无限）；「首败、重试成功」场景设 1。
+  failOneshotMaxTimes: number | null = null
+  // 失败子串命中计数（公开供测试 beforeEach 重置——upgrade.test.ts 显式逐字段重置模式）。
+  oneshotFailHits = 0
   // #590：remove 收到 volumes 时的卷删除记录（断言 named volume 模式连带 docker volume rm 三卷）。
   removedVolumes: string[] = []
 
@@ -174,8 +178,12 @@ export class FakeRuntime implements ContainerRuntime {
     try {
       if (this.oneshotWaitError) throw this.oneshotWaitError
       // #699 按命令子串定向失败（备份 vs doctor 分流断言）：命中 → 按当前注入退出码抛错。
+      // #718 failOneshotMaxTimes 限定失败次数（耗尽后放行）——doctor 幂等重试的「首败次成」路径。
       if (this.failOneshotCmdSubstring && spec.cmd.join(' ').includes(this.failOneshotCmdSubstring)) {
-        throw new RunOnceError(rec.exitCode !== 0 ? rec.exitCode : 9, rec.output, spec.cmd)
+        this.oneshotFailHits++
+        if (this.failOneshotMaxTimes === null || this.oneshotFailHits <= this.failOneshotMaxTimes) {
+          throw new RunOnceError(rec.exitCode !== 0 ? rec.exitCode : 9, rec.output, spec.cmd)
+        }
       }
       if (rec.exitCode !== 0) throw new RunOnceError(rec.exitCode, rec.output, spec.cmd)
       return { output: rec.output }
