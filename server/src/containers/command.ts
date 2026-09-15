@@ -753,14 +753,22 @@ export class FleetCommand {
     }
 
     // 步骤 4：doctor --fix（legacy session 迁移前置；失败 = 失败 attempt）。
+    // doctor 迁移/插件安装走 state-sqlite 生命周期租约（withPluginLifecycleLease）保护，租约
+    // assertOwned 丢失即整体 exit 1——实测非确定性偶发（本地同输入 1/3 失败）。doctor 幂等
+    //（重跑只补剩余迁移）→ 失败原样重试一次，两连败才计失败 attempt。
+    const doctorSpec = buildDoctorOneShot(target, volumes, {
+      GATEWAY_TOKEN: token,
+      OPENCLAW_GATEWAY_TOKEN: token,
+      LLM_API_KEY: this.deps.config.llmApiKey,
+    })
     try {
-      await this.deps.runtime.runOnce(
-        buildDoctorOneShot(target, volumes, {
-          GATEWAY_TOKEN: token,
-          OPENCLAW_GATEWAY_TOKEN: token,
-          LLM_API_KEY: this.deps.config.llmApiKey,
-        }),
-      )
+      try {
+        await this.deps.runtime.runOnce(doctorSpec)
+      } catch (first) {
+        // eslint-disable-next-line no-console
+        console.warn(`[fleet] upgrade doctor --fix failed once, retrying: ${(first as Error).message.slice(0, 300)}`)
+        await this.deps.runtime.runOnce(doctorSpec)
+      }
     } catch (e) {
       await this.failUpgradeAttempt(inst, 'openclaw doctor --fix', e)
       return

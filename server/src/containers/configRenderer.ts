@@ -13,7 +13,7 @@ interface OpenClawConfig {
     port?: number
     bind?: string
     auth?: { token?: string; mode?: string; [k: string]: unknown }
-    controlUi?: { allowInsecureAuth?: boolean; allowedOrigins?: string[]; [k: string]: unknown }
+    controlUi?: { allowedOrigins?: string[]; [k: string]: unknown }
     [k: string]: unknown
   }
   [k: string]: unknown
@@ -33,8 +33,10 @@ export function assertPlainObject(v: unknown, field: string): asserts v is Recor
 // #385 生产 Origin 接线：面板 origin 须在容器 gateway.controlUi.allowedOrigins 内（真网关 2026.7.1
 // 对 WS connect 校验 Origin，PR #384 实测）——否则面板后端隧道连容器网关被
 // CONTROL_UI_ORIGIN_NOT_ALLOWED 拒。deploy/openclaw.json 模板仅含 localhost/127.0.0.1 默认 seed，
-// 面板 origin 未知（env 注入）→ 强制点必在 renderer（配置单一来源），与 allowInsecureAuth=false
-// 同模式：追加/覆盖，不信模板值。
+// 面板 origin 未知（env 注入）→ 强制点必在 renderer（配置单一来源）。
+// （2026.9.4 起 controlUi.allowInsecureAuth 开关已从 schema 移除，insecure-auth 面不再存在；
+// 2026.7.1 时代 renderer 同点强制的 allowInsecureAuth=false 一并移除——写已废弃键反而令新版
+// config validate 拒绝整份配置、网关拒启。）
 function enforceAllowedOrigins(
   controlUi: Record<string, unknown>,
   panelOrigin: string,
@@ -82,14 +84,13 @@ export class ConfigRenderer {
     const gateway = (cfg.gateway ??= {})
     gateway.port = GATEWAY_INTERNAL_PORT
     gateway.bind = GATEWAY_BIND
-    // 强制 token 认证 + 关 insecure-auth（Codex 第七轮 #6）：仅强制 token 字段不够——模板若选了
-    // auth.mode 非 token 或开了 controlUi.allowInsecureAuth，GATEWAY_TOKEN 可被绕过（生产 publishHost
-    // =0.0.0.0 尤甚）。renderer 是 gateway 安全不变量强制点，mode/insecure 不信模板值（对齐 port/bind）。
+    // 强制 token 认证（Codex 第七轮 #6）：仅强制 token 字段不够——模板若选了 auth.mode 非 token，
+    // GATEWAY_TOKEN 可被绕过（生产 publishHost=0.0.0.0 尤甚）。renderer 是 gateway 安全不变量
+    // 强制点，mode 不信模板值（对齐 port/bind）。
     const auth = (gateway.auth ??= {})
     auth.token = GATEWAY_TOKEN_PLACEHOLDER // 占位防真 token 落盘（即便上游模板写错）
     auth.mode = 'token'
     const controlUi = (gateway.controlUi ??= {})
-    controlUi.allowInsecureAuth = false
     // #385：allowedOrigins 含面板 origin（模板已有 → 追加保留；缺失/非数组 → 建/重写）。空串 = 未配置
     //（旧 call 面/模板单元测不传）→ 不强制，保持模板原样。
     if (panelOrigin !== '') enforceAllowedOrigins(controlUi, panelOrigin)

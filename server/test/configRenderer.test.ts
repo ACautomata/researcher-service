@@ -55,9 +55,11 @@ describe('ConfigRenderer 模板 shape 校验 (Codex C9)', () => {
   })
 })
 
-// Codex 第七轮 #6[P2]：renderer 仅强制 token 字段不够 —— 模板若选了 auth.mode 非 token、或开了
-// controlUi.allowInsecureAuth，则 GATEWAY_TOKEN 可被绕过（生产 publishHost=0.0.0.0 尤甚）。renderer 是
-// gateway 安全不变量的强制点，须强制 mode=token / insecure=off，不信模板值（对齐 port/bind/token）。
+// Codex 第七轮 #6[P2]：renderer 仅强制 token 字段不够 —— 模板若选了 auth.mode 非 token，则
+// GATEWAY_TOKEN 可被绕过（生产 publishHost=0.0.0.0 尤甚）。renderer 是 gateway 安全不变量的强制点，
+// 须强制 mode=token，不信模板值（对齐 port/bind/token）。
+// （2026.9.4 起 controlUi.allowInsecureAuth 已从 schema 移除——insecure-auth 面不复存在，renderer
+// 亦不再强制该键；写已废弃键会令新版 config validate 拒绝整份配置、网关拒启，见 #718。）
 describe('ConfigRenderer 强制 token 认证不变量 (Codex 第七轮 #6)', () => {
   it('模板 auth.mode=none → renderDict 强制为 token', () => {
     const r = new ConfigRenderer(JSON.stringify({ gateway: { auth: { mode: 'none' } } }))
@@ -66,26 +68,24 @@ describe('ConfigRenderer 强制 token 认证不变量 (Codex 第七轮 #6)', () 
     expect(out.gateway?.auth?.token).toBe(GATEWAY_TOKEN_PLACEHOLDER)
   })
 
-  it('模板 controlUi.allowInsecureAuth=true → renderDict 强制为 false', () => {
-    const r = new ConfigRenderer(
-      JSON.stringify({ gateway: { controlUi: { allowInsecureAuth: true } } }),
-    )
+  it('renderDict 不注入 allowInsecureAuth（2026.9.4 已废弃键，写入即 validate 拒绝）', () => {
+    const r = new ConfigRenderer(JSON.stringify({ gateway: { controlUi: {} } }))
     const out = r.renderDict()
-    expect(out.gateway?.controlUi?.allowInsecureAuth).toBe(false)
+    expect(out.gateway?.controlUi?.allowInsecureAuth).toBeUndefined()
   })
 
-  it('模板缺 auth.mode / controlUi → renderDict 补 mode=token / insecure=false', () => {
+  it('模板缺 auth.mode / controlUi → renderDict 补 mode=token / controlUi 对象', () => {
     const r = new ConfigRenderer(JSON.stringify({ gateway: {} }))
     const out = r.renderDict()
     expect(out.gateway?.auth?.mode).toBe('token')
-    expect(out.gateway?.controlUi?.allowInsecureAuth).toBe(false)
+    expect(out.gateway?.controlUi).toBeDefined()
   })
 })
 
 // #385 生产 Origin 接线：面板 origin 须在容器 gateway.controlUi.allowedOrigins 内（真网关 2026.7.1
 // 校验 WS Origin，PR #384 实测）——否则面板后端隧道连容器网关被 CONTROL_UI_ORIGIN_NOT_ALLOWED 拒。
 // deploy/openclaw.json 模板仅含 localhost/127.0.0.1 seed，面板 origin 由 env 注入 → 强制点必在
-// renderer（配置单一来源），与 allowInsecureAuth=false 同模式：追加/覆盖，不信模板值。
+// renderer（配置单一来源）：追加/覆盖，不信模板值。
 describe('ConfigRenderer 强制 allowedOrigins 含面板 origin (#385)', () => {
   it('模板已有 allowedOrigins → 面板 origin 追加保留（不重复、不覆盖既有条目）', () => {
     const r = new ConfigRenderer(
@@ -134,10 +134,10 @@ describe('ConfigRenderer 强制 allowedOrigins 含面板 origin (#385)', () => {
     expect(out.gateway?.controlUi?.allowedOrigins).toEqual(['http://localhost:18789'])
   })
 
-  it('强制 allowedOrigins 时 allowInsecureAuth=false 不变量保持', () => {
+  it('强制 allowedOrigins 时不写已废弃的 allowInsecureAuth 键', () => {
     const r = new ConfigRenderer(JSON.stringify({ gateway: {} }))
     const out = r.renderDict('https://panel.example.com')
-    expect(out.gateway?.controlUi?.allowInsecureAuth).toBe(false)
+    expect(out.gateway?.controlUi?.allowInsecureAuth).toBeUndefined()
     expect(out.gateway?.controlUi?.allowedOrigins).toEqual(['https://panel.example.com'])
     // port/bind/token 不变量不受影响
     expect(out.gateway?.port).toBe(GATEWAY_INTERNAL_PORT)

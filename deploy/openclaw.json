@@ -1,15 +1,10 @@
 {
-  "meta": {
-    "lastTouchedVersion": "2026.4.21",
-    "lastTouchedAt": "2026-04-23T12:34:17.555Z"
-  },
   "update": {
     "checkOnStart": false
   },
   "gateway": {
     "bind": "lan",
     "controlUi": {
-      "allowInsecureAuth": false,
       "allowedOrigins": [
         "http://localhost:18789",
         "http://127.0.0.1:18789"
@@ -18,8 +13,7 @@
     "mode": "local",
     "port": 18789,
     "tailscale": {
-      "mode": "off",
-      "resetOnExit": false
+      "mode": "off"
     },
     "auth": {
       "mode": "token",
@@ -49,10 +43,10 @@
           "minimax/MiniMax-M3"
         ]
       },
-      "models": {
-        "minimax/MiniMax-M3": {
-          "alias": "Minimax"
-        }
+      "modelPolicy": {
+        "allow": [
+          "minimax/MiniMax-M3"
+        ]
       },
       "compaction": {
         "mode": "safeguard"
@@ -69,31 +63,29 @@
         "allowAgents": []
       }
     },
-    "list": [
-      {
-        "id": "main",
+    "entries": {
+      "main": {
         "name": "Research Assistant",
-        "default": true,
         "workspace": "~/.openclaw/workspace"
       }
-    ]
+    }
   },
   "messages": {
-    "ackReactionScope": "group-mentions",
-    "tts": {
-      "auto": "off",
-      "mode": "final",
-      "provider": "edge",
-      "providers": {
-        "edge": {
-          "voice": "zh-CN-XiaoxiaoNeural",
-          "lang": "zh-CN",
-          "outputFormat": "ogg-24khz-16bit-mono-opus",
-          "pitch": "+0Hz",
-          "rate": "+0%",
-          "volume": "+0%",
-          "timeoutMs": 30000
-        }
+    "ackReactionScope": "group-mentions"
+  },
+  "tts": {
+    "auto": "off",
+    "mode": "final",
+    "provider": "microsoft",
+    "providers": {
+      "microsoft": {
+        "lang": "zh-CN",
+        "outputFormat": "ogg-24khz-16bit-mono-opus",
+        "pitch": "+0Hz",
+        "rate": "+0%",
+        "volume": "+0%",
+        "timeoutMs": 30000,
+        "speakerVoice": "zh-CN-XiaoxiaoNeural"
       }
     }
   },
@@ -121,9 +113,7 @@
       "workspaceOnly": false
     },
     "web": {
-      "search": {
-        "provider": "duckduckgo"
-      }
+      "search": {}
     }
   },
   "plugins": {
@@ -188,27 +178,18 @@
     }
   },
   "memory": {
-    "backend": "qmd",
     "citations": "auto",
-    "qmd": {
-      "includeDefaultMemory": true,
-      "sessions": {
-        "enabled": true
+    "search": {
+      "experimental": {
+        "sessionMemory": true
       },
-      "limits": {
-        "timeoutMs": 8000,
-        "maxResults": 16
-      },
-      "update": {
-        "onBoot": true,
-        "interval": "5m",
-        "debounceMs": 15000
-      },
-      "command": "/usr/local/bin/qmd",
-      "paths": [
+      "sources": [
+        "memory",
+        "sessions"
+      ],
+      "extraPaths": [
         {
           "path": ".",
-          "name": "workspace",
           "pattern": "**/*.md"
         }
       ]
@@ -261,11 +242,5 @@
         "mode": "api_key"
       }
     }
-  },
-  "wizard": {
-    "lastRunAt": "2026-04-22T15:41:27.246Z",
-    "lastRunVersion": "2026.4.9",
-    "lastRunCommand": "configure",
-    "lastRunMode": "local"
   }
 }

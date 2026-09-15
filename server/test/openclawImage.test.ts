@@ -238,3 +238,38 @@ describe('CD 推送 openclaw 版本 tag（issue #695 AC4）', () => {
     expect(cd).toMatch(/envs: [^\n]*OPENCLAW_VERSION_TAG/)
   })
 })
+
+// ---- openclaw.json 模板 schema 兼容门（#718）----
+// 2026.9.4 起 openclaw 对 openclaw.json 严格校验（unrecognized key 即拒），配置无效 → 容器内网关
+// 拒启（"OpenClaw config is invalid"）→ unhealthy + 反复重启、升级六步序步骤 4 doctor 迁移前置
+// 失败——面板全面「连不上容器」。本门锁死：模板（新建路径的唯一配置源）不含目标镜像已移除的键、
+// 含迁移后的等价结构。移除键清单为 2026.9.4 `openclaw config validate` 对旧模板的实测输出；
+// 迁移形态照抄 `openclaw doctor --fix` 官方迁移产物（实测 validate 通过）。换版时随本清单更新。
+const TEMPLATE_JSON = JSON.parse(readRepoFile('deploy/openclaw.json')) as Record<string, unknown>
+
+describe('openclaw.json 模板 schema 兼容门（#718）', () => {
+  it('不含 2026.9.4 已移除的键（validate 实测 unrecognized key 清单）', () => {
+    const t = TEMPLATE_JSON
+    expect(t).not.toHaveProperty('meta') // lastTouchedVersion/lastTouchedAt 由 openclaw 运行时维护
+    expect(t).not.toHaveProperty('wizard') // 同上（wizard 运行时状态，非模板内容）
+    expect(t.gateway).not.toHaveProperty('controlUi.allowInsecureAuth')
+    expect(t.gateway).not.toHaveProperty('tailscale.resetOnExit')
+    expect(t).not.toHaveProperty('messages.tts') // 迁移至顶层 tts（providers 只收 apiKey 类字段）
+    expect(t.memory).not.toHaveProperty('backend') // qmd 后端 2026.9.4 已移除
+    expect(t.memory).not.toHaveProperty('qmd')
+    expect(t.agents).not.toHaveProperty('list') // 迁移至 keyed agents.entries
+    // tools.web.search.provider=duckduckgo：duckduckgo 自 2026.9.4 起非内置插件（validate 语义错误
+    // "provider is not available" → 网关拒启），派生镜像未预装 → 不声明，provider 由 openclaw 自动
+    // 探测。恢复 duckduckgo 须先在 deploy/openclaw-image/Dockerfile 预装插件。
+    const webSearch = (TEMPLATE_JSON.tools as Record<string, unknown>).web as Record<string, unknown>
+    expect(webSearch).not.toHaveProperty('search.provider')
+  })
+
+  it('含迁移后的等价结构（doctor --fix 官方迁移形态）', () => {
+    const agents = TEMPLATE_JSON.agents as Record<string, unknown>
+    expect(agents).toHaveProperty('entries.main')
+    expect(agents.defaults).toHaveProperty('modelPolicy.allow')
+    expect(TEMPLATE_JSON).toHaveProperty('tts')
+    expect(TEMPLATE_JSON.memory).toHaveProperty('citations')
+  })
+})
