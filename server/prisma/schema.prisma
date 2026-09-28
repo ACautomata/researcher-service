@@ -281,3 +281,55 @@ model GenerationJob {
 
   @@map("generation_jobs")
 }
+
+// ---------------------------------------------------------------------------
+// PoC 表（wayfinder #724 · 分支 prototype/724-agent-loop-poc 专属 · THROWAWAY 勿合 master）
+// agent 循环最小闭环的落库证据：run 元数据 + LangGraph checkpoint/writes 镜像 MemorySaver 语义。
+// ---------------------------------------------------------------------------
+model PocRun {
+  id             String    @id @default(cuid())
+  threadId       String    @unique
+  scenario       String // s1-latency | s2-interrupt | s3-replay
+  model          String
+  task           String
+  toolCalls      Int       @default(0)
+  execCalls      Int       @default(0)
+  archiveCalls   Int       @default(0)
+  execMsTotal    Int       @default(0)
+  archiveMsTotal Int       @default(0)
+  llmCalls       Int       @default(0)
+  llmMsTotal     Int       @default(0)
+  wallMs         Int       @default(0)
+  checkpointRows Int       @default(0)
+  checkpointBytes Int      @default(0)
+  createdAt      DateTime  @default(now())
+  finishedAt     DateTime?
+
+  @@map("poc_runs")
+}
+
+model PocCheckpoint {
+  threadId     String
+  checkpointNs String   @default("")
+  checkpointId String
+  parentId     String? // 父 checkpoint id（MemorySaver storage[...][3] 同语义）
+  blob         Bytes // serde.dumpsTyped(checkpoint)
+  metadata     Bytes // serde.dumpsTyped(metadata)
+  createdAt    DateTime @default(now())
+
+  @@id([threadId, checkpointNs, checkpointId])
+  @@map("poc_checkpoints")
+}
+
+model PocWrite {
+  threadId     String
+  checkpointNs String @default("")
+  checkpointId String
+  taskId       String
+  idx          Int // WRITES_IDX_MAP 映射后的写序号（错误写为负）
+  channel      String
+  blob         Bytes
+
+  @@id([threadId, checkpointNs, checkpointId, taskId, idx])
+  @@map("poc_writes")
+}

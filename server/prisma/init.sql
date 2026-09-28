@@ -15,18 +15,6 @@ CREATE TABLE "users" (
 );
 
 -- CreateTable
-CREATE TABLE "refresh_tokens" (
-    "id" TEXT NOT NULL PRIMARY KEY,
-    "userId" TEXT NOT NULL,
-    "tokenHash" TEXT NOT NULL,
-    "expiresAt" DATETIME NOT NULL,
-    "revokedAt" DATETIME,
-    "replacedByTokenId" TEXT,
-    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT "refresh_tokens_userId_fkey" FOREIGN KEY ("userId") REFERENCES "users" ("id") ON DELETE CASCADE ON UPDATE CASCADE
-);
-
--- CreateTable
 CREATE TABLE "text_trace_logs" (
     "id" TEXT NOT NULL PRIMARY KEY,
     "traceId" TEXT NOT NULL,
@@ -42,6 +30,18 @@ CREATE TABLE "text_trace_logs" (
     "status" TEXT NOT NULL DEFAULT 'success',
     "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT "text_trace_logs_userId_fkey" FOREIGN KEY ("userId") REFERENCES "users" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+
+-- CreateTable
+CREATE TABLE "refresh_tokens" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "userId" TEXT NOT NULL,
+    "tokenHash" TEXT NOT NULL,
+    "expiresAt" DATETIME NOT NULL,
+    "revokedAt" DATETIME,
+    "replacedByTokenId" TEXT,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT "refresh_tokens_userId_fkey" FOREIGN KEY ("userId") REFERENCES "users" ("id") ON DELETE CASCADE ON UPDATE CASCADE
 );
 
 -- CreateTable
@@ -122,6 +122,53 @@ CREATE TABLE "generation_jobs" (
     CONSTRAINT "generation_jobs_figureId_fkey" FOREIGN KEY ("figureId") REFERENCES "figures" ("id") ON DELETE CASCADE ON UPDATE CASCADE
 );
 
+-- CreateTable
+CREATE TABLE "poc_runs" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "threadId" TEXT NOT NULL,
+    "scenario" TEXT NOT NULL,
+    "model" TEXT NOT NULL,
+    "task" TEXT NOT NULL,
+    "toolCalls" INTEGER NOT NULL DEFAULT 0,
+    "execCalls" INTEGER NOT NULL DEFAULT 0,
+    "archiveCalls" INTEGER NOT NULL DEFAULT 0,
+    "execMsTotal" INTEGER NOT NULL DEFAULT 0,
+    "archiveMsTotal" INTEGER NOT NULL DEFAULT 0,
+    "llmCalls" INTEGER NOT NULL DEFAULT 0,
+    "llmMsTotal" INTEGER NOT NULL DEFAULT 0,
+    "wallMs" INTEGER NOT NULL DEFAULT 0,
+    "checkpointRows" INTEGER NOT NULL DEFAULT 0,
+    "checkpointBytes" INTEGER NOT NULL DEFAULT 0,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "finishedAt" DATETIME
+);
+
+-- CreateTable
+CREATE TABLE "poc_checkpoints" (
+    "threadId" TEXT NOT NULL,
+    "checkpointNs" TEXT NOT NULL DEFAULT '',
+    "checkpointId" TEXT NOT NULL,
+    "parentId" TEXT,
+    "blob" BLOB NOT NULL,
+    "metadata" BLOB NOT NULL,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    PRIMARY KEY ("threadId", "checkpointNs", "checkpointId")
+);
+
+-- CreateTable
+CREATE TABLE "poc_writes" (
+    "threadId" TEXT NOT NULL,
+    "checkpointNs" TEXT NOT NULL DEFAULT '',
+    "checkpointId" TEXT NOT NULL,
+    "taskId" TEXT NOT NULL,
+    "idx" INTEGER NOT NULL,
+    "channel" TEXT NOT NULL,
+    "blob" BLOB NOT NULL,
+
+    PRIMARY KEY ("threadId", "checkpointNs", "checkpointId", "taskId", "idx")
+);
+
 -- CreateIndex
 CREATE UNIQUE INDEX "users_username_key" ON "users"("username");
 
@@ -130,12 +177,6 @@ CREATE UNIQUE INDEX "users_email_key" ON "users"("email");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "users_oidcIssuer_oidcSubject_key" ON "users"("oidcIssuer", "oidcSubject");
-
--- CreateIndex
-CREATE UNIQUE INDEX "refresh_tokens_tokenHash_key" ON "refresh_tokens"("tokenHash");
-
--- CreateIndex
-CREATE INDEX "refresh_tokens_userId_idx" ON "refresh_tokens"("userId");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "text_trace_logs_traceId_key" ON "text_trace_logs"("traceId");
@@ -153,6 +194,12 @@ CREATE INDEX "text_trace_logs_createdAt_idx" ON "text_trace_logs"("createdAt");
 CREATE INDEX "text_trace_logs_status_idx" ON "text_trace_logs"("status");
 
 -- CreateIndex
+CREATE UNIQUE INDEX "refresh_tokens_tokenHash_key" ON "refresh_tokens"("tokenHash");
+
+-- CreateIndex
+CREATE INDEX "refresh_tokens_userId_idx" ON "refresh_tokens"("userId");
+
+-- CreateIndex
 CREATE UNIQUE INDEX "containers_name_key" ON "containers"("name");
 
 -- CreateIndex
@@ -168,11 +215,14 @@ CREATE UNIQUE INDEX "pairings_containerId_key" ON "pairings"("containerId");
 CREATE UNIQUE INDEX "model_providers_containerId_providerId_key" ON "model_providers"("containerId", "providerId");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "figures_ownerId_idempotencyKey_key" ON "figures"("ownerId", "idempotencyKey");
-
--- CreateIndex
 CREATE INDEX "figures_ownerId_idx" ON "figures"("ownerId");
 
 -- CreateIndex
+CREATE UNIQUE INDEX "figures_ownerId_idempotencyKey_key" ON "figures"("ownerId", "idempotencyKey");
+
+-- CreateIndex
 CREATE UNIQUE INDEX "generation_jobs_figureId_key" ON "generation_jobs"("figureId");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "poc_runs_threadId_key" ON "poc_runs"("threadId");
 
