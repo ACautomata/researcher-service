@@ -207,3 +207,11 @@ _Avoid_: rewind 恢复文件快照——文件系统无版本，回滚只在对�
 **对话分支 (conversation branch)**:
 同一会话在网关转录 DAG 里的多条活跃路径候选（由回退后重说 / 从历史点 fork 产生）。面板的分支菜单（聊天头部）只在**分支数 > 1** 时渲染（单分支 / 拉取失败 / 能力缺失统一不渲染——空列表即降级语义）；每项 = 最新消息摘要（网关 `headline`，空 →「未命名分支」）+「N 条消息」+ 时间（可选槽位缺失不渲染）。active 项打勾且 disabled——网关把 no-op 切换定为 typed error，UI 从不发起；active 判定唯一权威 = 网关标记（与分支 CAS 的 leaf 基准同源，不由本地 transcript 推导）。分支数据随会话切换 / 历史加载**并行预拉**（懒拉会让按钮出现被慢历史拖累），失败静默降级；`branchesGen` 请求代丢弃乱序旧响应。切换 = 同族「破坏性 RPC + 重建管线」：outbox 代际作废（被切走分支的待发不得重发进新分支）+ 放弃在途 run + 全量重拉历史与分支列表；busy 复用「回退在途」单一 ref。0 信任校准在协议层：`leafEntryId`（switch 定位参数）缺失才砍整项，纯展示字段异形只降级自己的槽位。
 _Avoid_: 懒拉分支列表——按钮需要提前知道分支数；前端自提摘要——非活跃分支的 transcript 本地不存在；把 active 项做成可点再吞错误——防线的正确位置是从不发起。
+
+**teammate（队友）**:
+（目标架构，#734 effort / #742 定稿，未实施）会话内具名、全并发存活、经信箱寻址的从属 agent。仅 leader（主 agent）可派生——teammate 可经信箱**申请**创建新 teammate，leader 自决不自动执行；leader 与 teammate 同时跑（runner 多路复用多 thread 的 LLM 流）；teammate 的等待 = thread park（LangGraph interrupt 态），来信 = resume 消息作输入（#724 已验证通路）；rewind 跨过派生点 → teammate 级联作废、未读留言失效；命中审批升级的 teammate 单独 suspended（leader 与其余 teammate 不停，信箱攒信随其消亡）；并发配额按**会话**计（teammate 不额外占 maxConcurrentRuns 额度）；模型派生时可选（默认跟随 leader）；leader 可注销 teammate（停调度 + thread 归档不删）。轨迹呈**具名折叠区**：主时间线只挂 leader 发言与产物，teammate 内部轨迹 + 信箱往来可展开，SSE 事件带 teammateId，teammate 间通信全量落审计域。
+_Avoid_: subagent——OpenClaw 一次性派生语义的旧词，新 runtime 不用；task 工具——同步阻塞等结果的派生形态，信箱模型下不存在；嵌套派生——层级被压扁为 leader 独派 + 申请通道。
+
+**信箱 (mailbox)**:
+（目标架构，#734 effort / #742 定稿，未实施）每 teammate（含 leader）的持久收件箱：异步、点对点寻址（teammate↔leader、teammate↔teammate 直投，不绕 leader）；消息落控制面库表（48h 升级攒信要求跨重启持久）；等待非阻塞——干完即 park，来信 resume，超时由持久调度唤醒（BullMQ delayed job）；超时/疑似未达可**广播升级**（不只报 leader），对等 teammate 可直接追问对齐。
+_Avoid_: 消息总线——广播语义；信箱是点对点寻址 + 持久收件箱；同步 rendezvous 等待——不存在，等待 = park + resume；内存队列——重启丢信，48h 攒信场景不可接受。
