@@ -89,6 +89,23 @@ _Avoid_: 文件/图片消息——掩盖「内联于 chat.send 帧、多类型�
 **审批卡 (approval card)**:
 OpenClaw agent 执行 elevated 命令前的权限门。网关经**连接级**事件（`exec.approval.requested` / `plugin.approval.requested`，不挂 runId）下发 `{id, kind, command, sessionKey, agentId}`；用户批准/拒绝后经 `*.approval.resolved` 广播落定（first-answer-wins，网关权威 decision，可能与他端不同）。生命周期：`pending`（待处理）→ `resolving`（已点击等回执）→ `resolved`（终态）；断线复位 `resolving → pending` 可重试，网关侧失效 `→ expired`（终态不可回覆）。**终态不留痕**（[ADR 0014](./docs/adr/0014-resolved-approval-no-trace.md)，supersede #547 / [ADR 0009](./docs/adr/0009-chat-timeline-merge.md) 的留痕条目）：resolved/expired 卡从界面消失，不在对话转录中留存任何记录；未决卡（pending/resolving）留在 composer 上方待办区，落定即撤。subagent 发起的卡（agentId 即来源语义）唯一可见于 main 会话。
 _Avoid_: 「审批消息」——审批卡是连接级权限事件，不挂 runId、不进 messages 转录、独立追踪；「操作记录 / 留痕」（resolved 卡留在时间线作审计回看）语义已随 ADR 0014 退役。
+**（新 runtime 演进注，wayfinder #729/[ADR 0015](./docs/adr/0015-approval-full-audit-trace.md)）**：集中式下审批卡成为**升级通道**的前端面（EscalationItem：来源护栏 + toolCall 摘要 + judge 理由，decision 仅 allow-once|deny），数据源换控制面 WS；「终态不留痕」supersede——三层判定全量落 `tool_approval_logs`，卡片落定即撤的渲染交互不变。
+
+**审批三层漏斗 (approval funnel)**:
+新 runtime 的审批架构（#722 根决策，#729 规格）：规则层（确定性前置，三分命中）→ LLM judge（灰区判定）→ 升级通道（罕用人工）。安全水位靠规则层白名单收紧 + judge 列拒政策，人工默认趋零；全量审计入 `tool_approval_logs`。
+_Avoid_: 「审批流」——掩盖三层各自的可替换性；「自动审批」单称——人工通道是其必要组成，不是例外。
+
+**规则层 (rule layer)**:
+漏斗第一层，确定性规则判定，零 LLM 成本。路径白名单（文件类工具字面参数，`wiki|lab|/tmp` 前缀，复用 `normalizeFilePath` 语义；exec 内路径由沙箱只读根兜底，不做字面扫描）+ 命令黑名单（shell 词法解析递归拆简单命令，V1 系统破坏类四条）+ provider 端点白名单（引述 #731，运行时复验在 LLM 调用出口）。名单 V1 硬编码 + 测试锁定，admin 可配为显式非目标。
+_Avoid_: 「静态审批」——规则不是只读配置，是三分判定的一支（黑名单拒/白名单放/灰区移交 judge）；把 exec 内路径纳入匹配——做不到可靠，是刻意的范围裁决。
+
+**judge (LLM 判定器)**:
+漏斗第二层，独立小模型（haiku 4.5 级）对灰区工具调用做 approve/reject 判定。输入固定为「用户输入 + 之前工具调用及结果 + 当前调用」（≤8k tokens，不喂历史判定防锚定，**不含模型自身推理输出**——主 agent 的 thinking 不在输入面）；政策**列拒四类**（系统破坏/数据外送/持久化后门/凭证访问），之外默认 approve；reject 以 ToolMessage 回喂主 agent，理由 ≤100 字。per-run 调用上限 20 次，超限升级人工。
+_Avoid_: 「内容审查器」——judge 只判工具调用的政策符合性，不审生成内容（那是 TextTrace 域）；「第二意见」——judge 是安全闸门，不是建议器，其 reject 有阻断力。
+
+**升级通道 (escalation)**:
+漏斗第三层，人工审批的罕用通道。触发源：谨慎模式（users 表 `approvalMode=cautious`，全灰区进人工）/ judge 超 20 次 / 同 hash reject ≥3 次 / judge 输出畸形再败（fail-closed）。一个 run 同时只挂一个 interrupt（串行，先 pending 先弹）；48h 超时 run → `suspended`（非 failed，可 resume/abort）。前端复用 ApprovalCard 骨架（dock/状态机），decision 砍 allow-always。
+_Avoid_: 「人工审核队列」——升级是 per-run 阻塞形态（interrupt/resume），不是全局工单队列；「审批模式」——谨慎模式只是触发源之一。
 
 **轮次 (turn)**:
 用户一次发送触发的完整 agent loop——一条 user 消息 + 一条 assistant 回复（含轨迹与正文），消息流上恰对应一条 assistant 消息。轮次是折叠、计时与异常判定的天然单位。
