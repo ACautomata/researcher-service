@@ -155,6 +155,26 @@ _Avoid_: 用「能力已握手」替代投影权威——能力只回答「网�
 对端网关是否支持回退 / fork / 分支这族 RPC 的判定：握手快照 `hello-ok.features.methods` 含全部四个方法名才算**可用**，否则面板整体隐藏这些入口（过渡期存量旧镜像容器混部时防呆——不出现点了必然报错的按钮）。能力随每次握手刷新（重连到旧网关即如实撤销）。**能力只是入口门的必要项之一**：入口渲染门 = 能力 ∧ 投影权威 ∧ 非三态忙碌（流式 / 连接中 / 已断线）∧ 非回退在途 ∧ 非分叉在途（#703 Codex P1 修订——原「不新增状态、复用三态」的决议在回退在途与重连同步两个窗口被证伪；#697 fork 增补 forkBusy 同款门项，见「回退在途」「分叉在途」「投影权威」词条）。
 _Avoid_: 网关版本探测——判定依据是能力清单快照，不是版本号比较；把 capability 当「入口可点」的同义词——可点性还受投影权威与在途门约束。
 
+**沙箱 (sandbox)**:
+（目标架构，#734 effort / #728 定稿，未实施）绑定单个 LangGraph session（thread）的执行环境容器：agent 的 bash/read/write/update 工具在其中执行，1 session : 1 沙箱，首个执行工具调用时**惰性创建**，闲置 30 分钟自动 stop（文件保留在容器可写层），删 session 级联删除。完整工具链镜像（bash/git/Python/Node/rg/poppler/Chromium headless），每沙箱独立 bridge network（NAT 出网、容器间零互通），V1 网络默认放行 + 审计。对容器列表**隐身**——用户从 session 页进入，不感知沙箱存在。
+_Avoid_: 临时容器——已被「一次性临时容器 (one-shot)」占用，混用会把生命周期完全不同的两种容器（runOnce 跑完即弃 vs 随 session 生灭）混为一谈。
+
+**wiki 容器 (wiki container)**:
+（目标架构，#728 定稿）用户 wiki 树的**永久**文件仓库：跨 session 存活，每用户一个。busybox 级极小镜像（仅 sh/mkdir/rm/cat，无 Node/Python/运行时），`NetworkMode=none` 零出网，根只读 + 可写层承载 `/wiki`，**无具名卷**（数据与容器同生命周期，备份 = docker export 全树 tar；删除路径必须带确认门）。wiki 树**零初始化**——OpenWiki 工具按需自行生成，骨架不烤进镜像。
+_Avoid_: 永久容器——「永久」只是相对沙箱的生命周期形容词；named volume 拓扑——本词条在目标架构下取代它，老容器窗口期内「named volume 拓扑」仍是现行词条。
+
+**lab**:
+（目标架构，#728 定稿）沙箱内 agent 工作根路径 `/lab`（承载 session 工具产物，stop 保留、删 session 级联删）；wiki 容器内对应根为 `/wiki`。两路径取代全部 `~/.openclaw` 遗产路径（`wiki/main`、`workspace` 等），新容器不注入任何 `OPENCLAW_*` env。
+_Avoid_: workspace——遗产字眼全面退役（files API root 参数随之改 `wiki|lab`）；home——容器内不再有 home 概念。
+
+**容器 kind (container kind)**:
+（目标架构，#728 定稿）容器规格分派维度，label 三值：`legacy`（OpenClaw fleet 老容器，窗口期内仍用端口池 + HTTP 探针）/ `wiki` / `sandbox`。orchestrator 按 kind 走各自 create/health/delete 路径；端口池与 `/health` 探针随 legacy 全体退役而删除（显式终点归 #732 runbook）。
+_Avoid_: 用镜像名推断规格——窗口期多规格并存，判定必须走 label。
+
+**fork 文件语义 (fork file semantics)**:
+（目标架构，#728 定稿）fork 建新 session 时**拷贝源沙箱 `/lab`**（docker export 流式导出→导入新沙箱；源已删则空起步 + 系统消息告知 agent）；**rewind 不回滚文件**——只回滚对话指针，`/lab` 保持「未来状态」，agent 重跑工具时自行面对（与 OpenClaw 现状语义一致）。
+_Avoid_: rewind 恢复文件快照——文件系统无版本，回滚只在对话域。
+
 **对话分支 (conversation branch)**:
 同一会话在网关转录 DAG 里的多条活跃路径候选（由回退后重说 / 从历史点 fork 产生）。面板的分支菜单（聊天头部）只在**分支数 > 1** 时渲染（单分支 / 拉取失败 / 能力缺失统一不渲染——空列表即降级语义）；每项 = 最新消息摘要（网关 `headline`，空 →「未命名分支」）+「N 条消息」+ 时间（可选槽位缺失不渲染）。active 项打勾且 disabled——网关把 no-op 切换定为 typed error，UI 从不发起；active 判定唯一权威 = 网关标记（与分支 CAS 的 leaf 基准同源，不由本地 transcript 推导）。分支数据随会话切换 / 历史加载**并行预拉**（懒拉会让按钮出现被慢历史拖累），失败静默降级；`branchesGen` 请求代丢弃乱序旧响应。切换 = 同族「破坏性 RPC + 重建管线」：outbox 代际作废（被切走分支的待发不得重发进新分支）+ 放弃在途 run + 全量重拉历史与分支列表；busy 复用「回退在途」单一 ref。0 信任校准在协议层：`leafEntryId`（switch 定位参数）缺失才砍整项，纯展示字段异形只降级自己的槽位。
 _Avoid_: 懒拉分支列表——按钮需要提前知道分支数；前端自提摘要——非活跃分支的 transcript 本地不存在；把 active 项做成可点再吞错误——防线的正确位置是从不发起。
