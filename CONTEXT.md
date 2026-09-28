@@ -89,7 +89,7 @@ _Avoid_: 文件/图片消息——掩盖「内联于 chat.send 帧、多类型�
 **审批卡 (approval card)**:
 OpenClaw agent 执行 elevated 命令前的权限门。网关经**连接级**事件（`exec.approval.requested` / `plugin.approval.requested`，不挂 runId）下发 `{id, kind, command, sessionKey, agentId}`；用户批准/拒绝后经 `*.approval.resolved` 广播落定（first-answer-wins，网关权威 decision，可能与他端不同）。生命周期：`pending`（待处理）→ `resolving`（已点击等回执）→ `resolved`（终态）；断线复位 `resolving → pending` 可重试，网关侧失效 `→ expired`（终态不可回覆）。**终态不留痕**（[ADR 0014](./docs/adr/0014-resolved-approval-no-trace.md)，supersede #547 / [ADR 0009](./docs/adr/0009-chat-timeline-merge.md) 的留痕条目）：resolved/expired 卡从界面消失，不在对话转录中留存任何记录；未决卡（pending/resolving）留在 composer 上方待办区，落定即撤。subagent 发起的卡（agentId 即来源语义）唯一可见于 main 会话。
 _Avoid_: 「审批消息」——审批卡是连接级权限事件，不挂 runId、不进 messages 转录、独立追踪；「操作记录 / 留痕」（resolved 卡留在时间线作审计回看）语义已随 ADR 0014 退役。
-**（新 runtime 演进注，wayfinder #729/[ADR 0015](./docs/adr/0015-approval-full-audit-trace.md)）**：集中式下审批卡成为**升级通道**的前端面（EscalationItem：来源护栏 + toolCall 摘要 + judge 理由，decision 仅 allow-once|deny），数据源换控制面 WS；「终态不留痕」supersede——三层判定全量落 `tool_approval_logs`，卡片落定即撤的渲染交互不变。
+**（新 runtime 演进注，wayfinder #729/[ADR 0015](./docs/adr/0015-approval-full-audit-trace.md)）**：集中式下审批卡成为**升级通道**的前端面（EscalationItem：来源护栏 + toolCall 摘要 + judge 理由，decision 仅 allow-once|deny），数据源换控制面事件流（SSE，#726）；「终态不留痕」supersede——三层判定全量落 `tool_approval_logs`，卡片落定即撤的渲染交互不变。
 
 **审批三层漏斗 (approval funnel)**:
 新 runtime 的审批架构（#722 根决策，#729 规格）：规则层（确定性前置，三分命中）→ LLM judge（灰区判定）→ 升级通道（罕用人工）。安全水位靠规则层白名单收紧 + judge 列拒政策，人工默认趋零；全量审计入 `tool_approval_logs`。
@@ -171,6 +171,18 @@ _Avoid_: 用「能力已握手」替代投影权威——能力只回答「网�
 **会话控制能力 (session control capability)**:
 对端网关是否支持回退 / fork / 分支这族 RPC 的判定：握手快照 `hello-ok.features.methods` 含全部四个方法名才算**可用**，否则面板整体隐藏这些入口（过渡期存量旧镜像容器混部时防呆——不出现点了必然报错的按钮）。能力随每次握手刷新（重连到旧网关即如实撤销）。**能力只是入口门的必要项之一**：入口渲染门 = 能力 ∧ 投影权威 ∧ 非三态忙碌（流式 / 连接中 / 已断线）∧ 非回退在途 ∧ 非分叉在途（#703 Codex P1 修订——原「不新增状态、复用三态」的决议在回退在途与重连同步两个窗口被证伪；#697 fork 增补 forkBusy 同款门项，见「回退在途」「分叉在途」「投影权威」词条）。
 _Avoid_: 网关版本探测——判定依据是能力清单快照，不是版本号比较；把 capability 当「入口可点」的同义词——可点性还受投影权威与在途门约束。
+
+**事件流 (event stream)**:
+（目标架构，#726 定稿，未实施）新 runtime 的浏览器↔控制面传输形态：每标签页一条 SSE 单工流（`GET /api/v1/events`，服务端→客户端单向），写操作（发消息/审批决策/rewind/fork）一律 REST。cookie 认证（`panel_stream`，HttpOnly/SameSite=Strict，Path 限定流端点），原生 EventSource 内置重连；线上跑服务端薄投影事件（`text.delta`/`tool.start` 等自有类型），不透传运行时原始事件。断线不影响 run——服务端继续跑，重连后按「会话投影重拉 + in-flight 从 checkpoint 重建」补齐。
+_Avoid_: 断点续传——事件不落盘（#727），`Last-Event-ID` 只用于 gap 检测与去重，不重放；WebSocket——随 OpenClaw 隧道整体退役（#730 窗口末），新模型无任何双向帧。
+
+**待发出箱 (outbox)**:
+（目标架构，#726 定稿，未实施）断线期间用户已点发送、尚未确认落库的待注入队列：本标签页 sessionStorage 落盘 + 32-hex 幂等 key，重连后按序经 REST 幂等注入；单会话上限 50 条丢最旧。REST 发送下「未确认」窗口极窄（2xx 即确认），outbox 的存在意义收敛为断线排队——用户看着服务端继续跑的半截输出追问的场景。
+_Avoid_: 离线消息盒——暗示服务端持久化队列，实为 best-effort 本地窄窗；重试队列——REST 幂等去重兜底重试，队列只管「断线时还没法发」。
+
+**会话投影 (session projection)**:
+（目标架构，#726 定稿，未实施）打开会话时的权威读模型：聚合后的消息行（正文 + 轨迹附件）是产品读源，事件流是它的增量通道。断线重连后视图以投影重拉为准重建；事件序号（seq）只回答「有没有 gap」，不承载重放（重放素材 = 投影 + checkpoint）。
+_Avoid_: 实时日志——投影按轮次聚合，token 级流只活在事件流里、即焚不落盘；消息表直读——产品读源是聚合行，机制表（checkpoints）不暴露读路径。
 
 **沙箱 (sandbox)**:
 （目标架构，#734 effort / #728 定稿，未实施）绑定单个 LangGraph session（thread）的执行环境容器：agent 的 bash/read/write/update 工具在其中执行，1 session : 1 沙箱，首个执行工具调用时**惰性创建**，闲置 30 分钟自动 stop（文件保留在容器可写层），删 session 级联删除。完整工具链镜像（bash/git/Python/Node/rg/poppler/Chromium headless），每沙箱独立 bridge network（NAT 出网、容器间零互通），V1 网络默认放行 + 审计。对容器列表**隐身**——用户从 session 页进入，不感知沙箱存在。
