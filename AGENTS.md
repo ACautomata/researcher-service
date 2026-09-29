@@ -4,7 +4,7 @@ This file provides guidance to Qoder (qoder.com) / Claude Code when working with
 
 ## Project overview
 
-多 OpenClaw 容器管理面板。**Vue3(TypeScript) 前端 + TS/Express 控制面**，前后端分离。
+**天津大学科研智能体平台**——多 OpenClaw 容器管理面板（产品显示名 #758 Q13 / #760；内部标识 researcher-service 系不动）。Vue3(TypeScript) 前端 + TS/Express 控制面，前后端分离。
 控制面经 Docker SDK 直接增/删/查 OpenClaw 容器，每容器内跑一个 `main` agent；面板提供对话、
 wiki 编辑、model 配置等管理能力。交接规格见 `docs/research/320`（wayfinder #308 汇编）。
 

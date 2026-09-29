@@ -5,6 +5,7 @@ import { computed, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import { useAutofigureStore } from '@/stores/autofigure'
+import { PRODUCT_NAME } from '@/product'
 
 const auth = useAuthStore()
 const router = useRouter()
@@ -41,6 +42,7 @@ async function handleLogout(): Promise<void> {
 <template>
 <div class="app-shell" :class="{ public: $route.meta?.public }">
     <nav v-if="!$route.meta?.public" class="app-nav">
+      <span class="nav-brand" data-test="nav-brand">{{ PRODUCT_NAME }}</span>
       <router-link to="/">容器管理</router-link>
       <router-link to="/chat">对话</router-link>
       <router-link to="/wiki">Wiki</router-link>
@@ -96,6 +98,12 @@ async function handleLogout(): Promise<void> {
 .app-nav a.router-link-active {
   color: var(--el-color-primary);
   font-weight: 600;
+}
+.nav-brand {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--el-color-primary);
+  white-space: nowrap;
 }
 .app-content {
   flex: 1;

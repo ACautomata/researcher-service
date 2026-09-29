@@ -11,7 +11,7 @@ describe('FigureEditorView', () => {
     const wrapper = mount(FigureEditorView)
     expect(wrapper.find('[data-test="figure-editor-view"]').exists()).toBe(true)
     expect(wrapper.get('h1').text()).toBe('Figure Editor')
-    expect(wrapper.text()).toContain('在 researcher-service 内编辑图片 / 图表')
+    expect(wrapper.text()).toContain('在天津大学科研智能体平台内编辑图片 / 图表')
   })
 
   it('shows the placeholder (editor not yet wired)', () => {

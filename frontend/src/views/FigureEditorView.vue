@@ -9,7 +9,7 @@
   <div class="figure-editor-view" data-test="figure-editor-view">
     <div class="figure-editor-head">
       <h1>Figure Editor</h1>
-      <p class="figure-editor-lead">在 researcher-service 内编辑图片 / 图表（Vue 原生模块）。</p>
+      <p class="figure-editor-lead">在天津大学科研智能体平台内编辑图片 / 图表（Vue 原生模块）。</p>
     </div>
 
     <div class="figure-editor-placeholder" data-test="figure-editor-placeholder">

@@ -1,4 +1,4 @@
-# frontend —— Vue3 多 OpenClaw 容器管理面板
+# frontend —— 天津大学科研智能体平台 Vue3 前端
 
 P0 骨架（[issue #37](https://github.com/ACautomata/researcher-service/issues/37)）。
 完整规格见 `../docs/FULLSTACK-REFACTOR-SPEC.md`。

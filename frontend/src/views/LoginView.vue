@@ -4,6 +4,7 @@ import { useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import { ApiError } from '@/api/errors'
 import { changePassword } from '@/api/auth'
+import { PRODUCT_NAME } from '@/product'
 
 // spec §9.2：本地账号登录表单 + #340-A 强制改密（mustChangePassword=true 的账号首登须改密，
 // bootstrap/发放的临时密码不残留）。提交后存 access token 并跳容器管理页。
@@ -86,6 +87,7 @@ async function onChangeSubmit(): Promise<void> {
 
 <template>
   <div class="login">
+    <p class="login-brand" data-test="login-brand">{{ PRODUCT_NAME }}</p>
     <h1>{{ mode === 'login' ? '登录' : '修改密码' }}</h1>
     <template v-if="mode === 'login'">
       <!-- #419-2：原生 form submit——输入框内回车即提交（@submit.prevent）；按钮 @click 直调
@@ -137,6 +139,12 @@ async function onChangeSubmit(): Promise<void> {
 </template>
 
 <style scoped>
+.login-brand {
+  margin: 0 0 6px;
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--el-color-primary);
+}
 .error {
   color: var(--el-color-danger);
 }
