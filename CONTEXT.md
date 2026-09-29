@@ -221,8 +221,8 @@ _Avoid_: subagent——OpenClaw 一次性派生语义的旧词，新 runtime 不
 _Avoid_: 消息总线——广播语义；信箱是点对点寻址 + 持久收件箱；同步 rendezvous 等待——不存在，等待 = park + resume；内存队列——重启丢信，48h 攒信场景不可接受。
 
 **figure 工具 (figure tool)**:
-（目标架构，#734 effort / #744 定稿，未实施）图的唯一生成入口：deepagents 会话内可调用的域工具，输入图的文字描述（method_text），触发 figure run，产出 Figure 作为工具结果附件（对话内渲染/下载）。两条触发面一条执行面——agent 自动调用 + `/figure` 系统命令手动调用（#742 命令模型，不经 agent 自由裁量）。domain-scoped 工具——非文件/exec 类，不进审批三层漏斗。
-_Avoid_: AutoFigure 工具——生成链路已换轨为 AutoFigure-Edit 流水线的控制面 TS 重实现（LangGraph 固定 graph），vendored「AutoFigure」代码全部退役；「画图插件」——它是域工具不是插件。
+（目标架构，#744 定稿、插件化宿主随插件系统 effort 修订，未实施）图的唯一生成入口：deepagents 会话内可调用的域工具，输入图的文字描述（method_text），触发 figure run，产出 Figure 作为工具结果附件（对话内渲染/下载）。两条触发面一条执行面——agent 自动调用 + `/figure` 系统命令手动调用（#742 命令模型，不经 agent 自由裁量）。domain-scoped 工具——非文件/exec 类，不进审批三层漏斗。宿主：由官方插件目录首个插件（AutoFigure 插件）贡献，默认未启用、用户目录一键启用。
+_Avoid_: AutoFigure 工具——生成链路已换轨为 AutoFigure-Edit 流水线的控制面 TS 重实现（LangGraph 固定 graph），vendored「AutoFigure」代码全部退役；用「插件」指代工具——插件是能力单元（工具+命令+渲染的集合），figure 工具只是它贡献的一个面。
 
 **figure run（图生成运行）**:
 （目标架构，#744 定稿，未实施）一次图生成流水线（生图→分割→图标准备→模板生成〔fix/optimize 循环〕→组装→预览）的执行记录：随调用方会话 run 执行（占 per-user 并发名额，不开第二套配额）。用户可见进度由会话 run 的工具调用事件承载；`figure_run.*` 事件族是机器面/审计（对齐 wiki_run 不落 SSE 用户面）。
@@ -231,3 +231,19 @@ _Avoid_: 生成任务/GenerationJob——旧 REST job 状态机实体随换轨�
 **Figure（图产物聚合）**:
 （目标架构，#744 定稿，未实施）用户拥有的一次图生成产物聚合：输入描述 + 最终 SVG + 预览 PNG + 运行元数据（迭代数/模型/回退标记）；只持久化终产物（中间模板不落库），可经 figures API 读回与下载，是 Figure Editor 编辑闭环的持久化家。
 _Avoid_: 图片——Figure 是结构化聚合（SVG 可编辑、含溯源 sessionId），不是一张位图；「AutoFigure 产物」——旧链路的 mxGraph XML 语义已随换轨退役。
+
+**插件 (plugin)**:
+（目标架构，插件系统 effort 定稿，未实施）面板官方内置的**能力单元**，单包双面：server 侧注册能力（工具、命令、graph、面板级配置），前端侧注册工具结果渲染（Vue 组件，编译期收录进 bundle）。插件是**能力贡献者**：只贡献工具/命令/渲染，数据与入口（表、REST 路由、错误码段、归属门）归核心。对齐 Pi-agent 扩展系统的**能力分类学**（注册工具/命令/渲染/钩子），不对齐其加载机制与信任模型——无运行时代码加载，插件全部编译期打包进面板。
+_Avoid_: 扩展 (extension)——Pi-agent 术语，掩盖安全模型差异（pi 无沙箱同进程热载 vs 本项目编译期内置）；OpenClaw plugin——旧 wire 历史概念（`plugin.approval.requested`），随隧道退役，与本项目插件无关。
+
+**官方插件目录 (official plugin catalog)**:
+（目标架构，插件系统 effort 定稿，未实施）面板收录并提供给用户安装的全部插件的静态清单（「我们提供的插件」）。新插件 = 发版收录，无运行时上传/安装第三方代码；用户的「安装」= 从目录一键启用，不是代码获取。
+_Avoid_: 插件市场/插件生态——暗示第三方开放与运行时加载，均已出局；第三方插件——目录只收官方内置。
+
+**插件启用 (plugin enablement)**:
+（目标架构，插件系统 effort 定稿，未实施）per-user、跨会话持久的启用位（区别于管理员经面板级配置管的能力开关）。teammate 默认继承 owner 的启用集（与技能继承同语义）；禁用 = 新 run 不再见该插件的工具/命令，进行中 run 不中断、历史回放不受影响。
+_Avoid_: 会话级开关——启用是用户维状态，不随会话生灭；面板级配置——那是管理员面（生图模型、云 API key 等），与用户启用位是两回事。
+
+**能力实现层与用户交互层 (capability layer vs interaction layer)**:
+（目标架构，插件系统 effort 定稿，未实施）插件与 commands/skills 的分层关系：插件是**能力实现层**（工具/命令/渲染背后的代码实现），commands/skills 是**用户交互层**（用户触发与引导这些能力的统一交互面）。交互层**双源**：插件贡献的（有代码 backing，如 `/figure` 命令背后是 figure 工具执行）与纯内容自定义的（#742 用户自写命令/技能，无代码）同形并存——用户视角一个命令模型，实现层两源。
+_Avoid_: 「插件收编 commands/skills」——双源并存已钉，插件不取代纯内容自定义；把 skills 归入插件——技能是内容级扩展（目录注入），无代码，不是插件的特例。
