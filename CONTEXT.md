@@ -219,3 +219,15 @@ _Avoid_: subagent——OpenClaw 一次性派生语义的旧词，新 runtime 不
 **信箱 (mailbox)**:
 （目标架构，#734 effort / #742 定稿，未实施）每 teammate（含 leader）的持久收件箱：异步、点对点寻址（teammate↔leader、teammate↔teammate 直投，不绕 leader）；消息落控制面库表（48h 升级攒信要求跨重启持久）；等待非阻塞——干完即 park，来信 resume，超时由持久调度唤醒（BullMQ delayed job）；超时/疑似未达可**广播升级**（不只报 leader），对等 teammate 可直接追问对齐。
 _Avoid_: 消息总线——广播语义；信箱是点对点寻址 + 持久收件箱；同步 rendezvous 等待——不存在，等待 = park + resume；内存队列——重启丢信，48h 攒信场景不可接受。
+
+**figure 工具 (figure tool)**:
+（目标架构，#734 effort / #744 定稿，未实施）图的唯一生成入口：deepagents 会话内可调用的域工具，输入图的文字描述（method_text），触发 figure run，产出 Figure 作为工具结果附件（对话内渲染/下载）。两条触发面一条执行面——agent 自动调用 + `/figure` 系统命令手动调用（#742 命令模型，不经 agent 自由裁量）。domain-scoped 工具——非文件/exec 类，不进审批三层漏斗。
+_Avoid_: AutoFigure 工具——生成链路已换轨为 AutoFigure-Edit 流水线的控制面 TS 重实现（LangGraph 固定 graph），vendored「AutoFigure」代码全部退役；「画图插件」——它是域工具不是插件。
+
+**figure run（图生成运行）**:
+（目标架构，#744 定稿，未实施）一次图生成流水线（生图→分割→图标准备→模板生成〔fix/optimize 循环〕→组装→预览）的执行记录：随调用方会话 run 执行（占 per-user 并发名额，不开第二套配额）。用户可见进度由会话 run 的工具调用事件承载；`figure_run.*` 事件族是机器面/审计（对齐 wiki_run 不落 SSE 用户面）。
+_Avoid_: 生成任务/GenerationJob——旧 REST job 状态机实体随换轨退役（状态机/超时/reconcile 由 run 域统一机制承载），勿沿用其语义。
+
+**Figure（图产物聚合）**:
+（目标架构，#744 定稿，未实施）用户拥有的一次图生成产物聚合：输入描述 + 最终 SVG + 预览 PNG + 运行元数据（迭代数/模型/回退标记）；只持久化终产物（中间模板不落库），可经 figures API 读回与下载，是 Figure Editor 编辑闭环的持久化家。
+_Avoid_: 图片——Figure 是结构化聚合（SVG 可编辑、含溯源 sessionId），不是一张位图；「AutoFigure 产物」——旧链路的 mxGraph XML 语义已随换轨退役。
