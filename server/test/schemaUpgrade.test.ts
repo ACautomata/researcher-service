@@ -2,19 +2,12 @@ import { describe, it, expect } from 'vitest'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { execFileSync } from 'node:child_process'
 import Database from 'better-sqlite3'
-
-function runUpgrade(dbPath: string): void {
-  execFileSync(process.execPath, ['scripts/upgrade-schema.mjs'], {
-    cwd: process.cwd(),
-    env: { ...process.env, DATABASE_URL: `file:${dbPath}` },
-    stdio: 'pipe',
-  })
-}
+import { runDbScript } from './runDbScript'
 
 // 从「只有 base 表」的旧库跑全量增量脚本（幂等跑两遍）→ 三批表全到位 + T02 幂等列/索引
-// + T03 生命周期时间戳列 + T06 产物三列 + #699 upgradeAttempts 列 + user_version 归 7。
+// + T03 生命周期时间戳列 + T06 产物三列 + #699 upgradeAttempts 列 + user_version 归 8
+// （#771：#747 B 节 LangGraph 新表地基批次，SCHEMA_VERSION 7→8）。
 function assertUpgraded(dbPath: string): void {
   const db = new Database(dbPath)
   try {
@@ -62,7 +55,7 @@ function assertUpgraded(dbPath: string): void {
     const attempts = containerCols.find((c) => c.name === 'upgradeAttempts')!
     expect(attempts.notnull).toBe(1) // NOT NULL
     expect(attempts.dflt_value).toBe('0') // DEFAULT 0（既有行升级计数从 0 起）
-    expect(db.pragma('user_version', { simple: true })).toBe(7)
+    expect(db.pragma('user_version', { simple: true })).toBe(8) // #771 批次（SCHEMA_VERSION 7→8）
   } finally {
     db.close()
   }
@@ -114,13 +107,13 @@ describe('schema upgrade script', () => {
     const dbPath = path.join(dir, 'panel.db')
     makeBaseDb(dbPath)
 
-    runUpgrade(dbPath)
-    runUpgrade(dbPath)
+    runDbScript('upgrade-schema.mjs', dbPath)
+    runDbScript('upgrade-schema.mjs', dbPath)
 
     assertUpgraded(dbPath)
   })
 
-  it('upgrades an already-text-trace DB (v2) to AutoFigure tables + user_version=7', () => {
+  it('upgrades an already-text-trace DB (v2) to AutoFigure tables + user_version=8', () => {
     const dir = mkdtempSync(path.join(tmpdir(), `schema-upgrade-${process.pid}-`))
     const dbPath = path.join(dir, 'panel.db')
     // 模拟上一轮增量已交付 text_trace_logs 的既有部署（v2）——增量脚本须只补 figures/generation_jobs
@@ -164,8 +157,8 @@ PRAGMA user_version=2;
       db.close()
     }
 
-    runUpgrade(dbPath)
-    runUpgrade(dbPath) // 幂等：第二遍不报错、不重复建表
+    runDbScript('upgrade-schema.mjs', dbPath)
+    runDbScript('upgrade-schema.mjs', dbPath) // 幂等：第二遍不报错、不重复建表
 
     assertUpgraded(dbPath)
   })

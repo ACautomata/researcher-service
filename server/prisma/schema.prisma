@@ -39,6 +39,9 @@ model User {
   isActive           Boolean  @default(true) // 平移 Django is_active（软禁用，不删行）
   mustChangePassword Boolean  @default(false) // #311 C1：首登/重置后强制改密
   maxContainers      Int      @default(3) // #311 配额；默认值经 env DEFAULT_MAX_CONTAINERS 在应用层覆盖
+  // --- #771（#747 B 节 · 731 §3.3 / 729 §3.5）---
+  maxConcurrentRuns Int           @default(2) // per-user 在飞 run 配额（story 55；超限 40043）
+  approvalMode      ApprovalMode  @default(standard) // 谨慎模式：cautious 下灰区强制升级人工（story 35）
 
   // --- OAuth2 预留（#311 O1 仅骨架；此处仅留形状）---
   oidcSubject String? // OIDC sub claim
@@ -48,12 +51,25 @@ model User {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  containers    Container[]
-  refreshTokens RefreshToken[]
-  textTraceLogs TextTraceLog[]
-  figures       Figure[]
+  containers      Container[]
+  refreshTokens   RefreshToken[]
+  textTraceLogs   TextTraceLog[]
+  figures         Figure[]
+  // --- #771（#747 B 节）：LangGraph 新表关系 ---
+  sessions         Session[]
+  modelProviders   ModelProvider[] // 归属上移：provider 配置挂用户（731 §3.2）
+  attachments      Attachment[]
+  pluginEnablements PluginEnablement[]
 
   @@map("users")
+}
+
+// ---------------------------------------------------------------------------
+// ApprovalMode —— 谨慎模式开关（#729 §3.5）：standard 常规三层漏斗 / cautious 灰区强制人工升级。
+// ---------------------------------------------------------------------------
+enum ApprovalMode {
+  standard
+  cautious
 }
 
 // ---------------------------------------------------------------------------
@@ -153,8 +169,7 @@ model Container {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  pairing        Pairing?
-  modelProviders ModelProvider[]
+  pairing Pairing?
 
   @@index([ownerId])
   @@map("containers")
@@ -192,29 +207,43 @@ model Pairing {
 }
 
 // ---------------------------------------------------------------------------
-// ModelProvider —— 一个容器的一个 model provider 行（平移 models.ModelProvider）。M3 实现。
+// LcProvider —— LangChain provider 二值白名单（#771 / 731 §2.1）：
+// 与旧 wire 枚举 1:1（openai-completions→openai / anthropic-messages→anthropic，映射收敛于
+// models/values.ts）；OpenAI 兼容端点（vLLM/MiniMax 等）统一走 openai + baseUrl。
 // ---------------------------------------------------------------------------
-enum ProviderApi {
-  // Prisma enum 值须为合法标识符 → 下划线名 + @map 落连字符真值
-  openai_completions @map("openai-completions")
-  anthropic_messages @map("anthropic-messages")
+enum LcProvider {
+  openai
+  anthropic
 }
 
+// ---------------------------------------------------------------------------
+// ModelProvider —— 一个用户的一个 model provider 行（#771 改造，731 §3.2 逐字段 DDL）。
+//
+// 归属上移：containerId → ownerId（#731 §1.3——新架构「用户」才是配置主体，多容器共享同
+// 一 LLM 配置面）；唯一键随之 (ownerId, providerId)。旧 wire 枚举 api（openai-completions /
+// anthropic-messages）由 lcProvider 二值取代（731 §3.2「二选一保留」取新列，wire 契约经
+// values.ts 映射保持不变）；apiKeyEnvId → credentialEnvId（过渡期引用 LLM_API_KEY），
+// credentialCipher 预留 P1 per-user key（AES 密文，对齐 Container.token 先例）。
+//
+// 注意：#771 验收钉死「旧表（ModelProvider 旧形状）本票不动，留待 T0 清退」——存量库中的
+// 旧形状 model_providers 行不由本票迁移；fresh 库（init.sql）即本新形状。
+// ---------------------------------------------------------------------------
 model ModelProvider {
   id          String    @id @default(cuid())
-  container   Container @relation(fields: [containerId], references: [id], onDelete: Cascade)
-  containerId String
+  owner       User      @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  ownerId     String // users.id（归属上移，731 §3.2）
 
-  providerId  String // openclaw.json models.providers 的 map key；DNS-label
-  api         ProviderApi
-  baseUrl     String
-  apiKeyEnvId String // ^[A-Z][A-Z0-9_]{0,127}$（应用层校验）
-  authHeader  Boolean     @default(true)
-  modelsJson  String // JSON 文本
+  providerId  String // openclaw.json models.providers 的 map key；DNS-label（应用层校验）
+  lcProvider  LcProvider // LangChain provider 二值白名单（openai/anthropic）
+  baseUrl     String // 完整 URL；origin 须命中 provider_endpoints 白名单（40042）
+  credentialEnvId   String?  // 过渡期：引用 LLM_API_KEY（对齐旧 apiKeyEnvId；P1 后退役）
+  credentialCipher  String?  // P1 扩展：per-user key，AES 密文（预留，本期不读写）
+  authHeader  Boolean   @default(true)
+  modelsJson  String // 模型条目数组 JSON 文本（id/name/reasoning/input/cost/contextWindow/maxTokens）
 
   createdAt DateTime @default(now())
 
-  @@unique([containerId, providerId])
+  @@unique([ownerId, providerId])
   @@map("model_providers")
 }
 
@@ -280,4 +309,276 @@ model GenerationJob {
   updatedAt    DateTime @updatedAt
 
   @@map("generation_jobs")
+}
+
+// ===========================================================================
+// #771（#747·01）LangGraph agent runtime 新表地基 —— 会话历史域 + 审计域 + 配置域
+//
+// 逐字段依据：#747 B 节表 + 731/729/752/766/768/770 resolution。commands/skills 官方内容
+// 目录不建表（#758 Q1/Q2/Q6 钉死 always-on 无表）。旧表（Pairing / ModelProvider 旧形状）
+// 本票不动，留待 T0 清退（#801）。
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// Session —— 会话行（#727）：id = LangGraph thread_id（cuid，不编码），会话扁平挂用户
+// （容器维度退役，story 4）。rewind/分支 = 换 activeCheckpointId 指针，消息行永不物理删。
+// ---------------------------------------------------------------------------
+model Session {
+  id   String @id @default(cuid()) // = LangGraph thread_id（cuid，不编码 —— #727）
+  owner User  @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  ownerId String
+
+  // 绑定的会话沙箱 docker 容器 id（researcher-sandbox-<sessionId>，#747 E 节）。
+  // 无 FK：沙箱注册表面貌归 #784 双容器 orchestrator，legacy containers 表形状
+  // （port/token/homeDir 必填）与沙箱规格（无宿主端口/token，端口池随 legacy 退役废除）矛盾；
+  // 「删容器级联 sessions」由 orchestrator 应用层联动（#727 retention，deleteThread 同款）。
+  containerId String
+  title       String @default("") // 自动生成可修改（story 5）；空串 = 未命名
+
+  // fork 溯源（#727）：parentSessionKey = 源 session id；forkSourceJson = 切点 checkpoint 等。
+  parentSessionKey String?
+  forkSourceJson   String?
+
+  // rewind/分支指针（#727）：指向 checkpoints 行（threadId = 本行 id）；换指针不删消息行，
+  // 旧分支自然保留（checkpoint 树即分支真相源）。
+  activeCheckpointId String?
+
+  // #770：branch-switch 机制取消后，「先 fork 再回退」的被放弃原路线软删除存档
+  // （delete 标记、映射层过滤——产品面不可读、行不物理删，retention/refcount GC 回收对象）。
+  archivedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  messages    SessionMessage[]
+  checkpoints Checkpoint[]
+  checkpointWrites CheckpointWrite[]
+  attachments Attachment[]
+  fileJournal FileJournal[]
+
+  @@index([ownerId])
+  @@map("sessions")
+}
+
+// ---------------------------------------------------------------------------
+// SessionMessage —— 消息投影行，产品读源（#727）：每 turn 聚合行（非 token 级——token 事件
+// 即焚不落盘）。rewind/切换只动 Session 指针，本表行永不物理删（仅删会话级联清）。
+// ---------------------------------------------------------------------------
+model SessionMessage {
+  id       String  @id @default(cuid())
+  session  Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  sessionId String
+
+  turn    Int    // 轮次序号（会话内单调，读路径排序键之一）
+  role    String // user / assistant / system / tool …（值集应用层约定；D9 媒体方向由本列派生）
+  content String @default("")
+
+  // attachmentsJson v1 聚合（schema 版本化，#726/#768）：
+  // {v:1, thinking?, tools?[{toolCallId,name,input≤1k,result≤1k,state,durationMs,rejection?,details?≤4KB}],
+  //  approval?, compaction?, media?:MediaRef[]}
+  attachmentsJson String @default("{\"v\":1}")
+
+  // 用户消息锚点 = rewind 目标 checkpoint（story 16；换 activeCheckpointId 时定位）
+  anchorCheckpointId String?
+
+  createdAt DateTime @default(now())
+
+  attachments Attachment[] // 挂载于本消息的附件（用户附件 + agent→用户媒体同表，D9）
+
+  @@index([sessionId, turn])
+  @@map("session_messages")
+}
+
+// ---------------------------------------------------------------------------
+// Checkpoint / CheckpointWrite —— LangGraph 机制数据（#727；自定义 PrismaCheckpointSaver
+// 五方法 put/putWrites/getTuple/list/deleteThread 的落点，#774 实现）。不暴露产品读。
+// 形状对齐 LangGraph checkpoint 存储惯例（thread_id / checkpoint_ns / checkpoint_id 三元组）。
+// ---------------------------------------------------------------------------
+model Checkpoint {
+  session    Session @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  threadId   String // = Session.id（FK 级联：删会话清机制数据）
+  checkpointNs       String @default("") // 子图命名空间
+  checkpointId       String
+  parentCheckpointId String? // checkpoint 树 = parent 链（分支真相源）
+  type       String // LangGraph serializer type（如 "json"）
+  blob       Bytes // 序列化 state（LangGraph dumpsTyped 字节；serde 默认 JSON —— #727）
+  metadataJson String @default("{}")
+  createdAt  DateTime @default(now())
+
+  @@id([threadId, checkpointNs, checkpointId])
+  @@index([threadId, checkpointNs])
+  @@map("checkpoints")
+}
+
+model CheckpointWrite {
+  session  Session @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  threadId String
+  checkpointNs String @default("")
+  checkpointId String // 目标 checkpoint（Loose 引用：LangGraph pending writes 语义，不建 FK）
+  taskId   String
+  idx      Int
+  channel  String
+  type     String
+  blob     Bytes // pending write 序列化字节
+
+  @@id([threadId, checkpointNs, checkpointId, taskId, idx])
+  @@index([threadId, checkpointNs])
+  @@map("checkpoint_writes")
+}
+
+// ---------------------------------------------------------------------------
+// MemoryItem —— 跨会话长期记忆（BaseStore V1，#727）：PrismaMemoryStore 五方法
+// get/put/delete/search/listNamespaces 落点（#774）。V1 无 embedding，前缀检索。
+// 归属经 namespace 前缀（per-user）派生——刻意不建 user FK（#727：memory 跟 user 不级联）。
+// ---------------------------------------------------------------------------
+model MemoryItem {
+  namespace String // per-user 前缀（如 "user-<ownerId>"）
+  key       String
+  valueJson String
+  updatedAt DateTime @updatedAt
+
+  @@id([namespace, key]) // 复合主键左前缀即 namespace 索引（前缀检索走它）
+  @@map("memory_items")
+}
+
+// ---------------------------------------------------------------------------
+// ToolApprovalLog —— 审批三层漏斗全量审计（ADR 0015，729 §4.1 Prisma DDL 原文）：
+// 规则/judge/人工三层同步写；judge 输入存 hash 不存全文；userId 冗余（无 FK）跟 user 永久。
+// ---------------------------------------------------------------------------
+enum ToolApprovalLayer {
+  rule
+  judge
+  human
+}
+
+enum ToolApprovalDecision {
+  allow
+  deny
+}
+
+model ToolApprovalLog {
+  id      String @id @default(cuid())
+  traceId String // 弱关联 text_trace_logs.traceId（#727 双域接缝）
+  runId   String
+  userId  String // 冗余：审计快照跟 user 永久，不随容器/会话删（729 DDL 原文无 FK）
+  layer   ToolApprovalLayer
+  decision ToolApprovalDecision
+  toolName String
+  toolCall String // 规范化参数 JSON 快照
+  policyClass String? // judge reject 的政策类（列拒四类之一）
+  reason      String? // judge 理由 / 人工拒绝理由（用户可见）
+  judgeInputHash String? // judge 输入快照 hash——不存全文，控体积
+  latencyMs   Int? // judge 判定耗时（成本面，admin 可见）
+  judgeTokens Int? // 输入+输出 token 成本（admin 可见）
+  createdAt   DateTime @default(now())
+
+  @@index([traceId])
+  @@index([userId, createdAt])
+  @@map("tool_approval_logs")
+}
+
+// ---------------------------------------------------------------------------
+// ProviderEndpoint —— 端点白名单（731 §3.1 逐字段 DDL，admin 管理，面板级）：
+// origin 精确匹配（scheme+host+port 唯一），禁路径/子域通配（防 attacker.example.com 绕过）。
+// 注意：SQLite UNIQUE 含 NULL port 不判重（NULL≠NULL）——应用层先查后建兜底（#775）。
+// createdBy 记审计归属（731 DDL 无 FK 约束 → 不加；用户软删不物理删行）。
+// ---------------------------------------------------------------------------
+model ProviderEndpoint {
+  id        String   @id @default(cuid())
+  scheme    String // 'https'（生产仅 https；'http' 限 dev）
+  host      String // 精确 host
+  port      Int? // NULL = 默认端口
+  note      String @default("")
+  createdBy String // users.id
+  createdAt DateTime @default(now())
+
+  @@unique([scheme, host, port])
+  @@map("provider_endpoints")
+}
+
+// ---------------------------------------------------------------------------
+// ConfigMeta —— 单行配置版本计数器（731 §3.3）：provider/endpoint CRUD 同事务 +1 =
+// 热生效信号（runner run 启动读版本判等，不等才重载快照）。id 恒 = 1（CHECK 约束 Prisma
+// DSL 不可表达 → 应用层不变量）；迁移脚本 INSERT OR IGNORE 种子首行。
+// ---------------------------------------------------------------------------
+model ConfigMeta {
+  id      Int @id @default(1) // 单行：id 恒 = 1
+  version Int @default(1)
+
+  @@map("config_meta")
+}
+
+// ---------------------------------------------------------------------------
+// PluginEnablement —— per-user 插件启用位（752 §4.2）：复合主键 ownerId+pluginId；
+// teammate 默认继承 owner 启用集 = per-run 快照。enabledAt 必填无默认（752 SQL 原文
+// TEXT NOT NULL）——调用方显式置位。级联 users：面板 user 行级联先例（752 草图未钉级联语义）。
+// ---------------------------------------------------------------------------
+model PluginEnablement {
+  owner   User   @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  ownerId String
+  pluginId String
+  enabled  Boolean @default(true)
+  enabledAt DateTime
+
+  @@id([ownerId, pluginId])
+  @@map("plugin_enablements")
+}
+
+// ---------------------------------------------------------------------------
+// Attachment —— 附件元数据（766 D1：字节在沙箱 /lab/uploads/<attachmentId>/<原始文件名>，
+// 不进表）。id = attachmentId 雪花算法（时间有序，String 承载——64 位雪花超 int53）。
+// agent→用户媒体与用户附件同表（方向由挂载消息 role 派生，不加列不分目录 —— D9）。
+// fork 行全量复制不改 attachmentId（768 D7）→ 唯一域 = 会话内，主键复合 (sessionId, id)。
+// ---------------------------------------------------------------------------
+model Attachment {
+  session Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  sessionId String
+  id        String // attachmentId（雪花算法；fork 复制不改 → 会话内唯一）
+  owner     User   @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  ownerId   String
+  message   SessionMessage? @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  // 可空：766 D5 时序——上传端点先建元数据行、消息行后由投影引用 attachmentId（G 节 D5/D9：
+  // 两条建行路径都是附件行先于消息行）；回填后非空。rewind 随消息同进退。
+  messageId String?
+
+  fileName String // 原始文件名（字节路径组成部分）
+  mimeType String
+  size     Int // 字节数（单文件 ≤100MB——D6，int32 内）
+  sha256   String // 内容校验（ingestion 节点校验落库）
+  path     String // 沙箱内路径 /lab/uploads/<attachmentId>/<原始文件名>
+
+  @@id([sessionId, id])
+  @@index([ownerId])
+  @@index([sessionId])
+  @@map("attachments")
+}
+
+// ---------------------------------------------------------------------------
+// FileJournal —— 文件 rewind 机制数据（766 D8）：session-global 全序（行 = checkpointId
+// 锚点 + 全局 seq + op/path/前后 sha256 + tombstoneKey + toolCallId 幂等键 + applied 标记）。
+// 崩溃管线 journal-first：行先落 applied=false → apply → 置位（启动/restore 双路 roll-forward
+// reconcile 补 apply）；重放 = 全局序逆放（rewind 恢复 /lab 至锚点时刻，exec 显式降级不入日志）。
+// fork 继承：源行复制、fork 时点截断、seq 接续（768 D7）→ 唯一域均收窄会话级：
+//   (sessionId, seq) 全局序唯一 · (sessionId, toolCallId) 幂等唯一（D8 原文「toolCallId UNIQUE」
+//   经 D7 修订后限会话内——fork 复制行不改 toolCallId，全局唯一与 D7 冲突，后 resolve 者为准）。
+// ---------------------------------------------------------------------------
+model FileJournal {
+  id       String  @id @default(cuid()) // 内部代理主键：fork 复制行后仍逐行可寻址（审计引用）
+  session  Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  sessionId String
+
+  checkpointId String // op 生效锚点 checkpoint（rewind 预览/逆放定位）
+  seq          Int // 会话内全局序（跨 thread——teammate 并发写同序；fork 时点截断、seq 接续）
+  op           String // write / edit / delete（V1 值集应用层 + 测试锁定；rename 不在 V1 工具面）
+  path         String // normalizeFilePath 后相对路径
+  beforeSha256 String? // 前像 sha256（write 新文件无前像 → null）
+  afterSha256  String? // 后像 sha256（delete 无后像 → null）
+  tombstoneKey String? // 墓碑 key（daemon 侧 root 写 0700 隐藏目录；非墓碑行 null）
+  toolCallId   String // 幂等键（journal-first 崩溃去重）
+  applied      Boolean @default(false)
+
+  @@unique([sessionId, seq])
+  @@unique([sessionId, toolCallId])
+  @@index([sessionId, checkpointId])
+  @@map("file_journal")
 }

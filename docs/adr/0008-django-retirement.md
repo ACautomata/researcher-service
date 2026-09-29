@@ -16,6 +16,7 @@ M0–M8 已完成：`server/` Express+ws 控制面实现全部 5 域（认证/�
 
 1. **`server/` 容器化**：新建多阶段 `server/Dockerfile`（build 全量 npm ci + prisma generate + tsc → runtime `npm ci --omit=dev` + dist + prisma/scripts），`docker-entrypoint.sh` 先幂等落表再 `node dist/server.js`。镜像基 `node:lts-slim`（Debian/glibc，better-sqlite3 原生模块不兼容 alpine）。
    - **幂等建表**：`prisma/init.sql` 无 `IF NOT EXISTS`（非幂等），entrypoint 用「裸 `users` 表是否存在」判定（Prisma `@@map` 落表名与 Django 带前缀表名不冲突，旧库残留不会误判），apply 后置 `PRAGMA user_version=1` 迁移位。
+     > **修订注记（#771）**：apply-schema 已改逐语句 skip-if-exists 幂等（users 表判定降级为重启快速路径，非正确性关卡）；`user_version` 改由 `upgrade-schema.mjs` 每次启动置 `SCHEMA_VERSION`（当前 8，见 `scripts/lib/incremental-schema.mjs`）。原描述保留为决策历史。
 2. **compose 服务改名 `backend` → `server`**：镜像 `PANEL_SERVER_IMAGE`、`container_name: panel-server`、端口 8000 → 8001；nginx upstream 同步 `server:8001`。环境变量平移：`DJANGO_SECRET_KEY` → `JWT_SECRET`（≥32 字符 fail-fast）、删除 `DJANGO_ALLOWED_HOSTS`（Express 不校验 Host）、新增 `PANEL_PUBLIC_ORIGIN`（生产必填 fail-fast，隧道 Origin + 容器 allowedOrigins 强制条目）、`DATABASE_NAME` → `DATABASE_URL`（`file:/app/db/db.sqlite3` 显式绝对路径）。
    - **`/fleet` 挂载边界**：compose 显式 pin `OPENCLAW_FLEET_ROOT=/fleet` 并挂载宿主 fleet 根；挂载缺失时 server 仍正常启动（幂等落表不受影响），故障在首次创建容器时才暴露——与 Django 时代 `prod.py` 启动期 fail-fast 不同（Express 的 `readFleetRoot` 仅对显式相对路径 fail-fast）。
 3. **CD 恢复自动部署**：`on: workflow_run`（CI 成功 → 构建 server + frontend 镜像 → 部署）。secrets 迁移：`JWT_SECRET` / `PANEL_PUBLIC_ORIGIN` 取代 `DJANGO_SECRET_KEY` / `DJANGO_ALLOWED_HOSTS`。

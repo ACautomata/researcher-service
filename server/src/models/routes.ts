@@ -93,7 +93,7 @@ export function createModelsRouter(deps: ModelsRouterDeps): Router {
     ok(res, await service(req).list(inst))
   })
 
-  // POST /:name/models/providers —— 新建；唯一(containerId, providerId) 冲突 → 40041；
+  // POST /:name/models/providers —— 新建；唯一(ownerId, providerId) 冲突 → 40041（#771 归属上移）；
   // 写盘失败 → 90003（DB 已回滚）。body 校验在容器/越权之后。
   router.post('/:name/models/providers', async (req: Request, res: Response) => {
     const inst = await resolveWrite(req, req.params.name)
@@ -108,7 +108,7 @@ export function createModelsRouter(deps: ModelsRouterDeps): Router {
   })
 
   // PUT /:name/models/providers/:pid —— 改（路径 pid 定位，body 可改 provider_id）；
-  // 撞同容器既有 pid → 40041；写盘失败 → 90003（DB 已回滚）。body 校验在容器/越权之后。
+  // 撞同 owner 既有 pid → 40041；写盘失败 → 90003（DB 已回滚）。body 校验在容器/越权之后。
   router.put('/:name/models/providers/:pid', async (req: Request, res: Response) => {
     const inst = await resolveWrite(req, req.params.name)
     const input = parseBody(req)

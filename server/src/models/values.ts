@@ -7,10 +7,14 @@
 //
 // wire 命名：REST 请求/响应体沿用 Django/frontend 的 snake_case（provider_id / base_url /
 // api_key_env_id / auth_header / created_at），与整个 Express server 既有 wire 契约一致；
-// Prisma 模型字段为 camelCase（providerId / apiKeyEnvId / …）。字段级 snake↔camel 映射在各层
+// Prisma 模型字段为 camelCase（providerId / credentialEnvId / …）。字段级 snake↔camel 映射在各层
 // 入口/出口收敛（routes.toInput / service.toView·toSpec），enum 的 wire↔DB 映射在本文件收敛。
+//
+// #771（731 §2.1/§3.2）：DB 枚举列 api（openai_completions/anthropic_messages）改造为 lcProvider
+// 二值白名单（openai/anthropic）——1:1 映射（openai-completions→openai / anthropic-messages→
+// anthropic，OpenAI 兼容端点统一走 openai + baseUrl）；wire 取值集不变，映射在本文件收敛。
 
-import type { ProviderApi } from '../generated/prisma/client'
+import type { LcProvider } from '../generated/prisma/client'
 
 // provider_id 小写 DNS-label 风格（r28 §1）：1–64 位
 export const PROVIDER_ID_REGEX = /^[a-z][a-z0-9-]{0,63}$/
@@ -34,13 +38,12 @@ export const ALLOWED_API_KEY_ENV_IDS: ReadonlySet<string> = new Set(['LLM_API_KE
 export const MODEL_INPUT_MODALITIES = ['text', 'image', 'audio', 'video', 'pdf'] as const
 export type ModelInputModality = (typeof MODEL_INPUT_MODALITIES)[number]
 
-// wire（连字符真值，落盘 openclaw.json）↔ Prisma enum（下划线标识符）映射。
-// Prisma enum 值须为合法标识符 → 下划线名 + @map 落连字符真值（schema 同款取向）。
-export const WIRE_TO_API_ENUM: Record<ProviderApiWire, ProviderApi> = {
-  'openai-completions': 'openai_completions',
-  'anthropic-messages': 'anthropic_messages',
+// wire（连字符真值，落盘 openclaw.json）↔ lcProvider 二值白名单（Prisma enum，#771 / 731 §2.1）。
+export const WIRE_TO_LC_PROVIDER: Record<ProviderApiWire, LcProvider> = {
+  'openai-completions': 'openai',
+  'anthropic-messages': 'anthropic',
 }
-export const API_ENUM_TO_WIRE: Record<ProviderApi, ProviderApiWire> = {
-  openai_completions: 'openai-completions',
-  anthropic_messages: 'anthropic-messages',
+export const LC_PROVIDER_TO_WIRE: Record<LcProvider, ProviderApiWire> = {
+  openai: 'openai-completions',
+  anthropic: 'anthropic-messages',
 }

@@ -8,22 +8,12 @@ CREATE TABLE "users" (
     "isActive" BOOLEAN NOT NULL DEFAULT true,
     "mustChangePassword" BOOLEAN NOT NULL DEFAULT false,
     "maxContainers" INTEGER NOT NULL DEFAULT 3,
+    "maxConcurrentRuns" INTEGER NOT NULL DEFAULT 2,
+    "approvalMode" TEXT NOT NULL DEFAULT 'standard',
     "oidcSubject" TEXT,
     "oidcIssuer" TEXT,
     "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" DATETIME NOT NULL
-);
-
--- CreateTable
-CREATE TABLE "refresh_tokens" (
-    "id" TEXT NOT NULL PRIMARY KEY,
-    "userId" TEXT NOT NULL,
-    "tokenHash" TEXT NOT NULL,
-    "expiresAt" DATETIME NOT NULL,
-    "revokedAt" DATETIME,
-    "replacedByTokenId" TEXT,
-    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT "refresh_tokens_userId_fkey" FOREIGN KEY ("userId") REFERENCES "users" ("id") ON DELETE CASCADE ON UPDATE CASCADE
 );
 
 -- CreateTable
@@ -42,6 +32,18 @@ CREATE TABLE "text_trace_logs" (
     "status" TEXT NOT NULL DEFAULT 'success',
     "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT "text_trace_logs_userId_fkey" FOREIGN KEY ("userId") REFERENCES "users" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+
+-- CreateTable
+CREATE TABLE "refresh_tokens" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "userId" TEXT NOT NULL,
+    "tokenHash" TEXT NOT NULL,
+    "expiresAt" DATETIME NOT NULL,
+    "revokedAt" DATETIME,
+    "replacedByTokenId" TEXT,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT "refresh_tokens_userId_fkey" FOREIGN KEY ("userId") REFERENCES "users" ("id") ON DELETE CASCADE ON UPDATE CASCADE
 );
 
 -- CreateTable
@@ -84,15 +86,16 @@ CREATE TABLE "pairings" (
 -- CreateTable
 CREATE TABLE "model_providers" (
     "id" TEXT NOT NULL PRIMARY KEY,
-    "containerId" TEXT NOT NULL,
+    "ownerId" TEXT NOT NULL,
     "providerId" TEXT NOT NULL,
-    "api" TEXT NOT NULL,
+    "lcProvider" TEXT NOT NULL,
     "baseUrl" TEXT NOT NULL,
-    "apiKeyEnvId" TEXT NOT NULL,
+    "credentialEnvId" TEXT,
+    "credentialCipher" TEXT,
     "authHeader" BOOLEAN NOT NULL DEFAULT true,
     "modelsJson" TEXT NOT NULL,
     "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT "model_providers_containerId_fkey" FOREIGN KEY ("containerId") REFERENCES "containers" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+    CONSTRAINT "model_providers_ownerId_fkey" FOREIGN KEY ("ownerId") REFERENCES "users" ("id") ON DELETE CASCADE ON UPDATE CASCADE
 );
 
 -- CreateTable
@@ -122,6 +125,154 @@ CREATE TABLE "generation_jobs" (
     CONSTRAINT "generation_jobs_figureId_fkey" FOREIGN KEY ("figureId") REFERENCES "figures" ("id") ON DELETE CASCADE ON UPDATE CASCADE
 );
 
+-- CreateTable
+CREATE TABLE "sessions" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "ownerId" TEXT NOT NULL,
+    "containerId" TEXT NOT NULL,
+    "title" TEXT NOT NULL DEFAULT '',
+    "parentSessionKey" TEXT,
+    "forkSourceJson" TEXT,
+    "activeCheckpointId" TEXT,
+    "archivedAt" DATETIME,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" DATETIME NOT NULL,
+    CONSTRAINT "sessions_ownerId_fkey" FOREIGN KEY ("ownerId") REFERENCES "users" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+
+-- CreateTable
+CREATE TABLE "session_messages" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "sessionId" TEXT NOT NULL,
+    "turn" INTEGER NOT NULL,
+    "role" TEXT NOT NULL,
+    "content" TEXT NOT NULL DEFAULT '',
+    "attachmentsJson" TEXT NOT NULL DEFAULT '{"v":1}',
+    "anchorCheckpointId" TEXT,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT "session_messages_sessionId_fkey" FOREIGN KEY ("sessionId") REFERENCES "sessions" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+
+-- CreateTable
+CREATE TABLE "checkpoints" (
+    "threadId" TEXT NOT NULL,
+    "checkpointNs" TEXT NOT NULL DEFAULT '',
+    "checkpointId" TEXT NOT NULL,
+    "parentCheckpointId" TEXT,
+    "type" TEXT NOT NULL,
+    "blob" BLOB NOT NULL,
+    "metadataJson" TEXT NOT NULL DEFAULT '{}',
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    PRIMARY KEY ("threadId", "checkpointNs", "checkpointId"),
+    CONSTRAINT "checkpoints_threadId_fkey" FOREIGN KEY ("threadId") REFERENCES "sessions" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+
+-- CreateTable
+CREATE TABLE "checkpoint_writes" (
+    "threadId" TEXT NOT NULL,
+    "checkpointNs" TEXT NOT NULL DEFAULT '',
+    "checkpointId" TEXT NOT NULL,
+    "taskId" TEXT NOT NULL,
+    "idx" INTEGER NOT NULL,
+    "channel" TEXT NOT NULL,
+    "type" TEXT NOT NULL,
+    "blob" BLOB NOT NULL,
+
+    PRIMARY KEY ("threadId", "checkpointNs", "checkpointId", "taskId", "idx"),
+    CONSTRAINT "checkpoint_writes_threadId_fkey" FOREIGN KEY ("threadId") REFERENCES "sessions" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+
+-- CreateTable
+CREATE TABLE "memory_items" (
+    "namespace" TEXT NOT NULL,
+    "key" TEXT NOT NULL,
+    "valueJson" TEXT NOT NULL,
+    "updatedAt" DATETIME NOT NULL,
+
+    PRIMARY KEY ("namespace", "key")
+);
+
+-- CreateTable
+CREATE TABLE "tool_approval_logs" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "traceId" TEXT NOT NULL,
+    "runId" TEXT NOT NULL,
+    "userId" TEXT NOT NULL,
+    "layer" TEXT NOT NULL,
+    "decision" TEXT NOT NULL,
+    "toolName" TEXT NOT NULL,
+    "toolCall" TEXT NOT NULL,
+    "policyClass" TEXT,
+    "reason" TEXT,
+    "judgeInputHash" TEXT,
+    "latencyMs" INTEGER,
+    "judgeTokens" INTEGER,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- CreateTable
+CREATE TABLE "provider_endpoints" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "scheme" TEXT NOT NULL,
+    "host" TEXT NOT NULL,
+    "port" INTEGER,
+    "note" TEXT NOT NULL DEFAULT '',
+    "createdBy" TEXT NOT NULL,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- CreateTable
+CREATE TABLE "config_meta" (
+    "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT DEFAULT 1,
+    "version" INTEGER NOT NULL DEFAULT 1
+);
+
+-- CreateTable
+CREATE TABLE "plugin_enablements" (
+    "ownerId" TEXT NOT NULL,
+    "pluginId" TEXT NOT NULL,
+    "enabled" BOOLEAN NOT NULL DEFAULT true,
+    "enabledAt" DATETIME NOT NULL,
+
+    PRIMARY KEY ("ownerId", "pluginId"),
+    CONSTRAINT "plugin_enablements_ownerId_fkey" FOREIGN KEY ("ownerId") REFERENCES "users" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+
+-- CreateTable
+CREATE TABLE "attachments" (
+    "sessionId" TEXT NOT NULL,
+    "id" TEXT NOT NULL,
+    "ownerId" TEXT NOT NULL,
+    "messageId" TEXT,
+    "fileName" TEXT NOT NULL,
+    "mimeType" TEXT NOT NULL,
+    "size" INTEGER NOT NULL,
+    "sha256" TEXT NOT NULL,
+    "path" TEXT NOT NULL,
+
+    PRIMARY KEY ("sessionId", "id"),
+    CONSTRAINT "attachments_sessionId_fkey" FOREIGN KEY ("sessionId") REFERENCES "sessions" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
+    CONSTRAINT "attachments_ownerId_fkey" FOREIGN KEY ("ownerId") REFERENCES "users" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
+    CONSTRAINT "attachments_messageId_fkey" FOREIGN KEY ("messageId") REFERENCES "session_messages" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+
+-- CreateTable
+CREATE TABLE "file_journal" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "sessionId" TEXT NOT NULL,
+    "checkpointId" TEXT NOT NULL,
+    "seq" INTEGER NOT NULL,
+    "op" TEXT NOT NULL,
+    "path" TEXT NOT NULL,
+    "beforeSha256" TEXT,
+    "afterSha256" TEXT,
+    "tombstoneKey" TEXT,
+    "toolCallId" TEXT NOT NULL,
+    "applied" BOOLEAN NOT NULL DEFAULT false,
+    CONSTRAINT "file_journal_sessionId_fkey" FOREIGN KEY ("sessionId") REFERENCES "sessions" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+
 -- CreateIndex
 CREATE UNIQUE INDEX "users_username_key" ON "users"("username");
 
@@ -130,12 +281,6 @@ CREATE UNIQUE INDEX "users_email_key" ON "users"("email");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "users_oidcIssuer_oidcSubject_key" ON "users"("oidcIssuer", "oidcSubject");
-
--- CreateIndex
-CREATE UNIQUE INDEX "refresh_tokens_tokenHash_key" ON "refresh_tokens"("tokenHash");
-
--- CreateIndex
-CREATE INDEX "refresh_tokens_userId_idx" ON "refresh_tokens"("userId");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "text_trace_logs_traceId_key" ON "text_trace_logs"("traceId");
@@ -153,6 +298,12 @@ CREATE INDEX "text_trace_logs_createdAt_idx" ON "text_trace_logs"("createdAt");
 CREATE INDEX "text_trace_logs_status_idx" ON "text_trace_logs"("status");
 
 -- CreateIndex
+CREATE UNIQUE INDEX "refresh_tokens_tokenHash_key" ON "refresh_tokens"("tokenHash");
+
+-- CreateIndex
+CREATE INDEX "refresh_tokens_userId_idx" ON "refresh_tokens"("userId");
+
+-- CreateIndex
 CREATE UNIQUE INDEX "containers_name_key" ON "containers"("name");
 
 -- CreateIndex
@@ -165,14 +316,50 @@ CREATE INDEX "containers_ownerId_idx" ON "containers"("ownerId");
 CREATE UNIQUE INDEX "pairings_containerId_key" ON "pairings"("containerId");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "model_providers_containerId_providerId_key" ON "model_providers"("containerId", "providerId");
-
--- CreateIndex
-CREATE UNIQUE INDEX "figures_ownerId_idempotencyKey_key" ON "figures"("ownerId", "idempotencyKey");
+CREATE UNIQUE INDEX "model_providers_ownerId_providerId_key" ON "model_providers"("ownerId", "providerId");
 
 -- CreateIndex
 CREATE INDEX "figures_ownerId_idx" ON "figures"("ownerId");
 
 -- CreateIndex
+CREATE UNIQUE INDEX "figures_ownerId_idempotencyKey_key" ON "figures"("ownerId", "idempotencyKey");
+
+-- CreateIndex
 CREATE UNIQUE INDEX "generation_jobs_figureId_key" ON "generation_jobs"("figureId");
+
+-- CreateIndex
+CREATE INDEX "sessions_ownerId_idx" ON "sessions"("ownerId");
+
+-- CreateIndex
+CREATE INDEX "session_messages_sessionId_turn_idx" ON "session_messages"("sessionId", "turn");
+
+-- CreateIndex
+CREATE INDEX "checkpoints_threadId_checkpointNs_idx" ON "checkpoints"("threadId", "checkpointNs");
+
+-- CreateIndex
+CREATE INDEX "checkpoint_writes_threadId_checkpointNs_idx" ON "checkpoint_writes"("threadId", "checkpointNs");
+
+-- CreateIndex
+CREATE INDEX "tool_approval_logs_traceId_idx" ON "tool_approval_logs"("traceId");
+
+-- CreateIndex
+CREATE INDEX "tool_approval_logs_userId_createdAt_idx" ON "tool_approval_logs"("userId", "createdAt");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "provider_endpoints_scheme_host_port_key" ON "provider_endpoints"("scheme", "host", "port");
+
+-- CreateIndex
+CREATE INDEX "attachments_ownerId_idx" ON "attachments"("ownerId");
+
+-- CreateIndex
+CREATE INDEX "attachments_sessionId_idx" ON "attachments"("sessionId");
+
+-- CreateIndex
+CREATE INDEX "file_journal_sessionId_checkpointId_idx" ON "file_journal"("sessionId", "checkpointId");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "file_journal_sessionId_seq_key" ON "file_journal"("sessionId", "seq");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "file_journal_sessionId_toolCallId_key" ON "file_journal"("sessionId", "toolCallId");
 

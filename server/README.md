@@ -67,7 +67,9 @@ src/
     fleetAssembly.ts     生产装配（DockerRuntime + BullMQ + FleetDeps + Orchestrator）
 test/                    接缝 #1–#5（wiki Port / 信封 REST / WS 桥 / hostDeps / 编排器 Port）+ 集成 smoke
 prisma/                  schema.prisma + init.sql（migrate diff 产出的建表 SQL）
-scripts/apply-schema.mjs 把 init.sql 落到 dev DB（不经 prisma CLI，规避 AI 守卫）
+scripts/apply-schema.mjs 把 init.sql 落到 dev DB（不经 prisma CLI，规避 AI 守卫；逐语句 skip-if-exists 幂等）
+scripts/upgrade-schema.mjs docker-entrypoint 每次启动 additive 收敛（PRAGMA user_version=SCHEMA_VERSION）
+scripts/lib/incremental-schema.mjs 增量 DDL 单一过程（apply/upgrade 两路径共享，与 init.sql 镜像 parity 由测试锁死）
 Dockerfile               生产镜像（多阶段；entrypoint 幂等落表 + node dist/server.js，见「生产部署」）
 ```
 
@@ -94,8 +96,11 @@ Prisma 7 的 `db push` / `migrate dev` 带 AI 破坏性操作守卫（交互式 
 # 2) 重生成建表 SQL：
 npx prisma migrate diff --from-empty --to-schema prisma/schema.prisma --script > prisma/init.sql
 npm run prisma:generate
-# 3) 落到 dev DB（清库重建）：
-rm -f prisma/panel.db && npm run db:apply
+# 3) 新增表 DDL 同步镜像进 scripts/lib/incremental-schema.mjs（既有库走 upgrade 路径补表；
+#    镜像与 init.sql 同形状由 test/schemaLanggraphFoundation.test.ts 的 NEW_TABLE_COLUMNS 两路径断言锁死）
+# 4) 落库：db:apply 幂等可重跑——空库全量建表、旧库 additive 收敛（新表/新列补齐，旧表形状不动）：
+npm run db:apply
+#    彻底重建亦可：rm -f prisma/panel.db && npm run db:apply
 ```
 
 测试库不经 CLI：`test/setup.ts` 用 better-sqlite3 直读 `prisma/init.sql` 建临时库，每文件独立。
@@ -148,8 +153,10 @@ npm run prisma:validate        # schema 合法性
 ## 生产部署（#341 M9）
 
 生产镜像 `server/Dockerfile`（多阶段：build 全量 npm ci + prisma generate + tsc → runtime `npm ci
---omit=dev` + dist + prisma/scripts）。入口 `docker-entrypoint.sh`：先幂等落表（`scripts/apply-schema.mjs`
-+ SQLite `user_version` 标记；init.sql 非幂等，重启跳过）再 `exec node dist/server.js`。
+--omit=dev` + dist + prisma/scripts）。入口 `docker-entrypoint.sh`：先幂等落表——fresh 库跑
+`scripts/apply-schema.mjs` 全量建表（逐语句 skip-if-exists，可重跑）；既有库按 users 表存在判定
+跳过全量、每次启动跑 `scripts/upgrade-schema.mjs` additive 收敛（SQLite `user_version` 标记）——
+再 `exec node dist/server.js`。
 
 生产 compose：`deploy/docker-compose.deploy.yml` 三服务（frontend nginx → server:8001 → redis）。
 **必填 env**（`NODE_ENV=production` 下 fail-fast）：`JWT_SECRET`（≥32 字符）· `PANEL_PUBLIC_ORIGIN`
