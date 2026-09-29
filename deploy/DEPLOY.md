@@ -80,6 +80,7 @@ panel-frontend 容器（nginx，唯一对宿主暴露，loopback:18080）
 | `LLM_API_KEY` | 面板共享 LLM key | 注入 OpenClaw 容器 |
 | `CREDENTIAL_ENCRYPTION_KEYS` | base64url 32 字节 | 凭证 AES-256-GCM 密钥环 |
 | `AUTOFIGURE_LLM_KEY`（可选） | AutoFigure 生成凭证 | **仅 `AUTOFIGURE_ENABLED=true` 时必需**（T11）；flag 关（生产默认）空串安全——缺失不导致部署失败（config 只在 enabled && production 下 fail-fast）。经 CD 渲染进 `.env` 注入 server，不落盘 git/不进日志 |
+| `API_DOCS_ENABLED`（可选） | `true`（默认） | OpenAPI/Swagger 文档面（`/api/docs`，#761）：admin-only（requireAuth + requireAdmin）zod 生成式文档。显式 `false` → server 不装配 docs 路由（整树 90005） |
 | `RESEARCHER_REPO`（可选） | 克隆 URL | 构建机 clone home 模板（默认 `https://github.com/ACautomata/researcher.git`；模板入 server 镜像，不再落宿主） |
 
 生成 `JWT_SECRET` 与 `CREDENTIAL_ENCRYPTION_KEYS`：

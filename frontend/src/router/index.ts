@@ -73,6 +73,14 @@ export const routes: RouteRecordRaw[] = [
     component: () => import('@/views/TraceLogsView.vue'),
     meta: { requiresAuth: true, requiresAdmin: true },
   },
+  // #761：OpenAPI 文档面（Swagger UI）——admin-only（后端 /api/docs 双层门控；浏览器地址栏
+  // 进不了 Bearer header，故经本视图 apiFetch 认证链消费 openapi.json 并渲染）。
+  {
+    path: '/admin/docs',
+    name: 'admin-docs',
+    component: () => import('@/views/ApiDocsView.vue'),
+    meta: { requiresAuth: true, requiresAdmin: true },
+  },
   {
     path: '/:pathMatch(.*)*',
     name: 'not-found',

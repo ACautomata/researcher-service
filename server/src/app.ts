@@ -10,6 +10,7 @@ import { createWikiRouter, type WikiRouterDeps } from './wiki/routes'
 import { createModelsRouter, type ModelsRouterDeps } from './models/routes'
 import { createFilesRouter, type FilesRouterDeps } from './files/routes'
 import { createFiguresRouter, type FiguresRouterDeps } from './figures/routes'
+import { createDocsRouter, type DocsRouterDeps } from './openapi/routes'
 import { Orchestrator } from './containers/orchestrator'
 import { FleetDeps } from './containers/deps'
 import type { ContainerRuntime } from './containers/runtime'
@@ -37,10 +38,14 @@ export interface AppDeps {
   // 路由只依赖 req.prisma + 认证身份。注入即挂载——flag 门在装配层 server.ts 消费
   // config.autofigure.enabled 决定是否注入；缺省 = 不挂 figures 路由（/api/v1/figures → 90005）。
   figures?: FiguresRouterDeps
+  // docs 接缝（#761）：OpenAPI/Swagger 文档面（/api/docs）。注入即挂载——flag 门（API_DOCS_ENABLED）
+  // 在装配层 server.ts 消费；缺省 = 不挂 docs 路由（/api/docs → 90005）。门控在路由内
+  //（requireAuth + requireAdmin），app.ts 只认 deps 注入、不读 config（对齐 figures 先例）。
+  docs?: DocsRouterDeps
 }
 
 // createApp 工厂：PrismaClient 经依赖注入，测试可传 test DB（接缝 #2）。
-export function createApp({ prisma, orchestrator, runtime, wiki, models, files, figures }: AppDeps): Application {
+export function createApp({ prisma, orchestrator, runtime, wiki, models, files, figures, docs }: AppDeps): Application {
   const app = express()
   // wiki 内容契约无大小上限（codex PR#346）：挂载路径内请求先走 5mb limit，其余端点仍 256kb。
   // 须先于全局 parser —— body-parser 对已解析 body（req._body）会跳过，故 wiki 命中后不二次解析。
@@ -83,6 +88,11 @@ export function createApp({ prisma, orchestrator, runtime, wiki, models, files, 
   // 不读 config；flag 门在装配层 server.ts 由 config.autofigure.enabled 决定是否注入）。
   if (figures) {
     app.use('/api/v1/figures', createFiguresRouter(figures))
+  }
+  // docs（#761）：存在即挂载（对齐 figures 条件挂载——app.ts 只认 deps 注入、不读 config；
+  // flag 门在装配层 server.ts 由 config.apiDocs.enabled 决定是否注入）。
+  if (docs) {
+    app.use('/api/docs', createDocsRouter(docs))
   }
 
   app.use(notFound) // 未匹配路由 → 信封 90005（兑现「所有 REST HTTP 200」）
