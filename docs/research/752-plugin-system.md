@@ -4,6 +4,7 @@
 > 根决策 [#749](https://github.com/ACautomata/researcher-service/issues/749)（16 决策全录）是本规格的钉定前提；Pi 能力面证据见 [#751](https://github.com/ACautomata/researcher-service/issues/751)（[docs/research/751](./751-pi-extension-system.md)）。
 > 接缝引述 #726（SSE 事件面）/ #729（审批漏斗）/ #730（前端单管线渲染）/ #731（ProviderRegistry）/ #742（commands/skills）/ #744（AutoFigure）/ #747（交接规格）。
 > 状态：grilling 会话定稿（2026-09-29，两轮 9 决策 + 6 推导全录见票 resolution）。术语以 CONTEXT.md 为准（插件 / 官方插件目录 / 插件启用 / 能力实现层与用户交互层，PR #748——本票核对后零改动）。
+> **#758 修订**（2026-09-29，方向修订，#762 执行）：R4 命令命名空间三源改两源（系统含官方内容目录 > 插件），用户创建撞名拒绝随创建端点退役消失；§2.3 autocomplete 面、§4.2 SQL 注释先例引用、§7 #742 接缝行、§8 S3 用例行随改。commands/skills 的 per-user 表与 REST 域退役本体归 #747 G 节与 #758，本契约只动插件接缝面——零新决策。
 
 ## 0. 上游决策与本票钉定
 
@@ -16,7 +17,7 @@
 | R1 | 插件包物理位置 | 根级 `plugins/<id>/` 源目录直引；双 app 经 `@plugins/*` 路径别名引 TS/Vue 源，零 workspace 基建 |
 | R2 | Plugin API 形状 | 声明式 `export default definePlugin({...})` 纯数据 manifest，无 factory 动态性 |
 | R3 | 启用位数据面 | `plugin_enablements` 表（复合主键 ownerId+pluginId） |
-| R4 | 命令命名空间 | 系统 > 插件 > 用户，无遮蔽；系统/插件命令名 = 保留字，用户自建撞名创建拒绝 |
+| R4 | 命令命名空间 | 系统（含官方内容目录）> 插件 两源无遮蔽（**#758 修订**：用户源随创建端点退役消失）；系统/官方/插件命令名 = 保留字，插件发版撞名 → 收录评审插件侧改名 |
 | R5 | 渲染接缝数据流 | attachmentsJson v1 `tools[]` 加 `details?`（≤4KB）；SSE `tool.end` 同形状带 details；实时/回放同一字段 |
 | R6 | content/渲染一致性 | 双面契约 + **事实同源不变量**：卡上每个结论性事实 ⊆ content，details 只承载呈现形态 |
 | R7 | env 校验 | 启动期全目录校验（不看启用位）；生产 fail-fast / dev 警告 |
@@ -128,9 +129,9 @@ type PluginCommandOutcome =
 ```
 
 - **`execute` 语义**：server 在该会话的 run 内直接调用声明的工具，结果以标准工具事件流（`tool.start` / `tool.end` + details）入会话，**不经 agent 自由裁量**——/figure「两条触发面一条执行面」（#744）的契约落位。handler 只能 execute **本插件已注册的工具**（引用在注册期可静态校验）。
-- **`inject` 语义**：与 #742 用户命令完全同形（模板插值 → user message 注入）；插件命令与用户命令在交互层不可区分（能力实现层与用户交互层双源并存，CONTEXT 词条）。
-- **命名空间与冲突（R4）**：命令目录解析序 = 系统命令（核心：/new /compact /model…）> 插件命令（启用位过滤）> 用户命令（command_defs），**无遮蔽**。系统/插件命令名是保留字：用户自建撞名 → REST 创建拒绝（commands 域校验错）；插件发版新增命令撞用户已用名 → 收录评审可见、插件侧改名。
-- **autocomplete**：命令清单 = REST 读三源合并目录（#742 机制延伸）；参数级补全经 `getArgumentCompletions` 由 REST 按需调用。
+- **`inject` 语义**：与官方目录命令同形（模板插值 → user message 注入；**#758 修订**：交互层内容全部官方维护——插件贡献 + 官方内容目录两源，CONTEXT 词条）。
+- **命名空间与冲突（R4）**：命令目录解析序 = 系统命令（核心：/new /compact /model… + 官方内容目录并入系统层语义）> 插件命令（启用位过滤）两源，**无遮蔽**（**#758 修订**：用户命令源随 commands/skills REST 域整域退役消失）。系统/官方/插件命令名是保留字：插件发版新增命令撞系统/官方名 → 收录评审可见、插件侧改名（原「用户自建撞名创建拒绝」随创建端点退役消失）。
+- **autocomplete**：命令清单 = 前端常量 + 静态 import + `GET /api/v1/plugins` 启用插件命令合并（**#758 修订**：两源合并，commands REST 域整域退役，无「REST 读目录」端点）；参数级补全经 `getArgumentCompletions` 由 REST 按需调用。
 
 ### 2.4 渲染注册（web 面）
 
@@ -174,7 +175,7 @@ export default definePluginWeb({
 ### 4.2 启用位
 
 ```sql
--- prisma/init.sql 新增（对齐 command_defs/skill_defs per-user 表先例）
+-- prisma/init.sql 新增（per-user 插件启用位表；#758 修订：command_defs/skill_defs 表不建，原先例引用失效）
 CREATE TABLE plugin_enablements (
   ownerId   TEXT NOT NULL REFERENCES users(id),
   pluginId  TEXT NOT NULL,
@@ -234,7 +235,7 @@ CREATE TABLE plugin_enablements (
 | #726 SSE 事件面 | 通用事件目录**不动**：插件工具走标准 `tool.start`/`tool.end`（name=工具名）。两处扩展：① `tool.end` 载荷与 attachmentsJson v1 `tools[]` 增加 `details?`（≤4KB 截断+截断标记）——schema 版本化内 v1 扩展；② 通用 `tool.progress` 事件 = V2（`onUpdate` 先进签名）。域 run 事件族（figure_run.* 类，对齐 wiki_run 先例）= 域规格职责（#753），不进本契约 |
 | #729 审批漏斗 | 类别声明 = 漏斗路由键（§3 路由表）；file 类 `pathParams` = 规则层校验目标；domain 不进漏斗（#744 钉，本文正式收录进类别映射）；V2 钩子 = 规则层扩展点 |
 | #730 单管线渲染 | 插件组件 = 归约产物 custom-render 分支，非第二条管线（§2.4）；实时/回放同一 `details` 字段；`isPartial` = 进行态装饰仅实时构造 |
-| #742 commands/skills | 三源命令目录（系统>插件>用户）+ 保留字创建拒绝（R4）；`{inject}` 与用户命令同形；`getArgumentCompletions` 接 autocomplete 面；skills 是内容级扩展**不归插件**（CONTEXT 词条 Avoid 项） |
+| #742 commands/skills（#758 修订） | 两源命令目录（系统含官方内容目录 > 插件，R4 修订）；`{inject}` 与官方目录命令同形；`getArgumentCompletions` 接 autocomplete 面；skills 是内容级扩展**不归插件**（CONTEXT 词条 Avoid 项）；commands/skills 的 per-user 表与 REST 域退役本体归 #747 G 节与 #758，本契约只动插件接缝面 |
 | #731 ProviderRegistry | 插件不带 provider（根决策）；插件工具需 LLM 时经 ctx 服务句柄用核心出口，形状随 #753 校准 |
 | #744 AutoFigure | 目录首成员：默认未启用、一键启用（根决策 Q16）；env 配置形态延续（AUTOFIGURE_*）；`/figure` = `{execute}` outcome 先例；figure 工具 = domain 类别先例；**迁移细节（#744 修订面）归 #753** |
 | #747 交接规格 | 本契约并入由 #754 汇编：M3 区间插插件骨架（Plugin API + 目录 + 启用模型），不阻塞整体（根决策 Q14）；AutoFigure 六票拆分相应修订 |
@@ -244,7 +245,7 @@ CREATE TABLE plugin_enablements (
 ## 8. 测试接缝（沿 #747 四层定稿）
 
 - **S1 信封 REST**：`GET /api/v1/plugins` / `PUT …/enablement`（8xxxx 码、鉴权边界、80040 防探测、幂等）。
-- **S3 纯逻辑**：注册期强校验（类别必填 / file 类 pathParams / 工具名·命令名全局唯一 / execute 引用合法）；启用集过滤（run 装配纯函数）；命令目录三源合并 + 保留字拒绝；双面契约截断（result ≤1k / details ≤4KB + 截断标记）。
+- **S3 纯逻辑**：注册期强校验（类别必填 / file 类 pathParams / 工具名·命令名全局唯一 / execute 引用合法）；启用集过滤（run 装配纯函数）；命令目录两源合并（#758 修订：系统含官方目录 > 插件）；双面契约截断（result ≤1k / details ≤4KB + 截断标记）。
 - **前端 vitest**：渲染注册表挂载与默认渲染回退；插件卡实时/回放零差异验收（#730 验收延伸）。
 
 ## 9. 开放点（不阻塞 #754 汇编）
