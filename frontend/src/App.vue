@@ -51,6 +51,7 @@ async function handleLogout(): Promise<void> {
       <router-link to="/figure-editor" data-test="nav-figure-editor">Figure Editor</router-link>
       <router-link v-if="isAdmin" to="/admin/users" data-test="nav-admin-users">账号管理</router-link>
       <router-link v-if="isAdmin" to="/admin/trace-logs" data-test="nav-trace-logs">内容消息</router-link>
+      <router-link v-if="isAdmin" to="/admin/docs" data-test="nav-admin-docs">API 文档</router-link>
       <button
         type="button"
         class="nav-logout"

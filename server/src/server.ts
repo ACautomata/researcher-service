@@ -50,6 +50,10 @@ async function main(): Promise<void> {
     // 认证身份），装配形态 `{}` 表达「已启用」。生成 runner（T03）与生产 HTTP adapter（T07）的
     // 接线不走 app deps——见下方 assembleAutoFigureRuntime（config → adapter → T03 runner 启动）。
     figures: config.autofigure.enabled ? {} : undefined,
+    // docs（#761）：flag 开才装配（config.apiDocs.enabled）——flag 关不注入 → 路由未挂载
+    //（/api/docs → 90005）。DocsRouterDeps 为空（文档启动期静态构建，路由只依赖认证身份），
+    // 装配形态 `{}` 表达「已启用」（对齐 figures 装配注释先例）。
+    docs: config.apiDocs.enabled ? {} : undefined,
   })
 
   // M0 同进程单端口分流：createServer(expressApp) + server.on('upgrade') 分流。

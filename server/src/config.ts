@@ -224,6 +224,19 @@ function readNamedVolumes(): boolean {
   )
 }
 
+// API_DOCS_ENABLED（#761）：OpenAPI/Swagger 文档面开关（/api/docs）。默认 true —— 文档面 admin-only
+//（requireAuth + requireAdmin）且为启动期静态生成，无敏感数据；生产可显式 false 关闭（装配层不注入
+// docs deps → 路由未挂载 → 90005）。非法值 fail-fast（对齐 readNamedVolumes 白名单模式）。
+function readApiDocsEnabled(): boolean {
+  const v = process.env.API_DOCS_ENABLED
+  if (v === undefined) return true
+  if (v === 'true') return true
+  if (v === 'false') return false
+  throw new Error(
+    `API_DOCS_ENABLED 非法: ${JSON.stringify(v)}，须为 true 或 false（OpenAPI 文档面开关，默认开）`,
+  )
+}
+
 // AUTOFIGURE_ENABLED（T01，docs/autofigure/tickets/T01-authenticated-figure-creation.md）：
 // AutoFigure 域开关。默认 false = 装配层不注入 figures deps → /api/v1/figures 路由未挂载（90005）；
 // 显式 true 装配。非 true/false 值 fail-fast（对齐 readNamedVolumes 白名单模式）——否则 `1`/`TRUE`
@@ -359,6 +372,14 @@ export const config = {
   lifecycleWorkerConcurrency: Number(process.env.LIFECYCLE_WORKER_CONCURRENCY ?? 2),
   // BullMQ/Redis 连接（#313 自本切片引入；后台 provisioning 队列）
   redisUrl: process.env.REDIS_URL ?? 'redis://localhost:6379/0',
+  // ---- OpenAPI 文档面（#761）----
+  apiDocs: (() => {
+    return {
+      // 域开关：flag 关 → 装配层 server.ts 不注入 docs deps → /api/docs 未挂载（90005）。
+      // flag 只在装配层消费（app.ts 不读 config，只认 deps 注入，对齐 autofigure 先例）。
+      enabled: readApiDocsEnabled(),
+    }
+  })(),
   // ---- AutoFigure（T01，docs/autofigure/tickets/T01-authenticated-figure-creation.md）----
   autofigure: (() => {
     const enabled = readAutofigureEnabled()

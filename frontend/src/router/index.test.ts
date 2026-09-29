@@ -12,6 +12,7 @@ describe('页面路由按需加载', () => {
   it('所有页面组件均使用动态导入', () => {
     const records = router.getRoutes().filter((route) => route.name)
     expect(records.map((route) => String(route.name)).sort()).toEqual([
+      'admin-docs',
       'admin-trace-logs',
       'admin-users',
       'categories',
