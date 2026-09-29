@@ -221,7 +221,7 @@ _Avoid_: subagent——OpenClaw 一次性派生语义的旧词，新 runtime 不
 _Avoid_: 消息总线——广播语义；信箱是点对点寻址 + 持久收件箱；同步 rendezvous 等待——不存在，等待 = park + resume；内存队列——重启丢信，48h 攒信场景不可接受。
 
 **figure 工具 (figure tool)**:
-（目标架构，#734 effort / #744 定稿，未实施）图的唯一生成入口：deepagents 会话内可调用的域工具，输入图的文字描述（method_text），触发 figure run，产出 Figure 作为工具结果附件（对话内渲染/下载）。domain-scoped 工具——非文件/exec 类，不进审批三层漏斗。
+（目标架构，#734 effort / #744 定稿，未实施）图的唯一生成入口：deepagents 会话内可调用的域工具，输入图的文字描述（method_text），触发 figure run，产出 Figure 作为工具结果附件（对话内渲染/下载）。两条触发面一条执行面——agent 自动调用 + `/figure` 系统命令手动调用（#742 命令模型，不经 agent 自由裁量）。domain-scoped 工具——非文件/exec 类，不进审批三层漏斗。
 _Avoid_: AutoFigure 工具——生成链路已换轨为 AutoFigure-Edit 流水线的控制面 TS 重实现（LangGraph 固定 graph），vendored「AutoFigure」代码全部退役；「画图插件」——它是域工具不是插件。
 
 **figure run（图生成运行）**:

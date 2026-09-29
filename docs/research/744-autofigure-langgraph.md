@@ -101,6 +101,7 @@ graph 状态（LangGraph state）：`methodText`、`figurePng`（步骤 1 产物
 - **执行语义**：**同步长工具调用**——随调用方的会话 run 执行（graph 在 run 内运行），分钟级时长内 agent loop 阻塞等待（语义即「agent 决定画图并等结果」）。阶段进度经 #726 run 域 tool delta 事件流给前端（工具行显示：生图中 / 分割中 / 模板生成中 / 组装中）。
 - **中断联动**：会话 run aborted（#726 `aborted{by}`）→ figure run 联动 aborted 终态（无半产物落 Figure 成功态）。
 - **审批边界**：figure 工具是 domain-scoped 工具（非文件/exec 类），**不进 #729 三层漏斗**——漏斗对象是 file/exec 工具参数，figure 工具的输入是纯文本描述。spec 记边界：domain 工具的白名单外地位由 #729 工具类别映射表（#737 回填）正式收录。
+- **手动调用**：`/figure <method_text>` 作为 **V1 第四个系统命令**（#742 命令模型：composer 语法 + 直接动作语义，同 /new /compact /model 一类）——用户不经 agent 自由裁量直接触发生成，命令处理器调用**同一** figure 工具包装（执行路径/事件/产物契约零分叉），结果附件落当前会话流。与 agent 自动调用的关系：两条触发面、一条执行面；手动调用同样随会话 run 占并发名额。
 - **回退形态**（若分钟级阻塞 UX 不可接受）：异步工具（立即返 figureId、完成以事件+附件出现）——留档不默认。
 
 ### 4.2 产物契约（Q9 核心）
@@ -158,7 +159,7 @@ figure 生成随会话 run 执行 → 自动占 per-user `maxConcurrentRuns` 名
 
 ## 7. 前端面
 
-- **`AutoFigureView` 退役**（含 `stores/autofigure.ts` 轮询逻辑；`api/figures.ts` 收缩为读/下载面）。工具是唯一生成入口——生成体验完全在会话流内。
+- **`AutoFigureView` 退役**（含 `stores/autofigure.ts` 轮询逻辑；`api/figures.ts` 收缩为读/下载面）。工具是唯一生成入口——agent 自动调用与 `/figure` 手动命令两条触发面，生成体验完全在会话流内。
 - **工具结果图卡**（ChatView 工具行扩展）：进行态 = 阶段进度（tool delta）；终态 = SVG 渲染（`<img>` blob URL）+ 下载按钮 + 失败态（稳定非敏感原因）。走 #730 单管线渲染。
 - **Figure Editor（F2/F3）接缝**：编辑器经 figures API 读写 SVG（`GET/PUT /figures/:id/svg`）——[其侦察文档 §3](../figure-editor/reconnaissance.md) 已预留「优先复用 figures/files 能力」；编辑产物版本策略归 figure-editor effort 自定。生成→编辑闭环即：thread 内生成 → Figure 行 → 编辑器打开改 → 存回。
 - 中间产物（template/optimized）不在前端暴露（未持久化）；「从模板重新组装」类高级操作不在 V1。
