@@ -1,6 +1,6 @@
-# OpenClaw Fleet 面板
+# 天津大学科研智能体平台
 
-多 OpenClaw 容器管理面板。TS/Express 控制面（server/，替代已退役的 Django 后端，#341 M9）经四条接触路径与每个 OpenClaw 容器交互；Vue3 前端经 REST + WS 消费控制面。本 glossary 只收录**本项目特有**的领域术语，通用编程概念（Port / Adapter / Translator / Protocol 等设计模式词汇）不在此列。
+「天津大学科研智能体平台」——多 OpenClaw 容器管理面板。TS/Express 控制面（server/，替代已退役的 Django 后端，#341 M9）经四条接触路径与每个 OpenClaw 容器交互；Vue3 前端经 REST + WS 消费控制面。本 glossary 只收录**本项目特有**的领域术语，通用编程概念（Port / Adapter / Translator / Protocol 等设计模式词汇）不在此列。
 
 ## Language
 
@@ -255,3 +255,7 @@ _Avoid_: 「插件收编 commands/skills」——插件不取代官方内容目�
 **双面板 (two-panel split)**:
 （#758 方向修订定稿，未实施）产品面按「跨用户运营 vs 本人工作」切割为两个面板：用户面板 = 本人工作面（对话、wiki 只读视图、lab 文件、models 自有 provider、插件目录启用位、本人容器）；admin 面板 = 跨用户运营面（用户管理/配额、provider_endpoints 白名单、全局审计检索、usage 核算）。产物级隔离——同仓库双入口 MPA（独立 `admin.html`/路由/bundle，共享组件库与 api client），用户面板 bundle 不含 admin 代码；同一控制面、同一 JWT，role claim 区分，登录按角色落点，后端 REST 面不变只换前端承载。
 _Avoid_: 单面板角色门控混入——「摘出来」是产物级隔离，不是隐藏入口；为 admin 另起服务/认证体系——隔离只发生在前端产物与路由层。
+
+**产品显示名 (product display name)**:
+「天津大学科研智能体平台」（#758 Q13 钉定，#760 执行）——用户可见面（浏览器标题、登录页品牌行、导航品牌位、可见文案、README 等面向读者的自称）对产品的唯一称呼。前端 TS 面单一来源 `frontend/src/product.ts` 的 `PRODUCT_NAME`；`index.html` 静态直写同一字面量（两处互指）。与内部标识**解耦**：GitHub 仓库名 `ACautomata/researcher-service`、npm 包名、GHCR 镜像名、容器名前缀（#747 钉内部标识）、模块路径/目录名一律保持 researcher 系不动；仓库重命名留待用户单独决定（影响 remote URL 与 CD 引用）。
+_Avoid_: 用户可见文案出现 `researcher-service` 自称——那是内部仓库/模块标识，不是产品名；改名连带改仓库名/npm 包名/镜像名——改名只动显示层，内部标识零改动；动法律文案里的备案算法名（「天研文本图像生成合成算法」）——那是算法备案身份，与面板产品名不同层。

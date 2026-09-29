@@ -20,6 +20,8 @@ describe('application shell layout', () => {
 
     expect(wrapper.find('.app-shell').exists()).toBe(true)
     expect(wrapper.find('.app-nav').exists()).toBe(true)
+    // #760 品牌位：导航首位渲染产品显示名（单一来源 src/product.ts）
+    expect(wrapper.get('[data-test="nav-brand"]').text()).toBe('天津大学科研智能体平台')
     expect(wrapper.find('.app-content [data-test="route-page"]').exists()).toBe(true)
   })
 
