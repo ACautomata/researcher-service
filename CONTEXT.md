@@ -85,6 +85,7 @@ _Avoid_: 删除会话/移除会话——与归档混为一谈；术语必须指�
 **附件 (attachment)**:
 `chat.send` 携带的多模态内容块（wire 字段 `attachments`：`{type, mimeType, fileName, content, width, height}`），经隧道**内联**发送。用户经浏览器采集（粘贴/拖拽/选择）上传，图片发送前**前端压缩**；content 是自由形状（0 信任），渲染端须按块类型分派。
 _Avoid_: 文件/图片消息——掩盖「内联于 chat.send 帧、多类型块数组」的协议形态。
+**（新 runtime 演进注，wayfinder #766 / #747 修订）**：（目标架构，未实施）附件经 REST 上传直写会话沙箱 `/lab/uploads/`（字节落容器 FS；宿主 FS / MongoDB / V1 对象存储均不用），消息与 checkpoint 只存引用（attachmentId/path），run 首节点确定性 **ingestion 工具**校验物化、图片装配时转多模态 block；下载走 owner 门端点（不存在/越权同码防探测）。上传纳入 **session-global 文件日志**，rewind 时可被一并回退。
 
 **审批卡 (approval card)**:
 OpenClaw agent 执行 elevated 命令前的权限门。网关经**连接级**事件（`exec.approval.requested` / `plugin.approval.requested`，不挂 runId）下发 `{id, kind, command, sessionKey, agentId}`；用户批准/拒绝后经 `*.approval.resolved` 广播落定（first-answer-wins，网关权威 decision，可能与他端不同）。生命周期：`pending`（待处理）→ `resolving`（已点击等回执）→ `resolved`（终态）；断线复位 `resolving → pending` 可重试，网关侧失效 `→ expired`（终态不可回覆）。**终态不留痕**（[ADR 0014](./docs/adr/0014-resolved-approval-no-trace.md)，supersede #547 / [ADR 0009](./docs/adr/0009-chat-timeline-merge.md) 的留痕条目）：resolved/expired 卡从界面消失，不在对话转录中留存任何记录；未决卡（pending/resolving）留在 composer 上方待办区，落定即撤。subagent 发起的卡（agentId 即来源语义）唯一可见于 main 会话。
@@ -151,6 +152,7 @@ _Avoid_: 消息 id / messageId——「消息 id」在本项目已指分页锚�
 **对话回退 (conversation rewind)**:
 把某条已持久化用户消息之后的历史从**当前活跃路径**剪除，被剪的首条用户消息文本与图片附件回填 composer 供编辑重发（面板的「消息编辑」形态——官方无原地改写）。回退不改写旧数据：旧路径留在网关 append-only 存储里，改动方式是**追加一个叶子事件把活跃路径重定向**，随后转录换新代；面板侧对应「放弃在途 run + 全量重拉历史」的重建（分页态随之重置）。成功路径两件随附事（Codex #703 review）：**作废本会话 outbox 待发残留**——残留条目属于被剪的旧代，不清则下次重连 resendOutbox 会把它重发到回退后的分支（消息复活 + 意外触发 agent run）；**重拉会话列表**——回退改写该会话权威元数据（`updated_at` 可能前移、派生标题可能随被剪首条改变），刷新侧栏日期分组与头部标题（多标签页列表陈旧仍是已知可接受瑕疵，本端自己发起的 mutation 后立即刷新不是订阅）。同族的 fork / 分支切换 / 分支 CAS 复用同一套 entryId 与重建语义。确认文案须说明后果（同「会话删除」的破坏性确认原则）。
 _Avoid_: 删除消息 / 撤销——回退既不删旧数据也不是还原（是剪出一条新活跃路径）；「重新生成」——那是重发当前轮，不动历史。
+**（新 runtime 演进注，wayfinder #766 / #747 修订）**：（目标架构，未实施）回退扩展为**双域回退**——对话指针 + 文件状态（文件日志全局序逆放，见「文件日志」「fork 文件语义」演进注）；恢复菜单三态：只回对话 / 只回文件 / 两者同回；exec 产生的外部效应不回退（显式降级，rewind 预览列出跨越的 exec 清单）。
 
 **回退在途 (rewind in flight)**:
 回退 RPC 已发出、重建管线未落地的窗口（一次 RPC + 一次全量重拉，编排层单飞——两次在途会在网关侧竞争同一活跃路径、落地序由网络决定，可能回填的不是最后一次意图）。窗口内消息投影仍是回退前的旧代：**发送被禁止**（composer 发送键置灰 + `send()` 守卫——此刻落下的 send 会被随后的放弃在途 run 吞掉：服务器端竞速下 run 被弃、乐观投影被重建冲掉，agent 却在服务端继续跑，用户消息与回复双双丢失）；**回退入口隐藏**（重入仍由编排层静默忽略，UI 门是双重防线）。输入框与附件编辑**不受限**——草稿指纹守卫保证窗口内的编辑在回填时原地保留（官方「your newer draft and attachments stay in place」）。落地后门项立即恢复。回退与 fork **在途互斥**（双向：两入口门均要求对方 busy 为假——两者同动 transcript，同时进行即网关侧乐观并发冲突）。
@@ -207,6 +209,11 @@ _Avoid_: 用镜像名推断规格——窗口期多规格并存，判定必须�
 **fork 文件语义 (fork file semantics)**:
 （目标架构，#728 定稿）fork 建新 session 时**拷贝源沙箱 `/lab`**（docker export 流式导出→导入新沙箱；源已删则空起步 + 系统消息告知 agent）；**rewind 不回滚文件**——只回滚对话指针，`/lab` 保持「未来状态」，agent 重跑工具时自行面对（与 OpenClaw 现状语义一致）。
 _Avoid_: rewind 恢复文件快照——文件系统无版本，回滚只在对话域。
+**（新 runtime 演进注，wayfinder #766 / #747 修订）**：「rewind 不回滚文件」**supersede**（翻案经产品决策程序）——rewind/branch-switch 按文件日志逆放恢复 `/lab` 至锚点时刻；fork 拷贝源沙箱**剔除墓碑目录**，新会话文件日志全新起步（rewind 深度上限从新会话起算）。
+
+**文件日志 (file journal)**:
+（目标架构，wayfinder #766 定稿，未实施）会话级**全局全序**的文件操作日志：文件工具与 ingestion 上传的每个字节级破坏性 op（覆写/删除）记一行（锚 checkpointId + 全局 seq + 前后 sha256 + 墓碑键 + toolCallId 幂等键 + applied 标记），墓碑字节由 daemon 侧以 root 写容器内 0700 隐藏目录（agent 结构性不可读写删）。rewind/branch-switch = 按全局序逆放逆操作；重放期间全会话文件写围栏，checkpoint 剪枝 GC 尊重 replay lease；超「文件 rewind 深度上限」降级为只回对话。exec 副作用不入日志（显式降级）。
+_Avoid_: 文件快照/文件版本库——不是整树快照也不是 VCS，是操作日志 + 墓碑重放；per-thread 日志——并发下无法定义会话级回退目标（已否决）。
 
 **对话分支 (conversation branch)**:
 同一会话在网关转录 DAG 里的多条活跃路径候选（由回退后重说 / 从历史点 fork 产生）。面板的分支菜单（聊天头部）只在**分支数 > 1** 时渲染（单分支 / 拉取失败 / 能力缺失统一不渲染——空列表即降级语义）；每项 = 最新消息摘要（网关 `headline`，空 →「未命名分支」）+「N 条消息」+ 时间（可选槽位缺失不渲染）。active 项打勾且 disabled——网关把 no-op 切换定为 typed error，UI 从不发起；active 判定唯一权威 = 网关标记（与分支 CAS 的 leaf 基准同源，不由本地 transcript 推导）。分支数据随会话切换 / 历史加载**并行预拉**（懒拉会让按钮出现被慢历史拖累），失败静默降级；`branchesGen` 请求代丢弃乱序旧响应。切换 = 同族「破坏性 RPC + 重建管线」：outbox 代际作废（被切走分支的待发不得重发进新分支）+ 放弃在途 run + 全量重拉历史与分支列表；busy 复用「回退在途」单一 ref。0 信任校准在协议层：`leafEntryId`（switch 定位参数）缺失才砍整项，纯展示字段异形只降级自己的槽位。
