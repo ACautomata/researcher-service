@@ -405,3 +405,9 @@ export const config = {
 // refresh cookie 公共属性（规格 #311 锁）：HttpOnly + Secure(prod) + SameSite=Lax + Path=/api/v1/auth
 export const REFRESH_COOKIE = 'refresh_token'
 export const REFRESH_COOKIE_PATH = '/api/v1/auth'
+
+// panel_stream cookie（SSE 只读流通道，#726 认证行 · issue #773）：HttpOnly + Secure(prod) +
+// SameSite=Strict + Path=/api/v1/events（浏览器只把它发给流端点，写面零 CSRF 暴露——REST Bearer
+// 全不动）。login/refresh Set-Cookie 滑动续期，logout 清除。
+export const PANEL_STREAM_COOKIE = 'panel_stream'
+export const PANEL_STREAM_COOKIE_PATH = '/api/v1/events'
