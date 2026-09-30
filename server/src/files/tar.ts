@@ -14,6 +14,21 @@ export interface TarEntry {
   data: Buffer | null // 仅 collectData 且未超 maxDataBytes 时收集
 }
 
+// tar 条目名归一化（对齐 Go archive/tar 产出）：去 './' 前缀、去尾 '/'；根 '.' → null（跳过）。
+// 归一化后条目名即「相对 root 的完整相对路径」（getArchive 的 tar 名相对传入路径展开）。
+// files/dockerArchive 与 runner/backend/dockerArchiveBackend 共用（#772 收拢单一直义）。
+export function normalizeTarName(raw: string): string | null {
+  let n = raw.startsWith('./') ? raw.slice(2) : raw
+  while (n.endsWith('/')) n = n.slice(0, -1)
+  if (n === '' || n === '.') return null
+  return n
+}
+
+// tar mtime（unix 秒）→ ISO 字符串。共用同上。
+export function mtimeIso(mtime: number): string {
+  return new Date(mtime * 1000).toISOString()
+}
+
 const BLOCK = 512
 // [start, end) 字节区间（subarray 直用）
 const HEADER_FIELD = {

@@ -17,19 +17,10 @@ import { HOME_BIND } from '../containers/constants'
 import { FileExists, FileInvalidPath, FileNotFound } from './errors'
 import type { DirListing, FileArchive, FileEntry, FileReading, FileRoot } from './fsPort'
 import { FILE_ROOTS, MAX_FILE_READ_BYTES, WALK_LIMIT } from './values'
-import { alignTo, createTarFile, createTarTree, parseNumeric, parseTar, type TarEntry, type TarTreeEntry } from './tar'
+import { alignTo, createTarFile, createTarTree, mtimeIso, normalizeTarName, parseNumeric, parseTar, type TarEntry, type TarTreeEntry } from './tar'
 
 // #591 静态 config：容器内 openclaw.json 固定路径（gateway 默认读取位，无 OPENCLAW_CONFIG_PATH）
 const CONFIG_PATH = `${HOME_BIND}/openclaw.json`
-
-// tar 条目名归一化（对齐 Go archive/tar 产出）：去 './' 前缀、去尾 '/'；根 '.' → null（跳过）。
-// 归一化后条目名即「相对 root 的完整相对路径」（getArchive 的 tar 名相对传入路径展开）。
-function normalizeTarName(raw: string): string | null {
-  let n = raw.startsWith('./') ? raw.slice(2) : raw
-  while (n.endsWith('/')) n = n.slice(0, -1)
-  if (n === '' || n === '.') return null
-  return n
-}
 
 function toEntry(t: TarEntry): FileEntry {
   return {
@@ -58,10 +49,6 @@ async function walkTree(absDir: string, relDir: string): Promise<TarTreeEntry[]>
     }
   }
   return out
-}
-
-function mtimeIso(mtime: number): string {
-  return new Date(mtime * 1000).toISOString()
 }
 
 // probe 结果：ok（完整 tar 已收集）/ oversized（只读头，超大文件不收集）/ null（路径不存在）
