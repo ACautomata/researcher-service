@@ -1,0 +1,324 @@
+// 增量 SQLite schema 收敛 —— apply-schema.mjs（初始化后收敛）与 upgrade-schema.mjs
+// （entrypoint 每次启动调用）共享本过程，保证两条路径对同一 DB 收敛到同一形状。
+//
+// 铁律（#771 验收）：
+//   - 全程幂等可重跑 —— CREATE 系 IF NOT EXISTS；ADD COLUMN 经 PRAGMA table_info guard
+//     （SQLite 无 ADD COLUMN IF NOT EXISTS）；种子 INSERT OR IGNORE。
+//   - 只做 additive —— 不 ALTER/DROP 既有旧表；旧形状 model_providers / pairings 留待
+//     T0 清退（#801），检测到旧形状只告警。
+//   - DDL 与 prisma/init.sql 逐字节同源（镜像其 CREATE 形状），init.sql 由
+//     prisma migrate diff 从 schema.prisma 派生 —— 单一来源，此处镜像。
+export const SCHEMA_VERSION = 8
+
+export function runIncrementalSchema(db) {
+  db.exec(`
+CREATE TABLE IF NOT EXISTS "text_trace_logs" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "traceId" TEXT NOT NULL,
+    "userId" TEXT NOT NULL,
+    "username" TEXT NOT NULL,
+    "ipAddress" TEXT NOT NULL,
+    "containerName" TEXT,
+    "sessionKey" TEXT,
+    "runId" TEXT,
+    "inputText" TEXT NOT NULL DEFAULT '',
+    "outputText" TEXT NOT NULL DEFAULT '',
+    "outputHash" TEXT NOT NULL DEFAULT '',
+    "status" TEXT NOT NULL DEFAULT 'success',
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT "text_trace_logs_userId_fkey" FOREIGN KEY ("userId") REFERENCES "users" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS "text_trace_logs_traceId_key" ON "text_trace_logs"("traceId");
+CREATE INDEX IF NOT EXISTS "text_trace_logs_userId_idx" ON "text_trace_logs"("userId");
+CREATE INDEX IF NOT EXISTS "text_trace_logs_ipAddress_idx" ON "text_trace_logs"("ipAddress");
+CREATE INDEX IF NOT EXISTS "text_trace_logs_createdAt_idx" ON "text_trace_logs"("createdAt");
+CREATE INDEX IF NOT EXISTS "text_trace_logs_status_idx" ON "text_trace_logs"("status");
+
+CREATE TABLE IF NOT EXISTS "figures" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "ownerId" TEXT NOT NULL,
+    "prompt" TEXT NOT NULL,
+    "idempotencyKey" TEXT,
+    "xml" TEXT,
+    "png" BLOB,
+    "evaluation" TEXT,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" DATETIME NOT NULL,
+    CONSTRAINT "figures_ownerId_fkey" FOREIGN KEY ("ownerId") REFERENCES "users" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS "generation_jobs" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "figureId" TEXT NOT NULL,
+    "status" TEXT NOT NULL DEFAULT 'queued',
+    "errorMessage" TEXT,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" DATETIME NOT NULL,
+    CONSTRAINT "generation_jobs_figureId_fkey" FOREIGN KEY ("figureId") REFERENCES "figures" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS "figures_ownerId_idx" ON "figures"("ownerId");
+CREATE UNIQUE INDEX IF NOT EXISTS "generation_jobs_figureId_key" ON "generation_jobs"("figureId");
+`)
+
+  // T02 幂等（grilling §17）：既有 figures 表（T01 前已建）缺 idempotencyKey 列。ADD COLUMN
+  // 非天然幂等（重复执行报 duplicate column），先查 PRAGMA table_info 再补；唯一索引本身
+  // 幂等（IF NOT EXISTS）。fresh 库（上方 CREATE TABLE 已带列）此处列存在 → guard 跳过。
+  const figureCols = db.prepare(`PRAGMA table_info("figures")`).all()
+  if (!figureCols.some((c) => c.name === 'idempotencyKey')) {
+    db.exec(`ALTER TABLE "figures" ADD COLUMN "idempotencyKey" TEXT`)
+  }
+  db.exec(
+    `CREATE UNIQUE INDEX IF NOT EXISTS "figures_ownerId_idempotencyKey_key" ON "figures"("ownerId", "idempotencyKey")`,
+  )
+
+  // T03（docs/autofigure/tickets/T03-single-worker-generation-lifecycle.md）：generation_jobs
+  // 增加执行生命周期时间戳。列语义：startedAt = 原子领取（queued→running）时刻置位，running 期间
+  // 非空；finishedAt = 终态（succeeded|failed）写入时刻置位，queued/running 恒 null。两列均
+  // nullable（不迁移旧行、不给旧 queued 伪造时间）；ADD COLUMN 非幂等，PRAGMA guard 先查再补
+  //（对齐 T02 idempotencyKey 模式）。fresh 库（上方 CREATE TABLE 已带列）此处列存在 → guard 跳过。
+  const jobCols = db.prepare(`PRAGMA table_info("generation_jobs")`).all()
+  if (!jobCols.some((c) => c.name === 'startedAt')) {
+    db.exec(`ALTER TABLE "generation_jobs" ADD COLUMN "startedAt" DATETIME`)
+  }
+  if (!jobCols.some((c) => c.name === 'finishedAt')) {
+    db.exec(`ALTER TABLE "generation_jobs" ADD COLUMN "finishedAt" DATETIME`)
+  }
+
+  // T06（docs/autofigure/tickets/T06-artifact-persistence-png.md · grilling §6）：figures 增加产物
+  // 三列——xml（文本）+ png（SQLite BLOB）+ evaluation（文本 JSON）。全 nullable：仅在 Job 提交
+  // succeeded 终态时由 runner 原子写入，queued/running/failed 恒 null（不迁移旧行、不给旧
+  // succeeded 伪造产物）。ADD COLUMN 非幂等，PRAGMA guard 先查再补（对齐 T02/T03 模式）。
+  // 本脚本上方 CREATE TABLE（既有部署早于 T01 前已建表，走 ALTER 分支）也随 init.sql 同步带三列，
+  // 保持 fresh 与 upgrade 两路径列集一致——此处列存在 → guard 跳过。
+  const figCols = db.prepare(`PRAGMA table_info("figures")`).all()
+  if (!figCols.some((c) => c.name === 'xml')) {
+    db.exec(`ALTER TABLE "figures" ADD COLUMN "xml" TEXT`)
+  }
+  if (!figCols.some((c) => c.name === 'png')) {
+    db.exec(`ALTER TABLE "figures" ADD COLUMN "png" BLOB`)
+  }
+  if (!figCols.some((c) => c.name === 'evaluation')) {
+    db.exec(`ALTER TABLE "figures" ADD COLUMN "evaluation" TEXT`)
+  }
+
+  // #699 容器升级编排（spec §2.2）：containers 增加 upgradeAttempts 列（连续失败计数，成功清零；
+  // ≥3 → upgrade_failed 终态）。ADD COLUMN 非幂等，PRAGMA guard 先查再补（对齐 T02/T03/T06 模式）。
+  // fresh 库（init.sql CREATE TABLE 已带列）此处列存在 → guard 跳过；表不存在（异常/极旧部署）→ 跳过
+  // 防 ALTER no such table。
+  const containerTable = db
+    .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='containers'`)
+    .get()
+  if (containerTable) {
+    const containerCols = db.prepare(`PRAGMA table_info("containers")`).all()
+    if (!containerCols.some((c) => c.name === 'upgradeAttempts')) {
+      db.exec(`ALTER TABLE "containers" ADD COLUMN "upgradeAttempts" INTEGER NOT NULL DEFAULT 0`)
+    }
+  }
+
+  runLanggraphFoundation(db)
+}
+
+// #771（#747·01）Prisma 新表地基：#747 B 节全表 + users 加列 + 旧形状 model_providers 检测。
+// DDL 镜像 prisma/init.sql（schema.prisma 派生）同形状，全 IF NOT EXISTS。
+function runLanggraphFoundation(db) {
+  // ---- users 加列（731 §3.3 / 729 §3.5）——既有库表已存在，ADD COLUMN 经 PRAGMA guard ----
+  const usersTable = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='users'`).get()
+  if (usersTable) {
+    const userCols = db.prepare(`PRAGMA table_info("users")`).all()
+    if (!userCols.some((c) => c.name === 'maxConcurrentRuns')) {
+      db.exec(`ALTER TABLE "users" ADD COLUMN "maxConcurrentRuns" INTEGER NOT NULL DEFAULT 2`)
+    }
+    if (!userCols.some((c) => c.name === 'approvalMode')) {
+      db.exec(`ALTER TABLE "users" ADD COLUMN "approvalMode" TEXT NOT NULL DEFAULT 'standard'`)
+    }
+  }
+
+  // ---- 会话历史域新表（#747 B 节 / #727）----
+  db.exec(`
+CREATE TABLE IF NOT EXISTS "sessions" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "ownerId" TEXT NOT NULL,
+    "containerId" TEXT NOT NULL,
+    "title" TEXT NOT NULL DEFAULT '',
+    "parentSessionKey" TEXT,
+    "forkSourceJson" TEXT,
+    "activeCheckpointId" TEXT,
+    "archivedAt" DATETIME,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" DATETIME NOT NULL,
+    CONSTRAINT "sessions_ownerId_fkey" FOREIGN KEY ("ownerId") REFERENCES "users" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS "session_messages" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "sessionId" TEXT NOT NULL,
+    "turn" INTEGER NOT NULL,
+    "role" TEXT NOT NULL,
+    "content" TEXT NOT NULL DEFAULT '',
+    "attachmentsJson" TEXT NOT NULL DEFAULT '{"v":1}',
+    "anchorCheckpointId" TEXT,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT "session_messages_sessionId_fkey" FOREIGN KEY ("sessionId") REFERENCES "sessions" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS "checkpoints" (
+    "threadId" TEXT NOT NULL,
+    "checkpointNs" TEXT NOT NULL DEFAULT '',
+    "checkpointId" TEXT NOT NULL,
+    "parentCheckpointId" TEXT,
+    "type" TEXT NOT NULL,
+    "blob" BLOB NOT NULL,
+    "metadataJson" TEXT NOT NULL DEFAULT '{}',
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    PRIMARY KEY ("threadId", "checkpointNs", "checkpointId"),
+    CONSTRAINT "checkpoints_threadId_fkey" FOREIGN KEY ("threadId") REFERENCES "sessions" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS "checkpoint_writes" (
+    "threadId" TEXT NOT NULL,
+    "checkpointNs" TEXT NOT NULL DEFAULT '',
+    "checkpointId" TEXT NOT NULL,
+    "taskId" TEXT NOT NULL,
+    "idx" INTEGER NOT NULL,
+    "channel" TEXT NOT NULL,
+    "type" TEXT NOT NULL,
+    "blob" BLOB NOT NULL,
+
+    PRIMARY KEY ("threadId", "checkpointNs", "checkpointId", "taskId", "idx"),
+    CONSTRAINT "checkpoint_writes_threadId_fkey" FOREIGN KEY ("threadId") REFERENCES "sessions" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS "memory_items" (
+    "namespace" TEXT NOT NULL,
+    "key" TEXT NOT NULL,
+    "valueJson" TEXT NOT NULL,
+    "updatedAt" DATETIME NOT NULL,
+
+    PRIMARY KEY ("namespace", "key")
+);
+
+CREATE TABLE IF NOT EXISTS "tool_approval_logs" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "traceId" TEXT NOT NULL,
+    "runId" TEXT NOT NULL,
+    "userId" TEXT NOT NULL,
+    "layer" TEXT NOT NULL,
+    "decision" TEXT NOT NULL,
+    "toolName" TEXT NOT NULL,
+    "toolCall" TEXT NOT NULL,
+    "policyClass" TEXT,
+    "reason" TEXT,
+    "judgeInputHash" TEXT,
+    "latencyMs" INTEGER,
+    "judgeTokens" INTEGER,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS "attachments" (
+    "sessionId" TEXT NOT NULL,
+    "id" TEXT NOT NULL,
+    "ownerId" TEXT NOT NULL,
+    "messageId" TEXT,
+    "fileName" TEXT NOT NULL,
+    "mimeType" TEXT NOT NULL,
+    "size" INTEGER NOT NULL,
+    "sha256" TEXT NOT NULL,
+    "path" TEXT NOT NULL,
+
+    PRIMARY KEY ("sessionId", "id"),
+    CONSTRAINT "attachments_sessionId_fkey" FOREIGN KEY ("sessionId") REFERENCES "sessions" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
+    CONSTRAINT "attachments_ownerId_fkey" FOREIGN KEY ("ownerId") REFERENCES "users" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
+    CONSTRAINT "attachments_messageId_fkey" FOREIGN KEY ("messageId") REFERENCES "session_messages" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS "file_journal" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "sessionId" TEXT NOT NULL,
+    "checkpointId" TEXT NOT NULL,
+    "seq" INTEGER NOT NULL,
+    "op" TEXT NOT NULL,
+    "path" TEXT NOT NULL,
+    "beforeSha256" TEXT,
+    "afterSha256" TEXT,
+    "tombstoneKey" TEXT,
+    "toolCallId" TEXT NOT NULL,
+    "applied" BOOLEAN NOT NULL DEFAULT false,
+    CONSTRAINT "file_journal_sessionId_fkey" FOREIGN KEY ("sessionId") REFERENCES "sessions" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS "sessions_ownerId_idx" ON "sessions"("ownerId");
+CREATE INDEX IF NOT EXISTS "session_messages_sessionId_turn_idx" ON "session_messages"("sessionId", "turn");
+CREATE INDEX IF NOT EXISTS "checkpoints_threadId_checkpointNs_idx" ON "checkpoints"("threadId", "checkpointNs");
+CREATE INDEX IF NOT EXISTS "checkpoint_writes_threadId_checkpointNs_idx" ON "checkpoint_writes"("threadId", "checkpointNs");
+CREATE INDEX IF NOT EXISTS "tool_approval_logs_traceId_idx" ON "tool_approval_logs"("traceId");
+CREATE INDEX IF NOT EXISTS "tool_approval_logs_userId_createdAt_idx" ON "tool_approval_logs"("userId", "createdAt");
+CREATE INDEX IF NOT EXISTS "attachments_ownerId_idx" ON "attachments"("ownerId");
+CREATE INDEX IF NOT EXISTS "attachments_sessionId_idx" ON "attachments"("sessionId");
+CREATE INDEX IF NOT EXISTS "file_journal_sessionId_checkpointId_idx" ON "file_journal"("sessionId", "checkpointId");
+CREATE UNIQUE INDEX IF NOT EXISTS "file_journal_sessionId_seq_key" ON "file_journal"("sessionId", "seq");
+CREATE UNIQUE INDEX IF NOT EXISTS "file_journal_sessionId_toolCallId_key" ON "file_journal"("sessionId", "toolCallId");
+`)
+
+  // ---- 配置域新表（731 §3：provider_endpoints / config_meta · 752 §4.2：plugin_enablements）----
+  db.exec(`
+CREATE TABLE IF NOT EXISTS "provider_endpoints" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "scheme" TEXT NOT NULL,
+    "host" TEXT NOT NULL,
+    "port" INTEGER,
+    "note" TEXT NOT NULL DEFAULT '',
+    "createdBy" TEXT NOT NULL,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS "config_meta" (
+    "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT DEFAULT 1,
+    "version" INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE TABLE IF NOT EXISTS "plugin_enablements" (
+    "ownerId" TEXT NOT NULL,
+    "pluginId" TEXT NOT NULL,
+    "enabled" BOOLEAN NOT NULL DEFAULT true,
+    "enabledAt" DATETIME NOT NULL,
+
+    PRIMARY KEY ("ownerId", "pluginId"),
+    CONSTRAINT "plugin_enablements_ownerId_fkey" FOREIGN KEY ("ownerId") REFERENCES "users" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS "provider_endpoints_scheme_host_port_key" ON "provider_endpoints"("scheme", "host", "port");
+`)
+
+  // config_meta 单行种子（id=1, version=1）：INSERT OR IGNORE 幂等；provider/endpoint CRUD
+  // 同事务 +1（热生效信号，731 §4）自 version=1 起步。fresh 库（init.sql CREATE 空表）同样
+  // 经此路径补种子，与既有库一致。
+  db.exec(`INSERT OR IGNORE INTO "config_meta" ("id", "version") VALUES (1, 1)`)
+
+  // 731 §3.1 seed：迁移脚本把 deploy/openclaw.json 模板既有端点写入白名单（对齐 ConfigRenderer
+  // 「空 providers → 模板默认 minimax」语义的显式 seed）。createdBy 无用户语境（面板级 seed，
+  // users 表可能为空）→ ''（该列无 FK，不伪造 users.id）；幂等 = 固定 seed id + INSERT OR
+  // IGNORE——#775 迁移存量用户 minimax provider 行时遇已存在条目自然跳过。
+  db.exec(`
+INSERT OR IGNORE INTO "provider_endpoints" ("id", "scheme", "host", "port", "note", "createdBy", "createdAt")
+VALUES ('seed-minimax-endpoint', 'https', 'api.minimaxi.com', NULL,
+        'seed（731 §3.1）：deploy/openclaw.json 模板默认 minimax 端点', '', CURRENT_TIMESTAMP)
+`)
+
+  // ---- 旧形状 model_providers 检测（#771 验收「旧表不动，留待 T0 清退」）----
+  // 存量库旧形状（containerId/api/apiKeyEnvId 列）本票不做任何 ALTER/迁移：legacy models 域
+  // 对该库离线（Prisma client 已按新形状生成），处置归 T0（#801）或重建库（删库重跑 db:apply）。
+  const mpTable = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='model_providers'`).get()
+  if (mpTable) {
+    const mpCols = db.prepare(`PRAGMA table_info("model_providers")`).all()
+    if (mpCols.some((c) => c.name === 'containerId')) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        '[db:schema] 检测到旧形状 model_providers（containerId/api/apiKeyEnvId）——#771 本票不动旧表（留待 T0 清退 #801），' +
+          'legacy models 域对该库离线；开发库请删除后重跑 npm run db:apply 重建。',
+      )
+    }
+  }
+}

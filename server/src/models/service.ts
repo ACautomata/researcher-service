@@ -1,9 +1,13 @@
-// ModelProviderService —— 每容器 model provider CRUD + 写后重渲染（#336）。
+// ModelProviderService —— 每用户 model provider CRUD + 写后重渲染（#336；#771 归属上移改造）。
 //
 // 事务语义（对齐 Django models/views._save_and_rewrite / _delete_and_rewrite）：
 //   DB mutation（tx）+ 读 tx 全量 providers + writer.rewrite 在同一事务内 —— rewrite 写盘失败
 //   抛 ConfigWriteError → 事务回滚 DB 行（90003），DB 与盘上配置绝不发散；
-//   unique(containerId, providerId) 并发冲突 → P2002 → 40041；目标行缺失 → P2025 → 40040。
+//   unique(ownerId, providerId) 并发冲突 → P2002 → 40041；目标行缺失 → P2025 → 40040。
+//
+// #771（731 §3.2）：归属 containerId → ownerId 上移（「用户」是配置主体，多容器共享同一 LLM
+// 配置面）——行归属取 inst.ownerId（不再是 inst.id），unique 键随之 (ownerId, providerId)。
+// 写盘/锁/reconcile 整段保留（退役归 #775/T0，#801）。
 //
 // 归属前置（容器级 20040 防探测）由路由层 getInstanceForUser 完成，本服务只操作「已通过归属
 // 校验的容器行」。provider 级「不存在 vs 越权」同码 40040（#336 验收）：非 owner 到不了 provider
@@ -15,7 +19,7 @@ import { fail, EnvelopeError } from '../envelope'
 import { CODE } from '../codes'
 import { type ProviderSpec } from './configBuilder'
 import type { ModelConfigWriter } from './configWriter'
-import { API_ENUM_TO_WIRE, WIRE_TO_API_ENUM, type ProviderApiWire } from './values'
+import { LC_PROVIDER_TO_WIRE, WIRE_TO_LC_PROVIDER, type ProviderApiWire } from './values'
 
 // 写侧输入（路由层已把 snake_case body 经 zod 校验后映射为 camelCase domain shape）
 export interface ModelProviderWriteInput {
@@ -55,12 +59,18 @@ function decodeModels(raw: string): Array<Record<string, unknown>> {
   return []
 }
 
+// 731 §3.2：credentialEnvId 过渡列可空（为 P1 per-user key 留位，见 credentialCipher）；
+// legacy wire/落盘链要求 apiKeyEnvId 非空（zod 入站保证）——缺失时回退空串（旧行为不变）。
+function envIdOf(row: ModelProvider): string {
+  return row.credentialEnvId ?? ''
+}
+
 function toSpec(row: ModelProvider): ProviderSpec {
   return {
     providerId: row.providerId,
-    api: API_ENUM_TO_WIRE[row.api],
+    api: LC_PROVIDER_TO_WIRE[row.lcProvider],
     baseUrl: row.baseUrl,
-    apiKeyEnvId: row.apiKeyEnvId,
+    apiKeyEnvId: envIdOf(row),
     authHeader: row.authHeader,
     models: decodeModels(row.modelsJson),
   }
@@ -70,9 +80,9 @@ function toView(row: ModelProvider): ModelProviderView {
   return {
     id: row.id,
     provider_id: row.providerId,
-    api: API_ENUM_TO_WIRE[row.api],
+    api: LC_PROVIDER_TO_WIRE[row.lcProvider],
     base_url: row.baseUrl,
-    api_key_env_id: row.apiKeyEnvId,
+    api_key_env_id: envIdOf(row),
     auth_header: row.authHeader,
     models: decodeModels(row.modelsJson),
     created_at: row.createdAt,
@@ -104,14 +114,14 @@ export class ModelProviderService {
 
   async list(inst: Container): Promise<ModelProviderView[]> {
     const rows = await this.prisma.modelProvider.findMany({
-      where: { containerId: inst.id },
+      where: { ownerId: inst.ownerId }, // #771 归属上移：行挂用户，同 owner 多容器共享配置面
       orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
     })
     return rows.map(toView)
   }
 
   async get(inst: Container, pid: string): Promise<ModelProviderView> {
-    return toView(await this.requireProvider(inst.id, pid))
+    return toView(await this.requireProvider(inst.ownerId, pid))
   }
 
   // create/update/delete 共用事务骨架：
@@ -141,11 +151,11 @@ export class ModelProviderService {
           await this.assertWritable(tx, inst.id)
           const created = await tx.modelProvider.create({
             data: {
-              containerId: inst.id,
+              ownerId: inst.ownerId, // #771 归属上移（731 §3.2）
               providerId: input.providerId,
-              api: WIRE_TO_API_ENUM[input.api],
+              lcProvider: WIRE_TO_LC_PROVIDER[input.api],
               baseUrl: input.baseUrl,
-              apiKeyEnvId: input.apiKeyEnvId,
+              credentialEnvId: input.apiKeyEnvId,
               authHeader: input.authHeader,
               modelsJson: JSON.stringify(input.models),
             },
@@ -175,14 +185,14 @@ export class ModelProviderService {
         async (tx) => {
           await this.assertWritable(tx, inst.id)
           // 复合唯一 where 定位目标行（路径 pid）：不存在 → P2025 → 40040。
-          // data.providerId 可为新 pid（PUT 改 provider_id），撞同容器既有 pid → P2002 → 40041。
+          // data.providerId 可为新 pid（PUT 改 provider_id），撞同 owner 既有 pid → P2002 → 40041。
           const updated = await tx.modelProvider.update({
-            where: { containerId_providerId: { containerId: inst.id, providerId: pid } },
+            where: { ownerId_providerId: { ownerId: inst.ownerId, providerId: pid } },
             data: {
               providerId: input.providerId,
-              api: WIRE_TO_API_ENUM[input.api],
+              lcProvider: WIRE_TO_LC_PROVIDER[input.api],
               baseUrl: input.baseUrl,
-              apiKeyEnvId: input.apiKeyEnvId,
+              credentialEnvId: input.apiKeyEnvId,
               authHeader: input.authHeader,
               modelsJson: JSON.stringify(input.models),
             },
@@ -195,7 +205,7 @@ export class ModelProviderService {
       return toView(row)
     } catch (e) {
       if (this.needsReconcile(e)) await this.reconcile(inst)
-      this.rethrowKnown(e, { containerId: inst.id, pid })
+      this.rethrowKnown(e, { ownerId: inst.ownerId, pid })
     }
   }
 
@@ -209,7 +219,7 @@ export class ModelProviderService {
         async (tx) => {
           await this.assertWritable(tx, inst.id)
           await tx.modelProvider.delete({
-            where: { containerId_providerId: { containerId: inst.id, providerId: pid } },
+            where: { ownerId_providerId: { ownerId: inst.ownerId, providerId: pid } },
           })
           await this.rewrite(tx, inst)
         },
@@ -217,18 +227,18 @@ export class ModelProviderService {
       )
     } catch (e) {
       if (this.needsReconcile(e)) await this.reconcile(inst)
-      this.rethrowKnown(e, { containerId: inst.id, pid })
+      this.rethrowKnown(e, { ownerId: inst.ownerId, pid })
     }
   }
 
-  // 读目标行（containerId + provider_id 复合定位）。不存在 → 40040（防探测，data 恒 null）。
-  private async requireProvider(containerId: string, pid: string): Promise<ModelProvider> {
+  // 读目标行（ownerId + provider_id 复合定位）。不存在 → 40040（防探测，data 恒 null）。
+  private async requireProvider(ownerId: string, pid: string): Promise<ModelProvider> {
     const row = await this.prisma.modelProvider.findFirst({
-      where: { containerId, providerId: pid },
+      where: { ownerId, providerId: pid },
     })
     if (!row) {
       // eslint-disable-next-line no-console
-      console.warn(`[models] provider_not_found: containerId=${containerId} pid=${pid}`)
+      console.warn(`[models] provider_not_found: ownerId=${ownerId} pid=${pid}`)
       throw fail(CODE.PROVIDER_NOT_FOUND)
     }
     return row
@@ -236,7 +246,7 @@ export class ModelProviderService {
 
   private async rewrite(tx: ProviderTx, inst: Container): Promise<void> {
     const rows = await tx.modelProvider.findMany({
-      where: { containerId: inst.id },
+      where: { ownerId: inst.ownerId },
       orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
     })
     await this.writer.rewrite({ name: inst.name, id: inst.id, providers: rows.map(toSpec) })
@@ -275,26 +285,26 @@ export class ModelProviderService {
   private async reconcile(inst: Container): Promise<void> {
     try {
       const rows = await this.prisma.modelProvider.findMany({
-        where: { containerId: inst.id },
+        where: { ownerId: inst.ownerId },
         orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
       })
       await this.writer.rewrite({ name: inst.name, id: inst.id, providers: rows.map(toSpec) })
     } catch (e) {
       // eslint-disable-next-line no-console
-      console.warn(`[models] reconcile_failed: containerId=${inst.id} err=${(e as Error).message}`)
+      console.warn(`[models] reconcile_failed: ownerId=${inst.ownerId} err=${(e as Error).message}`)
     }
   }
 
   // 已知领域错误转译；其余按原样上抛（ConfigurationError 90003 走错误面 ContainerDomainError 分支）。
   // ctx 供「不存在 vs 越权」的日志区分：对外逐字节同码 40040，区分仅进服务端日志（#336 验收）。
-  private rethrowKnown(e: unknown, ctx?: { containerId: string; pid: string }): never {
+  private rethrowKnown(e: unknown, ctx?: { ownerId: string; pid: string }): never {
     const code = (e as { code?: string }).code
-    // unique(containerId, providerId) 并发绕校验 / 重复提交 → 40041（非裸 500）
+    // unique(ownerId, providerId) 并发绕校验 / 重复提交 → 40041（非裸 500）
     if (code === 'P2002') throw fail(CODE.PROVIDER_ID_CONFLICT)
     // 目标 provider 行缺失（update/delete，P2025）→ 40040
     if (code === 'P2025') {
       // eslint-disable-next-line no-console
-      if (ctx) console.warn(`[models] provider_not_found: containerId=${ctx.containerId} pid=${ctx.pid}`)
+      if (ctx) console.warn(`[models] provider_not_found: ownerId=${ctx.ownerId} pid=${ctx.pid}`)
       throw fail(CODE.PROVIDER_NOT_FOUND)
     }
     // 写盘失败（卷只读/满）→ 90003；DB 已随事务回滚，配置停留上一份一致状态

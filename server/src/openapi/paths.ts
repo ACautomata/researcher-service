@@ -404,7 +404,7 @@ register({
   method: 'post',
   path: '/api/v1/containers/{name}/models/providers',
   tag: 'Models',
-  summary: '新建 provider（唯一(containerId, providerId)）',
+  summary: '新建 provider（唯一(ownerId, providerId)，#771 归属上移）',
   auth: 'user',
   errors: `90002（字段明细，body 校验在容器/越权之后）· 20040 · 20043 · 40041（pid 冲突）· 90003（写盘失败/LLM key 缺失，DB 回滚）。`,
   dataNote: 'data: 新建 provider（service.create 形状）。',
@@ -427,7 +427,7 @@ register({
   tag: 'Models',
   summary: '改 provider（路径 pid 定位，body 可改 provider_id）',
   auth: 'user',
-  errors: `90002 · 20040 · 20043 · 40040 · 40041（撞同容器既有 pid）· 90003（DB 回滚）。`,
+  errors: `90002 · 20040 · 20043 · 40040 · 40041（撞同 owner 既有 pid）· 90003（DB 回滚）。`,
   dataNote: 'data: 更新后 provider。',
   body: modelProviderWriteSchema,
 })

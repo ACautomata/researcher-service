@@ -22,7 +22,7 @@ export const CODE = {
   WIKI_PAGE_EXISTS: 30041, // 新建页已存在（POST 409 转译）
   // 4xxxx models（#336 平移 models 域；#319 §1.3 转译码）
   PROVIDER_NOT_FOUND: 40040, // provider 不存在 / 越权（同码防探测）
-  PROVIDER_ID_CONFLICT: 40041, // 同容器 provider_id 冲突（POST/PUT，unique 约束）
+  PROVIDER_ID_CONFLICT: 40041, // 同 owner provider_id 冲突（POST/PUT，unique(ownerId, providerId) 约束；#771 归属上移）
   // 6xxxx files（#589 统一文件 CRUD；6xxxx 段为 319 §1.1 未分配段，按「40 不存在 / 41 冲突」锁式）
   FILE_NOT_FOUND: 60040, // 文件不存在（GET/PUT/DELETE）
   FILE_EXISTS: 60041, // 新建文件已存在（POST 冲突）
