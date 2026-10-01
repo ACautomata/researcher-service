@@ -29,8 +29,8 @@ export interface AppDeps {
   runtime?: ContainerRuntime
   // wiki 接缝（#335）：compile 触发等。缺省 = no-op（无编排）。
   wiki?: WikiRouterDeps
-  // models 接缝（#336）：config 写盘（provider CRUD 后重渲染 openclaw.json）。
-  // 缺省 = 不挂 models 路由（configWriter 必填，缺 writer 静默发散不安全）。
+  // models 接缝（#336 → #775）：白名单第一层 DNS 解析注入位（测试 fake / 生产缺省 node dns）。
+  // 缺省 = 无注入（路由无条件挂载，对齐 wiki）。
   models?: ModelsRouterDeps
   // files 接缝（#589）：FileArchive Port（生产 DockerFileArchive）。必填——缺 archive 属装配
   // 错误（静默禁用文件 CRUD 不安全），由下方条件挂载（对齐 models）。
@@ -85,10 +85,9 @@ export function createApp({ prisma, orchestrator, runtime, wiki, models, files, 
   // 注意：Express 5 不把 app.use 挂载路径的 :name 合并进 router 的 req.params，故挂到
   // /api/v1/containers、把 `/:name/wiki/...` 路径声明在 router 内部（见 wiki/routes.ts）。
   app.use('/api/v1/containers', createWikiRouter(wiki ?? {}))
-  // models（#336）：configWriter 必填，仅在有注入时挂载（对齐 orchestrator 条件挂载）。
-  if (models) {
-    app.use('/api/v1/containers', createModelsRouter(models))
-  }
+  // models（#336 → #775 简化）：只依赖 prisma（写盘链退役，DB 即盘；白名单第一层 DNS 解析
+  // 经 deps.resolveDns 注入、缺省 node dns），无条件挂载（对齐 wiki 先例）。
+  app.use('/api/v1/containers', createModelsRouter(models ?? {}))
   // files（#589）：FileArchive 必填，仅在有注入时挂载（对齐 models 条件挂载；wiki/workspace
   // 两棵树统一文件 CRUD，缺 archive 静默禁用不安全）。
   if (files) {

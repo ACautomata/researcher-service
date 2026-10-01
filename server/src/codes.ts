@@ -23,6 +23,8 @@ export const CODE = {
   // 4xxxx models（#336 平移 models 域；#319 §1.3 转译码）
   PROVIDER_NOT_FOUND: 40040, // provider 不存在 / 越权（同码防探测）
   PROVIDER_ID_CONFLICT: 40041, // 同 owner provider_id 冲突（POST/PUT，unique(ownerId, providerId) 约束；#771 归属上移）
+  PROVIDER_ENDPOINT_NOT_ALLOWED: 40042, // 端点不在白名单（#747 C 节 / 731 §5.1 第二层：运行时构造复验 + fetch wrapper 未命中）
+  RUN_CONCURRENCY_FULL: 40043, // 并发 run 配额已满（per-user users.maxConcurrentRuns / 全局 RUNNER_MAX_CONCURRENT_RUNS；731 §5.3）
   // 6xxxx files（#589 统一文件 CRUD；6xxxx 段为 319 §1.1 未分配段，按「40 不存在 / 41 冲突」锁式）
   FILE_NOT_FOUND: 60040, // 文件不存在（GET/PUT/DELETE）
   FILE_EXISTS: 60041, // 新建文件已存在（POST 冲突）
@@ -78,7 +80,9 @@ export const DEFAULT_MESSAGE: Record<number, string> = {
   [CODE.WIKI_PAGE_NOT_FOUND]: '页面不存在',
   [CODE.WIKI_PAGE_EXISTS]: '页面已存在',
   [CODE.PROVIDER_NOT_FOUND]: 'model provider 不存在',
-  [CODE.PROVIDER_ID_CONFLICT]: '该容器下 provider_id 已存在',
+  [CODE.PROVIDER_ID_CONFLICT]: '同用户下 provider_id 已存在',
+  [CODE.PROVIDER_ENDPOINT_NOT_ALLOWED]: '端点不在白名单',
+  [CODE.RUN_CONCURRENCY_FULL]: '并发 run 数已达配额上限，请稍后重试',
   [CODE.FILE_NOT_FOUND]: '文件不存在',
   [CODE.FILE_EXISTS]: '文件已存在',
   [CODE.FIGURE_NOT_FOUND]: 'Figure 不存在',

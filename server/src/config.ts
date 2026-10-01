@@ -318,6 +318,18 @@ function readAutofigureSidecarUrl(enabled: boolean): string {
   return v
 }
 
+// 全局在飞 run 上限（#775 · 731 §5.3）：runner 进程内信号量消费；缺省 16（初值，PoC 实测后
+// 校准）。非法值启动期 fail-fast（对齐 readPortPoolValue 先例）。
+function readRunnerMaxConcurrentRuns(): number {
+  const raw = process.env.RUNNER_MAX_CONCURRENT_RUNS
+  if (raw === undefined || raw === '') return 16
+  const n = Number(raw)
+  if (!Number.isInteger(n) || n < 1 || n > 10_000) {
+    throw new Error(`RUNNER_MAX_CONCURRENT_RUNS 非法（须为 1–10000 整数）: ${JSON.stringify(raw)}`)
+  }
+  return n
+}
+
 export const config = {
   jwtSecret: readSecret(),
   accessTtl: process.env.ACCESS_TOKEN_TTL ?? '5m',
@@ -372,6 +384,12 @@ export const config = {
   lifecycleWorkerConcurrency: Number(process.env.LIFECYCLE_WORKER_CONCURRENCY ?? 2),
   // BullMQ/Redis 连接（#313 自本切片引入；后台 provisioning 队列）
   redisUrl: process.env.REDIS_URL ?? 'redis://localhost:6379/0',
+  // ---- runner（#775 · 731 §5.3）----
+  runner: {
+    // 全局在飞 run 上限（runaway agent 最后防线之一，与容器资源 limit 互补）。per-user 上限走
+    // users.maxConcurrentRuns 列，不入 env。默认 16 为初值（PoC 实测后校准）；须为正整数。
+    maxConcurrentRuns: readRunnerMaxConcurrentRuns(),
+  },
   // ---- OpenAPI 文档面（#761）----
   apiDocs: (() => {
     return {

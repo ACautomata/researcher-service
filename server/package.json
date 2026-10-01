@@ -14,7 +14,8 @@
     "test:watch": "vitest",
     "prisma:generate": "prisma generate",
     "prisma:validate": "prisma validate",
-    "db:apply": "node scripts/apply-schema.mjs"
+    "db:apply": "node scripts/apply-schema.mjs",
+    "seed:minimax": "tsx scripts/seed-minimax.ts"
   },
   "dependencies": {
     "@asteasolutions/zod-to-openapi": "^7.3.4",

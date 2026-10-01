@@ -883,3 +883,46 @@ describe('fleet image pinning env (slice config, #695)', () => {
     expect(isFloatingImageRef(`ghcr.io/a/b/openclaw:latest@sha256:${'a'.repeat(64)}`)).toBe(false)
   })
 })
+
+// #775（731 §5.3）：RUNNER_MAX_CONCURRENT_RUNS —— 全局在飞 run 上限，缺省 16；非正整数/超界
+// 启动 fail-fast（对齐端口池先例）。
+describe('runner max concurrent runs env (#775)', () => {
+  async function loadRunnerMax(env?: string): Promise<unknown | 'THREW'> {
+    vi.resetModules() // 清 config 模块缓存，让动态 import 重新快照 env
+    if (env === undefined) delete process.env.RUNNER_MAX_CONCURRENT_RUNS
+    else vi.stubEnv('RUNNER_MAX_CONCURRENT_RUNS', env)
+    try {
+      const { config } = await import('../src/config')
+      return config.runner.maxConcurrentRuns
+    } catch {
+      return 'THREW' // fail-fast
+    } finally {
+      vi.unstubAllEnvs() // 恢复 env（避免污染后续测试文件）
+    }
+  }
+
+  it('未设置 → 默认 16', async () => {
+    expect(await loadRunnerMax(undefined)).toBe(16)
+  })
+
+  it('合法值 4 → 加载为整数', async () => {
+    expect(await loadRunnerMax('4')).toBe(4)
+  })
+
+  it('非数字 abc → fail-fast', async () => {
+    expect(await loadRunnerMax('abc')).toBe('THREW')
+  })
+
+  it('小数 1.5 → fail-fast', async () => {
+    expect(await loadRunnerMax('1.5')).toBe('THREW')
+  })
+
+  it('0 / 负数 → fail-fast（上限须正整数）', async () => {
+    expect(await loadRunnerMax('0')).toBe('THREW')
+    expect(await loadRunnerMax('-2')).toBe('THREW')
+  })
+
+  it('超界 10001 → fail-fast', async () => {
+    expect(await loadRunnerMax('10001')).toBe('THREW')
+  })
+})

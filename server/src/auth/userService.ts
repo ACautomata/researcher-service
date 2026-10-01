@@ -4,6 +4,7 @@ import { hashPassword } from './password'
 import { fail } from '../envelope'
 import { CODE } from '../codes'
 import { isQuotaValid } from './quota'
+import { seedMinimaxForOwner } from '../models/seedMinimax'
 
 export interface CreateUserInput {
   username: string
@@ -29,8 +30,9 @@ export async function createUser(prisma: PrismaClient, input: CreateUserInput): 
   const existing = await prisma.user.findUnique({ where: { username: input.username } })
   if (existing) throw fail(CODE.NAME_CONFLICT)
   const passwordHash = await hashPassword(input.password)
+  let user: User
   try {
-    return await prisma.user.create({
+    user = await prisma.user.create({
       data: {
         username: input.username,
         passwordHash,
@@ -45,4 +47,14 @@ export async function createUser(prisma: PrismaClient, input: CreateUserInput): 
     if ((e as { code?: string }).code === 'P2002') throw fail(CODE.NAME_CONFLICT)
     throw e
   }
+  // minimax 默认 provider seed（#775 · 731 §6「对齐空 providers → 模板默认」现行为）：存量用户
+  // 经 npm run seed:minimax 一次性迁移，新建账号在此对齐同一语义。best-effort——seed 失败不回滚
+  // 建号（行已提交；插入失败面 = DB 故障，建号同败），仅告警留排查入口。
+  try {
+    await seedMinimaxForOwner(prisma, user.id)
+  } catch (e) {
+    // eslint-disable-next-line no-console
+    console.warn(`[auth] minimax seed failed: ownerId=${user.id} err=${(e as Error).message}`)
+  }
+  return user
 }

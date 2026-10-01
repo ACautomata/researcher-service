@@ -213,6 +213,20 @@ CREATE TABLE "tool_approval_logs" (
 );
 
 -- CreateTable
+CREATE TABLE "llm_usage" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "userId" TEXT NOT NULL,
+    "sessionId" TEXT,
+    "runId" TEXT,
+    "providerId" TEXT,
+    "model" TEXT NOT NULL,
+    "inputTokens" INTEGER NOT NULL,
+    "outputTokens" INTEGER NOT NULL,
+    "totalTokens" INTEGER NOT NULL,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- CreateTable
 CREATE TABLE "provider_endpoints" (
     "id" TEXT NOT NULL PRIMARY KEY,
     "scheme" TEXT NOT NULL,
@@ -345,6 +359,12 @@ CREATE INDEX "tool_approval_logs_traceId_idx" ON "tool_approval_logs"("traceId")
 
 -- CreateIndex
 CREATE INDEX "tool_approval_logs_userId_createdAt_idx" ON "tool_approval_logs"("userId", "createdAt");
+
+-- CreateIndex
+CREATE INDEX "llm_usage_userId_createdAt_idx" ON "llm_usage"("userId", "createdAt");
+
+-- CreateIndex
+CREATE INDEX "llm_usage_runId_idx" ON "llm_usage"("runId");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "provider_endpoints_scheme_host_port_key" ON "provider_endpoints"("scheme", "host", "port");

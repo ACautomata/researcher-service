@@ -27,6 +27,7 @@ cd server
 npm install
 npm run prisma:generate                        # 生成 Prisma client（fresh checkout 必须）
 npm run db:apply                               # 落表（better-sqlite3 直连 prisma/init.sql）
+npm run seed:minimax                           # minimax 默认 provider 幂等 seed（#775 一次性迁移；新建账号自动种）
 npm run dev                                    # tsx watch 宿主直跑（仅纯逻辑调试——摸不到 named volume；起服务/真编排走下方容器化 dev 栈）
 npm run typecheck                              # tsc --noEmit
 npm test                                       # vitest 全量（containers-smoke 需真 docker daemon）
@@ -70,11 +71,11 @@ OpenClaw 容器 fleet (openclaw-gw-<name>，每容器独立 home/openclaw.json/�
 | `auth/` | 双角色账号 + JWT 签发/刷新（R1 旋转）+ bootstrap B1 + C1 强制改密 | `tokens.ts` `authenticate.ts` `bootstrap.ts` `userService.ts` |
 | `containers/` | Docker SDK 编排（增/删/查容器、端口池、config 渲染、5 态机） | `orchestrator.ts` `dockerRuntime.ts` `ports.ts` `configRenderer.ts` `fleetAssembly.ts` |
 | `wiki/` | 每容器 `wiki/main` 文件树 + CRUD + graph（`WikiFileSystem` Port + 纯逻辑） | `service.ts` `logic.ts` `nodeFs.ts` `compile.ts` `routes.ts` |
-| `models/` | model provider CRUD（#771 归属上移过渡态：行挂 ownerId 非 containerId；写盘链留待 T0 清退 #801）+ 静态 config 写盘（putArchive 落容器内，改配置重启生效）+ 写盘回滚 | `configWriter.ts` `routes.ts` |
+| `models/` | model provider CRUD（#771 归属上移：行挂 ownerId；#775 写盘链退役——DB 即盘，CRUD 同事务 `config_meta` version bump 热生效）+ 端点白名单第一层（origin 精确匹配 + DNS 私网/环回拒绝，纯逻辑可单测） | `service.ts` `endpointAllowlist.ts` `seedMinimax.ts` `values.ts` `routes.ts` |
 | `chat/` | 网关隧道（JWT 握手 4401 + 原始帧透传，ADR 0006 浏览器直连） | `tunnelAssembly.ts` `subprotocol.ts` `values.ts` |
 | `files/` | 统一文件 CRUD（wiki/workspace 两树，经 Docker getArchive/putArchive/exec rm，ADR 0012） | `fsPort.ts` `dockerArchive.ts` `paths.ts` `tar.ts` `routes.ts` |
 | `events/` | SSE 事件流（#773，替代 WS 的传输面）：StreamHub per-user 扇出 + per-user 连续单调 serverSeq + 事件桥薄投影（LangChain streamEvents → 自有目录，不透传） | `hub.ts` `logic.ts` `routes.ts` `bridge.ts` `values.ts` |
-| `runner/` | LangGraph 运行时侧（#747 换轨；backend/ = DockerArchiveBackend——deepagents BackendProtocolV2 本地镜像 → 双根 /wiki/+/lab/ Docker 原语映射，S2 接缝 Port 注入可 fake，协议同形镜像不引 deepagents 依赖；persistence/ = #774 持久化双件——PrismaCheckpointSaver 五方法落 checkpoints/checkpoint_writes + PrismaMemoryStore 五方法落 memory_items，继承 @langchain/langgraph-checkpoint ~1.1.5 基类零侵入接入，WRITES_IDX_MAP 仅从 checkpoint 包导出，PrismaClient 构造注入） | `backend/dockerArchiveBackend.ts` `backend/primitives.ts` `backend/dockerPrimitives.ts` `backend/paths.ts` `backend/semantics.ts` `persistence/prismaCheckpointSaver.ts` `persistence/prismaMemoryStore.ts` |
+| `runner/` | LangGraph 运行时侧（#747 换轨；backend/ = DockerArchiveBackend——deepagents BackendProtocolV2 本地镜像 → 双根 /wiki/+/lab/ Docker 原语映射，S2 接缝 Port 注入可 fake，协议同形镜像不引 deepagents 依赖；persistence/ = #774 持久化双件——PrismaCheckpointSaver 五方法落 checkpoints/checkpoint_writes + PrismaMemoryStore 五方法落 memory_items，继承 @langchain/langgraph-checkpoint ~1.1.5 基类零侵入接入，WRITES_IDX_MAP 仅从 checkpoint 包导出，PrismaClient 构造注入）。#775 F 节：`providerRegistry.ts`（缓存 key (ownerId,providerId,modelId,configVersion) + ensureFresh 版本判等重载 + 白名单第二层复验 40042 + 凭证解析；ChatModelFactory Port 接缝，#777 以 initChatModel 装真工厂）、`whitelistedFetch.ts`（origin 复验 + redirect manual 禁随）、`runQuota.ts`（per-user/全局在飞闸门 40043）、`usage.ts`（LLM usage 采数 + 核算查询，落 llm_usage 审计域） | `backend/dockerArchiveBackend.ts` `backend/primitives.ts` `backend/dockerPrimitives.ts` `backend/paths.ts` `backend/semantics.ts` `persistence/prismaCheckpointSaver.ts` `persistence/prismaMemoryStore.ts` `providerRegistry.ts` `whitelistedFetch.ts` `runQuota.ts` `usage.ts` |
 
 配置集中在 `src/config.ts`（env 读取 + 生产 fail-fast）。Prisma schema 在 `prisma/schema.prisma`
 （建表 SQL 由 `scripts/apply-schema.mjs` 落库，不经 prisma CLI——规避 Prisma 7 AI 守卫）。
@@ -87,7 +88,9 @@ OpenClaw 容器 fleet (openclaw-gw-<name>，每容器独立 home/openclaw.json/�
 - `/api/v1/containers/*` — 容器列表/新建（同步返 creating 快照）/删除（异步信封）。
 - `/api/v1/containers/<name>/pairing/` — 设备配对查询/触发/approve。
 - `/api/v1/containers/<name>/wiki/{tree,page,graph,categories}` — wiki 文件树/读写/图谱。
-- `/api/v1/containers/<name>/models/providers[/<pid>]` — model provider CRUD。
+- `/api/v1/containers/<name>/models/providers[/<pid>]` — model provider CRUD（#775：白名单第一层
+  校验 base_url——zod URL 形态 + origin 精确匹配 + DNS 私网拒绝，未命中 90002；CRUD 同事务
+  config_meta version bump = 热生效信号）。
 - `/api/v1/containers/<name>/files?root=<wiki|workspace>&path=&recursive=` — 统一文件 CRUD
   （GET 列目录/读文件 + PUT/POST 覆写/新建 + DELETE 删除；binary/oversized 不返回内容）。
 - `/api/v1/containers/<name>/chat/{sessions,approval/resolve,commands}` — chat REST 代理。
@@ -100,7 +103,10 @@ OpenClaw 容器 fleet (openclaw-gw-<name>，每容器独立 home/openclaw.json/�
 连接级认证失败走 **HTTP 401** + 信封体（#726 钉死「不入事件」，EventSource 看不见状态码——REST 刷新链
 死信号让路；其余响应仍 HTTP 200+信封）。码段：`0` 成功 · `1xxxx` 通用/鉴权 ·
 `2xxxx` 容器 · `3xxxx` wiki ·
-`4xxxx` models · `5xxxx` chat/pairing（非信封段，错误经 WS close codes）· `6xxxx` files ·
+`4xxxx` models（40040 不存在/越权同码 · 40041 同 owner provider_id 冲突 · 40042 端点不在白名单
+（#775 运行时第二层：registry 构造复验 + fetch wrapper 未命中；CRUD 层第一层未命中走 90002）·
+40043 并发 run 配额已满（#775 per-user maxConcurrentRuns / 全局 RUNNER_MAX_CONCURRENT_RUNS））·
+`5xxxx` chat/pairing（非信封段，错误经 WS close codes）· `6xxxx` files ·
 `7xxxx` figures（AutoFigure，70040 不存在/越权同码防探测（T05 读路径，PNG 复用同一归属门）· 70041 幂等冲突 ·
 70042 PNG 未就绪（queued/running）· 70043 PNG 不可用（failed/产物缺失））·
 `9xxxx` 系统/校验。
@@ -131,6 +137,12 @@ OpenClaw 容器 fleet (openclaw-gw-<name>，每容器独立 home/openclaw.json/�
 - **输入 0 信任**：所有写操作经 zod schema 强制校验（`validation/schemas.ts`），禁裸读 `req.body`。
 - **凭证**：LLM key 全面板共享（`LLM_API_KEY` env 注入容器，不落盘）；`CREDENTIAL_ENCRYPTION_KEYS`
   加密 gateway token 落盘密文。
+- **provider 配置热生效与安全（#775 · 731 §4/§5）**：provider/endpoint CRUD 同事务 bump
+  `config_meta.version`；runner `ProviderRegistry.ensureFresh` run 启动读版本判等、不等才重载
+  （run 粒度快照——进行中 run 不感知，不引消息总线）。端点白名单双层：CRUD 层 90002 字段明细 +
+  运行层 40042（构造复验 + fetch wrapper 验最终 origin + redirect manual 禁随）。run 并发闸门
+  per-user `users.maxConcurrentRuns` + 全局 `RUNNER_MAX_CONCURRENT_RUNS` env（满 40043）。LLM
+  usage 全量采数落 `llm_usage` 审计域（`runner/usage.ts`，story 57 成本核算数据源）。
 - **生产部署**：`deploy/docker-compose.deploy.yml`（frontend nginx + server + redis 三服务），
   CD 经 GitHub Actions 构建 `server`/`frontend` 镜像推 GHCR 并部署宝塔宿主（见 `deploy/DEPLOY.md`）。
 - **测试**：

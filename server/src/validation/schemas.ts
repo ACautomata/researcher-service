@@ -6,6 +6,7 @@ import {
   MODEL_INPUT_MODALITIES,
   PROVIDER_ID_REGEX,
 } from '../models/values'
+import { parseEndpointOrigin } from '../models/endpointAllowlist'
 
 // 请求体 schema（zod）。校验失败 → 90002 + flatten().fieldErrors（{field:[errors]}）。
 // username 格式：字母/数字/下划线/连字符，3–30 字符（近似 Django UnicodeUsernameValidator，更严）。
@@ -74,13 +75,20 @@ export const figureCreateSchema = z.object({
 // 热加载拒绝、运行时落后 DB。入站校验拒绝，生成文件才可能符合 OpenClaw 形状。
 // base_url trim 后校验（#366 codex P2）：zod min(1) 不 trim，纯空格 '   ' 语义为空仍通过——
 // 对齐 Django CharField 默认 trim_whitespace，防「空 baseUrl 入库 + 写盘报成功热加载」。
+// URL 形态校验（#775 / 731 §5.1 白名单第一层第一段）：http(s) 绝对 URL（parseEndpointOrigin 可
+// 解析出 origin）——origin 提取失败则白名单匹配/DNS 检查无从谈起，入站即拒（90002 + data.base_url）。
 // 校验失败 → 90002 + 各字段明细（api_key_env_id 非法格式/未注入 env 同入 data.api_key_env_id）。
 export const modelProviderWriteSchema = z.object({
   provider_id: z
     .string()
     .regex(PROVIDER_ID_REGEX, 'provider_id 须以小写字母开头，1–64 位，仅含小写字母、数字、连字符'),
   api: z.enum(API_CHOICES),
-  base_url: z.string().trim().min(1, 'base_url 不能为空').max(512, 'base_url 过长'),
+  base_url: z
+    .string()
+    .trim()
+    .min(1, 'base_url 不能为空')
+    .max(512, 'base_url 过长')
+    .refine((v) => parseEndpointOrigin(v) !== null, 'base_url 须为合法 URL（http/https，含 scheme://host）'),
   api_key_env_id: z
     .string()
     .regex(API_KEY_ENV_ID_REGEX, 'api_key_env_id 须大写字母开头，仅含大写字母、数字、下划线（1–128 位）')

@@ -8,7 +8,7 @@
 //     T0 清退（#801），检测到旧形状只告警。
 //   - DDL 与 prisma/init.sql 逐字节同源（镜像其 CREATE 形状），init.sql 由
 //     prisma migrate diff 从 schema.prisma 派生 —— 单一来源，此处镜像。
-export const SCHEMA_VERSION = 8
+export const SCHEMA_VERSION = 9
 
 export function runIncrementalSchema(db) {
   db.exec(`
@@ -308,6 +308,26 @@ CREATE UNIQUE INDEX IF NOT EXISTS "provider_endpoints_scheme_host_port_key" ON "
     )
     db.exec(`UPDATE "memory_items" SET "createdAt" = CURRENT_TIMESTAMP`)
   }
+
+  // ---- 审计域新表（#775 · 731 §3.2/§5.3：llm_usage —— usage_metadata 采数落点 + 核算查询
+  // 消费面；userId 冗余无 FK，对齐 tool_approval_logs 跟 user 永久）----
+  db.exec(`
+CREATE TABLE IF NOT EXISTS "llm_usage" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "userId" TEXT NOT NULL,
+    "sessionId" TEXT,
+    "runId" TEXT,
+    "providerId" TEXT,
+    "model" TEXT NOT NULL,
+    "inputTokens" INTEGER NOT NULL,
+    "outputTokens" INTEGER NOT NULL,
+    "totalTokens" INTEGER NOT NULL,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS "llm_usage_userId_createdAt_idx" ON "llm_usage"("userId", "createdAt");
+CREATE INDEX IF NOT EXISTS "llm_usage_runId_idx" ON "llm_usage"("runId");
+`)
 
   // config_meta 单行种子（id=1, version=1）：INSERT OR IGNORE 幂等；provider/endpoint CRUD
   // 同事务 +1（热生效信号，731 §4）自 version=1 起步。fresh 库（init.sql CREATE 空表）同样

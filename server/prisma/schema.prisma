@@ -480,6 +480,31 @@ model ToolApprovalLog {
 }
 
 // ---------------------------------------------------------------------------
+// LlmUsage —— LLM usage 全量采数（#775 · 731 §3.2/§5.3，story 57 成本核算数据源）：
+// 记账真值 = LLM 响应 usage_metadata（LangChain callback 采数，#777 runner 接线；本表为
+// 审计域落点 + 核算查询消费面）。行粒度 = 一次 LLM 调用（run 内多轮各自成行，不聚合一 run
+// 一行——per-call 粒度才能按模型/按调用核算）。userId 冗余无 FK（对齐 tool_approval_logs：
+// 审计快照跟 user 永久，不随会话/容器删）。cacheRead/cacheWrite 等明细 V1 不拆列，出现真实
+// 核算需求再加（对齐 731 §5.3「速率/成本精细面首期不做」纪律）。
+// ---------------------------------------------------------------------------
+model LlmUsage {
+  id           String   @id @default(cuid())
+  userId       String
+  sessionId    String?
+  runId        String?
+  providerId   String?
+  model        String
+  inputTokens  Int
+  outputTokens Int
+  totalTokens  Int
+  createdAt    DateTime @default(now())
+
+  @@index([userId, createdAt])
+  @@index([runId])
+  @@map("llm_usage")
+}
+
+// ---------------------------------------------------------------------------
 // ProviderEndpoint —— 端点白名单（731 §3.1 逐字段 DDL，admin 管理，面板级）：
 // origin 精确匹配（scheme+host+port 唯一），禁路径/子域通配（防 attacker.example.com 绕过）。
 // 注意：SQLite UNIQUE 含 NULL port 不判重（NULL≠NULL）——应用层先查后建兜底（#775）。

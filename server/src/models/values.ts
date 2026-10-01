@@ -26,10 +26,10 @@ export const API_KEY_ENV_ID_REGEX = /^[A-Z][A-Z0-9_]{0,127}$/
 export const API_CHOICES = ['openai-completions', 'anthropic-messages'] as const
 export type ProviderApiWire = (typeof API_CHOICES)[number]
 
-// 容器进程实际持有的凭证 env（spec §5.2：全面板共享一个 LLM_API_KEY；DockerRuntime 仅注入它）。
-// 容器 env 在 docker run 时固定，OpenClaw watch 热加载无法新增 env（#36 已证：缺 env 则 reload
-// 失败停留 last-known-good）—— 故 SecretRef.id 只能引用已注入的 env。API 层据此收紧（builder
-// 层仍 env-agnostic，便于未来 fleet 注入更多 env 时仅放宽本集合）。
+// 凭证 env id 白名单（过渡态，#775）：SecretRef 机制随 OpenClaw 写盘链退役（731 §1.3——runner
+// 直接持有凭证，env id 的「容器 env 固定」存在理由消失），但 runner 侧凭证解析
+// （providerRegistry.resolveApiKey）当前仅注入 LLM_API_KEY，API 层据此收紧；P1 per-user key
+// （credentialCipher）落地时放宽或退役本集合。
 export const ALLOWED_API_KEY_ENV_IDS: ReadonlySet<string> = new Set(['LLM_API_KEY'])
 
 // 模型 input 模态枚举（r28 §1.2 / `/gateway/config-agents` 权威列举）：入站校验闸。
@@ -46,4 +46,17 @@ export const WIRE_TO_LC_PROVIDER: Record<ProviderApiWire, LcProvider> = {
 export const LC_PROVIDER_TO_WIRE: Record<LcProvider, ProviderApiWire> = {
   openai: 'openai-completions',
   anthropic: 'anthropic-messages',
+}
+
+// 防御解码 modelsJson（对齐 containers.decodeScopes）：坏 JSON 让读请求 500；合法 JSON 但非数组
+// 也违反 models[] 响应契约 → 回退 []。service（读侧视图）与 runner/providerRegistry（配置快照）
+// 共用（#775）。
+export function decodeModelsJson(raw: string): Array<Record<string, unknown>> {
+  try {
+    const v: unknown = JSON.parse(raw)
+    if (Array.isArray(v)) return v as Array<Record<string, unknown>>
+  } catch {
+    // 坏 JSON → 回退 []
+  }
+  return []
 }
