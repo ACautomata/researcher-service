@@ -49,6 +49,7 @@ describe.skipIf(!DOCKER_UP)('沙箱生命周期集成 smoke（真 docker daemon�
 
   afterAll(async () => {
     if (!DOCKER_UP) return
+    if (!runtime) return // beforeAll 中途失败（如镜像拉取超时）→ runtime 未赋值，防 TypeError 次生噪声
     await runtime.removeSandbox(SESSION)
     await runtime.removeNetwork(SESSION)
   })

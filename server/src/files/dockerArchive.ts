@@ -254,7 +254,7 @@ export class DockerFileArchive implements FileArchive {
 
   // 原始字节读取（WebChat 媒体通道）：与 read() 的 file 分支同探针/收集路径，但**不做 NUL 嗅探与
   // UTF-8 转码**——直接返回 entry.data Buffer（workspace 图片字节透传给浏览器）。absRoot = 容器内
-  // 树根绝对路径（legacy 专用通道，LEGACY_WORKSPACE_ROOT）。超大文件 probe 已短路
+  // 树根绝对路径（legacy 专用通道，FILE_ROOTS.workspace）。超大文件 probe 已短路
   //（oversized → FileInvalidPath）；非文件条目（目录/symlink）→ FileInvalidPath。
   async readBytes(name: string, absRoot: string, relPath: string): Promise<Buffer> {
     const absPath = relPath === '' ? absRoot : `${absRoot}/${relPath}`
