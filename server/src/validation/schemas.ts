@@ -6,6 +6,7 @@ import {
   MODEL_INPUT_MODALITIES,
   PROVIDER_ID_REGEX,
 } from '../models/values'
+import { parseHttpOrigin } from '../runner/allowlist'
 
 // 请求体 schema（zod）。校验失败 → 90002 + flatten().fieldErrors（{field:[errors]}）。
 // username 格式：字母/数字/下划线/连字符，3–30 字符（近似 Django UnicodeUsernameValidator，更严）。
@@ -63,10 +64,18 @@ export const figureCreateSchema = z.object({
   prompt: z.string().trim().min(1, 'prompt 不能为空').max(4000, 'prompt 过长（≤4000 字符）'),
 })
 
-// base_url URL 形态门（#775，731 §5.1 第一层 ①）：须 http(s)://host[:port] 起头——纯 zod 正则
-// （不产生 ZodEffects，openapi 生成零影响）；完整 origin 解析/规范化在 runner/allowlist
-// parseHttpOrigin（service 层，错误信息更精确）。
-const HTTP_URL_SHAPE_REGEX = /^https?:\/\/[a-zA-Z0-9.-]+(?::\d{1,5})?(?:\/\S*)?$/
+// base_url URL 形态门（#775，731 §5.1 第一层 ①）：.refine 复用 runner/allowlist parseHttpOrigin
+// 权威解析（scheme/凭证/端口域全量校验与 service 层同源，#812 打捞）——消除 zod 阶段与
+// service 阶段两份 URL 定义漂移面（本地正则曾放行 :99999 端口越界，service 层 parse 才拒）。
+// 同 schema 内 api_key_env_id / models 已有 .refine 先例，openapi 生成面无增量影响。
+const httpUrlShape = (v: string): boolean => {
+  try {
+    parseHttpOrigin(v)
+    return true
+  } catch {
+    return false
+  }
+}
 
 // 建/改 model provider（models POST/PUT，#336）：snake_case wire（平移 Django
 // ModelProviderWriteSerializer）。provider_id / api_key_env_id 经格式 + 成员校验（r28 §1），
@@ -89,7 +98,7 @@ export const modelProviderWriteSchema = z.object({
     .trim()
     .min(1, 'base_url 不能为空')
     .max(512, 'base_url 过长')
-    .regex(HTTP_URL_SHAPE_REGEX, 'base_url 须为 http(s)://<host>[:<port>][/<path>] 完整 URL'),
+    .refine(httpUrlShape, 'base_url 须为 http(s)://<host>[:<port>][/<path>] 完整 URL'),
   api_key_env_id: z
     .string()
     .regex(API_KEY_ENV_ID_REGEX, 'api_key_env_id 须大写字母开头，仅含大写字母、数字、下划线（1–128 位）')

@@ -70,7 +70,13 @@ export class ConcurrencyGate {
     let released = false
     return {
       release: () => {
-        if (released) return
+        if (released) {
+          // over-release 可观测面（#812 打捞 #809）：幂等不抛（闸门错误不放大为 run 域错误），
+          // 但告警留痕——finally 双释放等纪律失守在日志可见。
+          // eslint-disable-next-line no-console
+          console.warn(`[runner] run-quota over-release: ownerId=${ownerId}（lease 重复释放已忽略）`)
+          return
+        }
         released = true
         this.state.globalCount -= 1
         const n = (this.state.perUser.get(ownerId) ?? 1) - 1

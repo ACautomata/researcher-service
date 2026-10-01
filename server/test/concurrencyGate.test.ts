@@ -3,7 +3,7 @@
 // 纯逻辑单测（接缝 S3）：并发 acquire 竞争（await 点交错）、per-user 满拒、全局满拒、
 // release 后再取、runWithLease finally 释放（含 fn 抛错）、幂等 release、40043 码面。
 
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { ConcurrencyGate } from '../src/runner/concurrency'
 import { EnvelopeError } from '../src/envelope'
 
@@ -50,14 +50,21 @@ describe('ConcurrencyGate（#775 · 731 §5.3）', () => {
     await expect(gate.acquire('solo')).resolves.toBeTruthy()
   })
 
-  it('lease.release 幂等（重复释放不产生负计数/多退）', async () => {
-    const gate = new ConcurrencyGate({ globalLimit: 10, loadUserLimit: async () => 5 })
-    const lease = await gate.acquire('u')
-    lease.release()
-    lease.release()
-    lease.release()
-    expect(gate.inFlight()).toBe(0)
-    expect(gate.inFlight('u')).toBe(0)
+  it('lease.release 幂等：重复释放不产生负计数/多退，且 over-release 走 console.warn 可观测（#812 打捞）', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const gate = new ConcurrencyGate({ globalLimit: 10, loadUserLimit: async () => 5 })
+      const lease = await gate.acquire('u')
+      lease.release()
+      lease.release()
+      lease.release()
+      expect(gate.inFlight()).toBe(0)
+      expect(gate.inFlight('u')).toBe(0)
+      expect(warn).toHaveBeenCalledTimes(2) // 首次正常释放不告警，后两次 over-release 告警
+      expect(String(warn.mock.calls[0]?.[0])).toContain('over-release')
+    } finally {
+      warn.mockRestore()
+    }
   })
 
   it('并发 acquire 竞争（交错 await）：限额窗口内恰好放行 N 个', async () => {
@@ -91,6 +98,42 @@ describe('ConcurrencyGate（#775 · 731 §5.3）', () => {
     ).toBe(true)
     fulfilled.forEach((r) => (r as PromiseFulfilledResult<{ release(): void }>).value.release())
     expect(gate.inFlight()).toBe(0)
+  })
+
+  it('runQuota churn 不变量（#812 打捞 #809）：10 worker × 20 轮交错 acquire/release——任意时刻计数不越界、终态归零', async () => {
+    const gate = new ConcurrencyGate({ globalLimit: 5, loadUserLimit: async () => 2 })
+    const users = ['c1', 'c2', 'c3']
+    const userMax = 2
+    let accepted = 0
+    let rejected = 0
+
+    const worker = async (userId: string): Promise<void> => {
+      for (let i = 0; i < 20; i++) {
+        try {
+          const lease = await gate.acquire(userId)
+          accepted += 1
+          // 模拟在飞 run：acquire 经 await 交错后，持有 ~1ms 再释放
+          await new Promise<void>((r) => setTimeout(r, 1))
+          lease.release()
+        } catch {
+          rejected += 1
+          await new Promise<void>((r) => setTimeout(r, 1))
+        }
+        // 不变量：任意时刻 per-user 与全局计数都不越界
+        expect(gate.inFlight(userId)).toBeLessThanOrEqual(userMax)
+        expect(gate.inFlight()).toBeLessThanOrEqual(5)
+      }
+    }
+    // 10 worker 分摊 3 个 user：同 user 并发 worker（~4）> userMax=2、并发 worker 总数（10）
+    // > globalLimit=5——per-user 与全局两道闸门都有真实竞争面。
+    const workers: Array<Promise<void>> = []
+    for (let w = 0; w < 10; w++) workers.push(worker(users[w % users.length]))
+    await Promise.all(workers)
+    // 无泄漏：全部释放后计数归零
+    expect(gate.inFlight()).toBe(0)
+    for (const u of users) expect(gate.inFlight(u)).toBe(0)
+    expect(accepted).toBeGreaterThan(0)
+    expect(rejected).toBeGreaterThan(0) // 确有被闸门拒过的请求
   })
 
   it('runWithLease：fn 完成自动释放', async () => {

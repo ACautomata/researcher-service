@@ -914,6 +914,11 @@ describe('runner max concurrent runs env (#775)', () => {
       expect(await loadMax(bad), bad).toBe('THREW')
     }
   })
+
+  it('上界校验：10000 合法、10001 → fail-fast（#812 打捞——滥值会打穿全局 runaway 防线）', async () => {
+    expect(await loadMax('10000')).toBe(10000)
+    expect(await loadMax('10001')).toBe('THREW')
+  })
 })
 
 describe('allow private provider endpoints env (#775)', () => {

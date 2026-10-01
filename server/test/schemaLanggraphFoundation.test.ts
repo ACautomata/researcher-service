@@ -394,6 +394,14 @@ describe('#771 Prisma 新表地基（字段契约 / 迁移幂等 / 级联）', (
         expect(c, `${table}.createdAt`).toMatchObject({ type: 'DATETIME', notnull: 1 })
       }
     })
+
+    it('llm_usage_records：核算索引三枚（userId+createdAt / model+createdAt / runId per-run 对账 #812）', () => {
+      expectColumns(colsOf(sqlite, 'llm_usage_records'), NEW_TABLE_COLUMNS.llm_usage_records)
+      const idxs = indexesOf(sqlite, 'llm_usage_records')
+      expect(idxs.find((i) => i.name === 'llm_usage_records_userId_createdAt_idx')).toBeDefined()
+      expect(idxs.find((i) => i.name === 'llm_usage_records_model_createdAt_idx')).toBeDefined()
+      expect(idxs.find((i) => i.name === 'llm_usage_records_runId_idx')).toBeDefined()
+    })
   })
 
   // -------------------------------------------------------------------------
@@ -508,6 +516,8 @@ CREATE TABLE "pairings" (
       expect(
         (d2.prepare(`SELECT count(*) c FROM provider_endpoints WHERE id='seed-minimax-endpoint'`).get() as { c: number }).c,
       ).toBe(1)
+      // #812：runId 索引随增量收敛就位（per-run 对账下钻，三处同源的镜像侧）
+      expect(indexesOf(d2, 'llm_usage_records').find((i) => i.name === 'llm_usage_records_runId_idx')).toBeDefined()
       d2.close()
     })
 

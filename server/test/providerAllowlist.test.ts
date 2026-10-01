@@ -292,6 +292,14 @@ describe('createWhitelistFetch（第二层：运行时 fetch wrapper）', () => 
     expect(res.status).toBe(301)
   })
 
+  it('undici opaqueredirect（redirect manual 下 status 0、headers 不可读）→ 同按重定向拒（不假设 inner 恒为 undici）', async () => {
+    // Response 构造器不收 status 0（spec 限 200–599）——按 opaqueredirect 过滤响应形状造假
+    const opaque = { status: 0, headers: { get: () => null } } as unknown as Response
+    const inner = vi.fn(async () => opaque)
+    const guarded = createWhitelistFetch(allowed, inner as unknown as typeof fetch)
+    await expect(guarded('https://api.minimaxi.com/v1')).rejects.toThrow('重定向')
+  })
+
   it('错误携带 40042 码（run 失败面）', async () => {
     const guarded = createWhitelistFetch(allowed, (async () => okResponse()) as typeof fetch)
     try {

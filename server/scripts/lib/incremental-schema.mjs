@@ -358,6 +358,7 @@ CREATE TABLE IF NOT EXISTS "llm_usage_records" (
 );
 CREATE INDEX IF NOT EXISTS "llm_usage_records_userId_createdAt_idx" ON "llm_usage_records"("userId", "createdAt");
 CREATE INDEX IF NOT EXISTS "llm_usage_records_model_createdAt_idx" ON "llm_usage_records"("model", "createdAt");
+CREATE INDEX IF NOT EXISTS "llm_usage_records_runId_idx" ON "llm_usage_records"("runId");
 `)
 
   // ---- #775 minimax 默认 provider seed（731 §6 逐字段映射末行：「空 providers → 模板默认」
