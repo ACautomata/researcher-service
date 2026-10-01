@@ -318,6 +318,44 @@ function readAutofigureSidecarUrl(enabled: boolean): string {
   return v
 }
 
+// RUNNER_MAX_CONCURRENT_RUNS（#775，731 §5.3）：runner 全局在飞 run 上限（进程内信号量）。
+// BullMQ 原生 limiter 的 per-user 组限流是 Pro 专属（OSS 3.0 起移除 groupKey），进程内原语即
+// 正确边界（#734 Notes：单进程模型）。非法值（非正整数）fail-fast（对齐 readDefaultMaxContainers
+// 加载即校验模式）——否则错值静默按默认走，配额语义错配只在运行期暴露。
+function readRunnerMaxConcurrentRuns(): number {
+  const v = Number(process.env.RUNNER_MAX_CONCURRENT_RUNS ?? 8)
+  if (!Number.isInteger(v) || v <= 0) {
+    throw new Error(
+      `RUNNER_MAX_CONCURRENT_RUNS 非法: ${JSON.stringify(process.env.RUNNER_MAX_CONCURRENT_RUNS)}，须为正整数`,
+    )
+  }
+  return v
+}
+
+// ALLOW_PRIVATE_PROVIDER_ENDPOINTS（#775，731 §5.1）：CRUD 层 DNS 私网/环回拒绝的逃生开关。
+// 默认 false —— 用户配 baseUrl 时解析到私网/环回/链路本地一律拒（防借白名单条目做内网探测 +
+// prompt injection 外送 key）；自建私网端点（dev vLLM 等）显式 true 放行。生产 fail-fast 禁开
+// （对齐根决策「生产仅 https + 公网端点」；dev/test 容忍 true）。
+function readAllowPrivateProviderEndpoints(): boolean {
+  const v = process.env.ALLOW_PRIVATE_PROVIDER_ENDPOINTS
+  if (v === undefined) return false
+  if (v === 'true') {
+    if (process.env.NODE_ENV === 'production') {
+      throw new Error('ALLOW_PRIVATE_PROVIDER_ENDPOINTS 生产禁开（端点白名单 DNS 私网校验的逃生开关仅限 dev）')
+    }
+    return true
+  }
+  if (v === 'false') return false
+  throw new Error(
+    `ALLOW_PRIVATE_PROVIDER_ENDPOINTS 非法: ${JSON.stringify(v)}，须为 true 或 false（私网端点放行开关，默认关）`,
+  )
+}
+
+// LLM_API_KEY 单一读取点：fleet.llmApiKey（容器 env 注入面）与 runner.llmApiKey（#775
+// runner 侧 credentialEnvId 解析面）共享同值——读两处则轮换时可能漂移；字段名两侧各自保留
+// 以维持既有消费面。
+const LLM_API_KEY_RAW = process.env.LLM_API_KEY ?? ''
+
 export const config = {
   jwtSecret: readSecret(),
   accessTtl: process.env.ACCESS_TOKEN_TTL ?? '5m',
@@ -353,7 +391,8 @@ export const config = {
       portStart,
       portEnd,
       // 全面板共享 LLM_API_KEY（敏感值）；生产必填（create 时前置校验 → 90003）
-      llmApiKey: process.env.LLM_API_KEY ?? '',
+      //（单一读取点 LLM_API_KEY_RAW，runner.llmApiKey 同源）
+      llmApiKey: LLM_API_KEY_RAW,
       // 容器 gateway 端口宿主侧发布地址（本地 loopback；生产后端容器化后 0.0.0.0）
       publishHost: process.env.OPENCLAW_FLEET_PORT_BIND_HOST ?? '127.0.0.1',
       // 健康探测目标 host（与 WS 配对同源）
@@ -372,6 +411,18 @@ export const config = {
   lifecycleWorkerConcurrency: Number(process.env.LIFECYCLE_WORKER_CONCURRENCY ?? 2),
   // BullMQ/Redis 连接（#313 自本切片引入；后台 provisioning 队列）
   redisUrl: process.env.REDIS_URL ?? 'redis://localhost:6379/0',
+  // ---- runner（#775，#747 F 节 · 731 §5）----
+  runner: (() => {
+    return {
+      // 全局在飞 run 上限（进程内信号量；per-user 上限走 users.maxConcurrentRuns 列）
+      maxConcurrentRuns: readRunnerMaxConcurrentRuns(),
+      // CRUD 层 DNS 私网校验逃生开关（默认关；生产禁开）
+      allowPrivateProviderEndpoints: readAllowPrivateProviderEndpoints(),
+      // 共享 LLM key 解析源：credentialEnvId='LLM_API_KEY' 的 provider 行经此取值
+      //（单一读取点 LLM_API_KEY_RAW，与 fleet.llmApiKey 同源——#731 §1.3「runner 直接持有凭证」）
+      llmApiKey: LLM_API_KEY_RAW,
+    }
+  })(),
   // ---- OpenAPI 文档面（#761）----
   apiDocs: (() => {
     return {

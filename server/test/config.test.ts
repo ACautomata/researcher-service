@@ -883,3 +883,77 @@ describe('fleet image pinning env (slice config, #695)', () => {
     expect(isFloatingImageRef(`ghcr.io/a/b/openclaw:latest@sha256:${'a'.repeat(64)}`)).toBe(false)
   })
 })
+
+// ---- #775 runner 配置组：RUNNER_MAX_CONCURRENT_RUNS / ALLOW_PRIVATE_PROVIDER_ENDPOINTS ----
+
+describe('runner max concurrent runs env (#775)', () => {
+  async function loadMax(env: string | undefined): Promise<number | 'THREW'> {
+    vi.resetModules() // 清 config 模块缓存，让动态 import 重新快照 env
+    if (env === undefined) delete process.env.RUNNER_MAX_CONCURRENT_RUNS
+    else vi.stubEnv('RUNNER_MAX_CONCURRENT_RUNS', env)
+    try {
+      const { config } = await import('../src/config')
+      return config.runner.maxConcurrentRuns
+    } catch {
+      return 'THREW'
+    } finally {
+      vi.unstubAllEnvs()
+    }
+  }
+
+  it('未设置 → 默认 8', async () => {
+    expect(await loadMax(undefined)).toBe(8)
+  })
+
+  it('合法 16 → 加载为 16', async () => {
+    expect(await loadMax('16')).toBe(16)
+  })
+
+  it('非法 0 / 负数 / abc / 小数 → fail-fast（加载即校验）', async () => {
+    for (const bad of ['0', '-3', 'abc', '1.5']) {
+      expect(await loadMax(bad), bad).toBe('THREW')
+    }
+  })
+})
+
+describe('allow private provider endpoints env (#775)', () => {
+  async function loadFlag(opts: { env?: string; flag?: string }): Promise<boolean | 'THREW'> {
+    const { env, flag } = opts
+    vi.resetModules() // 清 config 模块缓存，让动态 import 重新快照 env
+    if (env === undefined) delete process.env.NODE_ENV
+    else vi.stubEnv('NODE_ENV', env)
+    if (flag === undefined) delete process.env.ALLOW_PRIVATE_PROVIDER_ENDPOINTS
+    else vi.stubEnv('ALLOW_PRIVATE_PROVIDER_ENDPOINTS', flag)
+    try {
+      const { config } = await import('../src/config')
+      return config.runner.allowPrivateProviderEndpoints
+    } catch {
+      return 'THREW'
+    } finally {
+      vi.unstubAllEnvs()
+    }
+  }
+
+  it('未设置 → 默认 false（私网端点一律拒）', async () => {
+    expect(await loadFlag({})).toBe(false)
+  })
+
+  it('显式 false → false', async () => {
+    expect(await loadFlag({ flag: 'false' })).toBe(false)
+  })
+
+  it('dev/test 显式 true → true（自建 vLLM 逃生门）', async () => {
+    expect(await loadFlag({ env: 'test', flag: 'true' })).toBe(true)
+    expect(await loadFlag({ env: 'development', flag: 'true' })).toBe(true)
+  })
+
+  it('生产 true → fail-fast（逃生门仅限 dev）', async () => {
+    expect(await loadFlag({ env: 'production', flag: 'true' })).toBe('THREW')
+  })
+
+  it('非法值 TRUE/1 → fail-fast（白名单开关模式）', async () => {
+    for (const bad of ['TRUE', '1', 'yes']) {
+      expect(await loadFlag({ flag: bad }), bad).toBe('THREW')
+    }
+  })
+})

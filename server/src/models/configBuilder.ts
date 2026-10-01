@@ -1,3 +1,5 @@
+// **#775 已退役**：models 事务简化为 mutation + config_meta version bump（runner 侧热生效），
+// 本文件不再被装配/调用（configWriter/configBuilder 留待 T0 #801 物理删除）。
 // ProviderConfigBuilder —— openclaw.json models.providers 合并纯逻辑（平移 backend/models/config_builder.py，#336）。
 //
 // 纯领域逻辑（无 IO / 无 Prisma）：消费 ProviderSpec 列表，把 DB model provider 合并进

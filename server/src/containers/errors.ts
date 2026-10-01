@@ -2,7 +2,8 @@
 // 区别于旧 Django「异常→HTTP 状态码」：本服务全部经信封码（#312 所有 REST HTTP 200）。
 // 带信封码的异常一律继承 ContainerDomainError，路由层不再逐类 catch —— 由 toEnvelopeError
 // 转译为 EnvelopeError（code 即信封码）。**不携带 code 的例外**直接继承 Error、与库内其他异常
-// 同形（无码面语义、调用方按类型捕获）：ConfigWriteError（models service 判「盘未变」）、
+// 同形（无码面语义、调用方按类型捕获）：ConfigWriteError（#775 写盘链退役前由 models
+// service 判「盘未变」消费；退役后无调用方，类留待 T0 #801 随 configWriter 一并删除）、
 // RunOnceError（升级编排判命令失败）。
 
 import { CODE } from '../codes'
@@ -84,7 +85,9 @@ export class QuotaExceeded extends ContainerDomainError {
 }
 
 // openclaw.json 写盘失败（#591 起经 FileArchive.putArchive，原 #366 ConfigStore 宿主原子写 seam
-// 已随 config 落容器内撤销）。models service 据此判定「盘未变」→ 事务回滚 DB 行 → 90003
+// 已随 config 落容器内撤销）。**#775 写盘链退役**：models service 不再消费本类（事务简化为
+// mutation + version bump），reconcile/90003 面随之消失——类保留至 T0 #801 随 configWriter
+// 一并物理删除。原消费语义存档：service 据此判定「盘未变」→ 事务回滚 DB 行 → 90003
 //（ConfigWriteError 恒 = fs/docker 写失败、盘未变；reconcile 只对「盘已写而事务回滚」触发）。
 // name = 面板实例名（诊断），path = 容器内 config 路径（诊断）。
 export class ConfigWriteError extends Error {

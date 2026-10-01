@@ -21,8 +21,17 @@ export const CODE = {
   WIKI_PAGE_NOT_FOUND: 30040, // 页不存在 / 越权（同码防探测）
   WIKI_PAGE_EXISTS: 30041, // 新建页已存在（POST 409 转译）
   // 4xxxx models（#336 平移 models 域；#319 §1.3 转译码）
-  PROVIDER_NOT_FOUND: 40040, // provider 不存在 / 越权（同码防探测）
-  PROVIDER_ID_CONFLICT: 40041, // 同 owner provider_id 冲突（POST/PUT，unique(ownerId, providerId) 约束；#771 归属上移）
+  PROVIDER_NOT_FOUND: 40040, // provider 不存在 / 越权（同码防探测）；#775 起端点白名单管理域
+  // 复用同码（models 配置段「40 不存在」锁式）：provider_endpoint 不存在（DELETE）。
+  PROVIDER_ID_CONFLICT: 40041, // 同 owner provider_id 冲突（POST/PUT，unique(ownerId, providerId) 约束；#771 归属上移）；
+  // #775 起端点白名单管理域复用同码（models 配置段「41 冲突」锁式）：provider_endpoint origin 冲突
+  //（POST，含 NULL-port 等价语义查重——SQLite UNIQUE NULL 不判重）。
+  // #775（731 §5.1/§5.3 + #747 C 节错误码新增）：40042 运行时白名单未命中（实例构造复验 / fetch
+  // wrapper 验最终请求 origin / redirect 禁随）；40043 并发配额已满（per-user maxConcurrentRuns
+  // 或全局 RUNNER_MAX_CONCURRENT_RUNS）。注意 40042 仅运行时层——CRUD 层白名单未命中是 90002
+  // 字段级（731 §5.1 第一层），两层的错误面刻意不同。
+  PROVIDER_ENDPOINT_NOT_ALLOWED: 40042, // 端点不在白名单（运行时双层校验第二层）
+  CONCURRENCY_QUOTA_EXCEEDED: 40043, // 并发配额已满（per-user 或全局在飞 run 上限）
   // 6xxxx files（#589 统一文件 CRUD；6xxxx 段为 319 §1.1 未分配段，按「40 不存在 / 41 冲突」锁式）
   FILE_NOT_FOUND: 60040, // 文件不存在（GET/PUT/DELETE）
   FILE_EXISTS: 60041, // 新建文件已存在（POST 冲突）
@@ -78,7 +87,9 @@ export const DEFAULT_MESSAGE: Record<number, string> = {
   [CODE.WIKI_PAGE_NOT_FOUND]: '页面不存在',
   [CODE.WIKI_PAGE_EXISTS]: '页面已存在',
   [CODE.PROVIDER_NOT_FOUND]: 'model provider 不存在',
-  [CODE.PROVIDER_ID_CONFLICT]: '该容器下 provider_id 已存在',
+  [CODE.PROVIDER_ID_CONFLICT]: '该用户下 provider_id 已存在',
+  [CODE.PROVIDER_ENDPOINT_NOT_ALLOWED]: '端点不在白名单内，请求被拒绝',
+  [CODE.CONCURRENCY_QUOTA_EXCEEDED]: '并发配额已满，请稍后再试',
   [CODE.FILE_NOT_FOUND]: '文件不存在',
   [CODE.FILE_EXISTS]: '文件已存在',
   [CODE.FIGURE_NOT_FOUND]: 'Figure 不存在',
