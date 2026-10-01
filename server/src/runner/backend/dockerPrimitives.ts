@@ -24,24 +24,25 @@ export class DockerPrimitives implements SandboxFilePrimitives {
   }
 
   // dockerode exec + demux（TTY=false 流带 8 字节复用头，modem.demuxStream 拆 stdout/stderr）。
-  // exitCode 原样透传（null = daemon 未能报告）；执行故障（容器不存在等）原样抛。
+  // exitCode 原样透传（null = daemon 未能报告）；daemon 级故障（容器不存在等）原样抛。
   // opts.timeoutMs（评审 M2）：Engine API 无 exec-kill 端点（POST /exec/{id}/kill 对真 daemon
   // 404 实证，moby#9098 长期未实现），exec inspect 的 Pid 又是宿主命名空间值、容器内不可
   // 寻址——改经容器内 timeout coreutil 包 argv（busybox/GNU coreutils 皆有；镜像缺该 applet
-  // 时 exec start 拒绝（OCI 404）→ throw → execute 落 exitCode:null，loud 失败不伪装成功；
-  // 沙箱镜像含 timeout 是 #776/#784 钉镜像的前置）。
-  // 信号取 KILL 单阶段（沙箱进程可弃，省略上游 SIGTERM→grace→SIGKILL 双阶段，对齐注释见
-  // dockerArchiveBackend.execute）。
+  // 时 loud fail：exec start 不抛、OCI 错误文本走 stdout 流、ExitCode 127 原样透传——真
+  // daemon 亲验；沙箱镜像含 timeout 是 #776/#784 钉镜像的前置）。
+  // 信号取 KILL 单阶段（沙箱进程可弃，省略上游 SIGTERM→grace→SIGKILL 双阶段——上游
+  // LocalShellBackend 语义对齐仅保 exitCode 124 + stderr 说明面）。
   // 退出码归一：-s KILL 真超时恒 137（busybox 与 GNU coreutils 9.x 实测一致 = 128+KILL；
   // GNU 124 仅 TERM 类信号）/124（防御 TERM 类与其他 timeout 实现）→ 124（上游
-  // LocalShellBackend 语义）。消歧：仅当 elapsed >= timeoutMs 才归一——限时内自行
-  // exit 124/137（受限沙箱 OOM 被杀常见）原样透传，不篡改为超时、不附误报文案。
+  // LocalShellBackend 语义）。消歧：仅当 elapsed >= timeoutMs 才归一（performance.now()
+  // 单调钟，免疫 wall-clock 回拨）——限时内自行 exit 124/137（受限沙箱 OOM 被杀常见）
+  // 原样透传，不篡改为超时、不附误报文案。
   // 残留语义：KILL 直达 timeout 的子进程，sh -c 复合命令的孙进程可能残留
   // （随容器生命周期回收）。
   async exec(container: string, cmd: string[], opts: ExecOptions = {}): Promise<ExecOutcome> {
     const timeoutMs = opts.timeoutMs !== undefined && opts.timeoutMs > 0 ? opts.timeoutMs : null
     const argv = timeoutMs !== null ? ['timeout', '-s', 'KILL', String(Math.ceil(timeoutMs / 1000)), ...cmd] : cmd
-    const t0 = Date.now()
+    const t0 = performance.now()
     const c = this.client().getContainer(container)
     const exec = await c.exec({ Cmd: argv, AttachStdout: true, AttachStderr: true })
     const stream = (await exec.start({ Detach: false })) as unknown as NodeJS.ReadableStream & {
@@ -65,9 +66,10 @@ export class DockerPrimitives implements SandboxFilePrimitives {
     const out = Buffer.concat(outBuf).toString('utf8')
     const err = Buffer.concat(errBuf).toString('utf8')
     const hitTimeout =
-      timeoutMs !== null && exitCode !== null && (exitCode === 124 || exitCode === 137) && Date.now() - t0 >= timeoutMs
+      timeoutMs !== null && exitCode !== null && (exitCode === 124 || exitCode === 137) && performance.now() - t0 >= timeoutMs
     if (hitTimeout) {
-      return { exitCode: 124, stdout: out, stderr: `${err}\nexecute timed out after ${timeoutMs}ms (process killed)` }
+      const note = `execute timed out after ${timeoutMs}ms (process killed)`
+      return { exitCode: 124, stdout: out, stderr: err === '' ? note : `${err}\n${note}` }
     }
     return { exitCode, stdout: out, stderr: err }
   }

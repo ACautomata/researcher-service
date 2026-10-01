@@ -14,7 +14,7 @@ export interface ExecOutcome {
   stderr: string
 }
 
-/** exec 选项：超时由 adapter 强制执行（SIGKILL + exitCode 124 + stderr 附说明） */
+/** exec 选项：超时经容器内 timeout coreutil 杀进程（adapter 包 argv），归一 exitCode 124 + stderr 附说明（机制见 dockerPrimitives.ts） */
 export interface ExecOptions {
   /** 超时毫秒数；缺省或 <=0 = 无超时（内部 mkdir/rm 等固定 argv 调用不传） */
   timeoutMs?: number
