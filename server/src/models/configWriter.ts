@@ -1,3 +1,5 @@
+// **#775 已退役**：models 事务简化为 mutation + config_meta version bump（runner 侧热生效），
+// 本文件不再被装配/调用（configWriter/configBuilder 留待 T0 #801 物理删除）。
 // ModelConfigWriter —— provider CRUD 后重渲染 openclaw.json 的写侧 Port（#336）。
 //
 // 平移 backend/containers/fleet/command.py#rewrite_config 语义：DB（ModelProvider）为单一来源，

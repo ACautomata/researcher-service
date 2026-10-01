@@ -218,6 +218,21 @@ const NEW_TABLE_COLUMNS: Record<string, Record<string, ColExpect>> = {
     toolCallId: { type: 'TEXT', notnull: 1 },
     applied: { type: 'BOOLEAN', notnull: 1, dflt: 'false' },
   },
+  llm_usage_records: {
+    // #775（#747 F 节 / story 57）：一次 LLM 调用一行 usage_metadata 落账；runId/sessionId
+    // 弱关联无 FK（审计行跟 user 永久，对齐 ToolApprovalLog 纪律）；用量四列 NOT NULL DEFAULT 0
+    runId: { type: 'TEXT', notnull: 1 },
+    sessionId: { type: 'TEXT', notnull: 0 },
+    userId: { type: 'TEXT', notnull: 1 },
+    username: { type: 'TEXT', notnull: 1 },
+    providerId: { type: 'TEXT', notnull: 1 },
+    lcProvider: { type: 'TEXT', notnull: 1 },
+    model: { type: 'TEXT', notnull: 1 },
+    inputTokens: { type: 'INTEGER', notnull: 1, dflt: '0' },
+    outputTokens: { type: 'INTEGER', notnull: 1, dflt: '0' },
+    cacheReadTokens: { type: 'INTEGER', notnull: 1, dflt: '0' },
+    cacheWriteTokens: { type: 'INTEGER', notnull: 1, dflt: '0' },
+  },
 }
 
 // 各表级 createdAt 公共列（fresh 与 upgrade 两路径都断言；checkpoint_writes 属 LangGraph
@@ -228,6 +243,7 @@ const HAS_CREATED_AT = new Set([
   'checkpoints',
   'tool_approval_logs',
   'provider_endpoints',
+  'llm_usage_records',
 ])
 
 describe('#771 Prisma 新表地基（字段契约 / 迁移幂等 / 级联）', () => {

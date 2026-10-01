@@ -511,6 +511,37 @@ model ConfigMeta {
 }
 
 // ---------------------------------------------------------------------------
+// LlmUsageRecord —— LLM usage 全量采数（#775 · #747 F 节 / story 57 成本核算数据源）。
+// 行 = 一次 LLM 调用的 usage_metadata 落账（runner callback 采数，731 §3.2「记账真值改采
+// usage_metadata」）；模型单价不入行（核算时 join modelsJson.cost——单价随配置版本可变，
+// 行只存用量真值）。runId/sessionId 弱关联无 FK（审计快照跟 user 永久，不随 run/会话级联删，
+// 对齐 TextTraceLog/ToolApprovalLog 纪律）；userId+username 冗余快照（改名不影响历史归属）。
+// ---------------------------------------------------------------------------
+model LlmUsageRecord {
+  id        String  @id @default(cuid())
+  runId     String // run 弱关联（无 FK）
+  sessionId String? // 会话弱关联（独立 run 如 wiki 治理生成可无会话）
+
+  userId   String // 冗余无 FK（tool_approval_logs 先例）
+  username String // 冗余快照（user 改名不影响历史核算归属）
+
+  providerId String // model_providers.providerId 弱引用
+  lcProvider String // openai / anthropic（构造侧 provider 种类）
+  model      String // 实际调用的 model id
+
+  inputTokens      Int @default(0)
+  outputTokens     Int @default(0)
+  cacheReadTokens  Int @default(0) // usage_metadata.input_token_details.cache_read
+  cacheWriteTokens Int @default(0) // usage_metadata.input_token_details.cache_creation
+
+  createdAt DateTime @default(now())
+
+  @@index([userId, createdAt]) // 核算查询：按用户 + 时间窗
+  @@index([model, createdAt]) // 核算查询：按模型 + 时间窗（全局面）
+  @@map("llm_usage_records")
+}
+
+// ---------------------------------------------------------------------------
 // PluginEnablement —— per-user 插件启用位（752 §4.2）：复合主键 ownerId+pluginId；
 // teammate 默认继承 owner 启用集 = per-run 快照。enabledAt 必填无默认（752 SQL 原文
 // TEXT NOT NULL）——调用方显式置位。级联 users：面板 user 行级联先例（752 草图未钉级联语义）。

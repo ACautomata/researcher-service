@@ -10,7 +10,6 @@ import {
 // 请求体 schema（zod）。校验失败 → 90002 + flatten().fieldErrors（{field:[errors]}）。
 // username 格式：字母/数字/下划线/连字符，3–30 字符（近似 Django UnicodeUsernameValidator，更严）。
 export const USERNAME_REGEX = /^[A-Za-z0-9_-]{3,30}$/
-
 // bcryptjs 截断 >72 字节的输入（72 字节后丢弃）。若不对密码设 UTF-8 字节上限，首 72 字节
 // 相同而后续不同的两个密码可互登（碰撞面）。共享此校验：login / 建号 / 改密一律拒绝 >72 字节。
 // Codex #342 四轮 P2。
@@ -64,6 +63,11 @@ export const figureCreateSchema = z.object({
   prompt: z.string().trim().min(1, 'prompt 不能为空').max(4000, 'prompt 过长（≤4000 字符）'),
 })
 
+// base_url URL 形态门（#775，731 §5.1 第一层 ①）：须 http(s)://host[:port] 起头——纯 zod 正则
+// （不产生 ZodEffects，openapi 生成零影响）；完整 origin 解析/规范化在 runner/allowlist
+// parseHttpOrigin（service 层，错误信息更精确）。
+const HTTP_URL_SHAPE_REGEX = /^https?:\/\/[a-zA-Z0-9.-]+(?::\d{1,5})?(?:\/\S*)?$/
+
 // 建/改 model provider（models POST/PUT，#336）：snake_case wire（平移 Django
 // ModelProviderWriteSerializer）。provider_id / api_key_env_id 经格式 + 成员校验（r28 §1），
 // api 限两值（r28 §1.3），models 至少一条且每条含非空 id（无 model 无法派生默认模型引用）。
@@ -80,7 +84,12 @@ export const modelProviderWriteSchema = z.object({
     .string()
     .regex(PROVIDER_ID_REGEX, 'provider_id 须以小写字母开头，1–64 位，仅含小写字母、数字、连字符'),
   api: z.enum(API_CHOICES),
-  base_url: z.string().trim().min(1, 'base_url 不能为空').max(512, 'base_url 过长'),
+  base_url: z
+    .string()
+    .trim()
+    .min(1, 'base_url 不能为空')
+    .max(512, 'base_url 过长')
+    .regex(HTTP_URL_SHAPE_REGEX, 'base_url 须为 http(s)://<host>[:<port>][/<path>] 完整 URL'),
   api_key_env_id: z
     .string()
     .regex(API_KEY_ENV_ID_REGEX, 'api_key_env_id 须大写字母开头，仅含大写字母、数字、下划线（1–128 位）')
@@ -120,4 +129,38 @@ export const modelProviderWriteSchema = z.object({
       (models) => new Set(models.map((m) => String(m.id))).size === models.length,
       { message: '同 provider 内 model id 须唯一', path: ['models'] },
     ),
+})
+
+// ---------------------------------------------------------------------------
+// provider_endpoints admin CRUD（#775，731 §3.1——端点白名单，admin 管理，面板级）。
+// wire snake_case 对齐 models 域：scheme/host/port/note。匹配语义 = origin 精确匹配
+// （scheme+host+port；port 缺省/NULL = scheme 默认端口），禁路径/子域通配——host 只收精确
+// hostname（点分标签，小写；全数字标签天然覆盖 IPv4 字面量，IPv6 字面量 V1 不收）。
+// 'http' 限 dev 的生产门在 service 层（zod 保持纯净不读 env）。校验失败 → 90002 字段级。
+// ---------------------------------------------------------------------------
+
+// 精确 hostname：点分标签（每段字母/数字/连字符、首尾非连字符）——zod .toLowerCase()
+// 归一化（大写输入折叠为小写，防 'API.Example.com' 与 'api.example.com' 两行同义白名单；
+// 归一化后重复建 → 40041，测试见 providerEndpoints.test.ts「大写输入归一化为小写」）。
+export const ENDPOINT_HOST_REGEX = /^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*$/
+
+export const providerEndpointWriteSchema = z.object({
+  scheme: z.enum(['https', 'http'], {
+    errorMap: () => ({ message: "scheme 仅支持 'https' 或 'http'（http 限开发环境）" }),
+  }),
+  host: z
+    .string()
+    .trim()
+    .toLowerCase()
+    .min(1, 'host 不能为空')
+    .max(253, 'host 过长（≤253 字符）')
+    .regex(ENDPOINT_HOST_REGEX, 'host 须为精确域名（点分小写标签，禁通配符/路径/端口混入）'),
+  port: z
+    .number()
+    .int('port 须为整数')
+    .min(1, 'port 须为 [1, 65535]')
+    .max(65535, 'port 须为 [1, 65535]')
+    .nullable()
+    .optional(),
+  note: z.string().max(200, 'note 过长（≤200 字符）').optional(),
 })

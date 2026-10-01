@@ -8,7 +8,7 @@
 //     T0 清退（#801），检测到旧形状只告警。
 //   - DDL 与 prisma/init.sql 逐字节同源（镜像其 CREATE 形状），init.sql 由
 //     prisma migrate diff 从 schema.prisma 派生 —— 单一来源，此处镜像。
-export const SCHEMA_VERSION = 8
+export const SCHEMA_VERSION = 9
 
 export function runIncrementalSchema(db) {
   db.exec(`
@@ -328,14 +328,59 @@ VALUES ('seed-minimax-endpoint', 'https', 'api.minimaxi.com', NULL,
   // 存量库旧形状（containerId/api/apiKeyEnvId 列）本票不做任何 ALTER/迁移：legacy models 域
   // 对该库离线（Prisma client 已按新形状生成），处置归 T0（#801）或重建库（删库重跑 db:apply）。
   const mpTable = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='model_providers'`).get()
-  if (mpTable) {
-    const mpCols = db.prepare(`PRAGMA table_info("model_providers")`).all()
-    if (mpCols.some((c) => c.name === 'containerId')) {
-      // eslint-disable-next-line no-console
-      console.warn(
-        '[db:schema] 检测到旧形状 model_providers（containerId/api/apiKeyEnvId）——#771 本票不动旧表（留待 T0 清退 #801），' +
-          'legacy models 域对该库离线；开发库请删除后重跑 npm run db:apply 重建。',
-      )
-    }
+  const mpLegacy =
+    !!mpTable &&
+    db.prepare(`PRAGMA table_info("model_providers")`).all().some((c) => c.name === 'containerId')
+  if (mpTable && mpLegacy) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      '[db:schema] 检测到旧形状 model_providers（containerId/api/apiKeyEnvId）——#771 本票不动旧表（留待 T0 清退 #801），' +
+        'legacy models 域对该库离线；开发库请删除后重跑 npm run db:apply 重建。',
+    )
+  }
+
+  // ---- #775（#747 F 节）：llm_usage_records（usage 全量采数，story 57 成本核算数据源）----
+  db.exec(`
+CREATE TABLE IF NOT EXISTS "llm_usage_records" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "runId" TEXT NOT NULL,
+    "sessionId" TEXT,
+    "userId" TEXT NOT NULL,
+    "username" TEXT NOT NULL,
+    "providerId" TEXT NOT NULL,
+    "lcProvider" TEXT NOT NULL,
+    "model" TEXT NOT NULL,
+    "inputTokens" INTEGER NOT NULL DEFAULT 0,
+    "outputTokens" INTEGER NOT NULL DEFAULT 0,
+    "cacheReadTokens" INTEGER NOT NULL DEFAULT 0,
+    "cacheWriteTokens" INTEGER NOT NULL DEFAULT 0,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS "llm_usage_records_userId_createdAt_idx" ON "llm_usage_records"("userId", "createdAt");
+CREATE INDEX IF NOT EXISTS "llm_usage_records_model_createdAt_idx" ON "llm_usage_records"("model", "createdAt");
+`)
+
+  // ---- #775 minimax 默认 provider seed（731 §6 逐字段映射末行：「空 providers → 模板默认」
+  // 的显式 seed 化）——每存量用户（当前零 provider 行）一行 minimax，幂等三保险：
+  //   ① NOT EXISTS（用户已有任意 provider 行——新形状表 (ownerId, providerId) 唯一键构造上
+  //     已无同 owner 重复行，「归属按 ownerId 折叠去重」在本表范围内即此语义）→ 跳过
+  //   ② 确定性 seed id（'seed-mp-minimax-' || userId，重跑 INSERT OR IGNORE 命中同主键）
+  //   ③ unique(ownerId, providerId) 兜底
+  // 旧形状库（mpLegacy）跳过 seed——「同 owner 多容器重复行折叠为一条（冲突取 createdAt
+  // 最早）」的旧表→新表折叠迁移归 T0 清退窗（#801；#771 验收④钉死「旧表不动」，#803 落地），
+  // 与本段 seed 不冲突：T0 时旧表连同行折叠一并处置。
+  // 模板漂移由 providerDefaults.test.ts 双向锁定（deploy/openclaw.json ↔ 本处内联 JSON ↔
+  // runner/providerDefaults.ts 常量）。
+  if (mpTable && !mpLegacy) {
+    db.exec(`
+INSERT OR IGNORE INTO "model_providers"
+  ("id", "ownerId", "providerId", "lcProvider", "baseUrl", "credentialEnvId", "authHeader", "modelsJson", "createdAt")
+SELECT 'seed-mp-minimax-' || u."id", u."id", 'minimax', 'anthropic',
+       'https://api.minimaxi.com/anthropic', 'LLM_API_KEY', 1,
+       '[{"id":"MiniMax-M3","name":"MiniMax M3","reasoning":true,"input":["text","image"],"cost":{"input":0.3,"output":1.2,"cacheRead":0.06,"cacheWrite":0.375},"contextWindow":1048576,"maxTokens":524288}]',
+       CURRENT_TIMESTAMP
+FROM "users" u
+WHERE NOT EXISTS (SELECT 1 FROM "model_providers" mp WHERE mp."ownerId" = u."id")
+`)
   }
 }

@@ -8,6 +8,10 @@ import { traceLogsRouter } from './routes/traceLogs'
 import { createContainersRouter } from './routes/containers'
 import { createWikiRouter, type WikiRouterDeps } from './wiki/routes'
 import { createModelsRouter, type ModelsRouterDeps } from './models/routes'
+import {
+  createProviderEndpointsRouter,
+  type ProviderEndpointsRouterDeps,
+} from './models/endpoints'
 import { createFilesRouter, type FilesRouterDeps } from './files/routes'
 import { createFiguresRouter, type FiguresRouterDeps } from './figures/routes'
 import { createDocsRouter, type DocsRouterDeps } from './openapi/routes'
@@ -29,11 +33,14 @@ export interface AppDeps {
   runtime?: ContainerRuntime
   // wiki 接缝（#335）：compile 触发等。缺省 = no-op（无编排）。
   wiki?: WikiRouterDeps
-  // models 接缝（#336）：config 写盘（provider CRUD 后重渲染 openclaw.json）。
-  // 缺省 = 不挂 models 路由（configWriter 必填，缺 writer 静默发散不安全）。
+  // models 接缝（#336；#775 写盘链退役后仅剩白名单校验注入缝——lookup 测试注 fake 免真 DNS，
+  // allowPrivate 覆盖 env 开关）。路由无条件挂载（零外部资源依赖）。
   models?: ModelsRouterDeps
+  // provider_endpoints 接缝（#775，731 §3.1）：端点白名单 admin 管理面，同款注入缝。
+  providerEndpoints?: ProviderEndpointsRouterDeps
   // files 接缝（#589）：FileArchive Port（生产 DockerFileArchive）。必填——缺 archive 属装配
-  // 错误（静默禁用文件 CRUD 不安全），由下方条件挂载（对齐 models）。
+  // 错误（静默禁用文件 CRUD 不安全），由下方条件挂载（models 自 #775 起无条件挂载，files 仍
+  // 依赖 archive 注入故保持条件挂载先例）。
   files?: FilesRouterDeps
   // figures 接缝（AutoFigure T01，docs/autofigure/tickets/T01-authenticated-figure-creation.md）：
   // 路由只依赖 req.prisma + 认证身份。注入即挂载——flag 门在装配层 server.ts 消费
@@ -51,7 +58,7 @@ export interface AppDeps {
 }
 
 // createApp 工厂：PrismaClient 经依赖注入，测试可传 test DB（接缝 #2）。
-export function createApp({ prisma, orchestrator, runtime, wiki, models, files, figures, docs, events }: AppDeps): Application {
+export function createApp({ prisma, orchestrator, runtime, wiki, models, providerEndpoints, files, figures, docs, events }: AppDeps): Application {
   const app = express()
   // wiki 内容契约无大小上限（codex PR#346）：挂载路径内请求先走 5mb limit，其余端点仍 256kb。
   // 须先于全局 parser —— body-parser 对已解析 body（req._body）会跳过，故 wiki 命中后不二次解析。
@@ -85,16 +92,18 @@ export function createApp({ prisma, orchestrator, runtime, wiki, models, files, 
   // 注意：Express 5 不把 app.use 挂载路径的 :name 合并进 router 的 req.params，故挂到
   // /api/v1/containers、把 `/:name/wiki/...` 路径声明在 router 内部（见 wiki/routes.ts）。
   app.use('/api/v1/containers', createWikiRouter(wiki ?? {}))
-  // models（#336）：configWriter 必填，仅在有注入时挂载（对齐 orchestrator 条件挂载）。
-  if (models) {
-    app.use('/api/v1/containers', createModelsRouter(models))
-  }
-  // files（#589）：FileArchive 必填，仅在有注入时挂载（对齐 models 条件挂载；wiki/workspace
-  // 两棵树统一文件 CRUD，缺 archive 静默禁用不安全）。
+  // models（#336；#775 写盘链退役）：零外部资源依赖（事务 = DB mutation + config_meta bump），
+  // 无条件挂载；deps 仅剩白名单校验注入缝（测试注 fake lookup 免真 DNS）。
+  app.use('/api/v1/containers', createModelsRouter(models ?? {}))
+  // provider_endpoints（#775，731 §3.1）：端点白名单 admin 管理面，无条件挂载（requireAdmin
+  // 在路由内；deps 同为白名单校验注入缝）。
+  app.use('/api/v1', createProviderEndpointsRouter(providerEndpoints ?? {}))
+  // files（#589）：FileArchive 必填，仅在有注入时挂载（条件挂载先例；wiki/workspace
+  // 两棵树统一文件 CRUD，缺 archive 静默禁用不安全——models 自 #775 起零资源依赖已改无条件）。
   if (files) {
     app.use('/api/v1/containers', createFilesRouter(files))
   }
-  // figures（AutoFigure T01）：存在即挂载（对齐 models/files 条件挂载——app.ts 只认 deps 注入、
+  // figures（AutoFigure T01）：存在即挂载（条件挂载——app.ts 只认 deps 注入、
   // 不读 config；flag 门在装配层 server.ts 由 config.autofigure.enabled 决定是否注入）。
   if (figures) {
     app.use('/api/v1/figures', createFiguresRouter(figures))

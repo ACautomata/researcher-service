@@ -14,6 +14,7 @@ import {
   loginSchema,
   modelProviderWriteSchema,
   passwordChangeSchema,
+  providerEndpointWriteSchema,
   userCreateSchema,
   userPatchSchema,
 } from '../validation/schemas'
@@ -388,7 +389,8 @@ register({
   dataNote: 'data: 分类聚合（开放词表；收顶层散落页）。',
 })
 
-// ---- Models /api/v1/containers/{name}/models/providers（写操作拒 creating/removing → 20043）----
+// ---- Models /api/v1/containers/{name}/models/providers（写操作拒 creating/removing → 20043；
+//      #775 事务 = mutation + config_meta version bump + 白名单第一层校验）----
 
 register({
   method: 'get',
@@ -406,8 +408,8 @@ register({
   tag: 'Models',
   summary: '新建 provider（唯一(ownerId, providerId)，#771 归属上移）',
   auth: 'user',
-  errors: `90002（字段明细，body 校验在容器/越权之后）· 20040 · 20043 · 40041（pid 冲突）· 90003（写盘失败/LLM key 缺失，DB 回滚）。`,
-  dataNote: 'data: 新建 provider（service.create 形状）。',
+  errors: `90002（字段明细含 base_url 白名单未命中/DNS 私网拒绝，body 校验在容器/越权之后）· 20040 · 20043 · 40041（pid 冲突）。`,
+  dataNote: 'data: 新建 provider（service.create 形状；事务内 config_meta version bump = 热生效信号）。',
   body: modelProviderWriteSchema,
 })
 
@@ -427,7 +429,7 @@ register({
   tag: 'Models',
   summary: '改 provider（路径 pid 定位，body 可改 provider_id）',
   auth: 'user',
-  errors: `90002 · 20040 · 20043 · 40040 · 40041（撞同 owner 既有 pid）· 90003（DB 回滚）。`,
+  errors: `90002（含 base_url 白名单未命中）· 20040 · 20043 · 40040 · 40041（撞同 owner 既有 pid）。`,
   dataNote: 'data: 更新后 provider。',
   body: modelProviderWriteSchema,
 })
@@ -436,9 +438,42 @@ register({
   method: 'delete',
   path: '/api/v1/containers/{name}/models/providers/{pid}',
   tag: 'Models',
-  summary: '删 provider（级联清理 + 重渲染）',
+  summary: '删 provider（version bump 热生效）',
   auth: 'user',
-  errors: `90002 · 20040 · 20043 · 40040 · 90003（DB 回滚）。`,
+  errors: `90002 · 20040 · 20043 · 40040。`,
+  nullData: true,
+})
+
+// ---- Provider endpoints /api/v1/provider-endpoints（#775 · 731 §3.1 端点白名单 admin 管理面）----
+
+register({
+  method: 'get',
+  path: '/api/v1/provider-endpoints',
+  tag: 'Models',
+  summary: '端点白名单列表（admin，createdAt 升序）',
+  auth: 'admin',
+  errors: `10001 · 10004（非 admin）· 10005。`,
+  dataNote: 'data: [{ id, scheme, host, port(null=scheme 默认端口), note, created_by, created_at }]。',
+})
+
+register({
+  method: 'post',
+  path: '/api/v1/provider-endpoints',
+  tag: 'Models',
+  summary: '新建白名单端点（origin 精确匹配；事务内 version bump）',
+  auth: 'admin',
+  errors: `10001 · 10004（非 admin）· 10005 · 90002（host 格式/DNS 私网拒绝、http 限开发环境）· 40041（origin 冲突，含 NULL-port 等价语义）。`,
+  dataNote: 'data: 新建端点条目。',
+  body: providerEndpointWriteSchema,
+})
+
+register({
+  method: 'delete',
+  path: '/api/v1/provider-endpoints/{id}',
+  tag: 'Models',
+  summary: '删白名单端点（不级联 provider 行——运行时复验 40042 兜底）',
+  auth: 'admin',
+  errors: `10001 · 10004（非 admin）· 10005 · 40040（不存在）。`,
   nullData: true,
 })
 

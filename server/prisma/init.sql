@@ -230,6 +230,23 @@ CREATE TABLE "config_meta" (
 );
 
 -- CreateTable
+CREATE TABLE "llm_usage_records" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "runId" TEXT NOT NULL,
+    "sessionId" TEXT,
+    "userId" TEXT NOT NULL,
+    "username" TEXT NOT NULL,
+    "providerId" TEXT NOT NULL,
+    "lcProvider" TEXT NOT NULL,
+    "model" TEXT NOT NULL,
+    "inputTokens" INTEGER NOT NULL DEFAULT 0,
+    "outputTokens" INTEGER NOT NULL DEFAULT 0,
+    "cacheReadTokens" INTEGER NOT NULL DEFAULT 0,
+    "cacheWriteTokens" INTEGER NOT NULL DEFAULT 0,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- CreateTable
 CREATE TABLE "plugin_enablements" (
     "ownerId" TEXT NOT NULL,
     "pluginId" TEXT NOT NULL,
@@ -348,6 +365,12 @@ CREATE INDEX "tool_approval_logs_userId_createdAt_idx" ON "tool_approval_logs"("
 
 -- CreateIndex
 CREATE UNIQUE INDEX "provider_endpoints_scheme_host_port_key" ON "provider_endpoints"("scheme", "host", "port");
+
+-- CreateIndex
+CREATE INDEX "llm_usage_records_userId_createdAt_idx" ON "llm_usage_records"("userId", "createdAt");
+
+-- CreateIndex
+CREATE INDEX "llm_usage_records_model_createdAt_idx" ON "llm_usage_records"("model", "createdAt");
 
 -- CreateIndex
 CREATE INDEX "attachments_ownerId_idx" ON "attachments"("ownerId");

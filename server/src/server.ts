@@ -6,7 +6,6 @@ import { config } from './config'
 import { assembleFleet } from './containers/fleetAssembly'
 import { assembleAutoFigureRuntime } from './figures/assembly'
 import { makeDockerCompile } from './wiki/compile'
-import { TemplateModelConfigWriter } from './models/configWriter'
 import { assembleTunnelServer } from './chat/tunnelAssembly'
 import { StreamHub } from './events/hub'
 import './types'
@@ -37,16 +36,10 @@ async function main(): Promise<void> {
     runtime: fleet.runtime,
     // wiki compile（#335）：docker exec `openclaw wiki compile`，5s 去抖、best-effort。
     wiki: { compile: makeDockerCompile(fleet.runtime) },
-    // models config 写盘（#336）：模板 + FileArchive.putArchive 落容器内 ~/.openclaw/openclaw.json
-    //（#591 静态 config——改配置后须重启容器生效，#366 热加载已回退）。
-    models: {
-      configWriter: new TemplateModelConfigWriter({
-        archive: fleet.archive,
-        templateJson: config.fleet.templateJson,
-        llmApiKey: config.fleet.llmApiKey,
-        panelOrigin: config.fleet.panelOrigin,
-      }),
-    },
+    // models（#336；#775 写盘链退役）：事务 = DB mutation + config_meta version bump（热生效
+    // 信号），不再 putArchive 重渲染 openclaw.json——TemplateModelConfigWriter 装配退役
+    //（configWriter/configBuilder 两文件留待 T0 清退 #801）；models/providerEndpoints 路由
+    // 无条件挂载，装配层无注入。
     // files（#589 · ADR 0012）：统一文件 CRUD 经 Docker getArchive/putArchive/exec rm。
     files: { archive: fleet.archive },
     // figures（AutoFigure T01）：flag 开才装配（config.autofigure.enabled）——flag 关不注入 →
