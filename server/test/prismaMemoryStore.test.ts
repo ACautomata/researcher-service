@@ -256,10 +256,33 @@ describe('PrismaMemoryStore（#774 · S3 · 真 SQLite）', () => {
     ])
     expect(prefixSuffix[0]).toEqual([['user-a', 'projects']])
 
-    // 未知 matchType：官方 doesMatch 抛错，镜像之
+    // 未知 matchType：官方 doesMatch 无条件抛错（path 比 ns 长也不被前置长度检查短路）
     const bogusOp = {
-      matchConditions: [{ matchType: 'bogus', path: ['x'] }],
+      matchConditions: [{ matchType: 'bogus', path: ['x', 'y'] }],
     } as unknown as Operation
     await expect(store.batch([bogusOp])).rejects.toThrow('Unsupported match type: bogus')
+  })
+
+  it('batch：listNamespaces op maxDepth 截断后重排（官方 sort 在截断后；截断可改变相对序）', async () => {
+    // 全量字典序：encode("a-b")="a-b" < encode(["a","z"])="a:z"（'-' 45 < ':' 58）
+    await store.put(['a-b'], 'k', { v: 1 })
+    await store.put(['a', 'z'], 'k', { v: 1 })
+    const results = await store.batch([{ maxDepth: 1, limit: 100, offset: 0 }])
+    // 截断到 depth 1 后排序：encode(["a"])="a" 是 "a-b" 前缀，短者小 → ["a"] 在前
+    expect(results[0]).toEqual([
+      ['a'],
+      ['a-b'],
+    ])
+    // 对照五方法路径（不走 batch op）同语义
+    expect(await store.listNamespaces({ maxDepth: 1 })).toEqual([
+      ['a'],
+      ['a-b'],
+    ])
+  })
+
+  it('search：空前缀对 ":" 开头 label 的退化 namespace 仍恒空（fail-closed 显式 guard）', async () => {
+    // validateNamespace 镜像官方不禁 ":"——[':colon'] 编码为 ":colon"，startsWith(':') 会命中
+    await store.put([':colon'], 'k', { v: 1 })
+    expect(await store.search([])).toEqual([])
   })
 })

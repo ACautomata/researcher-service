@@ -27,7 +27,8 @@ import type { PrismaClient } from '../../generated/prisma/client'
 
 const NS_SEPARATOR = ':'
 
-/** namespace 数组 ⇄ 单列编码（join(":")）——label 校验禁 "."，":" 分隔无歧义 */
+/** namespace 数组 ⇄ 单列编码（join(":")）——官方同款编码；label 校验镜像官方（禁 "."，
+ * 亦不禁 ":"，含 ":" 的 label 理论撞键，与官方 InMemoryStore 行为一致，不收紧） */
 function encodeNamespace(namespace: string[]): string {
   return namespace.join(NS_SEPARATOR)
 }
@@ -106,13 +107,16 @@ function compareValues(itemValue: unknown, filterValue: unknown): boolean {
   return itemValue === filterValue
 }
 
-// matchConditions 通配匹配（语义照抄官方 doesMatch：path 元素 "*" 通配按位比较；
-// 未知 matchType 抛错——BaseStore V1 仅定义 prefix/suffix）
+// matchConditions 通配匹配（逐行镜像官方 doesMatch：path 元素 "*" 通配按位比较；长度检查
+// 在 prefix/suffix 分支内，未知 matchType 无条件抛错——官方 throw 不被前置检查短路）
 function doesMatchCondition(condition: MatchCondition, ns: string[]): boolean {
   const { matchType, path } = condition
-  if (path.length > ns.length) return false
-  if (matchType === 'prefix') return path.every((p, i) => p === '*' || ns[i] === p)
+  if (matchType === 'prefix') {
+    if (path.length > ns.length) return false
+    return path.every((p, i) => p === '*' || ns[i] === p)
+  }
   if (matchType === 'suffix') {
+    if (path.length > ns.length) return false
     return path.every((p, i) => p === '*' || ns[ns.length - path.length + i] === p)
   }
   throw new Error(`Unsupported match type: ${matchType}`)
@@ -129,6 +133,12 @@ function truncateToDepth(namespaces: string[][], maxDepth: number): string[][] {
       seen.add(k)
       return true
     })
+}
+
+// 官方语义：字典序（join 后 localeCompare）——官方 sort 在 maxDepth 截断之后（截断可
+// 改变相对序），调用点须位于 truncateToDepth 之后
+function sortNamespaces(namespaces: string[][]): void {
+  namespaces.sort((a, b) => encodeNamespace(a).localeCompare(encodeNamespace(b)))
 }
 
 interface ListNamespacesParams {
@@ -198,9 +208,11 @@ export class PrismaMemoryStore extends BaseStore {
         'PrismaMemoryStore (BaseStore V1) does not support vector query search: memory_items has no embedding column (#727). Remove options.query or use a store with an index config.',
       )
     }
-    // 空前缀 fail-closed 恒空：官方 InMemoryStore startsWith('') 恒真返全量；本 store 承载
+    // 空前缀 fail-closed：官方 InMemoryStore startsWith('') 恒真返全量；本 store 承载
     // per-user 记忆，空前缀返全量 = 跨 namespace 泄漏——有意收紧（同 query 显式拒绝、
-    // 层级前缀边界化的先例模式），用例锁定
+    // 层级前缀边界化的先例模式）。显式提前返回而非依赖 OR 条件恒不可匹配：label 以
+    // ":" 开头系官方合法形状（validateNamespace 不禁 ":"），startsWith(':') 会命中
+    if (namespacePrefix.length === 0) return []
     const joined = encodeNamespace(namespacePrefix)
     const rows = await this.prisma.memoryItem.findMany({
       where: {
@@ -236,10 +248,8 @@ export class PrismaMemoryStore extends BaseStore {
     if (options?.maxDepth !== undefined) {
       namespaces = truncateToDepth(namespaces, options.maxDepth)
     }
-    // 官方语义：字典序（join 后 localeCompare）
-    namespaces.sort((a, b) =>
-      encodeNamespace(a).localeCompare(encodeNamespace(b)),
-    )
+    // 官方 sort 在 maxDepth 截断之后（截断可改变相对序）
+    sortNamespaces(namespaces)
     const offset = options?.offset ?? 0
     const limit = options?.limit ?? 100
     return namespaces.slice(offset, offset + limit)
@@ -297,7 +307,12 @@ export class PrismaMemoryStore extends BaseStore {
     if (conditions.length > 0) {
       namespaces = namespaces.filter((ns) => conditions.every((c) => doesMatchCondition(c, ns)))
     }
-    if (op.maxDepth !== undefined) namespaces = truncateToDepth(namespaces, op.maxDepth)
+    if (op.maxDepth !== undefined) {
+      namespaces = truncateToDepth(namespaces, op.maxDepth)
+      // 官方 sort 在 maxDepth 截断之后（截断可改变相对序，如 ["a-b"] 与 ["a","z"] 截到
+      // depth 1 后字典序翻转）——三字母实证：本实现须 [["a"],["a-b"]]，非全量序残留
+      sortNamespaces(namespaces)
+    }
     const offset = op.offset ?? 0
     const limit = op.limit ?? namespaces.length
     return namespaces.slice(offset, offset + limit)
