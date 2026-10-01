@@ -430,8 +430,9 @@ export const config = {
   // ---- 会话沙箱（#776 · #747 E 节沙箱列 + story 58/59）----
   sandbox: (() => {
     return {
-      // 沙箱镜像（生产禁浮动 tag → readSandboxImage fail-fast；默认 busybox 最小闭环，
-      // 完整工具链镜像随 #784 钉版）
+      // 沙箱镜像（生产禁浮动 tag → readSandboxImage fail-fast；默认 busybox 最小闭环——
+      // 本票 AC 不含镜像。E 节「完整工具链」镜像的拆票落点待确认（#784/#777 票面均无此项，
+      // 勿挂靠不存在的承接票），确认前以 SANDBOX_IMAGE env 钉版过渡）
       image: readSandboxImage(),
     }
   })(),

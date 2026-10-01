@@ -38,8 +38,6 @@ export interface SandboxInfo {
 
 // 沙箱运行时接触面（docker daemon 原语）。DockerSandboxRuntime 与 FakeSandboxRuntime 满足本接口。
 export interface SandboxRuntime {
-  // 确保镜像本地就位（缺失则 pull；对齐 ContainerRuntime.ensureImage 语义）
-  ensureImage(image: string): Promise<void>
   // 确保沙箱网络存在（已存在 → 幂等成功）；容器建在其上（每沙箱独立 bridge，容器间零互通）
   createNetwork(sessionId: string): Promise<void>
   // 删沙箱网络（不存在 → 幂等成功）

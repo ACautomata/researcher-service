@@ -18,7 +18,7 @@ class FakeFileArchive implements FileArchive {
   readonly dirs = new Set<string>([''])
   // #776 lab 树：docker 名 →（relPath → 内容）
   readonly labTrees = new Map<string, Map<string, string>>()
-  readonly calls: { method: string; root?: FileRoot | string; dockerName?: string; relPath: string; recursive?: boolean; content?: string }[] = []
+  readonly calls: { method: string; root?: FileRoot; absRoot?: string; dockerName?: string; relPath: string; recursive?: boolean; content?: string }[] = []
 
   private entryOf(files: Map<string, string>, relPath: string): FileReading {
     const raw = files.get(relPath)!
@@ -76,7 +76,7 @@ class FakeFileArchive implements FileArchive {
   // files/raw 字节通道：直接返回文件原始字节（不做 NUL 嗅探/UTF-8 转码——媒体字节透传语义，
   // 与 read() 的「二进制 → content:null」互补）。不存在 → FileNotFound；指向目录 → FileInvalidPath。
   async readBytes(_name: string, absRoot: string, relPath: string): Promise<Buffer> {
-    this.calls.push({ method: 'readBytes', root: absRoot, relPath })
+    this.calls.push({ method: 'readBytes', absRoot, relPath })
     if (this.dirs.has(relPath)) throw new FileInvalidPath(relPath)
     const raw = this.files.get(relPath)
     if (raw === undefined) throw new FileNotFound(relPath)
@@ -401,7 +401,7 @@ describe('files REST（接缝 #2 信封 + #589）', () => {
     // supertest 默认 JSON 解析 body；字节经 Buffer 判定
     expect(archive.calls.at(-1)).toMatchObject({
       method: 'readBytes',
-      root: '/home/node/.openclaw/workspace', // legacy 树根绝对路径（LEGACY_WORKSPACE_ROOT）
+      absRoot: '/home/node/.openclaw/workspace', // legacy 树根绝对路径（readBytes 独立字段，与 FileRoot 区分）
       relPath: 'test.png',
     })
   })

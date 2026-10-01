@@ -70,7 +70,7 @@ export function createFilesRouter(deps: FilesRouterDeps): Router {
   // root=lab 前置（#776）：name = sessionId → 查会话 + owner 判定（50002 同码防探测）→
   // 派生沙箱 docker 名（sandboxContainerName 单一来源）。不触发惰性创建（读面只读；
   // 创建归 runner ensure，#766 D5）。
-  const resolveLabSession = async (req: Request, name: string | string[]) => {
+  const resolveLabDockerName = async (req: Request, name: string | string[]) => {
     const session = await getSessionForUser(req.prisma, req.user!, requireContainerName(name))
     return sandboxContainerName(session.id)
   }
@@ -83,7 +83,7 @@ export function createFilesRouter(deps: FilesRouterDeps): Router {
     // lab 分支在 root 校验前按原值分派（root=lab 本身即合法值；其余值仍走 legacy 路径的
     // 「归属前置 → root 校验」顺序，防探测优先不变）
     if (req.query.root === 'lab') {
-      const dockerName = await resolveLabSession(req, req.params.name)
+      const dockerName = await resolveLabDockerName(req, req.params.name)
       const relPath = requireFilePath(req.query.path, { allowEmpty: true })
       try {
         ok(res, await archive.readLab(dockerName, relPath, req.query.recursive === 'true'))

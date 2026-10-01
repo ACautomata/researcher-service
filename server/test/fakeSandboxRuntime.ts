@@ -24,10 +24,6 @@ export class FakeSandboxRuntime implements SandboxRuntime {
   // 故障注入：listSandboxes 抛错（测 sweeper 容忍面）
   failList = false
 
-  async ensureImage(image: string): Promise<void> {
-    this.calls.push({ kind: 'ensureImage', image })
-  }
-
   async createNetwork(sessionId: string): Promise<void> {
     this.calls.push({ kind: 'createNetwork', sessionId })
     this.networks.add(sessionId)

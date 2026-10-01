@@ -26,6 +26,11 @@ function sandboxLabels(sessionId: string): Record<string, string> {
   return { [LABEL_KIND_KEY]: KIND_SANDBOX, [LABEL_SESSION_KEY]: sessionId }
 }
 
+// dockerode 错误携带的 HTTP 状态码（幂等吞错判定：409 已存在 / 404 不存在 / 304 已是目标态）
+function statusCodeOf(e: unknown): number | undefined {
+  return (e as { statusCode?: number }).statusCode
+}
+
 export class DockerSandboxRuntime implements SandboxRuntime {
   private cached: Docker | null = null
 
@@ -85,7 +90,9 @@ export class DockerSandboxRuntime implements SandboxRuntime {
     }
   }
 
-  async ensureImage(image: string): Promise<void> {
+  // 创建前置：镜像本地就位（缺失则 pull）。实现细节不进 Port——沙箱侧无 fleet #699 升级式的
+  // 外部 ensureImage 消费点（createSandbox 内部兜住）；#784 若出现再加回接口。
+  private async ensureImage(image: string): Promise<void> {
     await ensureImagePulled(this.client(), image)
   }
 
@@ -94,7 +101,7 @@ export class DockerSandboxRuntime implements SandboxRuntime {
       await this.client().createNetwork({ Name: sandboxNetworkName(sessionId), Labels: sandboxLabels(sessionId) })
     } catch (e) {
       // 已存在（外部残留/上一轮清理中断）→ 幂等复用
-      if ((e as { statusCode?: number }).statusCode !== 409) throw e
+      if (statusCodeOf(e) !== 409) throw e
     }
   }
 
@@ -102,7 +109,7 @@ export class DockerSandboxRuntime implements SandboxRuntime {
     try {
       await this.client().getNetwork(sandboxNetworkName(sessionId)).remove()
     } catch (e) {
-      if ((e as { statusCode?: number }).statusCode !== 404) throw e
+      if (statusCodeOf(e) !== 404) throw e
     }
   }
 
@@ -126,7 +133,7 @@ export class DockerSandboxRuntime implements SandboxRuntime {
       const data = await this.client().getContainer(sandboxContainerName(sessionId)).inspect()
       return this.inspectToInfo(data)
     } catch (e) {
-      if ((e as { statusCode?: number }).statusCode === 404) return null
+      if (statusCodeOf(e) === 404) return null
       throw e
     }
   }
@@ -135,7 +142,7 @@ export class DockerSandboxRuntime implements SandboxRuntime {
     try {
       await this.client().getContainer(sandboxContainerName(sessionId)).start()
     } catch (e) {
-      const sc = (e as { statusCode?: number }).statusCode
+      const sc = statusCodeOf(e)
       if (sc === 404 || sc === 304) return // 不存在 / 已 running：幂等
       throw e
     }
@@ -145,7 +152,7 @@ export class DockerSandboxRuntime implements SandboxRuntime {
     try {
       await this.client().getContainer(sandboxContainerName(sessionId)).stop({ t: 1 })
     } catch (e) {
-      const sc = (e as { statusCode?: number }).statusCode
+      const sc = statusCodeOf(e)
       if (sc === 404 || sc === 304) return // 不存在 / 已停：幂等（对齐 DockerRuntime.stop）
       throw e
     }
@@ -155,7 +162,7 @@ export class DockerSandboxRuntime implements SandboxRuntime {
     try {
       await this.client().getContainer(sandboxContainerName(sessionId)).remove({ force: true })
     } catch (e) {
-      if ((e as { statusCode?: number }).statusCode !== 404) throw e
+      if (statusCodeOf(e) !== 404) throw e
     }
   }
 
