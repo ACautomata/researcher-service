@@ -33,7 +33,7 @@ import type {
   WriteResult,
 } from './protocol'
 import type { ExecOutcome, SandboxFilePrimitives } from './primitives'
-import { routePath, type BackendTargets } from './paths'
+import { routePath, type BackendTargets, type RouteResult } from './paths'
 import { getMimeType, isTextMimeType } from './mime'
 import { matchGlobBaseName, matchGlobPattern } from './globmatch'
 import { paginateReadLines, performStringReplacement } from './semantics'
@@ -53,6 +53,9 @@ interface ArchiveTree {
   entries: FileInfo[]
   content: Map<string, Buffer>
 }
+
+// routePath 成功分支的命名形态（putBuffer 等内部通道参数；窄化即得）
+type RoutedPath = Extract<RouteResult, { container: string }>
 
 export class DockerArchiveBackend implements SandboxBackendProtocolV2 {
   readonly id: string
@@ -110,7 +113,7 @@ export class DockerArchiveBackend implements SandboxBackendProtocolV2 {
   // edit 必须走本通道而非 write()：write 对二进制 mime 做 base64 解码，而 edit 读侧按
   // utf8 全文本（readFullText）——错名二进制扩展名（.png 实为文本）经 write() 写回会把
   // 替换后文本 base64 解码成乱码（评审 M1）。上游 FilesystemBackend.edit 无条件 utf8 写回。
-  private async putBuffer(routed: { container: string; absPath: string }, buf: Buffer): Promise<void> {
+  private async putBuffer(routed: RoutedPath, buf: Buffer): Promise<void> {
     const abs = routed.absPath
     const dir = abs.slice(0, abs.lastIndexOf('/')) || '/'
     const basename = abs.split('/').pop() ?? 'file'
