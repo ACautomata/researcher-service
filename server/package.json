@@ -29,6 +29,7 @@
     "express": "^5.1.0",
     "ioredis": "^6.0.0",
     "jose": "^5.9.6",
+    "micromatch": "^4.0.8",
     "swagger-ui-express": "^5.0.1",
     "ws": "^8.18.0",
     "zod": "^3.24.1"
@@ -41,6 +42,7 @@
     "@types/cookie-parser": "^1.4.8",
     "@types/dockerode": "^4.0.1",
     "@types/express": "^5.0.0",
+    "@types/micromatch": "^4.0.10",
     "@types/node": "^22.10.0",
     "@types/supertest": "^6.0.2",
     "@types/swagger-ui-express": "^4.1.8",
