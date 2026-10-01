@@ -309,8 +309,8 @@ export class PrismaMemoryStore extends BaseStore {
     }
     if (op.maxDepth !== undefined) {
       namespaces = truncateToDepth(namespaces, op.maxDepth)
-      // 官方 sort 在 maxDepth 截断之后（截断可改变相对序，如 ["a-b"] 与 ["a","z"] 截到
-      // depth 1 后字典序翻转）——三字母实证：本实现须 [["a"],["a-b"]]，非全量序残留
+      // 官方 sort 在 maxDepth 截断之后：全量序按完整编码比较（"a-b" < "a:z"），截断
+      // 到 depth 1 后须按截断形状重排（"a" < "a-b"）——用例锁定两形状序翻转
       sortNamespaces(namespaces)
     }
     const offset = op.offset ?? 0

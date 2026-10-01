@@ -256,9 +256,10 @@ describe('PrismaMemoryStore（#774 · S3 · 真 SQLite）', () => {
     ])
     expect(prefixSuffix[0]).toEqual([['user-a', 'projects']])
 
-    // 未知 matchType：官方 doesMatch 无条件抛错（path 比 ns 长也不被前置长度检查短路）
+    // 未知 matchType：官方 doesMatch 无条件抛错。path 长 3 > fixture ns 深 2——若长度
+    // 检查前置（第 3 轮修复前形态）会返 false 短路而不抛，用例真判别回归
     const bogusOp = {
-      matchConditions: [{ matchType: 'bogus', path: ['x', 'y'] }],
+      matchConditions: [{ matchType: 'bogus', path: ['x', 'y', 'z'] }],
     } as unknown as Operation
     await expect(store.batch([bogusOp])).rejects.toThrow('Unsupported match type: bogus')
   })
