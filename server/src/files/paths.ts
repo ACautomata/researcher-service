@@ -49,6 +49,14 @@ export function normalizeFileRoot(raw: unknown): RootResult {
 const UNPAIRED_SURROGATE_RE =
   /(?:[\uD800-\uDBFF](?![\uDC00-\uDFFF]))|(?:(?<![\uD800-\uDBFF])[\uDC00-\uDFFF])/
 
+// 只读 root 的拒绝文案单一来源：lab / workspace 均只读（#776 写面收敛，唯一可写 root = wiki）。
+// wiki → undefined（可写）。
+export function readonlyRootError(root: Exclude<FileRoot, 'wiki'>): string {
+  return root === 'lab'
+    ? 'root=lab 为只读面（文件写经对话让 agent 改）'
+    : 'root=workspace 为 legacy 只读面（写经对话让 agent 改）'
+}
+
 // POST/PUT files body 校验（#589）：{root, path, content}。root 枚举 + path 防护 + content
 // 字符串性，双字段错误一次性收集进 data（对齐 wiki parseWikiWriteBody / DRF 聚合）。
 // #776 写面收敛：唯一可写 root = wiki（lab 只读——/lab 字节写收敛为 runner 工具 + 上传端点，
@@ -65,8 +73,7 @@ export function parseFileWriteBody(body: unknown): { root: 'wiki'; path: string;
   const pathRes = normalizeFilePath(b.path)
   const errors: Record<string, string[]> = {}
   if (!rootRes.ok) errors.root = rootRes.errors
-  else if (rootRes.root === 'lab') errors.root = ['root=lab 为只读面（文件写经对话让 agent 改）']
-  else if (rootRes.root === 'workspace') errors.root = ['root=workspace 为 legacy 只读面（写经对话让 agent 改）']
+  else if (rootRes.root !== 'wiki') errors.root = [readonlyRootError(rootRes.root)]
   if (!pathRes.ok) errors.path = pathRes.errors
   // 写操作必须指向文件：空 path（树根）无覆写/新建语义
   else if (pathRes.path === '') errors.path = ['path 不能为空']
@@ -96,12 +103,20 @@ export function requireFileRoot(raw: unknown): FileRoot {
   return res.root
 }
 
-// legacy 面专用（read/write/create/delete 的 root）：lab 不在其中——lab 分支在路由层已按
-// query 原值分派（resolveLabSession → readLab），走到这里的一定是 legacy 容器面。类型收窄
-// 即文档：read(name,'lab') 会错探 openclaw-gw-<name>/lab，此处静态排除。
+// legacy 面专用（GET read 的 root）：lab 不在其中——lab 分支在路由层已按 query 原值分派
+//（resolveLabSession → readLab），走到这里的一定是 legacy 容器面。类型收窄即文档：
+// read(name,'lab') 会错探 openclaw-gw-<name>/lab，此处静态排除。
 export function requireLegacyFileRoot(raw: unknown): LegacyFileRoot {
   const root = requireFileRoot(raw)
-  if (root === 'lab') throw fail(CODE.VALIDATION_FAILED, undefined, { root: ['root=lab 为只读面（文件写经对话让 agent 改）'] })
+  if (root === 'lab') throw fail(CODE.VALIDATION_FAILED, undefined, { root: [readonlyRootError(root)] })
+  return root
+}
+
+// 写面专用（DELETE/PUT/POST 的可写判定，query 与 body 两形态共用文案来源）：唯一可写
+// root = wiki；lab/workspace 即抛（readonlyRootError 单一来源）。
+export function requireWritableFileRoot(raw: unknown): 'wiki' {
+  const root = requireFileRoot(raw)
+  if (root !== 'wiki') throw fail(CODE.VALIDATION_FAILED, undefined, { root: [readonlyRootError(root)] })
   return root
 }
 

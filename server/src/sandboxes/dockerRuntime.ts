@@ -50,9 +50,18 @@ export class DockerSandboxRuntime implements SandboxRuntime {
   // 语义下互斥）：ReadonlyRootfs:true 时容器 rootfs 整体 ro-mount——/lab 要可写必须挂卷或 tmpfs，
   // 但规格钉死「无具名卷」、tmpfs 不跨 stop 保留（story 58「闲置 stop 文件保留」硬约束）；
   // 且 rewind 墓碑目录（attic，#766 D8「daemon 侧 root 写容器内 0700 隐藏目录」）同样落容器
-  // rootfs——daemon putArchive 对 ro rootfs 同样 EROFS。三取二下保「文件保留 + 无具名卷」，
-  // 只读根让位（敢写越界的结构性兜底由规则层路径白名单 lab/** tmp/** + 审批漏斗承担，#747 D 节；
-  // 镜像内容防篡改面收敛：busybox 级镜像内 world-writable 面积极小，uid 1000 不可写 root 目录）。
+  // rootfs——daemon putArchive 对 ro rootfs 同样 EROFS。
+  //
+  // 匿名卷（Binds: ['/lab']，非具名）看似可同时满足四项（只读根+可写+跨 stop 保留+非具名），
+  // 不选的真实代价：(1) 卷生命周期独立于容器——remove 必须显式 -v 才随之销毁，否则残留孤儿卷，
+  // 而本票语义是「删会话级联销毁文件」（#776 级联删），该保证将从容器的单点生命周期降级为
+  // 调用方记得 -v 的纪律；(2) 匿名卷首挂时 daemon 以镜像内 /lab 内容初始化（busybox 无 /lab
+  // → 建空目录 root 属主），/lab 属主预置（下方 putArchive）将与卷初始化顺序纠缠。
+  //
+  // 三取二下保「文件保留 + 无具名卷」，只读根让位（敢写越界的结构性兜底由规则层路径白名单
+  // lab/** tmp/** + 审批漏斗承担，#747 D 节；镜像内容防篡改面收敛：busybox 级镜像内
+  // world-writable 面积极小，uid 1000 不可写 root 目录）。取舍为对 E 节明文的偏离，
+  // #784 wiki 容器同款三约束，规格侧修订随其追认。
   buildSandboxCreateOptions(spec: SandboxSpec): Docker.ContainerCreateOptions {
     return {
       Image: spec.image,

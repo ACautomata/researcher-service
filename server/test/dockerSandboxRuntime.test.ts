@@ -58,6 +58,11 @@ describe('buildSandboxCreateOptions（#747 E 节沙箱列投影）', () => {
     expect(opts.HostConfig?.Tmpfs).toEqual({ '/tmp': '' })
   })
 
+  it('不设 ReadonlyRootfs、不挂任何卷（E 节三取二取舍锁死：文件保留靠容器可写层，误开只读根 = 闲置 stop 文件丢失回归；取舍论证见 dockerRuntime.ts 注释）', () => {
+    expect(opts.HostConfig?.ReadonlyRootfs).toBeUndefined()
+    expect(opts.HostConfig?.Binds).toBeUndefined()
+  })
+
   it('无宿主端口发布、无 env 注入（OPENCLAW_*/GATEWAY_TOKEN/LLM_API_KEY 全面退役）', () => {
     expect(opts.HostConfig?.PortBindings).toBeUndefined()
     expect(opts.ExposedPorts).toBeUndefined()

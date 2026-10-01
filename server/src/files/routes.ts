@@ -1,7 +1,8 @@
 // files 路由（#589 · ADR 0012 统一文件 CRUD；#776 root=lab 换轨）——挂 /api/v1/containers，
-// 路径 `/:name/files`。root ∈ {wiki, lab}（workspace 字眼退役 #776）：wiki = legacy 容器树
-//（读写面暂留，退役归 T0）；lab = 会话沙箱 /lab 只读 GET 面——:name 此时是 sessionId，
-// 经 getSessionForUser 归属门（50002 同码防探测）后由 archive.readLab 直读沙箱 docker 名。
+// 路径 `/:name/files`。root 契约：wiki = legacy 容器树（读写面暂留，退役归 T0）；
+// workspace = legacy 只读消费值（现存前端 fileTabs 硬发，#793 迁 lab 后退役，写面拒）；
+// lab = 会话沙箱 /lab 只读 GET 面——:name 此时是 sessionId，经 getSessionForUser 归属门
+//（50002 同码防探测）后由 archive.readLab 直读沙箱 docker 名。
 // 底层经 FileArchive Port（生产 DockerFileArchive，测试注入内存 fake）。沿用 #312 信封。
 // 错误映射（#589 AC + #776）：name 非法 → 90002(data.name) · 容器不存在/越权 → 20040 ·
 // 会话不存在/越权（lab）→ 50002 · root/path 非法 → 90002(data.root/path) · 写面 root=lab →
@@ -20,7 +21,7 @@ import { sandboxContainerName } from '../sandboxes/runtime'
 import { CONTAINER_NAME_REGEX } from '../validation/schemas'
 import type { FileArchive } from './fsPort'
 import { FileExists, FileInvalidPath, FileNotFound } from './errors'
-import { parseFileWriteBody, requireFilePath, requireLegacyFileRoot, resolveWorkspaceAbsPath } from './paths'
+import { parseFileWriteBody, requireFilePath, requireLegacyFileRoot, requireWritableFileRoot, resolveWorkspaceAbsPath } from './paths'
 import { FILE_ROOTS } from './values'
 
 // WebChat 媒体白名单（files/raw 端点）：仅图片扩展名 → mime。未知扩展名 → 90002（前端也不渲染）。
@@ -51,27 +52,26 @@ export function createFilesRouter(deps: FilesRouterDeps): Router {
   const router = Router()
   router.use(requireAuth, mustChangePasswordGate)
 
-  // 公共前置（对齐 wiki _get_instance）：name 校验（90002）→ 查容器 + owner 判定（20040）。
-  // Express 5 :name 可为 string | string[]（重复段）；非字符串直接按非法处理（90002）。
-  const resolveInstance = async (req: Request, name: string | string[]) => {
+  // name 校验公共段（容器面与 lab 面共用；对齐 wiki _get_instance 前置）：Express 5 :name 可为
+  // string | string[]（重复段）；非字符串直接按非法处理（90002）。
+  function requireContainerName(name: string | string[]): string {
     if (typeof name !== 'string' || !CONTAINER_NAME_REGEX.test(name)) {
       throw fail(CODE.VALIDATION_FAILED, undefined, {
         name: ['name 须以小写字母开头，3–30 位，仅含小写字母、数字、连字符'],
       })
     }
-    return getInstanceForUser(req.prisma, req.user!, name)
+    return name
   }
+
+  // 容器面前置：name 校验（90002）→ 查容器 + owner 判定（20040）。
+  const resolveInstance = async (req: Request, name: string | string[]) =>
+    getInstanceForUser(req.prisma, req.user!, requireContainerName(name))
 
   // root=lab 前置（#776）：name = sessionId → 查会话 + owner 判定（50002 同码防探测）→
   // 派生沙箱 docker 名（sandboxContainerName 单一来源）。不触发惰性创建（读面只读；
   // 创建归 runner ensure，#766 D5）。
   const resolveLabSession = async (req: Request, name: string | string[]) => {
-    if (typeof name !== 'string' || !CONTAINER_NAME_REGEX.test(name)) {
-      throw fail(CODE.VALIDATION_FAILED, undefined, {
-        name: ['name 须以小写字母开头，3–30 位，仅含小写字母、数字、连字符'],
-      })
-    }
-    const session = await getSessionForUser(req.prisma, req.user!, name)
+    const session = await getSessionForUser(req.prisma, req.user!, requireContainerName(name))
     return sandboxContainerName(session.id)
   }
 
@@ -152,14 +152,11 @@ export function createFilesRouter(deps: FilesRouterDeps): Router {
   })
 
   // DELETE /:name/files?root=&path= —— 删除文件（目录 → 90002；stopped 容器先 start 再 rm）。
-  // 写面收敛（#776/#769）：root=lab → 90002（/lab 写收敛 runner 工具 + 上传端点）；
-  // root=workspace → 90002（legacy 只读消费值）。
+  // 写面收敛（#776/#769）：唯一可写 root = wiki，lab/workspace → 90002（requireWritableFileRoot，
+  // 文案与 body 面同源；/lab 写收敛 runner 工具 + 上传端点，workspace 为 legacy 只读消费值）。
   router.delete('/:name/files', async (req: Request, res: Response) => {
     const inst = await resolveInstance(req, req.params.name)
-    const root = requireLegacyFileRoot(req.query.root) // lab → 90002（只读）
-    if (root === 'workspace') {
-      throw fail(CODE.VALIDATION_FAILED, undefined, { root: ['root=workspace 为 legacy 只读面（写经对话让 agent 改）'] })
-    }
+    const root = requireWritableFileRoot(req.query.root)
     const relPath = requireFilePath(req.query.path) // 空 path 无删除语义 → 90002
     try {
       await archive.delete(inst.name, root, relPath)

@@ -550,7 +550,6 @@ describe('files REST（接缝 #2 信封 + #589）', () => {
     const u = await seedUser(ctx.prisma, 'flab8', 'pw-flab8-secure')
     // 写面归属门先走 legacy 容器解析：种一个自有容器（顺序契约：20040 前置于 root 校验，不变）
     const name = await seedContainer(u.id)
-    const sid = await seedSession(u.id)
     const l = await login(ctx.request, 'flab8', 'pw-flab8-secure')
     const writesBefore = archive.calls.filter((c) => c.method === 'write' || c.method === 'create' || c.method === 'delete').length
     const put = await ctx.request.put(`${BASE}/${name}/files`).set(bearer(l.access)).send({ root: 'lab', path: 'x.md', content: 'x' })
@@ -565,7 +564,6 @@ describe('files REST（接缝 #2 信封 + #589）', () => {
     // fake 无任何新增写调用（读面只读）
     const writesAfter = archive.calls.filter((c) => c.method === 'write' || c.method === 'create' || c.method === 'delete').length
     expect(writesAfter).toBe(writesBefore)
-    expect(sid).toBeDefined()
   })
 
   it('跨会话沙箱隔离：同名文件各自成树（docker 名分树）', async () => {

@@ -8,6 +8,7 @@ import {
   parseFileWriteBody,
   requireFilePath,
   requireFileRoot,
+  requireWritableFileRoot,
 } from '../src/files/paths'
 import { CODE } from '../src/codes'
 import { EnvelopeError } from '../src/envelope'
@@ -176,6 +177,26 @@ describe('requireFilePath / requireFileRoot（query 形态）', () => {
       const e = err as EnvelopeError
       expect(e.code).toBe(CODE.VALIDATION_FAILED)
       expect(e.data).toHaveProperty('root')
+    }
+  })
+
+  it('requireWritableFileRoot：wiki 放行；lab/workspace → 90002（文案与 body 面同源单一来源）', () => {
+    expect(requireWritableFileRoot('wiki')).toBe('wiki')
+    try {
+      requireWritableFileRoot('lab')
+      throw new Error('应当抛 90002')
+    } catch (err) {
+      const e = err as EnvelopeError
+      expect(e.code).toBe(CODE.VALIDATION_FAILED)
+      expect(e.data).toMatchObject({ root: ['root=lab 为只读面（文件写经对话让 agent 改）'] })
+    }
+    try {
+      requireWritableFileRoot('workspace')
+      throw new Error('应当抛 90002')
+    } catch (err) {
+      const e = err as EnvelopeError
+      expect(e.code).toBe(CODE.VALIDATION_FAILED)
+      expect(e.data).toMatchObject({ root: ['root=workspace 为 legacy 只读面（写经对话让 agent 改）'] })
     }
   })
 })
