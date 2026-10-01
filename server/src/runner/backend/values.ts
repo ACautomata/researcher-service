@@ -8,6 +8,10 @@ export const MAX_COLLECT_BYTES = 32 * 1024 * 1024
 // execute 输出截断上限（PoC 50k chars）：超出截断 + truncated 标记回 agent。
 export const MAX_OUTPUT_CHARS = 50_000
 
+// execute 默认超时（对齐上游 LocalShellBackend 默认 120s）：超时 adapter SIGKILL exec 进程
+// + exitCode 124 + stderr 附说明——防 agent 一条挂起命令永久楔死 runner 回合（评审 M2）。
+export const EXEC_DEFAULT_TIMEOUT_MS = 120_000
+
 // read 默认分页（deepagents BackendProtocolV2 签名默认）。
 export const DEFAULT_READ_OFFSET = 0
 export const DEFAULT_READ_LIMIT = 500

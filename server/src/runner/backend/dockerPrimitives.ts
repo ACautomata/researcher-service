@@ -10,7 +10,7 @@
 
 import Docker from 'dockerode'
 import { Readable, PassThrough } from 'node:stream'
-import type { ExecOutcome, SandboxFilePrimitives } from './primitives'
+import type { ExecOptions, ExecOutcome, SandboxFilePrimitives } from './primitives'
 import { MAX_COLLECT_BYTES } from './values'
 
 export class DockerPrimitives implements SandboxFilePrimitives {
@@ -25,7 +25,11 @@ export class DockerPrimitives implements SandboxFilePrimitives {
 
   // dockerode exec + demux（TTY=false 流带 8 字节复用头，modem.demuxStream 拆 stdout/stderr）。
   // exitCode 原样透传（null = daemon 未能报告）；执行故障（容器不存在等）原样抛。
-  async exec(container: string, cmd: string[]): Promise<ExecOutcome> {
+  // opts.timeoutMs（评审 M2）：超时 SIGKILL exec 进程，返回 exitCode 124 + stderr 附说明
+  // （上游 LocalShellBackend 语义；信号取 SIGKILL 单阶段——沙箱进程可弃，省略上游
+  // SIGTERM→grace→SIGKILL 双阶段）。kill 与正常结束的竞态无害：timedOut 在 timer 回调
+  // 置位，正常完成路径先行 clearTimeout（微任务先于已到期的 timer macrotask）。
+  async exec(container: string, cmd: string[], opts: ExecOptions = {}): Promise<ExecOutcome> {
     const c = this.client().getContainer(container)
     const exec = await c.exec({ Cmd: cmd, AttachStdout: true, AttachStderr: true })
     const stream = (await exec.start({ Detach: false })) as unknown as NodeJS.ReadableStream & {
@@ -43,13 +47,46 @@ export class DockerPrimitives implements SandboxFilePrimitives {
       stdout,
       stderr,
     )
+    let timedOut = false
+    const timer =
+      opts.timeoutMs !== undefined && opts.timeoutMs > 0
+        ? setTimeout(() => {
+            timedOut = true
+            this.killExec(exec) // resolve-only：竞态无害，stream end 照常 resolve
+          }, opts.timeoutMs)
+        : null
     await ended
+    if (timer !== null) clearTimeout(timer)
+    if (timedOut) {
+      return {
+        exitCode: 124,
+        stdout: Buffer.concat(outBuf).toString('utf8'),
+        stderr: `${Buffer.concat(errBuf).toString('utf8')}\nexecute timed out after ${opts.timeoutMs}ms (process killed)`,
+      }
+    }
     const info = await exec.inspect()
     return {
       exitCode: info.ExitCode ?? null,
       stdout: Buffer.concat(outBuf).toString('utf8'),
       stderr: Buffer.concat(errBuf).toString('utf8'),
     }
+  }
+
+  // dockerode 5.x 未包装 POST /exec/{id}/kill（Docker API ≥1.41）：经 exec.modem.dial 直调
+  // （@types/dockerode 的 Exec.modem 为 any，收窄到 dial 签名）。resolve-only：进程已退出/
+  // 容器已停的竞态（404/409）无害——上层只等 stream end，不依赖本调用结果。
+  private killExec(exec: Docker.Exec): Promise<void> {
+    const modem = exec.modem as { dial(opts: Record<string, unknown>, cb: (err: unknown) => void): void }
+    return new Promise((resolve) => {
+      modem.dial(
+        {
+          path: `/exec/${exec.id}/kill?`,
+          method: 'POST',
+          statusCodes: { 204: true, 404: 'no such exec', 409: 'container not running' },
+        },
+        () => resolve(),
+      )
+    })
   }
 
   // getArchive 全量收集 + 404 → null。超 MAX_COLLECT_BYTES 护栏 throw（不驻留超限内存）。

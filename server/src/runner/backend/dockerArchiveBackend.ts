@@ -13,7 +13,8 @@
 //
 // 语义（semantics.ts/mime.ts/globmatch.ts 逐条镜像 deepagents@1.14.1 官方行为——基座
 // 三包联动升级时按上游核对）：read 行分页、edit 多命中拒绝、MIME 表、glob 全语义、
-// grep basename includeGlob、二进制 read 返回 Uint8Array、write 二进制 base64 解码。
+// grep basename includeGlob、二进制 read 返回 Uint8Array、write 二进制 base64 解码、
+// edit 恒 utf8 写回（评审 M1：不过 write 的 base64 分支，对齐官方 edit 无条件 utf8）。
 
 import { createTarFile, mtimeIso, normalizeTarName, parseTar, type TarEntry } from '../../files/tar'
 import type {
@@ -40,6 +41,7 @@ import {
   DEFAULT_READ_LIMIT,
   DEFAULT_READ_OFFSET,
   EMPTY_CONTENT_WARNING,
+  EXEC_DEFAULT_TIMEOUT_MS,
   GREP_DEFAULT_MAX_COUNT,
   MAX_COLLECT_BYTES,
   MAX_OUTPUT_CHARS,
@@ -103,12 +105,29 @@ export class DockerArchiveBackend implements SandboxBackendProtocolV2 {
     return { text: buf.toString('utf8') }
   }
 
+  // ---- 内部：mkdir -p 父目录 + putArchive 单文件落盘（write/edit 共用通道） ----
+
+  // edit 必须走本通道而非 write()：write 对二进制 mime 做 base64 解码，而 edit 读侧按
+  // utf8 全文本（readFullText）——错名二进制扩展名（.png 实为文本）经 write() 写回会把
+  // 替换后文本 base64 解码成乱码（评审 M1）。上游 FilesystemBackend.edit 无条件 utf8 写回。
+  private async putBuffer(routed: { container: string; absPath: string }, buf: Buffer): Promise<void> {
+    const abs = routed.absPath
+    const dir = abs.slice(0, abs.lastIndexOf('/')) || '/'
+    const basename = abs.split('/').pop() ?? 'file'
+    if (dir !== '/') await this.primitives.exec(routed.container, ['mkdir', '-p', dir])
+    await this.primitives.putArchive(routed.container, dir, createTarFile(basename, buf))
+  }
+
   // ---- SandboxBackendProtocolV2 ----
 
   // shell 固定落 /lab 沙箱（wiki 容器无运行时）；stdout+stderr 合并，超 MAX_OUTPUT_CHARS 截断。
+  // 默认超时 EXEC_DEFAULT_TIMEOUT_MS（上游 LocalShellBackend 120s 对齐，评审 M2）：adapter
+  // 超时 SIGKILL + exitCode 124 + stderr 附说明——挂起命令不再永久楔死 runner 回合。
   async execute(command: string): Promise<ExecuteResponse> {
     try {
-      const r: ExecOutcome = await this.primitives.exec(this.targets.lab, ['/bin/sh', '-c', command])
+      const r: ExecOutcome = await this.primitives.exec(this.targets.lab, ['/bin/sh', '-c', command], {
+        timeoutMs: EXEC_DEFAULT_TIMEOUT_MS,
+      })
       const combined = r.stdout + r.stderr
       const truncated = combined.length > MAX_OUTPUT_CHARS
       return {
@@ -191,14 +210,10 @@ export class DockerArchiveBackend implements SandboxBackendProtocolV2 {
     try {
       const routed = routePath(filePath, this.targets)
       if ('error' in routed) return { error: routed.error }
-      const abs = routed.absPath
-      const dir = abs.slice(0, abs.lastIndexOf('/')) || '/'
-      const basename = abs.split('/').pop() ?? 'file'
       // 二进制 mime：content 为 base64（对齐官方 FilesystemBackend 的 write 分支）
       const buf = isTextMimeType(getMimeType(filePath)) ? Buffer.from(content, 'utf8') : Buffer.from(content, 'base64')
-      if (dir !== '/') await this.primitives.exec(routed.container, ['mkdir', '-p', dir])
-      await this.primitives.putArchive(routed.container, dir, createTarFile(basename, buf))
-      return { path: abs, filesUpdate: null }
+      await this.putBuffer(routed, buf)
+      return { path: routed.absPath, filesUpdate: null }
     } catch (e) {
       return { error: `write failed: ${String(e)}` }
     }
@@ -212,8 +227,7 @@ export class DockerArchiveBackend implements SandboxBackendProtocolV2 {
       if ('error' in full) return { error: full.error }
       const replaced = performStringReplacement(full.text, oldString, newString, replaceAll)
       if (typeof replaced === 'string') return { error: replaced }
-      const w = await this.write(routed.absPath, replaced[0])
-      if (w.error !== undefined) return { error: w.error }
+      await this.putBuffer(routed, Buffer.from(replaced[0], 'utf8'))
       return { path: routed.absPath, filesUpdate: null, occurrences: replaced[1] }
     } catch (e) {
       return { error: `edit failed: ${String(e)}` }

@@ -14,13 +14,20 @@ export interface ExecOutcome {
   stderr: string
 }
 
+/** exec 选项：超时由 adapter 强制执行（SIGKILL + exitCode 124 + stderr 附说明） */
+export interface ExecOptions {
+  /** 超时毫秒数；缺省或 <=0 = 无超时（内部 mkdir/rm 等固定 argv 调用不传） */
+  timeoutMs?: number
+}
+
 export interface SandboxFilePrimitives {
   /**
    * 容器内同步执行命令（dockerode exec + demux，TTY=false 流带 8 字节复用头由适配层解）。
    * container = docker 容器名；cmd = argv 数组（不经 shell 插值，shell 语义由 caller 用
-   * ['/bin/sh', '-c', ...] 显式表达）。执行失败（daemon 故障/容器不存在）→ 抛错。
+   * ['/bin/sh', '-c', ...] 显式表达）。opts.timeoutMs 超时语义见 ExecOptions。
+   * 执行失败（daemon 故障/容器不存在）→ 抛错。
    */
-  exec(container: string, cmd: string[]): Promise<ExecOutcome>
+  exec(container: string, cmd: string[], opts?: ExecOptions): Promise<ExecOutcome>
 
   /**
    * getArchive 全量收集为 tar Buffer（调用方 parseTar）。路径不存在（daemon 404）→ null；

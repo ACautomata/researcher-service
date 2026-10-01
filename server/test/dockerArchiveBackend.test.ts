@@ -8,10 +8,10 @@
 
 import { describe, it, expect } from 'vitest'
 import { DockerArchiveBackend } from '../src/runner/backend/dockerArchiveBackend'
-import type { ExecOutcome, SandboxFilePrimitives } from '../src/runner/backend/primitives'
+import type { ExecOptions, ExecOutcome, SandboxFilePrimitives } from '../src/runner/backend/primitives'
 import type { BackendTargets } from '../src/runner/backend/paths'
 import { createTarFile, parseTar } from '../src/files/tar'
-import { MAX_OUTPUT_CHARS } from '../src/runner/backend/values'
+import { EXEC_DEFAULT_TIMEOUT_MS, MAX_OUTPUT_CHARS } from '../src/runner/backend/values'
 
 const WIKI = 'researcher-wiki-u1'
 const LAB = 'researcher-sandbox-s1'
@@ -25,12 +25,12 @@ interface FakeEntry {
   content?: Buffer
 }
 
-type ExecHandler = (container: string, cmd: string[]) => ExecOutcome | undefined
+type ExecHandler = (container: string, cmd: string[], opts?: ExecOptions) => ExecOutcome | undefined
 
 function fakeDocker(opts: { execHandler?: ExecHandler } = {}) {
   // trees[container] = 绝对路径 → 条目（目录与文件同表，路径已归一）
   const trees = new Map<string, Map<string, FakeEntry>>()
-  const calls: { kind: 'exec' | 'getArchive' | 'putArchive'; container: string; cmd?: string[]; path?: string; tar?: Buffer }[] = []
+  const calls: { kind: 'exec' | 'getArchive' | 'putArchive'; container: string; cmd?: string[]; path?: string; tar?: Buffer; timeoutMs?: number }[] = []
   const execCalls: { container: string; cmd: string[] }[] = []
 
   const treeOf = (container: string): Map<string, FakeEntry> => {
@@ -89,10 +89,10 @@ function fakeDocker(opts: { execHandler?: ExecHandler } = {}) {
   }
 
   const primitives: SandboxFilePrimitives = {
-    async exec(container, cmd) {
-      calls.push({ kind: 'exec', container, cmd })
+    async exec(container, cmd, execOpts) {
+      calls.push({ kind: 'exec', container, cmd, timeoutMs: execOpts?.timeoutMs })
       execCalls.push({ container, cmd })
-      const handled = opts.execHandler?.(container, cmd)
+      const handled = opts.execHandler?.(container, cmd, execOpts)
       if (handled) return handled
       // 默认行为：mkdir -p 建目录；rm -rf 删除；其余 exit 0 无输出
       if (cmd[0] === 'mkdir') {
@@ -222,6 +222,18 @@ describe('execute（shell 通道，PoC exec 语义）', () => {
     const r = await b.execute('big')
     expect(r.output).toHaveLength(MAX_OUTPUT_CHARS)
     expect(r.truncated).toBe(true)
+  })
+
+  it('execute 通道注入默认超时 EXEC_DEFAULT_TIMEOUT_MS（评审 M2：适配层超时 SIGKILL + exitCode 124）', async () => {
+    const f = fakeDocker()
+    const b = new DockerArchiveBackend(f.primitives, targets)
+    await b.execute('sleep 99999')
+    expect(f.calls[0]).toMatchObject({
+      kind: 'exec',
+      container: LAB,
+      cmd: ['/bin/sh', '-c', 'sleep 99999'],
+      timeoutMs: EXEC_DEFAULT_TIMEOUT_MS,
+    })
   })
 })
 
@@ -425,6 +437,19 @@ describe('edit（read+write 合成）', () => {
     const r = await b.edit('/wiki/a.md', 'zzz', 'y')
     expect(r.error).toContain('String not found')
     expect(f.calls.some((c) => c.kind === 'putArchive')).toBe(false)
+  })
+
+  it('二进制扩展名文件（mime 非文本）内实为文本：edit 按 utf8 写回，无 base64 损坏（评审 M1 回归）', async () => {
+    const f = fakeDocker()
+    f.seed(LAB, { '/lab/notes.png': 'hello PNG world' })
+    const b = new DockerArchiveBackend(f.primitives, targets)
+    const r = await b.edit('/lab/notes.png', 'PNG', 'JPEG')
+    expect(r.error).toBeUndefined()
+    expect(r.occurrences).toBe(1)
+    // 证据：fake 树中落盘字节 = utf8 替换结果（经 write() 的 base64 分支会是乱码）
+    const back = f.trees.get(LAB)!.get('/lab/notes.png')!.content!
+    expect(back.toString('utf8')).toBe('hello JPEG world')
+    expect(back.equals(Buffer.from('hello JPEG world', 'utf8'))).toBe(true)
   })
 })
 
