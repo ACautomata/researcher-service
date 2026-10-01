@@ -2,6 +2,7 @@
 // 单一来源：所有信封码在此定义，路由/中间件引用常量名而非裸数字。
 //
 // 段：0 成功 · 1xxxx 通用/鉴权/账号 · 2xxxx 容器 · 3xxxx wiki · 4xxxx models ·
+//     5xxxx 会话/run（#747 C 节；chat/pairing 的 WS close codes 为另一传输面不在此列）·
 //     6xxxx files · 7xxxx figures · 9xxxx 系统/校验。完整表见 docs/research/319-api-contract.md §1。
 
 export const CODE = {
@@ -53,6 +54,9 @@ export const CODE = {
   ORPHAN_DIR: 20044, // create 撞残留 orphan 目录（转译）
   CLEANUP_FAILED: 20045, // home 清理失败（delete 行标 REMOVING 可重试，转译）
   CONTAINER_NOT_RUNNING: 20046, // #13：容器非 running（creating/stopped/removing）——bootstrap-token 前置
+  // 5xxxx 会话/run 域（#747 C 节错误码新增；#776 起 50002 进信封面——chat/pairing 的 WS close
+  // codes 是另一传输面，不受影响）：50001 run_already_resumed 归 #777；50002 = 会话不存在。
+  SESSION_NOT_FOUND: 50002, // 会话不存在 / 越权（同码防探测；root=lab 读面 #776，#778 会话 REST 同款）
   // 9xxxx 系统 / 校验
   OAUTH_NOT_CONFIGURED: 90001, // OAuth provider 未配置（原 501）
   VALIDATION_FAILED: 90002, // 参数校验失败（字段明细进 data）；Idempotency-Key 缺/超长特例 data=null（figures 前置中间件）
@@ -83,6 +87,7 @@ export const DEFAULT_MESSAGE: Record<number, string> = {
   [CODE.ORPHAN_DIR]: '该名称存在残留数据目录，请删除同名实例或手动清理后重试',
   [CODE.CLEANUP_FAILED]: '容器已停删，但数据目录清理失败（权限/属主），请重试',
   [CODE.CONTAINER_NOT_RUNNING]: '容器未运行，请启动后再对话',
+  [CODE.SESSION_NOT_FOUND]: '会话不存在',
   [CODE.OAUTH_NOT_CONFIGURED]: 'OAuth provider 未配置',
   [CODE.WIKI_PAGE_NOT_FOUND]: '页面不存在',
   [CODE.WIKI_PAGE_EXISTS]: '页面已存在',

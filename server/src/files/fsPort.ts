@@ -7,8 +7,14 @@
 // 穿越/绝对路径/反斜杠/NUL 防护在 paths.ts（请求层），二进制过滤与 walk 上限在适配层
 // （tar 解析处，内存防护必须发生在数据落地前）。
 
-// 两棵树标识：wiki = 容器内 ~/.openclaw/wiki/main；workspace = ~/.openclaw/workspace
-export type FileRoot = 'wiki' | 'workspace'
+// 三棵树标识（#776 root 契约）：wiki = legacy 容器 ~/.openclaw/wiki/main（读写面暂留，退役归
+// T0）；workspace = legacy 容器 workspace 树（legacy 只读消费值——现存前端 fileTabs 硬发此值，
+// 迁 lab 归 #793）；lab = 会话沙箱可写树 /lab（**只经 readLab**，docker 名寻址）。
+export type FileRoot = 'wiki' | 'workspace' | 'lab'
+
+// read()/写删面的 root 集 = legacy 容器树（lab 刻意不在其中：lab 面按 sessionId 解析后走
+// readLab(dockerName)——read(name,'lab') 会错探 openclaw-gw-<name>/lab，类型层面排除误用）
+export type LegacyFileRoot = Exclude<FileRoot, 'lab'>
 
 export interface FileEntry {
   // 相对 root 的完整相对路径（无尾斜杠；目录经 type 区分）
@@ -40,20 +46,27 @@ export interface FileReading {
 }
 
 export interface FileArchive {
-  // 列目录或读文件：根条目是目录 → dir 分支（recursive=true 递归 walk）；文件 → file 分支。
-  // 路径不存在 → FileNotFound。symlink 根条目 → FileInvalidPath（不支持读链接）。
+  // 列目录或读文件（legacy 面：wiki 读写暂留 / workspace legacy 只读消费）：根条目是目录 →
+  // dir 分支（recursive=true 递归 walk）；文件 → file 分支。路径不存在 → FileNotFound。
+  // symlink 根条目 → FileInvalidPath（不支持读链接）。
   // name = 面板实例名（已过路由层 CONTAINER_NAME_REGEX 校验；适配层转 docker 容器名）。
-  read(name: string, root: FileRoot, relPath: string, recursive: boolean): Promise<DirListing | FileReading>
+  read(name: string, root: LegacyFileRoot, relPath: string, recursive: boolean): Promise<DirListing | FileReading>
+  // #776 root=lab 沙箱只读读面：dockerName = 沙箱容器 docker 名原文（researcher-sandbox-<sessionId>，
+  // 由路由层从 Session 解析派生——sandboxContainerName 单一来源），树根固定 /lab（FILE_ROOTS.lab），
+  // 语义与 read() 的目录/文件分支完全同构（复用适配层同一读通道）。沙箱未创建/容器不在 →
+  // getArchive 404 → FileNotFound（60040）——读面不触发惰性创建（创建归 runner ensure，#766 D5）。
+  readLab(dockerName: string, relPath: string, recursive: boolean): Promise<DirListing | FileReading>
   // 原始字节读取（WebChat 媒体通道，files/raw 端点）：不经 NUL 嗅探/UTF-8 转码，返回文件原生
   // Buffer——与 read() 的「二进制 → content:null」语义互补（read 面向文本投影，readBytes 面向
-  // 字节透传，如 workspace 图片）。超大（> MAX_FILE_READ_BYTES）/ 非文件条目 → FileInvalidPath。
-  readBytes(name: string, root: FileRoot, relPath: string): Promise<Buffer>
+  // 字节透传，如 workspace 图片）。absRoot = 容器内树根绝对路径（legacy 专用通道，
+  // FILE_ROOTS.workspace；T0 退役）。超大（> MAX_FILE_READ_BYTES）/ 非文件条目 → FileInvalidPath。
+  readBytes(name: string, absRoot: string, relPath: string): Promise<Buffer>
   // 覆写已存在文件（不存在 → FileNotFound）。写前幂等 start 容器（保 exec mkdir 可用）。
-  write(name: string, root: FileRoot, relPath: string, content: string): Promise<void>
+  write(name: string, root: LegacyFileRoot, relPath: string, content: string): Promise<void>
   // 新建文件（已存在 → FileExists）。
-  create(name: string, root: FileRoot, relPath: string, content: string): Promise<void>
+  create(name: string, root: LegacyFileRoot, relPath: string, content: string): Promise<void>
   // 删除文件（不存在 → FileNotFound；指向目录 → FileInvalidPath，只支持删文件）。
-  delete(name: string, root: FileRoot, relPath: string): Promise<void>
+  delete(name: string, root: LegacyFileRoot, relPath: string): Promise<void>
   // config 写读（#591 · 静态 config，对 #366「宿主 rename + ro bind 热加载」的回退）：
   // 容器内 ~/.openclaw/openclaw.json（home 卷 / bind home 内）的 upsert 写与全量读。
   // 内部机制（models 写盘 / create 渲染落盘），REST 不可达——不扩展 FileRoot 枚举。

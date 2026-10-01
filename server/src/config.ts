@@ -333,6 +333,22 @@ function readRunnerMaxConcurrentRuns(): number {
   return v
 }
 
+// SANDBOX_IMAGE（#776）：会话沙箱镜像——最小闭环先用 busybox（含 sh/timeout 基础 applet，
+// runner backend 超时 kill 机制的镜像前提，values.ts EXEC_DEFAULT_TIMEOUT_MS 注释同源）；完整
+// 工具链镜像（bash/git/Python3/Node/rg/curl/jq/…）随 #784 钉版更换默认。生产浮动引用
+//（无 tag 或 :latest）→ fail-fast（对齐 readFleetImage：沙箱同样要可复现/可 review）；
+// 资源 limit 与闲置阈值是规格常数（#747 开放点 8 待实测校准），不走 env——防部署配置漂移
+// 出一万个规格分叉（校准是代码变更，须随版锁定）。
+function readSandboxImage(): string {
+  const v = process.env.SANDBOX_IMAGE ?? 'busybox:1.36'
+  if (process.env.NODE_ENV === 'production' && isFloatingImageRef(v)) {
+    throw new Error(
+      `SANDBOX_IMAGE 为浮动镜像引用（无 tag 或 :latest）: ${JSON.stringify(v)}，生产须钉精确版本 tag`,
+    )
+  }
+  return v
+}
+
 // ALLOW_PRIVATE_PROVIDER_ENDPOINTS（#775，731 §5.1）：CRUD 层 DNS 私网/环回拒绝的逃生开关。
 // 默认 false —— 用户配 baseUrl 时解析到私网/环回/链路本地一律拒（防借白名单条目做内网探测 +
 // prompt injection 外送 key）；自建私网端点（dev vLLM 等）显式 true 放行。生产 fail-fast 禁开
@@ -412,6 +428,15 @@ export const config = {
   lifecycleWorkerConcurrency: Number(process.env.LIFECYCLE_WORKER_CONCURRENCY ?? 2),
   // BullMQ/Redis 连接（#313 自本切片引入；后台 provisioning 队列）
   redisUrl: process.env.REDIS_URL ?? 'redis://localhost:6379/0',
+  // ---- 会话沙箱（#776 · #747 E 节沙箱列 + story 58/59）----
+  sandbox: (() => {
+    return {
+      // 沙箱镜像（生产禁浮动 tag → readSandboxImage fail-fast；默认 busybox 最小闭环——
+      // 本票 AC 不含镜像。E 节「完整工具链」镜像的拆票落点待确认（#784/#777 票面均无此项，
+      // 勿挂靠不存在的承接票），确认前以 SANDBOX_IMAGE env 钉版过渡）
+      image: readSandboxImage(),
+    }
+  })(),
   // ---- runner（#775，#747 F 节 · 731 §5）----
   runner: (() => {
     return {

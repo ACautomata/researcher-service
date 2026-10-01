@@ -164,29 +164,28 @@ describe('containers 集成 smoke（真 docker daemon）', () => {
     const inst = await orch.createReserve('smoke-files', ownerId)
     await orch.createComplete(inst, true)
     try {
-      // #592 AC2 顺序闭环：建容器后、任何写前，wiki/workspace 根目录可读（空卷首挂点即存在；
+      // #592 AC2 顺序闭环：建容器后、任何写前，wiki 根目录可读（空卷首挂点即存在；
       // 骨架内容初始化属 #588 派生镜像职责——基线镜像为空读，openclawImage.test.ts 静态兜底）
+      //（#776：root 契约换轨 wiki|lab，workspace CRUD 面随字眼退役；本 smoke 的 CRUD 走 wiki 树）
       const wikiRoot = await fa.read('smoke-files', 'wiki', '', false)
       expect(wikiRoot.kind).toBe('dir')
-      const wsRoot = await fa.read('smoke-files', 'workspace', '', false)
-      expect(wsRoot.kind).toBe('dir')
-      // create → 写进容器 ~/.openclaw/workspace（父目录经 exec mkdir -p 保障）
-      await fa.create('smoke-files', 'workspace', 'out/report.md', '# Smoke 报告\n')
-      // list：workspace 根含刚建文件；递归 walk 出深层相对路径
-      const dir = await fa.read('smoke-files', 'workspace', '', true)
+      // create → 写进容器 wiki 树（父目录经 exec mkdir -p 保障）
+      await fa.create('smoke-files', 'wiki', 'out/report.md', '# Smoke 报告\n')
+      // list：wiki 根含刚建文件；递归 walk 出深层相对路径
+      const dir = await fa.read('smoke-files', 'wiki', '', true)
       expect(dir.kind).toBe('dir')
       if (dir.kind !== 'dir') return
       expect(dir.files.map((f) => f.path)).toContain('out/report.md')
       // read：内容原文
-      const file = await fa.read('smoke-files', 'workspace', 'out/report.md', false)
+      const file = await fa.read('smoke-files', 'wiki', 'out/report.md', false)
       expect(file).toMatchObject({ kind: 'file', content: '# Smoke 报告\n' })
       // write：覆写已存在
-      await fa.write('smoke-files', 'workspace', 'out/report.md', '# 覆写\n')
-      const after = await fa.read('smoke-files', 'workspace', 'out/report.md', false)
+      await fa.write('smoke-files', 'wiki', 'out/report.md', '# 覆写\n')
+      const after = await fa.read('smoke-files', 'wiki', 'out/report.md', false)
       if (after.kind === 'file') expect(after.content).toBe('# 覆写\n')
       // delete：删文件；不存在 → FileNotFound
-      await fa.delete('smoke-files', 'workspace', 'out/report.md')
-      await expect(fa.read('smoke-files', 'workspace', 'out/report.md', false)).rejects.toBeInstanceOf(FileNotFound)
+      await fa.delete('smoke-files', 'wiki', 'out/report.md')
+      await expect(fa.read('smoke-files', 'wiki', 'out/report.md', false)).rejects.toBeInstanceOf(FileNotFound)
       // wiki 树同样可用（基线镜像无 wiki 骨架：create 自动建目录，再列根）
       await fa.create('smoke-files', 'wiki', 'index.md', '# Wiki\n')
       const wikiDir = await fa.read('smoke-files', 'wiki', '', false)

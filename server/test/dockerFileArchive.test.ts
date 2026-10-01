@@ -16,7 +16,6 @@ import { createTarFile, parseTar } from '../src/files/tar'
 import { MAX_FILE_READ_BYTES, WALK_LIMIT } from '../src/files/values'
 
 const WIKI_ROOT = '/home/node/.openclaw/wiki/main'
-const WS_ROOT = '/home/node/.openclaw/workspace'
 
 // 造一个目录 tar（对齐 Docker getArchive 产出）：根 '.' + 直接子项 + 深层文件。
 // mtime 秒精度（2024-01-01）。createTarFile 自带尾部结束零块，拼接时去除、末位统一补。
@@ -87,18 +86,18 @@ function mockClient(opts: {
 describe('DockerFileArchive read（mock dockerode）', () => {
   it('列根目录：直接子项带 type/size/modified；深层条目不出现在非递归列表', async () => {
     const archives = new Map<string, Buffer>([
-      [WS_ROOT, dirTar([{ name: '.' }, { name: 'report.md', content: '# R\n' }, { name: 'data' }, { name: 'data/raw.txt', content: 'x' }])],
+      [WIKI_ROOT, dirTar([{ name: '.' }, { name: 'report.md', content: '# R\n' }, { name: 'data' }, { name: 'data/raw.txt', content: 'x' }])],
     ])
     const { docker, calls } = mockClient({ archives })
     const fa = new DockerFileArchive(() => docker)
-    const res = await fa.read('box', 'workspace', '', false)
+    const res = await fa.read('box', 'wiki', '', false)
     expect(res.kind).toBe('dir')
     if (res.kind !== 'dir') return
     expect(res.files.map((f) => f.path)).toEqual(['report.md', 'data'])
     expect(res.files[0]).toMatchObject({ type: 'file', size: 4, modified: '2024-01-01T00:00:00.000Z' })
     expect(res.files[1]).toMatchObject({ type: 'directory', size: 0 })
     expect(res.truncated).toBe(false)
-    expect(calls[0]).toEqual({ kind: 'getArchive', path: WS_ROOT })
+    expect(calls[0]).toEqual({ kind: 'getArchive', path: WIKI_ROOT })
   })
 
   it('递归 walk：深层条目带完整相对路径；子目录 path 透传', async () => {
@@ -182,6 +181,33 @@ describe('DockerFileArchive read（mock dockerode）', () => {
     const archives = new Map<string, Buffer>([[`${WIKI_ROOT}/link.md`, tar]])
     const fa2 = new DockerFileArchive(() => mockClient({ archives }).docker)
     await expect(fa2.read('box', 'wiki', 'link.md', false)).rejects.toBeInstanceOf(FileInvalidPath)
+  })
+})
+
+describe('DockerFileArchive readLab（#776 root=lab 沙箱只读读面）', () => {
+  it('docker 名原文直用（不套 openclaw-gw- 前缀）；树根固定 /lab；目录/文件分支同 read', async () => {
+    const LAB_ROOT = '/lab'
+    const archives = new Map<string, Buffer>([
+      [LAB_ROOT, dirTar([{ name: '.' }, { name: 'notes.md', content: '# lab\n' }, { name: 'out' }, { name: 'out/r.txt', content: '42' }])],
+      [`${LAB_ROOT}/notes.md`, createTarFile('notes.md', Buffer.from('# lab\n'), 1_704_067_200)],
+    ])
+    const { docker, calls } = mockClient({ archives })
+    const fa = new DockerFileArchive(() => docker)
+    // docker 名 = researcher-sandbox-<sessionId> 原文（适配层不得再拼 fleet 前缀）
+    const dir = await fa.readLab('researcher-sandbox-c0001', '', false)
+    expect(dir).toMatchObject({ kind: 'dir', path: '' })
+    if (dir.kind !== 'dir') return
+    expect(dir.files.map((f) => f.path)).toEqual(['notes.md', 'out'])
+    const file = await fa.readLab('researcher-sandbox-c0001', 'notes.md', false)
+    expect(file).toMatchObject({ kind: 'file', path: 'notes.md', content: '# lab\n', binary: false })
+    // 探针落点：/lab 树根与 /lab/notes.md（不落 wiki/workspace 路径）
+    expect(calls.map((c) => c.path)).toEqual([LAB_ROOT, `${LAB_ROOT}/notes.md`])
+  })
+
+  it('沙箱/路径不存在（daemon 404）→ FileNotFound（60040 语义；不触发惰性创建）', async () => {
+    const { docker } = mockClient({ archive404: new Set(['/lab']) })
+    const fa = new DockerFileArchive(() => docker)
+    await expect(fa.readLab('researcher-sandbox-missing', '', false)).rejects.toBeInstanceOf(FileNotFound)
   })
 })
 

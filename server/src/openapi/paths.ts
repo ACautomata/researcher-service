@@ -86,7 +86,7 @@ const USER_WRITE_BODY_NOTE =
   'JSON 对象；字段校验为服务端手写（单一来源 wiki/paths.ts），非法 → 90002 + data 字段明细。'
 
 const FILE_WRITE_BODY_NOTE =
-  'JSON 对象；字段校验为服务端手写（单一来源 files/paths.ts），非法 → 90002 + data 字段明细。root 仅 wiki|workspace。'
+  'JSON 对象；字段校验为服务端手写（单一来源 files/paths.ts），非法 → 90002 + data 字段明细。写面 root 仅 wiki（lab/workspace 只读 → 90002 data.root）。'
 
 const CONTAINER_PATH_NOTE = '容器名（DNS-label：小写字母开头，3–30 位，仅 [a-z0-9-]）；非法 → 90002(data.name)。'
 
@@ -477,7 +477,7 @@ register({
   nullData: true,
 })
 
-// ---- 文件 /api/v1/containers/{name}/files（ADR 0012 统一文件 CRUD）----
+// ---- 文件 /api/v1/containers/{name}/files（ADR 0012 统一文件 CRUD；#776 root=lab 换轨）----
 
 register({
   method: 'get',
@@ -485,10 +485,13 @@ register({
   tag: '文件',
   summary: '列目录 / 读文件（stopped 容器可读）',
   auth: 'user',
-  errors: `90002（data.name|data.root|data.path）· 20040 · 60040（文件不存在）· 10005。`,
-  dataNote: 'path 指目录 → { files: [{ path, type, size, modified }] }；指文件 → { path, content, size, modified }。',
+  errors: `90002（data.name|data.root|data.path）· 20040（容器面：容器不存在/越权）· 50002（lab 面：会话不存在/越权）· 60040（文件不存在）· 10005。`,
+  dataNote:
+    'root=wiki：path 指目录 → { files: [{ path, type, size, modified }] }；指文件 → { path, content, size, modified }。' +
+    'root=workspace：legacy 只读消费值（现存前端 fileTabs；#793 迁 lab 后退役）。' +
+    'root=lab（#776）：同形读面指向会话沙箱 /lab，{name} 为 sessionId；只读 GET，不触发沙箱创建。',
   query: z.object({
-    root: z.enum(['wiki', 'workspace']),
+    root: z.enum(['wiki', 'workspace', 'lab']),
     path: z.string().optional().describe('相对路径；空 = 树根'),
     recursive: z.enum(['true', 'false']).optional().describe('仅字面 true 递归'),
   }),
@@ -498,11 +501,11 @@ register({
   method: 'get',
   path: '/api/v1/containers/{name}/files/raw',
   tag: '文件',
-  summary: 'workspace 图片字节（WebChat 媒体白名单）',
+  summary: 'workspace 图片字节（WebChat 媒体白名单；legacy 通道，T0 随 legacy 退役 #801）',
   auth: 'user',
   errors: `90002（非 workspace 前缀/穿越/非白名单扩展名 → data.path）· 20040 · 60040。`,
-  dataNote: '错误面走信封；白名单 png/jpg/jpeg/webp/gif。',
-  query: z.object({ path: z.string().describe('workspace 树内绝对路径') }),
+  dataNote: '错误面走信封；白名单 png/jpg/jpeg/webp/gif。注意：本端点是 legacy 容器媒体通道——「workspace」仅在此遗留通道内以绝对路径参数出现；root 契约（#776）为 wiki|workspace(legacy 只读)|lab，本端点不收 root。',
+  query: z.object({ path: z.string().describe('legacy 容器 workspace 树内绝对路径') }),
   bytes: 'image/png, image/jpeg 或 image/webp/gif（按扩展名）',
 })
 
@@ -532,12 +535,12 @@ register({
   method: 'delete',
   path: '/api/v1/containers/{name}/files',
   tag: '文件',
-  summary: '删文件（目录 → 90002；stopped 先 start 再 rm）',
+  summary: '删文件（目录 → 90002；stopped 先 start 再 rm；写面收敛：root=lab/workspace → 90002 data.root）',
   auth: 'user',
   errors: `90002（data.name|data.root|data.path）· 20040 · 60040 · 10005。`,
   nullData: true,
   query: z.object({
-    root: z.enum(['wiki', 'workspace']),
+    root: z.enum(['wiki', 'workspace', 'lab']),
     path: z.string().describe('相对路径（非空）'),
   }),
 })

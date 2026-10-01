@@ -4,6 +4,7 @@ import { getPrisma } from './prisma'
 import { bootstrap } from './auth/bootstrap'
 import { config } from './config'
 import { assembleFleet } from './containers/fleetAssembly'
+import { assembleSandboxes } from './sandboxes/assembly'
 import { assembleAutoFigureRuntime } from './figures/assembly'
 import { makeDockerCompile } from './wiki/compile'
 import { assembleTunnelServer } from './chat/tunnelAssembly'
@@ -18,6 +19,9 @@ async function main(): Promise<void> {
   const eventHub = new StreamHub()
   // 容器编排（#334 M2）：真 DockerRuntime + BullMQ(Redis) 队列 + worker 并发默认 2。
   const fleet = assembleFleet(prisma)
+  // 会话沙箱生命周期（#776 · story 58/59）：惰性创建/闲置 30min 回收/级联删 Port +
+  // 周期 sweeper（真正消费方 = #777 runner ensure/touch 与 #778 会话 REST 删 session 级联）。
+  const sandboxes = assembleSandboxes()
   // AutoFigure 生成运行时（T07）：config → 生产 HTTP adapter（私有 sidecar）→ T03 runner。
   // flag 关 → null（不构造 adapter、不启动 pump；面板启动/health 独立于 sidecar）。enabled →
   // 构造 adapter + 启动 runner pump（queue 由 T03 runner 内部创建）。handle 供优雅关闭 await。
@@ -76,6 +80,7 @@ async function main(): Promise<void> {
   //（T07：停 pump + 等待在飞生成 settle——T03 close 语义，见 runner.ts）。
   const shutdown = async (): Promise<void> => {
     await fleet.close().catch(() => {})
+    await sandboxes.close().catch(() => {})
     await autofigure?.close().catch(() => {})
     // 先终止活动隧道（http.Server.close 会等升级后的 WS 连接自然断开——有浏览器持隧道时挂起）
     tunnel.close()

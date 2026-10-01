@@ -25,6 +25,16 @@ export const LABEL_APP_KEY = 'app'
 export const LABEL_APP_VALUE = 'openclaw-fleet'
 export const LABEL_INSTANCE_KEY = 'openclaw.instance'
 export const LABEL_PORT_KEY = 'openclaw.port'
+// #747 E 节 / #776：容器 kind 标签三值 legacy|wiki|sandbox——新世界编排器按它分派 create/health/delete
+// 路径（legacy 值仅为 T0 删除路径的识别标记）。#776 先立沙箱支路（kind=sandbox + session 绑定标签）；
+// legacy fleet（app=openclaw-fleet）不带 kind 标签、与新标签互不影响——listFleet 按 app label 过滤，
+// 沙箱不打 app 标签即天然隐身（#747「沙箱对容器列表隐身」）。
+export const LABEL_KIND_KEY = 'researcher.kind'
+export const KIND_LEGACY = 'legacy'
+export const KIND_WIKI = 'wiki'
+export const KIND_SANDBOX = 'sandbox'
+// 沙箱 → 会话绑定标签（researcher.session = sessionId）：daemon 侧认领/清理沙箱的归属凭据。
+export const LABEL_SESSION_KEY = 'researcher.session'
 // #696 一次性临时容器标记（runOnce）：与 fleet 三标签互斥——临时容器不写 app/instance/port 标签、
 // 不发布宿主端口，故 listFleet（按 app 过滤）与端口对账均不可见；本标签仅用于「认出临时容器」
 //（daemon 侧泄漏排查 / 冒烟断言）。

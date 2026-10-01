@@ -50,6 +50,9 @@ export class MemoryArchive implements FileArchive {
   async read(): Promise<never> {
     throw new Error('files CRUD not used in fleet tests')
   }
+  async readLab(): Promise<never> {
+    throw new Error('files lab read not used in fleet tests')
+  }
   async readBytes(): Promise<never> {
     throw new Error('files CRUD not used in fleet tests')
   }
