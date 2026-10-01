@@ -33,6 +33,10 @@ panel-frontend 容器（nginx，唯一对宿主暴露，loopback:18080）
   最慢值 `3600s`**：站点 → 反向代理 → 配置，填 `proxy_read_timeout 3600s;` + `proxy_send_timeout 3600s;`
   （bootstrap 步骤 5），否则外层默认 60s 会先于内层返回 504——慢请求已完成但 UI 报失败。
   改任一层超时须同步全链。
+- **SSE 事件流**（`GET /api/v1/events`，issue #773）：容器内 nginx 已配专属精确匹配 location
+  （`proxy_buffering off; proxy_cache off;` + `3600s` 读写超时——20s `:ping` 心跳间隙不被代理掐断；
+  应用层另发 `X-Accel-Buffering: no` 双侧互锁）。**BaoTa 边缘反代同样须 `proxy_buffering off;`
+  且超时 ≥ `3600s`**，否则外层攒帧/掐断会让事件流延迟成批到达或直接 504。
 
 ## CD 自动化什么
 

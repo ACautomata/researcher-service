@@ -2,8 +2,8 @@ import express, { type Application, type Request, type Response, type NextFuncti
 import cookieParser from 'cookie-parser'
 import type { PrismaClient } from './generated/prisma/client'
 import { healthRouter } from './routes/health'
-import { authRouter } from './routes/auth'
-import { usersRouter } from './routes/users'
+import { createAuthRouter } from './routes/auth'
+import { createUsersRouter } from './routes/users'
 import { traceLogsRouter } from './routes/traceLogs'
 import { createContainersRouter } from './routes/containers'
 import { createWikiRouter, type WikiRouterDeps } from './wiki/routes'
@@ -11,6 +11,7 @@ import { createModelsRouter, type ModelsRouterDeps } from './models/routes'
 import { createFilesRouter, type FilesRouterDeps } from './files/routes'
 import { createFiguresRouter, type FiguresRouterDeps } from './figures/routes'
 import { createDocsRouter, type DocsRouterDeps } from './openapi/routes'
+import { createEventsRouter, type EventsRouterDeps } from './events/routes'
 import { Orchestrator } from './containers/orchestrator'
 import { FleetDeps } from './containers/deps'
 import type { ContainerRuntime } from './containers/runtime'
@@ -42,10 +43,15 @@ export interface AppDeps {
   // 在装配层 server.ts 消费；缺省 = 不挂 docs 路由（/api/docs → 90005）。门控在路由内
   //（requireAuth + requireAdmin），app.ts 只认 deps 注入、不读 config（对齐 figures 先例）。
   docs?: DocsRouterDeps
+  // events 接缝（#773，#747 C 节）：SSE 事件流（GET /api/v1/events）。注入即挂载——
+  // 生产 server.ts 装配 StreamHub 单例；缺省 = 不挂（/api/v1/events → 90005，对齐
+  // figures/docs 条件挂载先例）。panel_stream cookie 颁发在 auth 路由（login/refresh），
+  // 不依赖本 deps。
+  events?: EventsRouterDeps
 }
 
 // createApp 工厂：PrismaClient 经依赖注入，测试可传 test DB（接缝 #2）。
-export function createApp({ prisma, orchestrator, runtime, wiki, models, files, figures, docs }: AppDeps): Application {
+export function createApp({ prisma, orchestrator, runtime, wiki, models, files, figures, docs, events }: AppDeps): Application {
   const app = express()
   // wiki 内容契约无大小上限（codex PR#346）：挂载路径内请求先走 5mb limit，其余端点仍 256kb。
   // 须先于全局 parser —— body-parser 对已解析 body（req._body）会跳过，故 wiki 命中后不二次解析。
@@ -61,8 +67,12 @@ export function createApp({ prisma, orchestrator, runtime, wiki, models, files, 
   })
 
   app.use('/api', healthRouter)
-  app.use('/api/v1/auth', authRouter)
-  app.use('/api/v1/users', usersRouter)
+  // auth（#773）：logout 终止 SSE 流（session.terminated{logout}）需 StreamHub——
+  // events 挂载时经其注入同一单例；未挂载（缺省装配）传 undefined，logout 静默跳过流终止。
+  app.use('/api/v1/auth', createAuthRouter({ streamHub: events?.hub }))
+  // #773：reset-password 终止目标 user SSE 流（session.terminated{logout}）——
+  // 同 auth 的 streamHub 注入语义：events 挂载时同一单例，未挂载静默跳过。
+  app.use('/api/v1/users', createUsersRouter({ streamHub: events?.hub }))
   app.use('/api/v1/trace-logs', traceLogsRouter)
   if (orchestrator) {
     // approve 端点依赖 runtime（docker exec），与 orchestrator 成对注入（#374）；缺 runtime 属装配错误。
@@ -93,6 +103,11 @@ export function createApp({ prisma, orchestrator, runtime, wiki, models, files, 
   // flag 门在装配层 server.ts 由 config.apiDocs.enabled 决定是否注入）。
   if (docs) {
     app.use('/api/docs', createDocsRouter(docs))
+  }
+  // events（#773）：SSE 单工流（/api/v1/events，panel_stream cookie 认证）。存在即挂载
+  // （对齐 figures/docs 条件挂载先例）；生产由 server.ts 装配 StreamHub 单例注入。
+  if (events) {
+    app.use('/api/v1/events', createEventsRouter(events))
   }
 
   app.use(notFound) // 未匹配路由 → 信封 90005（兑现「所有 REST HTTP 200」）

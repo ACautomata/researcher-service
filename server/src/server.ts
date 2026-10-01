@@ -8,11 +8,15 @@ import { assembleAutoFigureRuntime } from './figures/assembly'
 import { makeDockerCompile } from './wiki/compile'
 import { TemplateModelConfigWriter } from './models/configWriter'
 import { assembleTunnelServer } from './chat/tunnelAssembly'
+import { StreamHub } from './events/hub'
 import './types'
 
 async function main(): Promise<void> {
   const prisma = getPrisma()
   await bootstrap(prisma) // B1 惰性首启（空表生成 admin）
+  // SSE 事件扇出注册表（#773，#747 C 节）：单进程单例，REST 路由与（后续票的）runner
+  // 事件桥共享；logout/吊销终止经它广播 session.terminated。
+  const eventHub = new StreamHub()
   // 容器编排（#334 M2）：真 DockerRuntime + BullMQ(Redis) 队列 + worker 并发默认 2。
   const fleet = assembleFleet(prisma)
   // AutoFigure 生成运行时（T07）：config → 生产 HTTP adapter（私有 sidecar）→ T03 runner。
@@ -54,6 +58,9 @@ async function main(): Promise<void> {
     //（/api/docs → 90005）。DocsRouterDeps 为空（文档启动期静态构建，路由只依赖认证身份），
     // 装配形态 `{}` 表达「已启用」（对齐 figures 装配注释先例）。
     docs: config.apiDocs.enabled ? {} : undefined,
+    // events（#773）：SSE 事件流（/api/v1/events）。StreamHub 单例注入；
+    // 心跳 20s 用缺省（HEARTBEAT_MS，路由层唯一默认值声明处）。
+    events: { hub: eventHub },
   })
 
   // M0 同进程单端口分流：createServer(expressApp) + server.on('upgrade') 分流。

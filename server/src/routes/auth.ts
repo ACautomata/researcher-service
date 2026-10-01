@@ -2,17 +2,19 @@ import { Router, type Request, type Response } from 'express'
 import type { PrismaClient } from '../generated/prisma/client'
 import { ok, fail } from '../envelope'
 import { CODE } from '../codes'
-import { config, REFRESH_COOKIE, REFRESH_COOKIE_PATH } from '../config'
+import { config, REFRESH_COOKIE, REFRESH_COOKIE_PATH, PANEL_STREAM_COOKIE, PANEL_STREAM_COOKIE_PATH } from '../config'
 import {
   signAccessToken,
   generateRefreshToken,
   hashToken,
   refreshExpiresAt,
   revokeAllUserRefresh,
+  signPanelStreamToken,
 } from '../auth/tokens'
 import { verifyPassword, hashPassword } from '../auth/password'
 import { createUser, type CreateUserInput } from '../auth/userService'
 import { requireAuth, requireAdmin } from '../middleware/auth'
+import type { StreamHub } from '../events/hub'
 import { mustChangePasswordGate } from '../middleware/mustChangePasswordGate'
 import { validateBody } from '../middleware/validate'
 import { loginSchema, passwordChangeSchema, userCreateSchema } from '../validation/schemas'
@@ -31,6 +33,22 @@ function setRefreshCookie(res: Response, token: string): void {
 
 function clearRefreshCookie(res: Response): void {
   res.clearCookie(REFRESH_COOKIE, { path: REFRESH_COOKIE_PATH })
+}
+
+// panel_stream：SSE 只读流凭证 cookie（#726 · issue #773）。SameSite=Strict（refresh 用 Lax——
+// 流端点只读、 Strict 收紧跨站发送面）；Path 锁流端点；logout 经同 Path 清除。
+// Secure 与 refresh 共用 config.cookieSecure（prod-only）先例。
+function setPanelStreamCookie(res: Response, token: string): void {
+  res.cookie(PANEL_STREAM_COOKIE, token, {
+    httpOnly: true,
+    secure: config.cookieSecure,
+    sameSite: 'strict',
+    path: PANEL_STREAM_COOKIE_PATH,
+  })
+}
+
+function clearPanelStreamCookie(res: Response): void {
+  res.clearCookie(PANEL_STREAM_COOKIE, { path: PANEL_STREAM_COOKIE_PATH })
 }
 
 // 恒定耗时的 dummy bcrypt(12) 散列：login 短路分支（用户不存在/OIDC-only/inactive）用它
@@ -57,7 +75,7 @@ export async function rotateInTx(
   now: Date,
 ): Promise<
   | { replay: true }
-  | { replay: false; access: string; refreshCookie: string }
+  | { replay: false; access: string; refreshCookie: string; userId: string }
 > {
   const revoked = await tx.refreshToken.updateMany({
     where: { id: row.id, revokedAt: null },
@@ -76,13 +94,13 @@ export async function rotateInTx(
     },
   })
   const access = await signAccessToken(user.id)
-  return { replay: false, access, refreshCookie: newTok.token }
+  return { replay: false, access, refreshCookie: newTok.token, userId: user.id }
 }
 
 async function rotateRefresh(
   oldToken: string,
   prisma: PrismaClient,
-): Promise<{ access: string; refreshCookie: string }> {
+): Promise<{ access: string; refreshCookie: string; userId: string }> {
   const oldHash = hashToken(oldToken)
   const row = await prisma.refreshToken.findUnique({ where: { tokenHash: oldHash } })
   const now = new Date()
@@ -104,7 +122,7 @@ async function rotateRefresh(
     await revokeAllUserRefresh(prisma, row.userId, now)
     throw fail(CODE.REFRESH_INVALID)
   }
-  return { access: result.access, refreshCookie: result.refreshCookie }
+  return { access: result.access, refreshCookie: result.refreshCookie, userId: result.userId }
 }
 
 // --- handlers ---
@@ -160,6 +178,7 @@ async function loginHandler(req: Request, res: Response): Promise<void> {
   )
   if (!issued.ok) throw fail(CODE.LOGIN_FAILED)
   setRefreshCookie(res, issued.refreshToken)
+  setPanelStreamCookie(res, await signPanelStreamToken(user.id)) // SSE 流通道随登录颁发
   ok(res, { access: issued.access, mustChangePassword: user.mustChangePassword })
 }
 
@@ -168,12 +187,14 @@ async function refreshHandler(req: Request, res: Response): Promise<void> {
   // cookie-parser 对 j: 前缀 JSON cookie 解析为对象 → hashToken 会抛 TypeError → 90000。
   // 拒绝任何非 string cookie（Codex #342 四轮 P2）。
   if (typeof oldToken !== 'string') throw fail(CODE.REFRESH_INVALID)
-  const { access, refreshCookie } = await rotateRefresh(oldToken, req.prisma)
+  const { access, refreshCookie, userId } = await rotateRefresh(oldToken, req.prisma)
   setRefreshCookie(res, refreshCookie)
+  // 滑动续期（#726）：refresh 旋转即重签 panel_stream（寿命 = refreshTtl，流长命于 access）。
+  setPanelStreamCookie(res, await signPanelStreamToken(userId))
   ok(res, { access })
 }
 
-async function logoutHandler(req: Request, res: Response): Promise<void> {
+async function logoutHandler(req: Request, res: Response, streamHub?: StreamHub): Promise<void> {
   const token = req.cookies?.[REFRESH_COOKIE]
   if (typeof token === 'string') {
     await req.prisma.refreshToken.updateMany({
@@ -182,6 +203,15 @@ async function logoutHandler(req: Request, res: Response): Promise<void> {
     })
   }
   clearRefreshCookie(res)
+  clearPanelStreamCookie(res)
+  // #726（issue #773）：logout 终止该 user 全部 SSE 流（带内 session.terminated{logout}
+  // 广播后关连接，客户端停重连）；events 未挂载（缺省装配）时静默跳过。
+  // 粒度说明（Spec 评审逮到的错位，裁决留规格票）：logout 吊销是单设备（只撤呈递的
+  // refresh token），而流终止是 per-user 广播——同用户其他设备的流会被一并停推（REST
+  // 不受影响，刷新页面凭仍有效 cookie 可重建流）。改密/重置密码是 refresh 族灭，per-user
+  // 终止与之对齐、无错位。单设备粒度需按凭证 jti 键连，但滑动续期下旧连接持旧 jti，
+  // 定向语义绕——logout 单设备 vs 多端同登出属产品决策，#726 未钉，留规格票。
+  streamHub?.terminate(req.user!.id, 'logout')
   ok(res, null)
 }
 
@@ -217,7 +247,7 @@ export async function changePasswordInTx(
   return { ok: true }
 }
 
-async function passwordChangeHandler(req: Request, res: Response): Promise<void> {
+async function passwordChangeHandler(req: Request, res: Response, streamHub?: StreamHub): Promise<void> {
   const { oldPassword, newPassword } = req.body as { oldPassword: string; newPassword: string }
   const user = await req.prisma.user.findUnique({ where: { id: req.user!.id } })
   if (!user || !user.passwordHash || !(await verifyPassword(oldPassword, user.passwordHash))) {
@@ -234,6 +264,12 @@ async function passwordChangeHandler(req: Request, res: Response): Promise<void>
     throw fail(CODE.LOGIN_FAILED)
   }
   clearRefreshCookie(res)
+  clearPanelStreamCookie(res)
+  // #773：改密 = 强制重登语义，对齐 logout 断 SSE 流（带内 terminate{logout}）。
+  // 残余窗口（已知限制）：panel_stream 是无状态 JWT（TTL=refreshTtl），旧 cookie 值在
+  // TTL 内仍可建流（建流只复查 isActive，改密不改 isActive）——彻底吊销需服务端凭证
+  // 状态（如 users 加 passwordChangedAt 比对 iat），规格票 #726 未定，留后续决策。
+  streamHub?.terminate(user.id, 'logout')
   ok(res, null)
 }
 
@@ -246,23 +282,34 @@ function oauthSkeleton(_req: Request, _res: Response): void {
   throw fail(CODE.OAUTH_NOT_CONFIGURED) // O1 骨架：不接 IdP → 90001
 }
 
-export const authRouter = Router()
+// #773：SSE 流终止通道（logout → session.terminated{logout}）。可选注入——events
+// 未挂载的装配（缺省）静默跳过，auth 域不因流缺席而失败。
+export interface AuthRouterDeps {
+  streamHub?: StreamHub
+}
 
-// 公开
-authRouter.post('/login', validateBody(loginSchema), loginHandler)
-authRouter.post('/token/refresh', refreshHandler)
-authRouter.get('/oauth/:provider/login', oauthSkeleton)
-authRouter.get('/oauth/:provider/callback', oauthSkeleton)
+export function createAuthRouter(deps: AuthRouterDeps = {}): Router {
+  const router = Router()
 
-// 受保护（requireAuth → mustChangePasswordGate；gate 放行 me/logout/password-change，拦 register）
-authRouter.use(requireAuth, mustChangePasswordGate)
-authRouter.get('/me', meHandler)
-authRouter.post('/logout', logoutHandler)
-authRouter.post('/password/change', validateBody(passwordChangeSchema), passwordChangeHandler)
-authRouter.post(
-  '/register',
-  requireAdmin,
-  // Codex #342 ㉒ P2：建账号用户名格式非法返 10042（契约 #328 码段），非通用 90002
-  validateBody(userCreateSchema, CODE.USERNAME_INVALID),
-  registerHandler,
-)
+  // 公开
+  router.post('/login', validateBody(loginSchema), loginHandler)
+  router.post('/token/refresh', refreshHandler)
+  router.get('/oauth/:provider/login', oauthSkeleton)
+  router.get('/oauth/:provider/callback', oauthSkeleton)
+
+  // 受保护（requireAuth → mustChangePasswordGate；gate 放行 me/logout/password-change，拦 register）
+  router.use(requireAuth, mustChangePasswordGate)
+  router.get('/me', meHandler)
+  router.post('/logout', (req, res) => logoutHandler(req, res, deps.streamHub))
+  router.post('/password/change', validateBody(passwordChangeSchema), (req, res) =>
+    passwordChangeHandler(req, res, deps.streamHub),
+  )
+  router.post(
+    '/register',
+    requireAdmin,
+    // Codex #342 ㉒ P2：建账号用户名格式非法返 10042（契约 #328 码段），非通用 90002
+    validateBody(userCreateSchema, CODE.USERNAME_INVALID),
+    registerHandler,
+  )
+  return router
+}
