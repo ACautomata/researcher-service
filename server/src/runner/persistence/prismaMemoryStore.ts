@@ -5,8 +5,9 @@
 //
 // 关键约束（#727/#771）：
 //   - memory_items 归属经 namespace 前缀派生（per-user，如 ["user-<ownerId>"]），刻意不建
-//     user FK（memory 跟 user 不级联）；namespace 数组 join(":") 编码进单列（label 校验禁
-//     "."，":" 天然无歧义——层级前缀检索 = 精确 or startsWith(joined + ":")）。
+//     user FK（memory 跟 user 不级联）；namespace 数组 join(":") 编码进单列——编码系官方
+//     同款（validateNamespace 镜像官方规则：禁 "." 亦不禁 ":"，label 含 ":" 理论撞键，
+//     与官方 InMemoryStore 行为一致，不收紧）；层级前缀检索 = 精确 or startsWith(joined + ":")。
 //   - V1 无 embedding：search 的 query 参数显式拒绝（防静默降级）；filter 内存比较
 //     （$eq/$ne/$gt/$gte/$lt/$lte/$in/$nin，语义照抄官方 store/utils）。
 //   - 五方法（get/put/delete/search/listNamespaces）直落 Prisma 为唯一落点；batch 语义镜像
@@ -17,6 +18,7 @@ import { BaseStore, InvalidNamespaceError } from '@langchain/langgraph-checkpoin
 import type {
   Item,
   ListNamespacesOperation,
+  MatchCondition,
   Operation,
   OperationResults,
   SearchItem,
@@ -104,10 +106,29 @@ function compareValues(itemValue: unknown, filterValue: unknown): boolean {
   return itemValue === filterValue
 }
 
-// matchConditions 通配匹配（语义照抄官方 doesMatch：path 元素 "*" 通配，按位比较）
-function matchesPath(path: string[], key: string[]): boolean {
-  if (path.length > key.length) return false
-  return path.every((p, i) => p === '*' || key[i] === p)
+// matchConditions 通配匹配（语义照抄官方 doesMatch：path 元素 "*" 通配按位比较；
+// 未知 matchType 抛错——BaseStore V1 仅定义 prefix/suffix）
+function doesMatchCondition(condition: MatchCondition, ns: string[]): boolean {
+  const { matchType, path } = condition
+  if (path.length > ns.length) return false
+  if (matchType === 'prefix') return path.every((p, i) => p === '*' || ns[i] === p)
+  if (matchType === 'suffix') {
+    return path.every((p, i) => p === '*' || ns[ns.length - path.length + i] === p)
+  }
+  throw new Error(`Unsupported match type: ${matchType}`)
+}
+
+// maxDepth 截断去重（官方语义：slice(0, maxDepth) 后按编码去重，保序）
+function truncateToDepth(namespaces: string[][], maxDepth: number): string[][] {
+  const seen = new Set<string>()
+  return namespaces
+    .map((ns) => ns.slice(0, maxDepth))
+    .filter((ns) => {
+      const k = encodeNamespace(ns)
+      if (seen.has(k)) return false
+      seen.add(k)
+      return true
+    })
 }
 
 interface ListNamespacesParams {
@@ -177,6 +198,9 @@ export class PrismaMemoryStore extends BaseStore {
         'PrismaMemoryStore (BaseStore V1) does not support vector query search: memory_items has no embedding column (#727). Remove options.query or use a store with an index config.',
       )
     }
+    // 空前缀 fail-closed 恒空：官方 InMemoryStore startsWith('') 恒真返全量；本 store 承载
+    // per-user 记忆，空前缀返全量 = 跨 namespace 泄漏——有意收紧（同 query 显式拒绝、
+    // 层级前缀边界化的先例模式），用例锁定
     const joined = encodeNamespace(namespacePrefix)
     const rows = await this.prisma.memoryItem.findMany({
       where: {
@@ -202,26 +226,15 @@ export class PrismaMemoryStore extends BaseStore {
       distinct: ['namespace'],
     })
     let namespaces = rows.map((r) => decodeNamespace(r.namespace))
-    if (options?.prefix) {
-      namespaces = namespaces.filter((ns) => matchesPath(options.prefix!, ns))
-    }
-    if (options?.suffix) {
-      namespaces = namespaces.filter((ns) => {
-        const suffix = options.suffix!
-        if (suffix.length > ns.length) return false
-        return matchesPath(suffix, ns.slice(ns.length - suffix.length))
-      })
+    // 条件组装对齐官方 BaseStore.listNamespaces 包装路径（prefix/suffix → matchConditions）
+    const conditions: MatchCondition[] = []
+    if (options?.prefix) conditions.push({ matchType: 'prefix', path: options.prefix })
+    if (options?.suffix) conditions.push({ matchType: 'suffix', path: options.suffix })
+    if (conditions.length > 0) {
+      namespaces = namespaces.filter((ns) => conditions.every((c) => doesMatchCondition(c, ns)))
     }
     if (options?.maxDepth !== undefined) {
-      const seen = new Set<string>()
-      namespaces = namespaces
-        .map((ns) => ns.slice(0, options.maxDepth))
-        .filter((ns) => {
-          const k = encodeNamespace(ns)
-          if (seen.has(k)) return false
-          seen.add(k)
-          return true
-        })
+      namespaces = truncateToDepth(namespaces, options.maxDepth)
     }
     // 官方语义：字典序（join 后 localeCompare）
     namespaces.sort((a, b) =>
@@ -276,19 +289,18 @@ export class PrismaMemoryStore extends BaseStore {
   }
 
   private async listNamespacesOperation(op: ListNamespacesOperation): Promise<string[][]> {
-    const prefix = op.matchConditions?.find((c) => c.matchType === 'prefix')?.path as
-      | string[]
-      | undefined
-    const suffix = op.matchConditions?.find((c) => c.matchType === 'suffix')?.path as
-      | string[]
-      | undefined
-    return this.listNamespaces({
-      prefix,
-      suffix,
-      maxDepth: op.maxDepth,
-      limit: op.limit,
-      offset: op.offset,
-    })
+    // 官方语义（InMemoryStore.listNamespacesOperation）：matchConditions 全量 .every 匹配
+    // （BaseStore.listNamespaces 包装路径至多一 prefix + 一 suffix，手写 batch op 可多条件）；
+    // maxDepth 在条件过滤之后截断；limit 缺省返全部（官方 op.limit ?? namespaces.length）
+    let namespaces = await this.listNamespaces({ limit: Number.MAX_SAFE_INTEGER })
+    const conditions = op.matchConditions ?? []
+    if (conditions.length > 0) {
+      namespaces = namespaces.filter((ns) => conditions.every((c) => doesMatchCondition(c, ns)))
+    }
+    if (op.maxDepth !== undefined) namespaces = truncateToDepth(namespaces, op.maxDepth)
+    const offset = op.offset ?? 0
+    const limit = op.limit ?? namespaces.length
+    return namespaces.slice(offset, offset + limit)
   }
 
   private toItem(row: {

@@ -161,6 +161,22 @@ describe('PrismaCheckpointSaver（#774 · S3 · 真 SQLite）', () => {
     )
   })
 
+  it('put：copyCheckpoint 白名单归一化——额外字段不落 blob（镜像官方 MemorySaver.put）', async () => {
+    const threadId = 't-normalized'
+    await seedThread(threadId)
+    // runtime 传入带白名单外字段的 checkpoint（异常路径防御）
+    const dirty = {
+      ...makeCheckpoint('ckpt-dirty', { channel_values: { x: 1 } }),
+      stray: 'pollution',
+    } as Checkpoint
+    await saver.put({ configurable: { thread_id: threadId } }, dirty, makeMetadata(), {})
+    const tuple = await saver.getTuple({
+      configurable: { thread_id: threadId, checkpoint_id: 'ckpt-dirty' },
+    })
+    expect(tuple!.checkpoint).toEqual(makeCheckpoint('ckpt-dirty', { channel_values: { x: 1 } }))
+    expect('stray' in tuple!.checkpoint).toBe(false)
+  })
+
   it('getTuple 无 checkpoint_id → 返回该 thread 最新（id 字典序倒序 = 时间序）', async () => {
     const threadId = 't-latest'
     await seedThread(threadId)

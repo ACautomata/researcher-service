@@ -16,6 +16,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { BaseStore, InvalidNamespaceError } from '@langchain/langgraph-checkpoint'
+import type { Operation } from '@langchain/langgraph-checkpoint'
 import { createPrismaClient } from '../src/prisma'
 import type { PrismaClient } from '../src/generated/prisma/client'
 import { runDbScript } from './runDbScript'
@@ -216,5 +217,49 @@ describe('PrismaMemoryStore（#774 · S3 · 真 SQLite）', () => {
     expect((results[3] as Array<{ value: { n: number } }>)[0].value.n).toBe(1)
     // 批落库后：两次 put 顺序执行，最终值为后者
     expect((await store.get(['snap'], 'k'))!.value.n).toBe(3)
+  })
+
+  it('search：空前缀 fail-closed 恒空（官方返全量；per-user 隔离方向有意收紧）', async () => {
+    await store.put(['user-a'], 'k1', { v: 1 })
+    expect(await store.search([])).toEqual([])
+  })
+
+  it('batch：listNamespaces 手写 op 多 matchConditions 全量 every + 未知 matchType 抛错（镜像官方）', async () => {
+    await store.put(['user-a', 'projects'], 'k', { v: 1 })
+    await store.put(['user-b', 'projects'], 'k', { v: 1 })
+    await store.put(['user-a', 'archive'], 'k', { v: 1 })
+
+    // 两 prefix 同批：every 语义下不可同时满足 → 恒空（第 1 轮「只取首个条件」缺陷回归）。
+    // 官方 ListNamespacesOperation 类型 limit/offset 必填（实现仍 ?? 防御 JS 调用方）。
+    const twoPrefix = await store.batch([
+      {
+        matchConditions: [
+          { matchType: 'prefix', path: ['user-a'] },
+          { matchType: 'prefix', path: ['user-b'] },
+        ],
+        limit: 100,
+        offset: 0,
+      },
+    ])
+    expect(twoPrefix[0]).toEqual([])
+
+    // prefix + suffix 组合：交集命中
+    const prefixSuffix = await store.batch([
+      {
+        matchConditions: [
+          { matchType: 'prefix', path: ['user-a'] },
+          { matchType: 'suffix', path: ['projects'] },
+        ],
+        limit: 100,
+        offset: 0,
+      },
+    ])
+    expect(prefixSuffix[0]).toEqual([['user-a', 'projects']])
+
+    // 未知 matchType：官方 doesMatch 抛错，镜像之
+    const bogusOp = {
+      matchConditions: [{ matchType: 'bogus', path: ['x'] }],
+    } as unknown as Operation
+    await expect(store.batch([bogusOp])).rejects.toThrow('Unsupported match type: bogus')
   })
 })

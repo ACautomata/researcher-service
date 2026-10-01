@@ -15,7 +15,7 @@
 //   - getDeltaChannelHistory 不 override——基类默认实现经 getTuple+parentConfig walk，
 //     零侵入接入（beta 契约，随 SDK 演进）。
 
-import { BaseCheckpointSaver, WRITES_IDX_MAP, getCheckpointId } from '@langchain/langgraph-checkpoint'
+import { BaseCheckpointSaver, WRITES_IDX_MAP, copyCheckpoint, getCheckpointId } from '@langchain/langgraph-checkpoint'
 import type {
   Checkpoint,
   CheckpointListOptions,
@@ -144,7 +144,9 @@ export class PrismaCheckpointSaver extends BaseCheckpointSaver {
     const checkpointNs = (conf.checkpoint_ns as string | undefined) ?? ''
     const parentCheckpointId = (conf.checkpoint_id as string | undefined) ?? null
 
-    const [type, blob] = await this.serde.dumpsTyped(checkpoint)
+    // 归一化镜像官方 MemorySaver.put（copyCheckpoint 白名单六字段）——runtime 传带额外
+    // 字段的 checkpoint 时不污染 blob
+    const [type, blob] = await this.serde.dumpsTyped(copyCheckpoint(checkpoint))
     const bytes = toBytes(blob)
     await this.prisma.checkpoint.upsert({
       where: {
