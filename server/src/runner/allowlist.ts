@@ -225,6 +225,7 @@ export async function checkOriginForCrud(
 //   - 强制 redirect: 'manual' 禁跟随——白名单端点若 302 跳走，响应须显式拒绝（带 key 跟随即外送）；
 //   - 未命中 / 出现重定向响应 → 抛 EndpointNotAllowedError（40042），run 失败、错误进事件流。
 // inner fetch 可注入（测试注 spy），默认 globalThis.fetch。
+const REDIRECT_REJECTED = '端点返回重定向，已被禁止（防止凭证随跳转外送）'
 export function createWhitelistFetch(
   allowedOrigins: ReadonlySet<string>,
   innerFetch: typeof fetch = (...args: Parameters<typeof fetch>) =>
@@ -243,10 +244,16 @@ export function createWhitelistFetch(
       throw new EndpointNotAllowedError()
     }
     // 禁跟随重定向：manual 下 SDK 收到 3xx 响应本身；任何 location 头 = origin 漂移 = 拒绝。
+    // inner fetch 不假设恒为 undici（undici 返回真实 3xx）：合规 fetch 对 redirect:'manual'
+    // 可返回 opaqueredirect 过滤响应（status 0、headers 空）——跳转已发生但目标不可读，同按
+    // 重定向拒（fail-closed，#812 打捞 #809）。
     const response = await innerFetch(input, { ...init, redirect: 'manual' })
+    if (response.status === 0) {
+      throw new EndpointNotAllowedError(REDIRECT_REJECTED)
+    }
     const location = response.headers?.get?.('location')
     if (response.status >= 300 && response.status < 400 && location !== null && location !== undefined) {
-      throw new EndpointNotAllowedError('端点返回重定向，已被禁止（防止凭证随跳转外送）')
+      throw new EndpointNotAllowedError(REDIRECT_REJECTED)
     }
     return response
   }

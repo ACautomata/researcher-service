@@ -164,4 +164,30 @@ describe('usage 采数落审计域（临时库集成）', () => {
     const past = await aggregateUsage(ctx.prisma, { from: new Date(now.getTime() - 3_600_000) })
     expect(past.length).toBeGreaterThanOrEqual(2)
   })
+
+  it('核算时间窗半开 [from, to)：边界行归 to 侧窗，相邻窗拼接不双计（#812 打捞）', async () => {
+    const carol = await seedUser(ctx.prisma, 'usageu3', 'pw-usageu3-secure')
+    await recordLlmUsage(ctx.prisma, {
+      runId: 'r-half', sessionId: null, userId: carol.id, username: carol.username,
+      providerId: 'minimax', lcProvider: 'anthropic', model: 'MiniMax-M3',
+      usage: { inputTokens: 10, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 },
+    })
+    const row = await ctx.prisma.llmUsageRecord.findFirstOrThrow({ where: { runId: 'r-half' } })
+    // 精确钉边界时刻（SQLite CURRENT_TIMESTAMP 秒级不够细，update 直写）
+    const T0 = new Date('2026-01-01T00:00:00Z')
+    const T1 = new Date('2026-01-01T00:01:00Z')
+    const T2 = new Date('2026-01-01T00:02:00Z')
+    await ctx.prisma.llmUsageRecord.update({ where: { id: row.id }, data: { createdAt: T1 } })
+
+    // [T0, T1) 不含恰落 T1 的边界行（修前 lte 会双计进两侧相邻窗）
+    const left = await aggregateUsage(ctx.prisma, { userId: carol.id, from: T0, to: T1 })
+    expect(left).toEqual([])
+    // [T1, T2) 含边界行
+    const right = await aggregateUsage(ctx.prisma, { userId: carol.id, from: T1, to: T2 })
+    expect(right).toHaveLength(1)
+    expect(right[0]).toMatchObject({ calls: 1, inputTokens: 10 })
+    // 相邻两窗拼接 = 全窗：不双计、不丢行
+    const full = await aggregateUsage(ctx.prisma, { userId: carol.id, from: T0, to: T2 })
+    expect(full).toHaveLength(1)
+  })
 })

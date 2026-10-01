@@ -373,6 +373,9 @@ CREATE INDEX "llm_usage_records_userId_createdAt_idx" ON "llm_usage_records"("us
 CREATE INDEX "llm_usage_records_model_createdAt_idx" ON "llm_usage_records"("model", "createdAt");
 
 -- CreateIndex
+CREATE INDEX "llm_usage_records_runId_idx" ON "llm_usage_records"("runId");
+
+-- CreateIndex
 CREATE INDEX "attachments_ownerId_idx" ON "attachments"("ownerId");
 
 -- CreateIndex

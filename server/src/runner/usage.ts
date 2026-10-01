@@ -152,6 +152,7 @@ export function createUsageCallbackHandler(
 
 export interface UsageQuery {
   readonly userId?: string
+  /** 时间窗半开区间 [from, to)：含 from、不含 to——相邻核算窗拼接不双计边界行（#812 打捞）。 */
   readonly from?: Date
   readonly to?: Date
 }
@@ -169,7 +170,8 @@ export interface UsageAggregateRow {
   readonly cacheWriteTokens: number
 }
 
-// 按用户 × provider × 模型聚合（时间窗过滤；输出按 groupBy 全键字典序稳定——groupBy 无
+// 按用户 × provider × 模型聚合（时间窗过滤，半开区间 [from, to)——相邻核算窗拼接不双计
+// 落在边界时刻的行（#812 打捞）；输出按 groupBy 全键字典序稳定——groupBy 无
 // 保序承诺，消费端（核算导出/对账 diff）需要确定性序）。
 // 单价 join：消费方拿 model → model_providers.modelsJson[].cost 计算（单价随配置版本可变，
 // 用量行是唯一真值）。
@@ -183,7 +185,7 @@ export async function aggregateUsage(
       ? {
           createdAt: {
             ...(query.from !== undefined ? { gte: query.from } : {}),
-            ...(query.to !== undefined ? { lte: query.to } : {}),
+            ...(query.to !== undefined ? { lt: query.to } : {}),
           },
         }
       : {}),

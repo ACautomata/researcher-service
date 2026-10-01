@@ -234,6 +234,14 @@ describe('models REST（接缝 #2 + #336 + #775 新事务）', () => {
       .send({ ...VALID, provider_id: 'url-y', base_url: 'not a url' })
     expect(r3.body.code).toBe(90002)
     expect(r3.body.data).toHaveProperty('base_url')
+    // #812：形态门复用 parseHttpOrigin 后端口域越界（>65535）zod 阶段即拒
+    //（旧本地正则 \d{1,5} 放行 :99999 —— 两份 URL 定义的漂移面回归）
+    const r4 = await ctx.request
+      .post(providersOf(name))
+      .set(bearer(l.access))
+      .send({ ...VALID, provider_id: 'url-z', base_url: 'https://open.bigmodel.cn:99999/v4' })
+    expect(r4.body.code).toBe(90002)
+    expect(r4.body.data).toHaveProperty('base_url')
   })
 
   it('api_key_env_id 非法格式 / 未注入 env → 90002 + data.api_key_env_id', async () => {

@@ -320,13 +320,14 @@ function readAutofigureSidecarUrl(enabled: boolean): string {
 
 // RUNNER_MAX_CONCURRENT_RUNS（#775，731 §5.3）：runner 全局在飞 run 上限（进程内信号量）。
 // BullMQ 原生 limiter 的 per-user 组限流是 Pro 专属（OSS 3.0 起移除 groupKey），进程内原语即
-// 正确边界（#734 Notes：单进程模型）。非法值（非正整数）fail-fast（对齐 readDefaultMaxContainers
-// 加载即校验模式）——否则错值静默按默认走，配额语义错配只在运行期暴露。
+// 正确边界（#734 Notes：单进程模型）。非法值（非正整数/超上界）fail-fast（对齐 readDefaultMaxContainers
+// 加载即校验模式）——否则错值静默按默认走，配额语义错配只在运行期暴露；上界防呆（1–10000，
+// #812 打捞）：单位错配/滥值会打穿全局 runaway 最后防线。
 function readRunnerMaxConcurrentRuns(): number {
   const v = Number(process.env.RUNNER_MAX_CONCURRENT_RUNS ?? 8)
-  if (!Number.isInteger(v) || v <= 0) {
+  if (!Number.isInteger(v) || v <= 0 || v > 10_000) {
     throw new Error(
-      `RUNNER_MAX_CONCURRENT_RUNS 非法: ${JSON.stringify(process.env.RUNNER_MAX_CONCURRENT_RUNS)}，须为正整数`,
+      `RUNNER_MAX_CONCURRENT_RUNS 非法: ${JSON.stringify(process.env.RUNNER_MAX_CONCURRENT_RUNS)}，须为 1–10000 整数`,
     )
   }
   return v

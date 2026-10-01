@@ -538,6 +538,7 @@ model LlmUsageRecord {
 
   @@index([userId, createdAt]) // 核算查询：按用户 + 时间窗
   @@index([model, createdAt]) // 核算查询：按模型 + 时间窗（全局面）
+  @@index([runId]) // per-run 对账下钻（#812 打捞；#777 接线后 per-run 核算）
   @@map("llm_usage_records")
 }
 
