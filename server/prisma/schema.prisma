@@ -430,11 +430,13 @@ model CheckpointWrite {
 // MemoryItem —— 跨会话长期记忆（BaseStore V1，#727）：PrismaMemoryStore 五方法
 // get/put/delete/search/listNamespaces 落点（#774）。V1 无 embedding，前缀检索。
 // 归属经 namespace 前缀（per-user）派生——刻意不建 user FK（#727：memory 跟 user 不级联）。
+// createdAt（#774 补）：BaseStore Item 契约必填字段（put 时首记，跨会话记忆需知记忆成形时刻）。
 // ---------------------------------------------------------------------------
 model MemoryItem {
   namespace String // per-user 前缀（如 "user-<ownerId>"）
   key       String
   valueJson String
+  createdAt DateTime @default(now()) // #774：Item.createdAt 契约（首写时刻，put 覆盖不刷新）
   updatedAt DateTime @updatedAt
 
   @@id([namespace, key]) // 复合主键左前缀即 namespace 索引（前缀检索走它）

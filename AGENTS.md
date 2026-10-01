@@ -74,7 +74,7 @@ OpenClaw 容器 fleet (openclaw-gw-<name>，每容器独立 home/openclaw.json/�
 | `chat/` | 网关隧道（JWT 握手 4401 + 原始帧透传，ADR 0006 浏览器直连） | `tunnelAssembly.ts` `subprotocol.ts` `values.ts` |
 | `files/` | 统一文件 CRUD（wiki/workspace 两树，经 Docker getArchive/putArchive/exec rm，ADR 0012） | `fsPort.ts` `dockerArchive.ts` `paths.ts` `tar.ts` `routes.ts` |
 | `events/` | SSE 事件流（#773，替代 WS 的传输面）：StreamHub per-user 扇出 + per-user 连续单调 serverSeq + 事件桥薄投影（LangChain streamEvents → 自有目录，不透传） | `hub.ts` `logic.ts` `routes.ts` `bridge.ts` `values.ts` |
-| `runner/` | LangGraph 运行时侧（#747 换轨；backend/ = DockerArchiveBackend——deepagents BackendProtocolV2 本地镜像 → 双根 /wiki/+/lab/ Docker 原语映射，S2 接缝 Port 注入可 fake，协议同形镜像不引 deepagents 依赖） | `backend/dockerArchiveBackend.ts` `backend/primitives.ts` `backend/dockerPrimitives.ts` `backend/paths.ts` `backend/semantics.ts` |
+| `runner/` | LangGraph 运行时侧（#747 换轨；backend/ = DockerArchiveBackend——deepagents BackendProtocolV2 本地镜像 → 双根 /wiki/+/lab/ Docker 原语映射，S2 接缝 Port 注入可 fake，协议同形镜像不引 deepagents 依赖；persistence/ = #774 持久化双件——PrismaCheckpointSaver 五方法落 checkpoints/checkpoint_writes + PrismaMemoryStore 五方法落 memory_items，继承 @langchain/langgraph-checkpoint ~1.1.5 基类零侵入接入，WRITES_IDX_MAP 仅从 checkpoint 包导出，PrismaClient 构造注入） | `backend/dockerArchiveBackend.ts` `backend/primitives.ts` `backend/dockerPrimitives.ts` `backend/paths.ts` `backend/semantics.ts` `persistence/prismaCheckpointSaver.ts` `persistence/prismaMemoryStore.ts` |
 
 配置集中在 `src/config.ts`（env 读取 + 生产 fail-fast）。Prisma schema 在 `prisma/schema.prisma`
 （建表 SQL 由 `scripts/apply-schema.mjs` 落库，不经 prisma CLI——规避 Prisma 7 AI 守卫）。

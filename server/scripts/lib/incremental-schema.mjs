@@ -195,6 +195,7 @@ CREATE TABLE IF NOT EXISTS "memory_items" (
     "namespace" TEXT NOT NULL,
     "key" TEXT NOT NULL,
     "valueJson" TEXT NOT NULL,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" DATETIME NOT NULL,
 
     PRIMARY KEY ("namespace", "key")
@@ -291,6 +292,22 @@ CREATE TABLE IF NOT EXISTS "plugin_enablements" (
 
 CREATE UNIQUE INDEX IF NOT EXISTS "provider_endpoints_scheme_host_port_key" ON "provider_endpoints"("scheme", "host", "port");
 `)
+
+  // #774（#747·04）：memory_items 补 createdAt 列（BaseStore Item 契约必填，#771 地基遗漏）。
+  // ADD COLUMN 非天然幂等，PRAGMA guard 先查再补。注意默认值处理不适用 T02/T03/T06 先例——
+  // 那几处全为 nullable 或常量默认，而 SQLite 禁 ADD COLUMN 非常量默认值（CURRENT_TIMESTAMP
+  // 仅 CREATE TABLE 可用）+ NOT NULL 必须有非 NULL 默认，故占位常量 + UPDATE 回填：guard 块内
+  // 列刚加，全部既有行该列必为占位值，无条件回填安全（记忆成形时刻不可考，取迁移时刻——
+  // 本票前无生产消费者，无脏数据）。占位 DEFAULT 残留列定义无害：Prisma client 对
+  // @default(now()) 在 INSERT 显式传值，不触发表级 default。
+  // fresh 库（上方 CREATE TABLE 已带列）此处列存在 → guard 跳过。
+  const miCols = db.prepare(`PRAGMA table_info("memory_items")`).all()
+  if (!miCols.some((c) => c.name === 'createdAt')) {
+    db.exec(
+      `ALTER TABLE "memory_items" ADD COLUMN "createdAt" DATETIME NOT NULL DEFAULT '1970-01-01 00:00:00'`,
+    )
+    db.exec(`UPDATE "memory_items" SET "createdAt" = CURRENT_TIMESTAMP`)
+  }
 
   // config_meta 单行种子（id=1, version=1）：INSERT OR IGNORE 幂等；provider/endpoint CRUD
   // 同事务 +1（热生效信号，731 §4）自 version=1 起步。fresh 库（init.sql CREATE 空表）同样
