@@ -48,7 +48,7 @@ describe('normalizeFilePath 防护矩阵（US10）', () => {
     expect(normalizeFilePath('./x.md')).toEqual({ ok: true, path: 'x.md' })
   })
 
-  it('放宽 wiki .md 限制：任意扩展/无扩展都合法（workspace 文本）', () => {
+  it('放宽 wiki .md 限制：任意扩展/无扩展都合法（lab 沙箱文本）', () => {
     expect(normalizeFilePath('notes.txt').ok).toBe(true)
     expect(normalizeFilePath('code/main.ts').ok).toBe(true)
     expect(normalizeFilePath('README').ok).toBe(true)
@@ -67,8 +67,9 @@ describe('normalizeFilePath 防护矩阵（US10）', () => {
 })
 
 describe('normalizeFileRoot', () => {
-  it('wiki / workspace 合法', () => {
+  it('wiki / lab / workspace(legacy 只读) 合法（#776 root 契约）', () => {
     expect(normalizeFileRoot('wiki')).toEqual({ ok: true, root: 'wiki' })
+    expect(normalizeFileRoot('lab')).toEqual({ ok: true, root: 'lab' })
     expect(normalizeFileRoot('workspace')).toEqual({ ok: true, root: 'workspace' })
   })
 
@@ -80,12 +81,29 @@ describe('normalizeFileRoot', () => {
 })
 
 describe('parseFileWriteBody（POST/PUT body）', () => {
-  it('合法 body → {root,path,content} 逐字保留', () => {
-    expect(parseFileWriteBody({ root: 'workspace', path: 'out/report.md', content: '# 正文\n' })).toEqual({
-      root: 'workspace',
+  it('合法 body → {root,path,content} 逐字保留（写面只留 wiki）', () => {
+    expect(parseFileWriteBody({ root: 'wiki', path: 'out/report.md', content: '# 正文\n' })).toEqual({
+      root: 'wiki',
       path: 'out/report.md',
       content: '# 正文\n',
     })
+  })
+
+  it('root=lab / root=workspace → 拒（只读面：写收敛 runner 工具 + 上传端点，#769/#776）', () => {
+    try {
+      parseFileWriteBody({ root: 'lab', path: 'out/report.md', content: 'x' })
+      throw new Error('应当抛 90002')
+    } catch (err) {
+      expect((err as { code?: number }).code).toBe(90002)
+      expect((err as { data?: unknown }).data).toMatchObject({ root: ['root=lab 为只读面（文件写经对话让 agent 改）'] })
+    }
+    try {
+      parseFileWriteBody({ root: 'workspace', path: 'out/report.md', content: 'x' })
+      throw new Error('应当抛 90002')
+    } catch (err) {
+      expect((err as { code?: number }).code).toBe(90002)
+      expect((err as { data?: unknown }).data).toMatchObject({ root: ['root=workspace 为 legacy 只读面（写经对话让 agent 改）'] })
+    }
   })
 
   it('root/path/content 错误一次性聚合进 data（对齐 wiki 双字段收集）', () => {

@@ -72,8 +72,9 @@ OpenClaw 容器 fleet (openclaw-gw-<name>，每容器独立 home/openclaw.json/�
 | `wiki/` | 每容器 `wiki/main` 文件树 + CRUD + graph（`WikiFileSystem` Port + 纯逻辑） | `service.ts` `logic.ts` `nodeFs.ts` `compile.ts` `routes.ts` |
 | `models/` | model provider CRUD（#775：行挂 ownerId；事务 = mutation + config_meta version bump 热生效；白名单第一层校验 origin 精确匹配 + DNS 私网拒绝 → 90002 字段级）+ 端点白名单 admin REST（`/api/v1/provider-endpoints`，731 §3.1）；写盘链（configWriter/configBuilder 两文件）已退役不再接线，物理删除留待 T0 #801 | `service.ts` `routes.ts` `endpoints.ts` `values.ts` |
 | `chat/` | 网关隧道（JWT 握手 4401 + 原始帧透传，ADR 0006 浏览器直连） | `tunnelAssembly.ts` `subprotocol.ts` `values.ts` |
-| `files/` | 统一文件 CRUD（wiki/workspace 两树，经 Docker getArchive/putArchive/exec rm，ADR 0012） | `fsPort.ts` `dockerArchive.ts` `paths.ts` `tar.ts` `routes.ts` |
+| `files/` | 统一文件 CRUD（root 契约 #776：wiki\|workspace(legacy 只读)\|lab；写面收敛 wiki；经 Docker getArchive/putArchive/exec rm，ADR 0012；lab 为沙箱只读 GET 面 readLab） | `fsPort.ts` `dockerArchive.ts` `paths.ts` `tar.ts` `routes.ts` |
 | `events/` | SSE 事件流（#773，替代 WS 的传输面）：StreamHub per-user 扇出 + per-user 连续单调 serverSeq + 事件桥薄投影（LangChain streamEvents → 自有目录，不透传） | `hub.ts` `logic.ts` `routes.ts` `bridge.ts` `values.ts` |
+| `sandboxes/` | 会话沙箱生命周期（#776 · story 58/59：1 session:1，容器名 `researcher-sandbox-<sessionId>`，对容器列表隐身）：惰性创建 ensure/闲置 30min 自动 stop（文件保留）/级联删（容器+独立 bridge 网络）；资源 limit Memory 4GB·4 核·PidsLimit 512 + MemorySwap=Memory 禁 swap（OOM 杀进程不杀容器的前提）；非 root(1000) + CapDrop ALL + no-new-privileges + RestartPolicy no；kind 标签三值 legacy\|wiki\|sandbox（本票先立沙箱支路，完整分派归 #784）；消费方 = #777 runner ensure/touch + #778 删 session 级联 | `values.ts` `runtime.ts` `dockerRuntime.ts` `lifecycle.ts` `service.ts` `assembly.ts` |
 | `runner/` | LangGraph 运行时侧（#747 换轨；backend/ = DockerArchiveBackend——deepagents BackendProtocolV2 本地镜像 → 双根 /wiki/+/lab/ Docker 原语映射，S2 接缝 Port 注入可 fake，协议同形镜像不引 deepagents 依赖；persistence/ = #774 持久化双件——PrismaCheckpointSaver 五方法落 checkpoints/checkpoint_writes + PrismaMemoryStore 五方法落 memory_items，继承 @langchain/langgraph-checkpoint ~1.1.5 基类零侵入接入，WRITES_IDX_MAP 仅从 checkpoint 包导出，PrismaClient 构造注入；根五件 = #775 F 节——ProviderRegistry（initChatModel 构造、缓存 key (ownerId,providerId,configVersion)、热生效 = run 启动读 config_meta.version 判等 + run 粒度快照、白名单第二层复验 40042 + fetch wrapper 验最终请求 origin/redirect manual）、allowlist（纯逻辑）、concurrency（per-user+全局信号量 40043）、usage（usage_metadata 全量采数落 llm_usage_records + 核算查询）、providerDefaults（minimax 默认 provider 三方同源常量 + 惰性物化）） | `backend/dockerArchiveBackend.ts` `backend/primitives.ts` `backend/dockerPrimitives.ts` `backend/paths.ts` `backend/semantics.ts` `persistence/prismaCheckpointSaver.ts` `persistence/prismaMemoryStore.ts` `providerRegistry.ts` `allowlist.ts` `concurrency.ts` `usage.ts` `providerDefaults.ts` |
 
 配置集中在 `src/config.ts`（env 读取 + 生产 fail-fast）。Prisma schema 在 `prisma/schema.prisma`
@@ -91,8 +92,11 @@ OpenClaw 容器 fleet (openclaw-gw-<name>，每容器独立 home/openclaw.json/�
   config_meta version bump 热生效；白名单第一层校验未命中 → 90002 字段级 base_url）。
 - `/api/v1/provider-endpoints[/<id>]` — 端点白名单 admin CRUD（#775 · 731 §3.1，origin 精确匹配；
   GET/POST/DELETE，非 admin → 10004）。
-- `/api/v1/containers/<name>/files?root=<wiki|workspace>&path=&recursive=` — 统一文件 CRUD
-  （GET 列目录/读文件 + PUT/POST 覆写/新建 + DELETE 删除；binary/oversized 不返回内容）。
+- `/api/v1/containers/<name>/files?root=<wiki|workspace|lab>&path=&recursive=` — 统一文件 CRUD（#776
+  root 契约换轨：wiki = legacy 容器树（读写面暂留，退役归 T0）；workspace = legacy **只读消费值**
+  （现存前端 fileTabs 硬发此值，#793 迁 lab 后退役；写面 90002）；lab = 会话沙箱 /lab 只读 GET 面——
+  <name> 为 sessionId，50002 同码防探测；写面收敛：PUT/POST/DELETE 仅 wiki 放行，lab/workspace →
+  90002；binary/oversized 不返回内容）。
 - `/api/v1/containers/<name>/chat/{sessions,approval/resolve,commands}` — chat REST 代理。
 - 对话 WS 走 `/ws/chat/` 隧道（JWT subprotocol 握手；先 accept 再 close(4401) 拒未认证）。
 - `GET /api/v1/events` — SSE 事件流（#773，panel_stream cookie 认证，替代 WS 的传输面先行）。
@@ -104,7 +108,8 @@ OpenClaw 容器 fleet (openclaw-gw-<name>，每容器独立 home/openclaw.json/�
 死信号让路；其余响应仍 HTTP 200+信封）。码段：`0` 成功 · `1xxxx` 通用/鉴权 ·
 `2xxxx` 容器 · `3xxxx` wiki ·
 `4xxxx` models（40042 端点不在白名单[运行时第二层，仅 runner 侧] · 40043 并发配额已满[per-user
-maxConcurrentRuns 或全局 RUNNER_MAX_CONCURRENT_RUNS]）· `5xxxx` chat/pairing（非信封段，错误经 WS close codes）· `6xxxx` files ·
+maxConcurrentRuns 或全局 RUNNER_MAX_CONCURRENT_RUNS]）· `5xxxx` chat/pairing 的 WS close codes 为另一传输面；信封面 5xxxx = 会话/run 域（#747 C 节，
+  #776 起 50002 session_not_found）· `6xxxx` files ·
 `7xxxx` figures（AutoFigure，70040 不存在/越权同码防探测（T05 读路径，PNG 复用同一归属门）· 70041 幂等冲突 ·
 70042 PNG 未就绪（queued/running）· 70043 PNG 不可用（failed/产物缺失））·
 `9xxxx` 系统/校验。

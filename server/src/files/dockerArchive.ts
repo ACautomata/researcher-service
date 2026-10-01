@@ -107,10 +107,12 @@ export class DockerFileArchive implements FileArchive {
 
   // 流式 probe：读第一个业务头（容忍前置 GNU 'L' / PAX 'x' 元头）→ 超大文件只留元数据；
   // 否则收集完整 tar 解析。路径不存在（daemon 404）→ null。
-  private async probe(name: string, absPath: string): Promise<ProbeResult> {
+  // container = docker 容器名原文：fleet 面调用方套 containerName(name)，lab 面直传
+  // researcher-sandbox-<sessionId>（readLab，#776）——本方法不再二次加工。
+  private async probe(container: string, absPath: string): Promise<ProbeResult> {
     let stream: NodeJS.ReadableStream
     try {
-      stream = await this.client().getContainer(containerName(name)).getArchive({ path: absPath })
+      stream = await this.client().getContainer(container).getArchive({ path: absPath })
     } catch (e) {
       if ((e as { statusCode?: number }).statusCode === 404) return null
       throw e
@@ -175,8 +177,24 @@ export class DockerFileArchive implements FileArchive {
   // ---- FileArchive 实现 ----
 
   async read(name: string, root: FileRoot, relPath: string, recursive: boolean): Promise<DirListing | FileReading> {
-    const absPath = this.absPath(root, relPath)
-    const probed = await this.probe(name, absPath)
+    return this.readContainer(containerName(name), this.absPath(root, relPath), relPath, recursive)
+  }
+
+  // #776 root=lab 沙箱读面：dockerName 原文直用（不套 openclaw-gw- 前缀），树根固定 FILE_ROOTS.lab。
+  // 与 read() 共用同一读通道（probe/tar/walk/二进制嗅探全同构）。
+  async readLab(dockerName: string, relPath: string, recursive: boolean): Promise<DirListing | FileReading> {
+    const base = FILE_ROOTS.lab
+    return this.readContainer(dockerName, relPath === '' ? base : `${base}/${relPath}`, relPath, recursive)
+  }
+
+  // 读通道本体（read/readLab 共用）：absPath = 容器内绝对路径，relPath = 相对树根的回显路径。
+  private async readContainer(
+    container: string,
+    absPath: string,
+    relPath: string,
+    recursive: boolean,
+  ): Promise<DirListing | FileReading> {
+    const probed = await this.probe(container, absPath)
     if (probed === null) throw new FileNotFound(relPath)
     if (probed.kind === 'oversized') {
       // 超上限：明确过滤信号（content null + oversized），不返回内容
@@ -236,11 +254,12 @@ export class DockerFileArchive implements FileArchive {
   }
 
   // 原始字节读取（WebChat 媒体通道）：与 read() 的 file 分支同探针/收集路径，但**不做 NUL 嗅探与
-  // UTF-8 转码**——直接返回 entry.data Buffer（workspace 图片字节透传给浏览器）。超大文件 probe
-  // 已短路（oversized → FileInvalidPath）；非文件条目（目录/symlink）→ FileInvalidPath。
-  async readBytes(name: string, root: FileRoot, relPath: string): Promise<Buffer> {
-    const absPath = this.absPath(root, relPath)
-    const probed = await this.probe(name, absPath)
+  // UTF-8 转码**——直接返回 entry.data Buffer（workspace 图片字节透传给浏览器）。absRoot = 容器内
+  // 树根绝对路径（legacy 专用通道，LEGACY_WORKSPACE_ROOT）。超大文件 probe 已短路
+  //（oversized → FileInvalidPath）；非文件条目（目录/symlink）→ FileInvalidPath。
+  async readBytes(name: string, absRoot: string, relPath: string): Promise<Buffer> {
+    const absPath = relPath === '' ? absRoot : `${absRoot}/${relPath}`
+    const probed = await this.probe(containerName(name), absPath)
     if (probed === null) throw new FileNotFound(relPath)
     if (probed.kind === 'oversized') throw new FileInvalidPath(relPath)
     if (probed.root.type !== 'file') throw new FileInvalidPath(relPath)
@@ -252,7 +271,7 @@ export class DockerFileArchive implements FileArchive {
 
   async write(name: string, root: FileRoot, relPath: string, content: string): Promise<void> {
     const absPath = this.absPath(root, relPath)
-    const probed = await this.probe(name, absPath)
+    const probed = await this.probe(containerName(name), absPath)
     if (probed === null) throw new FileNotFound(relPath)
     if (probed.kind === 'ok' && probed.root.type !== 'file') throw new FileInvalidPath(relPath) // 目录/链接不可覆写
     await this.ensureParentAndPut(name, absPath, Buffer.from(content, 'utf8'))
@@ -260,14 +279,14 @@ export class DockerFileArchive implements FileArchive {
 
   async create(name: string, root: FileRoot, relPath: string, content: string): Promise<void> {
     const absPath = this.absPath(root, relPath)
-    const probed = await this.probe(name, absPath)
+    const probed = await this.probe(containerName(name), absPath)
     if (probed !== null) throw new FileExists(relPath)
     await this.ensureParentAndPut(name, absPath, Buffer.from(content, 'utf8'))
   }
 
   async delete(name: string, root: FileRoot, relPath: string): Promise<void> {
     const absPath = this.absPath(root, relPath)
-    const probed = await this.probe(name, absPath)
+    const probed = await this.probe(containerName(name), absPath)
     if (probed === null) throw new FileNotFound(relPath)
     if (probed.kind === 'ok' && probed.root.type === 'directory') throw new FileInvalidPath(relPath) // 只支持删文件
     await this.start(name)
@@ -300,14 +319,14 @@ export class DockerFileArchive implements FileArchive {
     const entries = await walkTree(root, '')
     const container = this.client().getContainer(containerName(name))
     await container.putArchive(Readable.from([createTarTree(entries)]), {
-      path: FILE_ROOTS.workspace, // 树根 = 挂载点单一来源（values.ts ← containers/constants 的 MOUNT_*）
+      path: FILE_ROOTS.workspace, // 树根 = 挂载点单一来源（legacy workspace，T0 退役）
       chown: true,
     })
   }
 
   // 读容器内 openclaw.json 全文；不存在（daemon 404）→ FileNotFound。
   async readConfig(name: string): Promise<string> {
-    const probed = await this.probe(name, CONFIG_PATH)
+    const probed = await this.probe(containerName(name), CONFIG_PATH)
     if (probed === null) throw new FileNotFound('openclaw.json')
     if (probed.kind === 'oversized' || probed.root.type !== 'file') throw new FileInvalidPath('openclaw.json')
     const full = parseTar(probed.buf, { collectData: true, maxDataBytes: MAX_FILE_READ_BYTES })

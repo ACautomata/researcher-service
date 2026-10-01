@@ -165,7 +165,8 @@ function paxRecord(key: string, value: string): Buffer {
 
 // 单条目块序列（PAX 长名头按需 + 条目头 + 数据 + padding，不含结束零块）——createTarFile/
 // createTarTree 共用。typeflag：'0' 文件 / '5' 目录（目录 size 恒 0、无数据段）。
-function entryBlocks(name: string, content: Buffer, typeflag: '0' | '5', mtimeSec: number): Buffer[] {
+// modeOctal：八进制 mode 字符串（如 '0000755'）；缺省 0644（文件常权）。
+function entryBlocks(name: string, content: Buffer, typeflag: '0' | '5', mtimeSec: number, modeOctal = '0000644'): Buffer[] {
   const nameBytes = Buffer.from(name, 'utf8')
   const needsPax = nameBytes.length > 100 || nameBytes.some((b) => b >= 0x80)
   const chunks: Buffer[] = []
@@ -174,7 +175,7 @@ function entryBlocks(name: string, content: Buffer, typeflag: '0' | '5', mtimeSe
     chunks.push(headerOf('', pax.length, 'x', mtimeSec))
     chunks.push(pax, Buffer.alloc(alignTo(pax.length) - pax.length))
   }
-  chunks.push(headerOf(nameBytes.length <= 100 ? name : '', content.length, typeflag, mtimeSec))
+  chunks.push(headerOf(nameBytes.length <= 100 ? name : '', content.length, typeflag, mtimeSec, modeOctal))
   if (content.length > 0) {
     chunks.push(content)
     const pad = alignTo(content.length) - content.length
@@ -190,11 +191,13 @@ export function createTarFile(name: string, content: Buffer, mtimeSec = Math.flo
 }
 
 // 目录树条目（createTarTree 输入）：name 相对路径（'/' 分隔，无 './' 前缀）；file 必带 content。
+// modeOctal：可选八进制 mode（如目录需 '0000755'——0644 目录无 x 位不可遍历；#776 沙箱 /lab 预置）。
 export interface TarTreeEntry {
   name: string
   type: 'file' | 'directory'
   content?: Buffer
   mtimeSec?: number
+  modeOctal?: string
 }
 
 // 造多条目目录树 tar（putArchive 整树解包用，#6xx seedWorkspace）：目录先于其内容（先序），
@@ -203,16 +206,16 @@ export function createTarTree(entries: TarTreeEntry[]): Buffer {
   const chunks: Buffer[] = []
   for (const e of entries) {
     const content = e.type === 'file' ? (e.content ?? Buffer.alloc(0)) : Buffer.alloc(0)
-    chunks.push(...entryBlocks(e.name, content, e.type === 'file' ? '0' : '5', e.mtimeSec ?? Math.floor(Date.now() / 1000)))
+    chunks.push(...entryBlocks(e.name, content, e.type === 'file' ? '0' : '5', e.mtimeSec ?? Math.floor(Date.now() / 1000), e.modeOctal))
   }
   chunks.push(Buffer.alloc(BLOCK * 2)) // 结束零块
   return Buffer.concat(chunks)
 }
 
-function headerOf(name: string, size: number, typeflag: string, mtime: number): Buffer {
+function headerOf(name: string, size: number, typeflag: string, mtime: number, modeOctal = '0000644'): Buffer {
   const h = Buffer.alloc(BLOCK)
   h.write(name.slice(0, 100), 0, 'utf8')
-  h.write('0000644', 100, 'utf8') // mode 0644
+  h.write(modeOctal, 100, 'utf8') // mode（0644 文件常权 / 0755 目录可遍历）
   // uid/gid = 容器内 node(1000:1000)：putArchive chown:true 是「应用头内 uid/gid」语义
   // （bt 宿主实测非「跟随目标目录」），写 0 会落 root:root、agent 不可写（#660 回归）
   h.write('0001750', 108, 'utf8') // uid 1000

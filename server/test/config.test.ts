@@ -884,6 +884,57 @@ describe('fleet image pinning env (slice config, #695)', () => {
   })
 })
 
+// ---- #776 沙箱配置组：SANDBOX_IMAGE 钉版（生产禁浮动，对齐 readFleetImage 先例）----
+
+describe('sandbox image pinning env (#776)', () => {
+  async function loadSandboxImage(opts: { env?: string; image?: string | undefined }): Promise<string | 'THREW'> {
+    vi.resetModules()
+    const { env = 'production', image } = opts
+    vi.stubEnv('NODE_ENV', env)
+    if (env === 'production') {
+      // 隔离 sandbox 变量：提供其余生产必填（同 loadFleetImage 模式）。
+      vi.stubEnv('JWT_SECRET', 's'.repeat(32))
+      vi.stubEnv('CREDENTIAL_ENCRYPTION_KEYS', Buffer.alloc(32, 0x01).toString('base64'))
+      vi.stubEnv('OPENCLAW_TEMPLATE_DIR', process.cwd())
+      vi.stubEnv('PANEL_PUBLIC_ORIGIN', 'https://panel.example.com')
+    }
+    if (image === undefined) delete process.env.SANDBOX_IMAGE
+    else vi.stubEnv('SANDBOX_IMAGE', image)
+    try {
+      const { config } = await import('../src/config')
+      return config.sandbox.image
+    } catch (e) {
+      if (env === 'production') expect((e as Error).message).toContain('SANDBOX_IMAGE')
+      return 'THREW'
+    } finally {
+      vi.unstubAllEnvs()
+    }
+  }
+
+  it('生产缺省 → busybox 最小闭环镜像且非浮动（含 timeout applet 前提）', async () => {
+    const v = await loadSandboxImage({ image: undefined })
+    expect(v).toBe('busybox:1.36')
+    expect(isFloatingImageRef(v)).toBe(false)
+  })
+
+  it('生产 + 精确版本 tag → 放行', async () => {
+    expect(await loadSandboxImage({ image: 'ghcr.io/acautomata/researcher-service/sandbox:2026.10.1' })).toBe(
+      'ghcr.io/acautomata/researcher-service/sandbox:2026.10.1',
+    )
+  })
+
+  it('生产 + :latest / 无 tag → fail-fast（浮动 tag 目标不可复现）', async () => {
+    expect(await loadSandboxImage({ image: 'ghcr.io/openclaw/sandbox:latest' })).toBe('THREW')
+    expect(await loadSandboxImage({ image: 'ghcr.io/openclaw/sandbox' })).toBe('THREW')
+  })
+
+  it('dev + :latest → 放行（本地调试不受影响）', async () => {
+    expect(await loadSandboxImage({ env: 'development', image: 'ghcr.io/openclaw/sandbox:latest' })).toBe(
+      'ghcr.io/openclaw/sandbox:latest',
+    )
+  })
+})
+
 // ---- #775 runner 配置组：RUNNER_MAX_CONCURRENT_RUNS / ALLOW_PRIVATE_PROVIDER_ENDPOINTS ----
 
 describe('runner max concurrent runs env (#775)', () => {
