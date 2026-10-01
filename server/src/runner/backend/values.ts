@@ -8,8 +8,10 @@ export const MAX_COLLECT_BYTES = 32 * 1024 * 1024
 // execute 输出截断上限（PoC 50k chars）：超出截断 + truncated 标记回 agent。
 export const MAX_OUTPUT_CHARS = 50_000
 
-// execute 默认超时（对齐上游 LocalShellBackend 默认 120s）：超时 adapter SIGKILL exec 进程
-// + exitCode 124 + stderr 附说明——防 agent 一条挂起命令永久楔死 runner 回合（评审 M2）。
+// execute 默认超时（对齐上游 LocalShellBackend 默认 120s）：超时由容器内 timeout coreutil
+// SIGKILL 子进程（adapter 包 argv，机制与退出码归一见 dockerPrimitives.ts），exitCode 124
+// 语义 + stderr 附说明——防 agent 一条挂起命令永久楔死 runner 回合（评审 M2）。
+// 前置：沙箱镜像须含 timeout applet（busybox/GNU coreutils 皆有；#776/#784 钉镜像时列为验收项）。
 export const EXEC_DEFAULT_TIMEOUT_MS = 120_000
 
 // read 默认分页（deepagents BackendProtocolV2 签名默认）。

@@ -125,7 +125,7 @@ export class DockerArchiveBackend implements SandboxBackendProtocolV2 {
 
   // shell 固定落 /lab 沙箱（wiki 容器无运行时）；stdout+stderr 合并，超 MAX_OUTPUT_CHARS 截断。
   // 默认超时 EXEC_DEFAULT_TIMEOUT_MS（上游 LocalShellBackend 120s 对齐，评审 M2）：adapter
-  // 超时 SIGKILL + exitCode 124 + stderr 附说明——挂起命令不再永久楔死 runner 回合。
+  // 包容器内 timeout -s KILL，到期杀子进程、exitCode 归一 124 + stderr 附说明。
   async execute(command: string): Promise<ExecuteResponse> {
     try {
       const r: ExecOutcome = await this.primitives.exec(this.targets.lab, ['/bin/sh', '-c', command], {
