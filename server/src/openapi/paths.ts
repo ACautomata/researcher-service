@@ -504,7 +504,7 @@ register({
   summary: 'workspace 图片字节（WebChat 媒体白名单；legacy 通道，T0 随 legacy 退役 #801）',
   auth: 'user',
   errors: `90002（非 workspace 前缀/穿越/非白名单扩展名 → data.path）· 20040 · 60040。`,
-  dataNote: '错误面走信封；白名单 png/jpg/jpeg/webp/gif。注意：本端点是 legacy 容器媒体通道——「workspace」仅在此遗留通道内出现，root 契约（#776）为 wiki|lab。',
+  dataNote: '错误面走信封；白名单 png/jpg/jpeg/webp/gif。注意：本端点是 legacy 容器媒体通道——「workspace」仅在此遗留通道内以绝对路径参数出现；root 契约（#776）为 wiki|workspace(legacy 只读)|lab，本端点不收 root。',
   query: z.object({ path: z.string().describe('legacy 容器 workspace 树内绝对路径') }),
   bytes: 'image/png, image/jpeg 或 image/webp/gif（按扩展名）',
 })

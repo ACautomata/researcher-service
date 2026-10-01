@@ -183,8 +183,7 @@ export class DockerFileArchive implements FileArchive {
   // #776 root=lab 沙箱读面：dockerName 原文直用（不套 openclaw-gw- 前缀），树根固定 FILE_ROOTS.lab。
   // 与 read() 共用同一读通道（probe/tar/walk/二进制嗅探全同构）。
   async readLab(dockerName: string, relPath: string, recursive: boolean): Promise<DirListing | FileReading> {
-    const base = FILE_ROOTS.lab
-    return this.readContainer(dockerName, relPath === '' ? base : `${base}/${relPath}`, relPath, recursive)
+    return this.readContainer(dockerName, this.absPath('lab', relPath), relPath, recursive)
   }
 
   // 读通道本体（read/readLab 共用）：absPath = 容器内绝对路径，relPath = 相对树根的回显路径。
