@@ -88,7 +88,7 @@ describe.skipIf(!DOCKER_UP)('DockerArchiveBackend 集成 smoke（真 docker daem
     const raw = await backend.readRaw('/lab/raw.png')
     expect(raw.data && 'content' in raw.data && raw.data.content).toBeInstanceOf(Uint8Array)
     const d = await backend.delete('/lab/src')
-    expect(d).toEqual({ path: '/lab/src' })
+    expect(d).toEqual({ path: '/lab/src', filesUpdate: null })
     expect((await backend.read('/lab/src/main.py')).error).toBeTruthy()
   }, 60_000)
 

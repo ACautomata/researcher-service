@@ -141,6 +141,11 @@ export interface DeleteResult {
   error?: string
   /** File path of deleted file or directory, undefined on failure */
   path?: string
+  /** 外部存储恒 null（delete() 显式返回；上游型为 Record<string, null>——删除标记以
+   * removed path 键 null 值表示，与 Write/Edit 的 FileData 不同型，逐条镜像勿混） */
+  filesUpdate?: Record<string, null> | null
+  /** Metadata for the delete operation, attached to the ToolMessage（上游同名可选字段补镜像） */
+  metadata?: Record<string, unknown>
 }
 
 /** Result of code execution（exitCode null = 未能取得退出码） */

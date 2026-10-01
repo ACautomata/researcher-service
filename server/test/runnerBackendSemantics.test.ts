@@ -104,6 +104,26 @@ describe('mime（镜像 deepagents MIME_TYPES / isTextMimeType）', () => {
     expect(isTextMimeType('image/png')).toBe(false)
     expect(isTextMimeType('application/pdf')).toBe(false)
   })
+  it('扩展名按 basename 提取（评审 m6：dotfile /lab/.png → text/plain，镜像上游 extname）', () => {
+    expect(getMimeType('/lab/.png')).toBe('text/plain') // dotfile：旧实现对全路径取 ext 会误判 image/png
+    expect(getMimeType('/lab/sub/.env')).toBe('text/plain')
+    expect(getMimeType('/lab/sub/a.PNG')).toBe('image/png') // 大小写归一保留
+    expect(getMimeType('noext')).toBe('text/plain')
+  })
+  it('上游 12 项补齐（评审 m6：MIME 表 78→90 项全表镜像，均 text/plain）', () => {
+    expect(getMimeType('x.ml')).toBe('text/plain')
+    expect(getMimeType('x.mli')).toBe('text/plain')
+    expect(getMimeType('x.vue')).toBe('text/plain')
+    expect(getMimeType('x.svelte')).toBe('text/plain')
+    expect(getMimeType('x.astro')).toBe('text/plain')
+    expect(getMimeType('x.tf')).toBe('text/plain')
+    expect(getMimeType('x.cmake')).toBe('text/plain')
+    expect(getMimeType('x.makefile')).toBe('text/plain')
+    expect(getMimeType('x.dockerfile')).toBe('text/plain')
+    expect(getMimeType('x.gitignore')).toBe('text/plain')
+    expect(getMimeType('x.dockerignore')).toBe('text/plain')
+    expect(getMimeType('x.editorconfig')).toBe('text/plain')
+  })
 })
 
 describe('routePath（双根路由纯函数：/wiki/ → wiki 容器，/lab/ → 沙箱容器）', () => {
