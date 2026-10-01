@@ -18,7 +18,7 @@ import { sandboxContainerName, sandboxNetworkName } from '../src/sandboxes/runti
 import { DockerArchiveBackend } from '../src/runner/backend/dockerArchiveBackend'
 import { DockerPrimitives } from '../src/runner/backend/dockerPrimitives'
 import { DockerFileArchive } from '../src/files/dockerArchive'
-import { KIND_SANDBOX, LABEL_APP_VALUE, LABEL_KIND_KEY } from '../src/containers/constants'
+import { KIND_SANDBOX, LABEL_APP_KEY, LABEL_APP_VALUE, LABEL_KIND_KEY, LABEL_SESSION_KEY } from '../src/containers/constants'
 import { probeDockerAvailable } from './smokeGating'
 import { ensureImageAvailable } from './smokeDocker'
 
@@ -73,7 +73,7 @@ describe.skipIf(!DOCKER_UP)('沙箱生命周期集成 smoke（真 docker daemon�
     expect(data.HostConfig.NetworkMode).toBe(sandboxNetworkName(SESSION))
     expect(Object.keys(data.NetworkSettings.Networks ?? {})).toEqual([sandboxNetworkName(SESSION)])
     // 标签：kind=sandbox + session；不打 fleet app 标签
-    expect(data.Config.Labels).toMatchObject({ [LABEL_KIND_KEY]: KIND_SANDBOX, 'researcher.session': SESSION })
+    expect(data.Config.Labels).toMatchObject({ [LABEL_KIND_KEY]: KIND_SANDBOX, [LABEL_SESSION_KEY]: SESSION })
     expect(data.Config.Labels?.app).toBeUndefined()
     // 无宿主端口发布
     expect(data.HostConfig.PortBindings ?? {}).toEqual({})
@@ -136,7 +136,7 @@ describe.skipIf(!DOCKER_UP)('沙箱生命周期集成 smoke（真 docker daemon�
   }, 60_000)
 
   it('对 fleet 列表隐身：app=openclaw-fleet 过滤不含沙箱；kind=sandbox 过滤含沙箱', async () => {
-    const fleet = await docker.listContainers({ all: true, filters: { label: [`app=${LABEL_APP_VALUE}`] } })
+    const fleet = await docker.listContainers({ all: true, filters: { label: [`${LABEL_APP_KEY}=${LABEL_APP_VALUE}`] } })
     expect(fleet.map((c) => c.Names?.[0])).not.toContain(`/${dockerName}`)
     const sandboxes = await docker.listContainers({
       all: true,
