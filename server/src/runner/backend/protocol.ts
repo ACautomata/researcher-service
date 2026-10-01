@@ -2,8 +2,8 @@
 //
 // 来源：deepagents@1.14.1 dist/agent-CxEdojMv.d.ts 逐字段复制（v1/v2 protocol 区原文）。
 // 本票刻意不引 deepagents 依赖：S2 fake 单测零 langchain 面；「@langchain/langgraph ~1.4.18 /
-// langchain ~1.5.14 / deepagents ~1.14.1 三包 + checkpointer 同 PR 联动引入」由首个运行时
-// 消费票（#774 CheckpointSaver / #777 runner）落地。TS 结构类型天然兼容——runner 票接入时
+// langchain ~1.5.14 / deepagents ~1.14.1 三包」由 #777 runner 票联动引入，checkpointer 包已由
+// #774（persistence/ 持久化双件）先行落地。TS 结构类型天然兼容——runner 票接入时
 // 以 `satisfies import('deepagents').SandboxBackendProtocolV2` 一次性对齐断言。
 // 基座升级时按上游 d.ts 核对本文件（语义锁定先例同 semantics.ts）。
 

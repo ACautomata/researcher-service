@@ -188,6 +188,7 @@ CREATE TABLE "memory_items" (
     "namespace" TEXT NOT NULL,
     "key" TEXT NOT NULL,
     "valueJson" TEXT NOT NULL,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" DATETIME NOT NULL,
 
     PRIMARY KEY ("namespace", "key")

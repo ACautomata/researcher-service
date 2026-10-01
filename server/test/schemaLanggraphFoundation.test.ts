@@ -150,6 +150,8 @@ const NEW_TABLE_COLUMNS: Record<string, Record<string, ColExpect>> = {
     namespace: { type: 'TEXT', notnull: 1 },
     key: { type: 'TEXT', notnull: 1 },
     valueJson: { type: 'TEXT', notnull: 1 },
+    // #774 补：BaseStore Item.createdAt 契约必填（首写时刻，put 覆盖不刷新）
+    createdAt: { type: 'DATETIME', notnull: 1 },
     updatedAt: { type: 'DATETIME', notnull: 1 },
   },
   tool_approval_logs: {
@@ -490,6 +492,42 @@ CREATE TABLE "pairings" (
       expect(
         (d2.prepare(`SELECT count(*) c FROM provider_endpoints WHERE id='seed-minimax-endpoint'`).get() as { c: number }).c,
       ).toBe(1)
+      d2.close()
+    })
+
+    // #774 回归：#771 形状库（memory_items 已建表但无 createdAt 列——#771 地基遗漏）经
+    // upgrade 补列 + 回填。pre-#771 旧形状用例（上方）因 CREATE IF NOT EXISTS 先建带列新表
+    // 走不到 ALTER 分支，真实 #771→#774 升级形状仅此用例覆盖（code-review 阻断项回归）。
+    it('upgrade-schema.mjs 对「#771 形状库」（memory_items 已建但无 createdAt 列）补列 + 回填旧行', () => {
+      const p = path.join(dir, 'memory-items-createdat-upgrade.db')
+      const d = new Database(p)
+      // 造 #771 形状：memory_items 无 createdAt 列 + 一行存量数据
+      d.exec(`
+CREATE TABLE "memory_items" (
+    "namespace" TEXT NOT NULL,
+    "key" TEXT NOT NULL,
+    "valueJson" TEXT NOT NULL,
+    "updatedAt" DATETIME NOT NULL,
+
+    PRIMARY KEY ("namespace", "key")
+);
+INSERT INTO "memory_items" ("namespace", "key", "valueJson", "updatedAt")
+VALUES ('user-a', 'legacy-note', '{"v":1}', '2026-09-30 12:00:00');
+`)
+      d.close()
+      runDbScript('upgrade-schema.mjs', p)
+      runDbScript('upgrade-schema.mjs', p) // 可重跑
+
+      const d2 = new Database(p, { readonly: true })
+      // 补列与 fresh 路径同一套逐字段期望（NOT NULL 语义不破，parity 保持）
+      expectColumns(colsOf(d2, 'memory_items'), NEW_TABLE_COLUMNS.memory_items)
+      // 旧行回填：占位常量被 CURRENT_TIMESTAMP 覆盖（真实成形时刻不可考，取迁移时刻）
+      const row = d2
+        .prepare(
+          `SELECT "createdAt" FROM "memory_items" WHERE "namespace"='user-a' AND "key"='legacy-note'`,
+        )
+        .get() as { createdAt: string }
+      expect(row.createdAt).not.toBe('1970-01-01 00:00:00')
       d2.close()
     })
 
