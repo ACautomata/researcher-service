@@ -85,11 +85,29 @@ const MIME_TYPES: Record<string, string> = {
   '.exs': 'text/plain',
   '.erl': 'text/plain',
   '.hs': 'text/plain',
+  // 评审 m6 补齐：上游 12 项（langsmith chunk MIME_TYPES 全表 90 项，此前漏镜像；
+  // 均 text/plain，与未补时兜底行为等价——补的是表保真）
+  '.ml': 'text/plain',
+  '.mli': 'text/plain',
+  '.vue': 'text/plain',
+  '.svelte': 'text/plain',
+  '.astro': 'text/plain',
+  '.tf': 'text/plain',
+  '.cmake': 'text/plain',
+  '.makefile': 'text/plain',
+  '.dockerfile': 'text/plain',
+  '.gitignore': 'text/plain',
+  '.dockerignore': 'text/plain',
+  '.editorconfig': 'text/plain',
 }
 
 export function getMimeType(filePath: string): string {
-  const dot = filePath.lastIndexOf('.')
-  const ext = dot >= 0 ? filePath.slice(dot).toLowerCase() : ''
+  // 扩展名按 basename 提取（评审 m6：镜像上游 extname 的 dotIdx<=0 判据——dotfile
+  // 如 /lab/.png 无扩展名 → text/plain；旧实现对全路径 lastIndexOf 会把 dotfile
+  // 误判 image/png）
+  const base = filePath.slice(filePath.lastIndexOf('/') + 1)
+  const dot = base.lastIndexOf('.')
+  const ext = dot > 0 ? base.slice(dot).toLowerCase() : ''
   return MIME_TYPES[ext] ?? 'text/plain'
 }
 

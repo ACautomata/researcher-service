@@ -5,8 +5,9 @@
 // 覆盖：
 //   1. 双根端到端（busybox 双容器真 getArchive/putArchive/exec）：write→read/edit/glob/grep/ls/delete
 //   2. /wiki/ 与 /lab/ 路由按容器目标正确分派（跨容器同名文件隔离即证据）
-//   3. execute 性能量级不回退（PoC #724 基线：exec mean 47.7ms / p95 70.6ms；断言留 20 倍
-//      CI 余量 mean<1000ms / p95<2000ms，实测数字打印供校准）
+//   3. execute 性能量级不回退（PoC #724 基线：exec mean 47.7ms / p95 70.6ms；~5x 余量断言
+//      mean<250ms / p95<500ms，实测数字打印供校准）
+//   4. execute 超时 kill 真 daemon 证据（评审 M2：挂起命令被容器内 timeout KILL → exitCode 124）
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import Docker from 'dockerode'
@@ -87,7 +88,7 @@ describe.skipIf(!DOCKER_UP)('DockerArchiveBackend 集成 smoke（真 docker daem
     const raw = await backend.readRaw('/lab/raw.png')
     expect(raw.data && 'content' in raw.data && raw.data.content).toBeInstanceOf(Uint8Array)
     const d = await backend.delete('/lab/src')
-    expect(d).toEqual({ path: '/lab/src' })
+    expect(d).toEqual({ path: '/lab/src', filesUpdate: null })
     expect((await backend.read('/lab/src/main.py')).error).toBeTruthy()
   }, 60_000)
 
@@ -129,4 +130,14 @@ describe.skipIf(!DOCKER_UP)('DockerArchiveBackend 集成 smoke（真 docker daem
     expect(mean).toBeLessThan(250)
     expect(p95).toBeLessThan(500)
   }, 60_000)
+
+  it('execute 超时 kill 真 daemon 证据（评审 M2：挂起命令 ~1s 处被 KILL，exitCode 124）', async () => {
+    const primitives = new DockerPrimitives()
+    const t0 = performance.now()
+    const r = await primitives.exec(LAB, ['/bin/sh', '-c', 'sleep 30'], { timeoutMs: 800 })
+    const elapsed = performance.now() - t0
+    expect(r.exitCode).toBe(124)
+    expect(r.stderr).toContain('timed out after 800ms')
+    expect(elapsed).toBeLessThan(15_000) // 30s 命令被秒杀路径：必须远早于自然结束
+  }, 30_000)
 })
