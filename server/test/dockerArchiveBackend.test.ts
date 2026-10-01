@@ -11,7 +11,7 @@ import { DockerArchiveBackend } from '../src/runner/backend/dockerArchiveBackend
 import type { ExecOptions, ExecOutcome, SandboxFilePrimitives } from '../src/runner/backend/primitives'
 import type { BackendTargets } from '../src/runner/backend/paths'
 import { createTarFile, parseTar } from '../src/files/tar'
-import { EXEC_DEFAULT_TIMEOUT_MS, MAX_OUTPUT_CHARS } from '../src/runner/backend/values'
+import { EXEC_DEFAULT_TIMEOUT_MS, MAX_COLLECT_BYTES, MAX_OUTPUT_CHARS } from '../src/runner/backend/values'
 
 const WIKI = 'researcher-wiki-u1'
 const LAB = 'researcher-sandbox-s1'
@@ -21,7 +21,7 @@ const MTIME = 1_704_067_200 // 2024-01-01T00:00:00Z（tar mtime 秒精度）
 // ---- 内存 fake：双容器扁平路径表（file/dir 条目）+ 原语调用记录 ----
 
 interface FakeEntry {
-  type: 'file' | 'dir'
+  type: 'file' | 'dir' | 'symlink' | 'other' // other = fifo 等 tar 'other' 类型
   content?: Buffer
 }
 
@@ -94,15 +94,17 @@ function fakeDocker(opts: { execHandler?: ExecHandler } = {}) {
       execCalls.push({ container, cmd })
       const handled = opts.execHandler?.(container, cmd, execOpts)
       if (handled) return handled
-      // 默认行为：mkdir -p 建目录；rm -rf 删除；其余 exit 0 无输出
+      // 默认行为：mkdir -p 建目录；delete 的 sh -c（test -e 预检 + rm -rf）按 fake 树模拟
+      // （目标不存在 → exit 44 哨兵；存在 → 删子树）；其余 exit 0 无输出
       if (cmd[0] === 'mkdir') {
         const target = cmd[cmd.length - 1]
         treeOf(container).set(target, { type: 'dir' })
         return { exitCode: 0, stdout: '', stderr: '' }
       }
-      if (cmd[0] === 'rm') {
-        const target = cmd[cmd.length - 1]
+      if (cmd[0] === 'sh' && cmd[2].includes('rm -rf')) {
+        const target = cmd[4] // argv 形态 ['sh','-c',script,'sh',absPath]：$1 = absPath
         const t = treeOf(container)
+        if (!t.has(target)) return { exitCode: 44, stdout: '', stderr: '' }
         for (const p of [...t.keys()]) if (p === target || p.startsWith(`${target}/`)) t.delete(p)
         return { exitCode: 0, stdout: '', stderr: '' }
       }
@@ -114,6 +116,14 @@ function fakeDocker(opts: { execHandler?: ExecHandler } = {}) {
       const e = t.get(absPath)
       if (!e) return null
       if (e.type === 'dir') return dirTarOf(t, absPath)
+      if (e.type === 'symlink' || e.type === 'other') {
+        // 评审 m8：symlink（typeflag '2'）/fifo 等其他类型（'6'），size 0 无数据段。
+        // 定偏移 patch 仅对短名无 PAX 头安全（parseTar 不校验 chksum，tar.ts:7 明示）——
+        // 复用到长名场景会在错误偏移落字节，勿照抄
+        const buf = createTarFile(absPath.split('/').pop()!, Buffer.alloc(0), MTIME)
+        buf.write(e.type === 'symlink' ? '2' : '6', 156, 'utf8')
+        return buf
+      }
       const buf = createTarFile(absPath.split('/').pop()!, e.content ?? Buffer.alloc(0), MTIME)
       return buf
     },
@@ -174,7 +184,7 @@ describe('双根路由分派（/wiki/ → wiki 容器，/lab/ → 沙箱容器�
     expect(nonExec.map((c) => c.container)).toEqual([WIKI, LAB, WIKI, LAB, WIKI, WIKI, WIKI, LAB])
     // exec（mkdir/rm）同样落在正确容器
     const execContainers = f.execCalls.map((c) => `${c.container}:${c.cmd[0]}`)
-    expect(execContainers).toEqual([WIKI + ':mkdir', LAB + ':mkdir', WIKI + ':mkdir', LAB + ':rm'])
+    expect(execContainers).toEqual([WIKI + ':mkdir', LAB + ':mkdir', WIKI + ':mkdir', LAB + ':sh'])
   })
 
   it('execute 固定落 /lab 沙箱容器（shell 只在沙箱执行；wiki 容器 busybox 级无运行时）', async () => {
@@ -451,19 +461,80 @@ describe('edit（read+write 合成）', () => {
     expect(back.toString('utf8')).toBe('hello JPEG world')
     expect(back.equals(Buffer.from('hello JPEG world', 'utf8'))).toBe(true)
   })
+
+  it('超限文件（>32MiB）→ exceeds read limit 文案，不写盘（评审 m7：不再误报 not found）', async () => {
+    const f = fakeDocker()
+    f.seed(LAB, { '/lab/big.txt': 'x'.repeat(MAX_COLLECT_BYTES + 1) })
+    const b = new DockerArchiveBackend(f.primitives, targets)
+    const r = await b.edit('/lab/big.txt', 'x', 'y')
+    expect(r.error).toContain(`exceeds read limit (${MAX_COLLECT_BYTES} bytes)`)
+    expect(f.calls.some((c) => c.kind === 'putArchive')).toBe(false)
+  })
+
+  it('symlink → Symlinks are not allowed，无写盘（评审 m8：对齐上游显式拒绝）', async () => {
+    const f = fakeDocker()
+    f.trees.set(WIKI, new Map([['/wiki/link.md', { type: 'symlink' }]]))
+    const b = new DockerArchiveBackend(f.primitives, targets)
+    const r = await b.edit('/wiki/link.md', 'x', 'y')
+    expect(r.error).toContain('Symlinks are not allowed')
+    expect(f.calls.some((c) => c.kind === 'putArchive')).toBe(false)
+  })
 })
 
 // ---- delete ----
 
+describe('guardedFile 守卫链（read/readRaw/edit 共用，评审 m8 + Standards 轮收拢）', () => {
+  it('read：symlink → Symlinks are not allowed；fifo（other）→ not found（非误报超限）', async () => {
+    const f = fakeDocker()
+    f.trees.set(WIKI, new Map([
+      ['/wiki/link.md', { type: 'symlink' }],
+      ['/wiki/pipe', { type: 'other' }],
+    ]))
+    const b = new DockerArchiveBackend(f.primitives, targets)
+    expect((await b.read('/wiki/link.md')).error).toContain('Symlinks are not allowed')
+    expect((await b.read('/wiki/pipe')).error).toContain('not found')
+  })
+
+  it('readRaw：symlink → 同拒绝', async () => {
+    const f = fakeDocker()
+    f.trees.set(WIKI, new Map([['/wiki/link.md', { type: 'symlink' }]]))
+    const b = new DockerArchiveBackend(f.primitives, targets)
+    expect((await b.readRaw('/wiki/link.md')).error).toContain('Symlinks are not allowed')
+  })
+})
+
 describe('delete', () => {
-  it('rm -rf -- 绝对路径（目录递归删，BackendProtocolV2 语义），path 返回', async () => {
+  it('sh -c 探存在 + rm -rf 递归删（评审 m4：存在性预检 + 退出码契约），path 返回', async () => {
     const f = fakeDocker()
     f.seed(LAB, { '/lab/dir/a.txt': 'x', '/lab/dir/b.txt': 'y' }, ['/lab/dir'])
     const b = new DockerArchiveBackend(f.primitives, targets)
     const r = await b.delete('/lab/dir')
-    expect(r).toEqual({ path: '/lab/dir' })
-    expect(f.execCalls[0]).toEqual({ container: LAB, cmd: ['rm', '-rf', '--', '/lab/dir'] })
+    expect(r).toEqual({ path: '/lab/dir', filesUpdate: null })
+    expect(f.execCalls[0]).toEqual({
+      container: LAB,
+      cmd: ['sh', '-c', 'if [ ! -e "$1" ] && [ ! -L "$1" ]; then exit 44; fi; rm -rf -- "$1"', 'sh', '/lab/dir'],
+    })
     expect(await b.ls('/lab')).toEqual({ files: [] })
+  })
+
+  it('不存在路径 → { error: not found }（评审 m4：对齐上游 lstat 语义，不再静默成功）', async () => {
+    const f = fakeDocker()
+    const b = new DockerArchiveBackend(f.primitives, targets)
+    const r = await b.delete('/lab/nope')
+    expect(r.error).toContain('not found')
+    expect(r.path).toBeUndefined()
+  })
+
+  it('rm 非零退出 → { error } 带 stderr 细节（评审 m4：DeleteResult.error 契约不再吞退出码）', async () => {
+    const f = fakeDocker({
+      execHandler: () => ({ exitCode: 1, stdout: '', stderr: 'rm: permission denied' }),
+    })
+    f.seed(LAB, { '/lab/locked.txt': 'x' })
+    const b = new DockerArchiveBackend(f.primitives, targets)
+    const r = await b.delete('/lab/locked.txt')
+    expect(r.error).toContain('delete failed')
+    expect(r.error).toContain('permission denied')
+    expect(r.path).toBeUndefined()
   })
 })
 
@@ -495,6 +566,14 @@ describe('glob（相对搜索基目录的全语义匹配）', () => {
     f.seed(WIKI, { '/wiki/a.md': 'x' })
     const b = new DockerArchiveBackend(f.primitives, targets)
     expect(await b.glob('*.md', '/wiki/a.md')).toEqual({ files: [] })
+  })
+
+  it('pattern 前导 / 剥除（评审 m5：镜像上游 substring(1)，官方广告 /subdir/**/*.md 形态）', async () => {
+    const f = fakeDocker()
+    f.seed(WIKI, { '/wiki/notes/a.md': 'a', '/wiki/notes/b.txt': 'b' }, ['/wiki/notes'])
+    const b = new DockerArchiveBackend(f.primitives, targets)
+    const r = await b.glob('/notes/**/*.md', '/wiki')
+    expect(r.files!.map((x) => x.path)).toEqual(['/wiki/notes/a.md'])
   })
 })
 
@@ -538,6 +617,28 @@ describe('grep（literal，二进制跳过，basename includeGlob）', () => {
     const r = await b.grep('hit', '/wiki', null, 3)
     expect(r.matches).toHaveLength(3)
     expect(r.truncated).toBe(true)
+  })
+
+  it('恰好 cap 条 → truncated:false（评审 m3：镜像上游 applyGrepMaxCount 的 <= 分支）', async () => {
+    const f = fakeDocker()
+    f.seed(WIKI, { '/wiki/a.txt': Array.from({ length: 3 }, () => 'hit').join('\n') })
+    const b = new DockerArchiveBackend(f.primitives, targets)
+    const r = await b.grep('hit', '/wiki', null, 3)
+    expect(r.matches).toHaveLength(3)
+    expect(r.truncated).toBe(false)
+  })
+
+  it('截断路径同样按 path+line 排序（评审 m9：确定性输出在截断路径上成立）', async () => {
+    const f = fakeDocker()
+    // 扫描序 z 先于 a（Map 插入序）；cap=2 时截断集扫描序为 [z:1, a:1]，排序后 a 先
+    f.seed(WIKI, { '/wiki/z.txt': 'hit', '/wiki/a.txt': 'hit\nhit' })
+    const b = new DockerArchiveBackend(f.primitives, targets)
+    const r = await b.grep('hit', '/wiki', null, 2)
+    expect(r.truncated).toBe(true)
+    expect(r.matches).toEqual([
+      { path: '/wiki/a.txt', line: 1, text: 'hit' },
+      { path: '/wiki/z.txt', line: 1, text: 'hit' },
+    ])
   })
 
   it('默认 cap = 1000：1001 命中 → truncated', async () => {
