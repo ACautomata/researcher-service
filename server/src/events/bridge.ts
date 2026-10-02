@@ -94,7 +94,7 @@ export interface StreamEventsParams {
 
 export function buildStreamEventsInvocation(threadId: string): StreamEventsParams {
   return Object.freeze({
-    version: 'v3' as const,
+    version: 'v3',
     configurable: Object.freeze({ thread_id: threadId }),
   })
 }

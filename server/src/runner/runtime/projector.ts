@@ -75,10 +75,6 @@ function serializeDetails(content: unknown): string {
   }
 }
 
-export interface ProjectorClock {
-  (): number
-}
-
 export class RunProjector {
   private readonly toolStarts = new Map<string, number>()
   // (runId:index) → 该块已发过 delta（流式形态）；finish 时据此跳过整块防重复。

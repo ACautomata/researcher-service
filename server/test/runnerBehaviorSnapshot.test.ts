@@ -155,7 +155,8 @@ describe('S4 行为快照（#724 断言集 6/6 固化，三包升级守门基线
     })
     await reborn.svc.execute(resume)
 
-    // A2：resume 跑完
+    // A2：resume 跑完（首事件 = run.resumed——#747 C 节目录与 run.started 并列）
+    expect(reborn.hub.types()[0]).toBe('run.resumed')
     expect(reborn.hub.types()[reborn.hub.types().length - 1]).toBe('run.completed')
     expect(reborn.svc.stateOf(SESSION)?.state).toBe('completed')
     // A3：工具恰执行一次（interrupt 前未执行 + resume 后执行一次 = 1）

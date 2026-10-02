@@ -6,6 +6,7 @@
 
 import type { PrismaClient } from '../generated/prisma/client'
 import type { StreamHub } from '../events/hub'
+import type { RunServiceDeps } from './runtime/runService'
 import { PrismaCheckpointSaver } from './persistence/prismaCheckpointSaver'
 import { ProviderRegistry } from './providerRegistry'
 import { ConcurrencyGate } from './concurrency'
@@ -27,11 +28,8 @@ export function assembleRunner(opts: {
   redisUrl: string
   maxConcurrentRuns: number
   recursionLimit?: number
-  /** 沙箱生命周期（#776 契约「消费方 = #777 runner ensure/touch」；SandboxLifecycle 结构子集） */
-  sandboxes?: {
-    ensure: (sessionId: string) => Promise<{ containerId: string }>
-    touch: (sessionId: string) => void
-  }
+  /** 沙箱生命周期（#776 契约「消费方 = #777 runner ensure/touch」；类型面复用 RunServiceDeps） */
+  sandboxes?: NonNullable<RunServiceDeps['sandboxes']>
 }): RunnerAssembly {
   // tracing 显式关（启动期第一路；RunService 构造期第二路兜底）
   disableLangsmithTracing()
@@ -64,8 +62,8 @@ export function assembleRunner(opts: {
     // 当前生产 wiki 容器不存在，/wiki/ 工具路径的文件操作会因容器缺失报错回流 agent 自纠，
     // /lab/ 面不受影响。#784 落地后替换为 orchestrator 查询）。
     resolveWikiContainer: (ownerId) => `researcher-wiki-${ownerId}`,
-    ...(opts.recursionLimit !== undefined ? { recursionLimit: opts.recursionLimit } : {}),
-    ...(opts.sandboxes ? { sandboxes: opts.sandboxes } : {}),
+    recursionLimit: opts.recursionLimit,
+    sandboxes: opts.sandboxes,
   })
 
   const queue = new BullMqRunQueue({

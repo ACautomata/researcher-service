@@ -1,11 +1,13 @@
 // S1 信封级集成（#777）：发消息到 run 终态的端到端事件序列（#747 C 节 run 域目录帧序列断言）。
+// 断言落在 hub.publish 收集层（传输面 = SSE 帧层 id/event/data + serverSeq，#773 encodeFrame
+// 已锁）——REST 入队面归 #778，届时补 supertest 端到端。
 // 基建全 fake：ScriptedChatModel（脚本化 LLM）+ fakePrimitives（内存 Docker）+ 收集器 hub +
 // 临时 SQLite（checkpoint 落库 + session/provider seed）。验收面：
 //   - 事件序列形状（run.started → text/thinking.delta → tool.start/end → 终态）
 //   - 错误三分类各有用例（story 10）
 //   - abort（story 8 by:user）
 //   - 同 thread 严格串行（#723 责任面）
-//   - interrupt → resume（interrupted 态 + 50001 竞态败方）
+//   - interrupt → resume（run.resumed 首事件 + 副作用恰一次 + 50001 竞态败方 + 50003 interrupted 禁输入）
 //   - tracing 关闭无泄漏（env + fetch spy 双保险）
 // 每用例独立 registry/RunService（模型缓存 key 含脚本消费状态不成立——跨 run 复用会命中
 // 已耗尽的脚本模型），hub/prisma 共享。
@@ -322,6 +324,7 @@ describe('RunService：发消息 → run 终态事件序列（S1，#747 C 节目
       script: [
         toolCallAi('cH', 'execute', { command: 'echo hi' }),
         new AIMessage({ content: '执行完成。' }),
+        new AIMessage({ content: '续聊回复。' }), // resume 完成后的 followup 轮
       ],
     })
     await svc.execute(cmd())
@@ -335,10 +338,64 @@ describe('RunService：发消息 → run 终态事件序列（S1，#747 C 节目
       username: owner.username,
       decisions: { decisions: [{ type: 'approve' }] },
     })
+    const beforeResume = hub.events.length
     await svc.execute(rc)
+    // resume 首事件 = run.resumed（#747 C 节目录与 run.started 并列——续跑不重发 started）
+    expect(hub.events[beforeResume]?.type).toBe('run.resumed')
     expect(hub.types()[hub.types().length - 1]).toBe('run.completed')
     expect(fs.execCalls).toHaveLength(1) // resume 后工具恰执行一次（副作用幂等）
     expect(svc.stateOf(sessionId)?.state).toBe('completed')
+
+    // resume 完成后线程解除 interrupt 态：后续 message 不被 50003 误挡（checkpoint 语义锁定——
+    // 续跑后的最新 checkpoint 不再带 pending __interrupt__）
+    const followup = await svc.buildMessageCommand({
+      sessionId,
+      ownerId: owner.id,
+      username: owner.username,
+      content: '继续',
+    })
+    await svc.execute(followup)
+    expect(svc.stateOf(sessionId)?.state).toBe('completed')
+  }, 30_000)
+
+  it('interrupted 态 message → 50003 拒绝（#747 C 节「interrupt 全端可审批」内核防御面）', async () => {
+    // 独立 thread：本用例把线程留在 interrupted，不毒化共享 sess-1 的后续用例
+    await prisma.session.create({
+      data: { id: 'sess-i1', ownerId: owner.id, containerId: LAB, title: '' },
+    })
+    const svc = makeService({
+      interruptPolicyFor: () => ({ tools: ['execute'] }),
+      script: [toolCallAi('cI', 'execute', { command: 'x' }), new AIMessage({ content: 'ok' })],
+    })
+    await svc.execute(cmd({ sessionId: 'sess-i1' }))
+    expect(svc.stateOf('sess-i1')?.state).toBe('interrupted')
+    await expect(svc.execute(cmd({ sessionId: 'sess-i1', content: '打断' }))).rejects.toMatchObject({
+      code: CODE.RUN_INTERRUPT_PENDING,
+    })
+    // 拒绝在 pre-start 面：无新事件、queued 占位回滚、interrupt 态保持
+    expect(svc.stateOf('sess-i1')?.state).toBe('interrupted')
+  })
+
+  it('interrupted 态 message → 50003（重启形态：内存缺失走 checkpoint 推导）', async () => {
+    await prisma.session.create({
+      data: { id: 'sess-i2', ownerId: owner.id, containerId: LAB, title: '' },
+    })
+    // svc A 打出 interrupt 后弃用；svc B（同 DB、空内存）收到 message 同挡
+    const first = makeService({
+      interruptPolicyFor: () => ({ tools: ['execute'] }),
+      script: [toolCallAi('cI2', 'execute', { command: 'x' }), new AIMessage({ content: 'ok' })],
+    })
+    await first.execute(cmd({ sessionId: 'sess-i2' }))
+    expect(first.stateOf('sess-i2')?.state).toBe('interrupted')
+
+    const reborn = makeService({
+      interruptPolicyFor: () => ({ tools: ['execute'] }),
+      script: [new AIMessage({ content: 'ok' })],
+    })
+    await expect(
+      reborn.execute(cmd({ sessionId: 'sess-i2', content: '打断' })),
+    ).rejects.toMatchObject({ code: CODE.RUN_INTERRUPT_PENDING })
+    expect(reborn.stateOf('sess-i2')?.state).toBeUndefined() // pre-start 拒绝，queued 占位已回滚
   })
 
   it('resume 竞态权威判定：interrupted 消费后第二次 resume → execute 抛 50001', async () => {

@@ -58,6 +58,7 @@ export const CODE = {
   // codes 是另一传输面，不受影响）：50002 = 会话不存在。
   RUN_ALREADY_RESUMED: 50001, // run 已被 resume（先到先得，败方拒绝；#777 runService 互斥面）
   SESSION_NOT_FOUND: 50002, // 会话不存在 / 越权（同码防探测；root=lab 读面 #776，#778 会话 REST 同款）
+  RUN_INTERRUPT_PENDING: 50003, // interrupted 态禁输入（#747 C 节「interrupt 全端可审批」内核防御面——须先 resume 决策或 abort）
   // 9xxxx 系统 / 校验
   OAUTH_NOT_CONFIGURED: 90001, // OAuth provider 未配置（原 501）
   VALIDATION_FAILED: 90002, // 参数校验失败（字段明细进 data）；Idempotency-Key 缺/超长特例 data=null（figures 前置中间件）
@@ -90,6 +91,7 @@ export const DEFAULT_MESSAGE: Record<number, string> = {
   [CODE.CONTAINER_NOT_RUNNING]: '容器未运行，请启动后再对话',
   [CODE.RUN_ALREADY_RESUMED]: '该 run 已被恢复',
   [CODE.SESSION_NOT_FOUND]: '会话不存在',
+  [CODE.RUN_INTERRUPT_PENDING]: 'run 停在 interrupt，须先审批决策（approve/reject）或终止后再发消息',
   [CODE.OAUTH_NOT_CONFIGURED]: 'OAuth provider 未配置',
   [CODE.WIKI_PAGE_NOT_FOUND]: '页面不存在',
   [CODE.WIKI_PAGE_EXISTS]: '页面已存在',

@@ -47,12 +47,12 @@ import { createUsageCallbackHandler } from '../usage'
 import { buildStreamEventsInvocation } from '../../events/bridge'
 import { RunProjector } from './projector'
 import { classifyRunError, isAbortError, type RunErrorKind } from './errorKind'
-import { buildLeaderAgent, interruptPolicyKey, type DeepAgentLike, type InterruptPolicy } from './graphFactory'
+import { buildLeaderAgent, interruptPolicyKey, type DeepAgentLike, type InterruptPolicy, type LeaderAgentParams } from './graphFactory'
 import { DEFAULT_RECURSION_LIMIT, GRAPH_CACHE_MAX_INSTANCES, LEADER_SYSTEM_PROMPT } from './values'
 import { disableLangsmithTracing } from './tracing'
 
-// run 命令（BullMQ job data 契约：纯 JSON 可序列化，无内存句柄——stalled 重跑自包含，
-// 语义 = run 从头重跑，副作用幂等约束在案）。
+// run 命令（BullMQ job data 契约：纯 JSON 可序列化，无内存句柄——进程内状态全弃后凭 DB
+// 重投可从头重跑，副作用幂等约束在案；重投/断线补偿面归 #779）。
 export interface RunCommand {
   readonly runId: string
   readonly sessionId: string
@@ -199,7 +199,12 @@ export class RunService {
   // 同 thread 串行链：任意时刻同 thread 至多一个 executeRun 在跑，其余按提交序排队。
   // executeNow 的信封错误（40043/50002）向上传播；run 执行体错误在 executeRun 内消化
   //（终态事件已发，对传输面表现为正常完成）。
-  execute(cmd: RunCommand): Promise<void> {
+  async execute(cmd: RunCommand): Promise<void> {
+    // 入队面 fast-fail：interrupted 态 message 拒绝（queued 覆盖之前——#747 C 节「interrupt
+    // 全端可审批」，见 executeRun 权威面）。内存面可知即不排队，调用方即时感知。
+    if (cmd.kind === 'message' && this.runs.get(cmd.sessionId)?.state === 'interrupted') {
+      throw fail(CODE.RUN_INTERRUPT_PENDING)
+    }
     // queued 只标 message 命令的新 run；resume 延续既有 run（interrupted 保持到 running，
     // 否则 executeRun 的互斥权威判定会被覆盖态误伤）。
     if (cmd.kind === 'message') {
@@ -226,11 +231,18 @@ export class RunService {
   }
 
   private async executeNow(cmd: RunCommand): Promise<void> {
-    const lease = await this.deps.gate.acquire(cmd.ownerId) // 满 → 40043（权威判定）
+    let lease: Awaited<ReturnType<ConcurrencyGate['acquire']>> | undefined
     try {
+      lease = await this.deps.gate.acquire(cmd.ownerId) // 满 → 40043（权威判定）
       await this.executeRun(cmd)
+    } catch (e) {
+      // pre-start 失败回滚 queued 占位（40043/50003 等——「未开始执行的 run 不发事件」
+      // 同纪律：不留观测态）。回滚只认本命令的 queued 条目（runId 匹配），不碰后继命令的。
+      const snap = this.runs.get(cmd.sessionId)
+      if (snap?.state === 'queued' && snap.runId === cmd.runId) this.runs.delete(cmd.sessionId)
+      throw e
     } finally {
-      lease.release()
+      lease?.release()
     }
   }
 
@@ -249,6 +261,17 @@ export class RunService {
         }
       }
       if (!snap || snap.state !== 'interrupted') throw fail(CODE.RUN_ALREADY_RESUMED)
+    } else {
+      // #747 C 节「running 全端禁输入、interrupt 全端可审批」的内核权威面：interrupted 态
+      // message 会作废 pending interrupt（静默丢审批）——拒绝之（#778 REST 门禁之外的第二
+      // 道，接线遗漏不丢 interrupt）。queued/内存缺失态（排队窗口撞上前序 run 中断、重启后
+      // 首条消息）走 checkpoint 推导同挡——每条消息一次 getTuple，SQLite 本地读，人机尺度可忽略。
+      const snap = this.runs.get(cmd.sessionId)
+      const threadInterrupted =
+        snap?.state === 'interrupted' ||
+        ((snap === undefined || snap.state === 'queued') &&
+          (await this.threadInterruptedFromCheckpoint(cmd.sessionId)))
+      if (threadInterrupted) throw fail(CODE.RUN_INTERRUPT_PENDING)
     }
 
     const session = await this.deps.prisma.session.findUnique({ where: { id: cmd.sessionId } })
@@ -267,7 +290,13 @@ export class RunService {
     const agent = this.getOrBuildGraph(cmd.sessionId, snapshot.version, policy, model, cmd.ownerId, labContainer)
 
     this.runs.set(cmd.sessionId, { runId: cmd.runId, state: 'running' })
-    this.publish(cmd.ownerId, { type: 'run.started', payload: {} }, cmd)
+    // 新 run = run.started；interrupted 后的续跑 = run.resumed（#747 C 节目录二者并列——
+    // resume 不重发 started，消费方按事件类型区分首轮/续跑轮）
+    this.publish(
+      cmd.ownerId,
+      { type: cmd.kind === 'resume' ? 'run.resumed' : 'run.started', payload: {} },
+      cmd,
+    )
 
     // usage 身份：默认链主 provider（snapshot.providers[0] 首模型）。fallback 链切换后的
     // per-call 身份不追踪（#775 usage.ts 声明的 #777 接线局限；采数不 fail run）。
@@ -341,7 +370,7 @@ export class RunService {
     threadId: string,
     configVersion: number,
     policy: InterruptPolicy | undefined,
-    model: Parameters<typeof buildLeaderAgent>[0]['model'],
+    model: LeaderAgentParams['model'],
     ownerId: string,
     labContainer: string,
   ): DeepAgentLike {

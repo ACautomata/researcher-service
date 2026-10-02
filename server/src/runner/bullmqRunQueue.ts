@@ -1,8 +1,9 @@
 // BullMQ 生产 run 队列（#777 · #747 A 节「集中式 runner：BullMQ worker」）。
 //
 // 与 containers/bullmqQueue.ts（生命周期队列）的分野：run 命令是**自包含 JSON data**
-//（RunCommand，无进程内任务句柄注册表）——worker 崩溃后 stalled job 重跑 = run 从头重跑
-//（副作用幂等约束在案，#747 A 节硬约束），checkpoint 断点续跑的细粒度恢复归 #779 断线补偿。
+//（RunCommand，无进程内任务句柄注册表）——进程内状态可全弃，凭 DB 重投即 run 从头重跑
+//（副作用幂等约束在案，#747 A 节硬约束）。attempts:1 下 stalled/失败 job 直接 failed
+// **不重跑**（重复用户可见事件面在案，见失败语义注）；断线补偿与重投归 #779。
 // 同 thread 串行不在本层（BullMQ OSS 无 per-group 限流，worker 可并发领同 thread job）——
 // 顺序性由 RunService 进程内串行链保证（#723 风险条目「BullMQ per-thread 串行是全部责任」）。
 //
@@ -13,6 +14,7 @@
 
 import { Queue, Worker, type Job } from 'bullmq'
 import IORedis from 'ioredis'
+import { raceWithTimeout } from '../raceTimeout'
 import type { RunCommand } from './runtime/runService'
 
 export interface BullMqRunQueueOptions {
@@ -69,13 +71,10 @@ export class BullMqRunQueue {
   // 入队一个 run 命令（jobId = runId：幂等面——同 runId 重复 submit 被 BullMQ 去重）。
   async submit(cmd: RunCommand): Promise<void> {
     const add = this.queue.add('run', cmd, { jobId: cmd.runId, attempts: 1 })
-    const timeout = new Promise<never>((_, rej) => {
-      const t = setTimeout(() => rej(new Error(`runner queue.add timeout (${this.addTimeoutMs}ms)`)), this.addTimeoutMs)
-      // 不持有 timer 引用阻止进程退出（settle 后由 GC 收）
-      t.unref?.()
-    })
     try {
-      await Promise.race([add, timeout])
+      await raceWithTimeout(add, this.addTimeoutMs, () =>
+        new Error(`runner queue.add timeout (${this.addTimeoutMs}ms)`),
+      )
     } catch (e) {
       await add.catch(() => undefined) // 超时后 add 仍可能落库——尽力等待其 settle 防未处理 rejection
       throw e
@@ -83,12 +82,10 @@ export class BullMqRunQueue {
   }
 
   async close(): Promise<void> {
-    const closeWorker = this.worker.close().catch(() => undefined)
-    const timeout = new Promise<void>((res) => {
-      const t = setTimeout(res, this.workerCloseTimeoutMs)
-      t.unref?.()
-    })
-    await Promise.race([closeWorker, timeout])
+    await raceWithTimeout(
+      this.worker.close().catch(() => undefined),
+      this.workerCloseTimeoutMs,
+    )
     await this.queue.close().catch(() => undefined)
     this.connection.disconnect()
   }

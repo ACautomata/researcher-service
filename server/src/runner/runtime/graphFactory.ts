@@ -37,7 +37,7 @@ type InterruptOnConfig = NonNullable<CreateDeepAgentParams['interruptOn']>
 // policy → deepagents interruptOn（确定性派生：when 恒真，无闭包状态——拓扑推导约束）。
 export function interruptOnFromPolicy(policy: InterruptPolicy | undefined): InterruptOnConfig | undefined {
   if (!policy || policy.tools.length === 0) return undefined
-  const on: NonNullable<InterruptOnConfig> = {}
+  const on: InterruptOnConfig = {}
   for (const name of policy.tools) {
     on[name] = { allowedDecisions: ['approve', 'reject'], when: () => true }
   }
