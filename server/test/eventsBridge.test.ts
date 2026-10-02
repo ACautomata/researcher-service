@@ -125,9 +125,9 @@ describe('事件桥薄投影：streamEvents → 自有目录', () => {
 })
 
 describe('streamEvents 调用参数（PoC 坑 2 锁定）', () => {
-  it('version + configurable 同一参数对象，构造一次 resume 复用', () => {
+  it('version + configurable 同一参数对象，构造一次 resume 复用（version v3：#777 实测修正）', () => {
     const params = buildStreamEventsInvocation('thread-1')
-    expect(params.version).toBe('v2')
+    expect(params.version).toBe('v3')
     expect(params.configurable).toEqual({ thread_id: 'thread-1' })
     // 同一对象引用（非深拷贝等价）——resume/首次调用必须传同一引用语义，
     // 防「重新构造一个相等但不同源的对象」在后续演进中漂移。

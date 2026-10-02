@@ -7,9 +7,10 @@ import { encodeFrame } from './logic'
 // 与流内去重的游标，见 logic.ts。hub 只面向 StreamSink 接口（Port）——express Response
 // 适配在路由层。
 //
-// 扩展点：后续票 session/run/approval 域事件经 publish 扇出（runner 订阅者 →
-// 事件桥 projectStreamEvent → hub.publish）；terminate 由 logout（auth 路由注入）与
-// 心跳存活检查（路由层 isActive 复查，#726「用户被吊销 → session.terminated」）触发。
+// 扩展点：session/run/approval 域事件经 publish 扇出——run 域自 #777 起由 RunService 直接
+// publish（投影面 = runner/runtime/projector.ts，消费 v3 protocol events）；terminate 由
+// logout（auth 路由注入）与心跳存活检查（路由层 isActive 复查，#726「用户被吊销 →
+// session.terminated」）触发。
 
 // 连接写出口（Port）：send 返回 false 表示连接已不可写（扇出方据此注销）。
 export interface StreamSink {

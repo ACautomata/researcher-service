@@ -4,6 +4,7 @@ import path from 'node:path'
 import { isQuotaValid, QUOTA_MAX } from './auth/quota'
 import { isFloatingImageRef } from './containers/imageRef'
 import { parseEncryptionKeys } from './crypto'
+import { DEFAULT_RECURSION_LIMIT } from './runner/runtime/values'
 
 // 控制面配置：全部来自环境变量，带 dev 友好默认。生产缺关键项时 fail-fast。
 // 规格 §A：JWT 密钥 = HS256 对称（平移现状 SECRET_KEY 语义）；access/refresh 寿命平移 simplejwt 默认。
@@ -333,6 +334,19 @@ function readRunnerMaxConcurrentRuns(): number {
   return v
 }
 
+// RUNNER_RECURSION_LIMIT（#777）：图深度护栏（GraphRecursionError → run.failed{recursion_limit}，
+// story 10）。默认 500 = #724 PoC 实测值（DEFAULT_RECURSION_LIMIT，values.ts 单一来源——config 层
+// 只做 env 覆盖面）。非法值 fail-fast（同上对齐加载即校验）。
+function readRunnerRecursionLimit(): number {
+  const v = Number(process.env.RUNNER_RECURSION_LIMIT ?? DEFAULT_RECURSION_LIMIT)
+  if (!Number.isInteger(v) || v <= 0 || v > 10_000) {
+    throw new Error(
+      `RUNNER_RECURSION_LIMIT 非法: ${JSON.stringify(process.env.RUNNER_RECURSION_LIMIT)}，须为 1–10000 整数`,
+    )
+  }
+  return v
+}
+
 // SANDBOX_IMAGE（#776）：会话沙箱镜像——最小闭环先用 busybox（含 sh/timeout 基础 applet，
 // runner backend 超时 kill 机制的镜像前提，values.ts EXEC_DEFAULT_TIMEOUT_MS 注释同源）；完整
 // 工具链镜像（bash/git/Python3/Node/rg/curl/jq/…）随 #784 钉版更换默认。生产浮动引用
@@ -442,6 +456,8 @@ export const config = {
     return {
       // 全局在飞 run 上限（进程内信号量；per-user 上限走 users.maxConcurrentRuns 列）
       maxConcurrentRuns: readRunnerMaxConcurrentRuns(),
+      // 图深度护栏（GraphRecursionError → run.failed{recursion_limit}；默认 500 = PoC 实测值）
+      recursionLimit: readRunnerRecursionLimit(),
       // CRUD 层 DNS 私网校验逃生开关（默认关；生产禁开）
       allowPrivateProviderEndpoints: readAllowPrivateProviderEndpoints(),
       // 共享 LLM key 解析源：credentialEnvId='LLM_API_KEY' 的 provider 行经此取值

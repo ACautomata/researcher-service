@@ -8,6 +8,7 @@ import { assembleSandboxes } from './sandboxes/assembly'
 import { assembleAutoFigureRuntime } from './figures/assembly'
 import { makeDockerCompile } from './wiki/compile'
 import { assembleTunnelServer } from './chat/tunnelAssembly'
+import { assembleRunner } from './runner/assembly'
 import { StreamHub } from './events/hub'
 import './types'
 
@@ -32,6 +33,22 @@ async function main(): Promise<void> {
     sidecarUrl: config.autofigure.sidecarUrl,
     llmKey: config.autofigure.llmKey,
     jobTimeoutMs: config.autofigure.jobTimeoutMs,
+  })
+  // 集中式 runner（#777 · #747 A 节）：RunService + BullMQ worker。事件经 eventHub 扇出
+  //（run 域事件目录）；REST 入队面归 #778 会话域（本装配 = 进程内就绪）。BullMQ 连接 lazy
+  //（Redis 不可达不挂控制面，add 超时兜底在队列层——fleet 队列先例同形态）。
+  const runner = assembleRunner({
+    prisma,
+    hub: eventHub,
+    redisUrl: config.redisUrl,
+    maxConcurrentRuns: config.runner.maxConcurrentRuns,
+    recursionLimit: config.runner.recursionLimit,
+    // #776 契约接线：runner = 沙箱 ensure/touch 的真 activity 源（run 前 ensure——闲置 stop
+    // 后 re-ensure；事件流 touch——长 run 不被闲置 sweep stop）。
+    sandboxes: {
+      ensure: (id) => sandboxes.lifecycle.ensure(id),
+      touch: (id) => sandboxes.lifecycle.touch(id),
+    },
   })
   const app = createApp({
     prisma,
@@ -76,12 +93,14 @@ async function main(): Promise<void> {
     if (!tunnel.handleUpgrade(req, socket, head)) socket.destroy()
   })
 
-  // 优雅关闭：drain BullMQ worker（在飞 provisioning 完成或标 ERROR）；AutoFigure runner
-  //（T07：停 pump + 等待在飞生成 settle——T03 close 语义，见 runner.ts）。
+  // 优雅关闭：drain BullMQ worker（在飞 provisioning 完成或标 ERROR）；runner 队列 drain
+  //（在飞 run 完成或 job failed——run 执行错误已在 RunService 消化为终态事件）；AutoFigure
+  // runner（T07：停 pump + 等待在飞生成 settle——T03 close 语义，见 runner.ts）。
   const shutdown = async (): Promise<void> => {
     await fleet.close().catch(() => {})
     await sandboxes.close().catch(() => {})
     await autofigure?.close().catch(() => {})
+    await runner.close().catch(() => {})
     // 先终止活动隧道（http.Server.close 会等升级后的 WS 连接自然断开——有浏览器持隧道时挂起）
     tunnel.close()
     server.close(() => process.exit(0))

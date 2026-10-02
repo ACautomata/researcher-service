@@ -6,6 +6,7 @@
 import { randomUUID } from 'node:crypto'
 import { Queue, Worker, type Job } from 'bullmq'
 import IORedis from 'ioredis'
+import { raceWithTimeout } from '../raceTimeout'
 import type { LifecycleQueue, LifecycleTask } from './lifecycleQueue'
 
 export interface BullMqLifecycleOptions {
@@ -131,22 +132,10 @@ export class BullMqLifecycleQueue implements LifecycleQueue {
   // 不重复执行。BullMQ 强制 producer connection 的 maxRetriesPerRequest:null，无法改有限重试预算，
   // 故用提交超时而非连接重试上限。
   private raceAddTimeout(addP: Promise<unknown>): Promise<void> {
-    return new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(
-        () => reject(new Error('bullmq queue.add 超时（Redis 不可达？）')),
-        this.addTimeoutMs,
-      )
-      addP.then(
-        () => {
-          clearTimeout(timer)
-          resolve()
-        },
-        (e) => {
-          clearTimeout(timer)
-          reject(e)
-        },
-      )
-    })
+    // 成功路径弃 add 结果（void 契约），只透传失败/超时
+    return raceWithTimeout(addP, this.addTimeoutMs, () => new Error('bullmq queue.add 超时（Redis 不可达？）')).then(
+      () => undefined,
+    )
   }
 
   async start(): Promise<void> {
@@ -166,15 +155,9 @@ export class BullMqLifecycleQueue implements LifecycleQueue {
 
   // worker.close 有界超时（Codex 第七轮 #3）：await drain 在跑 job，超时则放行防卡死。
   private raceWorkerClose(): Promise<void> {
-    return new Promise<void>((resolve) => {
-      const timer = setTimeout(resolve, this.workerCloseTimeoutMs)
-      this.worker
-        .close()
-        .catch(() => {})
-        .then(() => {
-          clearTimeout(timer)
-          resolve()
-        })
-    })
+    return raceWithTimeout(
+      this.worker.close().catch(() => {}),
+      this.workerCloseTimeoutMs,
+    )
   }
 }
