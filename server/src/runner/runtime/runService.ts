@@ -182,6 +182,9 @@ export class RunService {
   }
 
   // ---- 中断（story 8；REST 面归 #778）----
+  // 仅对 running 在飞 run 有效（aborts 条目随 executeRun finally 清除——interrupted/终态
+  // run 返 false）。interrupted run 的「不审批直接终止」面归 #783 审批漏斗/#778——既有
+  // 出路 = reject 决策 resume（50003 文案同源）。
   abort(runId: string, by: 'user' | 'system' = 'user'): boolean {
     const a = this.aborts.get(runId)
     if (!a) return false
@@ -380,13 +383,14 @@ export class RunService {
     ownerId: string,
     labContainer: string,
   ): DeepAgentLike {
-    // labContainer 入键：沙箱 remove/recreate 后 docker 实例变更，缓存图持旧 backend 会指向
-    // 已删容器——backend 根是拓扑因子的一部分。
-    const key = `${threadId}|${configVersion}|${interruptPolicyKey(policy)}|${labContainer}`
+    // 双根入键：docker 实例变更（沙箱 remove/recreate、#784 wiki 容器接管后改名）时缓存图
+    // 持旧 backend 会指向已删容器——backend 双根都是拓扑因子。
+    const wikiContainer = this.deps.resolveWikiContainer(ownerId)
+    const key = `${threadId}|${configVersion}|${interruptPolicyKey(policy)}|${labContainer}|${wikiContainer}`
     const cached = this.graphs.get(key)
     if (cached) return cached
     const backend = new DockerArchiveBackend(this.deps.primitives, {
-      wiki: this.deps.resolveWikiContainer(ownerId),
+      wiki: wikiContainer,
       lab: labContainer,
     })
     const agent = buildLeaderAgent({

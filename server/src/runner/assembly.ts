@@ -69,8 +69,10 @@ export function assembleRunner(opts: {
   const queue = new BullMqRunQueue({
     redisUrl: opts.redisUrl,
     execute: (cmd) => service.execute(cmd),
-    // worker 并发 = 全局在飞上限（并发闸门在 service 内权威判定，worker 并发给足余量排队）
-    concurrency: Math.max(4, opts.maxConcurrentRuns),
+    // worker 并发 = 全局在飞上限（与 gate 同源同值）：gate 是拒绝式（满 → 40043），worker
+    // 超领会把本可在 Redis 排队的 run 变成 40043 job failed（attempts:1 不重试、无 run 事件）
+    // ——40043 是 Inline/#778 REST 的即时反馈面，不由 worker 面必然触发。
+    concurrency: opts.maxConcurrentRuns,
   })
 
   return {
