@@ -3,7 +3,7 @@
 // = 投影 GET 输出——测试锁定三面同构中的归约器一面（API 面零差异断言在 sessionsApi.test.ts）。
 
 import { describe, it, expect } from 'vitest'
-import { TurnReducer, type TurnSnapshot } from '../src/sessions/reducer'
+import { TurnReducer, serializeAttachments, type TurnSnapshot } from '../src/sessions/reducer'
 import type { CatalogEvent } from '../src/events/logic'
 
 function ev(type: string, payload: unknown): Omit<CatalogEvent, 'sessionId' | 'runId'> {
@@ -89,19 +89,19 @@ describe('TurnReducer：run 域事件归约（S3）', () => {
     expect(r2.isEmpty()).toBe(false)
   })
 
-  it('toAttachmentsJson v1：字段序稳定、空聚合缺省 thinking/tools（schema 版本化）', () => {
+  it('serializeAttachments v1：字段序稳定、空聚合缺省 thinking/tools（schema 版本化）', () => {
     const r = new TurnReducer()
-    expect(JSON.parse(r.toAttachmentsJson())).toEqual({ v: 1 })
+    expect(JSON.parse(serializeAttachments(r.snapshot()))).toEqual({ v: 1 })
     r.feed(ev('thinking.delta', { delta: '想' }))
     r.feed(ev('text.delta', { delta: '答' }))
     r.feed(ev('tool.start', { toolCallId: 'c', name: 'exec', input: 'ls' }))
     r.feed(ev('tool.end', { toolCallId: 'c', name: 'exec', state: 'success', durationMs: 1, details: '' }))
-    const parsed = JSON.parse(r.toAttachmentsJson()) as Record<string, unknown>
+    const parsed = JSON.parse(serializeAttachments(r.snapshot())) as Record<string, unknown>
     expect(parsed.v).toBe(1)
     expect(parsed.thinking).toBe('想')
     expect(Array.isArray(parsed.tools)).toBe(true)
     // 字段序稳定（逐字节一致断言的前提）
-    expect(r.toAttachmentsJson()).toBe(r.toAttachmentsJson())
+    expect(serializeAttachments(r.snapshot())).toBe(serializeAttachments(r.snapshot()))
   })
 
   it('snapshot 与 attachmentsJson 反序列化同构（投影行 = content 列 + JSON 聚合面组装）', () => {
@@ -111,7 +111,11 @@ describe('TurnReducer：run 域事件归约（S3）', () => {
     r.feed(ev('tool.start', { toolCallId: 'c1', name: 'exec', input: 'ls' }))
     r.feed(ev('tool.end', { toolCallId: 'c1', name: 'exec', state: 'success', durationMs: 3, details: 'out' }))
     const snap = r.snapshot()
-    const json = JSON.parse(r.toAttachmentsJson()) as { v: number; thinking?: string; tools?: TurnSnapshot['tools'] }
+    const json = JSON.parse(serializeAttachments(snap)) as {
+      v: number
+      thinking?: string
+      tools?: TurnSnapshot['tools']
+    }
     expect(json.thinking).toBe(snap.thinking)
     expect(json.tools).toEqual(snap.tools)
     // 投影行组装（service 投影路径同款）：content 独立列 + JSON 聚合面（v 版本字段不外露）→

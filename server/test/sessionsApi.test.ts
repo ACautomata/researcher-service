@@ -561,6 +561,88 @@ describe('会话 REST 域（S1，#778）', () => {
     expect(assistant.anchorCheckpointId).toEqual(expect.any(String))
   })
 
+  it('interrupted 两段式回放零差异：interrupt 轮部分聚合行 ≡ 事件归约；resume 轮新行 ≡ 续跑归约', async () => {
+    policyTools = ['execute']
+    currentScript = [
+      toolCallAi('g4', 'execute', { command: 'ls' }, '先执行列目录。'),
+      new AIMessage({ content: '审批后续跑的第二段输出。' }),
+    ]
+    const sid = (await request.post('/api/v1/sessions').set(bearer(access)).send({})).body.data.id as string
+    const before = frameEvents(sinkA.frames).length
+    await request
+      .post(`/api/v1/sessions/${sid}/messages`)
+      .set(bearer(access))
+      .set('Idempotency-Key', hexKey(0x501))
+      .send({ content: '两段式回放' })
+    await waitFor(() => runService.stateOf(sid)?.state === 'interrupted')
+
+    // 第一段：interrupted 也落部分聚合行（「刷新回放须含已流出部分」）——与本轮事件归约逐字节一致
+    const p1 = await request.get(`/api/v1/sessions/${sid}/messages`).set(bearer(access))
+    expect(p1.body.code).toBe(CODE.OK)
+    const messages1 = p1.body.data.messages as {
+      id: string
+      turn: number
+      role: string
+      content: string
+      thinking?: string
+      tools?: unknown[]
+    }[]
+    expect(messages1).toHaveLength(2)
+    expect(messages1[0]).toMatchObject({ role: 'user', content: '两段式回放', turn: 1 })
+    const assistant1 = messages1[1]!
+    expect(assistant1.role).toBe('assistant')
+    const reducer1 = new TurnReducer()
+    for (const ev of frameEvents(sinkA.frames.slice(before))) {
+      if (ev.sessionId !== sid) continue
+      if (['text.delta', 'thinking.delta', 'tool.start', 'tool.end'].includes(ev.type)) reducer1.feed(ev)
+    }
+    expect(
+      JSON.stringify({
+        content: assistant1.content,
+        ...(assistant1.thinking !== undefined ? { thinking: assistant1.thinking } : {}),
+        ...(assistant1.tools !== undefined ? { tools: assistant1.tools } : {}),
+      }),
+    ).toBe(JSON.stringify(reducer1.snapshot()))
+    const rowsAfterTurn1 = messages1.length
+    const framesAfterTurn1 = sinkA.frames.length
+
+    // 第二段：resume → 新 assistant 行（turn 递增），仅由续跑轮事件归约得出——两段式零差异
+    const resumed = await request
+      .post(`/api/v1/sessions/${sid}/resume`)
+      .set(bearer(access))
+      .send({ decisions: { decisions: [{ type: 'approve' }] } })
+    expect(resumed.body.code).toBe(CODE.OK)
+    await waitFor(() => runService.stateOf(sid)?.state === 'completed')
+
+    const p2 = await request.get(`/api/v1/sessions/${sid}/messages`).set(bearer(access))
+    expect(p2.body.code).toBe(CODE.OK)
+    const messages2 = p2.body.data.messages as {
+      id: string
+      turn: number
+      role: string
+      content: string
+      thinking?: string
+      tools?: unknown[]
+    }[]
+    expect(messages2).toHaveLength(3)
+    expect(messages2[1]).toMatchObject({ role: 'assistant', turn: 2 })
+    const assistant2 = messages2[2]!
+    expect(assistant2).toMatchObject({ role: 'assistant', turn: 3, content: '审批后续跑的第二段输出。' })
+    const reducer2 = new TurnReducer()
+    for (const ev of frameEvents(sinkA.frames.slice(framesAfterTurn1))) {
+      if (ev.sessionId !== sid) continue
+      if (['text.delta', 'thinking.delta', 'tool.start', 'tool.end'].includes(ev.type)) reducer2.feed(ev)
+    }
+    expect(
+      JSON.stringify({
+        content: assistant2.content,
+        ...(assistant2.thinking !== undefined ? { thinking: assistant2.thinking } : {}),
+        ...(assistant2.tools !== undefined ? { tools: assistant2.tools } : {}),
+      }),
+    ).toBe(JSON.stringify(reducer2.snapshot()))
+    expect(rowsAfterTurn1).toBe(2)
+  }, 15_000)
+
   // ---- 自动标题（story 5）----
 
   it('run 终态自动生成标题（首条 user 消息截断）+ session.updated 广播；已有标题不覆盖', async () => {

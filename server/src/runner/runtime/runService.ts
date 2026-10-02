@@ -51,19 +51,14 @@ import { classifyRunError, type RunErrorKind } from './errorKind'
 import { buildLeaderAgent, interruptPolicyKey, type DeepAgentLike, type InterruptPolicy, type LeaderAgentParams } from './graphFactory'
 import { DEFAULT_RECURSION_LIMIT, DEFAULT_RESUME_DECISIONS, GRAPH_CACHE_MAX_INSTANCES, LEADER_SYSTEM_PROMPT } from './values'
 import { disableLangsmithTracing } from './tracing'
-import { TurnReducer, type TurnSnapshot } from '../../sessions/reducer'
+import { TurnReducer, type RecordTurnPayload } from '../../sessions/reducer'
 
 // recordTurn 注入缝（#778）：run 终态（completed/interrupted/aborted/failed 任一）的单 turn
 // 聚合落库回调。anchorCheckpointId = 终态 checkpoint 锚点（issue 点名列；aborted/failed 路径
 // 无可靠 state → null）。生产实现 = SessionService.recordTurn（落 session_messages + 自动标题）；
 // 测试注收集器。setter 注入原因：SessionService 依赖本 service 实例（门禁/命令面），构造顺序
-// 晚于 RunService——constructor 注入会成环。
-export type RecordTurnFn = (p: {
-  sessionId: string
-  runId: string
-  anchorCheckpointId: string | null
-  aggregate: TurnSnapshot
-}) => Promise<void>
+// 晚于 RunService——constructor 注入会成环。载荷 RecordTurnPayload 单一声明于 sessions/reducer。
+export type RecordTurnFn = (p: RecordTurnPayload) => Promise<void>
 
 // run 命令（BullMQ job data 契约：纯 JSON 可序列化，无内存句柄——进程内状态全弃后凭 DB
 // 重投可从头重跑，副作用幂等约束在案；重投/断线补偿面归 #779）。

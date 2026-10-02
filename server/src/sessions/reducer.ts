@@ -7,13 +7,15 @@
 // 事件目录归约出同形状。纯逻辑（S3 接缝）：不触库、不发布事件，白名单外事件一律忽略（对齐
 // RunProjector「多出的字段一律不进投影输出」纪律）。
 
-import { TOOL_DETAILS_MAX_BYTES, TOOL_INPUT_MAX_BYTES, TRUNCATED_FLAG } from '../runner/runtime/values'
+import { TOOL_DETAILS_MAX_BYTES, TOOL_INPUT_MAX_BYTES } from '../runner/runtime/values'
 import { truncateUtf8 } from '../runner/runtime/projector'
 
 // attachmentsJson v1 的 tools 行（#747 C 节：toolCallId/name/input≤1k/result≤1k/state/durationMs/
-// details?≤4KB + 截断标记——截断已在 RunProjector 事件侧完成，本归约器信任事件形状不再截）。
-// C 节 result 概念由 details 承载（#777 事件目录 tool.end 无独立 result 字段）；rejection
-//（工具被拒）归 #783 审批漏斗——本票无审批面，事件目录无来源故不设保留位。
+// details?≤4KB + 截断标记）。截断纪律：RunProjector 事件侧已按同常量截（1k/4KB），本归约器
+// 再截是防御面——幂等（已截文本再截不变），且归约器是纯逻辑接缝、可被非 projector 事件源
+// 直灌（测试/前端同构），不信任单一上游。C 节 result 概念由 details 承载（#777 事件目录
+// tool.end 无独立 result 字段）；rejection（工具被拒）归 #783 审批漏斗——本票无审批面，
+// 事件目录无来源故不设保留位。
 export interface ToolLine {
   readonly toolCallId: string
   readonly name: string
@@ -30,6 +32,16 @@ export interface TurnSnapshot {
   readonly tools?: ToolLine[]
 }
 
+// RunService recordTurn 注入缝的载荷（run 终态的单 turn 聚合 + 终态 checkpoint 锚点）。
+// 定义于归约器侧：缝两侧（runner/runtime/runService 与 sessions/service）共享单一声明，
+// 避免 service↔runService 互相 import。
+export interface RecordTurnPayload {
+  readonly sessionId: string
+  readonly runId: string
+  readonly anchorCheckpointId: string | null
+  readonly aggregate: TurnSnapshot
+}
+
 interface DeltaPayload {
   readonly delta?: unknown
 }
@@ -38,7 +50,6 @@ interface ToolStartPayload {
   readonly toolCallId?: unknown
   readonly name?: unknown
   readonly input?: unknown
-  readonly [TRUNCATED_FLAG]?: unknown
 }
 
 interface ToolEndPayload {
@@ -47,7 +58,6 @@ interface ToolEndPayload {
   readonly state?: unknown
   readonly durationMs?: unknown
   readonly details?: unknown
-  readonly [TRUNCATED_FLAG]?: unknown
 }
 
 const MAX = {
@@ -131,9 +141,5 @@ export class TurnReducer {
       ...(this.think !== '' ? { thinking: this.think } : {}),
       ...(this.tools.size > 0 ? { tools: [...this.tools.values()] } : {}),
     }
-  }
-
-  toAttachmentsJson(): string {
-    return serializeAttachments(this.snapshot())
   }
 }

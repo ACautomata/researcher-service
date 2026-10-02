@@ -7,10 +7,10 @@
 // buildResumeCommand 预检 + executeRun 权威面双层）。事件扇出经 StreamHub 单例 → 该 user
 // 全部连接同帧（多端广播一致由 hub.fanOut 保证，eventsHub.test.ts 锁）。
 //
-// 回放零差异（story 3）：makeRecordTurn 是 RunService 的 recordTurn 注入缝生产实现——run 域
-// 事件流经 TurnReducer 聚合，终态（completed/interrupted/aborted/failed 任一）落一条
-// assistant 行（attachmentsJson v1）；投影 GET 反序列化回同形状。事件流归约 ≡ 投影行
-// （sessionsApi.test.ts 逐字节断言）。
+// 回放零差异（story 3）：SessionService.recordTurn 是 RunService 的 recordTurn 注入缝生产实现
+// （server.ts 经 runner.service.setRecordTurn 回接）——run 域事件流经 TurnReducer 聚合，终态
+// （completed/interrupted/aborted/failed 任一）落一条 assistant 行（attachmentsJson v1）；投影
+// GET 反序列化回同形状。事件流归约 ≡ 投影行（sessionsApi.test.ts 逐字节断言）。
 
 import type { PrismaClient, Session, SessionMessage } from '../generated/prisma/client'
 import type { AuthUser } from '../types'
@@ -20,8 +20,7 @@ import { SANDBOX_CONTAINER_PREFIX } from '../sandboxes/values'
 import { getSessionForUser } from '../sandboxes/service'
 import type { SandboxRemoveOutcome } from '../sandboxes/lifecycle'
 import type { EventPublisher, RunCommand, RunSnapshot } from '../runner/runtime/runService'
-import type { TurnSnapshot } from './reducer'
-import { serializeAttachments } from './reducer'
+import { serializeAttachments, type RecordTurnPayload } from './reducer'
 import { TITLE_AUTO_MAX } from './values'
 
 // 会话摘要（session.created/updated 载荷 + 列表行 + 创建/PATCH 返回——同一形状）。
@@ -89,13 +88,7 @@ export interface SessionServiceDeps {
   readonly sandboxes?: { readonly remove: (sessionId: string) => Promise<SandboxRemoveOutcome> }
 }
 
-// RunService recordTurn 注入缝的载荷（run 终态的单 turn 聚合 + 终态 checkpoint 锚点）。
-export interface RecordTurnInput {
-  readonly sessionId: string
-  readonly runId: string
-  readonly anchorCheckpointId: string | null
-  readonly aggregate: TurnSnapshot
-}
+// RunService recordTurn 注入缝的载荷（RecordTurnPayload）单一声明于 './reducer'。
 
 function summary(s: Session): SessionSummary {
   return { id: s.id, title: s.title, createdAt: s.createdAt.toISOString(), updatedAt: s.updatedAt.toISOString() }
@@ -121,7 +114,7 @@ function toProjectionMessage(row: SessionMessage): ProjectionMessage {
       const { v: _v, ...rest } = parsed
       aggregate = rest
     } catch {
-      aggregate = {} // 坏 JSON 不炸读路径（写面恒经 toAttachmentsJson，防御面）
+      aggregate = {} // 坏 JSON 不炸读路径（写面恒经 serializeAttachments，防御面）
     }
   }
   return {
@@ -197,6 +190,9 @@ export class SessionService {
 
     // 多端门禁（#747 C 节）：queued/running → 50004 禁新输入；interrupted → 50003 须先审批
     //（内核面 RunService.execute 同挡，此处 REST 即时反馈——入队前拒绝，不产生 queued 幽灵）。
+    // 观测窗口（已知边界）：dispatch=BullMQ 异步入队，submit→worker 拾取间 stateOf 尚无记录，
+    // 窗口内新输入穿透 50004 沿串行链排队（顺序保证不丢，仅门禁反馈弱化；S1 Inline 同步
+    // 执行无此窗口——测试面与生产行为在此点的分叉已认知）。
     const snap = this.deps.runService.stateOf(sessionId)
     if (snap?.state === 'running' || snap?.state === 'queued') throw fail(CODE.RUN_IN_PROGRESS)
     if (snap?.state === 'interrupted') throw fail(CODE.RUN_INTERRUPT_PENDING)
@@ -252,7 +248,10 @@ export class SessionService {
   }
 
   // ---- resume（interrupt 全端可审批面；#783 审批漏斗接 decisions 构造，本票机制面直通）。
-  // 先到先得：buildResumeCommand 预检 50001（executeRun 权威面兜底并发窗口）。----
+  // 先到先得：buildResumeCommand 预检 50001（executeRun 权威面兜底并发窗口）。REST 应答语义
+  // 边界（已知）：两端紧邻并发时败方预检仍过（先到者尚未把 state 推离 interrupted）→ REST
+  // 200 + runId，权威 50001 在内核面拒绝且无该 runId 的任何事件——最终一致由赢家的
+  // run.resumed 同帧扇出保证（多端事件面同一真相），REST 应答在窗口内有误导性。----
   async resumeRun(
     user: Pick<AuthUser, 'id' | 'role' | 'username'>,
     sessionId: string,
@@ -287,7 +286,7 @@ export class SessionService {
   // 锚点 anchorCheckpointId——issue 点名列；aborted/failed 路径 null）+ 自动标题（story 5）。
   // attachmentsJson 走 serializeAttachments（与 TurnReducer 同一实现——单一来源），字段序稳定
   //（回放零差异断言的前提）。----
-  async recordTurn(p: RecordTurnInput): Promise<void> {
+  async recordTurn(p: RecordTurnPayload): Promise<void> {
     const turn = await nextTurn(this.deps.prisma, p.sessionId)
     await this.deps.prisma.sessionMessage.create({
       data: {
