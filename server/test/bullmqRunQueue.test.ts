@@ -91,3 +91,27 @@ describe('BullMqRunQueue（真 Redis）', () => {
     expect(ran.size).toBe(5)
   }, 20_000)
 })
+
+// 超时兜底不依赖真 Redis：坏连接上 add 永挂（maxRetriesPerRequest:null 离线队列），submit
+// 必须在 addTimeoutMs 内拒绝——timeout 兜底不得被等待 add settle 架空。
+describe('BullMqRunQueue submit 超时兜底（坏 Redis，无门控）', () => {
+  it('add 永挂 → submit 在 addTimeoutMs 内拒绝（不永挂）', async () => {
+    const q = new BullMqRunQueue({
+      redisUrl: 'redis://127.0.0.1:1/0', // 关闭端口——连接恒失败，add 永挂
+      execute: async () => {},
+      addTimeoutMs: 150,
+    })
+    const cmd: RunCommand = {
+      runId: 'run-timeout',
+      sessionId: 'sess-1',
+      ownerId: 'u1',
+      username: 'user1',
+      kind: 'message',
+      content: 'x',
+    }
+    const t0 = Date.now()
+    await expect(q.submit(cmd)).rejects.toThrow('runner queue.add timeout')
+    expect(Date.now() - t0).toBeLessThan(2000)
+    await q.close()
+  }, 10_000)
+})
