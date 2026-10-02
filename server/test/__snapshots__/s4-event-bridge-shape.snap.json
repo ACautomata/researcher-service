@@ -1,0 +1,46 @@
+[
+ {
+  "type": "run.started",
+  "payload": {}
+ },
+ {
+  "type": "thinking.delta",
+  "payload": {
+   "delta": "先想一步。"
+  }
+ },
+ {
+  "type": "text.delta",
+  "payload": {
+   "delta": "我来写文件。"
+  }
+ },
+ {
+  "type": "tool.start",
+  "payload": {
+   "toolCallId": "snap-call-1",
+   "name": "write_file",
+   "input": "{\"path\":\"/lab/snap.txt\",\"content\":\"hello snapshot\"}"
+  }
+ },
+ {
+  "type": "tool.end",
+  "payload": {
+   "toolCallId": "snap-call-1",
+   "name": "write_file",
+   "state": "success",
+   "durationMs": "<durationMs>",
+   "details": "Successfully wrote to '/lab/snap.txt'"
+  }
+ },
+ {
+  "type": "text.delta",
+  "payload": {
+   "delta": "写好了。"
+  }
+ },
+ {
+  "type": "run.completed",
+  "payload": {}
+ }
+]

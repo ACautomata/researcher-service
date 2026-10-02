@@ -84,14 +84,17 @@ export function projectStreamEvent(
 // streamEvents 调用参数（PoC 坑 2 锁定，#747 A 节生产硬约束）：version + configurable
 // 必须同一参数对象——resume 时参数不同会静默 no-op 假 done。构造一次、首次调用与 resume
 // 复用；冻结防就地篡改。thread_id = LangGraph thread（sessionId，#727）。
+// version 'v3'（#777 实测锁定，修正 #773 骨架期 v2 假设）：deepagents 1.14 / langgraph
+// 1.4 的 agent.streamEvents 以 v3 产出 protocol events（{method,params} 形态）——v2 经典
+// on_* 形态对 v3 投影（RunProjector）全部不可见。三包升级时以探针复测。
 export interface StreamEventsParams {
-  readonly version: 'v2'
+  readonly version: 'v3'
   readonly configurable: Readonly<{ thread_id: string }>
 }
 
 export function buildStreamEventsInvocation(threadId: string): StreamEventsParams {
   return Object.freeze({
-    version: 'v2',
+    version: 'v3' as const,
     configurable: Object.freeze({ thread_id: threadId }),
   })
 }
