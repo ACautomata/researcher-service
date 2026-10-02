@@ -51,6 +51,19 @@ import { classifyRunError, type RunErrorKind } from './errorKind'
 import { buildLeaderAgent, interruptPolicyKey, type DeepAgentLike, type InterruptPolicy, type LeaderAgentParams } from './graphFactory'
 import { DEFAULT_RECURSION_LIMIT, DEFAULT_RESUME_DECISIONS, GRAPH_CACHE_MAX_INSTANCES, LEADER_SYSTEM_PROMPT } from './values'
 import { disableLangsmithTracing } from './tracing'
+import { TurnReducer, type TurnSnapshot } from '../../sessions/reducer'
+
+// recordTurn 注入缝（#778）：run 终态（completed/interrupted/aborted/failed 任一）的单 turn
+// 聚合落库回调。anchorCheckpointId = 终态 checkpoint 锚点（issue 点名列；aborted/failed 路径
+// 无可靠 state → null）。生产实现 = SessionService.recordTurn（落 session_messages + 自动标题）；
+// 测试注收集器。setter 注入原因：SessionService 依赖本 service 实例（门禁/命令面），构造顺序
+// 晚于 RunService——constructor 注入会成环。
+export type RecordTurnFn = (p: {
+  sessionId: string
+  runId: string
+  anchorCheckpointId: string | null
+  aggregate: TurnSnapshot
+}) => Promise<void>
 
 // run 命令（BullMQ job data 契约：纯 JSON 可序列化，无内存句柄——进程内状态全弃后凭 DB
 // 重投可从头重跑，副作用幂等约束在案；重投/断线补偿面归 #779）。
@@ -104,6 +117,9 @@ export interface RunServiceDeps {
 interface GraphStateLike {
   next?: string[]
   tasks?: { interrupts?: unknown[] }[]
+  // LangGraph StateSnapshot.config.configurable.checkpoint_id——终态 checkpoint 锚点
+  //（#778 session_messages.anchorCheckpointId 落值来源；issue 正文点名该列）。
+  config?: { configurable?: { checkpoint_id?: string } }
 }
 
 // LangGraph interrupt 的 putWrites channel：上游一等导出 INTERRUPT（checkpoint 包
@@ -118,12 +134,18 @@ export class RunService {
   private readonly chains = new Map<string, Promise<void>>()
   private readonly recursionLimit: number
   private readonly clock: () => number
+  private recordTurn: RecordTurnFn | undefined
 
   constructor(private readonly deps: RunServiceDeps) {
     this.recursionLimit = deps.recursionLimit ?? DEFAULT_RECURSION_LIMIT
     this.clock = deps.clock ?? (() => Date.now())
     // 构造期兜底：任何 runner 实例化路径都覆盖 env 误开（装配层亦显式调用，双保险）
     disableLangsmithTracing()
+  }
+
+  // 装配期注入 session_messages 落库缝（见 RecordTurnFn 注；幂等——重复注入覆盖前者）。
+  setRecordTurn(fn: RecordTurnFn | undefined): void {
+    this.recordTurn = fn
   }
 
   // ---- 命令构造（REST/传输面用；runId 单点生成）----
@@ -331,12 +353,18 @@ export class RunService {
     this.aborts.set(cmd.runId, abortEntry)
 
     const projector = new RunProjector()
+    // 单 turn 聚合（#778 回放零差异的实时面）：与 publish 同源同序消费投影事件——归约快照即
+    // SSE 事件流终态（前端 #730 消费同一目录）。
+    const turn = new TurnReducer()
     const invocation = buildStreamEventsInvocation(cmd.sessionId)
     const input =
       cmd.kind === 'message'
         ? { messages: [new HumanMessage(cmd.content ?? '')] }
         : new Command({ resume: cmd.decisions ?? DEFAULT_RESUME_DECISIONS })
 
+    // 终态 checkpoint 锚点（#778 anchorCheckpointId）：成功路径从终态 state 取；
+    // aborted/failed 路径无可靠 state → null（回放面锚点缺位不阻断落行）。
+    let anchorCheckpointId: string | null = null
     try {
       const stream = await agent.streamEvents(input, {
         ...invocation,
@@ -348,15 +376,19 @@ export class RunService {
         // 工具/推理活动刷新沙箱闲置计时（#776 真 activity 源——长 run 中途不被 sweep stop）
         this.deps.sandboxes?.touch(cmd.sessionId)
         for (const ev of projector.feed(raw, this.clock())) {
+          turn.feed(ev)
           this.publish(cmd.ownerId, ev, cmd)
         }
       }
       // 流正常结束：判定停在 interrupt（PoC 形态：next 非空或 tasks 带 interrupts）
       const state = await this.graphState(agent, cmd.sessionId)
+      anchorCheckpointId = state.config?.configurable?.checkpoint_id ?? null
       const interrupted =
         (state.next?.length ?? 0) > 0 || (state.tasks?.some((t) => (t.interrupts?.length ?? 0) > 0) ?? false)
       if (interrupted) {
         this.runs.set(cmd.sessionId, { runId: cmd.runId, state: 'interrupted' })
+        // interrupted 不发终态事件（#777 契约「interrupted 态无终态事件」，S4 锁；恢复面 =
+        // run.resumed 起新轮）
       } else {
         this.runs.set(cmd.sessionId, { runId: cmd.runId, state: 'completed' })
         this.publish(cmd.ownerId, { type: 'run.completed', payload: {} }, cmd)
@@ -374,6 +406,22 @@ export class RunService {
       }
     } finally {
       this.aborts.delete(cmd.runId)
+      // 终态聚合落 session_messages（#778；interrupted/aborted/failed 也落——刷新回放须含
+      // 已流出的部分，story 3「零差异」）。空聚合不落（failed 立即等场景无用户可见内容）。
+      // 落库失败不放大为 run 故障（终态事件已发）：告警留痕，#779 补偿面兜底。
+      if (this.recordTurn && !turn.isEmpty()) {
+        try {
+          await this.recordTurn({
+            sessionId: cmd.sessionId,
+            runId: cmd.runId,
+            anchorCheckpointId,
+            aggregate: turn.snapshot(),
+          })
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn(`[runner] recordTurn failed: session=${cmd.sessionId} run=${cmd.runId}: ${(err as Error).message}`)
+        }
+      }
     }
   }
 

@@ -10,6 +10,7 @@ import { makeDockerCompile } from './wiki/compile'
 import { assembleTunnelServer } from './chat/tunnelAssembly'
 import { assembleRunner } from './runner/assembly'
 import { StreamHub } from './events/hub'
+import { SessionService } from './sessions/service'
 import './types'
 
 async function main(): Promise<void> {
@@ -50,6 +51,23 @@ async function main(): Promise<void> {
       touch: (id) => sandboxes.lifecycle.touch(id),
     },
   })
+  // 会话域（#778 · #747 C 节会话 REST 全件）：SessionService（门禁观测/命令构造复用
+  // runner.service；dispatch = BullMQ submit fire-and-forget——submit 失败上报不阻断，
+  // run 域事件面与 #779 补偿兜底）+ recordTurn 注入缝回接 runner（session_messages 落库 +
+  // 自动标题；构造顺序晚于 RunService 故走 setter）。
+  const sessions = new SessionService({
+    prisma,
+    hub: eventHub,
+    runService: runner.service,
+    dispatch: (cmd) => {
+      runner.queue.submit(cmd).catch((e: Error) => {
+        // eslint-disable-next-line no-console
+        console.error(`[sessions] dispatch failed: session=${cmd.sessionId} run=${cmd.runId}: ${e.message}`)
+      })
+    },
+    sandboxes: { remove: (id) => sandboxes.lifecycle.remove(id) },
+  })
+  runner.service.setRecordTurn((p) => sessions.recordTurn(p))
   const app = createApp({
     prisma,
     orchestrator: fleet.orchestrator,
@@ -75,6 +93,8 @@ async function main(): Promise<void> {
     // events（#773）：SSE 事件流（/api/v1/events）。StreamHub 单例注入；
     // 心跳 20s 用缺省（HEARTBEAT_MS，路由层唯一默认值声明处）。
     events: { hub: eventHub },
+    // sessions（#778）：会话 REST 域（/api/v1/sessions）。SessionService 单例注入。
+    sessions: { service: sessions },
   })
 
   // M0 同进程单端口分流：createServer(expressApp) + server.on('upgrade') 分流。

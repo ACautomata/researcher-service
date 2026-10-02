@@ -373,12 +373,24 @@ model SessionMessage {
   role    String // user / assistant / system / tool …（值集应用层约定；D9 媒体方向由本列派生）
   content String @default("")
 
+  // 客户端幂等 key（story 7 · #747 C 节 32-hex）：仅 user 行携带（POST /messages 落行时盖印）。
+  // (sessionId, clientKey) 唯一 = 断网重发不重复入列的约束面（并发同 key 单落走 P2002 兜底
+  // 重查，bootstrap 先例）；assistant/system 行恒 NULL——SQLite UNIQUE 多 NULL 视为 distinct，
+  // 不参与幂等域。
+  clientKey String?
+
   // attachmentsJson v1 聚合（schema 版本化，#726/#768）：
   // {v:1, thinking?, tools?[{toolCallId,name,input≤1k,result≤1k,state,durationMs,rejection?,details?≤4KB}],
   //  approval?, compaction?, media?:MediaRef[]}
+  // 本票（#778）产出子集：{v:1, thinking?, tools?[{toolCallId,name,input,state,durationMs?,
+  // details?,truncated?}]}——C 节 result 概念由 RunProjector details 承载（#777 事件目录
+  // tool.end 无独立 result 字段，4KB 截断）；rejection/approval/compaction/media 归 #783
+  // 审批漏斗及后续票（v1 契约全景见 serializeAttachments 演进）。
   attachmentsJson String @default("{\"v\":1}")
 
-  // 用户消息锚点 = rewind 目标 checkpoint（story 16；换 activeCheckpointId 时定位）
+  // 用户消息锚点 = rewind 目标 checkpoint（story 16；换 activeCheckpointId 时定位）。
+  // user 行：本票暂 NULL（attachment 上传 #780 时落值）；assistant 行：run 终态 checkpoint
+  // 锚点（issue #778 点名——recordTurn 注入缝从 RunService StateSnapshot 取）。
   anchorCheckpointId String?
 
   createdAt DateTime @default(now())
@@ -386,6 +398,7 @@ model SessionMessage {
   attachments Attachment[] // 挂载于本消息的附件（用户附件 + agent→用户媒体同表，D9）
 
   @@index([sessionId, turn])
+  @@unique([sessionId, clientKey])
   @@map("session_messages")
 }
 

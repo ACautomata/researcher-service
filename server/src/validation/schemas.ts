@@ -7,6 +7,7 @@ import {
   PROVIDER_ID_REGEX,
 } from '../models/values'
 import { parseHttpOrigin } from '../runner/allowlist'
+import { MESSAGE_CONTENT_MAX, TITLE_MAX } from '../sessions/values'
 
 // 请求体 schema（zod）。校验失败 → 90002 + flatten().fieldErrors（{field:[errors]}）。
 // username 格式：字母/数字/下划线/连字符，3–30 字符（近似 Django UnicodeUsernameValidator，更严）。
@@ -172,4 +173,29 @@ export const providerEndpointWriteSchema = z.object({
     .nullable()
     .optional(),
   note: z.string().max(200, 'note 过长（≤200 字符）').optional(),
+})
+
+// ---------------------------------------------------------------------------
+// 会话域（#778 · #747 C 节会话 REST 全件）。幂等 key 的 32-hex 形态校验在路由中间件
+// requireMessageKey（header 面）；此处只管 body。
+// ---------------------------------------------------------------------------
+export const sessionCreateSchema = z.object({
+  title: z.string().trim().max(TITLE_MAX, `title 过长（≤${TITLE_MAX} 字符）`).optional(),
+})
+
+export const sessionPatchSchema = z.object({
+  title: z.string().trim().min(1, 'title 不能为空').max(TITLE_MAX, `title 过长（≤${TITLE_MAX} 字符）`),
+})
+
+export const messageSendSchema = z.object({
+  content: z
+    .string()
+    .min(1, 'content 不能为空')
+    .max(MESSAGE_CONTENT_MAX, `content 过长（≤${MESSAGE_CONTENT_MAX} 字符）`),
+})
+
+// resume 决策载荷：#783 审批漏斗接构造，本票机制面直通——decisions 形状校验归 #783（此处
+// 只放行可选透传，RunService 命令面 JSON 序列化兼容任意 JSON 值）。
+export const sessionResumeSchema = z.object({
+  decisions: z.unknown().optional(),
 })
