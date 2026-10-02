@@ -32,6 +32,7 @@
 import { randomUUID } from 'node:crypto'
 import { HumanMessage } from '@langchain/core/messages'
 import { Command } from '@langchain/langgraph'
+import { INTERRUPT } from '@langchain/langgraph-checkpoint'
 import type { PrismaClient } from '../../generated/prisma/client'
 import { CODE } from '../../codes'
 import { fail } from '../../envelope'
@@ -105,8 +106,10 @@ interface GraphStateLike {
   tasks?: { interrupts?: unknown[] }[]
 }
 
-// LangGraph interrupt 的 putWrites channel（checkpoint 包 WRITES_IDX_MAP 负 idx 通道）。
-const INTERRUPT_CHANNEL = '__interrupt__'
+// LangGraph interrupt 的 putWrites channel：上游一等导出 INTERRUPT（checkpoint 包
+// WRITES_IDX_MAP 的负 idx 通道键，prismaCheckpointSaver「不自造」同纪律）——三包升级
+// 通道名漂移时此处类型红，推导面不会静默失效。
+const INTERRUPT_CHANNEL = INTERRUPT
 
 export class RunService {
   private readonly graphs = new Map<string, DeepAgentLike>()
