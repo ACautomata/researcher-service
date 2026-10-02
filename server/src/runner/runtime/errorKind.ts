@@ -60,17 +60,7 @@ export function classifyRunError(err: unknown): RunErrorKind {
   return 'infra'
 }
 
-// abort 与错误终态的判据：RunService 以自身 AbortRunError 标记用户中断（story 8 by:user），
-// 不经 classifyRunError（aborted 是独立终态事件 run.aborted{by}，非 failed 分支）。
-export class AbortRunError extends Error {
-  readonly by: 'user' | 'system'
-  constructor(by: 'user' | 'system' = 'user') {
-    super('run aborted')
-    this.name = 'AbortRunError'
-    this.by = by
-  }
-}
-
-export function isAbortError(err: unknown): err is AbortRunError {
-  return err instanceof AbortRunError
-}
+// abort 与错误终态的判据：RunService 以自身 AbortController.signal 为用户中断的唯一权威
+// 判据（story 8 by:user；catch 分支 signal.aborted → run.aborted，不经 classifyRunError
+// ——aborted 是独立终态事件 run.aborted{by}，非 failed 分支）。provider SDK 自身的
+// timeout AbortError 在 signal 未 abort 时按 LLM 面分类（llm_error）——不按错误形态猜。

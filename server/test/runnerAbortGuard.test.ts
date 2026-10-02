@@ -10,8 +10,6 @@ describe('installAbortRejectionGuard', () => {
     installAbortRejectionGuard(log)
     const err = Object.assign(new Error('This operation was aborted'), { name: 'AbortError' })
     expect(() => {
-      const dispatch = new Promise((_, rej) => rej(err))
-      void dispatch
       // 直接模拟 handler 分发：process.emit 触发已注册 listener
       process.emit('unhandledRejection', err, Promise.resolve())
     }).not.toThrow()

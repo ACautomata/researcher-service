@@ -46,7 +46,7 @@ import type { ConcurrencyGate } from '../concurrency'
 import { createUsageCallbackHandler } from '../usage'
 import { buildStreamEventsInvocation } from '../../events/bridge'
 import { RunProjector } from './projector'
-import { classifyRunError, isAbortError, type RunErrorKind } from './errorKind'
+import { classifyRunError, type RunErrorKind } from './errorKind'
 import { buildLeaderAgent, interruptPolicyKey, type DeepAgentLike, type InterruptPolicy, type LeaderAgentParams } from './graphFactory'
 import { DEFAULT_RECURSION_LIMIT, DEFAULT_RESUME_DECISIONS, GRAPH_CACHE_MAX_INSTANCES, LEADER_SYSTEM_PROMPT } from './values'
 import { disableLangsmithTracing } from './tracing'
@@ -356,7 +356,9 @@ export class RunService {
         this.publish(cmd.ownerId, { type: 'run.completed', payload: {} }, cmd)
       }
     } catch (e) {
-      if (controller.signal.aborted || isAbortError(e)) {
+      // 用户中断唯一权威判据 = signal.aborted（provider 自身 timeout AbortError 不误判——
+      // 那是 llm_error，见 errorKind.ts 头注）
+      if (controller.signal.aborted) {
         this.runs.set(cmd.sessionId, { runId: cmd.runId, state: 'aborted', by: abortEntry.by })
         this.publish(cmd.ownerId, { type: 'run.aborted', payload: { by: abortEntry.by } }, cmd)
       } else {

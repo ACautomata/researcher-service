@@ -106,10 +106,13 @@ interface MemFs {
   trees: Map<string, Map<string, Buffer | 'dir'>>
   execCalls: { container: string; cmd: string[] }[]
   primitives: SandboxFilePrimitives
-  execBehavior?: (container: string, cmd: string[]) => Promise<{ exitCode: number; stdout: string; stderr: string }> | { exitCode: number; stdout: string; stderr: string } | undefined
 }
 
-export function fakePrimitives(opts: { execBehavior?: MemFs['execBehavior'] } = {}): MemFs {
+export function fakePrimitives(
+  opts: {
+    execBehavior?: (container: string, cmd: string[]) => Promise<{ exitCode: number; stdout: string; stderr: string }> | { exitCode: number; stdout: string; stderr: string } | undefined
+  } = {},
+): MemFs {
   const trees = new Map<string, Map<string, Buffer | 'dir'>>()
   const execCalls: { container: string; cmd: string[] }[] = []
   const treeOf = (c: string): Map<string, Buffer | 'dir'> => {
@@ -161,14 +164,7 @@ export function fakePrimitives(opts: { execBehavior?: MemFs['execBehavior'] } = 
       }
     },
   }
-  return { trees, execCalls, primitives, execBehavior: opts.execBehavior }
-}
-
-// 读侧便捷：取内存树里一个文件文本（S4「报告写成」类断言）。
-export function readFile(fs: MemFs, container: string, absPath: string): string {
-  const v = fs.trees.get(container)?.get(absPath)
-  if (typeof v === 'string') return v
-  return v === undefined ? '' : Buffer.from(v).toString('utf8')
+  return { trees, execCalls, primitives }
 }
 
 // ---------------------------------------------------------------------------

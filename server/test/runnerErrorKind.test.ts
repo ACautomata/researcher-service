@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { GraphRecursionError } from '@langchain/langgraph'
-import { classifyRunError, AbortRunError, isAbortError } from '../src/runner/runtime/errorKind'
+import { classifyRunError } from '../src/runner/runtime/errorKind'
 import { fail } from '../src/envelope'
 import { CODE } from '../src/codes'
 
@@ -46,17 +46,5 @@ describe('classifyRunError（错误三分类，story 10）', () => {
     expect(classifyRunError(new Error('docker daemon down'))).toBe('infra')
     expect(classifyRunError('raw string')).toBe('infra')
     expect(classifyRunError(undefined)).toBe('infra')
-  })
-})
-
-describe('AbortRunError（aborted 独立终态判据）', () => {
-  it('isAbortError 只认 AbortRunError', () => {
-    expect(isAbortError(new AbortRunError('user'))).toBe(true)
-    expect(isAbortError(new Error('nope'))).toBe(false)
-  })
-
-  it('by 默认 user（story 8 标注中止来源）', () => {
-    expect(new AbortRunError().by).toBe('user')
-    expect(new AbortRunError('system').by).toBe('system')
   })
 })
