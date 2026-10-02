@@ -23,6 +23,12 @@ export const CAUSE_CHAIN_MAX_DEPTH = 8
 // 消费方按标记渲染「已截断」态，attachmentsJson v1 同语义）。
 export const TRUNCATED_FLAG = 'truncated'
 
+// HITL 默认决策（PoC 实测 payload 形态）：resume 命令未显式给 decisions 时的单一来源
+//（构造面默认值 + 执行面 fallback 同源——两处分叉即构造/执行行为分叉）。
+// ⚠ fail-open 缺省：缺省 = 自动 approve。V1 无审批面（interruptPolicyFor 未接线）无实害；
+// #783 审批漏斗接入时此缺省须改为必填——审批时代静默放行是安全事故面。
+export const DEFAULT_RESUME_DECISIONS = { decisions: [{ type: 'approve' }] } as const
+
 // V1 leader 系统提示（最小闭环面；#787 commands/skills 官方目录注入扩展，#789 wiki 工具面扩展）。
 export const LEADER_SYSTEM_PROMPT = [
   '你是天津大学科研智能体平台的研究助手。',

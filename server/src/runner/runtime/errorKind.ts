@@ -48,7 +48,8 @@ function* walkCauseChain(err: unknown): Generator<unknown> {
 
 export function classifyRunError(err: unknown): RunErrorKind {
   // 优先级：recursion_limit（类型判据）> llm_error（信封码白名单 / HTTP status）> infra。
-  // 全链扫描（含 MiddlewareError 包装层）取最高优先级命中——同一链上多判据并存时按优先级。
+  // recursion_limit 全链扫描；envelope 分支取链上**首个** EnvelopeError 定分类（非 LLM 白名单
+  // 码 → infra）——5xxxx 会话/run 域码不在 run 执行体内抛，链上首见即 models 域码或非 LLM 码。
   const chain = [...walkCauseChain(err)]
   if (chain.some((e) => e instanceof GraphRecursionError)) return 'recursion_limit'
   for (const e of chain) {

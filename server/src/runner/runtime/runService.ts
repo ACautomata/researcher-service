@@ -48,7 +48,7 @@ import { buildStreamEventsInvocation } from '../../events/bridge'
 import { RunProjector } from './projector'
 import { classifyRunError, isAbortError, type RunErrorKind } from './errorKind'
 import { buildLeaderAgent, interruptPolicyKey, type DeepAgentLike, type InterruptPolicy, type LeaderAgentParams } from './graphFactory'
-import { DEFAULT_RECURSION_LIMIT, GRAPH_CACHE_MAX_INSTANCES, LEADER_SYSTEM_PROMPT } from './values'
+import { DEFAULT_RECURSION_LIMIT, DEFAULT_RESUME_DECISIONS, GRAPH_CACHE_MAX_INSTANCES, LEADER_SYSTEM_PROMPT } from './values'
 import { disableLangsmithTracing } from './tracing'
 
 // run 命令（BullMQ job data 契约：纯 JSON 可序列化，无内存句柄——进程内状态全弃后凭 DB
@@ -177,7 +177,7 @@ export class RunService {
       ownerId: params.ownerId,
       username: params.username,
       kind: 'resume',
-      decisions: params.decisions ?? { decisions: [{ type: 'approve' }] },
+      decisions: params.decisions ?? DEFAULT_RESUME_DECISIONS,
     })
   }
 
@@ -205,10 +205,14 @@ export class RunService {
     if (cmd.kind === 'message' && this.runs.get(cmd.sessionId)?.state === 'interrupted') {
       throw fail(CODE.RUN_INTERRUPT_PENDING)
     }
-    // queued 只标 message 命令的新 run；resume 延续既有 run（interrupted 保持到 running，
-    // 否则 executeRun 的互斥权威判定会被覆盖态误伤）。
+    // queued 只标 message 命令的新 run，且仅在无活跃条目时落——running/queued 不被新排队
+    // 命令覆盖（stateOf 是 #778「running 全端禁输入」门禁的观测面，覆盖即门禁失效）；
+    // resume 延续既有 run（interrupted 保持到 running，否则 executeRun 的互斥权威判定会被
+    // 覆盖态误伤）。interrupted 态已在上方 fast-fail 拒绝，不会走到覆盖。
     if (cmd.kind === 'message') {
-      this.runs.set(cmd.sessionId, { runId: cmd.runId, state: 'queued' })
+      const prev = this.runs.get(cmd.sessionId)
+      const active = prev !== undefined && (prev.state === 'running' || prev.state === 'queued' || prev.state === 'interrupted')
+      if (!active) this.runs.set(cmd.sessionId, { runId: cmd.runId, state: 'queued' })
     }
     const prev = this.chains.get(cmd.sessionId) ?? Promise.resolve()
     const task = prev.then(
@@ -325,7 +329,7 @@ export class RunService {
     const input =
       cmd.kind === 'message'
         ? { messages: [new HumanMessage(cmd.content ?? '')] }
-        : new Command({ resume: cmd.decisions ?? { decisions: [{ type: 'approve' }] } })
+        : new Command({ resume: cmd.decisions ?? DEFAULT_RESUME_DECISIONS })
 
     try {
       const stream = await agent.streamEvents(input, {

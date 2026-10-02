@@ -316,6 +316,32 @@ describe('RunService：发消息 → run 终态事件序列（S1，#747 C 节目
     expect(secondStart).toBeGreaterThan(firstDone)
   })
 
+  it('stateOf 观测面：排队窗口保持 running（queued 占位不覆盖活跃态——#778 门禁消费面）', async () => {
+    const fs = fakePrimitives({
+      execBehavior: async () => {
+        await new Promise((r) => setTimeout(r, 100))
+        return { exitCode: 0, stdout: '', stderr: '' }
+      },
+    })
+    const svc = makeService({
+      primitives: fs,
+      script: [
+        toolCallAi('q1', 'execute', { command: 'slow' }),
+        new AIMessage({ content: 'one' }),
+        new AIMessage({ content: 'two' }),
+      ],
+    })
+    const c1 = cmd()
+    const running = svc.execute(c1)
+    for (let i = 0; i < 100 && !hub.types().includes('run.started'); i++) {
+      await new Promise((r) => setTimeout(r, 5))
+    }
+    const queued = svc.execute(cmd()) // 排队窗口：c2 入链
+    expect(svc.stateOf(sessionId)?.state).toBe('running') // 不被 queued 覆盖
+    await Promise.all([running, queued])
+    expect(svc.stateOf(sessionId)?.state).toBe('completed')
+  })
+
   it('interrupt → resume：interrupted 态无终态事件，resume 后 completed 且工具恰执行一次', async () => {
     const fs = fakePrimitives()
     const svc = makeService({
@@ -398,7 +424,7 @@ describe('RunService：发消息 → run 终态事件序列（S1，#747 C 节目
     expect(reborn.stateOf('sess-i2')?.state).toBeUndefined() // pre-start 拒绝，queued 占位已回滚
   })
 
-  it('resume 竞态权威判定：interrupted 消费后第二次 resume → execute 抛 50001', async () => {
+  it('resume 竞态：interrupted 消费后二次 resume——预检 50001 + executeRun 权威判定 50001', async () => {
     const svc = makeService({
       interruptPolicyFor: () => ({ tools: ['execute'] }),
       script: [
@@ -409,10 +435,24 @@ describe('RunService：发消息 → run 终态事件序列（S1，#747 C 节目
     await svc.execute(cmd())
     const rc1 = svc.buildResumeCommand({ sessionId, ownerId: owner.id, username: owner.username })
     await svc.execute(rc1) // interrupted 消费 → completed
-    // state 已推离 interrupted：预检与 executeRun 权威判定同源 state，50001 同面
-    expect(() =>
-      svc.buildResumeCommand({ sessionId, ownerId: owner.id, username: owner.username }),
-    ).toThrowError()
+
+    // 预检面：state 已推离 interrupted（内存权威可知）→ 50001
+    let precheckCode: number | undefined
+    try {
+      svc.buildResumeCommand({ sessionId, ownerId: owner.id, username: owner.username })
+    } catch (e) {
+      precheckCode = (e as { code?: number }).code
+    }
+    expect(precheckCode).toBe(CODE.RUN_ALREADY_RESUMED)
+
+    // 权威面：绕过预检的 resume 命令（BullMQ 传输面形态）→ executeRun 互斥判定 50001
+    const bypass = svc.buildCommand({
+      sessionId,
+      ownerId: owner.id,
+      username: owner.username,
+      kind: 'resume',
+    })
+    await expect(svc.execute(bypass)).rejects.toMatchObject({ code: CODE.RUN_ALREADY_RESUMED })
   })
 
   it('额度 40043：gate 满 → execute 抛 EnvelopeError（权威判定）', async () => {
