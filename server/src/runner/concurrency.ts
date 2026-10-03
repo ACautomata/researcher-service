@@ -96,6 +96,18 @@ export class ConcurrencyGate {
     }
   }
 
+  // REST 即时反馈面（#778 接线；#777 注释契约「额度即时反馈面归 #778 REST」）：与 acquire
+  // 同判定形状的只读预检（不占额）——紧邻并发仍可能双双穿透预检，权威判定始终在
+  // acquire（worker 侧 job failed 兜底）。坏值视同满（同 acquire 的保护面方向）。
+  async wouldReject(ownerId: string): Promise<boolean> {
+    const userLimit = await this.opts.loadUserLimit(ownerId)
+    if (!Number.isInteger(userLimit) || userLimit < 0) return true
+    return (
+      this.state.globalCount >= this.opts.globalLimit ||
+      (this.state.perUser.get(ownerId) ?? 0) >= userLimit
+    )
+  }
+
   // 观测面（测试/健康检查；非产品 API）。
   inFlight(ownerId?: string): number {
     return ownerId === undefined ? this.state.globalCount : this.state.perUser.get(ownerId) ?? 0

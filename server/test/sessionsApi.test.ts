@@ -86,6 +86,8 @@ describe('会话 REST 域（S1，#778）', () => {
   let currentScript: ScriptEntry[]
   let policyTools: readonly string[] | undefined
   let slowExec = false // 慢执行开关（running 窗口制造；afterEach 复位——deps.primitives private 不可换，开关内建）
+  let userLimit = 4 // per-user 配额开关（quota 预检 40043 用例；afterEach 复位）
+  let dispatchFail = false // dispatch（submit ack）失败注入——回滚删行用例；afterEach 复位
 
   const hexKey = (n: number) => n.toString(16).padStart(32, '0')
 
@@ -131,7 +133,7 @@ describe('会话 REST 域（S1，#778）', () => {
       prisma,
       registry,
       saver: new PrismaCheckpointSaver(prisma),
-      gate: new ConcurrencyGate({ globalLimit: 8, loadUserLimit: async () => 4 }),
+      gate: new ConcurrencyGate({ globalLimit: 8, loadUserLimit: async () => userLimit }),
       hub,
       primitives: fakePrimitives({
         execBehavior: async () => {
@@ -151,7 +153,11 @@ describe('会话 REST 域（S1，#778）', () => {
       hub,
       runService,
       dispatch: (cmd) => {
+        // submit 入队 ack 语义（生产 BullMQ 同形）：立即 resolve = job 已入队，执行体后台跑；
+        // dispatchFail 注入 submit 失败（sendMessage 须回滚删行）。
+        if (dispatchFail) return Promise.reject(new Error('queue down'))
         void runService.execute(cmd).catch(() => {})
+        return Promise.resolve()
       },
       sandboxes: {
         remove: async (id) => {
@@ -177,6 +183,8 @@ describe('会话 REST 域（S1，#778）', () => {
     currentScript = []
     policyTools = undefined
     slowExec = false
+    userLimit = 4
+    dispatchFail = false
     // bump config_meta.version → registry 模型缓存 miss → 下一用例换新 ScriptedChatModel
     //（脚本 cursor 状态不跨用例污染——对齐 runnerRunService.test.ts「每用例独立模型实例」；
     // 复用生产热生效机制而非重建 RunService/SessionService/app）。测试库无 seed 行 → upsert。
@@ -267,6 +275,29 @@ describe('会话 REST 域（S1，#778）', () => {
     const after = await request.get(`/api/v1/sessions/${id}/messages`).set(bearer(access))
     expect(after.body.code).toBe(CODE.SESSION_NOT_FOUND)
   })
+
+  it('DELETE /:id 在飞互斥：running → 50004 挡删（沙箱保留）；终态后可删', async () => {
+    slowExec = true
+    currentScript = [toolCallAi('g5', 'execute', { command: 'slow' }), new AIMessage({ content: 'done' })]
+    const sid = (await request.post('/api/v1/sessions').set(bearer(access)).send({})).body.data.id as string
+    await request
+      .post(`/api/v1/sessions/${sid}/messages`)
+      .set(bearer(access))
+      .set('Idempotency-Key', hexKey(0x111))
+      .send({ content: '删除窗口' })
+    await waitFor(() => runService.stateOf(sid)?.state === 'running')
+
+    const blocked = await request.delete(`/api/v1/sessions/${sid}`).set(bearer(access))
+    expect(blocked.body.code).toBe(CODE.RUN_IN_PROGRESS)
+    expect(removedSandboxes).not.toContain(sid)
+    expect(await prisma.session.findUnique({ where: { id: sid } })).not.toBeNull()
+
+    await request.post(`/api/v1/sessions/${sid}/abort`).set(bearer(access))
+    await waitFor(() => runService.stateOf(sid)?.state === 'aborted')
+    const res = await request.delete(`/api/v1/sessions/${sid}`).set(bearer(access))
+    expect(res.body.code).toBe(CODE.OK)
+    expect(removedSandboxes).toContain(sid)
+  }, 15_000)
 
   // ---- 发消息 + 幂等（story 7）----
 
@@ -415,6 +446,48 @@ describe('会话 REST 域（S1，#778）', () => {
     expect(replay.body.data).toMatchObject({ messageId: first.body.data.messageId, replay: true })
     await waitFor(() => runService.stateOf(sid)?.state === 'completed')
     const rows = await prisma.sessionMessage.count({ where: { sessionId: sid, clientKey: hexKey(0x201) } })
+    expect(rows).toBe(1)
+  })
+
+  it('配额满即时反馈：per-user 额度耗尽 → POST /messages 40043（REST 预检，不落行不入队）', async () => {
+    userLimit = 0
+    currentScript = [new AIMessage({ content: '不应到达' })]
+    const before = frameEvents(sinkA.frames).length
+    const res = await request
+      .post('/api/v1/sessions/sess-seed/messages')
+      .set(bearer(access))
+      .set('Idempotency-Key', hexKey(0x203))
+      .send({ content: '配额外消息' })
+    expect(res.body.code).toBe(CODE.CONCURRENCY_QUOTA_EXCEEDED)
+    expect(await prisma.sessionMessage.count({ where: { sessionId: 'sess-seed', clientKey: hexKey(0x203) } })).toBe(0)
+    // 无 run 域事件（预检在 dispatch 前）
+    expect(frameEvents(sinkA.frames.slice(before))).toHaveLength(0)
+  })
+
+  it('dispatch ack 失败回滚：submit 拒绝 → 90000 + user 行回滚，幂等键不锁死（修复后重发正常入队）', async () => {
+    currentScript = [new AIMessage({ content: '入队后回复' })]
+    dispatchFail = true
+    const failed = await request
+      .post('/api/v1/sessions/sess-seed/messages')
+      .set(bearer(access))
+      .set('Idempotency-Key', hexKey(0x205))
+      .send({ content: '会回滚的消息' })
+    expect(failed.body.code).toBe(CODE.INTERNAL)
+    expect(await prisma.sessionMessage.count({ where: { sessionId: 'sess-seed', clientKey: hexKey(0x205) } })).toBe(0)
+
+    // 幂等键未被锁死：修复后同 key 重发重走全流程（新行 + 正常入队 + replay:false）
+    dispatchFail = false
+    const retry = await request
+      .post('/api/v1/sessions/sess-seed/messages')
+      .set(bearer(access))
+      .set('Idempotency-Key', hexKey(0x205))
+      .send({ content: '会回滚的消息' })
+    expect(retry.body.code).toBe(CODE.OK)
+    expect(retry.body.data).toMatchObject({ replay: false })
+    await waitFor(() =>
+      frameEvents(sinkA.frames).some((e) => e.type === 'run.completed' && e.sessionId === 'sess-seed'),
+    )
+    const rows = await prisma.sessionMessage.count({ where: { sessionId: 'sess-seed', clientKey: hexKey(0x205) } })
     expect(rows).toBe(1)
   })
 

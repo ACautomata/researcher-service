@@ -51,20 +51,15 @@ async function main(): Promise<void> {
       touch: (id) => sandboxes.lifecycle.touch(id),
     },
   })
-  // 会话域（#778 · #747 C 节会话 REST 全件）：SessionService（门禁观测/命令构造复用
-  // runner.service；dispatch = BullMQ submit fire-and-forget——submit 失败上报不阻断，
-  // run 域事件面与 #779 补偿兜底）+ recordTurn 注入缝回接 runner（session_messages 落库 +
-  // 自动标题；构造顺序晚于 RunService 故走 setter）。
+  // 会话域（#778 · #747 C 节会话 REST 全件）：SessionService（门禁观测/配额预检/命令构造复用
+  // runner.service；dispatch = BullMQ submit 透传——ack 失败由 SessionService 回滚/上报，
+  // 执行体错误走 run 域事件面与 #779 补偿）+ recordTurn 注入缝回接 runner（session_messages
+  // 落库 + 自动标题；构造顺序晚于 RunService 故走 setter）。
   const sessions = new SessionService({
     prisma,
     hub: eventHub,
     runService: runner.service,
-    dispatch: (cmd) => {
-      runner.queue.submit(cmd).catch((e: Error) => {
-        // eslint-disable-next-line no-console
-        console.error(`[sessions] dispatch failed: session=${cmd.sessionId} run=${cmd.runId}: ${e.message}`)
-      })
-    },
+    dispatch: (cmd) => runner.queue.submit(cmd),
     sandboxes: { remove: (id) => sandboxes.lifecycle.remove(id) },
   })
   runner.service.setRecordTurn((p) => sessions.recordTurn(p))

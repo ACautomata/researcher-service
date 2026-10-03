@@ -56,10 +56,13 @@ export interface SendMessageResult {
   readonly replay: boolean
 }
 
-// RunService 的结构子集（门禁观测 + 命令构造 + abort）——测试注入同形 fake，不依赖具体类。
+// RunService 的结构子集（门禁观测 + 配额预检 + 命令构造 + abort）——测试注入同形 fake/真
+// 实例，不依赖具体类。
 export interface SessionRunGateway {
   readonly stateOf: (sessionId: string) => RunSnapshot | undefined
   readonly abort: (runId: string, by?: 'user' | 'system') => boolean
+  /** 额度满预检（#777 注释契约「额度即时反馈面归 #778 REST」；只读不占额） */
+  readonly quotaFull: (ownerId: string) => Promise<boolean>
   readonly buildMessageCommand: (p: {
     sessionId: string
     ownerId: string
@@ -74,10 +77,11 @@ export interface SessionRunGateway {
   }) => RunCommand
 }
 
-// run 命令发射口（fire-and-forget 语义）：生产 = BullMQ submit（失败上报不阻断——run 域事件
-// 面与 #779 补偿兜底）；测试 = Inline execute。50001/50003 等预检在 REST 面完成，dispatch 后
-// 的异步失败经 run 域事件/日志表达。
-export type RunDispatcher = (cmd: RunCommand) => void
+// run 命令发射口（submit 入队 ack 语义）：生产 = BullMQ submit（resolve = job 已入队；
+// reject = 入队失败——调用方回滚落行，见 sendMessage），执行体错误在 run 域事件面表达
+//（#779 补偿兜底 job 已入队形态）。50001/50003 等预检在 REST 面完成，dispatch 后的异步
+// 失败经 run 域事件/日志表达。
+export type RunDispatcher = (cmd: RunCommand) => Promise<void>
 
 export interface SessionServiceDeps {
   readonly prisma: PrismaClient
@@ -164,14 +168,25 @@ export class SessionService {
 
   // ---- 删会话（级联：沙箱容器+网络 → DB 行 onDelete Cascade 清 messages/checkpoints/
   // attachments/fileJournal）。先删沙箱（失败保留行可重试——remove 'not-found' 幂等）再删行，
-  // 防孤儿容器（sweeper 只 stop 不 remove）。----
+  // 防孤儿容器（sweeper 只 stop 不 remove）。
+  // 在飞 run 互斥（R3 评审）：非终态（queued/running/interrupted）挡删 50004——删 = 沙箱随删
+  //（在飞工具全失败）+ 行删后 run 域事件成无主引用 + recordTurn FK 失败。先 abort/等终态再
+  // 删；stateOf 内存缺失（本进程无该会话 run 记录——worker 同进程模型）= 可删。----
   async deleteSession(user: Pick<AuthUser, 'id' | 'role'>, sessionId: string): Promise<void> {
     await getSessionForUser(this.deps.prisma, user, sessionId)
+    const snap = this.deps.runService.stateOf(sessionId)
+    const terminal =
+      snap === undefined ||
+      snap.state === 'completed' ||
+      snap.state === 'aborted' ||
+      snap.state === 'failed'
+    if (!terminal) throw fail(CODE.RUN_IN_PROGRESS)
     await this.deps.sandboxes?.remove(sessionId)
     await this.deps.prisma.session.delete({ where: { id: sessionId } })
   }
 
-  // ---- 发消息（story 7 幂等 + 多端门禁）。顺序：归属 → 幂等 → 门禁 → 落 user 行 → dispatch。
+  // ---- 发消息（story 7 幂等 + 多端门禁）。顺序：归属 → 幂等 → 门禁 → 配额预检 → 命令构造
+  // → 落 user 行 → dispatch（ack 失败回滚删行）。
   // 幂等查先于门禁：断网重发的首个请求可能已把 run 推入 running——重发必须拿 replay 应答
   //（200）而非 50004 门禁错误（「断网重发不重复入列」的语义面：已收的消息不应答错误）。
   // 并发同 key 单落：先查 + 唯一约束 P2002 兜底重查（bootstrap 先例）——约束是单落权威，
@@ -197,6 +212,22 @@ export class SessionService {
     if (snap?.state === 'running' || snap?.state === 'queued') throw fail(CODE.RUN_IN_PROGRESS)
     if (snap?.state === 'interrupted') throw fail(CODE.RUN_INTERRUPT_PENDING)
 
+    // 配额即时反馈（#777 注释契约「额度即时反馈面归 #778 REST」）：满 → 40043。预检只读不占
+    // 额——紧邻并发仍可能双双穿透，权威判定在 worker 的 gate.acquire（job failed 面，#779
+    // 兜底该形态：job 已入队故可观测）。
+    if (await this.deps.runService.quotaFull(user.id)) throw fail(CODE.CONCURRENCY_QUOTA_EXCEEDED)
+
+    // 命令构造先于落行：构造失败（caller 缺失/50002 面）不落行——幂等键只在「run 确已被
+    // 接受」后锁定（失败请求锁死幂等键 = story 7 语义反转：重发恒 replay 而消息从未被处理）。
+    const cmd = await this.deps.runService.buildMessageCommand({
+      sessionId,
+      ownerId: user.id,
+      username: user.username,
+      content: p.content,
+    })
+
+    // 落行先于 dispatch：dispatch 后 run 域事件（run.started 起）才可见，用户行必已在投影中
+    //（刷新窗口无「事件先于消息」跳变）。
     let row: SessionMessage
     try {
       row = await this.deps.prisma.sessionMessage.create({
@@ -219,15 +250,16 @@ export class SessionService {
       throw e
     }
 
-    // 命令构造（内含 caller 检查与 #777 接缝语义）→ 发射。落行先于 dispatch：dispatch 后
-    // run 域事件（run.started 起）才可见，用户行必已在投影中（刷新窗口无「事件先于消息」跳变）。
-    const cmd = await this.deps.runService.buildMessageCommand({
-      sessionId,
-      ownerId: user.id,
-      username: user.username,
-      content: p.content,
-    })
-    this.deps.dispatch(cmd)
+    // dispatch = submit 入队 ack：失败 → 回滚删行。行残留的后果不可补偿——submit 失败无 job、
+    // 无事件（#779 补偿只覆盖 job 已入队形态），重发同 key 将恒 replay 而消息永不执行。回滚
+    // 后幂等键随行消失，重发重走全流程。回滚自身失败 best-effort（行残留概率 = DB 已故障，
+    // 此时告警面在日志）。
+    try {
+      await this.deps.dispatch(cmd)
+    } catch {
+      await this.deps.prisma.sessionMessage.delete({ where: { id: row.id } }).catch(() => {})
+      throw fail(CODE.INTERNAL, 'run 入队失败，请稍后重试')
+    }
     return { messageId: row.id, turn: row.turn, runId: cmd.runId, replay: false }
   }
 
@@ -251,7 +283,8 @@ export class SessionService {
   // 先到先得：buildResumeCommand 预检 50001（executeRun 权威面兜底并发窗口）。REST 应答语义
   // 边界（已知）：两端紧邻并发时败方预检仍过（先到者尚未把 state 推离 interrupted）→ REST
   // 200 + runId，权威 50001 在内核面拒绝且无该 runId 的任何事件——最终一致由赢家的
-  // run.resumed 同帧扇出保证（多端事件面同一真相），REST 应答在窗口内有误导性。----
+  // run.resumed 同帧扇出保证（多端事件面同一真相），REST 应答在窗口内有误导性。
+  // dispatch await 入队 ack：失败（state 仍 interrupted 未变）→ 90000，重试 resume 即可。----
   async resumeRun(
     user: Pick<AuthUser, 'id' | 'role' | 'username'>,
     sessionId: string,
@@ -264,7 +297,7 @@ export class SessionService {
       username: user.username,
       ...(decisions !== undefined ? { decisions } : {}),
     })
-    this.deps.dispatch(cmd)
+    await this.deps.dispatch(cmd)
     return { runId: cmd.runId }
   }
 

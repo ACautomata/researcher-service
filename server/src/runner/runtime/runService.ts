@@ -218,6 +218,12 @@ export class RunService {
     return this.runs.get(sessionId)
   }
 
+  // 额度满预检（#778 REST 即时反馈；#777 注释契约「额度即时反馈面归 #778」）——只读不占额，
+  // 权威判定仍在 executeNow 的 gate.acquire。
+  quotaFull(ownerId: string): Promise<boolean> {
+    return this.deps.gate.wouldReject(ownerId)
+  }
+
   // ---- 执行（传输面调用点：Inline 直调 / BullMQ worker processor）----
   // 同 thread 串行链：任意时刻同 thread 至多一个 executeRun 在跑，其余按提交序排队。
   // executeNow 的信封错误（40043/50002）向上传播；run 执行体错误在 executeRun 内消化
