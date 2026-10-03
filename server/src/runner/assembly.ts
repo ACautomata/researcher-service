@@ -15,6 +15,11 @@ import { RunService } from './runtime/runService'
 import { BullMqRunQueue } from './bullmqRunQueue'
 import { disableLangsmithTracing } from './runtime/tracing'
 import { installAbortRejectionGuard } from './runtime/abortGuard'
+import { config } from '../config'
+import { createPrismaApprovalAuditSink } from './approval/audit'
+import { ToolCallJudgeClient } from './approval/judge'
+import { ApprovalFunnel, type ApprovalFunnelDeps } from './approval/funnel'
+import { JUDGE_POLICY_MARKDOWN } from './approval/values'
 
 export interface RunnerAssembly {
   readonly service: RunService
@@ -30,6 +35,8 @@ export function assembleRunner(opts: {
   recursionLimit?: number
   /** 沙箱生命周期（#776 契约「消费方 = #777 runner ensure/touch」；类型面复用 RunServiceDeps） */
   sandboxes?: NonNullable<RunServiceDeps['sandboxes']>
+  /** 审批漏斗 judge 模型（测试注入 fake；缺省按 config.runner.judge 构造，未配置 = 无 judge） */
+  judge?: NonNullable<ApprovalFunnelDeps['judge']>
 }): RunnerAssembly {
   // tracing 显式关（启动期第一路；RunService 构造期第二路兜底）
   disableLangsmithTracing()
@@ -51,6 +58,18 @@ export function assembleRunner(opts: {
   })
   const primitives = new DockerPrimitives()
 
+  // 审批三层漏斗（#783）：judge 按部署配置构造（独立小模型，与用户主模型解耦）；审计三层
+  // 全量同步写 tool_approval_logs（ADR 0015）。judge 未配置 → 灰区一律升级人工（fail-closed）。
+  const judge =
+    opts.judge ??
+    (config.runner.judge.model !== '' && config.runner.judge.baseUrl !== ''
+      ? createJudgeClient()
+      : undefined)
+  const funnel = new ApprovalFunnel({
+    judge,
+    audit: createPrismaApprovalAuditSink(opts.prisma),
+  })
+
   const service = new RunService({
     prisma: opts.prisma,
     registry,
@@ -64,7 +83,10 @@ export function assembleRunner(opts: {
     resolveWikiContainer: (ownerId) => `researcher-wiki-${ownerId}`,
     recursionLimit: opts.recursionLimit,
     sandboxes: opts.sandboxes,
+    approvals: funnel,
+    approvalTimeoutMs: config.runner.approvalTimeoutMs,
   })
+  void service.recoverSuspensions() // 重启恢复：超时未落定的审批升级 → suspended（异步，不挂启动）
 
   const queue = new BullMqRunQueue({
     redisUrl: opts.redisUrl,
@@ -78,6 +100,35 @@ export function assembleRunner(opts: {
   return {
     service,
     queue,
-    close: () => queue.close(),
+    close: async () => {
+      service.dispose()
+      await queue.close()
+    },
   }
+}
+
+// judge 客户端（部署级独立小模型；729 §2.5）：initChatModel 构造 + 共享 LLM_API_KEY。
+// 出口不走 provider_endpoints 白名单——env 是 admin 信任面（config.runner.judge 注释同源）。
+function createJudgeClient(): InstanceType<typeof ToolCallJudgeClient> {
+  const { model, baseUrl, lcProvider } = config.runner.judge
+  return new ToolCallJudgeClient(
+    {
+      async invoke(messages: unknown[]) {
+        const { initChatModel } = await import('langchain/chat_models/universal')
+        // temperature 0（729 §2.3：判定确定性面）；JSON mode 不依赖 provider response_format
+        //（MiniMax/DeepSeek 兼容面支持参差）——输出契约由 ToolCallJudgeClient 的 zod 校验 +
+        // 重试一次 + fail-closed 兑现（同语义，跨端点可移植）。
+        const m = await initChatModel(model, {
+          modelProvider: lcProvider,
+          apiKey: config.runner.llmApiKey,
+          temperature: 0,
+          ...(lcProvider === 'openai'
+            ? { baseUrl, configuration: { fetch: globalThis.fetch } }
+            : { clientOptions: { baseURL: baseUrl, fetch: globalThis.fetch } }),
+        })
+        return m.invoke(messages as never)
+      },
+    },
+    { policy: JUDGE_POLICY_MARKDOWN },
+  )
 }

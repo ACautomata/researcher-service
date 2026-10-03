@@ -5,6 +5,7 @@ import { healthRouter } from './routes/health'
 import { createAuthRouter } from './routes/auth'
 import { createUsersRouter } from './routes/users'
 import { traceLogsRouter } from './routes/traceLogs'
+import { approvalLogsRouter } from './runner/auditRoutes'
 import { createContainersRouter } from './routes/containers'
 import { createWikiRouter, type WikiRouterDeps } from './wiki/routes'
 import { createModelsRouter, type ModelsRouterDeps } from './models/routes'
@@ -81,6 +82,7 @@ export function createApp({ prisma, orchestrator, runtime, wiki, models, provide
   // 同 auth 的 streamHub 注入语义：events 挂载时同一单例，未挂载静默跳过。
   app.use('/api/v1/users', createUsersRouter({ streamHub: events?.hub }))
   app.use('/api/v1/trace-logs', traceLogsRouter)
+  app.use('/api/v1/approval-logs', approvalLogsRouter)
   if (orchestrator) {
     // approve 端点依赖 runtime（docker exec），与 orchestrator 成对注入（#374）；缺 runtime 属装配错误。
     if (!runtime) {

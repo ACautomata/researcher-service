@@ -59,6 +59,7 @@ export const CODE = {
   RUN_ALREADY_RESUMED: 50001, // run 已被 resume（先到先得，败方拒绝；#777 runService 互斥面）
   SESSION_NOT_FOUND: 50002, // 会话不存在 / 越权（同码防探测；root=lab 读面 #776，#778 会话 REST 同款）
   RUN_INTERRUPT_PENDING: 50003, // interrupted 态禁输入（#747 C 节「interrupt 全端可审批」内核防御面——须先 resume 决策）
+  APPROVAL_NOT_FOUND: 50004, // 审批不存在 / escalationId 不匹配（同码防探测；#783 审批漏斗 resolve 面）
   // 9xxxx 系统 / 校验
   OAUTH_NOT_CONFIGURED: 90001, // OAuth provider 未配置（原 501）
   VALIDATION_FAILED: 90002, // 参数校验失败（字段明细进 data）；Idempotency-Key 缺/超长特例 data=null（figures 前置中间件）
@@ -92,6 +93,7 @@ export const DEFAULT_MESSAGE: Record<number, string> = {
   [CODE.RUN_ALREADY_RESUMED]: '该 run 已被恢复',
   [CODE.SESSION_NOT_FOUND]: '会话不存在',
   [CODE.RUN_INTERRUPT_PENDING]: 'run 停在 interrupt，须先审批决策（approve/reject）再发消息',
+  [CODE.APPROVAL_NOT_FOUND]: '审批不存在或已落定',
   [CODE.OAUTH_NOT_CONFIGURED]: 'OAuth provider 未配置',
   [CODE.WIKI_PAGE_NOT_FOUND]: '页面不存在',
   [CODE.WIKI_PAGE_EXISTS]: '页面已存在',
