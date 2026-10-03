@@ -464,6 +464,31 @@ describe('会话 REST 域（S1，#778）', () => {
     expect(frameEvents(sinkA.frames.slice(before))).toHaveLength(0)
   })
 
+  it('配额满 resume 同挡：interrupted 会话 resume → 40043；恢复配额后重试成功（不停 interrupted 静默）', async () => {
+    policyTools = ['execute']
+    currentScript = [toolCallAi('g6', 'execute', { command: 'x' }), new AIMessage({ content: '续跑完成。' })]
+    const sid = (await request.post('/api/v1/sessions').set(bearer(access)).send({})).body.data.id as string
+    await request
+      .post(`/api/v1/sessions/${sid}/messages`)
+      .set(bearer(access))
+      .set('Idempotency-Key', hexKey(0x206))
+      .send({ content: '触发 interrupt' })
+    await waitFor(() => runService.stateOf(sid)?.state === 'interrupted')
+
+    userLimit = 0
+    const blocked = await request.post(`/api/v1/sessions/${sid}/resume`).set(bearer(access)).send({})
+    expect(blocked.body.code).toBe(CODE.CONCURRENCY_QUOTA_EXCEEDED)
+
+    // state 未变（仍 interrupted），恢复配额后同一入口重试成功
+    userLimit = 4
+    const retried = await request
+      .post(`/api/v1/sessions/${sid}/resume`)
+      .set(bearer(access))
+      .send({ decisions: { decisions: [{ type: 'approve' }] } })
+    expect(retried.body.code).toBe(CODE.OK)
+    await waitFor(() => runService.stateOf(sid)?.state === 'completed')
+  }, 15_000)
+
   it('dispatch ack 失败回滚：submit 拒绝 → 90000 + user 行回滚，幂等键不锁死（修复后重发正常入队）', async () => {
     currentScript = [new AIMessage({ content: '入队后回复' })]
     dispatchFail = true

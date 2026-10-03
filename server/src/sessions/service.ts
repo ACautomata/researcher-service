@@ -258,6 +258,8 @@ export class SessionService {
       })
     } catch (e) {
       if ((e as { code?: string }).code === 'P2002') {
+        // 已知毫秒窗口（R4 记录备查）：败方经此分支拿 replay 应答后，若胜方 dispatch ack
+        // 失败回滚删行，败方应答与实况相悖——需 dispatch 故障叠加并发窗口，刷新自愈。
         const winner = await this.deps.prisma.sessionMessage.findUnique({
           where: { sessionId_clientKey: { sessionId, clientKey: p.clientKey } },
         })
@@ -297,9 +299,12 @@ export class SessionService {
   }
 
   // ---- resume（interrupt 全端可审批面；#783 审批漏斗接 decisions 构造，本票机制面直通）。
-  // 先到先得：buildResumeCommand 预检 50001（executeRun 权威面兜底并发窗口）。REST 应答语义
-  // 边界（已知）：两端紧邻并发时败方预检仍过（先到者尚未把 state 推离 interrupted）→ REST
-  // 200 + runId，权威 50001 在内核面拒绝且无该 runId 的任何事件——最终一致由赢家的
+  // 先到先得：buildResumeCommand 预检 50001（executeRun 权威面兜底并发窗口）。配额即时反馈同
+  // sendMessage（quotaFull → 40043）——resume 是 interrupted 会话唯一可用入口（sendMessage 被
+  // 50003 挡），缺预检时配额满期间 REST 200 → worker 40043 → 无 run 域事件，会话停 interrupted
+  // 用户零信号（R4 评审）。
+  // REST 应答语义边界（已知）：两端紧邻并发时败方预检仍过（先到者尚未把 state 推离 interrupted）→
+  // REST 200 + runId，权威 50001 在内核面拒绝且无该 runId 的任何事件——最终一致由赢家的
   // run.resumed 同帧扇出保证（多端事件面同一真相），REST 应答在窗口内有误导性。
   // dispatch await 入队 ack：失败（state 仍 interrupted 未变）→ 90000，重试 resume 即可。----
   async resumeRun(
@@ -314,6 +319,7 @@ export class SessionService {
       username: user.username,
       decisions,
     })
+    if (await this.deps.runService.quotaFull(user.id)) throw fail(CODE.CONCURRENCY_QUOTA_EXCEEDED)
     await this.deps.dispatch(cmd)
     return { runId: cmd.runId }
   }
