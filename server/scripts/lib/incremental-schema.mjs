@@ -157,6 +157,7 @@ CREATE TABLE IF NOT EXISTS "session_messages" (
     "turn" INTEGER NOT NULL,
     "role" TEXT NOT NULL,
     "content" TEXT NOT NULL DEFAULT '',
+    "clientKey" TEXT,
     "attachmentsJson" TEXT NOT NULL DEFAULT '{"v":1}',
     "anchorCheckpointId" TEXT,
     "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -252,6 +253,7 @@ CREATE TABLE IF NOT EXISTS "file_journal" (
 
 CREATE INDEX IF NOT EXISTS "sessions_ownerId_idx" ON "sessions"("ownerId");
 CREATE INDEX IF NOT EXISTS "session_messages_sessionId_turn_idx" ON "session_messages"("sessionId", "turn");
+CREATE UNIQUE INDEX IF NOT EXISTS "session_messages_sessionId_clientKey_key" ON "session_messages"("sessionId", "clientKey");
 CREATE INDEX IF NOT EXISTS "checkpoints_threadId_checkpointNs_idx" ON "checkpoints"("threadId", "checkpointNs");
 CREATE INDEX IF NOT EXISTS "checkpoint_writes_threadId_checkpointNs_idx" ON "checkpoint_writes"("threadId", "checkpointNs");
 CREATE INDEX IF NOT EXISTS "tool_approval_logs_traceId_idx" ON "tool_approval_logs"("traceId");
@@ -262,6 +264,15 @@ CREATE INDEX IF NOT EXISTS "file_journal_sessionId_checkpointId_idx" ON "file_jo
 CREATE UNIQUE INDEX IF NOT EXISTS "file_journal_sessionId_seq_key" ON "file_journal"("sessionId", "seq");
 CREATE UNIQUE INDEX IF NOT EXISTS "file_journal_sessionId_toolCallId_key" ON "file_journal"("sessionId", "toolCallId");
 `)
+
+  // #778（#747·08 · story 7）：session_messages 补 clientKey 列（32-hex 幂等 key，仅 user 行
+  // 携带）+ (sessionId, clientKey) 唯一索引 = 断网重发不重复入列的约束面。ADD COLUMN 非幂等，
+  // PRAGMA guard 先查再补（对齐 T02 模式）；唯一索引本身幂等（IF NOT EXISTS）。fresh 库
+  // （上方 CREATE TABLE 已带列）此处列存在 → guard 跳过。
+  const smCols = db.prepare(`PRAGMA table_info("session_messages")`).all()
+  if (smCols.length > 0 && !smCols.some((c) => c.name === 'clientKey')) {
+    db.exec(`ALTER TABLE "session_messages" ADD COLUMN "clientKey" TEXT`)
+  }
 
   // ---- 配置域新表（731 §3：provider_endpoints / config_meta · 752 §4.2：plugin_enablements）----
   db.exec(`

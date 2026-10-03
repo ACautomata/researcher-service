@@ -147,6 +147,7 @@ CREATE TABLE "session_messages" (
     "turn" INTEGER NOT NULL,
     "role" TEXT NOT NULL,
     "content" TEXT NOT NULL DEFAULT '',
+    "clientKey" TEXT,
     "attachmentsJson" TEXT NOT NULL DEFAULT '{"v":1}',
     "anchorCheckpointId" TEXT,
     "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -350,6 +351,9 @@ CREATE INDEX "sessions_ownerId_idx" ON "sessions"("ownerId");
 
 -- CreateIndex
 CREATE INDEX "session_messages_sessionId_turn_idx" ON "session_messages"("sessionId", "turn");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "session_messages_sessionId_clientKey_key" ON "session_messages"("sessionId", "clientKey");
 
 -- CreateIndex
 CREATE INDEX "checkpoints_threadId_checkpointNs_idx" ON "checkpoints"("threadId", "checkpointNs");
