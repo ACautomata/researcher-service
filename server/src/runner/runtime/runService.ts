@@ -158,7 +158,8 @@ export class RunService {
 
   // ---- 发消息入口（story 7 的 runner 侧；幂等 key/落 session_messages 归 #778）----
   // 归属判定复用 #776 getSessionForUser（admin 全放行 / user 仅本人；「不存在 vs 越权」
-  // 同码 50002 防探测，区分仅进服务端日志——#312⑤；#778 会话域落地后随 sessions 域收编）。
+  // 同码 50002 防探测，区分仅进服务端日志——#312⑤；#778 落地后保留为内核防御面（REST 面
+  // #778 已前置同判定——双层对齐 50004/50003 门禁先例：REST 即时反馈 + 内核权威兜底）。
   // 额度即时反馈面归 #778 REST（读 gate.inFlight），权威判定在 executeNow 的 gate.acquire
   //（满 → 40043）。
   async buildMessageCommand(params: {

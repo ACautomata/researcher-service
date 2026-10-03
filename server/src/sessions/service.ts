@@ -98,14 +98,31 @@ function summary(s: Session): SessionSummary {
   return { id: s.id, title: s.title, createdAt: s.createdAt.toISOString(), updatedAt: s.updatedAt.toISOString() }
 }
 
-// turn 序号分配：会话内 max+1（读路径排序键；门禁单 run 语义下无并发 run，SQLite 串行写）。
-async function nextTurn(prisma: PrismaClient, sessionId: string): Promise<number> {
-  const last = await prisma.sessionMessage.findFirst({
-    where: { sessionId },
-    orderBy: { turn: 'desc' },
-    select: { turn: true },
+// turn 序号分配 + 落行打包进 interactive transaction：read-then-write 在 SQLite 单连接事务内
+// 原子（并发写排队），消除交错窗口——run 终态 recordTurn 与门禁放行的新 sendMessage 落行
+// 曾可重叠（completed 置位于 finally recordTurn 之前），裸 read-then-write 下产生同 turn 双行，
+// 投影 (turn asc, createdAt asc) 排序下答先于问（R3 评审）。
+async function insertWithNextTurn(
+  prisma: PrismaClient,
+  sessionId: string,
+  data: {
+    role: string
+    content: string
+    clientKey?: string
+    anchorCheckpointId?: string | null
+    attachmentsJson?: string
+  },
+): Promise<SessionMessage> {
+  return prisma.$transaction(async (tx) => {
+    const last = await tx.sessionMessage.findFirst({
+      where: { sessionId },
+      orderBy: { turn: 'desc' },
+      select: { turn: true },
+    })
+    return tx.sessionMessage.create({
+      data: { sessionId, turn: (last?.turn ?? 0) + 1, ...data },
+    })
   })
-  return (last?.turn ?? 0) + 1
 }
 
 // 投影行组装：content 独立列 + attachmentsJson 聚合面（v 版本字段不外露）；assistant 行
@@ -138,12 +155,16 @@ export class SessionService {
   // ---- 创建（扁平挂用户；containerId = 预言名 researcher-sandbox-<id>，沙箱本体惰性创建
   // 由 #776 ensure 在首次 run/上传时落地）+ session.created{source:new} 广播 ----
   async createSession(user: Pick<AuthUser, 'id'>, title = ''): Promise<SessionSummary> {
-    const created = await this.deps.prisma.session.create({
-      data: { ownerId: user.id, containerId: '', title },
-    })
-    const fresh = await this.deps.prisma.session.update({
-      where: { id: created.id },
-      data: { containerId: `${SANDBOX_CONTAINER_PREFIX}${created.id}` },
+    const fresh = await this.deps.prisma.$transaction(async (tx) => {
+      // 两跳打包事务：预言名 PREFIX+id 依赖 create 生成的 id——打包消除 containerId 空值
+      // 中间态（并发列表/详情读不可见）。
+      const created = await tx.session.create({
+        data: { ownerId: user.id, containerId: '', title },
+      })
+      return tx.session.update({
+        where: { id: created.id },
+        data: { containerId: `${SANDBOX_CONTAINER_PREFIX}${created.id}` },
+      })
     })
     this.publishSessionEvent(user.id, 'session.created', { source: 'new', session: summary(fresh) }, fresh.id)
     return summary(fresh)
@@ -230,14 +251,10 @@ export class SessionService {
     //（刷新窗口无「事件先于消息」跳变）。
     let row: SessionMessage
     try {
-      row = await this.deps.prisma.sessionMessage.create({
-        data: {
-          sessionId,
-          turn: await nextTurn(this.deps.prisma, sessionId),
-          role: 'user',
-          content: p.content,
-          clientKey: p.clientKey,
-        },
+      row = await insertWithNextTurn(this.deps.prisma, sessionId, {
+        role: 'user',
+        content: p.content,
+        clientKey: p.clientKey,
       })
     } catch (e) {
       if ((e as { code?: string }).code === 'P2002') {
@@ -295,7 +312,7 @@ export class SessionService {
       sessionId,
       ownerId: user.id,
       username: user.username,
-      ...(decisions !== undefined ? { decisions } : {}),
+      decisions,
     })
     await this.deps.dispatch(cmd)
     return { runId: cmd.runId }
@@ -320,16 +337,11 @@ export class SessionService {
   // attachmentsJson 走 serializeAttachments（与 TurnReducer 同一实现——单一来源），字段序稳定
   //（回放零差异断言的前提）。----
   async recordTurn(p: RecordTurnPayload): Promise<void> {
-    const turn = await nextTurn(this.deps.prisma, p.sessionId)
-    await this.deps.prisma.sessionMessage.create({
-      data: {
-        sessionId: p.sessionId,
-        turn,
-        role: 'assistant',
-        content: p.aggregate.content,
-        anchorCheckpointId: p.anchorCheckpointId,
-        attachmentsJson: serializeAttachments(p.aggregate),
-      },
+    await insertWithNextTurn(this.deps.prisma, p.sessionId, {
+      role: 'assistant',
+      content: p.aggregate.content,
+      anchorCheckpointId: p.anchorCheckpointId,
+      attachmentsJson: serializeAttachments(p.aggregate),
     })
     await this.autoTitle(p.sessionId)
   }
