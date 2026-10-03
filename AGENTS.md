@@ -113,8 +113,9 @@ OpenClaw 容器 fleet (openclaw-gw-<name>，每容器独立 home/openclaw.json/�
 `2xxxx` 容器 · `3xxxx` wiki ·
 `4xxxx` models（40042 端点不在白名单[运行时第二层，仅 runner 侧] · 40043 并发配额已满[per-user
 maxConcurrentRuns 或全局 RUNNER_MAX_CONCURRENT_RUNS]）· `5xxxx` chat/pairing 的 WS close codes 为另一传输面；信封面 5xxxx = 会话/run 域（#747 C 节，
-  #776 起 50002 session_not_found；#778 增 50003 审批挂起 / 50004 run 进行中禁输入·非终态拒删 /
-  50005 无在飞可中断 / 50006 幂等 key 同 key 异 content）· `6xxxx` files ·
+  #776 起 50002 session_not_found；#777 起 50003 审批挂起（#778 补 REST 前置面与码表）/ #778 增
+  50004 run 进行中禁输入·非终态拒删 / 50005 无在飞可中断 / 50006 幂等 key 同 key 异 content）·
+  `6xxxx` files ·
 `7xxxx` figures（AutoFigure，70040 不存在/越权同码防探测（T05 读路径，PNG 复用同一归属门）· 70041 幂等冲突 ·
 70042 PNG 未就绪（queued/running）· 70043 PNG 不可用（failed/产物缺失））·
 `9xxxx` 系统/校验。
