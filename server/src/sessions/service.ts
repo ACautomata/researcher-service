@@ -2,7 +2,7 @@
 // 改标题（story 5 自动生成+可改）、发消息（story 7 32-hex 幂等）、abort（story 8 by:user）、
 // resume、历史投影 GET、删会话级联删沙箱（#776 契约「消费方 = #778」）。
 //
-// 多端门禁（story 13 · #747 C 节）：running 全端禁输入（50004）/ interrupted 全端须先审批
+// 多端门禁（story 13 · #747 C 节）：running 全端禁输入（50005）/ interrupted 全端须先审批
 //（50003，内核防御面在 RunService，此处 REST 前置即时反馈）/ resume 先到先得（50001，
 // buildResumeCommand 预检 + executeRun 权威面双层）。事件扇出经 StreamHub 单例 → 该 user
 // 全部连接同帧（多端广播一致由 hub.fanOut 保证，eventsHub.test.ts 锁）。
@@ -190,7 +190,7 @@ export class SessionService {
   // ---- 删会话（级联：沙箱容器+网络 → DB 行 onDelete Cascade 清 messages/checkpoints/
   // attachments/fileJournal）。先删沙箱（失败保留行可重试——remove 'not-found' 幂等）再删行，
   // 防孤儿容器（sweeper 只 stop 不 remove）。
-  // 在飞 run 互斥（R3 评审）：非终态（queued/running/interrupted）挡删 50004——删 = 沙箱随删
+  // 在飞 run 互斥（R3 评审）：非终态（queued/running/interrupted）挡删 50005——删 = 沙箱随删
   //（在飞工具全失败）+ 行删后 run 域事件成无主引用 + recordTurn FK 失败。先 abort/等终态再
   // 删；stateOf 内存缺失（本进程无该会话 run 记录——worker 同进程模型）= 可删。----
   async deleteSession(user: Pick<AuthUser, 'id' | 'role'>, sessionId: string): Promise<void> {
@@ -209,7 +209,7 @@ export class SessionService {
   // ---- 发消息（story 7 幂等 + 多端门禁）。顺序：归属 → 幂等 → 门禁 → 配额预检 → 命令构造
   // → 落 user 行 → dispatch（ack 失败回滚删行）。
   // 幂等查先于门禁：断网重发的首个请求可能已把 run 推入 running——重发必须拿 replay 应答
-  //（200）而非 50004 门禁错误（「断网重发不重复入列」的语义面：已收的消息不应答错误）。
+  //（200）而非 50005 门禁错误（「断网重发不重复入列」的语义面：已收的消息不应答错误）。
   // 并发同 key 单落：先查 + 唯一约束 P2002 兜底重查（bootstrap 先例）——约束是单落权威，
   // 双请求都越过先查时后落者撞约束回读既有行（replay 形态返回，不重复 dispatch）。----
   async sendMessage(
@@ -224,10 +224,10 @@ export class SessionService {
     })
     if (existing) return this.replayOrConflict(existing, p.content)
 
-    // 多端门禁（#747 C 节）：queued/running → 50004 禁新输入；interrupted → 50003 须先审批
+    // 多端门禁（#747 C 节）：queued/running → 50005 禁新输入；interrupted → 50003 须先审批
     //（内核面 RunService.execute 同挡，此处 REST 即时反馈——入队前拒绝，不产生 queued 幽灵）。
     // 观测窗口（已知边界）：dispatch=BullMQ 异步入队，submit→worker 拾取间 stateOf 尚无记录，
-    // 窗口内新输入穿透 50004 沿串行链排队（顺序保证不丢，仅门禁反馈弱化；S1 Inline 同步
+    // 窗口内新输入穿透 50005 沿串行链排队（顺序保证不丢，仅门禁反馈弱化；S1 Inline 同步
     // 执行无此窗口——测试面与生产行为在此点的分叉已认知）。
     const snap = this.deps.runService.stateOf(sessionId)
     if (snap?.state === 'running' || snap?.state === 'queued') throw fail(CODE.RUN_IN_PROGRESS)
@@ -288,7 +288,7 @@ export class SessionService {
   }
 
   // ---- 中断（story 8，by:user）。仅 running 在飞 run 可中断（RunService.abort 只对 aborts
-  // 条目生效——queued/interrupted/终态 → 50005）。run.aborted{by:user} 事件由 RunService 发。----
+  // 条目生效——queued/interrupted/终态 → 50006）。run.aborted{by:user} 事件由 RunService 发。----
   async abortRun(user: Pick<AuthUser, 'id' | 'role'>, sessionId: string): Promise<{ runId: string }> {
     await getSessionForUser(this.deps.prisma, user, sessionId)
     const snap = this.deps.runService.stateOf(sessionId)

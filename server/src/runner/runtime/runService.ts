@@ -31,8 +31,15 @@
 
 import { randomUUID } from 'node:crypto'
 import { HumanMessage } from '@langchain/core/messages'
-import { Command } from '@langchain/langgraph'
+import { Command, END } from '@langchain/langgraph'
 import { INTERRUPT } from '@langchain/langgraph-checkpoint'
+import {
+  ApprovalFunnel,
+  isApprovalInterruptPayload,
+  type ApprovalInterruptPayload,
+  type RejectionNotice,
+} from '../approval/funnel'
+import { APPROVAL_EVENT_REQUESTED, APPROVAL_EVENT_RESOLVED, APPROVAL_TIMEOUT_MS } from '../approval/values'
 import type { PrismaClient } from '../../generated/prisma/client'
 import { CODE } from '../../codes'
 import { fail } from '../../envelope'
@@ -72,9 +79,14 @@ export interface RunCommand {
   readonly content?: string
   /** kind=resume：HITL 决策（{decisions:[...]} 形态，PoC 实测） */
   readonly decisions?: unknown
+  /** kind=resume：abort 语义（#783 story 15——suspended/interrupted run 的终态出路：
+   *  Command({resume, goto: END}) 终止图执行，run 落 aborted 终态而非续跑） */
+  readonly abort?: boolean
 }
 
-export type RunState = 'queued' | 'running' | 'interrupted' | 'completed' | 'failed' | 'aborted'
+// suspended（#783 story 15）：审批升级 48h 未落定——非终态（interrupted ⇄ suspended），
+// 可 resume / abort。仅审批漏斗升级会进入（deepagents interruptOn 的 V1 测试面不计时）。
+export type RunState = 'queued' | 'running' | 'interrupted' | 'suspended' | 'completed' | 'failed' | 'aborted'
 
 export interface RunSnapshot {
   readonly runId: string
@@ -103,6 +115,12 @@ export interface RunServiceDeps {
   }
   /** interrupt 策略源（拓扑因子；V1 无审批恒 undefined，#783 由持久化维度派生——测试注入） */
   readonly interruptPolicyFor?: (sessionId: string) => InterruptPolicy | undefined
+  /** 审批三层漏斗（#783）。与 interruptPolicyFor（V1 测试面）可并存，生产只接前者。 */
+  readonly approvals?: ApprovalFunnel
+  /** 审批升级超时（默认 48h，729 附录 B；测试注入缩短） */
+  readonly approvalTimeoutMs?: number
+  /** 挂起清扫定时器间隔（毫秒；缺省 5min，0 = 不启动定时器——测试手动调 sweepSuspensions） */
+  readonly sweepIntervalMs?: number
   readonly recursionLimit?: number
   /** 毫秒时钟（durationMs 计时；缺省 Date.now，测试注入步进时钟） */
   readonly clock?: () => number
@@ -122,20 +140,50 @@ interface GraphStateLike {
 // 通道名漂移时此处类型红，推导面不会静默失效。
 const INTERRUPT_CHANNEL = INTERRUPT
 
+// 审批升级挂起记录（#783）：interrupt 检出时落（事件 + 48h 死线），resume/落定时清。
+interface PendingApproval {
+  readonly ownerId: string
+  readonly runId: string
+  readonly escalationId: string
+  readonly deadlineAt: number
+}
+
 export class RunService {
   private readonly graphs = new Map<string, DeepAgentLike>()
   private readonly runs = new Map<string, RunSnapshot>()
   private readonly aborts = new Map<string, { controller: AbortController; by: 'user' | 'system' }>()
   private readonly chains = new Map<string, Promise<void>>()
+  private readonly pendingApprovals = new Map<string, PendingApproval>()
+  /** 在飞 run 命令（threadId → cmd；拒绝红显事件的归属盖印源） */
+  private readonly activeCmds = new Map<string, Pick<RunCommand, 'sessionId' | 'runId' | 'ownerId'>>()
   private readonly recursionLimit: number
+  private readonly approvalTimeoutMs: number
   private readonly clock: () => number
   private recordTurn: RecordTurnFn | undefined
+  private sweepTimer: ReturnType<typeof setInterval> | undefined
 
   constructor(private readonly deps: RunServiceDeps) {
     this.recursionLimit = deps.recursionLimit ?? DEFAULT_RECURSION_LIMIT
+    this.approvalTimeoutMs = deps.approvalTimeoutMs ?? APPROVAL_TIMEOUT_MS
     this.clock = deps.clock ?? (() => Date.now())
     // 构造期兜底：任何 runner 实例化路径都覆盖 env 误开（装配层亦显式调用，双保险）
     disableLangsmithTracing()
+    // 拒绝红显事件接线：漏斗判定时回调（同步），按在飞 cmd 盖印发布
+    this.deps.approvals?.setRejectionSink((notice) => this.publishRejection(notice))
+    // 挂起清扫定时器（48h 死线 → suspended；测试可 0 关闭手动 sweep）
+    const sweepInterval = deps.sweepIntervalMs ?? 300_000
+    if (deps.approvals && sweepInterval > 0) {
+      this.sweepTimer = setInterval(() => this.sweepSuspensions(), sweepInterval)
+      this.sweepTimer.unref?.()
+    }
+  }
+
+  // 停清扫定时器（装配层 close 调用；幂等）
+  dispose(): void {
+    if (this.sweepTimer) {
+      clearInterval(this.sweepTimer)
+      this.sweepTimer = undefined
+    }
   }
 
   // 装配期注入 session_messages 落库缝（见 RecordTurnFn 注；幂等——重复注入覆盖前者）。
@@ -230,9 +278,10 @@ export class RunService {
   // executeNow 的信封错误（40043/50002）向上传播；run 执行体错误在 executeRun 内消化
   //（终态事件已发，对传输面表现为正常完成）。
   async execute(cmd: RunCommand): Promise<void> {
-    // 入队面 fast-fail：interrupted 态 message 拒绝（queued 覆盖之前——#747 C 节「interrupt
-    // 全端可审批」，见 executeRun 权威面）。内存面可知即不排队，调用方即时感知。
-    if (cmd.kind === 'message' && this.runs.get(cmd.sessionId)?.state === 'interrupted') {
+    // 入队面 fast-fail：interrupted/suspended 态 message 拒绝（queued 覆盖之前——#747 C 节
+    // 「interrupt 全端可审批」，见 executeRun 权威面）。内存面可知即不排队，调用方即时感知。
+    const entryState = this.runs.get(cmd.sessionId)?.state
+    if (cmd.kind === 'message' && (entryState === 'interrupted' || entryState === 'suspended')) {
       throw fail(CODE.RUN_INTERRUPT_PENDING)
     }
     // queued 只标 message 命令的新 run，且仅在无活跃条目时落——running/queued 不被新排队
@@ -241,7 +290,9 @@ export class RunService {
     // 覆盖态误伤）。interrupted 态已在上方 fast-fail 拒绝，不会走到覆盖。
     if (cmd.kind === 'message') {
       const prev = this.runs.get(cmd.sessionId)
-      const active = prev !== undefined && (prev.state === 'running' || prev.state === 'queued' || prev.state === 'interrupted')
+      const active =
+        prev !== undefined &&
+        (prev.state === 'running' || prev.state === 'queued' || prev.state === 'interrupted' || prev.state === 'suspended')
       if (!active) this.runs.set(cmd.sessionId, { runId: cmd.runId, state: 'queued' })
     }
     const prev = this.chains.get(cmd.sessionId) ?? Promise.resolve()
@@ -260,7 +311,11 @@ export class RunService {
     return task
   }
 
-  private publish(ownerId: string, ev: Omit<CatalogEvent, 'sessionId' | 'runId'>, cmd: RunCommand): void {
+  private publish(
+    ownerId: string,
+    ev: Omit<CatalogEvent, 'sessionId' | 'runId'>,
+    cmd: Pick<RunCommand, 'sessionId' | 'runId'>,
+  ): void {
     this.deps.hub.publish(ownerId, { ...ev, sessionId: cmd.sessionId, runId: cmd.runId })
   }
 
@@ -294,7 +349,11 @@ export class RunService {
           this.runs.set(cmd.sessionId, snap)
         }
       }
-      if (!snap || snap.state !== 'interrupted') throw fail(CODE.RUN_ALREADY_RESUMED)
+      // suspended 可 resume（#783 story 15：48h 超时非终态）
+      if (!snap || (snap.state !== 'interrupted' && snap.state !== 'suspended')) {
+        throw fail(CODE.RUN_ALREADY_RESUMED)
+      }
+      this.pendingApprovals.delete(cmd.sessionId) // 升级落定，48h 死线随清
     } else {
       // #747 C 节「running 全端禁输入、interrupt 全端可审批」的内核权威面：interrupted 态
       // message 会作废 pending interrupt（静默丢审批）——拒绝之（#778 REST 门禁之外的第二
@@ -303,6 +362,7 @@ export class RunService {
       const snap = this.runs.get(cmd.sessionId)
       const threadInterrupted =
         snap?.state === 'interrupted' ||
+        snap?.state === 'suspended' ||
         ((snap === undefined || snap.state === 'queued') &&
           (await this.threadInterruptedFromCheckpoint(cmd.sessionId)))
       if (threadInterrupted) throw fail(CODE.RUN_INTERRUPT_PENDING)
@@ -323,7 +383,28 @@ export class RunService {
     const policy = this.deps.interruptPolicyFor?.(cmd.sessionId)
     const agent = this.getOrBuildGraph(cmd.sessionId, snapshot.version, policy, model, cmd.ownerId, labContainer)
 
+    // 漏斗运行面（#783）：谨慎模式读 session owner 的 users.approvalMode（会话级开关，跨设备
+    // 跟随）；message run 重置计数器 + 落审计身份（runId/ownerId/traceId），resume 延续计数
+    // （同一逻辑 run 的 judge 超限/重复拒绝护栏跨 resume 连续）。审计身份归属 session owner
+    // （approvalMode 是 owner 的会话级偏好；admin 代跑他人会话时漏斗判定仍记 owner——V1 简化）。
+    if (this.deps.approvals) {
+      const ownerRow = await this.deps.prisma.user.findUnique({
+        where: { id: session.ownerId },
+        select: { approvalMode: true },
+      })
+      const cautious = ownerRow?.approvalMode === 'cautious'
+      if (cmd.kind === 'message') {
+        this.deps.approvals.beginRun(cmd.sessionId, {
+          cautious,
+          identity: { runId: cmd.runId, userId: session.ownerId, traceId: cmd.runId },
+        })
+      } else {
+        this.deps.approvals.refreshRun(cmd.sessionId, { cautious })
+      }
+    }
+
     this.runs.set(cmd.sessionId, { runId: cmd.runId, state: 'running' })
+    this.activeCmds.set(cmd.sessionId, { sessionId: cmd.sessionId, runId: cmd.runId, ownerId: cmd.ownerId })
     // 新 run = run.started；interrupted 后的续跑 = run.resumed（#747 C 节目录二者并列——
     // resume 不重发 started，消费方按事件类型区分首轮/续跑轮）
     this.publish(
@@ -362,7 +443,12 @@ export class RunService {
     const input =
       cmd.kind === 'message'
         ? { messages: [new HumanMessage(cmd.content ?? '')] }
-        : new Command({ resume: cmd.decisions ?? DEFAULT_RESUME_DECISIONS })
+        : new Command({
+            resume: cmd.decisions ?? DEFAULT_RESUME_DECISIONS,
+            // abort（#783 story 15）：回执决策 + goto END——interrupt 回执后图立即终止，
+            // run 落 aborted 终态（探针验证：resume 值仍送达 interrupt 点，工具不执行）
+            ...(cmd.abort ? { goto: END } : {}),
+          })
 
     // 终态 checkpoint 锚点（#778 anchorCheckpointId）：成功路径从终态 state 取；
     // aborted/failed 路径无可靠 state → null（回放面锚点缺位不阻断落行）。
@@ -391,6 +477,31 @@ export class RunService {
         this.runs.set(cmd.sessionId, { runId: cmd.runId, state: 'interrupted' })
         // interrupted 不发终态事件（#777 契约「interrupted 态无终态事件」，S4 锁；恢复面 =
         // run.resumed 起新轮）
+        // 审批升级检出（#783）：漏斗 interrupt → approval.requested 事件 + 48h 死线落表；
+        // deepagents 内建 interruptOn（V1 测试面）载荷无 kind 标记，不触发审批事件。
+        const escalations = this.extractApprovalInterrupts(state)
+        for (const payload of escalations) {
+          this.publish(
+            cmd.ownerId,
+            {
+              type: APPROVAL_EVENT_REQUESTED,
+              payload: { escalation: payload.escalation, actionRequests: payload.actionRequests, teammateId: null },
+            },
+            cmd,
+          )
+        }
+        if (escalations.length > 0) {
+          this.pendingApprovals.set(cmd.sessionId, {
+            ownerId: cmd.ownerId,
+            runId: cmd.runId,
+            escalationId: escalations[0]!.escalation.id,
+            deadlineAt: this.clock() + this.approvalTimeoutMs,
+          })
+        }
+      } else if (cmd.kind === 'resume' && cmd.abort) {
+        // abort 落定（story 15）：goto END 终止，aborted 为终态
+        this.runs.set(cmd.sessionId, { runId: cmd.runId, state: 'aborted', by: 'user' })
+        this.publish(cmd.ownerId, { type: 'run.aborted', payload: { by: 'user' } }, cmd)
       } else {
         this.runs.set(cmd.sessionId, { runId: cmd.runId, state: 'completed' })
         this.publish(cmd.ownerId, { type: 'run.completed', payload: {} }, cmd)
@@ -408,6 +519,15 @@ export class RunService {
       }
     } finally {
       this.aborts.delete(cmd.runId)
+      this.activeCmds.delete(cmd.sessionId)
+      // 终态清理漏斗运行槽（interrupted/suspended 保留——resume 延续同一逻辑 run 的护栏计数）
+      const finalState = this.runs.get(cmd.sessionId)?.state
+      if (
+        this.deps.approvals &&
+        (finalState === 'completed' || finalState === 'failed' || finalState === 'aborted')
+      ) {
+        this.deps.approvals.dropRun(cmd.sessionId)
+      }
       // 终态聚合落 session_messages（#778；interrupted/aborted/failed 也落——刷新回放须含
       // 已流出的部分，story 3「零差异」）。空聚合不落（failed 立即等场景无用户可见内容）。
       // 落库失败不放大为 run 故障（终态事件已发）：告警留痕，#779 补偿面兜底。
@@ -425,6 +545,161 @@ export class RunService {
         }
       }
     }
+  }
+
+  // ---- 审批升级检出（interrupt payload → approval.requested 事件面）----
+  private extractApprovalInterrupts(state: GraphStateLike): ApprovalInterruptPayload[] {
+    const out: ApprovalInterruptPayload[] = []
+    for (const task of state.tasks ?? []) {
+      for (const interrupt of task.interrupts ?? []) {
+        const value = (interrupt as { value?: unknown } | null)?.value ?? interrupt
+        if (isApprovalInterruptPayload(value)) out.push(value)
+      }
+    }
+    return out
+  }
+
+  // ---- 拒绝红显事件（漏斗 onRejection 回调接线）：tool.start + tool.end{error, rejection} ----
+  private publishRejection(notice: RejectionNotice): void {
+    const cmd = this.activeCmds.get(notice.threadId)
+    if (!cmd) return
+    this.publish(
+      cmd.ownerId,
+      { type: 'tool.start', payload: { toolCallId: notice.toolCallId, name: notice.name, input: notice.argsSummary } },
+      cmd,
+    )
+    this.publish(
+      cmd.ownerId,
+      {
+        type: 'tool.end',
+        payload: {
+          toolCallId: notice.toolCallId,
+          name: notice.name,
+          state: 'error',
+          durationMs: 0,
+          details: notice.reason,
+          rejection: { source: notice.source, reason: notice.reason },
+        },
+      },
+      cmd,
+    )
+  }
+
+  // ---- 48h 挂起清扫（#783 story 15）：死线过 → suspended（非终态）+ run.suspended 事件 ----
+  sweepSuspensions(now?: number): void {
+    const t = now ?? this.clock()
+    for (const [sessionId, pending] of this.pendingApprovals) {
+      if (pending.deadlineAt > t) continue
+      this.pendingApprovals.delete(sessionId)
+      const snap = this.runs.get(sessionId)
+      if (!snap || snap.state !== 'interrupted') continue
+      this.runs.set(sessionId, { runId: snap.runId, state: 'suspended' })
+      this.publish(pending.ownerId, { type: 'run.suspended', payload: {} }, { sessionId, runId: snap.runId })
+    }
+  }
+
+  // ---- 重启恢复（装配层启动调用）：checkpoint 推导超时未落定的审批升级 → suspended ----
+  // 死线源 = 该 thread 最新 checkpoint 行的 createdAt（interrupt 后无新 checkpoint，两者差
+  // 一个节点执行时长——48h 尺度下可忽略）；仅标内存观测态，不发事件（重启不重放历史）。
+  async recoverSuspensions(): Promise<void> {
+    if (!this.deps.approvals) return
+    const threads: { threadId: string }[] = []
+    try {
+      const groups = await this.deps.prisma.checkpointWrite.groupBy({
+        by: ['threadId'],
+        where: { channel: INTERRUPT_CHANNEL },
+        orderBy: [{ threadId: 'asc' }], // groupBy 变体要求 orderBy/take 其一；顺带确定性序
+      })
+      for (const g of groups) threads.push({ threadId: g.threadId })
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.warn('[runner] 挂起恢复扫描失败（跳过）: ' + (e as Error).message)
+      return
+    }
+    for (const { threadId } of threads) {
+      if (this.runs.has(threadId)) continue // 内存已有权威态
+      if (!(await this.threadInterruptedFromCheckpoint(threadId))) continue // 已 resume/落定
+      const cp = await this.deps.prisma.checkpoint.findFirst({
+        where: { threadId },
+        orderBy: [{ createdAt: 'desc' }],
+        select: { createdAt: true },
+      })
+      if (!cp) continue
+      if (this.clock() - cp.createdAt.getTime() < this.approvalTimeoutMs) continue
+      this.runs.set(threadId, { runId: '', state: 'suspended' })
+    }
+  }
+
+  // ---- 审批落定（#783 story 33：allow-once/deny 二选；story 15：suspended 可 resume/abort）----
+  // 落定 = approval.resolved 事件（卡片落定即撤）→ resume 命令入串行链（abort = goto END 终态）。
+  async resolveApproval(params: {
+    sessionId: string
+    ownerId: string
+    username: string
+    escalationId: string
+    decision: 'allow' | 'deny'
+    reason?: string
+    abort?: boolean
+  }): Promise<void> {
+    // 归属判定（「不存在 vs 越权」同码 50002 防探测——与 message 入口同源）
+    const caller = await this.deps.prisma.user.findUnique({
+      where: { id: params.ownerId },
+      select: { role: true },
+    })
+    if (!caller) throw fail(CODE.SESSION_NOT_FOUND)
+    await getSessionForUser(this.deps.prisma, { id: params.ownerId, role: caller.role }, params.sessionId)
+
+    // 权威 pending 判定：内存态 / checkpoint 推导（重启形态）
+    let snap = this.runs.get(params.sessionId)
+    if (!snap) {
+      const interrupted = await this.threadInterruptedFromCheckpoint(params.sessionId)
+      if (interrupted) {
+        snap = { runId: this.pendingApprovals.get(params.sessionId)?.runId ?? '', state: 'interrupted' }
+        this.runs.set(params.sessionId, snap)
+      }
+    }
+    if (!snap || (snap.state !== 'interrupted' && snap.state !== 'suspended')) {
+      throw fail(CODE.APPROVAL_NOT_FOUND)
+    }
+    // escalationId 核对（同进程漏斗 memo 在场时强校验；重启后 memo 丢失，弱校验放行——
+    // 调用方已过归属门，id 核对主要防同会话双升级窗口的错配落定）
+    const escalation = this.deps.approvals?.pendingEscalation(params.sessionId)
+    if (escalation && escalation.escalation.id !== params.escalationId) {
+      throw fail(CODE.APPROVAL_NOT_FOUND)
+    }
+
+    const runId = this.pendingApprovals.get(params.sessionId)?.runId ?? snap.runId
+    this.publish(
+      params.ownerId,
+      {
+        type: APPROVAL_EVENT_RESOLVED,
+        payload: {
+          escalationId: params.escalationId,
+          decision: params.decision,
+          reason: params.reason ?? null,
+          teammateId: null, // teammate 并发协作（#742）未上线，来源标记预留
+        },
+      },
+      { sessionId: params.sessionId, runId },
+    )
+    this.pendingApprovals.delete(params.sessionId)
+
+    const cmd = this.buildCommand({
+      sessionId: params.sessionId,
+      ownerId: params.ownerId,
+      username: params.username,
+      kind: 'resume',
+      decisions: {
+        decisions: [
+          {
+            type: params.decision === 'allow' ? 'approve' : 'reject',
+            ...(params.reason !== undefined && params.reason !== '' ? { message: params.reason } : {}),
+          },
+        ],
+      },
+      ...(params.abort ? { abort: true } : {}),
+    })
+    await this.execute(cmd)
   }
 
   // ---- 图实例缓存（拓扑因子全在键内：thread | configVersion | policy | backend 双根）----
@@ -452,6 +727,9 @@ export class RunService {
       checkpointer: this.deps.saver,
       systemPrompt: LEADER_SYSTEM_PROMPT,
       interruptPolicy: policy,
+      // 审批漏斗中间件（#783）：middleware 是运行期行为非拓扑因子——不入缓存键（跨 run
+      // 状态由漏斗 per-thread 槽管理，同参数必同拓扑的纯函数约束不受影响）。
+      ...(this.deps.approvals ? { middleware: [this.deps.approvals.middleware] } : {}),
     })
     // 图实例数护栏（正确性由键保证，此处防长期运行退化；超限整表清——重建成本 =
     // 一次 createDeepAgent 编译，进行中 run 持既有实例引用不受影响）。

@@ -1,5 +1,5 @@
 // S1 信封级集成（#778 · #747 Testing Decisions）：会话 REST 域全件——创建/列表/改标题/删除、
-// 发消息幂等（story 7）、多端门禁（story 13：running 禁输入 50004 / interrupt 50003 / resume
+// 发消息幂等（story 7）、多端门禁（story 13：running 禁输入 50005 / interrupt 50003 / resume
 // 先到先得 50001 / 广播一致）、abort（story 8 by:user）、50002 防探测、回放零差异（story 3：
 // SSE 事件流归约终态 ≡ 投影 GET 行，逐字节）。
 //
@@ -276,7 +276,7 @@ describe('会话 REST 域（S1，#778）', () => {
     expect(after.body.code).toBe(CODE.SESSION_NOT_FOUND)
   })
 
-  it('DELETE /:id 在飞互斥：running → 50004 挡删（沙箱保留）；终态后可删', async () => {
+  it('DELETE /:id 在飞互斥：running → 50005 挡删（沙箱保留）；终态后可删', async () => {
     slowExec = true
     currentScript = [toolCallAi('g5', 'execute', { command: 'slow' }), new AIMessage({ content: 'done' })]
     const sid = (await request.post('/api/v1/sessions').set(bearer(access)).send({})).body.data.id as string
@@ -376,7 +376,7 @@ describe('会话 REST 域（S1，#778）', () => {
     await waitFor(() => ['completed', 'failed'].includes(runService.stateOf('sess-seed')?.state ?? ''))
   })
 
-  it('同 key 不同 content → 50006（幂等冲突，零写入）', async () => {
+  it('同 key 不同 content → 50007（幂等冲突，零写入）', async () => {
     const key = hexKey(0x104)
     await request
       .post('/api/v1/sessions/sess-seed/messages')
@@ -420,7 +420,7 @@ describe('会话 REST 域（S1，#778）', () => {
 
   // ---- 多端门禁（story 13）----
 
-  it('running 全端禁输入：run 在飞时 POST /messages → 50004；同 key 重发仍幂等 replay（不门禁）', async () => {
+  it('running 全端禁输入：run 在飞时 POST /messages → 50005；同 key 重发仍幂等 replay（不门禁）', async () => {
     slowExec = true
     currentScript = [toolCallAi('g1', 'execute', { command: 'slow' }), new AIMessage({ content: 'done' })]
     const sid = (await request.post('/api/v1/sessions').set(bearer(access)).send({})).body.data.id as string
@@ -548,7 +548,7 @@ describe('会话 REST 域（S1，#778）', () => {
 
   // ---- abort（story 8）----
 
-  it('POST /:id/abort：running → 200 + run.aborted{by:user} 广播；无在飞 → 50005', async () => {
+  it('POST /:id/abort：running → 200 + run.aborted{by:user} 广播；无在飞 → 50006', async () => {
     slowExec = true
     currentScript = [toolCallAi('g3', 'execute', { command: 'slow' }), new AIMessage({ content: 'done' })]
     const sid = (await request.post('/api/v1/sessions').set(bearer(access)).send({})).body.data.id as string

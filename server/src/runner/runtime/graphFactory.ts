@@ -17,6 +17,7 @@ import { createDeepAgent, type CreateDeepAgentParams, type DeepAgent } from 'dee
 import type { Runnable } from '@langchain/core/runnables'
 import type { BaseCheckpointSaver } from '@langchain/langgraph-checkpoint'
 import type { SandboxBackendProtocolV2 as DeepAgentsBackendV2 } from 'deepagents'
+import type { AnyAgentMiddleware } from 'langchain'
 import type { SandboxBackendProtocolV2 as LocalBackendV2 } from '../backend/protocol'
 
 // 编译期对齐断言（#772 预留）：本地协议镜像结构兼容 deepagents 真类型。三包联动升级时
@@ -52,6 +53,10 @@ export interface LeaderAgentParams {
   readonly checkpointer: BaseCheckpointSaver
   readonly systemPrompt: string
   readonly interruptPolicy?: InterruptPolicy
+  // 审批漏斗中间件（#783；AnyAgentMiddleware 宽进——langchain 中间件类型随版本泛型漂移，
+  // 结构面由 runFunnel 的 WrapToolCallHook 推导钉死）。middleware 是运行期行为非拓扑因子，
+  // 不入缓存键；跨 run 状态由漏斗自身 per-thread 槽管理。
+  readonly middleware?: readonly AnyAgentMiddleware[]
 }
 
 // 构建一个 leader agent 图（纯函数；缓存责任在调用方——RunService 按
@@ -66,6 +71,9 @@ export function buildLeaderAgent(params: LeaderAgentParams): DeepAgent {
     checkpointer: params.checkpointer,
     systemPrompt: params.systemPrompt,
     interruptOn: interruptOnFromPolicy(params.interruptPolicy),
+    ...(params.middleware !== undefined && params.middleware.length > 0
+      ? { middleware: [...params.middleware] }
+      : {}),
   })
 }
 

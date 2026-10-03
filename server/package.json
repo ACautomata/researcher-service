@@ -37,6 +37,7 @@
     "jose": "^5.9.6",
     "langchain": "~1.5.14",
     "micromatch": "^4.0.8",
+    "shell-quote": "^1.8.3",
     "swagger-ui-express": "^5.0.1",
     "ws": "^8.18.0",
     "zod": "^3.24.1"
@@ -51,6 +52,7 @@
     "@types/express": "^5.0.0",
     "@types/micromatch": "^4.0.10",
     "@types/node": "^22.10.0",
+    "@types/shell-quote": "^1.7.5",
     "@types/supertest": "^6.0.2",
     "@types/swagger-ui-express": "^4.1.8",
     "@types/ws": "^8.5.13",
