@@ -60,7 +60,7 @@ export const CODE = {
   SESSION_NOT_FOUND: 50002, // 会话不存在 / 越权（同码防探测；root=lab 读面 #776，#778 会话 REST 同款）
   RUN_INTERRUPT_PENDING: 50003, // interrupted 态禁输入（#747 C 节「interrupt 全端可审批」内核防御面——须先 resume 决策）
   // #778（#747·08）会话 REST 域新增（码值执行期续号，对齐「03 interrupted 专用 / 04+ 域专用」惯例）：
-  RUN_IN_PROGRESS: 50004, // run 进行中（running/queued）禁新输入——#747 C 节「running 全端禁输入」REST 门禁面
+  RUN_IN_PROGRESS: 50004, // run 进行中（running/queued）禁新输入 + 非终态拒删会话（在飞互斥）——#747 C 节「running 全端禁输入」REST 门禁面
   RUN_NOT_ABORTABLE: 50005, // 无在飞 run 可中断（abort 目标缺失；#777 aborts 条目仅在飞期存在）
   MESSAGE_KEY_CONFLICT: 50006, // 同幂等 key 已用于不同 content（对齐 figures 70041「同 key 不同输入」稳定冲突锁式）
   // 9xxxx 系统 / 校验

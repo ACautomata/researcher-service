@@ -67,8 +67,8 @@ const MAX = {
 
 // attachmentsJson v1 序列化（字段序稳定——「投影 GET 与实时流终态逐字节一致」的前提）。
 // content 不入此 JSON——它是行独立列（schema.prisma SessionMessage.content）；本 JSON 只装
-// 聚合面（thinking/tools），空聚合 = 列默认 {"v":1}。模块级共享：TurnReducer.toAttachmentsJson
-// 与 SessionService.recordTurn（run 终态落行）同一实现——单一来源，不允两处漂移。
+// 聚合面（thinking/tools），空聚合 = 列默认 {"v":1}。attachmentsJson 的唯一序列化实现：
+// SessionService.recordTurn（run 终态落行）与投影侧快照比对共用，不允第二处漂移。
 export function serializeAttachments(snap: TurnSnapshot): string {
   return JSON.stringify({
     v: 1,

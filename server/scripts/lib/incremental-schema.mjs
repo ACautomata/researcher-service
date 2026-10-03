@@ -157,8 +157,8 @@ CREATE TABLE IF NOT EXISTS "session_messages" (
     "turn" INTEGER NOT NULL,
     "role" TEXT NOT NULL,
     "content" TEXT NOT NULL DEFAULT '',
-    "attachmentsJson" TEXT NOT NULL DEFAULT '{"v":1}',
     "clientKey" TEXT,
+    "attachmentsJson" TEXT NOT NULL DEFAULT '{"v":1}',
     "anchorCheckpointId" TEXT,
     "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT "session_messages_sessionId_fkey" FOREIGN KEY ("sessionId") REFERENCES "sessions" ("id") ON DELETE CASCADE ON UPDATE CASCADE

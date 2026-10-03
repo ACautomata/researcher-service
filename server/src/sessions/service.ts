@@ -334,7 +334,7 @@ export class SessionService {
 
   // ---- RunService recordTurn 注入缝（生产实现）：终态聚合落 assistant 行（含终态 checkpoint
   // 锚点 anchorCheckpointId——issue 点名列；aborted/failed 路径 null）+ 自动标题（story 5）。
-  // attachmentsJson 走 serializeAttachments（与 TurnReducer 同一实现——单一来源），字段序稳定
+  // attachmentsJson 走 serializeAttachments（唯一序列化实现——单一来源），字段序稳定
   //（回放零差异断言的前提）。----
   async recordTurn(p: RecordTurnPayload): Promise<void> {
     await insertWithNextTurn(this.deps.prisma, p.sessionId, {
