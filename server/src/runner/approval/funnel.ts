@@ -35,6 +35,7 @@ import type { ApprovalAuditRow, ApprovalAuditSink, RejectionSource } from './aud
 import {
   APPROVAL_INTERRUPT_KIND,
   APPROVAL_INTERRUPT_V,
+  APPROVAL_REJECTION_CONTENT_PREFIX,
   APPROVAL_REASON_MAX_CHARS,
   APPROVAL_SUMMARY_MAX_BYTES,
   EXEC_COMMAND_PARAM_NAME,
@@ -144,6 +145,16 @@ export interface ApprovalFunnelDeps {
   readonly audit: ApprovalAuditSink
   /** 拒绝即时红显回调（RunService 接线为 tool.start + tool.end 事件对发布） */
   readonly onRejection?: (notice: RejectionNotice) => void
+}
+
+// UTF-8 字节上限截断（与 runtime/projector.ts truncateUtf8 同形——摘要按字节计，
+// CJK 最坏 3x 膨胀，按字符截断会超预算；独立实现避免 approval→runtime 模块环）。
+function truncateUtf8Bytes(text: string, maxBytes: number): string {
+  if (Buffer.byteLength(text, 'utf8') <= maxBytes) return text
+  const buf = Buffer.from(text, 'utf8')
+  let end = maxBytes
+  while (end > 0 && (buf[end]! & 0xc0) === 0x80) end -= 1
+  return buf.subarray(0, end).toString('utf8')
 }
 
 export class ApprovalFunnel {
@@ -269,8 +280,12 @@ export class ApprovalFunnel {
       return this.escalate(state, request, handler, toolCallJson, { source: 'judge-limit' })
     }
     if (!this.deps.judge) {
-      // judge 未配置：判定不可得 → fail-closed 升级人工
-      return this.escalate(state, request, handler, toolCallJson, { source: 'judge-malformed' })
+      // judge 未配置：判定不可得 → fail-closed 升级人工（source 枚举为 729 §3.1 锁定四值，
+      // 部署缺失经 judgeReason 区分，不与「输出畸形」静默混淆）
+      return this.escalate(state, request, handler, toolCallJson, {
+        source: 'judge-malformed',
+        judgeReason: 'judge 未配置（部署面缺 RUNNER_JUDGE_*），fail-closed 升级',
+      })
     }
 
     state.judgeCalls += 1
@@ -345,9 +360,14 @@ export class ApprovalFunnel {
     toolCallJson: string,
     opts: { source: EscalationSource; judgeReason?: string },
   ): Promise<ToolMessage | LangGraphCommand> {
+    // 串行升级（729 §3.2「一个 run 同时只挂一个 interrupt」）：同超步并行工具调用的第二笔
+    // 不再挂 interrupt——错误回喂令 agent 在前一升级落定后重试（重放时前笔 memo 已清）。
+    if (state.escalationMemos.size > 0) {
+      return Promise.resolve(rejectedToolMessage(request, '已有升级审批待落定，请稍后重试该操作'))
+    }
     const callId = String(request.toolCall.id ?? '')
     const name = String(request.toolCall.name ?? '')
-    const summary = truncateChars(toolCallJson, APPROVAL_SUMMARY_MAX_BYTES)
+    const summary = truncateUtf8Bytes(toolCallJson, APPROVAL_SUMMARY_MAX_BYTES)
     const payload: ApprovalInterruptPayload = {
       v: APPROVAL_INTERRUPT_V,
       kind: APPROVAL_INTERRUPT_KIND,
@@ -360,6 +380,7 @@ export class ApprovalFunnel {
         ...(opts.judgeReason !== undefined ? { judgeReason: opts.judgeReason } : {}),
       },
       actionRequests: [{ toolCallId: callId, name, argsSummary: summary }],
+      // actionRequests 摘要与 toolCallSummary 同为 UTF-8 字节截断面
     }
     state.escalationMemos.set(callId, payload) // 先记 memo 再 interrupt——重放幂等 + id 稳定
     return this.applyHumanDecision(state, payload, request, handler, toolCallJson)
@@ -448,7 +469,7 @@ export class ApprovalFunnel {
         threadId,
         toolCallId: String(request.toolCall.id ?? ''),
         name: String(request.toolCall.name ?? ''),
-        argsSummary: truncateChars(toolCallJson, APPROVAL_SUMMARY_MAX_BYTES),
+        argsSummary: truncateUtf8Bytes(toolCallJson, APPROVAL_SUMMARY_MAX_BYTES),
         source,
         reason,
       })
@@ -463,7 +484,8 @@ function rejectedToolMessage(request: FunnelRequest, reason: string): ToolMessag
   return new ToolMessage({
     tool_call_id: String(request.toolCall.id ?? ''),
     name: String(request.toolCall.name ?? ''),
-    content: `操作被拒绝：${reason}`,
+    // 前缀契约：APPROVAL_REJECTION_CONTENT_PREFIX（judge 输入构造据此剥离拒绝理由防锚定）
+    content: `${APPROVAL_REJECTION_CONTENT_PREFIX}${reason}`,
     status: 'error',
   })
 }

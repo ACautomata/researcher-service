@@ -60,7 +60,10 @@ function normalizeRulePath(raw: string): string | null {
   const stripped = raw.startsWith('/') ? raw.slice(1) : raw
   const parts = stripped.split('/').filter((p) => p !== '' && p !== '.')
   if (parts.some((p) => p === '..')) return null
-  return parts.join('/')
+  const norm = parts.join('/')
+  // 512 码点上限（normalizeFilePath 语义同源——超长按未命中进灰区，不放行）
+  if (Array.from(norm).length > 512) return null
+  return norm
 }
 
 function pathInWhitelist(normalized: string): boolean {
@@ -216,9 +219,9 @@ export function commandVerdict(command: string): RuleVerdict {
     }
     // 规则② 设备写
     const deviceWrite =
-      (name === 'dd' && c.args.some((a) => /^of=\/dev\//.test(a))) ||
+      (name === 'dd' && c.args.some((a) => /^of=\/dev\//.test(a))) || // dd 特判目标（普通 dd 不拦）
       name.startsWith('mkfs') ||
-      DEVICE_WRITE_COMMANDS.slice(1).includes(name)
+      DEVICE_WRITE_COMMANDS.includes(name)
     if (deviceWrite) {
       return {
         kind: 'deny',

@@ -33,7 +33,12 @@ import { randomUUID } from 'node:crypto'
 import { HumanMessage } from '@langchain/core/messages'
 import { Command, END } from '@langchain/langgraph'
 import { INTERRUPT } from '@langchain/langgraph-checkpoint'
-import { ApprovalFunnel, isApprovalInterruptPayload, type ApprovalInterruptPayload } from '../approval/funnel'
+import {
+  ApprovalFunnel,
+  isApprovalInterruptPayload,
+  type ApprovalInterruptPayload,
+  type RejectionNotice,
+} from '../approval/funnel'
 import { APPROVAL_EVENT_REQUESTED, APPROVAL_EVENT_RESOLVED, APPROVAL_TIMEOUT_MS } from '../approval/values'
 import type { PrismaClient } from '../../generated/prisma/client'
 import { CODE } from '../../codes'
@@ -505,14 +510,7 @@ export class RunService {
   }
 
   // ---- 拒绝红显事件（漏斗 onRejection 回调接线）：tool.start + tool.end{error, rejection} ----
-  private publishRejection(notice: {
-    threadId: string
-    toolCallId: string
-    name: string
-    argsSummary: string
-    source: string
-    reason: string
-  }): void {
+  private publishRejection(notice: RejectionNotice): void {
     const cmd = this.activeCmds.get(notice.threadId)
     if (!cmd) return
     this.publish(

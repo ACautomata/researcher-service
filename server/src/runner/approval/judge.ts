@@ -9,6 +9,7 @@ import { createHash } from 'node:crypto'
 import { z } from 'zod'
 import { AIMessage, HumanMessage, SystemMessage } from '@langchain/core/messages'
 import {
+  APPROVAL_REJECTION_CONTENT_PREFIX,
   APPROVAL_REASON_MAX_CHARS,
   JUDGE_CHARS_PER_TOKEN,
   JUDGE_CURRENT_CALL_BUDGET_TOKENS,
@@ -106,7 +107,15 @@ export function extractJudgeContext(messages: unknown[]): JudgeContext {
       }
     }
     if (type === 'tool' && typeof msg.tool_call_id === 'string') {
-      results.set(msg.tool_call_id, contentToText(msg.content))
+      const text = contentToText(msg.content)
+      // 防锚定（§2.2「不喂历史 judge 判定与理由」）：审批拒绝的回喂 ToolMessage 携带
+      // judge/规则理由，据此剥离——否则拒绝理由经 prior 结果回灌后续判定。
+      results.set(
+        msg.tool_call_id,
+        text.startsWith(APPROVAL_REJECTION_CONTENT_PREFIX)
+          ? '（该调用被审批层拒绝，理由不入判定输入）'
+          : text,
+      )
     }
   }
   const priorCalls: JudgePriorCall[] = calls

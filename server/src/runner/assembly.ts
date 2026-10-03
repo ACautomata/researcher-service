@@ -111,10 +111,6 @@ export function assembleRunner(opts: {
 // 出口不走 provider_endpoints 白名单——env 是 admin 信任面（config.runner.judge 注释同源）。
 function createJudgeClient(): InstanceType<typeof ToolCallJudgeClient> {
   const { model, baseUrl, lcProvider } = config.runner.judge
-  // initChatModel 动态 import 代价小（同进程模块图）；构造失败 = 部署配置错误，允许冒泡
-  void model
-  void baseUrl
-  void lcProvider
   return new ToolCallJudgeClient(
     {
       async invoke(messages: unknown[]) {

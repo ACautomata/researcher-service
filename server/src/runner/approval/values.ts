@@ -32,8 +32,13 @@ export const APPROVAL_TIMEOUT_MS = 48 * 60 * 60 * 1000
 // judge 理由长度上限（729 §2.5：≤100 字中文，面向 agent 的纠正建议）。超长截断。
 export const APPROVAL_REASON_MAX_CHARS = 100
 
-// 审批卡摘要字段截断（toolCall 摘要 / actionRequests 参数摘要，字节上限——事件 payload 面）。
+// 审批卡摘要字段截断（toolCall 摘要 / actionRequests 参数摘要，UTF-8 字节上限——事件
+// payload 面，与 projector 的 details 截断同语义）。
 export const APPROVAL_SUMMARY_MAX_BYTES = 1024
+
+// 拒绝回喂 ToolMessage 的内容前缀（funnel 产出 ↔ judge 输入构造消费——同一契约常量：
+// extractJudgeContext 据此剥离拒绝理由，兑现 §2.2「不喂历史 judge 判定与理由」防锚定）。
+export const APPROVAL_REJECTION_CONTENT_PREFIX = '操作被拒绝：'
 
 // ---------------------------------------------------------------------------
 // 工具类别映射表（729 §1.5——映射机制本票定稿；工具名以 deepagents 内建工具面实测锁定，
@@ -89,8 +94,9 @@ export const FORK_BOMB_PATTERNS: readonly RegExp[] = [
 export const DOCKER_SOCK_MARKERS: readonly string[] = ['/var/run/docker.sock', '/run/docker.sock']
 export const CONTAINER_ESCAPE_COMMANDS: readonly string[] = ['nsenter']
 
-// 设备写命令名（§1.3 #2）：mkfs 家族按前缀匹配（mkfs / mkfs.ext4 / mkfs.vfat …）。
-export const DEVICE_WRITE_COMMANDS: readonly string[] = ['dd', 'fdisk', 'sfdisk', 'parted']
+// 设备写命令名（§1.3 #2）：mkfs 家族按前缀匹配（mkfs / mkfs.ext4 / mkfs.vfat …）；
+// dd 特判 of=/dev/*（普通 dd 不拦），故不在此列——判定面见 rules.ts。
+export const DEVICE_WRITE_COMMANDS: readonly string[] = ['fdisk', 'sfdisk', 'parted']
 
 // ---------------------------------------------------------------------------
 // 升级通道（729 §3）
