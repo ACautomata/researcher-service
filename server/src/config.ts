@@ -387,6 +387,21 @@ function readAllowPrivateProviderEndpoints(): boolean {
 // 以维持既有消费面。
 const LLM_API_KEY_RAW = process.env.LLM_API_KEY ?? ''
 
+function readOptionalEnv(name: string): string {
+  const v = process.env[name]
+  return typeof v === 'string' ? v.trim() : ''
+}
+
+// 审批升级超时（#783 · 729 §3.3 默认 48h；RUNNER_APPROVAL_TIMEOUT_MS 可覆盖，测试注入缩短）
+const APPROVAL_TIMEOUT_DEFAULT_MS = 48 * 60 * 60 * 1000
+function readApprovalTimeoutMs(): number {
+  const raw = process.env.RUNNER_APPROVAL_TIMEOUT_MS
+  if (raw === undefined || raw.trim() === '') return APPROVAL_TIMEOUT_DEFAULT_MS
+  const n = Number(raw)
+  if (!Number.isFinite(n) || n <= 0) return APPROVAL_TIMEOUT_DEFAULT_MS
+  return Math.floor(n)
+}
+
 export const config = {
   jwtSecret: readSecret(),
   accessTtl: process.env.ACCESS_TOKEN_TTL ?? '5m',
@@ -463,6 +478,20 @@ export const config = {
       // 共享 LLM key 解析源：credentialEnvId='LLM_API_KEY' 的 provider 行经此取值
       //（单一读取点 LLM_API_KEY_RAW，与 fleet.llmApiKey 同源——#731 §1.3「runner 直接持有凭证」）
       llmApiKey: LLM_API_KEY_RAW,
+      // 审批三层漏斗 judge 模型（#783 · 729 §2.5「独立小模型，与主模型解耦」）：部署级配置
+      //（RUNNER_JUDGE_MODEL + RUNNER_JUDGE_BASE_URL，key 复用 LLM_API_KEY；lcProvider 二值，
+      // 默认 openai 兼容面）。二者任缺 → judge 未启用（灰区一律升级人工——fail-closed，
+      // 729 §2.3 校验再败同语义）。judge 出口不走 provider_endpoints 白名单：env 是 admin
+      // 信任面（与 LLM_API_KEY 同级），白名单治理的是用户可配的 provider 面。
+      judge: {
+        model: readOptionalEnv('RUNNER_JUDGE_MODEL'),
+        baseUrl: readOptionalEnv('RUNNER_JUDGE_BASE_URL'),
+        lcProvider: (readOptionalEnv('RUNNER_JUDGE_LC_PROVIDER') === 'anthropic'
+          ? 'anthropic'
+          : 'openai') as 'openai' | 'anthropic',
+      },
+      // 审批升级超时（729 §3.3 默认 48h；装配层注入 RunService）
+      approvalTimeoutMs: readApprovalTimeoutMs(),
     }
   })(),
   // ---- OpenAPI 文档面（#761）----
