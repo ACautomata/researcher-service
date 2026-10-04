@@ -58,6 +58,7 @@ import { classifyRunError, type RunErrorKind } from './errorKind'
 import { buildLeaderAgent, interruptPolicyKey, type DeepAgentLike, type InterruptPolicy, type LeaderAgentParams } from './graphFactory'
 import { DEFAULT_RECURSION_LIMIT, DEFAULT_RESUME_DECISIONS, GRAPH_CACHE_MAX_INSTANCES, LEADER_SYSTEM_PROMPT } from './values'
 import { disableLangsmithTracing } from './tracing'
+import { lastMessage, scanMediaBlocks } from './mediaBlocks'
 import { TurnReducer, type RecordTurnPayload } from '../../sessions/reducer'
 
 // recordTurn 注入缝（#778）：run 终态（completed/interrupted/aborted/failed 任一）的单 turn
@@ -133,6 +134,15 @@ export interface RunServiceDeps {
       primitives: Pick<SandboxFilePrimitives, 'exec' | 'putArchive'>
     }) => Promise<Array<{ attachmentId: string; mimeType: string }>>
     readonly readTempBytes: (attachmentId: string) => Promise<Buffer>
+    /** #780 D9 agent→用户媒体物化（片 3）：校验/拷进 uploads/建行；null = 校验失败（降级面） */
+    readonly materializeAgentMedia: (p: {
+      sessionId: string
+      ownerId: string
+      declaredPath: string
+      mime: string
+      container: string
+      primitives: Pick<SandboxFilePrimitives, 'exec' | 'getArchive' | 'putArchive'>
+    }) => Promise<{ attachmentId: string; fileName: string; mimeType: string; size: number } | null>
   }
   /** 审批三层漏斗（#783）。与 interruptPolicyFor（V1 测试面）可并存，生产只接前者。 */
   readonly approvals?: ApprovalFunnel
@@ -149,6 +159,8 @@ export interface RunServiceDeps {
 interface GraphStateLike {
   next?: string[]
   tasks?: { interrupts?: unknown[] }[]
+  // LangGraph StateSnapshot.values（channel 值）——终态 messages（#780 D9 媒体块扫描源）。
+  values?: { messages?: unknown[] }
   // LangGraph StateSnapshot.config.configurable.checkpoint_id——终态 checkpoint 锚点
   //（#778 session_messages.anchorCheckpointId 落值来源；issue 正文点名该列）。
   config?: { configurable?: { checkpoint_id?: string } }
@@ -558,6 +570,44 @@ export class RunService {
         this.runs.set(cmd.sessionId, { runId: cmd.runId, state: 'aborted', by: 'user' })
         this.publish(cmd.ownerId, { type: 'run.aborted', payload: { by: 'user' } }, cmd)
       } else {
+        // #780 D9 媒体块归约（片 3）：run 完成前扫描终态 assistant 回复的媒体块 → 校验（存在性/
+        // mime 白名单）/拷进 /lab/uploads/ 物化/建 Attachment 行 → `attachment` 事件（实时面）+
+        // turn.feed（回放同形状——attachmentsJson media 数组，单管线渲染零差异）。校验失败块
+        // 降级文本占位（占位进事件流与回放聚合）+ 审计计数 warn（不 fail run）。仅 completed
+        // 路径扫（interrupted/aborted 的回复未终稿，不做产物面）。
+        if (this.deps.attachments) {
+          const scan = scanMediaBlocks(lastMessage(state.values?.messages ?? []))
+          const degrade = (declaredPath: string, reason: string): void => {
+            const placeholder = `[媒体产物不可用：${declaredPath}]`
+            turn.feed({ type: 'text.delta', payload: { delta: placeholder } })
+            this.publish(cmd.ownerId, { type: 'text.delta', payload: { delta: placeholder } }, cmd)
+            // eslint-disable-next-line no-console
+            console.warn(`[runner] media block degraded: session=${cmd.sessionId} path=${declaredPath} reason=${reason}`)
+          }
+          for (const block of scan.materializable) {
+            const meta = await this.deps.attachments.materializeAgentMedia({
+              sessionId: cmd.sessionId,
+              ownerId: session.ownerId,
+              declaredPath: block.declaredPath,
+              mime: block.mime,
+              container: labContainer,
+              primitives: this.deps.primitives,
+            })
+            if (meta) {
+              const ref = {
+                attachmentId: meta.attachmentId,
+                mime: meta.mimeType,
+                size: meta.size,
+                fileName: meta.fileName,
+              }
+              turn.feed({ type: 'attachment', payload: ref })
+              this.publish(cmd.ownerId, { type: 'attachment', payload: ref }, cmd)
+            } else {
+              degrade(block.declaredPath, 'materialize_failed')
+            }
+          }
+          for (const d of scan.degraded) degrade(d.declaredPath, d.reason)
+        }
         this.runs.set(cmd.sessionId, { runId: cmd.runId, state: 'completed' })
         this.publish(cmd.ownerId, { type: 'run.completed', payload: {} }, cmd)
       }

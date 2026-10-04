@@ -18,10 +18,10 @@ import { CODE } from '../codes'
 import { getSessionForUser } from '../sandboxes/service'
 import { SANDBOX_CONTAINER_PREFIX } from '../sandboxes/values'
 import type { FileArchive } from '../files/fsPort'
-import { createTarFile } from '../files/tar'
+import { createTarFile, parseTar } from '../files/tar'
 import type { SandboxFilePrimitives } from '../runner/backend/primitives'
 import { snowflakeId } from './snowflake'
-import { ATTACHMENTS_PER_MESSAGE_MAX, ATTACHMENT_MAX_BYTES, ATTACHMENT_LAB_UPLOADS, labUploadRelPath } from './values'
+import { ATTACHMENTS_PER_MESSAGE_MAX, ATTACHMENT_MAX_BYTES, ATTACHMENT_LAB_UPLOADS, labUploadRelPath, sanitizeFileName } from './values'
 
 export interface AttachmentMeta {
   readonly attachmentId: string
@@ -168,5 +168,54 @@ export class AttachmentsService {
   // 读临时区字节（ingestion 图片内联用；附件 id 为键）。
   async readTempBytes(attachmentId: string): Promise<Buffer> {
     return readFile(path.join(this.deps.tmpRoot, attachmentId))
+  }
+
+  // ---- agent→用户媒体物化（片 3 · D9）：校验存在性/mime 白名单 → 拷进 /lab/uploads/ → 建行 ----
+  // agent 经工具产出文件后在最终回复里声明路径（mediaBlocks 扫描已保 /lab/ 前缀 + mime 白名单）；
+  // 此处校验文件真实存在（getArchive；不存在 = 已删/墓碑态）→ sha256/size → 拷贝进
+  // /lab/uploads/<attachmentId>/<fileName>（与用户附件同表同目录，方向由挂载消息 role 派生——
+  // 不加列不分目录）→ 建 Attachment 行（messageId 空——assistant 行由 recordTurn 随后落，回放
+  // 引用走 attachmentsJson media 数组）。返回 null = 校验失败（调用方降级文本占位 + 审计计数，
+  // 不 fail run）。字节读/拷失败（daemon 故障）同样返 null（fail-soft，run 不受累）。
+  async materializeAgentMedia(p: {
+    sessionId: string
+    ownerId: string
+    declaredPath: string // /lab/... agent 声明路径
+    mime: string
+    container: string
+    primitives: Pick<SandboxFilePrimitives, 'exec' | 'getArchive' | 'putArchive'>
+  }): Promise<AttachmentMeta | null> {
+    try {
+      // 双保险：路径仍须 /lab/ 前缀且无穿越段（扫描层已保，防御面）
+      if (!p.declaredPath.startsWith('/lab/') || p.declaredPath.includes('..')) return null
+      const tar = await p.primitives.getArchive(p.container, p.declaredPath)
+      if (tar === null) return null // 不存在（已删/墓碑态）→ 降级
+      const entries = parseTar(tar, { collectData: true, maxDataBytes: ATTACHMENT_MAX_BYTES })
+      const entry = entries[0]
+      if (!entry || entry.data === null || entry.type !== 'file') return null
+      const fileName = sanitizeFileName(p.declaredPath.split('/').pop() ?? 'file')
+      const buf = entry.data
+      const sha256 = createHash('sha256').update(buf).digest('hex')
+      const attachmentId = snowflakeId()
+      const dir = `${ATTACHMENT_LAB_UPLOADS}/${attachmentId}`
+      await p.primitives.exec(p.container, ['mkdir', '-p', dir])
+      await p.primitives.putArchive(p.container, dir, createTarFile(fileName, buf))
+      const row = await this.deps.prisma.attachment.create({
+        data: {
+          id: attachmentId,
+          ownerId: p.ownerId,
+          sessionId: p.sessionId,
+          fileName,
+          mimeType: p.mime,
+          size: buf.length,
+          sha256,
+          path: `${dir}/${fileName}`,
+        },
+      })
+      return this.meta(row)
+    } catch {
+      // 物化链路故障（daemon/DB）→ 降级面（不 fail run，#747 D9「校验失败降级文本占位」）
+      return null
+    }
   }
 }

@@ -26,10 +26,24 @@ export interface ToolLine {
   truncated?: boolean
 }
 
+// #780 D9 媒体引用（attachmentsJson v1 可选 media 数组 + `attachment` 事件载荷，同一形状——
+// 实时事件 ≡ 回放投影零差异）。agent→用户媒体块经 runner 校验/物化后建 Attachment 行，此处只
+// 装引用不装字节（字节经 GET /attachments/:id/download）。
+export interface MediaRef {
+  readonly attachmentId: string
+  readonly mime: string
+  readonly size: number
+  readonly fileName: string
+  readonly width?: number
+  readonly height?: number
+  readonly durationMs?: number
+}
+
 export interface TurnSnapshot {
   readonly content: string
   readonly thinking?: string
   readonly tools?: ToolLine[]
+  readonly media?: MediaRef[]
 }
 
 // RunService recordTurn 注入缝的载荷（run 终态的单 turn 聚合 + 终态 checkpoint 锚点）。
@@ -67,13 +81,14 @@ const MAX = {
 
 // attachmentsJson v1 序列化（字段序稳定——「投影 GET 与实时流终态逐字节一致」的前提）。
 // content 不入此 JSON——它是行独立列（schema.prisma SessionMessage.content）；本 JSON 只装
-// 聚合面（thinking/tools），空聚合 = 列默认 {"v":1}。attachmentsJson 的唯一序列化实现：
+// 聚合面（thinking/tools/media），空聚合 = 列默认 {"v":1}。attachmentsJson 的唯一序列化实现：
 // SessionService.recordTurn（run 终态落行）与投影侧快照比对共用，不允第二处漂移。
 export function serializeAttachments(snap: TurnSnapshot): string {
   return JSON.stringify({
     v: 1,
     ...(snap.thinking !== undefined ? { thinking: snap.thinking } : {}),
     ...(snap.tools !== undefined ? { tools: snap.tools } : {}),
+    ...(snap.media !== undefined && snap.media.length > 0 ? { media: snap.media } : {}),
   })
 }
 
@@ -81,6 +96,7 @@ export class TurnReducer {
   private text = ''
   private think = ''
   private readonly tools = new Map<string, ToolLine>()
+  private readonly media: MediaRef[] = []
 
   // 消费一条 run 域目录事件；白名单外（run.* / session.* / 未知）一律忽略，绝不抛。
   feed(event: { type: string; payload: unknown }): void {
@@ -93,6 +109,28 @@ export class TurnReducer {
     if (event.type === 'thinking.delta') {
       const delta = (payload as DeltaPayload | null)?.delta
       if (typeof delta === 'string') this.think += delta
+      return
+    }
+    if (event.type === 'attachment') {
+      // #780 D9：媒体块物化成功 → 引用进聚合（回放同形状；同一事件经 hub 发实时面）
+      const p = payload as Partial<MediaRef> | null
+      if (
+        p &&
+        typeof p.attachmentId === 'string' && p.attachmentId !== '' &&
+        typeof p.mime === 'string' &&
+        typeof p.size === 'number' &&
+        typeof p.fileName === 'string'
+      ) {
+        this.media.push({
+          attachmentId: p.attachmentId,
+          mime: p.mime,
+          size: p.size,
+          fileName: p.fileName,
+          ...(typeof p.width === 'number' ? { width: p.width } : {}),
+          ...(typeof p.height === 'number' ? { height: p.height } : {}),
+          ...(typeof p.durationMs === 'number' ? { durationMs: p.durationMs } : {}),
+        })
+      }
       return
     }
     if (event.type === 'tool.start') {
@@ -129,17 +167,18 @@ export class TurnReducer {
     }
   }
 
-  // 聚合为空（无 delta、无工具）——终态空 run 不落行的判据（failed 立即等场景）。
+  // 聚合为空（无 delta、无工具、无媒体）——终态空 run 不落行的判据（failed 立即等场景）。
   isEmpty(): boolean {
-    return this.text === '' && this.think === '' && this.tools.size === 0
+    return this.text === '' && this.think === '' && this.tools.size === 0 && this.media.length === 0
   }
 
-  // 当前聚合快照（投影形状：thinking/tools 仅在有内容时出现——字段缺省即「无」，非空串）。
+  // 当前聚合快照（投影形状：thinking/tools/media 仅在有内容时出现——字段缺省即「无」，非空串）。
   snapshot(): TurnSnapshot {
     return {
       content: this.text,
       ...(this.think !== '' ? { thinking: this.think } : {}),
       ...(this.tools.size > 0 ? { tools: [...this.tools.values()] } : {}),
+      ...(this.media.length > 0 ? { media: [...this.media] } : {}),
     }
   }
 }

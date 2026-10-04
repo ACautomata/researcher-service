@@ -7,7 +7,7 @@
 // 集成面覆盖（S1/S4），本文件只锁纯逻辑。
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
-import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import type { PrismaClient } from '../src/generated/prisma/client'
