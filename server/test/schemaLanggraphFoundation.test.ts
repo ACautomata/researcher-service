@@ -557,6 +557,50 @@ VALUES ('user-a', 'legacy-note', '{"v":1}', '2026-09-30 12:00:00');
       d2.close()
     })
 
+    // #818 CD 崩溃回归：#778 之前的镜像（≤#777 部署）已建出**无 clientKey** 的 session_messages
+    // ——增量收敛必须「先补列、后建 (sessionId, clientKey) 唯一索引」，否则索引引用缺失列，
+    // `no such column: "clientKey"` 令 entrypoint 崩溃循环、health gate 永不过（6f19ebf 与
+    // d4b1e2d 两次 CD 失败的生产实锤）。pre-#778 形状因 CREATE IF NOT EXISTS 先建带列新表
+    // 走不到 ALTER 分支，真实部署形状仅此用例覆盖（memory_items createdAt 回归同款纪律）。
+    it('upgrade-schema.mjs 对「#778 前形状库」（session_messages 已建但无 clientKey）补列 + 唯一索引就位', () => {
+      const p = path.join(dir, 'session-messages-clientkey-upgrade.db')
+      const d = new Database(p)
+      // 造 #778 前形状：session_messages 无 clientKey 列 + 一行存量数据（旧行 clientKey 恒 null）
+      d.exec(`
+CREATE TABLE "session_messages" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "sessionId" TEXT NOT NULL,
+    "turn" INTEGER NOT NULL,
+    "role" TEXT NOT NULL,
+    "content" TEXT NOT NULL DEFAULT '',
+    "attachmentsJson" TEXT NOT NULL DEFAULT '{"v":1}',
+    "anchorCheckpointId" TEXT,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+INSERT INTO "session_messages" ("id", "sessionId", "turn", "role")
+VALUES ('m1', 's1', 0, 'user');
+`)
+      d.close()
+      runDbScript('upgrade-schema.mjs', p)
+      runDbScript('upgrade-schema.mjs', p) // 可重跑
+
+      const d2 = new Database(p, { readonly: true })
+      // 补列：nullable TEXT（旧行保持 null——SQLite 唯一索引 NULL 互相不等价，不撞约束）
+      const ck = colsOf(d2, 'session_messages').get('clientKey')
+      expect(ck, 'clientKey 列存在').toBeDefined()
+      expect(ck!.type).toBe('TEXT')
+      expect(ck!.notnull).toBe(0)
+      // 唯一索引就位（guard 之后创建；崩溃场景即此语句先于补列执行）
+      expect(
+        indexesOf(d2, 'session_messages').find((i) => i.name === 'session_messages_sessionId_clientKey_key'),
+      ).toBeDefined()
+      // 存量行原样保留
+      expect(
+        d2.prepare(`SELECT "id", "clientKey" FROM "session_messages" WHERE "id"='m1'`).get(),
+      ).toEqual({ id: 'm1', clientKey: null })
+      d2.close()
+    })
+
     it('apply-schema.mjs 对「旧形状库」可重跑：跳过 model_providers 新索引不崩溃 + 新表照常 + 旧表不动', () => {
       const p = path.join(dir, 'legacy-apply.db')
       const d = new Database(p)

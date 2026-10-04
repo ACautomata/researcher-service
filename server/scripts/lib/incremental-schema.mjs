@@ -250,7 +250,26 @@ CREATE TABLE IF NOT EXISTS "file_journal" (
     "applied" BOOLEAN NOT NULL DEFAULT false,
     CONSTRAINT "file_journal_sessionId_fkey" FOREIGN KEY ("sessionId") REFERENCES "sessions" ("id") ON DELETE CASCADE ON UPDATE CASCADE
 );
+`)
 
+  // #778（#747·08 · story 7）：session_messages 补 clientKey 列（32-hex 幂等 key，仅 user 行
+  // 携带）——(sessionId, clientKey) 唯一索引 = 断网重发不重复入列的约束面。ADD COLUMN 非幂等，
+  // PRAGMA guard 先查再补（对齐 T02 模式）。fresh 库（上方 CREATE TABLE 已带列）此处列存在
+  // → guard 跳过。
+  //
+  // **guard 必须先于下方索引创建**（#818 CD 崩溃回归，生产实锤）：#778 之前的镜像（≤#777
+  // 部署）已在此建出**无 clientKey** 的 session_messages——CREATE IF NOT EXISTS 对既有表
+  // no-op，若 (sessionId, clientKey) 唯一索引先于补列执行，`no such column: "clientKey"`
+  // 令 entrypoint 崩溃循环、health gate 永不过。故 guard 独立于索引块之前：既有库先 ALTER
+  // 再建索引，fresh 库两分支自然正确（索引块全部语句只引用 CREATE TABLE 自带列 + 本 guard
+  // 补的列）。
+  const smCols = db.prepare(`PRAGMA table_info("session_messages")`).all()
+  if (smCols.length > 0 && !smCols.some((c) => c.name === 'clientKey')) {
+    db.exec(`ALTER TABLE "session_messages" ADD COLUMN "clientKey" TEXT`)
+  }
+
+  // ---- B 节索引（在全部 B 节表 + 补列 guard 之后统一创建；IF NOT EXISTS 幂等）----
+  db.exec(`
 CREATE INDEX IF NOT EXISTS "sessions_ownerId_idx" ON "sessions"("ownerId");
 CREATE INDEX IF NOT EXISTS "session_messages_sessionId_turn_idx" ON "session_messages"("sessionId", "turn");
 CREATE UNIQUE INDEX IF NOT EXISTS "session_messages_sessionId_clientKey_key" ON "session_messages"("sessionId", "clientKey");
@@ -264,15 +283,6 @@ CREATE INDEX IF NOT EXISTS "file_journal_sessionId_checkpointId_idx" ON "file_jo
 CREATE UNIQUE INDEX IF NOT EXISTS "file_journal_sessionId_seq_key" ON "file_journal"("sessionId", "seq");
 CREATE UNIQUE INDEX IF NOT EXISTS "file_journal_sessionId_toolCallId_key" ON "file_journal"("sessionId", "toolCallId");
 `)
-
-  // #778（#747·08 · story 7）：session_messages 补 clientKey 列（32-hex 幂等 key，仅 user 行
-  // 携带）+ (sessionId, clientKey) 唯一索引 = 断网重发不重复入列的约束面。ADD COLUMN 非幂等，
-  // PRAGMA guard 先查再补（对齐 T02 模式）；唯一索引本身幂等（IF NOT EXISTS）。fresh 库
-  // （上方 CREATE TABLE 已带列）此处列存在 → guard 跳过。
-  const smCols = db.prepare(`PRAGMA table_info("session_messages")`).all()
-  if (smCols.length > 0 && !smCols.some((c) => c.name === 'clientKey')) {
-    db.exec(`ALTER TABLE "session_messages" ADD COLUMN "clientKey" TEXT`)
-  }
 
   // ---- 配置域新表（731 §3：provider_endpoints / config_meta · 752 §4.2：plugin_enablements）----
   db.exec(`
