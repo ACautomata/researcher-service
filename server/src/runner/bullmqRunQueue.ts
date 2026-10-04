@@ -2,15 +2,22 @@
 //
 // 与 containers/bullmqQueue.ts（生命周期队列）的分野：run 命令是**自包含 JSON data**
 //（RunCommand，无进程内任务句柄注册表）——进程内状态可全弃，凭 DB 重投即 run 从头重跑
-//（副作用幂等约束在案，#747 A 节硬约束）。attempts:1 下 stalled/失败 job 直接 failed
-// **不重跑**（重复用户可见事件面在案，见失败语义注）；断线补偿与重投归 #779。
-// 同 thread 串行不在本层（BullMQ OSS 无 per-group 限流，worker 可并发领同 thread job）——
-// 顺序性由 RunService 进程内串行链保证（#723 风险条目「BullMQ per-thread 串行是全部责任」）。
+//（副作用幂等约束在案，#747 A 节硬约束）。attempts:1 下失败 job 直接 failed 不重跑；
+// 断线补偿与重投归 #779（normalizeReplay，见下）。同 thread 串行不在本层（BullMQ OSS 无
+// per-group 限流，worker 可并发领同 thread job）——顺序性由 RunService 进程内串行链保证
+//（#723 风险条目「BullMQ per-thread 串行是全部责任」）。
 //
 // 失败语义：processor 内 run 执行错误已在 RunService 消化（终态事件已发，对 job 表现为
 // 成功）；信封错误（40043 额度满 / 50001 resume 竞态 / 50002 会话不存在）冒泡为 job failed
 // ——V1 attempts 默认 1 不重试（额度等待/重投语义归 #778 REST 层即时反馈面，job 级重跑 =
 // run 从头执行会产生重复用户可见事件，故不开）。onError 统一上报（先例 Codex C7）。
+//
+// stalled 重放（story 14 · #779 探针实测）：worker 崩溃（进程死）时在飞 job 的 lock 残留，
+// 新 worker 的 stalled check 将其**移回 wait 自动重放**（BullMQ v6：绕过 attempts:1——
+// stalled 是独立于 attempts 的恢复机制）。重放 message 会重复 append 用户消息、重放 resume
+// 会被互斥判定误拒 50001——拦截归 RunService.normalizeReplay（checkpoint 判据 → kind 转
+// 'recover'，从 checkpoint 续跑）。本层零特判：重放对 processor 透明（同 job 同 data 二次
+// 执行）。
 
 import { Queue, Worker, type Job } from 'bullmq'
 import IORedis from 'ioredis'

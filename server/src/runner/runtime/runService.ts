@@ -33,7 +33,7 @@ import { randomUUID } from 'node:crypto'
 import { HumanMessage, type ContentBlock } from '@langchain/core/messages'
 import type { AnyAgentMiddleware } from 'langchain'
 import { Command, END } from '@langchain/langgraph'
-import { INTERRUPT } from '@langchain/langgraph-checkpoint'
+import { ERROR, INTERRUPT } from '@langchain/langgraph-checkpoint'
 import {
   ApprovalFunnel,
   isApprovalInterruptPayload,
@@ -60,7 +60,8 @@ import { buildLeaderAgent, interruptPolicyKey, type DeepAgentLike, type Interrup
 import { DEFAULT_RECURSION_LIMIT, DEFAULT_RESUME_DECISIONS, GRAPH_CACHE_MAX_INSTANCES, LEADER_SYSTEM_PROMPT } from './values'
 import { disableLangsmithTracing } from './tracing'
 import { lastMessage, scanMediaBlocks } from './mediaBlocks'
-import { TurnReducer, type RecordTurnPayload } from '../../sessions/reducer'
+import { turnFromCheckpointMessages } from './checkpointTurn'
+import { TurnReducer, isEmptyTurnSnapshot, type RecordTurnPayload, type TurnSnapshot } from '../../sessions/reducer'
 
 // recordTurn 注入缝（#778）：run 终态（completed/interrupted/aborted/failed 任一）的单 turn
 // 聚合落库回调。anchorCheckpointId = 终态 checkpoint 锚点（issue 点名列；aborted/failed 路径
@@ -70,13 +71,13 @@ import { TurnReducer, type RecordTurnPayload } from '../../sessions/reducer'
 export type RecordTurnFn = (p: RecordTurnPayload) => Promise<void>
 
 // run 命令（BullMQ job data 契约：纯 JSON 可序列化，无内存句柄——进程内状态全弃后凭 DB
-// 重投可从头重跑，副作用幂等约束在案；重投/断线补偿面归 #779）。
+// 重投可从头重跑，副作用幂等约束在案；重放归一化面见 normalizeReplay）。
 export interface RunCommand {
   readonly runId: string
   readonly sessionId: string
   readonly ownerId: string
   readonly username: string
-  readonly kind: 'message' | 'resume'
+  readonly kind: 'message' | 'resume' | 'recover'
   /** kind=message：用户消息文本 */
   readonly content?: string
   /** kind=message：#780 附件引用（雪花 attachmentId 列表；ingestion 节点消费，片 2） */
@@ -170,10 +171,19 @@ interface GraphStateLike {
   config?: { configurable?: { checkpoint_id?: string } }
 }
 
-// LangGraph interrupt 的 putWrites channel：上游一等导出 INTERRUPT（checkpoint 包
-// WRITES_IDX_MAP 的负 idx 通道键，prismaCheckpointSaver「不自造」同纪律）——三包升级
+// LangGraph interrupt 的 putWrites channel：上游一等导出 INTERRUPT/RESUME/ERROR（checkpoint
+// 包 WRITES_IDX_MAP 的负 idx 通道键，prismaCheckpointSaver「不自造」同纪律）——三包升级
 // 通道名漂移时此处类型红，推导面不会静默失效。
 const INTERRUPT_CHANNEL = INTERRUPT
+// resume 重放判据用：__error__ = 上一次 super-step 有任务异常中断（normalizeReplay 用）。
+const ERROR_CHANNEL = ERROR
+
+// story 11 · in-flight 投影（投影 GET inFlight 字段）：重连补偿的进行中 turn 重建面。
+export interface InFlightProjection {
+  readonly runId: string
+  readonly state: 'queued' | 'running'
+  readonly turn: TurnSnapshot
+}
 
 // 审批升级挂起记录（#783）：interrupt 检出时落（事件 + 48h 死线），resume/落定时清。
 interface PendingApproval {
@@ -315,17 +325,22 @@ export class RunService {
   // executeNow 的信封错误（40043/50002）向上传播；run 执行体错误在 executeRun 内消化
   //（终态事件已发，对传输面表现为正常完成）。
   async execute(cmd: RunCommand): Promise<void> {
+    // 重放归一化（story 14）：BullMQ v6 stalled job 绕过 attempts 自动重放（#779 探针实测）
+    // ——「message 重复 append / resume 50001」的重放风险在内核单点拦截，checkpoint 判据
+    // 见 normalizeReplay。Inline/测试路径判据不命中即原样（零行为差异）。
+    cmd = await this.normalizeReplay(cmd)
     // 入队面 fast-fail：interrupted/suspended 态 message 拒绝（queued 覆盖之前——#747 C 节
-    // 「interrupt 全端可审批」，见 executeRun 权威面）。内存面可知即不排队，调用方即时感知。
+    // 「interrupt 全端可审批」，见 executeRun 权威面）。recover 不拒（恢复面权威——判据已在
+    // normalizeReplay 核验，重放的 message 语义已由 checkpoint 承接）。
     const entryState = this.runs.get(cmd.sessionId)?.state
     if (cmd.kind === 'message' && (entryState === 'interrupted' || entryState === 'suspended')) {
       throw fail(CODE.RUN_INTERRUPT_PENDING)
     }
-    // queued 只标 message 命令的新 run，且仅在无活跃条目时落——running/queued 不被新排队
-    // 命令覆盖（stateOf 是 #778「running 全端禁输入」门禁的观测面，覆盖即门禁失效）；
-    // resume 延续既有 run（interrupted 保持到 running，否则 executeRun 的互斥权威判定会被
-    // 覆盖态误伤）。interrupted 态已在上方 fast-fail 拒绝，不会走到覆盖。
-    if (cmd.kind === 'message') {
+    // queued 只标 message/recover 命令的新 run，且仅在无活跃条目时落——running/queued 不被
+    // 新排队命令覆盖（stateOf 是 #778「running 全端禁输入」门禁 + #779 inFlight 投影的观测
+    // 面，覆盖即门禁失效）；resume 延续既有 run（interrupted 保持到 running，否则 executeRun
+    // 的互斥权威判定会被覆盖态误伤）。interrupted 态已在上方 fast-fail 拒绝，不会走到覆盖。
+    if (cmd.kind === 'message' || cmd.kind === 'recover') {
       const prev = this.runs.get(cmd.sessionId)
       const active =
         prev !== undefined &&
@@ -346,6 +361,68 @@ export class RunService {
       if (this.chains.get(cmd.sessionId) === tail) this.chains.delete(cmd.sessionId)
     })
     return task
+  }
+
+  // ---- 重放归一化（story 14）：BullMQ stalled 自动重放的「重放 vs 首次执行」判别 ----
+  //
+  // #779 探针实测的行为基线：崩溃的在飞 job 被新 worker stalled check 移回 wait 重新执行
+  //（attempts:1 不拦——stalled 是独立恢复机制）。重放 message 会重复 append 用户消息、
+  // 重放 resume 会被互斥判定误拒 50001——两类都把 run 卡死。判据全部 checkpoint 面（无
+  // BullMQ API 依赖，Inline 路径零影响）：
+  //   message：checkpoint messages 存在 id=runId 的消息（executeRun 构造 HumanMessage 时
+  //            以 runId 盖印——命令→消息的持久锚）⇔ 该命令已入图 → 转 recover（null input
+  //            从 checkpoint 续跑）。
+  //   resume：pendingWrites 无 interrupt 且带 __error__（节点异常崩溃必落 error write，
+  //            #779 探针实测）⇔ 上一次执行异常中断 → 转 recover。有 interrupt = 未执行 →
+  //            原样重放（resume 重试，负 idx RESUME 覆盖幂等）；两者皆无（已完成会话的
+  //            终态 checkpoint 无 writes）= 用户乱调 → 原样走 executeRun 权威 50001，
+  //            不放大为续跑（API 语义保留）。已知边界：SIGKILL 窗口（RESUME 消费后、
+  //            error write 落盘前崩）不可判别 → 50001 卡死，重放 job failed——窗口毫秒级，
+  //            实害 = 该 run 不自动续跑（数据无损），重试面归用户重新发消息。
+  //
+  // #779 探针验证的 LangGraph null-input 三形态（recover 的执行语义依据）：
+  //   checkpoint 带 pending interrupt → no-op（不误触发审批消费）
+  //   图中途崩溃（error write 在）→ 从 checkpoint 续跑剩余节点（失败任务重试）
+  //   图已完成 → no-op（流空结束，落 completed；防双行见 executeRun finally）
+  //
+  // 成本：每条 message/resume 命令一次 getTuple（SQLite 本地读，与 message 门禁
+  // threadInterruptedFromCheckpoint 同量级——人机尺度可忽略）。
+  private async normalizeReplay(cmd: RunCommand): Promise<RunCommand> {
+    if (cmd.kind !== 'message' && cmd.kind !== 'resume') return cmd
+    let tuple: Awaited<ReturnType<PrismaCheckpointSaver['getTuple']>> | undefined
+    try {
+      tuple = await this.latestTuple(cmd.sessionId)
+    } catch {
+      return cmd // checkpoint 故障不拦——原路径的门禁/互斥/错误面兜底
+    }
+    if (cmd.kind === 'message') {
+      const messages = channelMessages(tuple)
+      const replayed = messages.some((m) => (m as { id?: unknown } | null)?.id === cmd.runId)
+      return replayed ? { ...cmd, kind: 'recover' } : cmd
+    }
+    const pendingWrites = tuple?.pendingWrites ?? []
+    const hasInterrupt = pendingWrites.some(([, channel]) => channel === INTERRUPT_CHANNEL)
+    if (hasInterrupt) return cmd
+    const hasErrorWrite = pendingWrites.some(([, channel]) => channel === ERROR_CHANNEL)
+    return hasErrorWrite ? { ...cmd, kind: 'recover' } : cmd
+  }
+
+  // ---- in-flight 投影（story 11）：投影 GET 的补偿重建面（重拉投影同帧带出）----
+  // running：从 checkpoint blob 反序列化重建进行中 turn（即焚 token 事件的补偿真相源——
+  // 「最后一条 human 之后」切片，见 checkpointTurn.ts）。queued：消息未入图，无内容可重建
+  //（空 turn）。checkpoint 读故障降级空 turn（补偿面不炸投影——终态行兜底回放）。仅内存
+  // 观测态（stateOf）判定在飞：控制面重启窗口（内存丢、job 未重放）秒级缺失，恢复后可见。
+  async inFlightProjection(sessionId: string): Promise<InFlightProjection | undefined> {
+    const snap = this.runs.get(sessionId)
+    if (!snap || (snap.state !== 'queued' && snap.state !== 'running')) return undefined
+    if (snap.state === 'queued') return { runId: snap.runId, state: 'queued', turn: { content: '' } }
+    let turn: TurnSnapshot
+    try {
+      turn = turnFromCheckpointMessages(channelMessages(await this.latestTuple(sessionId)))
+    } catch {
+      turn = { content: '' }
+    }
+    return { runId: snap.runId, state: 'running', turn }
   }
 
   private publish(
@@ -377,6 +454,7 @@ export class RunService {
     // 同 thread 的其它命令），后到者 50001。message 命令不做此检查（queued 态可覆盖）。
     // 内存态缺失（控制面重启/跨进程 resume）→ 从持久化状态推导（#747 A 节硬约束：
     // 「图拓扑必须可由持久化状态推导」——最新 checkpoint 带 pending interrupt ⇔ interrupted）。
+    // recover 跳过两者（恢复面权威：重放判据已在 normalizeReplay 核验）。
     if (cmd.kind === 'resume') {
       let snap = this.runs.get(cmd.sessionId)
       if (!snap) {
@@ -391,7 +469,7 @@ export class RunService {
         throw fail(CODE.RUN_ALREADY_RESUMED)
       }
       this.pendingApprovals.delete(cmd.sessionId) // 升级落定，48h 死线随清
-    } else {
+    } else if (cmd.kind === 'message') {
       // #747 C 节「running 全端禁输入、interrupt 全端可审批」的内核权威面：interrupted 态
       // message 会作废 pending interrupt（静默丢审批）——拒绝之（#778 REST 门禁之外的第二
       // 道，接线遗漏不丢 interrupt）。queued/内存缺失态（排队窗口撞上前序 run 中断、重启后
@@ -446,11 +524,11 @@ export class RunService {
 
     this.runs.set(cmd.sessionId, { runId: cmd.runId, state: 'running' })
     this.activeCmds.set(cmd.sessionId, { sessionId: cmd.sessionId, runId: cmd.runId, ownerId: cmd.ownerId })
-    // 新 run = run.started；interrupted 后的续跑 = run.resumed（#747 C 节目录二者并列——
-    // resume 不重发 started，消费方按事件类型区分首轮/续跑轮）
+    // 新 run = run.started；interrupted 后的续跑（resume）/恢复续跑（recover，story 14）=
+    // run.resumed（#747 C 节目录二者并列——消费方按事件类型区分首轮/续跑轮）
     this.publish(
       cmd.ownerId,
-      { type: cmd.kind === 'resume' ? 'run.resumed' : 'run.started', payload: {} },
+      { type: cmd.kind === 'message' ? 'run.started' : 'run.resumed', payload: {} },
       cmd,
     )
 
@@ -507,23 +585,28 @@ export class RunService {
           }
         }
       }
+      // HumanMessage 显式 id = runId：命令→checkpoint 消息的持久锚（normalizeReplay 重放判据）。
+      // kind=recover：input = null —— LangGraph 从 checkpoint 续跑（三形态见 normalizeReplay 注）。
       input =
         cmd.kind === 'message'
           ? {
               messages: [
-                new HumanMessage(
-                  imageBlocks.length > 0
+                new HumanMessage({
+                  ...(imageBlocks.length > 0
                     ? { content: [{ type: 'text', text: cmd.content ?? '' }, ...imageBlocks] }
-                    : (cmd.content ?? ''),
-                ),
+                    : { content: cmd.content ?? '' }),
+                  id: cmd.runId,
+                }),
               ],
             }
-          : new Command({
-              resume: cmd.decisions ?? DEFAULT_RESUME_DECISIONS,
-              // abort（#783 story 15）：回执决策 + goto END——interrupt 回执后图立即终止，
-              // run 落 aborted 终态（探针验证：resume 值仍送达 interrupt 点，工具不执行）
-              ...(cmd.abort ? { goto: END } : {}),
-            })
+          : cmd.kind === 'resume'
+            ? new Command({
+                resume: cmd.decisions ?? DEFAULT_RESUME_DECISIONS,
+                // abort（#783 story 15）：回执决策 + goto END——interrupt 回执后图立即终止，
+                // run 落 aborted 终态（探针验证：resume 值仍送达 interrupt 点，工具不执行）
+                ...(cmd.abort ? { goto: END } : {}),
+              })
+            : null
 
       const stream = await agent.streamEvents(input, {
         ...invocation,
@@ -569,8 +652,9 @@ export class RunService {
             deadlineAt: this.clock() + this.approvalTimeoutMs,
           })
         }
-      } else if (cmd.kind === 'resume' && cmd.abort) {
-        // abort 落定（story 15）：goto END 终止，aborted 为终态
+      } else if ((cmd.kind === 'resume' || cmd.kind === 'recover') && cmd.abort) {
+        // abort 落定（story 15）：goto END 终止，aborted 为终态。recover 重放保留 abort 语义
+        //（RESUME 已消费后崩溃的重放：no-op 或走完 END 路径，终态同 aborted）
         this.runs.set(cmd.sessionId, { runId: cmd.runId, state: 'aborted', by: 'user' })
         this.publish(cmd.ownerId, { type: 'run.aborted', payload: { by: 'user' } }, cmd)
       } else {
@@ -637,10 +721,30 @@ export class RunService {
       ) {
         this.deps.approvals.dropRun(cmd.sessionId)
       }
-      // 终态聚合落 session_messages（#778；interrupted/aborted/failed 也落——刷新回放须含
-      // 已流出的部分，story 3「零差异」）。空聚合不落（failed 立即等场景无用户可见内容）。
-      // 落库失败不放大为 run 故障（终态事件已发）：告警留痕，#779 补偿面兜底。
-      if (this.recordTurn && !turn.isEmpty()) {
+      // 终态聚合落 session_messages（#778 回放零差异的实时面；interrupted/aborted/failed 也落
+      // ——刷新回放须含已流出部分，story 3「零差异」）。空聚合不落（failed 立即等场景）。
+      // recover run 的聚合以终态 checkpoint 为准（story 14：断点前内容只在 blob，reducer 只有
+      // 断点后事件——checkpointTurn 单一真相 + anchor 幂等防「processor 完成后 ack 前崩溃」
+      // 的重放双落）。落库失败不放大为 run 故障（终态事件已发）：告警留痕。
+      if (this.recordTurn && cmd.kind === 'recover' && finalState === 'completed') {
+        const anchor = anchorCheckpointId
+        if (anchor !== null && !(await this.turnAlreadyRecorded(cmd.sessionId, anchor))) {
+          try {
+            const aggregate = await this.turnSnapshotFromCheckpoint(cmd.sessionId)
+            if (!isEmptyTurnSnapshot(aggregate)) {
+              await this.recordTurn({
+                sessionId: cmd.sessionId,
+                runId: cmd.runId,
+                anchorCheckpointId: anchor,
+                aggregate,
+              })
+            }
+          } catch (err) {
+            // eslint-disable-next-line no-console
+            console.warn(`[runner] recover recordTurn failed: session=${cmd.sessionId} run=${cmd.runId}: ${(err as Error).message}`)
+          }
+        }
+      } else if (this.recordTurn && !turn.isEmpty()) {
         try {
           await this.recordTurn({
             sessionId: cmd.sessionId,
@@ -859,18 +963,44 @@ export class RunService {
     return (await agent.getState({ configurable: { thread_id: threadId } })) as GraphStateLike
   }
 
+  // 最新 checkpoint tuple 读取（四消费面共用：重放判据/in-flight 投影/recover 落行/interrupt
+  // 推导；故障语义由调用面各自定义——不拦/降级空 turn/抛出/按无 interrupt）。
+  private latestTuple(sessionId: string): ReturnType<PrismaCheckpointSaver['getTuple']> {
+    return this.deps.saver.getTuple({ configurable: { thread_id: sessionId } })
+  }
+
+  // recover 终态落行的双落防御：同 anchor 的 assistant 行已存在（processor 完成后 ack 前
+  // 崩溃 → stalled 重放形态）→ 跳过。anchor = 终态 checkpoint id（同 run 恒同值）。
+  private async turnAlreadyRecorded(sessionId: string, anchorCheckpointId: string): Promise<boolean> {
+    const row = await this.deps.prisma.sessionMessage.findFirst({
+      where: { sessionId, role: 'assistant', anchorCheckpointId },
+      select: { id: true },
+    })
+    return row !== null
+  }
+
+  private async turnSnapshotFromCheckpoint(sessionId: string): Promise<TurnSnapshot> {
+    return turnFromCheckpointMessages(channelMessages(await this.latestTuple(sessionId)))
+  }
+
   // 从持久化状态推导「thread 停在 interrupt」（#747 A 节硬约束的内存缺失 fallback 面）：
   // 最新 checkpoint 的 pendingWrites 带 __interrupt__ channel（LangGraph interrupt 的标准
   // putWrites 通道，WRITES_IDX_MAP 负 idx）。blob 反序列化不做——pendingWrites 面足够。
   private async threadInterruptedFromCheckpoint(threadId: string): Promise<boolean> {
     let tuple: Awaited<ReturnType<PrismaCheckpointSaver['getTuple']>> | undefined
     try {
-      tuple = await this.deps.saver.getTuple({ configurable: { thread_id: threadId } })
+      tuple = await this.latestTuple(threadId)
     } catch {
       return false // checkpoint 读取故障按「无 interrupt」处理——resume 判定 50001，不放大
     }
     return (tuple?.pendingWrites ?? []).some(([, channel]) => channel === INTERRUPT_CHANNEL)
   }
+}
+
+// checkpoint tuple → messages 通道（防御式：blob 形状漂移时返回空数组，调用面降级不炸）。
+function channelMessages(tuple: Awaited<ReturnType<PrismaCheckpointSaver['getTuple']>>): unknown[] {
+  const values = (tuple?.checkpoint as { channel_values?: { messages?: unknown } } | undefined)?.channel_values
+  return Array.isArray(values?.messages) ? values.messages : []
 }
 
 // 快照类型的导出面（#778 消费；避免消费方反向 import 内部形状）
