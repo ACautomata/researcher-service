@@ -8,9 +8,13 @@
 //     T0 清退（#801），检测到旧形状只告警。
 //   - DDL 与 prisma/init.sql 逐字节同源（镜像其 CREATE 形状），init.sql 由
 //     prisma migrate diff 从 schema.prisma 派生 —— 单一来源，此处镜像。
-export const SCHEMA_VERSION = 9
+export const SCHEMA_VERSION = 10
 
 export function runIncrementalSchema(db) {
+  const hasSessions = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='sessions'").get()
+  if (hasSessions && !db.prepare('PRAGMA table_info("sessions")').all().some(c => c.name === 'preferredModelJson')) {
+    db.exec('ALTER TABLE "sessions" ADD COLUMN "preferredModelJson" TEXT')
+  }
   db.exec(`
 CREATE TABLE IF NOT EXISTS "text_trace_logs" (
     "id" TEXT NOT NULL PRIMARY KEY,

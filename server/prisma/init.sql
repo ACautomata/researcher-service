@@ -134,6 +134,7 @@ CREATE TABLE "sessions" (
     "parentSessionKey" TEXT,
     "forkSourceJson" TEXT,
     "activeCheckpointId" TEXT,
+    "preferredModelJson" TEXT,
     "archivedAt" DATETIME,
     "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" DATETIME NOT NULL,

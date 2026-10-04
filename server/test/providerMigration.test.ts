@@ -139,7 +139,7 @@ describe('#775 迁移批次（llm_usage_records + minimax per-user seed）', () 
         .all() as Array<Record<string, unknown>>
       expect(rows).toEqual([])
       // 旧形状告警路径不炸、user_version 照常推进、usage 表照常落
-      expect(db.pragma('user_version', { simple: true })).toBe(9)
+      expect(db.pragma('user_version', { simple: true })).toBe(10)
       expect(
         db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='llm_usage_records'`).get(),
       ).toEqual({ name: 'llm_usage_records' })

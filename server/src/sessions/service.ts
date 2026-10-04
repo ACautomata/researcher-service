@@ -1,3 +1,6 @@
+import { parseSlash } from '../officialContent/catalog'
+import type { ModelRef } from '../runner/providerRegistry'
+import { snapshotOfficialContent } from '../officialContent/runtime'
 // 会话域业务服务（#778 · #747 C 节会话 REST 全件）：扁平挂用户（容器维度退役）、创建/列表/
 // 改标题（story 5 自动生成+可改）、发消息（story 7 32-hex 幂等）、abort（story 8 by:user）、
 // resume、历史投影 GET、删会话级联删沙箱（#776 契约「消费方 = #778」）。
@@ -52,7 +55,15 @@ export interface SessionProjection {
   readonly inFlight?: InFlightProjection
 }
 
+export interface SystemCommandResult {
+  readonly name: 'new' | 'model'
+  readonly sessionId?: string
+  readonly model?: ModelRef | null
+  readonly models?: readonly ModelRef[]
+  readonly appliesTo?: 'next-run'
+}
 export interface SendMessageResult {
+  readonly command?: SystemCommandResult
   readonly messageId: string
   readonly turn: number
   readonly runId: string | null // 重放（replay=true）时 run 在首次请求已入队，此处 null
@@ -62,6 +73,7 @@ export interface SendMessageResult {
 // RunService 的结构子集（门禁观测 + 配额预检 + 命令构造 + abort）——测试注入同形 fake/真
 // 实例，不依赖具体类。
 export interface SessionRunGateway {
+  readonly resolveModelSelection?: (ownerId: string, args: string) => Promise<Omit<SystemCommandResult, 'name'>>
   readonly stateOf: (sessionId: string) => RunSnapshot | undefined
   readonly abort: (runId: string, by?: 'user' | 'system') => boolean
   /** 额度满预检（#777 注释契约「额度即时反馈面归 #778 REST」；只读不占额） */
@@ -233,11 +245,17 @@ export class SessionService {
     p: { content: string; clientKey: string; attachmentIds?: readonly string[] },
   ): Promise<SendMessageResult> {
     await getSessionForUser(this.deps.prisma, user, sessionId)
-
+    // 斜杠识别/幂等/门禁全部作用于**原始输入**：落行存用户所发原文，官方模板展开只在命令
+    // 构造点进行——模板发版改文不改变已存内容，同 key 重发恒 replay（#778 story 7；50007 只对
+    // 真正异 content 的输入触发）。系统命令（/new /compact /model）为保留名（catalog 构造期
+    // 拒绝同名官方命令），恒以原文穿过 expand。
+    const slash = parseSlash(p.content)
     const existing = await this.deps.prisma.sessionMessage.findUnique({
       where: { sessionId_clientKey: { sessionId, clientKey: p.clientKey } },
     })
     if (existing) return this.replayOrConflict(existing, p.content)
+    if (slash?.name === 'new' || slash?.name === 'model') return this.executeSystemCommand(user, sessionId, p, slash)
+    if (slash?.name === 'compact' && slash.args) throw fail(CODE.VALIDATION_FAILED, '/compact 不接受参数')
 
     // 多端门禁（#747 C 节）：queued/running → 50005 禁新输入；interrupted → 50003 须先审批
     //（内核面 RunService.execute 同挡，此处 REST 即时反馈——入队前拒绝，不产生 queued 幽灵）。
@@ -255,13 +273,17 @@ export class SessionService {
 
     // 命令构造先于落行：构造失败（caller 缺失/50002 面）不落行——幂等键只在「run 确已被
     // 接受」后锁定（失败请求锁死幂等键 = story 7 语义反转：重发恒 replay 而消息从未被处理）。
-    const cmd = await this.deps.runService.buildMessageCommand({
+    // 官方命令展开在此处（唯一消费方 = run）：/research x → 模板正文 $ARGUMENTS 插值；非官方
+    // 输入恒等返回。落行 content 列仍存原始输入（见 sendMessage 头注）。
+    let cmd = await this.deps.runService.buildMessageCommand({
       sessionId,
       ownerId: user.id,
       username: user.username,
-      content: p.content,
+      content: snapshotOfficialContent().expand(p.content),
       attachmentIds: p.attachmentIds,
     })
+
+    if (slash?.name === 'compact') cmd = { ...cmd, operation: 'compact' }
 
     // 落行先于 dispatch：dispatch 后 run 域事件（run.started 起）才可见，用户行必已在投影中
     //（刷新窗口无「事件先于消息」跳变）。
@@ -317,7 +339,54 @@ export class SessionService {
 
   private replayOrConflict(existing: SessionMessage, content: string): SendMessageResult {
     if (existing.content !== content) throw fail(CODE.MESSAGE_KEY_CONFLICT)
-    return { messageId: existing.id, turn: existing.turn, runId: null, replay: true }
+    // 坏 JSON 不炸 replay 路径（写面恒经 serializeAttachments，防御面同 toProjectionMessage）
+    let command: SystemCommandResult | undefined
+    try {
+      command = (JSON.parse(existing.attachmentsJson || '{}') as { command?: SystemCommandResult }).command
+    } catch {
+      command = undefined
+    }
+    return { messageId: existing.id, turn: existing.turn, runId: null, replay: true, ...(command ? { command } : {}) }
+  }
+
+  private async executeSystemCommand(
+    user: Pick<AuthUser, 'id'>, sessionId: string, p: { content: string; clientKey: string }, slash: { name: string; args: string },
+  ): Promise<SendMessageResult> {
+    if (slash.name === 'new' && slash.args) throw fail(CODE.VALIDATION_FAILED, '/new 不接受参数')
+    const selection = slash.name === 'model'
+      ? await this.deps.runService.resolveModelSelection?.(user.id, slash.args)
+      : undefined
+    if (slash.name === 'model' && !selection) throw fail(CODE.INTERNAL, '模型选择能力未接线')
+    const result = await this.deps.prisma.$transaction(async tx => {
+      const previous = await tx.sessionMessage.findUnique({ where: { sessionId_clientKey: { sessionId, clientKey: p.clientKey } } })
+      if (previous) return { response: this.replayOrConflict(previous, p.content) }
+      let created: Session | undefined
+      let command: SystemCommandResult
+      if (slash.name === 'new') {
+        const fresh = await tx.session.create({ data: { ownerId: user.id, containerId: '', title: '' } })
+        created = await tx.session.update({ where: { id: fresh.id }, data: { containerId: `${SANDBOX_CONTAINER_PREFIX}${fresh.id}` } })
+        command = { name: 'new', sessionId: created.id }
+      } else {
+        if (selection && 'model' in selection) await tx.session.update({ where: { id: sessionId }, data: { preferredModelJson: selection.model ? JSON.stringify(selection.model) : null } })
+        command = { name: 'model', ...selection }
+      }
+      // turn 分配与幂等查同处一个 interactive transaction：better-sqlite3 单连接下事务体
+      // 串行执行（写排队），read-then-write 无交错窗口——无需常规路径的 P2002 兜底重查
+      //（该兜底防的是「先查在事务外」的间隙，此处查/写同事务，约束撞不上）。
+      const last = await tx.sessionMessage.findFirst({ where: { sessionId }, orderBy: { turn: 'desc' }, select: { turn: true } })
+      const row = await tx.sessionMessage.create({
+        data: { sessionId, turn: (last?.turn ?? 0) + 1, role: 'user', content: p.content, clientKey: p.clientKey, attachmentsJson: serializeAttachments({ command }) },
+      })
+      return { created, response: { messageId: row.id, turn: row.turn, runId: null, replay: false, command } }
+    })
+    if (result.created) this.publishSessionEvent(user.id, 'session.created', { source: 'new', session: summary(result.created) }, result.created.id)
+    // session.updated 只随「偏好真实落定」（含 /model default 重置）广播——/model 无参纯列清单
+    // 不发事件（列清单是查询不是变更，广播 model:undefined 是噪音）。
+    const command = result.response.command
+    if (command?.name === 'model' && 'model' in command && !result.response.replay) {
+      this.publishSessionEvent(user.id, 'session.updated', { sessionId, model: command.model, appliesTo: 'next-run' }, sessionId)
+    }
+    return result.response
   }
 
   // ---- 中断（story 8，by:user）。仅 running 在飞 run 可中断（RunService.abort 只对 aborts
