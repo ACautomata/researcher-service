@@ -125,7 +125,6 @@ export class SandboxLifecycle {
       const spec = {
         sessionId: newSessionId,
         sourceSessionId,
-        image: this.opts.image,
         limits: this.opts.limits ?? SANDBOX_LIMITS,
       }
       const outcome = await this.runtime.createSandboxFromSource(spec)

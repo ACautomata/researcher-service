@@ -7,7 +7,7 @@ import type { SandboxInfo, SandboxRuntime, SandboxSpec, SandboxForkSpec } from '
 
 export interface FakeSandboxRecord {
   info: SandboxInfo
-  spec: SandboxSpec
+  spec: SandboxSpec | SandboxForkSpec
   started: boolean
   removed: boolean
 }

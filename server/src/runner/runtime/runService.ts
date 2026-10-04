@@ -807,7 +807,9 @@ export class RunService {
 
   // 祖先链包含判定（#781 指针推进前提）：from 出发沿 parentCheckpointId 上溯（含 from 自身）是否
   // 命中 target。行走下沉共享内核 checkpointChain.ts（与 sessions/rewind 单一实现）；读失败向上
-  // 抛由调用方吞（宁可不推进）。
+  // 抛由调用方吞（宁可不推进）。刻意不过滤 archivedAt（与 service 侧 checkpointParentLookup 的
+  // 产品面口径不同）：守卫只判「终态锚含指针」，归档与否不改判定结果，全量图上溯在崩溃恢复
+  // 窗口下最保守（不因软删口径产生假阴性而漏推进）。
   private async checkpointLineageContains(threadId: string, from: string, target: string): Promise<boolean> {
     const cps = await this.deps.prisma.checkpoint.findMany({
       where: { threadId },

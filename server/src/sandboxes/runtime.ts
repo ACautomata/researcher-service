@@ -32,8 +32,10 @@ export interface SandboxSpec {
   readonly limits: SandboxLimits
 }
 
-// fork 字面复制参数（#781 · #768 D7）：目标沙箱语义参数 + 源沙箱 session。
-export interface SandboxForkSpec extends SandboxSpec {
+// fork 字面复制参数（#781 · #768 D7）：目标沙箱语义参数 + 源沙箱 session。刻意不带 image——
+// 目标容器镜像恒由实现侧派生（fsImage = 源容器 export→import 的专属镜像），接口上不留给
+// 调用方「指定 image」的误导面。
+export interface SandboxForkSpec extends Omit<SandboxSpec, 'image'> {
   readonly sourceSessionId: string
 }
 

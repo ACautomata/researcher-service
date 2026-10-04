@@ -500,7 +500,7 @@ export class SessionService {
   // 顺序：session 行先落（拿 id）→ 沙箱复制（Docker 成功才落数据行）→ 数据复制事务（含系统
   // 消息）；任一步失败补偿删 session 行（cascade 清子行）+ 删沙箱尽力——fork 可整体重试。
   async forkSession(
-    user: Pick<AuthUser, 'id' | 'role' | 'username'>,
+    user: Pick<AuthUser, 'id' | 'role'>,
     sessionId: string,
     p: { messageId?: string; title?: string },
   ): Promise<{ session: SessionSummary }> {
