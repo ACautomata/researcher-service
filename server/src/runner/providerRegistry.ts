@@ -276,7 +276,7 @@ export class ProviderRegistry {
   // 换模型经 withConfig 绑定（ConfigurableModel 的 configurable 通道，实测请求体正确换 model）——
   // 同 provider 多模型共享缓存实例，仅绑定点不同。集合外 model 值须先过 resolveModelRef
   //（731 §5.2 机制面，见文件级导出）。
-  async getDefaultModel(snapshot: ProviderConfigSnapshot): Promise<Runnable> {
+  async getDefaultModel(snapshot: ProviderConfigSnapshot, preferred?: ModelRef): Promise<Runnable> {
     const firstModelOf = (providerId: string): string | undefined =>
       snapshot.providers.find((p) => p.providerId === providerId)?.models[0]?.id
     const refs = snapshot.providers.flatMap((p) =>
@@ -284,6 +284,14 @@ export class ProviderRegistry {
     )
     if (refs.length === 0) {
       throw fail(CODE.LLM_NOT_CONFIGURED, '无可用模型（provider/models 均为空）')
+    }
+    if (preferred) {
+      resolveModelRef(snapshot, preferred)
+      const index = refs.findIndex(ref => ref.providerId === preferred.providerId && ref.modelId === preferred.modelId)
+      // 不可达（resolveModelRef 已验成员资格）——显式挡住 findIndex=-1 时 splice(-1) 静默轮转
+      // fallback 链（preferred 误置链尾 = 主备倒挂）。
+      if (index < 0) throw fail(CODE.PROVIDER_NOT_FOUND, '偏好模型不在配置快照中')
+      refs.unshift(...refs.splice(index, 1))
     }
     const [primary, ...rest] = refs
     const primaryModel = await this.getModel(snapshot, primary.providerId)

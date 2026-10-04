@@ -6,7 +6,7 @@
   "main": "dist/server.js",
   "scripts": {
     "dev": "tsx watch src/server.ts",
-    "prebuild": "prisma generate",
+    "prebuild": "npm run content:build && prisma generate",
     "build": "tsc -p tsconfig.build.json && rm -rf dist/generated && cp -R src/generated dist/generated",
     "start": "node dist/server.js",
     "typecheck": "tsc --noEmit",
@@ -14,7 +14,10 @@
     "test:watch": "vitest",
     "prisma:generate": "prisma generate",
     "prisma:validate": "prisma validate",
-    "db:apply": "node scripts/apply-schema.mjs"
+    "db:apply": "node scripts/apply-schema.mjs",
+    "content:build": "node scripts/build-official-content.mjs",
+    "predev": "npm run content:build",
+    "pretest": "npm run content:build"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.122.0",

@@ -55,7 +55,7 @@ function assertUpgraded(dbPath: string): void {
     const attempts = containerCols.find((c) => c.name === 'upgradeAttempts')!
     expect(attempts.notnull).toBe(1) // NOT NULL
     expect(attempts.dflt_value).toBe('0') // DEFAULT 0（既有行升级计数从 0 起）
-    expect(db.pragma('user_version', { simple: true })).toBe(9) // #775 批次（SCHEMA_VERSION 8→9）
+    expect(db.pragma('user_version', { simple: true })).toBe(10) // #775 批次（8→9）+ #787 preferredModelJson（9→10）
   } finally {
     db.close()
   }
