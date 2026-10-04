@@ -40,6 +40,8 @@ export function assembleRunner(opts: {
   wikis?: NonNullable<RunServiceDeps['wikis']>
   /** 审批漏斗 judge 模型（测试注入 fake；缺省按 config.runner.judge 构造，未配置 = 无 judge） */
   judge?: NonNullable<ApprovalFunnelDeps['judge']>
+  /** #780 附件 ingestion（片 2：run 首步物化到沙箱 + 图片内联；server.ts 注入 AttachmentsService） */
+  attachments?: NonNullable<RunServiceDeps['attachments']>
 }): RunnerAssembly {
   // tracing 显式关（启动期第一路；RunService 构造期第二路兜底）
   disableLangsmithTracing()
@@ -88,6 +90,7 @@ export function assembleRunner(opts: {
     wikis: opts.wikis,
     approvals: funnel,
     approvalTimeoutMs: config.runner.approvalTimeoutMs,
+    attachments: opts.attachments,
   })
   void service.recoverSuspensions() // 重启恢复：超时未落定的审批升级 → suspended（异步，不挂启动）
 

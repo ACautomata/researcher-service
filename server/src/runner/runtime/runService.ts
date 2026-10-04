@@ -30,7 +30,7 @@
 // run 域事件不受影响（未开始执行的 run 不发事件）。
 
 import { randomUUID } from 'node:crypto'
-import { HumanMessage } from '@langchain/core/messages'
+import { HumanMessage, type ContentBlock } from '@langchain/core/messages'
 import { Command, END } from '@langchain/langgraph'
 import { INTERRUPT } from '@langchain/langgraph-checkpoint'
 import {
@@ -123,6 +123,17 @@ export interface RunServiceDeps {
   }
   /** interrupt 策略源（拓扑因子；V1 无审批恒 undefined，#783 由持久化维度派生——测试注入） */
   readonly interruptPolicyFor?: (sessionId: string) => InterruptPolicy | undefined
+  /** #780 附件 ingestion（片 2）：run 首步确定性物化附件到沙箱 + 图片内联多模态。缺省不注 =
+   * message 命令带附件时跳过物化（测试无附件面）；装配层注入 AttachmentsService。 */
+  readonly attachments?: {
+    readonly ingestAttachments: (p: {
+      sessionId: string
+      attachmentIds: readonly string[]
+      container: string // 沙箱容器名（/lab 工具根）
+      primitives: Pick<SandboxFilePrimitives, 'exec' | 'putArchive'>
+    }) => Promise<Array<{ attachmentId: string; mimeType: string }>>
+    readonly readTempBytes: (attachmentId: string) => Promise<Buffer>
+  }
   /** 审批三层漏斗（#783）。与 interruptPolicyFor（V1 测试面）可并存，生产只接前者。 */
   readonly approvals?: ApprovalFunnel
   /** 审批升级超时（默认 48h，729 附录 B；测试注入缩短） */
@@ -454,20 +465,50 @@ export class RunService {
     // SSE 事件流终态（前端 #730 消费同一目录）。
     const turn = new TurnReducer()
     const invocation = buildStreamEventsInvocation(cmd.sessionId)
-    const input =
-      cmd.kind === 'message'
-        ? { messages: [new HumanMessage(cmd.content ?? '')] }
-        : new Command({
-            resume: cmd.decisions ?? DEFAULT_RESUME_DECISIONS,
-            // abort（#783 story 15）：回执决策 + goto END——interrupt 回执后图立即终止，
-            // run 落 aborted 终态（探针验证：resume 值仍送达 interrupt 点，工具不执行）
-            ...(cmd.abort ? { goto: END } : {}),
-          })
 
     // 终态 checkpoint 锚点（#778 anchorCheckpointId）：成功路径从终态 state 取；
     // aborted/failed 路径无可靠 state → null（回放面锚点缺位不阻断落行）。
     let anchorCheckpointId: string | null = null
+    let input: unknown = null
     try {
+      // #780 ingestion（片 2）：message 命令带附件 → run 首步确定性物化（runner 调度权，非 agent
+      // 工具；LangGraph 图拓扑约束下作 runner 侧幂等预步骤——putArchive 覆盖写 + sha256 校验，
+      // resume/重投安全）。校验失败 → throw → 下方 catch → run.failed（ingestion 错误，不进入
+      // agent loop）。图片读字节 → 多模态 block 内联进输入（前端已降采样长边 ≤1568px，data URL
+      // 满足 provider 内联限制）；文件类只物化、由常规 fs 工具自读（漏斗白名单 lab/** 覆盖）。
+      let imageBlocks: ContentBlock[] = []
+      if (cmd.kind === 'message' && cmd.attachmentIds && cmd.attachmentIds.length > 0 && this.deps.attachments) {
+        const metas = await this.deps.attachments.ingestAttachments({
+          sessionId: cmd.sessionId,
+          attachmentIds: cmd.attachmentIds,
+          container: labContainer,
+          primitives: this.deps.primitives,
+        })
+        for (const m of metas) {
+          if (m.mimeType.startsWith('image/')) {
+            const buf = await this.deps.attachments.readTempBytes(m.attachmentId)
+            imageBlocks.push({ type: 'image_url', image_url: { url: `data:${m.mimeType};base64,${buf.toString('base64')}` } })
+          }
+        }
+      }
+      input =
+        cmd.kind === 'message'
+          ? {
+              messages: [
+                new HumanMessage(
+                  imageBlocks.length > 0
+                    ? { content: [{ type: 'text', text: cmd.content ?? '' }, ...imageBlocks] }
+                    : (cmd.content ?? ''),
+                ),
+              ],
+            }
+          : new Command({
+              resume: cmd.decisions ?? DEFAULT_RESUME_DECISIONS,
+              // abort（#783 story 15）：回执决策 + goto END——interrupt 回执后图立即终止，
+              // run 落 aborted 终态（探针验证：resume 值仍送达 interrupt 点，工具不执行）
+              ...(cmd.abort ? { goto: END } : {}),
+            })
+
       const stream = await agent.streamEvents(input, {
         ...invocation,
         recursionLimit: this.recursionLimit,

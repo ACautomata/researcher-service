@@ -18,6 +18,8 @@ import { CODE } from '../codes'
 import { getSessionForUser } from '../sandboxes/service'
 import { SANDBOX_CONTAINER_PREFIX } from '../sandboxes/values'
 import type { FileArchive } from '../files/fsPort'
+import { createTarFile } from '../files/tar'
+import type { SandboxFilePrimitives } from '../runner/backend/primitives'
 import { snowflakeId } from './snowflake'
 import { ATTACHMENTS_PER_MESSAGE_MAX, ATTACHMENT_MAX_BYTES, ATTACHMENT_LAB_UPLOADS, labUploadRelPath } from './values'
 
@@ -124,5 +126,47 @@ export class AttachmentsService {
       where: { id: { in: ids }, sessionId },
       data: { messageId },
     })
+  }
+
+  // ---- ingestion（片 2 · run 首步，runner 调度权）：sha256 校验 → 写沙箱物化 ----
+  // 从控制面临时区读字节、重算 sha256 与行校验（不符 = 内容被改/临时区损坏 → 抛错 → run 失败，
+  // 不进入 agent loop）；校验通过 → mkdir + putArchive 单文件 tar 落 `/lab/uploads/<attachmentId>/`
+  //（ID 子目录结构性防同名碰撞，D1）。putArchive 覆盖写 = 幂等（resume/重投安全）。返回元数据
+  // 供 runner 做图片内联（image mime → 读字节 data URL 多模态 block；文件类由常规 fs 工具自读）。
+  async ingestAttachments(p: {
+    sessionId: string
+    attachmentIds: readonly string[]
+    container: string
+    primitives: Pick<SandboxFilePrimitives, 'exec' | 'putArchive'>
+  }): Promise<Array<{ attachmentId: string; mimeType: string }>> {
+    const rows = await this.deps.prisma.attachment.findMany({
+      where: { id: { in: [...p.attachmentIds] }, sessionId: p.sessionId },
+    })
+    // 任一 id 未命中（行被删/跨会话引用）→ 校验失败（ingestion 错误面）
+    if (rows.length !== new Set(p.attachmentIds).size) {
+      throw fail(CODE.SESSION_NOT_FOUND, '附件引用无效（会话内不存在）')
+    }
+    const metas: Array<{ attachmentId: string; mimeType: string }> = []
+    for (const row of rows) {
+      const tmp = path.join(this.deps.tmpRoot, row.id)
+      let buf: Buffer
+      try {
+        buf = await readFile(tmp)
+      } catch {
+        throw fail(CODE.INTERNAL, `附件字节缺失（临时区）：${row.id}`)
+      }
+      const sha = createHash('sha256').update(buf).digest('hex')
+      if (sha !== row.sha256) throw fail(CODE.INTERNAL, `附件内容校验失败（sha256 不符）：${row.id}`)
+      const dir = `${ATTACHMENT_LAB_UPLOADS}/${row.id}`
+      await p.primitives.exec(p.container, ['mkdir', '-p', dir])
+      await p.primitives.putArchive(p.container, dir, createTarFile(row.fileName, buf))
+      metas.push({ attachmentId: row.id, mimeType: row.mimeType })
+    }
+    return metas
+  }
+
+  // 读临时区字节（ingestion 图片内联用；附件 id 为键）。
+  async readTempBytes(attachmentId: string): Promise<Buffer> {
+    return readFile(path.join(this.deps.tmpRoot, attachmentId))
   }
 }
