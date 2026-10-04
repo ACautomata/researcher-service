@@ -56,6 +56,11 @@ export interface FileArchive {
   // 语义与 read() 的目录/文件分支完全同构（复用适配层同一读通道）。沙箱未创建/容器不在 →
   // getArchive 404 → FileNotFound（60040）——读面不触发惰性创建（创建归 runner ensure，#766 D5）。
   readLab(dockerName: string, relPath: string, recursive: boolean): Promise<DirListing | FileReading>
+  // #780 沙箱字节读通道（附件下载端点）：与 readLab 的 file 分支同探针/收集路径，但**不做 NUL
+  // 嗅探与 UTF-8 转码**——直接返回 entry.data Buffer（/lab/uploads/<attachmentId>/<原文件名> 的
+  // 图片/音视频字节透传，仿 readBytes 的 workspace 媒体通道先例）。dockerName = 沙箱容器 docker
+  // 名原文；树根固定 /lab。超大（> MAX_FILE_READ_BYTES）/ 非文件条目 → FileInvalidPath。
+  readLabBytes(dockerName: string, relPath: string): Promise<Buffer>
   // 原始字节读取（WebChat 媒体通道，files/raw 端点）：不经 NUL 嗅探/UTF-8 转码，返回文件原生
   // Buffer——与 read() 的「二进制 → content:null」语义互补（read 面向文本投影，readBytes 面向
   // 字节透传，如 workspace 图片）。absRoot = 容器内树根绝对路径（legacy 专用通道，

@@ -30,7 +30,8 @@
 // run 域事件不受影响（未开始执行的 run 不发事件）。
 
 import { randomUUID } from 'node:crypto'
-import { HumanMessage } from '@langchain/core/messages'
+import { HumanMessage, type ContentBlock } from '@langchain/core/messages'
+import type { AnyAgentMiddleware } from 'langchain'
 import { Command, END } from '@langchain/langgraph'
 import { INTERRUPT } from '@langchain/langgraph-checkpoint'
 import {
@@ -58,6 +59,7 @@ import { classifyRunError, type RunErrorKind } from './errorKind'
 import { buildLeaderAgent, interruptPolicyKey, type DeepAgentLike, type InterruptPolicy, type LeaderAgentParams } from './graphFactory'
 import { DEFAULT_RECURSION_LIMIT, DEFAULT_RESUME_DECISIONS, GRAPH_CACHE_MAX_INSTANCES, LEADER_SYSTEM_PROMPT } from './values'
 import { disableLangsmithTracing } from './tracing'
+import { lastMessage, scanMediaBlocks } from './mediaBlocks'
 import { TurnReducer, type RecordTurnPayload } from '../../sessions/reducer'
 
 // recordTurn 注入缝（#778）：run 终态（completed/interrupted/aborted/failed 任一）的单 turn
@@ -77,6 +79,8 @@ export interface RunCommand {
   readonly kind: 'message' | 'resume'
   /** kind=message：用户消息文本 */
   readonly content?: string
+  /** kind=message：#780 附件引用（雪花 attachmentId 列表；ingestion 节点消费，片 2） */
+  readonly attachmentIds?: readonly string[]
   /** kind=resume：HITL 决策（{decisions:[...]} 形态，PoC 实测） */
   readonly decisions?: unknown
   /** kind=resume：abort 语义（#783 story 15——suspended/interrupted run 的终态出路：
@@ -121,8 +125,31 @@ export interface RunServiceDeps {
   }
   /** interrupt 策略源（拓扑因子；V1 无审批恒 undefined，#783 由持久化维度派生——测试注入） */
   readonly interruptPolicyFor?: (sessionId: string) => InterruptPolicy | undefined
+  /** #780 附件 ingestion（片 2）：run 首步确定性物化附件到沙箱 + 图片内联多模态。缺省不注 =
+   * message 命令带附件时跳过物化（测试无附件面）；装配层注入 AttachmentsService。 */
+  readonly attachments?: {
+    readonly ingestAttachments: (p: {
+      sessionId: string
+      attachmentIds: readonly string[]
+      container: string // 沙箱容器名（/lab 工具根）
+      primitives: Pick<SandboxFilePrimitives, 'exec' | 'putArchive'>
+    }) => Promise<Array<{ attachmentId: string; mimeType: string }>>
+    readonly readTempBytes: (attachmentId: string) => Promise<Buffer>
+    /** #780 D9 agent→用户媒体物化（片 3）：校验/拷进 uploads/建行；null = 校验失败（降级面） */
+    readonly materializeAgentMedia: (p: {
+      sessionId: string
+      ownerId: string
+      declaredPath: string
+      mime: string
+      container: string
+      primitives: Pick<SandboxFilePrimitives, 'exec' | 'getArchive' | 'putArchive'>
+    }) => Promise<{ attachmentId: string; fileName: string; mimeType: string; size: number } | null>
+  }
   /** 审批三层漏斗（#783）。与 interruptPolicyFor（V1 测试面）可并存，生产只接前者。 */
   readonly approvals?: ApprovalFunnel
+  /** #780 下载校验节点（片 3：file 写类工具成功后校验声明路径 → 物化 + 下载引用进 tool 输出；
+   * 失败 → 错误回喂 agent 重新生成）。缺省不注 = 工具产物面关闭（测试）。 */
+  readonly downloadNode?: { readonly middleware: AnyAgentMiddleware }
   /** 审批升级超时（默认 48h，729 附录 B；测试注入缩短） */
   readonly approvalTimeoutMs?: number
   /** 挂起清扫定时器间隔（毫秒；缺省 5min，0 = 不启动定时器——测试手动调 sweepSuspensions） */
@@ -136,6 +163,8 @@ export interface RunServiceDeps {
 interface GraphStateLike {
   next?: string[]
   tasks?: { interrupts?: unknown[] }[]
+  // LangGraph StateSnapshot.values（channel 值）——终态 messages（#780 D9 媒体块扫描源）。
+  values?: { messages?: unknown[] }
   // LangGraph StateSnapshot.config.configurable.checkpoint_id——终态 checkpoint 锚点
   //（#778 session_messages.anchorCheckpointId 落值来源；issue 正文点名该列）。
   config?: { configurable?: { checkpoint_id?: string } }
@@ -205,6 +234,7 @@ export class RunService {
     username: string
     kind: 'message' | 'resume'
     content?: string
+    attachmentIds?: readonly string[]
     decisions?: unknown
   }): RunCommand {
     return { runId: randomUUID(), ...params }
@@ -221,6 +251,7 @@ export class RunService {
     ownerId: string
     username: string
     content: string
+    attachmentIds?: readonly string[]
   }): Promise<RunCommand> {
     const caller = await this.deps.prisma.user.findUnique({
       where: { id: params.ownerId },
@@ -450,20 +481,50 @@ export class RunService {
     // SSE 事件流终态（前端 #730 消费同一目录）。
     const turn = new TurnReducer()
     const invocation = buildStreamEventsInvocation(cmd.sessionId)
-    const input =
-      cmd.kind === 'message'
-        ? { messages: [new HumanMessage(cmd.content ?? '')] }
-        : new Command({
-            resume: cmd.decisions ?? DEFAULT_RESUME_DECISIONS,
-            // abort（#783 story 15）：回执决策 + goto END——interrupt 回执后图立即终止，
-            // run 落 aborted 终态（探针验证：resume 值仍送达 interrupt 点，工具不执行）
-            ...(cmd.abort ? { goto: END } : {}),
-          })
 
     // 终态 checkpoint 锚点（#778 anchorCheckpointId）：成功路径从终态 state 取；
     // aborted/failed 路径无可靠 state → null（回放面锚点缺位不阻断落行）。
     let anchorCheckpointId: string | null = null
+    let input: unknown = null
     try {
+      // #780 ingestion（片 2）：message 命令带附件 → run 首步确定性物化（runner 调度权，非 agent
+      // 工具；LangGraph 图拓扑约束下作 runner 侧幂等预步骤——putArchive 覆盖写 + sha256 校验，
+      // resume/重投安全）。校验失败 → throw → 下方 catch → run.failed（ingestion 错误，不进入
+      // agent loop）。图片读字节 → 多模态 block 内联进输入（前端已降采样长边 ≤1568px，data URL
+      // 满足 provider 内联限制）；文件类只物化、由常规 fs 工具自读（漏斗白名单 lab/** 覆盖）。
+      let imageBlocks: ContentBlock[] = []
+      if (cmd.kind === 'message' && cmd.attachmentIds && cmd.attachmentIds.length > 0 && this.deps.attachments) {
+        const metas = await this.deps.attachments.ingestAttachments({
+          sessionId: cmd.sessionId,
+          attachmentIds: cmd.attachmentIds,
+          container: labContainer,
+          primitives: this.deps.primitives,
+        })
+        for (const m of metas) {
+          if (m.mimeType.startsWith('image/')) {
+            const buf = await this.deps.attachments.readTempBytes(m.attachmentId)
+            imageBlocks.push({ type: 'image_url', image_url: { url: `data:${m.mimeType};base64,${buf.toString('base64')}` } })
+          }
+        }
+      }
+      input =
+        cmd.kind === 'message'
+          ? {
+              messages: [
+                new HumanMessage(
+                  imageBlocks.length > 0
+                    ? { content: [{ type: 'text', text: cmd.content ?? '' }, ...imageBlocks] }
+                    : (cmd.content ?? ''),
+                ),
+              ],
+            }
+          : new Command({
+              resume: cmd.decisions ?? DEFAULT_RESUME_DECISIONS,
+              // abort（#783 story 15）：回执决策 + goto END——interrupt 回执后图立即终止，
+              // run 落 aborted 终态（探针验证：resume 值仍送达 interrupt 点，工具不执行）
+              ...(cmd.abort ? { goto: END } : {}),
+            })
+
       const stream = await agent.streamEvents(input, {
         ...invocation,
         recursionLimit: this.recursionLimit,
@@ -513,6 +574,44 @@ export class RunService {
         this.runs.set(cmd.sessionId, { runId: cmd.runId, state: 'aborted', by: 'user' })
         this.publish(cmd.ownerId, { type: 'run.aborted', payload: { by: 'user' } }, cmd)
       } else {
+        // #780 D9 媒体块归约（片 3）：run 完成前扫描终态 assistant 回复的媒体块 → 校验（存在性/
+        // mime 白名单）/拷进 /lab/uploads/ 物化/建 Attachment 行 → `attachment` 事件（实时面）+
+        // turn.feed（回放同形状——attachmentsJson media 数组，单管线渲染零差异）。校验失败块
+        // 降级文本占位（占位进事件流与回放聚合）+ 审计计数 warn（不 fail run）。仅 completed
+        // 路径扫（interrupted/aborted 的回复未终稿，不做产物面）。
+        if (this.deps.attachments) {
+          const scan = scanMediaBlocks(lastMessage(state.values?.messages ?? []))
+          const degrade = (declaredPath: string, reason: string): void => {
+            const placeholder = `[媒体产物不可用：${declaredPath}]`
+            turn.feed({ type: 'text.delta', payload: { delta: placeholder } })
+            this.publish(cmd.ownerId, { type: 'text.delta', payload: { delta: placeholder } }, cmd)
+            // eslint-disable-next-line no-console
+            console.warn(`[runner] media block degraded: session=${cmd.sessionId} path=${declaredPath} reason=${reason}`)
+          }
+          for (const block of scan.materializable) {
+            const meta = await this.deps.attachments.materializeAgentMedia({
+              sessionId: cmd.sessionId,
+              ownerId: session.ownerId,
+              declaredPath: block.declaredPath,
+              mime: block.mime,
+              container: labContainer,
+              primitives: this.deps.primitives,
+            })
+            if (meta) {
+              const ref = {
+                attachmentId: meta.attachmentId,
+                mime: meta.mimeType,
+                size: meta.size,
+                fileName: meta.fileName,
+              }
+              turn.feed({ type: 'attachment', payload: ref })
+              this.publish(cmd.ownerId, { type: 'attachment', payload: ref }, cmd)
+            } else {
+              degrade(block.declaredPath, 'materialize_failed')
+            }
+          }
+          for (const d of scan.degraded) degrade(d.declaredPath, d.reason)
+        }
         this.runs.set(cmd.sessionId, { runId: cmd.runId, state: 'completed' })
         this.publish(cmd.ownerId, { type: 'run.completed', payload: {} }, cmd)
       }
@@ -737,9 +836,17 @@ export class RunService {
       checkpointer: this.deps.saver,
       systemPrompt: LEADER_SYSTEM_PROMPT,
       interruptPolicy: policy,
-      // 审批漏斗中间件（#783）：middleware 是运行期行为非拓扑因子——不入缓存键（跨 run
-      // 状态由漏斗 per-thread 槽管理，同参数必同拓扑的纯函数约束不受影响）。
-      ...(this.deps.approvals ? { middleware: [this.deps.approvals.middleware] } : {}),
+      // 中间件（运行期行为非拓扑因子——不入缓存键）：#783 审批漏斗 + #780 下载校验节点
+      //（file 写类工具成功后物化产物 + 下载引用进 tool 输出；跨 run 状态由各中间件
+      // per-thread 槽管理，同参数必同拓扑的纯函数约束不受影响）。
+      ...(this.deps.approvals || this.deps.downloadNode
+        ? {
+            middleware: [
+              ...(this.deps.approvals ? [this.deps.approvals.middleware] : []),
+              ...(this.deps.downloadNode ? [this.deps.downloadNode.middleware] : []),
+            ],
+          }
+        : {}),
     })
     // 图实例数护栏（正确性由键保证，此处防长期运行退化；超限整表清——重建成本 =
     // 一次 createDeepAgent 编译，进行中 run 持既有实例引用不受影响）。

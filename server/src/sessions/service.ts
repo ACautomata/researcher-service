@@ -68,6 +68,7 @@ export interface SessionRunGateway {
     ownerId: string
     username: string
     content: string
+    attachmentIds?: readonly string[]
   }) => Promise<RunCommand>
   readonly buildResumeCommand: (p: {
     sessionId: string
@@ -90,6 +91,15 @@ export interface SessionServiceDeps {
   readonly dispatch: RunDispatcher
   /** 删会话级联删沙箱（#776；缺省 no-op——测试不注则不删） */
   readonly sandboxes?: { readonly remove: (sessionId: string) => Promise<SandboxRemoveOutcome> }
+  /** #780 附件链接（≤4 件 + 归属/session 校验；缺省不注 = 发消息不接受附件引用） */
+  readonly attachments?: {
+    readonly linkToMessage: (
+      user: Pick<AuthUser, 'id' | 'role'>,
+      sessionId: string,
+      messageId: string,
+      attachmentIds: readonly string[],
+    ) => Promise<void>
+  }
 }
 
 // RunService recordTurn 注入缝的载荷（RecordTurnPayload）单一声明于 './reducer'。
@@ -215,7 +225,7 @@ export class SessionService {
   async sendMessage(
     user: Pick<AuthUser, 'id' | 'role' | 'username'>,
     sessionId: string,
-    p: { content: string; clientKey: string },
+    p: { content: string; clientKey: string; attachmentIds?: readonly string[] },
   ): Promise<SendMessageResult> {
     await getSessionForUser(this.deps.prisma, user, sessionId)
 
@@ -245,6 +255,7 @@ export class SessionService {
       ownerId: user.id,
       username: user.username,
       content: p.content,
+      attachmentIds: p.attachmentIds,
     })
 
     // 落行先于 dispatch：dispatch 后 run 域事件（run.started 起）才可见，用户行必已在投影中
@@ -269,14 +280,31 @@ export class SessionService {
       throw e
     }
 
+    // #780：附件引用链接（≤4 件 + 归属/session 校验在 linkToMessage）。失败 → 消息行回滚
+    //（引用与消息同生共死——校验失败的消息不应留下无引用的幽灵行）。链接先于 dispatch：
+    // worker 拾取 run 时按消息行读附件（片 2 ingestion），引用必须在 run 事件前就位。
+    if (p.attachmentIds && p.attachmentIds.length > 0 && this.deps.attachments) {
+      try {
+        await this.deps.attachments.linkToMessage(user, sessionId, row.id, p.attachmentIds)
+      } catch (e) {
+        await this.deps.prisma.sessionMessage.delete({ where: { id: row.id } }).catch(() => {})
+        throw e
+      }
+    }
+
     // dispatch = submit 入队 ack：失败 → 回滚删行。行残留的后果不可补偿——submit 失败无 job、
     // 无事件（#779 补偿只覆盖 job 已入队形态），重发同 key 将恒 replay 而消息永不执行。回滚
     // 后幂等键随行消失，重发重走全流程。回滚自身失败 best-effort（行残留概率 = DB 已故障，
-    // 此时告警面在日志）。
+    // 此时告警面在日志）。附件链接随行回滚（messageId → null，字节与临时区不动）。
     try {
       await this.deps.dispatch(cmd)
     } catch {
       await this.deps.prisma.sessionMessage.delete({ where: { id: row.id } }).catch(() => {})
+      if (p.attachmentIds && p.attachmentIds.length > 0) {
+        await this.deps.prisma.attachment
+          .updateMany({ where: { id: { in: [...p.attachmentIds] }, sessionId }, data: { messageId: null } })
+          .catch(() => {})
+      }
       throw fail(CODE.INTERNAL, 'run 入队失败，请稍后重试')
     }
     return { messageId: row.id, turn: row.turn, runId: cmd.runId, replay: false }

@@ -1,4 +1,5 @@
 import { createServer } from 'node:http'
+import path from 'node:path'
 import { createApp } from './app'
 import { getPrisma } from './prisma'
 import { bootstrap } from './auth/bootstrap'
@@ -11,6 +12,8 @@ import { assembleTunnelServer } from './chat/tunnelAssembly'
 import { assembleRunner } from './runner/assembly'
 import { StreamHub } from './events/hub'
 import { SessionService } from './sessions/service'
+import { AttachmentsService } from './attachments/service'
+import { ATTACHMENT_TMP_DIR } from './attachments/values'
 import './types'
 
 async function main(): Promise<void> {
@@ -42,6 +45,15 @@ async function main(): Promise<void> {
   // 集中式 runner（#777 · #747 A 节）：RunService + BullMQ worker。事件经 eventHub 扇出
   //（run 域事件目录）；REST 入队面归 #778 会话域（本装配 = 进程内就绪）。BullMQ 连接 lazy
   //（Redis 不可达不挂控制面，add 超时兜底在队列层——fleet 队列先例同形态）。
+  // #780 附件域服务：上传（控制面临时区 <fleetRoot>/attachments，REST 不直写沙箱）+ 下载（沙箱
+  // readLabBytes 字节通道，files 域 fleet.archive 复用）+ run 首步 ingestion（片 2，runner 注入）。
+  // 临时区须在 multer destination 前存在（createAttachmentsRouter 工厂期 mkdirSync 兜底）。
+  const attachmentTmpRoot = path.join(config.fleet.root, ATTACHMENT_TMP_DIR)
+  const attachmentsService = new AttachmentsService({
+    prisma,
+    tmpRoot: attachmentTmpRoot,
+    archive: fleet.archive,
+  })
   const runner = assembleRunner({
     prisma,
     hub: eventHub,
@@ -61,6 +73,8 @@ async function main(): Promise<void> {
         await wikiContainers.lifecycle.ensure(ownerId)
       },
     },
+    // #780 附件 ingestion（片 2）：run 首步物化附件到沙箱 + 图片内联多模态。
+    attachments: attachmentsService,
   })
   // 会话域（#778 · #747 C 节会话 REST 全件）：SessionService（门禁观测/配额预检/命令构造复用
   // runner.service；dispatch = BullMQ submit 透传——ack 失败由 SessionService 回滚/上报，
@@ -72,6 +86,8 @@ async function main(): Promise<void> {
     runService: runner.service,
     dispatch: (cmd) => runner.queue.submit(cmd),
     sandboxes: { remove: (id) => sandboxes.lifecycle.remove(id) },
+    // #780 附件链接（≤4 件 + 归属/session 校验）——上传/下载走独立 AttachmentsService
+    attachments: attachmentsService,
   })
   runner.service.setRecordTurn((p) => sessions.recordTurn(p))
   const app = createApp({
@@ -109,6 +125,8 @@ async function main(): Promise<void> {
     events: { hub: eventHub },
     // sessions（#778）：会话 REST 域（/api/v1/sessions）。SessionService 单例注入。
     sessions: { service: sessions },
+    // attachments（#780）：上传/下载 REST（挂 /api/v1）。AttachmentsService 单例注入。
+    attachments: { service: attachmentsService, tmpRoot: attachmentTmpRoot },
   })
 
   // M0 同进程单端口分流：createServer(expressApp) + server.on('upgrade') 分流。
