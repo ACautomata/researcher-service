@@ -59,6 +59,8 @@ import { buildLeaderAgent, interruptPolicyKey, type DeepAgentLike, type Interrup
 import { DEFAULT_RECURSION_LIMIT, DEFAULT_RESUME_DECISIONS, GRAPH_CACHE_MAX_INSTANCES, LEADER_SYSTEM_PROMPT } from './values'
 import { disableLangsmithTracing } from './tracing'
 import { TurnReducer, type RecordTurnPayload } from '../../sessions/reducer'
+import { TeammateService, type TeammateSummary } from '../teammates/service'
+import { createTeammateTools } from '../teammates/tools'
 
 // recordTurn 注入缝（#778）：run 终态（completed/interrupted/aborted/failed 任一）的单 turn
 // 聚合落库回调。anchorCheckpointId = 终态 checkpoint 锚点（issue 点名列；aborted/failed 路径
@@ -75,6 +77,11 @@ export interface RunCommand {
   readonly ownerId: string
   readonly username: string
   readonly kind: 'message' | 'resume'
+  readonly teammateId?: string
+  readonly parentSessionId?: string
+  readonly mailWaitId?: string
+  readonly mailWakeReason?: 'message' | 'timeout'
+  readonly mailBroadcastOnTimeout?: boolean
   /** kind=message：用户消息文本 */
   readonly content?: string
   /** kind=resume：HITL 决策（{decisions:[...]} 形态，PoC 实测） */
@@ -123,6 +130,7 @@ export interface RunServiceDeps {
   readonly interruptPolicyFor?: (sessionId: string) => InterruptPolicy | undefined
   /** 审批三层漏斗（#783）。与 interruptPolicyFor（V1 测试面）可并存，生产只接前者。 */
   readonly approvals?: ApprovalFunnel
+  readonly teammates?: TeammateService
   /** 审批升级超时（默认 48h，729 附录 B；测试注入缩短） */
   readonly approvalTimeoutMs?: number
   /** 挂起清扫定时器间隔（毫秒；缺省 5min，0 = 不启动定时器——测试手动调 sweepSuspensions） */
@@ -167,6 +175,7 @@ export class RunService {
   private readonly clock: () => number
   private recordTurn: RecordTurnFn | undefined
   private sweepTimer: ReturnType<typeof setInterval> | undefined
+  private dispatch: (cmd: RunCommand, delayMs?: number) => Promise<void> = (cmd) => this.execute(cmd)
 
   constructor(private readonly deps: RunServiceDeps) {
     this.recursionLimit = deps.recursionLimit ?? DEFAULT_RECURSION_LIMIT
@@ -195,6 +204,10 @@ export class RunService {
   // 装配期注入 session_messages 落库缝（见 RecordTurnFn 注；幂等——重复注入覆盖前者）。
   setRecordTurn(fn: RecordTurnFn | undefined): void {
     this.recordTurn = fn
+  }
+
+  setTeammateDispatcher(dispatch: (cmd: RunCommand, delayMs?: number) => Promise<void>): void {
+    this.dispatch = dispatch
   }
 
   // ---- 命令构造（REST/传输面用；runId 单点生成）----
@@ -320,15 +333,20 @@ export class RunService {
   private publish(
     ownerId: string,
     ev: Omit<CatalogEvent, 'sessionId' | 'runId'>,
-    cmd: Pick<RunCommand, 'sessionId' | 'runId'>,
+    cmd: Pick<RunCommand, 'sessionId' | 'runId' | 'parentSessionId' | 'teammateId'>,
   ): void {
-    this.deps.hub.publish(ownerId, { ...ev, sessionId: cmd.sessionId, runId: cmd.runId })
+    this.deps.hub.publish(ownerId, {
+      ...ev,
+      sessionId: cmd.parentSessionId ?? cmd.sessionId,
+      runId: cmd.runId,
+      ...(cmd.teammateId ? { teammateId: cmd.teammateId } : {}),
+    })
   }
 
   private async executeNow(cmd: RunCommand): Promise<void> {
     let lease: Awaited<ReturnType<ConcurrencyGate['acquire']>> | undefined
     try {
-      lease = await this.deps.gate.acquire(cmd.ownerId) // 满 → 40043（权威判定）
+      if (!cmd.teammateId) lease = await this.deps.gate.acquire(cmd.ownerId) // teammates are outside session quota
       await this.executeRun(cmd)
     } catch (e) {
       // pre-start 失败回滚 queued 占位（40043/50003 等——「未开始执行的 run 不发事件」
@@ -376,12 +394,17 @@ export class RunService {
 
     const session = await this.deps.prisma.session.findUnique({ where: { id: cmd.sessionId } })
     if (!session) throw fail(CODE.SESSION_NOT_FOUND)
+    if (cmd.teammateId) {
+      const teammate = await this.deps.prisma.teammate.findUnique({ where: { id: cmd.teammateId }, select: { archivedAt: true } })
+      if (!teammate || teammate.archivedAt) throw fail(CODE.SESSION_NOT_FOUND)
+    }
 
     // 沙箱执行前提（#776 契约「消费方 = #777 runner ensure/touch」）：闲置自动 stop 后
     // re-ensure（stopped → start，文件保留），返回容器即 /lab/ 工具根（可能 ≠
     // session.containerId 陈旧值）。失败按 pre-start 面向上传播（job failed / Inline 调用方；
     // 未开始执行的 run 不发 run 域事件——文件头信封错误面，registry 故障同先例）。
-    const sandbox = this.deps.sandboxes ? await this.deps.sandboxes.ensure(cmd.sessionId) : undefined
+    const sandboxSessionId = cmd.parentSessionId ?? cmd.sessionId
+    const sandbox = this.deps.sandboxes ? await this.deps.sandboxes.ensure(sandboxSessionId) : undefined
     const labContainer = sandbox?.containerId ?? session.containerId
     // wiki 容器执行前提（#784 契约）：run 前 ensure 用户 wiki 容器——/wiki/ 工具根就绪
     //（不存在惰性创建零初始化、stopped 复启；永久容器随用户生命周期，无 touch 面）。失败
@@ -389,9 +412,28 @@ export class RunService {
     await this.deps.wikis?.ensure(cmd.ownerId)
 
     const snapshot = await this.deps.registry.getSnapshot(cmd.ownerId)
-    const model = await this.deps.registry.getDefaultModel(snapshot)
+    const actor = cmd.teammateId
+      ? await this.deps.teammates?.get(cmd.parentSessionId ?? cmd.sessionId, cmd.teammateId)
+      : undefined
+    const model = actor?.modelProviderId
+      ? await this.deps.registry.getModel(snapshot, actor.modelProviderId)
+      : await this.deps.registry.getDefaultModel(snapshot)
     const policy = this.deps.interruptPolicyFor?.(cmd.sessionId)
-    const agent = this.getOrBuildGraph(cmd.sessionId, snapshot.version, policy, model, cmd.ownerId, labContainer)
+    const tools = this.deps.teammates
+      ? createTeammateTools({
+          parentSessionId: cmd.parentSessionId ?? cmd.sessionId,
+          actorTeammateId: cmd.teammateId ?? null,
+          service: this.deps.teammates,
+          checkpointId: async () => {
+            const tuple = await this.deps.saver.getTuple({ configurable: { thread_id: cmd.parentSessionId ?? cmd.sessionId } })
+            return tuple?.config.configurable?.checkpoint_id as string | undefined ?? null
+          },
+          start: (teammate) => this.startTeammate(cmd, teammate),
+          scheduleTimeout: (input) => this.scheduleMailboxTimeout(cmd, input),
+          abort: async (teammate) => { const runId = this.runs.get(teammate.threadId)?.runId; if (runId) this.abort(runId, 'system') },
+        })
+      : []
+    const agent = this.getOrBuildGraph(cmd.sessionId, snapshot.version, policy, model, cmd.ownerId, labContainer, tools)
 
     // 漏斗运行面（#783）：谨慎模式读 session owner 的 users.approvalMode（会话级开关，跨设备
     // 跟随）；message run 重置计数器 + 落审计身份（runId/ownerId/traceId），resume 延续计数
@@ -425,7 +467,7 @@ export class RunService {
 
     // usage 身份：默认链主 provider（snapshot.providers[0] 首模型）。fallback 链切换后的
     // per-call 身份不追踪（#775 usage.ts 声明的 #777 接线局限；采数不 fail run）。
-    const identity = snapshot.providers[0]
+    const identity = snapshot.providers.find((provider) => provider.providerId === actor?.modelProviderId) ?? snapshot.providers[0]
     const usageHandler = createUsageCallbackHandler(
       {
         prisma: this.deps.prisma,
@@ -450,11 +492,46 @@ export class RunService {
     // SSE 事件流终态（前端 #730 消费同一目录）。
     const turn = new TurnReducer()
     const invocation = buildStreamEventsInvocation(cmd.sessionId)
+    if (cmd.mailWaitId) {
+      const state = await this.graphState(agent, cmd.sessionId)
+      const matched = (state.tasks ?? []).some((task) => (task.interrupts ?? []).some((raw) => {
+        const value = (raw as { value?: unknown } | null)?.value ?? raw
+        return typeof value === 'object' && value !== null &&
+          (value as { kind?: unknown }).kind === 'teammate-mail-wait' &&
+          (value as { waitId?: unknown }).waitId === cmd.mailWaitId
+      }))
+      if (!matched) throw fail(CODE.RUN_ALREADY_RESUMED)
+      await this.deps.teammates?.clearWait(cmd.sessionId, cmd.mailWaitId)
+      if (cmd.mailWakeReason === 'timeout' && this.deps.teammates) {
+        const parentSessionId = cmd.parentSessionId ?? cmd.sessionId
+        const followUp = 'A teammate mailbox wait timed out. Send a follow-up request for updates and keep working.'
+        await this.deps.teammates.sendMail({
+          parentSessionId,
+          recipientTeammateId: cmd.teammateId ?? null,
+          kind: 'timeout',
+          content: followUp,
+        })
+        if (cmd.mailBroadcastOnTimeout) {
+          const peers = (await this.deps.teammates.list(parentSessionId))
+            .filter((peer) => peer.id !== cmd.teammateId && peer.status !== 'archived')
+          await Promise.all(peers.map((peer) => this.deps.teammates!.sendMail({
+            parentSessionId, senderTeammateId: cmd.teammateId ?? null,
+            recipientTeammateId: peer.id, kind: 'timeout-follow-up', content: followUp,
+          })))
+          if (cmd.teammateId) {
+            await this.deps.teammates.sendMail({
+              parentSessionId, senderTeammateId: cmd.teammateId,
+              recipientTeammateId: null, kind: 'timeout-follow-up', content: followUp,
+            })
+          }
+        }
+      }
+    }
     const input =
       cmd.kind === 'message'
         ? { messages: [new HumanMessage(cmd.content ?? '')] }
         : new Command({
-            resume: cmd.decisions ?? DEFAULT_RESUME_DECISIONS,
+            resume: cmd.mailWaitId ? { kind: 'mail', waitId: cmd.mailWaitId } : (cmd.decisions ?? DEFAULT_RESUME_DECISIONS),
             // abort（#783 story 15）：回执决策 + goto END——interrupt 回执后图立即终止，
             // run 落 aborted 终态（探针验证：resume 值仍送达 interrupt 点，工具不执行）
             ...(cmd.abort ? { goto: END } : {}),
@@ -472,7 +549,7 @@ export class RunService {
       })
       for await (const raw of stream) {
         // 工具/推理活动刷新沙箱闲置计时（#776 真 activity 源——长 run 中途不被 sweep stop）
-        this.deps.sandboxes?.touch(cmd.sessionId)
+        this.deps.sandboxes?.touch(sandboxSessionId)
         for (const ev of projector.feed(raw, this.clock())) {
           turn.feed(ev)
           this.publish(cmd.ownerId, ev, cmd)
@@ -495,7 +572,7 @@ export class RunService {
             cmd.ownerId,
             {
               type: APPROVAL_EVENT_REQUESTED,
-              payload: { escalation: payload.escalation, actionRequests: payload.actionRequests, teammateId: null },
+              payload: { escalation: payload.escalation, actionRequests: payload.actionRequests, teammateId: cmd.teammateId ?? null },
             },
             cmd,
           )
@@ -532,6 +609,29 @@ export class RunService {
       this.activeCmds.delete(cmd.sessionId)
       // 终态清理漏斗运行槽（interrupted/suspended 保留——resume 延续同一逻辑 run 的护栏计数）
       const finalState = this.runs.get(cmd.sessionId)?.state
+      if (cmd.teammateId && this.deps.teammates) {
+        const parentSessionId = cmd.parentSessionId ?? cmd.sessionId
+        try {
+          const teammate = await this.deps.teammates.get(parentSessionId, cmd.teammateId)
+          if (teammate.status !== 'archived') {
+            const status = finalState === 'completed' ? 'completed'
+              : finalState === 'failed' || finalState === 'aborted' ? 'failed'
+              : finalState === 'suspended' || (finalState === 'interrupted' && this.pendingApprovals.has(cmd.sessionId)) ? 'suspended'
+              : finalState === 'interrupted' ? 'waiting'
+              : 'running'
+            await this.deps.teammates.updateStatus(parentSessionId, cmd.teammateId, status)
+            if (status === 'completed' || status === 'failed' || status === 'suspended') {
+              this.publish(cmd.ownerId, {
+                type: `teammate.${status}`,
+                payload: { teammateId: cmd.teammateId, name: teammate.name },
+              }, cmd)
+            }
+          }
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn(`[runner] teammate status update failed: teammate=${cmd.teammateId}: ${(err as Error).message}`)
+        }
+      }
       if (
         this.deps.approvals &&
         (finalState === 'completed' || finalState === 'failed' || finalState === 'aborted')
@@ -659,13 +759,31 @@ export class RunService {
     if (!caller) throw fail(CODE.SESSION_NOT_FOUND)
     await getSessionForUser(this.deps.prisma, { id: params.ownerId, role: caller.role }, params.sessionId)
 
+    // Approval cards are rendered on the parent timeline, but a teammate owns its checkpoint.
+    // Route by escalation id to that child thread so one approval never resumes the leader graph.
+    const children = await this.deps.prisma.teammate.findMany({
+      where: { parentSessionId: params.sessionId, archivedAt: null },
+      select: { id: true, threadId: true },
+    })
+    let child: (typeof children)[number] | undefined
+    for (const candidate of children) {
+      const inMemoryMatch = this.pendingApprovals.get(candidate.threadId)?.escalationId === params.escalationId ||
+        this.deps.approvals?.pendingEscalation(candidate.threadId)?.escalation.id === params.escalationId
+      if (inMemoryMatch || await this.checkpointHasApproval(candidate.threadId, params.escalationId)) {
+        child = candidate
+        break
+      }
+    }
+    const targetSessionId = child?.threadId ?? params.sessionId
+    const targetTeammateId = child?.id
+
     // 权威 pending 判定：内存态 / checkpoint 推导（重启形态）
-    let snap = this.runs.get(params.sessionId)
+    let snap = this.runs.get(targetSessionId)
     if (!snap) {
-      const interrupted = await this.threadInterruptedFromCheckpoint(params.sessionId)
+      const interrupted = await this.threadInterruptedFromCheckpoint(targetSessionId)
       if (interrupted) {
-        snap = { runId: this.pendingApprovals.get(params.sessionId)?.runId ?? '', state: 'interrupted' }
-        this.runs.set(params.sessionId, snap)
+        snap = { runId: this.pendingApprovals.get(targetSessionId)?.runId ?? '', state: 'interrupted' }
+        this.runs.set(targetSessionId, snap)
       }
     }
     if (!snap || (snap.state !== 'interrupted' && snap.state !== 'suspended')) {
@@ -673,12 +791,12 @@ export class RunService {
     }
     // escalationId 核对（同进程漏斗 memo 在场时强校验；重启后 memo 丢失，弱校验放行——
     // 调用方已过归属门，id 核对主要防同会话双升级窗口的错配落定）
-    const escalation = this.deps.approvals?.pendingEscalation(params.sessionId)
+    const escalation = this.deps.approvals?.pendingEscalation(targetSessionId)
     if (escalation && escalation.escalation.id !== params.escalationId) {
       throw fail(CODE.APPROVAL_NOT_FOUND)
     }
 
-    const runId = this.pendingApprovals.get(params.sessionId)?.runId ?? snap.runId
+    const runId = this.pendingApprovals.get(targetSessionId)?.runId ?? snap.runId
     this.publish(
       params.ownerId,
       {
@@ -687,18 +805,19 @@ export class RunService {
           escalationId: params.escalationId,
           decision: params.decision,
           reason: params.reason ?? null,
-          teammateId: null, // teammate 并发协作（#742）未上线，来源标记预留
+          teammateId: targetTeammateId ?? null,
         },
       },
-      { sessionId: params.sessionId, runId },
+      { sessionId: targetSessionId, parentSessionId: targetTeammateId ? params.sessionId : undefined, teammateId: targetTeammateId, runId },
     )
-    this.pendingApprovals.delete(params.sessionId)
+    this.pendingApprovals.delete(targetSessionId)
 
     const cmd = this.buildCommand({
-      sessionId: params.sessionId,
+      sessionId: targetSessionId,
       ownerId: params.ownerId,
       username: params.username,
       kind: 'resume',
+      ...(targetTeammateId ? { teammateId: targetTeammateId, parentSessionId: params.sessionId } : {}),
       decisions: {
         decisions: [
           {
@@ -720,11 +839,12 @@ export class RunService {
     model: LeaderAgentParams['model'],
     ownerId: string,
     labContainer: string,
+    tools: NonNullable<LeaderAgentParams['tools']>,
   ): DeepAgentLike {
     // 双根入键：docker 实例变更（沙箱 remove/recreate、#784 wiki 容器接管后改名）时缓存图
     // 持旧 backend 会指向已删容器——backend 双根都是拓扑因子。
     const wikiContainer = this.deps.resolveWikiContainer(ownerId)
-    const key = `${threadId}|${configVersion}|${interruptPolicyKey(policy)}|${labContainer}|${wikiContainer}`
+    const key = `${threadId}|${configVersion}|${interruptPolicyKey(policy)}|${labContainer}|${wikiContainer}|teammates`
     const cached = this.graphs.get(key)
     if (cached) return cached
     const backend = new DockerArchiveBackend(this.deps.primitives, {
@@ -737,6 +857,7 @@ export class RunService {
       checkpointer: this.deps.saver,
       systemPrompt: LEADER_SYSTEM_PROMPT,
       interruptPolicy: policy,
+      tools,
       // 审批漏斗中间件（#783）：middleware 是运行期行为非拓扑因子——不入缓存键（跨 run
       // 状态由漏斗 per-thread 槽管理，同参数必同拓扑的纯函数约束不受影响）。
       ...(this.deps.approvals ? { middleware: [this.deps.approvals.middleware] } : {}),
@@ -746,6 +867,57 @@ export class RunService {
     if (this.graphs.size >= GRAPH_CACHE_MAX_INSTANCES) this.graphs.clear()
     this.graphs.set(key, agent)
     return agent
+  }
+
+  private async startTeammate(parent: RunCommand, teammate: TeammateSummary): Promise<void> {
+    const parentSessionId = parent.parentSessionId ?? parent.sessionId
+    await this.deps.teammates?.updateStatus(parentSessionId, teammate.id, 'running')
+    this.publish(parent.ownerId, {
+      type: 'teammate.started',
+      payload: { teammateId: teammate.id, name: teammate.name },
+    }, { ...parent, parentSessionId, teammateId: teammate.id })
+    await this.dispatch({
+      runId: randomUUID(), sessionId: teammate.threadId, parentSessionId,
+      ownerId: parent.ownerId, username: parent.username, kind: 'message',
+      teammateId: teammate.id, content: teammate.task,
+    })
+  }
+
+  private async scheduleMailboxTimeout(parent: RunCommand, input: {
+    waitId: string; recipientTeammateId: string | null; delayMs: number; broadcastOnTimeout: boolean
+  }): Promise<void> {
+    const parentSessionId = parent.parentSessionId ?? parent.sessionId
+    const threadId = input.recipientTeammateId
+      ? (await this.deps.teammates?.get(parentSessionId, input.recipientTeammateId))?.threadId
+      : parentSessionId
+    if (!threadId) throw new Error('teammate mailbox thread not found')
+    await this.dispatch({
+      runId: `mail-timeout-${input.waitId}`, sessionId: threadId, parentSessionId,
+      ownerId: parent.ownerId, username: parent.username, kind: 'resume',
+      ...(input.recipientTeammateId ? { teammateId: input.recipientTeammateId } : {}),
+      mailWaitId: input.waitId, mailWakeReason: 'timeout',
+      mailBroadcastOnTimeout: input.broadcastOnTimeout,
+    }, input.delayMs)
+  }
+
+  /** Resume only a thread parked at a mailbox interrupt. Checkpoint payload is the durable wait id. */
+  async wakeMailbox(threadId: string, teammateId: string | null, waitId: string): Promise<void> {
+    const teammate = teammateId
+      ? await this.deps.prisma.teammate.findUnique({ where: { id: teammateId } })
+      : null
+    const parentSessionId = teammate?.parentSessionId ?? threadId
+    const parent = await this.deps.prisma.session.findUnique({ where: { id: parentSessionId }, select: { ownerId: true } })
+    const user = parent ? await this.deps.prisma.user.findUnique({ where: { id: parent.ownerId } }) : null
+    if (!user) return
+    await this.dispatch({
+      runId: `mail-wake-${waitId}`, sessionId: threadId, parentSessionId,
+      ownerId: user.id, username: user.username, kind: 'resume',
+      ...(teammateId ? { teammateId } : {}), mailWaitId: waitId, mailWakeReason: 'message',
+    })
+  }
+
+  async teammatesForRewind(sessionId: string, checkpointId: string): Promise<void> {
+    await this.deps.teammates?.rewind(sessionId, checkpointId)
   }
 
   private async graphState(agent: DeepAgentLike, threadId: string): Promise<GraphStateLike> {
@@ -763,6 +935,19 @@ export class RunService {
       return false // checkpoint 读取故障按「无 interrupt」处理——resume 判定 50001，不放大
     }
     return (tuple?.pendingWrites ?? []).some(([, channel]) => channel === INTERRUPT_CHANNEL)
+  }
+
+  private async checkpointHasApproval(threadId: string, escalationId: string): Promise<boolean> {
+    try {
+      const tuple = await this.deps.saver.getTuple({ configurable: { thread_id: threadId } })
+      return (tuple?.pendingWrites ?? []).some(([, channel, raw]) => {
+        if (channel !== INTERRUPT_CHANNEL) return false
+        const candidate = (raw as { value?: unknown } | null)?.value ?? raw
+        return isApprovalInterruptPayload(candidate) && candidate.escalation.id === escalationId
+      })
+    } catch {
+      return false
+    }
   }
 }
 

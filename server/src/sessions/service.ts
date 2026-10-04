@@ -173,7 +173,7 @@ export class SessionService {
   // ---- 列表：本人会话（扁平挂用户；updatedAt DESC 最新在前）----
   async listSessions(user: Pick<AuthUser, 'id'>): Promise<{ sessions: SessionSummary[] }> {
     const rows = await this.deps.prisma.session.findMany({
-      where: { ownerId: user.id, archivedAt: null },
+      where: { ownerId: user.id, archivedAt: null, isTeammate: false },
       orderBy: [{ updatedAt: 'desc' }, { id: 'desc' }],
     })
     return { sessions: rows.map(summary) }
@@ -203,7 +203,16 @@ export class SessionService {
       snap.state === 'failed'
     if (!terminal) throw fail(CODE.RUN_IN_PROGRESS)
     await this.deps.sandboxes?.remove(sessionId)
-    await this.deps.prisma.session.delete({ where: { id: sessionId } })
+    await this.deps.prisma.$transaction(async (tx) => {
+      const teammateThreads = await tx.teammate.findMany({
+        where: { parentSessionId: sessionId },
+        select: { threadId: true },
+      })
+      if (teammateThreads.length > 0) {
+        await tx.session.deleteMany({ where: { id: { in: teammateThreads.map((row) => row.threadId) } } })
+      }
+      await tx.session.delete({ where: { id: sessionId } })
+    })
   }
 
   // ---- 发消息（story 7 幂等 + 多端门禁）。顺序：归属 → 幂等 → 门禁 → 配额预检 → 命令构造

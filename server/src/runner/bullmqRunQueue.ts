@@ -72,8 +72,12 @@ export class BullMqRunQueue {
   // 超时即向上抛（调用方感知失败）——底层 add 此后仍 pending（坏 Redis 永挂面），但
   // Promise.race 已订阅其 handlers，后续 rejection 不会成为 unhandledRejection；等待其
   // settle 反而架空 addTimeoutMs（永挂场景下 submit 永不返回）。对齐 fleet raceAddTimeout。
-  async submit(cmd: RunCommand): Promise<void> {
-    const add = this.queue.add('run', cmd, { jobId: cmd.runId, attempts: 1 })
+  async submit(cmd: RunCommand, opts: { delayMs?: number } = {}): Promise<void> {
+    const add = this.queue.add('run', cmd, {
+      jobId: cmd.runId,
+      attempts: 1,
+      ...(opts.delayMs && opts.delayMs > 0 ? { delay: opts.delayMs } : {}),
+    })
     await raceWithTimeout(add, this.addTimeoutMs, () =>
       new Error(`runner queue.add timeout (${this.addTimeoutMs}ms)`),
     )

@@ -57,6 +57,7 @@ export interface LeaderAgentParams {
   // 结构面由 runFunnel 的 WrapToolCallHook 推导钉死）。middleware 是运行期行为非拓扑因子，
   // 不入缓存键；跨 run 状态由漏斗自身 per-thread 槽管理。
   readonly middleware?: readonly AnyAgentMiddleware[]
+  readonly tools?: NonNullable<CreateDeepAgentParams['tools']>
 }
 
 // 构建一个 leader agent 图（纯函数；缓存责任在调用方——RunService 按
@@ -71,6 +72,7 @@ export function buildLeaderAgent(params: LeaderAgentParams): DeepAgent {
     checkpointer: params.checkpointer,
     systemPrompt: params.systemPrompt,
     interruptOn: interruptOnFromPolicy(params.interruptPolicy),
+    ...(params.tools !== undefined ? { tools: [...params.tools] } : {}),
     ...(params.middleware !== undefined && params.middleware.length > 0
       ? { middleware: [...params.middleware] }
       : {}),

@@ -21,6 +21,7 @@ import { createPrismaApprovalAuditSink } from './approval/audit'
 import { ToolCallJudgeClient } from './approval/judge'
 import { ApprovalFunnel, type ApprovalFunnelDeps } from './approval/funnel'
 import { JUDGE_POLICY_MARKDOWN } from './approval/values'
+import { TeammateService } from './teammates/service'
 
 export interface RunnerAssembly {
   readonly service: RunService
@@ -60,6 +61,7 @@ export function assembleRunner(opts: {
     },
   })
   const primitives = new DockerPrimitives()
+  const teammates = new TeammateService(opts.prisma)
 
   // 审批三层漏斗（#783）：judge 按部署配置构造（独立小模型，与用户主模型解耦）；审计三层
   // 全量同步写 tool_approval_logs（ADR 0015）。judge 未配置 → 灰区一律升级人工（fail-closed）。
@@ -87,6 +89,7 @@ export function assembleRunner(opts: {
     sandboxes: opts.sandboxes,
     wikis: opts.wikis,
     approvals: funnel,
+    teammates,
     approvalTimeoutMs: config.runner.approvalTimeoutMs,
   })
   void service.recoverSuspensions() // 重启恢复：超时未落定的审批升级 → suspended（异步，不挂启动）
@@ -99,6 +102,8 @@ export function assembleRunner(opts: {
     // ——40043 是 Inline/#778 REST 的即时反馈面，不由 worker 面必然触发。
     concurrency: opts.maxConcurrentRuns,
   })
+  service.setTeammateDispatcher((cmd, delayMs) => queue.submit(cmd, { delayMs }))
+  teammates.setWakeHandler((threadId, teammateId, waitId) => service.wakeMailbox(threadId, teammateId, waitId))
 
   return {
     service,

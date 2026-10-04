@@ -8,7 +8,7 @@
 //     T0 清退（#801），检测到旧形状只告警。
 //   - DDL 与 prisma/init.sql 逐字节同源（镜像其 CREATE 形状），init.sql 由
 //     prisma migrate diff 从 schema.prisma 派生 —— 单一来源，此处镜像。
-export const SCHEMA_VERSION = 9
+export const SCHEMA_VERSION = 11
 
 export function runIncrementalSchema(db) {
   db.exec(`
@@ -146,9 +146,52 @@ CREATE TABLE IF NOT EXISTS "sessions" (
     "forkSourceJson" TEXT,
     "activeCheckpointId" TEXT,
     "archivedAt" DATETIME,
+    "isTeammate" BOOLEAN NOT NULL DEFAULT false,
     "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" DATETIME NOT NULL,
     CONSTRAINT "sessions_ownerId_fkey" FOREIGN KEY ("ownerId") REFERENCES "users" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS "teammates" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "parentSessionId" TEXT NOT NULL,
+    "threadId" TEXT NOT NULL,
+    "name" TEXT NOT NULL,
+    "task" TEXT NOT NULL,
+    "status" TEXT NOT NULL DEFAULT 'requested',
+    "modelProviderId" TEXT,
+    "spawnedAtCheckpointId" TEXT,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" DATETIME NOT NULL,
+    "archivedAt" DATETIME,
+    CONSTRAINT "teammates_parentSessionId_fkey" FOREIGN KEY ("parentSessionId") REFERENCES "sessions" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
+    CONSTRAINT "teammates_threadId_fkey" FOREIGN KEY ("threadId") REFERENCES "sessions" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS "teammate_mailbox_messages" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "parentSessionId" TEXT NOT NULL,
+    "senderTeammateId" TEXT,
+    "recipientTeammateId" TEXT,
+    "kind" TEXT NOT NULL DEFAULT 'message',
+    "content" TEXT NOT NULL,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "readAt" DATETIME,
+    "invalidatedAt" DATETIME,
+    "expiresAt" DATETIME,
+    CONSTRAINT "teammate_mailbox_messages_parentSessionId_fkey" FOREIGN KEY ("parentSessionId") REFERENCES "sessions" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
+    CONSTRAINT "teammate_mailbox_messages_senderTeammateId_fkey" FOREIGN KEY ("senderTeammateId") REFERENCES "teammates" ("id") ON DELETE SET NULL ON UPDATE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS "teammate_mailbox_waits" (
+    "waitId" TEXT NOT NULL PRIMARY KEY,
+    "parentSessionId" TEXT NOT NULL,
+    "threadId" TEXT NOT NULL UNIQUE,
+    "recipientTeammateId" TEXT,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT "teammate_mailbox_waits_parentSessionId_fkey" FOREIGN KEY ("parentSessionId") REFERENCES "sessions" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
+    CONSTRAINT "teammate_mailbox_waits_threadId_fkey" FOREIGN KEY ("threadId") REFERENCES "sessions" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
+    CONSTRAINT "teammate_mailbox_waits_recipientTeammateId_fkey" FOREIGN KEY ("recipientTeammateId") REFERENCES "teammates" ("id") ON DELETE CASCADE ON UPDATE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS "session_messages" (
@@ -252,6 +295,16 @@ CREATE TABLE IF NOT EXISTS "file_journal" (
 );
 `)
 
+  // #786 teammate thread flags: existing session rows default to leader; teammate threads are hidden
+  // from the user's session list while remaining valid LangGraph checkpoint threads.
+  const sessionsTable = db.prepare('SELECT 1 FROM sqlite_master WHERE type = ? AND name = ?').get('table', 'sessions')
+  if (sessionsTable) {
+    const sessionCols = db.prepare('PRAGMA table_info("sessions")').all()
+    if (!sessionCols.some((c) => c.name === 'isTeammate')) {
+      db.exec('ALTER TABLE "sessions" ADD COLUMN "isTeammate" BOOLEAN NOT NULL DEFAULT false')
+    }
+  }
+
   // #778（#747·08 · story 7）：session_messages 补 clientKey 列（32-hex 幂等 key，仅 user 行
   // 携带）——(sessionId, clientKey) 唯一索引 = 断网重发不重复入列的约束面。ADD COLUMN 非幂等，
   // PRAGMA guard 先查再补（对齐 T02 模式）。fresh 库（上方 CREATE TABLE 已带列）此处列存在
@@ -271,6 +324,17 @@ CREATE TABLE IF NOT EXISTS "file_journal" (
   // ---- B 节索引（在全部 B 节表 + 补列 guard 之后统一创建；IF NOT EXISTS 幂等）----
   db.exec(`
 CREATE INDEX IF NOT EXISTS "sessions_ownerId_idx" ON "sessions"("ownerId");
+CREATE UNIQUE INDEX IF NOT EXISTS "teammates_threadId_key" ON "teammates"("threadId");
+CREATE UNIQUE INDEX IF NOT EXISTS "teammates_parentSessionId_name_key" ON "teammates"("parentSessionId", "name");
+CREATE INDEX IF NOT EXISTS "teammates_parentSessionId_status_idx" ON "teammates"("parentSessionId", "status");
+CREATE INDEX IF NOT EXISTS "teammate_mailbox_messages_parentSessionId_recipientTeammateId_createdAt_idx" ON "teammate_mailbox_messages"("parentSessionId", "recipientTeammateId", "createdAt");
+CREATE INDEX IF NOT EXISTS "teammate_mailbox_messages_recipientTeammateId_readAt_invalidatedAt_idx" ON "teammate_mailbox_messages"("recipientTeammateId", "readAt", "invalidatedAt");
+CREATE INDEX IF NOT EXISTS "teammate_mailbox_waits_parentSessionId_recipientTeammateId_idx" ON "teammate_mailbox_waits"("parentSessionId", "recipientTeammateId");
+CREATE UNIQUE INDEX IF NOT EXISTS "teammates_threadId_key" ON "teammates"("threadId");
+CREATE UNIQUE INDEX IF NOT EXISTS "teammates_parentSessionId_name_key" ON "teammates"("parentSessionId", "name");
+CREATE INDEX IF NOT EXISTS "teammates_parentSessionId_status_idx" ON "teammates"("parentSessionId", "status");
+CREATE INDEX IF NOT EXISTS "teammate_mailbox_messages_parentSessionId_recipientTeammateId_createdAt_idx" ON "teammate_mailbox_messages"("parentSessionId", "recipientTeammateId", "createdAt");
+CREATE INDEX IF NOT EXISTS "teammate_mailbox_messages_recipientTeammateId_readAt_invalidatedAt_idx" ON "teammate_mailbox_messages"("recipientTeammateId", "readAt", "invalidatedAt");
 CREATE INDEX IF NOT EXISTS "session_messages_sessionId_turn_idx" ON "session_messages"("sessionId", "turn");
 CREATE UNIQUE INDEX IF NOT EXISTS "session_messages_sessionId_clientKey_key" ON "session_messages"("sessionId", "clientKey");
 CREATE INDEX IF NOT EXISTS "checkpoints_threadId_checkpointNs_idx" ON "checkpoints"("threadId", "checkpointNs");
