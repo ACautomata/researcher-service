@@ -25,6 +25,8 @@ import type { SandboxRemoveOutcome } from '../sandboxes/lifecycle'
 import type { EventPublisher, InFlightProjection, RunCommand, RunSnapshot } from '../runner/runtime/runService'
 import { serializeAttachments, type RecordTurnPayload } from './reducer'
 import { TITLE_AUTO_MAX } from './values'
+import type { TeammateStatus } from '../runner/teammates/service'
+import type { ApprovalInterruptPayload } from '../runner/approval/funnel'
 
 // 会话摘要（session.created/updated 载荷 + 列表行 + 创建/PATCH 返回——同一形状）。
 export interface SessionSummary {
@@ -53,6 +55,18 @@ export interface SessionProjection {
   /** in-flight 投影（story 11 · #779）：有进行中 run 时带出（从 checkpoint blob 反序列化重建，
    *  即焚 token 事件的补偿真相源）；无在飞 = 字段缺省。多端重拉同帧（同一内存态）。 */
   readonly inFlight?: InFlightProjection
+  readonly teammates?: TeammateProjection[]
+  readonly approvals?: Array<ApprovalInterruptPayload & { teammateId?: string }>
+}
+
+export interface TeammateProjection {
+  readonly id: string
+  readonly name: string
+  readonly task: string
+  readonly status: TeammateStatus
+  readonly messages: ProjectionMessage[]
+  readonly mailbox: Array<{ id: string; senderTeammateId: string | null; recipientTeammateId: string | null; kind: string; content: string; createdAt: string }>
+  readonly inFlight?: InFlightProjection
 }
 
 export interface SystemCommandResult {
@@ -73,11 +87,13 @@ export interface SendMessageResult {
 // RunService 的结构子集（门禁观测 + 配额预检 + 命令构造 + abort）——测试注入同形 fake/真
 // 实例，不依赖具体类。
 export interface SessionRunGateway {
+  readonly pendingApprovalProjection?: (threadId: string) => Promise<ApprovalInterruptPayload[]>
+  readonly resolveApproval?: (params: { sessionId: string; ownerId: string; username: string; escalationId: string; decision: 'allow' | 'deny'; reason?: string }) => Promise<void>
   readonly resolveModelSelection?: (ownerId: string, args: string) => Promise<Omit<SystemCommandResult, 'name'>>
   readonly stateOf: (sessionId: string) => RunSnapshot | undefined
   readonly abort: (runId: string, by?: 'user' | 'system') => boolean
   /** 额度满预检（#777 注释契约「额度即时反馈面归 #778 REST」；只读不占额） */
-  readonly quotaFull: (ownerId: string) => Promise<boolean>
+  readonly quotaFull: (ownerId: string, sessionId?: string) => Promise<boolean>
   readonly buildMessageCommand: (p: {
     sessionId: string
     ownerId: string
@@ -200,7 +216,7 @@ export class SessionService {
   // ---- 列表：本人会话（扁平挂用户；updatedAt DESC 最新在前）----
   async listSessions(user: Pick<AuthUser, 'id'>): Promise<{ sessions: SessionSummary[] }> {
     const rows = await this.deps.prisma.session.findMany({
-      where: { ownerId: user.id, archivedAt: null },
+      where: { ownerId: user.id, archivedAt: null, isTeammate: false },
       orderBy: [{ updatedAt: 'desc' }, { id: 'desc' }],
     })
     return { sessions: rows.map(summary) }
@@ -229,8 +245,31 @@ export class SessionService {
       snap.state === 'aborted' ||
       snap.state === 'failed'
     if (!terminal) throw fail(CODE.RUN_IN_PROGRESS)
+    const teammates = await this.deps.prisma.teammate.findMany({
+      where: { parentSessionId: sessionId },
+      select: { threadId: true, status: true },
+    })
+    for (const teammate of teammates) {
+      const state = this.deps.runService.stateOf(teammate.threadId)?.state
+      const executing = state === 'queued' || state === 'running'
+      const live = teammate.status !== 'archived' && (state
+        ? !['completed', 'aborted', 'failed'].includes(state)
+        : ['queued', 'running', 'waiting', 'suspended'].includes(teammate.status))
+      if (executing || live) {
+        throw fail(CODE.RUN_IN_PROGRESS)
+      }
+    }
     await this.deps.sandboxes?.remove(sessionId)
-    await this.deps.prisma.session.delete({ where: { id: sessionId } })
+    await this.deps.prisma.$transaction(async (tx) => {
+      const teammateThreads = await tx.teammate.findMany({
+        where: { parentSessionId: sessionId },
+        select: { threadId: true },
+      })
+      if (teammateThreads.length > 0) {
+        await tx.session.deleteMany({ where: { id: { in: teammateThreads.map((row) => row.threadId) } } })
+      }
+      await tx.session.delete({ where: { id: sessionId } })
+    })
   }
 
   // ---- 发消息（story 7 幂等 + 多端门禁）。顺序：归属 → 幂等 → 门禁 → 配额预检 → 命令构造
@@ -269,7 +308,7 @@ export class SessionService {
     // 配额即时反馈（#777 注释契约「额度即时反馈面归 #778 REST」）：满 → 40043。预检只读不占
     // 额——紧邻并发仍可能双双穿透，权威判定在 worker 的 gate.acquire（job failed 面，#779
     // 兜底该形态：job 已入队故可观测）。
-    if (await this.deps.runService.quotaFull(user.id)) throw fail(CODE.CONCURRENCY_QUOTA_EXCEEDED)
+    if (await this.deps.runService.quotaFull(user.id, sessionId)) throw fail(CODE.CONCURRENCY_QUOTA_EXCEEDED)
 
     // 命令构造先于落行：构造失败（caller 缺失/50002 面）不落行——幂等键只在「run 确已被
     // 接受」后锁定（失败请求锁死幂等键 = story 7 语义反转：重发恒 replay 而消息从未被处理）。
@@ -421,7 +460,7 @@ export class SessionService {
       username: user.username,
       decisions,
     })
-    if (await this.deps.runService.quotaFull(user.id)) throw fail(CODE.CONCURRENCY_QUOTA_EXCEEDED)
+    if (await this.deps.runService.quotaFull(user.id, sessionId)) throw fail(CODE.CONCURRENCY_QUOTA_EXCEEDED)
     await this.deps.dispatch(cmd)
     return { runId: cmd.runId }
   }
@@ -436,12 +475,47 @@ export class SessionService {
       orderBy: [{ turn: 'asc' }, { createdAt: 'asc' }],
     })
     const inFlight = await this.deps.runService.inFlightProjection(sessionId)
+    const peers = await this.deps.prisma.teammate.findMany({
+      where: { parentSessionId: sessionId },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      include: { thread: { include: { messages: { orderBy: [{ turn: 'asc' }, { createdAt: 'asc' }] } } } },
+    })
+    const mail = peers.length > 0 ? await this.deps.prisma.teammateMailboxMessage.findMany({
+      where: { parentSessionId: sessionId, invalidatedAt: null, OR: [{ readAt: { not: null } }, { expiresAt: null }, { expiresAt: { gt: new Date() } }] },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+    }) : []
+    const teammates = await Promise.all(peers.map(async peer => {
+      const active = await this.deps.runService.inFlightProjection(peer.threadId)
+      return {
+        id: peer.id, name: peer.name, task: peer.task, status: peer.status as TeammateStatus,
+        messages: peer.thread.messages.map(toProjectionMessage),
+        mailbox: mail.filter(message => message.senderTeammateId === peer.id || message.recipientTeammateId === peer.id).map(message => ({
+          id: message.id, senderTeammateId: message.senderTeammateId, recipientTeammateId: message.recipientTeammateId,
+          kind: message.kind, content: message.content, createdAt: message.createdAt.toISOString(),
+        })),
+        ...(active !== undefined ? { inFlight: active } : {}),
+      }
+    }))
+    const approvals = this.deps.runService.pendingApprovalProjection ? [
+      ...await this.deps.runService.pendingApprovalProjection(sessionId),
+      ...(await Promise.all(peers.filter(peer => peer.archivedAt === null).map(async peer =>
+        (await this.deps.runService.pendingApprovalProjection!(peer.threadId)).map(approval => ({ ...approval, teammateId: peer.id })),
+      ))).flat(),
+    ] : []
     return {
       sessionId,
       title: session.title,
       messages: rows.map(toProjectionMessage),
       ...(inFlight !== undefined ? { inFlight } : {}),
+      ...(teammates.length > 0 ? { teammates } : {}),
+      ...(approvals.length > 0 ? { approvals } : {}),
     }
+  }
+
+  async resolveApproval(user: Pick<AuthUser, 'id' | 'role' | 'username'>, sessionId: string, escalationId: string, decision: 'allow' | 'deny', reason?: string): Promise<void> {
+    const session = await getSessionForUser(this.deps.prisma, user, sessionId)
+    if (!this.deps.runService.resolveApproval) throw fail(CODE.APPROVAL_NOT_FOUND)
+    await this.deps.runService.resolveApproval({ sessionId, ownerId: session.ownerId, username: user.username, escalationId, decision, reason })
   }
 
   // ---- RunService recordTurn 注入缝（生产实现）：终态聚合落 assistant 行（含终态 checkpoint
@@ -456,6 +530,9 @@ export class SessionService {
       attachmentsJson: serializeAttachments(p.aggregate),
     })
     await this.autoTitle(p.sessionId)
+    const child = await this.deps.prisma.teammate.findUnique({ where: { threadId: p.sessionId }, select: { parentSessionId: true } })
+    const parent = await this.deps.prisma.session.findUnique({ where: { id: child?.parentSessionId ?? p.sessionId }, select: { ownerId: true } })
+    if (parent) this.publishSessionEvent(parent.ownerId, 'session.updated', { projectionChanged: true }, child?.parentSessionId ?? p.sessionId)
   }
 
   // 自动标题（story 5）：首个 run 终态时 title 仍空 → 首条 user 消息截断派生 + session.updated。

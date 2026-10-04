@@ -24,6 +24,7 @@ import { PrismaCheckpointSaver } from '../src/runner/persistence/prismaCheckpoin
 import { ProviderRegistry } from '../src/runner/providerRegistry'
 import { ConcurrencyGate } from '../src/runner/concurrency'
 import { RunService, type RunCommand } from '../src/runner/runtime/runService'
+import { TeammateService } from '../src/runner/teammates/service'
 import { CODE } from '../src/codes'
 import { seedAdmin, seedUser } from './helpers'
 import {
@@ -82,9 +83,10 @@ describe('RunService：发消息 → run 终态事件序列（S1，#747 C 节目
     await prisma.$disconnect()
   })
 
-  afterEach(() => {
+  afterEach(async () => {
     hub.reset()
     currentScript = []
+    await prisma.session.deleteMany({ where: { isTeammate: true } })
   })
 
   // 每用例独立 RunService（独立 registry → 独立模型实例；脚本状态不跨用例污染）。
@@ -104,6 +106,7 @@ describe('RunService：发消息 → run 终态事件序列（S1，#747 C 节目
       wikis?: {
         ensure: (ownerId: string) => Promise<void>
       }
+      teammates?: TeammateService
     } = {},
   ): RunService {
     const script = opts.script ?? currentScript
@@ -123,6 +126,7 @@ describe('RunService：发消息 → run 终态事件序列（S1，#747 C 节目
       ...(opts.recursionLimit !== undefined ? { recursionLimit: opts.recursionLimit } : {}),
       ...(opts.sandboxes ? { sandboxes: opts.sandboxes } : {}),
       ...(opts.wikis ? { wikis: opts.wikis } : {}),
+      ...(opts.teammates ? { teammates: opts.teammates } : {}),
       clock: (() => {
         let t = 0
         return () => (t += 10)
@@ -160,6 +164,47 @@ describe('RunService：发消息 → run 终态事件序列（S1，#747 C 节目
     expect(hub.events.every((e) => e.userId === owner.id && e.sessionId === sessionId)).toBe(true)
     expect(hub.events.every((e) => e.runId === hub.events[0]!.runId)).toBe(true)
     expect(svc.stateOf(sessionId)?.state).toBe('completed')
+  })
+
+  it('独立恢复的 teammate 按父会话占一份配额，事件带 teammateId', async () => {
+    const teammateId = 'teammate-run-1'
+    const threadId = 'teammate-thread-1'
+    await prisma.session.create({
+      data: { id: threadId, ownerId: owner.id, containerId: LAB, title: 'review', isTeammate: true },
+    })
+    await prisma.teammate.create({
+      data: {
+        id: teammateId, parentSessionId: sessionId, threadId, name: 'review', task: 'Review this topic', status: 'running',
+      },
+    })
+    const gate = new ConcurrencyGate({ globalLimit: 1, loadUserLimit: async () => 1 })
+    const svc = makeService({
+      script: [
+        () => { expect(gate.inFlight(owner.id)).toBe(1); return toolCallAi('team-skill', 'read_official_skill', { name: 'research' }) },
+        toolCallAi('team-list', 'list_teammates', {}),
+        new AIMessage({ content: 'Teammate result' }),
+      ],
+      gate,
+      teammates: new TeammateService(prisma),
+    })
+
+    await svc.execute(cmd({
+      sessionId: threadId,
+      parentSessionId: sessionId,
+      teammateId,
+      content: 'Review this topic',
+    }))
+
+    const teammateDeltas = hub.events.filter((event) => event.type === 'text.delta')
+    expect(teammateDeltas.length).toBeGreaterThan(0)
+    expect(teammateDeltas.every((event) => event.sessionId === sessionId && event.teammateId === teammateId)).toBe(true)
+    expect(hub.events.filter((event) => event.type === 'tool.end').map((event) => event.payload)).toEqual([
+      expect.objectContaining({ name: 'read_official_skill', state: 'success', details: expect.stringContaining('调研') }),
+      expect.objectContaining({ name: 'list_teammates', state: 'success', details: expect.stringContaining('review') }),
+    ])
+    expect(hub.events.at(-1)).toMatchObject({ type: 'teammate.completed', sessionId, teammateId })
+    expect(svc.stateOf(threadId)?.state).toBe('completed')
+    expect(gate.inFlight(owner.id)).toBe(0)
   })
 
   it('工具调用面：text → tool.start → tool.end{state,durationMs} → text → run.completed', async () => {

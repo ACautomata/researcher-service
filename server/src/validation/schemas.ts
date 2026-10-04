@@ -202,3 +202,8 @@ export const messageSendSchema = z.object({
 export const sessionResumeSchema = z.object({
   decisions: z.unknown().optional(),
 })
+
+export const sessionApprovalSchema = z.object({
+  decision: z.enum(['allow', 'deny']),
+  reason: z.string().max(2000).optional(),
+})

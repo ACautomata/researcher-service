@@ -16,7 +16,7 @@ function makeDeps(
 ): Omit<DownloadNodeDeps, 'materialize' | 'audit' | 'resolveContainer'> & {
   materialize: ReturnType<typeof vi.fn>
   audit: ReturnType<typeof vi.fn>
-  resolveContainer: (threadId: string) => string
+  resolveContainer: DownloadNodeDeps['resolveContainer']
 } {
   const materialize = vi.fn(async () => ({
     attachmentId: '9007199254740993',
@@ -40,6 +40,13 @@ function okTool(): ToolMessage {
 }
 
 describe('#780 片 3 下载校验节点（S3）', () => {
+  it('awaits the teammate parent sandbox lookup before materializing a file', async () => {
+    const deps = makeDeps({ resolveContainer: async () => 'researcher-sandbox-parent' })
+    const result = await createDownloadNode(deps).wrapToolCall(writeRequest('/lab/report.md'), async () => okTool())
+    expect(deps.materialize).toHaveBeenCalledWith(expect.objectContaining({ container: 'researcher-sandbox-parent' }))
+    expect(String((result as ToolMessage).content)).toContain('[download attachmentId=')
+  })
+
   it('正确路径 → 物化 + 下载引用追加进 tool 输出（[download ...] 行，tool.end details 承载）', async () => {
     const deps = makeDeps()
     const node = createDownloadNode(deps)

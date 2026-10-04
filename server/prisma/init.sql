@@ -136,10 +136,56 @@ CREATE TABLE "sessions" (
     "activeCheckpointId" TEXT,
     "preferredModelJson" TEXT,
     "archivedAt" DATETIME,
+    "isTeammate" BOOLEAN NOT NULL DEFAULT false,
     "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" DATETIME NOT NULL,
     CONSTRAINT "sessions_ownerId_fkey" FOREIGN KEY ("ownerId") REFERENCES "users" ("id") ON DELETE CASCADE ON UPDATE CASCADE
 );
+
+-- CreateTable
+CREATE TABLE "teammates" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "parentSessionId" TEXT NOT NULL,
+    "threadId" TEXT NOT NULL,
+    "name" TEXT NOT NULL,
+    "task" TEXT NOT NULL,
+    "status" TEXT NOT NULL DEFAULT 'requested',
+    "modelProviderId" TEXT,
+    "spawnedAtCheckpointId" TEXT,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" DATETIME NOT NULL,
+    "archivedAt" DATETIME,
+    CONSTRAINT "teammates_parentSessionId_fkey" FOREIGN KEY ("parentSessionId") REFERENCES "sessions" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
+    CONSTRAINT "teammates_threadId_fkey" FOREIGN KEY ("threadId") REFERENCES "sessions" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+
+-- CreateTable
+CREATE TABLE "teammate_mailbox_messages" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "parentSessionId" TEXT NOT NULL,
+    "senderTeammateId" TEXT,
+    "recipientTeammateId" TEXT,
+    "kind" TEXT NOT NULL DEFAULT 'message',
+    "content" TEXT NOT NULL,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "readAt" DATETIME,
+    "invalidatedAt" DATETIME,
+    "expiresAt" DATETIME,
+    CONSTRAINT "teammate_mailbox_messages_parentSessionId_fkey" FOREIGN KEY ("parentSessionId") REFERENCES "sessions" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
+    CONSTRAINT "teammate_mailbox_messages_senderTeammateId_fkey" FOREIGN KEY ("senderTeammateId") REFERENCES "teammates" ("id") ON DELETE SET NULL ON UPDATE CASCADE
+);
+
+CREATE TABLE "teammate_mailbox_waits" (
+    "waitId" TEXT NOT NULL PRIMARY KEY,
+    "parentSessionId" TEXT NOT NULL,
+    "threadId" TEXT NOT NULL UNIQUE,
+    "recipientTeammateId" TEXT,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT "teammate_mailbox_waits_parentSessionId_fkey" FOREIGN KEY ("parentSessionId") REFERENCES "sessions" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
+    CONSTRAINT "teammate_mailbox_waits_threadId_fkey" FOREIGN KEY ("threadId") REFERENCES "sessions" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
+    CONSTRAINT "teammate_mailbox_waits_recipientTeammateId_fkey" FOREIGN KEY ("recipientTeammateId") REFERENCES "teammates" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+CREATE INDEX "teammate_mailbox_waits_parentSessionId_recipientTeammateId_idx" ON "teammate_mailbox_waits"("parentSessionId", "recipientTeammateId");
 
 -- CreateTable
 CREATE TABLE "session_messages" (
@@ -349,6 +395,11 @@ CREATE UNIQUE INDEX "generation_jobs_figureId_key" ON "generation_jobs"("figureI
 
 -- CreateIndex
 CREATE INDEX "sessions_ownerId_idx" ON "sessions"("ownerId");
+CREATE UNIQUE INDEX "teammates_threadId_key" ON "teammates"("threadId");
+CREATE UNIQUE INDEX "teammates_parentSessionId_name_key" ON "teammates"("parentSessionId", "name");
+CREATE INDEX "teammates_parentSessionId_status_idx" ON "teammates"("parentSessionId", "status");
+CREATE INDEX "teammate_mailbox_messages_parentSessionId_recipientTeammateId_createdAt_idx" ON "teammate_mailbox_messages"("parentSessionId", "recipientTeammateId", "createdAt");
+CREATE INDEX "teammate_mailbox_messages_recipientTeammateId_readAt_invalidatedAt_idx" ON "teammate_mailbox_messages"("recipientTeammateId", "readAt", "invalidatedAt");
 
 -- CreateIndex
 CREATE INDEX "session_messages_sessionId_turn_idx" ON "session_messages"("sessionId", "turn");
@@ -394,4 +445,3 @@ CREATE UNIQUE INDEX "file_journal_sessionId_seq_key" ON "file_journal"("sessionI
 
 -- CreateIndex
 CREATE UNIQUE INDEX "file_journal_sessionId_toolCallId_key" ON "file_journal"("sessionId", "toolCallId");
-

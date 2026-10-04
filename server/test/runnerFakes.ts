@@ -178,12 +178,13 @@ export interface CapturedEvent {
   type: string
   sessionId?: string
   runId?: string
+  teammateId?: string
   payload: unknown
 }
 
 export class CollectingHub {
   readonly events: CapturedEvent[] = []
-  publish(userId: string, event: { type: string; sessionId?: string; runId?: string; payload: unknown }): void {
+  publish(userId: string, event: { type: string; sessionId?: string; runId?: string; teammateId?: string; payload: unknown }): void {
     this.events.push({ userId, ...event })
   }
   types(): string[] {

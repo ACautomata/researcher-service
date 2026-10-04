@@ -1,4 +1,4 @@
-// #775 迁移批次测试（SCHEMA_VERSION 8→9）：llm_usage_records 落表 + minimax 默认 provider
+// #775 provider migration behavior test (SCHEMA_VERSION 8→11): usage table + minimax default provider
 // per-user seed 幂等（验收 ④「minimax seed 迁移脚本幂等，重跑不产生重复行」）。
 //
 // 场景矩阵（731 §6 迁移映射末三行）：
@@ -139,7 +139,7 @@ describe('#775 迁移批次（llm_usage_records + minimax per-user seed）', () 
         .all() as Array<Record<string, unknown>>
       expect(rows).toEqual([])
       // 旧形状告警路径不炸、user_version 照常推进、usage 表照常落
-      expect(db.pragma('user_version', { simple: true })).toBe(10)
+      expect(db.pragma('user_version', { simple: true })).toBe(11)
       expect(
         db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='llm_usage_records'`).get(),
       ).toEqual({ name: 'llm_usage_records' })

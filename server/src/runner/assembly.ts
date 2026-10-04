@@ -23,6 +23,7 @@ import { createPrismaApprovalAuditSink } from './approval/audit'
 import { ToolCallJudgeClient } from './approval/judge'
 import { ApprovalFunnel, type ApprovalFunnelDeps } from './approval/funnel'
 import { JUDGE_POLICY_MARKDOWN } from './approval/values'
+import { TeammateService } from './teammates/service'
 
 export interface RunnerAssembly {
   readonly service: RunService
@@ -64,6 +65,7 @@ export function assembleRunner(opts: {
     },
   })
   const primitives = new DockerPrimitives()
+  const teammates = new TeammateService(opts.prisma)
 
   // #780 下载校验节点（片 3）：file 写类工具（write/edit）成功后校验声明路径 → 物化
   // Attachment 行 + 下载引用追加进 tool 输出（tool.end details 承载）；失败 → 错误回喂
@@ -72,13 +74,15 @@ export function assembleRunner(opts: {
   const downloadNode = attachmentsForNode
     ? createDownloadNode({
         materialize: async (p) => {
+          const teammate = await opts.prisma.teammate.findUnique({ where: { threadId: p.sessionId } })
+          const sessionId = teammate?.parentSessionId ?? p.sessionId
           const session = await opts.prisma.session.findUnique({
-            where: { id: p.sessionId },
+            where: { id: sessionId },
             select: { ownerId: true },
           })
           if (!session) return null
           return attachmentsForNode.materializeAgentMedia({
-            sessionId: p.sessionId,
+            sessionId,
             ownerId: session.ownerId,
             declaredPath: p.declaredPath,
             mime: p.mime,
@@ -86,7 +90,10 @@ export function assembleRunner(opts: {
             primitives,
           })
         },
-        resolveContainer: (threadId) => `${SANDBOX_CONTAINER_PREFIX}${threadId}`,
+        resolveContainer: async (threadId) => {
+          const teammate = await opts.prisma.teammate.findUnique({ where: { threadId } })
+          return `${SANDBOX_CONTAINER_PREFIX}${teammate?.parentSessionId ?? threadId}`
+        },
         audit: (info) => {
           // eslint-disable-next-line no-console
           console.warn(`[runner] download node: session=${info.sessionId} path=${info.path} outcome=${info.outcome}`)
@@ -120,6 +127,7 @@ export function assembleRunner(opts: {
     sandboxes: opts.sandboxes,
     wikis: opts.wikis,
     approvals: funnel,
+    teammates,
     approvalTimeoutMs: config.runner.approvalTimeoutMs,
     attachments: opts.attachments,
     downloadNode,
@@ -134,6 +142,8 @@ export function assembleRunner(opts: {
     // ——40043 是 Inline/#778 REST 的即时反馈面，不由 worker 面必然触发。
     concurrency: opts.maxConcurrentRuns,
   })
+  service.setTeammateDispatcher((cmd, delayMs) => queue.submit(cmd, { delayMs }))
+  teammates.setWakeHandler((threadId, teammateId, waitId) => service.wakeMailbox(threadId, teammateId, waitId))
 
   return {
     service,
