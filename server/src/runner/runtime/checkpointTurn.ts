@@ -15,9 +15,8 @@ import { TOOL_DETAILS_MAX_BYTES, TOOL_INPUT_MAX_BYTES } from './values'
 import { truncateUtf8 } from './projector'
 import type { TurnSnapshot, ToolLine } from '../../sessions/reducer'
 
-// checkpoint channel_values.messages 的宽进形状（BaseMessage 运行时面的结构子集——
+// 入参宽进形状：checkpoint channel_values.messages（BaseMessage 运行时面的结构子集——
 // 从 blob 反序列化回真实例，字段访问全防御）。
-export type CheckpointMessageLike = unknown
 
 interface ContentBlockLike {
   type?: unknown

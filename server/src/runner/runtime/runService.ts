@@ -389,7 +389,7 @@ export class RunService {
   // threadInterruptedFromCheckpoint 同量级——人机尺度可忽略）。
   private async normalizeReplay(cmd: RunCommand): Promise<RunCommand> {
     if (cmd.kind !== 'message' && cmd.kind !== 'resume') return cmd
-    let tuple: Awaited<ReturnType<PrismaCheckpointSaver['getTuple']>> | undefined
+    let tuple: LatestCheckpointTuple | undefined
     try {
       tuple = await this.latestTuple(cmd.sessionId)
     } catch {
@@ -418,7 +418,7 @@ export class RunService {
     if (snap.state === 'queued') return { runId: snap.runId, state: 'queued', turn: { content: '' } }
     let turn: TurnSnapshot
     try {
-      turn = turnFromCheckpointMessages(channelMessages(await this.latestTuple(sessionId)))
+      turn = await this.turnSnapshotFromCheckpoint(sessionId)
     } catch {
       turn = { content: '' }
     }
@@ -725,13 +725,19 @@ export class RunService {
       // ——刷新回放须含已流出部分，story 3「零差异」）。空聚合不落（failed 立即等场景）。
       // recover run 的聚合以终态 checkpoint 为准（story 14：断点前内容只在 blob，reducer 只有
       // 断点后事件——checkpointTurn 单一真相 + anchor 幂等防「processor 完成后 ack 前崩溃」
-      // 的重放双落）。落库失败不放大为 run 故障（终态事件已发）：告警留痕。
+      // 的重放双落 + 本 run 残留链整删防「中途行 + 全量行」双行重叠）。落库失败不放大为 run
+      // 故障（终态事件已发）：告警留痕。
+      // 已知边界（用例锁定）：recover 非 completed 终态走常规 reducer 落行——真实崩溃后
+      // reducer 内存丢失，断点前内容缺位（blob∪reducer 结构化合并归后续；纯串拼接在
+      // interrupted 形态下 blob 与 reducer 前缀重叠必重影，故不做）。后续 resume 的常规
+      // 落行同样只含 resume 段，缺口固化。
       if (this.recordTurn && cmd.kind === 'recover' && finalState === 'completed') {
         const anchor = anchorCheckpointId
         if (anchor !== null && !(await this.turnAlreadyRecorded(cmd.sessionId, anchor))) {
           try {
             const aggregate = await this.turnSnapshotFromCheckpoint(cmd.sessionId)
             if (!isEmptyTurnSnapshot(aggregate)) {
+              await this.deleteRunResidues(cmd.sessionId)
               await this.recordTurn({
                 sessionId: cmd.sessionId,
                 runId: cmd.runId,
@@ -965,7 +971,7 @@ export class RunService {
 
   // 最新 checkpoint tuple 读取（四消费面共用：重放判据/in-flight 投影/recover 落行/interrupt
   // 推导；故障语义由调用面各自定义——不拦/降级空 turn/抛出/按无 interrupt）。
-  private latestTuple(sessionId: string): ReturnType<PrismaCheckpointSaver['getTuple']> {
+  private latestTuple(sessionId: string): Promise<LatestCheckpointTuple> {
     return this.deps.saver.getTuple({ configurable: { thread_id: sessionId } })
   }
 
@@ -979,6 +985,22 @@ export class RunService {
     return row !== null
   }
 
+  // recover 全量落行前的本 run 残留清理：本 run（message 及其 resume 链）中途终态的落行
+  //（interrupted anchor=中断点 / failed、aborted anchor=null）turn 都晚于最近 user 行——
+  // 同 thread 串行链保证这些行只能是本 run 的残留；blob 全量聚合（「最后 human 之后」切片）
+  // 覆盖其内容 → 整链删除后由 recordTurn 落全量顶位，防「中途行 + 全量行」双行重叠。
+  // 更早轮的 completed 行（turn ≤ 最近 user 行）不触碰。
+  private async deleteRunResidues(sessionId: string): Promise<void> {
+    const lastUser = await this.deps.prisma.sessionMessage.findFirst({
+      where: { sessionId, role: 'user' },
+      orderBy: [{ turn: 'desc' }, { createdAt: 'desc' }],
+      select: { turn: true },
+    })
+    await this.deps.prisma.sessionMessage.deleteMany({
+      where: { sessionId, role: 'assistant', turn: { gt: lastUser?.turn ?? 0 } },
+    })
+  }
+
   private async turnSnapshotFromCheckpoint(sessionId: string): Promise<TurnSnapshot> {
     return turnFromCheckpointMessages(channelMessages(await this.latestTuple(sessionId)))
   }
@@ -987,7 +1009,7 @@ export class RunService {
   // 最新 checkpoint 的 pendingWrites 带 __interrupt__ channel（LangGraph interrupt 的标准
   // putWrites 通道，WRITES_IDX_MAP 负 idx）。blob 反序列化不做——pendingWrites 面足够。
   private async threadInterruptedFromCheckpoint(threadId: string): Promise<boolean> {
-    let tuple: Awaited<ReturnType<PrismaCheckpointSaver['getTuple']>> | undefined
+    let tuple: LatestCheckpointTuple | undefined
     try {
       tuple = await this.latestTuple(threadId)
     } catch {
@@ -997,8 +1019,11 @@ export class RunService {
   }
 }
 
+// checkpoint tuple 类型（Awaited：await latestTuple 后的形态）——四消费面共用单一别名。
+type LatestCheckpointTuple = Awaited<ReturnType<PrismaCheckpointSaver['getTuple']>>
+
 // checkpoint tuple → messages 通道（防御式：blob 形状漂移时返回空数组，调用面降级不炸）。
-function channelMessages(tuple: Awaited<ReturnType<PrismaCheckpointSaver['getTuple']>>): unknown[] {
+function channelMessages(tuple: LatestCheckpointTuple): unknown[] {
   const values = (tuple?.checkpoint as { channel_values?: { messages?: unknown } } | undefined)?.channel_values
   return Array.isArray(values?.messages) ? values.messages : []
 }

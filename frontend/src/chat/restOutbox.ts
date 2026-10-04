@@ -97,14 +97,10 @@ export function createRestOutbox(storage: Storage | null = getSafeSessionStorage
     }
   }
 
-  function mutate(
-    sessionId: string,
-    fn: (list: OutboxEntry[]) => { next: OutboxEntry[]; dropSession?: boolean },
-  ): void {
+  function mutate(sessionId: string, fn: (list: OutboxEntry[]) => OutboxEntry[]): void {
     const blob = readBlob() ?? { version: 1, sessions: {} }
-    const list = blob.sessions[sessionId] ?? []
-    const { next, dropSession } = fn(list)
-    if (dropSession || next.length === 0) delete blob.sessions[sessionId]
+    const next = fn(blob.sessions[sessionId] ?? [])
+    if (next.length === 0) delete blob.sessions[sessionId]
     else blob.sessions[sessionId] = next
     writeBlob(blob)
   }
@@ -119,7 +115,7 @@ export function createRestOutbox(storage: Storage | null = getSafeSessionStorage
       mutate(sessionId, (list) => {
         const next = [...list, entry]
         if (next.length > MAX_QUEUE_ITEMS) next.splice(0, next.length - MAX_QUEUE_ITEMS) // 丢最旧
-        return { next }
+        return next
       })
       return entry
     },
@@ -129,7 +125,7 @@ export function createRestOutbox(storage: Storage | null = getSafeSessionStorage
     },
 
     remove(sessionId, clientKey) {
-      mutate(sessionId, (list) => ({ next: list.filter((e) => e.clientKey !== clientKey) }))
+      mutate(sessionId, (list) => list.filter((e) => e.clientKey !== clientKey))
     },
 
     async flush(sessionId, send) {

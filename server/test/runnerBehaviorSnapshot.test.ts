@@ -32,7 +32,7 @@ import { PrismaCheckpointSaver } from '../src/runner/persistence/prismaCheckpoin
 import { ProviderRegistry } from '../src/runner/providerRegistry'
 import { ConcurrencyGate } from '../src/runner/concurrency'
 import { RunService, type RunCommand } from '../src/runner/runtime/runService'
-import { seedUser } from './helpers'
+import { checkpointHumanCount, seedUser, waitFor } from './helpers'
 import { ScriptedChatModel, fakePrimitives, CollectingHub, toolCallAi, type ScriptEntry } from './runnerFakes'
 
 const LAB = 'researcher-sandbox-s4'
@@ -296,20 +296,24 @@ describe('S4 行为快照（#724 断言集 6/6 固化，三包升级守门基线
     const running = bundle.svc.execute(cmd)
     // 等工具行进 checkpoint（慢窗口）
     let inflight: Awaited<ReturnType<typeof bundle.svc.inFlightProjection>>
-    for (let i = 0; i < 100; i++) {
+    // blob 边界不变量（story 11「无跳变重影」的行为契约）：重建 content 恒为已流出
+    // text.delta 拼接的前缀——blob 只含已落 super-step 的消息，宁短不假（正在生成的 delta
+    // 未入 blob 是 LangGraph blob 边界粒度固有；每次探测断言前缀关系即「重建 ⊆ 流出」锁定）
+    const streamedSoFar = () =>
+      bundle.hub.events
+        .filter((e) => e.type === 'text.delta')
+        .map((e) => (e.payload as { delta: string }).delta)
+        .join('')
+    await waitFor(async () => {
       inflight = await bundle.svc.inFlightProjection(SESSION)
-      if ((inflight?.turn.tools?.length ?? 0) > 0) break
-      await new Promise((r) => setTimeout(r, 20))
-    }
+      expect(streamedSoFar().startsWith(inflight?.turn.content ?? '')).toBe(true)
+      return (inflight?.turn.tools?.length ?? 0) > 0
+    })
     expect(inflight?.state).toBe('running')
     // 「无跳变重影」断言：blob 还原的 turn 与同刻事件流归约快照结构一致（同源同刻）
     // ——reducer 面无法直取（RunService 内部），用流式事件同构归约对齐：text.delta 拼接 ≡
     // blob content；tool.start ≡ blob tools 行。
-    const streamedText = bundle.hub.events
-      .filter((e) => e.type === 'text.delta')
-      .map((e) => (e.payload as { delta: string }).delta)
-      .join('')
-    expect(inflight?.turn.content).toBe(streamedText)
+    expect(inflight?.turn.content).toBe(streamedSoFar())
     expect(inflight?.turn.tools?.[0]).toMatchObject({ toolCallId: 's4-d1', name: 'execute', state: 'running' })
     await running
 
@@ -348,15 +352,7 @@ describe('S4 行为快照（#724 断言集 6/6 固化，三包升级守门基线
     expect(types[types.length - 1]).toBe('run.completed')
     expect(reborn.svc.stateOf(SESSION)?.state).toBe('completed')
     // checkpoint 无重复 user 消息（重放未重复 append——normalizeReplay 判据生效）
-    const saver = new PrismaCheckpointSaver(prisma)
-    const tuple = await saver.getTuple({ configurable: { thread_id: SESSION } })
-    const messages =
-      (tuple?.checkpoint as { channel_values?: { messages?: { _getType?: () => string; content?: unknown }[] } })
-        ?.channel_values?.messages ?? []
-    const humanCount = messages.filter(
-      (m) => typeof m._getType === 'function' && m._getType() === 'human' && m.content === '长任务不白费',
-    ).length
-    expect(humanCount).toBe(1)
+    expect(await checkpointHumanCount(prisma, SESSION, '长任务不白费')).toBe(1)
     // 续跑产出经事件面完整流出
     const text = reborn.hub.events
       .filter((e) => e.type === 'text.delta')

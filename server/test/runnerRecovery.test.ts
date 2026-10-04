@@ -26,7 +26,7 @@ import { PrismaCheckpointSaver } from '../src/runner/persistence/prismaCheckpoin
 import { ProviderRegistry } from '../src/runner/providerRegistry'
 import { ConcurrencyGate } from '../src/runner/concurrency'
 import { RunService, type RunCommand } from '../src/runner/runtime/runService'
-import { seedUser } from './helpers'
+import { checkpointHumanCount, seedUser, waitFor } from './helpers'
 import { ScriptedChatModel, fakePrimitives, CollectingHub, toolCallAi, type ScriptEntry } from './runnerFakes'
 
 const LAB = 'researcher-sandbox-rec'
@@ -144,16 +144,6 @@ describe('#779 断线补偿 + 重启恢复（RunService 级）', () => {
     return rows.map((r) => ({ role: r.role, content: r.content, anchorCheckpointId: r.anchorCheckpointId }))
   }
 
-  async function checkpointHumanCount(sessionId: string, content: string): Promise<number> {
-    const saver = new PrismaCheckpointSaver(prisma)
-    const tuple = await saver.getTuple({ configurable: { thread_id: sessionId } })
-    const messages = (tuple?.checkpoint as { channel_values?: { messages?: { _getType?: () => string; content?: unknown }[] } })
-      ?.channel_values?.messages ?? []
-    return messages.filter(
-      (m) => typeof m._getType === 'function' && m._getType() === 'human' && m.content === content,
-    ).length
-  }
-
   // ---- story 14：message 重放 → recover 续跑 ----
 
   it('message 崩溃重放：checkpoint 已含 id=runId → 转 recover，null 续跑跑完，无重复 append', async () => {
@@ -170,7 +160,9 @@ describe('#779 断线补偿 + 重启恢复（RunService 级）', () => {
     })
     await s1.execute(crashed)
     expect(s1.stateOf(session)?.state).toBe('failed')
-    expect(await checkpointHumanCount(session, '崩溃的问题')).toBe(1)
+    expect(await checkpointHumanCount(prisma, session, '崩溃的问题')).toBe(1)
+    // failed 常规落行（reducer 段「想想。」，anchor=null 残留）
+    expect((await projectionMessages(session)).filter((r) => r.role === 'assistant')).toHaveLength(1)
 
     // 第二段：新栈（内存空）重放同 job（同 runId/content）——normalizeReplay 转 recover
     const s2 = makeService({ script: [new AIMessage({ content: [{ type: 'text', text: '续跑完成。' }] })] })
@@ -180,7 +172,7 @@ describe('#779 断线补偿 + 重启恢复（RunService 级）', () => {
     expect(hub.types().lastIndexOf('run.resumed')).toBeGreaterThan(-1)
     expect(s2.stateOf(session)?.state).toBe('completed')
     // checkpoint 无重复 human（判据生效——正常重放会 append 第二条）
-    expect(await checkpointHumanCount(session, '崩溃的问题')).toBe(1)
+    expect(await checkpointHumanCount(prisma, session, '崩溃的问题')).toBe(1)
     // recover 终态落行以 checkpoint 为准：断点前内容（想想。+ 工具行）+ 断点后续跑完成
     const rows = await projectionMessages(session)
     const last = rows[rows.length - 1]
@@ -188,6 +180,8 @@ describe('#779 断线补偿 + 重启恢复（RunService 级）', () => {
     expect(last.content).toContain('想想。')
     expect(last.content).toContain('续跑完成。')
     expect(last.anchorCheckpointId).not.toBeNull()
+    // failed 残留部分行（anchor=null、content 前缀）被全量行替换——双行重叠防御
+    expect(rows.filter((r) => r.role === 'assistant')).toHaveLength(1)
   }, 30_000)
 
   it('message 未执行重放（排队窗口崩溃）：checkpoint 无该消息 → 正常执行（run.started）', async () => {
@@ -200,7 +194,7 @@ describe('#779 断线补偿 + 重启恢复（RunService 级）', () => {
     // 本段事件首项为 run.started（未转换）
     const types = hub.types()
     expect(types.lastIndexOf('run.started')).toBeGreaterThan(types.lastIndexOf('run.resumed'))
-    expect(await checkpointHumanCount(session, '排队的问题')).toBe(1)
+    expect(await checkpointHumanCount(prisma, session, '排队的问题')).toBe(1)
   }, 30_000)
 
   it('resume 中途崩溃重放：RESUME 已消费且无 interrupt → 转 recover 续跑', async () => {
@@ -218,14 +212,11 @@ describe('#779 断线补偿 + 重启恢复（RunService 级）', () => {
     expect(seed.stateOf(session)?.state).toBe('interrupted')
 
     // resume 命令执行中「崩溃」（脚本第二轮抛错——RESUME write 已消费）
-    const resumeCmd: RunCommand = {
+    const resumeCmd = cmdOf(session, {
       runId: 'rec-resume-1',
-      sessionId: session,
-      ownerId: owner.id,
-      username: owner.username,
       kind: 'resume',
       decisions: { decisions: [{ type: 'approve' }] },
-    }
+    })
     await seed.execute(resumeCmd)
     expect(seed.stateOf(session)?.state).toBe('failed')
 
@@ -237,6 +228,8 @@ describe('#779 断线补偿 + 重启恢复（RunService 级）', () => {
     expect(types.lastIndexOf('run.resumed')).toBeGreaterThan(types.lastIndexOf('run.started'))
     const rows = await projectionMessages(session)
     expect(rows[rows.length - 1].content).toContain('恢复续答。')
+    // resume failed 残留行（空 content 纯工具行，空前缀天然命中）同样被全量替换——双行防御
+    expect(rows.filter((r) => r.role === 'assistant')).toHaveLength(1)
   }, 30_000)
 
   it('resume 未执行重放：pending interrupt 在场 → 正常 resume 重试（非 recover）', async () => {
@@ -252,21 +245,18 @@ describe('#779 断线补偿 + 重启恢复（RunService 级）', () => {
     expect(seed.stateOf(session)?.state).toBe('interrupted')
 
     // 排队即崩（RESUME 未落，interrupt 在）——重放 = resume 重试
-    const resumeCmd: RunCommand = {
+    const resumeCmd = cmdOf(session, {
       runId: 'rec-resume-2',
-      sessionId: session,
-      ownerId: owner.id,
-      username: owner.username,
       kind: 'resume',
       decisions: { decisions: [{ type: 'approve' }] },
-    }
+    })
     const s2 = makeService({
       interruptOnExecute: true,
       script: [new AIMessage({ content: [{ type: 'text', text: '重试成功。' }] })],
     })
     await s2.execute(resumeCmd)
     expect(s2.stateOf(session)?.state).toBe('completed')
-    expect(await checkpointHumanCount(session, '另一审批问题')).toBe(1)
+    expect(await checkpointHumanCount(prisma, session, '另一审批问题')).toBe(1)
   }, 30_000)
 
   it('图已完成重放：recover no-op → 防双行（anchor 已落不重复）+ 删行后可补偿', async () => {
@@ -313,14 +303,11 @@ describe('#779 断线补偿 + 重启恢复（RunService 级）', () => {
     })
     await seed.execute(cmdOf(session, { content: '待中止问题' }))
     expect(seed.stateOf(session)?.state).toBe('interrupted')
-    const resumeCmd: RunCommand = {
+    const resumeCmd = cmdOf(session, {
       runId: 'rec-abort-1',
-      sessionId: session,
-      ownerId: owner.id,
-      username: owner.username,
       kind: 'resume',
       decisions: { decisions: [{ type: 'approve' }] },
-    }
+    })
     await seed.execute(resumeCmd)
     expect(seed.stateOf(session)?.state).toBe('failed')
 
@@ -329,6 +316,61 @@ describe('#779 断线补偿 + 重启恢复（RunService 级）', () => {
     await s2.execute({ ...resumeCmd, abort: true })
     expect(s2.stateOf(session)?.state).toBe('aborted')
     expect(hub.types().lastIndexOf('run.aborted')).toBeGreaterThan(-1)
+  }, 30_000)
+
+  it('recover 续跑再 interrupted：常规 reducer 落行面（断点前内容缺位——已知边界锁定）', async () => {
+    const session = await newSession()
+    // 第一次审批 interrupt（AI 产出 execute tool_call 后停）
+    const seed = makeService({
+      interruptOnExecute: true,
+      script: [toolCallAi('rec-i1', 'execute', { command: 'echo hi' }, '想想。')],
+    })
+    await seed.execute(cmdOf(session, { content: '二次审批问题' }))
+    expect(seed.stateOf(session)?.state).toBe('interrupted')
+
+    // resume 执行中崩溃（RESUME 已消费、error write 落盘）
+    const resumeCmd = cmdOf(session, {
+      runId: 'rec-resume-i1',
+      kind: 'resume',
+      decisions: { decisions: [{ type: 'approve' }] },
+    })
+    const crashed = makeService({
+      interruptOnExecute: true,
+      script: [
+        () => {
+          throw new Error('crash after resume')
+        },
+      ],
+    })
+    await crashed.execute(resumeCmd)
+    expect(crashed.stateOf(session)?.state).toBe('failed')
+
+    // 重放前模拟真实进程崩溃形态（finally 未执行、中途落行未发生）：删本 run 已落行，
+    // 断点前内容只存在于 checkpoint blob
+    await prisma.sessionMessage.deleteMany({ where: { sessionId: session, role: 'assistant' } })
+
+    // 重放 → recover → null 续跑重试 AI 轮 → 产出第二个 tool_call → 再停 interrupt
+    const s2 = makeService({
+      interruptOnExecute: true,
+      script: [toolCallAi('rec-i2', 'execute', { command: 'echo again' })],
+    })
+    await s2.execute(resumeCmd)
+    expect(s2.stateOf(session)?.state).toBe('interrupted')
+    // 现状锁定：interrupted 终态走常规 reducer 面——本次续跑只流出 tool_call（无 text.delta）
+    // → 空聚合不落行。断点前内容（想想。+ 工具行，只在 blob）缺位（blob∪reducer 结构化合并
+    // 归后续；纯串拼接在 interrupted 形态下 blob 与 reducer 前缀重叠必重影，故不做）
+    expect((await projectionMessages(session)).filter((r) => r.role === 'assistant')).toHaveLength(0)
+
+    // 缺口固化面：后续 resume 完成 → 落行只含 resume 段，断点前内容不在任何行
+    const s3 = makeService({
+      interruptOnExecute: true,
+      script: [new AIMessage({ content: [{ type: 'text', text: '重试后回答。' }] })],
+    })
+    await s3.execute({ ...resumeCmd, runId: 'rec-resume-i2' })
+    expect(s3.stateOf(session)?.state).toBe('completed')
+    const rows = await projectionMessages(session)
+    expect(rows.filter((r) => r.role === 'assistant')).toHaveLength(1)
+    expect(rows[rows.length - 1].content).toBe('重试后回答。')
   }, 30_000)
 
   // ---- story 11：inFlightProjection ----
@@ -345,12 +387,11 @@ describe('#779 断线补偿 + 重启恢复（RunService 级）', () => {
     const running = s.execute(cmdOf(session, { content: '在飞问题', runId: 'rec-inflight-1' }))
     // 等 running 态 + checkpoint 出现工具行（慢工具窗口；thinking 面归 S3 纯逻辑用例——
     // runnerFakes 流式路径不产出 thinking 块，checkpoint 无其来源）
-    for (let i = 0; i < 100; i++) {
-      const probe = await s.inFlightProjection(session)
-      if ((probe?.turn.tools?.length ?? 0) > 0) break
-      await new Promise((r) => setTimeout(r, 20))
-    }
-    const inflight = await s.inFlightProjection(session)
+    let inflight: Awaited<ReturnType<typeof s.inFlightProjection>>
+    await waitFor(async () => {
+      inflight = await s.inFlightProjection(session)
+      return (inflight?.turn.tools?.length ?? 0) > 0
+    })
     expect(inflight?.state).toBe('running')
     expect(inflight?.runId).toBe('rec-inflight-1')
     // 断点前内容从 blob 重建（工具行）

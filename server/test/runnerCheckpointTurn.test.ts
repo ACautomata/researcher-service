@@ -18,7 +18,7 @@
 
 import { AIMessage, HumanMessage, ToolMessage } from '@langchain/core/messages'
 import { describe, expect, it } from 'vitest'
-import { turnFromCheckpointMessages, type CheckpointMessageLike } from '../src/runner/runtime/checkpointTurn'
+import { turnFromCheckpointMessages } from '../src/runner/runtime/checkpointTurn'
 
 describe('turnFromCheckpointMessages（S3 · #779 in-flight 重建纯逻辑）', () => {
   it('切片恒「最后一条 human 之后」：调用方约束状态（running/recover 终态）；上一轮终态切出上一轮产出', () => {
@@ -112,10 +112,10 @@ describe('turnFromCheckpointMessages（S3 · #779 in-flight 重建纯逻辑）',
   })
 
   it('防御面：非 BaseMessage 形状的条目跳过不抛（blob 演进容忍）', () => {
-    const mixed: CheckpointMessageLike[] = [
+    const mixed: unknown[] = [
       new HumanMessage({ content: 'hi' }),
-      { weird: true } as unknown as CheckpointMessageLike,
-      null as unknown as CheckpointMessageLike,
+      { weird: true },
+      null,
       new AIMessage({ content: [{ type: 'text', text: 'ok。' }] }),
     ]
     expect(turnFromCheckpointMessages(mixed)).toEqual({ content: 'ok。' })

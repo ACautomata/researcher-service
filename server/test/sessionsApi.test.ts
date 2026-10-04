@@ -18,7 +18,7 @@ import { createPrismaClient } from '../src/prisma'
 import { createApp } from '../src/app'
 import type { PrismaClient } from '../src/generated/prisma/client'
 import { StreamHub, type StreamSink } from '../src/events/hub'
-import { seedUser, login, bearer } from './helpers'
+import { seedUser, login, bearer, waitFor } from './helpers'
 import { ScriptedChatModel, fakePrimitives, toolCallAi, type ScriptEntry } from './runnerFakes'
 import { RunService } from '../src/runner/runtime/runService'
 import { ProviderRegistry } from '../src/runner/providerRegistry'
@@ -62,14 +62,6 @@ function frameEvents(frames: string[]): DecodedFrame[] {
   return frames
     .filter((f) => f.startsWith('id: '))
     .map((f) => JSON.parse(/^data: (.+)$/m.exec(f)![1]) as DecodedFrame)
-}
-
-async function waitFor(pred: () => boolean | Promise<boolean>, timeoutMs = 5000): Promise<void> {
-  const deadline = Date.now() + timeoutMs
-  while (!(await pred())) {
-    if (Date.now() > deadline) throw new Error('waitFor 超时')
-    await new Promise((r) => setTimeout(r, 10))
-  }
 }
 
 describe('会话 REST 域（S1，#778）', () => {
