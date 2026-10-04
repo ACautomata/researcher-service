@@ -101,6 +101,9 @@ describe('RunService：发消息 → run 终态事件序列（S1，#747 C 节目
         ensure: (sessionId: string) => Promise<{ containerId: string }>
         touch: (sessionId: string) => void
       }
+      wikis?: {
+        ensure: (ownerId: string) => Promise<void>
+      }
     } = {},
   ): RunService {
     const script = opts.script ?? currentScript
@@ -119,6 +122,7 @@ describe('RunService：发消息 → run 终态事件序列（S1，#747 C 节目
       ...(opts.interruptPolicyFor ? { interruptPolicyFor: opts.interruptPolicyFor } : {}),
       ...(opts.recursionLimit !== undefined ? { recursionLimit: opts.recursionLimit } : {}),
       ...(opts.sandboxes ? { sandboxes: opts.sandboxes } : {}),
+      ...(opts.wikis ? { wikis: opts.wikis } : {}),
       clock: (() => {
         let t = 0
         return () => (t += 10)
@@ -302,6 +306,34 @@ describe('RunService：发消息 → run 终态事件序列（S1，#747 C 节目
     expect(touched.length).toBeGreaterThan(0) // 事件流活动刷新闲置计时（真 activity 源）
     // backend 工具落在 ensure 返回的容器（而非 seed 的 session.containerId 陈旧值）
     expect(fs.execCalls[0]?.container).toBe('researcher-sandbox-ensured')
+  })
+
+  it('wiki 容器 ensure 接线：run 前 ensure(ownerId)（#784 契约「双容器 run 前就绪」）', async () => {
+    const ensured: string[] = []
+    const svc = makeService({
+      script: [new AIMessage({ content: 'ok' })],
+      wikis: {
+        ensure: async (ownerId) => {
+          ensured.push(ownerId)
+        },
+      },
+    })
+    await svc.execute(cmd())
+    expect(hub.types()[hub.types().length - 1]).toBe('run.completed')
+    expect(ensured).toEqual([cmd().ownerId])
+  })
+
+  it('wiki 容器 ensure 失败 → pre-start 面向上传播（不发 run 域事件，沙箱同先例）', async () => {
+    const svc = makeService({
+      script: [new AIMessage({ content: 'ok' })],
+      wikis: {
+        ensure: async () => {
+          throw new Error('simulated wiki ensure failure')
+        },
+      },
+    })
+    await expect(svc.execute(cmd())).rejects.toThrow('simulated wiki ensure failure')
+    expect(hub.types()).not.toContain('run.started')
   })
 
   it('同 thread 严格串行：第二个 run 的 run.started 晚于第一个 run 的终态', async () => {

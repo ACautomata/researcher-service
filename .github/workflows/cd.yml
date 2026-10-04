@@ -71,6 +71,9 @@ jobs:
           # standalone 模板栈 compose 默认值同钉该 tag（issue #695）。:latest 与 :<sha> 仍照推
           # （:<sha> 供回滚；:latest 为滚动别名，fleet 与模板栈都不用）
           echo "OPENCLAW_IMAGE=ghcr.io/${IMAGE_REPO}/openclaw" >> "$GITHUB_ENV"
+          # wiki 容器镜像（#784）：server config.ts WIKI_IMAGE 默认值指向它的版本 tag（版本源
+          # deploy/wiki-image/Dockerfile FROM 基线，wikiImage.test.ts 交叉断言锁死）
+          echo "WIKI_IMAGE=ghcr.io/${IMAGE_REPO}/wiki" >> "$GITHUB_ENV"
           # autofigure sidecar 镜像（T11）：compose PANEL_AUTOFIGURE_IMAGE 默认值指向它的 :latest
           echo "AUTOFIGURE_IMAGE=ghcr.io/${IMAGE_REPO}/autofigure" >> "$GITHUB_ENV"
 
@@ -110,6 +113,32 @@ jobs:
           esac
           echo "OPENCLAW_VERSION_TAG=${VERSION_TAG}" >> "$GITHUB_ENV"
           echo "[cd] openclaw 版本 tag: ${VERSION_TAG}"
+
+      - name: Resolve wiki image version tag (Dockerfile FROM 单源, #784)
+        # wiki 容器镜像的版本单源 = deploy/wiki-image/Dockerfile 的 FROM 基线行（对齐 openclaw
+        # 派生镜像先例 issue #695）：config.ts WIKI_IMAGE 默认值与之同版本（wikiImage.test.ts
+        # 交叉断言锁死），CD 一并推该版本 tag。提取失败即 fail：绝不推空 tag、sha 或含 '/' 的串。
+        run: |
+          FROM_REF="$(grep -m1 -E '^[[:space:]]*FROM[[:space:]]' deploy/wiki-image/Dockerfile | awk '{print $2}')"
+          case "$FROM_REF" in
+            *@*)
+              echo "[cd] ERROR: wiki-image Dockerfile FROM 行为 digest 钉定，无法提取版本 tag: '${FROM_REF}'" >&2
+              exit 1
+              ;;
+          esac
+          VERSION_TAG="${FROM_REF##*:}"
+          if [ -z "$FROM_REF" ] || [ -z "$VERSION_TAG" ] || [ "$VERSION_TAG" = "$FROM_REF" ]; then
+            echo "[cd] ERROR: 无法从 wiki-image Dockerfile FROM 行提取版本 tag: '${FROM_REF}'" >&2
+            exit 1
+          fi
+          case "$VERSION_TAG" in
+            */*)
+              echo "[cd] ERROR: 无法从 wiki-image Dockerfile FROM 行提取版本 tag（末段 ':' 疑为 registry 端口）: '${FROM_REF}'" >&2
+              exit 1
+              ;;
+          esac
+          echo "WIKI_VERSION_TAG=${VERSION_TAG}" >> "$GITHUB_ENV"
+          echo "[cd] wiki 镜像版本 tag: ${VERSION_TAG}"
 
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4.4.1
 
@@ -183,6 +212,23 @@ jobs:
             ${{ env.OPENCLAW_IMAGE }}:${{ env.OPENCLAW_VERSION_TAG }}
           cache-from: type=gha,scope=openclaw
           cache-to: type=gha,mode=max,scope=openclaw
+
+      - name: Build & push wiki container image (#784)
+        # wiki 容器镜像：busybox 级极简（sh/mkdir/rm/cat，无运行时）+ 零初始化（无骨架 COPY，
+        # /wiki 属主由控制面创建流程预置）。构建期断言在 Dockerfile RUN 内（最小 applet 集），
+        # 任一失败即构建失败 → CD 红。三个 tag：:latest + :<sha> + 版本 tag（版本从 FROM 基线行
+        # 单源提取，见上方 Resolve step；版本 tag 一经发布不可移动）。
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7.4.0
+        with:
+          context: deploy/wiki-image
+          file: deploy/wiki-image/Dockerfile
+          push: true
+          tags: |
+            ${{ env.WIKI_IMAGE }}:latest
+            ${{ env.WIKI_IMAGE }}:${{ env.IMAGE_TAG }}
+            ${{ env.WIKI_IMAGE }}:${{ env.WIKI_VERSION_TAG }}
+          cache-from: type=gha,scope=wiki-image
+          cache-to: type=gha,mode=max,scope=wiki-image
 
       - name: Build & push autofigure sidecar image (T08/T11)
         # AutoFigure sidecar：构建源 deploy/autofigure-sidecar（vendored T08 源，不 fetch

@@ -75,17 +75,23 @@ export class DockerFileArchive implements FileArchive {
     return this.cached
   }
 
-  private absPath(root: FileRoot, relPath: string): string {
-    const base = FILE_ROOTS[root]
+  // 树根 + 相对路径 → 容器内绝对路径（join 单一来源；absPath 与 InContainer 写面共用）
+  private static joinRoot(base: string, relPath: string): string {
     return relPath === '' ? base : `${base}/${relPath}`
+  }
+
+  private absPath(root: FileRoot, relPath: string): string {
+    return DockerFileArchive.joinRoot(FILE_ROOTS[root], relPath)
   }
 
   // ---- docker 原语封装（404 语义与 exec 模式对齐 DockerRuntime） ----
 
-  // 幂等 start（已 running → docker 返 304 幂等成功；容器消失 404 幂等成功，后续 exec 再暴露）
-  private async start(name: string): Promise<void> {
+  // 幂等 start（已 running → docker 返 304 幂等成功；容器消失 404 幂等成功，后续 exec 再暴露）。
+  // dockerName 原文直用——fleet 面调用方传 containerName(name) 套好前缀，wiki 容器面传
+  // researcher-wiki-<ownerId>（#784），lab 面不经此。
+  private async start(dockerName: string): Promise<void> {
     try {
-      await this.client().getContainer(containerName(name)).start()
+      await this.client().getContainer(dockerName).start()
     } catch (e) {
       const sc = (e as { statusCode?: number }).statusCode
       if (sc === 404 || sc === 304) return
@@ -94,14 +100,14 @@ export class DockerFileArchive implements FileArchive {
   }
 
   // 同步等命令完成；退出码非 0 → 抛错（mkdir/rm 失败须让 caller 走错误路径）
-  private async execSync(name: string, cmd: string[]): Promise<void> {
-    const container = this.client().getContainer(containerName(name))
+  private async execSync(dockerName: string, cmd: string[]): Promise<void> {
+    const container = this.client().getContainer(dockerName)
     const exec = await container.exec({ Cmd: cmd, AttachStdout: true, AttachStderr: true })
     const stream = await exec.start({ Detach: false })
     await drainStream(stream[Symbol.asyncIterator]()) // 排干（非 TTY 流含 demux 头，仅作结束信号）
     const info = await exec.inspect()
     if (info.ExitCode !== 0) {
-      throw new Error(`exec failed in ${name}: exit_code=${info.ExitCode} cmd=${JSON.stringify(cmd)}`)
+      throw new Error(`exec failed in ${dockerName}: exit_code=${info.ExitCode} cmd=${JSON.stringify(cmd)}`)
     }
   }
 
@@ -165,10 +171,10 @@ export class DockerFileArchive implements FileArchive {
   }
 
   // 写/建共用后段：幂等 start → mkdir -p 父目录 → putArchive 单文件 tar
-  private async ensureParentAndPut(name: string, absPath: string, content: Buffer): Promise<void> {
-    await this.start(name)
-    await this.execSync(name, ['mkdir', '-p', absPath.slice(0, absPath.lastIndexOf('/'))])
-    const container = this.client().getContainer(containerName(name))
+  private async ensureParentAndPut(dockerName: string, absPath: string, content: Buffer): Promise<void> {
+    await this.start(dockerName)
+    await this.execSync(dockerName, ['mkdir', '-p', absPath.slice(0, absPath.lastIndexOf('/'))])
+    const container = this.client().getContainer(dockerName)
     const basename = absPath.split('/').pop() ?? 'file'
     const dir = absPath.slice(0, absPath.lastIndexOf('/'))
     await container.putArchive(Readable.from([createTarFile(basename, content)]), { path: dir })
@@ -257,7 +263,7 @@ export class DockerFileArchive implements FileArchive {
   // 树根绝对路径（legacy 专用通道，FILE_ROOTS.workspace）。超大文件 probe 已短路
   //（oversized → FileInvalidPath）；非文件条目（目录/symlink）→ FileInvalidPath。
   async readBytes(name: string, absRoot: string, relPath: string): Promise<Buffer> {
-    const absPath = relPath === '' ? absRoot : `${absRoot}/${relPath}`
+    const absPath = DockerFileArchive.joinRoot(absRoot, relPath)
     const probed = await this.probe(containerName(name), absPath)
     if (probed === null) throw new FileNotFound(relPath)
     if (probed.kind === 'oversized') throw new FileInvalidPath(relPath)
@@ -269,27 +275,44 @@ export class DockerFileArchive implements FileArchive {
   }
 
   async write(name: string, root: FileRoot, relPath: string, content: string): Promise<void> {
-    const absPath = this.absPath(root, relPath)
-    const probed = await this.probe(containerName(name), absPath)
-    if (probed === null) throw new FileNotFound(relPath)
-    if (probed.kind === 'ok' && probed.root.type !== 'file') throw new FileInvalidPath(relPath) // 目录/链接不可覆写
-    await this.ensureParentAndPut(name, absPath, Buffer.from(content, 'utf8'))
+    await this.writeInContainer(containerName(name), FILE_ROOTS[root], relPath, content)
   }
 
   async create(name: string, root: FileRoot, relPath: string, content: string): Promise<void> {
-    const absPath = this.absPath(root, relPath)
-    const probed = await this.probe(containerName(name), absPath)
-    if (probed !== null) throw new FileExists(relPath)
-    await this.ensureParentAndPut(name, absPath, Buffer.from(content, 'utf8'))
+    await this.createInContainer(containerName(name), FILE_ROOTS[root], relPath, content)
   }
 
   async delete(name: string, root: FileRoot, relPath: string): Promise<void> {
-    const absPath = this.absPath(root, relPath)
-    const probed = await this.probe(containerName(name), absPath)
+    await this.deleteInContainer(containerName(name), FILE_ROOTS[root], relPath)
+  }
+
+  // ---- 显式容器名写面（#784）：wiki 域 REST 挂新 wiki 容器（researcher-wiki-<ownerId>，
+  // 树根 /wiki）——FileArchive Port 的 (name, root) 寻址是 legacy fleet 契约，wiki 容器不在
+  // FILE_ROOTS 词表也不套 openclaw-gw- 前缀；写/建/删三方法以 docker 名 + 绝对树根直给。
+  // 语义与 write/create/delete 逐字节同源（probe 守卫 / mkdir -p / rm -f 只删文件）。
+
+  async writeInContainer(dockerName: string, absRoot: string, relPath: string, content: string): Promise<void> {
+    const absPath = DockerFileArchive.joinRoot(absRoot, relPath)
+    const probed = await this.probe(dockerName, absPath)
+    if (probed === null) throw new FileNotFound(relPath)
+    if (probed.kind === 'ok' && probed.root.type !== 'file') throw new FileInvalidPath(relPath) // 目录/链接不可覆写
+    await this.ensureParentAndPut(dockerName, absPath, Buffer.from(content, 'utf8'))
+  }
+
+  async createInContainer(dockerName: string, absRoot: string, relPath: string, content: string): Promise<void> {
+    const absPath = DockerFileArchive.joinRoot(absRoot, relPath)
+    const probed = await this.probe(dockerName, absPath)
+    if (probed !== null) throw new FileExists(relPath)
+    await this.ensureParentAndPut(dockerName, absPath, Buffer.from(content, 'utf8'))
+  }
+
+  async deleteInContainer(dockerName: string, absRoot: string, relPath: string): Promise<void> {
+    const absPath = DockerFileArchive.joinRoot(absRoot, relPath)
+    const probed = await this.probe(dockerName, absPath)
     if (probed === null) throw new FileNotFound(relPath)
     if (probed.kind === 'ok' && probed.root.type === 'directory') throw new FileInvalidPath(relPath) // 只支持删文件
-    await this.start(name)
-    await this.execSync(name, ['rm', '-f', '--', absPath])
+    await this.start(dockerName)
+    await this.execSync(dockerName, ['rm', '-f', '--', absPath])
   }
 
   // ---- #591 静态 config（内部机制，REST 不可达）----

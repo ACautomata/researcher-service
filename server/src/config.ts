@@ -161,15 +161,38 @@ function readFleetRoot(): string {
 //（本地调试可覆盖回官方 :latest）。**无 dev 旁路分支**（父 spec #693 §2.1「dev 不旁路检测机制」
 // = 不为 dev 另写一条路径）：dev/prod 共用本函数与同一准据 isFloatingImageRef，仅按 NODE_ENV
 // 决定是否抛错——「生产必拦 / dev 放行」是同一判定的两种门控结果，不是两套实现。
-function readFleetImage(): string {
-  const v =
-    process.env.OPENCLAW_IMAGE ?? 'ghcr.io/acautomata/researcher-service/openclaw:2026.9.4-browser'
+// 钉版镜像引用读取三处共用内核（OPENCLAW_IMAGE #695 / SANDBOX_IMAGE #776 / WIKI_IMAGE #784，
+// 同一判定与文案形状——本函数收口防第四处拷贝）：生产浮动引用 fail-fast，dev/test 放行
+//（「生产必拦 / dev 放行」是同一判定的两种门控结果，不是两套实现）。
+// versionSource：错误文案里的版本源指引（无独立版本源钉版的镜像——如过渡期 busybox——省略）。
+function readPinnedImage(envVar: string, fallback: string, versionSource?: string): string {
+  const v = process.env[envVar] ?? fallback
   if (process.env.NODE_ENV === 'production' && isFloatingImageRef(v)) {
-    throw new Error(
-      `OPENCLAW_IMAGE 为浮动镜像引用（无 tag 或 :latest）: ${JSON.stringify(v)}，生产须钉精确版本 tag（版本源见 deploy/openclaw-image/Dockerfile FROM 基线）`,
-    )
+    const note = versionSource ? `（版本源见 ${versionSource}）` : ''
+    throw new Error(`${envVar} 为浮动镜像引用（无 tag 或 :latest）: ${JSON.stringify(v)}，生产须钉精确版本 tag${note}`)
   }
   return v
+}
+
+function readFleetImage(): string {
+  return readPinnedImage(
+    'OPENCLAW_IMAGE',
+    'ghcr.io/acautomata/researcher-service/openclaw:2026.9.4-browser',
+    'deploy/openclaw-image/Dockerfile FROM 基线',
+  )
+}
+
+// WIKI_IMAGE（#784 · #747 E 节 wiki 列）：wiki 容器镜像——busybox 级极简（sh/mkdir/rm/cat
+// 基础 applet，无运行时），零初始化（无骨架 COPY，/wiki 属主由创建面 putArchive 预置）。
+// 默认 = 本仓库派生镜像 + 精确版本 tag（版本源 = deploy/wiki-image/Dockerfile FROM 基线
+// busybox tag，两处明文由 wikiImage.test.ts 交叉断言锁死，CD 随发布构建推送）。可用 WIKI_IMAGE
+// 覆盖（生产浮动引用 fail-fast，readFleetImage 同款判定/同款文案形状）。
+function readWikiImage(): string {
+  return readPinnedImage(
+    'WIKI_IMAGE',
+    'ghcr.io/acautomata/researcher-service/wiki:1.36',
+    'deploy/wiki-image/Dockerfile FROM 基线',
+  )
 }
 
 // PANEL_PUBLIC_ORIGIN（#385 生产 Origin 接线）：面板对外的 origin（浏览器经它访问面板），后端
@@ -355,13 +378,7 @@ function readRunnerRecursionLimit(): number {
 // 资源 limit 与闲置阈值是规格常数（#747 开放点 8 待实测校准），不走 env——防部署配置漂移
 // 出一万个规格分叉（校准是代码变更，须随版锁定）。
 function readSandboxImage(): string {
-  const v = process.env.SANDBOX_IMAGE ?? 'busybox:1.36'
-  if (process.env.NODE_ENV === 'production' && isFloatingImageRef(v)) {
-    throw new Error(
-      `SANDBOX_IMAGE 为浮动镜像引用（无 tag 或 :latest）: ${JSON.stringify(v)}，生产须钉精确版本 tag`,
-    )
-  }
-  return v
+  return readPinnedImage('SANDBOX_IMAGE', 'busybox:1.36')
 }
 
 // ALLOW_PRIVATE_PROVIDER_ENDPOINTS（#775，731 §5.1）：CRUD 层 DNS 私网/环回拒绝的逃生开关。
@@ -464,6 +481,14 @@ export const config = {
       // 本票 AC 不含镜像。E 节「完整工具链」镜像的拆票落点待确认（#784/#777 票面均无此项，
       // 勿挂靠不存在的承接票），确认前以 SANDBOX_IMAGE env 钉版过渡）
       image: readSandboxImage(),
+    }
+  })(),
+  // ---- wiki 容器（#784 · #747 E 节 wiki 列：每用户一台、永久、零出网文件仓库）----
+  wikiContainers: (() => {
+    return {
+      // wiki 容器镜像（生产禁浮动 tag → readWikiImage fail-fast；默认本仓库派生镜像 + 精确
+      // 版本 tag——busybox 级极简、零初始化，版本源 deploy/wiki-image/Dockerfile FROM 基线）
+      image: readWikiImage(),
     }
   })(),
   // ---- runner（#775，#747 F 节 · 731 §5）----

@@ -150,9 +150,11 @@ function dockerfileFromRef(): string {
   return (line as string).slice('FROM '.length).split(/\s+/)[0]
 }
 
-// config.ts 里 OPENCLAW_IMAGE 默认值明文（与运行时 env 注入解耦，静态防漂移）
+// config.ts 里 OPENCLAW_IMAGE 默认值明文（与运行时 env 注入解耦，静态防漂移）。#784 起三处
+// 钉版镜像读取收口进 readPinnedImage（fleet/sandbox/wiki 同一判定内核），默认值 = 其第二参——
+// 匹配该调用形态（跨行缩进由 \s* 容纳）。
 function configDefaultImage(): string {
-  const m = readRepoFile('server/src/config.ts').match(/OPENCLAW_IMAGE\s*\?\?\s*'([^']+)'/)
+  const m = readRepoFile('server/src/config.ts').match(/readPinnedImage\(\s*'OPENCLAW_IMAGE',\s*'([^']+)'/)
   expect(m, 'config.ts 缺 OPENCLAW_IMAGE 默认值明文').not.toBeNull()
   return (m as RegExpMatchArray)[1]
 }

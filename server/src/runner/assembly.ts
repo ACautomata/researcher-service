@@ -16,6 +16,7 @@ import { BullMqRunQueue } from './bullmqRunQueue'
 import { disableLangsmithTracing } from './runtime/tracing'
 import { installAbortRejectionGuard } from './runtime/abortGuard'
 import { config } from '../config'
+import { wikiContainerName } from '../wikiContainers/runtime'
 import { createPrismaApprovalAuditSink } from './approval/audit'
 import { ToolCallJudgeClient } from './approval/judge'
 import { ApprovalFunnel, type ApprovalFunnelDeps } from './approval/funnel'
@@ -35,6 +36,8 @@ export function assembleRunner(opts: {
   recursionLimit?: number
   /** 沙箱生命周期（#776 契约「消费方 = #777 runner ensure/touch」；类型面复用 RunServiceDeps） */
   sandboxes?: NonNullable<RunServiceDeps['sandboxes']>
+  /** wiki 容器生命周期（#784 契约「run 前 ensure」；server.ts 注入 WikiContainerLifecycle 子集） */
+  wikis?: NonNullable<RunServiceDeps['wikis']>
   /** 审批漏斗 judge 模型（测试注入 fake；缺省按 config.runner.judge 构造，未配置 = 无 judge） */
   judge?: NonNullable<ApprovalFunnelDeps['judge']>
 }): RunnerAssembly {
@@ -77,12 +80,12 @@ export function assembleRunner(opts: {
     gate,
     hub: opts.hub,
     primitives,
-    // wiki 容器命名（#784 双容器 orchestrator 接管前的占位实现——每用户一台，命名即预言；
-    // 当前生产 wiki 容器不存在，/wiki/ 工具路径的文件操作会因容器缺失报错回流 agent 自纠，
-    // /lab/ 面不受影响。#784 落地后替换为 orchestrator 查询）。
-    resolveWikiContainer: (ownerId) => `researcher-wiki-${ownerId}`,
+    // wiki 容器命名（#784 起经 wikiContainerName 单一来源派生——每用户一台
+    // researcher-wiki-<ownerId>；与 wikiContainers/assembly 的创建面同源）。
+    resolveWikiContainer: wikiContainerName,
     recursionLimit: opts.recursionLimit,
     sandboxes: opts.sandboxes,
+    wikis: opts.wikis,
     approvals: funnel,
     approvalTimeoutMs: config.runner.approvalTimeoutMs,
   })

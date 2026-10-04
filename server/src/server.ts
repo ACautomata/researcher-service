@@ -5,8 +5,8 @@ import { bootstrap } from './auth/bootstrap'
 import { config } from './config'
 import { assembleFleet } from './containers/fleetAssembly'
 import { assembleSandboxes } from './sandboxes/assembly'
+import { assembleWikiContainers } from './wikiContainers/assembly'
 import { assembleAutoFigureRuntime } from './figures/assembly'
-import { makeDockerCompile } from './wiki/compile'
 import { assembleTunnelServer } from './chat/tunnelAssembly'
 import { assembleRunner } from './runner/assembly'
 import { StreamHub } from './events/hub'
@@ -24,6 +24,10 @@ async function main(): Promise<void> {
   // 会话沙箱生命周期（#776 · story 58/59）：惰性创建/闲置 30min 回收/级联删 Port +
   // 周期 sweeper（真正消费方 = #777 runner ensure/touch 与 #778 会话 REST 删 session 级联）。
   const sandboxes = assembleSandboxes()
+  // wiki 容器生命周期（#784 · #747 E 节 wiki 列）：每用户一台、永久、零出网文件仓库。
+  // ensure 消费方 = wiki 域 REST（每操作前置）与 runner（run 前）；remove = 用户级联删/T0
+  // 清理面（用户删除端点未落地）；永久容器无闲置 sweeper。
+  const wikiContainers = assembleWikiContainers()
   // AutoFigure 生成运行时（T07）：config → 生产 HTTP adapter（私有 sidecar）→ T03 runner。
   // flag 关 → null（不构造 adapter、不启动 pump；面板启动/health 独立于 sidecar）。enabled →
   // 构造 adapter + 启动 runner pump（queue 由 T03 runner 内部创建）。handle 供优雅关闭 await。
@@ -50,6 +54,13 @@ async function main(): Promise<void> {
       ensure: (id) => sandboxes.lifecycle.ensure(id),
       touch: (id) => sandboxes.lifecycle.touch(id),
     },
+    // #784 契约接线：runner run 前 ensure 用户 wiki 容器（/wiki/ 工具根就绪——沙箱 ensure
+    // 同款接缝；/wiki 惰性创建 + stopped 复启，永久容器无 touch 面）。
+    wikis: {
+      ensure: async (ownerId) => {
+        await wikiContainers.lifecycle.ensure(ownerId)
+      },
+    },
   })
   // 会话域（#778 · #747 C 节会话 REST 全件）：SessionService（门禁观测/配额预检/命令构造复用
   // runner.service；dispatch = BullMQ submit 透传——ack 失败由 SessionService 回滚/上报，
@@ -68,8 +79,16 @@ async function main(): Promise<void> {
     orchestrator: fleet.orchestrator,
     // approve 端点 docker exec 通道（#374）：容器内 `openclaw devices approve <requestId>`。
     runtime: fleet.runtime,
-    // wiki compile（#335）：docker exec `openclaw wiki compile`，5s 去抖、best-effort。
-    wiki: { compile: makeDockerCompile(fleet.runtime) },
+    // wiki（#335 → #784 换轨）：存储面 = 新 wiki 容器（ensure 经 wikiContainers 注入）；
+    // compile 触发不注入（busybox 级容器无 openclaw 运行时，索引归 OpenWiki 工具形态 #737，
+    // routes 缺省 noop）。
+    wiki: {
+      wikiContainers: {
+        ensure: async (ownerId) => {
+          await wikiContainers.lifecycle.ensure(ownerId)
+        },
+      },
+    },
     // models（#336；#775 写盘链退役）：事务 = DB mutation + config_meta version bump（热生效
     // 信号），不再 putArchive 重渲染 openclaw.json——TemplateModelConfigWriter 装配退役
     //（configWriter/configBuilder 两文件留待 T0 清退 #801）；models/providerEndpoints 路由
@@ -114,6 +133,7 @@ async function main(): Promise<void> {
   const shutdown = async (): Promise<void> => {
     await fleet.close().catch(() => {})
     await sandboxes.close().catch(() => {})
+    await wikiContainers.close().catch(() => {})
     await autofigure?.close().catch(() => {})
     await runner.close().catch(() => {})
     // 先终止活动隧道（http.Server.close 会等升级后的 WS 连接自然断开——有浏览器持隧道时挂起）

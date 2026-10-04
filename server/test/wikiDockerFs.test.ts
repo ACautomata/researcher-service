@@ -6,9 +6,8 @@
 
 import { describe, it, expect } from 'vitest'
 import { FileExists, FileInvalidPath, FileNotFound } from '../src/files/errors'
-import type { FileArchive, FileRoot } from '../src/files/fsPort'
 import type { TarEntry } from '../src/files/tar'
-import { DockerWikiFileSystem, type WikiProbeResult } from '../src/wiki/dockerFs'
+import { DockerWikiFileSystem, type WikiContainerArchive, type WikiProbeResult } from '../src/wiki/dockerFs'
 import { WikiInvalidPath, WikiPageExists, WikiPageNotFound } from '../src/wiki/errors'
 
 // 单文件条目（data 默认给空——title/decode 行为由用例按需给）。
@@ -22,33 +21,27 @@ function link(name: string): TarEntry {
   return { name, type: 'symlink', size: 0, mtime: 0, data: null }
 }
 
-// 最小 fake FileArchive：只实现 DockerWikiFileSystem 用到的 write/create/delete + 满足 Port 的
-// read/writeConfig/readConfig。可注入：记录调用、按策略抛 files 域异常。
+// 最小 fake 写面（#784 WikiContainerArchive）：只实现 DockerWikiFileSystem 用到的
+// writeInContainer/createInContainer/deleteInContainer。可注入：记录调用、按策略抛 files 域异常。
 type ArchiveMethod = 'write' | 'create' | 'delete'
-class FakeArchive implements FileArchive {
-  calls: Array<{ method: ArchiveMethod; root: FileRoot; relPath: string; content?: string }> = []
+class FakeArchive implements WikiContainerArchive {
+  calls: Array<{ method: ArchiveMethod; absRoot: string; relPath: string; content?: string }> = []
   constructor(private readonly behave: Partial<Record<ArchiveMethod, (relPath: string) => Error | void>> = {}) {}
-  async read(_name: string): Promise<never> { throw new Error('not used by DockerWikiFileSystem') }
-  async readLab(): Promise<never> { throw new Error('not used by DockerWikiFileSystem') }
-  async readBytes(): Promise<never> { throw new Error('not used by DockerWikiFileSystem') }
-  async write(_name: string, root: FileRoot, relPath: string, content: string): Promise<void> {
-    this.calls.push({ method: 'write', root, relPath, content })
+  async writeInContainer(_dockerName: string, absRoot: string, relPath: string, content: string): Promise<void> {
+    this.calls.push({ method: 'write', absRoot, relPath, content })
     const e = this.behave.write?.(relPath)
     if (e) throw e
   }
-  async create(_name: string, root: FileRoot, relPath: string, content: string): Promise<void> {
-    this.calls.push({ method: 'create', root, relPath, content })
+  async createInContainer(_dockerName: string, absRoot: string, relPath: string, content: string): Promise<void> {
+    this.calls.push({ method: 'create', absRoot, relPath, content })
     const e = this.behave.create?.(relPath)
     if (e) throw e
   }
-  async delete(_name: string, root: FileRoot, relPath: string): Promise<void> {
-    this.calls.push({ method: 'delete', root, relPath })
+  async deleteInContainer(_dockerName: string, absRoot: string, relPath: string): Promise<void> {
+    this.calls.push({ method: 'delete', absRoot, relPath })
     const e = this.behave.delete?.(relPath)
     if (e) throw e
   }
-  async writeConfig(): Promise<void> {}
-  async seedWorkspace(): Promise<void> {} // 本域不触达（编排 create 路径专用）
-  async readConfig(): Promise<string> { return '' }
 }
 
 const enc = (s: string) => Buffer.from(s, 'utf8')
@@ -66,6 +59,19 @@ function makeDocker(
     archive: opts.archive ?? new FakeArchive(),
   })
 }
+
+describe('DockerWikiFileSystem 寻址面（#784 挂新 wiki 容器）', () => {
+  it('dockerName 原文保留、rootPath 缺省 /wiki（可写层，wikiContainers/values 单一来源）', () => {
+    const fs = new DockerWikiFileSystem('researcher-wiki-u1')
+    expect(fs.dockerName).toBe('researcher-wiki-u1')
+    expect(fs.rootPath).toBe('/wiki')
+  })
+
+  it('rootPath 可覆盖（测试异形根缝）', () => {
+    const fs = new DockerWikiFileSystem('any', { rootPath: '/custom' })
+    expect(fs.rootPath).toBe('/custom')
+  })
+})
 
 describe('DockerWikiFileSystem.buildTree', () => {
   it('snapshot 为 null（容器/wiki 目录不存在/超限）→ 空树降级', async () => {
@@ -180,17 +186,17 @@ describe('DockerWikiFileSystem.readPage', () => {
   })
 })
 
-describe('DockerWikiFileSystem 写侧（委托 FileArchive + managed + 异常映射）', () => {
-  it('write/create/delete 委托 archive（root=wiki，透传 name/rel/content）', async () => {
+describe('DockerWikiFileSystem 写侧（委托 FileArchive 显式容器名方法 + managed + 异常映射）', () => {
+  it('write/create/delete 委托 InContainer 三方法（透传 dockerName/树根 /wiki/rel/content，#784）', async () => {
     const archive = new FakeArchive()
     const fs = makeDocker({ archive, probeFile: async () => ({ kind: 'dir' }) }) // createPage 父链放行
     await fs.writePage('concepts/a.md', '# A\n')
     await fs.createPage('concepts/new.md', '# N\n')
     await fs.deletePage('concepts/a.md')
     expect(archive.calls).toEqual([
-      { method: 'write', root: 'wiki', relPath: 'concepts/a.md', content: '# A\n' },
-      { method: 'create', root: 'wiki', relPath: 'concepts/new.md', content: '# N\n' },
-      { method: 'delete', root: 'wiki', relPath: 'concepts/a.md' },
+      { method: 'write', absRoot: '/wiki', relPath: 'concepts/a.md', content: '# A\n' },
+      { method: 'create', absRoot: '/wiki', relPath: 'concepts/new.md', content: '# N\n' },
+      { method: 'delete', absRoot: '/wiki', relPath: 'concepts/a.md' },
     ])
   })
 
