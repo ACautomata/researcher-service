@@ -18,7 +18,7 @@ import { createPrismaClient } from '../src/prisma'
 import { createApp } from '../src/app'
 import type { PrismaClient } from '../src/generated/prisma/client'
 import { StreamHub, type StreamSink } from '../src/events/hub'
-import { seedUser, login, bearer } from './helpers'
+import { seedUser, login, bearer, waitFor } from './helpers'
 import { ScriptedChatModel, fakePrimitives, toolCallAi, type ScriptEntry } from './runnerFakes'
 import { RunService } from '../src/runner/runtime/runService'
 import { ProviderRegistry } from '../src/runner/providerRegistry'
@@ -64,14 +64,6 @@ function frameEvents(frames: string[]): DecodedFrame[] {
     .map((f) => JSON.parse(/^data: (.+)$/m.exec(f)![1]) as DecodedFrame)
 }
 
-async function waitFor(pred: () => boolean | Promise<boolean>, timeoutMs = 5000): Promise<void> {
-  const deadline = Date.now() + timeoutMs
-  while (!(await pred())) {
-    if (Date.now() > deadline) throw new Error('waitFor 超时')
-    await new Promise((r) => setTimeout(r, 10))
-  }
-}
-
 describe('会话 REST 域（S1，#778）', () => {
   let prisma: PrismaClient
   let request: SuperTest<Test>
@@ -83,6 +75,7 @@ describe('会话 REST 域（S1，#778）', () => {
   let sessions: SessionService
   const removedSandboxes: string[] = []
   const cleanupDirs: string[] = []
+  let observedModel: ScriptedChatModel | undefined
   let currentScript: ScriptEntry[]
   let policyTools: readonly string[] | undefined
   let slowExec = false // 慢执行开关（running 窗口制造；afterEach 复位——deps.primitives private 不可换，开关内建）
@@ -127,7 +120,7 @@ describe('会话 REST 域（S1，#778）', () => {
 
     const registry = new ProviderRegistry(prisma, {
       llmApiKey: 'test-key',
-      modelFactory: async () => new ScriptedChatModel(currentScript),
+      modelFactory: async () => { observedModel = new ScriptedChatModel(currentScript); return observedModel },
     })
     runService = new RunService({
       prisma,
@@ -416,6 +409,102 @@ describe('会话 REST 域（S1，#778）', () => {
       .send({ content: '' })
     expect(badBody.body.code).toBe(CODE.VALIDATION_FAILED)
     expect(badBody.body.data).toMatchObject({ content: expect.any(Array) })
+  })
+
+  it('official /research template reaches the runner as a user message; skill body is progressively disclosed', async () => {
+    currentScript = [toolCallAi('read-skill', 'read_official_skill', { name: 'research' }), new AIMessage('research done')]
+    const sid = (await request.post('/api/v1/sessions').set(bearer(access)).send({})).body.data.id as string
+    const sent = await request.post(`/api/v1/sessions/${sid}/messages`).set(bearer(access)).set('Idempotency-Key', hexKey(0x787)).send({ content: '/research 电池寿命' })
+    expect(sent.body.code).toBe(CODE.OK)
+    await waitFor(() => frameEvents(sinkA.frames).some(e => e.sessionId === sid && e.type === 'run.completed'))
+    const inputs = observedModel!.receivedMessages as { content: string; getType(): string }[][]
+    expect(inputs[0]!.find(m => m.getType() === 'human')!.content).toContain('电池寿命')
+    expect(inputs[0]!.find(m => m.getType() === 'human')!.content).toContain('先读取技能正文')
+    expect(inputs[0]!.find(m => m.getType() === 'system')!.content).not.toContain('完成标准：核心问题')
+    expect(inputs[1]!.find(m => m.getType() === 'tool')!.content).toContain('完成标准：核心问题')
+    const projection = await request.get(`/api/v1/sessions/${sid}/messages`).set(bearer(access))
+    // 落行存原始输入（/命令原文）——展开只发生在命令构造点，模板发版改文不破幂等 replay
+    expect(projection.body.data.messages[0].content).toContain('/research 电池寿命')
+    const replay = await request.post(`/api/v1/sessions/${sid}/messages`).set(bearer(access)).set('Idempotency-Key', hexKey(0x787)).send({ content: '/research 电池寿命' })
+    expect(replay.body.data.replay).toBe(true)
+  })
+
+  it('/new creates a fresh session once without starting a model run', async () => {
+    const sid = (await request.post('/api/v1/sessions').set(bearer(access)).send({})).body.data.id as string
+    const send = () => request.post(`/api/v1/sessions/${sid}/messages`).set(bearer(access)).set('Idempotency-Key', hexKey(0x788)).send({ content: '/new' })
+    const first = await send()
+    expect(first.body.code).toBe(CODE.OK)
+    expect(first.body.data.command).toMatchObject({ name: 'new', sessionId: expect.any(String) })
+    const again = await send()
+    expect(again.body.data.command.sessionId).toBe(first.body.data.command.sessionId)
+    expect(again.body.data.replay).toBe(true)
+    expect(first.body.data.runId).toBeNull()
+    expect((await request.get('/api/v1/sessions').set(bearer(access))).body.data.sessions.some((s: { id: string }) => s.id === first.body.data.command.sessionId)).toBe(true)
+  })
+
+  it('/model lists configured models, persists a next-run choice, and rejects unknown values', async () => {
+    const sid = (await request.post('/api/v1/sessions').set(bearer(access)).send({})).body.data.id as string
+    const send = (content: string, n: number) => request.post(`/api/v1/sessions/${sid}/messages`).set(bearer(access)).set('Idempotency-Key', hexKey(n)).send({ content })
+    const listed = await send('/model', 0x789)
+    expect(listed.body.code).toBe(CODE.OK)
+    expect(listed.body.data.command.models).toContainEqual({ providerId: 'prov-1', modelId: 'model-x' })
+    // 列清单是查询不是变更：不广播 session.updated（model:undefined 噪音）
+    expect(frameEvents(sinkA.frames).filter(e => e.sessionId === sid && e.type === 'session.updated')).toHaveLength(0)
+    const picked = await send('/model prov-1/model-x', 0x790)
+    expect(picked.body.code).toBe(CODE.OK)
+    expect(picked.body.data.command).toMatchObject({ name: 'model', model: { providerId: 'prov-1', modelId: 'model-x' }, appliesTo: 'next-run' })
+    expect((await send('/model prov-1/missing', 0x791)).body.code).toBe(CODE.PROVIDER_NOT_FOUND)
+    expect((await send('/model default', 0x792)).body.data.command.model).toBeNull()
+    expect(picked.body.data.runId).toBeNull()
+    // 偏好落定（含 default 重置）恰广播一次
+    expect(frameEvents(sinkA.frames).filter(e => e.sessionId === sid && e.type === 'session.updated')).toHaveLength(2)
+  })
+
+  it('/compact compacts the thread: pre-cutoff turns leave the model context, summary persists', async () => {
+    const sid = (await request.post('/api/v1/sessions').set(bearer(access)).send({})).body.data.id as string
+    const send = (content: string, n: number) => request.post(`/api/v1/sessions/${sid}/messages`).set(bearer(access)).set('Idempotency-Key', hexKey(n)).send({ content })
+    // 保留窗 6：4 轮对话 = 8 条消息（>7 才有可压缩余量）；脚本序 = run1..4 → compact 摘要 → run5
+    currentScript = [new AIMessage('a1'), new AIMessage('a2'), new AIMessage('a3'), new AIMessage('a4'), new AIMessage('COMPACT-SUMMARY-TEXT'), new AIMessage('a5')]
+    for (const n of [1, 2, 3, 4]) {
+      expect((await send(`q${n}`, 0x800 + n)).body.code).toBe(CODE.OK)
+      await waitFor(() => frameEvents(sinkA.frames).filter(e => e.sessionId === sid && e.type === 'run.completed').length >= n)
+    }
+    const compact = await send('/compact', 0x900)
+    expect(compact.body.code).toBe(CODE.OK)
+    expect(compact.body.data.runId).toBeTruthy()
+    await waitFor(() => frameEvents(sinkA.frames).filter(e => e.sessionId === sid && e.type === 'run.completed').length >= 5)
+    expect((await send('q5', 0x905)).body.code).toBe(CODE.OK)
+    await waitFor(() => frameEvents(sinkA.frames).filter(e => e.sessionId === sid && e.type === 'run.completed').length >= 6)
+    const inputs = observedModel!.receivedMessages as { content: string; getType(): string }[][]
+    // 摘要调用：压缩提示 + 被截转写（q1/a1 在内、保留窗外的 q4 不在）
+    const summaryPrompt = inputs[4]!.filter(m => m.getType() === 'human').map(m => String(m.content)).join('')
+    expect(summaryPrompt).toContain('会话压缩器')
+    expect(summaryPrompt).toContain('[human] q1')
+    expect(summaryPrompt).toContain('[ai] a1')
+    expect(summaryPrompt).not.toContain('q4')
+    // 压缩后 run5 的上下文：摘要在、q1/a1 不在、保留窗尾部（q4/a4/q5）在
+    const after = inputs.at(-1)!
+    expect(after.some(m => m.getType() === 'human' && String(m.content).includes('COMPACT-SUMMARY-TEXT'))).toBe(true)
+    expect(after.some(m => String(m.content).includes('q1'))).toBe(false)
+    expect(after.some(m => String(m.content).includes('q4'))).toBe(true)
+    expect(after.some(m => String(m.content).includes('q5'))).toBe(true)
+  })
+
+  it('/compact on a short thread is a no-op that still completes the run', async () => {
+    const sid = (await request.post('/api/v1/sessions').set(bearer(access)).send({})).body.data.id as string
+    const send = (content: string, n: number) => request.post(`/api/v1/sessions/${sid}/messages`).set(bearer(access)).set('Idempotency-Key', hexKey(n)).send({ content })
+    currentScript = [new AIMessage('solo answer'), new AIMessage('after answer')]
+    expect((await send('only question', 0x910)).body.code).toBe(CODE.OK)
+    await waitFor(() => frameEvents(sinkA.frames).filter(e => e.sessionId === sid && e.type === 'run.completed').length >= 1)
+    const compact = await send('/compact', 0x911)
+    expect(compact.body.code).toBe(CODE.OK)
+    await waitFor(() => frameEvents(sinkA.frames).filter(e => e.sessionId === sid && e.type === 'run.completed').length >= 2)
+    expect((await send('follow-up', 0x912)).body.code).toBe(CODE.OK)
+    await waitFor(() => frameEvents(sinkA.frames).filter(e => e.sessionId === sid && e.type === 'run.completed').length >= 3)
+    const inputs = observedModel!.receivedMessages as unknown[][]
+    // no-op：摘要调用未发生（仅 run1/run3 两次 invoke），上下文原样保留
+    expect(inputs.length).toBe(2)
+    expect(inputs.at(-1)!.some(m => String((m as { content: unknown }).content).includes('only question'))).toBe(true)
   })
 
   // ---- 多端门禁（story 13）----
@@ -770,6 +859,45 @@ describe('会话 REST 域（S1，#778）', () => {
       .send({ content: 'sess-seed 已有标题' })
     await waitFor(() => ['completed', 'failed'].includes(runService.stateOf('sess-seed')?.state ?? ''))
     expect((await prisma.session.findUnique({ where: { id: 'sess-seed' } }))?.title).toBe('新标题')
+  })
+
+  // ---- inFlight 投影（story 11 · #779 断线补偿）----
+
+  it('投影 GET 的 inFlight：running 带 checkpoint 重建 turn（多端同形）；终态字段缺省', async () => {
+    slowExec = true
+    currentScript = [
+      toolCallAi('if-c1', 'execute', { command: 'echo hi' }, '想想。'),
+      new AIMessage({ content: [{ type: 'text', text: '完成。' }] }),
+    ]
+    const sid = (await request.post('/api/v1/sessions').set(bearer(access)).send({})).body.data.id as string
+    await request
+      .post(`/api/v1/sessions/${sid}/messages`)
+      .set(bearer(access))
+      .set('Idempotency-Key', hexKey(0x801))
+      .send({ content: '慢问题' })
+    await waitFor(() => runService.stateOf(sid)?.state === 'running')
+
+    // 等工具行进 checkpoint（慢工具窗口 = 重建素材窗口）
+    let inFlight: { runId: string; state: string; turn: { tools?: { toolCallId: string; name: string }[] } } | undefined
+    await waitFor(async () => {
+      const res = await request.get(`/api/v1/sessions/${sid}/messages`).set(bearer(access))
+      inFlight = res.body.data.inFlight as typeof inFlight
+      return (inFlight?.turn.tools?.length ?? 0) > 0
+    })
+    expect(inFlight?.state).toBe('running')
+    expect(inFlight?.turn.tools?.[0]).toMatchObject({ toolCallId: 'if-c1', name: 'execute' })
+
+    // 多端/换设备重拉同形：同一内存态 + 同一 checkpoint → runId/turn 一致
+    const res2 = await request.get(`/api/v1/sessions/${sid}/messages`).set(bearer(access))
+    const inFlight2 = res2.body.data.inFlight as typeof inFlight
+    expect(inFlight2?.runId).toBe(inFlight?.runId)
+    expect(inFlight2?.state).toBe('running')
+    expect(inFlight2?.turn.tools?.[0]).toMatchObject({ toolCallId: 'if-c1' })
+
+    // 终态 → 字段缺省（「无进行中 run」的投影形状）
+    await waitFor(() => runService.stateOf(sid)?.state === 'completed')
+    const final = await request.get(`/api/v1/sessions/${sid}/messages`).set(bearer(access))
+    expect(final.body.data.inFlight).toBeUndefined()
   })
 
   // ---- 认证边界 ----

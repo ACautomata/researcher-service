@@ -74,8 +74,8 @@ export function createSessionsRouter(deps: SessionsRouterDeps): Router {
     validateBody(messageSendSchema),
     async (req: Request, res: Response) => {
       const clientKey = res.locals.messageKey as string
-      const { content } = req.body as z.infer<typeof messageSendSchema>
-      ok(res, await deps.service.sendMessage(req.user!, pathId(req), { content, clientKey }))
+      const { content, attachmentIds } = req.body as z.infer<typeof messageSendSchema>
+      ok(res, await deps.service.sendMessage(req.user!, pathId(req), { content, clientKey, attachmentIds }))
     },
   )
 

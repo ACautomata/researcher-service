@@ -101,6 +101,7 @@ export class TeammateService {
           ownerId: parent.ownerId,
           containerId: parent.containerId,
           title: trimmedName,
+          preferredModelJson: parent.preferredModelJson,
           isTeammate: true,
         },
       })
@@ -335,10 +336,10 @@ export class TeammateService {
     return invalidated.map((row) => row.id)
   }
 
-  private async getLeaderSession(sessionId: string): Promise<Pick<Session, 'id' | 'ownerId' | 'containerId'>> {
+  private async getLeaderSession(sessionId: string): Promise<Pick<Session, 'id' | 'ownerId' | 'containerId' | 'preferredModelJson'>> {
     const row = await this.prisma.session.findUnique({
       where: { id: sessionId },
-      select: { id: true, ownerId: true, containerId: true, isTeammate: true },
+      select: { id: true, ownerId: true, containerId: true, isTeammate: true, preferredModelJson: true },
     })
     if (!row || row.isTeammate) throw fail(CODE.SESSION_NOT_FOUND)
     return row

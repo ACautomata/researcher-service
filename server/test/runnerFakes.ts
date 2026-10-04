@@ -28,6 +28,7 @@ export class ScriptedChatModel extends BaseChatModel {
   private readonly loop: boolean
 
   invokeCount = 0
+  readonly receivedMessages: unknown[] = []
 
   constructor(script: ScriptEntry[], opts: { loop?: boolean } = {}) {
     super({})
@@ -57,6 +58,7 @@ export class ScriptedChatModel extends BaseChatModel {
     _options: unknown,
     _runManager: unknown,
   ) {
+    this.receivedMessages.push(_messages)
     this.invokeCount += 1
     const message = this.nextMessage()
     const text = typeof message.content === 'string' ? message.content : ''

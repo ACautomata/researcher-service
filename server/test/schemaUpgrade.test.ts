@@ -7,7 +7,7 @@ import { runDbScript } from './runDbScript'
 
 // 从「只有 base 表」的旧库跑全量增量脚本（幂等跑两遍）→ 三批表全到位 + T02 幂等列/索引
 // + T03 生命周期时间戳列 + T06 产物三列 + #699 upgradeAttempts 列 + teammate/mailbox + user_version 归 11
-// （#771 批次 7→8；#775 批次 8→9；#786 teammate/mailbox 9→11）。
+// （#771 批次 7→8；#775 批次 8→9；#787 preferredModelJson 9→10；#786 teammate/mailbox 10→11）。
 function assertUpgraded(dbPath: string): void {
   const db = new Database(dbPath)
   try {
@@ -55,9 +55,10 @@ function assertUpgraded(dbPath: string): void {
     const attempts = containerCols.find((c) => c.name === 'upgradeAttempts')!
     expect(attempts.notnull).toBe(1) // NOT NULL
     expect(attempts.dflt_value).toBe('0') // DEFAULT 0（既有行升级计数从 0 起）
-    expect(db.pragma('user_version', { simple: true })).toBe(11) // #786 批次（SCHEMA_VERSION 9→11）
+    expect(db.pragma('user_version', { simple: true })).toBe(11) // #787 + #786 批次（SCHEMA_VERSION 9→11）
     const sessionCols = db.prepare('PRAGMA table_info("sessions")').all() as Array<{ name: string }>
     expect(sessionCols.some((col) => col.name === 'isTeammate')).toBe(true)
+    expect(sessionCols.some((col) => col.name === 'preferredModelJson')).toBe(true)
     for (const table of ['teammates', 'teammate_mailbox_messages', 'teammate_mailbox_waits']) {
       expect(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?").get(table)).toEqual({ name: table })
     }

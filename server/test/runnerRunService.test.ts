@@ -183,7 +183,11 @@ describe('RunService：发消息 → run 终态事件序列（S1，#747 C 节目
       inFlight: () => 0,
     } as unknown as ConcurrencyGate
     const svc = makeService({
-      script: [new AIMessage({ content: 'Teammate result' })],
+      script: [
+        toolCallAi('team-skill', 'read_official_skill', { name: 'research' }),
+        toolCallAi('team-list', 'list_teammates', {}),
+        new AIMessage({ content: 'Teammate result' }),
+      ],
       gate,
       teammates: new TeammateService(prisma),
     })
@@ -198,6 +202,10 @@ describe('RunService：发消息 → run 终态事件序列（S1，#747 C 节目
     const teammateDeltas = hub.events.filter((event) => event.type === 'text.delta')
     expect(teammateDeltas.length).toBeGreaterThan(0)
     expect(teammateDeltas.every((event) => event.sessionId === sessionId && event.teammateId === teammateId)).toBe(true)
+    expect(hub.events.filter((event) => event.type === 'tool.end').map((event) => event.payload)).toEqual([
+      expect.objectContaining({ name: 'read_official_skill', state: 'success', details: expect.stringContaining('调研') }),
+      expect.objectContaining({ name: 'list_teammates', state: 'success', details: expect.stringContaining('review') }),
+    ])
     expect(hub.events.at(-1)).toMatchObject({ type: 'teammate.completed', sessionId, teammateId })
     expect(svc.stateOf(threadId)?.state).toBe('completed')
   })

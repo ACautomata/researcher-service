@@ -343,6 +343,9 @@ model Session {
   // 旧分支自然保留（checkpoint 树即分支真相源）。
   activeCheckpointId String?
 
+  // #787: /model is a session preference, applied at the next run snapshot.
+  preferredModelJson String?
+
   // #770：branch-switch 机制取消后，「先 fork 再回退」的被放弃原路线软删除存档
   // （delete 标记、映射层过滤——产品面不可读、行不物理删，retention/refcount GC 回收对象）。
   archivedAt DateTime?

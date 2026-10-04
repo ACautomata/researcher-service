@@ -17,6 +17,8 @@ import { disableLangsmithTracing } from './runtime/tracing'
 import { installAbortRejectionGuard } from './runtime/abortGuard'
 import { config } from '../config'
 import { wikiContainerName } from '../wikiContainers/runtime'
+import { SANDBOX_CONTAINER_PREFIX } from '../sandboxes/values'
+import { createDownloadNode } from './runtime/downloadNode'
 import { createPrismaApprovalAuditSink } from './approval/audit'
 import { ToolCallJudgeClient } from './approval/judge'
 import { ApprovalFunnel, type ApprovalFunnelDeps } from './approval/funnel'
@@ -41,6 +43,8 @@ export function assembleRunner(opts: {
   wikis?: NonNullable<RunServiceDeps['wikis']>
   /** 审批漏斗 judge 模型（测试注入 fake；缺省按 config.runner.judge 构造，未配置 = 无 judge） */
   judge?: NonNullable<ApprovalFunnelDeps['judge']>
+  /** #780 附件 ingestion（片 2：run 首步物化到沙箱 + 图片内联；server.ts 注入 AttachmentsService） */
+  attachments?: NonNullable<RunServiceDeps['attachments']>
 }): RunnerAssembly {
   // tracing 显式关（启动期第一路；RunService 构造期第二路兜底）
   disableLangsmithTracing()
@@ -62,6 +66,40 @@ export function assembleRunner(opts: {
   })
   const primitives = new DockerPrimitives()
   const teammates = new TeammateService(opts.prisma)
+
+  // #780 下载校验节点（片 3）：file 写类工具（write/edit）成功后校验声明路径 → 物化
+  // Attachment 行 + 下载引用追加进 tool 输出（tool.end details 承载）；失败 → 错误回喂
+  // agent loop 重新生成。ownerId 按 session 解析（工具调用面无身份参数——ctx 身份纪律）。
+  const attachmentsForNode = opts.attachments
+  const downloadNode = attachmentsForNode
+    ? createDownloadNode({
+        materialize: async (p) => {
+          const teammate = await opts.prisma.teammate.findUnique({ where: { threadId: p.sessionId } })
+          const sessionId = teammate?.parentSessionId ?? p.sessionId
+          const session = await opts.prisma.session.findUnique({
+            where: { id: sessionId },
+            select: { ownerId: true },
+          })
+          if (!session) return null
+          return attachmentsForNode.materializeAgentMedia({
+            sessionId,
+            ownerId: session.ownerId,
+            declaredPath: p.declaredPath,
+            mime: p.mime,
+            container: p.container,
+            primitives,
+          })
+        },
+        resolveContainer: async (threadId) => {
+          const teammate = await opts.prisma.teammate.findUnique({ where: { threadId } })
+          return `${SANDBOX_CONTAINER_PREFIX}${teammate?.parentSessionId ?? threadId}`
+        },
+        audit: (info) => {
+          // eslint-disable-next-line no-console
+          console.warn(`[runner] download node: session=${info.sessionId} path=${info.path} outcome=${info.outcome}`)
+        },
+      })
+    : undefined
 
   // 审批三层漏斗（#783）：judge 按部署配置构造（独立小模型，与用户主模型解耦）；审计三层
   // 全量同步写 tool_approval_logs（ADR 0015）。judge 未配置 → 灰区一律升级人工（fail-closed）。
@@ -91,6 +129,8 @@ export function assembleRunner(opts: {
     approvals: funnel,
     teammates,
     approvalTimeoutMs: config.runner.approvalTimeoutMs,
+    attachments: opts.attachments,
+    downloadNode,
   })
   void service.recoverSuspensions() // 重启恢复：超时未落定的审批升级 → suspended（异步，不挂启动）
 

@@ -1,3 +1,5 @@
+import { resolveModelRef, type ModelRef } from '../providerRegistry'
+import { snapshotOfficialContent } from '../../officialContent/runtime'
 // RunService —— 集中式 runner 内核（#777 · #747 A 节「runner 编排」）。
 //
 // 职责（BullMQ 传输面之外的全部 run 机制）：
@@ -30,9 +32,10 @@
 // run 域事件不受影响（未开始执行的 run 不发事件）。
 
 import { randomUUID } from 'node:crypto'
-import { HumanMessage } from '@langchain/core/messages'
+import { HumanMessage, ToolMessage, type BaseMessage, type ContentBlock } from '@langchain/core/messages'
+import type { AnyAgentMiddleware } from 'langchain'
 import { Command, END } from '@langchain/langgraph'
-import { INTERRUPT } from '@langchain/langgraph-checkpoint'
+import { ERROR, INTERRUPT } from '@langchain/langgraph-checkpoint'
 import {
   ApprovalFunnel,
   isApprovalInterruptPayload,
@@ -56,9 +59,11 @@ import { buildStreamEventsInvocation } from '../../events/bridge'
 import { RunProjector } from './projector'
 import { classifyRunError, type RunErrorKind } from './errorKind'
 import { buildLeaderAgent, interruptPolicyKey, type DeepAgentLike, type InterruptPolicy, type LeaderAgentParams } from './graphFactory'
-import { DEFAULT_RECURSION_LIMIT, DEFAULT_RESUME_DECISIONS, GRAPH_CACHE_MAX_INSTANCES, LEADER_SYSTEM_PROMPT } from './values'
+import { COMPACT_KEEP, COMPACT_SUMMARY_PROMPT, DEFAULT_RECURSION_LIMIT, DEFAULT_RESUME_DECISIONS, GRAPH_CACHE_MAX_INSTANCES, LEADER_SYSTEM_PROMPT } from './values'
 import { disableLangsmithTracing } from './tracing'
-import { TurnReducer, type RecordTurnPayload } from '../../sessions/reducer'
+import { lastMessage, scanMediaBlocks } from './mediaBlocks'
+import { turnFromCheckpointMessages } from './checkpointTurn'
+import { TurnReducer, isEmptyTurnSnapshot, type RecordTurnPayload, type TurnSnapshot } from '../../sessions/reducer'
 import { TeammateService, type TeammateSummary } from '../teammates/service'
 import { createTeammateTools } from '../teammates/tools'
 
@@ -70,13 +75,15 @@ import { createTeammateTools } from '../teammates/tools'
 export type RecordTurnFn = (p: RecordTurnPayload) => Promise<void>
 
 // run 命令（BullMQ job data 契约：纯 JSON 可序列化，无内存句柄——进程内状态全弃后凭 DB
-// 重投可从头重跑，副作用幂等约束在案；重投/断线补偿面归 #779）。
+// 重投可从头重跑，副作用幂等约束在案；重放归一化面见 normalizeReplay）。
 export interface RunCommand {
   readonly runId: string
   readonly sessionId: string
   readonly ownerId: string
   readonly username: string
-  readonly kind: 'message' | 'resume'
+  readonly kind: 'message' | 'resume' | 'recover'
+  /** #787 story 45：kind=message 的系统命令形态（/compact 显式压缩——REST 侧已校验无参） */
+  readonly operation?: 'compact'
   readonly teammateId?: string
   readonly parentSessionId?: string
   readonly mailWaitId?: string
@@ -84,6 +91,8 @@ export interface RunCommand {
   readonly mailBroadcastOnTimeout?: boolean
   /** kind=message：用户消息文本 */
   readonly content?: string
+  /** kind=message：#780 附件引用（雪花 attachmentId 列表；ingestion 节点消费，片 2） */
+  readonly attachmentIds?: readonly string[]
   /** kind=resume：HITL 决策（{decisions:[...]} 形态，PoC 实测） */
   readonly decisions?: unknown
   /** kind=resume：abort 语义（#783 story 15——suspended/interrupted run 的终态出路：
@@ -128,9 +137,32 @@ export interface RunServiceDeps {
   }
   /** interrupt 策略源（拓扑因子；V1 无审批恒 undefined，#783 由持久化维度派生——测试注入） */
   readonly interruptPolicyFor?: (sessionId: string) => InterruptPolicy | undefined
+  /** #780 附件 ingestion（片 2）：run 首步确定性物化附件到沙箱 + 图片内联多模态。缺省不注 =
+   * message 命令带附件时跳过物化（测试无附件面）；装配层注入 AttachmentsService。 */
+  readonly attachments?: {
+    readonly ingestAttachments: (p: {
+      sessionId: string
+      attachmentIds: readonly string[]
+      container: string // 沙箱容器名（/lab 工具根）
+      primitives: Pick<SandboxFilePrimitives, 'exec' | 'putArchive'>
+    }) => Promise<Array<{ attachmentId: string; mimeType: string }>>
+    readonly readTempBytes: (attachmentId: string) => Promise<Buffer>
+    /** #780 D9 agent→用户媒体物化（片 3）：校验/拷进 uploads/建行；null = 校验失败（降级面） */
+    readonly materializeAgentMedia: (p: {
+      sessionId: string
+      ownerId: string
+      declaredPath: string
+      mime: string
+      container: string
+      primitives: Pick<SandboxFilePrimitives, 'exec' | 'getArchive' | 'putArchive'>
+    }) => Promise<{ attachmentId: string; fileName: string; mimeType: string; size: number } | null>
+  }
   /** 审批三层漏斗（#783）。与 interruptPolicyFor（V1 测试面）可并存，生产只接前者。 */
   readonly approvals?: ApprovalFunnel
   readonly teammates?: TeammateService
+  /** #780 下载校验节点（片 3：file 写类工具成功后校验声明路径 → 物化 + 下载引用进 tool 输出；
+   * 失败 → 错误回喂 agent 重新生成）。缺省不注 = 工具产物面关闭（测试）。 */
+  readonly downloadNode?: { readonly middleware: AnyAgentMiddleware }
   /** 审批升级超时（默认 48h，729 附录 B；测试注入缩短） */
   readonly approvalTimeoutMs?: number
   /** 挂起清扫定时器间隔（毫秒；缺省 5min，0 = 不启动定时器——测试手动调 sweepSuspensions） */
@@ -144,15 +176,31 @@ export interface RunServiceDeps {
 interface GraphStateLike {
   next?: string[]
   tasks?: { interrupts?: unknown[] }[]
+  // LangGraph StateSnapshot.values（channel 值）——终态 messages（#780 D9 媒体块扫描源）；
+  // /compact（#787 story 45）另读 summarization middleware 的私有压缩态
+  //（deepagents SummarizationEvent：{cutoffIndex, summaryMessage, filePath}）。
+  values?: {
+    messages?: BaseMessage[]
+    _summarizationEvent?: { cutoffIndex: number; summaryMessage: BaseMessage }
+  }
   // LangGraph StateSnapshot.config.configurable.checkpoint_id——终态 checkpoint 锚点
   //（#778 session_messages.anchorCheckpointId 落值来源；issue 正文点名该列）。
   config?: { configurable?: { checkpoint_id?: string } }
 }
 
-// LangGraph interrupt 的 putWrites channel：上游一等导出 INTERRUPT（checkpoint 包
-// WRITES_IDX_MAP 的负 idx 通道键，prismaCheckpointSaver「不自造」同纪律）——三包升级
+// LangGraph interrupt 的 putWrites channel：上游一等导出 INTERRUPT/RESUME/ERROR（checkpoint
+// 包 WRITES_IDX_MAP 的负 idx 通道键，prismaCheckpointSaver「不自造」同纪律）——三包升级
 // 通道名漂移时此处类型红，推导面不会静默失效。
 const INTERRUPT_CHANNEL = INTERRUPT
+// resume 重放判据用：__error__ = 上一次 super-step 有任务异常中断（normalizeReplay 用）。
+const ERROR_CHANNEL = ERROR
+
+// story 11 · in-flight 投影（投影 GET inFlight 字段）：重连补偿的进行中 turn 重建面。
+export interface InFlightProjection {
+  readonly runId: string
+  readonly state: 'queued' | 'running'
+  readonly turn: TurnSnapshot
+}
 
 // 审批升级挂起记录（#783）：interrupt 检出时落（事件 + 48h 死线），resume/落定时清。
 interface PendingApproval {
@@ -218,6 +266,7 @@ export class RunService {
     username: string
     kind: 'message' | 'resume'
     content?: string
+    attachmentIds?: readonly string[]
     decisions?: unknown
   }): RunCommand {
     return { runId: randomUUID(), ...params }
@@ -234,6 +283,7 @@ export class RunService {
     ownerId: string
     username: string
     content: string
+    attachmentIds?: readonly string[]
   }): Promise<RunCommand> {
     const caller = await this.deps.prisma.user.findUnique({
       where: { id: params.ownerId },
@@ -246,6 +296,15 @@ export class RunService {
     }
     await getSessionForUser(this.deps.prisma, { id: params.ownerId, role: caller.role }, params.sessionId)
     return this.buildCommand({ ...params, kind: 'message' })
+  }
+
+  async resolveModelSelection(ownerId: string, args: string): Promise<{ model?: ModelRef | null; models?: readonly ModelRef[]; appliesTo?: 'next-run' }> {
+    const snapshot = await this.deps.registry.getSnapshot(ownerId)
+    if (!args) return { models: snapshot.providers.flatMap(provider => provider.models.map(model => ({ providerId: provider.providerId, modelId: model.id }))) }
+    if (args === 'default') return { model: null, appliesTo: 'next-run' }
+    const match = /^([^\s/]+)\/(\S+)$/.exec(args)
+    if (!match) throw fail(CODE.VALIDATION_FAILED, '用法：/model providerId/modelId，或 /model default')
+    return { model: resolveModelRef(snapshot, { providerId: match[1]!, modelId: match[2]! }), appliesTo: 'next-run' }
   }
 
   // ---- resume 命令构造：interrupted 态预检（权威互斥判定在 executeRun）----
@@ -297,17 +356,22 @@ export class RunService {
   // executeNow 的信封错误（40043/50002）向上传播；run 执行体错误在 executeRun 内消化
   //（终态事件已发，对传输面表现为正常完成）。
   async execute(cmd: RunCommand): Promise<void> {
+    // 重放归一化（story 14）：BullMQ v6 stalled job 绕过 attempts 自动重放（#779 探针实测）
+    // ——「message 重复 append / resume 50001」的重放风险在内核单点拦截，checkpoint 判据
+    // 见 normalizeReplay。Inline/测试路径判据不命中即原样（零行为差异）。
+    cmd = await this.normalizeReplay(cmd)
     // 入队面 fast-fail：interrupted/suspended 态 message 拒绝（queued 覆盖之前——#747 C 节
-    // 「interrupt 全端可审批」，见 executeRun 权威面）。内存面可知即不排队，调用方即时感知。
+    // 「interrupt 全端可审批」，见 executeRun 权威面）。recover 不拒（恢复面权威——判据已在
+    // normalizeReplay 核验，重放的 message 语义已由 checkpoint 承接）。
     const entryState = this.runs.get(cmd.sessionId)?.state
     if (cmd.kind === 'message' && (entryState === 'interrupted' || entryState === 'suspended')) {
       throw fail(CODE.RUN_INTERRUPT_PENDING)
     }
-    // queued 只标 message 命令的新 run，且仅在无活跃条目时落——running/queued 不被新排队
-    // 命令覆盖（stateOf 是 #778「running 全端禁输入」门禁的观测面，覆盖即门禁失效）；
-    // resume 延续既有 run（interrupted 保持到 running，否则 executeRun 的互斥权威判定会被
-    // 覆盖态误伤）。interrupted 态已在上方 fast-fail 拒绝，不会走到覆盖。
-    if (cmd.kind === 'message') {
+    // queued 只标 message/recover 命令的新 run，且仅在无活跃条目时落——running/queued 不被
+    // 新排队命令覆盖（stateOf 是 #778「running 全端禁输入」门禁 + #779 inFlight 投影的观测
+    // 面，覆盖即门禁失效）；resume 延续既有 run（interrupted 保持到 running，否则 executeRun
+    // 的互斥权威判定会被覆盖态误伤）。interrupted 态已在上方 fast-fail 拒绝，不会走到覆盖。
+    if (cmd.kind === 'message' || cmd.kind === 'recover') {
       const prev = this.runs.get(cmd.sessionId)
       const active =
         prev !== undefined &&
@@ -328,6 +392,68 @@ export class RunService {
       if (this.chains.get(cmd.sessionId) === tail) this.chains.delete(cmd.sessionId)
     })
     return task
+  }
+
+  // ---- 重放归一化（story 14）：BullMQ stalled 自动重放的「重放 vs 首次执行」判别 ----
+  //
+  // #779 探针实测的行为基线：崩溃的在飞 job 被新 worker stalled check 移回 wait 重新执行
+  //（attempts:1 不拦——stalled 是独立恢复机制）。重放 message 会重复 append 用户消息、
+  // 重放 resume 会被互斥判定误拒 50001——两类都把 run 卡死。判据全部 checkpoint 面（无
+  // BullMQ API 依赖，Inline 路径零影响）：
+  //   message：checkpoint messages 存在 id=runId 的消息（executeRun 构造 HumanMessage 时
+  //            以 runId 盖印——命令→消息的持久锚）⇔ 该命令已入图 → 转 recover（null input
+  //            从 checkpoint 续跑）。
+  //   resume：pendingWrites 无 interrupt 且带 __error__（节点异常崩溃必落 error write，
+  //            #779 探针实测）⇔ 上一次执行异常中断 → 转 recover。有 interrupt = 未执行 →
+  //            原样重放（resume 重试，负 idx RESUME 覆盖幂等）；两者皆无（已完成会话的
+  //            终态 checkpoint 无 writes）= 用户乱调 → 原样走 executeRun 权威 50001，
+  //            不放大为续跑（API 语义保留）。已知边界：SIGKILL 窗口（RESUME 消费后、
+  //            error write 落盘前崩）不可判别 → 50001 卡死，重放 job failed——窗口毫秒级，
+  //            实害 = 该 run 不自动续跑（数据无损），重试面归用户重新发消息。
+  //
+  // #779 探针验证的 LangGraph null-input 三形态（recover 的执行语义依据）：
+  //   checkpoint 带 pending interrupt → no-op（不误触发审批消费）
+  //   图中途崩溃（error write 在）→ 从 checkpoint 续跑剩余节点（失败任务重试）
+  //   图已完成 → no-op（流空结束，落 completed；防双行见 executeRun finally）
+  //
+  // 成本：每条 message/resume 命令一次 getTuple（SQLite 本地读，与 message 门禁
+  // threadInterruptedFromCheckpoint 同量级——人机尺度可忽略）。
+  private async normalizeReplay(cmd: RunCommand): Promise<RunCommand> {
+    if (cmd.kind !== 'message' && cmd.kind !== 'resume') return cmd
+    let tuple: LatestCheckpointTuple | undefined
+    try {
+      tuple = await this.latestTuple(cmd.sessionId)
+    } catch {
+      return cmd // checkpoint 故障不拦——原路径的门禁/互斥/错误面兜底
+    }
+    if (cmd.kind === 'message') {
+      const messages = channelMessages(tuple)
+      const replayed = messages.some((m) => (m as { id?: unknown } | null)?.id === cmd.runId)
+      return replayed ? { ...cmd, kind: 'recover' } : cmd
+    }
+    const pendingWrites = tuple?.pendingWrites ?? []
+    const hasInterrupt = pendingWrites.some(([, channel]) => channel === INTERRUPT_CHANNEL)
+    if (hasInterrupt) return cmd
+    const hasErrorWrite = pendingWrites.some(([, channel]) => channel === ERROR_CHANNEL)
+    return hasErrorWrite ? { ...cmd, kind: 'recover' } : cmd
+  }
+
+  // ---- in-flight 投影（story 11）：投影 GET 的补偿重建面（重拉投影同帧带出）----
+  // running：从 checkpoint blob 反序列化重建进行中 turn（即焚 token 事件的补偿真相源——
+  // 「最后一条 human 之后」切片，见 checkpointTurn.ts）。queued：消息未入图，无内容可重建
+  //（空 turn）。checkpoint 读故障降级空 turn（补偿面不炸投影——终态行兜底回放）。仅内存
+  // 观测态（stateOf）判定在飞：控制面重启窗口（内存丢、job 未重放）秒级缺失，恢复后可见。
+  async inFlightProjection(sessionId: string): Promise<InFlightProjection | undefined> {
+    const snap = this.runs.get(sessionId)
+    if (!snap || (snap.state !== 'queued' && snap.state !== 'running')) return undefined
+    if (snap.state === 'queued') return { runId: snap.runId, state: 'queued', turn: { content: '' } }
+    let turn: TurnSnapshot
+    try {
+      turn = await this.turnSnapshotFromCheckpoint(sessionId)
+    } catch {
+      turn = { content: '' }
+    }
+    return { runId: snap.runId, state: 'running', turn }
   }
 
   private publish(
@@ -364,6 +490,7 @@ export class RunService {
     // 同 thread 的其它命令），后到者 50001。message 命令不做此检查（queued 态可覆盖）。
     // 内存态缺失（控制面重启/跨进程 resume）→ 从持久化状态推导（#747 A 节硬约束：
     // 「图拓扑必须可由持久化状态推导」——最新 checkpoint 带 pending interrupt ⇔ interrupted）。
+    // recover 跳过两者（恢复面权威：重放判据已在 normalizeReplay 核验）。
     if (cmd.kind === 'resume') {
       let snap = this.runs.get(cmd.sessionId)
       if (!snap) {
@@ -378,7 +505,7 @@ export class RunService {
         throw fail(CODE.RUN_ALREADY_RESUMED)
       }
       this.pendingApprovals.delete(cmd.sessionId) // 升级落定，48h 死线随清
-    } else {
+    } else if (cmd.kind === 'message') {
       // #747 C 节「running 全端禁输入、interrupt 全端可审批」的内核权威面：interrupted 态
       // message 会作废 pending interrupt（静默丢审批）——拒绝之（#778 REST 门禁之外的第二
       // 道，接线遗漏不丢 interrupt）。queued/内存缺失态（排队窗口撞上前序 run 中断、重启后
@@ -415,9 +542,10 @@ export class RunService {
     const actor = cmd.teammateId
       ? await this.deps.teammates?.get(cmd.parentSessionId ?? cmd.sessionId, cmd.teammateId)
       : undefined
+    const preferred: ModelRef | undefined = session.preferredModelJson ? JSON.parse(session.preferredModelJson) : undefined
     const model = actor?.modelProviderId
       ? await this.deps.registry.getModel(snapshot, actor.modelProviderId)
-      : await this.deps.registry.getDefaultModel(snapshot)
+      : await this.deps.registry.getDefaultModel(snapshot, preferred)
     const policy = this.deps.interruptPolicyFor?.(cmd.sessionId)
     const tools = this.deps.teammates
       ? createTeammateTools({
@@ -433,7 +561,20 @@ export class RunService {
           abort: async (teammate) => { const runId = this.runs.get(teammate.threadId)?.runId; if (runId) this.abort(runId, 'system') },
         })
       : []
-    const agent = this.getOrBuildGraph(cmd.sessionId, snapshot.version, policy, model, cmd.ownerId, labContainer, tools)
+    const modelKey = actor?.modelProviderId ? `provider:${actor.modelProviderId}` : session.preferredModelJson ?? 'default'
+    const agent = this.getOrBuildGraph(cmd.sessionId, snapshot.version, policy, model, cmd.ownerId, labContainer, modelKey, tools)
+
+    // Mailbox recover has already consumed its interrupt; only a fresh resume must match the wait.
+    if (cmd.kind === 'resume' && cmd.mailWaitId) {
+      const state = await this.graphState(agent, cmd.sessionId)
+      const matched = (state.tasks ?? []).some((task) => (task.interrupts ?? []).some((raw) => {
+        const value = (raw as { value?: unknown } | null)?.value ?? raw
+        return typeof value === 'object' && value !== null &&
+          (value as { kind?: unknown }).kind === 'teammate-mail-wait' &&
+          (value as { waitId?: unknown }).waitId === cmd.mailWaitId
+      }))
+      if (!matched) throw fail(CODE.RUN_ALREADY_RESUMED)
+    }
 
     // 漏斗运行面（#783）：谨慎模式读 session owner 的 users.approvalMode（会话级开关，跨设备
     // 跟随）；message run 重置计数器 + 落审计身份（runId/ownerId/traceId），resume 延续计数
@@ -457,17 +598,18 @@ export class RunService {
 
     this.runs.set(cmd.sessionId, { runId: cmd.runId, state: 'running' })
     this.activeCmds.set(cmd.sessionId, { sessionId: cmd.sessionId, runId: cmd.runId, ownerId: cmd.ownerId })
-    // 新 run = run.started；interrupted 后的续跑 = run.resumed（#747 C 节目录二者并列——
-    // resume 不重发 started，消费方按事件类型区分首轮/续跑轮）
+    // 新 run = run.started；interrupted 后的续跑（resume）/恢复续跑（recover，story 14）=
+    // run.resumed（#747 C 节目录二者并列——消费方按事件类型区分首轮/续跑轮）
     this.publish(
       cmd.ownerId,
-      { type: cmd.kind === 'resume' ? 'run.resumed' : 'run.started', payload: {} },
+      { type: cmd.kind === 'message' ? 'run.started' : 'run.resumed', payload: {} },
       cmd,
     )
 
     // usage 身份：默认链主 provider（snapshot.providers[0] 首模型）。fallback 链切换后的
     // per-call 身份不追踪（#775 usage.ts 声明的 #777 接线局限；采数不 fail run）。
-    const identity = snapshot.providers.find((provider) => provider.providerId === actor?.modelProviderId) ?? snapshot.providers[0]
+    const providerId = actor?.modelProviderId ?? preferred?.providerId
+    const identity = providerId ? snapshot.providers.find(provider => provider.providerId === providerId) : snapshot.providers[0]
     const usageHandler = createUsageCallbackHandler(
       {
         prisma: this.deps.prisma,
@@ -479,7 +621,7 @@ export class RunService {
       {
         providerId: identity?.providerId ?? '',
         lcProvider: identity?.lcProvider ?? '',
-        model: String(identity?.models[0]?.id ?? ''),
+        model: (actor?.modelProviderId ? undefined : preferred?.modelId) ?? String(identity?.models[0]?.id ?? ''),
       },
     )
 
@@ -492,106 +634,181 @@ export class RunService {
     // SSE 事件流终态（前端 #730 消费同一目录）。
     const turn = new TurnReducer()
     const invocation = buildStreamEventsInvocation(cmd.sessionId)
-    if (cmd.mailWaitId) {
-      const state = await this.graphState(agent, cmd.sessionId)
-      const matched = (state.tasks ?? []).some((task) => (task.interrupts ?? []).some((raw) => {
-        const value = (raw as { value?: unknown } | null)?.value ?? raw
-        return typeof value === 'object' && value !== null &&
-          (value as { kind?: unknown }).kind === 'teammate-mail-wait' &&
-          (value as { waitId?: unknown }).waitId === cmd.mailWaitId
-      }))
-      if (!matched) throw fail(CODE.RUN_ALREADY_RESUMED)
-      await this.deps.teammates?.clearWait(cmd.sessionId, cmd.mailWaitId)
-      if (cmd.mailWakeReason === 'timeout' && this.deps.teammates) {
-        const parentSessionId = cmd.parentSessionId ?? cmd.sessionId
-        const followUp = 'A teammate mailbox wait timed out. Send a follow-up request for updates and keep working.'
-        await this.deps.teammates.sendMail({
-          parentSessionId,
-          recipientTeammateId: cmd.teammateId ?? null,
-          kind: 'timeout',
-          content: followUp,
-        })
-        if (cmd.mailBroadcastOnTimeout) {
-          const peers = (await this.deps.teammates.list(parentSessionId))
-            .filter((peer) => peer.id !== cmd.teammateId && peer.status !== 'archived')
-          await Promise.all(peers.map((peer) => this.deps.teammates!.sendMail({
-            parentSessionId, senderTeammateId: cmd.teammateId ?? null,
-            recipientTeammateId: peer.id, kind: 'timeout-follow-up', content: followUp,
-          })))
-          if (cmd.teammateId) {
-            await this.deps.teammates.sendMail({
-              parentSessionId, senderTeammateId: cmd.teammateId,
-              recipientTeammateId: null, kind: 'timeout-follow-up', content: followUp,
-            })
-          }
-        }
-      }
-    }
-    const input =
-      cmd.kind === 'message'
-        ? { messages: [new HumanMessage(cmd.content ?? '')] }
-        : new Command({
-            resume: cmd.mailWaitId ? { kind: 'mail', waitId: cmd.mailWaitId } : (cmd.decisions ?? DEFAULT_RESUME_DECISIONS),
-            // abort（#783 story 15）：回执决策 + goto END——interrupt 回执后图立即终止，
-            // run 落 aborted 终态（探针验证：resume 值仍送达 interrupt 点，工具不执行）
-            ...(cmd.abort ? { goto: END } : {}),
-          })
 
     // 终态 checkpoint 锚点（#778 anchorCheckpointId）：成功路径从终态 state 取；
     // aborted/failed 路径无可靠 state → null（回放面锚点缺位不阻断落行）。
     let anchorCheckpointId: string | null = null
+    let input: unknown = null
     try {
-      const stream = await agent.streamEvents(input, {
-        ...invocation,
-        recursionLimit: this.recursionLimit,
-        signal: controller.signal,
-        callbacks: [usageHandler],
-      })
-      for await (const raw of stream) {
-        // 工具/推理活动刷新沙箱闲置计时（#776 真 activity 源——长 run 中途不被 sweep stop）
-        this.deps.sandboxes?.touch(sandboxSessionId)
-        for (const ev of projector.feed(raw, this.clock())) {
-          turn.feed(ev)
-          this.publish(cmd.ownerId, ev, cmd)
+      if (cmd.kind === 'resume' && cmd.mailWaitId) {
+        await this.deps.teammates?.clearWait(cmd.sessionId, cmd.mailWaitId)
+        if (cmd.mailWakeReason === 'timeout' && this.deps.teammates) {
+          const parentSessionId = cmd.parentSessionId ?? cmd.sessionId
+          const followUp = 'A teammate mailbox wait timed out. Send a follow-up request for updates and keep working.'
+          await this.deps.teammates.sendMail({
+            parentSessionId,
+            recipientTeammateId: cmd.teammateId ?? null,
+            kind: 'timeout',
+            content: followUp,
+          })
+          if (cmd.mailBroadcastOnTimeout) {
+            const peers = (await this.deps.teammates.list(parentSessionId))
+              .filter((peer) => peer.id !== cmd.teammateId && peer.status !== 'archived')
+            await Promise.all(peers.map((peer) => this.deps.teammates!.sendMail({
+              parentSessionId, senderTeammateId: cmd.teammateId ?? null,
+              recipientTeammateId: peer.id, kind: 'timeout-follow-up', content: followUp,
+            })))
+            if (cmd.teammateId) {
+              await this.deps.teammates.sendMail({
+                parentSessionId, senderTeammateId: cmd.teammateId,
+                recipientTeammateId: null, kind: 'timeout-follow-up', content: followUp,
+              })
+            }
+          }
         }
       }
-      // 流正常结束：判定停在 interrupt（PoC 形态：next 非空或 tasks 带 interrupts）
-      const state = await this.graphState(agent, cmd.sessionId)
-      anchorCheckpointId = state.config?.configurable?.checkpoint_id ?? null
-      const interrupted =
-        (state.next?.length ?? 0) > 0 || (state.tasks?.some((t) => (t.interrupts?.length ?? 0) > 0) ?? false)
-      if (interrupted) {
-        this.runs.set(cmd.sessionId, { runId: cmd.runId, state: 'interrupted' })
-        // interrupted 不发终态事件（#777 契约「interrupted 态无终态事件」，S4 锁；恢复面 =
-        // run.resumed 起新轮）
-        // 审批升级检出（#783）：漏斗 interrupt → approval.requested 事件 + 48h 死线落表；
-        // deepagents 内建 interruptOn（V1 测试面）载荷无 kind 标记，不触发审批事件。
-        const escalations = this.extractApprovalInterrupts(state)
-        for (const payload of escalations) {
-          this.publish(
-            cmd.ownerId,
-            {
-              type: APPROVAL_EVENT_REQUESTED,
-              payload: { escalation: payload.escalation, actionRequests: payload.actionRequests, teammateId: cmd.teammateId ?? null },
-            },
-            cmd,
-          )
-        }
-        if (escalations.length > 0) {
-          this.pendingApprovals.set(cmd.sessionId, {
-            ownerId: cmd.ownerId,
-            runId: cmd.runId,
-            escalationId: escalations[0]!.escalation.id,
-            deadlineAt: this.clock() + this.approvalTimeoutMs,
-          })
-        }
-      } else if (cmd.kind === 'resume' && cmd.abort) {
-        // abort 落定（story 15）：goto END 终止，aborted 为终态
-        this.runs.set(cmd.sessionId, { runId: cmd.runId, state: 'aborted', by: 'user' })
-        this.publish(cmd.ownerId, { type: 'run.aborted', payload: { by: 'user' } }, cmd)
-      } else {
+      if (cmd.kind === 'message' && cmd.operation === 'compact') {
+        // /compact 薄封装（#787 story 45）：不走 agent loop、无投影事件——压缩态直写 checkpoint
+        //（见 compactThread 注释），终态恒 completed（中断在 REST/内核门前已被 50003 挡住）。
+        // 不进 #780 ingestion/媒体扫描面（系统命令恒无附件、无 assistant 产物）。
+        anchorCheckpointId = await this.compactThread(cmd, agent, model, usageHandler, controller.signal)
         this.runs.set(cmd.sessionId, { runId: cmd.runId, state: 'completed' })
         this.publish(cmd.ownerId, { type: 'run.completed', payload: {} }, cmd)
+      } else {
+        // #780 ingestion（片 2）：message 命令带附件 → run 首步确定性物化（runner 调度权，非 agent
+        // 工具；LangGraph 图拓扑约束下作 runner 侧幂等预步骤——putArchive 覆盖写 + sha256 校验，
+        // resume/重投安全）。校验失败 → throw → 下方 catch → run.failed（ingestion 错误，不进入
+        // agent loop）。图片读字节 → 多模态 block 内联进输入（前端已降采样长边 ≤1568px，data URL
+        // 满足 provider 内联限制）；文件类只物化、由常规 fs 工具自读（漏斗白名单 lab/** 覆盖）。
+        let imageBlocks: ContentBlock[] = []
+        if (cmd.kind === 'message' && cmd.attachmentIds && cmd.attachmentIds.length > 0 && this.deps.attachments) {
+          const metas = await this.deps.attachments.ingestAttachments({
+            sessionId: cmd.sessionId,
+            attachmentIds: cmd.attachmentIds,
+            container: labContainer,
+            primitives: this.deps.primitives,
+          })
+          for (const m of metas) {
+            if (m.mimeType.startsWith('image/')) {
+              const buf = await this.deps.attachments.readTempBytes(m.attachmentId)
+              imageBlocks.push({ type: 'image_url', image_url: { url: `data:${m.mimeType};base64,${buf.toString('base64')}` } })
+            }
+          }
+        }
+        // HumanMessage 显式 id = runId：命令→checkpoint 消息的持久锚（normalizeReplay 重放判据）。
+        // kind=recover：input = null —— LangGraph 从 checkpoint 续跑（三形态见 normalizeReplay 注）。
+        input =
+          cmd.kind === 'message'
+            ? {
+                messages: [
+                  new HumanMessage({
+                    ...(imageBlocks.length > 0
+                      ? { content: [{ type: 'text', text: cmd.content ?? '' }, ...imageBlocks] }
+                      : { content: cmd.content ?? '' }),
+                    id: cmd.runId,
+                  }),
+                ],
+              }
+            : cmd.kind === 'resume'
+              ? new Command({
+                  resume: cmd.mailWaitId ? { kind: 'mail', waitId: cmd.mailWaitId } : (cmd.decisions ?? DEFAULT_RESUME_DECISIONS),
+                  // abort（#783 story 15）：回执决策 + goto END——interrupt 回执后图立即终止，
+                  // run 落 aborted 终态（探针验证：resume 值仍送达 interrupt 点，工具不执行）
+                  ...(cmd.abort ? { goto: END } : {}),
+                })
+              : null
+
+        const stream = await agent.streamEvents(input, {
+          ...invocation,
+          recursionLimit: this.recursionLimit,
+          signal: controller.signal,
+          callbacks: [usageHandler],
+        })
+        for await (const raw of stream) {
+          // 工具/推理活动刷新沙箱闲置计时（#776 真 activity 源——长 run 中途不被 sweep stop）
+          this.deps.sandboxes?.touch(sandboxSessionId)
+          for (const ev of projector.feed(raw, this.clock())) {
+            turn.feed(ev)
+            this.publish(cmd.ownerId, ev, cmd)
+          }
+        }
+        // 流正常结束：判定停在 interrupt（PoC 形态：next 非空或 tasks 带 interrupts）
+        const state = await this.graphState(agent, cmd.sessionId)
+        anchorCheckpointId = state.config?.configurable?.checkpoint_id ?? null
+        const interrupted =
+          (state.next?.length ?? 0) > 0 || (state.tasks?.some((t) => (t.interrupts?.length ?? 0) > 0) ?? false)
+        if (interrupted) {
+          this.runs.set(cmd.sessionId, { runId: cmd.runId, state: 'interrupted' })
+          // interrupted 不发终态事件（#777 契约「interrupted 态无终态事件」，S4 锁；恢复面 =
+          // run.resumed 起新轮）
+          // 审批升级检出（#783）：漏斗 interrupt → approval.requested 事件 + 48h 死线落表；
+          // deepagents 内建 interruptOn（V1 测试面）载荷无 kind 标记，不触发审批事件。
+          const escalations = this.extractApprovalInterrupts(state)
+          for (const payload of escalations) {
+            this.publish(
+              cmd.ownerId,
+              {
+                type: APPROVAL_EVENT_REQUESTED,
+                payload: { escalation: payload.escalation, actionRequests: payload.actionRequests, teammateId: cmd.teammateId ?? null },
+              },
+              cmd,
+            )
+          }
+          if (escalations.length > 0) {
+            this.pendingApprovals.set(cmd.sessionId, {
+              ownerId: cmd.ownerId,
+              runId: cmd.runId,
+              escalationId: escalations[0]!.escalation.id,
+              deadlineAt: this.clock() + this.approvalTimeoutMs,
+            })
+          }
+        } else if ((cmd.kind === 'resume' || cmd.kind === 'recover') && cmd.abort) {
+          // abort 落定（story 15）：goto END 终止，aborted 为终态。recover 重放保留 abort 语义
+          //（RESUME 已消费后崩溃的重放：no-op 或走完 END 路径，终态同 aborted）
+          this.runs.set(cmd.sessionId, { runId: cmd.runId, state: 'aborted', by: 'user' })
+          this.publish(cmd.ownerId, { type: 'run.aborted', payload: { by: 'user' } }, cmd)
+        } else {
+          // #780 D9 媒体块归约（片 3）：run 完成前扫描终态 assistant 回复的媒体块 → 校验（存在性/
+          // mime 白名单）/拷进 /lab/uploads/ 物化/建 Attachment 行 → `attachment` 事件（实时面）+
+          // turn.feed（回放同形状——attachmentsJson media 数组，单管线渲染零差异）。校验失败块
+          // 降级文本占位（占位进事件流与回放聚合）+ 审计计数 warn（不 fail run）。仅 completed
+          // 路径扫（interrupted/aborted 的回复未终稿，不做产物面）。
+          if (this.deps.attachments) {
+            const scan = scanMediaBlocks(lastMessage(state.values?.messages ?? []))
+            const degrade = (declaredPath: string, reason: string): void => {
+              const placeholder = `[媒体产物不可用：${declaredPath}]`
+              turn.feed({ type: 'text.delta', payload: { delta: placeholder } })
+              this.publish(cmd.ownerId, { type: 'text.delta', payload: { delta: placeholder } }, cmd)
+              // eslint-disable-next-line no-console
+              console.warn(`[runner] media block degraded: session=${cmd.sessionId} path=${declaredPath} reason=${reason}`)
+            }
+            for (const block of scan.materializable) {
+              const meta = await this.deps.attachments.materializeAgentMedia({
+                sessionId: sandboxSessionId,
+                ownerId: session.ownerId,
+                declaredPath: block.declaredPath,
+                mime: block.mime,
+                container: labContainer,
+                primitives: this.deps.primitives,
+              })
+              if (meta) {
+                const ref = {
+                  attachmentId: meta.attachmentId,
+                  mime: meta.mimeType,
+                  size: meta.size,
+                  fileName: meta.fileName,
+                }
+                turn.feed({ type: 'attachment', payload: ref })
+                this.publish(cmd.ownerId, { type: 'attachment', payload: ref }, cmd)
+              } else {
+                degrade(block.declaredPath, 'materialize_failed')
+              }
+            }
+            for (const d of scan.degraded) degrade(d.declaredPath, d.reason)
+          }
+          this.runs.set(cmd.sessionId, { runId: cmd.runId, state: 'completed' })
+          this.publish(cmd.ownerId, { type: 'run.completed', payload: {} }, cmd)
+        }
       }
     } catch (e) {
       // 用户中断唯一权威判据 = signal.aborted（provider 自身 timeout AbortError 不误判——
@@ -638,10 +855,36 @@ export class RunService {
       ) {
         this.deps.approvals.dropRun(cmd.sessionId)
       }
-      // 终态聚合落 session_messages（#778；interrupted/aborted/failed 也落——刷新回放须含
-      // 已流出的部分，story 3「零差异」）。空聚合不落（failed 立即等场景无用户可见内容）。
-      // 落库失败不放大为 run 故障（终态事件已发）：告警留痕，#779 补偿面兜底。
-      if (this.recordTurn && !turn.isEmpty()) {
+      // 终态聚合落 session_messages（#778 回放零差异的实时面；interrupted/aborted/failed 也落
+      // ——刷新回放须含已流出部分，story 3「零差异」）。空聚合不落（failed 立即等场景）。
+      // recover run 的聚合以终态 checkpoint 为准（story 14：断点前内容只在 blob，reducer 只有
+      // 断点后事件——checkpointTurn 单一真相 + anchor 幂等防「processor 完成后 ack 前崩溃」
+      // 的重放双落 + 本 run 残留链整删防「中途行 + 全量行」双行重叠）。落库失败不放大为 run
+      // 故障（终态事件已发）：告警留痕。
+      // 已知边界（用例锁定）：recover 非 completed 终态走常规 reducer 落行——真实崩溃后
+      // reducer 内存丢失，断点前内容缺位（blob∪reducer 结构化合并归后续；纯串拼接在
+      // interrupted 形态下 blob 与 reducer 前缀重叠必重影，故不做）。后续 resume 的常规
+      // 落行同样只含 resume 段，缺口固化。
+      if (this.recordTurn && cmd.kind === 'recover' && finalState === 'completed') {
+        const anchor = anchorCheckpointId
+        if (anchor !== null && !(await this.turnAlreadyRecorded(cmd.sessionId, anchor))) {
+          try {
+            const aggregate = await this.turnSnapshotFromCheckpoint(cmd.sessionId)
+            if (!isEmptyTurnSnapshot(aggregate)) {
+              await this.deleteRunResidues(cmd.sessionId)
+              await this.recordTurn({
+                sessionId: cmd.sessionId,
+                runId: cmd.runId,
+                anchorCheckpointId: anchor,
+                aggregate,
+              })
+            }
+          } catch (err) {
+            // eslint-disable-next-line no-console
+            console.warn(`[runner] recover recordTurn failed: session=${cmd.sessionId} run=${cmd.runId}: ${(err as Error).message}`)
+          }
+        }
+      } else if (this.recordTurn && !turn.isEmpty()) {
         try {
           await this.recordTurn({
             sessionId: cmd.sessionId,
@@ -655,6 +898,62 @@ export class RunService {
         }
       }
     }
+  }
+
+  // ---- /compact 显式上下文压缩（#787 story 45：compact = deepagents 压缩薄封装）----
+  // deepagents summarization middleware 的压缩态不重写 messages——一次压缩 = 图状态里的
+  // _summarizationEvent {cutoffIndex, summaryMessage, filePath}，此后每次模型调用前
+  // effective = [summaryMessage, ...raw.slice(cutoffIndex)]（getEffectiveMessages）。该
+  // middleware 由阈值谓词触发且 createDeepAgent 默认栈不可注入 trigger，手动 /compact 无法
+  // 强制其开火——故按同形态直写事件状态：与自动压缩共用同一重建逻辑，后续 run（含其自动
+  // 压缩）零感知。filePath 恒 null：被压缩全文已由平台自有面持久化（session_messages 投影），
+  // 不另落沙箱 /conversation_history（deepagents 卸载面的冗余副本）。
+  private async compactThread(
+    cmd: RunCommand,
+    agent: DeepAgentLike,
+    model: LeaderAgentParams['model'],
+    usageHandler: ReturnType<typeof createUsageCallbackHandler>,
+    signal: AbortSignal,
+  ): Promise<string | null> {
+    const config = { configurable: { thread_id: cmd.sessionId } }
+    const state = (await agent.getState(config)) as GraphStateLike
+    const current = state.config?.configurable?.checkpoint_id ?? null
+    const raw = state.values?.messages ?? []
+    const prev = state.values?._summarizationEvent
+    const effective = prev ? [prev.summaryMessage, ...raw.slice(prev.cutoffIndex)] : raw
+    // 有效消息未超保留窗 → 无可压缩余量，no-op（终态照常 completed，状态不动）
+    if (effective.length <= COMPACT_KEEP + (prev ? 1 : 0)) return current
+    // 截断点：保留尾部 COMPACT_KEEP 条；cutoff 落在 ToolMessage 上时前移跨过整对
+    //（deepagents findSafeCutoffPoint 的前进策略——被截集合保持完整 AI/tool 对）
+    let cutoff = effective.length - COMPACT_KEEP
+    while (cutoff < effective.length && ToolMessage.isInstance(effective[cutoff])) cutoff += 1
+    const summary = await this.summarizeMessages(model, effective.slice(0, cutoff), signal, usageHandler)
+    // summaryMessage 形态对齐 deepagents isSummaryMessage（HumanMessage + lc_source=
+    // 'summarization'）——后续自动压缩的识别/重建依赖该标记，缺了会双重摘要。
+    const summaryMessage = new HumanMessage({ content: summary, additional_kwargs: { lc_source: 'summarization' } })
+    // raw 坐标换算：no-op 门保证 cutoff ≥ 1，旧 summary 恒落在被截集合内 → 保留尾部全在 raw
+    const keptCount = effective.length - cutoff
+    const updated = await agent.updateState(config, {
+      _summarizationEvent: { cutoffIndex: raw.length - keptCount, summaryMessage, filePath: null },
+    })
+    return updated.configurable?.checkpoint_id ?? current
+  }
+
+  private async summarizeMessages(
+    model: LeaderAgentParams['model'],
+    messages: BaseMessage[],
+    signal: AbortSignal,
+    usageHandler: ReturnType<typeof createUsageCallbackHandler>,
+  ): Promise<string> {
+    const transcript = messages
+      .map((m) => `[${m.getType()}] ${typeof m.content === 'string' ? m.content : JSON.stringify(m.content)}`)
+      .join('\n\n')
+    const res = await model.invoke(
+      [new HumanMessage(COMPACT_SUMMARY_PROMPT.replace('{conversation}', transcript))],
+      { signal, callbacks: [usageHandler] },
+    )
+    const text = typeof res.content === 'string' ? res.content.trim() : ''
+    return text || '（对话上下文已压缩为摘要。）'
   }
 
   // ---- 审批升级检出（interrupt payload → approval.requested 事件面）----
@@ -839,12 +1138,14 @@ export class RunService {
     model: LeaderAgentParams['model'],
     ownerId: string,
     labContainer: string,
+    modelKey: string,
     tools: NonNullable<LeaderAgentParams['tools']>,
   ): DeepAgentLike {
     // 双根入键：docker 实例变更（沙箱 remove/recreate、#784 wiki 容器接管后改名）时缓存图
     // 持旧 backend 会指向已删容器——backend 双根都是拓扑因子。
+    const official = snapshotOfficialContent()
     const wikiContainer = this.deps.resolveWikiContainer(ownerId)
-    const key = `${threadId}|${configVersion}|${interruptPolicyKey(policy)}|${labContainer}|${wikiContainer}|teammates`
+    const key = `${threadId}|${configVersion}|${interruptPolicyKey(policy)}|${labContainer}|${wikiContainer}|${official.version}|${modelKey}`
     const cached = this.graphs.get(key)
     if (cached) return cached
     const backend = new DockerArchiveBackend(this.deps.primitives, {
@@ -856,11 +1157,20 @@ export class RunService {
       backend,
       checkpointer: this.deps.saver,
       systemPrompt: LEADER_SYSTEM_PROMPT,
+      official,
       interruptPolicy: policy,
       tools,
-      // 审批漏斗中间件（#783）：middleware 是运行期行为非拓扑因子——不入缓存键（跨 run
-      // 状态由漏斗 per-thread 槽管理，同参数必同拓扑的纯函数约束不受影响）。
-      ...(this.deps.approvals ? { middleware: [this.deps.approvals.middleware] } : {}),
+      // 中间件（运行期行为非拓扑因子——不入缓存键）：#783 审批漏斗 + #780 下载校验节点
+      //（file 写类工具成功后物化产物 + 下载引用进 tool 输出；跨 run 状态由各中间件
+      // per-thread 槽管理，同参数必同拓扑的纯函数约束不受影响）。
+      ...(this.deps.approvals || this.deps.downloadNode
+        ? {
+            middleware: [
+              ...(this.deps.approvals ? [this.deps.approvals.middleware] : []),
+              ...(this.deps.downloadNode ? [this.deps.downloadNode.middleware] : []),
+            ],
+          }
+        : {}),
     })
     // 图实例数护栏（正确性由键保证，此处防长期运行退化；超限整表清——重建成本 =
     // 一次 createDeepAgent 编译，进行中 run 持既有实例引用不受影响）。
@@ -924,13 +1234,49 @@ export class RunService {
     return (await agent.getState({ configurable: { thread_id: threadId } })) as GraphStateLike
   }
 
+  // 最新 checkpoint tuple 读取（四消费面共用：重放判据/in-flight 投影/recover 落行/interrupt
+  // 推导；故障语义由调用面各自定义——不拦/降级空 turn/抛出/按无 interrupt）。
+  private latestTuple(sessionId: string): Promise<LatestCheckpointTuple> {
+    return this.deps.saver.getTuple({ configurable: { thread_id: sessionId } })
+  }
+
+  // recover 终态落行的双落防御：同 anchor 的 assistant 行已存在（processor 完成后 ack 前
+  // 崩溃 → stalled 重放形态）→ 跳过。anchor = 终态 checkpoint id（同 run 恒同值）。
+  private async turnAlreadyRecorded(sessionId: string, anchorCheckpointId: string): Promise<boolean> {
+    const row = await this.deps.prisma.sessionMessage.findFirst({
+      where: { sessionId, role: 'assistant', anchorCheckpointId },
+      select: { id: true },
+    })
+    return row !== null
+  }
+
+  // recover 全量落行前的本 run 残留清理：本 run（message 及其 resume 链）中途终态的落行
+  //（interrupted anchor=中断点 / failed、aborted anchor=null）turn 都晚于最近 user 行——
+  // 同 thread 串行链保证这些行只能是本 run 的残留；blob 全量聚合（「最后 human 之后」切片）
+  // 覆盖其内容 → 整链删除后由 recordTurn 落全量顶位，防「中途行 + 全量行」双行重叠。
+  // 更早轮的 completed 行（turn ≤ 最近 user 行）不触碰。
+  private async deleteRunResidues(sessionId: string): Promise<void> {
+    const lastUser = await this.deps.prisma.sessionMessage.findFirst({
+      where: { sessionId, role: 'user' },
+      orderBy: [{ turn: 'desc' }, { createdAt: 'desc' }],
+      select: { turn: true },
+    })
+    await this.deps.prisma.sessionMessage.deleteMany({
+      where: { sessionId, role: 'assistant', turn: { gt: lastUser?.turn ?? 0 } },
+    })
+  }
+
+  private async turnSnapshotFromCheckpoint(sessionId: string): Promise<TurnSnapshot> {
+    return turnFromCheckpointMessages(channelMessages(await this.latestTuple(sessionId)))
+  }
+
   // 从持久化状态推导「thread 停在 interrupt」（#747 A 节硬约束的内存缺失 fallback 面）：
   // 最新 checkpoint 的 pendingWrites 带 __interrupt__ channel（LangGraph interrupt 的标准
   // putWrites 通道，WRITES_IDX_MAP 负 idx）。blob 反序列化不做——pendingWrites 面足够。
   private async threadInterruptedFromCheckpoint(threadId: string): Promise<boolean> {
-    let tuple: Awaited<ReturnType<PrismaCheckpointSaver['getTuple']>> | undefined
+    let tuple: LatestCheckpointTuple | undefined
     try {
-      tuple = await this.deps.saver.getTuple({ configurable: { thread_id: threadId } })
+      tuple = await this.latestTuple(threadId)
     } catch {
       return false // checkpoint 读取故障按「无 interrupt」处理——resume 判定 50001，不放大
     }
@@ -949,6 +1295,15 @@ export class RunService {
       return false
     }
   }
+}
+
+// checkpoint tuple 类型（Awaited：await latestTuple 后的形态）——四消费面共用单一别名。
+type LatestCheckpointTuple = Awaited<ReturnType<PrismaCheckpointSaver['getTuple']>>
+
+// checkpoint tuple → messages 通道（防御式：blob 形状漂移时返回空数组，调用面降级不炸）。
+function channelMessages(tuple: LatestCheckpointTuple): unknown[] {
+  const values = (tuple?.checkpoint as { channel_values?: { messages?: unknown } } | undefined)?.channel_values
+  return Array.isArray(values?.messages) ? values.messages : []
 }
 
 // 快照类型的导出面（#778 消费；避免消费方反向 import 内部形状）

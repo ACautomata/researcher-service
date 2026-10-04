@@ -134,6 +134,7 @@ CREATE TABLE "sessions" (
     "parentSessionKey" TEXT,
     "forkSourceJson" TEXT,
     "activeCheckpointId" TEXT,
+    "preferredModelJson" TEXT,
     "archivedAt" DATETIME,
     "isTeammate" BOOLEAN NOT NULL DEFAULT false,
     "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,

@@ -192,6 +192,9 @@ export const messageSendSchema = z.object({
     .string()
     .min(1, 'content 不能为空')
     .max(MESSAGE_CONTENT_MAX, `content 过长（≤${MESSAGE_CONTENT_MAX} 字符）`),
+  // #780 附件引用（D6：单消息 ≤4 件，service.linkToMessage 权威校验 + 归属/session 门）。
+  // 只存引用不存字节——字节在沙箱 /lab/uploads/<attachmentId>/，本字段是雪花 attachmentId 列表。
+  attachmentIds: z.array(z.string()).max(4, '单消息最多 4 个附件').optional(),
 })
 
 // resume 决策载荷：#783 审批漏斗接构造，本票机制面直通——decisions 形状校验归 #783（此处

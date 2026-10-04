@@ -11,6 +11,10 @@
 export const SCHEMA_VERSION = 11
 
 export function runIncrementalSchema(db) {
+  const hasSessions = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='sessions'").get()
+  if (hasSessions && !db.prepare('PRAGMA table_info("sessions")').all().some(c => c.name === 'preferredModelJson')) {
+    db.exec('ALTER TABLE "sessions" ADD COLUMN "preferredModelJson" TEXT')
+  }
   db.exec(`
 CREATE TABLE IF NOT EXISTS "text_trace_logs" (
     "id" TEXT NOT NULL PRIMARY KEY,
@@ -145,6 +149,7 @@ CREATE TABLE IF NOT EXISTS "sessions" (
     "parentSessionKey" TEXT,
     "forkSourceJson" TEXT,
     "activeCheckpointId" TEXT,
+    "preferredModelJson" TEXT,
     "archivedAt" DATETIME,
     "isTeammate" BOOLEAN NOT NULL DEFAULT false,
     "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -330,11 +335,6 @@ CREATE INDEX IF NOT EXISTS "teammates_parentSessionId_status_idx" ON "teammates"
 CREATE INDEX IF NOT EXISTS "teammate_mailbox_messages_parentSessionId_recipientTeammateId_createdAt_idx" ON "teammate_mailbox_messages"("parentSessionId", "recipientTeammateId", "createdAt");
 CREATE INDEX IF NOT EXISTS "teammate_mailbox_messages_recipientTeammateId_readAt_invalidatedAt_idx" ON "teammate_mailbox_messages"("recipientTeammateId", "readAt", "invalidatedAt");
 CREATE INDEX IF NOT EXISTS "teammate_mailbox_waits_parentSessionId_recipientTeammateId_idx" ON "teammate_mailbox_waits"("parentSessionId", "recipientTeammateId");
-CREATE UNIQUE INDEX IF NOT EXISTS "teammates_threadId_key" ON "teammates"("threadId");
-CREATE UNIQUE INDEX IF NOT EXISTS "teammates_parentSessionId_name_key" ON "teammates"("parentSessionId", "name");
-CREATE INDEX IF NOT EXISTS "teammates_parentSessionId_status_idx" ON "teammates"("parentSessionId", "status");
-CREATE INDEX IF NOT EXISTS "teammate_mailbox_messages_parentSessionId_recipientTeammateId_createdAt_idx" ON "teammate_mailbox_messages"("parentSessionId", "recipientTeammateId", "createdAt");
-CREATE INDEX IF NOT EXISTS "teammate_mailbox_messages_recipientTeammateId_readAt_invalidatedAt_idx" ON "teammate_mailbox_messages"("recipientTeammateId", "readAt", "invalidatedAt");
 CREATE INDEX IF NOT EXISTS "session_messages_sessionId_turn_idx" ON "session_messages"("sessionId", "turn");
 CREATE UNIQUE INDEX IF NOT EXISTS "session_messages_sessionId_clientKey_key" ON "session_messages"("sessionId", "clientKey");
 CREATE INDEX IF NOT EXISTS "checkpoints_threadId_checkpointNs_idx" ON "checkpoints"("threadId", "checkpointNs");

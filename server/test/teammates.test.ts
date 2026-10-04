@@ -64,6 +64,14 @@ describe('TeammateService', () => {
     expect(await teammates.list(rootSessionId)).toHaveLength(1)
   })
 
+  it('snapshots the leader model preference when spawning a teammate', async () => {
+    const preferred = JSON.stringify({ providerId: 'prov-1', modelId: 'model-x' })
+    await prisma.session.update({ where: { id: rootSessionId }, data: { preferredModelJson: preferred } })
+    const created = await new TeammateService(prisma).spawn({ parentSessionId: rootSessionId, name: 'model-inherit', task: 'Research' })
+    await prisma.session.update({ where: { id: rootSessionId }, data: { preferredModelJson: null } })
+    expect(await prisma.session.findUnique({ where: { id: created.threadId } })).toMatchObject({ preferredModelJson: preferred })
+  })
+
   it('persists point-to-point mail and returns it only to its recipient', async () => {
     const teammates = new TeammateService(prisma)
     const first = await teammates.spawn({ parentSessionId: rootSessionId, name: 'first', task: 'One' })

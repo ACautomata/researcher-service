@@ -1,3 +1,4 @@
+import { officialSkillTools, type OfficialCatalog } from '../../officialContent/runtime'
 // Leader 单 agent 图工厂（#777 · #747 A 节「基础 leader 单 agent loop」）。
 //
 // createDeepAgent 三扩展点接线（#724 PoC 验证的形态）：
@@ -13,7 +14,7 @@
 // session/run 持久化维度派生），**绝不允许运行期可变闭包**（PoC 的 fired 计数器是 throwaway
 // 形态，生产禁止——when 恒真或纯输入谓词）。resume 路径（RunService）必须以同 policy 源重建。
 
-import { createDeepAgent, type CreateDeepAgentParams, type DeepAgent } from 'deepagents'
+import { GENERAL_PURPOSE_SUBAGENT, createDeepAgent, type CreateDeepAgentParams, type DeepAgent } from 'deepagents'
 import type { Runnable } from '@langchain/core/runnables'
 import type { BaseCheckpointSaver } from '@langchain/langgraph-checkpoint'
 import type { SandboxBackendProtocolV2 as DeepAgentsBackendV2 } from 'deepagents'
@@ -52,6 +53,7 @@ export interface LeaderAgentParams {
   readonly backend: DeepAgentsBackendV2
   readonly checkpointer: BaseCheckpointSaver
   readonly systemPrompt: string
+  readonly official?: OfficialCatalog
   readonly interruptPolicy?: InterruptPolicy
   // 审批漏斗中间件（#783；AnyAgentMiddleware 宽进——langchain 中间件类型随版本泛型漂移，
   // 结构面由 runFunnel 的 WrapToolCallHook 推导钉死）。middleware 是运行期行为非拓扑因子，
@@ -70,9 +72,12 @@ export function buildLeaderAgent(params: LeaderAgentParams): DeepAgent {
     model: params.model as unknown as NonNullable<CreateDeepAgentParams['model']>,
     backend: params.backend,
     checkpointer: params.checkpointer,
-    systemPrompt: params.systemPrompt,
+    systemPrompt: [params.systemPrompt, params.official?.prompt].filter(Boolean).join('\n\n'),
+    ...(params.official ? {
+      subagents: [{ ...GENERAL_PURPOSE_SUBAGENT, systemPrompt: `${GENERAL_PURPOSE_SUBAGENT.systemPrompt}\n\n${params.official.prompt}` }],
+    } : {}),
     interruptOn: interruptOnFromPolicy(params.interruptPolicy),
-    ...(params.tools !== undefined ? { tools: [...params.tools] } : {}),
+    tools: [...(params.official ? officialSkillTools(params.official) : []), ...(params.tools ?? [])],
     ...(params.middleware !== undefined && params.middleware.length > 0
       ? { middleware: [...params.middleware] }
       : {}),
@@ -86,6 +91,8 @@ export function buildLeaderAgent(params: LeaderAgentParams): DeepAgent {
 export interface DeepAgentLike {
   streamEvents(input: unknown, options: object): Promise<AsyncIterable<unknown>>
   getState(config: unknown): Promise<unknown>
+  // /compact 显式压缩（#787 story 45）：直接写图状态（_summarizationEvent），返回新 checkpoint config
+  updateState(config: unknown, values: unknown): Promise<{ configurable?: { checkpoint_id?: string } }>
 }
 
 // policy 的缓存键成分（键序化前 sort——序不敏感，policy 派生面无需保证数组序）。
