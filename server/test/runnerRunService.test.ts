@@ -166,7 +166,7 @@ describe('RunService：发消息 → run 终态事件序列（S1，#747 C 节目
     expect(svc.stateOf(sessionId)?.state).toBe('completed')
   })
 
-  it('teammate run 不占用户配额，事件回到 leader session 并带 teammateId', async () => {
+  it('独立恢复的 teammate 按父会话占一份配额，事件带 teammateId', async () => {
     const teammateId = 'teammate-run-1'
     const threadId = 'teammate-thread-1'
     await prisma.session.create({
@@ -177,14 +177,10 @@ describe('RunService：发消息 → run 终态事件序列（S1，#747 C 节目
         id: teammateId, parentSessionId: sessionId, threadId, name: 'review', task: 'Review this topic', status: 'running',
       },
     })
-    const gate = {
-      acquire: async () => { throw new Error('teammate command must not acquire user quota') },
-      wouldReject: async () => false,
-      inFlight: () => 0,
-    } as unknown as ConcurrencyGate
+    const gate = new ConcurrencyGate({ globalLimit: 1, loadUserLimit: async () => 1 })
     const svc = makeService({
       script: [
-        toolCallAi('team-skill', 'read_official_skill', { name: 'research' }),
+        () => { expect(gate.inFlight(owner.id)).toBe(1); return toolCallAi('team-skill', 'read_official_skill', { name: 'research' }) },
         toolCallAi('team-list', 'list_teammates', {}),
         new AIMessage({ content: 'Teammate result' }),
       ],
@@ -208,6 +204,7 @@ describe('RunService：发消息 → run 终态事件序列（S1，#747 C 节目
     ])
     expect(hub.events.at(-1)).toMatchObject({ type: 'teammate.completed', sessionId, teammateId })
     expect(svc.stateOf(threadId)?.state).toBe('completed')
+    expect(gate.inFlight(owner.id)).toBe(0)
   })
 
   it('工具调用面：text → tool.start → tool.end{state,durationMs} → text → run.completed', async () => {

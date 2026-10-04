@@ -63,10 +63,19 @@ async function harness(replies: Record<string, Reply[]>, judge?: ApprovalFunnelD
   }, close: () => {} })
   const gate = new ConcurrencyGate({ globalLimit: 1, loadUserLimit: async () => 1 })
   const teammates = new TeammateService(prisma)
+  const modelCalls: Array<{ task: string; metadata: Record<string, unknown>; system: string }> = []
   const service = new RunService({
     prisma, hub, gate, teammates, saver: new PrismaCheckpointSaver(prisma),
     approvals: judge ? new ApprovalFunnel({ judge, audit: createPrismaApprovalAuditSink(prisma) }) : undefined,
-    registry: new ProviderRegistry(prisma, { llmApiKey: 'fake', modelFactory: async () => new TeamModel(replies) }),
+    registry: new ProviderRegistry(prisma, { llmApiKey: 'fake', modelFactory: async () => {
+      const model = new TeamModel(replies)
+      model.callbacks = [{ name: 'FakeLLMTransport', handleChatModelStart: (_model, batches, _run, _parent, _extra, _tags, metadata) => {
+        const messages = batches[0] ?? []
+        const human = messages.find(message => message.getType() === 'human')?.content
+        modelCalls.push({ task: typeof human === 'string' ? human : '', metadata: metadata ?? {}, system: JSON.stringify(messages.filter(message => message.getType() === 'system').map(message => message.content)) })
+      } }]
+      return model
+    } }),
     primitives: fakePrimitives().primitives, resolveWikiContainer: () => 'researcher-wiki-team',
   })
   const executions: Promise<void>[] = []
@@ -87,7 +96,7 @@ async function harness(replies: Record<string, Reply[]>, judge?: ApprovalFunnelD
   const created = await request.post('/api/v1/sessions').set(auth).send({ title: 'Team research' })
   const sessionId = created.body.data.id as string
   cleanups.push(async () => { service.dispose(); await prisma.$disconnect() })
-  return { prisma, owner, teammates, service, gate, events, delayed, request, auth, sessionId, dispatch,
+  return { prisma, owner, teammates, service, gate, hub, events, delayed, request, auth, sessionId, dispatch, modelCalls,
     send: async (content: string) => request.post(`/api/v1/sessions/${sessionId}/messages`).set(auth).set('Idempotency-Key', 'a'.repeat(32)).send({ content }),
     settle: async () => { let n = 0; while (n < executions.length) { const current = executions.slice(n); n = executions.length; await Promise.all(current) } },
   }
@@ -96,6 +105,88 @@ async function harness(replies: Record<string, Reply[]>, judge?: ApprovalFunnelD
 function latch() { let release!: () => void; const promise = new Promise<void>(resolve => { release = resolve }); return { promise, release } }
 
 describe('#786 teammate runtime acceptance (S1/S2)', () => {
+  it('approval REST acknowledges dispatch without waiting for the teammate to finish', async () => {
+    const release = latch()
+    const h = await harness({
+      leader: [toolCallAi('spawn', 'spawn_teammate', { name: 'worker', task: 'worker-task' }), new AIMessage({ content: 'Leader done' })],
+      'worker-task': [toolCallAi('approval', 'execute', { command: 'echo needs-human' }), async () => { await release.promise; return new AIMessage({ content: 'Worker done' }) }],
+    }, { run: async input => input.rendered.includes('echo needs-human')
+      ? { kind: 'malformed', inputHash: input.inputHash, latencyMs: 1, tokens: 1 }
+      : { kind: 'verdict', inputHash: input.inputHash, latencyMs: 1, tokens: 1, verdict: { decision: 'approve', policy_class: null, reason: '' } } })
+    await h.send('leader'); await h.settle()
+    const approval = (await h.request.get(`/api/v1/sessions/${h.sessionId}/messages`).set(h.auth)).body.data.approvals[0]
+    let responseCode: number | undefined
+    const response = h.request.post(`/api/v1/sessions/${h.sessionId}/approvals/${approval.escalation.id}`).set(h.auth).send({ decision: 'allow' }).then(result => { responseCode = result.body.code })
+    try {
+      await waitFor(() => responseCode !== undefined, 1000)
+      expect(responseCode).toBe(0)
+      const [worker] = await h.teammates.list(h.sessionId)
+      expect(h.service.stateOf(worker.threadId)?.state).toBe('running')
+    } finally { release.release(); await response; await h.settle() }
+  }, 15_000)
+
+  it('restores pending approvals after restart and retains them when queue submission fails', async () => {
+    const judge: ApprovalFunnelDeps['judge'] = { run: async input => input.rendered.includes('echo needs-human')
+      ? { kind: 'malformed', inputHash: input.inputHash, latencyMs: 1, tokens: 1 }
+      : { kind: 'verdict', inputHash: input.inputHash, latencyMs: 1, tokens: 1, verdict: { decision: 'approve', policy_class: null, reason: '' } } }
+    const h = await harness({ leader: [toolCallAi('spawn', 'spawn_teammate', { name: 'worker', task: 'worker-task' }), new AIMessage({ content: 'Leader done' })], 'worker-task': [toolCallAi('approval', 'execute', { command: 'echo needs-human' })] }, judge)
+    await h.send('leader'); await h.settle(); h.service.dispose()
+    const restarted = new RunService({ prisma: h.prisma, hub: h.hub, gate: h.gate, teammates: h.teammates, saver: new PrismaCheckpointSaver(h.prisma), approvals: new ApprovalFunnel({ judge, audit: createPrismaApprovalAuditSink(h.prisma) }), registry: new ProviderRegistry(h.prisma, { llmApiKey: 'fake', modelFactory: async () => new ScriptedChatModel([]) }), primitives: fakePrimitives().primitives, resolveWikiContainer: () => 'researcher-wiki-team' })
+    cleanups.push(async () => restarted.dispose())
+    let failQueue = true
+    restarted.setTeammateDispatcher(async () => { if (failQueue) throw new Error('Queue unavailable') })
+    const service = new SessionService({ prisma: h.prisma, hub: h.hub, runService: restarted, dispatch: async () => {} })
+    const request = supertest(createApp({ prisma: h.prisma, events: { hub: h.hub }, sessions: { service } }))
+    const projection = (await request.get(`/api/v1/sessions/${h.sessionId}/messages`).set(h.auth)).body.data
+    const id = projection.approvals[0].escalation.id as string
+    const endpoint = `/api/v1/sessions/${h.sessionId}/approvals/`
+    expect((await request.post(endpoint + 'wrong-id').set(h.auth).send({ decision: 'allow' })).body.code).toBe(50004)
+    expect((await request.post(endpoint + id).set(h.auth).send({ decision: 'allow' })).body.code).not.toBe(0)
+    expect(h.events.filter(event => event.type === 'approval.resolved')).toEqual([])
+    expect((await request.get(`/api/v1/sessions/${h.sessionId}/messages`).set(h.auth)).body.data.approvals[0].escalation.id).toBe(id)
+    failQueue = false
+    expect((await request.post(endpoint + id).set(h.auth).send({ decision: 'allow' })).body.code).toBe(0)
+    expect((await request.post(endpoint + id).set(h.auth).send({ decision: 'allow' })).body.code).toBe(50001)
+  }, 15_000)
+
+  it('leader and peers inherit owner capabilities per run; disabling affects only later runs', async () => {
+    let h: Awaited<ReturnType<typeof harness>>
+    h = await harness({
+      leader: [toolCallAi('spawn', 'spawn_teammate', { name: 'worker', task: 'worker-task' }), async () => {
+        await waitFor(() => h.modelCalls.some(call => call.task === 'worker-task'))
+        await h.prisma.pluginEnablement.update({ where: { ownerId_pluginId: { ownerId: h.owner.id, pluginId: 'autofigure' } }, data: { enabled: false } })
+        return new AIMessage({ content: 'Leader done' })
+      }],
+      'worker-task': [toolCallAi('skill', 'read_official_skill', { name: 'research' }), new AIMessage({ content: 'Worker done' })],
+      next: [new AIMessage({ content: 'Next run done' })],
+    })
+    await h.prisma.pluginEnablement.create({ data: { ownerId: h.owner.id, pluginId: 'autofigure', enabled: true, enabledAt: new Date() } })
+    expect((await h.send('leader')).body.code).toBe(0)
+    await h.settle()
+    for (const call of h.modelCalls) expect(call.metadata.ownerPluginIds).toEqual(['autofigure'])
+    expect(h.modelCalls.filter(call => call.task === 'worker-task').every(call => call.system.includes('research'))).toBe(true)
+    const session = (await h.request.post('/api/v1/sessions').set(h.auth).send({})).body.data.id as string
+    expect((await h.request.post(`/api/v1/sessions/${session}/messages`).set(h.auth).set('Idempotency-Key', 'b'.repeat(32)).send({ content: 'next' })).body.code).toBe(0)
+    await h.settle()
+    expect(h.modelCalls.find(call => call.task === 'next')?.metadata.ownerPluginIds).toEqual([])
+  }, 15_000)
+
+  it('charges one session lease until the last concurrently running teammate finishes', async () => {
+    const release = latch()
+    const h = await harness({
+      leader: [toolCallAi('spawn', 'spawn_teammate', { name: 'worker', task: 'worker-task' }), new AIMessage({ content: 'Leader done' })],
+      'worker-task': [async () => { await release.promise; return new AIMessage({ content: 'Worker done' }) }],
+    })
+    try {
+      expect((await h.send('leader')).body.code).toBe(0)
+      await waitFor(() => h.service.stateOf(h.sessionId)?.state === 'completed')
+      expect(h.gate.inFlight(h.owner.id)).toBe(1)
+      const other = (await h.request.post('/api/v1/sessions').set(h.auth).send({})).body.data.id as string
+      expect((await h.request.post(`/api/v1/sessions/${other}/messages`).set(h.auth).set('Idempotency-Key', 'b'.repeat(32)).send({ content: 'another session' })).body.code).toBe(40043)
+    } finally { release.release(); await h.settle() }
+    expect(h.gate.inFlight(h.owner.id)).toBe(0)
+  }, 15_000)
+
   it('rewind across a spawn checkpoint retires its thread and invalidates unread mail', async () => {
     const h = await harness({
       leader: [toolCallAi('spawn', 'spawn_teammate', { name: 'worker', task: 'worker-task' }), new AIMessage({ content: 'Leader done' })],
@@ -190,10 +281,13 @@ describe('#786 teammate runtime acceptance (S1/S2)', () => {
     expect(h.service.stateOf(worker.threadId)?.state).toBe('interrupted')
     const requested = h.events.find(event => event.type === 'approval.requested')!
     expect(requested).toMatchObject({ sessionId: h.sessionId, teammateId: worker.id })
+    const projection = (await h.request.get(`/api/v1/sessions/${h.sessionId}/messages`).set(h.auth)).body.data
+    expect(projection.approvals).toEqual([expect.objectContaining({ teammateId: worker.id, escalation: expect.objectContaining({ id: (requested.payload as { escalation: { id: string } }).escalation.id }) })])
     h.service.sweepSuspensions(Date.now() + 49 * 60 * 60 * 1000)
     expect(h.events.find(event => event.type === 'run.suspended')).toMatchObject({ sessionId: h.sessionId, teammateId: worker.id })
     const escalationId = (requested.payload as { escalation: { id: string } }).escalation.id
-    await h.service.resolveApproval({ sessionId: h.sessionId, ownerId: h.owner.id, username: h.owner.username, escalationId, decision: 'allow' })
+    expect((await h.request.post(`/api/v1/sessions/${h.sessionId}/approvals/${escalationId}`).set(h.auth).send({ decision: 'allow' })).body.code).toBe(0)
+    await h.settle()
     expect(h.service.stateOf(worker.threadId)?.state).toBe('completed')
     expect(h.service.stateOf(h.sessionId)?.state).toBe('completed')
   }, 15_000)

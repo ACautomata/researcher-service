@@ -1,6 +1,6 @@
 import { resolveModelRef, type ModelRef } from '../providerRegistry'
-import { snapshotOfficialContent } from '../../officialContent/runtime'
 import { teammateDelegation } from '../teammates/delegation'
+import { snapshotRunCapabilities, type RunCapabilities } from '../capabilities'
 // RunService —— 集中式 runner 内核（#777 · #747 A 节「runner 编排」）。
 //
 // 职责（BullMQ 传输面之外的全部 run 机制）：
@@ -218,13 +218,16 @@ export class RunService {
   private readonly aborts = new Map<string, { controller: AbortController; by: 'user' | 'system' }>()
   private readonly chains = new Map<string, Promise<void>>()
   private readonly pendingApprovals = new Map<string, PendingApproval>()
+  private readonly resolvingApprovals = new Set<string>()
   /** 在飞 run 命令（threadId → cmd；拒绝红显事件的归属盖印源） */
   private readonly activeCmds = new Map<string, RunEventContext>()
+  private readonly sessionLeases = new Map<string, { ownerId: string; threads: Set<string>; lease: Promise<Awaited<ReturnType<ConcurrencyGate['acquire']>>> }>()
   private readonly recursionLimit: number
   private readonly approvalTimeoutMs: number
   private readonly clock: () => number
   private recordTurn: RecordTurnFn | undefined
   private sweepTimer: ReturnType<typeof setInterval> | undefined
+  private queuedDispatch = false
   private dispatch: (cmd: RunCommand, delayMs?: number) => Promise<void> = (cmd) => this.execute(cmd)
 
   constructor(private readonly deps: RunServiceDeps) {
@@ -257,6 +260,7 @@ export class RunService {
   }
 
   setTeammateDispatcher(dispatch: (cmd: RunCommand, delayMs?: number) => Promise<void>): void {
+    this.queuedDispatch = true
     this.dispatch = dispatch
   }
 
@@ -347,9 +351,23 @@ export class RunService {
     return this.runs.get(sessionId)
   }
 
+  async pendingApprovalProjection(threadId: string): Promise<ApprovalInterruptPayload[]> {
+    const state = this.runs.get(threadId)?.state
+    if (state && state !== 'interrupted' && state !== 'suspended') return []
+    const tuple = await this.latestTuple(threadId)
+    const pending: ApprovalInterruptPayload[] = []
+    for (const [, channel, raw] of tuple?.pendingWrites ?? []) {
+      if (channel !== INTERRUPT_CHANNEL) continue
+      const value = (raw as { value?: unknown } | null)?.value ?? raw
+      if (isApprovalInterruptPayload(value)) pending.push(value)
+    }
+    return pending
+  }
+
   // 额度满预检（#778 REST 即时反馈；#777 注释契约「额度即时反馈面归 #778」）——只读不占额，
   // 权威判定仍在 executeNow 的 gate.acquire。
-  quotaFull(ownerId: string): Promise<boolean> {
+  quotaFull(ownerId: string, sessionId?: string): Promise<boolean> {
+    if (sessionId && this.sessionLeases.get(sessionId)?.ownerId === ownerId) return Promise.resolve(false)
     return this.deps.gate.wouldReject(ownerId)
   }
 
@@ -478,9 +496,16 @@ export class RunService {
   }
 
   private async executeNow(cmd: RunCommand): Promise<void> {
-    let lease: Awaited<ReturnType<ConcurrencyGate['acquire']>> | undefined
+    const parentId = cmd.parentSessionId ?? cmd.sessionId
+    let shared = this.sessionLeases.get(parentId)
+    if (!shared) {
+      shared = { ownerId: cmd.ownerId, threads: new Set(), lease: this.deps.gate.acquire(cmd.ownerId) }
+      this.sessionLeases.set(parentId, shared)
+    }
+    shared.threads.add(cmd.sessionId)
     try {
-      if (!cmd.teammateId) lease = await this.deps.gate.acquire(cmd.ownerId) // teammates are outside session quota
+      if (shared.ownerId !== cmd.ownerId) throw fail(CODE.SESSION_NOT_FOUND)
+      await shared.lease
       await this.executeRun(cmd)
     } catch (e) {
       // pre-start 失败回滚 queued 占位（40043/50003 等——「未开始执行的 run 不发事件」
@@ -489,7 +514,12 @@ export class RunService {
       if (snap?.state === 'queued' && snap.runId === cmd.runId) this.runs.delete(cmd.sessionId)
       throw e
     } finally {
-      lease?.release()
+      if (cmd.kind === 'resume') this.resolvingApprovals.delete(cmd.sessionId)
+      shared.threads.delete(cmd.sessionId)
+      if (shared.threads.size === 0) {
+        this.sessionLeases.delete(parentId)
+        await shared.lease.then(lease => lease.release(), () => {})
+      }
     }
   }
 
@@ -530,8 +560,8 @@ export class RunService {
     const session = await this.deps.prisma.session.findUnique({ where: { id: cmd.sessionId } })
     if (!session) throw fail(CODE.SESSION_NOT_FOUND)
     if (cmd.teammateId) {
-      const teammate = await this.deps.prisma.teammate.findUnique({ where: { id: cmd.teammateId }, select: { archivedAt: true } })
-      if (!teammate || teammate.archivedAt) throw fail(CODE.SESSION_NOT_FOUND)
+      const teammate = await this.deps.prisma.teammate.findUnique({ where: { id: cmd.teammateId } })
+      if (!teammate || teammate.archivedAt || teammate.threadId !== cmd.sessionId || teammate.parentSessionId !== cmd.parentSessionId || session.ownerId !== cmd.ownerId) throw fail(CODE.SESSION_NOT_FOUND)
     }
 
     // 沙箱执行前提（#776 契约「消费方 = #777 runner ensure/touch」）：闲置自动 stop 后
@@ -547,6 +577,7 @@ export class RunService {
     await this.deps.wikis?.ensure(cmd.ownerId)
 
     const snapshot = await this.deps.registry.getSnapshot(cmd.ownerId)
+    const capabilities = await snapshotRunCapabilities(this.deps.prisma, cmd.ownerId)
     const actor = cmd.teammateId
       ? await this.deps.teammates?.get(cmd.parentSessionId ?? cmd.sessionId, cmd.teammateId)
       : undefined
@@ -570,7 +601,7 @@ export class RunService {
         })
       : []
     const modelKey = actor?.modelProviderId ? `provider:${actor.modelProviderId}` : session.preferredModelJson ?? 'default'
-    const agent = this.getOrBuildGraph(cmd.sessionId, snapshot.version, policy, model, cmd.ownerId, labContainer, modelKey, tools)
+    const agent = this.getOrBuildGraph(cmd.sessionId, snapshot.version, policy, model, cmd.ownerId, labContainer, modelKey, tools, capabilities)
 
     // Mailbox recover has already consumed its interrupt; only a fresh resume must match the wait.
     if (cmd.kind === 'resume' && cmd.mailWaitId) {
@@ -731,6 +762,7 @@ export class RunService {
           recursionLimit: this.recursionLimit,
           signal: controller.signal,
           callbacks: [usageHandler],
+          metadata: { ownerId: capabilities.ownerId, ownerPluginIds: [...capabilities.enabledPluginIds], officialContentVersion: capabilities.official.version },
         })
         for await (const raw of stream) {
           // 工具/推理活动刷新沙箱闲置计时（#776 真 activity 源——长 run 中途不被 sweep stop）
@@ -1098,15 +1130,18 @@ export class RunService {
     if (!snap || (snap.state !== 'interrupted' && snap.state !== 'suspended')) {
       throw fail(CODE.APPROVAL_NOT_FOUND)
     }
-    // escalationId 核对（同进程漏斗 memo 在场时强校验；重启后 memo 丢失，弱校验放行——
-    // 调用方已过归属门，id 核对主要防同会话双升级窗口的错配落定）
+    // Restart loses the funnel memo; persisted interrupts remain authoritative for the id.
     const escalation = this.deps.approvals?.pendingEscalation(targetSessionId)
-    if (escalation && escalation.escalation.id !== params.escalationId) {
+    if (escalation ? escalation.escalation.id !== params.escalationId : !(await this.checkpointHasApproval(targetSessionId, params.escalationId))) {
       throw fail(CODE.APPROVAL_NOT_FOUND)
     }
 
     const runId = this.pendingApprovals.get(targetSessionId)?.runId ?? snap.runId
-    this.publish(
+    if (this.resolvingApprovals.has(targetSessionId)) throw fail(CODE.RUN_ALREADY_RESUMED)
+    if (await this.quotaFull(params.ownerId, params.sessionId)) throw fail(CODE.CONCURRENCY_QUOTA_EXCEEDED)
+    if (this.resolvingApprovals.has(targetSessionId)) throw fail(CODE.RUN_ALREADY_RESUMED)
+    this.resolvingApprovals.add(targetSessionId)
+    const acknowledge = () => this.publish(
       params.ownerId,
       {
         type: APPROVAL_EVENT_RESOLVED,
@@ -1119,7 +1154,6 @@ export class RunService {
       },
       { sessionId: targetSessionId, parentSessionId: targetTeammateId ? params.sessionId : undefined, teammateId: targetTeammateId, runId },
     )
-    this.pendingApprovals.delete(targetSessionId)
 
     const cmd = this.buildCommand({
       sessionId: targetSessionId,
@@ -1137,7 +1171,15 @@ export class RunService {
       },
       ...(params.abort ? { abort: true } : {}),
     })
-    await this.execute(cmd)
+    const accepted = () => {
+      acknowledge()
+      if (this.pendingApprovals.get(targetSessionId)?.escalationId === params.escalationId) this.pendingApprovals.delete(targetSessionId)
+    }
+    // Inline execution accepts immediately; a durable queue accepts only after add succeeds.
+    if (!this.queuedDispatch) accepted()
+    try { await this.dispatch(cmd) }
+    catch (cause) { this.resolvingApprovals.delete(targetSessionId); throw cause }
+    if (this.queuedDispatch) accepted()
   }
 
   // ---- 图实例缓存（拓扑因子全在键内：thread | configVersion | policy | backend 双根）----
@@ -1150,12 +1192,13 @@ export class RunService {
     labContainer: string,
     modelKey: string,
     tools: NonNullable<LeaderAgentParams['tools']>,
+    capabilities: RunCapabilities,
   ): DeepAgentLike {
     // 双根入键：docker 实例变更（沙箱 remove/recreate、#784 wiki 容器接管后改名）时缓存图
     // 持旧 backend 会指向已删容器——backend 双根都是拓扑因子。
-    const official = snapshotOfficialContent()
+    const official = capabilities.official
     const wikiContainer = this.deps.resolveWikiContainer(ownerId)
-    const key = `${threadId}|${configVersion}|${interruptPolicyKey(policy)}|${labContainer}|${wikiContainer}|${official.version}|${modelKey}`
+    const key = `${threadId}|${configVersion}|${interruptPolicyKey(policy)}|${labContainer}|${wikiContainer}|${capabilities.key}|${modelKey}`
     const cached = this.graphs.get(key)
     if (cached) return cached
     const backend = new DockerArchiveBackend(this.deps.primitives, {
