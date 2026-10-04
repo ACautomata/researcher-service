@@ -40,6 +40,11 @@ function mimeOf(path: string): string | null {
   return EXT_MIME[path.slice(dot).toLowerCase()] ?? null
 }
 
+// 扩展名 → mime（下载校验节点复用；白名单外返回 null 由调用方回退 octet-stream）。
+export function mimeFromPath(path: string): string | null {
+  return mimeOf(path)
+}
+
 // 扫描终态最后一条消息（agent 最终回复）的 content 块，产出「可物化」与「须降级」两清单。
 // url 非 /lab/ 前缀（含 data: URL——V1 不可从路径物化）→ 降级 not_lab；扩展名不在白名单 → 降级
 // mime_not_allowed。同一路径重复声明去重（首见为准）。

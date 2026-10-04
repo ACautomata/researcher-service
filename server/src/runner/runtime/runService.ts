@@ -31,6 +31,7 @@
 
 import { randomUUID } from 'node:crypto'
 import { HumanMessage, type ContentBlock } from '@langchain/core/messages'
+import type { AnyAgentMiddleware } from 'langchain'
 import { Command, END } from '@langchain/langgraph'
 import { INTERRUPT } from '@langchain/langgraph-checkpoint'
 import {
@@ -146,6 +147,9 @@ export interface RunServiceDeps {
   }
   /** 审批三层漏斗（#783）。与 interruptPolicyFor（V1 测试面）可并存，生产只接前者。 */
   readonly approvals?: ApprovalFunnel
+  /** #780 下载校验节点（片 3：file 写类工具成功后校验声明路径 → 物化 + 下载引用进 tool 输出；
+   * 失败 → 错误回喂 agent 重新生成）。缺省不注 = 工具产物面关闭（测试）。 */
+  readonly downloadNode?: { readonly middleware: AnyAgentMiddleware }
   /** 审批升级超时（默认 48h，729 附录 B；测试注入缩短） */
   readonly approvalTimeoutMs?: number
   /** 挂起清扫定时器间隔（毫秒；缺省 5min，0 = 不启动定时器——测试手动调 sweepSuspensions） */
@@ -832,9 +836,17 @@ export class RunService {
       checkpointer: this.deps.saver,
       systemPrompt: LEADER_SYSTEM_PROMPT,
       interruptPolicy: policy,
-      // 审批漏斗中间件（#783）：middleware 是运行期行为非拓扑因子——不入缓存键（跨 run
-      // 状态由漏斗 per-thread 槽管理，同参数必同拓扑的纯函数约束不受影响）。
-      ...(this.deps.approvals ? { middleware: [this.deps.approvals.middleware] } : {}),
+      // 中间件（运行期行为非拓扑因子——不入缓存键）：#783 审批漏斗 + #780 下载校验节点
+      //（file 写类工具成功后物化产物 + 下载引用进 tool 输出；跨 run 状态由各中间件
+      // per-thread 槽管理，同参数必同拓扑的纯函数约束不受影响）。
+      ...(this.deps.approvals || this.deps.downloadNode
+        ? {
+            middleware: [
+              ...(this.deps.approvals ? [this.deps.approvals.middleware] : []),
+              ...(this.deps.downloadNode ? [this.deps.downloadNode.middleware] : []),
+            ],
+          }
+        : {}),
     })
     // 图实例数护栏（正确性由键保证，此处防长期运行退化；超限整表清——重建成本 =
     // 一次 createDeepAgent 编译，进行中 run 持既有实例引用不受影响）。
