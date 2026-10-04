@@ -18,7 +18,7 @@ import { createPrismaClient } from '../src/prisma'
 import { createApp } from '../src/app'
 import type { PrismaClient } from '../src/generated/prisma/client'
 import { StreamHub, type StreamSink } from '../src/events/hub'
-import { seedUser, login, bearer } from './helpers'
+import { seedUser, login, bearer, waitFor } from './helpers'
 import { ScriptedChatModel, fakePrimitives, toolCallAi, type ScriptEntry } from './runnerFakes'
 import { RunService } from '../src/runner/runtime/runService'
 import { ProviderRegistry } from '../src/runner/providerRegistry'
@@ -62,14 +62,6 @@ function frameEvents(frames: string[]): DecodedFrame[] {
   return frames
     .filter((f) => f.startsWith('id: '))
     .map((f) => JSON.parse(/^data: (.+)$/m.exec(f)![1]) as DecodedFrame)
-}
-
-async function waitFor(pred: () => boolean | Promise<boolean>, timeoutMs = 5000): Promise<void> {
-  const deadline = Date.now() + timeoutMs
-  while (!(await pred())) {
-    if (Date.now() > deadline) throw new Error('waitFor 超时')
-    await new Promise((r) => setTimeout(r, 10))
-  }
 }
 
 describe('会话 REST 域（S1，#778）', () => {
@@ -770,6 +762,45 @@ describe('会话 REST 域（S1，#778）', () => {
       .send({ content: 'sess-seed 已有标题' })
     await waitFor(() => ['completed', 'failed'].includes(runService.stateOf('sess-seed')?.state ?? ''))
     expect((await prisma.session.findUnique({ where: { id: 'sess-seed' } }))?.title).toBe('新标题')
+  })
+
+  // ---- inFlight 投影（story 11 · #779 断线补偿）----
+
+  it('投影 GET 的 inFlight：running 带 checkpoint 重建 turn（多端同形）；终态字段缺省', async () => {
+    slowExec = true
+    currentScript = [
+      toolCallAi('if-c1', 'execute', { command: 'echo hi' }, '想想。'),
+      new AIMessage({ content: [{ type: 'text', text: '完成。' }] }),
+    ]
+    const sid = (await request.post('/api/v1/sessions').set(bearer(access)).send({})).body.data.id as string
+    await request
+      .post(`/api/v1/sessions/${sid}/messages`)
+      .set(bearer(access))
+      .set('Idempotency-Key', hexKey(0x801))
+      .send({ content: '慢问题' })
+    await waitFor(() => runService.stateOf(sid)?.state === 'running')
+
+    // 等工具行进 checkpoint（慢工具窗口 = 重建素材窗口）
+    let inFlight: { runId: string; state: string; turn: { tools?: { toolCallId: string; name: string }[] } } | undefined
+    await waitFor(async () => {
+      const res = await request.get(`/api/v1/sessions/${sid}/messages`).set(bearer(access))
+      inFlight = res.body.data.inFlight as typeof inFlight
+      return (inFlight?.turn.tools?.length ?? 0) > 0
+    })
+    expect(inFlight?.state).toBe('running')
+    expect(inFlight?.turn.tools?.[0]).toMatchObject({ toolCallId: 'if-c1', name: 'execute' })
+
+    // 多端/换设备重拉同形：同一内存态 + 同一 checkpoint → runId/turn 一致
+    const res2 = await request.get(`/api/v1/sessions/${sid}/messages`).set(bearer(access))
+    const inFlight2 = res2.body.data.inFlight as typeof inFlight
+    expect(inFlight2?.runId).toBe(inFlight?.runId)
+    expect(inFlight2?.state).toBe('running')
+    expect(inFlight2?.turn.tools?.[0]).toMatchObject({ toolCallId: 'if-c1' })
+
+    // 终态 → 字段缺省（「无进行中 run」的投影形状）
+    await waitFor(() => runService.stateOf(sid)?.state === 'completed')
+    const final = await request.get(`/api/v1/sessions/${sid}/messages`).set(bearer(access))
+    expect(final.body.data.inFlight).toBeUndefined()
   })
 
   // ---- 认证边界 ----

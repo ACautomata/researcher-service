@@ -30,6 +30,7 @@ function fakeRunGateway(): { gw: SessionRunGateway; dispatch: ReturnType<typeof 
     stateOf: () => undefined,
     abort: () => false,
     quotaFull: async () => false,
+    inFlightProjection: async () => undefined,
     buildMessageCommand: async (p) => ({
       runId: 'run-fake',
       sessionId: p.sessionId,

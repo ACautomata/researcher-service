@@ -19,7 +19,7 @@ import { CODE } from '../codes'
 import { SANDBOX_CONTAINER_PREFIX } from '../sandboxes/values'
 import { getSessionForUser } from '../sandboxes/service'
 import type { SandboxRemoveOutcome } from '../sandboxes/lifecycle'
-import type { EventPublisher, RunCommand, RunSnapshot } from '../runner/runtime/runService'
+import type { EventPublisher, InFlightProjection, RunCommand, RunSnapshot } from '../runner/runtime/runService'
 import { serializeAttachments, type RecordTurnPayload } from './reducer'
 import { TITLE_AUTO_MAX } from './values'
 
@@ -47,6 +47,9 @@ export interface SessionProjection {
   readonly sessionId: string
   readonly title: string
   readonly messages: ProjectionMessage[]
+  /** in-flight 投影（story 11 · #779）：有进行中 run 时带出（从 checkpoint blob 反序列化重建，
+   *  即焚 token 事件的补偿真相源）；无在飞 = 字段缺省。多端重拉同帧（同一内存态）。 */
+  readonly inFlight?: InFlightProjection
 }
 
 export interface SendMessageResult {
@@ -76,6 +79,8 @@ export interface SessionRunGateway {
     username: string
     decisions?: unknown
   }) => RunCommand
+  /** in-flight 投影（#779 story 11）：重拉投影的补偿重建面（running 从 checkpoint 重建/queued 空 turn） */
+  readonly inFlightProjection: (sessionId: string) => Promise<InFlightProjection | undefined>
 }
 
 // run 命令发射口（submit 入队 ack 语义）：生产 = BullMQ submit（resolve = job 已入队；
@@ -352,17 +357,21 @@ export class SessionService {
     return { runId: cmd.runId }
   }
 
-  // ---- 历史投影 GET（story 3 回放面；turn 升序）。50002 同码防探测。----
+  // ---- 历史投影 GET（story 3 回放面；turn 升序）。50002 同码防探测。
+  // inFlight（#779 story 11）：有进行中 run 时同响应带出「从 checkpoint blob 反序列化重建」
+  // 的进行中 turn——断线补偿 = 重拉投影 + in-flight 重建一次完成（前端以投影为锚重挂视图）。----
   async getProjection(user: Pick<AuthUser, 'id' | 'role'>, sessionId: string): Promise<SessionProjection> {
     const session = await getSessionForUser(this.deps.prisma, user, sessionId)
     const rows = await this.deps.prisma.sessionMessage.findMany({
       where: { sessionId },
       orderBy: [{ turn: 'asc' }, { createdAt: 'asc' }],
     })
+    const inFlight = await this.deps.runService.inFlightProjection(sessionId)
     return {
       sessionId,
       title: session.title,
       messages: rows.map(toProjectionMessage),
+      ...(inFlight !== undefined ? { inFlight } : {}),
     }
   }
 

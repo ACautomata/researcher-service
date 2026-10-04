@@ -1,6 +1,7 @@
 import type { SuperTest, Test } from 'supertest'
 import type { PrismaClient, User } from '../src/generated/prisma/client'
 import { hashPassword } from '../src/auth/password'
+import { PrismaCheckpointSaver } from '../src/runner/persistence/prismaCheckpointSaver'
 
 // 测试身份种子：直接写库（绕过 bootstrap/HTTP），拿已知密码登录。
 export async function seedAdmin(
@@ -130,4 +131,38 @@ export function frameOfEvent(acc: string, event: string): SseFrame {
   const block = acc.split('\n\n').find((b) => b.includes(`event: ${event}`))
   if (!block) throw new Error(`未见事件帧 ${event}：${JSON.stringify(acc)}`)
   return parseSseFrame(block)
+}
+
+// --- 轮询等待 + checkpoint 断言（#779 断线补偿测试共用） ---
+
+// 轮询等待谓词为真；超时抛错并带诊断（素材永不出现时错误信息直指等待超时，而非落在
+// 后续 expect 上）。谓词抛错原样上抛（不吞不当重试）。
+export async function waitFor(
+  pred: () => boolean | Promise<boolean>,
+  timeoutMs = 5000,
+  intervalMs = 20,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    if (await pred()) return
+    if (Date.now() > deadline) throw new Error(`waitFor：${timeoutMs}ms 内条件未满足`)
+    await new Promise((r) => setTimeout(r, intervalMs))
+  }
+}
+
+// checkpoint messages 通道中指定 content 的 human 消息计数——#779 重放判据的断言面
+//（判「重放未重复 append 用户消息」）。
+export async function checkpointHumanCount(
+  prisma: PrismaClient,
+  sessionId: string,
+  content: string,
+): Promise<number> {
+  const saver = new PrismaCheckpointSaver(prisma)
+  const tuple = await saver.getTuple({ configurable: { thread_id: sessionId } })
+  const messages =
+    (tuple?.checkpoint as { channel_values?: { messages?: { _getType?: () => string; content?: unknown }[] } })
+      ?.channel_values?.messages ?? []
+  return messages.filter(
+    (m) => typeof m._getType === 'function' && m._getType() === 'human' && m.content === content,
+  ).length
 }

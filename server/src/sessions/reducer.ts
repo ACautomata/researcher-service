@@ -92,6 +92,17 @@ export function serializeAttachments(snap: TurnSnapshot): string {
   })
 }
 
+// 空聚合判据（TurnSnapshot 接受面纯函数——TurnReducer.isEmpty 与 #779 checkpointTurn 产物
+// 共用单一实现，「TurnSnapshot 增字段即静默漂移」的防漂移面）。
+export function isEmptyTurnSnapshot(snap: TurnSnapshot): boolean {
+  return (
+    snap.content === '' &&
+    (snap.thinking === undefined || snap.thinking === '') &&
+    (snap.tools === undefined || snap.tools.length === 0) &&
+    (snap.media === undefined || snap.media.length === 0)
+  )
+}
+
 export class TurnReducer {
   private text = ''
   private think = ''
@@ -169,7 +180,7 @@ export class TurnReducer {
 
   // 聚合为空（无 delta、无工具、无媒体）——终态空 run 不落行的判据（failed 立即等场景）。
   isEmpty(): boolean {
-    return this.text === '' && this.think === '' && this.tools.size === 0 && this.media.length === 0
+    return isEmptyTurnSnapshot(this.snapshot())
   }
 
   // 当前聚合快照（投影形状：thinking/tools/media 仅在有内容时出现——字段缺省即「无」，非空串）。

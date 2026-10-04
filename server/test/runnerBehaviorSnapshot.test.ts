@@ -10,6 +10,11 @@
 //     B2  followup 凭历史直答 0 工具调用（模型脚本扫描式取答案——脚本不含答案本身）
 //   事件桥（协议事件形状）：归一化后固化为文件快照——三包升级 diff 审查面（C 节目录形状守门）
 //     C1  v3 protocol events → 自有目录的完整投影序列快照
+//   断线补偿 + 重启恢复（#779 · story 11/14 增补）：
+//     D1  running 中「断线」（不消费事件）→ in-flight 从 checkpoint blob 还原 ≈ 流式归约
+//         快照（无跳变重影：blob 与事件同源同刻）
+//     D2  「控制面重启」（全新栈）重放崩溃 job → 转 recover 从 checkpoint 续跑跑完
+//         （BullMQ stalled 重放的测试同形面：同 RunCommand 二次 execute）
 //
 // 全 fake（ScriptedChatModel + fakePrimitives），确定性可重复；版本升级后跑本文件，
 // 行为漂移在此红。
@@ -27,7 +32,7 @@ import { PrismaCheckpointSaver } from '../src/runner/persistence/prismaCheckpoin
 import { ProviderRegistry } from '../src/runner/providerRegistry'
 import { ConcurrencyGate } from '../src/runner/concurrency'
 import { RunService, type RunCommand } from '../src/runner/runtime/runService'
-import { seedUser } from './helpers'
+import { checkpointHumanCount, seedUser, waitFor } from './helpers'
 import { ScriptedChatModel, fakePrimitives, CollectingHub, toolCallAi, type ScriptEntry } from './runnerFakes'
 
 const LAB = 'researcher-sandbox-s4'
@@ -267,4 +272,92 @@ describe('S4 行为快照（#724 断言集 6/6 固化，三包升级守门基线
       '事件桥投影形状（三包升级守门——diff 即行为漂移，人工确认后更新）',
     )
   })
+
+  // ---- 断线补偿（story 11）：in-flight 从 checkpoint blob 还原 ----
+
+  it('D1：running 中断线 → in-flight blob 还原 ≈ 流式归约快照（无跳变重影）', async () => {
+    // 慢工具窗口 = 断线观察窗：模型轮（含文本）已入 checkpoint、工具执行中
+    const bundle = makeBundle({
+      primitives: fakePrimitives({
+        execBehavior: async () => {
+          await new Promise((r) => setTimeout(r, 300))
+          return { exitCode: 0, stdout: 'fake-exec-out', stderr: '' }
+        },
+      }),
+      script: () => [
+        new AIMessage({
+          content: [{ type: 'text', text: '断线前的模型输出。' }],
+          tool_calls: [{ id: 's4-d1', name: 'execute', args: { command: 'echo slow' } }],
+        }),
+        new AIMessage({ content: [{ type: 'text', text: '断线后的收尾。' }] }),
+      ],
+    })
+    const cmd = cmdOf(owner, { content: '断线场景' })
+    const running = bundle.svc.execute(cmd)
+    // 等工具行进 checkpoint（慢窗口）
+    let inflight: Awaited<ReturnType<typeof bundle.svc.inFlightProjection>>
+    // blob 边界不变量（story 11「无跳变重影」的行为契约）：重建 content 恒为已流出
+    // text.delta 拼接的前缀——blob 只含已落 super-step 的消息，宁短不假（正在生成的 delta
+    // 未入 blob 是 LangGraph blob 边界粒度固有；每次探测断言前缀关系即「重建 ⊆ 流出」锁定）
+    const streamedSoFar = () =>
+      bundle.hub.events
+        .filter((e) => e.type === 'text.delta')
+        .map((e) => (e.payload as { delta: string }).delta)
+        .join('')
+    await waitFor(async () => {
+      inflight = await bundle.svc.inFlightProjection(SESSION)
+      expect(streamedSoFar().startsWith(inflight?.turn.content ?? '')).toBe(true)
+      return (inflight?.turn.tools?.length ?? 0) > 0
+    })
+    expect(inflight?.state).toBe('running')
+    // 「无跳变重影」断言：blob 还原的 turn 与同刻事件流归约快照结构一致（同源同刻）
+    // ——reducer 面无法直取（RunService 内部），用流式事件同构归约对齐：text.delta 拼接 ≡
+    // blob content；tool.start ≡ blob tools 行。
+    expect(inflight?.turn.content).toBe(streamedSoFar())
+    expect(inflight?.turn.tools?.[0]).toMatchObject({ toolCallId: 's4-d1', name: 'execute', state: 'running' })
+    await running
+
+    // 完成后 in-flight 缺省（观测面收敛）
+    expect(await bundle.svc.inFlightProjection(SESSION)).toBeUndefined()
+  }, 30_000)
+
+  // ---- 重启恢复（story 14）：全新栈重放崩溃 job → recover 续跑 ----
+
+  it('D2：控制面重启后重放崩溃 job → 转 recover 凭 checkpoint 续跑跑完（集成场景）', async () => {
+    // 第一段：模型轮中途「崩溃」（进程死——checkpoint 停在 super-step 边界）
+    const crashed = cmdOf(owner, { content: '长任务不白费', runId: 's4-d2-fixed' })
+    const s1 = makeBundle({
+      primitives: fakePrimitives(),
+      script: () => [
+        toolCallAi('s4-d2', 'execute', { command: 'echo x' }, '先干活。'),
+        () => {
+          throw new Error('simulated crash')
+        },
+      ],
+    })
+    await s1.svc.execute(crashed)
+    expect(s1.svc.stateOf(SESSION)?.state).toBe('failed')
+
+    // 第二段：全新栈（新 registry/saver/RunService——「控制面重启」形态）重放同 job
+    //（BullMQ stalled 自动重放的测试同形面：同 RunCommand、内存态全失）
+    const reborn = makeBundle({
+      primitives: s1.fs,
+      script: () => [new AIMessage({ content: [{ type: 'text', text: '恢复后续跑完成。' }] })],
+    })
+    await reborn.svc.execute(crashed)
+
+    // 续跑跑完：run.resumed 起（非 run.started——重放归一化生效的事件面证据）
+    const types = reborn.hub.types()
+    expect(types[0]).toBe('run.resumed')
+    expect(types[types.length - 1]).toBe('run.completed')
+    expect(reborn.svc.stateOf(SESSION)?.state).toBe('completed')
+    // checkpoint 无重复 user 消息（重放未重复 append——normalizeReplay 判据生效）
+    expect(await checkpointHumanCount(prisma, SESSION, '长任务不白费')).toBe(1)
+    // 续跑产出经事件面完整流出
+    const text = reborn.hub.events
+      .filter((e) => e.type === 'text.delta')
+      .map((e) => (e.payload as { delta: string }).delta)
+      .join('')
+    expect(text).toContain('恢复后续跑完成')
+  }, 30_000)
 })
