@@ -7,9 +7,16 @@ import { describe, it, expect, vi } from 'vitest'
 import { ToolMessage } from '@langchain/core/messages'
 import { createDownloadNode, type DownloadNodeDeps } from '../src/runner/runtime/downloadNode'
 
-function makeDeps(overrides: Partial<DownloadNodeDeps> = {}): DownloadNodeDeps & {
+// WrapToolCallHook 的 request 形状（ToolCallRequest 含 tool/state 图通道字段——S3 直调只消费
+// toolCall/runtime，其余字段以最小形状断言补齐，类型断言收窄）。
+type HookReq = Parameters<ReturnType<typeof createDownloadNode>['wrapToolCall']>[0]
+
+function makeDeps(
+  overrides: Partial<Pick<DownloadNodeDeps, 'resolveContainer'>> = {},
+): Omit<DownloadNodeDeps, 'materialize' | 'audit' | 'resolveContainer'> & {
   materialize: ReturnType<typeof vi.fn>
   audit: ReturnType<typeof vi.fn>
+  resolveContainer: (threadId: string) => string
 } {
   const materialize = vi.fn(async () => ({
     attachmentId: '9007199254740993',
@@ -21,11 +28,11 @@ function makeDeps(overrides: Partial<DownloadNodeDeps> = {}): DownloadNodeDeps &
   return { materialize, audit, resolveContainer: (t) => `researcher-sandbox-${t}`, ...overrides }
 }
 
-function writeRequest(path: string, toolName = 'write') {
+function writeRequest(path: string, toolName = 'write'): HookReq {
   return {
     toolCall: { id: 'call-1', name: toolName, args: { file_path: path, content: 'x' } },
     runtime: { configurable: { thread_id: 'sess-1' } },
-  }
+  } as unknown as HookReq
 }
 
 function okTool(): ToolMessage {
@@ -69,7 +76,10 @@ describe('#780 片 3 下载校验节点（S3）', () => {
     const handler = vi.fn(async () => okTool())
     // execute（shell 写旁路——D8 exec 显式降级同哲学）
     await node.wrapToolCall(
-      { toolCall: { id: 'c', name: 'execute', args: { command: 'echo hi' } }, runtime: { configurable: { thread_id: 's' } } },
+      {
+        toolCall: { id: 'c', name: 'execute', args: { command: 'echo hi' } },
+        runtime: { configurable: { thread_id: 's' } },
+      } as unknown as HookReq,
       handler,
     )
     // wiki 路径（/wiki/ 前缀不进产物面）
