@@ -19,11 +19,22 @@ export function sandboxNetworkName(sessionId: string): string {
   return `${SANDBOX_NETWORK_PREFIX}${sessionId}`
 }
 
+// sessionId → fork 导入镜像名（researcher-sandbox-fs-<sessionId>；#781 字面复制的 FS 快照，
+// 随容器 remove 顺手 rmi——单一来源命名防漂移）
+export function sandboxFsImageName(sessionId: string): string {
+  return `researcher-sandbox-fs-${sessionId}`
+}
+
 // 创建一个沙箱所需的语义参数（lifecycle → runtime）
 export interface SandboxSpec {
   readonly sessionId: string
   readonly image: string
   readonly limits: SandboxLimits
+}
+
+// fork 字面复制参数（#781 · #768 D7）：目标沙箱语义参数 + 源沙箱 session。
+export interface SandboxForkSpec extends SandboxSpec {
+  readonly sourceSessionId: string
 }
 
 // 一个沙箱的运行时状态快照（runtime → lifecycle）；health = docker inspect Running
@@ -45,6 +56,10 @@ export interface SandboxRuntime {
   // 创建沙箱容器（不启动）：资源 limit/安全 profile/标签 + /lab 属主预置（putArchive uid 1000）。
   // 返回 docker container id。
   createSandbox(spec: SandboxSpec): Promise<string>
+  // fork 字面复制（#781 · #768 D7「整容器字面文件系统复制，含墓碑目录」）：docker export 源
+  // 容器流式导出 → import 为目标专属镜像 → 以常规沙箱参数建目标容器（Image = 导入镜像）。
+  // 源容器不存在 → 'source-missing'（不建目标容器，调用方空起步）；网络创建归 lifecycle。
+  createSandboxFromSource(spec: SandboxForkSpec): Promise<'copied' | 'source-missing'>
   // 按 sessionId 取沙箱；不存在 → null
   getSandbox(sessionId: string): Promise<SandboxInfo | null>
   // 启动沙箱（已 running → 幂等成功；不存在 → 幂等成功，后续调用再暴露）

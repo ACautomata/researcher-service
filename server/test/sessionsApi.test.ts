@@ -156,6 +156,7 @@ describe('会话 REST 域（S1，#778）', () => {
           removedSandboxes.push(id)
           return 'removed'
         },
+        fork: async () => 'source-missing',
       },
     })
     runService.setRecordTurn((p) => sessions.recordTurn(p))

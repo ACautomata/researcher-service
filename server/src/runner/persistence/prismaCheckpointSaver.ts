@@ -79,8 +79,11 @@ export class PrismaCheckpointSaver extends BaseCheckpointSaver {
       ? await this.prisma.checkpoint.findUnique({
           where: { threadId_checkpointNs_checkpointId: { threadId, checkpointNs, checkpointId } },
         })
-      : await this.prisma.checkpoint.findFirst({
-          where: { threadId, checkpointNs },
+      : // 缺省寻址（取最新）= 未归档最新（#781 rewind 软删）：被放弃路线 checkpoint 不可被
+        // recover/续跑隐式寻址（R 评审：stalled 重放无 checkpoint_id，否则会续跑进旧分支）。
+        // 精确寻址不过滤——调用方自担（rewind 的 invocation 锚点由服务端校验后才入指针）。
+        await this.prisma.checkpoint.findFirst({
+          where: { threadId, checkpointNs, archivedAt: null },
           orderBy: { checkpointId: 'desc' },
         })
     if (!row) return undefined

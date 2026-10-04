@@ -268,6 +268,21 @@ CREATE TABLE IF NOT EXISTS "file_journal" (
     db.exec(`ALTER TABLE "session_messages" ADD COLUMN "clientKey" TEXT`)
   }
 
+  // #781（#747·11 · #770 rewind 软删）：session_messages / checkpoints / file_journal 三表
+  // 补 archivedAt 软删列——被放弃原路线行打标记（投影过滤/逆放跳过/GC 回收对象），行不物理删。
+  // ADD COLUMN 非幂等，PRAGMA guard 先查再补（三处 nullable，无回填需求）。
+  if (smCols.length > 0 && !smCols.some((c) => c.name === 'archivedAt')) {
+    db.exec(`ALTER TABLE "session_messages" ADD COLUMN "archivedAt" DATETIME`)
+  }
+  const cpCols = db.prepare(`PRAGMA table_info("checkpoints")`).all()
+  if (cpCols.length > 0 && !cpCols.some((c) => c.name === 'archivedAt')) {
+    db.exec(`ALTER TABLE "checkpoints" ADD COLUMN "archivedAt" DATETIME`)
+  }
+  const fjCols = db.prepare(`PRAGMA table_info("file_journal")`).all()
+  if (fjCols.length > 0 && !fjCols.some((c) => c.name === 'archivedAt')) {
+    db.exec(`ALTER TABLE "file_journal" ADD COLUMN "archivedAt" DATETIME`)
+  }
+
   // ---- B 节索引（在全部 B 节表 + 补列 guard 之后统一创建；IF NOT EXISTS 幂等）----
   db.exec(`
 CREATE INDEX IF NOT EXISTS "sessions_ownerId_idx" ON "sessions"("ownerId");

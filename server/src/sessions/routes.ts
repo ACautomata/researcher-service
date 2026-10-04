@@ -12,8 +12,10 @@ import { validateBody } from '../middleware/validate'
 import {
   messageSendSchema,
   sessionCreateSchema,
+  sessionForkSchema,
   sessionPatchSchema,
   sessionResumeSchema,
+  sessionRewindSchema,
 } from '../validation/schemas'
 import { MESSAGE_KEY_REGEX } from './values'
 import type { SessionService } from './service'
@@ -93,6 +95,20 @@ export function createSessionsRouter(deps: SessionsRouterDeps): Router {
   // GET /:id/messages —— 历史投影（story 3 回放面；与实时流终态零差异）。
   router.get('/:id/messages', async (req: Request, res: Response) => {
     ok(res, await deps.service.getProjection(req.user!, pathId(req)))
+  })
+
+  // POST /:id/rewind —— 回退重开（story 16）：换 activeCheckpointId 指针 + 被放弃路线软删
+  //（#770）+ session.invalidated{reason:rewind} 广播。文件逆放归 #782。
+  router.post('/:id/rewind', validateBody(sessionRewindSchema), async (req: Request, res: Response) => {
+    const { messageId } = req.body as z.infer<typeof sessionRewindSchema>
+    ok(res, await deps.service.rewindSession(req.user!, pathId(req), { messageId }))
+  })
+
+  // POST /:id/fork —— 复制出新会话（story 18/20 · #768 D7）：state/沙箱/journal/attachments
+  // 全件 + session.created{source:fork} 广播。branch-switch 机制 #770 取消（fork 并存多开）。
+  router.post('/:id/fork', validateBody(sessionForkSchema), async (req: Request, res: Response) => {
+    const { messageId, title } = req.body as z.infer<typeof sessionForkSchema>
+    ok(res, await deps.service.forkSession(req.user!, pathId(req), { messageId, title }))
   })
 
   return router

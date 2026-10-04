@@ -558,7 +558,13 @@ export class RunService {
     // 单 turn 聚合（#778 回放零差异的实时面）：与 publish 同源同序消费投影事件——归约快照即
     // SSE 事件流终态（前端 #730 消费同一目录）。
     const turn = new TurnReducer()
-    const invocation = buildStreamEventsInvocation(cmd.sessionId)
+    // rewind time-travel（#781 story 16）：仅 kind=message 且会话指针非空时从锚点 checkpoint
+    // 分叉续跑（resume/recover 恒链头——interrupt/recover 点必在锚点链上，getTuple 缺省寻址
+    // 即命中；指针非空时从锚点 input 重新起步，旧 checkpoint 走 archivedAt 软删）。
+    const invocation = buildStreamEventsInvocation(
+      cmd.sessionId,
+      cmd.kind === 'message' && session.activeCheckpointId !== null ? session.activeCheckpointId : undefined,
+    )
 
     // 终态 checkpoint 锚点（#778 anchorCheckpointId）：成功路径从终态 state 取；
     // aborted/failed 路径无可靠 state → null（回放面锚点缺位不阻断落行）。
@@ -763,7 +769,57 @@ export class RunService {
           console.warn(`[runner] recordTurn failed: session=${cmd.sessionId} run=${cmd.runId}: ${(err as Error).message}`)
         }
       }
+      // 活跃指针推进（#781 story 16 + R 评审守卫）：仅会话处于 rewind 态（指针非空）且本轮
+      // completed 时，指针前移到本轮终态 checkpoint（锚点链延伸头）——投影 archivedAt 过滤的
+      // 链基准随之推进，下次 message 从新头分叉。NULL 指针（从未 rewind）不写（免全量写放大，
+      // NULL ≡ 链头）；interrupted/failed/aborted 不推进（指针保持锚点：failed/aborted 轮由
+      // sendMessage 的残留清理归档后从锚点重开；interrupted 走 resume 从链头续跑）。
+      // 推进前提校验（R 评审）：指针实时重读 + 本轮终态锚的祖先链须含该指针——崩溃后 BullMQ
+      // stalled 重放（recover 不带 checkpoint_id）若续跑进被放弃分支，其终态锚不含指针 → 不
+      // 推进（防指针被拽进旧分支致会话永久复跑）。校验/更新失败一律不放大（终态已发）。
+      if (finalState === 'completed' && anchorCheckpointId !== null) {
+        try {
+          const current = await this.deps.prisma.session.findUnique({
+            where: { id: cmd.sessionId },
+            select: { activeCheckpointId: true },
+          })
+          const pointer = current?.activeCheckpointId ?? null
+          if (
+            pointer !== null &&
+            (await this.checkpointLineageContains(cmd.sessionId, anchorCheckpointId, pointer))
+          ) {
+            await this.deps.prisma.session.update({
+              where: { id: cmd.sessionId },
+              data: { activeCheckpointId: anchorCheckpointId },
+            })
+          } else if (pointer !== null) {
+            // eslint-disable-next-line no-console
+            console.warn(`[runner] activeCheckpointId 推进跳过（终态锚不在指针链下）: session=${cmd.sessionId}`)
+          }
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn(`[runner] activeCheckpointId 推进失败: session=${cmd.sessionId}: ${(err as Error).message}`)
+        }
+      }
     }
+  }
+
+  // 祖先链包含判定（#781 指针推进前提）：from 出发沿 parentCheckpointId 上溯（含 from 自身）是否
+  // 命中 target。环/超深 guard 兜底；读失败向上抛由调用方吞（宁可不推进）。
+  private async checkpointLineageContains(threadId: string, from: string, target: string): Promise<boolean> {
+    const cps = await this.deps.prisma.checkpoint.findMany({
+      where: { threadId },
+      select: { checkpointId: true, parentCheckpointId: true },
+    })
+    const parentOf = new Map(cps.map((c) => [c.checkpointId, c.parentCheckpointId]))
+    const seen = new Set<string>()
+    let cur: string | null = from
+    while (cur !== null && !seen.has(cur) && seen.size < 10_000) {
+      if (cur === target) return true
+      seen.add(cur)
+      cur = parentOf.get(cur) ?? null
+    }
+    return false
   }
 
   // ---- 审批升级检出（interrupt payload → approval.requested 事件面）----

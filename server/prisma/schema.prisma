@@ -393,6 +393,10 @@ model SessionMessage {
   // 锚点（issue #778 点名——recordTurn 注入缝从 RunService StateSnapshot 取）。
   anchorCheckpointId String?
 
+  // #770 rewind 软删存档：被放弃原路线的行打标记（映射层过滤——投影 GET 不读；行不物理删，
+  // retention 回收对象）。fork 复制只拷活跃行，归档行不随 fork。
+  archivedAt DateTime?
+
   createdAt DateTime @default(now())
 
   attachments Attachment[] // 挂载于本消息的附件（用户附件 + agent→用户媒体同表，D9）
@@ -416,6 +420,9 @@ model Checkpoint {
   type       String // LangGraph serializer type（如 "json"）
   blob       Bytes // 序列化 state（LangGraph dumpsTyped 字节；serde 默认 JSON —— #727）
   metadataJson String @default("{}")
+  // #770 rewind 软删：被放弃原路线独有的 checkpoint 行打标记（retention/refcount GC 回收
+  // 对象；机制面 LangGraph 不滤——activeCheckpointId 指针保证续跑永不触达归档分支）。
+  archivedAt DateTime?
   createdAt  DateTime @default(now())
 
   @@id([threadId, checkpointNs, checkpointId])
@@ -623,6 +630,9 @@ model FileJournal {
   tombstoneKey String? // 墓碑 key（daemon 侧 root 写 0700 隐藏目录；非墓碑行 null）
   toolCallId   String // 幂等键（journal-first 崩溃去重）
   applied      Boolean @default(false)
+  // #770 rewind 软删：checkpointId 落在被放弃路线的行打标记（rewind 逆放跳过 = 幂等 no-op，
+  // #782 消费；fork 继承只拷活跃行）。
+  archivedAt DateTime?
 
   @@unique([sessionId, seq])
   @@unique([sessionId, toolCallId])
