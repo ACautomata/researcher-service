@@ -70,9 +70,11 @@ describe.skipIf(!DOCKER_UP)('wiki 容器生命周期集成 smoke（真 docker da
     expect(data.HostConfig.SecurityOpt).toEqual(['no-new-privileges'])
     // 永久容器：daemon 重启自愈（随用户生命周期；删除面归 removeWiki）
     expect(data.HostConfig.RestartPolicy?.Name).toBe('unless-stopped')
-    // NetworkMode none 零出网（AC「NetworkMode none 有验证」）
+    // NetworkMode none 零出网（AC「NetworkMode none 有验证」）：daemon 实测 inspect 的
+    // Networks 键集恰为 ['none']（合成的 none 条目，无端点无 IPAM，不构成连通面）——断言
+    // 「不存在除 none 外的任何网络」即零出网语义（none 条目形状跨 daemon 版本可微差，不锁）
     expect(data.HostConfig.NetworkMode).toBe('none')
-    expect(data.NetworkSettings.Networks ?? {}).toEqual({})
+    expect(Object.keys(data.NetworkSettings.Networks ?? {}).filter((k) => k !== 'none')).toEqual([])
     // 标签：kind=wiki + owner 绑定；不打 fleet app 标签
     expect(data.Config.Labels).toMatchObject({ [LABEL_KIND_KEY]: KIND_WIKI, [LABEL_OWNER_KEY]: OWNER })
     expect(data.Config.Labels?.app).toBeUndefined()
