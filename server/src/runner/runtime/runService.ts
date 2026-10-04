@@ -77,6 +77,8 @@ export interface RunCommand {
   readonly kind: 'message' | 'resume'
   /** kind=message：用户消息文本 */
   readonly content?: string
+  /** kind=message：#780 附件引用（雪花 attachmentId 列表；ingestion 节点消费，片 2） */
+  readonly attachmentIds?: readonly string[]
   /** kind=resume：HITL 决策（{decisions:[...]} 形态，PoC 实测） */
   readonly decisions?: unknown
   /** kind=resume：abort 语义（#783 story 15——suspended/interrupted run 的终态出路：
@@ -205,6 +207,7 @@ export class RunService {
     username: string
     kind: 'message' | 'resume'
     content?: string
+    attachmentIds?: readonly string[]
     decisions?: unknown
   }): RunCommand {
     return { runId: randomUUID(), ...params }
@@ -221,6 +224,7 @@ export class RunService {
     ownerId: string
     username: string
     content: string
+    attachmentIds?: readonly string[]
   }): Promise<RunCommand> {
     const caller = await this.deps.prisma.user.findUnique({
       where: { id: params.ownerId },

@@ -83,6 +83,16 @@ class FakeFileArchive implements FileArchive {
     return Buffer.from(raw, 'utf8')
   }
 
+  // #780 沙箱字节读（附件下载端点）：按 docker 名取 lab 树、返回原始字节；不存在 → FileNotFound。
+  async readLabBytes(dockerName: string, relPath: string): Promise<Buffer> {
+    this.calls.push({ method: 'readLabBytes', dockerName, relPath })
+    const tree = this.labTrees.get(dockerName)
+    if (tree === undefined) throw new FileNotFound(relPath)
+    const raw = tree.get(relPath)
+    if (raw === undefined) throw new FileNotFound(relPath)
+    return Buffer.from(raw, 'utf8')
+  }
+
   async write(_name: string, root: FileRoot, relPath: string, content: string): Promise<void> {
     this.calls.push({ method: 'write', root, relPath, content })
     if (!this.files.has(relPath)) throw new FileNotFound(relPath)

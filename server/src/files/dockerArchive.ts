@@ -192,6 +192,21 @@ export class DockerFileArchive implements FileArchive {
     return this.readContainer(dockerName, this.absPath('lab', relPath), relPath, recursive)
   }
 
+  // #780 沙箱字节读（附件下载端点）：与 readBytes 同 byte 收集语义，但以 lab 根 + dockerName 原文
+  // 寻址（不复用 readBytes 的 workspace absRoot 通道——lab 字节属于沙箱容器）。探针/收集与
+  // readBytes 完全同构（oversized/非文件 → FileInvalidPath；不存在 → FileNotFound）。
+  async readLabBytes(dockerName: string, relPath: string): Promise<Buffer> {
+    const absPath = this.absPath('lab', relPath)
+    const probed = await this.probe(dockerName, absPath)
+    if (probed === null) throw new FileNotFound(relPath)
+    if (probed.kind === 'oversized') throw new FileInvalidPath(relPath)
+    if (probed.root.type !== 'file') throw new FileInvalidPath(relPath)
+    const full = parseTar(probed.buf, { collectData: true, maxDataBytes: MAX_FILE_READ_BYTES })
+    const entry = full[0]
+    if (!entry) throw new FileNotFound(relPath)
+    return entry.data ?? Buffer.alloc(0)
+  }
+
   // 读通道本体（read/readLab 共用）：absPath = 容器内绝对路径，relPath = 相对树根的回显路径。
   private async readContainer(
     container: string,

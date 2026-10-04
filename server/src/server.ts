@@ -1,4 +1,5 @@
 import { createServer } from 'node:http'
+import path from 'node:path'
 import { createApp } from './app'
 import { getPrisma } from './prisma'
 import { bootstrap } from './auth/bootstrap'
@@ -11,6 +12,8 @@ import { assembleTunnelServer } from './chat/tunnelAssembly'
 import { assembleRunner } from './runner/assembly'
 import { StreamHub } from './events/hub'
 import { SessionService } from './sessions/service'
+import { AttachmentsService } from './attachments/service'
+import { ATTACHMENT_TMP_DIR } from './attachments/values'
 import './types'
 
 async function main(): Promise<void> {
@@ -62,6 +65,16 @@ async function main(): Promise<void> {
       },
     },
   })
+  // #780 附件域：上传（控制面临时区 <fleetRoot>/attachments，REST 不直写沙箱）+ 下载（沙箱
+  // readLabBytes 字节通道，files 域 fleet.archive 复用）。临时区须在 multer destination 前存在
+  //（createAttachmentsRouter 工厂期 mkdirSync 兜底）。ingestion/validation 节点（片 2/3）经
+  // runner 注入缝消费本服务（后续票接线）。
+  const attachmentTmpRoot = path.join(config.fleet.root, ATTACHMENT_TMP_DIR)
+  const attachmentsService = new AttachmentsService({
+    prisma,
+    tmpRoot: attachmentTmpRoot,
+    archive: fleet.archive,
+  })
   // 会话域（#778 · #747 C 节会话 REST 全件）：SessionService（门禁观测/配额预检/命令构造复用
   // runner.service；dispatch = BullMQ submit 透传——ack 失败由 SessionService 回滚/上报，
   // 执行体错误走 run 域事件面与 #779 补偿）+ recordTurn 注入缝回接 runner（session_messages
@@ -72,6 +85,8 @@ async function main(): Promise<void> {
     runService: runner.service,
     dispatch: (cmd) => runner.queue.submit(cmd),
     sandboxes: { remove: (id) => sandboxes.lifecycle.remove(id) },
+    // #780 附件链接（≤4 件 + 归属/session 校验）——上传/下载走独立 AttachmentsService
+    attachments: attachmentsService,
   })
   runner.service.setRecordTurn((p) => sessions.recordTurn(p))
   const app = createApp({
@@ -109,6 +124,8 @@ async function main(): Promise<void> {
     events: { hub: eventHub },
     // sessions（#778）：会话 REST 域（/api/v1/sessions）。SessionService 单例注入。
     sessions: { service: sessions },
+    // attachments（#780）：上传/下载 REST（挂 /api/v1）。AttachmentsService 单例注入。
+    attachments: { service: attachmentsService, tmpRoot: attachmentTmpRoot },
   })
 
   // M0 同进程单端口分流：createServer(expressApp) + server.on('upgrade') 分流。

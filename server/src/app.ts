@@ -18,6 +18,7 @@ import { createFiguresRouter, type FiguresRouterDeps } from './figures/routes'
 import { createDocsRouter, type DocsRouterDeps } from './openapi/routes'
 import { createEventsRouter, type EventsRouterDeps } from './events/routes'
 import { createSessionsRouter, type SessionsRouterDeps } from './sessions/routes'
+import { createAttachmentsRouter, type AttachmentsRouterDeps } from './attachments/routes'
 import { Orchestrator } from './containers/orchestrator'
 import { FleetDeps } from './containers/deps'
 import type { ContainerRuntime } from './containers/runtime'
@@ -61,10 +62,14 @@ export interface AppDeps {
   // resume + 历史投影。注入即挂载（条件挂载先例）——生产 server.ts 装配 SessionService
   //（持 runner 命令面 + hub + dispatch）；缺省 = 不挂（/api/v1/sessions → 90005）。
   sessions?: SessionsRouterDeps
+  // attachments 接缝（#780，#747 G 节附件 D1–D6）：上传/下载 REST（挂 /api/v1，
+  // POST /sessions/:id/attachments + GET /attachments/:id/download）。注入即挂载（条件挂载
+  // 先例）——生产 server.ts 装配 AttachmentsService（临时区 + files 沙箱读通道）；缺省 = 不挂。
+  attachments?: AttachmentsRouterDeps
 }
 
 // createApp 工厂：PrismaClient 经依赖注入，测试可传 test DB（接缝 #2）。
-export function createApp({ prisma, orchestrator, runtime, wiki, models, providerEndpoints, files, figures, docs, events, sessions }: AppDeps): Application {
+export function createApp({ prisma, orchestrator, runtime, wiki, models, providerEndpoints, files, figures, docs, events, sessions, attachments }: AppDeps): Application {
   const app = express()
   // wiki 内容契约无大小上限（codex PR#346）：挂载路径内请求先走 5mb limit，其余端点仍 256kb。
   // 须先于全局 parser —— body-parser 对已解析 body（req._body）会跳过，故 wiki 命中后不二次解析。
@@ -128,6 +133,12 @@ export function createApp({ prisma, orchestrator, runtime, wiki, models, provide
   // sessions（#778）：会话 REST 域（/api/v1/sessions）。存在即挂载（条件挂载先例）。
   if (sessions) {
     app.use('/api/v1/sessions', createSessionsRouter(sessions))
+  }
+  // attachments（#780）：上传/下载（挂 /api/v1——POST /sessions/:id/attachments 与
+  // GET /attachments/:id/download 共根）。存在即挂载（条件挂载先例）；须在 sessions 之后
+  //（/sessions/:id/attachments 不被 sessions 路由吞——session 路由无该子路径，落空即穿透）。
+  if (attachments) {
+    app.use('/api/v1', createAttachmentsRouter(attachments))
   }
 
   app.use(notFound) // 未匹配路由 → 信封 90005（兑现「所有 REST HTTP 200」）
