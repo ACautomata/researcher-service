@@ -1,6 +1,7 @@
 import type { PrismaClient, Session, Teammate, TeammateMailboxMessage } from '../../generated/prisma/client'
 import { fail } from '../../envelope'
 import { CODE } from '../../codes'
+import { createHash } from 'node:crypto'
 
 export const TEAMMATE_MAIL_TTL_MS = 48 * 60 * 60 * 1000
 export const DEFAULT_MAIL_WAIT_MS = 30 * 60 * 1000
@@ -165,7 +166,7 @@ export class TeammateService {
     content: string
     ttlMs?: number
   }): Promise<MailSummary> {
-    await this.getLeaderSession(input.parentSessionId)
+    const parent = await this.getLeaderSession(input.parentSessionId)
     if (input.senderTeammateId) {
       await this.getActiveTeammate(input.parentSessionId, input.senderTeammateId)
     }
@@ -174,16 +175,33 @@ export class TeammateService {
     }
     const now = this.clock()
     const ttlMs = input.ttlMs ?? TEAMMATE_MAIL_TTL_MS
-    const row = await this.prisma.teammateMailboxMessage.create({
-      data: {
-        parentSessionId: input.parentSessionId,
-        senderTeammateId: input.senderTeammateId ?? null,
-        recipientTeammateId: input.recipientTeammateId ?? null,
-        kind: input.kind ?? 'message',
-        content: input.content,
-        createdAt: now,
-        expiresAt: ttlMs > 0 ? new Date(now.getTime() + ttlMs) : null,
-      },
+    const row = await this.prisma.$transaction(async tx => {
+      const owner = await tx.user.findUniqueOrThrow({ where: { id: parent.ownerId }, select: { username: true } })
+      const actors = await tx.teammate.findMany({ where: { parentSessionId: parent.id }, select: { id: true, name: true, archivedAt: true } })
+      for (const id of [input.senderTeammateId, input.recipientTeammateId]) {
+        if (id && !actors.some(actor => actor.id === id && actor.archivedAt === null)) throw fail(CODE.SESSION_NOT_FOUND)
+      }
+      const actorName = (id: string | null | undefined) => id ? actors.find(actor => actor.id === id)?.name ?? id : 'leader'
+      const mail = await tx.teammateMailboxMessage.create({
+        data: {
+          parentSessionId: input.parentSessionId,
+          senderTeammateId: input.senderTeammateId ?? null,
+          recipientTeammateId: input.recipientTeammateId ?? null,
+          kind: input.kind ?? 'message',
+          content: input.content,
+          createdAt: now,
+          expiresAt: ttlMs > 0 ? new Date(now.getTime() + ttlMs) : null,
+        },
+      })
+      // Communication audit follows the user's lifetime, independently of session cascades.
+      // Commit mail and its audit together before attempting a recipient wake.
+      await tx.textTraceLog.create({ data: {
+        traceId: `teammate-mail:${mail.id}`, userId: parent.ownerId, username: owner.username,
+        ipAddress: 'internal', sessionKey: parent.id, status: 'success', createdAt: now,
+        inputText: JSON.stringify({ kind: mail.kind, from: actorName(mail.senderTeammateId), to: actorName(mail.recipientTeammateId), senderTeammateId: mail.senderTeammateId, recipientTeammateId: mail.recipientTeammateId }),
+        outputText: mail.content, outputHash: createHash('sha256').update(mail.content).digest('hex'),
+      } })
+      return mail
     })
     const wait = await this.prisma.teammateMailboxWait.findFirst({
       where: { parentSessionId: input.parentSessionId, recipientTeammateId: input.recipientTeammateId ?? null },
@@ -244,10 +262,12 @@ export class TeammateService {
     const teammate = await this.getActiveTeammate(parentSessionId, teammateId, true)
     const archivedAt = status === 'archived' ? this.clock() : null
     const updated = await this.prisma.$transaction(async (tx) => {
-      const row = await tx.teammate.update({
-        where: { id: teammate.id },
+      const updated = await tx.teammate.updateMany({
+        where: { id: teammate.id, ...(status !== 'archived' ? { archivedAt: null } : {}) },
         data: { status, archivedAt },
       })
+      const row = await tx.teammate.findUniqueOrThrow({ where: { id: teammate.id } })
+      if (updated.count === 0) return row // Archive is terminal; a stale finalizer cannot revive it.
       if (archivedAt) {
         await tx.session.update({ where: { id: row.threadId }, data: { archivedAt } })
       } else {

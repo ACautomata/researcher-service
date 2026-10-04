@@ -1,5 +1,6 @@
 import { resolveModelRef, type ModelRef } from '../providerRegistry'
 import { snapshotOfficialContent } from '../../officialContent/runtime'
+import { teammateDelegation } from '../teammates/delegation'
 // RunService —— 集中式 runner 内核（#777 · #747 A 节「runner 编排」）。
 //
 // 职责（BullMQ 传输面之外的全部 run 机制）：
@@ -33,6 +34,7 @@ import { snapshotOfficialContent } from '../../officialContent/runtime'
 
 import { randomUUID } from 'node:crypto'
 import { HumanMessage, ToolMessage, type BaseMessage, type ContentBlock } from '@langchain/core/messages'
+import { AsyncLocalStorageProviderSingleton } from '@langchain/core/singletons'
 import type { AnyAgentMiddleware } from 'langchain'
 import { Command, END } from '@langchain/langgraph'
 import { ERROR, INTERRUPT } from '@langchain/langgraph-checkpoint'
@@ -203,9 +205,9 @@ export interface InFlightProjection {
 }
 
 // 审批升级挂起记录（#783）：interrupt 检出时落（事件 + 48h 死线），resume/落定时清。
-interface PendingApproval {
-  readonly ownerId: string
-  readonly runId: string
+type RunEventContext = Pick<RunCommand, 'sessionId' | 'runId' | 'ownerId' | 'parentSessionId' | 'teammateId'>
+
+interface PendingApproval extends Omit<RunEventContext, 'sessionId'> {
   readonly escalationId: string
   readonly deadlineAt: number
 }
@@ -217,7 +219,7 @@ export class RunService {
   private readonly chains = new Map<string, Promise<void>>()
   private readonly pendingApprovals = new Map<string, PendingApproval>()
   /** 在飞 run 命令（threadId → cmd；拒绝红显事件的归属盖印源） */
-  private readonly activeCmds = new Map<string, Pick<RunCommand, 'sessionId' | 'runId' | 'ownerId'>>()
+  private readonly activeCmds = new Map<string, RunEventContext>()
   private readonly recursionLimit: number
   private readonly approvalTimeoutMs: number
   private readonly clock: () => number
@@ -356,6 +358,12 @@ export class RunService {
   // executeNow 的信封错误（40043/50002）向上传播；run 执行体错误在 executeRun 内消化
   //（终态事件已发，对传输面表现为正常完成）。
   async execute(cmd: RunCommand): Promise<void> {
+    // Each command is a root graph, even when dispatched from another graph's tool.
+    // Inheriting the caller's Pregel config makes teammate interrupts bubble into the leader.
+    return AsyncLocalStorageProviderSingleton.getInstance().run(undefined, () => this.executeCommand(cmd))
+  }
+
+  private async executeCommand(cmd: RunCommand): Promise<void> {
     // 重放归一化（story 14）：BullMQ v6 stalled job 绕过 attempts 自动重放（#779 探针实测）
     // ——「message 重复 append / resume 50001」的重放风险在内核单点拦截，checkpoint 判据
     // 见 normalizeReplay。Inline/测试路径判据不命中即原样（零行为差异）。
@@ -459,7 +467,7 @@ export class RunService {
   private publish(
     ownerId: string,
     ev: Omit<CatalogEvent, 'sessionId' | 'runId'>,
-    cmd: Pick<RunCommand, 'sessionId' | 'runId' | 'parentSessionId' | 'teammateId'>,
+    cmd: Omit<RunEventContext, 'ownerId'>,
   ): void {
     this.deps.hub.publish(ownerId, {
       ...ev,
@@ -558,7 +566,7 @@ export class RunService {
           },
           start: (teammate) => this.startTeammate(cmd, teammate),
           scheduleTimeout: (input) => this.scheduleMailboxTimeout(cmd, input),
-          abort: async (teammate) => { const runId = this.runs.get(teammate.threadId)?.runId; if (runId) this.abort(runId, 'system') },
+          abort: async (teammate) => { this.stopTeammate(cmd, teammate) },
         })
       : []
     const modelKey = actor?.modelProviderId ? `provider:${actor.modelProviderId}` : session.preferredModelJson ?? 'default'
@@ -597,7 +605,7 @@ export class RunService {
     }
 
     this.runs.set(cmd.sessionId, { runId: cmd.runId, state: 'running' })
-    this.activeCmds.set(cmd.sessionId, { sessionId: cmd.sessionId, runId: cmd.runId, ownerId: cmd.ownerId })
+    this.activeCmds.set(cmd.sessionId, cmd)
     // 新 run = run.started；interrupted 后的续跑（resume）/恢复续跑（recover，story 14）=
     // run.resumed（#747 C 节目录二者并列——消费方按事件类型区分首轮/续跑轮）
     this.publish(
@@ -760,6 +768,8 @@ export class RunService {
               runId: cmd.runId,
               escalationId: escalations[0]!.escalation.id,
               deadlineAt: this.clock() + this.approvalTimeoutMs,
+              parentSessionId: cmd.parentSessionId,
+              teammateId: cmd.teammateId,
             })
           }
         } else if ((cmd.kind === 'resume' || cmd.kind === 'recover') && cmd.abort) {
@@ -836,8 +846,8 @@ export class RunService {
               : finalState === 'suspended' || (finalState === 'interrupted' && this.pendingApprovals.has(cmd.sessionId)) ? 'suspended'
               : finalState === 'interrupted' ? 'waiting'
               : 'running'
-            await this.deps.teammates.updateStatus(parentSessionId, cmd.teammateId, status)
-            if (status === 'completed' || status === 'failed' || status === 'suspended') {
+            const updated = await this.deps.teammates.updateStatus(parentSessionId, cmd.teammateId, status)
+            if (updated.status !== 'archived' && (status === 'completed' || status === 'failed' || status === 'suspended')) {
               this.publish(cmd.ownerId, {
                 type: `teammate.${status}`,
                 payload: { teammateId: cmd.teammateId, name: teammate.name },
@@ -1003,7 +1013,7 @@ export class RunService {
       const snap = this.runs.get(sessionId)
       if (!snap || snap.state !== 'interrupted') continue
       this.runs.set(sessionId, { runId: snap.runId, state: 'suspended' })
-      this.publish(pending.ownerId, { type: 'run.suspended', payload: {} }, { sessionId, runId: snap.runId })
+      this.publish(pending.ownerId, { type: 'run.suspended', payload: {} }, { ...pending, sessionId, runId: snap.runId })
     }
   }
 
@@ -1163,9 +1173,10 @@ export class RunService {
       // 中间件（运行期行为非拓扑因子——不入缓存键）：#783 审批漏斗 + #780 下载校验节点
       //（file 写类工具成功后物化产物 + 下载引用进 tool 输出；跨 run 状态由各中间件
       // per-thread 槽管理，同参数必同拓扑的纯函数约束不受影响）。
-      ...(this.deps.approvals || this.deps.downloadNode
+      ...(this.deps.approvals || this.deps.downloadNode || this.deps.teammates
         ? {
             middleware: [
+              ...(this.deps.teammates ? [teammateDelegation] : []),
               ...(this.deps.approvals ? [this.deps.approvals.middleware] : []),
               ...(this.deps.downloadNode ? [this.deps.downloadNode.middleware] : []),
             ],
@@ -1227,7 +1238,27 @@ export class RunService {
   }
 
   async teammatesForRewind(sessionId: string, checkpointId: string): Promise<void> {
-    await this.deps.teammates?.rewind(sessionId, checkpointId)
+    const teammates = this.deps.teammates
+    if (!teammates) return
+    const parent = await this.deps.prisma.session.findUnique({ where: { id: sessionId }, select: { ownerId: true } })
+    const ids = await teammates.rewind(sessionId, checkpointId)
+    if (!parent) return
+    for (const id of ids) {
+      this.stopTeammate({ sessionId, ownerId: parent.ownerId }, await teammates.get(sessionId, id))
+    }
+  }
+
+  private stopTeammate(parent: Pick<RunCommand, 'sessionId' | 'ownerId' | 'parentSessionId'>, teammate: TeammateSummary): void {
+    this.pendingApprovals.delete(teammate.threadId)
+    const snap = this.runs.get(teammate.threadId)
+    if (!snap || ['completed', 'failed', 'aborted'].includes(snap.state)) return
+    if (this.abort(snap.runId, 'system')) return
+    // Parked threads have no AbortController; retire scheduling while retaining their checkpoint.
+    this.runs.set(teammate.threadId, { runId: snap.runId, state: 'aborted', by: 'system' })
+    this.publish(parent.ownerId, { type: 'run.aborted', payload: { by: 'system' } }, {
+      sessionId: teammate.threadId, runId: snap.runId,
+      parentSessionId: parent.parentSessionId ?? parent.sessionId, teammateId: teammate.id,
+    })
   }
 
   private async graphState(agent: DeepAgentLike, threadId: string): Promise<GraphStateLike> {

@@ -25,6 +25,7 @@ import type { SandboxRemoveOutcome } from '../sandboxes/lifecycle'
 import type { EventPublisher, InFlightProjection, RunCommand, RunSnapshot } from '../runner/runtime/runService'
 import { serializeAttachments, type RecordTurnPayload } from './reducer'
 import { TITLE_AUTO_MAX } from './values'
+import type { TeammateStatus } from '../runner/teammates/service'
 
 // 会话摘要（session.created/updated 载荷 + 列表行 + 创建/PATCH 返回——同一形状）。
 export interface SessionSummary {
@@ -52,6 +53,17 @@ export interface SessionProjection {
   readonly messages: ProjectionMessage[]
   /** in-flight 投影（story 11 · #779）：有进行中 run 时带出（从 checkpoint blob 反序列化重建，
    *  即焚 token 事件的补偿真相源）；无在飞 = 字段缺省。多端重拉同帧（同一内存态）。 */
+  readonly inFlight?: InFlightProjection
+  readonly teammates?: TeammateProjection[]
+}
+
+export interface TeammateProjection {
+  readonly id: string
+  readonly name: string
+  readonly task: string
+  readonly status: TeammateStatus
+  readonly messages: ProjectionMessage[]
+  readonly mailbox: Array<{ id: string; senderTeammateId: string | null; recipientTeammateId: string | null; kind: string; content: string; createdAt: string }>
   readonly inFlight?: InFlightProjection
 }
 
@@ -229,6 +241,20 @@ export class SessionService {
       snap.state === 'aborted' ||
       snap.state === 'failed'
     if (!terminal) throw fail(CODE.RUN_IN_PROGRESS)
+    const teammates = await this.deps.prisma.teammate.findMany({
+      where: { parentSessionId: sessionId },
+      select: { threadId: true, status: true },
+    })
+    for (const teammate of teammates) {
+      const state = this.deps.runService.stateOf(teammate.threadId)?.state
+      const executing = state === 'queued' || state === 'running'
+      const live = teammate.status !== 'archived' && (state
+        ? !['completed', 'aborted', 'failed'].includes(state)
+        : ['queued', 'running', 'waiting', 'suspended'].includes(teammate.status))
+      if (executing || live) {
+        throw fail(CODE.RUN_IN_PROGRESS)
+      }
+    }
     await this.deps.sandboxes?.remove(sessionId)
     await this.deps.prisma.$transaction(async (tx) => {
       const teammateThreads = await tx.teammate.findMany({
@@ -445,11 +471,33 @@ export class SessionService {
       orderBy: [{ turn: 'asc' }, { createdAt: 'asc' }],
     })
     const inFlight = await this.deps.runService.inFlightProjection(sessionId)
+    const peers = await this.deps.prisma.teammate.findMany({
+      where: { parentSessionId: sessionId },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      include: { thread: { include: { messages: { orderBy: [{ turn: 'asc' }, { createdAt: 'asc' }] } } } },
+    })
+    const mail = peers.length > 0 ? await this.deps.prisma.teammateMailboxMessage.findMany({
+      where: { parentSessionId: sessionId, invalidatedAt: null, OR: [{ readAt: { not: null } }, { expiresAt: null }, { expiresAt: { gt: new Date() } }] },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+    }) : []
+    const teammates = await Promise.all(peers.map(async peer => {
+      const active = await this.deps.runService.inFlightProjection(peer.threadId)
+      return {
+        id: peer.id, name: peer.name, task: peer.task, status: peer.status as TeammateStatus,
+        messages: peer.thread.messages.map(toProjectionMessage),
+        mailbox: mail.filter(message => message.senderTeammateId === peer.id || message.recipientTeammateId === peer.id).map(message => ({
+          id: message.id, senderTeammateId: message.senderTeammateId, recipientTeammateId: message.recipientTeammateId,
+          kind: message.kind, content: message.content, createdAt: message.createdAt.toISOString(),
+        })),
+        ...(active !== undefined ? { inFlight: active } : {}),
+      }
+    }))
     return {
       sessionId,
       title: session.title,
       messages: rows.map(toProjectionMessage),
       ...(inFlight !== undefined ? { inFlight } : {}),
+      ...(teammates.length > 0 ? { teammates } : {}),
     }
   }
 

@@ -44,6 +44,26 @@ describe('BullMqRunQueue（真 Redis）', () => {
     return q
   }
 
+  it('delayed mailbox wake survives worker restart with its complete command', async ctx => {
+    if (!redisUp) ctx.skip()
+    const queueName = `test-mail-wake-${process.pid}-${Math.random().toString(36).slice(2, 8)}`
+    const ran: RunCommand[] = []
+    const cmd: RunCommand = {
+      runId: 'mail-timeout-test', sessionId: 'child-thread', parentSessionId: 'leader-thread',
+      teammateId: 'worker', ownerId: 'u1', username: 'user1', kind: 'resume',
+      mailWaitId: 'wait-id', mailWakeReason: 'timeout', mailBroadcastOnTimeout: true,
+    }
+    const first = new BullMqRunQueue({ redisUrl: REDIS_URL, queueName, execute: async command => { ran.push(command) } })
+    try {
+      await first.submit(cmd, { delayMs: 1000 })
+    } finally { await first.close() }
+    expect(ran).toEqual([])
+    const restarted = new BullMqRunQueue({ redisUrl: REDIS_URL, queueName, execute: async command => { ran.push(command) } })
+    queues.push(restarted)
+    for (let i = 0; i < 150 && ran.length === 0; i++) await new Promise(resolve => setTimeout(resolve, 20))
+    expect(ran).toEqual([cmd])
+  }, 15_000)
+
   it('submit → worker 消费执行（自包含 RunCommand data）', async (ctx) => {
     if (!redisUp) ctx.skip()
     const ran: RunCommand[] = []
