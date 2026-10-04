@@ -106,12 +106,18 @@ export interface RunServiceDeps {
   readonly hub: EventPublisher
   /** runner backend 的 Docker 原语（S2 接缝；生产 dockerode 适配，测试 fake） */
   readonly primitives: SandboxFilePrimitives
-  /** wiki 容器名解析（#784 双容器 orchestrator 接管前由装配层给定；V1 生产为占位实现） */
+  /** wiki 容器名解析（#784 起经 wikiContainerName 单一来源派生；测试注入同名 fake） */
   readonly resolveWikiContainer: (ownerId: string) => string
   /** 沙箱生命周期（#776；SandboxLifecycle 结构子集）。缺省回退 session.containerId（测试）。 */
   readonly sandboxes?: {
     ensure: (sessionId: string) => Promise<{ containerId: string }>
     touch: (sessionId: string) => void
+  }
+  /** wiki 容器生命周期（#784；WikiContainerLifecycle 结构子集）。run 前 ensure——/wiki/
+   * 工具根就绪（惰性创建零初始化 + stopped 复启，永久容器无 touch 面）。缺省不 ensure（测试）。
+   * 返回 void：/wiki/ 容器名经 resolveWikiContainer 单一来源派生，ensure 的快照无消费面。 */
+  readonly wikis?: {
+    ensure: (ownerId: string) => Promise<void>
   }
   /** interrupt 策略源（拓扑因子；V1 无审批恒 undefined，#783 由持久化维度派生——测试注入） */
   readonly interruptPolicyFor?: (sessionId: string) => InterruptPolicy | undefined
@@ -377,6 +383,10 @@ export class RunService {
     // 未开始执行的 run 不发 run 域事件——文件头信封错误面，registry 故障同先例）。
     const sandbox = this.deps.sandboxes ? await this.deps.sandboxes.ensure(cmd.sessionId) : undefined
     const labContainer = sandbox?.containerId ?? session.containerId
+    // wiki 容器执行前提（#784 契约）：run 前 ensure 用户 wiki 容器——/wiki/ 工具根就绪
+    //（不存在惰性创建零初始化、stopped 复启；永久容器随用户生命周期，无 touch 面）。失败
+    // 同沙箱：pre-start 面向上传播，不发 run 域事件。
+    await this.deps.wikis?.ensure(cmd.ownerId)
 
     const snapshot = await this.deps.registry.getSnapshot(cmd.ownerId)
     const model = await this.deps.registry.getDefaultModel(snapshot)

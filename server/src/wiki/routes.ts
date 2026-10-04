@@ -1,4 +1,5 @@
-// wiki 5 路由 7 方法（#335 · #315 逐字节迁移）—— 挂 /api/v1/containers，路由路径 `/:name/wiki/...`。
+// wiki 5 路由 7 方法（#335 · #315 逐字节迁移；#784 存储面换轨新 wiki 容器）—— 挂 /api/v1/containers，
+// 路由路径 `/:name/wiki/...`。
 //
 // Express 5 不把 app.use 挂载路径的 :name 合并进 router 的 req.params，故 :name 在 router 内部
 // 声明（对齐 containers 路由同款挂载方式）；路由层不加 name 正则（校验在 handler 内做，
@@ -6,6 +7,12 @@
 //
 // 路由 + 成功载荷与 Django 版逐字节一致；仅错误搬进信封（#312）。隔离经 getInstanceForUser
 // 归属前置（#312⑤）：admin 全放行 / user 仅本人，越权 20040 同码防探测。
+// #784 存储换轨：wiki 数据源 = 每用户 wiki 容器（researcher-wiki-<inst.ownerId>，树根 /wiki），
+// 路由参数 <name> 仅剩寻址/归属语义（legacy Container 行所有门）——读写不再触达 legacy 容器。
+// 每操作前置 ensure（kind=wiki 支路的 create/health 合一面）：容器不存在惰性创建（零初始化）、
+// stopped 复启、running 原样——归属校验之后（未授权探测不建容器）。
+// compile 触发（#315 §6）随存储换轨停用：busybox 级 wiki 容器无 openclaw 运行时，索引生成
+// 归 OpenWiki 工具形态（#737，G 节 wiki 三通道）；deps.compile 缺省 noop，生产装配不注入。
 // 错误映射（#335）：name 非法 → 90002(data.name) · 容器不存在/越权 → 20040 ·
 // path 非法/穿越/managed → 90002(data.path) · 页不存在 → 30040 · 页已存在 → 30041。
 // 顺序陷阱（#315 §0）：name 非法 ≠ name 合法但无此容器，两码不可混。
@@ -16,6 +23,7 @@ import { CODE } from '../codes'
 import { requireAuth } from '../middleware/auth'
 import { mustChangePasswordGate } from '../middleware/mustChangePasswordGate'
 import { getInstanceForUser } from '../containers/orchestrator'
+import { wikiContainerName } from '../wikiContainers/runtime'
 import { CONTAINER_NAME_REGEX } from '../validation/schemas'
 import { DockerWikiFileSystem } from './dockerFs'
 import { WikiService } from './service'
@@ -23,12 +31,22 @@ import { WikiInvalidPath, WikiPageExists, WikiPageNotFound } from './errors'
 import { parseWikiWriteBody, requireRelPath } from './paths'
 import { noopCompile, type CompileTrigger } from './compile'
 
+// wiki 容器生命周期 ensure 面（kind=wiki 支路，#784）：结构子集注入（生产 = WikiContainerLifecycle）。
+// 返回 void：快照无消费面（ensure 是 create/health 合一面，成功即容器 running）。
+export interface WikiContainersEnsurePort {
+  ensure(ownerId: string): Promise<void>
+}
+
 export interface WikiRouterDeps {
-  // compile 触发（#315 §6）：POST/DELETE 触发、PUT 不触发、5s 去抖。缺省 = 无编排 no-op。
+  // compile 触发（#315 §6 遗留面）：POST/DELETE 触发、PUT 不触发、5s 去抖。缺省 = no-op。
+  // #784 起生产装配不注入（busybox 无运行时；索引归 OpenWiki 工具形态）。
   compile?: CompileTrigger
-  // service 工厂（#621 · ADR 0012 wiki 收口）：缺省 = Docker 适配器（getArchive/putArchive/exec rm
-  // 读写容器内 ~/.openclaw/wiki/main，named volume / bind 两拓扑通用）；测试注入内存 fake。
-  serviceFor?: (inst: { name: string; homeDir: string }) => WikiService
+  // wiki 容器 ensure（#784）：缺省 = 不 ensure（纯测试装配）；生产 app.ts 必注入——缺注入时
+  // 容器缺失的读写以原语层错误暴露（不静默伪装成功）。
+  wikiContainers?: WikiContainersEnsurePort
+  // service 工厂：缺省 = Docker 适配器挂 inst.owner 的 wiki 容器（researcher-wiki-<ownerId>，
+  // 树根 /wiki）；测试注入内存 fake（fake 以 inst.name 键控）。
+  serviceFor?: (inst: { name: string; ownerId: string }) => WikiService
 }
 
 // 页级域错误 → 信封（30040 / 90002+data.path）；其余上抛走统一错误面。
@@ -40,14 +58,16 @@ function assertPageOpError(err: unknown): void {
 
 export function createWikiRouter(deps: WikiRouterDeps = {}): Router {
   const compile = deps.compile ?? noopCompile
-  // 缺省经 Docker 原语读写容器内 wiki（#621）：inst.homeDir（DB 记账的宿主路径）不再被 wiki
-  // 使用——named volume 拓扑下该路径在控制面文件系统不存在；DB 字段保留（编排删除清理仍用）。
+  // 缺省经 Docker 原语读写 inst.owner 的 wiki 容器（#784）：docker 名单一来源
+  // wikiContainerName 派生，树根 /wiki（DockerWikiFileSystem 缺省）；inst.homeDir 不参与读写。
   const serviceFor =
-    deps.serviceFor ?? ((inst: { name: string }) => new WikiService(new DockerWikiFileSystem(inst.name)))
+    deps.serviceFor ?? ((inst: { name: string; ownerId: string }) => new WikiService(new DockerWikiFileSystem(wikiContainerName(inst.ownerId))))
+  const ensureWiki = deps.wikiContainers
   const router = Router()
   router.use(requireAuth, mustChangePasswordGate)
 
-  // 公共前置（对齐 Django _get_instance）：name 校验（400/90002）→ 查容器 + owner 判定（404/20040）。
+  // 公共前置（对齐 Django _get_instance）：name 校验（400/90002）→ 查容器 + owner 判定（404/20040）
+  // → wiki 容器 ensure（惰性创建/复启，#784；越权探测不建容器）。
   // Express 5 :name 可为 string | string[]（重复段）；非字符串直接按非法处理（90002）。
   const resolveInstance = async (req: Request, name: string | string[]) => {
     if (typeof name !== 'string' || !CONTAINER_NAME_REGEX.test(name)) {
@@ -55,7 +75,9 @@ export function createWikiRouter(deps: WikiRouterDeps = {}): Router {
         name: ['name 须以小写字母开头，3–30 位，仅含小写字母、数字、连字符'],
       })
     }
-    return getInstanceForUser(req.prisma, req.user!, name)
+    const inst = await getInstanceForUser(req.prisma, req.user!, name)
+    await ensureWiki?.ensure(inst.ownerId)
+    return inst
   }
 
   // GET /:name/wiki/tree —— 文件树（开放目录分组；不收顶层散落页）。
@@ -87,7 +109,7 @@ export function createWikiRouter(deps: WikiRouterDeps = {}): Router {
     ok(res, { path: body.path }) // PUT 不触发 compile（r29 §2.3）
   })
 
-  // POST /:name/wiki/page —— 新建页；触发 5s 去抖 recompile 入搜索索引。
+  // POST /:name/wiki/page —— 新建页；compile 面缺省 noop（#784 起生产不注入，见文件头）。
   router.post('/:name/wiki/page', async (req: Request, res: Response) => {
     const inst = await resolveInstance(req, req.params.name)
     const body = parseWikiWriteBody(req.body)
@@ -101,7 +123,7 @@ export function createWikiRouter(deps: WikiRouterDeps = {}): Router {
     ok(res, { path: body.path })
   })
 
-  // DELETE /:name/wiki/page?path= —— 删页；触发 5s 去抖 recompile 清索引残留。
+  // DELETE /:name/wiki/page?path= —— 删页；compile 面同上 noop。
   router.delete('/:name/wiki/page', async (req: Request, res: Response) => {
     const inst = await resolveInstance(req, req.params.name)
     const relPath = requireRelPath(req.query.path)

@@ -935,6 +935,55 @@ describe('sandbox image pinning env (#776)', () => {
   })
 })
 
+// ---- #784 wiki 容器配置组：WIKI_IMAGE 钉版（生产禁浮动，对齐 readFleetImage 先例）----
+
+describe('wiki image pinning env (#784)', () => {
+  async function loadWikiImage(opts: { env?: string; image?: string | undefined }): Promise<string | 'THREW'> {
+    vi.resetModules()
+    const { env = 'production', image } = opts
+    vi.stubEnv('NODE_ENV', env)
+    if (env === 'production') {
+      // 隔离 wiki 变量：提供其余生产必填（同 loadFleetImage 模式）。
+      vi.stubEnv('JWT_SECRET', 's'.repeat(32))
+      vi.stubEnv('CREDENTIAL_ENCRYPTION_KEYS', Buffer.alloc(32, 0x01).toString('base64'))
+      vi.stubEnv('OPENCLAW_TEMPLATE_DIR', process.cwd())
+      vi.stubEnv('PANEL_PUBLIC_ORIGIN', 'https://panel.example.com')
+    }
+    if (image === undefined) delete process.env.WIKI_IMAGE
+    else vi.stubEnv('WIKI_IMAGE', image)
+    try {
+      const { config } = await import('../src/config')
+      return config.wikiContainers.image
+    } catch (e) {
+      if (env === 'production') expect((e as Error).message).toContain('WIKI_IMAGE')
+      return 'THREW'
+    } finally {
+      vi.unstubAllEnvs()
+    }
+  }
+
+  it('生产缺省 → 本仓库派生镜像且非浮动（busybox 基线，零初始化）', async () => {
+    const v = await loadWikiImage({ image: undefined })
+    expect(v).toBe('ghcr.io/acautomata/researcher-service/wiki:1.36')
+    expect(isFloatingImageRef(v)).toBe(false)
+  })
+
+  it('生产 + 精确版本 tag → 放行', async () => {
+    expect(await loadWikiImage({ image: 'ghcr.io/acautomata/researcher-service/wiki:1.37' })).toBe(
+      'ghcr.io/acautomata/researcher-service/wiki:1.37',
+    )
+  })
+
+  it('生产 + :latest / 无 tag → fail-fast（浮动 tag 目标不可复现）', async () => {
+    expect(await loadWikiImage({ image: 'ghcr.io/acautomata/researcher-service/wiki:latest' })).toBe('THREW')
+    expect(await loadWikiImage({ image: 'ghcr.io/acautomata/researcher-service/wiki' })).toBe('THREW')
+  })
+
+  it('dev + :latest → 放行（本地调试可用 busybox 覆盖）', async () => {
+    expect(await loadWikiImage({ env: 'development', image: 'busybox:latest' })).toBe('busybox:latest')
+  })
+})
+
 // ---- #775 runner 配置组：RUNNER_MAX_CONCURRENT_RUNS / ALLOW_PRIVATE_PROVIDER_ENDPOINTS ----
 
 describe('runner max concurrent runs env (#775)', () => {

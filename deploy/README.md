@@ -54,6 +54,17 @@
   #   "ghcr.io/acautomata/researcher-service/openclaw:${TAG}"
   ```
 
+- **wiki 容器镜像（#784）**：`deploy/wiki-image/`（busybox 级极简 + 零初始化，无骨架 COPY），
+  默认镜像 `ghcr.io/acautomata/researcher-service/wiki:<FROM 基线 tag>`，经 `WIKI_IMAGE` 可覆盖
+  （生产禁浮动 tag，同上）。版本单源 = 其 Dockerfile 的 FROM 基线行，与
+  `server/src/config.ts` 的 WIKI_IMAGE 默认值由 `server/test/wikiImage.test.ts` 交叉断言锁死。
+  本地构建（真编排/真容器联调需要）：
+
+  ```bash
+  TAG="$(grep -m1 -E '^[[:space:]]*FROM[[:space:]]' deploy/wiki-image/Dockerfile | awk '{print $2}')"; TAG="${TAG##*:}"
+  docker build -t "ghcr.io/acautomata/researcher-service/wiki:${TAG}" deploy/wiki-image
+  ```
+
 ## 在新架构中的位置
 
 ```

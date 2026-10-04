@@ -35,6 +35,9 @@ export const KIND_WIKI = 'wiki'
 export const KIND_SANDBOX = 'sandbox'
 // 沙箱 → 会话绑定标签（researcher.session = sessionId）：daemon 侧认领/清理沙箱的归属凭据。
 export const LABEL_SESSION_KEY = 'researcher.session'
+// wiki 容器 → 用户绑定标签（researcher.owner = userId，#784）：daemon 侧认领 wiki 容器的
+// 归属凭据（listWikis 映射容器 → owner；无此标签的 kind=wiki 容器不属编排，防御性跳过）。
+export const LABEL_OWNER_KEY = 'researcher.owner'
 // #696 一次性临时容器标记（runOnce）：与 fleet 三标签互斥——临时容器不写 app/instance/port 标签、
 // 不发布宿主端口，故 listFleet（按 app 过滤）与端口对账均不可见；本标签仅用于「认出临时容器」
 //（daemon 侧泄漏排查 / 冒烟断言）。
