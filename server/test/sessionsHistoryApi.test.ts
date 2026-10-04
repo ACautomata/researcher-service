@@ -376,7 +376,8 @@ describe('rewind / fork 会话历史域（S1，#781）', () => {
     await prisma.fileJournal.create({
       data: { sessionId: sid, checkpointId: secondAnchor, seq: 2, op: 'write', path: 'lab/late.md', toolCallId: 'tc-j2', applied: true },
     })
-    // seed attachments：挂第一轮 user 行（应复制）+ 挂第二轮 user 行（FK 交集：不复制）
+    // seed attachments：挂第一轮 user 行（复制 + messageId 映射新行）+ 挂第二轮 user 行
+    //（全量复制语义：行复制、messageId 置 null——切点后消息不在 fork）
     await prisma.attachment.create({
       data: { sessionId: sid, id: 'att-1', ownerId: (await prisma.session.findUnique({ where: { id: sid } }))!.ownerId, messageId: firstUser.id, fileName: 'a.txt', mimeType: 'text/plain', size: 3, sha256: 'x', path: '/lab/uploads/att-1/a.txt' },
     })
@@ -424,11 +425,13 @@ describe('rewind / fork 会话历史域（S1，#781）', () => {
     expect(forkedJournal).toHaveLength(1)
     expect(forkedJournal[0]).toMatchObject({ checkpointId: anchor, seq: 1, toolCallId: 'tc-j1' })
 
-    // attachments 复制：挂第一轮行复制、attachmentId 不改；挂第二轮行留在源
+    // attachments 全量复制（#768 D7 字面）：attachmentId 不改；挂第一轮行 messageId 映射
+    // 新行；挂切点后消息的行置 null（message FK onDelete: Cascade——跨会话保留原值会随源
+    // 会话删除被级联清掉）
     const forkedAtt = await prisma.attachment.findMany({ where: { sessionId: forked.id } })
-    expect(forkedAtt.map((a) => a.id)).toEqual(['att-1'])
-    // messageId 随映射改指新行（FK 完整）
-    expect(forkedAtt[0]?.messageId).toBe(forkedMsgs[0]?.id)
+    expect(forkedAtt.map((a) => a.id).sort()).toEqual(['att-1', 'att-2'])
+    expect(forkedAtt.find((a) => a.id === 'att-1')?.messageId).toBe(forkedMsgs[0]?.id)
+    expect(forkedAtt.find((a) => a.id === 'att-2')?.messageId).toBeNull()
 
     // 投影 = 切点时刻；源会话不受影响
     const forkedProjection = await projection(forked.id)

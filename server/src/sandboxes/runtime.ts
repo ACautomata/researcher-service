@@ -19,10 +19,10 @@ export function sandboxNetworkName(sessionId: string): string {
   return `${SANDBOX_NETWORK_PREFIX}${sessionId}`
 }
 
-// sessionId → fork 导入镜像名（researcher-sandbox-fs-<sessionId>；#781 字面复制的 FS 快照，
-// 随容器 remove 顺手 rmi——单一来源命名防漂移）
+// sessionId → fork 导入镜像名（<沙箱前缀>fs-<sessionId>；#781 字面复制的 FS 快照，
+// 随容器 remove 顺手 rmi——前缀单一来源 values.ts，防漂移）
 export function sandboxFsImageName(sessionId: string): string {
-  return `researcher-sandbox-fs-${sessionId}`
+  return `${SANDBOX_CONTAINER_PREFIX}fs-${sessionId}`
 }
 
 // 创建一个沙箱所需的语义参数（lifecycle → runtime）

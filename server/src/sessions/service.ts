@@ -22,9 +22,9 @@ import { getSessionForUser } from '../sandboxes/service'
 import type { SandboxRemoveOutcome } from '../sandboxes/lifecycle'
 import type { EventPublisher, InFlightProjection, RunCommand, RunSnapshot } from '../runner/runtime/runService'
 import { serializeAttachments, type RecordTurnPayload } from './reducer'
+import { ancestorChainOf } from '../checkpointChain'
 import {
   abandonedCheckpointIds,
-  anchorChainOf,
   resolveRewindAnchor,
   visibleRowIds,
   type HistoryRowLite,
@@ -460,7 +460,7 @@ export class SessionService {
     if (!parentOf.has(anchor)) {
       throw fail(CODE.VALIDATION_FAILED, '锚点 checkpoint 缺失或已归档')
     }
-    const anchorChain = anchorChainOf((id) => parentOf.get(id) ?? null, anchor)
+    const anchorChain = ancestorChainOf((id) => parentOf.get(id) ?? null, anchor)
 
     // 软删存档（#770）：被放弃 checkpoint（未归档全体 − 锚点链）+ journal（checkpointId ∈
     // 被放弃集）+ 挂靠不可见消息行——共享前缀（锚点之前）一律不打标记。
@@ -495,8 +495,8 @@ export class SessionService {
   // forkSourceJson 溯源）+ checkpoint 祖先链行复制（blob 自包含，新 thread 直读——「切点 state
   // 起步」的机制面，保锚点引用有效）+ 消息行挂靠截断复制 + 沙箱整容器字面复制（docker
   // export→import，含墓碑目录；源已删 → 空起步 + 系统消息）+ file_journal 切点截断继承
-  //（seq 保留原值接续）+ attachments 行复制（不改 attachmentId；挂切点后消息的行随其消息行
-  // 留在源会话——FK 完整性交集，规格「全量复制」指不按 attachmentId 锚点筛选）。
+  //（seq 保留原值接续）+ attachments 行全量复制（#768 D7 字面；attachmentId 不改，messageId
+  // 挂靠复制行映射新 id、其余置 null——跨会话 FK 级联删除面）。
   // 顺序：session 行先落（拿 id）→ 沙箱复制（Docker 成功才落数据行）→ 数据复制事务（含系统
   // 消息）；任一步失败补偿删 session 行（cascade 清子行）+ 删沙箱尽力——fork 可整体重试。
   async forkSession(
@@ -599,16 +599,18 @@ export class SessionService {
     source: Session,
     forkedSessionId: string,
     anchor: string | null,
-    systemMessage: boolean,
+    sourceSandboxMissing: boolean,
   ): Promise<void> {
     const rows = anchor !== null ? await this.listHistoryRows(source.id) : []
     await this.deps.prisma.$transaction(async (tx) => {
+      // 复制消息行 id 映射（源 id → 新 id）：attachments.messageId 挂靠改指用。
+      const messageIdMap = new Map<string, string>()
       if (anchor !== null) {
         const checkpoints = await tx.checkpoint.findMany({
           where: { threadId: source.id, archivedAt: null },
         })
         const parentOf = new Map(checkpoints.map((c) => [c.checkpointId, c.parentCheckpointId]))
-        const chain = anchorChainOf((id) => parentOf.get(id) ?? null, anchor)
+        const chain = ancestorChainOf((id) => parentOf.get(id) ?? null, anchor)
         const chainRows = checkpoints.filter((c) => chain.has(c.checkpointId))
         const chainIds = [...chain]
         if (chainRows.length === 0) {
@@ -650,12 +652,11 @@ export class SessionService {
         // 消息行挂靠截断复制：turn/createdAt/clientKey 原样，id 新生成（全局主键，复制体是
         // 独立行）——attachments.messageId 随映射改指新行。
         const visible = visibleRowIds(rows, chain)
-        const visibleIds = [...visible]
         const rowsToCopy = await tx.sessionMessage.findMany({
-          where: { sessionId: source.id, id: { in: visibleIds } },
+          where: { sessionId: source.id, id: { in: [...visible] } },
         })
         if (rowsToCopy.length > 0) {
-          const messageIdMap = new Map(rowsToCopy.map((r) => [r.id, randomUUID()]))
+          for (const r of rowsToCopy) messageIdMap.set(r.id, randomUUID())
           await tx.sessionMessage.createMany({
             data: rowsToCopy.map((r) => ({
               id: messageIdMap.get(r.id)!,
@@ -669,35 +670,34 @@ export class SessionService {
               createdAt: r.createdAt,
             })),
           })
-          // attachments 复制：messageId ∈ 复制行或 null（FK 完整）；attachmentId 不改（路径
-          // 在沙箱 /lab/uploads/——字面复制后继续有效；下载面按 id 全表 + owner 过滤，多行
-          // 同 id 语义安全，#766 D7「不改 attachmentId」）
-          const attachments = await tx.attachment.findMany({
-            where: {
-              sessionId: source.id,
-              OR: [{ messageId: null }, { messageId: { in: visibleIds } }],
-            },
-          })
-          if (attachments.length > 0) {
-            await tx.attachment.createMany({
-              data: attachments.map((a) => ({
-                sessionId: forkedSessionId,
-                id: a.id,
-                ownerId: a.ownerId,
-                ...(a.messageId !== null ? { messageId: messageIdMap.get(a.messageId) ?? null } : {}),
-                fileName: a.fileName,
-                mimeType: a.mimeType,
-                size: a.size,
-                sha256: a.sha256,
-                path: a.path,
-              })),
-            })
-          }
         }
       }
 
+      // attachments 全量复制（#768 D7 定案「attachments 行全量复制」，R2 评审回归字面）：
+      // attachmentId 不改（PK (sessionId,id) 复合 → 会话内唯一；下载面按 id + owner 过滤，
+      // 多行同 id 语义安全）；messageId 挂靠复制行 → 映射新 id（FK 同会话），挂切点后消息/
+      // 无主行 → 置 null——message FK onDelete: Cascade，跨会话保留原值会让本行随源会话
+      // 删除被级联清掉（静默丢数据）。路径在沙箱 /lab/uploads/——字面复制后继续有效。
+      const attachments = await tx.attachment.findMany({ where: { sessionId: source.id } })
+      if (attachments.length > 0) {
+        await tx.attachment.createMany({
+          data: attachments.map((a) => ({
+            sessionId: forkedSessionId,
+            id: a.id,
+            ownerId: a.ownerId,
+            messageId:
+              a.messageId !== null && messageIdMap.has(a.messageId) ? messageIdMap.get(a.messageId)! : null,
+            fileName: a.fileName,
+            mimeType: a.mimeType,
+            size: a.size,
+            sha256: a.sha256,
+            path: a.path,
+          })),
+        })
+      }
+
       // 源沙箱已删 → 空起步 + 系统消息（#768 D7「源已删则空起步+系统消息」）
-      if (systemMessage) {
+      if (sourceSandboxMissing) {
         const last = await tx.sessionMessage.findFirst({
           where: { sessionId: forkedSessionId },
           orderBy: { turn: 'desc' },
@@ -785,10 +785,10 @@ export class SessionService {
     const parentOfFn = (id: string) => parentOf.get(id) ?? null
     const rowHead = this.latestAnchoredId(rows)
     const ref =
-      rowHead !== null && rowHead !== pointer && anchorChainOf(parentOfFn, rowHead).has(pointer)
+      rowHead !== null && rowHead !== pointer && ancestorChainOf(parentOfFn, rowHead).has(pointer)
         ? rowHead
         : pointer
-    const writes = this.archiveRowWrites(sessionId, rows, anchorChainOf(parentOfFn, ref), new Date())
+    const writes = this.archiveRowWrites(sessionId, rows, ancestorChainOf(parentOfFn, ref), new Date())
     if (writes.length > 0) await this.deps.prisma.$transaction(writes)
   }
 

@@ -41,6 +41,7 @@ import {
   type RejectionNotice,
 } from '../approval/funnel'
 import { APPROVAL_EVENT_REQUESTED, APPROVAL_EVENT_RESOLVED, APPROVAL_TIMEOUT_MS } from '../approval/values'
+import { ancestorChainOf } from '../../checkpointChain'
 import type { PrismaClient } from '../../generated/prisma/client'
 import { CODE } from '../../codes'
 import { fail } from '../../envelope'
@@ -805,21 +806,15 @@ export class RunService {
   }
 
   // 祖先链包含判定（#781 指针推进前提）：from 出发沿 parentCheckpointId 上溯（含 from 自身）是否
-  // 命中 target。环/超深 guard 兜底；读失败向上抛由调用方吞（宁可不推进）。
+  // 命中 target。行走下沉共享内核 checkpointChain.ts（与 sessions/rewind 单一实现）；读失败向上
+  // 抛由调用方吞（宁可不推进）。
   private async checkpointLineageContains(threadId: string, from: string, target: string): Promise<boolean> {
     const cps = await this.deps.prisma.checkpoint.findMany({
       where: { threadId },
       select: { checkpointId: true, parentCheckpointId: true },
     })
     const parentOf = new Map(cps.map((c) => [c.checkpointId, c.parentCheckpointId]))
-    const seen = new Set<string>()
-    let cur: string | null = from
-    while (cur !== null && !seen.has(cur) && seen.size < 10_000) {
-      if (cur === target) return true
-      seen.add(cur)
-      cur = parentOf.get(cur) ?? null
-    }
-    return false
+    return ancestorChainOf((id) => parentOf.get(id) ?? null, from).has(target)
   }
 
   // ---- 审批升级检出（interrupt payload → approval.requested 事件面）----

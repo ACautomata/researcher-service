@@ -10,8 +10,8 @@
 //     前驱挂靠会让锚点后的失败尾部在 rewind 后恒可见，违反「与锚点时刻一致」）。
 //   - user/system 行：归属 = 它触发的轮 —— 后继最近 assistant 行的可见性；无后继（活跃头部
 //     新输入 / 崩溃残留）→ 可见（无后继不可判定归属，保守不归档——崩溃重放面另有 #779 收尾）。
-// 锚点解析（story 16「rewind 到任一历史消息锚点重开」）：assistant 行 → 自身锚点；user 行 →
-// 前驱最近带锚 assistant 锚点（改 prompt 重来 = 该消息入图之前的 state）；会话头部/无锚可达
+// 锚点解析（story 16「rewind 到任一历史消息锚点重开」）：assistant 行 → 自身锚点；user/system
+// 行 → 前驱最近带锚 assistant 锚点（改 prompt 重来 = 该消息入图之前的 state）；会话头部/无锚可达
 // → null（调用方 90002）。输入 rows 恒为未归档行（调用方过滤 archivedAt——#770 无恢复入口：
 // 归档行不可再作锚点/切点）。
 
@@ -27,8 +27,9 @@ function byTurnCreatedAt(a: HistoryRowLite, b: HistoryRowLite): number {
   return a.turn - b.turn || a.createdAt.getTime() - b.createdAt.getTime()
 }
 
-// 解析 rewind 锚点 checkpoint id；不可作锚点（system 行 / 失败轮无锚 / 会话头部 / id 不存在）
-// → null。
+// 解析 rewind 锚点 checkpoint id；不可作锚点（id 不存在 / 会话头部之前无带锚 assistant 可挂靠）
+// → null。assistant 行 → 自身锚点；user/system 行与无锚失败轮 assistant → 前驱最近带锚 assistant
+// 锚点（改 prompt 重来 / 重开到失败前 = 该消息入图之前的 state）。
 export function resolveRewindAnchor(rows: readonly HistoryRowLite[], messageId: string): string | null {
   const sorted = [...rows].sort(byTurnCreatedAt)
   const idx = sorted.findIndex((r) => r.id === messageId)
@@ -42,9 +43,10 @@ export function resolveRewindAnchor(rows: readonly HistoryRowLite[], messageId: 
   return null
 }
 
-// 被放弃 checkpoint 集 = 未归档 checkpoint 全体 − 锚点祖先链（含锚点）。全量差集而非旧 head
-// 链行走（R 评审）：不经旧 head 的死亡分叉（失败轮超步残留、跨分支脏数据）一并入集，也不依赖
-// 「最新 checkpointId 字典序」猜头（UUIDv6 下近似时序，失败轮残留会污染）。
+// 换锚被放弃 checkpoint 集 = 未归档 checkpoint 全体 − 锚点祖先链（含锚点；链判定下沉共享内核
+// `checkpointChain.ts`，与 runner 指针推进守卫单一实现）。全量差集而非旧 head 链行走（R 评审）：
+// 不经旧 head 的死亡分叉（失败轮超步残留、跨分支脏数据）一并入集，也不依赖「最新 checkpointId
+// 字典序」猜头（UUIDv6 下近似时序，失败轮残留会污染）。
 export function abandonedCheckpointIds(
   allCheckpointIds: readonly string[],
   anchorChain: ReadonlySet<string>,
@@ -52,22 +54,6 @@ export function abandonedCheckpointIds(
   const out = new Set<string>()
   for (const id of allCheckpointIds) if (!anchorChain.has(id)) out.add(id)
   return out
-}
-
-// 锚点祖先链（含锚点自身；parentOf 环/超深 guard 同上）。rewind 归档与 fork 截断复制的
-// 共用判定集。
-export function anchorChainOf(parentOf: (id: string) => string | null, anchor: string): Set<string> {
-  return collect(parentOf, anchor)
-}
-
-function collect(parentOf: (id: string) => string | null, start: string): Set<string> {
-  const seen = new Set<string>()
-  let cur: string | null = start
-  while (cur !== null && !seen.has(cur) && seen.size < 10_000) {
-    seen.add(cur)
-    cur = parentOf(cur)
-  }
-  return seen
 }
 
 // 锚点链（含锚点）上的可见消息行 id 集。rows 无需预排序（内部稳定排序），恒输入未归档行。
