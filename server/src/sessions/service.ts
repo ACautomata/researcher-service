@@ -634,10 +634,7 @@ export class SessionService {
     this.requireTerminal(sessionId)
 
     const rows = await this.listHistoryRows(sessionId)
-    const anchor = resolveRewindAnchor(rows, p.messageId)
-    if (anchor === null) {
-      throw fail(CODE.VALIDATION_FAILED, '该消息不可作为回退锚点（无更早的可回退 state）')
-    }
+    const anchor = this.anchorOrThrow(rows, p.messageId)
     // 归档 checkpoint 不可作锚点（#770 无恢复入口；归档行已由 listHistoryRows 滤除，此处兜
     // 「行未归档但 checkpoint 已归档」的机制性不一致）。
     const parentOf = await this.checkpointParentLookup(sessionId)
@@ -727,6 +724,15 @@ export class SessionService {
     }
   }
 
+  // 锚点解析（rewind/preview 共用——同码同文案；fork 切点文案不同不复用）。
+  private anchorOrThrow(rows: Parameters<typeof resolveRewindAnchor>[0], messageId: string): string {
+    const anchor = resolveRewindAnchor(rows, messageId)
+    if (anchor === null) {
+      throw fail(CODE.VALIDATION_FAILED, '该消息不可作为回退锚点（无更早的可回退 state）')
+    }
+    return anchor
+  }
+
   // rewind 预览（#782 · D8）：逆放集摘要 + exec 跨越清单（复用轨迹聚合，零新增存储）。
   // 只读不写——产品面确认门（恢复菜单）的输入。
   async rewindPreview(
@@ -736,10 +742,7 @@ export class SessionService {
   ): Promise<{ anchor: string } & FileRewindPreview> {
     await getSessionForUser(this.deps.prisma, user, sessionId) // 归属校验（50002 同码防探测）
     const rows = await this.listHistoryRows(sessionId)
-    const anchor = resolveRewindAnchor(rows, p.messageId)
-    if (anchor === null) {
-      throw fail(CODE.VALIDATION_FAILED, '该消息不可作为回退锚点（无更早的可回退 state）')
-    }
+    const anchor = this.anchorOrThrow(rows, p.messageId)
     return this.deps.fileRewind
       ? await this.deps.fileRewind.preview({
           sessionId,

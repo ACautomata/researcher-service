@@ -18,7 +18,7 @@ import { disableLangsmithTracing } from './runtime/tracing'
 import { installAbortRejectionGuard } from './runtime/abortGuard'
 import { config } from '../config'
 import { wikiContainerName } from '../wikiContainers/runtime'
-import { SANDBOX_CONTAINER_PREFIX } from '../sandboxes/values'
+import { sandboxContainerName } from '../sandboxes/runtime'
 import { createDownloadNode } from './runtime/downloadNode'
 import { createPrismaApprovalAuditSink } from './approval/audit'
 import { ToolCallJudgeClient } from './approval/judge'
@@ -86,7 +86,7 @@ export function assembleRunner(opts: {
     depthLimit: config.runner.fileJournal.depthLimit,
     fenceTimeoutMs: config.runner.fileJournal.fenceTimeoutMs,
     containerOf: async (sessionId) => {
-      const name = `${SANDBOX_CONTAINER_PREFIX}${sessionId}`
+      const name = sandboxContainerName(sessionId)
       try {
         const info = await docker.getContainer(name).inspect()
         return info.State.Running ? name : null
@@ -131,7 +131,7 @@ export function assembleRunner(opts: {
         },
         resolveContainer: async (threadId) => {
           const teammate = await opts.prisma.teammate.findUnique({ where: { threadId } })
-          return `${SANDBOX_CONTAINER_PREFIX}${teammate?.parentSessionId ?? threadId}`
+          return sandboxContainerName(teammate?.parentSessionId ?? threadId)
         },
         audit: (info) => {
           // eslint-disable-next-line no-console

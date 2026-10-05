@@ -47,3 +47,17 @@ export function shaRefsOf(
   if (row.tombstoneKey !== null) out.push(row.tombstoneKey)
   return out
 }
+
+// /lab 根与 rel↔abs 对偶（journal 行 path 列 = /lab 相对路径；引用点变更单点改）。
+export const LAB_ROOT = '/lab'
+
+/** journal 相对路径（'' = 根本身）→ 容器内绝对路径 */
+export function labAbsOf(rel: string): string {
+  return rel === '' ? LAB_ROOT : `${LAB_ROOT}/${rel}`
+}
+
+/** /lab 绝对路径 → journal 相对路径（'' = 根本身；调用方保证 routePath 已判定 /lab 前缀） */
+export function labRelOf(absPath: string): string {
+  const rel = absPath.slice(LAB_ROOT.length)
+  return rel.startsWith('/') ? rel.slice(1) : rel
+}

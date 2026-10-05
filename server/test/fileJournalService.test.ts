@@ -2,7 +2,7 @@
 // 行为 / 逆放恢复一致性（含上传回退）/ scope 三态 / C1 多 thread / reconcile / GC / 围栏。
 
 import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest'
-import { mkdtempSync, readFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import Database from 'better-sqlite3'
@@ -89,6 +89,7 @@ describe('FileJournalService（#782）', () => {
 
   afterAll(async () => {
     await prisma.$disconnect()
+    for (const d of cleanupDirs) rmSync(d, { recursive: true, force: true })
   })
 
   // ---------------------------------------------------------------------------
@@ -164,6 +165,27 @@ describe('FileJournalService（#782）', () => {
     expect(auditRow.traceId).toContain('file-journal:')
     expect(auditRow.inputText).toContain('attic_quota_reject')
     expect(auditRow.inputText).toContain('big.txt')
+  })
+
+  it('/lab 根 delete 拒绝（fail-closed——全树删除无 rewind 恢复面）', async () => {
+    await seedSession()
+    const b = backend()
+    await b.write('/lab/keep.txt', 'k')
+    const r = await b.delete('/lab')
+    expect(r.error).toBeDefined()
+    // 树不动、不产生 journal 行
+    expect(labSnapshot(fs)).toEqual({ 'keep.txt': 'k' })
+    expect(await prisma.fileJournal.count({ where: { sessionId: SESSION } })).toBe(1)
+  })
+
+  it('审计 traceId 防同毫秒碰撞：并发双事件都落账', async () => {
+    await seedSession()
+    const user = await prisma.user.findFirstOrThrow()
+    await Promise.all([
+      svc.preview({ sessionId: SESSION, anchor: 'root', caller: { userId: user.id, username: user.username } }),
+      svc.preview({ sessionId: SESSION, anchor: 'root', caller: { userId: user.id, username: user.username } }),
+    ])
+    expect(await prisma.textTraceLog.count({ where: { sessionKey: SESSION } })).toBe(2)
   })
 
   // ---------------------------------------------------------------------------
@@ -316,6 +338,29 @@ describe('FileJournalService（#782）', () => {
     const auditRow = await prisma.textTraceLog.findFirstOrThrow({ where: { sessionKey: SESSION } })
     expect(auditRow.inputText).toContain('"kind":"reconcile"')
     expect(auditRow.inputText).toContain('"rolledMissing":1')
+  })
+
+  it('boot reconcile 与并发面互斥：围栏被占时排队等待', async () => {
+    await seedSession()
+    // crash 残留行驱动 sessionsNeedingReconcile 命中本 session（write 无 afterSha → rolledMissing 面）
+    await prisma.fileJournal.create({
+      data: {
+        sessionId: SESSION, checkpointId: PENDING_CHECKPOINT_ID, seq: 1, op: 'write', path: 'boot.txt',
+        afterSha256: null, toolCallId: 'tc-boot', applied: false, runId: null,
+      },
+    })
+    const hold = await svc.fence.acquire(SESSION, { holder: 'rewind-replay', timeoutMs: 0 })
+    let done = false
+    const boot = svc.reconcileOnBoot().then((o) => {
+      done = true
+      return o
+    })
+    await new Promise((r) => setTimeout(r, 30))
+    expect(done).toBe(false) // 围栏被占——boot 路排队未执行
+    hold.release()
+    const outcomes = await boot
+    expect(outcomes.get(SESSION)).toMatchObject({ rolledMissing: 1, containerMissing: false })
+    expect(await prisma.fileJournal.count({ where: { sessionId: SESSION, applied: true } })).toBe(1)
   })
 
   it('续放：逆放中断残留（水位已推进、部分行未处置）在下次 rewindFiles 续放完成', async () => {

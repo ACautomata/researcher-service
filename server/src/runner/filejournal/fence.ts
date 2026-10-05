@@ -12,7 +12,6 @@ import { fail } from '../../envelope'
 
 interface Waiter {
   readonly holder: string
-  granted: boolean
   resolve?: () => void
   reject?: (e: unknown) => void
   timer?: ReturnType<typeof setTimeout>
@@ -36,7 +35,7 @@ export class SessionWriteFence {
       s.holder = opts.holder
       return this.makeLease(sessionId, opts.holder)
     }
-    const waiter: Waiter = { holder: opts.holder, granted: false }
+    const waiter: Waiter = { holder: opts.holder }
     s.queue.push(waiter)
     if (opts.timeoutMs > 0) {
       const timer = setTimeout(() => {
@@ -83,7 +82,6 @@ export class SessionWriteFence {
         if (!s || s.holder !== holder) return
         const next = s.queue.shift()
         if (next) {
-          next.granted = true
           s.holder = next.holder
           next.resolve?.()
         } else {

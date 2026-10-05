@@ -104,14 +104,9 @@ describe('文件 rewind 性能基准（S4，#782）', () => {
       progress.push([done, total])
       lastDone = done
     })
-    expect(elapsedBig(t0)).toBeLessThanOrEqual(2000) // 单 100MB op 逆放（fake IO）≤2s
+    expect(performance.now() - t0).toBeLessThanOrEqual(2000) // 单 100MB op 逆放（fake IO）≤2s
     expect(outcome.reverted).toBe(1)
     expect(progress).toEqual([[1, 1]])
     expect(lastDone).toBe(1)
-    void big
   })
 })
-
-function elapsedBig(t0: number): number {
-  return performance.now() - t0
-}

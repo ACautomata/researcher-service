@@ -22,6 +22,7 @@ import { AtticQuotaExceededError } from './attic'
 import { currentRunId, currentToolCallContext } from './context'
 import type { SessionWriteFence } from './fence'
 import { filePreTar, snapshotAsTar } from './preimage'
+import { labRelOf } from './values'
 import type { JournalWriter } from './writer'
 
 export interface JournalingBackendParams {
@@ -34,8 +35,6 @@ export interface JournalingBackendParams {
   readonly fenceTimeoutMs: number
 }
 
-type Routed = { container: string; absPath: string }
-
 export class JournalingBackend extends DockerArchiveBackend implements BackendProtocolV2 {
   constructor(private readonly j: JournalingBackendParams) {
     super(j.primitives, j.targets)
@@ -46,9 +45,9 @@ export class JournalingBackend extends DockerArchiveBackend implements BackendPr
       const routed = routePath(filePath, this.j.targets)
       if ('error' in routed) return routed
       if (routed.container !== this.j.targets.lab) return super.write(filePath, content)
-      if (relPathOf(routed) === '') return super.write(filePath, content) // /lab 根目标：V1 不打点
+      if (labRelOf(routed.absPath) === '') return super.write(filePath, content) // /lab 根目标：V1 不打点（super 回 error——根不可写为文件）
       const buf = isTextMimeType(getMimeType(filePath)) ? Buffer.from(content, 'utf8') : Buffer.from(content, 'base64')
-      const rel = relPathOf(routed)
+      const rel = labRelOf(routed.absPath)
       const basename = routed.absPath.split('/').pop() ?? 'file'
       const afterTar = filePreTar(basename, buf)
       // pre 探测（文件级；不存在/目录/超限 → null = 新建语义）
@@ -78,13 +77,13 @@ export class JournalingBackend extends DockerArchiveBackend implements BackendPr
       const routed = routePath(filePath, this.j.targets)
       if ('error' in routed) return routed
       if (routed.container !== this.j.targets.lab) return super.edit(filePath, oldString, newString, replaceAll)
-      if (relPathOf(routed) === '') return super.edit(filePath, oldString, newString, replaceAll)
+      if (labRelOf(routed.absPath) === '') return super.edit(filePath, oldString, newString, replaceAll)
       // after 全文在此合成（super.edit 内部会重读一次——正确性优先，S4 基准锁开销）
       const full = await this.readFullText(routed, filePath)
       if ('error' in full) return full
       const replaced = performStringReplacement(full.text, oldString, newString, replaceAll)
       if (typeof replaced === 'string') return { error: replaced }
-      const rel = relPathOf(routed)
+      const rel = labRelOf(routed.absPath)
       const basename = routed.absPath.split('/').pop() ?? 'file'
       const afterTar = filePreTar(basename, Buffer.from(replaced[0], 'utf8'))
       const preTar = filePreTar(basename, Buffer.from(full.text, 'utf8'))
@@ -112,13 +111,18 @@ export class JournalingBackend extends DockerArchiveBackend implements BackendPr
       const routed = routePath(filePath, this.j.targets)
       if ('error' in routed) return routed
       if (routed.container !== this.j.targets.lab) return super.delete(filePath)
-      if (relPathOf(routed) === '') return super.delete(filePath) // /lab 根目标：V1 不打点
+      // /lab 根目标拒绝（fail-closed）：super.delete = 全树 rm -rf——blast radius 最大的路径
+      // 恰不能走打点（全树 pre 快照受 MAX_COLLECT_BYTES 上限，失守即无恢复面），拒绝回 agent
+      // 自纠；写工具不经 approval 词法黑名单，此处是唯一闸门。
+      if (labRelOf(routed.absPath) === '') {
+        return { error: 'refusing to delete /lab root（全树删除无 rewind 恢复面——请指定具体文件）' }
+      }
       // pre 快照（文件/目录统一 tar；不存在 → null = 无恢复面，直接 super 走 not found）
       const preTar = await snapshotAsTar(this.j.primitives, routed.container, routed.absPath, {
         maxDataBytes: MAX_COLLECT_BYTES,
       })
       if (preTar === null) return super.delete(filePath)
-      const rel = relPathOf(routed)
+      const rel = labRelOf(routed.absPath)
       await this.fenced('agent-delete', () =>
         this.j.writer.write({
           sessionId: this.j.sessionId,
@@ -156,12 +160,6 @@ export class JournalingBackend extends DockerArchiveBackend implements BackendPr
   private runId(): string | undefined {
     return currentRunId()
   }
-}
-
-// /lab 绝对路径 → journal 相对路径（无前导斜杠；routePath 保证 /lab 前缀；'' = /lab 根本身）。
-function relPathOf(routed: Routed): string {
-  const rel = routed.absPath.slice('/lab'.length)
-  return rel.startsWith('/') ? rel.slice(1) : rel
 }
 
 function journalError(prefix: string, e: unknown): { error: string } {

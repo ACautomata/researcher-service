@@ -74,16 +74,7 @@ export class JournalWriter {
       where: { sessionId_toolCallId: { sessionId: p.sessionId, toolCallId } },
       select: { seq: true, applied: true },
     })
-    if (existing !== null) {
-      await p.apply()
-      if (!existing.applied) {
-        await this.prisma.fileJournal.updateMany({
-          where: { sessionId: p.sessionId, seq: existing.seq },
-          data: { applied: true },
-        })
-      }
-      return { seq: existing.seq, idempotentReplay: true }
-    }
+    if (existing !== null) return this.replayExisting(p, existing)
 
     // ① pre-image
     const pre = await p.readPreImage()
@@ -141,14 +132,7 @@ export class JournalWriter {
         where: { sessionId_toolCallId: { sessionId: p.sessionId, toolCallId } },
         select: { seq: true, applied: true },
       })
-      await p.apply()
-      if (!raced.applied) {
-        await this.prisma.fileJournal.updateMany({
-          where: { sessionId: p.sessionId, seq: raced.seq },
-          data: { applied: true },
-        })
-      }
-      return { seq: raced.seq, idempotentReplay: true }
+      return this.replayExisting(p, raced)
     }
 
     // ④ apply
@@ -160,6 +144,21 @@ export class JournalWriter {
       data: { applied: true },
     })
     return { seq, idempotentReplay: false }
+  }
+
+  // 幂等命中处置（⓪查询命中与 ③P2002 raced 共用）：补 apply + 补置位，不重复打点。
+  private async replayExisting(
+    p: JournalWriteParams,
+    row: { seq: number; applied: boolean },
+  ): Promise<JournalWriteEntry> {
+    await p.apply()
+    if (!row.applied) {
+      await this.prisma.fileJournal.updateMany({
+        where: { sessionId: p.sessionId, seq: row.seq },
+        data: { applied: true },
+      })
+    }
+    return { seq: row.seq, idempotentReplay: true }
   }
 
   // attic 访问面（GC/配额观测共用同一 store 实例——单例纪律）。

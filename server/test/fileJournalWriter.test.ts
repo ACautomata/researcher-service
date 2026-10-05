@@ -1,7 +1,7 @@
 // JournalWriter 单测（#782 · S3/S2 混合：管线步骤序 + 幂等处置 + 崩溃残留用真 SQLite 锁行面）。
 
 import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest'
-import { mkdtempSync, readFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import Database from 'better-sqlite3'
@@ -65,7 +65,7 @@ describe('JournalWriter（journal-first 管线）', () => {
 
   afterAll(async () => {
     await prisma.$disconnect()
-    for (const d of cleanupDirs) void d
+    for (const d of cleanupDirs) rmSync(d, { recursive: true, force: true })
   })
 
   it('正常管线：journal 行全列 + attic 双 blob + apply 执行 + applied=true + seq 自增', async () => {

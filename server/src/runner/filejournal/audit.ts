@@ -4,7 +4,7 @@
 // exec_crossing。写失败 = 调用方 console.warn 留痕不放大（机制观测非安全判定路径——与审批
 // 审计的 fail-closed 纪律区分：机制事件丢失不构成信任面破坏）。
 
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import type { PrismaClient } from '../../generated/prisma/client'
 import { JOURNAL_AUDIT_TRACE_PREFIX } from './values'
 
@@ -45,7 +45,9 @@ export class JournalAudit {
     try {
       await this.prisma.textTraceLog.create({
         data: {
-          traceId: `${JOURNAL_AUDIT_TRACE_PREFIX}:${e.sessionId}:${now.getTime()}`,
+          // 随机段防同毫秒碰撞：rewindFiles 尾部 gc→revert_complete 顺序双记在 SQLite 亚毫秒
+          // 常态下同 ms 概率高，traceId @unique 相撞 = P2002 静默丢事件。
+          traceId: `${JOURNAL_AUDIT_TRACE_PREFIX}:${e.sessionId}:${now.getTime()}:${randomUUID().slice(0, 8)}`,
           userId,
           username,
           ipAddress: 'internal',

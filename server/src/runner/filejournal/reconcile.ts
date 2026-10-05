@@ -1,7 +1,8 @@
 // roll-forward reconcile（#782 · #766 D8「启动/restore 双路」）：
-//   启动路（reconcileOnBoot）：进程重启后全表扫 applied=false 行 + 水位 session 续放残集
-//   ——沙箱容器不存在的 session 跳过（启动期不批量 ensure 容器；该 session 的 rewind/run
-//   前置 restore 路兜底），计数上行（静默跳过不可接受——审计面）。
+//   启动路（sessionsNeedingReconcile + 调用方 FileJournalService.reconcileOnBoot）：进程重启
+//   后全表扫 applied=false 行 + 水位 session 续放残集——沙箱容器不存在的 session 跳过（启动
+//   期不批量 ensure 容器；该 session 的 rewind/run 前置 restore 路兜底），计数上行（静默
+//   跳过不可接受——审计面）。
 //   restore 路（reconcileSession）：rewind 逆放前对目标 session 调用（容器 ensure 由调用方
 //   决定——sessions 域 rewind 面容器恒在或惰性创建语义同 #776 run 前 ensure）。
 //
@@ -44,25 +45,17 @@ export class Reconciler {
     return { ...rolled, ...resumed, containerMissing: false }
   }
 
-  // 启动路：全表 applied=false 按 session 分组 + 水位 session 续放。容器缺失跳过并计数。
-  async reconcileOnBoot(): Promise<Map<string, ReconcileOutcome>> {
+  // 启动路待处理清单：全表 applied=false 按 session 分组 + 水位 session 续放。执行互斥与
+  // blob 防剪由调用方装配（FileJournalService.reconcileOnBoot——围栏 + replay lease；容器
+  // 缺失 session 在 reconcileSession 跳过并计数）。
+  async sessionsNeedingReconcile(): Promise<string[]> {
     const sessions = await this.deps.prisma.session.findMany({
       where: {
         OR: [{ fileJournalAnchorSeq: { not: null } }, { fileJournal: { some: { applied: false } } }],
       },
       select: { id: true },
     })
-    const out = new Map<string, ReconcileOutcome>()
-    for (const s of sessions) {
-      try {
-        out.set(s.id, await this.reconcileSession(s.id))
-      } catch (err) {
-        // 单 session 基建故障不中断全批（daemon 抖动等）；console.warn 留痕——静默不可接受
-        // eslint-disable-next-line no-console
-        console.warn(`[filejournal] boot reconcile failed: session=${s.id}: ${String(err)}`)
-      }
-    }
-    return out
+    return sessions.map((s) => s.id)
   }
 
   private async rollForward(sessionId: string, container: string): Promise<{ rolledForward: number; rolledMissing: number }> {

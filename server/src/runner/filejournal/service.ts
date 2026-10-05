@@ -14,6 +14,7 @@ import { buildRewindPreview, type RewindPreview } from './preview'
 import { filePreTar } from './preimage'
 import { Reconciler, type ReconcileOutcome } from './reconcile'
 import { executeRevert, leaseShasOf, parentDirOf, planRevert, type RevertIo, type RevertOutcome } from './replay'
+import { labAbsOf } from './values'
 import { JournalWriter } from './writer'
 
 export interface FileJournalServiceDeps {
@@ -70,12 +71,12 @@ export class FileJournalService {
     return {
       getBlob: (container, sha256) => this.attic.getBlob(container, sha256),
       putTar: async (container, dir, tar) => {
-        const absDir = dir === '' ? '/lab' : `/lab/${dir}`
+        const absDir = labAbsOf(dir)
         await this.deps.primitives.exec(container, ['mkdir', '-p', absDir])
         await this.deps.primitives.putArchive(container, absDir, tar)
       },
       removeFile: async (container, path) => {
-        await this.deps.primitives.exec(container, ['sh', '-c', 'rm -rf -- "$1"', 'sh', `/lab/${path}`])
+        await this.deps.primitives.exec(container, ['sh', '-c', 'rm -rf -- "$1"', 'sh', labAbsOf(path)])
       },
       markReverted: async (sessionId, seqs, at) => {
         await this.deps.prisma.fileJournal.updateMany({
@@ -111,8 +112,7 @@ export class FileJournalService {
     runId: string
   }): Promise<void> {
     const afterTar = filePreTar(p.path.split('/').pop() ?? 'file', p.bytes)
-    const parent = parentDirOf(p.path)
-    const dir = parent === '' ? '/lab' : `/lab/${parent}`
+    const dir = labAbsOf(parentDirOf(p.path))
     await this.fence.runExclusive(p.sessionId, { holder: 'materialize', timeoutMs: this.deps.fenceTimeoutMs }, async () => {
       await this.writer.write({
         sessionId: p.sessionId,
@@ -266,16 +266,36 @@ export class FileJournalService {
 
   // ---- 启动面 ----
 
-  // 启动 reconcile（server.ts 装配后异步调；容器缺失 session 跳过——restore 路兜底）。
+  // 启动 reconcile（server.ts 装配后异步调）：逐 session 围栏 + lease 包 reconcileSession——
+  // 与并发 rewind/agent 写互斥（同一 fence）；blob 读防 GC 剪枝（归档未处置行的 sha 不在
+  // gc refcount 内，lease 是唯一防剪面）。单 session 基建故障不中断全批（warn 留痕——静默
+  // 不可接受）。
   async reconcileOnBoot(): Promise<Map<string, ReconcileOutcome>> {
-    const outcomes = await this.reconciler.reconcileOnBoot()
-    for (const [sessionId, o] of outcomes) {
-      if (o.rolledForward + o.rolledMissing + o.resumedReverted + o.resumedMissing > 0) {
-        // 机制事件无用户上下文——userId/username 由 JournalAudit 按 session.ownerId 解析
-        await this.audit.record({ kind: 'reconcile', sessionId, detail: { phase: 'boot', ...o } })
+    const out = new Map<string, ReconcileOutcome>()
+    for (const sessionId of await this.reconciler.sessionsNeedingReconcile()) {
+      let outcome: ReconcileOutcome
+      try {
+        outcome = await this.fence.runExclusive(sessionId, { holder: 'boot-reconcile', timeoutMs: 0 }, async () => {
+          const rows = await this.deps.prisma.fileJournal.findMany({ where: { sessionId, fileRevertedAt: null } })
+          this.gc.acquireLease(sessionId, leaseShasOf(rows))
+          try {
+            return await this.reconciler.reconcileSession(sessionId)
+          } finally {
+            this.gc.releaseLease(sessionId)
+          }
+        })
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn(`[filejournal] boot reconcile failed: session=${sessionId}: ${String(err)}`)
+        continue
       }
+      if (outcome.rolledForward + outcome.rolledMissing + outcome.resumedReverted + outcome.resumedMissing > 0) {
+        // 机制事件无用户上下文——userId/username 由 JournalAudit 按 session.ownerId 解析
+        await this.audit.record({ kind: 'reconcile', sessionId, detail: { phase: 'boot', ...outcome } })
+      }
+      out.set(sessionId, outcome)
     }
-    return outcomes
+    return out
   }
 
   // 观测面（测试/健康检查）。
