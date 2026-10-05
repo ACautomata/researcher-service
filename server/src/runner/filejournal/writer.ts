@@ -47,6 +47,9 @@ export interface JournalWriteParams {
   /** op 生效锚点 checkpoint：打点时点未知（终态未定）——恒记 PENDING_CHECKPOINT_ID，行带
    *  runId 待 run 终态按 runId 回填（RunService 终态面） */
   readonly runId?: string
+  /** 打点时点锚点已知的物化面直盖（media 物化在 run completed 分支——checkpointId 回填
+   *  updateMany 已执行完，不直盖则行恒 pending 恒逆放误撤产物）；缺省走回填路 */
+  readonly checkpointId?: string
   readonly toolCallId?: string
 }
 
@@ -72,7 +75,7 @@ export class JournalWriter {
     // ⓪ 幂等键命中（重放路径）：不重读 pre-image / 不写 attic——直接补 apply
     const existing = await this.prisma.fileJournal.findUnique({
       where: { sessionId_toolCallId: { sessionId: p.sessionId, toolCallId } },
-      select: { seq: true, applied: true },
+      select: { seq: true, applied: true, runId: true },
     })
     if (existing !== null) return this.replayExisting(p, existing)
 
@@ -112,7 +115,7 @@ export class JournalWriter {
         await tx.fileJournal.create({
           data: {
             sessionId: p.sessionId,
-            checkpointId: PENDING_CHECKPOINT_ID,
+            checkpointId: p.checkpointId ?? PENDING_CHECKPOINT_ID,
             seq: nextSeq,
             op: p.op,
             path: p.path,
@@ -130,7 +133,7 @@ export class JournalWriter {
       if (!isP2002(e)) throw e
       const raced = await this.prisma.fileJournal.findUniqueOrThrow({
         where: { sessionId_toolCallId: { sessionId: p.sessionId, toolCallId } },
-        select: { seq: true, applied: true },
+        select: { seq: true, applied: true, runId: true },
       })
       return this.replayExisting(p, raced)
     }
@@ -146,16 +149,22 @@ export class JournalWriter {
     return { seq, idempotentReplay: false }
   }
 
-  // 幂等命中处置（⓪查询命中与 ③P2002 raced 共用）：补 apply + 补置位，不重复打点。
+  // 幂等命中处置（⓪查询命中与 ③P2002 raced 共用）：补 apply + 补置位；跨 run 复用迁移
+  // runId（行归最后驱动该物化的 run——failed run 的上传物化行被重发 run 幂等命中复用时，
+  // 不迁移则新 run 终态回填 where runId 不命中、行恒 pending 被误逆放）
   private async replayExisting(
     p: JournalWriteParams,
-    row: { seq: number; applied: boolean },
+    row: { seq: number; applied: boolean; runId: string | null },
   ): Promise<JournalWriteEntry> {
     await p.apply()
-    if (!row.applied) {
+    const migrateRun = p.runId !== undefined && row.runId !== p.runId
+    if (!row.applied || migrateRun) {
       await this.prisma.fileJournal.updateMany({
         where: { sessionId: p.sessionId, seq: row.seq },
-        data: { applied: true },
+        data: {
+          ...(row.applied ? {} : { applied: true }),
+          ...(migrateRun ? { runId: p.runId } : {}),
+        },
       })
     }
     return { seq: row.seq, idempotentReplay: true }

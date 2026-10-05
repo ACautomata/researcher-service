@@ -634,13 +634,7 @@ export class SessionService {
     this.requireTerminal(sessionId)
 
     const rows = await this.listHistoryRows(sessionId)
-    const anchor = this.anchorOrThrow(rows, p.messageId)
-    // 归档 checkpoint 不可作锚点（#770 无恢复入口；归档行已由 listHistoryRows 滤除，此处兜
-    // 「行未归档但 checkpoint 已归档」的机制性不一致）。
-    const parentOf = await this.checkpointParentLookup(sessionId)
-    if (!parentOf.has(anchor)) {
-      throw fail(CODE.VALIDATION_FAILED, '锚点 checkpoint 缺失或已归档')
-    }
+    const { anchor, parentOf } = await this.anchorForRewind(sessionId, rows, p.messageId)
     const anchorChain = ancestorChainOf((id) => parentOf.get(id) ?? null, anchor)
 
     // 被放弃 checkpoint（未归档全体 − 锚点链）——共享前缀（锚点之前）一律不打标记。
@@ -724,13 +718,23 @@ export class SessionService {
     }
   }
 
-  // 锚点解析（rewind/preview 共用——同码同文案；fork 切点文案不同不复用）。
-  private anchorOrThrow(rows: Parameters<typeof resolveRewindAnchor>[0], messageId: string): string {
+  // 锚点解析（rewind/preview 共用——同码同判定）：resolveRewindAnchor + checkpoint 存在性
+  // 兜底（归档 checkpoint 不可作锚点——#770 无恢复入口；「行未归档但 checkpoint 已归档」
+  // 机制性不一致态两入口同拒，preview 判定 ≡ 执行判定）。fork 切点文案不同不复用。
+  private async anchorForRewind(
+    sessionId: string,
+    rows: Parameters<typeof resolveRewindAnchor>[0],
+    messageId: string,
+  ): Promise<{ anchor: string; parentOf: Map<string, string | null> }> {
     const anchor = resolveRewindAnchor(rows, messageId)
     if (anchor === null) {
       throw fail(CODE.VALIDATION_FAILED, '该消息不可作为回退锚点（无更早的可回退 state）')
     }
-    return anchor
+    const parentOf = await this.checkpointParentLookup(sessionId)
+    if (!parentOf.has(anchor)) {
+      throw fail(CODE.VALIDATION_FAILED, '锚点 checkpoint 缺失或已归档')
+    }
+    return { anchor, parentOf }
   }
 
   // rewind 预览（#782 · D8）：逆放集摘要 + exec 跨越清单（复用轨迹聚合，零新增存储）。
@@ -742,7 +746,7 @@ export class SessionService {
   ): Promise<{ anchor: string } & FileRewindPreview> {
     await getSessionForUser(this.deps.prisma, user, sessionId) // 归属校验（50002 同码防探测）
     const rows = await this.listHistoryRows(sessionId)
-    const anchor = this.anchorOrThrow(rows, p.messageId)
+    const { anchor } = await this.anchorForRewind(sessionId, rows, p.messageId)
     return this.deps.fileRewind
       ? await this.deps.fileRewind.preview({
           sessionId,

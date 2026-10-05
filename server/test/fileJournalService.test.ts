@@ -10,6 +10,7 @@ import { createPrismaClient } from '../src/prisma'
 import type { PrismaClient } from '../src/generated/prisma/client'
 import { FileJournalService } from '../src/runner/filejournal/service'
 import { PENDING_CHECKPOINT_ID } from '../src/runner/filejournal/values'
+import { MAX_COLLECT_BYTES } from '../src/runner/backend/values'
 import { fakeFs } from './fileJournalTestkit'
 import { seedUser } from './helpers'
 
@@ -165,6 +166,38 @@ describe('FileJournalService（#782）', () => {
     expect(auditRow.traceId).toContain('file-journal:')
     expect(auditRow.inputText).toContain('attic_quota_reject')
     expect(auditRow.inputText).toContain('big.txt')
+  })
+
+  it('write 覆写超限既有文件：降级不打点直写（打点而逆操作错——beforeSha=null + op=write 逆放 remove——比无恢复面更危险）', async () => {
+    await seedSession()
+    const tree = fs.trees.get(CONTAINER)!
+    tree.set('/lab/big.txt', Buffer.alloc(MAX_COLLECT_BYTES + 1, 7))
+    const b = backend()
+    expect((await b.write('/lab/big.txt', 'small')).error).toBeUndefined()
+    // 降级面：零 journal 行（不误导「可恢复」）+ 文件已直写
+    expect(await prisma.fileJournal.count({ where: { sessionId: SESSION } })).toBe(0)
+    expect(tree.get('/lab/big.txt')?.toString()).toBe('small')
+    // not-found 仍新建语义打点（回归锚）
+    expect((await b.write('/lab/new.txt', 'v')).error).toBeUndefined()
+    expect(await prisma.fileJournal.count({ where: { sessionId: SESSION } })).toBe(1)
+  })
+
+  it('journalMaterialize：checkpointId 直盖（media 物化面——回填已执行完，不直盖则恒 pending 误逆放）', async () => {
+    await seedSession()
+    await svc.journalMaterialize({
+      sessionId: SESSION, container: CONTAINER, path: 'uploads/a1/img.png',
+      bytes: Buffer.from('media-bytes'), toolCallId: 'media-a1', runId: 'run-1', checkpointId: 'ckB',
+    })
+    const row = await prisma.fileJournal.findFirstOrThrow({ where: { sessionId: SESSION, toolCallId: 'media-a1' } })
+    expect(row.checkpointId).toBe('ckB')
+    // 缺省 → pending（ingestion 面——run 开始时终态未知，靠终态回填）
+    await svc.journalMaterialize({
+      sessionId: SESSION, container: CONTAINER, path: 'uploads/a2/f.bin',
+      bytes: Buffer.from('upload'), toolCallId: 'ingest-a2', runId: 'run-1',
+    })
+    const row2 = await prisma.fileJournal.findFirstOrThrow({ where: { sessionId: SESSION, toolCallId: 'ingest-a2' } })
+    expect(row2.checkpointId).toBe(PENDING_CHECKPOINT_ID)
+    expect(labSnapshot(fs)).toMatchObject({ 'uploads/a1/img.png': 'media-bytes', 'uploads/a2/f.bin': 'upload' })
   })
 
   it('/lab 根 delete 拒绝（fail-closed——全树删除无 rewind 恢复面）', async () => {

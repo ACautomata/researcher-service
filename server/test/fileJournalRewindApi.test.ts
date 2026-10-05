@@ -372,6 +372,22 @@ describe('文件 rewind 端到端（S1，#782）', () => {
     expect(crossed.some((c) => c.toolCallId === 'tm-ex-tm-prev-safe')).toBe(false)
   })
 
+  it('preview 锚点 checkpoint 已归档（行未归档机制性不一致态）：与执行面同拒', async () => {
+    currentScript = [new AIMessage({ content: '好。' })]
+    const created = await request.post('/api/v1/sessions').set(bearer(access)).send({ title: '预览兜底' })
+    const sid = created.body.data.id as string
+    await request.post(`/api/v1/sessions/${sid}/messages`).set(bearer(access)).set('Idempotency-Key', hexKey()).send({ content: '1' })
+    await waitFor(() => runService.stateOf(sid)?.state === 'completed')
+    const assistant = await prisma.sessionMessage.findFirstOrThrow({ where: { sessionId: sid, role: 'assistant' } })
+    // checkpoint 行归档、消息行不动——listHistoryRows 滤不到的机制性不一致态
+    await prisma.checkpoint.updateMany({ where: { threadId: sid }, data: { archivedAt: new Date() } })
+    const res = await request
+      .post(`/api/v1/sessions/${sid}/rewind/preview`)
+      .set(bearer(access))
+      .send({ messageId: assistant.id })
+    expect(res.body.code).toBe(CODE.VALIDATION_FAILED)
+  })
+
   it('C1：存活 teammate 在 scope=all rewind 后收信箱系统消息', async () => {
     // teammates deps 已在 beforeAll 注入 RunService——直接驱动 C1 方法面
     const created = await request.post('/api/v1/sessions').set(bearer(access)).send({ title: 'C1 会话' })

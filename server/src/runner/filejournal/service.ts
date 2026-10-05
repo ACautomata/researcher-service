@@ -110,6 +110,8 @@ export class FileJournalService {
     toolCallId: string
     /** 打点所在 run（checkpointId 终态回填键） */
     runId: string
+    /** 物化时点锚点已知则直盖（media 物化在 completed 分支——回填已执行完）；缺省 pending 走回填路 */
+    checkpointId?: string
   }): Promise<void> {
     const afterTar = filePreTar(p.path.split('/').pop() ?? 'file', p.bytes)
     const dir = labAbsOf(parentDirOf(p.path))
@@ -126,6 +128,7 @@ export class FileJournalService {
           await this.deps.primitives.putArchive(p.container, dir, afterTar)
         },
         runId: p.runId,
+        ...(p.checkpointId !== undefined ? { checkpointId: p.checkpointId } : {}),
         toolCallId: p.toolCallId,
       })
     })

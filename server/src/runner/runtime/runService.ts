@@ -890,6 +890,9 @@ export class RunService {
                           bytes,
                           toolCallId: `${IDEMPOTENCY_MEDIA_PREFIX}${row.attachmentId}`,
                           runId: cmd.runId,
+                          // 直盖终态锚：本 run 的 checkpointId 回填 updateMany（stream 结束处）
+                          // 已执行完、先于本次物化 insert——不直盖则 media 行恒 pending 恒逆放
+                          ...(anchorCheckpointId !== null ? { checkpointId: anchorCheckpointId } : {}),
                         })
                       },
                     }

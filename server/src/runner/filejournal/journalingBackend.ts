@@ -12,7 +12,7 @@
 
 import { randomUUID } from 'node:crypto'
 import { performStringReplacement } from '../backend/semantics'
-import { getMimeType, isTextMimeType } from '../backend/mime'
+import { decodeWriteContent } from '../backend/mime'
 import { routePath, type BackendTargets } from '../backend/paths'
 import { DockerArchiveBackend } from '../backend/dockerArchiveBackend'
 import type { BackendProtocolV2, DeleteResult, EditResult, WriteResult } from '../backend/protocol'
@@ -46,12 +46,15 @@ export class JournalingBackend extends DockerArchiveBackend implements BackendPr
       if ('error' in routed) return routed
       if (routed.container !== this.j.targets.lab) return super.write(filePath, content)
       if (labRelOf(routed.absPath) === '') return super.write(filePath, content) // /lab 根目标：V1 不打点（super 回 error——根不可写为文件）
-      const buf = isTextMimeType(getMimeType(filePath)) ? Buffer.from(content, 'utf8') : Buffer.from(content, 'base64')
+      const buf = decodeWriteContent(filePath, content)
       const rel = labRelOf(routed.absPath)
       const basename = routed.absPath.split('/').pop() ?? 'file'
       const afterTar = filePreTar(basename, buf)
-      // pre 探测（文件级；不存在/目录/超限 → null = 新建语义）
+      // pre 探测（文件级；kind 分派：not-found → null = 新建语义；超限/目录/symlink →
+      // 降级不打点直写（对齐 delete 面降级形态）——打点而逆操作错（beforeSha=null + op=write
+      // → 逆放 remove 删原文件）比无恢复面直操作更危险：行存在反而误导「可恢复」）
       const g = await this.guardedFile(routed, filePath)
+      if ('error' in g && g.kind !== 'not-found') return super.write(filePath, content)
       const preTar = 'tree' in g ? filePreTar(basename, g.buf) : null
       await this.fenced('agent-write', () =>
         this.j.writer.write({

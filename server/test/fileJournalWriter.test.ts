@@ -43,6 +43,7 @@ describe('JournalWriter（journal-first 管线）', () => {
         await fs.primitives.putArchive(CONTAINER, '/lab', createTarFile(p, afterBytes))
       }),
       ...(over.toolCallId !== undefined ? { toolCallId: over.toolCallId } : {}),
+      ...(over.runId !== undefined ? { runId: over.runId } : {}),
     }
   }
 
@@ -143,6 +144,19 @@ describe('JournalWriter（journal-first 管线）', () => {
     const row = await prisma.fileJournal.findFirstOrThrow({ where: { sessionId: SESSION, seq: 1 } })
     expect(row.applied).toBe(true)
     expect(await prisma.fileJournal.count({ where: { sessionId: SESSION } })).toBe(1)
+  })
+
+  it('幂等命中跨 run 复用：runId 迁移至最新 run（重发 run 终态回填 where runId 可命中）', async () => {
+    const w = writer()
+    // 首打点挂 failed run（无终态回填——行带旧 runId）
+    await w.write(writeParams({ toolCallId: 'tc-mig', runId: 'runA', apply: async () => {} }))
+    // 重发 run 幂等命中：runId 迁移至 runB（不迁移则 runB 回填不命中、行恒 pending 被误逆放）
+    const r2 = await w.write(writeParams({ toolCallId: 'tc-mig', runId: 'runB', apply: async () => {} }))
+    expect(r2).toMatchObject({ seq: 1, idempotentReplay: true })
+    expect(await prisma.fileJournal.findFirstOrThrow({ where: { sessionId: SESSION } })).toMatchObject({ runId: 'runB' })
+    // 缺 runId 的重放不迁移（ALS 随机键等无归属面）
+    await w.write(writeParams({ toolCallId: 'tc-mig', apply: async () => {} }))
+    expect(await prisma.fileJournal.findFirstOrThrow({ where: { sessionId: SESSION } })).toMatchObject({ runId: 'runB' })
   })
 
   it('apply 抛错：applied=false 行残留（reconcile 消费面）、错误上抛', async () => {
