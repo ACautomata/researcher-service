@@ -117,6 +117,9 @@ export interface SessionRunGateway {
   }) => RunCommand
   /** in-flight 投影（#779 story 11）：重拉投影的补偿重建面（running 从 checkpoint 重建/queued 空 turn） */
   readonly inFlightProjection: (sessionId: string) => Promise<InFlightProjection | undefined>
+  /** rewind 跨派生点的 teammate 级联作废（#786 AC4）：锚点祖先链判定 + 归档 + 未读留言失效
+   *  + 停跑/事件，由 RunService 统一面完成；缺省不注 = 无 teammate 语义（旧 fake 兼容）。 */
+  readonly teammatesForRewind?: (sessionId: string, checkpointId: string) => Promise<void>
 }
 
 // run 命令发射口（submit 入队 ack 语义）：生产 = BullMQ submit（resolve = job 已入队；
@@ -633,6 +636,11 @@ export class SessionService {
     ]
     await this.deps.prisma.$transaction(writes)
 
+    // AC4（#786）：跨派生点的 teammate 级联作废（锚点祖先链不含其 spawnedAtCheckpointId →
+    // 归档 + 未读留言失效 + 停跑/run.aborted{by:system} 事件）。指针换锚事务提交后执行：
+    // 作废判据 = 新锚点链，与落库状态一致；失败向上抛（事务已提交，重试 rewind 同锚点幂等）。
+    await this.deps.runService.teammatesForRewind?.(sessionId, anchor)
+
     this.publishSessionEvent(session.ownerId, 'session.invalidated', { reason: 'rewind' }, sessionId)
     return { sessionId, activeCheckpointId: anchor }
   }
@@ -643,6 +651,8 @@ export class SessionService {
   // export→import，含墓碑目录；源已删 → 空起步 + 系统消息）+ file_journal 切点截断继承
   //（seq 保留原值接续）+ attachments 行全量复制（#768 D7 字面；attachmentId 不改，messageId
   // 挂靠复制行映射新 id、其余置 null——跨会话 FK 级联删除面）。
+  // teammate（#786 定案）：不跟随——teammate 行按 parentSessionId 挂源会话（新 id 天然无
+  // teammate），源会话 teammate 原样不动；fork 是对话状态探索，teammate 属于源会话执行上下文。
   // 顺序：session 行先落（拿 id）→ 沙箱复制（Docker 成功才落数据行）→ 数据复制事务（含系统
   // 消息）；任一步失败补偿删 session 行（cascade 清子行）+ 删沙箱尽力——fork 可整体重试。
   async forkSession(
