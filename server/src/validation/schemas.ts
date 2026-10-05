@@ -203,6 +203,19 @@ export const sessionResumeSchema = z.object({
   decisions: z.unknown().optional(),
 })
 
+// ---------------------------------------------------------------------------
+// rewind / fork（#781 · #747 story 16/18）。锚点一律以消息行表达（产品面 = 选历史消息）；
+// checkpoint 解析在 service（resolveRewindAnchor）。branch-switch 机制 #770 已取消。
+// ---------------------------------------------------------------------------
+export const sessionRewindSchema = z.object({
+  messageId: z.string().min(1, 'messageId 不能为空'),
+})
+
+export const sessionForkSchema = z.object({
+  messageId: z.string().min(1).optional(), // 缺省 = 当前活跃头（指针或最新锚点）
+  title: z.string().trim().max(TITLE_MAX, `title 过长（≤${TITLE_MAX} 字符）`).optional(),
+})
+
 export const sessionApprovalSchema = z.object({
   decision: z.enum(['allow', 'deny']),
   reason: z.string().max(2000).optional(),

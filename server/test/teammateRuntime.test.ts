@@ -351,4 +351,91 @@ describe('#786 teammate runtime acceptance (S1/S2)', () => {
       ]))
     } finally { releaseWriter.release() }
   }, 15_000)
+
+  it('rest rewind across a spawn checkpoint retires teammates and invalidates their unread mail', async () => {
+    const h = await harness({
+      leader: [new AIMessage({ content: 'First done' }), toolCallAi('spawn', 'spawn_teammate', { name: 'worker', task: 'worker-task' }), new AIMessage({ content: 'Second done' })],
+      'worker-task': [toolCallAi('wait', 'wait_for_teammate_mail', { timeoutMs: 5000 })],
+    })
+    expect((await h.send('leader')).body.code).toBe(0)
+    await h.settle()
+    expect((await h.request.post(`/api/v1/sessions/${h.sessionId}/messages`).set(h.auth).set('Idempotency-Key', 'c'.repeat(32)).send({ content: 'spawn the worker' })).body.code).toBe(0)
+    await h.settle()
+    const [worker] = await h.teammates.list(h.sessionId)
+    expect(worker.status).toBe('waiting')
+    await h.teammates.sendMail({ parentSessionId: h.sessionId, senderTeammateId: worker.id, content: 'pre-rewind evidence' })
+    const projection = (await h.request.get(`/api/v1/sessions/${h.sessionId}/messages`).set(h.auth)).body.data
+    const anchorRow = projection.messages.find((message: { role: string; content: string }) => message.role === 'assistant' && message.content === 'First done')
+    expect((await h.request.post(`/api/v1/sessions/${h.sessionId}/rewind`).set(h.auth).send({ messageId: anchorRow.id })).body.code).toBe(0)
+    await h.settle()
+    expect(await h.teammates.list(h.sessionId)).toEqual([expect.objectContaining({ name: 'worker', status: 'archived' })])
+    expect(h.service.stateOf(worker.threadId)?.state).toBe('aborted')
+    expect(h.events.find(event => event.type === 'run.aborted' && event.teammateId === worker.id)).toMatchObject({ payload: { by: 'system' } })
+    expect(h.events.find(event => event.type === 'session.invalidated')).toMatchObject({ sessionId: h.sessionId, payload: { reason: 'rewind' } })
+    expect(await h.teammates.receiveMail(h.sessionId, null)).toEqual([])
+    const after = (await h.request.get(`/api/v1/sessions/${h.sessionId}/messages`).set(h.auth)).body.data
+    expect(after.teammates).toEqual([expect.objectContaining({ name: 'worker', status: 'archived', mailbox: [] })])
+  }, 15_000)
+
+  it('fork starts the new session without teammates and leaves the source untouched', async () => {
+    const h = await harness({
+      leader: [toolCallAi('spawn', 'spawn_teammate', { name: 'worker', task: 'worker-task' }), new AIMessage({ content: 'Leader done' })],
+      'worker-task': [toolCallAi('wait', 'wait_for_teammate_mail', { timeoutMs: 5000 })],
+    })
+    expect((await h.send('leader')).body.code).toBe(0)
+    await h.settle()
+    const forked = await h.request.post(`/api/v1/sessions/${h.sessionId}/fork`).set(h.auth).send({})
+    expect(forked.body.code).toBe(0)
+    const forkId = forked.body.data.session.id as string
+    expect((await h.request.get(`/api/v1/sessions/${forkId}/messages`).set(h.auth)).body.data.teammates).toBeUndefined()
+    expect(await h.teammates.list(h.sessionId)).toEqual([expect.objectContaining({ name: 'worker', status: 'waiting' })])
+    expect((await h.request.get(`/api/v1/sessions/${h.sessionId}/messages`).set(h.auth)).body.data.teammates)
+      .toEqual([expect.objectContaining({ name: 'worker' })])
+  }, 15_000)
+
+  it('a teammate request read by the leader results in a leader-spawned teammate', async () => {
+    const h = await harness({
+      leader: [
+        toolCallAi('spawn', 'spawn_teammate', { name: 'worker', task: 'worker-task' }),
+        toolCallAi('wait', 'wait_for_teammate_mail', { timeoutMs: 5000 }),
+        toolCallAi('grant', 'spawn_teammate', { name: 'nested', task: 'nested-task' }),
+        new AIMessage({ content: 'Leader done' }),
+      ],
+      'worker-task': [toolCallAi('request', 'request_teammate', { name: 'nested', task: 'nested-task' }), new AIMessage({ content: 'Worker done' })],
+      'nested-task': [new AIMessage({ content: 'Nested done' })],
+    })
+    expect((await h.send('leader')).body.code).toBe(0)
+    await h.settle()
+    expect(await h.teammates.list(h.sessionId)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: 'worker', status: 'completed' }),
+      expect.objectContaining({ name: 'nested', status: 'completed' }),
+    ]))
+    expect(await h.teammates.mailboxHistory(h.sessionId)).toEqual([expect.objectContaining({ kind: 'request', recipientTeammateId: null })])
+  }, 15_000)
+
+  it('broadcast_teammate_mail delivers to every other active teammate and wakes a parked peer', async () => {
+    let h: Awaited<ReturnType<typeof harness>>
+    h = await harness({
+      leader: [
+        toolCallAi('spawn-bob', 'spawn_teammate', { name: 'bob', task: 'bob-task' }),
+        async () => {
+          await waitFor(async () => (await h.teammates.list(h.sessionId)).some(row => row.name === 'bob' && row.status === 'waiting'))
+          return toolCallAi('spawn-alice', 'spawn_teammate', { name: 'alice', task: 'alice-task' })
+        },
+        new AIMessage({ content: 'Leader done' }),
+      ],
+      'bob-task': [toolCallAi('wait', 'wait_for_teammate_mail', { timeoutMs: 5000 }), new AIMessage({ content: 'Bob done' })],
+      'alice-task': [toolCallAi('bcast', 'broadcast_teammate_mail', { message: 'status check' }), new AIMessage({ content: 'Alice done' })],
+    })
+    expect((await h.send('leader')).body.code).toBe(0)
+    await h.settle()
+    const rows = await h.teammates.list(h.sessionId)
+    expect(rows).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: 'bob', status: 'completed' }),
+      expect.objectContaining({ name: 'alice', status: 'completed' }),
+    ]))
+    const bob = rows.find(row => row.name === 'bob')!
+    expect(await h.teammates.mailboxHistory(h.sessionId)).toEqual([expect.objectContaining({ kind: 'broadcast', content: 'status check', recipientTeammateId: bob.id })])
+    expect(h.events.filter(event => event.type === 'run.resumed')).toHaveLength(1)
+  }, 15_000)
 })

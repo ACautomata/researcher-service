@@ -3,11 +3,11 @@
 // 刻意镜像真 daemon 的标签过滤语义：listSandboxes 只返回带 kind=sandbox 标签的容器——供
 // 「沙箱对容器列表隐身」类断言共享同一判定源。
 
-import type { SandboxInfo, SandboxRuntime, SandboxSpec } from '../src/sandboxes/runtime'
+import type { SandboxInfo, SandboxRuntime, SandboxSpec, SandboxForkSpec } from '../src/sandboxes/runtime'
 
 export interface FakeSandboxRecord {
   info: SandboxInfo
-  spec: SandboxSpec
+  spec: SandboxSpec | SandboxForkSpec
   started: boolean
   removed: boolean
 }
@@ -23,6 +23,10 @@ export class FakeSandboxRuntime implements SandboxRuntime {
   failCreateFor = new Set<string>()
   // 故障注入：listSandboxes 抛错（测 sweeper 容忍面）
   failList = false
+  // fork 字面复制记录（目标 sessionId → 源 sessionId）
+  readonly forkedFrom = new Map<string, string>()
+  // 故障注入：对指定 sessionId 的 createSandboxFromSource 抛错
+  failForkFor = new Set<string>()
 
   async createNetwork(sessionId: string): Promise<void> {
     this.calls.push({ kind: 'createNetwork', sessionId })
@@ -53,6 +57,30 @@ export class FakeSandboxRuntime implements SandboxRuntime {
       removed: false,
     })
     return id
+  }
+
+  // fork 字面复制（#781）：源容器存在 → 落位目标容器（image = 源镜像，字面语义的 fake 面标注）；
+  // 源不存在 → 'source-missing'（不建容器，lifecycle 空起步路径兜底）。
+  async createSandboxFromSource(spec: SandboxForkSpec): Promise<'copied' | 'source-missing'> {
+    this.calls.push({ kind: 'createSandboxFromSource', sessionId: spec.sessionId })
+    if (this.failForkFor.has(spec.sessionId)) throw new Error(`simulated sandbox fork failure: ${spec.sessionId}`)
+    const source = this.containers.get(spec.sourceSessionId)
+    if (!source) return 'source-missing'
+    const id = `fake-sb-${spec.sessionId}-${this.idSeq++}`
+    this.forkedFrom.set(spec.sessionId, spec.sourceSessionId)
+    this.containers.set(spec.sessionId, {
+      info: {
+        containerId: id,
+        sessionId: spec.sessionId,
+        running: false,
+        status: 'created',
+        image: source.info.image,
+      },
+      spec,
+      started: false,
+      removed: false,
+    })
+    return 'copied'
   }
 
   async getSandbox(sessionId: string): Promise<SandboxInfo | null> {

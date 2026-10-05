@@ -6,6 +6,7 @@ import { isFloatingImageRef } from './containers/imageRef'
 import { parseEncryptionKeys } from './crypto'
 import { DEFAULT_RECURSION_LIMIT } from './runner/runtime/values'
 import { APPROVAL_TIMEOUT_MS } from './runner/approval/values'
+import { DEFAULT_WRITE_LOCK_TIMEOUT_MS } from './runner/writelock/registry'
 
 // 控制面配置：全部来自环境变量，带 dev 友好默认。生产缺关键项时 fail-fast。
 // 规格 §A：JWT 密钥 = HS256 对称（平移现状 SECRET_KEY 语义）；access/refresh 寿命平移 simplejwt 默认。
@@ -419,6 +420,16 @@ function readApprovalTimeoutMs(): number {
   return Math.floor(n)
 }
 
+// 写锁有界等待（#785 · #769 锁方案「等待有界，超时向 agent 报错」；默认值单一来源 =
+// writelock/registry.ts 的 DEFAULT_WRITE_LOCK_TIMEOUT_MS）。坏值回退默认（approval 超时同风格）。
+function readWriteLockTimeoutMs(): number {
+  const raw = process.env.RUNNER_WRITE_LOCK_TIMEOUT_MS
+  if (raw === undefined || raw.trim() === '') return DEFAULT_WRITE_LOCK_TIMEOUT_MS
+  const n = Number(raw)
+  if (!Number.isFinite(n) || n <= 0) return DEFAULT_WRITE_LOCK_TIMEOUT_MS
+  return Math.floor(n)
+}
+
 export const config = {
   jwtSecret: readSecret(),
   accessTtl: process.env.ACCESS_TOKEN_TTL ?? '5m',
@@ -517,6 +528,8 @@ export const config = {
       },
       // 审批升级超时（729 §3.3 默认 48h；装配层注入 RunService）
       approvalTimeoutMs: readApprovalTimeoutMs(),
+      // #785 写锁有界等待（默认 10s；装配层注入 RunService；env RUNNER_WRITE_LOCK_TIMEOUT_MS）
+      writeLockTimeoutMs: readWriteLockTimeoutMs(),
     }
   })(),
   // ---- OpenAPI 文档面（#761）----

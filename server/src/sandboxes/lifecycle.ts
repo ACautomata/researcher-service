@@ -115,6 +115,32 @@ export class SandboxLifecycle {
     })
   }
 
+  // fork 沙箱（#781 · #768 D7）：源容器字面复制 → 目标沙箱（网络 + 容器 + start）。
+  // 源不存在 → 'source-missing' + 目标空起步（常规 createSandbox，/lab 预置空树——「源已删则
+  // 空起步 + 系统消息」的容器面；系统消息由调用方落库）。全程 per-session 串行（目标名排队，
+  // 与 ensure/remove 同 serializer——并发 fork 只落一次）。返回值 = 复制结果供调用方落系统消息。
+  forkSandbox(sourceSessionId: string, newSessionId: string): Promise<'copied' | 'source-missing'> {
+    return this.serializer.enqueue(newSessionId, async () => {
+      await this.runtime.createNetwork(newSessionId)
+      const spec = {
+        sessionId: newSessionId,
+        sourceSessionId,
+        limits: this.opts.limits ?? SANDBOX_LIMITS,
+      }
+      const outcome = await this.runtime.createSandboxFromSource(spec)
+      if (outcome === 'source-missing') {
+        await this.runtime.createSandbox({
+          sessionId: newSessionId,
+          image: this.opts.image,
+          limits: this.opts.limits ?? SANDBOX_LIMITS,
+        })
+      }
+      await this.runtime.startSandbox(newSessionId)
+      this.touch(newSessionId)
+      return outcome
+    })
+  }
+
   // 闲置回收扫描：对 daemon 上仍 running 的沙箱，按「最后活动（未知 → 服务启动时刻）+ 阈值」
   // 判闲置并 stop（文件保留）。返回被 stop 的 sessionId 列表（观测/测试面）。daemon 不可达 →
   // 抛错由 sweeper 吞（下轮重试），不炸进程。

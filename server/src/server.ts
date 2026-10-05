@@ -85,7 +85,11 @@ async function main(): Promise<void> {
     hub: eventHub,
     runService: runner.service,
     dispatch: (cmd) => runner.queue.submit(cmd),
-    sandboxes: { remove: (id) => sandboxes.lifecycle.remove(id) },
+    sandboxes: {
+      remove: (id) => sandboxes.lifecycle.remove(id),
+      // #781 fork 字面复制（#768 D7）：源容器 export→import（源缺 → 'source-missing' 空起步）
+      fork: (source, target) => sandboxes.lifecycle.forkSandbox(source, target),
+    },
     // #780 附件链接（≤4 件 + 归属/session 校验）——上传/下载走独立 AttachmentsService
     attachments: attachmentsService,
   })

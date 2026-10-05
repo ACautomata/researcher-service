@@ -194,3 +194,41 @@ describe('删 session 级联删（story 58：容器 + 独立网络）', () => {
     expect(runtime.containers.has(SESSION)).toBe(true)
   })
 })
+
+describe('fork 沙箱（#781 · #768 D7：源字面复制 / 源删空起步 / 故障传播）', () => {
+  const TARGET = 'csession-fork-1'
+
+  it('源存在 → copied：目标容器落位（forkedFrom 记录）、网络 + start 时序、规格透传', async () => {
+    const { runtime, lifecycle } = makeLifecycle()
+    await lifecycle.ensure(SESSION)
+    expect(await lifecycle.forkSandbox(SESSION, TARGET)).toBe('copied')
+    expect(runtime.forkedFrom.get(TARGET)).toBe(SESSION)
+    expect(runtime.containers.get(TARGET)?.info).toMatchObject({ running: true, image: 'busybox:1.36' })
+    expect(runtime.calls.filter((c) => c.sessionId === TARGET).map((c) => c.kind)).toEqual([
+      'createNetwork',
+      'createSandboxFromSource',
+      'startSandbox',
+    ])
+  })
+
+  it('源已删 → source-missing：目标空起步（常规 create 兜底 + start）', async () => {
+    const { runtime, lifecycle } = makeLifecycle()
+    expect(await lifecycle.forkSandbox('csession-gone', TARGET)).toBe('source-missing')
+    expect(runtime.forkedFrom.has(TARGET)).toBe(false)
+    expect(runtime.containers.has(TARGET)).toBe(true) // 空容器已建（/lab 空树语义在 runtime 侧）
+    expect(runtime.calls.filter((c) => c.sessionId === TARGET).map((c) => c.kind)).toEqual([
+      'createNetwork',
+      'createSandboxFromSource',
+      'createSandbox',
+      'startSandbox',
+    ])
+  })
+
+  it('复制原语故障 → 抛错上传播（调用方 fork 补偿面），目标容器不落位', async () => {
+    const { runtime, lifecycle } = makeLifecycle()
+    await lifecycle.ensure(SESSION)
+    runtime.failForkFor.add(TARGET)
+    await expect(lifecycle.forkSandbox(SESSION, TARGET)).rejects.toThrow(/fork failure/)
+    expect(runtime.containers.has(TARGET)).toBe(false)
+  })
+})

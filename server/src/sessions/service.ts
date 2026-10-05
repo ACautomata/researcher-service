@@ -15,16 +15,24 @@ import { snapshotOfficialContent } from '../officialContent/runtime'
 // （completed/interrupted/aborted/failed 任一）落一条 assistant 行（attachmentsJson v1）；投影
 // GET 反序列化回同形状。事件流归约 ≡ 投影行（sessionsApi.test.ts 逐字节断言）。
 
-import type { PrismaClient, Session, SessionMessage } from '../generated/prisma/client'
+import { randomUUID } from 'node:crypto'
+import type { PrismaClient, PrismaPromise, Session, SessionMessage } from '../generated/prisma/client'
 import type { AuthUser } from '../types'
-import { fail } from '../envelope'
+import { fail, EnvelopeError } from '../envelope'
 import { CODE } from '../codes'
 import { SANDBOX_CONTAINER_PREFIX } from '../sandboxes/values'
 import { getSessionForUser } from '../sandboxes/service'
 import type { SandboxRemoveOutcome } from '../sandboxes/lifecycle'
 import type { EventPublisher, InFlightProjection, RunCommand, RunSnapshot } from '../runner/runtime/runService'
 import { serializeAttachments, type RecordTurnPayload } from './reducer'
-import { TITLE_AUTO_MAX } from './values'
+import { ancestorChainOf } from '../checkpointChain'
+import {
+  abandonedCheckpointIds,
+  resolveRewindAnchor,
+  visibleRowIds,
+  type HistoryRowLite,
+} from './rewind'
+import { TITLE_AUTO_MAX, TITLE_MAX } from './values'
 import type { TeammateStatus } from '../runner/teammates/service'
 import type { ApprovalInterruptPayload } from '../runner/approval/funnel'
 
@@ -109,6 +117,9 @@ export interface SessionRunGateway {
   }) => RunCommand
   /** in-flight 投影（#779 story 11）：重拉投影的补偿重建面（running 从 checkpoint 重建/queued 空 turn） */
   readonly inFlightProjection: (sessionId: string) => Promise<InFlightProjection | undefined>
+  /** rewind 跨派生点的 teammate 级联作废（#786 AC4）：锚点祖先链判定 + 归档 + 未读留言失效
+   *  + 停跑/事件，由 RunService 统一面完成；缺省不注 = 无 teammate 语义（旧 fake 兼容）。 */
+  readonly teammatesForRewind?: (sessionId: string, checkpointId: string) => Promise<void>
 }
 
 // run 命令发射口（submit 入队 ack 语义）：生产 = BullMQ submit（resolve = job 已入队；
@@ -122,8 +133,13 @@ export interface SessionServiceDeps {
   readonly hub: EventPublisher
   readonly runService: SessionRunGateway
   readonly dispatch: RunDispatcher
-  /** 删会话级联删沙箱（#776；缺省 no-op——测试不注则不删） */
-  readonly sandboxes?: { readonly remove: (sessionId: string) => Promise<SandboxRemoveOutcome> }
+  /** 删会话级联删沙箱（#776；缺省 no-op——测试不注则不删）。fork（#781 · #768 D7）：
+   *  源沙箱字面复制 → 'copied'；源不存在 → 'source-missing'（调用方空起步 + 系统消息）。
+   *  缺省不注 = 恒 'source-missing'（纯 DB fork，测试面可控）。 */
+  readonly sandboxes?: {
+    readonly remove: (sessionId: string) => Promise<SandboxRemoveOutcome>
+    readonly fork: (sourceSessionId: string, newSessionId: string) => Promise<'copied' | 'source-missing'>
+  }
   /** #780 附件链接（≤4 件 + 归属/session 校验；缺省不注 = 发消息不接受附件引用） */
   readonly attachments?: {
     readonly linkToMessage: (
@@ -238,13 +254,7 @@ export class SessionService {
   // 删；stateOf 内存缺失（本进程无该会话 run 记录——worker 同进程模型）= 可删。----
   async deleteSession(user: Pick<AuthUser, 'id' | 'role'>, sessionId: string): Promise<void> {
     await getSessionForUser(this.deps.prisma, user, sessionId)
-    const snap = this.deps.runService.stateOf(sessionId)
-    const terminal =
-      snap === undefined ||
-      snap.state === 'completed' ||
-      snap.state === 'aborted' ||
-      snap.state === 'failed'
-    if (!terminal) throw fail(CODE.RUN_IN_PROGRESS)
+    this.requireTerminal(sessionId)
     const teammates = await this.deps.prisma.teammate.findMany({
       where: { parentSessionId: sessionId },
       select: { threadId: true, status: true },
@@ -272,6 +282,19 @@ export class SessionService {
     })
   }
 
+  // ---- 终态门禁（#778 多端互斥的 rewind/fork/删 共用面）：queued/running/interrupted/suspended
+  // → 50005（rewind 换锚会作废在飞 checkpoint 链；fork 复制源沙箱要求导出快照静止——run 进行
+  // 中导出文件系统在变）。stateOf 内存缺失 = 可操作（worker 同进程模型）。----
+  private requireTerminal(sessionId: string): void {
+    const snap = this.deps.runService.stateOf(sessionId)
+    const terminal =
+      snap === undefined ||
+      snap.state === 'completed' ||
+      snap.state === 'aborted' ||
+      snap.state === 'failed'
+    if (!terminal) throw fail(CODE.RUN_IN_PROGRESS)
+  }
+
   // ---- 发消息（story 7 幂等 + 多端门禁）。顺序：归属 → 幂等 → 门禁 → 配额预检 → 命令构造
   // → 落 user 行 → dispatch（ack 失败回滚删行）。
   // 幂等查先于门禁：断网重发的首个请求可能已把 run 推入 running——重发必须拿 replay 应答
@@ -283,6 +306,8 @@ export class SessionService {
     sessionId: string,
     p: { content: string; clientKey: string; attachmentIds?: readonly string[] },
   ): Promise<SendMessageResult> {
+    // 归属门（50002 同码防探测）先行；此后本体不再消费入口快照（残留清理在函数内重读指针——
+    // 入口快照可能落后于上一轮 completed 的指针推进，R 评审）。
     await getSessionForUser(this.deps.prisma, user, sessionId)
     // 斜杠识别/幂等/门禁全部作用于**原始输入**：落行存用户所发原文，官方模板展开只在命令
     // 构造点进行——模板发版改文不改变已存内容，同 key 重发恒 replay（#778 story 7；50007 只对
@@ -323,6 +348,11 @@ export class SessionService {
     })
 
     if (slash?.name === 'compact') cmd = { ...cmd, operation: 'compact' }
+
+    // rewind 残留清理（#781 story 16）：rewind 态（指针非空）时，锚点之后的残留行归档（#770
+    // 软删）——落新 user 行前清场，防「失败轮 + 重开轮」双 user 并列投影。指针在清理函数内
+    // 重读（见 archiveRowsOffAnchor）；未 rewind 会话（指针恒 null）全量历史保留。
+    await this.archiveRowsOffAnchor(sessionId)
 
     // 落行先于 dispatch：dispatch 后 run 域事件（run.started 起）才可见，用户行必已在投影中
     //（刷新窗口无「事件先于消息」跳变）。
@@ -467,11 +497,13 @@ export class SessionService {
 
   // ---- 历史投影 GET（story 3 回放面；turn 升序）。50002 同码防探测。
   // inFlight（#779 story 11）：有进行中 run 时同响应带出「从 checkpoint blob 反序列化重建」
-  // 的进行中 turn——断线补偿 = 重拉投影 + in-flight 重建一次完成（前端以投影为锚重挂视图）。----
+  // 的进行中 turn——断线补偿 = 重拉投影 + in-flight 重建一次完成（前端以投影为锚重挂视图）。
+  // archivedAt 过滤（#781 rewind 软删）：被放弃路线行产品面不可读（#770「无恢复入口」——
+  // 比较路线 = fork 并存多开）。
   async getProjection(user: Pick<AuthUser, 'id' | 'role'>, sessionId: string): Promise<SessionProjection> {
     const session = await getSessionForUser(this.deps.prisma, user, sessionId)
     const rows = await this.deps.prisma.sessionMessage.findMany({
-      where: { sessionId },
+      where: { sessionId, archivedAt: null },
       orderBy: [{ turn: 'asc' }, { createdAt: 'asc' }],
     })
     const inFlight = await this.deps.runService.inFlightProjection(sessionId)
@@ -553,9 +585,372 @@ export class SessionService {
     this.publishSessionEvent(session.ownerId, 'session.updated', { session: summary(fresh) }, sessionId)
   }
 
+  // ---- rewind（story 16 · #770 三操作模型）：换 activeCheckpointId 指针重开 + 被放弃路线
+  // 软删存档（checkpoint/journal/消息行 archivedAt——行不物理删，产品面不可读无恢复入口，
+  // 「比较路线」= fork 并存多开）。锚点以消息行表达（产品面选历史消息），解析 + 挂靠判定在
+  // 纯逻辑（./rewind）。完成后 session.invalidated{reason:rewind} 广播（多端重拉投影）。
+  // 文件 /lab 的 journal 逆放恢复归 #782（本票纯对话指针）。----
+  async rewindSession(
+    user: Pick<AuthUser, 'id' | 'role'>,
+    sessionId: string,
+    p: { messageId: string },
+  ): Promise<{ sessionId: string; activeCheckpointId: string }> {
+    const session = await getSessionForUser(this.deps.prisma, user, sessionId)
+    this.requireTerminal(sessionId)
+
+    const rows = await this.listHistoryRows(sessionId)
+    const anchor = resolveRewindAnchor(rows, p.messageId)
+    if (anchor === null) {
+      throw fail(CODE.VALIDATION_FAILED, '该消息不可作为回退锚点（无更早的可回退 state）')
+    }
+    // 归档 checkpoint 不可作锚点（#770 无恢复入口；归档行已由 listHistoryRows 滤除，此处兜
+    // 「行未归档但 checkpoint 已归档」的机制性不一致）。
+    const parentOf = await this.checkpointParentLookup(sessionId)
+    if (!parentOf.has(anchor)) {
+      throw fail(CODE.VALIDATION_FAILED, '锚点 checkpoint 缺失或已归档')
+    }
+    const anchorChain = ancestorChainOf((id) => parentOf.get(id) ?? null, anchor)
+
+    // 软删存档（#770）：被放弃 checkpoint（未归档全体 − 锚点链）+ journal（checkpointId ∈
+    // 被放弃集）+ 挂靠不可见消息行——共享前缀（锚点之前）一律不打标记。
+    const abandoned = abandonedCheckpointIds([...parentOf.keys()], anchorChain)
+    const now = new Date()
+    const writes: PrismaPromise<unknown>[] = [
+      ...(abandoned.size > 0
+        ? [
+            this.deps.prisma.checkpoint.updateMany({
+              where: { threadId: sessionId, checkpointId: { in: [...abandoned] } },
+              data: { archivedAt: now },
+            }),
+            this.deps.prisma.fileJournal.updateMany({
+              where: { sessionId, checkpointId: { in: [...abandoned] } },
+              data: { archivedAt: now },
+            }),
+          ]
+        : []),
+      ...this.archiveRowWrites(sessionId, rows, anchorChain, now),
+      this.deps.prisma.session.update({
+        where: { id: sessionId },
+        data: { activeCheckpointId: anchor },
+      }),
+    ]
+    await this.deps.prisma.$transaction(writes)
+
+    // AC4（#786）：跨派生点的 teammate 级联作废（锚点祖先链不含其 spawnedAtCheckpointId →
+    // 归档 + 未读留言失效 + 停跑/run.aborted{by:system} 事件）。指针换锚事务提交后执行：
+    // 作废判据 = 新锚点链，与落库状态一致；失败向上抛（事务已提交，重试 rewind 同锚点幂等）。
+    await this.deps.runService.teammatesForRewind?.(sessionId, anchor)
+
+    this.publishSessionEvent(session.ownerId, 'session.invalidated', { reason: 'rewind' }, sessionId)
+    return { sessionId, activeCheckpointId: anchor }
+  }
+
+  // ---- fork（story 18/20 · #768 D7 修订）：唯一复制原语。新 Session 行（parentSessionKey +
+  // forkSourceJson 溯源）+ checkpoint 祖先链行复制（blob 自包含，新 thread 直读——「切点 state
+  // 起步」的机制面，保锚点引用有效）+ 消息行挂靠截断复制 + 沙箱整容器字面复制（docker
+  // export→import，含墓碑目录；源已删 → 空起步 + 系统消息）+ file_journal 切点截断继承
+  //（seq 保留原值接续）+ attachments 行全量复制（#768 D7 字面；attachmentId 不改，messageId
+  // 挂靠复制行映射新 id、其余置 null——跨会话 FK 级联删除面）。
+  // teammate（#786 定案）：不跟随——teammate 行按 parentSessionId 挂源会话（新 id 天然无
+  // teammate），源会话 teammate 原样不动；fork 是对话状态探索，teammate 属于源会话执行上下文。
+  // 顺序：session 行先落（拿 id）→ 沙箱复制（Docker 成功才落数据行）→ 数据复制事务（含系统
+  // 消息）；任一步失败补偿删 session 行（cascade 清子行）+ 删沙箱尽力——fork 可整体重试。
+  async forkSession(
+    user: Pick<AuthUser, 'id' | 'role'>,
+    sessionId: string,
+    p: { messageId?: string; title?: string },
+  ): Promise<{ session: SessionSummary }> {
+    const session = await getSessionForUser(this.deps.prisma, user, sessionId)
+    this.requireTerminal(sessionId)
+
+    // 切点解析：缺省 = 当前活跃头（指针或最新锚点；皆无 = 空会话 fork，纯新会话 + 沙箱复制）
+    const rows = await this.listHistoryRows(sessionId)
+    let anchor: string | null
+    if (p.messageId !== undefined) {
+      anchor = resolveRewindAnchor(rows, p.messageId)
+      if (anchor === null) {
+        throw fail(CODE.VALIDATION_FAILED, '该消息不可作为 fork 切点（无更早的可回退 state）')
+      }
+    } else {
+      anchor = session.activeCheckpointId ?? this.latestAnchoredId(rows)
+    }
+    // 切点有效性前置校验（R 评审）：归档 checkpoint 不可作切点——否则新会话指针悬空、
+    // checkpoint 零复制。校验先于 session 行落库（失败零残留）。
+    if (anchor !== null) {
+      const cp = await this.deps.prisma.checkpoint.findFirst({
+        where: { threadId: sessionId, checkpointId: anchor, archivedAt: null },
+        select: { checkpointId: true },
+      })
+      if (!cp) throw fail(CODE.VALIDATION_FAILED, '切点 checkpoint 缺失或已归档')
+    }
+
+    // 新 session 行先行（containerId 预言名两跳，同 createSession）
+    const fresh = await this.deps.prisma.$transaction(async (tx) => {
+      const created = await tx.session.create({
+        data: {
+          ownerId: session.ownerId,
+          containerId: '',
+          title: p.title ?? (session.title !== '' ? `${session.title} (fork)`.slice(0, TITLE_MAX) : ''),
+          parentSessionKey: session.id,
+          forkSourceJson: JSON.stringify({
+            sourceSessionId: session.id,
+            ...(anchor !== null ? { sourceCheckpointId: anchor } : {}),
+            sourceMessageId: p.messageId ?? null,
+            forkedAt: new Date().toISOString(),
+          }),
+          ...(anchor !== null ? { activeCheckpointId: anchor } : {}),
+        },
+      })
+      return tx.session.update({
+        where: { id: created.id },
+        data: { containerId: `${SANDBOX_CONTAINER_PREFIX}${created.id}` },
+      })
+    })
+
+    // 沙箱字面复制先行（Docker 成功才落数据行；失败走补偿，fork 可整体重试）。Docker 层错误
+    // 包 INTERNAL 信封（R 评审：不漏裸错误出路由）；已是信封错误（理论上不存在）原样放行。
+    let sandboxOutcome: 'copied' | 'source-missing' = 'source-missing'
+    try {
+      sandboxOutcome = await this.deps.sandboxes?.fork(session.id, fresh.id) ?? 'source-missing'
+    } catch (e) {
+      await this.compensateFork(fresh.id)
+      if (e instanceof EnvelopeError) throw e
+      // eslint-disable-next-line no-console
+      console.warn(`[sessions] fork 沙箱复制失败: source=${session.id} target=${fresh.id}: ${(e as Error).message}`)
+      throw fail(CODE.INTERNAL, 'fork 沙箱复制失败，请稍后重试')
+    }
+
+    // 数据复制事务（#770 截断口径：checkpoint = 锚点祖先链、消息 = 挂靠可见行、journal =
+    // checkpointId ∈ 祖先链；attachments 全量 [FK 交集]）
+    try {
+      await this.copyForkData(session, fresh.id, anchor, sandboxOutcome === 'source-missing')
+    } catch (e) {
+      await this.compensateFork(fresh.id)
+      if (e instanceof EnvelopeError) throw e
+      // eslint-disable-next-line no-console
+      console.warn(`[sessions] fork 数据复制失败: source=${session.id} target=${fresh.id}: ${(e as Error).message}`)
+      throw fail(CODE.INTERNAL, 'fork 数据复制失败，已回滚')
+    }
+
+    this.publishSessionEvent(
+      session.ownerId,
+      'session.created',
+      { source: 'fork', session: summary(fresh) },
+      fresh.id,
+    )
+    return { session: summary(fresh) }
+  }
+
+  // fork 补偿：删 session 行（cascade 清已复制子行）+ 删沙箱尽力（Docker 失败不掩盖原始错误）
+  private async compensateFork(forkedSessionId: string): Promise<void> {
+    await this.deps.prisma.session.delete({ where: { id: forkedSessionId } }).catch(() => {})
+    await this.deps.sandboxes?.remove(forkedSessionId).catch(() => {})
+  }
+
+  // fork 数据复制（单事务）：checkpoint 祖先链 + checkpoint_writes + 消息行 + attachments +
+  // file_journal + 系统消息（源沙箱缺失时）。行面输入在事务外一次性读取（事务内不混用非 tx
+  // client 读——R 评审）。切点链缺失（理论上已由前置校验挡下）→ 抛错整滚，绝不落「指针悬空」
+  // 的半成品 fork。
+  private async copyForkData(
+    source: Session,
+    forkedSessionId: string,
+    anchor: string | null,
+    sourceSandboxMissing: boolean,
+  ): Promise<void> {
+    const rows = anchor !== null ? await this.listHistoryRows(source.id) : []
+    await this.deps.prisma.$transaction(async (tx) => {
+      // 复制消息行 id 映射（源 id → 新 id）：attachments.messageId 挂靠改指用。
+      const messageIdMap = new Map<string, string>()
+      if (anchor !== null) {
+        const checkpoints = await tx.checkpoint.findMany({
+          where: { threadId: source.id, archivedAt: null },
+        })
+        const parentOf = new Map(checkpoints.map((c) => [c.checkpointId, c.parentCheckpointId]))
+        const chain = ancestorChainOf((id) => parentOf.get(id) ?? null, anchor)
+        const chainRows = checkpoints.filter((c) => chain.has(c.checkpointId))
+        const chainIds = [...chain]
+        if (chainRows.length === 0) {
+          throw fail(CODE.VALIDATION_FAILED, '切点 checkpoint 链缺失（机制数据不一致）')
+        }
+        await tx.checkpoint.createMany({
+          data: chainRows.map((c) => ({ ...c, threadId: forkedSessionId })),
+        })
+        const writes = await tx.checkpointWrite.findMany({
+          where: { threadId: source.id, checkpointId: { in: chainIds } },
+        })
+        if (writes.length > 0) {
+          await tx.checkpointWrite.createMany({
+            data: writes.map((w) => ({ ...w, threadId: forkedSessionId })),
+          })
+        }
+        const journals = await tx.fileJournal.findMany({
+          where: { sessionId: source.id, archivedAt: null, checkpointId: { in: chainIds } },
+        })
+        if (journals.length > 0) {
+          // seq 保留原值（新会话内唯一 ✓），后续写入从 max(seq)+1 接续（写入面归 #782）
+          await tx.fileJournal.createMany({
+            data: journals.map((j) => ({
+              id: randomUUID(),
+              sessionId: forkedSessionId,
+              checkpointId: j.checkpointId,
+              seq: j.seq,
+              op: j.op,
+              path: j.path,
+              beforeSha256: j.beforeSha256,
+              afterSha256: j.afterSha256,
+              tombstoneKey: j.tombstoneKey,
+              toolCallId: j.toolCallId,
+              applied: j.applied,
+            })),
+          })
+        }
+
+        // 消息行挂靠截断复制：turn/createdAt/clientKey 原样，id 新生成（全局主键，复制体是
+        // 独立行）——attachments.messageId 随映射改指新行。
+        const visible = visibleRowIds(rows, chain)
+        const rowsToCopy = await tx.sessionMessage.findMany({
+          where: { sessionId: source.id, id: { in: [...visible] } },
+        })
+        if (rowsToCopy.length > 0) {
+          for (const r of rowsToCopy) messageIdMap.set(r.id, randomUUID())
+          await tx.sessionMessage.createMany({
+            data: rowsToCopy.map((r) => ({
+              id: messageIdMap.get(r.id)!,
+              sessionId: forkedSessionId,
+              turn: r.turn,
+              role: r.role,
+              content: r.content,
+              clientKey: r.clientKey,
+              attachmentsJson: r.attachmentsJson,
+              anchorCheckpointId: r.anchorCheckpointId,
+              createdAt: r.createdAt,
+            })),
+          })
+        }
+      }
+
+      // attachments 全量复制（#768 D7 定案「attachments 行全量复制」，R2 评审回归字面）：
+      // attachmentId 不改（PK (sessionId,id) 复合 → 会话内唯一；下载面按 id + owner 过滤，
+      // 多行同 id 语义安全）；messageId 挂靠复制行 → 映射新 id（FK 同会话），挂切点后消息/
+      // 无主行 → 置 null——message FK onDelete: Cascade，跨会话保留原值会让本行随源会话
+      // 删除被级联清掉（静默丢数据）。路径在沙箱 /lab/uploads/——字面复制后继续有效。
+      const attachments = await tx.attachment.findMany({ where: { sessionId: source.id } })
+      if (attachments.length > 0) {
+        await tx.attachment.createMany({
+          data: attachments.map((a) => ({
+            sessionId: forkedSessionId,
+            id: a.id,
+            ownerId: a.ownerId,
+            messageId:
+              a.messageId !== null && messageIdMap.has(a.messageId) ? messageIdMap.get(a.messageId)! : null,
+            fileName: a.fileName,
+            mimeType: a.mimeType,
+            size: a.size,
+            sha256: a.sha256,
+            path: a.path,
+          })),
+        })
+      }
+
+      // 源沙箱已删 → 空起步 + 系统消息（#768 D7「源已删则空起步+系统消息」）
+      if (sourceSandboxMissing) {
+        const last = await tx.sessionMessage.findFirst({
+          where: { sessionId: forkedSessionId },
+          orderBy: { turn: 'desc' },
+          select: { turn: true },
+        })
+        await tx.sessionMessage.create({
+          data: {
+            sessionId: forkedSessionId,
+            turn: (last?.turn ?? 0) + 1,
+            role: 'system',
+            content: '源会话的沙箱不存在，新会话从空白文件环境开始。',
+          },
+        })
+      }
+    })
+  }
+
+  // 活跃行读取（rewind/fork/残留清理共用投影判定输入）：只取未归档行——归档行产品面不可读、
+  // 不可作锚点/切点（#770 无恢复入口；R 评审：连续/向前 rewind 到被放弃分支须 90002 而非
+  // 把指针指进归档区）。挂靠判定在未归档集内自洽（归档行不再参与可见性传播）。
+  private async listHistoryRows(sessionId: string): Promise<HistoryRowLite[]> {
+    const rows = await this.deps.prisma.sessionMessage.findMany({
+      where: { sessionId, archivedAt: null },
+      orderBy: [{ turn: 'asc' }, { createdAt: 'asc' }],
+      select: { id: true, turn: true, role: true, anchorCheckpointId: true, createdAt: true },
+    })
+    return rows
+  }
+
+  // thread 的未归档 checkpointId → parentCheckpointId 查找表（rewind/fork/残留清理共用）：
+  // 链行走只在活跃（未归档）图上进行——归档行不参与祖先链（被放弃分叉不复活）。
+  private async checkpointParentLookup(sessionId: string): Promise<Map<string, string | null>> {
+    const cps = await this.deps.prisma.checkpoint.findMany({
+      where: { threadId: sessionId, archivedAt: null },
+      select: { checkpointId: true, parentCheckpointId: true },
+    })
+    return new Map(cps.map((c) => [c.checkpointId, c.parentCheckpointId]))
+  }
+
+  // 活跃行里最新带锚 assistant 锚点（fork 缺省切点解析面；无 → null）
+  private latestAnchoredId(rows: readonly HistoryRowLite[]): string | null {
+    for (let i = rows.length - 1; i >= 0; i--) {
+      const r = rows[i]!
+      if (r.role === 'assistant' && r.anchorCheckpointId !== null) return r.anchorCheckpointId
+    }
+    return null
+  }
+
+  // 锚点链之外的活跃行归档写操作（rewind 与 sendMessage 残留清理共用）
+  private archiveRowWrites(
+    sessionId: string,
+    rows: readonly HistoryRowLite[],
+    anchorChain: ReadonlySet<string>,
+    now: Date,
+  ): PrismaPromise<unknown>[] {
+    const visible = visibleRowIds(rows, anchorChain)
+    if (visible.size === rows.length) return []
+    const stale = rows.filter((r) => !visible.has(r.id)).map((r) => r.id)
+    return [
+      this.deps.prisma.sessionMessage.updateMany({
+        where: { sessionId, id: { in: stale } },
+        data: { archivedAt: now },
+      }),
+    ]
+  }
+
+  // sendMessage 残留清理（rewind 态专属，R 评审重写）：指针在函数内重读（入口快照可能落后于
+  // 上一轮 completed 的指针推进——按旧链归档会误伤刚完成的成功轮）；参照链取「指针 ∪ 行面最新
+  // 锚点」中的较新者（recordTurn 已落行、指针推进未至的窗口内以行面锚为准，同步消除误伤）。
+  // 未 rewind 会话（指针 null）不清理——全量历史保留（回放零差异）。只清消息行不扫 checkpoint：
+  // 失败轮超步残留（checkpoint 面）由下一次 rewind 的差集归档收口（sendMessage 时点在 completed
+  // 观测窗口内扫 checkpoint 会误伤刚完成轮的落盘行，故不扫——残留只影响缺省寻址的「最新」，而
+  // 新轮 checkpoint 恒更新）。
+  private async archiveRowsOffAnchor(sessionId: string): Promise<void> {
+    const current = await this.deps.prisma.session.findUnique({
+      where: { id: sessionId },
+      select: { activeCheckpointId: true },
+    })
+    const pointer = current?.activeCheckpointId ?? null
+    if (pointer === null) return
+    const [rows, parentOf] = await Promise.all([
+      this.listHistoryRows(sessionId),
+      this.checkpointParentLookup(sessionId),
+    ])
+    const parentOfFn = (id: string) => parentOf.get(id) ?? null
+    const rowHead = this.latestAnchoredId(rows)
+    const ref =
+      rowHead !== null && rowHead !== pointer && ancestorChainOf(parentOfFn, rowHead).has(pointer)
+        ? rowHead
+        : pointer
+    const writes = this.archiveRowWrites(sessionId, rows, ancestorChainOf(parentOfFn, ref), new Date())
+    if (writes.length > 0) await this.deps.prisma.$transaction(writes)
+  }
+
   private publishSessionEvent(
     userId: string,
-    type: 'session.created' | 'session.updated',
+    type: 'session.created' | 'session.updated' | 'session.invalidated',
     payload: Record<string, unknown>,
     sessionId: string,
   ): void {

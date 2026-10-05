@@ -466,6 +466,10 @@ model SessionMessage {
   // 锚点（issue #778 点名——recordTurn 注入缝从 RunService StateSnapshot 取）。
   anchorCheckpointId String?
 
+  // #770 rewind 软删存档：被放弃原路线的行打标记（映射层过滤——投影 GET 不读；行不物理删，
+  // retention 回收对象）。fork 复制只拷活跃行，归档行不随 fork。
+  archivedAt DateTime?
+
   createdAt DateTime @default(now())
 
   attachments Attachment[] // 挂载于本消息的附件（用户附件 + agent→用户媒体同表，D9）
@@ -489,6 +493,9 @@ model Checkpoint {
   type       String // LangGraph serializer type（如 "json"）
   blob       Bytes // 序列化 state（LangGraph dumpsTyped 字节；serde 默认 JSON —— #727）
   metadataJson String @default("{}")
+  // #770 rewind 软删：被放弃原路线独有的 checkpoint 行打标记（retention/refcount GC 回收
+  // 对象；机制面 LangGraph 不滤——activeCheckpointId 指针保证续跑永不触达归档分支）。
+  archivedAt DateTime?
   createdAt  DateTime @default(now())
 
   @@id([threadId, checkpointNs, checkpointId])
@@ -696,9 +703,35 @@ model FileJournal {
   tombstoneKey String? // 墓碑 key（daemon 侧 root 写 0700 隐藏目录；非墓碑行 null）
   toolCallId   String // 幂等键（journal-first 崩溃去重）
   applied      Boolean @default(false)
+  // #770 rewind 软删：checkpointId 落在被放弃路线的行打标记（rewind 逆放跳过 = 幂等 no-op，
+  // #782 消费；fork 继承只拷活跃行）。
+  archivedAt DateTime?
 
   @@unique([sessionId, seq])
   @@unique([sessionId, toolCallId])
   @@index([sessionId, checkpointId])
   @@map("file_journal")
+}
+
+// ---------------------------------------------------------------------------
+// FileOverwriteLog —— teammate 并发写 write-after-write 覆盖审计（#785 · #747 E 节
+// 「teammate 并发写互斥（#769 锁方案）」语义层）：取锁写 path 时存在已 applied 且上家
+// writer ≠ 本 thread 的 file_journal 行 → 记一次（path/覆盖者/被覆盖者，不限时窗）。
+// 观测面进审计域（D8 同纪律：静默失败不可接受），V1 覆盖合法、不做运行时提示。
+// 弱关联无 FK（tool_approval_logs 审计快照先例——行跟审计域永久，不随会话删）；
+// thread 身份存字符串快照（写者归属经 journal.checkpointId → checkpoints.threadId 解析
+// 后落值，跨 fork/rewind 溯源不依赖 join）。
+// ---------------------------------------------------------------------------
+model FileOverwriteLog {
+  id                  String @id @default(cuid())
+  sessionId           String // 锁/journal 域会话（sandbox 所属 parent session）
+  path                String // normalizeFilePath 后相对路径（lab/... | wiki/...，与锁 key 同约定）
+  overwriterThreadId  String // 覆盖者 thread（本 thread；threadId = sessions.id 同构）
+  overwrittenThreadId String // 被覆盖者 thread（journal 上家 writer）
+  runId               String // 触发 run（弱关联）
+  createdAt           DateTime @default(now())
+
+  @@index([sessionId, path])
+  @@index([createdAt])
+  @@map("file_overwrite_logs")
 }
