@@ -16,9 +16,11 @@ import { SANDBOX_KEEPALIVE_CMD, SANDBOX_LAB_ROOT, SANDBOX_USER } from './values'
 import {
   sandboxContainerName,
   sandboxNetworkName,
+  sandboxFsImageName,
   type SandboxInfo,
   type SandboxRuntime,
   type SandboxSpec,
+  type SandboxForkSpec,
 } from './runtime'
 
 // 网络与沙箱容器共用的标签（daemon 侧按 kind=sandbox 认领整个沙箱族，session 标签定归属）
@@ -128,6 +130,26 @@ export class DockerSandboxRuntime implements SandboxRuntime {
     return container.id
   }
 
+  // fork 字面复制（#768 D7）：export（容器可写层 + 镜像层的整 FS tar 流，含 /lab、墓碑目录与
+  // exec 装的包）→ import 为目标专属镜像（单层；repo/tag 由 sandboxFsImageName 单一来源派生，
+  // 随 removeSandbox 顺手回收）。源已删（404）→ 'source-missing'。export 对 stopped 容器同样
+  // 可用（闲置 stop 文件保留语义的直接受益面）；fork 门禁挡 run 进行中 → 导出无并发写。
+  // /lab 属主预置（createSandbox 的 putArchive）不适用——源 tar 里已带全部属主信息，import
+  // 原样落盘（「字面」语义的字节面）。
+  async createSandboxFromSource(spec: SandboxForkSpec): Promise<'copied' | 'source-missing'> {
+    try {
+      await this.client().getContainer(sandboxContainerName(spec.sourceSessionId)).inspect()
+    } catch (e) {
+      if (statusCodeOf(e) === 404) return 'source-missing'
+      throw e
+    }
+    const fsImage = sandboxFsImageName(spec.sessionId)
+    const stream = await this.client().getContainer(sandboxContainerName(spec.sourceSessionId)).export()
+    await this.client().importImage(stream, { repo: fsImage, tag: 'latest' })
+    await this.client().createContainer(this.buildSandboxCreateOptions({ ...spec, image: fsImage }))
+    return 'copied'
+  }
+
   async getSandbox(sessionId: string): Promise<SandboxInfo | null> {
     try {
       const data = await this.client().getContainer(sandboxContainerName(sessionId)).inspect()
@@ -163,6 +185,12 @@ export class DockerSandboxRuntime implements SandboxRuntime {
       await this.client().getContainer(sandboxContainerName(sessionId)).remove({ force: true })
     } catch (e) {
       if (statusCodeOf(e) !== 404) throw e
+    }
+    // fork 导入镜像随容器回收（尽力：常规沙箱无此镜像 → 404 吞；daemon 故障不阻断删除主链）
+    try {
+      await this.client().getImage(sandboxFsImageName(sessionId)).remove()
+    } catch {
+      // 镜像清理是 best-effort——容器已删，残留镜像不影响语义（标签唯一，可被外部 GC）
     }
   }
 

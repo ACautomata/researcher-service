@@ -93,14 +93,19 @@ export function projectStreamEvent(
 // version 'v3'（#777 实测锁定，修正 #773 骨架期 v2 假设）：deepagents 1.14 / langgraph
 // 1.4 的 agent.streamEvents 以 v3 产出 protocol events（{method,params} 形态）——v2 经典
 // on_* 形态对 v3 投影（RunProjector）全部不可见。三包升级时以探针复测。
+// checkpointId（#781 rewind）：非空 = time-travel 续跑（从该锚点 checkpoint 分叉——LangGraph
+// 经 checkpointer.getTuple 精确寻址，saver 已支持）；缺省 = 链头（最新 checkpoint）。
 export interface StreamEventsParams {
   readonly version: 'v3'
-  readonly configurable: Readonly<{ thread_id: string }>
+  readonly configurable: Readonly<{ thread_id: string; checkpoint_id?: string }>
 }
 
-export function buildStreamEventsInvocation(threadId: string): StreamEventsParams {
+export function buildStreamEventsInvocation(threadId: string, checkpointId?: string): StreamEventsParams {
   return Object.freeze({
     version: 'v3',
-    configurable: Object.freeze({ thread_id: threadId }),
+    configurable: Object.freeze({
+      thread_id: threadId,
+      ...(checkpointId !== undefined ? { checkpoint_id: checkpointId } : {}),
+    }),
   })
 }

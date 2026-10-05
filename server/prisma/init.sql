@@ -197,6 +197,7 @@ CREATE TABLE "session_messages" (
     "clientKey" TEXT,
     "attachmentsJson" TEXT NOT NULL DEFAULT '{"v":1}',
     "anchorCheckpointId" TEXT,
+    "archivedAt" DATETIME,
     "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT "session_messages_sessionId_fkey" FOREIGN KEY ("sessionId") REFERENCES "sessions" ("id") ON DELETE CASCADE ON UPDATE CASCADE
 );
@@ -210,6 +211,7 @@ CREATE TABLE "checkpoints" (
     "type" TEXT NOT NULL,
     "blob" BLOB NOT NULL,
     "metadataJson" TEXT NOT NULL DEFAULT '{}',
+    "archivedAt" DATETIME,
     "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
     PRIMARY KEY ("threadId", "checkpointNs", "checkpointId"),
@@ -336,6 +338,7 @@ CREATE TABLE "file_journal" (
     "tombstoneKey" TEXT,
     "toolCallId" TEXT NOT NULL,
     "applied" BOOLEAN NOT NULL DEFAULT false,
+    "archivedAt" DATETIME,
     CONSTRAINT "file_journal_sessionId_fkey" FOREIGN KEY ("sessionId") REFERENCES "sessions" ("id") ON DELETE CASCADE ON UPDATE CASCADE
 );
 
