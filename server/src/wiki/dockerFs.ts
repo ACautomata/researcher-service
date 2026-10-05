@@ -31,7 +31,7 @@ import { FileExists, FileInvalidPath, FileNotFound } from '../files/errors'
 import { parseTar, type TarEntry } from '../files/tar'
 import { MAX_FILE_READ_BYTES, WALK_LIMIT } from '../files/values'
 import { WIKI_ROOT } from '../wikiContainers/values'
-import { cmp, decodeUtf8Strict, FrontmatterParser, frontmatterTitle, h1Title } from './logic'
+import { claimsSidecarPath, cmp, decodeUtf8Strict, FrontmatterParser, frontmatterTitle, h1Title } from './logic'
 import { SKIP_DIRS, SKIP_FILES } from './values'
 import { WikiInvalidPath, WikiPageExists, WikiPageNotFound } from './errors'
 import type {
@@ -201,6 +201,22 @@ export class DockerWikiFileSystem implements WikiFileSystem {
       throw this.mapArchiveError(err, relPath)
     }
     return
+  }
+
+  // —— Port: read_claims_file（#789 claims 只读面）——
+
+  // 页路径 → .claims 镜像旁车（claimsSidecarPath 单点映射）。调用方（service.readClaims）
+  // 已先经 readPage 的 assertNotManaged/probe 校验页本体——旁车是 openwiki 生成物，读侧
+  // 不再过 managed 黑名单（.claims 在 SKIP_DIRS：树/图不收、写侧仍拒；这里是旁车的唯一
+  // 合法读出口）。旁车缺失/非 UTF-8 → null（「无旁车」语义，不放大为读失败）。
+  async readClaimsFile(relPath: string): Promise<string | null> {
+    const probed = await this.probeFile(claimsSidecarPath(relPath))
+    if (probed === null || probed.kind !== 'file') return null
+    try {
+      return decodeUtf8Strict(probed.data)
+    } catch {
+      return null
+    }
   }
 
   // —— internal ——

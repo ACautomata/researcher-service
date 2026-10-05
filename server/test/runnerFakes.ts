@@ -133,7 +133,15 @@ export function fakePrimitives(
     parts.push(h.subarray(0, 512))
     for (const [p, c] of tree) {
       if (p.startsWith(`${absPath}/`) && c !== 'dir') {
-        parts.push(createTarFile(`${base}/${p.slice(absPath.length + 1)}`, c, 1000))
+        // createTarFile 尾部自带 2×512 结束零块——多文件目录 tar 必须剥掉再拼接，否则
+        // parseTar 在首个文件的尾零块提前终止（对齐 dockerArchiveBackend.test.ts dirTarOf
+        // 同款 subarray 处理；#789 wikisearch 首个多文件种子暴露）。
+        parts.push(
+          createTarFile(`${base}/${p.slice(absPath.length + 1)}`, c, 1000).subarray(
+            0,
+            512 + Math.ceil(c.length / 512) * 512,
+          ),
+        )
       }
     }
     parts.push(Buffer.alloc(1024))

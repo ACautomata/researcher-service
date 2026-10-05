@@ -3,7 +3,8 @@
 // test_service_fake_fs.py + test_categories_api.py + test_graph_api.py 的行为断言。
 
 import { describe, it, expect } from 'vitest'
-import { CategoryMarkerExtractor, FrontmatterParser, WikilinkResolver, wikilinkTargets } from '../src/wiki/logic'
+import { createHash } from 'node:crypto'
+import { CategoryMarkerExtractor, FrontmatterParser, WikilinkResolver, claimsDrift, claimsSidecarPath, markdownLinkTargets, okfBadge, parseClaimsSidecar, wikilinkTargets } from '../src/wiki/logic'
 
 describe('FrontmatterParser', () => {
   it('解析标量键与行内列表；正文保留 frontmatter 之外内容', () => {
@@ -123,5 +124,103 @@ describe('WikilinkResolver', () => {
 
   it('wikilinkTargets：[[target]] 与 [[target|别名]] 取 `|` 前并 strip', () => {
     expect(wikilinkTargets('见 [[self-attention]] 和 [[x | 别名]]。')).toEqual(['self-attention', 'x'])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// #789 OKF 适配（wiki 域）：markdown 相对链接边 / OKF 徽章 / claims 旁车解析。
+// 依据 = docs/research/725-openwiki-embedding-okf.md §二/§三 + #747 G 节 wiki 三通道。
+// ---------------------------------------------------------------------------
+
+describe('markdownLinkTargets（#789 story 43）', () => {
+  it('提取 markdown 相对链接目标，剥 # 片段与标题后缀', () => {
+    const body = [
+      '见 [Attention](concepts/attention.md) 与 [T](./transformer.md#相关)。',
+      '带标题：[T](b/t.md "title")。',
+    ].join('\n')
+    expect(markdownLinkTargets(body)).toEqual(['concepts/attention.md', 'transformer.md', 'b/t.md'])
+  })
+
+  it('只收 .md 相对目标：http/mailto/绝对路径/锚点/图片/非 md 不收', () => {
+    const body = [
+      '[外链](https://a.com/x.md) 不收',
+      '[邮件](mailto:a@b.c) 不收',
+      '[绝对](/concepts/a.md) 不收',
+      '[纯锚](#sec) 不收',
+      '[图](img.png) 不收',
+      '[页](concepts/a.md) 收',
+    ].join('\n')
+    expect(markdownLinkTargets(body)).toEqual(['concepts/a.md'])
+  })
+
+  it('无链接正文 → 空数组', () => {
+    expect(markdownLinkTargets('# T\n\n正文无链接。\n')).toEqual([])
+  })
+})
+
+describe('okfBadge（#789 story 41 数据面）', () => {
+  it('完整 OKF front matter：status/stale_after/generated.at 三字段', () => {
+    const content = [
+      '---',
+      'type: concept',
+      'title: Attention',
+      'status: stable',
+      'stale_after: 2026-12-01T00:00:00+00:00',
+      'generated: {by: openwiki, at: 2026-09-30T12:00:00Z}',
+      '---',
+      '# Attention',
+    ].join('\n')
+    expect(okfBadge(content)).toEqual({
+      status: 'stable',
+      staleAfter: '2026-12-01T00:00:00+00:00',
+      generatedAt: '2026-09-30T12:00:00Z',
+    })
+  })
+
+  it('部分字段缺失 → 只回有的；无 OKF 字段 → undefined', () => {
+    expect(okfBadge('---\ntitle: T\nstatus: draft\n---\n# T\n')).toEqual({ status: 'draft' })
+    expect(okfBadge('# 无 frontmatter')).toBeUndefined()
+    expect(okfBadge('---\ntitle: T\n---\n# T\n')).toBeUndefined()
+  })
+
+  it('generated 行内 flow 的 at 值剥引号', () => {
+    const content = '---\ntype: t\ngenerated: {by: "openwiki", at: "2026-09-30T12:00:00Z"}\n---\n# T\n'
+    expect(okfBadge(content)).toMatchObject({ generatedAt: '2026-09-30T12:00:00Z' })
+  })
+})
+
+describe('claimsSidecarPath / parseClaimsSidecar / claimsDrift（#789 story 42 数据面）', () => {
+  it('claimsSidecarPath：页路径 → .claims 镜像同名 .json', () => {
+    expect(claimsSidecarPath('concepts/attention.md')).toBe('.claims/concepts/attention.json')
+    expect(claimsSidecarPath('a.md')).toBe('.claims/a.json')
+  })
+
+  it('parseClaimsSidecar：结构化提取 claims/evidence；畸形 JSON → null', () => {
+    const raw = JSON.stringify({
+      schemaVersion: 1,
+      pageVersion: 'sha256:' + 'a'.repeat(64),
+      claims: [
+        {
+          id: 'claim_' + '0'.repeat(32),
+          statement: 'frontmatter 校验强制 type 必填',
+          evidence: [{ resource: 'repo://src/okf/frontmatter.ts#L118-L183', version: 'repo-lines-v1:sha256:x:y' }],
+        },
+      ],
+    })
+    const parsed = parseClaimsSidecar(raw)
+    expect(parsed).not.toBeNull()
+    expect(parsed!.schemaVersion).toBe(1)
+    expect(parsed!.pageVersion).toBe('sha256:' + 'a'.repeat(64))
+    expect(parsed!.claims[0]!.statement).toContain('type 必填')
+    expect(parsed!.claims[0]!.evidence[0]!.resource).toContain('frontmatter.ts')
+    expect(parseClaimsSidecar('not json')).toBeNull()
+  })
+
+  it('claimsDrift：pageVersion 哈希对上 → fresh，对不上 → drifted，缺 pageVersion → null', () => {
+    const content = '# Attention\n正文\n'
+    const hash = 'sha256:' + createHash('sha256').update(Buffer.from(content, 'utf8')).digest('hex')
+    expect(claimsDrift(hash, content)).toBe('fresh')
+    expect(claimsDrift('sha256:' + 'b'.repeat(64), content)).toBe('drifted')
+    expect(claimsDrift(null, content)).toBeNull()
   })
 })

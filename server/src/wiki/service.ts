@@ -3,9 +3,20 @@
 // CategoryMarkerExtractor / WikilinkResolver。CRUD 直接委托 Port（域异常透传）；
 // buildGraph / listCategories 是本层聚合逻辑（纯逻辑，对 fake FS 可直测）。
 
-import { CategoryMarkerExtractor, cmp, FrontmatterParser, WikilinkResolver, wikilinkTargets } from './logic'
+import {
+  CategoryMarkerExtractor,
+  cmp,
+  claimsDrift,
+  FrontmatterParser,
+  markdownLinkTargets,
+  okfBadge,
+  parseClaimsSidecar,
+  WikilinkResolver,
+  wikilinkTargets,
+} from './logic'
 import type {
   WikiCategoryItem,
+  WikiClaims,
   WikiFileSystem,
   WikiGraph,
   WikiPage,
@@ -24,7 +35,15 @@ export class WikiService {
   }
 
   readPage(relPath: string): Promise<WikiPage> {
-    return this.fs.readPage(relPath)
+    return this.readPageWithOkf(relPath)
+  }
+
+  // readPage + OKF 徽章数据面（#789 story 41）：徽章从页 front matter 单点提取，非 OKF 页
+  // 无 okf 字段（不进 JSON）。适配器返回的 WikiPage 不带徽章——徽章是聚合层语义。
+  private async readPageWithOkf(relPath: string): Promise<WikiPage> {
+    const page = await this.fs.readPage(relPath)
+    const badge = okfBadge(page.content)
+    return badge === undefined ? page : { ...page, okf: badge }
   }
 
   writePage(relPath: string, content: string): Promise<{ path: string }> {
@@ -37,6 +56,18 @@ export class WikiService {
 
   deletePage(relPath: string): Promise<void> {
     return this.fs.deletePage(relPath)
+  }
+
+  // claims 只读面（#789 story 42 数据面）：页存在性先于旁车读取（页缺失 → WikiPageNotFound
+  // 透传，路由 30040 语义不变）；旁车缺失/畸形 → drift null + 空 claims（sidecar 是 openwiki
+  // 生成物，两种情况对消费方同义——无证据面板）。漂移 = pageVersion（页字节 sha256）与当前
+  // 页内容比对；repo:// 源文件 evidence 漂移归后续票（725 §五-4），V1 不解析。
+  async readClaims(relPath: string): Promise<WikiClaims> {
+    const page = await this.readPage(relPath)
+    const raw = await this.fs.readClaimsFile(relPath)
+    const parsed = raw === null ? null : parseClaimsSidecar(raw)
+    if (parsed === null) return { schemaVersion: null, pageVersion: null, drift: null, claims: [] }
+    return { ...parsed, drift: claimsDrift(parsed.pageVersion, page.content) }
   }
 
   // 按 category 标记分组带标记页（issue #84 / spec #75）。返回 `{<cat>:[item,…]}`。
@@ -70,8 +101,9 @@ export class WikiService {
     return result
   }
 
-  // 全库图谱：节点 = 遍历 tree 全部页；边 = 正文 [[wikilink]] + frontmatter related_pages。
-  // wikilink 目标解析顺序（r29 §3.3）：整串 id → stem（末段去 .md）→ title → ghost。
+  // 全库图谱：节点 = 遍历 tree 全部页；边 = 正文 [[wikilink]] + markdown 相对链接 + frontmatter
+  // related_pages。wikilink 目标解析顺序（r29 §3.3）：整串 id → stem（末段去 .md）→ title → ghost。
+  // markdown 相对链接目标（#789 story 43，OKF 页间关系）走同一 resolver / ghost 机制。
   // 边逐条 push 不去重（同 from→to 可并存真/ghost）；ghost 节点按首次出现顺序 append。
   async buildGraph(): Promise<WikiGraph> {
     const tree = await this.fs.buildTree()
@@ -94,7 +126,7 @@ export class WikiService {
         continue // 单页读不出 → 跳过该页（不 500）
       }
       const { frontmatter, body } = this.parser.parse(content)
-      const targets = wikilinkTargets(body)
+      const targets = [...wikilinkTargets(body), ...markdownLinkTargets(body)]
       let related = frontmatter['related_pages']
       if (related === undefined) related = []
       else if (typeof related === 'string') related = [related]
