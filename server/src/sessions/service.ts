@@ -121,7 +121,7 @@ export interface SessionRunGateway {
   /** teammate 级联作废（#781 缺口顺带补接线：跨派生点 teammate 随 rewind 作废停跑） */
   readonly teammatesForRewind?: (sessionId: string, checkpointId: string) => Promise<void>
   /** C1（#782）：作废 + 存活 teammate 信箱通知（文件面 rewind 时） */
-  readonly teammatesOnFileRewind?: (sessionId: string, checkpointId: string) => Promise<void>
+  readonly teammatesNotifyFileRewind?: (sessionId: string, checkpointId: string) => Promise<void>
 }
 
 // run 命令发射口（submit 入队 ack 语义）：生产 = BullMQ submit（resolve = job 已入队；
@@ -643,16 +643,12 @@ export class SessionService {
 
     if (scope === 'files') {
       // 只回文件：journal 行归档（投影/继承面）+ 逆放；checkpoint/消息行与指针零改动
-      await this.deps.prisma.$transaction([
-        ...(abandoned.size > 0
-          ? [
-              this.deps.prisma.fileJournal.updateMany({
-                where: { sessionId, checkpointId: { in: [...abandoned] } },
-                data: { archivedAt: now },
-              }),
-            ]
-          : []),
-      ])
+      if (abandoned.size > 0) {
+        await this.deps.prisma.fileJournal.updateMany({
+          where: { sessionId, checkpointId: { in: [...abandoned] } },
+          data: { archivedAt: now },
+        })
+      }
     } else {
       const maxSeq = await this.deps.prisma.fileJournal.findFirst({
         where: { sessionId },
@@ -685,13 +681,10 @@ export class SessionService {
       await this.deps.prisma.$transaction(writes)
     }
 
-    // teammate 面：跨派生点作废（全部 scope——对话/文件回退都使派生点后 teammate 失效）+
-    // 存活者信箱通知（scope≠chat——文件真的动了）
-    if (scope === 'chat') {
-      await this.deps.runService.teammatesForRewind?.(sessionId, anchor)
-    } else {
-      await this.deps.runService.teammatesOnFileRewind?.(sessionId, anchor)
-    }
+    // teammate 面：跨派生点作废（全部 scope——对话/文件回退都使派生点后 teammate 失效）。
+    // 文件逆放前先作废——被唤醒 survivor 与 rewindFiles 竞争围栏 FIFO，先获围栏的新写会被
+    // 本次逆放撤销；信箱通知在 rewindFiles 完成后（文案「已逆放恢复」须在事实之后）。
+    await this.deps.runService.teammatesForRewind?.(sessionId, anchor)
 
     // 文件逆放（scope ≠ chat；fileRewind 未注入 = 机制未接线，文件面 no-op——生产恒注入）
     let files: RewindResult['files']
@@ -707,6 +700,10 @@ export class SessionService {
         username: owner?.username ?? '',
       })
       files = result
+    }
+    // C1 通知面（逆放完成后——文案「已逆放恢复」在事实之后）
+    if (scope !== 'chat') {
+      await this.deps.runService.teammatesNotifyFileRewind?.(sessionId, anchor)
     }
 
     this.publishSessionEvent(session.ownerId, 'session.invalidated', { reason: 'rewind' }, sessionId)
@@ -745,6 +742,7 @@ export class SessionService {
     p: { messageId: string },
   ): Promise<{ anchor: string } & FileRewindPreview> {
     await getSessionForUser(this.deps.prisma, user, sessionId) // 归属校验（50002 同码防探测）
+    this.requireTerminal(sessionId) // 与执行面同门禁——执行不可达（50005）时预览不预告可行
     const rows = await this.listHistoryRows(sessionId)
     const { anchor } = await this.anchorForRewind(sessionId, rows, p.messageId)
     return this.deps.fileRewind

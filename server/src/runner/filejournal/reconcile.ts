@@ -27,7 +27,6 @@ export interface ReconcileOutcome {
 export interface ReconcilerDeps {
   readonly prisma: PrismaClient
   readonly io: RevertIo
-  readonly getBlob: (container: string, sha256: string) => Promise<Buffer | null>
   readonly containerOf: (sessionId: string) => Promise<string | null>
 }
 
@@ -70,7 +69,7 @@ export class Reconciler {
       if (row.op === 'delete') {
         await this.deps.io.removeFile(container, row.path)
       } else if (row.afterSha256 !== null) {
-        const tar = await this.deps.getBlob(container, row.afterSha256)
+        const tar = await this.deps.io.getBlob(container, row.afterSha256)
         if (tar === null) {
           ok = false // blob 失联：文件现状即真相（重放无法复现——审计面计数）
           rolledMissing += 1

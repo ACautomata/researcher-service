@@ -5,7 +5,9 @@
 // 的键域（非跨会话去重）。
 //
 // 剪枝集 = 存量 blob − 活跃 refcount − replay lease（逆放进行中的行已归档、失去 refcount，
-// lease 挡住 use-after-free）。GC 时机：rewind 逆放后 / reconcile 后（被动触发，无定时器）。
+// lease 挡住 use-after-free）。GC 时机：rewindFiles 尾部恒跑一次（restore reconcile 与逆放
+// 完成后）——boot reconcile 处置行的 blob 滞留至下次 rewind 剪枝（启动面不批量 IO；被动触发，
+// 无定时器）。
 
 import type { PrismaClient } from '../../generated/prisma/client'
 import type { AtticStore } from './attic'

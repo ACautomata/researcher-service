@@ -105,7 +105,8 @@ export class AtticStore {
     return shas.sort()
   }
 
-  // GC 剪枝面：按键列表删除（root exec rm）。返回实际发出的删除键（调用方记观测）。
+  // GC 剪枝面：按键列表删除（root exec rm）。返回成功删除键数（批失败不计入——失败 warn
+  // 留痕：GC 审计 freed 偏小不可静默）。
   async deleteBlobs(container: string, shas: readonly string[]): Promise<number> {
     if (shas.length === 0) return 0
     // 分批防 argv 过长（sha64 × N；500/批远低于 ARG_MAX 量级）
@@ -117,7 +118,12 @@ export class AtticStore {
         ['sh', '-c', 'rm -f -- "$@"', 'sh', ...batch],
         { user: '0' },
       )
-      if (r.exitCode === 0) removed += batch.length
+      if (r.exitCode === 0) {
+        removed += batch.length
+      } else {
+        // eslint-disable-next-line no-console
+        console.warn(`[filejournal] attic GC batch rm failed: container=${container} batch=${batch.length} exit=${r.exitCode}`)
+      }
     }
     return removed
   }

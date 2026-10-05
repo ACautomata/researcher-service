@@ -23,6 +23,18 @@ export class DockerPrimitives implements SandboxFilePrimitives {
     return this.cached
   }
 
+  // 容器活性探在（只读）：Running 判定 + 故障吞为 false（缺失面）。具体类方法不进
+  // SandboxFilePrimitives Port（fake 面零负担）——消费方（filejournal containerOf 探在）
+  // 经本类实例调用，daemon 客户端单点（对齐 clientFactory 懒缓存先例，免裸 new Docker 双通道）。
+  async inspectRunning(container: string): Promise<boolean> {
+    try {
+      const info = await this.client().getContainer(container).inspect()
+      return info.State.Running
+    } catch {
+      return false
+    }
+  }
+
   // dockerode exec + demux（TTY=false 流带 8 字节复用头，modem.demuxStream 拆 stdout/stderr）。
   // exitCode 原样透传（null = daemon 未能报告）；daemon 级故障（容器不存在等）原样抛。
   // opts.timeoutMs（评审 M2）：Engine API 无 exec-kill 端点（POST /exec/{id}/kill 对真 daemon

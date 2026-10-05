@@ -63,6 +63,13 @@ describe('文件 rewind 端到端（S1，#782）', () => {
   let keySeq = 0x500
   const hexKey = () => (keySeq++).toString(16).padStart(32, '0')
   const labFs = fakeFs()
+  // 慢执行开关（running 窗口制造——对齐 sessionsApi 手法；exec 前 200ms 延迟，afterEach 复位）
+  let slowExec = false
+  const baseExec = labFs.primitives.exec.bind(labFs.primitives)
+  labFs.primitives.exec = async (container, cmd, opts) => {
+    if (slowExec) await new Promise((r) => setTimeout(r, 200))
+    return baseExec(container, cmd, opts)
+  }
 
   // session 沙箱预言容器名（createSession 面非 LAB 常量——backend targets 随 session 行）
   // 图缓存失效（每轮换脚本数组 → 须换 configVersion 键——否则缓存图持旧 model、脚本耗尽）
@@ -178,6 +185,7 @@ describe('文件 rewind 端到端（S1，#782）', () => {
 
   afterEach(async () => {
     currentScript = []
+    slowExec = false
     // config version bump：图缓存键失效（同 session 下轮重建图——新 ScriptedChatModel 实例）
     await prisma.configMeta.upsert({
       where: { id: 1 },
@@ -388,6 +396,19 @@ describe('文件 rewind 端到端（S1，#782）', () => {
     expect(res.body.code).toBe(CODE.VALIDATION_FAILED)
   })
 
+  it('preview 门禁与执行面同形：run 非终态时 50005（执行不可达时预览不预告可行）', async () => {
+    slowExec = true
+    currentScript = [toolCallAi('call-slow', 'execute', { command: 'slow' }, ''), new AIMessage({ content: '好。' })]
+    const created = await request.post('/api/v1/sessions').set(bearer(access)).send({ title: '预览门禁' })
+    const sid = created.body.data.id as string
+    await request.post(`/api/v1/sessions/${sid}/messages`).set(bearer(access)).set('Idempotency-Key', hexKey()).send({ content: '1' })
+    await waitFor(() => runService.stateOf(sid)?.state === 'running')
+    const res = await request.post(`/api/v1/sessions/${sid}/rewind/preview`).set(bearer(access)).send({ messageId: 'any' })
+    expect(res.body.code).toBe(CODE.RUN_IN_PROGRESS)
+    slowExec = false
+    await waitFor(() => runService.stateOf(sid)?.state === 'completed')
+  })
+
   it('C1：存活 teammate 在 scope=all rewind 后收信箱系统消息', async () => {
     // teammates deps 已在 beforeAll 注入 RunService——直接驱动 C1 方法面
     const created = await request.post('/api/v1/sessions').set(bearer(access)).send({ title: 'C1 会话' })
@@ -414,7 +435,9 @@ describe('文件 rewind 端到端（S1，#782）', () => {
       data: { id: 'tm-doomed', parentSessionId: sid, threadId: 'tm-thread-2', name: '越线者', task: 'y', status: 'running', spawnedAtCheckpointId: laterAnchor },
     })
 
-    await runService.teammatesOnFileRewind(sid, anchor)
+    // 生产装配序（rewindSession）：作废面先行（逆放前）→ 通知面（逆放后——此处方法面直驱同序）
+    await runService.teammatesForRewind(sid, anchor)
+    await runService.teammatesNotifyFileRewind(sid, anchor)
     // 存活者收信箱；越线者被作废（archivedAt）且无信箱
     const mail = await prisma.teammateMailboxMessage.findMany({ where: { parentSessionId: sid, recipientTeammateId: tm1.id, invalidatedAt: null } })
     expect(mail.length).toBe(1)

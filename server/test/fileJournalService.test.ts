@@ -168,6 +168,31 @@ describe('FileJournalService（#782）', () => {
     expect(auditRow.inputText).toContain('big.txt')
   })
 
+  it('delete 目录快照：干净目录完整打点可逆放；含超限子文件 fail-closed 拒绝（部分树打点即误导）', async () => {
+    await seedSession()
+    const tree = fs.trees.get(CONTAINER)!
+    const b = backend()
+    // 干净目录：全树入快照
+    await b.write('/lab/dir/a.txt', 'a')
+    await b.write('/lab/dir/b.txt', 'b')
+    const countBefore = await prisma.fileJournal.count({ where: { sessionId: SESSION } })
+    expect((await b.delete('/lab/dir')).error).toBeUndefined()
+    expect(await prisma.fileJournal.count({ where: { sessionId: SESSION } })).toBe(countBefore + 1)
+    const delRow = await prisma.fileJournal.findFirstOrThrow({ where: { sessionId: SESSION, op: 'delete' } })
+    expect(delRow.path).toBe('dir')
+    expect(delRow.beforeSha256).not.toBeNull()
+    // 含超限子文件：快照不完整 → 拒绝（零新行、树不动）
+    tree.set('/lab/bigdir', 'dir')
+    tree.set('/lab/bigdir/huge.bin', Buffer.alloc(MAX_COLLECT_BYTES + 1, 7))
+    tree.set('/lab/bigdir/small.txt', Buffer.from('s'))
+    const r = await b.delete('/lab/bigdir')
+    expect(r.error).toBeDefined()
+    expect(r.error).toContain('delete files individually')
+    expect(await prisma.fileJournal.count({ where: { sessionId: SESSION } })).toBe(countBefore + 1)
+    expect(tree.get('/lab/bigdir/huge.bin')).toBeDefined()
+    expect(tree.get('/lab/bigdir/small.txt')).toBeDefined()
+  })
+
   it('write 覆写超限既有文件：降级不打点直写（打点而逆操作错——beforeSha=null + op=write 逆放 remove——比无恢复面更危险）', async () => {
     await seedSession()
     const tree = fs.trees.get(CONTAINER)!

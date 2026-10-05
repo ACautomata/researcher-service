@@ -7,11 +7,10 @@
 import type { PrismaClient } from '../generated/prisma/client'
 import type { StreamHub } from '../events/hub'
 import type { RunServiceDeps } from './runtime/runService'
-import Docker from 'dockerode'
+import { DockerPrimitives } from './backend/dockerPrimitives'
 import { PrismaCheckpointSaver } from './persistence/prismaCheckpointSaver'
 import { ProviderRegistry } from './providerRegistry'
 import { ConcurrencyGate } from './concurrency'
-import { DockerPrimitives } from './backend/dockerPrimitives'
 import { RunService } from './runtime/runService'
 import { BullMqRunQueue } from './bullmqRunQueue'
 import { disableLangsmithTracing } from './runtime/tracing'
@@ -77,8 +76,8 @@ export function assembleRunner(opts: {
   // rewind 逆放 + reconcile。journal sessionId 归属 parent（teammate 写共享 session-global
   // 日志）——containerOf 面按 session id 直呼（teammate 调用方传 parent id）。
   // 探在语义（null = 容器缺失/未运行）：reconcileOnBoot 的「容器缺失跳过」契约前提
-  // （inspect 只读，启动期不批量 ensure——restore 路兜底）。
-  const docker: Docker = new Docker()
+  // （inspect 只读，启动期不批量 ensure——restore 路兜底）。经 DockerPrimitives 单客户端
+  // inspectRunning（对齐 clientFactory 懒缓存先例——不裸 new Docker 双通道）。
   const fileJournal = new FileJournalService({
     prisma: opts.prisma,
     primitives,
@@ -87,12 +86,7 @@ export function assembleRunner(opts: {
     fenceTimeoutMs: config.runner.fileJournal.fenceTimeoutMs,
     containerOf: async (sessionId) => {
       const name = sandboxContainerName(sessionId)
-      try {
-        const info = await docker.getContainer(name).inspect()
-        return info.State.Running ? name : null
-      } catch {
-        return null
-      }
+      return (await primitives.inspectRunning(name)) ? name : null
     },
     ...(opts.ensureSandbox
       ? { ensureContainerOf: async (sessionId) => (await opts.ensureSandbox!(sessionId)).containerId }

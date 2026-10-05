@@ -62,7 +62,6 @@ export class FileJournalService {
     this.reconciler = new Reconciler({
       prisma: deps.prisma,
       io: this.io,
-      getBlob: (container, sha) => this.attic.getBlob(container, sha),
       containerOf: deps.containerOf,
     })
   }

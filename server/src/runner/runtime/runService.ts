@@ -1411,12 +1411,11 @@ export class RunService {
     }
   }
 
-  // C1（#782 · #766）：文件 rewind 的 teammate 面——跨派生点作废（复用 rewind 作废链）+
-  // 未跨派生点的存活 teammate 收信箱系统消息「文件状态已回退至锚点」（与 US-25 级联作废 +
-  // 信箱机制同构；sendMail 内部经 wakeHandler 唤醒 parked thread）。对话面 rewind（scope=chat，
-  // 文件未动）走 teammatesForRewind 纯作废面。
-  async teammatesOnFileRewind(sessionId: string, checkpointId: string): Promise<void> {
-    await this.teammatesForRewind(sessionId, checkpointId)
+  // C1（#782 · #766）拆两面（时序错配修复）：作废面 rewindFiles **前**调（teammatesForRewind
+  // 复用——防被唤醒 survivor 与逆放竞争围栏 FIFO：survivor 先获围栏的新写 checkpointId='' 会被
+  // 本次逆放撤销）；通知面 rewindFiles **后**调（文案「已逆放恢复」在事实之后——先发信即虚假
+  // 陈述）。对话面 rewind（scope=chat，文件未动）只走作废面。
+  async teammatesNotifyFileRewind(sessionId: string, checkpointId: string): Promise<void> {
     const teammates = this.deps.teammates
     if (!teammates) return
     const survivors = (await teammates.list(sessionId)).filter((t) => t.status !== 'archived')
