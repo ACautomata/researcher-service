@@ -471,7 +471,7 @@ describe('文件 rewind 端到端（S1，#782）', () => {
 
     // 生产装配序（rewindSession）：作废面先行（逆放前）→ 通知面（逆放后——此处方法面直驱同序）
     await runService.teammatesForRewind(sid, anchor)
-    await runService.teammatesNotifyFileRewind(sid, anchor)
+    await runService.teammatesNotifyFileRewind(sid, anchor, false)
     // 存活者收信箱；越线者被作废（archivedAt）且无信箱
     const mail = await prisma.teammateMailboxMessage.findMany({ where: { parentSessionId: sid, recipientTeammateId: tm1.id, invalidatedAt: null } })
     expect(mail.length).toBe(1)

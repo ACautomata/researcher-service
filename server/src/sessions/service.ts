@@ -121,7 +121,7 @@ export interface SessionRunGateway {
   /** teammate 级联作废（#781 缺口顺带补接线：跨派生点 teammate 随 rewind 作废停跑） */
   readonly teammatesForRewind?: (sessionId: string, checkpointId: string) => Promise<void>
   /** C1（#782）：作废 + 存活 teammate 信箱通知（文件面 rewind 时） */
-  readonly teammatesNotifyFileRewind?: (sessionId: string, checkpointId: string) => Promise<void>
+  readonly teammatesNotifyFileRewind?: (sessionId: string, checkpointId: string, degradedFiles: boolean) => Promise<void>
 }
 
 // run 命令发射口（submit 入队 ack 语义）：生产 = BullMQ submit（resolve = job 已入队；
@@ -719,9 +719,11 @@ export class SessionService {
           : fileRewind.rewindFiles(rewindInput))
         files = result
       }
-      // C1 通知面（逆放完成后——文案「已逆放恢复」在事实之后）
+      // C1 通知面（逆放完成后——文案「已逆放恢复」在事实之后）；degraded（容器缺失/深度
+      // 超限——/lab 未动）如实报「回退未完成」；机制未接线（fileRewind 缺省）= 文件未动，
+      // 同 degraded 语义
       if (scope !== 'chat') {
-        await this.deps.runService.teammatesNotifyFileRewind?.(sessionId, anchor)
+        await this.deps.runService.teammatesNotifyFileRewind?.(sessionId, anchor, files?.degraded ?? true)
       }
 
       this.publishSessionEvent(session.ownerId, 'session.invalidated', { reason: 'rewind' }, sessionId)

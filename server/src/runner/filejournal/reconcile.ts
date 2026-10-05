@@ -34,8 +34,9 @@ export class Reconciler {
   constructor(private readonly deps: ReconcilerDeps) {}
 
   // 单 session reconcile（restore 路；容器缺失返回 containerMissing 标志）。chain = 本次
-  // rewind 锚链（rewindFilesCore 传入——续放过滤与 planRevert 同形）；null（boot 路）= 不滤
-  //（启动期无新写窗口，残集恒崩溃残留）。
+  // rewind 锚链（rewindFilesCore 传入——续放过滤与 planRevert 同形）；boot 路传
+  // activeCheckpointId 指针重建链（boot 串行遍历期间新 run 可完成落账——不过滤则锚链内
+  // 新写被误撤）；null = 不滤（指针缺失的罕见组合，保守现状面）。
   async reconcileSession(sessionId: string, chain: ReadonlySet<string> | null = null): Promise<ReconcileOutcome> {
     const container = await this.deps.containerOf(sessionId)
     if (container === null) {

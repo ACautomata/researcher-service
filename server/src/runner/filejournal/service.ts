@@ -156,6 +156,13 @@ export class FileJournalService {
     return this.fence.runExclusive(sessionId, { holder: 'rewind-session', timeoutMs: 0 }, fn)
   }
 
+  // 锚链构造（rewindCore/preview 共用单一来源——checkpointParentOf → ancestorChainOf 样板
+  // 双份必漂移）。
+  private async chainOf(sessionId: string, anchor: string): Promise<ReadonlySet<string>> {
+    const parentOf = await this.deps.checkpointParentOf(sessionId)
+    return ancestorChainOf((id) => parentOf.get(id) ?? null, anchor)
+  }
+
   // 核心（调用方保证持围栏——runRewindExclusive 锁内直呼）。ensure 失败/容器缺失 = 容器面
   // 降级（「对话照回退、文件保持现状」，ensure 故障不放大为 rewind 失败）。
   async rewindFilesCore(p: {
@@ -180,8 +187,7 @@ export class FileJournalService {
     })
 
     // 锚链先于 restore 路构造（续放判据的 chain 过滤依赖——见 Reconciler.resumeRevert）
-    const parentOf = await this.deps.checkpointParentOf(p.sessionId)
-    const chain = ancestorChainOf((id) => parentOf.get(id) ?? null, p.anchor)
+    const chain = await this.chainOf(p.sessionId, p.anchor)
 
     // restore 路：journal-first 崩溃残留补 apply + 上次中断的续放（容器缺失 = 跳过）；
     // 活动计数入审计域（D8——静默失败不可接受）。此处 chain 已知——续放过滤与 planRevert 同形
@@ -269,8 +275,7 @@ export class FileJournalService {
     /** REST 调用者上下文——有则记 exec_crossing 审计（观测面计数；内部调用缺省不记） */
     caller?: { userId: string; username: string }
   }): Promise<RewindPreview> {
-    const parentOf = await this.deps.checkpointParentOf(p.sessionId)
-    const chain = ancestorChainOf((id) => parentOf.get(id) ?? null, p.anchor)
+    const chain = await this.chainOf(p.sessionId, p.anchor)
     const out = await buildRewindPreview(this.deps.prisma, p.sessionId, p.anchor, chain)
     if (p.caller) {
       await this.audit.record({
@@ -289,17 +294,24 @@ export class FileJournalService {
   // 启动 reconcile（server.ts 装配后异步调）：逐 session 围栏 + lease 包 reconcileSession——
   // 与并发 rewind/agent 写互斥（同一 fence）；blob 读防 GC 剪枝（归档未处置行的 sha 不在
   // gc refcount 内，lease 是唯一防剪面）。单 session 基建故障不中断全批（warn 留痕——静默
-  // 不可接受）。
+  // 不可接受）。续放 chain = activeCheckpointId 指针重建（指针即上次 rewind 落盘的锚——
+  // 与 restore 路同形；boot 串行遍历期间新 run 可完成落账，不过滤则锚链内新写被误撤）。
   async reconcileOnBoot(): Promise<Map<string, ReconcileOutcome>> {
     const out = new Map<string, ReconcileOutcome>()
     for (const sessionId of await this.reconciler.sessionsNeedingReconcile()) {
       let outcome: ReconcileOutcome
       try {
         outcome = await this.fence.runExclusive(sessionId, { holder: 'boot-reconcile', timeoutMs: 0 }, async () => {
+          // 指针缺失（罕见组合：水位非 null 而指针 null）→ chain=null 保守不滤（boot 现状面）
+          const sess = await this.deps.prisma.session.findUnique({
+            where: { id: sessionId },
+            select: { activeCheckpointId: true },
+          })
+          const chain = sess?.activeCheckpointId ? await this.chainOf(sessionId, sess.activeCheckpointId) : null
           const rows = await this.deps.prisma.fileJournal.findMany({ where: { sessionId, fileRevertedAt: null } })
           this.gc.acquireLease(sessionId, leaseShasOf(rows))
           try {
-            return await this.reconciler.reconcileSession(sessionId)
+            return await this.reconciler.reconcileSession(sessionId, chain)
           } finally {
             this.gc.releaseLease(sessionId)
           }

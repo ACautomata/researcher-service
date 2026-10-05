@@ -86,6 +86,8 @@ export class SessionWriteFence {
           next.resolve?.()
         } else {
           s.holder = ''
+          // 空条目清理（会话删除后长驻进程 Map 累积面）；再 acquire 时重建
+          if (s.queue.length === 0) this.state.delete(sessionId)
         }
       },
     }

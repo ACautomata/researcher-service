@@ -40,10 +40,13 @@ export class AtticGc {
     this.leases.delete(sessionId)
   }
 
-  // 活跃 refcount：未归档行全部引用键。
+  // 活跃 refcount：未归档 ∧ 未处置行全部引用键。fileRevertedAt 过滤不可省（refcount 泄漏
+  // 面）：已处置行的 blob 无再读面（planRevert/续放/boot 全滤已处置行），而 pending '' 行与
+  // scope=files keepMark 行结构性永不可归档（'' 匹配不到 abandoned 集 / keepMark ∈ chain
+  // 零改动 checkpoint）——不过滤则死 blob 单调累积耗尽 attic 配额，会话写面 fail-closed。
   async activeShas(sessionId: string): Promise<Set<string>> {
     const rows = await this.prisma.fileJournal.findMany({
-      where: { sessionId, archivedAt: null },
+      where: { sessionId, archivedAt: null, fileRevertedAt: null },
       select: { beforeSha256: true, afterSha256: true, tombstoneKey: true },
     })
     const out = new Set<string>()

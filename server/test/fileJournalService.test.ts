@@ -421,6 +421,34 @@ describe('FileJournalService（#782）', () => {
     expect(await prisma.fileJournal.count({ where: { sessionId: SESSION, applied: true } })).toBe(1)
   })
 
+  it('boot 续放 chain 过滤：崩溃残集续放、锚链内新写保留（activeCheckpointId 指针重建链）', async () => {
+    await seedSession({ activeCheckpointId: 'ckB' })
+    const b = backend()
+    // 崩溃前 rewind 决策的 toRevert（ckC ∉ chain(ckB)）——未处置残集
+    expect((await b.write('/lab/stale.txt', 'stale')).error).toBeUndefined()
+    await prisma.fileJournal.update({
+      where: { sessionId_seq: { sessionId: SESSION, seq: 1 } },
+      data: { checkpointId: 'ckC' },
+    })
+    // 崩溃后新 run 的锚链内写（ckA ∈ chain(ckB)）——boot 串行遍历期间落账的合法新写
+    expect((await b.write('/lab/fresh.txt', 'fresh')).error).toBeUndefined()
+    await prisma.fileJournal.update({
+      where: { sessionId_seq: { sessionId: SESSION, seq: 2 } },
+      data: { checkpointId: 'ckA' },
+    })
+    // 上次 rewind tx 已提交：水位推进至 0（判据 seq > 0 两行皆入残集候选）
+    await prisma.session.update({ where: { id: SESSION }, data: { fileJournalAnchorSeq: 0 } })
+    await fs.trees.get(CONTAINER)!.delete('/lab/stale.txt') // 逆放中断时的文件现状
+
+    await svc.reconcileOnBoot()
+    // ckC 残集行续放处置；ckA 锚链内新写行未动（不误撤）
+    const after1 = await prisma.fileJournal.findFirstOrThrow({ where: { sessionId: SESSION, path: 'stale.txt' } })
+    const after2 = await prisma.fileJournal.findFirstOrThrow({ where: { sessionId: SESSION, path: 'fresh.txt' } })
+    expect(after1.fileRevertedAt).not.toBeNull()
+    expect(after2.fileRevertedAt).toBeNull()
+    expect(fs.trees.get(CONTAINER)!.get('/lab/fresh.txt')?.toString()).toBe('fresh')
+  })
+
   it('续放：逆放中断残留（水位已推进、部分行未处置）在下次 rewindFiles 续放完成', async () => {
     await seedSession()
     const b = backend()
@@ -458,10 +486,11 @@ describe('FileJournalService（#782）', () => {
     }
     const user = await prisma.user.findFirstOrThrow()
     await svc.rewindFiles({ sessionId: SESSION, anchor: 'root', userId: user.id, username: user.username })
-    // 行未归档（对话面事务管归档）→ refcount 仍在 → 不剪
+    // 两行已全部逆放处置（fileRevertedAt 置位）——refcount 收敛（已处置行 blob 无再读面）：
+    // 行未归档也不占额，尾部 gc 已剪净
     const usageBefore = await svc.atticUsage(CONTAINER)
-    expect(usageBefore.blobs).toBeGreaterThan(0)
-    // 模拟对话面归档（#781 rewind 事务面）后，二次 rewindFiles 的尾部 gc 剪净无引用 blob
+    expect(usageBefore.blobs).toBe(0)
+    // 模拟对话面归档（#781 rewind 事务面）后，二次 rewindFiles 的尾部 gc 无剩余可剪
     await prisma.fileJournal.updateMany({ where: { sessionId: SESSION }, data: { archivedAt: new Date() } })
     await svc.rewindFiles({ sessionId: SESSION, anchor: 'root', userId: user.id, username: user.username })
     const usage = await svc.atticUsage(CONTAINER)
@@ -486,6 +515,26 @@ describe('FileJournalService（#782）', () => {
     g.releaseLease(SESSION)
     const out2 = await g.gc(CONTAINER, SESSION)
     expect(out2.freed).toBe(1)
+  })
+
+  it('GC refcount 收敛：已处置未归档行（pending 空 checkpointId/keepMark 面）blob 剪枝——死 blob 不累积耗尽配额', async () => {
+    await seedSession()
+    const b = backend()
+    await b.write('/lab/leak.txt', 'lv1')
+    // 模拟 aborted/failed 面行：pending '' + 已逆放处置（fileRevertedAt 置位、行未归档——
+    // checkpointId='' 恒匹配不到 abandoned 归档集 = 结构性永不可归档）
+    const row = await prisma.fileJournal.findFirstOrThrow({ where: { sessionId: SESSION } })
+    await prisma.fileJournal.update({
+      where: { sessionId_seq: { sessionId: SESSION, seq: row.seq } },
+      data: { fileRevertedAt: new Date() },
+    })
+    // 已处置行不再占 refcount（planRevert/续放/boot 三处判定全滤已处置行——blob 无再读面）
+    const { AtticGc } = await import('../src/runner/filejournal/gc')
+    const { AtticStore } = await import('../src/runner/filejournal/attic')
+    const attic = new AtticStore(fs.primitives, { quotaBytes: 1024 * 1024 })
+    const g = new AtticGc(prisma, attic)
+    const out = await g.gc(CONTAINER, SESSION)
+    expect(out.freed).toBe(1)
   })
 
   // ---------------------------------------------------------------------------
