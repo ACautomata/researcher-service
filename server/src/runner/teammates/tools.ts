@@ -25,6 +25,18 @@ export interface TeammateToolContext {
   readonly abort: (teammate: TeammateSummary) => Promise<void>
 }
 
+// 工具名清单（#788 插件目录全局唯一校验的「核心」侧消费：装配层传入 assertValidPluginCatalog）。
+// 与下方 tool() 定义同名——改名时此处同步，pluginsRegistry 唯一性校验的红即提醒。
+export const TEAMMATE_TOOL_NAMES: readonly string[] = [
+  'spawn_teammate',
+  'request_teammate',
+  'send_teammate_mail',
+  'broadcast_teammate_mail',
+  'wait_for_teammate_mail',
+  'list_teammates',
+  'close_teammate',
+]
+
 function renderMail(messages: readonly MailSummary[]): string {
   return JSON.stringify(messages.map((message) => ({
     id: message.id,

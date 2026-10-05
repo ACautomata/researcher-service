@@ -1,6 +1,9 @@
 import { resolveModelRef, type ModelRef } from '../providerRegistry'
 import { teammateDelegation } from '../teammates/delegation'
 import { snapshotRunCapabilities, type RunCapabilities } from '../capabilities'
+import type { PluginRuntime } from '../../plugins/surface'
+import { toLangChainTools, contentToText } from '../../plugins/tools'
+import type { AnyPluginToolDefinition } from '../../plugins/api'
 // RunService —— 集中式 runner 内核（#777 · #747 A 节「runner 编排」）。
 //
 // 职责（BullMQ 传输面之外的全部 run 机制）：
@@ -65,7 +68,8 @@ import { buildStreamEventsInvocation } from '../../events/bridge'
 import { RunProjector } from './projector'
 import { classifyRunError, type RunErrorKind } from './errorKind'
 import { buildLeaderAgent, interruptPolicyKey, type DeepAgentLike, type InterruptPolicy, type LeaderAgentParams } from './graphFactory'
-import { COMPACT_KEEP, COMPACT_SUMMARY_PROMPT, DEFAULT_RECURSION_LIMIT, DEFAULT_RESUME_DECISIONS, GRAPH_CACHE_MAX_INSTANCES, LEADER_SYSTEM_PROMPT } from './values'
+import { COMPACT_KEEP, COMPACT_SUMMARY_PROMPT, DEFAULT_RECURSION_LIMIT, DEFAULT_RESUME_DECISIONS, GRAPH_CACHE_MAX_INSTANCES, LEADER_SYSTEM_PROMPT, TOOL_DETAILS_MAX_BYTES, TOOL_INPUT_MAX_BYTES, TRUNCATED_FLAG } from './values'
+import { truncateUtf8 } from './projector'
 import { disableLangsmithTracing } from './tracing'
 import { lastMessage, scanMediaBlocks } from './mediaBlocks'
 import { turnFromCheckpointMessages } from './checkpointTurn'
@@ -88,8 +92,12 @@ export interface RunCommand {
   readonly ownerId: string
   readonly username: string
   readonly kind: 'message' | 'resume' | 'recover'
-  /** #787 story 45：kind=message 的系统命令形态（/compact 显式压缩——REST 侧已校验无参） */
-  readonly operation?: 'compact'
+  /** #787 story 45：kind=message 的系统命令形态（/compact 显式压缩——REST 侧已校验无参）；
+   *  #788：'plugin-execute' = 插件命令 {execute} outcome（直达本插件工具执行面，不经 agent） */
+  readonly operation?: 'compact' | 'plugin-execute'
+  /** operation='plugin-execute'：目标插件工具名（启用集内）与 zod 解析前参数 */
+  readonly pluginTool?: string
+  readonly pluginArgs?: unknown
   readonly teammateId?: string
   readonly parentSessionId?: string
   readonly mailWaitId?: string
@@ -166,6 +174,9 @@ export interface RunServiceDeps {
   /** 审批三层漏斗（#783）。与 interruptPolicyFor（V1 测试面）可并存，生产只接前者。 */
   readonly approvals?: ApprovalFunnel
   readonly teammates?: TeammateService
+  /** 插件运行时（#788 · #752 §4.2）：per-run 启用集静态过滤 → 插件工具/prompt 进图；
+   *  目录版本进图缓存键。缺省不注 = 无插件维度（测试）。 */
+  readonly plugins?: PluginRuntime
   /** #780 下载校验节点（片 3：file 写类工具成功后校验声明路径 → 物化 + 下载引用进 tool 输出；
    * 失败 → 错误回喂 agent 重新生成）。缺省不注 = 工具产物面关闭（测试）。 */
   readonly downloadNode?: { readonly middleware: AnyAgentMiddleware }
@@ -627,7 +638,10 @@ export class RunService {
         })
       : []
     const modelKey = actor?.modelProviderId ? `provider:${actor.modelProviderId}` : session.preferredModelJson ?? 'default'
-    const agent = this.getOrBuildGraph(cmd.sessionId, snapshot.version, policy, model, cmd.ownerId, sandboxSessionId, labContainer, modelKey, tools, capabilities)
+    // 插件工具/prompt（#788 §4.2）：run 粒度启用集静态过滤——禁用 = 新 run 装配不纳入；
+    // 进行中 run 不中断（工具集已随本次装配入图）。
+    const pluginSurface = this.deps.plugins?.surface(capabilities.enabledPluginIds)
+    const agent = this.getOrBuildGraph(cmd.sessionId, snapshot.version, policy, model, cmd.ownerId, sandboxSessionId, labContainer, modelKey, tools, capabilities, pluginSurface?.tools ?? [], pluginSurface?.prompt ?? '')
 
     // Mailbox recover has already consumed its interrupt; only a fresh resume must match the wait.
     if (cmd.kind === 'resume' && cmd.mailWaitId) {
@@ -743,6 +757,14 @@ export class RunService {
         //（见 compactThread 注释），终态恒 completed（中断在 REST/内核门前已被 50003 挡住）。
         // 不进 #780 ingestion/媒体扫描面（系统命令恒无附件、无 assistant 产物）。
         anchorCheckpointId = await this.compactThread(cmd, agent, model, usageHandler, controller.signal)
+        this.runs.set(cmd.sessionId, { runId: cmd.runId, state: 'completed' })
+        this.publish(cmd.ownerId, { type: 'run.completed', payload: {} }, cmd)
+      } else if (cmd.kind === 'message' && cmd.operation === 'plugin-execute') {
+        // 插件命令 {execute}（#788 · #752 §2.3 R9）：直达本插件工具执行面，不经 agent 自由裁量
+        //（两条触发面一条执行面，/figure 先例 #744）。标准 tool.start/tool.end 事件 + TurnReducer
+        // 聚合入会话（单管线渲染，实时 ≡ 回放）。无 agent loop → 无 checkpoint（锚点 null，
+        // 挂靠语义同无终态轮）；占用户 run 额度（#747 F 节「figure 随会话 run 占额度」同语义）。
+        await this.executePluginToolRun(cmd, capabilities, controller.signal, turn)
         this.runs.set(cmd.sessionId, { runId: cmd.runId, state: 'completed' })
         this.publish(cmd.ownerId, { type: 'run.completed', payload: {} }, cmd)
       } else {
@@ -1031,6 +1053,61 @@ export class RunService {
   // 强制其开火——故按同形态直写事件状态：与自动压缩共用同一重建逻辑，后续 run（含其自动
   // 压缩）零感知。filePath 恒 null：被压缩全文已由平台自有面持久化（session_messages 投影），
   // 不另落沙箱 /conversation_history（deepagents 卸载面的冗余副本）。
+  // ---- 插件命令 {execute} 运行体（#788 · #752 §2.3 R9）----
+  // 工具必须在本 run 启用集（owner per-run 快照）内——REST 面预检之外的内核权威面，
+  // 越权/禁用 → 80040 同码防探测。事件形状与 projector 产出同形（截断常量单一来源），
+  // turn 聚合与实时发布同源同序（#778 回放零差异纪律）。
+  private async executePluginToolRun(
+    cmd: RunCommand,
+    capabilities: RunCapabilities,
+    signal: AbortSignal,
+    turn: TurnReducer,
+  ): Promise<void> {
+    const surface = this.deps.plugins?.surface(capabilities.enabledPluginIds)
+    const def = surface?.tools.find((tool) => tool.name === cmd.pluginTool)
+    if (!surface || !def) throw fail(CODE.PLUGIN_NOT_FOUND)
+    const toolCallId = randomUUID()
+    const { text: inputText, truncated: inputTruncated } = truncateUtf8(JSON.stringify(cmd.pluginArgs ?? {}), TOOL_INPUT_MAX_BYTES)
+    const start = {
+      type: 'tool.start' as const,
+      payload: { toolCallId, name: def.name, input: inputText, ...(inputTruncated ? { [TRUNCATED_FLAG]: true } : {}) },
+    }
+    turn.feed(start)
+    this.publish(cmd.ownerId, start, cmd)
+    const startedAt = this.clock()
+    try {
+      const result = await def.execute(toolCallId, cmd.pluginArgs as never, { signal, ctx: this.deps.plugins!.toolContext })
+      const durationMs = Math.max(0, this.clock() - startedAt)
+      // details 数据源与 projector 同语义（R5）：artifact（渲染面）优先，缺省回落 content
+      // 序列化（模型/审计面文本不丢——结果卡可见）。
+      const detailsSource = result.details !== undefined
+        ? JSON.stringify(result.details, (_k, v: unknown) => (typeof v === 'bigint' ? v.toString() : v))
+        : contentToText(result.content)
+      const details = truncateUtf8(detailsSource, TOOL_DETAILS_MAX_BYTES)
+      const end = {
+        type: 'tool.end' as const,
+        payload: {
+          toolCallId,
+          name: def.name,
+          state: 'success' as const,
+          durationMs,
+          ...(details.text !== '' ? { details: details.text } : {}),
+          ...(details.truncated ? { [TRUNCATED_FLAG]: true } : {}),
+        },
+      }
+      turn.feed(end)
+      this.publish(cmd.ownerId, end, cmd)
+    } catch (e) {
+      const end = {
+        type: 'tool.end' as const,
+        payload: { toolCallId, name: def.name, state: 'error' as const, durationMs: Math.max(0, this.clock() - startedAt) },
+      }
+      turn.feed(end)
+      this.publish(cmd.ownerId, end, cmd)
+      throw e
+    }
+  }
+
   private async compactThread(
     cmd: RunCommand,
     agent: DeepAgentLike,
@@ -1275,12 +1352,16 @@ export class RunService {
     modelKey: string,
     tools: NonNullable<LeaderAgentParams['tools']>,
     capabilities: RunCapabilities,
+    pluginToolDefs: readonly AnyPluginToolDefinition[],
+    pluginPrompt: string,
   ): DeepAgentLike {
     // 双根入键：docker 实例变更（沙箱 remove/recreate、#784 wiki 容器接管后改名）时缓存图
     // 持旧 backend 会指向已删容器——backend 双根都是拓扑因子。
     const official = capabilities.official
     const wikiContainer = this.deps.resolveWikiContainer(ownerId)
-    const key = `${threadId}|${configVersion}|${interruptPolicyKey(policy)}|${labContainer}|${wikiContainer}|${capabilities.key}|${modelKey}`
+    // 插件目录版本入键（#788）：启用集（capabilities.key）管「哪些插件开」，目录版本管
+    // 「开着的插件长什么样」——任一变更都触发图重建（拓扑因子 = 工具面 + prompt 面）。
+    const key = `${threadId}|${configVersion}|${interruptPolicyKey(policy)}|${labContainer}|${wikiContainer}|${capabilities.key}|${modelKey}|${this.deps.plugins?.catalogVersion ?? 'none'}`
     const cached = this.graphs.get(key)
     if (cached) return cached
     const backend = withWriteLocks(
@@ -1301,6 +1382,12 @@ export class RunService {
       official,
       interruptPolicy: policy,
       tools,
+      // 插件工具进图（#788）：LangChain 适配（zod → StructuredTool）；prompt 段并入
+      // system prompt 与 teammate subagent 继承（graphFactory 内拼接）。
+      ...(pluginToolDefs.length > 0 && this.deps.plugins
+        ? { pluginTools: toLangChainTools(pluginToolDefs, this.deps.plugins.toolContext) }
+        : {}),
+      ...(pluginPrompt !== '' ? { pluginPrompt } : {}),
       // 中间件（运行期行为非拓扑因子——不入缓存键）：#783 审批漏斗 + #780 下载校验节点
       //（file 写类工具成功后物化产物 + 下载引用进 tool 输出；跨 run 状态由各中间件
       // per-thread 槽管理，同参数必同拓扑的纯函数约束不受影响）。

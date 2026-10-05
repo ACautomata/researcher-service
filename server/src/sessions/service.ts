@@ -1,5 +1,8 @@
-import { parseSlash } from '../officialContent/catalog'
+import { parseSlash, SYSTEM_COMMANDS } from '../officialContent/catalog'
 import type { ModelRef } from '../runner/providerRegistry'
+import { snapshotRunCapabilities } from '../runner/capabilities'
+import { mergeCommandDirectories } from '../plugins/commandResolution'
+import type { PluginRuntime } from '../plugins/surface'
 import { snapshotOfficialContent } from '../officialContent/runtime'
 // 会话域业务服务（#778 · #747 C 节会话 REST 全件）：扁平挂用户（容器维度退役）、创建/列表/
 // 改标题（story 5 自动生成+可改）、发消息（story 7 32-hex 幂等）、abort（story 8 by:user）、
@@ -146,6 +149,9 @@ export interface SessionServiceDeps {
       attachmentIds: readonly string[],
     ) => Promise<void>
   }
+  /** 插件运行时（#788 · #752 §2.3）：插件命令 {inject}/{execute} 在 sendMessage 命令构造点
+   *  消费（启用集 per-command 现读快照）。缺省不注 = 无插件命令源（两源合并退化为单源）。 */
+  readonly plugins?: PluginRuntime
 }
 
 // RunService recordTurn 注入缝的载荷（RecordTurnPayload）单一声明于 './reducer'。
@@ -336,15 +342,37 @@ export class SessionService {
     // 接受」后锁定（失败请求锁死幂等键 = story 7 语义反转：重发恒 replay 而消息从未被处理）。
     // 官方命令展开在此处（唯一消费方 = run）：/research x → 模板正文 $ARGUMENTS 插值；非官方
     // 输入恒等返回。落行 content 列仍存原始输入（见 sendMessage 头注）。
+    // 插件命令（#788 · #752 §2.3 R4/R9）：两源合并序 = 系统含官方 > 插件（无遮蔽——注册期
+    // 校验保证不撞名）。slash 命中启用集内插件命令 → handler 产出 outcome：{inject} 以
+    // user message 注入（官方命令同形）；{execute} 直达本插件工具执行面（operation=
+    // plugin-execute，不经 agent）。启用集 per-command 现读快照（禁用即下个命令不生效）。
+    let runContent = snapshotOfficialContent().expand(p.content)
+    let pluginExecute: { tool: string; args: unknown } | undefined
+    if (slash && !(SYSTEM_COMMANDS as readonly string[]).includes(slash.name) && this.deps.plugins) {
+      const enabled = await snapshotRunCapabilities(this.deps.prisma, user.id)
+      const commandDirectory = mergeCommandDirectories({
+        official: snapshotOfficialContent().commands,
+        plugin: this.deps.plugins.surface([...enabled.enabledPluginIds]).commands,
+      })
+      const resolved = slash ? commandDirectory.get(slash.name) : undefined
+      // 官方命中 → runContent 已是展开产物（上方 expand）；插件命中 → handler outcome 覆盖
+      //（{inject} 以 user message 注入；{execute} 直达本插件工具执行面，不经 agent）。
+      if (resolved?.source === 'plugin') {
+        const outcome = await resolved.entry.command.handler(slash.args, { logger: { info: () => {}, warn: () => {} } })
+        if ('inject' in outcome) runContent = outcome.inject
+        else pluginExecute = outcome.execute
+      }
+    }
     let cmd = await this.deps.runService.buildMessageCommand({
       sessionId,
       ownerId: user.id,
       username: user.username,
-      content: snapshotOfficialContent().expand(p.content),
+      content: runContent,
       attachmentIds: p.attachmentIds,
     })
 
     if (slash?.name === 'compact') cmd = { ...cmd, operation: 'compact' }
+    else if (pluginExecute) cmd = { ...cmd, operation: 'plugin-execute', pluginTool: pluginExecute.tool, pluginArgs: pluginExecute.args }
 
     // rewind 残留清理（#781 story 16）：rewind 态（指针非空）时，锚点之后的残留行归档（#770
     // 软删）——落新 user 行前清场，防「失败轮 + 重开轮」双 user 并列投影。指针在清理函数内

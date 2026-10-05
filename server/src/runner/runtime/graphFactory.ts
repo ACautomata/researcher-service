@@ -60,11 +60,18 @@ export interface LeaderAgentParams {
   // 不入缓存键；跨 run 状态由漏斗自身 per-thread 槽管理。
   readonly middleware?: readonly AnyAgentMiddleware[]
   readonly tools?: NonNullable<CreateDeepAgentParams['tools']>
+  // 插件工具集（#788 §4.2）：run 粒度启用集静态过滤产物（LangChain 适配后）。启用集进
+  // capabilities.key + 目录版本进图缓存键（runService），同参数必同拓扑约束不受影响。
+  readonly pluginTools?: NonNullable<CreateDeepAgentParams['tools']>
+  // 系统 prompt 插件段（promptSnippet + guidelines；空集 = 空串不进拼接）。teammate
+  // subagent 同步继承（#742 story 47「teammate 默认全继承」的插件维度）。
+  readonly pluginPrompt?: string
 }
 
 // 构建一个 leader agent 图（纯函数；缓存责任在调用方——RunService 按
 // (threadId, 拓扑因子) 缓存实例，版本变更丢缓存重建，见 runService.ts）。
 export function buildLeaderAgent(params: LeaderAgentParams): DeepAgent {
+  const subagentExtras = [params.official?.prompt, params.pluginPrompt].filter(Boolean).join('\n\n')
   return createDeepAgent({
     // deepagents model 参数类型面只收 BaseLanguageModel；withFallbacks 产物
     // （RunnableBinding）运行时具备完整调用面（invoke/stream/bindTools 全委派），类型面
@@ -72,12 +79,21 @@ export function buildLeaderAgent(params: LeaderAgentParams): DeepAgent {
     model: params.model as unknown as NonNullable<CreateDeepAgentParams['model']>,
     backend: params.backend,
     checkpointer: params.checkpointer,
-    systemPrompt: [params.systemPrompt, params.official?.prompt].filter(Boolean).join('\n\n'),
-    ...(params.official ? {
-      subagents: [{ ...GENERAL_PURPOSE_SUBAGENT, systemPrompt: `${GENERAL_PURPOSE_SUBAGENT.systemPrompt}\n\n${params.official.prompt}` }],
-    } : {}),
+    systemPrompt: [params.systemPrompt, params.official?.prompt, params.pluginPrompt].filter(Boolean).join('\n\n'),
+    ...(params.official || params.pluginPrompt
+      ? {
+          subagents: [{
+            ...GENERAL_PURPOSE_SUBAGENT,
+            systemPrompt: [GENERAL_PURPOSE_SUBAGENT.systemPrompt, subagentExtras].filter(Boolean).join('\n\n'),
+          }],
+        }
+      : {}),
     interruptOn: interruptOnFromPolicy(params.interruptPolicy),
-    tools: [...(params.official ? officialSkillTools(params.official) : []), ...(params.tools ?? [])],
+    tools: [
+      ...(params.official ? officialSkillTools(params.official) : []),
+      ...(params.tools ?? []),
+      ...(params.pluginTools ?? []),
+    ],
     ...(params.middleware !== undefined && params.middleware.length > 0
       ? { middleware: [...params.middleware] }
       : {}),

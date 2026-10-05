@@ -74,10 +74,10 @@ function pathInWhitelist(normalized: string): boolean {
 
 export const RULE_PATH_WHITELIST = 'path_whitelist'
 
-export function filePathVerdict(args: Record<string, unknown>): RuleVerdict {
+export function filePathVerdict(args: Record<string, unknown>, pathParams: readonly string[] = FILE_PATH_PARAM_NAMES): RuleVerdict {
   const values: unknown[] = []
   let sawParam = false
-  for (const key of FILE_PATH_PARAM_NAMES) {
+  for (const key of pathParams) {
     if (!(key in args)) continue
     sawParam = true
     values.push(args[key])

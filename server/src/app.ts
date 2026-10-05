@@ -19,6 +19,7 @@ import { createDocsRouter, type DocsRouterDeps } from './openapi/routes'
 import { createEventsRouter, type EventsRouterDeps } from './events/routes'
 import { createSessionsRouter, type SessionsRouterDeps } from './sessions/routes'
 import { createAttachmentsRouter, type AttachmentsRouterDeps } from './attachments/routes'
+import { createPluginsRouter, type PluginsRouterDeps } from './plugins/routes'
 import { Orchestrator } from './containers/orchestrator'
 import { FleetDeps } from './containers/deps'
 import type { ContainerRuntime } from './containers/runtime'
@@ -66,10 +67,13 @@ export interface AppDeps {
   // POST /sessions/:id/attachments + GET /attachments/:id/download）。注入即挂载（条件挂载
   // 先例）——生产 server.ts 装配 AttachmentsService（临时区 + files 沙箱读通道）；缺省 = 不挂。
   attachments?: AttachmentsRouterDeps
+  // plugins 接缝（#788，#752 §4.3 R8）：目录清单 + per-user 启用位（8xxxx 段）。注入即挂载
+  //（条件挂载先例）——生产 server.ts 注入编译期目录 PLUGIN_MANIFESTS；缺省 = 不挂。
+  plugins?: PluginsRouterDeps
 }
 
 // createApp 工厂：PrismaClient 经依赖注入，测试可传 test DB（接缝 #2）。
-export function createApp({ prisma, orchestrator, runtime, wiki, models, providerEndpoints, files, figures, docs, events, sessions, attachments }: AppDeps): Application {
+export function createApp({ prisma, orchestrator, runtime, wiki, models, providerEndpoints, files, figures, docs, events, sessions, attachments, plugins }: AppDeps): Application {
   const app = express()
   // wiki 内容契约无大小上限（codex PR#346）：挂载路径内请求先走 5mb limit，其余端点仍 256kb。
   // 须先于全局 parser —— body-parser 对已解析 body（req._body）会跳过，故 wiki 命中后不二次解析。
@@ -141,6 +145,10 @@ export function createApp({ prisma, orchestrator, runtime, wiki, models, provide
   //（/sessions/:id/attachments 不被 sessions 路由吞——session 路由无该子路径，落空即穿透）。
   if (attachments) {
     app.use('/api/v1', createAttachmentsRouter(attachments))
+  }
+  // plugins（#788）：目录 + 启用位（/api/v1/plugins，8xxxx 段）。存在即挂载（条件挂载先例）。
+  if (plugins) {
+    app.use('/api/v1/plugins', createPluginsRouter(plugins))
   }
 
   app.use(notFound) // 未匹配路由 → 信封 90005（兑现「所有 REST HTTP 200」）

@@ -49,6 +49,7 @@ services:
       additional_contexts:
         template: ${RESEARCHER_DIR:-../researcher}   # home 模板（provision cp -a 预填充源）
         official: ../official
+        plugins: ../plugins                          # #788 插件目录（#752 R1 根级源直引入镜像）
         deploy: .                                     # openclaw.json 配置单一来源
     image: panel-server:dev
     container_name: panel-dev-server
