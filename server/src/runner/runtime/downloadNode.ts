@@ -28,7 +28,7 @@ export interface DownloadNodeDeps {
     container: string
   }) => Promise<{ attachmentId: string; fileName: string; mimeType: string; size: number } | null>
   /** 沙箱容器名解析（threadId = sessionId；researcher-sandbox-<sessionId> 单一来源派生） */
-  readonly resolveContainer: (threadId: string) => string
+  readonly resolveContainer: (threadId: string) => string | Promise<string>
   /** 降级/失败审计计数（V1 warn 留痕——静默失败不可接受，#766 D8 观测面纪律） */
   readonly audit?: (info: { sessionId: string; path: string; outcome: 'feedback_error' | 'reference_added' }) => void
 }
@@ -60,7 +60,7 @@ export function createDownloadNode(deps: DownloadNodeDeps) {
       sessionId: threadId,
       declaredPath: rawPath,
       mime: mimeFromPath(rawPath) ?? 'application/octet-stream',
-      container: deps.resolveContainer(threadId),
+      container: await deps.resolveContainer(threadId),
     })
     if (meta === null) {
       // 路径不正确（产物未落盘/已删/穿越）→ 错误回喂 agent loop 重新生成

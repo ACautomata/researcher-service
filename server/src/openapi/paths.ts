@@ -15,6 +15,7 @@ import {
   modelProviderWriteSchema,
   passwordChangeSchema,
   providerEndpointWriteSchema,
+  sessionApprovalSchema,
   userCreateSchema,
   userPatchSchema,
 } from '../validation/schemas'
@@ -84,6 +85,8 @@ function register(spec: EndpointSpec): void {
 
 const USER_WRITE_BODY_NOTE =
   'JSON 对象；字段校验为服务端手写（单一来源 wiki/paths.ts），非法 → 90002 + data 字段明细。'
+
+register({ method: 'post', path: '/api/v1/sessions/{id}/approvals/{escalationId}', tag: 'Sessions', summary: 'Resolve a leader or teammate approval', auth: 'user', body: sessionApprovalSchema, nullData: true, errors: '50002 session_not_found; 50004 approval_not_found; 50001 already_resumed; 40043 quota exceeded; 90002 validation', dataNote: 'Acknowledges queued resume; only the checkpoint thread owning this escalation resumes.' })
 
 const FILE_WRITE_BODY_NOTE =
   'JSON 对象；字段校验为服务端手写（单一来源 files/paths.ts），非法 → 90002 + data 字段明细。写面 root 仅 wiki（lab/workspace 只读 → 90002 data.root）。'

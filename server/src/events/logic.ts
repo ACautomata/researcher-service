@@ -17,6 +17,7 @@ export interface CatalogEvent {
   readonly type: string
   readonly sessionId?: string
   readonly runId?: string
+  readonly teammateId?: string
   readonly payload: unknown
 }
 
@@ -26,6 +27,7 @@ export function encodeFrame(seq: number, event: CatalogEvent): string {
     type: event.type,
     ...(event.sessionId !== undefined ? { sessionId: event.sessionId } : {}),
     ...(event.runId !== undefined ? { runId: event.runId } : {}),
+    ...(event.teammateId !== undefined ? { teammateId: event.teammateId } : {}),
     payload: event.payload,
   })
   return `id: ${seq}\nevent: ${event.type}\ndata: ${data}\n\n`

@@ -33,7 +33,7 @@ function buildHeaders(init: RequestInit, token: string): Headers {
 // json()——会 drain 流，使后续 blob() 抛 Body is unusable。JSON 判定对齐仓库既有 Content-Type 约定
 // （后端信封响应经 res.json()，恒带 application/json）。
 function isJsonResponse(resp: Response): boolean {
-  return (resp.headers.get('content-type') ?? '').includes('application/json')
+  return !resp.headers.get('Content-Disposition') && (resp.headers.get('content-type') ?? '').includes('application/json')
 }
 
 // 响应 body 只可读一次（流语义）——把解析结果缓存到响应对象，envelope 判定与 apiJson 复用同一份，

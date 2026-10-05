@@ -26,6 +26,8 @@ import { PrismaCheckpointSaver } from '../src/runner/persistence/prismaCheckpoin
 import { ProviderRegistry } from '../src/runner/providerRegistry'
 import { ConcurrencyGate } from '../src/runner/concurrency'
 import { RunService, type RunCommand } from '../src/runner/runtime/runService'
+import { TeammateService } from '../src/runner/teammates/service'
+import { CODE } from '../src/codes'
 import { checkpointHumanCount, seedUser, waitFor } from './helpers'
 import { ScriptedChatModel, fakePrimitives, CollectingHub, toolCallAi, type ScriptEntry } from './runnerFakes'
 
@@ -83,6 +85,7 @@ describe('#779 断线补偿 + 重启恢复（RunService 级）', () => {
     script?: ScriptEntry[]
     slowExec?: boolean
     interruptOnExecute?: boolean
+    teammates?: TeammateService
   }): RunService {
     const registry = new ProviderRegistry(prisma, {
       llmApiKey: 'rec-key',
@@ -101,6 +104,7 @@ describe('#779 断线补偿 + 重启恢复（RunService 级）', () => {
         },
       }).primitives,
       resolveWikiContainer: () => WIKI,
+      teammates: opts.teammates,
       ...(opts.interruptOnExecute ? { interruptPolicyFor: () => ({ tools: ['execute'] }) } : {}),
     })
     // recordTurn 注入（SessionService.recordTurn 的落行语义简化镜像：assistant 行 + anchor）
@@ -145,6 +149,36 @@ describe('#779 断线补偿 + 重启恢复（RunService 级）', () => {
   }
 
   // ---- story 14：message 重放 → recover 续跑 ----
+
+  it('mailbox timeout resume recovers after consuming its wait without repeating timeout mail', async () => {
+    const session = await newSession()
+    const teammates = new TeammateService(prisma)
+    const scheduled: RunCommand[] = []
+    const first = makeService({
+      teammates,
+      script: [toolCallAi('mail-wait', 'wait_for_teammate_mail', { timeoutMs: 1000 }), () => { throw new Error('crash after mailbox resume') }],
+    })
+    first.setTeammateDispatcher(async (command) => { scheduled.push(command) })
+    await first.execute(cmdOf(session))
+    expect(first.stateOf(session)?.state).toBe('interrupted')
+    expect(scheduled).toHaveLength(1)
+    const resume = scheduled[0]!
+    const parkedEvents = hub.events.length
+    await expect(first.execute({ ...resume, mailWaitId: 'stale-wait' })).rejects.toMatchObject({ code: CODE.RUN_ALREADY_RESUMED })
+    expect(first.stateOf(session)?.state).toBe('interrupted')
+    expect(hub.events).toHaveLength(parkedEvents)
+
+    await first.execute(resume)
+    expect(first.stateOf(session)?.state).toBe('failed')
+    expect(await teammates.mailboxHistory(session)).toHaveLength(1)
+
+    const reborn = makeService({ teammates, script: [new AIMessage({ content: [{ type: 'text', text: 'Recovered mailbox work' }] })] })
+    reborn.setTeammateDispatcher(async () => { throw new Error('recover must not schedule another wait') })
+    await reborn.execute(resume)
+    expect(reborn.stateOf(session)?.state).toBe('completed')
+    expect(await teammates.mailboxHistory(session)).toHaveLength(1)
+    expect((await projectionMessages(session)).at(-1)?.content).toBe('Recovered mailbox work')
+  })
 
   it('message 崩溃重放：checkpoint 已含 id=runId → 转 recover，null 续跑跑完，无重复 append', async () => {
     const session = await newSession()

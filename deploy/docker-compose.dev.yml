@@ -48,6 +48,7 @@ services:
       # additional_contexts 自备（路径基准 = 本目录 deploy/）。
       additional_contexts:
         template: ${RESEARCHER_DIR:-../researcher}   # home 模板（provision cp -a 预填充源）
+        official: ../official
         deploy: .                                     # openclaw.json 配置单一来源
     image: panel-server:dev
     container_name: panel-dev-server

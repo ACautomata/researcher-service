@@ -25,6 +25,12 @@ export const routes: RouteRecordRaw[] = [
     meta: { requiresAuth: true },
   },
   {
+    path: '/sessions/:id?',
+    name: 'sessions',
+    component: () => import('@/views/TeamSessionsView.vue'),
+    meta: { requiresAuth: true },
+  },
+  {
     path: '/wiki',
     name: 'wiki',
     component: () => import('@/views/WikiView.vue'),

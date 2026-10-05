@@ -21,6 +21,7 @@ COPY tsconfig.json tsconfig.build.json ./
 COPY src ./src
 COPY prisma ./prisma
 COPY scripts ./scripts
+COPY --from=official / /official
 # prebuild 钩子 = prisma generate；build = tsc -p tsconfig.build.json + cp src/generated dist/generated。
 RUN npm run build
 

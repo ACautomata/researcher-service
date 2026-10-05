@@ -28,6 +28,7 @@ export class ScriptedChatModel extends BaseChatModel {
   private readonly loop: boolean
 
   invokeCount = 0
+  readonly receivedMessages: unknown[] = []
 
   constructor(script: ScriptEntry[], opts: { loop?: boolean } = {}) {
     super({})
@@ -57,6 +58,7 @@ export class ScriptedChatModel extends BaseChatModel {
     _options: unknown,
     _runManager: unknown,
   ) {
+    this.receivedMessages.push(_messages)
     this.invokeCount += 1
     const message = this.nextMessage()
     const text = typeof message.content === 'string' ? message.content : ''
@@ -176,12 +178,13 @@ export interface CapturedEvent {
   type: string
   sessionId?: string
   runId?: string
+  teammateId?: string
   payload: unknown
 }
 
 export class CollectingHub {
   readonly events: CapturedEvent[] = []
-  publish(userId: string, event: { type: string; sessionId?: string; runId?: string; payload: unknown }): void {
+  publish(userId: string, event: { type: string; sessionId?: string; runId?: string; teammateId?: string; payload: unknown }): void {
     this.events.push({ userId, ...event })
   }
   types(): string[] {

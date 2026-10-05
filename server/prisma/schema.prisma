@@ -343,9 +343,14 @@ model Session {
   // 旧分支自然保留（checkpoint 树即分支真相源）。
   activeCheckpointId String?
 
+  // #787: /model is a session preference, applied at the next run snapshot.
+  preferredModelJson String?
+
   // #770：branch-switch 机制取消后，「先 fork 再回退」的被放弃原路线软删除存档
   // （delete 标记、映射层过滤——产品面不可读、行不物理删，retention/refcount GC 回收对象）。
   archivedAt DateTime?
+  // Teammate threads use the same checkpoint store but stay out of the user's top-level session list.
+  isTeammate Boolean @default(false)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -355,9 +360,77 @@ model Session {
   checkpointWrites CheckpointWrite[]
   attachments Attachment[]
   fileJournal FileJournal[]
+  parentTeammates Teammate[] @relation("TeammateParent")
+  teammateThread Teammate? @relation("TeammateThread")
+  teammateMessages TeammateMailboxMessage[]
+  teammateMailboxParentWaits TeammateMailboxWait[] @relation("MailboxWaitParent")
+  teammateMailboxThreadWait TeammateMailboxWait? @relation("MailboxWaitThread")
 
   @@index([ownerId])
   @@map("sessions")
+}
+
+// ---------------------------------------------------------------------------
+// Teammate —— a named agent thread owned by a parent session (#786).
+// A teammate has its own Session row so LangGraph checkpoints and approvals remain isolated;
+// that row is hidden from the top-level session list and remains archived after close.
+// ---------------------------------------------------------------------------
+model Teammate {
+  id              String   @id @default(cuid())
+  parentSession   Session  @relation("TeammateParent", fields: [parentSessionId], references: [id], onDelete: Cascade)
+  parentSessionId String
+  thread           Session  @relation("TeammateThread", fields: [threadId], references: [id], onDelete: Cascade)
+  threadId         String   @unique
+  name             String
+  task             String
+  status           String   @default("requested")
+  modelProviderId  String?
+  spawnedAtCheckpointId String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  archivedAt       DateTime?
+
+  messages TeammateMailboxMessage[]
+  waits    TeammateMailboxWait[]
+
+  @@unique([parentSessionId, name])
+  @@index([parentSessionId, status])
+  @@map("teammates")
+}
+
+// TeammateMailboxMessage —— durable point-to-point mail and request history (#786).
+// recipientTeammateId=null addresses the leader. Invalidated messages remain auditable after rewind.
+model TeammateMailboxMessage {
+  id              String   @id @default(cuid())
+  parentSession   Session  @relation(fields: [parentSessionId], references: [id], onDelete: Cascade)
+  parentSessionId String
+  senderTeammate  Teammate? @relation(fields: [senderTeammateId], references: [id], onDelete: SetNull)
+  senderTeammateId String?
+  recipientTeammateId String?
+  kind            String   @default("message")
+  content         String
+  createdAt       DateTime @default(now())
+  readAt          DateTime?
+  invalidatedAt   DateTime?
+  expiresAt       DateTime?
+
+  @@index([parentSessionId, recipientTeammateId, createdAt])
+  @@index([recipientTeammateId, readAt, invalidatedAt])
+  @@map("teammate_mailbox_messages")
+}
+
+model TeammateMailboxWait {
+  waitId                 String   @id
+  parentSession          Session  @relation("MailboxWaitParent", fields: [parentSessionId], references: [id], onDelete: Cascade)
+  parentSessionId        String
+  thread                 Session  @relation("MailboxWaitThread", fields: [threadId], references: [id], onDelete: Cascade)
+  threadId               String   @unique
+  recipientTeammate      Teammate? @relation(fields: [recipientTeammateId], references: [id], onDelete: Cascade)
+  recipientTeammateId    String?
+  createdAt              DateTime @default(now())
+
+  @@index([parentSessionId, recipientTeammateId])
+  @@map("teammate_mailbox_waits")
 }
 
 // ---------------------------------------------------------------------------

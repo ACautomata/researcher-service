@@ -11,6 +11,7 @@ import { mustChangePasswordGate } from '../middleware/mustChangePasswordGate'
 import { validateBody } from '../middleware/validate'
 import {
   messageSendSchema,
+  sessionApprovalSchema,
   sessionCreateSchema,
   sessionForkSchema,
   sessionPatchSchema,
@@ -93,6 +94,13 @@ export function createSessionsRouter(deps: SessionsRouterDeps): Router {
   })
 
   // GET /:id/messages —— 历史投影（story 3 回放面；与实时流终态零差异）。
+  router.post('/:id/approvals/:escalationId', validateBody(sessionApprovalSchema), async (req, res) => {
+    const { decision, reason } = req.body as z.infer<typeof sessionApprovalSchema>
+    const id = typeof req.params.escalationId === 'string' ? req.params.escalationId : ''
+    await deps.service.resolveApproval(req.user!, pathId(req), id, decision, reason)
+    ok(res, null)
+  })
+
   router.get('/:id/messages', async (req: Request, res: Response) => {
     ok(res, await deps.service.getProjection(req.user!, pathId(req)))
   })

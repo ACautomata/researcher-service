@@ -215,3 +215,8 @@ export const sessionForkSchema = z.object({
   messageId: z.string().min(1).optional(), // 缺省 = 当前活跃头（指针或最新锚点）
   title: z.string().trim().max(TITLE_MAX, `title 过长（≤${TITLE_MAX} 字符）`).optional(),
 })
+
+export const sessionApprovalSchema = z.object({
+  decision: z.enum(['allow', 'deny']),
+  reason: z.string().max(2000).optional(),
+})

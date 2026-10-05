@@ -36,3 +36,20 @@ export const LEADER_SYSTEM_PROMPT = [
   '工具：ls / read_file / write_file / edit_file / glob / grep / execute。',
   '逐步用工具完成任务，不要凭空假设文件内容；回答使用用户语言。',
 ].join('\n')
+
+// /compact 显式压缩保留窗（#787 story 45；deepagents summarization FALLBACK_KEEP 同值——
+// 压缩后仍保留最近对话尾部，衔接感不丢）。
+export const COMPACT_KEEP = 6
+
+// /compact 摘要生成提示（deepagents DEFAULT_SUMMARY_PROMPT 同构的中文面；{conversation}
+// 占位 = 被压缩消息的转写文本，summarizeMessages 就地填充）。
+export const COMPACT_SUMMARY_PROMPT = [
+  '你是会话压缩器。把下面的对话压缩成一份后续对话可依赖的摘要，必须保留：',
+  '1. 已讨论的主题与用户意图；',
+  '2. 已做出的关键决定、结论与重要事实（含文件路径、id 等可复用细节）；',
+  '3. 未完成的事项与下一步。',
+  '只输出摘要正文，不要额外解释。',
+  '',
+  '待压缩对话：',
+  '{conversation}',
+].join('\n')

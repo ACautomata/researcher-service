@@ -9,6 +9,8 @@
 
 import { TOOL_DETAILS_MAX_BYTES, TOOL_INPUT_MAX_BYTES } from '../runner/runtime/values'
 import { truncateUtf8 } from '../runner/runtime/projector'
+// type-only 环引：service 反向 import 本模块的 serializeAttachments（运行时无环，类型单向）
+import type { SystemCommandResult } from './service'
 
 // attachmentsJson v1 的 tools 行（#747 C 节：toolCallId/name/input≤1k/result≤1k/state/durationMs/
 // details?≤4KB + 截断标记）。截断纪律：RunProjector 事件侧已按同常量截（1k/4KB），本归约器
@@ -83,12 +85,18 @@ const MAX = {
 // content 不入此 JSON——它是行独立列（schema.prisma SessionMessage.content）；本 JSON 只装
 // 聚合面（thinking/tools/media），空聚合 = 列默认 {"v":1}。attachmentsJson 的唯一序列化实现：
 // SessionService.recordTurn（run 终态落行）与投影侧快照比对共用，不允第二处漂移。
-export function serializeAttachments(snap: TurnSnapshot): string {
+// command 元数据（#787 系统命令行）= 聚合面的第二合法形态：/new /model 行把命令结果挂此处，
+// 幂等 replay 复原应答；读侧（toProjectionMessage / replayOrConflict）对未知键一律忽略，
+// user 行与 assistant 行同列两形状不互染。
+// content 不入参序列化（它是行独立列）——Partial 宽进：assistant 行传完整 TurnSnapshot，
+// #787 系统命令行只传 command 聚合面。
+export function serializeAttachments(snap: Partial<TurnSnapshot> & { command?: SystemCommandResult }): string {
   return JSON.stringify({
     v: 1,
     ...(snap.thinking !== undefined ? { thinking: snap.thinking } : {}),
     ...(snap.tools !== undefined ? { tools: snap.tools } : {}),
     ...(snap.media !== undefined && snap.media.length > 0 ? { media: snap.media } : {}),
+    ...(snap.command !== undefined ? { command: snap.command } : {}),
   })
 }
 
