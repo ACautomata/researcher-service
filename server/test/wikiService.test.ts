@@ -3,6 +3,7 @@
 // 验证：CRUD 域错误映射、listCategories 分组/排序/窗口、buildGraph 节点/边/ghost/不 dedup。
 // fake 自 #621 起共享于 ./fakes（REST 契约测试 wiki.test.ts 同用）。
 
+import { createHash } from 'node:crypto'
 import { describe, it, expect } from 'vitest'
 import { WikiInvalidPath, WikiPageExists, WikiPageNotFound } from '../src/wiki/errors'
 import { WikiService } from '../src/wiki/service'
@@ -236,5 +237,118 @@ describe('WikiService buildGraph（fake FS）', () => {
     const ghost = graph.nodes.find((n) => n.id === '__proto__')
     expect(ghost).toMatchObject({ id: '__proto__', title: '__proto__', ghost: true })
     expect(graph.edges).toContainEqual({ from: 'a/x.md', to: '__proto__' })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// #789 OKF 适配（wiki 域）：markdown 相对链接边 / SKIP 集扩充 / okf 徽章 / claims 只读面。
+// ---------------------------------------------------------------------------
+
+describe('WikiService buildGraph markdown 相对链接边（#789 story 43）', () => {
+  it('OKF 相对链接出边，解析复用 stem/title/整串链', () => {
+    const fs = new FakeWikiFileSystem({
+      'concepts/attention.md': '# A\n见 [Transformer](../concepts/transformer.md)。\n',
+      'concepts/transformer.md': '# T\n[反向](attention.md)。\n',
+    })
+    const graph = new WikiService(fs).buildGraph()
+    return graph.then((g) => {
+      expect(g.edges).toContainEqual({ from: 'concepts/attention.md', to: 'concepts/transformer.md' })
+      expect(g.edges).toContainEqual({ from: 'concepts/transformer.md', to: 'concepts/attention.md' })
+    })
+  })
+
+  it('不可解析的 markdown 链接 → ghost 节点（复用 ghost 机制）', () => {
+    const fs = new FakeWikiFileSystem({
+      'a/x.md': '# X\n[缺失](missing/target.md)。\n',
+    })
+    return new WikiService(fs).buildGraph().then((g) => {
+      expect(g.nodes).toContainEqual({ id: 'missing/target.md', title: 'missing/target.md', ghost: true })
+      expect(g.edges).toContainEqual({ from: 'a/x.md', to: 'missing/target.md' })
+    })
+  })
+
+  it('外链/图片/锚点不出边（只收 .md 相对目标）', () => {
+    const fs = new FakeWikiFileSystem({
+      'a/x.md': '# X\n[外](https://a.com/b.md) [图](img.png) [锚](#s) [绝](/b.md)\n',
+    })
+    return new WikiService(fs).buildGraph().then((g) => {
+      expect(g.edges).toHaveLength(0)
+    })
+  })
+})
+
+describe('SKIP 集扩充（#789：log.md/INSTRUCTIONS.md/.claims）', () => {
+  it('SKIP 文件与 .claims 不进树；写侧拒绝（managed 黑名单）', async () => {
+    const fs = new FakeWikiFileSystem({
+      'log.md': '# Log\n',
+      'INSTRUCTIONS.md': '# How\n',
+      '.claims/a.json': '{}',
+      'concepts/a.md': '# A\n',
+    })
+    const svc = new WikiService(fs)
+    const tree = await svc.buildTree()
+    const paths = tree.groups.flatMap((g) => g.pages.map((p) => p.path))
+    expect(paths).toEqual(['concepts/a.md'])
+    await expect(svc.writePage('log.md', 'x')).rejects.toBeInstanceOf(WikiInvalidPath)
+    await expect(svc.createPage('INSTRUCTIONS.md', 'x')).rejects.toBeInstanceOf(WikiInvalidPath)
+  })
+})
+
+describe('WikiService okf 徽章与 claims 只读面（#789 story 41/42 数据面）', () => {
+  const OKF_PAGE = [
+    '---',
+    'type: concept',
+    'title: Attention',
+    'status: stable',
+    'stale_after: 2026-12-01T00:00:00+00:00',
+    'generated: {by: openwiki, at: 2026-09-30T12:00:00Z}',
+    '---',
+    '# Attention',
+    '',
+    '正文。',
+  ].join('\n')
+
+  function okfFs(): FakeWikiFileSystem {
+    return new FakeWikiFileSystem({ 'concepts/attention.md': OKF_PAGE, 'concepts/plain.md': '# Plain\n' })
+  }
+
+  it('readPage 附带 okf 徽章（status/staleAfter/generatedAt）；非 OKF 页无 okf 字段', async () => {
+    const svc = new WikiService(okfFs())
+    const page = await svc.readPage('concepts/attention.md')
+    expect(page.okf).toEqual({
+      status: 'stable',
+      staleAfter: '2026-12-01T00:00:00+00:00',
+      generatedAt: '2026-09-30T12:00:00Z',
+    })
+    const plain = await svc.readPage('concepts/plain.md')
+    expect(plain.okf).toBeUndefined()
+  })
+
+  it('readClaims：旁车存在 → claims + 漂移状态（页未动 fresh，页动过 drifted）', async () => {
+    const fs = okfFs()
+    // 旁车 pageVersion = 当前页字节哈希（openwiki hashPage 同源）→ fresh
+    const hash = createHash('sha256').update(Buffer.from(OKF_PAGE, 'utf8')).digest('hex')
+    fs.claims.set('.claims/concepts/attention.json', JSON.stringify({
+      schemaVersion: 1,
+      pageVersion: `sha256:${hash}`,
+      claims: [{ id: 'claim_a', statement: '论断', evidence: [{ resource: 'repo://x.ts#L1-L2', version: 'repo-lines-v1:s:h:f' }] }],
+    }))
+    const svc = new WikiService(fs)
+    const claims = await svc.readClaims('concepts/attention.md')
+    expect(claims.schemaVersion).toBe(1)
+    expect(claims.pageVersion).toBe(`sha256:${hash}`)
+    expect(claims.drift).toBe('fresh')
+    expect(claims.claims[0]!.evidence[0]!.resource).toBe('repo://x.ts#L1-L2')
+
+    await svc.writePage('concepts/attention.md', OKF_PAGE + '\n追加。')
+    const drifted = await svc.readClaims('concepts/attention.md')
+    expect(drifted.drift).toBe('drifted')
+  })
+
+  it('readClaims：旁车缺失 → drift null + 空 claims；页缺失 → 30040 语义不变', async () => {
+    const svc = new WikiService(okfFs())
+    const none = await svc.readClaims('concepts/plain.md')
+    expect(none).toEqual({ schemaVersion: null, pageVersion: null, drift: null, claims: [] })
+    await expect(svc.readClaims('concepts/nope.md')).rejects.toBeInstanceOf(WikiPageNotFound)
   })
 })

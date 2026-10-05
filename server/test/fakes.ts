@@ -6,7 +6,7 @@
 //   - readPage：title = frontmatter → stem（**无 H1**）；
 //   - listCategoryPages：全量（含顶层散落页）；title = frontmatter → H1 → stem。
 
-import { FrontmatterParser, frontmatterTitle, h1Title } from '../src/wiki/logic'
+import { claimsSidecarPath, FrontmatterParser, frontmatterTitle, h1Title } from '../src/wiki/logic'
 import { SKIP_DIRS, SKIP_FILES } from '../src/wiki/values'
 import { WikiInvalidPath, WikiPageExists, WikiPageNotFound } from '../src/wiki/errors'
 import type {
@@ -19,9 +19,14 @@ import type {
 
 export class FakeWikiFileSystem implements WikiFileSystem {
   pages = new Map<string, string>()
+  // .claims 旁车（#789）：键 = 旁车完整路径（'.claims/concepts/a.json'），构造条目按前缀分桶。
+  claims = new Map<string, string>()
 
   constructor(entries: Record<string, string> = {}) {
-    for (const [k, v] of Object.entries(entries)) this.pages.set(k, v)
+    for (const [k, v] of Object.entries(entries)) {
+      if (k.startsWith('.claims/')) this.claims.set(k, v)
+      else this.pages.set(k, v)
+    }
   }
 
   private validatePath(relPath: string): void {
@@ -104,5 +109,9 @@ export class FakeWikiFileSystem implements WikiFileSystem {
     this.validatePath(relPath)
     if (!this.pages.has(relPath)) throw new WikiPageNotFound(relPath)
     this.pages.delete(relPath)
+  }
+
+  async readClaimsFile(relPath: string): Promise<string | null> {
+    return this.claims.get(claimsSidecarPath(relPath)) ?? null
   }
 }

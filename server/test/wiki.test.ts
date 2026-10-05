@@ -5,6 +5,7 @@
 // （#312⑤，越权 20040 同码防探测）+ 错误映射（90002/20040/30040/30041）。compile 经注入 fake
 // 断言触发时机（POST/DELETE 触发、PUT 不触发），不碰真 docker。
 
+import { createHash } from 'node:crypto'
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { setupTestApp, type TestContext } from './setup'
 import { seedAdmin, seedUser, login, bearer } from './helpers'
@@ -356,5 +357,37 @@ describe('wiki REST（接缝 #2 信封 + #335）', () => {
     expect(data.rootcat.map((i) => i.path)).toEqual(['root-note.md']) // 顶层散落页进 categories
     const allPaths = Object.values(data).flat().map((i) => i.path)
     expect(allPaths).not.toContain('concepts/attention.md') // 无标记页不进
+  })
+
+  // ---------------------------- GET /claims（#789 story 42 数据面） ----------------------------
+
+  it('claims：旁车存在 → claims/drift fresh；旁车缺失 → drift null 空 claims；页缺失 → 30040', async () => {
+    const u = await seedUser(ctx.prisma, 'uclaims', 'pw-uclaims-secure')
+    const name = await seedContainer(u.id)
+    const fs = fss.get(name)!
+    const content = fs.pages.get('concepts/attention.md')!
+    const hash = createHash('sha256').update(Buffer.from(content, 'utf8')).digest('hex')
+    fs.claims.set('.claims/concepts/attention.json', JSON.stringify({
+      schemaVersion: 1,
+      pageVersion: `sha256:${hash}`,
+      claims: [{ id: 'claim_1', statement: '论断', evidence: [{ resource: 'repo://x.ts#L1-L2' }] }],
+    }))
+    const l = await login(ctx.request, 'uclaims', 'pw-uclaims-secure')
+    const res = await ctx.request.get(`${BASE}/${name}/wiki/claims?path=concepts/attention.md`).set(bearer(l.access))
+    expect(res.body.code).toBe(0)
+    expect(res.body.data.drift).toBe('fresh')
+    expect(res.body.data.pageVersion).toBe(`sha256:${hash}`)
+    expect(res.body.data.claims).toHaveLength(1)
+    expect(res.body.data.claims[0].evidence[0].resource).toBe('repo://x.ts#L1-L2')
+
+    const none = await ctx.request.get(`${BASE}/${name}/wiki/claims?path=thoughts/idea-1.md`).set(bearer(l.access))
+    expect(none.body.code).toBe(0)
+    expect(none.body.data).toMatchObject({ schemaVersion: null, pageVersion: null, drift: null, claims: [] })
+
+    const missing = await ctx.request.get(`${BASE}/${name}/wiki/claims?path=concepts/nope.md`).set(bearer(l.access))
+    expect(missing.body.code).toBe(30040)
+
+    const invalid = await ctx.request.get(`${BASE}/${name}/wiki/claims?path=../evil.md`).set(bearer(l.access))
+    expect(invalid.body.code).toBe(90002)
   })
 })

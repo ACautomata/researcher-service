@@ -227,6 +227,49 @@ describe('RunService：发消息 → run 终态事件序列（S1，#747 C 节目
     expect((end.payload as { durationMs: number }).durationMs).toBeGreaterThan(0)
   })
 
+  it('wiki 常驻检索（#789 三通道①）：openwiki_search 进装配并真实检索 wiki 容器内容', async () => {
+    const fs = fakePrimitives()
+    fs.trees.set(WIKI, new Map<string, Buffer | 'dir'>([
+      ['/wiki', 'dir'],
+      ['/wiki/concepts/attention.md', Buffer.from('---\ntype: concept\ntitle: Attention\n---\n# Attention\n\n## 机制\n\n自注意力按缩放点积计算。\n', 'utf8')],
+    ]))
+    const svc = makeService({
+      primitives: fs,
+      script: [
+        toolCallAi('c-wiki', 'openwiki_search', { query: '自注意力 机制' }),
+        new AIMessage({ content: '已检索。' }),
+      ],
+    })
+    await svc.execute(cmd())
+    const end = hub.events.find((e) => e.type === 'tool.end')!
+    expect(end.payload).toMatchObject({ toolCallId: 'c-wiki', name: 'openwiki_search', state: 'success' })
+    const result = JSON.parse((end.payload as { details: string }).details) as {
+      ok: boolean
+      data?: { results: Array<{ ref: string[] }> }
+    }
+    expect(result.ok).toBe(true)
+    expect(result.data!.results.length).toBeGreaterThan(0)
+    expect(result.data!.results[0]!.ref[0]).toMatch(/^openwiki\/concepts\/attention\.md#/)
+  })
+
+  it('wiki 轻写（#789 三通道②）：write_file /wiki/... 直落 wiki 容器树', async () => {
+    const fs = fakePrimitives()
+    fs.trees.set(WIKI, new Map<string, Buffer | 'dir'>([['/wiki', 'dir']]))
+    const svc = makeService({
+      primitives: fs,
+      script: [
+        toolCallAi('c-lw', 'write_file', { path: '/wiki/notes/idea.md', content: '# Idea\n' }),
+        new AIMessage({ content: '写好了。' }),
+      ],
+    })
+    await svc.execute(cmd())
+    const wikiTree = fs.trees.get(WIKI)!
+    expect(wikiTree.get('/wiki/notes/idea.md')?.toString()).toBe('# Idea\n')
+    // 不落 lab：轻写的目标容器是 wiki（routePath 双根分派证据）
+    const labTree = fs.trees.get(LAB)
+    expect([...(labTree?.keys() ?? [])]).not.toContain('/wiki/notes/idea.md')
+  })
+
   it('thinking 分流：thinking 块 → thinking.delta（与 text 分轨不串流）', async () => {
     const svc = makeService({
       script: [

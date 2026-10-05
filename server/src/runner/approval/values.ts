@@ -47,7 +47,27 @@ export const APPROVAL_REJECTION_CONTENT_PREFIX = '操作被拒绝：'
 
 // 文件类工具：路径白名单（§1.2）。字面路径参数名实测锁定（deepagents FilesystemMiddleware）：
 // read_file/write_file/edit_file 用 file_path，ls/glob/grep 用 path（S1 用例经真实工具面锁定）。
-export const FILE_TOOLS: readonly string[] = ['ls', 'read_file', 'write_file', 'edit_file', 'glob', 'grep']
+//
+// #789 漏斗归类首验结论（#747 D 节工具映射表开放点 5 闭环——「检索/生命周期工具归类 #737 未
+// 显式钉死，倾向路径白名单，实施首验定」）：
+//   - openwiki_search / openwiki_read（常驻检索，三通道①）归**文件类**：只读、不触沙箱执行面，
+//     且模型面参数（query/paths/limit、page/sections）不含路径白名单参数名（file_path/path）
+//     → filePathVerdict 走「无路径参数 = 命中」分支，规则层确定性放行、零 LLM、审计行最瘦
+//     ——与 ls 无 path 参数同语义。检索的文件访问实际发生在控制面落地镜像（wikisearch.ts），
+//     镜像本身经 wiki 容器 getArchive 只读通道，无 agent 可控路径注入面。
+//   - 生命周期工具（openwiki_begin/submit_plan/…，三通道③未实施）：协调型工具，页写入仍走
+//     fs 写工具（已被本白名单覆盖）；其自身无路径参数。首验倾向 = 实施时同归文件类（无路径
+//     参数 → 规则层放行），通道③落地票按实际参数面复核——此处记录为该票的输入，不再悬置。
+export const FILE_TOOLS: readonly string[] = [
+  'ls',
+  'read_file',
+  'write_file',
+  'edit_file',
+  'glob',
+  'grep',
+  'openwiki_search',
+  'openwiki_read',
+]
 // 文件类工具的字面路径参数候选名（双形态并收——deepagents 升级参数改名时测试红，不静默漏判）。
 export const FILE_PATH_PARAM_NAMES: readonly string[] = ['file_path', 'path']
 
