@@ -69,6 +69,9 @@ import { turnFromCheckpointMessages } from './checkpointTurn'
 import { TurnReducer, isEmptyTurnSnapshot, type RecordTurnPayload, type TurnSnapshot } from '../../sessions/reducer'
 import { TeammateService, type TeammateSummary } from '../teammates/service'
 import { createTeammateTools } from '../teammates/tools'
+import type { FileJournalService } from '../filejournal/service'
+import { createToolCallContextMiddleware, runWithRunContext } from '../filejournal/context'
+import { IDEMPOTENCY_INGEST_PREFIX, IDEMPOTENCY_MEDIA_PREFIX } from '../filejournal/values'
 
 // recordTurn 注入缝（#778）：run 终态（completed/interrupted/aborted/failed 任一）的单 turn
 // 聚合落库回调。anchorCheckpointId = 终态 checkpoint 锚点（issue 点名列；aborted/failed 路径
@@ -168,6 +171,10 @@ export interface RunServiceDeps {
   readonly downloadNode?: { readonly middleware: AnyAgentMiddleware }
   /** 审批升级超时（默认 48h，729 附录 B；测试注入缩短） */
   readonly approvalTimeoutMs?: number
+  /** 文件 rewind 机制（#782 · D8）：JournalingBackend 打点接缝 + ingestion/D9 物化打点 +
+   *  journal checkpointId 终态回填。缺省不注 = backend 直用 DockerArchiveBackend、物化直写
+   *  （journaling 关闭——测试/降级面）。 */
+  readonly fileJournal?: FileJournalService
   /** 挂起清扫定时器间隔（毫秒；缺省 5min，0 = 不启动定时器——测试手动调 sweepSuspensions） */
   readonly sweepIntervalMs?: number
   readonly recursionLimit?: number
@@ -602,7 +609,7 @@ export class RunService {
         })
       : []
     const modelKey = actor?.modelProviderId ? `provider:${actor.modelProviderId}` : session.preferredModelJson ?? 'default'
-    const agent = this.getOrBuildGraph(cmd.sessionId, snapshot.version, policy, model, cmd.ownerId, labContainer, modelKey, tools, capabilities)
+    const agent = this.getOrBuildGraph(cmd.sessionId, snapshot.version, policy, model, cmd.ownerId, labContainer, modelKey, tools, capabilities, sandboxSessionId)
 
     // Mailbox recover has already consumed its interrupt; only a fresh resume must match the wait.
     if (cmd.kind === 'resume' && cmd.mailWaitId) {
@@ -726,13 +733,30 @@ export class RunService {
         // resume/重投安全）。校验失败 → throw → 下方 catch → run.failed（ingestion 错误，不进入
         // agent loop）。图片读字节 → 多模态 block 内联进输入（前端已降采样长边 ≤1568px，data URL
         // 满足 provider 内联限制）；文件类只物化、由常规 fs 工具自读（漏斗白名单 lab/** 覆盖）。
+        // #782：journaling 开启时物化改经 journalMaterialize（journal-first——打点先于落盘；
+        // 确定性幂等键 ingest-<attachmentId>）。沙箱惰性创建由该步触发（story 58 语义不变）。
         let imageBlocks: ContentBlock[] = []
         if (cmd.kind === 'message' && cmd.attachmentIds && cmd.attachmentIds.length > 0 && this.deps.attachments) {
+          const fj = this.deps.fileJournal
           const metas = await this.deps.attachments.ingestAttachments({
             sessionId: cmd.sessionId,
             attachmentIds: cmd.attachmentIds,
             container: labContainer,
             primitives: this.deps.primitives,
+            ...(fj
+              ? {
+                  journalWrite: async (row: { id: string; fileName: string; mimeType: string }, bytes: Buffer) => {
+                    await fj.journalMaterialize({
+                      sessionId: sandboxSessionId,
+                      container: labContainer,
+                      path: `uploads/${row.id}/${row.fileName}`,
+                      bytes,
+                      toolCallId: `${IDEMPOTENCY_INGEST_PREFIX}${row.id}`,
+                      runId: cmd.runId,
+                    })
+                  },
+                }
+              : {}),
           })
           for (const m of metas) {
             if (m.mimeType.startsWith('image/')) {
@@ -764,24 +788,40 @@ export class RunService {
                 })
               : null
 
-        const stream = await agent.streamEvents(input, {
-          ...invocation,
-          recursionLimit: this.recursionLimit,
-          signal: controller.signal,
-          callbacks: [usageHandler],
-          metadata: { ownerId: capabilities.ownerId, ownerPluginIds: [...capabilities.enabledPluginIds], officialContentVersion: capabilities.official.version },
-        })
-        for await (const raw of stream) {
-          // 工具/推理活动刷新沙箱闲置计时（#776 真 activity 源——长 run 中途不被 sweep stop）
-          this.deps.sandboxes?.touch(sandboxSessionId)
-          for (const ev of projector.feed(raw, this.clock())) {
-            turn.feed(ev)
-            this.publish(cmd.ownerId, ev, cmd)
+        // #782 run 上下文（ALS 外层）：journal 行 runId 盖印源（checkpointId 终态回填键）——
+        // 覆盖流创建与消费全程（backend 打点在流内发生）
+        await runWithRunContext(cmd.runId, async () => {
+          const stream = await agent.streamEvents(input, {
+            ...invocation,
+            recursionLimit: this.recursionLimit,
+            signal: controller.signal,
+            callbacks: [usageHandler],
+            metadata: { ownerId: capabilities.ownerId, ownerPluginIds: [...capabilities.enabledPluginIds], officialContentVersion: capabilities.official.version },
+          })
+          for await (const raw of stream) {
+            // 工具/推理活动刷新沙箱闲置计时（#776 真 activity 源——长 run 中途不被 sweep stop）
+            this.deps.sandboxes?.touch(sandboxSessionId)
+            for (const ev of projector.feed(raw, this.clock())) {
+              turn.feed(ev)
+              this.publish(cmd.ownerId, ev, cmd)
+            }
           }
-        }
+        })
         // 流正常结束：判定停在 interrupt（PoC 形态：next 非空或 tasks 带 interrupts）
         const state = await this.graphState(agent, cmd.sessionId)
         anchorCheckpointId = state.config?.configurable?.checkpoint_id ?? null
+        // #782 journal checkpointId 终态回填（completed/interrupted 有锚；aborted/failed 保持
+        // pending ''——被放弃 turn 的 op 恒逆放，保守方向）。fail-soft：回填失败不放大终态。
+        if (anchorCheckpointId !== null) {
+          try {
+            await this.deps.prisma.fileJournal.updateMany({
+              where: { sessionId: sandboxSessionId, runId: cmd.runId },
+              data: { checkpointId: anchorCheckpointId },
+            })
+          } catch (err) {
+            console.warn(`[runner] journal checkpointId 回填失败: run=${cmd.runId}: ${String(err)}`)
+          }
+        }
         const interrupted =
           (state.next?.length ?? 0) > 0 || (state.tasks?.some((t) => (t.interrupts?.length ?? 0) > 0) ?? false)
         if (interrupted) {
@@ -832,6 +872,7 @@ export class RunService {
               console.warn(`[runner] media block degraded: session=${cmd.sessionId} path=${declaredPath} reason=${reason}`)
             }
             for (const block of scan.materializable) {
+              const fj = this.deps.fileJournal
               const meta = await this.deps.attachments.materializeAgentMedia({
                 sessionId: sandboxSessionId,
                 ownerId: session.ownerId,
@@ -839,6 +880,20 @@ export class RunService {
                 mime: block.mime,
                 container: labContainer,
                 primitives: this.deps.primitives,
+                ...(fj
+                  ? {
+                      journalWrite: async (row: { attachmentId: string; fileName: string }, bytes: Buffer) => {
+                        await fj.journalMaterialize({
+                          sessionId: sandboxSessionId,
+                          container: labContainer,
+                          path: `uploads/${row.attachmentId}/${row.fileName}`,
+                          bytes,
+                          toolCallId: `${IDEMPOTENCY_MEDIA_PREFIX}${row.attachmentId}`,
+                          runId: cmd.runId,
+                        })
+                      },
+                    }
+                  : {}),
               })
               if (meta) {
                 const ref = {
@@ -1246,18 +1301,25 @@ export class RunService {
     modelKey: string,
     tools: NonNullable<LeaderAgentParams['tools']>,
     capabilities: RunCapabilities,
+    journalSessionId: string,
   ): DeepAgentLike {
     // 双根入键：docker 实例变更（沙箱 remove/recreate、#784 wiki 容器接管后改名）时缓存图
-    // 持旧 backend 会指向已删容器——backend 双根都是拓扑因子。
+    // 持旧 backend 会指向已删容器——backend 双根都是拓扑因子。（journaling backend 无新键
+    // 成分：journal sessionId 与 labContainer 一一对应——researcher-sandbox-<journalSessionId>。）
     const official = capabilities.official
     const wikiContainer = this.deps.resolveWikiContainer(ownerId)
     const key = `${threadId}|${configVersion}|${interruptPolicyKey(policy)}|${labContainer}|${wikiContainer}|${capabilities.key}|${modelKey}`
     const cached = this.graphs.get(key)
     if (cached) return cached
-    const backend = new DockerArchiveBackend(this.deps.primitives, {
-      wiki: wikiContainer,
-      lab: labContainer,
-    })
+    const backend = this.deps.fileJournal
+      ? this.deps.fileJournal.backendFor({
+          sessionId: journalSessionId,
+          targets: { wiki: wikiContainer, lab: labContainer },
+        })
+      : new DockerArchiveBackend(this.deps.primitives, {
+          wiki: wikiContainer,
+          lab: labContainer,
+        })
     const agent = buildLeaderAgent({
       model,
       backend,
@@ -1266,12 +1328,14 @@ export class RunService {
       official,
       interruptPolicy: policy,
       tools,
-      // 中间件（运行期行为非拓扑因子——不入缓存键）：#783 审批漏斗 + #780 下载校验节点
-      //（file 写类工具成功后物化产物 + 下载引用进 tool 输出；跨 run 状态由各中间件
-      // per-thread 槽管理，同参数必同拓扑的纯函数约束不受影响）。
-      ...(this.deps.approvals || this.deps.downloadNode || this.deps.teammates
+      // 中间件（运行期行为非拓扑因子——不入缓存键）：#782 工具调用上下文盖印（journal 幂等键
+      // ALS 源，链首位——journaling 开启恒注入）+ #783 审批漏斗 + #780 下载校验节点（file 写类
+      // 工具成功后物化产物 + 下载引用进 tool 输出；跨 run 状态由各中间件 per-thread 槽管理，
+      // 同参数必同拓扑的纯函数约束不受影响）。
+      ...(this.deps.approvals || this.deps.downloadNode || this.deps.teammates || this.deps.fileJournal
         ? {
             middleware: [
+              createToolCallContextMiddleware(),
               ...(this.deps.teammates ? [teammateDelegation] : []),
               ...(this.deps.approvals ? [this.deps.approvals.middleware] : []),
               ...(this.deps.downloadNode ? [this.deps.downloadNode.middleware] : []),
@@ -1341,6 +1405,27 @@ export class RunService {
     if (!parent) return
     for (const id of ids) {
       this.stopTeammate({ sessionId, ownerId: parent.ownerId }, await teammates.get(sessionId, id))
+    }
+  }
+
+  // C1（#782 · #766）：文件 rewind 的 teammate 面——跨派生点作废（复用 rewind 作废链）+
+  // 未跨派生点的存活 teammate 收信箱系统消息「文件状态已回退至锚点」（与 US-25 级联作废 +
+  // 信箱机制同构；sendMail 内部经 wakeHandler 唤醒 parked thread）。对话面 rewind（scope=chat，
+  // 文件未动）走 teammatesForRewind 纯作废面。
+  async teammatesOnFileRewind(sessionId: string, checkpointId: string): Promise<void> {
+    await this.teammatesForRewind(sessionId, checkpointId)
+    const teammates = this.deps.teammates
+    if (!teammates) return
+    const survivors = (await teammates.list(sessionId)).filter((t) => t.status !== 'archived')
+    const content = `文件状态已回退至锚点 ${checkpointId.slice(0, 12)}（/lab 已逆放恢复，重放期间写入已排队）`
+    for (const peer of survivors) {
+      await teammates.sendMail({
+        parentSessionId: sessionId,
+        senderTeammateId: null,
+        recipientTeammateId: peer.id,
+        kind: 'system',
+        content,
+      })
     }
   }
 

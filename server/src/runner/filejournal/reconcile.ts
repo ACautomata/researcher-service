@@ -1,0 +1,116 @@
+// roll-forward reconcile（#782 · #766 D8「启动/restore 双路」）：
+//   启动路（reconcileOnBoot）：进程重启后全表扫 applied=false 行 + 水位 session 续放残集
+//   ——沙箱容器不存在的 session 跳过（启动期不批量 ensure 容器；该 session 的 rewind/run
+//   前置 restore 路兜底），计数上行（静默跳过不可接受——审计面）。
+//   restore 路（reconcileSession）：rewind 逆放前对目标 session 调用（容器 ensure 由调用方
+//   决定——sessions 域 rewind 面容器恒在或惰性创建语义同 #776 run 前 ensure）。
+//
+// roll-forward：applied=false 行按 seq 升序重放 apply（journal-first 管线的②③崩溃残留）——
+//   write/edit：afterSha blob 覆盖写（失联 → 行按「文件现状即真相」置位 + missing 计数）
+//   delete：幂等 rm
+// 续放（崩溃的 rewind 逆放）：session.fileJournalAnchorSeq 非 null → 残集 = seq > 水位 ∧
+//   fileRevertedAt=null → executeRevert（判定式见 replay.ts——keepMark 已在 rewind 事务内
+//   打标，残集恒为 toRevert 真子集，逆放幂等）。
+
+import type { PrismaClient } from '../../generated/prisma/client'
+import { executeRevert, parentDirOf, type RevertIo } from './replay'
+
+export interface ReconcileOutcome {
+  readonly rolledForward: number
+  readonly rolledMissing: number
+  readonly resumedReverted: number
+  readonly resumedMissing: number
+  readonly containerMissing: boolean
+}
+
+export interface ReconcilerDeps {
+  readonly prisma: PrismaClient
+  readonly io: RevertIo
+  readonly getBlob: (container: string, sha256: string) => Promise<Buffer | null>
+  readonly containerOf: (sessionId: string) => Promise<string | null>
+}
+
+export class Reconciler {
+  constructor(private readonly deps: ReconcilerDeps) {}
+
+  // 单 session reconcile（restore 路；容器缺失返回 containerMissing 标志）。
+  async reconcileSession(sessionId: string): Promise<ReconcileOutcome> {
+    const container = await this.deps.containerOf(sessionId)
+    if (container === null) {
+      return { rolledForward: 0, rolledMissing: 0, resumedReverted: 0, resumedMissing: 0, containerMissing: true }
+    }
+    const rolled = await this.rollForward(sessionId, container)
+    const resumed = await this.resumeRevert(sessionId, container)
+    return { ...rolled, ...resumed, containerMissing: false }
+  }
+
+  // 启动路：全表 applied=false 按 session 分组 + 水位 session 续放。容器缺失跳过并计数。
+  async reconcileOnBoot(): Promise<Map<string, ReconcileOutcome>> {
+    const sessions = await this.deps.prisma.session.findMany({
+      where: {
+        OR: [{ fileJournalAnchorSeq: { not: null } }, { fileJournal: { some: { applied: false } } }],
+      },
+      select: { id: true },
+    })
+    const out = new Map<string, ReconcileOutcome>()
+    for (const s of sessions) {
+      try {
+        out.set(s.id, await this.reconcileSession(s.id))
+      } catch (err) {
+        // 单 session 基建故障不中断全批（daemon 抖动等）；console.warn 留痕——静默不可接受
+        // eslint-disable-next-line no-console
+        console.warn(`[filejournal] boot reconcile failed: session=${s.id}: ${String(err)}`)
+      }
+    }
+    return out
+  }
+
+  private async rollForward(sessionId: string, container: string): Promise<{ rolledForward: number; rolledMissing: number }> {
+    const pending = await this.deps.prisma.fileJournal.findMany({
+      where: { sessionId, applied: false },
+      orderBy: { seq: 'asc' },
+    })
+    let rolledForward = 0
+    let rolledMissing = 0
+    for (const row of pending) {
+      let ok = true
+      if (row.op === 'delete') {
+        await this.deps.io.removeFile(container, row.path)
+      } else if (row.afterSha256 !== null) {
+        const tar = await this.deps.getBlob(container, row.afterSha256)
+        if (tar === null) {
+          ok = false // blob 失联：文件现状即真相（重放无法复现——审计面计数）
+          rolledMissing += 1
+        } else {
+          await this.deps.io.putTar(container, parentDirOf(row.path), tar)
+        }
+      } else {
+        ok = false // write/edit 无 afterSha = 行损坏（防御面）
+        rolledMissing += 1
+      }
+      await this.deps.prisma.fileJournal.updateMany({
+        where: { sessionId, seq: row.seq },
+        data: { applied: true },
+      })
+      if (ok) rolledForward += 1
+    }
+    return { rolledForward, rolledMissing }
+  }
+
+  private async resumeRevert(sessionId: string, container: string): Promise<{ resumedReverted: number; resumedMissing: number }> {
+    const session = await this.deps.prisma.session.findUniqueOrThrow({
+      where: { id: sessionId },
+      select: { fileJournalAnchorSeq: true },
+    })
+    if (session.fileJournalAnchorSeq === null) {
+      return { resumedReverted: 0, resumedMissing: 0 }
+    }
+    const residual = await this.deps.prisma.fileJournal.findMany({
+      where: { sessionId, seq: { gt: session.fileJournalAnchorSeq }, fileRevertedAt: null },
+      orderBy: { seq: 'desc' },
+    })
+    if (residual.length === 0) return { resumedReverted: 0, resumedMissing: 0 }
+    const outcome = await executeRevert(sessionId, container, residual, this.deps.io)
+    return { resumedReverted: outcome.reverted, resumedMissing: outcome.skippedMissing }
+  }
+}

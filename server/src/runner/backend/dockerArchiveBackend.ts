@@ -98,12 +98,13 @@ export class DockerArchiveBackend implements SandboxBackendProtocolV2 {
   }
 
   // ---- 内部：单文件读取守卫链（read/readRaw/readFullText 三处共用；评审 m3-m9 轮 Standards 收拢） ----
+  //（protected：#782 JournalingBackend 子类打点管线复用 pre-image 读取面）
 
   // null → not found；directory → is a directory；symlink → 显式拒绝；'other'（fifo 等）
   // → not found（镜像上游 stat !isFile——评审残留：旧代码落入 content 缺失误报超限）；
   // file 但 content 缺失 → exceeds read limit（>32MiB，评审 m7）。评审 m9(1)：目录文案
   // 「is a directory」系知情分歧——上游报 not found（stat !isFile），此处信息量更高。
-  private async guardedFile(routed: RoutedPath, filePath: string): Promise<{ tree: ArchiveTree; buf: Buffer } | { error: string }> {
+  protected async guardedFile(routed: RoutedPath, filePath: string): Promise<{ tree: ArchiveTree; buf: Buffer } | { error: string }> {
     const tree = await this.archiveRead(routed.container, routed.absPath, true)
     if (tree === null) return { error: `File '${filePath}' not found` }
     if (tree.root.type === 'directory') return { error: `is a directory: ${filePath}` }
@@ -116,13 +117,14 @@ export class DockerArchiveBackend implements SandboxBackendProtocolV2 {
 
   // ---- 内部：read 全量文本（edit 合成用；守卫链见 guardedFile；分页走 paginateReadLines） ----
 
-  private async readFullText(routed: RoutedPath, filePath: string): Promise<{ text: string } | { error: string }> {
+  protected async readFullText(routed: RoutedPath, filePath: string): Promise<{ text: string } | { error: string }> {
     const g = await this.guardedFile(routed, filePath)
     if ('error' in g) return g
     return { text: g.buf.toString('utf8') }
   }
 
   // ---- 内部：mkdir -p 父目录 + putArchive 单文件落盘（write/edit 共用通道） ----
+  //（protected：#782 JournalingBackend 子类打点管线复用 apply 通道——幂等重放同路径）
 
   // edit 必须走本通道而非 write()：write 对二进制 mime 做 base64 解码，而 edit 读侧按
   // utf8 全文本（readFullText）——错名二进制扩展名（.png 实为文本）经 write() 写回会把
@@ -130,7 +132,7 @@ export class DockerArchiveBackend implements SandboxBackendProtocolV2 {
   // symlink 语义（评审 m8 跟进探针亲验）：上游 fs.writeFile 穿透 symlink 写目标；本通道
   // 经 daemon untar 对链目的端是「替换链本身」（真 daemon 实测：目标字节不变、链变常规
   // 文件）——不穿透故不会越界写链指目标，安全面不劣于上游。
-  private async putBuffer(routed: RoutedPath, buf: Buffer): Promise<void> {
+  protected async putBuffer(routed: RoutedPath, buf: Buffer): Promise<void> {
     const abs = routed.absPath
     const dir = abs.slice(0, abs.lastIndexOf('/')) || '/'
     const basename = abs.split('/').pop() ?? 'file'

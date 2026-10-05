@@ -7,6 +7,7 @@
 import type { PrismaClient } from '../generated/prisma/client'
 import type { StreamHub } from '../events/hub'
 import type { RunServiceDeps } from './runtime/runService'
+import Docker from 'dockerode'
 import { PrismaCheckpointSaver } from './persistence/prismaCheckpointSaver'
 import { ProviderRegistry } from './providerRegistry'
 import { ConcurrencyGate } from './concurrency'
@@ -24,10 +25,13 @@ import { ToolCallJudgeClient } from './approval/judge'
 import { ApprovalFunnel, type ApprovalFunnelDeps } from './approval/funnel'
 import { JUDGE_POLICY_MARKDOWN } from './approval/values'
 import { TeammateService } from './teammates/service'
+import { FileJournalService } from './filejournal/service'
 
 export interface RunnerAssembly {
   readonly service: RunService
   readonly queue: BullMqRunQueue
+  /** 文件 rewind 机制（#782）：SessionService fileRewind 面与启动 reconcile 的共用单例 */
+  readonly fileJournal: FileJournalService
   close: () => Promise<void>
 }
 
@@ -45,6 +49,8 @@ export function assembleRunner(opts: {
   judge?: NonNullable<ApprovalFunnelDeps['judge']>
   /** #780 附件 ingestion（片 2：run 首步物化到沙箱 + 图片内联；server.ts 注入 AttachmentsService） */
   attachments?: NonNullable<RunServiceDeps['attachments']>
+  /** #782 沙箱 ensure 解析（rewindFiles 前置；server.ts 注入 sandboxes.lifecycle.ensure） */
+  ensureSandbox?: (sessionId: string) => Promise<{ containerId: string }>
 }): RunnerAssembly {
   // tracing 显式关（启动期第一路；RunService 构造期第二路兜底）
   disableLangsmithTracing()
@@ -66,6 +72,39 @@ export function assembleRunner(opts: {
   })
   const primitives = new DockerPrimitives()
   const teammates = new TeammateService(opts.prisma)
+
+  // 文件 rewind 机制（#782 · D8）：JournalingBackend 打点接缝 + ingestion/D9 物化打点 +
+  // rewind 逆放 + reconcile。journal sessionId 归属 parent（teammate 写共享 session-global
+  // 日志）——containerOf 面按 session id 直呼（teammate 调用方传 parent id）。
+  // 探在语义（null = 容器缺失/未运行）：reconcileOnBoot 的「容器缺失跳过」契约前提
+  // （inspect 只读，启动期不批量 ensure——restore 路兜底）。
+  const docker: Docker = new Docker()
+  const fileJournal = new FileJournalService({
+    prisma: opts.prisma,
+    primitives,
+    quotaBytes: config.runner.fileJournal.quotaBytes,
+    depthLimit: config.runner.fileJournal.depthLimit,
+    fenceTimeoutMs: config.runner.fileJournal.fenceTimeoutMs,
+    containerOf: async (sessionId) => {
+      const name = `${SANDBOX_CONTAINER_PREFIX}${sessionId}`
+      try {
+        const info = await docker.getContainer(name).inspect()
+        return info.State.Running ? name : null
+      } catch {
+        return null
+      }
+    },
+    ...(opts.ensureSandbox
+      ? { ensureContainerOf: async (sessionId) => (await opts.ensureSandbox!(sessionId)).containerId }
+      : {}),
+    checkpointParentOf: async (sessionId) => {
+      const rows = await opts.prisma.checkpoint.findMany({
+        where: { threadId: sessionId, archivedAt: null },
+        select: { checkpointId: true, parentCheckpointId: true },
+      })
+      return new Map(rows.map((r) => [r.checkpointId, r.parentCheckpointId]))
+    },
+  })
 
   // #780 下载校验节点（片 3）：file 写类工具（write/edit）成功后校验声明路径 → 物化
   // Attachment 行 + 下载引用追加进 tool 输出（tool.end details 承载）；失败 → 错误回喂
@@ -131,6 +170,7 @@ export function assembleRunner(opts: {
     approvalTimeoutMs: config.runner.approvalTimeoutMs,
     attachments: opts.attachments,
     downloadNode,
+    fileJournal,
   })
   void service.recoverSuspensions() // 重启恢复：超时未落定的审批升级 → suspended（异步，不挂启动）
 
@@ -148,6 +188,7 @@ export function assembleRunner(opts: {
   return {
     service,
     queue,
+    fileJournal,
     close: async () => {
       service.dispose()
       await queue.close()

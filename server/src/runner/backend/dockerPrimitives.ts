@@ -44,7 +44,7 @@ export class DockerPrimitives implements SandboxFilePrimitives {
     const argv = timeoutMs !== null ? ['timeout', '-s', 'KILL', String(Math.ceil(timeoutMs / 1000)), ...cmd] : cmd
     const t0 = performance.now()
     const c = this.client().getContainer(container)
-    const exec = await c.exec({ Cmd: argv, AttachStdout: true, AttachStderr: true })
+    const exec = await c.exec({ Cmd: argv, AttachStdout: true, AttachStderr: true, ...(opts.user !== undefined ? { User: opts.user } : {}) })
     const stream = (await exec.start({ Detach: false })) as unknown as NodeJS.ReadableStream & {
       on(ev: 'end', cb: () => void): void
     }

@@ -204,10 +204,16 @@ export const sessionResumeSchema = z.object({
 })
 
 // ---------------------------------------------------------------------------
-// rewind / fork（#781 · #747 story 16/18）。锚点一律以消息行表达（产品面 = 选历史消息）；
-// checkpoint 解析在 service（resolveRewindAnchor）。branch-switch 机制 #770 已取消。
+// rewind / fork（#781 · #747 story 16/18 + #782 三态）。锚点一律以消息行表达（产品面 =
+// 选历史消息）；checkpoint 解析在 service（resolveRewindAnchor）。branch-switch 机制 #770 已取消。
+// scope（#747 UX 恢复菜单三态）：all = 对话+文件同回（缺省）；chat = 只回对话；files = 只回文件。
 // ---------------------------------------------------------------------------
 export const sessionRewindSchema = z.object({
+  messageId: z.string().min(1, 'messageId 不能为空'),
+  scope: z.enum(['all', 'chat', 'files']).optional(),
+})
+
+export const sessionRewindPreviewSchema = z.object({
   messageId: z.string().min(1, 'messageId 不能为空'),
 })
 

@@ -1,0 +1,95 @@
+// rewind 预览（#782 · D8）：逆放集摘要 + exec 跨越清单——「exec 显式降级（shell 副作用
+// 不入日志；rewind 预览列出跨越 exec 调用清单——复用轨迹/审计数据零新增存储；不做全树
+// diff）」。exec 清单源 = 锚后 assistant 行 attachmentsJson 的 tools 聚合（ToolLine——
+// TurnReducer 落行面，零新增存储）；锚后判定 = anchorCheckpointId ∉ chain(anchor)
+//（挂靠语义与 rewind 归档同源——sessions/rewind.ts visibleRowIds 的机制面取反）。
+
+import type { PrismaClient } from '../../generated/prisma/client'
+import { PREVIEW_PATH_SAMPLE_MAX } from './values'
+
+export interface ExecCrossed {
+  readonly toolCallId: string
+  readonly input: string
+}
+
+export interface RewindPreview {
+  readonly anchor: string
+  readonly revertOps: number
+  readonly pathSample: string[]
+  readonly pathTotal: number
+  readonly execCrossed: ExecCrossed[]
+}
+
+// 纯逻辑：tools 聚合 → exec 清单（S3 直锁；input 截 ≤400 字符预览面）。
+export function extractExecCrossed(tools: unknown): ExecCrossed[] {
+  if (!Array.isArray(tools)) return []
+  const out: ExecCrossed[] = []
+  for (const t of tools) {
+    if (typeof t !== 'object' || t === null) continue
+    const line = t as { name?: unknown; toolCallId?: unknown; input?: unknown }
+    if (line.name !== 'execute') continue
+    out.push({
+      toolCallId: typeof line.toolCallId === 'string' ? line.toolCallId : '',
+      input: typeof line.input === 'string' ? line.input.slice(0, 400) : '',
+    })
+  }
+  return out
+}
+
+export async function buildRewindPreview(
+  prisma: PrismaClient,
+  sessionId: string,
+  anchor: string,
+  chain: ReadonlySet<string>,
+): Promise<RewindPreview> {
+  const rows = await prisma.fileJournal.findMany({
+    where: { sessionId, fileRevertedAt: null },
+    select: { seq: true, path: true, checkpointId: true },
+    orderBy: { seq: 'desc' },
+  })
+  const toRevert = rows.filter((r) => !chain.has(r.checkpointId))
+  const paths = [...new Set(toRevert.map((r) => r.path))]
+
+  // 锚后 assistant 行（未归档、锚 ∉ chain）→ tools 聚合 → exec 清单；外加存活跨派生点
+  // teammate threads（teammate 共享 /lab、exec 副作用同不可逆放——派生点 ∉ chain = 锚后
+  // 派生，其全部 exec 在锚后；锚前派生的副作用在锚前不入清单）。
+  const messages = await prisma.sessionMessage.findMany({
+    where: { sessionId, role: 'assistant', archivedAt: null },
+    select: { anchorCheckpointId: true, attachmentsJson: true },
+  })
+  const execCrossed: ExecCrossed[] = []
+  const harvest = (rows: Array<{ attachmentsJson: string }>): void => {
+    for (const m of rows) {
+      try {
+        const agg = JSON.parse(m.attachmentsJson) as { tools?: unknown }
+        execCrossed.push(...extractExecCrossed(agg.tools))
+      } catch {
+        // 坏 JSON 不炸预览（serializeAttachments 恒产出合法 JSON——防御面）
+      }
+    }
+  }
+  harvest(messages.filter((m) => m.anchorCheckpointId !== null && !chain.has(m.anchorCheckpointId)))
+  const teammates = await prisma.teammate.findMany({
+    where: { parentSessionId: sessionId, archivedAt: null },
+    select: { threadId: true, spawnedAtCheckpointId: true },
+  })
+  const crossedThreads = teammates
+    .filter((t) => t.spawnedAtCheckpointId !== null && !chain.has(t.spawnedAtCheckpointId))
+    .map((t) => t.threadId)
+  if (crossedThreads.length > 0) {
+    harvest(
+      await prisma.sessionMessage.findMany({
+        where: { sessionId: { in: crossedThreads }, role: 'assistant', archivedAt: null },
+        select: { attachmentsJson: true },
+      }),
+    )
+  }
+
+  return {
+    anchor,
+    revertOps: toRevert.length,
+    pathSample: paths.slice(0, PREVIEW_PATH_SAMPLE_MAX),
+    pathTotal: paths.length,
+    execCrossed,
+  }
+}
