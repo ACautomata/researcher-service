@@ -1,6 +1,8 @@
 // 文件 rewind 机制常量（#782 · #766 D8）：op 值集、attic 容器内路径、幂等键前缀。
 // 配额/深度/围栏超时的可调值走 config（FILE_JOURNAL_* env），此处只放机制常量。
 
+import type { FileJournal } from '../../generated/prisma/client'
+
 // journal op 值集（V1：rename 不在工具面——schema.prisma FileJournal.op 注释锁定）。
 export const JOURNAL_OPS = ['write', 'edit', 'delete'] as const
 export type JournalOp = (typeof JOURNAL_OPS)[number]
@@ -33,3 +35,15 @@ export const JOURNAL_AUDIT_TRACE_PREFIX = 'file-journal'
 
 // 逆放摘要给前端的路径采样上限（不做全树 diff——D8；仅摘要面）。
 export const PREVIEW_PATH_SAMPLE_MAX = 20
+
+// journal 行的 attic sha 引用（before/after/墓碑三列——GC refcount 与 replay lease 共用
+// 收集面；引用列变更单点改）。
+export function shaRefsOf(
+  row: Pick<FileJournal, 'beforeSha256' | 'afterSha256' | 'tombstoneKey'>,
+): string[] {
+  const out: string[] = []
+  if (row.beforeSha256 !== null) out.push(row.beforeSha256)
+  if (row.afterSha256 !== null) out.push(row.afterSha256)
+  if (row.tombstoneKey !== null) out.push(row.tombstoneKey)
+  return out
+}

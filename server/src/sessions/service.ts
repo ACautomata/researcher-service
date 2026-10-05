@@ -35,7 +35,7 @@ import {
 import { TITLE_AUTO_MAX, TITLE_MAX } from './values'
 import type { TeammateStatus } from '../runner/teammates/service'
 import type { ApprovalInterruptPayload } from '../runner/approval/funnel'
-import type { RewindPreview as FileRewindPreview } from '../runner/filejournal/preview'
+import { emptyRewindPreview, type RewindPreview as FileRewindPreview } from '../runner/filejournal/preview'
 
 // 会话摘要（session.created/updated 载荷 + 列表行 + 创建/PATCH 返回——同一形状）。
 export interface SessionSummary {
@@ -740,15 +740,13 @@ export class SessionService {
     if (anchor === null) {
       throw fail(CODE.VALIDATION_FAILED, '该消息不可作为回退锚点（无更早的可回退 state）')
     }
-    const { anchor: _anchor, ...preview } = this.deps.fileRewind
+    return this.deps.fileRewind
       ? await this.deps.fileRewind.preview({
           sessionId,
           anchor,
           caller: { userId: user.id, username: user.username },
         })
-      : { anchor, revertOps: 0, pathSample: [], pathTotal: 0, execCrossed: [] }
-    void _anchor
-    return { anchor, ...preview }
+      : emptyRewindPreview(anchor)
   }
 
   // ---- fork（story 18/20 · #768 D7 修订）：唯一复制原语。新 Session 行（parentSessionKey +

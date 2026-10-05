@@ -9,6 +9,10 @@
 //   命中 applied=true → 前次执行已完整落账，仅 apply（重放覆盖写）不重复打点不重读 pre
 //   命中 applied=false → 前次打点后崩溃，本次执行补全——apply 后置位已有行
 //   未命中 → 正常管线（tx insert 撞唯一 = 防御面兜底同命中处置——围栏单飞下理论不可达）
+// 可达窗口（backend 前置校验先于本查询——edit 的字符串替换 / delete 的 pre 快照）：
+// write 全程可达；edit/delete 在 applied 前窗口可达（apply 未执行 → 文件处旧态 → 前置
+// 校验通过 → 命中补全）；applied 后重放 edit/delete 在前置校验即以 error 回 agent（文件
+// 已处新态、oldString/路径失配——agent 自纠，无重复行）。
 // agent 工具调用键 = 真实 tool_call_id（ALS，context.ts）；runner 物化 = 确定性键
 //（ingest-<attachmentId> / media-<attachmentId>）；ALS 缺席降级随机 UUID（无重放去重，
 // 管线完整性与正确性不受损）。

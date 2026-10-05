@@ -9,6 +9,7 @@
 
 import type { PrismaClient } from '../../generated/prisma/client'
 import type { AtticStore } from './attic'
+import { shaRefsOf } from './values'
 
 export interface GcOutcome {
   readonly scanned: number
@@ -44,11 +45,7 @@ export class AtticGc {
       select: { beforeSha256: true, afterSha256: true, tombstoneKey: true },
     })
     const out = new Set<string>()
-    for (const r of rows) {
-      if (r.beforeSha256 !== null) out.add(r.beforeSha256)
-      if (r.afterSha256 !== null) out.add(r.afterSha256)
-      if (r.tombstoneKey !== null) out.add(r.tombstoneKey)
-    }
+    for (const r of rows) for (const sha of shaRefsOf(r)) out.add(sha)
     return out
   }
 

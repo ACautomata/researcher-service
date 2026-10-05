@@ -83,6 +83,7 @@ describe('FileJournalService（#782）', () => {
     await prisma.fileJournal.deleteMany({})
     await prisma.sessionMessage.deleteMany({})
     await prisma.session.deleteMany({ where: { id: SESSION } })
+    await prisma.textTraceLog.deleteMany({})
     fs.trees.get(CONTAINER)?.clear()
   })
 
@@ -230,6 +231,22 @@ describe('FileJournalService（#782）', () => {
     expect(labSnapshot(fs)).toEqual({ 'keep.txt': 'before', 'late.txt': 'after' })
   })
 
+  it('preview 判定式与逆放同形：水位已越过的行不进 revertOps', async () => {
+    await seedSession()
+    const b = backend()
+    await b.write('/lab/p1.txt', '1')
+    await b.write('/lab/p2.txt', '2')
+    await prisma.fileJournal.update({ where: { sessionId_seq: { sessionId: SESSION, seq: 1 } }, data: { checkpointId: 'ckB' } })
+    await prisma.fileJournal.update({ where: { sessionId_seq: { sessionId: SESSION, seq: 2 } }, data: { checkpointId: 'ckC' } })
+    // scope=chat 型水位推进：seq1 未处置但被永久越过
+    await prisma.session.update({ where: { id: SESSION }, data: { fileJournalAnchorSeq: 1 } })
+
+    const out = await svc.preview({ sessionId: SESSION, anchor: 'root' })
+    expect(out.revertOps).toBe(1) // 仅 seq2（ckC ∉ chain(root) 且 > 水位）；seq1 被水位排除
+    expect(out.pathSample).toEqual(['p2.txt'])
+    expect(out.pathTotal).toBe(1)
+  })
+
   it('C1 多 thread：teammate 行（checkpointId 不在 leader chain）恒逆放；降级路径有测试', async () => {
     await seedSession()
     const b = backend()
@@ -295,6 +312,10 @@ describe('FileJournalService（#782）', () => {
     expect(result.degraded).toBe(false)
     const row = await prisma.fileJournal.findFirstOrThrow({ where: { sessionId: SESSION } })
     expect(row.applied).toBe(true)
+    // 观测面：roll-forward 活动计数入审计域（D8——静默失败不可接受）
+    const auditRow = await prisma.textTraceLog.findFirstOrThrow({ where: { sessionKey: SESSION } })
+    expect(auditRow.inputText).toContain('"kind":"reconcile"')
+    expect(auditRow.inputText).toContain('"rolledMissing":1')
   })
 
   it('续放：逆放中断残留（水位已推进、部分行未处置）在下次 rewindFiles 续放完成', async () => {

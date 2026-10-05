@@ -54,18 +54,17 @@ export class JournalingBackend extends DockerArchiveBackend implements BackendPr
       // pre 探测（文件级；不存在/目录/超限 → null = 新建语义）
       const g = await this.guardedFile(routed, filePath)
       const preTar = 'tree' in g ? filePreTar(basename, g.buf) : null
-      const inner = this
       await this.fenced('agent-write', () =>
-        inner.j.writer.write({
-          sessionId: inner.j.sessionId,
+        this.j.writer.write({
+          sessionId: this.j.sessionId,
           container: routed.container,
           path: rel,
           op: 'write',
           readPreImage: async () => preTar,
           afterBytes: afterTar,
-          apply: () => inner.putBuffer(routed, buf),
-          toolCallId: inner.toolCallId(),
-          runId: inner.runId(),
+          apply: () => this.putBuffer(routed, buf),
+          toolCallId: this.toolCallId(),
+          runId: this.runId(),
         }),
       )
       return { path: routed.absPath, filesUpdate: null }
@@ -89,18 +88,17 @@ export class JournalingBackend extends DockerArchiveBackend implements BackendPr
       const basename = routed.absPath.split('/').pop() ?? 'file'
       const afterTar = filePreTar(basename, Buffer.from(replaced[0], 'utf8'))
       const preTar = filePreTar(basename, Buffer.from(full.text, 'utf8'))
-      const inner = this
       await this.fenced('agent-edit', () =>
-        inner.j.writer.write({
-          sessionId: inner.j.sessionId,
+        this.j.writer.write({
+          sessionId: this.j.sessionId,
           container: routed.container,
           path: rel,
           op: 'edit',
           readPreImage: async () => preTar,
           afterBytes: afterTar,
-          apply: () => inner.putBuffer(routed, Buffer.from(replaced[0], 'utf8')),
-          toolCallId: inner.toolCallId(),
-          runId: inner.runId(),
+          apply: () => this.putBuffer(routed, Buffer.from(replaced[0], 'utf8')),
+          toolCallId: this.toolCallId(),
+          runId: this.runId(),
         }),
       )
       return { path: routed.absPath, filesUpdate: null, occurrences: replaced[1] }
@@ -121,18 +119,17 @@ export class JournalingBackend extends DockerArchiveBackend implements BackendPr
       })
       if (preTar === null) return super.delete(filePath)
       const rel = relPathOf(routed)
-      const inner = this
       await this.fenced('agent-delete', () =>
-        inner.j.writer.write({
-          sessionId: inner.j.sessionId,
+        this.j.writer.write({
+          sessionId: this.j.sessionId,
           container: routed.container,
           path: rel,
           op: 'delete',
           readPreImage: async () => preTar,
           afterBytes: null,
-          apply: () => inner.deleteForApply(filePath),
-          toolCallId: inner.toolCallId(),
-          runId: inner.runId(),
+          apply: () => this.deleteForApply(filePath),
+          toolCallId: this.toolCallId(),
+          runId: this.runId(),
         }),
       )
       return { path: routed.absPath, filesUpdate: null }

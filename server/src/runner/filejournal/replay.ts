@@ -22,6 +22,7 @@
 // 打标（「对话照回退、文件保持现状」——残集空，续放不再拾起）。
 
 import type { FileJournal } from '../../generated/prisma/client'
+import { shaRefsOf } from './values'
 
 // 逆放计划（纯逻辑判定输出；S3 直锁）。
 export interface RevertPlan {
@@ -44,7 +45,6 @@ export function planRevert(
   // 水位面：seq ≤ 旧水位的行已处置或被「保持现状」决策永久越过（scope=chat）——恒排除
   const pending = rows.filter((r) => r.fileRevertedAt === null && (currentWatermark === null || r.seq > currentWatermark))
   const inChain = pending.filter((r) => chain.has(r.checkpointId))
-  const keepMark = inChain
   const toRevert = pending
     .filter((r) => !chain.has(r.checkpointId))
     .sort((a, b) => b.seq - a.seq)
@@ -52,7 +52,7 @@ export function planRevert(
   const chainMax = inChain.length > 0 ? Math.max(...inChain.map((r) => r.seq)) : 0
   const watermark = currentWatermark !== null ? Math.max(currentWatermark, chainMax) : chainMax
   const degraded = toRevert.length > depthLimit
-  return { keepMark, toRevert, watermark, degraded }
+  return { keepMark: inChain, toRevert, watermark, degraded }
 }
 
 // 单行逆操作（纯函数；S3 直锁）。
@@ -67,11 +67,7 @@ export function revertActionOf(row: Pick<FileJournal, 'op' | 'beforeSha256'>): R
 // replay lease 的 sha 集（逆放行全部引用——GC 排除面）。
 export function leaseShasOf(rows: readonly FileJournal[]): Set<string> {
   const out = new Set<string>()
-  for (const r of rows) {
-    if (r.beforeSha256 !== null) out.add(r.beforeSha256)
-    if (r.afterSha256 !== null) out.add(r.afterSha256)
-    if (r.tombstoneKey !== null) out.add(r.tombstoneKey)
-  }
+  for (const r of rows) for (const sha of shaRefsOf(r)) out.add(sha)
   return out
 }
 

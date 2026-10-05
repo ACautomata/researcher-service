@@ -42,12 +42,20 @@ export async function buildRewindPreview(
   anchor: string,
   chain: ReadonlySet<string>,
 ): Promise<RewindPreview> {
+  // 判定式与 planRevert 同形（水位 + 未处置 + ∉ chain）——确认门数字 = 实际逆放集
+  const session = await prisma.session.findUnique({
+    where: { id: sessionId },
+    select: { fileJournalAnchorSeq: true },
+  })
+  const watermark = session?.fileJournalAnchorSeq ?? null
   const rows = await prisma.fileJournal.findMany({
     where: { sessionId, fileRevertedAt: null },
     select: { seq: true, path: true, checkpointId: true },
     orderBy: { seq: 'desc' },
   })
-  const toRevert = rows.filter((r) => !chain.has(r.checkpointId))
+  const toRevert = rows.filter(
+    (r) => (watermark === null || r.seq > watermark) && !chain.has(r.checkpointId),
+  )
   const paths = [...new Set(toRevert.map((r) => r.path))]
 
   // 锚后 assistant 行（未归档、锚 ∉ chain）→ tools 聚合 → exec 清单；外加存活跨派生点
@@ -92,4 +100,9 @@ export async function buildRewindPreview(
     pathTotal: paths.length,
     execCrossed,
   }
+}
+
+// 缺省摘要（filejournal 服务未装配的降级面——RewindPreview 形状单一来源）。
+export function emptyRewindPreview(anchor: string): RewindPreview {
+  return { anchor, revertOps: 0, pathSample: [], pathTotal: 0, execCrossed: [] }
 }
