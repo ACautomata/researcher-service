@@ -54,6 +54,9 @@ import type { CatalogEvent } from '../../events/logic'
 import type { StreamHub } from '../../events/hub'
 import type { SandboxFilePrimitives } from '../backend/primitives'
 import { DockerArchiveBackend } from '../backend/dockerArchiveBackend'
+import { WriteLockRegistry, DEFAULT_WRITE_LOCK_TIMEOUT_MS } from '../writelock/registry'
+import { withWriteLocks, withLockedPuts, type WriteLockContext } from '../writelock/lockedBackend'
+import { OverwriteAuditor, createPrismaJournalWriterReader, createPrismaOverwriteAuditSink } from '../writelock/overwriteAudit'
 import type { PrismaCheckpointSaver } from '../persistence/prismaCheckpointSaver'
 import type { ProviderRegistry, ProviderConfigSnapshot } from '../providerRegistry'
 import type { ConcurrencyGate } from '../concurrency'
@@ -168,6 +171,9 @@ export interface RunServiceDeps {
   readonly downloadNode?: { readonly middleware: AnyAgentMiddleware }
   /** 审批升级超时（默认 48h，729 附录 B；测试注入缩短） */
   readonly approvalTimeoutMs?: number
+  /** #785 per-path 写锁注册表（缺省进程内新建——测试无注入也全量生效；生产由装配层注入
+   *  config.runner.writeLockTimeoutMs 形态）。有界等待默认见 DEFAULT_WRITE_LOCK_TIMEOUT_MS。 */
+  readonly writeLocks?: WriteLockRegistry
   /** 挂起清扫定时器间隔（毫秒；缺省 5min，0 = 不启动定时器——测试手动调 sweepSuspensions） */
   readonly sweepIntervalMs?: number
   readonly recursionLimit?: number
@@ -226,6 +232,9 @@ export class RunService {
   private readonly recursionLimit: number
   private readonly approvalTimeoutMs: number
   private readonly clock: () => number
+  /** #785 per-path 写锁 + 覆盖审计（构造期装配——deps 缺省也生效，行为面无开关） */
+  private readonly writeLocks: WriteLockRegistry
+  private readonly overwriteAuditor: OverwriteAuditor
   private recordTurn: RecordTurnFn | undefined
   private sweepTimer: ReturnType<typeof setInterval> | undefined
   private queuedDispatch = false
@@ -235,6 +244,13 @@ export class RunService {
     this.recursionLimit = deps.recursionLimit ?? DEFAULT_RECURSION_LIMIT
     this.approvalTimeoutMs = deps.approvalTimeoutMs ?? APPROVAL_TIMEOUT_MS
     this.clock = deps.clock ?? (() => Date.now())
+    // #785 写锁（缺省新建 = 测试零注入也生效；生产经装配层注入 config 超时形态）+ 覆盖审计
+    //（journal 上家 writer 读取 + file_overwrite_logs sink，同 prisma 实例）。
+    this.writeLocks = deps.writeLocks ?? new WriteLockRegistry({ timeoutMs: DEFAULT_WRITE_LOCK_TIMEOUT_MS })
+    this.overwriteAuditor = new OverwriteAuditor(
+      createPrismaJournalWriterReader(deps.prisma),
+      createPrismaOverwriteAuditSink(deps.prisma),
+    )
     // 构造期兜底：任何 runner 实例化路径都覆盖 env 误开（装配层亦显式调用，双保险）
     disableLangsmithTracing()
     // 拒绝红显事件接线：漏斗判定时回调（同步），按在飞 cmd 盖印发布
@@ -572,6 +588,15 @@ export class RunService {
     const sandboxSessionId = cmd.parentSessionId ?? cmd.sessionId
     const sandbox = this.deps.sandboxes ? await this.deps.sandboxes.ensure(sandboxSessionId) : undefined
     const labContainer = sandbox?.containerId ?? session.containerId
+    // #785 ingestion/校验节点写面入锁：putArchive 按 tar 内单文件名取文件级锁（互斥域 =
+    // 沙箱所属 parent session；图缓存跨 run，每次 op 经 ctx 现取 holder）。覆盖审计与
+    // backend 层同形接线（detect/record 两段式）。
+    const runPrimitives = withLockedPuts(
+      this.deps.primitives,
+      this.writeLocks,
+      () => this.writeLockContext(sandboxSessionId, cmd.sessionId),
+      this.overwriteAuditor,
+    )
     // wiki 容器执行前提（#784 契约）：run 前 ensure 用户 wiki 容器——/wiki/ 工具根就绪
     //（不存在惰性创建零初始化、stopped 复启；永久容器随用户生命周期，无 touch 面）。失败
     // 同沙箱：pre-start 面向上传播，不发 run 域事件。
@@ -602,7 +627,7 @@ export class RunService {
         })
       : []
     const modelKey = actor?.modelProviderId ? `provider:${actor.modelProviderId}` : session.preferredModelJson ?? 'default'
-    const agent = this.getOrBuildGraph(cmd.sessionId, snapshot.version, policy, model, cmd.ownerId, labContainer, modelKey, tools, capabilities)
+    const agent = this.getOrBuildGraph(cmd.sessionId, snapshot.version, policy, model, cmd.ownerId, sandboxSessionId, labContainer, modelKey, tools, capabilities)
 
     // Mailbox recover has already consumed its interrupt; only a fresh resume must match the wait.
     if (cmd.kind === 'resume' && cmd.mailWaitId) {
@@ -732,7 +757,7 @@ export class RunService {
             sessionId: cmd.sessionId,
             attachmentIds: cmd.attachmentIds,
             container: labContainer,
-            primitives: this.deps.primitives,
+            primitives: runPrimitives,
           })
           for (const m of metas) {
             if (m.mimeType.startsWith('image/')) {
@@ -838,7 +863,7 @@ export class RunService {
                 declaredPath: block.declaredPath,
                 mime: block.mime,
                 container: labContainer,
-                primitives: this.deps.primitives,
+                primitives: runPrimitives,
               })
               if (meta) {
                 const ref = {
@@ -873,6 +898,9 @@ export class RunService {
     } finally {
       this.aborts.delete(cmd.runId)
       this.activeCmds.delete(cmd.sessionId)
+      // #785 持锁者死亡随 task 取消自动释放：本 run 残余持锁释放 + 其排队等待取消（正常路径
+      // 锁已由包装层 try/finally 先行释放——此处是 abort/异常路径的兜底；幂等 no-op 无害）
+      this.writeLocks.releaseRun(cmd.runId)
       // 终态清理漏斗运行槽（interrupted/suspended 保留——resume 延续同一逻辑 run 的护栏计数）
       const finalState = this.runs.get(cmd.sessionId)?.state
       if (cmd.teammateId && this.deps.teammates) {
@@ -1242,6 +1270,7 @@ export class RunService {
     policy: InterruptPolicy | undefined,
     model: LeaderAgentParams['model'],
     ownerId: string,
+    sandboxSessionId: string,
     labContainer: string,
     modelKey: string,
     tools: NonNullable<LeaderAgentParams['tools']>,
@@ -1254,10 +1283,16 @@ export class RunService {
     const key = `${threadId}|${configVersion}|${interruptPolicyKey(policy)}|${labContainer}|${wikiContainer}|${capabilities.key}|${modelKey}`
     const cached = this.graphs.get(key)
     if (cached) return cached
-    const backend = new DockerArchiveBackend(this.deps.primitives, {
-      wiki: wikiContainer,
-      lab: labContainer,
-    })
+    const backend = withWriteLocks(
+      new DockerArchiveBackend(this.deps.primitives, {
+        wiki: wikiContainer,
+        lab: labContainer,
+      }),
+      { wiki: wikiContainer, lab: labContainer },
+      this.writeLocks,
+      () => this.writeLockContext(sandboxSessionId, threadId),
+      this.overwriteAuditor,
+    )
     const agent = buildLeaderAgent({
       model,
       backend,
@@ -1284,6 +1319,21 @@ export class RunService {
     if (this.graphs.size >= GRAPH_CACHE_MAX_INSTANCES) this.graphs.clear()
     this.graphs.set(key, agent)
     return agent
+  }
+
+  // 写锁上下文现取（#785）：图实例跨 run 缓存，holder 不可构造期固化——每次加锁时从在飞
+  // cmd 解析（activeCmds 以 threadId 为键；缺失 = 非 run 语境，label-only 兜底，清理靠
+  // try/finally 纪律）。互斥域 = 沙箱所属 parent session（teammate /lab 写落 parent 沙箱，
+  // 互斥随容器不随 thread；跨会话 wiki 锁 V1 不做——#747 230 行钉死）。
+  private writeLockContext(sandboxSessionId: string, threadId: string): WriteLockContext {
+    const cmd = this.activeCmds.get(threadId)
+    return {
+      session: sandboxSessionId,
+      threadId,
+      holder: cmd
+        ? { runId: cmd.runId, label: `run ${cmd.runId}（thread ${threadId}）` }
+        : { label: `thread ${threadId}` },
+    }
   }
 
   private async startTeammate(parent: RunCommand, teammate: TeammateSummary): Promise<void> {

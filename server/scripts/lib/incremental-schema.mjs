@@ -8,7 +8,7 @@
 //     T0 清退（#801），检测到旧形状只告警。
 //   - DDL 与 prisma/init.sql 逐字节同源（镜像其 CREATE 形状），init.sql 由
 //     prisma migrate diff 从 schema.prisma 派生 —— 单一来源，此处镜像。
-export const SCHEMA_VERSION = 11
+export const SCHEMA_VERSION = 12
 
 export function runIncrementalSchema(db) {
   const hasSessions = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='sessions'").get()
@@ -422,6 +422,23 @@ CREATE UNIQUE INDEX IF NOT EXISTS "provider_endpoints_scheme_host_port_key" ON "
 INSERT OR IGNORE INTO "provider_endpoints" ("id", "scheme", "host", "port", "note", "createdBy", "createdAt")
 VALUES ('seed-minimax-endpoint', 'https', 'api.minimaxi.com', NULL,
         'seed（731 §3.1）：deploy/openclaw.json 模板默认 minimax 端点', '', CURRENT_TIMESTAMP)
+`)
+
+  // ---- #785（#747·15 · #769 锁方案）：file_overwrite_logs（write-after-write 覆盖审计）----
+  // 取锁写 path 时存在已 applied 且上家 writer ≠ 本 thread 的 file_journal 行 → 记一次
+  // （path/覆盖者/被覆盖者，不限时窗）。弱关联无 FK（审计快照纪律）；D8「观测面进审计域」。
+  db.exec(`
+CREATE TABLE IF NOT EXISTS "file_overwrite_logs" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "sessionId" TEXT NOT NULL,
+    "path" TEXT NOT NULL,
+    "overwriterThreadId" TEXT NOT NULL,
+    "overwrittenThreadId" TEXT NOT NULL,
+    "runId" TEXT NOT NULL,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS "file_overwrite_logs_sessionId_path_idx" ON "file_overwrite_logs"("sessionId", "path");
+CREATE INDEX IF NOT EXISTS "file_overwrite_logs_createdAt_idx" ON "file_overwrite_logs"("createdAt");
 `)
 
   // ---- 旧形状 model_providers 检测（#771 验收「旧表不动，留待 T0 清退」）----
