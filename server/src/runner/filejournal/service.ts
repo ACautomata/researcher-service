@@ -143,6 +143,27 @@ export class FileJournalService {
     userId: string
     username: string
   }): Promise<RewindFilesResult> {
+    return this.fence.runExclusive(p.sessionId, { holder: 'rewind-replay', timeoutMs: 0 }, () =>
+      this.rewindFilesCore(p),
+    )
+  }
+
+  // rewind 会话级互斥入口（sessions rewindSession 包「校验→事务→逆放」整段）：双端并发
+  // rewind 各自视图交错会写悬空指针（锚已被先行 rewind 归档仍被写为 activeCheckpointId）
+  // + chain 截断过度逆放——FIFO 串行化 + 锁内重验锚点存活（anchorForRewind 同拒 90002）。
+  // agent 写/materialize 照常经同一围栏排队；锁内逆放走 rewindFilesCore（防重入死锁）。
+  async runRewindExclusive<T>(sessionId: string, fn: () => Promise<T>): Promise<T> {
+    return this.fence.runExclusive(sessionId, { holder: 'rewind-session', timeoutMs: 0 }, fn)
+  }
+
+  // 核心（调用方保证持围栏——runRewindExclusive 锁内直呼）。ensure 失败/容器缺失 = 容器面
+  // 降级（「对话照回退、文件保持现状」，ensure 故障不放大为 rewind 失败）。
+  async rewindFilesCore(p: {
+    sessionId: string
+    anchor: string
+    userId: string
+    username: string
+  }): Promise<RewindFilesResult> {
     // 前置 ensure（stopped 复启/惰性创建——#776 run 前同语义）；失败 = 容器面降级（degraded
     // 分支处理——「对话照回退、文件保持现状」，ensure 故障不放大为 rewind 失败）
     const resolve = this.deps.ensureContainerOf ?? this.deps.containerOf
@@ -157,90 +178,87 @@ export class FileJournalService {
       where: { id: p.sessionId },
       select: { fileJournalAnchorSeq: true },
     })
-    let degraded = false
-    let outcome: RevertOutcome = { reverted: 0, skippedMissing: 0 }
 
-    await this.fence.runExclusive(p.sessionId, { holder: 'rewind-replay', timeoutMs: 0 }, async () => {
-      // restore 路：journal-first 崩溃残留补 apply + 上次中断的续放（容器缺失 = 跳过）；
-      // 活动计数入审计域（D8——静默失败不可接受）
-      if (container !== null) {
-        const rec = await this.reconciler.reconcileSession(p.sessionId)
-        if (rec.rolledForward + rec.rolledMissing + rec.resumedReverted + rec.resumedMissing > 0) {
-          await this.audit.record({
-            kind: 'reconcile', sessionId: p.sessionId, userId: p.userId, username: p.username,
-            detail: { phase: 'restore', ...rec },
-          })
-        }
-      }
+    // 锚链先于 restore 路构造（续放判据的 chain 过滤依赖——见 Reconciler.resumeRevert）
+    const parentOf = await this.deps.checkpointParentOf(p.sessionId)
+    const chain = ancestorChainOf((id) => parentOf.get(id) ?? null, p.anchor)
 
-      const parentOf = await this.deps.checkpointParentOf(p.sessionId)
-      const chain = ancestorChainOf((id) => parentOf.get(id) ?? null, p.anchor)
-      const rows = await this.deps.prisma.fileJournal.findMany({ where: { sessionId: p.sessionId } })
-      const plan = planRevert(rows, chain, session.fileJournalAnchorSeq, this.deps.depthLimit)
-      const now = new Date()
-
-      // tx：保留集补标 + 水位推进（原子——中断续放判定式的前提）
-      await this.deps.prisma.$transaction([
-        ...(plan.keepMark.length > 0
-          ? [
-              this.deps.prisma.fileJournal.updateMany({
-                where: { sessionId: p.sessionId, seq: { in: plan.keepMark.map((r) => r.seq) }, fileRevertedAt: null },
-                data: { fileRevertedAt: now },
-              }),
-            ]
-          : []),
-        this.deps.prisma.session.update({
-          where: { id: p.sessionId },
-          data: { fileJournalAnchorSeq: plan.watermark },
-        }),
-      ])
-
-      if (container === null) {
-        // 沙箱已删的异常态：不逆放（降级——对话照回退、文件保持现状），行处置保持待续放面
-        degraded = true
+    // restore 路：journal-first 崩溃残留补 apply + 上次中断的续放（容器缺失 = 跳过）；
+    // 活动计数入审计域（D8——静默失败不可接受）。此处 chain 已知——续放过滤与 planRevert 同形
+    if (container !== null) {
+      const rec = await this.reconciler.reconcileSession(p.sessionId, chain)
+      if (rec.rolledForward + rec.rolledMissing + rec.resumedReverted + rec.resumedMissing > 0) {
         await this.audit.record({
           kind: 'reconcile', sessionId: p.sessionId, userId: p.userId, username: p.username,
-          detail: { anchor: p.anchor, containerMissing: true },
+          detail: { phase: 'restore', ...rec },
         })
-        return
       }
+    }
 
-      if (plan.degraded) {
-        // 深度超限降级：「对话照回退、文件保持现状」——toRevert 跳过式处置（残集空，续放不再拾起）
-        degraded = true
-        await this.io.markReverted(p.sessionId, plan.toRevert.map((r) => r.seq), now)
-        await this.audit.record({
-          kind: 'degraded', sessionId: p.sessionId, userId: p.userId, username: p.username,
-          detail: { anchor: p.anchor, skipped: plan.toRevert.length, depthLimit: this.deps.depthLimit },
-        })
-        return
-      }
+    const rows = await this.deps.prisma.fileJournal.findMany({ where: { sessionId: p.sessionId } })
+    const plan = planRevert(rows, chain, session.fileJournalAnchorSeq, this.deps.depthLimit)
+    const now = new Date()
 
-      // replay lease（防 GC 剪枝 use-after-free）→ 全局序逆放（逐行打标，崩溃续放幂等）
-      this.gc.acquireLease(p.sessionId, leaseShasOf(plan.toRevert))
-      try {
-        outcome = await executeRevert(p.sessionId, container, plan.toRevert, this.io)
-      } finally {
-        this.gc.releaseLease(p.sessionId)
-      }
-      const gcOutcome = await this.gc.gc(container, p.sessionId)
+    // tx：保留集补标 + 水位推进（原子——中断续放判定式的前提）
+    await this.deps.prisma.$transaction([
+      ...(plan.keepMark.length > 0
+        ? [
+            this.deps.prisma.fileJournal.updateMany({
+              where: { sessionId: p.sessionId, seq: { in: plan.keepMark.map((r) => r.seq) }, fileRevertedAt: null },
+              data: { fileRevertedAt: now },
+            }),
+          ]
+        : []),
+      this.deps.prisma.session.update({
+        where: { id: p.sessionId },
+        data: { fileJournalAnchorSeq: plan.watermark },
+      }),
+    ])
+
+    if (container === null) {
+      // 沙箱已删的异常态：不逆放（降级——对话照回退、文件保持现状），行处置保持待续放面
       await this.audit.record({
-        kind: 'gc',
-        sessionId: p.sessionId,
-        userId: p.userId,
-        username: p.username,
-        detail: { anchor: p.anchor, scanned: gcOutcome.scanned, freed: gcOutcome.freed },
+        kind: 'reconcile', sessionId: p.sessionId, userId: p.userId, username: p.username,
+        detail: { anchor: p.anchor, containerMissing: true },
       })
+      return { reverted: 0, skippedMissing: 0, degraded: true }
+    }
+
+    if (plan.degraded) {
+      // 深度超限降级：「对话照回退、文件保持现状」——toRevert 跳过式处置（残集空，续放不再拾起）
+      await this.io.markReverted(p.sessionId, plan.toRevert.map((r) => r.seq), now)
       await this.audit.record({
-        kind: 'revert_complete', sessionId: p.sessionId, userId: p.userId, username: p.username,
-        detail: {
-          anchor: p.anchor, reverted: outcome.reverted, missing: outcome.skippedMissing,
-          watermark: plan.watermark, keepMarked: plan.keepMark.length,
-        },
+        kind: 'degraded', sessionId: p.sessionId, userId: p.userId, username: p.username,
+        detail: { anchor: p.anchor, skipped: plan.toRevert.length, depthLimit: this.deps.depthLimit },
       })
+      return { reverted: 0, skippedMissing: 0, degraded: true }
+    }
+
+    // replay lease（防 GC 剪枝 use-after-free）→ 全局序逆放（逐行打标，崩溃续放幂等）
+    this.gc.acquireLease(p.sessionId, leaseShasOf(plan.toRevert))
+    let outcome: RevertOutcome
+    try {
+      outcome = await executeRevert(p.sessionId, container, plan.toRevert, this.io)
+    } finally {
+      this.gc.releaseLease(p.sessionId)
+    }
+    const gcOutcome = await this.gc.gc(container, p.sessionId)
+    await this.audit.record({
+      kind: 'gc',
+      sessionId: p.sessionId,
+      userId: p.userId,
+      username: p.username,
+      detail: { anchor: p.anchor, scanned: gcOutcome.scanned, freed: gcOutcome.freed },
+    })
+    await this.audit.record({
+      kind: 'revert_complete', sessionId: p.sessionId, userId: p.userId, username: p.username,
+      detail: {
+        anchor: p.anchor, reverted: outcome.reverted, missing: outcome.skippedMissing,
+        watermark: plan.watermark, keepMarked: plan.keepMark.length,
+      },
     })
 
-    return { reverted: outcome.reverted, skippedMissing: outcome.skippedMissing, degraded }
+    return { reverted: outcome.reverted, skippedMissing: outcome.skippedMissing, degraded: false }
   }
 
   // ---- 预览（REST preview 端点消费）----

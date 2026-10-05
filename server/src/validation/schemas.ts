@@ -7,7 +7,7 @@ import {
   PROVIDER_ID_REGEX,
 } from '../models/values'
 import { parseHttpOrigin } from '../runner/allowlist'
-import { MESSAGE_CONTENT_MAX, TITLE_MAX } from '../sessions/values'
+import { MESSAGE_CONTENT_MAX, REWIND_SCOPES, TITLE_MAX } from '../sessions/values'
 
 // 请求体 schema（zod）。校验失败 → 90002 + flatten().fieldErrors（{field:[errors]}）。
 // username 格式：字母/数字/下划线/连字符，3–30 字符（近似 Django UnicodeUsernameValidator，更严）。
@@ -210,7 +210,7 @@ export const sessionResumeSchema = z.object({
 // ---------------------------------------------------------------------------
 export const sessionRewindSchema = z.object({
   messageId: z.string().min(1, 'messageId 不能为空'),
-  scope: z.enum(['all', 'chat', 'files']).optional(),
+  scope: z.enum(REWIND_SCOPES).optional(),
 })
 
 export const sessionRewindPreviewSchema = z.object({

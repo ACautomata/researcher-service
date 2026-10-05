@@ -50,14 +50,15 @@ export class JournalingBackend extends DockerArchiveBackend implements BackendPr
       const rel = labRelOf(routed.absPath)
       const basename = routed.absPath.split('/').pop() ?? 'file'
       const afterTar = filePreTar(basename, buf)
-      // pre 探测（文件级；kind 分派：not-found → null = 新建语义；超限/目录/symlink →
-      // 降级不打点直写（对齐 delete 面降级形态）——打点而逆操作错（beforeSha=null + op=write
-      // → 逆放 remove 删原文件）比无恢复面直操作更危险：行存在反而误导「可恢复」）
-      const g = await this.guardedFile(routed, filePath)
-      if ('error' in g && g.kind !== 'not-found') return super.write(filePath, content)
-      const preTar = 'tree' in g ? filePreTar(basename, g.buf) : null
-      await this.fenced('agent-write', () =>
-        this.j.writer.write({
+      return await this.fenced('agent-write', async () => {
+        // pre 探测在围栏内（fence 自钉「全局序重放一致性前提」——围栏外读 pre 可捕获逆放
+        // 中途态，beforeSha 与获权后实态不符）。kind 分派：not-found → null = 新建语义；
+        // 超限/目录/symlink → 降级不打点直写（对齐 delete 面降级形态——打点而逆操作错
+        //（beforeSha=null + op=write → 逆放 remove 删原文件）比无恢复面直操作更危险）
+        const g = await this.guardedFile(routed, filePath)
+        if ('error' in g && g.kind !== 'not-found') return super.write(filePath, content)
+        const preTar = 'tree' in g ? filePreTar(basename, g.buf) : null
+        await this.j.writer.write({
           sessionId: this.j.sessionId,
           container: routed.container,
           path: rel,
@@ -67,9 +68,9 @@ export class JournalingBackend extends DockerArchiveBackend implements BackendPr
           apply: () => this.putBuffer(routed, buf),
           toolCallId: this.toolCallId(),
           runId: this.runId(),
-        }),
-      )
-      return { path: routed.absPath, filesUpdate: null }
+        })
+        return { path: routed.absPath, filesUpdate: null }
+      })
     } catch (e) {
       return journalError('write failed', e)
     }
@@ -81,17 +82,18 @@ export class JournalingBackend extends DockerArchiveBackend implements BackendPr
       if ('error' in routed) return routed
       if (routed.container !== this.j.targets.lab) return super.edit(filePath, oldString, newString, replaceAll)
       if (labRelOf(routed.absPath) === '') return super.edit(filePath, oldString, newString, replaceAll)
-      // after 全文在此合成（super.edit 内部会重读一次——正确性优先，S4 基准锁开销）
-      const full = await this.readFullText(routed, filePath)
-      if ('error' in full) return full
-      const replaced = performStringReplacement(full.text, oldString, newString, replaceAll)
-      if (typeof replaced === 'string') return { error: replaced }
       const rel = labRelOf(routed.absPath)
       const basename = routed.absPath.split('/').pop() ?? 'file'
-      const afterTar = filePreTar(basename, Buffer.from(replaced[0], 'utf8'))
-      const preTar = filePreTar(basename, Buffer.from(full.text, 'utf8'))
-      await this.fenced('agent-edit', () =>
-        this.j.writer.write({
+      return await this.fenced('agent-edit', async () => {
+        // after 全文合成在围栏内（围栏外读文本合成替换 = TOCTOU：等待围栏期间文件被逆放
+        // 改动，写回基于旧文本的替换——正确性面非仅打点面；S4 基准锁开销）
+        const full = await this.readFullText(routed, filePath)
+        if ('error' in full) return full
+        const replaced = performStringReplacement(full.text, oldString, newString, replaceAll)
+        if (typeof replaced === 'string') return { error: replaced }
+        const afterTar = filePreTar(basename, Buffer.from(replaced[0], 'utf8'))
+        const preTar = filePreTar(basename, Buffer.from(full.text, 'utf8'))
+        await this.j.writer.write({
           sessionId: this.j.sessionId,
           container: routed.container,
           path: rel,
@@ -101,9 +103,9 @@ export class JournalingBackend extends DockerArchiveBackend implements BackendPr
           apply: () => this.putBuffer(routed, Buffer.from(replaced[0], 'utf8')),
           toolCallId: this.toolCallId(),
           runId: this.runId(),
-        }),
-      )
-      return { path: routed.absPath, filesUpdate: null, occurrences: replaced[1] }
+        })
+        return { path: routed.absPath, filesUpdate: null, occurrences: replaced[1] }
+      })
     } catch (e) {
       return journalError('edit failed', e)
     }
@@ -120,14 +122,14 @@ export class JournalingBackend extends DockerArchiveBackend implements BackendPr
       if (labRelOf(routed.absPath) === '') {
         return { error: 'refusing to delete /lab root（全树删除无 rewind 恢复面——请指定具体文件）' }
       }
-      // pre 快照（文件/目录统一 tar；不存在 → null = 无恢复面，直接 super 走 not found）
-      const preTar = await snapshotAsTar(this.j.primitives, routed.container, routed.absPath, {
-        maxDataBytes: MAX_COLLECT_BYTES,
-      })
-      if (preTar === null) return super.delete(filePath)
-      const rel = labRelOf(routed.absPath)
-      await this.fenced('agent-delete', () =>
-        this.j.writer.write({
+      return await this.fenced('agent-delete', async () => {
+        // pre 快照在围栏内（同 write——围栏外快照可捕获逆放中途态）
+        const preTar = await snapshotAsTar(this.j.primitives, routed.container, routed.absPath, {
+          maxDataBytes: MAX_COLLECT_BYTES,
+        })
+        if (preTar === null) return super.delete(filePath) // 不存在 = super 走 not found
+        const rel = labRelOf(routed.absPath)
+        await this.j.writer.write({
           sessionId: this.j.sessionId,
           container: routed.container,
           path: rel,
@@ -137,9 +139,9 @@ export class JournalingBackend extends DockerArchiveBackend implements BackendPr
           apply: () => this.deleteForApply(filePath),
           toolCallId: this.toolCallId(),
           runId: this.runId(),
-        }),
-      )
-      return { path: routed.absPath, filesUpdate: null }
+        })
+        return { path: routed.absPath, filesUpdate: null }
+      })
     } catch (e) {
       return journalError('delete failed', e)
     }

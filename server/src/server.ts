@@ -94,9 +94,11 @@ async function main(): Promise<void> {
     },
     // #780 附件链接（≤4 件 + 归属/session 校验）——上传/下载走独立 AttachmentsService
     attachments: attachmentsService,
-    // #782 文件 rewind（D8）：逆放 + 预览（FileJournalService 结构面）
+    // #782 文件 rewind（D8）：逆放 + 预览 + 会话级互斥（FileJournalService 结构面）
     fileRewind: {
       rewindFiles: (p) => runner.fileJournal.rewindFiles(p),
+      rewindFilesCore: (p) => runner.fileJournal.rewindFilesCore(p),
+      runRewindExclusive: (sessionId, fn) => runner.fileJournal.runRewindExclusive(sessionId, fn),
       preview: (p) => runner.fileJournal.preview(p),
     },
   })

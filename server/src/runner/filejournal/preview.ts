@@ -5,6 +5,7 @@
 //（挂靠语义与 rewind 归档同源——sessions/rewind.ts visibleRowIds 的机制面取反）。
 
 import type { PrismaClient } from '../../generated/prisma/client'
+import { planRevert } from './replay'
 import { PREVIEW_PATH_SAMPLE_MAX } from './values'
 
 export interface ExecCrossed {
@@ -42,7 +43,8 @@ export async function buildRewindPreview(
   anchor: string,
   chain: ReadonlySet<string>,
 ): Promise<RewindPreview> {
-  // 判定式与 planRevert 同形（水位 + 未处置 + ∉ chain）——确认门数字 = 实际逆放集
+  // 判定式 = planRevert 单一来源（确认门数字 ≡ 实际逆放集——自实现双处必漂移；深度上限
+  // 传 Infinity：preview 只报面不降级，逆放面深度处置在 rewindFiles）
   const session = await prisma.session.findUnique({
     where: { id: sessionId },
     select: { fileJournalAnchorSeq: true },
@@ -50,12 +52,9 @@ export async function buildRewindPreview(
   const watermark = session?.fileJournalAnchorSeq ?? null
   const rows = await prisma.fileJournal.findMany({
     where: { sessionId, fileRevertedAt: null },
-    select: { seq: true, path: true, checkpointId: true },
     orderBy: { seq: 'desc' },
   })
-  const toRevert = rows.filter(
-    (r) => (watermark === null || r.seq > watermark) && !chain.has(r.checkpointId),
-  )
+  const toRevert = planRevert(rows, chain, watermark, Number.MAX_SAFE_INTEGER).toRevert
   const paths = [...new Set(toRevert.map((r) => r.path))]
 
   // 锚后 assistant 行（未归档、锚 ∉ chain）→ tools 聚合 → exec 清单；外加存活跨派生点

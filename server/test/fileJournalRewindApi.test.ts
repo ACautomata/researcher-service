@@ -167,6 +167,8 @@ describe('文件 rewind 端到端（S1，#782）', () => {
       },
       fileRewind: {
         rewindFiles: (p) => fileJournal.rewindFiles(p),
+        rewindFilesCore: (p) => fileJournal.rewindFilesCore(p),
+        runRewindExclusive: (sessionId, fn) => fileJournal.runRewindExclusive(sessionId, fn),
         preview: (p) => fileJournal.preview(p),
       },
     })
@@ -407,6 +409,38 @@ describe('文件 rewind 端到端（S1，#782）', () => {
     expect(res.body.code).toBe(CODE.RUN_IN_PROGRESS)
     slowExec = false
     await waitFor(() => runService.stateOf(sid)?.state === 'completed')
+  })
+
+  it('双端并发 rewind：会话级互斥串行化——指针恒指向未归档 checkpoint、被归档锚点 90002', async () => {
+    // 两轮产生锚 A（轮1）、B（轮2）
+    const created = await request.post('/api/v1/sessions').set(bearer(access)).send({ title: '并发 rewind' })
+    const sid = created.body.data.id as string
+    for (const v of ['1', '2']) {
+      currentScript = [toolCallAi(`call-cc-${v}`, 'write_file', { path: `/lab/cc${v}.txt`, content: v }, ''), new AIMessage({ content: '好。' })]
+      await bumpVersion()
+      await request.post(`/api/v1/sessions/${sid}/messages`).set(bearer(access)).set('Idempotency-Key', hexKey()).send({ content: v })
+      await waitFor(() => runService.stateOf(sid)?.state === 'completed')
+    }
+    const both = await prisma.sessionMessage.findMany({ where: { sessionId: sid, role: 'assistant' }, orderBy: { turn: 'asc' } })
+    // 并发双端：回退轮2（锚 B）+ 回退轮1（锚 A）——完成顺序不定。A ∈ chain(B) 恒合法；
+    // A 先完成则 B 已被归档 → B 端锁内 90002（无锁视图交错会写悬空指针）
+    const [r1, r2] = await Promise.all([
+      request.post(`/api/v1/sessions/${sid}/rewind`).set(bearer(access)).send({ messageId: both[1]!.id }),
+      request.post(`/api/v1/sessions/${sid}/rewind`).set(bearer(access)).send({ messageId: both[0]!.id }),
+    ])
+    const codes = [r1.body.code, r2.body.code]
+    expect(codes).toContain(CODE.OK) // A 锚恒合法（∈ 任何 chain）
+    for (const c of codes) {
+      expect([CODE.OK, CODE.VALIDATION_FAILED]).toContain(c) // 非预期码 = 互斥面破
+    }
+    // 指针不悬空：activeCheckpointId 必在未归档 checkpoint 集内
+    const sess = await prisma.session.findUniqueOrThrow({ where: { id: sid }, select: { activeCheckpointId: true } })
+    if (sess.activeCheckpointId !== null) {
+      const ck = await prisma.checkpoint.findFirst({
+        where: { threadId: sid, checkpointId: sess.activeCheckpointId, archivedAt: null },
+      })
+      expect(ck).not.toBeNull()
+    }
   })
 
   it('C1：存活 teammate 在 scope=all rewind 后收信箱系统消息', async () => {
