@@ -23,6 +23,8 @@ import { createPrismaApprovalAuditSink } from './approval/audit'
 import { ToolCallJudgeClient } from './approval/judge'
 import { ApprovalFunnel, type ApprovalFunnelDeps } from './approval/funnel'
 import { JUDGE_POLICY_MARKDOWN } from './approval/values'
+import { WriteLockRegistry } from './writelock/registry'
+import { withLockedPuts } from './writelock/lockedBackend'
 import { TeammateService } from './teammates/service'
 
 export interface RunnerAssembly {
@@ -66,6 +68,9 @@ export function assembleRunner(opts: {
   })
   const primitives = new DockerPrimitives()
   const teammates = new TeammateService(opts.prisma)
+  // #785 per-path 写锁（互斥域 = 沙箱所属 parent session；有界等待超时 → agent 报错含
+  // path 与持有者。覆盖 ingestion/校验节点 putArchive 写面——下方下载节点闭包内包装）。
+  const writeLocks = new WriteLockRegistry({ timeoutMs: config.runner.writeLockTimeoutMs })
 
   // #780 下载校验节点（片 3）：file 写类工具（write/edit）成功后校验声明路径 → 物化
   // Attachment 行 + 下载引用追加进 tool 输出（tool.end details 承载）；失败 → 错误回喂
@@ -87,7 +92,14 @@ export function assembleRunner(opts: {
             declaredPath: p.declaredPath,
             mime: p.mime,
             container: p.container,
-            primitives,
+            // 校验节点物化写面入锁（#785）：互斥域 = 解析后的 parent session；
+            // runId 在此闭包不可得（label-only holder）→ 不接覆盖审计（detect 无 run
+            // 归属恒不落行）；清理靠 materialize 内 try/finally 纪律。
+            primitives: withLockedPuts(primitives, writeLocks, () => ({
+              session: sessionId,
+              threadId: p.sessionId,
+              holder: { label: `thread ${p.sessionId}` },
+            })),
           })
         },
         resolveContainer: async (threadId) => {
@@ -129,6 +141,7 @@ export function assembleRunner(opts: {
     approvals: funnel,
     teammates,
     approvalTimeoutMs: config.runner.approvalTimeoutMs,
+    writeLocks,
     attachments: opts.attachments,
     downloadNode,
   })
