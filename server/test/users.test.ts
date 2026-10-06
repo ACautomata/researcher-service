@@ -110,6 +110,46 @@ describe('users admin (slice 10/11/12)', () => {
     expect(res.body.code).toBe(10043)
   })
 
+  // ---- maxConcurrentRuns 配额（#800 admin 运营面；字段自 #775 story 55 落 schema，admin 可改）----
+  it('admin GET /users → 每行含 maxConcurrentRuns（缺省 2）', async () => {
+    const admin = await login(ctx.request, 'admin1', 'pw-admin1-secure')
+    const res = await ctx.request.get('/api/v1/users').set(bearer(admin.access))
+    expect(res.body.code).toBe(0)
+    const users = res.body.data.users as Record<string, unknown>[]
+    const target = users.find((u) => u.username === 'target')!
+    expect(target.maxConcurrentRuns).toBe(2)
+  })
+
+  it('admin PATCH /users/:id maxConcurrentRuns → 落库 + 响应回显', async () => {
+    const admin = await login(ctx.request, 'admin1', 'pw-admin1-secure')
+    const res = await ctx.request
+      .patch(`/api/v1/users/${targetId}`)
+      .set(bearer(admin.access))
+      .send({ maxConcurrentRuns: 5 })
+    expect(res.body.code).toBe(0)
+    expect(res.body.data.maxConcurrentRuns).toBe(5)
+    const row = await ctx.prisma.user.findUnique({ where: { id: targetId } })
+    expect(row!.maxConcurrentRuns).toBe(5)
+    // 只动 maxConcurrentRuns：maxContainers 不被连带改写
+    expect(row!.maxContainers).toBe(3)
+  })
+
+  it('PATCH maxConcurrentRuns 负数/超 Int 上界 → 10043（与 maxContainers 共用语义）；非整数 → 90002（zod int() 结构层，同 maxContainers 分层）', async () => {
+    const admin = await login(ctx.request, 'admin1', 'pw-admin1-secure')
+    for (const bad of [-1, 2147483648]) {
+      const res = await ctx.request
+        .patch(`/api/v1/users/${targetId}`)
+        .set(bearer(admin.access))
+        .send({ maxConcurrentRuns: bad })
+      expect(res.body.code).toBe(10043)
+    }
+    const nonInt = await ctx.request
+      .patch(`/api/v1/users/${targetId}`)
+      .set(bearer(admin.access))
+      .send({ maxConcurrentRuns: 1.5 })
+    expect(nonInt.body.code).toBe(90002)
+  })
+
   // 意见⑫[P2]（Codex 五轮）：quota 未绑 Prisma Int 范围 —— maxContainers 超 2,147,483,647
   // zod int() 接受但 Prisma Int 列存不了 → 90000。须共享上界，超界 → 10043 拒绝。
   it('PATCH 配额超 Int 上界（2147483648）→ 10043 而非 90000', async () => {

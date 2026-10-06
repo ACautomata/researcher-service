@@ -6,6 +6,7 @@ import { createAuthRouter } from './routes/auth'
 import { createUsersRouter } from './routes/users'
 import { traceLogsRouter } from './routes/traceLogs'
 import { approvalLogsRouter, fileOverwriteLogsRouter } from './runner/auditRoutes'
+import { usageRouter } from './runner/usageRoutes'
 import { createContainersRouter } from './routes/containers'
 import { createWikiRouter, type WikiRouterDeps } from './wiki/routes'
 import { createModelsRouter, type ModelsRouterDeps } from './models/routes'
@@ -94,6 +95,8 @@ export function createApp({ prisma, orchestrator, runtime, wiki, models, provide
   app.use('/api/v1/approval-logs', approvalLogsRouter)
   // #785 覆盖审计检索（file_overwrite_logs）：admin 全量审计面，同款 admin 门
   app.use('/api/v1/file-overwrite-logs', fileOverwriteLogsRouter)
+  // #800 admin 核算面：usage 聚合（llm_usage_records → aggregateUsage；admin-only）。
+  app.use('/api/v1/usage', usageRouter)
   if (orchestrator) {
     // approve 端点依赖 runtime（docker exec），与 orchestrator 成对注入（#374）；缺 runtime 属装配错误。
     if (!runtime) {

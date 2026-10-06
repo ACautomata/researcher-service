@@ -23,7 +23,7 @@ vi.mock('element-plus', async (importOriginal) => {
   }
 })
 
-import AdminUsersView from '@/views/AdminUsersView.vue'
+import AdminUsersView from '@/admin/views/AdminUsersView.vue'
 import { listUsers, createUser, patchUser, resetUserPassword } from '@/api/users'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useAuthStore } from '@/stores/auth'
@@ -37,6 +37,7 @@ const USERS = [
     isActive: true,
     containerCount: 2,
     quota: { used: 2, limit: 5 },
+    maxConcurrentRuns: 2,
     mustChangePassword: false,
     createdAt: '2026-08-01T00:00:00Z',
   },
@@ -48,6 +49,7 @@ const USERS = [
     isActive: false,
     containerCount: 0,
     quota: { used: 0, limit: 3 },
+    maxConcurrentRuns: 4,
     mustChangePassword: true,
     createdAt: '2026-08-02T00:00:00Z',
   },
@@ -102,6 +104,10 @@ function vm(wrapper: ReturnType<typeof mount>) {
     isQuotaEditing: (userId: string) => boolean
     saveQuota: (u: (typeof USERS)[0]) => Promise<void>
     quotaEditing: Record<string, string>
+    beginRunsEdit: (u: (typeof USERS)[0]) => void
+    isRunsEditing: (userId: string) => boolean
+    saveRuns: (u: (typeof USERS)[0]) => Promise<void>
+    runsEditing: Record<string, string>
   }
 }
 
@@ -225,6 +231,32 @@ describe('AdminUsersView', () => {
     ;(vm(w).quotaEditing as Record<string, string>)[USERS[0].id] = '-1'
     await nextTick()
     await vm(w).saveQuota(USERS[0])
+    await flushPromises()
+    expect(patchUser).not.toHaveBeenCalled()
+    expect(ElMessage.warning).toHaveBeenCalled()
+  })
+
+  // #800：在飞 run 并发配额（maxConcurrentRuns）inline 编辑
+  it('并发配额 inline 编辑：保存合法值 → patchUser(maxConcurrentRuns) + 退出编辑态', async () => {
+    const w = await mountView()
+    vm(w).beginRunsEdit(USERS[0])
+    await nextTick()
+    expect(vm(w).isRunsEditing(USERS[0].id)).toBe(true)
+    ;(vm(w).runsEditing as Record<string, string>)[USERS[0].id] = '6'
+    await nextTick()
+    await vm(w).saveRuns(USERS[0])
+    await flushPromises()
+    expect(patchUser).toHaveBeenCalledWith('u1', { maxConcurrentRuns: 6 })
+    expect(vm(w).isRunsEditing(USERS[0].id)).toBe(false)
+  })
+
+  it('并发配额 inline 编辑：非法值（负数）→ 本地提示，不调 API', async () => {
+    const w = await mountView()
+    vm(w).beginRunsEdit(USERS[1])
+    await nextTick()
+    ;(vm(w).runsEditing as Record<string, string>)[USERS[1].id] = '-2'
+    await nextTick()
+    await vm(w).saveRuns(USERS[1])
     await flushPromises()
     expect(patchUser).not.toHaveBeenCalled()
     expect(ElMessage.warning).toHaveBeenCalled()

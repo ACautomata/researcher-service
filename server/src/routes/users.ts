@@ -69,6 +69,7 @@ export function createUsersRouter(deps: UsersRouterDeps = {}): Router {
         isActive: u.isActive,
         containerCount: u._count.containers,
         quota: { used: u._count.containers, limit: u.maxContainers },
+        maxConcurrentRuns: u.maxConcurrentRuns,
         mustChangePassword: u.mustChangePassword,
         createdAt: u.createdAt,
       })),
@@ -82,15 +83,17 @@ export function createUsersRouter(deps: UsersRouterDeps = {}): Router {
     ok(res, { id: user.id, username: user.username, email: user.email, role: user.role })
   })
 
-  // PATCH /:id —— active + 配额
+  // PATCH /:id —— active + 配额（容器数 / 在飞 run 并发 #800）
   router.patch('/:id', validateBody(userPatchSchema), async (req: Request, res: Response) => {
     const id = req.params.id as string
-    const { isActive, maxContainers } = req.body as {
+    const { isActive, maxContainers, maxConcurrentRuns } = req.body as {
       isActive?: boolean
       maxContainers?: number
+      maxConcurrentRuns?: number
     }
     // 配额语义非法（负数或超 Int 上界）→ 10043（区别于 90002 结构校验；与 createUser 共享）
     assertQuotaValid(maxContainers)
+    assertQuotaValid(maxConcurrentRuns)
 
     const existing = await req.prisma.user.findUnique({ where: { id } })
     if (!existing) {
@@ -106,6 +109,7 @@ export function createUsersRouter(deps: UsersRouterDeps = {}): Router {
       data: {
         ...(isActive !== undefined ? { isActive } : {}),
         ...(maxContainers !== undefined ? { maxContainers } : {}),
+        ...(maxConcurrentRuns !== undefined ? { maxConcurrentRuns } : {}),
       },
     })
     ok(res, {
@@ -113,6 +117,7 @@ export function createUsersRouter(deps: UsersRouterDeps = {}): Router {
       username: updated.username,
       isActive: updated.isActive,
       maxContainers: updated.maxContainers,
+      maxConcurrentRuns: updated.maxConcurrentRuns,
     })
   })
 

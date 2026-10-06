@@ -11,6 +11,7 @@ export interface UserRowDTO {
   isActive: boolean
   containerCount: number
   quota: { used: number; limit: number }
+  maxConcurrentRuns: number // per-user 在飞 run 配额（#800 admin 可改）
   mustChangePassword: boolean
   createdAt: string
 }
@@ -37,8 +38,8 @@ export function createUser(input: {
 
 export function patchUser(
   id: string,
-  patch: { isActive?: boolean; maxContainers?: number },
-): Promise<{ id: string; username: string; isActive: boolean; maxContainers: number }> {
+  patch: { isActive?: boolean; maxContainers?: number; maxConcurrentRuns?: number },
+): Promise<{ id: string; username: string; isActive: boolean; maxContainers: number; maxConcurrentRuns: number }> {
   return apiJson(`/api/v1/users/${encodeURIComponent(id)}`, {
     method: 'PATCH',
     body: JSON.stringify(patch),

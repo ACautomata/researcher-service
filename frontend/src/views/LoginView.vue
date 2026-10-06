@@ -44,9 +44,14 @@ async function onSubmit(): Promise<void> {
 }
 
 // #340-A：登录后按 me.mustChangePassword 分流——true 进改密模式（强制改密，不跳容器页）
+// #800：角色落点——admin → /admin/ 运营子应用（跨 MPA，整页跳转）；user → 本面板 /。
 async function afterLogin(): Promise<void> {
   if (auth.mustChangePassword) {
     mode.value = 'change'
+    return
+  }
+  if (auth.role === 'admin') {
+    window.location.assign('/admin/')
     return
   }
   await router.push('/')

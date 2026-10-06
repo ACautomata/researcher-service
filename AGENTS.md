@@ -108,6 +108,8 @@ OpenClaw 容器 fleet (openclaw-gw-<name>，每容器独立 home/openclaw.json/�
   userId/runId/layer/decision/from/to + 分页；judge 输入只露 hash）。
 - `/api/v1/file-overwrite-logs` — 覆盖审计检索 admin REST（#785；过滤 sessionId/path/from/to
   + 分页；行 = 一次 write-after-write 覆盖 path/覆盖者/被覆盖者）。
+- `/api/v1/usage/aggregate` — LLM usage 核算聚合 admin REST（#800 · #775 采数数据源；过滤
+  userId/from/to，时间窗半开区间 [from, to)；按 user × provider × model 聚合，wire snake_case）。
 - `/api/v1/containers/<name>/files?root=<wiki|workspace|lab>&path=&recursive=` — 统一文件 CRUD（#776
   root 契约换轨：wiki = legacy 容器树（读写面暂留，退役归 T0）；workspace = legacy **只读消费值**
   （现存前端 fileTabs 硬发此值，#793 迁 lab 后退役；写面 90002）；lab = 会话沙箱 /lab 只读 GET 面——
@@ -147,8 +149,16 @@ maxConcurrentRuns 或全局 RUNNER_MAX_CONCURRENT_RUNS]）· `5xxxx` chat/pairin
 
 ## frontend 结构（`frontend/src/`）
 
-- `router/index.ts` — 路由表 + 导航守卫（未登录重定向 `/login`，`auth.hydrate()` 恢复登录态；
-  `meta.requiresAdmin` 守卫 admin users 页）。
+- `router/index.ts` — 用户面板路由表 + 导航守卫（未登录重定向 `/login`，`auth.hydrate()` 恢复
+  登录态；#800 起零 admin 残留——admin 路由整体迁入 /admin/ 子应用）。
+- `admin/` — admin 子应用（#800 双面板 MPA）：`main.ts`（组合根 2，复用 @/api/@/stores/ElementPlus）
+  /`router.ts`（base `/admin/` 独立路由表 + `decideAdminGuard` 纯函数守卫：未认证确认失效 →
+  跨应用跳 /login；瞬态放行交 401 刷新链；非 admin → 回 `/`）/`AdminApp.vue`（运营 nav +
+  用户面板回链）/`views/`（账号管理/端点白名单/审计检索/Usage 核算/内容消息/API 文档——
+  前三个既有 admin 页 AdminUsersView/TraceLogsView/ApiDocsView 随迁本目录）。
+  产物级隔离：vite 双入口（index.html + admin.html）按 /admin/ 分流（nginx try_files →
+  admin.html；dev/preview 由 vite 插件 rewrite），`scripts/verify-admin-split.mjs` 挂入 build
+  验证用户 bundle 不含 admin 代码；登录角色落点 admin → `/admin/`（LoginView）。
 - `stores/` — Pinia：`auth.ts`（JWT access token + role/mustChangePassword）、`wiki.ts`、`chat.ts`
   （对话页响应式投影：纯 mutation；视图模型类型经 `chat/projection.ts` 再导出）、`fileTabs.ts`
   （会话沙箱 lab 文件 tab，#793 起 root=lab、切会话即换树）。
@@ -161,7 +171,7 @@ maxConcurrentRuns 或全局 RUNNER_MAX_CONCURRENT_RUNS]）· `5xxxx` chat/pairin
   `restOutbox.ts`（#779 story 12 断线排队：sessionStorage 落盘、50 上限丢最旧、按序幂等 flush）/
   `attachments.ts`（采集/校验纯函数，发送经 multipart 上传换 attachmentIds）；
   `teamProjection.ts`（#786 teammate 投影，TeamSessionsView 用）。
-- `views/` — 六页：`LoginView` / `ContainersView` / `ChatView`（REST+SSE 编排壳）/ `WikiView` / `ModelView` / `AdminUsersView`。
+- `views/` — 用户面板五页：`LoginView` / `ContainersView` / `ChatView`（REST+SSE 编排壳）/ `WikiView` / `ModelView`（AdminUsersView 等 admin 页随迁 `admin/views/`，#800）。
 - `components/` — `FileTree` / `MdEditor`（Typora 式实时渲染）/ `WikiGraph`（obsidian 风格图谱）/
   ChatView 哑组件族（props-in/emits-out，零协议 import：`ChatSidebar`（会话扁平列表 + lab 文件树）/
   `ChatHeader`/`ChatStream`/`ChatComposer`/`ChatMessageItem`/`ThinkingCard`/`ToolLine`/`ApprovalCard`/`ApprovalDock`

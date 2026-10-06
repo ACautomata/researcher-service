@@ -1,6 +1,6 @@
 // 路由表 + 全局导航守卫（spec §9.1/§9.2：登录页骨架 + 未登录重定向）。
-// #340-D：admin 账号管理页 `/admin/users`（#328）——首例 meta.requiresAdmin 守卫（admin-only
-// nav 条件渲染 + 非 admin 重定向 `/`，消费 `me.role`）。
+// #800：admin 运营面整体迁入 /admin/ 子应用（@/admin/router，decideAdminGuard 守卫）——
+// 主面板路由零 admin 残留，本文件守卫不再判角色（requiresAdmin 语义随迁移移除）。
 import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 
@@ -50,34 +50,16 @@ export const routes: RouteRecordRaw[] = [
   },
   // Figure Editor（F1，docs/figure-editor/reconnaissance.md）：面板内图片/图表编辑正式模块。
   // Path A V1 = Vue shell + 后续 same-origin SVG-Edit iframe；常规受保护路由，不做 capability
-  // 门控——F2/F3 落地前直达占位页（非 404），与 admin 路由同理：入口常显只是 UI。
+  // 门控——F2/F3 落地前直达占位页（非 404）。
   {
     path: '/figure-editor',
     name: 'figure-editor',
     component: () => import('@/views/FigureEditorView.vue'),
     meta: { requiresAuth: true },
   },
-  // #328：顶层路由（无 /admin 嵌套壳）；meta.requiresAdmin 首例——非 admin 重定向 /
-  {
-    path: '/admin/users',
-    name: 'admin-users',
-    component: () => import('@/views/AdminUsersView.vue'),
-    meta: { requiresAuth: true, requiresAdmin: true },
-  },
-  {
-    path: '/admin/trace-logs',
-    name: 'admin-trace-logs',
-    component: () => import('@/views/TraceLogsView.vue'),
-    meta: { requiresAuth: true, requiresAdmin: true },
-  },
-  // #761：OpenAPI 文档面（Swagger UI）——admin-only（后端 /api/docs 双层门控；浏览器地址栏
-  // 进不了 Bearer header，故经本视图 apiFetch 认证链消费 openapi.json 并渲染）。
-  {
-    path: '/admin/docs',
-    name: 'admin-docs',
-    component: () => import('@/views/ApiDocsView.vue'),
-    meta: { requiresAuth: true, requiresAdmin: true },
-  },
+  // #800：admin 运营面（账号管理/白名单/审计/Usage/内容消息/API 文档）整体迁入 admin 子应用
+  // （/admin/ MPA 入口：生产 nginx try_files → admin.html；dev/preview 由 vite 插件 rewrite）。
+  // 主路由零 /admin/* 残留——用户 bundle 产物级不含 admin 代码。
   {
     path: '/:pathMatch(.*)*',
     name: 'not-found',
@@ -102,24 +84,21 @@ router.beforeEach(async (to) => {
   if (to.name === 'login' && auth.isAuthenticated) {
     return { name: 'containers' }
   }
-  return decideGuard(!!to.meta?.requiresAuth, auth, !!to.meta?.requiresAdmin)
+  return decideGuard(!!to.meta?.requiresAuth, auth)
 })
 
 // 守卫决策（纯函数）：受保护路由 + 未认证时，仅 refreshExhausted（refresh 端点确认 cookie 失效）
 // 才跳登录；瞬态（token 空 + !refreshExhausted，如 forceRefresh 遇网络瞬态失败、cookie 仍可能有效）
 // 放行——让首个 API 请求的 401 刷新链兜底重试，而非把 cookie 仍有效的用户冤枉踢下线（PR #370
-// 第四轮 #10 P2）。requiresAdmin 路由（#340-D）：已认证但非 admin → 重定向 `/`（me.role 判别；
-// 角色误判/未拉到 me 时交 API 10004 兜底）。非受保护路由 / 已认证 → 放行。
+// 第四轮 #10 P2）。非受保护路由 / 已认证 → 放行。
+// #800：requiresAdmin 语义随 admin 路由整体迁入 /admin/ 子应用（decideAdminGuard），主面板
+// 守卫不再判角色。
 export function decideGuard(
   requiresAuth: boolean,
-  auth: { isAuthenticated: boolean; refreshExhausted: boolean; role: string },
-  requiresAdmin = false,
-): { name: 'login' } | { name: 'containers' } | undefined {
+  auth: { isAuthenticated: boolean; refreshExhausted: boolean },
+): { name: 'login' } | undefined {
   if (!requiresAuth) return undefined
-  if (auth.isAuthenticated) {
-    if (requiresAdmin && auth.role !== 'admin') return { name: 'containers' }
-    return undefined
-  }
+  if (auth.isAuthenticated) return undefined
   if (auth.refreshExhausted) return { name: 'login' }
   return undefined // 瞬态：放行，交 apiFetch 401 刷新链
 }

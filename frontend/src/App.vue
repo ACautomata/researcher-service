@@ -1,6 +1,6 @@
 <script setup lang="ts">
-// #340-D（#328）：admin-only nav 条件渲染——仅 me.role==='admin' 时显示「账号管理」入口。
-// 守卫本身（meta.requiresAdmin）负责兜底，nav 只是入口隐藏。
+// #800：用户面板壳——admin 入口收敛为单一「运营面板」链接（跨应用 <a href="/admin/">，
+// 守卫在 admin 子应用 decideAdminGuard）；isAdmin 仅控制入口显隐，不判数据面（后端 10004 兜底）。
 import { computed, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
@@ -38,9 +38,9 @@ async function handleLogout(): Promise<void> {
       <router-link to="/models">Model 配置</router-link>
       <!-- Figure Editor（F1，docs/figure-editor/reconnaissance.md）：常规入口，登录即见（非 admin-only、非 flag-gated）。 -->
       <router-link to="/figure-editor" data-test="nav-figure-editor">Figure Editor</router-link>
-      <router-link v-if="isAdmin" to="/admin/users" data-test="nav-admin-users">账号管理</router-link>
-      <router-link v-if="isAdmin" to="/admin/trace-logs" data-test="nav-trace-logs">内容消息</router-link>
-      <router-link v-if="isAdmin" to="/admin/docs" data-test="nav-admin-docs">API 文档</router-link>
+      <!-- #800：admin 运营面整体迁入 /admin/ 子应用（独立 MPA 入口）——用户面板 nav 只留
+           单一入口（跨应用普通 <a>，非 router-link）；子页面导航归 admin 壳自身。 -->
+      <a v-if="isAdmin" href="/admin/" class="nav-admin" data-test="nav-admin-panel">运营面板</a>
       <button
         type="button"
         class="nav-logout"
@@ -86,6 +86,10 @@ async function handleLogout(): Promise<void> {
 .app-nav a.router-link-active {
   color: var(--el-color-primary);
   font-weight: 600;
+}
+/* #800：跨应用入口（运营面板）无 router-link-active 态，hover 与导航同风格 */
+.app-nav a.nav-admin:hover {
+  color: var(--el-color-primary);
 }
 .nav-brand {
   font-size: 15px;
