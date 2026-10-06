@@ -133,8 +133,3 @@ export async function buildRewindPreview(
     execCrossed,
   }
 }
-
-// 缺省摘要（filejournal 服务未装配的降级面——RewindPreview 形状单一来源）。
-export function emptyRewindPreview(anchor: string): RewindPreview {
-  return { anchor, revertOps: 0, pathSample: [], pathTotal: 0, execCrossed: [] }
-}

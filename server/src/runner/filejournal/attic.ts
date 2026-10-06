@@ -69,7 +69,7 @@ export class AtticStore {
     return entry?.data ?? null
   }
 
-  // blob 键存在性（GC/refcount 与失联检出用——不搬字节）。
+  // blob 键存在性（观测面——测试断言用；生产 GC 走 listBlobShas 差集、失联检出走 getBlob null）。
   async hasBlob(container: string, sha256: string): Promise<boolean> {
     return (await this.primitives.getArchive(container, atticBlobPath(sha256))) !== null
   }

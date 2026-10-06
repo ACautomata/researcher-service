@@ -645,6 +645,9 @@ export class SessionService {
     // 截断过度逆放。锁内重跑 anchorForRewind：被先行 rewind 归档的锚点同拒 90002。
     // fileRewind 未注 runRewindExclusive（旧装配面）= 无锁直跑（单端语义不变）。
     const run = async (): Promise<RewindResult> => {
+      // 锁内重验 run 终态（排队等锁期间新 run 可插入——sendMessage 门禁放行、checkpoint 随
+      // 执行落账；获锁后归档其中间 checkpoint = 误撤在飞 run 面）。锁外首验为便宜拒绝。
+      this.requireTerminal(sessionId)
       const rows = await this.listHistoryRows(sessionId)
       const { anchor, parentOf } = await this.anchorForRewind(sessionId, rows, p.messageId)
       const anchorChain = ancestorChainOf((id) => parentOf.get(id) ?? null, anchor)

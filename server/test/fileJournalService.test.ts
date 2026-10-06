@@ -449,6 +449,22 @@ describe('FileJournalService（#782）', () => {
     expect(fs.trees.get(CONTAINER)!.get('/lab/fresh.txt')?.toString()).toBe('fresh')
   })
 
+  it('boot 水位 null 无短路：链内正常写行保护（从未 rewind 会话重启不误撤 /lab）', async () => {
+    await seedSession({ activeCheckpointId: 'ckB' })
+    const b = backend()
+    // 从未 rewind（水位 null）的正常会话：链内 completed 行 + teammate 面行（∉ chain）+ pending ''
+    expect((await b.write('/lab/normal.txt', 'keep')).error).toBeUndefined()
+    await prisma.fileJournal.update({
+      where: { sessionId_seq: { sessionId: SESSION, seq: 1 } },
+      data: { checkpointId: 'ckA' }, // ∈ chain(ckB)——正常 completed 行
+    })
+    await svc.reconcileOnBoot()
+    // 链内正常行不动（水位 null 短路会把整会话 /lab 全量逆放 = 数据破坏）
+    const row = await prisma.fileJournal.findFirstOrThrow({ where: { sessionId: SESSION, path: 'normal.txt' } })
+    expect(row.fileRevertedAt).toBeNull()
+    expect(fs.trees.get(CONTAINER)!.get('/lab/normal.txt')?.toString()).toBe('keep')
+  })
+
   it('boot 续放深度护栏：残集超限跳过式处置（resumedDegraded——boot 面对齐 planRevert 降级语义）', async () => {
     await seedSession()
     const tiny = new FileJournalService({

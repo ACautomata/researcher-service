@@ -122,7 +122,8 @@ export class Reconciler {
   //   未归档 ∧ seq > 水位 ∧ ∉ chain：中断续放面——chain 过滤防 (tN,tN+1] 锚链内新写误撤；
   //     teammate 行（checkpointId 恒 ∉ leader chain）与 pending '' 行在此被 boot 拾起（恒
   //     逆放保守向提前收口 + 审计留痕）。
-  // 水位 null：全量未处置面（归档决策行 + 未归档保守向行）。
+  // 水位 null：归档决策面 + 未归档 ∉ chain 面（从未 rewind 会话水位恒 null——chain 过滤
+  // 保护链内正常行，无水位短路）。
   // 深度护栏：残集超限 → 跳过式处置（markReverted 打标，续放不再拾起——对齐 planRevert
   // degraded 语义「文件保持现状」）+ 计数入审计域（ReconcilerDeps.depthLimit）。
   private async resumeRevert(
@@ -144,7 +145,9 @@ export class Reconciler {
         },
         orderBy: { seq: 'desc' },
       })
-    ).filter((r) => r.archivedAt !== null || watermark === null || chain === null || !chain.has(r.checkpointId))
+      // 无水位短路：归档行恒拾起（决策面）；未归档行恒交 chain 判定（∈ chain 正常行保护——
+      // 从未 rewind 会话水位恒 null，短路会把链内 completed 行全量逆放 = 数据破坏）
+    ).filter((r) => r.archivedAt !== null || chain === null || !chain.has(r.checkpointId))
     if (residual.length === 0) return { resumedReverted: 0, resumedMissing: 0, resumedDegraded: 0 }
     if (residual.length > this.deps.depthLimit) {
       await this.deps.io.markReverted(sessionId, residual.map((r) => r.seq), new Date())
