@@ -1,5 +1,8 @@
 # AutoFigure V1 —— ticket 计划
 
+> **superseded（#791）**：本文档为 sidecar 集成时代的票史档案；现役拆票 = GitHub issue
+> #744 v2 §10（#791 起六票）。按 #744 §8 保留为历史档案，不删。
+
 > 状态：**已批准，待发布**。本文档固化 AutoFigure V1 的 ticket 分解：DAG / blockers / 执行波次 / 工作流。
 > 每个 ticket 一个独立文件（`docs/autofigure/tickets/Txx-*.md`）。
 > 发布方式：由用户手动执行 `gh` 逐票发布（当前环境未安装 `gh` CLI），统一加 `ready-for-agent` triage 标签。

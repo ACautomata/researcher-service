@@ -18,9 +18,7 @@ describe('页面路由按需加载', () => {
       'categories',
       'chat',
       'containers',
-      // 字典序：'-'（0x2d）先于 's'，故 'figure-editor' 排在 'figures' 前。
       'figure-editor',
-      'figures',
       'legal-document',
       'login',
       'models',

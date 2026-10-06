@@ -83,7 +83,7 @@ panel-frontend 容器（nginx，唯一对宿主暴露，loopback:18080）
 | `PANEL_PUBLIC_ORIGIN` | `https://researcher.acautomata.top` | 面板对外 origin（隧道连网关 + 容器 allowedOrigins 强制条目，server 生产必填） |
 | `LLM_API_KEY` | 面板共享 LLM key | 注入 OpenClaw 容器 |
 | `CREDENTIAL_ENCRYPTION_KEYS` | base64url 32 字节 | 凭证 AES-256-GCM 密钥环 |
-| `AUTOFIGURE_LLM_KEY`（可选） | AutoFigure 生成凭证 | **仅 `AUTOFIGURE_ENABLED=true` 时必需**（T11）；flag 关（生产默认）空串安全——缺失不导致部署失败（config 只在 enabled && production 下 fail-fast）。经 CD 渲染进 `.env` 注入 server，不落盘 git/不进日志 |
+| ~~`AUTOFIGURE_LLM_KEY`~~（**已退役，#791**） | ~~AutoFigure 生成凭证~~ | 随 sidecar 生成链路换轨退役（config.autofigure 读取面已删，server 不再消费任何 AUTOFIGURE_* 键）；新面板级生成配置归插件 configSchema（#744 §5，票 4）。正式清退归票 6 |
 | `API_DOCS_ENABLED`（可选） | `true`（默认） | OpenAPI/Swagger 文档面（`/api/docs`，#761）：admin-only（requireAuth + requireAdmin）zod 生成式文档。显式 `false` → server 不装配 docs 路由（整树 90005） |
 | `RESEARCHER_REPO`（可选） | 克隆 URL | 构建机 clone home 模板（默认 `https://github.com/ACautomata/researcher.git`；模板入 server 镜像，不再落宿主） |
 
@@ -127,35 +127,23 @@ python3 -c "import base64,os;print(base64.urlsafe_b64encode(os.urandom(32)).deco
 > 2026-08-01 的「/fleet 缺挂载 → gateway 崩溃循环」故障属于旧 bind 时代契约（宿主 fleet 根须与
 > compose 挂载同源）；挂载已删除，此故障面不再存在。
 
-## AutoFigure 生产接线与运维（T11，docs/autofigure/tickets/T11-production-packaging-cd.md）
+## AutoFigure 生产接线与运维（T11，docs/autofigure/tickets/T11-production-packaging-cd.md）——已换轨退役（#791）
 
-生产栈额外起 **panel-autofigure** 服务（第 4 镜像，镜像本体 T08）：
+> **已换轨退役（#791）**：本节为 sidecar 时代历史档案。server 消费端全量退役——`AUTOFIGURE_*`
+> env 注入（config.autofigure 读取面删除）、`AUTOFIGURE_ENABLED` flag 门（figures 路由已无常驻
+> 90005 语义）、`X-Autofigure-Api-Key` 凭证注入链均已删除；figures = 常驻读面（无 flag 门），
+> 生成入口 = 会话内 figure 工具（#744 §4.1，票 4 接线）。生产 compose 的 **panel-autofigure
+> 服务段暂留**（无现役消费者），`deploy/autofigure-sidecar` 目录与服务段的正式删除归票 6
+>（#744 §10）；`PANEL_AUTOFIGURE_IMAGE` 覆盖位随服务段同批清退。
 
-- **镜像管线**：`autofigure` 经既有 CD 管线构建推送（`:latest` + `:<CI head_sha>`），构建源
-  `deploy/autofigure-sidecar`（**vendored T08 源，不 fetch mutable upstream**）；许可/署名文件
-  （`LICENSE` / `CITATION.cff` / `CITATION_AND_ATTRIBUTION.md` / `TRADEMARK.md`）构建期入镜像，
-  Dockerfile 构建期断言（缺失即构建失败 → CD 红）。
-- **接线**：仅挂 `panel-net`、**无 ports、零 host 挂载**（ADR 0013）——宿主/浏览器永不直接访问，
-  只经 server 内部 URL `http://autofigure:8080` 访问；`/health` 容器 healthcheck（无域信息/凭证的
-  存活性探测）；`mem_limit: 2g`（T10/T11 judgement call，真实生成 = Playwright 渲染 + LLM 调用
-  内存上限）；`restart: unless-stopped`。
-- **凭证**：`AUTOFIGURE_LLM_KEY` 经 CD 渲染 `.env` → `env_file` 注入 server（可选 secret，见上方
-  清单），由 server 经 `X-Autofigure-Api-Key` header 注入 sidecar；不落盘 git/不入日志/不 commit。
-- **`AUTOFIGURE_ENABLED` 生产默认关**（compose 显式 `${AUTOFIGURE_ENABLED:-false}`），须宿主 `.env`
-  显式设 `true` 才开启（分阶段发布 / 必要时快速关闭）。flag 关 → server **不装配** AutoFigure runtime
-  （不启动 runner、不要求 key/sidecar 可达，figures 路由 90005）。
-- **feature disabled 语义（精确）**：`docker compose up -d` 仍会启动 autofigure 容器（compose 无
-  profile/条件服务机制），但 flag 关时 server **不使用**它——`/api/health`（面板应用健康）与生成路由
-  **不依赖 sidecar 运行状态**（sidecar 容器 unhealthy/未就绪不影响 panel 健康门，`depends_on` 仅
-  `service_started` 启动序，非 `service_healthy`）。注意部署面语义：autofigure 是栈内声明服务，CD 的
-  `docker compose pull`/`up` 仍会部署它——sidecar 镜像不可拉或容器 start 失败会使 CD/up 变红，
-  **这与 flag 无关**（flag 关并不豁免该服务被部署）。**「flag 关 sidecar 不运行」是不准确的表述**：
-  容器在跑，只是不被面板使用。
-- **feature enabled 语义**：flag 开 → sidecar 不可用经既有部署面探针检测——`docker compose ps` 显示
-  `unhealthy`（healthcheck `/health`）；生成请求失败走 T07 规范化信封码（不模糊 500、不抛 raw
-  Python/provider error）。**不扩 `/api/health`**（该端点保持静态 `{status:'ok'}`，不并入 sidecar 状态）。
-- **回滚**：`.env` 设 `PANEL_AUTOFIGURE_IMAGE=ghcr.io/<owner>/<repo>/autofigure:<上一个 sha>`（覆盖位
-  对齐 `PANEL_*_IMAGE` 先例）重启即回滚 sidecar；server/前端回滚照常。
+- **sidecar 服务段（暂留，历史形状）**：仅挂 `panel-net`、无 ports、零 host 挂载（ADR 0013）；
+  `/health` 容器 healthcheck；`mem_limit: 2g`（T10/T11 judgement call）；`restart: unless-stopped`；
+  内部 URL `http://autofigure:8080`。镜像管线 = CD 既有管线构建推送（`:latest` + `:<CI head_sha>`，
+  构建源 `deploy/autofigure-sidecar` vendored T08 源，不 fetch mutable upstream；许可/署名文件
+  构建期入镜像 + Dockerfile 断言，缺失即 CD 红）。
+- **部署面注意（服务段存续期仍为真）**：autofigure 是栈内声明服务，CD 的 `docker compose
+  pull`/`up` 仍会部署它——sidecar 镜像不可拉或容器 start 失败会使 CD/up 变红（与面板是否使用
+  无关）。
 
 > **验证状态**：镜像构建/推送与运行时健康行为属 CD/CI 拥有（本机无 Docker daemon）。T11 本地验证仅
 > 静态（compose config 解析、YAML 结构、image/env 插值、server 回归），**不声称本地构建/推送/运行时

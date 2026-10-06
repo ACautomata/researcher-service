@@ -1,14 +1,14 @@
-// seam: figures API —— AutoFigure 域 REST 投影（T09）。
-// 契约对齐 docs/autofigure/tickets/T09-vue-figure-journey.md + 后端 figures/routes（T01–T06）：
-// 幂等创建带 Idempotency-Key 头、#312 信封解包、PNG 原生字节 vs 信封错误按 Content-Type 判别。
+// seam: figures API —— AutoFigure 域 REST 读面投影（#791 · #744 v2 §7/§8 收缩后形状）。
+// 契约对齐后端 figures/routes（读/下载/SVG 面）：#312 信封解包、PNG/SVG 原生响应 vs 信封错误
+// 按 Content-Type 判别；创建端点已随 GenerationJob 退役（工具是唯一生成入口），无删除/创建导出。
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { useAuthStore } from '@/stores/auth'
 import { ApiError, apiFetch } from '@/api/client'
 import {
-  createFigure,
   getFigureDetail,
   getFigurePngBlob,
+  getFigureSvgBlob,
   listFigures,
 } from '@/api/figures'
 
@@ -24,53 +24,16 @@ function mockResp(body: unknown, status = 200, contentType = 'application/json')
 
 const SAMPLE = {
   figureId: 'f-1',
-  jobId: 'j-1',
   prompt: 'draw a pipeline',
-  status: 'queued',
+  sessionId: 's-1',
   createdAt: '2026-08-01T00:00:00Z',
 }
 
-describe('figures api', () => {
+describe('figures api（读面）', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
     useAuthStore().token = 't'
     vi.stubGlobal('fetch', vi.fn())
-  })
-
-  it('createFigure POSTs prompt body with Idempotency-Key header', async () => {
-    ;(globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
-      mockResp({ code: 0, message: 'ok', data: { ...SAMPLE, status: 'queued' } }),
-    )
-    const result = await createFigure('draw a pipeline', 'key-1')
-    expect(result.figureId).toBe('f-1')
-    const [path, init] = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0]
-    expect(path).toBe('/api/v1/figures')
-    expect(init.method).toBe('POST')
-    expect(init.headers).toBeInstanceOf(Headers)
-    expect(init.headers.get('Idempotency-Key')).toBe('key-1')
-    expect(init.body).toBe(JSON.stringify({ prompt: 'draw a pipeline' }))
-  })
-
-  it('createFigure throws ApiError 70041 on idempotency conflict envelope', async () => {
-    ;(globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
-      mockResp({
-        code: 70041,
-        message: '幂等键已用于不同输入，请勿复用同一 Idempotency-Key 提交不同创建载荷',
-        data: null,
-      }),
-    )
-    const err = await createFigure('other', 'key-1').catch((e) => e)
-    expect(err).toBeInstanceOf(ApiError)
-    expect((err as ApiError).code).toBe(70041)
-    expect((err as ApiError).message).toContain('幂等键已用于不同输入')
-  })
-
-  it('createFigure throws ApiError 90002 on validation envelope (missing key)', async () => {
-    ;(globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
-      mockResp({ code: 90002, message: '参数校验失败', data: null }),
-    )
-    const err = await createFigure('p', '').catch((e) => e)
-    expect((err as ApiError).code).toBe(90002)
   })
 
   it('listFigures GETs /api/v1/figures and unwraps envelope array', async () => {
@@ -88,12 +51,12 @@ describe('figures api', () => {
       mockResp({
         code: 0,
         message: 'ok',
-        data: { ...SAMPLE, status: 'succeeded', errorMessage: null, updatedAt: '2026-08-01T00:01:00Z' },
+        data: { ...SAMPLE, previewReady: true, updatedAt: '2026-08-01T00:01:00Z' },
       }),
     )
     const detail = await getFigureDetail('f-1')
     expect(detail.figureId).toBe('f-1')
-    expect(detail.status).toBe('succeeded')
+    expect(detail.previewReady).toBe(true)
     const [path] = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0]
     expect(path).toBe('/api/v1/figures/f-1')
   })
@@ -106,33 +69,33 @@ describe('figures api', () => {
     expect(path).toBe('/api/v1/figures/f-1/png')
   })
 
-  it('getFigurePngBlob throws ApiError 70042 on JSON envelope error', async () => {
-    ;(globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
-      mockResp({ code: 70042, message: 'Figure 尚未生成完成，请稍后再试', data: null }),
-    )
-    const err = await getFigurePngBlob('f-1').catch((e) => e)
-    expect(err).toBeInstanceOf(ApiError)
-    expect((err as ApiError).code).toBe(70042)
+  it('getFigureSvgBlob GETs /:id/svg；download=true 追加 ?download=1', async () => {
+    ;(globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(mockResp(null, 200, 'image/svg+xml'))
+    await getFigureSvgBlob('f-1')
+    await getFigureSvgBlob('f-1', true)
+    const calls = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls
+    expect(calls[0][0]).toBe('/api/v1/figures/f-1/svg')
+    expect(calls[1][0]).toBe('/api/v1/figures/f-1/svg?download=1')
   })
 
-  it('getFigurePngBlob throws ApiError 70043 when PNG unavailable', async () => {
+  it('getFigurePngBlob throws ApiError 70043 when artifact unavailable', async () => {
     ;(globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
-      mockResp({ code: 70043, message: 'Figure 无可用 PNG（生成失败或产物缺失）', data: null }),
+      mockResp({ code: 70043, message: 'Figure 产物不可用', data: null }),
     )
     const err = await getFigurePngBlob('f-1').catch((e) => e)
     expect((err as ApiError).code).toBe(70043)
   })
 
-  it('module surface exports no delete/remove operation (V1 no-delete)', async () => {
+  it('module surface exports no create/delete operation（创建端点退役，工具是唯一生成入口）', async () => {
     const mod = await import('@/api/figures')
     const names = Object.keys(mod)
-    expect(names.some((k) => /delete|remove/i.test(k))).toBe(false)
+    expect(names.some((k) => /delete|remove|create/i.test(k))).toBe(false)
   })
 })
 
-// T09 Spec-1（二进制 body 守卫）：真实 Response 严格建模 bodyUsed/Content-Type——PNG 成功经 apiFetch
+// Spec-1（二进制 body 守卫）：真实 Response 严格建模 bodyUsed/Content-Type——PNG 成功经 apiFetch
 // 后 body 不得被消费（后续 blob() 可用）；getFigurePngBlob 成功 blob() 原生字节；JSON 错误信封保留
-// 70040/70042/70043 精确 code；JSON 10001 信封仍触发既有刷新链（auth 行为无回归）。
+// 70040/70043 精确 code；JSON 10001 信封仍触发既有刷新链（auth 行为无回归）。
 describe('getFigurePngBlob binary body safety（真实 Response）', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
@@ -172,10 +135,9 @@ describe('getFigurePngBlob binary body safety（真实 Response）', () => {
     expect(blob.size).toBe(8)
   })
 
-  it('JSON 错误信封保留 70040/70042/70043 精确 code', async () => {
+  it('JSON 错误信封保留 70040/70043 精确 code', async () => {
     const cases: Array<[number, string]> = [
-      [70042, 'Figure 尚未生成完成，请稍后再试'],
-      [70043, 'Figure 无可用 PNG（生成失败或产物缺失）'],
+      [70043, 'Figure 产物不可用'],
       [70040, 'figure 不存在或无权访问'],
     ]
     for (const [code, message] of cases) {

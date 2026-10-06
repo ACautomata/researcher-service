@@ -7,7 +7,6 @@ import { config } from './config'
 import { assembleFleet } from './containers/fleetAssembly'
 import { assembleSandboxes } from './sandboxes/assembly'
 import { assembleWikiContainers } from './wikiContainers/assembly'
-import { assembleAutoFigureRuntime } from './figures/assembly'
 import { assembleTunnelServer } from './chat/tunnelAssembly'
 import { assembleRunner } from './runner/assembly'
 import { WikiUpdateRunService } from './wiki/updateRun'
@@ -33,17 +32,6 @@ async function main(): Promise<void> {
   // ensure 消费方 = wiki 域 REST（每操作前置）与 runner（run 前）；remove = 用户级联删/T0
   // 清理面（用户删除端点未落地）；永久容器无闲置 sweeper。
   const wikiContainers = assembleWikiContainers()
-  // AutoFigure 生成运行时（T07）：config → 生产 HTTP adapter（私有 sidecar）→ T03 runner。
-  // flag 关 → null（不构造 adapter、不启动 pump；面板启动/health 独立于 sidecar）。enabled →
-  // 构造 adapter + 启动 runner pump（queue 由 T03 runner 内部创建）。handle 供优雅关闭 await。
-  // T04 超时（config.autofigure.jobTimeoutMs）在此显式传入——T07 不引入 adapter-local timeout。
-  const autofigure = assembleAutoFigureRuntime({
-    enabled: config.autofigure.enabled,
-    prisma,
-    sidecarUrl: config.autofigure.sidecarUrl,
-    llmKey: config.autofigure.llmKey,
-    jobTimeoutMs: config.autofigure.jobTimeoutMs,
-  })
   // 集中式 runner（#777 · #747 A 节）：RunService + BullMQ worker。事件经 eventHub 扇出
   //（run 域事件目录）；REST 入队面归 #778 会话域（本装配 = 进程内就绪）。BullMQ 连接 lazy
   //（Redis 不可达不挂控制面，add 超时兜底在队列层——fleet 队列先例同形态）。
@@ -154,14 +142,11 @@ async function main(): Promise<void> {
     // 无条件挂载，装配层无注入。
     // files（#589 · ADR 0012）：统一文件 CRUD 经 Docker getArchive/putArchive/exec rm。
     files: { archive: fleet.archive },
-    // figures（AutoFigure T01）：flag 开才装配（config.autofigure.enabled）——flag 关不注入 →
-    // 路由未挂载（/api/v1/figures → 90005）。FiguresRouterDeps 为空（路由只依赖 req.prisma +
-    // 认证身份），装配形态 `{}` 表达「已启用」。生成 runner（T03）与生产 HTTP adapter（T07）的
-    // 接线不走 app deps——见下方 assembleAutoFigureRuntime（config → adapter → T03 runner 启动）。
-    figures: config.autofigure.enabled ? {} : undefined,
+    // figures 读面（#791）：无条件挂载（资产常驻，读面不设 flag 门——#744 §11.3）；生成执行面
+    // 归会话 run 域（#744 §5.2），无装配项。
     // docs（#761）：flag 开才装配（config.apiDocs.enabled）——flag 关不注入 → 路由未挂载
     //（/api/docs → 90005）。DocsRouterDeps 为空（文档启动期静态构建，路由只依赖认证身份），
-    // 装配形态 `{}` 表达「已启用」（对齐 figures 装配注释先例）。
+    // 装配形态 `{}` 表达「已启用」（对齐 models/files 装配注释先例）。
     docs: config.apiDocs.enabled ? {} : undefined,
     // events（#773）：SSE 事件流（/api/v1/events）。StreamHub 单例注入；
     // 心跳 20s 用缺省（HEARTBEAT_MS，路由层唯一默认值声明处）。
@@ -191,13 +176,11 @@ async function main(): Promise<void> {
   })
 
   // 优雅关闭：drain BullMQ worker（在飞 provisioning 完成或标 ERROR）；runner 队列 drain
-  //（在飞 run 完成或 job failed——run 执行错误已在 RunService 消化为终态事件）；AutoFigure
-  // runner（T07：停 pump + 等待在飞生成 settle——T03 close 语义，见 runner.ts）。
+  //（在飞 run 完成或 job failed——run 执行错误已在 RunService 消化为终态事件）。
   const shutdown = async (): Promise<void> => {
     await fleet.close().catch(() => {})
     await sandboxes.close().catch(() => {})
     await wikiContainers.close().catch(() => {})
-    await autofigure?.close().catch(() => {})
     await runner.close().catch(() => {})
     // 先终止活动隧道（http.Server.close 会等升级后的 WS 连接自然断开——有浏览器持隧道时挂起）
     tunnel.close()

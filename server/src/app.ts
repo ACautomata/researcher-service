@@ -14,7 +14,7 @@ import {
   type ProviderEndpointsRouterDeps,
 } from './models/endpoints'
 import { createFilesRouter, type FilesRouterDeps } from './files/routes'
-import { createFiguresRouter, type FiguresRouterDeps } from './figures/routes'
+import { createFiguresRouter } from './figures/routes'
 import { createDocsRouter, type DocsRouterDeps } from './openapi/routes'
 import { createEventsRouter, type EventsRouterDeps } from './events/routes'
 import { createSessionsRouter, type SessionsRouterDeps } from './sessions/routes'
@@ -46,13 +46,8 @@ export interface AppDeps {
   // 错误（静默禁用文件 CRUD 不安全），由下方条件挂载（models 自 #775 起无条件挂载，files 仍
   // 依赖 archive 注入故保持条件挂载先例）。
   files?: FilesRouterDeps
-  // figures 接缝（AutoFigure T01，docs/autofigure/tickets/T01-authenticated-figure-creation.md）：
-  // 路由只依赖 req.prisma + 认证身份。注入即挂载——flag 门在装配层 server.ts 消费
-  // config.autofigure.enabled 决定是否注入；缺省 = 不挂 figures 路由（/api/v1/figures → 90005）。
-  figures?: FiguresRouterDeps
-  // docs 接缝（#761）：OpenAPI/Swagger 文档面（/api/docs）。注入即挂载——flag 门（API_DOCS_ENABLED）
-  // 在装配层 server.ts 消费；缺省 = 不挂 docs 路由（/api/docs → 90005）。门控在路由内
-  //（requireAuth + requireAdmin），app.ts 只认 deps 注入、不读 config（对齐 figures 先例）。
+  // figures 读面（#791 · #744 §11.3 资产常驻）：无 flag 门（历史图卡渲染不受插件启用位影响），
+  // 无条件挂载——只依赖 req.prisma + 认证身份（对齐 models 无条件挂载先例）。
   docs?: DocsRouterDeps
   // events 接缝（#773，#747 C 节）：SSE 事件流（GET /api/v1/events）。注入即挂载——
   // 生产 server.ts 装配 StreamHub 单例；缺省 = 不挂（/api/v1/events → 90005，对齐
@@ -73,7 +68,7 @@ export interface AppDeps {
 }
 
 // createApp 工厂：PrismaClient 经依赖注入，测试可传 test DB（接缝 #2）。
-export function createApp({ prisma, orchestrator, runtime, wiki, models, providerEndpoints, files, figures, docs, events, sessions, attachments, plugins }: AppDeps): Application {
+export function createApp({ prisma, orchestrator, runtime, wiki, models, providerEndpoints, files, docs, events, sessions, attachments, plugins }: AppDeps): Application {
   const app = express()
   // wiki 内容契约无大小上限（codex PR#346）：挂载路径内请求先走 5mb limit，其余端点仍 256kb。
   // 须先于全局 parser —— body-parser 对已解析 body（req._body）会跳过，故 wiki 命中后不二次解析。
@@ -121,11 +116,8 @@ export function createApp({ prisma, orchestrator, runtime, wiki, models, provide
   if (files) {
     app.use('/api/v1/containers', createFilesRouter(files))
   }
-  // figures（AutoFigure T01）：存在即挂载（条件挂载——app.ts 只认 deps 注入、
-  // 不读 config；flag 门在装配层 server.ts 由 config.autofigure.enabled 决定是否注入）。
-  if (figures) {
-    app.use('/api/v1/figures', createFiguresRouter(figures))
-  }
+  // figures 读面（#791）：无条件挂载（资产常驻，不设 flag 门——#744 §11.3）。
+  app.use('/api/v1/figures', createFiguresRouter())
   // docs（#761）：存在即挂载（对齐 figures 条件挂载——app.ts 只认 deps 注入、不读 config；
   // flag 门在装配层 server.ts 由 config.apiDocs.enabled 决定是否注入）。
   if (docs) {

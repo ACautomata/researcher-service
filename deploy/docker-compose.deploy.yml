@@ -7,25 +7,13 @@
 # 宿主数据挂载唯一豁免：/var/run/docker.sock（ADR 0013，spec §5.4 已接受等价 root）。
 # （#341 M9：backend 服务退役 Django，切换为 server 服务跑 Express 控制面。）
 #
-# AutoFigure sidecar（T11，docs/autofigure/tickets/T11-production-packaging-cd.md；镜像本体 T08）：
-#   - 第 4 镜像 ghcr.io/acautomata/researcher-service/autofigure（CD 既有管线构建推送，vendored
-#     T08 源，不 fetch mutable upstream；许可/署名文件构建期入镜像，Dockerfile 构建期断言）；
-#   - 仅挂 panel-net、无 ports 无 volumes：私有 sidecar 无宿主端口（grilling §7）、零 host 挂载
-#     （ADR 0013）——宿主/浏览器永不直接访问，只经 server（panel-net 内部）经 X-Autofigure-Api-Key
-#     注入凭证；
-#   - healthcheck：/health 存活性探测（无域信息/凭证），容器内本机探（无宿主端口可依）；
-#   - AUTOFIGURE_ENABLED 生产默认关（显式 ${AUTOFIGURE_ENABLED:-false}）：flag 关 → server 不装配
-#     AutoFigure runtime（不启动 runner、不要求 key/sidecar 可达、figures 路由 90005）、/api/health
-#     独立——sidecar 容器仍随 up -d 启动但未被使用（compose 无 profile/条件服务机制，如实文档化）；
-#     flag 开（宿主 .env 设 true）→ sidecar 故障经 docker compose health（unhealthy）检测，生成失败
-#     走 T07 信封码，不模糊 500；
-#   - 凭证 AUTOFIGURE_LLM_KEY 经 env_file .env 注入（CD 渲染，可选 secret；flag 关空串安全），
-#     由 server 经 X-Autofigure-Api-Key header 注入 sidecar；不落盘/不入日志/不 commit。
+# AutoFigure sidecar（已换轨，#791）：server 侧 env 注入与消费端已全量退役（config.autofigure
+# 删除、figures 读面常驻无 flag 门）——本服务段无任何现役消费者；服务段与
+# deploy/autofigure-sidecar 目录的正式删除归票 6（#744 §10 退役 PR，一次性窗口）。
 #
-# 运行时敏感值（JWT_SECRET / PANEL_PUBLIC_ORIGIN / LLM_API_KEY / CREDENTIAL_ENCRYPTION_KEYS /
-# AUTOFIGURE_LLM_KEY[可选]）
-# 经同目录 .env（env_file）注入，不落盘进 git；非敏感固定项（REDIS_URL/OPENCLAW_TEMPLATE_DIR/端口/
-# AUTOFIGURE_SIDECAR_URL/AUTOFIGURE_JOB_TIMEOUT_MS）直接写在本文件。
+# 运行时敏感值（JWT_SECRET / PANEL_PUBLIC_ORIGIN / LLM_API_KEY / CREDENTIAL_ENCRYPTION_KEYS）
+# 经同目录 .env（env_file）注入，不落盘进 git；非敏感固定项（REDIS_URL/OPENCLAW_TEMPLATE_DIR/端口）
+# 直接写在本文件。AutoFigure 相关键已随消费端退役（#791，见 server env 段注释）。
 #
 # 用法（CD 已自动化；手工排障时参考）：
 #   docker compose -f docker-compose.deploy.yml --env-file .env pull
@@ -85,16 +73,9 @@ services:
       # provision cp 都落在容器私有 /fleet（named volume 拓扑下容器不 bind 宿主树，ADR 0011/0013；
       # 容器重建即空、create 幂等重建）。readFleetRoot 生产校验绝对路径——显式 pin 防相对路径 fallback。
       OPENCLAW_FLEET_ROOT: /fleet
-      # AutoFigure（T11）：sidecar 接线经 panel-net 内部（无宿主端口）。AUTOFIGURE_ENABLED 生产默认
-      # 关（flag 关 → server 不装配 AutoFigure runtime：不启动 runner、不要求 key/sidecar 可达、
-      # figures 路由 90005，/api/health 独立——面板启动/健康不依赖 sidecar）；SIDECAR_URL = 容器内部
-      # 服务名 autofigure:8080（T08 gunicorn 端口）；JOB_TIMEOUT_MS 显式默认 1800000（防空串陷阱，
-      # config.test.ts 有对应用例；生产唯一 AutoFigure 执行超时，不引入第二 timeout）。
-      # AUTOFIGURE_LLM_KEY（可选 secret）经 env_file .env 注入——flag 关空串安全（config 只在
-      # enabled && production 下 fail-fast）。
-      AUTOFIGURE_ENABLED: ${AUTOFIGURE_ENABLED:-false}
-      AUTOFIGURE_SIDECAR_URL: http://autofigure:8080
-      AUTOFIGURE_JOB_TIMEOUT_MS: 1800000
+      # AutoFigure：AUTOFIGURE_* 键注入已随消费端退役（#791——config.autofigure 读取面删除，
+      # sidecar 生成链路全量退役；figures 读面常驻无 flag 门）。正式 env 清退 + sidecar 服务段
+      # 删除归票 6（#744 §10）。
     extra_hosts:
       # Linux host-gateway 映射：server 容器访问宿主 loopback 接口（host.docker.internal）。
       # macOS Docker Desktop 自动提供该名，此处显式声明保证 Linux 生产宿主（BaoTa）可解析。

@@ -10,7 +10,6 @@ import { z } from 'zod'
 import { registry, okEnvelope, LooseData, NullData, ErrorEnvelope, bearerAuth } from './components'
 import {
   containerCreateSchema,
-  figureCreateSchema,
   loginSchema,
   modelProviderWriteSchema,
   passwordChangeSchema,
@@ -553,26 +552,13 @@ register({
   }),
 })
 
-// ---- Figures /api/v1/figures（AutoFigure 域开关；未启用时整树 90005）----
-
-register({
-  method: 'post',
-  path: '/api/v1/figures',
-  tag: 'Figures',
-  summary: '幂等创建 Figure + 1:1 GenerationJob（T01/T02）',
-  auth: 'user',
-  errors:
-    '90002（缺/超长 Idempotency-Key 头（data null）或字段明细）· 70041（同 key 不同输入，幂等冲突）· 10005。',
-  dataNote: 'data: { figure, job } 当前应用级状态；同 key 同输入 → 零写入重放。',
-  headers: z.object({ 'Idempotency-Key': z.string().describe('必填幂等键') }),
-  body: figureCreateSchema,
-})
+// ---- Figures /api/v1/figures（#791 · #744 v2 读面：常驻资产面，无 flag 门）----
 
 register({
   method: 'get',
   path: '/api/v1/figures',
   tag: 'Figures',
-  summary: 'Figure 历史（本人；admin 全部）',
+  summary: 'Figure 资产列表（本人；admin 全部）',
   auth: 'user',
   errors: '10001 · 10005。',
   dataNote: 'data: Figure 列表（createdAt DESC + id DESC；无分页）。',
@@ -582,18 +568,29 @@ register({
   method: 'get',
   path: '/api/v1/figures/{id}',
   tag: 'Figures',
-  summary: 'Figure metadata + 状态（T05）',
+  summary: 'Figure 元数据 + 预览可用性',
   auth: 'user',
   errors: '70040（不存在/越权同码防枚举）· 10005。',
-  dataNote: 'data: metadata + 应用级状态 + 非敏感失败原因。',
+  dataNote: 'data: metadata（prompt/sessionId/createdAt）+ previewReady + updatedAt。',
 })
 
 register({
   method: 'get',
   path: '/api/v1/figures/{id}/png',
   tag: 'Figures',
-  summary: '下载 PNG 字节（T06；成功豁免信封）',
+  summary: '下载预览 PNG 字节（成功豁免信封）',
   auth: 'user',
-  errors: '70040 · 70042（queued/running 未就绪）· 70043（failed/产物缺失）。',
+  errors: '70040 · 70043（产物缺失）。',
   bytes: 'image/png',
+})
+
+register({
+  method: 'get',
+  path: '/api/v1/figures/{id}/svg',
+  tag: 'Figures',
+  summary: 'final SVG 文本（?download=1 → attachment；成功豁免信封）',
+  auth: 'user',
+  errors: '70040 · 70043（产物缺失）。',
+  bytes: 'image/svg+xml',
+  query: z.object({ download: z.string().optional().describe('download=1/true 触发下载') }),
 })

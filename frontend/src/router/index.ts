@@ -48,15 +48,6 @@ export const routes: RouteRecordRaw[] = [
     component: () => import('@/views/ModelView.vue'),
     meta: { requiresAuth: true },
   },
-  // AutoFigure（T09，docs/autofigure/tickets/T09-vue-figure-journey.md）：常规受保护路由，
-  // 不随 capability 门控——flag off 时直达由 AutoFigureView 呈现「功能未启用」（非裸 404），
-  // 与 admin nav（meta.requiresAdmin 守卫兜底）同理：nav 入口隐藏只是 UI，路由守卫不负责 flag。
-  {
-    path: '/figures',
-    name: 'figures',
-    component: () => import('@/views/AutoFigureView.vue'),
-    meta: { requiresAuth: true },
-  },
   // Figure Editor（F1，docs/figure-editor/reconnaissance.md）：面板内图片/图表编辑正式模块。
   // Path A V1 = Vue shell + 后续 same-origin SVG-Edit iframe；常规受保护路由，不做 capability
   // 门控——F2/F3 落地前直达占位页（非 404），与 admin 路由同理：入口常显只是 UI。

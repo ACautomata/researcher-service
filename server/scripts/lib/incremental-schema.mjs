@@ -48,69 +48,52 @@ CREATE TABLE IF NOT EXISTS "figures" (
     "id" TEXT NOT NULL PRIMARY KEY,
     "ownerId" TEXT NOT NULL,
     "prompt" TEXT NOT NULL,
-    "idempotencyKey" TEXT,
-    "xml" TEXT,
+    "svg" TEXT,
     "png" BLOB,
     "evaluation" TEXT,
+    "sessionId" TEXT,
     "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" DATETIME NOT NULL,
     CONSTRAINT "figures_ownerId_fkey" FOREIGN KEY ("ownerId") REFERENCES "users" ("id") ON DELETE CASCADE ON UPDATE CASCADE
 );
-
-CREATE TABLE IF NOT EXISTS "generation_jobs" (
-    "id" TEXT NOT NULL PRIMARY KEY,
-    "figureId" TEXT NOT NULL,
-    "status" TEXT NOT NULL DEFAULT 'queued',
-    "errorMessage" TEXT,
-    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updatedAt" DATETIME NOT NULL,
-    CONSTRAINT "generation_jobs_figureId_fkey" FOREIGN KEY ("figureId") REFERENCES "figures" ("id") ON DELETE CASCADE ON UPDATE CASCADE
-);
-
-CREATE INDEX IF NOT EXISTS "figures_ownerId_idx" ON "figures"("ownerId");
-CREATE UNIQUE INDEX IF NOT EXISTS "generation_jobs_figureId_key" ON "generation_jobs"("figureId");
 `)
 
-  // T02 幂等（grilling §17）：既有 figures 表（T01 前已建）缺 idempotencyKey 列。ADD COLUMN
-  // 非天然幂等（重复执行报 duplicate column），先查 PRAGMA table_info 再补；唯一索引本身
-  // 幂等（IF NOT EXISTS）。fresh 库（上方 CREATE TABLE 已带列）此处列存在 → guard 跳过。
-  const figureCols = db.prepare(`PRAGMA table_info("figures")`).all()
-  if (!figureCols.some((c) => c.name === 'idempotencyKey')) {
-    db.exec(`ALTER TABLE "figures" ADD COLUMN "idempotencyKey" TEXT`)
+  // #791（#747·21 · #744 v2 §5/§8）：AutoFigure 数据模型换轨 —— GenerationJob 退役 + Figure
+  // 改造（xml→svg 列改名落为重建、idempotencyKey/唯一索引退役、sessionId 溯源列新增）。
+  // 零迁移前提（#732：产品未上线，旧 Figure 行不迁移、旧产物不转换，直接换轨删除）→ 旧形状
+  // figures 检测到即 DROP 重建新形状（「空库直建」语义的迁移化表达，#744 §5.1）；执行状态机
+  // 归会话 run 域（#744 §5.2），generation_jobs 无条件 DROP。全程幂等：
+  //   - 旧形状判定 = 有 sessionId 且无 xml 且无 idempotencyKey 之外的一切情况（含表不存在）
+  //   - DROP 重建后二跑：新形状命中跳过；DROP IF EXISTS 对不存在表 no-op
+  // 本段必须先于下方 figures_ownerId_idx 索引创建（#818 教训：guard/重建先于索引——DROP 连带
+  // 旧索引消失，索引在其后重建才不落空）。
+  const figCols791 = db.prepare(`PRAGMA table_info("figures")`).all()
+  const figFresh791 =
+    figCols791.length > 0 &&
+    figCols791.some((c) => c.name === 'sessionId') &&
+    !figCols791.some((c) => c.name === 'xml') &&
+    !figCols791.some((c) => c.name === 'idempotencyKey')
+  if (!figFresh791) {
+    if (figCols791.length > 0) {
+      db.exec('DROP TABLE "figures"')
+    }
+    db.exec(`
+CREATE TABLE IF NOT EXISTS "figures" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "ownerId" TEXT NOT NULL,
+    "prompt" TEXT NOT NULL,
+    "svg" TEXT,
+    "png" BLOB,
+    "evaluation" TEXT,
+    "sessionId" TEXT,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" DATETIME NOT NULL,
+    CONSTRAINT "figures_ownerId_fkey" FOREIGN KEY ("ownerId") REFERENCES "users" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+`)
   }
-  db.exec(
-    `CREATE UNIQUE INDEX IF NOT EXISTS "figures_ownerId_idempotencyKey_key" ON "figures"("ownerId", "idempotencyKey")`,
-  )
-
-  // T03（docs/autofigure/tickets/T03-single-worker-generation-lifecycle.md）：generation_jobs
-  // 增加执行生命周期时间戳。列语义：startedAt = 原子领取（queued→running）时刻置位，running 期间
-  // 非空；finishedAt = 终态（succeeded|failed）写入时刻置位，queued/running 恒 null。两列均
-  // nullable（不迁移旧行、不给旧 queued 伪造时间）；ADD COLUMN 非幂等，PRAGMA guard 先查再补
-  //（对齐 T02 idempotencyKey 模式）。fresh 库（上方 CREATE TABLE 已带列）此处列存在 → guard 跳过。
-  const jobCols = db.prepare(`PRAGMA table_info("generation_jobs")`).all()
-  if (!jobCols.some((c) => c.name === 'startedAt')) {
-    db.exec(`ALTER TABLE "generation_jobs" ADD COLUMN "startedAt" DATETIME`)
-  }
-  if (!jobCols.some((c) => c.name === 'finishedAt')) {
-    db.exec(`ALTER TABLE "generation_jobs" ADD COLUMN "finishedAt" DATETIME`)
-  }
-
-  // T06（docs/autofigure/tickets/T06-artifact-persistence-png.md · grilling §6）：figures 增加产物
-  // 三列——xml（文本）+ png（SQLite BLOB）+ evaluation（文本 JSON）。全 nullable：仅在 Job 提交
-  // succeeded 终态时由 runner 原子写入，queued/running/failed 恒 null（不迁移旧行、不给旧
-  // succeeded 伪造产物）。ADD COLUMN 非幂等，PRAGMA guard 先查再补（对齐 T02/T03 模式）。
-  // 本脚本上方 CREATE TABLE（既有部署早于 T01 前已建表，走 ALTER 分支）也随 init.sql 同步带三列，
-  // 保持 fresh 与 upgrade 两路径列集一致——此处列存在 → guard 跳过。
-  const figCols = db.prepare(`PRAGMA table_info("figures")`).all()
-  if (!figCols.some((c) => c.name === 'xml')) {
-    db.exec(`ALTER TABLE "figures" ADD COLUMN "xml" TEXT`)
-  }
-  if (!figCols.some((c) => c.name === 'png')) {
-    db.exec(`ALTER TABLE "figures" ADD COLUMN "png" BLOB`)
-  }
-  if (!figCols.some((c) => c.name === 'evaluation')) {
-    db.exec(`ALTER TABLE "figures" ADD COLUMN "evaluation" TEXT`)
-  }
+  db.exec('DROP TABLE IF EXISTS "generation_jobs"')
+  db.exec(`CREATE INDEX IF NOT EXISTS "figures_ownerId_idx" ON "figures"("ownerId")`)
 
   // #699 容器升级编排（spec §2.2）：containers 增加 upgradeAttempts 列（连续失败计数，成功清零；
   // ≥3 → upgrade_failed 终态）。ADD COLUMN 非幂等，PRAGMA guard 先查再补（对齐 T02/T03/T06 模式）。
