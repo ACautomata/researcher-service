@@ -652,6 +652,9 @@ export class RunService {
     // 生命周期存活：resume/recover 重建 = 新镜像 + 新 HostSessionManager（openwiki durable
     // .run.json 不跨镜像；与「中断 = 作废」语义一致），故图构建跳缓存（镜像根 per-run 必新，
     // 命中旧缓存 = backend 指向已 dispose 的临时目录）。
+    // pull 失败 = pre-start 面（同上方 wikis.ensure）：running 迁移之前向上传播、不发 run 域
+    // 事件，queued 占位由 executeNow catch 回滚（不残留非终态）；镜像临时目录由 mirror.ts
+    // 自清（pull 的 catch rm root）。
     const wikiContainer = this.deps.resolveWikiContainer(cmd.ownerId)
     const wikiUpdate = actor?.kind === WIKI_UPDATE_TEAMMATE_KIND
     const wikiMirror = wikiUpdate ? await pullWikiGenerationMirror(this.deps.primitives, wikiContainer) : undefined
