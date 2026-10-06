@@ -45,7 +45,7 @@ vi.mock('element-plus', () => ({
 
 import * as api from '@/api/sessions'
 import * as filesApi from '@/api/files'
-import { ElMessageBox } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import ChatView from '@/views/ChatView.vue'
 
 class FakeEventSource extends EventTarget {
@@ -102,7 +102,7 @@ beforeEach(() => {
   sessionStorage.clear()
   vi.stubGlobal('EventSource', FakeEventSource)
   vi.clearAllMocks()
-  apiJsonMock.mockReset().mockResolvedValue({ id: 'u1' })
+  apiJsonMock.mockReset().mockImplementation(async (url: string) => url === '/api/v1/plugins' ? { plugins: [] } : { id: 'u1' })
   vi.mocked(api.listSessions).mockResolvedValue([S1, S2])
   vi.mocked(api.getSessionProjection).mockResolvedValue(PROJECTION)
   vi.mocked(api.sendSessionMessage).mockResolvedValue({ messageId: 'm9', turn: 3, runId: 'r1', replay: false })
@@ -208,3 +208,38 @@ describe('ChatView（REST+SSE 三件套接线）', () => {
 function opened(): void {
   FakeEventSource.last()!.emit('stream.opened', { type: 'stream.opened', payload: { protocolV: 1, serverSeq: 0, serverTime: '' } })
 }
+
+
+describe('#797 slash 命令呈现', () => {
+  it('官方命令的参数提示在输入区可见，参数原文保留在 user 消息中', async () => {
+    const w = await mountChat()
+    const input = w.get('[data-test="input"]')
+    await input.setValue('/r')
+    expect(w.get('[data-test="slash-menu"]').text()).toContain('/research')
+    await input.trigger('keydown', { key: 'Tab' })
+    expect(w.get('[data-test="slash-argument-hint"]').text()).toContain('$ARGUMENTS')
+    await input.setValue('/research 新型电池')
+    await input.trigger('keydown', { key: 'Enter' })
+    await flushPromises()
+    expect(w.text()).toContain('/research 新型电池')
+    expect(api.sendSessionMessage).toHaveBeenCalledWith('sess-1', '/research 新型电池', expect.any(String), undefined)
+    w.unmount()
+  })
+
+  it('/model 查询呈现可用模型，切换与 default 明示下一轮生效', async () => {
+    vi.mocked(api.sendSessionMessage).mockResolvedValueOnce({ messageId: 'm9', turn: 3, runId: null, replay: false, command: { name: 'model', models: [{ providerId: 'provider-1', modelId: 'model-1' }] } })
+    const w = await mountChat()
+    const input = w.get('[data-test="input"]')
+    await input.setValue('/model ')
+    await input.trigger('keydown', { key: 'Enter' })
+    await flushPromises()
+    expect(w.get('[data-test="model-command-result"]').text()).toContain('provider-1/model-1')
+    expect(ElMessage.success).not.toHaveBeenCalledWith('未指定模型，沿用面板默认')
+    vi.mocked(api.sendSessionMessage).mockResolvedValueOnce({ messageId: 'm10', turn: 4, runId: null, replay: false, command: { name: 'model', model: null, appliesTo: 'next-run' } })
+    await input.setValue('/model default')
+    await input.trigger('keydown', { key: 'Enter' })
+    await flushPromises()
+    expect(w.get('[data-test="model-command-result"]').text()).toContain('下一轮对话')
+    w.unmount()
+  })
+})

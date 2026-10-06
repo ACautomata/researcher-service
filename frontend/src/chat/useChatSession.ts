@@ -31,15 +31,9 @@ import { applyEvent, coerceJsonish, fromProjection } from './projection'
 import { createRestOutbox, newClientKey, type RestOutbox } from './restOutbox'
 import { useEventStream, type EventStream, type SessionEvent } from './useEventStream'
 
-export interface SlashOption { alias: string; description: string }
-
-// 系统命令 V1（#742：/new /compact /model 保留名）——前端常量数据源（服务端经 POST /messages
-// 的 content 前缀解析执行；官方/插件命令目录并入归 #797）。
-export const SYSTEM_COMMANDS: readonly SlashOption[] = [
-  { alias: '/new', description: '新建会话' },
-  { alias: '/compact', description: '压缩上下文后继续' },
-  { alias: '/model', description: '查看/切换模型' },
-]
+import { listPlugins, getPluginArgumentCompletions } from '@/api/plugins'
+import { mergeSlashCommands, type SlashOption } from './slashCommands'
+export { SYSTEM_COMMANDS, type SlashOption } from './slashCommands'
 
 // 错误分类红显（story 10：llm_error/recursion_limit/infra 三分类）。
 const RUN_ERROR_LABELS: Record<string, string> = {
@@ -86,6 +80,7 @@ export interface ChatSession {
   slashQuery: Ref<string | null>
   slashMatches: Ref<SlashOption[]>
   slashOpen: Ref<boolean>
+  slashArgumentHint: Ref<string | null>
   pickSlash(alias: string): void
   onComposerInput(): void
   onComposerKeydown(e: KeyboardEvent): void
@@ -138,7 +133,8 @@ export function useChatSession(deps: ChatSessionDeps = {}): ChatSession {
     if (outbox.pending(id).length === 0) return
     try {
       await outbox.flush(id, async (sid, entry) => {
-        await sendSessionMessage(sid, entry.content, entry.clientKey)
+        const result = await sendSessionMessage(sid, entry.content, entry.clientKey)
+        if (!disposed && chat.selectedSession === sid && result.command) deps.onCommand?.(result.command)
       })
     } catch {
       return // 网络/门控拒绝 → 保序停止，条目保留，下次补偿续传
@@ -147,6 +143,7 @@ export function useChatSession(deps: ChatSessionDeps = {}): ChatSession {
   }
 
   async function compensate(): Promise<void> {
+    void refreshSlashCommands()
     deps.onClearError?.()
     try {
       await refreshSessions()
@@ -314,6 +311,7 @@ export function useChatSession(deps: ChatSessionDeps = {}): ChatSession {
   }
 
   async function boot(): Promise<void> {
+    void refreshSlashCommands()
     try {
       await refreshSessions()
     } catch (e) {
@@ -411,12 +409,12 @@ export function useChatSession(deps: ChatSessionDeps = {}): ChatSession {
     try {
       const result = await sendSessionMessage(id, content, key, attachments?.map((a) => a.attachmentId))
       if (disposed || chat.selectedSession !== id) return
+      if (result.command) deps.onCommand?.(result.command)
       if (result.replay) {
         void refreshProjection() // 重发 replay：以权威行回填（乐观行随整替消失）
         return
       }
       chat.markMessageId(key, result.messageId)
-      if (result.command) deps.onCommand?.(result.command)
     } catch (e) {
       if (disposed) return
       chat.removeMessage(key)
@@ -457,18 +455,63 @@ export function useChatSession(deps: ChatSessionDeps = {}): ChatSession {
   }
 
   // ---- slash 系统命令 + composer 键位（T07 逻辑保留，数据源换前端常量）----
+  const slashCommands = ref<SlashOption[]>(mergeSlashCommands([]))
+  let slashCatalogGen = 0
+  async function refreshSlashCommands(): Promise<void> {
+    const gen = ++slashCatalogGen
+    try {
+      const plugins = await listPlugins()
+      if (!disposed && gen === slashCatalogGen) slashCommands.value = mergeSlashCommands(plugins)
+    } catch {
+      if (disposed || gen !== slashCatalogGen) return
+      slashCommands.value = mergeSlashCommands([])
+      deps.onActionError?.('插件命令加载失败；重新输入 / 可重试')
+    }
+  }
+  const slashArgumentHint = computed<string | null>(() => {
+    const alias = /^\/([a-z][a-z0-9-]*)\s/i.exec(chat.input)?.[1]?.toLowerCase()
+    return slashCommands.value.find(c => c.alias === `/${alias}`)?.argumentHint ?? null
+  })
   const slashQuery = computed<string | null>(() => {
     const v = chat.input
-    if (!v.startsWith('/') || v.includes(' ')) return null
+    if (!v.startsWith('/') || /\s/.test(v)) return null
     return v.slice(1).toLowerCase()
+  })
+  const argumentMatches = ref<SlashOption[]>([])
+  let argumentTimer: ReturnType<typeof setTimeout> | undefined
+  let argumentGen = 0
+  const argumentQuery = computed(() => {
+    if (chat.slashDismissed) return null
+    const match = /^\/([a-z][a-z0-9-]*)\s+([\s\S]*)$/.exec(chat.input)
+    if (!match || match[2].length > 1000) return null
+    const pluginId = slashCommands.value.find(c => c.alias === `/${match[1]}`)?.pluginId
+    return pluginId ? { pluginId, name: match[1], prefix: match[2] } : null
+  })
+  watch(argumentQuery, (query) => {
+    const gen = ++argumentGen
+    clearTimeout(argumentTimer)
+    argumentMatches.value = []
+    if (!query || disposed) return
+    argumentTimer = setTimeout(async () => {
+      try {
+        const items = await getPluginArgumentCompletions(query.pluginId, query.name, query.prefix)
+        if (disposed || gen !== argumentGen) return
+        argumentMatches.value = items.map(item => ({ alias: `/${query.name} ${item.value}`, description: item.description ?? '' }))
+      } catch {
+        if (!disposed && gen === argumentGen) deps.onActionError?.('命令参数补全加载失败，请重新输入参数重试')
+      }
+    }, 250)
   })
   const slashMatches = computed<SlashOption[]>(() => {
     const q = slashQuery.value
-    if (q === null) return []
-    return SYSTEM_COMMANDS.filter((c) => c.alias.slice(1).toLowerCase().startsWith(q))
+    if (q === null) return argumentMatches.value
+    return slashCommands.value.filter((c) => c.alias.slice(1).toLowerCase().startsWith(q))
+  })
+  watch(slashMatches, (matches) => {
+    if (chat.slashIndex >= matches.length) chat.setSlashIndex(0)
   })
   const slashOpen = computed(
-    () => slashQuery.value !== null && !chat.slashDismissed && slashMatches.value.length > 0,
+    () => !chat.slashDismissed && slashMatches.value.length > 0,
   )
   function pickSlash(alias: string): void {
     chat.setInput(`${alias} `)
@@ -479,7 +522,8 @@ export function useChatSession(deps: ChatSessionDeps = {}): ChatSession {
   function onComposerInput(): void {
     promptHistoryIndex = -1
     promptDraft = ''
-    if (!slashQuery.value) chat.setSlashDismissed(false)
+    chat.setSlashDismissed(false)
+    if (slashQuery.value === '') void refreshSlashCommands()
     chat.setSlashIndex(0)
   }
   function triggerSend(): void {
@@ -488,6 +532,7 @@ export function useChatSession(deps: ChatSessionDeps = {}): ChatSession {
   function onComposerKeydown(e: KeyboardEvent): void {
     // IME 确认候选词的 Enter 不当发送/选令牌（isComposing 标准信号 + keyCode 229 兼容）
     if (e.isComposing || e.keyCode === 229) return
+    if (e.shiftKey || e.ctrlKey || e.altKey || e.metaKey) return
     if (slashOpen.value) {
       if (e.key === 'ArrowDown') {
         e.preventDefault()
@@ -531,6 +576,9 @@ export function useChatSession(deps: ChatSessionDeps = {}): ChatSession {
 
   function dispose(): void {
     disposed = true
+    argumentGen++
+    clearTimeout(argumentTimer)
+    argumentMatches.value = []
     pendingToolInputs.clear()
     stream.close()
   }
@@ -553,6 +601,7 @@ export function useChatSession(deps: ChatSessionDeps = {}): ChatSession {
     slashQuery,
     slashMatches,
     slashOpen,
+    slashArgumentHint,
     pickSlash,
     onComposerInput,
     onComposerKeydown,

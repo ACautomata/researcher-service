@@ -14,7 +14,7 @@ import { definePlugin, type PluginManifest } from '../src/plugins/api'
 import { seedUser, login, bearer } from './helpers'
 
 const fixtureCatalog: PluginManifest[] = [
-  definePlugin({ id: 'autofigure', name: 'AutoFigure', description: 'method figure generation', version: '1.0.0' }),
+  definePlugin({ id: 'autofigure', name: 'AutoFigure', description: 'method figure generation', version: '1.0.0', commands: [{ name: 'figure', description: '生成科研图', getArgumentCompletions: (prefix: string) => [{ value: `${prefix}图`, description: '建议主题' }], handler: async () => ({ inject: 'figure' }) }] }),
   definePlugin({ id: 'second', name: 'Second', description: 'another plugin', version: '0.2.0' }),
 ]
 
@@ -51,8 +51,8 @@ describe('#788 plugins REST（S1，#752 §4.3）', () => {
     const res = await request.get('/api/v1/plugins').set(auth)
     expect(res.body.code).toBe(0)
     expect(res.body.data.plugins).toEqual([
-      { id: 'autofigure', name: 'AutoFigure', description: 'method figure generation', version: '1.0.0', enabled: false },
-      { id: 'second', name: 'Second', description: 'another plugin', version: '0.2.0', enabled: false },
+      { id: 'autofigure', name: 'AutoFigure', description: 'method figure generation', version: '1.0.0', enabled: false, commands: [{ name: 'figure', description: '生成科研图', hasArgumentCompletions: true }] },
+      { id: 'second', name: 'Second', description: 'another plugin', version: '0.2.0', enabled: false, commands: [] },
     ])
   })
 
@@ -85,6 +85,17 @@ describe('#788 plugins REST（S1，#752 §4.3）', () => {
   it('启用位 per-user 隔离：其他用户不受影响', async () => {
     const list = await request.get('/api/v1/plugins').set(otherAuth)
     expect(list.body.data.plugins).toEqual([expect.objectContaining({ id: 'autofigure', enabled: false }), expect.objectContaining({ id: 'second', enabled: false })])
+  })
+
+  it('#797 参数补全仅对本人启用的插件开放，并校验 prefix', async () => {
+    const enabled = await request.get('/api/v1/plugins/autofigure/commands/figure/completions').query({ prefix: '流程' }).set(auth)
+    expect(enabled.body).toMatchObject({ code: 0, data: { completions: [{ value: '流程图', description: '建议主题' }] } })
+    const disabled = await request.get('/api/v1/plugins/autofigure/commands/figure/completions').set(otherAuth)
+    expect(disabled.body.code).toBe(80040)
+    const missing = await request.get('/api/v1/plugins/autofigure/commands/missing/completions').set(auth)
+    expect(missing.body.code).toBe(80040)
+    const tooLong = await request.get('/api/v1/plugins/autofigure/commands/figure/completions').query({ prefix: 'x'.repeat(1001) }).set(auth)
+    expect(tooLong.body.code).toBe(90002)
   })
 
   it('body 校验：enabled 缺失/非布尔 → 90002', async () => {

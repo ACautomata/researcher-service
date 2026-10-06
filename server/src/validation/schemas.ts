@@ -236,3 +236,7 @@ export const PLUGIN_ID_REGEX = /^[a-z][a-z0-9-]*$/
 export const pluginEnablementSchema = z.object({
   enabled: z.boolean(),
 })
+
+export const pluginCommandCompletionQuerySchema = z.object({
+  prefix: z.string().max(1000).default(''),
+})

@@ -22,3 +22,8 @@ const commands = readdirSync(path.join(root, 'commands')).sort().filter(name => 
 const skills = readdirSync(path.join(root, 'skills'), { withFileTypes: true }).filter(dir => dir.isDirectory()).sort((a, b) => a.name.localeCompare(b.name)).map(dir => entry(path.join(root, 'skills', dir.name, 'SKILL.md')))
 mkdirSync(path.join(server, 'src/officialContent'), { recursive: true })
 writeFileSync(path.join(server, 'src/officialContent/generated.ts'), `// 由仓库根 official/ Markdown 生成（npm run content:build）。勿手改——发版评审改源目录后重新生成。\nexport const OFFICIAL_SOURCES = ${JSON.stringify({ commands, skills }, null, 2)} as const\n`)
+
+// 前端仅打包补全元数据，不包含模板正文或技能正文；同源生成并提交，Docker 前端独立构建可直读。
+const frontendCatalog = path.resolve(server, '../frontend/src/chat/officialCommands.generated.ts')
+mkdirSync(path.dirname(frontendCatalog), { recursive: true })
+writeFileSync(frontendCatalog, `// 由 server/scripts/build-official-content.mjs 生成，勿手改。\nexport const OFFICIAL_COMMANDS = ${JSON.stringify(commands.map(({ name, description, body }) => ({ name, description, takesArguments: body.includes('$ARGUMENTS') })), null, 2)} as const\n`)
