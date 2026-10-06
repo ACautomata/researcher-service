@@ -10,6 +10,7 @@ import { assembleWikiContainers } from './wikiContainers/assembly'
 import { assembleAutoFigureRuntime } from './figures/assembly'
 import { assembleTunnelServer } from './chat/tunnelAssembly'
 import { assembleRunner } from './runner/assembly'
+import { WikiUpdateRunService } from './wiki/updateRun'
 import { StreamHub } from './events/hub'
 import { SessionService } from './sessions/service'
 import { AttachmentsService } from './attachments/service'
@@ -94,6 +95,13 @@ async function main(): Promise<void> {
     attachments: attachmentsService,
   })
   runner.service.setRecordTurn((p) => sessions.recordTurn(p))
+  // wiki 全量更新独立 run（#790 · 三通道③）：复用 runner 装配的 registry/primitives（#731
+  // 单出口纪律）+ 事件经同一 StreamHub 扇出 wiki_run.* 五类事件；全局串行锁/在飞互斥在服务内。
+  const wikiUpdateRuns = new WikiUpdateRunService({
+    registry: runner.registry,
+    primitives: runner.primitives,
+    hub: eventHub,
+  })
   const app = createApp({
     prisma,
     orchestrator: fleet.orchestrator,
@@ -101,12 +109,15 @@ async function main(): Promise<void> {
     runtime: fleet.runtime,
     // wiki（#335 → #784 换轨）：存储面 = 新 wiki 容器（ensure 经 wikiContainers 注入）；
     // compile 触发不注入（busybox 级容器无 openclaw 运行时，索引归 OpenWiki 工具形态 #737，
-    // routes 缺省 noop）。
+    // routes 缺省 noop）。#790：全量更新独立 run 触发面（POST /wiki/update）注入。
     wiki: {
       wikiContainers: {
         ensure: async (ownerId) => {
           await wikiContainers.lifecycle.ensure(ownerId)
         },
+      },
+      updateRunner: {
+        start: async (params) => wikiUpdateRuns.start(params),
       },
     },
     // models（#336；#775 写盘链退役）：事务 = DB mutation + config_meta version bump（热生效

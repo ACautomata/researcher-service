@@ -30,6 +30,9 @@ import { TeammateService } from './teammates/service'
 export interface RunnerAssembly {
   readonly service: RunService
   readonly queue: BullMqRunQueue
+  /** #790 通道③独立 run 的装配复用面（WikiUpdateRunService 共享同一 registry/primitives） */
+  readonly registry: ProviderRegistry
+  readonly primitives: DockerPrimitives
   close: () => Promise<void>
 }
 
@@ -161,6 +164,8 @@ export function assembleRunner(opts: {
   return {
     service,
     queue,
+    registry,
+    primitives,
     close: async () => {
       service.dispose()
       await queue.close()
