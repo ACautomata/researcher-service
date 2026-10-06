@@ -321,6 +321,13 @@ export class FileJournalService {
       } catch (err) {
         // eslint-disable-next-line no-console
         console.warn(`[filejournal] boot reconcile failed: session=${sessionId}: ${String(err)}`)
+        // 异常路径留痕（部分执行计数不可得——异常事实入审计域，静默不可接受）；审计面故障
+        // 不再放大（warn 已留痕）
+        try {
+          await this.audit.record({ kind: 'reconcile', sessionId, detail: { phase: 'boot', error: String(err) } })
+        } catch {
+          // 审计不可用——console.warn 已留痕
+        }
         continue
       }
       if (outcome.rolledForward + outcome.rolledMissing + outcome.resumedReverted + outcome.resumedMissing + outcome.resumedDegraded > 0) {

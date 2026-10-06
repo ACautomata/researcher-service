@@ -1420,8 +1420,10 @@ export class RunService {
     const teammates = this.deps.teammates
     if (!teammates) return
     const survivors = (await teammates.list(sessionId)).filter((t) => t.status !== 'archived')
+    // degraded 文案中性化（scope=files 对话面零改动——「会话已回退至锚点」断言在此组合下
+    // 虚假；半逆放中间态同理）：只述文件面未完成事实，不做对话面/终态承诺
     const content = degradedFiles
-      ? `文件状态回退未完成（/lab 保持现状）——会话已回退至锚点 ${checkpointId.slice(0, 12)}`
+      ? `文件状态回退未完成——/lab 处于中间态（可重试回退收敛）`
       : `文件状态已回退至锚点 ${checkpointId.slice(0, 12)}（/lab 已逆放恢复，重放期间写入已排队）`
     for (const peer of survivors) {
       await teammates.sendMail({

@@ -696,37 +696,39 @@ export class SessionService {
         await this.deps.prisma.$transaction(writes)
       }
 
-      // teammate 面：跨派生点作废（全部 scope——对话/文件回退都使派生点后 teammate 失效）。
-      // 文件逆放前先作废——被唤醒 survivor 与 rewindFiles 竞争围栏 FIFO，先获围栏的新写会被
-      // 本次逆放撤销；信箱通知在 rewindFiles 完成后（文案「已逆放恢复」须在事实之后）。
-      await this.deps.runService.teammatesForRewind?.(sessionId, anchor)
-
-      // 文件逆放（scope ≠ chat；fileRewind 未注入 = 机制未接线，文件面 no-op——生产恒注入）。
-      // 已持互斥锁时走 rewindFilesCore 直呼（外层 rewindFiles 重入 fence 即死锁）
+      // teammate 作废面 + 文件逆放（对话面事务已提交——事实已发生）：异常终态补偿统一在此
+      // try 内（作废失败 survivor 未停跑继续 running，无补偿则重试撞 50005 收敛卡死）——事件
+      // 与 C1 通知照发（degraded 语义如实）后重抛，REST 错误信封驱动重试，残行由重试/boot
+      // 续放收敛。已持互斥锁时走 rewindFilesCore 直呼（外层 rewindFiles 重入 fence 即死锁）
       let files: RewindResult['files']
       const fileRewind = this.deps.fileRewind
-      if (scope !== 'chat' && fileRewind) {
-        const owner = await this.deps.prisma.user.findUnique({
-          where: { id: session.ownerId },
-          select: { username: true },
-        })
-        const rewindInput = {
-          sessionId,
-          anchor,
-          userId: session.ownerId,
-          username: owner?.username ?? '',
-        }
-        try {
+      try {
+        await this.deps.runService.teammatesForRewind?.(sessionId, anchor)
+        if (scope !== 'chat' && fileRewind) {
+          const owner = await this.deps.prisma.user.findUnique({
+            where: { id: session.ownerId },
+            select: { username: true },
+          })
+          const rewindInput = {
+            sessionId,
+            anchor,
+            userId: session.ownerId,
+            username: owner?.username ?? '',
+          }
           files = await (fileRewind.runRewindExclusive !== undefined
             ? fileRewind.rewindFilesCore(rewindInput)
             : fileRewind.rewindFiles(rewindInput))
-        } catch (err) {
-          // 异常终态补偿（对话面事务已提交——事实已发生）：事件与 C1 通知照发（degraded
-          // 语义「回退未完成」），错误重抛（REST 错误信封驱动重试；残行由重试/boot 续放收敛）
-          this.publishSessionEvent(session.ownerId, 'session.invalidated', { reason: 'rewind' }, sessionId)
-          await this.deps.runService.teammatesNotifyFileRewind?.(sessionId, anchor, true)
-          throw err
         }
+      } catch (err) {
+        this.publishSessionEvent(session.ownerId, 'session.invalidated', { reason: 'rewind' }, sessionId)
+        try {
+          await this.deps.runService.teammatesNotifyFileRewind?.(sessionId, anchor, true)
+        } catch (notifyErr) {
+          // 通知失败不吞原始错误（REST 归因保真）——warn 留痕
+          // eslint-disable-next-line no-console
+          console.warn(`[sessions] rewind 补偿通知失败: session=${sessionId}: ${String(notifyErr)}`)
+        }
+        throw err
       }
       // C1 通知面（逆放完成后——文案「已逆放恢复」在事实之后）；degraded（容器缺失/深度
       // 超限——/lab 未动）如实报「回退未完成」；机制未接线（fileRewind 缺省）= 文件未动，

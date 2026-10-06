@@ -1,8 +1,8 @@
 // rewind 预览（#782 · D8）：逆放集摘要 + exec 跨越清单——「exec 显式降级（shell 副作用
 // 不入日志；rewind 预览列出跨越 exec 调用清单——复用轨迹/审计数据零新增存储；不做全树
 // diff）」。exec 清单源 = 锚后 assistant 行 attachmentsJson 的 tools 聚合（ToolLine——
-// TurnReducer 落行面，零新增存储）；锚后判定 = anchorCheckpointId ∉ chain(anchor)
-//（挂靠语义与 rewind 归档同源——checkpointChain.visibleRowIds 共享内核单一实现）。
+// TurnReducer 落行面，零新增存储）；锚后判定 = checkpointChain.visibleRowIds 挂靠判定
+//（null 锚 assistant 行〔aborted/failed 轮〕经后继传递——与 rewind 归档判据共享内核单一实现）。
 
 import type { PrismaClient } from '../../generated/prisma/client'
 import { visibleRowIds } from '../../checkpointChain'
