@@ -21,6 +21,8 @@ export interface ReconcileOutcome {
   readonly rolledMissing: number
   readonly resumedReverted: number
   readonly resumedMissing: number
+  /** 续放深度超限跳过式处置计数（对齐 planRevert degraded——「文件保持现状」+ 审计域明示） */
+  readonly resumedDegraded: number
   readonly containerMissing: boolean
 }
 
@@ -28,29 +30,43 @@ export interface ReconcilerDeps {
   readonly prisma: PrismaClient
   readonly io: RevertIo
   readonly containerOf: (sessionId: string) => Promise<string | null>
+  /** 续放深度护栏（config 注入——boot 续放面跳过式降级，对齐 planRevert degraded 语义） */
+  readonly depthLimit: number
+}
+
+export interface RollForwardOutcome {
+  readonly rolledForward: number
+  readonly rolledMissing: number
 }
 
 export class Reconciler {
   constructor(private readonly deps: ReconcilerDeps) {}
 
-  // 单 session reconcile（restore 路；容器缺失返回 containerMissing 标志）。chain = 本次
-  // rewind 锚链（rewindFilesCore 传入——续放过滤与 planRevert 同形）；boot 路传
-  // activeCheckpointId 指针重建链（boot 串行遍历期间新 run 可完成落账——不过滤则锚链内
-  // 新写被误撤）；null = 不滤（指针缺失的罕见组合，保守现状面）。
+  // restore 路（rewindFilesCore 前置）：仅 rollForward——journal-first 崩溃残留补 apply。
+  // 续放**不在此**：生产 rewind 流水 tx1 先归档 abandoned 行，归档面拾起会命中本流水刚归档
+  // 行 → 无护栏全量逆放结构性绕过 depthLimit；上次 rewind 中断残行由本次 planRevert 自然
+  // 拾起（水位不越线后判据完备；abandoned 分叉恒 ∉ 新锚链）。容器缺失返回 null（调用方跳过）。
+  async rollForwardPending(sessionId: string): Promise<RollForwardOutcome | null> {
+    const container = await this.deps.containerOf(sessionId)
+    if (container === null) return null
+    return this.rollForward(sessionId, container)
+  }
+
+  // boot 路单 session reconcile（容器缺失返回 containerMissing 标志）。chain = 指针重建链
+  //（activeCheckpointId——boot 串行遍历期间新 run 可完成落账，chain 过滤防锚链内新写误撤）；
+  // null = 不滤（指针缺失的罕见组合，保守现状面）。
   async reconcileSession(sessionId: string, chain: ReadonlySet<string> | null = null): Promise<ReconcileOutcome> {
     const container = await this.deps.containerOf(sessionId)
     if (container === null) {
-      return { rolledForward: 0, rolledMissing: 0, resumedReverted: 0, resumedMissing: 0, containerMissing: true }
+      return { rolledForward: 0, rolledMissing: 0, resumedReverted: 0, resumedMissing: 0, resumedDegraded: 0, containerMissing: true }
     }
     const rolled = await this.rollForward(sessionId, container)
     const resumed = await this.resumeRevert(sessionId, container, chain)
     return { ...rolled, ...resumed, containerMissing: false }
   }
-
-  // 启动路待处理清单：applied=false（journal-first 崩溃残留）+ 水位 session 续放 + 归档未
-  // 处置行（首次 rewind 的 tx1〔归档+指针〕提交后 tx2〔keepMark+水位〕前崩溃窗口——决策已
-  // 落盘但水位仍 null，前两支判据均不命中则 /lab 恢复无自动路径且零审计）。session 水位条件
-  // 排除 chat 面归档遗留（seq ≤ 水位恒存在——非拾起对象，免 boot 清单噪音）。执行互斥与
+  // 启动路待处理清单：applied=false（journal-first 崩溃残留）+ 水位 session 续放 + 水位 null
+  // 且有 journal 行的 session（tx1 后 tx2 前崩溃窗口的归档决策行 + teammate/pending 保守向
+  // 行——teammate 行恒不入归档集，只捞归档面则该窗口无自动路径且零审计）。执行互斥与
   // blob 防剪由调用方装配（FileJournalService.reconcileOnBoot——围栏 + replay lease；容器
   // 缺失 session 在 reconcileSession 跳过并计数）。
   async sessionsNeedingReconcile(): Promise<string[]> {
@@ -59,7 +75,7 @@ export class Reconciler {
         OR: [
           { fileJournalAnchorSeq: { not: null } },
           { fileJournal: { some: { applied: false } } },
-          { fileJournal: { some: { archivedAt: { not: null }, fileRevertedAt: null, session: { fileJournalAnchorSeq: null } } } },
+          { fileJournal: { some: {} }, fileJournalAnchorSeq: null },
         ],
       },
       select: { id: true },
@@ -99,17 +115,21 @@ export class Reconciler {
     return { rolledForward, rolledMissing }
   }
 
-  // 续放：残集两分支——
+  // 续放（boot 路专用）：残集两分支——
   //   归档 ∧ 未处置（∧ 水位 null ∨ seq > 水位）：行级 rewind 决策面（tx1 abandoned 归档即
   //     落盘表达），**无 chain 过滤**——scope=files 指针不动（可留在被放弃分支），chain(指针)
   //     会把归档待逆放行错排；chat 面归档遗留由 seq ≤ 水位天然排除（chat 水位 = maxSeq）。
-  //   未归档 ∧ seq > 水位 ∧ ∉ chain：中断续放面——chain 过滤防 (tN,tN+1] 锚链内新写误撤。
-  // 水位 null：仅归档面（决策信号），未归档面无判据不捞。
+  //   未归档 ∧ seq > 水位 ∧ ∉ chain：中断续放面——chain 过滤防 (tN,tN+1] 锚链内新写误撤；
+  //     teammate 行（checkpointId 恒 ∉ leader chain）与 pending '' 行在此被 boot 拾起（恒
+  //     逆放保守向提前收口 + 审计留痕）。
+  // 水位 null：全量未处置面（归档决策行 + 未归档保守向行）。
+  // 深度护栏：残集超限 → 跳过式处置（markReverted 打标，续放不再拾起——对齐 planRevert
+  // degraded 语义「文件保持现状」）+ 计数入审计域（ReconcilerDeps.depthLimit）。
   private async resumeRevert(
     sessionId: string,
     container: string,
     chain: ReadonlySet<string> | null,
-  ): Promise<{ resumedReverted: number; resumedMissing: number }> {
+  ): Promise<{ resumedReverted: number; resumedMissing: number; resumedDegraded: number }> {
     const session = await this.deps.prisma.session.findUniqueOrThrow({
       where: { id: sessionId },
       select: { fileJournalAnchorSeq: true },
@@ -120,15 +140,17 @@ export class Reconciler {
         where: {
           sessionId,
           fileRevertedAt: null,
-          ...(watermark !== null
-            ? { seq: { gt: watermark } }
-            : { archivedAt: { not: null } }),
+          ...(watermark !== null ? { seq: { gt: watermark } } : {}),
         },
         orderBy: { seq: 'desc' },
       })
-    ).filter((r) => r.archivedAt !== null || chain === null || !chain.has(r.checkpointId))
-    if (residual.length === 0) return { resumedReverted: 0, resumedMissing: 0 }
+    ).filter((r) => r.archivedAt !== null || watermark === null || chain === null || !chain.has(r.checkpointId))
+    if (residual.length === 0) return { resumedReverted: 0, resumedMissing: 0, resumedDegraded: 0 }
+    if (residual.length > this.deps.depthLimit) {
+      await this.deps.io.markReverted(sessionId, residual.map((r) => r.seq), new Date())
+      return { resumedReverted: 0, resumedMissing: 0, resumedDegraded: residual.length }
+    }
     const outcome = await executeRevert(sessionId, container, residual, this.deps.io)
-    return { resumedReverted: outcome.reverted, resumedMissing: outcome.skippedMissing }
+    return { resumedReverted: outcome.reverted, resumedMissing: outcome.skippedMissing, resumedDegraded: 0 }
   }
 }

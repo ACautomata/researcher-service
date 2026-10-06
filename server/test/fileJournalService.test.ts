@@ -449,6 +449,30 @@ describe('FileJournalService（#782）', () => {
     expect(fs.trees.get(CONTAINER)!.get('/lab/fresh.txt')?.toString()).toBe('fresh')
   })
 
+  it('boot 续放深度护栏：残集超限跳过式处置（resumedDegraded——boot 面对齐 planRevert 降级语义）', async () => {
+    await seedSession()
+    const tiny = new FileJournalService({
+      prisma,
+      primitives: fs.primitives,
+      quotaBytes: 10 * 1024 * 1024,
+      depthLimit: 2,
+      fenceTimeoutMs: 200,
+      containerOf: async () => CONTAINER,
+      checkpointParentOf: async () => parentOf,
+    })
+    const b = tiny.backendFor({ sessionId: SESSION, targets: { wiki: 'w-1', lab: CONTAINER } })
+    for (let i = 0; i < 3; i++) await b.write(`/lab/rd${i}.txt`, `v${i}`)
+    // 水位 0 → 残集 3 行 > depthLimit 2
+    await prisma.session.update({ where: { id: SESSION }, data: { fileJournalAnchorSeq: 0 } })
+
+    const outcomes = await tiny.reconcileOnBoot()
+    expect(outcomes.get(SESSION)).toMatchObject({ resumedDegraded: 3, resumedReverted: 0 })
+    // 跳过式处置——文件保持现状、行打标（续放不再拾起）
+    expect(labSnapshot(fs)).toEqual({ 'rd0.txt': 'v0', 'rd1.txt': 'v1', 'rd2.txt': 'v2' })
+    const rows = await prisma.fileJournal.findMany({ where: { sessionId: SESSION } })
+    expect(rows.every((r) => r.fileRevertedAt !== null)).toBe(true)
+  })
+
   it('boot 拾起 scope=files 崩溃面：归档未处置行 ∈ chain(指针) 仍续放（行级决策优先——指针在被放弃分支）', async () => {
     // scope=files：对话面零改动、指针留在被放弃分支（ckB ∈ abandoned）——boot 续放 chain=指针
     // 重建时归档行 ∈ chain(指针)，chain 过滤会错排；行级归档标记 = 决策表达（无 chain 过滤）

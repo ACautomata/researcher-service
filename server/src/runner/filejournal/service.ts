@@ -63,6 +63,7 @@ export class FileJournalService {
       prisma: deps.prisma,
       io: this.io,
       containerOf: deps.containerOf,
+      depthLimit: deps.depthLimit,
     })
   }
 
@@ -189,11 +190,12 @@ export class FileJournalService {
     // 锚链先于 restore 路构造（续放判据的 chain 过滤依赖——见 Reconciler.resumeRevert）
     const chain = await this.chainOf(p.sessionId, p.anchor)
 
-    // restore 路：journal-first 崩溃残留补 apply + 上次中断的续放（容器缺失 = 跳过）；
-    // 活动计数入审计域（D8——静默失败不可接受）。此处 chain 已知——续放过滤与 planRevert 同形
+    // restore 路：仅 rollForward（journal-first 崩溃残留补 apply）——续放不在此：tx1 刚归档
+    // 行会命中归档拾起面 → 无护栏全量逆放绕过 depthLimit；上次 rewind 中断残行由本次
+    // planRevert 自然拾起（水位不越线后判据完备）。活动计数入审计域（D8——静默不可接受）
     if (container !== null) {
-      const rec = await this.reconciler.reconcileSession(p.sessionId, chain)
-      if (rec.rolledForward + rec.rolledMissing + rec.resumedReverted + rec.resumedMissing > 0) {
+      const rec = await this.reconciler.rollForwardPending(p.sessionId)
+      if (rec !== null && rec.rolledForward + rec.rolledMissing > 0) {
         await this.audit.record({
           kind: 'reconcile', sessionId: p.sessionId, userId: p.userId, username: p.username,
           detail: { phase: 'restore', ...rec },
@@ -321,7 +323,7 @@ export class FileJournalService {
         console.warn(`[filejournal] boot reconcile failed: session=${sessionId}: ${String(err)}`)
         continue
       }
-      if (outcome.rolledForward + outcome.rolledMissing + outcome.resumedReverted + outcome.resumedMissing > 0) {
+      if (outcome.rolledForward + outcome.rolledMissing + outcome.resumedReverted + outcome.resumedMissing + outcome.resumedDegraded > 0) {
         // 机制事件无用户上下文——userId/username 由 JournalAudit 按 session.ownerId 解析
         await this.audit.record({ kind: 'reconcile', sessionId, detail: { phase: 'boot', ...outcome } })
       }

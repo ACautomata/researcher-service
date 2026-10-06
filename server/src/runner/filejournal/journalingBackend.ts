@@ -159,7 +159,10 @@ export class JournalingBackend extends DockerArchiveBackend implements BackendPr
   }
 
   private toolCallId(): string {
-    return currentToolCallContext()?.toolCallId ?? randomUUID()
+    // 空串拦截（context 盖印面 String(id ?? '') 会把 id 缺席转成 '' 真实键——两次空 id 调用
+    // 在 (sessionId, toolCallId) UNIQUE 相撞 → 第二次幂等命中不落行 → rewind 漏撤）
+    const id = currentToolCallContext()?.toolCallId
+    return id !== undefined && id !== '' ? id : randomUUID()
   }
 
   private runId(): string | undefined {

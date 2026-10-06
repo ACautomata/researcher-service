@@ -45,7 +45,7 @@ export async function buildRewindPreview(
   chain: ReadonlySet<string>,
 ): Promise<RewindPreview> {
   // 判定式 = planRevert 单一来源（确认门数字 ≡ 实际逆放集——自实现双处必漂移；深度上限
-  // 传 Infinity：preview 只报面不降级，逆放面深度处置在 rewindFiles）
+  // 传 MAX_SAFE_INTEGER（恒不触发降级）：preview 只报面不降级，逆放面深度处置在 rewindFiles）
   const session = await prisma.session.findUnique({
     where: { id: sessionId },
     select: { fileJournalAnchorSeq: true },

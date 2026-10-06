@@ -6,8 +6,9 @@
 //   保留集 keepMark = fileRevertedAt=null ∧ checkpointId ∈ chain(anchor) ∧ seq > 旧水位
 //   ——跳过式处置（仅打 reverted 标记不回退）：中断续放（残集 = seq > 水位 ∧ !reverted）
 //   才不会误逆放锚点之前的变更。
-//   新水位 = chain(anchor) 行的最大 seq（无 = 0）——scope=chat「保持现状」由水位推进单独
-//   表达（行不处置、永不再拾起）。
+//   新水位 = min(chain(anchor) 行最大 seq，未处置 toRevert 最小 seq − 1)（无 chain 行 = 0）
+//   ——交错不越线（水位越过未处置 toRevert 行 = 中断续放永久漏逆放）；scope=chat「保持现状」
+//   由水位推进单独表达（行不处置、永不再拾起）。
 //
 // 逆操作映射（op 逆）：
 //   write  before=null → remove（文件是新建的，回退即删；rm 幂等——shell 旁路可能已删）
