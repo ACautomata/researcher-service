@@ -97,7 +97,7 @@ export function coerceJsonish(s: string | undefined): unknown {
 
 // ToolLine（事件聚合形状 / 投影行形状同体）→ ToolRow。success→done 是**呈现映射**，
 // 两入口同走此处（零差异不因映射漂移）。
-function toolRowFromServer(t: ToolLine): ToolRow {
+export function toolRowFromServer(t: ToolLine): ToolRow {
   return {
     id: t.toolCallId,
     name: t.name,
@@ -304,4 +304,20 @@ export function applyEvent(prev: Msg[], event: SessionEvent): Msg[] {
   }
 
   return prev
+}
+
+// 用户附件就位状态由同轮 ingestion 工具聚合派生，实时与回放共享。
+export function attachmentReadiness(messages: Msg[], index: number): 'pending' | 'ready' | 'error' {
+  const user = messages[index]
+  if (!user || user.role !== 'user') return 'ready'
+  for (let i = index + 1; i < messages.length; i++) {
+    const message = messages[i]
+    if (message.role === 'user') break
+    const tool = message.tools.find((item) => item.name === 'ingest_attachments')
+    if (tool) return tool.state === 'done' ? 'ready' : tool.state === 'error' ? 'error' : 'pending'
+    // 老投影没有 ingestion 行；已进入 agent loop 的正文/轨迹表示附件已物化。
+    if (message.text || message.thinking || message.tools.length) return 'ready'
+    if (message.streaming) return 'pending'
+  }
+  return user.sendKey ? 'pending' : 'ready'
 }

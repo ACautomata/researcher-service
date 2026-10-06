@@ -10,7 +10,7 @@ import type { PendingAttachment } from '@/chat/attachments'
 import { nextTick, ref, watch } from 'vue'
 
 // 预览项 PendingAttachment（结构上提 attachments.ts 单一来源，本组件只渲染）：
-// att 附件数据 + previewUrl 缩略（图片 dataURL，非图片空）+ key。
+// att 附件数据 + previewUrl 缩略（图片 Blob URL，非图片空）+ key。
 
 const props = withDefaults(
   defineProps<{
@@ -30,6 +30,8 @@ const props = withDefaults(
     // 输入框/附件编辑不受限。
     forkBusy?: boolean
     pendingAttachments?: PendingAttachment[]
+    attachmentBusy?: boolean
+    attachmentStatus?: string
   }>(),
   { pendingAttachments: () => [] },
 )
@@ -125,20 +127,21 @@ watch(() => props.modelValue, () => void nextTick(resize), { immediate: true })
           type="button"
           class="preview-remove"
           data-test="preview-remove"
-          :disabled="connecting || streaming || disconnected"
+          :disabled="connecting || streaming || disconnected || attachmentBusy"
           :aria-label="`移除 ${p.att.fileName}`"
           @click="emit('removeAttachment', p.key)"
         >✕</button>
       </div>
-      <span class="attach-count" data-test="attach-count">{{ pendingAttachments.length }} 个附件</span>
+      <span class="attach-count" data-test="attach-count">{{ pendingAttachments.length }}/4 个附件 · 单文件 ≤100MB</span>
     </div>
+    <p v-if="attachmentStatus" class="argument-hint" role="status" data-test="attachment-status">{{ attachmentStatus }}</p>
     <p v-if="argumentHint" id="slash-argument-hint" class="argument-hint" data-test="slash-argument-hint" role="status">{{ argumentHint }}</p>
     <div class="composer-row">
       <button
         type="button"
         class="attach-btn"
         data-test="attach-btn"
-        :disabled="connecting || streaming || disconnected"
+        :disabled="connecting || streaming || disconnected || attachmentBusy"
         aria-label="添加附件"
         @click="openFilePicker"
       >📎</button>
@@ -168,8 +171,8 @@ watch(() => props.modelValue, () => void nextTick(resize), { immediate: true })
       ></textarea>
       <button
         data-test="send"
-        :disabled="connecting || streaming || disconnected || rewindBusy || forkBusy"
-        :title="connecting ? '正在连接' : streaming ? '正在生成回答' : disconnected ? '连接已断开' : rewindBusy ? '正在回退' : forkBusy ? '正在分叉' : '发送消息'"
+        :disabled="connecting || streaming || disconnected || attachmentBusy || rewindBusy || forkBusy"
+        :title="attachmentBusy ? '正在处理附件' : connecting ? '正在连接' : streaming ? '正在生成回答' : disconnected ? '连接已断开' : rewindBusy ? '正在回退' : forkBusy ? '正在分叉' : '发送消息'"
         aria-label="发送消息"
         @click="emit('send')"
       >发送</button>

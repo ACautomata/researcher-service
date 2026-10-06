@@ -134,3 +134,11 @@ describe('turnFromCheckpointMessages（S3 · #779 in-flight 重建纯逻辑）',
     expect(snap.tools?.[0]?.details?.length).toBeLessThanOrEqual(4096)
   })
 })
+
+ it('#795 ingestion readiness survives checkpoint recovery within its human turn', () => {
+   const tool = { toolCallId: 'ingest-run', name: 'ingest_attachments', state: 'success', input: '{"attachmentIds":["a"]}', durationMs: 12 }
+   const human = new HumanMessage({ content: 'file', additional_kwargs: { researcherAttachmentIngestion: tool } })
+   expect(turnFromCheckpointMessages([human])).toEqual({ content: '', tools: [tool] })
+   expect(turnFromCheckpointMessages([human, new HumanMessage('next')])).toEqual({ content: '' })
+   expect(turnFromCheckpointMessages([new HumanMessage({ content: 'bad', additional_kwargs: { researcherAttachmentIngestion: { ...tool, durationMs: -1 } } })])).toEqual({ content: '' })
+ })

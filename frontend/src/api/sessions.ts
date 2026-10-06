@@ -145,12 +145,12 @@ export const resolveSessionApproval = (id: string, escalationId: string, decisio
   apiJson<null>(`${path(id)}/approvals/${encodeURIComponent(escalationId)}`, { method: 'POST', body: JSON.stringify({ decision }) })
 
 // 附件上传（multipart，单文件字段 file；REST 不直写沙箱——物化归图内 ingestion 节点 #780）。
-// 入参 Blob + 名称/mime（发送面持有的是压缩后的 base64 RawAttachment，经宿主重建 Blob；
+// 入参 Blob + 名称/mime（图片在前端降采样，文件保留原始 Blob；
 // 服务端 form 字段 fileName/mimeType 为权威元数据，缺省 'file' / 'application/octet-stream'）。
-export function uploadSessionAttachment(id: string, blob: Blob, fileName: string, mimeType: string): Promise<AttachmentMeta> {
+export function uploadSessionAttachment(id: string, blob: Blob, fileName: string, mimeType: string, signal?: AbortSignal): Promise<AttachmentMeta> {
   const form = new FormData()
   form.append('file', blob, fileName || 'file')
   form.append('fileName', fileName || 'file')
   form.append('mimeType', mimeType || 'application/octet-stream')
-  return apiJson<AttachmentMeta>(`${path(id)}/attachments`, { method: 'POST', body: form })
+  return apiJson<AttachmentMeta>(`${path(id)}/attachments`, { method: 'POST', body: form, timeoutMs: 300_000, signal })
 }

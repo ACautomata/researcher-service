@@ -129,6 +129,23 @@ describe('boot / 会话列表', () => {
 })
 
 describe('发送（幂等 + 乐观回显 + 门控）', () => {
+  it('#795 响应丢失后用同一 key 和附件引用重试，不降为纯文本', async () => {
+    const conn = await mounted()
+    const attachment = { attachmentId: '123', mime: 'application/pdf', size: 12, fileName: 'paper.pdf' }
+    vi.mocked(api.sendSessionMessage).mockRejectedValueOnce(new TypeError('response lost'))
+    conn.chat.setInput('分析附件')
+    expect(conn.send([attachment])).toBe(true)
+    await flushPromises()
+    const firstKey = vi.mocked(api.sendSessionMessage).mock.calls[0]![2]
+    const pending = JSON.parse(sessionStorage.getItem('chat.restOutbox.v1')!).sessions['sess-1'][0]
+    expect(pending.clientKey).toBe(firstKey)
+    expect(pending.attachments).toEqual([attachment])
+    expect(conn.chat.messages.at(-1)?.media).toEqual([attachment])
+    opened(); await flushPromises()
+    expect(api.sendSessionMessage).toHaveBeenLastCalledWith('sess-1', '分析附件', firstKey, ['123'])
+    conn.dispose()
+  })
+
   it('happy path：乐观 user 行 → POST 带 32-hex 幂等键 → messageId 回填 → 清输入', async () => {
     const conn = await mounted()
     conn.chat.setInput('新问题')

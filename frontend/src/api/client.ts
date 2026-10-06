@@ -7,7 +7,7 @@
 // 吊销的 token 在 body 信封里拒绝业务请求，经刷新链换新重试/确认失效跳登录（P0 code review）。
 import { useAuthStore } from '@/stores/auth'
 import { ApiError, parseEnvelope } from '@/api/errors'
-import { fetchWithTimeout } from '@/api/request'
+import { fetchWithTimeout, type RequestOptions } from '@/api/request'
 
 export { ApiError } from '@/api/errors'
 
@@ -20,7 +20,7 @@ export { ApiError } from '@/api/errors'
 // loadInstances 对 401 静默 return 让用户永远看不到「需改密」指引（PR #370 第四轮 R4-3 P0）。
 const ENVELOPE_UNAUTHENTICATED_CODES: ReadonlySet<number> = new Set([10001, 10004])
 
-function buildHeaders(init: RequestInit, token: string): Headers {
+function buildHeaders(init: RequestOptions, token: string): Headers {
   const headers = new Headers(init.headers)
   if (token) headers.set('Authorization', `Bearer ${token}`)
   // FormData（multipart，如附件上传）不设 Content-Type——浏览器须自带 multipart boundary。
@@ -80,7 +80,7 @@ function singleFlightRefresh(): Promise<void> {
   return inflightRefresh
 }
 
-async function refreshAndRetry(path: string, init: RequestInit): Promise<Response | null> {
+async function refreshAndRetry(path: string, init: RequestOptions): Promise<Response | null> {
   const auth = useAuthStore()
   await singleFlightRefresh()
   if (auth.token) {
@@ -102,7 +102,7 @@ async function refreshAndRetry(path: string, init: RequestInit): Promise<Respons
   return null
 }
 
-export async function apiFetch(path: string, init: RequestInit = {}): Promise<Response> {
+export async function apiFetch(path: string, init: RequestOptions = {}): Promise<Response> {
   const auth = useAuthStore()
   const resp = await fetchWithTimeout(path, { ...init, headers: buildHeaders(init, auth.token) })
   // HTTP 200 + 非 JSON（二进制成功，如 AutoFigure PNG 原生字节）→ 跳过信封 sniff 原样返回：
@@ -125,7 +125,7 @@ export async function apiFetch(path: string, init: RequestInit = {}): Promise<Re
   throw new ApiError(401, '未登录或登录已过期')
 }
 
-export async function apiJson<T>(path: string, init: RequestInit = {}): Promise<T> {
+export async function apiJson<T>(path: string, init: RequestOptions = {}): Promise<T> {
   const resp = await apiFetch(path, init)
   // #419-5：204 No Content 空体——不读 body 直接返回 undefined（resp.json() 对空体会 reject）。
   if (resp.status === 204) return undefined as T

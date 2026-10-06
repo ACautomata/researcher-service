@@ -73,6 +73,18 @@ export function turnFromCheckpointMessages(messages: unknown): TurnSnapshot {
   const contentParts: string[] = []
   let thinking = ''
   const tools = new Map<string, ToolLine>()
+  const human = list[anchor]
+  const kwargs = isRecord(human) ? human.additional_kwargs : undefined
+  const ingestion = isRecord(kwargs) ? kwargs.researcherAttachmentIngestion : undefined
+  if (isRecord(ingestion) && ingestion.name === 'ingest_attachments' && ingestion.state === 'success'
+    && typeof ingestion.toolCallId === 'string' && typeof ingestion.input === 'string'
+    && typeof ingestion.durationMs === 'number' && Number.isFinite(ingestion.durationMs) && ingestion.durationMs >= 0) {
+    const { text, truncated } = truncateUtf8(ingestion.input, TOOL_INPUT_MAX_BYTES)
+    tools.set(ingestion.toolCallId, {
+      toolCallId: ingestion.toolCallId, name: 'ingest_attachments', state: 'success', input: text,
+      durationMs: ingestion.durationMs, ...(truncated ? { truncated: true } : {}),
+    })
+  }
 
   for (let i = anchor + 1; i < list.length; i++) {
     const m = list[i]

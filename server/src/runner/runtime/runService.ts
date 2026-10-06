@@ -73,7 +73,7 @@ import { truncateUtf8 } from './projector'
 import { disableLangsmithTracing } from './tracing'
 import { lastMessage, scanMediaBlocks } from './mediaBlocks'
 import { turnFromCheckpointMessages } from './checkpointTurn'
-import { TurnReducer, isEmptyTurnSnapshot, type RecordTurnPayload, type TurnSnapshot } from '../../sessions/reducer'
+import { TurnReducer, isEmptyTurnSnapshot, type RecordTurnPayload, type TurnSnapshot, type ToolLine } from '../../sessions/reducer'
 import { TeammateService, type TeammateSummary } from '../teammates/service'
 import { createTeammateTools } from '../teammates/tools'
 import type { FileJournalService } from '../filejournal/service'
@@ -271,6 +271,7 @@ export class RunService {
   /** #785 per-path 写锁 + 覆盖审计（构造期装配——deps 缺省也生效，行为面无开关） */
   private readonly writeLocks: WriteLockRegistry
   private readonly overwriteAuditor: OverwriteAuditor
+  private attachmentIngestions = new Map<string, { runId: string; tool: ToolLine }>()
   private recordTurn: RecordTurnFn | undefined
   private sweepTimer: ReturnType<typeof setInterval> | undefined
   private queuedDispatch = false
@@ -532,6 +533,8 @@ export class RunService {
     } catch {
       turn = { content: '' }
     }
+    const ingestion = this.attachmentIngestions.get(sessionId)
+    if (ingestion?.runId === snap.runId && !turn.tools?.some(t => t.toolCallId === ingestion.tool.toolCallId)) turn = { content: '', tools: [ingestion.tool] }
     return { runId: snap.runId, state: 'running', turn }
   }
 
@@ -839,33 +842,61 @@ export class RunService {
         // #782：journaling 开启时物化改经 journalMaterialize（journal-first——打点先于落盘；
         // 确定性幂等键 ingest-<attachmentId>）。沙箱惰性创建由该步触发（story 58 语义不变）。
         let imageBlocks: ContentBlock[] = []
+        let attachmentIngestion: ToolLine | undefined
         if (cmd.kind === 'message' && cmd.attachmentIds && cmd.attachmentIds.length > 0 && this.deps.attachments) {
-          const fj = this.deps.fileJournal
-          const metas = await this.deps.attachments.ingestAttachments({
-            sessionId: cmd.sessionId,
-            attachmentIds: cmd.attachmentIds,
-            container: labContainer,
-            primitives: runPrimitives,
-            ...(fj
-              ? {
-                  journalWrite: async (row: { id: string; fileName: string; mimeType: string }, bytes: Buffer) => {
-                    await fj.journalMaterialize({
-                      sessionId: sandboxSessionId,
-                      container: labContainer,
-                      path: `uploads/${row.id}/${row.fileName}`,
-                      bytes,
-                      toolCallId: `${IDEMPOTENCY_INGEST_PREFIX}${row.id}`,
-                      runId: cmd.runId,
-                    })
-                  },
-                }
-              : {}),
-          })
-          for (const m of metas) {
-            if (m.mimeType.startsWith('image/')) {
-              const buf = await this.deps.attachments.readTempBytes(m.attachmentId)
-              imageBlocks.push({ type: 'image_url', image_url: { url: `data:${m.mimeType};base64,${buf.toString('base64')}` } })
+          // #795：确定性 ingestion 也走标准工具状态面，实时与落行同一聚合。
+          const toolCallId = `ingest-${cmd.runId}`
+          const start = { type: 'tool.start' as const, payload: {
+            toolCallId, name: 'ingest_attachments', input: JSON.stringify({ attachmentIds: cmd.attachmentIds }),
+          } }
+          this.attachmentIngestions.set(cmd.sessionId, { runId: cmd.runId, tool: { ...start.payload, state: 'running' } })
+          turn.feed(start)
+          this.publish(cmd.ownerId, start, cmd)
+          const startedAt = this.clock()
+          try {
+            const fj = this.deps.fileJournal
+            const metas = await this.deps.attachments.ingestAttachments({
+              sessionId: cmd.sessionId,
+              attachmentIds: cmd.attachmentIds,
+              container: labContainer,
+              primitives: runPrimitives,
+              ...(fj
+                ? {
+                    journalWrite: async (row: { id: string; fileName: string; mimeType: string }, bytes: Buffer) => {
+                      await fj.journalMaterialize({
+                        sessionId: sandboxSessionId,
+                        container: labContainer,
+                        path: `uploads/${row.id}/${row.fileName}`,
+                        bytes,
+                        toolCallId: `${IDEMPOTENCY_INGEST_PREFIX}${row.id}`,
+                        runId: cmd.runId,
+                      })
+                    },
+                  }
+                : {}),
+            })
+            for (const m of metas) {
+              if (m.mimeType.startsWith('image/')) {
+                const buf = await this.deps.attachments.readTempBytes(m.attachmentId)
+                imageBlocks.push({ type: 'image_url', image_url: { url: `data:${m.mimeType};base64,${buf.toString('base64')}` } })
+              }
             }
+            const end = { type: 'tool.end' as const, payload: {
+              toolCallId, name: 'ingest_attachments', state: 'success' as const,
+              durationMs: Math.max(0, this.clock() - startedAt),
+            } }
+            attachmentIngestion = { ...start.payload, ...end.payload }
+            this.attachmentIngestions.set(cmd.sessionId, { runId: cmd.runId, tool: attachmentIngestion })
+            turn.feed(end)
+            this.publish(cmd.ownerId, end, cmd)
+          } catch (cause) {
+            const end = { type: 'tool.end' as const, payload: {
+              toolCallId, name: 'ingest_attachments', state: 'error' as const,
+              durationMs: Math.max(0, this.clock() - startedAt),
+            } }
+            turn.feed(end)
+            this.publish(cmd.ownerId, end, cmd)
+            throw cause
           }
         }
         // HumanMessage 显式 id = runId：命令→checkpoint 消息的持久锚（normalizeReplay 重放判据）。
@@ -879,6 +910,7 @@ export class RunService {
                       ? { content: [{ type: 'text', text: cmd.content ?? '' }, ...imageBlocks] }
                       : { content: cmd.content ?? '' }),
                     id: cmd.runId,
+                    ...(attachmentIngestion ? { additional_kwargs: { researcherAttachmentIngestion: attachmentIngestion } } : {}),
                   }),
                 ],
               }
@@ -1032,6 +1064,7 @@ export class RunService {
         this.publish(cmd.ownerId, { type: 'run.failed', payload: { errorKind: kind } }, cmd)
       }
     } finally {
+      if (this.attachmentIngestions.get(cmd.sessionId)?.runId === cmd.runId) this.attachmentIngestions.delete(cmd.sessionId)
       this.aborts.delete(cmd.runId)
       this.activeCmds.delete(cmd.sessionId)
       // #785 持锁者死亡随 task 取消自动释放：本 run 残余持锁释放 + 其排队等待取消（正常路径
