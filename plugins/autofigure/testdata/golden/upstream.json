@@ -1,0 +1,486 @@
+{
+  "image_prompt_no_ref": {
+    "prompt": "Generate a professional academic journal style figure for the paper below so as to visualize the method it proposes, below is the method section of this paper:\n\n我们提出 FlowNet-3 用于多尺度特征聚合。首先，输入图像经骨干网络提取特征；\n随后，SAM3 分割模块定位语义图标；最后，模板渲染器输出矢量图形。\nThe decoder iteratively refines the layout (max 3 fix rounds).\n\nThe figure should be engaging and using academic journal style with cute characters.",
+    "methodText": "我们提出 FlowNet-3 用于多尺度特征聚合。首先，输入图像经骨干网络提取特征；\n随后，SAM3 分割模块定位语义图标；最后，模板渲染器输出矢量图形。\nThe decoder iteratively refines the layout (max 3 fix rounds).",
+    "model": "img-model-x",
+    "provider": "bianxie",
+    "image_size": "4K",
+    "has_reference": false
+  },
+  "image_prompt_with_ref": {
+    "prompt": "Generate a figure to visualize the method described below.\n\nYou should closely imitate the visual (artistic) style of the reference figure I provide, focusing only on aesthetic aspects, NOT on layout or structure.\n\nSpecifically, match:\n- overall visual tone and mood\n- illustration abstraction level\n- line style\n- color usage\n- shading style\n- icon and shape style\n- arrow and connector aesthetics\n- typography feel\n\nThe content structure, number of components, and layout may differ freely.\nOnly the visual style should be consistent.\n\nThe goal is that the figure looks like it was drawn by the same illustrator using the same visual design language as the reference figure.\n\nBelow is the method section of the paper:\n\"\"\"\n我们提出 FlowNet-3 用于多尺度特征聚合。首先，输入图像经骨干网络提取特征；\n随后，SAM3 分割模块定位语义图标；最后，模板渲染器输出矢量图形。\nThe decoder iteratively refines the layout (max 3 fix rounds).\n\"\"\"",
+    "methodText": "我们提出 FlowNet-3 用于多尺度特征聚合。首先，输入图像经骨干网络提取特征；\n随后，SAM3 分割模块定位语义图标；最后，模板渲染器输出矢量图形。\nThe decoder iteratively refines the layout (max 3 fix rounds).",
+    "model": "img-model-x",
+    "provider": "bianxie",
+    "image_size": "4K",
+    "has_reference": true
+  },
+  "template_prompt_label": {
+    "prompt": "编写svg代码来实现像素级别的复现这张图片（除了图标用相同大小的矩形占位符填充之外其他文字和组件(尤其是箭头样式)都要保持一致（即灰色矩形覆盖的内容就是图标））\n\nCRITICAL DIMENSION REQUIREMENT:\n- The original image has dimensions: 200 x 120 pixels\n- Your SVG MUST use these EXACT dimensions to ensure accurate icon placement:\n  - Set viewBox=\"0 0 200 120\"\n  - Set width=\"200\" height=\"120\"\n- DO NOT scale or resize the SVG\n\nPLACEHOLDER STYLE REQUIREMENT:\nLook at the second image (samed.png) - each icon area is marked with a gray rectangle (#808080), black border, and a centered label like <AF>01, <AF>02, etc.\n\nYour SVG placeholders MUST match this exact style:\n- Rectangle with fill=\"#808080\" and stroke=\"black\" stroke-width=\"2\"\n- Centered white text showing the same label (<AF>01, <AF>02, etc.)\n- Wrap each placeholder in a <g> element with id matching the label (e.g., id=\"AF01\")\n\nExample placeholder structure:\n<g id=\"AF01\">\n  <rect x=\"100\" y=\"50\" width=\"80\" height=\"80\" fill=\"#808080\" stroke=\"black\" stroke-width=\"2\"/>\n  <text x=\"140\" y=\"90\" text-anchor=\"middle\" dominant-baseline=\"middle\" fill=\"white\" font-size=\"14\">&lt;AF&gt;01</text>\n</g>\n\nPlease output ONLY the SVG code, starting with <svg and ending with </svg>. Do not include any explanation or markdown formatting.",
+    "n_images": 2,
+    "model": "svg-model-x",
+    "max_tokens": 50000,
+    "temperature": 0.7,
+    "figureWidth": 200,
+    "figureHeight": 120,
+    "boxlibJson": "{\n  \"image_size\": {\n    \"width\": 200,\n    \"height\": 120\n  },\n  \"prompts_used\": [\n    \"icon\",\n    \"robot\"\n  ],\n  \"boxes\": [\n    {\n      \"id\": 0,\n      \"label\": \"<AF>01\",\n      \"x1\": 10,\n      \"y1\": 5,\n      \"x2\": 70,\n      \"y2\": 45,\n      \"score\": 0.91,\n      \"prompt\": \"icon\"\n    },\n    {\n      \"id\": 1,\n      \"label\": \"<AF>02\",\n      \"x1\": 100,\n      \"y1\": 60,\n      \"x2\": 150,\n      \"y2\": 110,\n      \"score\": 0.77,\n      \"prompt\": \"robot\"\n    }\n  ],\n  \"no_icon_mode\": false\n}",
+    "noIconMode": false,
+    "currentSvg": null
+  },
+  "template_prompt_box": {
+    "prompt": "编写svg代码来实现像素级别的复现这张图片（除了图标用相同大小的矩形占位符填充之外其他文字和组件(尤其是箭头样式)都要保持一致（即灰色矩形覆盖的内容就是图标））\n\nCRITICAL DIMENSION REQUIREMENT:\n- The original image has dimensions: 200 x 120 pixels\n- Your SVG MUST use these EXACT dimensions to ensure accurate icon placement:\n  - Set viewBox=\"0 0 200 120\"\n  - Set width=\"200\" height=\"120\"\n- DO NOT scale or resize the SVG\n\nICON COORDINATES FROM boxlib.json:\nThe following JSON contains precise icon coordinates detected by SAM3:\n{\n  \"image_size\": {\n    \"width\": 200,\n    \"height\": 120\n  },\n  \"prompts_used\": [\n    \"icon\",\n    \"robot\"\n  ],\n  \"boxes\": [\n    {\n      \"id\": 0,\n      \"label\": \"<AF>01\",\n      \"x1\": 10,\n      \"y1\": 5,\n      \"x2\": 70,\n      \"y2\": 45,\n      \"score\": 0.91,\n      \"prompt\": \"icon\"\n    },\n    {\n      \"id\": 1,\n      \"label\": \"<AF>02\",\n      \"x1\": 100,\n      \"y1\": 60,\n      \"x2\": 150,\n      \"y2\": 110,\n      \"score\": 0.77,\n      \"prompt\": \"robot\"\n    }\n  ],\n  \"no_icon_mode\": false\n}\nUse these coordinates to accurately position your icon placeholders in the SVG.\n\nPlease output ONLY the SVG code, starting with <svg and ending with </svg>. Do not include any explanation or markdown formatting.",
+    "n_images": 2,
+    "model": "svg-model-x",
+    "max_tokens": 50000,
+    "temperature": 0.7,
+    "figureWidth": 200,
+    "figureHeight": 120,
+    "boxlibJson": "{\n  \"image_size\": {\n    \"width\": 200,\n    \"height\": 120\n  },\n  \"prompts_used\": [\n    \"icon\",\n    \"robot\"\n  ],\n  \"boxes\": [\n    {\n      \"id\": 0,\n      \"label\": \"<AF>01\",\n      \"x1\": 10,\n      \"y1\": 5,\n      \"x2\": 70,\n      \"y2\": 45,\n      \"score\": 0.91,\n      \"prompt\": \"icon\"\n    },\n    {\n      \"id\": 1,\n      \"label\": \"<AF>02\",\n      \"x1\": 100,\n      \"y1\": 60,\n      \"x2\": 150,\n      \"y2\": 110,\n      \"score\": 0.77,\n      \"prompt\": \"robot\"\n    }\n  ],\n  \"no_icon_mode\": false\n}",
+    "noIconMode": false,
+    "currentSvg": null
+  },
+  "template_prompt_no_icon": {
+    "prompt": "编写 SVG 代码来尽可能像素级复现这张图片。\n\n当前 SAM3 没有检测到任何有效图标，因此这是一个无图标回退模式任务：\n- 不要添加任何灰色矩形占位符\n- 不要添加任何 <AF>01 / <AF>02 标签\n- 不要凭空生成图标框、占位组或额外装饰\n- 所有可见内容都应直接用 SVG 元素复现\n- 优先保持整体布局、文字、箭头、线条、边框和配色与原图一致\n\nCRITICAL DIMENSION REQUIREMENT:\n- The original image has dimensions: 200 x 120 pixels\n- Your SVG MUST use these EXACT dimensions:\n  - Set viewBox=\"0 0 200 120\"\n  - Set width=\"200\" height=\"120\"\n- DO NOT scale or resize the SVG\n\nImage reference notes:\n- Image 1 is the original target figure.\n- Image 2 is the SAM reference image. It does not contain any valid icon placeholder boxes for this run.\n\nPlease output ONLY the SVG code, starting with <svg and ending with </svg>. Do not include any explanation or markdown formatting.",
+    "n_images": 2,
+    "model": "svg-model-x",
+    "max_tokens": 50000,
+    "temperature": 0.7,
+    "figureWidth": 200,
+    "figureHeight": 120,
+    "boxlibJson": "{\n  \"image_size\": {\n    \"width\": 200,\n    \"height\": 120\n  },\n  \"prompts_used\": [\n    \"icon\",\n    \"robot\"\n  ],\n  \"boxes\": [\n    {\n      \"id\": 0,\n      \"label\": \"<AF>01\",\n      \"x1\": 10,\n      \"y1\": 5,\n      \"x2\": 70,\n      \"y2\": 45,\n      \"score\": 0.91,\n      \"prompt\": \"icon\"\n    },\n    {\n      \"id\": 1,\n      \"label\": \"<AF>02\",\n      \"x1\": 100,\n      \"y1\": 60,\n      \"x2\": 150,\n      \"y2\": 110,\n      \"score\": 0.77,\n      \"prompt\": \"robot\"\n    }\n  ],\n  \"no_icon_mode\": false\n}",
+    "noIconMode": true,
+    "currentSvg": null
+  },
+  "fix_prompt": {
+    "prompt": "The following SVG code has XML syntax errors detected by an XML parser. Please fix ALL the errors and return valid SVG code.\n\nSYNTAX ERRORS DETECTED:\n  - 行 2, 列 15: attributes construct error\n  - 行 2, 列 21: Expected >, but got: <\n\nORIGINAL SVG CODE:\n```xml\n<svg width=\"10\"><rect x=\"1\"</svg>\n```\n\nIMPORTANT INSTRUCTIONS:\n1. Fix all XML syntax errors (unclosed tags, invalid attributes, unescaped characters, etc.)\n2. Ensure the output is valid XML that can be parsed by lxml\n3. Keep all the visual elements and structure intact\n4. Return ONLY the fixed SVG code, starting with <svg and ending with </svg>\n5. Do NOT include any markdown formatting, explanation, or code blocks - just the raw SVG code",
+    "currentSvg": "<svg width=\"10\"><rect x=\"1\"</svg>",
+    "errors": [
+      "行 2, 列 15: attributes construct error",
+      "行 2, 列 21: Expected >, but got: <"
+    ],
+    "max_tokens": 16000,
+    "temperature": 0.3
+  },
+  "fix_prompt_injected_errors": [
+    "行 2, 列 15: attributes construct error",
+    "行 2, 列 21: Expected >, but got: <"
+  ],
+  "fix_prompt_bad_svg": "<svg width=\"10\"><rect x=\"1\"</svg>",
+  "optimize_prompts_label": [
+    {
+      "prompt": "You are an expert SVG optimizer. Compare the current SVG rendering with the original figure and optimize the SVG code to better match the original.\n\nI'm providing you with 4 inputs:\n1. **Image 1 (figure.png)**: The original target figure that we want to replicate\n2. **Image 2 (samed.png)**: The same figure with icon positions marked as gray rectangles with labels (<AF>01, <AF>02, etc.)\n3. **Image 3 (current SVG rendered as PNG)**: The current state of our SVG\n4. **Current SVG code**: The SVG code that needs optimization\n\nPlease carefully compare and check the following **TWO MAJOR ASPECTS with EIGHT KEY POINTS**:\n\n## ASPECT 1: POSITION (位置)\n1. **Icons (图标)**: Are icon placeholder positions matching the original?\n2. **Text (文字)**: Are text elements positioned correctly?\n3. **Arrows (箭头)**: Are arrows starting/ending at correct positions?\n4. **Lines/Borders (线条)**: Are lines and borders aligned properly?\n\n## ASPECT 2: STYLE (样式)\n5. **Icons (图标)**: Icon placeholder sizes, proportions (must have gray fill #808080, black border, and centered label)\n6. **Text (文字)**: Font sizes, colors, weights\n7. **Arrows (箭头)**: Arrow styles, thicknesses, colors\n8. **Lines/Borders (线条)**: Line styles, colors, stroke widths\n\n**CURRENT SVG CODE:**\n```xml\n<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"200\" height=\"120\"><rect x=\"1\" y=\"2\" width=\"30\" height=\"20\" fill=\"#808080\" stroke=\"black\"/></svg>\n```\n\n**IMPORTANT:**\n- Output ONLY the optimized SVG code\n- Start with <svg and end with </svg>\n- Do NOT include markdown formatting or explanations\n- Keep all icon placeholder structures intact (the <g> elements with id like \"AF01\")\n- Focus on position and style corrections",
+      "n_images": 3,
+      "model": "svg-model-x",
+      "max_tokens": 50000,
+      "temperature": 0.3,
+      "figureWidth": null,
+      "figureHeight": null,
+      "boxlibJson": null,
+      "noIconMode": false,
+      "currentSvg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"200\" height=\"120\"><rect x=\"1\" y=\"2\" width=\"30\" height=\"20\" fill=\"#808080\" stroke=\"black\"/></svg>"
+    },
+    {
+      "prompt": "You are an expert SVG optimizer. Compare the current SVG rendering with the original figure and optimize the SVG code to better match the original.\n\nI'm providing you with 4 inputs:\n1. **Image 1 (figure.png)**: The original target figure that we want to replicate\n2. **Image 2 (samed.png)**: The same figure with icon positions marked as gray rectangles with labels (<AF>01, <AF>02, etc.)\n3. **Image 3 (current SVG rendered as PNG)**: The current state of our SVG\n4. **Current SVG code**: The SVG code that needs optimization\n\nPlease carefully compare and check the following **TWO MAJOR ASPECTS with EIGHT KEY POINTS**:\n\n## ASPECT 1: POSITION (位置)\n1. **Icons (图标)**: Are icon placeholder positions matching the original?\n2. **Text (文字)**: Are text elements positioned correctly?\n3. **Arrows (箭头)**: Are arrows starting/ending at correct positions?\n4. **Lines/Borders (线条)**: Are lines and borders aligned properly?\n\n## ASPECT 2: STYLE (样式)\n5. **Icons (图标)**: Icon placeholder sizes, proportions (must have gray fill #808080, black border, and centered label)\n6. **Text (文字)**: Font sizes, colors, weights\n7. **Arrows (箭头)**: Arrow styles, thicknesses, colors\n8. **Lines/Borders (线条)**: Line styles, colors, stroke widths\n\n**CURRENT SVG CODE:**\n```xml\n<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"200\" height=\"120\"><rect x=\"1\" y=\"2\" width=\"30\" height=\"20\" fill=\"#808080\" stroke=\"black\"/></svg>\n```\n\n**IMPORTANT:**\n- Output ONLY the optimized SVG code\n- Start with <svg and end with </svg>\n- Do NOT include markdown formatting or explanations\n- Keep all icon placeholder structures intact (the <g> elements with id like \"AF01\")\n- Focus on position and style corrections",
+      "n_images": 3,
+      "model": "svg-model-x",
+      "max_tokens": 50000,
+      "temperature": 0.3,
+      "figureWidth": null,
+      "figureHeight": null,
+      "boxlibJson": null,
+      "noIconMode": false,
+      "currentSvg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"200\" height=\"120\"><rect x=\"1\" y=\"2\" width=\"30\" height=\"20\" fill=\"#808080\" stroke=\"black\"/></svg>"
+    }
+  ],
+  "optimize_prompt_no_icon": [
+    {
+      "prompt": "You are an expert SVG optimizer. Compare the current SVG rendering with the original figure and optimize the SVG code to better match the original.\n\nI'm providing you with 4 inputs:\n1. **Image 1 (figure.png)**: The original target figure that we want to replicate\n2. **Image 2 (samed.png)**: The SAM reference image for this run. No valid icon boxes were detected.\n3. **Image 3 (current SVG rendered as PNG)**: The current state of our SVG\n4. **Current SVG code**: The SVG code that needs optimization\n\nPlease carefully compare and optimize:\n1. Overall layout and spatial alignment\n2. Text positions, font sizes, and colors\n3. Arrows, connectors, borders, and strokes\n4. Shapes, grouping, and visual hierarchy\n\n**CURRENT SVG CODE:**\n```xml\n<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"200\" height=\"120\"><rect x=\"1\" y=\"2\" width=\"30\" height=\"20\" fill=\"#808080\" stroke=\"black\"/></svg>\n```\n\n**IMPORTANT:**\n- Output ONLY the optimized SVG code\n- Start with <svg and end with </svg>\n- Do NOT include markdown formatting or explanations\n- No valid icon placeholders exist for this figure\n- Do NOT add gray rectangles, AF labels, placeholder groups, or synthetic icon boxes\n- Focus on position and style corrections",
+      "n_images": 3,
+      "model": "svg-model-x",
+      "max_tokens": 50000,
+      "temperature": 0.3,
+      "figureWidth": null,
+      "figureHeight": null,
+      "boxlibJson": null,
+      "noIconMode": true,
+      "currentSvg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"200\" height=\"120\"><rect x=\"1\" y=\"2\" width=\"30\" height=\"20\" fill=\"#808080\" stroke=\"black\"/></svg>"
+    }
+  ],
+  "sam3_fal_metadata": [
+    {
+      "box": [
+        0.2,
+        0.25,
+        0.3,
+        0.5
+      ],
+      "imageW": 200,
+      "imageH": 120,
+      "xyxy": [
+        10,
+        0,
+        70,
+        60
+      ]
+    },
+    {
+      "box": [
+        0.7,
+        0.75,
+        0.2,
+        0.1
+      ],
+      "imageW": 200,
+      "imageH": 120,
+      "xyxy": [
+        120,
+        84,
+        160,
+        96
+      ]
+    }
+  ],
+  "sam3_fal_resp": {
+    "metadata": [
+      {
+        "box": [
+          0.2,
+          0.25,
+          0.3,
+          0.5
+        ],
+        "score": 0.93
+      },
+      {
+        "box": [
+          0.7,
+          0.75,
+          0.2,
+          0.1
+        ],
+        "score": 0.55
+      },
+      {
+        "box": [
+          0.5,
+          0.5,
+          0.0,
+          0.5
+        ],
+        "score": 0.9
+      }
+    ]
+  },
+  "sam3_fal_detections": [
+    {
+      "x1": 10,
+      "y1": 0,
+      "x2": 70,
+      "y2": 60,
+      "score": 0.93
+    },
+    {
+      "x1": 120,
+      "y1": 84,
+      "x2": 160,
+      "y2": 96,
+      "score": 0.55
+    }
+  ],
+  "sam3_roboflow_resp": {
+    "prompt_results": [
+      {
+        "predictions": [
+          {
+            "confidence": 0.81,
+            "masks": [
+              [
+                [
+                  10,
+                  20
+                ],
+                [
+                  80,
+                  20
+                ],
+                [
+                  80,
+                  90
+                ],
+                [
+                  10,
+                  90
+                ]
+              ]
+            ]
+          },
+          {
+            "confidence": 0.6,
+            "masks": [
+              [
+                [
+                  5,
+                  5
+                ],
+                [
+                  40,
+                  5
+                ],
+                [
+                  40,
+                  40
+                ]
+              ]
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "sam3_roboflow_detections": [
+    {
+      "x1": 10,
+      "y1": 20,
+      "x2": 80,
+      "y2": 90,
+      "score": 0.81
+    },
+    {
+      "x1": 5,
+      "y1": 5,
+      "x2": 40,
+      "y2": 40,
+      "score": 0.6
+    }
+  ],
+  "replace": {
+    "template": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"200\" height=\"120\"><g id=\"AF01\" transform=\"translate(5, 5)\"><rect x=\"5\" y=\"0\" width=\"60\" height=\"40\" fill=\"#808080\" stroke=\"black\" stroke-width=\"2\"/><text x=\"35\" y=\"20\" fill=\"white\">&lt;AF&gt;01</text></g><rect x=\"100\" y=\"60\" width=\"50\" height=\"50\" fill=\"#808080\" stroke=\"black\"/><text x=\"125\" y=\"85\" text-anchor=\"middle\" fill=\"white\">&lt;AF&gt;02</text><rect x=\"20\" y=\"70\" width=\"40\" height=\"30\" fill=\"#808080\" stroke=\"black\" stroke-width=\"2\"/><rect x=\"0\" y=\"0\" width=\"199\" height=\"119\" fill=\"none\"/></svg>",
+    "icons": [
+      {
+        "label": "<AF>01",
+        "labelClean": "AF01",
+        "x1": 10,
+        "y1": 5,
+        "width": 60,
+        "height": 40,
+        "nobgPngB64": "iVBORw0KGgoAAAANSUhEUgAAAAwAAAAKCAYAAACALL/6AAAAHElEQVR4nGP8z8Dwn4EEwESKYhAY1UAMoH0oAQDgbAISzemfkgAAAABJRU5ErkJggg=="
+      },
+      {
+        "label": "<AF>02",
+        "labelClean": "AF02",
+        "x1": 100,
+        "y1": 60,
+        "width": 50,
+        "height": 50,
+        "nobgPngB64": "iVBORw0KGgoAAAANSUhEUgAAAAwAAAAKCAYAAACALL/6AAAAHElEQVR4nGNk+M/wn4EEwESKYhAY1UAMoH0oAQDfbQISe/D1gAAAAABJRU5ErkJggg=="
+      },
+      {
+        "label": "<AF>03",
+        "labelClean": "AF03",
+        "x1": 20,
+        "y1": 70,
+        "width": 40,
+        "height": 30,
+        "nobgPngB64": "iVBORw0KGgoAAAANSUhEUgAAAAwAAAAKCAYAAACALL/6AAAAHElEQVR4nGNkYPj/n4EEwESKYhAY1UAMoH0oAQDebgISiGGQbwAAAABJRU5ErkJggg=="
+      },
+      {
+        "label": "<AF>04",
+        "labelClean": "AF04",
+        "x1": 160,
+        "y1": 10,
+        "width": 30,
+        "height": 30,
+        "nobgPngB64": "iVBORw0KGgoAAAANSUhEUgAAAAwAAAAKCAYAAACALL/6AAAAHElEQVR4nGP8/5/hPwMJgIkUxSAwqoEYQPtQAgDGogMRCaIpWAAAAABJRU5ErkJggg=="
+      }
+    ],
+    "scaleFactors": [
+      1.0,
+      1.0
+    ],
+    "matchByLabel": true,
+    "finalSvg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"200\" height=\"120\"><image id=\"icon_AF01\" x=\"10.0\" y=\"5.0\" width=\"60.0\" height=\"40.0\" href=\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAwAAAAKCAYAAACALL/6AAAAHElEQVR4nGP8z8Dwn4EEwESKYhAY1UAMoH0oAQDgbAISzemfkgAAAABJRU5ErkJggg==\" preserveAspectRatio=\"xMidYMid meet\"/><image id=\"icon_AF02\" x=\"100.0\" y=\"60.0\" width=\"50.0\" height=\"50.0\" href=\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAwAAAAKCAYAAACALL/6AAAAHElEQVR4nGNk+M/wn4EEwESKYhAY1UAMoH0oAQDfbQISe/D1gAAAAABJRU5ErkJggg==\" preserveAspectRatio=\"xMidYMid meet\"/><image id=\"icon_AF03\" x=\"20.0\" y=\"70.0\" width=\"40.0\" height=\"30.0\" href=\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAwAAAAKCAYAAACALL/6AAAAHElEQVR4nGNkYPj/n4EEwESKYhAY1UAMoH0oAQDebgISiGGQbwAAAABJRU5ErkJggg==\" preserveAspectRatio=\"xMidYMid meet\"/><rect x=\"0\" y=\"0\" width=\"199\" height=\"119\" fill=\"none\"/>  <image id=\"icon_AF04\" x=\"160.0\" y=\"10.0\" width=\"30.0\" height=\"30.0\" href=\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAwAAAAKCAYAAACALL/6AAAAHElEQVR4nGP8/5/hPwMJgIkUxSAwqoEYQPtQAgDGogMRCaIpWAAAAABJRU5ErkJggg==\" preserveAspectRatio=\"xMidYMid meet\"/>\n</svg>"
+  },
+  "embedded": {
+    "b64": "iVBORw0KGgoAAAANSUhEUgAAAMgAAAB4CAIAAAA48Cq8AAABcUlEQVR4nO3csQnDMABFQTlkAI3skT1CitRxYfywAnetQbh4/Eag7TiOAXd73X4iCIuKxSIhLBLCIiEsEsIiISwSwiLxPv885xxLcmGwOIvFE4v1te/7WMZSP8MvFouEsEgIi4SwSAiLhLBICIuEsEgIi4SwSAiLhLBICIuEsEgIi4SwSAiLhLBICIuEsEgIi4SwSAiLhLBICIuEsEgIi4SwSAiLhLBICIuEsEgIi4SwSAiLhLBIbOfvWnuOm2ssFk8sFlxjsUgIi4SwSAiLhLBICIuEsEgIi4SwSAiLhLBICIuEsEgIi4SwSAiLhLBICIuEsEgIi4SwSAiLhLBICIuEsEgIi4SwSAiLhLBICIuEsEgIi4SwSAiLhLBICIuEsEgIi4SwSAiLhLBICIuEsEgIi4SwSAiLhLBICIuEsEgIi4SwSAiLhLBICIuEsEgIi4SwEBb/w2KREBYJYZEQFglhkRAWCWGREBYJYZEQFqPwAXOlEmIuES7mAAAAAElFTkSuQmCC",
+    "width": 200,
+    "height": 120,
+    "svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"200\" height=\"120\" viewBox=\"0 0 200 120\">\n  <image x=\"0\" y=\"0\" width=\"200\" height=\"120\" href=\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAMgAAAB4CAIAAAA48Cq8AAABcUlEQVR4nO3csQnDMABFQTlkAI3skT1CitRxYfywAnetQbh4/Eag7TiOAXd73X4iCIuKxSIhLBLCIiEsEsIiISwSwiLxPv885xxLcmGwOIvFE4v1te/7WMZSP8MvFouEsEgIi4SwSAiLhLBICIuEsEgIi4SwSAiLhLBICIuEsEgIi4SwSAiLhLBICIuEsEgIi4SwSAiLhLBICIuEsEgIi4SwSAiLhLBICIuEsEgIi4SwSAiLhLBIbOfvWnuOm2ssFk8sFlxjsUgIi4SwSAiLhLBICIuEsEgIi4SwSAiLhLBICIuEsEgIi4SwSAiLhLBICIuEsEgIi4SwSAiLhLBICIuEsEgIi4SwSAiLhLBICIuEsEgIi4SwSAiLhLBICIuEsEgIi4SwSAiLhLBICIuEsEgIi4SwSAiLhLBICIuEsEgIi4SwSAiLhLBICIuEsEgIi4SwEBb/w2KREBYJYZEQFglhkRAWCWGREBYJYZEQFqPwAXOlEmIuES7mAAAAAElFTkSuQmCC\" preserveAspectRatio=\"none\"/>\n</svg>\n"
+  },
+  "merge_boxes": {
+    "input": [
+      {
+        "id": 0,
+        "label": "<AF>01",
+        "x1": 0,
+        "y1": 0,
+        "x2": 100,
+        "y2": 100,
+        "score": 0.9,
+        "prompt": "icon"
+      },
+      {
+        "id": 1,
+        "label": "<AF>02",
+        "x1": 5,
+        "y1": 5,
+        "x2": 105,
+        "y2": 105,
+        "score": 0.7,
+        "prompt": "robot"
+      },
+      {
+        "id": 2,
+        "label": "<AF>03",
+        "x1": 200,
+        "y1": 200,
+        "x2": 260,
+        "y2": 260,
+        "score": 0.6,
+        "prompt": "person"
+      }
+    ],
+    "threshold": 0.9,
+    "expected": [
+      {
+        "id": 0,
+        "label": "<AF>01",
+        "x1": 200,
+        "y1": 200,
+        "x2": 260,
+        "y2": 260,
+        "score": 0.6,
+        "prompt": "person"
+      },
+      {
+        "id": 1,
+        "label": "<AF>02",
+        "x1": 0,
+        "y1": 0,
+        "x2": 105,
+        "y2": 105,
+        "score": 0.9,
+        "prompt": "icon"
+      }
+    ]
+  },
+  "extract_svg": [
+    {
+      "input": "before <svg A>1</svg> after",
+      "expected": "<svg A>1</svg>"
+    },
+    {
+      "input": "```svg\n<svg B>2</svg>\n```",
+      "expected": "<svg B>2</svg>"
+    },
+    {
+      "input": "  <svg C>3</svg>",
+      "expected": "<svg C>3</svg>"
+    },
+    {
+      "input": "no svg here",
+      "expected": null
+    },
+    {
+      "input": "<SVG D>4</SVG>",
+      "expected": "<SVG D>4</SVG>"
+    }
+  ],
+  "parity_cases": [
+    {
+      "fn": "overlap",
+      "a": {
+        "x1": 0,
+        "y1": 0,
+        "x2": 100,
+        "y2": 100,
+        "score": 0.9
+      },
+      "b": {
+        "x1": 5,
+        "y1": 5,
+        "x2": 105,
+        "y2": 105,
+        "score": 0.7
+      },
+      "expected": 0.9025
+    },
+    {
+      "fn": "svgDims",
+      "svg": "<svg viewBox=\"0 0 200 120\" width=\"400\" height=\"240\"><rect/></svg>",
+      "expected": [
+        200.0,
+        120.0
+      ]
+    },
+    {
+      "fn": "svgDims",
+      "svg": "<svg width=\"640.5px\" height=\"480px\"/>",
+      "expected": [
+        640.5,
+        480.0
+      ]
+    },
+    {
+      "fn": "svgDims",
+      "svg": "<svg><rect/></svg>",
+      "expected": [
+        null,
+        null
+      ]
+    },
+    {
+      "fn": "scale",
+      "args": [
+        200,
+        120,
+        400.0,
+        240.0
+      ],
+      "expected": [
+        2.0,
+        2.0
+      ]
+    },
+    {
+      "fn": "countBase64",
+      "svg": "<svg><image href=\"data:image/png;base64,QUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJD\"/></svg>",
+      "expected": 1
+    },
+    {
+      "fn": "validateBase64",
+      "svg": "<svg><image href=\"data:image/png;base64,QUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJDQUJD\"/><image xlink:href=\"data:image/jpeg;base64,WQ==WQ==WQ==WQ==WQ==WQ==WQ==WQ==WQ==WQ==WQ==WQ==WQ==WQ==WQ==WQ==WQ==WQ==WQ==WQ==WQ==WQ==WQ==WQ==WQ==WQ==WQ==WQ==WQ==WQ==WQ==WQ==WQ==WQ==WQ==WQ==WQ==WQ==WQ==WQ==WQ==WQ==WQ==WQ==WQ==WQ==WQ==WQ==WQ==WQ==\"/></svg>",
+      "n": 2,
+      "expected": [
+        true,
+        "base64 图片验证通过: 2 张图片"
+      ]
+    },
+    {
+      "fn": "polygonToBbox",
+      "points": [
+        [
+          10,
+          20
+        ],
+        [
+          80,
+          20
+        ],
+        [
+          80,
+          90
+        ],
+        [
+          10,
+          90
+        ]
+      ],
+      "expected": [
+        10,
+        20,
+        80,
+        90
+      ]
+    }
+  ]
+}

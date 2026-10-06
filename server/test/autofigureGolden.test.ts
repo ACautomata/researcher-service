@@ -42,7 +42,7 @@ const golden: any = hasGolden ? JSON.parse(readFileSync(GOLDEN_PATH, 'utf8')) : 
 
 describe.skipIf(!hasGolden)('golden-file 对照（上游 AutoFigure-Edit @ 16f3749）', () => {
   it('生图 prompt（无参考图 / 有参考图）逐字节对照', () => {
-    const method = golden.image_prompt_no_ref.prompt
+    const method = golden.image_prompt_no_ref.methodText // 原始 method_text（非嵌套 prompt）
     expect(buildImageGenPrompt(method)).toBe(golden.image_prompt_no_ref.prompt)
     expect(buildImageGenPromptWithReference(method)).toBe(golden.image_prompt_with_ref.prompt)
     expect(buildImageGenPrompt(method)).toContain(method)

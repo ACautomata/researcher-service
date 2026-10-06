@@ -23,6 +23,16 @@ args = parser.parse_args()
 
 sys.path.insert(0, args.upstream)
 
+# 上游顶层 import torchvision/transformers（:91-92）——二者仅服务于本地 RMBG 模型路径
+#（BriaRMBG2Remover），采集路径（云 API + 纯函数）不触碰；torch 重依赖本机存在则用真身。
+# 注入最小 stub 挡顶层 import（from X import Y 需模块属性存在）。
+import types  # noqa: E402
+
+for _name in ('torchvision', 'torchvision.transforms', 'transformers'):
+    sys.modules[_name] = types.ModuleType(_name)
+sys.modules['torchvision'].transforms = sys.modules['torchvision.transforms']
+sys.modules['transformers'].AutoModelForImageSegmentation = object()
+
 import autofigure2  # noqa: E402
 from PIL import Image, ImageDraw  # noqa: E402
 
@@ -175,7 +185,16 @@ with open(template_path, 'w', encoding='utf-8') as f:
     f.write(FIXTURE_SVG_RETURNED)
 rendered_png = os.path.join(work, 'rendered.png')
 Image.new('RGB', (FIG_W, FIG_H), (255, 255, 255)).save(rendered_png)
-autofigure2.svg_to_png = lambda svg_path, output_path, scale=1.0: rendered_png
+# 上游 optimize 内部直接 Image.open(svg_to_png 的 output_path 实参)——stub 须把 fixture 写到该路径
+import shutil  # noqa: E402
+
+
+def _fake_svg_to_png(svg_path, output_path, scale=1.0):
+    shutil.copyfile(rendered_png, output_path)
+    return output_path
+
+
+autofigure2.svg_to_png = _fake_svg_to_png
 
 ctx = {'current_svg': FIXTURE_SVG_RETURNED, 'no_icon_mode': False}
 autofigure2.optimize_svg_with_llm(
@@ -219,6 +238,13 @@ def icon_png_b64(p):
     return b64mod.b64encode(open(p, 'rb').read()).decode('utf-8')
 
 
+# 上游消费形状（nobg_path 文件路径 + x1/y1/x2/y2）；golden 记录 TS 消费形状（nobgPngB64 + width/height）
+_replace_up = [
+    {'id': 0, 'label': '<AF>01', 'label_clean': 'AF01', 'x1': 10, 'y1': 5, 'x2': 70, 'y2': 45, 'width': 60, 'height': 40, 'nobg_path': icon_paths[0]},
+    {'id': 1, 'label': '<AF>02', 'label_clean': 'AF02', 'x1': 100, 'y1': 60, 'x2': 150, 'y2': 110, 'width': 50, 'height': 50, 'nobg_path': icon_paths[1]},
+    {'id': 2, 'label': '<AF>03', 'label_clean': 'AF03', 'x1': 20, 'y1': 70, 'x2': 60, 'y2': 100, 'width': 40, 'height': 30, 'nobg_path': icon_paths[2]},
+    {'id': 3, 'label': '<AF>04', 'label_clean': 'AF04', 'x1': 160, 'y1': 10, 'x2': 190, 'y2': 40, 'width': 30, 'height': 30, 'nobg_path': icon_paths[3]},
+]
 replace_icons = [
     {'label': '<AF>01', 'labelClean': 'AF01', 'x1': 10, 'y1': 5, 'width': 60, 'height': 40, 'nobgPngB64': icon_png_b64(icon_paths[0])},
     {'label': '<AF>02', 'labelClean': 'AF02', 'x1': 100, 'y1': 60, 'width': 50, 'height': 50, 'nobgPngB64': icon_png_b64(icon_paths[1])},
@@ -227,7 +253,7 @@ replace_icons = [
 ]
 replace_final_path = os.path.join(work, 'final_golden.svg')
 autofigure2.replace_icons_in_svg(
-    template_svg_path=replace_template_path, icon_infos=replace_icons,
+    template_svg_path=replace_template_path, icon_infos=_replace_up,
     output_path=replace_final_path, scale_factors=(1.0, 1.0), match_by_label=True,
 )
 
