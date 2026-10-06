@@ -4,6 +4,7 @@
 
 import { describe, it, expect } from 'vitest'
 import { createLlmToolPort } from '../src/runner/llmToolPort'
+import { TINY_PNG } from './autofigureFakePorts'
 
 // 最小 registry 替身：不触 prisma（结构子集——getSnapshot/getModel 两面）。
 type ProviderRegistryLike = { constructed: string[]; invoked: Array<{ modelId: string; opts: unknown; contents: unknown }> }
@@ -60,18 +61,13 @@ function fakeRegistry(p: {
   } as never
 }
 
-function png(): Uint8Array {
-  // 4x4 PNG（TINY_PNG 同物）
-  return Uint8Array.from(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAQAAAAECAYAAACp8Z5+AAAAFklEQVR42mP8z8AAAxIDEwMDAwMDAwAkBgMBjfAPdAAAAAElFTkSuQmCC', 'base64'))
-}
-
 describe('createLlmToolPort（ProviderRegistry 回退链封装）', () => {
   const opts = { maxTokens: 50000, temperature: 0.7 } as const
 
   it('单 provider：primary 调用成功，文本与 usage 返回，invoke 参数透传', async () => {
     const reg = fakeRegistry({ providers: [{ providerId: 'p1', modelIds: ['m-1'] }] })
     const port = createLlmToolPort(reg as never, 'u1')
-    const r = await port.generateMultimodal({ contents: ['画一张方法图', { png: png() }], model: '', ...opts })
+    const r = await port.generateMultimodal({ contents: ['画一张方法图', { png: TINY_PNG }], model: '', ...opts })
     expect(r.text).toBe('ok')
     expect(r.usage).toEqual({ inputTokens: 3, outputTokens: 5, totalTokens: 8 })
     expect(reg.invoked[0]!.opts).toMatchObject({ maxTokens: 50000, temperature: 0.7 })
@@ -145,7 +141,7 @@ describe('createLlmToolPort（ProviderRegistry 回退链封装）', () => {
     expect(reg.invoked[0]!.modelId).toBe('m-2')
   })
 
-  it('指定模型调用失败 → 降级默认链（首模型序，指定模型不重复入链）', async () => {
+  it('指定模型调用失败 = 明确报错（pin 语义，不静默降级默认链）', async () => {
     const reg = fakeRegistry({
       providers: [
         { providerId: 'p1', modelIds: ['m-1', 'm-2'] },
@@ -154,9 +150,8 @@ describe('createLlmToolPort（ProviderRegistry 回退链封装）', () => {
       failInvokes: { 'm-2': 'quota exceeded' },
     })
     const port = createLlmToolPort(reg as never, 'u1')
-    const r = await port.generateMultimodal({ contents: ['hi'], model: 'm-2', ...opts })
-    expect(r.text).toBe('ok')
-    // m-2 失败 → 默认链 m-1 成功即止（m-3 不再触达）
-    expect(reg.invoked.map((i) => i.modelId)).toEqual(['m-2', 'm-1'])
+    await expect(port.generateMultimodal({ contents: ['hi'], model: 'm-2', ...opts })).rejects.toThrow(/m-2 调用失败/)
+    // 降级默认链被 pin 语义阻断：仅 pin 模型被调用
+    expect(reg.invoked.map((i) => i.modelId)).toEqual(['m-2'])
   })
 })

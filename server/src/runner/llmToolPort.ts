@@ -1,7 +1,8 @@
 // ctx.llm 句柄核心实现（#744 §6/§11.1 · #792）：ProviderRegistry 出口的高层多模态句柄。
 // 回退链封装在核心实现内，插件不碰 registry 查询逻辑：默认链 = owner providers（createdAt
 // 序）× 各自首模型，构造或调用失败逐级降级，全败明确报错（不静默换模型）；AUTOFIGURE_SVG_MODEL
-// 指定 = 集合内任一模型优先（检索域全 provider 全模型，非首模型经 configurable 通道绑定）。
+// 指定 = 集合内任一模型（检索域全 provider 全模型，非首模型经 configurable 通道绑定）——
+// 运维 pin 语义，调用失败明确报错不降级。
 // owner 无 provider → loadSnapshot 惰性物化面板默认 provider（providerDefaults）——物化后
 // 仍为空集 = 面板未配置 → 明确配置错误。
 //
@@ -63,13 +64,16 @@ export function createLlmToolPort(registry: ProviderRegistry, ownerId: string): 
       if (refs.length === 0) {
         throw fail(CODE.LLM_NOT_CONFIGURED, '无可用模型（figure 生成需要 owner 或面板默认 provider）')
       }
-      // model 非空 = 指定模型优先：检索域 = 全 provider 全模型（AUTOFIGURE_SVG_MODEL 可指
-      // 集合内任一模型，非首模型经 bindModelId 的 configurable 通道绑定）；集合外 = 配置错误
-      // 明确拒绝（resolveModelRef「集合外值拒绝」同语义，不静默换模型）。
+      // model 非空 = 指定模型（运维 pin）：检索域 = 全 provider 全模型（AUTOFIGURE_SVG_MODEL
+      // 可指集合内任一模型，非首模型经 bindModelId 的 configurable 通道绑定）；集合外 = 明确
+      // 拒绝（resolveModelRef「集合外值拒绝」同语义）。pin 失败 = 明确报错不降级默认链
+      //（spec §6「不静默换模型」精神——降级出产 = 产物非 pin 模型 + graph meta.svgModel
+      // 误记请求名）。码沿用 PROVIDER_NOT_FOUND 是刻意的：它在 errorKind LLM 白名单内
+      //（errorKind.ts）→ run.failed 分类 llm_error，用户动作面 = 「检查 model 配置」。
       if (opts.model.trim() !== '') {
         const owner = snapshot.providers.find((p) => p.models.some((m) => m.id === opts.model))
         if (!owner) throw fail(CODE.PROVIDER_NOT_FOUND, `模型 ${opts.model} 不在 provider 配置集合内（AUTOFIGURE_SVG_MODEL 配置错误）`)
-        refs = [{ provider: owner, modelId: opts.model }, ...refs.filter((r) => r.modelId !== opts.model)]
+        refs = [{ provider: owner, modelId: opts.model }]
       }
       let lastError: unknown
       for (const ref of refs) {
@@ -93,7 +97,11 @@ export function createLlmToolPort(registry: ProviderRegistry, ownerId: string): 
       // 日志，不串入错误消息。
       // eslint-disable-next-line no-console
       console.warn(`[figures] llm 回退链全败: owner=${ownerId}: ${lastError instanceof Error ? lastError.message : String(lastError)}`)
-      throw fail(CODE.LLM_NOT_CONFIGURED, 'figure 生成模型调用全部失败（见服务端日志）')
+      const reason =
+        opts.model.trim() !== ''
+          ? `figure 生成模型 ${opts.model} 调用失败（见服务端日志）`
+          : 'figure 生成模型调用全部失败（见服务端日志）'
+      throw fail(CODE.LLM_NOT_CONFIGURED, reason)
     },
   }
 }

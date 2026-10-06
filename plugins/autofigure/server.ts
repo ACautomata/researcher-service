@@ -88,6 +88,9 @@ export function readAutofigureConfig(config: Readonly<Record<string, string>>): 
   }
   if (cfg.imageModel.trim() === '') throw new Error('AUTOFIGURE_IMAGE_MODEL 未配置：figure 生图需要面板级模型名')
   if (cfg.falKey.trim() === '') throw new Error('FAL_KEY 未配置：figure 云计算（SAM3/RMBG）需要 fal key')
+  // 三必填键分工：imageModel/falKey 在此调用面校验；imageApiKey 由 MiniMaxImageGenPort
+  // 构造期 fail-fast（凭证构造期校验纪律，与 fal.ts 适配器同型，#744 §6）——两条路径都在
+  // 首个云 API 调用前触发，无遗漏窗口。
   return cfg
 }
 

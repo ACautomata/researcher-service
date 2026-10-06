@@ -1,4 +1,4 @@
-// MiniMax image-01 生图适配器契约测试（#792 · 纯逻辑——fetch 全 mock，无真 API 调用）。
+// MiniMax image-01 生图适配器契约测试（#792 · S3 纯逻辑——fetch 全 mock，无真 API 调用）。
 // 覆盖：请求形状（endpoint/path、Bearer 头、payload 四键、redirect error）/ 响应解析
 //（base64 → PNG 字节 + IHDR 尺寸）/ 错误归一（unreachable、非 2xx、畸形 JSON、业务码≠0、
 // 缺图、畸形 IHDR）。凭证纪律断言：Authorization 构造、凭证不进错误消息。
@@ -6,11 +6,8 @@
 
 import { describe, it, expect, vi } from 'vitest'
 import { MiniMaxImageGenPort, pngIhdrSize } from '../../plugins/autofigure/compute/imageGen'
+import { TINY_PNG } from './autofigureFakePorts'
 
-// 4x4 PNG（llmToolPort.test.ts 同物）
-const TINY_PNG = Uint8Array.from(
-  Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAQAAAAECAYAAACp8Z5+AAAAFklEQVR42mP8z8AAAxIDEwMDAwMDAwAkBgMBjfAPdAAAAAElFTkSuQmCC', 'base64'),
-)
 const TINY_PNG_B64 = Buffer.from(TINY_PNG).toString('base64')
 
 function jsonResp(status: number, body: unknown): Response {
