@@ -143,14 +143,23 @@ maxConcurrentRuns 或全局 RUNNER_MAX_CONCURRENT_RUNS]）· `5xxxx` chat/pairin
 
 - `router/index.ts` — 路由表 + 导航守卫（未登录重定向 `/login`，`auth.hydrate()` 恢复登录态；
   `meta.requiresAdmin` 守卫 admin users 页）。
-- `stores/` — Pinia：`auth.ts`（JWT access token + role/mustChangePassword）、`wiki.ts`、`chatStore.ts`。
-- `api/` — REST client 封装（`client.ts` 信封解析 + 401 刷新链 + 并发去抖；`chat/containers/wiki/models/users.ts` 按域）。
-- `chat/` — 网关直连协议机（官方 `@openclaw/gateway-client` 浏览器端）：`gatewayChat.ts` /
-  `useChatConnection.ts`（composable）/ `eventTranslate.ts`（纯函数翻译）/ `restOutbox.ts`
-  （#779 story 12 REST 断线排队纯逻辑：sessionStorage 落盘、50 上限丢最旧、按序幂等 flush——接线归 #793）。
-- `views/` — 六页：`LoginView` / `ContainersView` / `ChatView` / `WikiView` / `ModelView` / `AdminUsersView`。
+- `stores/` — Pinia：`auth.ts`（JWT access token + role/mustChangePassword）、`wiki.ts`、`chat.ts`
+  （对话页响应式投影：纯 mutation；视图模型类型经 `chat/projection.ts` 再导出）、`fileTabs.ts`
+  （会话沙箱 lab 文件 tab，#793 起 root=lab、切会话即换树）。
+- `api/` — REST client 封装（`client.ts` 信封解析 + 401 刷新链 + 并发去抖；`sessions/containers/files/wiki/models/users.ts` 按域）。
+- `chat/` — chat 核心三件套（#793 · #730 §4.1，REST+SSE 换轨；网关协议机/设备配对/升级编排死区已删）：
+  `projection.ts`（投影归约器纯函数——`applyEvent` 事件增量 / `fromProjection` 投影行双入口同形状，
+  事件聚合语义镜像 server sessions/reducer.ts，一致性由 projection.test.ts 零差异组锁死）/
+  `useChatSession.ts`（会话编排 composable——发送幂等/门控/断线补偿/审批/slash 系统命令）/
+  `useEventStream.ts`（SSE 薄封装——原生重连 + seq gap 检测 + 401 经刷新链关流 + session.terminated 停重连）/
+  `restOutbox.ts`（#779 story 12 断线排队：sessionStorage 落盘、50 上限丢最旧、按序幂等 flush）/
+  `attachments.ts`（采集/校验纯函数，发送经 multipart 上传换 attachmentIds）；
+  `teamProjection.ts`（#786 teammate 投影，TeamSessionsView 用）。
+- `views/` — 六页：`LoginView` / `ContainersView` / `ChatView`（REST+SSE 编排壳）/ `WikiView` / `ModelView` / `AdminUsersView`。
 - `components/` — `FileTree` / `MdEditor`（Typora 式实时渲染）/ `WikiGraph`（obsidian 风格图谱）/
-  ChatView 8 组件（`ChatSidebar`/`ChatHeader`/`ChatStream`/`ChatComposer`/`ChatMessageItem`/`ThinkingCard`/`ToolLine`/`ApprovalCard`）。
+  ChatView 哑组件族（props-in/emits-out，零协议 import：`ChatSidebar`（会话扁平列表 + lab 文件树）/
+  `ChatHeader`/`ChatStream`/`ChatComposer`/`ChatMessageItem`/`ThinkingCard`/`ToolLine`/`ApprovalCard`/`ApprovalDock`
+  + `SessionTimeline`/`SessionTurn`（teammate 面））。
 
 ## 关键机制与约束
 
