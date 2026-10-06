@@ -103,26 +103,13 @@ CREATE TABLE "figures" (
     "id" TEXT NOT NULL PRIMARY KEY,
     "ownerId" TEXT NOT NULL,
     "prompt" TEXT NOT NULL,
-    "idempotencyKey" TEXT,
-    "xml" TEXT,
+    "svg" TEXT,
     "png" BLOB,
     "evaluation" TEXT,
+    "sessionId" TEXT,
     "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" DATETIME NOT NULL,
     CONSTRAINT "figures_ownerId_fkey" FOREIGN KEY ("ownerId") REFERENCES "users" ("id") ON DELETE CASCADE ON UPDATE CASCADE
-);
-
--- CreateTable
-CREATE TABLE "generation_jobs" (
-    "id" TEXT NOT NULL PRIMARY KEY,
-    "figureId" TEXT NOT NULL,
-    "status" TEXT NOT NULL DEFAULT 'queued',
-    "errorMessage" TEXT,
-    "startedAt" DATETIME,
-    "finishedAt" DATETIME,
-    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updatedAt" DATETIME NOT NULL,
-    CONSTRAINT "generation_jobs_figureId_fkey" FOREIGN KEY ("figureId") REFERENCES "figures" ("id") ON DELETE CASCADE ON UPDATE CASCADE
 );
 
 -- CreateTable
@@ -340,8 +327,8 @@ CREATE TABLE "file_journal" (
     "toolCallId" TEXT NOT NULL,
     "runId" TEXT,
     "applied" BOOLEAN NOT NULL DEFAULT false,
-    "fileRevertedAt" DATETIME,
     "archivedAt" DATETIME,
+    "fileRevertedAt" DATETIME,
     CONSTRAINT "file_journal_sessionId_fkey" FOREIGN KEY ("sessionId") REFERENCES "sessions" ("id") ON DELETE CASCADE ON UPDATE CASCADE
 );
 
@@ -403,12 +390,6 @@ CREATE UNIQUE INDEX "model_providers_ownerId_providerId_key" ON "model_providers
 
 -- CreateIndex
 CREATE INDEX "figures_ownerId_idx" ON "figures"("ownerId");
-
--- CreateIndex
-CREATE UNIQUE INDEX "figures_ownerId_idempotencyKey_key" ON "figures"("ownerId", "idempotencyKey");
-
--- CreateIndex
-CREATE UNIQUE INDEX "generation_jobs_figureId_key" ON "generation_jobs"("figureId");
 
 -- CreateIndex
 CREATE INDEX "sessions_ownerId_idx" ON "sessions"("ownerId");

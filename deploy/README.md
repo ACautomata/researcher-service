@@ -220,6 +220,10 @@ docker compose -f deploy/docker-compose.dev.yml up -d --build server
 - **双轨工作流**：纯逻辑快速迭代仍走宿主 `cd server && npm test` / `npm run typecheck`（不起服务、
   不摸卷）；凡要起服务 / 真编排 OpenClaw 容器（named volume 拓扑），一律走本容器化 dev 栈。
 
+> **已换轨退役（#791）**：以下 T10 接线描述已过时——server 侧 AUTOFIGURE_* 注入与消费端
+> 全量退役（config.autofigure 删除），sidecar 服务段保留但无现役消费者；正式删除归票 6
+> （#744 §10 退役 PR）。figures 读面常驻（无 flag 门）。
+
 ## AutoFigure 接线（T10，docs/autofigure/tickets/T10-dev-sidecar-smoke.md）
 
 dev 栈额外起 **autofigure**（T08 sidecar）服务：仅挂 `panel-dev-net`、**无宿主端口暴露、零 host 挂载**

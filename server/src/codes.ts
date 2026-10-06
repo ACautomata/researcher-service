@@ -36,16 +36,16 @@ export const CODE = {
   // 6xxxx files（#589 统一文件 CRUD；6xxxx 段为 319 §1.1 未分配段，按「40 不存在 / 41 冲突」锁式）
   FILE_NOT_FOUND: 60040, // 文件不存在（GET/PUT/DELETE）
   FILE_EXISTS: 60041, // 新建文件已存在（POST 冲突）
-  // 7xxxx figures（AutoFigure，docs/autofigure/tickets/）：
-  // T05 读路径（T05-figure-history-ownership.md）：70040 = 不存在/越权同码防探测（镜像各域
-  // 20040/30040/40040/60040 的 getInstanceForUser 锁式）。T02 幂等冲突 70041（对齐「41 冲突」锁）。
-  // T06 PNG 下载（T06-artifact-persistence-png.md · spec §3「未完成/失败给明确应用级响应，不返回
-  // 模糊 500」）：70042/70043 为 70040/70041 之后的域专用续号（对齐 20042 quota/20043 busy 的
-  // 「40 不存在 / 41 冲突 / 42+ 域专用」锁式；确切码值经 spec §4 / grilling §9 委托实现定准）。
-  FIGURE_NOT_FOUND: 70040, // Figure 不存在 / 越权（同码防探测，T05）
-  IDEMPOTENCY_CONFLICT: 70041, // 同用户 + 同 key + 不同输入 → 稳定幂等冲突（不建任何行）
-  FIGURE_PNG_NOT_READY: 70042, // PNG 未就绪（queued/running 未完成，明确应用级「未就绪」响应）
-  FIGURE_PNG_NOT_AVAILABLE: 70043, // PNG 不可用（failed / succeeded 但产物缺失，明确应用级「不可用」响应）
+  // 7xxxx figures（AutoFigure · #744 v2 换轨后读面）：
+  // 70040 = 不存在/越权同码防探测（镜像各域 20040/30040/40040/60040 的 getInstanceForUser 锁式）。
+  // #791（#744 §5.2/§8）REST 创建端点退役 → 70041/70042 暂无消费者（码段保留防复用混入）；
+  // 70041 曾为幂等冲突（Idempotency-Key 随创建端点退役），70042 曾为 PNG 未就绪
+  //（GenerationJob 进行态随 Job 表退役——Figure 行恒为成功产物，无进行态）。70043 活跃：
+  // 产物缺失（渲染失败缺省 / 数据完整性防御）确定性「不可用」。
+  FIGURE_NOT_FOUND: 70040, // Figure 不存在 / 越权（同码防探测）
+  IDEMPOTENCY_CONFLICT: 70041, // [退役保留] 曾为同 key 不同输入冲突；码段保留不复用
+  FIGURE_PNG_NOT_READY: 70042, // [退役保留] 曾为 PNG 未就绪（进行态已随 GenerationJob 退役）
+  FIGURE_ARTIFACT_NOT_AVAILABLE: 70043, // 产物不可用（渲染失败缺省 / 产物缺失，PNG/SVG 共用——#791 起码值语义泛化，常量名随语义）
   // 8xxxx plugins（#788 · #752 R8；对齐「40 不存在」锁式，01 校验段专用——参数校验缺省走
   // 90002，80001 仅插件域语义化校验失败如未知 pluginId 启用请求外的域内约束）
   PLUGINS_VALIDATION_FAILED: 80001, // 插件域参数校验失败（#752 R8）
@@ -119,7 +119,7 @@ export const DEFAULT_MESSAGE: Record<number, string> = {
   [CODE.FIGURE_NOT_FOUND]: 'Figure 不存在',
   [CODE.IDEMPOTENCY_CONFLICT]: '幂等键已用于不同输入，请勿复用同一 Idempotency-Key 提交不同创建载荷',
   [CODE.FIGURE_PNG_NOT_READY]: 'Figure 尚未生成完成，请稍后再试',
-  [CODE.FIGURE_PNG_NOT_AVAILABLE]: 'Figure 无可用 PNG（生成失败或产物缺失）',
+  [CODE.FIGURE_ARTIFACT_NOT_AVAILABLE]: 'Figure 产物不可用（生成渲染失败或产物缺失）',
   [CODE.PLUGINS_VALIDATION_FAILED]: '插件参数校验失败',
   [CODE.PLUGIN_NOT_FOUND]: '插件不存在',
   [CODE.VALIDATION_FAILED]: '参数校验失败',

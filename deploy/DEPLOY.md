@@ -83,7 +83,7 @@ panel-frontend 容器（nginx，唯一对宿主暴露，loopback:18080）
 | `PANEL_PUBLIC_ORIGIN` | `https://researcher.acautomata.top` | 面板对外 origin（隧道连网关 + 容器 allowedOrigins 强制条目，server 生产必填） |
 | `LLM_API_KEY` | 面板共享 LLM key | 注入 OpenClaw 容器 |
 | `CREDENTIAL_ENCRYPTION_KEYS` | base64url 32 字节 | 凭证 AES-256-GCM 密钥环 |
-| `AUTOFIGURE_LLM_KEY`（可选） | AutoFigure 生成凭证 | **仅 `AUTOFIGURE_ENABLED=true` 时必需**（T11）；flag 关（生产默认）空串安全——缺失不导致部署失败（config 只在 enabled && production 下 fail-fast）。经 CD 渲染进 `.env` 注入 server，不落盘 git/不进日志 |
+| ~~`AUTOFIGURE_LLM_KEY`~~（**已退役，#791**） | ~~AutoFigure 生成凭证~~ | 随 sidecar 生成链路换轨退役（config.autofigure 读取面已删，server 不再消费任何 AUTOFIGURE_* 键）；新面板级生成配置归插件 configSchema（#744 §5，票 4）。正式清退归票 6 |
 | `API_DOCS_ENABLED`（可选） | `true`（默认） | OpenAPI/Swagger 文档面（`/api/docs`，#761）：admin-only（requireAuth + requireAdmin）zod 生成式文档。显式 `false` → server 不装配 docs 路由（整树 90005） |
 | `RESEARCHER_REPO`（可选） | 克隆 URL | 构建机 clone home 模板（默认 `https://github.com/ACautomata/researcher.git`；模板入 server 镜像，不再落宿主） |
 
@@ -135,6 +135,9 @@ python3 -c "import base64,os;print(base64.urlsafe_b64encode(os.urandom(32)).deco
   `deploy/autofigure-sidecar`（**vendored T08 源，不 fetch mutable upstream**）；许可/署名文件
   （`LICENSE` / `CITATION.cff` / `CITATION_AND_ATTRIBUTION.md` / `TRADEMARK.md`）构建期入镜像，
   Dockerfile 构建期断言（缺失即构建失败 → CD 红）。
+> **已换轨退役（#791）**：本节（接线/凭证/flag 门）描述已过时——server 消费端已全量退役，
+> sidecar 服务段与目录的正式删除归票 6（#744 §10）。
+
 - **接线**：仅挂 `panel-net`、**无 ports、零 host 挂载**（ADR 0013）——宿主/浏览器永不直接访问，
   只经 server 内部 URL `http://autofigure:8080` 访问；`/health` 容器 healthcheck（无域信息/凭证的
   存活性探测）；`mem_limit: 2g`（T10/T11 judgement call，真实生成 = Playwright 渲染 + LLM 调用

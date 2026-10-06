@@ -263,87 +263,6 @@ function readApiDocsEnabled(): boolean {
   )
 }
 
-// AUTOFIGURE_ENABLED（T01，docs/autofigure/tickets/T01-authenticated-figure-creation.md）：
-// AutoFigure 域开关。默认 false = 装配层不注入 figures deps → /api/v1/figures 路由未挂载（90005）；
-// 显式 true 装配。非 true/false 值 fail-fast（对齐 readNamedVolumes 白名单模式）——否则 `1`/`TRUE`
-// 这类错值静默按默认 false 走，flag 开了却没生效（错误方向是「路由缺席」，fail-fast 更安全）。
-function readAutofigureEnabled(): boolean {
-  const v = process.env.AUTOFIGURE_ENABLED
-  if (v === undefined) return false
-  if (v === 'true') return true
-  if (v === 'false') return false
-  throw new Error(
-    `AUTOFIGURE_ENABLED 非法: ${JSON.stringify(v)}，须为 true 或 false（AutoFigure 域开关，默认关）`,
-  )
-}
-
-// AUTOFIGURE_LLM_KEY（T03，docs/autofigure/tickets/T03-single-worker-generation-lifecycle.md）：
-// AutoFigure 生成凭证（服务端执行上下文）。flag 开而生产缺 key → fail-fast（否则 queued Job 永
-// 不被跑、错配只在请求期暴露——对齐 readTemplateDir/readPanelOrigin 前置校验模式）；dev/test 缺省
-// 容忍空串（纯逻辑 runner 测试经 DI 注入 llmKey，不经 config）。值只存 config.autofigure.llmKey，
-// 由装配层注入 AutoFigureGenerationPort（generate(input, credential)）；本文件是唯一读取点，不落盘、
-// 不入请求体、不入 Job payload、不入日志（T03 凭证纪律）。超时值管道属 T04（本票不引入）。
-function readAutofigureLlmKey(enabled: boolean): string {
-  const v = process.env.AUTOFIGURE_LLM_KEY ?? ''
-  if (enabled && process.env.NODE_ENV === 'production' && v === '') {
-    throw new Error(
-      'AUTOFIGURE_LLM_KEY 必须在生产环境显式提供（AUTOFIGURE_ENABLED=true 时 AutoFigure 生成凭证必填）',
-    )
-  }
-  return v
-}
-
-// AUTOFIGURE_JOB_TIMEOUT_MS（T04，docs/autofigure/tickets/T04-timeout-reconcile-late-result.md）：
-// AutoFigure 执行超时（ms）。默认 30 分钟——本文件是唯一默认值声明处，runner 逻辑不硬编码生产
-// 超时（runner 经 DI 收 timeoutMs）。超时自进入 running（startedAt 置位）起算，queued 等待不计入。
-// 非法值（非正整数，如 0/负/小数/abc）fail-fast（对齐 readDefaultMaxContainers 加载即校验）——
-// 否则错值静默按默认 30min 走，超时语义错配只在运行期暴露。只存 config.autofigure.jobTimeoutMs，
-// 由装配层注入 runner；执行层配置，不暴露于公开 API（绝进信封 data）。
-function readAutofigureJobTimeoutMs(): number {
-  const raw = process.env.AUTOFIGURE_JOB_TIMEOUT_MS
-  if (raw === undefined) return 30 * 60 * 1000 // 默认 30 分钟
-  const v = Number(raw)
-  if (!Number.isInteger(v) || v <= 0) {
-    throw new Error(
-      `AUTOFIGURE_JOB_TIMEOUT_MS 非法: ${JSON.stringify(process.env.AUTOFIGURE_JOB_TIMEOUT_MS)}，须为正整数毫秒`,
-    )
-  }
-  return v
-}
-
-// AUTOFIGURE_SIDECAR_URL（T07，docs/autofigure/tickets/T07-autofigure-http-adapter.md）：
-// 私有 AutoFigure sidecar 的 HTTP base URL（panel-net 内、不暴露宿主端口，如
-// http://autofigure:8080——T10 dev compose 接线默认值，见 deploy/docker-compose.dev.yml）。flag 开 +
-// 生产缺省/非法 URL → fail-fast（否则错配只在 enabled 时
-// adapter 构造/首请求才暴露——对齐 readPanelOrigin 前置校验模式）；dev/test 缺省容忍空串
-//（装配测试经 DI 注入 sidecarUrl，不经 config）。只存 config.autofigure.sidecarUrl，由装配层注入
-// 生产 HTTP adapter；不落盘/不入日志。T07 不引入 adapter-local HTTP timeout——sidecar 请求超时
-// 语义由 T04 AUTOFIGURE_JOB_TIMEOUT_MS（应用 runner 超时）唯一承担。
-function readAutofigureSidecarUrl(enabled: boolean): string {
-  const v = process.env.AUTOFIGURE_SIDECAR_URL ?? ''
-  if (enabled && process.env.NODE_ENV === 'production') {
-    if (v === '') {
-      throw new Error(
-        'AUTOFIGURE_SIDECAR_URL 必须在生产环境显式提供（AUTOFIGURE_ENABLED=true 时 sidecar 地址必填）',
-      )
-    }
-    let url: URL
-    try {
-      url = new URL(v)
-    } catch {
-      throw new Error(
-        `AUTOFIGURE_SIDECAR_URL 非法（须为 http(s)://<host>[:<port>] 完整 URL）: ${JSON.stringify(v)}`,
-      )
-    }
-    if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-      throw new Error(
-        `AUTOFIGURE_SIDECAR_URL 协议非法（须 http/https，私有 sidecar 传输）: ${JSON.stringify(v)}`,
-      )
-    }
-  }
-  return v
-}
-
 // RUNNER_MAX_CONCURRENT_RUNS（#775，731 §5.3）：runner 全局在飞 run 上限（进程内信号量）。
 // BullMQ 原生 limiter 的 per-user 组限流是 Pro 专属（OSS 3.0 起移除 groupKey），进程内原语即
 // 正确边界（#734 Notes：单进程模型）。非法值（非正整数/超上界）fail-fast（对齐 readDefaultMaxContainers
@@ -556,30 +475,15 @@ export const config = {
   apiDocs: (() => {
     return {
       // 域开关：flag 关 → 装配层 server.ts 不注入 docs deps → /api/docs 未挂载（90005）。
-      // flag 只在装配层消费（app.ts 不读 config，只认 deps 注入，对齐 autofigure 先例）。
+      // flag 只在装配层消费（app.ts 不读 config，只认 deps 注入，对齐 models/files 先例）。
       enabled: readApiDocsEnabled(),
     }
   })(),
-  // ---- AutoFigure（T01，docs/autofigure/tickets/T01-authenticated-figure-creation.md）----
-  autofigure: (() => {
-    const enabled = readAutofigureEnabled()
-    return {
-      // 域开关：flag 关 → 装配层 server.ts 不注入 figures deps → 路由未挂载（/api/v1/figures 90005）。
-      // flag 只在装配层消费（app.ts 不读 config，只认 deps 注入，对齐 models/files 条件挂载先例）。
-      enabled,
-      // 生成凭证（T03）：服务端执行上下文，flag 开 + 生产缺 → fail-fast（readAutofigureLlmKey）。
-      // 只被装配层注入 Port credential；不落盘/不入请求体/不入 Job payload/不入日志。
-      llmKey: readAutofigureLlmKey(enabled),
-      // 执行超时（T04）：默认 30 分钟（readAutofigureJobTimeoutMs 唯一声明处），自进入 running
-      //（startedAt 置位）起算。只被装配层注入 runner timeoutMs；不暴露公开 API。
-      jobTimeoutMs: readAutofigureJobTimeoutMs(),
-      // sidecar 地址（T07）：私有 HTTP base URL，flag 开 + 生产缺/非法 → fail-fast
-      //（readAutofigureSidecarUrl）。只被装配层注入生产 HTTP adapter（assembleAutoFigureRuntime）；
-      // 不落盘/不入日志。T07 无 adapter-local timeout——sidecar 请求超时语义由上方 jobTimeoutMs
-      //（T04 应用 runner 超时）唯一承担。
-      sidecarUrl: readAutofigureSidecarUrl(enabled),
-    }
-  })(),
+  // ---- AutoFigure（#791 退役旧 config 段）----
+  // AUTOFIGURE_ENABLED/LLM_KEY/JOB_TIMEOUT_MS/SIDECAR_URL 四键随 sidecar 生成链路退役
+  //（#744 §8 v2 勘误；消费方 runner/httpPort/assembly 已删）。figures 读面（list/detail/png/svg）
+  // 常驻不设 flag 门（资产面，#744 §11.3）；新面板级生成配置（生图/fal/Roboflow 键）随插件
+  // configSchema 声明接线（#744 §5/§11.1，#744 §10 票 4），仍走本文件单一来源。
 }
 
 // refresh cookie 公共属性（规格 #311 锁）：HttpOnly + Secure(prod) + SameSite=Lax + Path=/api/v1/auth

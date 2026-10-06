@@ -5,58 +5,51 @@ import path from 'node:path'
 import Database from 'better-sqlite3'
 import { runDbScript } from './runDbScript'
 
-// 从「只有 base 表」的旧库跑全量增量脚本（幂等跑两遍）→ 三批表全到位 + T02 幂等列/索引
-// + T03 生命周期时间戳列 + T06 产物三列 + #699 upgradeAttempts 列 + teammate/mailbox + user_version 归 12
-// （#771 批次 7→8；#775 批次 8→9；#787 preferredModelJson 9→10；#786 teammate/mailbox 10→11；
-// #785 file_overwrite_logs 11→12）。
+// 从「只有 base 表」的旧库跑全量增量脚本（幂等跑两遍）→ 全表到位 + #791 AutoFigure 换轨
+//（figures 新形状重建 + generation_jobs 退役）+ #699 upgradeAttempts 列 + teammate/mailbox
+// + user_version 归 13（#771 批次 7→8；#775 8→9；#787 9→10；#786 10→11；#785 11→12；
+// #791 figures 换轨 12→13）。
 function assertUpgraded(dbPath: string): void {
   const db = new Database(dbPath)
   try {
     // better-sqlite3 命名参数经对象绑定（$name）；表/索引名来自上方常量数组，无注入面。
-    for (const table of ['text_trace_logs', 'figures', 'generation_jobs']) {
+    for (const table of ['text_trace_logs', 'figures']) {
       expect(
         db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=$name").get({ name: table }),
       ).toEqual({ name: table })
     }
-    for (const index of [
-      'text_trace_logs_traceId_key',
-      'figures_ownerId_idx',
-      // T02 幂等唯一索引（grilling §17）：并发重复创建去重的最终仲裁
-      'figures_ownerId_idempotencyKey_key',
-      'generation_jobs_figureId_key',
-    ]) {
+    // #791（#744 §5.2）：GenerationJob 退役——执行状态机归 run 域，表不得残留
+    expect(
+      db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='generation_jobs'").get(),
+    ).toBeUndefined()
+    for (const index of ['text_trace_logs_traceId_key', 'figures_ownerId_idx']) {
       expect(
         db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name=$name").get({ name: index }),
       ).toEqual({ name: index })
     }
-    // figures/generation_jobs 的持久化契约：queued 默认 + nullable errorMessage + T02 idempotencyKey 列
-    const jobCols = db.prepare('PRAGMA table_info(generation_jobs)').all() as Array<{ name: string; dflt_value: string | null; notnull: number }>
-    const status = jobCols.find((c) => c.name === 'status')!
-    expect(status.dflt_value).toBe("'queued'")
-    const errorMessage = jobCols.find((c) => c.name === 'errorMessage')!
-    expect(errorMessage.notnull).toBe(0) // nullable
-    // T03 执行生命周期时间戳：两列均 nullable（不迁移旧行、不给旧 queued 伪造时间）；跑增量的旧库
-    // 由 ALTER TABLE ADD COLUMN 补齐，fresh 库建表已带。断言存在 + nullable 即验收 v5 增量到位。
-    const startedAt = jobCols.find((c) => c.name === 'startedAt')!
-    expect(startedAt.notnull).toBe(0) // nullable——queued 恒 null，仅原子领取后置位
-    const finishedAt = jobCols.find((c) => c.name === 'finishedAt')!
-    expect(finishedAt.notnull).toBe(0) // nullable——终态写入后置位
+    // #791 幂等唯一索引随换轨退役（Idempotency-Key 机制随 REST 创建端点退役）
+    expect(
+      db
+        .prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='figures_ownerId_idempotencyKey_key'")
+        .get(),
+    ).toBeUndefined()
+    // figures 新形状持久化契约（#744 §5.1）：svg（final SVG 文本）+ png（BLOB）+ evaluation
+    //（pipeline 元数据 JSON）+ sessionId（溯源）全 nullable；旧列（xml/idempotencyKey）不残留。
     const figureCols = db.prepare('PRAGMA table_info(figures)').all() as Array<{ name: string; notnull: number }>
-    const idemKey = figureCols.find((c) => c.name === 'idempotencyKey')!
-    expect(idemKey.notnull).toBe(0) // nullable——容 T02 前既有行（应用层恒非空）
-    // T06 产物三列（grilling §6）：xml（文本）+ png（SQLite BLOB）+ evaluation（文本 JSON）。
-    // 全 nullable——仅在 Job 提交 succeeded 终态时由 runner 原子写入，queued/running/failed 恒
-    // null（不迁移旧行、不给旧 succeeded 伪造产物）。断言存在 + nullable 即验收 v6 增量到位。
-    for (const col of ['xml', 'png', 'evaluation']) {
-      const c = figureCols.find((x) => x.name === col)!
-      expect(c.notnull).toBe(0)
+    for (const col of ['svg', 'png', 'evaluation', 'sessionId']) {
+      const c = figureCols.find((x) => x.name === col)
+      expect(c, col).toBeDefined()
+      expect(c!.notnull).toBe(0) // nullable
+    }
+    for (const col of ['xml', 'idempotencyKey']) {
+      expect(figureCols.find((x) => x.name === col), `${col} 应已退役`).toBeUndefined()
     }
     // #699 升级编排：containers 增量补 upgradeAttempts 列（连续失败计数，成功清零；≥3 终态）。
     const containerCols = db.prepare('PRAGMA table_info(containers)').all() as Array<{ name: string; dflt_value: string | null; notnull: number }>
     const attempts = containerCols.find((c) => c.name === 'upgradeAttempts')!
     expect(attempts.notnull).toBe(1) // NOT NULL
     expect(attempts.dflt_value).toBe('0') // DEFAULT 0（既有行升级计数从 0 起）
-    expect(db.pragma('user_version', { simple: true })).toBe(12) // #787 + #786 + #785 批次（SCHEMA_VERSION 9→12）
+    expect(db.pragma('user_version', { simple: true })).toBe(13) // #785 批次 12 → #791 换轨 13
     const sessionCols = db.prepare('PRAGMA table_info("sessions")').all() as Array<{ name: string }>
     expect(sessionCols.some((col) => col.name === 'isTeammate')).toBe(true)
     expect(sessionCols.some((col) => col.name === 'preferredModelJson')).toBe(true)
@@ -124,10 +117,10 @@ describe('schema upgrade script', () => {
     assertUpgraded(dbPath)
   })
 
-  it('upgrades an already-text-trace DB (v2) to current tables + user_version=12', () => {
+  it('upgrades an already-text-trace DB (v2) to current tables + user_version=13', () => {
     const dir = mkdtempSync(path.join(tmpdir(), `schema-upgrade-${process.pid}-`))
     const dbPath = path.join(dir, 'panel.db')
-    // 模拟上一轮增量已交付 text_trace_logs 的既有部署（v2）——增量脚本须只补 figures/generation_jobs
+    // 模拟上一轮增量已交付 text_trace_logs 的既有部署（v2）——增量脚本须只补 figures + 换轨
     // + containers.upgradeAttempts（#699）。containers 表为 v1 起就有的 base 表，一并种上（缺列）。
     const db = new Database(dbPath)
     try {
@@ -172,5 +165,85 @@ PRAGMA user_version=2;
     runDbScript('upgrade-schema.mjs', dbPath) // 幂等：第二遍不报错、不重复建表
 
     assertUpgraded(dbPath)
+  })
+
+  it('#791 legacy AutoFigure shapes are replaced (figures 旧形状 + generation_jobs → 新形状)', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), `schema-legacy791-${process.pid}-`))
+    const dbPath = path.join(dir, 'panel.db')
+    // 模拟 #791 前的完整旧形状部署：figures 带 xml/idempotencyKey（含旧行）+ generation_jobs
+    // 带执行列与遗留 queued 行 → 换轨后旧行删除（#732 零迁移前提）、Job 表退役、新形状落位。
+    const db = new Database(dbPath)
+    try {
+      db.exec(`
+CREATE TABLE "users" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "username" TEXT NOT NULL,
+    "email" TEXT,
+    "passwordHash" TEXT,
+    "role" TEXT NOT NULL DEFAULT 'user',
+    "isActive" BOOLEAN NOT NULL DEFAULT true,
+    "mustChangePassword" BOOLEAN NOT NULL DEFAULT false,
+    "maxContainers" INTEGER NOT NULL DEFAULT 3,
+    "oidcSubject" TEXT,
+    "oidcIssuer" TEXT,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" DATETIME NOT NULL
+);
+CREATE TABLE "containers" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "name" TEXT NOT NULL,
+    "port" INTEGER NOT NULL,
+    "ownerId" TEXT NOT NULL,
+    "token" TEXT NOT NULL,
+    "tokenEncrypted" BOOLEAN NOT NULL DEFAULT false,
+    "homeDir" TEXT NOT NULL,
+    "containerId" TEXT NOT NULL DEFAULT '',
+    "status" TEXT NOT NULL DEFAULT 'creating',
+    "image" TEXT NOT NULL,
+    "leaseExpiresAt" DATETIME,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" DATETIME NOT NULL
+);
+CREATE TABLE "figures" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "ownerId" TEXT NOT NULL,
+    "prompt" TEXT NOT NULL,
+    "idempotencyKey" TEXT,
+    "xml" TEXT,
+    "png" BLOB,
+    "evaluation" TEXT,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" DATETIME NOT NULL
+);
+CREATE TABLE "generation_jobs" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "figureId" TEXT NOT NULL,
+    "status" TEXT NOT NULL DEFAULT 'queued',
+    "errorMessage" TEXT,
+    "startedAt" DATETIME,
+    "finishedAt" DATETIME,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" DATETIME NOT NULL
+);
+CREATE UNIQUE INDEX "figures_ownerId_idempotencyKey_key" ON "figures"("ownerId", "idempotencyKey");
+INSERT INTO "figures" ("id","ownerId","prompt","updatedAt") VALUES ('f-legacy','u1','old mxgraph', CURRENT_TIMESTAMP);
+INSERT INTO "generation_jobs" ("id","figureId","updatedAt") VALUES ('j-legacy','f-legacy', CURRENT_TIMESTAMP);
+PRAGMA user_version=12;
+`)
+    } finally {
+      db.close()
+    }
+
+    runDbScript('upgrade-schema.mjs', dbPath)
+    runDbScript('upgrade-schema.mjs', dbPath) // 幂等重跑
+
+    assertUpgraded(dbPath)
+    const check = new Database(dbPath)
+    try {
+      // 旧 Figure 行不迁移（#732 零迁移前提：直接换轨删除）
+      expect(check.prepare('SELECT COUNT(*) n FROM figures').get()).toEqual({ n: 0 })
+    } finally {
+      check.close()
+    }
   })
 })

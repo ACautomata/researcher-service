@@ -4,7 +4,6 @@ import { setupTestApp, type TestContext } from './setup'
 import { seedAdmin, seedUser, login, bearer } from './helpers'
 import {
   containerCreateSchema,
-  figureCreateSchema,
   loginSchema,
   modelProviderWriteSchema,
   passwordChangeSchema,
@@ -82,6 +81,7 @@ describe('OpenAPI 文档面（#761）', () => {
       '/api/v1/containers/{name}/files/raw',
       '/api/v1/figures',
       '/api/v1/figures/{id}/png',
+      '/api/v1/figures/{id}/svg',
       '/api/v1/trace-logs',
     ]) {
       expect(doc.paths, `缺少端点 ${p}`).toHaveProperty(p)
@@ -130,7 +130,6 @@ describe('OpenAPI 文档面（#761）', () => {
       ['userPatch', '/api/v1/users/{id}', userPatchSchema],
       ['containerCreate', '/api/v1/containers', containerCreateSchema],
       ['modelProviderWrite', '/api/v1/containers/{name}/models/providers', modelProviderWriteSchema],
-      ['figureCreate', '/api/v1/figures', figureCreateSchema],
     ]
     for (const [label, path, schema] of cases) {
       const methods = doc.paths[path]
@@ -151,27 +150,27 @@ describe('OpenAPI 文档面（#761）', () => {
     }
   })
 
-  it('字节例外：figures/png 与 files/raw 成功响应声明二进制（豁免 #312 信封）', async () => {
+  it('字节例外：figures/png、figures/svg 与 files/raw 成功响应声明二进制（豁免 #312 信封）', async () => {
     const doc = await adminDoc()
     const png = doc.paths['/api/v1/figures/{id}/png'].get.responses['200']
     expect(JSON.stringify(png.content)).toContain('binary')
+    const svg = doc.paths['/api/v1/figures/{id}/svg'].get.responses['200']
+    expect(JSON.stringify(svg.content)).toContain('binary')
     const raw = doc.paths['/api/v1/containers/{name}/files/raw'].get.responses['200']
     expect(JSON.stringify(raw.content)).toContain('binary')
     // 错误面仍走信封（default 响应引用 ErrorEnvelope 形状）
     expect(JSON.stringify(doc.paths['/api/v1/figures/{id}/png'].get.responses.default)).toContain('code')
   })
 
-  it('query/header 参数：wiki page path 与 figures Idempotency-Key 进文档', async () => {
+  it('query 参数：wiki page path 与 figures svg download 进文档', async () => {
     const doc = await adminDoc()
     const pageParams = doc.paths['/api/v1/containers/{name}/wiki/page'].get.parameters
     expect(pageParams).toEqual(
       expect.arrayContaining([expect.objectContaining({ name: 'path', in: 'query', required: true })]),
     )
-    const createParams = doc.paths['/api/v1/figures'].post.parameters
-    expect(createParams).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ name: 'Idempotency-Key', in: 'header', required: true }),
-      ]),
+    const svgParams = doc.paths['/api/v1/figures/{id}/svg'].get.parameters
+    expect(svgParams).toEqual(
+      expect.arrayContaining([expect.objectContaining({ name: 'download', in: 'query' })]),
     )
   })
 
