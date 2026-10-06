@@ -6,6 +6,7 @@
 
 import type { PrismaClient } from '../../generated/prisma/client'
 import { visibleRowIds } from '../../checkpointChain'
+import { EXEC_TOOLS } from '../approval/values'
 import { planRevert } from './replay'
 import { PREVIEW_PATH_SAMPLE_MAX } from './values'
 
@@ -29,7 +30,7 @@ export function extractExecCrossed(tools: unknown): ExecCrossed[] {
   for (const t of tools) {
     if (typeof t !== 'object' || t === null) continue
     const line = t as { name?: unknown; toolCallId?: unknown; input?: unknown }
-    if (line.name !== 'execute') continue
+    if (typeof line.name !== 'string' || !EXEC_TOOLS.includes(line.name)) continue
     out.push({
       toolCallId: typeof line.toolCallId === 'string' ? line.toolCallId : '',
       input: typeof line.input === 'string' ? line.input.slice(0, 400) : '',
