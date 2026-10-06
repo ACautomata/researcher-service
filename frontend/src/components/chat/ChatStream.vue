@@ -13,6 +13,7 @@
 // ResizeObserver（仅 onUpdated/onMounted 会漏掉不改 messages 的纯尺寸变化）。
 import { computed, onBeforeUnmount, onMounted, onUpdated, ref, watch } from 'vue'
 import type { Msg } from '@/stores/chat'
+import { attachmentReadiness } from '@/chat/projection'
 import { shouldFollowBottom } from '@/chat/scroll'
 import { activeAnchorIndex, anchorRatios, anchorSummary, selectUserAnchorIndices, viewportRatio } from '@/chat/anchorNav'
 import ChatMessageItem from '@/components/chat/ChatMessageItem.vue'
@@ -243,6 +244,7 @@ defineSlots<{
       <slot name="msg-item" :msg="m">
         <ChatMessageItem
           :msg="m"
+          :media-readiness="attachmentReadiness(messages, i)"
           :data-index="i"
           :class="{ 'anchor-flash': i === flashIndex }"
           :regenerate-text="m.role === 'assistant' ? previousUserText(m) : ''"

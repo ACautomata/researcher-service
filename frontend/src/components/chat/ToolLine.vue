@@ -4,6 +4,8 @@
 // (targetDetail 目录淡显,ellipsis) + 状态;展开区 = edit/write 内联 diff + stat + 输入/输出详情。
 // props-in/emits-out 哑组件(#316:#340 拆分边界)。
 import { computed } from 'vue'
+import { downloadReferences } from '@/chat/toolRender/downloads'
+import MediaAttachment from './MediaAttachmentHost.vue'
 import type { ToolRow } from '@/stores/chat'
 import { toolRowToView } from '@/chat/toolRender/adapt'
 import type { DiffLineKind } from '@/chat/toolRender/tool-call-diff'
@@ -12,6 +14,8 @@ import { pluginComponentFor } from '@/plugins/registry'
 const props = defineProps<{
   tool: ToolRow
 }>()
+
+const downloads = computed(() => downloadReferences(props.tool.result))
 
 const view = computed(() => toolRowToView(props.tool))
 
@@ -32,6 +36,7 @@ const display = computed(() => {
   if (v.kind === 'command') {
     return { main: firstLine(v.command) || props.tool.name, secondary: '', hint: v.command ?? '' }
   }
+  if (props.tool.name === 'ingest_attachments') return { main: '附件就位', secondary: '', hint: '将附件准备为 agent 可读文件' }
   const title = typeof props.tool.title === 'string' ? props.tool.title : props.tool.name
   return {
     main: v.target ?? title,
@@ -98,6 +103,7 @@ function diffSig(kind: DiffLineKind): string {
         :tool-call-id="tool.id ?? ''"
       />
       <template v-else>
+        <MediaAttachment v-for="media in downloads" :key="media.attachmentId" :media="media" />
         <strong>输入</strong><pre>{{ inputDetail() }}</pre>
         <strong>输出</strong><pre>{{ formatDetail(tool.result) }}</pre>
       </template>

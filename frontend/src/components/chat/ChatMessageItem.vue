@@ -3,15 +3,13 @@
 // thinking/tool-line slot 注入点：默认渲染 ThinkingCard/ToolLine；父可经 slot 覆盖表现。
 // #401 / ticket #402：assistant 正文走 MarkdownRenderer（v-html + DOMPurify 消毒），
 // user 保持纯文本（用户输入的 * # _ 不当语法）；流式光标由 MarkdownRenderer streaming 控制。
-// 附件媒体（#780 D9 attachmentsJson v1）：msg.media 为 MediaRef 引用面（attachmentId/mime/size/
-// fileName），#793 以文件卡呈现（文件名 + 体积；下载/内联预览渲染面归 #795——字节经 Bearer 门
-// GET /attachments/:id/download，<img src> 直发不可达）。user 与 assistant 均渲染。
 import type { Msg } from '@/stores/chat'
 import { hasTrace } from '@/stores/chat'
 // #555:工具聚合摘要——summarizeToolGroup 纯函数 + ToolRow→{name,args,isError} 三元组适配
 import { summarizeToolGroup } from '@/chat/toolRender/tool-call-grouping'
 import { toolRowToGroupInput } from '@/chat/toolRender/adapt'
 import { computed, ref } from 'vue'
+import MediaAttachment from './MediaAttachmentHost.vue'
 import ThinkingCard from '@/components/chat/ThinkingCard.vue'
 import ToolLine from '@/components/chat/ToolLine.vue'
 import TraceFold from '@/components/chat/TraceFold.vue'
@@ -23,6 +21,7 @@ const props = withDefaults(
   defineProps<{
     msg: Msg
     regenerateText?: string
+    mediaReadiness?: 'pending' | 'ready' | 'error'
     // #694/#794：回退入口是否可用（宿主计算）。#793 新管线暂不开启（rewind/fork 编排归 #794），
     // 缺省 false = fail-closed：能力门未被宿主打开就不渲染，不出现点了必然报错的按钮。
     rewindAvailable?: boolean
@@ -91,18 +90,6 @@ defineSlots<{
   'tool-line'?: (props: { tool: Msg['tools'][number] }) => unknown
 }>()
 
-// #568: 附件体积人类可读（字节 → B/KB/MB）；durationMs → mm:ss（播放器惯用格式）。
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
-}
-function formatDuration(ms: number): string {
-  const totalSec = Math.max(0, Math.round(ms / 1000))
-  const min = Math.floor(totalSec / 60)
-  const sec = totalSec % 60
-  return `${min}:${String(sec).padStart(2, '0')}`
-}
 async function copyMessage(): Promise<void> {
   try {
     if (!navigator.clipboard?.writeText) throw new Error('Clipboard API unavailable')
@@ -202,16 +189,8 @@ const copyState = ref<'idle' | 'copied' | 'failed'>('idle')
       <!-- #401：assistant 渲染 markdown（含流式光标），user 保持纯文本 + 光标 -->
       <MarkdownRenderer v-if="msg.role === 'assistant'" :text="msg.text" :streaming="msg.streaming" />
       <template v-else>{{ msg.text }}<span v-if="msg.streaming" class="cursor"></span></template>
-      <!-- 附件媒体（#780 D9 MediaRef）：文件卡列表（名称 + 体积）；内联预览/下载渲染面归 #795 -->
       <div v-if="msg.media.length" class="media-list" data-test="media-list">
-        <div v-for="(m, mi) in msg.media" :key="`media-${mi}`" class="media-file" data-test="media-file">
-          <span class="media-file-name" :title="m.fileName">{{ m.fileName || '附件' }}</span>
-          <span class="media-file-meta">
-            <span v-if="m.width && m.height">{{ m.width }} × {{ m.height }}</span>
-            <span v-if="m.durationMs != null">{{ formatDuration(m.durationMs) }}</span>
-            <span v-if="m.size != null">{{ formatBytes(m.size) }}</span>
-          </span>
-        </div>
+        <MediaAttachment v-for="m in msg.media" :key="m.attachmentId" :media="m" :readiness="mediaReadiness" />
       </div>
       <div v-if="msg.role === 'assistant' && !msg.streaming" class="ai-notice" data-test="ai-notice">
         <span>内容由 AI 生成，仅供参考</span>
@@ -274,9 +253,7 @@ const copyState = ref<'idle' | 'copied' | 'failed'>('idle')
 /* 附件媒体文件卡（#780 D9 MediaRef 渲染）：约束在气泡宽度内，多附件纵向堆叠留白 */
 .media-list { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
 .media-list:first-child { margin-top: 0; }
-.media-file { display: flex; align-items: center; justify-content: space-between; gap: 10px; max-width: 100%; min-width: 0; padding: 8px 12px; border: 1px solid var(--el-border-color); border-radius: 8px; background: var(--el-fill-color); font-size: 13px; }
-.media-file-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; color: var(--el-text-color-regular); }
-.media-file-meta { display: flex; gap: 10px; flex-shrink: 0; font-size: 12px; color: var(--el-text-color-secondary); }
+
 
 /* #555：工具聚合摘要折叠卡（>=2 个工具调用时）——摘要行 + 展开逐行 ToolLine */
 .tool-group { min-width: 0; background: var(--el-fill-color); border: 1px solid var(--el-border-color); border-radius: 9px; padding: 6px 12px; margin: 4px 0; font-size: 12.5px; }

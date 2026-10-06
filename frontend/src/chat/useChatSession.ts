@@ -74,7 +74,7 @@ export interface ChatSession {
   renameSession(id: string, title: string): Promise<void>
   removeSession(id: string, confirm: () => Promise<boolean>): Promise<true | string | null>
   /** 发送（含乐观回显/幂等/断线排队）；attachments 为已上传附件引用。返回是否受理 */
-  send(attachments?: SentAttachment[]): boolean
+  send(attachments?: SentAttachment[], onSettled?: (accepted: boolean) => void): boolean
   abort(): Promise<void>
   resolveApproval(a: ApprovalItem, decision: 'allow' | 'deny'): Promise<void>
   slashQuery: Ref<string | null>
@@ -133,7 +133,9 @@ export function useChatSession(deps: ChatSessionDeps = {}): ChatSession {
     if (outbox.pending(id).length === 0) return
     try {
       await outbox.flush(id, async (sid, entry) => {
-        const result = await sendSessionMessage(sid, entry.content, entry.clientKey)
+        const result = await (entry.attachments?.length
+          ? sendSessionMessage(sid, entry.content, entry.clientKey, entry.attachments.map((media) => media.attachmentId))
+          : sendSessionMessage(sid, entry.content, entry.clientKey))
         if (!disposed && chat.selectedSession === sid && result.command) deps.onCommand?.(result.command)
       })
     } catch {
@@ -366,7 +368,7 @@ export function useChatSession(deps: ChatSessionDeps = {}): ChatSession {
   }
 
   // ---- 发送（幂等 + 乐观回显 + 门控 + 断线排队）----
-  function send(attachments?: SentAttachment[]): boolean {
+  function send(attachments?: SentAttachment[], onSettled?: (accepted: boolean) => void): boolean {
     const content = chat.input.trim()
     if (!content) return false
     const id = chat.selectedSession
@@ -387,7 +389,7 @@ export function useChatSession(deps: ChatSessionDeps = {}): ChatSession {
     const key = newClientKey()
     pushOptimistic(content, key, attachments)
     chat.setInput('')
-    void dispatchSend(id, content, key, attachments)
+    void dispatchSend(id, content, key, attachments).then((accepted) => onSettled?.(accepted))
     return true
   }
 
@@ -405,36 +407,44 @@ export function useChatSession(deps: ChatSessionDeps = {}): ChatSession {
     })
   }
 
-  async function dispatchSend(id: string, content: string, key: string, attachments: SentAttachment[] | undefined): Promise<void> {
+  async function dispatchSend(id: string, content: string, key: string, attachments: SentAttachment[] | undefined): Promise<boolean> {
     try {
       const result = await sendSessionMessage(id, content, key, attachments?.map((a) => a.attachmentId))
-      if (disposed || chat.selectedSession !== id) return
+      if (disposed || chat.selectedSession !== id) return true
       if (result.command) deps.onCommand?.(result.command)
       if (result.replay) {
         void refreshProjection() // 重发 replay：以权威行回填（乐观行随整替消失）
-        return
+        return true
       }
       chat.markMessageId(key, result.messageId)
+      return true
     } catch (e) {
-      if (disposed) return
+      if (disposed) return false
       chat.removeMessage(key)
+      const restoreDraft = () => {
+        if (chat.selectedSession === id && chat.input === '') chat.setInput(content)
+      }
       if (e instanceof ApiError && (e.code === 50005 || e.code === 50003)) {
         deps.onActionError?.('已有任务在进行中') // 多端门禁：另一端先发了
         void refreshProjection()
-        return
+        restoreDraft()
+        return false
       }
       if (e instanceof ApiError && e.code === 40043) {
         deps.onActionError?.('并发配额已满，请稍后再试')
-        return
+        restoreDraft()
+        return false
       }
       if (e instanceof ApiError && e.code === 50007) {
         deps.onActionError?.('发送冲突（幂等键已用于不同内容），请刷新后重试')
-        return
+        restoreDraft()
+        return false
       }
       // 网络/未知故障：消息可能已到达（幂等键保不重复）→ 入待发，重连后按序注入（replay 幂等）
-      outbox.enqueue(id, content)
-      pushOptimistic(content, undefined, undefined)
+      outbox.enqueue(id, content, { clientKey: key, attachments })
+      if (chat.selectedSession === id) pushOptimistic(content, key, attachments)
       deps.onActionError?.('已加入待发，重连后自动发送')
+      return true
     }
   }
 

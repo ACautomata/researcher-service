@@ -23,7 +23,7 @@ import type { PrismaClient } from '../src/generated/prisma/client'
 import { PrismaCheckpointSaver } from '../src/runner/persistence/prismaCheckpointSaver'
 import { ProviderRegistry } from '../src/runner/providerRegistry'
 import { ConcurrencyGate } from '../src/runner/concurrency'
-import { RunService, type RunCommand } from '../src/runner/runtime/runService'
+import { RunService, type RunCommand, type RunServiceDeps, type RecordTurnFn } from '../src/runner/runtime/runService'
 import { TeammateService } from '../src/runner/teammates/service'
 import { CODE } from '../src/codes'
 import { seedAdmin, seedUser } from './helpers'
@@ -106,6 +106,8 @@ describe('RunService：发消息 → run 终态事件序列（S1，#747 C 节目
       wikis?: {
         ensure: (ownerId: string) => Promise<void>
       }
+      attachments?: RunServiceDeps['attachments']
+      recordTurn?: RecordTurnFn
       teammates?: TeammateService
     } = {},
   ): RunService {
@@ -114,12 +116,13 @@ describe('RunService：发消息 → run 终态事件序列（S1，#747 C 节目
       llmApiKey: 'test-key',
       modelFactory: async () => new ScriptedChatModel(script, { loop: opts.scriptLoop }),
     })
-    return new RunService({
+    const service = new RunService({
       prisma,
       registry,
       saver: opts.saver ?? new PrismaCheckpointSaver(prisma),
       gate: opts.gate ?? new ConcurrencyGate({ globalLimit: 8, loadUserLimit: async () => 4 }),
       hub,
+      attachments: opts.attachments,
       primitives: (opts.primitives ?? fakePrimitives()).primitives,
       resolveWikiContainer: () => WIKI,
       ...(opts.interruptPolicyFor ? { interruptPolicyFor: opts.interruptPolicyFor } : {}),
@@ -132,6 +135,8 @@ describe('RunService：发消息 → run 终态事件序列（S1，#747 C 节目
         return () => (t += 10)
       })(),
     })
+    service.setRecordTurn(opts.recordTurn)
+    return service
   }
 
   function cmd(p: Partial<RunCommand> = {}): RunCommand {
@@ -145,6 +150,29 @@ describe('RunService：发消息 → run 终态事件序列（S1，#747 C 节目
       ...p,
     }
   }
+
+  it.each([false, true])('#795 ingestion 状态实时与落行相同（failure=%s）', async (failure) => {
+    const turns: Array<Parameters<RecordTurnFn>[0]> = []
+    const svc = makeService({
+      script: [new AIMessage({ content: '文件已读取' })],
+      attachments: {
+        ingestAttachments: async () => {
+          if (failure) throw new Error('sha256 mismatch')
+          return [{ attachmentId: '123', mimeType: 'text/plain' }]
+        },
+        readTempBytes: async () => Buffer.from('bytes'),
+        materializeAgentMedia: async () => null,
+      },
+      recordTurn: async (turn) => { turns.push(turn) },
+    })
+    await svc.execute(cmd({ attachmentIds: ['123'] }))
+    const tools = hub.events.filter((event) => event.type === 'tool.start' || event.type === 'tool.end')
+    expect(tools.map((event) => event.type)).toEqual(['tool.start', 'tool.end'])
+    expect(tools[0]?.payload).toMatchObject({ name: 'ingest_attachments', input: '{"attachmentIds":["123"]}' })
+    expect(tools[1]?.payload).toMatchObject({ state: failure ? 'error' : 'success' })
+    expect(turns[0]?.aggregate.tools?.[0]).toMatchObject({ name: 'ingest_attachments', state: failure ? 'error' : 'success' })
+    expect(hub.types().at(-1)).toBe(failure ? 'run.failed' : 'run.completed')
+  })
 
   it('纯文本回复：run.started → text.delta* → run.completed（delta 拼接 == 全文）', async () => {
     currentScript = [new AIMessage({ content: '你好，我是助手。' })]

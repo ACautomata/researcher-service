@@ -20,15 +20,7 @@ import { INLINE_RANGE_NARROW, INLINE_RANGE_WIDE } from '@/panels/triState'
 import { usePanelGroup } from '@/panels/usePanelGroup'
 import { usePanelTriState } from '@/panels/usePanelTriState'
 import PanelTriState from '@/components/PanelTriState.vue'
-import {
-  buildAttachments,
-  compressImageFile,
-  fileToRawAttachment,
-  isAllowedAttachmentType,
-  toPreviewDataUrl,
-  type PendingAttachment,
-  type RawAttachment,
-} from '@/chat/attachments'
+import { prepareAttachment, validateAttachment, type PendingAttachment } from '@/chat/attachments'
 import ChatSidebar from '@/components/chat/ChatSidebar.vue'
 import ChatHeader from '@/components/chat/ChatHeader.vue'
 import ChatStream from '@/components/chat/ChatStream.vue'
@@ -260,91 +252,102 @@ async function removeSession(id: string): Promise<void> {
   // null = 用户取消：无反馈
 }
 
-// ---- 附件采集（预览条状态归宿主，贴 connecting/errorMsg 先例——本地瞬态 UI 态）----
-// 预览项 PendingAttachment（结构上提 attachments.ts 单一来源）= 采集到的 RawAttachment（content 纯
-// base64）+ 本地缩略 previewUrl（图片经 toPreviewDataUrl 重建 dataURL）；发送前经 buildAttachments
-// 统一校验（类型/体积）→ 逐个上传（POST /sessions/:id/attachments）→ attachmentIds 随消息发送。
+// #795 附件草稿：Blob 直接上传；成功上传的引用缓存用于部分失败后的重试。
 const pendingAttachments = ref<PendingAttachment[]>([])
+const attachmentBusy = ref(false)
+const attachmentStatus = ref('')
 let attachKey = 0
-let uploading = false
+let attachmentGeneration = 0
+let attachmentUpload: AbortController | undefined
+let collecting: Promise<void> = Promise.resolve()
 
-// 预览条追加（单一入口）：采集三通道（粘贴/拖拽/选择）共用同一落点——key 单调递增
-// （移除按钮按 key 定位）、图片经 toPreviewDataUrl 重建 dataURL 缩略。
-function pushAttachment(att: RawAttachment): void {
-  pendingAttachments.value.push({ key: ++attachKey, att, previewUrl: toPreviewDataUrl(att) })
+function clearAttachments(): void {
+  attachmentGeneration++
+  attachmentUpload?.abort()
+  attachmentBusy.value = false
+  attachmentStatus.value = ''
+  for (const item of pendingAttachments.value) if (item.previewUrl) URL.revokeObjectURL(item.previewUrl)
+  pendingAttachments.value = []
 }
+watch(() => chat.selectedSession, clearAttachments, { flush: 'sync' })
+onBeforeUnmount(clearAttachments)
 
-// 三通道共用入口：粘贴/拖拽/文件选择的 File 列表 → 压缩（图片）/转换（非图片）→ 入预览条。
-// 不支持的类型（非 image/audio/video）即时提示，不入预览条（体积校验留发送前 buildAttachments 兜底）。
-async function addFiles(files: File[]): Promise<void> {
-  for (const file of files) {
-    if (!isAllowedAttachmentType(file.type)) {
-      ElMessage.error(`不支持的附件类型：${file.name}`)
-      continue
-    }
+function addFiles(files: File[]): Promise<void> {
+  if (attachmentBusy.value) return Promise.resolve()
+  const generation = attachmentGeneration
+  attachmentBusy.value = true
+  collecting = collecting.then(async () => {
     try {
-      const att = file.type.startsWith('image/')
-        ? await compressImageFile(file)
-        : await fileToRawAttachment(file)
-      pushAttachment(att)
-    } catch {
-      ElMessage.error(`附件读取失败：${file.name}`)
+      for (const file of files) {
+        if (generation !== attachmentGeneration) return
+        const error = validateAttachment(file, pendingAttachments.value.length)
+        if (error) { ElMessage.error(`${file.name}：${error}`); continue }
+        attachmentStatus.value = `正在处理 ${file.name}`
+        try {
+          const att = await prepareAttachment(file)
+          if (generation !== attachmentGeneration) return
+          pendingAttachments.value.push({
+            key: ++attachKey, att,
+            previewUrl: att.mimeType.startsWith('image/') ? URL.createObjectURL(att.blob) : '',
+          })
+        } catch (cause) {
+          if (generation === attachmentGeneration) ElMessage.error(cause instanceof Error ? cause.message : '附件读取失败')
+        }
+      }
+    } finally {
+      if (generation === attachmentGeneration) { attachmentBusy.value = false; attachmentStatus.value = '' }
     }
-  }
+  })
+  return collecting
 }
 
 function removeAttachment(key: number): void {
+  if (attachmentBusy.value) return
+  const item = pendingAttachments.value.find((p) => p.key === key)
+  if (item?.previewUrl) URL.revokeObjectURL(item.previewUrl)
   pendingAttachments.value = pendingAttachments.value.filter((p) => p.key !== key)
 }
 
-// base64（纯）→ Blob（上传面：RawAttachment content 重建字节，文件名/mime 为权威元数据）
-function base64ToBlob(content: string, mime: string): Blob {
-  const bin = atob(content)
-  const bytes = new Uint8Array(bin.length)
-  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
-  return new Blob([bytes], { type: mime })
-}
-
-// 发送（Enter/按钮/斜杠统一入口，#1）：buildAttachments 校验预览条 → 有拒发则提示不发；
-// 全放行 → 逐个上传换 attachmentId（失败中止保留预览条）→ conn.send（幂等/门控/断线排队）。
-// 仅真受理才清空预览条（conn.send 守卫早退——无会话/在飞/审批挂起——返回 false，附件不丢）。
 async function sendMessage(): Promise<void> {
-  if (uploading) return
-  const { attachments, rejected } = buildAttachments(pendingAttachments.value.map((p) => p.att))
-  if (rejected.length > 0) {
-    const oversize = rejected.some((r) => r.reason === 'size')
-    ElMessage.error(oversize ? '文件过大，无法发送' : '存在不支持的附件类型')
-    return
-  }
+  if (attachmentBusy.value || running.value) return
+  const sessionId = chat.selectedSession
+  const generation = attachmentGeneration
+  const pending = [...pendingAttachments.value]
   let refs: SentAttachment[] | undefined
-  if (attachments.length) {
-    if (!chat.selectedSession || conn.disconnected.value) {
-      ElMessage.error(conn.disconnected.value ? '连接已断开，暂不能发送附件' : '请先选择会话')
-      return
-    }
-    uploading = true
+  if (pending.length) {
+    if (conn.disconnected.value) { ElMessage.error('连接已断开，暂不能发送附件'); return }
+    if (!chat.input.trim()) { ElMessage.warning('请填写消息后发送附件'); return }
+    if (!sessionId) { ElMessage.error('请先选择会话'); return }
+    attachmentBusy.value = true
+    attachmentUpload = new AbortController()
+    const signal = attachmentUpload.signal
     try {
       refs = []
-      for (const att of attachments) {
-        const content = typeof att.content === 'string' ? att.content : ''
-        const mime = att.mimeType ?? 'application/octet-stream'
-        const meta = await uploadSessionAttachment(
-          chat.selectedSession,
-          base64ToBlob(content, mime),
-          att.fileName ?? 'file',
-          mime,
+      for (const [index, item] of pending.entries()) {
+        attachmentStatus.value = `正在上传附件 ${index + 1}/${pending.length}：${item.att.fileName}`
+        const meta = item.uploaded ?? await uploadSessionAttachment(
+          sessionId, item.att.blob, item.att.fileName, item.att.mimeType, signal,
         )
+        if (generation !== attachmentGeneration) return
+        item.uploaded = meta
         refs.push({ attachmentId: meta.attachmentId, mime: meta.mimeType, size: meta.size, fileName: meta.fileName })
       }
-    } catch (e) {
-      ElMessage.error(e instanceof Error ? e.message : '附件上传失败')
-      return // 预览条保留，可重试
-    } finally {
-      uploading = false
+    } catch (cause) {
+      if (generation === attachmentGeneration) ElMessage.error(cause instanceof Error ? cause.message : '附件上传失败')
+      if (generation === attachmentGeneration) { attachmentBusy.value = false; attachmentStatus.value = '' }
+      return
     }
   }
-  const accepted = conn.send(refs)
-  if (accepted) pendingAttachments.value = [] // 真受理 → 预览条清空；早退保留
+  if (generation !== attachmentGeneration) return
+  try {
+    if (refs) attachmentStatus.value = '正在发送消息…'
+    const accepted = refs
+      ? await new Promise<boolean>((resolve) => { if (!conn.send(refs, resolve)) resolve(false) })
+      : conn.send()
+    if (accepted && generation === attachmentGeneration) clearAttachments()
+  } finally {
+    if (generation === attachmentGeneration) { attachmentBusy.value = false; attachmentStatus.value = '' }
+  }
 }
 
 async function regenerate(text: string): Promise<void> {
@@ -468,6 +471,8 @@ defineExpose({
         :streaming="running"
         :disconnected="conn.disconnected.value"
         :pending-attachments="pendingAttachments"
+        :attachment-busy="attachmentBusy"
+        :attachment-status="attachmentStatus"
         @input="conn.onComposerInput"
         @keydown="conn.onComposerKeydown"
         @send="sendMessage"

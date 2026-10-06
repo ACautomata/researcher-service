@@ -47,6 +47,7 @@ import * as api from '@/api/sessions'
 import * as filesApi from '@/api/files'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import ChatView from '@/views/ChatView.vue'
+import ChatComposer from '@/components/chat/ChatComposer.vue'
 
 class FakeEventSource extends EventTarget {
   // IDL 静态常量（真 EventSource 接口面）：useEventStream 以 EventSource.CLOSED 判连接终态
@@ -102,6 +103,7 @@ beforeEach(() => {
   sessionStorage.clear()
   vi.stubGlobal('EventSource', FakeEventSource)
   vi.clearAllMocks()
+  vi.mocked(api.uploadSessionAttachment).mockReset()
   apiJsonMock.mockReset().mockImplementation(async (url: string) => url === '/api/v1/plugins' ? { plugins: [] } : { id: 'u1' })
   vi.mocked(api.listSessions).mockResolvedValue([S1, S2])
   vi.mocked(api.getSessionProjection).mockResolvedValue(PROJECTION)
@@ -116,6 +118,63 @@ afterEach(() => {
 })
 
 describe('ChatView（REST+SSE 三件套接线）', () => {
+  it('#795 文件采集、数量/大小校验、上传引用、乐观就位状态全链', async () => {
+    const w = await mountChat()
+    const documents = Array.from({ length: 5 }, (_, i) => new File(['data'], `data-${i}.bin`))
+    const oversized = new File(['bytes'], 'big.bin')
+    Object.defineProperty(oversized, 'size', { value: 100 * 1024 * 1024 + 1 })
+    w.getComponent(ChatComposer).vm.$emit('addFiles', [oversized, ...documents])
+    await flushPromises()
+    expect(w.findAll('[data-test="preview-item"]')).toHaveLength(4)
+    expect(ElMessage.error).toHaveBeenCalledWith('big.bin：单文件不能超过 100MB')
+    expect(ElMessage.error).toHaveBeenCalledWith('data-4.bin：单消息最多 4 个附件')
+    vi.mocked(api.uploadSessionAttachment).mockImplementation(async (_id, blob, fileName, mimeType) => ({
+      attachmentId: fileName, fileName, mimeType, size: blob.size, sha256: 'hash', path: '/lab/uploads/file',
+    }))
+    await w.get('[data-test="input"]').setValue('分析文件')
+    await w.get('[data-test="send"]').trigger('click'); await flushPromises()
+    expect(api.uploadSessionAttachment).toHaveBeenCalledWith('sess-1', documents[0], 'data-0.bin', 'application/octet-stream', expect.any(AbortSignal))
+    expect(api.sendSessionMessage).toHaveBeenCalledWith('sess-1', '分析文件', expect.any(String), documents.slice(0, 4).map((file) => file.name))
+    expect(w.find('[data-test="preview-strip"]').exists()).toBe(false)
+    expect(w.text()).toContain('附件正在就位')
+    w.unmount()
+  })
+
+  it('#795 部分上传失败后重试复用已上传引用', async () => {
+    const w = await mountChat()
+    w.getComponent(ChatComposer).vm.$emit('addFiles', [new File(['a'], 'a.txt'), new File(['b'], 'b.txt')])
+    await flushPromises()
+    await w.get('[data-test="input"]').setValue('分析文件')
+    vi.mocked(api.uploadSessionAttachment)
+      .mockResolvedValueOnce({ attachmentId: 'a', fileName: 'a.txt', mimeType: 'text/plain', size: 1, sha256: 'hash', path: '/lab/a' })
+      .mockRejectedValueOnce(new Error('上传失败'))
+      .mockResolvedValueOnce({ attachmentId: 'b', fileName: 'b.txt', mimeType: 'text/plain', size: 1, sha256: 'hash', path: '/lab/b' })
+    await w.get('[data-test="send"]').trigger('click'); await flushPromises()
+    expect(api.sendSessionMessage).not.toHaveBeenCalled()
+    expect(w.findAll('[data-test="preview-item"]')).toHaveLength(2)
+    await w.get('[data-test="send"]').trigger('click'); await flushPromises()
+    expect(api.uploadSessionAttachment).toHaveBeenCalledTimes(3)
+    expect(api.sendSessionMessage).toHaveBeenCalledWith('sess-1', '分析文件', expect.any(String), ['a', 'b'])
+    w.unmount()
+  })
+
+  it('#795 上传期间切会话不会把旧附件发到新会话', async () => {
+    const w = await mountChat()
+    w.getComponent(ChatComposer).vm.$emit('addFiles', [new File(['bytes'], 'a.txt')])
+    await flushPromises()
+    await w.get('[data-test="input"]').setValue('分析文件')
+    let finish!: (meta: api.AttachmentMeta) => void
+    vi.mocked(api.uploadSessionAttachment).mockReturnValue(new Promise((resolve) => { finish = resolve }))
+    await w.get('[data-test="send"]').trigger('click'); await flushPromises()
+    expect(w.get('[data-test="attachment-status"]').text()).toContain('正在上传附件 1/1')
+    await w.get('[data-test="session-sess-2"]').trigger('click'); await flushPromises()
+    finish({ attachmentId: 'a', fileName: 'a.txt', mimeType: 'text/plain', size: 5, sha256: 'hash', path: '/lab/a' })
+    await flushPromises()
+    expect(api.sendSessionMessage).not.toHaveBeenCalled()
+    expect(w.find('[data-test="preview-strip"]').exists()).toBe(false)
+    w.unmount()
+  })
+
   it('挂载：会话扁平列表渲染 + 自动选中最近会话 + 投影回放渲染 + 标题', async () => {
     const w = await mountChat()
     expect(w.find('[data-test="session-sess-1"]').exists()).toBe(true)

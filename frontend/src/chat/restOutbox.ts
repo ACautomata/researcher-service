@@ -12,6 +12,7 @@
 // 语义）。0 信任读回：逐字段 normalize（clientKey 32-hex / content 非空 / queuedAt 有限数），
 // 坏行丢弃、坏 blob → 空（读取降级不抛）。接线归 #793（useEventStream 断线重连编排）。
 
+import type { MediaRef } from '@/api/sessions'
 import { getSafeSessionStorage } from './localStorage'
 
 export const REST_OUTBOX_STORAGE_KEY = 'chat.restOutbox.v1'
@@ -21,6 +22,7 @@ export interface OutboxEntry {
   clientKey: string
   content: string
   queuedAt: number
+  attachments?: MediaRef[]
 }
 
 // flush 的注入缝：生产 = api sessions.sendMessage(sessionId, content, clientKey)（#793 接线）；
@@ -28,7 +30,7 @@ export interface OutboxEntry {
 export type RestOutboxSend = (sessionId: string, entry: OutboxEntry) => Promise<void>
 
 export interface RestOutbox {
-  enqueue(sessionId: string, content: string, opts?: { idgen?: () => string; now?: () => number }): OutboxEntry
+  enqueue(sessionId: string, content: string, opts?: { clientKey?: string; attachments?: MediaRef[]; idgen?: () => string; now?: () => number }): OutboxEntry
   pending(sessionId: string): OutboxEntry[]
   remove(sessionId: string, clientKey: string): void
   /** 按序逐条注入：成功（resolve）移除、失败（reject）停止并上抛；返回已注入条数 */
@@ -64,7 +66,20 @@ export function createRestOutbox(storage: Storage | null = getSafeSessionStorage
     const content = typeof rec.content === 'string' ? rec.content : ''
     const queuedAt = typeof rec.queuedAt === 'number' && Number.isFinite(rec.queuedAt) ? rec.queuedAt : NaN
     if (!CLIENT_KEY_REGEX.test(clientKey) || content === '' || Number.isNaN(queuedAt)) return null
-    return { clientKey, content, queuedAt }
+    let attachments: MediaRef[] | undefined
+    if (rec.attachments !== undefined) {
+      if (!Array.isArray(rec.attachments) || rec.attachments.length === 0 || rec.attachments.length > 4) return null
+      attachments = []
+      for (const value of rec.attachments) {
+        if (!value || typeof value !== 'object') return null
+        const media = value as Record<string, unknown>
+        if (typeof media.attachmentId !== 'string' || !media.attachmentId ||
+            typeof media.mime !== 'string' || typeof media.fileName !== 'string' ||
+            typeof media.size !== 'number' || !Number.isFinite(media.size) || media.size < 0) return null
+        attachments.push({ attachmentId: media.attachmentId, mime: media.mime, fileName: media.fileName, size: media.size })
+      }
+    }
+    return { clientKey, content, queuedAt, ...(attachments ? { attachments } : {}) }
   }
 
   function readBlob(): OutboxBlob | null {
@@ -110,12 +125,13 @@ export function createRestOutbox(storage: Storage | null = getSafeSessionStorage
   return {
     enqueue(sessionId, content, opts) {
       const entry: OutboxEntry = {
-        clientKey: opts?.idgen ? opts.idgen() : newClientKey(),
+        clientKey: opts?.clientKey ?? (opts?.idgen ? opts.idgen() : newClientKey()),
         content,
+        ...(opts?.attachments?.length ? { attachments: opts.attachments.map((media) => ({ ...media })) } : {}),
         queuedAt: opts?.now ? opts.now() : Date.now(),
       }
       mutate(sessionId, (list) => {
-        const next = [...list, entry]
+        const next = [...list.filter((item) => item.clientKey !== entry.clientKey), entry]
         if (next.length > MAX_QUEUE_ITEMS) next.splice(0, next.length - MAX_QUEUE_ITEMS) // 丢最旧
         return next
       })

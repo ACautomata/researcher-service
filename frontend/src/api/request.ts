@@ -2,8 +2,11 @@
 // 调用方已有 signal 时用 AbortSignal.any 同时保留主动取消语义。
 export const REQUEST_TIMEOUT_MS = 15_000
 
-export function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
-  const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS)
+export type RequestOptions = RequestInit & { timeoutMs?: number }
+
+export function fetchWithTimeout(input: RequestInfo | URL, init: RequestOptions = {}): Promise<Response> {
+  const { timeoutMs = REQUEST_TIMEOUT_MS, ...request } = init
+  const timeout = AbortSignal.timeout(timeoutMs)
   const signal = init.signal ? AbortSignal.any([init.signal, timeout]) : timeout
-  return fetch(input, { ...init, signal })
+  return fetch(input, { ...request, signal })
 }
