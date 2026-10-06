@@ -7,8 +7,10 @@ import {
   MAX_MAIL_WAIT_MS,
   TeammateService,
   type MailSummary,
+  type TeammateKind,
   type TeammateSummary,
 } from './service'
+import { WIKI_UPDATE_TEAMMATE_KIND } from '../wikigen/values'
 
 export interface TeammateToolContext {
   readonly parentSessionId: string
@@ -49,7 +51,7 @@ function renderMail(messages: readonly MailSummary[]): string {
 
 export function createTeammateTools(ctx: TeammateToolContext) {
   const spawn = tool(
-    async ({ name, task, modelProviderId }) => {
+    async ({ name, task, kind, modelProviderId }) => {
       if (ctx.actorTeammateId !== null) {
         return 'Only the leader can start a teammate. Use request_teammate to ask the leader.'
       }
@@ -57,6 +59,7 @@ export function createTeammateTools(ctx: TeammateToolContext) {
         parentSessionId: ctx.parentSessionId,
         name,
         task,
+        kind: (kind ?? 'generic') as TeammateKind,
         modelProviderId,
         spawnedAtCheckpointId: await ctx.checkpointId(),
       })
@@ -69,6 +72,9 @@ export function createTeammateTools(ctx: TeammateToolContext) {
       schema: z.object({
         name: z.string().trim().min(1).max(80),
         task: z.string().trim().min(1).max(8000),
+        // kind 显式值 V1 只有 wiki-update（治理生成；generic = 缺省不出现在 schema——
+        // 保留名单防模型杜撰类别，扩展随发版）。
+        kind: z.enum([WIKI_UPDATE_TEAMMATE_KIND]).optional().describe('Spawn a "wiki-update" teammate to regenerate the knowledge wiki with the OpenWiki lifecycle tools. Omit for a generic teammate.'),
         modelProviderId: z.string().trim().min(1).optional().describe('Optional provider id; defaults to the leader model.'),
       }),
     },

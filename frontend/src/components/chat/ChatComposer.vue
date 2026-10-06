@@ -5,7 +5,7 @@
 // 本组件只收 matches/slashOpen props 渲染菜单，不重复计算。
 // #459-T2 #463：附件采集壳——粘贴/拖拽/文件选择三通道仅做「采 File 上抛」，压缩/校验/发送逻辑全在
 // 宿主 ChatView；预览条只渲染宿主给的 pendingAttachments（含 previewUrl），移除上抛 key。
-import type { SlashOption } from '@/chat/useChatConnection'
+import type { SlashOption } from '@/chat/useChatSession'
 import type { PendingAttachment } from '@/chat/attachments'
 import { nextTick, ref, watch } from 'vue'
 
@@ -18,6 +18,7 @@ const props = withDefaults(
     matches: SlashOption[]
     slashOpen: boolean
     slashIndex: number
+    argumentHint?: string | null
     connecting: boolean
     streaming: boolean
     disconnected: boolean
@@ -131,6 +132,7 @@ watch(() => props.modelValue, () => void nextTick(resize), { immediate: true })
       </div>
       <span class="attach-count" data-test="attach-count">{{ pendingAttachments.length }} 个附件</span>
     </div>
+    <p v-if="argumentHint" id="slash-argument-hint" class="argument-hint" data-test="slash-argument-hint" role="status">{{ argumentHint }}</p>
     <div class="composer-row">
       <button
         type="button"
@@ -155,6 +157,12 @@ watch(() => props.modelValue, () => void nextTick(resize), { immediate: true })
         rows="2"
         placeholder="发消息…（Enter 发送 / Shift+Enter 换行；输 / 弹命令补全；可粘贴/拖拽/选附件）"
         aria-label="消息输入框"
+        role="combobox"
+        aria-autocomplete="list"
+        :aria-expanded="slashOpen"
+        :aria-controls="slashOpen ? 'slash-command-menu' : undefined"
+        :aria-activedescendant="slashOpen ? `slash-command-${slashIndex}` : undefined"
+        :aria-describedby="argumentHint ? 'slash-argument-hint' : undefined"
         @input="onInput"
         @keydown="emit('keydown', $event)"
       ></textarea>
@@ -171,6 +179,7 @@ watch(() => props.modelValue, () => void nextTick(resize), { immediate: true })
 
 <style scoped>
 .composer { position: relative; display: flex; flex-direction: column; gap: 8px; padding: 12px 18px; border-top: 1px solid var(--el-border-color); }
+.argument-hint { width: 100%; max-width: 840px; margin: 0 auto; font-size: 12px; color: var(--el-text-color-secondary); }
 .composer-row { display: flex; width: 100%; max-width: 840px; margin: 0 auto; gap: 8px; align-items: flex-end; }
 .composer-row textarea { flex: 1; resize: none; min-height: 42px; max-height: 180px; overflow-y: auto; padding: 8px; border: 1px solid var(--el-border-color); border-radius: 8px; box-sizing: border-box; }
 .composer-row button { padding: 8px 16px; background: var(--el-color-primary); color: #fff; border: none; border-radius: 8px; cursor: pointer; }

@@ -38,8 +38,12 @@ FROM node:lts-slim
 
 # better-sqlite3 原生模块（node-gyp）在 runtime 的 postinstall 编译工具链；
 # 仅构建期用，体积小。必须 slim（Debian/glibc）——alpine/musl 需额外编译参数。
+# git（#790 · #747 G 节三通道②③）：openwiki 生成生命周期硬依赖 git 二进制
+#（resolveRepositoryRoot rev-parse + 源指纹 ls-files/status）——落地镜像 git init 是
+# wiki 治理生成（teammate 通道 + 更新 wiki 独立 run）的运行前提；缺 git = 宿主直跑
+# npm test 绿测、容器内每个更新 run 必坏（prodDeploy.test.ts 契约断言钉住）。
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends build-essential python3 \
+    && apt-get install -y --no-install-recommends build-essential python3 git \
     && rm -rf /var/lib/apt/lists/*
 
 ENV NODE_ENV=production

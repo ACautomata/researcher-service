@@ -37,6 +37,13 @@ export interface WikiContainersEnsurePort {
   ensure(ownerId: string): Promise<void>
 }
 
+// wiki 全量更新独立 run 触发面（#790 · #747 G 节三通道③）：结构子集注入（生产 =
+// WikiUpdateRunService）。start 在飞互斥（30042，EnvelopeError 上抛走信封）；返回 runId
+// 供 SSE wiki_run.* 事件关联。
+export interface WikiUpdateRunnerPort {
+  start(params: { ownerId: string; wikiContainer: string }): Promise<{ runId: string }>
+}
+
 export interface WikiRouterDeps {
   // compile 触发（#315 §6 遗留面）：POST/DELETE 触发、PUT 不触发、5s 去抖。缺省 = no-op。
   // #784 起生产装配不注入（busybox 无运行时；索引归 OpenWiki 工具形态）。
@@ -47,6 +54,9 @@ export interface WikiRouterDeps {
   // service 工厂：缺省 = Docker 适配器挂 inst.owner 的 wiki 容器（researcher-wiki-<ownerId>，
   // 树根 /wiki）；测试注入内存 fake（fake 以 inst.name 键控）。
   serviceFor?: (inst: { name: string; ownerId: string }) => WikiService
+  // 全量更新独立 run（#790）：缺省不注入 = 端点以 90005 回应（对齐 figures/docs 条件挂载
+  // 先例——未装配的面不虚挂）；生产 server.ts 注入 WikiUpdateRunService。
+  updateRunner?: WikiUpdateRunnerPort
 }
 
 // 页级域错误 → 信封（30040 / 90002+data.path）；其余上抛走统一错误面。
@@ -63,6 +73,7 @@ export function createWikiRouter(deps: WikiRouterDeps = {}): Router {
   const serviceFor =
     deps.serviceFor ?? ((inst: { name: string; ownerId: string }) => new WikiService(new DockerWikiFileSystem(wikiContainerName(inst.ownerId))))
   const ensureWiki = deps.wikiContainers
+  const updateRunner = deps.updateRunner
   const router = Router()
   router.use(requireAuth, mustChangePasswordGate)
 
@@ -159,6 +170,16 @@ export function createWikiRouter(deps: WikiRouterDeps = {}): Router {
     } catch (err) {
       assertPageOpError(err)
     }
+  })
+
+  // POST /:name/wiki/update —— 全量更新独立 run 触发面（#790 · 三通道③）：归属前置
+  // （resolveInstance——越权探测不建容器）+ wiki 容器 ensure，即返 {runId}；进度经 SSE
+  // wiki_run.progress/text/tool_start/tool_end/finished 五类事件扇出（事件即焚不落盘）。
+  // 在飞互斥 30042（start 同步抛 EnvelopeError）；缺装配 → 90005。
+  router.post('/:name/wiki/update', async (req: Request, res: Response) => {
+    if (!updateRunner) throw fail(CODE.ROUTE_NOT_FOUND)
+    const inst = await resolveInstance(req, req.params.name)
+    ok(res, await updateRunner.start({ ownerId: inst.ownerId, wikiContainer: wikiContainerName(inst.ownerId) }))
   })
 
   return router
