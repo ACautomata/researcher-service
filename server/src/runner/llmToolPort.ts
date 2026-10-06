@@ -1,6 +1,7 @@
 // ctx.llm 句柄核心实现（#744 §6/§11.1 · #792）：ProviderRegistry 出口的高层多模态句柄。
-// 回退链封装在核心实现内，插件不碰 registry 查询逻辑：owner providers（createdAt 序）
-// 逐 provider 首模型构造/调用，构造或调用失败逐级降级，全败明确报错（不静默换模型）。
+// 回退链封装在核心实现内，插件不碰 registry 查询逻辑：默认链 = owner providers（createdAt
+// 序）× 各自首模型，构造或调用失败逐级降级，全败明确报错（不静默换模型）；AUTOFIGURE_SVG_MODEL
+// 指定 = 集合内任一模型优先（检索域全 provider 全模型，非首模型经 configurable 通道绑定）。
 // owner 无 provider → loadSnapshot 惰性物化面板默认 provider（providerDefaults）——物化后
 // 仍为空集 = 面板未配置 → 明确配置错误。
 //
@@ -55,18 +56,20 @@ export function createLlmToolPort(registry: ProviderRegistry, ownerId: string): 
   return {
     async generateMultimodal(opts): Promise<PluginLlmResult> {
       const snapshot = await registry.getSnapshot(ownerId)
-      // 逐 provider 回退链：refs = providers（createdAt 序）× 各自首模型（V1 图形面多模态
-      // 文本固定 provider 首模型——不暴露选模参数面，#744 §6「多模态文本走 ProviderRegistry」）。
+      // 默认回退链：providers（createdAt 序）× 各自首模型（agent 面不暴露选模参数——V1
+      // 图形面多模态文本缺省固定 provider 首模型，#744 §6「多模态文本走 ProviderRegistry」；
+      // 面板级选模 = AUTOFIGURE_SVG_MODEL，走下方指定路径）。
       let refs = snapshot.providers.flatMap((p) => (p.models[0]?.id ? [{ provider: p, modelId: p.models[0]!.id }] : []))
       if (refs.length === 0) {
         throw fail(CODE.LLM_NOT_CONFIGURED, '无可用模型（figure 生成需要 owner 或面板默认 provider）')
       }
-      // model 非空 = 指定模型优先（provider 集合内 id；集合外 = 配置错误——resolveModelRef
-      // 「集合外值拒绝」同语义，明确报错不静默换模型）。
+      // model 非空 = 指定模型优先：检索域 = 全 provider 全模型（AUTOFIGURE_SVG_MODEL 可指
+      // 集合内任一模型，非首模型经 bindModelId 的 configurable 通道绑定）；集合外 = 配置错误
+      // 明确拒绝（resolveModelRef「集合外值拒绝」同语义，不静默换模型）。
       if (opts.model.trim() !== '') {
-        const hit = refs.find((r) => r.modelId === opts.model)
-        if (!hit) throw fail(CODE.PROVIDER_NOT_FOUND, `模型 ${opts.model} 不在 provider 配置集合内（AUTOFIGURE_SVG_MODEL 配置错误）`)
-        refs = [hit, ...refs.filter((r) => r !== hit)]
+        const owner = snapshot.providers.find((p) => p.models.some((m) => m.id === opts.model))
+        if (!owner) throw fail(CODE.PROVIDER_NOT_FOUND, `模型 ${opts.model} 不在 provider 配置集合内（AUTOFIGURE_SVG_MODEL 配置错误）`)
+        refs = [{ provider: owner, modelId: opts.model }, ...refs.filter((r) => r.modelId !== opts.model)]
       }
       let lastError: unknown
       for (const ref of refs) {

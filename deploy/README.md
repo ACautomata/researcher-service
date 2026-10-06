@@ -220,6 +220,25 @@ docker compose -f deploy/docker-compose.dev.yml up -d --build server
 - **双轨工作流**：纯逻辑快速迭代仍走宿主 `cd server && npm test` / `npm run typecheck`（不起服务、
   不摸卷）；凡要起服务 / 真编排 OpenClaw 容器（named volume 拓扑），一律走本容器化 dev 栈。
 
+## AutoFigure env（#792 插件化收口——现行）
+
+figure 生成 = server 进程内插件管线（#792 起；sidecar 时代见下方两节历史档案）。键声明单源 =
+`plugins/autofigure/manifest.ts` configSchema，启动期 `assertPluginEnv` 全目录校验（不看启用位）：
+
+| 键 | 必填 | 说明 |
+|----|------|------|
+| `AUTOFIGURE_IMAGE_MODEL` | 是 | 生图模型名（如 image-01） |
+| `AUTOFIGURE_IMAGE_API_KEY` | 是 | 生图 API key（服务端凭证） |
+| `FAL_KEY` | 是 | fal 云计算 key（SAM3/RMBG） |
+| `AUTOFIGURE_IMAGE_BASE_URL` | 否 | 生图 API base URL（缺省国际区 `https://api.minimax.io`） |
+| `AUTOFIGURE_SVG_MODEL` | 否 | SVG 生成模型 id（缺省 owner 默认链 primary） |
+
+- **生产**：三必填键写入同目录 `.env`（env_file 注入，与 `LLM_API_KEY` 同机制）——缺键 =
+  server 启动期 fail-fast throw，不做静默降级。
+- **dev**：`docker-compose.dev.yml` 显式列三键（`${VAR:-}` 空串安全）——缺键 = dev 警告照常
+  启动，figure 工具调用期明确报错。
+- 凭证纪律：env 注入、不落盘、不入日志、不进事件载荷/产物（#744 §6）。
+
 ## AutoFigure 接线（T10，docs/autofigure/tickets/T10-dev-sidecar-smoke.md）——已换轨退役（#791）
 
 > **已换轨退役（#791）**：本节为 sidecar 时代历史档案。server 侧消费端全量退役——`AUTOFIGURE_*`
@@ -227,6 +246,7 @@ docker compose -f deploy/docker-compose.dev.yml up -d --build server
 > 凭证注入链、figures 创建端点与 Idempotency-Key、`figuresSmoke` 测试均已删除；figures = 常驻
 > 读面（无 flag 门），生成入口 = 会话内 figure 工具（#744 §4.1，票 4 接线）。compose 中的
 > **autofigure sidecar 服务段暂留**（无现役消费者），目录与服务段的正式删除归票 6（#744 §10）。
+> 注意：插件级 env 键已随 #792 回归——现行键清单见上方「AutoFigure env」节。
 
 - **sidecar 服务段（暂留，历史形状）**：dev 栈 `autofigure` 服务仅挂 `panel-dev-net`、无宿主
   端口暴露、零 host 挂载（ADR 0013），`/health` healthcheck；`mem_limit: 2g`（T10 judgement call）。

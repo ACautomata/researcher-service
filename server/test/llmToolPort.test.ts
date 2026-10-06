@@ -42,17 +42,19 @@ function fakeRegistry(p: {
       const fail = p.failModels?.[providerId]
       if (fail) throw new Error(fail)
       const entry = p.providers.find((x) => x.providerId === providerId)!
-      const modelId = entry.modelIds[0]!
+      const first = entry.modelIds[0]!
+      const makeInvoke = (modelId: string) => async (messages: unknown, opts: unknown) => {
+        invoked.push({ modelId, opts, contents: messages })
+        const failInvoke = p.failInvokes?.[modelId]
+        if (failInvoke) throw new Error(failInvoke)
+        return { content: p.replies?.[modelId] ?? 'ok', usage_metadata: { input_tokens: 3, output_tokens: 5, total_tokens: 8 } }
+      }
       return {
-        withConfig() {
-          return this
+        // configurable 通道换模型（providerRegistry getModel 头注同源——per-request 非首模型走此）
+        withConfig(cfg: { configurable?: { model?: string } }) {
+          return { invoke: makeInvoke(cfg?.configurable?.model ?? first) }
         },
-        async invoke(messages: unknown, opts: unknown) {
-          invoked.push({ modelId, opts, contents: messages })
-          const failInvoke = p.failInvokes?.[modelId]
-          if (failInvoke) throw new Error(failInvoke)
-          return { content: p.replies?.[modelId] ?? 'ok', usage_metadata: { input_tokens: 3, output_tokens: 5, total_tokens: 8 } }
-        },
+        invoke: makeInvoke(first),
       } as never
     },
   } as never
@@ -128,5 +130,33 @@ describe('createLlmToolPort（ProviderRegistry 回退链封装）', () => {
     await expect(port.generateMultimodal({ contents: ['hi'], model: 'm-1', ...opts })).resolves.toMatchObject({ text: 'ok' })
     // 集合外指定：明确报错
     await expect(port.generateMultimodal({ contents: ['hi'], model: 'not-there', ...opts })).rejects.toThrow(/不在 provider 配置集合内/)
+  })
+
+  it('model 指定非首模型：检索域 = 全 provider 全模型，经 configurable 通道绑定', async () => {
+    const reg = fakeRegistry({
+      providers: [
+        { providerId: 'p1', modelIds: ['m-1', 'm-2'] },
+        { providerId: 'p2', modelIds: ['m-3'] },
+      ],
+    })
+    const port = createLlmToolPort(reg as never, 'u1')
+    const r = await port.generateMultimodal({ contents: ['hi'], model: 'm-2', ...opts })
+    expect(r.text).toBe('ok')
+    expect(reg.invoked[0]!.modelId).toBe('m-2')
+  })
+
+  it('指定模型调用失败 → 降级默认链（首模型序，指定模型不重复入链）', async () => {
+    const reg = fakeRegistry({
+      providers: [
+        { providerId: 'p1', modelIds: ['m-1', 'm-2'] },
+        { providerId: 'p2', modelIds: ['m-3'] },
+      ],
+      failInvokes: { 'm-2': 'quota exceeded' },
+    })
+    const port = createLlmToolPort(reg as never, 'u1')
+    const r = await port.generateMultimodal({ contents: ['hi'], model: 'm-2', ...opts })
+    expect(r.text).toBe('ok')
+    // m-2 失败 → 默认链 m-1 成功即止（m-3 不再触达）
+    expect(reg.invoked.map((i) => i.modelId)).toEqual(['m-2', 'm-1'])
   })
 })

@@ -29,7 +29,8 @@ export function pngIhdrSize(png: Uint8Array): { width: number; height: number } 
   const view = new DataView(png.buffer, png.byteOffset, png.byteLength)
   const width = view.getUint32(16)
   const height = view.getUint32(20)
-  if (!Number.isFinite(width) || !Number.isFinite(height) || width === 0 || height === 0) {
+  // getUint32 恒有限——只需挡零尺寸（IHDR 全零 = 未渲染占位）。
+  if (width === 0 || height === 0) {
     throw new Error('malformed PNG IHDR')
   }
   return { width, height }
