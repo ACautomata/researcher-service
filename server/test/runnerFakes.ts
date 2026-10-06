@@ -11,7 +11,7 @@
 import { BaseChatModel } from '@langchain/core/language_models/chat_models'
 import { AIMessage, AIMessageChunk } from '@langchain/core/messages'
 import { ChatGenerationChunk } from '@langchain/core/outputs'
-import { createTarFile, createTarTree, parseTar } from '../src/files/tar'
+import { createTarFile, parseTar } from '../src/files/tar'
 import type { SandboxFilePrimitives } from '../src/runner/backend/primitives'
 
 // 脚本条目：AIMessage 或工厂（LazyMessage 可断言构造时点）
@@ -127,17 +127,25 @@ export function fakePrimitives(
   }
   const dirTarOf = (tree: Map<string, Buffer | 'dir'>, absPath: string): Buffer => {
     const base = absPath.split('/').pop()!
-    // createTarTree（先序多条目 + 末尾统一零块）——逐 createTarFile 拼接会内嵌结束零块，
-    // parseTar 早停丢后续条目（真实 daemon 目录 tar 无此形态）
-    const entries: Array<{ name: string; type: 'file' | 'directory'; content?: Buffer; modeOctal?: string }> = [
-      { name: `${base}/`, type: 'directory', modeOctal: '0000755' },
-    ]
+    const parts: Buffer[] = []
+    const h = createTarFile(`${base}/`, Buffer.alloc(0), 1000)
+    h.write('5', 156, 'utf8')
+    parts.push(h.subarray(0, 512))
     for (const [p, c] of tree) {
       if (p.startsWith(`${absPath}/`) && c !== 'dir') {
-        entries.push({ name: `${base}/${p.slice(absPath.length + 1)}`, type: 'file', content: c })
+        // createTarFile 尾部自带 2×512 结束零块——多文件目录 tar 必须剥掉再拼接，否则
+        // parseTar 在首个文件的尾零块提前终止（对齐 dockerArchiveBackend.test.ts dirTarOf
+        // 同款 subarray 处理；#789 wikisearch 首个多文件种子暴露）。
+        parts.push(
+          createTarFile(`${base}/${p.slice(absPath.length + 1)}`, c, 1000).subarray(
+            0,
+            512 + Math.ceil(c.length / 512) * 512,
+          ),
+        )
       }
     }
-    return createTarTree(entries)
+    parts.push(Buffer.alloc(1024))
+    return Buffer.concat(parts)
   }
   const primitives: SandboxFilePrimitives = {
     async exec(container, cmd) {

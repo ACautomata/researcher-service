@@ -1,6 +1,9 @@
 import { resolveModelRef, type ModelRef } from '../providerRegistry'
 import { teammateDelegation } from '../teammates/delegation'
 import { snapshotRunCapabilities, type RunCapabilities } from '../capabilities'
+import type { PluginRuntime } from '../../plugins/surface'
+import { toLangChainTools, contentToText } from '../../plugins/tools'
+import type { AnyPluginToolDefinition } from '../../plugins/api'
 // RunService —— 集中式 runner 内核（#777 · #747 A 节「runner 编排」）。
 //
 // 职责（BullMQ 传输面之外的全部 run 机制）：
@@ -54,6 +57,9 @@ import type { CatalogEvent } from '../../events/logic'
 import type { StreamHub } from '../../events/hub'
 import type { SandboxFilePrimitives } from '../backend/primitives'
 import { DockerArchiveBackend } from '../backend/dockerArchiveBackend'
+import { WriteLockRegistry, DEFAULT_WRITE_LOCK_TIMEOUT_MS } from '../writelock/registry'
+import { withWriteLocks, withLockedPuts, type WriteLockContext } from '../writelock/lockedBackend'
+import { OverwriteAuditor, createPrismaJournalWriterReader, createPrismaOverwriteAuditSink } from '../writelock/overwriteAudit'
 import type { PrismaCheckpointSaver } from '../persistence/prismaCheckpointSaver'
 import type { ProviderRegistry, ProviderConfigSnapshot } from '../providerRegistry'
 import type { ConcurrencyGate } from '../concurrency'
@@ -62,7 +68,8 @@ import { buildStreamEventsInvocation } from '../../events/bridge'
 import { RunProjector } from './projector'
 import { classifyRunError, type RunErrorKind } from './errorKind'
 import { buildLeaderAgent, interruptPolicyKey, type DeepAgentLike, type InterruptPolicy, type LeaderAgentParams } from './graphFactory'
-import { COMPACT_KEEP, COMPACT_SUMMARY_PROMPT, DEFAULT_RECURSION_LIMIT, DEFAULT_RESUME_DECISIONS, GRAPH_CACHE_MAX_INSTANCES, LEADER_SYSTEM_PROMPT } from './values'
+import { COMPACT_KEEP, COMPACT_SUMMARY_PROMPT, DEFAULT_RECURSION_LIMIT, DEFAULT_RESUME_DECISIONS, GRAPH_CACHE_MAX_INSTANCES, LEADER_SYSTEM_PROMPT, TOOL_DETAILS_MAX_BYTES, TOOL_INPUT_MAX_BYTES, TRUNCATED_FLAG } from './values'
+import { truncateUtf8 } from './projector'
 import { disableLangsmithTracing } from './tracing'
 import { lastMessage, scanMediaBlocks } from './mediaBlocks'
 import { turnFromCheckpointMessages } from './checkpointTurn'
@@ -72,6 +79,7 @@ import { createTeammateTools } from '../teammates/tools'
 import type { FileJournalService } from '../filejournal/service'
 import { createToolCallContextMiddleware, runWithRunContext } from '../filejournal/context'
 import { IDEMPOTENCY_INGEST_PREFIX, IDEMPOTENCY_MEDIA_PREFIX } from '../filejournal/values'
+import { createWikiRetrievalTools } from '../wikisearch'
 
 // recordTurn 注入缝（#778）：run 终态（completed/interrupted/aborted/failed 任一）的单 turn
 // 聚合落库回调。anchorCheckpointId = 终态 checkpoint 锚点（issue 点名列；aborted/failed 路径
@@ -88,8 +96,12 @@ export interface RunCommand {
   readonly ownerId: string
   readonly username: string
   readonly kind: 'message' | 'resume' | 'recover'
-  /** #787 story 45：kind=message 的系统命令形态（/compact 显式压缩——REST 侧已校验无参） */
-  readonly operation?: 'compact'
+  /** #787 story 45：kind=message 的系统命令形态（/compact 显式压缩——REST 侧已校验无参）；
+   *  #788：'plugin-execute' = 插件命令 {execute} outcome（直达本插件工具执行面，不经 agent） */
+  readonly operation?: 'compact' | 'plugin-execute'
+  /** operation='plugin-execute'：目标插件工具名（启用集内）与 zod 解析前参数 */
+  readonly pluginTool?: string
+  readonly pluginArgs?: unknown
   readonly teammateId?: string
   readonly parentSessionId?: string
   readonly mailWaitId?: string
@@ -166,6 +178,9 @@ export interface RunServiceDeps {
   /** 审批三层漏斗（#783）。与 interruptPolicyFor（V1 测试面）可并存，生产只接前者。 */
   readonly approvals?: ApprovalFunnel
   readonly teammates?: TeammateService
+  /** 插件运行时（#788 · #752 §4.2）：per-run 启用集静态过滤 → 插件工具/prompt 进图；
+   *  目录版本进图缓存键。缺省不注 = 无插件维度（测试）。 */
+  readonly plugins?: PluginRuntime
   /** #780 下载校验节点（片 3：file 写类工具成功后校验声明路径 → 物化 + 下载引用进 tool 输出；
    * 失败 → 错误回喂 agent 重新生成）。缺省不注 = 工具产物面关闭（测试）。 */
   readonly downloadNode?: { readonly middleware: AnyAgentMiddleware }
@@ -175,6 +190,9 @@ export interface RunServiceDeps {
    *  journal checkpointId 终态回填。缺省不注 = backend 直用 DockerArchiveBackend、物化直写
    *  （journaling 关闭——测试/降级面）。 */
   readonly fileJournal?: FileJournalService
+  /** #785 per-path 写锁注册表（缺省进程内新建——测试无注入也全量生效；生产由装配层注入
+   *  config.runner.writeLockTimeoutMs 形态）。有界等待默认见 DEFAULT_WRITE_LOCK_TIMEOUT_MS。 */
+  readonly writeLocks?: WriteLockRegistry
   /** 挂起清扫定时器间隔（毫秒；缺省 5min，0 = 不启动定时器——测试手动调 sweepSuspensions） */
   readonly sweepIntervalMs?: number
   readonly recursionLimit?: number
@@ -233,6 +251,9 @@ export class RunService {
   private readonly recursionLimit: number
   private readonly approvalTimeoutMs: number
   private readonly clock: () => number
+  /** #785 per-path 写锁 + 覆盖审计（构造期装配——deps 缺省也生效，行为面无开关） */
+  private readonly writeLocks: WriteLockRegistry
+  private readonly overwriteAuditor: OverwriteAuditor
   private recordTurn: RecordTurnFn | undefined
   private sweepTimer: ReturnType<typeof setInterval> | undefined
   private queuedDispatch = false
@@ -242,6 +263,13 @@ export class RunService {
     this.recursionLimit = deps.recursionLimit ?? DEFAULT_RECURSION_LIMIT
     this.approvalTimeoutMs = deps.approvalTimeoutMs ?? APPROVAL_TIMEOUT_MS
     this.clock = deps.clock ?? (() => Date.now())
+    // #785 写锁（缺省新建 = 测试零注入也生效；生产经装配层注入 config 超时形态）+ 覆盖审计
+    //（journal 上家 writer 读取 + file_overwrite_logs sink，同 prisma 实例）。
+    this.writeLocks = deps.writeLocks ?? new WriteLockRegistry({ timeoutMs: DEFAULT_WRITE_LOCK_TIMEOUT_MS })
+    this.overwriteAuditor = new OverwriteAuditor(
+      createPrismaJournalWriterReader(deps.prisma),
+      createPrismaOverwriteAuditSink(deps.prisma),
+    )
     // 构造期兜底：任何 runner 实例化路径都覆盖 env 误开（装配层亦显式调用，双保险）
     disableLangsmithTracing()
     // 拒绝红显事件接线：漏斗判定时回调（同步），按在飞 cmd 盖印发布
@@ -579,6 +607,15 @@ export class RunService {
     const sandboxSessionId = cmd.parentSessionId ?? cmd.sessionId
     const sandbox = this.deps.sandboxes ? await this.deps.sandboxes.ensure(sandboxSessionId) : undefined
     const labContainer = sandbox?.containerId ?? session.containerId
+    // #785 ingestion/校验节点写面入锁：putArchive 按 tar 内单文件名取文件级锁（互斥域 =
+    // 沙箱所属 parent session；图缓存跨 run，每次 op 经 ctx 现取 holder）。覆盖审计与
+    // backend 层同形接线（detect/record 两段式）。
+    const runPrimitives = withLockedPuts(
+      this.deps.primitives,
+      this.writeLocks,
+      () => this.writeLockContext(sandboxSessionId, cmd.sessionId),
+      this.overwriteAuditor,
+    )
     // wiki 容器执行前提（#784 契约）：run 前 ensure 用户 wiki 容器——/wiki/ 工具根就绪
     //（不存在惰性创建零初始化、stopped 复启；永久容器随用户生命周期，无 touch 面）。失败
     // 同沙箱：pre-start 面向上传播，不发 run 域事件。
@@ -609,7 +646,10 @@ export class RunService {
         })
       : []
     const modelKey = actor?.modelProviderId ? `provider:${actor.modelProviderId}` : session.preferredModelJson ?? 'default'
-    const agent = this.getOrBuildGraph(cmd.sessionId, snapshot.version, policy, model, cmd.ownerId, labContainer, modelKey, tools, capabilities, sandboxSessionId)
+    // 插件工具/prompt（#788 §4.2）：run 粒度启用集静态过滤——禁用 = 新 run 装配不纳入；
+    // 进行中 run 不中断（工具集已随本次装配入图）。
+    const pluginSurface = this.deps.plugins?.surface(capabilities.enabledPluginIds)
+    const agent = this.getOrBuildGraph(cmd.sessionId, snapshot.version, policy, model, cmd.ownerId, sandboxSessionId, labContainer, modelKey, tools, capabilities, sandboxSessionId, pluginSurface?.tools ?? [], pluginSurface?.prompt ?? '')
 
     // Mailbox recover has already consumed its interrupt; only a fresh resume must match the wait.
     if (cmd.kind === 'resume' && cmd.mailWaitId) {
@@ -727,6 +767,14 @@ export class RunService {
         anchorCheckpointId = await this.compactThread(cmd, agent, model, usageHandler, controller.signal)
         this.runs.set(cmd.sessionId, { runId: cmd.runId, state: 'completed' })
         this.publish(cmd.ownerId, { type: 'run.completed', payload: {} }, cmd)
+      } else if (cmd.kind === 'message' && cmd.operation === 'plugin-execute') {
+        // 插件命令 {execute}（#788 · #752 §2.3 R9）：直达本插件工具执行面，不经 agent 自由裁量
+        //（两条触发面一条执行面，/figure 先例 #744）。标准 tool.start/tool.end 事件 + TurnReducer
+        // 聚合入会话（单管线渲染，实时 ≡ 回放）。无 agent loop → 无 checkpoint（锚点 null，
+        // 挂靠语义同无终态轮）；占用户 run 额度（#747 F 节「figure 随会话 run 占额度」同语义）。
+        await this.executePluginToolRun(cmd, capabilities, controller.signal, turn)
+        this.runs.set(cmd.sessionId, { runId: cmd.runId, state: 'completed' })
+        this.publish(cmd.ownerId, { type: 'run.completed', payload: {} }, cmd)
       } else {
         // #780 ingestion（片 2）：message 命令带附件 → run 首步确定性物化（runner 调度权，非 agent
         // 工具；LangGraph 图拓扑约束下作 runner 侧幂等预步骤——putArchive 覆盖写 + sha256 校验，
@@ -742,7 +790,7 @@ export class RunService {
             sessionId: cmd.sessionId,
             attachmentIds: cmd.attachmentIds,
             container: labContainer,
-            primitives: this.deps.primitives,
+            primitives: runPrimitives,
             ...(fj
               ? {
                   journalWrite: async (row: { id: string; fileName: string; mimeType: string }, bytes: Buffer) => {
@@ -879,7 +927,7 @@ export class RunService {
                 declaredPath: block.declaredPath,
                 mime: block.mime,
                 container: labContainer,
-                primitives: this.deps.primitives,
+                primitives: runPrimitives,
                 ...(fj
                   ? {
                       journalWrite: async (row: { attachmentId: string; fileName: string }, bytes: Buffer) => {
@@ -931,6 +979,9 @@ export class RunService {
     } finally {
       this.aborts.delete(cmd.runId)
       this.activeCmds.delete(cmd.sessionId)
+      // #785 持锁者死亡随 task 取消自动释放：本 run 残余持锁释放 + 其排队等待取消（正常路径
+      // 锁已由包装层 try/finally 先行释放——此处是 abort/异常路径的兜底；幂等 no-op 无害）
+      this.writeLocks.releaseRun(cmd.runId)
       // 终态清理漏斗运行槽（interrupted/suspended 保留——resume 延续同一逻辑 run 的护栏计数）
       const finalState = this.runs.get(cmd.sessionId)?.state
       if (cmd.teammateId && this.deps.teammates) {
@@ -1061,6 +1112,61 @@ export class RunService {
   // 强制其开火——故按同形态直写事件状态：与自动压缩共用同一重建逻辑，后续 run（含其自动
   // 压缩）零感知。filePath 恒 null：被压缩全文已由平台自有面持久化（session_messages 投影），
   // 不另落沙箱 /conversation_history（deepagents 卸载面的冗余副本）。
+  // ---- 插件命令 {execute} 运行体（#788 · #752 §2.3 R9）----
+  // 工具必须在本 run 启用集（owner per-run 快照）内——REST 面预检之外的内核权威面，
+  // 越权/禁用 → 80040 同码防探测。事件形状与 projector 产出同形（截断常量单一来源），
+  // turn 聚合与实时发布同源同序（#778 回放零差异纪律）。
+  private async executePluginToolRun(
+    cmd: RunCommand,
+    capabilities: RunCapabilities,
+    signal: AbortSignal,
+    turn: TurnReducer,
+  ): Promise<void> {
+    const surface = this.deps.plugins?.surface(capabilities.enabledPluginIds)
+    const def = surface?.tools.find((tool) => tool.name === cmd.pluginTool)
+    if (!surface || !def) throw fail(CODE.PLUGIN_NOT_FOUND)
+    const toolCallId = randomUUID()
+    const { text: inputText, truncated: inputTruncated } = truncateUtf8(JSON.stringify(cmd.pluginArgs ?? {}), TOOL_INPUT_MAX_BYTES)
+    const start = {
+      type: 'tool.start' as const,
+      payload: { toolCallId, name: def.name, input: inputText, ...(inputTruncated ? { [TRUNCATED_FLAG]: true } : {}) },
+    }
+    turn.feed(start)
+    this.publish(cmd.ownerId, start, cmd)
+    const startedAt = this.clock()
+    try {
+      const result = await def.execute(toolCallId, cmd.pluginArgs as never, { signal, ctx: this.deps.plugins!.toolContext })
+      const durationMs = Math.max(0, this.clock() - startedAt)
+      // details 数据源与 projector 同语义（R5）：artifact（渲染面）优先，缺省回落 content
+      // 序列化（模型/审计面文本不丢——结果卡可见）。
+      const detailsSource = result.details !== undefined
+        ? JSON.stringify(result.details, (_k, v: unknown) => (typeof v === 'bigint' ? v.toString() : v))
+        : contentToText(result.content)
+      const details = truncateUtf8(detailsSource, TOOL_DETAILS_MAX_BYTES)
+      const end = {
+        type: 'tool.end' as const,
+        payload: {
+          toolCallId,
+          name: def.name,
+          state: 'success' as const,
+          durationMs,
+          ...(details.text !== '' ? { details: details.text } : {}),
+          ...(details.truncated ? { [TRUNCATED_FLAG]: true } : {}),
+        },
+      }
+      turn.feed(end)
+      this.publish(cmd.ownerId, end, cmd)
+    } catch (e) {
+      const end = {
+        type: 'tool.end' as const,
+        payload: { toolCallId, name: def.name, state: 'error' as const, durationMs: Math.max(0, this.clock() - startedAt) },
+      }
+      turn.feed(end)
+      this.publish(cmd.ownerId, end, cmd)
+      throw e
+    }
+  }
+
   private async compactThread(
     cmd: RunCommand,
     agent: DeepAgentLike,
@@ -1300,21 +1406,29 @@ export class RunService {
     policy: InterruptPolicy | undefined,
     model: LeaderAgentParams['model'],
     ownerId: string,
+    sandboxSessionId: string,
     labContainer: string,
     modelKey: string,
     tools: NonNullable<LeaderAgentParams['tools']>,
     capabilities: RunCapabilities,
     journalSessionId: string,
+    pluginToolDefs: readonly AnyPluginToolDefinition[],
+    pluginPrompt: string,
   ): DeepAgentLike {
     // 双根入键：docker 实例变更（沙箱 remove/recreate、#784 wiki 容器接管后改名）时缓存图
     // 持旧 backend 会指向已删容器——backend 双根都是拓扑因子。（journaling backend 无新键
     // 成分：journal sessionId 与 labContainer 一一对应——researcher-sandbox-<journalSessionId>。）
     const official = capabilities.official
     const wikiContainer = this.deps.resolveWikiContainer(ownerId)
-    const key = `${threadId}|${configVersion}|${interruptPolicyKey(policy)}|${labContainer}|${wikiContainer}|${capabilities.key}|${modelKey}`
+    // 插件目录版本入键（#788）：启用集（capabilities.key）管「哪些插件开」，目录版本管
+    // 「开着的插件长什么样」——任一变更都触发图重建（拓扑因子 = 工具面 + prompt 面）。
+    const key = `${threadId}|${configVersion}|${interruptPolicyKey(policy)}|${labContainer}|${wikiContainer}|${capabilities.key}|${modelKey}|${this.deps.plugins?.catalogVersion ?? 'none'}`
     const cached = this.graphs.get(key)
     if (cached) return cached
-    const backend = this.deps.fileJournal
+    // #782 × #785 接缝：journaling 开启时 backendFor 产出打点装饰器（其 apply 经 putBuffer
+    // 直达原语层）——会话写围栏（fence）已提供 journaling 路径的串行保证，#785 per-path 锁
+    // 面覆盖 journaling off（直用 DockerArchiveBackend）路径。
+    const baseBackend = this.deps.fileJournal
       ? this.deps.fileJournal.backendFor({
           sessionId: journalSessionId,
           targets: { wiki: wikiContainer, lab: labContainer },
@@ -1323,6 +1437,18 @@ export class RunService {
           wiki: wikiContainer,
           lab: labContainer,
         })
+    const backend = withWriteLocks(
+      baseBackend,
+      { wiki: wikiContainer, lab: labContainer },
+      this.writeLocks,
+      () => this.writeLockContext(sandboxSessionId, threadId),
+      this.overwriteAuditor,
+    )
+    // wiki 常驻检索工具（#789 三通道①）：openwiki_search/read 进装配——模型面 schema 裁剪 +
+    // Result 永不 throw（见 wikisearch.ts 文件头）。输入因子都在缓存键内（wikiContainer 在键、
+    // primitives 进程级单例），同键必同工具面——「同参数必同拓扑」纯函数约束保持。
+    // 检索只读（getArchive 拉镜像），不经写锁面（#785 锁只覆盖 putArchive/破坏性 op）。
+    const wikiTools = createWikiRetrievalTools({ primitives: this.deps.primitives, wikiContainer })
     const agent = buildLeaderAgent({
       model,
       backend,
@@ -1330,7 +1456,13 @@ export class RunService {
       systemPrompt: LEADER_SYSTEM_PROMPT,
       official,
       interruptPolicy: policy,
-      tools,
+      tools: [...wikiTools, ...tools],
+      // 插件工具进图（#788）：LangChain 适配（zod → StructuredTool）；prompt 段并入
+      // system prompt 与 teammate subagent 继承（graphFactory 内拼接）。
+      ...(pluginToolDefs.length > 0 && this.deps.plugins
+        ? { pluginTools: toLangChainTools(pluginToolDefs, this.deps.plugins.toolContext) }
+        : {}),
+      ...(pluginPrompt !== '' ? { pluginPrompt } : {}),
       // 中间件（运行期行为非拓扑因子——不入缓存键）：#782 工具调用上下文盖印（journal 幂等键
       // ALS 源，链首位——journaling 开启恒注入）+ #783 审批漏斗 + #780 下载校验节点（file 写类
       // 工具成功后物化产物 + 下载引用进 tool 输出；跨 run 状态由各中间件 per-thread 槽管理，
@@ -1351,6 +1483,21 @@ export class RunService {
     if (this.graphs.size >= GRAPH_CACHE_MAX_INSTANCES) this.graphs.clear()
     this.graphs.set(key, agent)
     return agent
+  }
+
+  // 写锁上下文现取（#785）：图实例跨 run 缓存，holder 不可构造期固化——每次加锁时从在飞
+  // cmd 解析（activeCmds 以 threadId 为键；缺失 = 非 run 语境，label-only 兜底，清理靠
+  // try/finally 纪律）。互斥域 = 沙箱所属 parent session（teammate /lab 写落 parent 沙箱，
+  // 互斥随容器不随 thread；跨会话 wiki 锁 V1 不做——#747 230 行钉死）。
+  private writeLockContext(sandboxSessionId: string, threadId: string): WriteLockContext {
+    const cmd = this.activeCmds.get(threadId)
+    return {
+      session: sandboxSessionId,
+      threadId,
+      holder: cmd
+        ? { runId: cmd.runId, label: `run ${cmd.runId}（thread ${threadId}）` }
+        : { label: `thread ${threadId}` },
+    }
   }
 
   private async startTeammate(parent: RunCommand, teammate: TeammateSummary): Promise<void> {

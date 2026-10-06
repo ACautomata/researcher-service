@@ -1,5 +1,8 @@
-import { parseSlash } from '../officialContent/catalog'
+import { parseSlash, SYSTEM_COMMANDS } from '../officialContent/catalog'
 import type { ModelRef } from '../runner/providerRegistry'
+import { snapshotRunCapabilities } from '../runner/capabilities'
+import { mergeCommandDirectories } from '../plugins/commandResolution'
+import type { PluginRuntime } from '../plugins/surface'
 import { snapshotOfficialContent } from '../officialContent/runtime'
 // 会话域业务服务（#778 · #747 C 节会话 REST 全件）：扁平挂用户（容器维度退役）、创建/列表/
 // 改标题（story 5 自动生成+可改）、发消息（story 7 32-hex 幂等）、abort（story 8 by:user）、
@@ -116,7 +119,8 @@ export interface SessionRunGateway {
   }) => RunCommand
   /** in-flight 投影（#779 story 11）：重拉投影的补偿重建面（running 从 checkpoint 重建/queued 空 turn） */
   readonly inFlightProjection: (sessionId: string) => Promise<InFlightProjection | undefined>
-  /** teammate 级联作废（#781 缺口顺带补接线：跨派生点 teammate 随 rewind 作废停跑） */
+  /** teammate 级联作废（#781 缺口顺带接线；#786 AC4 演进：锚点祖先链判定 + 归档 + 未读留言
+   *  失效 + 停跑/事件，由 RunService 统一面完成） */
   readonly teammatesForRewind?: (sessionId: string, checkpointId: string) => Promise<void>
   /** C1 通知面（#782 拆面：作废归 teammatesForRewind、逆放前先行；本方法在 rewindFiles 后调——
    *  degradedFiles 分文案，/lab 未动时如实报「回退未完成」） */
@@ -174,6 +178,9 @@ export interface SessionServiceDeps {
       caller?: { userId: string; username: string }
     }) => Promise<FileRewindPreview>
   }
+  /** 插件运行时（#788 · #752 §2.3）：插件命令 {inject}/{execute} 在 sendMessage 命令构造点
+   *  消费（启用集 per-command 现读快照）。缺省不注 = 无插件命令源（两源合并退化为单源）。 */
+  readonly plugins?: PluginRuntime
 }
 
 // 恢复菜单三态 REWIND_SCOPES/RewindScope 单点在 ./values（zod schema 同源派生）。
@@ -375,15 +382,37 @@ export class SessionService {
     // 接受」后锁定（失败请求锁死幂等键 = story 7 语义反转：重发恒 replay 而消息从未被处理）。
     // 官方命令展开在此处（唯一消费方 = run）：/research x → 模板正文 $ARGUMENTS 插值；非官方
     // 输入恒等返回。落行 content 列仍存原始输入（见 sendMessage 头注）。
+    // 插件命令（#788 · #752 §2.3 R4/R9）：两源合并序 = 系统含官方 > 插件（无遮蔽——注册期
+    // 校验保证不撞名）。slash 命中启用集内插件命令 → handler 产出 outcome：{inject} 以
+    // user message 注入（官方命令同形）；{execute} 直达本插件工具执行面（operation=
+    // plugin-execute，不经 agent）。启用集 per-command 现读快照（禁用即下个命令不生效）。
+    let runContent = snapshotOfficialContent().expand(p.content)
+    let pluginExecute: { tool: string; args: unknown } | undefined
+    if (slash && !(SYSTEM_COMMANDS as readonly string[]).includes(slash.name) && this.deps.plugins) {
+      const enabled = await snapshotRunCapabilities(this.deps.prisma, user.id)
+      const commandDirectory = mergeCommandDirectories({
+        official: snapshotOfficialContent().commands,
+        plugin: this.deps.plugins.surface([...enabled.enabledPluginIds]).commands,
+      })
+      const resolved = slash ? commandDirectory.get(slash.name) : undefined
+      // 官方命中 → runContent 已是展开产物（上方 expand）；插件命中 → handler outcome 覆盖
+      //（{inject} 以 user message 注入；{execute} 直达本插件工具执行面，不经 agent）。
+      if (resolved?.source === 'plugin') {
+        const outcome = await resolved.entry.command.handler(slash.args, { logger: { info: () => {}, warn: () => {} } })
+        if ('inject' in outcome) runContent = outcome.inject
+        else pluginExecute = outcome.execute
+      }
+    }
     let cmd = await this.deps.runService.buildMessageCommand({
       sessionId,
       ownerId: user.id,
       username: user.username,
-      content: snapshotOfficialContent().expand(p.content),
+      content: runContent,
       attachmentIds: p.attachmentIds,
     })
 
     if (slash?.name === 'compact') cmd = { ...cmd, operation: 'compact' }
+    else if (pluginExecute) cmd = { ...cmd, operation: 'plugin-execute', pluginTool: pluginExecute.tool, pluginArgs: pluginExecute.args }
 
     // rewind 残留清理（#781 story 16）：rewind 态（指针非空）时，锚点之后的残留行归档（#770
     // 软删）——落新 user 行前清场，防「失败轮 + 重开轮」双 user 并列投影。指针在清理函数内
@@ -807,6 +836,8 @@ export class SessionService {
   // export→import，含墓碑目录；源已删 → 空起步 + 系统消息）+ file_journal 切点截断继承
   //（seq 保留原值接续）+ attachments 行全量复制（#768 D7 字面；attachmentId 不改，messageId
   // 挂靠复制行映射新 id、其余置 null——跨会话 FK 级联删除面）。
+  // teammate（#786 定案）：不跟随——teammate 行按 parentSessionId 挂源会话（新 id 天然无
+  // teammate），源会话 teammate 原样不动；fork 是对话状态探索，teammate 属于源会话执行上下文。
   // 顺序：session 行先落（拿 id）→ 沙箱复制（Docker 成功才落数据行）→ 数据复制事务（含系统
   // 消息）；任一步失败补偿删 session 行（cascade 清子行）+ 删沙箱尽力——fork 可整体重试。
   async forkSession(

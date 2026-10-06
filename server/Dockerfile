@@ -2,12 +2,16 @@
 # 多阶段：build（npm ci 全量——编译需要 devDeps：typescript + prisma CLI）+ prebuild 钩子
 # prisma generate → tsc 产出 dist/；runtime（npm ci --omit=dev，仅生产依赖，src 全部 import
 # 已验证落在 dependencies）。容器启动经 entrypoint：先幂等落表（apply-schema.mjs + user_version
-# 标记，对齐 Django 镜像「entrypoint = migrate + daphne」模式）再起 node dist/server.js。
+# 标记，对齐 Django 镜像「entrypoint = migrate + daphne」模式）再起 node dist/server/src/server.js。
 
 # ---- build：编译 ----
 FROM node:lts-slim AS build
 
-WORKDIR /app
+# 构建布局必须复刻仓库兄弟目录形态（hotfix #788 CD）：plugins/index.ts 经跨包相对导入
+# '../server/src/plugins/api' 引契约类型（#752 R1 双面直引的固有形态，#753 的插件 manifest
+# 同理），content:build 亦按 '../official' 兄弟解析——故 server 根 = /server，official/plugins
+# 两个 named context 分别挂 /official、/plugins（与 WORKDIR 成兄弟）。
+WORKDIR /server
 # better-sqlite3 原生模块（node-gyp）在 build 阶段 npm ci 的 postinstall 编译工具链。
 RUN apt-get update \
     && apt-get install -y --no-install-recommends build-essential python3 \
@@ -22,7 +26,11 @@ COPY src ./src
 COPY prisma ./prisma
 COPY scripts ./scripts
 COPY --from=official / /official
-# prebuild 钩子 = prisma generate；build = tsc -p tsconfig.build.json + cp src/generated dist/generated。
+# 插件目录（#788 · #752 R1 根级 plugins/ 源直引）：server src 编译期 import，
+# 经 buildx named context 注入（dev compose additional_contexts / cd.yml build-contexts 同名）。
+COPY --from=plugins / /plugins
+# prebuild 钩子 = prisma generate；build = tsc -p tsconfig.build.json（rootDir=仓库根，产物
+# dist/server/src/ + dist/plugins/）+ cp src/generated dist/server/src/generated。
 RUN npm run build
 
 # ---- runtime：精简运行镜像 ----
@@ -41,12 +49,13 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 
-# 编译产物 + prisma generate 生成物（tsc 已编译进 dist/generated，显式双拷贝保证完整；
-# client 纯 JS，体积可忽略）。schema/scripts 供 entrypoint 幂等落表。
-COPY --from=build /app/dist ./dist
-COPY --from=build /app/src/generated ./src/generated
-COPY --from=build /app/prisma ./prisma
-COPY --from=build /app/scripts ./scripts
+# 编译产物 + prisma generate 生成物（tsc 编译产物树含 dist/server/src/generated，显式双拷贝
+# 保证完整；client 纯 JS，体积可忽略）。schema/scripts 供 entrypoint 幂等落表。
+# 源路径 = build 阶段 WORKDIR /server（兄弟布局 hotfix，见上）。
+COPY --from=build /server/dist ./dist
+COPY --from=build /server/src/generated ./src/generated
+COPY --from=build /server/prisma ./prisma
+COPY --from=build /server/scripts ./scripts
 
 # ADR 0013（issue #593）：home 模板与 openclaw.json 构建期入镜像——生产不再挂载任何宿主数据
 # 路径（唯一豁免 docker.sock）。两处 COPY 的源是 buildx 多 context（CD 经 build-contexts 注入：

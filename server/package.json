@@ -3,12 +3,12 @@
   "version": "0.0.0",
   "private": true,
   "description": "TS/Express 控制面（wayfinder #308 · issue #333 M0+M1）",
-  "main": "dist/server.js",
+  "main": "dist/server/src/server.js",
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "prebuild": "npm run content:build && prisma generate",
-    "build": "tsc -p tsconfig.build.json && rm -rf dist/generated && cp -R src/generated dist/generated",
-    "start": "node dist/server.js",
+    "build": "tsc -p tsconfig.build.json && rm -rf dist/server/src/generated && cp -R src/generated dist/server/src/generated",
+    "start": "node dist/server/src/server.js",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -41,6 +41,7 @@
     "langchain": "~1.5.14",
     "micromatch": "^4.0.8",
     "multer": "^2.4.0",
+    "openwiki": "~0.6.1",
     "shell-quote": "^1.8.3",
     "swagger-ui-express": "^5.0.1",
     "ws": "^8.18.0",
@@ -66,5 +67,8 @@
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
     "vitest": "^2.1.8"
+  },
+  "engines": {
+    "node": ">=22.22"
   }
 }

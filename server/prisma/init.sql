@@ -176,17 +176,17 @@ CREATE TABLE "teammate_mailbox_messages" (
     CONSTRAINT "teammate_mailbox_messages_senderTeammateId_fkey" FOREIGN KEY ("senderTeammateId") REFERENCES "teammates" ("id") ON DELETE SET NULL ON UPDATE CASCADE
 );
 
+-- CreateTable
 CREATE TABLE "teammate_mailbox_waits" (
     "waitId" TEXT NOT NULL PRIMARY KEY,
     "parentSessionId" TEXT NOT NULL,
-    "threadId" TEXT NOT NULL UNIQUE,
+    "threadId" TEXT NOT NULL,
     "recipientTeammateId" TEXT,
     "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT "teammate_mailbox_waits_parentSessionId_fkey" FOREIGN KEY ("parentSessionId") REFERENCES "sessions" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
     CONSTRAINT "teammate_mailbox_waits_threadId_fkey" FOREIGN KEY ("threadId") REFERENCES "sessions" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
     CONSTRAINT "teammate_mailbox_waits_recipientTeammateId_fkey" FOREIGN KEY ("recipientTeammateId") REFERENCES "teammates" ("id") ON DELETE CASCADE ON UPDATE CASCADE
 );
-CREATE INDEX "teammate_mailbox_waits_parentSessionId_recipientTeammateId_idx" ON "teammate_mailbox_waits"("parentSessionId", "recipientTeammateId");
 
 -- CreateTable
 CREATE TABLE "session_messages" (
@@ -345,6 +345,17 @@ CREATE TABLE "file_journal" (
     CONSTRAINT "file_journal_sessionId_fkey" FOREIGN KEY ("sessionId") REFERENCES "sessions" ("id") ON DELETE CASCADE ON UPDATE CASCADE
 );
 
+-- CreateTable
+CREATE TABLE "file_overwrite_logs" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "sessionId" TEXT NOT NULL,
+    "path" TEXT NOT NULL,
+    "overwriterThreadId" TEXT NOT NULL,
+    "overwrittenThreadId" TEXT NOT NULL,
+    "runId" TEXT NOT NULL,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 -- CreateIndex
 CREATE UNIQUE INDEX "users_username_key" ON "users"("username");
 
@@ -401,11 +412,27 @@ CREATE UNIQUE INDEX "generation_jobs_figureId_key" ON "generation_jobs"("figureI
 
 -- CreateIndex
 CREATE INDEX "sessions_ownerId_idx" ON "sessions"("ownerId");
+
+-- CreateIndex
 CREATE UNIQUE INDEX "teammates_threadId_key" ON "teammates"("threadId");
-CREATE UNIQUE INDEX "teammates_parentSessionId_name_key" ON "teammates"("parentSessionId", "name");
+
+-- CreateIndex
 CREATE INDEX "teammates_parentSessionId_status_idx" ON "teammates"("parentSessionId", "status");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "teammates_parentSessionId_name_key" ON "teammates"("parentSessionId", "name");
+
+-- CreateIndex
 CREATE INDEX "teammate_mailbox_messages_parentSessionId_recipientTeammateId_createdAt_idx" ON "teammate_mailbox_messages"("parentSessionId", "recipientTeammateId", "createdAt");
+
+-- CreateIndex
 CREATE INDEX "teammate_mailbox_messages_recipientTeammateId_readAt_invalidatedAt_idx" ON "teammate_mailbox_messages"("recipientTeammateId", "readAt", "invalidatedAt");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "teammate_mailbox_waits_threadId_key" ON "teammate_mailbox_waits"("threadId");
+
+-- CreateIndex
+CREATE INDEX "teammate_mailbox_waits_parentSessionId_recipientTeammateId_idx" ON "teammate_mailbox_waits"("parentSessionId", "recipientTeammateId");
 
 -- CreateIndex
 CREATE INDEX "session_messages_sessionId_turn_idx" ON "session_messages"("sessionId", "turn");
@@ -451,3 +478,10 @@ CREATE UNIQUE INDEX "file_journal_sessionId_seq_key" ON "file_journal"("sessionI
 
 -- CreateIndex
 CREATE UNIQUE INDEX "file_journal_sessionId_toolCallId_key" ON "file_journal"("sessionId", "toolCallId");
+
+-- CreateIndex
+CREATE INDEX "file_overwrite_logs_sessionId_path_idx" ON "file_overwrite_logs"("sessionId", "path");
+
+-- CreateIndex
+CREATE INDEX "file_overwrite_logs_createdAt_idx" ON "file_overwrite_logs"("createdAt");
+

@@ -42,7 +42,6 @@ export function buildOpenApiDocument() {
         '## 不在本文档',
         '',
         '- 对话 WS 走 `/ws/chat/` 网关隧道（JWT subprotocol 握手 + 原始帧透传，ADR 0006 浏览器直连），OpenAPI 3.1 不覆盖 WS。',
-        '- plugins 域（#758 方向修订的插件系统）尚未实施，实施后收录。',
       ].join('\n'),
     },
     servers: [{ url: '/' }],

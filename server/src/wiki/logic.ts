@@ -3,6 +3,8 @@
 // 组合进 WikiService（service.ts）；单测注入 fake FS 直测，不需真实磁盘。
 // 按 #315 §3 命名建议用小型不可组合对象，勿套类层级。
 
+import { createHash } from 'node:crypto'
+
 import { CATEGORY_RE, EXCERPT_LEN, H1_RE, H2_RE, WIKILINK_RE } from './values'
 
 // 字典序比较（对齐 Python 的 Unicode code-point 序）。
@@ -141,6 +143,147 @@ export function wikilinkTargets(body: string): string[] {
     out.push(m[1].split('|')[0].trim())
   }
   return out
+}
+
+// OKF 页间关系是 markdown 相对链接 `[text](../dir/page.md)`，不是 `[[wikilink]]`（#725 §三：
+// 现有 graph 派生只认 wikilink → OKF wiki 是空图）。提取规则（V1）：只收 .md 结尾的相对目标
+// ——剥 `#` 片段、`"title"` 后缀与 `./` 前缀；scheme（http:/mailto: 等）、根绝对（/ 开头）、
+// 空/纯锚目标不收；图片 `![]()` 因非 .md 自然排除。目标解析与 ghost 复用 WikilinkResolver
+// 现有机制（stem/title 已有；不可解析 → ghost，obsidian 死链语义同构，story 43）。
+const MD_LINK_RE = /\[[^\]]*\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g
+
+export function markdownLinkTargets(body: string): string[] {
+  const out: string[] = []
+  for (const m of body.matchAll(MD_LINK_RE)) {
+    let target = m[1]
+    if (target.startsWith('<') && target.endsWith('>')) target = target.slice(1, -1)
+    const hash = target.indexOf('#')
+    if (hash >= 0) target = target.slice(0, hash)
+    if (target.startsWith('./')) target = target.slice(2)
+    if (target === '' || !target.endsWith('.md')) continue
+    if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(target)) continue
+    if (target.startsWith('/')) continue
+    out.push(target)
+  }
+  return out
+}
+
+// OKF 徽章字段（story 41 数据面）：front matter 的 status / stale_after / generated.at。
+// 简易 FrontmatterParser 不解析行内 flow mapping（`generated: {by, at}` 成字符串且嵌套列表
+// 跳过，#725 §三判定「无需动」），OKF 字段专用提取在此单点实现；块界定沿用同款
+// `content.find('---', 3)` 歧义语义（logic.ts 头注：逐字保留，勿修正）。
+export interface OkfBadge {
+  status?: string
+  staleAfter?: string
+  generatedAt?: string
+}
+
+const OKF_GENERATED_AT_RE = /\bat:\s*"?([^",}]+)"?/
+
+function frontmatterBlock(content: string): string | null {
+  if (!content.startsWith('---')) return null
+  const end = content.indexOf('---', 3)
+  if (end < 0) return null
+  return content.slice(3, end)
+}
+
+export function okfBadge(content: string): OkfBadge | undefined {
+  const block = frontmatterBlock(content)
+  if (block === null) return undefined
+  const badge: OkfBadge = {}
+  for (const rawLine of block.split('\n')) {
+    const line = rawLine.trimEnd()
+    const status = /^status:\s*(.+)$/.exec(line)
+    if (status) {
+      badge.status = stripQuotes(status[1].trim())
+      continue
+    }
+    const staleAfter = /^stale_after:\s*(.+)$/.exec(line)
+    if (staleAfter) {
+      badge.staleAfter = stripQuotes(staleAfter[1].trim())
+      continue
+    }
+    // generated 的 at 在行内 flow mapping 里（`{by: x, at: ...}`），整行取值段再提 at
+    const generated = /^generated:\s*(.+)$/.exec(line)
+    if (generated) {
+      const at = OKF_GENERATED_AT_RE.exec(generated[1])
+      if (at) badge.generatedAt = stripQuotes(at[1].trim())
+    }
+  }
+  return Object.keys(badge).length > 0 ? badge : undefined
+}
+
+// .claims 旁车与页面目录结构镜像、同名 .json（#725 §二）：`concepts/a.md` → `.claims/concepts/a.json`。
+export function claimsSidecarPath(page: string): string {
+  const slash = page.lastIndexOf('/')
+  const dir = slash < 0 ? '' : page.slice(0, slash)
+  const base = slash < 0 ? page : page.slice(slash + 1)
+  const stem = base.endsWith('.md') ? base.slice(0, -3) : base
+  return dir === '' ? `.claims/${stem}.json` : `.claims/${dir}/${stem}.json`
+}
+
+// claims 旁车结构化提取（#725 §二确切结构；lenient——畸形条目跳过不炸，消费面是只读展示）。
+export interface WikiClaimEvidence {
+  resource: string
+  version?: string
+}
+export interface WikiClaim {
+  id: string
+  statement: string
+  evidence: WikiClaimEvidence[]
+}
+export interface ParsedClaimsSidecar {
+  schemaVersion: number | null
+  pageVersion: string | null
+  claims: WikiClaim[]
+}
+
+export function parseClaimsSidecar(raw: string): ParsedClaimsSidecar | null {
+  let doc: unknown
+  try {
+    doc = JSON.parse(raw)
+  } catch {
+    return null
+  }
+  if (typeof doc !== 'object' || doc === null) return null
+  const o = doc as Record<string, unknown>
+  const claims: WikiClaim[] = []
+  if (Array.isArray(o.claims)) {
+    for (const c of o.claims) {
+      if (typeof c !== 'object' || c === null) continue
+      const co = c as Record<string, unknown>
+      if (typeof co.statement !== 'string') continue
+      const evidence: WikiClaimEvidence[] = []
+      if (Array.isArray(co.evidence)) {
+        for (const ev of co.evidence) {
+          if (typeof ev !== 'object' || ev === null) continue
+          const evo = ev as Record<string, unknown>
+          if (typeof evo.resource !== 'string') continue
+          evidence.push(
+            typeof evo.version === 'string'
+              ? { resource: evo.resource, version: evo.version }
+              : { resource: evo.resource },
+          )
+        }
+      }
+      claims.push({ id: typeof co.id === 'string' ? co.id : '', statement: co.statement, evidence })
+    }
+  }
+  return {
+    schemaVersion: typeof o.schemaVersion === 'number' ? o.schemaVersion : null,
+    pageVersion: typeof o.pageVersion === 'string' ? o.pageVersion : null,
+    claims,
+  }
+}
+
+// 页级漂移（story 42 数据面）：openwiki 的 pageVersion = 页文件字节的 sha256
+//（`sha256:<hex>`，openwiki claims store hashPage 同源），与当前页内容 utf8 重编码后比对。
+// 旁车缺失 / 无 pageVersion / 非 sha256: 形态 → null（前端「无证据面板」语义）。
+// repo:// 源文件的 evidence 漂移语义（725 §五-4）归后续票定稿，V1 数据面不解析。
+export function claimsDrift(pageVersion: string | null, content: string): 'fresh' | 'drifted' | null {
+  if (pageVersion === null || !pageVersion.startsWith('sha256:')) return null
+  const current = createHash('sha256').update(Buffer.from(content, 'utf8')).digest('hex')
+  return pageVersion.slice('sha256:'.length) === current ? 'fresh' : 'drifted'
 }
 
 // 页面标题 frontmatter 取值（Django `fm.get('paper.title') or fm.get('title')` or 链）。

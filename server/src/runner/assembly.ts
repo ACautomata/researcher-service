@@ -24,18 +24,29 @@ import { createPrismaApprovalAuditSink } from './approval/audit'
 import { ToolCallJudgeClient } from './approval/judge'
 import { ApprovalFunnel, type ApprovalFunnelDeps } from './approval/funnel'
 import { JUDGE_POLICY_MARKDOWN } from './approval/values'
+import { WriteLockRegistry } from './writelock/registry'
+import { withLockedPuts } from './writelock/lockedBackend'
 import { TeammateService } from './teammates/service'
 import { FileJournalService } from './filejournal/service'
+import { TEAMMATE_TOOL_NAMES } from './teammates/tools'
+import { FILE_TOOLS, EXEC_TOOLS } from './approval/values'
+import { PLUGIN_MANIFESTS } from '../../../plugins/index'
+import { assertPluginEnv, assertValidPluginCatalog } from '../plugins/registry'
+import { createPluginRuntime, resolvePluginConfig, type PluginRuntime } from '../plugins/surface'
+import { SYSTEM_COMMANDS } from '../officialContent/catalog'
+import { snapshotOfficialContent } from '../officialContent/runtime'
 
 export interface RunnerAssembly {
   readonly service: RunService
   readonly queue: BullMqRunQueue
   /** 文件 rewind 机制（#782）：SessionService fileRewind 面与启动 reconcile 的共用单例 */
   readonly fileJournal: FileJournalService
+  /** 插件运行时（#788）：SessionService 命令构造点消费（{inject}/{execute} outcome 面） */
+  readonly plugins: PluginRuntime
   close: () => Promise<void>
 }
 
-export function assembleRunner(opts: {
+export async function assembleRunner(opts: {
   prisma: PrismaClient
   hub: StreamHub
   redisUrl: string
@@ -51,7 +62,9 @@ export function assembleRunner(opts: {
   attachments?: NonNullable<RunServiceDeps['attachments']>
   /** #782 沙箱 ensure 解析（rewindFiles 前置；server.ts 注入 sandboxes.lifecycle.ensure） */
   ensureSandbox?: (sessionId: string) => Promise<{ containerId: string }>
-}): RunnerAssembly {
+  /** 插件运行时（#788；测试注入覆盖缺省目录装配——V1 目录为空时缺省装配即 no-op 面） */
+  plugins?: PluginRuntime
+}): Promise<RunnerAssembly> {
   // tracing 显式关（启动期第一路；RunService 构造期第二路兜底）
   disableLangsmithTracing()
   // LangGraph abortPromise 泄漏守门（用户 abort run 的进程级 crash 面，见 abortGuard.ts）
@@ -72,6 +85,28 @@ export function assembleRunner(opts: {
   })
   const primitives = new DockerPrimitives()
   const teammates = new TeammateService(opts.prisma)
+  // 插件运行时（#788 · #752）：启动期强校验（fail-fast——R2/R7 编译期信任下无「装了一半」）
+  // + 全目录 env 完备性（R7 不看启用位：任何用户随时可启用 = 面板必须永远备好）。校验注
+  // opts.plugins 缺省路径只跑——测试注入自备 runtime 时不重复校验。
+  const plugins = opts.plugins ?? await (async () => {
+    await assertValidPluginCatalog({
+      manifests: PLUGIN_MANIFESTS,
+      coreToolNames: [...FILE_TOOLS, ...EXEC_TOOLS, 'task', 'read_official_skill', ...TEAMMATE_TOOL_NAMES],
+      reservedCommandNames: [...SYSTEM_COMMANDS, ...snapshotOfficialContent().commands.map((c) => c.name)],
+    })
+    assertPluginEnv(PLUGIN_MANIFESTS, {
+      env: process.env,
+      production: process.env.NODE_ENV === 'production',
+      warn: (message) => {
+        // eslint-disable-next-line no-console
+        console.warn(`[plugins] ${message}`)
+      },
+    })
+    return createPluginRuntime({ manifests: PLUGIN_MANIFESTS, config: resolvePluginConfig(PLUGIN_MANIFESTS, process.env) })
+  })()
+  // #785 per-path 写锁（互斥域 = 沙箱所属 parent session；有界等待超时 → agent 报错含
+  // path 与持有者。覆盖 ingestion/校验节点 putArchive 写面——下方下载节点闭包内包装）。
+  const writeLocks = new WriteLockRegistry({ timeoutMs: config.runner.writeLockTimeoutMs })
 
   // 文件 rewind 机制（#782 · D8）：JournalingBackend 打点接缝 + ingestion/D9 物化打点 +
   // rewind 逆放 + reconcile。journal sessionId 归属 parent（teammate 写共享 session-global
@@ -115,7 +150,14 @@ export function assembleRunner(opts: {
             declaredPath: p.declaredPath,
             mime: p.mime,
             container: p.container,
-            primitives,
+            // 校验节点物化写面入锁（#785）：互斥域 = 解析后的 parent session；
+            // runId 在此闭包不可得（label-only holder）→ 不接覆盖审计（detect 无 run
+            // 归属恒不落行）；清理靠 materialize 内 try/finally 纪律。
+            primitives: withLockedPuts(primitives, writeLocks, () => ({
+              session: sessionId,
+              threadId: p.sessionId,
+              holder: { label: `thread ${p.sessionId}` },
+            })),
           })
         },
         resolveContainer: async (threadId) => {
@@ -139,6 +181,9 @@ export function assembleRunner(opts: {
   const funnel = new ApprovalFunnel({
     judge,
     audit: createPrismaApprovalAuditSink(opts.prisma),
+    // 插件 category 路由（#788 · §3）：domain 短路不进漏斗；file 类以声明 pathParams 过
+    // 路径白名单；exec 类过命令黑名单——与核心工具同一闸门，无平行审批路径。
+    pluginToolSpecs: (name) => plugins.toolSpecByName.get(name),
   })
 
   const service = new RunService({
@@ -157,9 +202,11 @@ export function assembleRunner(opts: {
     approvals: funnel,
     teammates,
     approvalTimeoutMs: config.runner.approvalTimeoutMs,
+    writeLocks,
     attachments: opts.attachments,
     downloadNode,
     fileJournal,
+    plugins,
   })
   void service.recoverSuspensions() // 重启恢复：超时未落定的审批升级 → suspended（异步，不挂启动）
 
@@ -178,6 +225,7 @@ export function assembleRunner(opts: {
     service,
     queue,
     fileJournal,
+    plugins,
     close: async () => {
       service.dispose()
       await queue.close()

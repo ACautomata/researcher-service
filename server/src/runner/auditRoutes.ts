@@ -4,6 +4,10 @@
 //   过滤 userId / runId / layer(rule|judge|human) / decision(allow|deny) / from / to(ISO)，
 //   分页 page/pageSize（pageSize ≤ 200）；createdAt 降序。
 //
+// GET /api/v1/file-overwrite-logs（#785 · #747 E 节锁方案「合法覆盖审计计数进审计域」）：
+//   同款 admin 审计面（file_overwrite_logs）；过滤 sessionId / path / from / to + 分页；
+//   行 = 一次 write-after-write 覆盖（path/覆盖者 thread/被覆盖者 thread/触发 run）。
+//
 // 中间件与 traceLogs 同款：requireAuth → mustChangePasswordGate → admin 门（非 admin → 10004
 // ——面板级运营资源无存在性敏感面，直用角色码）。终端用户可见面（judge 理由对本人可见）
 // 属会话读面（#778 投影），不在本路由。
@@ -154,6 +158,108 @@ approvalLogsRouter.get('/', async (req: Request, res: Response, next: NextFuncti
       runId: textParam(req.query.runId),
       layer: layerParam(req.query.layer),
       decision: decisionParam(req.query.decision),
+      from: dateParam(req.query.from),
+      to: dateParam(req.query.to),
+      ...pagingParams(req),
+    })
+    ok(res, data)
+  } catch (e) {
+    next(e)
+  }
+})
+
+// ---------------------------------------------------------------------------
+// #785 覆盖审计检索（file_overwrite_logs）：admin 全量审计面，同款 admin 门 + 分页。
+// ---------------------------------------------------------------------------
+
+export const fileOverwriteLogsRouter = Router()
+
+fileOverwriteLogsRouter.use(requireAuth, mustChangePasswordGate)
+
+fileOverwriteLogsRouter.use((req: Request, _res: Response, next: NextFunction) => {
+  if (req.user?.role !== 'admin') {
+    // eslint-disable-next-line no-console
+    console.warn(`[file-overwrite-logs] denied: non-admin uid=${req.user?.id} path=${req.baseUrl}${req.path}`)
+    return next(fail(CODE.FORBIDDEN))
+  }
+  next()
+})
+
+export interface FileOverwriteLogQuery {
+  readonly sessionId?: string
+  readonly path?: string
+  readonly from?: Date
+  readonly to?: Date
+  readonly page: number
+  readonly pageSize: number
+}
+
+export async function listFileOverwriteLogs(
+  prisma: {
+    fileOverwriteLog: {
+      count(args: { where: Prisma.FileOverwriteLogWhereInput }): Promise<number>
+      findMany(args: {
+        where: Prisma.FileOverwriteLogWhereInput
+        orderBy: Prisma.FileOverwriteLogOrderByWithRelationInput[]
+        take: number
+        skip: number
+      }): Promise<
+        Array<{
+          id: string
+          sessionId: string
+          path: string
+          overwriterThreadId: string
+          overwrittenThreadId: string
+          runId: string
+          createdAt: Date
+        }>
+      >
+    }
+  },
+  query: FileOverwriteLogQuery,
+): Promise<{ total: number; page: number; pageSize: number; items: unknown[] }> {
+  const where: Prisma.FileOverwriteLogWhereInput = {
+    ...(query.sessionId !== undefined ? { sessionId: query.sessionId } : {}),
+    ...(query.path !== undefined ? { path: query.path } : {}),
+    ...(query.from !== undefined || query.to !== undefined
+      ? {
+          createdAt: {
+            ...(query.from !== undefined ? { gte: query.from } : {}),
+            ...(query.to !== undefined ? { lt: query.to } : {}),
+          },
+        }
+      : {}),
+  }
+  const [total, rows] = await Promise.all([
+    prisma.fileOverwriteLog.count({ where }),
+    prisma.fileOverwriteLog.findMany({
+      where,
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      take: query.pageSize,
+      skip: (query.page - 1) * query.pageSize,
+    }),
+  ])
+  return {
+    total,
+    page: query.page,
+    pageSize: query.pageSize,
+    items: rows.map((r) => ({
+      id: r.id,
+      session_id: r.sessionId,
+      path: r.path,
+      overwriter_thread_id: r.overwriterThreadId,
+      overwritten_thread_id: r.overwrittenThreadId,
+      run_id: r.runId,
+      created_at: r.createdAt,
+    })),
+  }
+}
+
+fileOverwriteLogsRouter.get('/', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const data = await listFileOverwriteLogs(req.prisma, {
+      sessionId: textParam(req.query.sessionId),
+      path: textParam(req.query.path),
       from: dateParam(req.query.from),
       to: dateParam(req.query.to),
       ...pagingParams(req),

@@ -175,6 +175,7 @@ jobs:
             template=${{ github.workspace }}/_templates/researcher
             deploy=${{ github.workspace }}/deploy
             official=${{ github.workspace }}/official
+            plugins=${{ github.workspace }}/plugins
           push: true
           tags: |
             ${{ env.SERVER_IMAGE }}:latest

@@ -243,3 +243,28 @@ describe('DockerWikiFileSystem 写侧（委托 FileArchive 显式容器名方法
     expect(archive.calls).toEqual([]) // 前置拦截，不触达 archive
   })
 })
+
+describe('DockerWikiFileSystem.readClaimsFile（#789 claims 只读面）', () => {
+  const sidecar = JSON.stringify({ schemaVersion: 1, pageVersion: 'sha256:x', claims: [] })
+
+  it('页路径映射 .claims 镜像同名 .json 读取；缺失（null/dir/link）→ null', async () => {
+    const seen: string[] = []
+    const fs = makeDocker({
+      probeFile: async (rel) => {
+        seen.push(rel)
+        if (rel === '.claims/concepts/a.json') return { kind: 'file', data: enc(sidecar) }
+        return null
+      },
+    })
+    expect(await fs.readClaimsFile('concepts/a.md')).toBe(sidecar)
+    expect(seen).toEqual(['.claims/concepts/a.json'])
+    expect(await fs.readClaimsFile('concepts/none.md')).toBeNull()
+  })
+
+  it('旁车非 UTF-8 → null（「无旁车」语义，不放大为读失败）', async () => {
+    const fs = makeDocker({
+      probeFile: async () => ({ kind: 'file', data: Buffer.from([0xff, 0xfe, 0x00]) }),
+    })
+    expect(await fs.readClaimsFile('concepts/a.md')).toBeNull()
+  })
+})
