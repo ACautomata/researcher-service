@@ -66,10 +66,11 @@ export function assertFigureContext(ctx: PluginToolContext): FigureToolContext {
 
 // ---------------------------------------------------------------------------
 // 面板级配置（ctx.config = configSchema 声明键的解析值；#744 §6 凭证纪律：env 注入、
-// 不落盘、不入日志、不进事件载荷/产物）
+// 不落盘、不入日志、不进事件载荷/产物）。导出——出现在导出接口 FigureExecuteDeps/
+// buildComputePorts 签名中（外部结构推导面）。
 // ---------------------------------------------------------------------------
 
-interface AutofigureRuntimeConfig {
+export interface AutofigureRuntimeConfig {
   readonly imageModel: string
   readonly imageApiKey: string
   readonly imageBaseUrl: string | undefined
@@ -143,7 +144,6 @@ function mergeUsage(list: readonly PluginToolUsage[]): PluginToolUsage | undefin
   let totalTokens = 0
   let seen = false
   for (const u of list) {
-    if (!u) continue
     seen = true
     inputTokens += u.inputTokens ?? 0
     outputTokens += u.outputTokens ?? 0
@@ -165,8 +165,10 @@ export interface FigureResultDetails {
 }
 
 // compute 注入缝（S3 测试面）：缺省 = 生产适配器组装。manifest 引用不传——签名兼容。
+// 签名类型 typeof 单源（Duplicated Code 收口：与 buildComputePorts 字面同三元组是
+// 第 4 轮发现，声明位置在其后故 typeof 可引）。
 export interface FigureExecuteDeps {
-  readonly compute?: (config: AutofigureRuntimeConfig, ctx: FigureToolContext, usage: PluginToolUsage[]) => FigureComputePorts
+  readonly compute?: typeof buildComputePorts
 }
 
 export async function executeFigureGenerate(
