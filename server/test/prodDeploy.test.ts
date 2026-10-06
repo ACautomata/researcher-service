@@ -88,6 +88,13 @@ describe('server 镜像构建期入模板（issue #593，ADR 0013）', () => {
     expect(runtime).toMatch(/COPY --from=template/)
     expect(runtime).toMatch(/COPY --from=deploy/)
   })
+
+  it('runtime 层安装 git（issue #790：openwiki 生成生命周期硬依赖 git——落地镜像 git init/源指纹；宿主 CI 直跑 npm test 有 git 必绿、容器内每个 wiki 更新 run 必坏的 gap 只能靠部署契约测试钉住）', () => {
+    const runtimeStart = df.lastIndexOf('FROM node:lts-slim')
+    const entrypointIdx = df.indexOf('COPY docker-entrypoint.sh')
+    const runtime = df.slice(runtimeStart, entrypointIdx)
+    expect(runtime).toMatch(/apt-get install[^\n]*\bgit\b/)
+  })
 })
 
 describe('CD 工作流（issue #593，ADR 0013）', () => {
