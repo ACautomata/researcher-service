@@ -185,6 +185,20 @@ describe('审批三层漏斗（S1，#783 · 729 规格）', () => {
     expect(row?.latencyMs).toBeNull()
   })
 
+  it('wiki 常驻检索归文件类（#789 开放点 5 首验）：openwiki_search 规则层放行，零 judge 不进灰区', async () => {
+    const { svc, judgeCalls } = makeService({
+      script: [
+        toolCallAi('c-w', 'openwiki_search', { query: '自注意力' }),
+        new AIMessage({ content: '检索到了。' }),
+      ],
+    })
+    await svc.execute(cmd())
+    expect(hub.types()[hub.types().length - 1]).toBe('run.completed')
+    expect(judgeCalls).toHaveLength(0) // 文件类 + 无路径参数 → 规则层确定性放行，零 LLM
+    const row = await prisma.toolApprovalLog.findFirst({ where: { layer: 'rule', decision: 'allow', toolName: 'openwiki_search' } })
+    expect(row).toMatchObject({ reason: 'path_whitelist' })
+  })
+
   it('黑名单即时红显：rm -rf / → tool.end{error, rejection:blacklist}，零 judge 不升级（story 31）', async () => {
     const { svc, fs, judgeCalls } = makeService({
       script: [

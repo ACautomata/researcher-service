@@ -148,5 +148,18 @@ export function createWikiRouter(deps: WikiRouterDeps = {}): Router {
     ok(res, await serviceFor(inst).listCategories())
   })
 
+  // GET /:name/wiki/claims?path= —— 页 claims 旁车只读面（#789 story 42 数据面：论断 →
+  // 源文件行锚 evidence + 页级漂移状态）。页缺失 → 30040（与 page GET 同码）；旁车缺失/
+  // 畸形 → 200 + drift null + 空 claims（「无证据面板」语义，不报错）。
+  router.get('/:name/wiki/claims', async (req: Request, res: Response) => {
+    const inst = await resolveInstance(req, req.params.name)
+    const relPath = requireRelPath(req.query.path)
+    try {
+      ok(res, await serviceFor(inst).readClaims(relPath))
+    } catch (err) {
+      assertPageOpError(err)
+    }
+  })
+
   return router
 }

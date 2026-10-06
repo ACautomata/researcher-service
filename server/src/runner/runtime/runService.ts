@@ -76,6 +76,7 @@ import { turnFromCheckpointMessages } from './checkpointTurn'
 import { TurnReducer, isEmptyTurnSnapshot, type RecordTurnPayload, type TurnSnapshot } from '../../sessions/reducer'
 import { TeammateService, type TeammateSummary } from '../teammates/service'
 import { createTeammateTools } from '../teammates/tools'
+import { createWikiRetrievalTools } from '../wikisearch'
 
 // recordTurn 注入缝（#778）：run 终态（completed/interrupted/aborted/failed 任一）的单 turn
 // 聚合落库回调。anchorCheckpointId = 终态 checkpoint 锚点（issue 点名列；aborted/failed 路径
@@ -1374,6 +1375,11 @@ export class RunService {
       () => this.writeLockContext(sandboxSessionId, threadId),
       this.overwriteAuditor,
     )
+    // wiki 常驻检索工具（#789 三通道①）：openwiki_search/read 进装配——模型面 schema 裁剪 +
+    // Result 永不 throw（见 wikisearch.ts 文件头）。输入因子都在缓存键内（wikiContainer 在键、
+    // primitives 进程级单例），同键必同工具面——「同参数必同拓扑」纯函数约束保持。
+    // 检索只读（getArchive 拉镜像），不经写锁面（#785 锁只覆盖 putArchive/破坏性 op）。
+    const wikiTools = createWikiRetrievalTools({ primitives: this.deps.primitives, wikiContainer })
     const agent = buildLeaderAgent({
       model,
       backend,
@@ -1381,7 +1387,7 @@ export class RunService {
       systemPrompt: LEADER_SYSTEM_PROMPT,
       official,
       interruptPolicy: policy,
-      tools,
+      tools: [...wikiTools, ...tools],
       // 插件工具进图（#788）：LangChain 适配（zod → StructuredTool）；prompt 段并入
       // system prompt 与 teammate subagent 继承（graphFactory 内拼接）。
       ...(pluginToolDefs.length > 0 && this.deps.plugins
