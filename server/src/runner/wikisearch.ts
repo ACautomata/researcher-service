@@ -41,6 +41,8 @@ import { MAX_COLLECT_BYTES } from './backend/values'
 import type { SandboxFilePrimitives } from './backend/primitives'
 
 // ---- 结构化 Result（#737 工具返回形状） ----
+// error.code 增 'conflict'（#790 通道③：openwiki 生命周期 base-hash 冲突经 HostIntegrationError
+// 冒泡——冲突中止不静默覆盖的 agent 可读回喂面）。
 
 export interface WikiToolOk {
   ok: true
@@ -48,7 +50,7 @@ export interface WikiToolOk {
 }
 export interface WikiToolError {
   ok: false
-  error: { code: 'invalid_input' | 'invalid_state' | 'internal'; message: string; hint?: string }
+  error: { code: 'invalid_input' | 'invalid_state' | 'conflict' | 'internal'; message: string; hint?: string }
 }
 export type WikiToolResult = WikiToolOk | WikiToolError
 

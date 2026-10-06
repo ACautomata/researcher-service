@@ -39,6 +39,9 @@ import { snapshotOfficialContent } from '../officialContent/runtime'
 export interface RunnerAssembly {
   readonly service: RunService
   readonly queue: BullMqRunQueue
+  /** #790 通道③独立 run 的装配复用面（WikiUpdateRunService 共享同一 registry/primitives） */
+  readonly registry: ProviderRegistry
+  readonly primitives: DockerPrimitives
   /** 文件 rewind 机制（#782）：SessionService fileRewind 面与启动 reconcile 的共用单例 */
   readonly fileJournal: FileJournalService
   /** 插件运行时（#788）：SessionService 命令构造点消费（{inject}/{execute} outcome 面） */
@@ -224,6 +227,8 @@ export async function assembleRunner(opts: {
   return {
     service,
     queue,
+    registry,
+    primitives,
     fileJournal,
     plugins,
     close: async () => {

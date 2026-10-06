@@ -8,7 +8,7 @@
 //     T0 清退（#801），检测到旧形状只告警。
 //   - DDL 与 prisma/init.sql 逐字节同源（镜像其 CREATE 形状），init.sql 由
 //     prisma migrate diff 从 schema.prisma 派生 —— 单一来源，此处镜像。
-export const SCHEMA_VERSION = 12
+export const SCHEMA_VERSION = 13
 
 export function runIncrementalSchema(db) {
   const hasSessions = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='sessions'").get()
@@ -170,6 +170,7 @@ CREATE TABLE IF NOT EXISTS "teammates" (
     "name" TEXT NOT NULL,
     "task" TEXT NOT NULL,
     "status" TEXT NOT NULL DEFAULT 'requested',
+    "kind" TEXT NOT NULL DEFAULT 'generic',
     "modelProviderId" TEXT,
     "spawnedAtCheckpointId" TEXT,
     "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -341,6 +342,18 @@ CREATE UNIQUE INDEX IF NOT EXISTS "file_journal_sessionId_toolCallId_key" ON "fi
     const sessionCols = db.prepare('PRAGMA table_info("sessions")').all()
     if (!sessionCols.some((c) => c.name === 'isTeammate')) {
       db.exec('ALTER TABLE "sessions" ADD COLUMN "isTeammate" BOOLEAN NOT NULL DEFAULT false')
+    }
+  }
+
+  // #790（#747·20 · G 节三通道②）teammates 补 kind 列（generic 缺省 / wiki-update = 治理生成
+  // teammate——RunService 据此装配落地副本 backend + 生命周期工具；拓扑可由持久化状态推导）。
+  // ADD COLUMN 非幂等，PRAGMA guard 先查再补（对齐 isTeammate 模式）。fresh 库（上方 CREATE
+  // TABLE 已带列）此处列存在 → guard 跳过。
+  const teammatesTable = db.prepare('SELECT 1 FROM sqlite_master WHERE type = ? AND name = ?').get('table', 'teammates')
+  if (teammatesTable) {
+    const teammateCols = db.prepare('PRAGMA table_info("teammates")').all()
+    if (!teammateCols.some((c) => c.name === 'kind')) {
+      db.exec(`ALTER TABLE "teammates" ADD COLUMN "kind" TEXT NOT NULL DEFAULT 'generic'`)
     }
   }
 
