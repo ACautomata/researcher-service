@@ -14,6 +14,7 @@ import {
   loginSchema,
   modelProviderWriteSchema,
   passwordChangeSchema,
+  pluginEnablementSchema,
   providerEndpointWriteSchema,
   sessionApprovalSchema,
   userCreateSchema,
@@ -87,6 +88,10 @@ const USER_WRITE_BODY_NOTE =
   'JSON 对象；字段校验为服务端手写（单一来源 wiki/paths.ts），非法 → 90002 + data 字段明细。'
 
 register({ method: 'post', path: '/api/v1/sessions/{id}/approvals/{escalationId}', tag: 'Sessions', summary: 'Resolve a leader or teammate approval', auth: 'user', body: sessionApprovalSchema, nullData: true, errors: '50002 session_not_found; 50004 approval_not_found; 50001 already_resumed; 40043 quota exceeded; 90002 validation', dataNote: 'Acknowledges queued resume; only the checkpoint thread owning this escalation resumes.' })
+
+// plugins（#788 · #752 §4.3 R8）：目录清单 + per-user 启用位（8xxxx 段）。
+register({ method: 'get', path: '/api/v1/plugins', tag: 'Plugins', summary: 'List plugin catalog with the caller enablement bits', auth: 'user', errors: '90002 validation', dataNote: '{plugins:[{id,name,description,version,enabled}]} —— 目录 = 编译期静态清单；enabled 无行 = false（默认未启用）。' })
+register({ method: 'put', path: '/api/v1/plugins/{id}/enablement', tag: 'Plugins', summary: 'Enable or disable a plugin for the caller', auth: 'user', body: pluginEnablementSchema, nullData: false, errors: '80040 plugin_not_found（目录外 id，同码防探测）; 90002 validation', dataNote: '{id, enabled} —— 幂等 upsert（plugin_enablements per-user 行）。' })
 
 const FILE_WRITE_BODY_NOTE =
   'JSON 对象；字段校验为服务端手写（单一来源 files/paths.ts），非法 → 90002 + data 字段明细。写面 root 仅 wiki（lab/workspace 只读 → 90002 data.root）。'

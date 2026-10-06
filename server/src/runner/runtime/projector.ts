@@ -35,7 +35,7 @@ interface ToolStartedData {
 interface ToolFinishedData {
   readonly event?: unknown
   readonly tool_call_id?: unknown
-  readonly output?: { readonly kwargs?: { readonly status?: unknown; readonly content?: unknown; readonly name?: unknown } } | null
+  readonly output?: { readonly kwargs?: { readonly status?: unknown; readonly content?: unknown; readonly artifact?: unknown; readonly name?: unknown } } | null
 }
 
 interface ContentDeltaData {
@@ -192,7 +192,10 @@ export class RunProjector {
     // LangChain ToolMessage status 语义（实测锁定）：成功态 status 缺省，失败态显式 'error'
     // ——缺省即 success，不得按「非 success 即 error」判。
     const state = kwargs.status === 'error' ? 'error' : 'success'
-    const { text, truncated } = truncateUtf8(serializeDetails(kwargs.content), TOOL_DETAILS_MAX_BYTES)
+    // details 数据源（#788 R5 双面契约）：artifact 优先（插件工具经 ContentAndArtifact 的
+    // 渲染面通道透传 manifest details），缺省回落序列化输出（核心工具行为不变）。
+    const detailsSource = kwargs.artifact !== undefined ? kwargs.artifact : kwargs.content
+    const { text, truncated } = truncateUtf8(serializeDetails(detailsSource), TOOL_DETAILS_MAX_BYTES)
     return [
       {
         type: 'tool.end',

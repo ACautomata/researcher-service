@@ -29,4 +29,4 @@ echo "[entrypoint] applying incremental schema upgrades..."
 node scripts/upgrade-schema.mjs
 
 echo "[entrypoint] starting control plane on :8001..."
-exec node dist/server.js
+exec node dist/server/src/server.js

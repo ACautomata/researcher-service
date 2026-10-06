@@ -15,6 +15,7 @@ import { SessionService } from './sessions/service'
 import { AttachmentsService } from './attachments/service'
 import { ATTACHMENT_TMP_DIR } from './attachments/values'
 import './types'
+import { PLUGIN_MANIFESTS } from '../../plugins/index'
 
 async function main(): Promise<void> {
   const prisma = getPrisma()
@@ -54,7 +55,7 @@ async function main(): Promise<void> {
     tmpRoot: attachmentTmpRoot,
     archive: fleet.archive,
   })
-  const runner = assembleRunner({
+  const runner = await assembleRunner({
     prisma,
     hub: eventHub,
     redisUrl: config.redisUrl,
@@ -76,6 +77,8 @@ async function main(): Promise<void> {
     // #780 附件 ingestion（片 2）：run 首步物化附件到沙箱 + 图片内联多模态。
     attachments: attachmentsService,
   })
+  // 插件域 REST（#788）：编译期目录 + per-user 启用位（8xxxx 段）。
+  const pluginsRouter = { prisma, manifests: PLUGIN_MANIFESTS }
   // 会话域（#778 · #747 C 节会话 REST 全件）：SessionService（门禁观测/配额预检/命令构造复用
   // runner.service；dispatch = BullMQ submit 透传——ack 失败由 SessionService 回滚/上报，
   // 执行体错误走 run 域事件面与 #779 补偿）+ recordTurn 注入缝回接 runner（session_messages
@@ -85,6 +88,7 @@ async function main(): Promise<void> {
     hub: eventHub,
     runService: runner.service,
     dispatch: (cmd) => runner.queue.submit(cmd),
+    plugins: runner.plugins,
     sandboxes: {
       remove: (id) => sandboxes.lifecycle.remove(id),
       // #781 fork 字面复制（#768 D7）：源容器 export→import（源缺 → 'source-missing' 空起步）
@@ -131,6 +135,8 @@ async function main(): Promise<void> {
     sessions: { service: sessions },
     // attachments（#780）：上传/下载 REST（挂 /api/v1）。AttachmentsService 单例注入。
     attachments: { service: attachmentsService, tmpRoot: attachmentTmpRoot },
+    // plugins（#788）：目录 + 启用位（/api/v1/plugins，8xxxx 段）。编译期目录注入。
+    plugins: pluginsRouter,
   })
 
   // M0 同进程单端口分流：createServer(expressApp) + server.on('upgrade') 分流。

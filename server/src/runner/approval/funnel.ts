@@ -32,6 +32,7 @@ import {
 } from './rules'
 import { buildJudgeInput, extractJudgeContext, truncateChars, type JudgeOutcome } from './judge'
 import type { ApprovalAuditRow, ApprovalAuditSink, RejectionSource } from './audit'
+import type { PluginToolSpec } from '../../plugins/surface'
 import {
   APPROVAL_INTERRUPT_KIND,
   APPROVAL_INTERRUPT_V,
@@ -145,6 +146,10 @@ export interface ApprovalFunnelDeps {
   readonly audit: ApprovalAuditSink
   /** 拒绝即时红显回调（RunService 接线为 tool.start + tool.end 事件对发布） */
   readonly onRejection?: (notice: RejectionNotice) => void
+  /** 插件工具 spec 路由（#788 · #752 §3）：category 是路由键——domain 短路不进漏斗、
+   *  file 类以声明 pathParams 过路径白名单、exec 类过命令黑名单。按全目录路由（禁用
+   *  插件的工具不会出现在图内，图内出现即启用态）。缺省 = 无插件维度。 */
+  readonly pluginToolSpecs?: (name: string) => PluginToolSpec | undefined
 }
 
 // UTF-8 字节上限截断（与 runtime/projector.ts truncateUtf8 同形——摘要按字节计，
@@ -237,10 +242,14 @@ export class ApprovalFunnel {
     const memo = state.escalationMemos.get(callId)
     if (memo) return this.applyHumanDecision(state, memo, request, handler, toolCallJson)
 
-    // ② 规则层（729 §1）
-    const category = classifyTool(name)
+    // ② 规则层（729 §1）+ 插件 category 路由（#788 · #752 §3）：插件工具以声明 category
+    // 路由——与核心工具同一漏斗同一闸门（无平行审批路径）；domain 不进漏斗（#744 钉：
+    // 漏斗对象是 file/exec 工具参数，domain 工具输入是域内数据）。
+    const pluginSpec = this.deps.pluginToolSpecs?.(name)
+    if (pluginSpec?.category === 'domain') return handler(request)
+    const category = pluginSpec?.category ?? classifyTool(name)
     if (category === 'file') {
-      const verdict = filePathVerdict(args)
+      const verdict = filePathVerdict(args, pluginSpec?.pathParams)
       if (verdict.kind === 'allow') {
         const ok = await this.writeAudit(state, {
           layer: 'rule',
