@@ -90,19 +90,12 @@ export interface EvaluationMeta {
 }
 
 // ---------------------------------------------------------------------------
-// 阶段面（#744 §5.5 六节点 stage；progress 事件接线归票 4，本票 graph 经 onStage 上报）
+// 阶段面（#744 §5.5 六节点 stage；progress 事件接线归票 4，本票 graph 经 onStage 上报）。
+// 枚举单源 = 核心 figures/figureAudit（SSE 白名单校验面所在），此处 re-export 保持
+// 插件内引用面（graph/values 消费方零改动）；插件→核心方向合法（autofigureDeps 同向）。
 // ---------------------------------------------------------------------------
 
-export const FIGURE_STAGES = [
-  'generating',
-  'segmenting',
-  'preparing',
-  'templating',
-  'assembling',
-  'rendering',
-] as const
-
-export type FigureStage = (typeof FIGURE_STAGES)[number]
+export { FIGURE_RUN_STAGES as FIGURE_STAGES, type FigureStage } from '../../../server/src/figures/figureAudit'
 
 // ---------------------------------------------------------------------------
 // 流水线配置（V1 输入面仅 method_text，参数内置常量——#744 Q6）

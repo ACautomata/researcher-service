@@ -14,11 +14,84 @@ import type { z } from 'zod'
 // domain → 不进漏斗。核心拒绝未声明类别的工具（根决策 Q11）。
 export type PluginToolCategory = 'file' | 'exec' | 'domain'
 
+// ---------------------------------------------------------------------------
+// ctx 四件（#744 §11.1 · #792）：随首个消费者（figure）校准的副作用服务句柄面。
+// 全是副作用端口（DB/LLM/审计/装配身份）——可测接缝，插件内纯逻辑零接缝直写；
+// figure 域触核心只经此四件（#752 §2.2 推荐接缝）。
+// ---------------------------------------------------------------------------
+
+// run 装配身份（#744 §11.1）：execute 签名无身份参数——身份面单点经 ctx 进，
+// 防插件隐式抓全局。sessionId = parentSessionId ?? sessionId（teammate 溯源挂 parent）。
+export interface PluginRunIdentity {
+  readonly ownerId: string
+  readonly sessionId: string
+  readonly runId: string
+}
+
+// figures 落库面（核心 server/src/figures 实现）：终态一次性 create——GenerationJob 退役后
+// Figure 无状态列，单写方法即全写面。幂等（同 toolCallId 不重复建行）由核心实现按调用方
+// run 的 toolCallId 承载（figures 数据面不加列，#744 §5.3）。
+export interface PluginFigureCreateInput {
+  readonly prompt: string // method_text
+  readonly svg: string // final SVG 文本
+  readonly pngBytes?: Uint8Array // 预览 PNG（渲染失败不致命 → 缺省 + meta 标记）
+  readonly meta: unknown // EvaluationMeta（pipeline 元数据，JSON 序列化落 evaluation 列）
+  readonly sessionId: string // 溯源列（§5.1）
+}
+
+export interface PluginFiguresPort {
+  readonly create: (input: PluginFigureCreateInput) => Promise<{ readonly figureId: string }>
+}
+
+// 核心 ProviderRegistry 出口的高层句柄：owner 无 provider → 面板默认 → 明确报错的回退链
+// 封装在核心实现内，插件不碰 registry 查询逻辑（#744 §6）。文本与 PNG 图混合序列。
+export type PluginLlmContent = string | { readonly png: Uint8Array }
+
+export interface PluginLlmCallOptions {
+  readonly maxTokens: number
+  readonly temperature: number
+}
+
+export interface PluginLlmResult {
+  readonly text: string
+  readonly usage?: PluginToolUsage
+}
+
+export interface PluginLlmPort {
+  readonly generateMultimodal: (opts: {
+    readonly contents: readonly PluginLlmContent[]
+    readonly model: string // provider 集合内模型 id；空串 = 默认链 primary 不绑模型
+  } & PluginLlmCallOptions) => Promise<PluginLlmResult>
+}
+
+// figure_run 审计事件（#744 §11.2 形状定稿——TextTrace 弱关联，traceId 关联会话 run）。
+// created/stage_transitions/completed/failed/aborted 五类落审计域；progress 的 SSE 面
+// 归 runner onUpdate 翻译链（同一阶段变化事实双面，onUpdate 上报一次 runner 落两面）。
+// detail 为域载荷（stage/figureId/reason/by/iterations/durationMs…）——stage 白名单
+// 校验归 runner 面，端口不锁 figure 域类型。
+export type FigureRunAuditKind = 'created' | 'stage_transitions' | 'completed' | 'failed' | 'aborted'
+
+export interface FigureRunAuditEvent {
+  readonly event: FigureRunAuditKind
+  readonly toolCallId: string
+  readonly detail: Readonly<Record<string, unknown>>
+}
+
+export interface PluginAuditPort {
+  readonly emitFigureRun: (event: FigureRunAuditEvent) => void
+}
+
 // 插件工具运行上下文（§2.2 ctx 最小面）：config = configSchema 声明键的解析值（启动期
 // 校验后注入）；logger = 面板统一日志面。不给直连口：fsPort / 沙箱 exec / 凭证面。
+// 四件（run/figures/llm/audit）= run 装配面注入——agent 路径经 run frame ALS、直达路径
+// 显式构造；frame 缺失（注册期探针/无 runner 上下文）为 undefined，域工具执行时自校验。
 export interface PluginToolContext {
   readonly config: Readonly<Record<string, string>>
   readonly logger: { readonly info: (message: string) => void; readonly warn: (message: string) => void }
+  readonly run?: PluginRunIdentity
+  readonly figures?: PluginFiguresPort
+  readonly llm?: PluginLlmPort
+  readonly audit?: PluginAuditPort
 }
 
 // 给模型/审计的内容块（#751 双面：content 是结论性事实唯一来源——R6 事实同源不变量）。
