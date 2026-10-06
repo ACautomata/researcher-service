@@ -49,6 +49,10 @@ export const CODE = {
   IDEMPOTENCY_CONFLICT: 70041, // 同用户 + 同 key + 不同输入 → 稳定幂等冲突（不建任何行）
   FIGURE_PNG_NOT_READY: 70042, // PNG 未就绪（queued/running 未完成，明确应用级「未就绪」响应）
   FIGURE_PNG_NOT_AVAILABLE: 70043, // PNG 不可用（failed / succeeded 但产物缺失，明确应用级「不可用」响应）
+  // 8xxxx plugins（#788 · #752 R8；对齐「40 不存在」锁式，01 校验段专用——参数校验缺省走
+  // 90002，80001 仅插件域语义化校验失败如未知 pluginId 启用请求外的域内约束）
+  PLUGINS_VALIDATION_FAILED: 80001, // 插件域参数校验失败（#752 R8）
+  PLUGIN_NOT_FOUND: 80040, // 插件不存在（目录外 id）/ 越权（同码防探测，#752 R8）
   // 2xxxx 容器（20041 锁 = name 全局唯一冲突；register/users 用户名冲突复用，契约 §2.2）
   CONTAINER_NOT_FOUND: 20040, // 容器不存在 / 越权（同码防探测，#312 锁）
   NAME_CONFLICT: 20041,
@@ -119,6 +123,8 @@ export const DEFAULT_MESSAGE: Record<number, string> = {
   [CODE.IDEMPOTENCY_CONFLICT]: '幂等键已用于不同输入，请勿复用同一 Idempotency-Key 提交不同创建载荷',
   [CODE.FIGURE_PNG_NOT_READY]: 'Figure 尚未生成完成，请稍后再试',
   [CODE.FIGURE_PNG_NOT_AVAILABLE]: 'Figure 无可用 PNG（生成失败或产物缺失）',
+  [CODE.PLUGINS_VALIDATION_FAILED]: '插件参数校验失败',
+  [CODE.PLUGIN_NOT_FOUND]: '插件不存在',
   [CODE.VALIDATION_FAILED]: '参数校验失败',
   [CODE.LLM_NOT_CONFIGURED]: 'LLM_API_KEY 未配置',
   [CODE.PORT_POOL_EXHAUSTED]: '端口池已耗尽，暂无法创建容器，请稍后重试或删除闲置容器',

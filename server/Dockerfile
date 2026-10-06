@@ -2,7 +2,7 @@
 # 多阶段：build（npm ci 全量——编译需要 devDeps：typescript + prisma CLI）+ prebuild 钩子
 # prisma generate → tsc 产出 dist/；runtime（npm ci --omit=dev，仅生产依赖，src 全部 import
 # 已验证落在 dependencies）。容器启动经 entrypoint：先幂等落表（apply-schema.mjs + user_version
-# 标记，对齐 Django 镜像「entrypoint = migrate + daphne」模式）再起 node dist/server.js。
+# 标记，对齐 Django 镜像「entrypoint = migrate + daphne」模式）再起 node dist/server/src/server.js。
 
 # ---- build：编译 ----
 FROM node:lts-slim AS build
@@ -22,7 +22,11 @@ COPY src ./src
 COPY prisma ./prisma
 COPY scripts ./scripts
 COPY --from=official / /official
-# prebuild 钩子 = prisma generate；build = tsc -p tsconfig.build.json + cp src/generated dist/generated。
+# 插件目录（#788 · #752 R1 根级 plugins/ 源直引）：server src 编译期 import，
+# 经 buildx named context 注入（dev compose additional_contexts / cd.yml build-contexts 同名）。
+COPY --from=plugins / /plugins
+# prebuild 钩子 = prisma generate；build = tsc -p tsconfig.build.json（rootDir=仓库根，产物
+# dist/server/src/ + dist/plugins/）+ cp src/generated dist/server/src/generated。
 RUN npm run build
 
 # ---- runtime：精简运行镜像 ----
@@ -45,8 +49,8 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 
-# 编译产物 + prisma generate 生成物（tsc 已编译进 dist/generated，显式双拷贝保证完整；
-# client 纯 JS，体积可忽略）。schema/scripts 供 entrypoint 幂等落表。
+# 编译产物 + prisma generate 生成物（tsc 编译产物树含 dist/server/src/generated，显式双拷贝
+# 保证完整；client 纯 JS，体积可忽略）。schema/scripts 供 entrypoint 幂等落表。
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/src/generated ./src/generated
 COPY --from=build /app/prisma ./prisma

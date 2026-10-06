@@ -11,6 +11,8 @@ export default defineConfig({
   resolve: {
     alias: {
       '@': fileURLToPath(new URL('./src', import.meta.url)),
+      // 插件目录（#788 · #752 R1）：仓库根级 plugins/<id>/ 源直引（web.ts + Vue 组件）。
+      '@plugins': fileURLToPath(new URL('../plugins', import.meta.url)),
     },
   },
   server: {

@@ -7,12 +7,22 @@ import { computed } from 'vue'
 import type { ToolRow } from '@/stores/chat'
 import { toolRowToView } from '@/chat/toolRender/adapt'
 import type { DiffLineKind } from '@/chat/toolRender/tool-call-diff'
+import { pluginComponentFor } from '@/plugins/registry'
 
 const props = defineProps<{
   tool: ToolRow
 }>()
 
 const view = computed(() => toolRowToView(props.tool))
+
+// 插件 custom-render 分支（#752 §2.4 · #788）：注册表命中 → 展开区交插件组件消费
+// details（R5 双面：details 只承载呈现形态）；未注册走默认渲染（零成本回退）。
+const pluginComponent = computed(() => pluginComponentFor(props.tool.name))
+const pluginDetails = computed(() => {
+  const raw = props.tool.result
+  if (typeof raw !== 'string' || raw === '') return raw
+  try { return JSON.parse(raw) as unknown } catch { return raw }
+})
 
 // summary 显示模型(合并主/副/提示文本,判别只写一次):command=剥壳命令首行(折叠);
 // 其余=target(basename/pattern/url)+targetDetail(目录/范围淡显);generic=title/name。
@@ -77,8 +87,20 @@ function diffSig(kind: DiffLineKind): string {
           <span class="dl-text">{{ line.text }}</span>
         </div>
       </div>
-      <strong>输入</strong><pre>{{ inputDetail() }}</pre>
-      <strong>输出</strong><pre>{{ formatDetail(tool.result) }}</pre>
+      <!-- #788 插件渲染卡：注册表命中组件消费 details；未注册保持默认输入/输出详情 -->
+      <component
+        :is="pluginComponent"
+        v-if="pluginComponent"
+        :details="pluginDetails"
+        :input="tool.input"
+        :state="tool.state"
+        :expanded="true"
+        :tool-call-id="tool.id ?? ''"
+      />
+      <template v-else>
+        <strong>输入</strong><pre>{{ inputDetail() }}</pre>
+        <strong>输出</strong><pre>{{ formatDetail(tool.result) }}</pre>
+      </template>
     </div>
   </details>
 </template>

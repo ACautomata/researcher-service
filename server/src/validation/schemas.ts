@@ -220,3 +220,13 @@ export const sessionApprovalSchema = z.object({
   decision: z.enum(['allow', 'deny']),
   reason: z.string().max(2000).optional(),
 })
+
+// ---------------------------------------------------------------------------
+// plugins（#788 · #752 R8）：启用位 PUT（{enabled: boolean}；幂等 upsert）。
+// pluginId = 目录 id（kebab-case，与 plugins/registry PLUGIN_ID_REGEX 同形）。
+// ---------------------------------------------------------------------------
+export const PLUGIN_ID_REGEX = /^[a-z][a-z0-9-]*$/
+
+export const pluginEnablementSchema = z.object({
+  enabled: z.boolean(),
+})
