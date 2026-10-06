@@ -118,7 +118,8 @@ export interface SessionRunGateway {
   readonly inFlightProjection: (sessionId: string) => Promise<InFlightProjection | undefined>
   /** teammate 级联作废（#781 缺口顺带补接线：跨派生点 teammate 随 rewind 作废停跑） */
   readonly teammatesForRewind?: (sessionId: string, checkpointId: string) => Promise<void>
-  /** C1（#782）：作废 + 存活 teammate 信箱通知（文件面 rewind 时） */
+  /** C1 通知面（#782 拆面：作废归 teammatesForRewind、逆放前先行；本方法在 rewindFiles 后调——
+   *  degradedFiles 分文案，/lab 未动时如实报「回退未完成」） */
   readonly teammatesNotifyFileRewind?: (sessionId: string, checkpointId: string, degradedFiles: boolean) => Promise<void>
 }
 

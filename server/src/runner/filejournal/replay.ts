@@ -48,9 +48,15 @@ export function planRevert(
   const toRevert = pending
     .filter((r) => !chain.has(r.checkpointId))
     .sort((a, b) => b.seq - a.seq)
-  // 水位单调不减：chain 内 pending 空时不得清零已推进水位（scope=chat 越线面）
+  // 水位单调不减：chain 内 pending 空时不得清零已推进水位（scope=chat 越线面）。
+  // 上界收敛（交错面）：水位不得越过未处置 toRevert 行——journal seq 为会话全局序，teammate
+  // 行与锚链行交错（C1 固有）时 chainMax 可大于低 seq toRevert 行；先推水位后逆放，中断/
+  // 容器缺失降级后低 seq 行落入 seq ≤ 水位区被一切拾起判据（planRevert pending / resumeRevert
+  // 残集）永久排除。min(chainMax, toRevertMin−1)：非交错 = chainMax 现状不变；交错 = 全部
+  // toRevert 行保持在水位之上可续放。
   const chainMax = inChain.length > 0 ? Math.max(...inChain.map((r) => r.seq)) : 0
-  const watermark = currentWatermark !== null ? Math.max(currentWatermark, chainMax) : chainMax
+  const toRevertMin = toRevert.length > 0 ? Math.min(...toRevert.map((r) => r.seq)) : Infinity
+  const watermark = currentWatermark !== null ? Math.max(currentWatermark, Math.min(chainMax, toRevertMin - 1)) : Math.min(chainMax, toRevertMin - 1)
   const degraded = toRevert.length > depthLimit
   return { keepMark: inChain, toRevert, watermark, degraded }
 }

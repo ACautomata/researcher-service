@@ -84,8 +84,37 @@ export async function buildRewindPreview(
     where: { parentSessionId: sessionId, archivedAt: null },
     select: { threadId: true, spawnedAtCheckpointId: true },
   })
+  // 跨越面（宁多列不漏列——exec 副作用不可逆放，清单是确认门唯一补偿面）：
+  //   锚后派生（spawnedAtCheckpointId ∉ chain）：全部 exec 恒在锚后。
+  //   锚前派生存活者（∈ chain）：「派生时点在锚前」不等于「exec 在锚前」——survivor 跨锚点
+  //     干活，其锚后 exec 同不可逆放。跨 thread 锚序不可判定（teammate 恒逆放留票同根），
+  //     时间代理：thread 最新消息行晚于锚 checkpoint 落盘时刻 → 保守入清单（宁多列不漏列；
+  //     execCrossed 条数无界是确认门完整展示语义的有意取舍——采样会漏报丢失面）。
+  const anchorCheckpoint = await prisma.checkpoint.findFirst({
+    where: { threadId: sessionId, checkpointId: anchor },
+    select: { createdAt: true },
+  })
+  const survivorThreads = teammates
+    .filter((t) => t.spawnedAtCheckpointId !== null && chain.has(t.spawnedAtCheckpointId))
+    .map((t) => t.threadId)
+  const survivorLatest = new Map<string, Date>(
+    survivorThreads.length > 0
+      ? (
+          await prisma.sessionMessage.groupBy({
+            by: ['sessionId'],
+            where: { sessionId: { in: survivorThreads }, archivedAt: null },
+            _max: { createdAt: true },
+          })
+        ).map((g) => [g.sessionId, g._max.createdAt!])
+      : [],
+  )
   const crossedThreads = teammates
-    .filter((t) => t.spawnedAtCheckpointId !== null && !chain.has(t.spawnedAtCheckpointId))
+    .filter((t) => {
+      if (t.spawnedAtCheckpointId === null) return false
+      if (!chain.has(t.spawnedAtCheckpointId)) return true
+      const latest = survivorLatest.get(t.threadId)
+      return latest !== undefined && anchorCheckpoint !== null && latest > anchorCheckpoint.createdAt
+    })
     .map((t) => t.threadId)
   if (crossedThreads.length > 0) {
     harvest(

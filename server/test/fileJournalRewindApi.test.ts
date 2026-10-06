@@ -375,11 +375,12 @@ describe('文件 rewind 端到端（S1，#782）', () => {
     expect(res.body.data.anchor).toBe(anchor1)
     expect(res.body.data.revertOps).toBe(1) // 基线行 ∈ 锚链保留；exec 轮的 q.txt ∉ chain 逆放
     expect(res.body.data.pathTotal).toBe(1)
-    // exec 跨越清单：轮2 的 execute 调用 + 跨派生点 teammate 的 execute（锚前派生的不入）
+    // exec 跨越清单：轮2 的 execute 调用 + 跨派生点 teammate 的 execute + 锚前派生存活者
+    //（时间面：其种子行 createdAt 晚于锚1 checkpoint 落盘时刻 → 保守入清单——宁多列不漏列）
     const crossed = res.body.data.execCrossed as Array<{ toolCallId: string; input: string }>
     expect(crossed.some((c) => c.toolCallId === 'call-ex' && c.input.includes('rm -rf'))).toBe(true)
     expect(crossed.some((c) => c.toolCallId === 'tm-ex-tm-prev-crossed')).toBe(true)
-    expect(crossed.some((c) => c.toolCallId === 'tm-ex-tm-prev-safe')).toBe(false)
+    expect(crossed.some((c) => c.toolCallId === 'tm-ex-tm-prev-safe')).toBe(true)
   })
 
   it('preview 锚点 checkpoint 已归档（行未归档机制性不一致态）：与执行面同拒', async () => {

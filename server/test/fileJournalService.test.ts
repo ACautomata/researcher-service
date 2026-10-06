@@ -449,6 +449,25 @@ describe('FileJournalService（#782）', () => {
     expect(fs.trees.get(CONTAINER)!.get('/lab/fresh.txt')?.toString()).toBe('fresh')
   })
 
+  it('boot 拾起 scope=files 崩溃面：归档未处置行 ∈ chain(指针) 仍续放（行级决策优先——指针在被放弃分支）', async () => {
+    // scope=files：对话面零改动、指针留在被放弃分支（ckB ∈ abandoned）——boot 续放 chain=指针
+    // 重建时归档行 ∈ chain(指针)，chain 过滤会错排；行级归档标记 = 决策表达（无 chain 过滤）
+    await seedSession({ activeCheckpointId: 'ckB', fileJournalAnchorSeq: 0 })
+    const b = backend()
+    expect((await b.write('/lab/files-victim.txt', 'v')).error).toBeUndefined()
+    // files rewind tx1：journal 行归档（checkpointId=ckC ∈ abandoned）——tx2 前崩溃残留
+    await prisma.fileJournal.update({
+      where: { sessionId_seq: { sessionId: SESSION, seq: 1 } },
+      data: { checkpointId: 'ckC', archivedAt: new Date() },
+    })
+    expect(fs.trees.get(CONTAINER)!.has('/lab/files-victim.txt')).toBe(true)
+
+    await svc.reconcileOnBoot()
+    const row = await prisma.fileJournal.findFirstOrThrow({ where: { sessionId: SESSION, path: 'files-victim.txt' } })
+    expect(row.fileRevertedAt).not.toBeNull()
+    expect(fs.trees.get(CONTAINER)!.has('/lab/files-victim.txt')).toBe(false)
+  })
+
   it('boot 拾起首次 rewind tx1 后崩溃窗口：归档未处置行重演（水位 null 决策面）', async () => {
     await seedSession({ activeCheckpointId: 'ckB' })
     // tx1 已提交（指针=ckB、abandoned 行已归档）、tx2 未跑（水位 null）——前两支判据均不命中

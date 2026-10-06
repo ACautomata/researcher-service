@@ -99,12 +99,12 @@ export class Reconciler {
     return { rolledForward, rolledMissing }
   }
 
-  // 续放：残集 = seq>水位 ∧ 未打标（上次 rewind 决策 toRevert 的执行中断残留——或容器缺失
-  // 降级面）；水位 null 时改查归档未处置面（首次 rewind tx1 后 tx2 前崩溃窗口——归档行即
-  // 决策已落盘信号；chat 面归档遗留被第三支 session 水位条件与 seq 判据双重排除在拾起外）。
-  // chain 过滤（与 planRevert 同形）：∈ chain 的行是锚链保留段/新写，不可分面用
-  // chain 判别——交回 planRevert 判定（keepMark/水位语义），∉ chain 才续放；否则后续 rewind
-  // 的 restore 路会把 (tN, tN+1] 段合法新写一并撤销。
+  // 续放：残集两分支——
+  //   归档 ∧ 未处置（∧ 水位 null ∨ seq > 水位）：行级 rewind 决策面（tx1 abandoned 归档即
+  //     落盘表达），**无 chain 过滤**——scope=files 指针不动（可留在被放弃分支），chain(指针)
+  //     会把归档待逆放行错排；chat 面归档遗留由 seq ≤ 水位天然排除（chat 水位 = maxSeq）。
+  //   未归档 ∧ seq > 水位 ∧ ∉ chain：中断续放面——chain 过滤防 (tN,tN+1] 锚链内新写误撤。
+  // 水位 null：仅归档面（决策信号），未归档面无判据不捞。
   private async resumeRevert(
     sessionId: string,
     container: string,
@@ -126,7 +126,7 @@ export class Reconciler {
         },
         orderBy: { seq: 'desc' },
       })
-    ).filter((r) => chain === null || !chain.has(r.checkpointId))
+    ).filter((r) => r.archivedAt !== null || chain === null || !chain.has(r.checkpointId))
     if (residual.length === 0) return { resumedReverted: 0, resumedMissing: 0 }
     const outcome = await executeRevert(sessionId, container, residual, this.deps.io)
     return { resumedReverted: outcome.reverted, resumedMissing: outcome.skippedMissing }

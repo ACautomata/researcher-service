@@ -4,6 +4,8 @@
 // 共用。目录含超限子文件 → throw fail-closed（与 /lab 根 delete 拒绝同构：「要么完整恢复面
 // 要么不打点」——部分树打点让行声称可恢复而逆放静默丢数据；调用方 catch 回 agent 自纠：
 // 逐文件删除走文件级超限降级面）。
+// mode 降级（知情取舍，parseTar 的 TarEntry 无 mode 字段——保真需改 files/tar.ts 共享内核）：
+// 文件条目恢复为 0644 常权（可执行位丢失）；目录条目显式 0755（可遍历语义保留）。
 
 import { createTarFile, createTarTree, parseTar } from '../../files/tar'
 import type { SandboxFilePrimitives } from '../backend/primitives'
