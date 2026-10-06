@@ -19,6 +19,8 @@ vi.mock('@/api/sessions', () => ({
   uploadSessionAttachment: vi.fn(),
 }))
 
+vi.mock('@/api/plugins', () => ({ listPlugins: vi.fn(), getPluginArgumentCompletions: vi.fn() }))
+import { listPlugins, getPluginArgumentCompletions } from '@/api/plugins'
 import * as api from '@/api/sessions'
 import { ApiError } from '@/api/client'
 
@@ -84,6 +86,7 @@ beforeEach(() => {
   sessionStorage.clear()
   vi.stubGlobal('EventSource', FakeEventSource)
   vi.clearAllMocks()
+  vi.mocked(listPlugins).mockResolvedValue([])
   vi.mocked(api.listSessions).mockResolvedValue([S1, S2])
   vi.mocked(api.getSessionProjection).mockResolvedValue(projectionOf())
   vi.mocked(api.sendSessionMessage).mockResolvedValue({ messageId: 'm9', turn: 3, runId: 'r1', replay: false })
@@ -93,6 +96,7 @@ beforeEach(() => {
   commandSpy.mockClear()
 })
 afterEach(() => {
+  vi.useRealTimers()
   vi.unstubAllGlobals()
 })
 
@@ -415,4 +419,160 @@ describe('中断 / 标题 / 删除 / slash', () => {
     conn.onComposerKeydown(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
     expect(onSend).toHaveBeenCalledTimes(1)
   })
+})
+
+
+describe('#797 slash 键盘与参数提示', () => {
+  it('启动加载插件目录；选择官方命令提示参数，发送仍保留 /命令原文', async () => {
+    vi.mocked(listPlugins).mockResolvedValue([{ id: 'fig', name: 'Fig', description: '', version: '1', enabled: true, commands: [{ name: 'figure', description: '绘图' }] }])
+    const conn = await mounted()
+    conn.chat.setInput('/')
+    expect(conn.slashMatches.value.map(c => c.alias)).toContain('/figure')
+    conn.chat.setInput('/r')
+    conn.onComposerInput()
+    conn.onComposerKeydown(new KeyboardEvent('keydown', { key: 'Tab' }))
+    expect(conn.chat.input).toBe('/research ')
+    expect(conn.slashArgumentHint.value).toContain('$ARGUMENTS')
+    conn.chat.setInput('/research 电池材料')
+    expect(conn.send()).toBe(true)
+    expect(conn.chat.messages.at(-1)?.text).toBe('/research 电池材料')
+    await flushPromises()
+    expect(api.sendSessionMessage).toHaveBeenCalledWith('sess-1', '/research 电池材料', expect.any(String), undefined)
+    conn.dispose()
+  })
+
+  it.each(['/new', '/compact', '/model'])('键盘选中 %s 后，第二次 Enter 发送原文', async (alias) => {
+    const onSend = vi.fn()
+    const conn = useChatSession({ onSend })
+    conn.chat.setInput(alias)
+    conn.onComposerKeydown(new KeyboardEvent('keydown', { key: 'Enter' }))
+    expect(conn.chat.input).toBe(`${alias} `)
+    expect(onSend).not.toHaveBeenCalled()
+    conn.onComposerKeydown(new KeyboardEvent('keydown', { key: 'Enter' }))
+    expect(onSend).toHaveBeenCalledOnce()
+    conn.dispose()
+  })
+
+  it('菜单中 Shift+Enter 和 IME Enter 保留输入；上下键选择、Esc 关闭、重新输入可打开', async () => {
+    const conn = await mounted()
+    conn.chat.setInput('/')
+    conn.onComposerKeydown(new KeyboardEvent('keydown', { key: 'Enter', shiftKey: true }))
+    conn.onComposerKeydown(new KeyboardEvent('keydown', { key: 'Enter', isComposing: true }))
+    expect(conn.chat.input).toBe('/')
+    conn.onComposerKeydown(new KeyboardEvent('keydown', { key: 'ArrowDown' }))
+    conn.onComposerKeydown(new KeyboardEvent('keydown', { key: 'Enter' }))
+    expect(conn.chat.input).toBe('/compact ')
+    conn.chat.setInput('/m')
+    conn.onComposerInput()
+    conn.onComposerKeydown(new KeyboardEvent('keydown', { key: 'Escape' }))
+    expect(conn.slashOpen.value).toBe(false)
+    conn.chat.setInput('/mo')
+    conn.onComposerInput()
+    expect(conn.slashOpen.value).toBe(true)
+    conn.dispose()
+  })
+})
+
+
+describe('#797 插件启用刷新与命令重发', () => {
+  it('重新打开菜单时刷新启用集；插件关闭后菜单选中项仍可通过 Enter 选择', async () => {
+    vi.mocked(listPlugins).mockResolvedValue([{ id: 'fig', name: 'Fig', description: '', version: '1', enabled: true, commands: [{ name: 'figure', description: '绘图' }] }])
+    const conn = await mounted()
+    conn.chat.setInput('/')
+    for (let i = 0; i < 4; i++) conn.onComposerKeydown(new KeyboardEvent('keydown', { key: 'ArrowDown' }))
+    vi.mocked(listPlugins).mockResolvedValue([])
+    conn.onComposerInput()
+    // catalog reload can arrive while the user moves the selection
+    for (let i = 0; i < 4; i++) conn.onComposerKeydown(new KeyboardEvent('keydown', { key: 'ArrowDown' }))
+    await flushPromises()
+    expect(conn.slashMatches.value.map(c => c.alias)).not.toContain('/figure')
+    conn.onComposerKeydown(new KeyboardEvent('keydown', { key: 'Enter' }))
+    expect(conn.chat.input).toBe('/new ')
+    conn.dispose()
+  })
+
+  it('插件目录请求失败仍可选择官方命令，并给出重试提示', async () => {
+    vi.mocked(listPlugins).mockRejectedValue(new Error('offline'))
+    const conn = await mounted()
+    conn.chat.setInput('/r')
+    expect(conn.slashMatches.value.map(c => c.alias)).toEqual(['/research'])
+    expect(actionsErr).toHaveBeenCalledWith(expect.stringContaining('重新输入 /'))
+    conn.dispose()
+  })
+
+  it('幂等重发的 /model 结果仍可提示，不误当作普通聊天消息', async () => {
+    const conn = await mounted()
+    vi.mocked(api.sendSessionMessage).mockResolvedValueOnce({ messageId: 'm9', turn: 3, runId: null, replay: true, command: { name: 'model', model: { providerId: 'p', modelId: 'm' }, appliesTo: 'next-run' } })
+    conn.chat.setInput('/model p/m')
+    conn.send()
+    await flushPromises()
+    expect(commandSpy).toHaveBeenCalledWith(expect.objectContaining({ name: 'model', appliesTo: 'next-run' }))
+    conn.dispose()
+  })
+})
+
+
+it('#797 断线排队的系统命令重连后仍展示返回结果', async () => {
+  const conn = await mounted()
+  FakeEventSource.last()!.fail()
+  await flushPromises()
+  conn.chat.setInput('/model')
+  expect(conn.send()).toBe(true)
+  vi.mocked(api.sendSessionMessage).mockResolvedValueOnce({ messageId: 'm9', turn: 3, runId: null, replay: false, command: { name: 'model', models: [] } })
+  opened()
+  await flushPromises()
+  expect(commandSpy).toHaveBeenCalledWith({ name: 'model', models: [] })
+  conn.dispose()
+})
+
+
+it('#797 插件参数补全防抖后可用 Tab 选择，并按 user 原文发送', async () => {
+  vi.mocked(listPlugins).mockResolvedValue([{ id: 'fig', name: 'Fig', description: '', version: '1', enabled: true, commands: [{ name: 'figure', description: '绘图', hasArgumentCompletions: true }] }])
+  vi.mocked(getPluginArgumentCompletions).mockResolvedValue([{ value: 'flow chart', description: '流程图' }])
+  const conn = await mounted()
+  vi.useFakeTimers()
+  conn.chat.setInput('/figure fl')
+  conn.onComposerInput()
+  await flushPromises()
+  await vi.advanceTimersByTimeAsync(100)
+  conn.chat.setInput('/figure flow')
+  conn.onComposerInput()
+  await flushPromises()
+  await vi.advanceTimersByTimeAsync(249)
+  expect(getPluginArgumentCompletions).not.toHaveBeenCalled()
+  await vi.advanceTimersByTimeAsync(1)
+  expect(getPluginArgumentCompletions).toHaveBeenCalledWith('fig', 'figure', 'flow')
+  expect(conn.slashMatches.value).toEqual([{ alias: '/figure flow chart', description: '流程图' }])
+  conn.onComposerKeydown(new KeyboardEvent('keydown', { key: 'Tab' }))
+  expect(conn.chat.input).toBe('/figure flow chart ')
+  expect(conn.slashOpen.value).toBe(false)
+  conn.send()
+  await flushPromises()
+  expect(api.sendSessionMessage).toHaveBeenCalledWith('sess-1', '/figure flow chart', expect.any(String), undefined)
+  conn.dispose()
+})
+
+it('#797 参数补全迟到时不覆盖新输入，dispose 取消尚未发送的请求', async () => {
+  vi.mocked(listPlugins).mockResolvedValue([{ id: 'fig', name: 'Fig', description: '', version: '1', enabled: true, commands: [{ name: 'figure', description: '绘图', hasArgumentCompletions: true }] }])
+  let complete!: (items: { value: string }[]) => void
+  vi.mocked(getPluginArgumentCompletions).mockReturnValueOnce(new Promise(resolve => { complete = resolve }))
+  const conn = await mounted()
+  vi.useFakeTimers()
+  conn.chat.setInput('/figure old')
+  conn.onComposerInput()
+  await flushPromises()
+  await vi.advanceTimersByTimeAsync(250)
+  conn.chat.setInput('新的普通消息')
+  conn.onComposerInput()
+  await flushPromises()
+  complete([{ value: 'old suggestion' }])
+  await flushPromises()
+  expect(conn.slashOpen.value).toBe(false)
+  expect(conn.chat.input).toBe('新的普通消息')
+  conn.chat.setInput('/figure new')
+  conn.onComposerInput()
+  await flushPromises()
+  conn.dispose()
+  await vi.advanceTimersByTimeAsync(250)
+  expect(getPluginArgumentCompletions).toHaveBeenCalledTimes(1)
 })

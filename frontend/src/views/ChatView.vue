@@ -10,7 +10,7 @@ defineOptions({ name: 'ChatView' })
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { uploadSessionAttachment } from '@/api/sessions'
-import type { SystemCommandResult } from '@/api/sessions'
+import type { ModelRef, SystemCommandResult } from '@/api/sessions'
 import { useChatStore } from '@/stores/chat'
 import { useFileTabsStore } from '@/stores/fileTabs'
 import { useAuthStore, tokenOwner } from '@/stores/auth'
@@ -40,6 +40,12 @@ const chat = useChatStore()
 const auth = useAuthStore()
 // 视图专属态（errorMsg 上抛至此；connecting/disconnected/lastRunError/run 在 composable 内）
 const errorMsg = ref('')
+const availableModels = ref<readonly ModelRef[] | null>(null)
+const modelStatus = ref('')
+watch(() => chat.selectedSession, () => {
+  availableModels.value = null
+  modelStatus.value = ''
+})
 
 // #671 / #672：本页三态面板组（每页一个实例，非模块级单例）——左栏与右侧文件预览共用一组，
 // 弹一个自动收回另一个（spec #667 US25）。互斥逻辑单一实现在 usePanelGroup。
@@ -142,8 +148,14 @@ const conn = useChatSession({
       return
     }
     if (cmd.name === 'model') {
-      const m = cmd.model
-      ElMessage.success(m ? `下一条消息起使用模型 ${m.modelId}` : '未指定模型，沿用面板默认')
+      availableModels.value = cmd.models ?? null
+      if (cmd.models) {
+        modelStatus.value = cmd.models.length ? '可用模型（输入 /model providerId/modelId 切换）' : '暂无可用模型'
+      } else {
+        const m = cmd.model
+        modelStatus.value = m ? `下一轮对话起使用模型 ${m.providerId}/${m.modelId}` : '下一轮对话起使用面板默认模型'
+        ElMessage.success(modelStatus.value)
+      }
     }
   },
 })
@@ -440,11 +452,18 @@ defineExpose({
         @resolve="conn.resolveApproval"
         @toggle-detail="toggleApprovalDetail"
       />
+      <div v-if="modelStatus" class="model-command-result" data-test="model-command-result" role="status">
+        <p>{{ modelStatus }}</p>
+        <ul v-if="availableModels?.length">
+          <li v-for="m in availableModels" :key="`${m.providerId}/${m.modelId}`"><code>{{ m.providerId }}/{{ m.modelId }}</code></li>
+        </ul>
+      </div>
       <ChatComposer
         v-model="chat.input"
         :matches="slashMatches"
         :slash-open="slashOpen"
         :slash-index="chat.slashIndex"
+        :argument-hint="conn.slashArgumentHint.value"
         :connecting="connecting"
         :streaming="running"
         :disconnected="conn.disconnected.value"
@@ -458,16 +477,19 @@ defineExpose({
       >
         <!-- T07 斜杠补全菜单表现（父注入，逻辑留宿主 useChatSession） -->
         <template #slash-menu="{ matches, slashIndex }">
-          <div v-if="matches.length" class="slash-menu" data-test="slash-menu">
+          <div v-if="matches.length" class="slash-menu" id="slash-command-menu" data-test="slash-menu" role="listbox" aria-label="命令补全">
             <div
               v-for="(o, i) in matches"
               :key="o.alias"
               class="slash-item"
+              :id="`slash-command-${i}`"
+              role="option"
+              :aria-selected="i === slashIndex"
               :class="{ sel: i === slashIndex }"
               data-test="slash-item"
               @mousedown.prevent="conn.pickSlash(o.alias)"
             >
-              <span class="cmd">{{ o.alias }}</span><span class="desc">{{ o.description }}</span>
+              <span class="cmd">{{ o.alias }}</span><span v-if="o.argumentHint" class="args">{{ o.argumentHint }}</span><span class="desc">{{ o.description }}</span>
             </div>
           </div>
         </template>
@@ -524,6 +546,10 @@ defineExpose({
 .slash-item { display: flex; align-items: center; gap: 10px; padding: 9px 14px; cursor: pointer; }
 .slash-item.sel, .slash-item:hover { background: var(--el-fill-color); }
 .slash-item .cmd { font-family: ui-monospace, monospace; color: var(--el-color-primary); font-size: 13px; }
+.model-command-result { padding: 8px 18px; font-size: 13px; max-height: 180px; overflow-y: auto; background: var(--el-fill-color-light); }
+.model-command-result p { margin: 0; }
+.model-command-result ul { margin: 6px 0 0; }
+.slash-item .args { font-size: 12px; color: var(--el-text-color-secondary); }
 .slash-item .desc { margin-left: auto; color: var(--el-text-color-secondary); font-size: 12px; }
 @media (max-width: 720px) {
   .chat { flex: 1; min-height: 0; flex-direction: column; }

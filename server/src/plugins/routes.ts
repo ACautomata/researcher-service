@@ -9,7 +9,7 @@ import { CODE } from '../codes'
 import { requireAuth } from '../middleware/auth'
 import { mustChangePasswordGate } from '../middleware/mustChangePasswordGate'
 import { validateBody } from '../middleware/validate'
-import { PLUGIN_ID_REGEX, pluginEnablementSchema } from '../validation/schemas'
+import { PLUGIN_ID_REGEX, pluginEnablementSchema, pluginCommandCompletionQuerySchema } from '../validation/schemas'
 import type { PluginManifest } from './api'
 
 export interface PluginsRouterDeps {
@@ -48,9 +48,27 @@ export function createPluginsRouter(deps: PluginsRouterDeps): Router {
         name: manifest.name,
         description: manifest.description,
         version: manifest.version,
+        commands: (manifest.commands ?? []).map(({ name, description, getArgumentCompletions }) => ({
+          name, description: description ?? '',
+          ...(getArgumentCompletions ? { hasArgumentCompletions: true } : {}),
+        })),
         enabled: enabledById.get(manifest.id) === true,
       })),
     })
+  })
+
+  // #797：只读参数补全，启用位与当前用户同源；不执行 command handler。
+  router.get('/:id/commands/:name/completions', async (req: Request, res: Response) => {
+    const parsed = pluginCommandCompletionQuerySchema.safeParse(req.query)
+    if (!parsed.success) throw fail(CODE.VALIDATION_FAILED, undefined, parsed.error.flatten().fieldErrors)
+    const manifest = deps.manifests.find(m => m.id === pathId(req))
+    const command = manifest?.commands?.find(c => c.name === req.params.name)
+    const rows = await deps.prisma.pluginEnablement.findMany({ where: { ownerId: req.user!.id } })
+    if (!manifest || !command || !rows.some(row => row.pluginId === manifest.id && row.enabled)) {
+      throw fail(CODE.PLUGIN_NOT_FOUND)
+    }
+    const completions = await command.getArgumentCompletions?.(parsed.data.prefix) ?? []
+    ok(res, { completions: completions.slice(0, 50) })
   })
 
   // PUT /api/v1/plugins/:id/enablement —— 幂等 upsert（§4.3 表；body {enabled: boolean}）
