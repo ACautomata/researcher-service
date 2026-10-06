@@ -17,12 +17,18 @@ export type TeammateStatus =
   | 'failed'
   | 'archived'
 
+// teammate 类别（#790 · #747 G 节三通道②）：generic = 缺省通用 teammate；wiki-update = 治理
+// 生成 teammate（RunService 装配落地副本 backend + openwiki 生命周期工具 + 驱动提示——拓扑
+// 可由本持久化列推导，resume/recover 重建同形）。
+export type TeammateKind = 'generic' | 'wiki-update'
+
 export interface TeammateSummary {
   readonly id: string
   readonly threadId: string
   readonly name: string
   readonly task: string
   readonly status: TeammateStatus
+  readonly kind: TeammateKind
   readonly modelProviderId: string | null
   readonly spawnedAtCheckpointId: string | null
   readonly createdAt: string
@@ -45,6 +51,7 @@ function summary(row: Teammate): TeammateSummary {
     name: row.name,
     task: row.task,
     status: row.status as TeammateStatus,
+    kind: (row.kind ?? 'generic') as TeammateKind,
     modelProviderId: row.modelProviderId,
     spawnedAtCheckpointId: row.spawnedAtCheckpointId,
     createdAt: row.createdAt.toISOString(),
@@ -88,6 +95,7 @@ export class TeammateService {
     parentSessionId: string
     name: string
     task: string
+    kind?: TeammateKind
     modelProviderId?: string | null
     spawnedAtCheckpointId?: string | null
   }): Promise<TeammateSummary> {
@@ -113,6 +121,7 @@ export class TeammateService {
           name: trimmedName,
           task: trimmedTask,
           status: 'queued',
+          kind: input.kind ?? 'generic',
           modelProviderId: input.modelProviderId ?? null,
           spawnedAtCheckpointId: input.spawnedAtCheckpointId ?? null,
         },

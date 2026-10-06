@@ -380,10 +380,13 @@ model Teammate {
   parentSession   Session  @relation("TeammateParent", fields: [parentSessionId], references: [id], onDelete: Cascade)
   parentSessionId String
   thread           Session  @relation("TeammateThread", fields: [threadId], references: [id], onDelete: Cascade)
-  threadId         String   @unique
+  threadId         String @unique
   name             String
   task             String
   status           String   @default("requested")
+  // #790（#747·20 · G 节三通道②）：teammate 类别——generic 缺省 / wiki-update = 治理生成
+  // teammate（RunService 装配落地副本 backend + 生命周期工具 + 驱动提示；拓扑可由本列推导）。
+  kind             String   @default("generic")
   modelProviderId  String?
   spawnedAtCheckpointId String?
   createdAt        DateTime @default(now())

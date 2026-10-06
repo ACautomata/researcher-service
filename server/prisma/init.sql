@@ -150,6 +150,7 @@ CREATE TABLE "teammates" (
     "name" TEXT NOT NULL,
     "task" TEXT NOT NULL,
     "status" TEXT NOT NULL DEFAULT 'requested',
+    "kind" TEXT NOT NULL DEFAULT 'generic',
     "modelProviderId" TEXT,
     "spawnedAtCheckpointId" TEXT,
     "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,

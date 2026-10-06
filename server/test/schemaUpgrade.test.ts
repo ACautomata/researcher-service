@@ -6,9 +6,9 @@ import Database from 'better-sqlite3'
 import { runDbScript } from './runDbScript'
 
 // 从「只有 base 表」的旧库跑全量增量脚本（幂等跑两遍）→ 三批表全到位 + T02 幂等列/索引
-// + T03 生命周期时间戳列 + T06 产物三列 + #699 upgradeAttempts 列 + teammate/mailbox + user_version 归 12
+// + T03 生命周期时间戳列 + T06 产物三列 + #699 upgradeAttempts 列 + teammate/mailbox + user_version 归 13
 // （#771 批次 7→8；#775 批次 8→9；#787 preferredModelJson 9→10；#786 teammate/mailbox 10→11；
-// #785 file_overwrite_logs 11→12）。
+// #785 file_overwrite_logs 11→12；#790 teammates.kind 12→13）。
 function assertUpgraded(dbPath: string): void {
   const db = new Database(dbPath)
   try {
@@ -56,7 +56,7 @@ function assertUpgraded(dbPath: string): void {
     const attempts = containerCols.find((c) => c.name === 'upgradeAttempts')!
     expect(attempts.notnull).toBe(1) // NOT NULL
     expect(attempts.dflt_value).toBe('0') // DEFAULT 0（既有行升级计数从 0 起）
-    expect(db.pragma('user_version', { simple: true })).toBe(12) // #787 + #786 + #785 批次（SCHEMA_VERSION 9→12）
+    expect(db.pragma('user_version', { simple: true })).toBe(13) // #787 + #786 + #785 批次（SCHEMA_VERSION 9→12）；#790 teammates.kind 12→13
     const sessionCols = db.prepare('PRAGMA table_info("sessions")').all() as Array<{ name: string }>
     expect(sessionCols.some((col) => col.name === 'isTeammate')).toBe(true)
     expect(sessionCols.some((col) => col.name === 'preferredModelJson')).toBe(true)
@@ -124,7 +124,7 @@ describe('schema upgrade script', () => {
     assertUpgraded(dbPath)
   })
 
-  it('upgrades an already-text-trace DB (v2) to current tables + user_version=12', () => {
+  it('upgrades an already-text-trace DB (v2) to current tables + user_version=13', () => {
     const dir = mkdtempSync(path.join(tmpdir(), `schema-upgrade-${process.pid}-`))
     const dbPath = path.join(dir, 'panel.db')
     // 模拟上一轮增量已交付 text_trace_logs 的既有部署（v2）——增量脚本须只补 figures/generation_jobs

@@ -73,6 +73,23 @@ import { TurnReducer, isEmptyTurnSnapshot, type RecordTurnPayload, type TurnSnap
 import { TeammateService, type TeammateSummary } from '../teammates/service'
 import { createTeammateTools } from '../teammates/tools'
 import { createWikiRetrievalTools } from '../wikisearch'
+import {
+  pullWikiGenerationMirror,
+  pushBackWikiGenerationMirror,
+  readContainerWikiTree,
+  type WikiGenerationMirror,
+} from '../wikigen/mirror'
+import { createWikiLifecycleTools } from '../wikigen/lifecycleTools'
+import { buildWikiUpdateBackend, wikiMirrorRouteRootDir } from '../wikigen/backend'
+import {
+  WIKI_CONFLICT_MAIL_KIND,
+  WIKI_UPDATE_HOST_ID,
+  WIKI_UPDATE_TEAMMATE_KIND,
+  WIKI_UPDATE_TEAMMATE_PROMPT,
+} from '../wikigen/values'
+import type { WikiToolResult } from '../wikisearch'
+import { HostSessionManager } from 'openwiki/dist/integrations/core/session-manager.js'
+import { FilesystemBackend } from 'deepagents'
 
 // recordTurn 注入缝（#778）：run 终态（completed/interrupted/aborted/failed 任一）的单 turn
 // 聚合落库回调。anchorCheckpointId = 终态 checkpoint 锚点（issue 点名列；aborted/failed 路径
@@ -627,8 +644,41 @@ export class RunService {
           abort: async (teammate) => { this.stopTeammate(cmd, teammate) },
         })
       : []
+
+    // ---- wiki 治理生成路径（#790 三通道②：kind=wiki-update 的 teammate run）----
+    // 落地副本执行模型：run 开始（wikis ensure 之后）把 wiki 容器整树 pull 到控制面临时镜像；
+    // 生命周期工具的 finish 触发「base-hash 复检 → 推回 → 冲突信箱邮件」（finishWikiGeneration）；
+    // executeRun finally dispose 镜像——中断/失败 = 作废不推回，只有 finish 推回。镜像随 run
+    // 生命周期存活：resume/recover 重建 = 新镜像 + 新 HostSessionManager（openwiki durable
+    // .run.json 不跨镜像；与「中断 = 作废」语义一致），故图构建跳缓存（镜像根 per-run 必新，
+    // 命中旧缓存 = backend 指向已 dispose 的临时目录）。
+    const wikiContainer = this.deps.resolveWikiContainer(cmd.ownerId)
+    const wikiUpdate = actor?.kind === WIKI_UPDATE_TEAMMATE_KIND
+    const wikiMirror = wikiUpdate ? await pullWikiGenerationMirror(this.deps.primitives, wikiContainer) : undefined
+    const lifecycleTools =
+      wikiUpdate && wikiMirror
+        ? createWikiLifecycleTools({
+            manager: HostSessionManager.create({ host: WIKI_UPDATE_HOST_ID }),
+            mirrorRoot: wikiMirror.root,
+            onFinished: () => this.finishWikiGeneration(cmd, wikiMirror, wikiContainer),
+          })
+        : []
+
     const modelKey = actor?.modelProviderId ? `provider:${actor.modelProviderId}` : session.preferredModelJson ?? 'default'
-    const agent = this.getOrBuildGraph(cmd.sessionId, snapshot.version, policy, model, cmd.ownerId, sandboxSessionId, labContainer, modelKey, tools, capabilities)
+    const agent = wikiUpdate && wikiMirror
+      ? this.buildWikiUpdateAgent({
+          threadId: cmd.sessionId,
+          sandboxSessionId,
+          labContainer,
+          wikiContainer,
+          mirror: wikiMirror,
+          policy,
+          model,
+          teammateTools: tools,
+          lifecycleTools,
+          capabilities,
+        })
+      : this.getOrBuildGraph(cmd.sessionId, snapshot.version, policy, model, cmd.ownerId, sandboxSessionId, labContainer, modelKey, tools, capabilities)
 
     // Mailbox recover has already consumed its interrupt; only a fresh resume must match the wait.
     if (cmd.kind === 'resume' && cmd.mailWaitId) {
@@ -1007,6 +1057,9 @@ export class RunService {
           console.warn(`[runner] activeCheckpointId 推进失败: session=${cmd.sessionId}: ${(err as Error).message}`)
         }
       }
+      // 治理镜像 dispose（#790）：completed（finish 已推回）/ interrupted / failed / aborted
+      // 全路径作废——「中断 = 作废不推回」（AC③），推回后的副本亦无用。
+      await wikiMirror?.dispose()
     }
   }
 
@@ -1264,6 +1317,17 @@ export class RunService {
     if (this.queuedDispatch) accepted()
   }
 
+  // 运行期中间件装配（非拓扑因子——不入缓存键）：#786 teammate 委派 + #783 审批漏斗 +
+  // #780 下载校验节点（file 写类工具成功后物化产物 + 下载引用进 tool 输出；跨 run 状态由
+  // 各中间件 per-thread 槽管理）。leader 缓存路径与 #790 wiki-update 跳缓存路径共享。
+  private runtimeMiddleware(): AnyAgentMiddleware[] {
+    return [
+      ...(this.deps.teammates ? [teammateDelegation] : []),
+      ...(this.deps.approvals ? [this.deps.approvals.middleware] : []),
+      ...(this.deps.downloadNode ? [this.deps.downloadNode.middleware] : []),
+    ]
+  }
+
   // ---- 图实例缓存（拓扑因子全在键内：thread | configVersion | policy | backend 双根）----
   private getOrBuildGraph(
     threadId: string,
@@ -1299,6 +1363,7 @@ export class RunService {
     // primitives 进程级单例），同键必同工具面——「同参数必同拓扑」纯函数约束保持。
     // 检索只读（getArchive 拉镜像），不经写锁面（#785 锁只覆盖 putArchive/破坏性 op）。
     const wikiTools = createWikiRetrievalTools({ primitives: this.deps.primitives, wikiContainer })
+    const middleware = this.runtimeMiddleware()
     const agent = buildLeaderAgent({
       model,
       backend,
@@ -1307,24 +1372,102 @@ export class RunService {
       official,
       interruptPolicy: policy,
       tools: [...wikiTools, ...tools],
-      // 中间件（运行期行为非拓扑因子——不入缓存键）：#783 审批漏斗 + #780 下载校验节点
-      //（file 写类工具成功后物化产物 + 下载引用进 tool 输出；跨 run 状态由各中间件
-      // per-thread 槽管理，同参数必同拓扑的纯函数约束不受影响）。
-      ...(this.deps.approvals || this.deps.downloadNode || this.deps.teammates
-        ? {
-            middleware: [
-              ...(this.deps.teammates ? [teammateDelegation] : []),
-              ...(this.deps.approvals ? [this.deps.approvals.middleware] : []),
-              ...(this.deps.downloadNode ? [this.deps.downloadNode.middleware] : []),
-            ],
-          }
-        : {}),
+      ...(middleware.length > 0 ? { middleware } : {}),
     })
     // 图实例数护栏（正确性由键保证，此处防长期运行退化；超限整表清——重建成本 =
     // 一次 createDeepAgent 编译，进行中 run 持既有实例引用不受影响）。
     if (this.graphs.size >= GRAPH_CACHE_MAX_INSTANCES) this.graphs.clear()
     this.graphs.set(key, agent)
     return agent
+  }
+
+  // ---- wiki-update teammate 图（#790 · 三通道②）：跳缓存 per-run 重建 ----
+  // 镜像根 per-run 必新（finally dispose）——命中旧缓存 = backend 指向已 dispose 的临时目录，
+  // 故不入图缓存。systemPrompt 追加治理驱动提示；backend = 组合 backend（/lab 照旧容器面 +
+  // /wiki/ 落镜像；withWriteLocks 整体包裹——/lab 写不丢 #785 写锁，/wiki/ 镜像写也入锁）；
+  // 生命周期工具（六件）+ 常驻检索（#789）+ teammate 工具同图。
+  private buildWikiUpdateAgent(p: {
+    readonly threadId: string
+    readonly sandboxSessionId: string
+    readonly labContainer: string
+    readonly wikiContainer: string
+    readonly mirror: WikiGenerationMirror
+    readonly policy: InterruptPolicy | undefined
+    readonly model: LeaderAgentParams['model']
+    readonly teammateTools: NonNullable<LeaderAgentParams['tools']>
+    readonly lifecycleTools: NonNullable<LeaderAgentParams['tools']>
+    readonly capabilities: RunCapabilities
+  }): DeepAgentLike {
+    const backend = buildWikiUpdateBackend({
+      defaultBackend: new DockerArchiveBackend(this.deps.primitives, {
+        wiki: p.wikiContainer,
+        lab: p.labContainer,
+      }),
+      wikiRouteBackend: new FilesystemBackend({ rootDir: wikiMirrorRouteRootDir(p.mirror.root), virtualMode: true }),
+      targets: { wiki: p.wikiContainer, lab: p.labContainer },
+      locks: this.writeLocks,
+      ctx: () => this.writeLockContext(p.sandboxSessionId, p.threadId),
+      auditor: this.overwriteAuditor,
+    })
+    const wikiTools = createWikiRetrievalTools({ primitives: this.deps.primitives, wikiContainer: p.wikiContainer })
+    const middleware = this.runtimeMiddleware()
+    return buildLeaderAgent({
+      model: p.model,
+      backend,
+      checkpointer: this.deps.saver,
+      systemPrompt: [LEADER_SYSTEM_PROMPT, WIKI_UPDATE_TEAMMATE_PROMPT].join('\n\n'),
+      official: p.capabilities.official,
+      interruptPolicy: p.policy,
+      tools: [...wikiTools, ...p.teammateTools, ...p.lifecycleTools],
+      ...(middleware.length > 0 ? { middleware } : {}),
+    })
+  }
+
+  // ---- finish 治理副作用（#790 通道②推回钩子）：base-hash 复检 → 推回 / 冲突信箱邮件 ----
+  // 复检与 pull 同一实现同一口径（readContainerWikiTree）；复检 ≠ 基线（或树不可读——无法
+  // 核验）→ 不推回 + leader 信箱邮件（conflict 不静默覆盖）；一致 → pushBack（putArchive +
+  // diff rm）。
+  private async finishWikiGeneration(
+    cmd: RunCommand,
+    mirror: WikiGenerationMirror,
+    wikiContainer: string,
+  ): Promise<WikiToolResult> {
+    let current: Awaited<ReturnType<typeof readContainerWikiTree>> = null
+    try {
+      current = await readContainerWikiTree(this.deps.primitives, wikiContainer)
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.warn(`[runner] wiki base-hash recheck failed: session=${cmd.sessionId}: ${(e as Error).message}`)
+    }
+    if (current === null || current.hash !== mirror.baselineHash) {
+      // 冲突：弃镜像不推回（executeRun finally dispose），leader 信箱通知是父会话时间线上
+      // 的用户可见面。邮件失败不放大——conflict Result 始终是工具回传权威。
+      try {
+        await this.deps.teammates?.sendMail({
+          parentSessionId: cmd.parentSessionId ?? cmd.sessionId,
+          senderTeammateId: cmd.teammateId ?? null,
+          recipientTeammateId: null,
+          kind: WIKI_CONFLICT_MAIL_KIND,
+          content: JSON.stringify({
+            reason: 'base-hash-conflict',
+            runId: cmd.runId,
+            message: 'The wiki changed while the wiki-update teammate was running; the update was discarded without overwriting.',
+          }),
+        })
+      } catch (e) {
+        // eslint-disable-next-line no-console
+        console.warn(`[runner] wiki conflict mail failed: session=${cmd.sessionId}: ${(e as Error).message}`)
+      }
+      return {
+        ok: false,
+        error: {
+          code: 'conflict',
+          message: 'The real wiki changed while this update was running; nothing was published. Report the conflict to the leader.',
+        },
+      }
+    }
+    const push = await pushBackWikiGenerationMirror(this.deps.primitives, wikiContainer, mirror.root)
+    return { ok: true, data: push }
   }
 
   // 写锁上下文现取（#785）：图实例跨 run 缓存，holder 不可构造期固化——每次加锁时从在飞
