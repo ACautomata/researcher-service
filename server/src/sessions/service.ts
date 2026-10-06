@@ -25,17 +25,15 @@ import { getSessionForUser } from '../sandboxes/service'
 import type { SandboxRemoveOutcome } from '../sandboxes/lifecycle'
 import type { EventPublisher, InFlightProjection, RunCommand, RunSnapshot } from '../runner/runtime/runService'
 import { serializeAttachments, type RecordTurnPayload } from './reducer'
-import { ancestorChainOf } from '../checkpointChain'
+import { ancestorChainOf, loadCheckpointParentOf, visibleRowIds, type HistoryRowLite } from '../checkpointChain'
 import {
   abandonedCheckpointIds,
   resolveRewindAnchor,
-  visibleRowIds,
-  type HistoryRowLite,
 } from './rewind'
 import { TITLE_AUTO_MAX, TITLE_MAX, type RewindScope } from './values'
 import type { TeammateStatus } from '../runner/teammates/service'
 import type { ApprovalInterruptPayload } from '../runner/approval/funnel'
-import { emptyRewindPreview, type RewindPreview as FileRewindPreview } from '../runner/filejournal/preview'
+import type { RewindPreview as FileRewindPreview } from '../runner/filejournal/preview'
 
 // 会话摘要（session.created/updated 载荷 + 列表行 + 创建/PATCH 返回——同一形状）。
 export interface SessionSummary {
@@ -776,7 +774,8 @@ export class SessionService {
           anchor,
           caller: { userId: user.id, username: user.username },
         })
-      : emptyRewindPreview(anchor)
+      : // 机制未接线（fileRewind 缺省）——空预览本地构造（跨域运行时 import 走注入缝纪律）
+        { anchor, revertOps: 0, pathSample: [], pathTotal: 0, execCrossed: [] }
   }
 
   // ---- fork（story 18/20 · #768 D7 修订）：唯一复制原语。新 Session 行（parentSessionKey +
@@ -1018,11 +1017,7 @@ export class SessionService {
   // thread 的未归档 checkpointId → parentCheckpointId 查找表（rewind/fork/残留清理共用）：
   // 链行走只在活跃（未归档）图上进行——归档行不参与祖先链（被放弃分叉不复活）。
   private async checkpointParentLookup(sessionId: string): Promise<Map<string, string | null>> {
-    const cps = await this.deps.prisma.checkpoint.findMany({
-      where: { threadId: sessionId, archivedAt: null },
-      select: { checkpointId: true, parentCheckpointId: true },
-    })
-    return new Map(cps.map((c) => [c.checkpointId, c.parentCheckpointId]))
+    return loadCheckpointParentOf(this.deps.prisma, sessionId)
   }
 
   // 活跃行里最新带锚 assistant 锚点（fork 缺省切点解析面；无 → null）

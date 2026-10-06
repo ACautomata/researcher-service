@@ -2,9 +2,10 @@
 // 不入日志；rewind 预览列出跨越 exec 调用清单——复用轨迹/审计数据零新增存储；不做全树
 // diff）」。exec 清单源 = 锚后 assistant 行 attachmentsJson 的 tools 聚合（ToolLine——
 // TurnReducer 落行面，零新增存储）；锚后判定 = anchorCheckpointId ∉ chain(anchor)
-//（挂靠语义与 rewind 归档同源——sessions/rewind.ts visibleRowIds 的机制面取反）。
+//（挂靠语义与 rewind 归档同源——checkpointChain.visibleRowIds 共享内核单一实现）。
 
 import type { PrismaClient } from '../../generated/prisma/client'
+import { visibleRowIds } from '../../checkpointChain'
 import { planRevert } from './replay'
 import { PREVIEW_PATH_SAMPLE_MAX } from './values'
 
@@ -57,12 +58,14 @@ export async function buildRewindPreview(
   const toRevert = planRevert(rows, chain, watermark, Number.MAX_SAFE_INTEGER).toRevert
   const paths = [...new Set(toRevert.map((r) => r.path))]
 
-  // 锚后 assistant 行（未归档、锚 ∉ chain）→ tools 聚合 → exec 清单；外加存活跨派生点
-  // teammate threads（teammate 共享 /lab、exec 副作用同不可逆放——派生点 ∉ chain = 锚后
-  // 派生，其全部 exec 在锚后；锚前派生的副作用在锚前不入清单）。
+  // 锚后 assistant 行（未归档）→ tools 聚合 → exec 清单；外加存活跨派生点 teammate threads
+  //（teammate 共享 /lab、exec 副作用同不可逆放——派生点 ∉ chain = 锚后派生，其全部 exec 在锚后；
+  // 锚前派生的副作用在锚前不入清单）。锚后判定 = visibleRowIds 单一来源（挂靠判据与 rewind
+  // 归档同源——null 锚 assistant 行〔aborted/failed 轮〕挂靠后方最近 assistant 传递，简化
+  // 非空过滤会把这批行的 exec 轨迹漏在确认门外，而归档面会将其一并软删）。
   const messages = await prisma.sessionMessage.findMany({
     where: { sessionId, role: 'assistant', archivedAt: null },
-    select: { anchorCheckpointId: true, attachmentsJson: true },
+    select: { id: true, turn: true, role: true, anchorCheckpointId: true, createdAt: true, attachmentsJson: true },
   })
   const execCrossed: ExecCrossed[] = []
   const harvest = (rows: Array<{ attachmentsJson: string }>): void => {
@@ -75,7 +78,8 @@ export async function buildRewindPreview(
       }
     }
   }
-  harvest(messages.filter((m) => m.anchorCheckpointId !== null && !chain.has(m.anchorCheckpointId)))
+  const visible = visibleRowIds(messages, chain)
+  harvest(messages.filter((m) => !visible.has(m.id)))
   const teammates = await prisma.teammate.findMany({
     where: { parentSessionId: sessionId, archivedAt: null },
     select: { threadId: true, spawnedAtCheckpointId: true },

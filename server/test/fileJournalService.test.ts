@@ -449,6 +449,24 @@ describe('FileJournalService（#782）', () => {
     expect(fs.trees.get(CONTAINER)!.get('/lab/fresh.txt')?.toString()).toBe('fresh')
   })
 
+  it('boot 拾起首次 rewind tx1 后崩溃窗口：归档未处置行重演（水位 null 决策面）', async () => {
+    await seedSession({ activeCheckpointId: 'ckB' })
+    // tx1 已提交（指针=ckB、abandoned 行已归档）、tx2 未跑（水位 null）——前两支判据均不命中
+    const b = backend()
+    expect((await b.write('/lab/victim.txt', 'v')).error).toBeUndefined()
+    await prisma.fileJournal.update({
+      where: { sessionId_seq: { sessionId: SESSION, seq: 1 } },
+      data: { checkpointId: 'ckC', archivedAt: new Date() }, // abandoned 归档（对话面已回退）
+    })
+    expect(fs.trees.get(CONTAINER)!.has('/lab/victim.txt')).toBe(true)
+
+    await svc.reconcileOnBoot()
+    // 决策已落盘 → boot 重演执行（/lab 恢复无自动路径 + 零审计的静默面消除）
+    const row = await prisma.fileJournal.findFirstOrThrow({ where: { sessionId: SESSION, path: 'victim.txt' } })
+    expect(row.fileRevertedAt).not.toBeNull()
+    expect(fs.trees.get(CONTAINER)!.has('/lab/victim.txt')).toBe(false)
+  })
+
   it('续放：逆放中断残留（水位已推进、部分行未处置）在下次 rewindFiles 续放完成', async () => {
     await seedSession()
     const b = backend()

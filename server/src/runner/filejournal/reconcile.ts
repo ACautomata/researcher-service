@@ -47,13 +47,20 @@ export class Reconciler {
     return { ...rolled, ...resumed, containerMissing: false }
   }
 
-  // 启动路待处理清单：全表 applied=false 按 session 分组 + 水位 session 续放。执行互斥与
+  // 启动路待处理清单：applied=false（journal-first 崩溃残留）+ 水位 session 续放 + 归档未
+  // 处置行（首次 rewind 的 tx1〔归档+指针〕提交后 tx2〔keepMark+水位〕前崩溃窗口——决策已
+  // 落盘但水位仍 null，前两支判据均不命中则 /lab 恢复无自动路径且零审计）。session 水位条件
+  // 排除 chat 面归档遗留（seq ≤ 水位恒存在——非拾起对象，免 boot 清单噪音）。执行互斥与
   // blob 防剪由调用方装配（FileJournalService.reconcileOnBoot——围栏 + replay lease；容器
   // 缺失 session 在 reconcileSession 跳过并计数）。
   async sessionsNeedingReconcile(): Promise<string[]> {
     const sessions = await this.deps.prisma.session.findMany({
       where: {
-        OR: [{ fileJournalAnchorSeq: { not: null } }, { fileJournal: { some: { applied: false } } }],
+        OR: [
+          { fileJournalAnchorSeq: { not: null } },
+          { fileJournal: { some: { applied: false } } },
+          { fileJournal: { some: { archivedAt: { not: null }, fileRevertedAt: null, session: { fileJournalAnchorSeq: null } } } },
+        ],
       },
       select: { id: true },
     })
@@ -93,7 +100,9 @@ export class Reconciler {
   }
 
   // 续放：残集 = seq>水位 ∧ 未打标（上次 rewind 决策 toRevert 的执行中断残留——或容器缺失
-  // 降级面）。chain 过滤（与 planRevert 同形）：∈ chain 的行是锚链保留段/新写，不可分面用
+  // 降级面）；水位 null 时改查归档未处置面（首次 rewind tx1 后 tx2 前崩溃窗口——归档行即
+  // 决策已落盘信号；chat 面归档遗留被第三支 session 水位条件与 seq 判据双重排除在拾起外）。
+  // chain 过滤（与 planRevert 同形）：∈ chain 的行是锚链保留段/新写，不可分面用
   // chain 判别——交回 planRevert 判定（keepMark/水位语义），∉ chain 才续放；否则后续 rewind
   // 的 restore 路会把 (tN, tN+1] 段合法新写一并撤销。
   private async resumeRevert(
@@ -105,13 +114,19 @@ export class Reconciler {
       where: { id: sessionId },
       select: { fileJournalAnchorSeq: true },
     })
-    if (session.fileJournalAnchorSeq === null) {
-      return { resumedReverted: 0, resumedMissing: 0 }
-    }
-    const residual = (await this.deps.prisma.fileJournal.findMany({
-      where: { sessionId, seq: { gt: session.fileJournalAnchorSeq }, fileRevertedAt: null },
-      orderBy: { seq: 'desc' },
-    })).filter((r) => chain === null || !chain.has(r.checkpointId))
+    const watermark = session.fileJournalAnchorSeq
+    const residual = (
+      await this.deps.prisma.fileJournal.findMany({
+        where: {
+          sessionId,
+          fileRevertedAt: null,
+          ...(watermark !== null
+            ? { seq: { gt: watermark } }
+            : { archivedAt: { not: null } }),
+        },
+        orderBy: { seq: 'desc' },
+      })
+    ).filter((r) => chain === null || !chain.has(r.checkpointId))
     if (residual.length === 0) return { resumedReverted: 0, resumedMissing: 0 }
     const outcome = await executeRevert(sessionId, container, residual, this.deps.io)
     return { resumedReverted: outcome.reverted, resumedMissing: outcome.skippedMissing }

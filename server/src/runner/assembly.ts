@@ -16,6 +16,7 @@ import { BullMqRunQueue } from './bullmqRunQueue'
 import { disableLangsmithTracing } from './runtime/tracing'
 import { installAbortRejectionGuard } from './runtime/abortGuard'
 import { config } from '../config'
+import { loadCheckpointParentOf } from '../checkpointChain'
 import { wikiContainerName } from '../wikiContainers/runtime'
 import { sandboxContainerName } from '../sandboxes/runtime'
 import { createDownloadNode } from './runtime/downloadNode'
@@ -91,13 +92,7 @@ export function assembleRunner(opts: {
     ...(opts.ensureSandbox
       ? { ensureContainerOf: async (sessionId) => (await opts.ensureSandbox!(sessionId)).containerId }
       : {}),
-    checkpointParentOf: async (sessionId) => {
-      const rows = await opts.prisma.checkpoint.findMany({
-        where: { threadId: sessionId, archivedAt: null },
-        select: { checkpointId: true, parentCheckpointId: true },
-      })
-      return new Map(rows.map((r) => [r.checkpointId, r.parentCheckpointId]))
-    },
+    checkpointParentOf: async (sessionId) => loadCheckpointParentOf(opts.prisma, sessionId),
   })
 
   // #780 下载校验节点（片 3）：file 写类工具（write/edit）成功后校验声明路径 → 物化
