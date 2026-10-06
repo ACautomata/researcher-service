@@ -2,7 +2,7 @@
 // Figure Editor shell（F1，docs/figure-editor/reconnaissance.md）。
 // Path A V1：researcher-service 内置图片/图表编辑正式模块。本页是占位壳——编辑器工作台
 // （same-origin SVG-Edit iframe）由 F2/F3 引入；本轮不接入任何 AutoFigure-Edit 资产/API。
-// 视觉沿用仓库 Element Plus 设计 token + scoped style（AutoFigureView 同款约束），不引上游 CSS。
+// 视觉沿用仓库 Element Plus 设计 token + scoped style 约束，不引上游 CSS。
 </script>
 
 <template>

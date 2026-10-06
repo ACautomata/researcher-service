@@ -124,8 +124,9 @@ OpenClaw 容器 fleet (openclaw-gw-<name>，每容器独立 home/openclaw.json/�
 - `GET /api/v1/events` — SSE 事件流（#773，panel_stream cookie 认证，替代 WS 的传输面先行）。
 
 全局 #312 信封：所有 REST 一律 HTTP 200，错误信号在 body `{code,message,data}`；「不存在 vs 越权」
-同码防探测（20040/30040/40040/60040）。例外：二进制成功路径直发原生字节（`GET /figures/:id/png` 成功
-返 `image/png` 字节，不包信封、不 base64-in-JSON；错误面仍走信封）；SSE 流端点（`/api/v1/events`）
+同码防探测（20040/30040/40040/60040）。例外：产物成功路径直发原生字节（`GET /figures/:id/png` 成功
+返 `image/png` 字节、`GET /figures/:id/svg` 返 `image/svg+xml` 文本，不包信封、不 base64-in-JSON；
+错误面仍走信封）；SSE 流端点（`/api/v1/events`）
 连接级认证失败走 **HTTP 401** + 信封体（#726 钉死「不入事件」，EventSource 看不见状态码——REST 刷新链
 死信号让路；其余响应仍 HTTP 200+信封）。码段：`0` 成功 · `1xxxx` 通用/鉴权 ·
 `2xxxx` 容器 · `3xxxx` wiki ·
@@ -135,8 +136,9 @@ maxConcurrentRuns 或全局 RUNNER_MAX_CONCURRENT_RUNS]）· `5xxxx` chat/pairin
   50004 approval_not_found 同码防探测；#778 增（50004 让位 #783，顺移起）50005 run 进行中禁输入·
   非终态拒删 / 50006 无在飞可中断 / 50007 幂等 key 同 key 异 content；#782 起 50008 文件状态
   重放中[写围栏等待超时，报当前持有者]）· `6xxxx` files ·
-`7xxxx` figures（AutoFigure，70040 不存在/越权同码防探测（T05 读路径，PNG 复用同一归属门）· 70041 幂等冲突 ·
-70042 PNG 未就绪（queued/running）· 70043 PNG 不可用（failed/产物缺失））·
+`7xxxx` figures（AutoFigure，70040 不存在/越权同码防探测（detail/png/svg 三读路径共用归属门）·
+70041/70042 [退役保留]（幂等冲突/PNG 未就绪随 #791 创建端点与 GenerationJob 退役，码段防复用）·
+70043 产物不可用（渲染失败缺省/产物缺失，PNG/SVG 共用））·
 `9xxxx` 系统/校验。
 
 ## frontend 结构（`frontend/src/`）

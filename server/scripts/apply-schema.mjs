@@ -3,14 +3,16 @@
 //
 // #771 起本脚本幂等可重跑（验收钉死）：
 //   1) init.sql 逐语句应用 —— CREATE TABLE/INDEX 先查 sqlite_master 存在即跳过（additive，
-//      旧表形状永不被重建/改写）；fresh 库全量建表，既有库全量跳过。
+//      旧表形状不被改写）；fresh 库全量建表，既有库全量跳过。
 //      例外：存量库检测到旧形状 model_providers（containerId 列）时，跳过一切引用该表的语句
 //      ——新形状的唯一索引 (ownerId, providerId) 在旧列集上执行会炸（no such column），且
 //      「旧表不动留待 T0 清退」本就不要求改写它；跳过后续 runIncrementalSchema 的旧形状
 //      检测与告警即可达（#771 验收④）。
 //   2) 增量收敛 —— 共享 lib/incremental-schema.mjs（新表 IF NOT EXISTS、既有表加列经
 //      PRAGMA guard、config_meta 种子）：`npm run db:apply` 单独即可把任意旧库收敛到当前
-//      schema（additive；旧形状 model_providers/pairings 不动，留待 T0 清退 #801）。
+//      schema。additive 是默认；唯一例外 = #791 起的换轨 DROP 重建（figures 旧形状 → 新形状、
+//      generation_jobs 无条件 DROP）——依 #732 零迁移前提（产品未上线，旧行不迁移直接换轨，
+//      「空库直建」语义），非 additive 常态的放松。
 //
 // schema 变更后：先 `npx prisma migrate diff --from-empty --to-schema prisma/schema.prisma
 // --script > prisma/init.sql`（init.sql 为 from-empty 全量派生物，schema.prisma 单一来源），

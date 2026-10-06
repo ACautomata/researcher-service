@@ -1,5 +1,9 @@
 # AutoFigure 集成 —— 规格（spec / PRD）
 
+> **superseded（#791）**：本文档为 sidecar 集成时代的历史档案（#744 v1 形态）。现役准据 =
+> GitHub issue #744 v2（LangGraph 化重构与融合形态）及其 §10 拆票（#791 等）；sidecar 目录/
+> 服务段的正式删除归票 6。票据史按 #744 §8 保留不删。
+
 > 状态：**规格草案，待发布到 issue tracker**（`ready-for-agent`）。本文档由 `/to-spec` 依据
 > [reconnaissance.md](./reconnaissance.md)（事实侦察）与 [grilling-decisions.md](./grilling-decisions.md)
 > （已批准决策）综合而成。**集成目标：`ResearAI/AutoFigure`**（非 AutoFigure-Edit）。

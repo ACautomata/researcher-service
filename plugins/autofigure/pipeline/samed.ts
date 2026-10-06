@@ -48,6 +48,8 @@ export function samedOverlaySvg(
     parts.push(
       `<rect x="${box.x1}" y="${box.y1}" width="${boxWidth}" height="${boxHeight}" fill="#808080" stroke="black" stroke-width="3"/>`,
     )
+    // label = 内部编号固定形态 `<AF>NN`（buildValidBoxes/mergeOverlappingBoxes 生成，非 LLM
+    // 来源）——恒单个 `<`/`>`、无 `&`，单次 replace 转义即完备。
     parts.push(
       `<text x="${cx}" y="${cy}" text-anchor="middle" dominant-baseline="central" fill="white" font-family="DejaVu Sans, Helvetica, Arial, sans-serif" font-weight="bold" font-size="${fontSize}">${box.label.replace('<', '&lt;').replace('>', '&gt;')}</text>`,
     )

@@ -1,7 +1,7 @@
 // AutoFigure 图标替换策略链 / 保底 SVG / samed overlay（#791 · S2 纯逻辑 + S4 行为快照）。
 // 上游对照：replace_icons_in_svg :2707-2915 · create_embedded_figure_svg :3547-3571。
-// golden-file 升级位：testdata/golden/upstream.json 生成后（需运行上游采集脚本的用户批准，
-// 见 dump_golden.py）追加逐字节对照断言；本文件先以确定性快照锁定移植行为。
+// 逐字节 golden 对照在 autofigureGolden.test.ts（testdata/golden/upstream.json 已落库，
+// 采集脚本 = plugins/autofigure/testdata/golden/dump-golden.py）；本文件锁定策略链分支行为。
 
 import { describe, it, expect } from 'vitest'
 import { replaceIconsInSvg } from '../../plugins/autofigure/pipeline/replaceIcons'

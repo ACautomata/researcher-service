@@ -1,8 +1,8 @@
 // AutoFigure prompt 模板结构断言（#791 · S2）。
 // 保真策略：prompt 是逐字移植（#744 §3.3），本文件锁定结构锚点（维度约束 / 占位符 spec /
-// 八要点检查单 / 转义三引号形态）；**golden-file 逐字节对照** = testdata/golden/upstream.json
-//（采集脚本跑上游 Python 实现生成——需运行外部代码的用户批准，见 plugins/autofigure/testdata/
-// README），生成后追加对照断言。错误消息注入面：fix prompt 的 SYNTAX ERRORS DETECTED 内容
+// 八要点检查单 / 转义三引号形态）；**golden-file 逐字节对照** = autofigureGolden.test.ts
+//（testdata/golden/upstream.json 已落库，采集脚本见 plugins/autofigure/testdata/golden/README.md）。
+// 错误消息注入面：fix prompt 的 SYNTAX ERRORS DETECTED 内容
 // 与 parser 相关（lxml vs @xmldom 消息格式不同），对照场景用固定注入 errors 规避。
 
 import { describe, it, expect } from 'vitest'

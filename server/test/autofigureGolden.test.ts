@@ -49,8 +49,6 @@ describe.skipIf(!hasGolden)('golden-file 对照（上游 AutoFigure-Edit @ 16f37
   })
 
   it('模板 prompt（label/box/no_icon）逐字节对照', () => {
-    const method = golden.image_prompt_no_ref.prompt
-    void method
     expect(
       buildTemplatePrompt({
         figureWidth: golden.template_prompt_label.figureWidth ?? 200,

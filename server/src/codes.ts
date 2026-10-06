@@ -72,7 +72,7 @@ export const CODE = {
   FILE_REPLAY_IN_PROGRESS: 50008, // 文件状态重放中（#782 会话写围栏超时——rewind 逆放持有围栏，等待有界报持有者）
   // 9xxxx 系统 / 校验
   OAUTH_NOT_CONFIGURED: 90001, // OAuth provider 未配置（原 501）
-  VALIDATION_FAILED: 90002, // 参数校验失败（字段明细进 data）；Idempotency-Key 缺/超长特例 data=null（figures 前置中间件）
+  VALIDATION_FAILED: 90002, // 参数校验失败（字段明细进 data）；曾为 figures 幂等中间件特例 data=null（该中间件随 #791 创建端点退役）
   LLM_NOT_CONFIGURED: 90003, // LLM key 未配置 / 写盘失败（create 前置，转译）
   PORT_POOL_EXHAUSTED: 90004, // 端口池耗尽 / 持续分配冲突（转译，复用系统域）
   ROUTE_NOT_FOUND: 90005, // 路由不存在（404 信封兜底）
