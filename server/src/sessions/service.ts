@@ -716,10 +716,17 @@ export class SessionService {
           userId: session.ownerId,
           username: owner?.username ?? '',
         }
-        const result = await (fileRewind.runRewindExclusive !== undefined
-          ? fileRewind.rewindFilesCore(rewindInput)
-          : fileRewind.rewindFiles(rewindInput))
-        files = result
+        try {
+          files = await (fileRewind.runRewindExclusive !== undefined
+            ? fileRewind.rewindFilesCore(rewindInput)
+            : fileRewind.rewindFiles(rewindInput))
+        } catch (err) {
+          // 异常终态补偿（对话面事务已提交——事实已发生）：事件与 C1 通知照发（degraded
+          // 语义「回退未完成」），错误重抛（REST 错误信封驱动重试；残行由重试/boot 续放收敛）
+          this.publishSessionEvent(session.ownerId, 'session.invalidated', { reason: 'rewind' }, sessionId)
+          await this.deps.runService.teammatesNotifyFileRewind?.(sessionId, anchor, true)
+          throw err
+        }
       }
       // C1 通知面（逆放完成后——文案「已逆放恢复」在事实之后）；degraded（容器缺失/深度
       // 超限——/lab 未动）如实报「回退未完成」；机制未接线（fileRewind 缺省）= 文件未动，
@@ -729,9 +736,19 @@ export class SessionService {
       }
 
       this.publishSessionEvent(session.ownerId, 'session.invalidated', { reason: 'rewind' }, sessionId)
+      // scope=files 返回指针锁内重读（并发串行化后锁外快照可能已被先行 rewind 归档失效）
+      const currentPointer =
+        scope === 'files'
+          ? (
+              await this.deps.prisma.session.findUniqueOrThrow({
+                where: { id: sessionId },
+                select: { activeCheckpointId: true },
+              })
+            ).activeCheckpointId
+          : null
       return {
         sessionId,
-        activeCheckpointId: scope === 'files' ? session.activeCheckpointId : anchor,
+        activeCheckpointId: scope === 'files' ? currentPointer : anchor,
         scope,
         ...(files !== undefined ? { files } : {}),
       }
