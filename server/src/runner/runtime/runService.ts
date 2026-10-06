@@ -4,6 +4,11 @@ import { snapshotRunCapabilities, type RunCapabilities } from '../capabilities'
 import type { PluginRuntime } from '../../plugins/surface'
 import { toLangChainTools, contentToText } from '../../plugins/tools'
 import type { AnyPluginToolDefinition } from '../../plugins/api'
+import { runWithPluginRunFrame, execPartsFromFrame, type PluginRunFrame } from '../../plugins/runContext'
+import { createFiguresToolPort } from '../../figures/toolPort'
+import { createLlmToolPort } from '../llmToolPort'
+import { createPrismaFigureRunAuditSink, FIGURE_RUN_PROGRESS, parseFigureRunProgress } from '../../figures/figureAudit'
+import { runWithToolCallContext, createToolCallContextMiddleware, runWithRunContext } from '../filejournal/context'
 // RunService —— 集中式 runner 内核（#777 · #747 A 节「runner 编排」）。
 //
 // 职责（BullMQ 传输面之外的全部 run 机制）：
@@ -77,7 +82,6 @@ import { TurnReducer, isEmptyTurnSnapshot, type RecordTurnPayload, type TurnSnap
 import { TeammateService, type TeammateSummary } from '../teammates/service'
 import { createTeammateTools } from '../teammates/tools'
 import type { FileJournalService } from '../filejournal/service'
-import { createToolCallContextMiddleware, runWithRunContext } from '../filejournal/context'
 import { IDEMPOTENCY_INGEST_PREFIX, IDEMPOTENCY_MEDIA_PREFIX } from '../filejournal/values'
 import { createWikiRetrievalTools } from '../wikisearch'
 import {
@@ -924,23 +928,27 @@ export class RunService {
               : null
 
         // #782 run 上下文（ALS 外层）：journal 行 runId 盖印源（checkpointId 终态回填键）——
-        // 覆盖流创建与消费全程（backend 打点在流内发生）
+        // 覆盖流创建与消费全程（backend 打点在流内发生）。#792 插件 run frame（嵌套 ALS）：
+        // ctx 四件解析源——图实例跨 run 复用，run 身份只能运行期读取（runContext.ts 头注）。
+        const pluginFrame = this.buildPluginRunFrame(cmd)
         await runWithRunContext(cmd.runId, async () => {
-          const stream = await agent.streamEvents(input, {
-            ...invocation,
-            recursionLimit: this.recursionLimit,
-            signal: controller.signal,
-            callbacks: [usageHandler],
-            metadata: { ownerId: capabilities.ownerId, ownerPluginIds: [...capabilities.enabledPluginIds], officialContentVersion: capabilities.official.version },
-          })
-          for await (const raw of stream) {
-            // 工具/推理活动刷新沙箱闲置计时（#776 真 activity 源——长 run 中途不被 sweep stop）
-            this.deps.sandboxes?.touch(sandboxSessionId)
-            for (const ev of projector.feed(raw, this.clock())) {
-              turn.feed(ev)
-              this.publish(cmd.ownerId, ev, cmd)
+          await runWithPluginRunFrame(pluginFrame, async () => {
+            const stream = await agent.streamEvents(input, {
+              ...invocation,
+              recursionLimit: this.recursionLimit,
+              signal: controller.signal,
+              callbacks: [usageHandler],
+              metadata: { ownerId: capabilities.ownerId, ownerPluginIds: [...capabilities.enabledPluginIds], officialContentVersion: capabilities.official.version },
+            })
+            for await (const raw of stream) {
+              // 工具/推理活动刷新沙箱闲置计时（#776 真 activity 源——长 run 中途不被 sweep stop）
+              this.deps.sandboxes?.touch(sandboxSessionId)
+              for (const ev of projector.feed(raw, this.clock())) {
+                turn.feed(ev)
+                this.publish(cmd.ownerId, ev, cmd)
+              }
             }
-          }
+          })
         })
         // 流正常结束：判定停在 interrupt（PoC 形态：next 非空或 tasks 带 interrupts）
         const state = await this.graphState(agent, cmd.sessionId)
@@ -1195,6 +1203,49 @@ export class RunService {
     return ancestorChainOf((id) => parentOf.get(id) ?? null, from).has(target)
   }
 
+  // ---- 插件 run frame（#792 · #744 §11.1「run 装配注入」）----
+  // ctx 四件（run 身份/figures/llm/audit）的 per-run 构造面：agent 自动调用路径经 ALS
+  // frame（executeRun streamEvents 外层置位）、{execute} 直达路径显式构造。figures 去重表
+  // RunService 单例持有（跨 run 共享事务性重试窗口防护）；audit sink per-run（session/run
+  // 弱关联盖印）；onUpdate 闭包 per-run（per-toolCall 上次 stage 记忆随 frame GC）。
+  private readonly figureDedupe = new Map<string, Promise<{ readonly figureId: string }>>()
+
+  private buildPluginRunFrame(cmd: RunEventContext & { username: string }): PluginRunFrame | undefined {
+    if (!this.deps.plugins) return undefined
+    const sessionId = cmd.parentSessionId ?? cmd.sessionId
+    const audit = createPrismaFigureRunAuditSink(this.deps.prisma, {
+      ownerId: cmd.ownerId,
+      username: cmd.username,
+      sessionId,
+      runId: cmd.runId,
+    })
+    const stageTrace = new Map<string, string>()
+    return {
+      run: { ownerId: cmd.ownerId, sessionId, runId: cmd.runId },
+      figures: createFiguresToolPort({ prisma: this.deps.prisma, dedupe: this.figureDedupe }, cmd.ownerId),
+      llm: createLlmToolPort(this.deps.registry, cmd.ownerId),
+      audit,
+      // 双面翻译链（#744 §11.2）：onUpdate 上报一次 → runner 同时发 figure_run.progress
+      //（SSE 用户面）与落 figure_run.stage_transitions（TextTrace 审计面）；白名单外丢弃。
+      onUpdate: (toolCallId, partial) => {
+        const parsed = parseFigureRunProgress(partial)
+        if (!parsed) return
+        const from = stageTrace.get(toolCallId)
+        stageTrace.set(toolCallId, parsed.stage)
+        this.publish(
+          cmd.ownerId,
+          { type: FIGURE_RUN_PROGRESS, payload: { toolCallId, stage: parsed.stage } },
+          cmd,
+        )
+        audit.emitFigureRun({
+          event: 'stage_transitions',
+          toolCallId,
+          detail: { ...(from !== undefined ? { from } : {}), to: parsed.stage, at: this.clock() },
+        })
+      },
+    }
+  }
+
   // ---- /compact 显式上下文压缩（#787 story 45：compact = deepagents 压缩薄封装）----
   // deepagents summarization middleware 的压缩态不重写 messages——一次压缩 = 图状态里的
   // _summarizationEvent {cutoffIndex, summaryMessage, filePath}，此后每次模型调用前
@@ -1216,7 +1267,15 @@ export class RunService {
     const surface = this.deps.plugins?.surface(capabilities.enabledPluginIds)
     const def = surface?.tools.find((tool) => tool.name === cmd.pluginTool)
     if (!surface || !def) throw fail(CODE.PLUGIN_NOT_FOUND)
-    const toolCallId = randomUUID()
+    // 直达路径输入 0 信任：zod 预校验（agent 路径由 LangChain schema 解析等价约束）。
+    const parsed = def.parameters.safeParse(cmd.pluginArgs ?? {})
+    if (!parsed.success) throw fail(CODE.PLUGINS_VALIDATION_FAILED, '插件命令参数校验失败')
+    // toolCallId 从 runId 确定性派生（agent 面为真实 tool_call_id）：BullMQ stalled 重放同
+    // job = 同 runId = 同 toolCallId → figures 去重表命中（同进程重放窗口内严格幂等）。
+    // 已知边界（文档化备查，对齐 normalizeReplay SIGKILL 窗口先例）：worker 执行中崩溃 +
+    // 进程重启后重放——去重表随进程丢失，跨进程窗口可能重复建 Figure 行（实害 = 数据冗余
+    // 非损坏；持久化判据需 figure 数据面加列，spec 明示不加，#744 §5.3）。
+    const toolCallId = `figcmd-${cmd.runId}`
     const { text: inputText, truncated: inputTruncated } = truncateUtf8(JSON.stringify(cmd.pluginArgs ?? {}), TOOL_INPUT_MAX_BYTES)
     const start = {
       type: 'tool.start' as const,
@@ -1225,8 +1284,17 @@ export class RunService {
     turn.feed(start)
     this.publish(cmd.ownerId, start, cmd)
     const startedAt = this.clock()
+    // ctx 四件 + onUpdate（#792 · #744 §11.1）：直达路径显式构造 frame 面件；toolCallId
+    // ALS 盖印 = figures 去重身份（toolPort 同源）+ 插件 execute 收到的同一 id。
+    const frame = this.buildPluginRunFrame(cmd)
+    const pluginCtx = this.deps.plugins!.toolContext
     try {
-      const result = await def.execute(toolCallId, cmd.pluginArgs as never, { signal, ctx: this.deps.plugins!.toolContext })
+      const result = await runWithToolCallContext({ toolCallId, threadId: cmd.sessionId }, () =>
+        def.execute(toolCallId, parsed.data as never, {
+          signal,
+          ...execPartsFromFrame(pluginCtx, frame, toolCallId),
+        }),
+      )
       const durationMs = Math.max(0, this.clock() - startedAt)
       // details 数据源与 projector 同语义（R5）：artifact（渲染面）优先，缺省回落 content
       // 序列化（模型/审计面文本不丢——结果卡可见）。
@@ -1499,7 +1567,9 @@ export class RunService {
   // per-thread 槽管理，同参数必同拓扑的纯函数约束不受影响）。四依赖全缺 = 空数组（调用点
   // 不挂 middleware）——leader 图与 wiki-update 图共用本单一来源。
   private runtimeMiddleware(): AnyAgentMiddleware[] {
-    if (!this.deps.teammates && !this.deps.approvals && !this.deps.downloadNode && !this.deps.fileJournal) return []
+    // #792：plugins 面也依赖 toolCallContext ALS（figures 去重身份 = 真实 tool_call_id，
+    // tools.ts 同源读取）——四依赖 + plugins 任一存在即挂链。
+    if (!this.deps.teammates && !this.deps.approvals && !this.deps.downloadNode && !this.deps.fileJournal && !this.deps.plugins) return []
     return [
       createToolCallContextMiddleware(),
       ...(this.deps.teammates ? [teammateDelegation] : []),

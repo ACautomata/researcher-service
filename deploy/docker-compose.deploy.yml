@@ -7,13 +7,15 @@
 # 宿主数据挂载唯一豁免：/var/run/docker.sock（ADR 0013，spec §5.4 已接受等价 root）。
 # （#341 M9：backend 服务退役 Django，切换为 server 服务跑 Express 控制面。）
 #
-# AutoFigure sidecar（已换轨，#791）：server 侧 env 注入与消费端已全量退役（config.autofigure
-# 删除、figures 读面常驻无 flag 门）——本服务段无任何现役消费者；服务段与
-# deploy/autofigure-sidecar 目录的正式删除归票 6（#744 §10 退役 PR，一次性窗口）。
+# AutoFigure sidecar（已换轨，#791）：sidecar 生成链路的消费端已全量退役——本服务段无任何
+# 现役消费者；服务段与 deploy/autofigure-sidecar 目录的正式删除归票 6（#744 §10 退役 PR）。
+# 注意：#792 插件化收口后 figure 生成回到 server 进程内（插件管线），AutoFigure env 三必填键
+# 随之回归（不再随 #791 清退）——见下方 server 段注释。
 #
-# 运行时敏感值（JWT_SECRET / PANEL_PUBLIC_ORIGIN / LLM_API_KEY / CREDENTIAL_ENCRYPTION_KEYS）
-# 经同目录 .env（env_file）注入，不落盘进 git；非敏感固定项（REDIS_URL/OPENCLAW_TEMPLATE_DIR/端口）
-# 直接写在本文件。AutoFigure 相关键已随消费端退役（#791，见 server env 段注释）。
+# 运行时敏感值（JWT_SECRET / PANEL_PUBLIC_ORIGIN / LLM_API_KEY / CREDENTIAL_ENCRYPTION_KEYS /
+# AUTOFIGURE_IMAGE_API_KEY / FAL_KEY）经同目录 .env（env_file）注入，不落盘进 git；
+# 非敏感固定项（REDIS_URL/OPENCLAW_TEMPLATE_DIR/端口/AUTOFIGURE_IMAGE_MODEL）直接写在本文件
+# 或 .env。AutoFigure 键清单见 server env 段注释（#792 起）。
 #
 # 用法（CD 已自动化；手工排障时参考）：
 #   docker compose -f docker-compose.deploy.yml --env-file .env pull
@@ -73,9 +75,14 @@ services:
       # provision cp 都落在容器私有 /fleet（named volume 拓扑下容器不 bind 宿主树，ADR 0011/0013；
       # 容器重建即空、create 幂等重建）。readFleetRoot 生产校验绝对路径——显式 pin 防相对路径 fallback。
       OPENCLAW_FLEET_ROOT: /fleet
-      # AutoFigure：AUTOFIGURE_* 键注入已随消费端退役（#791——config.autofigure 读取面删除，
-      # sidecar 生成链路全量退役；figures 读面常驻无 flag 门）。正式 env 清退 + sidecar 服务段
-      # 删除归票 6（#744 §10）。
+      # AutoFigure（#792 插件化收口起回归）：figure 生成 = server 进程内插件管线（sidecar
+      # 无现役消费者，服务段删除归票 6）。三个必填键经 .env（env_file）注入，生产缺键 =
+      # 启动期 assertPluginEnv fail-fast（不看启用位——任何用户随时可启用，面板必须永远备好）：
+      #   AUTOFIGURE_IMAGE_MODEL        生图模型名（如 image-01）
+      #   AUTOFIGURE_IMAGE_API_KEY      生图 API key（敏感，只走 .env）
+      #   FAL_KEY                       fal 云计算 key（敏感，只走 .env）
+      # 可选键：AUTOFIGURE_IMAGE_BASE_URL（缺省国际区）、AUTOFIGURE_SVG_MODEL（缺省 owner
+      # 默认链 primary）。键声明单源 = plugins/autofigure/manifest.ts configSchema。
     extra_hosts:
       # Linux host-gateway 映射：server 容器访问宿主 loopback 接口（host.docker.internal）。
       # macOS Docker Desktop 自动提供该名，此处显式声明保证 Linux 生产宿主（BaoTa）可解析。

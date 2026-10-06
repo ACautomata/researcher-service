@@ -3,9 +3,8 @@
 // frontend/src/plugins/index.ts）。不用 glob 自动发现——显式收录行是收录评审的动作面
 //（名字冲突、类别正确性、env 需求在 diff 上可见，§1）。
 //
-// V1 目录仅规划 AutoFigure（#752 §4.1「目录首成员」，迁移归 #753 / #744 实施拆分），
-// 当前为空：骨架校验 / REST / 启用装配 / 漏斗路由全链以测试 fixture 插件覆盖
-//（server/test/pluginsRegistry.test.ts 等）。
+// V1 目录仅 AutoFigure（#752 §4.1 目录首成员；#744 §10 票 4 工具包装收口，#792）。
 import type { PluginManifest } from '../server/src/plugins/api'
+import autofigureManifest from './autofigure/manifest'
 
-export const PLUGIN_MANIFESTS: readonly PluginManifest[] = []
+export const PLUGIN_MANIFESTS: readonly PluginManifest[] = [autofigureManifest]

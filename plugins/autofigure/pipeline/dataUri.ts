@@ -1,6 +1,5 @@
 // PNG → data URI 编码（fal/RMBG 云 API 入参与 SAM3 分割入参共用的形状）。
-// 上游对照：autofigure2.py _image_to_data_uri :1605-1609（PNG base64 + data: 前缀）。
+// 实现单源 = 核心 server/src/figures/dataUri（核心→插件方向不引入的边界纪律）——
+// 此处 re-export 保持插件内引用面（graph/fal 消费方零改动）。
 
-export function pngToDataUri(png: Uint8Array): string {
-  return `data:image/png;base64,${Buffer.from(png).toString('base64')}`
-}
+export { pngToDataUri } from '../../../server/src/figures/dataUri'

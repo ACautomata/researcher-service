@@ -74,8 +74,12 @@ services:
       # JWT_SECRET / CREDENTIAL_ENCRYPTION_KEYS 不列，走 config.ts dev 默认。不设
       # OPENCLAW_NAMED_VOLUMES（保持默认 true，named volume 拓扑，与 prod 同效）。
       LLM_API_KEY: ${LLM_API_KEY:-}
-      # AutoFigure：AUTOFIGURE_* 四键注入已随消费端退役（#791——config.autofigure 读取面删除，
-      # sidecar 生成链路全量退役）。正式 env 清退 + sidecar 服务段删除归票 6（#744 §10）。
+      # AutoFigure（#792 插件化收口起回归，同 prod 三必填键）：shell 可选注入，空串安全 =
+      # assertPluginEnv dev 警告不阻断（dev 缺键时 figure 工具调用期明确报错）。可选键
+      # AUTOFIGURE_IMAGE_BASE_URL / AUTOFIGURE_SVG_MODEL 同机制，缺省即行为正确，不显式列。
+      AUTOFIGURE_IMAGE_MODEL: ${AUTOFIGURE_IMAGE_MODEL:-}
+      AUTOFIGURE_IMAGE_API_KEY: ${AUTOFIGURE_IMAGE_API_KEY:-}
+      FAL_KEY: ${FAL_KEY:-}
     extra_hosts:
       # Linux host-gateway 映射：server 容器访问宿主 loopback 接口（host.docker.internal）。
       # macOS Docker Desktop 自动提供该名，此处显式声明对齐 prod（保证 Linux 宿主可解析）。

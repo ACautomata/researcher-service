@@ -9,3 +9,4 @@
 
 export { StateGraph, Annotation, START, END } from '@langchain/langgraph'
 export type { LangGraphRunnableConfig } from '@langchain/langgraph'
+export { z } from 'zod'

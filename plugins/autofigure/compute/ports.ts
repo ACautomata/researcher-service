@@ -19,6 +19,7 @@
 // ---------------------------------------------------------------------------
 
 import type { Sam3Detection, SamBox } from '../pipeline/values'
+import type { PluginLlmCallOptions, PluginLlmContent } from '../../../server/src/plugins/api'
 
 export interface FigureImage {
   readonly png: Uint8Array
@@ -27,15 +28,14 @@ export interface FigureImage {
 }
 
 // 多模态 contents：文本与 PNG 图混合序列（上游 call_llm_multimodal contents 形状）。
-export type MultimodalContent = string | { readonly png: Uint8Array }
-
+// 单源 = 核心 ctx.llm 载荷 PluginLlmContent（别名不另立形状，消除同形定义两对——插件→核心
+// 方向直引合法，同 server.ts/dataUri.ts 先例）。
+export type MultimodalContent = PluginLlmContent
 
 // LLM 调用参数（上游契约：步骤 4 max_tokens=50000/temp=0.7；4.5 fix 16000/0.3；
-// 4.6 optimize 50000/0.3——参数由 graph 节点显式传，适配器不自带默认）。
-export interface LlmCallOptions {
-  readonly maxTokens: number
-  readonly temperature: number
-}
+// 4.6 optimize 50000/0.3——参数由 graph 节点显式传，适配器不自带默认）。单源 = 核心
+// PluginLlmCallOptions。
+export type LlmCallOptions = PluginLlmCallOptions
 
 // ---------------------------------------------------------------------------
 // 各步骤 Port
