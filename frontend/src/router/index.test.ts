@@ -1,5 +1,6 @@
-// seam: 路由守卫决策——未认证分「确认失效踢登录」与「瞬态放行」；requiresAdmin 分「非 admin 踢回容器页」
-// （spec §9.1/§9.2 + #10 + #340-D #328）。
+// seam: 路由守卫决策——未认证分「确认失效踢登录」与「瞬态放行」（spec §9.1/§9.2 + #10）。
+// #800：admin 路由（admin-users/admin-trace-logs/admin-docs 等）整体迁入 /admin/ 子应用
+// （@/admin/router + decideAdminGuard 测试）——主面板路由表零 admin 残留、decideGuard 不判角色。
 import { describe, expect, it } from 'vitest'
 import router, { decideGuard, routes } from '@/router/index'
 
@@ -12,9 +13,6 @@ describe('页面路由按需加载', () => {
   it('所有页面组件均使用动态导入', () => {
     const records = router.getRoutes().filter((route) => route.name)
     expect(records.map((route) => String(route.name)).sort()).toEqual([
-      'admin-docs',
-      'admin-trace-logs',
-      'admin-users',
       'categories',
       'chat',
       'containers',
@@ -28,7 +26,18 @@ describe('页面路由按需加载', () => {
     ])
     expect(records.every((route) => typeof route.components?.default === 'function')).toBe(true)
   })
+
+  it('主面板路由表无 /admin/* 残留（#800 迁入 admin 子应用）', () => {
+    expect(recordsWithAdminPrefix()).toEqual([])
+  })
 })
+
+function recordsWithAdminPrefix(): string[] {
+  return router
+    .getRoutes()
+    .filter((route) => String(route.path).startsWith('/admin'))
+    .map((route) => String(route.name ?? route.path))
+}
 
 describe('decideGuard（守卫决策纯函数）', () => {
   it('受保护路由 + 已认证 → 放行', () => {
@@ -50,25 +59,9 @@ describe('decideGuard（守卫决策纯函数）', () => {
     expect(decideGuard(false, exhausted)).toBeUndefined()
   })
 
-  // #340-D（#328）：requiresAdmin 路由——已认证非 admin → 重定向容器页；admin → 放行；
-  // 未认证仍按原守卫语义（确认失效踢登录 / 瞬态放行交刷新链）。
-  it('requiresAdmin + 已认证非 admin → 重定向容器页', () => {
-    expect(decideGuard(true, authed, true)).toEqual({ name: 'containers' })
-  })
-
-  it('requiresAdmin + admin → 放行', () => {
-    expect(decideGuard(true, authedAdmin, true)).toBeUndefined()
-  })
-
-  it('requiresAdmin + 确认失效 → 跳登录（先于角色判定）', () => {
-    expect(decideGuard(true, exhausted, true)).toEqual({ name: 'login' })
-  })
-
-  it('requiresAdmin + 瞬态 → 放行（交 401 刷新链，刷新后角色再定）', () => {
-    expect(decideGuard(true, transient, true)).toBeUndefined()
-  })
-
-  it('普通路由不受 requiresAdmin 影响（默认 false）', () => {
+  // #800：requiresAdmin 语义迁入 admin 子应用守卫（decideAdminGuard）——主面板 decideGuard
+  // 不再判角色（参数已移除）。
+  it('普通路由不受角色影响', () => {
     expect(decideGuard(true, authed)).toBeUndefined()
     expect(decideGuard(true, authedAdmin)).toBeUndefined()
   })

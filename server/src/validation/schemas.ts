@@ -40,10 +40,11 @@ export const userCreateSchema = z.object({
   maxContainers: z.number().int().optional(),
 })
 
-// 改账号（users PATCH）：可改 active / 配额。
+// 改账号（users PATCH）：可改 active / 配额（容器数 + 在飞 run 并发，#800 admin 运营面）。
 export const userPatchSchema = z.object({
   isActive: z.boolean().optional(),
   maxContainers: z.number().int().optional(),
+  maxConcurrentRuns: z.number().int().optional(),
 })
 
 // 容器名 DNS-label（#334 / 平移 NAME_VALIDATOR）：小写字母开头，3–30 位，仅 [a-z0-9-]。

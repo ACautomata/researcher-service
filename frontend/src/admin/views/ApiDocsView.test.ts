@@ -17,7 +17,7 @@ vi.mock('@/api/client', () => ({
   apiJson: vi.fn(),
 }))
 
-import ApiDocsView from '@/views/ApiDocsView.vue'
+import ApiDocsView from '@/admin/views/ApiDocsView.vue'
 import { apiJson } from '@/api/client'
 import { useAuthStore } from '@/stores/auth'
 

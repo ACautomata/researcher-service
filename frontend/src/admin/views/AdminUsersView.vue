@@ -154,10 +154,40 @@ async function saveQuota(u: UserRowDTO): Promise<void> {
   }
 }
 
+// 在飞 run 并发配额 inline（#800；users PATCH maxConcurrentRuns，后端 10043 语义同容器配额）
+const runsEditing = ref<Record<string, string>>({})
+
+function beginRunsEdit(u: UserRowDTO): void {
+  runsEditing.value = { ...runsEditing.value, [u.id]: String(u.maxConcurrentRuns) }
+}
+
+function isRunsEditing(userId: string): boolean {
+  return runsEditing.value[userId] !== undefined
+}
+
+async function saveRuns(u: UserRowDTO): Promise<void> {
+  const raw = runsEditing.value[u.id] ?? ''
+  const n = Number(raw)
+  if (!Number.isInteger(n) || n < 0) {
+    ElMessage.warning('并发配额须为非负整数')
+    return
+  }
+  try {
+    await patchUser(u.id, { maxConcurrentRuns: n })
+    const next = { ...runsEditing.value }
+    delete next[u.id]
+    runsEditing.value = next
+    await refresh()
+    ElMessage.success('并发配额已更新')
+  } catch (e) {
+    ElMessage.error((e as Error).message)
+  }
+}
+
 onMounted(refresh)
 
 // 暴露行内动作 + 配额编辑态供测试/父组件触发（el-table row scoped slot 在 stub 下渲染脆弱，
-// 贴 ContainersView 模式；quotaEditing 暴露使配额编辑可在 stub 下经 VM 驱动）
+// 贴 ContainersView 模式；quotaEditing/runsEditing 暴露使配额编辑可在 stub 下经 VM 驱动）
 defineExpose({
   refresh,
   toggleActive,
@@ -167,6 +197,10 @@ defineExpose({
   isQuotaEditing,
   saveQuota,
   quotaEditing,
+  beginRunsEdit,
+  isRunsEditing,
+  saveRuns,
+  runsEditing,
 })
 </script>
 
@@ -207,6 +241,26 @@ defineExpose({
           </span>
         </template>
       </el-table-column>
+      <!-- 在飞 run 并发配额（#800；与容器配额同列宽风格） -->
+      <el-table-column label="并发配额" width="160">
+        <template #default="{ row }">
+          <span v-if="!isRunsEditing(row.id)" data-test="runs-view">
+            {{ row.maxConcurrentRuns }}
+          </span>
+          <span v-else class="quota-edit">
+            <el-input
+              v-model="runsEditing[row.id]"
+              size="small"
+              :data-test="`runs-input-${row.username}`"
+              style="width: 70px"
+              @keyup.enter="saveRuns(row)"
+            />
+            <el-button size="small" :data-test="`runs-save-${row.username}`" @click="saveRuns(row)">
+              保存
+            </el-button>
+          </span>
+        </template>
+      </el-table-column>
       <el-table-column label="改密" width="70">
         <template #default="{ row }">
           <el-tag
@@ -218,7 +272,7 @@ defineExpose({
         </template>
       </el-table-column>
       <el-table-column prop="createdAt" label="创建时间" width="180" />
-      <el-table-column label="操作" width="240">
+      <el-table-column label="操作" width="330">
         <template #default="{ row }">
           <el-button
             v-if="!isQuotaEditing(row.id)"
@@ -227,6 +281,14 @@ defineExpose({
             @click="beginQuotaEdit(row)"
           >
             改配额
+          </el-button>
+          <el-button
+            v-if="!isRunsEditing(row.id)"
+            size="small"
+            :data-test="`edit-runs-${row.username}`"
+            @click="beginRunsEdit(row)"
+          >
+            改并发
           </el-button>
           <el-button
             size="small"
