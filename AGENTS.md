@@ -171,7 +171,7 @@ maxConcurrentRuns 或全局 RUNNER_MAX_CONCURRENT_RUNS]）· `5xxxx` chat/pairin
   `restOutbox.ts`（#779 story 12 断线排队：sessionStorage 落盘、50 上限丢最旧、按序幂等 flush）/
   `attachments.ts`（采集/校验纯函数，发送经 multipart 上传换 attachmentIds）；
   `teamProjection.ts`（#786 teammate 投影，TeamSessionsView 用）。
-- `views/` — 用户面板五页：`LoginView` / `ContainersView` / `ChatView`（REST+SSE 编排壳）/ `WikiView` / `ModelView`（AdminUsersView 等 admin 页随迁 `admin/views/`，#800）。
+- `views/` — 用户面板视图：`LoginView` / `ContainersView` / `ChatView`（REST+SSE 编排壳）/ `TeamSessionsView` / `WikiView` / `CategoriesView` / `ModelView` / `FigureEditorView` / `LegalDocumentView` / `NotFoundView`（admin 页已随迁 `admin/views/`，#800）。
 - `components/` — `FileTree` / `MdEditor`（Typora 式实时渲染）/ `WikiGraph`（obsidian 风格图谱）/
   ChatView 哑组件族（props-in/emits-out，零协议 import：`ChatSidebar`（会话扁平列表 + lab 文件树）/
   `ChatHeader`/`ChatStream`/`ChatComposer`/`ChatMessageItem`/`ThinkingCard`/`ToolLine`/`ApprovalCard`/`ApprovalDock`

@@ -18,6 +18,7 @@ import { CODE } from '../codes'
 import { requireAuth } from '../middleware/auth'
 import { mustChangePasswordGate } from '../middleware/mustChangePasswordGate'
 import type { Prisma, ToolApprovalDecision, ToolApprovalLayer } from '../generated/prisma/client'
+import { dateParam, textParam } from './queryParams'
 
 export const approvalLogsRouter = Router()
 
@@ -32,22 +33,12 @@ approvalLogsRouter.use((req: Request, _res: Response, next: NextFunction) => {
   next()
 })
 
-function textParam(value: unknown): string | undefined {
-  return typeof value === 'string' && value.trim() !== '' ? value.trim() : undefined
-}
-
 function layerParam(value: unknown): ToolApprovalLayer | undefined {
   return value === 'rule' || value === 'judge' || value === 'human' ? value : undefined
 }
 
 function decisionParam(value: unknown): ToolApprovalDecision | undefined {
   return value === 'allow' || value === 'deny' ? value : undefined
-}
-
-function dateParam(value: unknown): Date | undefined {
-  if (typeof value !== 'string' || value.trim() === '') return undefined
-  const d = new Date(value)
-  return Number.isNaN(d.getTime()) ? undefined : d
 }
 
 export interface ApprovalLogQuery {

@@ -1,6 +1,7 @@
 // audit API —— admin 全局审计检索面（#800 ↔ 后端 /api/v1/approval-logs + /file-overwrite-logs，
 // #783/#785 admin 面）。wire snake_case（对齐后端 auditRoutes 契约）；过滤 null/undefined 不落 URL。
 import { apiJson } from '@/api/client'
+import { q } from '@/api/queryParams'
 
 export interface ApprovalLogRowDTO {
   id: string
@@ -36,17 +37,6 @@ export interface PagedResult<T> {
   items: T[]
 }
 
-function q(params: Record<string, string | number | undefined>): string {
-  const usp = new URLSearchParams()
-  for (const [k, v] of Object.entries(params)) {
-    if (v !== undefined && v !== '') usp.set(k, String(v))
-  }
-  const s = usp.toString()
-  return s ? `?${s}` : ''
-}
-
-const iso = (d: Date | undefined): string | undefined => d?.toISOString()
-
 export function listApprovalLogs(query: {
   userId?: string
   runId?: string
@@ -63,8 +53,8 @@ export function listApprovalLogs(query: {
       runId: query.runId,
       layer: query.layer,
       decision: query.decision,
-      from: iso(query.from),
-      to: iso(query.to),
+      from: query.from,
+      to: query.to,
       page: query.page ?? 1,
       pageSize: query.pageSize ?? 50,
     })}`,
@@ -83,8 +73,8 @@ export function listFileOverwriteLogs(query: {
     `/api/v1/file-overwrite-logs/${q({
       sessionId: query.sessionId,
       path: query.path,
-      from: iso(query.from),
-      to: iso(query.to),
+      from: query.from,
+      to: query.to,
       page: query.page ?? 1,
       pageSize: query.pageSize ?? 50,
     })}`,

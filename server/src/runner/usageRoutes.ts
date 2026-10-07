@@ -13,20 +13,11 @@ import { ok } from '../envelope'
 import { requireAuth, requireAdmin } from '../middleware/auth'
 import { mustChangePasswordGate } from '../middleware/mustChangePasswordGate'
 import { aggregateUsage } from './usage'
+import { dateParam, textParam } from './queryParams'
 
 export const usageRouter = Router()
 
 usageRouter.use(requireAuth, mustChangePasswordGate, requireAdmin)
-
-function textParam(value: unknown): string | undefined {
-  return typeof value === 'string' && value.trim() !== '' ? value.trim() : undefined
-}
-
-function dateParam(value: unknown): Date | undefined {
-  if (typeof value !== 'string' || value.trim() === '') return undefined
-  const d = new Date(value)
-  return Number.isNaN(d.getTime()) ? undefined : d
-}
 
 usageRouter.get('/aggregate', async (req: Request, res: Response, next: NextFunction) => {
   try {

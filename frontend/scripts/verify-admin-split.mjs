@@ -17,19 +17,25 @@ const read = (f) => readFileSync(join(assetsDir, f), 'utf8')
 // 静态 import 图遍历（rolldown 产物形态全覆盖：from"./x.js" 无空格 / import("...") / 反引号
 // import(`./x.js`)；构建产物 chunk 引用均为相对路径）
 const IMPORT_RE = /(?:import|from)\s*\(?\s*["'`](\.\/[^"'`]+?\.js)["'`]/g
-const reachable = new Set()
-const queue = []
 const entryOf = (html) => {
   const m = readFileSync(join(dist, html), 'utf8').match(/\/assets\/([\w.-]+\.js)/g)
   return m ? m.map((s) => s.replace('/assets/', '')) : []
 }
-queue.push(...entryOf('index.html'))
-while (queue.length) {
-  const f = queue.pop()
-  if (!f || reachable.has(f) || !files.has(f)) continue
-  reachable.add(f)
-  for (const m of read(f).matchAll(IMPORT_RE)) queue.push(m[1].replace('./', ''))
+
+// 从入口 html 出发沿静态 import 图遍历，返回可达 chunk 集合（index.html / admin.html 各调一次）
+function collectReachable(html) {
+  const reachable = new Set()
+  const queue = entryOf(html)
+  while (queue.length) {
+    const f = queue.pop()
+    if (!f || reachable.has(f) || !files.has(f)) continue
+    reachable.add(f)
+    for (const m of read(f).matchAll(IMPORT_RE)) queue.push(m[1].replace('./', ''))
+  }
+  return reachable
 }
+
+const reachable = collectReachable('index.html')
 
 // 1) admin 视图 chunk 不得可达
 const ADMIN_CHUNKS = [
@@ -53,14 +59,7 @@ for (const f of reachable) {
 }
 
 // 3) admin 入口自身必须可达 admin 视图（反向 sanity：admin.html 没把页面 chunk 拉进来才奇怪）
-const adminReachable = new Set()
-const aQueue = entryOf('admin.html')
-while (aQueue.length) {
-  const f = aQueue.pop()
-  if (!f || adminReachable.has(f) || !files.has(f)) continue
-  adminReachable.add(f)
-  for (const m of read(f).matchAll(IMPORT_RE)) aQueue.push(m[1].replace('./', ''))
-}
+const adminReachable = collectReachable('admin.html')
 const adminHasViews = ADMIN_CHUNKS.filter((c) => [...adminReachable].some((f) => f.startsWith(c)))
 
 const failed =

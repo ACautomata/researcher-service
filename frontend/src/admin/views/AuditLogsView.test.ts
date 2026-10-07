@@ -75,19 +75,22 @@ describe('AuditLogsView（#800 admin 审计检索页）', () => {
     expect(listFileOverwriteLogs).not.toHaveBeenCalled()
   })
 
-  it('切 tab → 加载覆盖日志；切回 → 各自保留过滤参数', async () => {
+  it('切 tab → 自动重查该 tab 第 1 页（分页态不跨 tab 漂移）', async () => {
     const wrapper = mountView()
     await flushPromises()
     const vm = wrapper.vm as unknown as {
       activeTab: string
+      page: number
       search: () => Promise<void>
-      filters: { layer?: string; sessionId?: string }
+      filters: { sessionId?: string }
     }
+    vm.page = 3
     vm.activeTab = 'overwrite'
-    await vm.search()
+    await flushPromises()
     expect(listFileOverwriteLogs).toHaveBeenCalledTimes(1)
-    expect(listApprovalLogs).toHaveBeenCalledTimes(1)
-    // 覆盖 tab 专属过滤 sessionId 传参
+    const [firstQuery] = (listFileOverwriteLogs as ReturnType<typeof vi.fn>).mock.calls[0]
+    expect(firstQuery).toMatchObject({ page: 1 })
+    // 覆盖 tab 专属过滤 sessionId 传参（手动查询仍可用，取最后一次调用）
     vm.filters.sessionId = 's1'
     await vm.search()
     const [lastQuery] = (listFileOverwriteLogs as ReturnType<typeof vi.fn>).mock.calls.at(-1)!

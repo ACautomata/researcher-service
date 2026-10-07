@@ -1,8 +1,9 @@
 <script setup lang="ts">
 // admin 全局审计检索页（#800）：审批日志（approval-logs，#783）/ 覆盖日志
 // （file-overwrite-logs，#785）双 tab + 过滤 + 分页。judge 输入只露 hash（后端契约）。
-// state 局部 ref；tab 切换不清过滤（各 tab 过滤字段独立渲染、互不可见）。
-import { onMounted, reactive, ref } from 'vue'
+// state 局部 ref；tab 切换不清过滤（各 tab 过滤字段独立渲染、互不可见），
+// 切 tab 自动重查该 tab 第 1 页（分页态不跨 tab 漂移）。
+import { onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import {
   listApprovalLogs,
@@ -73,6 +74,11 @@ async function goPage(p: number): Promise<void> {
   page.value = p
   await queryOnce(p)
 }
+
+watch(activeTab, () => {
+  page.value = 1
+  void queryOnce(1)
+})
 
 onMounted(search)
 
