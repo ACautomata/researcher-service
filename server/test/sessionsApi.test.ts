@@ -78,7 +78,16 @@ describe('会话 REST 域（S1，#778）', () => {
   let observedModel: ScriptedChatModel | undefined
   let currentScript: ScriptEntry[]
   let policyTools: readonly string[] | undefined
-  let slowExec = false // 慢执行开关（running 窗口制造；afterEach 复位——deps.primitives private 不可换，开关内建）
+  let execGate: Promise<void> | undefined
+  let releaseHeldExec: (() => void) | undefined
+
+  // 工具执行由断言显式释放，running 窗口不依赖 CI 调度速度。
+  function holdExec(): () => void {
+    let release!: () => void
+    execGate = new Promise<void>((resolve) => { release = resolve })
+    releaseHeldExec = release
+    return release
+  }
   let userLimit = 4 // per-user 配额开关（quota 预检 40043 用例；afterEach 复位）
   let dispatchFail = false // dispatch（submit ack）失败注入——回滚删行用例；afterEach 复位
 
@@ -130,7 +139,7 @@ describe('会话 REST 域（S1，#778）', () => {
       hub,
       primitives: fakePrimitives({
         execBehavior: async () => {
-          if (slowExec) await new Promise((r) => setTimeout(r, 200))
+          await execGate
           return { exitCode: 0, stdout: 'fake-exec-out', stderr: '' }
         },
       }).primitives,
@@ -176,7 +185,9 @@ describe('会话 REST 域（S1，#778）', () => {
   afterEach(async () => {
     currentScript = []
     policyTools = undefined
-    slowExec = false
+    releaseHeldExec?.()
+    execGate = undefined
+    releaseHeldExec = undefined
     userLimit = 4
     dispatchFail = false
     // bump config_meta.version → registry 模型缓存 miss → 下一用例换新 ScriptedChatModel
@@ -271,7 +282,7 @@ describe('会话 REST 域（S1，#778）', () => {
   })
 
   it('DELETE /:id 在飞互斥：running → 50005 挡删（沙箱保留）；终态后可删', async () => {
-    slowExec = true
+    const releaseExec = holdExec()
     currentScript = [toolCallAi('g5', 'execute', { command: 'slow' }), new AIMessage({ content: 'done' })]
     const sid = (await request.post('/api/v1/sessions').set(bearer(access)).send({})).body.data.id as string
     await request
@@ -287,6 +298,7 @@ describe('会话 REST 域（S1，#778）', () => {
     expect(await prisma.session.findUnique({ where: { id: sid } })).not.toBeNull()
 
     await request.post(`/api/v1/sessions/${sid}/abort`).set(bearer(access))
+    releaseExec()
     await waitFor(() => runService.stateOf(sid)?.state === 'aborted')
     const res = await request.delete(`/api/v1/sessions/${sid}`).set(bearer(access))
     expect(res.body.code).toBe(CODE.OK)
@@ -511,7 +523,7 @@ describe('会话 REST 域（S1，#778）', () => {
   // ---- 多端门禁（story 13）----
 
   it('running 全端禁输入：run 在飞时 POST /messages → 50005；同 key 重发仍幂等 replay（不门禁）', async () => {
-    slowExec = true
+    const releaseExec = holdExec()
     currentScript = [toolCallAi('g1', 'execute', { command: 'slow' }), new AIMessage({ content: 'done' })]
     const sid = (await request.post('/api/v1/sessions').set(bearer(access)).send({})).body.data.id as string
     const first = await request
@@ -534,6 +546,7 @@ describe('会话 REST 域（S1，#778）', () => {
       .send({ content: '触发慢 run' })
     expect(replay.body.code).toBe(CODE.OK)
     expect(replay.body.data).toMatchObject({ messageId: first.body.data.messageId, replay: true })
+    releaseExec()
     await waitFor(() => runService.stateOf(sid)?.state === 'completed')
     const rows = await prisma.sessionMessage.count({ where: { sessionId: sid, clientKey: hexKey(0x201) } })
     expect(rows).toBe(1)
@@ -639,7 +652,7 @@ describe('会话 REST 域（S1，#778）', () => {
   // ---- abort（story 8）----
 
   it('POST /:id/abort：running → 200 + run.aborted{by:user} 广播；无在飞 → 50006', async () => {
-    slowExec = true
+    const releaseExec = holdExec()
     currentScript = [toolCallAi('g3', 'execute', { command: 'slow' }), new AIMessage({ content: 'done' })]
     const sid = (await request.post('/api/v1/sessions').set(bearer(access)).send({})).body.data.id as string
     await request
@@ -652,6 +665,7 @@ describe('会话 REST 域（S1，#778）', () => {
     const abort = await request.post(`/api/v1/sessions/${sid}/abort`).set(bearer(access))
     expect(abort.body.code).toBe(CODE.OK)
     expect(abort.body.data.runId).toBeTruthy()
+    releaseExec()
     await waitFor(() => runService.stateOf(sid)?.state === 'aborted')
     const evs = frameEvents(sinkA.frames).filter((e) => e.type === 'run.aborted' && e.sessionId === sid)
     expect(evs[evs.length - 1]!.payload).toMatchObject({ by: 'user' })
@@ -865,7 +879,7 @@ describe('会话 REST 域（S1，#778）', () => {
   // ---- inFlight 投影（story 11 · #779 断线补偿）----
 
   it('投影 GET 的 inFlight：running 带 checkpoint 重建 turn（多端同形）；终态字段缺省', async () => {
-    slowExec = true
+    const releaseExec = holdExec()
     currentScript = [
       toolCallAi('if-c1', 'execute', { command: 'echo hi' }, '想想。'),
       new AIMessage({ content: [{ type: 'text', text: '完成。' }] }),
@@ -896,6 +910,7 @@ describe('会话 REST 域（S1，#778）', () => {
     expect(inFlight2?.turn.tools?.[0]).toMatchObject({ toolCallId: 'if-c1' })
 
     // 终态 → 字段缺省（「无进行中 run」的投影形状）
+    releaseExec()
     await waitFor(() => runService.stateOf(sid)?.state === 'completed')
     const final = await request.get(`/api/v1/sessions/${sid}/messages`).set(bearer(access))
     expect(final.body.data.inFlight).toBeUndefined()
