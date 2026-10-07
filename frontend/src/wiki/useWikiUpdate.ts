@@ -1,4 +1,4 @@
-import { onBeforeUnmount, ref } from 'vue'
+import { computed, onBeforeUnmount, ref } from 'vue'
 import { startWikiUpdate } from '@/api/wiki'
 import { useEventStream, type SessionEvent } from '@/chat/useEventStream'
 
@@ -41,7 +41,8 @@ export function useWikiUpdate(onFinished: () => Promise<void>) {
     if (!busy.value) return
     interrupted = true
     // No replay/status endpoint exists for independent runs. Never claim success after a gap.
-    busy.value = false
+    // A launch request keeps its lock until its HTTP response settles.
+    if (!pending) busy.value = false
     runId = ''
     message.value = '更新进度连接中断，结果未知；请刷新查看，或重试检查是否仍在更新'
     void onFinished().catch(() => {})
@@ -49,7 +50,11 @@ export function useWikiUpdate(onFinished: () => Promise<void>) {
   const stream = useEventStream({ onEvent: receive, onDisconnect: lostProgress, onGap: lostProgress })
   onBeforeUnmount(() => { alive = false; stream.close() })
   async function start(container: string) {
-    if (busy.value || !container) return
+    if (busy.value || pending || !container) return
+    if (stream.status.value !== 'open') {
+      message.value = '正在连接更新进度，请稍后重试'
+      return
+    }
     interrupted = false
     busy.value = true
     pending = true
@@ -68,8 +73,9 @@ export function useWikiUpdate(onFinished: () => Promise<void>) {
       throw error
     } finally {
       pending = false
+      if (interrupted) busy.value = false
       earlyEvents.length = 0
     }
   }
-  return { busy, message, detail, start }
+  return { busy, message, detail, start, connected: computed(() => stream.status.value === 'open') }
 }

@@ -67,3 +67,35 @@ describe('wiki update', () => {
     wrapper.unmount()
   })
 })
+
+describe('wiki update stream readiness', () => {
+  it('does not launch until the SSE subscription opens', async () => {
+    const status = ref<'connecting' | 'open'>('connecting')
+    vi.mocked(useEventStream).mockImplementation(hooks => { handlers = hooks; return { status, close } })
+    const { update, wrapper } = setup()
+    await update.start('demo')
+    expect(startWikiUpdate).not.toHaveBeenCalled()
+    expect(update.connected.value).toBe(false)
+    status.value = 'open'
+    await update.start('demo')
+    expect(startWikiUpdate).toHaveBeenCalledOnce()
+    wrapper.unmount()
+  })
+  it('keeps the launch lock during disconnect until the pending response settles', async () => {
+    let resolve!: (result: { runId: string }) => void
+    vi.mocked(startWikiUpdate).mockImplementationOnce(() => new Promise(done => { resolve = done }))
+    const { update, wrapper } = setup()
+    const first = update.start('demo')
+    handlers.onDisconnect?.()
+    await update.start('demo')
+    expect(startWikiUpdate).toHaveBeenCalledOnce()
+    resolve({ runId: 'old' })
+    await first
+    expect(update.busy.value).toBe(false)
+    expect(update.message.value).toContain('结果未知')
+    await update.start('demo')
+    handlers.onEvent({ type: 'wiki_run.finished', runId: 'old', payload: { outcome: 'completed' } })
+    expect(update.busy.value).toBe(true)
+    wrapper.unmount()
+  })
+})

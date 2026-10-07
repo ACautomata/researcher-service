@@ -118,7 +118,7 @@ const update = useWikiUpdate(async () => {
   await refreshGraph()
   if (current.value === container && activePath.value) await store.openPage(activePath.value)
 })
-const { busy: updating, message: updateMessage, detail: updateDetail } = update
+const { busy: updating, message: updateMessage, detail: updateDetail, connected: updateConnected } = update
 async function onUpdate() {
   try { await update.start(current.value) }
   catch (e) { ElMessage.error(wikiErrorMessage(e, '更新启动失败，请重试')) }
@@ -176,7 +176,7 @@ onMounted(async () => {
       >
         <option v-for="c in containers" :key="c" :value="c">{{ c }}</option>
       </select>
-      <button data-test="update-wiki" :disabled="!current || updating" @click="onUpdate">{{ updating ? '更新中…' : '更新 wiki' }}</button>
+      <button data-test="update-wiki" :disabled="!current || updating || !updateConnected" @click="onUpdate">{{ updating ? '更新中…' : updateConnected ? '更新 wiki' : '连接进度中…' }}</button>
       <span role="status" aria-live="polite" data-test="wiki-update-progress">{{ updateMessage }} {{ updateDetail }}</span>
       <button
         class="toggle-graph"
@@ -270,13 +270,6 @@ onMounted(async () => {
 /* FileTree stays unchanged; wiki writing belongs to the agent. */
 .wiki-body :deep(.file-tree .create-btn),
 .wiki-body :deep(.file-tree .del-btn) { display: none; }
-.save-state {
-  font-size: 12px;
-  color: var(--el-color-success);
-}
-.save-state.dirty {
-  color: var(--el-color-warning);
-}
 .toggle-graph {
   margin-left: auto;
   padding: 4px 10px;
@@ -293,8 +286,8 @@ onMounted(async () => {
 }
 .center {
   flex: 1;
-  /* #668：min-width:0 放开 flex 默认 min-content 下限——面板拖到 560px 时编辑区收缩
-     到剩余空间而不是把 .wiki-body 顶溢出（「中间编辑区不被挤没」的实现保障）。 */
+  /* #668：min-width:0 放开 flex 默认 min-content 下限——面板拖到 560px 时阅读区收缩
+     到剩余空间而不是把 .wiki-body 顶溢出（「中间阅读区不被挤没」的实现保障）。 */
   min-width: 0;
   overflow-y: auto;
   padding: 16px 24px;

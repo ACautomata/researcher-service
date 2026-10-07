@@ -12,7 +12,7 @@ vi.mock('@/api/wiki', () => ({
   getClaims: vi.fn().mockResolvedValue({ drift: null, claims: [] }),
   startWikiUpdate: vi.fn(),
 }))
-vi.mock('@/chat/useEventStream', () => ({ useEventStream: vi.fn(() => ({ close: vi.fn() })) }))
+vi.mock('@/chat/useEventStream', () => ({ useEventStream: vi.fn(() => ({ close: vi.fn(), status: { value: 'open' } })) }))
 vi.mock('@/api/containers', () => ({ listInstances: vi.fn() }))
 vi.mock('element-plus', async (importOriginal) => {
   const actual = (await importOriginal()) as Record<string, unknown>
