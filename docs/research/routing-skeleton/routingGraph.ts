@@ -3,7 +3,7 @@
 //
 // 风格对齐 plugins/autofigure/pipeline/graph.ts：纯工厂（同参数必同拓扑）、全部计算面经端口
 // 注入（图零直连 LLM/文件系统）、import 一律经桥 server/src/plugins/autofigureDeps.ts。
-// 本文件是研究工件：research/ 树不入 server tsconfig include，类型检查走同目录 tsconfig.json。
+// 本文件是研究工件：docs/research/ 树不入 server tsconfig include，类型检查走同目录 tsconfig.json。
 //
 // 拓扑：
 //   START → classify（结构化输出意图分类，Command 回写 intent）
@@ -22,13 +22,13 @@ import {
   StateGraph,
   interrupt,
   z,
-} from '../../server/src/plugins/autofigureDeps'
+} from '../../../server/src/plugins/autofigureDeps'
 import type {
   BaseCheckpointSaver,
   BaseLanguageModelInput,
   LangGraphRunnableConfig,
   Runnable,
-} from '../../server/src/plugins/autofigureDeps'
+} from '../../../server/src/plugins/autofigureDeps'
 
 // ---------------------------------------------------------------------------
 // 状态面
