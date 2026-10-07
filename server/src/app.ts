@@ -23,7 +23,6 @@ import { createAttachmentsRouter, type AttachmentsRouterDeps } from './attachmen
 import { createPluginsRouter, type PluginsRouterDeps } from './plugins/routes'
 import { Orchestrator } from './containers/orchestrator'
 import { FleetDeps } from './containers/deps'
-import type { ContainerRuntime } from './containers/runtime'
 import type { FleetConfig } from './containers/values'
 import { envelopeErrorHandler, notFound } from './middleware/errorHandler'
 import './types' // Express Request 增强（req.user / req.prisma）
@@ -33,9 +32,6 @@ export interface AppDeps {
   // 容器编排接缝（#334）：测试注入假 runtime + inline queue + tmp fleet config；
   // 生产由 server.ts 装真 DockerRuntime + BullMQ 队列。缺省 = 无编排（containers 路由不挂）。
   orchestrator?: Orchestrator
-  // approve 端点 docker exec 通道（#371-1 / #374）：与 orchestrator 成对注入（生产 DockerRuntime、
-  // 测试 FakeRuntime）。编排器存在时缺 runtime → 装配期 fail-fast（approve 静默禁用不安全）。
-  runtime?: ContainerRuntime
   // wiki 接缝（#335）：compile 触发等。缺省 = no-op（无编排）。
   wiki?: WikiRouterDeps
   // models 接缝（#336；#775 写盘链退役后仅剩白名单校验注入缝——lookup 测试注 fake 免真 DNS，
@@ -43,9 +39,8 @@ export interface AppDeps {
   models?: ModelsRouterDeps
   // provider_endpoints 接缝（#775，731 §3.1）：端点白名单 admin 管理面，同款注入缝。
   providerEndpoints?: ProviderEndpointsRouterDeps
-  // files 接缝（#589）：FileArchive Port（生产 DockerFileArchive）。必填——缺 archive 属装配
-  // 错误（静默禁用文件 CRUD 不安全），由下方条件挂载（models 自 #775 起无条件挂载，files 仍
-  // 依赖 archive 注入故保持条件挂载先例）。
+  // files（#589 · T0 #801 只读化）：FileArchive Port 必填（缺 archive 属装配错误——静默禁用
+  // 不安全），由下方条件挂载（models/files 条件挂载先例）。
   files?: FilesRouterDeps
   // figures 读面（#791 · #744 §11.3 资产常驻）：无 flag 门（历史图卡渲染不受插件启用位影响），
   // 无条件挂载——只依赖 req.prisma + 认证身份（对齐 models 无条件挂载先例）。
@@ -69,14 +64,11 @@ export interface AppDeps {
 }
 
 // createApp 工厂：PrismaClient 经依赖注入，测试可传 test DB（接缝 #2）。
-export function createApp({ prisma, orchestrator, runtime, wiki, models, providerEndpoints, files, docs, events, sessions, attachments, plugins }: AppDeps): Application {
+export function createApp({ prisma, orchestrator, wiki, models, providerEndpoints, files, docs, events, sessions, attachments, plugins }: AppDeps): Application {
   const app = express()
   // wiki 内容契约无大小上限（codex PR#346）：挂载路径内请求先走 5mb limit，其余端点仍 256kb。
   // 须先于全局 parser —— body-parser 对已解析 body（req._body）会跳过，故 wiki 命中后不二次解析。
   app.use('/api/v1/containers/:name/wiki', express.json({ limit: '5mb' }))
-  // files 写体（#589 PUT/POST 文本内容）对齐 wiki 的 5mb carve-out——全局 256kb 会拒大文本
-  // 写入，与读侧 MAX_FILE_READ_BYTES(16MB) 契约不对称。
-  app.use('/api/v1/containers/:name/files', express.json({ limit: '5mb' }))
   app.use(express.json({ limit: '256kb' }))
   app.use(cookieParser())
   app.use((req: Request, _res: Response, next: NextFunction) => {
@@ -98,11 +90,7 @@ export function createApp({ prisma, orchestrator, runtime, wiki, models, provide
   // #800 admin 核算面：usage 聚合（llm_usage_records → aggregateUsage；admin-only）。
   app.use('/api/v1/usage', usageRouter)
   if (orchestrator) {
-    // approve 端点依赖 runtime（docker exec），与 orchestrator 成对注入（#374）；缺 runtime 属装配错误。
-    if (!runtime) {
-      throw new Error('[app] orchestrator 注入时必须同时注入 runtime（approve 端点 docker exec 通道）')
-    }
-    app.use('/api/v1/containers', createContainersRouter(orchestrator, runtime))
+    app.use('/api/v1/containers', createContainersRouter(orchestrator))
   }
   // wiki（#335）：只依赖 prisma + 容器行 homeDir，不依赖编排器；compile 触发经 wiki 注入。
   // 注意：Express 5 不把 app.use 挂载路径的 :name 合并进 router 的 req.params，故挂到
@@ -114,8 +102,8 @@ export function createApp({ prisma, orchestrator, runtime, wiki, models, provide
   // provider_endpoints（#775，731 §3.1）：端点白名单 admin 管理面，无条件挂载（requireAdmin
   // 在路由内；deps 同为白名单校验注入缝）。
   app.use('/api/v1', createProviderEndpointsRouter(providerEndpoints ?? {}))
-  // files（#589）：FileArchive 必填，仅在有注入时挂载（条件挂载先例；wiki/workspace
-  // 两棵树统一文件 CRUD，缺 archive 静默禁用不安全——models 自 #775 起零资源依赖已改无条件）。
+  // files（T0 #801 只读化）：root=lab 只读 GET 面，FileArchive 必填，仅在有注入时挂载
+  // （条件挂载先例）。
   if (files) {
     app.use('/api/v1/containers', createFilesRouter(files))
   }
@@ -157,4 +145,4 @@ export interface FleetAssembly {
   deps: FleetDeps
 }
 
-export type { ContainerRuntime, FleetConfig }
+export type { FleetConfig }

@@ -1,27 +1,50 @@
-// files REST 契约测试（#589 · 接缝 #2 信封 + 新 Port 注入；#776 root=lab 只读读面 + workspace 退役）。
-// 端点 /api/v1/containers/<name>/files（GET/PUT/POST/DELETE）；信封（#312）+ 隔离归属前置
-// （越权 20040 同码防探测）+ 错误映射（90002/20040/50002/60040/60041）。经 createApp 依赖注入
-// 内存 fake FileArchive 直测域契约，不碰真 docker。
+// files REST 契约测试（#589 · 接缝 #2 信封 + Port 注入；T0 #801 只读化 + root=wiki/workspace 退役）。
+// 端点 /api/v1/containers/<name>/files（仅 GET）；root=lab 是唯一现役读面（沙箱 /lab，:name =
+// sessionId，50002 归属门）；root=wiki/workspace → 60042 退役码（容器归属前置校验后）；
+// 写面（PUT/POST/DELETE）与 files/raw 媒体通道随 T0 关闭 → 90005 路由不存在。信封（#312）+
+// 错误映射（90002/20040/50002/60040/60042）经 createApp 注入内存 fake FileArchive 直测域契约。
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { setupTestApp, type TestContext } from './setup'
 import { seedAdmin, seedUser, login, bearer } from './helpers'
-import { FileExists, FileInvalidPath, FileNotFound } from '../src/files/errors'
-import type { DirListing, FileArchive, FileReading, FileRoot } from '../src/files/fsPort'
+import { FileNotFound } from '../src/files/errors'
+import type { DirListing, FileArchive, FileReading } from '../src/files/fsPort'
 import { sandboxContainerName } from '../src/sandboxes/runtime'
 
-// 内存 fake FileArchive：目录树 + 文件内容 map；记录每次调用的（root, relPath, recursive）。
-// #776：lab 读面独立树（dockerName → relPath → 内容），镜像「沙箱按 docker 名寻址」语义。
+// 内存 fake FileArchive：lab 读面独立树（dockerName → relPath → 内容），镜像「沙箱按 docker
+// 名寻址」语义；InContainer 三方法按 T0 收缩保留（wiki 域写面，本套件不触达——抛错兜底）。
 class FakeFileArchive implements FileArchive {
-  // relPath → 内容；含 \u0000 视为二进制。目录不在 files 里（在 dirs）。
-  readonly files = new Map<string, string>()
-  readonly dirs = new Set<string>([''])
-  // #776 lab 树：docker 名 →（relPath → 内容）
+  // #776 lab 树：docker 名 →（relPath → 内容；含 \u0000 视为二进制）
   readonly labTrees = new Map<string, Map<string, string>>()
-  readonly calls: { method: string; root?: FileRoot; absRoot?: string; dockerName?: string; relPath: string; recursive?: boolean; content?: string }[] = []
+  readonly calls: { method: string; dockerName?: string; relPath: string; recursive?: boolean }[] = []
 
-  private entryOf(files: Map<string, string>, relPath: string): FileReading {
-    const raw = files.get(relPath)!
+  async readLab(dockerName: string, relPath: string, recursive: boolean): Promise<DirListing | FileReading> {
+    this.calls.push({ method: 'readLab', dockerName, relPath, recursive })
+    const tree = this.labTrees.get(dockerName)
+    if (tree === undefined) throw new FileNotFound(relPath) // 沙箱不存在/未创建 → 60040 语义
+    // 目录集 = 路径前缀折叠（树根 '' 恒在）
+    const dirs = new Set<string>([''])
+    for (const p of tree.keys()) {
+      const segs = p.split('/')
+      for (let i = 1; i < segs.length; i++) dirs.add(segs.slice(0, i).join('/'))
+    }
+    // 目录分支：列直接子项（recursive=false）或全子树（true）；文件分支：内容（NUL → binary）
+    if (dirs.has(relPath)) {
+      const children: DirListing['files'] = []
+      for (const p of [...tree.keys(), ...dirs].filter((p) => p !== '')) {
+        const depth = p.split('/').length
+        if (recursive ? !p.startsWith(relPath === '' ? '' : `${relPath}/`) : depth !== (relPath === '' ? 1 : relPath.split('/').length + 1)) continue
+        children.push({
+          path: p,
+          type: tree.has(p) ? 'file' : 'directory',
+          size: tree.has(p) ? Buffer.byteLength(tree.get(p)!) : 0,
+          modified: new Date(0).toISOString(),
+        })
+      }
+      return { kind: 'dir', path: relPath, files: children, truncated: false }
+    }
+    const raw = tree.get(relPath)
+    if (raw === undefined) throw new FileNotFound(relPath)
     const binary = raw.includes('\u0000')
     return {
       kind: 'file',
@@ -34,55 +57,6 @@ class FakeFileArchive implements FileArchive {
     }
   }
 
-  async read(_name: string, root: FileRoot, relPath: string, recursive: boolean): Promise<DirListing | FileReading> {
-    this.calls.push({ method: 'read', root, relPath, recursive })
-    return this.readTree(this.files, this.dirs, relPath, recursive)
-  }
-
-  // #776 root=lab 读面：按 docker 名取独立 lab 树（不与 wiki 树混——跨沙箱隔离即证据）
-  async readLab(dockerName: string, relPath: string, recursive: boolean): Promise<DirListing | FileReading> {
-    this.calls.push({ method: 'readLab', dockerName, relPath, recursive })
-    const tree = this.labTrees.get(dockerName)
-    if (tree === undefined) throw new FileNotFound(relPath) // 沙箱不存在/未创建 → 60040 语义
-    const dirs = new Set<string>([''])
-    for (const p of tree.keys()) {
-      const segs = p.split('/')
-      for (let i = 1; i < segs.length; i++) dirs.add(segs.slice(0, i).join('/'))
-    }
-    return this.readTree(tree, dirs, relPath, recursive)
-  }
-
-  // 共用树读取（read/readLab 同构：目录 → 列表；文件 → 内容；不存在 → FileNotFound）
-  private async readTree(files: Map<string, string>, dirs: Set<string>, relPath: string, recursive: boolean): Promise<DirListing | FileReading> {
-    if (dirs.has(relPath)) {
-      const children: DirListing['files'] = []
-      for (const p of [...files.keys(), ...dirs].filter((p) => p !== '')) {
-        if (recursive ? p.startsWith(relPath === '' ? '' : `${relPath}/`) : p.split('/').length === (relPath === '' ? 1 : 2)) {
-          if (relPath !== '' && !p.startsWith(`${relPath}/`)) continue
-          children.push({
-            path: p,
-            type: files.has(p) ? 'file' : 'directory',
-            size: files.has(p) ? Buffer.byteLength(files.get(p)!) : 0,
-            modified: new Date(0).toISOString(),
-          })
-        }
-      }
-      return { kind: 'dir', path: relPath, files: children, truncated: false }
-    }
-    if (files.has(relPath)) return this.entryOf(files, relPath)
-    throw new FileNotFound(relPath)
-  }
-
-  // files/raw 字节通道：直接返回文件原始字节（不做 NUL 嗅探/UTF-8 转码——媒体字节透传语义，
-  // 与 read() 的「二进制 → content:null」互补）。不存在 → FileNotFound；指向目录 → FileInvalidPath。
-  async readBytes(_name: string, absRoot: string, relPath: string): Promise<Buffer> {
-    this.calls.push({ method: 'readBytes', absRoot, relPath })
-    if (this.dirs.has(relPath)) throw new FileInvalidPath(relPath)
-    const raw = this.files.get(relPath)
-    if (raw === undefined) throw new FileNotFound(relPath)
-    return Buffer.from(raw, 'utf8')
-  }
-
   // #780 沙箱字节读（附件下载端点）：按 docker 名取 lab 树、返回原始字节；不存在 → FileNotFound。
   async readLabBytes(dockerName: string, relPath: string): Promise<Buffer> {
     this.calls.push({ method: 'readLabBytes', dockerName, relPath })
@@ -93,51 +67,30 @@ class FakeFileArchive implements FileArchive {
     return Buffer.from(raw, 'utf8')
   }
 
-  async write(_name: string, root: FileRoot, relPath: string, content: string): Promise<void> {
-    this.calls.push({ method: 'write', root, relPath, content })
-    if (!this.files.has(relPath)) throw new FileNotFound(relPath)
-    this.files.set(relPath, content)
+  // InContainer 写面（wiki 域消费）与 seedWorkspace（fleet create 消费）：本套件不触达。
+  async writeInContainer(): Promise<never> {
+    throw new Error('not used in files REST tests')
   }
-
-  async create(_name: string, root: FileRoot, relPath: string, content: string): Promise<void> {
-    this.calls.push({ method: 'create', root, relPath, content })
-    if (this.files.has(relPath) || this.dirs.has(relPath)) throw new FileExists(relPath)
-    this.files.set(relPath, content)
+  async createInContainer(): Promise<never> {
+    throw new Error('not used in files REST tests')
   }
-
-  async delete(_name: string, root: FileRoot, relPath: string): Promise<void> {
-    this.calls.push({ method: 'delete', root, relPath })
-    if (this.dirs.has(relPath)) throw new FileInvalidPath(relPath)
-    if (!this.files.has(relPath)) throw new FileNotFound(relPath)
-    this.files.delete(relPath)
+  async deleteInContainer(): Promise<never> {
+    throw new Error('not used in files REST tests')
   }
-
-  // #591 config 方法（files REST 不消费；仅满足 Port 契约——按容器名存 openclaw.json 文本）
-  readonly configs = new Map<string, string>()
-  async seedWorkspace(): Promise<void> {} // files REST 不消费（编排 create 路径专用）
-  async writeConfig(name: string, content: string): Promise<void> {
-    this.configs.set(name, content)
-  }
-  async readConfig(name: string): Promise<string> {
-    const c = this.configs.get(name)
-    if (c === undefined) throw new FileNotFound('openclaw.json')
-    return c
+  async seedWorkspace(): Promise<never> {
+    throw new Error('not used in files REST tests')
   }
 }
 
 let seq = 0
 
-describe('files REST（接缝 #2 信封 + #589）', () => {
+describe('files REST（T0 #801：lab 只读 + wiki/workspace 退役）', () => {
   let ctx: TestContext
   let archive: FakeFileArchive
   const BASE = '/api/v1/containers'
 
   beforeAll(async () => {
     archive = new FakeFileArchive()
-    archive.files.set('report.md', '# 报告\n')
-    archive.files.set('data/raw.txt', 'raw data')
-    archive.files.set('data/binary.bin', 'a\u0000b')
-    archive.dirs.add('data')
     ctx = await setupTestApp({ files: { archive } })
   })
   afterAll(async () => {
@@ -150,7 +103,7 @@ describe('files REST（接缝 #2 信封 + #589）', () => {
     await ctx.prisma.container.create({
       data: {
         name,
-        port: 19100 + seq,
+        port: 0, // T0 #801：端口池废除，行 port 恒 0（列保留记账）
         ownerId,
         token: 't',
         homeDir: '/tmp/home',
@@ -161,317 +114,6 @@ describe('files REST（接缝 #2 信封 + #589）', () => {
     return name
   }
 
-  // ---------------------------- 认证 / name / 容器归属（公共前置）----------------------------
-
-  it('未认证 → 10001', async () => {
-    const res = await ctx.request.get(`${BASE}/demo/files?root=wiki&path=`)
-    expect(res.body.code).toBe(10001)
-  })
-
-  it('name 非法 → 90002 + data.name（大写/非法字符）', async () => {
-    await seedUser(ctx.prisma, 'finu', 'pw-finu-secure')
-    const l = await login(ctx.request, 'finu', 'pw-finu-secure')
-    const res = await ctx.request.get(`${BASE}/Bad_Name/files?root=wiki&path=`).set(bearer(l.access))
-    expect(res.body.code).toBe(90002)
-    expect(res.body.data).toHaveProperty('name')
-  })
-
-  it('容器不存在 → 20040（空 data）', async () => {
-    await seedUser(ctx.prisma, 'fnotf', 'pw-fnotf-secure')
-    const l = await login(ctx.request, 'fnotf', 'pw-fnotf-secure')
-    const res = await ctx.request.get(`${BASE}/nope/files?root=wiki&path=`).set(bearer(l.access))
-    expect(res.body.code).toBe(20040)
-    expect(res.body.data).toBeNull()
-  })
-
-  it('user 越权访问他人容器 → 20040，与「不存在」同码同文案同空 data（防探测）', async () => {
-    const u = await seedUser(ctx.prisma, 'fowner', 'pw-fowner-secure')
-    await seedUser(ctx.prisma, 'fvoyeur', 'pw-fvoyeur-secure')
-    const name = await seedContainer(u.id)
-    const lv = await login(ctx.request, 'fvoyeur', 'pw-fvoyeur-secure')
-    const res = await ctx.request.get(`${BASE}/${name}/files?root=wiki&path=`).set(bearer(lv.access))
-    expect(res.body.code).toBe(20040)
-    expect(res.body).toEqual({ code: 20040, message: expect.any(String), data: null })
-  })
-
-  it('admin 可跨用户访问全部容器', async () => {
-    const u = await seedUser(ctx.prisma, 'ftarget', 'pw-ftarget-secure')
-    const name = await seedContainer(u.id)
-    await seedAdmin(ctx.prisma, 'fadmin', 'pw-fadmin-secure')
-    const la = await login(ctx.request, 'fadmin', 'pw-fadmin-secure')
-    const res = await ctx.request.get(`${BASE}/${name}/files?root=wiki&path=`).set(bearer(la.access))
-    expect(res.body.code).toBe(0)
-  })
-
-  it('容器行 stopped 也可读（容器存在即可读，US7）', async () => {
-    const u = await seedUser(ctx.prisma, 'fstop', 'pw-fstop-secure')
-    const name = await seedContainer(u.id, 'stopped')
-    const l = await login(ctx.request, 'fstop', 'pw-fstop-secure')
-    const res = await ctx.request.get(`${BASE}/${name}/files?root=wiki&path=`).set(bearer(l.access))
-    expect(res.body.code).toBe(0)
-    expect(res.body.data.kind).toBe('dir')
-  })
-
-  // ---------------------------- root / path 校验（90002）----------------------------
-
-  it('root 非法 → 90002 + data.root', async () => {
-    const u = await seedUser(ctx.prisma, 'froot', 'pw-froot-secure')
-    const name = await seedContainer(u.id)
-    const l = await login(ctx.request, 'froot', 'pw-froot-secure')
-    const res = await ctx.request.get(`${BASE}/${name}/files?root=home&path=`).set(bearer(l.access))
-    expect(res.body.code).toBe(90002)
-    expect(res.body.data).toHaveProperty('root')
-  })
-
-  it('root=workspace legacy 契约（#776）：GET 只读放行（现存前端 fileTabs 消费链）；写面 90002', async () => {
-    const u = await seedUser(ctx.prisma, 'fwsret', 'pw-fwsret-secure')
-    const name = await seedContainer(u.id)
-    const l = await login(ctx.request, 'fwsret', 'pw-fwsret-secure')
-    const get = await ctx.request.get(`${BASE}/${name}/files?root=workspace&path=`).set(bearer(l.access))
-    expect(get.body.code).toBe(0) // legacy 只读消费值：#793 前端迁 lab 前保持可用
-    expect(get.body.data).toMatchObject({ kind: 'dir', path: '' })
-    const put = await ctx.request.put(`${BASE}/${name}/files`).set(bearer(l.access)).send({ root: 'workspace', path: 'a.md', content: 'x' })
-    expect(put.body.code).toBe(90002)
-    expect(put.body.data).toHaveProperty('root')
-    const del = await ctx.request.delete(`${BASE}/${name}/files?root=workspace&path=a.md`).set(bearer(l.access))
-    expect(del.body.code).toBe(90002)
-    expect(del.body.data).toHaveProperty('root')
-  })
-
-  it('path 穿越/绝对路径 → 90002 + data.path（防探测优先：在容器校验之后）', async () => {
-    const u = await seedUser(ctx.prisma, 'fpath', 'pw-fpath-secure')
-    const name = await seedContainer(u.id)
-    const l = await login(ctx.request, 'fpath', 'pw-fpath-secure')
-    for (const bad of ['../evil.md', '/etc/passwd', 'a\\b.txt', 'a\u0000b']) {
-      const res = await ctx.request.get(`${BASE}/${name}/files?root=wiki&path=${encodeURIComponent(bad)}`).set(bearer(l.access))
-      expect(res.body.code).toBe(90002)
-      expect(res.body.data).toHaveProperty('path')
-    }
-  })
-
-  // ---------------------------- GET 读 ----------------------------
-
-  it('GET 缺省 path（树根列目录形态 ?root=wiki&recursive=true）→ 200 列根目录', async () => {
-    const u = await seedUser(ctx.prisma, 'fgnp', 'pw-fgnp-secure')
-    const name = await seedContainer(u.id)
-    const l = await login(ctx.request, 'fgnp', 'pw-fgnp-secure')
-    // 前端不传 path —— 缺省 = 树根（路由注释「空 path = 树根」语义）
-    const res = await ctx.request.get(`${BASE}/${name}/files?root=wiki&recursive=true`).set(bearer(l.access))
-    expect(res.body.code).toBe(0)
-    expect(res.body.data).toMatchObject({ kind: 'dir', path: '', truncated: false })
-    expect(res.body.data.files).toContainEqual(
-      expect.objectContaining({ path: 'report.md', type: 'file', size: expect.any(Number), modified: expect.any(String) }),
-    )
-    expect(archive.calls.at(-1)).toMatchObject({ method: 'read', root: 'wiki', relPath: '', recursive: true })
-  })
-
-  it('GET path=目录 → dir 分支：{files:[{path,type,size,modified}]}', async () => {
-    const u = await seedUser(ctx.prisma, 'fg1', 'pw-fg1-secure')
-    const name = await seedContainer(u.id)
-    const l = await login(ctx.request, 'fg1', 'pw-fg1-secure')
-    const res = await ctx.request.get(`${BASE}/${name}/files?root=wiki&path=`).set(bearer(l.access))
-    expect(res.body.code).toBe(0)
-    expect(res.body.data).toMatchObject({ kind: 'dir', path: '', truncated: false })
-    expect(res.body.data.files).toContainEqual(
-      expect.objectContaining({ path: 'report.md', type: 'file', size: expect.any(Number), modified: expect.any(String) }),
-    )
-    expect(res.body.data.files).toContainEqual(expect.objectContaining({ path: 'data', type: 'directory' }))
-    // root/path 透传
-    expect(archive.calls.at(-1)).toMatchObject({ method: 'read', root: 'wiki', relPath: '', recursive: false })
-  })
-
-  it('GET recursive=true 递归 walk 出深层相对路径', async () => {
-    const u = await seedUser(ctx.prisma, 'fg2', 'pw-fg2-secure')
-    const name = await seedContainer(u.id)
-    const l = await login(ctx.request, 'fg2', 'pw-fg2-secure')
-    const res = await ctx.request.get(`${BASE}/${name}/files?root=wiki&path=data&recursive=true`).set(bearer(l.access))
-    expect(res.body.code).toBe(0)
-    const paths = res.body.data.files.map((f: { path: string }) => f.path)
-    expect(paths).toContain('data/raw.txt')
-    expect(archive.calls.at(-1)).toMatchObject({ root: 'wiki', relPath: 'data', recursive: true })
-  })
-
-  it('GET path=文件 → file 分支：{path,content,size,modified}；二进制 → content null + binary', async () => {
-    const u = await seedUser(ctx.prisma, 'fg3', 'pw-fg3-secure')
-    const name = await seedContainer(u.id)
-    const l = await login(ctx.request, 'fg3', 'pw-fg3-secure')
-    const res = await ctx.request.get(`${BASE}/${name}/files?root=wiki&path=data%2Fraw.txt`).set(bearer(l.access))
-    expect(res.body.code).toBe(0)
-    expect(res.body.data).toMatchObject({ kind: 'file', path: 'data/raw.txt', content: 'raw data', binary: false })
-
-    const bin = await ctx.request.get(`${BASE}/${name}/files?root=wiki&path=data%2Fbinary.bin`).set(bearer(l.access))
-    expect(bin.body.code).toBe(0)
-    expect(bin.body.data).toMatchObject({ content: null, binary: true })
-  })
-
-  it('GET 文件不存在 → 60040', async () => {
-    const u = await seedUser(ctx.prisma, 'fg4', 'pw-fg4-secure')
-    const name = await seedContainer(u.id)
-    const l = await login(ctx.request, 'fg4', 'pw-fg4-secure')
-    const res = await ctx.request.get(`${BASE}/${name}/files?root=wiki&path=nope.md`).set(bearer(l.access))
-    expect(res.body.code).toBe(60040)
-    expect(res.body.data).toBeNull()
-  })
-
-  // ---------------------------- PUT / POST / DELETE 写删 ----------------------------
-
-  it('PUT 覆写已存在；返回 {path}；root/path/content 透传', async () => {
-    const u = await seedUser(ctx.prisma, 'fw1', 'pw-fw1-secure')
-    const name = await seedContainer(u.id)
-    const l = await login(ctx.request, 'fw1', 'pw-fw1-secure')
-    const res = await ctx.request
-      .put(`${BASE}/${name}/files`)
-      .set(bearer(l.access))
-      .send({ root: 'wiki', path: 'report.md', content: '# 新报告\n' })
-    expect(res.body.code).toBe(0)
-    expect(res.body.data).toEqual({ path: 'report.md' })
-    expect(archive.calls.at(-1)).toMatchObject({ method: 'write', root: 'wiki', relPath: 'report.md', content: '# 新报告\n' })
-  })
-
-  it('PUT 不存在 → 60040', async () => {
-    const u = await seedUser(ctx.prisma, 'fw2', 'pw-fw2-secure')
-    const name = await seedContainer(u.id)
-    const l = await login(ctx.request, 'fw2', 'pw-fw2-secure')
-    const res = await ctx.request
-      .put(`${BASE}/${name}/files`)
-      .set(bearer(l.access))
-      .send({ root: 'wiki', path: 'nope.md', content: 'x' })
-    expect(res.body.code).toBe(60040)
-  })
-
-  it('POST 新建；已存在 → 60041 冲突', async () => {
-    const u = await seedUser(ctx.prisma, 'fw3', 'pw-fw3-secure')
-    const name = await seedContainer(u.id)
-    const l = await login(ctx.request, 'fw3', 'pw-fw3-secure')
-    const res = await ctx.request
-      .post(`${BASE}/${name}/files`)
-      .set(bearer(l.access))
-      .send({ root: 'wiki', path: 'fresh.md', content: 'new' })
-    expect(res.body.code).toBe(0)
-    expect(res.body.data).toEqual({ path: 'fresh.md' })
-
-    const conflict = await ctx.request
-      .post(`${BASE}/${name}/files`)
-      .set(bearer(l.access))
-      .send({ root: 'wiki', path: 'fresh.md', content: 'dup' })
-    expect(conflict.body.code).toBe(60041)
-  })
-
-  it('DELETE 删除文件 → null；不存在 → 60040；指向目录 → 90002', async () => {
-    const u = await seedUser(ctx.prisma, 'fw4', 'pw-fw4-secure')
-    const name = await seedContainer(u.id)
-    const l = await login(ctx.request, 'fw4', 'pw-fw4-secure')
-    const del = await ctx.request.delete(`${BASE}/${name}/files?root=wiki&path=data%2Fraw.txt`).set(bearer(l.access))
-    expect(del.body.code).toBe(0)
-    expect(del.body.data).toBeNull()
-    expect(archive.calls.at(-1)).toMatchObject({ method: 'delete', root: 'wiki', relPath: 'data/raw.txt' })
-
-    const missing = await ctx.request.delete(`${BASE}/${name}/files?root=wiki&path=data%2Fraw.txt`).set(bearer(l.access))
-    expect(missing.body.code).toBe(60040)
-
-    const dir = await ctx.request.delete(`${BASE}/${name}/files?root=wiki&path=data`).set(bearer(l.access))
-    expect(dir.body.code).toBe(90002)
-  })
-
-  it('写操作 path 空串 → 90002（PUT/POST/DELETE 无树根语义）', async () => {
-    const u = await seedUser(ctx.prisma, 'fw5', 'pw-fw5-secure')
-    const name = await seedContainer(u.id)
-    const l = await login(ctx.request, 'fw5', 'pw-fw5-secure')
-    const put = await ctx.request.put(`${BASE}/${name}/files`).set(bearer(l.access)).send({ root: 'wiki', path: '', content: 'x' })
-    expect(put.body.code).toBe(90002)
-    const del = await ctx.request.delete(`${BASE}/${name}/files?root=wiki&path=`).set(bearer(l.access))
-    expect(del.body.code).toBe(90002)
-  })
-
-  it('body 非 JSON / content 缺失 → 90002', async () => {
-    const u = await seedUser(ctx.prisma, 'fw6', 'pw-fw6-secure')
-    const name = await seedContainer(u.id)
-    const l = await login(ctx.request, 'fw6', 'pw-fw6-secure')
-    const res = await ctx.request
-      .post(`${BASE}/${name}/files`)
-      .set(bearer(l.access))
-      .send({ root: 'wiki', path: 'a.md' })
-    expect(res.body.code).toBe(90002)
-    expect(res.body.data).toHaveProperty('content')
-  })
-
-  // ---------------------------- GET /:name/files/raw（WebChat 媒体字节通道）----------------------------
-
-  it('raw png 成功读取：原生字节 + image/png + 无信封', async () => {
-    const u = await seedUser(ctx.prisma, 'fraw1', 'pw-fraw1-secure')
-    const name = await seedContainer(u.id)
-    const l = await login(ctx.request, 'fraw1', 'pw-fraw1-secure')
-    archive.files.set('test.png', 'PNG\r\n\nfake-png-bytes')
-    const res = await ctx.request
-      .get(`${BASE}/${name}/files/raw?path=${encodeURIComponent('/home/node/.openclaw/workspace/test.png')}`)
-      .set(bearer(l.access))
-    expect(res.status).toBe(200)
-    expect(res.headers['content-type']).toBe('image/png')
-    expect(res.body).not.toHaveProperty('code') // 豁免信封：原生字节
-    // supertest 默认 JSON 解析 body；字节经 Buffer 判定
-    expect(archive.calls.at(-1)).toMatchObject({
-      method: 'readBytes',
-      absRoot: '/home/node/.openclaw/workspace', // legacy 树根绝对路径（readBytes 独立字段，与 FileRoot 区分）
-      relPath: 'test.png',
-    })
-  })
-
-  it('raw 未认证 → 10001', async () => {
-    const u = await seedUser(ctx.prisma, 'fraw2', 'pw-fraw2-secure')
-    const name = await seedContainer(u.id)
-    const res = await ctx.request.get(`${BASE}/${name}/files/raw?path=${encodeURIComponent('/home/node/.openclaw/workspace/x.png')}`)
-    expect(res.body.code).toBe(10001)
-  })
-
-  it('raw 越权访问他人容器 → 20040（防探测同码）', async () => {
-    const u = await seedUser(ctx.prisma, 'fraw3', 'pw-fraw3-secure')
-    const name = await seedContainer(u.id)
-    await seedUser(ctx.prisma, 'fraw3v', 'pw-fraw3v-secure')
-    const lv = await login(ctx.request, 'fraw3v', 'pw-fraw3v-secure')
-    const res = await ctx.request.get(`${BASE}/${name}/files/raw?path=${encodeURIComponent('/home/node/.openclaw/workspace/x.png')}`).set(bearer(lv.access))
-    expect(res.body.code).toBe(20040)
-  })
-
-  it('raw 越界路径（.. 穿越 / 绝对路径越出 workspace）→ 90002 + data.path', async () => {
-    const u = await seedUser(ctx.prisma, 'fraw4', 'pw-fraw4-secure')
-    const name = await seedContainer(u.id)
-    const l = await login(ctx.request, 'fraw4', 'pw-fraw4-secure')
-    for (const bad of [
-      '/home/node/.openclaw/workspace/../secret.png', // 前缀内穿越
-      '/home/node/.openclaw/wiki/main/x.png', // 非 workspace 树
-      '/etc/passwd', // 任意绝对路径
-      '/home/node/.openclaw/workspace/a\\b.png', // 反斜杠
-    ]) {
-      const res = await ctx.request.get(`${BASE}/${name}/files/raw?path=${encodeURIComponent(bad)}`).set(bearer(l.access))
-      expect(res.body.code).toBe(90002)
-      expect(res.body.data).toHaveProperty('path')
-    }
-  })
-
-  it('raw 未知扩展名 → 90002（媒体白名单外）', async () => {
-    const u = await seedUser(ctx.prisma, 'fraw5', 'pw-fraw5-secure')
-    const name = await seedContainer(u.id)
-    const l = await login(ctx.request, 'fraw5', 'pw-fraw5-secure')
-    archive.files.set('doc.pdf', '%PDF-fake')
-    const res = await ctx.request
-      .get(`${BASE}/${name}/files/raw?path=${encodeURIComponent('/home/node/.openclaw/workspace/doc.pdf')}`)
-      .set(bearer(l.access))
-    expect(res.body.code).toBe(90002)
-    expect(res.body.data).toHaveProperty('path')
-  })
-
-  it('raw 文件不存在 → 60040', async () => {
-    const u = await seedUser(ctx.prisma, 'fraw6', 'pw-fraw6-secure')
-    const name = await seedContainer(u.id)
-    const l = await login(ctx.request, 'fraw6', 'pw-fraw6-secure')
-    const res = await ctx.request
-      .get(`${BASE}/${name}/files/raw?path=${encodeURIComponent('/home/node/.openclaw/workspace/missing.png')}`)
-      .set(bearer(l.access))
-    expect(res.body.code).toBe(60040)
-  })
-
-  // ---------------------------- root=lab 沙箱只读读面（#776 · S1 信封级集成） ----------------------------
-
   // 会话种子：owner + 沙箱绑定（schema 契约：containerId 记沙箱 docker 名）
   async function seedSession(ownerId: string): Promise<string> {
     seq += 1
@@ -481,6 +123,105 @@ describe('files REST（接缝 #2 信封 + #589）', () => {
     })
     return id
   }
+
+  // ---------------------------- 认证 / name / 容器归属（公共前置）----------------------------
+
+  it('未认证 → 10001', async () => {
+    const res = await ctx.request.get(`${BASE}/demo/files?root=lab&path=`)
+    expect(res.body.code).toBe(10001)
+  })
+
+  it('name 非法 → 90002 + data.name（大写/非法字符）', async () => {
+    await seedUser(ctx.prisma, 'finu', 'pw-finu-secure')
+    const l = await login(ctx.request, 'finu', 'pw-finu-secure')
+    const res = await ctx.request.get(`${BASE}/Bad_Name/files?root=lab&path=`).set(bearer(l.access))
+    expect(res.body.code).toBe(90002)
+    expect(res.body.data).toHaveProperty('name')
+  })
+
+  it('root=wiki：容器不存在 → 20040（防探测优先：退役码不泄露容器存在性）', async () => {
+    await seedUser(ctx.prisma, 'fnotf', 'pw-fnotf-secure')
+    const l = await login(ctx.request, 'fnotf', 'pw-fnotf-secure')
+    const res = await ctx.request.get(`${BASE}/nope/files?root=wiki&path=`).set(bearer(l.access))
+    expect(res.body.code).toBe(20040)
+    expect(res.body.data).toBeNull()
+  })
+
+  it('root=wiki：user 越权访问他人容器 → 20040，与「不存在」同码同文案同空 data（防探测）', async () => {
+    const u = await seedUser(ctx.prisma, 'fowner', 'pw-fowner-secure')
+    await seedUser(ctx.prisma, 'fvoyeur', 'pw-fvoyeur-secure')
+    const name = await seedContainer(u.id)
+    const lv = await login(ctx.request, 'fvoyeur', 'pw-fvoyeur-secure')
+    const res = await ctx.request.get(`${BASE}/${name}/files?root=wiki&path=`).set(bearer(lv.access))
+    expect(res.body.code).toBe(20040)
+    expect(res.body).toEqual({ code: 20040, message: expect.any(String), data: null })
+  })
+
+  // ---------------------------- root=wiki / workspace 整根退役（T0 #801 · 60042）----------------------------
+
+  it('root=wiki 归属通过后 → 60042 退役码（wiki 读走 wiki 域 REST）', async () => {
+    const u = await seedUser(ctx.prisma, 'fret1', 'pw-fret1-secure')
+    const name = await seedContainer(u.id)
+    const l = await login(ctx.request, 'fret1', 'pw-fret1-secure')
+    const res = await ctx.request.get(`${BASE}/${name}/files?root=wiki&path=`).set(bearer(l.access))
+    expect(res.body.code).toBe(60042)
+  })
+
+  it('root=workspace → 60042；缺省 root（legacy 前端硬发 workspace 的历史面）同退役语义', async () => {
+    const u = await seedUser(ctx.prisma, 'fret2', 'pw-fret2-secure')
+    const name = await seedContainer(u.id)
+    const l = await login(ctx.request, 'fret2', 'pw-fret2-secure')
+    const ws = await ctx.request.get(`${BASE}/${name}/files?root=workspace&path=`).set(bearer(l.access))
+    expect(ws.body.code).toBe(60042)
+    const missing = await ctx.request.get(`${BASE}/${name}/files?path=`).set(bearer(l.access))
+    expect(missing.body.code).toBe(60042)
+  })
+
+  it('admin 对退役根同样得到 60042（退役无角色豁免）', async () => {
+    const u = await seedUser(ctx.prisma, 'fret3', 'pw-fret3-secure')
+    const name = await seedContainer(u.id)
+    await seedAdmin(ctx.prisma, 'fret3a', 'pw-fret3a-secure')
+    const la = await login(ctx.request, 'fret3a', 'pw-fret3a-secure')
+    const res = await ctx.request.get(`${BASE}/${name}/files?root=workspace&path=`).set(bearer(la.access))
+    expect(res.body.code).toBe(60042)
+  })
+
+  it('root 非法值 → 90002 + data.root（区分于合法退役根 60042）', async () => {
+    const u = await seedUser(ctx.prisma, 'froot', 'pw-froot-secure')
+    const name = await seedContainer(u.id)
+    const l = await login(ctx.request, 'froot', 'pw-froot-secure')
+    const res = await ctx.request.get(`${BASE}/${name}/files?root=home&path=`).set(bearer(l.access))
+    expect(res.body.code).toBe(90002)
+    expect(res.body.data).toHaveProperty('root')
+  })
+
+  // ---------------------------- 写面 / raw 通道关闭（→ 90005 路由不存在）----------------------------
+
+  it('PUT/POST/DELETE 写面已关闭 → 90005（files API 只读化，T0 #801）', async () => {
+    const u = await seedUser(ctx.prisma, 'fwr', 'pw-fwr-secure')
+    const name = await seedContainer(u.id)
+    const l = await login(ctx.request, 'fwr', 'pw-fwr-secure')
+    const put = await ctx.request.put(`${BASE}/${name}/files`).set(bearer(l.access)).send({ root: 'lab', path: 'a.md', content: 'x' })
+    expect(put.body.code).toBe(90005)
+    const post = await ctx.request.post(`${BASE}/${name}/files`).set(bearer(l.access)).send({ root: 'lab', path: 'a.md', content: 'x' })
+    expect(post.body.code).toBe(90005)
+    const del = await ctx.request.delete(`${BASE}/${name}/files?root=lab&path=a.md`).set(bearer(l.access))
+    expect(del.body.code).toBe(90005)
+    // fake 零调用（路由未挂载，archive 不被触达）
+    expect(archive.calls).toHaveLength(0)
+  })
+
+  it('files/raw 媒体字节通道已关闭 → 90005', async () => {
+    const u = await seedUser(ctx.prisma, 'fraw', 'pw-fraw-secure')
+    const name = await seedContainer(u.id)
+    const l = await login(ctx.request, 'fraw', 'pw-fraw-secure')
+    const res = await ctx.request
+      .get(`${BASE}/${name}/files/raw?path=${encodeURIComponent('/home/node/.openclaw/workspace/x.png')}`)
+      .set(bearer(l.access))
+    expect(res.body.code).toBe(90005)
+  })
+
+  // ---------------------------- root=lab 沙箱只读读面（#776 · S1 信封级集成）----------------------------
 
   it('GET root=lab 列沙箱根目录 → 200；readLab 按沙箱 docker 名寻址（researcher-sandbox-<id>）', async () => {
     const u = await seedUser(ctx.prisma, 'flab1', 'pw-flab1-secure')
@@ -494,7 +235,7 @@ describe('files REST（接缝 #2 信封 + #589）', () => {
     expect(archive.calls.at(-1)).toMatchObject({ method: 'readLab', dockerName: sandboxContainerName(sid), relPath: '', recursive: false })
   })
 
-  it('GET root=lab 读文件 / recursive 递归（与 wiki 读面同形）', async () => {
+  it('GET root=lab 读文件 / recursive 递归 walk', async () => {
     const u = await seedUser(ctx.prisma, 'flab2', 'pw-flab2-secure')
     const sid = await seedSession(u.id)
     archive.labTrees.set(sandboxContainerName(sid), new Map([['src/main.py', 'print(1)\n'], ['src/util.py', 'x=2\n']]))
@@ -554,26 +295,6 @@ describe('files REST（接缝 #2 信封 + #589）', () => {
       expect(res.body.code).toBe(90002)
       expect(res.body.data).toHaveProperty('path')
     }
-  })
-
-  it('PUT/POST/DELETE root=lab → 90002 + data.root（只读面；/lab 写收敛 runner + 上传端点）', async () => {
-    const u = await seedUser(ctx.prisma, 'flab8', 'pw-flab8-secure')
-    // 写面归属门先走 legacy 容器解析：种一个自有容器（顺序契约：20040 前置于 root 校验，不变）
-    const name = await seedContainer(u.id)
-    const l = await login(ctx.request, 'flab8', 'pw-flab8-secure')
-    const writesBefore = archive.calls.filter((c) => c.method === 'write' || c.method === 'create' || c.method === 'delete').length
-    const put = await ctx.request.put(`${BASE}/${name}/files`).set(bearer(l.access)).send({ root: 'lab', path: 'x.md', content: 'x' })
-    expect(put.body.code).toBe(90002)
-    expect(put.body.data).toHaveProperty('root')
-    const post = await ctx.request.post(`${BASE}/${name}/files`).set(bearer(l.access)).send({ root: 'lab', path: 'x.md', content: 'x' })
-    expect(post.body.code).toBe(90002)
-    expect(post.body.data).toHaveProperty('root')
-    const del = await ctx.request.delete(`${BASE}/${name}/files?root=lab&path=x.md`).set(bearer(l.access))
-    expect(del.body.code).toBe(90002)
-    expect(del.body.data).toHaveProperty('root')
-    // fake 无任何新增写调用（读面只读）
-    const writesAfter = archive.calls.filter((c) => c.method === 'write' || c.method === 'create' || c.method === 'delete').length
-    expect(writesAfter).toBe(writesBefore)
   })
 
   it('跨会话沙箱隔离：同名文件各自成树（docker 名分树）', async () => {

@@ -13,9 +13,9 @@ wiki 编辑、model 配置等管理能力。交接规格见 `docs/research/320`�
 ## Layout
 
 ```
-server/     TS/Express 控制面（Express 5 + ws + Prisma 7 + SQLite + BullMQ/Redis + dockerode）
+server/     TS/Express 控制面（Express 5 + Prisma 7 + SQLite + BullMQ/Redis + dockerode）
 frontend/   Vue 3 + Vite + TypeScript + Pinia + Router + Element Plus
-deploy/     编排契约：单容器 compose 模板 + openclaw.json（配置单一来源）+ 生产 compose
+deploy/     编排契约：生产 compose + dev 栈 + wiki/autofigure 镜像构建
 docs/       research/ + prototypes/ + adr/
 ```
 
@@ -35,7 +35,7 @@ npm run build                                  # tsc + prisma generate 产物拷
 # ---- frontend（Vue3 + Vite）----
 cd frontend
 npm install
-npm run dev                                    # Vite dev server（proxy /api、/ws → :8001，指向容器化 server）
+npm run dev                                    # Vite dev server（proxy /api → :8001，指向容器化 server）
 npm run test                                   # vitest
 npm run build                                  # vue-tsc 类型检查 + vite build
 
@@ -51,16 +51,16 @@ docker compose -f deploy/docker-compose.dev.yml up -d --build   # server+redis�
 
 ```
 浏览器 (Vue3 + TS)
-    │ HTTP/REST (JWT Bearer)        │ WebSocket (JWT subprotocol)
-    ▼                               ▼
+    │ HTTP/REST (JWT Bearer) + SSE 事件流 (/api/v1/events)
+    ▼
 Express 控制面 (server/, localhost:8001)
-    │ auth / users / containers / wiki / models / chat  (路由按域)
+    │ auth / users / containers / wiki / models / sessions / events  (路由按域)
     │ 全局 #312 信封（HTTP 200 + {code,message,data}）+ jose HS256 认证
     ▼
-Docker SDK 控制面 (containers)          网关隧道 (chat，浏览器直连网关)
-    │ dockerode 挂 docker.sock             │ 隧道只做握手 4401 + 原始帧透传
-    ▼                                     ▼
-OpenClaw 容器 fleet (openclaw-gw-<name>，每容器独立 home/openclaw.json/宿主端口)
+Docker SDK 控制面 (containers)
+    │ dockerode 挂 docker.sock
+    ▼
+OpenClaw 容器 fleet (openclaw-gw-<name>，每容器独立 home；端口池废除不做宿主端口发布)
 ```
 
 ## server 模块边界（`server/src/`）
@@ -68,11 +68,10 @@ OpenClaw 容器 fleet (openclaw-gw-<name>，每容器独立 home/openclaw.json/�
 | 域 | 职责 | 关键模块 |
 |-----|------|----------|
 | `auth/` | 双角色账号 + JWT 签发/刷新（R1 旋转）+ bootstrap B1 + C1 强制改密 | `tokens.ts` `authenticate.ts` `bootstrap.ts` `userService.ts` |
-| `containers/` | Docker SDK 编排（增/删/查容器、端口池、config 渲染、5 态机） | `orchestrator.ts` `dockerRuntime.ts` `ports.ts` `configRenderer.ts` `fleetAssembly.ts` |
+| `containers/` | Docker SDK 编排（增/删/查容器、5 态机；T0 #801 起端口池/config 渲染写盘链/升级编排/健康探针退役，活性 = docker inspect Running） | `orchestrator.ts` `dockerRuntime.ts` `readModel.ts` `fleetAssembly.ts` |
 | `wiki/` | wiki 树 + CRUD + graph（`WikiFileSystem` Port + 纯逻辑；#784 存储换轨 = 每用户 wiki 容器 `researcher-wiki-<ownerId>` 树根 `/wiki`，每操作前置 ensure，compile 触发退役归 OpenWiki 工具形态；#789 OKF 适配 = SKIP_FILES += log.md/INSTRUCTIONS.md、SKIP_DIRS += .claims、graph 派生加 markdown 相对链接边[复用 ghost，story 43]、claims 只读 API[页路径→.claims 镜像旁车 + pageVersion 漂移，story 42]、okf 徽章入页数据[status/stale_after/generated，story 41]、POST /wiki/update = #790 三通道③独立 run 触发面（updateRunner 注入缺省 90005；updateEvents 纯映射 wiki_run 五类[debug 丢弃/input ≤1k 截断]）） | `service.ts` `logic.ts` `nodeFs.ts` `compile.ts` `routes.ts` |
-| `models/` | model provider CRUD（#775：行挂 ownerId；事务 = mutation + config_meta version bump 热生效；白名单第一层校验 origin 精确匹配 + DNS 私网拒绝 → 90002 字段级）+ 端点白名单 admin REST（`/api/v1/provider-endpoints`，731 §3.1）；写盘链（configWriter/configBuilder 两文件）已退役不再接线，物理删除留待 T0 #801 | `service.ts` `routes.ts` `endpoints.ts` `values.ts` |
-| `chat/` | 网关隧道（JWT 握手 4401 + 原始帧透传，ADR 0006 浏览器直连） | `tunnelAssembly.ts` `subprotocol.ts` `values.ts` |
-| `files/` | 统一文件 CRUD（root 契约 #776：wiki\|workspace(legacy 只读)\|lab；写面收敛 wiki；经 Docker getArchive/putArchive/exec rm，ADR 0012；lab 为沙箱只读 GET 面 readLab） | `fsPort.ts` `dockerArchive.ts` `paths.ts` `tar.ts` `routes.ts` |
+| `models/` | model provider CRUD（#775：行挂 ownerId；事务 = mutation + config_meta version bump 热生效；白名单第一层校验 origin 精确匹配 + DNS 私网拒绝 → 90002 字段级）+ 端点白名单 admin REST（`/api/v1/provider-endpoints`，731 §3.1）；写盘链（configWriter/configBuilder 两文件）已随 T0 #801 物理删除 | `service.ts` `routes.ts` `endpoints.ts` `values.ts` |
+| `files/` | 统一文件读面（T0 #801 只读化：root=lab 唯一现役读面——会话沙箱 /lab 只读 GET，:name=sessionId；root=wiki/workspace 退役 → 60042；写面/媒体通道关闭 → 90005；经 Docker getArchive，ADR 0012） | `fsPort.ts` `dockerArchive.ts` `paths.ts` `routes.ts` |
 | `events/` | SSE 事件流（#773，替代 WS 的传输面）：StreamHub per-user 扇出 + per-user 连续单调 serverSeq + 事件桥薄投影（LangChain streamEvents → 自有目录，不透传） | `hub.ts` `logic.ts` `routes.ts` `bridge.ts` `values.ts` |
 | `sandboxes/` | 会话沙箱生命周期（#776 · story 58/59：1 session:1，容器名 `researcher-sandbox-<sessionId>`，对容器列表隐身）：惰性创建 ensure/闲置 30min 自动 stop（文件保留）/级联删（容器+独立 bridge 网络）；资源 limit Memory 4GB·4 核·PidsLimit 512 + MemorySwap=Memory 禁 swap（OOM 杀进程不杀容器的前提）；非 root(1000) + CapDrop ALL + no-new-privileges + RestartPolicy no；kind 标签三值 legacy\|wiki\|sandbox（#784 起完整分派，见 containers/kind.ts）；消费方 = #777 runner ensure/touch + #778 删 session 级联 + #781 fork 字面复制（`forkSandbox`：createSandboxFromSource 容器 export→import 整 FS，源已删空起步兜底） | `values.ts` `runtime.ts` `dockerRuntime.ts` `lifecycle.ts` `service.ts` `assembly.ts` |
 | `wikiContainers/` | wiki 容器生命周期（#784 · E 节 wiki 列：每用户一台 `researcher-wiki-<userId>`、永久、零初始化零骨架、NetworkMode none 零出网、Memory 256MB/PidsLimit 128、非 root + CapDrop ALL + no-new-privileges、无具名卷——备份 = docker export 全树 tar，还原 = docker import 成镜像后重建；活性 = docker inspect Running 无探针无端口；对 fleet 列表隐身 kind=wiki + owner 标签；镜像 = deploy/wiki-image busybox 级 + WIKI_IMAGE 钉版） | `values.ts` `runtime.ts` `dockerRuntime.ts` `lifecycle.ts` `assembly.ts` |
@@ -94,7 +93,6 @@ OpenClaw 容器 fleet (openclaw-gw-<name>，每容器独立 home/openclaw.json/�
 - `/api/v1/auth/*` — 登录/refresh(R1 旋转)/logout/me/password/change + OIDC `oauth/<p>/login|callback`（未配 provider 时 90001）。
 - `/api/v1/users` — admin 账号管理（GET 连带 containerCount / POST / PATCH / reset-password；码段 1xxxx）。
 - `/api/v1/containers/*` — 容器列表/新建（同步返 creating 快照）/删除（异步信封）。
-- `/api/v1/containers/<name>/pairing/` — 设备配对查询/触发/approve。
 - `/api/v1/containers/<name>/wiki/{tree,page,graph,categories}` — wiki 文件树/读写/图谱
   （#784 存储换轨：数据源 = 该容器行 owner 的 wiki 容器，每操作前置 ensure（惰性创建/stopped
   复启），归属校验先于 ensure——越权探测不建容器）。
@@ -125,8 +123,6 @@ OpenClaw 容器 fleet (openclaw-gw-<name>，每容器独立 home/openclaw.json/�
   指针不动]；files 面结果挂 `files` 字段{reverted,skippedMissing,degraded}）+ `/<id>/rewind/preview`
   （逆放摘要 + 锚后 exec 跨越清单——POST 同 body，只读）；
   50002 同码防探测）。
-- `/api/v1/containers/<name>/chat/{sessions,approval/resolve,commands}` — chat REST 代理。
-- 对话 WS 走 `/ws/chat/` 隧道（JWT subprotocol 握手；先 accept 再 close(4401) 拒未认证）。
 - `GET /api/v1/events` — SSE 事件流（#773，panel_stream cookie 认证，替代 WS 的传输面先行）。
 
 全局 #312 信封：所有 REST 一律 HTTP 200，错误信号在 body `{code,message,data}`；「不存在 vs 越权」
@@ -137,7 +133,7 @@ OpenClaw 容器 fleet (openclaw-gw-<name>，每容器独立 home/openclaw.json/�
 死信号让路；其余响应仍 HTTP 200+信封）。码段：`0` 成功 · `1xxxx` 通用/鉴权 ·
 `2xxxx` 容器 · `3xxxx` wiki ·
 `4xxxx` models（40042 端点不在白名单[运行时第二层，仅 runner 侧] · 40043 并发配额已满[per-user
-maxConcurrentRuns 或全局 RUNNER_MAX_CONCURRENT_RUNS]）· `5xxxx` chat/pairing 的 WS close codes 为另一传输面；信封面 5xxxx = 会话/run 域（#747 C 节，
+maxConcurrentRuns 或全局 RUNNER_MAX_CONCURRENT_RUNS]）· `5xxxx` 会话/run 域（#747 C 节，
   #776 起 50002 session_not_found；#777 起 50003 审批挂起（#778 补 REST 前置面与码表）；#783 起
   50004 approval_not_found 同码防探测；#778 增（50004 让位 #783，顺移起）50005 run 进行中禁输入·
   非终态拒删 / 50006 无在飞可中断 / 50007 幂等 key 同 key 异 content；#782 起 50008 文件状态
@@ -179,13 +175,12 @@ maxConcurrentRuns 或全局 RUNNER_MAX_CONCURRENT_RUNS]）· `5xxxx` chat/pairin
 
 ## 关键机制与约束
 
-- **配置单一来源**：`deploy/openclaw.json` 是全面板共享模板；`ConfigRenderer` 渲染每容器配置并强制
-  安全不变量（port/bind/token 占位）。`GATEWAY_TOKEN` 每容器独立生成、经 env 注入，真值落盘为 AES 密文。
-- **端口池**：宿主侧池 `19000–19999`（容器内统一 18789，靠 Docker 网络命名空间隔离；池避开单容器
-  compose 占用的 18789），创建取最小空闲、删除回收（`containers/ports.ts`）。
-- **设备配对**：chat/审批/补全/工具事件须先完成 Ed25519 设备配对（签名 challenge → 宿主 approve →
-  deviceToken 持久化）。A3 双层状态机 `PAIRING_REQUIRED→APPROVING→PAIRED`（可重试无 FAILED 终态），
-  宿主 approve 由控制面在容器内 `openclaw devices approve` 编排（ADR 0006）。
+- **T0 legacy 清退（#801）**：chat 隧道四文件/设备配对（表+路由+approve exec）/bootstrap-token/端口池/
+  config 渲染写盘链（openclaw.json 模板）/升级编排/健康探针对账已整链退役；files API 只读化（root=lab
+  唯一读面，wiki/workspace → 60042，写面与 files/raw 媒体通道 → 90005）；openclaw-image 派生镜像构建
+  退役（fleet 镜像引用仍钉版存量 GHCR，可继续拉取）。
+- **容器配置**：容器读镜像内默认配置（模板渲染链已删）；`GATEWAY_TOKEN` 每容器独立生成、经 env 注入，
+  真值落盘为 AES 密文；行 `port` 恒 0 记账（列保留，不做宿主端口发布）。
 - **docker.sock 安全**：控制面挂 `/var/run/docker.sock` = 等价 root（spec §5.4 明示风险）。本地/可信
   部署可接受；生产应限制控制面网络面或改用 rootless / 远程 TLS daemon。
 - **输入 0 信任**：所有写操作经 zod schema 强制校验（`validation/schemas.ts`），禁裸读 `req.body`。

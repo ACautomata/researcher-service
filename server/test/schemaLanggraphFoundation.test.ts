@@ -16,8 +16,8 @@
 //   1) 字段契约 —— init.sql 落 fresh 库后逐表 PRAGMA table_info 断言（存在性/类型/NOT NULL/默认值）
 //      + 唯一索引/复合主键断言（对齐上游 DDL，不测 Prisma 实现细节而测落库形状）。
 //   2) 迁移幂等 —— apply-schema.mjs 对同一库连跑两次均退出 0 且 schema 一致；upgrade-schema.mjs
-//      对「旧形状库」（users 无新列 + 旧 model_providers + pairings）增量收敛：新表就位、
-//      users 列补齐、旧表形状原样不动（#771 验收「旧表不动，留待 T0 清退」）。
+//      对「旧形状库」（users 无新列 + 旧 model_providers）增量收敛：新表就位、users 列补齐、
+//      旧 model_providers DROP 重建新形状 + pairings 清退（T0 #801 零迁移前提）。
 //      NEW_TABLE_COLUMNS 常量对 fresh（init.sql）与 upgrade（镜像脚本）两路径跑同一套逐字段
 //      断言 —— 镜像与 init.sql 漂移即测试红（双写镜像的 parity 保险）。
 //   3) 写入时序 —— attachments.messageId 可空 + 投影回填（766 D5/D9：附件行先于消息行）。
@@ -444,7 +444,7 @@ describe('#771 Prisma 新表地基（字段契约 / 迁移幂等 / 级联）', (
       expect(first.endpointCount).toBe(1)
     })
 
-    it('upgrade-schema.mjs 对「旧形状库」增量收敛：新表就位 + users 列补齐 + 旧表形状不动（留待 T0 清退）', () => {
+    it('upgrade-schema.mjs 对「旧形状库」增量收敛：新表就位 + users 列补齐 + 旧表随 T0 #801 清退重建', () => {
       const p = path.join(dir, 'legacy-upgrade.db')
       const d = new Database(p)
       // 造最小旧形状：users（无新列）+ 旧 model_providers（containerId/api/apiKeyEnvId）+ pairings
@@ -502,15 +502,18 @@ CREATE TABLE "pairings" (
         const c = colsOf(d2, table).get('createdAt')
         expect(c, `upgrade 路径 ${table}.createdAt`).toMatchObject({ type: 'DATETIME', notnull: 1 })
       }
-      // 旧形状 model_providers 原样不动（containerId/api/apiKeyEnvId 仍在；新 ownerId/lcProvider 不加）
+      // T0 #801 清退语义反转：旧形状 model_providers DROP 重建为新形状（零迁移前提 #732）——
+      // 旧列（containerId/api/apiKeyEnvId）不残留、新列（ownerId/lcProvider）就位；
+      // pairings 表随配对全链退役 DROP。
       const mpCols = colsOf(d2, 'model_providers')
-      expect(mpCols.has('containerId')).toBe(true)
-      expect(mpCols.has('api')).toBe(true)
-      expect(mpCols.has('apiKeyEnvId')).toBe(true)
-      expect(mpCols.has('ownerId')).toBe(false)
-      expect(mpCols.has('lcProvider')).toBe(false)
-      // pairings 不动
-      expect(colsOf(d2, 'pairings').has('deviceId')).toBe(false)
+      expect(mpCols.has('containerId')).toBe(false)
+      expect(mpCols.has('api')).toBe(false)
+      expect(mpCols.has('apiKeyEnvId')).toBe(false)
+      expect(mpCols.has('ownerId')).toBe(true)
+      expect(mpCols.has('lcProvider')).toBe(true)
+      expect(
+        (d2.prepare(`SELECT count(*) c FROM sqlite_master WHERE type='table' AND name='pairings'`).get() as { c: number }).c,
+      ).toBe(0)
       // config_meta 种子 + 731 §3.1 白名单 seed（重跑不重复）
       expect(d2.prepare(`SELECT id, version FROM config_meta`).get()).toEqual({ id: 1, version: 1 })
       expect(
@@ -601,7 +604,7 @@ VALUES ('m1', 's1', 0, 'user');
       d2.close()
     })
 
-    it('apply-schema.mjs 对「旧形状库」可重跑：跳过 model_providers 新索引不崩溃 + 新表照常 + 旧表不动', () => {
+    it('apply-schema.mjs 对「旧形状库」可重跑：model_providers 旧形状 DROP 重建 + 新表照常 + pairings 清退', () => {
       const p = path.join(dir, 'legacy-apply.db')
       const d = new Database(p)
       // 旧库夹具：users 逐列对齐 master init.sql（无新列、含 email 等索引列）；model_providers
@@ -647,11 +650,11 @@ CREATE TABLE "model_providers" (
         expect(tables, `新表 ${t} 就位`).toContain(t)
       }
       expectColumns(colsOf(d2, 'users'), USERS_NEW_COLUMNS) // users 加列经增量收敛补齐
-      // 旧 model_providers 形状原样：无 ownerId 列、新唯一索引未建
+      // T0 #801：旧形状 DROP 重建——containerId 不残留、ownerId 就位、新唯一索引 (ownerId, providerId) 建出
       const mpCols = colsOf(d2, 'model_providers')
-      expect(mpCols.has('containerId')).toBe(true)
-      expect(mpCols.has('ownerId')).toBe(false)
-      expect(indexesOf(d2, 'model_providers').find((i) => i.name === 'model_providers_ownerId_providerId_key')).toBeUndefined()
+      expect(mpCols.has('containerId')).toBe(false)
+      expect(mpCols.has('ownerId')).toBe(true)
+      expect(indexesOf(d2, 'model_providers').find((i) => i.name === 'model_providers_ownerId_providerId_key')).toBeDefined()
       d2.close()
     })
   })

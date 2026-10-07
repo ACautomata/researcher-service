@@ -1,26 +1,24 @@
-// DockerFileArchive —— FileArchive 的 dockerode 适配层（#589 · ADR 0012）。
-// 读（list/read）经 getArchive（以容器为视角打 tar 流，穿过 named volume 挂载点读卷数据）、
-// 写经 putArchive、删经容器内 exec rm。容器存在即可读（stopped 的 getArchive 由 daemon 处理，
+// DockerFileArchive —— FileArchive 的 dockerode 适配层（#589 · ADR 0012；T0 #801 只读化收缩）。
+// 读（readLab/readLabBytes）经 getArchive（以容器为视角打 tar 流，穿过挂载点读卷数据）、写经
+// putArchive、删经容器内 exec rm。容器存在即可读（stopped 的 getArchive 由 daemon 处理，
 // 不需进程）；写/删先幂等 start（保 exec mkdir / rm 可用，对齐 ADR「stopped 删除需先 start」）。
 // client 延迟注入（默认 new Docker() 挂 docker.sock）——构造时不连 daemon（对齐 DockerRuntime）。
+// legacy fleet 文件树读写删（root=wiki/workspace）与 openclaw.json config 写读链随 T0 清退删除。
 //
 // 内存防护（#586 US8「接口不会被大二进制拖垮」）：probe 流式读第一个业务头，文件超
 // MAX_FILE_READ_BYTES 时只保留头元数据（size/mtime）、排干剩余流不驻留字节——超大文件读请求
-// 不把文件内容拉进控制面内存（列表/删除/覆写的大文件同理只读头）。
+// 不把文件内容拉进控制面内存。
 
 import Docker from 'dockerode'
 import { readdir, readFile, stat } from 'node:fs/promises'
 import path from 'node:path'
 import { Readable } from 'node:stream'
 import { containerName } from '../containers/runtime'
-import { HOME_BIND } from '../containers/constants'
+import { MOUNT_WORKSPACE } from '../containers/constants'
 import { FileExists, FileInvalidPath, FileNotFound } from './errors'
-import type { DirListing, FileArchive, FileEntry, FileReading, FileRoot } from './fsPort'
-import { FILE_ROOTS, MAX_FILE_READ_BYTES, WALK_LIMIT } from './values'
+import type { DirListing, FileArchive, FileEntry, FileReading } from './fsPort'
+import { LAB_ROOT_ABS, MAX_FILE_READ_BYTES, WALK_LIMIT } from './values'
 import { alignTo, createTarFile, createTarTree, mtimeIso, normalizeTarName, parseNumeric, parseTar, type TarEntry, type TarTreeEntry } from './tar'
-
-// #591 静态 config：容器内 openclaw.json 固定路径（gateway 默认读取位，无 OPENCLAW_CONFIG_PATH）
-const CONFIG_PATH = `${HOME_BIND}/openclaw.json`
 
 function toEntry(t: TarEntry): FileEntry {
   return {
@@ -80,15 +78,10 @@ export class DockerFileArchive implements FileArchive {
     return relPath === '' ? base : `${base}/${relPath}`
   }
 
-  private absPath(root: FileRoot, relPath: string): string {
-    return DockerFileArchive.joinRoot(FILE_ROOTS[root], relPath)
-  }
-
   // ---- docker 原语封装（404 语义与 exec 模式对齐 DockerRuntime） ----
 
   // 幂等 start（已 running → docker 返 304 幂等成功；容器消失 404 幂等成功，后续 exec 再暴露）。
-  // dockerName 原文直用——fleet 面调用方传 containerName(name) 套好前缀，wiki 容器面传
-  // researcher-wiki-<ownerId>（#784），lab 面不经此。
+  // dockerName 原文直用——wiki 容器面传 researcher-wiki-<ownerId>（#784），lab 面不经此。
   private async start(dockerName: string): Promise<void> {
     try {
       await this.client().getContainer(dockerName).start()
@@ -113,8 +106,8 @@ export class DockerFileArchive implements FileArchive {
 
   // 流式 probe：读第一个业务头（容忍前置 GNU 'L' / PAX 'x' 元头）→ 超大文件只留元数据；
   // 否则收集完整 tar 解析。路径不存在（daemon 404）→ null。
-  // container = docker 容器名原文：fleet 面调用方套 containerName(name)，lab 面直传
-  // researcher-sandbox-<sessionId>（readLab，#776）——本方法不再二次加工。
+  // container = docker 容器名原文：lab 面直传 researcher-sandbox-<sessionId>（readLab，#776），
+  // wiki 面传 researcher-wiki-<ownerId>——本方法不再二次加工。
   private async probe(container: string, absPath: string): Promise<ProbeResult> {
     let stream: NodeJS.ReadableStream
     try {
@@ -182,21 +175,21 @@ export class DockerFileArchive implements FileArchive {
 
   // ---- FileArchive 实现 ----
 
-  async read(name: string, root: FileRoot, relPath: string, recursive: boolean): Promise<DirListing | FileReading> {
-    return this.readContainer(containerName(name), this.absPath(root, relPath), relPath, recursive)
-  }
-
-  // #776 root=lab 沙箱读面：dockerName 原文直用（不套 openclaw-gw- 前缀），树根固定 FILE_ROOTS.lab。
-  // 与 read() 共用同一读通道（probe/tar/walk/二进制嗅探全同构）。
+  // #776 root=lab 沙箱读面：dockerName 原文直用（不套 openclaw-gw- 前缀），树根固定 /lab。
   async readLab(dockerName: string, relPath: string, recursive: boolean): Promise<DirListing | FileReading> {
-    return this.readContainer(dockerName, this.absPath('lab', relPath), relPath, recursive)
+    return this.readContainer(
+      dockerName,
+      DockerFileArchive.joinRoot(LAB_ROOT_ABS, relPath),
+      relPath,
+      recursive,
+    )
   }
 
-  // #780 沙箱字节读（附件下载端点）：与 readBytes 同 byte 收集语义，但以 lab 根 + dockerName 原文
-  // 寻址（不复用 readBytes 的 workspace absRoot 通道——lab 字节属于沙箱容器）。探针/收集与
-  // readBytes 完全同构（oversized/非文件 → FileInvalidPath；不存在 → FileNotFound）。
+  // #780 沙箱字节读（附件下载端点）：与 readLab 的 file 分支同探针/收集路径，但**不做 NUL
+  // 嗅探与 UTF-8 转码**——直接返回 entry.data Buffer（/lab/uploads/<attachmentId>/<原文件名> 的
+  // 图片/音视频字节透传）。
   async readLabBytes(dockerName: string, relPath: string): Promise<Buffer> {
-    const absPath = this.absPath('lab', relPath)
+    const absPath = DockerFileArchive.joinRoot(LAB_ROOT_ABS, relPath)
     const probed = await this.probe(dockerName, absPath)
     if (probed === null) throw new FileNotFound(relPath)
     if (probed.kind === 'oversized') throw new FileInvalidPath(relPath)
@@ -207,7 +200,7 @@ export class DockerFileArchive implements FileArchive {
     return entry.data ?? Buffer.alloc(0)
   }
 
-  // 读通道本体（read/readLab 共用）：absPath = 容器内绝对路径，relPath = 相对树根的回显路径。
+  // 读通道本体（readLab 用）：absPath = 容器内绝对路径，relPath = 相对树根的回显路径。
   private async readContainer(
     container: string,
     absPath: string,
@@ -231,7 +224,7 @@ export class DockerFileArchive implements FileArchive {
     const { buf, entries, root: rootEntry } = probed
 
     if (rootEntry.type === 'directory') {
-      // Docker 目录 getArchive：根条目 = basename（如 'workspace'），子条目带 'workspace/' 前缀
+      // Docker 目录 getArchive：根条目 = basename（如 'lab'），子条目带 'lab/' 前缀
       // （对齐 `docker cp` 语义）；逐条 strip 根前缀得到相对 root 的路径。
       const prefix = normalizeTarName(rootEntry.name)
       const files: FileEntry[] = []
@@ -273,38 +266,8 @@ export class DockerFileArchive implements FileArchive {
     throw new FileInvalidPath(relPath) // symlink / 特殊类型：不支持读
   }
 
-  // 原始字节读取（WebChat 媒体通道）：与 read() 的 file 分支同探针/收集路径，但**不做 NUL 嗅探与
-  // UTF-8 转码**——直接返回 entry.data Buffer（workspace 图片字节透传给浏览器）。absRoot = 容器内
-  // 树根绝对路径（legacy 专用通道，FILE_ROOTS.workspace）。超大文件 probe 已短路
-  //（oversized → FileInvalidPath）；非文件条目（目录/symlink）→ FileInvalidPath。
-  async readBytes(name: string, absRoot: string, relPath: string): Promise<Buffer> {
-    const absPath = DockerFileArchive.joinRoot(absRoot, relPath)
-    const probed = await this.probe(containerName(name), absPath)
-    if (probed === null) throw new FileNotFound(relPath)
-    if (probed.kind === 'oversized') throw new FileInvalidPath(relPath)
-    if (probed.root.type !== 'file') throw new FileInvalidPath(relPath)
-    const full = parseTar(probed.buf, { collectData: true, maxDataBytes: MAX_FILE_READ_BYTES })
-    const entry = full[0]
-    if (!entry) throw new FileNotFound(relPath)
-    return entry.data ?? Buffer.alloc(0)
-  }
-
-  async write(name: string, root: FileRoot, relPath: string, content: string): Promise<void> {
-    await this.writeInContainer(containerName(name), FILE_ROOTS[root], relPath, content)
-  }
-
-  async create(name: string, root: FileRoot, relPath: string, content: string): Promise<void> {
-    await this.createInContainer(containerName(name), FILE_ROOTS[root], relPath, content)
-  }
-
-  async delete(name: string, root: FileRoot, relPath: string): Promise<void> {
-    await this.deleteInContainer(containerName(name), FILE_ROOTS[root], relPath)
-  }
-
-  // ---- 显式容器名写面（#784）：wiki 域 REST 挂新 wiki 容器（researcher-wiki-<ownerId>，
-  // 树根 /wiki）——FileArchive Port 的 (name, root) 寻址是 legacy fleet 契约，wiki 容器不在
-  // FILE_ROOTS 词表也不套 openclaw-gw- 前缀；写/建/删三方法以 docker 名 + 绝对树根直给。
-  // 语义与 write/create/delete 逐字节同源（probe 守卫 / mkdir -p / rm -f 只删文件）。
+  // ---- 显式容器名写面（#784）：wiki 域 REST 挂 wiki 容器（researcher-wiki-<ownerId>，
+  // 树根 /wiki）——写/建/删三方法以 docker 名 + 绝对树根直给。
 
   async writeInContainer(dockerName: string, absRoot: string, relPath: string, content: string): Promise<void> {
     const absPath = DockerFileArchive.joinRoot(absRoot, relPath)
@@ -330,19 +293,6 @@ export class DockerFileArchive implements FileArchive {
     await this.execSync(dockerName, ['rm', '-f', '--', absPath])
   }
 
-  // ---- #591 静态 config（内部机制，REST 不可达）----
-
-  // upsert 写容器内 ~/.openclaw/openclaw.json：不 probe 存在性、不 start、不 exec mkdir——
-  // HOME_BIND 挂载点恒存在（镜像骨架/镜像默认），putArchive 对 created/stopped/running 容器
-  // 均可用（daemon 直接解包到容器 rootfs，无需进程）。create 流程即「create 容器 → writeConfig
-  // → start」，首启 gateway 就读到渲染配置；改配置后须重启容器生效（静态 config，#366 回退）。
-  async writeConfig(name: string, content: string): Promise<void> {
-    const container = this.client().getContainer(containerName(name))
-    await container.putArchive(Readable.from([createTarFile('openclaw.json', Buffer.from(content, 'utf8'))]), {
-      path: HOME_BIND,
-    })
-  }
-
   // 模板 workspace 灌卷（#6xx · named volume 拓扑下 researcher workspace 预填充）：递归 walk
   // hostDir → 目录树 tar（目录先序条目，父目录先建）→ putArchive 解包进 ~/.openclaw/workspace。
   // chown:true（daemon 语义：应用 tar 头内 uid/gid）+ 头写 node(1000)，灌入文件 node:node——
@@ -356,19 +306,8 @@ export class DockerFileArchive implements FileArchive {
     const entries = await walkTree(root, '')
     const container = this.client().getContainer(containerName(name))
     await container.putArchive(Readable.from([createTarTree(entries)]), {
-      path: FILE_ROOTS.workspace, // 树根 = 挂载点单一来源（legacy workspace，T0 退役）
+      path: MOUNT_WORKSPACE, // 容器内挂载点单一来源（containers/constants）
       chown: true,
     })
-  }
-
-  // 读容器内 openclaw.json 全文；不存在（daemon 404）→ FileNotFound。
-  async readConfig(name: string): Promise<string> {
-    const probed = await this.probe(containerName(name), CONFIG_PATH)
-    if (probed === null) throw new FileNotFound('openclaw.json')
-    if (probed.kind === 'oversized' || probed.root.type !== 'file') throw new FileInvalidPath('openclaw.json')
-    const full = parseTar(probed.buf, { collectData: true, maxDataBytes: MAX_FILE_READ_BYTES })
-    const entry = full[0]
-    if (!entry) throw new FileNotFound('openclaw.json')
-    return (entry.data ?? Buffer.alloc(0)).toString('utf8')
   }
 }

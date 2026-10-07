@@ -2,6 +2,7 @@
 // 薄组合根：读侧委托 FleetReadModel（list/createdItem + creating 对账），写侧委托 FleetCommand
 // （create/delete + 取消标志），共享依赖经 FleetDeps 单点注入。取消注册表读写共享（delete 置标志、
 // create 检查点检出）。
+// T0 #801 legacy 清退：#699 upgrade 编排与 pairing 代系 list（listWithIds）随组件退役移除。
 
 import type { PrismaClient, Container } from '../generated/prisma/client'
 import type { AuthUser } from '../types'
@@ -54,28 +55,17 @@ export class Orchestrator {
   delete(name: string, expectedId?: string): Promise<DeleteOutcome> {
     return this.cmd.delete(name, expectedId)
   }
-  // #699 升级（守卫/幂等/置 upgrading 同步段 + 后台六步编排异步段；对齐 delete 先例）
-  upgradeReserve(name: string): Promise<{ inst: Container; triggered: boolean }> {
-    return this.cmd.upgradeReserve(name)
-  }
-  submitUpgrade(name: string): Promise<void> {
-    return this.cmd.submitUpgrade(name)
-  }
 
   // 读侧
   list(where: { ownerId?: string } = {}): Promise<ContainerSummary[]> {
     return this.read.list(where)
-  }
-  // list + 行 ID（Codex 第五轮③[P2]，pairing 代系 join 用）
-  listWithIds(where: { ownerId?: string } = {}): Promise<{ items: ContainerSummary[]; ids: Map<string, string> }> {
-    return this.read.listWithIds(where)
   }
   createdItem(inst: Container): ContainerSummary {
     return this.read.createdItem(inst)
   }
 }
 
-// 单点归属前置（#312⑤ / #334：供 WIKI/models/chat/pairing 各域复用）。
+// 单点归属前置（#312⑤ / #334：供 WIKI/models/files 各域复用）。
 // 按 name 查容器后追加 owner 判定：admin 全放行 / user 仅本人。
 // 「不存在 vs 越权」同码 20040 防探测——对外逐字节一致，区分仅进服务端日志（owner_mismatch vs not_found）。
 export async function getInstanceForUser(

@@ -4,11 +4,12 @@
 // 铁律（#771 验收）：
 //   - 全程幂等可重跑 —— CREATE 系 IF NOT EXISTS；ADD COLUMN 经 PRAGMA table_info guard
 //     （SQLite 无 ADD COLUMN IF NOT EXISTS）；种子 INSERT OR IGNORE。
-//   - 只做 additive —— 不 ALTER/DROP 既有旧表；旧形状 model_providers / pairings 留待
-//     T0 清退（#801），检测到旧形状只告警。
+//   - 默认只做 additive；显式非 additive 例外 = 换轨 DROP 重建（#791 figures 先例 / T0 #801
+//     legacy 清退：旧形状 model_providers DROP、pairings DROP、containers 升级编排列与
+//     port 唯一索引 DROP）——均依 #732 零迁移前提（产品未上线，旧行不迁移直接换轨）。
 //   - DDL 与 prisma/init.sql 逐字节同源（镜像其 CREATE 形状），init.sql 由
 //     prisma migrate diff 从 schema.prisma 派生 —— 单一来源，此处镜像。
-export const SCHEMA_VERSION = 13
+export const SCHEMA_VERSION = 14
 
 export function runIncrementalSchema(db) {
   const hasSessions = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='sessions'").get()
@@ -95,24 +96,49 @@ CREATE TABLE IF NOT EXISTS "figures" (
   db.exec('DROP TABLE IF EXISTS "generation_jobs"')
   db.exec(`CREATE INDEX IF NOT EXISTS "figures_ownerId_idx" ON "figures"("ownerId")`)
 
-  // #699 容器升级编排（spec §2.2）：containers 增加 upgradeAttempts 列（连续失败计数，成功清零；
-  // ≥3 → upgrade_failed 终态）。ADD COLUMN 非幂等，PRAGMA guard 先查再补（对齐 T02/T03/T06 模式）。
-  // fresh 库（init.sql CREATE TABLE 已带列）此处列存在 → guard 跳过；表不存在（异常/极旧部署）→ 跳过
-  // 防 ALTER no such table。
-  const containerTable = db
-    .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='containers'`)
-    .get()
-  if (containerTable) {
-    const containerCols = db.prepare(`PRAGMA table_info("containers")`).all()
-    if (!containerCols.some((c) => c.name === 'upgradeAttempts')) {
-      db.exec(`ALTER TABLE "containers" ADD COLUMN "upgradeAttempts" INTEGER NOT NULL DEFAULT 0`)
-    }
-  }
+  // ---- T0 #801 legacy 清退（先 DROP 后 CREATE：本段须在 model_providers 新形状 CREATE
+  // 与 minimax seed 之前执行）----
+  runT0LegacyCleanup(db)
 
   runLanggraphFoundation(db)
 }
 
-// #771（#747·01）Prisma 新表地基：#747 B 节全表 + users 加列 + 旧形状 model_providers 检测。
+// T0 #801 legacy 清退：旧形状 model_providers / pairings / 升级编排列处置。
+// 零迁移前提（#732：产品未上线，旧行不迁移直接换轨）：检测到旧形状 model_providers
+//（containerId/api/apiKeyEnvId 列）即 DROP（新形状 CREATE 由 runLanggraphFoundation 紧随，
+// minimax seed 随之补默认 provider）；pairings 表（设备配对全链退役）与 containers
+// port 唯一索引（端口池废除，行 port 恒 0）一并幂等清退。upgradeAttempts 列（#699 升级
+// 编排退役）如存在于既有库（#771 前旧库）亦 DROP。全程可重跑：DROP IF EXISTS / PRAGMA
+// guard / 索引存在性查询。
+export function runT0LegacyCleanup(db) {
+  const mpTable = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='model_providers'`).get()
+  const mpLegacy =
+    !!mpTable &&
+    db.prepare(`PRAGMA table_info("model_providers")`).all().some((c) => c.name === 'containerId')
+  if (mpTable && mpLegacy) {
+    // eslint-disable-next-line no-console
+    console.warn('[db:schema] T0 #801：检测到旧形状 model_providers（containerId/api/apiKeyEnvId）——DROP（零迁移前提，旧行不迁移），新形状 CREATE 与默认 seed 紧随')
+    db.exec('DROP TABLE "model_providers"')
+  }
+  db.exec(`DROP TABLE IF EXISTS "pairings"`)
+  const containerCols = db.prepare(`PRAGMA table_info("containers")`).all()
+  if (containerCols.some((c) => c.name === 'upgradeAttempts')) {
+    // eslint-disable-next-line no-console
+    console.warn('[db:schema] T0 #801：containers.upgradeAttempts 随 #699 升级编排退役——DROP COLUMN')
+    db.exec('ALTER TABLE "containers" DROP COLUMN "upgradeAttempts"')
+  }
+  const portUnique = db
+    .prepare(`SELECT name FROM sqlite_master WHERE type='index' AND name='containers_port_key'`)
+    .get()
+  if (portUnique) {
+    // eslint-disable-next-line no-console
+    console.warn('[db:schema] T0 #801：containers port 唯一索引随端口池废除——DROP INDEX')
+    db.exec('DROP INDEX "containers_port_key"')
+  }
+}
+
+// #771（#747·01）Prisma 新表地基：#747 B 节全表 + users 加列 + model_providers 新形状
+//（旧形状由 runT0LegacyCleanup 先 DROP，此处 CREATE IF NOT EXISTS 重建）。
 // DDL 镜像 prisma/init.sql（schema.prisma 派生）同形状，全 IF NOT EXISTS。
 function runLanggraphFoundation(db) {
   // ---- users 加列（731 §3.3 / 729 §3.5）——既有库表已存在，ADD COLUMN 经 PRAGMA guard ----
@@ -126,6 +152,24 @@ function runLanggraphFoundation(db) {
       db.exec(`ALTER TABLE "users" ADD COLUMN "approvalMode" TEXT NOT NULL DEFAULT 'standard'`)
     }
   }
+
+  // ---- model_providers 新形状（#771 归属上移；旧形状 DROP 归 runT0LegacyCleanup 先行）----
+  db.exec(`
+CREATE TABLE IF NOT EXISTS "model_providers" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "ownerId" TEXT NOT NULL,
+    "providerId" TEXT NOT NULL,
+    "lcProvider" TEXT NOT NULL,
+    "baseUrl" TEXT NOT NULL,
+    "credentialEnvId" TEXT,
+    "credentialCipher" TEXT,
+    "authHeader" BOOLEAN NOT NULL DEFAULT true,
+    "modelsJson" TEXT NOT NULL,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT "model_providers_ownerId_fkey" FOREIGN KEY ("ownerId") REFERENCES "users" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+CREATE UNIQUE INDEX IF NOT EXISTS "model_providers_ownerId_providerId_key" ON "model_providers"("ownerId", "providerId");
+`)
 
   // ---- 会话历史域新表（#747 B 节 / #727）----
   db.exec(`
@@ -471,20 +515,7 @@ CREATE INDEX IF NOT EXISTS "file_overwrite_logs_sessionId_path_idx" ON "file_ove
 CREATE INDEX IF NOT EXISTS "file_overwrite_logs_createdAt_idx" ON "file_overwrite_logs"("createdAt");
 `)
 
-  // ---- 旧形状 model_providers 检测（#771 验收「旧表不动，留待 T0 清退」）----
-  // 存量库旧形状（containerId/api/apiKeyEnvId 列）本票不做任何 ALTER/迁移：legacy models 域
-  // 对该库离线（Prisma client 已按新形状生成），处置归 T0（#801）或重建库（删库重跑 db:apply）。
-  const mpTable = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='model_providers'`).get()
-  const mpLegacy =
-    !!mpTable &&
-    db.prepare(`PRAGMA table_info("model_providers")`).all().some((c) => c.name === 'containerId')
-  if (mpTable && mpLegacy) {
-    // eslint-disable-next-line no-console
-    console.warn(
-      '[db:schema] 检测到旧形状 model_providers（containerId/api/apiKeyEnvId）——#771 本票不动旧表（留待 T0 清退 #801），' +
-        'legacy models 域对该库离线；开发库请删除后重跑 npm run db:apply 重建。',
-    )
-  }
+  // ---- 旧形状 model_providers 检测段已迁出至 runT0LegacyCleanup（先 DROP 后 CREATE 次序）----
 
   // ---- #775（#747 F 节）：llm_usage_records（usage 全量采数，story 57 成本核算数据源）----
   db.exec(`
@@ -514,12 +545,12 @@ CREATE INDEX IF NOT EXISTS "llm_usage_records_runId_idx" ON "llm_usage_records"(
   //     已无同 owner 重复行，「归属按 ownerId 折叠去重」在本表范围内即此语义）→ 跳过
   //   ② 确定性 seed id（'seed-mp-minimax-' || userId，重跑 INSERT OR IGNORE 命中同主键）
   //   ③ unique(ownerId, providerId) 兜底
-  // 旧形状库（mpLegacy）跳过 seed——「同 owner 多容器重复行折叠为一条（冲突取 createdAt
-  // 最早）」的旧表→新表折叠迁移归 T0 清退窗（#801；#771 验收④钉死「旧表不动」，#803 落地），
-  // 与本段 seed 不冲突：T0 时旧表连同行折叠一并处置。
-  // 模板漂移由 providerDefaults.test.ts 双向锁定（deploy/openclaw.json ↔ 本处内联 JSON ↔
-  // runner/providerDefaults.ts 常量）。
-  if (mpTable && !mpLegacy) {
+  // T0 #801：旧形状表已在上方 DROP 重建（新形状 CREATE 段见 #771 段），seed 对全量用户生效。
+  // 漂移守卫 = providerDefaults.test.ts 双向锁定（本处内联 JSON ↔ runner/providerDefaults.ts
+  // 常量；deploy/openclaw.json 模板已随 T0 删除）。
+  // 守卫：users 表存在才 seed——极旧/残缺部署（如仅 text_trace 批次的最小库）无用户可 seed。
+  const usersTable801 = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='users'`).get()
+  if (usersTable801) {
     db.exec(`
 INSERT OR IGNORE INTO "model_providers"
   ("id", "ownerId", "providerId", "lcProvider", "baseUrl", "credentialEnvId", "authHeader", "modelsJson", "createdAt")

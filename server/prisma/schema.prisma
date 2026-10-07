@@ -142,16 +142,12 @@ enum ContainerStatus {
   stopped
   removing
   error
-  // #699 容器升级编排（spec §2.2）：upgrading = 六步升级在飞（删/重复触发被拒）；
-  // upgrade_failed = 连续失败进入终态（仅可删除重建）。SQLite TEXT 无 CHECK，纯 app 层 + prisma generate。
-  upgrading
-  upgrade_failed
 }
 
 model Container {
   id   String @id @default(cuid())
   name String @unique // DNS-label：^[a-z][a-z0-9-]{2,29}$（应用层校验）
-  port Int    @unique
+  port Int // T0 #801：端口池废除——行 port 恒 0（列保留记账，不再唯一：多容器同为 0）
 
   owner   User   @relation(fields: [ownerId], references: [id], onDelete: Cascade)
   ownerId String
@@ -162,48 +158,13 @@ model Container {
   containerId    String @default("") // run 前未知；空串而非 NULL
   status         ContainerStatus @default(creating)
   image          String
-  // #699 升级编排连续失败计数（spec §2.2）：可重试失败 +1，成功清零；≥3 → upgrade_failed 终态。
-  upgradeAttempts Int @default(0)
   leaseExpiresAt DateTime? // null=无保护
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  pairing Pairing?
-
   @@index([ownerId])
   @@map("containers")
-}
-
-// ---------------------------------------------------------------------------
-// Pairing —— 设备配对记账行（平移 chat.Pairing，一对一 Cascade）。M4 实现。
-// ---------------------------------------------------------------------------
-enum PairingStatus {
-  unpaired
-  pending
-  paired
-  error
-}
-
-model Pairing {
-  id          String    @id @default(cuid())
-  container   Container @relation(fields: [containerId], references: [id], onDelete: Cascade)
-  containerId String    @unique // 一对一
-
-  deviceId                String @default("")
-  publicKeyPem            String @default("")
-  privateKeyPem           String @default("") // 密文
-  privateKeyPemEncrypted  Boolean @default(false)
-  deviceToken             String @default("") // @deprecated 方向 A：deviceToken 回浏览器 localStorage（chat/deviceAuth.ts），此列不再读写（保留避免生产 DROP COLUMN 迁移）
-  deviceTokenEncrypted    Boolean @default(false) // @deprecated 同上
-  scopesJson              String @default("[]")
-  pairingRequestId        String @default("")
-  status                  PairingStatus @default(unpaired)
-  attemptVersion          Int @default(0)
-
-  updatedAt DateTime @updatedAt
-
-  @@map("pairings")
 }
 
 // ---------------------------------------------------------------------------
@@ -224,16 +185,15 @@ enum LcProvider {
 // anthropic-messages）由 lcProvider 二值取代（731 §3.2「二选一保留」取新列，wire 契约经
 // values.ts 映射保持不变）；apiKeyEnvId → credentialEnvId（过渡期引用 LLM_API_KEY），
 // credentialCipher 预留 P1 per-user key（AES 密文，对齐 Container.token 先例）。
-//
-// 注意：#771 验收钉死「旧表（ModelProvider 旧形状）本票不动，留待 T0 清退」——存量库中的
-// 旧形状 model_providers 行不由本票迁移；fresh 库（init.sql）即本新形状。
+// T0 #801：存量库中的旧形状 model_providers 行（containerId/api/apiKeyEnvId 列）由
+// apply-schema 检测即 DROP 重建（#732 零迁移前提——产品未上线，旧行不迁移）。
 // ---------------------------------------------------------------------------
 model ModelProvider {
   id          String    @id @default(cuid())
   owner       User      @relation(fields: [ownerId], references: [id], onDelete: Cascade)
   ownerId     String // users.id（归属上移，731 §3.2）
 
-  providerId  String // openclaw.json models.providers 的 map key；DNS-label（应用层校验）
+  providerId  String // provider map key；DNS-label（应用层校验）
   lcProvider  LcProvider // LangChain provider 二值白名单（openai/anthropic）
   baseUrl     String // 完整 URL；origin 须命中 provider_endpoints 白名单（40042）
   credentialEnvId   String?  // 过渡期：引用 LLM_API_KEY（对齐旧 apiKeyEnvId；P1 后退役）
@@ -285,8 +245,9 @@ model Figure {
 // #771（#747·01）LangGraph agent runtime 新表地基 —— 会话历史域 + 审计域 + 配置域
 //
 // 逐字段依据：#747 B 节表 + 731/729/752/766/768/770 resolution。commands/skills 官方内容
-// 目录不建表（#758 Q1/Q2/Q6 钉死 always-on 无表）。旧表（Pairing / ModelProvider 旧形状）
-// 本票不动，留待 T0 清退（#801）。
+// 目录不建表（#758 Q1/Q2/Q6 钉死 always-on 无表）。T0 #801 legacy 清退：Pairing 表已随设备
+// 配对全链删除；ModelProvider 为 #771 新形状（旧形状行由 apply-schema 检测即 DROP 重建——
+// 零迁移前提）。
 // ===========================================================================
 
 // ---------------------------------------------------------------------------

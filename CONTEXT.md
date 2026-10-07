@@ -29,6 +29,7 @@ _Avoid_: 用「镜像版本」泛指——须区分**基线版本**（官方镜�
 
 **接触路径 (contact path)**:
 控制面与 OpenClaw 容器交互的四条通道：(1) Docker SDK 编排（增删查容器）、(2) 宿主文件 bind-mount 直读写（wiki / openclaw.json）、(3) HTTP `/health` 探测、(4) WebSocket（协议 v4 + 设备配对 + 事件流，见「隧道」）。
+（T0 #801 演进注：(2) 已换 named volume 拓扑（ADR 0011）、(3) 健康探针与 (4) WebSocket 隧道均已退役——现役接触路径 = (1) Docker SDK 编排 + 各域 Docker 原语读写（wiki 容器 /lab 沙箱）。）
 _Avoid_: 集成点——过于笼统，无法区分这四条性质不同的通道。
 
 **防腐层 (Anti-Corruption Layer, ACL)**:
@@ -67,7 +68,7 @@ _Avoid_: 在模块里散读 env、新建独立「env 注册包」——前者绕
 生产（`NODE_ENV=production` 下 `server/src/config.ts` 的 read* 校验）对必填 secret 缺失即拒启动（`JWT_SECRET` ≥32 字符硬校验、`OPENCLAW_TEMPLATE_DIR` / `PANEL_PUBLIC_ORIGIN` / `CREDENTIAL_ENCRYPTION_KEYS` 缺失 fail-fast），杜绝「生产漏设 → 静默空值」的错配（`LLM_API_KEY` 旧为 `os.environ.get(...,'')`，漏设会把空 key 静默注入容器，与 issue #195「卡 creating」同类）。**dev / test 宽容不加 fail-fast**。
 
 **隧道 (tunnel)**:
-ADR 0006 引入的接触路径 (4) 新形态：浏览器↔控制面的一条 WebSocket，握手做 JWT 验签 + 归属门（user 只能开到**自己容器**的隧道），建立后**原样透传**浏览器与容器网关之间的 OpenClaw 协议 v4 原始帧——控制面**不解析、不翻译、不注入凭证、不做 method 级授权**。隧道是 B-直连的承载：浏览器跑官方 `@openclaw/gateway-client` 的 `./browser` 协议机，把「隧道 socket」注入其 `createSocket` 当 transport，经隧道直连藏在控制面后面的容器网关。
+ADR 0006 引入的接触路径 (4) 新形态：浏览器↔控制面的一条 WebSocket，握手做 JWT 验签 + 归属门（user 只能开到**自己容器**的隧道），建立后**原样透传**浏览器与容器网关之间的 OpenClaw 协议 v4 原始帧——控制面**不解析、不翻译、不注入凭证、不做 method 级授权**。隧道是 B-直连的承载：浏览器跑官方 `@openclaw/gateway-client` 的 `./browser` 协议机，把「隧道 socket」注入其 `createSocket` 当 transport，经隧道直连藏在控制面后面的容器网关。**本形态已随 T0 #801 整链退役**（现役对话面 = REST+SSE，#793）。
 _Avoid_: 转发 / 代理——笼统，掩盖了「纯透传原始帧（隧道）vs 懂协议的胖中介（旧 #331 G 节桥接）」这一本质区分；旧桥接做翻译/池壳/授权，隧道一概不做。
 
 **浏览器设备 (browser device)**:
@@ -75,7 +76,7 @@ ADR 0006 的配对单位：每个浏览器 profile（Chrome / 隐身 / 另一台
 _Avoid_: 设备——脱离了「每浏览器 profile 一设备」就没意义；旧模型是「面板后端单设备、每容器一份」，新模型是「每浏览器设备 × 每容器」。
 
 **bootstrap token**:
-容器网关的共享认证秘密（旧称 `GATEWAY_TOKEN`，容器创建时生成、env 注入容器、DB 加密存值）。ADR 0006 修订 spec §5.2 后，它**可经所有权门控 REST（`POST /containers/<name>/bootstrap-token`）下发给容器属主的浏览器**做首次连接认证（bootstrap auth 对首连是强制的，官方文档）。每个容器一个共享 bootstrap token，该容器所有属主浏览器首连共用。
+容器网关的共享认证秘密（旧称 `GATEWAY_TOKEN`，容器创建时生成、env 注入容器、DB 加密存值）。ADR 0006 修订 spec §5.2 后，它**可经所有权门控 REST（`POST /containers/<name>/bootstrap-token`）下发给容器属主的浏览器**做首次连接认证（bootstrap auth 对首连是强制的，官方文档；该下发端点已随 T0 #801 退役）。每个容器一个共享 bootstrap token，该容器所有属主浏览器首连共用。
 _Avoid_: 真值不落盘/不外泄（旧 §5.2 字面）——已修订为「可下发属主浏览器，真值仍不落前端以外的盘、不经日志」。
 
 **会话删除 (session delete)**:
@@ -87,7 +88,7 @@ _Avoid_: 删除会话/移除会话——与归档混为一谈；术语必须指�
 _Avoid_: 把带 `archivedAt` 的行称作「已归档会话」——归档是会话级用户功能；机制面只说「软删存档行 / 被放弃路线」。
 
 **附件 (attachment)**:
-`chat.send` 携带的多模态内容块（wire 字段 `attachments`：`{type, mimeType, fileName, content, width, height}`），经隧道**内联**发送。用户经浏览器采集（粘贴/拖拽/选择）上传，图片发送前**前端压缩**；content 是自由形状（0 信任），渲染端须按块类型分派。
+`chat.send` 携带的多模态内容块（wire 字段 `attachments`：`{type, mimeType, fileName, content, width, height}`），现经 REST 上传换 attachmentIds 随消息引用（#795 起；隧道内联形态已随 T0 #801 退役）。用户经浏览器采集（粘贴/拖拽/选择）上传，图片发送前**前端压缩**；content 是自由形状（0 信任），渲染端须按块类型分派。
 _Avoid_: 文件/图片消息——掩盖「内联于 chat.send 帧、多类型块数组」的协议形态。
 **（新 runtime 演进注，wayfinder #766 / #747 修订）**：（目标架构，未实施）附件经 REST 上传直写会话沙箱 `/lab/uploads/`（字节落容器 FS；宿主 FS / MongoDB / V1 对象存储均不用），消息与 checkpoint 只存引用（attachmentId/path），run 首节点确定性 **ingestion 工具**校验物化、图片装配时转多模态 block；下载走 owner 门端点（不存在/越权同码防探测）。上传纳入 **session-global 文件日志**，rewind 时可被一并回退。
 

@@ -1,6 +1,6 @@
-// minimax 默认 provider 三方同源漂移守卫（#775 · 731 §6）：
-//   deploy/openclaw.json（模板真值）↔ runner/providerDefaults.ts 常量 ↔
-//   scripts/lib/incremental-schema.mjs v9 seed 内联 JSON——任一处漂移即红。
+// minimax 默认 provider 两方同源漂移守卫（#775 · 731 §6；T0 #801 模板面退役后两方锁定）：
+//   runner/providerDefaults.ts 常量（单一来源）↔ scripts/lib/incremental-schema.mjs v9 seed
+//   内联 JSON——任一处漂移即红。
 
 import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
@@ -11,30 +11,19 @@ import {
   defaultProviderRowId,
 } from '../src/runner/providerDefaults'
 
-const TEMPLATE = path.join(process.cwd(), '..', 'deploy', 'openclaw.json')
 const SCRIPT = path.join(process.cwd(), 'scripts', 'lib', 'incremental-schema.mjs')
 
-function templateMinimax(): Record<string, unknown> {
-  const tpl = JSON.parse(readFileSync(TEMPLATE, 'utf8')) as {
-    models?: { providers?: Record<string, Record<string, unknown>> }
-  }
-  return tpl.models?.providers?.minimax ?? {}
-}
-
-describe('minimax 默认 provider 三方同源守卫（#775）', () => {
-  it('providerDefaults 常量 ≡ deploy/openclaw.json 模板（baseUrl/api/SecretRef/models 逐字段）', () => {
-    const mm = templateMinimax()
-    expect(DEFAULT_MINIMAX.baseUrl).toBe(mm.baseUrl)
-    // 模板 api: anthropic-messages → lcProvider: anthropic（values.ts 1:1 映射）
+describe('minimax 默认 provider 两方同源守卫（#775）', () => {
+  it('常量不变量锚定（baseUrl https + lcProvider anthropic 映射 + env 凭证引用 + modelsJson 合法 JSON）', () => {
+    expect(DEFAULT_MINIMAX.baseUrl).toBe('https://api.minimaxi.com/anthropic')
+    // 旧模板 api: anthropic-messages → lcProvider: anthropic（values.ts 1:1 映射，语义锚不变）
     expect(DEFAULT_MINIMAX.lcProvider).toBe('anthropic')
-    expect((mm.api as string) === 'anthropic-messages').toBe(true)
     // SecretRef {source:env, id:LLM_API_KEY} → credentialEnvId 退化引用（731 §6）
-    const apiKey = mm.apiKey as { source: string; id: string }
-    expect(DEFAULT_MINIMAX.credentialEnvId).toBe(apiKey.id)
-    expect(apiKey.source).toBe('env')
-    expect(DEFAULT_MINIMAX.authHeader).toBe(mm.authHeader)
-    // modelsJson ≡ 模板 models 数组（逐字段 JSON 等价）
-    expect(JSON.parse(DEFAULT_MINIMAX_MODELS_JSON)).toEqual(mm.models)
+    expect(DEFAULT_MINIMAX.credentialEnvId).toBe('LLM_API_KEY')
+    expect(DEFAULT_MINIMAX.authHeader).toBe(true)
+    const models = JSON.parse(DEFAULT_MINIMAX_MODELS_JSON) as Array<Record<string, unknown>>
+    expect(models).toHaveLength(1)
+    expect(models[0]?.id).toBe('MiniMax-M3')
   })
 
   it('迁移脚本 v9 seed 内联 JSON ≡ providerDefaults 常量（重跑不产生语义漂移行）', () => {
@@ -49,7 +38,7 @@ describe('minimax 默认 provider 三方同源守卫（#775）', () => {
     expect(defaultProviderRowId('u-x')).toBe('seed-mp-minimax-u-x')
   })
 
-  it('白名单 seed 端点 ≡ 模板 baseUrl origin（#803 先例行，731 §3.1）', () => {
+  it('白名单 seed 端点 ≡ 常量 baseUrl origin（#803 先例行，731 §3.1）', () => {
     const script = readFileSync(SCRIPT, 'utf8')
     const origin = new URL(DEFAULT_MINIMAX.baseUrl).origin // https://api.minimaxi.com
     expect(script).toContain(`'${new URL(DEFAULT_MINIMAX.baseUrl).hostname}'`)

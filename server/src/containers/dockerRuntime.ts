@@ -1,6 +1,8 @@
 // DockerRuntime —— dockerode 适配层（平移 backend/containers/docker_runtime.py，#334）。
 // buildRunOptions 是纯逻辑 seam（不调 daemon），run/listFleet/get/stop/remove 经 docker client 操作 daemon。
 // client 延迟注入（默认 new Docker() 挂 /var/run/docker.sock）——构造时不连 daemon，仅实际调用时才连。
+// T0 #801 legacy 清退：宿主端口发布（PortBindings/ExposedPorts/port label）与 oneshot 升级编排
+// （runOnce 全家）随端口池/upgrade 编排退役删除——容器 gateway 不再有外部连接方。
 
 import Docker from 'dockerode'
 import {
@@ -10,9 +12,6 @@ import {
   LABEL_APP_KEY,
   LABEL_APP_VALUE,
   LABEL_INSTANCE_KEY,
-  LABEL_ONESHOT_KEY,
-  LABEL_ONESHOT_VALUE,
-  LABEL_PORT_KEY,
   MOUNT_WIKI,
   MOUNT_WORKSPACE,
 } from './constants'
@@ -23,10 +22,7 @@ import {
   type ContainerRuntime,
   type ContainerSpec,
   type NamedVolumes,
-  type OneShotResult,
-  type OneShotSpec,
 } from './runtime'
-import { RunOnceError } from './errors'
 import { ensureImagePulled } from './dockerImage'
 
 // 4 个 sync flag 全关（防覆写挂载的 openclaw.json / 防明文写凭证；对官方镜像无害、兼容 fork init.sh）。
@@ -49,9 +45,8 @@ const BASE_ENV: Record<string, string> = {
   OPENCLAW_GATEWAY_PORT: String(GATEWAY_INTERNAL_PORT),
   OPENCLAW_GATEWAY_BIND: GATEWAY_BIND,
   OPENCLAW_GATEWAY_MODE: 'local',
-  // #591：config 无独立 bind、无 OPENCLAW_CONFIG_PATH——openclaw.json 落容器内默认
-  // ~/.openclaw/openclaw.json（home 卷 / bind home），gateway 走默认路径读取（静态 config，
-  // 对 #366「宿主 rename + ro bind 热加载」的明确回退：改配置须重启容器生效）。
+  // openclaw.json 走镜像内默认（~/.openclaw/openclaw.json）——T0 起控制面不再渲染/写盘容器
+  // config（ConfigRenderer 与模板随 legacy 清退退役），首启 gateway 读镜像默认配置。
   OPENCLAW_WORKSPACE_ROOT: HOME_BIND,
   DM_POLICY: 'disabled',
   GROUP_POLICY: 'disabled',
@@ -63,60 +58,36 @@ function envRecordToArray(env: Record<string, string>): string[] {
   return Object.entries(env).map(([k, v]) => `${k}=${v}`)
 }
 
-// 面板创建的容器（fleet 实例 / 一次性临时容器）共用的环境基线：镜像行为不变的 BASE_ENV + 关闭镜像侧
-// config 同步的 SYNC_FLAGS_OFF。单一构造点——两处各写一份会在新增容器类型时漂移（一次性容器漏关
-// SYNC_*，doctor 就会去改写挂载卷里的配置）。
 function panelEnv(): Record<string, string> {
   return { ...BASE_ENV, ...SYNC_FLAGS_OFF }
 }
 
-// named volume 挂载的唯一构造点（fleet 三卷与一次性临时容器共用同一形状——两处手写会漂移）。
+// named volume 挂载的唯一构造点（fleet 三卷）。
 function volumeMount(source: string, target: string, readOnly = false): Docker.MountSettings {
   return { Type: 'volume', Source: source, Target: target, ...(readOnly ? { ReadOnly: true } : {}) }
-}
-
-// docker 容器日志多路复用帧解析（#696）：非 TTY 容器的 logs 响应为逐帧
-// [stream(1=stdout/2=stderr),0,0,0,size_be32] + 负载；先收齐各帧负载再整体解码（跨帧切开的多字节
-// 字符不裂成替换符），stdout/stderr 合并成诊断文本。首个帧头即无效（daemon 直返原文）→ 原样返回；
-// 空帧/残缺帧视为帧流结束，已收齐的帧照常返回——绝不因解析错位把整段日志吞掉。
-function demuxLogFrames(raw: Buffer): string {
-  const payloads: Buffer[] = []
-  let off = 0
-  while (off + 8 <= raw.length) {
-    const size = raw.readUInt32BE(off + 4)
-    if (size === 0 || off + 8 + size > raw.length) break
-    payloads.push(raw.subarray(off + 8, off + 8 + size))
-    off += 8 + size
-  }
-  if (off === 0) return raw.toString('utf8') // 无有效帧头 → 原文
-  return Buffer.concat(payloads).toString('utf8')
 }
 
 export class DockerRuntime implements ContainerRuntime {
   private cached: Docker | null = null
 
-  // publishHost 默认 127.0.0.1（loopback 收敛暴露面）；生产后端容器化后 0.0.0.0。
-  constructor(
-    private readonly clientFactory: () => Docker = () => new Docker(),
-    private readonly publishHost: string = '127.0.0.1',
-  ) {}
+  constructor(private readonly clientFactory: () => Docker = () => new Docker()) {}
 
   private client(): Docker {
     if (this.cached === null) this.cached = this.clientFactory()
     return this.cached
   }
 
-  // 构造 docker create 参数（纯逻辑，可单测）。
+  // 构造 docker create 参数（纯逻辑，可单测）。T0 #801：无 ExposedPorts/PortBindings——
+  // 容器 gateway 不向宿主发布端口（隧道/配对/健康探针全退役，端口池废除，#747 E 节）。
   buildRunOptions(spec: ContainerSpec): Docker.ContainerCreateOptions {
     const environment = {
       ...panelEnv(),
       GATEWAY_TOKEN: spec.gatewayToken,
-      // 容器内 sidecar CLI（approve/exec 审批注册）自连 gateway 须同值 token
+      // 容器内 sidecar CLI 自连 gateway 须同值 token
       OPENCLAW_GATEWAY_TOKEN: spec.gatewayToken,
       LLM_API_KEY: spec.llmApiKey,
     }
-    // #590 named volume 模式（ADR 0011）：三卷 Mounts 替代 home host bind；config 无独立 bind
-    // （#591：openclaw.json 落 ~/.openclaw/ 默认路径，静态 config）。
+    // #590 named volume 模式（ADR 0011）：三卷 Mounts 替代 home host bind。
     const mounts: Docker.MountSettings[] | undefined = spec.volumes
       ? [
           volumeMount(spec.volumes.wiki, MOUNT_WIKI),
@@ -129,14 +100,9 @@ export class DockerRuntime implements ContainerRuntime {
       name: containerName(spec.name),
       Env: envRecordToArray(environment),
       User: '0:0',
-      // #378 CI 定位：PortBindings 之外还须 ExposedPorts——docker CLI `-p` 两者同设；仅 PortBindings
-      // 时部分 dockerd（CI ubuntu dockerd，非 Docker Desktop）NetworkSettings.Ports={}（docker-proxy
-      // 不注册映射），宿主端口恒 ECONNREFUSED（配对 smoke 容器内网关 ready 但连不上）。
-      ExposedPorts: { [`${GATEWAY_INTERNAL_PORT}/tcp`]: {} },
       Labels: {
         [LABEL_APP_KEY]: LABEL_APP_VALUE,
         [LABEL_INSTANCE_KEY]: spec.name,
-        [LABEL_PORT_KEY]: String(spec.hostPort),
       },
       HostConfig: {
         CapAdd: ['CHOWN', 'SETUID', 'SETGID', 'DAC_OVERRIDE'],
@@ -144,40 +110,10 @@ export class DockerRuntime implements ContainerRuntime {
           ? // named volume 模式：无 home bind
             { Mounts: mounts }
           : {
-              // 旧 bind 模式（#591）：仅 home 目录 rw bind。config 不再独立 ro bind——
-              // openclaw.json 落 home bind 内默认路径（#366「config 独立目录 + OPENCLAW_CONFIG_PATH
-              // 热加载」已回退为静态 config：改配置经 putArchive 写容器内、重启容器生效）。
+              // 旧 bind 模式：仅 home 目录 rw bind（openclaw.json 落其内默认路径）。
               Binds: [`${spec.homeDir}:${HOME_BIND}:rw`],
             }),
-        PortBindings: {
-          [`${GATEWAY_INTERNAL_PORT}/tcp`]: [{ HostIp: this.publishHost, HostPort: String(spec.hostPort) }],
-        },
         RestartPolicy: { Name: 'unless-stopped' },
-      },
-    }
-  }
-
-  // 构造一次性临时容器 create 参数（纯逻辑，可单测，#696）。「对 fleet 列表与端口对账不可见」的三处
-  // 刻意差异即在此固定：
-  //  ① 标签只有 oneshot 标记——不写 app=openclaw-fleet / openclaw.instance / openclaw.port，
-  //     故 listFleet（按 app label 过滤）看不到它；
-  //  ② 无 PortBindings/ExposedPorts——不占宿主端口，端口对账（按发布端口聚合）看不到它；
-  //  ③ Entrypoint 覆写为 spec.cmd 且 Cmd 清空——既不依赖镜像 ENTRYPOINT（官方镜像为 tini）转发
-  //     命令，也不让镜像 Cmd（node openclaw.mjs gateway）被当作参数追加到命令之后。
-  // 无 RestartPolicy（默认 no）：一次性容器跑完即弃，绝不自动重启。
-  buildOneShotOptions(spec: OneShotSpec): Docker.ContainerCreateOptions {
-    const environment = { ...panelEnv(), ...spec.env }
-    return {
-      Image: spec.image,
-      Entrypoint: [...spec.cmd],
-      Cmd: [],
-      Env: envRecordToArray(environment),
-      User: '0:0',
-      Labels: { [LABEL_ONESHOT_KEY]: LABEL_ONESHOT_VALUE },
-      HostConfig: {
-        ...(spec.mounts
-          ? { Mounts: spec.mounts.map((m) => volumeMount(m.source, m.target, m.readOnly === true)) }
-          : {}),
       },
     }
   }
@@ -188,18 +124,14 @@ export class DockerRuntime implements ContainerRuntime {
     return id
   }
 
-  // 只创建不启动（#591：createComplete 先 create → FileArchive.putArchive 写容器内 config →
-  // 再 start——首启 gateway 即读渲染配置，无需重启）。ensureImage 前置同 run。
+  // 只创建不启动（createComplete 先 create → seedWorkspace 灌模板卷 → start）。
   async create(spec: ContainerSpec): Promise<string> {
     await this.ensureImage(spec.image)
     const container = await this.client().createContainer(this.buildRunOptions(spec))
     return container.id
   }
 
-  // create/runOnce 前置确保镜像已就位（Codex 第四轮③[P1]）：Engine createContainer 对本地缺失的镜像
-  // 返回 image-not-found——干净 host / OPENCLAW_IMAGE 换成未缓存 tag 时 create 必 error。CI 此前靠手动
-  // docker pull 掩盖。仅本地缺失时拉取；拉取失败向上抛 → createComplete 标 error 行（可重试）。
-  // #699 升级编排步骤 1 显式调用：把慢 pull 排在停机之前，失败=干净中止（原私有助手提为接口方法）。
+  // create 前置确保镜像已就位（本地缺失则 pull；拉取失败向上抛 → createComplete 标 error 行可重试）。
   // 样板收敛（#776）：inspect-404 → pull → followProgress 逻辑与沙箱 runtime 共享（dockerImage.ts）。
   async ensureImage(image: string): Promise<void> {
     await ensureImagePulled(this.client(), image)
@@ -211,67 +143,6 @@ export class DockerRuntime implements ContainerRuntime {
       filters: { label: [`${LABEL_APP_KEY}=${LABEL_APP_VALUE}`] },
     })
     return cs.map((c) => this.toInfo(c))
-  }
-
-  // 一次性临时容器（#696）：创建（无 fleet 标签/无端口，见 buildOneShotOptions）→ 启动 → 等退出
-  // → 强制删容器。成功（退出码 0）返回日志文本；非 0 抛 RunOnceError（携带退出码与输出）；
-  // 三路（成功/非 0/异常）都清理容器。未设超时——调用命令是面板自派的（tar/doctor），
-  // 卡死由编排层（#699）的容器生命周期兜底。
-  async runOnce(spec: OneShotSpec): Promise<OneShotResult> {
-    await this.ensureImage(spec.image)
-    const container = await this.client().createContainer(this.buildOneShotOptions(spec))
-    try {
-      await container.start()
-      const { StatusCode } = (await container.wait()) as { StatusCode: number }
-      const output = await this.logsText(container)
-      if (StatusCode !== 0) throw new RunOnceError(StatusCode, output, spec.cmd)
-      return { output }
-    } finally {
-      await this.removeOneShot(container)
-    }
-  }
-
-  // 删一次性临时容器（force）。只删容器、不删卷——挂载的卷是调用方资产（如备份卷），须留存。
-  // 清理失败只告警不上抛：否则会掩盖主结果（命令已成功却被报成失败；非 0 退出的诊断被删除错误替换）。
-  private async removeOneShot(container: Docker.Container): Promise<void> {
-    try {
-      await container.remove({ force: true })
-    } catch (e) {
-      console.warn(`[fleet] oneshot container cleanup failed: ${(e as Error).message}`)
-    }
-  }
-
-  // 读容器日志（诊断用途，尽力而为）：读失败返回空串——日志是附加信息，绝不改变命令结果判定。
-  private async logsText(container: Docker.Container): Promise<string> {
-    try {
-      const raw = await container.logs({ stdout: true, stderr: true })
-      return demuxLogFrames(Buffer.from(raw))
-    } catch {
-      return ''
-    }
-  }
-
-  // 枚举宿主上与发布地址冲突的活动容器宿主端口（含未跟踪容器；daemon 不可达 → 空集）。
-  async hostPublishedPorts(): Promise<Set<number>> {
-    const published = new Set<number>()
-    let cs: Docker.ContainerInfo[]
-    try {
-      cs = await this.client().listContainers({ all: true })
-    } catch {
-      return published
-    }
-    for (const c of cs) {
-      // exited/created/dead 容器保留 PortBindings 但 daemon 已收回端口（无活跃 docker-proxy）→ 跳过
-      if (c.State === 'exited' || c.State === 'created' || c.State === 'dead') continue
-      for (const p of c.Ports ?? []) {
-        if (p.PublicPort === undefined) continue
-        const hostIp = p.IP ?? '0.0.0.0'
-        // 通配绑定（空/0.0.0.0）与任意发布地址冲突；具体地址仅在同 publishHost 时冲突。
-        if (this.publishHost !== '0.0.0.0' && hostIp !== '0.0.0.0' && hostIp !== this.publishHost) continue
-        published.add(p.PublicPort)
-      }
-    }
-    return published
   }
 
   async get(name: string): Promise<ContainerInfo | null> {
@@ -295,7 +166,7 @@ export class DockerRuntime implements ContainerRuntime {
     }
   }
 
-  // 按容器 id 启动（#591：create 返回 id → startById，消除 name 竞态）。404/304 幂等同 start。
+  // 按容器 id 启动（create 返回 id → startById，消除 name 竞态）。404/304 幂等同 start。
   async startById(containerId: string): Promise<void> {
     try {
       await this.client().getContainer(containerId).start()
@@ -351,7 +222,7 @@ export class DockerRuntime implements ContainerRuntime {
     }
   }
 
-  // 同步等命令完成；退出码非 0 → 抛错（approve CLI 失败须让 caller 走 STATUS_ERROR 路径）。
+  // 同步等命令完成；退出码非 0 → 抛错（delete 前置 chown 修复失败须让 caller 走清理失败路径）。
   async execSync(name: string, cmd: string[]): Promise<void> {
     let c: Docker.Container
     try {
@@ -383,30 +254,24 @@ export class DockerRuntime implements ContainerRuntime {
 
   private toInfo(c: Docker.ContainerInfo): ContainerInfo {
     const labels = c.Labels ?? {}
-    const rawPort = labels[LABEL_PORT_KEY]
-    const port = rawPort !== undefined ? Number.parseInt(rawPort, 10) : null
     return {
       containerId: c.Id,
       name: (c.Names?.[0] ?? '').replace(/^\//, ''),
       running: c.State === 'running',
       status: c.State ?? '',
       image: c.Image ?? '',
-      port: Number.isNaN(port) ? null : port,
       instanceName: labels[LABEL_INSTANCE_KEY] ?? null,
     }
   }
 
   private inspectToInfo(data: Docker.ContainerInspectInfo): ContainerInfo {
     const labels = data.Config?.Labels ?? {}
-    const rawPort = labels[LABEL_PORT_KEY]
-    const port = rawPort !== undefined ? Number.parseInt(rawPort, 10) : null
     return {
       containerId: data.Id,
       name: (data.Name ?? '').replace(/^\//, ''),
       running: data.State?.Status === 'running',
       status: data.State?.Status ?? '',
       image: data.Config?.Image ?? '',
-      port: Number.isNaN(port) ? null : port,
       instanceName: labels[LABEL_INSTANCE_KEY] ?? null,
     }
   }

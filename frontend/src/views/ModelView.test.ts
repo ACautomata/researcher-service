@@ -37,11 +37,9 @@ import {
 
 const CONTAINERS = [
   { name: 'demo', port: 19000, status: 'running', health: 'healthy', image: 'img',
-    container_id: 'cid', created_at: '2026-07-24T00:00:00Z',
-    pairing: { status: 'unpaired', device_id: '', scopes: [], pairing_request_id: '' } },
+    container_id: 'cid', created_at: '2026-07-24T00:00:00Z' },
   { name: 'other', port: 19001, status: 'running', health: 'healthy', image: 'img',
-    container_id: 'cid2', created_at: '2026-07-24T00:00:00Z',
-    pairing: { status: 'unpaired', device_id: '', scopes: [], pairing_request_id: '' } },
+    container_id: 'cid2', created_at: '2026-07-24T00:00:00Z' },
 ]
 
 const PROVIDER: ModelProviderDTO = {

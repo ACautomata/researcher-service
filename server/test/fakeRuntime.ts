@@ -1,63 +1,39 @@
-// 假 docker runtime（接缝 #5：注入编排器测 5 态机 + 取消标志 + 端口入队前分配 + 补偿，不需真 daemon）。
-// 全内存模拟 ContainerRuntime：run/get/stop/remove/listFleet/hostPublishedPorts/exec 各原语可注入故障。
+// 假 docker runtime（接缝 #5）：注入编排器测 5 态机 + 取消标志 + 补偿，不需真 daemon。
+// 全内存模拟 ContainerRuntime：run/get/stop/remove/listFleet/exec 各原语可注入故障。
+// T0 #801：端口发布/oneshot 升级原语随组件退役删除。
 
 import type {
   ContainerInfo,
   ContainerRuntime,
   ContainerSpec,
   NamedVolumes,
-  OneShotResult,
-  OneShotSpec,
 } from '../src/containers/runtime'
 import { containerName, volumeOrder } from '../src/containers/runtime'
-import { RunOnceError } from '../src/containers/errors'
-import { GATEWAY_INTERNAL_PORT, LABEL_INSTANCE_KEY, LABEL_PORT_KEY } from '../src/containers/constants'
+import { LABEL_INSTANCE_KEY } from '../src/containers/constants'
 
 export interface FakeContainerRecord {
   info: ContainerInfo
   spec: ContainerSpec
 }
 
-// #696 一次性临时容器记录：断言「临时容器不进 fleet 列表 / 不参与端口对账（全路径清理）」。
-export interface FakeOneShotRecord {
-  spec: OneShotSpec
-  output: string
-  exitCode: number
-  removed: boolean
-}
-
 export class FakeRuntime implements ContainerRuntime {
   readonly containers = new Map<string, FakeContainerRecord>()
   private idSeq = 0
-  // 故障注入：run 时对指定 hostPort 抛 bind 冲突（测就地换端口重试）。
-  bindConflictPorts = new Set<number>()
-  // run 时对指定 name 抛非 bind 错（测统一回滚）。
-  failRunFor = new Set<string>()
-  // run 时若 name 命中本表 → 植入外部同名容器（instanceName 用给定值，模拟另一 Docker actor 在
-  // 慢 pull 期间抢先建 openclaw-gw-<name>、不带我们的 label）并抛非 bind 的名冲突错（测
-  // finalizeFailedCreate 回滚须按 instance label 校验所有权，不误删外部容器）。Codex 第六轮①。
+  // create 时对指定 name 抛错（测统一回滚）。
+  failCreateFor = new Set<string>()
+  // create 时若 name 命中本表 → 植入外部同名容器（instanceName 用给定值，模拟另一 Docker actor
+  // 在慢 pull 期间抢先建 openclaw-gw-<name>、不带我们的 label）并抛名冲突错（测
+  // finalizeFailedCreate 回滚须按 instance label 校验所有权，不误删外部容器）。
   plantExternalFor = new Map<string, string>()
   // get（inspect）时对指定 name 抛错（测 daemon 故障时 list 降级保留记账状态）。
   failGetFor = new Set<string>()
-  // execSync 故障注入：对指定 name 抛错（测 approve CLI 失败 → 不推进配对状态）。
+  // execSync 故障注入：对指定 name 抛错（测 delete 前置 chown 失败 → 行卡 REMOVING 可重试）。
   failExecSyncFor = new Set<string>()
-  // execSync 调用记录（断言 delete 的 chown / approve 的 CLI argv）。
+  // execSync 调用记录（断言 delete 的 chown argv）。
   execCalls: { name: string; cmd: string[] }[] = []
-  // #699 ensureImage（升级步骤 1 拉镜像）：调用记录 + 故障注入（拉失败 = 干净中止、不计失败）。
+  // create 前置拉镜像：调用记录 + 故障注入（拉失败 → createComplete 标 error 行）。
   readonly ensureImageCalls: string[] = []
   failEnsureImageFor = new Set<string>()
-  // #696 一次性临时容器：调用记录 + 故障注入（退出码/输出/等待退出抛错）。
-  readonly oneshotRuns: FakeOneShotRecord[] = []
-  oneshotExitCode = 0
-  oneshotOutput = ''
-  oneshotWaitError: Error | null = null
-  // #699 按命令子串定向 fail runOnce（升级测试：备份 vs doctor 失败分流）。命中时按当前
-  // oneshotExitCode 抛 RunOnceError——不整段替换 oneshotExitCode（保三路清理断言共享）。
-  failOneshotCmdSubstring: string | null = null
-  // #718 命中失败子串的最大失败次数（null = 无限）；「首败、重试成功」场景设 1。
-  failOneshotMaxTimes: number | null = null
-  // 失败子串命中计数（公开供测试 beforeEach 重置——upgrade.test.ts 显式逐字段重置模式）。
-  oneshotFailHits = 0
   // #590：remove 收到 volumes 时的卷删除记录（断言 named volume 模式连带 docker volume rm 三卷）。
   removedVolumes: string[] = []
 
@@ -68,17 +44,13 @@ export class FakeRuntime implements ContainerRuntime {
     return id
   }
 
-  // #591：只创建不启动（createComplete 先 create → archive.writeConfig → start，静态 config）。
-  // 故障注入路径与 run 对齐（bind 冲突/非 bind 错/外部同名），status 'created'、running false。
+  // 只创建不启动（createComplete 先 create → seedWorkspace → start）。
   async create(spec: ContainerSpec): Promise<string> {
-    if (this.failRunFor.has(spec.name)) {
-      throw new Error(`simulated docker run failure for ${spec.name}`)
-    }
-    if (this.bindConflictPorts.has(spec.hostPort)) {
-      throw new Error(`Bind for 127.0.0.1:${spec.hostPort} failed: port is already allocated`)
+    if (this.failCreateFor.has(spec.name)) {
+      throw new Error(`simulated docker create failure for ${spec.name}`)
     }
     if (this.plantExternalFor.has(spec.name)) {
-      // 外部 actor 抢先占用 name：植入外部容器（instanceName 故意 ≠ spec.name），抛名冲突（非 bind）。
+      // 外部 actor 抢先占用 name：植入外部容器（instanceName 故意 ≠ spec.name），抛名冲突。
       this.containers.set(spec.name, {
         info: {
           containerId: `external-${spec.name}`,
@@ -86,7 +58,6 @@ export class FakeRuntime implements ContainerRuntime {
           running: true,
           status: 'running',
           image: spec.image,
-          port: spec.hostPort,
           instanceName: this.plantExternalFor.get(spec.name) ?? 'external-instance',
         },
         spec,
@@ -100,7 +71,6 @@ export class FakeRuntime implements ContainerRuntime {
       running: false,
       status: 'created',
       image: spec.image,
-      port: spec.hostPort,
       instanceName: spec.name,
     }
     this.containers.set(spec.name, { info, spec })
@@ -111,15 +81,7 @@ export class FakeRuntime implements ContainerRuntime {
     return [...this.containers.values()].map((r) => r.info)
   }
 
-  async hostPublishedPorts(): Promise<Set<number>> {
-    const s = new Set<number>()
-    for (const r of this.containers.values()) {
-      if (r.info.running && typeof r.info.port === 'number') s.add(r.info.port)
-    }
-    return s
-  }
-
-  // #699 升级编排步骤 1：记录调用 + 按需注入拉取失败（干净中止路径）。
+  // create 前置确保镜像（记录调用 + 按需注入拉取失败）。
   async ensureImage(image: string): Promise<void> {
     this.ensureImageCalls.push(image)
     if (this.failEnsureImageFor.has(image)) {
@@ -133,23 +95,23 @@ export class FakeRuntime implements ContainerRuntime {
   }
 
   async start(name: string): Promise<void> {
-    const r = this.containers.get(name)
-    if (r) r.info = { ...r.info, running: true, status: 'running' }
+    const rec = this.containers.get(name)
+    if (rec) rec.info = { ...rec.info, running: true, status: 'running' }
   }
 
-  // #591：按容器 id 启动（createComplete 用 create 返回的 id——消除 name 竞态）；id 不存在 no-op
+  // 按容器 id 启动（createComplete 用 create 返回的 id——消除 name 竞态）；id 不存在 no-op。
   async startById(containerId: string): Promise<void> {
-    for (const r of this.containers.values()) {
-      if (r.info.containerId === containerId) {
-        r.info = { ...r.info, running: true, status: 'running' }
+    for (const rec of this.containers.values()) {
+      if (rec.info.containerId === containerId) {
+        rec.info = { ...rec.info, running: true, status: 'running' }
         return
       }
     }
   }
 
   async stop(name: string): Promise<void> {
-    const r = this.containers.get(name)
-    if (r) r.info = { ...r.info, running: false, status: 'exited' }
+    const rec = this.containers.get(name)
+    if (rec) rec.info = { ...rec.info, running: false, status: 'exited' }
   }
 
   async remove(name: string, volumes?: NamedVolumes): Promise<void> {
@@ -160,40 +122,10 @@ export class FakeRuntime implements ContainerRuntime {
   async execInContainer(_name: string, _cmd: string[]): Promise<void> {}
 
   async execSync(name: string, cmd: string[]): Promise<void> {
-    if (this.failExecSyncFor.has(name)) throw new Error(`simulated approve exec failure for ${name}`)
+    if (this.failExecSyncFor.has(name)) throw new Error(`simulated exec failure for ${name}`)
     this.execCalls.push({ name, cmd })
   }
 
-  // #696 一次性临时容器：记录 → 按注入的退出码 resolve/抛 RunOnceError → finally 标清理。
-  // 刻意不进 this.containers——临时容器对 listFleet / hostPublishedPorts 不可见（真 runtime 靠
-  // 「无 fleet 标签 + 无端口发布」达成同一效果，见 DockerRuntime.buildOneShotOptions）。
-  async runOnce(spec: OneShotSpec): Promise<OneShotResult> {
-    const rec: FakeOneShotRecord = {
-      spec,
-      output: this.oneshotOutput,
-      exitCode: this.oneshotExitCode,
-      removed: false,
-    }
-    this.oneshotRuns.push(rec)
-    try {
-      if (this.oneshotWaitError) throw this.oneshotWaitError
-      // #699 按命令子串定向失败（备份 vs doctor 分流断言）：命中 → 按当前注入退出码抛错。
-      // #718 failOneshotMaxTimes 限定失败次数（耗尽后放行）——doctor 幂等重试的「首败次成」路径。
-      if (this.failOneshotCmdSubstring && spec.cmd.join(' ').includes(this.failOneshotCmdSubstring)) {
-        this.oneshotFailHits++
-        if (this.failOneshotMaxTimes === null || this.oneshotFailHits <= this.failOneshotMaxTimes) {
-          throw new RunOnceError(rec.exitCode !== 0 ? rec.exitCode : 9, rec.output, spec.cmd)
-        }
-      }
-      if (rec.exitCode !== 0) throw new RunOnceError(rec.exitCode, rec.output, spec.cmd)
-      return { output: rec.output }
-    } finally {
-      rec.removed = true
-    }
-  }
-
   // 测试辅助：断言用的 label 常量（与真 runtime 同源）。
-  static readonly internalPort = GATEWAY_INTERNAL_PORT
   static readonly labelInstance = LABEL_INSTANCE_KEY
-  static readonly labelPort = LABEL_PORT_KEY
 }

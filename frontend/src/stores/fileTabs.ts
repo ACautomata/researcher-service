@@ -17,7 +17,7 @@ import { buildWriteDiffLines } from '@/chat/toolRender/tool-call-diff'
 import { parsePatchView } from '@/chat/toolRender/tool-call-patch'
 
 export interface FileTab {
-  path: string // workspace 相对路径；唯一 key（同路径复用单 tab）
+  path: string // lab 相对路径；唯一 key（同路径复用单 tab）
   state: 'pending' | 'loaded' | 'error' // pending=agent running 骨架；loaded=全文（含 binary/oversized）；error=fetch 失败
   content: string | null // 全文（loaded 且非 binary/oversized）；pending / fetch 中 / error 为 null
   lineMarks: number[] // 高亮行号（1-based）；树点击 / 未映射 / pending 恒 []，agent done 写入
@@ -123,7 +123,7 @@ function computeLineMarks(input: unknown, kind: 'edit' | 'write', path: string, 
 
 export const useFileTabsStore = defineStore('fileTabs', {
   state: () => ({
-    tree: null as DirListing | null, // workspace 递归树（基线 3）
+    tree: null as DirListing | null, // lab 递归树（基线 3）
     treeLoading: false as boolean,
     treeGeneration: 0, // 回退/切会话作废旧树请求
     treeTruncated: false as boolean,

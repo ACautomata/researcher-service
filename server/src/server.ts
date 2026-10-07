@@ -7,7 +7,6 @@ import { config } from './config'
 import { assembleFleet } from './containers/fleetAssembly'
 import { assembleSandboxes } from './sandboxes/assembly'
 import { assembleWikiContainers } from './wikiContainers/assembly'
-import { assembleTunnelServer } from './chat/tunnelAssembly'
 import { assembleRunner } from './runner/assembly'
 import { WikiUpdateRunService } from './wiki/updateRun'
 import { StreamHub } from './events/hub'
@@ -121,8 +120,6 @@ async function main(): Promise<void> {
   const app = createApp({
     prisma,
     orchestrator: fleet.orchestrator,
-    // approve 端点 docker exec 通道（#374）：容器内 `openclaw devices approve <requestId>`。
-    runtime: fleet.runtime,
     // wiki（#335 → #784 换轨）：存储面 = 新 wiki 容器（ensure 经 wikiContainers 注入）；
     // compile 触发不注入（busybox 级容器无 openclaw 运行时，索引归 OpenWiki 工具形态 #737，
     // routes 缺省 noop）。#790：全量更新独立 run 触发面（POST /wiki/update）注入。
@@ -136,11 +133,10 @@ async function main(): Promise<void> {
         start: async (params) => wikiUpdateRuns.start(params),
       },
     },
-    // models（#336；#775 写盘链退役）：事务 = DB mutation + config_meta version bump（热生效
-    // 信号），不再 putArchive 重渲染 openclaw.json——TemplateModelConfigWriter 装配退役
-    //（configWriter/configBuilder 两文件留待 T0 清退 #801）；models/providerEndpoints 路由
-    // 无条件挂载，装配层无注入。
-    // files（#589 · ADR 0012）：统一文件 CRUD 经 Docker getArchive/putArchive/exec rm。
+    // models（#336；#775 事务简化）：事务 = DB mutation + config_meta version bump（热生效
+    // 信号）——写盘链（configWriter/configBuilder）已随 T0 #801 物理删除；models/providerEndpoints
+    // 路由无条件挂载，装配层无注入。
+    // files（T0 #801 只读化）：root=lab 沙箱只读 GET 面（经 Docker getArchive）。
     files: { archive: fleet.archive },
     // figures 读面（#791）：无条件挂载（资产常驻，读面不设 flag 门——#744 §11.3）；生成执行面
     // 归会话 run 域（#744 §5.2），无装配项。
@@ -159,21 +155,7 @@ async function main(): Promise<void> {
     plugins: pluginsRouter,
   })
 
-  // M0 同进程单端口分流：createServer(expressApp) + server.on('upgrade') 分流。
-  // M5 隧道（#337 · ADR 0006）：/ws/chat/ 由隧道接管（JWT subprotocol 握手 + 归属门 + 原始帧透传
-  // 到容器网关）；其余 upgrade 请求拒绝（避免裸挂导致悬空连接）。
-  const tunnel = assembleTunnelServer({
-    prisma,
-    // #385：隧道连容器网关携带面板 origin（生产 PANEL_PUBLIC_ORIGIN；真网关 2026.7.1 校验
-    // Origin 须在容器 allowedOrigins 内——该值同时由 ConfigRenderer 强制进容器 openclaw.json）。
-    panelOrigin: config.fleet.panelOrigin,
-    gatewayHost: config.fleet.healthHost,
-    gatewayScheme: config.fleet.healthScheme,
-  })
   const server = createServer(app)
-  server.on('upgrade', (req, socket, head) => {
-    if (!tunnel.handleUpgrade(req, socket, head)) socket.destroy()
-  })
 
   // 优雅关闭：drain BullMQ worker（在飞 provisioning 完成或标 ERROR）；runner 队列 drain
   //（在飞 run 完成或 job failed——run 执行错误已在 RunService 消化为终态事件）。
@@ -182,8 +164,6 @@ async function main(): Promise<void> {
     await sandboxes.close().catch(() => {})
     await wikiContainers.close().catch(() => {})
     await runner.close().catch(() => {})
-    // 先终止活动隧道（http.Server.close 会等升级后的 WS 连接自然断开——有浏览器持隧道时挂起）
-    tunnel.close()
     server.close(() => process.exit(0))
   }
   process.on('SIGINT', () => void shutdown())

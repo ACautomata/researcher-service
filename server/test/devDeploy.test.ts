@@ -64,15 +64,16 @@ describe('dev compose 去 host 挂载（issue #594，ADR 0013）', () => {
 describe('dev 寻址与 prod 同形态（issue #594，ADR 0013）', () => {
   const compose = readRepoFile(DEV)
 
-  it('fleet 寻址经 host.docker.internal + 0.0.0.0 发布 + host-gateway 映射（server 容器化，同 prod）', () => {
-    expect(compose).toMatch(/OPENCLAW_FLEET_WS_HOST: host\.docker\.internal/)
-    expect(compose).toMatch(/OPENCLAW_FLEET_PORT_BIND_HOST: 0\.0\.0\.0/)
-    expect(compose).toMatch(/host\.docker\.internal:host-gateway/)
+  it('T0 #801：fleet 宿主寻址面整体退役——无 WS host / 端口绑定 host / host-gateway 映射', () => {
+    expect(compose).not.toMatch(/OPENCLAW_FLEET_WS_HOST/)
+    expect(compose).not.toMatch(/OPENCLAW_FLEET_PORT_BIND_HOST/)
+    expect(compose).not.toMatch(/host\.docker\.internal:host-gateway/)
+    expect(compose).not.toMatch(/extra_hosts:/)
   })
 
-  it('模板与 openclaw.json 的 env 指向镜像内路径（构建期 COPY 产物，同 prod）', () => {
+  it('home 模板 env 指向镜像内路径（构建期 COPY 产物，同 prod）；openclaw.json 模板随 T0 #801 退役', () => {
     expect(compose).toMatch(/OPENCLAW_TEMPLATE_DIR: \/app\/templates\/researcher/)
-    expect(compose).toMatch(/OPENCLAW_TEMPLATE_JSON: \/app\/deploy\/openclaw\.json/)
+    expect(compose).not.toMatch(/OPENCLAW_TEMPLATE_JSON/)
   })
 
   it('fleet 根与 SQLite 走容器内路径 / named volume 挂载点（同 prod）', () => {
@@ -88,13 +89,12 @@ describe('dev 寻址与 prod 同形态（issue #594，ADR 0013）', () => {
 
 describe('dev 与 prod 逐键对齐（issue #594 同形态交叉校验）', () => {
   // 这些键决定「编排/寻址/配置来源」行为，dev 与 prod 必须完全一致，否则分叉重生。
+  // T0 #801：OPENCLAW_TEMPLATE_JSON / OPENCLAW_FLEET_WS_HOST / OPENCLAW_FLEET_PORT_BIND_HOST
+  // 随端口池与模板面退役，不再属于对齐面。
   const SHARED_KEYS = [
     'REDIS_URL',
     'OPENCLAW_TEMPLATE_DIR',
-    'OPENCLAW_TEMPLATE_JSON',
     'DATABASE_URL',
-    'OPENCLAW_FLEET_WS_HOST',
-    'OPENCLAW_FLEET_PORT_BIND_HOST',
     'OPENCLAW_FLEET_ROOT',
   ]
   const dev = readRepoFile(DEV)
@@ -120,10 +120,10 @@ describe('dev 特有项（issue #594）', () => {
     expect(compose).toMatch(/127\.0\.0\.1:8001:8001/)
   })
 
-  it('build 经 additional_contexts 注入 template（本地 researcher）与 deploy（openclaw.json）', () => {
+  it('build 经 additional_contexts 注入 template（本地 researcher）；openclaw.json 的 deploy context 已随 T0 #801 退役', () => {
     expect(compose).toMatch(/additional_contexts:/)
     expect(compose).toMatch(/template: \$\{RESEARCHER_DIR:-\.\.\/researcher\}/)
-    expect(compose).toMatch(/deploy: \./)
+    expect(compose).not.toMatch(/^\s+deploy: \.$/m)
   })
 
   it('不显式覆盖 OPENCLAW_NAMED_VOLUMES（保持 config.ts 默认 true，与 prod 同效）', () => {

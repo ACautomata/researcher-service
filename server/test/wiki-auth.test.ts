@@ -27,7 +27,6 @@ describe('wiki 认证单链（生产 orchestrator + wiki 同挂；codex PR#346 P
     const app = createApp({
       prisma: ctx.prisma,
       orchestrator: fl.orch,
-      runtime: fl.runtime,
       wiki: { compile: { trigger: () => {} }, serviceFor },
     })
     ctx.request = supertest(app) as unknown as TestContext['request']

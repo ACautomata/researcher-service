@@ -1,10 +1,9 @@
-// 容器/编排域异常族（平移 backend/containers/fleet/values.py + ports.py，#334）。
+// 容器/编排域异常族（平移 backend/containers/fleet/values.py，#334）。
 // 区别于旧 Django「异常→HTTP 状态码」：本服务全部经信封码（#312 所有 REST HTTP 200）。
 // 带信封码的异常一律继承 ContainerDomainError，路由层不再逐类 catch —— 由 toEnvelopeError
-// 转译为 EnvelopeError（code 即信封码）。**不携带 code 的例外**直接继承 Error、与库内其他异常
-// 同形（无码面语义、调用方按类型捕获）：ConfigWriteError（#775 写盘链退役前由 models
-// service 判「盘未变」消费；退役后无调用方，类留待 T0 #801 随 configWriter 一并删除）、
-// RunOnceError（升级编排判命令失败）。
+// 转译为 EnvelopeError（code 即信封码）。
+// T0 #801 legacy 清退：端口池（PortAllocationError/PortPoolExhausted）、写盘链（ConfigWriteError）、
+// 升级 oneshot（RunOnceError）异常随组件删除。
 
 import { CODE } from '../codes'
 
@@ -46,22 +45,7 @@ export class InstanceDirExists extends ContainerDomainError {
   }
 }
 
-// 端口分配重试用尽（池理论充足但持续冲突）；不可重试 → 90004
-export class PortAllocationError extends ContainerDomainError {
-  constructor(public readonly containerName: string) {
-    super(CODE.PORT_POOL_EXHAUSTED, `端口分配重试用尽: ${containerName}`)
-  }
-}
-
-// 端口池内无可用端口（平移 ports.PortPoolExhausted）→ 90004
-export class PortPoolExhausted extends ContainerDomainError {
-  constructor(message: string) {
-    super(CODE.PORT_POOL_EXHAUSTED, message)
-  }
-}
-
 // 面板级配置缺失——LLM_API_KEY 等必填字段未设置 → 90003
-// （#366：模板读取/解析失败也包成此错误，见 configWriter.ensureRenderer 转译说明）
 export class ConfigurationError extends ContainerDomainError {
   constructor(public readonly field: string) {
     super(CODE.LLM_NOT_CONFIGURED, `${field} 未配置`)
@@ -81,39 +65,5 @@ export class InstanceBusy extends ContainerDomainError {
 export class QuotaExceeded extends ContainerDomainError {
   constructor(public readonly containerName: string) {
     super(CODE.QUOTA_EXCEEDED, `容器数量已达配额上限: ${containerName}`)
-  }
-}
-
-// openclaw.json 写盘失败（#591 起经 FileArchive.putArchive，原 #366 ConfigStore 宿主原子写 seam
-// 已随 config 落容器内撤销）。**#775 写盘链退役**：models service 不再消费本类（事务简化为
-// mutation + version bump），reconcile/90003 面随之消失——类保留至 T0 #801 随 configWriter
-// 一并物理删除。原消费语义存档：service 据此判定「盘未变」→ 事务回滚 DB 行 → 90003
-//（ConfigWriteError 恒 = fs/docker 写失败、盘未变；reconcile 只对「盘已写而事务回滚」触发）。
-// name = 面板实例名（诊断），path = 容器内 config 路径（诊断）。
-export class ConfigWriteError extends Error {
-  constructor(
-    public readonly containerName: string,
-    public readonly path: string,
-  ) {
-    super(`config write failed for ${containerName}: ${path}`)
-    this.name = 'ConfigWriteError'
-  }
-}
-
-// 一次性临时容器（runOnce）以非 0 退出（#696）：携带退出码与输出，供升级编排判定失败语义并如实
-// 记录日志（如 `openclaw doctor --fix` 的输出）。与 ConfigWriteError 同类：刻意不继承
-// ContainerDomainError（无信封码，编排层消费，不经 REST 直达用户）。
-// 截断上限：doctor 输出前 500 字符全是与失败无关的 Startup optimization 提示框，真正的失败原因
-// 在其后——2026.9.4 升级事故（#718）里生产日志因此只见提示不见错误。放宽到 8000 保完整诊断。
-export class RunOnceError extends Error {
-  constructor(
-    public readonly exitCode: number,
-    public readonly output: string,
-    public readonly cmd: readonly string[],
-  ) {
-    super(
-      `runOnce exited with code ${exitCode}: cmd=${JSON.stringify(cmd)} output=${JSON.stringify(output.slice(0, 8000))}`,
-    )
-    this.name = 'RunOnceError'
   }
 }

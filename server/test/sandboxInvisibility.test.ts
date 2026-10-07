@@ -29,7 +29,6 @@ describe('沙箱对容器列表隐身（#776 · S1）', () => {
     const app = createApp({
       prisma: ctx.prisma,
       orchestrator: fleet.orch,
-      runtime: fleet.runtime,
       files: { archive: fleet.archive },
     })
     ctx.request = supertest(app) as unknown as TestContext['request']

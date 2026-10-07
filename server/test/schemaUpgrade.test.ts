@@ -7,7 +7,7 @@ import { runDbScript } from './runDbScript'
 
 // 从「只有 base 表」的旧库跑全量增量脚本（幂等跑两遍）→ 全表到位 + #791 AutoFigure 换轨
 //（figures 新形状重建 + generation_jobs 退役）+ #699 upgradeAttempts 列 + teammate/mailbox
-// + user_version 归 13（#771 批次 7→8；#775 8→9；#787 9→10；#786 10→11；#785 11→12；
+// + user_version 归 14（#771 批次 7→8；#775 8→9；#787 9→10；#786 10→11；#785 11→12；
 // #790 teammates.kind + #791 figures 换轨 12→13）。
 function assertUpgraded(dbPath: string): void {
   const db = new Database(dbPath)
@@ -44,12 +44,14 @@ function assertUpgraded(dbPath: string): void {
     for (const col of ['xml', 'idempotencyKey']) {
       expect(figureCols.find((x) => x.name === col), `${col} 应已退役`).toBeUndefined()
     }
-    // #699 升级编排：containers 增量补 upgradeAttempts 列（连续失败计数，成功清零；≥3 终态）。
-    const containerCols = db.prepare('PRAGMA table_info(containers)').all() as Array<{ name: string; dflt_value: string | null; notnull: number }>
-    const attempts = containerCols.find((c) => c.name === 'upgradeAttempts')!
-    expect(attempts.notnull).toBe(1) // NOT NULL
-    expect(attempts.dflt_value).toBe('0') // DEFAULT 0（既有行升级计数从 0 起）
-    expect(db.pragma('user_version', { simple: true })).toBe(13) // #785 批次 11→12；#790 teammates.kind + #791 figures 换轨 12→13
+    // T0 #801：upgradeAttempts 列随 #699 升级编排退役——增量收敛须 DROP 既有库残留列。
+    const containerCols = db.prepare('PRAGMA table_info(containers)').all() as Array<{ name: string }>
+    expect(containerCols.find((c) => c.name === 'upgradeAttempts'), 'upgradeAttempts 应已退役').toBeUndefined()
+    // port 唯一索引随端口池废除一并清退
+    expect(db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='containers_port_key'").get()).toBeUndefined()
+    // pairings 表随设备配对全链退役
+    expect(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='pairings'").get()).toBeUndefined()
+    expect(db.pragma('user_version', { simple: true })).toBe(14) // #790/#791 批次 12→13；T0 #801 legacy 清退 13→14
     const sessionCols = db.prepare('PRAGMA table_info("sessions")').all() as Array<{ name: string }>
     expect(sessionCols.some((col) => col.name === 'isTeammate')).toBe(true)
     expect(sessionCols.some((col) => col.name === 'preferredModelJson')).toBe(true)
@@ -117,7 +119,7 @@ describe('schema upgrade script', () => {
     assertUpgraded(dbPath)
   })
 
-  it('upgrades an already-text-trace DB (v2) to current tables + user_version=13', () => {
+  it('upgrades an already-text-trace DB (v2) to current tables + user_version=14', () => {
     const dir = mkdtempSync(path.join(tmpdir(), `schema-upgrade-${process.pid}-`))
     const dbPath = path.join(dir, 'panel.db')
     // 模拟上一轮增量已交付 text_trace_logs 的既有部署（v2）——增量脚本须只补 figures + 换轨
