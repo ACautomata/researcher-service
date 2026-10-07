@@ -7,6 +7,8 @@
 // 一律经本桥（相对 import，#788 plugins → server 源目录直引同向）；server 树内的适配器
 //（autofigureXml / autofigureSharp）不受此限。
 
-export { StateGraph, Annotation, START, END } from '@langchain/langgraph'
-export type { LangGraphRunnableConfig } from '@langchain/langgraph'
+export { StateGraph, Annotation, START, END, Command, Send, interrupt } from '@langchain/langgraph'
+export type { LangGraphRunnableConfig, BaseCheckpointSaver } from '@langchain/langgraph'
+export type { Runnable } from '@langchain/core/runnables'
+export type { BaseLanguageModelInput } from '@langchain/core/language_models/base'
 export { z } from 'zod'
