@@ -105,7 +105,13 @@ export function useChatSession(deps: ChatSessionDeps = {}): ChatSession {
   const lastRunError = ref<RunError | null>(null)
   let disposed = false
   const historyBusy = ref(false)
-  const historyAvailable = computed(() => Boolean(chat.selectedSession) && !connecting.value && !disconnected.value && !running.value && !historyBusy.value && chat.approvals.length === 0)
+  const projectionReady = ref(false)
+  const outboxGenerations = new Map<string, number>()
+  function invalidateOutbox(id: string): void {
+    outboxGenerations.set(id, (outboxGenerations.get(id) ?? 0) + 1)
+    for (const entry of outbox.pending(id)) outbox.remove(id, entry.clientKey)
+  }
+  const historyAvailable = computed(() => Boolean(chat.selectedSession) && projectionReady.value && !connecting.value && !disconnected.value && !running.value && !historyBusy.value && chat.approvals.length === 0)
 
   async function rewind(messageId: string, scope: RewindScope): Promise<RewindResult | null> {
     if (!historyAvailable.value) return null
@@ -113,6 +119,7 @@ export function useChatSession(deps: ChatSessionDeps = {}): ChatSession {
     historyBusy.value = true
     try {
       const result = await rewindSessionApi(id, messageId, scope)
+      if (scope !== 'files') invalidateOutbox(id)
       if (!disposed && chat.selectedSession === id) {
         pendingToolInputs.clear()
         fileTabs.reset()
@@ -149,11 +156,13 @@ export function useChatSession(deps: ChatSessionDeps = {}): ChatSession {
     const id = chat.selectedSession
     if (!id || disposed) return
     const gen = ++projectionGen
+    projectionReady.value = false
     try {
       const p = await getSessionProjection(id)
       if (disposed || chat.selectedSession !== id || gen !== projectionGen) return
       chat.setMessages(fromProjection(p))
       chat.setApprovalsFromProjection(p.approvals)
+      projectionReady.value = true
       deps.onClearError?.()
     } catch (e) {
       if (disposed || chat.selectedSession !== id || gen !== projectionGen) return
@@ -177,6 +186,7 @@ export function useChatSession(deps: ChatSessionDeps = {}): ChatSession {
     if (outbox.pending(id).length === 0) return
     try {
       await outbox.flush(id, async (sid, entry) => {
+        if (historyBusy.value) throw new Error('历史操作进行中')
         const result = await (entry.attachments?.length
           ? sendSessionMessage(sid, entry.content, entry.clientKey, entry.attachments.map((media) => media.attachmentId))
           : sendSessionMessage(sid, entry.content, entry.clientKey))
@@ -189,6 +199,7 @@ export function useChatSession(deps: ChatSessionDeps = {}): ChatSession {
   }
 
   async function compensate(): Promise<void> {
+    projectionReady.value = false
     void refreshSlashCommands()
     deps.onClearError?.()
     try {
@@ -220,6 +231,7 @@ export function useChatSession(deps: ChatSessionDeps = {}): ChatSession {
   watch(stream.status, (s) => {
     connecting.value = s === 'connecting'
     disconnected.value = s === 'disconnected' || s === 'closed'
+    if (s !== 'open') projectionReady.value = false
   })
 
   // ---- SSE 事件分派（业务面）----
@@ -241,6 +253,7 @@ export function useChatSession(deps: ChatSessionDeps = {}): ChatSession {
       return
     }
     if (e.type === 'session.invalidated') {
+      if (e.sessionId && e.payload.reason === 'rewind' && e.payload.scope !== 'files') invalidateOutbox(e.sessionId)
       if (e.sessionId === chat.selectedSession) { fileTabs.reset(); void refreshProjection() } // 他端 rewind 同步对话与文件
       return
     }
@@ -346,6 +359,7 @@ export function useChatSession(deps: ChatSessionDeps = {}): ChatSession {
   function selectSession(id: string): void {
     if (chat.selectedSession === id) return
     projectionGen++ // 旧会话迟到响应作废
+    projectionReady.value = false
     lastRunError.value = null
     pendingToolInputs.clear()
     chat.resetForSession()
@@ -453,6 +467,7 @@ export function useChatSession(deps: ChatSessionDeps = {}): ChatSession {
   }
 
   async function dispatchSend(id: string, content: string, key: string, attachments: SentAttachment[] | undefined): Promise<boolean> {
+    const outboxGen = outboxGenerations.get(id) ?? 0
     try {
       const result = await sendSessionMessage(id, content, key, attachments?.map((a) => a.attachmentId))
       if (disposed || chat.selectedSession !== id) return true
@@ -464,7 +479,7 @@ export function useChatSession(deps: ChatSessionDeps = {}): ChatSession {
       chat.markMessageId(key, result.messageId)
       return true
     } catch (e) {
-      if (disposed) return false
+      if (disposed || outboxGen !== (outboxGenerations.get(id) ?? 0)) return false
       chat.removeMessage(key)
       const restoreDraft = () => {
         if (chat.selectedSession === id && chat.input === '') chat.setInput(content)

@@ -125,6 +125,7 @@ export const useFileTabsStore = defineStore('fileTabs', {
   state: () => ({
     tree: null as DirListing | null, // workspace 递归树（基线 3）
     treeLoading: false as boolean,
+    treeGeneration: 0, // 回退/切会话作废旧树请求
     treeTruncated: false as boolean,
     treeError: null as string | null, // 树拉取失败文案（§4.3：失败 → tree=null + 错误空态）
     tabs: [] as FileTab[],
@@ -137,19 +138,20 @@ export const useFileTabsStore = defineStore('fileTabs', {
       const chat = useChatStore()
       const sessionId = chat.selectedSession
       if (!sessionId) return
+      const generation = ++this.treeGeneration
       this.treeLoading = true
       this.treeError = null
       try {
         const listing = await listLabTree(sessionId)
-        if (chat.selectedSession !== sessionId) return // 切走了：丢弃旧会话响应
+        if (chat.selectedSession !== sessionId || generation !== this.treeGeneration) return // 丢弃旧树响应
         this.tree = listing
         this.treeTruncated = listing.truncated
       } catch (e) {
-        if (chat.selectedSession !== sessionId) return
+        if (chat.selectedSession !== sessionId || generation !== this.treeGeneration) return
         this.tree = null
         this.treeError = describeError(e)
       } finally {
-        this.treeLoading = false
+        if (generation === this.treeGeneration) this.treeLoading = false
       }
     },
 
@@ -294,6 +296,8 @@ export const useFileTabsStore = defineStore('fileTabs', {
 
     // 全清（含 tree）—— 切会话语义（lab 随会话生灭：tree 清空后下次进「文件」分段触发 loadTree）
     reset(): void {
+      this.treeGeneration++
+      this.treeLoading = false
       this.tabs = []
       this.activePath = null
       this.tree = null

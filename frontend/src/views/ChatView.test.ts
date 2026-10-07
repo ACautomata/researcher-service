@@ -339,3 +339,15 @@ it('#794 fork 进入新会话，保留溯源且可返回源会话', async () => 
   expect(useChatStore().selectedSession).toBe('sess-1')
   w.unmount()
 })
+
+
+it('#794 文件分段收到他端恢复后自动刷新树', async () => {
+  const w = await mountChat()
+  await w.get('[data-test="side-tab-files"]').trigger('click')
+  await flushPromises()
+  expect(filesApi.listLabTree).toHaveBeenCalledTimes(1)
+  FakeEventSource.last()!.emit('session.invalidated', { type: 'session.invalidated', sessionId: 'sess-1', payload: { reason: 'rewind', scope: 'files' } })
+  await flushPromises()
+  expect(filesApi.listLabTree).toHaveBeenCalledTimes(2)
+  w.unmount()
+})

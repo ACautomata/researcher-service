@@ -101,6 +101,9 @@ const {
 const sidebarTab = ref<'sessions' | 'files'>('sessions')
 const fileTabs = useFileTabsStore()
 // 切到「文件」分段：树未加载则拉一次；切会话：fileTabs.reset 已清树，在 files 分段时重拉
+watch(() => [fileTabs.tree, fileTabs.treeGeneration] as const, ([tree]) => {
+  if (!tree && sidebarTab.value === 'files' && chat.selectedSession && !fileTabs.treeLoading) void fileTabs.loadTree()
+})
 watch(sidebarTab, (tab) => {
   if (tab === 'files' && chat.selectedSession && !fileTabs.tree && !fileTabs.treeLoading) {
     void fileTabs.loadTree()
@@ -508,6 +511,8 @@ defineExpose({
         </ul>
       </div>
       <ChatComposer
+        :rewind-busy="restoreBusy"
+        :fork-busy="restoreBusy"
         v-model="chat.input"
         :matches="slashMatches"
         :slash-open="slashOpen"

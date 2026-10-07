@@ -750,7 +750,7 @@ export class SessionService {
             : fileRewind.rewindFiles(rewindInput))
         }
       } catch (err) {
-        this.publishSessionEvent(session.ownerId, 'session.invalidated', { reason: 'rewind' }, sessionId)
+        this.publishSessionEvent(session.ownerId, 'session.invalidated', { reason: 'rewind', scope }, sessionId)
         try {
           await this.deps.runService.teammatesNotifyFileRewind?.(sessionId, anchor, true)
         } catch (notifyErr) {
@@ -767,7 +767,7 @@ export class SessionService {
         await this.deps.runService.teammatesNotifyFileRewind?.(sessionId, anchor, files?.degraded ?? true)
       }
 
-      this.publishSessionEvent(session.ownerId, 'session.invalidated', { reason: 'rewind' }, sessionId)
+      this.publishSessionEvent(session.ownerId, 'session.invalidated', { reason: 'rewind', scope }, sessionId)
       // scope=files 返回指针锁内重读（并发串行化后锁外快照可能已被先行 rewind 归档失效）
       const currentPointer =
         scope === 'files'
