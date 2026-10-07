@@ -14,10 +14,6 @@
 #     与 deploy（本目录 openclaw.json）——prod 由 CD 注入同两 context（见 cd.yml build-contexts）；
 #   - 独立 named volume panel-dev-db（与 prod panel-db 隔离）。
 #
-# AutoFigure sidecar（已换轨，#791）：autofigure 服务段保留但 server 侧 env 注入与消费端
-# 已全量退役（config.autofigure 删除）——该 sidecar 链路无任何现役消费者，服务段与目录的
-# 正式删除归票 6（#744 §10 退役 PR）。
-#
 # 用法：
 #   1. 克隆 researcher 到仓库根（additional_contexts template= 默认 ../researcher）：
 #        git clone --depth 1 https://github.com/ACautomata/researcher ./researcher
@@ -29,7 +25,6 @@
 #   3. 起栈：docker compose -f deploy/docker-compose.dev.yml up -d --build
 #   4. 前端：cd frontend && npm run dev（vite proxy /api、/ws → 127.0.0.1:8001）
 #   5. 改 server 代码：docker compose -f deploy/docker-compose.dev.yml up -d --build server
-#   6. AutoFigure smoke 已随 sidecar 链路退役（#791；figuresSmoke/smokeGating 相应删除）。
 
 name: panel-dev
 
@@ -49,7 +44,6 @@ services:
     restart: unless-stopped
     depends_on:
       - redis      # 启动顺序：redis 先于 server（仅启动序，非就绪等待；entrypoint 落表阶段给 redis 留出窗口，同 prod）
-      - autofigure # 同上：仅启动序（service_started，非 service_healthy）——flag 关路径不依赖 sidecar 就绪，dev 栈不因 sidecar 卡死
     ports:
       # dev 特有：暴露给宿主 vite dev proxy（prod server 不暴露）。仅 loopback。
       - "127.0.0.1:8001:8001"
@@ -100,34 +94,6 @@ services:
     networks:
       - panel-dev-net
 
-  # AutoFigure 私有 sidecar（T10，docs/autofigure/tickets/T10-dev-sidecar-smoke.md；镜像本体 T08）：
-  #   - build context 基准 = 本目录 deploy/ → deploy/autofigure-sidecar（Dockerfile 构建期断言 + zero
-  #     host mount，ADR 0013）；
-  #   - 仅挂 panel-dev-net，无 ports 无 volumes：私有 sidecar 无宿主端口（grilling §7）、零 host 挂载
-  #     （grilling §10）——宿主/浏览器永不直接访问，只经 server（panel-net 内部）经 X-Autofigure-Api-Key
-  #     注入凭证；
-  #   - healthcheck：/health 存活性探测（无域信息/凭证），容器内本机探（无宿主端口可依）；
-  #   - mem_limit 2g = T10 judgement call（真实生成 = Playwright 渲染 + LLM 调用的内存上限，仅 dev 栈
-  #     约束，不构成 prod 契约——prod 打包归 T11）。
-  autofigure:
-    build:
-      context: autofigure-sidecar
-    image: autofigure-sidecar:dev
-    container_name: panel-dev-autofigure
-    restart: unless-stopped
-    mem_limit: 2g
-    healthcheck:
-      test:
-        - CMD
-        - python
-        - -c
-        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)"
-      interval: 10s
-      timeout: 3s
-      retries: 5
-      start_period: 15s
-    networks:
-      - panel-dev-net
 
 networks:
   panel-dev-net:

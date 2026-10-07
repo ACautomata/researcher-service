@@ -1,3 +1,5 @@
+> **历史档案 / superseded（#802）**：旧生成链路已退役，本文仅保留设计与票据史；现行规格见 [#744 v2](../research/744-autofigure-langgraph.md)。
+
 # AutoFigure 集成 —— grilling 决策记录
 
 > 状态：**决策记录**。本文件记录 grilling 阶段（2026-08-15）已批准的架构决定。

@@ -222,7 +222,7 @@ docker compose -f deploy/docker-compose.dev.yml up -d --build server
 
 ## AutoFigure env（#792 插件化收口——现行）
 
-figure 生成 = server 进程内插件管线（#792 起；sidecar 时代见下方两节历史档案）。键声明单源 =
+figure 生成 = server 进程内插件管线（#792 起）。键声明单源 =
 `plugins/autofigure/manifest.ts` configSchema，启动期 `assertPluginEnv` 全目录校验（不看启用位）：
 
 | 键 | 必填 | 说明 |
@@ -239,39 +239,7 @@ figure 生成 = server 进程内插件管线（#792 起；sidecar 时代见下�
   启动，figure 工具调用期明确报错。
 - 凭证纪律：env 注入、不落盘、不入日志、不进事件载荷/产物（#744 §6）。
 
-## AutoFigure 接线（T10，docs/autofigure/tickets/T10-dev-sidecar-smoke.md）——已换轨退役（#791）
+## AutoFigure 退役（#802）
 
-> **已换轨退役（#791）**：本节为 sidecar 时代历史档案。server 侧消费端全量退役——`AUTOFIGURE_*`
-> env 注入（config.autofigure 读取面删除）、`AUTOFIGURE_ENABLED` flag 门、`X-Autofigure-Api-Key`
-> 凭证注入链、figures 创建端点与 Idempotency-Key、`figuresSmoke` 测试均已删除；figures = 常驻
-> 读面（无 flag 门），生成入口 = 会话内 figure 工具（#744 §4.1，票 4 接线）。compose 中的
-> **autofigure sidecar 服务段暂留**（无现役消费者），目录与服务段的正式删除归票 6（#744 §10）。
-> 注意：插件级 env 键已随 #792 回归——现行键清单见上方「AutoFigure env」节。
-
-- **sidecar 服务段（暂留，历史形状）**：dev 栈 `autofigure` 服务仅挂 `panel-dev-net`、无宿主
-  端口暴露、零 host 挂载（ADR 0013），`/health` healthcheck；`mem_limit: 2g`（T10 judgement call）。
-  构建：`docker compose -f deploy/docker-compose.dev.yml build autofigure`（或
-  `docker build deploy/autofigure-sidecar -t autofigure-sidecar:dev`）。
-- **部署面注意（服务段存续期仍为真）**：autofigure 是栈内声明服务，`docker compose up -d` 仍会
-  启动它——镜像不可拉或 start 失败会使 up 变红（与面板是否使用无关）。
-- **历史语义（已失效，仅存档）**：原 T10 设计为 server 经 env 注入 `AUTOFIGURE_ENABLED/LLM_KEY/
-  SIDECAR_URL/JOB_TIMEOUT_MS` 四键调 sidecar；真实生成 smoke（三条件门控）走 `POST /api/v1/figures`
-  （Idempotency-Key）创建-轮询链——均随 #791 退役，详见本节 superseded 前的 git 历史。
-
-## AutoFigure 生产打包（T11，docs/autofigure/tickets/T11-production-packaging-cd.md）——已换轨退役（#791）
-
-> **已换轨退役（#791）**：与上方 T10 段同批——server 消费端全量退役，生产 compose 的
-> **panel-autofigure 服务段暂留**（无现役消费者），目录与服务段正式删除归票 6（#744 §10）。
-
-- **sidecar 服务段（暂留，历史形状）**：生产 compose 起 **panel-autofigure** 第 4 镜像
-  `ghcr.io/acautomata/researcher-service/autofigure`（CD 既有管线构建推送，vendored T08 源
-  不 fetch mutable upstream；许可/署名文件构建期入镜像 + Dockerfile 断言）。仅挂 `panel-net`、
-  无宿主端口、零 host 挂载（ADR 0013）、`/health` healthcheck、`mem_limit: 2g`、
-  `restart: unless-stopped`、内部 URL `http://autofigure:8080`。镜像覆盖位
-  `PANEL_AUTOFIGURE_IMAGE`（`:latest` / `:<sha>` 回滚）对齐 `PANEL_*_IMAGE` 先例，随服务段
-  同批清退。
-- **部署面注意（服务段存续期仍为真）**：CD 的 `docker compose pull`/`up` 仍会部署该服务——
-  镜像不可拉或 start 失败会使 CD/up 变红（与面板是否使用无关）。
-- **历史语义（已失效，仅存档）**：原 T11 设计的 `AUTOFIGURE_ENABLED` flag 门（figures 路由
-  90005）、`AUTOFIGURE_LLM_KEY` env 注入 + `X-Autofigure-Api-Key` 凭证链、T07 规范化信封码
-  失败面均随 #791 退役。
+旧生成容器、vendored 源码和部署配置已删除，无数据迁移。生成由控制面插件执行，
+figures 读取、PNG/SVG 下载保持原 API。历史契约见 `docs/autofigure/`。
