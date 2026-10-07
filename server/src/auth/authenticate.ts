@@ -12,9 +12,8 @@ export class AuthenticationError extends Error {
   }
 }
 
-// 共享验签（规格 M0：authenticate() 可被 REST requireAuth 与 M4 WS upgrade 复用）。
+// 共享验签（规格 M0：authenticate() 供 REST requireAuth 调用）。
 // 签名验证后查库确认 user 存在且 active——禁用/删 user 下次 verify 立即拒（#321 同源）。
-// 不依赖 Express req/res → WS 握手可直接调用同一函数。
 // 错误契约：认证失败抛 AuthenticationError；DB/传输异常原样传播（非认证失败，调用方按内部故障处理）。
 
 export function toAuthUser(u: User): AuthUser {

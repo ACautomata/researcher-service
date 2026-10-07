@@ -1,6 +1,6 @@
 <script setup lang="ts">
 // Model 配置页（spec §9.5 / issue #47）：当前容器 selector + provider 列表 + 新增/编辑/删除表单。
-// 写后后端重渲染该容器 openclaw.json，经 OpenClaw watch 热加载生效（无需重启，#36 已证）。
+// 写后经 config_meta version bump 热生效（无需重启，#775；openclaw.json 写盘链已随 T0 #801 退役）。
 // apiKey 仅 env id（marker），绝不收集/回显明文。api 取值 openai-completions / anthropic-messages。
 import { onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'

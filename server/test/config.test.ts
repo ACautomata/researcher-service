@@ -319,9 +319,6 @@ describe('production fleet root (slice config)', () => {
   })
 })
 
-// 意见[F2]（code review PR #367）：隧道连容器网关的 URL scheme 硬编码 ws，deploy/Django 已文档
-// OPENCLAW_FLEET_WS_SCHEME=wss（生产 TLS）。config 加载即校验 ws/wss，非法 fail-fast（防 `SCHEME=http`
-// 这类错值静默拼出坏 URL，隧道全 4402）。
 describe('named volumes flag (slice config, #590/#592)', () => {
   async function loadNamedVolumes(env: string | undefined): Promise<boolean | 'THREW'> {
     vi.resetModules() // 清 config 模块缓存，让动态 import 重新快照 env

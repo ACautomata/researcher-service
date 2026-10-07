@@ -77,10 +77,10 @@ const httpUrlShape = (v: string): boolean => {
 // models 条目形状校验（#366 codex 三轮 P2）：已知字段类型严格校验（name/reasoning/input/cost/
 // contextWindow/maxTokens，对齐前端 ModelEntryDTO），未知扩展字段 passthrough 透传（前端表单
 // 收集的其余字段原样保留）。原来 `z.record(z.string(), z.unknown())` 让 {id:'m', name:{}} 这种
-// 非法形状入库——ProviderConfigBuilder 把 name 对象原样落盘为 alias/model 名（应为 string）→
-// 热加载拒绝、运行时落后 DB。入站校验拒绝，生成文件才可能符合 OpenClaw 形状。
+// 非法形状入库——name 对象被原样当作 alias/model 名（应为 string）→ 消费端拒绝、运行时落后
+// DB。入站校验拒绝，落库形状才可能合法。
 // base_url trim 后校验（#366 codex P2）：zod min(1) 不 trim，纯空格 '   ' 语义为空仍通过——
-// 对齐 Django CharField 默认 trim_whitespace，防「空 baseUrl 入库 + 写盘报成功热加载」。
+// 对齐 Django CharField 默认 trim_whitespace，防纯空格 baseUrl 入库静默生效。
 // 校验失败 → 90002 + 各字段明细（api_key_env_id 非法格式/未注入 env 同入 data.api_key_env_id）。
 export const modelProviderWriteSchema = z.object({
   provider_id: z
@@ -125,9 +125,9 @@ export const modelProviderWriteSchema = z.object({
         .passthrough(), // 未知扩展字段透传（前端表单收集的其余字段原样保留）
     )
     .min(1, '须至少一条 model（用于派生默认模型引用）')
-    // #366 codex 五轮 P2：同 provider 内 model id 须唯一。重复 id 让 ProviderConfigBuilder 生成相同
-    // <pid>/<mid> ref —— primary 自指进 fallbacks + aliases 键覆盖，盘上配置歧义、DB 却报成功
-    // （与 input 枚举同根：入站拒，生成文件才可能符合 OpenClaw 形状）。path 落 models → 90002 明细。
+    // #366 codex 五轮 P2：同 provider 内 model id 须唯一。重复 id 让消费端生成相同
+    // <pid>/<mid> 模型引用 —— primary 自指进 fallbacks + aliases 键覆盖，运行时配置歧义、
+    // DB 却报成功（与 input 枚举同根：入站拒，落库形状才可能合法）。path 落 models → 90002 明细。
     .refine(
       (models) => new Set(models.map((m) => String(m.id))).size === models.length,
       { message: '同 provider 内 model id 须唯一', path: ['models'] },

@@ -1,5 +1,5 @@
 // 真 docker daemon 集成 smoke 共享工具：镜像可获取性检查（pull 进度流消费）。
-// 复用于 containers-smoke.test.ts 与 pairingSmoke.test.ts（两个真容器 smoke 各自持有逐字复制会漂移）。
+// 复用于 containers-smoke.test.ts（真容器 smoke；逐字复制会漂移，故共享单实现）。
 // 门控语义由调用方决定：containers-smoke「必须真跑」→ ensureImageAvailable 抛错即套件失败；
 // 旧版曾优雅 skip（镜像可获取 + daemon 可达双条件），codex PR#346 后去 skip 必须真跑。
 

@@ -488,14 +488,14 @@ CREATE UNIQUE INDEX IF NOT EXISTS "provider_endpoints_scheme_host_port_key" ON "
   // 经此路径补种子，与既有库一致。
   db.exec(`INSERT OR IGNORE INTO "config_meta" ("id", "version") VALUES (1, 1)`)
 
-  // 731 §3.1 seed：迁移脚本把 deploy/openclaw.json 模板既有端点写入白名单（对齐 ConfigRenderer
-  // 「空 providers → 模板默认 minimax」语义的显式 seed）。createdBy 无用户语境（面板级 seed，
+  // 731 §3.1 seed：迁移脚本把默认 minimax 种子端点写入白名单（原 openclaw.json 模板默认语义——
+  // 模板与 ConfigRenderer 已随 T0 #801 退役，seed 名单内联于此）。createdBy 无用户语境（面板级 seed，
   // users 表可能为空）→ ''（该列无 FK，不伪造 users.id）；幂等 = 固定 seed id + INSERT OR
   // IGNORE——#775 迁移存量用户 minimax provider 行时遇已存在条目自然跳过。
   db.exec(`
 INSERT OR IGNORE INTO "provider_endpoints" ("id", "scheme", "host", "port", "note", "createdBy", "createdAt")
 VALUES ('seed-minimax-endpoint', 'https', 'api.minimaxi.com', NULL,
-        'seed（731 §3.1）：deploy/openclaw.json 模板默认 minimax 端点', '', CURRENT_TIMESTAMP)
+        'seed（731 §3.1）：默认 minimax 端点', '', CURRENT_TIMESTAMP)
 `)
 
   // ---- #785（#747·15 · #769 锁方案）：file_overwrite_logs（write-after-write 覆盖审计）----

@@ -43,7 +43,7 @@ import type {
 } from './fsPort'
 
 // 写面窄接口（#784）：files 域 DockerFileArchive 的显式容器名三方法——(name, root) 寻址是
-// legacy fleet 契约，wiki 容器不在 FILE_ROOTS 词表也不套 openclaw-gw- 前缀。测试注入 fake
+// legacy fleet 契约（root 词表已随 T0 #801 退役），wiki 容器不走 root 词表寻址也不套 openclaw-gw- 前缀。测试注入 fake
 // 记录调用（wikiDockerFs.test.ts）。
 export interface WikiContainerArchive {
   writeInContainer(dockerName: string, absRoot: string, relPath: string, content: string): Promise<void>

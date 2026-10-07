@@ -1,5 +1,5 @@
 // models API —— 每容器 model provider CRUD（spec §7 / issue #47）。
-// DB 单一来源，写后后端重渲染 openclaw.json 经 watch 热加载生效。apiKey 仅以 env id（marker）
+// DB 单一来源，写后经 config_meta version bump 热生效（#775；openclaw.json 写盘链已随 T0 #801 退役）。apiKey 仅以 env id（marker）
 // 形式回读，绝不暴露明文。api 取值 openai-completions / anthropic-messages（r28 §1.3）。
 import { apiJson } from '@/api/client'
 

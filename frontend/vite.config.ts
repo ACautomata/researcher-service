@@ -56,7 +56,8 @@ export default defineConfig({
   },
   server: {
     // dev 下把 /api 代理到 TS 控制面（server/src/config.ts port=8001），前端用相对路径
-    // POST /api/v1/auth/login。WS 隧道已随 T0 #801 退役——SSE 事件流走同源 /api，无需 proxy。
+    // POST /api/v1/auth/login。WS 隧道已随 T0 #801 退役——现役 SSE 事件流（/api/v1/events）
+    // 同源走本条目承载，无需额外 proxy 配置。
     proxy: {
       '/api': apiTarget,
     },
