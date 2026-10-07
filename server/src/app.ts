@@ -96,9 +96,11 @@ export function createApp({ prisma, orchestrator, wiki, models, providerEndpoint
   // 注意：Express 5 不把 app.use 挂载路径的 :name 合并进 router 的 req.params，故挂到
   // /api/v1/containers、把 `/:name/wiki/...` 路径声明在 router 内部（见 wiki/routes.ts）。
   app.use('/api/v1/containers', createWikiRouter(wiki ?? {}))
-  // models（#336；#775 写盘链退役）：零外部资源依赖（事务 = DB mutation + config_meta bump），
-  // 无条件挂载；deps 仅剩白名单校验注入缝（测试注 fake lookup 免真 DNS）。
-  app.use('/api/v1/containers', createModelsRouter(models ?? {}))
+  // models（#336；#775 写盘链退役；#857 归属门改挂 ownerId）：owner 级路由
+  // /api/v1/models/providers[/<pid>]（对齐 sessions 扁平挂用户先例），零容器行查询；
+  // 零外部资源依赖（事务 = DB mutation + config_meta bump），无条件挂载；deps 仅剩白名单
+  // 校验注入缝（测试注 fake lookup 免真 DNS）。
+  app.use('/api/v1/models', createModelsRouter(models ?? {}))
   // provider_endpoints（#775，731 §3.1）：端点白名单 admin 管理面，无条件挂载（requireAdmin
   // 在路由内；deps 同为白名单校验注入缝）。
   app.use('/api/v1', createProviderEndpointsRouter(providerEndpoints ?? {}))

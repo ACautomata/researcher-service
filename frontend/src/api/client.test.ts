@@ -158,10 +158,11 @@ describe('api client', () => {
     // P0 回归：TS 后端错误恒 HTTP 200 + {code,message,data}——apiJson 不得把信封错误当成功透传
     // （旧实现只按 resp.ok 判错 → 20040/401 分支全成死代码，用户看到内部错误文案）。
     ;(globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
-      mockResp({ code: 20040, message: '容器不存在或无权访问', data: null }),
+      // #857：models 面脱钩容器行——该 URL 只产 40040/90002，mock 码值对齐 models 域实况
+      mockResp({ code: 40040, message: 'provider 不存在或无权访问', data: null }),
     )
-    await expect(apiJson('/api/v1/containers/x/models/providers')).rejects.toMatchObject({
-      code: 20040,
+    await expect(apiJson('/api/v1/models/providers')).rejects.toMatchObject({
+      code: 40040,
       status: 200,
     } as ApiError)
   })

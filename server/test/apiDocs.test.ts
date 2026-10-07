@@ -73,8 +73,8 @@ describe('OpenAPI 文档面（#761）', () => {
       '/api/v1/containers',
       '/api/v1/containers/{name}/wiki/tree',
       '/api/v1/containers/{name}/wiki/page',
-      '/api/v1/containers/{name}/models/providers',
-      '/api/v1/containers/{name}/models/providers/{pid}',
+      '/api/v1/models/providers',
+      '/api/v1/models/providers/{pid}',
       '/api/v1/containers/{name}/files',
       '/api/v1/figures',
       '/api/v1/figures/{id}/png',
@@ -89,6 +89,9 @@ describe('OpenAPI 文档面（#761）', () => {
       '/api/v1/containers/{name}/bootstrap-token',
       '/api/v1/containers/{name}/pairing/approve/{requestId}',
       '/api/v1/containers/{name}/files/raw',
+      // #857：models 归属门改挂 ownerId，容器前缀路径下线
+      '/api/v1/containers/{name}/models/providers',
+      '/api/v1/containers/{name}/models/providers/{pid}',
     ]) {
       expect(doc.paths, `退役端点残留 ${p}`).not.toHaveProperty(p)
     }
@@ -135,7 +138,7 @@ describe('OpenAPI 文档面（#761）', () => {
       ['userCreate', '/api/v1/users', userCreateSchema],
       ['userPatch', '/api/v1/users/{id}', userPatchSchema],
       ['containerCreate', '/api/v1/containers', containerCreateSchema],
-      ['modelProviderWrite', '/api/v1/containers/{name}/models/providers', modelProviderWriteSchema],
+      ['modelProviderWrite', '/api/v1/models/providers', modelProviderWriteSchema],
     ]
     for (const [label, path, schema] of cases) {
       const methods = doc.paths[path]

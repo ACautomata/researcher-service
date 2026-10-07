@@ -363,58 +363,58 @@ register({
   dataNote: 'data: 分类聚合（开放词表；收顶层散落页）。',
 })
 
-// ---- Models /api/v1/containers/{name}/models/providers（写操作拒 creating/removing → 20043；
-//      #775 事务 = mutation + config_meta version bump + 白名单第一层校验）----
+// ---- Models /api/v1/models/providers（owner 级，#857 归属门直挂认证身份；#775 事务 =
+//      mutation + config_meta version bump + 白名单第一层校验）----
 
 register({
   method: 'get',
-  path: '/api/v1/containers/{name}/models/providers',
+  path: '/api/v1/models/providers',
   tag: 'Models',
-  summary: 'provider 列表（createdAt 升序）',
+  summary: 'provider 列表（createdAt 升序；owner 直取认证身份，#857）',
   auth: 'user',
-  errors: `90002（${CONTAINER_PATH_NOTE}）· 20040 · 10005。`,
-  dataNote: 'data: provider 列表（service.list 形状）。',
+  errors: `10005（mustChangePassword）。`,
+  dataNote: 'data: 本人 provider 列表（service.list 形状）。',
 })
 
 register({
   method: 'post',
-  path: '/api/v1/containers/{name}/models/providers',
+  path: '/api/v1/models/providers',
   tag: 'Models',
   summary: '新建 provider（唯一(ownerId, providerId)，#771 归属上移）',
   auth: 'user',
-  errors: `90002（字段明细含 base_url 白名单未命中/DNS 私网拒绝，body 校验在容器/越权之后）· 20040 · 20043 · 40041（pid 冲突）。`,
+  errors: `90002（字段明细含 base_url 白名单未命中/DNS 私网拒绝）· 40041（pid 冲突）· 10005。`,
   dataNote: 'data: 新建 provider（service.create 形状；事务内 config_meta version bump = 热生效信号）。',
   body: modelProviderWriteSchema,
 })
 
 register({
   method: 'get',
-  path: '/api/v1/containers/{name}/models/providers/{pid}',
+  path: '/api/v1/models/providers/{pid}',
   tag: 'Models',
   summary: '回读单条 provider',
   auth: 'user',
-  errors: `90002（${CONTAINER_PATH_NOTE}）· 20040 · 40040（不存在/越权同码防探测）· 10005。`,
+  errors: `40040（不存在/越权同码防探测）· 10005。`,
   dataNote: 'data: provider（service.get 形状）。',
 })
 
 register({
   method: 'put',
-  path: '/api/v1/containers/{name}/models/providers/{pid}',
+  path: '/api/v1/models/providers/{pid}',
   tag: 'Models',
   summary: '改 provider（路径 pid 定位，body 可改 provider_id）',
   auth: 'user',
-  errors: `90002（含 base_url 白名单未命中）· 20040 · 20043 · 40040 · 40041（撞同 owner 既有 pid）。`,
+  errors: `90002（含 base_url 白名单未命中）· 40040 · 40041（撞同 owner 既有 pid）· 10005。`,
   dataNote: 'data: 更新后 provider。',
   body: modelProviderWriteSchema,
 })
 
 register({
   method: 'delete',
-  path: '/api/v1/containers/{name}/models/providers/{pid}',
+  path: '/api/v1/models/providers/{pid}',
   tag: 'Models',
   summary: '删 provider（version bump 热生效）',
   auth: 'user',
-  errors: `90002 · 20040 · 20043 · 40040。`,
+  errors: `40040 · 10005。`,
   nullData: true,
 })
 

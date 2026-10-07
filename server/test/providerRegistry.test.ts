@@ -14,9 +14,6 @@ import type { BaseChatModel } from '@langchain/core/language_models/chat_models'
 // REST 面 DNS 校验 fake（S1 串成用例走 ModelProviderService 真链；免真 DNS）
 const publicLookup = async () => [{ address: '203.0.113.10', family: 4 }]
 
-// 容器 name/port 计数（name/port 全局唯一）
-let seq = 7000
-
 // fake 模型：记录身份 + withConfig/withFallbacks spy（默认链断言面）。
 function makeFakeFactory() {
   const calls: Array<{ model: string; lcProvider: string; baseUrl: string; apiKey: string; authHeader: boolean }> = []
@@ -462,11 +459,6 @@ describe('ProviderRegistry（#775 · 731 §2.4/§4）', () => {
 
   it('S1 集成：REST 建 provider → config_meta bump → registry 下个 run 快照见新配置', async () => {
     const u = await seedUser(ctx.prisma, 'rgs1', 'pw-rgs1-secure')
-    seq += 1
-    const cname = `pmod${seq}`
-    await ctx.prisma.container.create({
-      data: { name: cname, port: 19000 + seq, ownerId: u.id, token: 't', homeDir: '/h', image: 'img', status: 'running' },
-    })
     await seedEndpoint(ctx, 's1.example.com')
     const { factory } = makeFakeFactory()
     const reg = new ProviderRegistry(ctx.prisma, { llmApiKey: 'sk-test', modelFactory: factory })
@@ -475,10 +467,11 @@ describe('ProviderRegistry（#775 · 731 §2.4/§4）', () => {
     const before = await reg.getSnapshot(u.id)
     expect(before.providers.map((p) => p.providerId)).toEqual(['minimax']) // 惰性默认行
 
-    // REST 面建 provider（信封级，走 ModelProviderService 全链：白名单校验 + version bump）
+    // REST 面建 provider（信封级，走 ModelProviderService 全链：白名单校验 + version bump；
+    // #857：owner 级路由，ownerId 直取认证身份）
     const l = await login(ctx.request, 'rgs1', 'pw-rgs1-secure')
     const res = await ctx.request
-      .post(`/api/v1/containers/${cname}/models/providers`)
+      .post('/api/v1/models/providers')
       .set(bearer(l.access))
       .send({
         provider_id: 'my-vllm',
