@@ -160,7 +160,7 @@ describe('api client', () => {
     ;(globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
       mockResp({ code: 20040, message: '容器不存在或无权访问', data: null }),
     )
-    await expect(apiJson('/api/v1/containers/x/models/providers')).rejects.toMatchObject({
+    await expect(apiJson('/api/v1/models/providers')).rejects.toMatchObject({
       code: 20040,
       status: 200,
     } as ApiError)

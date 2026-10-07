@@ -1,15 +1,13 @@
-// seam: ModelView Model 配置页 —— issue #47 前端（spec §9.5）。
-// 覆盖：mount 拉容器列表 + 当前容器 providers 渲染、切换容器重载、新建/编辑保存调 API +
-// 热加载提示、删除二次确认调 removeProvider。EP 组件用 stub；动作经 defineExpose 走方法级 seam
+// seam: ModelView Model 配置页 —— issue #47 前端（spec §9.5）+ #857 owner 级（容器选择器
+// 下线：provider 配置面扁平挂本人，mount 直拉本人 providers）。
+// 覆盖：mount 拉 providers 渲染、重载竞态保最新响应、新建/编辑保存调 API + 热加载提示、
+// 删除二次确认调 removeProvider。EP 组件用 stub；动作经 defineExpose 走方法级 seam
 // （el-table row slot / el-form 在 stub 下渲染脆弱，照 ContainersView.test.ts 既定做法）。
 import { flushPromises } from '@vue/test-utils'
 import { mount } from '@vue/test-utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 
-vi.mock('@/api/containers', () => ({
-  listInstances: vi.fn(),
-}))
 vi.mock('@/api/models', () => ({
   listProviders: vi.fn(),
   createProvider: vi.fn(),
@@ -26,7 +24,6 @@ vi.mock('element-plus', async (importOriginal) => {
 })
 
 import ModelView from '@/views/ModelView.vue'
-import { listInstances } from '@/api/containers'
 import {
   createProvider,
   listProviders,
@@ -34,13 +31,6 @@ import {
   updateProvider,
   type ModelProviderDTO,
 } from '@/api/models'
-
-const CONTAINERS = [
-  { name: 'demo', port: 19000, status: 'running', health: 'healthy', image: 'img',
-    container_id: 'cid', created_at: '2026-07-24T00:00:00Z' },
-  { name: 'other', port: 19001, status: 'running', health: 'healthy', image: 'img',
-    container_id: 'cid2', created_at: '2026-07-24T00:00:00Z' },
-]
 
 const PROVIDER: ModelProviderDTO = {
   id: 1, provider_id: 'my-openai', api: 'openai-completions',
@@ -100,11 +90,10 @@ function deferred<T>() {
   return { promise, resolve }
 }
 
-describe('ModelView', () => {
+describe('ModelView（#857 owner 级配置面）', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
     vi.clearAllMocks()
-    ;(listInstances as ReturnType<typeof vi.fn>).mockResolvedValue(CONTAINERS)
     ;(listProviders as ReturnType<typeof vi.fn>).mockResolvedValue([])
   })
 
@@ -112,44 +101,35 @@ describe('ModelView', () => {
     vi.useRealTimers()
   })
 
-  it('loads containers and first container providers on mount', async () => {
+  it('loads own providers on mount（owner 直取认证身份，无容器维度）', async () => {
     ;(listProviders as ReturnType<typeof vi.fn>).mockResolvedValue([PROVIDER])
     const wrapper = mount(ModelView, { global: { plugins: [createPinia()], stubs } })
     await flushPromises()
-    expect(listInstances).toHaveBeenCalled()
-    expect(listProviders).toHaveBeenCalledWith('demo')
+    expect(listProviders).toHaveBeenCalledWith()
     expect(wrapper.find('[data-test="provider-table"]').text()).toContain('my-openai')
   })
 
-  it('switching container reloads providers for that container', async () => {
+  it('keeps the latest response when a reload races an in-flight load', async () => {
     const wrapper = mount(ModelView, { global: { plugins: [createPinia()], stubs } })
     await flushPromises()
-    await (wrapper.vm as unknown as { selectContainer: (n: string) => Promise<void> }).selectContainer('other')
-    await flushPromises()
-    expect(listProviders).toHaveBeenCalledWith('other')
-  })
-
-  it('clears stale rows and keeps the latest container response', async () => {
-    const wrapper = mount(ModelView, { global: { plugins: [createPinia()], stubs } })
-    await flushPromises()
-    const slowOther = deferred<ModelProviderDTO[]>()
+    const slow = deferred<ModelProviderDTO[]>()
     const latestProvider = { ...PROVIDER, provider_id: 'latest-provider' }
     ;(listProviders as ReturnType<typeof vi.fn>).mockImplementation(
-      (name: string) => name === 'other' ? slowOther.promise : Promise.resolve([latestProvider]),
+      () => slow.promise,
     )
 
-    const vm = wrapper.vm as unknown as { selectContainer: (n: string) => Promise<void> }
-    const otherRequest = vm.selectContainer('other')
+    const vm = wrapper.vm as unknown as { loadProviders: () => Promise<void> }
+    const first = vm.loadProviders()
     await flushPromises()
     expect(wrapper.find('[data-test="providers-loading"]').exists()).toBe(true)
     expect(wrapper.find('[data-test="provider-table"]').text()).not.toContain('my-openai')
-    expect(wrapper.find('[data-test="open-create"]').attributes('disabled')).toBeDefined()
 
-    await vm.selectContainer('demo')
+    ;(listProviders as ReturnType<typeof vi.fn>).mockResolvedValue([latestProvider])
+    await vm.loadProviders()
     await flushPromises()
     expect(wrapper.find('[data-test="provider-table"]').text()).toContain('latest-provider')
-    slowOther.resolve([PROVIDER])
-    await otherRequest
+    slow.resolve([PROVIDER])
+    await first
     await flushPromises()
     expect(wrapper.find('[data-test="provider-table"]').text()).toContain('latest-provider')
     expect(wrapper.find('[data-test="provider-table"]').text()).not.toContain('my-openai')
@@ -168,10 +148,10 @@ describe('ModelView', () => {
     await flushPromises()
     await (wrapper.vm as unknown as { save: (p: typeof PAYLOAD) => Promise<void> }).save(PAYLOAD)
     await flushPromises()
-    expect(createProvider).toHaveBeenCalledWith('demo', PAYLOAD)
+    expect(createProvider).toHaveBeenCalledWith(PAYLOAD)
     const { ElMessage } = await import('element-plus')
     expect(ElMessage.success).toHaveBeenCalled()
-    // spec §9.5：保存提示「热加载即时生效，无需重启」
+    // spec §9.5：保存提示「热加载即时生效」
     const toast = (ElMessage.success as ReturnType<typeof vi.fn>).mock.calls[0][0]
     expect(String(toast)).toMatch(/热加载/)
   })
@@ -187,7 +167,7 @@ describe('ModelView', () => {
     }).openEdit(PROVIDER)
     await (wrapper.vm as unknown as { save: (p: typeof PAYLOAD) => Promise<void> }).save(PAYLOAD)
     await flushPromises()
-    expect(updateProvider).toHaveBeenCalledWith('demo', 'my-openai', PAYLOAD)
+    expect(updateProvider).toHaveBeenCalledWith('my-openai', PAYLOAD)
   })
 
   it('removes provider after confirmation', async () => {
@@ -198,7 +178,7 @@ describe('ModelView', () => {
     await flushPromises()
     await (wrapper.vm as unknown as { confirmRemove: (pid: string) => Promise<void> }).confirmRemove('my-openai')
     await flushPromises()
-    expect(removeProvider).toHaveBeenCalledWith('demo', 'my-openai')
+    expect(removeProvider).toHaveBeenCalledWith('my-openai')
   })
 
   it('does not remove when user cancels confirmation', async () => {

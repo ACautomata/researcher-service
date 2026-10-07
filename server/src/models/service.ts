@@ -1,10 +1,11 @@
-// ModelProviderService —— 每用户 model provider CRUD + 热生效版本号（#336；#771 归属上移；#775 事务简化）。
+// ModelProviderService —— 每用户 model provider CRUD + 热生效版本号（#336；#771 归属上移；#775 事务简化；
+// #857 服务签名 ownerId 标量化：入参即操作主体，与容器行完全脱钩）。
 //
 // 事务语义（#775，731 §4/§6）：DB mutation + config_meta version bump 同一事务；写盘
 // （putArchive 重渲染 openclaw.json）/ catch reconcile / per-container 写锁整段退役——
 // LLM 调用的消费方已从「容器内 OpenClaw 进程」换为「控制面 runner」（#731 §1.3），配置变更经
-// version 信号热生效（下一个 run 重建快照），不再有 fs 资源参与事务。物理删除 configWriter/
-// configBuilder 两文件归 T0 清退（#801）。unique(ownerId, providerId) 并发冲突 → P2002 → 40041；
+// version 信号热生效（下一个 run 重建快照），不再有 fs 资源参与事务。configWriter/
+// configBuilder 两文件已随 T0 清退（#801）。unique(ownerId, providerId) 并发冲突 → P2002 → 40041；
 // 目标行缺失 → P2025 → 40040。
 //
 // 白名单第一层校验（#775，731 §5.1）：create/update 在事务前调 checkOriginForCrud——
@@ -13,13 +14,14 @@
 // 未命中 → 90002 字段级 base_url（不泄露白名单内容；40042 仅运行时第二层）。
 //
 // #771（731 §3.2）：归属 containerId → ownerId 上移（「用户」是配置主体，多容器共享同一 LLM
-// 配置面）——行归属取 inst.ownerId，unique 键随之 (ownerId, providerId)。
+// 配置面）——行归属取 ownerId，unique 键随之 (ownerId, providerId)。
 //
-// 归属前置（容器级 20040 防探测）由路由层 getInstanceForUser 完成，本服务只操作「已通过归属
-// 校验的容器行」。provider 级「不存在 vs 越权」同码 40040（#336 验收）：非 owner 到不了 provider
-// 级（容器门已挡），对外两者逐字节一致、区分仅进服务端日志。
+// #857（退役②）：归属前置不再经容器行解析——ownerId 由路由层从认证身份直派生传入，本服务
+// 零容器行查询（事务内状态谓词 assertWritable 随 creating/removing 拒写契约一并移除）。
+// provider 级「不存在 vs 越权」同码 40040（#336 验收）：非 owner 到不了目标行（ownerId 复合
+// 定位天然隔离），对外两者逐字节一致、区分仅进服务端日志。
 
-import type { Container, ModelProvider, PrismaClient } from '../generated/prisma/client'
+import type { ModelProvider, PrismaClient } from '../generated/prisma/client'
 import { fail } from '../envelope'
 import { CODE } from '../codes'
 import { config } from '../config'
@@ -60,10 +62,6 @@ export interface ModelProviderServiceOptions {
   lookup?: HostLookup
   allowPrivate?: boolean
 }
-
-// 事务内只用到 modelProvider / configMeta / container 的投影（对齐 auth.rotateInTx 的
-// Pick<PrismaClient,…> 接缝写法）；container 供 assertWritable 事务内重查状态谓词（#366 codex P2）。
-type ProviderTx = Pick<PrismaClient, 'modelProvider' | 'configMeta' | 'container'>
 
 // 防御解码 modelsJson（对齐 containers.decodeScopes）：坏 JSON 让 list 请求 500；合法 JSON 但
 // 非数组也违反 models[] 响应契约 → 回退 []。
@@ -108,27 +106,26 @@ export class ModelProviderService {
     this.allowPrivate = opts.allowPrivate ?? config.runner.allowPrivateProviderEndpoints
   }
 
-  async list(inst: Container): Promise<ModelProviderView[]> {
+  async list(ownerId: string): Promise<ModelProviderView[]> {
     const rows = await this.prisma.modelProvider.findMany({
-      where: { ownerId: inst.ownerId }, // #771 归属上移：行挂用户，同 owner 多容器共享配置面
+      where: { ownerId }, // #771 归属上移：行挂用户；#857：ownerId 即认证身份直派生
       orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
     })
     return rows.map(toView)
   }
 
-  async get(inst: Container, pid: string): Promise<ModelProviderView> {
-    return toView(await this.requireProvider(inst.ownerId, pid))
+  async get(ownerId: string, pid: string): Promise<ModelProviderView> {
+    return toView(await this.requireProvider(ownerId, pid))
   }
 
   // create/update：白名单第一层校验（事务前，不经网络占用事务）→ 事务内 mutation + version bump。
-  async create(inst: Container, input: ModelProviderWriteInput): Promise<ModelProviderView> {
+  async create(ownerId: string, input: ModelProviderWriteInput): Promise<ModelProviderView> {
     await this.assertOriginAllowed(input.baseUrl)
     try {
       const row = await this.prisma.$transaction(async (tx) => {
-        await this.assertWritable(tx, inst.id)
         const created = await tx.modelProvider.create({
           data: {
-            ownerId: inst.ownerId, // #771 归属上移（731 §3.2）
+            ownerId, // #771 归属上移（731 §3.2）；#857：直取认证身份
             providerId: input.providerId,
             lcProvider: WIRE_TO_LC_PROVIDER[input.api],
             baseUrl: input.baseUrl,
@@ -146,15 +143,14 @@ export class ModelProviderService {
     }
   }
 
-  async update(inst: Container, pid: string, input: ModelProviderWriteInput): Promise<ModelProviderView> {
+  async update(ownerId: string, pid: string, input: ModelProviderWriteInput): Promise<ModelProviderView> {
     await this.assertOriginAllowed(input.baseUrl)
     try {
       const row = await this.prisma.$transaction(async (tx) => {
-        await this.assertWritable(tx, inst.id)
         // 复合唯一 where 定位目标行（路径 pid）：不存在 → P2025 → 40040。
         // data.providerId 可为新 pid（PUT 改 provider_id），撞同 owner 既有 pid → P2002 → 40041。
         const updated = await tx.modelProvider.update({
-          where: { ownerId_providerId: { ownerId: inst.ownerId, providerId: pid } },
+          where: { ownerId_providerId: { ownerId, providerId: pid } },
           data: {
             providerId: input.providerId,
             lcProvider: WIRE_TO_LC_PROVIDER[input.api],
@@ -169,21 +165,20 @@ export class ModelProviderService {
       })
       return toView(row)
     } catch (e) {
-      this.rethrowKnown(e, { ownerId: inst.ownerId, pid })
+      this.rethrowKnown(e, { ownerId, pid })
     }
   }
 
-  async remove(inst: Container, pid: string): Promise<void> {
+  async remove(ownerId: string, pid: string): Promise<void> {
     try {
       await this.prisma.$transaction(async (tx) => {
-        await this.assertWritable(tx, inst.id)
         await tx.modelProvider.delete({
-          where: { ownerId_providerId: { ownerId: inst.ownerId, providerId: pid } },
+          where: { ownerId_providerId: { ownerId, providerId: pid } },
         })
         await bumpConfigVersion(tx)
       })
     } catch (e) {
-      this.rethrowKnown(e, { ownerId: inst.ownerId, pid })
+      this.rethrowKnown(e, { ownerId, pid })
     }
   }
 
@@ -214,17 +209,6 @@ export class ModelProviderService {
       throw fail(CODE.PROVIDER_NOT_FOUND)
     }
     return row
-  }
-
-  // #366 codex P2「事务内状态谓词」：路由层 resolveWrite 的 creating/removing 检查基于请求前快照，
-  // 与并发 DELETE 无共享串行化——快照通过后状态可能已变。事务内重查行状态，把「removing/creating
-  // 拒写」与 DB mutation 收进同一事务，消除 check-then-act TOCTOU；行不存在（并发删完）与
-  // creating/removing 同拒 20043（写盘链退役后此为纯契约保留语义，#775）。
-  private async assertWritable(tx: ProviderTx, containerId: string): Promise<void> {
-    const inst = await tx.container.findUnique({ where: { id: containerId } })
-    if (!inst || inst.status === 'creating' || inst.status === 'removing') {
-      throw fail(CODE.CONTAINER_BUSY, '容器正在创建/删除中，暂不能配置模型，请稍候')
-    }
   }
 
   // 已知领域错误转译；其余按原样上抛。

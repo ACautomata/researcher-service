@@ -1,10 +1,10 @@
 <script setup lang="ts">
-// Model 配置页（spec §9.5 / issue #47）：当前容器 selector + provider 列表 + 新增/编辑/删除表单。
+// Model 配置页（spec §9.5 / issue #47；#857 owner 级）：本人 provider 列表 + 新增/编辑/删除表单。
+// provider 配置面扁平挂认证用户——容器选择器随「models 域与容器行脱钩」一并下线。
 // 写后经 config_meta version bump 热生效（无需重启，#775；openclaw.json 写盘链已随 T0 #801 退役）。
 // apiKey 仅 env id（marker），绝不收集/回显明文。api 取值 openai-completions / anthropic-messages。
 import { onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { listInstances, type InstanceDTO } from '@/api/containers'
 import { ApiError } from '@/api/client'
 import {
   createProvider,
@@ -17,10 +17,7 @@ import {
   type ModelProviderWriteDTO,
 } from '@/api/models'
 
-const containers = ref<InstanceDTO[]>([])
-const current = ref<string>('')
 const providers = ref<ModelProviderDTO[]>([])
-const loading = ref(false)
 const providersLoading = ref(false)
 const errorMsg = ref('')
 let providerRequestSeq = 0
@@ -36,66 +33,33 @@ const apiKeyEnvId = ref('')
 const authHeader = ref(true)
 const models = ref<ModelEntryDTO[]>([])
 
-async function loadContainers(): Promise<void> {
-  loading.value = true
-  errorMsg.value = ''
-  try {
-    containers.value = await listInstances()
-    if (!current.value && containers.value.length) {
-      current.value = containers.value[0].name
-    }
-    if (current.value) {
-      await loadProviders()
-    }
-  } catch (e) {
-    errorMsg.value = (e as Error).message
-  } finally {
-    loading.value = false
-  }
-}
-
-async function loadProviders(container = current.value): Promise<void> {
+async function loadProviders(): Promise<void> {
   const requestSeq = ++providerRequestSeq
-  if (!container) {
-    providers.value = []
-    providersLoading.value = false
-    return
-  }
   providersLoading.value = true
   providers.value = []
   errorMsg.value = ''
   try {
-    const nextProviders = await listProviders(container)
-    if (requestSeq === providerRequestSeq && current.value === container) {
+    const nextProviders = await listProviders()
+    if (requestSeq === providerRequestSeq) {
       providers.value = nextProviders
     }
   } catch (e) {
-    if (requestSeq === providerRequestSeq && current.value === container) {
+    if (requestSeq === providerRequestSeq) {
       errorMsg.value = (e as Error).message
       providers.value = []
     }
   } finally {
-    if (requestSeq === providerRequestSeq && current.value === container) {
+    if (requestSeq === providerRequestSeq) {
       providersLoading.value = false
     }
   }
-}
-
-async function selectContainer(name: string): Promise<void> {
-  if (!name) return
-  current.value = name
-  // 旧容器的列表和编辑上下文不能在新容器下继续操作。
-  providers.value = []
-  dialogVisible.value = false
-  editingPid.value = null
-  await loadProviders(name)
 }
 
 function resetForm(): void {
   providerId.value = ''
   api.value = 'openai-completions'
   baseUrl.value = ''
-  apiKeyEnvId.value = 'LLM_API_KEY'   // spec §5.2：面板共享单一 LLM_API_KEY（容器仅注入它）
+  apiKeyEnvId.value = 'LLM_API_KEY'   // spec §5.2：面板共享单一 LLM_API_KEY
   authHeader.value = true
   models.value = [{ id: '', name: '' }]
   editingPid.value = null
@@ -139,9 +103,9 @@ async function save(payload: ModelProviderWriteDTO): Promise<void> {
   saving.value = true
   try {
     if (editingPid.value) {
-      await updateProvider(current.value, editingPid.value, payload)
+      await updateProvider(editingPid.value, payload)
     } else {
-      await createProvider(current.value, payload)
+      await createProvider(payload)
     }
     dialogVisible.value = false
     await loadProviders()
@@ -176,7 +140,7 @@ async function confirmRemove(pid: string): Promise<void> {
     return // 用户取消
   }
   try {
-    await removeProvider(current.value, pid)
+    await removeProvider(pid)
     await loadProviders()
     ElMessage.success('已删除，热加载即时生效')
   } catch (e) {
@@ -186,11 +150,11 @@ async function confirmRemove(pid: string): Promise<void> {
 }
 
 onMounted(() => {
-  void loadContainers()
+  void loadProviders()
 })
 
 // 暴露动作供测试（el-table row slot / el-form 在 stub 下不便点击，照 ContainersView 既定做法）
-defineExpose({ selectContainer, openCreate, openEdit, save, confirmRemove })
+defineExpose({ openCreate, openEdit, save, confirmRemove, loadProviders })
 </script>
 
 <template>
@@ -198,13 +162,6 @@ defineExpose({ selectContainer, openCreate, openEdit, save, confirmRemove })
     <div class="header">
       <h1>Model 配置</h1>
       <div class="actions">
-        <select
-          data-test="container-switch"
-          :value="current"
-          @change="selectContainer(($event.target as HTMLSelectElement).value)"
-        >
-          <option v-for="c in containers" :key="c.name" :value="c.name">{{ c.name }}</option>
-        </select>
         <el-button
           type="primary"
           data-test="open-create"
@@ -214,7 +171,7 @@ defineExpose({ selectContainer, openCreate, openEdit, save, confirmRemove })
       </div>
     </div>
     <p v-if="errorMsg" class="error">{{ errorMsg }}</p>
-    <p class="hint">改后自动热加载，无需重启容器。</p>
+    <p class="hint">改后自动热加载，无需重启。</p>
     <p v-if="providersLoading" class="hint" data-test="providers-loading">正在加载 provider…</p>
 
     <el-table v-loading="providersLoading" :data="providers" data-test="provider-table">
@@ -261,7 +218,7 @@ defineExpose({ selectContainer, openCreate, openEdit, save, confirmRemove })
           <el-input v-model="baseUrl" placeholder="OpenAI 系需含 /v1" data-test="field-base-url" />
         </el-form-item>
         <el-form-item label="apiKey env id">
-          <el-input v-model="apiKeyEnvId" placeholder="LLM_API_KEY（面板共享，容器仅注入它）" data-test="field-env-id" />
+          <el-input v-model="apiKeyEnvId" placeholder="LLM_API_KEY（面板共享）" data-test="field-env-id" />
         </el-form-item>
         <el-form-item label="Authorization 头">
           <el-switch v-model="authHeader" data-test="field-auth-header" />
