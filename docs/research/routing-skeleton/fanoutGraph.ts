@@ -8,8 +8,8 @@
 //   - new Send(node, args) 的 args 按 key 合入该任务的状态拷贝 → 并行实例互不踩踏；
 //     归并靠 annotation reducer（与 routingGraph.ts 同一 branchResults/hypotheses 追加语义）。
 
-import { Annotation, END, Send, START, StateGraph } from '../../server/src/plugins/autofigureDeps'
-import type { BaseCheckpointSaver } from '../../server/src/plugins/autofigureDeps'
+import { Annotation, END, Send, START, StateGraph } from '../../../server/src/plugins/autofigureDeps'
+import type { BaseCheckpointSaver } from '../../../server/src/plugins/autofigureDeps'
 
 export const HYPOTHESIS_ANGLES = ['empirical', 'theoretical', 'adversarial'] as const
 
