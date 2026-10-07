@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// PanelTriState —— 面板三态包装哑组件（issue #668 / spec #667，CONTEXT.md「面板三态」）。
+// PanelTriState —— 面板三态包装哑组件（issue #668 / spec #667，GLOSSARY.md「面板三态」）。
 // 三种呈现态：inline（常驻可拖宽）/ collapsed（边缘窄条）/ popped（贴边全高非模态浮层）。
 // props-in/emits-out：状态与宽度钳制在宿主（usePanelTriState），本组件只渲染形态并冒泡
 // 事件——拖拽经纯函数 draggedWidth 换算原始几何值 emit，宿主钳制后回灌 props。

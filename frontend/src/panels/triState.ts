@@ -1,4 +1,4 @@
-// 面板三态（panel tri-state，CONTEXT.md 词汇）纯逻辑层——issue #668 / spec #667。
+// 面板三态（panel tri-state，GLOSSARY.md 词汇）纯逻辑层——issue #668 / spec #667。
 // 三种呈现态：inline（常驻可拖宽）/ collapsed（边缘窄条）/ popped（贴边全高非模态浮层）；
 // 决策逻辑全部为纯函数，DOM 度量（指针坐标、视口宽）由宿主注入——贴滚动判定
 // shouldFollowBottom 先例（几何进参数，不摸 window/document），可脱离 DOM 直测。
