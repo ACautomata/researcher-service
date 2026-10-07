@@ -120,4 +120,18 @@ describe('AuditLogsView（#800 admin 审计检索页）', () => {
     await flushPromises()
     expect(ElMessage.error).toHaveBeenCalled()
   })
+
+  it('同 tab 快速连续查询：慢的旧响应不覆盖新结果', async () => {
+    let resolveStale!: (v: typeof PAGED) => void
+    const fresh = { ...PAGED, items: [{ id: 'fresh' }] }
+    ;(listApprovalLogs as ReturnType<typeof vi.fn>)
+      .mockImplementationOnce(() => new Promise((r) => { resolveStale = r }))
+      .mockResolvedValueOnce(fresh)
+    const wrapper = mountView() // onMounted 的查询 #1 挂起（stale）
+    const vm = wrapper.vm as unknown as { search: () => Promise<void>; approval: { items: unknown[] } }
+    await vm.search() // 查询 #2 → fresh 落地
+    resolveStale(PAGED) // #1 晚到 resolve → 应被序号守卫丢弃
+    await flushPromises()
+    expect(vm.approval.items).toEqual([{ id: 'fresh' }])
+  })
 })

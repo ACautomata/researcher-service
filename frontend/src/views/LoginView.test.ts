@@ -69,7 +69,6 @@ describe('LoginView 角色落点（#800）', () => {
     const wrapper = mount(LoginView, {
       global: {
         stubs,
-        mocks: { $router: { push } },
         // useRouter() 在组件 setup 取注入——经 mock router 注入
         provide: { router: { push } },
       },

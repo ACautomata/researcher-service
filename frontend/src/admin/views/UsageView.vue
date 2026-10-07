@@ -16,17 +16,24 @@ const totals = computed(() => ({
   outputTokens: rows.value.reduce((s, r) => s + r.output_tokens, 0),
 }))
 
+// 快速连续查询的竞态守卫：仅最新一次请求可写回 state / 复位 loading / 弹错误——
+// 慢的旧响应晚到直接丢弃。
+let querySeq = 0
 async function search(): Promise<void> {
+  const seq = ++querySeq
   loading.value = true
   try {
-    rows.value = await aggregateUsage({
+    const next = await aggregateUsage({
       ...(filters.userId.trim() ? { userId: filters.userId.trim() } : {}),
       ...(filters.range ? { from: filters.range[0], to: filters.range[1] } : {}),
     })
+    if (seq !== querySeq) return
+    rows.value = next
   } catch (e) {
+    if (seq !== querySeq) return
     ElMessage.error((e as Error).message)
   } finally {
-    loading.value = false
+    if (seq === querySeq) loading.value = false
   }
 }
 
@@ -59,6 +66,7 @@ defineExpose({ rows, totals, filters, search })
       </el-form-item>
     </el-form>
 
+    <!-- 合计行按列下标对齐（V1 列固定）；cache 两列不进合计（合计只汇总 calls/input/output） -->
     <el-table :data="rows" v-loading="loading" data-test="usage-table" show-summary :summary-method="() => [
       '合计', '', '', '',
       String(totals.calls),

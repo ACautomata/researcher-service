@@ -34,7 +34,7 @@ describe('usage api（#800）', () => {
     vi.stubGlobal('fetch', vi.fn())
   })
 
-  it('aggregateUsage GETs /aggregate; 过滤与时间窗序列化，缺省省略', async () => {
+  it('aggregateUsage GET /aggregate；过滤与时间窗序列化，缺省省略', async () => {
     ;(globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
       mockResp({ code: 0, message: 'ok', data: { items: [ROW] } }),
     )

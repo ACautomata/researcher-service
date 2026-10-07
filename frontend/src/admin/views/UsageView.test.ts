@@ -115,4 +115,18 @@ describe('UsageView（#800 admin Usage 核算页）', () => {
     await flushPromises()
     expect(ElMessage.error).toHaveBeenCalled()
   })
+
+  it('快速连续查询：慢的旧响应不覆盖新结果', async () => {
+    let resolveStale!: (v: typeof ROWS) => void
+    const fresh = [ROWS[0]]
+    ;(aggregateUsage as ReturnType<typeof vi.fn>)
+      .mockImplementationOnce(() => new Promise((r) => { resolveStale = r }))
+      .mockResolvedValueOnce(fresh)
+    const wrapper = mountView() // onMounted 的查询 #1 挂起（stale）
+    const vm = wrapper.vm as unknown as { search: () => Promise<void>; rows: unknown[] }
+    await vm.search() // 查询 #2 → fresh 落地
+    resolveStale(ROWS) // #1 晚到 resolve → 应被序号守卫丢弃
+    await flushPromises()
+    expect(vm.rows).toEqual([ROWS[0]])
+  })
 })

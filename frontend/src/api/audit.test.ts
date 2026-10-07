@@ -21,7 +21,7 @@ describe('audit api（#800）', () => {
     vi.stubGlobal('fetch', vi.fn())
   })
 
-  it('listApprovalLogs GETs with trailing slash; filters serialized, empty omitted', async () => {
+  it('listApprovalLogs GET 集合路径；过滤序列化，空值省略', async () => {
     ;(globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
       mockResp({ code: 0, message: 'ok', data: { total: 0, page: 1, pageSize: 50, items: [] } }),
     )
@@ -53,7 +53,7 @@ describe('audit api（#800）', () => {
     expect(path).toBe('/api/v1/approval-logs/?page=1&pageSize=50')
   })
 
-  it('listFileOverwriteLogs GETs with trailing slash; sessionId/path/from/to 透传', async () => {
+  it('listFileOverwriteLogs GET 集合路径；sessionId/path/from/to 透传', async () => {
     ;(globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
       mockResp({ code: 0, message: 'ok', data: { total: 0, page: 1, pageSize: 50, items: [] } }),
     )

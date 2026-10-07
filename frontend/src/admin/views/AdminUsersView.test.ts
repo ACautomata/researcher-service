@@ -131,15 +131,12 @@ describe('AdminUsersView', () => {
     vi.restoreAllMocks()
   })
 
-  it('渲染用户列表（用户名/配额 used-limit/待改密标记）', async () => {
+  it('渲染用户列表（用户名/配额 used-limit）', async () => {
     const w = await mountView()
     expect(listUsers).toHaveBeenCalled()
     const text = w.text()
     expect(text).toContain('alice')
     expect(text).toContain('bob')
-    // 待改密标记走 el-table row slot（stub 下不渲染）——直接断言数据驱动 + 暴露状态：
-    // 列表数据已携带 mustChangePassword（UI 渲染由模板 el-tag 承担，stub 渲染脆弱贴 ContainersView）
-    expect(USERS[1].mustChangePassword).toBe(true)
   })
 
   it('新建用户：填用户名/密码/配额 → createUser + 刷新列表', async () => {

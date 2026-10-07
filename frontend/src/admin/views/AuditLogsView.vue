@@ -33,8 +33,12 @@ const filters = reactive<{
 const rangeDates = (): { from?: Date; to?: Date } =>
   filters.range ? { from: filters.range[0], to: filters.range[1] } : {}
 
-// 当前 tab 的一次查询（search 与 goPage 共此单一实现——差别仅在 page 值）
+// 当前 tab 的一次查询（search 与 goPage 共此单一实现——差别仅在 page 值）。
+// 快速连续查询的竞态守卫：仅最新一次请求可写回 state / 复位 loading / 弹错误——慢的旧响应
+// 晚到直接丢弃（切 tab 分支在 await 前定型，旧响应本就不跨 tab 污染）。
+let querySeq = 0
 async function queryOnce(targetPage: number): Promise<void> {
+  const seq = ++querySeq
   loading.value = true
   try {
     if (activeTab.value === 'approval') {
@@ -47,6 +51,7 @@ async function queryOnce(targetPage: number): Promise<void> {
         page: targetPage,
         pageSize: pageSize.value,
       })
+      if (seq !== querySeq) return
       approval.value = { total: d.total, items: d.items }
     } else {
       const d = await listFileOverwriteLogs({
@@ -56,12 +61,14 @@ async function queryOnce(targetPage: number): Promise<void> {
         page: targetPage,
         pageSize: pageSize.value,
       })
+      if (seq !== querySeq) return
       overwrite.value = { total: d.total, items: d.items }
     }
   } catch (e) {
+    if (seq !== querySeq) return
     ElMessage.error((e as Error).message)
   } finally {
-    loading.value = false
+    if (seq === querySeq) loading.value = false
   }
 }
 

@@ -155,7 +155,7 @@ maxConcurrentRuns 或全局 RUNNER_MAX_CONCURRENT_RUNS]）· `5xxxx` chat/pairin
   /`router.ts`（base `/admin/` 独立路由表 + `decideAdminGuard` 纯函数守卫：未认证确认失效 →
   跨应用跳 /login；瞬态放行交 401 刷新链；非 admin → 回 `/`）/`AdminApp.vue`（运营 nav +
   用户面板回链）/`views/`（账号管理/端点白名单/审计检索/Usage 核算/内容消息/API 文档——
-  前三个既有 admin 页 AdminUsersView/TraceLogsView/ApiDocsView 随迁本目录）。
+  账号管理/内容消息/API 文档三页系既有页随迁本目录，端点白名单/审计检索/Usage 核算本 issue 新写）。
   产物级隔离：vite 双入口（index.html + admin.html）按 /admin/ 分流（nginx try_files →
   admin.html；dev/preview 由 vite 插件 rewrite），`scripts/verify-admin-split.mjs` 挂入 build
   验证用户 bundle 不含 admin 代码；登录角色落点 admin → `/admin/`（LoginView）。

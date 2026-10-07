@@ -26,14 +26,14 @@ describe('providerEndpoints api（#800）', () => {
     vi.stubGlobal('fetch', vi.fn())
   })
 
-  it('listProviderEndpoints GETs collection with trailing slash', async () => {
+  it('listProviderEndpoints GET 集合路径（带尾斜杠）', async () => {
     ;(globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(mockResp([]))
     await listProviderEndpoints()
     const [path] = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0]
     expect(path).toBe('/api/v1/provider-endpoints/')
   })
 
-  it('createProviderEndpoint POSTs {scheme, host, port?, note?}', async () => {
+  it('createProviderEndpoint POST {scheme, host, port?, note?}', async () => {
     ;(globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
       mockResp({ id: 'e1', scheme: 'https', host: 'api.x.com', port: null, note: '', created_by: 'u1', created_at: '2026-10-07T00:00:00Z' }),
     )
@@ -44,7 +44,7 @@ describe('providerEndpoints api（#800）', () => {
     expect(JSON.parse(init.body)).toEqual({ scheme: 'https', host: 'api.x.com', note: '主站' })
   })
 
-  it('removeProviderEndpoint DELETEs detail URL', async () => {
+  it('removeProviderEndpoint DELETE 详情 URL', async () => {
     // 后端 ep.delete 实返 200 + ok(res, null) 信封（非 204）——mock 对齐真实 wire
     ;(globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
       mockResp({ code: 0, message: 'ok', data: null }),
