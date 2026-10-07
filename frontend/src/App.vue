@@ -32,7 +32,6 @@ async function handleLogout(): Promise<void> {
       <span class="nav-brand" data-test="nav-brand">{{ PRODUCT_NAME }}</span>
       <router-link to="/">容器管理</router-link>
       <router-link to="/chat">对话</router-link>
-      <router-link to="/sessions">协作会话</router-link>
       <router-link to="/wiki">Wiki</router-link>
       <router-link to="/categories">Categories</router-link>
       <router-link to="/models">Model 配置</router-link>

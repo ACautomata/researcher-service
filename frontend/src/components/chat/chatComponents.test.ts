@@ -577,6 +577,18 @@ describe('ApprovalCard', () => {
     expect(badge.text()).toContain('队友协作')
   })
 
+  // #796：徽标具名化（story 26 当事 teammate 卡片态标识）——有映射显名，无映射回退通用
+  it('teammate 审批卡具名徽标：teammateName 映射 → 「队友协作 · 名字」；缺省回退通用徽标', () => {
+    const named = mount(ApprovalCard, {
+      props: { approval: { ...card, teammateId: 'peer-1' }, disconnected: false, teammateName: '文献员' },
+    })
+    expect(named.get('[data-test="approval-source"]').text()).toContain('队友协作 · 文献员')
+    const unnamed = mount(ApprovalCard, {
+      props: { approval: { ...card, teammateId: 'peer-1' }, disconnected: false },
+    })
+    expect(unnamed.get('[data-test="approval-source"]').text()).not.toContain('·')
+  })
+
   it('主会话审批（teammateId null）→ 无徽标', () => {
     const w = mount(ApprovalCard, { props: { approval: card, disconnected: false } })
     expect(w.find('[data-test="approval-source"]').exists()).toBe(false)

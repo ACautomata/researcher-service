@@ -7,10 +7,10 @@
 // 归 useChatSession 同宿主（#340 关键约束延续）。
 import { defineStore } from 'pinia'
 import type { SessionApproval, SessionSummary } from '@/api/sessions'
-import type { Msg } from '@/chat/projection'
+import type { Msg, TeamFold } from '@/chat/projection'
 
 // 视图模型单一来源在投影归约器（纯函数可测）——组件经由本 store 再导出保持 import 面不变。
-export type { Msg, ToolRow } from '@/chat/projection'
+export type { Msg, TeamFold, TeamMail, ToolRow } from '@/chat/projection'
 export { hasTrace, newMsg, shouldFoldTrace } from '@/chat/projection'
 
 // T06 审批卡（#783 三层漏斗前端面）：独立列表渲染，不混入 messages——避免破坏流式锚定
@@ -55,6 +55,12 @@ export const useChatStore = defineStore('chat', {
     sessions: [] as SessionSummary[],
     selectedSession: '' as string,
     messages: [] as Msg[],
+    // teammate 具名折叠区（#796 / #730 §4.3）：主时间线只挂 leader 发言与产物，teammate 轨迹
+    // 收进具名分区（视图模型 = 投影归约器 TeamFold，实时 applyTeamEvent / 回放 teamFoldsFromProjection）。
+    teams: [] as TeamFold[],
+    // 折叠区开合 UI 态与数据分离（整替不重置——重拉频繁，挂在 TeamFold 上会被 fromProjection
+    // 重建复位）。undefined = 收起（缺省）。
+    teamExpanded: {} as Record<string, boolean>,
     approvals: [] as ApprovalItem[],
     // ADR 0009：审批卡全局到达序号计数器（addApproval 时赋 ++seqCounter）——严格单调递增。
     seqCounter: 0 as number,
@@ -67,6 +73,13 @@ export const useChatStore = defineStore('chat', {
     // 审批卡列表（编排层只灌当前会话的卡：SSE 按 sessionId 分派 + 投影重拉按选中会话整替）。
     visibleApprovals(state): ApprovalItem[] {
       return state.approvals
+    },
+    // leader 审批挂起判定（#796 story 26）：server 50003 门禁 per-thread——teammate 审批只冻结
+    // 当事 teammate，leader 线程不被挡。发送门控/断线补偿/状态行三处共用此单一实现。
+    leaderApprovalPending(state): boolean {
+      return state.approvals.some(
+        (a) => a.teammateId === null && (a.status === 'pending' || a.status === 'resolving'),
+      )
     },
   },
   actions: {
@@ -98,6 +111,13 @@ export const useChatStore = defineStore('chat', {
     // ---- 消息投影（纯 mutation，供 useChatSession 经归约器调用）----
     setMessages(list: Msg[]): void {
       this.messages = list
+    },
+    // teammate 折叠区整替（投影重拉权威面；开合态独立于数据不受扰）。
+    setTeams(list: TeamFold[]): void {
+      this.teams = list
+    },
+    toggleTeamExpanded(id: string): void {
+      this.teamExpanded = { ...this.teamExpanded, [id]: !this.teamExpanded[id] }
     },
     pushMessage(m: Msg): void {
       this.messages.push(m)
@@ -164,6 +184,8 @@ export const useChatStore = defineStore('chat', {
     // ---- 切会话清态（连接簇由 useEventStream/useChatSession 负责）----
     resetForSession(): void {
       this.messages = []
+      this.teams = []
+      this.teamExpanded = {}
       this.approvals = []
       this.input = ''
       this.slashDismissed = false

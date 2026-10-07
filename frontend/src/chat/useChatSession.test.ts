@@ -1,6 +1,6 @@
 // seam: useChatSession 会话编排 composable（#730 §4.1 拆三件之三 / #793 验收「会话列表/中断/
 // 错误分类/标题 UI 接通真实 REST+SSE」）。api/sessions 全 mock（信封解包由 client 单测覆盖），
-// EventSource stub 全局（贴 TeamSessionsView.test.ts 先例），restOutbox 走真 sessionStorage
+// EventSource stub 全局（贴 ChatView.test.ts 同款工具），restOutbox 走真 sessionStorage
 // （vitest.setup MemoryStorage）——重点验证编排逻辑：幂等发送/门控/断线补偿/事件分派/审批/系统命令。
 import { flushPromises } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
@@ -215,6 +215,23 @@ describe('发送（幂等 + 乐观回显 + 门控）', () => {
     expect(actionsErr).toHaveBeenCalledWith('已加入待发，重连后自动发送')
     expect(JSON.parse(sessionStorage.getItem('chat.restOutbox.v1')!).sessions['sess-1']).toHaveLength(1)
   })
+
+  // #796 story 26「leader 面不受扰」：server 50003 门禁是 per-thread（leader 线程不被 teammate
+  // 审批挂起挡住）——前端预检只认 leader 卡（teammateId null），teammate 审批挂起时照发。
+  it('teammate 审批挂起不挡 leader 发送；leader 审批挂起才禁发', async () => {
+    const conn = await mounted()
+    const chat = conn.chat
+    chat.addApproval({ id: 'eT', source: 'cautious-mode', toolName: 'bash', toolCallSummary: 'x', teammateId: 'tm1' })
+    chat.setInput('新问题')
+    expect(conn.send()).toBe(true)
+    await flushPromises()
+    expect(api.sendSessionMessage).toHaveBeenCalledWith('sess-1', '新问题', expect.any(String), undefined)
+
+    chat.addApproval({ id: 'eL', source: 'cautious-mode', toolName: 'bash', toolCallSummary: 'x', teammateId: null })
+    chat.setInput('再来一问')
+    expect(conn.send()).toBe(false)
+    expect(api.sendSessionMessage).toHaveBeenCalledTimes(1)
+  })
 })
 
 describe('断线补偿（story 12 outbox + 投影重拉）', () => {
@@ -385,6 +402,114 @@ describe('审批（#783 升级通道前端面）', () => {
     vi.mocked(api.resolveSessionApproval).mockRejectedValueOnce(new TypeError('网络'))
     await conn.resolveApproval(chat.approvals[0], 'deny')
     expect(chat.approvals[0].status).toBe('pending') // 可重试
+  })
+})
+
+// ---- teammate 具名折叠区编排（#796 / #730 §4.3）：teammateId 分区路由 + 主时间线隔离 ----
+describe('teammate 折叠区编排（#796）', () => {
+  const tm = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
+    id: 'tm1', name: '文献员', task: '整理文献', status: 'completed',
+    messages: [{ id: 'pm1', turn: 1, role: 'assistant', content: '队友产出', anchorCheckpointId: null, createdAt: '2026-10-06T01:00:00Z' }],
+    mailbox: [{ id: 'mail1', senderTeammateId: 'tm1', recipientTeammateId: null, kind: 'message', content: '已完成', createdAt: '2026-10-06T01:01:00Z' }],
+    ...over,
+  })
+
+  it('SSE 轨迹事件带 teammateId → 分区进 fold（主时间线不受污染）', async () => {
+    // teammate.started 触发投影重拉：REST 是权威面（新 teammate 行已落库，inFlight 从 checkpoint
+    // 重建）——mock 返回 running 行模拟真实整替；占位 fold 语义（重拉竞态窗口内不丢帧）由
+    // projection.test.ts 的 applyTeamEvent 单测覆盖。
+    vi.mocked(api.getSessionProjection).mockResolvedValue(projectionOf({
+      teammates: [tm({ status: 'running', inFlight: { runId: 'rT', state: 'running', turn: { content: '检索中' } } })],
+    }))
+    const conn = await mounted()
+    const src = FakeEventSource.last()!
+    const base = conn.chat.messages.length
+    src.emit('teammate.started', { type: 'teammate.started', sessionId: 'sess-1', runId: 'rT', teammateId: 'tm1', payload: { teammateId: 'tm1', name: '文献员' } })
+    src.emit('run.started', { type: 'run.started', sessionId: 'sess-1', runId: 'rT', teammateId: 'tm1', payload: {} })
+    src.emit('text.delta', { type: 'text.delta', sessionId: 'sess-1', runId: 'rT', teammateId: 'tm1', payload: { delta: '检索中' } })
+    await flushPromises()
+    expect(conn.chat.teams).toHaveLength(1)
+    expect(conn.chat.teams[0]).toMatchObject({ id: 'tm1', name: '文献员', status: 'running' })
+    expect(conn.chat.teams[0].msgs.at(-1)).toMatchObject({ text: '检索中', streaming: true })
+    expect(conn.chat.messages).toHaveLength(base) // 主时间线零污染
+  })
+
+  it('投影重拉灌 teams（REST teammates 行 → teamFoldsFromProjection，含 mailbox）', async () => {
+    vi.mocked(api.getSessionProjection).mockResolvedValue(projectionOf({ teammates: [tm()] }))
+    const conn = await mounted()
+    expect(conn.chat.teams).toHaveLength(1)
+    expect(conn.chat.teams[0]).toMatchObject({ id: 'tm1', name: '文献员', task: '整理文献', status: 'completed' })
+    expect(conn.chat.teams[0].msgs[0]).toMatchObject({ text: '队友产出', streaming: false })
+    expect(conn.chat.teams[0].mailbox).toHaveLength(1)
+  })
+
+  it('teammate.* 状态事件与 run 终态 → 投影重拉（mailbox/task 补全 = REST-only 面）', async () => {
+    const conn = await mounted()
+    vi.mocked(api.getSessionProjection).mockClear()
+    const src = FakeEventSource.last()!
+    src.emit('teammate.completed', { type: 'teammate.completed', sessionId: 'sess-1', teammateId: 'tm1', payload: { teammateId: 'tm1', name: '文献员' } })
+    await flushPromises()
+    expect(api.getSessionProjection).toHaveBeenCalled()
+    vi.mocked(api.getSessionProjection).mockClear()
+    src.emit('run.failed', { type: 'run.failed', sessionId: 'sess-1', runId: 'rT', teammateId: 'tm1', payload: { errorKind: 'llm_error' } })
+    await flushPromises()
+    expect(api.getSessionProjection).toHaveBeenCalled()
+    // leader 面不受扰：teammate run.failed 不进主时间线错误横幅
+    expect(conn.lastRunError.value).toBeNull()
+  })
+
+  it('teammate run.resumed（信箱唤醒帧）→ 投影重拉：等待者被信唤醒点即见自身信箱新邮件', async () => {
+    const conn = await mounted()
+    const base = conn.chat.messages.length
+    vi.mocked(api.getSessionProjection).mockClear()
+    const src = FakeEventSource.last()!
+    src.emit('run.resumed', { type: 'run.resumed', sessionId: 'sess-1', runId: 'rT', teammateId: 'tm1', payload: {} })
+    await flushPromises()
+    expect(api.getSessionProjection).toHaveBeenCalled()
+    // 分流纪律：teammate 的 run.resumed 同样不进 leader 主时间线
+    expect(conn.chat.messages).toHaveLength(base)
+  })
+
+  it('teammate 审批（approval.requested 带 teammateId）→ 卡带 teammateId + 投影重拉；resolved 摘卡', async () => {
+    const escalation = { id: 'e9', source: 'cautious-mode', toolCallId: 't9', toolName: 'bash', toolCallSummary: 'x' }
+    // 事件先到建卡；紧随的投影重拉是权威面（pendingApprovalProjection 带 teammateId 标注）——
+    // 双路同形（setApprovalsFromProjection 幂等整替），mock 投影带同卡模拟真实面。
+    vi.mocked(api.getSessionProjection).mockResolvedValue(projectionOf({ approvals: [{ escalation, teammateId: 'tm1' }] }))
+    const conn = await mounted()
+    const src = FakeEventSource.last()!
+    src.emit('approval.requested', { type: 'approval.requested', sessionId: 'sess-1', teammateId: 'tm1', payload: { escalation, teammateId: 'tm1' } })
+    await flushPromises()
+    expect(conn.chat.approvals[0]).toMatchObject({ id: 'e9', teammateId: 'tm1' })
+    expect(api.getSessionProjection).toHaveBeenCalled()
+    // resolved 后 REST 权威面不再含该审批（pendingApprovalProjection 摘除）
+    vi.mocked(api.getSessionProjection).mockResolvedValue(projectionOf())
+    src.emit('approval.resolved', { type: 'approval.resolved', sessionId: 'sess-1', teammateId: 'tm1', payload: { escalationId: 'e9', decision: 'allow' } })
+    await flushPromises()
+    expect(conn.chat.approvals).toHaveLength(0)
+  })
+
+  it('展开态与数据分离：投影重拉整替 teams 不重置 teamExpanded', async () => {
+    vi.mocked(api.getSessionProjection).mockResolvedValue(projectionOf({ teammates: [tm()] }))
+    const conn = await mounted()
+    conn.chat.toggleTeamExpanded('tm1')
+    expect(conn.chat.teamExpanded.tm1).toBe(true)
+    vi.mocked(api.getSessionProjection).mockResolvedValue(projectionOf({ teammates: [tm({ status: 'failed' })] }))
+    const src = FakeEventSource.last()!
+    src.emit('session.updated', { type: 'session.updated', sessionId: 'sess-1', payload: { projectionChanged: true } })
+    await flushPromises()
+    expect(conn.chat.teams[0].status).toBe('failed')
+    expect(conn.chat.teamExpanded.tm1).toBe(true)
+  })
+
+  it('切会话清 teams 与展开态', async () => {
+    vi.mocked(api.getSessionProjection).mockResolvedValue(projectionOf({ teammates: [tm()] }))
+    const conn = await mounted()
+    conn.chat.toggleTeamExpanded('tm1')
+    vi.mocked(api.getSessionProjection).mockResolvedValue(projectionOf({ sessionId: 'sess-2', title: '实验记录', messages: [] }))
+    conn.selectSession('sess-2')
+    await flushPromises()
+    expect(conn.chat.teams).toHaveLength(0)
+    expect(conn.chat.teamExpanded).toEqual({})
   })
 })
 

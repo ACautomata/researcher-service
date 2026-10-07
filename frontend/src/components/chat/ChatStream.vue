@@ -217,6 +217,9 @@ defineSlots<{
   'msg-item'?: (props: { msg: Msg }) => unknown
   thinking?: (props: { thinking: string; thinkingOpen: boolean }) => unknown
   'tool-line'?: (props: { tool: Msg['tools'][number] }) => unknown
+  // teammate 具名折叠区（#796 / #730 §4.3）：主时间线（leader 发言与产物）之后的分区容器——
+  // 折叠区随消息流滚动（leader 消息末尾、empty 之前的流内位置），不参与锚点导航。
+  'team-folds'?: (props: {}) => unknown
   empty?: (props: {}) => unknown
 }>()
 </script>
@@ -259,6 +262,7 @@ defineSlots<{
         />
       </slot>
     </template>
+    <slot name="team-folds" />
     <slot name="empty" />
     <button v-if="!stickyBottom" class="jump-bottom" data-test="jump-bottom" @click="jumpToBottom">
       {{ hasNewContent ? '有新消息 · 回到底部' : '回到底部' }}

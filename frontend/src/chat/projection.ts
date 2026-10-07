@@ -165,6 +165,110 @@ export function fromProjection(p: SessionProjection): Msg[] {
   return msgs
 }
 
+// ---- teammate 具名折叠区（#796 / #730 §4.3「TraceFold 泛化」）----
+// 可见性模型（#742 定稿）：主时间线只挂 leader 发言与产物，teammate 轨迹 + 信箱往来收进具名
+// 折叠区。分区视图模型与主时间线同形状（msgs 复用 Msg / 同一归约器），差异只在容器：
+// status 徽标（八值镜像 server TeammateStatus）与 mailbox 往来（REST-only 面——server sendMail
+// 不发事件，实时靠投影重拉整替，不入事件归约）。
+
+export interface TeamMail {
+  id: string
+  senderTeammateId: string | null // null = 来自 leader（timeout 提醒等系统件亦 null）
+  recipientTeammateId: string | null // null = 发给 leader（request/汇报）
+  kind: string // 'message' 点对点缺省 / 'request' 协助申请 / 'broadcast' 广播 /
+  // 'timeout'/'timeout-follow-up' 超时提醒·追问 / 'wiki-conflict' 弃更新通知
+  content: string // 原始落库内容（JSON 载荷 kind 为序列化原文）
+  displayContent: string // 呈现正文（wire 形状知识归此处，组件纯呈现）——见 mailDisplayContent
+  createdAt: string
+}
+
+export interface TeamFold {
+  id: string // teammate id（SSE 顶层 teammateId / REST TeamMember.id 同源）
+  name: string
+  task: string
+  status: string // server TeammateStatus 八值；前端宽容未知值（渲染回退原文）
+  msgs: Msg[] // 轨迹（与主时间线同形状；流式 overlay 在尾，归约器同款语义）
+  mailbox: TeamMail[]
+}
+
+// 信箱行 → 呈现正文（服务端形状 → 视图模型映射归口，与 toolRowFromServer 同责）：JSON 载荷
+// kind 解析——request（server requestSpawn 落库 {name, task}）→「申请派生 <name> · <task>」；
+// wiki-conflict（server finishWikiGeneration 落库 {reason, runId, message}）→「<reason>：<message>」。
+// 解析失败/形态不符/其余 kind 恒等原文（0 信任宽容度）。
+function mailDisplayContent(mail: { kind: string; content: string }): string {
+  if (mail.kind !== 'request' && mail.kind !== 'wiki-conflict') return mail.content
+  try {
+    const parsed = JSON.parse(mail.content) as Record<string, unknown>
+    if (mail.kind === 'request' && typeof parsed.name === 'string' && typeof parsed.task === 'string') {
+      return `申请派生 ${parsed.name} · ${parsed.task}`
+    }
+    if (mail.kind === 'wiki-conflict' && typeof parsed.reason === 'string' && typeof parsed.message === 'string') {
+      return `${parsed.reason}：${parsed.message}`
+    }
+  } catch {
+    // 非 JSON 原文兜底
+  }
+  return mail.content
+}
+
+// 回放入口：teammates 投影行 → 分区视图（msgs 走 fromProjection 同一构造——含轨迹默认折叠与
+// inFlight overlay 重建，回放 ≡ 实时的机制载体）。fromProjection 只消费 messages/inFlight 两
+// 字段——此处构造的投影形参仅为复用该构造路径（sessionId/title 无消费方，占位值即可）。
+export function teamFoldsFromProjection(p: SessionProjection): TeamFold[] {
+  return (p.teammates ?? []).map((peer) => ({
+    id: peer.id,
+    name: peer.name,
+    task: peer.task,
+    status: peer.status,
+    msgs: fromProjection({
+      sessionId: peer.id,
+      title: peer.name,
+      messages: peer.messages,
+      ...(peer.inFlight ? { inFlight: peer.inFlight } : {}),
+    }),
+    mailbox: peer.mailbox.map((mail) => ({ ...mail, displayContent: mailDisplayContent(mail) })),
+  }))
+}
+
+// teammate 事件 → 状态映射（镜像 server runService：startTeammate 先 updateStatus('running')
+// 再发事件；run finally 块按终态发 completed/failed/suspended；archive 只写库无事件——
+// archived 靠投影重拉，此处保留映射供占位兜底）。teammate.started → running 是唯一非同名映射。
+const TEAM_EVENT_STATUS: Record<string, string> = {
+  'teammate.started': 'running',
+  'teammate.completed': 'completed',
+  'teammate.failed': 'failed',
+  'teammate.suspended': 'suspended',
+  'teammate.archived': 'archived',
+}
+
+// 实时入口：对 teams 应用一条带顶层 teammateId 的事件（编排层分流；无 teammateId 原样返回）。
+// 未知 teammate 的首帧建占位 fold（name 从 payload 取——teammate.* 事件恒带；轨迹乱序帧占位
+// 兜底不丢帧，task/mailbox 由随后的投影整替补全）。msgs 走 applyEvent 同一归约器——同形状
+// 「同一实现」的纪律载体，事件语义零漂移。
+export function applyTeamEvent(teams: TeamFold[], event: SessionEvent): TeamFold[] {
+  const teammateId = event.teammateId
+  if (!teammateId) return teams
+  const status = TEAM_EVENT_STATUS[event.type]
+  const idx = teams.findIndex((t) => t.id === teammateId)
+  if (idx < 0) {
+    const fold: TeamFold = {
+      id: teammateId,
+      name: asString(event.payload.name),
+      task: '',
+      status: status ?? 'running',
+      msgs: applyEvent([], event),
+      mailbox: [],
+    }
+    return [...teams, fold]
+  }
+  const fold = teams[idx]
+  const msgs = applyEvent(fold.msgs, event)
+  if (msgs === fold.msgs && status === undefined) return teams // 无变化帧原样返回（copy-on-write 纪律）
+  const next = [...teams]
+  next[idx] = { ...fold, ...(status !== undefined ? { status } : {}), msgs }
+  return next
+}
+
 // ---- 实时入口：事件增量归约（copy-on-write）----
 
 // overlay 定位：**最后一条**匹配 runId 的流式 assistant 消息（per-session run 串行，#777

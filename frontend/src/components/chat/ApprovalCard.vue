@@ -2,12 +2,14 @@
 // T06 权限审批卡（#783 三层漏斗升级通道前端面 / #729）：橙边待处理，处理后落定即摘除
 //（ADR 0014，摘除在父层）。props-in/emits-out 哑组件（#316：#340 拆分边界）。
 // decision 两值：allow（放行一次）/ deny——allow-always 已砍（#729 钉死）。
-// #793：teammate 审批带「队友协作」徽标（teammateId 非空；具名折叠区泛化归 #796）。
+// #793：teammate 审批带「队友协作」徽标（teammateId 非空）。
+// #796：徽标具名化（teammateName 由宿主从折叠区名册映射——story 26 当事 teammate 卡片态标识）。
 import type { ApprovalItem } from '@/stores/chat'
 
 defineProps<{
   approval: ApprovalItem
   disconnected: boolean
+  teammateName?: string // 当事 teammate 具名（无映射时回退「队友协作」通用徽标）
 }>()
 
 const emit = defineEmits<{
@@ -28,7 +30,7 @@ function commandSummary(command: string): string { return command.replace(/\s+/g
     <div class="a-head">
       ⚠️ 请求提升权限
       <span v-if="approval.teammateId" class="source-badge" data-test="approval-source">
-        <span class="source-dot" />队友协作
+        <span class="source-dot" />队友协作<template v-if="teammateName"> · {{ teammateName }}</template>
       </span>
       <!-- #492：网关侧审批已失效（过期/他端处理）→ 终态不可回覆，明示「已失效」而非死卡 -->
       <span v-if="approval.status === 'expired'" class="resolved-tag expired" data-test="approval-expired">

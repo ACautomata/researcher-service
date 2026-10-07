@@ -267,6 +267,72 @@ describe('ChatView（REST+SSE 三件套接线）', () => {
   })
 })
 
+// ---- teammate 具名折叠区呈现全件（#796 / #730 §4.3，story 23/24/26）----
+describe('ChatView teammate 折叠区（#796）', () => {
+  const PEER = {
+    id: 'tm1', name: '文献员', task: '整理文献', status: 'completed',
+    messages: [{ id: 'pm1', turn: 1, role: 'assistant', content: '队友产出', anchorCheckpointId: null, createdAt: '2026-10-06T01:00:00Z' }],
+    mailbox: [{ id: 'mail1', senderTeammateId: 'tm1', recipientTeammateId: null, kind: 'message', content: '已完成整理', createdAt: '2026-10-06T01:01:00Z' }],
+  }
+
+  it('投影回放带 teammates → 具名折叠区渲染（主时间线只挂 leader 发言与产物）', async () => {
+    vi.mocked(api.getSessionProjection).mockResolvedValue({ ...PROJECTION, teammates: [PEER] })
+    const w = await mountChat()
+    w.get('[data-test="team-folds"]')
+    expect(w.get('[data-test="teammate-name"]').text()).toBe('文献员')
+    expect(w.get('[data-test="teammate-status"]').text()).toBe('已完成')
+    // leader 面：主时间线只有投影 messages（队友产出不串进主时间线）
+    expect(w.text()).toContain('第一答')
+    await w.find('[data-test="teammate-toggle"]').trigger('click')
+    expect(w.get('[data-test="teammate-body-tm1"]').text()).toContain('队友产出')
+    expect(w.get('[data-test="teammate-mailbox"]').text()).toContain('发给主助手')
+  })
+
+  it('SSE 轨迹事件带 teammateId → 折叠条出现且主时间线不渲染队友内容', async () => {
+    // teammate.started 触发投影重拉：REST 权威面含该 teammate 行（mock 模拟真实整替）
+    vi.mocked(api.getSessionProjection).mockResolvedValue({
+      ...PROJECTION,
+      teammates: [{ id: 'tm9', name: '写作员', task: '起草初稿', status: 'running', messages: [], mailbox: [], inFlight: { runId: 'rT', state: 'running', turn: { content: '草稿进行中' } } }],
+    })
+    const w = await mountChat()
+    const src = FakeEventSource.last()!
+    src.emit('teammate.started', { type: 'teammate.started', sessionId: 'sess-1', runId: 'rT', teammateId: 'tm9', payload: { teammateId: 'tm9', name: '写作员' } })
+    src.emit('run.started', { type: 'run.started', sessionId: 'sess-1', runId: 'rT', teammateId: 'tm9', payload: {} })
+    src.emit('text.delta', { type: 'text.delta', sessionId: 'sess-1', runId: 'rT', teammateId: 'tm9', payload: { delta: '草稿进行中' } })
+    await flushPromises()
+    expect(w.get('[data-test="teammate-name"]').text()).toBe('写作员')
+    await w.find('[data-test="teammate-toggle"]').trigger('click')
+    await flushPromises()
+    expect(w.get('[data-test="teammate-body-tm9"]').text()).toContain('草稿进行中')
+  })
+
+  it('teammate 审批 → ApprovalDock 卡具名徽标（story 26 当事 teammate 卡片态）', async () => {
+    const escalation = { id: 'e7', source: 'cautious-mode', toolCallId: 't7', toolName: 'bash', toolCallSummary: 'make' } as const
+    // 双路同形：事件先到建卡，紧随投影重拉（权威面 pendingApprovalProjection 带 teammateId 标注）
+    vi.mocked(api.getSessionProjection).mockResolvedValue({ ...PROJECTION, teammates: [PEER], approvals: [{ escalation, teammateId: 'tm1' }] })
+    const w = await mountChat()
+    const src = FakeEventSource.last()!
+    src.emit('approval.requested', {
+      type: 'approval.requested', sessionId: 'sess-1', teammateId: 'tm1',
+      payload: { escalation, teammateId: 'tm1' },
+    })
+    await flushPromises()
+    const card = w.get('[data-test="approval-e7"]')
+    expect(card.get('[data-test="approval-source"]').text()).toContain('队友协作 · 文献员')
+    // 折叠条同步冻结（双信号之一：status 竞态窗口内 pending 审批即冻结）
+    expect(w.find('.team-fold.frozen').exists()).toBe(true)
+  })
+
+  it('teammate run.failed 不污染 leader 错误横幅（leader 面不受扰）', async () => {
+    vi.mocked(api.getSessionProjection).mockResolvedValue({ ...PROJECTION, teammates: [PEER] })
+    const w = await mountChat()
+    const src = FakeEventSource.last()!
+    src.emit('run.failed', { type: 'run.failed', sessionId: 'sess-1', runId: 'rT', teammateId: 'tm1', payload: { errorKind: 'llm_error' } })
+    await flushPromises()
+    expect(w.find('[data-test="run-error"]').exists()).toBe(false)
+  })
+})
+
 // opened() 需在文件作用域可用的辅助（挂载后开流补偿）
 function opened(): void {
   FakeEventSource.last()!.emit('stream.opened', { type: 'stream.opened', payload: { protocolV: 1, serverSeq: 0, serverTime: '' } })
