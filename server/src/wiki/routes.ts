@@ -74,24 +74,26 @@ export function createWikiRouter(deps: WikiRouterDeps = {}): Router {
   const router = Router()
   router.use(requireAuth, mustChangePasswordGate)
 
-  // owner 直取认证身份（#856，对齐 #857 models 同款）：requireAuth 已保证 req.user 非空；
-  // 不接收任何客户端 userId 作为授权覆写面。
-  const ownerId = (req: Request): string => req.user!.id
+  // 公共前置（#856，对齐 #857 models 同款）：owner 直取认证身份（requireAuth 已保证 req.user
+  // 非空；不接收任何客户端 userId 作为授权覆写面）+ 每操作前置 ensure（create/health 合一面）。
+  // 顺序不变量「校验先于 ensure」由调用点自律：各 handler 先跑完自身 path/body 校验再调本守卫
+  // （未授权/非法请求不触碰编排面，见文件头与 wikiContainerRest.test.ts 顺序契约）。
+  const ownerWithEnsure = async (req: Request): Promise<string> => {
+    const owner = req.user!.id
+    await ensureWiki?.ensure(owner)
+    return owner
+  }
 
   // GET /wiki/tree —— 文件树（开放目录分组；不收顶层散落页）。
-  router.get('/tree', async (_req: Request, res: Response) => {
-    const owner = ownerId(_req)
-    await ensureWiki?.ensure(owner)
-    ok(res, await serviceFor(owner).buildTree())
+  router.get('/tree', async (req: Request, res: Response) => {
+    ok(res, await serviceFor(await ownerWithEnsure(req)).buildTree())
   })
 
   // GET /wiki/page?path= —— 读一页原文全文。
   router.get('/page', async (req: Request, res: Response) => {
     const relPath = requireRelPath(req.query.path) // 非法 → 90002(data.path)；先于 ensure（非法请求不触碰编排面）
-    const owner = ownerId(req)
-    await ensureWiki?.ensure(owner)
     try {
-      ok(res, await serviceFor(owner).readPage(relPath))
+      ok(res, await serviceFor(await ownerWithEnsure(req)).readPage(relPath))
     } catch (err) {
       assertPageOpError(err)
     }
@@ -100,10 +102,8 @@ export function createWikiRouter(deps: WikiRouterDeps = {}): Router {
   // PUT /wiki/page —— 覆写已存在页（byte-exact 保留空白；不触发 compile）。
   router.put('/page', async (req: Request, res: Response) => {
     const body = parseWikiWriteBody(req.body) // 非法 → 90002；先于 ensure（非法请求不触碰编排面）
-    const owner = ownerId(req)
-    await ensureWiki?.ensure(owner)
     try {
-      await serviceFor(owner).writePage(body.path, body.content)
+      await serviceFor(await ownerWithEnsure(req)).writePage(body.path, body.content)
     } catch (err) {
       assertPageOpError(err)
     }
@@ -113,9 +113,9 @@ export function createWikiRouter(deps: WikiRouterDeps = {}): Router {
   // POST /wiki/page —— 新建页；compile 面缺省 noop（#784 起生产不注入，见文件头）。
   router.post('/page', async (req: Request, res: Response) => {
     const body = parseWikiWriteBody(req.body)
-    const owner = ownerId(req)
-    await ensureWiki?.ensure(owner)
+    let owner!: string
     try {
+      owner = await ownerWithEnsure(req)
       await serviceFor(owner).createPage(body.path, body.content)
     } catch (err) {
       if (err instanceof WikiPageExists) throw fail(CODE.WIKI_PAGE_EXISTS)
@@ -128,9 +128,9 @@ export function createWikiRouter(deps: WikiRouterDeps = {}): Router {
   // DELETE /wiki/page?path= —— 删页；compile 面同上 noop。
   router.delete('/page', async (req: Request, res: Response) => {
     const relPath = requireRelPath(req.query.path)
-    const owner = ownerId(req)
-    await ensureWiki?.ensure(owner)
+    let owner!: string
     try {
+      owner = await ownerWithEnsure(req)
       await serviceFor(owner).deletePage(relPath)
     } catch (err) {
       assertPageOpError(err)
@@ -141,16 +141,12 @@ export function createWikiRouter(deps: WikiRouterDeps = {}): Router {
 
   // GET /wiki/graph —— 全库图谱（nodes + edges；边不 dedup、不可解析 → ghost 节点）。
   router.get('/graph', async (req: Request, res: Response) => {
-    const owner = ownerId(req)
-    await ensureWiki?.ensure(owner)
-    ok(res, await serviceFor(owner).buildGraph())
+    ok(res, await serviceFor(await ownerWithEnsure(req)).buildGraph())
   })
 
   // GET /wiki/categories —— 按 `category:` 标记聚合（开放词表；收顶层散落页）。
   router.get('/categories', async (req: Request, res: Response) => {
-    const owner = ownerId(req)
-    await ensureWiki?.ensure(owner)
-    ok(res, await serviceFor(owner).listCategories())
+    ok(res, await serviceFor(await ownerWithEnsure(req)).listCategories())
   })
 
   // GET /wiki/claims?path= —— 页 claims 旁车只读面（#789 story 42 数据面：论断 →
@@ -158,10 +154,8 @@ export function createWikiRouter(deps: WikiRouterDeps = {}): Router {
   // 畸形 → 200 + drift null + 空 claims（「无证据面板」语义，不报错）。
   router.get('/claims', async (req: Request, res: Response) => {
     const relPath = requireRelPath(req.query.path)
-    const owner = ownerId(req)
-    await ensureWiki?.ensure(owner)
     try {
-      ok(res, await serviceFor(owner).readClaims(relPath))
+      ok(res, await serviceFor(await ownerWithEnsure(req)).readClaims(relPath))
     } catch (err) {
       assertPageOpError(err)
     }
@@ -172,8 +166,7 @@ export function createWikiRouter(deps: WikiRouterDeps = {}): Router {
   // （事件即焚不落盘）。在飞互斥 30042（start 同步抛 EnvelopeError）；缺装配 → 90005。
   router.post('/update', async (req: Request, res: Response) => {
     if (!updateRunner) throw fail(CODE.ROUTE_NOT_FOUND)
-    const owner = ownerId(req)
-    await ensureWiki?.ensure(owner)
+    const owner = await ownerWithEnsure(req)
     ok(res, await updateRunner.start({ ownerId: owner, wikiContainer: wikiContainerName(owner) }))
   })
 

@@ -69,7 +69,7 @@ OpenClaw 容器 fleet (openclaw-gw-<name>，每容器独立 home；端口池废�
 |-----|------|----------|
 | `auth/` | 双角色账号 + JWT 签发/刷新（R1 旋转）+ bootstrap B1 + C1 强制改密 | `tokens.ts` `authenticate.ts` `bootstrap.ts` `userService.ts` |
 | `containers/` | Docker SDK 编排（增/删/查容器、5 态机；T0 #801 起端口池/config 渲染写盘链/升级编排/健康探针退役，活性 = docker inspect Running） | `orchestrator.ts` `dockerRuntime.ts` `readModel.ts` `fleetAssembly.ts` |
-| `wiki/` | wiki 树 + CRUD + graph（`WikiFileSystem` Port + 纯逻辑；#784 存储换轨 = 每用户 wiki 容器 `researcher-wiki-<ownerId>` 树根 `/wiki`，每操作前置 ensure，compile 触发退役归 OpenWiki 工具形态；#789 OKF 适配 = SKIP_FILES += log.md/INSTRUCTIONS.md、SKIP_DIRS += .claims、graph 派生加 markdown 相对链接边[复用 ghost，story 43]、claims 只读 API[页路径→.claims 镜像旁车 + pageVersion 漂移，story 42]、okf 徽章入页数据[status/stale_after/generated，story 41]、POST /wiki/update = #790 三通道③独立 run 触发面（updateRunner 注入缺省 90005；updateEvents 纯映射 wiki_run 五类[debug 丢弃/input ≤1k 截断]）） | `service.ts` `logic.ts` `nodeFs.ts` `compile.ts` `routes.ts` |
+| `wiki/` | wiki 树 + CRUD + graph（`WikiFileSystem` Port + 纯逻辑；#856 归属门改挂 ownerId = 路由 owner 级 `/api/v1/wiki/*`，req.user.id 直派生零容器行查询[容器级 20040 随耦合退役]；#784 存储换轨 = 每用户 wiki 容器 `researcher-wiki-<ownerId>` 树根 `/wiki`，每操作前置 ensure，compile 触发退役归 OpenWiki 工具形态；#789 OKF 适配 = SKIP_FILES += log.md/INSTRUCTIONS.md、SKIP_DIRS += .claims、graph 派生加 markdown 相对链接边[复用 ghost，story 43]、claims 只读 API[页路径→.claims 镜像旁车 + pageVersion 漂移，story 42]、okf 徽章入页数据[status/stale_after/generated，story 41]、POST /wiki/update = #790 三通道③独立 run 触发面（updateRunner 注入缺省 90005；updateEvents 纯映射 wiki_run 五类[debug 丢弃/input ≤1k 截断]）） | `service.ts` `logic.ts` `nodeFs.ts` `compile.ts` `routes.ts` |
 | `models/` | model provider CRUD（#775：行挂 ownerId；事务 = mutation + config_meta version bump 热生效；白名单第一层校验 origin 精确匹配 + DNS 私网拒绝 → 90002 字段级）+ 端点白名单 admin REST（`/api/v1/provider-endpoints`，731 §3.1）；写盘链（configWriter/configBuilder 两文件）已随 T0 #801 物理删除 | `service.ts` `routes.ts` `endpoints.ts` `values.ts` |
 | `files/` | 统一文件读面（T0 #801 只读化：root=lab 唯一现役读面——会话沙箱 /lab 只读 GET，:name=sessionId；root=wiki/workspace 退役 → 60042；写面/媒体通道关闭 → 90005；经 Docker getArchive，ADR 0012） | `fsPort.ts` `dockerArchive.ts` `paths.ts` `routes.ts` |
 | `events/` | SSE 事件流（#773，替代 WS 的传输面）：StreamHub per-user 扇出 + per-user 连续单调 serverSeq + 事件桥薄投影（LangChain streamEvents → 自有目录，不透传） | `hub.ts` `logic.ts` `routes.ts` `bridge.ts` `values.ts` |
@@ -93,10 +93,11 @@ OpenClaw 容器 fleet (openclaw-gw-<name>，每容器独立 home；端口池废�
 - `/api/v1/auth/*` — 登录/refresh(R1 旋转)/logout/me/password/change + OIDC `oauth/<p>/login|callback`（未配 provider 时 90001）。
 - `/api/v1/users` — admin 账号管理（GET 连带 containerCount / POST / PATCH / reset-password；码段 1xxxx）。
 - `/api/v1/containers/*` — 容器列表/新建（同步返 creating 快照）/删除（异步信封）。
-- `/api/v1/containers/<name>/wiki/{tree,page,graph,categories}` — wiki 文件树/读写/图谱
-  （#784 存储换轨：数据源 = 该容器行 owner 的 wiki 容器，每操作前置 ensure（惰性创建/stopped
-  复启），归属校验先于 ensure——越权探测不建容器）。
-- `/api/v1/containers/<name>/wiki/claims?path=` — 页 claims 旁车只读面（#789 story 42 数据面：
+- `/api/v1/wiki/{tree,page,graph,categories}` — wiki 文件树/读写/图谱，owner 级（#856：归属门
+  从容器行解析改为 req.user.id 直派生，零容器行查询，路径 <name> 与容器级 20040 随耦合退役；
+  数据源 = 请求者本人的 wiki 容器，每操作前置 ensure——requireAuth 与 path/body 校验之后，
+  未授权/非法探测不建容器）。
+- `/api/v1/wiki/claims?path=` — 页 claims 旁车只读面（#789 story 42 数据面：
   论断 evidence + 页级漂移 fresh|drifted|null；页缺失 30040、旁车缺失 200+空 claims）。
 - `/api/v1/containers/<name>/models/providers[/<pid>]` — model provider CRUD（#775：事务 = mutation +
   config_meta version bump 热生效；白名单第一层校验未命中 → 90002 字段级 base_url）。
