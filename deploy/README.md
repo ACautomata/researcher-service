@@ -22,7 +22,7 @@
   （`deploy/docker-compose.yml`）、dev 管线 driver 预拉的默认镜像
   （`.claude/skills/run-ai-research-pipeline/driver.sh`）、测试内的版本常量 `PINNED_TAG`；
   CD 也从该行提取版本并推送派生镜像版本 tag。**文档里的版本属示意值**（不在锁内，换版时须一并同步：
-  本文档、根 `README.md` 环境表、`CONTEXT.md`、`docs/adr/` 里含版本正文的 0003（更新块 + 决定句）与
+  本文档、根 `README.md` 环境表、`GLOSSARY.md`、`docs/adr/` 里含版本正文的 0003（更新块 + 决定句）与
   0013（派生镜像描述）、两份 `.env.example`）。测试夹具（`config.test.ts` / `tunnel*.test.ts` 的样本
   引用、两个 smoke 的缺省常量）与其它**历史快照**（CD 注释里的版本形态示例、`docs/research/` 与代码 /
   ADR 注释里带日期的一次性实测记录）不随 bump 改。
