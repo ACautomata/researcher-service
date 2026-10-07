@@ -5,5 +5,12 @@
     "outDir": "dist"
   },
   "include": ["src/**/*.ts", "../plugins/**/*.ts"],
-  "exclude": ["node_modules", "dist", "test", "src/generated"]
+  "exclude": [
+    "node_modules",
+    "dist",
+    "test",
+    "src/generated",
+    "../plugins/**/web.ts",
+    "../plugins/**/components/**"
+  ]
 }

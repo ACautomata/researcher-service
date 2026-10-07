@@ -24,6 +24,7 @@ const props = withDefaults(
     mediaReadiness?: 'pending' | 'ready' | 'error'
     // #694/#794：回退入口是否可用（宿主计算）。#793 新管线暂不开启（rewind/fork 编排归 #794），
     // 缺省 false = fail-closed：能力门未被宿主打开就不渲染，不出现点了必然报错的按钮。
+    rewindPreviewRequired?: boolean
     rewindAvailable?: boolean
     // #697/#794：fork 入口是否可用（同 rewind 语义）。
     forkAvailable?: boolean
@@ -39,6 +40,7 @@ const emit = defineEmits<{ regenerate: [text: string]; toggleTraceFold: []; rewi
 // T1 轮次折叠（#664）：完成（非流式）且有轨迹的 assistant 消息渲染折叠条——轨迹判定
 // hasTrace（思考非空或工具行非空），正文与附件不算轨迹；流式进行中渲染现状完全不动；
 // 无轨迹不渲染折叠条。
+const rejectedTools = computed(() => props.msg.tools.filter(t => t.rejection))
 const traceFoldable = computed(
   () => props.msg.role === 'assistant' && !props.msg.streaming && hasTrace(props.msg),
 )
@@ -48,12 +50,12 @@ const traceFoldable = computed(
 // echo 与异常形状消息无 id，回退必然被网关拒）+ rewindAvailable（agent 工作中/连接异常/网关不支持
 // 会话控制）。见模板 hover 操作条。
 const rewindVisible = computed(
-  () => props.msg.role === 'user' && Boolean(props.msg.id) && props.rewindAvailable,
+  () => !props.msg.streaming && Boolean(props.msg.id) && props.rewindAvailable,
 )
 // #697 fork 入口：身份门与回退一致（已持久化 user 消息），能力门独立（宿主分别开门——
 // rewind/fork 在途互斥时只隐藏其中一侧）。
 const forkVisible = computed(
-  () => props.msg.role === 'user' && Boolean(props.msg.id) && props.forkAvailable,
+  () => !props.msg.streaming && Boolean(props.msg.id) && props.forkAvailable,
 )
 // 确认 popover 显隐（本地瞬态；关闭路径见 RewindConfirmPopover）+ 触发按钮 ref（传给 popover 作
 // anchor：落在触发按钮上的按下不算外部点击，保住「再点入口收起」的 toggle 语义）。
@@ -63,6 +65,7 @@ const rewindBtn = ref<HTMLButtonElement | null>(null)
 // 点击入口：已记住「不再询问」→ 直接回退；popover 已开 → 收起（toggle）；否则先问一次
 // （破坏性动作的误触防线）。
 function onRewindClick(): void {
+  if (props.rewindPreviewRequired) { emit('rewind'); return }
   if (confirmOpen.value) {
     closeConfirm()
     return
@@ -119,7 +122,7 @@ const copyState = ref<'idle' | 'copied' | 'failed'>('idle')
         type="button"
         class="fork"
         aria-label="Fork"
-        title="从这条消息之前分叉出新会话"
+        :title="msg.role === 'assistant' ? '从这条回复之后分叉出新会话' : '从这条消息之前分叉出新会话'"
         data-test="fork"
         @click="emit('fork')"
       >从此分叉</button>
@@ -129,7 +132,7 @@ const copyState = ref<'idle' | 'copied' | 'failed'>('idle')
         ref="rewindBtn"
         class="rewind"
         aria-label="Rewind"
-        title="回退到这条消息之前"
+        :title="msg.role === 'assistant' ? '回退到这条回复之后' : '回退到这条消息之前'"
         data-test="rewind"
         @click="onRewindClick"
       >回退</button>
@@ -146,6 +149,9 @@ const copyState = ref<'idle' | 'copied' | 'failed'>('idle')
            聚合，仅一层）。traceFolded 三态统一「缺省即展开」（undefined/false 渲染轨迹、true
            只留条面）——T3（#666）起历史翻译的有轨迹 assistant 消息默认置 true（历史轮默认
            折叠）；异常收尾轮不置值（保持展开便于看原因）。 -->
+      <template v-if="traceFoldable && msg.traceFolded === true">
+        <div v-for="tool in rejectedTools" :key="tool.id ?? tool.name" class="folded-rejection" role="alert" data-test="folded-rejection">{{ tool.rejection?.source === 'blacklist' ? '黑名单拦截' : 'judge 拒绝' }}：{{ tool.rejection?.reason }}</div>
+      </template>
       <template v-if="traceFoldable">
         <TraceFold
           :has-thinking="msg.thinking !== ''"
@@ -165,7 +171,7 @@ const copyState = ref<'idle' | 'copied' | 'failed'>('idle')
         <!-- #555：>=2 个工具调用聚合折叠为一条摘要——**仅流式/无轨迹完成轮**（折叠条展开态
              平铺逐行 ToolLine，绕过分组聚合：#664 单层展开）。聚合只在渲染层落位，不碰 timeline.ts。 -->
         <template v-if="!traceFoldable && msg.tools.length >= 2">
-          <details class="tool-group" data-test="tool-group">
+          <details class="tool-group" :open="rejectedTools.length > 0" data-test="tool-group">
             <summary data-test="tool-group-summary">
               {{ summarizeToolGroup(msg.tools.map(toolRowToGroupInput)) }}
             </summary>
@@ -206,6 +212,7 @@ const copyState = ref<'idle' | 'copied' | 'failed'>('idle')
 </template>
 
 <style scoped>
+.folded-rejection { color: var(--el-color-danger); white-space: pre-wrap; overflow-wrap: anywhere; margin-bottom: 6px; }
 /* #545：消息与 composer 共用 840px 内容列。assistant 作为正文铺满内容列；user 在列内靠右，
    仅用户输入保留气泡，形成 ChatGPT 风格的紧凑对话层级。 */
 .msg { display: flex; width: 100%; max-width: 840px; align-self: center; min-width: 0; }

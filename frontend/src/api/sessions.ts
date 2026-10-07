@@ -5,7 +5,7 @@
 // content 得 replay（runId null / replay true），同 key 异 content → 50007。
 import { apiJson } from './client'
 
-export interface SessionSummary { id: string; title: string; createdAt: string; updatedAt: string }
+export interface SessionSummary { id: string; title: string; createdAt: string; updatedAt: string; parentSessionKey?: string }
 
 // ---- attachmentsJson v1 聚合面（server sessions/reducer.ts ToolLine/MediaRef 逐字段镜像）----
 export interface ToolLine {
@@ -154,3 +154,25 @@ export function uploadSessionAttachment(id: string, blob: Blob, fileName: string
   form.append('mimeType', mimeType || 'application/octet-stream')
   return apiJson<AttachmentMeta>(`${path(id)}/attachments`, { method: 'POST', body: form, timeoutMs: 300_000, signal })
 }
+
+// #794 历史操作：消息行作为锚点；branch-switch 已由 #770 取消。
+export type RewindScope = 'chat' | 'files' | 'all'
+export interface RewindPreview {
+  anchor: string
+  revertOps: number
+  pathSample: string[]
+  pathTotal: number
+  execCrossed: Array<{ toolCallId: string; input: string }>
+}
+export interface RewindResult {
+  sessionId: string
+  activeCheckpointId: string | null
+  scope: RewindScope
+  files?: { reverted: number; skippedMissing: number; degraded: boolean }
+}
+export const previewSessionRewind = (id: string, messageId: string) =>
+  apiJson<RewindPreview>(`${path(id)}/rewind/preview`, { method: 'POST', body: JSON.stringify({ messageId }) })
+export const rewindSession = (id: string, messageId: string, scope: RewindScope) =>
+  apiJson<RewindResult>(`${path(id)}/rewind`, { method: 'POST', body: JSON.stringify({ messageId, scope }) })
+export const forkSession = (id: string, messageId: string) =>
+  apiJson<{ session: SessionSummary }>(`${path(id)}/fork`, { method: 'POST', body: JSON.stringify({ messageId }) })

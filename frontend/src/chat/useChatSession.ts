@@ -14,6 +14,10 @@ import { computed, ref, watch, type Ref } from 'vue'
 import { ApiError } from '@/api/client'
 import {
   abortSession,
+  forkSession as forkSessionApi,
+  rewindSession as rewindSessionApi,
+  type RewindScope,
+  type RewindResult,
   createSession,
   deleteSession,
   getSessionProjection,
@@ -67,6 +71,10 @@ export interface ChatSession {
   running: Ref<boolean>
   /** 最近一次 run.failed 的分类（红显横幅；新 run/切会话清除） */
   lastRunError: Ref<RunError | null>
+  historyBusy: Ref<boolean>
+  historyAvailable: Ref<boolean>
+  rewind(messageId: string, scope: RewindScope): Promise<RewindResult | null>
+  fork(messageId: string): Promise<void>
   reconnect(): void
   boot(): Promise<void>
   selectSession(id: string): void
@@ -96,6 +104,49 @@ export function useChatSession(deps: ChatSessionDeps = {}): ChatSession {
   const disconnected = ref(false)
   const lastRunError = ref<RunError | null>(null)
   let disposed = false
+  const historyBusy = ref(false)
+  const projectionReady = ref(false)
+  const outboxGenerations = new Map<string, number>()
+  function invalidateOutbox(id: string): void {
+    outboxGenerations.set(id, (outboxGenerations.get(id) ?? 0) + 1)
+    for (const entry of outbox.pending(id)) outbox.remove(id, entry.clientKey)
+  }
+  const historyAvailable = computed(() => Boolean(chat.selectedSession) && projectionReady.value && !connecting.value && !disconnected.value && !running.value && !historyBusy.value && chat.approvals.length === 0)
+
+  async function rewind(messageId: string, scope: RewindScope): Promise<RewindResult | null> {
+    if (!historyAvailable.value) return null
+    const id = chat.selectedSession
+    historyBusy.value = true
+    try {
+      const result = await rewindSessionApi(id, messageId, scope)
+      if (scope !== 'files') invalidateOutbox(id)
+      if (!disposed && chat.selectedSession === id) {
+        pendingToolInputs.clear()
+        fileTabs.reset()
+        lastRunError.value = null
+        await refreshProjection()
+      }
+      return result
+    } catch (e) {
+      deps.onActionError?.(e instanceof Error ? e.message : '回退失败')
+      return null
+    } finally { historyBusy.value = false }
+  }
+
+  async function fork(messageId: string): Promise<void> {
+    if (!historyAvailable.value) return
+    const id = chat.selectedSession
+    historyBusy.value = true
+    try {
+      const result = await forkSessionApi(id, messageId)
+      if (disposed) return
+      chat.prependSession(result.session)
+      if (chat.selectedSession === id) selectSession(result.session.id)
+    } catch (e) {
+      deps.onActionError?.(e instanceof Error ? e.message : '分叉失败')
+    } finally { historyBusy.value = false }
+  }
+
 
   const running = computed(() => chat.messages.some((m) => m.role === 'assistant' && m.streaming))
 
@@ -105,11 +156,13 @@ export function useChatSession(deps: ChatSessionDeps = {}): ChatSession {
     const id = chat.selectedSession
     if (!id || disposed) return
     const gen = ++projectionGen
+    projectionReady.value = false
     try {
       const p = await getSessionProjection(id)
       if (disposed || chat.selectedSession !== id || gen !== projectionGen) return
       chat.setMessages(fromProjection(p))
       chat.setApprovalsFromProjection(p.approvals)
+      projectionReady.value = true
       deps.onClearError?.()
     } catch (e) {
       if (disposed || chat.selectedSession !== id || gen !== projectionGen) return
@@ -127,12 +180,13 @@ export function useChatSession(deps: ChatSessionDeps = {}): ChatSession {
   // ---- 断线补偿（#726/#779 story 12）：待发注入 + 投影重拉 ----
   async function tryFlush(): Promise<void> {
     const id = chat.selectedSession
-    if (!id || disposed || disconnected.value || running.value) return
+    if (!id || disposed || disconnected.value || running.value || historyBusy.value) return
     // interrupted（审批挂起）禁新输入（50003 预检）——排队条目等审批解除后的下次补偿。
     if (chat.approvals.some((a) => a.status === 'pending' || a.status === 'resolving')) return
     if (outbox.pending(id).length === 0) return
     try {
       await outbox.flush(id, async (sid, entry) => {
+        if (historyBusy.value) throw new Error('历史操作进行中')
         const result = await (entry.attachments?.length
           ? sendSessionMessage(sid, entry.content, entry.clientKey, entry.attachments.map((media) => media.attachmentId))
           : sendSessionMessage(sid, entry.content, entry.clientKey))
@@ -145,6 +199,7 @@ export function useChatSession(deps: ChatSessionDeps = {}): ChatSession {
   }
 
   async function compensate(): Promise<void> {
+    projectionReady.value = false
     void refreshSlashCommands()
     deps.onClearError?.()
     try {
@@ -176,6 +231,7 @@ export function useChatSession(deps: ChatSessionDeps = {}): ChatSession {
   watch(stream.status, (s) => {
     connecting.value = s === 'connecting'
     disconnected.value = s === 'disconnected' || s === 'closed'
+    if (s !== 'open') projectionReady.value = false
   })
 
   // ---- SSE 事件分派（业务面）----
@@ -197,7 +253,8 @@ export function useChatSession(deps: ChatSessionDeps = {}): ChatSession {
       return
     }
     if (e.type === 'session.invalidated') {
-      if (e.sessionId === chat.selectedSession) void refreshProjection() // 他端 rewind 后投影权威变化
+      if (e.sessionId && e.payload.reason === 'rewind' && e.payload.scope !== 'files') invalidateOutbox(e.sessionId)
+      if (e.sessionId === chat.selectedSession) { fileTabs.reset(); void refreshProjection() } // 他端 rewind 同步对话与文件
       return
     }
     // session.* / stream 生命周期之外的事件都带 sessionId——非当前会话忽略（选中时投影自见）。
@@ -295,12 +352,14 @@ export function useChatSession(deps: ChatSessionDeps = {}): ChatSession {
       title: typeof r.title === 'string' ? r.title : '',
       createdAt: typeof r.createdAt === 'string' ? r.createdAt : '',
       updatedAt: typeof r.updatedAt === 'string' ? r.updatedAt : '',
+      ...(typeof r.parentSessionKey === 'string' ? { parentSessionKey: r.parentSessionKey } : {}),
     }
   }
 
   function selectSession(id: string): void {
     if (chat.selectedSession === id) return
     projectionGen++ // 旧会话迟到响应作废
+    projectionReady.value = false
     lastRunError.value = null
     pendingToolInputs.clear()
     chat.resetForSession()
@@ -372,7 +431,7 @@ export function useChatSession(deps: ChatSessionDeps = {}): ChatSession {
     const content = chat.input.trim()
     if (!content) return false
     const id = chat.selectedSession
-    if (!id || connecting.value || running.value) return false
+    if (!id || connecting.value || running.value || historyBusy.value) return false
     // interrupted（审批挂起）禁新输入（50003 预检）
     if (chat.approvals.some((a) => a.status === 'pending' || a.status === 'resolving')) return false
     if (disconnected.value) {
@@ -408,6 +467,7 @@ export function useChatSession(deps: ChatSessionDeps = {}): ChatSession {
   }
 
   async function dispatchSend(id: string, content: string, key: string, attachments: SentAttachment[] | undefined): Promise<boolean> {
+    const outboxGen = outboxGenerations.get(id) ?? 0
     try {
       const result = await sendSessionMessage(id, content, key, attachments?.map((a) => a.attachmentId))
       if (disposed || chat.selectedSession !== id) return true
@@ -419,7 +479,7 @@ export function useChatSession(deps: ChatSessionDeps = {}): ChatSession {
       chat.markMessageId(key, result.messageId)
       return true
     } catch (e) {
-      if (disposed) return false
+      if (disposed || outboxGen !== (outboxGenerations.get(id) ?? 0)) return false
       chat.removeMessage(key)
       const restoreDraft = () => {
         if (chat.selectedSession === id && chat.input === '') chat.setInput(content)
@@ -599,6 +659,10 @@ export function useChatSession(deps: ChatSessionDeps = {}): ChatSession {
     disconnected,
     running,
     lastRunError,
+    historyBusy,
+    historyAvailable,
+    rewind,
+    fork,
     reconnect,
     boot,
     selectSession,

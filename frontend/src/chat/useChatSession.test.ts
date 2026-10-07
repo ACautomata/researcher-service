@@ -8,6 +8,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useChatSession } from './useChatSession'
 
 vi.mock('@/api/sessions', () => ({
+  rewindSession: vi.fn(),
+  forkSession: vi.fn(),
   listSessions: vi.fn(),
   createSession: vi.fn(),
   getSessionProjection: vi.fn(),
@@ -604,4 +606,37 @@ it('#797 参数补全迟到时不覆盖新输入，dispose 取消尚未发送的
   conn.dispose()
   await vi.advanceTimersByTimeAsync(250)
   expect(getPluginArgumentCompletions).toHaveBeenCalledTimes(1)
+})
+
+
+import { createRestOutbox } from './restOutbox'
+
+it('#794 回退作废旧路线待发，只回文件保留待发', async () => {
+  const conn = await mounted()
+  const outbox = createRestOutbox()
+  outbox.enqueue('sess-1', '旧路线追问')
+  vi.mocked(api.rewindSession).mockResolvedValue({ sessionId: 'sess-1', activeCheckpointId: 'ck-1', scope: 'chat' })
+  await conn.rewind('m2', 'chat')
+  expect(outbox.pending('sess-1')).toEqual([])
+  outbox.enqueue('sess-1', '保留对话的追问')
+  vi.mocked(api.rewindSession).mockResolvedValue({ sessionId: 'sess-1', activeCheckpointId: 'ck-1', scope: 'files' })
+  await conn.rewind('m2', 'files')
+  expect(outbox.pending('sess-1')).toHaveLength(1)
+  conn.dispose()
+})
+
+it('#794 重连权威投影尚未返回时禁止历史操作', async () => {
+  const conn = await mounted()
+  expect(conn.historyAvailable.value).toBe(true)
+  let resolve!: (p: ReturnType<typeof projectionOf>) => void
+  vi.mocked(api.getSessionProjection).mockImplementationOnce(() => new Promise(r => { resolve = r }))
+  opened()
+  await flushPromises()
+  expect(conn.historyAvailable.value).toBe(false)
+  await conn.fork('m2')
+  expect(api.forkSession).not.toHaveBeenCalled()
+  resolve(projectionOf())
+  await flushPromises()
+  expect(conn.historyAvailable.value).toBe(true)
+  conn.dispose()
 })

@@ -9,6 +9,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const apiJsonMock = vi.hoisted(() => vi.fn())
 vi.mock('@/api/sessions', () => ({
+  previewSessionRewind: vi.fn(),
+  rewindSession: vi.fn(),
+  forkSession: vi.fn(),
   listSessions: vi.fn(),
   createSession: vi.fn(),
   getSessionProjection: vi.fn(),
@@ -46,6 +49,7 @@ vi.mock('element-plus', () => ({
 import * as api from '@/api/sessions'
 import * as filesApi from '@/api/files'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { useChatStore } from '@/stores/chat'
 import ChatView from '@/views/ChatView.vue'
 import ChatComposer from '@/components/chat/ChatComposer.vue'
 
@@ -301,4 +305,49 @@ describe('#797 slash 命令呈现', () => {
     expect(w.get('[data-test="model-command-result"]').text()).toContain('下一轮对话')
     w.unmount()
   })
+})
+
+
+it('#794 从历史回复预览文件恢复，显示 exec 与降级结果并重拉投影', async () => {
+  vi.mocked(api.previewSessionRewind).mockResolvedValue({ anchor: 'ck1', revertOps: 4, pathSample: ['/lab/a'], pathTotal: 1, execCrossed: [{ toolCallId: 't', input: 'touch /lab/out' }] })
+  vi.mocked(api.rewindSession).mockResolvedValue({ sessionId: 'sess-1', activeCheckpointId: 'ck1', scope: 'files', files: { reverted: 0, skippedMissing: 0, degraded: true } })
+  const w = await mountChat()
+  await w.findAll('[data-test="rewind"]')[1].trigger('click')
+  await flushPromises()
+  expect(api.previewSessionRewind).toHaveBeenCalledWith('sess-1', 'm2')
+  expect(document.body.textContent).toContain('touch /lab/out')
+  const select = document.body.querySelector('select')!
+  select.value = 'files'; select.dispatchEvent(new Event('change', { bubbles: true }))
+  await flushPromises()
+  ;(document.body.querySelector('[data-test="restore-confirm"]') as HTMLElement).click()
+  await flushPromises()
+  expect(api.rewindSession).toHaveBeenCalledWith('sess-1', 'm2', 'files')
+  expect(w.get('[data-test="restore-result"]').text()).toContain('文件保持现状')
+  expect(api.getSessionProjection).toHaveBeenCalledTimes(2)
+  w.unmount()
+})
+
+it('#794 fork 进入新会话，保留溯源且可返回源会话', async () => {
+  vi.mocked(api.forkSession).mockResolvedValue({ session: { id: 'fork-1', title: '分叉', createdAt: '', updatedAt: '', parentSessionKey: 'sess-1' } })
+  const w = await mountChat()
+  await w.findAll('[data-test="fork"]')[1].trigger('click')
+  await flushPromises()
+  expect(api.forkSession).toHaveBeenCalledWith('sess-1', 'm2')
+  expect(w.get('[data-test="fork-source"]').text()).toContain('sess-1')
+  await w.get('[data-test="fork-source"] button').trigger('click')
+  await flushPromises()
+  expect(useChatStore().selectedSession).toBe('sess-1')
+  w.unmount()
+})
+
+
+it('#794 文件分段收到他端恢复后自动刷新树', async () => {
+  const w = await mountChat()
+  await w.get('[data-test="side-tab-files"]').trigger('click')
+  await flushPromises()
+  expect(filesApi.listLabTree).toHaveBeenCalledTimes(1)
+  FakeEventSource.last()!.emit('session.invalidated', { type: 'session.invalidated', sessionId: 'sess-1', payload: { reason: 'rewind', scope: 'files' } })
+  await flushPromises()
+  expect(filesApi.listLabTree).toHaveBeenCalledTimes(2)
+  w.unmount()
 })
