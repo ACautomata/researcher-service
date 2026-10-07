@@ -18,13 +18,12 @@ panel-frontend 容器（nginx，唯一对宿主暴露，loopback:18080）
                      │  home 模板构建期入镜像（ADR 0013，无宿主数据挂载）
                      ▼
               panel-redis（BullMQ 队列，内部网络）
-              panel-autofigure（AutoFigure sidecar，仅 panel-net 内部；flag 默认关，sidecar 未被使用）
 ```
 
-- 四服务 `restart: unless-stopped`，宿主重启自恢复。
+- 三服务 `restart: unless-stopped`，宿主重启自恢复。
 - 前端为 origin-relative：构建不注入后端地址，无 CORS、无 per-domain 重建。
-- 镜像存私有 GHCR：`ghcr.io/<owner>/<repo>/{server,frontend,wiki,autofigure}`，tag `:latest` +
-  `:<commit sha>`（wiki 为 wiki 容器镜像 #784，autofigure 为 AutoFigure sidecar T08/T11）。
+- 镜像存私有 GHCR：`ghcr.io/<owner>/<repo>/{server,frontend,wiki}`，tag `:latest` +
+  `:<commit sha>`（wiki 为 wiki 容器镜像 #784）。
   wiki 另推**版本 tag**（`:<Dockerfile FROM 基线 tag>`）——**面板 wiki 容器的目标镜像钉的就是它**
   （server 镜像内 `config.ts` 默认值同版本）。fleet 目标镜像 = `OPENCLAW_IMAGE` 存量钉版 GHCR
   引用（openclaw-image 派生镜像构建已随 T0 #801 退役，见 `deploy/README.md`）。
@@ -42,12 +41,10 @@ panel-frontend 容器（nginx，唯一对宿主暴露，loopback:18080）
 
 每次 CI 在 `master` 上成功后自动：
 
-1. 构建 + 推送 `server`、`frontend`、`wiki`（#784）、`autofigure`（AutoFigure sidecar，T08/T11）
-   四镜像到 GHCR（`:latest` 与 `:<CI head_sha>`）；`wiki` 另推版本 tag（版本从 wiki Dockerfile
-   的 `FROM` 行单源提取）。server 镜像构建期 clone researcher home 模板并经 buildx 多 context
-   拷入镜像（ADR 0013：#593 模板入镜像，模板随镜像 `:sha` 版本化）。autofigure 构建源为
-   `deploy/autofigure-sidecar`（vendored T08 源，**不 fetch mutable upstream**），许可/署名文件
-   构建期入镜像（Dockerfile 构建期断言，缺失即 CD 红）。
+1. 构建 + 推送 `server`、`frontend`、`wiki`（#784）三镜像到 GHCR（`:latest` 与 `:<CI head_sha>`）；
+   `wiki` 另推版本 tag（版本从 wiki Dockerfile 的 `FROM` 行单源提取）。server 镜像构建期 clone
+   researcher home 模板并经 buildx 多 context 拷入镜像（ADR 0013：#593 模板入镜像，模板随镜像
+   `:sha` 版本化）。
 2. 渲染运行时 `.env`（敏感值来自 secrets，不进 git）。
 3. scp `docker-compose.deploy.yml` + `.env` → 宿主 `/www/panel/`。
 4. SSH 远端：`docker login ghcr.io`（持久）→ `pull` → `up -d --remove-orphans` → `image prune` →
@@ -82,7 +79,6 @@ panel-frontend 容器（nginx，唯一对宿主暴露，loopback:18080）
 | `JWT_SECRET` | **≥32 字符强随机** | HS256 签名密钥（server 生产 fail-fast） |
 | `LLM_API_KEY` | 面板共享 LLM key | 注入 OpenClaw 容器 |
 | `CREDENTIAL_ENCRYPTION_KEYS` | base64url 32 字节 | 凭证 AES-256-GCM 密钥环 |
-| ~~`AUTOFIGURE_LLM_KEY`~~（**已退役，#791**） | ~~AutoFigure 生成凭证~~ | 随 sidecar 生成链路换轨退役（config.autofigure 读取面已删，server 不再消费任何 AUTOFIGURE_* 键）；新面板级生成配置归插件 configSchema（#744 §5，票 4）。正式清退归票 6 |
 | `API_DOCS_ENABLED`（可选） | `true`（默认） | OpenAPI/Swagger 文档面（`/api/docs`，#761）：admin-only（requireAuth + requireAdmin）zod 生成式文档。显式 `false` → server 不装配 docs 路由（整树 90005） |
 | `RESEARCHER_REPO`（可选） | 克隆 URL | 构建机 clone home 模板（默认 `https://github.com/ACautomata/researcher.git`；模板入 server 镜像，不再落宿主） |
 
@@ -125,38 +121,21 @@ python3 -c "import base64,os;print(base64.urlsafe_b64encode(os.urandom(32)).deco
 > 2026-08-01 的「/fleet 缺挂载 → gateway 崩溃循环」故障属于旧 bind 时代契约（宿主 fleet 根须与
 > compose 挂载同源）；挂载已删除，此故障面不再存在。
 
-## AutoFigure 生产接线与运维（T11，docs/autofigure/tickets/T11-production-packaging-cd.md）——已换轨退役（#791）
+## AutoFigure 生产接线
 
-> **已换轨退役（#791）**：本节为 sidecar 时代历史档案。server 消费端全量退役——`AUTOFIGURE_*`
-> env 注入（config.autofigure 读取面删除）、`AUTOFIGURE_ENABLED` flag 门（figures 路由已无常驻
-> 90005 语义）、`X-Autofigure-Api-Key` 凭证注入链均已删除；figures = 常驻读面（无 flag 门），
-> 生成入口 = 会话内 figure 工具（#744 §4.1，票 4 接线）。生产 compose 的 **panel-autofigure
-> 服务段暂留**（无现役消费者），`deploy/autofigure-sidecar` 目录与服务段的正式删除归票 6
->（#744 §10）；`PANEL_AUTOFIGURE_IMAGE` 覆盖位随服务段同批清退。
-
-- **sidecar 服务段（暂留，历史形状）**：仅挂 `panel-net`、无 ports、零 host 挂载（ADR 0013）；
-  `/health` 容器 healthcheck；`mem_limit: 2g`（T10/T11 judgement call）；`restart: unless-stopped`；
-  内部 URL `http://autofigure:8080`。镜像管线 = CD 既有管线构建推送（`:latest` + `:<CI head_sha>`，
-  构建源 `deploy/autofigure-sidecar` vendored T08 源，不 fetch mutable upstream；许可/署名文件
-  构建期入镜像 + Dockerfile 断言，缺失即 CD 红）。
-- **部署面注意（服务段存续期仍为真）**：autofigure 是栈内声明服务，CD 的 `docker compose
-  pull`/`up` 仍会部署它——sidecar 镜像不可拉或容器 start 失败会使 CD/up 变红（与面板是否使用
-  无关）。
-
-> **验证状态**：镜像构建/推送与运行时健康行为属 CD/CI 拥有（本机无 Docker daemon）。T11 本地验证仅
-> 静态（compose config 解析、YAML 结构、image/env 插值、server 回归），**不声称本地构建/推送/运行时
-> 真实通过**。
+生成在控制面插件执行，配置见 `deploy/README.md`「AutoFigure env（#792 插件化收口——现行）」。
+旧生成容器已于 #802 删除；CD 的 `up -d --remove-orphans` 清除遗留容器，无数据迁移。
+figures 读取与 PNG/SVG 下载仍由控制面提供。历史契约保留在 `docs/autofigure/`。
 
 ## 回滚
 
 镜像按 `:<commit sha>` 留了不可变记录，回滚 = 固定到上一个 sha 重启（home 模板已随
-server 镜像构建期入镜像——回滚镜像即回滚模板，无宿主侧残留状态需要同步；AutoFigure 镜像回滚
-经 `PANEL_AUTOFIGURE_IMAGE`，见上方 AutoFigure 段）：
+server 镜像构建期入镜像——回滚镜像即回滚模板，无宿主侧残留状态需要同步）：
 
 ```bash
 ssh root@<REMOTE_HOST>
 cd /www/panel
-# 编辑 .env，把 PANEL_SERVER_IMAGE / PANEL_FRONTEND_IMAGE / PANEL_AUTOFIGURE_IMAGE 的 :latest 改成 :<上一个 sha>
+# 编辑 .env，把 PANEL_SERVER_IMAGE / PANEL_FRONTEND_IMAGE 的 :latest 改成 :<上一个 sha>
 docker compose -f docker-compose.deploy.yml --env-file .env up -d
 ```
 

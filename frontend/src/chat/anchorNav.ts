@@ -1,7 +1,7 @@
 // 消息锚点导航（issue #669 / #667 spec）：消息流右缘垂直刻度轨的几何判定纯函数层。
 // DOM 度量（消息元素 offsetTop、容器 scrollHeight/clientHeight/scrollTop）由宿主 ChatStream
 // 注入——贴滚动判定层 scroll.ts（ADR 0009 范式 B）先例：本模块只做几何计算，可单测。
-// 术语见根 CONTEXT.md「消息锚点导航 (message anchor nav)」。
+// 术语见根 GLOSSARY.md「消息锚点导航 (message anchor nav)」。
 
 // hover 摘要最大长度（前几十字）；超长截断加省略号。
 export const SUMMARY_MAX_CHARS = 40

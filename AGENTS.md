@@ -15,8 +15,8 @@ wiki 编辑、model 配置等管理能力。交接规格见 `docs/research/320`�
 ```
 server/     TS/Express 控制面（Express 5 + Prisma 7 + SQLite + BullMQ/Redis + dockerode）
 frontend/   Vue 3 + Vite + TypeScript + Pinia + Router + Element Plus
-deploy/     编排契约：生产 compose + dev 栈 + wiki/autofigure 镜像构建
-docs/       research/ + prototypes/ + adr/
+deploy/     编排契约：生产 compose + dev 栈 + wiki 容器镜像构建
+docs/       research/ + prototypes/ + adr/ + agents/（triage 指引）
 ```
 
 ## Commands

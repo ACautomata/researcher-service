@@ -394,10 +394,7 @@ export const config = {
       enabled: readApiDocsEnabled(),
     }
   })(),
-  // ---- AutoFigure（#791 退役旧 config 段）----
-  // AUTOFIGURE_ENABLED/LLM_KEY/JOB_TIMEOUT_MS/SIDECAR_URL 四键随 sidecar 生成链路退役
-  //（#744 §8 v2 勘误；消费方 runner/httpPort/assembly 已删）。figures 读面（list/detail/png/svg）
-  // 常驻不设 flag 门（资产面，#744 §11.3）；面板级生成配置经插件 configSchema 声明接线
+  // AutoFigure 生成配置经插件 configSchema 声明接线；figures 读面常驻。
   //（#792 · plugins/autofigure/manifest.ts 单一声明处，resolvePluginConfig 注入 ctx.config）：
   //   AUTOFIGURE_IMAGE_MODEL / AUTOFIGURE_IMAGE_API_KEY / AUTOFIGURE_IMAGE_BASE_URL(可选) /
   //   FAL_KEY / AUTOFIGURE_SVG_MODEL(可选，缺省 owner 默认链 primary)。

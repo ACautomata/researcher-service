@@ -1,6 +1,6 @@
 // checkpoint 父链行走 + 挂靠可见性（共享内核）：纯逻辑（链行走/挂靠判定）+ 单点 IO 查询
 //（loadCheckpointParentOf）——sessions/rewind（归档/复制判定）、runner/filejournal（preview
-// 确认门、指针推进守卫）的单一实现——CONTEXT.md「无 IO 纯函数下沉共享内核……在 context 间
+// 确认门、指针推进守卫）的单一实现——GLOSSARY.md「无 IO 纯函数下沉共享内核……在 context 间
 // 不得复制共享内核纯知识」。环与超深链 guard 兜底（脏数据不炸、不死循环）。
 
 import type { PrismaClient } from './generated/prisma/client'

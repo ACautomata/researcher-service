@@ -122,7 +122,7 @@ onBeforeUnmount(() => {
    （视口 - 24px）——横向夹取读的是实测 offsetWidth，故变窄也能整体落在滚动容器内（#703 P2）。 */
 .rewind-confirm { width: min(232px, calc(100vw - 24px)); padding: 12px; background: var(--el-bg-color-overlay); border: 1px solid var(--el-border-color); border-radius: 8px; box-shadow: 0 8px 24px rgba(0, 0, 0, .35); text-align: left; }
 .rewind-confirm-text { margin: 0; font-size: 13px; color: var(--el-text-color-primary); }
-/* 后果说明：回退会剪掉后半段对话（CONTEXT.md「会话删除」确立的破坏性确认原则——确认文案必须让用户
+/* 后果说明：回退会剪掉后半段对话（GLOSSARY.md「会话删除」确立的破坏性确认原则——确认文案必须让用户
    看清将要发生什么） */
 .rewind-confirm-hint { margin: 4px 0 8px; font-size: 12px; color: var(--el-text-color-secondary); }
 .rewind-confirm-remember { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--el-text-color-secondary); cursor: pointer; }
