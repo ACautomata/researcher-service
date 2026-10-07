@@ -3,7 +3,7 @@ import type { AuthUser } from '../types'
 import { verifyAccessToken } from './tokens'
 
 // 认证失败错误（code review F1）：token 无效/过期、user 不存在或已禁用——调用方应视同未认证
-// （REST 10001 / WS 4401）。与 DB/内部故障区分（那些错误保持原始类型传播，tunnel 映射 WS 1011，
+// （REST 10001）。与 DB/内部故障区分（那些错误保持原始类型传播，
 // 避免 DB 瞬断被误判为凭证过期触发前端 forceRefresh 风暴）。
 export class AuthenticationError extends Error {
   constructor(message: string) {

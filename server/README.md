@@ -168,7 +168,7 @@ secrets、回滚、排障）见 `deploy/DEPLOY.md`。
 ## 下游衔接
 
 - WIKI（#335）与 Models（#336）已交付：复用 `createApp`、`authenticate()`、信封中间件、
-  `getInstanceForUser` 归属前置（containers/wiki/models/chat/pairing 全域单点）。
+  `getInstanceForUser` 归属前置（containers/wiki/models 全域单点）。
 - 配对/对话桥接（#378/#385、#337 ADR 0006）：已随 T0 #801 整链退役（Pairing 表删除、隧道四文件
   删除、bootstrap-token 端点删除）；现役对话面 = REST+SSE（#793）。cookie Secure 由
   `NODE_ENV==='production'` 直接判定，无 CORS 中间件。

@@ -213,9 +213,6 @@ describe('refresh ttl env (slice config)', () => {
   })
 })
 
-// 意见⑦[P2]（Codex 第三轮，针对 9550045）：端口池环境值未校验 —— Number(env) 接受 NaN/小数/负/
-// 超 65535，服务照常启动（PortAllocator 只查 end<start），create 时才异常（误报池耗尽 / 坏端口落 docker）。
-// 修复：config 加载即校验两个端口池值为合法 TCP 端口整数（[1,65535]）且 end≥start，非法 fail-fast。
 describe('production template dir (slice config)', () => {
   async function loadTemplateDir(opts: {
     env?: string
@@ -229,7 +226,6 @@ describe('production template dir (slice config)', () => {
       // 否则放行用例会因缺其它必填被误判 THREW（同 loadSecret 模式）。
       vi.stubEnv('JWT_SECRET', 's'.repeat(32))
       vi.stubEnv('CREDENTIAL_ENCRYPTION_KEYS', Buffer.alloc(32, 0x01).toString('base64'))
-      // #385：隔离 panelOrigin 变量（同 loadSecret 模式）。
     }
     if (dir === undefined) delete process.env.OPENCLAW_TEMPLATE_DIR
     else vi.stubEnv('OPENCLAW_TEMPLATE_DIR', dir)
@@ -284,7 +280,6 @@ describe('production fleet root (slice config)', () => {
       vi.stubEnv('JWT_SECRET', 's'.repeat(32))
       vi.stubEnv('CREDENTIAL_ENCRYPTION_KEYS', Buffer.alloc(32, 0x01).toString('base64'))
       vi.stubEnv('OPENCLAW_TEMPLATE_DIR', process.cwd())
-      // #385：隔离 panelOrigin 变量（同 loadTemplateDir 模式）。
     }
     if (root === undefined) delete process.env.OPENCLAW_FLEET_ROOT
     else vi.stubEnv('OPENCLAW_FLEET_ROOT', root)

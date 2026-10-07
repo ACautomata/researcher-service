@@ -169,7 +169,7 @@ function readWikiImage(): string {
 
 // OPENCLAW_NAMED_VOLUMES（#590/#592，ADR 0011）：容器持久化是否用 named volume 拓扑——
 // openclaw-wiki/workspace/home-<id> 三卷（按代系 id 派生）替代宿主 bind-mount home。
-// 默认 true = named volume 拓扑（#592 编排默认：新容器走三卷 + putArchive config，旧 host bind
+// 默认 true = named volume 拓扑（#592 编排默认：新容器走三卷，旧 host bind
 // 路径退场）；显式 false 回退旧 bind 模式。默认对本地/CI/生产同效（deploy 不设该变量）。
 // 非 true/false 值 fail-fast——否则 `TRUE`/`1` 这类错值
 // 静默按默认 true 走，flag 关了却没生效。

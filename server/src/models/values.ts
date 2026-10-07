@@ -1,7 +1,7 @@
 // models 域常量 + wire↔DB 枚举映射（平移 backend/models/models.py，#336）。
 //
-// 术语对齐：provider_id = openclaw.json models.providers 的 map key（r28 §1：minimax / vllm /
-// my-proxy），亦拼成 <pid>/<mid> 引用进 agents.defaults.model —— 须小写 DNS-label 风格，禁路径
+// 术语对齐：provider_id = provider 行的稳定 id（r28 §1：minimax / vllm /
+// my-proxy），亦拼成 <pid>/<mid> 模型引用 —— 须小写 DNS-label 风格，禁路径
 // 分隔符 / 大写 / 数字开头。api_key_env_id = SecretRef.id（env 变量名），须 ^[A-Z][A-Z0-9_]{0,127}$，
 // 且须为容器已注入的 env（ALLOWED_API_KEY_ENV_IDS）。
 //
@@ -27,18 +27,17 @@ export const API_CHOICES = ['openai-completions', 'anthropic-messages'] as const
 export type ProviderApiWire = (typeof API_CHOICES)[number]
 
 // 容器进程实际持有的凭证 env（spec §5.2：全面板共享一个 LLM_API_KEY；DockerRuntime 仅注入它）。
-// 容器 env 在 docker run 时固定，OpenClaw watch 热加载无法新增 env（#36 已证：缺 env 则 reload
-// 失败停留 last-known-good）—— 故 SecretRef.id 只能引用已注入的 env。API 层据此收紧（builder
-// 层仍 env-agnostic，便于未来 fleet 注入更多 env 时仅放宽本集合）。
+// 容器 env 在 docker run 时固定，无法热新增——故 SecretRef.id 只能引用已注入的 env。API 层
+// 据此收紧（入站校验拒绝，落库形状才可能合法；便于未来 fleet 注入更多 env 时仅放宽本集合）。
 export const ALLOWED_API_KEY_ENV_IDS: ReadonlySet<string> = new Set(['LLM_API_KEY'])
 
-// 模型 input 模态枚举（r28 §1.2 / `/gateway/config-agents` 权威列举）：入站校验闸。
-// 非法值（如 "bogus"）经 builder 原样透传落盘 → OpenClaw 热加载校验拒绝 → 运行时落后 DB（#366
+// 模型 input 模态枚举（r28 §1.2 权威列举）：入站校验闸。
+// 非法值（如 "bogus"）入库则消费端拒绝 → 运行时落后 DB（#366
 // codex 四轮 P2：z.array(z.string()) 只验容器类型、不验取值）。
 export const MODEL_INPUT_MODALITIES = ['text', 'image', 'audio', 'video', 'pdf'] as const
 export type ModelInputModality = (typeof MODEL_INPUT_MODALITIES)[number]
 
-// wire（连字符真值，落盘 openclaw.json）↔ lcProvider 二值白名单（Prisma enum，#771 / 731 §2.1）。
+// wire（连字符真值，REST 契约）↔ lcProvider 二值白名单（Prisma enum，#771 / 731 §2.1）。
 export const WIRE_TO_LC_PROVIDER: Record<ProviderApiWire, LcProvider> = {
   'openai-completions': 'openai',
   'anthropic-messages': 'anthropic',

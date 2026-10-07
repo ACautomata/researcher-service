@@ -28,7 +28,7 @@ panel-frontend 容器（nginx，唯一对宿主暴露，loopback:18080）
   wiki 另推**版本 tag**（`:<Dockerfile FROM 基线 tag>`）——**面板 wiki 容器的目标镜像钉的就是它**
   （server 镜像内 `config.ts` 默认值同版本）。fleet 目标镜像 = `OPENCLAW_IMAGE` 存量钉版 GHCR
   引用（openclaw-image 派生镜像构建已随 T0 #801 退役，见 `deploy/README.md`）。
-- **超时分层**：`/api/` 慢请求（创建容器、配对等）依赖代理链逐层放宽超时。容器内 nginx 已配
+- **超时分层**：`/api/` 慢请求（创建容器等）依赖代理链逐层放宽超时。容器内 nginx 已配
   `proxy_read_timeout/send_timeout 300s`（`/api/`）与 `3600s`（`/api/v1/events` SSE 流）；**BaoTa 边缘
   反代须 ≥ 内层最慢值 `3600s`**：站点 → 反向代理 → 配置，填 `proxy_read_timeout 3600s;` +
   `proxy_send_timeout 3600s;`（bootstrap 步骤 5），否则外层默认 60s 会先于内层返回 504——慢请求已

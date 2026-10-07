@@ -296,16 +296,11 @@ describe('orchestrator (接缝 #5 编排器 Port)', () => {
     expect(item!.health).toBe('stopped')
   })
 
-  // ---- 端口预留重试预算 = 池候选数（Codex 第四轮⑥[P2]）----
-  // reserveRow 固定 MAX_PORT_RETRIES=8 次重试：并发不同 owner 都选中同一最小空闲端口时，SQLite 唯一
-  // 约束只放行一个，其余须重试下一候选——固定 8 次在并发 ≥9 时耗尽（第 9 个请求 8 次全撞已分配端口
-  // → 误报 90004 池耗尽），而池实际大量空闲。修法：预算 = 端口池候选数（每候选至多尝试一次）。
-
 })
 
 // ---- #2 createComplete 在 runtime.create() 后未重查取消（Codex 第七轮 P2）----
-// command.ts createComplete 的取消检查点在循环开头（render 前）与 render 后 create 前、start 后
-// （#591：create → writeConfig → start）。DELETE 在 runtime.create()（拉镜像/创建容器）期间到达时：
+// command.ts createComplete 的取消检查点在循环开头（render 前）与 create 后、start 后
+// （#591：create → start）。DELETE 在 runtime.create()（拉镜像/创建容器）期间到达时：
 // deleteReserve 已 flag + 标 removing，但 create 返回后 createComplete 仍会 start + update
 // (status:'running') 覆盖 removing——错过取消回滚路径，list 轮询全程显示 running。
 describe('#2 createComplete create 后重查取消 (Codex 第七轮 P2)', () => {

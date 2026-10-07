@@ -2,7 +2,7 @@
 // 单一来源：所有信封码在此定义，路由/中间件引用常量名而非裸数字。
 //
 // 段：0 成功 · 1xxxx 通用/鉴权/账号 · 2xxxx 容器 · 3xxxx wiki · 4xxxx models ·
-//     5xxxx 会话/run（#747 C 节；chat/pairing 的 WS close codes 为另一传输面不在此列）·
+//     5xxxx 会话/run（#747 C 节）·
 //     6xxxx files · 7xxxx figures · 9xxxx 系统/校验。完整表见 docs/research/319-api-contract.md §1。
 
 export const CODE = {
@@ -64,8 +64,7 @@ export const CODE = {
   ORPHAN_DIR: 20044, // create 撞残留 orphan 目录（转译）
   CLEANUP_FAILED: 20045, // home 清理失败（delete 行标 REMOVING 可重试，转译）
   CONTAINER_NOT_RUNNING: 20046, // [退役保留] 曾为 bootstrap-token/pairing approve 前置（T0 #801 端点退役），码段保留防复用
-  // 5xxxx 会话/run 域（#747 C 节错误码新增；#776 起 50002 进信封面——chat/pairing 的 WS close
-  // codes 是另一传输面，不受影响）：50002 = 会话不存在。
+  // 5xxxx 会话/run 域（#747 C 节错误码新增；#776 起 50002 进信封面）：50002 = 会话不存在。
   RUN_ALREADY_RESUMED: 50001, // run 已被 resume（先到先得，败方拒绝；#777 runService 互斥面）
   SESSION_NOT_FOUND: 50002, // 会话不存在 / 越权（同码防探测；root=lab 读面 #776，#778 会话 REST 同款）
   RUN_INTERRUPT_PENDING: 50003, // interrupted 态禁输入（#747 C 节「interrupt 全端可审批」内核防御面——须先 resume 决策）

@@ -77,7 +77,6 @@ cd frontend  && npm run test && npm run build                    # vitest + vue-
 - **T0 legacy 清退（#801）**：chat 隧道/设备配对/端口池/config 渲染/openclaw.json 模板/升级编排已整链
   退役；files API 只读化（root=lab 唯一读面）；`GATEWAY_TOKEN` 每容器独立生成、经 env 注入，真值以
   AES 密文落盘；行 `port` 恒 0 记账。
-  宿主 approve 由控制面在容器内 `openclaw devices approve` 编排（ADR 0006）。
 - **docker.sock 安全**：控制面挂 `/var/run/docker.sock` 等价 root（spec §5.4 明示风险）；本地/可信
   部署可接受，生产应限制控制面网络面或改用 rootless / 远程 TLS daemon。
 
