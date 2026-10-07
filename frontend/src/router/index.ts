@@ -48,6 +48,13 @@ export const routes: RouteRecordRaw[] = [
     component: () => import('@/views/ModelView.vue'),
     meta: { requiresAuth: true },
   },
+  {
+    // 插件目录页（#799 · #752 §4）：能力可见性唯一入口 + per-user 启用位管理。
+    path: '/plugins',
+    name: 'plugins',
+    component: () => import('@/views/PluginsView.vue'),
+    meta: { requiresAuth: true },
+  },
   // Figure Editor（F1，docs/figure-editor/reconnaissance.md）：面板内图片/图表编辑正式模块。
   // Path A V1 = Vue shell + 后续 same-origin SVG-Edit iframe；常规受保护路由，不做 capability
   // 门控——F2/F3 落地前直达占位页（非 404）。

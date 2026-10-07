@@ -21,6 +21,7 @@ describe('页面路由按需加载', () => {
       'login',
       'models',
       'not-found',
+      'plugins',
       'sessions',
       'wiki',
     ])

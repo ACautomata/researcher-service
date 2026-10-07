@@ -33,7 +33,7 @@ function normalize(m: Msg) {
   return {
     role: m.role, raw: m.raw, text: m.text, thinking: m.thinking, thinkingOpen: m.thinkingOpen,
     streaming: m.streaming, traceFolded: m.traceFolded,
-    tools: m.tools.map((t) => ({ id: t.id, name: t.name, state: t.state, title: t.title, input: t.input, result: t.result, durationMs: t.durationMs, truncated: t.truncated, rejection: t.rejection })),
+    tools: m.tools.map((t) => ({ id: t.id, name: t.name, state: t.state, title: t.title, input: t.input, result: t.result, durationMs: t.durationMs, truncated: t.truncated, rejection: t.rejection, stage: t.stage })),
     media: m.media,
   }
 }
@@ -149,6 +149,34 @@ describe('applyEvent（实时入口）事件语义', () => {
     vm = applyEvent(vm, ev('tool.start', { toolCallId: 't1', name: 'bash', input: 'x' }, { runId: 'r1' }))
     vm = applyEvent(vm, ev('tool.end', { toolCallId: 't1', state: 'error', rejection: { source: 'funnel', reason: '拒绝' } }, { runId: 'r1' }))
     expect(vm[0].tools[0].rejection).toEqual({ source: 'funnel', reason: '拒绝' })
+  })
+
+  it('figure_run.progress 写入匹配工具行的 stage（#799 story 50 进行态）', () => {
+    let vm = applyEvent([], ev('run.started', {}, { runId: 'r1' }))
+    vm = applyEvent(vm, ev('tool.start', { toolCallId: 'f1', name: 'figure_generate', input: '{"method_text":"流程图"}' }, { runId: 'r1' }))
+    vm = applyEvent(vm, ev('figure_run.progress', { toolCallId: 'f1', stage: 'segmenting' }, { runId: 'r1' }))
+    expect(vm[0].tools[0]).toMatchObject({ id: 'f1', state: 'running', stage: 'segmenting' })
+    vm = applyEvent(vm, ev('figure_run.progress', { toolCallId: 'f1', stage: 'rendering' }, { runId: 'r1' }))
+    expect(vm[0].tools[0].stage).toBe('rendering')
+  })
+
+  it('figure_run.progress 白名单外/无落点帧忽略（镜像 server parseFigureRunProgress 丢弃纪律）', () => {
+    let vm = applyEvent([], ev('run.started', {}, { runId: 'r1' }))
+    vm = applyEvent(vm, ev('tool.start', { toolCallId: 'f1', name: 'figure_generate', input: '{}' }, { runId: 'r1' }))
+    const before = vm[0].tools[0]
+    vm = applyEvent(vm, ev('figure_run.progress', { toolCallId: 'f1', stage: '未知阶段' }, { runId: 'r1' }))
+    vm = applyEvent(vm, ev('figure_run.progress', { stage: 'generating' }, { runId: 'r1' }))
+    vm = applyEvent(vm, ev('figure_run.progress', { toolCallId: 'ghost', stage: 'generating' }, { runId: 'r1' }))
+    expect(vm[0].tools[0]).toBe(before) // 无变化 → 原引用返回（copy-on-write 零噪声）
+  })
+
+  it('stage 随 tool.end 剥落（终态行回放无此装饰——零差异不被污染）', () => {
+    let vm = applyEvent([], ev('run.started', {}, { runId: 'r1' }))
+    vm = applyEvent(vm, ev('tool.start', { toolCallId: 'f1', name: 'figure_generate', input: '{}' }, { runId: 'r1' }))
+    vm = applyEvent(vm, ev('figure_run.progress', { toolCallId: 'f1', stage: 'assembling' }, { runId: 'r1' }))
+    vm = applyEvent(vm, ev('tool.end', { toolCallId: 'f1', state: 'success', details: '{"figureId":"fig1"}' }, { runId: 'r1' }))
+    expect(vm[0].tools[0]).toMatchObject({ state: 'done', result: { figureId: 'fig1' } })
+    expect(vm[0].tools[0].stage).toBeUndefined()
   })
 
   it('attachment 引用进 media（校验门镜像 server：缺字段整帧忽略）', () => {
@@ -293,6 +321,22 @@ describe('零差异一致性（硬验收：reduce(全量事件) ≡ 投影行）
         ev('text.delta', { delta: '生成到一半' }, { runId: 'r1' }),
         ev('tool.start', { toolCallId: 't1', name: 'read', input: '{"file_path":"a.md"}' }, { runId: 'r1' }),
         ev('run.failed', { errorKind: 'llm_error' }, { runId: 'r1' }),
+      ],
+    },
+    {
+      name: 'figure 工具全生命周期（六 stage progress + 终态 details，#799 story 50）',
+      events: [
+        ev('run.started', {}, { runId: 'r1' }),
+        ev('tool.start', { toolCallId: 'f1', name: 'figure_generate', input: '{"method_text":"方法流程图"}' }, { runId: 'r1' }),
+        ev('figure_run.progress', { toolCallId: 'f1', stage: 'generating' }, { runId: 'r1' }),
+        ev('figure_run.progress', { toolCallId: 'f1', stage: 'segmenting' }, { runId: 'r1' }),
+        ev('figure_run.progress', { toolCallId: 'f1', stage: 'preparing' }, { runId: 'r1' }),
+        ev('figure_run.progress', { toolCallId: 'f1', stage: 'templating' }, { runId: 'r1' }),
+        ev('figure_run.progress', { toolCallId: 'f1', stage: 'assembling' }, { runId: 'r1' }),
+        ev('figure_run.progress', { toolCallId: 'f1', stage: 'rendering' }, { runId: 'r1' }),
+        ev('tool.end', { toolCallId: 'f1', state: 'success', durationMs: 4200, details: '{"figureId":"fig1","state":"completed","previewReady":true}' }, { runId: 'r1' }),
+        ev('text.delta', { delta: '图已生成。' }, { runId: 'r1' }),
+        ev('run.completed', {}, { runId: 'r1' }),
       ],
     },
   ]

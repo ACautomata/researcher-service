@@ -18,5 +18,11 @@
     "types": ["node"]
   },
   "include": ["src/**/*.ts", "test/**/*.ts", "../plugins/**/*.ts"],
-  "exclude": ["node_modules", "dist", "src/generated"]
+  "exclude": [
+    "node_modules",
+    "dist",
+    "src/generated",
+    "../plugins/**/web.ts",
+    "../plugins/**/components/**"
+  ]
 }

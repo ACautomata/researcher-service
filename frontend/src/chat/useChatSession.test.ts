@@ -271,6 +271,18 @@ describe('SSE 事件分派', () => {
     expect(conn.chat.messages).toHaveLength(3) // 旧两条 + 本会话 overlay
   })
 
+  it('figure_run.progress 当前会话 → 写入匹配工具行 stage（#799）；他端 run 工具行不串扰', async () => {
+    const conn = await mounted()
+    const src = FakeEventSource.last()!
+    src.emit('run.started', { type: 'run.started', sessionId: 'sess-1', runId: 'r1', payload: {} })
+    src.emit('tool.start', { type: 'tool.start', sessionId: 'sess-1', runId: 'r1', payload: { toolCallId: 'f1', name: 'figure_generate', input: '{"method_text":"x"}' } })
+    src.emit('figure_run.progress', { type: 'figure_run.progress', sessionId: 'sess-1', runId: 'r1', payload: { toolCallId: 'f1', stage: 'templating' } })
+    src.emit('figure_run.progress', { type: 'figure_run.progress', sessionId: 'sess-1', runId: 'r1', payload: { toolCallId: 'ghost', stage: 'rendering' } })
+    await flushPromises()
+    const overlay = conn.chat.messages.at(-1)!
+    expect(overlay.tools[0]).toMatchObject({ id: 'f1', state: 'running', stage: 'templating' })
+  })
+
   it('run.completed → 终态投影重拉（权威行整替 overlay）', async () => {
     const conn = await mounted()
     vi.mocked(api.getSessionProjection).mockClear()

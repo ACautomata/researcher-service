@@ -7,7 +7,8 @@
 import type { Component } from 'vue'
 
 // 工具渲染 props 契约（对齐 #751 ToolRenderContext 精简）。isPartial 仅实时路径的
-// 进行态装饰，回放路径不构造（#730）。
+// 进行态装饰，回放路径不构造（#730）；stage = 域 run 进行态阶段（figure_run.progress
+// 归约产物，#799 story 50 阶段条）——同为进行态装饰，终态/回放不构造。
 export interface PluginToolRenderProps {
   /** tool.end details（≤4KB 截断面；JSON 字符串或文本——组件侧自行解析） */
   details: unknown
@@ -15,6 +16,7 @@ export interface PluginToolRenderProps {
   state: 'running' | 'done' | 'error'
   expanded: boolean
   isPartial?: boolean
+  stage?: string
   toolCallId: string
 }
 

@@ -2,7 +2,8 @@
 //（@plugins/* 别名 → 仓库根级 plugins/<id>/web.ts）并加入 PLUGIN_WEB_DEFINITIONS 一行。
 // 不用 glob 自动发现——显式收录行是收录评审的动作面（与 server 侧 plugins/index.ts 成对）。
 //
-// V1 目录仅规划 AutoFigure（web.ts + FigureCard.vue，迁移归 #753）；当前为空。
+// V1 目录仅 AutoFigure 一个成员（#752 §4.1）；#799 收录其 web.ts + FigureCard.vue。
 import type { PluginWebDefinition } from './api'
+import autofigureWeb from '@plugins/autofigure/web'
 
-export const PLUGIN_WEB_DEFINITIONS: readonly PluginWebDefinition[] = []
+export const PLUGIN_WEB_DEFINITIONS: readonly PluginWebDefinition[] = [autofigureWeb]
