@@ -9,9 +9,9 @@ defineOptions({ name: 'ChatView' })
 //（扁平挂用户，story 4）+ 沙箱 lab 文件树（story 61）。
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { uploadSessionAttachment } from '@/api/sessions'
-import type { ModelRef, SystemCommandResult } from '@/api/sessions'
-import { useChatStore } from '@/stores/chat'
+import { previewSessionRewind, uploadSessionAttachment } from '@/api/sessions'
+import type { ModelRef, SystemCommandResult, RewindPreview, RewindScope } from '@/api/sessions'
+import { useChatStore, type Msg } from '@/stores/chat'
 import { useFileTabsStore } from '@/stores/fileTabs'
 import { useAuthStore, tokenOwner } from '@/stores/auth'
 import { safeLocalStorage } from '@/storage'
@@ -21,6 +21,7 @@ import { usePanelGroup } from '@/panels/usePanelGroup'
 import { usePanelTriState } from '@/panels/usePanelTriState'
 import PanelTriState from '@/components/PanelTriState.vue'
 import { prepareAttachment, validateAttachment, type PendingAttachment } from '@/chat/attachments'
+import RewindDialog from '@/components/chat/RewindDialog.vue'
 import ChatSidebar from '@/components/chat/ChatSidebar.vue'
 import ChatHeader from '@/components/chat/ChatHeader.vue'
 import ChatStream from '@/components/chat/ChatStream.vue'
@@ -156,6 +157,40 @@ const conn = useChatSession({
 const slashOpen = conn.slashOpen
 const slashMatches = conn.slashMatches
 const connecting = conn.connecting
+const historyAvailable = conn.historyAvailable
+const restoreTarget = ref<{ sessionId: string; messageId: string; preview: RewindPreview } | null>(null)
+const restoreLoading = ref(false)
+const restoreBusy = conn.historyBusy
+const restoreResult = ref('')
+let restoreGeneration = 0
+function closeRestore(): void { restoreGeneration++; restoreTarget.value = null }
+watch(() => chat.selectedSession, () => { closeRestore(); restoreResult.value = '' })
+watch(() => chat.messages, closeRestore) // 他端回退/新 run 的投影变化使旧预览失效
+onBeforeUnmount(closeRestore)
+async function previewRestore(msg: Msg): Promise<void> {
+  if (!historyAvailable.value || !msg.id || restoreLoading.value) return
+  const sessionId = chat.selectedSession
+  const gen = ++restoreGeneration
+  restoreLoading.value = true
+  try {
+    const preview = await previewSessionRewind(sessionId, msg.id)
+    if (gen === restoreGeneration && sessionId === chat.selectedSession) restoreTarget.value = { sessionId, messageId: msg.id, preview }
+  } catch (e) {
+    if (gen === restoreGeneration) ElMessage.error(e instanceof Error ? e.message : '预览失败')
+  } finally { restoreLoading.value = false }
+}
+async function confirmRestore(scope: RewindScope): Promise<void> {
+  const target = restoreTarget.value
+  if (!target || target.sessionId !== chat.selectedSession || !historyAvailable.value) return
+  const result = await conn.rewind(target.messageId, scope)
+  if (!result || target.sessionId !== chat.selectedSession) return
+  closeRestore()
+  const files = result.files
+  restoreResult.value = files?.degraded
+    ? '已达到恢复深度上限：文件保持现状；对话按所选范围处理。'
+    : files ? `恢复完成：已恢复 ${files.reverted} 次文件操作，缺失前像跳过 ${files.skippedMissing} 次。` : '对话已恢复，文件保持现状。'
+}
+const forkSource = computed(() => chat.sessions.find(s => s.id === chat.selectedSession)?.parentSessionKey)
 
 const currentSessionTitle = computed(() => {
   const s = chat.sessions.find((x) => x.id === chat.selectedSession)
@@ -427,7 +462,18 @@ defineExpose({
         <span>{{ executionStatus }}</span>
         <button v-if="running" type="button" class="abort" data-test="abort" @click="conn.abort()">中断</button>
       </div>
+      <div v-if="forkSource" class="execution-status" data-test="fork-source">
+        分叉自 {{ forkSource }} <button v-if="chat.sessions.some(s => s.id === forkSource)" @click="conn.selectSession(forkSource)">查看源会话</button>
+      </div>
+      <div v-if="restoreResult" class="connection-banner" role="status" data-test="restore-result">{{ restoreResult }}</div>
+      <div v-if="restoreLoading" class="execution-status" role="status">正在加载恢复预览…</div>
+      <RewindDialog v-if="restoreTarget" :preview="restoreTarget.preview" :busy="restoreBusy" @confirm="confirmRestore" @cancel="closeRestore" />
       <ChatStream
+        :rewind-available="historyAvailable && !restoreLoading"
+        :fork-available="historyAvailable && !restoreLoading"
+        :rewind-preview-required="true"
+        @rewind="previewRestore"
+        @fork="(msg: Msg) => msg.id && conn.fork(msg.id)"
         :messages="chat.messages"
         :history-has-more="false"
         :history-loading="false"

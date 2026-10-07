@@ -44,6 +44,7 @@ export interface SessionSummary {
   readonly title: string
   readonly createdAt: string
   readonly updatedAt: string
+  readonly parentSessionKey?: string
 }
 
 // 投影消息行（GET /messages 输出；前端单管线渲染的输入形状——实时事件归约同构）。
@@ -197,7 +198,7 @@ export interface RewindResult {
 // RunService recordTurn 注入缝的载荷（RecordTurnPayload）单一声明于 './reducer'。
 
 function summary(s: Session): SessionSummary {
-  return { id: s.id, title: s.title, createdAt: s.createdAt.toISOString(), updatedAt: s.updatedAt.toISOString() }
+  return { id: s.id, title: s.title, createdAt: s.createdAt.toISOString(), updatedAt: s.updatedAt.toISOString(), ...(s.parentSessionKey ? { parentSessionKey: s.parentSessionKey } : {}) }
 }
 
 // turn 序号分配 + 落行打包进 interactive transaction：read-then-write 在 SQLite 单连接事务内

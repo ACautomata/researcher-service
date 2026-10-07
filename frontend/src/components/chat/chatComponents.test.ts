@@ -1120,12 +1120,12 @@ describe('#694 回退入口与确认 popover', () => {
     expect(w.find('[data-test="msg-actions"]').exists()).toBe(false)
   })
 
-  it('assistant 消息即使有 id 也无回退入口（回退只针对用户消息）', () => {
+  it('#794 已持久化 assistant 回复也可作为回退锚点', () => {
     const m = newMsg('assistant', '回答')
     m.streaming = false
     m.id = 'msg-2'
     const w = mountItem(m)
-    expect(w.find('[data-test="msg-actions"]').exists()).toBe(false)
+    expect(w.find('[data-test="msg-actions"]').exists()).toBe(true)
   })
 
   it('agent 工作中 / 会话控制不可用（rewindAvailable=false）→ 入口整体隐藏（非禁用态）', () => {
@@ -1321,14 +1321,14 @@ describe('#697 fork 入口', () => {
     expect(w.get('[data-test="fork"]').attributes('aria-label')).toBe('Fork')
   })
 
-  it('无 id / assistant 消息 → 无 fork 入口（与回退同一身份门）', () => {
+  it('无 id 不可 fork；#794 已持久化 assistant 回复可分叉', () => {
     const w1 = mountItem(newMsg('user', '没落库'))
     expect(w1.find('[data-test="fork"]').exists()).toBe(false)
     const m = newMsg('assistant', '回答')
     m.streaming = false
     m.id = 'msg-2'
     const w2 = mountItem(m)
-    expect(w2.find('[data-test="fork"]').exists()).toBe(false)
+    expect(w2.find('[data-test="fork"]').exists()).toBe(true)
   })
 
   it('forkAvailable=false（能力门关 / 对方 busy）→ fork 入口隐藏（fail-closed，非禁用态）', () => {

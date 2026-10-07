@@ -24,6 +24,7 @@ const props = withDefaults(
     mediaReadiness?: 'pending' | 'ready' | 'error'
     // #694/#794：回退入口是否可用（宿主计算）。#793 新管线暂不开启（rewind/fork 编排归 #794），
     // 缺省 false = fail-closed：能力门未被宿主打开就不渲染，不出现点了必然报错的按钮。
+    rewindPreviewRequired?: boolean
     rewindAvailable?: boolean
     // #697/#794：fork 入口是否可用（同 rewind 语义）。
     forkAvailable?: boolean
@@ -48,12 +49,12 @@ const traceFoldable = computed(
 // echo 与异常形状消息无 id，回退必然被网关拒）+ rewindAvailable（agent 工作中/连接异常/网关不支持
 // 会话控制）。见模板 hover 操作条。
 const rewindVisible = computed(
-  () => props.msg.role === 'user' && Boolean(props.msg.id) && props.rewindAvailable,
+  () => !props.msg.streaming && Boolean(props.msg.id) && props.rewindAvailable,
 )
 // #697 fork 入口：身份门与回退一致（已持久化 user 消息），能力门独立（宿主分别开门——
 // rewind/fork 在途互斥时只隐藏其中一侧）。
 const forkVisible = computed(
-  () => props.msg.role === 'user' && Boolean(props.msg.id) && props.forkAvailable,
+  () => !props.msg.streaming && Boolean(props.msg.id) && props.forkAvailable,
 )
 // 确认 popover 显隐（本地瞬态；关闭路径见 RewindConfirmPopover）+ 触发按钮 ref（传给 popover 作
 // anchor：落在触发按钮上的按下不算外部点击，保住「再点入口收起」的 toggle 语义）。
@@ -63,6 +64,7 @@ const rewindBtn = ref<HTMLButtonElement | null>(null)
 // 点击入口：已记住「不再询问」→ 直接回退；popover 已开 → 收起（toggle）；否则先问一次
 // （破坏性动作的误触防线）。
 function onRewindClick(): void {
+  if (props.rewindPreviewRequired) { emit('rewind'); return }
   if (confirmOpen.value) {
     closeConfirm()
     return
@@ -119,7 +121,7 @@ const copyState = ref<'idle' | 'copied' | 'failed'>('idle')
         type="button"
         class="fork"
         aria-label="Fork"
-        title="从这条消息之前分叉出新会话"
+        :title="msg.role === 'assistant' ? '从这条回复之后分叉出新会话' : '从这条消息之前分叉出新会话'"
         data-test="fork"
         @click="emit('fork')"
       >从此分叉</button>
@@ -129,7 +131,7 @@ const copyState = ref<'idle' | 'copied' | 'failed'>('idle')
         ref="rewindBtn"
         class="rewind"
         aria-label="Rewind"
-        title="回退到这条消息之前"
+        :title="msg.role === 'assistant' ? '回退到这条回复之后' : '回退到这条消息之前'"
         data-test="rewind"
         @click="onRewindClick"
       >回退</button>
