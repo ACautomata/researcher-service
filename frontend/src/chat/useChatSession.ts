@@ -27,7 +27,7 @@ import {
 } from '@/api/sessions'
 import { approvalCardFields, useChatStore, type ApprovalItem } from '@/stores/chat'
 import { useFileTabsStore } from '@/stores/fileTabs'
-import { applyEvent, coerceJsonish, fromProjection } from './projection'
+import { applyEvent, applyTeamEvent, coerceJsonish, fromProjection, teamFoldsFromProjection } from './projection'
 import { createRestOutbox, newClientKey, type RestOutbox } from './restOutbox'
 import { useEventStream, type EventStream, type SessionEvent } from './useEventStream'
 
@@ -109,6 +109,7 @@ export function useChatSession(deps: ChatSessionDeps = {}): ChatSession {
       const p = await getSessionProjection(id)
       if (disposed || chat.selectedSession !== id || gen !== projectionGen) return
       chat.setMessages(fromProjection(p))
+      chat.setTeams(teamFoldsFromProjection(p))
       chat.setApprovalsFromProjection(p.approvals)
       deps.onClearError?.()
     } catch (e) {
@@ -129,7 +130,7 @@ export function useChatSession(deps: ChatSessionDeps = {}): ChatSession {
     const id = chat.selectedSession
     if (!id || disposed || disconnected.value || running.value) return
     // interrupted（审批挂起）禁新输入（50003 预检）——排队条目等审批解除后的下次补偿。
-    if (chat.approvals.some((a) => a.status === 'pending' || a.status === 'resolving')) return
+    if (chat.leaderApprovalPending) return
     if (outbox.pending(id).length === 0) return
     try {
       await outbox.flush(id, async (sid, entry) => {
@@ -203,6 +204,33 @@ export function useChatSession(deps: ChatSessionDeps = {}): ChatSession {
     // session.* / stream 生命周期之外的事件都带 sessionId——非当前会话忽略（选中时投影自见）。
     if (e.sessionId !== chat.selectedSession) return
 
+    // teammate 分区路由（#796 / #730 §4.3）：带顶层 teammateId 的事件（server publish 把 teammate
+    // 子线程事件挂父会话 id + teammateId）收进具名折叠区——主时间线只挂 leader 发言与产物，
+    // teammate 轨迹/run 失败不污染 leader 面。审批卡是全局面（ApprovalDock 呈现），teammate 审批
+    // 同样入卡（teammateId → 具名徽标 + 折叠区冻结态）。mailbox/task 补全无实时事件（server
+    // sendMail 不 publish）——低频节点投影重拉整替。
+    if (e.teammateId) {
+      if (e.type === 'approval.requested') {
+        const card = approvalCardFromPayload(e)
+        if (card) chat.addApproval(card)
+      } else if (e.type === 'approval.resolved') {
+        dismissResolvedApproval(e.payload)
+      }
+      chat.setTeams(applyTeamEvent(chat.teams, e))
+      if (
+        e.type.startsWith('teammate.') ||
+        e.type === 'approval.requested' ||
+        e.type === 'approval.resolved' ||
+        e.type === 'run.completed' ||
+        e.type === 'run.failed' ||
+        e.type === 'run.aborted' ||
+        e.type === 'run.suspended'
+      ) {
+        void refreshProjection()
+      }
+      return
+    }
+
     if (e.type === 'run.started' || e.type === 'run.resumed') {
       lastRunError.value = null
       chat.setMessages(applyEvent(chat.messages, e))
@@ -223,8 +251,7 @@ export function useChatSession(deps: ChatSessionDeps = {}): ChatSession {
       return
     }
     if (e.type === 'approval.resolved') {
-      const id = typeof e.payload.escalationId === 'string' ? e.payload.escalationId : ''
-      if (id) chat.removeApproval(id) // ADR 0014：落定即从界面消失，不留痕
+      dismissResolvedApproval(e.payload)
       return
     }
     if (e.type === 'run.failed') {
@@ -265,6 +292,12 @@ export function useChatSession(deps: ChatSessionDeps = {}): ChatSession {
   // ---- 审批卡（形状构造单一来源在 stores/chat.approvalCardFields）----
   function approvalCardFromPayload(e: SessionEvent): ReturnType<typeof approvalCardFields> {
     return approvalCardFields(e.payload.escalation, e.teammateId)
+  }
+
+  // ADR 0014：落定即从界面消失不留痕——leader/teammate 双路共用同一摘卡实现。
+  function dismissResolvedApproval(payload: Record<string, unknown>): void {
+    const id = typeof payload.escalationId === 'string' ? payload.escalationId : ''
+    if (id) chat.removeApproval(id)
   }
 
   async function resolveApproval(a: ApprovalItem, decision: 'allow' | 'deny'): Promise<void> {
@@ -373,8 +406,9 @@ export function useChatSession(deps: ChatSessionDeps = {}): ChatSession {
     if (!content) return false
     const id = chat.selectedSession
     if (!id || connecting.value || running.value) return false
-    // interrupted（审批挂起）禁新输入（50003 预检）
-    if (chat.approvals.some((a) => a.status === 'pending' || a.status === 'resolving')) return false
+    // interrupted（审批挂起）禁新输入（50003 预检，per-thread：只认 leader 卡——
+    // #796 story 26 teammate 审批挂起不挡 leader 发送）
+    if (chat.leaderApprovalPending) return false
     if (disconnected.value) {
       // 断线排队（#779 story 12）：附件不排队（上传面依赖在线 REST）——有附件时拒发保真
       if (attachments?.length) {

@@ -7,6 +7,7 @@ import ApprovalCard from '@/components/chat/ApprovalCard.vue'
 defineProps<{
   approvals: ApprovalItem[]
   disconnected: boolean
+  teammateNames?: Record<string, string> // #796：teammateId → 具名（当事 teammate 卡片态标识）
 }>()
 
 const emit = defineEmits<{
@@ -34,6 +35,7 @@ const emit = defineEmits<{
           :key="approval.id"
           :approval="approval"
           :disconnected="disconnected"
+          :teammate-name="approval.teammateId ? teammateNames?.[approval.teammateId] : undefined"
           @resolve="(a, decision) => emit('resolve', a, decision)"
           @toggle-detail="(a) => emit('toggleDetail', a)"
         />

@@ -2,7 +2,7 @@
 // 覆盖：named-event 订阅 + 坏帧丢弃、serverSeq 去重与 gap 检测（Last-Event-ID 只检测不重放）、
 // stream.opened 状态迁移、session.terminated（per-user 广播无 sessionId）停重连、
 // 401（EventSource 不可见）经 REST 刷新链探测：活 → 手动重开（原生重连放弃时）/ 死 → close 终态。
-// stub 全局 EventSource（贴 TeamSessionsView.test.ts 先例）；apiJson 经 vi.mock 注入。
+// stub 全局 EventSource（贴 useChatSession.test.ts 同款工具）；apiJson 经 vi.mock 注入。
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { useAuthStore } from '@/stores/auth'

@@ -26,6 +26,7 @@ import ChatHeader from '@/components/chat/ChatHeader.vue'
 import ChatStream from '@/components/chat/ChatStream.vue'
 import ChatComposer from '@/components/chat/ChatComposer.vue'
 import ApprovalDock from '@/components/chat/ApprovalDock.vue'
+import TeamFolds from '@/components/chat/TeamFolds.vue'
 import FileTabsPanel from '@/components/chat/FileTabsPanel.vue'
 
 const chat = useChatStore()
@@ -177,9 +178,10 @@ const connectionState = computed(() => {
 // #542：执行状态指示——与上方连接横幅互补，横幅只报连接态（正在连接/断开/加载失败），
 // 此行只反映「正在干活」的瞬时态；横幅可见时返回空串整行隐藏，不重复横幅文案。
 // story 8：在飞 run 时行内挂「中断」入口（REST POST /abort；50006 无在飞 → toast）。
+// #796 story 26：「等待批准」只认 leader 审批——teammate 审批挂起只冻结当事 teammate，leader 面照跑。
 const executionStatus = computed(() => {
   if (connectionState.value) return ''
-  if (chat.approvals.some((a) => a.status === 'pending')) return '等待批准'
+  if (chat.leaderApprovalPending) return '等待批准'
   if (running.value) return '模型正在回答…'
   if (chat.messages.some((m) => m.tools.some((t) => t.state === 'running'))) return '正在执行工具…'
   return '已连接'
@@ -222,6 +224,9 @@ async function renameSession(): Promise<void> {
 const activeApprovals = computed(() =>
   conn.chat.visibleApprovals.filter((a) => a.status === 'pending' || a.status === 'resolving'),
 )
+
+// #796：teammateId → 具名映射（审批卡徽标具名化——story 26 当事 teammate 卡片态标识）。
+const teammateNames = computed(() => Object.fromEntries(conn.chat.teams.map((t) => [t.id, t.name])))
 
 function toggleApprovalDetail(a: { id: string }): void {
   chat.toggleApprovalDetail(a.id)
@@ -434,6 +439,15 @@ defineExpose({
         @regenerate="regenerate"
         @toggle-trace-fold="chat.toggleTraceFold"
       >
+        <!-- #796 teammate 具名折叠区：主时间线（leader 发言与产物）之后的分区容器 -->
+        <template #team-folds>
+          <TeamFolds
+            :teams="chat.teams"
+            :approvals="activeApprovals"
+            :expanded="chat.teamExpanded"
+            @toggle="chat.toggleTeamExpanded"
+          />
+        </template>
         <!-- #461：无选中会话（含删除当前会话后）→ 空态视图 + 「新建会话」入口 -->
         <template #empty>
           <div v-if="!chat.selectedSession" class="empty-state" data-test="empty-state">
@@ -452,6 +466,7 @@ defineExpose({
       <ApprovalDock
         :approvals="activeApprovals"
         :disconnected="conn.disconnected.value"
+        :teammate-names="teammateNames"
         @resolve="conn.resolveApproval"
         @toggle-detail="toggleApprovalDetail"
       />

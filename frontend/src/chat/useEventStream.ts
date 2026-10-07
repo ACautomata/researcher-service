@@ -12,7 +12,7 @@ import { apiJson } from '@/api/client'
 import { useAuthStore } from '@/stores/auth'
 
 // SSE 事件目录（server events/logic.ts type 面）：type 自由串 + 路由字段（sessionId/runId/
-// teammateId）+ payload——非判别联合，消费方按 type 分派（teamProjection/归约器同款）。
+// teammateId）+ payload——非判别联合，消费方按 type 分派（投影归约器/编排层同款）。
 export interface SessionEvent {
   type: string
   sessionId?: string
