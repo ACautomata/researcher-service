@@ -1,115 +1,68 @@
-# deploy —— OpenClaw 容器编排契约与配置单一来源
+# deploy —— 面板编排契约（生产栈 + dev 栈 + 镜像构建）
 
 本目录承载多 OpenClaw 容器面板的**编排契约**：
 
-- `openclaw.json` —— **全面板共享的配置单一来源 / 模板**。Express 控制面 `ConfigRenderer`
-  （`server/src/containers/config_renderer.ts`）以它为底渲染每容器配置，compose 栈也单独 bind-mount 它。
-- `docker-compose.yml` —— **单容器联调 / 模板栈**。用于本地手动起一个 OpenClaw 网关做协议联调；
-  多容器 fleet 由控制面经 Docker SDK 直接编排（不走本 compose），但镜像、env、挂载契约与此保持一致。
-- `.env.example` —— 网关环境变量模板（`GATEWAY_TOKEN` / `LLM_API_KEY` 等）。
+- `docker-compose.deploy.yml` —— **生产栈**（frontend nginx + server + redis；
+  由 CD scp 落盘宝塔宿主 `/www/panel/`）。
+- `docker-compose.dev.yml` —— **dev 栈**（server+redis 容器化，与 prod 同形态，issue #594 / ADR 0013）。
+- `.env.example` —— 生产栈环境变量模板（`LLM_API_KEY` / `JWT_SECRET` 等；真实 `.env` 经 CD 渲染，
+  不进版本库）。
+- `wiki-image/` —— wiki 容器镜像构建源（#784，busybox 级 + 零初始化）。
 
-镜像默认 `ghcr.io/acautomata/researcher-service/openclaw:2026.9.4-browser`（**自建派生镜像**，issue #588：`FROM`
-官方 `ghcr.io/openclaw/openclaw:2026.9.4-browser` 叠加 `pdftotext` 与 wiki/workspace 骨架，ADR 0011/0013；源在
-`deploy/openclaw-image/`，经 `OPENCLAW_IMAGE` 可覆盖回官方基线——**生产禁浮动 tag**，见下「派生镜像
-版本 tag 约定」），把 [ACautomata/researcher](https://github.com/ACautomata/researcher) 仓库作为容器
-`~/.openclaw` 配置卷挂载。researcher 仓库**不动**（其 workspace/、wiki/、skills/ 仍照常挂载）。
+> **T0 legacy 清退（#801）**：`openclaw.json` 配置模板、`docker-compose.yml` 单容器联调栈、
+> `openclaw-image/` 派生镜像构建源均已删除——config 渲染写盘链、端口池、设备配对、bootstrap-token、
+> 升级编排、健康探针对账整链退役。fleet 目标镜像 = `config.ts` 的 `OPENCLAW_IMAGE` 钉版存量
+> GHCR 引用（存量镜像可继续拉取，可覆盖回官方基线）；容器读镜像内默认配置，`GATEWAY_TOKEN`
+> 经 env 注入、AES 密文落盘；行 `port` 恒 0 记账（端口池废除，不做宿主端口发布）。
 
-## 派生镜像版本 tag 约定（issue #695）
+## fleet 目标镜像（钉版纪律，T0 #801 起为存量引用）
 
-- **版本单源 = `deploy/openclaw-image/Dockerfile` 的 `FROM` 基线行**。四处**运行期**明文与之同版本，
-  由 `server/test/openclawImage.test.ts` 交叉断言锁死（防双源漂移）：控制面默认目标镜像
-  （`server/src/config.ts` 的 `OPENCLAW_IMAGE` 默认值）、模板栈 compose 默认值
-  （`deploy/docker-compose.yml`）、dev 管线 driver 预拉的默认镜像
-  （`.claude/skills/run-ai-research-pipeline/driver.sh`）、测试内的版本常量 `PINNED_TAG`；
-  CD 也从该行提取版本并推送派生镜像版本 tag。**文档里的版本属示意值**（不在锁内，换版时须一并同步：
-  本文档、根 `README.md` 环境表、`GLOSSARY.md`、`docs/adr/` 里含版本正文的 0003（更新块 + 决定句）与
-  0013（派生镜像描述）、两份 `.env.example`）。测试夹具（`config.test.ts` / `tunnel*.test.ts` 的样本
-  引用、两个 smoke 的缺省常量）与其它**历史快照**（CD 注释里的版本形态示例、`docs/research/` 与代码 /
-  ADR 注释里带日期的一次性实测记录）不随 bump 改。
-- **版本 tag 一经发布不可移动**：`ghcr.io/acautomata/researcher-service/openclaw:<基线 tag>`
-  （当前 `2026.9.4-browser`）发布后内容冻结，**不得原地覆盖同名 tag**。容器升级编排的检测判定是
-  「容器记录镜像 ≠ 当前目标」，移动 tag 会让历史容器与目标的关系不可复现；回滚走 `:<CI head_sha>`。
-  bump 路径 = **基线换版**：改 Dockerfile `FROM` 行 → 版本 tag 自然前进，随之同步**四处**运行期明文
-  （config 默认值 / 模板栈 compose / dev driver / 测试常量 `PINNED_TAG`，四处均有静态断言兜底）。
-  **只换叠加层而基线不变**时，当前单源约定无 tag 可表达——不要覆盖旧 tag，须另立决策（把版本单源
-  改成独立常量，属后续演进）。
-- **CD 推三个 tag**：`:<基线 tag>`（钉版 = fleet 目标）+ `:latest` + `:<CI head_sha>`；版本号以
-  `grep` 从 Dockerfile `FROM` 行提取（单源，不引入第二配置源）。部署段显式重拉的就是版本 tag
-  （宿主 daemon 缓存与 fleet 目标同源）。
 - **生产禁浮动 tag**：`OPENCLAW_IMAGE` 为浮动引用（无 tag 或 `:latest`）→ server 启动 fail-fast
   （机器强制，准据 `isFloatingImageRef`）。滚动 tag（`latest-browser` / `extended-stable-browser`）
-  同样禁用于生产、但**不由代码拦截**（上游命名无法穷举，靠 review 拦）——它们与本条要防的「目标
+  同样禁用于生产、但**不由代码拦截**（上游命名无法穷举，靠评审拦）——它们与本条要防的「目标
   随上游移动」是同一风险。dev/test 不拦（本地调试可覆盖回官方 `:latest`）。
-- **本地开发手工打 tag**（CD 之外）：dev 栈 compose 不覆盖 `OPENCLAW_IMAGE`（走 config 默认值）、
-  模板栈 compose 的默认值同钉该版本 tag——故本地构建的镜像**必须**打成该版本 tag，否则会去私有
-  GHCR 拉取（无凭证即失败）。
+- T0 #801 起派生镜像不再构建推送——`OPENCLAW_IMAGE` 默认值指向存量版本 tag
+  （`ghcr.io/acautomata/researcher-service/openclaw:2026.9.4-browser`，内容冻结），bump = 改
+  `server/src/config.ts` 默认值（生产禁浮动约束不变；存量镜像缺失时可覆盖回官方基线 tag）。
 
-  ```bash
-  # 版本 tag 单源 = Dockerfile FROM 行（与 CD 同一提取方式；CD 另对 digest 行与「末段是 registry
-  # 端口」的形态显式拒绝）
-  TAG="$(grep -m1 -E '^[[:space:]]*FROM[[:space:]]' deploy/openclaw-image/Dockerfile | awk '{print $2}')"; TAG="${TAG##*:}"
-  docker build -t "ghcr.io/acautomata/researcher-service/openclaw:${TAG}" deploy/openclaw-image
-  # 已构建过镜像时补打（等价；源为先前构建的任意 tag，此处以 :latest 为例）：
-  # docker tag ghcr.io/acautomata/researcher-service/openclaw:latest \
-  #   "ghcr.io/acautomata/researcher-service/openclaw:${TAG}"
-  ```
+## wiki 容器镜像（#784）
 
-- **wiki 容器镜像（#784）**：`deploy/wiki-image/`（busybox 级极简 + 零初始化，无骨架 COPY），
-  默认镜像 `ghcr.io/acautomata/researcher-service/wiki:<FROM 基线 tag>`，经 `WIKI_IMAGE` 可覆盖
-  （生产禁浮动 tag，同上）。版本单源 = 其 Dockerfile 的 FROM 基线行，与
-  `server/src/config.ts` 的 WIKI_IMAGE 默认值由 `server/test/wikiImage.test.ts` 交叉断言锁死。
-  本地构建（真编排/真容器联调需要）：
+`deploy/wiki-image/`（busybox 级极简 + 零初始化，无骨架 COPY），默认镜像
+`ghcr.io/acautomata/researcher-service/wiki:<FROM 基线 tag>`，经 `WIKI_IMAGE` 可覆盖
+（生产禁浮动 tag，同上）。版本单源 = 其 Dockerfile 的 FROM 基线行，与
+`server/src/config.ts` 的 WIKI_IMAGE 默认值由 `server/test/wikiImage.test.ts` 交叉断言锁死。
+本地构建（真编排/真容器联调需要）：
 
   ```bash
   TAG="$(grep -m1 -E '^[[:space:]]*FROM[[:space:]]' deploy/wiki-image/Dockerfile | awk '{print $2}')"; TAG="${TAG##*:}"
   docker build -t "ghcr.io/acautomata/researcher-service/wiki:${TAG}" deploy/wiki-image
   ```
 
-## 在新架构中的位置
+## 面板编排面（T0 #801 后的 create/delete 链）
 
 ```
 Express 控制面 (server/src/containers)
-    │ 1. 以 deploy/openclaw.json 为底渲染每容器 openclaw.json（强制 port/bind/token 占位），
-    │    putArchive 落容器内 ~/.openclaw/openclaw.json（静态 config，#591，零宿主路径）
+    │ 1. createComplete：mkdir instanceDir → ensureImage → docker create（无宿主端口发布）→
+    │    seedWorkspace（named volume 拓扑：镜像内模板 workspace/ 灌容器卷）→ start → 落行
     │ 2. Docker SDK 挂 /var/run/docker.sock 建/删容器 openclaw-gw-<name>
     │ 3. named volume 拓扑（ADR 0011，#590/#592）：openclaw-wiki/workspace/home-<id> 三卷，
     │    空卷首挂由镜像内 ~/.openclaw 骨架自动初始化；home 模板（researcher 克隆）生产经
     │    server 镜像构建期入镜像（ADR 0013，#593），不再挂载宿主
-    │ 4. 模板 workspace 灌卷（#6xx）：createComplete 在 create 后 start 前，把镜像内模板的
-    │    workspace/ 树（researcher 各项 md + skills）经 putArchive(chown) 灌进容器
-    │    ~/.openclaw/workspace（骨架占位被 researcher 内容覆盖；旧 bind 模式 provision 已预填充，不重复灌）
+    │ 4. 活性 = docker inspect Running（健康探针随 #801 退役）；删除 = chown 前置 exec +
+    │    docker rm（连带三卷）
     ▼
-OpenClaw 容器 fleet（容器内统一 18789，宿主端口池 19000–19999 取最小空闲）
+OpenClaw 容器 fleet（容器内统一 18789，不做宿主端口发布——端口池 19000–19999 已废除）
 ```
 
-- **配置单一来源在本目录**：`deploy/openclaw.json` 是精简版配置。每容器渲染产物经 putArchive 落
-  容器内 `~/.openclaw/openclaw.json`（named volume / bind home 内，零宿主路径）；`GATEWAY_TOKEN`
-  每容器独立生成、经 env 注入，JSON 内仅 `${GATEWAY_TOKEN}` 占位。**凭证边界（ADR 0006 决定 7
-  修订）**：真值仍不落服务端盘/日志，但 bootstrap token / deviceToken **可下发给容器属主的浏览器
-  设备**（B-直连下浏览器经隧道直连网关所必需，有效安全级≈面板 JWT；网关藏隧道后凭证离了隧道无从使用）。
-- **端口池**：宿主侧池 `19000–19999`（避开被本单容器 compose 占用的 18789），创建取最小空闲、
-  删除容器即回收。容器内统一 18789，靠 Docker 网络命名空间隔离。
+- **凭证边界**：`GATEWAY_TOKEN` 每容器独立生成、经 env 注入，真值以 AES-256-GCM 密文落盘
+  （`Container.token` 列）；不落日志/不下发浏览器（bootstrap-token 端点已随 #801 退役）。
 - **docker.sock 安全**：控制面挂 `/var/run/docker.sock` = 等价 root（spec §5.4 明示风险）。本地/可信
   部署可接受；生产应限制网络面或改用 rootless / 远程 TLS daemon。
 
-## 设备配对（B-直连，浏览器侧）
-
-OpenClaw 的 operator scope **不在 WS connect 握手声明授予**，而来自**设备配对记录**（Ed25519 签名
-challenge → 宿主 approve → deviceToken，spec §8.1 / issue #36 已证）。B-直连下配对发生在**浏览器**
-（官方 `@openclaw/gateway-client` 协议机，设备身份/tokenStore 存 localStorage），后端只做三件薄事：
-
-- **bootstrap 发放**：`POST /api/v1/containers/<name>/bootstrap-token`（所有权门控，非 running → `20046`）。
-- **approve 编排**：浏览器首连遇 `PAIRING_REQUIRED{requestId}` → 自动
-  `POST /api/v1/containers/<name>/pairing/approve/<requestId>` → 后端容器内 docker exec
-  `openclaw devices approve <requestId>`（浏览器永不接触容器 exec 通道，ADR 事实 3 物理约束）。
-- **进度记账**：`Pairing` 表 status（unpaired/pending/paired）+ pairingRequestId 落库，容器列表
-  `GET /api/v1/containers/` 的 pairing 快照随行展示（容器页可确认配对进度）。
-
-配对闭环真网关实测见 `server/test/pairingSmoke.test.ts`（#378，门控 smoke）。
-
 ## 凭证加密与密钥轮换
 
-后端将 `Instance.token`、`Pairing.private_key_pem` 和 `Pairing.device_token` 以 AES-256-GCM 密文持久化。生产环境必须通过环境变量注入密钥，绝不能将密钥提交到 `.env.example`、镜像或日志中：
+后端将 `Instance.token`（GATEWAY_TOKEN 密文）以 AES-256-GCM 密文持久化。生产环境必须通过环境变量
+注入密钥，绝不能将密钥提交到 `.env.example`、镜像或日志中：
 
 ```bash
 export CREDENTIAL_ENCRYPTION_KEYS="<current-base64url-key>,<previous-base64url-key>"
@@ -122,72 +75,18 @@ export CREDENTIAL_ENCRYPTION_KEYS="<current-base64url-key>,<previous-base64url-k
 1. 备份数据库，并记录当前 key ring。
 2. 生成新 32 字节 key；将它放在 `CREDENTIAL_ENCRYPTION_KEYS` 的第一个位置，旧 key 保留在后面。
 3. 重启控制面使新配置生效（Express 控制面仅读 env，无独立旋转命令；写入用新 key、旧 key 继续读历史密文）。
-4. 验证应用可读取既有实例和配对记录，并完成数据库备份校验。
+4. 验证应用可读取既有实例记录，并完成数据库备份校验。
 5. 从环境变量移除旧 key，再次重启；此时旧 key 可以安全下线。
 
-> 注：`deviceToken`/`privateKeyPem` 真值不下发服务端（B-直连，存浏览器 localStorage），服务端 Pairing 行
-> 的对应列为密文占位；轮换影响的明文列主要是 `Container.token`（GATEWAY_TOKEN 密文）与历史遗留行。
-
-若怀疑 key 泄露：立即限制密钥访问权限，按以上流程生成并启用新 key、执行重加密、移除泄露 key；同时撤销并重新配对受影响设备、轮换网关 token，并审计部署平台与数据库访问日志。
-
-## 前置
-
-- Docker + compose plugin
-- 控制面经容器宿主映射端口（池 `19000–19999`）+ 每容器 `GATEWAY_TOKEN` 访问网关；本单容器栈默认
-  收敛到 `127.0.0.1:18789`。
-
-## 单容器联调步骤
-
-```bash
-# 1. 克隆 researcher 配置仓库（本仓库根下；或设 RESEARCHER_DIR 指向它）
-#    提供 workspace/ + wiki/ + skills/；其 openclaw.json 会被本目录的覆盖，无需手改
-git clone https://github.com/ACautomata/researcher ./researcher
-
-# 2. 配置环境
-cp deploy/.env.example deploy/.env
-#    填入 GATEWAY_TOKEN（强随机）与 LLM_API_KEY
-
-# 3. 启动单容器网关（联调用）
-docker compose --env-file deploy/.env -f deploy/docker-compose.yml up -d
-
-# 4. 验证
-docker logs -f openclaw-gateway
-curl http://127.0.0.1:18789/health
-```
-
-## 配置精简（不接任何消息 channel）
-
-`deploy/openclaw.json` 已是精简好的版本，相对 researcher 原始配置的精简点（依据
-`docs/research/r8-channels-plugins.md`）：
-
-- **删** `channels`（整个块）与 `bindings`：留 `feishu.enabled=true` 会因缺 `FEISHU_*` secret 启动失败。
-- **改** `plugins.slots.contextEngine`: `"lossless-claw"` → `"legacy"`；删 `plugins.entries.lossless-claw` / `plugins.installs.lossless-claw`。
-- **留** 顶层 `browser` + `plugins.entries.browser`、`plugins.entries.memory-core`、`plugins.entries.minimax`、`plugins.entries.memory-wiki`（enabled:true）。
-- **改** `gateway.bind` → `lan`：跨容器/宿主经 18789 访问网关必需（`loopback` 时 Docker 端口映射不到容器内 loopback）。sync 全关后 env 覆盖不可靠，故直接写进 JSON。
-- **改** `gateway.controlUi.allowInsecureAuth` → `false`：token 认证始终强制，关掉 Control UI 的 insecure-auth 降级路径。
-- **WS 注意**：本部署走 WebSocket（见 #13），HTTP `responses.enabled` 非必需。
-
-## 关键点（来自 R6/R7/R8）
-
-- 挂载：`${RESEARCHER_DIR:-../researcher}` → `/home/node/.openclaw`（读写）；`deploy/openclaw.json` →
-  `/home/node/.openclaw/openclaw.json`（覆盖）。gateway 读 `/home/node/.openclaw/openclaw.json`。
-  **相对路径解析基准 = 本目录（deploy/）**，故仓库根的 researcher 默认写作 `../researcher`；若默认写成
-  `./researcher` 会解析成 `deploy/researcher`（不存在时 compose 自建空目录，导致 workspace/wiki/skills 全缺失）。
-- 4 个 sync flag 全关，init.sh 不覆写挂载的 openclaw.json、不明文写凭证。
-- `LLM_API_KEY` 经 env 注入、SecretRef 运行时读，勿写盘。
-- **token 认证始终强制**：WS 握手 `connect.params.auth.token` 必须带 `GATEWAY_TOKEN`。容器不设
-  `ALLOW_INSECURE_AUTH` env，且 `deploy/openclaw.json` 已把 `controlUi.allowInsecureAuth` 置 `false`，
-  彻底关闭 insecure-auth 降级路径。端口收敛到 `127.0.0.1`。
-- wiki 在 `/home/node/.openclaw/wiki/main`（memory-wiki 插件），宿主侧即 `./researcher/wiki/main`。
-- 运行时 `state/`、`logs/` 用匿名卷，避免污染宿主 researcher git 树。
+若怀疑 key 泄露：立即限制密钥访问权限，按以上流程生成并启用新 key、执行重加密、移除泄露 key；
+同时轮换网关 token，并审计部署平台与数据库访问日志。
 
 ## 与控制面的衔接
 
-- 控制面配置走环境变量（`server/src/config.ts`）：`OPENCLAW_TEMPLATE_JSON` 默认指向
-  本目录 `deploy/openclaw.json`，`OPENCLAW_FLEET_ROOT` 为 `instances/<id>/` 落盘根（生产须绝对路径，
-  fail-fast），镜像/端口池见 `server/.env.example`。
-- model provider 的 CRUD 经控制面 `models` 域重渲染每容器 `openclaw.json` 生效（热加载，无需重启，
-  spec §7 / issue #47）。
+- 控制面配置走环境变量（`server/src/config.ts`）：`OPENCLAW_TEMPLATE_DIR`（home 模板源目录，
+  生产必填绝对路径）、`OPENCLAW_FLEET_ROOT`（`instances/<id>/` 落盘根，生产须绝对路径 fail-fast）、
+  `OPENCLAW_IMAGE`（fleet 目标镜像钉版引用）、`LLM_API_KEY`（全面板共享，env 注入容器不落盘）。
+  model provider CRUD 经 `models` 域 + `config_meta` version bump 热生效（#775，不再渲染落盘）。
 
 ## 面板 dev 栈（容器化控制面，issue #594 / ADR 0013）
 
@@ -199,24 +98,23 @@ volume（卷物理路径在 Docker VM 内）→ dev/prod 寻址/路径分叉」�
 # 1. 克隆 researcher（build additional_contexts template= 默认 ../researcher；或设 RESEARCHER_DIR）
 git clone --depth 1 https://github.com/ACautomata/researcher ./researcher
 
-# 2.（仅真编排需）备派生镜像 + LLM key；仅起控制面/登录可跳过
-#    镜像 tag 须 = Dockerfile FROM 基线版本 tag（config 默认目标镜像钉的就是它，issue #695）——
-#    构建命令见上「派生镜像版本 tag 约定」（该命令只在那里维护一处，不在此重复拷贝）
+# 2.（仅真编排需）LLM key；仅起控制面/登录可跳过。fleet 目标镜像 = config.ts 钉版存量
+#    GHCR 引用（派生镜像构建链已随 T0 #801 退役），无需本地构建。
 export LLM_API_KEY=...
 
 # 3. 起 dev 控制面（server:8001，挂 docker.sock + panel-dev-db 卷）
 docker compose -f deploy/docker-compose.dev.yml up -d --build
 
-# 4. 前端仍宿主 vite dev（proxy /api、/ws → 127.0.0.1:8001）
+# 4. 前端仍宿主 vite dev（proxy /api → 127.0.0.1:8001）
 cd frontend && npm run dev
 
 # 改 server 代码 → 重建镜像
 docker compose -f deploy/docker-compose.dev.yml up -d --build server
 ```
 
-- **与 prod 对齐**：寻址（`host.docker.internal` + `0.0.0.0` 发布 + host-gateway）、模板/config
-  镜像内路径、`REDIS_URL`、`DATABASE_URL`、`OPENCLAW_FLEET_ROOT` 逐键一致；仅
-  `NODE_ENV=development`（走 config.ts dev 分支）与「server 暴露 8001 给宿主 vite」为 dev 特有。
+- **与 prod 对齐**：模板镜像内路径、`REDIS_URL`、`DATABASE_URL`、`OPENCLAW_FLEET_ROOT` 逐键一致；
+  仅 `NODE_ENV=development`（走 config.ts dev 分支）与「server 暴露 8001 给宿主 vite」为 dev 特有。
+  端口发布/健康探测/宿主寻址已随 T0 #801 退役（dev/prod 均无端口池与 host.docker.internal 映射）。
 - **双轨工作流**：纯逻辑快速迭代仍走宿主 `cd server && npm test` / `npm run typecheck`（不起服务、
   不摸卷）；凡要起服务 / 真编排 OpenClaw 容器（named volume 拓扑），一律走本容器化 dev 栈。
 

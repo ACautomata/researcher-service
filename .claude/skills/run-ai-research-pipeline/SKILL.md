@@ -63,14 +63,7 @@ chromium-cli --viewport=1280x900 \
   'Screenshot /tmp/ai-research-pipeline-screenshot.png'
 ```
 
-The Vite dev server proxies `/api` → `localhost:8001` and `/ws` → `localhost:8001` (WS upgrade), so `chromium-cli` against `:5173` exercises the full stack.
-
-### WebSocket (chat)
-
-```bash
-TOKEN="<JWT-from-login>"
-wscat -c "ws://localhost:5173/ws/chat/" -H "Sec-WebSocket-Protocol: access_token, $TOKEN"
-```
+The Vite dev server proxies `/api` → `localhost:8001`, so `chromium-cli` against `:5173` exercises the full stack.
 
 ## Run (human path)
 

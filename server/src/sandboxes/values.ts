@@ -1,6 +1,6 @@
 // 沙箱域常量（#776 · #747 E 节沙箱列 + story 58/59/61 后端面）。
 // 单一来源：容器/网络命名前缀、资源 limit 初值、闲置 stop 阈值、/lab 树根、保活命令。
-// 供纯逻辑（lifecycle.ts）、docker 适配层（dockerRuntime.ts）、files 域 lab 读面（FILE_ROOTS）、
+// 供纯逻辑（lifecycle.ts）、docker 适配层（dockerRuntime.ts）、files 域 lab 读面、
 // 测试复用。资源数字为规格初值（#747 开放点 8：待实测校准；生命周期服务构造可整体覆盖——
 // smoke 用小内存值验证 OOM 路径）。
 

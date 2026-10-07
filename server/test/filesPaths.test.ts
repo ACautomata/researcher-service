@@ -1,15 +1,10 @@
-// files path 请求层校验单测（#589 · paths.ts）。覆盖 #586 US10 穿越防护矩阵：
-// 绝对路径/反斜杠/`..`/NUL/超长（Unicode code points 计长）/归一化折叠/空串=树根。
+// files path 请求层校验单测（#589 · paths.ts；T0 #801 只读化收缩后形状）。
+// 覆盖 #586 US10 穿越防护矩阵：绝对路径/反斜杠/`..`/NUL/超长（Unicode code points 计长）/
+// 归一化折叠/空串=树根；root 三态（lab 现役 / wiki+workspace 退役→调用方转 60042）。
+// T0 删除的 parseFileWriteBody/requireWritableFileRoot/resolveWorkspaceAbsPath 随写面退役。
 
 import { describe, it, expect } from 'vitest'
-import {
-  normalizeFilePath,
-  normalizeFileRoot,
-  parseFileWriteBody,
-  requireFilePath,
-  requireFileRoot,
-  requireWritableFileRoot,
-} from '../src/files/paths'
+import { normalizeFilePath, normalizeFileRoot, requireFilePath, requireFileRoot } from '../src/files/paths'
 import { CODE } from '../src/codes'
 import { EnvelopeError } from '../src/envelope'
 
@@ -49,7 +44,7 @@ describe('normalizeFilePath 防护矩阵（US10）', () => {
     expect(normalizeFilePath('./x.md')).toEqual({ ok: true, path: 'x.md' })
   })
 
-  it('放宽 wiki .md 限制：任意扩展/无扩展都合法（lab 沙箱文本）', () => {
+  it('任意扩展/无扩展都合法（lab 沙箱文本）', () => {
     expect(normalizeFilePath('notes.txt').ok).toBe(true)
     expect(normalizeFilePath('code/main.ts').ok).toBe(true)
     expect(normalizeFilePath('README').ok).toBe(true)
@@ -58,145 +53,49 @@ describe('normalizeFilePath 防护矩阵（US10）', () => {
   it('路径长度按 Unicode code points 计（≤512；emoji 不误拒）', () => {
     const seg = 'x😀' // 2 code points / 3 code units
     const deep = Array.from({ length: 150 }, () => seg).join('/') // 3*150-1=449 cp，4*150-1=599 cu
-    expect(normalizeFilePath(deep).ok).toBe(true) // code points < 512，code units > 512
-    expect(normalizeFilePath(`${'a'.repeat(513)}`)).toEqual({ ok: false, errors: ['path 过长'] })
-  })
-
-  it('文件名首尾空白保留（不做 trim）', () => {
-    expect(normalizeFilePath(' leading.md')).toEqual({ ok: true, path: ' leading.md' })
+    expect(normalizeFilePath(deep).ok).toBe(true)
+    expect(Array.from((normalizeFilePath(deep) as { ok: true; path: string }).path).length).toBe(449)
+    expect(normalizeFilePath(`${seg}/`.repeat(180)).ok).toBe(false) // >512 cp
   })
 })
 
-describe('normalizeFileRoot', () => {
-  it('wiki / lab / workspace(legacy 只读) 合法（#776 root 契约）', () => {
-    expect(normalizeFileRoot('wiki')).toEqual({ ok: true, root: 'wiki' })
+describe('normalizeFileRoot（T0 #801：lab 现役，wiki/workspace 退役）', () => {
+  it('lab 合法；wiki/workspace 合法但退役（Result.ok=true，退役码判定归路由层）', () => {
     expect(normalizeFileRoot('lab')).toEqual({ ok: true, root: 'lab' })
+    expect(normalizeFileRoot('wiki')).toEqual({ ok: true, root: 'wiki' })
     expect(normalizeFileRoot('workspace')).toEqual({ ok: true, root: 'workspace' })
   })
 
-  it('其他值 / 大写 / 缺失 → 拒', () => {
-    expect(normalizeFileRoot('home').ok).toBe(false)
-    expect(normalizeFileRoot('WIKI').ok).toBe(false)
-    expect(normalizeFileRoot(undefined).ok).toBe(false)
+  it('其余值 → 拒（错误文案点名退役根）', () => {
+    const r = normalizeFileRoot('home')
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.errors[0]).toContain('lab')
   })
 })
 
-describe('parseFileWriteBody（POST/PUT body）', () => {
-  it('合法 body → {root,path,content} 逐字保留（写面只留 wiki）', () => {
-    expect(parseFileWriteBody({ root: 'wiki', path: 'out/report.md', content: '# 正文\n' })).toEqual({
-      root: 'wiki',
-      path: 'out/report.md',
-      content: '# 正文\n',
-    })
-  })
-
-  it('root=lab / root=workspace → 拒（只读面：写收敛 runner 工具 + 上传端点，#769/#776）', () => {
-    try {
-      parseFileWriteBody({ root: 'lab', path: 'out/report.md', content: 'x' })
-      throw new Error('应当抛 90002')
-    } catch (err) {
-      expect((err as { code?: number }).code).toBe(90002)
-      expect((err as { data?: unknown }).data).toMatchObject({ root: ['root=lab 为只读面（文件写经对话让 agent 改）'] })
-    }
-    try {
-      parseFileWriteBody({ root: 'workspace', path: 'out/report.md', content: 'x' })
-      throw new Error('应当抛 90002')
-    } catch (err) {
-      expect((err as { code?: number }).code).toBe(90002)
-      expect((err as { data?: unknown }).data).toMatchObject({ root: ['root=workspace 为 legacy 只读面（写经对话让 agent 改）'] })
-    }
-  })
-
-  it('root/path/content 错误一次性聚合进 data（对齐 wiki 双字段收集）', () => {
-    try {
-      parseFileWriteBody({ root: 'bogus', path: '../../evil', content: 42 })
-      throw new Error('应当抛 90002')
-    } catch (err) {
-      expect(err).toBeInstanceOf(EnvelopeError)
-      const e = err as EnvelopeError
-      expect(e.code).toBe(CODE.VALIDATION_FAILED)
-      expect(e.data).toHaveProperty('root')
-      expect(e.data).toHaveProperty('path')
-      expect(e.data).toHaveProperty('content')
-    }
-  })
-
-  it('path 空串（树根）→ 90002（写操作必须指向文件）', () => {
-    try {
-      parseFileWriteBody({ root: 'wiki', path: '', content: 'x' })
-      throw new Error('应当抛 90002')
-    } catch (err) {
-      expect((err as EnvelopeError).code).toBe(CODE.VALIDATION_FAILED)
-      expect((err as EnvelopeError).data).toHaveProperty('path')
-    }
-  })
-
-  it('path 缺省（undefined）→ 90002（body 校验不因归一化放行写树根）', () => {
-    try {
-      parseFileWriteBody({ root: 'wiki', content: 'x' })
-      throw new Error('应当抛 90002')
-    } catch (err) {
-      expect((err as EnvelopeError).code).toBe(CODE.VALIDATION_FAILED)
-      expect((err as EnvelopeError).data).toHaveProperty('path')
-    }
-  })
-
-  it('content 含未配对 surrogate → 90002（不落盘）；emoji 放行', () => {
-    try {
-      parseFileWriteBody({ root: 'wiki', path: 'a.md', content: 'before\ud800after' })
-      throw new Error('应当抛 90002')
-    } catch (err) {
-      expect((err as EnvelopeError).code).toBe(CODE.VALIDATION_FAILED)
-      expect((err as EnvelopeError).data).toMatchObject({ content: expect.any(Array) })
-    }
-    expect(parseFileWriteBody({ root: 'wiki', path: 'a.md', content: '😀' }).content).toBe('😀')
-  })
-})
-
-describe('requireFilePath / requireFileRoot（query 形态）', () => {
-  it('GET 允许空 path（allowEmpty）', () => {
-    expect(requireFilePath('', { allowEmpty: true })).toBe('')
-    expect(() => requireFilePath('../x')).toThrow(EnvelopeError)
-  })
-
-  it('DELETE 空 path → 90002（无删除语义）', () => {
-    try {
-      requireFilePath('')
-      throw new Error('应当抛 90002')
-    } catch (err) {
-      expect((err as EnvelopeError).code).toBe(CODE.VALIDATION_FAILED)
-      expect((err as EnvelopeError).data).toHaveProperty('path')
-    }
-  })
-
-  it('requireFileRoot 非法 → 90002 + data.root', () => {
+describe('requireFileRoot / requireFilePath（抛信封面）', () => {
+  it('requireFileRoot 非法 → EnvelopeError 90002 + data.root', () => {
     try {
       requireFileRoot('home')
-      throw new Error('应当抛 90002')
-    } catch (err) {
-      const e = err as EnvelopeError
-      expect(e.code).toBe(CODE.VALIDATION_FAILED)
-      expect(e.data).toHaveProperty('root')
+      expect.unreachable()
+    } catch (e) {
+      expect(e).toBeInstanceOf(EnvelopeError)
+      expect((e as EnvelopeError).code).toBe(CODE.VALIDATION_FAILED)
+      expect((e as EnvelopeError).data).toHaveProperty('root')
     }
   })
 
-  it('requireWritableFileRoot：wiki 放行；lab/workspace → 90002（文案与 body 面同源单一来源）', () => {
-    expect(requireWritableFileRoot('wiki')).toBe('wiki')
+  it('requireFilePath：空值（缺省/空串）默认拒 → 90002 + data.path；allowEmpty 放行树根（HTTP query 无法区分未传与空串，单一开关）', () => {
+    expect(() => requireFilePath(undefined)).toThrow(EnvelopeError)
+    expect(requireFilePath('a/b.md')).toBe('a/b.md')
     try {
-      requireWritableFileRoot('lab')
-      throw new Error('应当抛 90002')
-    } catch (err) {
-      const e = err as EnvelopeError
-      expect(e.code).toBe(CODE.VALIDATION_FAILED)
-      expect(e.data).toMatchObject({ root: ['root=lab 为只读面（文件写经对话让 agent 改）'] })
+      requireFilePath('')
+      expect.unreachable()
+    } catch (e) {
+      expect((e as EnvelopeError).code).toBe(CODE.VALIDATION_FAILED)
+      expect((e as EnvelopeError).data).toHaveProperty('path')
     }
-    try {
-      requireWritableFileRoot('workspace')
-      throw new Error('应当抛 90002')
-    } catch (err) {
-      const e = err as EnvelopeError
-      expect(e.code).toBe(CODE.VALIDATION_FAILED)
-      expect(e.data).toMatchObject({ root: ['root=workspace 为 legacy 只读面（写经对话让 agent 改）'] })
-    }
+    expect(requireFilePath(undefined, { allowEmpty: true })).toBe('')
+    expect(requireFilePath('', { allowEmpty: true })).toBe('')
   })
 })

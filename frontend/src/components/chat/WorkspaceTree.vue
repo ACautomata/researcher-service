@@ -89,15 +89,15 @@ const isEmpty = computed(() => !!props.tree && props.tree.files.length === 0 && 
   <div class="ws-tree" data-test="ws-tree">
     <div v-if="treeError" class="state" data-test="tree-error">
       <span class="ic">⚠️</span>
-      <span>无法读取 workspace：{{ treeError }}</span>
+      <span>无法读取 lab 文件：{{ treeError }}</span>
     </div>
     <div v-else-if="!tree" class="state" data-test="tree-loading">
       <span class="ic">⋯</span>
-      <span>正在读取 workspace…</span>
+      <span>正在读取 lab 文件…</span>
     </div>
     <div v-else-if="isEmpty" class="state" data-test="tree-empty">
       <span class="ic">📁</span>
-      <span>workspace 为空——agent 创建的文件会出现在这里</span>
+      <span>lab 目录为空——agent 创建的文件会出现在这里</span>
     </div>
     <template v-else>
       <div

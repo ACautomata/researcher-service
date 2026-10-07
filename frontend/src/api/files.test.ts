@@ -25,7 +25,7 @@ describe('files api', () => {
     vi.stubGlobal('fetch', vi.fn())
   })
 
-  it('listWorkspaceTree GETs recursive workspace tree and unwraps envelope data', async () => {
+  it('listLabTree GETs recursive lab tree and unwraps envelope data', async () => {
     const data = {
       kind: 'dir' as const,
       path: '',
@@ -44,7 +44,7 @@ describe('files api', () => {
     expect(path).toBe('/api/v1/containers/demo/files?root=lab&recursive=true')
   })
 
-  it('listWorkspaceTree encodes container name', async () => {
+  it('listLabTree encodes container name', async () => {
     ;(globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
       mockResp({ code: 0, message: 'ok', data: { kind: 'dir', path: '', files: [], truncated: false } }),
     )
@@ -53,7 +53,7 @@ describe('files api', () => {
     expect(path).toBe('/api/v1/containers/my%2Fsession/files?root=lab&recursive=true')
   })
 
-  it('listWorkspaceTree surfaces truncated flag from envelope', async () => {
+  it('listLabTree surfaces truncated flag from envelope', async () => {
     ;(globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
       mockResp({
         code: 0,
@@ -65,7 +65,7 @@ describe('files api', () => {
     expect(tree.truncated).toBe(true)
   })
 
-  it('readWorkspaceFile GETs single file with path query and unwraps envelope', async () => {
+  it('readLabFile GETs single file with path query and unwraps envelope', async () => {
     const data = {
       kind: 'file' as const,
       path: 'notes/plan.md',
@@ -84,7 +84,7 @@ describe('files api', () => {
     expect(path).toBe('/api/v1/containers/demo/files?root=lab&path=notes%2Fplan.md')
   })
 
-  it('readWorkspaceFile passes through binary content:null flag', async () => {
+  it('readLabFile passes through binary content:null flag', async () => {
     ;(globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
       mockResp({
         code: 0,
@@ -105,7 +105,7 @@ describe('files api', () => {
     expect(file.content).toBeNull()
   })
 
-  it('readWorkspaceFile passes through oversized content:null flag', async () => {
+  it('readLabFile passes through oversized content:null flag', async () => {
     ;(globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
       mockResp({
         code: 0,
@@ -126,14 +126,14 @@ describe('files api', () => {
     expect(file.content).toBeNull()
   })
 
-  it('readWorkspaceFile throws ApiError(60040) on envelope not-found', async () => {
+  it('readLabFile throws ApiError(60040) on envelope not-found', async () => {
     ;(globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
       mockResp({ code: 60040, message: '文件不存在', data: null }),
     )
     await expect(readLabFile('demo', 'missing.md')).rejects.toMatchObject({ code: 60040 })
   })
 
-  it('readWorkspaceFile throws ApiError(20040) on envelope forbidden', async () => {
+  it('readLabFile throws ApiError(50002) on envelope forbidden', async () => {
     ;(globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
       mockResp({ code: 50002, message: '会话不存在或无权访问', data: null }),
     )

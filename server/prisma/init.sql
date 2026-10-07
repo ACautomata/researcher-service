@@ -58,29 +58,10 @@ CREATE TABLE "containers" (
     "containerId" TEXT NOT NULL DEFAULT '',
     "status" TEXT NOT NULL DEFAULT 'creating',
     "image" TEXT NOT NULL,
-    "upgradeAttempts" INTEGER NOT NULL DEFAULT 0,
     "leaseExpiresAt" DATETIME,
     "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" DATETIME NOT NULL,
     CONSTRAINT "containers_ownerId_fkey" FOREIGN KEY ("ownerId") REFERENCES "users" ("id") ON DELETE CASCADE ON UPDATE CASCADE
-);
-
--- CreateTable
-CREATE TABLE "pairings" (
-    "id" TEXT NOT NULL PRIMARY KEY,
-    "containerId" TEXT NOT NULL,
-    "deviceId" TEXT NOT NULL DEFAULT '',
-    "publicKeyPem" TEXT NOT NULL DEFAULT '',
-    "privateKeyPem" TEXT NOT NULL DEFAULT '',
-    "privateKeyPemEncrypted" BOOLEAN NOT NULL DEFAULT false,
-    "deviceToken" TEXT NOT NULL DEFAULT '',
-    "deviceTokenEncrypted" BOOLEAN NOT NULL DEFAULT false,
-    "scopesJson" TEXT NOT NULL DEFAULT '[]',
-    "pairingRequestId" TEXT NOT NULL DEFAULT '',
-    "status" TEXT NOT NULL DEFAULT 'unpaired',
-    "attemptVersion" INTEGER NOT NULL DEFAULT 0,
-    "updatedAt" DATETIME NOT NULL,
-    CONSTRAINT "pairings_containerId_fkey" FOREIGN KEY ("containerId") REFERENCES "containers" ("id") ON DELETE CASCADE ON UPDATE CASCADE
 );
 
 -- CreateTable
@@ -378,13 +359,7 @@ CREATE INDEX "refresh_tokens_userId_idx" ON "refresh_tokens"("userId");
 CREATE UNIQUE INDEX "containers_name_key" ON "containers"("name");
 
 -- CreateIndex
-CREATE UNIQUE INDEX "containers_port_key" ON "containers"("port");
-
--- CreateIndex
 CREATE INDEX "containers_ownerId_idx" ON "containers"("ownerId");
-
--- CreateIndex
-CREATE UNIQUE INDEX "pairings_containerId_key" ON "pairings"("containerId");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "model_providers_ownerId_providerId_key" ON "model_providers"("ownerId", "providerId");

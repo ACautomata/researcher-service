@@ -11,8 +11,6 @@ vi.mock('@/api/containers', () => ({
   listInstances: vi.fn(),
   createInstance: vi.fn(),
   removeInstance: vi.fn(),
-  // #793：配对面自 api/chat.ts 移入 api/containers.ts，mock 随迁
-  triggerPair: vi.fn(),
 }))
 vi.mock('element-plus', async (importOriginal) => {
   const actual = (await importOriginal()) as Record<string, unknown>
@@ -24,7 +22,7 @@ vi.mock('element-plus', async (importOriginal) => {
 })
 
 import ContainersView from '@/views/ContainersView.vue'
-import { createInstance, listInstances, removeInstance, triggerPair } from '@/api/containers'
+import { createInstance, listInstances, removeInstance } from '@/api/containers'
 
 const SAMPLE = {
   name: 'demo',
@@ -34,7 +32,6 @@ const SAMPLE = {
   image: 'img',
   container_id: 'cid',
   created_at: '2026-07-24T00:00:00Z',
-  pairing: { status: 'unpaired', device_id: '', scopes: [], pairing_request_id: '' },
 }
 
 const stubs = {
@@ -132,7 +129,7 @@ describe('ContainersView', () => {
   })
 
   it('polls the list periodically while mounted and stops on unmount (codex R2 :78)', async () => {
-    // 新起 gateway 由 unhealthy 转 healthy、容器被外部停止等运行时变化须靠轮询反映。
+    // 容器状态翻转（creating→running）、被外部停止等运行时变化须靠轮询反映。
     vi.useFakeTimers()
     const wrapper = mount(ContainersView, { global: { plugins: [createPinia()], stubs } })
     await flushPromises()
@@ -248,113 +245,4 @@ describe('ContainersView', () => {
     expect(wrapper.text()).toContain('disk full')
   })
 
-  // ---------------------------- 配对状态（issue #40 + #340-C 徽标）----------------------------
-
-  it('loads pairing status from listInstances payload', async () => {
-    ;(listInstances as ReturnType<typeof vi.fn>).mockResolvedValue([
-      { ...SAMPLE, pairing: { status: 'paired', scopes: ['operator.read'] } },
-    ])
-    const wrapper = mount(ContainersView, { global: { plugins: [createPinia()], stubs } })
-    await flushPromises()
-    expect(listInstances).toHaveBeenCalled()
-    expect((wrapper.vm as unknown as { pairingStatus: (n: string) => string }).pairingStatus('demo')).toBe('paired')
-  })
-
-  it('#340-C: 配对徽标按状态着色（paired→success/pending→warning/error→warning/unpaired→info）', async () => {
-    ;(listInstances as ReturnType<typeof vi.fn>).mockResolvedValue([
-      { ...SAMPLE, pairing: { status: 'paired' } },
-      { ...SAMPLE, name: 'pending-box', pairing: { status: 'pending', pairing_request_id: 'r1' } },
-      { ...SAMPLE, name: 'err-box', pairing: { status: 'error', detail: 'boom' } },
-      { ...SAMPLE, name: 'unpaired-box', pairing: { status: 'unpaired' } },
-    ])
-    const wrapper = mount(ContainersView, { global: { plugins: [createPinia()], stubs } })
-    await flushPromises()
-    const vm = wrapper.vm as unknown as {
-      pairingTagType: (s: string) => string
-      pairingLabel: (s: string) => string
-      pairingStatus: (n: string) => string
-    }
-    expect(vm.pairingTagType('paired')).toBe('success')
-    expect(vm.pairingTagType('pending')).toBe('warning')
-    expect(vm.pairingTagType('error')).toBe('warning')
-    expect(vm.pairingTagType('unpaired')).toBe('info')
-    expect(vm.pairingLabel('paired')).toBe('已配对')
-    expect(vm.pairingLabel('pending')).toBe('配对中')
-    expect(vm.pairingLabel('error')).toBe('配对失败')
-    expect(vm.pairingLabel('unpaired')).toBe('未配对')
-    expect(vm.pairingStatus('err-box')).toBe('error')
-  })
-
-  it('#340-C: 配对失败（error）行内重试 → triggerPair 重新触发', async () => {
-    ;(listInstances as ReturnType<typeof vi.fn>).mockResolvedValue([
-      { ...SAMPLE, pairing: { status: 'error', detail: 'handshake failed' } },
-    ])
-    ;(triggerPair as ReturnType<typeof vi.fn>).mockResolvedValue({ status: 'paired' })
-    const wrapper = mount(ContainersView, { global: { plugins: [createPinia()], stubs } })
-    await flushPromises()
-    await (wrapper.vm as unknown as { pair: (n: string) => Promise<void> }).pair('demo')
-    await flushPromises()
-    expect(triggerPair).toHaveBeenCalledWith('demo')
-    // 重试成功 → 状态翻转为 paired
-    expect((wrapper.vm as unknown as { pairingStatus: (n: string) => string }).pairingStatus('demo')).toBe('paired')
-  })
-
-  it('triggerPair calls the api and refreshes pairing status', async () => {
-    ;(listInstances as ReturnType<typeof vi.fn>).mockResolvedValue([SAMPLE])
-    ;(triggerPair as ReturnType<typeof vi.fn>).mockResolvedValue({ status: 'pending', pairing_request_id: 'r1' })
-    const wrapper = mount(ContainersView, { global: { plugins: [createPinia()], stubs } })
-    await flushPromises()
-
-    await (wrapper.vm as unknown as { pair: (n: string) => Promise<void> }).pair('demo')
-    await flushPromises()
-    expect(triggerPair).toHaveBeenCalledWith('demo')
-    // pending 态提示宿主 approve（验收 3 重试路径）
-    const { ElMessage } = await import('element-plus')
-    expect(ElMessage.warning).toHaveBeenCalled()
-  })
-
-  // ---------------------------- #702 升级状态标记（需升级 / 升级中 / 升级失败）----------------------------
-
-  it('#702: 三种升级标记文案与视觉状态两两互异；无需升级不渲染', async () => {
-    const wrapper = mount(ContainersView, { global: { plugins: [createPinia()], stubs } })
-    await flushPromises()
-    const vm = wrapper.vm as unknown as {
-      upgradeBadgeOf: (r: { status: string; needs_upgrade?: boolean }) => { label: string; tone: string } | null
-    }
-    expect(vm.upgradeBadgeOf({ status: 'running', needs_upgrade: true })).toEqual({
-      label: '需升级',
-      tone: 'warning',
-    })
-    expect(vm.upgradeBadgeOf({ status: 'upgrading', needs_upgrade: true })).toEqual({
-      label: '升级中',
-      tone: 'primary',
-    })
-    expect(vm.upgradeBadgeOf({ status: 'upgrade_failed', needs_upgrade: true })).toEqual({
-      label: '升级失败',
-      tone: 'danger',
-    })
-    expect(vm.upgradeBadgeOf({ status: 'running', needs_upgrade: false })).toBeNull()
-  })
-
-  it('#702: 列表挂载「升级」列（徽标经 scoped slot 取自 upgradeBadgeOf，非硬编码文案）', async () => {
-    ;(listInstances as ReturnType<typeof vi.fn>).mockResolvedValue([
-      { ...SAMPLE, name: 'need', needs_upgrade: true },
-      { ...SAMPLE, name: 'doing', status: 'upgrading', needs_upgrade: true },
-      { ...SAMPLE, name: 'failed', status: 'upgrade_failed', needs_upgrade: true },
-    ])
-    const wrapper = mount(ContainersView, { global: { plugins: [createPinia()], stubs } })
-    await flushPromises()
-    // el-table 各列在 stub 下不渲染行内容，故断言「升级」列存在（列 slot 的取值函数在上一用例已钉死）
-    const labels = wrapper
-      .findAllComponents({ name: 'ElTableColumn' })
-      .map((c) => c.attributes('label'))
-    expect(labels).toContain('升级')
-    // 三态徽标经同一 mapper 产出（数据驱动，逐行按 status/needs_upgrade 分派）
-    const vm = wrapper.vm as unknown as {
-      upgradeBadgeOf: (r: { status: string; needs_upgrade?: boolean }) => { label: string } | null
-    }
-    expect(vm.upgradeBadgeOf({ status: 'running', needs_upgrade: true })?.label).toBe('需升级')
-    expect(vm.upgradeBadgeOf({ status: 'upgrading', needs_upgrade: true })?.label).toBe('升级中')
-    expect(vm.upgradeBadgeOf({ status: 'upgrade_failed', needs_upgrade: true })?.label).toBe('升级失败')
-  })
 })

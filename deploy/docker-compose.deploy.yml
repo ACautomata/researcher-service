@@ -1,12 +1,13 @@
 # deploy/docker-compose.deploy.yml —— 面板生产栈（BaoTa 边缘 TLS 之后的应用层）
 #
 # 由 CD（.github/workflows/cd.yml）scp 到宿主 /www/panel/ 并经 `docker compose ... up -d` 启动。
+# 由 CD（.github/workflows/cd.yml）scp 到宿主 /www/panel/ 并经 `docker compose ... up -d` 启动。
 # 三服务：frontend（唯一对宿主暴露，loopback 18080 供 BaoTa 反代）/ server（内部，TS/Express 控制面，
-# docker.sock 编排 OpenClaw 容器 + SQLite 卷；home 模板与 openclaw.json 构建期入镜像）/ redis（内部，BullMQ 队列）。
+# docker.sock 编排 OpenClaw 容器 + SQLite 卷；home 模板构建期入镜像）/ redis（内部，BullMQ 队列）。
 # 宿主数据挂载唯一豁免：/var/run/docker.sock（ADR 0013，spec §5.4 已接受等价 root）。
 # （#341 M9：backend 服务退役 Django，切换为 server 服务跑 Express 控制面。）
 #
-# 运行时敏感值（JWT_SECRET / PANEL_PUBLIC_ORIGIN / LLM_API_KEY / CREDENTIAL_ENCRYPTION_KEYS /
+# 运行时敏感值（JWT_SECRET / LLM_API_KEY / CREDENTIAL_ENCRYPTION_KEYS /
 # AUTOFIGURE_IMAGE_API_KEY / FAL_KEY）经同目录 .env（env_file）注入，不落盘进 git；
 # 非敏感固定项（REDIS_URL/OPENCLAW_TEMPLATE_DIR/端口/AUTOFIGURE_IMAGE_MODEL）直接写在本文件
 # 或 .env。AutoFigure 键清单见 server env 段注释（#792 起）。
@@ -48,25 +49,14 @@ services:
       # （server/Dockerfile COPY --from=template，CD 构建时 clone researcher 注入；ADR 0013
       # 模板入镜像，不再挂载宿主 /srv/openclaw/template）。
       OPENCLAW_TEMPLATE_DIR: /app/templates/researcher
-      # openclaw.json 模板文件（配置单一来源，与单容器 compose 共用一份 deploy/openclaw.json）：
-      # 构建期 COPY 进镜像（server/Dockerfile COPY --from=deploy → /app/deploy/openclaw.json），
-      # 此处显式 pin 镜像内路径（默认 <cwd>/../deploy 解析到 /app/../deploy 不存在，首次创建容器
-      # 即 90003）。CD 不再分发/挂载宿主 openclaw.json。
-      OPENCLAW_TEMPLATE_JSON: /app/deploy/openclaw.json
       # SQLite 持久化：server 经 DATABASE_URL（Prisma driver adapter）读本 named volume 挂载点，
       # 容器重建数据不丢。必须显式绝对路径——apply-schema.mjs 的 file: 前缀剥离对绝对路径正确。
       DATABASE_URL: file:/app/db/db.sqlite3
-      # #295 生产 gateway 寻址（server 容器化）：控制面容器经 host.docker.internal 寻址宿主上
-      # 0.0.0.0 发布的 fleet gateway 端口——健康探测/WS 配对/对话共用同一 host（config.ts 默认
-      # 127.0.0.1 保持本地/单机 loopback 零回归）。0.0.0.0 把整个端口池暴露到宿主网络：
-      # 明文 ws 流量由 gateway 强制 token 认证兜底（deploy/openclaw.json
-      # controlUi.allowInsecureAuth=false；网关未开 tls.enabled，跨桥接走明文），宝塔防火墙
-      # 仅开 80/443 收敛公网面。生产若需传输加密，后续在网关开 tls 并切 OPENCLAW_FLEET_WS_SCHEME=wss。
-      OPENCLAW_FLEET_WS_HOST: host.docker.internal
-      OPENCLAW_FLEET_PORT_BIND_HOST: 0.0.0.0
       # fleet 根（容器内工作目录，无宿主挂载）：createComplete 的 instances/<id>/ 目录与
       # provision cp 都落在容器私有 /fleet（named volume 拓扑下容器不 bind 宿主树，ADR 0011/0013；
       # 容器重建即空、create 幂等重建）。readFleetRoot 生产校验绝对路径——显式 pin 防相对路径 fallback。
+      # 端口发布/健康探测/WS 寻址已随 T0 #801 退役（端口池废除、容器不做宿主寻址）——
+      # 宿主寻址相关 env 与 extra_hosts 均已移除。
       OPENCLAW_FLEET_ROOT: /fleet
       # AutoFigure（#792 插件化收口起回归）：figure 生成 = server 进程内插件管线。
       # 三个必填键经 .env（env_file）注入，生产缺键 =
@@ -76,13 +66,9 @@ services:
       #   FAL_KEY                       fal 云计算 key（敏感，只走 .env）
       # 可选键：AUTOFIGURE_IMAGE_BASE_URL（缺省国际区）、AUTOFIGURE_SVG_MODEL（缺省 owner
       # 默认链 primary）。键声明单源 = plugins/autofigure/manifest.ts configSchema。
-    extra_hosts:
-      # Linux host-gateway 映射：server 容器访问宿主 loopback 接口（host.docker.internal）。
-      # macOS Docker Desktop 自动提供该名，此处显式声明保证 Linux 生产宿主（BaoTa）可解析。
-      - "host.docker.internal:host-gateway"
     volumes:
       # 唯一宿主数据挂载（ADR 0013 豁免）：控制面等价 root，经 docker.sock 增删查 OpenClaw 容器
-      # （spec §5.4 已明示风险）。其余数据（SQLite）走 named volume，模板/openclaw.json 在镜像内。
+      # （spec §5.4 已明示风险）。其余数据（SQLite）走 named volume，模板在镜像内。
       - /var/run/docker.sock:/var/run/docker.sock
       # SQLite 持久化：server 经 DATABASE_URL 指向本 named volume 挂载点 /app/db/db.sqlite3，
       # 容器重建数据不丢。

@@ -1,6 +1,7 @@
 // 编排器 Port 测试（接缝 #5）：注入假 docker + 内存假队列，断言
-// 5 态机 + 取消标志 + 端口入队前分配 + 补偿（bind 换端口重试 / REMOVING 可重试 / 端口耗尽 / 残留目录）。
+// 5 态机 + 取消标志 + 补偿（REMOVING 可重试 / 残留目录 / 取代系绑定）。
 // 覆盖 issue #334 验收标准的编排层（非 HTTP 壳）。
+// T0 #801：端口分配/bind 冲突换端口/端口耗尽用例随端口池退役删除。
 
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest'
 import { existsSync } from 'node:fs'
@@ -11,7 +12,6 @@ import { seedUser } from './helpers'
 import {
   InstanceExists,
   InstanceCleanupError,
-  PortAllocationError,
   ConfigurationError,
   QuotaExceeded,
 } from '../src/containers/errors'
@@ -32,12 +32,10 @@ describe('orchestrator (接缝 #5 编排器 Port)', () => {
     await ctx.cleanup()
   })
 
-  // ---- 端口入队前分配 + 5 态机 creating→running ----
-  it('create 同步预占返 creating 快照（端口已分配），complete 后 running', async () => {
+  // ---- create 预占 + 5 态机 creating→running ----
+  it('create 同步预占返 creating 快照，complete 后 running', async () => {
     const inst = await fl.orch.createReserve('web-one', ownerId)
-    // 端口入队前分配：reserve 即带 port（池最小空闲 19000），status=creating
     expect(inst.status).toBe('creating')
-    expect(inst.port).toBe(19000)
     expect(inst.containerId).toBe('')
     // home 路径固化 instances/<id>/home（代系绑定，#360）；token 已生成不落盘
     expect(inst.homeDir).toBe(path.join(fl.fleetRoot, 'instances', inst.id, 'home'))
@@ -47,20 +45,13 @@ describe('orchestrator (接缝 #5 编排器 Port)', () => {
     const row = await ctx.prisma.container.findUnique({ where: { name: 'web-one' } })
     expect(row?.status).toBe('running')
     expect(row?.containerId).not.toBe('')
-    // runtime 已起容器，bind-mount home + 端口映射 + label 所有权
+    // runtime 已起容器（label 所有权断言；T0 #801：无端口映射、无 config 渲染写盘——容器读镜像内默认配置）
     const rec = fl.runtime.containers.get('web-one')
-    expect(rec?.spec.hostPort).toBe(19000)
     expect(rec?.info.instanceName).toBe('web-one')
-    // config 已经 FileArchive.putArchive 落容器内（#591 静态 config）+ 安全不变量（port 18789 /
-    // bind lan / token 占位）；createComplete 顺序：create（不启动）→ 写 config → start
-    const cfg = JSON.parse(await fl.archive.readConfig('web-one'))
-    expect(cfg.gateway.port).toBe(18789)
-    expect(cfg.gateway.bind).toBe('lan')
-    expect(cfg.gateway.auth.token).toBe('${GATEWAY_TOKEN}')
-    expect(rec?.info.running).toBe(true) // start 后 running（config 已先落容器内）
+    expect(rec?.info.running).toBe(true)
   })
 
-  it('LLM key 缺失 → ConfigurationError（90003），不占端口不建行', async () => {
+  it('LLM key 缺失 → ConfigurationError（90003），不建行', async () => {
     const fl2 = makeFleetTest(ctx.prisma, { config: { llmApiKey: '' } })
     await expect(fl2.orch.createReserve('nokey', ownerId)).rejects.toBeInstanceOf(ConfigurationError)
     expect(await ctx.prisma.container.findUnique({ where: { name: 'nokey' } })).toBeNull()
@@ -87,7 +78,7 @@ describe('orchestrator (接缝 #5 编排器 Port)', () => {
     // id 模式下每代用唯一 id 派生 instances/<id>/home；delete+同名 recreate 不重用上代目录。
     // 修前 homeDir 基于 name（instances/<name>/home），recreate 重用同路径——在飞 wiki/长扫描操作
     // 期间容器被删+同名 recreate 给他人会读写新 owner 数据（#360 根因）。
-    const flg = makeFleetTest(ctx.prisma, { config: { portStart: 19720, portEnd: 19730 } })
+    const flg = makeFleetTest(ctx.prisma, )
     const inst1 = await flg.orch.create('gen-box', ownerId)
     const dir1 = path.join(flg.fleetRoot, 'instances', inst1.id)
     expect(inst1.homeDir).toBe(path.join(dir1, 'home'))
@@ -104,37 +95,14 @@ describe('orchestrator (接缝 #5 编排器 Port)', () => {
     expect(existsSync(dir1)).toBe(false) // 旧代系目录未随同名 recreate 复活
   })
 
-  it('bind 端口冲突就地换端口重试：最终 running，端口前移', async () => {
-    // 19000 已被前面容器占用；注入 19001 也 bind 冲突 → 应跳到 19002
-    fl.runtime.bindConflictPorts.add(19001)
-    const inst = await fl.orch.createReserve('bindy', ownerId)
-    const reservedPort = inst.port // 入队前分配的端口（19001，因 19000 已占）
-    fl.runtime.bindConflictPorts.add(reservedPort)
-    await fl.orch.createComplete(inst, true)
-    const row = await ctx.prisma.container.findUnique({ where: { name: 'bindy' } })
-    expect(row?.status).toBe('running')
-    expect(row?.port).not.toBe(reservedPort) // 已就地换端口
-    expect(fl.runtime.containers.get('bindy')?.spec.hostPort).toBe(row?.port)
-  })
-
   it('非 bind 失败：后台保留 ERROR 行（preserveErrorRow），可 list+delete 感知', async () => {
-    fl.runtime.failRunFor.add('broken')
+    fl.runtime.failCreateFor.add('broken')
     const inst = await fl.orch.createReserve('broken', ownerId)
     await expect(fl.orch.createComplete(inst, true)).rejects.toThrow()
     const row = await ctx.prisma.container.findUnique({ where: { name: 'broken' } })
     expect(row?.status).toBe('error') // ERROR 行保留，不静默消失
     // 目录已回滚清理
     expect(existsSync(path.join(fl.fleetRoot, 'instances', inst.id))).toBe(false)
-  })
-
-  it('端口池耗尽 → PortAllocationError（90004）', async () => {
-    // 极小池（2 候选），全部 bind 冲突 → 重试预算（=池大小）耗尽
-    const flSmall = makeFleetTest(ctx.prisma, {
-      config: { portStart: 19500, portEnd: 19501 },
-    })
-    flSmall.runtime.bindConflictPorts.add(19500).add(19501)
-    const inst = await flSmall.orch.createReserve('exhaust', ownerId)
-    await expect(flSmall.orch.createComplete(inst, true)).rejects.toBeInstanceOf(PortAllocationError)
   })
 
   it('取消标志：delete 在飞 create，检查点检出即统一回滚后终止', async () => {
@@ -147,15 +115,10 @@ describe('orchestrator (接缝 #5 编排器 Port)', () => {
     expect(fl.runtime.containers.has('cancelme')).toBe(false)
   })
 
-  it('delete 完整生命周期：stop+remove 容器、清目录、删行、触发 evict', async () => {
-    const evicted: { name: string; port: number }[] = []
-    // 显式旧 bind：本用例断言 chown 前置（宿主目录清理语义；named volume 模式跳过 chown，#590）
-    const fl3 = makeFleetTest(ctx.prisma, {
-      config: { namedVolumes: false },
-      onEvict: async (i) => {
-        evicted.push(i)
-      },
-    })
+  it('delete 完整生命周期：stop+remove 容器、清目录、删行', async () => {
+    // 显式旧 bind：本用例断言 chown 前置（宿主目录清理语义；named volume 模式跳过 chown，#590）。
+    // （evict 逐出钩子随 T0 #801 chat pool 退役删除。）
+    const fl3 = makeFleetTest(ctx.prisma, { config: { namedVolumes: false } })
     await fl3.orch.create('delme', ownerId)
     const created = await ctx.prisma.container.findUnique({ where: { name: 'delme' } })
     expect(created).not.toBeNull()
@@ -165,8 +128,6 @@ describe('orchestrator (接缝 #5 编排器 Port)', () => {
     expect(existsSync(path.join(fl3.fleetRoot, 'instances', created!.id))).toBe(false)
     // chown 已被调用（root 容器 home 清理前置）
     expect(fl3.runtime.execCalls.some((c) => c.cmd[0] === 'chown' && c.cmd.includes(HOME_BIND))).toBe(true)
-    // evict 钩子已触发（携带删除前的 name/port 供逐出）
-    expect(evicted).toEqual([{ name: 'delme', port: created!.port }])
   })
 
   it('delete 清理失败：行标 REMOVING 可重试（20045）', async () => {
@@ -214,7 +175,7 @@ describe('orchestrator (接缝 #5 编排器 Port)', () => {
     expect(ownList.map((i) => i.name)).toEqual(['a-box'])
     const all = await fl.orch.list({})
     expect(all.map((i) => i.name)).toEqual(expect.arrayContaining(['a-box', 'b-box']))
-    // running（runtime 实况）+ health（health probe true → healthy）
+    // running（runtime 实况推导；T0 #801：活性 = docker inspect Running，健康探针退役）
     const aItem = all.find((i) => i.name === 'a-box')!
     expect(aItem.status).toBe('running')
     expect(aItem.health).toBe('healthy')
@@ -243,7 +204,7 @@ describe('orchestrator (接缝 #5 编排器 Port)', () => {
 
   it('配额 check-then-act 收紧：并发不同名 create 同 owner 不绕过配额（Codex C4）', async () => {
     // 独立 fl + 独立端口区间：隔离前面累积的 DB 行占端口，让配额逻辑成为唯一变量。
-    const qfl = makeFleetTest(ctx.prisma, { config: { portStart: 19400, portEnd: 19410 } })
+    const qfl = makeFleetTest(ctx.prisma, )
     const qOwner = await seedUser(ctx.prisma, 'qowner', 'pw-qowner-secure')
     // maxContainers=1 + 并发两个不同名 create：按 owner 串行化后恰一个成功、一个 QuotaExceeded，
     // 不双双绕过 count 双创建超配额（修复前 routes 层 count→create 的 check-then-act 让两者都过 count）。
@@ -268,7 +229,7 @@ describe('orchestrator (接缝 #5 编排器 Port)', () => {
   //   文件；直接 remove 让非 root 控制面永久删不掉目录、行卡 REMOVING 无解。修法：start 恢复 → chown
   //   修复 → 再 stop；修复失败 → 抛 InstanceCleanupError 保留容器 + REMOVING 行（不 remove 保留机会）。
   const chownFleet = () =>
-    makeFleetTest(ctx.prisma, { config: { portStart: 19600, portEnd: 19610, namedVolumes: false } })
+    makeFleetTest(ctx.prisma, { config: { namedVolumes: false } })
 
   it('chown: running 容器 chown 失败（ro 文件报错属预期）→ best-effort 吞掉、正常清理', async () => {
     const fl2 = chownFleet()
@@ -322,7 +283,7 @@ describe('orchestrator (接缝 #5 编排器 Port)', () => {
   // DB 记账状态 inst.status，health 保持 stopped。
 
   it('list: daemon 故障时降级保留记账状态（stopped 行不硬编码 running）', async () => {
-    const fl5 = makeFleetTest(ctx.prisma, { config: { portStart: 19620, portEnd: 19630 } })
+    const fl5 = makeFleetTest(ctx.prisma, )
     await fl5.orch.create('r4-insp', ownerId)
     // 模拟「已对账/存储为 stopped」的行（create 后行记账 running，此处改为 stopped 表示已识别为停止）。
     await ctx.prisma.container.update({ where: { name: 'r4-insp' }, data: { status: 'stopped' } })
@@ -335,32 +296,11 @@ describe('orchestrator (接缝 #5 编排器 Port)', () => {
     expect(item!.health).toBe('stopped')
   })
 
-  // ---- 端口预留重试预算 = 池候选数（Codex 第四轮⑥[P2]）----
-  // reserveRow 固定 MAX_PORT_RETRIES=8 次重试：并发不同 owner 都选中同一最小空闲端口时，SQLite 唯一
-  // 约束只放行一个，其余须重试下一候选——固定 8 次在并发 ≥9 时耗尽（第 9 个请求 8 次全撞已分配端口
-  // → 误报 90004 池耗尽），而池实际大量空闲。修法：预算 = 端口池候选数（每候选至多尝试一次）。
-
-  it('端口预留：并发 10 不同名（池 16 候选）全部成功，不误报池耗尽', async () => {
-    const pfl = makeFleetTest(ctx.prisma, { config: { portStart: 19500, portEnd: 19515 } })
-    const pOwner = await seedUser(ctx.prisma, 'r4ports', 'pw-r4ports-secure')
-    // 并发 10 个不同名 reserve：全部撞同一最小空闲端口（19500）→ SQLite 仲裁 + 重试下一候选。
-    // 修前固定 8 次重试：至少 2 个在撞满 8 个已占端口后抛 PortAllocationError（90004）；
-    // 修后预算 16 → 10 个全部拿到不同端口成功。
-    const results = await Promise.allSettled(
-      Array.from({ length: 10 }, (_, i) => pfl.orch.createReserve(`r4p-${i}`, pOwner.id)),
-    )
-    const rejected = results.filter((r) => r.status === 'rejected')
-    expect(rejected).toHaveLength(0)
-    const rows = await ctx.prisma.container.findMany({ where: { ownerId: pOwner.id } })
-    expect(rows).toHaveLength(10)
-    // 端口互不重复（各得一个候选）
-    expect(new Set(rows.map((r) => r.port)).size).toBe(10)
-  })
 })
 
 // ---- #2 createComplete 在 runtime.create() 后未重查取消（Codex 第七轮 P2）----
-// command.ts createComplete 的取消检查点在循环开头（render 前）与 render 后 create 前、start 后
-// （#591：create → writeConfig → start）。DELETE 在 runtime.create()（拉镜像/创建容器）期间到达时：
+// command.ts createComplete 的取消检查点在循环开头（render 前）与 create 后、start 后
+// （#591：create → start）。DELETE 在 runtime.create()（拉镜像/创建容器）期间到达时：
 // deleteReserve 已 flag + 标 removing，但 create 返回后 createComplete 仍会 start + update
 // (status:'running') 覆盖 removing——错过取消回滚路径，list 轮询全程显示 running。
 describe('#2 createComplete create 后重查取消 (Codex 第七轮 P2)', () => {
@@ -432,8 +372,8 @@ describe('named volume 编排（#590/#592）', () => {
     expect(fl.archive.seedCalls).toEqual([
       { name: 'nv-seed', hostDir: path.join(fl.config.templateDir, 'workspace') },
     ])
-    // 顺序：seedWorkspace 先于 writeConfig（create → 灌模板 → 写 config → start，首启即见完整 workspace）
-    expect(fl.archive.ops).toEqual(['seedWorkspace', 'writeConfig'])
+    // createComplete 调用过灌卷（无 writeConfig——T0 #801 config 渲染写盘链退役，容器读镜像内默认配置）
+    expect(fl.archive.ops).toEqual(['seedWorkspace'])
   })
 
   it('旧 bind 模式：provision 已宿主预填充 home，不再 seedWorkspace', async () => {
@@ -463,21 +403,6 @@ describe('named volume 编排（#590/#592）', () => {
     expect(fl.runtime.containers.has('nv-del')).toBe(false)
   })
 
-  it('flag 开启：run bind 冲突换端口重试，清残留容器连带删卷', async () => {
-    const fl = nvFleet()
-    const inst = await fl.orch.createReserve('nv-bind', ownerId)
-    fl.runtime.bindConflictPorts.add(inst.port)
-    await fl.orch.createComplete(inst, true)
-    const rec = fl.runtime.containers.get('nv-bind')
-    expect(rec?.spec.hostPort).not.toBe(inst.port) // 换端口成功
-    // 第一次 run 的残留容器被 remove 时连带删卷
-    expect(fl.runtime.removedVolumes).toEqual([
-      volNames(inst.id).wiki,
-      volNames(inst.id).workspace,
-      volNames(inst.id).home,
-    ])
-  })
-
   it('flag 开启：容器已被外部删除（live null）→ delete 仍连带删卷（防卷泄漏，对齐 flag 关 dirRemover 语义）', async () => {
     const fl = nvFleet()
     const inst = await fl.orch.createReserve('nv-ext-del', ownerId)
@@ -496,7 +421,7 @@ describe('named volume 编排（#590/#592）', () => {
   it('flag 开启：run 失败且容器未驻留（外部已删）→ finalizeFailedCreate 连带删卷', async () => {
     const fl = nvFleet()
     const inst = await fl.orch.createReserve('nv-fail-ext', ownerId)
-    fl.runtime.failRunFor.add('nv-fail-ext') // run 抛非 bind 错 → finalizeFailedCreate
+    fl.runtime.failCreateFor.add('nv-fail-ext') // run 抛非 bind 错 → finalizeFailedCreate
     await expect(fl.orch.createComplete(inst, true)).rejects.toThrow()
     expect(fl.runtime.removedVolumes).toEqual([
       volNames(inst.id).wiki,

@@ -4,15 +4,12 @@
 // #771 起本脚本幂等可重跑（验收钉死）：
 //   1) init.sql 逐语句应用 —— CREATE TABLE/INDEX 先查 sqlite_master 存在即跳过（additive，
 //      旧表形状不被改写）；fresh 库全量建表，既有库全量跳过。
-//      例外：存量库检测到旧形状 model_providers（containerId 列）时，跳过一切引用该表的语句
-//      ——新形状的唯一索引 (ownerId, providerId) 在旧列集上执行会炸（no such column），且
-//      「旧表不动留待 T0 清退」本就不要求改写它；跳过后续 runIncrementalSchema 的旧形状
-//      检测与告警即可达（#771 验收④）。
 //   2) 增量收敛 —— 共享 lib/incremental-schema.mjs（新表 IF NOT EXISTS、既有表加列经
 //      PRAGMA guard、config_meta 种子）：`npm run db:apply` 单独即可把任意旧库收敛到当前
-//      schema。additive 是默认；唯一例外 = #791 起的换轨 DROP 重建（figures 旧形状 → 新形状、
-//      generation_jobs 无条件 DROP）——依 #732 零迁移前提（产品未上线，旧行不迁移直接换轨，
-//      「空库直建」语义），非 additive 常态的放松。
+//      schema。additive 是默认；换轨 DROP 重建例外（#791 figures / T0 #801 legacy 清退：
+//      旧形状 model_providers / pairings / containers 升级编排列与 port 唯一索引）——
+//      依 #732 零迁移前提（产品未上线，旧行不迁移直接换轨），处置集中在 incremental-schema
+//      的 runT0LegacyCleanup（先 DROP 后 CREATE 次序）。
 //
 // schema 变更后：先 `npx prisma migrate diff --from-empty --to-schema prisma/schema.prisma
 // --script > prisma/init.sql`（init.sql 为 from-empty 全量派生物，schema.prisma 单一来源），
@@ -24,7 +21,7 @@ import Database from 'better-sqlite3'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
-import { runIncrementalSchema } from './lib/incremental-schema.mjs'
+import { runIncrementalSchema, runT0LegacyCleanup } from './lib/incremental-schema.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const sql = readFileSync(path.join(here, '..', 'prisma', 'init.sql'), 'utf8')
@@ -53,20 +50,11 @@ function parseStatements(rawSql) {
 
 const db = new Database(dbPath)
 try {
-  // 旧形状 model_providers 检测（containerId 列 = #771 前形状）：其存在时 init.sql 中一切
-  // 引用该表的语句都必须跳过——CREATE TABLE 本就 IF-NOT-EXISTS 跳过，但新形状唯一索引
-  // 在旧列集上会抛 no such column 使整脚本崩溃（先于增量路径的旧形状告警）。
-  const mpLegacy = db
-    .prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'model_providers'`)
-    .get()
-    ? db.prepare(`PRAGMA table_info("model_providers")`).all().some((c) => c.name === 'containerId')
-    : false
-  if (mpLegacy) {
-    // eslint-disable-next-line no-console
-    console.warn('[db:apply] 检测到旧形状 model_providers —— 跳过其 init.sql 语句（新表/加列照常；旧表不动，留待 T0 清退 #801）')
-  }
+  // T0 #801：先清退 legacy（旧形状 model_providers / pairings / 升级编排列 / port 唯一索引）——
+  // init.sql 的新形状语句（含 model_providers (ownerId, providerId) 唯一索引）在旧形状上执行
+  // 会炸 no such column；先 DROP 后 init.sql 全量建出新形状（幂等可重跑）。
+  runT0LegacyCleanup(db)
   for (const stmt of parseStatements(sql)) {
-    if (mpLegacy && stmt.sql.includes('model_providers')) continue
     if (stmt.kind !== 'raw') {
       const exists = db
         .prepare(`SELECT 1 FROM sqlite_master WHERE type = ? AND name = ?`)

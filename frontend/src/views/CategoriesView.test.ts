@@ -23,9 +23,9 @@ import { ElMessage } from 'element-plus'
 
 const INSTANCES = [
   { name: 'demo', port: 19000, status: 'running', health: 'healthy',
-    image: 'img', container_id: 'c1', created_at: '', pairing: { status: 'paired' } },
+    image: 'img', container_id: 'c1', created_at: '' },
   { name: 'other', port: 19001, status: 'running', health: 'healthy',
-    image: 'img', container_id: 'c2', created_at: '', pairing: { status: 'paired' } },
+    image: 'img', container_id: 'c2', created_at: '' },
 ]
 const CATS = {
   idea: [

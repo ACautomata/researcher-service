@@ -2,7 +2,7 @@
 // 单一来源：所有信封码在此定义，路由/中间件引用常量名而非裸数字。
 //
 // 段：0 成功 · 1xxxx 通用/鉴权/账号 · 2xxxx 容器 · 3xxxx wiki · 4xxxx models ·
-//     5xxxx 会话/run（#747 C 节；chat/pairing 的 WS close codes 为另一传输面不在此列）·
+//     5xxxx 会话/run（#747 C 节）·
 //     6xxxx files · 7xxxx figures · 9xxxx 系统/校验。完整表见 docs/research/319-api-contract.md §1。
 
 export const CODE = {
@@ -37,8 +37,11 @@ export const CODE = {
   PROVIDER_ENDPOINT_NOT_ALLOWED: 40042, // 端点不在白名单（运行时双层校验第二层）
   CONCURRENCY_QUOTA_EXCEEDED: 40043, // 并发配额已满（per-user 或全局在飞 run 上限）
   // 6xxxx files（#589 统一文件 CRUD；6xxxx 段为 319 §1.1 未分配段，按「40 不存在 / 41 冲突」锁式）
-  FILE_NOT_FOUND: 60040, // 文件不存在（GET/PUT/DELETE）
-  FILE_EXISTS: 60041, // 新建文件已存在（POST 冲突）
+  FILE_NOT_FOUND: 60040, // 文件不存在（GET）
+  FILE_EXISTS: 60041, // [退役保留] 新建文件已存在（POST 冲突）——files 写面随 T0 #801 关闭，码段保留防复用
+  // T0 #801：files root=wiki/workspace 整根退役（wiki 读走 wiki 域 REST；workspace 字眼退役）——
+  // 归属校验后返回本码（防探测优先顺序不变）。
+  FILE_ROOT_RETIRED: 60042, // 文件 root 已退役（仅 root=lab 只读面保留）
   // 7xxxx figures（AutoFigure · #744 v2 换轨后读面）：
   // 70040 = 不存在/越权同码防探测（镜像各域 20040/30040/40040/60040 的 getInstanceForUser 锁式）。
   // #791（#744 §5.2/§8）REST 创建端点退役 → 70041/70042 暂无消费者（码段保留防复用混入）；
@@ -60,9 +63,8 @@ export const CODE = {
   CONTAINER_BUSY: 20043, // 目标在 provisioning（delete 改取消标志后仅作在飞冲突备用，#313）
   ORPHAN_DIR: 20044, // create 撞残留 orphan 目录（转译）
   CLEANUP_FAILED: 20045, // home 清理失败（delete 行标 REMOVING 可重试，转译）
-  CONTAINER_NOT_RUNNING: 20046, // #13：容器非 running（creating/stopped/removing）——bootstrap-token 前置
-  // 5xxxx 会话/run 域（#747 C 节错误码新增；#776 起 50002 进信封面——chat/pairing 的 WS close
-  // codes 是另一传输面，不受影响）：50002 = 会话不存在。
+  CONTAINER_NOT_RUNNING: 20046, // [退役保留] 曾为 bootstrap-token/pairing approve 前置（T0 #801 端点退役），码段保留防复用
+  // 5xxxx 会话/run 域（#747 C 节错误码新增；#776 起 50002 进信封面）：50002 = 会话不存在。
   RUN_ALREADY_RESUMED: 50001, // run 已被 resume（先到先得，败方拒绝；#777 runService 互斥面）
   SESSION_NOT_FOUND: 50002, // 会话不存在 / 越权（同码防探测；root=lab 读面 #776，#778 会话 REST 同款）
   RUN_INTERRUPT_PENDING: 50003, // interrupted 态禁输入（#747 C 节「interrupt 全端可审批」内核防御面——须先 resume 决策）
@@ -77,7 +79,7 @@ export const CODE = {
   OAUTH_NOT_CONFIGURED: 90001, // OAuth provider 未配置（原 501）
   VALIDATION_FAILED: 90002, // 参数校验失败（字段明细进 data）；曾为 figures 幂等中间件特例 data=null（该中间件随 #791 创建端点退役）
   LLM_NOT_CONFIGURED: 90003, // LLM 凭证/模型配置类总码（#775 起多义：credentialEnvId 非法、无可用 provider；#792 起 figure llm 回退链全败/无 provider 同码）
-  PORT_POOL_EXHAUSTED: 90004, // 端口池耗尽 / 持续分配冲突（转译，复用系统域）
+  PORT_POOL_EXHAUSTED: 90004, // [退役保留] 曾为端口池耗尽（T0 #801 端口池废除），码段保留防复用
   ROUTE_NOT_FOUND: 90005, // 路由不存在（404 信封兜底）
   INTERNAL: 90000, // 未知错误兜底
 } as const
@@ -102,6 +104,7 @@ export const DEFAULT_MESSAGE: Record<number, string> = {
   [CODE.CONTAINER_BUSY]: '容器正在创建中，请稍候再删除',
   [CODE.ORPHAN_DIR]: '该名称存在残留数据目录，请删除同名实例或手动清理后重试',
   [CODE.CLEANUP_FAILED]: '容器已停删，但数据目录清理失败（权限/属主），请重试',
+  // [退役保留] 20046/90004 端点已随 T0 #801 退役——码段与兜底文案保留防复用（对齐 60041/70041/70042）。
   [CODE.CONTAINER_NOT_RUNNING]: '容器未运行，请启动后再对话',
   [CODE.RUN_ALREADY_RESUMED]: '该 run 已被恢复',
   [CODE.SESSION_NOT_FOUND]: '会话不存在',
@@ -120,6 +123,7 @@ export const DEFAULT_MESSAGE: Record<number, string> = {
   [CODE.CONCURRENCY_QUOTA_EXCEEDED]: '并发配额已满，请稍后再试',
   [CODE.FILE_NOT_FOUND]: '文件不存在',
   [CODE.FILE_EXISTS]: '文件已存在',
+  [CODE.FILE_ROOT_RETIRED]: '该文件根已退役（wiki 读走 wiki 域 REST；lab 为只读面）',
   [CODE.FIGURE_NOT_FOUND]: 'Figure 不存在',
   [CODE.IDEMPOTENCY_CONFLICT]: '幂等键已用于不同输入，请勿复用同一 Idempotency-Key 提交不同创建载荷',
   [CODE.FIGURE_PNG_NOT_READY]: 'Figure 尚未生成完成，请稍后再试',

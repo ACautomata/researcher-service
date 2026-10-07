@@ -13,25 +13,25 @@ https://researcher.acautomata.top
 panel-frontend 容器（nginx，唯一对宿主暴露，loopback:18080）
     ├─ /        → SPA（dist/，history fallback）
     ├─ /api/    → panel-server:8001（TS/Express，#312 信封）
-    └─ /ws/     → panel-server:8001（JWT subprotocol 隧道，Upgrade 透传）
+    └─ /api/v1/events → panel-server:8001（SSE 事件流，proxy_buffering off）
                      │  panel-server 挂 docker.sock（编排 OpenClaw 容器）+ SQLite 卷；
-                     │  home 模板与 openclaw.json 构建期入镜像（ADR 0013，无宿主数据挂载）
+                     │  home 模板构建期入镜像（ADR 0013，无宿主数据挂载）
                      ▼
               panel-redis（BullMQ 队列，内部网络）
 ```
 
 - 三服务 `restart: unless-stopped`，宿主重启自恢复。
 - 前端为 origin-relative：构建不注入后端地址，无 CORS、无 per-domain 重建。
-- 镜像存私有 GHCR：`ghcr.io/<owner>/<repo>/{server,frontend,openclaw,wiki}`，tag `:latest` +
-  `:<commit sha>`（openclaw 为派生镜像 issue #588，wiki 为用户 wiki 容器镜像）。
-  openclaw 另推**版本 tag**（`:<Dockerfile FROM 基线 tag>`，issue #695）——**面板 fleet 的目标镜像
-  钉的就是它**（server 镜像内 `config.ts` 默认值同版本），**一经发布不可移动**（换内容 bump 版本；
-  回滚走 `:<sha>`），约定与本地打 tag 见 `deploy/README.md`「派生镜像版本 tag 约定」。
-- **超时分层**：`/api/` 慢请求（创建容器、配对等）依赖代理链逐层放宽超时。容器内 nginx 已配
-  `proxy_read_timeout/send_timeout 300s`（`/api/`）与 `3600s`（`/ws/`）；**BaoTa 边缘反代须 ≥ 内层
-  最慢值 `3600s`**：站点 → 反向代理 → 配置，填 `proxy_read_timeout 3600s;` + `proxy_send_timeout 3600s;`
-  （bootstrap 步骤 5），否则外层默认 60s 会先于内层返回 504——慢请求已完成但 UI 报失败。
-  改任一层超时须同步全链。
+- 镜像存私有 GHCR：`ghcr.io/<owner>/<repo>/{server,frontend,wiki}`，tag `:latest` +
+  `:<commit sha>`（wiki 为 wiki 容器镜像 #784）。
+  wiki 另推**版本 tag**（`:<Dockerfile FROM 基线 tag>`）——**面板 wiki 容器的目标镜像钉的就是它**
+  （server 镜像内 `config.ts` 默认值同版本）。fleet 目标镜像 = `OPENCLAW_IMAGE` 存量钉版 GHCR
+  引用（openclaw-image 派生镜像构建已随 T0 #801 退役，见 `deploy/README.md`）。
+- **超时分层**：`/api/` 慢请求（创建容器等）依赖代理链逐层放宽超时。容器内 nginx 已配
+  `proxy_read_timeout/send_timeout 300s`（`/api/`）与 `3600s`（`/api/v1/events` SSE 流）；**BaoTa 边缘
+  反代须 ≥ 内层最慢值 `3600s`**：站点 → 反向代理 → 配置，填 `proxy_read_timeout 3600s;` +
+  `proxy_send_timeout 3600s;`（bootstrap 步骤 5），否则外层默认 60s 会先于内层返回 504——慢请求已
+  完成但 UI 报失败。改任一层超时须同步全链。
 - **SSE 事件流**（`GET /api/v1/events`，issue #773）：容器内 nginx 已配专属精确匹配 location
   （`proxy_buffering off; proxy_cache off;` + `3600s` 读写超时——20s `:ping` 心跳间隙不被代理掐断；
   应用层另发 `X-Accel-Buffering: no` 双侧互锁）。**BaoTa 边缘反代同样须 `proxy_buffering off;`
@@ -41,9 +41,10 @@ panel-frontend 容器（nginx，唯一对宿主暴露，loopback:18080）
 
 每次 CI 在 `master` 上成功后自动：
 
-1. 构建 + 推送 `server`、`frontend`、`openclaw`（派生）、`wiki` 四镜像到 GHCR。
-   server 构建期注入 home 模板、官方内容、插件与 `deploy/openclaw.json`，随镜像版本化。
-   openclaw/wiki 另推 Dockerfile FROM 基线版本 tag；fleet 与 wiki 容器使用钉版镜像。
+1. 构建 + 推送 `server`、`frontend`、`wiki`（#784）三镜像到 GHCR（`:latest` 与 `:<CI head_sha>`）；
+   `wiki` 另推版本 tag（版本从 wiki Dockerfile 的 `FROM` 行单源提取）。server 镜像构建期 clone
+   researcher home 模板并经 buildx 多 context 拷入镜像（ADR 0013：#593 模板入镜像，模板随镜像
+   `:sha` 版本化）。
 2. 渲染运行时 `.env`（敏感值来自 secrets，不进 git）。
 3. scp `docker-compose.deploy.yml` + `.env` → 宿主 `/www/panel/`。
 4. SSH 远端：`docker login ghcr.io`（持久）→ `pull` → `up -d --remove-orphans` → `image prune` →
@@ -76,7 +77,6 @@ panel-frontend 容器（nginx，唯一对宿主暴露，loopback:18080）
 | `GHCR_PULL_USER` | GitHub 用户名 | 宿主拉私有 GHCR |
 | `GHCR_PULL_TOKEN` | classic PAT，scope `read:packages` | 宿主拉私有 GHCR（持久 login，运行时拉 OpenClaw 镜像复用） |
 | `JWT_SECRET` | **≥32 字符强随机** | HS256 签名密钥（server 生产 fail-fast） |
-| `PANEL_PUBLIC_ORIGIN` | `https://researcher.acautomata.top` | 面板对外 origin（隧道连网关 + 容器 allowedOrigins 强制条目，server 生产必填） |
 | `LLM_API_KEY` | 面板共享 LLM key | 注入 OpenClaw 容器 |
 | `CREDENTIAL_ENCRYPTION_KEYS` | base64url 32 字节 | 凭证 AES-256-GCM 密钥环 |
 | `API_DOCS_ENABLED`（可选） | `true`（默认） | OpenAPI/Swagger 文档面（`/api/docs`，#761）：admin-only（requireAuth + requireAdmin）zod 生成式文档。显式 `false` → server 不装配 docs 路由（整树 90005） |
@@ -90,8 +90,8 @@ python3 -c "import base64,os;print(base64.urlsafe_b64encode(os.urandom(32)).deco
 ```
 
 > **⚠ #341 M9 迁移注意**：旧 Django 时代的 `DJANGO_SECRET_KEY` / `DJANGO_ALLOWED_HOSTS` 两个
-> secret 已被 `JWT_SECRET` / `PANEL_PUBLIC_ORIGIN` 取代。**恢复 CD 自动部署前必须先在仓库
-> Settings 配好新 secret**（JWT_SECRET 与 PANEL_PUBLIC_ORIGIN 缺失时 server 容器拒绝启动，
+> secret 已被 `JWT_SECRET` 取代。**恢复 CD 自动部署前必须先在仓库
+> Settings 配好新 secret**（JWT_SECRET 缺失时 server 容器拒绝启动，
 > 健康门判红）。旧 secret 可删除。另注意：Django 表结构与 Prisma schema 不兼容，切换后
 > panel-db 卷内旧 Django 数据**不会迁移**（spec #312「现有数据不迁移」），首启会建新表。
 
@@ -99,21 +99,20 @@ python3 -c "import base64,os;print(base64.urlsafe_b64encode(os.urandom(32)).deco
 
 容器启动时校验，缺一即拒启动（健康门会据此判红）：
 
-`JWT_SECRET`（≥32 字符）· `PANEL_PUBLIC_ORIGIN`（http(s) URL）· `CREDENTIAL_ENCRYPTION_KEYS` ·
+`JWT_SECRET`（≥32 字符）· `CREDENTIAL_ENCRYPTION_KEYS` ·
 `LLM_API_KEY`（create 容器时 90003 前置校验）· `REDIS_URL`（compose 固定
 `redis://redis:6379/0`）· `OPENCLAW_TEMPLATE_DIR`（compose 固定 `/app/templates/researcher`，
-镜像内——构建期 COPY 的 researcher home 模板）· `OPENCLAW_TEMPLATE_JSON`（compose 固定
-`/app/deploy/openclaw.json`，镜像内——构建期 COPY 的 `deploy/openclaw.json`）·
+镜像内——构建期 COPY 的 researcher home 模板）·
 `OPENCLAW_FLEET_ROOT`（compose 固定 `/fleet`，server 容器内工作目录，无宿主挂载）·
 `DATABASE_URL`（compose 固定 `file:/app/db/db.sqlite3`，指向 panel-db 卷）。
 
-> **`OPENCLAW_IMAGE` 不在上列**：它有缺省值（= 派生镜像钉版本 tag），缺省并不拒启动——但
-> **生产浮动 tag（无 tag 或 `:latest`）→ 启动 fail-fast**（#695，准据 `server/src/config.ts` 的
-> `readFleetImage`；与 `server/README.md` 同处置）。
+> **`OPENCLAW_IMAGE` 不在上列**：它有缺省值（= 存量钉版 GHCR 引用，openclaw-image 派生镜像构建
+> 已随 T0 #801 退役），缺省并不拒启动——但
+> **生产浮动 tag（无 tag 或 `:latest`）→ 启动 fail-fast**（准据 `server/src/config.ts` 的
+> `readPinnedImage`；与 `server/README.md` 同处置）。
 
-> 说明：`OPENCLAW_TEMPLATE_DIR` / `OPENCLAW_TEMPLATE_JSON` 都指向 **server 镜像内**路径（ADR 0013
-> `#593` 模板入镜像）。镜像内默认路径 `<cwd>/../deploy/openclaw.json` 解析到 `/app/../deploy`
-> 不存在——compose 显式 pin 到镜像内 COPY 产物，首次创建容器不再 90003。镜像外唯一的宿主数据
+> 说明：`OPENCLAW_TEMPLATE_DIR` 指向 **server 镜像内**路径（ADR 0013
+> `#593` 模板入镜像），compose 显式 pin 到镜像内 COPY 产物。镜像外唯一的宿主数据
 > 挂载是 `/var/run/docker.sock`（spec §5.4 已接受等价 root）。
 
 > **`/fleet`（容器内工作目录，非宿主挂载）：** server 容器的 `OPENCLAW_FLEET_ROOT=/fleet` 是
@@ -130,8 +129,8 @@ figures 读取与 PNG/SVG 下载仍由控制面提供。历史契约保留在 `d
 
 ## 回滚
 
-镜像按 `:<commit sha>` 留了不可变记录，回滚 = 固定到上一个 sha 重启（模板与 openclaw.json 已随
-server 镜像构建期入镜像——回滚镜像即回滚模板/配置，无宿主侧残留状态需要同步）：
+镜像按 `:<commit sha>` 留了不可变记录，回滚 = 固定到上一个 sha 重启（home 模板已随
+server 镜像构建期入镜像——回滚镜像即回滚模板，无宿主侧残留状态需要同步）：
 
 ```bash
 ssh root@<REMOTE_HOST>
@@ -142,9 +141,9 @@ docker compose -f docker-compose.deploy.yml --env-file .env up -d
 
 （或在 CI 重跑对应历史 commit 的 CD。）
 
-> 面板 fleet 的目标镜像不随部署自动切换：它钉在 server 镜像内的 `config.ts` 默认值（= 派生镜像
-> 版本 tag，issue #695）。存量容器何时/如何换到新目标由容器升级编排决定（#682 epic），生产禁浮动
-> tag 的 fail-fast 见上方「运行时 server 必需 env」的 `OPENCLAW_IMAGE` 说明。
+> 面板 fleet 的目标镜像不随部署自动切换：它钉在 server 镜像内的 `config.ts` 默认值（存量
+> 版本 tag 引用）。存量容器何时/如何换到新目标由运维动作决定（升级编排已随 T0 #801 退役），
+> 生产禁浮动 tag 的 fail-fast 见上方「运行时 server 必需 env」的 `OPENCLAW_IMAGE` 说明。
 
 ## 排障
 

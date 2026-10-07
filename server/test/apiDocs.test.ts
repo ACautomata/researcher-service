@@ -71,20 +71,26 @@ describe('OpenAPI 文档面（#761）', () => {
       '/api/v1/users',
       '/api/v1/users/{id}/reset-password',
       '/api/v1/containers',
-      '/api/v1/containers/{name}/bootstrap-token',
-      '/api/v1/containers/{name}/pairing/approve/{requestId}',
       '/api/v1/containers/{name}/wiki/tree',
       '/api/v1/containers/{name}/wiki/page',
       '/api/v1/containers/{name}/models/providers',
       '/api/v1/containers/{name}/models/providers/{pid}',
       '/api/v1/containers/{name}/files',
-      '/api/v1/containers/{name}/files/raw',
       '/api/v1/figures',
       '/api/v1/figures/{id}/png',
       '/api/v1/figures/{id}/svg',
       '/api/v1/trace-logs',
     ]) {
       expect(doc.paths, `缺少端点 ${p}`).toHaveProperty(p)
+    }
+    // T0 #801 退役端点不得再出现在文档面
+    for (const p of [
+      '/api/v1/containers/{name}/upgrade',
+      '/api/v1/containers/{name}/bootstrap-token',
+      '/api/v1/containers/{name}/pairing/approve/{requestId}',
+      '/api/v1/containers/{name}/files/raw',
+    ]) {
+      expect(doc.paths, `退役端点残留 ${p}`).not.toHaveProperty(p)
     }
   })
 
@@ -145,19 +151,17 @@ describe('OpenAPI 文档面（#761）', () => {
 
   it('码段表反射自 codes.ts（info.description 含运行时码值与常量名）', async () => {
     const doc = await adminDoc()
-    for (const token of ['10001', 'ROUTE_NOT_FOUND', '90002', '70043']) {
+    for (const token of ['10001', 'ROUTE_NOT_FOUND', '90002', '70043', '60042']) {
       expect(doc.info.description).toContain(token)
     }
   })
 
-  it('字节例外：figures/png、figures/svg 与 files/raw 成功响应声明二进制（豁免 #312 信封）', async () => {
+  it('字节例外：figures/png 与 figures/svg 成功响应声明二进制（豁免 #312 信封；files/raw 已随 T0 #801 关闭）', async () => {
     const doc = await adminDoc()
     const png = doc.paths['/api/v1/figures/{id}/png'].get.responses['200']
     expect(JSON.stringify(png.content)).toContain('binary')
     const svg = doc.paths['/api/v1/figures/{id}/svg'].get.responses['200']
     expect(JSON.stringify(svg.content)).toContain('binary')
-    const raw = doc.paths['/api/v1/containers/{name}/files/raw'].get.responses['200']
-    expect(JSON.stringify(raw.content)).toContain('binary')
     // 错误面仍走信封（default 响应引用 ErrorEnvelope 形状）
     expect(JSON.stringify(doc.paths['/api/v1/figures/{id}/png'].get.responses.default)).toContain('code')
   })

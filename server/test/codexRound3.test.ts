@@ -8,7 +8,7 @@
 // ⑥[P2] createReserve renderer 失败不删行 → creating 行残留耗配额/占端口
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
-import { existsSync, writeFileSync } from 'node:fs'
+import { existsSync } from 'node:fs'
 import path from 'node:path'
 import { setupTestApp, type TestContext } from './setup'
 import { makeFleetTest, type FleetTestContext } from './fleetTestUtils'
@@ -134,27 +134,4 @@ describe('codex round3: 意见①—⑥ 复现/回归', () => {
     expect(fl5.runtime.containers.has('r3-orphan')).toBe(true)
   })
 
-  // ---- ⑥[P2] createReserve renderer 失败不删行 ----
-  it('⑥ 模板损坏（renderer 构造失败）→ reserve 的行被回滚（不耗配额/占端口）', async () => {
-    const badJson = path.join(fl.fleetRoot, 'bad.json')
-    writeFileSync(badJson, 'not json') // JSON.parse 抛 SyntaxError
-    const fl6 = makeFleetTest(ctx.prisma, { config: { templateJson: badJson } })
-    // renderer 失败可能抛 SyntaxError（JSON 坏）/ ConfigurationError（shape 坏）/ readFile 错（缺失）；
-    // 核心断言是「失败后行被回滚」——用 toThrow() 不锁具体类型。
-    await expect(fl6.orch.createReserve('r3-badcfg', ownerId)).rejects.toThrow()
-    // 修后：creating 行被回滚删除（配额/端口/名称释放）——坏模板下 recreate 仍会失败，
-    // 但「失败不再消耗 quota/端口/名称」已由行删除保证（修前 creating 行残留、recreate 撞 20041）。
-    expect(await ctx.prisma.container.findUnique({ where: { name: 'r3-badcfg' } })).toBeNull()
-    // 行删除后，租约/端口/配额已释放：再次尝试仍是「配置错误」而非「撞名 20041」——
-    // 用 20041（InstanceExists）作对照：修前第二次 createReserve 会撞 20041（行残留），
-    // 修后不会（行已删）——抛的是模板解析错误而非 InstanceExists。
-    await expect(fl6.orch.createReserve('r3-badcfg', ownerId)).rejects.not.toBeInstanceOf(
-      InstanceExists,
-    )
-    // 换好模板后同名可立即重建（不 20041 / 不 20044）
-    const flGood = makeFleetTest(ctx.prisma)
-    const inst = await flGood.orch.createReserve('r3-badcfg', ownerId)
-    expect(inst.status).toBe('creating')
-    await flGood.orch.createComplete(inst, true).catch(() => {})
-  })
 })

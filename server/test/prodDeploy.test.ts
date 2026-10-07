@@ -48,9 +48,9 @@ describe('prod compose 去 host 挂载（issue #593，ADR 0013）', () => {
     }
   })
 
-  it('模板与 openclaw.json 的 env 指向镜像内路径（构建期 COPY 产物）', () => {
+  it('home 模板 env 指向镜像内路径（构建期 COPY 产物）；openclaw.json 模板随 T0 #801 退役', () => {
     expect(compose).toMatch(/OPENCLAW_TEMPLATE_DIR: \/app\/templates\/researcher/)
-    expect(compose).toMatch(/OPENCLAW_TEMPLATE_JSON: \/app\/deploy\/openclaw\.json/)
+    expect(compose).not.toMatch(/OPENCLAW_TEMPLATE_JSON/)
   })
 
   it('fleet 根为容器内工作目录、无宿主 bind（/fleet 绑定已移除；与 devDeploy.test.ts 同形断言）', () => {
@@ -72,8 +72,8 @@ describe('server 镜像构建期入模板（issue #593，ADR 0013）', () => {
     expect(df).toMatch(/RUN rm -rf \/app\/templates\/researcher\/\.git/)
   })
 
-  it('COPY --from=deploy 的 openclaw.json 到 /app/deploy/openclaw.json（配置单一来源入镜像）', () => {
-    expect(df).toMatch(/COPY --from=deploy \/openclaw\.json \/app\/deploy\/openclaw\.json/)
+  it('无 COPY --from=deploy（openclaw.json 配置面随 T0 #801 退役，server 不再消费模板文件）', () => {
+    expect(df).not.toMatch(/COPY --from=deploy/)
   })
 
   it('模板 COPY 位于 runtime 阶段（ENTRYPOINT 之前、docker-entrypoint COPY 附近）', () => {
@@ -86,7 +86,7 @@ describe('server 镜像构建期入模板（issue #593，ADR 0013）', () => {
     expect(entrypointIdx).toBeGreaterThan(runtimeStart)
     const runtime = df.slice(runtimeStart, entrypointIdx)
     expect(runtime).toMatch(/COPY --from=template/)
-    expect(runtime).toMatch(/COPY --from=deploy/)
+    expect(runtime).not.toMatch(/COPY --from=deploy/)
   })
 
   it('runtime 层安装 git（issue #790：openwiki 生成生命周期硬依赖 git——落地镜像 git init/源指纹；宿主 CI 直跑 npm test 有 git 必绿、容器内每个 wiki 更新 run 必坏的 gap 只能靠部署契约测试钉住）', () => {
@@ -100,10 +100,10 @@ describe('server 镜像构建期入模板（issue #593，ADR 0013）', () => {
 describe('CD 工作流（issue #593，ADR 0013）', () => {
   const cd = readRepoFile('.github/workflows/cd.yml')
 
-  it('server 构建经 buildx 多 context 注入 template（researcher 克隆）与 deploy（openclaw.json）', () => {
+  it('server 构建经 buildx 多 context 注入 template（researcher 克隆）；openclaw.json 的 deploy context 已随 T0 #801 退役', () => {
     expect(cd).toMatch(/build-contexts:/)
     expect(cd).toMatch(/template=\$\{\{ github\.workspace \}\}\/_templates\/researcher/)
-    expect(cd).toMatch(/deploy=\$\{\{ github\.workspace \}\}\/deploy/)
+    expect(cd).not.toMatch(/deploy=\$\{\{ github\.workspace \}\}\/deploy/)
   })
 
   it('构建机构建期 clone researcher 模板（模板随镜像 :sha 版本化）', () => {

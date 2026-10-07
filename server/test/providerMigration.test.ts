@@ -5,7 +5,7 @@
 //   新形状库 + 零 provider 用户   → seed 一行（重跑不重复——确定性 id + NOT EXISTS 双保险）
 //   已有任意 provider 的用户      → 不 seed（「归属按 ownerId 折叠去重」语义）
 //   已有 minimax 行（异 id）的用户 → 不 seed（无重复行）
-//   旧形状 model_providers 库     → 跳过 seed（旧表不动纪律，留待 T0 #801）
+//   旧形状 model_providers 库     → T0 #801 清退：DROP 重建新形状 + seed 照常（零迁移前提）
 //   llm_usage_records / config_meta 种子 → 到位
 
 import { describe, it, expect } from 'vitest'
@@ -57,7 +57,7 @@ PRAGMA user_version=8;
   }
 }
 
-// 旧形状库（#771 前部署）：model_providers 带 containerId 列——旧表不动，seed 跳过。
+// 旧形状库（#771 前部署）：model_providers 带 containerId 列——T0 #801 检测即 DROP 重建。
 function makeLegacyDb(dbPath: string): void {
   const db = new Database(dbPath)
   try {
@@ -124,7 +124,7 @@ describe('#775 迁移批次（llm_usage_records + minimax per-user seed）', () 
     }
   })
 
-  it('旧形状 model_providers 库：seed 跳过（旧表不动，留待 T0 #801），其余增量照常', () => {
+  it('旧形状 model_providers 库：T0 #801 DROP 重建新形状 + seed 照常，其余增量照常', () => {
     const dir = makeDir()
     const dbPath = path.join(dir, 'panel.db')
     makeLegacyDb(dbPath)
@@ -133,13 +133,20 @@ describe('#775 迁移批次（llm_usage_records + minimax per-user seed）', () 
 
     const db = new Database(dbPath)
     try {
-      // 旧表零写入（无 ownerId 列可写，seed 段 guard 跳过）
+      // T0 #801 清退语义：旧表 DROP 重建新形状（零迁移前提 #732）——新形状列就位、
+      // 旧 containerId 列不残留；旧形状行随 DROP 删除，seed 对存量用户照常生效（u-legacy 零
+      // provider 行 → 恰得一行确定性 minimax seed）。
       const rows = db
-        .prepare(`SELECT * FROM model_providers`)
+        .prepare(`SELECT id, "ownerId", providerId, lcProvider FROM model_providers`)
         .all() as Array<Record<string, unknown>>
-      expect(rows).toEqual([])
-      // 旧形状告警路径不炸、user_version 照常推进、usage 表照常落
-      expect(db.pragma('user_version', { simple: true })).toBe(13) // #785 批次 11→12；#790 teammates.kind + #791 figures 换轨 12→13
+      expect(rows).toEqual([
+        { id: 'seed-mp-minimax-u-legacy', ownerId: 'u-legacy', providerId: 'minimax', lcProvider: 'anthropic' },
+      ])
+      const cols = db.prepare('PRAGMA table_info(model_providers)').all() as Array<{ name: string }>
+      expect(cols.some((c) => c.name === 'ownerId')).toBe(true)
+      expect(cols.some((c) => c.name === 'containerId')).toBe(false)
+      // 告警路径不炸、user_version 照常推进、usage 表照常落
+      expect(db.pragma('user_version', { simple: true })).toBe(14) // T0 #801 批次 13→14
       expect(
         db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='llm_usage_records'`).get(),
       ).toEqual({ name: 'llm_usage_records' })

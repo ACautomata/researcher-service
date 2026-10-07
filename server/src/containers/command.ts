@@ -8,49 +8,21 @@
 //
 // 状态机（5 态，DB 持久化 creating/removing/error + 创建成功后 running）：
 //   creating → running ⇄ stopped → removing(终) + error（残留）。running/stopped 由读侧 runtime 实况推导。
+//
+// T0 #801 legacy 清退：端口分配/端口重试（端口池废除，无宿主端口发布）、#699 upgrade 六步编排
+// （随升级机制退役）、openclaw.json 渲染写盘（ConfigRenderer/模板退役，容器读镜像内默认配置）
+// 全组删除。
 
 import { randomBytes, randomUUID } from 'node:crypto'
-import { access, mkdir, readFile } from 'node:fs/promises'
+import { access, mkdir } from 'node:fs/promises'
 import path from 'node:path'
 import type { PrismaClient, Container } from '../generated/prisma/client'
-import {
-  BACKUP_TAR_NAME,
-  HOME_BIND,
-  MOUNT_WIKI,
-  MOUNT_WORKSPACE,
-  ONESHOT_BACKUP_TARGET,
-  TOKEN_URLSAFE_BYTES,
-  UPGRADE_MAX_ATTEMPTS,
-} from './constants'
+import { HOME_BIND, TOKEN_URLSAFE_BYTES } from './constants'
 import { CODE } from '../codes'
 import { fail } from '../envelope'
-import {
-  ConfigurationError,
-  ContainerDomainError,
-  InstanceBusy,
-  InstanceCleanupError,
-  InstanceExists,
-  PortAllocationError,
-  PortPoolExhausted,
-  QuotaExceeded,
-} from './errors'
+import { ConfigurationError, InstanceBusy, InstanceCleanupError, InstanceExists, QuotaExceeded } from './errors'
 import type { FleetDeps } from './deps'
-import {
-  backupVolumeFor,
-  namedVolumesFor,
-  type ContainerInfo,
-  type ContainerSpec,
-  type NamedVolumes,
-  type OneShotSpec,
-} from './runtime'
-import { ConfigRenderer } from './configRenderer'
-
-// 识别 docker 发布端口时的宿主 bind 冲突异常（归一化匹配两种来源措辞）：
-// OS 层 bind 失败 "address already in use"；libnetwork portallocator "... port is already allocated"。
-function isBindConflict(exc: unknown): boolean {
-  const message = exc instanceof Error ? exc.message : String(exc)
-  return message.includes('address already in use') || message.includes('already allocated')
-}
+import { namedVolumesFor, type ContainerInfo, type ContainerSpec, type NamedVolumes } from './runtime'
 
 async function pathExists(p: string): Promise<boolean> {
   try {
@@ -58,39 +30,6 @@ async function pathExists(p: string): Promise<boolean> {
     return true
   } catch {
     return false
-  }
-}
-
-// ---- #699 升级步骤命令构建（单一来源；测试经 FakeRuntime.oneshotRuns 断言 OneShotSpec 形状）----
-
-// 备份（硬性首步，任何卷变更之前，spec §2.4 步骤 3）：目标镜像临时容器挂 home 卷（只读）+ 备份卷，
-// home 卷全量 tar 进备份卷。home 只读——备份不得改写源卷；备份卷独立于代系三卷（runtime.backupVolumeFor，
-// 删容器不清除，供故障手工救回）。
-export function buildBackupOneShot(target: string, homeVolume: string, backupVolume: string): OneShotSpec {
-  return {
-    image: target,
-    cmd: ['sh', '-c', `tar czf ${ONESHOT_BACKUP_TARGET}/${BACKUP_TAR_NAME} -C ${HOME_BIND} .`],
-    mounts: [
-      { source: homeVolume, target: HOME_BIND, readOnly: true },
-      { source: backupVolume, target: ONESHOT_BACKUP_TARGET },
-    ],
-  }
-}
-
-// doctor（legacy session 迁移——9.4 网关遇 legacy store 拒 ready，spec §2.4 步骤 4）：临时容器挂与
-// 真容器同布局三卷 + 目标镜像，跑 `openclaw doctor --fix`。env 须与真容器同环境（卷内 openclaw.json
-// 的 ${GATEWAY_TOKEN} 占位由进程运行时插值——doctor 拿不到同 env 就读不了配置）。用临时容器而非 exec：
-// 9.4 遇 legacy store 拒绝就绪（先起真容器再 exec 不可行）、stopped 容器亦不可 exec（#683 事实 3）。
-export function buildDoctorOneShot(target: string, volumes: NamedVolumes, env: Record<string, string>): OneShotSpec {
-  return {
-    image: target,
-    cmd: ['openclaw', 'doctor', '--fix'],
-    mounts: [
-      { source: volumes.wiki, target: MOUNT_WIKI },
-      { source: volumes.workspace, target: MOUNT_WORKSPACE },
-      { source: volumes.home, target: HOME_BIND },
-    ],
-    env,
   }
 }
 
@@ -111,7 +50,6 @@ export class CancelRegistry {
 export type DeleteOutcome = 'removed' | 'not-found'
 
 export class FleetCommand {
-  private renderer: ConfigRenderer | null = null
   // create_reserve 取得的租约句柄登记表（跨阶段传递到 create_complete finally 释放）。
   private readonly leases = new Map<string, { release(): void }>()
 
@@ -122,7 +60,7 @@ export class FleetCommand {
   ) {}
 
   // ---- create 阶段一：同步预占（确定性工作，请求线程安全）----
-  // LLM key 缺失 → 90003；双创建/撞名 → 20041；端口耗尽 → 90004；超配额 → 20042。
+  // LLM key 缺失 → 90003；双创建/撞名 → 20041；超配额 → 20042。
   // ownerId 由路由层（归属已校验）传入；maxContainers 提供时按 owner 串行 count+create 收紧配额竞态。
   async createReserve(name: string, ownerId: string, maxContainers?: number): Promise<Container> {
     const doReserve = async (): Promise<Container> => {
@@ -136,16 +74,7 @@ export class FleetCommand {
       // 并发 retry 在租约被在飞 create 持有时抛 20041，不得清掉对方的取消标志（Codex 第三轮 ④[P1]）。
       this.cancel.clear(name)
       try {
-        const inst = await this.reserveRow(name, ownerId)
-        try {
-          await this.ensureRenderer() // 模板损坏 fail-fast（确定性配置错误同步暴露）
-        } catch (e) {
-          // renderer 失败（模板损坏/缺失）→ 回滚刚 reserve 的行，释放名称/端口/配额。
-          // 修前只 releaseLease，creating 行残留耗配额/占端口，recreate 被 20041 锁死（Codex 第三轮 ⑥[P2]）。
-          await this.prisma.container.delete({ where: { id: inst.id } }).catch(() => {})
-          throw e
-        }
-        return inst
+        return await this.reserveRow(name, ownerId)
         // 成功路径不释放租约：租约跨到后台 create_complete，finally 释放（覆盖 provisioning 全程）。
       } catch (e) {
         this.releaseLease(name)
@@ -186,230 +115,106 @@ export class FleetCommand {
     return this.createComplete(inst, false)
   }
 
-  // 事务预占 creating 行：name/port 冲突由 DB 唯一约束仲裁。
-  // port 冲突（并发选同 port）→ 重试下一空闲 port；name 冲突 → InstanceExists（20041，不重试）。
-  private async reserveRow(name: string, ownerId: string, extraUsed?: Set<number>): Promise<Container> {
+  // 事务预占 creating 行：name 冲突由 DB 唯一约束仲裁 → InstanceExists（20041）。
+  // T0 #801：端口池废除——行 port 恒写 0（列保留不再 @unique，存量行的历史端口值不影响语义；
+  // 容器不再向宿主发布端口）。
+  private async reserveRow(name: string, ownerId: string): Promise<Container> {
     // gateway token 真值不落盘（AGENTS.md §5.2 / Codex C1）：DB 存 AES-GCM 密文，
     // createComplete 用时 decrypt 供 spec.gatewayToken（docker env 注入明文）。
     const token = this.deps.crypto.encrypt(randomBytes(TOKEN_URLSAFE_BYTES).toString('base64url'))
-    // 重试预算 = 端口池候选数（Codex 第四轮⑥[P2]）而非固定 MAX_PORT_RETRIES：并发不同 owner 都选中
-    // 同一最小空闲端口时，SQLite 唯一约束只放行一个，其余须重试下一候选——固定 8 次预算在并发 ≥9
-    // 时耗尽（第 9 个请求 8 次全撞已分配端口 → 误报 90004 池耗尽），而池实际大量空闲。候选数上限
-    // 保证每个候选端口至多尝试一次（DB 已用集每次重算），并发再多也不会假耗尽。
-    const poolSize = this.deps.config.portEnd - this.deps.config.portStart + 1
-    for (let attempt = 0; attempt < poolSize; attempt += 1) {
-      // 代系 id（#360）：每代唯一，homeDir = instances/<id>/home 绑定代系——delete+同名 recreate
-      // 用不同物理目录，防在飞 wiki/长扫描期间容器被删+同名重建给他人时读写新 owner 数据。
-      // 循环内每次新生成（P2002 后换新 id+port，无死循环；UUID 碰撞概率忽略）。
-      const id = randomUUID()
-      const home = path.join(this.deps.config.root, 'instances', id, 'home')
-      const port = this.deps.allocator.nextFree(await this.usedPorts(extraUsed))
-      try {
-        return await this.prisma.container.create({
-          data: {
-            id,
-            name,
-            port,
-            token,
-            tokenEncrypted: true,
-            homeDir: home,
-            containerId: '',
-            status: 'creating',
-            image: this.deps.config.image,
-            ownerId,
-          },
-        })
-      } catch (e) {
-        if (this.isUniqueViolation(e)) {
-          const nameTaken = await this.prisma.container.findUnique({ where: { name } })
-          if (nameTaken) throw new InstanceExists(name)
-          continue // 否则 port 冲突 → 重试下一 port
-        }
-        throw e
+    // 代系 id（#360）：每代唯一，homeDir = instances/<id>/home 绑定代系——delete+同名 recreate
+    // 用不同物理目录，防在飞 wiki/长扫描期间容器被删+同名重建给他人时读写新 owner 数据。
+    const id = randomUUID()
+    const home = path.join(this.deps.config.root, 'instances', id, 'home')
+    try {
+      return await this.prisma.container.create({
+        data: {
+          id,
+          name,
+          port: 0,
+          token,
+          tokenEncrypted: true,
+          homeDir: home,
+          containerId: '',
+          status: 'creating',
+          image: this.deps.config.image,
+          ownerId,
+        },
+      })
+    } catch (e) {
+      if (this.isUniqueViolation(e) && (await this.prisma.container.findUnique({ where: { name } }))) {
+        throw new InstanceExists(name)
       }
+      throw e
     }
-    throw new PortAllocationError(name)
   }
 
   private isUniqueViolation(e: unknown): boolean {
     return (e as { code?: string }).code === 'P2002'
   }
 
-  // 已用端口 = DB 记账 ∪ daemon fleet label 端口 ∪ daemon 宿主发布端口 ∪ 宿主 bind 实测 ∪ extra（学习集）。
-  private async usedPorts(extraUsed?: Set<number>): Promise<Set<number>> {
-    const used = new Set<number>(
-      (await this.prisma.container.findMany({ select: { port: true } })).map((r) => r.port),
-    )
-    if (extraUsed) for (const p of extraUsed) used.add(p)
-    try {
-      for (const info of await this.deps.runtime.listFleet()) {
-        if (typeof info.port === 'number') used.add(info.port)
-      }
-    } catch {
-      // daemon 不可达不阻断分配：DB 记账 + 宿主实测仍可给出候选
-    }
-    try {
-      for (const p of await this.deps.runtime.hostPublishedPorts()) used.add(p)
-    } catch {
-      // 同上
-    }
-    for (let port = this.deps.config.portStart; port <= this.deps.config.portEnd; port += 1) {
-      if (!used.has(port) && (await this.deps.portInUse(port))) used.add(port)
-    }
-    return used
-  }
-
-  // ---- create 阶段二：后台/同步完成 provisioning（mkdir + cp -a + 原子写 config + docker run）----
-  // bind 端口冲突就地换端口重试（预算 = 池大小）；取消标志检查点检出即统一回滚后终止。
+  // ---- create 阶段二：后台/同步完成 provisioning（mkdir + cp -a + docker create + seedWorkspace
+  // + start）；取消标志检查点检出即统一回滚后终止 ----
   async createComplete(inst: Container, preserveErrorRow: boolean): Promise<Container> {
     const name = inst.name
     // 代系绑定（#360）：instanceDir 基于 inst.id（每代唯一），非可复用的 name。
     const instanceDir = path.join(this.deps.config.root, 'instances', inst.id)
     const home = path.join(instanceDir, 'home')
-    // bind 冲突重试预算 = 端口池候选数（非 reserveRow 的 DB 并发冲突预算——那是另一处独立预算）。
-    const poolSize = this.deps.config.portEnd - this.deps.config.portStart + 1
-    const learnedConflicts = new Set<number>()
     let directoryCreated = false
     let runAttempted = false
     let preexisting = false
     let current = inst
     try {
-      for (let i = 0; i < poolSize; i += 1) {
-        // 取消检查点：delete 已置取消标志 → 统一回滚后终止（不干等）。
-        if (this.cancel.isCancelled(name)) {
-          await this.finalizeFailedCreate(name, instanceDir, current, runAttempted, preexisting, directoryCreated, preserveErrorRow, new InstanceBusy(name))
-        }
-        try {
-          preexisting = (await this.deps.runtime.get(name)) !== null
-          if (!directoryCreated) {
-            // instanceDir 基于 inst.id 每代全新（#360），无 name 时代的 orphan 冲突——直接建。
-            // 先确保父目录 instances/ 存在，再非递归建叶子（对齐 Python parents=True + exist_ok=False）。
-            await mkdir(path.dirname(instanceDir), { recursive: true })
-            await mkdir(instanceDir, { recursive: false })
-            directoryCreated = true
-            // provision 只在目录首次创建时执行（bind 冲突重试复用已 provision 的 home）
-            await this.deps.provisioner.provision(home)
-          }
-          // config 渲染（模板损坏 fail-fast 在此暴露，容器尚未创建——runAttempted 保持 false，
-          // 失败走「未 run」清理分支）；#385：allowedOrigins 强制含面板 origin（隧道 Origin 校验
-          // + 生产 ChatView 开箱可聊）
-          const rendered = (await this.ensureRenderer()).render(this.deps.config.panelOrigin)
-          // 取消检查点（render 后、create 前——覆盖随后 docker create / image pull 阻塞 IO 前的最后窗口）
-          if (this.cancel.isCancelled(name)) {
-            await this.finalizeFailedCreate(name, instanceDir, current, runAttempted, preexisting, directoryCreated, preserveErrorRow, new InstanceBusy(name))
-          }
-          runAttempted = true
-          const spec: ContainerSpec = {
-            name,
-            image: this.deps.config.image,
-            hostPort: current.port,
-            // DB 存密文，docker env 须注入明文 gatewayToken——用时 decrypt（Codex C1）。
-            gatewayToken: this.deps.crypto.decrypt(current.token),
-            homeDir: home,
-            // #590 named volume 拓扑（flag 开）：三卷 Mounts 替代 home host bind（buildRunOptions
-            // 按 volumes 存在与否分支）；空卷首挂由镜像内 ~/.openclaw 骨架自动初始化（#588）。
-            // config 无独立 bind（#591：落容器内默认路径，经 archive.writeConfig 写）
-            volumes: this.volumesFor(inst.id),
-            llmApiKey: this.deps.config.llmApiKey,
-          }
-          // #591 静态 config 顺序（对 #366「宿主 rename + ro bind 热加载」回退）：create（不启动）
-          // → putArchive 写容器内 ~/.openclaw/openclaw.json → start——首启 gateway 即读渲染配置，
-          // 无需重启；config 零宿主路径（named volume / bind home 内）。
-          const containerId = await this.deps.runtime.create(spec)
-          // #6xx named volume 拓扑：provision 的宿主树不进容器（卷首挂由镜像骨架初始化），
-          // 模板 workspace（researcher 各项 md + skills）经 putArchive 灌卷补上——create 后
-          // start 前（同 writeConfig 时序，putArchive 对 created 容器可用），首启 agent 即见
-          // 完整 workspace。旧 bind 模式 provision 已宿主预填充 home，不重复灌。
-          if (spec.volumes !== undefined) {
-            await this.deps.archive.seedWorkspace(name, path.join(this.deps.config.templateDir, 'workspace'))
-          }
-          await this.deps.archive.writeConfig(inst.name, rendered)
-          // 按 id 启动（#591）：create 返回的 id 精确指向本代容器——按 name 启动在外部 actor
-          // 删/重建同名容器的窗口会错启他人容器
-          await this.deps.runtime.startById(containerId)
-          // 取消检查点（Codex 第七轮 #2）：DELETE 可能在 create（拉镜像/建容器）/ writeConfig /
-          // start 期间到达——render 后检查点已过。start 后、持久化 running 前重查取消：检出即
-          // finalizeFailedCreate（runAttempted=true 清已起/已 created 的容器），不覆盖
-          // deleteReserve 已持久化的 removing、list 全程不显示 running。
-          if (this.cancel.isCancelled(name)) {
-            await this.finalizeFailedCreate(
-              name,
-              instanceDir,
-              current,
-              runAttempted,
-              preexisting,
-              directoryCreated,
-              preserveErrorRow,
-              new InstanceBusy(name),
-            )
-          }
-          current = await this.prisma.container.update({
-            where: { id: current.id },
-            data: { containerId, status: 'running' },
-          })
-          return current
-        } catch (exc) {
-          if (isBindConflict(exc)) {
-            // docker run bind 冲突 → 就地更新行端口、继续循环重试下一端口。
-            learnedConflicts.add(current.port)
-            // 残留容器清理不能吞：残留让下一轮撞 name 冲突。不清目录（行/目录/配置保留复用）。
-            if (runAttempted && !preexisting) {
-              try {
-                const created = await this.deps.runtime.get(name)
-                if (created?.containerId) {
-                  await this.prisma.container.update({
-                    where: { id: current.id },
-                    data: { containerId: created.containerId },
-                  })
-                }
-                await this.deps.runtime.remove(name, this.volumesFor(inst.id))
-                await this.prisma.container.update({
-                  where: { id: current.id },
-                  data: { containerId: '' },
-                })
-              } catch {
-                await this.markError(current)
-                throw new InstanceCleanupError(name, instanceDir)
-              }
-            }
-            let nextPort: number
-            // 端口换选 + 落库（Codex 第六轮②[P2]）：update(port) 也可能撞 P2002——并发不同名 create 的
-            // 各自 usedPorts 快照选了同一替换端口，port @unique 仲裁放行一个、拒另一个。旧实现不重试
-            // 直接中止、行卡 creating；对齐 reserveRow 把 P2002 视作 learned conflict、重选下一候选。
-            // 内层循环重选直至落库成功；learned 涨满池时 nextFree 抛 PortPoolExhausted 终止（有界）。
-            // eslint-disable-next-line no-constant-condition
-            while (true) {
-              try {
-                nextPort = this.deps.allocator.nextFree(await this.usedPorts(learnedConflicts))
-              } catch (poolErr) {
-                if (poolErr instanceof PortPoolExhausted) {
-                  await this.finalizeFailedCreate(name, instanceDir, current, runAttempted, preexisting, directoryCreated, preserveErrorRow, new PortAllocationError(name))
-                }
-                throw poolErr
-              }
-              try {
-                current = await this.prisma.container.update({
-                  where: { id: current.id },
-                  data: { port: nextPort },
-                })
-                break
-              } catch (e) {
-                if (this.isUniqueViolation(e)) {
-                  learnedConflicts.add(nextPort) // 并发抢注 → 学下一候选重选
-                  continue
-                }
-                throw e
-              }
-            }
-            continue
-          }
-          // 非 bind 冲突 → 统一失败终态
-          await this.finalizeFailedCreate(name, instanceDir, current, runAttempted, preexisting, directoryCreated, preserveErrorRow, exc)
-        }
+      // 取消检查点：delete 已置取消标志 → 统一回滚后终止（不干等）。
+      if (this.cancel.isCancelled(name)) {
+        await this.finalizeFailedCreate(name, instanceDir, current, runAttempted, preexisting, directoryCreated, preserveErrorRow, new InstanceBusy(name))
       }
-      throw new PortAllocationError(name)
+      preexisting = (await this.deps.runtime.get(name)) !== null
+      // instanceDir 基于 inst.id 每代全新（#360），无 name 时代的 orphan 冲突——直接建。
+      // 先确保父目录 instances/ 存在，再非递归建叶子（对齐 Python parents=True + exist_ok=False）。
+      await mkdir(path.dirname(instanceDir), { recursive: true })
+      await mkdir(instanceDir, { recursive: false })
+      directoryCreated = true
+      // provision 只在目录首次创建时执行（cp -a 模板预填充 home bind 模式）。
+      await this.deps.provisioner.provision(home)
+      runAttempted = true
+      const spec: ContainerSpec = {
+        name,
+        image: this.deps.config.image,
+        // DB 存密文，docker env 须注入明文 gatewayToken——用时 decrypt（Codex C1）。
+        gatewayToken: this.deps.crypto.decrypt(current.token),
+        homeDir: home,
+        // #590 named volume 拓扑（flag 开）：三卷 Mounts 替代 home host bind。
+        volumes: this.volumesFor(inst.id),
+        llmApiKey: this.deps.config.llmApiKey,
+      }
+      const containerId = await this.deps.runtime.create(spec)
+      // #6xx named volume 拓扑：provision 的宿主树不进容器（卷首挂由镜像骨架初始化），
+      // 模板 workspace（researcher 各项 md + skills）经 putArchive 灌卷补上——create 后
+      // start 前（putArchive 对 created 容器可用），首启 agent 即见完整 workspace。旧 bind 模式
+      // provision 已宿主预填充 home，不重复灌。
+      if (spec.volumes !== undefined) {
+        await this.deps.archive.seedWorkspace(name, path.join(this.deps.config.templateDir, 'workspace'))
+      }
+      // 按 id 启动（#591）：create 返回的 id 精确指向本代容器——按 name 启动在外部 actor
+      // 删/重建同名容器的窗口会错启他人容器
+      await this.deps.runtime.startById(containerId)
+      // 取消检查点（Codex 第七轮 #2）：DELETE 可能在 create（拉镜像/建容器）/ start 期间到达。
+      // start 后、持久化 running 前重查取消：检出即 finalizeFailedCreate（清已起容器），
+      // 不覆盖 deleteReserve 已持久化的 removing、list 全程不显示 running。
+      if (this.cancel.isCancelled(name)) {
+        await this.finalizeFailedCreate(name, instanceDir, current, runAttempted, preexisting, directoryCreated, preserveErrorRow, new InstanceBusy(name))
+      }
+      current = await this.prisma.container.update({
+        where: { id: current.id },
+        data: { containerId, status: 'running' },
+      })
+      return current
+    } catch (exc) {
+      // 统一失败终态（T0 #801：无 bind 端口冲突重试面——端口发布已随端口池废除）
+      return this.finalizeFailedCreate(name, instanceDir, current, runAttempted, preexisting, directoryCreated, preserveErrorRow, exc)
     } finally {
-      // 租约随 createReserve 持有至此；统一在此释放（成功/回滚/重试耗尽/取消都释放）。
+      // 租约随 createReserve 持有至此；统一在此释放（成功/回滚都释放）。
       this.releaseLease(name)
     }
   }
@@ -424,7 +229,7 @@ export class FleetCommand {
     }
   }
 
-  // create_complete 失败的统一收尾（非 bind 分支 + bind 池耗尽 + 取消检出共用）。总以 throw 结尾。
+  // create_complete 失败的统一收尾。总以 throw 结尾。
   // 清残留容器 → 清目录（失败保留 ERROR 行 + raise InstanceCleanupError）→ 落失败终态 → raise 原异常。
   private async finalizeFailedCreate(
     name: string,
@@ -548,11 +353,6 @@ export class FleetCommand {
     const inst = await this.prisma.container.findUnique({ where: { name } })
     // 不应到达（路由层归属前置已 20040）；防御分支沿用同码（20040 = 不存在），非 20043 busy。
     if (!inst) throw fail(CODE.CONTAINER_NOT_FOUND)
-    // #699 升级守卫（spec §2.3）：目标 upgrading → 拒删 20043（升级在飞，删除会把容器切一半）；
-    // upgrade_failed 终态放行删除（既有清理路径；备份卷除外——备份卷独立于删除连删范围）。
-    if (inst.status === 'upgrading') {
-      throw new ContainerDomainError(CODE.CONTAINER_BUSY, `容器升级中，禁止删除: ${name}`)
-    }
     // 在飞 create：置取消标志（provisioning 检查点检出即统一回滚），不干等。
     this.cancel.flag(name)
     // 标 removing（终态前奏），list 轮询可见。
@@ -563,7 +363,7 @@ export class FleetCommand {
   // delete 后台执行（按 name 串行——排在同 name 在飞 create 之后）。完成时 settle 供测试 await。
   // expectedId（Codex 第四轮①[P1]，代系绑定）：reconcileRemoving 的 requeueDelete 携带被观察 removing
   // 行的 ID。stale duplicate job 在用户 recreate 同名后到达时，delete 校验目标行代系，不匹配即跳过——
-  // 否则 job 用 name 解析到新行、误删用户重建的容器/目录/数据。
+  // 否则 job 用 name 解析到新行、误删用户重建的新行/目录/数据。
   submitDelete(name: string, expectedId?: string): Promise<DeleteOutcome> {
     return this.deps.serializer.enqueue(name, async () => this.delete0(name, expectedId))
   }
@@ -629,11 +429,6 @@ export class FleetCommand {
       this.cancel.clear(name)
       return 'removed'
     }
-    // 容器已被确认 stop+remove（或本就不存在）→ 立即逐出 chat pool（Codex 第五轮②[P2]）：
-    // 放行下方 dirRemover 之前，目录清理失败（throw InstanceCleanupError）也不跳过逐出——
-    // 否则容器已不复存在、gateway 已死，而 cached client 仍持续重连已消失的网关。
-    // onEvict 幂等（M2 空挂点），重复调用无害。
-    await this.deps.onEvict({ name: inst.name, port: inst.port })
     // 目录已不存在（外部清理/建行前崩溃）视为清理成功——否则行卡 REMOVING 重试永远撞同一路径。
     if (await pathExists(instanceDir)) {
       try {
@@ -648,199 +443,5 @@ export class FleetCommand {
     await this.prisma.container.delete({ where: { id: inst.id } })
     this.cancel.clear(name)
     return 'removed'
-  }
-
-  // ---- #699 容器升级编排（spec §2：六步序 + 干净中止 + attempts 守卫）----
-
-  // 同步段：守卫 + 幂等 + 置 upgrading + 拿 name lease（与 create/delete 同名互斥）。
-  // 返回 triggered=false = 幂等 no-op（未启动后台）；true = 已置 upgrading、路由应 submitUpgrade。
-  async upgradeReserve(name: string): Promise<{ inst: Container; triggered: boolean }> {
-    const inst = await this.prisma.container.findUnique({ where: { name } })
-    // 不应到达（路由层归属前置已 20040）；防御分支沿用同码（20040 = 不存在）。
-    if (!inst) throw fail(CODE.CONTAINER_NOT_FOUND)
-    // bind 模式（named volumes 关闭）无升级编排路径（spec §2.4 末：直接拒绝，文案「请删重建」）。
-    if (!this.deps.config.namedVolumes) {
-      throw new ContainerDomainError(CODE.CONTAINER_BUSY, `named volume 拓扑未开启（OPENCLAW_NAMED_VOLUMES=false），升级请删重建: ${name}`)
-    }
-    // 幂等：已 upgrading → 200 返当前快照，不重复入队（spec §2.3）。
-    if (inst.status === 'upgrading') return { inst, triggered: false }
-    // 终态：upgrade_failed → 20043 变体文案「仅可删除重建」（spec §2.3）。
-    if (inst.status === 'upgrade_failed') {
-      throw new ContainerDomainError(CODE.CONTAINER_BUSY, `容器升级失败，仅可删除重建: ${name}`)
-    }
-    // busy：仅 running/stopped 可触发（creating/removing/error → 20043）。
-    if (inst.status !== 'running' && inst.status !== 'stopped') throw new InstanceBusy(name)
-    // 幂等 no-op：容器记录镜像已对齐当前目标 → 无需升级（spec §2.1/§2.3）。
-    if (inst.image === this.deps.config.image) return { inst, triggered: false }
-    // 与 create/delete 同名互斥：拿 name lease（在飞 create/upgrade → 20043 busy；deleteReserve 对
-    // upgrading 已拒删，故无在飞 delete）。
-    const lease = this.deps.lock.tryAcquire(name)
-    if (lease === null) throw new InstanceBusy(name)
-    this.leases.set(name, lease)
-    try {
-      const updated = await this.prisma.container.update({
-        where: { id: inst.id },
-        data: { status: 'upgrading' },
-      })
-      return { inst: updated, triggered: true }
-    } catch (e) {
-      this.releaseLease(name)
-      throw e
-    }
-  }
-
-  // 后台入口：按 name 串行 + 队列并发（对齐 submitCreate/submitDelete）。完成时 settle（供测试 await）。
-  submitUpgrade(name: string): Promise<void> {
-    return this.deps.serializer.enqueue(name, async () => {
-      try {
-        await this.deps.queue.submit(() => this.runUpgrade(name))
-      } catch (e) {
-        // 队列不可达补偿（对齐 submitCreate）：runUpgrade 的 finally 不会执行 → lease 永久持有 + 行卡
-        // upgrading。释放 lease（reconcileUpgrading 在下次 list 按 runtime 实况收敛该行）。
-        this.releaseLease(name)
-        throw e
-      }
-    })
-  }
-
-  // 后台六步编排；domain 失败全部内部收敛（干净中止 / attempts），兜底异常按可重试失败收敛、不再上抛。
-  private async runUpgrade(name: string): Promise<void> {
-    try {
-      const inst = await this.prisma.container.findUnique({ where: { name } })
-      // 行已删/状态已变（极端竞态）→ 直接退（不误收敛他人状态）。
-      if (!inst || inst.status !== 'upgrading') return
-      await this.upgrade0(inst)
-    } catch (e) {
-      // 兜底：未捕获异常 → 按可重试失败收敛 + 尽力复启旧容器（日志如实记录）。
-      const inst = await this.prisma.container.findUnique({ where: { name } }).catch(() => null)
-      if (inst) await this.failUpgradeAttempt(inst, 'unexpected upgrade error', e)
-      // eslint-disable-next-line no-console
-      console.error(`[fleet] background upgrade failed for ${name}`, e)
-    } finally {
-      this.releaseLease(name)
-    }
-  }
-
-  // 六步序（spec §2.4）：
-  //   1 拉目标镜像（先做不停机）        → 失败 = 干净中止（不计失败）
-  //   2 stop（幂等）
-  //   3 备份 home 卷（硬性首步）        → 失败 = 干净中止（不计失败）
-  //   4 openclaw doctor --fix（三卷同布局）→ 失败 = 失败 attempt（attempts+1）
-  //   5 保留三卷 recreate（不 provision/seedWorkspace/writeConfig）→ 失败 = 失败 attempt
-  //   6 记回 image=target + running + attempts 清零（needsUpgrade 自然转 false）
-  private async upgrade0(inst: Container): Promise<void> {
-    const target = this.deps.config.image
-    const volumes = namedVolumesFor(inst.id)
-    const token = inst.tokenEncrypted ? this.deps.crypto.decrypt(inst.token) : inst.token
-
-    // 步骤 1：拉目标镜像（可慢，先做不停机——慢 pull 排在任何卷变更之前）。
-    try {
-      await this.deps.runtime.ensureImage(target)
-    } catch (e) {
-      await this.abortClean(inst, 'pull target image', e)
-      return
-    }
-
-    // 步骤 2：停容器（幂等）。
-    await this.deps.runtime.stop(inst.name)
-
-    // 步骤 3：备份 home 卷（硬性首步，任何卷变更之前）。失败 → 干净中止（数据未动，旧容器复启照常）。
-    try {
-      await this.deps.runtime.runOnce(buildBackupOneShot(target, volumes.home, backupVolumeFor(inst.id)))
-    } catch (e) {
-      await this.abortClean(inst, 'backup home volume', e)
-      return
-    }
-
-    // 步骤 4：doctor --fix（legacy session 迁移前置；失败 = 失败 attempt）。
-    // doctor 迁移/插件安装走 state-sqlite 生命周期租约（withPluginLifecycleLease）保护，租约
-    // assertOwned 丢失即整体 exit 1——实测非确定性偶发（本地同输入 1/3 失败）。doctor 幂等
-    //（重跑只补剩余迁移）→ 失败原样重试一次，两连败才计失败 attempt。
-    const doctorSpec = buildDoctorOneShot(target, volumes, {
-      GATEWAY_TOKEN: token,
-      OPENCLAW_GATEWAY_TOKEN: token,
-      LLM_API_KEY: this.deps.config.llmApiKey,
-    })
-    try {
-      try {
-        await this.deps.runtime.runOnce(doctorSpec)
-      } catch (first) {
-        // eslint-disable-next-line no-console
-        console.warn(`[fleet] upgrade doctor --fix failed once, retrying: ${(first as Error).message.slice(0, 300)}`)
-        await this.deps.runtime.runOnce(doctorSpec)
-      }
-    } catch (e) {
-      await this.failUpgradeAttempt(inst, 'openclaw doctor --fix', e)
-      return
-    }
-
-    // 步骤 5：保留三卷 recreate（spec §2.4）——remove 不带 volumes（三卷保留，与删除路径的唯一本质
-    // 差异，防串读设计关系 #687）；create 不 provision / 不 seedWorkspace / 不 writeConfig（卷内已有
-    // 用户数据与用户级 model provider config，覆写即毁）。
-    try {
-      await this.deps.runtime.remove(inst.name)
-      const spec: ContainerSpec = {
-        name: inst.name,
-        image: target,
-        hostPort: inst.port,
-        gatewayToken: token,
-        homeDir: inst.homeDir,
-        volumes,
-        llmApiKey: this.deps.config.llmApiKey,
-      }
-      const containerId = await this.deps.runtime.create(spec)
-      await this.deps.runtime.startById(containerId)
-      // 步骤 6：记回新容器 id + 目标镜像 + running + attempts 清零。
-      await this.prisma.container.update({
-        where: { id: inst.id },
-        data: { containerId, image: target, status: 'running', upgradeAttempts: 0 },
-      })
-    } catch (e) {
-      await this.failUpgradeAttempt(inst, 'recreate with target image', e)
-    }
-  }
-
-  // 干净中止（步骤 1/3 失败，spec §2.4）：基础设施抖动 ≠ 升级失败——attempts 不动、不计失败。
-  // 尽力复启旧容器回可用态 + 标 stopped（读侧按 runtime 实况推导 running/stopped，复启成功即显示
-  // running；拉镜像失败于停机前，startById 对 running 容器幂等 no-op）。
-  private async abortClean(inst: Container, what: string, exc: unknown): Promise<void> {
-    // eslint-disable-next-line no-console
-    console.warn(`[fleet] upgrade clean abort (${what}) for ${inst.name}: ${(exc as Error)?.message ?? exc}`)
-    await this.tryRestartOld(inst)
-    await this.prisma.container.update({ where: { id: inst.id }, data: { status: 'stopped' } }).catch(() => {})
-  }
-
-  // 可重试失败（步骤 4/5，spec §2.4）：attempts+1；尽力复启旧容器（store 可能已部分迁移、7.1 可能
-  // 起不来——日志如实记录，不掩盖失败判定）；attempts ≥ UPGRADE_MAX_ATTEMPTS → upgrade_failed 终态。
-  private async failUpgradeAttempt(inst: Container, what: string, exc: unknown): Promise<void> {
-    // eslint-disable-next-line no-console
-    console.warn(`[fleet] upgrade attempt failed (${what}) for ${inst.name}: ${(exc as Error)?.message ?? exc}`)
-    await this.tryRestartOld(inst)
-    const attempts = inst.upgradeAttempts + 1
-    const status: Container['status'] = attempts >= UPGRADE_MAX_ATTEMPTS ? 'upgrade_failed' : 'stopped'
-    await this.prisma.container
-      .update({ where: { id: inst.id }, data: { status, upgradeAttempts: attempts } })
-      .catch(() => {})
-  }
-
-  // 尽力复启旧容器（失败恢复可用态）：containerId 指向旧镜像容器。remove 已删容器 → startById 幂等
-  // no-op；store 已迁移旧镜像起不来 → 抛错捕获记日志（恢复失败不掩盖主失败判定）。
-  private async tryRestartOld(inst: Container): Promise<void> {
-    if (!inst.containerId) return
-    try {
-      await this.deps.runtime.startById(inst.containerId)
-    } catch (e) {
-      // eslint-disable-next-line no-console
-      console.warn(`[fleet] restart old container after upgrade failure failed for ${inst.name}: ${(e as Error)?.message}`)
-    }
-  }
-
-  // 惰性构造 renderer：模板 JSON 仅供 create 使用，list/delete 不应因其损坏而失败。
-  private async ensureRenderer(): Promise<ConfigRenderer> {
-    if (this.renderer === null) {
-      const templateText = await readFile(this.deps.config.templateJson, 'utf8')
-      this.renderer = new ConfigRenderer(templateText)
-    }
-    return this.renderer
   }
 }

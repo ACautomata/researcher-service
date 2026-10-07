@@ -1,6 +1,6 @@
 # 天津大学科研智能体平台
 
-「天津大学科研智能体平台」——多 OpenClaw 容器管理面板。TS/Express 控制面（server/，替代已退役的 Django 后端，#341 M9）经四条接触路径与每个 OpenClaw 容器交互；Vue3 前端经 REST + WS 消费控制面。本 glossary 只收录**本项目特有**的领域术语，通用编程概念（Port / Adapter / Translator / Protocol 等设计模式词汇）不在此列。
+「天津大学科研智能体平台」——多 OpenClaw 容器管理面板。TS/Express 控制面（server/，替代已退役的 Django 后端，#341 M9）经四条接触路径与每个 OpenClaw 容器交互；Vue3 前端经 REST + SSE 事件流消费控制面。本 glossary 只收录**本项目特有**的领域术语，通用编程概念（Port / Adapter / Translator / Protocol 等设计模式词汇）不在此列。
 
 ## Language
 
@@ -9,31 +9,33 @@
 _Avoid_: 实例——"实例"指面板侧的 `Instance` 数据模型，是 OpenClaw 容器在控制面的投影，二者不等同。
 
 **一次性临时容器 (one-shot container)**:
+**（历史注：`runOnce` 原语、`RunOnceError` 与升级编排已随 T0 #801 整链物理删除，本条保留为决策历史。）**
 由运行时原语 `runOnce` 以指定镜像 + 指定命令跑完即弃的容器（升级编排在「真容器尚未启动」的窗口里执行备份与 `openclaw doctor --fix` 的通道——stopped 容器不可 exec，新镜像网关遇 legacy 存储又拒绝就绪）。**它不是 OpenClaw 容器**：不写 fleet 三标签（`app` / `openclaw.instance` / `openclaw.port`）、不发布宿主端口，故对 fleet 列表与端口对账不可见；退出码非 0 即失败（`RunOnceError` 携带退出码与输出），容器由原语在成功/失败/异常三路强制回收（卷不删）。
 _Avoid_: 临时实例——易与面板侧 `Instance` 模型混淆；影子容器——掩盖它由面板显式创建、必须回收的事实。
 
 **面板 bounded context (panel bounded context)**:
-面板内部的六个 bounded context（2026-08-13 划分，wayfinder #637）：containers（核心）/ 身份与访问 / wiki / models（支撑）/ files / traceLogs 审计（通用）。跨 context 契约：**行为协作一律经领域消息**（异步）；无 IO 纯函数/常量/渲染机制下沉**共享内核**；容器归属门 `getInstanceForUser` 是共享中间件**唯一单点**（tenant 引入时只替换此门）。隧道、前端 chat 协议机、health 探针**不是 context**（基础设施 / 接触路径 (4) 客户端侧 ACL）。
+面板内部的六个 bounded context（2026-08-13 划分，wayfinder #637）：containers（核心）/ 身份与访问 / wiki / models（支撑）/ files / traceLogs 审计（通用）。跨 context 契约：**行为协作一律经领域消息**（异步）；无 IO 纯函数/常量/渲染机制下沉**共享内核**；容器归属门 `getInstanceForUser` 是共享中间件**唯一单点**（tenant 引入时只替换此门）。
 _Avoid_: 跨 context 直接 import 域服务（渲染、状态查询）——行为协作走领域消息；在 context 内复制共享内核纯知识（容器命名规则 `containerName`、配置安全不变量）——必须单一实现。
 
 **镜像谱系 (image lineage)**:
 承载 OpenClaw 容器的镜像决定容器的能力边界与挂载契约。有两个互不兼容的**现成**变体，另可自建第三条：
 - **cn-im fork**（`acautomata/openclaw-docker-cn-im`）：历史部署镜像，启动时自带配置同步与权限降权（init 脚本），预装中国 IM 渠道插件，**不含 browser 运行时**（researcher 配置的 browser 插件在此镜像上无效）。
 - **官方原版**（`ghcr.io/openclaw/openclaw`，分 `-browser`/`-slim` 变体）：OpenClaw 官方镜像，不自带配置同步逻辑；`-browser` 变体预装 Playwright，browser 能力可用（ADR 0003 选定 browser 变体为部署基线；当前基线版本 `2026.9.4-browser`）。
-- **自建派生 (derived image)**：`FROM ghcr.io/openclaw/openclaw:2026.9.4-browser`（保 browser 能力，ADR 0003 基线）之上叠加本面板专属内容：`pdftotext`（poppler，PDF 文本提取 CLI，供 agent `tools.exec` 调用）+ wiki/workspace 骨架（COPY 进 `~/.openclaw`，供 named volume 首挂自动初始化，见「named volume 拓扑」）。经 `OPENCLAW_IMAGE` 注入。派生镜像**不新开谱系**，只在其基镜像谱系（官方）上加层；基镜像的 browser 能力、token 占位、SecretRef 等已校准性质原样继承。
+- **自建派生 (derived image)**：`FROM ghcr.io/openclaw/openclaw:2026.9.4-browser`（保 browser 能力，ADR 0003 基线）之上叠加本面板专属内容：`pdftotext`（poppler，PDF 文本提取 CLI，供 agent `tools.exec` 调用）+ wiki/workspace 骨架（COPY 进 `~/.openclaw`，供 named volume 首挂自动初始化，见「named volume 拓扑」）。经 `OPENCLAW_IMAGE` 注入（派生镜像构建已随 T0 #801 退役，现钉版存量 GHCR 引用）。派生镜像**不新开谱系**，只在其基镜像谱系（官方）上加层；基镜像的 browser 能力、token 占位、SecretRef 等已校准性质原样继承。
 _Avoid_: 「OpenClaw 镜像」——掩盖谱系在 browser 能力、挂载契约依赖、启动方式上的本质差异；讨论迁移/换镜像/重新打包时必须指明谱系（含派生镜像的**基镜像**谱系）。
 
 **目标镜像与版本 tag (target image / version tag)**:
-面板 fleet 的**目标镜像** = `config.fleet.image`（env `OPENCLAW_IMAGE`）：新建容器时写进容器记录，容器升级编排（#682）的检测判定即「容器记录镜像 ≠ 当前目标」。**版本 tag** = 派生镜像的 `:<基线 tag>`（基线 = `deploy/openclaw-image/Dockerfile` 的 `FROM` 行），**一经发布不可移动**；bump = 改 FROM 单源 + 四处**运行期**明文（config 默认值 / 模板栈 compose / dev driver / 测试常量）随之同步，由 `openclawImage.test.ts` 交叉断言锁死。**浮动 tag (floating tag)** = 无 tag（Docker 默认解析 `:latest`）或显式 `:latest`：内容随上游移动、使「当前目标」不可复现 → **生产启动即 fail-fast**（准据 `isFloatingImageRef`；dev/test 放行）；滚动 tag（`latest-browser` 等）不由代码拦截，靠 review 拦。
+面板 fleet 的**目标镜像** = `config.fleet.image`（env `OPENCLAW_IMAGE`）：新建容器时写进容器记录（升级编排 #682 已随 T0 #801 退役，行镜像一经创建不再变更）。**版本 tag** = 派生镜像的 `:<基线 tag>`，**一经发布不可移动**（派生镜像构建已随 T0 #801 退役：`deploy/openclaw-image/` 基线链与 `openclawImage.test.ts` 交叉断言随之删除，bump 机制不再存在，本条保留为决策历史）。**浮动 tag (floating tag)** = 无 tag（Docker 默认解析 `:latest`）或显式 `:latest`：内容随上游移动、使「当前目标」不可复现 → **生产启动即 fail-fast**（准据 `isFloatingImageRef`；dev/test 放行）；滚动 tag（`latest-browser` 等）不由代码拦截，靠 review 拦。
 _Avoid_: 用「镜像版本」泛指——须区分**基线版本**（官方镜像 tag）与**派生镜像版本 tag**（发布后冻结）；也不要把「最新」当目标（浮动 = 不可复现）。
 
 **接触路径 (contact path)**:
 控制面与 OpenClaw 容器交互的四条通道：(1) Docker SDK 编排（增删查容器）、(2) 宿主文件 bind-mount 直读写（wiki / openclaw.json）、(3) HTTP `/health` 探测、(4) WebSocket（协议 v4 + 设备配对 + 事件流，见「隧道」）。
+（T0 #801 演进注：(2) 已换 named volume 拓扑（ADR 0011）、(3) 健康探针与 (4) WebSocket 隧道均已退役——现役接触路径 = (1) Docker SDK 编排 + 各域 Docker 原语读写（wiki 容器 /lab 沙箱）。）
 _Avoid_: 集成点——过于笼统，无法区分这四条性质不同的通道。
 
 **防腐层 (Anti-Corruption Layer, ACL)**:
-`server/src/chat/` 与 `wiki/` 的 Port + Adapter + Translator 结构（Django 时代为 `backend/integration/openclaw/` 包，已随后端退役）。用 Port + Adapter + Translator 隔离 OpenClaw 的 wire 模型，防止其原生概念污染控制面 domain。**明确不追求 vendor-neutral**——保留 OpenClaw 原生命名作为事实，只在语义不一致处翻译。
-_Avoid_: 网关层、适配器层（单数）——本系统是多个 Port 的集合，不是单一门面；单一门面因 chat 的双向流式回调不可行。
+`wiki/` 等域的 Port + Adapter + Translator 结构（`server/src/chat/` ACL 与 Django 时代 `backend/integration/openclaw/` 包均已退役）。用 Port + Adapter + Translator 隔离 OpenClaw 的 wire 模型，防止其原生概念污染控制面 domain。**明确不追求 vendor-neutral**——保留 OpenClaw 原生命名作为事实，只在语义不一致处翻译。
+_Avoid_: 网关层、适配器层（单数）——本系统是多个 Port 的集合，不是单一门面。
 
 **wire 概念 (wire concept)**:
 OpenClaw WS 协议 v4 的原生命名——事件族（`exec.approval.requested` / `plugin.approval.requested` / `agent.tool.start` / `agent.tool.result` / `chat` 的 `state`）、字段名（`deltaText` / `errorMessage` / `systemRunPlan.rawCommand`）、标识符（`runId` / `sessionKey` / `deviceToken` / `deviceId` / `operator.*` scopes）。
@@ -64,18 +66,19 @@ _Avoid_: 在模块里散读 env、新建独立「env 注册包」——前者绕
 测试 harness / fixture（如 `test/` 里测 config 解析的用例）读 env 不属于 runtime。边界是架构约定（code review 维护），非零容忍 grep。
 
 **必填 secret 的 fail-fast (required-secret fail-fast)**:
-生产（`NODE_ENV=production` 下 `server/src/config.ts` 的 read* 校验）对必填 secret 缺失即拒启动（`JWT_SECRET` ≥32 字符硬校验、`OPENCLAW_TEMPLATE_DIR` / `PANEL_PUBLIC_ORIGIN` / `CREDENTIAL_ENCRYPTION_KEYS` 缺失 fail-fast），杜绝「生产漏设 → 静默空值」的错配（`LLM_API_KEY` 旧为 `os.environ.get(...,'')`，漏设会把空 key 静默注入容器，与 issue #195「卡 creating」同类）。**dev / test 宽容不加 fail-fast**。
+生产（`NODE_ENV=production` 下 `server/src/config.ts` 的 read* 校验）对必填 secret 缺失即拒启动（`JWT_SECRET` ≥32 字符硬校验、`OPENCLAW_TEMPLATE_DIR` / `CREDENTIAL_ENCRYPTION_KEYS` 缺失 fail-fast），杜绝「生产漏设 → 静默空值」的错配（`LLM_API_KEY` 旧为 `os.environ.get(...,'')`，漏设会把空 key 静默注入容器，与 issue #195「卡 creating」同类）。**dev / test 宽容不加 fail-fast**。
 
 **隧道 (tunnel)**:
-ADR 0006 引入的接触路径 (4) 新形态：浏览器↔控制面的一条 WebSocket，握手做 JWT 验签 + 归属门（user 只能开到**自己容器**的隧道），建立后**原样透传**浏览器与容器网关之间的 OpenClaw 协议 v4 原始帧——控制面**不解析、不翻译、不注入凭证、不做 method 级授权**。隧道是 B-直连的承载：浏览器跑官方 `@openclaw/gateway-client` 的 `./browser` 协议机，把「隧道 socket」注入其 `createSocket` 当 transport，经隧道直连藏在控制面后面的容器网关。
+ADR 0006 引入的接触路径 (4) 新形态：浏览器↔控制面的一条 WebSocket，握手做 JWT 验签 + 归属门（user 只能开到**自己容器**的隧道），建立后**原样透传**浏览器与容器网关之间的 OpenClaw 协议 v4 原始帧——控制面**不解析、不翻译、不注入凭证、不做 method 级授权**。隧道是 B-直连的承载：浏览器跑官方 `@openclaw/gateway-client` 的 `./browser` 协议机，把「隧道 socket」注入其 `createSocket` 当 transport，经隧道直连藏在控制面后面的容器网关。**本形态已随 T0 #801 整链退役**（现役对话面 = REST+SSE，#793）。
 _Avoid_: 转发 / 代理——笼统，掩盖了「纯透传原始帧（隧道）vs 懂协议的胖中介（旧 #331 G 节桥接）」这一本质区分；旧桥接做翻译/池壳/授权，隧道一概不做。
 
 **浏览器设备 (browser device)**:
+**（历史注：设备配对整链——pairings 表、配对 REST、前端 `@noble/ed25519` 依赖——已随 T0 #801 退役，本条保留为决策历史。）**
 ADR 0006 的配对单位：每个浏览器 profile（Chrome / 隐身 / 另一台电脑）生成独立 Ed25519 设备身份（存 localStorage，同 profile 多 tab 共享），独立配对、独立 approve，并为其访问的**每个容器**各持一份 deviceToken（按 `(clientId, deviceId, role)` 存）。对齐官方 webchat-ui / control-ui 的「设备即浏览器 profile」模型。
 _Avoid_: 设备——脱离了「每浏览器 profile 一设备」就没意义；旧模型是「面板后端单设备、每容器一份」，新模型是「每浏览器设备 × 每容器」。
 
 **bootstrap token**:
-容器网关的共享认证秘密（旧称 `GATEWAY_TOKEN`，容器创建时生成、env 注入容器、DB 加密存值）。ADR 0006 修订 spec §5.2 后，它**可经所有权门控 REST（`POST /containers/<name>/bootstrap-token`）下发给容器属主的浏览器**做首次连接认证（bootstrap auth 对首连是强制的，官方文档）。每个容器一个共享 bootstrap token，该容器所有属主浏览器首连共用。
+容器网关的共享认证秘密（旧称 `GATEWAY_TOKEN`，容器创建时生成、env 注入容器、DB 加密存值）。ADR 0006 修订 spec §5.2 后，它**可经所有权门控 REST（`POST /containers/<name>/bootstrap-token`）下发给容器属主的浏览器**做首次连接认证（bootstrap auth 对首连是强制的，官方文档；该下发端点已随 T0 #801 退役）。每个容器一个共享 bootstrap token，该容器所有属主浏览器首连共用。
 _Avoid_: 真值不落盘/不外泄（旧 §5.2 字面）——已修订为「可下发属主浏览器，真值仍不落前端以外的盘、不经日志」。
 
 **会话删除 (session delete)**:
@@ -87,7 +90,7 @@ _Avoid_: 删除会话/移除会话——与归档混为一谈；术语必须指�
 _Avoid_: 把带 `archivedAt` 的行称作「已归档会话」——归档是会话级用户功能；机制面只说「软删存档行 / 被放弃路线」。
 
 **附件 (attachment)**:
-`chat.send` 携带的多模态内容块（wire 字段 `attachments`：`{type, mimeType, fileName, content, width, height}`），经隧道**内联**发送。用户经浏览器采集（粘贴/拖拽/选择）上传，图片发送前**前端压缩**；content 是自由形状（0 信任），渲染端须按块类型分派。
+`chat.send` 携带的多模态内容块（wire 字段 `attachments`：`{type, mimeType, fileName, content, width, height}`），现经 REST 上传换 attachmentIds 随消息引用（#795 起；隧道内联形态已随 T0 #801 退役）。用户经浏览器采集（粘贴/拖拽/选择）上传，图片发送前**前端压缩**；content 是自由形状（0 信任），渲染端须按块类型分派。
 _Avoid_: 文件/图片消息——掩盖「内联于 chat.send 帧、多类型块数组」的协议形态。
 **（新 runtime 演进注，wayfinder #766 / #747 修订）**：（目标架构，未实施）附件经 REST 上传直写会话沙箱 `/lab/uploads/`（字节落容器 FS；宿主 FS / MongoDB / V1 对象存储均不用），消息与 checkpoint 只存引用（attachmentId/path），run 首节点确定性 **ingestion 工具**校验物化、图片装配时转多模态 block；下载走 owner 门端点（不存在/越权同码防探测）。上传纳入 **session-global 文件日志**，rewind 时可被一并回退。
 
@@ -137,8 +140,8 @@ OpenClaw 容器持久化**全用 Docker named volume，宿主零数据 bind-moun
 _Avoid_: bind-mount home——它要求「server 与宿主 docker daemon 解析同一宿主路径」（`/fleet` 坑，2026-08-01 生产实测），与「零 host 数据挂载」目标根本冲突。
 
 **禁止挂 host (no host mounts)**:
-生产部署除 `/var/run/docker.sock`（编排 OpenClaw 的唯一通道，无 volume 替代，spec §5.4 已接受等价 root 风险）外**零 host 挂载**。由此：模板与 `openclaw.json` 单一来源**构建期 COPY 进 server 镜像**（不再运行时挂载 `/srv/openclaw/template`、`./openclaw.json`）；`openclaw.json` 写读**不经文件 bind**——写用 `putArchive` 打进容器、读用 `getArchive` 拉出；`/fleet:/fleet` bind 随 homeDir bind 一并消失。dev 控制面也容器化（与 prod 同形态）。
-**静态 config 后果**：`openclaw.json` 改经 `putArchive` 写后，#366 的「宿主 rename 换 inode + 目录 ro bind」热加载机制**放弃**——配置改为**静态**，改配置须重启容器生效（不复用 gateway watch 热加载）。这是 #366 决策的一次明确回退。
+生产部署除 `/var/run/docker.sock`（编排 OpenClaw 的唯一通道，无 volume 替代，spec §5.4 已接受等价 root 风险）外**零 host 挂载**。由此：researcher 模板单一来源**构建期 COPY 进 server 镜像**（不再运行时挂载 `/srv/openclaw/template`）；模板灌卷与文件读写经 Docker 原语（`putArchive`/`getArchive`，见「docker archive 直读」）；`openclaw.json` 渲染写盘链已随 T0 #801 整链退役（容器读镜像内默认配置）；`/fleet:/fleet` bind 随 homeDir bind 一并消失。dev 控制面也容器化（与 prod 同形态）。
+**静态 config 后果**（写盘链已随 T0 #801 退役，本条保留为决策历史）：#366 的「宿主 rename 换 inode + 目录 ro bind」热加载机制**放弃**——配置**静态**，改配置须重启容器生效（不复用 gateway watch 热加载）。这是 #366 决策的一次明确回退。
 _Avoid_: 把 `docker.sock` 也当可删的 host 挂载——删它即失去编排能力；混用「运行时挂载模板」——违背配置入镜像的单一来源；假设配置仍可热加载——已改静态。
 
 **消息锚点导航 (message anchor nav)**:
@@ -196,7 +199,7 @@ _Avoid_: 双管线各自渲染再对齐——一致性靠「同一归约器 + �
 
 **沙箱 (sandbox)**:
 （目标架构，#734 effort / #728 定稿，未实施）绑定单个 LangGraph session（thread）的执行环境容器：agent 的 bash/read/write/update 工具在其中执行，1 session : 1 沙箱，首个执行工具调用时**惰性创建**，闲置 30 分钟自动 stop（文件保留在容器可写层），删 session 级联删除。完整工具链镜像（bash/git/Python/Node/rg/poppler/Chromium headless），每沙箱独立 bridge network（NAT 出网、容器间零互通），V1 网络默认放行 + 审计。对容器列表**隐身**——用户从 session 页进入，不感知沙箱存在。
-_Avoid_: 临时容器——已被「一次性临时容器 (one-shot)」占用，混用会把生命周期完全不同的两种容器（runOnce 跑完即弃 vs 随 session 生灭）混为一谈。
+_Avoid_: 临时容器——混用会把生命周期完全不同的容器（随 session 生灭、闲置 stop 保留文件的沙箱 vs 跑完即弃的一次性任务）混为一谈。
 
 **wiki 容器 (wiki container)**:
 （目标架构，#728 定稿）用户 wiki 树的**永久**文件仓库：跨 session 存活，每用户一个。busybox 级极小镜像（仅 sh/mkdir/rm/cat，无 Node/Python/运行时），`NetworkMode=none` 零出网，根只读 + 可写层承载 `/wiki`，**无具名卷**（数据与容器同生命周期，备份 = docker export 全树 tar；删除路径必须带确认门）。wiki 树**零初始化**——OpenWiki 工具按需自行生成，骨架不烤进镜像。

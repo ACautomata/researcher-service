@@ -160,7 +160,7 @@ describe('api client', () => {
     ;(globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
       mockResp({ code: 20040, message: '容器不存在或无权访问', data: null }),
     )
-    await expect(apiJson('/api/v1/containers/x/bootstrap-token')).rejects.toMatchObject({
+    await expect(apiJson('/api/v1/containers/x/models/providers')).rejects.toMatchObject({
       code: 20040,
       status: 200,
     } as ApiError)
@@ -209,9 +209,9 @@ describe('api client', () => {
   })
 
   // PR #370 第四轮 R4-1（P0）：TS 后端 #312 信封 {code:0,message,data} 下，apiJson 成功时必须
-  // 解包 data 返回业务载荷，而不是整个信封——否则所有非 chat.ts 调用方（containers/wiki/models/
-  // pairing + ChatView.loadInstances）裸消费信封对象，listInstances.length / ContainersView.map 失败，
-  // 主线「容器列表 → selectContainer → 隧道」全断。非信封（裸载荷）仍原样透传（上一用例）。
+  // 解包 data 返回业务载荷，而不是整个信封——否则所有非 chat.ts 调用方（containers/wiki/models
+  // + ChatView.loadInstances）裸消费信封对象，listInstances.length / ContainersView.map 失败，
+  // 主流程全断。非信封（裸载荷）仍原样透传（上一用例）。
   it('apiJson unwraps envelope data on HTTP 200 success（#312 信封）', async () => {
     ;(globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
       mockResp({ code: 0, message: 'ok', data: { a: 1 } }),

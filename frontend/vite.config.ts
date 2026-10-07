@@ -9,7 +9,7 @@ const apiTarget = process.env.VITE_API_TARGET ?? 'http://localhost:8001'
 // #800 双面板 MPA——/admin/ 分流（dev/preview 形态对齐生产 nginx try_files /admin/ → admin.html）：
 // navigation 请求（GET + Accept: text/html）命中 /admin 或 /admin/ 前缀时 rewrite 到 /admin.html，
 // admin 子应用（admin.html + src/admin/*）接管路由（base '/admin/'）；非导航请求（静态资源、
-// /api、/ws）不触碰。生产由 nginx.conf 的 location /admin/ 承担同款分流。
+// /api）不触碰。生产由 nginx.conf 的 location /admin/ 承担同款分流。
 function adminHtmlFallback(): Plugin {
   const rewrite = (
     req: IncomingMessage,
@@ -56,10 +56,10 @@ export default defineConfig({
   },
   server: {
     // dev 下把 /api 代理到 TS 控制面（server/src/config.ts port=8001），前端用相对路径
-    // POST /api/v1/auth/login；/ws/chat/ 经同一控制面的隧道（server.ts 同端口 upgrade 分流）。
+    // POST /api/v1/auth/login。WS 隧道已随 T0 #801 退役——现役 SSE 事件流（/api/v1/events）
+    // 同源走本条目承载，无需额外 proxy 配置。
     proxy: {
       '/api': apiTarget,
-      '/ws': { target: apiTarget, ws: true },
     },
   },
   test: {
