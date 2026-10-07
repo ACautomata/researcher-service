@@ -9,22 +9,23 @@
 _Avoid_: 实例——"实例"指面板侧的 `Instance` 数据模型，是 OpenClaw 容器在控制面的投影，二者不等同。
 
 **一次性临时容器 (one-shot container)**:
+**（历史注：`runOnce` 原语、`RunOnceError` 与升级编排已随 T0 #801 整链物理删除，本条保留为决策历史。）**
 由运行时原语 `runOnce` 以指定镜像 + 指定命令跑完即弃的容器（升级编排在「真容器尚未启动」的窗口里执行备份与 `openclaw doctor --fix` 的通道——stopped 容器不可 exec，新镜像网关遇 legacy 存储又拒绝就绪）。**它不是 OpenClaw 容器**：不写 fleet 三标签（`app` / `openclaw.instance` / `openclaw.port`）、不发布宿主端口，故对 fleet 列表与端口对账不可见；退出码非 0 即失败（`RunOnceError` 携带退出码与输出），容器由原语在成功/失败/异常三路强制回收（卷不删）。
 _Avoid_: 临时实例——易与面板侧 `Instance` 模型混淆；影子容器——掩盖它由面板显式创建、必须回收的事实。
 
 **面板 bounded context (panel bounded context)**:
-面板内部的六个 bounded context（2026-08-13 划分，wayfinder #637）：containers（核心）/ 身份与访问 / wiki / models（支撑）/ files / traceLogs 审计（通用）。跨 context 契约：**行为协作一律经领域消息**（异步）；无 IO 纯函数/常量/渲染机制下沉**共享内核**；容器归属门 `getInstanceForUser` 是共享中间件**唯一单点**（tenant 引入时只替换此门）。隧道、前端 chat 协议机、health 探针**不是 context**（基础设施 / 接触路径 (4) 客户端侧 ACL）。
+面板内部的六个 bounded context（2026-08-13 划分，wayfinder #637）：containers（核心）/ 身份与访问 / wiki / models（支撑）/ files / traceLogs 审计（通用）。跨 context 契约：**行为协作一律经领域消息**（异步）；无 IO 纯函数/常量/渲染机制下沉**共享内核**；容器归属门 `getInstanceForUser` 是共享中间件**唯一单点**（tenant 引入时只替换此门）。
 _Avoid_: 跨 context 直接 import 域服务（渲染、状态查询）——行为协作走领域消息；在 context 内复制共享内核纯知识（容器命名规则 `containerName`、配置安全不变量）——必须单一实现。
 
 **镜像谱系 (image lineage)**:
 承载 OpenClaw 容器的镜像决定容器的能力边界与挂载契约。有两个互不兼容的**现成**变体，另可自建第三条：
 - **cn-im fork**（`acautomata/openclaw-docker-cn-im`）：历史部署镜像，启动时自带配置同步与权限降权（init 脚本），预装中国 IM 渠道插件，**不含 browser 运行时**（researcher 配置的 browser 插件在此镜像上无效）。
 - **官方原版**（`ghcr.io/openclaw/openclaw`，分 `-browser`/`-slim` 变体）：OpenClaw 官方镜像，不自带配置同步逻辑；`-browser` 变体预装 Playwright，browser 能力可用（ADR 0003 选定 browser 变体为部署基线；当前基线版本 `2026.9.4-browser`）。
-- **自建派生 (derived image)**：`FROM ghcr.io/openclaw/openclaw:2026.9.4-browser`（保 browser 能力，ADR 0003 基线）之上叠加本面板专属内容：`pdftotext`（poppler，PDF 文本提取 CLI，供 agent `tools.exec` 调用）+ wiki/workspace 骨架（COPY 进 `~/.openclaw`，供 named volume 首挂自动初始化，见「named volume 拓扑」）。经 `OPENCLAW_IMAGE` 注入。派生镜像**不新开谱系**，只在其基镜像谱系（官方）上加层；基镜像的 browser 能力、token 占位、SecretRef 等已校准性质原样继承。
+- **自建派生 (derived image)**：`FROM ghcr.io/openclaw/openclaw:2026.9.4-browser`（保 browser 能力，ADR 0003 基线）之上叠加本面板专属内容：`pdftotext`（poppler，PDF 文本提取 CLI，供 agent `tools.exec` 调用）+ wiki/workspace 骨架（COPY 进 `~/.openclaw`，供 named volume 首挂自动初始化，见「named volume 拓扑」）。经 `OPENCLAW_IMAGE` 注入（派生镜像构建已随 T0 #801 退役，现钉版存量 GHCR 引用）。派生镜像**不新开谱系**，只在其基镜像谱系（官方）上加层；基镜像的 browser 能力、token 占位、SecretRef 等已校准性质原样继承。
 _Avoid_: 「OpenClaw 镜像」——掩盖谱系在 browser 能力、挂载契约依赖、启动方式上的本质差异；讨论迁移/换镜像/重新打包时必须指明谱系（含派生镜像的**基镜像**谱系）。
 
 **目标镜像与版本 tag (target image / version tag)**:
-面板 fleet 的**目标镜像** = `config.fleet.image`（env `OPENCLAW_IMAGE`）：新建容器时写进容器记录，容器升级编排（#682）的检测判定即「容器记录镜像 ≠ 当前目标」。**版本 tag** = 派生镜像的 `:<基线 tag>`（基线 = `deploy/openclaw-image/Dockerfile` 的 `FROM` 行），**一经发布不可移动**；bump = 改 FROM 单源 + 四处**运行期**明文（config 默认值 / 模板栈 compose / dev driver / 测试常量）随之同步，由 `openclawImage.test.ts` 交叉断言锁死。**浮动 tag (floating tag)** = 无 tag（Docker 默认解析 `:latest`）或显式 `:latest`：内容随上游移动、使「当前目标」不可复现 → **生产启动即 fail-fast**（准据 `isFloatingImageRef`；dev/test 放行）；滚动 tag（`latest-browser` 等）不由代码拦截，靠 review 拦。
+面板 fleet 的**目标镜像** = `config.fleet.image`（env `OPENCLAW_IMAGE`）：新建容器时写进容器记录（升级编排 #682 已随 T0 #801 退役，行镜像一经创建不再变更）。**版本 tag** = 派生镜像的 `:<基线 tag>`，**一经发布不可移动**（派生镜像构建已随 T0 #801 退役：`deploy/openclaw-image/` 基线链与 `openclawImage.test.ts` 交叉断言随之删除，bump 机制不再存在，本条保留为决策历史）。**浮动 tag (floating tag)** = 无 tag（Docker 默认解析 `:latest`）或显式 `:latest`：内容随上游移动、使「当前目标」不可复现 → **生产启动即 fail-fast**（准据 `isFloatingImageRef`；dev/test 放行）；滚动 tag（`latest-browser` 等）不由代码拦截，靠 review 拦。
 _Avoid_: 用「镜像版本」泛指——须区分**基线版本**（官方镜像 tag）与**派生镜像版本 tag**（发布后冻结）；也不要把「最新」当目标（浮动 = 不可复现）。
 
 **接触路径 (contact path)**:
@@ -33,8 +34,8 @@ _Avoid_: 用「镜像版本」泛指——须区分**基线版本**（官方镜�
 _Avoid_: 集成点——过于笼统，无法区分这四条性质不同的通道。
 
 **防腐层 (Anti-Corruption Layer, ACL)**:
-`server/src/chat/` 与 `wiki/` 的 Port + Adapter + Translator 结构（Django 时代为 `backend/integration/openclaw/` 包，已随后端退役）。用 Port + Adapter + Translator 隔离 OpenClaw 的 wire 模型，防止其原生概念污染控制面 domain。**明确不追求 vendor-neutral**——保留 OpenClaw 原生命名作为事实，只在语义不一致处翻译。
-_Avoid_: 网关层、适配器层（单数）——本系统是多个 Port 的集合，不是单一门面；单一门面因 chat 的双向流式回调不可行。
+`wiki/` 等域的 Port + Adapter + Translator 结构（`server/src/chat/` ACL 与 Django 时代 `backend/integration/openclaw/` 包均已退役）。用 Port + Adapter + Translator 隔离 OpenClaw 的 wire 模型，防止其原生概念污染控制面 domain。**明确不追求 vendor-neutral**——保留 OpenClaw 原生命名作为事实，只在语义不一致处翻译。
+_Avoid_: 网关层、适配器层（单数）——本系统是多个 Port 的集合，不是单一门面。
 
 **wire 概念 (wire concept)**:
 OpenClaw WS 协议 v4 的原生命名——事件族（`exec.approval.requested` / `plugin.approval.requested` / `agent.tool.start` / `agent.tool.result` / `chat` 的 `state`）、字段名（`deltaText` / `errorMessage` / `systemRunPlan.rawCommand`）、标识符（`runId` / `sessionKey` / `deviceToken` / `deviceId` / `operator.*` scopes）。
@@ -72,6 +73,7 @@ ADR 0006 引入的接触路径 (4) 新形态：浏览器↔控制面的一条 We
 _Avoid_: 转发 / 代理——笼统，掩盖了「纯透传原始帧（隧道）vs 懂协议的胖中介（旧 #331 G 节桥接）」这一本质区分；旧桥接做翻译/池壳/授权，隧道一概不做。
 
 **浏览器设备 (browser device)**:
+**（历史注：设备配对整链——pairings 表、配对 REST、前端 `@noble/ed25519` 依赖——已随 T0 #801 退役，本条保留为决策历史。）**
 ADR 0006 的配对单位：每个浏览器 profile（Chrome / 隐身 / 另一台电脑）生成独立 Ed25519 设备身份（存 localStorage，同 profile 多 tab 共享），独立配对、独立 approve，并为其访问的**每个容器**各持一份 deviceToken（按 `(clientId, deviceId, role)` 存）。对齐官方 webchat-ui / control-ui 的「设备即浏览器 profile」模型。
 _Avoid_: 设备——脱离了「每浏览器 profile 一设备」就没意义；旧模型是「面板后端单设备、每容器一份」，新模型是「每浏览器设备 × 每容器」。
 
@@ -197,7 +199,7 @@ _Avoid_: 双管线各自渲染再对齐——一致性靠「同一归约器 + �
 
 **沙箱 (sandbox)**:
 （目标架构，#734 effort / #728 定稿，未实施）绑定单个 LangGraph session（thread）的执行环境容器：agent 的 bash/read/write/update 工具在其中执行，1 session : 1 沙箱，首个执行工具调用时**惰性创建**，闲置 30 分钟自动 stop（文件保留在容器可写层），删 session 级联删除。完整工具链镜像（bash/git/Python/Node/rg/poppler/Chromium headless），每沙箱独立 bridge network（NAT 出网、容器间零互通），V1 网络默认放行 + 审计。对容器列表**隐身**——用户从 session 页进入，不感知沙箱存在。
-_Avoid_: 临时容器——已被「一次性临时容器 (one-shot)」占用，混用会把生命周期完全不同的两种容器（runOnce 跑完即弃 vs 随 session 生灭）混为一谈。
+_Avoid_: 临时容器——混用会把生命周期完全不同的容器（随 session 生灭、闲置 stop 保留文件的沙箱 vs 跑完即弃的一次性任务）混为一谈。
 
 **wiki 容器 (wiki container)**:
 （目标架构，#728 定稿）用户 wiki 树的**永久**文件仓库：跨 session 存活，每用户一个。busybox 级极小镜像（仅 sh/mkdir/rm/cat，无 Node/Python/运行时），`NetworkMode=none` 零出网，根只读 + 可写层承载 `/wiki`，**无具名卷**（数据与容器同生命周期，备份 = docker export 全树 tar；删除路径必须带确认门）。wiki 树**零初始化**——OpenWiki 工具按需自行生成，骨架不烤进镜像。

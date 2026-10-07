@@ -32,8 +32,8 @@ describe('orchestrator (接缝 #5 编排器 Port)', () => {
     await ctx.cleanup()
   })
 
-  // ---- 端口入队前分配 + 5 态机 creating→running ----
-  it('create 同步预占返 creating 快照（端口已分配），complete 后 running', async () => {
+  // ---- create 预占 + 5 态机 creating→running ----
+  it('create 同步预占返 creating 快照，complete 后 running', async () => {
     const inst = await fl.orch.createReserve('web-one', ownerId)
     expect(inst.status).toBe('creating')
     expect(inst.containerId).toBe('')

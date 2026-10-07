@@ -53,6 +53,7 @@ src/
     runtime.ts           ContainerRuntime Port（docker 接触面）+ ContainerSpec/ContainerInfo
     dockerRuntime.ts     DockerRuntime（dockerode，真 daemon 接触面）
     values.ts            FleetConfig + HEALTH_* 枚举
+    provisioner.ts       HomeProvisioner（cp -a 模板预填充 home）
     imageRef.ts          镜像引用钉版判定（isFloatingImageRef / imageTag 纯知识；#695）
     leaseMap.ts          NameLeaseMap 进程内互斥（不依赖 Redis，防双创建/双删除）
     lifecycleQueue.ts    LifecycleQueue Port + InlineLifecycleQueue + NameSerializer（按 name 串行）
@@ -126,7 +127,7 @@ npm run prisma:validate        # schema 合法性
 - **refresh cookie**：`HttpOnly; Secure(prod); SameSite=Lax; Path=/api/v1/auth`；R1 旋转 + 重放族灭。
 - **C1 强制改密**：服务端拦截（`mustChangePasswordGate`），放行 me/logout/password-change，余者 mustChange=true → `10005`。
 - **防探测**：`/users` 非 admin、目标不存在 → 同码 `10041` 同体；容器「不存在 vs 越权」→ 同码 `20040` 同体，区分仅进服务端日志。
-- **凭证零落盘**：响应体不含 passwordHash / refresh 明文 / 容器 token / private_key / device_token。
+- **凭证零落盘**：响应体不含 passwordHash / refresh 明文 / 容器 token / private_key。
 - **凭证加密（Codex C1）**：gateway token 落盘为 AES-256-GCM 密文（`CREDENTIAL_ENCRYPTION_KEYS`，
   逗号分隔 base64(32 字节)，首个 = active 加密、余者仅解密支持轮换）。**生产必填**（缺失启动
   fail-fast），生成示例 `openssl rand -base64 32`；dev/test 未设置时回退到固定密钥（勿用于生产）。
