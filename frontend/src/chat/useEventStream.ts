@@ -28,8 +28,9 @@ const EVENT_NAMES = [
   'stream.opened', 'session.created', 'session.updated', 'session.invalidated',
   'session.terminated', 'run.started', 'run.resumed', 'run.completed', 'run.failed',
   'run.aborted', 'run.suspended', 'text.delta', 'thinking.delta', 'tool.start', 'tool.end',
-  'attachment', 'approval.requested', 'approval.resolved', 'teammate.started',
-  'teammate.completed', 'teammate.failed', 'teammate.suspended', 'teammate.archived',
+  'attachment', 'figure_run.progress', 'approval.requested', 'approval.resolved',
+  'teammate.started', 'teammate.completed', 'teammate.failed', 'teammate.suspended',
+  'teammate.archived',
 ] as const
 
 export interface EventStreamHandlers {

@@ -16,7 +16,11 @@ export function unregisterPluginWeb(definition: PluginWebDefinition): void {
   if (idx >= 0) definitions.splice(idx, 1)
 }
 
-/** 工具名 → 注册组件；同名多插件先收录者胜（收录评审把关唯一性，V1 单插件无冲突面）。 */
+/** 工具名 → 注册组件；同名多插件先收录者胜（收录评审把关唯一性，V1 单插件无冲突面）。
+ *  挂点边界（#752 §2.4）：当前消费点 = ToolLine 展开区一处；「附件卡位」挂载缺数据通道——
+ *  media 引用（attachment 事件/attachmentsJson v1）不带 producer 工具名，注册表无路由键可挂，
+ *  随首个需要它的插件再扩（map fog；AutoFigure 无实害——figure 结果走 tools[].details 引用
+ *  形态，PNG/SVG 由 FigureCard 内部渲染，不进附件面）。 */
 export function pluginComponentFor(name: string): Component | undefined {
   for (const definition of definitions) {
     const component = definition.components[name]

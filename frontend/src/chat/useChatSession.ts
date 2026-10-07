@@ -212,9 +212,9 @@ export function useChatSession(deps: ChatSessionDeps = {}): ChatSession {
       chat.setMessages(applyEvent(chat.messages, e))
       return
     }
-    if (e.type === 'tool.start' || e.type === 'tool.end') {
+    if (e.type === 'tool.start' || e.type === 'tool.end' || e.type === 'figure_run.progress') {
       chat.setMessages(applyEvent(chat.messages, e))
-      bridgeFileTabs(e)
+      if (e.type !== 'figure_run.progress') bridgeFileTabs(e)
       return
     }
     if (e.type === 'approval.requested') {
