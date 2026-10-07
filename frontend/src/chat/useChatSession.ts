@@ -221,6 +221,8 @@ export function useChatSession(deps: ChatSessionDeps = {}): ChatSession {
         e.type.startsWith('teammate.') ||
         e.type === 'approval.requested' ||
         e.type === 'approval.resolved' ||
+        // 信箱唤醒帧：等待者被信唤醒（sendMail 无事件）——resume 点重拉让自身信箱即刻可见
+        e.type === 'run.resumed' ||
         e.type === 'run.completed' ||
         e.type === 'run.failed' ||
         e.type === 'run.aborted' ||

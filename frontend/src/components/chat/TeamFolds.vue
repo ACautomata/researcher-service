@@ -43,15 +43,17 @@ function mailDirection(fold: TeamFold, mail: TeamMail): string {
 
 // 信箱 kind 标签（story 23 追问/广播呈现；镜像 server 全量 kind——teammates/service.requestSpawn
 // 'request'、tools.broadcast 'broadcast'、runService 信箱超时唤醒 'timeout'/'timeout-follow-up'
-// （追问本体/广播升级）。未知 kind 回退空串（kind 原文不入呈现）。
+// （追问本体/广播升级）。未知 kind 回退空串（kind 原文不入呈现）。查表 Record 与上方
+// STATUS_LABELS 同款形态。
+const MAIL_KIND_LABELS: Record<string, string> = {
+  request: '协助申请',
+  broadcast: '广播',
+  timeout: '超时提醒',
+  'timeout-follow-up': '超时追问',
+}
+
 function mailKindLabel(mail: TeamMail): string {
-  switch (mail.kind) {
-    case 'request': return '协助申请'
-    case 'broadcast': return '广播'
-    case 'timeout': return '超时提醒'
-    case 'timeout-follow-up': return '超时追问'
-    default: return ''
-  }
+  return MAIL_KIND_LABELS[mail.kind] ?? ''
 }
 
 // request 类信箱内容呈现：server requestSpawn 落库 content = JSON.stringify({name, task})——

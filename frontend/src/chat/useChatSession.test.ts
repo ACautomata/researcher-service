@@ -456,6 +456,18 @@ describe('teammate 折叠区编排（#796）', () => {
     expect(conn.lastRunError.value).toBeNull()
   })
 
+  it('teammate run.resumed（信箱唤醒帧）→ 投影重拉：等待者被信唤醒点即见自身信箱新邮件', async () => {
+    const conn = await mounted()
+    const base = conn.chat.messages.length
+    vi.mocked(api.getSessionProjection).mockClear()
+    const src = FakeEventSource.last()!
+    src.emit('run.resumed', { type: 'run.resumed', sessionId: 'sess-1', runId: 'rT', teammateId: 'tm1', payload: {} })
+    await flushPromises()
+    expect(api.getSessionProjection).toHaveBeenCalled()
+    // 分流纪律：teammate 的 run.resumed 同样不进 leader 主时间线
+    expect(conn.chat.messages).toHaveLength(base)
+  })
+
   it('teammate 审批（approval.requested 带 teammateId）→ 卡带 teammateId + 投影重拉；resolved 摘卡', async () => {
     const escalation = { id: 'e9', source: 'cautious-mode', toolCallId: 't9', toolName: 'bash', toolCallSummary: 'x' }
     // 事件先到建卡；紧随的投影重拉是权威面（pendingApprovalProjection 带 teammateId 标注）——
