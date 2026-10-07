@@ -78,6 +78,7 @@ function diffSig(kind: DiffLineKind): string {
       <span class="t-name" :title="display.hint">{{ display.main }}</span>
       <span v-if="display.secondary" class="t-args" :title="display.hint">{{ display.secondary }}</span>
       <span class="t-state">{{ tool.state === 'running' ? '⟳ 运行中' : tool.state === 'error' ? '✗ 失败' : '✓ 完成' }}</span>
+      <span v-if="tool.rejection" class="rejection" role="alert" data-test="tool-rejection">{{ tool.rejection.source === 'blacklist' ? '黑名单拦截' : 'judge 拒绝' }}：{{ tool.rejection.reason }}</span>
     </summary>
     <div class="t-detail" data-test="tool-detail">
       <!-- #555 edit/write 内联 diff(行级对照 + added/removed stat) -->
@@ -115,8 +116,9 @@ function diffSig(kind: DiffLineKind): string {
 </template>
 
 <style scoped>
+.rejection { flex-basis: 100%; min-width: 0; color: var(--el-color-danger); white-space: pre-wrap; overflow-wrap: anywhere; }
 .tool { min-width: 0; background: var(--el-fill-color); border: 1px solid var(--el-border-color); border-radius: 9px; padding: 6px 12px; margin: 4px 0; font-size: 12.5px; }
-.tool summary { display: flex; align-items: center; min-width: 0; gap: 9px; cursor: pointer; }
+.tool summary { flex-wrap: wrap; display: flex; align-items: center; min-width: 0; gap: 9px; cursor: pointer; }
 .tool .t-icon { color: var(--el-color-primary); }
 .tool .t-name { font-family: ui-monospace, monospace; font-weight: 600; min-width: 0; }
 .tool .t-args { min-width: 0; overflow: hidden; color: var(--el-text-color-secondary); text-overflow: ellipsis; white-space: nowrap; }

@@ -38,6 +38,8 @@ function commandSummary(command: string): string { return command.replace(/\s+/g
       </span>
     </div>
     <div class="a-sub">{{ approvalSubtitle(approval) }}</div>
+    <div class="a-sub" data-test="escalation-source">来源：{{ approval.teammateId ? `teammate ${approval.teammateId}` : '主 agent' }} · {{ approval.source }}</div>
+    <div v-if="approval.judgeReason" class="a-sub" data-test="judge-reason">judge 理由：{{ approval.judgeReason }}</div>
     <div class="a-cmd" :title="approval.toolCallSummary">{{ commandSummary(approval.toolCallSummary) }}</div>
     <div v-if="approval.detailOpen" class="a-detail" :data-test="`approval-detail-${approval.id}`">
       参数摘要全文：<code>{{ approval.toolCallSummary }}</code><br>

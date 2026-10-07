@@ -393,6 +393,9 @@ describe('rewind / fork 会话历史域（S1，#781）', () => {
     expect(res.body.code).toBe(CODE.OK)
     const forked = res.body.data.session as { id: string; title: string; createdAt: string }
     expect(forked.id).not.toBe(sid)
+    expect(res.body.data.session.parentSessionKey).toBe(sid)
+    const list = await request.get('/api/v1/sessions').set(bearer(access))
+    expect(list.body.data.sessions.find((s: { id: string }) => s.id === forked.id).parentSessionKey).toBe(sid)
 
     // 溯源行：parentSessionKey + forkSourceJson + activeCheckpointId = 切点
     const row = await prisma.session.findUnique({ where: { id: forked.id } })
