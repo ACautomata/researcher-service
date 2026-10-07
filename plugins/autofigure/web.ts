@@ -7,7 +7,8 @@
 // vue 依赖进 server typecheck 是错误方向）。
 //
 // 铁律（#791 对称面）：本文件在 plugins/ 树内，禁裸包名 import——definePluginWeb 经
-// 前端契约模块相对直引（type-only，编译期擦除）；FigureCard 的 vue 运行时依赖在其内部
+// 前端契约模块相对直引（值导入非 type-only：api.ts 运行时零依赖、definePluginWeb 为
+// identity 契约标记，入 bundle 无实害）；FigureCard 的 vue 运行时依赖在其内部
 // 经 @/plugins/deps 桥。web.ts 不 import server.ts（避免把 node 依赖拉进前端 bundle），
 // 工具名字面量与 plugins/autofigure/server.ts FIGURE_TOOL_NAME 单源注释锁定。
 import { definePluginWeb } from '../../frontend/src/plugins/api'

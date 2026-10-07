@@ -93,7 +93,7 @@ function diffSig(kind: DiffLineKind): string {
         </div>
       </div>
       <!-- #788 插件渲染卡：注册表命中组件消费 details；未注册保持默认输入/输出详情。
-           isPartial/stage = 进行态装饰（#752 §2.4 / #799：仅 running 态构造，终态/回放不传） -->
+           isPartial/stage = 进行态装饰（#752 §2.4 / #799：state==='running' 派生，终态恒缺省） -->
       <component
         :is="pluginComponent"
         v-if="pluginComponent"

@@ -26,7 +26,8 @@ const props = defineProps<{
 }>()
 
 // stage 中文呈现序 = FIGURE_RUN_STAGES 单源顺序（镜像 server figureAudit.ts 六值）。
-const STAGE_LABELS: Record<string, string> = {
+// 键集 = FIGURE_RUN_STAGES 元素类型（TS 锁死漂移：新增 stage 忘配中文标签编译报错）。
+const STAGE_LABELS: Record<(typeof FIGURE_RUN_STAGES)[number], string> = {
   generating: '生成',
   segmenting: '分割',
   preparing: '准备',
@@ -34,7 +35,7 @@ const STAGE_LABELS: Record<string, string> = {
   assembling: '装配',
   rendering: '渲染',
 }
-const stages = FIGURE_RUN_STAGES.map((s) => ({ key: s, label: STAGE_LABELS[s] ?? s }))
+const stages = FIGURE_RUN_STAGES.map((s) => ({ key: s, label: STAGE_LABELS[s] }))
 const stageIndex = computed(() => (props.stage ? stages.findIndex((s) => s.key === props.stage) : -1))
 
 // details 容错解析：ToolLine 已 JSON.parse 过对象为主；字符串（异形源/直接挂载）再试一次，

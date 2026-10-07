@@ -1,6 +1,6 @@
 // seam: 插件 enablement API（#799 · #752 §4.3 R8）——PUT /api/v1/plugins/:id/enablement
 // wire 契约：幂等 upsert，body {enabled: boolean}；响应 {id, enabled}。
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { useAuthStore } from '@/stores/auth'
 import { setPluginEnablement } from './plugins'
@@ -13,6 +13,11 @@ function mockResp(body: unknown, status = 200): Response {
     json: async () => body,
   } as unknown as Response
 }
+
+afterEach(() => {
+  vi.restoreAllMocks()
+  vi.unstubAllGlobals()
+})
 
 describe('plugins api enablement（#799）', () => {
   beforeEach(() => {
