@@ -130,6 +130,20 @@ describe('信箱往来（story 23 追问/广播）', () => {
     expect(w.get('[data-test="mail-m9"]').text()).toContain('不是 JSON')
   })
 
+  it('wiki-conflict（server finishWikiGeneration 弃更新通知）→ 标签 + {reason,message} 解析呈现', () => {
+    const w = mountFolds({
+      expanded: { tm1: true },
+      teams: [fold({
+        mailbox: [
+          // server runService finishWikiGeneration 落库 content = JSON.stringify({reason, runId, message})——真实载荷
+          { id: 'm7', senderTeammateId: 'tm1', recipientTeammateId: null, kind: 'wiki-conflict', content: JSON.stringify({ reason: 'base-hash-conflict', runId: 'rW', message: 'wiki 在运行中被改动，更新已丢弃' }), createdAt: '2026-10-06T01:06:00Z' },
+        ],
+      })],
+    })
+    expect(w.get('[data-test="mail-m7"]').text()).toContain('wiki 冲突')
+    expect(w.get('[data-test="mail-m7"]').text()).toContain('base-hash-conflict：wiki 在运行中被改动，更新已丢弃')
+  })
+
   it('空 mailbox 不渲染通信记录节', () => {
     const w = mountFolds({ teams: [fold({ mailbox: [] })], expanded: { tm1: true } })
     expect(w.find('[data-test="teammate-mailbox"]').exists()).toBe(false)

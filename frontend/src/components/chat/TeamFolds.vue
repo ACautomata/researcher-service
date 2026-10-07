@@ -43,27 +43,32 @@ function mailDirection(fold: TeamFold, mail: TeamMail): string {
 
 // 信箱 kind 标签（story 23 追问/广播呈现；镜像 server 全量 kind——teammates/service.requestSpawn
 // 'request'、tools.broadcast 'broadcast'、runService 信箱超时唤醒 'timeout'/'timeout-follow-up'
-// （追问本体/广播升级）。未知 kind 回退空串（kind 原文不入呈现）。查表 Record 与上方
-// STATUS_LABELS 同款形态。
+// （追问本体/广播升级）、finishWikiGeneration base-hash 冲突 'wiki-conflict'（弃更新通知）。
+// 未知 kind 回退空串（kind 原文不入呈现）。查表 Record 与上方 STATUS_LABELS 同款形态。
 const MAIL_KIND_LABELS: Record<string, string> = {
   request: '协助申请',
   broadcast: '广播',
   timeout: '超时提醒',
   'timeout-follow-up': '超时追问',
+  'wiki-conflict': 'wiki 冲突',
 }
 
 function mailKindLabel(mail: TeamMail): string {
   return MAIL_KIND_LABELS[mail.kind] ?? ''
 }
 
-// request 类信箱内容呈现：server requestSpawn 落库 content = JSON.stringify({name, task})——
-// 解析出「申请派生 <name> · <task>」；解析失败/形态不符兜底原文（0 信任宽容度）。
+// JSON 载荷信箱内容解析：request（server requestSpawn 落库 {name, task}）→「申请派生 <name> ·
+// <task>」；wiki-conflict（server finishWikiGeneration 落库 {reason, runId, message}）→
+// 「<reason>：<message>」。解析失败/形态不符兜底原文（0 信任宽容度）。
 function mailContent(mail: TeamMail): string {
-  if (mail.kind !== 'request') return mail.content
+  if (mail.kind !== 'request' && mail.kind !== 'wiki-conflict') return mail.content
   try {
     const parsed = JSON.parse(mail.content) as Record<string, unknown>
-    if (typeof parsed.name === 'string' && typeof parsed.task === 'string') {
+    if (mail.kind === 'request' && typeof parsed.name === 'string' && typeof parsed.task === 'string') {
       return `申请派生 ${parsed.name} · ${parsed.task}`
+    }
+    if (mail.kind === 'wiki-conflict' && typeof parsed.reason === 'string' && typeof parsed.message === 'string') {
+      return `${parsed.reason}：${parsed.message}`
     }
   } catch {
     // 非 JSON 原文兜底
@@ -154,4 +159,5 @@ function isFrozen(fold: TeamFold, approvals: ApprovalItem[]): boolean {
 .mail-kind.broadcast { color: var(--el-color-primary); }
 .mail-kind.request { color: var(--el-color-warning); }
 .mail-kind.timeout-follow-up { color: var(--el-color-warning); }
+.mail-kind.wiki-conflict { color: var(--el-color-danger); }
 </style>

@@ -13,8 +13,8 @@ import { applyEvent, applyTeamEvent, fromProjection, hasTrace, newMsg, shouldFol
 
 // ---- fixtures ----
 
-const ev = (type: string, payload: Record<string, unknown> = {}, extra: Partial<SessionEvent> = {}, teammateId?: string): SessionEvent =>
-  ({ type, payload, ...extra, ...(teammateId ? { teammateId } : {}) })
+const ev = (type: string, payload: Record<string, unknown> = {}, extra: Partial<SessionEvent> = {}): SessionEvent =>
+  ({ type, payload, ...extra })
 
 const userRow = (over: Partial<ProjectionMessage> = {}): ProjectionMessage => ({
   id: 'm1', turn: 1, role: 'user', content: '第一问', anchorCheckpointId: null, createdAt: '2026-10-06T00:00:00Z', ...over,
@@ -459,10 +459,10 @@ describe('applyTeamEvent（teammate 实时入口：teammateId 分区路由）', 
 
   it('轨迹事件路由进当事 fold：text/tool 累积于 fold.msgs（与主时间线同款 overlay）', () => {
     let teams = [fold()]
-    teams = applyTeamEvent(teams, ev('run.started', {}, { runId: 'r1' }, 'tm1'))
-    teams = applyTeamEvent(teams, ev('text.delta', { delta: '检索' }, { runId: 'r1' }, 'tm1'))
-    teams = applyTeamEvent(teams, ev('tool.start', { toolCallId: 't1', name: 'read', input: '{"file_path":"a.md"}' }, { runId: 'r1' }, 'tm1'))
-    teams = applyTeamEvent(teams, ev('tool.end', { toolCallId: 't1', state: 'success', details: 'ok' }, { runId: 'r1' }, 'tm1'))
+    teams = applyTeamEvent(teams, ev('run.started', {}, { runId: 'r1', teammateId: 'tm1' }))
+    teams = applyTeamEvent(teams, ev('text.delta', { delta: '检索' }, { runId: 'r1', teammateId: 'tm1' }))
+    teams = applyTeamEvent(teams, ev('tool.start', { toolCallId: 't1', name: 'read', input: '{"file_path":"a.md"}' }, { runId: 'r1', teammateId: 'tm1' }))
+    teams = applyTeamEvent(teams, ev('tool.end', { toolCallId: 't1', state: 'success', details: 'ok' }, { runId: 'r1', teammateId: 'tm1' }))
     expect(teams[0].msgs).toHaveLength(1)
     expect(teams[0].msgs[0].text).toBe('检索')
     expect(teams[0].msgs[0].tools[0]).toMatchObject({ id: 't1', state: 'done', result: 'ok' })
@@ -471,27 +471,27 @@ describe('applyTeamEvent（teammate 实时入口：teammateId 分区路由）', 
 
   it('run 终态 → fold 内 finalize（剥装饰 + 有轨迹默认折叠）', () => {
     let teams = [fold()]
-    teams = applyTeamEvent(teams, ev('run.started', {}, { runId: 'r1' }, 'tm1'))
-    teams = applyTeamEvent(teams, ev('thinking.delta', { delta: '检索策略' }, { runId: 'r1' }, 'tm1'))
-    teams = applyTeamEvent(teams, ev('text.delta', { delta: '检索完成' }, { runId: 'r1' }, 'tm1'))
-    teams = applyTeamEvent(teams, ev('run.completed', {}, { runId: 'r1' }, 'tm1'))
+    teams = applyTeamEvent(teams, ev('run.started', {}, { runId: 'r1', teammateId: 'tm1' }))
+    teams = applyTeamEvent(teams, ev('thinking.delta', { delta: '检索策略' }, { runId: 'r1', teammateId: 'tm1' }))
+    teams = applyTeamEvent(teams, ev('text.delta', { delta: '检索完成' }, { runId: 'r1', teammateId: 'tm1' }))
+    teams = applyTeamEvent(teams, ev('run.completed', {}, { runId: 'r1', teammateId: 'tm1' }))
     expect(teams[0].msgs[0].streaming).toBe(false)
     expect(teams[0].msgs[0].traceFolded).toBe(true)
   })
 
   it('teammate 终态事件 → status 更新（started→running 镜像 server startTeammate；archived 归档终态）', () => {
     let teams = [fold({ status: 'running' })]
-    teams = applyTeamEvent(teams, ev('teammate.completed', { name: '文献员' }, { runId: 'r1' }, 'tm1'))
+    teams = applyTeamEvent(teams, ev('teammate.completed', { name: '文献员' }, { runId: 'r1', teammateId: 'tm1' }))
     expect(teams[0].status).toBe('completed')
-    teams = applyTeamEvent(teams, ev('teammate.suspended', { name: '文献员' }, {}, 'tm1'))
+    teams = applyTeamEvent(teams, ev('teammate.suspended', { name: '文献员' }, { teammateId: 'tm1' }))
     expect(teams[0].status).toBe('suspended')
-    teams = applyTeamEvent(teams, ev('teammate.archived', { name: '文献员' }, {}, 'tm1'))
+    teams = applyTeamEvent(teams, ev('teammate.archived', { name: '文献员' }, { teammateId: 'tm1' }))
     expect(teams[0].status).toBe('archived')
     expect(teams[0].msgs).toHaveLength(0) // 归档不删：轨迹保留可回看
   })
 
   it('未知 teammate 的轨迹事件 → 占位 fold 兜底（乱序源不丢帧，REST 整替补全 task/mailbox）', () => {
-    const next = applyTeamEvent([], ev('text.delta', { delta: '迟到帧' }, { runId: 'r1' }, 'tm9'))
+    const next = applyTeamEvent([], ev('text.delta', { delta: '迟到帧' }, { runId: 'r1', teammateId: 'tm9' }))
     expect(next).toHaveLength(1)
     expect(next[0].id).toBe('tm9')
     expect(next[0].msgs[0].text).toBe('迟到帧')
@@ -501,7 +501,7 @@ describe('applyTeamEvent（teammate 实时入口：teammateId 分区路由）', 
     const a = fold({ id: 'tm1' })
     const b = fold({ id: 'tm2', name: '写作员' })
     const teams = [a, b]
-    const next = applyTeamEvent(teams, ev('text.delta', { delta: 'x' }, { runId: 'r1' }, 'tm2'))
+    const next = applyTeamEvent(teams, ev('text.delta', { delta: 'x' }, { runId: 'r1', teammateId: 'tm2' }))
     expect(next[0]).toBe(a)
     expect(next[1]).not.toBe(b)
     expect(b.msgs).toHaveLength(0)
@@ -509,7 +509,7 @@ describe('applyTeamEvent（teammate 实时入口：teammateId 分区路由）', 
 
   it('无变化帧（空 delta 等）原样返回同一数组引用', () => {
     const teams = [fold()]
-    expect(applyTeamEvent(teams, ev('text.delta', { delta: '' }, { runId: 'r1' }, 'tm1'))).toBe(teams)
+    expect(applyTeamEvent(teams, ev('text.delta', { delta: '' }, { runId: 'r1', teammateId: 'tm1' }))).toBe(teams)
   })
 })
 
@@ -525,13 +525,13 @@ describe('teammate 零差异一致性 + 并发不串区（#796 验收）', () =>
   }
 
   const PEER_EVENTS: SessionEvent[] = [
-    ev('run.started', {}, { runId: 'r9' }, 'tm1'),
-    ev('thinking.delta', { delta: '先查' }, { runId: 'r9' }, 'tm1'),
-    ev('tool.start', { toolCallId: 't1', name: 'read', input: '{"file_path":"a.md"}' }, { runId: 'r9' }, 'tm1'),
-    ev('tool.end', { toolCallId: 't1', state: 'success', durationMs: 3, details: '{"n":1}' }, { runId: 'r9' }, 'tm1'),
-    ev('text.delta', { delta: '查到 1 条' }, { runId: 'r9' }, 'tm1'),
-    ev('run.completed', {}, { runId: 'r9' }, 'tm1'),
-    ev('teammate.completed', { name: '文献员' }, {}, 'tm1'),
+    ev('run.started', {}, { runId: 'r9', teammateId: 'tm1' }),
+    ev('thinking.delta', { delta: '先查' }, { runId: 'r9', teammateId: 'tm1' }),
+    ev('tool.start', { toolCallId: 't1', name: 'read', input: '{"file_path":"a.md"}' }, { runId: 'r9', teammateId: 'tm1' }),
+    ev('tool.end', { toolCallId: 't1', state: 'success', durationMs: 3, details: '{"n":1}' }, { runId: 'r9', teammateId: 'tm1' }),
+    ev('text.delta', { delta: '查到 1 条' }, { runId: 'r9', teammateId: 'tm1' }),
+    ev('run.completed', {}, { runId: 'r9', teammateId: 'tm1' }),
+    ev('teammate.completed', { name: '文献员' }, { teammateId: 'tm1' }),
   ]
 
   it('场景：单 teammate 全生命周期（reduce(事件) ≡ 投影行）', () => {
@@ -554,16 +554,16 @@ describe('teammate 零差异一致性 + 并发不串区（#796 验收）', () =>
 
   it('场景：并发两 teammate 交错事件流——各 fold 内容不混，各自零差异', () => {
     const a: SessionEvent[] = [
-      ev('run.started', {}, { runId: 'rA' }, 'tmA'),
-      ev('text.delta', { delta: '甲线' }, { runId: 'rA' }, 'tmA'),
-      ev('run.completed', {}, { runId: 'rA' }, 'tmA'),
-      ev('teammate.completed', { name: 'A' }, {}, 'tmA'),
+      ev('run.started', {}, { runId: 'rA', teammateId: 'tmA' }),
+      ev('text.delta', { delta: '甲线' }, { runId: 'rA', teammateId: 'tmA' }),
+      ev('run.completed', {}, { runId: 'rA', teammateId: 'tmA' }),
+      ev('teammate.completed', { name: 'A' }, { teammateId: 'tmA' }),
     ]
     const b: SessionEvent[] = [
-      ev('run.started', {}, { runId: 'rB' }, 'tmB'),
-      ev('text.delta', { delta: '乙线' }, { runId: 'rB' }, 'tmB'),
-      ev('run.completed', {}, { runId: 'rB' }, 'tmB'),
-      ev('teammate.completed', { name: 'B' }, {}, 'tmB'),
+      ev('run.started', {}, { runId: 'rB', teammateId: 'tmB' }),
+      ev('text.delta', { delta: '乙线' }, { runId: 'rB', teammateId: 'tmB' }),
+      ev('run.completed', {}, { runId: 'rB', teammateId: 'tmB' }),
+      ev('teammate.completed', { name: 'B' }, { teammateId: 'tmB' }),
     ]
     // 严格交错（真实并发到达序）
     let live: TeamFold[] = []
