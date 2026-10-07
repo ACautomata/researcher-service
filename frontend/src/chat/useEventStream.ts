@@ -30,7 +30,8 @@ const EVENT_NAMES = [
   'run.aborted', 'run.suspended', 'text.delta', 'thinking.delta', 'tool.start', 'tool.end',
   'attachment', 'figure_run.progress', 'approval.requested', 'approval.resolved',
   'teammate.started', 'teammate.completed', 'teammate.failed', 'teammate.suspended',
-  'teammate.archived',
+  'teammate.archived', 'wiki_run.progress', 'wiki_run.text', 'wiki_run.tool_start',
+  'wiki_run.tool_end', 'wiki_run.finished',
 ] as const
 
 export interface EventStreamHandlers {

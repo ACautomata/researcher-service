@@ -22,6 +22,7 @@ export interface WikiPageContentDTO {
   path: string
   title: string
   content: string
+  okf?: { status?: string; staleAfter?: string; generatedAt?: string }
 }
 
 export interface WikiGraphNodeDTO {
@@ -91,4 +92,19 @@ export function getGraph(name: string): Promise<WikiGraphDTO> {
 
 export function getCategories(name: string): Promise<CategoriesDTO> {
   return apiJson<CategoriesDTO>(`${base(name)}/categories`)
+}
+
+export interface WikiClaimsDTO {
+  schemaVersion: number | null
+  pageVersion: string | null
+  drift: 'fresh' | 'drifted' | null
+  claims: { id: string; statement: string; evidence: { resource: string; version?: string }[] }[]
+}
+
+export function getClaims(name: string, path: string): Promise<WikiClaimsDTO> {
+  return apiJson(`${base(name)}/claims?path=${encodeURIComponent(path)}`)
+}
+
+export function startWikiUpdate(name: string): Promise<{ runId: string }> {
+  return apiJson(`${base(name)}/update`, { method: 'POST' })
 }
