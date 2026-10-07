@@ -403,7 +403,7 @@ describe('teamFoldsFromProjection（teammate 回放入口）', () => {
     id: 'pm1', turn: 1, role: 'assistant', content: '队友产出', anchorCheckpointId: null, createdAt: '2026-10-06T01:00:00Z', ...over,
   })
 
-  it('teammates 行 → TeamFold[]：id/name/task/status 直挂，msgs 走 fromProjection 同构，mailbox 直挂', () => {
+  it('teammates 行 → TeamFold[]：id/name/task/status 直挂，msgs 走 fromProjection 同构，mailbox 直挂 + displayContent 派生', () => {
     const p: SessionProjection = {
       sessionId: 's1', title: 'T',
       messages: [],
@@ -420,7 +420,8 @@ describe('teamFoldsFromProjection（teammate 回放入口）', () => {
     expect(folds[0].msgs[0]).toMatchObject({ role: 'assistant', text: '队友产出', thinking: '翻一翻', streaming: false })
     expect(folds[0].msgs[0].tools[0]).toMatchObject({ id: 't1', name: 'bash', state: 'done' })
     expect(folds[0].msgs[0].traceFolded).toBe(true) // 有轨迹默认折叠（#664 语义延伸）
-    expect(folds[0].mailbox).toEqual([p.teammates![0].mailbox[0]])
+    // mailbox 行字段直挂 + displayContent 派生（JSON 载荷解析归此入口，下游组件纯呈现）
+    expect(folds[0].mailbox).toEqual([{ ...p.teammates![0].mailbox[0], displayContent: '已完成' }])
   })
 
   it('teammate inFlight → 流式 overlay 挂尾（与主时间线同构）', () => {
@@ -606,5 +607,42 @@ describe('teammate 零差异一致性 + 并发不串区（#796 验收）', () =>
     })
     expect(live).toHaveLength(1)
     expect(normalizeFold(live[0])).toEqual(normalizeFold(replay[0]))
+  })
+})
+
+describe('teamFoldsFromProjection 信箱解析（wire 形状 → displayContent 归口）', () => {
+  const mailRow = (over: Record<string, unknown>) => ({
+    id: 'm1', senderTeammateId: 'tm1', recipientTeammateId: null, kind: 'message',
+    content: '原文', createdAt: '2026-10-06T01:00:00Z', ...over,
+  })
+  const foldsWith = (mailbox: unknown[]) =>
+    teamFoldsFromProjection({
+      sessionId: 's1', title: 'T', messages: [],
+      teammates: [{ id: 'tm1', name: '文献员', task: '', status: 'running', mailbox: mailbox as never, messages: [] }],
+    })
+
+  it('request（server requestSpawn 落库 {name,task}）→「申请派生 <name> · <task>」，content 原文保留', () => {
+    const folds = foldsWith([mailRow({ kind: 'request', content: '{"name":"写作员","task":"起草第二章"}' })])
+    expect(folds[0].mailbox[0].displayContent).toBe('申请派生 写作员 · 起草第二章')
+    expect(folds[0].mailbox[0].content).toBe('{"name":"写作员","task":"起草第二章"}')
+  })
+
+  it('wiki-conflict（server finishWikiGeneration 落库 {reason,runId,message}）→「<reason>：<message>」', () => {
+    const folds = foldsWith([mailRow({ kind: 'wiki-conflict', content: '{"reason":"base-hash-conflict","runId":"rW","message":"更新已丢弃"}' })])
+    expect(folds[0].mailbox[0].displayContent).toBe('base-hash-conflict：更新已丢弃')
+  })
+
+  it('JSON 载荷解析失败/形态不符 → 兜底原文（0 信任宽容度）', () => {
+    expect(foldsWith([mailRow({ kind: 'request', content: '不是 JSON' })])[0].mailbox[0].displayContent).toBe('不是 JSON')
+    expect(foldsWith([mailRow({ kind: 'request', content: '{"name":"只有名"}' })])[0].mailbox[0].displayContent).toBe('{"name":"只有名"}')
+    expect(foldsWith([mailRow({ kind: 'wiki-conflict', content: '{"reason":"缺message"}' })])[0].mailbox[0].displayContent).toBe('{"reason":"缺message"}')
+  })
+
+  it('非 JSON 载荷 kind（message/broadcast/timeout…）→ displayContent 恒等原文', () => {
+    const folds = foldsWith([
+      mailRow({ kind: 'message', content: '继续补充第二节' }),
+      mailRow({ id: 'm2', senderTeammateId: 'tmB', kind: 'broadcast', content: '各队友注意进度' }),
+    ])
+    expect(folds[0].mailbox.map((m) => m.displayContent)).toEqual(['继续补充第二节', '各队友注意进度'])
   })
 })

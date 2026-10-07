@@ -173,10 +173,12 @@ export function fromProjection(p: SessionProjection): Msg[] {
 
 export interface TeamMail {
   id: string
-  senderTeammateId: string | null // null = 来自 leader
+  senderTeammateId: string | null // null = 来自 leader（timeout 提醒等系统件亦 null）
   recipientTeammateId: string | null // null = 发给 leader（request/汇报）
-  kind: string // 'message' 点对点缺省 / 'request' 协助申请 / 'broadcast' 广播
-  content: string
+  kind: string // 'message' 点对点缺省 / 'request' 协助申请 / 'broadcast' 广播 /
+  // 'timeout'/'timeout-follow-up' 超时提醒·追问 / 'wiki-conflict' 弃更新通知
+  content: string // 原始落库内容（JSON 载荷 kind 为序列化原文）
+  displayContent: string // 呈现正文（wire 形状知识归此处，组件纯呈现）——见 mailDisplayContent
   createdAt: string
 }
 
@@ -187,6 +189,26 @@ export interface TeamFold {
   status: string // server TeammateStatus 八值；前端宽容未知值（渲染回退原文）
   msgs: Msg[] // 轨迹（与主时间线同形状；流式 overlay 在尾，归约器同款语义）
   mailbox: TeamMail[]
+}
+
+// 信箱行 → 呈现正文（服务端形状 → 视图模型映射归口，与 toolRowFromServer 同责）：JSON 载荷
+// kind 解析——request（server requestSpawn 落库 {name, task}）→「申请派生 <name> · <task>」；
+// wiki-conflict（server finishWikiGeneration 落库 {reason, runId, message}）→「<reason>：<message>」。
+// 解析失败/形态不符/其余 kind 恒等原文（0 信任宽容度）。
+function mailDisplayContent(mail: { kind: string; content: string }): string {
+  if (mail.kind !== 'request' && mail.kind !== 'wiki-conflict') return mail.content
+  try {
+    const parsed = JSON.parse(mail.content) as Record<string, unknown>
+    if (mail.kind === 'request' && typeof parsed.name === 'string' && typeof parsed.task === 'string') {
+      return `申请派生 ${parsed.name} · ${parsed.task}`
+    }
+    if (mail.kind === 'wiki-conflict' && typeof parsed.reason === 'string' && typeof parsed.message === 'string') {
+      return `${parsed.reason}：${parsed.message}`
+    }
+  } catch {
+    // 非 JSON 原文兜底
+  }
+  return mail.content
 }
 
 // 回放入口：teammates 投影行 → 分区视图（msgs 走 fromProjection 同一构造——含轨迹默认折叠与
@@ -204,7 +226,7 @@ export function teamFoldsFromProjection(p: SessionProjection): TeamFold[] {
       messages: peer.messages,
       ...(peer.inFlight ? { inFlight: peer.inFlight } : {}),
     }),
-    mailbox: peer.mailbox.map((mail) => ({ ...mail })),
+    mailbox: peer.mailbox.map((mail) => ({ ...mail, displayContent: mailDisplayContent(mail) })),
   }))
 }
 

@@ -14,7 +14,7 @@ const fold = (over: Partial<TeamFold> = {}): TeamFold => ({
     tools: [{ id: 't1', name: 'read', state: 'done', title: null, input: { file_path: 'a.md' }, result: 'ok' }],
     media: [],
   }],
-  mailbox: [{ id: 'mail1', senderTeammateId: 'tm1', recipientTeammateId: null, kind: 'message', content: '已完成整理', createdAt: '2026-10-06T01:00:00Z' }],
+  mailbox: [{ id: 'mail1', senderTeammateId: 'tm1', recipientTeammateId: null, kind: 'message', content: '已完成整理', displayContent: '已完成整理', createdAt: '2026-10-06T01:00:00Z' }],
   ...over,
 })
 
@@ -93,19 +93,20 @@ describe('局部冻结与注销终态（story 23/26）', () => {
 })
 
 describe('信箱往来（story 23 追问/广播）', () => {
-  it('展开区渲染 mailbox：方向 + kind 标签（request 内容解析自 server JSON 载荷）', () => {
+  it('展开区渲染 mailbox：方向 + kind 标签 + displayContent 呈现', () => {
     const w = mountFolds({
       expanded: { tm1: true },
       teams: [fold({
         mailbox: [
-          // server requestSpawn 落库 content = JSON.stringify({name, task})——真实载荷呈现
-          { id: 'm1', senderTeammateId: 'tm1', recipientTeammateId: null, kind: 'request', content: JSON.stringify({ name: '写作员', task: '起草第二章' }), createdAt: '2026-10-06T01:00:00Z' },
-          { id: 'm2', senderTeammateId: 'tmB', recipientTeammateId: 'tm1', kind: 'broadcast', content: '各队友注意进度', createdAt: '2026-10-06T01:01:00Z' },
-          { id: 'm3', senderTeammateId: null, recipientTeammateId: 'tm1', kind: 'message', content: '继续补充第二节', createdAt: '2026-10-06T01:02:00Z' },
-          { id: 'm4', senderTeammateId: 'tm1', recipientTeammateId: 'tmB', kind: 'message', content: '收到', createdAt: '2026-10-06T01:03:00Z' },
+          // displayContent 为投影归约器产出（TeamMail 视图模型字段，组件纯呈现直出）——
+          // request/wiki-conflict 的 JSON 载荷解析在 projection.ts 单测覆盖
+          { id: 'm1', senderTeammateId: 'tm1', recipientTeammateId: null, kind: 'request', content: '{"name":"写作员","task":"起草第二章"}', displayContent: '申请派生 写作员 · 起草第二章', createdAt: '2026-10-06T01:00:00Z' },
+          { id: 'm2', senderTeammateId: 'tmB', recipientTeammateId: 'tm1', kind: 'broadcast', content: '各队友注意进度', displayContent: '各队友注意进度', createdAt: '2026-10-06T01:01:00Z' },
+          { id: 'm3', senderTeammateId: null, recipientTeammateId: 'tm1', kind: 'message', content: '继续补充第二节', displayContent: '继续补充第二节', createdAt: '2026-10-06T01:02:00Z' },
+          { id: 'm4', senderTeammateId: 'tm1', recipientTeammateId: 'tmB', kind: 'message', content: '收到', displayContent: '收到', createdAt: '2026-10-06T01:03:00Z' },
           // server 信箱超时唤醒（runService）：等待者自收提醒 + 广播升级追问本体
-          { id: 'm5', senderTeammateId: null, recipientTeammateId: 'tm1', kind: 'timeout', content: '等待超时', createdAt: '2026-10-06T01:04:00Z' },
-          { id: 'm6', senderTeammateId: 'tmB', recipientTeammateId: 'tm1', kind: 'timeout-follow-up', content: '请汇报进展', createdAt: '2026-10-06T01:05:00Z' },
+          { id: 'm5', senderTeammateId: null, recipientTeammateId: 'tm1', kind: 'timeout', content: '等待超时', displayContent: '等待超时', createdAt: '2026-10-06T01:04:00Z' },
+          { id: 'm6', senderTeammateId: 'tmB', recipientTeammateId: 'tm1', kind: 'timeout-follow-up', content: '请汇报进展', displayContent: '请汇报进展', createdAt: '2026-10-06T01:05:00Z' },
         ],
       })],
     })
@@ -122,21 +123,13 @@ describe('信箱往来（story 23 追问/广播）', () => {
     expect(w.get('[data-test="mail-m6"]').text()).toContain('超时追问')
   })
 
-  it('request 载荷解析失败兜底原文（0 信任宽容度）', () => {
-    const w = mountFolds({
-      expanded: { tm1: true },
-      teams: [fold({ mailbox: [{ id: 'm9', senderTeammateId: 'tm1', recipientTeammateId: null, kind: 'request', content: '不是 JSON', createdAt: '2026-10-06T01:00:00Z' }] })],
-    })
-    expect(w.get('[data-test="mail-m9"]').text()).toContain('不是 JSON')
-  })
-
-  it('wiki-conflict（server finishWikiGeneration 弃更新通知）→ 标签 + {reason,message} 解析呈现', () => {
+  it('wiki-conflict 邮件 → 标签 + 呈现投影归约的 displayContent', () => {
     const w = mountFolds({
       expanded: { tm1: true },
       teams: [fold({
         mailbox: [
-          // server runService finishWikiGeneration 落库 content = JSON.stringify({reason, runId, message})——真实载荷
-          { id: 'm7', senderTeammateId: 'tm1', recipientTeammateId: null, kind: 'wiki-conflict', content: JSON.stringify({ reason: 'base-hash-conflict', runId: 'rW', message: 'wiki 在运行中被改动，更新已丢弃' }), createdAt: '2026-10-06T01:06:00Z' },
+          // server runService finishWikiGeneration 弃更新通知——displayContent 归 projection.ts 产出
+          { id: 'm7', senderTeammateId: 'tm1', recipientTeammateId: null, kind: 'wiki-conflict', content: '{"reason":"base-hash-conflict","runId":"rW","message":"wiki 在运行中被改动，更新已丢弃"}', displayContent: 'base-hash-conflict：wiki 在运行中被改动，更新已丢弃', createdAt: '2026-10-06T01:06:00Z' },
         ],
       })],
     })

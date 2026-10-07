@@ -57,25 +57,6 @@ function mailKindLabel(mail: TeamMail): string {
   return MAIL_KIND_LABELS[mail.kind] ?? ''
 }
 
-// JSON 载荷信箱内容解析：request（server requestSpawn 落库 {name, task}）→「申请派生 <name> ·
-// <task>」；wiki-conflict（server finishWikiGeneration 落库 {reason, runId, message}）→
-// 「<reason>：<message>」。解析失败/形态不符兜底原文（0 信任宽容度）。
-function mailContent(mail: TeamMail): string {
-  if (mail.kind !== 'request' && mail.kind !== 'wiki-conflict') return mail.content
-  try {
-    const parsed = JSON.parse(mail.content) as Record<string, unknown>
-    if (mail.kind === 'request' && typeof parsed.name === 'string' && typeof parsed.task === 'string') {
-      return `申请派生 ${parsed.name} · ${parsed.task}`
-    }
-    if (mail.kind === 'wiki-conflict' && typeof parsed.reason === 'string' && typeof parsed.message === 'string') {
-      return `${parsed.reason}：${parsed.message}`
-    }
-  } catch {
-    // 非 JSON 原文兜底
-  }
-  return mail.content
-}
-
 // 局部冻结（story 26）：当事 teammate 有待决审批（与 status=suspended 双信号互证——正常时序
 // 两者同现，仅投影重拉竞态窗口内可能短暂单边）。
 function isFrozen(fold: TeamFold, approvals: ApprovalItem[]): boolean {
@@ -125,7 +106,7 @@ function isFrozen(fold: TeamFold, approvals: ApprovalItem[]): boolean {
           <p v-for="mail in fold.mailbox" :key="mail.id" class="mail" :data-test="`mail-${mail.id}`">
             <span class="mail-direction">{{ mailDirection(fold, mail) }}</span>
             <span v-if="mailKindLabel(mail)" class="mail-kind" :class="mail.kind">{{ mailKindLabel(mail) }}</span>
-            <span class="mail-content">{{ mailContent(mail) }}</span>
+            <span class="mail-content">{{ mail.displayContent }}</span>
           </p>
         </details>
       </div>
