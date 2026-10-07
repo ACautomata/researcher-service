@@ -116,9 +116,9 @@ function diffSig(kind: DiffLineKind): string {
 </template>
 
 <style scoped>
-.rejection { color: var(--el-color-danger); white-space: pre-wrap; overflow-wrap: anywhere; }
+.rejection { flex-basis: 100%; min-width: 0; color: var(--el-color-danger); white-space: pre-wrap; overflow-wrap: anywhere; }
 .tool { min-width: 0; background: var(--el-fill-color); border: 1px solid var(--el-border-color); border-radius: 9px; padding: 6px 12px; margin: 4px 0; font-size: 12.5px; }
-.tool summary { display: flex; align-items: center; min-width: 0; gap: 9px; cursor: pointer; }
+.tool summary { flex-wrap: wrap; display: flex; align-items: center; min-width: 0; gap: 9px; cursor: pointer; }
 .tool .t-icon { color: var(--el-color-primary); }
 .tool .t-name { font-family: ui-monospace, monospace; font-weight: 600; min-width: 0; }
 .tool .t-args { min-width: 0; overflow: hidden; color: var(--el-text-color-secondary); text-overflow: ellipsis; white-space: nowrap; }

@@ -40,6 +40,7 @@ const emit = defineEmits<{ regenerate: [text: string]; toggleTraceFold: []; rewi
 // T1 轮次折叠（#664）：完成（非流式）且有轨迹的 assistant 消息渲染折叠条——轨迹判定
 // hasTrace（思考非空或工具行非空），正文与附件不算轨迹；流式进行中渲染现状完全不动；
 // 无轨迹不渲染折叠条。
+const rejectedTools = computed(() => props.msg.tools.filter(t => t.rejection))
 const traceFoldable = computed(
   () => props.msg.role === 'assistant' && !props.msg.streaming && hasTrace(props.msg),
 )
@@ -148,6 +149,9 @@ const copyState = ref<'idle' | 'copied' | 'failed'>('idle')
            聚合，仅一层）。traceFolded 三态统一「缺省即展开」（undefined/false 渲染轨迹、true
            只留条面）——T3（#666）起历史翻译的有轨迹 assistant 消息默认置 true（历史轮默认
            折叠）；异常收尾轮不置值（保持展开便于看原因）。 -->
+      <template v-if="traceFoldable && msg.traceFolded === true">
+        <div v-for="tool in rejectedTools" :key="tool.id ?? tool.name" class="folded-rejection" role="alert" data-test="folded-rejection">{{ tool.rejection?.source === 'blacklist' ? '黑名单拦截' : 'judge 拒绝' }}：{{ tool.rejection?.reason }}</div>
+      </template>
       <template v-if="traceFoldable">
         <TraceFold
           :has-thinking="msg.thinking !== ''"
@@ -167,7 +171,7 @@ const copyState = ref<'idle' | 'copied' | 'failed'>('idle')
         <!-- #555：>=2 个工具调用聚合折叠为一条摘要——**仅流式/无轨迹完成轮**（折叠条展开态
              平铺逐行 ToolLine，绕过分组聚合：#664 单层展开）。聚合只在渲染层落位，不碰 timeline.ts。 -->
         <template v-if="!traceFoldable && msg.tools.length >= 2">
-          <details class="tool-group" data-test="tool-group">
+          <details class="tool-group" :open="rejectedTools.length > 0" data-test="tool-group">
             <summary data-test="tool-group-summary">
               {{ summarizeToolGroup(msg.tools.map(toolRowToGroupInput)) }}
             </summary>
@@ -208,6 +212,7 @@ const copyState = ref<'idle' | 'copied' | 'failed'>('idle')
 </template>
 
 <style scoped>
+.folded-rejection { color: var(--el-color-danger); white-space: pre-wrap; overflow-wrap: anywhere; margin-bottom: 6px; }
 /* #545：消息与 composer 共用 840px 内容列。assistant 作为正文铺满内容列；user 在列内靠右，
    仅用户输入保留气泡，形成 ChatGPT 风格的紧凑对话层级。 */
 .msg { display: flex; width: 100%; max-width: 840px; align-self: center; min-width: 0; }

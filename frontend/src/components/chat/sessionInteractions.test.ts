@@ -28,3 +28,18 @@ it('恢复确认展示三种范围、完整 exec 跨越清单和文件采样', a
   await w.get('[data-test="restore-confirm"]').trigger('click')
   expect(w.emitted('confirm')).toEqual([['files']])
 })
+
+
+import ChatMessageItem from './ChatMessageItem.vue'
+import { newMsg } from '@/chat/projection'
+it('#794 多工具聚合自动展开黑拒，折叠历史轨迹仍红显', () => {
+  const msg = newMsg('assistant')
+  msg.tools = [
+    { id: 'a', name: 'read_file', state: 'done', title: null, input: null, result: null },
+    { id: 'b', name: 'bash', state: 'error', title: null, input: null, result: null, rejection: { source: 'blacklist', reason: '危险命令' } },
+  ]
+  const live = mount(ChatMessageItem, { props: { msg } })
+  expect(live.get('[data-test="tool-group"]').attributes()).toHaveProperty('open')
+  const replay = mount(ChatMessageItem, { props: { msg: { ...msg, streaming: false, traceFolded: true } } })
+  expect(replay.get('[data-test="folded-rejection"]').text()).toContain('危险命令')
+})
