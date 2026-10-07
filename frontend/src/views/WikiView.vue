@@ -1,13 +1,8 @@
 <script setup lang="ts">
-// WikiView —— wiki 编辑页（spec §9.6 / issue #45）。
-// 版面：顶部容器切换器 + 左文件树 + 中 Milkdown 编辑器 + 右图谱（可折叠）。
-// 联动：点树/图谱节点 openPage；编辑器 update → store.edit（防抖自动保存落盘）；
-// 顶部切换容器 → store.switchContainer（切前自动落盘）。新建/删除经 store，落盘并触发 compile。
-// #668：左文件树由面板三态包装接管（inline 拖宽 / collapsed 窄条 / popped 浮层）。
-// #670：右图谱接入同一套三态包装，并与文件树共用一个 panel group——同页至多一个浮层。
-import { onMounted, ref, watch } from 'vue'
+// Read-only wiki: tree/graph navigation, OKF reader, independent update progress.
+import { nextTick, onMounted, ref } from 'vue'
 import { storeToRefs } from 'pinia'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
 import { listInstances } from '@/api/containers'
 import { getGraph } from '@/api/wiki'
 import type { WikiGraphDTO } from '@/api/wiki'
@@ -18,12 +13,13 @@ import { INLINE_RANGE_NARROW, INLINE_RANGE_WIDE } from '@/panels/triState'
 import { usePanelGroup } from '@/panels/usePanelGroup'
 import { usePanelTriState } from '@/panels/usePanelTriState'
 import FileTree from '@/components/FileTree.vue'
-import MdEditor from '@/components/MdEditor.vue'
+import WikiPreview from '@/components/WikiPreview.vue'
+import { useWikiUpdate } from '@/wiki/useWikiUpdate'
 import WikiGraph from '@/components/WikiGraph.vue'
 import PanelTriState from '@/components/PanelTriState.vue'
 
 const store = useWikiStore()
-const { current, groups, activePath, draft, dirty, saving, saveSeq } = storeToRefs(store)
+const { current, groups, activePath, page, claims, claimsError, loading } = storeToRefs(store)
 
 // #668：文件树三态（inline 拖宽 160–560px / collapsed 窄条 / popped 浮层）。
 // 宽度按用户+页面+面板落 localStorage，collapsed/popped 态不持久化。
@@ -115,16 +111,21 @@ async function refreshGraph(): Promise<void> {
   }
 }
 
-// 自动保存成功后刷新树与图谱（codex PR #62 意见6）：title/wikilink 变更即时反映。
-watch(saveSeq, async () => {
-  await store.loadTree(current.value)
+const preview = ref<InstanceType<typeof WikiPreview>>()
+const update = useWikiUpdate(async () => {
+  const container = current.value
+  await store.loadTree(container)
   await refreshGraph()
+  if (current.value === container && activePath.value) await store.openPage(activePath.value)
 })
+const { busy: updating, message: updateMessage, detail: updateDetail, connected: updateConnected } = update
+async function onUpdate() {
+  try { await update.start(current.value) }
+  catch (e) { ElMessage.error(wikiErrorMessage(e, '更新启动失败，请重试')) }
+}
 
 async function selectContainer(name: string): Promise<void> {
   if (!name) return
-  // 初始化/重挂载：经 resetForContainer 清掉 Pinia 残留的旧编辑器态（codex PR #62 意见3），
-  // 否则旧容器 draft 会在新容器下显示/被误覆盖写。
   await store.resetForContainer(name)
   await refreshGraph()
 }
@@ -139,55 +140,13 @@ async function onSwitch(name: string): Promise<void> {
   }
 }
 
-async function onOpen(path: string): Promise<void> {
+async function onOpen(path: string, anchor = ''): Promise<void> {
   try {
     await store.openPage(path)
+    await nextTick()
+    if (activePath.value === path && anchor) await preview.value?.scrollToAnchor(anchor)
   } catch (e) {
     ElMessage.error(wikiErrorMessage(e, '页面打开失败，请重试'))
-  }
-}
-
-function onEdit(markdown: string): void {
-  store.edit(markdown)
-}
-
-async function onCreate(): Promise<void> {
-  let path = ''
-  try {
-    const { value } = await ElMessageBox.prompt(
-      '相对 wiki/main 的路径（如 concepts/foo.md）',
-      '新建页面',
-      { confirmButtonText: '新建', cancelButtonText: '取消', inputPattern: /\.md$/,
-        inputErrorMessage: '须以 .md 结尾' },
-    )
-    path = (value ?? '').trim()
-  } catch {
-    return // 用户取消
-  }
-  if (!path) return
-  try {
-    await store.createPage(path, `---\ntitle: ${path}\n---\n\n`)
-    await refreshGraph()
-    await store.openPage(path)
-    ElMessage.success('页面已创建')
-  } catch (e) {
-    ElMessage.error(wikiErrorMessage(e, '页面创建失败，请重试'))
-  }
-}
-
-async function onDelete(path: string): Promise<void> {
-  try {
-    await ElMessageBox.confirm(`确认删除页面 ${path}？`, '删除页面',
-      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' })
-  } catch {
-    return
-  }
-  try {
-    await store.deletePage(path)
-    await refreshGraph()
-    ElMessage.success('页面已删除')
-  } catch (e) {
-    ElMessage.error(wikiErrorMessage(e, '页面删除失败，请重试'))
   }
 }
 
@@ -212,13 +171,13 @@ onMounted(async () => {
         data-test="container-switch"
         class="switcher"
         :value="current"
+        :disabled="updating"
         @change="onSwitch(($event.target as HTMLSelectElement).value)"
       >
         <option v-for="c in containers" :key="c" :value="c">{{ c }}</option>
       </select>
-      <span v-if="saving" class="save-state" data-test="saving">保存中…</span>
-      <span v-else-if="dirty" class="save-state dirty" data-test="dirty">未保存</span>
-      <span v-else class="save-state" data-test="saved">已保存</span>
+      <button data-test="update-wiki" :disabled="!current || updating || !updateConnected" @click="onUpdate">{{ updating ? '更新中…' : updateConnected ? '更新 wiki' : '连接进度中…' }}</button>
+      <span role="status" aria-live="polite" data-test="wiki-update-progress">{{ updateMessage }} {{ updateDetail }}</span>
       <button
         class="toggle-graph"
         data-test="toggle-graph"
@@ -250,14 +209,12 @@ onMounted(async () => {
           :groups="groups"
           :active-path="activePath"
           @open="onOpen"
-          @create="onCreate"
-          @delete="onDelete"
         />
       </PanelTriState>
 
       <main class="center">
-        <MdEditor v-if="activePath" :content="draft" @update="onEdit" />
-        <div v-else class="empty" data-test="empty">从左侧选择或新建一个页面开始编辑</div>
+        <WikiPreview v-if="page" ref="preview" :page="page" :claims="claims" :claims-error="claimsError" :graph="graph" @open="onOpen" />
+        <div v-else class="empty" data-test="empty">{{ loading ? '正在加载…' : activePath ? '页面加载失败，请重新选择' : '从左侧选择一个页面阅读' }}</div>
       </main>
 
       <!-- #670：图谱接入三态包装。graphOpen=false 时连包装一起不渲染（无幽灵手柄）。
@@ -310,13 +267,9 @@ onMounted(async () => {
   color: var(--el-text-color-regular);
   background: var(--el-bg-color);
 }
-.save-state {
-  font-size: 12px;
-  color: var(--el-color-success);
-}
-.save-state.dirty {
-  color: var(--el-color-warning);
-}
+/* FileTree stays unchanged; wiki writing belongs to the agent. */
+.wiki-body :deep(.file-tree .create-btn),
+.wiki-body :deep(.file-tree .del-btn) { display: none; }
 .toggle-graph {
   margin-left: auto;
   padding: 4px 10px;
@@ -333,8 +286,8 @@ onMounted(async () => {
 }
 .center {
   flex: 1;
-  /* #668：min-width:0 放开 flex 默认 min-content 下限——面板拖到 560px 时编辑区收缩
-     到剩余空间而不是把 .wiki-body 顶溢出（「中间编辑区不被挤没」的实现保障）。 */
+  /* #668：min-width:0 放开 flex 默认 min-content 下限——面板拖到 560px 时阅读区收缩
+     到剩余空间而不是把 .wiki-body 顶溢出（「中间阅读区不被挤没」的实现保障）。 */
   min-width: 0;
   overflow-y: auto;
   padding: 16px 24px;

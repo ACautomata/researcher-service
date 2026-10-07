@@ -165,3 +165,16 @@ describe('useEventStream', () => {
     expect(seen).toHaveLength(0)
   })
 })
+
+it('订阅 wiki_run 五类事件，不把连续 wiki 事件误判为 seq gap', () => {
+  const seen: SessionEvent[] = []
+  const gap = vi.fn()
+  const stream = useEventStream({ onEvent: e => seen.push(e), onGap: gap })
+  const src = FakeEventSource.last()!
+  for (const [i, type] of ['wiki_run.progress', 'wiki_run.text', 'wiki_run.tool_start', 'wiki_run.tool_end', 'wiki_run.finished'].entries()) {
+    src.emit(type, { type, runId: 'wiki', payload: {} }, String(i + 1))
+  }
+  expect(seen).toHaveLength(5)
+  expect(gap).not.toHaveBeenCalled()
+  stream.close()
+})
