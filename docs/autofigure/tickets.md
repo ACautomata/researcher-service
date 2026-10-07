@@ -1,3 +1,5 @@
+> **历史档案 / superseded（#802）**：旧生成链路已退役，本文仅保留设计与票据史；现行规格见 [#744 v2](../research/744-autofigure-langgraph.md)。
+
 # AutoFigure V1 —— ticket 计划
 
 > **superseded（#791）**：本文档为 sidecar 集成时代的票史档案；现役拆票 = GitHub issue

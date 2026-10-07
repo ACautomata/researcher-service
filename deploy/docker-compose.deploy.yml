@@ -1,16 +1,10 @@
 # deploy/docker-compose.deploy.yml —— 面板生产栈（BaoTa 边缘 TLS 之后的应用层）
 #
 # 由 CD（.github/workflows/cd.yml）scp 到宿主 /www/panel/ 并经 `docker compose ... up -d` 启动。
-# 四服务：frontend（唯一对宿主暴露，loopback 18080 供 BaoTa 反代）/ server（内部，TS/Express 控制面，
-# docker.sock 编排 OpenClaw 容器 + SQLite 卷；home 模板与 openclaw.json 构建期入镜像）/ redis（内部，BullMQ 队列）
-# / autofigure（AutoFigure sidecar，T11；仅 panel-net 内部、flag 默认关，详见下方 AutoFigure 段）。
+# 三服务：frontend（唯一对宿主暴露，loopback 18080 供 BaoTa 反代）/ server（内部，TS/Express 控制面，
+# docker.sock 编排 OpenClaw 容器 + SQLite 卷；home 模板与 openclaw.json 构建期入镜像）/ redis（内部，BullMQ 队列）。
 # 宿主数据挂载唯一豁免：/var/run/docker.sock（ADR 0013，spec §5.4 已接受等价 root）。
 # （#341 M9：backend 服务退役 Django，切换为 server 服务跑 Express 控制面。）
-#
-# AutoFigure sidecar（已换轨，#791）：sidecar 生成链路的消费端已全量退役——本服务段无任何
-# 现役消费者；服务段与 deploy/autofigure-sidecar 目录的正式删除归票 6（#744 §10 退役 PR）。
-# 注意：#792 插件化收口后 figure 生成回到 server 进程内（插件管线），AutoFigure env 三必填键
-# 随之回归（不再随 #791 清退）——见下方 server 段注释。
 #
 # 运行时敏感值（JWT_SECRET / PANEL_PUBLIC_ORIGIN / LLM_API_KEY / CREDENTIAL_ENCRYPTION_KEYS /
 # AUTOFIGURE_IMAGE_API_KEY / FAL_KEY）经同目录 .env（env_file）注入，不落盘进 git；
@@ -45,7 +39,6 @@ services:
       - .env
     depends_on:
       - redis      # 启动顺序：redis 先于 server（仅启动序，非就绪等待；entrypoint 落表阶段给 redis 留出窗口）
-      - autofigure # 同上：仅启动序（service_started，非 service_healthy）——server 启动/health 不依赖 sidecar 就绪；flag 关路径 sidecar 未被使用，无健康依赖
     environment:
       # 非敏感固定项：config.ts 唯一 env 读取处（server/src/config.ts）。
       NODE_ENV: production
@@ -75,8 +68,8 @@ services:
       # provision cp 都落在容器私有 /fleet（named volume 拓扑下容器不 bind 宿主树，ADR 0011/0013；
       # 容器重建即空、create 幂等重建）。readFleetRoot 生产校验绝对路径——显式 pin 防相对路径 fallback。
       OPENCLAW_FLEET_ROOT: /fleet
-      # AutoFigure（#792 插件化收口起回归）：figure 生成 = server 进程内插件管线（sidecar
-      # 无现役消费者，服务段删除归票 6）。三个必填键经 .env（env_file）注入，生产缺键 =
+      # AutoFigure（#792 插件化收口起回归）：figure 生成 = server 进程内插件管线。
+      # 三个必填键经 .env（env_file）注入，生产缺键 =
       # 启动期 assertPluginEnv fail-fast（不看启用位——任何用户随时可启用，面板必须永远备好）：
       #   AUTOFIGURE_IMAGE_MODEL        生图模型名（如 image-01）
       #   AUTOFIGURE_IMAGE_API_KEY      生图 API key（敏感，只走 .env）
@@ -105,34 +98,6 @@ services:
     networks:
       - panel-net
 
-  # AutoFigure 私有 sidecar（T11，docs/autofigure/tickets/T11-production-packaging-cd.md；镜像本体 T08）：
-  #   - 第 4 镜像：ghcr.io/acautomata/researcher-service/autofigure（CD 既有管线构建推送，vendored T08
-  #     源不 fetch mutable upstream；Dockerfile 构建期断言 + 许可/署名文件入镜像）；PANEL_AUTOFIGURE_IMAGE
-  #     覆盖位对齐 PANEL_*_IMAGE 先例（回滚固定到 :<sha>）；
-  #   - 仅挂 panel-net、无 ports 无 volumes：私有 sidecar 无宿主端口（grilling §7）、零 host 挂载
-  #     （ADR 0013）——宿主/浏览器永不直接访问，只经 server（panel-net 内部）经 X-Autofigure-Api-Key
-  #     注入凭证；
-  #   - healthcheck：/health 存活性探测（无域信息/凭证），容器内本机探（无宿主端口可依）；flag 开时
-  #     sidecar 故障经 docker compose health（unhealthy）在既有部署面检测，不扩 /api/health；
-  #   - mem_limit 2g = T10/T11 judgement call（真实生成 = Playwright 渲染 + LLM 调用内存上限；仓库
-  #     生产服务均无资源限制，此为 AutoFigure 域首个约束，对齐 T10 dev 栈同值）。
-  autofigure:
-    image: ${PANEL_AUTOFIGURE_IMAGE:-ghcr.io/acautomata/researcher-service/autofigure:latest}
-    container_name: panel-autofigure
-    restart: unless-stopped
-    mem_limit: 2g
-    healthcheck:
-      test:
-        - CMD
-        - python
-        - -c
-        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)"
-      interval: 10s
-      timeout: 3s
-      retries: 5
-      start_period: 15s
-    networks:
-      - panel-net
 
 networks:
   panel-net:
