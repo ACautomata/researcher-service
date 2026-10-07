@@ -1,30 +1,27 @@
-// wiki 5 路由 7 方法（#335 · #315 逐字节迁移；#784 存储面换轨新 wiki 容器）—— 挂 /api/v1/containers，
-// 路由路径 `/:name/wiki/...`。
+// wiki 6 路由 7 方法（#335 · #315 逐字节迁移；#784 存储面换轨新 wiki 容器；#856 归属门改挂
+// ownerId）—— 挂 /api/v1/wiki（owner 级，对齐 #857 models / sessions 扁平挂用户先例）。
 //
-// Express 5 不把 app.use 挂载路径的 :name 合并进 router 的 req.params，故 :name 在 router 内部
-// 声明（对齐 containers 路由同款挂载方式）；路由层不加 name 正则（校验在 handler 内做，
-// 保「非法 → 90002」而非 Express 默认 404）。
+// #856（退役①）：归属门从容器行解析（getInstanceForUser）改为认证身份直派生，wiki 域与
+// 容器行完全脱钩（容器行删除后 wiki 功能无损运行，为③容器消费面退役清障）。随之移除：
+//   - 路径 <name> 参数与其校验（90002 data.name 随路径参数一并消失）；
+//   - 容器不存在/越权 20040（无容器行可查——跨用户寻址面结构性消失：ownerId 即认证身份，
+//     寻址只达本人 wiki 容器，隔离由派生封闭保证；admin 亦只操作本人 wiki）。
 //
-// 路由 + 成功载荷与 Django 版逐字节一致；仅错误搬进信封（#312）。隔离经 getInstanceForUser
-// 归属前置（#312⑤）：admin 全放行 / user 仅本人，越权 20040 同码防探测。
-// #784 存储换轨：wiki 数据源 = 每用户 wiki 容器（researcher-wiki-<inst.ownerId>，树根 /wiki），
-// 路由参数 <name> 仅剩寻址/归属语义（legacy Container 行所有门）——读写不再触达 legacy 容器。
-// 每操作前置 ensure（kind=wiki 支路的 create/health 合一面）：容器不存在惰性创建（零初始化）、
-// stopped 复启、running 原样——归属校验之后（未授权探测不建容器）。
+// #784 存储换轨：wiki 数据源 = 每用户 wiki 容器（researcher-wiki-<ownerId>，树根 /wiki），
+// 读写不触达 legacy 容器。每操作前置 ensure（kind=wiki 支路的 create/health 合一面）：容器
+// 不存在惰性创建（零初始化）、stopped 复启、running 原样——requireAuth 之后（未授权探测不建
+// 容器）且在 path/body 校验之后（非法请求不触碰编排面）；ownerId 无客户端覆写面，
+// 「归属先于 ensure」由派生封闭兑现。
 // compile 触发（#315 §6）随存储换轨停用：busybox 级 wiki 容器无 openclaw 运行时，索引生成
 // 归 OpenWiki 工具形态（#737，G 节 wiki 三通道）；deps.compile 缺省 noop，生产装配不注入。
-// 错误映射（#335）：name 非法 → 90002(data.name) · 容器不存在/越权 → 20040 ·
-// path 非法/穿越/managed → 90002(data.path) · 页不存在 → 30040 · 页已存在 → 30041。
-// 顺序陷阱（#315 §0）：name 非法 ≠ name 合法但无此容器，两码不可混。
+// 错误映射：path 非法/穿越/managed → 90002(data.path) · 页不存在 → 30040 · 页已存在 → 30041。
 
 import { Router, type Request, type Response } from 'express'
 import { fail, ok } from '../envelope'
 import { CODE } from '../codes'
 import { requireAuth } from '../middleware/auth'
 import { mustChangePasswordGate } from '../middleware/mustChangePasswordGate'
-import { getInstanceForUser } from '../containers/orchestrator'
 import { wikiContainerName } from '../wikiContainers/runtime'
-import { CONTAINER_NAME_REGEX } from '../validation/schemas'
 import { DockerWikiFileSystem } from './dockerFs'
 import { WikiService } from './service'
 import { WikiInvalidPath, WikiPageExists, WikiPageNotFound } from './errors'
@@ -51,9 +48,9 @@ export interface WikiRouterDeps {
   // wiki 容器 ensure（#784）：缺省 = 不 ensure（纯测试装配）；生产 app.ts 必注入——缺注入时
   // 容器缺失的读写以原语层错误暴露（不静默伪装成功）。
   wikiContainers?: WikiContainersEnsurePort
-  // service 工厂：缺省 = Docker 适配器挂 inst.owner 的 wiki 容器（researcher-wiki-<ownerId>，
-  // 树根 /wiki）；测试注入内存 fake（fake 以 inst.name 键控）。
-  serviceFor?: (inst: { name: string; ownerId: string }) => WikiService
+  // service 工厂：缺省 = Docker 适配器挂请求者本人的 wiki 容器（researcher-wiki-<ownerId>，
+  // 树根 /wiki）；测试注入内存 fake（#856 起 fake 以 ownerId 键控）。
+  serviceFor?: (ownerId: string) => WikiService
   // 全量更新独立 run（#790）：缺省不注入 = 端点以 90005 回应（对齐 figures/docs 条件挂载
   // 先例——未装配的面不虚挂）；生产 server.ts 注入 WikiUpdateRunService。
   updateRunner?: WikiUpdateRunnerPort
@@ -68,118 +65,116 @@ function assertPageOpError(err: unknown): void {
 
 export function createWikiRouter(deps: WikiRouterDeps = {}): Router {
   const compile = deps.compile ?? noopCompile
-  // 缺省经 Docker 原语读写 inst.owner 的 wiki 容器（#784）：docker 名单一来源
-  // wikiContainerName 派生，树根 /wiki（DockerWikiFileSystem 缺省）；inst.homeDir 不参与读写。
+  // 缺省经 Docker 原语读写请求者本人的 wiki 容器（#784；#856 起 ownerId 即认证身份）：docker
+  // 名单一来源 wikiContainerName 派生，树根 /wiki（DockerWikiFileSystem 缺省）。
   const serviceFor =
-    deps.serviceFor ?? ((inst: { name: string; ownerId: string }) => new WikiService(new DockerWikiFileSystem(wikiContainerName(inst.ownerId))))
+    deps.serviceFor ?? ((ownerId: string) => new WikiService(new DockerWikiFileSystem(wikiContainerName(ownerId))))
   const ensureWiki = deps.wikiContainers
   const updateRunner = deps.updateRunner
   const router = Router()
   router.use(requireAuth, mustChangePasswordGate)
 
-  // 公共前置（对齐 Django _get_instance）：name 校验（400/90002）→ 查容器 + owner 判定（404/20040）
-  // → wiki 容器 ensure（惰性创建/复启，#784；越权探测不建容器）。
-  // Express 5 :name 可为 string | string[]（重复段）；非字符串直接按非法处理（90002）。
-  const resolveInstance = async (req: Request, name: string | string[]) => {
-    if (typeof name !== 'string' || !CONTAINER_NAME_REGEX.test(name)) {
-      throw fail(CODE.VALIDATION_FAILED, undefined, {
-        name: ['name 须以小写字母开头，3–30 位，仅含小写字母、数字、连字符'],
-      })
-    }
-    const inst = await getInstanceForUser(req.prisma, req.user!, name)
-    await ensureWiki?.ensure(inst.ownerId)
-    return inst
-  }
+  // owner 直取认证身份（#856，对齐 #857 models 同款）：requireAuth 已保证 req.user 非空；
+  // 不接收任何客户端 userId 作为授权覆写面。
+  const ownerId = (req: Request): string => req.user!.id
 
-  // GET /:name/wiki/tree —— 文件树（开放目录分组；不收顶层散落页）。
-  router.get('/:name/wiki/tree', async (req: Request, res: Response) => {
-    const inst = await resolveInstance(req, req.params.name)
-    ok(res, await serviceFor(inst).buildTree())
+  // GET /wiki/tree —— 文件树（开放目录分组；不收顶层散落页）。
+  router.get('/tree', async (_req: Request, res: Response) => {
+    const owner = ownerId(_req)
+    await ensureWiki?.ensure(owner)
+    ok(res, await serviceFor(owner).buildTree())
   })
 
-  // GET /:name/wiki/page?path= —— 读一页原文全文。
-  router.get('/:name/wiki/page', async (req: Request, res: Response) => {
-    const inst = await resolveInstance(req, req.params.name)
-    const relPath = requireRelPath(req.query.path) // 非法 → 90002(data.path)；在容器/越权校验之后
+  // GET /wiki/page?path= —— 读一页原文全文。
+  router.get('/page', async (req: Request, res: Response) => {
+    const relPath = requireRelPath(req.query.path) // 非法 → 90002(data.path)；先于 ensure（非法请求不触碰编排面）
+    const owner = ownerId(req)
+    await ensureWiki?.ensure(owner)
     try {
-      ok(res, await serviceFor(inst).readPage(relPath))
+      ok(res, await serviceFor(owner).readPage(relPath))
     } catch (err) {
       assertPageOpError(err)
     }
   })
 
-  // PUT /:name/wiki/page —— 覆写已存在页（byte-exact 保留空白；不触发 compile）。
-  router.put('/:name/wiki/page', async (req: Request, res: Response) => {
-    const inst = await resolveInstance(req, req.params.name)
-    const body = parseWikiWriteBody(req.body) // 非法 → 90002；在容器/越权校验之后（对齐 Django 顺序）
+  // PUT /wiki/page —— 覆写已存在页（byte-exact 保留空白；不触发 compile）。
+  router.put('/page', async (req: Request, res: Response) => {
+    const body = parseWikiWriteBody(req.body) // 非法 → 90002；先于 ensure（非法请求不触碰编排面）
+    const owner = ownerId(req)
+    await ensureWiki?.ensure(owner)
     try {
-      await serviceFor(inst).writePage(body.path, body.content)
+      await serviceFor(owner).writePage(body.path, body.content)
     } catch (err) {
       assertPageOpError(err)
     }
     ok(res, { path: body.path }) // PUT 不触发 compile（r29 §2.3）
   })
 
-  // POST /:name/wiki/page —— 新建页；compile 面缺省 noop（#784 起生产不注入，见文件头）。
-  router.post('/:name/wiki/page', async (req: Request, res: Response) => {
-    const inst = await resolveInstance(req, req.params.name)
+  // POST /wiki/page —— 新建页；compile 面缺省 noop（#784 起生产不注入，见文件头）。
+  router.post('/page', async (req: Request, res: Response) => {
     const body = parseWikiWriteBody(req.body)
+    const owner = ownerId(req)
+    await ensureWiki?.ensure(owner)
     try {
-      await serviceFor(inst).createPage(body.path, body.content)
+      await serviceFor(owner).createPage(body.path, body.content)
     } catch (err) {
       if (err instanceof WikiPageExists) throw fail(CODE.WIKI_PAGE_EXISTS)
       assertPageOpError(err)
     }
-    compile.trigger(inst.name)
+    compile.trigger(owner)
     ok(res, { path: body.path })
   })
 
-  // DELETE /:name/wiki/page?path= —— 删页；compile 面同上 noop。
-  router.delete('/:name/wiki/page', async (req: Request, res: Response) => {
-    const inst = await resolveInstance(req, req.params.name)
+  // DELETE /wiki/page?path= —— 删页；compile 面同上 noop。
+  router.delete('/page', async (req: Request, res: Response) => {
     const relPath = requireRelPath(req.query.path)
+    const owner = ownerId(req)
+    await ensureWiki?.ensure(owner)
     try {
-      await serviceFor(inst).deletePage(relPath)
+      await serviceFor(owner).deletePage(relPath)
     } catch (err) {
       assertPageOpError(err)
     }
-    compile.trigger(inst.name)
+    compile.trigger(owner)
     ok(res, null)
   })
 
-  // GET /:name/wiki/graph —— 全库图谱（nodes + edges；边不 dedup、不可解析 → ghost 节点）。
-  router.get('/:name/wiki/graph', async (req: Request, res: Response) => {
-    const inst = await resolveInstance(req, req.params.name)
-    ok(res, await serviceFor(inst).buildGraph())
+  // GET /wiki/graph —— 全库图谱（nodes + edges；边不 dedup、不可解析 → ghost 节点）。
+  router.get('/graph', async (req: Request, res: Response) => {
+    const owner = ownerId(req)
+    await ensureWiki?.ensure(owner)
+    ok(res, await serviceFor(owner).buildGraph())
   })
 
-  // GET /:name/wiki/categories —— 按 `category:` 标记聚合（开放词表；收顶层散落页）。
-  router.get('/:name/wiki/categories', async (req: Request, res: Response) => {
-    const inst = await resolveInstance(req, req.params.name)
-    ok(res, await serviceFor(inst).listCategories())
+  // GET /wiki/categories —— 按 `category:` 标记聚合（开放词表；收顶层散落页）。
+  router.get('/categories', async (req: Request, res: Response) => {
+    const owner = ownerId(req)
+    await ensureWiki?.ensure(owner)
+    ok(res, await serviceFor(owner).listCategories())
   })
 
-  // GET /:name/wiki/claims?path= —— 页 claims 旁车只读面（#789 story 42 数据面：论断 →
+  // GET /wiki/claims?path= —— 页 claims 旁车只读面（#789 story 42 数据面：论断 →
   // 源文件行锚 evidence + 页级漂移状态）。页缺失 → 30040（与 page GET 同码）；旁车缺失/
   // 畸形 → 200 + drift null + 空 claims（「无证据面板」语义，不报错）。
-  router.get('/:name/wiki/claims', async (req: Request, res: Response) => {
-    const inst = await resolveInstance(req, req.params.name)
+  router.get('/claims', async (req: Request, res: Response) => {
     const relPath = requireRelPath(req.query.path)
+    const owner = ownerId(req)
+    await ensureWiki?.ensure(owner)
     try {
-      ok(res, await serviceFor(inst).readClaims(relPath))
+      ok(res, await serviceFor(owner).readClaims(relPath))
     } catch (err) {
       assertPageOpError(err)
     }
   })
 
-  // POST /:name/wiki/update —— 全量更新独立 run 触发面（#790 · 三通道③）：归属前置
-  // （resolveInstance——越权探测不建容器）+ wiki 容器 ensure，即返 {runId}；进度经 SSE
-  // wiki_run.progress/text/tool_start/tool_end/finished 五类事件扇出（事件即焚不落盘）。
-  // 在飞互斥 30042（start 同步抛 EnvelopeError）；缺装配 → 90005。
-  router.post('/:name/wiki/update', async (req: Request, res: Response) => {
+  // POST /wiki/update —— 全量更新独立 run 触发面（#790 · 三通道③）：wiki 容器 ensure 后
+  // 即返 {runId}；进度经 SSE wiki_run.progress/text/tool_start/tool_end/finished 五类事件扇出
+  // （事件即焚不落盘）。在飞互斥 30042（start 同步抛 EnvelopeError）；缺装配 → 90005。
+  router.post('/update', async (req: Request, res: Response) => {
     if (!updateRunner) throw fail(CODE.ROUTE_NOT_FOUND)
-    const inst = await resolveInstance(req, req.params.name)
-    ok(res, await updateRunner.start({ ownerId: inst.ownerId, wikiContainer: wikiContainerName(inst.ownerId) }))
+    const owner = ownerId(req)
+    await ensureWiki?.ensure(owner)
+    ok(res, await updateRunner.start({ ownerId: owner, wikiContainer: wikiContainerName(owner) }))
   })
 
   return router

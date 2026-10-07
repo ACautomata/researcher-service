@@ -1,6 +1,6 @@
 // seam: CategoriesView 页 —— issue #85 Categories 栏目组装（spec #75 前端）。
-// 版面：顶部容器切换器 + 左按 category 动态分组（可折叠 chip+名称+计数）+ 右只读正文。
-// store 用真 Pinia（api/wiki、api/containers mock 替身）；MdEditor stub 聚焦组装逻辑。
+// 版面：左按 category 动态分组（可折叠 chip+名称+计数）+ 右只读正文。
+// #856：owner 级——容器切换器随耦合下线；store 用真 Pinia（api/wiki mock 替身）；MdEditor stub 聚焦组装逻辑。
 import { flushPromises, mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
@@ -9,7 +9,6 @@ vi.mock('@/api/wiki', () => ({
   getCategories: vi.fn(),
   readPage: vi.fn(),
 }))
-vi.mock('@/api/containers', () => ({ listInstances: vi.fn() }))
 vi.mock('element-plus', async (importOriginal) => {
   const actual = (await importOriginal()) as Record<string, unknown>
   return { ...actual, ElMessage: { error: vi.fn() } }
@@ -18,15 +17,8 @@ vi.mock('element-plus', async (importOriginal) => {
 import CategoriesView from '@/views/CategoriesView.vue'
 import { useCategoriesStore } from '@/stores/categories'
 import { getCategories, readPage } from '@/api/wiki'
-import { listInstances } from '@/api/containers'
 import { ElMessage } from 'element-plus'
 
-const INSTANCES = [
-  { name: 'demo', port: 19000, status: 'running', health: 'healthy',
-    image: 'img', container_id: 'c1', created_at: '' },
-  { name: 'other', port: 19001, status: 'running', health: 'healthy',
-    image: 'img', container_id: 'c2', created_at: '' },
-]
 const CATS = {
   idea: [
     { path: 'a.md', title: 'Alpha', category: 'idea', excerpt: '甲摘要' },
@@ -53,19 +45,22 @@ describe('CategoriesView', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
     vi.clearAllMocks()
-    ;(listInstances as ReturnType<typeof vi.fn>).mockResolvedValue(INSTANCES)
     ;(getCategories as ReturnType<typeof vi.fn>).mockResolvedValue(CATS)
     ;(readPage as ReturnType<typeof vi.fn>).mockResolvedValue({
       path: 'a.md', title: 'Alpha', content: '# Alpha 正文',
     })
   })
 
-  it('loads first container categories on mount', async () => {
+  it('loads categories on mount（owner 直取认证身份，不传容器名）', async () => {
     mountView()
     await flushPromises()
-    const s = useCategoriesStore()
-    expect(s.current).toBe('demo')
-    expect(getCategories).toHaveBeenCalledWith('demo')
+    expect(getCategories).toHaveBeenCalledWith()
+  })
+
+  it('容器切换器随 #856 下线（owner 级无切换面）', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+    expect(wrapper.find('[data-test="container-switch"]').exists()).toBe(false)
   })
 
   it('builds one collapsible group per category key, incl. unknown values', async () => {
@@ -105,7 +100,7 @@ describe('CategoriesView', () => {
     await flushPromises()
     await wrapper.find('[data-test="cat-item"]').trigger('click')
     await flushPromises()
-    expect(readPage).toHaveBeenCalledWith('demo', 'a.md')
+    expect(readPage).toHaveBeenCalledWith('a.md')
     const s = useCategoriesStore()
     expect(s.activePath).toBe('a.md')
     // 右侧只读编辑器收到全文，且 readonly=true
@@ -120,7 +115,7 @@ describe('CategoriesView', () => {
     const item = wrapper.get('[data-test="cat-item"]')
     expect(item.element.tagName).toBe('BUTTON')
     await item.trigger('click')
-    expect(readPage).toHaveBeenCalledWith('demo', 'a.md')
+    expect(readPage).toHaveBeenCalledWith('a.md')
   })
 
   it('shows an error when opening an item fails', async () => {
@@ -144,25 +139,6 @@ describe('CategoriesView', () => {
     await wrapper.find('[data-test="cat-toggle"]').trigger('click')
     await flushPromises()
     expect(wrapper.findAll('[data-test="cat-item"]')).toHaveLength(4)
-  })
-
-  it('switches container via switcher and reloads categories', async () => {
-    const wrapper = mountView()
-    await flushPromises()
-    const select = wrapper.find('[data-test="container-switch"]')
-    await select.setValue('other')
-    await flushPromises()
-    expect(useCategoriesStore().current).toBe('other')
-    expect(getCategories).toHaveBeenCalledWith('other')
-  })
-
-  it('shows an error when switching container fails', async () => {
-    const wrapper = mountView()
-    await flushPromises()
-    ;(getCategories as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('栏目切换失败'))
-    await wrapper.find('[data-test="container-switch"]').setValue('other')
-    await flushPromises()
-    expect(ElMessage.error).toHaveBeenCalledWith('栏目切换失败')
   })
 
   // codex P2：category 是开放词表，__proto__ 也能正常折叠/展开（不能用普通对象存折叠态）

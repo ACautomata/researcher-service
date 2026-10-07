@@ -1,19 +1,18 @@
 <script setup lang="ts">
 // CategoriesView —— Categories 栏目（issue #85 / spec #75 前端）。
-// 版面：顶部容器切换器 + 左按 category 动态分组（可折叠 chip+名称+计数）+ 右只读正文。
+// 版面：左按 category 动态分组（可折叠 chip+名称+计数）+ 右只读正文。
+// #856：owner 级——每用户仅本人 wiki，无容器切换面（listInstances 选容器随耦合下线）。
 // 分组开放词表：遍历响应键建组，未知 category 也自动成组；chip 用 hash 取色（无需预设调色板）。
 // 点条目右侧只读展示完整正文（复用 MdEditor readonly + readPage 取全文）。
 import { onMounted, ref } from 'vue'
 import { storeToRefs } from 'pinia'
 import { ElMessage } from 'element-plus'
-import { listInstances } from '@/api/containers'
 import { useCategoriesStore } from '@/stores/categories'
 import MdEditor from '@/components/MdEditor.vue'
 
 const store = useCategoriesStore()
-const { current, groups, activePath, content } = storeToRefs(store)
+const { groups, activePath, content } = storeToRefs(store)
 
-const containers = ref<string[]>([])
 // 折叠状态：category 键 → 是否折叠（默认展开）。开放词表键可能是 `__proto__`，
 // 用 Map 而非普通对象（普通对象赋值 `__proto__` 会走原型 setter，导致该组折叠失效 —— codex P2）。
 const collapsed = ref(new Map<string, boolean>())
@@ -36,22 +35,6 @@ function toggle(category: string): void {
   collapsed.value.set(category, !isCollapsed(category))
 }
 
-async function selectContainer(name: string): Promise<void> {
-  if (!name) return
-  // 初始化/重挂载：清掉 Pinia 残留的旧选中态（对齐 WikiView 的 resetForContainer 用法）
-  await store.resetForContainer(name)
-}
-
-async function onSwitch(name: string): Promise<void> {
-  // 早退判 pending（含在飞的目标容器）而非 current：加载在飞时再选回 current 必须推进作废旧请求
-  if (name === store.pending) return
-  try {
-    await store.switchContainer(name)
-  } catch (e) {
-    ElMessage.error((e as Error).message)
-  }
-}
-
 async function onOpen(path: string): Promise<void> {
   try {
     await store.openItem(path)
@@ -62,11 +45,7 @@ async function onOpen(path: string): Promise<void> {
 
 onMounted(async () => {
   try {
-    const list = await listInstances()
-    containers.value = list.map((i) => i.name)
-    if (containers.value.length > 0) {
-      await selectContainer(containers.value[0])
-    }
+    await store.reset()
   } catch (e) {
     ElMessage.error((e as Error).message)
   }
@@ -77,14 +56,6 @@ onMounted(async () => {
   <div class="categories-view">
     <header class="categories-header">
       <span class="brand">Categories</span>
-      <select
-        data-test="container-switch"
-        class="switcher"
-        :value="current"
-        @change="onSwitch(($event.target as HTMLSelectElement).value)"
-      >
-        <option v-for="c in containers" :key="c" :value="c">{{ c }}</option>
-      </select>
     </header>
 
     <div class="categories-body">
@@ -152,13 +123,6 @@ onMounted(async () => {
 }
 .brand {
   font-weight: 600;
-}
-.switcher {
-  padding: 4px 8px;
-  border: 1px solid var(--el-border-color);
-  border-radius: 4px;
-  color: var(--el-text-color-regular);
-  background: var(--el-bg-color);
 }
 .categories-body {
   display: flex;

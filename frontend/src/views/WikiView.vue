@@ -1,9 +1,9 @@
 <script setup lang="ts">
 // Read-only wiki: tree/graph navigation, OKF reader, independent update progress.
+// #856：owner 级——每用户仅本人 wiki，无容器切换面（listInstances 选容器随耦合下线）。
 import { nextTick, onMounted, ref } from 'vue'
 import { storeToRefs } from 'pinia'
 import { ElMessage } from 'element-plus'
-import { listInstances } from '@/api/containers'
 import { getGraph } from '@/api/wiki'
 import type { WikiGraphDTO } from '@/api/wiki'
 import { ApiError } from '@/api/errors'
@@ -19,7 +19,7 @@ import WikiGraph from '@/components/WikiGraph.vue'
 import PanelTriState from '@/components/PanelTriState.vue'
 
 const store = useWikiStore()
-const { current, groups, activePath, page, claims, claimsError, loading } = storeToRefs(store)
+const { groups, activePath, page, claims, claimsError, loading } = storeToRefs(store)
 
 // #668：文件树三态（inline 拖宽 160–560px / collapsed 窄条 / popped 浮层）。
 // 宽度按用户+页面+面板落 localStorage，collapsed/popped 态不持久化。
@@ -87,25 +87,19 @@ function wikiErrorMessage(e: unknown, fallback: string): string {
   return e instanceof ApiError && e.message ? e.message : fallback
 }
 
-const containers = ref<string[]>([])
 const graph = ref<WikiGraphDTO>({ nodes: [], edges: [] })
 const graphOpen = ref(true)
 let graphRequestSeq = 0
 
 async function refreshGraph(): Promise<void> {
   const requestSeq = ++graphRequestSeq
-  const container = current.value
-  if (!container) {
-    graph.value = { nodes: [], edges: [] }
-    return
-  }
   try {
-    const nextGraph = await getGraph(container)
-    if (requestSeq === graphRequestSeq && current.value === container) {
+    const nextGraph = await getGraph()
+    if (requestSeq === graphRequestSeq) {
       graph.value = nextGraph
     }
   } catch {
-    if (requestSeq === graphRequestSeq && current.value === container) {
+    if (requestSeq === graphRequestSeq) {
       graph.value = { nodes: [], edges: [] }
     }
   }
@@ -113,31 +107,14 @@ async function refreshGraph(): Promise<void> {
 
 const preview = ref<InstanceType<typeof WikiPreview>>()
 const update = useWikiUpdate(async () => {
-  const container = current.value
-  await store.loadTree(container)
+  await store.loadTree()
   await refreshGraph()
-  if (current.value === container && activePath.value) await store.openPage(activePath.value)
+  if (activePath.value) await store.openPage(activePath.value)
 })
 const { busy: updating, message: updateMessage, detail: updateDetail, connected: updateConnected } = update
 async function onUpdate() {
-  try { await update.start(current.value) }
+  try { await update.start() }
   catch (e) { ElMessage.error(wikiErrorMessage(e, '更新启动失败，请重试')) }
-}
-
-async function selectContainer(name: string): Promise<void> {
-  if (!name) return
-  await store.resetForContainer(name)
-  await refreshGraph()
-}
-
-async function onSwitch(name: string): Promise<void> {
-  if (name === current.value) return
-  try {
-    await store.switchContainer(name)
-    await refreshGraph()
-  } catch (e) {
-    ElMessage.error(wikiErrorMessage(e, '容器切换失败，请重试'))
-  }
 }
 
 async function onOpen(path: string, anchor = ''): Promise<void> {
@@ -152,11 +129,8 @@ async function onOpen(path: string, anchor = ''): Promise<void> {
 
 onMounted(async () => {
   try {
-    const list = await listInstances()
-    containers.value = list.map((i) => i.name)
-    if (containers.value.length > 0) {
-      await selectContainer(containers.value[0])
-    }
+    await store.reset()
+    await refreshGraph()
   } catch (e) {
     ElMessage.error(wikiErrorMessage(e, 'Wiki 加载失败，请重试'))
   }
@@ -167,16 +141,7 @@ onMounted(async () => {
   <div class="wiki-view">
     <header class="wiki-header">
       <span class="brand">Wiki</span>
-      <select
-        data-test="container-switch"
-        class="switcher"
-        :value="current"
-        :disabled="updating"
-        @change="onSwitch(($event.target as HTMLSelectElement).value)"
-      >
-        <option v-for="c in containers" :key="c" :value="c">{{ c }}</option>
-      </select>
-      <button data-test="update-wiki" :disabled="!current || updating || !updateConnected" @click="onUpdate">{{ updating ? '更新中…' : updateConnected ? '更新 wiki' : '连接进度中…' }}</button>
+      <button data-test="update-wiki" :disabled="updating || !updateConnected" @click="onUpdate">{{ updating ? '更新中…' : updateConnected ? '更新 wiki' : '连接进度中…' }}</button>
       <span role="status" aria-live="polite" data-test="wiki-update-progress">{{ updateMessage }} {{ updateDetail }}</span>
       <button
         class="toggle-graph"
@@ -259,13 +224,6 @@ onMounted(async () => {
 }
 .brand {
   font-weight: 600;
-}
-.switcher {
-  padding: 4px 8px;
-  border: 1px solid var(--el-border-color);
-  border-radius: 4px;
-  color: var(--el-text-color-regular);
-  background: var(--el-bg-color);
 }
 /* FileTree stays unchanged; wiki writing belongs to the agent. */
 .wiki-body :deep(.file-tree .create-btn),

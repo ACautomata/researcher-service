@@ -1,4 +1,5 @@
-// #790 通道③ S1 信封级集成：POST /api/v1/containers/:name/wiki/update 独立 run（验收②③）。
+// #790 通道③ S1 信封级集成：POST /api/v1/wiki/update 独立 run（验收②③；#856 起 owner 级
+// 路径，零容器行查询）。
 // 真 SQLite + 真 StreamHub + 真 openwiki runNativeRepositoryGeneration（deep-import 契约面）+
 // 真 WikiUpdateRunService——只假 LLM/Docker（teammateRuntime.test.ts harness 先例）。
 //
@@ -36,7 +37,6 @@ import {
 import { fakePrimitives, ScriptedChatModel, toolCallAi } from './runnerFakes'
 import { seedUser, waitFor } from './helpers'
 
-const CONTAINER = 'gen-container'
 const enc = (s: string) => Buffer.from(s, 'utf8')
 
 type Reply = AIMessage | ((messages: BaseMessage[]) => Promise<AIMessage> | AIMessage)
@@ -66,8 +66,8 @@ class KeyedChatModel extends ScriptedChatModel {
 const cleanups: Array<() => Promise<void>> = []
 afterEach(async () => { for (const cleanup of cleanups.splice(0)) await cleanup() })
 
-// fake wiki 容器树（键 = wikiContainerName(owner.id)——路由传参即该名，resolveInstance 归属门
-// 之后的 wiki 容器寻址与生产一致）
+// fake wiki 容器树（键 = wikiContainerName(owner.id)——路由按认证身份派生同名，wiki 容器寻址
+// 与生产一致）
 function seededFake(wiki: string) {
   const fake = fakePrimitives()
   fake.trees.set(
@@ -101,10 +101,6 @@ async function harness(opts: {
     credentialEnvId: 'LLM_API_KEY', authHeader: true, modelsJson: JSON.stringify([{ id: 'model-x' }]),
   } })
   await prisma.providerEndpoint.create({ data: { scheme: 'https', host: 'llm.example.edu', port: null, createdBy: 'seed' } })
-  await prisma.container.create({ data: {
-    name: CONTAINER, port: 19077, ownerId: owner.id, token: 'seed-token', homeDir: '/tmp/seed-home',
-    image: 'seed-image', status: 'running',
-  } })
   const hub = new StreamHub()
   const events: CatalogEvent[] = []
   hub.register(owner.id, { send: (frame) => {
@@ -135,7 +131,7 @@ async function harness(opts: {
   const auth = { Authorization: `Bearer ${access}` }
   cleanups.push(async () => { await prisma.$disconnect() })
   return { owner, wiki, service, events, request, auth, fake,
-    post: () => request.post(`/api/v1/containers/${CONTAINER}/wiki/update`).set(auth).send({}),
+    post: () => request.post('/api/v1/wiki/update').set(auth).send({}),
     waitForFinished: async () => {
       await waitFor(() => events.some((e) => e.type === WIKI_RUN_FINISHED), 90_000)
       return events.find((e) => e.type === WIKI_RUN_FINISHED)!

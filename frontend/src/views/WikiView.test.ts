@@ -13,7 +13,6 @@ vi.mock('@/api/wiki', () => ({
   startWikiUpdate: vi.fn(),
 }))
 vi.mock('@/chat/useEventStream', () => ({ useEventStream: vi.fn(() => ({ close: vi.fn(), status: { value: 'open' } })) }))
-vi.mock('@/api/containers', () => ({ listInstances: vi.fn() }))
 vi.mock('element-plus', async (importOriginal) => {
   const actual = (await importOriginal()) as Record<string, unknown>
   return {
@@ -26,27 +25,14 @@ vi.mock('element-plus', async (importOriginal) => {
 import WikiView from '@/views/WikiView.vue'
 import { useWikiStore } from '@/stores/wiki'
 import { getGraph, getTree, readPage } from '@/api/wiki'
-import { listInstances } from '@/api/containers'
 import { ElMessage } from 'element-plus'
 
-const INSTANCES = [
-  { name: 'demo', port: 19000, status: 'running', health: 'healthy',
-    image: 'img', container_id: 'c1', created_at: '' },
-  { name: 'other', port: 19001, status: 'running', health: 'healthy',
-    image: 'img', container_id: 'c2', created_at: '' },
-]
 const TREE = {
   groups: [
     { kind: 'concept', name: 'concepts', pages: [{ path: 'concepts/a.md', title: 'A' }] },
   ],
 }
 const GRAPH = { nodes: [{ id: 'concepts/a.md', title: 'A' }], edges: [] }
-
-function deferred<T>() {
-  let resolve!: (value: T) => void
-  const promise = new Promise<T>((done) => { resolve = done })
-  return { promise, resolve }
-}
 
 const stubs = {
   FileTree: {
@@ -73,10 +59,9 @@ function mountView() {
   return mount(WikiView, { global: { stubs } })
 }
 
-describe('WikiView', () => {
+describe('WikiView（#856 owner 级）', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
-    ;(listInstances as ReturnType<typeof vi.fn>).mockResolvedValue(INSTANCES)
     ;(getTree as ReturnType<typeof vi.fn>).mockResolvedValue(TREE)
     ;(getGraph as ReturnType<typeof vi.fn>).mockResolvedValue(GRAPH)
     ;(readPage as ReturnType<typeof vi.fn>).mockResolvedValue({
@@ -84,20 +69,17 @@ describe('WikiView', () => {
     })
   })
 
-  it('loads first container tree+graph on mount', async () => {
+  it('loads tree+graph on mount（owner 直取认证身份，不传容器名）', async () => {
     mountView()
     await flushPromises()
-    const s = useWikiStore()
-    expect(s.current).toBe('demo')
-    expect(getTree).toHaveBeenCalledWith('demo')
-    expect(getGraph).toHaveBeenCalledWith('demo')
+    expect(getTree).toHaveBeenCalledWith()
+    expect(getGraph).toHaveBeenCalledWith()
   })
 
-  it('renders container switcher with all instances', async () => {
+  it('容器切换器随 #856 下线（owner 级无切换面）', async () => {
     const wrapper = mountView()
     await flushPromises()
-    const options = wrapper.findAll('[data-test="container-switch"] option')
-    expect(options.map((o) => o.text())).toEqual(['demo', 'other'])
+    expect(wrapper.find('[data-test="container-switch"]').exists()).toBe(false)
   })
 
   it('opens a page when file tree emits open', async () => {
@@ -105,7 +87,7 @@ describe('WikiView', () => {
     await flushPromises()
     await wrapper.findComponent({ name: 'FileTree' }).vm.$emit('open', 'concepts/a.md')
     await flushPromises()
-    expect(readPage).toHaveBeenCalledWith('demo', 'concepts/a.md')
+    expect(readPage).toHaveBeenCalledWith('concepts/a.md')
     expect(useWikiStore().activePath).toBe('concepts/a.md')
   })
 
@@ -138,49 +120,6 @@ describe('WikiView', () => {
     expect(wrapper.find('[contenteditable="true"]').exists()).toBe(false)
   })
 
-  it('switches container via switcher', async () => {
-    const wrapper = mountView()
-    await flushPromises()
-    const select = wrapper.find('[data-test="container-switch"]')
-    await select.setValue('other')
-    await flushPromises()
-    expect(useWikiStore().current).toBe('other')
-    expect(getTree).toHaveBeenCalledWith('other')
-  })
-
-  it('keeps the latest graph when container responses arrive out of order', async () => {
-    const wrapper = mountView()
-    await flushPromises()
-    const otherGraph = deferred<typeof GRAPH>()
-    const demoGraph = { nodes: [{ id: 'concepts/latest.md', title: 'Latest' }], edges: [] }
-    ;(getGraph as ReturnType<typeof vi.fn>).mockImplementation(
-      (name: string) => name === 'other' ? otherGraph.promise : Promise.resolve(demoGraph),
-    )
-
-    const select = wrapper.find('[data-test="container-switch"]')
-    await select.setValue('other')
-    await flushPromises()
-    expect(getGraph).toHaveBeenCalledWith('other')
-    await select.setValue('demo')
-    await flushPromises()
-    expect(wrapper.findComponent({ name: 'WikiGraph' }).props('graph')).toEqual(demoGraph)
-
-    otherGraph.resolve(GRAPH)
-    await flushPromises()
-    expect(wrapper.findComponent({ name: 'WikiGraph' }).props('graph')).toEqual(demoGraph)
-  })
-
-  it('shows an error when switching container fails', async () => {
-    const wrapper = mountView()
-    await flushPromises()
-    // 真实业务失败经 apiJson 抛 ApiError（client.ts #312 信封），其 message 逐字透传。
-    const { ApiError } = await import('@/api/errors')
-    ;(getTree as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new ApiError(200, '容器切换失败', 20040))
-    await wrapper.find('[data-test="container-switch"]').setValue('other')
-    await flushPromises()
-    expect(ElMessage.error).toHaveBeenCalledWith('容器切换失败')
-  })
-
   it('toggles graph panel collapsed', async () => {
     const wrapper = mountView()
     await flushPromises()
@@ -193,7 +132,7 @@ describe('WikiView', () => {
     // 15s 统一超时（api/request.ts AbortSignal.timeout）触发时，fetch reject 原生 DOMException
     // （Safari 文案 "Fetch is aborted"）。它不是 ApiError，不应把浏览器原文漏给用户。
     const abort = new DOMException('Fetch is aborted', 'AbortError')
-    ;(listInstances as ReturnType<typeof vi.fn>).mockRejectedValueOnce(abort)
+    ;(getTree as ReturnType<typeof vi.fn>).mockRejectedValueOnce(abort)
     mountView()
     await flushPromises()
     expect(ElMessage.error).toHaveBeenCalled()
@@ -204,14 +143,14 @@ describe('WikiView', () => {
   })
 
   it('#493: 挂载链的真实业务错误（ApiError）仍逐字透传，不回归', async () => {
-    // 20040 越权等真实业务错误经信封解析为 ApiError，其 message 是后端真实可读消息，逐字透传。
+    // 真实业务错误经信封解析为 ApiError，其 message 是后端真实可读消息，逐字透传。
     const { ApiError } = await import('@/api/errors')
-    ;(listInstances as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
-      new ApiError(200, '容器不可访问', 20040),
+    ;(getTree as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new ApiError(200, 'wiki 暂不可用', 30040),
     )
     mountView()
     await flushPromises()
-    expect(ElMessage.error).toHaveBeenCalledWith('容器不可访问')
+    expect(ElMessage.error).toHaveBeenCalledWith('wiki 暂不可用')
   })
 })
 
@@ -224,7 +163,6 @@ describe('WikiView — #668 面板三态接线（wiki 文件树）', () => {
 
   beforeEach(() => {
     setActivePinia(createPinia())
-    ;(listInstances as ReturnType<typeof vi.fn>).mockResolvedValue(INSTANCES)
     ;(getTree as ReturnType<typeof vi.fn>).mockResolvedValue(TREE)
     ;(getGraph as ReturnType<typeof vi.fn>).mockResolvedValue(GRAPH)
     ;(readPage as ReturnType<typeof vi.fn>).mockResolvedValue({
@@ -272,7 +210,6 @@ describe('WikiView — #670 面板三态接线（wiki 图谱 + 同页互斥）',
 
   beforeEach(() => {
     setActivePinia(createPinia())
-    ;(listInstances as ReturnType<typeof vi.fn>).mockResolvedValue(INSTANCES)
     ;(getTree as ReturnType<typeof vi.fn>).mockResolvedValue(TREE)
     ;(getGraph as ReturnType<typeof vi.fn>).mockResolvedValue(GRAPH)
     ;(readPage as ReturnType<typeof vi.fn>).mockResolvedValue({
