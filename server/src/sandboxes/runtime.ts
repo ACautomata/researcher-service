@@ -1,8 +1,9 @@
 // 沙箱运行时 Port（#776 · S2「编排器 Port 延伸」真身）。
 // 业务层（lifecycle.ts）只依赖本接口（SandboxRuntime），docker 接触面在 DockerSandboxRuntime
-// （dockerode），测试注入 FakeSandboxRuntime（先例：containers/runtime.ts 的 ContainerRuntime）。
+// （dockerode），测试注入 FakeSandboxRuntime（wiki 容器 WikiContainerRuntime 同构先例）。
 //
-// 与 fleet ContainerRuntime 的刻意分野：沙箱无 DB 行、无宿主端口、无 token/config 渲染、无 5 态机
+// 与 #859 已退役的 fleet ContainerRuntime 的分野（历史注记）：沙箱无 DB 行、无宿主端口、
+// 无 token/config 渲染、无 5 态机
 //（「对容器列表隐身 = 纯 session 实现细节」，生命周期归 runner/BullMQ 侧调用方）；键一律是 sessionId，
 // docker 名/网络名由本模块单一来源函数派生，调用方不手拼。
 

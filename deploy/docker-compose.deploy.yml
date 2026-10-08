@@ -1,13 +1,13 @@
 # deploy/docker-compose.deploy.yml —— 面板生产栈（BaoTa 边缘 TLS 之后的应用层）
 #
 # 由 CD（.github/workflows/cd.yml）scp 到宿主 /www/panel/ 并经 `docker compose ... up -d` 启动。
-# 由 CD（.github/workflows/cd.yml）scp 到宿主 /www/panel/ 并经 `docker compose ... up -d` 启动。
 # 三服务：frontend（唯一对宿主暴露，loopback 18080 供 BaoTa 反代）/ server（内部，TS/Express 控制面，
-# docker.sock 编排 OpenClaw 容器 + SQLite 卷；home 模板构建期入镜像）/ redis（内部，BullMQ 队列）。
+# docker.sock 编排面板自管容器（会话沙箱 + wiki 容器）+ SQLite 卷）/ redis（内部，BullMQ 队列）。
 # 宿主数据挂载唯一豁免：/var/run/docker.sock（ADR 0013，spec §5.4 已接受等价 root）。
-# （#341 M9：backend 服务退役 Django，切换为 server 服务跑 Express 控制面。）
+# （#341 M9：backend 服务退役 Django，切换为 server 服务跑 Express 控制面。
+#   #859 OpenClaw 退役④：OpenClaw 编排内核与 GATEWAY_TOKEN 凭证链整链退役。）
 #
-# 运行时敏感值（JWT_SECRET / LLM_API_KEY / CREDENTIAL_ENCRYPTION_KEYS /
+# 运行时敏感值（JWT_SECRET / LLM_API_KEY /
 # AUTOFIGURE_IMAGE_API_KEY / FAL_KEY）经同目录 .env（env_file）注入，不落盘进 git；
 # 非敏感固定项（REDIS_URL/DATA_ROOT/端口/AUTOFIGURE_IMAGE_MODEL）直接写在本文件
 # 或 .env。AutoFigure 键清单见 server env 段注释（#792 起）。

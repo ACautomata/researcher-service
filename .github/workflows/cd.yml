@@ -158,10 +158,11 @@ jobs:
           # v1/v2 CLI 行为一致（--env-file 仅 v2 且只管 env_file 不管替换；v1 缺 .env 直接报错）。
           # #341 M9：DJANGO_SECRET_KEY → JWT_SECRET（server config.ts 生产必填 ≥32 字符）；
           # DJANGO_ALLOWED_HOSTS 删除（Express 不校验 Host）。
+          # #859 OpenClaw 退役④：CREDENTIAL_ENCRYPTION_KEYS 注入线摘除——加密链仅服务
+          # gateway token 落盘，#858 已随 fleet 退役，server 零消费面（宿主 .env 残留行无害）。
           {
             echo "JWT_SECRET=${{ secrets.JWT_SECRET }}"
             echo "LLM_API_KEY=${{ secrets.LLM_API_KEY }}"
-            echo "CREDENTIAL_ENCRYPTION_KEYS=${{ secrets.CREDENTIAL_ENCRYPTION_KEYS }}"
             echo "PANEL_SERVER_IMAGE=${{ env.SERVER_IMAGE }}:latest"
             echo "PANEL_FRONTEND_IMAGE=${{ env.FRONTEND_IMAGE }}:latest"
           } > _deploy/.env

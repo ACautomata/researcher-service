@@ -276,9 +276,8 @@ describe('sandbox image pinning env (#776)', () => {
     const { env = 'production', image } = opts
     vi.stubEnv('NODE_ENV', env)
     if (env === 'production') {
-      // 隔离 sandbox 变量：提供其余生产必填（同 loadFleetImage 模式）。
+      // 隔离 sandbox 变量：提供其余生产必填（同 loadDataRoot 模式；#858 起 CREDENTIAL_ENCRYPTION_KEYS 非必填）。
       vi.stubEnv('JWT_SECRET', 's'.repeat(32))
-      vi.stubEnv('CREDENTIAL_ENCRYPTION_KEYS', Buffer.alloc(32, 0x01).toString('base64'))
     }
     if (image === undefined) delete process.env.SANDBOX_IMAGE
     else vi.stubEnv('SANDBOX_IMAGE', image)
@@ -325,9 +324,8 @@ describe('wiki image pinning env (#784)', () => {
     const { env = 'production', image } = opts
     vi.stubEnv('NODE_ENV', env)
     if (env === 'production') {
-      // 隔离 wiki 变量：提供其余生产必填（同 loadFleetImage 模式）。
+      // 隔离 wiki 变量：提供其余生产必填（同 loadDataRoot 模式）。
       vi.stubEnv('JWT_SECRET', 's'.repeat(32))
-      vi.stubEnv('CREDENTIAL_ENCRYPTION_KEYS', Buffer.alloc(32, 0x01).toString('base64'))
     }
     if (image === undefined) delete process.env.WIKI_IMAGE
     else vi.stubEnv('WIKI_IMAGE', image)

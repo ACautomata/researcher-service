@@ -1,11 +1,10 @@
 // wiki REST 契约测试（#335 · #315 §8 checklist 对 Express 实现重跑；#621 起经 serviceFor 注入
 // 内存 fake WikiFileSystem，对齐 files.test.ts 的内存 Port 注入模式——存储适配器行为由
-// wikiDockerFs.test.ts 单测覆盖，本文件钉 REST ↔ Port 接线：信封/错误映射/隔离/compile 时机）。
+// wikiDockerFs.test.ts 单测覆盖，本文件钉 REST ↔ Port 接线：信封/错误映射/隔离）。
 // #856（退役①）：owner 级端点 /api/v1/wiki/{tree,page,graph,categories,claims}，ownerId 直取
 // 认证身份——容器行 20040 归属面随耦合退役，跨用户探测面结构性消失（隔离测试改为：
 // 各用户寻址只达本人 fake 存储，他人页不可见）；path 校验先于 ensure（非法请求不触碰编排面）。
-// 信封（#312）+ 错误映射（90002/30040/30041）。compile 经注入 fake 断言触发时机
-// （POST/DELETE 触发、PUT 不触发），不碰真 docker。
+// 信封（#312）+ 错误映射（90002/30040/30041）。compile 触发面已随 #859 退役。
 
 import { createHash } from 'node:crypto'
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
@@ -13,7 +12,6 @@ import { setupTestApp, type TestContext } from './setup'
 import { seedUser, login, bearer } from './helpers'
 import { FakeWikiFileSystem } from './fakes'
 import { WikiService } from '../src/wiki/service'
-import type { CompileTrigger } from '../src/wiki/compile'
 
 // wiki fixture（页集对齐旧 makeWikiHome 真目录 fixture；空目录 entities 无法在内存 fake 表示，
 // 「空目录不成组」由 entities 下无页自然成立）。
@@ -31,17 +29,14 @@ function wikiFixture(): Record<string, string> {
 
 describe('wiki REST（接缝 #2 信封 + #335；#856 owner 级）', () => {
   let ctx: TestContext
-  const compileCalls: string[] = []
   // 每用户一个内存 fake WikiFileSystem（ownerId 键控，#856）；serviceFor 按 ownerId 查，未注册
   // 给空 fake（对齐「账号存在但无 wiki 数据 → 空树」的降级语义）。
   const fss = new Map<string, FakeWikiFileSystem>()
   const BASE = '/api/v1/wiki'
 
   beforeAll(async () => {
-    const fakeCompile: CompileTrigger = { trigger: (owner) => { compileCalls.push(owner) } }
     ctx = await setupTestApp({
       wiki: {
-        compile: fakeCompile,
         serviceFor: (ownerId) => new WikiService(fss.get(ownerId) ?? new FakeWikiFileSystem()),
       },
     })
@@ -148,16 +143,14 @@ describe('wiki REST（接缝 #2 信封 + #335；#856 owner 级）', () => {
 
   // ---------------------------- PUT /page ----------------------------
 
-  it('PUT：byte-exact 覆写已存在页（首尾空白/尾换行保留）；返回 {path}；不触发 compile', async () => {
+  it('PUT：byte-exact 覆写已存在页（首尾空白/尾换行保留）；返回 {path}', async () => {
     const u = await seedWikiUser('uput')
-    compileCalls.length = 0
     const res = await ctx.request
       .put(`${BASE}/page`)
       .set(bearer(u.token))
       .send({ path: 'concepts/attention.md', content: '  # 已编辑  \n\n' })
     expect(res.body.code).toBe(0)
     expect(res.body.data).toEqual({ path: 'concepts/attention.md' })
-    expect(compileCalls).toEqual([]) // PUT 不触发 compile
     const read = await ctx.request
       .get(`${BASE}/page?path=${encodeURIComponent('concepts/attention.md')}`)
       .set(bearer(u.token))
@@ -178,21 +171,18 @@ describe('wiki REST（接缝 #2 信封 + #335；#856 owner 级）', () => {
 
   // ---------------------------- POST /page ----------------------------
 
-  it('POST：新建页落盘 + 触发 compile；返回 {path}', async () => {
+  it('POST：新建页落盘；返回 {path}', async () => {
     const u = await seedWikiUser('upost')
-    compileCalls.length = 0
     const res = await ctx.request
       .post(`${BASE}/page`)
       .set(bearer(u.token))
       .send({ path: 'concepts/transformer.md', content: '---\ntitle: Transformer\n---\n# T\n' })
     expect(res.body.code).toBe(0)
     expect(res.body.data).toEqual({ path: 'concepts/transformer.md' })
-    expect(compileCalls).toEqual([u.ownerId]) // 新建触发 compile（#856 起去抖键 = ownerId）
   })
 
-  it('POST 已存在 → 30041；path 注入 / managed → 90002 且不触发 compile', async () => {
+  it('POST 已存在 → 30041；path 注入 / managed → 90002', async () => {
     const u = await seedWikiUser('upost2')
-    compileCalls.length = 0
     const exists = await ctx.request
       .post(`${BASE}/page`).set(bearer(u.token)).send({ path: 'concepts/attention.md', content: 'x' })
     expect(exists.body.code).toBe(30041)
@@ -202,25 +192,21 @@ describe('wiki REST（接缝 #2 信封 + #335；#856 owner 级）', () => {
     const managed = await ctx.request
       .post(`${BASE}/page`).set(bearer(u.token)).send({ path: '.openclaw-wiki/evil.md', content: 'x' })
     expect(managed.body.code).toBe(90002)
-    expect(compileCalls).toEqual([])
   })
 
   // ---------------------------- DELETE /page ----------------------------
 
-  it('DELETE：删页 + 触发 compile；成功 data null', async () => {
+  it('DELETE：删页；成功 data null', async () => {
     const u = await seedWikiUser('udel')
-    compileCalls.length = 0
     const res = await ctx.request
       .delete(`${BASE}/page?path=${encodeURIComponent('concepts/attention.md')}`)
       .set(bearer(u.token))
     expect(res.body.code).toBe(0)
     expect(res.body.data).toBeNull()
-    expect(compileCalls).toEqual([u.ownerId])
   })
 
-  it('DELETE 页不存在 → 30040；path 注入 → 90002 且不触发 compile', async () => {
+  it('DELETE 页不存在 → 30040；path 注入 → 90002', async () => {
     const u = await seedWikiUser('udel2')
-    compileCalls.length = 0
     const missing = await ctx.request
       .delete(`${BASE}/page?path=${encodeURIComponent('concepts/nope.md')}`)
       .set(bearer(u.token))
@@ -229,7 +215,6 @@ describe('wiki REST（接缝 #2 信封 + #335；#856 owner 级）', () => {
     expect(inject.body.code).toBe(90002)
     const managed = await ctx.request.delete(`${BASE}/page?path=index.md`).set(bearer(u.token))
     expect(managed.body.code).toBe(90002)
-    expect(compileCalls).toEqual([])
   })
 
   // ---------------------------- NUL / body limit（codex PR#346）----------------------------

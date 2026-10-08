@@ -106,7 +106,9 @@ openssl rand -base64 48      # JWT_SECRET（≥32 字符，48 字节 base64 足�
 > **#858 OpenClaw 退役③**：旧 env `OPENCLAW_TEMPLATE_DIR` / `OPENCLAW_FLEET_ROOT` /
 > `OPENCLAW_IMAGE` / `OPENCLAW_NAMED_VOLUMES` / `CREDENTIAL_ENCRYPTION_KEYS` /
 > `LIFECYCLE_WORKER_CONCURRENCY` 已随 fleet 编排退役，server 不再读取（宿主 .env 里残留
-> 无害）。
+> 无害）。**#859 退役④复核**：`CREDENTIAL_ENCRYPTION_KEYS` 全库零代码消费（加密链仅服务
+> gateway token 落盘，crypto.ts 已随 #858 物理删除），cd.yml 注入线同步摘除——加密链无
+> 保留面；宿主 .env / GitHub secrets 里的残留键可自行清理。
 
 > 
 > 沙箱/wiki 容器镜像（`SANDBOX_IMAGE` / `WIKI_IMAGE`，均有钉版缺省值）**不在上列**：
