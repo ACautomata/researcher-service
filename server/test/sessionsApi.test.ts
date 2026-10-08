@@ -845,7 +845,44 @@ describe('会话 REST 域（S1，#778）', () => {
     expect(rowsAfterTurn1).toBe(2)
   }, 15_000)
 
-  // ---- 自动标题（story 5）----
+  // ---- 自动标题（story 5 · 语义翻案：主触发 = 首条消息被接受（dispatch ack），与 run 终态解耦）----
+
+  it('run 失败（空聚合）也生成标题：POST 200 后立即查 DB title 非空（不 waitFor 终态——锁定与终态解耦）', async () => {
+    // ScriptEntry 耗尽：首次 invoke 即抛 'script exhausted' → run.failed 空聚合（recordTurn 不触发）。
+    currentScript = []
+    const sid = (await request.post('/api/v1/sessions').set(bearer(access)).send({})).body.data.id as string
+    await request
+      .post(`/api/v1/sessions/${sid}/messages`)
+      .set(bearer(access))
+      .set('Idempotency-Key', hexKey(0x705))
+      .send({ content: '失败会话的标题来自首条消息' })
+    // 不 waitFor run 终态——主触发在 dispatch ack 时已落库（REST 面，与 run 生命周期解耦）。
+    const row = await prisma.session.findUnique({ where: { id: sid } })
+    expect(row?.title).toBe('失败会话的标题来自首条消息'.slice(0, 30))
+    // session.updated{session.title} 广播已出（title 非空即 autoTitle 成功）。
+    const updated = frameEvents(sinkA.frames).filter((e) => e.type === 'session.updated' && e.sessionId === sid)
+    expect(updated.length).toBeGreaterThan(0)
+  })
+
+  it('dispatch 失败回滚不留幽灵标题：POST 信封 90000 → DB title 仍空', async () => {
+    // 新空标题会话（避免与 sess-seed 既有用例的幂等键/状态冲突）。
+    const sid = (await request.post('/api/v1/sessions').set(bearer(access)).send({})).body.data.id as string
+    dispatchFail = true
+    try {
+      const res = await request
+        .post(`/api/v1/sessions/${sid}/messages`)
+        .set(bearer(access))
+        .set('Idempotency-Key', hexKey(0x706))
+        .send({ content: '这条消息入队失败应回滚' })
+      expect(res.status).toBe(200) // #312 信封：HTTP 恒 200，code=90000
+      expect(res.body.code).toBe(90000)
+      // 消息行已随 dispatch 失败回滚删——autoTitle 不该被触发（否则留下无消息的幽灵标题）。
+      const row = await prisma.session.findUnique({ where: { id: sid } })
+      expect(row?.title).toBe('')
+    } finally {
+      dispatchFail = false
+    }
+  })
 
   it('run 终态自动生成标题（首条 user 消息截断）+ session.updated 广播；已有标题不覆盖', async () => {
     currentScript = [new AIMessage({ content: '好' })]
