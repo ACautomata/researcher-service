@@ -12,7 +12,7 @@
 // URL 逐字锁定（kimi 带尾斜杠、zhipu 不带——各家 OpenAI 兼容面的既有惯例，勿「规范化」）：
 // 平台默认端点（env 派生虚拟实体，不落库）经 LLM_PRESET 从本清单取协议/地址/默认模型。
 
-// 协议二值（wire 命名，对齐 models/values.ts API_CHOICES）。
+// 协议二值（wire 命名；values.ts 侧的同名常量已随 #881 预设制删除，此处为唯一来源）。
 export type EndpointProtocol = 'anthropic-messages' | 'openai-completions'
 
 // 预设默认模型条目（ModelEntryLike 形状子集——id 必填，其余展示元数据；成本数字不确者不编造）。
