@@ -39,6 +39,12 @@ describe('CI 工作流（#860：零 OpenClaw 镜像步骤，编排 smoke 删除�
 describe('CD 工作流（#860：镜像面 = server/frontend/wiki 三支路，零 OpenClaw）', () => {
   const cd = readRepoFile('.github/workflows/cd.yml')
 
+  it('镜像面三支路在位（server / frontend / wiki 三个 GITHUB_ENV 镜像引用）', () => {
+    expect(cd).toMatch(/SERVER_IMAGE=ghcr\.io\//)
+    expect(cd).toMatch(/FRONTEND_IMAGE=ghcr\.io\//)
+    expect(cd).toMatch(/WIKI_IMAGE=ghcr\.io\//)
+  })
+
   it('无 OpenClaw 镜像引用 / 无 OPENCLAW_* env 使用', () => {
     expect(cd).not.toMatch(OPENCLAW_IMAGE_REF)
     expect(cd).not.toMatch(OPENCLAW_ENV_ASSIGN)
