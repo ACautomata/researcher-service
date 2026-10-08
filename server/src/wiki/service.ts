@@ -1,11 +1,9 @@
 // WikiService（#335 · 平移 backend/wiki/service.py）：单容器 wiki/main 直读/直写组合根。
 // 构造注入 WikiFileSystem Port（生产 NodeWikiFileSystem、测试 fake），组合 FrontmatterParser /
-// CategoryMarkerExtractor / WikilinkResolver。CRUD 直接委托 Port（域异常透传）；
-// buildGraph / listCategories 是本层聚合逻辑（纯逻辑，对 fake FS 可直测）。
+// WikilinkResolver。CRUD 直接委托 Port（域异常透传）；buildGraph 是本层聚合逻辑（纯逻辑，
+// 对 fake FS 可直测）。
 
 import {
-  CategoryMarkerExtractor,
-  cmp,
   claimsDrift,
   FrontmatterParser,
   markdownLinkTargets,
@@ -15,7 +13,6 @@ import {
   wikilinkTargets,
 } from './logic'
 import type {
-  WikiCategoryItem,
   WikiClaims,
   WikiFileSystem,
   WikiGraph,
@@ -27,7 +24,6 @@ export class WikiService {
   constructor(
     private readonly fs: WikiFileSystem,
     private readonly parser: FrontmatterParser = new FrontmatterParser(),
-    private readonly extractor: CategoryMarkerExtractor = new CategoryMarkerExtractor(),
   ) {}
 
   buildTree(): Promise<WikiTree> {
@@ -68,37 +64,6 @@ export class WikiService {
     const parsed = raw === null ? null : parseClaimsSidecar(raw)
     if (parsed === null) return { schemaVersion: null, pageVersion: null, drift: null, claims: [] }
     return { ...parsed, drift: claimsDrift(parsed.pageVersion, page.content) }
-  }
-
-  // 按 category 标记分组带标记页（issue #84 / spec #75）。返回 `{<cat>:[item,…]}`。
-  // 只收带标记页；无标记页与插件私有目录/占位文件（fs 层已过滤）不进响应。组名按字典序、
-  // 组内按 path 字典序，保证响应稳定。
-  // 用 Map 累积：category 是开放词表、用户可控，`constructor`/`toString` 等值若用普通对象
-  // `??=` 会命中继承属性崩溃（codex 评审#1）——Map 无原型链污染。结果对象用 null-prototype：
-  // `__proto__` 键在普通对象上会触发原型 setter 而非建自有属性，category 静默丢失（codex PR#346）。
-  async listCategories(): Promise<Record<string, WikiCategoryItem[]>> {
-    const groups = new Map<string, WikiCategoryItem[]>()
-    for (const page of await this.fs.listCategoryPages()) {
-      const { body } = this.parser.parse(page.content)
-      const category = this.extractor.extractCategory(body)
-      if (category === null) continue
-      const list = groups.get(category)
-      const item: WikiCategoryItem = {
-        path: page.path,
-        title: page.title,
-        category,
-        excerpt: this.extractor.excerpt(body),
-      }
-      if (list) list.push(item)
-      else groups.set(category, [item])
-    }
-    const result: Record<string, WikiCategoryItem[]> = Object.create(null) as Record<string, WikiCategoryItem[]>
-    // 组名与组内 path 均按 Unicode code-point 序（cmp）：默认 sort()/`<` 按 UTF-16 code-unit 序，含
-    // emoji 等非 BMP 字符时顺序与 Python 相反（codex 第五轮 P2）。
-    for (const cat of [...groups.keys()].sort(cmp)) {
-      result[cat] = groups.get(cat)!.sort((a, b) => cmp(a.path, b.path))
-    }
-    return result
   }
 
   // 全库图谱：节点 = 遍历 tree 全部页；边 = 正文 [[wikilink]] + markdown 相对链接 + frontmatter

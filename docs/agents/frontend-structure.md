@@ -24,8 +24,8 @@
   `useEventStream.ts`（SSE 薄封装——原生重连 + seq gap 检测 + 401 经刷新链关流 + session.terminated 停重连；#799 订阅目录增 figure_run.progress）/
   `restOutbox.ts`（#779 story 12 断线排队：sessionStorage 落盘、50 上限丢最旧、按序幂等 flush）/
   `attachments.ts`（采集/校验纯函数，发送经 multipart 上传换 attachmentIds）。
-- `views/` — 用户面板视图：`LoginView` / `ContainersView` / `ChatView`（REST+SSE 编排壳；#796 起 teammate 具名折叠区随消息流渲染）/ `WikiView` / `CategoriesView` / `ModelView` / `PluginsView`（#799 插件目录页——能力可见性唯一入口 + per-user 启用位开关）/ `FigureEditorView` / `LegalDocumentView` / `NotFoundView`（admin 页已随迁 `admin/views/`，#800）。
-- `components/` — `FileTree` / `MdEditor`（Typora 式实时渲染）/ `WikiGraph`（obsidian 风格图谱）/
+- `views/` — 用户面板视图：`LoginView` / `ChatView`（REST+SSE 编排壳；#796 起 teammate 具名折叠区随消息流渲染）/ `WikiView` / `ModelView` / `PluginsView`（#799 插件目录页——能力可见性唯一入口 + per-user 启用位开关）/ `LegalDocumentView` / `NotFoundView`（admin 页已随迁 `admin/views/`，#800）。FigureEditorView / CategoriesView / MdEditor 已随 #747 回归退役；ContainersView 已随 #858 退役。
+- `components/` — `FileTree` / `WikiGraph`（obsidian 风格图谱）/
   ChatView 哑组件族（props-in/emits-out，零协议 import：`ChatSidebar`（会话扁平列表 + lab 文件树）/
   `ChatHeader`/`ChatStream`/`ChatComposer`/`ChatMessageItem`/`ThinkingCard`/`ToolLine`（#799 起展开区接插件渲染注册表——命中交插件组件消费 details，未注册默认输入/输出详情）/`ApprovalCard`/`ApprovalDock`（#796 审批卡具名徽标 teammateName）
   + `TeamFolds`（#796 teammate 具名折叠区——状态八值徽标/审批局部冻结/归档终态/展开轨迹同形状行 + mailbox 追问广播呈现））。

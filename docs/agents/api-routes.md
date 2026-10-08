@@ -8,7 +8,7 @@
   #858 起 GET 载荷不含 containerCount/quota——容器行表退役）。
 - `/api/v1/containers` CRUD（列表/新建/删除）已随 #858 整体退役（90005）；该前缀唯一残余 =
   下方 `/:name/files` 只读面。
-- `/api/v1/wiki/{tree,page,graph,categories}` — wiki 文件树/读写/图谱，owner 级（#856：归属门
+- `/api/v1/wiki/{tree,page,graph}` — wiki 文件树/读写/图谱，owner 级（#856：归属门
   从容器行解析改为 req.user.id 直派生，零容器行查询，路径 <name> 与容器级 20040 随耦合退役；
   数据源 = 请求者本人的 wiki 容器，每操作前置 ensure——requireAuth 与 path/body 校验之后，
   未授权/非法探测不建容器）。

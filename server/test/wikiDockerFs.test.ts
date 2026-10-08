@@ -1,7 +1,7 @@
 // DockerWikiFileSystem 适配器单测（#621）：注入 fake snapshot/probeFile/archive 纯逻辑直测，
 // 不碰真 docker（对齐 dockerFileArchive.test.ts 的「fake 适配器依赖」分工——docker 接线由
 // dockerFileArchive.test.ts 已覆盖的 mock client + 真 tar 模式保障，本文件钉 wiki 语义层）。
-// 覆盖：tree 分组/title 兜底链/SKIP 过滤/symlink 跳过/空目录/顶层散落只进 categories/
+// 覆盖：tree 分组/title 兜底链/SKIP 过滤/symlink 跳过/空目录/
 // 快照 null 降级/probeFile 三分支映射/managed 黑名单三写一读/异常映射膜/FileExists。
 
 import { describe, it, expect } from 'vitest'
@@ -128,31 +128,6 @@ describe('DockerWikiFileSystem.buildTree', () => {
     })
     const tree = await fs.buildTree()
     expect(tree.groups.map((g) => g.kind)).toEqual(['concepts'])
-  })
-})
-
-describe('DockerWikiFileSystem.listCategoryPages', () => {
-  it('snapshot null → []；收顶层散落页；title = frontmatter → H1 → stem；data=null/坏 UTF-8 跳过；cmp 排序', async () => {
-    const fs = makeDocker({
-      snapshot: async () => null,
-    })
-    expect(await fs.listCategoryPages()).toEqual([])
-
-    const fs2 = makeDocker({
-      snapshot: async () => [
-        file('thoughts/idea.md', enc('---\ntitle: First Idea\n---\n# X\n')),
-        file('root.md', enc('# Root Note\n\n正文。\n')), // 顶层散落页，title = H1 → 'Root Note'
-        file('skip/null.md', null), // data=null 跳过
-        file('skip/bad.md', Buffer.from([0xff])), // 坏 UTF-8 跳过
-        file('z/late.md', enc('# Late\n')),
-      ],
-    })
-    const pages = await fs2.listCategoryPages()
-    expect(pages.map((p) => [p.path, p.title])).toEqual([
-      ['root.md', 'Root Note'],
-      ['thoughts/idea.md', 'First Idea'],
-      ['z/late.md', 'Late'], // 无 frontmatter → H1 → stem
-    ])
   })
 })
 

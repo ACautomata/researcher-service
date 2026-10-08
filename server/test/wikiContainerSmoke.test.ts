@@ -89,9 +89,9 @@ describe.skipIf(!DOCKER_UP)('wiki 容器生命周期集成 smoke（真 docker da
     expect(tree).toEqual({ groups: [] })
   }, 60_000)
 
-  it('wiki 域存储适配器写读全链：create → read → write → tree/graph/categories → delete', async () => {
+  it('wiki 域存储适配器写读全链：create → read → write → tree/graph → delete', async () => {
     await wikiFs.createPage('concepts/attention.md', '---\ntitle: Attention\n---\n# Attention\n见 [[self-attention]]。\n')
-    await wikiFs.createPage('concepts/self-attention.md', '# Self Attention\n`category: ml`\n\n链接 [[attention]]。\n')
+    await wikiFs.createPage('concepts/self-attention.md', '# Self Attention\n\n链接 [[attention]]。\n')
     // 读回：frontmatter title + 全文
     const page = await wikiFs.readPage('concepts/attention.md')
     expect(page.title).toBe('Attention')
@@ -99,11 +99,9 @@ describe.skipIf(!DOCKER_UP)('wiki 容器生命周期集成 smoke（真 docker da
     // 覆写
     await wikiFs.writePage('concepts/attention.md', '---\ntitle: Attention v2\n---\n# Attention v2\n')
     expect((await wikiFs.readPage('concepts/attention.md')).title).toBe('Attention v2')
-    // tree 分组（开放目录分组；categories 收顶层散落页——本页集两组均在 concepts）
+    // tree 分组（开放目录分组——本页集两组均在 concepts）
     const tree = await wikiFs.buildTree()
     expect(tree.groups.map((g) => g.name)).toEqual(['concepts'])
-    const categories = await wikiSvc.listCategories()
-    expect(Object.keys(categories)).toEqual(['ml'])
     // graph：wikilink 边 + ghost 节点机制
     const graph = await wikiSvc.buildGraph()
     expect(graph.edges.length).toBeGreaterThanOrEqual(1)

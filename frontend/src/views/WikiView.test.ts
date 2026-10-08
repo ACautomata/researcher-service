@@ -41,12 +41,6 @@ const stubs = {
     template: '<div data-test="file-tree" />',
     emits: ['open', 'create', 'delete'],
   },
-  MdEditor: {
-    name: 'MdEditor',
-    props: ['content'],
-    template: '<div data-test="md-editor" />',
-    emits: ['update'],
-  },
   WikiGraph: {
     name: 'WikiGraph',
     props: ['graph', 'activePath'],

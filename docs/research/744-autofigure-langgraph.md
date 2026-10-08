@@ -167,7 +167,7 @@ figure 生成随会话 run 执行 → 自动占 per-user `maxConcurrentRuns` 名
 
 - **`AutoFigureView` 退役**（含 `stores/autofigure.ts` 轮询逻辑；`api/figures.ts` 收缩为读/下载面）。工具是唯一生成入口——agent 自动调用与 `/figure` 手动命令两条触发面，生成体验完全在会话流内。**v2 修订**：能力可见性入口 = 插件目录页（插件系统管理面，#752 R8 REST）；figure 工具行/图卡经插件渲染注册——web.ts + `FigureCard.vue` 落 `plugins/autofigure/`（components/，#752 §1 单包双面）。
 - **工具结果图卡**（ChatView 工具行扩展）：进行态 = 阶段进度（`figure_run.progress` 消费 + `isPartial` 装饰，#752 §2.4）；终态 = SVG 渲染（`<img>` blob URL）+ 下载按钮 + 失败态（稳定非敏感原因）。走 #730 单管线渲染。**v2 数据流（#753）**：details（≤4KB）携带 `{figureId, state, previewReady}` 引用形态；SVG 本体由组件经 `GET /figures/:id/svg` 拉取 blob——拉取是渲染层只读 IO（幂等、无独立状态），实时与回放同一代码路径，单管线约束不破：投影归约器仍是唯一数据流真相源。
-- **Figure Editor（F2/F3）接缝**：编辑器经 figures API 读写 SVG（`GET/PUT /figures/:id/svg`）——[其侦察文档 §3](../figure-editor/reconnaissance.md) 已预留「优先复用 figures/files 能力」；编辑产物版本策略归 figure-editor effort 自定。生成→编辑闭环即：thread 内生成 → Figure 行 → 编辑器打开改 → 存回。
+- **Figure Editor（F2/F3）接缝**（已退役，#747 回归①）：F1 占位壳（`/figure-editor`）随 figure-editor 页面整体退役，侦察文档（docs/figure-editor/reconnaissance.md）已删；F2/F3 编辑器 effort 未落地即终止。AutoFigure 唯一入口 = 会话内 figure 工具 + `/figure` 命令 + 图卡渲染（#753），不经编辑器。
 - 中间产物（template/optimized）不在前端暴露（未持久化）；「从模板重新组装」类高级操作不在 V1。
 
 ## 8. 退役清单（随新架构实施，另 effort）

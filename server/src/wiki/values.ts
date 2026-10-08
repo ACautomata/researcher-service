@@ -5,23 +5,13 @@
 // managed 文件黑名单（codex #125 / #315 §4）：插件私有目录与占位文件，读写全拦。
 // #789 OKF 适配（#725 §三）：log.md/INSTRUCTIONS.md 是 openwiki 的运行文件（给 agent 的
 // 操作说明与运行日志，非知识页），.claims/ 是 claims 证据旁车目录（机器生成物）——三者
-// 均不进 tree/graph/categories，写侧一并拒绝（.claims 只读面走 service.readClaims 专用
+// 均不进 tree/graph，写侧一并拒绝（.claims 只读面走 service.readClaims 专用
 // 通道，不经本黑名单拦截的页读路径）。
 export const SKIP_DIRS = new Set(['_attachments', '_views', '.claims'])
 export const SKIP_FILES = new Set(['index.md', 'AGENTS.md', 'WIKI.md', 'inbox.md', 'log.md', 'INSTRUCTIONS.md'])
 
 // obsidian 风格双链 [[target]] 或 [[target|别名]]（WIKILINK_RE）
 export const WIKILINK_RE = /\[\[([^\]]+)\]\]/g
-
-// category 机读标记：整行匹配、大小写不敏感（含 CATEGORY/cAtEgOrY 全形态）、剥离尾反引号
-// （issue #84 / spec #75；codex #129 P2 IGNORECASE 全词匹配）
-export const CATEGORY_RE = /^`category:\s*([^`\s]+)`\s*$/im
-// H1 / H2 标题行（界定 category 提取窗口）
-export const H1_RE = /^#\s/m
-export const H2_RE = /^##\s/m
-
-// excerpt 摘要长度（正文开头片段，字符数；Python 按码点截断，JS 用 Array.from 对齐）
-export const EXCERPT_LEN = 200
 
 // 页面标题 frontmatter 值上限（_page_title 只读前 2000 字符，防大文件整读；保留原行为）
 export const TITLE_READ_CHARS = 2000

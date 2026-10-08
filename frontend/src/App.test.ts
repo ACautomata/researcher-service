@@ -47,17 +47,4 @@ describe('App navigation', () => {
     expect(auth.logout.mock.invocationCallOrder[0]).toBeLessThan(replace.mock.invocationCallOrder[0])
   })
 
-  // F1（docs/figure-editor/reconnaissance.md）：Figure Editor 入口为常规受保护页——登录 shell 下
-  // 恒显示，不随 AutoFigure capability / admin role 条件渲染（非 admin-only、非 flag-gated）。
-  it('Figure Editor nav 入口：登录 shell 下显示', () => {
-    auth.isAuthenticated = true
-    const wrapper = mount(App, {
-      global: {
-        mocks: { $route: { name: 'chat' } },
-        stubs: { RouterLink: true, RouterView: true },
-      },
-    })
-    expect(wrapper.find('[data-test="nav-figure-editor"]').exists()).toBe(true)
-  })
-
 })
