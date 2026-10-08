@@ -7,10 +7,9 @@ Express 同进程控制面（替代已退役的 Django 后端；WS 隧道已随 
 为现役传输面）。已交付：
 - **M0 骨架 + M1 认证与账号**（#333）：双角色 login / R1 refresh 旋转 + 重放检测 / logout / me /
   password-change / bootstrap B1 + C1 强制改密 / OAuth2 O1 骨架 / admin 账号管理 4 端点。
-- **M2 容器生命周期**（#334）：容器按用户隔离的完整生命周期——编排器 Port + BullMQ(Redis) 后台队列
-  + 5 态机 + 异步 delete + 取消标志（T0 #801 起端口池废除：行 port 恒 0，不做宿主端口发布）。
-  `GET /containers/`（user 自己 / admin 全部）、`POST /containers/`（同步返 creating 快照）、
-  `DELETE /containers/<name>`（异步信封、置取消标志）。
+- **M2 容器生命周期**（#334）：~~容器按用户隔离的完整生命周期（编排器 Port + BullMQ 后台队列
+  + 5 态机）~~ **已随 #858 整链退役**（容器行表/CRUD/管理页/NameLeaseMap/BullMQ 生命周期队列）——
+  现役容器面 = 会话沙箱（#776）+ wiki 容器（#784），见目录树与 `deploy/README.md`。
 - **M3 WIKI**（#335）：5 路由 7 方法逐字节平移——`WikiFileSystem` Port + 纯逻辑
   （`FrontmatterParser`/`CategoryMarkerExtractor`/`WikilinkResolver`）+ compile 去抖 5s（docker exec，best-effort）
   + FS 安全（symlink 不跟随 / SKIP 集合 / path 双保险）。
@@ -27,43 +26,45 @@ CD 构建 `server` 镜像推 GHCR；Django 后端已退役删除。见下方「�
 
 Express 5 + `jose` 5（HS256，显式 `algorithms:['HS256']`）
 + Prisma 7 + SQLite（driver adapter `@prisma/adapter-better-sqlite3`）+ `bcryptjs`(cost=12) + `zod`
-+ **BullMQ 6 + ioredis**（#313 容器后台 provisioning 队列，Redis-backed）+ **dockerode**（docker.sock
-容器编排）。JWT 平移 simplejwt 默认（HS256、access 5min、refresh 7d）。
++ **BullMQ 6 + ioredis**（runner run 队列 #747，Redis-backed；旧 #313 容器 provisioning 队列随 #858 退役）
++ **dockerode**（docker.sock 编排面板自管容器：会话沙箱 + wiki 容器）。JWT 平移 simplejwt 默认
+（HS256、access 5min、refresh 7d）。
 
 ## 目录
 
 ```
 src/
-  app.ts                 createApp({prisma, orchestrator?}) 工厂（DI，测试注入 test DB + 假编排）
-  server.ts              createServer(app) + bootstrap + assembleFleet + listen
-  config.ts              env 读取（JWT_SECRET/access/refresh TTL/bcrypt cost/fleet/redis/...，生产 fail-fast）
+  app.ts                 createApp 装配（全局信封/认证中间件 + 域路由挂载）
+  server.ts              进程入口：bootstrap + listen（域装配见各域 assembly）
+  config.ts              env 读取（JWT_SECRET / DATA_ROOT / SANDBOX_IMAGE / WIKI_IMAGE / ...，生产 fail-fast）
   prisma.ts              PrismaClient 工厂 + 单例（driver adapter 注入）
-  codes.ts               五位分层码常量表（#312 + #319 转译 + 各切片新增）
+  codes.ts               五位分层码常量表（#312 + 各切片新增）
   envelope.ts            唯一错误面：EnvelopeError + ok()/fail()
-  auth/                  tokens / authenticate / bootstrap / password / userService / quota
+  auth/                  tokens / authenticate / bootstrap / password / userService（双角色 + R1 旋转 + C1 强制改密）
   middleware/            auth(→10001/10004) / mustChangePasswordGate(→10005) / validate(→90002) / errorHandler
-  routes/                health / auth / users / containers
-  validation/schemas.ts  zod schema（login/passwordChange/userCreate/userPatch/containerCreate）
-  wiki/                  #335 WIKI：routes / service（纯逻辑）/ nodeFs（WikiFileSystem Port 实现）/
-                         compile（docker exec 去抖）
-  models/                #336 Models：routes / service / endpoints（#775 挂 ownerId + 热生效）
-  containers/            #334 编排域：
-    constants.ts         纯常量（openclaw-gw- 前缀/label/卷前缀/GATEWAY_BIND）
-    errors.ts            领域错误族（携带信封码；errorHandler 统一转译）
-    runtime.ts           ContainerRuntime Port（docker 接触面）+ ContainerSpec/ContainerInfo
-    dockerRuntime.ts     DockerRuntime（dockerode，真 daemon 接触面）
-    values.ts            FleetConfig + HEALTH_* 枚举
-    provisioner.ts       HomeProvisioner（cp -a 模板预填充 home）
-    imageRef.ts          镜像引用钉版判定（isFloatingImageRef / imageTag 纯知识；#695）
-    leaseMap.ts          NameLeaseMap 进程内互斥（不依赖 Redis，防双创建/双删除）
-    lifecycleQueue.ts    LifecycleQueue Port + InlineLifecycleQueue + NameSerializer（按 name 串行）
-    bullmqQueue.ts       BullMqLifecycleQueue（Redis-backed，worker 并发默认 2，stalled 重跑）
-    deps.ts              FleetDeps 组合根（单点装配 + 测试替换）
-    command.ts           FleetCommand 写侧（create_reserve/create_complete/delete + 取消标志 + 补偿）
-    readModel.ts         FleetReadModel 读侧（list 聚合 + creating 对账 + ContainerSummary）
-    orchestrator.ts      Orchestrator 薄 facade + getInstanceForUser 归属前置
-    fleetAssembly.ts     生产装配（DockerRuntime + BullMQ + FleetDeps + Orchestrator）
-test/                    接缝 #1–#5（wiki Port / 信封 REST / WS 桥 / hostDeps / 编排器 Port）+ 集成 smoke
+  routes/                health / auth / users / traceLogs（域路由多在各域 routes.ts 自挂）
+  validation/schemas.ts  zod schema（输入 0 信任，禁裸读 req.body）
+  sessions/              会话 REST 域（#778：消息幂等 / 审批 / rewind·fork / 斜杠命令；reducer 投影零差异）
+  events/                SSE 事件流（#773：StreamHub per-user 扇出 + serverSeq 单调 + 事件桥薄投影）
+  runner/                LangGraph 运行时（#747 换轨）：providerRegistry / RunService / 审批三层漏斗 /
+                         writelock / wikigen / 持久化双件（checkpoint + memory）
+  sandboxes/             会话沙箱生命周期（#776：researcher-sandbox-<sessionId>，惰性创建 / 闲置 stop / 级联删）
+  wikiContainers/        wiki 容器生命周期（#784：researcher-wiki-<userId>，永久、零出网、export/import 备份还原）
+  containers/            面板自管容器共享原语（#858 收敛后 5 件）：constants（researcher.kind/session/owner
+                         标签 schema）/ kind 识别 / dockerImage（ensureImagePulled）/ lifecycleQueue
+                         （NameSerializer per-name 串行）/ imageRef（浮动引用判定）
+  wiki/                  wiki 树 + CRUD + graph（#784 换轨 wiki 容器；#789 OKF 适配）：routes / service /
+                         logic（纯逻辑）/ dockerFs
+  models/                model provider CRUD（#775：ownerId + config_meta version bump 热生效 + 端点白名单）
+  files/                 统一文件读面（#801 只读化：root=lab 经 Docker getArchive，ADR 0012）
+  figures/               AutoFigure 读面 + ctx.figures 句柄 + figure_run 审计（#791 / #792）
+  attachments/           附件上传（#780：临时区落 DATA_ROOT，run 首步 ingestion 进沙箱）
+  plugins/               插件系统骨架（#788：api / registry / surface / tools / runContext）
+  officialContent/       官方内容目录（#787：commands / skills，always-on，generated.ts 提交入库）
+  openapi/               OpenAPI 文档面（#761：zod 生成式，admin-only）
+  traceLogs/             TextTrace 落库查询面（审计/运行轨迹检索）
+test/                    vitest 全量（接缝：wiki Port / 信封 REST / hostDeps / files Port / 部署契约
+                         文本断言）+ 真 docker daemon / Redis 门控 smoke（自动探测，不可达即 skip）
 prisma/                  schema.prisma + init.sql（migrate diff 产出的建表 SQL）
 scripts/apply-schema.mjs 把 init.sql 落到 dev DB（不经 prisma CLI，规避 AI 守卫；逐语句 skip-if-exists 幂等）
 scripts/upgrade-schema.mjs docker-entrypoint 每次启动 additive 收敛（PRAGMA user_version=SCHEMA_VERSION）
@@ -81,8 +82,10 @@ cp .env.example .env           # 按需改 JWT_SECRET 等
 npm run dev                    # tsx watch，http://localhost:8001；首启 log 输出 admin 临时密码一次
 ```
 
-> M2 起 `npm run dev` 会装配真编排（DockerRuntime 挂 docker.sock + BullMQ 连 REDIS_URL）。
-> 本地需 docker daemon 与 Redis 可达才能 create/delete 容器；REST 认证/账号端点不依赖它们。
+> 起服务 / 真编排容器（沙箱 + wiki 容器）一律走容器化 dev 栈
+> （`deploy/docker-compose.dev.yml`，server:8001，issue #594 / ADR 0013）；宿主 `npm run dev`
+> 仅适合纯逻辑调试（摸不到 named volume）。会话沙箱/wiki 容器惰性创建需 docker daemon 可达；
+> REST 认证/账号端点不依赖。
 
 ### schema 变更
 
@@ -107,26 +110,28 @@ npm run db:apply
 
 ```bash
 npm run typecheck              # tsc --noEmit（含测试）
-npm test                       # vitest run（49 文件 / ~497 用例，接缝 #1–#5）
+npm test                       # vitest run 全量（接缝 + 部署契约断言 + 门控 smoke）
 npm run prisma:validate        # schema 合法性
 ```
 
 接缝（spec Testing Decisions）：
 - **#1 WikiFileSystem Port**：纯逻辑对 fake FS 直测（symlink / 非 regular / 不可读 / SKIP 集合 / 降级）。
 - **#2 信封 REST 契约**：注入假身份（admin/user）打路由，断 HTTP 200 + 信封码 + 归属前置。
-  防探测用例逐字节断言「不存在 vs 越权」同码（10041 / 20040）；凭证零落盘贯穿断言。
+  防探测用例逐字节断言「不存在 vs 越权」同码；凭证零落盘贯穿断言。
 - **#3 events SSE**（#773）：StreamHub per-user 扇出 + serverSeq 单调 + 401 关流语义。
-- **#5 编排器 Port**：注入假 docker（FakeRuntime）+ 内存假队列（InlineLifecycleQueue），断
-  5 态机 + 取消标志 + 补偿（REMOVING 可重试 / 残留目录 / seedWorkspace 灌卷顺序）。
-- **集成 smoke**（`containers-smoke.test.ts` / `bullmqQueue.test.ts`）：真 docker daemon / 真 Redis
-  **默认 skip 自动探测门控**（daemon/Redis 不可达 → skip），可达 → 真跑端到端。
+- **部署契约文本断言**（`prodDeploy.test.ts` / `devDeploy.test.ts` / `openclawRetirement.test.ts` /
+  `wikiImage.test.ts`）：对 compose / Dockerfile / CD workflow / env 样例 / 部署文档做静态断言，
+  防「模板/配置回退到宿主挂载」「退役配置项复活」回归（不触真 docker）。
+- **集成 smoke**（`sandboxSmoke.test.ts` / `wikiContainerSmoke.test.ts` 等）：真 docker daemon /
+  真 Redis **默认 skip 自动探测门控**（daemon/Redis 不可达 → skip），可达 → 真跑端到端。
 
 ## 关键约定
 
 - **统一信封**：所有 REST HTTP 200；成功 `{code:0,data}`，失败 `{code,message,data}`。码表见 `src/codes.ts`。
 - **refresh cookie**：`HttpOnly; Secure(prod); SameSite=Lax; Path=/api/v1/auth`；R1 旋转 + 重放族灭。
 - **C1 强制改密**：服务端拦截（`mustChangePasswordGate`），放行 me/logout/password-change，余者 mustChange=true → `10005`。
-- **防探测**：`/users` 非 admin、目标不存在 → 同码 `10041` 同体；容器「不存在 vs 越权」→ 同码 `20040` 同体，区分仅进服务端日志。
+- **防探测**：`/users` 非 admin、目标不存在 → 同码 `10041` 同体；2xxxx 码段（含容器域
+  20040「不存在 vs 越权」同码形态）随 #858 容器行表退役整组保留防复用，区分仅进服务端日志。
 - **凭证零落盘**：响应体不含 passwordHash / refresh 明文 / private_key。
 - **凭证加密（Codex C1）已整链退役**（#858 起 #859 收尾）：AES-256-GCM 链（`crypto.ts`）与
   `CREDENTIAL_ENCRYPTION_KEYS` 仅服务 gateway token 落盘，随 fleet 编排退役——全库零消费面
@@ -167,10 +172,11 @@ fleet 目标镜像 `OPENCLAW_IMAGE` 随编排退役）。部署全流程（CD、
 ## 下游衔接
 
 - WIKI（#335）与 Models（#336）已交付：复用 `createApp`、`authenticate()`、信封中间件、
-  `getInstanceForUser` 归属前置（containers/wiki/models 全域单点）。
+  zod validate；归属门 #856/#857 起挂 owner 级（req.user.id 直派生，容器行查询随 #858 退役）。
 - 配对/对话桥接（#378/#385、#337 ADR 0006）：已随 T0 #801 整链退役（Pairing 表删除、隧道四文件
   删除、bootstrap-token 端点删除）；现役对话面 = REST+SSE（#793）。cookie Secure 由
   `NODE_ENV==='production'` 直接判定，无 CORS 中间件。
-- 前端（#340/M5/M8）：信封解析 + `me.role` + R1 双 token 旋转 + 异步 delete 轮询 + ChatView 拆分
-  （8 组件）+ admin users 页。
-- 生产（#341）：`deploy/docker-compose.deploy.yml` + CD 构建 `server` 镜像；Django 后端已退役。
+- 前端（#340/M5/M8）：信封解析 + `me.role` + R1 双 token 旋转 + ChatView 组件族
+  （REST+SSE 编排）；admin 子应用 `/admin/` MPA（#800）。
+- 生产（#341）：`deploy/docker-compose.deploy.yml` + CD 构建 `server`/`frontend`/`wiki` 三镜像；
+  Django 后端已退役。

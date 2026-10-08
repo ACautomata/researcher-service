@@ -82,31 +82,12 @@ _load_env() {
   echo "[driver] 已加载 deploy/.env（shell 环境变量优先，未被覆盖）"
 }
 
-_ensure_fleet_image() {
-  # 容器编排（POST /containers）依赖镜像已 pull：本机默认派生镜像（issue #588，ADR 0013：
-  # pdftotext + wiki/workspace 骨架，基官方 browser 变体）未 pull 时 docker run 会触发 pull 阻塞/失败，
-  # 前端表现为「容器一直 creating」。docker daemon 不可达时跳过（driver 仍起前后端，仅容器创建不可用）。
-  command -v docker >/dev/null 2>&1 || return 0
-  docker info >/dev/null 2>&1 || { echo "[driver] 警告: docker daemon 不可达，容器创建将不可用"; return 0; }
-  # 默认 = 派生镜像**钉版本 tag**（与 Dockerfile FROM 基线单源，issue #695；本行是第四处运行期明文，
-  # 由 server/test/openclawImage.test.ts 交叉断言锁死）。按 deploy/README.md「派生镜像版本 tag 约定」
-  # 本地构建同 tag 镜像后此处直接命中，不会去拉私有 GHCR。
-  local image="${OPENCLAW_IMAGE:-ghcr.io/acautomata/researcher-service/openclaw:2026.9.4-browser}"   # 派生镜像（issue #588）；可覆盖回官方基线
-  if ! docker image inspect "$image" >/dev/null 2>&1; then
-    echo "[driver] 预拉 fleet 镜像 $image …"
-    if docker pull "$image"; then
-      echo "[driver] ✓ 镜像就绪"
-    else
-      echo "[driver] 警告: 拉取 $image 失败，容器创建将不可用（检查镜像名/登录/网络）"
-    fi
-  fi
-}
-
 _warn_llm_key() {
-  # LLM_API_KEY 缺失 → create 容器前置校验返 90003（信封码，HTTP 200），前端显示业务错误。
-  # 提前显式警告。
+  # LLM_API_KEY 缺失 → 会话发消息时 runner 侧 provider 解析失败返 90003（LLM_NOT_CONFIGURED，
+  # 信封码 HTTP 200），前端显示业务错误。提前显式警告。（fleet 容器创建面已随 #858 退役——
+  # 会话沙箱/wiki 容器由控制面惰性创建，busybox 级钉版镜像无需预拉。）
   if [ -z "${LLM_API_KEY:-}" ]; then
-    echo "[driver] 警告: LLM_API_KEY 未设置 —— 创建容器将返 90003（'LLM_API_KEY is required but not configured'）"
+    echo "[driver] 警告: LLM_API_KEY 未设置 —— 会话发消息将返 90003（'LLM_API_KEY 未配置'）"
     echo "          请在 deploy/.env 或环境变量中设置 LLM_API_KEY 后重启 driver"
   fi
 }
@@ -129,7 +110,6 @@ cmd_start() {
   _ensure_node_modules "$SERVER_DIR"
   _ensure_node_modules "$FRONTEND_DIR"
   _ensure_db
-  _ensure_fleet_image
   _warn_llm_key
 
   # ---- server（TS/Express 控制面）----

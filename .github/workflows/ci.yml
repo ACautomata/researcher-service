@@ -43,7 +43,7 @@ jobs:
       - run: npm ci
       - run: npm run prisma:generate
       - run: npm run typecheck
-      #（#858：OPENCLAW_IMAGE 预拉随 containers-smoke 退役——fleet 端到端 smoke 随容器管理退役；
-      # 沙箱/wiki 容器 smoke 用 busybox 级钉版镜像，体积小无需预拉。）
+      #（沙箱/wiki 容器 smoke 用 busybox 级钉版镜像，体积小无需预拉；#858/#860 OpenClaw 退役面
+      # 断言于 test/openclawRetirement.test.ts。）
       - run: npm test
       - run: npm run build
