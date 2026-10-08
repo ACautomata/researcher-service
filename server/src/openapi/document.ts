@@ -14,7 +14,7 @@ export function buildOpenApiDocument() {
       // 文档契约版本（与产品/镜像版本解耦）：文档面结构变更（端点增删、信封语义变化）时 bump。
       version: '1.0.0',
       description: [
-        '多 OpenClaw 容器管理面板控制面（TS/Express）。本文档由 zod schema 生成（`@asteasolutions/zod-to-openapi`），',
+        '科研智能体平台控制面（TS/Express；用户视角 = 会话 / wiki / 模型配置）。本文档由 zod schema 生成（`@asteasolutions/zod-to-openapi`），',
         '请求体校验的单一来源是 `server/src/validation/schemas.ts`，文档与实现零漂移——不手写 openapi.yaml。',
         '',
         '## 全局 #312 信封',

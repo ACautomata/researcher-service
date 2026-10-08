@@ -12,8 +12,8 @@
 // 不存在惰性创建（零初始化）、stopped 复启、running 原样——requireAuth 之后（未授权探测不建
 // 容器）且在 path/body 校验之后（非法请求不触碰编排面）；ownerId 无客户端覆写面，
 // 「归属先于 ensure」由派生封闭兑现。
-// compile 触发（#315 §6）随存储换轨停用：busybox 级 wiki 容器无 openclaw 运行时，索引生成
-// 归 OpenWiki 工具形态（#737，G 节 wiki 三通道）；deps.compile 缺省 noop，生产装配不注入。
+// compile 触发（#315 §6）已随 #859 退役：busybox 级 wiki 容器无 openclaw 运行时，索引生成
+// 归 OpenWiki 工具形态（#737，G 节 wiki 三通道）。
 // 错误映射：path 非法/穿越/managed → 90002(data.path) · 页不存在 → 30040 · 页已存在 → 30041。
 
 import { Router, type Request, type Response } from 'express'
@@ -26,7 +26,6 @@ import { DockerWikiFileSystem } from './dockerFs'
 import { WikiService } from './service'
 import { WikiInvalidPath, WikiPageExists, WikiPageNotFound } from './errors'
 import { parseWikiWriteBody, requireRelPath } from './paths'
-import { noopCompile, type CompileTrigger } from './compile'
 
 // wiki 容器生命周期 ensure 面（kind=wiki 支路，#784）：结构子集注入（生产 = WikiContainerLifecycle）。
 // 返回 void：快照无消费面（ensure 是 create/health 合一面，成功即容器 running）。
@@ -42,9 +41,6 @@ export interface WikiUpdateRunnerPort {
 }
 
 export interface WikiRouterDeps {
-  // compile 触发（#315 §6 遗留面）：POST/DELETE 触发、PUT 不触发、5s 去抖。缺省 = no-op。
-  // #784 起生产装配不注入（busybox 无运行时；索引归 OpenWiki 工具形态）。
-  compile?: CompileTrigger
   // wiki 容器 ensure（#784）：缺省 = 不 ensure（纯测试装配）；生产 app.ts 必注入——缺注入时
   // 容器缺失的读写以原语层错误暴露（不静默伪装成功）。
   wikiContainers?: WikiContainersEnsurePort
@@ -64,7 +60,6 @@ function assertPageOpError(err: unknown): void {
 }
 
 export function createWikiRouter(deps: WikiRouterDeps = {}): Router {
-  const compile = deps.compile ?? noopCompile
   // 缺省经 Docker 原语读写请求者本人的 wiki 容器（#784；#856 起 ownerId 即认证身份）：docker
   // 名单一来源 wikiContainerName 派生，树根 /wiki（DockerWikiFileSystem 缺省）。
   const serviceFor =
@@ -99,7 +94,7 @@ export function createWikiRouter(deps: WikiRouterDeps = {}): Router {
     }
   })
 
-  // PUT /wiki/page —— 覆写已存在页（byte-exact 保留空白；不触发 compile）。
+  // PUT /wiki/page —— 覆写已存在页（byte-exact 保留空白）。
   router.put('/page', async (req: Request, res: Response) => {
     const body = parseWikiWriteBody(req.body) // 非法 → 90002；先于 ensure（非法请求不触碰编排面）
     try {
@@ -107,35 +102,29 @@ export function createWikiRouter(deps: WikiRouterDeps = {}): Router {
     } catch (err) {
       assertPageOpError(err)
     }
-    ok(res, { path: body.path }) // PUT 不触发 compile（r29 §2.3）
+    ok(res, { path: body.path })
   })
 
-  // POST /wiki/page —— 新建页；compile 面缺省 noop（#784 起生产不注入，见文件头）。
+  // POST /wiki/page —— 新建页。
   router.post('/page', async (req: Request, res: Response) => {
     const body = parseWikiWriteBody(req.body)
-    let owner!: string
     try {
-      owner = await ownerWithEnsure(req)
-      await serviceFor(owner).createPage(body.path, body.content)
+      await serviceFor(await ownerWithEnsure(req)).createPage(body.path, body.content)
     } catch (err) {
       if (err instanceof WikiPageExists) throw fail(CODE.WIKI_PAGE_EXISTS)
       assertPageOpError(err)
     }
-    compile.trigger(owner)
     ok(res, { path: body.path })
   })
 
-  // DELETE /wiki/page?path= —— 删页；compile 面同上 noop。
+  // DELETE /wiki/page?path= —— 删页。
   router.delete('/page', async (req: Request, res: Response) => {
     const relPath = requireRelPath(req.query.path)
-    let owner!: string
     try {
-      owner = await ownerWithEnsure(req)
-      await serviceFor(owner).deletePage(relPath)
+      await serviceFor(await ownerWithEnsure(req)).deletePage(relPath)
     } catch (err) {
       assertPageOpError(err)
     }
-    compile.trigger(owner)
     ok(res, null)
   })
 

@@ -121,8 +121,7 @@ async function main(): Promise<void> {
   const app = createApp({
     prisma,
     // wiki（#335 → #784 换轨）：存储面 = 新 wiki 容器（ensure 经 wikiContainers 注入）；
-    // compile 触发不注入（busybox 级容器无 openclaw 运行时，索引归 OpenWiki 工具形态 #737，
-    // routes 缺省 noop）。#790：全量更新独立 run 触发面（POST /wiki/update）注入。
+    // compile 触发面已随 #859 退役。#790：全量更新独立 run 触发面（POST /wiki/update）注入。
     wiki: {
       wikiContainers: {
         ensure: async (ownerId) => {
