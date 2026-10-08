@@ -2,10 +2,10 @@ import { describe, it, expect } from 'vitest'
 import { readFileSync, existsSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 
-// issue #593 prod compose/CD 去 host 挂载静态断言（issue #586 测试接缝 5；先例：config.test.ts /
-// openclawImage.test.ts 文本断言模式，不触真 docker）。断言对象是声明式产物——prod compose、
+// issue #593 prod compose/CD 去 host 挂载静态断言（issue #586 测试接缝 5；先例：config.test.ts
+// 文本断言模式，不触真 docker）。断言对象是声明式产物——prod compose、
 // server 镜像 Dockerfile、CD workflow——防「模板/配置回退到宿主挂载」回归。
-// 路径解析沿 openclawImage.test.ts 模式：vitest 自 server/ 目录运行，cwd 上溯取仓库根。
+// 路径解析模式：vitest 自 server/ 目录运行，cwd 上溯取仓库根。
 const ROOT = resolve(process.cwd(), '..')
 
 function readRepoFile(rel: string): string {

@@ -47,7 +47,7 @@ TOKEN=$(curl -s -X POST http://localhost:8001/api/v1/auth/login \
   | python3 -c "import json,sys; print(json.load(sys.stdin)['data']['access'])")
 
 # 访问受保护端点
-curl -s http://localhost:8001/api/v1/containers/ -H "Authorization: Bearer $TOKEN"
+curl -s http://localhost:8001/api/v1/sessions -H "Authorization: Bearer $TOKEN"
 ```
 
 > 公开注册已关闭（admin-only，spec #331）：账号由 bootstrap（首启 log 输出 admin 临时密码一次）
@@ -92,7 +92,7 @@ cd frontend && npm run test && npm run build
 - **DB 落表**: On first launch or after schema changes, the driver runs `prisma:generate` + `db:apply` automatically（`server/prisma/init.sql` 落到 `DATABASE_URL` 指向的 SQLite）。If you're running the server manually, run `npm run db:apply` first — otherwise bootstrap 报 `no such table: users`。
 - **Worktree node_modules**: If you're inside a git worktree, `node_modules/` isn't shared — run `npm install` in the worktree's `server/` and `frontend/` before starting. The driver's `_ensure_node_modules` handles this.
 - **Port conflicts**: The driver uses `--strictPort` for Vite and `npm run dev`（Express）bound to `localhost:8001`. If either port is taken, the start command fails. Check with `driver.sh status` or `lsof -i :8001 -i :5173`。
-- **Redis / docker daemon**: 容器生命周期（POST /containers）依赖 Redis（BullMQ）与 docker daemon；不可达时 REST 认证/账号端点仍可用，仅容器创建不可用（driver 会警告）。
+- **Redis / docker daemon**: 会话 run（BullMQ 队列）与面板自管容器编排（会话沙箱/wiki 容器，惰性创建）分别依赖 Redis 与 docker daemon；不可达时 REST 认证/账号端点仍可用，仅会话消息与容器创建不可用。
 - **Vite proxy**: Requests to `http://localhost:5173/api/*` are proxied to the Express server. API-only testing should hit `:8001` directly — the proxy exists for the browser's same-origin convenience.
 
 ## Troubleshooting

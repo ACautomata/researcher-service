@@ -66,7 +66,7 @@ _Avoid_: 在模块里散读 env、新建独立「env 注册包」——前者绕
 测试 harness / fixture（如 `test/` 里测 config 解析的用例）读 env 不属于 runtime。边界是架构约定（code review 维护），非零容忍 grep。
 
 **必填 secret 的 fail-fast (required-secret fail-fast)**:
-生产（`NODE_ENV=production` 下 `server/src/config.ts` 的 read* 校验）对必填 secret 缺失即拒启动（`JWT_SECRET` ≥32 字符硬校验、`OPENCLAW_TEMPLATE_DIR` / `CREDENTIAL_ENCRYPTION_KEYS` 缺失 fail-fast），杜绝「生产漏设 → 静默空值」的错配（`LLM_API_KEY` 旧为 `os.environ.get(...,'')`，漏设会把空 key 静默注入容器，与 issue #195「卡 creating」同类）。**dev / test 宽容不加 fail-fast**。
+生产（`NODE_ENV=production` 下 `server/src/config.ts` 的 read* 校验）对必填项缺失/非法即拒启动：`JWT_SECRET` ≥32 字符硬校验、`DATA_ROOT` 强制绝对路径、`SANDBOX_IMAGE` / `WIKI_IMAGE` 禁浮动 tag（无 tag / `:latest` fail-fast，准据 `readPinnedImage`）——杜绝「生产漏设 → 静默空值」的错配（`LLM_API_KEY` 旧为 `os.environ.get(...,'')`，漏设会把空 key 静默注入容器，与 issue #195「卡 creating」同类）。**dev / test 宽容不加 fail-fast**。（旧 `OPENCLAW_TEMPLATE_DIR` / `CREDENTIAL_ENCRYPTION_KEYS` 缺失 fail-fast 随 #858/#859 退役。）
 
 **隧道 (tunnel)**:
 ADR 0006 引入的接触路径 (4) 新形态：浏览器↔控制面的一条 WebSocket，握手做 JWT 验签 + 归属门（user 只能开到**自己容器**的隧道），建立后**原样透传**浏览器与容器网关之间的 OpenClaw 协议 v4 原始帧——控制面**不解析、不翻译、不注入凭证、不做 method 级授权**。隧道是 B-直连的承载：浏览器跑官方 `@openclaw/gateway-client` 的 `./browser` 协议机，把「隧道 socket」注入其 `createSocket` 当 transport，经隧道直连藏在控制面后面的容器网关。**本形态已随 T0 #801 整链退役**（现役对话面 = REST+SSE，#793）。

@@ -14,8 +14,8 @@ panel-frontend 容器（nginx，唯一对宿主暴露，loopback:18080）
     ├─ /        → SPA（dist/，history fallback）
     ├─ /api/    → panel-server:8001（TS/Express，#312 信封）
     └─ /api/v1/events → panel-server:8001（SSE 事件流，proxy_buffering off）
-                     │  panel-server 挂 docker.sock（编排 OpenClaw 容器）+ SQLite 卷；
-                     │  home 模板构建期入镜像（ADR 0013，无宿主数据挂载）
+                     │  panel-server 挂 docker.sock（编排面板自管容器：会话沙箱 + wiki 容器）
+                     │  + SQLite 卷（唯一宿主数据挂载豁免 = docker.sock，ADR 0013）
                      ▼
               panel-redis（BullMQ 队列，内部网络）
 ```
@@ -27,7 +27,7 @@ panel-frontend 容器（nginx，唯一对宿主暴露，loopback:18080）
   wiki 另推**版本 tag**（`:<Dockerfile FROM 基线 tag>`）——**面板 wiki 容器的目标镜像钉的就是它**
   （server 镜像内 `config.ts` 默认值同版本）。（#858：fleet 目标镜像 `OPENCLAW_IMAGE` 随
   fleet 编排退役，server 不再读取。）
-- **超时分层**：`/api/` 慢请求（创建容器等）依赖代理链逐层放宽超时。容器内 nginx 已配
+- **超时分层**：`/api/` 慢请求（会话 run 等）依赖代理链逐层放宽超时。容器内 nginx 已配
   `proxy_read_timeout/send_timeout 300s`（`/api/`）与 `3600s`（`/api/v1/events` SSE 流）；**BaoTa 边缘
   反代须 ≥ 内层最慢值 `3600s`**：站点 → 反向代理 → 配置，填 `proxy_read_timeout 3600s;` +
   `proxy_send_timeout 3600s;`（bootstrap 步骤 5），否则外层默认 60s 会先于内层返回 504——慢请求已
@@ -42,9 +42,9 @@ panel-frontend 容器（nginx，唯一对宿主暴露，loopback:18080）
 每次 CI 在 `master` 上成功后自动：
 
 1. 构建 + 推送 `server`、`frontend`、`wiki`（#784）三镜像到 GHCR（`:latest` 与 `:<CI head_sha>`）；
-   `wiki` 另推版本 tag（版本从 wiki Dockerfile 的 `FROM` 行单源提取）。server 镜像构建期 clone
-   researcher home 模板并经 buildx 多 context 拷入镜像（ADR 0013：#593 模板入镜像，模板随镜像
-   `:sha` 版本化）。
+   `wiki` 另推版本 tag（版本从 wiki Dockerfile 的 `FROM` 行单源提取）。server 镜像构建多 context =
+   `official/`（#787 官方内容）+ `plugins/`（#788 插件包），#858 起无 home 模板注入（fleet
+   provisioning 退役），CD 只分发 compose。
 2. 渲染运行时 `.env`（敏感值来自 secrets，不进 git）。
 3. scp `docker-compose.deploy.yml` + `.env` → 宿主 `/www/panel/`。
 4. SSH 远端：`docker login ghcr.io`（持久）→ `pull` → `up -d --remove-orphans` → `image prune` →
@@ -62,8 +62,9 @@ panel-frontend 容器（nginx，唯一对宿主暴露，loopback:18080）
 | 5 | 反代 | 站点 → 反向代理 → 目标 `http://127.0.0.1:18080`，发送域名 `$host`。**并把代理读/写超时放宽到 `3600s`**（见上方「超时分层」）。 |
 | 6 | GitHub secrets | 见下表。 |
 
-> `/www/panel` 目录无需手工预建——CD 首次会自动创建（防御性 bootstrap）。researcher home 模板
-> 不再落宿主：CD 构建期 clone 并拷入 server 镜像（ADR 0013，#593），镜像 `:sha` 即模板版本。
+> `/www/panel` 目录无需手工预建——CD 首次会自动创建（防御性 bootstrap）。镜像外唯一的宿主数据
+> 挂载是 `/var/run/docker.sock`（spec §5.4 已接受等价 root）；researcher home 模板注入与
+> `openclaw.json` 配置面已分别随 #858 / T0 #801 退役（退役总注见 deploy/README.md 顶部 #858 块）。
 
 ## GitHub secrets 清单
 
@@ -75,7 +76,7 @@ panel-frontend 容器（nginx，唯一对宿主暴露，loopback:18080）
 | `REMOTE_USER` | `root` | SSH 用户（宝塔以 root 跑、own docker.sock） |
 | `DEPLOY_KEY` | SSH 私钥全文 | 免密登录（对应公钥预先放宿主 `/root/.ssh/authorized_keys`） |
 | `GHCR_PULL_USER` | GitHub 用户名 | 宿主拉私有 GHCR |
-| `GHCR_PULL_TOKEN` | classic PAT，scope `read:packages` | 宿主拉私有 GHCR（持久 login，运行时拉 OpenClaw 镜像复用） |
+| `GHCR_PULL_TOKEN` | classic PAT，scope `read:packages` | 宿主拉私有 GHCR（持久 login，面板镜像拉取复用） |
 | `JWT_SECRET` | **≥32 字符强随机** | HS256 签名密钥（server 生产 fail-fast） |
 | `LLM_API_KEY` | 面板共享 LLM key | runner 侧 provider 凭证解析（#731 §1.3） |
 | `API_DOCS_ENABLED`（可选） | `true`（默认） | OpenAPI/Swagger 文档面（`/api/docs`，#761）：admin-only（requireAuth + requireAdmin）zod 生成式文档。显式 `false` → server 不装配 docs 路由（整树 90005） |
@@ -136,9 +137,10 @@ docker compose -f docker-compose.deploy.yml --env-file .env up -d
 
 （或在 CI 重跑对应历史 commit 的 CD。）
 
-> 面板 fleet 的目标镜像不随部署自动切换：它钉在 server 镜像内的 `config.ts` 默认值（存量
-> 版本 tag 引用）。存量容器何时/如何换到新目标由运维动作决定（升级编排已随 T0 #801 退役），
-> 生产禁浮动 tag 的 fail-fast（`SANDBOX_IMAGE` / `WIKI_IMAGE`）见上方「运行时 server 必需 env」。
+> 沙箱/wiki 容器镜像（`SANDBOX_IMAGE` / `WIKI_IMAGE`）有钉版缺省值（钉在 server 镜像内
+> `config.ts`），不经 `.env` 渲染、不随部署切换；如需换镜像，在宿主 `.env` 加覆盖键后重建
+> server 容器（生产禁浮动 tag fail-fast，见上方「运行时 server 必需 env」）。升级编排已随
+> T0 #801 退役，存量容器无滚动升级动作。
 
 ## 排障
 

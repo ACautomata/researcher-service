@@ -24,23 +24,23 @@ assert_eq() {  # <got> <want> <label>
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 envf="$tmp/.env"
-printf 'GATEWAY_TOKEN=gt-file\nLLM_API_KEY=key-file\nOPENCLAW_IMAGE=img-file\n# COMMENT=skip\nNOTHING\n' > "$envf"
+printf 'AUTOFIGURE_IMAGE_MODEL=fig-file\nLLM_API_KEY=key-file\nFAL_KEY=fal-file\n# COMMENT=skip\nNOTHING\n' > "$envf"
 
 # 子 shell（bash -c）跑，隔离本进程 env，且不继承本 shell 的 set 选项。
-# 先 unset 受测变量以排除宿主环境继承（host 可能已 export OPENCLAW_IMAGE/LLM_API_KEY），
+# 先 unset 受测变量以排除宿主环境继承（host 可能已 export FAL_KEY/LLM_API_KEY），
 # 使每个用例从已知空状态出发。
 
 # ① shell 已设置的变量胜出；未设置的从 .env 注入
 out=$(bash -c '
-  unset LLM_API_KEY GATEWAY_TOKEN OPENCLAW_IMAGE
+  unset LLM_API_KEY AUTOFIGURE_IMAGE_MODEL FAL_KEY
   export LLM_API_KEY=key-shell
   _load_env "$1" >/dev/null
-  printf "%s\n%s\n%s\n" "$LLM_API_KEY" "$GATEWAY_TOKEN" "$OPENCLAW_IMAGE"
+  printf "%s\n%s\n%s\n" "$LLM_API_KEY" "$AUTOFIGURE_IMAGE_MODEL" "$FAL_KEY"
 ' _ "$envf")
-llm=$(sed -n '1p' <<<"$out"); gt=$(sed -n '2p' <<<"$out"); img=$(sed -n '3p' <<<"$out")
+llm=$(sed -n '1p' <<<"$out"); fig=$(sed -n '2p' <<<"$out"); fal=$(sed -n '3p' <<<"$out")
 assert_eq "$llm" "key-shell" "shell-set LLM_API_KEY 不被 .env 覆盖"
-assert_eq "$gt"   "gt-file"  "未设置的 GATEWAY_TOKEN 从 .env 注入"
-assert_eq "$img"  "img-file" "未设置的 OPENCLAW_IMAGE 从 .env 注入"
+assert_eq "$fig" "fig-file"  "未设置的 AUTOFIGURE_IMAGE_MODEL 从 .env 注入"
+assert_eq "$fal" "fal-file"  "未设置的 FAL_KEY 从 .env 注入"
 
 # ② shell 显式空值也胜出（不被 .env 的 key-file 覆盖——codex 描述的核心 bug 场景）
 out=$(bash -c '

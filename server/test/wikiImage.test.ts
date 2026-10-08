@@ -1,4 +1,4 @@
-// wiki 容器镜像静态断言（#784；openclawImage.test.ts 先例：断言对象是 deploy/wiki-image/
+// wiki 容器镜像静态断言（#784；文本断言先例同 prodDeploy.test.ts：断言对象是 deploy/wiki-image/
 // 的声明式产物 Dockerfile，不触真 docker——构建期断言由 Dockerfile RUN 执行，此处兜底防回归，
 // 与 server/src/config.ts WIKI_IMAGE 默认值交叉锁死版本双源漂移）。
 
