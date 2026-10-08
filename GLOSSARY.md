@@ -273,3 +273,19 @@ _Avoid_: 单面板角色门控混入——「摘出来」是产物级隔离，�
 **产品显示名 (product display name)**:
 「天津大学科研智能体平台」（#758 Q13 钉定，#760 执行）——用户可见面（浏览器标题、登录页品牌行、导航品牌位、可见文案、README 等面向读者的自称）对产品的唯一称呼。前端 TS 面单一来源 `frontend/src/product.ts` 的 `PRODUCT_NAME`；`index.html` 静态直写同一字面量（两处互指）。与内部标识**解耦**：GitHub 仓库名 `ACautomata/researcher-service`、npm 包名、GHCR 镜像名、容器名前缀（#747 钉内部标识）、模块路径/目录名一律保持 researcher 系不动；仓库重命名留待用户单独决定（影响 remote URL 与 CD 引用）。
 _Avoid_: 用户可见文案出现 `researcher-service` 自称——那是内部仓库/模块标识，不是产品名；改名连带改仓库名/npm 包名/镜像名——改名只动显示层，内部标识零改动；动法律文案里的备案算法名（「天研文本图像生成合成算法」）——那是算法备案身份，与面板产品名不同层。
+
+**意图识别 (intent classification)**:
+（目标架构，wayfinder #846 定稿，未实施）research 插件入口图把用户请求分派到 workflow 流程前的两级判定：显式 slash 命令（`/ingest` `/discover` `/hypothesize` `/experiment`）经 `{execute}` 直达**seed 免分类**；自然语言路径由主 agent 组织 input 调用 `research_workflow`，图内 classify 节点结构化分类——5 值标签（ingest/discover/hypothesize/experiment/none）+ confidence∈[0,1]，`MIN_CONFIDENCE=0.60` 代码常量（#866 40 条中文 bad case × 3 轮实测定标）；`none` 或低于阈值 → clarify Result 回喂主 agent 反问（零新 interrupt 机制）。
+_Avoid_: 意图识别写进会话主图——否决形态（每条消息付一次分类调用、误路由敞口大、核心大改，#849）；把 `none` 当第五个流程——它是显式拒识出口，不是流程；「分类兜底再猜一次」——低置信走 clarify 反问，不硬选。
+
+**路由 (routing)**:
+（目标架构，wayfinder #846 定稿，未实施）`research_workflow` 工具内嵌套路由图的分发机制：单 StateGraph + addConditionalEdges **互斥条件边**——恰一 workflow 流程分支在跑，无公共归并节点；classify 对已 seed workflow 透传不调分类器（保「同参数必同拓扑」硬约束）。图在插件工具 execute 内构造执行，不进 RunService 图实例缓存（figure 先例同构）。
+_Avoid_: 子图组合——checkpoint ns 寻址与 PrismaCheckpointSaver 缺省寻址/rewind/recover 语义冲突（#847 否决）；deepagents teammate 委派路由——LLM 自由裁量违反「图拓扑必须可由持久化状态推导」；「流程编排」——路由只管入口分派，分支内时序归各 workflow 流程设计。
+
+**workflow 流程 (workflow)**:
+（目标架构，wayfinder #846 定稿，未实施）research 插件承载的四条固定科研流程：**ingest** 知识库深度构建 / **discover** 科学问题可信发现 / **hypothesize** 科学假说自主生成 / **experiment** 实验自主设计与执行。固定的是**骨架时序**不是执行段内部行为（#850）；流程互斥（单请求单流程）+ **产物串联**（后段经 wiki/lab 产物读前段产物：论文页 → critic 页 → idea card 页 → 实验报告页的单向边；发现/假说/报告落 wiki〔页面 + claims〕，中间产物落 lab）；假说 verdict 反哺（回写 idea card）V1 不做、归 V2 扩展点（#868）。
+_Avoid_: 与 researcher 谓词/编排 skill 混淆——那是源仓库的提示词工作流资产（迁移素材，只读参考），本术语指目标侧图内固定流程；subagent/teammate——流程是图节点链不是常驻协作 agent（W3 扇出桶是 Send[] 并行节点，不占 teammate 语义）。
+
+**实验方案人审 (plan review)**:
+（目标架构，wayfinder #846 定稿，未实施）W4 实验流程的**流程内置无条件门禁**：design/spec 产出后必停等用户审批（与 users.approvalMode 无关），方案全文经审批卡呈现（PlanApprovalCard，escalation source 第五值 `'experiment-plan'` + plan {title, summary, text, round} 全文内联）；approve（可选附言）→ 主 agent 续执行段；deny（必填理由 ≤2000）→ 回 design 修订模式，上限 3 轮，超限 = `plan_review_exhausted` 结构化终局（run completed，非 failed）。机制 = 工具内 interrupt + spec 落盘 lab 幂等短路（resume 重放跳过 design LLM 直达 interrupt 点）。
+_Avoid_: 与「升级通道」混淆——升级是审批三层漏斗的罕用人工层（触发源驱动），plan review 是流程承诺的无条件门禁，两者别钉；「方案批准豁免执行段漏斗」——两层正交：方案审科学内容（「做什么」），漏斗审系统安全（「怎么做」）。
