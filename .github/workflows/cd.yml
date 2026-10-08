@@ -13,7 +13,10 @@
 # 所需 secrets（见 deploy/DEPLOY.md 清单）：
 #   REMOTE_HOST REMOTE_USER DEPLOY_KEY            —— SSH 登录宿主
 #   GHCR_PULL_USER GHCR_PULL_TOKEN                —— 宿主拉私有 GHCR（read:packages PAT）
-#   JWT_SECRET LLM_API_KEY —— server 运行时
+#   JWT_SECRET LLM_API_KEY                        —— server 运行时
+#   AUTOFIGURE_IMAGE_MODEL AUTOFIGURE_IMAGE_API_KEY FAL_KEY
+#                                                 —— AutoFigure 插件必填键（#792 fail-fast，
+#                                                    缺任一 → 部署健康门必红：server 启动即崩）
 
 name: CD
 
@@ -166,9 +169,15 @@ jobs:
           # DJANGO_ALLOWED_HOSTS 删除（Express 不校验 Host）。
           # #859 OpenClaw 退役④：CREDENTIAL_ENCRYPTION_KEYS 注入线摘除——加密链仅服务
           # gateway token 落盘，#858 已随 fleet 退役，server 零消费面（宿主 .env 残留行无害）。
+          # AutoFigure 三必填键（#792 assertPluginEnv 生产 fail-fast：缺任一 server 容器
+          # 启动即崩、健康门必红——键契约单源 = plugins/autofigure/manifest.ts configSchema；
+          # 可选键 AUTOFIGURE_IMAGE_BASE_URL / AUTOFIGURE_SVG_MODEL 缺省即不注入）。
           {
             echo "JWT_SECRET=${{ secrets.JWT_SECRET }}"
             echo "LLM_API_KEY=${{ secrets.LLM_API_KEY }}"
+            echo "AUTOFIGURE_IMAGE_MODEL=${{ secrets.AUTOFIGURE_IMAGE_MODEL }}"
+            echo "AUTOFIGURE_IMAGE_API_KEY=${{ secrets.AUTOFIGURE_IMAGE_API_KEY }}"
+            echo "FAL_KEY=${{ secrets.FAL_KEY }}"
             echo "PANEL_SERVER_IMAGE=${{ env.SERVER_IMAGE }}:latest"
             echo "PANEL_FRONTEND_IMAGE=${{ env.FRONTEND_IMAGE }}:latest"
           } > _deploy/.env

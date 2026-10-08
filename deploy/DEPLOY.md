@@ -79,6 +79,9 @@ panel-frontend 容器（nginx，唯一对宿主暴露，loopback:18080）
 | `GHCR_PULL_TOKEN` | classic PAT，scope `read:packages` | 宿主拉私有 GHCR（持久 login，面板镜像拉取复用） |
 | `JWT_SECRET` | **≥32 字符强随机** | HS256 签名密钥（server 生产 fail-fast） |
 | `LLM_API_KEY` | 面板共享 LLM key | runner 侧 provider 凭证解析（#731 §1.3） |
+| `AUTOFIGURE_IMAGE_MODEL` | 生图模型名（如 `image-01`） | AutoFigure 插件必填键（#792 assertPluginEnv 生产 fail-fast，缺任一 → server 启动即崩、CD 健康门必红） |
+| `AUTOFIGURE_IMAGE_API_KEY` | 生图 API key | 同上（MiniMax 生图凭证） |
+| `FAL_KEY` | fal API key | 同上（SAM3 分割 / RMBG 去背景云 API） |
 | `API_DOCS_ENABLED`（可选） | `true`（默认） | OpenAPI/Swagger 文档面（`/api/docs`，#761）：admin-only（requireAuth + requireAdmin）zod 生成式文档。显式 `false` → server 不装配 docs 路由（整树 90005） |
 
 生成 `JWT_SECRET`：
