@@ -107,4 +107,28 @@ describe('CD 工作流（issue #593，ADR 0013；#858 后无模板注入）', ()
     expect(cd).not.toMatch(/cp deploy\/openclaw\.json/)
     expect(cd).not.toMatch(/TEMPLATE_DIR=\/srv\/openclaw\/template/)
   })
+
+  it('frontend 构建经命名 context 注入 plugins/（#788 插件源树不在 frontend/ context 内，缺此 CI 绿而 CD 必红）', () => {
+    const frontendStep = cd
+      .split('Build & push frontend image')[1]
+      ?.split('Build & push wiki')[0]
+    expect(frontendStep, 'cd.yml 缺 frontend 构建步骤').toBeDefined()
+    expect(frontendStep).toMatch(/build-contexts:/)
+    expect(frontendStep).toMatch(/plugins=/)
+  })
+})
+
+describe('frontend 镜像构建布局（#788 插件源直引入：容器内复刻 repo 根）', () => {
+  const dockerfile = readRepoFile('frontend/Dockerfile')
+
+  it('WORKDIR /repo/frontend + plugins 命名 context 拷入 /repo/plugins（@plugins 别名与 web.ts 反向引用 ../../frontend 的解析前提）', () => {
+    expect(dockerfile).toMatch(/WORKDIR \/repo\/frontend/)
+    expect(dockerfile).toMatch(/COPY --from=plugins \. \/repo\/plugins/)
+  })
+
+  it('无 /app 平铺布局残留（build 与 serve 阶段均按 /repo/frontend 书写）', () => {
+    expect(dockerfile).not.toMatch(/WORKDIR \/app/)
+    expect(dockerfile).toMatch(/COPY --from=build \/repo\/frontend\/dist/)
+    expect(dockerfile).not.toMatch(/\/app\/dist/)
+  })
 })
