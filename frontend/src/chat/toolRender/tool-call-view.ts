@@ -3,7 +3,7 @@
  *
  * Classifies a tool call into a small set of presentation kinds (command,
  * read, edit, write, search, fetch, generic) across the arg spellings used by
- * the OpenClaw session tools and foreign harnesses (Claude/Codex style).
+ * the session tools (legacy wire-era and Claude/Codex-style foreign harnesses).
  */
 
 import { asNullableRecord as asRecord } from "./recordCoerce";

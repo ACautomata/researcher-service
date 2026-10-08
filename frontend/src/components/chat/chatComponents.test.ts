@@ -1178,7 +1178,7 @@ describe('#694 回退入口与确认 popover', () => {
     await w.get('[data-test="rewind-confirm-yes"]').trigger('click')
     expect(w.emitted('rewind')).toHaveLength(1)
     expect(w.find('[data-test="rewind-confirm"]').exists()).toBe(false)
-    expect(localStorage.getItem('openclaw:skip-rewind-confirm')).toBeNull() // 未勾选不落盘
+    expect(localStorage.getItem('researcher:skip-rewind-confirm')).toBeNull() // 未勾选不落盘
   })
 
   it('取消 → 关闭且不 emit（用户可安全退出）', async () => {
@@ -1272,11 +1272,11 @@ describe('#694 回退入口与确认 popover', () => {
     await w.get('[data-test="rewind-remember"]').setValue(true)
     await w.get('[data-test="rewind-confirm-yes"]').trigger('click')
     expect(w.emitted('rewind')).toHaveLength(1)
-    expect(localStorage.getItem('openclaw:skip-rewind-confirm')).toBe('1')
+    expect(localStorage.getItem('researcher:skip-rewind-confirm')).toBe('1')
   })
 
   it('已记住偏好 → 点击直接回退，不再弹确认', async () => {
-    localStorage.setItem('openclaw:skip-rewind-confirm', '1')
+    localStorage.setItem('researcher:skip-rewind-confirm', '1')
     const w = mountItem(userWithEntry())
     await w.get('[data-test="rewind"]').trigger('click')
     expect(w.find('[data-test="rewind-confirm"]').exists()).toBe(false)

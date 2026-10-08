@@ -44,7 +44,8 @@ server/prisma/*.db
 server/prisma/*.db-journal
 server/.env
 
-# 容器编排运行时数据（仓库根 fleet/：instances/<name>/ home + openclaw.json，spec §5）。
+# 容器编排运行时数据（#858 前 fleet/：instances/<name>/ home + openclaw.json，spec §5——
+# fleet 已随 #858 整体退役，规则保留防意外回写）。
 # 限仓库根（/ 前缀）——否则会误伤源码子包 containers/fleet/（issue #278）。
 /fleet/
 

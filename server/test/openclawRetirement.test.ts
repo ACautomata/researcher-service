@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { readFileSync, existsSync } from 'node:fs'
+import { readFileSync, existsSync, readdirSync, statSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 
 // #860 OpenClaw 退役⑤：CI/CD 镜像链 + deploy 模板链 + env 样例/部署文档的痕迹清零静态断言
@@ -19,7 +19,7 @@ function readRepoFile(rel: string): string {
 // 功能性引用形态（镜像引用 / env 赋值 / 步骤名），不匹配「#858：OPENCLAW_IMAGE 预拉随…」这类
 // 退役注记注释——注释是决策历史，功能面清零才是本票验收。
 const OPENCLAW_IMAGE_REF = /researcher-service\/openclaw/
-const OPENCLAW_ENV_ASSIGN = /OPENCLAW_[A-Z_]+=/
+const OPENCLAW_ENV_ASSIGN = /OPENCLAW_[A-Z_]+ *=/
 
 describe('CI 工作流（#860：零 OpenClaw 镜像步骤，编排 smoke 删除后 job 链完整）', () => {
   const ci = readRepoFile('.github/workflows/ci.yml')
@@ -113,5 +113,128 @@ describe('server/README.md（#860：目录树/接缝零 fleet 现役描述）', 
   it('无 openclaw-gw 前缀/GATEWAY_BIND 常量描述（#858 后 constants = kind/session/owner 标签）', () => {
     expect(readme).not.toMatch(/openclaw-gw- 前缀\/label\/卷前缀\/GATEWAY_BIND/)
     expect(readme).not.toMatch(/HomeProvisioner|FleetCommand|FleetReadModel|fleetAssembly/)
+  })
+})
+
+// #861 OpenClaw 退役⑥（终局）：现役代码零功能性引用 + 全仓叙述仅剩档案级与退役注记。
+const SCAN_SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'coverage', 'generated'])
+
+function walkFiles(dir: string): string[] {
+  const out: string[] = []
+  for (const name of readdirSync(dir)) {
+    if (SCAN_SKIP_DIRS.has(name)) continue
+    const full = join(dir, name)
+    const s = statSync(full)
+    if (s.isDirectory()) out.push(...walkFiles(full))
+    else out.push(full)
+  }
+  return out
+}
+
+function rel(file: string): string {
+  return file.slice(ROOT.length + 1)
+}
+
+// 功能性引用形态（赋值 / 容器名前缀拼接 / 名字面量），注释里的键名提及（无赋值、无引号
+// 字面量）不中——注释是决策历史，功能面清零才是验收。单双引号 = 代码字面量；反引号 =
+// 注释内的历史值标注，放行。env 赋值形态与上文 OPENCLAW_ENV_ASSIGN 共用同一常量（#861
+// code review：双源漂移）。
+const FUNCTIONAL_OPENCLAW = [
+  OPENCLAW_ENV_ASSIGN, // env 赋值形态（与上文共用常量）
+  /process\.env\.OPENCLAW_[A-Z_]+/, // env 读取形态
+  /GATEWAY_TOKEN\s*=/, // 网关 token 注入形态
+  /openclaw-gw-\$\{/, // 容器名前缀模板
+  /['"]openclaw-gw-/, // 容器名前缀字面量拼接
+  /['"]\.openclaw-wiki['"]/, // wiki SKIP 旧成员字面量
+  /['"]openclaw:skip-rewind-confirm['"]/, // localStorage 旧 key 字面量
+  /['"]openclaw-panel['"]/, // JWT iss/aud 旧值
+]
+
+describe('#861 终局闸：现役代码域（server/src + frontend/src + server/scripts）零功能性 OpenClaw 引用', () => {
+  const codeFiles = ['server/src', 'frontend/src', 'server/scripts'].flatMap((d) =>
+    walkFiles(join(ROOT, d)),
+  )
+
+  it('零功能性引用形态（env 赋值 / 前缀拼接 / 旧标识字面量；注释提及放行）', () => {
+    const offenders: string[] = []
+    for (const file of codeFiles) {
+      const content = readFileSync(file, 'utf8')
+      if (FUNCTIONAL_OPENCLAW.some((re) => re.test(content))) offenders.push(rel(file))
+    }
+    expect(offenders).toEqual([])
+  })
+})
+
+describe('#861 终局闸：全仓 openclaw 叙述仅剩档案级与退役注记', () => {
+  // 档案目录（决策历史，不回删）+ 已注记文件清单（退役注记/负断言/守卫本体，逐文件
+  // 钉定）。新文件出现 openclaw 字样 → 此处红 = 强制审视；从清单移除条目前先确认该文件
+  // 已清零（清单是超集，清零后条目冗余不报错）。
+  const ALLOWED = [
+    // 档案级：
+    /^\.out-of-scope\//,
+    /^docs\/adr\//,
+    /^docs\/research\//,
+    /^docs\/autofigure\//,
+    /^docs\/prototypes\//,
+    // 文档层退役注记（叙述/表格/部署契约中的历史说明）：
+    /^README\.md$/,
+    /^AGENTS\.md$/,
+    /^GLOSSARY\.md$/,
+    /^\.gitignore$/,
+    /^server\/README\.md$/,
+    /^server\/Dockerfile$/,
+    /^deploy\/DEPLOY\.md$/,
+    /^deploy\/README\.md$/,
+    /^deploy\/docker-compose\.(dev|deploy)\.yml$/,
+    /^deploy\/wiki-image\/Dockerfile$/,
+    /^docs\/agents\/constraints\.md$/,
+    /^docs\/agents\/server-modules\.md$/,
+    /^\.github\/workflows\/(ci|cd)\.yml$/,
+    // 代码内退役注记（注释形态；功能性引用由上一 describe 独立锁死）：
+    /^server\/scripts\/apply-schema\.mjs$/,
+    /^server\/scripts\/lib\/incremental-schema\.mjs$/,
+    /^server\/src\/codes\.ts$/,
+    /^server\/src\/config\.ts$/,
+    /^server\/src\/validation\/schemas\.ts$/,
+    /^server\/src\/containers\/constants\.ts$/,
+    /^server\/src\/containers\/imageRef\.ts$/,
+    /^server\/src\/containers\/lifecycleQueue\.ts$/,
+    /^server\/src\/files\/dockerArchive\.ts$/,
+    /^server\/src\/models\/service\.ts$/,
+    /^server\/src\/runner\/providerDefaults\.ts$/,
+    /^server\/src\/runner\/providerRegistry\.ts$/,
+    /^server\/src\/sandboxes\/dockerRuntime\.ts$/,
+    /^server\/src\/wiki\/dockerFs\.ts$/,
+    /^server\/src\/wiki\/fsPort\.ts$/,
+    /^server\/src\/wiki\/routes\.ts$/,
+    /^server\/src\/wiki\/values\.ts$/,
+    /^server\/src\/wikiContainers\/dockerRuntime\.ts$/,
+    /^frontend\/src\/api\/models\.ts$/,
+    /^frontend\/src\/chat\/rewindPreference\.ts$/,
+    /^frontend\/src\/views\/ModelView\.vue$/,
+    // 退役负断言/注记测试（「不再出现」形态断言、注释说明）与守卫本体：
+    /^server\/test\/openclawRetirement\.test\.ts$/,
+    /^server\/test\/config\.test\.ts$/,
+    /^server\/test\/devDeploy\.test\.ts$/,
+    /^server\/test\/dockerFileArchive\.test\.ts$/,
+    /^server\/test\/dockerSandboxRuntime\.test\.ts$/,
+    /^server\/test\/files\.test\.ts$/,
+    /^server\/test\/prodDeploy\.test\.ts$/,
+    /^server\/test\/providerMigration\.test\.ts$/,
+    /^server\/test\/sandboxSmoke\.test\.ts$/,
+    /^server\/test\/schemaUpgrade\.test\.ts$/,
+    /^server\/test\/wikiContainerDockerRuntime\.test\.ts$/,
+    /^server\/test\/wikiContainerSmoke\.test\.ts$/,
+  ]
+
+  const SCAN_EXT = /\.(ts|tsx|mjs|cjs|js|md|yml|yaml|json|vue|html|sh|prisma|sql|css)$/
+
+  it('命中文件全部落在档案/注记白名单内', () => {
+    const hits = walkFiles(ROOT)
+      .map(rel)
+      .filter((r) => SCAN_EXT.test(r) || r === 'Dockerfile' || r === '.gitignore')
+      .filter((r) => readRepoFile(r).match(/openclaw/i))
+    const unexpected = hits.filter((r) => !ALLOWED.some((re) => re.test(r)))
+    expect(unexpected).toEqual([])
   })
 })

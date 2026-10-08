@@ -68,13 +68,13 @@ describe('WikiService CRUD（fake FS）', () => {
     const svc = new WikiService(fixtureFs())
     const cases: Array<() => Promise<unknown>> = [
       () => svc.readPage('../../evil.md'),
-      () => svc.readPage('.openclaw-wiki/evil.md'),
+      () => svc.readPage('_attachments/evil.md'),
       () => svc.readPage('concepts/index.md'),
       () => svc.writePage('../../evil.md', 'x'),
-      () => svc.createPage('.openclaw-wiki/evil.md', 'x'),
+      () => svc.createPage('_attachments/evil.md', 'x'),
       () => svc.createPage('concepts/index.md', 'x'),
       () => svc.deletePage('../../evil.md', ),
-      () => svc.deletePage('.openclaw-wiki/evil.md'),
+      () => svc.deletePage('_attachments/evil.md'),
     ]
     for (const fn of cases) {
       await expect(fn()).rejects.toBeInstanceOf(WikiInvalidPath)

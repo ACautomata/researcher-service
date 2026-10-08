@@ -101,7 +101,7 @@ describe('DockerWikiFileSystem.buildTree', () => {
       snapshot: async () => [
         link('concepts/evil.md'), // symlink 跳过
         file('concepts/notes.txt', enc('x')), // 非 .md 跳过
-        file('.openclaw-wiki/cache.md', enc('x')), // SKIP_DIRS 段
+        file('_attachments/cache.md', enc('x')), // SKIP_DIRS 段
         file('concepts/index.md', enc('x')), // SKIP_FILES 末段
         file('concepts/keep.md', enc('---\ntitle: Keep\n---\n')),
       ],
@@ -159,7 +159,7 @@ describe('DockerWikiFileSystem.listCategoryPages', () => {
 describe('DockerWikiFileSystem.readPage', () => {
   it('managed 路径 → WikiInvalidPath（CRUD 前置黑名单）', async () => {
     const fs = makeDocker({ probeFile: async () => null })
-    await expect(fs.readPage('.openclaw-wiki/x.md')).rejects.toBeInstanceOf(WikiInvalidPath)
+    await expect(fs.readPage('_attachments/x.md')).rejects.toBeInstanceOf(WikiInvalidPath)
     await expect(fs.readPage('concepts/index.md')).rejects.toBeInstanceOf(WikiInvalidPath)
   })
 
@@ -204,7 +204,7 @@ describe('DockerWikiFileSystem 写侧（委托 FileArchive 显式容器名方法
     const archive = new FakeArchive()
     const fs = makeDocker({ archive })
     await expect(fs.writePage('index.md', 'x')).rejects.toBeInstanceOf(WikiInvalidPath)
-    await expect(fs.createPage('.openclaw-wiki/x.md', 'x')).rejects.toBeInstanceOf(WikiInvalidPath)
+    await expect(fs.createPage('_attachments/x.md', 'x')).rejects.toBeInstanceOf(WikiInvalidPath)
     await expect(fs.deletePage('index.md')).rejects.toBeInstanceOf(WikiInvalidPath)
     expect(archive.calls).toEqual([])
   })

@@ -7,11 +7,11 @@ import type { PrismaClient } from '../generated/prisma/client'
 // access token claim 平移 simplejwt：sub=user_id + jti + exp + iat。
 // role/isActive/mustChangePassword 一律以查库为准（authenticate 落地），token 仅携带最小标识。
 
-const ISSUER = 'openclaw-panel'
-const AUDIENCE = 'openclaw-panel-users'
+const ISSUER = 'researcher-panel'
+const AUDIENCE = 'researcher-panel-users'
 // SSE 流凭证 audience（#726，issue #773）：panel_stream cookie 只读通道专用——与 access
 // token 隔离（audience 不匹配即拒），access token 不能当流凭证用、反之亦然。
-const STREAM_AUDIENCE = 'openclaw-panel-stream'
+const STREAM_AUDIENCE = 'researcher-panel-stream'
 
 function secretKey() {
   return createSecretKey(Buffer.from(config.jwtSecret))

@@ -104,7 +104,8 @@ export const modelProviderWriteSchema = z.object({
           name: z.string().optional(),
           reasoning: z.boolean().optional(),
           // #366 codex 四轮 P2：input 限 r28 §1.2 枚举（text/image/audio/video/pdf）——非法取值
-          // （如 "bogus"）原样落盘会被 OpenClaw 热加载校验拒绝，DB 却已提交报成功。
+          // （如 "bogus"）原样落盘会被下游运行时校验拒绝，DB 却已提交报成功（历史：该闸曾由
+          // OpenClaw 热加载校验承担，链已随 T0 #801 退役；校验前置的理由仍成立）。
           input: z.array(z.enum(MODEL_INPUT_MODALITIES)).optional(),
           cost: z
             .object({
