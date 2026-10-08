@@ -63,6 +63,9 @@ describe('dev 工具链（driver.sh / skill）零 fleet 预拉与退役端点', 
   })
 
   it('SKILL.md 无退役容器 REST 面引用（POST /containers 随 #858 退役 → 90005）', () => {
+    // 宽断言有意覆盖整个 containers 前缀：skill 操作面 = sessions。契约保留的 /:name/files
+    // lab 只读面（#858）属前端消费、非 skill 面；将来 skill 若需引用，此处红 = 预期审视点，
+    // 届时收窄正则表达例外而非放行前缀。
     expect(skill).not.toMatch(/\/api\/v1\/containers\//)
     expect(skill).not.toMatch(/POST \/containers/)
   })
