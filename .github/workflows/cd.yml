@@ -121,6 +121,12 @@ jobs:
         with:
           context: frontend
           file: frontend/Dockerfile
+          # plugins/（repo 根插件源目录树，#788）不在 frontend/ context 内——经命名 context
+          # 注入，Dockerfile 拷到 /repo/plugins 复刻 repo 根布局（@plugins 别名与 web.ts
+          # 反向引用 ../../frontend 均按 repo 根相对路径书写）。缺此行 CI 绿而 CD 必红
+          # （写法与上方 server 构建的 build-contexts 对齐）。
+          build-contexts: |
+            plugins=${{ github.workspace }}/plugins
           push: true
           tags: |
             ${{ env.FRONTEND_IMAGE }}:latest
