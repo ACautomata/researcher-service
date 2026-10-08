@@ -10,6 +10,7 @@ import type { RunServiceDeps } from './runtime/runService'
 import { DockerPrimitives } from './backend/dockerPrimitives'
 import { PrismaCheckpointSaver } from './persistence/prismaCheckpointSaver'
 import { ProviderRegistry } from './providerRegistry'
+import { assertLlmApiKey } from './providerDefaults'
 import { ConcurrencyGate } from './concurrency'
 import { RunService } from './runtime/runService'
 import { BullMqRunQueue } from './bullmqRunQueue'
@@ -87,6 +88,18 @@ export async function assembleRunner(opts: {
     },
   })
   const primitives = new DockerPrimitives()
+  // LLM_API_KEY 启动期校验（#747 回归②）：生产 fail-fast（与下方 assertPluginEnv 同模式）——
+  // key 缺失 = 每 run 装配期静默 job failed（「无声挂死」根因之一），生产崩在健康门（可见可告警）
+  // 远好于 run 级静默；dev 警告不阻断（AGENTS.md「仅起控制面/登录可跳过」既有语义）。与
+  // assertPluginEnv 同在 listen 之前，crashloop 由部署健康门暴露（#877 先例）。
+  assertLlmApiKey({
+    env: process.env,
+    production: process.env.NODE_ENV === 'production',
+    warn: (message) => {
+      // eslint-disable-next-line no-console
+      console.warn(`[runner] ${message}`)
+    },
+  })
   const teammates = new TeammateService(opts.prisma)
   // 插件运行时（#788 · #752）：启动期强校验（fail-fast——R2/R7 编译期信任下无「装了一半」）
   // + 全目录 env 完备性（R7 不看启用位：任何用户随时可启用 = 面板必须永远备好）。校验注

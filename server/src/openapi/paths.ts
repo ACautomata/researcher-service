@@ -317,16 +317,6 @@ register({
   dataNote: 'data: { nodes, edges }（obsidian 风格；边不 dedup，不可解析 → ghost 节点）。',
 })
 
-register({
-  method: 'get',
-  path: '/api/v1/wiki/categories',
-  tag: 'Wiki',
-  summary: '按 category: 标记聚合',
-  auth: 'user',
-  errors: `10005。`,
-  dataNote: 'data: 分类聚合（开放词表；收顶层散落页）。',
-})
-
 // ---- Models /api/v1/models/providers（owner 级，#857 归属门直挂认证身份；#775 事务 =
 //      mutation + config_meta version bump + 白名单第一层校验）----
 

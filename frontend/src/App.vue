@@ -32,12 +32,9 @@ async function handleLogout(): Promise<void> {
       <span class="nav-brand" data-test="nav-brand">{{ PRODUCT_NAME }}</span>
       <router-link to="/chat">对话</router-link>
       <router-link to="/wiki">Wiki</router-link>
-      <router-link to="/categories">Categories</router-link>
       <router-link to="/models">Model 配置</router-link>
       <!-- 插件目录页（#799 · #752 §4）：能力可见性唯一入口。 -->
       <router-link to="/plugins" data-test="nav-plugins">插件</router-link>
-      <!-- Figure Editor（F1，docs/figure-editor/reconnaissance.md）：常规入口，登录即见（非 admin-only、非 flag-gated）。 -->
-      <router-link to="/figure-editor" data-test="nav-figure-editor">Figure Editor</router-link>
       <!-- #800：admin 运营面整体迁入 /admin/ 子应用（独立 MPA 入口）——用户面板 nav 只留
            单一入口（跨应用普通 <a>，非 router-link）；子页面导航归 admin 壳自身。 -->
       <a v-if="isAdmin" href="/admin/" class="nav-admin" data-test="nav-admin-panel">运营面板</a>

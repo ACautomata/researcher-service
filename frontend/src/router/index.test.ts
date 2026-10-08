@@ -13,9 +13,7 @@ describe('页面路由按需加载', () => {
   it('所有页面组件均使用动态导入', () => {
     const records = router.getRoutes().filter((route) => route.name)
     expect(records.map((route) => String(route.name)).sort()).toEqual([
-      'categories',
       'chat',
-      'figure-editor',
       'legal-document',
       'login',
       'models',
@@ -63,19 +61,6 @@ describe('decideGuard（守卫决策纯函数）', () => {
   it('普通路由不受角色影响', () => {
     expect(decideGuard(true, authed)).toBeUndefined()
     expect(decideGuard(true, authedAdmin)).toBeUndefined()
-  })
-})
-
-describe('Figure Editor 路由', () => {
-  it('注册为受保护路由且懒加载 FigureEditorView', () => {
-    const record = routes.find((route) => route.name === 'figure-editor')
-    expect(record).toMatchObject({
-      path: '/figure-editor',
-      name: 'figure-editor',
-      meta: { requiresAuth: true },
-    })
-    expect(record?.component).toBeTypeOf('function')
-    expect(router.resolve('/figure-editor').name).toBe('figure-editor')
   })
 })
 

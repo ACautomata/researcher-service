@@ -30,12 +30,6 @@ export const routes: RouteRecordRaw[] = [
     meta: { requiresAuth: true },
   },
   {
-    path: '/categories',
-    name: 'categories',
-    component: () => import('@/views/CategoriesView.vue'),
-    meta: { requiresAuth: true },
-  },
-  {
     path: '/models',
     name: 'models',
     component: () => import('@/views/ModelView.vue'),
@@ -46,15 +40,6 @@ export const routes: RouteRecordRaw[] = [
     path: '/plugins',
     name: 'plugins',
     component: () => import('@/views/PluginsView.vue'),
-    meta: { requiresAuth: true },
-  },
-  // Figure Editor（F1，docs/figure-editor/reconnaissance.md）：面板内图片/图表编辑正式模块。
-  // Path A V1 = Vue shell + 后续 same-origin SVG-Edit iframe；常规受保护路由，不做 capability
-  // 门控——F2/F3 落地前直达占位页（非 404）。
-  {
-    path: '/figure-editor',
-    name: 'figure-editor',
-    component: () => import('@/views/FigureEditorView.vue'),
     meta: { requiresAuth: true },
   },
   // #800：admin 运营面（账号管理/白名单/审计/Usage/内容消息/API 文档）整体迁入 admin 子应用

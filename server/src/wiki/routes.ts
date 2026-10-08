@@ -133,11 +133,6 @@ export function createWikiRouter(deps: WikiRouterDeps = {}): Router {
     ok(res, await serviceFor(await ownerWithEnsure(req)).buildGraph())
   })
 
-  // GET /wiki/categories —— 按 `category:` 标记聚合（开放词表；收顶层散落页）。
-  router.get('/categories', async (req: Request, res: Response) => {
-    ok(res, await serviceFor(await ownerWithEnsure(req)).listCategories())
-  })
-
   // GET /wiki/claims?path= —— 页 claims 旁车只读面（#789 story 42 数据面：论断 →
   // 源文件行锚 evidence + 页级漂移状态）。页缺失 → 30040（与 page GET 同码）；旁车缺失/
   // 畸形 → 200 + drift null + 空 claims（「无证据面板」语义，不报错）。

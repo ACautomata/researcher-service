@@ -106,6 +106,7 @@ describe('RunService：发消息 → run 终态事件序列（S1，#747 C 节目
       wikis?: {
         ensure: (ownerId: string) => Promise<void>
       }
+      llmApiKey?: string
       attachments?: RunServiceDeps['attachments']
       recordTurn?: RecordTurnFn
       teammates?: TeammateService
@@ -113,7 +114,7 @@ describe('RunService：发消息 → run 终态事件序列（S1，#747 C 节目
   ): RunService {
     const script = opts.script ?? currentScript
     const registry = new ProviderRegistry(prisma, {
-      llmApiKey: 'test-key',
+      llmApiKey: opts.llmApiKey ?? 'test-key',
       modelFactory: async () => new ScriptedChatModel(script, { loop: opts.scriptLoop }),
     })
     const service = new RunService({
@@ -439,7 +440,8 @@ describe('RunService：发消息 → run 终态事件序列（S1，#747 C 节目
     expect(ensured).toEqual([cmd().ownerId])
   })
 
-  it('wiki 容器 ensure 失败 → pre-start 面向上传播（不发 run 域事件，沙箱同先例）', async () => {
+  it('wiki 容器 ensure 失败 → pre-start 面向上传播 + run.failed{infra}（story 10 不无声挂死；占位回滚）', async () => {
+    const c = cmd()
     const svc = makeService({
       script: [new AIMessage({ content: 'ok' })],
       wikis: {
@@ -448,8 +450,63 @@ describe('RunService：发消息 → run 终态事件序列（S1，#747 C 节目
         },
       },
     })
-    await expect(svc.execute(cmd())).rejects.toThrow('simulated wiki ensure failure')
+    await expect(svc.execute(c)).rejects.toThrow('simulated wiki ensure failure')
+    // run.started 仍不发（未进入图执行）；但 run.failed 必发（分类 infra）——旧「不发事件」纪律翻案。
     expect(hub.types()).not.toContain('run.started')
+    const failed = hub.events.find((e) => e.type === 'run.failed')
+    expect(failed).toBeDefined()
+    expect((failed as { payload: { errorKind: string } }).payload.errorKind).toBe('infra')
+    expect((failed as { runId: string }).runId).toBe(c.runId)
+    // 占位已回滚——不残留 queued 观测态（事件驱动的 refreshProjection 不会读回 inFlight 幽灵）。
+    expect(svc.stateOf(sessionId)).toBeUndefined()
+  })
+
+  it('沙箱 ensure 失败 → pre-start 面向上传播 + run.failed{infra}（与 wiki 同形）', async () => {
+    const c = cmd()
+    const svc = makeService({
+      script: [new AIMessage({ content: 'ok' })],
+      sandboxes: {
+        ensure: async () => {
+          throw new Error('simulated sandbox ensure failure')
+        },
+        touch: () => {},
+      },
+    })
+    await expect(svc.execute(c)).rejects.toThrow('simulated sandbox ensure failure')
+    expect(hub.types()).not.toContain('run.started')
+    const failed = hub.events.find((e) => e.type === 'run.failed')
+    expect(failed).toBeDefined()
+    expect((failed as { payload: { errorKind: string } }).payload.errorKind).toBe('infra')
+  })
+
+  it('LLM key 缺失（90003 装配失败）→ pre-start + run.failed{llm_error}（classifyRunError 白名单）', async () => {
+    const c = cmd()
+    const svc = makeService({
+      script: [new AIMessage({ content: 'ok' })],
+      llmApiKey: '', // 空 key → ProviderRegistry.resolveApiKey throw LLM_NOT_CONFIGURED
+    })
+    await expect(svc.execute(c)).rejects.toThrow()
+    expect(hub.types()).not.toContain('run.started')
+    const failed = hub.events.find((e) => e.type === 'run.failed')
+    expect(failed).toBeDefined()
+    expect((failed as { payload: { errorKind: string } }).payload.errorKind).toBe('llm_error')
+  })
+
+  it('REST 已即时反馈的竞态码不发 run.failed：40043 配额满 / 50002 会话不存在', async () => {
+    // 40043：gate.acquire 满额 → 排除码不发事件（REST quotaFull 已即时反馈）。
+    const svc40043 = makeService({
+      script: [new AIMessage({ content: 'ok' })],
+      gate: new ConcurrencyGate({ globalLimit: 8, loadUserLimit: async () => 0 }),
+    })
+    await expect(svc40043.execute(cmd())).rejects.toThrow()
+    expect(hub.types()).not.toContain('run.started')
+    expect(hub.types()).not.toContain('run.failed')
+    hub.reset()
+
+    // 50002：会话不存在 → 排除码不发事件（REST 双层预检已即时反馈）。
+    const svc50002 = makeService({ script: [new AIMessage({ content: 'ok' })] })
+    await expect(svc50002.execute(cmd({ sessionId: 'sess-nonexistent' }))).rejects.toThrow()
+    expect(hub.types()).not.toContain('run.failed')
   })
 
   it('同 thread 严格串行：第二个 run 的 run.started 晚于第一个 run 的终态', async () => {

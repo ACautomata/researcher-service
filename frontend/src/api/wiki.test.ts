@@ -1,12 +1,11 @@
 // seam: wiki API client —— issue #45 前端数据层（spec §6）。
 // #856：owner 级端点 /api/v1/wiki/*（ownerId 直取认证身份），调用方不再传容器名。
-// 覆盖：tree/page CRUD/graph/categories 的 URL 拼接、method、body、path query 编码。
+// 覆盖：tree/page CRUD/graph/claims 的 URL 拼接、method、body、path query 编码。
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import {
   createPage,
   deletePage,
-  getCategories,
   getGraph,
   getTree,
   readPage,
@@ -87,17 +86,5 @@ describe('wiki api client（#856 owner 级）', () => {
     ;(globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(mockResp({ nodes: [], edges: [] }))
     await getGraph()
     expect(lastCall()[0]).toBe('/api/v1/wiki/graph')
-  })
-
-  it('getCategories hits categories endpoint and parses grouped map', async () => {
-    const body = {
-      idea: [{ path: 'a.md', title: 'A', category: 'idea', excerpt: '…' }],
-      // 未知 category 值也按开放词表原样成组返回
-      'x-new': [{ path: 'b.md', title: 'B', category: 'x-new', excerpt: '…' }],
-    }
-    ;(globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(mockResp(body))
-    const res = await getCategories()
-    expect(lastCall()[0]).toBe('/api/v1/wiki/categories')
-    expect(res).toEqual(body)
   })
 })

@@ -7,7 +7,7 @@
 // 形态（与 NodeFs 对照）：
 //   - 读侧自实现：FileArchive.read 的 DirListing 无内容、FileReading 的 16MB/binary-null 语义
 //     不合 wiki 契约（readPage content 恒 string、tree title 需 frontmatter）。snapshot() 经
-//     getArchive 拉全库 tar + parseTar 收集内容，buildTree/listCategoryPages 在快照上跑与
+//     getArchive 拉全库 tar + parseTar 收集内容，buildTree 在快照上跑与
 //     NodeFs 等价的过滤/分组/title 语义；readPage 单文件 probe（无字节上限，对齐 NodeFs 全读）。
 //   - 写侧委托 FileArchive 显式容器名三方法（writeInContainer/createInContainer/deleteInContainer，
 //     #784）：write/create/delete 的原语序列（幂等 start → exec mkdir → putArchive / exec rm）
@@ -31,11 +31,10 @@ import { FileExists, FileInvalidPath, FileNotFound } from '../files/errors'
 import { parseTar, type TarEntry } from '../files/tar'
 import { MAX_FILE_READ_BYTES, WALK_LIMIT } from '../files/values'
 import { WIKI_ROOT } from '../wikiContainers/values'
-import { claimsSidecarPath, cmp, decodeUtf8Strict, FrontmatterParser, frontmatterTitle, h1Title } from './logic'
+import { claimsSidecarPath, cmp, decodeUtf8Strict, FrontmatterParser, frontmatterTitle } from './logic'
 import { SKIP_DIRS, SKIP_FILES } from './values'
 import { WikiInvalidPath, WikiPageExists, WikiPageNotFound } from './errors'
 import type {
-  WikiCategoryPage,
   WikiFileSystem,
   WikiPage,
   WikiTree,
@@ -144,30 +143,6 @@ export class DockerWikiFileSystem implements WikiFileSystem {
     return { path: relPath, title: frontmatterTitle(frontmatter) ?? stem, content }
   }
 
-  // —— Port: list_category_pages ——
-
-  async listCategoryPages(): Promise<WikiCategoryPage[]> {
-    const entries = await this.snap()
-    if (entries === null) return []
-    const pages: WikiCategoryPage[] = []
-    for (const t of entries) {
-      if (!this.isPageEntry(t)) continue
-      if (t.data === null) continue // 超大/未收集 → 跳过该页（对齐 NodeFs readText null → skip）
-      let content: string
-      try {
-        content = decodeUtf8Strict(t.data)
-      } catch {
-        continue // 读不出/解码失败 → 调用方跳过该页（codex #129 P2）
-      }
-      const { frontmatter, body } = this.parser.parse(content)
-      const stem = stemOf(t.name.slice(t.name.lastIndexOf('/') + 1))
-      const title = frontmatterTitle(frontmatter) ?? h1Title(body) ?? stem
-      pages.push({ path: t.name, title, content })
-    }
-    pages.sort((a, b) => cmp(a.path, b.path))
-    return pages
-  }
-
   // —— Port: write_page / create_page / delete_page（委托 FileArchive 显式容器名三方法）——
 
   async writePage(relPath: string, content: string): Promise<{ path: string }> {
@@ -224,7 +199,7 @@ export class DockerWikiFileSystem implements WikiFileSystem {
   // tree 页条目：过滤后返回 {path,title}；非页（目录/symlink/非 .md/SKIP/顶层散落）→ null。
   private treePage(t: TarEntry): WikiTreePage | null {
     if (!this.isPageEntry(t)) return null
-    if (!t.name.includes('/')) return null // 顶层散落页不收（categories 才收，对齐 NodeFs buildTree）
+    if (!t.name.includes('/')) return null // 顶层散落页不收（对齐 NodeFs buildTree）
     const stem = stemOf(t.name.slice(t.name.lastIndexOf('/') + 1))
     // title = frontmatter（全文 parse；frontmatter 在文件头，与 NodeFs 读前缀等价）→ stem。
     // 无 H1 fallback（对齐 NodeFs buildTree 的 pageTitle 语义）；超大/解码失败 → stem。

@@ -1,7 +1,7 @@
 // wiki REST 契约测试（#335 · #315 §8 checklist 对 Express 实现重跑；#621 起经 serviceFor 注入
 // 内存 fake WikiFileSystem，对齐 files.test.ts 的内存 Port 注入模式——存储适配器行为由
 // wikiDockerFs.test.ts 单测覆盖，本文件钉 REST ↔ Port 接线：信封/错误映射/隔离）。
-// #856（退役①）：owner 级端点 /api/v1/wiki/{tree,page,graph,categories,claims}，ownerId 直取
+// #856（退役①）：owner 级端点 /api/v1/wiki/{tree,page,graph,claims}，ownerId 直取
 // 认证身份——容器行 20040 归属面随耦合退役，跨用户探测面结构性消失（隔离测试改为：
 // 各用户寻址只达本人 fake 存储，他人页不可见）；path 校验先于 ensure（非法请求不触碰编排面）。
 // 信封（#312）+ 错误映射（90002/30040/30041）。compile 触发面已随 #859 退役。
@@ -20,10 +20,10 @@ function wikiFixture(): Record<string, string> {
     'concepts/attention.md': '---\ntitle: Attention\n---\n# Attention\n见 [[self-attention]]。\n',
     'domains/cv/papers/resnet.md': '---\npaper:\n  title: ResNet\nrelated_pages: [attention]\n---\n# ResNet\n',
     'experiments/trial-1.md': '---\ntitle: Trial 1\n---\n# Trial 1\n',
-    'thoughts/idea-1.md': '# First Idea\n\n`category: idea`\n\nIdea 摘录。\n',
+    'thoughts/idea-1.md': '# First Idea\n\nIdea 摘录。\n',
     '_attachments/cache.md': 'x',
     'index.md': '# INDEX',
-    'root-note.md': '# Root Note\n\n`category: rootcat`\n\nRoot 摘录。\n',
+    'root-note.md': '# Root Note\n\nRoot 摘录。\n',
   }
 }
 
@@ -271,23 +271,6 @@ describe('wiki REST（接缝 #2 信封 + #335；#856 owner 级）', () => {
     expect(edges).toContainEqual({ from: 'domains/cv/papers/resnet.md', to: 'concepts/attention.md' })
     const ghost = res.body.data.nodes.find((n: { id: string }) => n.id === 'self-attention')
     expect(ghost).toMatchObject({ id: 'self-attention', title: 'self-attention', ghost: true })
-  })
-
-  // ---------------------------- GET /categories ----------------------------
-
-  it('categories：按 category 分组（含顶层散落页）、开放词表、条目含 path/title/category/excerpt', async () => {
-    const u = await seedWikiUser('ucat')
-    const res = await ctx.request.get(`${BASE}/categories`).set(bearer(u.token))
-    expect(res.body.code).toBe(0)
-    const data = res.body.data as Record<string, Array<{ path: string; title: string; category: string; excerpt: string }>>
-    expect(Object.keys(data).sort()).toEqual(['idea', 'rootcat'])
-    expect(data.idea.map((i) => i.path)).toEqual(['thoughts/idea-1.md'])
-    expect(data.idea[0].title).toBe('First Idea') // 无 frontmatter → H1
-    expect(data.idea[0].category).toBe('idea')
-    expect(data.idea[0].excerpt).toContain('Idea 摘录')
-    expect(data.rootcat.map((i) => i.path)).toEqual(['root-note.md']) // 顶层散落页进 categories
-    const allPaths = Object.values(data).flat().map((i) => i.path)
-    expect(allPaths).not.toContain('concepts/attention.md') // 无标记页不进
   })
 
   // ---------------------------- GET /claims（#789 story 42 数据面） ----------------------------

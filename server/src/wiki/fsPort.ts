@@ -34,21 +34,6 @@ export interface WikiPage {
   okf?: OkfBadge
 }
 
-// categories 聚合入口：递归扫全库 .md（含顶层散落页），带全文 content 与 title。
-// 与 build_tree 共享 root 防护与遍历防护；title 语义对齐 read_page（frontmatter→H1→stem）。
-export interface WikiCategoryPage {
-  path: string
-  title: string
-  content: string
-}
-
-export interface WikiCategoryItem {
-  path: string
-  title: string
-  category: string
-  excerpt: string
-}
-
 export interface WikiGraphNode {
   id: string
   title: string
@@ -68,7 +53,6 @@ export interface WikiGraph {
 export interface WikiFileSystem {
   buildTree(): Promise<WikiTree>
   readPage(relPath: string): Promise<WikiPage>
-  listCategoryPages(): Promise<WikiCategoryPage[]>
   writePage(relPath: string, content: string): Promise<{ path: string }>
   createPage(relPath: string, content: string): Promise<{ path: string }>
   deletePage(relPath: string): Promise<void>

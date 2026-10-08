@@ -28,13 +28,13 @@ describe('application shell layout', () => {
 
   it('lets routed workspaces consume the shell content height instead of the viewport', () => {
     const app = readFileSync('src/App.vue', 'utf8')
-    const pages = ['ChatView.vue', 'WikiView.vue', 'CategoriesView.vue']
+    const pages = ['ChatView.vue', 'WikiView.vue']
       .map((name) => readFileSync(`src/views/${name}`, 'utf8'))
       .join('\n')
 
     expect(app).toMatch(/\.app-shell\s*{[^}]*height: 100svh/s)
     expect(app).toMatch(/\.app-content\s*{[^}]*flex: 1;[^}]*min-height: 0/s)
     expect(pages).not.toContain('100vh')
-    expect(pages.match(/height: 100%;/g)).toHaveLength(3)
+    expect(pages.match(/height: 100%;/g)).toHaveLength(2)
   })
 })

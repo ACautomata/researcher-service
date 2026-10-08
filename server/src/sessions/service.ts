@@ -469,6 +469,18 @@ export class SessionService {
       }
       throw fail(CODE.INTERNAL, 'run 入队失败，请稍后重试')
     }
+    // 自动标题（story 5 · 语义翻案：「首个 run 终态时」→「首条消息被接受（dispatch ack）时」）：
+    // user 消息行在 REST 面已落库（insertWithNextTurn 上方），autoTitle 的数据前提（首条 user
+    // 行）此刻已满足——与 run 生命周期彻底解耦，单点覆盖 pre-start 失败/空聚合 failed/abort/
+    // 任何未来失败形态（旧实现只挂「终态聚合非空的 recordTurn」，失败 run 永无标题，#747 回归②
+    // 「无标题」根因）。best-effort + try/catch 吞错（此刻消息已入队，REST 报错会诱发 replay；
+    // 标题属非关键路径）。recordTurn 内调用保留为幂等兜底（REST 面吞错后的补漏 + resume/recover）。
+    try {
+      await this.autoTitle(sessionId)
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn(`[sessions] autoTitle best-effort 失败: session=${sessionId}: ${String(err)}`)
+    }
     return { messageId: row.id, turn: row.turn, runId: cmd.runId, replay: false }
   }
 
@@ -618,6 +630,8 @@ export class SessionService {
 
   // ---- RunService recordTurn 注入缝（生产实现）：终态聚合落 assistant 行（含终态 checkpoint
   // 锚点 anchorCheckpointId——issue 点名列；aborted/failed 路径 null）+ 自动标题（story 5）。
+  // autoTitle 的主触发已移到 sendMessage（REST 面 dispatch ack，见 sendMessage 注记）；此处保留
+  // 为幂等兜底（title !== '' early-return）——REST 面吞错后的补漏 + resume/recover 路径。
   // attachmentsJson 走 serializeAttachments（唯一序列化实现——单一来源），字段序稳定
   //（回放零差异断言的前提）。----
   async recordTurn(p: RecordTurnPayload): Promise<void> {
@@ -633,7 +647,11 @@ export class SessionService {
     if (parent) this.publishSessionEvent(parent.ownerId, 'session.updated', { projectionChanged: true }, child?.parentSessionId ?? p.sessionId)
   }
 
-  // 自动标题（story 5）：首个 run 终态时 title 仍空 → 首条 user 消息截断派生 + session.updated。
+  // 自动标题（story 5 · 语义翻案）：title 仍空 → 首条 user 消息截断派生 + session.updated。
+  // 触发时机由 story 5 原文「首个 run 终态时 title 仍空」修订为「首条消息被接受时 title 仍空」
+  // （主触发 = sendMessage dispatch ack；recordTurn 幂等兜底）——发消息立即出标题，主流产品
+  // 行为，且覆盖 run 失败/空聚合/pre-start 失败一切形态（#747 回归②「无标题」根因：旧实现只挂
+  // recordTurn，失败 run 永走不到）。幂等（title !== '' early-return）。
   private async autoTitle(sessionId: string): Promise<void> {
     const session = await this.deps.prisma.session.findUnique({
       where: { id: sessionId },

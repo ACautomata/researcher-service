@@ -8,6 +8,7 @@ import path from 'node:path'
 import {
   DEFAULT_MINIMAX,
   DEFAULT_MINIMAX_MODELS_JSON,
+  assertLlmApiKey,
   defaultProviderRowId,
 } from '../src/runner/providerDefaults'
 
@@ -43,5 +44,31 @@ describe('minimax 默认 provider 两方同源守卫（#775）', () => {
     const origin = new URL(DEFAULT_MINIMAX.baseUrl).origin // https://api.minimaxi.com
     expect(script).toContain(`'${new URL(DEFAULT_MINIMAX.baseUrl).hostname}'`)
     expect(origin.startsWith('https://')).toBe(true)
+  })
+})
+
+describe('assertLlmApiKey（#747 回归② · 生产 fail-fast）', () => {
+  it('生产 + key 缺失（undefined）→ throw（fail-fast，健康门拦截）', () => {
+    expect(() => assertLlmApiKey({ env: {}, production: true })).toThrow(/LLM_API_KEY/)
+  })
+
+  it('生产 + key 空串 → throw（同缺失——cd.yml 渲染空值行即此形态）', () => {
+    expect(() => assertLlmApiKey({ env: { LLM_API_KEY: '' }, production: true })).toThrow(/LLM_API_KEY/)
+  })
+
+  it('生产 + key 非空 → 通过', () => {
+    expect(() => assertLlmApiKey({ env: { LLM_API_KEY: 'sk-x' }, production: true })).not.toThrow()
+  })
+
+  it('dev + key 缺失 → warn 不阻断（AGENTS.md「仅起控制面/登录可跳过」语义）', () => {
+    const warns: string[] = []
+    expect(() => assertLlmApiKey({ env: {}, production: false, warn: (m) => warns.push(m) })).not.toThrow()
+    expect(warns.some((m) => m.includes('LLM_API_KEY'))).toBe(true)
+  })
+
+  it('dev + key 非空 → 无 warn', () => {
+    const warns: string[] = []
+    assertLlmApiKey({ env: { LLM_API_KEY: 'sk-x' }, production: false, warn: (m) => warns.push(m) })
+    expect(warns).toEqual([])
   })
 })
