@@ -48,93 +48,63 @@ describe('prod compose 去 host 挂载（issue #593，ADR 0013）', () => {
     }
   })
 
-  it('home 模板 env 指向镜像内路径（构建期 COPY 产物）；openclaw.json 模板随 T0 #801 退役', () => {
-    expect(compose).toMatch(/OPENCLAW_TEMPLATE_DIR: \/app\/templates\/researcher/)
-    expect(compose).not.toMatch(/OPENCLAW_TEMPLATE_JSON/)
+  it('#858：fleet 编排配置面退役——OPENCLAW_TEMPLATE_DIR / OPENCLAW_FLEET_ROOT / OPENCLAW_IMAGE / OPENCLAW_NAMED_VOLUMES / LIFECYCLE_WORKER_CONCURRENCY 不再出现', () => {
+    expect(compose).not.toMatch(/OPENCLAW_TEMPLATE_DIR:/)
+    expect(compose).not.toMatch(/OPENCLAW_FLEET_ROOT:/)
+    expect(compose).not.toMatch(/OPENCLAW_IMAGE:/)
+    expect(compose).not.toMatch(/OPENCLAW_NAMED_VOLUMES:/)
+    expect(compose).not.toMatch(/LIFECYCLE_WORKER_CONCURRENCY:/)
+    expect(compose).not.toMatch(/CREDENTIAL_ENCRYPTION_KEYS:/)
   })
 
-  it('fleet 根为容器内工作目录、无宿主 bind（/fleet 绑定已移除；与 devDeploy.test.ts 同形断言）', () => {
-    // issue #595 收口锚定：#593 删 /fleet:/fleet bind 后 OPENCLAW_FLEET_ROOT 仍是容器内路径——
-    // named volume 拓扑（ADR 0011）下 OpenClaw 容器不 bind 宿主树，createComplete 的 instanceDir/
-    // provision 落容器私有 /fleet（容器重建即空、create 幂等重建；卷内容由 #588 派生镜像骨架播种）。
-    expect(compose).toMatch(/OPENCLAW_FLEET_ROOT: \/fleet/)
+  it('落盘根为容器内工作目录、无宿主 bind（#858 DATA_ROOT 取代 fleet 根；与 devDeploy.test.ts 同形断言）', () => {
+    expect(compose).toMatch(/DATA_ROOT: \/data/)
+    expect(compose).not.toMatch(/OPENCLAW_FLEET_ROOT/)
   })
 })
 
-describe('server 镜像构建期入模板（issue #593，ADR 0013）', () => {
+describe('server 镜像构建（#858 后：无模板注入）', () => {
   const df = readRepoFile('server/Dockerfile')
 
-  it('COPY --from=template 整棵 researcher 克隆到 /app/templates/researcher（provision cp 源）', () => {
-    expect(df).toMatch(/COPY --from=template \/ \/app\/templates\/researcher/)
-  })
-
-  it('COPY template 后清理 .git（issue #594：dev 本地 build 的 template context 带 .git 且无 cd.yml 预处理；防经 provision cp 进容器 home，对齐 CD 的 rm -rf .git 意图）', () => {
-    expect(df).toMatch(/RUN rm -rf \/app\/templates\/researcher\/\.git/)
+  it('无 COPY --from=template / 无 .git 清理（#858：home 模板 provisioning 随 fleet 退役）', () => {
+    expect(df).not.toMatch(/COPY --from=template/)
+    expect(df).not.toMatch(/templates\/researcher/)
+    expect(df).not.toMatch(/rm -rf \/app\/templates/)
   })
 
   it('无 COPY --from=deploy（openclaw.json 配置面随 T0 #801 退役，server 不再消费模板文件）', () => {
     expect(df).not.toMatch(/COPY --from=deploy/)
   })
 
-  it('模板 COPY 位于 runtime 阶段（ENTRYPOINT 之前、docker-entrypoint COPY 附近）', () => {
-    // lastIndexOf：`FROM node:lts-slim AS build` 也含 `FROM node:lts-slim` 子串——
-    // indexOf 会误配 build 阶段使断言恒真（spec 审查 #593 指出）；lastIndexOf 取
-    // 文件最后出现的 runtime 阶段 `FROM node:lts-slim`（无 AS）。
+  it('runtime 层安装 git（issue #790：openwiki 生成生命周期硬依赖 git——落地镜像 git init/源指纹；宿主 CI 直跑 npm test 有 git 必绿、容器内每个 wiki 更新 run 必坏的 gap 只能靠部署契约测试钉住）', () => {
     const runtimeStart = df.lastIndexOf('FROM node:lts-slim')
     const entrypointIdx = df.indexOf('COPY docker-entrypoint.sh')
     expect(runtimeStart).toBeGreaterThanOrEqual(0)
     expect(entrypointIdx).toBeGreaterThan(runtimeStart)
     const runtime = df.slice(runtimeStart, entrypointIdx)
-    expect(runtime).toMatch(/COPY --from=template/)
-    expect(runtime).not.toMatch(/COPY --from=deploy/)
-  })
-
-  it('runtime 层安装 git（issue #790：openwiki 生成生命周期硬依赖 git——落地镜像 git init/源指纹；宿主 CI 直跑 npm test 有 git 必绿、容器内每个 wiki 更新 run 必坏的 gap 只能靠部署契约测试钉住）', () => {
-    const runtimeStart = df.lastIndexOf('FROM node:lts-slim')
-    const entrypointIdx = df.indexOf('COPY docker-entrypoint.sh')
-    const runtime = df.slice(runtimeStart, entrypointIdx)
     expect(runtime).toMatch(/apt-get install[^\n]*\bgit\b/)
   })
 })
 
-describe('CD 工作流（issue #593，ADR 0013）', () => {
+describe('CD 工作流（issue #593，ADR 0013；#858 后无模板注入）', () => {
   const cd = readRepoFile('.github/workflows/cd.yml')
 
-  it('server 构建经 buildx 多 context 注入 template（researcher 克隆）；openclaw.json 的 deploy context 已随 T0 #801 退役', () => {
+  it('server 构建多 context 仅 official/ + plugins/（#858：template context 随 fleet provisioning 退役）', () => {
     expect(cd).toMatch(/build-contexts:/)
-    expect(cd).toMatch(/template=\$\{\{ github\.workspace \}\}\/_templates\/researcher/)
+    expect(cd).toMatch(/official=\$\{\{ github\.workspace \}\}\/official/)
+    expect(cd).toMatch(/plugins=\$\{\{ github\.workspace \}\}\/plugins/)
+    expect(cd).not.toMatch(/template=/)
     expect(cd).not.toMatch(/deploy=\$\{\{ github\.workspace \}\}\/deploy/)
   })
 
-  it('构建机构建期 clone researcher 模板（模板随镜像 :sha 版本化）', () => {
-    // env 先归一默认仓库（secret 可覆盖），clone 只消费 $REPO 变量（防 secret 值注入命令）
-    expect(cd).toMatch(/REPO="\$\{RESEARCHER_REPO:-https:\/\/github\.com\/ACautomata\/researcher\.git\}"/)
-    expect(cd).toMatch(/git clone --depth 1 "\$REPO" "\$\{\{ github\.workspace \}\}\/_templates\/researcher"/)
+  it('无构建期 clone researcher 模板步骤（#858 退役）', () => {
+    expect(cd).not.toMatch(/Clone researcher home template/)
+    expect(cd).not.toMatch(/RESEARCHER_REPO/)
+    expect(cd).not.toMatch(/git clone --depth 1/)
   })
 
-  it('不再 scp 分发 openclaw.json / 不再宿主 clone 模板', () => {
+  it('不再 scp 分发 openclaw.json', () => {
     expect(cd).not.toMatch(/cp deploy\/openclaw\.json/)
     expect(cd).not.toMatch(/TEMPLATE_DIR=\/srv\/openclaw\/template/)
-  })
-
-  it('clone 后清理 .git（模板上下文不进镜像/容器 home）', () => {
-    // COPY --from=template 整棵浅克隆入镜像：.git 不删会永久携带 + provision cp -a 时
-    // 一并拷进容器 ~/.openclaw/.git。clone 步骤内 rm -rf 兜底。
-    expect(cd).toMatch(/rm -rf "\$\{\{ github\.workspace \}\}\/_templates\/researcher\/\.git"/)
-  })
-})
-
-describe('prod flag 默认 named volume（issue #593 AC4，ADR 0011）', () => {
-  it('config.ts readNamedVolumes 未设置时默认 true（compose 不覆盖即生产同效）', () => {
-    // 对齐 openclawImage.test.ts「读 config.ts 源码锚定默认值」模式：compose 不设该变量，
-    // 默认翻转即生产静默回退 bind 拓扑——静态锚定防漂移（防「compose 无显式设置」测试假绿）。
-    const src = readRepoFile('server/src/config.ts')
-    expect(src).toMatch(/if \(v === undefined\) return true/)
-    expect(src).toMatch(/const v = process\.env\.OPENCLAW_NAMED_VOLUMES/)
-  })
-
-  it('compose 不显式覆盖 OPENCLAW_NAMED_VOLUMES（保持默认 true）', () => {
-    const compose = readRepoFile('deploy/docker-compose.deploy.yml')
-    expect(compose).not.toMatch(/OPENCLAW_NAMED_VOLUMES/)
   })
 })

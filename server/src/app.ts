@@ -7,7 +7,6 @@ import { createUsersRouter } from './routes/users'
 import { traceLogsRouter } from './routes/traceLogs'
 import { approvalLogsRouter, fileOverwriteLogsRouter } from './runner/auditRoutes'
 import { usageRouter } from './runner/usageRoutes'
-import { createContainersRouter } from './routes/containers'
 import { createWikiRouter, type WikiRouterDeps } from './wiki/routes'
 import { createModelsRouter, type ModelsRouterDeps } from './models/routes'
 import {
@@ -21,17 +20,11 @@ import { createEventsRouter, type EventsRouterDeps } from './events/routes'
 import { createSessionsRouter, type SessionsRouterDeps } from './sessions/routes'
 import { createAttachmentsRouter, type AttachmentsRouterDeps } from './attachments/routes'
 import { createPluginsRouter, type PluginsRouterDeps } from './plugins/routes'
-import { Orchestrator } from './containers/orchestrator'
-import { FleetDeps } from './containers/deps'
-import type { FleetConfig } from './containers/values'
 import { envelopeErrorHandler, notFound } from './middleware/errorHandler'
 import './types' // Express Request 增强（req.user / req.prisma）
 
 export interface AppDeps {
   prisma: PrismaClient
-  // 容器编排接缝（#334）：测试注入假 runtime + inline queue + tmp fleet config；
-  // 生产由 server.ts 装真 DockerRuntime + BullMQ 队列。缺省 = 无编排（containers 路由不挂）。
-  orchestrator?: Orchestrator
   // wiki 接缝（#335）：compile 触发等。缺省 = no-op（无编排）。
   wiki?: WikiRouterDeps
   // models 接缝（#336；#775 写盘链退役后仅剩白名单校验注入缝——lookup 测试注 fake 免真 DNS，
@@ -64,7 +57,7 @@ export interface AppDeps {
 }
 
 // createApp 工厂：PrismaClient 经依赖注入，测试可传 test DB（接缝 #2）。
-export function createApp({ prisma, orchestrator, wiki, models, providerEndpoints, files, docs, events, sessions, attachments, plugins }: AppDeps): Application {
+export function createApp({ prisma, wiki, models, providerEndpoints, files, docs, events, sessions, attachments, plugins }: AppDeps): Application {
   const app = express()
   // wiki 内容契约无大小上限（codex PR#346）：挂载路径内请求先走 5mb limit，其余端点仍 256kb。
   // 须先于全局 parser —— body-parser 对已解析 body（req._body）会跳过，故 wiki 命中后不二次解析。
@@ -89,9 +82,6 @@ export function createApp({ prisma, orchestrator, wiki, models, providerEndpoint
   app.use('/api/v1/file-overwrite-logs', fileOverwriteLogsRouter)
   // #800 admin 核算面：usage 聚合（llm_usage_records → aggregateUsage；admin-only）。
   app.use('/api/v1/usage', usageRouter)
-  if (orchestrator) {
-    app.use('/api/v1/containers', createContainersRouter(orchestrator))
-  }
   // wiki（#335 → #784 换轨 → #856 归属门改挂 ownerId）：owner 级路由 /api/v1/wiki/...
   // （对齐 #857 models / sessions 扁平挂用户先例），零容器行查询；存储面 = 每用户 wiki 容器
   // （ensure 经 wikiContainers 注入）；compile 触发经 wiki 注入。
@@ -104,8 +94,9 @@ export function createApp({ prisma, orchestrator, wiki, models, providerEndpoint
   // provider_endpoints（#775，731 §3.1）：端点白名单 admin 管理面，无条件挂载（requireAdmin
   // 在路由内；deps 同为白名单校验注入缝）。
   app.use('/api/v1', createProviderEndpointsRouter(providerEndpoints ?? {}))
-  // files（T0 #801 只读化）：root=lab 只读 GET 面，FileArchive 必填，仅在有注入时挂载
-  // （条件挂载先例）。
+  // files（T0 #801 只读化；#858 容器 CRUD 退役后本路由是 /api/v1/containers 挂载的唯一残余
+  // ——URL 契约保留（root=lab 会话沙箱只读 GET，<name> = sessionId），FileArchive 必填，
+  // 仅在有注入时挂载（条件挂载先例）。
   if (files) {
     app.use('/api/v1/containers', createFilesRouter(files))
   }
@@ -140,11 +131,3 @@ export function createApp({ prisma, orchestrator, wiki, models, providerEndpoint
   app.use(envelopeErrorHandler) // 唯一错误面（必须最后挂载）
   return app
 }
-
-// 生产装配：由 server.ts 调用（DockerRuntime + BullMQ 队列），返回编排器与资源句柄供优雅关闭。
-export interface FleetAssembly {
-  orchestrator: Orchestrator
-  deps: FleetDeps
-}
-
-export type { FleetConfig }

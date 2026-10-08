@@ -128,7 +128,7 @@ function closeReset(): void {
 
 // 配额 inline：开始编辑 → 保存（数字校验本地兜底；后端非法返 10043）
 function beginQuotaEdit(u: UserRowDTO): void {
-  quotaEditing.value = { ...quotaEditing.value, [u.id]: String(u.quota.limit) }
+  quotaEditing.value = { ...quotaEditing.value, [u.id]: String(u.maxContainers) }
 }
 
 function isQuotaEditing(userId: string): boolean {
@@ -225,7 +225,7 @@ defineExpose({
       <el-table-column label="配额" width="170">
         <template #default="{ row }">
           <span v-if="!isQuotaEditing(row.id)" data-test="quota-view">
-            {{ row.quota.used }}/{{ row.quota.limit }}
+            {{ row.maxContainers }}
           </span>
           <span v-else class="quota-edit">
             <el-input

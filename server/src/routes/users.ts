@@ -54,11 +54,11 @@ export function createUsersRouter(deps: UsersRouterDeps = {}): Router {
     next()
   })
 
-  // GET / —— 列表 + containerCount（acceptance 每行字段）
+  // GET / —— 列表（#858：containerCount/quota{used,limit} 随容器行表退役删除；maxContainers
+  // 列保留为普通用户列（与 maxConcurrentRuns 同位），列退役归终局票）。
   router.get('/', async (req: Request, res: Response) => {
     const users = await req.prisma.user.findMany({
       orderBy: { createdAt: 'asc' },
-      include: { _count: { select: { containers: true } } },
     })
     ok(res, {
       users: users.map((u) => ({
@@ -67,8 +67,7 @@ export function createUsersRouter(deps: UsersRouterDeps = {}): Router {
         email: u.email,
         role: u.role,
         isActive: u.isActive,
-        containerCount: u._count.containers,
-        quota: { used: u._count.containers, limit: u.maxContainers },
+        maxContainers: u.maxContainers,
         maxConcurrentRuns: u.maxConcurrentRuns,
         mustChangePassword: u.mustChangePassword,
         createdAt: u.createdAt,

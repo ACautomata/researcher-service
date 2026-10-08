@@ -101,14 +101,6 @@ describe('JWT secret strength env (slice config)', () => {
     if (secret === undefined) delete process.env.JWT_SECRET
     else vi.stubEnv('JWT_SECRET', secret)
     vi.stubEnv('NODE_ENV', env)
-    // C1：production 下 config 加载还校验 CREDENTIAL_ENCRYPTION_KEYS（gateway token 加密密钥）。
-    // 提供合法 32B base64 隔离 JWT_SECRET 变量——否则放行用例会因缺加密密钥被误判 THREW。
-    if (env === 'production') {
-      vi.stubEnv('CREDENTIAL_ENCRYPTION_KEYS', Buffer.alloc(32, 0x01).toString('base64'))
-      // 第六轮 P2：production 还校验 OPENCLAW_TEMPLATE_DIR（须存在可读目录）。stub process.cwd()
-      // 满足校验，隔离 JWT_SECRET 变量（同上理由）。
-      vi.stubEnv('OPENCLAW_TEMPLATE_DIR', process.cwd())
-    }
     try {
       const { config } = await import('../src/config')
       return config.jwtSecret
@@ -213,62 +205,10 @@ describe('refresh ttl env (slice config)', () => {
   })
 })
 
-describe('production template dir (slice config)', () => {
-  async function loadTemplateDir(opts: {
-    env?: string
-    dir?: string | undefined
-  }): Promise<string | 'THREW'> {
-    vi.resetModules()
-    const { env = 'production', dir } = opts
-    vi.stubEnv('NODE_ENV', env)
-    if (env === 'production') {
-      // 隔离 templateDir 变量：提供其余生产必填（JWT_SECRET / CREDENTIAL_ENCRYPTION_KEYS），
-      // 否则放行用例会因缺其它必填被误判 THREW（同 loadSecret 模式）。
-      vi.stubEnv('JWT_SECRET', 's'.repeat(32))
-      vi.stubEnv('CREDENTIAL_ENCRYPTION_KEYS', Buffer.alloc(32, 0x01).toString('base64'))
-    }
-    if (dir === undefined) delete process.env.OPENCLAW_TEMPLATE_DIR
-    else vi.stubEnv('OPENCLAW_TEMPLATE_DIR', dir)
-    try {
-      const { config } = await import('../src/config')
-      return config.fleet.templateDir
-    } catch {
-      return 'THREW' // fail-fast
-    } finally {
-      vi.unstubAllEnvs()
-    }
-  }
-
-  it('生产缺 OPENCLAW_TEMPLATE_DIR → fail-fast（修前走 ../researcher 兜底照常起）', async () => {
-    expect(await loadTemplateDir({ dir: undefined })).toBe('THREW')
-  })
-
-  it('生产相对路径 → fail-fast（须绝对路径，防 cwd 漂移错配）', async () => {
-    expect(await loadTemplateDir({ dir: 'template/relative' })).toBe('THREW')
-  })
-
-  it('生产不存在的绝对路径 → fail-fast（须存在）', async () => {
-    expect(await loadTemplateDir({ dir: '/definitely-not-a-real-template-dir-xyz' })).toBe('THREW')
-  })
-
-  it('生产合法存在的绝对目录 → 放行并返回', async () => {
-    expect(await loadTemplateDir({ dir: process.cwd() })).toBe(process.cwd())
-  })
-
-  it('dev/test 缺省 → 走 ../researcher 兜底（不加 fail-fast，本地友好）', async () => {
-    expect(await loadTemplateDir({ env: 'development', dir: undefined })).toBe(
-      `${process.cwd()}/../researcher`,
-    )
-  })
-})
-
-// 意见[P2]（Codex 第七轮 #4）：OPENCLAW_FLEET_ROOT 相对路径时 path.join 保留相对性 —— instances/<name>/
-// home 与 openclaw.json 作 Docker bind 的 source 非绝对（Docker bind source 须绝对），POST 返 creating、
-// detached provisioning 后台失败留 error 行（部署故障静默掩盖，与 OPENCLAW_TEMPLATE_DIR 第六轮同类）。
-// 修复：生产强制绝对路径（对齐 readTemplateDir），显式相对 fail-fast；缺省走 cwd/fleet 绝对兜底；
-// dev/test 保持容忍（本地调试可显式相对）。
-describe('production fleet root (slice config)', () => {
-  async function loadFleetRoot(opts: {
+// #858（前身 OPENCLAW_FLEET_ROOT 意见[Codex 第七轮 #4]）：DATA_ROOT 生产强制绝对路径，
+// 显式相对 fail-fast；缺省走 cwd/data 绝对兜底；dev/test 保持容忍（本地调试可显式相对）。
+describe('production data root (slice config, #858)', () => {
+  async function loadDataRoot(opts: {
     env?: string
     root?: string | undefined
   }): Promise<string | 'THREW'> {
@@ -276,16 +216,14 @@ describe('production fleet root (slice config)', () => {
     const { env = 'production', root } = opts
     vi.stubEnv('NODE_ENV', env)
     if (env === 'production') {
-      // 隔离 fleet.root 变量：提供其余生产必填，否则放行用例被误判 THREW（同 loadTemplateDir 模式）。
+      // 隔离 dataRoot 变量：提供其余生产必填，否则放行用例被误判 THREW（同 loadSecret 模式）。
       vi.stubEnv('JWT_SECRET', 's'.repeat(32))
-      vi.stubEnv('CREDENTIAL_ENCRYPTION_KEYS', Buffer.alloc(32, 0x01).toString('base64'))
-      vi.stubEnv('OPENCLAW_TEMPLATE_DIR', process.cwd())
     }
-    if (root === undefined) delete process.env.OPENCLAW_FLEET_ROOT
-    else vi.stubEnv('OPENCLAW_FLEET_ROOT', root)
+    if (root === undefined) delete process.env.DATA_ROOT
+    else vi.stubEnv('DATA_ROOT', root)
     try {
       const { config } = await import('../src/config')
-      return config.fleet.root
+      return config.dataRoot
     } catch {
       return 'THREW' // fail-fast
     } finally {
@@ -293,164 +231,44 @@ describe('production fleet root (slice config)', () => {
     }
   }
 
-  it('生产相对路径 → fail-fast（修前 path.join 保留相对致 Docker bind 失败）', async () => {
-    expect(await loadFleetRoot({ root: 'fleet/relative' })).toBe('THREW')
+  it('生产相对路径 → fail-fast（须绝对路径，防 cwd 漂移错配）', async () => {
+    expect(await loadDataRoot({ root: 'data/relative' })).toBe('THREW')
   })
 
-  it('生产相对单段 fleet → fail-fast', async () => {
-    expect(await loadFleetRoot({ root: 'fleet' })).toBe('THREW')
+  it('生产相对单段 data → fail-fast', async () => {
+    expect(await loadDataRoot({ root: 'data' })).toBe('THREW')
   })
 
   it('生产合法绝对路径 → 放行', async () => {
-    expect(await loadFleetRoot({ root: '/var/fleet' })).toBe('/var/fleet')
+    expect(await loadDataRoot({ root: '/var/panel-data' })).toBe('/var/panel-data')
   })
 
-  it('生产缺省 → cwd/fleet 绝对兜底（Docker bind 安全）', async () => {
-    expect(await loadFleetRoot({ root: undefined })).toBe(`${process.cwd()}/fleet`)
+  it('生产缺省 → cwd/data 绝对兜底', async () => {
+    expect(await loadDataRoot({ root: undefined })).toBe(`${process.cwd()}/data`)
   })
 
   it('dev 相对路径 → 容忍（本地调试不受影响）', async () => {
-    expect(await loadFleetRoot({ env: 'development', root: 'fleet/rel' })).toBe('fleet/rel')
+    expect(await loadDataRoot({ env: 'development', root: 'data/rel' })).toBe('data/rel')
   })
 })
 
-describe('named volumes flag (slice config, #590/#592)', () => {
-  async function loadNamedVolumes(env: string | undefined): Promise<boolean | 'THREW'> {
-    vi.resetModules() // 清 config 模块缓存，让动态 import 重新快照 env
-    if (env === undefined) delete process.env.OPENCLAW_NAMED_VOLUMES
-    else vi.stubEnv('OPENCLAW_NAMED_VOLUMES', env)
-    try {
-      const { config } = await import('../src/config')
-      return config.fleet.namedVolumes
-    } catch {
-      return 'THREW' // fail-fast
-    } finally {
-      vi.unstubAllEnvs() // 恢复 env（避免污染后续测试文件）
-    }
-  }
-
-  it('未设置 → 默认 true（named volume 拓扑，#592 本地/CI 默认）', async () => {
-    expect(await loadNamedVolumes(undefined)).toBe(true)
-  })
-
-  it('显式 true → 开启 named volume 拓扑', async () => {
-    expect(await loadNamedVolumes('true')).toBe(true)
-  })
-
-  it('显式 false → 保持旧 bind', async () => {
-    expect(await loadNamedVolumes('false')).toBe(false)
-  })
-
-  it('非法 TRUE（大小写敏感）→ fail-fast（防错值静默按默认走）', async () => {
-    expect(await loadNamedVolumes('TRUE')).toBe('THREW')
-  })
-
-  it('非法 1 → fail-fast', async () => {
-    expect(await loadNamedVolumes('1')).toBe('THREW')
-  })
-
-  it('非法 yes → fail-fast', async () => {
-    expect(await loadNamedVolumes('yes')).toBe('THREW')
+// 纯准据共享单测（#858 起 OPENCLAW_IMAGE 随 fleet 退役；SANDBOX/WIKI_IMAGE 共用同一判定，
+// 判定语义钉死在此）：config 与 wikiImage.test.ts 静态断言共享同一准据。
+describe('isFloatingImageRef 纯准据（#695 判定内核）', () => {
+  it('无 tag / :latest 浮动；版本 tag / digest 不浮动', () => {
+    expect(isFloatingImageRef('ghcr.io/a/b/img')).toBe(true)
+    expect(isFloatingImageRef('img')).toBe(true)
+    expect(isFloatingImageRef('ghcr.io/a/b/img:latest')).toBe(true)
+    expect(isFloatingImageRef('img:latest')).toBe(true)
+    expect(isFloatingImageRef('img:')).toBe(true) // 空 tag 不构成钉版
+    expect(isFloatingImageRef('ghcr.io/a/b/img:2026.9.4')).toBe(false)
+    expect(isFloatingImageRef('registry.internal:5000/img:2026.9.4')).toBe(false)
+    expect(isFloatingImageRef(`ghcr.io/a/b/img@sha256:${'a'.repeat(64)}`)).toBe(false)
+    expect(isFloatingImageRef(`ghcr.io/a/b/img:latest@sha256:${'a'.repeat(64)}`)).toBe(false)
   })
 })
 
-describe('fleet image pinning env (slice config, #695)', () => {
-  async function loadFleetImage(opts: {
-    env?: string
-    image?: string | undefined
-  }): Promise<string | 'THREW'> {
-    vi.resetModules() // 清 config 模块缓存，让动态 import 重新快照 env
-    const { env = 'production', image } = opts
-    vi.stubEnv('NODE_ENV', env)
-    if (env === 'production') {
-      // 隔离 fleet.image 变量：提供其余生产必填，否则放行用例被误判 THREW。
-      vi.stubEnv('JWT_SECRET', 's'.repeat(32))
-      vi.stubEnv('CREDENTIAL_ENCRYPTION_KEYS', Buffer.alloc(32, 0x01).toString('base64'))
-      vi.stubEnv('OPENCLAW_TEMPLATE_DIR', process.cwd())
-    }
-    if (image === undefined) delete process.env.OPENCLAW_IMAGE
-    else vi.stubEnv('OPENCLAW_IMAGE', image)
-    try {
-      const { config } = await import('../src/config')
-      return config.fleet.image
-    } catch (e) {
-      // fail-fast：错误消息须指向该 env（验收：生产浮动 tag → 启动期 fail-fast 含 env 名）
-      if (env === 'production') expect((e as Error).message).toContain('OPENCLAW_IMAGE')
-      return 'THREW'
-    } finally {
-      vi.unstubAllEnvs()
-    }
-  }
-
-  it('生产缺省 → 默认派生镜像且非浮动（版本 tag 钉版）', async () => {
-    const v = await loadFleetImage({ image: undefined })
-    expect(v).not.toBe('THREW')
-    expect(v as string).toMatch(/^ghcr\.io\/acautomata\/researcher-service\/openclaw:/)
-    expect(isFloatingImageRef(v as string)).toBe(false)
-  })
-
-  it('生产 + 精确版本 tag → 放行', async () => {
-    const ref = 'ghcr.io/acautomata/researcher-service/openclaw:2026.9.4-browser'
-    expect(await loadFleetImage({ image: ref })).toBe(ref)
-  })
-
-  it('生产 + :latest → fail-fast（浮动 tag 随上游移动，目标不可复现）', async () => {
-    expect(
-      await loadFleetImage({ image: 'ghcr.io/acautomata/researcher-service/openclaw:latest' }),
-    ).toBe('THREW')
-  })
-
-  it('生产 + 无 tag（Docker 默认解析 :latest）→ fail-fast', async () => {
-    expect(await loadFleetImage({ image: 'ghcr.io/acautomata/researcher-service/openclaw' })).toBe(
-      'THREW',
-    )
-  })
-
-  it('生产 + 官方基线无 tag → fail-fast', async () => {
-    expect(await loadFleetImage({ image: 'ghcr.io/openclaw/openclaw' })).toBe('THREW')
-  })
-
-  it('生产 + digest 钉定（@sha256:…）→ 放行（digest 寻址不浮动）', async () => {
-    const ref = `ghcr.io/acautomata/researcher-service/openclaw@sha256:${'a'.repeat(64)}`
-    expect(await loadFleetImage({ image: ref })).toBe(ref)
-  })
-
-  it('registry 端口不误判为 tag：<host>:5000/openclaw 无 tag → fail-fast', async () => {
-    expect(await loadFleetImage({ image: 'registry.internal:5000/openclaw' })).toBe('THREW')
-  })
-
-  it('registry 端口 + 版本 tag → 放行（端口与 tag 各自解析）', async () => {
-    const ref = 'registry.internal:5000/openclaw:2026.9.4-browser'
-    expect(await loadFleetImage({ image: ref })).toBe(ref)
-  })
-
-  it('dev + :latest → 放行（本地调试不受影响）', async () => {
-    expect(
-      await loadFleetImage({ env: 'development', image: 'ghcr.io/openclaw/openclaw:latest' }),
-    ).toBe('ghcr.io/openclaw/openclaw:latest')
-  })
-
-  it('test + 无 tag → 放行（测试环境不受影响）', async () => {
-    expect(await loadFleetImage({ env: 'test', image: 'ghcr.io/openclaw/openclaw' })).toBe(
-      'ghcr.io/openclaw/openclaw',
-    )
-  })
-
-  // 纯准据（config 与 openclawImage.test.ts 静态断言共享同一判定语义）
-  it('isFloatingImageRef：无 tag / :latest 浮动；版本 tag / digest 不浮动', () => {
-    expect(isFloatingImageRef('ghcr.io/a/b/openclaw')).toBe(true)
-    expect(isFloatingImageRef('openclaw')).toBe(true)
-    expect(isFloatingImageRef('ghcr.io/a/b/openclaw:latest')).toBe(true)
-    expect(isFloatingImageRef('openclaw:latest')).toBe(true)
-    expect(isFloatingImageRef('openclaw:')).toBe(true) // 空 tag 不构成钉版
-    expect(isFloatingImageRef('ghcr.io/a/b/openclaw:2026.9.4-browser')).toBe(false)
-    expect(isFloatingImageRef('registry.internal:5000/openclaw:2026.9.4-browser')).toBe(false)
-    expect(isFloatingImageRef(`ghcr.io/a/b/openclaw@sha256:${'a'.repeat(64)}`)).toBe(false)
-    expect(isFloatingImageRef(`ghcr.io/a/b/openclaw:latest@sha256:${'a'.repeat(64)}`)).toBe(false)
-  })
-})
-
-// ---- #776 沙箱配置组：SANDBOX_IMAGE 钉版（生产禁浮动，对齐 readFleetImage 先例）----
+// ---- #776 沙箱配置组：SANDBOX_IMAGE 钉版（生产禁浮动，readPinnedImage 共用内核）----
 
 describe('sandbox image pinning env (#776)', () => {
   async function loadSandboxImage(opts: { env?: string; image?: string | undefined }): Promise<string | 'THREW'> {
@@ -461,7 +279,6 @@ describe('sandbox image pinning env (#776)', () => {
       // 隔离 sandbox 变量：提供其余生产必填（同 loadFleetImage 模式）。
       vi.stubEnv('JWT_SECRET', 's'.repeat(32))
       vi.stubEnv('CREDENTIAL_ENCRYPTION_KEYS', Buffer.alloc(32, 0x01).toString('base64'))
-      vi.stubEnv('OPENCLAW_TEMPLATE_DIR', process.cwd())
     }
     if (image === undefined) delete process.env.SANDBOX_IMAGE
     else vi.stubEnv('SANDBOX_IMAGE', image)
@@ -511,7 +328,6 @@ describe('wiki image pinning env (#784)', () => {
       // 隔离 wiki 变量：提供其余生产必填（同 loadFleetImage 模式）。
       vi.stubEnv('JWT_SECRET', 's'.repeat(32))
       vi.stubEnv('CREDENTIAL_ENCRYPTION_KEYS', Buffer.alloc(32, 0x01).toString('base64'))
-      vi.stubEnv('OPENCLAW_TEMPLATE_DIR', process.cwd())
     }
     if (image === undefined) delete process.env.WIKI_IMAGE
     else vi.stubEnv('WIKI_IMAGE', image)

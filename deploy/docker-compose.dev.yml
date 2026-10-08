@@ -1,30 +1,26 @@
 # deploy/docker-compose.dev.yml —— 面板 dev 栈（控制面容器化，issue #594 / ADR 0013）
 #
 # 与 prod（deploy/docker-compose.deploy.yml）同形态：server（TS/Express 控制面，复用 prod
-# Dockerfile 构建产物）挂 docker.sock 编排 OpenClaw 容器（named volume 拓扑，ADR 0011）+ redis
-# （BullMQ 队列）。消除「dev 直跑摸不到 named volume」分叉（ADR 0012：宿主直跑时 named volume
-# 物理路径在 Docker VM 内不可达，dev/prod 寻址与路径语义由此分叉）。
+# Dockerfile 构建产物）挂 docker.sock 编排面板自管容器（会话沙箱 + wiki 容器）+ redis
+#（runner BullMQ 队列）。消除「dev 直跑摸不到 named volume」分叉（ADR 0012：宿主直跑时 named
+# volume 物理路径在 Docker VM 内不可达，dev/prod 寻址与路径语义由此分叉）。
 #
 # 与 prod 的差异（仅 dev 必需项）：
-#   - NODE_ENV=development（走 config.ts dev 分支：JWT_SECRET /
-#     CREDENTIAL_ENCRYPTION_KEYS 用 dev 默认，cookie Secure 关）；
+#   - NODE_ENV=development（走 config.ts dev 分支：JWT_SECRET 用 dev 默认，cookie Secure 关）；
 #   - server 暴露 127.0.0.1:8001:8001（frontend vite dev 在宿主跑，proxy /api → :8001；
 #     prod server 不暴露，走内部 panel-net 由 frontend nginx 反代）；
-#   - 本地 build（非 GHCR image），additional_contexts 自备 template（本地 researcher 克隆）——
-#     prod 由 CD 注入同 context（见 cd.yml build-contexts）；
+#   - 本地 build（非 GHCR image）；
 #   - 独立 named volume panel-dev-db（与 prod panel-db 隔离）。
 #
 # 用法：
-#   1. 克隆 researcher 到仓库根（additional_contexts template= 默认 ../researcher）：
-#        git clone --depth 1 https://github.com/ACautomata/researcher ./researcher
-#      或设 RESEARCHER_DIR 指向已有克隆。
-#   2. （真编排需）LLM key（config.ts dev 缺省可起控制面/登录，建容器才需）：
-#        fleet 目标镜像 = config.ts 钉版 GHCR 引用（openclaw-image 派生镜像构建链已随 T0 #801 退役；
-#        存量 GHCR 镜像可继续拉取，无需本地构建）。
+#   1.（会话 run 需）LLM key（config.ts dev 缺省可起控制面/登录，发消息才需）：
 #        export LLM_API_KEY=...
-#   3. 起栈：docker compose -f deploy/docker-compose.dev.yml up -d --build
-#   4. 前端：cd frontend && npm run dev（vite proxy /api → 127.0.0.1:8001）
-#   5. 改 server 代码：docker compose -f deploy/docker-compose.dev.yml up -d --build server
+#   2. 起栈：docker compose -f deploy/docker-compose.dev.yml up -d --build
+#   3. 前端：cd frontend && npm run dev（vite proxy /api → 127.0.0.1:8001）
+#   4. 改 server 代码：docker compose -f deploy/docker-compose.dev.yml up -d --build server
+#
+# #858 OpenClaw 退役③：fleet 编排与 home 模板 provisioning 退役——build 的 template
+# additional_context / OPENCLAW_TEMPLATE_DIR / OPENCLAW_FLEET_ROOT 随之退役（落盘根改 DATA_ROOT）。
 
 name: panel-dev
 
@@ -32,12 +28,12 @@ services:
   server:
     build:
       context: ../server
-      # prod Dockerfile 的 COPY --from=template / 需 buildx 多 context；dev 本地经
-      # additional_contexts 自备（路径基准 = 本目录 deploy/）。
+      # prod Dockerfile 的构建多 context：official/plugins 兄弟目录（#788 hotfix 布局）；
+      # 路径基准 = 本目录 deploy/。
       additional_contexts:
-        template: ${RESEARCHER_DIR:-../researcher}   # home 模板（provision cp -a 预填充源）
         official: ../official
         plugins: ../plugins                          # #788 插件目录（#752 R1 根级源直引入镜像）
+
     image: panel-server:dev
     container_name: panel-dev-server
     restart: unless-stopped
@@ -51,18 +47,12 @@ services:
       NODE_ENV: development
       PORT: "8001"
       REDIS_URL: redis://redis:6379/0
-      # home 模板：镜像内路径（构建期 COPY 入镜像，ADR 0013，同 prod）。
-      OPENCLAW_TEMPLATE_DIR: /app/templates/researcher
       # SQLite 持久化：dev 独立 named volume 挂载点（与 prod panel-db 隔离）。
       DATABASE_URL: file:/app/db/db.sqlite3
-      # fleet 根（容器内工作目录，无宿主挂载）：createComplete 的 instances/<id>/ 落容器私有
-      # /fleet（named volume 拓扑下容器不 bind 宿主树；容器重建即空、create 幂等重建）。
-      # 端口发布/健康探测/WS 寻址已随 T0 #801 退役（端口池废除、容器不做宿主寻址）——
-      # 宿主寻址相关 env 与 extra_hosts 均已移除。
-      OPENCLAW_FLEET_ROOT: /fleet
+      # 控制面落盘根（容器内路径，无宿主挂载；#858 前身 OPENCLAW_FLEET_ROOT）：附件上传临时区。
+      DATA_ROOT: /data
       # 敏感项：仅 LLM_API_KEY 显式列（shell 可选注入，空串安全 = config.ts dev 缺省 ''）；
-      # JWT_SECRET / CREDENTIAL_ENCRYPTION_KEYS 不列，走 config.ts dev 默认。不设
-      # OPENCLAW_NAMED_VOLUMES（保持默认 true，named volume 拓扑，与 prod 同效）。
+      # JWT_SECRET 不列，走 config.ts dev 默认。
       LLM_API_KEY: ${LLM_API_KEY:-}
       # AutoFigure（#792 插件化收口起回归，同 prod 三必填键）：shell 可选注入，空串安全 =
       # assertPluginEnv dev 警告不阻断（dev 缺键时 figure 工具调用期明确报错）。可选键
@@ -71,7 +61,7 @@ services:
       AUTOFIGURE_IMAGE_API_KEY: ${AUTOFIGURE_IMAGE_API_KEY:-}
       FAL_KEY: ${FAL_KEY:-}
     volumes:
-      # 唯一宿主数据挂载（ADR 0013 豁免）：控制面经 docker.sock 增删查 OpenClaw 容器。
+      # 唯一宿主数据挂载（ADR 0013 豁免）：控制面经 docker.sock 编排面板自管容器。
       - /var/run/docker.sock:/var/run/docker.sock
       # SQLite 持久化：DATABASE_URL 指向本 named volume 挂载点 /app/db/db.sqlite3。
       - panel-dev-db:/app/db

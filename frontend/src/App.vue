@@ -30,7 +30,6 @@ async function handleLogout(): Promise<void> {
 <div class="app-shell" :class="{ public: $route.meta?.public }">
     <nav v-if="!$route.meta?.public" class="app-nav">
       <span class="nav-brand" data-test="nav-brand">{{ PRODUCT_NAME }}</span>
-      <router-link to="/">容器管理</router-link>
       <router-link to="/chat">对话</router-link>
       <router-link to="/wiki">Wiki</router-link>
       <router-link to="/categories">Categories</router-link>

@@ -147,7 +147,7 @@ export async function apiJson<T>(path: string, init: RequestOptions = {}): Promi
   const env = parseEnvelope(body)
   if (env && env.code !== 0) throw new ApiError(resp.status, env.message, env.code)
   // PR #370 第四轮 R4-1（P0）：成功信封（code===0）须解包 data 返回业务载荷，而非整个信封——
-  // 否则调用方裸消费 {code,message,data}，listInstances.length / ContainersView.map 失败，
+  // 否则调用方裸消费 {code,message,data}，列表/map 消费全断，
   // 主流程全断。非信封（裸载荷，env===null）原样透传。
   return (env ? env.data : body) as T
 }

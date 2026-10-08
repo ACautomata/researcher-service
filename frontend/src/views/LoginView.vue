@@ -7,7 +7,7 @@ import { changePassword } from '@/api/auth'
 import { PRODUCT_NAME } from '@/product'
 
 // spec §9.2：本地账号登录表单 + #340-A 强制改密（mustChangePassword=true 的账号首登须改密，
-// bootstrap/发放的临时密码不残留）。提交后存 access token 并跳容器管理页。
+// bootstrap/发放的临时密码不残留）。提交后存 access token 并跳本面板首页（对话）。
 // #340-A 改密模式：me.mustChangePassword → 显示改密表单（旧+新+确认）；成功后服务端已撤销
 // 全部 refresh + 清 cookie，须用新密码重新 login 建立会话，再跳容器页。
 const auth = useAuthStore()

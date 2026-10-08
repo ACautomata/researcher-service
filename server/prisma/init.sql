@@ -47,24 +47,6 @@ CREATE TABLE "refresh_tokens" (
 );
 
 -- CreateTable
-CREATE TABLE "containers" (
-    "id" TEXT NOT NULL PRIMARY KEY,
-    "name" TEXT NOT NULL,
-    "port" INTEGER NOT NULL,
-    "ownerId" TEXT NOT NULL,
-    "token" TEXT NOT NULL,
-    "tokenEncrypted" BOOLEAN NOT NULL DEFAULT false,
-    "homeDir" TEXT NOT NULL,
-    "containerId" TEXT NOT NULL DEFAULT '',
-    "status" TEXT NOT NULL DEFAULT 'creating',
-    "image" TEXT NOT NULL,
-    "leaseExpiresAt" DATETIME,
-    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updatedAt" DATETIME NOT NULL,
-    CONSTRAINT "containers_ownerId_fkey" FOREIGN KEY ("ownerId") REFERENCES "users" ("id") ON DELETE CASCADE ON UPDATE CASCADE
-);
-
--- CreateTable
 CREATE TABLE "model_providers" (
     "id" TEXT NOT NULL PRIMARY KEY,
     "ownerId" TEXT NOT NULL,
@@ -354,12 +336,6 @@ CREATE UNIQUE INDEX "refresh_tokens_tokenHash_key" ON "refresh_tokens"("tokenHas
 
 -- CreateIndex
 CREATE INDEX "refresh_tokens_userId_idx" ON "refresh_tokens"("userId");
-
--- CreateIndex
-CREATE UNIQUE INDEX "containers_name_key" ON "containers"("name");
-
--- CreateIndex
-CREATE INDEX "containers_ownerId_idx" ON "containers"("ownerId");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "model_providers_ownerId_providerId_key" ON "model_providers"("ownerId", "providerId");

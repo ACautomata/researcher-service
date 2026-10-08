@@ -7,7 +7,7 @@ import { describe, it, expect } from 'vitest'
 import { DockerWikiContainerRuntime } from '../src/wikiContainers/dockerRuntime'
 import { wikiContainerName, wikiRestoreImageRef } from '../src/wikiContainers/runtime'
 import { WIKI_LIMITS, WIKI_ROOT } from '../src/wikiContainers/values'
-import { KIND_WIKI, LABEL_APP_KEY, LABEL_KIND_KEY, LABEL_OWNER_KEY } from '../src/containers/constants'
+import { KIND_WIKI, LABEL_KIND_KEY, LABEL_OWNER_KEY } from '../src/containers/constants'
 
 const SPEC = { ownerId: 'cuser0001', image: 'busybox:1.36', limits: WIKI_LIMITS }
 
@@ -41,7 +41,6 @@ describe('buildWikiCreateOptions（#747 E 节 wiki 列投影）', () => {
       [LABEL_KIND_KEY]: KIND_WIKI,
       [LABEL_OWNER_KEY]: 'cuser0001',
     })
-    expect(Object.keys(opts.Labels ?? {})).not.toContain(LABEL_APP_KEY)
   })
 
   it('安全 profile：CapDrop ALL + no-new-privileges', () => {

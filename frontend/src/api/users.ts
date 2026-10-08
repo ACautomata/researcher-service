@@ -9,8 +9,8 @@ export interface UserRowDTO {
   email: string | null
   role: string // 'admin' | 'user'
   isActive: boolean
-  containerCount: number
-  quota: { used: number; limit: number }
+  // #858：containerCount/quota{used,limit} 随容器行表退役删除；maxContainers 保留为普通用户列
+  maxContainers: number
   maxConcurrentRuns: number // per-user 在飞 run 配额（#800 admin 可改）
   mustChangePassword: boolean
   createdAt: string

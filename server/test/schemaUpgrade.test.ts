@@ -6,9 +6,9 @@ import Database from 'better-sqlite3'
 import { runDbScript } from './runDbScript'
 
 // 从「只有 base 表」的旧库跑全量增量脚本（幂等跑两遍）→ 全表到位 + #791 AutoFigure 换轨
-//（figures 新形状重建 + generation_jobs 退役）+ #699 upgradeAttempts 列 + teammate/mailbox
-// + user_version 归 14（#771 批次 7→8；#775 8→9；#787 9→10；#786 10→11；#785 11→12；
-// #790 teammates.kind + #791 figures 换轨 12→13）。
+//（figures 新形状重建 + generation_jobs 退役）+ teammate/mailbox + #858 containers 表整表退役
+// + user_version 归 15（#771 批次 7→8；#775 8→9；#787 9→10；#786 10→11；#785 11→12；
+// #790 teammates.kind + #791 figures 换轨 12→13；T0 #801 13→14；#858 OpenClaw 退役③ 14→15）。
 function assertUpgraded(dbPath: string): void {
   const db = new Database(dbPath)
   try {
@@ -44,14 +44,14 @@ function assertUpgraded(dbPath: string): void {
     for (const col of ['xml', 'idempotencyKey']) {
       expect(figureCols.find((x) => x.name === col), `${col} 应已退役`).toBeUndefined()
     }
-    // T0 #801：upgradeAttempts 列随 #699 升级编排退役——增量收敛须 DROP 既有库残留列。
-    const containerCols = db.prepare('PRAGMA table_info(containers)').all() as Array<{ name: string }>
-    expect(containerCols.find((c) => c.name === 'upgradeAttempts'), 'upgradeAttempts 应已退役').toBeUndefined()
-    // port 唯一索引随端口池废除一并清退
-    expect(db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='containers_port_key'").get()).toBeUndefined()
+    // #858 OpenClaw 退役③：containers 表整表退役（旧库残留表与行一并消失，索引随表连带）——
+    // 容器 CRUD/管理页随本票退役，消费面清零后零迁移前提换轨。
+    expect(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='containers'").get()).toBeUndefined()
+    expect(db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='containers_name_key'").get()).toBeUndefined()
+    expect(db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='containers_ownerId_idx'").get()).toBeUndefined()
     // pairings 表随设备配对全链退役
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='pairings'").get()).toBeUndefined()
-    expect(db.pragma('user_version', { simple: true })).toBe(14) // #790/#791 批次 12→13；T0 #801 legacy 清退 13→14
+    expect(db.pragma('user_version', { simple: true })).toBe(15) // T0 #801 legacy 清退 13→14；#858 OpenClaw 退役③ 14→15
     const sessionCols = db.prepare('PRAGMA table_info("sessions")').all() as Array<{ name: string }>
     expect(sessionCols.some((col) => col.name === 'isTeammate')).toBe(true)
     expect(sessionCols.some((col) => col.name === 'preferredModelJson')).toBe(true)
@@ -119,11 +119,11 @@ describe('schema upgrade script', () => {
     assertUpgraded(dbPath)
   })
 
-  it('upgrades an already-text-trace DB (v2) to current tables + user_version=14', () => {
+  it('upgrades an already-text-trace DB (v2) to current tables + user_version=15', () => {
     const dir = mkdtempSync(path.join(tmpdir(), `schema-upgrade-${process.pid}-`))
     const dbPath = path.join(dir, 'panel.db')
-    // 模拟上一轮增量已交付 text_trace_logs 的既有部署（v2）——增量脚本须只补 figures + 换轨
-    // + containers.upgradeAttempts（#699）。containers 表为 v1 起就有的 base 表，一并种上（缺列）。
+    // 模拟上一轮增量已交付 text_trace_logs 的既有部署（v2）——增量脚本须只补 figures + 换轨。
+    // containers 表为 v1 起就有的 base 表，一并种上（#858 起增量收敛整表 DROP）。
     const db = new Database(dbPath)
     try {
       db.exec(`

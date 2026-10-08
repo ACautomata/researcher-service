@@ -4,7 +4,8 @@ import { seedAdmin, seedUser, login, bearer } from './helpers'
 import { verifyPassword, hashPassword } from '../src/auth/password'
 import { resetPasswordInTx } from '../src/routes/users'
 
-// 片10/11/12：users 4 端点（GET+containerCount / POST / PATCH / reset-password）
+// 片10/11/12：users 4 端点（GET / POST / PATCH / reset-password；#858 起 containerCount/quota
+// 随容器行表退役从 GET 载荷移除）
 describe('users admin (slice 10/11/12)', () => {
   let ctx: TestContext
   let adminId: string
@@ -16,26 +17,21 @@ describe('users admin (slice 10/11/12)', () => {
     adminId = admin.id
     const target = await seedUser(ctx.prisma, 'target', 'pw-target-secure')
     targetId = target.id
-    // target 持有 2 个容器 → containerCount=2
-    await ctx.prisma.container.createMany({
-      data: [
-        { name: 'c-a', port: 19000, ownerId: targetId, token: '', homeDir: '/h/a', image: 'img', status: 'creating' },
-        { name: 'c-b', port: 19001, ownerId: targetId, token: '', homeDir: '/h/b', image: 'img', status: 'running' },
-      ],
-    })
   })
   afterAll(async () => {
     await ctx.cleanup()
   })
 
-  it('admin GET /users → 每行含 username/role/isActive/containerCount/quota/mustChangePassword/createdAt', async () => {
+  it('admin GET /users → 每行含 username/role/isActive/mustChangePassword/createdAt（#858 起 containerCount/quota 不在载荷）', async () => {
     const admin = await login(ctx.request, 'admin1', 'pw-admin1-secure')
     const res = await ctx.request.get('/api/v1/users').set(bearer(admin.access))
     expect(res.body.code).toBe(0)
     const users = res.body.data.users as Record<string, unknown>[]
     const target = users.find((u) => u.username === 'target')!
-    expect(target.containerCount).toBe(2)
-    expect(target.quota).toEqual({ used: 2, limit: 3 })
+    expect('containerCount' in target).toBe(false)
+    expect('quota' in target).toBe(false)
+    // maxContainers 列保留为普通用户列（#858 容器行退役后无生产消费面，列清退归终局票）
+    expect(target.maxContainers).toBe(3)
     expect(target).toHaveProperty('role')
     expect(target).toHaveProperty('isActive')
     expect(target).toHaveProperty('mustChangePassword')

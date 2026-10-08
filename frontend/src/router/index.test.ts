@@ -15,7 +15,6 @@ describe('页面路由按需加载', () => {
     expect(records.map((route) => String(route.name)).sort()).toEqual([
       'categories',
       'chat',
-      'containers',
       'figure-editor',
       'legal-document',
       'login',

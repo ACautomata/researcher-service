@@ -3,7 +3,6 @@ import { z } from 'zod'
 import { setupTestApp, type TestContext } from './setup'
 import { seedAdmin, seedUser, login, bearer } from './helpers'
 import {
-  containerCreateSchema,
   loginSchema,
   modelProviderWriteSchema,
   passwordChangeSchema,
@@ -70,7 +69,6 @@ describe('OpenAPI 文档面（#761）', () => {
       '/api/v1/auth/register',
       '/api/v1/users',
       '/api/v1/users/{id}/reset-password',
-      '/api/v1/containers',
       '/api/v1/wiki/tree',
       '/api/v1/wiki/page',
       '/api/v1/models/providers',
@@ -83,8 +81,10 @@ describe('OpenAPI 文档面（#761）', () => {
     ]) {
       expect(doc.paths, `缺少端点 ${p}`).toHaveProperty(p)
     }
-    // T0 #801 退役端点不得再出现在文档面
+    // T0 #801 与 #858 退役端点不得再出现在文档面
     for (const p of [
+      '/api/v1/containers',
+      '/api/v1/containers/{name}',
       '/api/v1/containers/{name}/upgrade',
       '/api/v1/containers/{name}/bootstrap-token',
       '/api/v1/containers/{name}/pairing/approve/{requestId}',
@@ -140,7 +140,6 @@ describe('OpenAPI 文档面（#761）', () => {
       ['passwordChange', '/api/v1/auth/password/change', passwordChangeSchema],
       ['userCreate', '/api/v1/users', userCreateSchema],
       ['userPatch', '/api/v1/users/{id}', userPatchSchema],
-      ['containerCreate', '/api/v1/containers', containerCreateSchema],
       ['modelProviderWrite', '/api/v1/models/providers', modelProviderWriteSchema],
     ]
     for (const [label, path, schema] of cases) {

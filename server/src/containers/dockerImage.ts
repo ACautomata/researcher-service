@@ -1,7 +1,8 @@
-// docker 镜像就位 helper（fleet DockerRuntime 与沙箱 DockerSandboxRuntime 共用样板，#776 收拈）。
-// 语义（对齐 containers/dockerRuntime.ts 原实现注释）：本地缺失才拉取（getImage().inspect() 404
-// → pull；已缓存 → 跳过）；pull 经 modem.followProgress 消费进度流（不消费则流不 flowing、pull
-// 永不完成）；拉取失败向上抛（caller 标 error 行/中止编排）。
+// docker 镜像就位 helper（沙箱与 wiki 容器两支路 DockerRuntime 共用样板，#776 收拈；
+// #858 fleet DockerRuntime 随容器消费面退役，本 helper 为唯一镜像拉取实现）。
+// 语义：本地缺失才拉取（getImage().inspect() 404 → pull；已缓存 → 跳过）；pull 经
+// modem.followProgress 消费进度流（不消费则流不 flowing、pull 永不完成）；拉取失败向上抛
+//（caller 中止编排）。
 
 import type Docker from 'dockerode'
 

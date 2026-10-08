@@ -18,6 +18,6 @@ describe('NotFoundView', () => {
 
     expect(wrapper.get('[data-test="not-found"]').text()).toContain('404')
     expect(wrapper.text()).toContain('页面不存在')
-    expect(wrapper.get('a').attributes('href')).toBe('/')
+    expect(wrapper.get('a').attributes('href')).toBe('/chat')
   })
 })

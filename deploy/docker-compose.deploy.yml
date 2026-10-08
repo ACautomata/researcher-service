@@ -9,7 +9,7 @@
 #
 # 运行时敏感值（JWT_SECRET / LLM_API_KEY / CREDENTIAL_ENCRYPTION_KEYS /
 # AUTOFIGURE_IMAGE_API_KEY / FAL_KEY）经同目录 .env（env_file）注入，不落盘进 git；
-# 非敏感固定项（REDIS_URL/OPENCLAW_TEMPLATE_DIR/端口/AUTOFIGURE_IMAGE_MODEL）直接写在本文件
+# 非敏感固定项（REDIS_URL/DATA_ROOT/端口/AUTOFIGURE_IMAGE_MODEL）直接写在本文件
 # 或 .env。AutoFigure 键清单见 server env 段注释（#792 起）。
 #
 # 用法（CD 已自动化；手工排障时参考）：
@@ -45,19 +45,13 @@ services:
       NODE_ENV: production
       PORT: "8001"
       REDIS_URL: redis://redis:6379/0
-      # home 模板（provision 的 cp -a 预填充源）：镜像内路径——构建期 COPY 进 server 镜像
-      # （server/Dockerfile COPY --from=template，CD 构建时 clone researcher 注入；ADR 0013
-      # 模板入镜像，不再挂载宿主 /srv/openclaw/template）。
-      OPENCLAW_TEMPLATE_DIR: /app/templates/researcher
       # SQLite 持久化：server 经 DATABASE_URL（Prisma driver adapter）读本 named volume 挂载点，
       # 容器重建数据不丢。必须显式绝对路径——apply-schema.mjs 的 file: 前缀剥离对绝对路径正确。
       DATABASE_URL: file:/app/db/db.sqlite3
-      # fleet 根（容器内工作目录，无宿主挂载）：createComplete 的 instances/<id>/ 目录与
-      # provision cp 都落在容器私有 /fleet（named volume 拓扑下容器不 bind 宿主树，ADR 0011/0013；
-      # 容器重建即空、create 幂等重建）。readFleetRoot 生产校验绝对路径——显式 pin 防相对路径 fallback。
-      # 端口发布/健康探测/WS 寻址已随 T0 #801 退役（端口池废除、容器不做宿主寻址）——
-      # 宿主寻址相关 env 与 extra_hosts 均已移除。
-      OPENCLAW_FLEET_ROOT: /fleet
+      # 控制面落盘根（容器内路径，无宿主挂载；#858 前身 fleet 落盘根旧键）：现役唯一消费方 =
+      # 附件上传临时区 <DATA_ROOT>/attachments（#780）。readDataRoot 生产校验绝对路径——显式 pin
+      # 防相对路径 fallback。
+      DATA_ROOT: /data
       # AutoFigure（#792 插件化收口起回归）：figure 生成 = server 进程内插件管线。
       # 三个必填键经 .env（env_file）注入，生产缺键 =
       # 启动期 assertPluginEnv fail-fast（不看启用位——任何用户随时可启用，面板必须永远备好）：
@@ -67,8 +61,8 @@ services:
       # 可选键：AUTOFIGURE_IMAGE_BASE_URL（缺省国际区）、AUTOFIGURE_SVG_MODEL（缺省 owner
       # 默认链 primary）。键声明单源 = plugins/autofigure/manifest.ts configSchema。
     volumes:
-      # 唯一宿主数据挂载（ADR 0013 豁免）：控制面等价 root，经 docker.sock 增删查 OpenClaw 容器
-      # （spec §5.4 已明示风险）。其余数据（SQLite）走 named volume，模板在镜像内。
+      # 唯一宿主数据挂载（ADR 0013 豁免）：控制面等价 root，经 docker.sock 编排面板自管容器
+      # （spec §5.4 已明示风险）。其余数据（SQLite）走 named volume。
       - /var/run/docker.sock:/var/run/docker.sock
       # SQLite 持久化：server 经 DATABASE_URL 指向本 named volume 挂载点 /app/db/db.sqlite3，
       # 容器重建数据不丢。

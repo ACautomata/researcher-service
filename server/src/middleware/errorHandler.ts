@@ -1,6 +1,5 @@
 import type { ErrorRequestHandler, Request, Response } from 'express'
 import { EnvelopeError } from '../envelope'
-import { ContainerDomainError } from '../containers/errors'
 import { CODE, defaultMessage } from '../codes'
 
 // 唯一错误面：所有抛出的 EnvelopeError 与未知错都转成 HTTP 200 信封（#312）。
@@ -9,11 +8,8 @@ export const envelopeErrorHandler: ErrorRequestHandler = (err, _req, res, _next)
     res.json({ code: err.code, message: err.message, data: err.data })
     return
   }
-  // 容器领域错误（#334）：携带信封码，统一转译（替代旧「异常→HTTP 状态码」逐类 catch）。
-  if (err instanceof ContainerDomainError) {
-    res.json({ code: err.code, message: err.message, data: null })
-    return
-  }
+  // #858：ContainerDomainError 转译分支随 fleet 域退役删除（sandboxes/wikiContainers 直接
+  // 抛 EnvelopeError，域错误全部走上方分支）。
   // JSON 解析失败（坏 body）/ body 超限（entity.too.large，body-parser PayloadTooLargeError）
   // → 90002 校验失败（codex PR#346：超限曾落 90000 未知错误）。
   const errType = (err as { type?: string }).type

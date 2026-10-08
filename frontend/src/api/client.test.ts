@@ -210,8 +210,8 @@ describe('api client', () => {
   })
 
   // PR #370 第四轮 R4-1（P0）：TS 后端 #312 信封 {code:0,message,data} 下，apiJson 成功时必须
-  // 解包 data 返回业务载荷，而不是整个信封——否则所有非 chat.ts 调用方（containers/wiki/models
-  // + ChatView.loadInstances）裸消费信封对象，listInstances.length / ContainersView.map 失败，
+  // 解包 data 返回业务载荷，而不是整个信封——否则 wiki/models 等调用方
+  // 裸消费信封对象，列表/map 消费全断，
   // 主流程全断。非信封（裸载荷）仍原样透传（上一用例）。
   it('apiJson unwraps envelope data on HTTP 200 success（#312 信封）', async () => {
     ;(globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(

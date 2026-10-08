@@ -4,7 +4,7 @@ import { createApp } from './app'
 import { getPrisma } from './prisma'
 import { bootstrap } from './auth/bootstrap'
 import { config } from './config'
-import { assembleFleet } from './containers/fleetAssembly'
+import { DockerFileArchive } from './files/dockerArchive'
 import { assembleSandboxes } from './sandboxes/assembly'
 import { assembleWikiContainers } from './wikiContainers/assembly'
 import { assembleRunner } from './runner/assembly'
@@ -22,8 +22,9 @@ async function main(): Promise<void> {
   // SSE 事件扇出注册表（#773，#747 C 节）：单进程单例，REST 路由与（后续票的）runner
   // 事件桥共享；logout/吊销终止经它广播 session.terminated。
   const eventHub = new StreamHub()
-  // 容器编排（#334 M2）：真 DockerRuntime + BullMQ(Redis) 队列 + worker 并发默认 2。
-  const fleet = assembleFleet(prisma)
+  // 文件读面 archive（#589 · ADR 0012；#858 起 files 域自持装配——fleet 编排退役后
+  // DockerFileArchive 直建，沙箱 lab 只读读面与附件字节读通道共用同一实例）。
+  const filesArchive = new DockerFileArchive()
   // 会话沙箱生命周期（#776 · story 58/59）：惰性创建/闲置 30min 回收/级联删 Port +
   // 周期 sweeper（真正消费方 = #777 runner ensure/touch 与 #778 会话 REST 删 session 级联）。
   const sandboxes = assembleSandboxes()
@@ -34,14 +35,14 @@ async function main(): Promise<void> {
   // 集中式 runner（#777 · #747 A 节）：RunService + BullMQ worker。事件经 eventHub 扇出
   //（run 域事件目录）；REST 入队面归 #778 会话域（本装配 = 进程内就绪）。BullMQ 连接 lazy
   //（Redis 不可达不挂控制面，add 超时兜底在队列层——fleet 队列先例同形态）。
-  // #780 附件域服务：上传（控制面临时区 <fleetRoot>/attachments，REST 不直写沙箱）+ 下载（沙箱
-  // readLabBytes 字节通道，files 域 fleet.archive 复用）+ run 首步 ingestion（片 2，runner 注入）。
+  // #780 附件域服务：上传（控制面临时区 <dataRoot>/attachments，REST 不直写沙箱）+ 下载（沙箱
+  // readLabBytes 字节通道，files 域 archive 复用）+ run 首步 ingestion（片 2，runner 注入）。
   // 临时区须在 multer destination 前存在（createAttachmentsRouter 工厂期 mkdirSync 兜底）。
-  const attachmentTmpRoot = path.join(config.fleet.root, ATTACHMENT_TMP_DIR)
+  const attachmentTmpRoot = path.join(config.dataRoot, ATTACHMENT_TMP_DIR)
   const attachmentsService = new AttachmentsService({
     prisma,
     tmpRoot: attachmentTmpRoot,
-    archive: fleet.archive,
+    archive: filesArchive,
   })
   const runner = await assembleRunner({
     prisma,
@@ -119,7 +120,6 @@ async function main(): Promise<void> {
     })
   const app = createApp({
     prisma,
-    orchestrator: fleet.orchestrator,
     // wiki（#335 → #784 换轨）：存储面 = 新 wiki 容器（ensure 经 wikiContainers 注入）；
     // compile 触发不注入（busybox 级容器无 openclaw 运行时，索引归 OpenWiki 工具形态 #737，
     // routes 缺省 noop）。#790：全量更新独立 run 触发面（POST /wiki/update）注入。
@@ -136,8 +136,9 @@ async function main(): Promise<void> {
     // models（#336；#775 事务简化）：事务 = DB mutation + config_meta version bump（热生效
     // 信号）——写盘链（configWriter/configBuilder）已随 T0 #801 物理删除；models/providerEndpoints
     // 路由无条件挂载，装配层无注入。
-    // files（T0 #801 只读化）：root=lab 沙箱只读 GET 面（经 Docker getArchive）。
-    files: { archive: fleet.archive },
+    // files（T0 #801 只读化；#858 起 files 自持 archive 装配）：root=lab 沙箱只读 GET 面（经
+    // Docker getArchive）。
+    files: { archive: filesArchive },
     // figures 读面（#791）：无条件挂载（资产常驻，读面不设 flag 门——#744 §11.3）；生成执行面
     // 归会话 run 域（#744 §5.2），无装配项。
     // docs（#761）：flag 开才装配（config.apiDocs.enabled）——flag 关不注入 → 路由未挂载
@@ -157,10 +158,9 @@ async function main(): Promise<void> {
 
   const server = createServer(app)
 
-  // 优雅关闭：drain BullMQ worker（在飞 provisioning 完成或标 ERROR）；runner 队列 drain
-  //（在飞 run 完成或 job failed——run 执行错误已在 RunService 消化为终态事件）。
+  // 优雅关闭：runner 队列 drain（在飞 run 完成或 job failed——run 执行错误已在 RunService
+  // 消化为终态事件）；沙箱/wiki 容器生命周期无后台队列（#858 起 fleet BullMQ 队列退役）。
   const shutdown = async (): Promise<void> => {
-    await fleet.close().catch(() => {})
     await sandboxes.close().catch(() => {})
     await wikiContainers.close().catch(() => {})
     await runner.close().catch(() => {})

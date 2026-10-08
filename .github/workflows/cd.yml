@@ -5,18 +5,15 @@
 # + wiki（wiki 容器镜像，#784：busybox 级，Dockerfile FROM 基线行单源提取版本 tag）
 # 三镜像，tag `:latest` + `:<CI head_sha>`（head_sha 取自通过的 CI run，使 latest/sha 精确对应该
 # commit，便于 :sha 回滚）。wiki 镜像另推**版本 tag**。
-# server 镜像构建期经 buildx 多 context 注入 home 模板（researcher 克隆）
-#（ADR 0013：#593 模板入镜像，生产不再挂载任何宿主数据路径）；server 容器
-# 运行时经 config.ts OPENCLAW_IMAGE 默认值拉存量钉版 GHCR openclaw 镜像（openclaw-image 派生镜像
-# 构建链已随 T0 #801 退役，存量镜像可继续拉取）。
+# #858 OpenClaw 退役③：fleet 编排退役——构建期 home 模板注入与运行时
+# OPENCLAW_IMAGE 拉取面随之退役；多 context 现仅 official/ + plugins/。
 # 部署：appleboy/scp-action 推 compose + 渲染 .env → /www/panel；appleboy/ssh-action 远端
-# docker login（持久，供运行时 OpenClaw 拉取复用宿主 daemon 凭证）→ pull → up -d → prune → /api/health 健康门。
+# docker login（持久，供运行时拉面板镜像复用宿主 daemon 凭证）→ pull → up -d → prune → /api/health 健康门。
 #
 # 所需 secrets（见 deploy/DEPLOY.md 清单）：
 #   REMOTE_HOST REMOTE_USER DEPLOY_KEY            —— SSH 登录宿主
 #   GHCR_PULL_USER GHCR_PULL_TOKEN                —— 宿主拉私有 GHCR（read:packages PAT）
-#   JWT_SECRET LLM_API_KEY CREDENTIAL_ENCRYPTION_KEYS —— server 运行时
-#   RESEARCHER_REPO（可选，默认 https://github.com/ACautomata/researcher.git）—— 构建机 clone home 模板
+#   JWT_SECRET LLM_API_KEY —— server 运行时
 
 name: CD
 
@@ -101,29 +98,15 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Clone researcher home template (build-time, ADR 0013)
-        # issue #593：home 模板构建期 clone 并作为 buildx 多 context 注入 server 镜像
-        # （Dockerfile COPY --from=template），不再 scp/挂载到宿主 /srv/openclaw/template。
-        # 每次构建 clone 最新 → 模板随镜像 :sha 版本化（回滚镜像即回滚模板）；
-        # clone 失败即构建失败 → CD 红（模板是构建必需，不带病出镜像）。
-        # 清理 .git：COPY --from=template 整棵入镜像 + provision cp -a 会一并拷进容器
-        # ~/.openclaw/.git（模板只作内容源，版本由镜像 :sha 记录，无需携带仓库元数据）。
-        env:
-          RESEARCHER_REPO: ${{ secrets.RESEARCHER_REPO }}
-        run: |
-          REPO="${RESEARCHER_REPO:-https://github.com/ACautomata/researcher.git}"
-          git clone --depth 1 "$REPO" "${{ github.workspace }}/_templates/researcher"
-          rm -rf "${{ github.workspace }}/_templates/researcher/.git"
-
       - name: Build & push server image
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7.4.0
         with:
           context: server
           file: server/Dockerfile
           # 多 context（buildx named context，Dockerfile 以 COPY --from=<name> 消费）：
-          #   template=researcher 克隆（home 模板，ADR 0013 入镜像）
+          # official（#787 官方内容目录）+ plugins（#788 插件包，#752 R1 根级源直引入镜像）。
+          # （template context 随 #858 fleet provisioning 退役。）
           build-contexts: |
-            template=${{ github.workspace }}/_templates/researcher
             official=${{ github.workspace }}/official
             plugins=${{ github.workspace }}/plugins
           push: true
@@ -170,7 +153,7 @@ jobs:
           mkdir -p _deploy
           cp deploy/docker-compose.deploy.yml _deploy/
           # T0 #801：openclaw.json 模板与 openclaw-image 派生镜像构建链均已退役——CD 只分发
-          # compose；home 模板经 build-contexts template= 构建期入 server 镜像（ADR 0013）。
+          # compose。（#858：构建期 template 注入亦退役。）
           # 命名 .env：compose 变量替换（$PANEL_SERVER_IMAGE 等）与 env_file 都自动读它，
           # v1/v2 CLI 行为一致（--env-file 仅 v2 且只管 env_file 不管替换；v1 缺 .env 直接报错）。
           # #341 M9：DJANGO_SECRET_KEY → JWT_SECRET（server config.ts 生产必填 ≥32 字符）；
@@ -209,11 +192,10 @@ jobs:
             set -euo pipefail
 
             APP_DIR=/www/panel
-            # 防御性 bootstrap：缺则建（首次部署）；后续幂等。home 模板不再落宿主
-            # （ADR 0013：#593 构建期入 server 镜像，见构建步骤 clone + build-contexts）。
+            # 防御性 bootstrap：缺则建（首次部署）；后续幂等。
             mkdir -p "$APP_DIR"
 
-            # 持久登录 ghcr：deploy 拉面板镜像 + 运行时后端经宿主 daemon 拉 OpenClaw 镜像共用此凭证。
+            # 持久登录 ghcr：面板镜像拉取共用此凭证。
             echo "$GHCR_PULL_TOKEN" | docker login ghcr.io -u "$GHCR_PULL_USER" --password-stdin
 
             cd "$APP_DIR"
@@ -221,9 +203,9 @@ jobs:
             # compose.yml/docker-compose.yml），缺 -f 会让 pull/up 报
             # "no configuration file provided: not found"。
             docker compose -f docker-compose.deploy.yml pull
-            # T0 #801：fleet 目标镜像 = config.ts 钉版存量 GHCR 引用（openclaw-image 派生镜像构建
-            # 已退役）——镜像版本不再随发版变化，宿主预拉无意义；首次缺缓存时由 server 侧
-            # dockerode 裸 pull（daemon 侧持久登录凭证）补齐。
+            # T0 #801 起 openclaw 镜像不再随发版变化；#858 起 fleet 整体退役，沙箱/wiki 容器
+            # 镜像均为公开钉版引用——首次缺缓存时由 server 侧 dockerode 裸 pull（daemon 侧
+            # 持久登录凭证）补齐。
             docker compose -f docker-compose.deploy.yml up -d --remove-orphans
             docker image prune -f
 

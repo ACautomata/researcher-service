@@ -17,7 +17,7 @@ function mountLogin() {
     history: createMemoryHistory(),
     routes: [
       { path: '/login', name: 'login', component: { template: '<div/>' } },
-      { path: '/', name: 'containers', component: { template: '<div/>' } },
+      { path: '/', component: { template: '<div/>' } },
     ],
   })
   return mount(LoginView, { global: { plugins: [pinia, router, ElementPlus] } })

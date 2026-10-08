@@ -61,17 +61,9 @@ COPY --from=build /server/src/generated ./src/generated
 COPY --from=build /server/prisma ./prisma
 COPY --from=build /server/scripts ./scripts
 
-# ADR 0013（issue #593）：home 模板构建期入镜像——生产不再挂载任何宿主数据
-# 路径（唯一豁免 docker.sock）。COPY 源是 buildx 多 context（CD 经 build-contexts 注入：
-# template=<researcher 克隆>）；本地构建须自备同名 context
-# （docker buildx build --build-context template=<dir>）。
-# template：provision 的 cp -a 预填充源（容器化后落在容器私有 fleet 根，compose 里
-# OPENCLAW_TEMPLATE_DIR 指向此路径）。
-COPY --from=template / /app/templates/researcher
-# 防 .git 经 provision cp -a 进容器 home（对齐 #593 CD 的 rm -rf .git 意图）：本地 dev build 的
-# template context 带 .git（用户自行 clone，issue #594 dev 容器化路径，无 cd.yml 预处理步骤）；
-# prod 经 cd.yml clone 后已 rm（此 rm 幂等无害）。统一在 COPY 后清理，保证 dev/prod 镜像同形态。
-RUN rm -rf /app/templates/researcher/.git
+# #858 OpenClaw 退役③：home 模板构建期注入（ADR 0013 template context）随 fleet
+# provisioning 退役——生产不再有任何模板注入（唯一宿主数据挂载豁免仍为 docker.sock）。
+# 构建多 context 现仅 official/ + plugins/ 两个（named context 注入，见 build 阶段 COPY）。
 
 COPY docker-entrypoint.sh /usr/local/bin/panel-entrypoint
 RUN chmod +x /usr/local/bin/panel-entrypoint

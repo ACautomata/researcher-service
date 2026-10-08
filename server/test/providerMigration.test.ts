@@ -146,7 +146,7 @@ describe('#775 迁移批次（llm_usage_records + minimax per-user seed）', () 
       expect(cols.some((c) => c.name === 'ownerId')).toBe(true)
       expect(cols.some((c) => c.name === 'containerId')).toBe(false)
       // 告警路径不炸、user_version 照常推进、usage 表照常落
-      expect(db.pragma('user_version', { simple: true })).toBe(14) // T0 #801 批次 13→14
+      expect(db.pragma('user_version', { simple: true })).toBe(15) // T0 #801 批次 13→14；#858 OpenClaw 退役③ 14→15
       expect(
         db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='llm_usage_records'`).get(),
       ).toEqual({ name: 'llm_usage_records' })

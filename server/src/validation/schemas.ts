@@ -48,15 +48,10 @@ export const userPatchSchema = z.object({
 })
 
 // 容器名 DNS-label（#334 / 平移 NAME_VALIDATOR）：小写字母开头，3–30 位，仅 [a-z0-9-]。
-// 防路径分隔符 / .. / 空格 / 大写（同时防 instances/<name>/ 目录穿越与 docker-name 注入）。
+// 防路径分隔符 / .. / 空格 / 大写（docker-name / 会话 id 路径参数注入）。#858 起唯一消费方 =
+// files 路由 requireName（lab 面路径参数 <name> = sessionId 的形状校验）；建容器 schema 随
+// 容器 CRUD 退役删除。
 export const CONTAINER_NAME_REGEX = /^[a-z][a-z0-9-]{2,29}$/
-
-// 建容器（containers POST）：仅需 name（端口/token/home 由编排器决定）。校验失败 → 90002 + data.name。
-export const containerCreateSchema = z.object({
-  name: z
-    .string()
-    .regex(CONTAINER_NAME_REGEX, 'name 须以小写字母开头，3–30 位，仅含小写字母、数字、连字符'),
-})
 
 // base_url URL 形态门（#775，731 §5.1 第一层 ①）：.refine 复用 runner/allowlist parseHttpOrigin
 // 权威解析（scheme/凭证/端口域全量校验与 service 层同源，#812 打捞）——消除 zod 阶段与

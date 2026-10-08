@@ -17,7 +17,7 @@ import { DockerWikiContainerRuntime } from '../src/wikiContainers/dockerRuntime'
 import { wikiContainerName } from '../src/wikiContainers/runtime'
 import { DockerWikiFileSystem } from '../src/wiki/dockerFs'
 import { WikiService } from '../src/wiki/service'
-import { KIND_WIKI, LABEL_APP_KEY, LABEL_APP_VALUE, LABEL_KIND_KEY, LABEL_OWNER_KEY } from '../src/containers/constants'
+import { KIND_WIKI, LABEL_KIND_KEY, LABEL_OWNER_KEY } from '../src/containers/constants'
 import { probeDockerAvailable } from './smokeGating'
 import { ensureImageAvailable } from './smokeDocker'
 
@@ -128,9 +128,7 @@ describe.skipIf(!DOCKER_UP)('wiki 容器生命周期集成 smoke（真 docker da
     expect((await wikiFs.readPage('post-restore.md')).content).toContain('# writable')
   }, 120_000)
 
-  it('对 fleet 列表隐身：app=openclaw-fleet 过滤不含 wiki 容器；kind=wiki 过滤含 wiki 容器', async () => {
-    const fleet = await docker.listContainers({ all: true, filters: { label: [`${LABEL_APP_KEY}=${LABEL_APP_VALUE}`] } })
-    expect(fleet.map((c) => c.Names?.[0])).not.toContain(`/${dockerName}`)
+  it('kind=wiki 标签过滤含 wiki 容器（#858 起 fleet 列表随容器管理退役，隐身断言收敛为 kind 标签可寻址）', async () => {
     const wikis = await docker.listContainers({
       all: true,
       filters: { label: [`${LABEL_KIND_KEY}=${KIND_WIKI}`] },

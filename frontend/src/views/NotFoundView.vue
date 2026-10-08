@@ -3,7 +3,7 @@
     <p class="status">404</p>
     <h1>页面不存在</h1>
     <p>你访问的地址不存在，或页面已被移动。</p>
-    <router-link class="back" to="/">返回容器管理</router-link>
+    <router-link class="back" to="/chat">返回对话</router-link>
   </main>
 </template>
 

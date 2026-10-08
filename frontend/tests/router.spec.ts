@@ -6,6 +6,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import router from '@/router'
 import { useAuthStore } from '@/stores/auth'
 
+// #858：容器管理页退役后 `/` 重定向 `/chat`——已登录导航会懒加载 ChatView 大 chunk，
+// 并行 worker 下可超默认 5s，本文件统一放宽（守卫语义测试，非性能断言）。
+vi.setConfig({ testTimeout: 20_000 })
+
 // 合法且未过期的 JWT（exp 远在未来）：isTokenExpired 判 false → hydrate early-return。
 // 用于模拟"持有有效会话"，避免非法 token 占位被当成过期触发 refresh。
 function unexpiredJwt(): string {
@@ -32,26 +36,33 @@ describe('router guard', () => {
   })
 
   it('redirects unauthenticated visits to /login', async () => {
-    await router.push('/')
+    await router.push('/chat')
     expect(router.currentRoute.value.name).toBe('login')
   })
 
   it('allows authenticated visits to the protected route', async () => {
     const auth = useAuthStore()
     auth.token = unexpiredJwt() // 模拟已登录（token 来源不属守卫职责）
+    await router.push('/chat')
+    expect(router.currentRoute.value.name).toBe('chat')
+  })
+
+  it('redirects `/` to the chat home (#858 容器管理退役)', async () => {
+    const auth = useAuthStore()
+    auth.token = unexpiredJwt()
     await router.push('/')
-    expect(router.currentRoute.value.name).toBe('containers')
+    expect(router.currentRoute.value.name).toBe('chat')
   })
 
   it('redirects authenticated visits to /login back to the home page (#419-1)', async () => {
     // 已登录用户不应停留在登录页（守卫缺 public 分支时 /login 对已登录用户不跳走）。
-    // 先进入受保护路由（守卫放行），再从 containers 访问 /login → 应被弹回首页。
+    // 先进入受保护路由（守卫放行），再从对话页访问 /login → 应被弹回首页。
     const auth = useAuthStore()
     auth.token = unexpiredJwt()
-    await router.push('/')
-    expect(router.currentRoute.value.name).toBe('containers')
+    await router.push('/chat')
+    expect(router.currentRoute.value.name).toBe('chat')
     await router.push('/login')
-    expect(router.currentRoute.value.name).toBe('containers')
+    expect(router.currentRoute.value.name).toBe('chat')
   })
 
   it('hydrates token from refresh cookie on first navigation', async () => {
@@ -61,7 +72,7 @@ describe('router guard', () => {
       json: async () => ({ access: 'hydrated-token' }),
     } as unknown as Response)
     const auth = useAuthStore()
-    await router.push('/')
+    await router.push('/chat')
     await flushPromises()
     expect(auth.token).toBe('hydrated-token')
   })
@@ -75,7 +86,7 @@ describe('router guard', () => {
     } as unknown as Response)
     const auth = useAuthStore()
     auth.token = `header.${expired}.sig`
-    await router.push('/')
+    await router.push('/chat')
     await flushPromises()
     expect(auth.token).toBe('fresh-token')
   })
@@ -91,7 +102,7 @@ describe('router guard', () => {
     } as unknown as Response)
     const auth = useAuthStore()
     auth.token = `header.${expired}.sig`
-    await router.push('/')
+    await router.push('/chat')
     await flushPromises()
     expect(auth.token).toBe('')
     expect(auth.refreshExhausted).toBe(true)
