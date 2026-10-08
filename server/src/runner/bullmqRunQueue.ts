@@ -8,9 +8,11 @@
 //（#723 风险条目「BullMQ per-thread 串行是全部责任」）。
 //
 // 失败语义：processor 内 run 执行错误已在 RunService 消化（终态事件已发，对 job 表现为
-// 成功）；信封错误（40043 额度满 / 50001 resume 竞态 / 50002 会话不存在）冒泡为 job failed
-// ——V1 attempts 默认 1 不重试（额度等待/重投语义归 #778 REST 层即时反馈面，job 级重跑 =
-// run 从头执行会产生重复用户可见事件，故不开）。onError 统一上报（先例 Codex C7）。
+// 成功）；信封错误（REST 已即时反馈的竞态码：40043 额度满 / 50001 resume 竞态 / 50002 会话
+// 不存在 / 50003 interrupt 门禁）冒泡为 job failed——V1 attempts 默认 1 不重试（额度等待/
+// 重投语义归 #778 REST 层即时反馈面，job 级重跑 = run 从头执行会产生重复用户可见事件，故不开）。
+// 其余 pre-start 失败（LLM 装配/容器 ensure/registry）由 RunService.executeNow catch 补
+// run.failed{errorKind} 后仍冒泡 job failed（story 10 不无声挂死）。onError 统一上报（先例 Codex C7）。
 //
 // stalled 重放（story 14 · #779 探针实测）：worker 崩溃（进程死）时在飞 job 的 lock 残留，
 // 新 worker 的 stalled check 将其**移回 wait 自动重放**（BullMQ v6：绕过 attempts:1——

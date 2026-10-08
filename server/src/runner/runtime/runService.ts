@@ -36,9 +36,10 @@ import { runWithToolCallContext, createToolCallContextMiddleware, runWithRunCont
 // 副作用纪律：interrupt 前 backend 工具未执行（探针实测 exec=0），resume 后恰执行一次
 // （S4 快照锁定）——「interrupt 前副作用幂等或后置」。
 //
-// 信封错误面：额度 40043 / 会话不存在 50002 / resume 竞态败方 50001 以 EnvelopeError 抛出
-// ——Inline 路径直接到达调用方（REST/#778 转信封）；BullMQ 路径表现为 job failed，
-// run 域事件不受影响（未开始执行的 run 不发事件）。
+// 信封错误面：额度 40043 / 会话不存在 50002 / resume 竞态败方 50001 / interrupt 门禁 50003
+// ——Inline 路径直接到达调用方（REST/#778 转信封）；BullMQ 路径表现为 job failed。REST 已即时
+// 反馈的这四码不发 run 域事件（PRESTART_REST_FEEDBACK_CODES）；其余 pre-start 失败（LLM 装配/
+// 容器 ensure/registry）补 run.failed{errorKind}——story 10「不无声挂死」语义（executeNow catch）。
 
 import { randomUUID } from 'node:crypto'
 import { HumanMessage, ToolMessage, type BaseMessage, type ContentBlock } from '@langchain/core/messages'
@@ -56,7 +57,7 @@ import { APPROVAL_EVENT_REQUESTED, APPROVAL_EVENT_RESOLVED, APPROVAL_TIMEOUT_MS 
 import { ancestorChainOf } from '../../checkpointChain'
 import type { PrismaClient } from '../../generated/prisma/client'
 import { CODE } from '../../codes'
-import { fail } from '../../envelope'
+import { EnvelopeError, fail } from '../../envelope'
 import { getSessionForUser } from '../../sandboxes/service'
 import type { CatalogEvent } from '../../events/logic'
 import type { StreamHub } from '../../events/hub'
@@ -244,6 +245,18 @@ const INTERRUPT_CHANNEL = INTERRUPT
 // resume 重放判据用：__error__ = 上一次 super-step 有任务异常中断（normalizeReplay 用）。
 const ERROR_CHANNEL = ERROR
 
+// pre-start 失败补 run.failed 的排除码表（story 10 无声挂死修复）：REST 面已即时反馈的竞态码
+// （40043 配额 / 50001 resume 竞态败方 / 50002 会话不存在 / 50003 interrupt 门禁）不发——REST 层
+// 预检已同步报错（sessions/service.ts quotaFull / resumeRun R4 评审 + assembly.ts 注释锁定的
+// 语义延续）。其余 pre-start throw（LLM 装配 90003/40040/40042、容器 ensure、registry）必发——
+// 这些 job failed 是用户零信号的「无声挂死」根因。默认 fail-open（未来新码默认发），宁多勿漏。
+const PRESTART_REST_FEEDBACK_CODES: ReadonlySet<number> = new Set([
+  CODE.CONCURRENCY_QUOTA_EXCEEDED,
+  CODE.RUN_ALREADY_RESUMED,
+  CODE.SESSION_NOT_FOUND,
+  CODE.RUN_INTERRUPT_PENDING,
+])
+
 // story 11 · in-flight 投影（投影 GET inFlight 字段）：重连补偿的进行中 turn 重建面。
 export interface InFlightProjection {
   readonly runId: string
@@ -260,6 +273,37 @@ interface PendingApproval extends Omit<RunEventContext, 'sessionId'> {
 }
 
 export class RunService {
+  // ---- teammate 状态归位（executeRun finally 与 executeNow pre-start catch 共用）：----
+  // startTeammate 在 dispatch 前已置 running，pre-start 失败时 executeRun 的 finally 归位不跑——
+  // 必须经本方法对 pre-start catch 也推 failed，消除「卡 running 幽灵」。状态映射表（completed→
+  // completed、failed/aborted→failed、suspended/pendingApprovals→suspended、interrupted→waiting、
+  // 兜底 running）与原 executeRun finally 内联逻辑一致；终态（completed/failed/suspended）且
+  // 未归档时发 teammate.<status> 事件。
+  private async settleTeammateStatus(cmd: RunCommand, finalState: RunState): Promise<void> {
+    if (!cmd.teammateId || !this.deps.teammates) return
+    const parentSessionId = cmd.parentSessionId ?? cmd.sessionId
+    try {
+      const teammate = await this.deps.teammates.get(parentSessionId, cmd.teammateId)
+      if (teammate.status !== 'archived') {
+        const status = finalState === 'completed' ? 'completed'
+          : finalState === 'failed' || finalState === 'aborted' ? 'failed'
+          : finalState === 'suspended' || (finalState === 'interrupted' && this.pendingApprovals.has(cmd.sessionId)) ? 'suspended'
+          : finalState === 'interrupted' ? 'waiting'
+          : 'running'
+        const updated = await this.deps.teammates.updateStatus(parentSessionId, cmd.teammateId, status)
+        if (updated.status !== 'archived' && (status === 'completed' || status === 'failed' || status === 'suspended')) {
+          this.publish(cmd.ownerId, {
+            type: `teammate.${status}`,
+            payload: { teammateId: cmd.teammateId, name: teammate.name },
+          }, cmd)
+        }
+      }
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn(`[runner] teammate status update failed: teammate=${cmd.teammateId}: ${(err as Error).message}`)
+    }
+  }
+
   private readonly graphs = new Map<string, DeepAgentLike>()
   private readonly runs = new Map<string, RunSnapshot>()
   private readonly aborts = new Map<string, { controller: AbortController; by: 'user' | 'system' }>()
@@ -568,10 +612,23 @@ export class RunService {
       await shared.lease
       await this.executeRun(cmd)
     } catch (e) {
-      // pre-start 失败回滚 queued 占位（40043/50003 等——「未开始执行的 run 不发事件」
-      // 同纪律：不留观测态）。回滚只认本命令的 queued 条目（runId 匹配），不碰后继命令的。
+      // pre-start 失败回滚 queued 占位（回滚只认本命令的 queued 条目，runId 匹配，不碰后继命令的），
+      // 然后按 story 10 补 run.failed——除 REST 已即时反馈的竞态码（PRESTART_REST_FEEDBACK_CODES）。
+      // 「未开始执行的 run 不发事件」旧纪律翻案为「REST 已即时反馈的竞态码不发，其余必发」：
+      // pre-start 失败（LLM 装配/容器 ensure/registry）此前 job failed 零事件零投影，是「无声
+      // 挂死」根因（#747 回归②诊断）。分类器 classifyRunError 现成（90003/40040/40042 →
+      // llm_error，Docker/ensure → infra）。顺序钉死：先回滚占位再发事件——否则事件驱动的
+      // refreshProjection 会读回 inFlight{queued} 幽灵。
       const snap = this.runs.get(cmd.sessionId)
       if (snap?.state === 'queued' && snap.runId === cmd.runId) this.runs.delete(cmd.sessionId)
+      const code = e instanceof EnvelopeError ? e.code : null
+      if (code === null || !PRESTART_REST_FEEDBACK_CODES.has(code)) {
+        this.publish(cmd.ownerId, { type: 'run.failed', payload: { errorKind: classifyRunError(e) } }, cmd)
+      }
+      // teammate 归位（顺带修卡 running 幽灵）：startTeammate 在 dispatch 前已置 running，
+      // pre-start 失败时 executeRun 的 finally 状态归位不跑——此处推 failed 与 executeRun
+      // finally 同款（settleTeammateStatus 共用）。
+      if (cmd.teammateId) await this.settleTeammateStatus(cmd, 'failed')
       throw e
     } finally {
       if (cmd.kind === 'resume') this.resolvingApprovals.delete(cmd.sessionId)
@@ -1080,29 +1137,8 @@ export class RunService {
       this.writeLocks.releaseRun(cmd.runId)
       // 终态清理漏斗运行槽（interrupted/suspended 保留——resume 延续同一逻辑 run 的护栏计数）
       const finalState = this.runs.get(cmd.sessionId)?.state
-      if (cmd.teammateId && this.deps.teammates) {
-        const parentSessionId = cmd.parentSessionId ?? cmd.sessionId
-        try {
-          const teammate = await this.deps.teammates.get(parentSessionId, cmd.teammateId)
-          if (teammate.status !== 'archived') {
-            const status = finalState === 'completed' ? 'completed'
-              : finalState === 'failed' || finalState === 'aborted' ? 'failed'
-              : finalState === 'suspended' || (finalState === 'interrupted' && this.pendingApprovals.has(cmd.sessionId)) ? 'suspended'
-              : finalState === 'interrupted' ? 'waiting'
-              : 'running'
-            const updated = await this.deps.teammates.updateStatus(parentSessionId, cmd.teammateId, status)
-            if (updated.status !== 'archived' && (status === 'completed' || status === 'failed' || status === 'suspended')) {
-              this.publish(cmd.ownerId, {
-                type: `teammate.${status}`,
-                payload: { teammateId: cmd.teammateId, name: teammate.name },
-              }, cmd)
-            }
-          }
-        } catch (err) {
-          // eslint-disable-next-line no-console
-          console.warn(`[runner] teammate status update failed: teammate=${cmd.teammateId}: ${(err as Error).message}`)
-        }
-      }
+      // teammate 状态归位（executeRun finally 与 executeNow pre-start catch 共用 settleTeammateStatus）
+      await this.settleTeammateStatus(cmd, finalState ?? 'failed')
       if (
         this.deps.approvals &&
         (finalState === 'completed' || finalState === 'failed' || finalState === 'aborted')
