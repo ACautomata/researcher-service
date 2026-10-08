@@ -81,15 +81,9 @@ describe('S4 行为快照（#724 断言集 6/6 固化，三包升级守门基线
       data: {
         ownerId: user.id,
         providerId: 'prov-1',
-        lcProvider: 'openai',
-        baseUrl: 'https://llm.example.edu/v1',
-        credentialEnvId: 'LLM_API_KEY',
-        authHeader: true,
+        presetId: 'openai',
         modelsJson: JSON.stringify([{ id: 'model-x' }]),
       },
-    })
-    await prisma.providerEndpoint.create({
-      data: { scheme: 'https', host: 'llm.example.edu', port: null, createdBy: 'seed' },
     })
   }, 30_000)
 

@@ -13,7 +13,9 @@
 # 所需 secrets（见 deploy/DEPLOY.md 清单）：
 #   REMOTE_HOST REMOTE_USER DEPLOY_KEY            —— SSH 登录宿主
 #   GHCR_PULL_USER GHCR_PULL_TOKEN                —— 宿主拉私有 GHCR（read:packages PAT）
-#   JWT_SECRET LLM_API_KEY                        —— server 运行时
+#   JWT_SECRET LLM_API_KEY LLM_CREDENTIAL_SECRET  —— server 运行时（#881：LLM_CREDENTIAL_SECRET
+#                                                    为 BYOK 凭证加密根，缺任一 → 部署健康门必红）
+#   LLM_PRESET LLM_MODEL                          —— 平台默认端点（#881，可选；空 = 缺省 minimax/预设默认模型）
 #   AUTOFIGURE_IMAGE_MODEL AUTOFIGURE_IMAGE_API_KEY FAL_KEY
 #                                                 —— AutoFigure 插件必填键（#792 fail-fast，
 #                                                    缺任一 → 部署健康门必红：server 启动即崩）
@@ -175,6 +177,9 @@ jobs:
           {
             echo "JWT_SECRET=${{ secrets.JWT_SECRET }}"
             echo "LLM_API_KEY=${{ secrets.LLM_API_KEY }}"
+            echo "LLM_CREDENTIAL_SECRET=${{ secrets.LLM_CREDENTIAL_SECRET }}"
+            echo "LLM_PRESET=${{ secrets.LLM_PRESET }}"
+            echo "LLM_MODEL=${{ secrets.LLM_MODEL }}"
             echo "AUTOFIGURE_IMAGE_MODEL=${{ secrets.AUTOFIGURE_IMAGE_MODEL }}"
             echo "AUTOFIGURE_IMAGE_API_KEY=${{ secrets.AUTOFIGURE_IMAGE_API_KEY }}"
             echo "FAL_KEY=${{ secrets.FAL_KEY }}"

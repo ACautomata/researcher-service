@@ -1,10 +1,10 @@
 // ctx.llm 句柄核心实现（#744 §6/§11.1 · #792）：ProviderRegistry 出口的高层多模态句柄。
 // 回退链封装在核心实现内，插件不碰 registry 查询逻辑：默认链 = owner providers（createdAt
-// 序）× 各自首模型，构造或调用失败逐级降级，全败明确报错（不静默换模型）；AUTOFIGURE_SVG_MODEL
-// 指定 = 集合内任一模型（检索域全 provider 全模型，非首模型经 configurable 通道绑定）——
-// 运维 pin 语义，调用失败明确报错不降级。
-// owner 无 provider → loadSnapshot 惰性物化面板默认 provider（providerDefaults）——物化后
-// 仍为空集 = 面板未配置 → 明确配置错误。
+// 序）+ 平台虚拟条目垫底（#881）各自首模型，构造或调用失败逐级降级，全败明确报错（不静默
+// 换模型）；AUTOFIGURE_SVG_MODEL 指定 = 集合内任一模型（检索域全 provider 全模型，非首模型
+// 经 configurable 通道绑定）——运维 pin 语义，调用失败明确报错不降级。
+// owner 零 provider 行 → 快照恒含平台虚拟条目（env 派生，#881）——仍为空集 = 面板预设无
+// 默认模型（防御面，正常配置不触达）。
 //
 // 不走 getDefaultModel 的 withFallbacks 组合链：RunnableWithFallbacks.bind 会丢 fallbacks
 //（langchain RunnableBinding.bind 不复制子类字段）——figure 调用须携带上游保真参数

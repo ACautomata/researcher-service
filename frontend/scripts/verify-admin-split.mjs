@@ -42,7 +42,6 @@ const ADMIN_CHUNKS = [
   'AdminUsersView',
   'TraceLogsView',
   'ApiDocsView',
-  'ProviderEndpointsView',
   'AuditLogsView',
   'UsageView',
 ]

@@ -51,9 +51,11 @@ services:
       DATABASE_URL: file:/app/db/db.sqlite3
       # 控制面落盘根（容器内路径，无宿主挂载；#858 前身 OPENCLAW_FLEET_ROOT）：附件上传临时区。
       DATA_ROOT: /data
-      # 敏感项：仅 LLM_API_KEY 显式列（shell 可选注入，空串安全 = config.ts dev 缺省 ''）；
-      # JWT_SECRET 不列，走 config.ts dev 默认。
+      # 敏感项：LLM_API_KEY / LLM_CREDENTIAL_SECRET 显式列（shell 可选注入，空串安全 =
+      # config.ts dev 缺省）；JWT_SECRET 不列，走 config.ts dev 默认。LLM_PRESET / LLM_MODEL
+      #（#881 平台默认端点预设与单模型覆盖）可选，不列走缺省 minimax/预设默认模型。
       LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_CREDENTIAL_SECRET: ${LLM_CREDENTIAL_SECRET:-}
       # AutoFigure（#792 插件化收口起回归，同 prod 三必填键）：shell 可选注入，空串安全 =
       # assertPluginEnv dev 警告不阻断（dev 缺键时 figure 工具调用期明确报错）。可选键
       # AUTOFIGURE_IMAGE_BASE_URL / AUTOFIGURE_SVG_MODEL 同机制，缺省即行为正确，不显式列。

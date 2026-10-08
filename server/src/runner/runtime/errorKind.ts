@@ -2,8 +2,9 @@
 //
 // 分类语义（story 10「用户知道下一步该做什么」）：
 //   llm_error        —— LLM 调用面失败：provider 端点不可达/HTTP 4xx·5xx、凭证缺失或非法
-//                       （LLM_NOT_CONFIGURED / PROVIDER_NOT_FOUND）、端点白名单运行时拒绝
-//                      （PROVIDER_ENDPOINT_NOT_ALLOWED 40042）。用户动作 = 检查 model 配置。
+//                       （LLM_NOT_CONFIGURED / PROVIDER_NOT_FOUND）、端点凭证解密失败
+//                      （#881 起 PROVIDER_ENDPOINT_NOT_ALLOWED 已退役——凭证解密失败 /
+//                      平台 key 缺失走 LLM_NOT_CONFIGURED 同分类）。用户动作 = 检查 model 配置。
 //   recursion_limit  —— LangGraph GraphRecursionError（图深度护栏触发）。用户动作 = 拆小任务。
 //   infra            —— 其余一切：Docker/DB/未知（含无类型异常）。用户动作 = 重试/联系管理员。
 //
@@ -17,12 +18,13 @@ import { CAUSE_CHAIN_MAX_DEPTH } from './values'
 
 export type RunErrorKind = 'llm_error' | 'recursion_limit' | 'infra'
 
-// models 域信封码 → llm_error 的白名单（运行时 LLM 配置/凭证/白名单面——providerRegistry
-// 与 fetch wrapper 抛出的全部 code）。会话/run 域码（5xxxx）不在 run 执行体内抛，不收。
+// models 域信封码 → llm_error 的白名单（运行时 LLM 配置/凭证面——providerRegistry
+// 抛出的全部 code）。会话/run 域码（5xxxx）不在 run 执行体内抛，不收。
+// PROVIDER_ENDPOINT_NOT_ALLOWED（40042）随 #881 白名单链退役出白名单（常量保留、语义退役）：
+// 任何残留抛出面归 infra 兜底分类。
 const LLM_ENVELOPE_CODES: ReadonlySet<number> = new Set([
   CODE.LLM_NOT_CONFIGURED,
   CODE.PROVIDER_NOT_FOUND,
-  CODE.PROVIDER_ENDPOINT_NOT_ALLOWED,
 ])
 
 function envelopeCodeOf(err: unknown): number | null {

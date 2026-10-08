@@ -61,10 +61,9 @@ describe('#788 插件命令运行时（S1，{inject}/{execute}）', () => {
     const prisma = createPrismaClient(`file:${dbPath}`)
     const owner = await seedUser(prisma, 'plugins-cmd-user', 'plugins-cmd-password')
     await prisma.modelProvider.create({ data: {
-      ownerId: owner.id, providerId: 'cmd-provider', lcProvider: 'openai', baseUrl: 'https://llm.example.edu/v1',
-      credentialEnvId: 'LLM_API_KEY', authHeader: true, modelsJson: JSON.stringify([{ id: 'model-x' }]),
+      ownerId: owner.id, providerId: 'cmd-provider', presetId: 'openai',
+      modelsJson: JSON.stringify([{ id: 'model-x' }]),
     } })
-    await prisma.providerEndpoint.create({ data: { scheme: 'https', host: 'llm.example.edu', port: null, createdBy: 'seed' } })
     const hub = new StreamHub()
     const events: CatalogEvent[] = []
     hub.register(owner.id, { send: frame => {

@@ -42,7 +42,7 @@ export const routes: RouteRecordRaw[] = [
     component: () => import('@/views/PluginsView.vue'),
     meta: { requiresAuth: true },
   },
-  // #800：admin 运营面（账号管理/白名单/审计/Usage/内容消息/API 文档）整体迁入 admin 子应用
+  // #800：admin 运营面（账号管理/审计/Usage/内容消息/API 文档）整体迁入 admin 子应用（#881 白名单页退役）
   // （/admin/ MPA 入口：生产 nginx try_files → admin.html；dev/preview 由 vite 插件 rewrite）。
   // 主路由零 /admin/* 残留——用户 bundle 产物级不含 admin 代码。
   {

@@ -78,7 +78,10 @@ panel-frontend 容器（nginx，唯一对宿主暴露，loopback:18080）
 | `GHCR_PULL_USER` | GitHub 用户名 | 宿主拉私有 GHCR |
 | `GHCR_PULL_TOKEN` | classic PAT，scope `read:packages` | 宿主拉私有 GHCR（持久 login，面板镜像拉取复用） |
 | `JWT_SECRET` | **≥32 字符强随机** | HS256 签名密钥（server 生产 fail-fast） |
-| `LLM_API_KEY` | 面板共享 LLM key | runner 侧 provider 凭证解析（#731 §1.3） |
+| `LLM_API_KEY` | 平台默认端点共享 LLM key | 平台虚拟端点 / BYOK「用平台 key」端点解析根（runner 启动 fail-fast；#881） |
+| `LLM_CREDENTIAL_SECRET` | **≥32 字符强随机** | BYOK 凭证加密根（AES-256-GCM，#881；生产 fail-fast） |
+| `LLM_PRESET`（可选） | `minimax`（默认） | 平台默认端点预设（六选一：minimax/anthropic/openai/deepseek/kimi/zhipu；#881） |
+| `LLM_MODEL`（可选） | 预设默认模型 | 平台默认端点单模型覆盖（#881） |
 | `AUTOFIGURE_IMAGE_MODEL` | 生图模型名（如 `image-01`） | AutoFigure 插件必填键（#792 assertPluginEnv 生产 fail-fast，缺任一 → server 启动即崩、CD 健康门必红） |
 | `AUTOFIGURE_IMAGE_API_KEY` | 生图 API key | 同上（MiniMax 生图凭证） |
 | `FAL_KEY` | fal API key | 同上（SAM3 分割 / RMBG 去背景云 API） |
@@ -101,7 +104,7 @@ openssl rand -base64 48      # JWT_SECRET（≥32 字符，48 字节 base64 足�
 容器启动时校验，缺一即拒启动（健康门会据此判红）：
 
 `JWT_SECRET`（≥32 字符）·
-`LLM_API_KEY`（会话发消息经 provider 解析消费）· `REDIS_URL`（compose 固定
+`LLM_API_KEY`（平台默认端点解析根）· `LLM_CREDENTIAL_SECRET`（BYOK 凭证加密，≥32 字符，#881）· `REDIS_URL`（compose 固定
 `redis://redis:6379/0`）·
 `DATA_ROOT`（compose 固定 `/data`，server 容器内落盘根——附件上传临时区；#858 前身
 `OPENCLAW_FLEET_ROOT`）·

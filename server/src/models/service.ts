@@ -1,70 +1,57 @@
-// ModelProviderService —— 每用户 model provider CRUD + 热生效版本号（#336；#771 归属上移；#775 事务简化；
-// #857 服务签名 ownerId 标量化：入参即操作主体，与容器行完全脱钩）。
+// ModelProviderService —— 每用户 LLM 端点（BYOK）CRUD + 热生效版本号（#336；#771 归属上移；
+// #881 预设制换形 + 凭证单向流）。
 //
-// 事务语义（#775，731 §4/§6）：DB mutation + config_meta version bump 同一事务；写盘
-// （putArchive 重渲染 openclaw.json）/ catch reconcile / per-container 写锁整段退役——
-// LLM 调用的消费方已从「容器内 OpenClaw 进程」换为「控制面 runner」（#731 §1.3），配置变更经
-// version 信号热生效（下一个 run 重建快照），不再有 fs 资源参与事务。configWriter/
-// configBuilder 两文件已随 T0 清退（#801）。unique(ownerId, providerId) 并发冲突 → P2002 → 40041；
-// 目标行缺失 → P2025 → 40040。
+// 事务语义（#775 先例保留）：DB mutation + config_meta version bump 同一事务；配置变更经
+// version 信号热生效（下一个 run 重建快照），在飞 run 持旧快照跑完。unique(ownerId, providerId)
+// 并发冲突 → P2002 → 40041；目标行缺失 → P2025 → 40040。
 //
-// 白名单第一层校验（#775，731 §5.1）：create/update 在事务前调 checkOriginForCrud——
-// zod URL 形态（validation/schemas.ts）→ origin 精确匹配 provider_endpoints → DNS 私网/环回
-// 拒绝（可注入 lookup 测 fake；ALLOW_PRIVATE_PROVIDER_ENDPOINTS 为自建私网端点逃生门）。
-// 未命中 → 90002 字段级 base_url（不泄露白名单内容；40042 仅运行时第二层）。
+// 预设制（#881）：preset_id ∈ 端点预设清单（presets.ts 单一来源）——协议/baseUrl/凭证头策略
+// 随预设派生，行内无自由地址（SSRF 构造性消灭；白名单双层校验链随票退役）。provider_id 保留域
+// 'platform' 写侧拒绝（防与平台虚拟条目歧义；zod 已挡，本层防御重复）。
 //
-// #771（731 §3.2）：归属 containerId → ownerId 上移（「用户」是配置主体，多容器共享同一 LLM
-// 配置面）——行归属取 ownerId，unique 键随之 (ownerId, providerId)。
+// 凭证单向流：写请求可带明文 api_key，落库即 AES-256-GCM 密文（cipher.ts，密钥
+// LLM_CREDENTIAL_SECRET）；任何读路径只出掩码，响应体永无明文无密文。POST 空/缺省 = 用平台
+// 共享 key（cipher NULL）；PUT 空/缺省 = 保持既有凭证不变。解密失败读不炸（key_error 标记，
+// 掩码置 null）——错钥（轮换缺失）只降级展示与运行时（运行时报 LLM 未配置），管理面可用。
 //
-// #857（退役②）：归属前置不再经容器行解析——ownerId 由路由层从认证身份直派生传入，本服务
-// 零容器行查询（事务内状态谓词 assertWritable 随 creating/removing 拒写契约一并移除）。
-// provider 级「不存在 vs 越权」同码 40040（#336 验收）：非 owner 到不了目标行（ownerId 复合
-// 定位天然隔离），对外两者逐字节一致、区分仅进服务端日志。
+// #857（退役②）：ownerId 由路由层从认证身份直派生传入。provider 级「不存在 vs 越权」同码
+// 40040（#336 验收）：非 owner 到不了目标行，对外逐字节一致。
 
 import type { ModelProvider, PrismaClient } from '../generated/prisma/client'
 import { fail } from '../envelope'
 import { CODE } from '../codes'
 import { config } from '../config'
-import {
-  checkOriginForCrud,
-  defaultHostLookup,
-  OriginCheckError,
-  type HostLookup,
-} from '../runner/allowlist'
 import { bumpConfigVersion } from './configVersion'
-import { LC_PROVIDER_TO_WIRE, WIRE_TO_LC_PROVIDER, type ProviderApiWire } from './values'
+import { decryptCredential, encryptCredential, isCredentialEnvelope } from './cipher'
+import { ENDPOINT_PRESETS, RESERVED_PROVIDER_IDS, presetById } from './presets'
 
 // 写侧输入（路由层已把 snake_case body 经 zod 校验后映射为 camelCase domain shape）
 export interface ModelProviderWriteInput {
   providerId: string
-  api: ProviderApiWire
-  baseUrl: string
-  apiKeyEnvId: string
-  authHeader: boolean
+  presetId: string
+  /** 明文 key：undefined/'' 语义按操作区分（create=平台共享 key；update=保持不变） */
+  apiKey?: string
   models: Array<Record<string, unknown>>
 }
 
-// 读侧输出（snake_case wire，对齐 Django ModelProviderReadSerializer / 前端 models.ts）
+// 读侧输出（snake_case wire）：任何字段永不含 key 明文/密文。
+// protocol/base_url 为 string（非 EndpointProtocol 窄型）：预设清单随版收缩后的存量行
+// 无预设可派生——管理面如实出空串（只读展示，无 origin 接触；运行时 fail-closed 跳过见
+// providerRegistry.rowToEntry），不回退任何预设形状。
 export interface ModelProviderView {
   id: string
   provider_id: string
-  api: ProviderApiWire
+  preset_id: string
+  protocol: string
   base_url: string
-  api_key_env_id: string
-  auth_header: boolean
+  /** 掩码（如 'sk-••••abcd'）；null = 未设自己的 key（走平台共享）或解密失败 */
+  api_key_masked: string | null
+  /** cipher 存在但解密失败（错钥）——读不炸标记；true 时运行时报 LLM 未配置 */
+  key_error: boolean
   models: Array<Record<string, unknown>>
   created_at: Date
 }
 
-// 白名单校验注入缝（#775）：lookup 测试注 fake 免真 DNS；allowPrivate 覆盖 env 开关。
-// 缺省 = 生产形态（真 DNS + config 开关）。
-export interface ModelProviderServiceOptions {
-  lookup?: HostLookup
-  allowPrivate?: boolean
-}
-
-// 防御解码 modelsJson（对齐 containers.decodeScopes）：坏 JSON 让 list 请求 500；合法 JSON 但
-// 非数组也违反 models[] 响应契约 → 回退 []。
 function decodeModels(raw: string): Array<Record<string, unknown>> {
   try {
     const v: unknown = JSON.parse(raw)
@@ -75,95 +62,119 @@ function decodeModels(raw: string): Array<Record<string, unknown>> {
   return []
 }
 
-// 731 §3.2：credentialEnvId 过渡列可空（为 P1 per-user key 留位，见 credentialCipher）；
-// legacy wire/落盘链要求 apiKeyEnvId 非空（zod 入站保证）——缺失时回退空串（旧行为不变）。
-function envIdOf(row: ModelProvider): string {
-  return row.credentialEnvId ?? ''
+// 掩码：保留前 3 + 末 4，其余以 •••• 收敛；隐藏位 < 4（≤10 位短串）全掩码——
+// 短串露 7 位只剩个位数未知，掩码形同虚设。绝不回明文。
+export function maskApiKey(plaintext: string): string {
+  if (plaintext.length - 7 < 4) return '••••'
+  return `${plaintext.slice(0, 3)}••••${plaintext.slice(-4)}`
 }
 
-function toView(row: ModelProvider): ModelProviderView {
+function toView(row: ModelProvider, credentialSecret: string): ModelProviderView {
+  const preset = presetById(row.presetId)
+  // 未知预设（清单随版收缩）→ 如实出空串（不回退任何预设形状；运行时该行走 fail-closed
+  // 跳过，管理面保留可见可删）
+  const protocol: string = preset?.protocol ?? ''
+  const baseUrl = preset?.baseUrl ?? ''
+  let masked: string | null = null
+  let keyError = false
+  if (row.credentialCipher !== null) {
+    if (!isCredentialEnvelope(row.credentialCipher)) {
+      keyError = true
+    } else {
+      try {
+        masked = maskApiKey(decryptCredential(row.credentialCipher, credentialSecret))
+      } catch {
+        keyError = true // 错钥/篡改：读不炸，标 key_error（掩码置 null）
+      }
+    }
+  }
   return {
     id: row.id,
     provider_id: row.providerId,
-    api: LC_PROVIDER_TO_WIRE[row.lcProvider],
-    base_url: row.baseUrl,
-    api_key_env_id: envIdOf(row),
-    auth_header: row.authHeader,
+    preset_id: row.presetId,
+    protocol,
+    base_url: baseUrl,
+    api_key_masked: masked,
+    key_error: keyError,
     models: decodeModels(row.modelsJson),
     created_at: row.createdAt,
   }
 }
 
 export class ModelProviderService {
-  private readonly lookup: HostLookup
-  private readonly allowPrivate: boolean
-
   constructor(
     private readonly prisma: PrismaClient,
-    opts: ModelProviderServiceOptions = {},
-  ) {
-    this.lookup = opts.lookup ?? defaultHostLookup
-    this.allowPrivate = opts.allowPrivate ?? config.runner.allowPrivateProviderEndpoints
-  }
+    private readonly credentialSecret: string = config.llm.credentialSecret,
+  ) {}
 
   async list(ownerId: string): Promise<ModelProviderView[]> {
     const rows = await this.prisma.modelProvider.findMany({
-      where: { ownerId }, // #771 归属上移：行挂用户；#857：ownerId 即认证身份直派生
+      where: { ownerId },
       orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
     })
-    return rows.map(toView)
+    return rows.map((r) => toView(r, this.credentialSecret))
   }
 
   async get(ownerId: string, pid: string): Promise<ModelProviderView> {
-    return toView(await this.requireProvider(ownerId, pid))
+    return toView(await this.requireProvider(ownerId, pid), this.credentialSecret)
   }
 
-  // create/update：白名单第一层校验（事务前，不经网络占用事务）→ 事务内 mutation + version bump。
   async create(ownerId: string, input: ModelProviderWriteInput): Promise<ModelProviderView> {
-    await this.assertOriginAllowed(input.baseUrl)
+    this.assertReserved(input.providerId)
+    this.assertPreset(input.presetId)
     try {
       const row = await this.prisma.$transaction(async (tx) => {
         const created = await tx.modelProvider.create({
           data: {
-            ownerId, // #771 归属上移（731 §3.2）；#857：直取认证身份
+            ownerId,
             providerId: input.providerId,
-            lcProvider: WIRE_TO_LC_PROVIDER[input.api],
-            baseUrl: input.baseUrl,
-            credentialEnvId: input.apiKeyEnvId,
-            authHeader: input.authHeader,
+            presetId: input.presetId,
+            credentialCipher: this.cipherOrNull(input.apiKey),
             modelsJson: JSON.stringify(input.models),
           },
         })
         await bumpConfigVersion(tx)
         return created
       })
-      return toView(row)
+      return toView(row, this.credentialSecret)
     } catch (e) {
       this.rethrowKnown(e)
     }
   }
 
   async update(ownerId: string, pid: string, input: ModelProviderWriteInput): Promise<ModelProviderView> {
-    await this.assertOriginAllowed(input.baseUrl)
+    this.assertReserved(input.providerId)
+    this.assertPreset(input.presetId)
     try {
       const row = await this.prisma.$transaction(async (tx) => {
         // 复合唯一 where 定位目标行（路径 pid）：不存在 → P2025 → 40040。
-        // data.providerId 可为新 pid（PUT 改 provider_id），撞同 owner 既有 pid → P2002 → 40041。
-        const updated = await tx.modelProvider.update({
+        // key 留空（undefined/''）= 保持既有凭证不变——先读后写（事务内行级一致）。
+        const existing = await tx.modelProvider.findUnique({
+          where: { ownerId_providerId: { ownerId, providerId: pid } },
+        })
+        if (!existing) {
+          // eslint-disable-next-line no-console
+          console.warn(`[models] provider_not_found: ownerId=${ownerId} pid=${pid}`)
+          throw fail(CODE.PROVIDER_NOT_FOUND)
+        }
+        const nextCipher =
+          input.apiKey !== undefined && input.apiKey !== ''
+            ? this.cipherOrNull(input.apiKey)
+            : existing.credentialCipher
+        return tx.modelProvider.update({
           where: { ownerId_providerId: { ownerId, providerId: pid } },
           data: {
             providerId: input.providerId,
-            lcProvider: WIRE_TO_LC_PROVIDER[input.api],
-            baseUrl: input.baseUrl,
-            credentialEnvId: input.apiKeyEnvId,
-            authHeader: input.authHeader,
+            presetId: input.presetId,
+            credentialCipher: nextCipher,
             modelsJson: JSON.stringify(input.models),
           },
+        }).then(async (updated) => {
+          await bumpConfigVersion(tx)
+          return updated
         })
-        await bumpConfigVersion(tx)
-        return updated
       })
-      return toView(row)
+      return toView(row, this.credentialSecret)
     } catch (e) {
       this.rethrowKnown(e, { ownerId, pid })
     }
@@ -182,19 +193,24 @@ export class ModelProviderService {
     }
   }
 
-  // 白名单第一层校验（#775，731 §5.1）：未命中 / DNS 私网 → 90002 字段级 base_url。
-  private async assertOriginAllowed(baseUrl: string): Promise<void> {
-    const entries = await this.prisma.providerEndpoint.findMany()
-    try {
-      await checkOriginForCrud(baseUrl, entries, {
-        lookup: this.lookup,
-        allowPrivate: this.allowPrivate,
+  // 明文 key → 密文；空/缺省 → NULL（平台共享 key）。
+  private cipherOrNull(apiKey: string | undefined): string | null {
+    if (apiKey === undefined || apiKey === '') return null
+    return encryptCredential(apiKey, this.credentialSecret)
+  }
+
+  // provider_id 保留域防御（zod 主闸；防绕过路由直接调 service）。
+  private assertReserved(providerId: string): void {
+    if (RESERVED_PROVIDER_IDS.has(providerId)) {
+      throw fail(CODE.VALIDATION_FAILED, undefined, { provider_id: ['provider_id 为保留 id，不可使用'] })
+    }
+  }
+
+  private assertPreset(presetId: string): void {
+    if (!presetById(presetId)) {
+      throw fail(CODE.VALIDATION_FAILED, undefined, {
+        preset_id: [`preset_id 须为端点预设之一（${ENDPOINT_PRESETS.map((p) => p.id).join(' | ')}）`],
       })
-    } catch (e) {
-      if (e instanceof OriginCheckError) {
-        throw fail(CODE.VALIDATION_FAILED, undefined, { base_url: [e.fieldMessage] })
-      }
-      throw e
     }
   }
 

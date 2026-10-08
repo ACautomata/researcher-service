@@ -5,7 +5,7 @@
 - `docker-compose.deploy.yml` —— **生产栈**（frontend nginx + server + redis；
   由 CD scp 落盘宝塔宿主 `/www/panel/`）。
 - `docker-compose.dev.yml` —— **dev 栈**（server+redis 容器化，与 prod 同形态，issue #594 / ADR 0013）。
-- `.env.example` —— 生产栈环境变量模板（`LLM_API_KEY` / `JWT_SECRET` 等；真实 `.env` 经 CD 渲染，
+- `.env.example` —— 生产栈环境变量模板（`LLM_API_KEY` / `LLM_CREDENTIAL_SECRET` / `JWT_SECRET` 等；真实 `.env` 经 CD 渲染，
   不进版本库）。
 - `wiki-image/` —— wiki 容器镜像构建源（#784，busybox 级 + 零初始化）。
 
@@ -51,8 +51,8 @@ Docker SDK（/var/run/docker.sock）—— docker inspect Running 即活性（�
 ## 与控制面的衔接
 
 - 控制面配置走环境变量（`server/src/config.ts`）：`DATA_ROOT`（落盘根 = 附件上传临时区，
-  生产须绝对路径 fail-fast）、`LLM_API_KEY`（runner 侧 provider 凭证解析，#731 §1.3）。
-  model provider CRUD 经 `models` 域 + `config_meta` version bump 热生效（#775）。
+  生产须绝对路径 fail-fast）、`LLM_API_KEY`（平台默认端点解析根）与 `LLM_CREDENTIAL_SECRET`
+  （BYOK 凭证加密根，#881）。LLM 端点 CRUD 经 `models` 域 + `config_meta` version bump 热生效（#775）。
 - （#858：`OPENCLAW_TEMPLATE_DIR` / `OPENCLAW_FLEET_ROOT` / `OPENCLAW_IMAGE` /
   `CREDENTIAL_ENCRYPTION_KEYS` 随 fleet 编排退役，server 不再读取。）
 

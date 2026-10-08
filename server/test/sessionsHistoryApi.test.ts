@@ -121,15 +121,9 @@ describe('rewind / fork 会话历史域（S1，#781）', () => {
       data: {
         ownerId: user.id,
         providerId: 'prov-1',
-        lcProvider: 'openai',
-        baseUrl: 'https://llm.example.edu/v1',
-        credentialEnvId: 'LLM_API_KEY',
-        authHeader: true,
+        presetId: 'openai',
         modelsJson: JSON.stringify([{ id: 'model-x' }]),
       },
-    })
-    await prisma.providerEndpoint.create({
-      data: { scheme: 'https', host: 'llm.example.edu', port: null, createdBy: 'seed' },
     })
 
     hub = new StreamHub()
@@ -138,7 +132,20 @@ describe('rewind / fork 会话历史域（S1，#781）', () => {
 
     const registry = new ProviderRegistry(prisma, {
       llmApiKey: 'test-key',
-      modelFactory: async () => new ScriptedChatModel(currentScript),
+      // #881 平台虚拟条目垫底：本文件用例以「primary 失败 → run.failed」为失败注入语义——
+      // 平台 fallback 实例给即刻失败桩（脚本耗尽的失败注入不得再退一轮平台 tool 执行）
+      modelFactory: async (_m, opts) =>
+        opts.baseUrl.includes('minimaxi')
+          ? ({
+              // 即刻失败桩：bindTools 返回自身——默认链成员 duck 面（可绑工具）与真实模型一致
+              invoke: async () => {
+                throw new Error('platform fallback disabled in test')
+              },
+              bindTools() {
+                return this
+              },
+            } as never)
+          : new ScriptedChatModel(currentScript),
     })
     runService = new RunService({
       prisma,

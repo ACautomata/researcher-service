@@ -1,48 +1,20 @@
-// models 域常量 + wire↔DB 枚举映射（平移 backend/models/models.py，#336）。
+// models 域常量（#881 预设制换形后精简）：协议二值 + provider_id 校验 + 模型条目模态枚举。
 //
-// 术语对齐：provider_id = provider 行的稳定 id（r28 §1：minimax / vllm /
-// my-proxy），亦拼成 <pid>/<mid> 模型引用 —— 须小写 DNS-label 风格，禁路径
-// 分隔符 / 大写 / 数字开头。api_key_env_id = SecretRef.id（env 变量名），须 ^[A-Z][A-Z0-9_]{0,127}$，
-// 且须为容器已注入的 env（ALLOWED_API_KEY_ENV_IDS）。
+// 术语对齐：provider_id = 端点行的稳定 id（用户命名域，DNS-label 风格）；保留域 'platform'
+// （平台虚拟条目，presets.ts RESERVED_PROVIDER_IDS）。preset_id ∈ 端点预设清单（presets.ts
+// 单一来源）——协议/baseUrl/凭证头策略全部随预设派生，无自由地址。
 //
-// wire 命名：REST 请求/响应体沿用 Django/frontend 的 snake_case（provider_id / base_url /
-// api_key_env_id / auth_header / created_at），与整个 Express server 既有 wire 契约一致；
-// Prisma 模型字段为 camelCase（providerId / credentialEnvId / …）。字段级 snake↔camel 映射在各层
-// 入口/出口收敛（routes.toInput / service.toView·toSpec），enum 的 wire↔DB 映射在本文件收敛。
-//
-// #771（731 §2.1/§3.2）：DB 枚举列 api（openai_completions/anthropic_messages）改造为 lcProvider
-// 二值白名单（openai/anthropic）——1:1 映射（openai-completions→openai / anthropic-messages→
-// anthropic，OpenAI 兼容端点统一走 openai + baseUrl）；wire 取值集不变，映射在本文件收敛。
-
-import type { LcProvider } from '../generated/prisma/client'
+// wire 命名：REST 请求/响应体沿用 snake_case（provider_id / preset_id / api_key / …），
+// 与整个 Express server 既有 wire 契约一致；Prisma 模型字段为 camelCase。
 
 // provider_id 小写 DNS-label 风格（r28 §1）：1–64 位
 export const PROVIDER_ID_REGEX = /^[a-z][a-z0-9-]{0,63}$/
 
-// apiKey env id：大写字母开头，仅含大写字母、数字、下划线（1–128 位）
-export const API_KEY_ENV_ID_REGEX = /^[A-Z][A-Z0-9_]{0,127}$/
-
-// r28 §1.3：CRUD 表单只暴露这两个稳定取值（避免低置信别名）
+// 协议二值（wire 命名；预设派生只读，写侧不收）
 export const API_CHOICES = ['openai-completions', 'anthropic-messages'] as const
 export type ProviderApiWire = (typeof API_CHOICES)[number]
 
-// 容器进程实际持有的凭证 env（spec §5.2：全面板共享一个 LLM_API_KEY；DockerRuntime 仅注入它）。
-// 容器 env 在 docker run 时固定，无法热新增——故 SecretRef.id 只能引用已注入的 env。API 层
-// 据此收紧（入站校验拒绝，落库形状才可能合法；便于未来 fleet 注入更多 env 时仅放宽本集合）。
-export const ALLOWED_API_KEY_ENV_IDS: ReadonlySet<string> = new Set(['LLM_API_KEY'])
-
-// 模型 input 模态枚举（r28 §1.2 权威列举）：入站校验闸。
-// 非法值（如 "bogus"）入库则消费端拒绝 → 运行时落后 DB（#366
-// codex 四轮 P2：z.array(z.string()) 只验容器类型、不验取值）。
+// 模型 input 模态枚举（r28 §1.2 权威列举）：入站校验闸——非法值入库则消费端拒绝、
+// 运行时落后 DB（入站拒，落库形状才可能合法）。
 export const MODEL_INPUT_MODALITIES = ['text', 'image', 'audio', 'video', 'pdf'] as const
 export type ModelInputModality = (typeof MODEL_INPUT_MODALITIES)[number]
-
-// wire（连字符真值，REST 契约）↔ lcProvider 二值白名单（Prisma enum，#771 / 731 §2.1）。
-export const WIRE_TO_LC_PROVIDER: Record<ProviderApiWire, LcProvider> = {
-  'openai-completions': 'openai',
-  'anthropic-messages': 'anthropic',
-}
-export const LC_PROVIDER_TO_WIRE: Record<LcProvider, ProviderApiWire> = {
-  openai: 'openai-completions',
-  anthropic: 'anthropic-messages',
-}

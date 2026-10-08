@@ -11,8 +11,10 @@
 //     prisma migrate diff 从 schema.prisma 派生 —— 单一来源，此处镜像。
 // 版本史：7→8 #771 langgraph foundation；8→9 #775 usage 表 + minimax seed；9→10 #787；
 // 10→11 #786 isTeammate；11→12 #785 file_overwrite_logs；12→13 #790 teammates.kind +
-// #791 figures 换轨；13→14 T0 #801 legacy 清退；14→15 #858 OpenClaw 退役③（containers 表 DROP）。
-export const SCHEMA_VERSION = 15
+// #791 figures 换轨；13→14 T0 #801 legacy 清退；14→15 #858 OpenClaw 退役③（containers 表 DROP）；
+// 15→16 #881 端点预设制收敛（model_providers copy-rebuild 归一 + provider_endpoints 表退役 +
+// minimax 种子退役 + plugin_llm_assignments 备用表）。
+export const SCHEMA_VERSION = 16
 
 export function runIncrementalSchema(db) {
   const hasSessions = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='sessions'").get()
@@ -105,6 +107,7 @@ CREATE TABLE IF NOT EXISTS "figures" (
   runT0LegacyCleanup(db)
 
   runLanggraphFoundation(db)
+  runV16EndpointConvergence(db)
 }
 
 // #858 OpenClaw 退役③：containers 表（openclaw-gw fleet 容器记账行）整表 DROP。
@@ -150,22 +153,19 @@ function runLanggraphFoundation(db) {
     }
   }
 
-  // ---- model_providers 新形状（#771 归属上移；旧形状 DROP 归 runT0LegacyCleanup 先行）----
+  // ---- model_providers v16 形状（#881 端点预设制：presetId 取代自由地址与旧凭证列）。
+  // v15 形状旧表存在时本 CREATE 为 no-op——copy-rebuild 归 runV16EndpointConvergence（后置）。----
   db.exec(`
 CREATE TABLE IF NOT EXISTS "model_providers" (
     "id" TEXT NOT NULL PRIMARY KEY,
     "ownerId" TEXT NOT NULL,
     "providerId" TEXT NOT NULL,
-    "lcProvider" TEXT NOT NULL,
-    "baseUrl" TEXT NOT NULL,
-    "credentialEnvId" TEXT,
+    "presetId" TEXT NOT NULL,
     "credentialCipher" TEXT,
-    "authHeader" BOOLEAN NOT NULL DEFAULT true,
     "modelsJson" TEXT NOT NULL,
     "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT "model_providers_ownerId_fkey" FOREIGN KEY ("ownerId") REFERENCES "users" ("id") ON DELETE CASCADE ON UPDATE CASCADE
 );
-CREATE UNIQUE INDEX IF NOT EXISTS "model_providers_ownerId_providerId_key" ON "model_providers"("ownerId", "providerId");
 `)
 
   // ---- 会话历史域新表（#747 B 节 / #727）----
@@ -434,18 +434,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS "file_journal_sessionId_seq_key" ON "file_jour
 CREATE UNIQUE INDEX IF NOT EXISTS "file_journal_sessionId_toolCallId_key" ON "file_journal"("sessionId", "toolCallId");
 `)
 
-  // ---- 配置域新表（731 §3：provider_endpoints / config_meta · 752 §4.2：plugin_enablements）----
+  // ---- 配置域新表（731 §3：config_meta · 752 §4.2：plugin_enablements）。
+  // provider_endpoints 白名单表随 #881 预设制退役（DROP 归 runV16EndpointConvergence）。----
   db.exec(`
-CREATE TABLE IF NOT EXISTS "provider_endpoints" (
-    "id" TEXT NOT NULL PRIMARY KEY,
-    "scheme" TEXT NOT NULL,
-    "host" TEXT NOT NULL,
-    "port" INTEGER,
-    "note" TEXT NOT NULL DEFAULT '',
-    "createdBy" TEXT NOT NULL,
-    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-
 CREATE TABLE IF NOT EXISTS "config_meta" (
     "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT DEFAULT 1,
     "version" INTEGER NOT NULL DEFAULT 1
@@ -460,8 +451,6 @@ CREATE TABLE IF NOT EXISTS "plugin_enablements" (
     PRIMARY KEY ("ownerId", "pluginId"),
     CONSTRAINT "plugin_enablements_ownerId_fkey" FOREIGN KEY ("ownerId") REFERENCES "users" ("id") ON DELETE CASCADE ON UPDATE CASCADE
 );
-
-CREATE UNIQUE INDEX IF NOT EXISTS "provider_endpoints_scheme_host_port_key" ON "provider_endpoints"("scheme", "host", "port");
 `)
 
   // #774（#747·04）：memory_items 补 createdAt 列（BaseStore Item 契约必填，#771 地基遗漏）。
@@ -484,16 +473,6 @@ CREATE UNIQUE INDEX IF NOT EXISTS "provider_endpoints_scheme_host_port_key" ON "
   // 同事务 +1（热生效信号，731 §4）自 version=1 起步。fresh 库（init.sql CREATE 空表）同样
   // 经此路径补种子，与既有库一致。
   db.exec(`INSERT OR IGNORE INTO "config_meta" ("id", "version") VALUES (1, 1)`)
-
-  // 731 §3.1 seed：迁移脚本把默认 minimax 种子端点写入白名单（原 openclaw.json 模板默认语义——
-  // 模板与 ConfigRenderer 已随 T0 #801 退役，seed 名单内联于此）。createdBy 无用户语境（面板级 seed，
-  // users 表可能为空）→ ''（该列无 FK，不伪造 users.id）；幂等 = 固定 seed id + INSERT OR
-  // IGNORE——#775 迁移存量用户 minimax provider 行时遇已存在条目自然跳过。
-  db.exec(`
-INSERT OR IGNORE INTO "provider_endpoints" ("id", "scheme", "host", "port", "note", "createdBy", "createdAt")
-VALUES ('seed-minimax-endpoint', 'https', 'api.minimaxi.com', NULL,
-        'seed（731 §3.1）：默认 minimax 端点', '', CURRENT_TIMESTAMP)
-`)
 
   // ---- #785（#747·15 · #769 锁方案）：file_overwrite_logs（write-after-write 覆盖审计）----
   // 取锁写 path 时存在已 applied 且上家 writer ≠ 本 thread 的 file_journal 行 → 记一次
@@ -535,28 +514,170 @@ CREATE INDEX IF NOT EXISTS "llm_usage_records_userId_createdAt_idx" ON "llm_usag
 CREATE INDEX IF NOT EXISTS "llm_usage_records_model_createdAt_idx" ON "llm_usage_records"("model", "createdAt");
 CREATE INDEX IF NOT EXISTS "llm_usage_records_runId_idx" ON "llm_usage_records"("runId");
 `)
+}
 
-  // ---- #775 minimax 默认 provider seed（731 §6 逐字段映射末行：「空 providers → 模板默认」
-  // 的显式 seed 化）——每存量用户（当前零 provider 行）一行 minimax，幂等三保险：
-  //   ① NOT EXISTS（用户已有任意 provider 行——新形状表 (ownerId, providerId) 唯一键构造上
-  //     已无同 owner 重复行，「归属按 ownerId 折叠去重」在本表范围内即此语义）→ 跳过
-  //   ② 确定性 seed id（'seed-mp-minimax-' || userId，重跑 INSERT OR IGNORE 命中同主键）
-  //   ③ unique(ownerId, providerId) 兜底
-  // T0 #801：旧形状表已在上方 DROP 重建（新形状 CREATE 段见 #771 段），seed 对全量用户生效。
-  // 漂移守卫 = providerDefaults.test.ts 双向锁定（本处内联 JSON ↔ runner/providerDefaults.ts
-  // 常量；deploy/openclaw.json 模板已随 T0 删除）。
-  // 守卫：users 表存在才 seed——极旧/残缺部署（如仅 text_trace 批次的最小库）无用户可 seed。
-  const usersTable801 = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='users'`).get()
-  if (usersTable801) {
+// #881（schema 收敛段 v15→v16）端点预设制换轨。幂等可重跑：
+//   ① model_providers copy-rebuild：v15 形状（有 baseUrl 列）→ 逐行 host+协议归一迁移到
+//     v16 新形状（presetId 取代 lcProvider/baseUrl/credentialEnvId/authHeader——协议/地址/
+//     凭证头策略改由预设派生；credentialCipher 统一 NULL = 平台共享 key）。归一规则：
+//       - baseUrl host ∈ 预设 host 集 且 lcProvider 与该预设协议一致 → 归一（id/providerId/
+//         modelsJson/createdAt 原样保留）；同 host 异协议行（白名单时代 MiniMax/DeepSeek 的
+//         OpenAI 兼容面配置）迁移后运行时才炸（协议面不匹配）——按未知 host 同处理：
+//         丢弃 + 逐行 console.warn
+//       - seed-mp-minimax-* 种子行 → 跳过（种子退役：零 provider 用户改由虚拟平台条目服务）
+//       - providerId='platform' 行（v16 前保留域校验缺失的存量抢注）→ 丢弃 + 逐行 warn
+//         （与平台虚拟条目同 id 会遮蔽条目、默认链出现重复 providerId）
+//       - 未知 host 行 → 丢弃 + 逐行 console.warn（预设域外自由地址不迁移，#732 零迁移前提）
+//     全段单事务（DROP+CREATE+INSERT+引用 remap）：SQLite DDL 可回滚——插入失败/中途崩溃
+//     旧表完好，重跑自愈（幂等铁律的隐含承诺）；分步 DROP+CREATE 在事务外 = 全表清零且
+//     重跑探测不到 v15 形状的不可恢复窗口。
+//   ①+ 退役 seed id 的存量引用 remap：/model 钉过 'minimax'（seed providerId）的会话偏好
+//     （sessions.preferredModelJson）与 teammate 指派（teammates.modelProviderId）改指平台
+//     虚拟条目（同形状兜底，下一 run 不断链）；该 owner 尚有自建 providerId='minimax' 行时
+//     不动（引用仍有效）。teammates 无 ownerId 列——经 parentSessionId → sessions.ownerId
+//     关联判自建行存在性。
+//   ② provider_endpoints 端点白名单表整表退役（admin 白名单链随预设制退役；索引随表连带消失）。
+//   ③ plugin_llm_assignments 备用表（per-user 插件 LLM 指派，消费者归 #883；'judge' 保留键行）。
+//   ④ (ownerId, providerId) 唯一索引统一在此建（fresh 库 v16 表直建后同样命中）。
+// host 归一映射与 src/models/presets.ts 预设清单同源——漂移守卫 providerMigration.test.ts
+// （逐预设 host 造行跑收敛断言归一）+ modelsPresets.test.ts（PRESET_HOST_TO_ID 形状）双向锁定。
+const V16_HOST_TO_PRESET = new Map([
+  ['api.minimaxi.com', 'minimax'],
+  ['api.anthropic.com', 'anthropic'],
+  ['api.openai.com', 'openai'],
+  ['api.deepseek.com', 'deepseek'],
+  ['api.moonshot.cn', 'kimi'],
+  ['open.bigmodel.cn', 'zhipu'],
+])
+
+// 预设 id → 期望 lcProvider 二值（与 presets.ts protocolToLcProvider 同规则内联——.mjs 不能
+// import TS；同源性经 providerMigration.test.ts 逐预设双协议造行断言锁定）。
+const V16_PRESET_LC = new Map([
+  ['minimax', 'anthropic'],
+  ['anthropic', 'anthropic'],
+  ['openai', 'openai'],
+  ['deepseek', 'openai'],
+  ['kimi', 'openai'],
+  ['zhipu', 'openai'],
+])
+
+export function runV16EndpointConvergence(db) {
+  const mpTable = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='model_providers'`).get()
+  const mpCols = mpTable ? db.prepare(`PRAGMA table_info("model_providers")`).all() : []
+  const isV15 = mpCols.some((c) => c.name === 'baseUrl')
+  if (isV15) {
+    // copy-rebuild：读旧行（内存）→ 单事务内 DROP → 建新形状 → 逐行归一 INSERT（保留
+    // id/createdAt）→ 引用 remap。事务外不残留任何中间态（DDL 回滚保旧表，重跑自愈）。
+    // INSERT 语句须在事务内（新表 CREATE 之后）prepare——better-sqlite3 prepare 即按
+    // 当前 schema 编译，语句在外层会按 v15 旧表编译直接炸「no column named presetId」。
+    const legacyRows = db
+      .prepare(`SELECT "id", "ownerId", "providerId", "lcProvider", "baseUrl", "modelsJson", "createdAt" FROM "model_providers" ORDER BY "createdAt", "id"`)
+      .all()
+    const rebuild = db.transaction(() => {
+      db.exec(`DROP TABLE "model_providers"`)
+      db.exec(`
+CREATE TABLE IF NOT EXISTS "model_providers" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "ownerId" TEXT NOT NULL,
+    "providerId" TEXT NOT NULL,
+    "presetId" TEXT NOT NULL,
+    "credentialCipher" TEXT,
+    "modelsJson" TEXT NOT NULL,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT "model_providers_ownerId_fkey" FOREIGN KEY ("ownerId") REFERENCES "users" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+`)
+      const insert = db.prepare(`
+INSERT INTO "model_providers" ("id", "ownerId", "providerId", "presetId", "credentialCipher", "modelsJson", "createdAt")
+VALUES (?, ?, ?, ?, NULL, ?, ?)
+`)
+      for (const row of legacyRows) {
+        if (String(row.id).startsWith('seed-mp-minimax-')) continue // 种子退役（虚拟平台条目服务）
+        if (String(row.providerId) === 'platform') {
+          // eslint-disable-next-line no-console
+          console.warn(`[db:schema] #881 v16 收敛：providerId 为保留 id 'platform'，行丢弃（不迁移）id=${row.id}`)
+          continue
+        }
+        const host = hostOf(String(row.baseUrl))
+        const presetId = host !== null ? V16_HOST_TO_PRESET.get(host) : undefined
+        if (presetId === undefined) {
+          // eslint-disable-next-line no-console
+          console.warn(`[db:schema] #881 v16 收敛：未知端点 host，行丢弃（不迁移）id=${row.id} baseUrl=${row.baseUrl}`)
+          continue
+        }
+        if (V16_PRESET_LC.get(presetId) !== String(row.lcProvider)) {
+          // eslint-disable-next-line no-console
+          console.warn(`[db:schema] #881 v16 收敛：同主机异协议（lcProvider=${row.lcProvider}，预设 ${presetId} 期望 ${V16_PRESET_LC.get(presetId)}），行丢弃（不迁移）id=${row.id} baseUrl=${row.baseUrl}`)
+          continue
+        }
+        insert.run(row.id, row.ownerId, row.providerId, presetId, row.modelsJson, row.createdAt)
+      }
+      remapRetiredMinimaxRefs(db)
+    })
+    rebuild()
+  }
+
+  // ② 白名单表整表退役（含 seed-minimax-endpoint 等行；索引随表连带消失）
+  db.exec(`DROP TABLE IF EXISTS "provider_endpoints"`)
+
+  // ③ 插件 LLM 指派备用表（752 §5 V2 per-user 配置项提前建表；providerId NULL=跟随默认链 /
+  // 'platform'=钉平台；modelId 须属端点模型集——约束在应用层，#883 落地）
+  db.exec(`
+CREATE TABLE IF NOT EXISTS "plugin_llm_assignments" (
+    "ownerId" TEXT NOT NULL,
+    "pluginId" TEXT NOT NULL,
+    "providerId" TEXT,
+    "modelId" TEXT,
+    "updatedAt" DATETIME NOT NULL,
+    PRIMARY KEY ("ownerId", "pluginId"),
+    CONSTRAINT "plugin_llm_assignments_ownerId_fkey" FOREIGN KEY ("ownerId") REFERENCES "users" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+`)
+
+  // ④ 唯一索引（copy-rebuild 后随新表重建；fresh 库幂等命中）
+  db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS "model_providers_ownerId_providerId_key" ON "model_providers"("ownerId", "providerId")`)
+}
+
+// baseUrl → host 小写（解析失败返回 null——归一路按未知 host 丢弃告警）。
+function hostOf(baseUrl) {
+  try {
+    return new URL(baseUrl).hostname.toLowerCase()
+  } catch {
+    return null
+  }
+}
+
+// 退役 seed providerId 'minimax' 的存量引用 remap（#881 P2 修复）：/model 钉过 seed 行的
+// 会话偏好 / teammate 指派改指平台虚拟条目（同形状兜底，下一 run 不断链——否则 resolveModelRef
+// 40040、run 失败至用户手动重选）。该 owner 尚有自建 providerId='minimax' 行时不动（引用仍
+// 有效）。列存在性经 PRAGMA 守卫（收敛段可能在列引入前的更老库形上跑——prepared 语句引用
+// 缺失列即抛，守卫后跳过）。仅 copy-rebuild 事务内调用一次（v16 库重跑不进此段）。
+function remapRetiredMinimaxRefs(db) {
+  const sessCols = db.prepare(`PRAGMA table_info("sessions")`).all().map((c) => c.name)
+  if (sessCols.includes('preferredModelJson')) {
     db.exec(`
-INSERT OR IGNORE INTO "model_providers"
-  ("id", "ownerId", "providerId", "lcProvider", "baseUrl", "credentialEnvId", "authHeader", "modelsJson", "createdAt")
-SELECT 'seed-mp-minimax-' || u."id", u."id", 'minimax', 'anthropic',
-       'https://api.minimaxi.com/anthropic', 'LLM_API_KEY', 1,
-       '[{"id":"MiniMax-M3","name":"MiniMax M3","reasoning":true,"input":["text","image"],"cost":{"input":0.3,"output":1.2,"cacheRead":0.06,"cacheWrite":0.375},"contextWindow":1048576,"maxTokens":524288}]',
-       CURRENT_TIMESTAMP
-FROM "users" u
-WHERE NOT EXISTS (SELECT 1 FROM "model_providers" mp WHERE mp."ownerId" = u."id")
+UPDATE "sessions"
+SET "preferredModelJson" = json_set("preferredModelJson", '$.providerId', 'platform')
+WHERE json_valid("preferredModelJson")
+  AND json_extract("preferredModelJson", '$.providerId') = 'minimax'
+  AND NOT EXISTS (
+    SELECT 1 FROM "model_providers" mp
+    WHERE mp."providerId" = 'minimax' AND mp."ownerId" = "sessions"."ownerId"
+  );
+`)
+  }
+  const tmCols = db.prepare(`PRAGMA table_info("teammates")`).all().map((c) => c.name)
+  if (tmCols.includes('modelProviderId')) {
+    // teammates 无 ownerId 列：经 parentSessionId → sessions.ownerId 关联判自建行存在性。
+    db.exec(`
+UPDATE "teammates"
+SET "modelProviderId" = 'platform'
+WHERE "modelProviderId" = 'minimax'
+  AND NOT EXISTS (
+    SELECT 1 FROM "model_providers" mp
+    WHERE mp."providerId" = 'minimax'
+      AND mp."ownerId" = (SELECT s."ownerId" FROM "sessions" s WHERE s."id" = "teammates"."parentSessionId")
+  );
 `)
   }
 }

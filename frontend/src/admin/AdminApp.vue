@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// admin 子应用壳（#800）：运营面板导航（账号/白名单/审计/Usage/内容消息/API 文档）+
+// admin 子应用壳（#800；#881 端点白名单导航随预设制退役）：运营面板导航（账号/审计/Usage/内容消息/API 文档）+
 // 回用户面板入口（admin 亦是用户）+ 退出登录（清会话回用户面板登录页）。
 // 守卫在 admin/router.ts（decideAdminGuard）：非 admin 根本到不了本壳。
 import { ref } from 'vue'
@@ -30,7 +30,6 @@ async function handleLogout(): Promise<void> {
     <nav class="admin-nav">
       <span class="nav-brand" data-test="admin-nav-brand">{{ PRODUCT_NAME }} · 运营管理台</span>
       <router-link to="/" data-test="admin-nav-users" exact-active-class="active">账号管理</router-link>
-      <router-link to="/endpoints" data-test="admin-nav-endpoints">端点白名单</router-link>
       <router-link to="/audit" data-test="admin-nav-audit">审计检索</router-link>
       <router-link to="/usage" data-test="admin-nav-usage">Usage 核算</router-link>
       <router-link to="/trace-logs" data-test="admin-nav-trace-logs">内容消息</router-link>

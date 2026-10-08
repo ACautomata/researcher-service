@@ -31,11 +31,9 @@ function fakeRegistry(p: {
           providerId: x.providerId,
           lcProvider: 'openai' as const,
           baseUrl: 'https://llm.example.com/v1',
-          credentialEnvId: 'LLM_API_KEY',
           authHeader: true,
           models: x.modelIds.map((id) => ({ id })),
         })),
-        endpoints: [],
       }
     },
     async getModel(_snapshot: unknown, providerId: string) {

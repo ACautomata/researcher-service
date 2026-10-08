@@ -96,14 +96,10 @@ describe('#792 figure 工具两条触发面一条执行面（S1）', () => {
       data: {
         ownerId: user.id,
         providerId: 'prov-1',
-        lcProvider: 'openai',
-        baseUrl: 'https://llm.example.com/v1',
-        credentialEnvId: 'LLM_API_KEY',
-        authHeader: true,
+        presetId: 'openai',
         modelsJson: JSON.stringify([{ id: 'm-1' }]),
       },
     })
-    await prisma.providerEndpoint.create({ data: { scheme: 'https', host: 'llm.example.com', port: null, createdBy: 'seed' } })
     hub = new CollectingHub()
     // 收录校验（目录含 autofigure + fixture——/figure 不撞系统保留名、figure_generate 不撞核心工具面）
     await assertValidPluginCatalog({

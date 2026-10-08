@@ -7,8 +7,8 @@ import { runDbScript } from './runDbScript'
 
 // 从「只有 base 表」的旧库跑全量增量脚本（幂等跑两遍）→ 全表到位 + #791 AutoFigure 换轨
 //（figures 新形状重建 + generation_jobs 退役）+ teammate/mailbox + #858 containers 表整表退役
-// + user_version 归 15（#771 批次 7→8；#775 8→9；#787 9→10；#786 10→11；#785 11→12；
-// #790 teammates.kind + #791 figures 换轨 12→13；T0 #801 13→14；#858 OpenClaw 退役③ 14→15）。
+// + user_version 归 16（#771 批次 7→8；#775 8→9；#787 9→10；#786 10→11；#785 11→12；
+// #790 teammates.kind + #791 figures 换轨 12→13；T0 #801 13→14；#858 OpenClaw 退役③ 14→15；#881 端点预设制 15→16）。
 function assertUpgraded(dbPath: string): void {
   const db = new Database(dbPath)
   try {
@@ -51,7 +51,7 @@ function assertUpgraded(dbPath: string): void {
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='containers_ownerId_idx'").get()).toBeUndefined()
     // pairings 表随设备配对全链退役
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='pairings'").get()).toBeUndefined()
-    expect(db.pragma('user_version', { simple: true })).toBe(15) // T0 #801 legacy 清退 13→14；#858 OpenClaw 退役③ 14→15
+    expect(db.pragma('user_version', { simple: true })).toBe(16) // T0 #801 legacy 清退 13→14；#858 OpenClaw 退役③ 14→15；#881 端点预设制 15→16
     const sessionCols = db.prepare('PRAGMA table_info("sessions")').all() as Array<{ name: string }>
     expect(sessionCols.some((col) => col.name === 'isTeammate')).toBe(true)
     expect(sessionCols.some((col) => col.name === 'preferredModelJson')).toBe(true)
@@ -62,6 +62,12 @@ function assertUpgraded(dbPath: string): void {
     expect(
       db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?").get('file_overwrite_logs'),
     ).toEqual({ name: 'file_overwrite_logs' })
+    // #881 端点预设制 v16：白名单表退役 + model_providers v16 形状 + 插件指派备用表
+    expect(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='provider_endpoints'").get()).toBeUndefined()
+    const mpCols = db.prepare('PRAGMA table_info("model_providers")').all() as Array<{ name: string }>
+    expect(mpCols.some((c) => c.name === 'presetId')).toBe(true)
+    expect(mpCols.some((c) => c.name === 'baseUrl')).toBe(false)
+    expect(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='plugin_llm_assignments'").get()).toEqual({ name: 'plugin_llm_assignments' })
   } finally {
     db.close()
   }
@@ -119,7 +125,7 @@ describe('schema upgrade script', () => {
     assertUpgraded(dbPath)
   })
 
-  it('upgrades an already-text-trace DB (v2) to current tables + user_version=15', () => {
+  it('upgrades an already-text-trace DB (v2) to current tables + user_version=16', () => {
     const dir = mkdtempSync(path.join(tmpdir(), `schema-upgrade-${process.pid}-`))
     const dbPath = path.join(dir, 'panel.db')
     // 模拟上一轮增量已交付 text_trace_logs 的既有部署（v2）——增量脚本须只补 figures + 换轨。
