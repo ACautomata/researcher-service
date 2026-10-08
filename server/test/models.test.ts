@@ -268,6 +268,32 @@ describe('models REST（#881 预设制 + BYOK 凭证单向流）', () => {
     expect(decryptCredential(rowNew!.credentialCipher!, TEST_SECRET)).toBe(rotated)
   })
 
+  it('纯空白 api_key 归一为「留空」语义：PUT trim 后空 → 凭证逐字节保持（不落坏密文）；POST trim 后空 → 平台共享（cipher NULL）', async () => {
+    const rowBefore = await ctx.prisma.modelProvider.findFirst({ where: { providerId: 'my-gpt' } })
+    const cipherBefore = rowBefore!.credentialCipher
+
+    const keep = await ctx.request.put(providerOf('my-gpt')).set(bearer(userAccess)).send({
+      provider_id: 'my-gpt',
+      preset_id: 'openai',
+      api_key: '   ',
+      models: [{ id: 'gpt-5.1' }],
+    })
+    expect(keep.body.code).toBe(0)
+    const rowKeep = await ctx.prisma.modelProvider.findFirst({ where: { providerId: 'my-gpt' } })
+    expect(rowKeep!.credentialCipher).toBe(cipherBefore) // trim 后空 = 保持不变（绝非 cipher=NULL 清成平台共享）
+
+    const blank = await ctx.request.post(PROVIDERS_PATH).set(bearer(userAccess)).send({
+      provider_id: 'blank-key',
+      preset_id: 'deepseek',
+      api_key: '   ',
+      models: [{ id: 'deepseek-chat' }],
+    })
+    expect(blank.body.code).toBe(0)
+    expect(blank.body.data.api_key_masked).toBeNull() // trim 后空 = 平台共享 key 语义
+    const rowBlank = await ctx.prisma.modelProvider.findFirst({ where: { providerId: 'blank-key' } })
+    expect(rowBlank!.credentialCipher).toBeNull()
+  })
+
   it('PUT：撞同 owner 既有 pid → 40041；不存在 → 40040', async () => {
     await ctx.request.post(PROVIDERS_PATH).set(bearer(userAccess)).send({
       provider_id: 'second-ep',

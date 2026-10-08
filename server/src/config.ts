@@ -290,9 +290,6 @@ export const config = {
       maxConcurrentRuns: readRunnerMaxConcurrentRuns(),
       // 图深度护栏（GraphRecursionError → run.failed{recursion_limit}；默认 500 = PoC 实测值）
       recursionLimit: readRunnerRecursionLimit(),
-      // 共享 LLM key 解析源：平台虚拟条目 / credentialCipher=NULL 的 BYOK 行经此取值
-      //（单一读取点 LLM_API_KEY_RAW；#858 起 runner 侧唯一消费）
-      llmApiKey: LLM_API_KEY_RAW,
       // 审批三层漏斗 judge 模型（#783 · 729 §2.5「独立小模型，与主模型解耦」）：部署级配置
       //（RUNNER_JUDGE_MODEL + RUNNER_JUDGE_BASE_URL，key 复用 LLM_API_KEY；lcProvider 二值，
       // 默认 openai 兼容面）。二者任缺 → judge 未启用（灰区一律升级人工——fail-closed，

@@ -264,7 +264,7 @@ function createJudgeClient(): InstanceType<typeof ToolCallJudgeClient> {
         // 重试一次 + fail-closed 兑现（同语义，跨端点可移植）。
         const m = await initChatModel(model, {
           modelProvider: lcProvider,
-          apiKey: config.runner.llmApiKey,
+          apiKey: config.llm.apiKey,
           temperature: 0,
           ...(lcProvider === 'openai'
             ? { baseUrl, configuration: { fetch: globalThis.fetch } }

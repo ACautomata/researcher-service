@@ -308,9 +308,21 @@ export class ProviderRegistry {
     if (refs.length === 0) {
       throw fail(CODE.LLM_NOT_CONFIGURED, '无可用模型（provider/models 均为空）')
     }
-    if (preferred) {
-      resolveModelRef(snapshot, preferred)
-      const index = refs.findIndex(ref => ref.providerId === preferred.providerId && ref.modelId === preferred.modelId)
+    // 悬挂回落（#880 story 11「服务不中断」）：preferred 来自持久化会话行，指向已删端点/
+    // 已从模型列表移除的模型是配置变更后的常态数据 → warn + 回落默认链（用户序 + 平台垫底）。
+    // 区别于 agent 每轮选值的集合外硬拒（resolveModelRef §5.2，那才是编程错误面）。
+    let pinned = preferred
+    if (pinned) {
+      try {
+        resolveModelRef(snapshot, pinned)
+      } catch {
+        // eslint-disable-next-line no-console
+        console.warn(`[runner] 会话模型偏好悬挂，回落默认链：providerId=${pinned!.providerId} modelId=${pinned!.modelId}`)
+        pinned = undefined
+      }
+    }
+    if (pinned) {
+      const index = refs.findIndex(ref => ref.providerId === pinned!.providerId && ref.modelId === pinned!.modelId)
       // 不可达（resolveModelRef 已验成员资格）——显式挡住 findIndex=-1 时 splice(-1) 静默轮转
       // fallback 链（preferred 误置链尾 = 主备倒挂）。
       if (index < 0) throw fail(CODE.PROVIDER_NOT_FOUND, '偏好模型不在配置快照中')

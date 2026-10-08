@@ -2,9 +2,11 @@
 //（SSRF 构造性消灭：BYOK 端点只能从本清单选，协议与地址随预设锁定）。加预设 = 改代码发版，
 // 随版评审（#880 Implementation Decisions）。
 //
-// 三处消费同一常量（漂移守卫 modelsPresets.test.ts）：
+// 消费面（漂移守卫 modelsPresets.test.ts 钉两侧一致）：
 //   ① REST 目录下发（GET /api/v1/models/presets——前端建端点下拉）
-//   ② v16 收敛迁移 host 归一映射（scripts/lib/incremental-schema.mjs 的 PRESET_HOST_TO_ID）
+//   ② v16 收敛迁移 host 归一映射——scripts/lib/incremental-schema.mjs 内联同规则表
+//     V16_HOST_TO_PRESET（mjs 无法 import TS，运行时并不消费本文件；下方 PRESET_HOST_TO_ID
+//     导出仅供漂移守卫测试对照，防两侧规则漂移）
 //   ③ config LLM_PRESET 校验（六选一，缺省 minimax）
 //
 // URL 逐字锁定（kimi 带尾斜杠、zhipu 不带——各家 OpenAI 兼容面的既有惯例，勿「规范化」）：

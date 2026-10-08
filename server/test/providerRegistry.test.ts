@@ -243,6 +243,32 @@ describe('ProviderRegistry（#881 预设制：平台虚拟条目 + BYOK 凭证�
     expect(chain.fallbacks.map((f) => f.stubModel)).toEqual(['m-1', 'MiniMax-M3'])
   })
 
+  it('悬挂会话偏好（端点已删/模型已移出列表）：warn + 回落默认链，run 不中断（#880 story 11）', async () => {
+    const u = await seedUser(ctx.prisma, 'rg-dangling', 'pw-rg-dangling-secure')
+    await seedByok(ctx, u.id, 'mine', 'openai', ['m-1'], { apiKey: 'sk-m' })
+    const { factory } = makeFakeFactory()
+    const reg = new ProviderRegistry(ctx.prisma, {
+      llmApiKey: 'sk-platform',
+      credentialSecret: TEST_SECRET,
+      modelFactory: factory,
+    })
+    const snap = await reg.getSnapshot(u.id)
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    // 端点整行已删（偏好指向不存在的 provider）→ 回落默认链（用户序 + 平台垫底）
+    const ghostChain = (await reg.getDefaultModel(snap, { providerId: 'ghost', modelId: 'm' })) as unknown as {
+      stubChain: string
+      fallbacks: Array<{ stubModel: string }>
+    }
+    expect(ghostChain.stubChain).toBe('m-1')
+    expect(ghostChain.fallbacks.map((f) => f.stubModel)).toEqual(['MiniMax-M3'])
+    // 端点在、模型已从列表移除 → 同样回落
+    const removedChain = (await reg.getDefaultModel(snap, { providerId: 'mine', modelId: 'm-gone' })) as unknown as {
+      stubChain: string
+    }
+    expect(removedChain.stubChain).toBe('m-1')
+    expect(warnSpy).toHaveBeenCalledTimes(2)
+  })
+
   it('resolveModelRef：集合外模型/provider 拒 40040（平台条目同域校验）', async () => {
     const u = await seedUser(ctx.prisma, 'rg-ref', 'pw-rg-ref-secure')
     const reg = new ProviderRegistry(ctx.prisma, { llmApiKey: 'sk-platform' })

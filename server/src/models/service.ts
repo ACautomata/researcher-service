@@ -129,7 +129,7 @@ export class ModelProviderService {
             ownerId,
             providerId: input.providerId,
             presetId: input.presetId,
-            credentialCipher: this.cipherOrNull(input.apiKey),
+            credentialCipher: this.cipherOrNull(input.apiKey?.trim()),
             modelsJson: JSON.stringify(input.models),
           },
         })
@@ -158,8 +158,8 @@ export class ModelProviderService {
           throw fail(CODE.PROVIDER_NOT_FOUND)
         }
         const nextCipher =
-          input.apiKey !== undefined && input.apiKey !== ''
-            ? this.cipherOrNull(input.apiKey)
+          input.apiKey !== undefined && input.apiKey.trim() !== ''
+            ? this.cipherOrNull(input.apiKey.trim())
             : existing.credentialCipher
         return tx.modelProvider.update({
           where: { ownerId_providerId: { ownerId, providerId: pid } },
@@ -229,6 +229,8 @@ export class ModelProviderService {
 
   // 已知领域错误转译；其余按原样上抛。
   // ctx 供「不存在 vs 越权」的日志区分：对外逐字节同码 40040，区分仅进服务端日志（#336 验收）。
+  // P2025 是并发防御面：update/delete 事务内已先 findUnique 预检（常态缺失在预检处 warn+40040），
+  // 预检后并发删行才落到这里——同文案系同一 not-found 语义，两处并存是有意的双层防御。
   private rethrowKnown(e: unknown, ctx?: { ownerId: string; pid: string }): never {
     const code = (e as { code?: string }).code
     // unique(ownerId, providerId) 并发绕校验 / 重复提交 → 40041（非裸 500）

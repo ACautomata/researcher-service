@@ -16,6 +16,7 @@ import {
   type EndpointPresetDTO,
   type ModelEntryDTO,
   type ModelProviderDTO,
+  type ModelProviderWriteDTO,
   type PlatformEndpointDTO,
 } from '@/api/models'
 
@@ -113,12 +114,7 @@ function removeModel(idx: number): void {
   models.value.splice(idx, 1)
 }
 
-async function save(payload: {
-  provider_id: string
-  preset_id: string
-  api_key?: string
-  models: ModelEntryDTO[]
-}): Promise<void> {
+async function save(payload: ModelProviderWriteDTO): Promise<void> {
   // 零信任：前端也校验必填（key 可空——平台共享/保持不变语义）
   if (!payload.provider_id.trim()) {
     ElMessage.warning('provider_id 不能为空')
