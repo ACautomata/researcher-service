@@ -1,6 +1,6 @@
 // sessions API —— 会话 REST 域全量写/读面（#778 / #793 #730 §3.2「REST 写操作面全量重建」）。
 // 镜像 server/src/sessions/service.ts 与 sessions/reducer.ts 的 DTO（前端本地定义惯例，同
-// api/containers.ts / api/files.ts）。全部经 apiJson（#312 信封解包 + 401 刷新链）。
+// api/files.ts）。全部经 apiJson（#312 信封解包 + 401 刷新链）。
 // 幂等：POST /messages 须 32-hex Idempotency-Key（服务端 MESSAGE_KEY_REGEX），重发同 key 同
 // content 得 replay（runId null / replay true），同 key 异 content → 50007。
 import { apiJson } from './client'

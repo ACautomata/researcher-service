@@ -23,7 +23,7 @@ datasource db {
 //
 // #311/#328 扩展（相对 310 草案）：
 //   - mustChangePassword  bootstrap/重置/新建账号置 true（C1 强制改密）
-//   - maxContainers       per-user 配额，admin 可改，超额拒 20042
+//   - maxContainers       per-user 配额列（#858 容器 CRUD 退役后不再有「容器数」语义，仅剩 admin 可改的存量列面；列清退归终局票）
 // ---------------------------------------------------------------------------
 enum Role {
   admin
@@ -38,7 +38,7 @@ model User {
   role               Role     @default(user)
   isActive           Boolean  @default(true) // 平移 Django is_active（软禁用，不删行）
   mustChangePassword Boolean  @default(false) // #311 C1：首登/重置后强制改密
-  maxContainers      Int      @default(3) // #311 配额；默认值经 env DEFAULT_MAX_CONTAINERS 在应用层覆盖
+  maxContainers      Int      @default(3) // #311 配额；#858 容器 CRUD 退役后语义悬空（列+admin PATCH 面保留，清退归终局票）
   // --- #771（#747 B 节 · 731 §3.3 / 729 §3.5）---
   maxConcurrentRuns Int           @default(2) // per-user 在飞 run 配额（story 55；超限 40043）
   approvalMode      ApprovalMode  @default(standard) // 谨慎模式：cautious 下灰区强制升级人工（story 35）
@@ -51,7 +51,6 @@ model User {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  containers      Container[]
   refreshTokens   RefreshToken[]
   textTraceLogs   TextTraceLog[]
   figures         Figure[]
@@ -131,43 +130,6 @@ model RefreshToken {
 }
 
 // ---------------------------------------------------------------------------
-// Container —— 一个 OpenClaw 容器实例的记账行（平移 containers.Instance，+ownerId 隔离）
-//
-// name 全局唯一（#312 定夺，非按用户）。本期 M1 仅用于 GET /users 计 containerCount，
-// 容器生命周期由 M2 实现；schema 一次落地。
-// ---------------------------------------------------------------------------
-enum ContainerStatus {
-  creating
-  running
-  stopped
-  removing
-  error
-}
-
-model Container {
-  id   String @id @default(cuid())
-  name String @unique // DNS-label：^[a-z][a-z0-9-]{2,29}$（应用层校验）
-  port Int // T0 #801：端口池废除——行 port 恒 0（列保留记账，不再唯一：多容器同为 0）
-
-  owner   User   @relation(fields: [ownerId], references: [id], onDelete: Cascade)
-  ownerId String
-
-  token          String // 应用层加密后的密文
-  tokenEncrypted Boolean @default(false)
-  homeDir        String // bind-mount 宿主路径 instances/<id>/home（代系绑定 #360）
-  containerId    String @default("") // run 前未知；空串而非 NULL
-  status         ContainerStatus @default(creating)
-  image          String
-  leaseExpiresAt DateTime? // null=无保护
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  @@index([ownerId])
-  @@map("containers")
-}
-
-// ---------------------------------------------------------------------------
 // LcProvider —— LangChain provider 二值白名单（#771 / 731 §2.1）：
 // 与旧 wire 枚举 1:1（openai-completions→openai / anthropic-messages→anthropic，映射收敛于
 // models/values.ts）；OpenAI 兼容端点（vLLM/MiniMax 等）统一走 openai + baseUrl。
@@ -184,7 +146,7 @@ enum LcProvider {
 // 一 LLM 配置面）；唯一键随之 (ownerId, providerId)。旧 wire 枚举 api（openai-completions /
 // anthropic-messages）由 lcProvider 二值取代（731 §3.2「二选一保留」取新列，wire 契约经
 // values.ts 映射保持不变）；apiKeyEnvId → credentialEnvId（过渡期引用 LLM_API_KEY），
-// credentialCipher 预留 P1 per-user key（AES 密文，对齐 Container.token 先例）。
+// credentialCipher 预留 P1 per-user key（AES 密文）。
 // T0 #801：存量库中的旧形状 model_providers 行（containerId/api/apiKeyEnvId 列）由
 // apply-schema 检测即 DROP 重建（#732 零迁移前提——产品未上线，旧行不迁移）。
 // ---------------------------------------------------------------------------
@@ -259,10 +221,10 @@ model Session {
   owner User  @relation(fields: [ownerId], references: [id], onDelete: Cascade)
   ownerId String
 
-  // 绑定的会话沙箱 docker 容器 id（researcher-sandbox-<sessionId>，#747 E 节）。
-  // 无 FK：沙箱注册表面貌归 #784 双容器 orchestrator，legacy containers 表形状
-  // （port/token/homeDir 必填）与沙箱规格（无宿主端口/token，端口池随 legacy 退役废除）矛盾；
-  // 「删容器级联 sessions」由 orchestrator 应用层联动（#727 retention，deleteThread 同款）。
+  // 绑定的会话沙箱 docker 容器名（researcher-sandbox-<sessionId>，#747 E 节；列名 containerId
+  // 为历史遗留——T0 前存容器 id，T0 起存沙箱 docker 名）。
+  // 无 FK：沙箱 docker 名由 sessionId 派生（sandboxContainerName 单一来源），落列仅省重复派生；
+  // #858 容器行表退役后与 containers 表再无任何关联（本列从来不是它的 FK）。
   containerId String
   title       String @default("") // 自动生成可修改（story 5）；空串 = 未命名
 

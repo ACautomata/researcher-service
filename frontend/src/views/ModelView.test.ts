@@ -2,7 +2,7 @@
 // 下线：provider 配置面扁平挂本人，mount 直拉本人 providers）。
 // 覆盖：mount 拉 providers 渲染、重载竞态保最新响应、新建/编辑保存调 API + 热加载提示、
 // 删除二次确认调 removeProvider。EP 组件用 stub；动作经 defineExpose 走方法级 seam
-// （el-table row slot / el-form 在 stub 下渲染脆弱，照 ContainersView.test.ts 既定做法）。
+// （el-table row slot / el-form 在 stub 下渲染脆弱，以 expose 动作经 VM 驱动的既定做法）。
 import { flushPromises } from '@vue/test-utils'
 import { mount } from '@vue/test-utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'

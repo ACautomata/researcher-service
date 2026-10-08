@@ -6,10 +6,10 @@
 //      旧表形状不被改写）；fresh 库全量建表，既有库全量跳过。
 //   2) 增量收敛 —— 共享 lib/incremental-schema.mjs（新表 IF NOT EXISTS、既有表加列经
 //      PRAGMA guard、config_meta 种子）：`npm run db:apply` 单独即可把任意旧库收敛到当前
-//      schema。additive 是默认；换轨 DROP 重建例外（#791 figures / T0 #801 legacy 清退：
-//      旧形状 model_providers / pairings / containers 升级编排列与 port 唯一索引）——
+//      schema。additive 是默认；换轨 DROP 例外（#791 figures / T0 #801 legacy 清退：
+//      旧形状 model_providers / pairings；#858 OpenClaw 退役③：containers 表）——
 //      依 #732 零迁移前提（产品未上线，旧行不迁移直接换轨），处置集中在 incremental-schema
-//      的 runT0LegacyCleanup（先 DROP 后 CREATE 次序）。
+//      的 runFleetRetirement + runT0LegacyCleanup（先 DROP 后 CREATE 次序）。
 //
 // schema 变更后：先 `npx prisma migrate diff --from-empty --to-schema prisma/schema.prisma
 // --script > prisma/init.sql`（init.sql 为 from-empty 全量派生物，schema.prisma 单一来源），
@@ -50,9 +50,10 @@ function parseStatements(rawSql) {
 
 const db = new Database(dbPath)
 try {
-  // T0 #801：先清退 legacy（旧形状 model_providers / pairings / 升级编排列 / port 唯一索引）——
-  // init.sql 的新形状语句（含 model_providers (ownerId, providerId) 唯一索引）在旧形状上执行
-  // 会炸 no such column；先 DROP 后 init.sql 全量建出新形状（幂等可重跑）。
+  // T0 #801：先清退 legacy（旧形状 model_providers / pairings）——init.sql 的新形状语句
+  //（含 model_providers (ownerId, providerId) 唯一索引）在旧形状上执行会炸 no such column；
+  // 先 DROP 后 init.sql 全量建出新形状（幂等可重跑）。（containers 表 DROP 归
+  // runIncrementalSchema → runFleetRetirement，#858。）
   runT0LegacyCleanup(db)
   for (const stmt of parseStatements(sql)) {
     if (stmt.kind !== 'raw') {

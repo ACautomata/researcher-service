@@ -26,6 +26,6 @@ npm run build    # vue-tsc 类型检查 + vite build
 - `src/router/` — 路由表 + 导航守卫（未登录重定向 `/login`）
 - `src/stores/auth.ts` — Pinia 认证 store（持有 JWT access token）
 - `src/views/LoginView.vue` — 登录页
-- `src/views/ContainersView.vue` — 容器管理占位（CRUD 留后续 ticket）
+- 容器管理页已随 #858 退役——首页 `/` 重定向 `/chat`（产品只呈现会话 / wiki / 模型配置）
 
-六页（对话 / Model 配置 / wiki 编辑等）留后续 ticket。
+对话 / Model 配置 / wiki 编辑等页已陆续落地（详见 `src/router/` 路由表）。

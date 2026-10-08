@@ -61,7 +61,7 @@ onMounted(async () => {
     <div class="categories-body">
       <aside class="left">
         <div v-if="Object.keys(groups).length === 0" class="empty" data-test="empty">
-          该容器暂无带 category 标记的页面
+          该 Wiki 暂无带 category 标记的页面
         </div>
         <section v-for="(items, category) in groups" :key="category" class="cat-group" data-test="cat-group">
           <button

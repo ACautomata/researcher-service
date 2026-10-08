@@ -1,21 +1,20 @@
 // files 路由（#589 · ADR 0012；#776 root=lab 换轨；T0 #801 只读化 + root=wiki/workspace 整根退役）。
-// 挂 /api/v1/containers，路径 `/:name/files`。现役面 = 唯一 GET 只读面 root=lab（:name = sessionId，
-// 经 getSessionForUser 归属门（50002 同码防探测）后由 archive.readLab 直读沙箱 docker 名）。
+// 挂 /api/v1/containers，路径 `/:name/files`（#858 容器 CRUD 退役后本域是该前缀唯一残余——
+// URL 契约保留）。现役面 = 唯一 GET 只读面 root=lab（:name = sessionId，经 getSessionForUser
+// 归属门（50002 同码防探测）后由 archive.readLab 直读沙箱 docker 名）。
 // root=wiki/workspace（含缺省值——legacy 前端硬发 workspace 的历史面）→ 60042 FILE_ROOT_RETIRED
-//（退役码在容器/会话归属校验之后返回，防探测优先顺序不变）；写面 PUT/POST/DELETE 端点整体移除
-//（→ 90005 路由不存在）。
+//（退役码在 name 形状校验之后返回；#858 起容器行表删除，旧「容器行归属前置」无归属真源可查，
+// 退役面背后本无数据，不再做实例级防探测）；写面 PUT/POST/DELETE 端点整体移除（→ 90005 路由不存在）。
 // 底层经 FileArchive Port（生产 DockerFileArchive，测试注入内存 fake）。沿用 #312 信封。
-// 错误映射：name 非法 → 90002(data.name) · 容器不存在/越权（wiki/workspace 根）→ 20040 ·
-// 会话不存在/越权（lab）→ 50002 · root 非法 → 90002(data.root) · root 已退役 → 60042 ·
-// 文件不存在 → 60040。
-// 顺序陷阱（#315 §0 同源）：name 非法 ≠ name 合法但无此容器，两码不可混。
+// 错误映射：name 非法 → 90002(data.name) · 会话不存在/越权（lab）→ 50002 · root 非法 →
+// 90002(data.root) · root 已退役 → 60042 · 文件不存在 → 60040。
+// 顺序陷阱（#315 §0 同源）：name 非法 ≠ name 合法，两码不可混。
 
 import { Router, type Request, type Response } from 'express'
 import { fail, ok } from '../envelope'
 import { CODE } from '../codes'
 import { requireAuth } from '../middleware/auth'
 import { mustChangePasswordGate } from '../middleware/mustChangePasswordGate'
-import { getInstanceForUser } from '../containers/orchestrator'
 import { getSessionForUser } from '../sandboxes/service'
 import { sandboxContainerName } from '../sandboxes/runtime'
 import { CONTAINER_NAME_REGEX } from '../validation/schemas'
@@ -77,10 +76,9 @@ export function createFilesRouter(deps: FilesRouterDeps): Router {
       }
       return
     }
-    // 退役根前置归属校验（防探测优先：不存在/越权容器仍 20040，不泄露退役面存在性）：
-    // wiki/workspace 根挂在 legacy 容器树上——容器行仍是归属真源。
-    const inst = await getInstanceForUser(req.prisma, req.user!, requireName(req.params.name))
-    void inst // 归属门即全部用途（退役面无数据可读）
+    // 退役根（#858：容器行表删除，旧「容器行归属前置」随之退役——退役面背后无数据，
+    // name 形状校验后整根拒，不再做实例级防探测）：
+    requireName(req.params.name)
     // root 合法性校验（缺省按 legacy workspace 面退役——历史前端硬发 workspace）后整根拒：
     requireFileRoot(req.query.root ?? 'workspace')
     // wiki / workspace：T0 整根退役（wiki 读走 wiki 域 REST；workspace 字眼退役）。

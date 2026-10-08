@@ -1,5 +1,5 @@
 // wiki 容器生命周期编排（#784 · S2「编排器 Port 延伸」业务层，沙箱 lifecycle 同构）。
-// kind=wiki 支路（containerKind/dispatchByKind 的 wiki 面，containers/kind.ts）：
+// kind=wiki 支路（标签识别准据 containers/kind.ts containerKind；#858 起分派表随 fleet 退役）：
 //   - ensure：create（不存在）/ start（stopped）/ 原样（running）+ liveness 快照——wiki 域 REST
 //     与 runner run 前的 create/health 合一入口（「活性 = docker inspect Running」，无探针无端口）；
 //   - remove：删容器（可写层 /wiki 随之销毁）。**永久容器**：随用户生命周期（orchestrator 管理，

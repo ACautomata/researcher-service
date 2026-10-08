@@ -5,11 +5,14 @@
 //   - 全程幂等可重跑 —— CREATE 系 IF NOT EXISTS；ADD COLUMN 经 PRAGMA table_info guard
 //     （SQLite 无 ADD COLUMN IF NOT EXISTS）；种子 INSERT OR IGNORE。
 //   - 默认只做 additive；显式非 additive 例外 = 换轨 DROP 重建（#791 figures 先例 / T0 #801
-//     legacy 清退：旧形状 model_providers DROP、pairings DROP、containers 升级编排列与
-//     port 唯一索引 DROP）——均依 #732 零迁移前提（产品未上线，旧行不迁移直接换轨）。
+//     legacy 清退：旧形状 model_providers DROP、pairings DROP / #858 OpenClaw 退役③：containers
+//     表 DROP）——均依 #732 零迁移前提（产品未上线，旧行不迁移直接换轨）。
 //   - DDL 与 prisma/init.sql 逐字节同源（镜像其 CREATE 形状），init.sql 由
 //     prisma migrate diff 从 schema.prisma 派生 —— 单一来源，此处镜像。
-export const SCHEMA_VERSION = 14
+// 版本史：7→8 #771 langgraph foundation；8→9 #775 usage 表 + minimax seed；9→10 #787；
+// 10→11 #786 isTeammate；11→12 #785 file_overwrite_logs；12→13 #790 teammates.kind +
+// #791 figures 换轨；13→14 T0 #801 legacy 清退；14→15 #858 OpenClaw 退役③（containers 表 DROP）。
+export const SCHEMA_VERSION = 15
 
 export function runIncrementalSchema(db) {
   const hasSessions = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='sessions'").get()
@@ -98,18 +101,26 @@ CREATE TABLE IF NOT EXISTS "figures" (
 
   // ---- T0 #801 legacy 清退（先 DROP 后 CREATE：本段须在 model_providers 新形状 CREATE
   // 与 minimax seed 之前执行）----
+  runFleetRetirement(db)
   runT0LegacyCleanup(db)
 
   runLanggraphFoundation(db)
 }
 
-// T0 #801 legacy 清退：旧形状 model_providers / pairings / 升级编排列处置。
+// #858 OpenClaw 退役③：containers 表（openclaw-gw fleet 容器记账行）整表 DROP。
+// 容器 CRUD REST/管理页随本票退役，wiki/models/files 归属门前置票（#856/#857）已解绑容器行；
+// 消费面清零后零迁移前提换轨（#732：旧行不迁移直接删）。幂等：DROP IF EXISTS 对不存在表
+// no-op（索引 containers_name_key / containers_ownerId_idx 随表连带消失）。
+export function runFleetRetirement(db) {
+  db.exec('DROP TABLE IF EXISTS "containers"')
+}
+
+// T0 #801 legacy 清退：旧形状 model_providers / pairings 处置。
 // 零迁移前提（#732：产品未上线，旧行不迁移直接换轨）：检测到旧形状 model_providers
 //（containerId/api/apiKeyEnvId 列）即 DROP（新形状 CREATE 由 runLanggraphFoundation 紧随，
-// minimax seed 随之补默认 provider）；pairings 表（设备配对全链退役）与 containers
-// port 唯一索引（端口池废除，行 port 恒 0）一并幂等清退。upgradeAttempts 列（#699 升级
-// 编排退役）如存在于既有库（#771 前旧库）亦 DROP。全程可重跑：DROP IF EXISTS / PRAGMA
-// guard / 索引存在性查询。
+// minimax seed 随之补默认 provider）；pairings 表（设备配对全链退役）一并幂等清退。
+// （原 containers 升级编排列/port 唯一索引处置随 #858 整表 DROP 收编进 runFleetRetirement。）
+// 全程可重跑：DROP IF EXISTS / PRAGMA guard。
 export function runT0LegacyCleanup(db) {
   const mpTable = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='model_providers'`).get()
   const mpLegacy =
@@ -121,20 +132,6 @@ export function runT0LegacyCleanup(db) {
     db.exec('DROP TABLE "model_providers"')
   }
   db.exec(`DROP TABLE IF EXISTS "pairings"`)
-  const containerCols = db.prepare(`PRAGMA table_info("containers")`).all()
-  if (containerCols.some((c) => c.name === 'upgradeAttempts')) {
-    // eslint-disable-next-line no-console
-    console.warn('[db:schema] T0 #801：containers.upgradeAttempts 随 #699 升级编排退役——DROP COLUMN')
-    db.exec('ALTER TABLE "containers" DROP COLUMN "upgradeAttempts"')
-  }
-  const portUnique = db
-    .prepare(`SELECT name FROM sqlite_master WHERE type='index' AND name='containers_port_key'`)
-    .get()
-  if (portUnique) {
-    // eslint-disable-next-line no-console
-    console.warn('[db:schema] T0 #801：containers port 唯一索引随端口池废除——DROP INDEX')
-    db.exec('DROP INDEX "containers_port_key"')
-  }
 }
 
 // #771（#747·01）Prisma 新表地基：#747 B 节全表 + users 加列 + model_providers 新形状

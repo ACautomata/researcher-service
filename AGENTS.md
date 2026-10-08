@@ -4,9 +4,11 @@ This file provides guidance to Qoder (qoder.com) / Claude Code when working with
 
 ## Project overview
 
-**天津大学科研智能体平台**——多 OpenClaw 容器管理面板（产品显示名 #758 Q13 / #760；内部标识 researcher-service 系不动）。Vue3(TypeScript) 前端 + TS/Express 控制面，前后端分离。
-控制面经 Docker SDK 直接增/删/查 OpenClaw 容器，每容器内跑一个 `main` agent；面板提供对话、
-wiki 编辑、model 配置等管理能力。交接规格见 `docs/research/320`（wayfinder #308 汇编）。
+**天津大学科研智能体平台**（产品显示名 #758 Q13 / #760；内部标识 researcher-service 系不动）。
+Vue3(TypeScript) 前端 + TS/Express 控制面，前后端分离。控制面经 Docker SDK 编排面板自管容器
+（会话沙箱 + 每用户 wiki 容器）；面板提供对话、wiki 编辑、model 配置等能力。
+**#858 OpenClaw 退役③：openclaw-gw fleet（容器 CRUD/管理页/容器行表）已整体退役**——用户视角
+只有会话 / wiki / 模型配置。交接规格见 `docs/research/320`（wayfinder #308 汇编）。
 
 > 旧 Django(DRF + Channels) 后端已退役（#341 M9 收尾），当前为 Express + ws 同进程控制面。
 
@@ -29,7 +31,7 @@ npm run prisma:generate                        # 生成 Prisma client（fresh ch
 npm run db:apply                               # 落表（better-sqlite3 直连 prisma/init.sql）
 npm run dev                                    # tsx watch 宿主直跑（仅纯逻辑调试——摸不到 named volume；起服务/真编排走下方容器化 dev 栈）
 npm run typecheck                              # tsc --noEmit
-npm test                                       # vitest 全量（containers-smoke 需真 docker daemon）
+npm test                                       # vitest 全量（沙箱/wiki 容器 smoke 需真 docker daemon）
 npm run build                                  # tsc + prisma generate 产物拷贝
 
 # ---- frontend（Vue3 + Vite）----
@@ -40,11 +42,9 @@ npm run test                                   # vitest
 npm run build                                  # vue-tsc 类型检查 + vite build
 
 # ---- dev 控制面（容器化，与 prod 同形态；issue #594 / ADR 0013）----
-# 起服务 / 真编排 OpenClaw 容器（named volume 拓扑）一律走此；纯逻辑迭代仍用上方宿主 npm test/typecheck。
+# 起服务 / 真编排容器（沙箱 + wiki 容器）一律走此；纯逻辑迭代仍用上方宿主 npm test/typecheck。
 docker compose -f deploy/docker-compose.dev.yml up -d --build   # server+redis，挂 docker.sock，server:8001
-# 前置：researcher 克隆到仓库根（build context template=../researcher，或设 RESEARCHER_DIR）；
-#       真编排另需派生镜像（构建须打成 Dockerfile FROM 基线版本 tag，命令见 deploy/README.md）
-#       + export LLM_API_KEY。
+# 会话发消息需 export LLM_API_KEY（仅起控制面/登录可跳过）。
 ```
 
 ## 架构总览
@@ -54,13 +54,14 @@ docker compose -f deploy/docker-compose.dev.yml up -d --build   # server+redis�
     │ HTTP/REST (JWT Bearer) + SSE 事件流 (/api/v1/events)
     ▼
 Express 控制面 (server/, localhost:8001)
-    │ auth / users / containers / wiki / models / sessions / events  (路由按域)
+    │ auth / users / files(files 路由) / wiki / models / sessions / events  (路由按域；#858 容器 CRUD 退役)
     │ 全局 #312 信封（HTTP 200 + {code,message,data}）+ jose HS256 认证
     ▼
-Docker SDK 控制面 (containers)
+Docker SDK 控制面 (sandboxes + wikiContainers)
     │ dockerode 挂 docker.sock
     ▼
-OpenClaw 容器 fleet (openclaw-gw-<name>，每容器独立 home；端口池废除不做宿主端口发布)
+面板自管容器 fleet（researcher-sandbox-<sessionId> 会话沙箱 + researcher-wiki-<userId> wiki 容器；
+#858 起 openclaw-gw fleet 退役，kind 标签二值 wiki|sandbox）
 ```
 
 ## server 模块边界（`server/src/`）
@@ -68,13 +69,13 @@ OpenClaw 容器 fleet (openclaw-gw-<name>，每容器独立 home；端口池废�
 | 域 | 职责 | 关键模块 |
 |-----|------|----------|
 | `auth/` | 双角色账号 + JWT 签发/刷新（R1 旋转）+ bootstrap B1 + C1 强制改密 | `tokens.ts` `authenticate.ts` `bootstrap.ts` `userService.ts` |
-| `containers/` | Docker SDK 编排（增/删/查容器、5 态机；T0 #801 起端口池/config 渲染写盘链/升级编排/健康探针退役，活性 = docker inspect Running） | `orchestrator.ts` `dockerRuntime.ts` `readModel.ts` `fleetAssembly.ts` |
+| `containers/` | 面板自管容器共享原语（#858 OpenClaw 退役③后：fleet 编排/REST/容器行表整链退役，本目录收敛为 wiki\|sandbox 两 kind 的共享件——constants = `researcher.kind/session/owner` 标签 schema、kind = `containerKind` 标签识别（无标签/外来 → null，防御性不触碰）、dockerImage = `ensureImagePulled` 共用样板、lifecycleQueue = `NameSerializer`（per-name 串行）、imageRef = 浮动镜像引用判定（config.readPinnedImage 准据）。消费方 = sandboxes/ + wikiContainers/ + config | `constants.ts` `kind.ts` `dockerImage.ts` `lifecycleQueue.ts` `imageRef.ts` |
 | `wiki/` | wiki 树 + CRUD + graph（`WikiFileSystem` Port + 纯逻辑；#856 归属门改挂 ownerId = 路由 owner 级 `/api/v1/wiki/*`，req.user.id 直派生零容器行查询[容器级 20040 随耦合退役]；#784 存储换轨 = 每用户 wiki 容器 `researcher-wiki-<ownerId>` 树根 `/wiki`，每操作前置 ensure，compile 触发退役归 OpenWiki 工具形态；#789 OKF 适配 = SKIP_FILES += log.md/INSTRUCTIONS.md、SKIP_DIRS += .claims、graph 派生加 markdown 相对链接边[复用 ghost，story 43]、claims 只读 API[页路径→.claims 镜像旁车 + pageVersion 漂移，story 42]、okf 徽章入页数据[status/stale_after/generated，story 41]、POST /wiki/update = #790 三通道③独立 run 触发面（updateRunner 注入缺省 90005；updateEvents 纯映射 wiki_run 五类[debug 丢弃/input ≤1k 截断]）） | `service.ts` `logic.ts` `nodeFs.ts` `compile.ts` `routes.ts` |
 | `models/` | model provider CRUD（#775：行挂 ownerId；事务 = mutation + config_meta version bump 热生效；白名单第一层校验 origin 精确匹配 + DNS 私网拒绝 → 90002 字段级）+ 端点白名单 admin REST（`/api/v1/provider-endpoints`，731 §3.1）；写盘链（configWriter/configBuilder 两文件）已随 T0 #801 物理删除 | `service.ts` `routes.ts` `endpoints.ts` `values.ts` |
 | `files/` | 统一文件读面（T0 #801 只读化：root=lab 唯一现役读面——会话沙箱 /lab 只读 GET，:name=sessionId；root=wiki/workspace 退役 → 60042；写面/媒体通道关闭 → 90005；经 Docker getArchive，ADR 0012） | `fsPort.ts` `dockerArchive.ts` `paths.ts` `routes.ts` |
 | `events/` | SSE 事件流（#773，替代 WS 的传输面）：StreamHub per-user 扇出 + per-user 连续单调 serverSeq + 事件桥薄投影（LangChain streamEvents → 自有目录，不透传） | `hub.ts` `logic.ts` `routes.ts` `bridge.ts` `values.ts` |
-| `sandboxes/` | 会话沙箱生命周期（#776 · story 58/59：1 session:1，容器名 `researcher-sandbox-<sessionId>`，对容器列表隐身）：惰性创建 ensure/闲置 30min 自动 stop（文件保留）/级联删（容器+独立 bridge 网络）；资源 limit Memory 4GB·4 核·PidsLimit 512 + MemorySwap=Memory 禁 swap（OOM 杀进程不杀容器的前提）；非 root(1000) + CapDrop ALL + no-new-privileges + RestartPolicy no；kind 标签三值 legacy\|wiki\|sandbox（#784 起完整分派，见 containers/kind.ts）；消费方 = #777 runner ensure/touch + #778 删 session 级联 + #781 fork 字面复制（`forkSandbox`：createSandboxFromSource 容器 export→import 整 FS，源已删空起步兜底） | `values.ts` `runtime.ts` `dockerRuntime.ts` `lifecycle.ts` `service.ts` `assembly.ts` |
-| `wikiContainers/` | wiki 容器生命周期（#784 · E 节 wiki 列：每用户一台 `researcher-wiki-<userId>`、永久、零初始化零骨架、NetworkMode none 零出网、Memory 256MB/PidsLimit 128、非 root + CapDrop ALL + no-new-privileges、无具名卷——备份 = docker export 全树 tar，还原 = docker import 成镜像后重建；活性 = docker inspect Running 无探针无端口；对 fleet 列表隐身 kind=wiki + owner 标签；镜像 = deploy/wiki-image busybox 级 + WIKI_IMAGE 钉版） | `values.ts` `runtime.ts` `dockerRuntime.ts` `lifecycle.ts` `assembly.ts` |
+| `sandboxes/` | 会话沙箱生命周期（#776 · story 58/59：1 session:1，容器名 `researcher-sandbox-<sessionId>`，对容器列表隐身）：惰性创建 ensure/闲置 30min 自动 stop（文件保留）/级联删（容器+独立 bridge 网络）；资源 limit Memory 4GB·4 核·PidsLimit 512 + MemorySwap=Memory 禁 swap（OOM 杀进程不杀容器的前提）；非 root(1000) + CapDrop ALL + no-new-privileges + RestartPolicy no；kind 标签二值 wiki\|sandbox（#858 收敛，识别准据 containers/kind.ts）；消费方 = #777 runner ensure/touch + #778 删 session 级联 + #781 fork 字面复制（`forkSandbox`：createSandboxFromSource 容器 export→import 整 FS，源已删空起步兜底） | `values.ts` `runtime.ts` `dockerRuntime.ts` `lifecycle.ts` `service.ts` `assembly.ts` |
+| `wikiContainers/` | wiki 容器生命周期（#784 · E 节 wiki 列：每用户一台 `researcher-wiki-<userId>`、永久、零初始化零骨架、NetworkMode none 零出网、Memory 256MB/PidsLimit 128、非 root + CapDrop ALL + no-new-privileges、无具名卷——备份 = docker export 全树 tar，还原 = docker import 成镜像后重建；活性 = docker inspect Running 无探针无端口；kind=wiki + owner 标签（#858 起 fleet 列表不存在）；镜像 = deploy/wiki-image busybox 级 + WIKI_IMAGE 钉版） | `values.ts` `runtime.ts` `dockerRuntime.ts` `lifecycle.ts` `assembly.ts` |
 | `runner/` | LangGraph 运行时侧（#747 换轨；backend/ = DockerArchiveBackend——deepagents BackendProtocolV2 本地镜像 → 双根 /wiki/+/lab/ Docker 原语映射，S2 接缝 Port 注入可 fake，协议同形镜像不引 deepagents 依赖；persistence/ = #774 持久化双件——PrismaCheckpointSaver 五方法落 checkpoints/checkpoint_writes + PrismaMemoryStore 五方法落 memory_items，继承 @langchain/langgraph-checkpoint ~1.1.5 基类零侵入接入，WRITES_IDX_MAP 仅从 checkpoint 包导出，PrismaClient 构造注入；根五件 = #775 F 节——ProviderRegistry（initChatModel 构造、缓存 key (ownerId,providerId,configVersion)、热生效 = run 启动读 config_meta.version 判等 + run 粒度快照、白名单第二层复验 40042 + fetch wrapper 验最终请求 origin/redirect manual）、allowlist（纯逻辑）、concurrency（per-user+全局信号量 40043 + wouldReject 只读预检[#778 REST 即时反馈]）、usage（usage_metadata 全量采数落 llm_usage_records + 核算查询）、providerDefaults（minimax 默认 provider 三方同源常量 + 惰性物化）、llmToolPort（#792 ctx.llm 回退链封装在核心——figure 多模态句柄：默认链 = owner providers createdAt 序×各自首模型、AUTOFIGURE_SVG_MODEL = 运维 pin[检索域全 provider 全模型、调用失败明确报错不降级默认链]）；runtime/ = #777 runner 内核——RunService（per-thread 串行链 + run 状态机 queued→running⇄interrupted→终态(+suspended #783) + 图实例缓存 key=(thread,configVersion,policy,backend 双根) + resume 互斥 50001 + 新栈从 checkpoint 推导 interrupted + 沙箱 ensure/touch 接线[#776 契约「消费方 = #777」] + recordTurn 注入缝[#778 会话行落库] + normalizeReplay 重放归一（checkpoint 判据 message=human id 盖印/resume=__error__ write → recover null 续跑[#779 story 14] + inFlightProjection 在飞投影[running 从 checkpoint blob 重建 turn，story 11]））、projector（v3 protocol events → run 域目录薄投影，details 4KB/input 1k 截断）、checkpointTurn（#779 checkpoint blob messages → TurnSnapshot 纯函数反序列化——in-flight 投影与 recover 落行共用单一实现）、errorKind（三分类 llm_error/recursion_limit/infra + cause 链剥离）、tracing（显式关 langsmith 双路覆盖）、abortGuard（LangGraph abortPromise 泄漏进程级守门）、bullmqRunQueue（自包含 RunCommand job，attempts:1 不重试——控制面崩溃后的 BullMQ stalled 自动重放由 RunService.normalizeReplay 以 checkpoint 判据拦截转 recover[#779 story 14]）、graphFactory（createDeepAgent 纯函数工厂，拓扑可由持久化状态推导 + middleware 透传）、wikisearch（#789 三通道①常驻检索——openwiki ~0.6.1 deep-import 直调 searchWiki/readWikiSections[绕开 MCP 层 git 硬依赖]，wiki 容器 /wiki 树逐调用拉控制面临时镜像 <tmp>/openwiki/**[与轻写一致，SKIP 集过滤]，模型面 schema 裁 root/wiki/workspace，Result {ok}|{ok:false,error} 永不 throw；漏斗归文件类[无路径参数→规则层放行，开放点 5 首验结论在 approval/values.ts]）、wikigen/ = #790 治理生成双路径（三通道②③——mirror 落地副本[整树 pull 不过 SKIP 集 + git init + sources/ 证据语料 + treeHash 单一口径 + pushBack 只归档 openwiki/** 子树 diff rm 先 put 后 rm]、lifecycleTools 包装 HostSessionManager 六生命周期工具[begin root 注入、Result 增 conflict]、backend 组合 CompositeBackend(DockerArchiveBackend,{'/wiki/':FilesystemBackend}) 经 withWriteLocks 整体包裹；②teammates.kind='wiki-update' RunService 跳缓存装配 + finish base-hash 复检推回/冲突弃镜像 + wiki-conflict 信箱邮件 + finally dispose=中断作废；③wiki/updateRun.ts 独立 run runNativeRepositoryGeneration 完整边界 + wiki_run 五类事件 + SerialRunGate 全局串行锁起步 + 30042 在飞互斥，全流程占锁）；approval/ = #783 审批三层漏斗——rules（S3 纯逻辑：路径白名单 wiki|lab|tmp 前缀 + shell-quote 词法拆解四条黑名单 [rm 根族/设备写/fork bomb/容器逃逸]，V1 硬编码测试锁定）、judge（输入构造 ≤8k tokens 截断 + 输出契约 zod + 重试一次 fail-closed + 版本化列拒四类政策 markdown）、funnel（langchain wrapToolCall 中间件：规则层→judge→升级三分，interrupt 升级带 escalationMemo 重放幂等，reject 回喂 ToolMessage、同 hash ≥3 升级、audit 同步写 fail-closed）、audit（tool_approval_logs 三层全量同步写，judge 存 hash）、auditRoutes（admin 全量检索 REST，含 #785 file-overwrite-logs 路由）——升级触发源 = 谨慎模式 users.approvalMode/judge 超限 20/重复拒绝 ≥3/输出畸形，RunService 侧 approval.requested/resolved 事件 + 48h→suspended（可 resume/abort，restart 靠 checkpoint createdAt 推导恢复）；writelock/ = #785 per-path 写锁（#769 锁方案：registry 进程内 FIFO 锁表 key=(sandbox parent session, 根相对 path)，有界等待超时 {error} 回喂 agent 含 path 与持有者，releaseRun 持锁者死随 task 取消自动释放；lockedBackend 装饰器锁 backend write/edit/delete 全方法[edit 读改写序整体在锁内] + withLockedPuts 按 tar 内单文件名锁 ingestion/校验节点 putArchive 写面；读/bash 旁路；跨会话 wiki 锁 V1 不做）+ overwriteAudit（write-after-write 合法覆盖审计：锁内查 file_journal 最新 applied 未归档行经 checkpoint.threadId 解析上家 writer ≠ 本 thread → 记一次落 file_overwrite_logs，fail-soft warn 留痕，不做运行时提示；journal 写入面归 #782——writer 落地前审计自然静默） | `backend/dockerArchiveBackend.ts` `backend/primitives.ts` `backend/dockerPrimitives.ts` `backend/paths.ts` `backend/semantics.ts` `persistence/prismaCheckpointSaver.ts` `persistence/prismaMemoryStore.ts` `providerRegistry.ts` `allowlist.ts` `concurrency.ts` `usage.ts` `providerDefaults.ts` `llmToolPort.ts` `runtime/runService.ts` `runtime/projector.ts` `runtime/checkpointTurn.ts` `runtime/errorKind.ts` `runtime/graphFactory.ts` `wikisearch.ts` `runtime/tracing.ts` `runtime/abortGuard.ts` `bullmqRunQueue.ts` `approval/rules.ts` `approval/judge.ts` `approval/funnel.ts` `approval/audit.ts` `approval/values.ts` `writelock/registry.ts` `writelock/lockedBackend.ts` `writelock/overwriteAudit.ts` `wikigen/values.ts` `wikigen/mirror.ts` `wikigen/lifecycleTools.ts` `wikigen/backend.ts` `auditRoutes.ts` `assembly.ts` |
 | `sessions/` | 会话 REST 域（#778 · #747 C 节会话 REST 全件：扁平挂用户（容器维度退役）、创建/列表/改标题（story 5 首轮自动生成+可改）、发消息 32-hex Idempotency-Key 幂等（story 7，P2002 唯一约束兜底并发单落，同 key 异 content → 50007）、abort by:user（story 8，仅 running 在飞 → 否则 50006）、resume 先到先得（50001 预检 + 内核权威面双层）、多端门禁（queued/running 禁新输入 50005·非终态拒删；幂等查先于门禁——重发已收消息必得 replay；sendMessage/resume 双入口配额预检 40043）、历史投影 GET（story 3 回放零差异——TurnReducer 双入口同构：RunService recordTurn 终态落行 ≡ 投影 GET 反序列化行，attachmentsJson v1 = serializeAttachments 单一来源；#781 起 archivedAt 过滤）、inFlight 投影（#779 story 11：GET 附带 inFlight 字段——queued 空 turn/running 从 checkpoint blob 重建，多端同形，终态缺省）、session.created/updated 事件、50002 session_not_found 同码防探测、删会话级联删沙箱[#776 契约]；#781 rewind/fork（#770 三操作模型——branch-switch 机制取消）：rewind = 换 Session.activeCheckpointId 指针 + 被放弃路线软删（checkpoint/消息/file_journal 三表 archivedAt，行不物理删、不可再作锚点/切点[无恢复入口]）+ session.invalidated{reason:rewind}，消息行重开后从锚点 time-travel 分叉（invocation configurable.checkpoint_id）+ completed 终态指针推进（终态锚祖先链含指针才推进，防 stalled 重放拽进旧分支）+ sendMessage 残留清理（指针内重读，锚点后失败轮随重试归档）；fork = 新 Session 行（parentSessionKey/forkSourceJson 溯源）+ checkpoint 祖先链行复制（blob 自包含——切点 state 起步）+ 消息行挂靠截断复制（新 id + attachments.messageId 映射）+ 沙箱整容器字面复制（docker export→import 含墓碑，#768 D7）+ file_journal 切点截断继承（seq 接续）+ attachments 行全量复制（attachmentId 不改；messageId 挂靠复制行映射新 id、其余置 null——FK 级联面）+ 源沙箱已删则空起步+系统消息；#787 起 sendMessage 入口截斜杠命令：幂等/门禁/落行全作用于**原始输入**（落行存 /命令原文——模板发版改文不破 replay），官方命令展开只在命令构造点（$ARGUMENTS 插值进 run）；系统命令 /new（事务建会话）/compact（cmd.operation=compact 转内核）/model（resolveModelSelection + sessions.preferredModelJson 落列，next-run 生效；命令结果经 serializeAttachments 的 command 聚合面挂行，幂等 replay 复原；列清单不发 session.updated）；锚点/挂靠判定 = rewind.ts 纯逻辑） | `values.ts` `reducer.ts` `rewind.ts` `service.ts` `routes.ts` |
 
@@ -91,16 +92,18 @@ OpenClaw 容器 fleet (openclaw-gw-<name>，每容器独立 home；端口池废�
 
 - `GET /api/health`（公开）。
 - `/api/v1/auth/*` — 登录/refresh(R1 旋转)/logout/me/password/change + OIDC `oauth/<p>/login|callback`（未配 provider 时 90001）。
-- `/api/v1/users` — admin 账号管理（GET 连带 containerCount / POST / PATCH / reset-password；码段 1xxxx）。
-- `/api/v1/containers/*` — 容器列表/新建（同步返 creating 快照）/删除（异步信封）。
+- `/api/v1/users` — admin 账号管理（GET / POST / PATCH / reset-password；码段 1xxxx；
+  #858 起 GET 载荷不含 containerCount/quota——容器行表退役）。
+- `/api/v1/containers` CRUD（列表/新建/删除）已随 #858 整体退役（90005）；该前缀唯一残余 =
+  下方 `/:name/files` 只读面。
 - `/api/v1/wiki/{tree,page,graph,categories}` — wiki 文件树/读写/图谱，owner 级（#856：归属门
   从容器行解析改为 req.user.id 直派生，零容器行查询，路径 <name> 与容器级 20040 随耦合退役；
   数据源 = 请求者本人的 wiki 容器，每操作前置 ensure——requireAuth 与 path/body 校验之后，
   未授权/非法探测不建容器）。
 - `/api/v1/wiki/claims?path=` — 页 claims 旁车只读面（#789 story 42 数据面：
   论断 evidence + 页级漂移 fresh|drifted|null；页缺失 30040、旁车缺失 200+空 claims）。
-- `/api/v1/containers/<name>/models/providers[/<pid>]` — model provider CRUD（#775：事务 = mutation +
-  config_meta version bump 热生效；白名单第一层校验未命中 → 90002 字段级 base_url）。
+- `/api/v1/models/providers[/<pid>]` — model provider CRUD（#857 归属门改挂 ownerId 零容器行查询；
+  #775：事务 = mutation + config_meta version bump 热生效；白名单第一层校验未命中 → 90002 字段级 base_url）。
 - `/api/v1/provider-endpoints[/<id>]` — 端点白名单 admin CRUD（#775 · 731 §3.1，origin 精确匹配；
   GET/POST/DELETE，非 admin → 10004）。
 - `/api/v1/approval-logs` — 审批全量审计检索 admin REST（#783 · ADR 0015；过滤
@@ -109,11 +112,11 @@ OpenClaw 容器 fleet (openclaw-gw-<name>，每容器独立 home；端口池废�
   + 分页；行 = 一次 write-after-write 覆盖 path/覆盖者/被覆盖者）。
 - `/api/v1/usage/aggregate` — LLM usage 核算聚合 admin REST（#800 · #775 采数数据源；过滤
   userId/from/to，时间窗半开区间 [from, to)；按 user × provider × model 聚合，wire snake_case）。
-- `/api/v1/containers/<name>/files?root=<wiki|workspace|lab>&path=&recursive=` — 统一文件 CRUD（#776
-  root 契约换轨：wiki = legacy 容器树（读写面暂留，退役归 T0）；workspace = legacy **只读消费值**
-  （现存前端 fileTabs 硬发此值，#793 迁 lab 后退役；写面 90002）；lab = 会话沙箱 /lab 只读 GET 面——
-  <name> 为 sessionId，50002 同码防探测；写面收敛：PUT/POST/DELETE 仅 wiki 放行，lab/workspace →
-  90002；binary/oversized 不返回内容）。
+- `/api/v1/containers/<name>/files?root=<wiki|workspace|lab>&path=&recursive=` — 统一文件 GET（#776
+  root=lab 唯一现役读面；#858 容器 CRUD 退役后本端点是 /api/v1/containers 前缀唯一残余——URL 契约
+  保留：<name> 为 sessionId，50002 同码防探测，无容器行查询）；root=wiki/workspace（含缺省）→ 60042
+  退役码（#858 起无容器行归属前置，name 形状校验后即拒）；写面 PUT/POST/DELETE → 90005；
+  binary/oversized 不返回内容）。
 - `/api/v1/sessions[/<id>]` — 会话 REST 域（#778：POST 创建/GET 列表/PATCH 改标题/DELETE（级联删
   沙箱）；`/<id>/messages` POST 发消息（`Idempotency-Key` 32-hex header 幂等，重发 replay）+
   GET 历史投影（回放零差异面；#781 起 archivedAt 过滤——被放弃路线行不可读）；`/<id>/abort`、
@@ -132,7 +135,7 @@ OpenClaw 容器 fleet (openclaw-gw-<name>，每容器独立 home；端口池废�
 错误面仍走信封）；SSE 流端点（`/api/v1/events`）
 连接级认证失败走 **HTTP 401** + 信封体（#726 钉死「不入事件」，EventSource 看不见状态码——REST 刷新链
 死信号让路；其余响应仍 HTTP 200+信封）。码段：`0` 成功 · `1xxxx` 通用/鉴权 ·
-`2xxxx` 容器 · `3xxxx` wiki ·
+`2xxxx` 容器（20040–20046 全组 [退役保留] 随 #858 码段防复用）· `3xxxx` wiki ·
 `4xxxx` models（40042 端点不在白名单[运行时第二层，仅 runner 侧] · 40043 并发配额已满[per-user
 maxConcurrentRuns 或全局 RUNNER_MAX_CONCURRENT_RUNS]）· `5xxxx` 会话/run 域（#747 C 节，
   #776 起 50002 session_not_found；#777 起 50003 审批挂起（#778 补 REST 前置面与码表）；#783 起
@@ -159,7 +162,7 @@ maxConcurrentRuns 或全局 RUNNER_MAX_CONCURRENT_RUNS]）· `5xxxx` 会话/run 
 - `stores/` — Pinia：`auth.ts`（JWT access token + role/mustChangePassword）、`wiki.ts`、`chat.ts`
   （对话页响应式投影：纯 mutation；视图模型类型经 `chat/projection.ts` 再导出）、`fileTabs.ts`
   （会话沙箱 lab 文件 tab，#793 起 root=lab、切会话即换树）。
-- `api/` — REST client 封装（`client.ts` 信封解析 + 401 刷新链 + 并发去抖；`sessions/containers/files/wiki/models/users/plugins.ts` 按域）。
+- `api/` — REST client 封装（`client.ts` 信封解析 + 401 刷新链 + 并发去抖；`sessions/files/wiki/models/users/plugins.ts` 按域；#858 起 containers.ts 客户端随容器管理页退役——files 客户端的 URL 前缀 /api/v1/containers 是 lab 文件面契约保留）。
 - `plugins/` — 插件 web 面基建（#788 骨架 + #799 收录）：`api.ts` = definePluginWeb 契约（props 六件 details/input/state/expanded/isPartial/toolCallId + #799 增 stage 可选件——进行态装饰仅实时构造）+ `registry.ts` = pluginComponentFor 查找（未注册走默认工具行渲染零成本回退；挂点 = ToolLine 展开区——#752 §2.4 的「附件卡位」挂载缺数据通道[media 引用无 producer 工具名路由键]，随首个需要的插件再扩）+ `index.ts` = 收录清单（显式 import 各插件 web.ts 一行，现含 autofigure）+ `deps.ts` = #799 vue 运行时依赖桥（#791 plugins 树禁裸包名 import 铁律的前端对称面；type-only import 不受限）。web 面组件本体在仓库根 `plugins/<id>/`（web.ts + components/，vite/tsconfig 双端 include 分工：server tsconfig exclude web.ts+components/，frontend include 之）。
 - `chat/` — chat 核心三件套（#793 · #730 §4.1，REST+SSE 换轨；网关协议机/设备配对/升级编排死区已删）：
   `projection.ts`（投影归约器纯函数——`applyEvent` 事件增量 / `fromProjection` 投影行双入口同形状，
@@ -178,21 +181,26 @@ maxConcurrentRuns 或全局 RUNNER_MAX_CONCURRENT_RUNS]）· `5xxxx` 会话/run 
 
 - **T0 legacy 清退（#801）**：chat 隧道四文件/设备配对（表+路由+approve exec）/bootstrap-token/端口池/
   config 渲染写盘链（openclaw.json 模板）/升级编排/健康探针对账已整链退役；files API 只读化（root=lab
-  唯一读面，wiki/workspace → 60042，写面与 files/raw 媒体通道 → 90005）；openclaw-image 派生镜像构建
-  退役（fleet 镜像引用仍钉版存量 GHCR，可继续拉取）。
-- **容器配置**：容器读镜像内默认配置（模板渲染链已删）；`GATEWAY_TOKEN` 每容器独立生成、经 env 注入，
-  真值落盘为 AES 密文；行 `port` 恒 0 记账（列保留，不做宿主端口发布）。
+  唯一读面，wiki/workspace → 60042，写面与 files/raw 媒体通道 → 90005）。
+- **OpenClaw 退役③（#858）**：容器 CRUD REST/管理页/Prisma `containers` 表（迁移 SCHEMA_VERSION 15
+  整表 DROP）/kind=legacy 分派整链退役；containers/ 收敛为 wiki|sandbox 共享原语（标签 schema/kind
+  识别/ensureImagePulled/NameSerializer/imageRef）；前端 `/` 重定向 `/chat`（产品只呈现会话 / wiki /
+  模型配置）；GET /users 载荷去 containerCount/quota{used,limit}（users.maxContainers 列保留无消费面，
+  列清退归终局票）；`OPENCLAW_TEMPLATE_DIR`/`OPENCLAW_FLEET_ROOT`/`OPENCLAW_IMAGE`/
+  `OPENCLAW_NAMED_VOLUMES`/`CREDENTIAL_ENCRYPTION_KEYS`/`LIFECYCLE_WORKER_CONCURRENCY` env 随
+  fleet 退役（落盘根改 `DATA_ROOT`，现役消费方 = 附件上传临时区）；凭证加密链（crypto.ts）随
+  GATEWAY_TOKEN 落盘面退役。
 - **docker.sock 安全**：控制面挂 `/var/run/docker.sock` = 等价 root（spec §5.4 明示风险）。本地/可信
   部署可接受；生产应限制控制面网络面或改用 rootless / 远程 TLS daemon。
 - **输入 0 信任**：所有写操作经 zod schema 强制校验（`validation/schemas.ts`），禁裸读 `req.body`。
-- **凭证**：LLM key 全面板共享（`LLM_API_KEY` env 注入容器，不落盘）；`CREDENTIAL_ENCRYPTION_KEYS`
-  加密 gateway token 落盘密文。
+- **凭证**：LLM key 全面板共享（`LLM_API_KEY`，runner 侧 provider 凭证解析消费，#731 §1.3）。
 - **生产部署**：`deploy/docker-compose.deploy.yml`（frontend nginx + server + redis 三服务），
   CD 经 GitHub Actions 构建 `server`/`frontend` 镜像推 GHCR 并部署宝塔宿主（见 `deploy/DEPLOY.md`）。
 - **测试**：
-  - server：`cd server && npm test`（vitest；接缝 1–5：wiki Port / 信封 REST / WS 桥 / hostDeps /
-    编排器 Port；events 域测试按 #747 Testing Decisions 的 S 编号标注：S1 信封级集成 /
-    S3 纯逻辑单测）。容器编排集成 smoke 需真 docker daemon（自动探测门控）；BullMQ 用例需真 Redis（门控）。
+  - server：`cd server && npm test`（vitest；接缝：wiki Port / 信封 REST / hostDeps / files
+    FileArchive Port；events 域测试按 #747 Testing Decisions 的 S 编号标注：S1 信封级集成 /
+    S3 纯逻辑单测）。沙箱/wiki 容器 smoke 需真 docker daemon（自动探测门控）；BullMQ 用例需真
+    Redis（门控）。（#858：fleet 编排 smoke 与 BullMQ 生命周期队列用例随容器管理退役。）
   - frontend：`cd frontend && npm run test`（vitest）；`npm run build` 跑 vue-tsc 类型检查。
 
 ## Issue tracker / triage

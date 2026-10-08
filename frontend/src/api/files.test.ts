@@ -1,5 +1,5 @@
 // seam: files API —— 会话沙箱 lab 文件树 + 单文件只读全文（#776 root 契约 / #793 story 61）。
-// 对齐 api/containers.test.ts 接缝：mock fetch 返回 #312 信封，断言 apiJson 解包 + path 拼接
+// 接缝惯例（api/*.test.ts 同形）：mock fetch 返回 #312 信封，断言 apiJson 解包 + path 拼接
 //（:name 段 = sessionId，root=lab）+ 错误码（50002 会话不存在/越权）+ binary/oversized
 // content:null 透传。v1 只读，无 PUT/POST/DELETE。
 import { beforeEach, describe, expect, it, vi } from 'vitest'

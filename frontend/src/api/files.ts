@@ -4,7 +4,7 @@
 // 走 apiJson（自动 #312 信封解包 + 401 刷新链，client.ts）。v1 只读——tabs 不回写，不实现 PUT/POST/DELETE。
 //
 // 镜像类型与 server/src/files/fsPort.ts 逐字段对齐（前端本地定义，不 import server 类型——
-// 对齐 api/containers.ts / api/wiki.ts 的本地 DTO 惯例）。
+// 对齐 api/wiki.ts 的本地 DTO 惯例）。
 import { apiJson } from '@/api/client'
 
 export interface FileEntry {

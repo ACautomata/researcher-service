@@ -13,10 +13,9 @@ export const routes: RouteRecordRaw[] = [
     meta: { public: true },
   },
   {
+    // #858 容器管理页退役：产品只呈现会话 / wiki / 模型配置——首页 `/` 重定向到对话。
     path: '/',
-    name: 'containers',
-    component: () => import('@/views/ContainersView.vue'),
-    meta: { requiresAuth: true },
+    redirect: '/chat',
   },
   {
     path: '/chat',
@@ -83,7 +82,7 @@ router.beforeEach(async (to) => {
     await auth.hydrate()
   }
   if (to.name === 'login' && auth.isAuthenticated) {
-    return { name: 'containers' }
+    return { path: '/chat' }
   }
   return decideGuard(!!to.meta?.requiresAuth, auth)
 })

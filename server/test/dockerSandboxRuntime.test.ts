@@ -7,7 +7,7 @@ import { describe, it, expect } from 'vitest'
 import { DockerSandboxRuntime } from '../src/sandboxes/dockerRuntime'
 import { sandboxContainerName, sandboxNetworkName } from '../src/sandboxes/runtime'
 import { SANDBOX_LIMITS } from '../src/sandboxes/values'
-import { KIND_SANDBOX, LABEL_APP_KEY, LABEL_KIND_KEY, LABEL_SESSION_KEY } from '../src/containers/constants'
+import { KIND_SANDBOX, LABEL_KIND_KEY, LABEL_SESSION_KEY } from '../src/containers/constants'
 
 const SPEC = { sessionId: 'csession0001', image: 'busybox:1.36', limits: SANDBOX_LIMITS }
 
@@ -32,12 +32,11 @@ describe('buildSandboxCreateOptions（#747 E 节沙箱列投影）', () => {
     expect(opts.User).toBe('1000:1000')
   })
 
-  it('标签：kind=sandbox + session 绑定；不打 fleet app 标签（对容器列表隐身）', () => {
+  it('标签：kind=sandbox + session 绑定（#858 起无 fleet app 标签概念，沙箱标签面仅 kind/session）', () => {
     expect(opts.Labels).toMatchObject({
       [LABEL_KIND_KEY]: KIND_SANDBOX,
       [LABEL_SESSION_KEY]: 'csession0001',
     })
-    expect(Object.keys(opts.Labels ?? {})).not.toContain(LABEL_APP_KEY)
   })
 
   it('安全 profile：CapDrop ALL + no-new-privileges + RestartPolicy no（生命周期归 runner）', () => {

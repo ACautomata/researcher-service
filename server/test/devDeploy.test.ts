@@ -2,9 +2,9 @@ import { describe, it, expect } from 'vitest'
 import { readFileSync, existsSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 
-// issue #594 dev 控制面容器化静态断言（issue #586 测试接缝 5；先例：prodDeploy.test.ts /
-// openclawImage.test.ts 文本断言模式，不触真 docker）。断言对象是声明式产物——dev compose——
-// 防「dev 回退宿主直跑 / 缺寻址配置 / 引入宿主数据挂载」回归，并交叉校验与 prod 同形态。
+// issue #594 dev 控制面容器化静态断言（issue #586 测试接缝 5；先例：prodDeploy.test.ts 文本断言
+// 模式，不触真 docker）。断言对象是声明式产物——dev compose——防「dev 回退宿主直跑 / 引入宿主数据
+// 挂载 / fleet 编排配置残留」回归，并交叉校验与 prod 同形态。
 // 路径解析沿 prodDeploy.test.ts 模式：vitest 自 server/ 目录运行，cwd 上溯取仓库根。
 const ROOT = resolve(process.cwd(), '..')
 const DEV = 'deploy/docker-compose.dev.yml'
@@ -18,7 +18,7 @@ function readRepoFile(rel: string): string {
 
 // server 服务的 volumes 段（compose 中唯一带 volumes 的服务）：从 `volumes:` 行到下一
 // `    networks:` 行之间，取所有挂载条目（`- <src>:<dst>` 形态）。文本定位不经 YAML 解析，
-// 断言只对挂载条目行生效（注释提及 /fleet、researcher 等历史/构建语境词汇不误伤）。
+// 断言只对挂载条目行生效（注释提及历史/构建语境词汇不误伤）。
 // 与 prodDeploy.test.ts 同名函数同逻辑。
 function serverMountLines(compose: string): string[] {
   const afterVolumes = compose.split('volumes:')[1]
@@ -54,7 +54,6 @@ describe('dev compose 去 host 挂载（issue #594，ADR 0013）', () => {
     for (const m of mounts) {
       expect(m, `残留 host 挂载: ${m}`).not.toMatch(/\/fleet:/)
       expect(m, `残留 host 挂载: ${m}`).not.toMatch(/\.\/openclaw\.json/)
-      // researcher 只作 build additional_context（构建期 COPY 入镜像），不作运行时 bind
       expect(m, `残留 researcher bind: ${m}`).not.toMatch(/researcher.*:/)
       expect(m, `残留 :ro 挂载: ${m}`).not.toContain(':ro')
     }
@@ -71,13 +70,18 @@ describe('dev 寻址与 prod 同形态（issue #594，ADR 0013）', () => {
     expect(compose).not.toMatch(/extra_hosts:/)
   })
 
-  it('home 模板 env 指向镜像内路径（构建期 COPY 产物，同 prod）；openclaw.json 模板随 T0 #801 退役', () => {
-    expect(compose).toMatch(/OPENCLAW_TEMPLATE_DIR: \/app\/templates\/researcher/)
-    expect(compose).not.toMatch(/OPENCLAW_TEMPLATE_JSON/)
+  it('#858：fleet 编排配置面退役——OPENCLAW_TEMPLATE_DIR / OPENCLAW_FLEET_ROOT / OPENCLAW_IMAGE / OPENCLAW_NAMED_VOLUMES / LIFECYCLE_WORKER_CONCURRENCY 不再出现', () => {
+    expect(compose).not.toMatch(/OPENCLAW_TEMPLATE_DIR:/)
+    expect(compose).not.toMatch(/OPENCLAW_FLEET_ROOT:/)
+    expect(compose).not.toMatch(/OPENCLAW_IMAGE:/)
+    expect(compose).not.toMatch(/OPENCLAW_NAMED_VOLUMES:/)
+    expect(compose).not.toMatch(/LIFECYCLE_WORKER_CONCURRENCY:/)
+    expect(compose).not.toMatch(/CREDENTIAL_ENCRYPTION_KEYS:/)
   })
 
-  it('fleet 根与 SQLite 走容器内路径 / named volume 挂载点（同 prod）', () => {
-    expect(compose).toMatch(/OPENCLAW_FLEET_ROOT: \/fleet/)
+  it('落盘根与 SQLite 走容器内路径 / named volume 挂载点（同 prod；#858 DATA_ROOT 取代 fleet 根）', () => {
+    expect(compose).toMatch(/DATA_ROOT: \/data/)
+    expect(compose).not.toMatch(/OPENCLAW_FLEET_ROOT:/)
     expect(compose).toMatch(/DATABASE_URL: file:\/app\/db\/db\.sqlite3/)
   })
 
@@ -85,17 +89,24 @@ describe('dev 寻址与 prod 同形态（issue #594，ADR 0013）', () => {
     expect(compose).toMatch(/REDIS_URL: redis:\/\/redis:6379\/0/)
     expect(compose).toMatch(/redis:7-alpine/)
   })
+
+  it('build 多 context 仅 official/ + plugins/（#858：template context 随 fleet provisioning 退役）', () => {
+    expect(compose).toMatch(/official: \.\.\/official/)
+    expect(compose).toMatch(/plugins: \.\.\/plugins/)
+    expect(compose).not.toMatch(/template:/)
+    expect(compose).not.toMatch(/RESEARCHER_DIR/)
+  })
 })
 
 describe('dev 与 prod 逐键对齐（issue #594 同形态交叉校验）', () => {
-  // 这些键决定「编排/寻址/配置来源」行为，dev 与 prod 必须完全一致，否则分叉重生。
+  // 这些键决定「寻址/落盘」行为，dev 与 prod 必须完全一致，否则分叉重生。
   // T0 #801：OPENCLAW_TEMPLATE_JSON / OPENCLAW_FLEET_WS_HOST / OPENCLAW_FLEET_PORT_BIND_HOST
-  // 随端口池与模板面退役，不再属于对齐面。
+  // 随端口池与模板面退役；#858：OPENCLAW_TEMPLATE_DIR / OPENCLAW_FLEET_ROOT 随 fleet 编排退役，
+  // 不再属于对齐面。
   const SHARED_KEYS = [
     'REDIS_URL',
-    'OPENCLAW_TEMPLATE_DIR',
     'DATABASE_URL',
-    'OPENCLAW_FLEET_ROOT',
+    'DATA_ROOT',
   ]
   const dev = readRepoFile(DEV)
   const prod = readRepoFile(PROD)
@@ -118,16 +129,5 @@ describe('dev 特有项（issue #594）', () => {
 
   it('server 暴露 127.0.0.1:8001:8001（宿主 vite dev proxy 目标；prod server 不暴露）', () => {
     expect(compose).toMatch(/127\.0\.0\.1:8001:8001/)
-  })
-
-  it('build 经 additional_contexts 注入 template（本地 researcher）；openclaw.json 的 deploy context 已随 T0 #801 退役', () => {
-    expect(compose).toMatch(/additional_contexts:/)
-    expect(compose).toMatch(/template: \$\{RESEARCHER_DIR:-\.\.\/researcher\}/)
-    expect(compose).not.toMatch(/^\s+deploy: \.$/m)
-  })
-
-  it('不显式覆盖 OPENCLAW_NAMED_VOLUMES（保持 config.ts 默认 true，与 prod 同效）', () => {
-    // 带冒号仅匹配 environment 赋值形态（KEY: value）——注释中对该词的说明性提及不误伤
-    expect(compose).not.toMatch(/OPENCLAW_NAMED_VOLUMES:/)
   })
 })

@@ -33,12 +33,6 @@ jobs:
     defaults:
       run:
         working-directory: server
-    env:
-      # 显式 pin 官方基线跑 smoke（T0 #801 起 openclaw-image 派生镜像构建链退役——smoke 直接拉
-      # 公开官方基线镜像；容器编排逻辑与镜像内容解耦）。
-      # CI runner 自带 docker daemon → smoke 门控放行真跑（区别于本地无 daemon 时 skip），
-      # 故须预拉镜像，否则 create 拉镜像 404 让 smoke 红（镜像缺失是环境问题，非代码问题）。
-      OPENCLAW_IMAGE: ghcr.io/openclaw/openclaw:2026.7.1-browser
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -49,7 +43,7 @@ jobs:
       - run: npm ci
       - run: npm run prisma:generate
       - run: npm run typecheck
-      # 预拉 OpenClaw 公共 ghcr 镜像供 containers-smoke 端到端测试。
-      - run: docker pull ${{ env.OPENCLAW_IMAGE }}
+      #（#858：OPENCLAW_IMAGE 预拉随 containers-smoke 退役——fleet 端到端 smoke 随容器管理退役；
+      # 沙箱/wiki 容器 smoke 用 busybox 级钉版镜像，体积小无需预拉。）
       - run: npm test
       - run: npm run build

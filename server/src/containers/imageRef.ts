@@ -1,8 +1,9 @@
 // 镜像引用（image reference）钉版纯判定（零依赖模块，issue #695 / spec §2.1）。
 // 唯一准据：浮动引用 = 无 tag（Docker 默认解析 :latest）或显式 :latest（含空 tag 的坏引用）；
 // digest 钉定（`@sha256:…`）恒不浮动——内容按 digest 寻址，tag 移动不影响解析。
-// 消费方：config.readFleetImage —— 生产环境目标镜像为浮动引用 → 启动 fail-fast（升级编排的检测
-// 判定是「容器记录镜像 ≠ 当前目标」，浮动 tag 让目标随上游移动、升级不可复现）；dev/test 容忍。
+// 消费方：config.readPinnedImage（SANDBOX_IMAGE #776 / WIKI_IMAGE #784 两处共用内核；#858 起
+// OPENCLAW_IMAGE 随 fleet 退役）—— 生产环境镜像为浮动引用 → 启动 fail-fast（浮动 tag 让目标
+// 随上游移动、行为不可复现）；dev/test 容忍。
 // 与 auth/quota.ts 同模式：纯知识独立成模块，config 与静态断言测试共享同一准据（避免双源漂移）。
 
 // 提取 tag：只看最后一段路径分量里的 `:`（`registry:5000/openclaw` 的 `:5000` 是端口不是 tag）。

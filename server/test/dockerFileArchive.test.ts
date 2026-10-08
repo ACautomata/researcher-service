@@ -1,18 +1,15 @@
 // DockerFileArchive 适配层单测（接缝：clientFactory 注入 mock dockerode client）。
-// T0 #801 只读化收缩后本文件覆盖：readLab 沙箱只读读面（目录/文件/404/truncated 语义）
-// 与 seedWorkspace 灌卷（多条目 tar 原语序列 + chown）；legacy 读写删与 config 链用例随
-// root=wiki/workspace 与 openclaw.json 写盘链退役删除。真容器端到端由 containers-smoke 覆盖。
+// T0 #801 只读化收缩后本文件覆盖：readLab 沙箱只读读面（目录/文件/404/truncated 语义）。
+// legacy 读写删与 config 链用例随 root=wiki/workspace 与 openclaw.json 写盘链退役删除；
+// seedWorkspace 灌卷用例随 fleet create 流程退役删除（#858）。
 // tar 流用本模块 createTarFile 自举构造（读侧真实走 parseTar 解析）。
 
 import { describe, it, expect } from 'vitest'
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import path from 'node:path'
 import { Readable } from 'node:stream'
 import type Docker from 'dockerode'
 import { DockerFileArchive } from '../src/files/dockerArchive'
 import { FileNotFound } from '../src/files/errors'
-import { createTarFile, parseTar } from '../src/files/tar'
+import { createTarFile } from '../src/files/tar'
 
 // 造一个目录 tar（对齐 Docker getArchive 产出）：根 '.' + 直接子项 + 深层文件。
 // mtime 秒精度（2024-01-01）。createTarFile 自带尾部结束零块，拼接时去除、末位统一补。
@@ -106,47 +103,3 @@ describe('DockerFileArchive readLab（#776 root=lab 沙箱只读读面）', () =
     await expect(fa.readLab('researcher-sandbox-missing', '', false)).rejects.toBeInstanceOf(FileNotFound)
   })
 })
-
-
-
-describe('DockerFileArchive seedWorkspace（#6xx named volume 模板 workspace 灌卷）', () => {
-  it('递归 walk 模板目录 → 多条目 tar putArchive 到 ~/.openclaw/workspace（目录先序 + chown）', async () => {
-    const root = mkdtempSync(path.join(tmpdir(), 'seedws-'))
-    mkdirSync(path.join(root, 'skills', 'demo'), { recursive: true })
-    writeFileSync(path.join(root, 'AGENTS.md'), '# ws\n')
-    writeFileSync(path.join(root, 'skills', 'demo', 'SKILL.md'), '# skill\n')
-
-    const { docker, calls } = mockClient({})
-    const fa = new DockerFileArchive(() => docker)
-    await fa.seedWorkspace('box', root)
-
-    expect(calls.map((c) => c.kind)).toEqual(['putArchive']) // 无 start/exec/probe（created 容器可用）
-    const put = calls.find((c) => c.kind === 'putArchive')!
-    expect(put.path).toBe('/home/node/.openclaw/workspace')
-    expect(put.chown).toBe(true) // daemon 语义：应用 tar 头内 uid/gid（bt 宿主实测非「跟随目标目录」）
-    const tarBuf = put.stream!
-    // tar 头 uid/gid 必须 = 容器内 node(1000:1000)——硬编码 0 会落 root:root，agent 不可写
-    // （#660 回归：部署机实测灌入文件 root:root。八进制 1000 = '0001750'）
-    expect(tarBuf.subarray(108, 116).toString('latin1').replace(/\0.*$/, '')).toBe('0001750')
-    expect(tarBuf.subarray(116, 124).toString('latin1').replace(/\0.*$/, '')).toBe('0001750')
-    expect(tarBuf.subarray(265, 297).toString('latin1').replace(/\0.*$/, '')).toBe('node')
-    expect(tarBuf.subarray(297, 329).toString('latin1').replace(/\0.*$/, '')).toBe('node')
-    const parsed = parseTar(tarBuf, { collectData: true })
-    expect(parsed.map((e) => `${e.type}:${e.name}`)).toEqual([
-      'file:AGENTS.md',
-      'directory:skills',
-      'directory:skills/demo',
-      'file:skills/demo/SKILL.md',
-    ])
-    expect(parsed[0].data?.toString('utf8')).toBe('# ws\n')
-    expect(parsed[3].data?.toString('utf8')).toBe('# skill\n')
-  })
-
-  it('hostDir 不存在 → 原样抛（fail-fast 不带病出容器），不发 putArchive', async () => {
-    const { docker, calls } = mockClient({})
-    const fa = new DockerFileArchive(() => docker)
-    await expect(fa.seedWorkspace('box', '/nonexistent/seed-src')).rejects.toThrow()
-    expect(calls).toEqual([])
-  })
-})
-

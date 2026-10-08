@@ -18,7 +18,7 @@ import { sandboxContainerName, sandboxNetworkName } from '../src/sandboxes/runti
 import { DockerArchiveBackend } from '../src/runner/backend/dockerArchiveBackend'
 import { DockerPrimitives } from '../src/runner/backend/dockerPrimitives'
 import { DockerFileArchive } from '../src/files/dockerArchive'
-import { KIND_SANDBOX, LABEL_APP_KEY, LABEL_APP_VALUE, LABEL_KIND_KEY, LABEL_SESSION_KEY } from '../src/containers/constants'
+import { KIND_SANDBOX, LABEL_KIND_KEY, LABEL_SESSION_KEY } from '../src/containers/constants'
 import { probeDockerAvailable } from './smokeGating'
 import { ensureImageAvailable } from './smokeDocker'
 
@@ -135,9 +135,7 @@ describe.skipIf(!DOCKER_UP)('沙箱生命周期集成 smoke（真 docker daemon�
     expect(ok.output).toContain('alive')
   }, 60_000)
 
-  it('对 fleet 列表隐身：app=openclaw-fleet 过滤不含沙箱；kind=sandbox 过滤含沙箱', async () => {
-    const fleet = await docker.listContainers({ all: true, filters: { label: [`${LABEL_APP_KEY}=${LABEL_APP_VALUE}`] } })
-    expect(fleet.map((c) => c.Names?.[0])).not.toContain(`/${dockerName}`)
+  it('kind=sandbox 标签过滤含沙箱（#858 起 fleet 列表随容器管理退役，隐身断言收敛为 kind 标签可寻址）', async () => {
     const sandboxes = await docker.listContainers({
       all: true,
       filters: { label: [`${LABEL_KIND_KEY}=${KIND_SANDBOX}`] },

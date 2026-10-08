@@ -3,22 +3,19 @@
 // putArchive、删经容器内 exec rm。容器存在即可读（stopped 的 getArchive 由 daemon 处理，
 // 不需进程）；写/删先幂等 start（保 exec mkdir / rm 可用，对齐 ADR「stopped 删除需先 start」）。
 // client 延迟注入（默认 new Docker() 挂 docker.sock）——构造时不连 daemon（对齐 DockerRuntime）。
-// legacy fleet 文件树读写删（root=wiki/workspace）与 openclaw.json config 写读链随 T0 清退删除。
+// legacy fleet 文件树读写删（root=wiki/workspace）与 openclaw.json config 写读链随 T0 清退删除；
+// seedWorkspace 模板灌卷随 fleet create 流程退役（#858）。
 //
 // 内存防护（#586 US8「接口不会被大二进制拖垮」）：probe 流式读第一个业务头，文件超
 // MAX_FILE_READ_BYTES 时只保留头元数据（size/mtime）、排干剩余流不驻留字节——超大文件读请求
 // 不把文件内容拉进控制面内存。
 
 import Docker from 'dockerode'
-import { readdir, readFile, stat } from 'node:fs/promises'
-import path from 'node:path'
 import { Readable } from 'node:stream'
-import { containerName } from '../containers/runtime'
-import { MOUNT_WORKSPACE } from '../containers/constants'
 import { FileExists, FileInvalidPath, FileNotFound } from './errors'
 import type { DirListing, FileArchive, FileEntry, FileReading } from './fsPort'
 import { LAB_ROOT_ABS, MAX_FILE_READ_BYTES, WALK_LIMIT } from './values'
-import { alignTo, createTarFile, createTarTree, mtimeIso, normalizeTarName, parseNumeric, parseTar, type TarEntry, type TarTreeEntry } from './tar'
+import { alignTo, createTarFile, mtimeIso, normalizeTarName, parseNumeric, parseTar, type TarEntry } from './tar'
 
 function toEntry(t: TarEntry): FileEntry {
   return {
@@ -28,25 +25,6 @@ function toEntry(t: TarEntry): FileEntry {
     size: t.size,
     modified: new Date(t.mtime * 1000).toISOString(),
   }
-}
-
-// 模板目录树 walk（seedWorkspace 源收集）：先序（目录条目先于其内容），同层按名字典序稳定
-// 产出；符号链接跳过（不 dereference、不产链接条目——模板树自包含，悬空链接不炸 create）。
-async function walkTree(absDir: string, relDir: string): Promise<TarTreeEntry[]> {
-  const names = await readdir(absDir, { withFileTypes: true })
-  names.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
-  const out: TarTreeEntry[] = []
-  for (const d of names) {
-    const abs = path.join(absDir, d.name)
-    const rel = relDir === '' ? d.name : `${relDir}/${d.name}`
-    if (d.isDirectory()) {
-      out.push({ name: rel, type: 'directory' })
-      out.push(...(await walkTree(abs, rel)))
-    } else if (d.isFile()) {
-      out.push({ name: rel, type: 'file', content: await readFile(abs) })
-    }
-  }
-  return out
 }
 
 // probe 结果：ok（完整 tar 已收集）/ oversized（只读头，超大文件不收集）/ null（路径不存在）
@@ -291,23 +269,5 @@ export class DockerFileArchive implements FileArchive {
     if (probed.kind === 'ok' && probed.root.type === 'directory') throw new FileInvalidPath(relPath) // 只支持删文件
     await this.start(dockerName)
     await this.execSync(dockerName, ['rm', '-f', '--', absPath])
-  }
-
-  // 模板 workspace 灌卷（#6xx · named volume 拓扑下 researcher workspace 预填充）：递归 walk
-  // hostDir → 目录树 tar（目录先序条目，父目录先建）→ putArchive 解包进 ~/.openclaw/workspace。
-  // chown:true（daemon 语义：应用 tar 头内 uid/gid）+ 头写 node(1000)，灌入文件 node:node——
-  // agent 在容器内可写自己的工作区（#660 曾误注「跟随目标目录」，bt 宿主实测不符）。
-  // 时序：create 后 start 前（putArchive 对 created 容器可用）；骨架首挂内容被
-  // 同名覆盖（researcher 模板为权威源）。hostDir 不存在/非目录 → 原样抛（fail-fast 不带病出容器）。
-  async seedWorkspace(name: string, hostDir: string): Promise<void> {
-    const root = path.resolve(hostDir)
-    const rootStat = await stat(root)
-    if (!rootStat.isDirectory()) throw new FileInvalidPath(root)
-    const entries = await walkTree(root, '')
-    const container = this.client().getContainer(containerName(name))
-    await container.putArchive(Readable.from([createTarTree(entries)]), {
-      path: MOUNT_WORKSPACE, // 容器内挂载点单一来源（containers/constants）
-      chown: true,
-    })
   }
 }

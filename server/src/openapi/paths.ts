@@ -10,7 +10,6 @@
 import { z } from 'zod'
 import { registry, okEnvelope, LooseData, NullData, ErrorEnvelope, bearerAuth } from './components'
 import {
-  containerCreateSchema,
   loginSchema,
   modelProviderWriteSchema,
   passwordChangeSchema,
@@ -92,8 +91,6 @@ register({ method: 'post', path: '/api/v1/sessions/{id}/approvals/{escalationId}
 // plugins（#788 · #752 §4.3 R8）：目录清单 + per-user 启用位（8xxxx 段）。
 register({ method: 'get', path: '/api/v1/plugins', tag: 'Plugins', summary: 'List plugin catalog with the caller enablement bits', auth: 'user', errors: '90002 validation', dataNote: '{plugins:[{id,name,description,version,enabled}]} —— 目录 = 编译期静态清单；enabled 无行 = false（默认未启用）。' })
 register({ method: 'put', path: '/api/v1/plugins/{id}/enablement', tag: 'Plugins', summary: 'Enable or disable a plugin for the caller', auth: 'user', body: pluginEnablementSchema, nullData: false, errors: '80040 plugin_not_found（目录外 id，同码防探测）; 90002 validation', dataNote: '{id, enabled} —— 幂等 upsert（plugin_enablements per-user 行）。' })
-
-const CONTAINER_PATH_NOTE = '容器名（DNS-label：小写字母开头，3–30 位，仅 [a-z0-9-]）；非法 → 90002(data.name)。'
 
 // ---- 系统 ----
 
@@ -216,10 +213,10 @@ register({
   method: 'get',
   path: '/api/v1/users',
   tag: '账号管理',
-  summary: '用户列表（含 containerCount/quota）',
+  summary: '用户列表',
   auth: 'admin',
   errors: '10001 · 10041（非 admin 同码防探测）· 10005。',
-  dataNote: 'data: { users: [{ id, username, email, role, isActive, containerCount, quota, mustChangePassword, createdAt }] }。',
+  dataNote: 'data: { users: [{ id, username, email, role, isActive, maxContainers, maxConcurrentRuns, mustChangePassword, createdAt }] }（#858：containerCount/quota 随容器行表退役移除）。', 
 })
 
 register({
@@ -252,39 +249,6 @@ register({
   auth: 'admin',
   errors: '10041（不存在/已禁用/并发已重置，同码防探测）。',
   dataNote: 'data: { password } 一次性明文（仅此一次回显）；目标 mustChangePassword=true。',
-})
-
-// ---- 容器 /api/v1/containers（归属前置：越权/不存在 → 20040 同码防探测）----
-
-register({
-  method: 'get',
-  path: '/api/v1/containers',
-  tag: '容器',
-  summary: '容器列表（user 仅本人，admin 全部）',
-  auth: 'user',
-  errors: '10001 · 10005。',
-  dataNote: 'data: { containers: [ContainerSummary] }。',
-})
-
-register({
-  method: 'post',
-  path: '/api/v1/containers',
-  tag: '容器',
-  summary: '新建容器（同步返 creating 快照，后台 provisioning）',
-  auth: 'user',
-  errors: '90002 · 20041（撞名）· 20042（配额超限）· 20044（残留 orphan 目录）· 90003（LLM key 未配置）。',
-  dataNote: 'data: creating 快照（含 name/status）。',
-  body: containerCreateSchema,
-})
-
-register({
-  method: 'delete',
-  path: '/api/v1/containers/{name}',
-  tag: '容器',
-  summary: '删除容器（异步：同步返 removing，后台清理）',
-  auth: 'user',
-  errors: `90002（${CONTAINER_PATH_NOTE}）· 20040 · 20043（在飞 provisioning，置取消标志）· 20045（目录清理失败，可重试）。`,
-  dataNote: 'data: { status: \'removing\' }。',
 })
 
 // ---- Wiki /api/v1/wiki（owner 级，#856 归属门直挂认证身份；页不存在 30040；页已存在 30041）----
@@ -451,8 +415,9 @@ register({
   nullData: true,
 })
 
-// ---- 文件 /api/v1/containers/{name}/files（T0 #801 只读化：唯一现役读面 root=lab——
-// {name} 为 sessionId，50002 归属门；wiki/workspace 根退役 → 60042，写面端点整体移除）----
+// ---- 文件 /api/v1/containers/{name}/files（T0 #801 只读化 + #858 容器 CRUD 退役后本前缀
+// 唯一残余端点：唯一现役读面 root=lab——{name} 为 sessionId，50002 归属门；wiki/workspace 根
+// 退役 → 60042，写面端点整体移除）----
 
 register({
   method: 'get',
@@ -460,10 +425,10 @@ register({
   tag: '文件',
   summary: '列目录 / 读文件（root=lab：会话沙箱只读面，stopped 可读；不触发沙箱创建）',
   auth: 'user',
-  errors: `90002（data.name|data.root|data.path）· 20040（容器面：容器不存在/越权）· 50002（lab 面：会话不存在/越权，同码防探测）· 60040（文件不存在）· 60042（root=wiki/workspace 已退役）· 10005。`,
+  errors: `90002（data.name|data.root|data.path）· 50002（lab 面：会话不存在/越权，同码防探测）· 60040（文件不存在）· 60042（root=wiki/workspace 已退役）· 10005。`,
   dataNote:
     'root=lab：path 指目录 → { files: [{ path, type, size, modified }] }（recursive=true 递归 walk）；指文件 → { path, content, size, modified, binary, oversized }。' +
-    'root=wiki/workspace：合法值但退役（60042，wiki 读走 wiki 域 REST）；缺省 root 按退役处理。',
+    'root=wiki/workspace：合法值但退役（60042，wiki 读走 wiki 域 REST；#858 起无容器行归属前置，name 形状校验后即拒）；缺省 root 按退役处理。',
   query: z.object({
     root: z.enum(['lab', 'wiki', 'workspace']).describe('lab=唯一现役读面；wiki/workspace=退役根（60042）'),
     path: z.string().optional().describe('相对路径；空 = 树根'),

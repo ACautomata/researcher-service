@@ -153,7 +153,7 @@ onMounted(() => {
   void loadProviders()
 })
 
-// 暴露动作供测试（el-table row slot / el-form 在 stub 下不便点击，照 ContainersView 既定做法）
+// 暴露动作供测试（el-table row slot / el-form 在 stub 下不便点击，expose 动作经 VM 驱动）
 defineExpose({ openCreate, openEdit, save, confirmRemove, loadProviders })
 </script>
 

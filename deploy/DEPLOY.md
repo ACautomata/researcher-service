@@ -25,8 +25,8 @@ panel-frontend 容器（nginx，唯一对宿主暴露，loopback:18080）
 - 镜像存私有 GHCR：`ghcr.io/<owner>/<repo>/{server,frontend,wiki}`，tag `:latest` +
   `:<commit sha>`（wiki 为 wiki 容器镜像 #784）。
   wiki 另推**版本 tag**（`:<Dockerfile FROM 基线 tag>`）——**面板 wiki 容器的目标镜像钉的就是它**
-  （server 镜像内 `config.ts` 默认值同版本）。fleet 目标镜像 = `OPENCLAW_IMAGE` 存量钉版 GHCR
-  引用（openclaw-image 派生镜像构建已随 T0 #801 退役，见 `deploy/README.md`）。
+  （server 镜像内 `config.ts` 默认值同版本）。（#858：fleet 目标镜像 `OPENCLAW_IMAGE` 随
+  fleet 编排退役，server 不再读取。）
 - **超时分层**：`/api/` 慢请求（创建容器等）依赖代理链逐层放宽超时。容器内 nginx 已配
   `proxy_read_timeout/send_timeout 300s`（`/api/`）与 `3600s`（`/api/v1/events` SSE 流）；**BaoTa 边缘
   反代须 ≥ 内层最慢值 `3600s`**：站点 → 反向代理 → 配置，填 `proxy_read_timeout 3600s;` +
@@ -77,16 +77,13 @@ panel-frontend 容器（nginx，唯一对宿主暴露，loopback:18080）
 | `GHCR_PULL_USER` | GitHub 用户名 | 宿主拉私有 GHCR |
 | `GHCR_PULL_TOKEN` | classic PAT，scope `read:packages` | 宿主拉私有 GHCR（持久 login，运行时拉 OpenClaw 镜像复用） |
 | `JWT_SECRET` | **≥32 字符强随机** | HS256 签名密钥（server 生产 fail-fast） |
-| `LLM_API_KEY` | 面板共享 LLM key | 注入 OpenClaw 容器 |
-| `CREDENTIAL_ENCRYPTION_KEYS` | base64url 32 字节 | 凭证 AES-256-GCM 密钥环 |
+| `LLM_API_KEY` | 面板共享 LLM key | runner 侧 provider 凭证解析（#731 §1.3） |
 | `API_DOCS_ENABLED`（可选） | `true`（默认） | OpenAPI/Swagger 文档面（`/api/docs`，#761）：admin-only（requireAuth + requireAdmin）zod 生成式文档。显式 `false` → server 不装配 docs 路由（整树 90005） |
-| `RESEARCHER_REPO`（可选） | 克隆 URL | 构建机 clone home 模板（默认 `https://github.com/ACautomata/researcher.git`；模板入 server 镜像，不再落宿主） |
 
-生成 `JWT_SECRET` 与 `CREDENTIAL_ENCRYPTION_KEYS`：
+生成 `JWT_SECRET`：
 
 ```bash
 openssl rand -base64 48      # JWT_SECRET（≥32 字符，48 字节 base64 足够）
-python3 -c "import base64,os;print(base64.urlsafe_b64encode(os.urandom(32)).decode().rstrip('='))"   # CREDENTIAL_ENCRYPTION_KEYS
 ```
 
 > **⚠ #341 M9 迁移注意**：旧 Django 时代的 `DJANGO_SECRET_KEY` / `DJANGO_ALLOWED_HOSTS` 两个
@@ -99,27 +96,23 @@ python3 -c "import base64,os;print(base64.urlsafe_b64encode(os.urandom(32)).deco
 
 容器启动时校验，缺一即拒启动（健康门会据此判红）：
 
-`JWT_SECRET`（≥32 字符）· `CREDENTIAL_ENCRYPTION_KEYS` ·
-`LLM_API_KEY`（create 容器时 90003 前置校验）· `REDIS_URL`（compose 固定
-`redis://redis:6379/0`）· `OPENCLAW_TEMPLATE_DIR`（compose 固定 `/app/templates/researcher`，
-镜像内——构建期 COPY 的 researcher home 模板）·
-`OPENCLAW_FLEET_ROOT`（compose 固定 `/fleet`，server 容器内工作目录，无宿主挂载）·
+`JWT_SECRET`（≥32 字符）·
+`LLM_API_KEY`（会话发消息经 provider 解析消费）· `REDIS_URL`（compose 固定
+`redis://redis:6379/0`）·
+`DATA_ROOT`（compose 固定 `/data`，server 容器内落盘根——附件上传临时区；#858 前身
+`OPENCLAW_FLEET_ROOT`）·
 `DATABASE_URL`（compose 固定 `file:/app/db/db.sqlite3`，指向 panel-db 卷）。
 
-> **`OPENCLAW_IMAGE` 不在上列**：它有缺省值（= 存量钉版 GHCR 引用，openclaw-image 派生镜像构建
-> 已随 T0 #801 退役），缺省并不拒启动——但
-> **生产浮动 tag（无 tag 或 `:latest`）→ 启动 fail-fast**（准据 `server/src/config.ts` 的
-> `readPinnedImage`；与 `server/README.md` 同处置）。
+> **#858 OpenClaw 退役③**：旧 env `OPENCLAW_TEMPLATE_DIR` / `OPENCLAW_FLEET_ROOT` /
+> `OPENCLAW_IMAGE` / `OPENCLAW_NAMED_VOLUMES` / `CREDENTIAL_ENCRYPTION_KEYS` /
+> `LIFECYCLE_WORKER_CONCURRENCY` 已随 fleet 编排退役，server 不再读取（宿主 .env 里残留
+> 无害）。
 
-> 说明：`OPENCLAW_TEMPLATE_DIR` 指向 **server 镜像内**路径（ADR 0013
-> `#593` 模板入镜像），compose 显式 pin 到镜像内 COPY 产物。镜像外唯一的宿主数据
-> 挂载是 `/var/run/docker.sock`（spec §5.4 已接受等价 root）。
-
-> **`/fleet`（容器内工作目录，非宿主挂载）：** server 容器的 `OPENCLAW_FLEET_ROOT=/fleet` 是
-> 容器私有目录——named volume 拓扑（ADR 0011/0013，#590/#592）下 OpenClaw 容器不 bind 宿主树，
-> `instances/<id>/` 目录与 provision 的 cp 只落在容器内，容器重建即空、create 幂等重建。生产
-> 2026-08-01 的「/fleet 缺挂载 → gateway 崩溃循环」故障属于旧 bind 时代契约（宿主 fleet 根须与
-> compose 挂载同源）；挂载已删除，此故障面不再存在。
+> 
+> 沙箱/wiki 容器镜像（`SANDBOX_IMAGE` / `WIKI_IMAGE`，均有钉版缺省值）**不在上列**：
+> 生产浮动 tag（无 tag 或 `:latest`）→ 启动 fail-fast（准据 `server/src/config.ts` 的
+> `readPinnedImage`）。镜像外唯一的宿主数据挂载是 `/var/run/docker.sock`
+>（spec §5.4 已接受等价 root）。
 
 ## AutoFigure 生产接线
 
@@ -129,8 +122,8 @@ figures 读取与 PNG/SVG 下载仍由控制面提供。历史契约保留在 `d
 
 ## 回滚
 
-镜像按 `:<commit sha>` 留了不可变记录，回滚 = 固定到上一个 sha 重启（home 模板已随
-server 镜像构建期入镜像——回滚镜像即回滚模板，无宿主侧残留状态需要同步）：
+镜像按 `:<commit sha>` 留了不可变记录，回滚 = 固定到上一个 sha 重启（无宿主侧残留状态
+需要同步；#858 起模板注入已退役）：
 
 ```bash
 ssh root@<REMOTE_HOST>
@@ -143,7 +136,7 @@ docker compose -f docker-compose.deploy.yml --env-file .env up -d
 
 > 面板 fleet 的目标镜像不随部署自动切换：它钉在 server 镜像内的 `config.ts` 默认值（存量
 > 版本 tag 引用）。存量容器何时/如何换到新目标由运维动作决定（升级编排已随 T0 #801 退役），
-> 生产禁浮动 tag 的 fail-fast 见上方「运行时 server 必需 env」的 `OPENCLAW_IMAGE` 说明。
+> 生产禁浮动 tag 的 fail-fast（`SANDBOX_IMAGE` / `WIKI_IMAGE`）见上方「运行时 server 必需 env」。
 
 ## 排障
 
