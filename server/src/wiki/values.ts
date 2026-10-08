@@ -1,4 +1,5 @@
-// wiki 常量（#335 · 平移 backend/wiki/service.py + integration/openclaw/adapters.py）。
+// wiki 常量（#335 · 平移 backend/wiki/service.py；#861 起黑名单零 legacy 成员——
+// 旧 `.openclaw-wiki` 目录名随 fleet 退役移除，现役 wiki 容器树零初始化不会产生它）。
 // 单一来源：SKIP 集合 / 正则 / 摘要长度。供纯逻辑（logic.ts）、FS 适配器（nodeFs.ts）复用。
 
 // managed 文件黑名单（codex #125 / #315 §4）：插件私有目录与占位文件，读写全拦。
@@ -6,7 +7,7 @@
 // 操作说明与运行日志，非知识页），.claims/ 是 claims 证据旁车目录（机器生成物）——三者
 // 均不进 tree/graph/categories，写侧一并拒绝（.claims 只读面走 service.readClaims 专用
 // 通道，不经本黑名单拦截的页读路径）。
-export const SKIP_DIRS = new Set(['.openclaw-wiki', '_attachments', '_views', '.claims'])
+export const SKIP_DIRS = new Set(['_attachments', '_views', '.claims'])
 export const SKIP_FILES = new Set(['index.md', 'AGENTS.md', 'WIKI.md', 'inbox.md', 'log.md', 'INSTRUCTIONS.md'])
 
 // obsidian 风格双链 [[target]] 或 [[target|别名]]（WIKILINK_RE）

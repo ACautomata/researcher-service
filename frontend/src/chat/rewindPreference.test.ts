@@ -13,7 +13,7 @@ describe('rewindPreference（#694 回退确认偏好）', () => {
     expect(shouldSkipRewindConfirm()).toBe(false)
   })
 
-  it('记住后 → 跳过确认；key/值沿用官方形状（openclaw:skip-rewind-confirm = "1"）', () => {
+  it('记住后 → 跳过确认；key/值沿用官方形状（researcher:skip-rewind-confirm = "1"）', () => {
     rememberSkipRewindConfirm()
     expect(localStorage.getItem(SKIP_REWIND_CONFIRM_KEY)).toBe('1')
     expect(shouldSkipRewindConfirm()).toBe(true)

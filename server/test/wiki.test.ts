@@ -21,7 +21,7 @@ function wikiFixture(): Record<string, string> {
     'domains/cv/papers/resnet.md': '---\npaper:\n  title: ResNet\nrelated_pages: [attention]\n---\n# ResNet\n',
     'experiments/trial-1.md': '---\ntitle: Trial 1\n---\n# Trial 1\n',
     'thoughts/idea-1.md': '# First Idea\n\n`category: idea`\n\nIdea 摘录。\n',
-    '.openclaw-wiki/cache.md': 'x',
+    '_attachments/cache.md': 'x',
     'index.md': '# INDEX',
     'root-note.md': '# Root Note\n\n`category: rootcat`\n\nRoot 摘录。\n',
   }
@@ -94,9 +94,9 @@ describe('wiki REST（接缝 #2 信封 + #335；#856 owner 级）', () => {
     const kinds = new Set(groups.map((g) => g.kind))
     expect(kinds).toEqual(expect.objectContaining(new Set(['concepts', 'domains', 'experiments', 'thoughts'])))
     expect(kinds).not.toContain('entities') // 空目录不成组
-    expect(kinds).not.toContain('.openclaw-wiki')
+    expect(kinds).not.toContain('_attachments')
     const all = groups.flatMap((g) => g.pages)
-    expect(all.some((p) => p.path.includes('.openclaw-wiki'))).toBe(false)
+    expect(all.some((p) => p.path.includes('_attachments'))).toBe(false)
     expect(all.some((p) => p.path === 'index.md')).toBe(false)
     expect(all.some((p) => p.path === 'root-note.md')).toBe(false) // 顶层散落页不收
     const concepts = groups.find((g) => g.kind === 'concepts')!
@@ -162,7 +162,7 @@ describe('wiki REST（接缝 #2 信封 + #335；#856 owner 级）', () => {
     const missing = await ctx.request
       .put(`${BASE}/page`).set(bearer(u.token)).send({ path: 'concepts/nope.md', content: 'x' })
     expect(missing.body.code).toBe(30040)
-    for (const managed of ['index.md', 'AGENTS.md', 'concepts/index.md', '.openclaw-wiki/cache/foo.md']) {
+    for (const managed of ['index.md', 'AGENTS.md', 'concepts/index.md', '_attachments/cache/foo.md']) {
       const res = await ctx.request
         .put(`${BASE}/page`).set(bearer(u.token)).send({ path: managed, content: 'x' })
       expect(res.body.code, `managed 路径写入未被拒: ${managed}`).toBe(90002)
@@ -190,7 +190,7 @@ describe('wiki REST（接缝 #2 信封 + #335；#856 owner 级）', () => {
       .post(`${BASE}/page`).set(bearer(u.token)).send({ path: '../../evil.md', content: 'x' })
     expect(inject.body.code).toBe(90002)
     const managed = await ctx.request
-      .post(`${BASE}/page`).set(bearer(u.token)).send({ path: '.openclaw-wiki/evil.md', content: 'x' })
+      .post(`${BASE}/page`).set(bearer(u.token)).send({ path: '_attachments/evil.md', content: 'x' })
     expect(managed.body.code).toBe(90002)
   })
 
