@@ -25,7 +25,8 @@ import './types' // Express Request 增强（req.user / req.prisma）
 
 export interface AppDeps {
   prisma: PrismaClient
-  // wiki 接缝（#335）：compile 触发等。缺省 = no-op（无编排）。
+  // wiki 接缝（#335 → #784 换轨）：wikiContainers ensure + #790 updateRunner（compile 触发
+  // 面已随 #859 退役）。缺省 = 测试装配（无 ensure）。
   wiki?: WikiRouterDeps
   // models 接缝（#336；#775 写盘链退役后仅剩白名单校验注入缝——lookup 测试注 fake 免真 DNS，
   // allowPrivate 覆盖 env 开关）。路由无条件挂载（零外部资源依赖）。
@@ -84,7 +85,7 @@ export function createApp({ prisma, wiki, models, providerEndpoints, files, docs
   app.use('/api/v1/usage', usageRouter)
   // wiki（#335 → #784 换轨 → #856 归属门改挂 ownerId）：owner 级路由 /api/v1/wiki/...
   // （对齐 #857 models / sessions 扁平挂用户先例），零容器行查询；存储面 = 每用户 wiki 容器
-  // （ensure 经 wikiContainers 注入）；compile 触发经 wiki 注入。
+  // （ensure 经 wikiContainers 注入）；compile 触发面已随 #859 退役。
   app.use('/api/v1/wiki', createWikiRouter(wiki ?? {}))
   // models（#336；#775 写盘链退役；#857 归属门改挂 ownerId）：owner 级路由
   // /api/v1/models/providers[/<pid>]（对齐 sessions 扁平挂用户先例），零容器行查询；

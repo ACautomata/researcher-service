@@ -127,18 +127,16 @@ npm run prisma:validate        # schema 合法性
 - **refresh cookie**：`HttpOnly; Secure(prod); SameSite=Lax; Path=/api/v1/auth`；R1 旋转 + 重放族灭。
 - **C1 强制改密**：服务端拦截（`mustChangePasswordGate`），放行 me/logout/password-change，余者 mustChange=true → `10005`。
 - **防探测**：`/users` 非 admin、目标不存在 → 同码 `10041` 同体；容器「不存在 vs 越权」→ 同码 `20040` 同体，区分仅进服务端日志。
-- **凭证零落盘**：响应体不含 passwordHash / refresh 明文 / 容器 token / private_key。
-- **凭证加密（Codex C1）**：gateway token 落盘为 AES-256-GCM 密文（`CREDENTIAL_ENCRYPTION_KEYS`，
-  逗号分隔 base64(32 字节)，首个 = active 加密、余者仅解密支持轮换）。**生产必填**（缺失启动
-  fail-fast），生成示例 `openssl rand -base64 32`；dev/test 未设置时回退到固定密钥（勿用于生产）。
-- **容器隔离（#312）**：user 仅自己容器、admin 跨用户全部；归属前置 `getInstanceForUser` 单点（admin 全放行 / user 仅本人）。
-- **容器并发（#313）**：进程内 `NameLeaseMap` 互斥（不依赖 Redis）防双创建/双删除；create/delete 按
-  name 串行入队；delete 异步 + 取消标志（provisioning 检查点检出统一回滚）；BullMQ(Redis) worker
-  并发默认 2 + stalled-job 崩溃重跑（T0 #801 起 reserveRow 写 port=0 记账，端口分配已废除）。
-- **容器补偿**：ERROR 行保留 / 清理失败标 REMOVING 可重试（20045）。
+- **凭证零落盘**：响应体不含 passwordHash / refresh 明文 / private_key。
+- **凭证加密（Codex C1）已整链退役**（#858 起 #859 收尾）：AES-256-GCM 链（`crypto.ts`）与
+  `CREDENTIAL_ENCRYPTION_KEYS` 仅服务 gateway token 落盘，随 fleet 编排退役——全库零消费面
+  （含 cd.yml 注入线摘除），无保留面。
+- **容器隔离/并发/补偿（#312/#313 fleet 域）已随 #858 退役**：容器行表/CRUD/NameLeaseMap/BullMQ
+  生命周期队列整链删除；现役容器面 = 会话沙箱 + wiki 容器（`sandboxes/` + `wikiContainers/`，
+  归属 = 认证身份直派生零容器行查询，per-name 串行 = `containers/lifecycleQueue.ts` NameSerializer）。
 - **config 面（#366 → T0 #801）**：openclaw.json 渲染写盘链（configRenderer/configWriter/configBuilder）
-  与 openclaw.json 模板已整链退役——容器读镜像内默认配置；models 域经 config_meta version bump 热
-  生效（#775），`GATEWAY_TOKEN` 经 env 注入、AES 密文落盘。
+  与 openclaw.json 模板已整链退役——models 域经 config_meta version bump 热生效（#775）；
+  `GATEWAY_TOKEN` 凭证链已随 #858/#859 退役。
 - **共享 key 所有权边界（#336 codex 四轮 P1，已知风险接受）**：`LLM_API_KEY` 值仅管理员部署级配置
   （env/启动配置注入），用户仅配置自己容器的 model provider 条目（含 `base_url`）引用之。**多租户不可信
   场景下**，恶意用户可把自家 provider 的 `base_url` 指向自己端点，诱使容器把共享 key 作为凭证发往该处
@@ -156,12 +154,12 @@ npm run prisma:validate        # schema 合法性
 
 生产 compose：`deploy/docker-compose.deploy.yml` 三服务（frontend nginx → server:8001 → redis）。
 **必填 env**（`NODE_ENV=production` 下 fail-fast）：`JWT_SECRET`（≥32 字符）·
-`CREDENTIAL_ENCRYPTION_KEYS` · `OPENCLAW_TEMPLATE_DIR`（绝对存在可读）·
-`DATABASE_URL`（显式绝对路径，如 `file:/app/db/db.sqlite3`）· `OPENCLAW_FLEET_ROOT`（compose pin
-`/fleet`，容器内工作目录无宿主挂载）。LLM_API_KEY create 时 90003 前置校验。`OPENCLAW_IMAGE` 有缺省值
-（= 存量钉版 GHCR 引用，派生镜像构建已随 T0 #801 退役）故不在上列，但**生产禁浮动 tag**：无 tag 或
-`:latest` 启动即 fail-fast（准据见 `server/src/config.ts` 的 `readPinnedImage`）。部署全流程（CD、
-secrets、回滚、排障）见 `deploy/DEPLOY.md`。
+`DATABASE_URL`（compose pin `file:/app/db/db.sqlite3`）· `DATA_ROOT`（compose pin `/data`，
+落盘根 = 附件上传临时区；#858 前身 `OPENCLAW_FLEET_ROOT`）。LLM_API_KEY 经 provider 解析消费
+（#731 §1.3）。`SANDBOX_IMAGE` / `WIKI_IMAGE` 有钉版缺省值故不在上列，但**生产禁浮动 tag**：无
+tag 或 `:latest` 启动即 fail-fast（准据见 `server/src/config.ts` 的 `readPinnedImage`；#858 起
+fleet 目标镜像 `OPENCLAW_IMAGE` 随编排退役）。部署全流程（CD、secrets、回滚、排障）见
+`deploy/DEPLOY.md`。
 
 > 坑：`node:lts-slim`（Debian/glibc）——better-sqlite3 原生模块不兼容 alpine/musl；runtime 阶段
 > 需 build-essential + python3（postinstall 编译工具链，Dockerfile 已含）。
