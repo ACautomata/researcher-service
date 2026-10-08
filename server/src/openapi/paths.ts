@@ -287,79 +287,79 @@ register({
   dataNote: 'data: { status: \'removing\' }。',
 })
 
-// ---- Wiki /api/v1/containers/{name}/wiki（归属前置 20040；页不存在 30040；页已存在 30041）----
+// ---- Wiki /api/v1/wiki（owner 级，#856 归属门直挂认证身份；页不存在 30040；页已存在 30041）----
 
 register({
   method: 'get',
-  path: '/api/v1/containers/{name}/wiki/tree',
+  path: '/api/v1/wiki/tree',
   tag: 'Wiki',
-  summary: 'wiki 文件树',
+  summary: 'wiki 文件树（本人 wiki）',
   auth: 'user',
-  errors: `90002（${CONTAINER_PATH_NOTE}）· 20040 · 10005。`,
+  errors: `10005。`,
   dataNote: 'data: 树形结构（开放目录分组，不收顶层散落页）。',
 })
 
 register({
   method: 'get',
-  path: '/api/v1/containers/{name}/wiki/page',
+  path: '/api/v1/wiki/page',
   tag: 'Wiki',
   summary: '读一页原文全文',
   auth: 'user',
-  errors: `90002（name/path 非法 → data.name|data.path）· 20040 · 30040 · 10005。`,
+  errors: `90002（path 非法 → data.path）· 30040 · 10005。`,
   dataNote: 'data: 页内容载荷（service.readPage 形状）。',
   query: z.object({ path: z.string().describe('wiki 内相对路径') }),
 })
 
 register({
   method: 'put',
-  path: '/api/v1/containers/{name}/wiki/page',
+  path: '/api/v1/wiki/page',
   tag: 'Wiki',
   summary: '覆写已存在页（byte-exact；不触发 compile）',
   auth: 'user',
-  errors: `90002（data.name|data.path|data.content 明细）· 20040 · 30040 · 10005。`,
+  errors: `90002（data.path|data.content 明细）· 30040 · 10005。`,
   dataNote: 'data: { path }。',
   bodyNote: `${USER_WRITE_BODY_NOTE}字段：path（相对路径，穿越/managed 拒）、content（string，含未配对代理字符拒）。`,
 })
 
 register({
   method: 'post',
-  path: '/api/v1/containers/{name}/wiki/page',
+  path: '/api/v1/wiki/page',
   tag: 'Wiki',
   summary: '新建页（触发 5s 去抖 recompile）',
   auth: 'user',
-  errors: `90002（字段明细）· 20040 · 30041（已存在）· 10005。`,
+  errors: `90002（字段明细）· 30041（已存在）· 10005。`,
   dataNote: 'data: { path }。',
   bodyNote: `${USER_WRITE_BODY_NOTE}字段：path、content（同 PUT）。`,
 })
 
 register({
   method: 'delete',
-  path: '/api/v1/containers/{name}/wiki/page',
+  path: '/api/v1/wiki/page',
   tag: 'Wiki',
   summary: '删页（触发 5s 去抖 recompile）',
   auth: 'user',
-  errors: `90002（data.name|data.path）· 20040 · 30040 · 10005。`,
+  errors: `90002（data.path）· 30040 · 10005。`,
   nullData: true,
   query: z.object({ path: z.string().describe('wiki 内相对路径') }),
 })
 
 register({
   method: 'get',
-  path: '/api/v1/containers/{name}/wiki/graph',
+  path: '/api/v1/wiki/graph',
   tag: 'Wiki',
   summary: '全库图谱（nodes + edges）',
   auth: 'user',
-  errors: `90002（${CONTAINER_PATH_NOTE}）· 20040 · 10005。`,
+  errors: `10005。`,
   dataNote: 'data: { nodes, edges }（obsidian 风格；边不 dedup，不可解析 → ghost 节点）。',
 })
 
 register({
   method: 'get',
-  path: '/api/v1/containers/{name}/wiki/categories',
+  path: '/api/v1/wiki/categories',
   tag: 'Wiki',
   summary: '按 category: 标记聚合',
   auth: 'user',
-  errors: `90002（${CONTAINER_PATH_NOTE}）· 20040 · 10005。`,
+  errors: `10005。`,
   dataNote: 'data: 分类聚合（开放词表；收顶层散落页）。',
 })
 

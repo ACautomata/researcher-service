@@ -1,6 +1,7 @@
-// wiki API —— 每容器 wiki/main tree/page CRUD/graph（spec §6 / issue #45）。
-// 直读/直写宿主 instances/<name>/home/wiki/main；path 为相对 wiki/main 的 posix 相对路径，
-// 经 encodeURIComponent 编码进 query。删除幂等：404（他人刚删）不报错。
+// wiki API —— 每用户（owner 级，#856）wiki tree/page CRUD/graph/categories/claims/update
+// （spec §6 / issue #45）。owner 直取认证身份——调用方不传容器名（wiki 域与容器行脱钩）。
+// path 为相对树根的 posix 相对路径，经 encodeURIComponent 编码进 query。删除幂等：
+// 30040（他人刚删）不报错——错误经 apiJson 对 code!==0 抛，调用方据 toast 提示失败。
 import { apiJson } from '@/api/client'
 
 export interface WikiPageDTO {
@@ -52,46 +53,44 @@ export interface CategoryItemDTO {
 // categories 聚合响应：键为动态 category 值（开放词表），值为该组带标记页列表。
 export type CategoriesDTO = Record<string, CategoryItemDTO[]>
 
-function base(name: string): string {
-  return `/api/v1/containers/${encodeURIComponent(name)}/wiki`
+const BASE = '/api/v1/wiki'
+
+export function getTree(): Promise<WikiTreeDTO> {
+  return apiJson<WikiTreeDTO>(`${BASE}/tree`)
 }
 
-export function getTree(name: string): Promise<WikiTreeDTO> {
-  return apiJson<WikiTreeDTO>(`${base(name)}/tree`)
+export function readPage(path: string): Promise<WikiPageContentDTO> {
+  return apiJson<WikiPageContentDTO>(`${BASE}/page?path=${encodeURIComponent(path)}`)
 }
 
-export function readPage(name: string, path: string): Promise<WikiPageContentDTO> {
-  return apiJson<WikiPageContentDTO>(`${base(name)}/page?path=${encodeURIComponent(path)}`)
-}
-
-export function updatePage(name: string, path: string, content: string): Promise<void> {
-  return apiJson<void>(`${base(name)}/page`, {
+export function updatePage(path: string, content: string): Promise<void> {
+  return apiJson<void>(`${BASE}/page`, {
     method: 'PUT',
     body: JSON.stringify({ path, content }),
   })
 }
 
-export function createPage(name: string, path: string, content: string): Promise<void> {
-  return apiJson<void>(`${base(name)}/page`, {
+export function createPage(path: string, content: string): Promise<void> {
+  return apiJson<void>(`${BASE}/page`, {
     method: 'POST',
     body: JSON.stringify({ path, content }),
   })
 }
 
-export async function deletePage(name: string, path: string): Promise<void> {
-  // 经 apiJson：TS 后端越权/不存在删除恒 HTTP 200 + code:20040（同码防探测），旧 apiFetch+resp.ok
-  // 把它当成功（PR #370 第四轮 #9 P0）。apiJson 对 code!==0 抛，调用方据 toast 提示失败。
-  await apiJson<void>(`${base(name)}/page?path=${encodeURIComponent(path)}`, {
+export async function deletePage(path: string): Promise<void> {
+  // 经 apiJson：后端错误恒 HTTP 200 + 信封 code（旧 apiFetch+resp.ok 把它当成功，
+  // PR #370 第四轮 #9 P0）。apiJson 对 code!==0 抛，调用方据 toast 提示失败。
+  await apiJson<void>(`${BASE}/page?path=${encodeURIComponent(path)}`, {
     method: 'DELETE',
   })
 }
 
-export function getGraph(name: string): Promise<WikiGraphDTO> {
-  return apiJson<WikiGraphDTO>(`${base(name)}/graph`)
+export function getGraph(): Promise<WikiGraphDTO> {
+  return apiJson<WikiGraphDTO>(`${BASE}/graph`)
 }
 
-export function getCategories(name: string): Promise<CategoriesDTO> {
-  return apiJson<CategoriesDTO>(`${base(name)}/categories`)
+export function getCategories(): Promise<CategoriesDTO> {
+  return apiJson<CategoriesDTO>(`${BASE}/categories`)
 }
 
 export interface WikiClaimsDTO {
@@ -101,10 +100,10 @@ export interface WikiClaimsDTO {
   claims: { id: string; statement: string; evidence: { resource: string; version?: string }[] }[]
 }
 
-export function getClaims(name: string, path: string): Promise<WikiClaimsDTO> {
-  return apiJson(`${base(name)}/claims?path=${encodeURIComponent(path)}`)
+export function getClaims(path: string): Promise<WikiClaimsDTO> {
+  return apiJson(`${BASE}/claims?path=${encodeURIComponent(path)}`)
 }
 
-export function startWikiUpdate(name: string): Promise<{ runId: string }> {
-  return apiJson(`${base(name)}/update`, { method: 'POST' })
+export function startWikiUpdate(): Promise<{ runId: string }> {
+  return apiJson(`${BASE}/update`, { method: 'POST' })
 }

@@ -71,8 +71,8 @@ describe('OpenAPI 文档面（#761）', () => {
       '/api/v1/users',
       '/api/v1/users/{id}/reset-password',
       '/api/v1/containers',
-      '/api/v1/containers/{name}/wiki/tree',
-      '/api/v1/containers/{name}/wiki/page',
+      '/api/v1/wiki/tree',
+      '/api/v1/wiki/page',
       '/api/v1/models/providers',
       '/api/v1/models/providers/{pid}',
       '/api/v1/containers/{name}/files',
@@ -92,6 +92,9 @@ describe('OpenAPI 文档面（#761）', () => {
       // #857：models 归属门改挂 ownerId，容器前缀路径下线
       '/api/v1/containers/{name}/models/providers',
       '/api/v1/containers/{name}/models/providers/{pid}',
+      // #856：wiki 归属门改挂 ownerId，容器前缀路径下线
+      '/api/v1/containers/{name}/wiki/tree',
+      '/api/v1/containers/{name}/wiki/page',
     ]) {
       expect(doc.paths, `退役端点残留 ${p}`).not.toHaveProperty(p)
     }
@@ -171,7 +174,7 @@ describe('OpenAPI 文档面（#761）', () => {
 
   it('query 参数：wiki page path 与 figures svg download 进文档', async () => {
     const doc = await adminDoc()
-    const pageParams = doc.paths['/api/v1/containers/{name}/wiki/page'].get.parameters
+    const pageParams = doc.paths['/api/v1/wiki/page'].get.parameters
     expect(pageParams).toEqual(
       expect.arrayContaining([expect.objectContaining({ name: 'path', in: 'query', required: true })]),
     )

@@ -49,8 +49,8 @@ export function useWikiUpdate(onFinished: () => Promise<void>) {
   }
   const stream = useEventStream({ onEvent: receive, onDisconnect: lostProgress, onGap: lostProgress })
   onBeforeUnmount(() => { alive = false; stream.close() })
-  async function start(container: string) {
-    if (busy.value || pending || !container) return
+  async function start() {
+    if (busy.value || pending) return
     if (stream.status.value !== 'open') {
       message.value = '正在连接更新进度，请稍后重试'
       return
@@ -61,7 +61,7 @@ export function useWikiUpdate(onFinished: () => Promise<void>) {
     message.value = '正在启动更新…'
     detail.value = ''
     try {
-      const result = await startWikiUpdate(container)
+      const result = await startWikiUpdate()
       if (!alive || interrupted) return
       runId = result.runId
       message.value = '规划中'

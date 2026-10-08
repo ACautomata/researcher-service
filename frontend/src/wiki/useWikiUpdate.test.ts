@@ -25,8 +25,8 @@ function setup() {
 describe('wiki update', () => {
   it('shows matching stages and counts, refreshes on completion and closes the stream on unmount', async () => {
     const { update, refresh, wrapper } = setup()
-    await update.start('demo')
-    expect(startWikiUpdate).toHaveBeenCalledWith('demo')
+    await update.start()
+    expect(startWikiUpdate).toHaveBeenCalledOnce()
     handlers.onEvent({ type: 'wiki_run.progress', runId: 'other', payload: { stage: 'finalizing' } })
     expect(update.message.value).toBe('规划中')
     for (const [stage, label] of [['planning', '规划中'], ['generating', '生成中'], ['finalizing', '收尾中']]) {
@@ -47,8 +47,8 @@ describe('wiki update', () => {
       return { runId: 'run' }
     })
     const { update, wrapper } = setup()
-    const first = update.start('demo')
-    await update.start('demo')
+    const first = update.start()
+    await update.start()
     await first
     expect(startWikiUpdate).toHaveBeenCalledOnce()
     expect(update.message.value).toContain('冲突')
@@ -57,12 +57,12 @@ describe('wiki update', () => {
   })
   it('reports unknown results after a sequence gap and handles failed launches', async () => {
     const { update, wrapper } = setup()
-    await update.start('demo')
+    await update.start()
     handlers.onGap?.()
     expect(update.message.value).toContain('结果未知')
     expect(update.busy.value).toBe(false)
     vi.mocked(startWikiUpdate).mockRejectedValueOnce(new Error('30042'))
-    await expect(update.start('demo')).rejects.toThrow('30042')
+    await expect(update.start()).rejects.toThrow('30042')
     expect(update.busy.value).toBe(false)
     wrapper.unmount()
   })
@@ -73,11 +73,11 @@ describe('wiki update stream readiness', () => {
     const status = ref<'connecting' | 'open'>('connecting')
     vi.mocked(useEventStream).mockImplementation(hooks => { handlers = hooks; return { status, close } })
     const { update, wrapper } = setup()
-    await update.start('demo')
+    await update.start()
     expect(startWikiUpdate).not.toHaveBeenCalled()
     expect(update.connected.value).toBe(false)
     status.value = 'open'
-    await update.start('demo')
+    await update.start()
     expect(startWikiUpdate).toHaveBeenCalledOnce()
     wrapper.unmount()
   })
@@ -85,15 +85,15 @@ describe('wiki update stream readiness', () => {
     let resolve!: (result: { runId: string }) => void
     vi.mocked(startWikiUpdate).mockImplementationOnce(() => new Promise(done => { resolve = done }))
     const { update, wrapper } = setup()
-    const first = update.start('demo')
+    const first = update.start()
     handlers.onDisconnect?.()
-    await update.start('demo')
+    await update.start()
     expect(startWikiUpdate).toHaveBeenCalledOnce()
     resolve({ runId: 'old' })
     await first
     expect(update.busy.value).toBe(false)
     expect(update.message.value).toContain('结果未知')
-    await update.start('demo')
+    await update.start()
     handlers.onEvent({ type: 'wiki_run.finished', runId: 'old', payload: { outcome: 'completed' } })
     expect(update.busy.value).toBe(true)
     wrapper.unmount()

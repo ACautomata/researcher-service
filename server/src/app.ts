@@ -68,7 +68,7 @@ export function createApp({ prisma, orchestrator, wiki, models, providerEndpoint
   const app = express()
   // wiki 内容契约无大小上限（codex PR#346）：挂载路径内请求先走 5mb limit，其余端点仍 256kb。
   // 须先于全局 parser —— body-parser 对已解析 body（req._body）会跳过，故 wiki 命中后不二次解析。
-  app.use('/api/v1/containers/:name/wiki', express.json({ limit: '5mb' }))
+  app.use('/api/v1/wiki', express.json({ limit: '5mb' }))
   app.use(express.json({ limit: '256kb' }))
   app.use(cookieParser())
   app.use((req: Request, _res: Response, next: NextFunction) => {
@@ -92,10 +92,10 @@ export function createApp({ prisma, orchestrator, wiki, models, providerEndpoint
   if (orchestrator) {
     app.use('/api/v1/containers', createContainersRouter(orchestrator))
   }
-  // wiki（#335）：只依赖 prisma + 容器行 homeDir，不依赖编排器；compile 触发经 wiki 注入。
-  // 注意：Express 5 不把 app.use 挂载路径的 :name 合并进 router 的 req.params，故挂到
-  // /api/v1/containers、把 `/:name/wiki/...` 路径声明在 router 内部（见 wiki/routes.ts）。
-  app.use('/api/v1/containers', createWikiRouter(wiki ?? {}))
+  // wiki（#335 → #784 换轨 → #856 归属门改挂 ownerId）：owner 级路由 /api/v1/wiki/...
+  // （对齐 #857 models / sessions 扁平挂用户先例），零容器行查询；存储面 = 每用户 wiki 容器
+  // （ensure 经 wikiContainers 注入）；compile 触发经 wiki 注入。
+  app.use('/api/v1/wiki', createWikiRouter(wiki ?? {}))
   // models（#336；#775 写盘链退役；#857 归属门改挂 ownerId）：owner 级路由
   // /api/v1/models/providers[/<pid>]（对齐 sessions 扁平挂用户先例），零容器行查询；
   // 零外部资源依赖（事务 = DB mutation + config_meta bump），无条件挂载；deps 仅剩白名单

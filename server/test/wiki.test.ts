@@ -1,19 +1,19 @@
 // wiki REST 契约测试（#335 · #315 §8 checklist 对 Express 实现重跑；#621 起经 serviceFor 注入
 // 内存 fake WikiFileSystem，对齐 files.test.ts 的内存 Port 注入模式——存储适配器行为由
-// wikiDockerFs.test.ts 单测覆盖，本文件钉 REST ↔ Port 接线：信封/错误映射/归属/compile 时机）。
-// 端点 /api/v1/containers/<name>/wiki/{tree,page,graph,categories}；信封（#312）+ 隔离归属前置
-// （#312⑤，越权 20040 同码防探测）+ 错误映射（90002/20040/30040/30041）。compile 经注入 fake
-// 断言触发时机（POST/DELETE 触发、PUT 不触发），不碰真 docker。
+// wikiDockerFs.test.ts 单测覆盖，本文件钉 REST ↔ Port 接线：信封/错误映射/隔离/compile 时机）。
+// #856（退役①）：owner 级端点 /api/v1/wiki/{tree,page,graph,categories,claims}，ownerId 直取
+// 认证身份——容器行 20040 归属面随耦合退役，跨用户探测面结构性消失（隔离测试改为：
+// 各用户寻址只达本人 fake 存储，他人页不可见）；path 校验先于 ensure（非法请求不触碰编排面）。
+// 信封（#312）+ 错误映射（90002/30040/30041）。compile 经注入 fake 断言触发时机
+// （POST/DELETE 触发、PUT 不触发），不碰真 docker。
 
 import { createHash } from 'node:crypto'
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { setupTestApp, type TestContext } from './setup'
-import { seedAdmin, seedUser, login, bearer } from './helpers'
+import { seedUser, login, bearer } from './helpers'
 import { FakeWikiFileSystem } from './fakes'
 import { WikiService } from '../src/wiki/service'
 import type { CompileTrigger } from '../src/wiki/compile'
-
-let seq = 0
 
 // wiki fixture（页集对齐旧 makeWikiHome 真目录 fixture；空目录 entities 无法在内存 fake 表示，
 // 「空目录不成组」由 entities 下无页自然成立）。
@@ -29,20 +29,20 @@ function wikiFixture(): Record<string, string> {
   }
 }
 
-describe('wiki REST（接缝 #2 信封 + #335）', () => {
+describe('wiki REST（接缝 #2 信封 + #335；#856 owner 级）', () => {
   let ctx: TestContext
   const compileCalls: string[] = []
-  // 每容器一个内存 fake WikiFileSystem（seedContainer 注册）；serviceFor 按 name 查，未注册
-  // 给空 fake（对齐「容器存在但无 wiki 数据 → 空树」的降级语义）。
+  // 每用户一个内存 fake WikiFileSystem（ownerId 键控，#856）；serviceFor 按 ownerId 查，未注册
+  // 给空 fake（对齐「账号存在但无 wiki 数据 → 空树」的降级语义）。
   const fss = new Map<string, FakeWikiFileSystem>()
-  const BASE = '/api/v1/containers'
+  const BASE = '/api/v1/wiki'
 
   beforeAll(async () => {
-    const fakeCompile: CompileTrigger = { trigger: (name) => { compileCalls.push(name) } }
+    const fakeCompile: CompileTrigger = { trigger: (owner) => { compileCalls.push(owner) } }
     ctx = await setupTestApp({
       wiki: {
         compile: fakeCompile,
-        serviceFor: (inst) => new WikiService(fss.get(inst.name) ?? new FakeWikiFileSystem()),
+        serviceFor: (ownerId) => new WikiService(fss.get(ownerId) ?? new FakeWikiFileSystem()),
       },
     })
   })
@@ -50,88 +50,50 @@ describe('wiki REST（接缝 #2 信封 + #335）', () => {
     await ctx.cleanup()
   })
 
-  // 每容器独立 name/port（name/port 全局唯一，跨测试不得复用）；homeDir 不再被 wiki 存储使用
-  // （#621 Docker 适配器以容器为视角），DB 字段按 schema 必填给占位值。
-  async function seedContainer(ownerId: string): Promise<string> {
-    seq += 1
-    const name = `demo${seq}`
-    fss.set(name, new FakeWikiFileSystem(wikiFixture()))
-    await ctx.prisma.container.create({
-      data: {
-        name,
-        port: 19000 + seq,
-        ownerId,
-        token: 't',
-        homeDir: '/unused',
-        image: 'img',
-        status: 'running',
-      },
-    })
-    return name
+  // 建用户并为其注册满配 wiki fake（name/id 全局唯一，跨测试不得复用）；返回登录态与 ownerId。
+  async function seedWikiUser(username: string): Promise<{ token: string; ownerId: string }> {
+    const u = await seedUser(ctx.prisma, username, `pw-${username}-secure`)
+    fss.set(u.id, new FakeWikiFileSystem(wikiFixture()))
+    const l = await login(ctx.request, username, `pw-${username}-secure`)
+    return { token: l.access!, ownerId: u.id }
   }
 
-  // ---------------------------- 认证 / name / 容器归属（#315 §0 公共前置）----------------------------
+  // ---------------------------- 认证 / 隔离（#856 owner 级公共前置）----------------------------
 
   it('未认证 → 10001', async () => {
-    const res = await ctx.request.get(`${BASE}/demo1/wiki/tree`)
+    const res = await ctx.request.get(`${BASE}/tree`)
     expect(res.body.code).toBe(10001)
   })
 
-  it('name 非法 → 90002 + data.name（大写/非法字符）', async () => {
-    await seedUser(ctx.prisma, 'uinv', 'pw-uinv-secure')
-    const l = await login(ctx.request, 'uinv', 'pw-uinv-secure')
-    const res = await ctx.request.get(`${BASE}/Bad_Name/wiki/tree`).set(bearer(l.access))
-    expect(res.body.code).toBe(90002)
-    expect(res.body.data).toHaveProperty('name')
+  it('owner 隔离：同 path 各读本人 wiki——B 永远看不到 A 的页（跨用户探测面结构性消失）', async () => {
+    const a = await seedWikiUser('uiso-a')
+    const b = await seedWikiUser('uiso-b')
+    const fb = fss.get(b.ownerId)!
+    fb.pages.set('concepts/attention.md', '---\ntitle: B-only\n---\n# B 版本\n')
+
+    const ra = await ctx.request.get(`${BASE}/page?path=${encodeURIComponent('concepts/attention.md')}`).set(bearer(a.token))
+    expect(ra.body.code).toBe(0)
+    expect(ra.body.data.title).toBe('Attention') // A 读到 A 的版本
+    const rb = await ctx.request.get(`${BASE}/page?path=${encodeURIComponent('concepts/attention.md')}`).set(bearer(b.token))
+    expect(rb.body.code).toBe(0)
+    expect(rb.body.data.title).toBe('B-only') // B 读到 B 的版本，非 A 的
   })
 
-  it('容器不存在 → 20040（空 data）', async () => {
-    await seedUser(ctx.prisma, 'unotf', 'pw-unotf-secure')
-    const l = await login(ctx.request, 'unotf', 'pw-unotf-secure')
-    const res = await ctx.request.get(`${BASE}/nope/wiki/tree`).set(bearer(l.access))
-    expect(res.body.code).toBe(20040)
+  it('owner 隔离：B 缺页 → 30040，不泄露 A 同名页存在性（同码防探测承接）', async () => {
+    await seedWikiUser('uiso2-a')
+    const bUser = await seedUser(ctx.prisma, 'uiso2-b', 'pw-uiso2-b-secure')
+    fss.set(bUser.id, new FakeWikiFileSystem()) // B 空 wiki，无同名页
+    const lb = await login(ctx.request, 'uiso2-b', 'pw-uiso2-b-secure')
+    const res = await ctx.request.get(`${BASE}/page?path=${encodeURIComponent('domains/cv/papers/resnet.md')}`).set(bearer(lb.access!))
+    expect(res.body.code).toBe(30040)
     expect(res.body.data).toBeNull()
-  })
-
-  it('user 越权访问他人容器 → 20040，与「不存在」同码同文案同空 data（防探测）', async () => {
-    const u = await seedUser(ctx.prisma, 'uowner', 'pw-uowner-secure')
-    await seedUser(ctx.prisma, 'uvoyeur', 'pw-uvoyeur-secure')
-    const name = await seedContainer(u.id)
-    const lv = await login(ctx.request, 'uvoyeur', 'pw-uvoyeur-secure')
-    const res = await ctx.request.get(`${BASE}/${name}/wiki/tree`).set(bearer(lv.access))
-    expect(res.body.code).toBe(20040)
-    expect(res.body).toEqual({ code: 20040, message: expect.any(String), data: null })
-  })
-
-  it('admin 可跨用户访问全部容器', async () => {
-    const u = await seedUser(ctx.prisma, 'uadm-target', 'pw-uadm-target-secure')
-    const name = await seedContainer(u.id)
-    await seedAdmin(ctx.prisma, 'adminx', 'pw-adminx-secure')
-    const la = await login(ctx.request, 'adminx', 'pw-adminx-secure')
-    const res = await ctx.request.get(`${BASE}/${name}/wiki/tree`).set(bearer(la.access))
-    expect(res.body.code).toBe(0)
-    expect(res.body.data.groups).toBeDefined()
-  })
-
-  it('顺序陷阱：越权 + 非法 path → 20040（容器校验先于 path）；非法 name + 容器缺失 → 90002', async () => {
-    const u = await seedUser(ctx.prisma, 'uord', 'pw-uord-secure')
-    await seedUser(ctx.prisma, 'uord-v', 'pw-uord-v-secure')
-    const name = await seedContainer(u.id)
-    const lv = await login(ctx.request, 'uord-v', 'pw-uord-v-secure')
-    const r1 = await ctx.request.get(`${BASE}/${name}/wiki/page?path=../../evil.md`).set(bearer(lv.access))
-    expect(r1.body.code).toBe(20040) // 越权优先，不透 path 校验
-    const r2 = await ctx.request.get(`${BASE}/Bad_Name/wiki/page?path=../../evil.md`).set(bearer(lv.access))
-    expect(r2.body.code).toBe(90002) // name 非法优先
-    expect(r2.body.data).toHaveProperty('name')
   })
 
   // ---------------------------- GET /tree ----------------------------
 
   it('tree：真实子目录分组、未知目录成组、空目录不成组、跳过插件私有/占位/非 .md、title 走 frontmatter', async () => {
-    const u = await seedUser(ctx.prisma, 'utree', 'pw-utree-secure')
-    const name = await seedContainer(u.id)
-    const l = await login(ctx.request, 'utree', 'pw-utree-secure')
-    const res = await ctx.request.get(`${BASE}/${name}/wiki/tree`).set(bearer(l.access))
+    const u = await seedWikiUser('utree')
+    const res = await ctx.request.get(`${BASE}/tree`).set(bearer(u.token))
     expect(res.body.code).toBe(0)
     const groups = res.body.data.groups as Array<{ kind: string; name: string; pages: Array<{ path: string; title: string }> }>
     const kinds = new Set(groups.map((g) => g.kind))
@@ -147,15 +109,21 @@ describe('wiki REST（接缝 #2 信封 + #335）', () => {
     expect(att.title).toBe('Attention')
   })
 
+  it('tree：未注册 wiki 的账号 → 空树合法初态（零初始化）', async () => {
+    await seedUser(ctx.prisma, 'utree-empty', 'pw-utree-empty-secure')
+    const l = await login(ctx.request, 'utree-empty', 'pw-utree-empty-secure')
+    const res = await ctx.request.get(`${BASE}/tree`).set(bearer(l.access!))
+    expect(res.body.code).toBe(0)
+    expect(res.body.data).toEqual({ groups: [] })
+  })
+
   // ---------------------------- GET /page ----------------------------
 
   it('page：返回原文全文 + title', async () => {
-    const u = await seedUser(ctx.prisma, 'upage', 'pw-upage-secure')
-    const name = await seedContainer(u.id)
-    const l = await login(ctx.request, 'upage', 'pw-upage-secure')
+    const u = await seedWikiUser('upage')
     const res = await ctx.request
-      .get(`${BASE}/${name}/wiki/page?path=${encodeURIComponent('concepts/attention.md')}`)
-      .set(bearer(l.access))
+      .get(`${BASE}/page?path=${encodeURIComponent('concepts/attention.md')}`)
+      .set(bearer(u.token))
     expect(res.body.code).toBe(0)
     expect(res.body.data.path).toBe('concepts/attention.md')
     expect(res.body.data.title).toBe('Attention')
@@ -163,53 +131,47 @@ describe('wiki REST（接缝 #2 信封 + #335）', () => {
   })
 
   it('page 不存在 → 30040；空 path / path 注入 → 90002 + data.path', async () => {
-    const u = await seedUser(ctx.prisma, 'upage2', 'pw-upage2-secure')
-    const name = await seedContainer(u.id)
-    const l = await login(ctx.request, 'upage2', 'pw-upage2-secure')
+    const u = await seedWikiUser('upage2')
     const missing = await ctx.request
-      .get(`${BASE}/${name}/wiki/page?path=${encodeURIComponent('concepts/nope.md')}`)
-      .set(bearer(l.access))
+      .get(`${BASE}/page?path=${encodeURIComponent('concepts/nope.md')}`)
+      .set(bearer(u.token))
     expect(missing.body.code).toBe(30040)
     const bad = ['../../../etc/passwd.md', '..%2F..%2Fsecret.md', '/etc/passwd.md', 'concepts\\..\\secret.md', 'concepts/attention']
     for (const p of bad) {
-      const res = await ctx.request.get(`${BASE}/${name}/wiki/page?path=${p}`).set(bearer(l.access))
+      const res = await ctx.request.get(`${BASE}/page?path=${p}`).set(bearer(u.token))
       expect(res.body.code, `path 注入未被拒: ${p}`).toBe(90002)
       expect(res.body.data).toHaveProperty('path')
     }
-    const empty = await ctx.request.get(`${BASE}/${name}/wiki/page?path=`).set(bearer(l.access))
+    const empty = await ctx.request.get(`${BASE}/page?path=`).set(bearer(u.token))
     expect(empty.body.code).toBe(90002)
   })
 
   // ---------------------------- PUT /page ----------------------------
 
   it('PUT：byte-exact 覆写已存在页（首尾空白/尾换行保留）；返回 {path}；不触发 compile', async () => {
-    const u = await seedUser(ctx.prisma, 'uput', 'pw-uput-secure')
-    const name = await seedContainer(u.id)
-    const l = await login(ctx.request, 'uput', 'pw-uput-secure')
+    const u = await seedWikiUser('uput')
     compileCalls.length = 0
     const res = await ctx.request
-      .put(`${BASE}/${name}/wiki/page`)
-      .set(bearer(l.access))
+      .put(`${BASE}/page`)
+      .set(bearer(u.token))
       .send({ path: 'concepts/attention.md', content: '  # 已编辑  \n\n' })
     expect(res.body.code).toBe(0)
     expect(res.body.data).toEqual({ path: 'concepts/attention.md' })
     expect(compileCalls).toEqual([]) // PUT 不触发 compile
     const read = await ctx.request
-      .get(`${BASE}/${name}/wiki/page?path=${encodeURIComponent('concepts/attention.md')}`)
-      .set(bearer(l.access))
+      .get(`${BASE}/page?path=${encodeURIComponent('concepts/attention.md')}`)
+      .set(bearer(u.token))
     expect(read.body.data.content).toBe('  # 已编辑  \n\n')
   })
 
   it('PUT 页不存在 → 30040；managed 路径 → 90002', async () => {
-    const u = await seedUser(ctx.prisma, 'uput2', 'pw-uput2-secure')
-    const name = await seedContainer(u.id)
-    const l = await login(ctx.request, 'uput2', 'pw-uput2-secure')
+    const u = await seedWikiUser('uput2')
     const missing = await ctx.request
-      .put(`${BASE}/${name}/wiki/page`).set(bearer(l.access)).send({ path: 'concepts/nope.md', content: 'x' })
+      .put(`${BASE}/page`).set(bearer(u.token)).send({ path: 'concepts/nope.md', content: 'x' })
     expect(missing.body.code).toBe(30040)
     for (const managed of ['index.md', 'AGENTS.md', 'concepts/index.md', '.openclaw-wiki/cache/foo.md']) {
       const res = await ctx.request
-        .put(`${BASE}/${name}/wiki/page`).set(bearer(l.access)).send({ path: managed, content: 'x' })
+        .put(`${BASE}/page`).set(bearer(u.token)).send({ path: managed, content: 'x' })
       expect(res.body.code, `managed 路径写入未被拒: ${managed}`).toBe(90002)
     }
   })
@@ -217,32 +179,28 @@ describe('wiki REST（接缝 #2 信封 + #335）', () => {
   // ---------------------------- POST /page ----------------------------
 
   it('POST：新建页落盘 + 触发 compile；返回 {path}', async () => {
-    const u = await seedUser(ctx.prisma, 'upost', 'pw-upost-secure')
-    const name = await seedContainer(u.id)
-    const l = await login(ctx.request, 'upost', 'pw-upost-secure')
+    const u = await seedWikiUser('upost')
     compileCalls.length = 0
     const res = await ctx.request
-      .post(`${BASE}/${name}/wiki/page`)
-      .set(bearer(l.access))
+      .post(`${BASE}/page`)
+      .set(bearer(u.token))
       .send({ path: 'concepts/transformer.md', content: '---\ntitle: Transformer\n---\n# T\n' })
     expect(res.body.code).toBe(0)
     expect(res.body.data).toEqual({ path: 'concepts/transformer.md' })
-    expect(compileCalls).toEqual([name]) // 新建触发 compile
+    expect(compileCalls).toEqual([u.ownerId]) // 新建触发 compile（#856 起去抖键 = ownerId）
   })
 
   it('POST 已存在 → 30041；path 注入 / managed → 90002 且不触发 compile', async () => {
-    const u = await seedUser(ctx.prisma, 'upost2', 'pw-upost2-secure')
-    const name = await seedContainer(u.id)
-    const l = await login(ctx.request, 'upost2', 'pw-upost2-secure')
+    const u = await seedWikiUser('upost2')
     compileCalls.length = 0
     const exists = await ctx.request
-      .post(`${BASE}/${name}/wiki/page`).set(bearer(l.access)).send({ path: 'concepts/attention.md', content: 'x' })
+      .post(`${BASE}/page`).set(bearer(u.token)).send({ path: 'concepts/attention.md', content: 'x' })
     expect(exists.body.code).toBe(30041)
     const inject = await ctx.request
-      .post(`${BASE}/${name}/wiki/page`).set(bearer(l.access)).send({ path: '../../evil.md', content: 'x' })
+      .post(`${BASE}/page`).set(bearer(u.token)).send({ path: '../../evil.md', content: 'x' })
     expect(inject.body.code).toBe(90002)
     const managed = await ctx.request
-      .post(`${BASE}/${name}/wiki/page`).set(bearer(l.access)).send({ path: '.openclaw-wiki/evil.md', content: 'x' })
+      .post(`${BASE}/page`).set(bearer(u.token)).send({ path: '.openclaw-wiki/evil.md', content: 'x' })
     expect(managed.body.code).toBe(90002)
     expect(compileCalls).toEqual([])
   })
@@ -250,30 +208,26 @@ describe('wiki REST（接缝 #2 信封 + #335）', () => {
   // ---------------------------- DELETE /page ----------------------------
 
   it('DELETE：删页 + 触发 compile；成功 data null', async () => {
-    const u = await seedUser(ctx.prisma, 'udel', 'pw-udel-secure')
-    const name = await seedContainer(u.id)
-    const l = await login(ctx.request, 'udel', 'pw-udel-secure')
+    const u = await seedWikiUser('udel')
     compileCalls.length = 0
     const res = await ctx.request
-      .delete(`${BASE}/${name}/wiki/page?path=${encodeURIComponent('concepts/attention.md')}`)
-      .set(bearer(l.access))
+      .delete(`${BASE}/page?path=${encodeURIComponent('concepts/attention.md')}`)
+      .set(bearer(u.token))
     expect(res.body.code).toBe(0)
     expect(res.body.data).toBeNull()
-    expect(compileCalls).toEqual([name])
+    expect(compileCalls).toEqual([u.ownerId])
   })
 
   it('DELETE 页不存在 → 30040；path 注入 → 90002 且不触发 compile', async () => {
-    const u = await seedUser(ctx.prisma, 'udel2', 'pw-udel2-secure')
-    const name = await seedContainer(u.id)
-    const l = await login(ctx.request, 'udel2', 'pw-udel2-secure')
+    const u = await seedWikiUser('udel2')
     compileCalls.length = 0
     const missing = await ctx.request
-      .delete(`${BASE}/${name}/wiki/page?path=${encodeURIComponent('concepts/nope.md')}`)
-      .set(bearer(l.access))
+      .delete(`${BASE}/page?path=${encodeURIComponent('concepts/nope.md')}`)
+      .set(bearer(u.token))
     expect(missing.body.code).toBe(30040)
-    const inject = await ctx.request.delete(`${BASE}/${name}/wiki/page?path=../../secret.md`).set(bearer(l.access))
+    const inject = await ctx.request.delete(`${BASE}/page?path=../../secret.md`).set(bearer(u.token))
     expect(inject.body.code).toBe(90002)
-    const managed = await ctx.request.delete(`${BASE}/${name}/wiki/page?path=index.md`).set(bearer(l.access))
+    const managed = await ctx.request.delete(`${BASE}/page?path=index.md`).set(bearer(u.token))
     expect(managed.body.code).toBe(90002)
     expect(compileCalls).toEqual([])
   })
@@ -281,38 +235,34 @@ describe('wiki REST（接缝 #2 信封 + #335）', () => {
   // ---------------------------- NUL / body limit（codex PR#346）----------------------------
 
   it('path 含 NUL 字节 → 90002 + data.path（GET query 与 POST/PUT body 一致，codex PR#346）', async () => {
-    const u = await seedUser(ctx.prisma, 'unul', 'pw-unul-secure')
-    const name = await seedContainer(u.id)
-    const l = await login(ctx.request, 'unul', 'pw-unul-secure')
+    const u = await seedWikiUser('unul')
     const nulPath = 'concepts/a\u0000.md'
     const g = await ctx.request
-      .get(`${BASE}/${name}/wiki/page?path=${encodeURIComponent(nulPath)}`)
-      .set(bearer(l.access))
+      .get(`${BASE}/page?path=${encodeURIComponent(nulPath)}`)
+      .set(bearer(u.token))
     expect(g.body.code).toBe(90002)
     expect(g.body.data).toHaveProperty('path')
     const p = await ctx.request
-      .post(`${BASE}/${name}/wiki/page`).set(bearer(l.access)).send({ path: nulPath, content: 'x' })
+      .post(`${BASE}/page`).set(bearer(u.token)).send({ path: nulPath, content: 'x' })
     expect(p.body.code).toBe(90002)
     expect(p.body.data).toHaveProperty('path')
     const put = await ctx.request
-      .put(`${BASE}/${name}/wiki/page`).set(bearer(l.access)).send({ path: nulPath, content: 'x' })
+      .put(`${BASE}/page`).set(bearer(u.token)).send({ path: nulPath, content: 'x' })
     expect(put.body.code).toBe(90002)
     expect(put.body.data).toHaveProperty('path')
   })
 
   it('PUT 大页面（>256kb 通用 body limit）保存成功：wiki 走独立大 limit（codex PR#346）', async () => {
-    const u = await seedUser(ctx.prisma, 'ubig', 'pw-ubig-secure')
-    const name = await seedContainer(u.id)
-    const l = await login(ctx.request, 'ubig', 'pw-ubig-secure')
+    const u = await seedWikiUser('ubig')
     const big = `# Big\n\n${'x'.repeat(300_000)}\n`
     const res = await ctx.request
-      .put(`${BASE}/${name}/wiki/page`)
-      .set(bearer(l.access))
+      .put(`${BASE}/page`)
+      .set(bearer(u.token))
       .send({ path: 'concepts/attention.md', content: big })
     expect(res.body.code).toBe(0)
     const read = await ctx.request
-      .get(`${BASE}/${name}/wiki/page?path=${encodeURIComponent('concepts/attention.md')}`)
-      .set(bearer(l.access))
+      .get(`${BASE}/page?path=${encodeURIComponent('concepts/attention.md')}`)
+      .set(bearer(u.token))
     expect(read.body.data.content).toHaveLength(big.length)
   })
 
@@ -326,10 +276,8 @@ describe('wiki REST（接缝 #2 信封 + #335）', () => {
   // ---------------------------- GET /graph ----------------------------
 
   it('graph：节点来自 tree；wikilink 不可解析 → ghost 节点；related_pages 出边', async () => {
-    const u = await seedUser(ctx.prisma, 'ugraph', 'pw-ugraph-secure')
-    const name = await seedContainer(u.id)
-    const l = await login(ctx.request, 'ugraph', 'pw-ugraph-secure')
-    const res = await ctx.request.get(`${BASE}/${name}/wiki/graph`).set(bearer(l.access))
+    const u = await seedWikiUser('ugraph')
+    const res = await ctx.request.get(`${BASE}/graph`).set(bearer(u.token))
     expect(res.body.code).toBe(0)
     const nodeIds = new Set(res.body.data.nodes.map((n: { id: string }) => n.id))
     expect(nodeIds).toEqual(expect.objectContaining(new Set(['concepts/attention.md', 'domains/cv/papers/resnet.md'])))
@@ -343,10 +291,8 @@ describe('wiki REST（接缝 #2 信封 + #335）', () => {
   // ---------------------------- GET /categories ----------------------------
 
   it('categories：按 category 分组（含顶层散落页）、开放词表、条目含 path/title/category/excerpt', async () => {
-    const u = await seedUser(ctx.prisma, 'ucat', 'pw-ucat-secure')
-    const name = await seedContainer(u.id)
-    const l = await login(ctx.request, 'ucat', 'pw-ucat-secure')
-    const res = await ctx.request.get(`${BASE}/${name}/wiki/categories`).set(bearer(l.access))
+    const u = await seedWikiUser('ucat')
+    const res = await ctx.request.get(`${BASE}/categories`).set(bearer(u.token))
     expect(res.body.code).toBe(0)
     const data = res.body.data as Record<string, Array<{ path: string; title: string; category: string; excerpt: string }>>
     expect(Object.keys(data).sort()).toEqual(['idea', 'rootcat'])
@@ -362,9 +308,8 @@ describe('wiki REST（接缝 #2 信封 + #335）', () => {
   // ---------------------------- GET /claims（#789 story 42 数据面） ----------------------------
 
   it('claims：旁车存在 → claims/drift fresh；旁车缺失 → drift null 空 claims；页缺失 → 30040', async () => {
-    const u = await seedUser(ctx.prisma, 'uclaims', 'pw-uclaims-secure')
-    const name = await seedContainer(u.id)
-    const fs = fss.get(name)!
+    const u = await seedWikiUser('uclaims')
+    const fs = fss.get(u.ownerId)!
     const content = fs.pages.get('concepts/attention.md')!
     const hash = createHash('sha256').update(Buffer.from(content, 'utf8')).digest('hex')
     fs.claims.set('.claims/concepts/attention.json', JSON.stringify({
@@ -372,22 +317,21 @@ describe('wiki REST（接缝 #2 信封 + #335）', () => {
       pageVersion: `sha256:${hash}`,
       claims: [{ id: 'claim_1', statement: '论断', evidence: [{ resource: 'repo://x.ts#L1-L2' }] }],
     }))
-    const l = await login(ctx.request, 'uclaims', 'pw-uclaims-secure')
-    const res = await ctx.request.get(`${BASE}/${name}/wiki/claims?path=concepts/attention.md`).set(bearer(l.access))
+    const res = await ctx.request.get(`${BASE}/claims?path=concepts/attention.md`).set(bearer(u.token))
     expect(res.body.code).toBe(0)
     expect(res.body.data.drift).toBe('fresh')
     expect(res.body.data.pageVersion).toBe(`sha256:${hash}`)
     expect(res.body.data.claims).toHaveLength(1)
     expect(res.body.data.claims[0].evidence[0].resource).toBe('repo://x.ts#L1-L2')
 
-    const none = await ctx.request.get(`${BASE}/${name}/wiki/claims?path=thoughts/idea-1.md`).set(bearer(l.access))
+    const none = await ctx.request.get(`${BASE}/claims?path=thoughts/idea-1.md`).set(bearer(u.token))
     expect(none.body.code).toBe(0)
     expect(none.body.data).toMatchObject({ schemaVersion: null, pageVersion: null, drift: null, claims: [] })
 
-    const missing = await ctx.request.get(`${BASE}/${name}/wiki/claims?path=concepts/nope.md`).set(bearer(l.access))
+    const missing = await ctx.request.get(`${BASE}/claims?path=concepts/nope.md`).set(bearer(u.token))
     expect(missing.body.code).toBe(30040)
 
-    const invalid = await ctx.request.get(`${BASE}/${name}/wiki/claims?path=../evil.md`).set(bearer(l.access))
+    const invalid = await ctx.request.get(`${BASE}/claims?path=../evil.md`).set(bearer(u.token))
     expect(invalid.body.code).toBe(90002)
   })
 })
