@@ -56,10 +56,10 @@ export const CODE = {
   // 90002，80001 仅插件域语义化校验失败如未知 pluginId 启用请求外的域内约束）
   PLUGINS_VALIDATION_FAILED: 80001, // 插件域参数校验失败（#752 R8）
   PLUGIN_NOT_FOUND: 80040, // 插件不存在（目录外 id）/ 越权（同码防探测，#752 R8）
-  // 2xxxx 容器（#858 OpenClaw 退役③：容器行表/REST/管理页整体退役——20040–20046 全组
-  // [退役保留]，码段保留防复用，对齐 90004 先例；无现役抛点）
+  // 2xxxx 容器（#858 OpenClaw 退役③：容器行表/REST/管理页整体退役——除 20041 外全组
+  // [退役保留] 码段防复用，对齐 90004 先例；无现役抛点）
   CONTAINER_NOT_FOUND: 20040, // [退役保留] 曾为容器不存在/越权（同码防探测，#312 锁）
-  NAME_CONFLICT: 20041, // [退役保留] 曾为 name 全局唯一冲突
+  NAME_CONFLICT: 20041, // name 全局唯一冲突（现役：auth register / users POST 用户名撞名复用，契约 §2.2）
   QUOTA_EXCEEDED: 20042, // [退役保留] 曾为容器数配额超限（User.maxContainers，#312/#311 锁）
   CONTAINER_BUSY: 20043, // [退役保留] 曾为目标在 provisioning（#313）
   ORPHAN_DIR: 20044, // [退役保留] 曾为 create 撞残留 orphan 目录（转译）
@@ -99,8 +99,8 @@ export const DEFAULT_MESSAGE: Record<number, string> = {
   [CODE.USERNAME_INVALID]: '用户名不合法',
   [CODE.QUOTA_INVALID]: '配额不合法',
   [CODE.CANNOT_DISABLE_SELF]: '不能禁用自己的账号',
-  // [退役保留] 20040–20046 容器域已随 T0 #801 与 #858 退役——码段与兜底文案保留防复用
-  //（对齐 90004/70041/70042）。
+  // [退役保留] 20040/20042–20046 容器域已随 T0 #801 与 #858 退役——码段与兜底文案保留防复用
+  //（对齐 90004/70041/70042）；20041 NAME_CONFLICT 现役（用户名冲突复用，见 codes 枚举注）。
   [CODE.CONTAINER_NOT_FOUND]: '容器不存在',
   [CODE.NAME_CONFLICT]: '名称已被占用',
   [CODE.QUOTA_EXCEEDED]: '容器数量已达配额上限',

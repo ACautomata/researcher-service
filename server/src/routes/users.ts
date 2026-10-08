@@ -55,7 +55,7 @@ export function createUsersRouter(deps: UsersRouterDeps = {}): Router {
   })
 
   // GET / —— 列表（#858：containerCount/quota{used,limit} 随容器行表退役删除；maxContainers
-  // 列保留为普通用户列（与 maxConcurrentRuns 同位），列退役归终局票）。
+  // 为普通用户列（与 maxConcurrentRuns 同位）——容器 CRUD 退役后语义悬空，列清退归终局票）。
   router.get('/', async (req: Request, res: Response) => {
     const users = await req.prisma.user.findMany({
       orderBy: { createdAt: 'asc' },

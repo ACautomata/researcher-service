@@ -213,10 +213,10 @@ register({
   method: 'get',
   path: '/api/v1/users',
   tag: '账号管理',
-  summary: '用户列表（含 containerCount/quota）',
+  summary: '用户列表',
   auth: 'admin',
   errors: '10001 · 10041（非 admin 同码防探测）· 10005。',
-  dataNote: 'data: { users: [{ id, username, email, role, isActive, containerCount, quota, mustChangePassword, createdAt }] }。',
+  dataNote: 'data: { users: [{ id, username, email, role, isActive, maxContainers, maxConcurrentRuns, mustChangePassword, createdAt }] }（#858：containerCount/quota 随容器行表退役移除）。', 
 })
 
 register({

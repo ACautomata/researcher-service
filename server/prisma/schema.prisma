@@ -23,7 +23,7 @@ datasource db {
 //
 // #311/#328 扩展（相对 310 草案）：
 //   - mustChangePassword  bootstrap/重置/新建账号置 true（C1 强制改密）
-//   - maxContainers       per-user 配额列（#858 起无消费面——容器 CRUD 退役；列随终局票清退）
+//   - maxContainers       per-user 配额列（#858 容器 CRUD 退役后不再有「容器数」语义，仅剩 admin 可改的存量列面；列清退归终局票）
 // ---------------------------------------------------------------------------
 enum Role {
   admin
@@ -38,7 +38,7 @@ model User {
   role               Role     @default(user)
   isActive           Boolean  @default(true) // 平移 Django is_active（软禁用，不删行）
   mustChangePassword Boolean  @default(false) // #311 C1：首登/重置后强制改密
-  maxContainers      Int      @default(3) // #311 配额；#858 起容器 CRUD 退役、无消费面（列保留，清退归终局票）
+  maxContainers      Int      @default(3) // #311 配额；#858 容器 CRUD 退役后语义悬空（列+admin PATCH 面保留，清退归终局票）
   // --- #771（#747 B 节 · 731 §3.3 / 729 §3.5）---
   maxConcurrentRuns Int           @default(2) // per-user 在飞 run 配额（story 55；超限 40043）
   approvalMode      ApprovalMode  @default(standard) // 谨慎模式：cautious 下灰区强制升级人工（story 35）

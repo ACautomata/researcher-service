@@ -187,7 +187,7 @@ async function saveRuns(u: UserRowDTO): Promise<void> {
 onMounted(refresh)
 
 // 暴露行内动作 + 配额编辑态供测试/父组件触发（el-table row scoped slot 在 stub 下渲染脆弱，
-// 贴 ContainersView 模式；quotaEditing/runsEditing 暴露使配额编辑可在 stub 下经 VM 驱动）
+// quotaEditing/runsEditing 暴露使配额编辑可在 stub 下经 VM 驱动）
 defineExpose({
   refresh,
   toggleActive,

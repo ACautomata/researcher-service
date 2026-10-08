@@ -86,7 +86,7 @@ export async function listFigures(prisma: PrismaClient, user: AuthUser): Promise
   }))
 }
 
-// 共享归属门（单点）：figure 域单点归属前置，镜像 getInstanceForUser（containers/orchestrator.ts）
+// 共享归属门（单点）：figure 域单点归属前置（先例形态：T0 前 fleet getInstanceForUser 同码防探测锁式）
 // ——admin 全放行 / user 仅本人；「不存在 vs 越权」同码 70040，对外逐字节一致，区分仅进服务端
 // 日志（not_found vs owner_mismatch）。detail / png / svg 三读路径共用同一实现——不建第二套归属
 // 逻辑（已验证资产原样保留，#744 §5.1）。ownerId 只由认证身份派生：本函数只按 id 查行，不接收

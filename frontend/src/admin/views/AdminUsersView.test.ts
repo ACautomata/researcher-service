@@ -1,6 +1,6 @@
 // seam: AdminUsersView —— admin 账号管理页（#328 / #340-D）。
 // 覆盖：列表渲染、新建用户、禁用二次确认、自禁被拒（10044 提示）、重置密码一次性明文 modal、
-// 配额 inline 编辑保存。Element Plus 组件用 stub（贴 ContainersView 模式）；行内动作经
+// 配额 inline 编辑保存。Element Plus 组件用 stub（expose 动作经 VM 驱动模式）；行内动作经
 // defineExpose 暴露的方法级 seam 触发（el-table row scoped slot 在 stub 下渲染脆弱）。
 import { flushPromises } from '@vue/test-utils'
 import { mount } from '@vue/test-utils'
