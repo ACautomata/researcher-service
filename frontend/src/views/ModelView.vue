@@ -139,7 +139,7 @@ function removeModel(idx: number): void {
 async function save(payload: ModelProviderWriteDTO): Promise<void> {
   // 零信任：前端也校验必填（key 可空——平台共享/保持不变语义）
   if (!payload.provider_id.trim()) {
-    ElMessage.warning('provider_id 不能为空')
+    ElMessage.warning('请填写端点 ID')
     return
   }
   if (!payload.preset_id) {
@@ -372,7 +372,7 @@ defineExpose({
 
     <p v-if="providersLoading" class="hint" data-test="providers-loading">正在加载端点…</p>
 
-    <el-table v-loading="providersLoading" :data="providers" data-test="provider-table">
+    <el-table empty-text="暂无自建端点" v-loading="providersLoading" :data="providers" data-test="provider-table">
       <el-table-column prop="provider_id" label="端点 ID" />
       <el-table-column label="预设" width="180">
         <template #default="{ row }">{{ presetLabel(row.preset_id) }}</template>

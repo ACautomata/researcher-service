@@ -21,5 +21,9 @@ export async function createUserJudgeClient(registry: Pick<ProviderRegistry, 'ge
   resolveModelRef(snapshot, { providerId: provider.providerId, modelId })
   const base = await registry.getModel(snapshot, provider.providerId)
   const model = base.withConfig({ configurable: { model: modelId, temperature: 0 } })
-  return new ToolCallJudgeClient({ invoke: (messages) => model.invoke(messages as never) }, { policy: JUDGE_POLICY_MARKDOWN })
+  // judge 只返回判定给漏斗；不继承主会话的消息流/usage 回调。
+  // 保留隐式 signal/configurable，取消仍随当前 run；用量仍由 judge 回包进入审批审计。
+  return new ToolCallJudgeClient({
+    invoke: (messages) => model.invoke(messages as never, { callbacks: [], tags: ['langsmith:nostream'] }),
+  }, { policy: JUDGE_POLICY_MARKDOWN })
 }

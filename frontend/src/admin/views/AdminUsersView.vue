@@ -1,6 +1,6 @@
 <script setup lang="ts">
 // admin 账号管理页（#328 / #340-D）：users 表 + 行内动作（禁用/启用二次确认、重置密码
-// 一次性明文 modal、配额 inline 数字输入）+ 新建用户。state 用局部 ref 不开 store。
+// 一次性明文 modal、并发配额 inline 数字输入）+ 新建用户。state 用局部 ref 不开 store。
 // 自禁（禁用自己）后端拒 10044 → toast 提示；重置密码回显明文仅此一次，关闭后不可再取。
 import { onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -21,7 +21,6 @@ const errorMsg = ref('')
 const createVisible = ref(false)
 const newUsername = ref('')
 const newPassword = ref('')
-const newMaxContainers = ref<number | undefined>(undefined)
 const creating = ref(false)
 
 // 重置密码一次性明文 modal
@@ -29,8 +28,6 @@ const resetVisible = ref(false)
 const resetTarget = ref<UserRowDTO | null>(null)
 const resetPassword = ref('')
 const resettingUserId = ref('')
-// 配额 inline 编辑：key=userId，value=输入中的数字（undefined=未在编辑）
-const quotaEditing = ref<Record<string, string>>({})
 
 async function refresh(): Promise<void> {
   loading.value = true
@@ -48,7 +45,6 @@ async function refresh(): Promise<void> {
 async function openCreate(): Promise<void> {
   newUsername.value = ''
   newPassword.value = ''
-  newMaxContainers.value = undefined
   createVisible.value = true
 }
 
@@ -66,7 +62,6 @@ async function submitCreate(): Promise<void> {
     await createUser({
       username: newUsername.value.trim(),
       password: newPassword.value,
-      ...(newMaxContainers.value !== undefined ? { maxContainers: newMaxContainers.value } : {}),
     })
     createVisible.value = false
     await refresh()
@@ -126,34 +121,6 @@ function closeReset(): void {
   resetPassword.value = ''
 }
 
-// 配额 inline：开始编辑 → 保存（数字校验本地兜底；后端非法返 10043）
-function beginQuotaEdit(u: UserRowDTO): void {
-  quotaEditing.value = { ...quotaEditing.value, [u.id]: String(u.maxContainers) }
-}
-
-function isQuotaEditing(userId: string): boolean {
-  return quotaEditing.value[userId] !== undefined
-}
-
-async function saveQuota(u: UserRowDTO): Promise<void> {
-  const raw = quotaEditing.value[u.id] ?? ''
-  const n = Number(raw)
-  if (!Number.isInteger(n) || n < 0) {
-    ElMessage.warning('配额须为非负整数')
-    return
-  }
-  try {
-    await patchUser(u.id, { maxContainers: n })
-    const next = { ...quotaEditing.value }
-    delete next[u.id]
-    quotaEditing.value = next
-    await refresh()
-    ElMessage.success('配额已更新')
-  } catch (e) {
-    ElMessage.error((e as Error).message)
-  }
-}
-
 // 在飞 run 并发配额 inline（#800；users PATCH maxConcurrentRuns，后端 10043 语义同容器配额）
 const runsEditing = ref<Record<string, string>>({})
 
@@ -186,17 +153,12 @@ async function saveRuns(u: UserRowDTO): Promise<void> {
 
 onMounted(refresh)
 
-// 暴露行内动作 + 配额编辑态供测试/父组件触发（el-table row scoped slot 在 stub 下渲染脆弱，
-// quotaEditing/runsEditing 暴露使配额编辑可在 stub 下经 VM 驱动）
+// 行内动作供测试接缝调用。
 defineExpose({
   refresh,
   toggleActive,
   openReset,
   resettingUserId,
-  beginQuotaEdit,
-  isQuotaEditing,
-  saveQuota,
-  quotaEditing,
   beginRunsEdit,
   isRunsEditing,
   saveRuns,
@@ -222,26 +184,6 @@ defineExpose({
           </el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="配额" width="170">
-        <template #default="{ row }">
-          <span v-if="!isQuotaEditing(row.id)" data-test="quota-view">
-            {{ row.maxContainers }}
-          </span>
-          <span v-else class="quota-edit">
-            <el-input
-              v-model="quotaEditing[row.id]"
-              size="small"
-              :data-test="`quota-input-${row.username}`"
-              style="width: 80px"
-              @keyup.enter="saveQuota(row)"
-            />
-            <el-button size="small" :data-test="`quota-save-${row.username}`" @click="saveQuota(row)">
-              保存
-            </el-button>
-          </span>
-        </template>
-      </el-table-column>
-      <!-- 在飞 run 并发配额（#800；与容器配额同列宽风格） -->
       <el-table-column label="并发配额" width="160">
         <template #default="{ row }">
           <span v-if="!isRunsEditing(row.id)" data-test="runs-view">
@@ -274,14 +216,6 @@ defineExpose({
       <el-table-column prop="createdAt" label="创建时间" width="180" />
       <el-table-column label="操作" width="330">
         <template #default="{ row }">
-          <el-button
-            v-if="!isQuotaEditing(row.id)"
-            size="small"
-            :data-test="`edit-quota-${row.username}`"
-            @click="beginQuotaEdit(row)"
-          >
-            改配额
-          </el-button>
           <el-button
             v-if="!isRunsEditing(row.id)"
             size="small"
@@ -318,9 +252,6 @@ defineExpose({
         </el-form-item>
         <el-form-item label="临时密码">
           <el-input v-model="newPassword" type="password" placeholder="至少 8 个字符" data-test="new-password" />
-        </el-form-item>
-        <el-form-item label="配额">
-          <el-input-number v-model="newMaxContainers" :min="0" :controls="false" placeholder="默认" data-test="new-quota" />
         </el-form-item>
       </el-form>
       <template #footer>

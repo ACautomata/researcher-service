@@ -73,7 +73,9 @@ describe('LoginView 角色落点（#800）', () => {
         provide: { router: { push } },
       },
     })
-    ;(wrapper.vm as unknown as { onSubmit: () => Promise<void> }).onSubmit()
+    await wrapper.findAll('input')[0].setValue('tester')
+    await wrapper.findAll('input')[1].setValue('test-password')
+    await wrapper.get('button').trigger('click')
     await flushPromises()
     expect(window.location.assign).not.toHaveBeenCalled()
   })
@@ -81,7 +83,9 @@ describe('LoginView 角色落点（#800）', () => {
   it('mustChangePassword=true 优先于角色落点 → 进入改密模式，不跳 /admin/', async () => {
     mockAuth({ role: 'admin', mustChangePassword: true })
     const wrapper = mount(LoginView, { global: { stubs } })
-    ;(wrapper.vm as unknown as { onSubmit: () => Promise<void> }).onSubmit()
+    await wrapper.findAll('input')[0].setValue('tester')
+    await wrapper.findAll('input')[1].setValue('test-password')
+    await wrapper.get('button').trigger('click')
     await flushPromises()
     expect(window.location.assign).not.toHaveBeenCalled()
     expect(wrapper.text()).toContain('修改密码')

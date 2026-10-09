@@ -82,7 +82,8 @@ const groupedSessions = computed(() => {
           >✕</button>
         </li>
         </template>
-        <slot name="empty" />
+        <li v-if="query.trim() && groupedSessions.length === 0" role="status" class="search-empty">未找到匹配会话，请修改或清除搜索条件</li>
+        <slot v-else name="empty" />
       </ul>
       <button class="ghost" data-test="new-session" @click="emit('newSession')">＋ 新会话</button>
     </div>
@@ -109,6 +110,7 @@ const groupedSessions = computed(() => {
 .pane-files { display: flex; flex-direction: column; }
 .side h3 { font-size: 12px; color: var(--el-text-color-secondary); text-transform: uppercase; margin: 8px 0 4px; }
 .search { width: 100%; box-sizing: border-box; border: 1px solid var(--el-border-color); border-radius: 7px; padding: 7px 9px; margin-bottom: 5px; background: var(--el-bg-color); color: inherit; }
+.search-empty { padding: 10px; color: var(--el-text-color-secondary); font-size: 13px; }
 .group-label { padding: 7px 10px 2px; color: var(--el-text-color-placeholder); font-size: 11px; }
 .list { list-style: none; padding: 0; margin: 0; }
 .pill, .sess { width: 100%; padding: 7px 10px; border: none; border-radius: 7px; cursor: pointer; color: var(--el-text-color-regular); font: inherit; text-align: left; }

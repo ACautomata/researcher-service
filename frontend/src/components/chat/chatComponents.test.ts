@@ -320,7 +320,7 @@ describe('ToolGroup', () => {
     const w = mount(ChatMessageItem, { props: { msg: m } })
     const group = w.get('details[data-test="tool-group"]')
     expect(group.attributes('open')).toBeUndefined()
-    expect(w.get('[data-test="tool-group-summary"]').text()).toBe('Ran 2 commands, read a file · 1 failed')
+    expect(w.get('[data-test="tool-group-summary"]').text()).toBe('执行 2 条命令, 读取 1 个文件 · 1 次失败')
     expect(w.findAll('[data-test="tool-line"]')).toHaveLength(3)
   })
 
