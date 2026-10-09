@@ -272,6 +272,16 @@ export class ProviderRegistry {
     return this.llmApiKey
   }
 
+  /** teammate 持久化模型钉：端点删除后仅新快照回落，旧快照仍可解析原端点。 */
+  async getTeammateModel(snapshot: ProviderConfigSnapshot, providerId: string): Promise<BaseChatModel> {
+    if (snapshot.providers.some((entry) => entry.providerId === providerId)) {
+      return this.getModel(snapshot, providerId)
+    }
+    // eslint-disable-next-line no-console
+    console.warn(`[runner] teammate 模型钉悬挂，回落平台默认：providerId=${providerId}`)
+    return this.getModel(snapshot, PLATFORM_PROVIDER_ID)
+  }
+
   // ---- ④ 默认链派生（primary = 首项首模型；fallbacks = 余序；不落盘，731 §6）----
   // 端点序 = 用户行 createdAt asc + 平台垫底（#881：零配置用户链 = 平台单模型；BYOK 用户
   // 链 = 自己端点在前、平台兜底——「单端点配额耗尽也有退路」）。换模型经 withConfig 绑定
@@ -287,7 +297,7 @@ export class ProviderRegistry {
       throw fail(CODE.LLM_NOT_CONFIGURED, '无可用模型（provider/models 均为空）')
     }
     // 悬挂回落（#880 story 11「服务不中断」）：preferred 来自持久化会话行，指向已删端点/
-    // 已从模型列表移除的模型是配置变更后的常态数据 → warn + 回落默认链（用户序 + 平台垫底）。
+    // 已从模型列表移除的模型是配置变更后的常态数据 → warn + 回落平台默认。
     // 区别于 agent 每轮选值的集合外硬拒（resolveModelRef §5.2，那才是编程错误面）。
     let pinned = preferred
     if (pinned) {
@@ -295,8 +305,8 @@ export class ProviderRegistry {
         resolveModelRef(snapshot, pinned)
       } catch {
         // eslint-disable-next-line no-console
-        console.warn(`[runner] 会话模型偏好悬挂，回落默认链：providerId=${pinned!.providerId} modelId=${pinned!.modelId}`)
-        pinned = undefined
+        console.warn(`[runner] 会话模型偏好悬挂，回落平台默认：providerId=${pinned!.providerId} modelId=${pinned!.modelId}`)
+        return this.getModel(snapshot, PLATFORM_PROVIDER_ID)
       }
     }
     if (pinned) {

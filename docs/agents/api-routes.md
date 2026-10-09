@@ -14,9 +14,9 @@
   未授权/非法探测不建容器）。
 - `/api/v1/wiki/claims?path=` — 页 claims 旁车只读面（#789 story 42 数据面：
   论断 evidence + 页级漂移 fresh|drifted|null；页缺失 30040、旁车缺失 200+空 claims）。
-- `/api/v1/models/{presets,platform,providers[/<pid>]}` — LLM 端点域（#857 归属门改挂 ownerId；
+- `/api/v1/models/{presets,platform,providers[/<pid>[/impact]]}` — LLM 端点域（#857 归属门改挂 ownerId；
   #881 预设制换形：presets = 六预设目录只读、platform = 平台默认端点只读视图（env 派生虚拟实体，
-  永无 key 材料）、providers = BYOK 端点 CRUD（preset_id 锁定协议与地址无自由 baseURL；api_key
+  永无 key 材料）、GET providers/<pid>/impact = 删除前四类引用计数（sessions/plugins/judge/teammates + total，本人归属门）；删除不拒悬挂引用，下一 run 回落平台默认 + warn，在飞快照不变。providers = BYOK 端点 CRUD（preset_id 锁定协议与地址无自由 baseURL；api_key
   单向流——写请求可带明文落库即密文、读只出掩码；事务 = mutation + config_meta version bump
   热生效；保留 id 'platform' 写侧拒绝 90002；40040 不存在/越权同码防探测、40041 pid 冲突）。
 - `/api/v1/models/test` — 端点试连（#882：按表单态[预设+key+模型]发起最小代价真实试连——不入库、

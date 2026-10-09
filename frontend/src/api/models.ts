@@ -112,6 +112,18 @@ export function updateProvider(
   })
 }
 
+export interface ProviderImpactDTO {
+  sessions: number
+  teammates: number
+  plugins: number
+  judge: number
+  total: number
+}
+
+export function getProviderImpact(pid: string): Promise<ProviderImpactDTO> {
+  return apiJson<ProviderImpactDTO>(`${detail(pid)}/impact`)
+}
+
 export async function removeProvider(pid: string): Promise<void> {
   // 经 apiJson：TS 后端越权/不存在删除恒 HTTP 200 + code:40040（同码防探测）。apiJson 对
   // code!==0 抛，调用方据 toast 提示失败。

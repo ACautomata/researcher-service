@@ -9,7 +9,7 @@
 //   POST /providers          —— 建 BYOK 端点（preset_id 锁定协议与地址；api_key 缺省 = 平台共享 key）
 //   GET  /providers/:pid     —— 回读单条；不存在/越权 → 40040（同码防探测）
 //   PUT  /providers/:pid     —— 改（api_key 留空 = 保持不变；撞同 owner 既有 pid → 40041）
-//   DELETE /providers/:pid   —— 删（引用方回落语义归 #885；本票行为 = 直接删除 + 热生效）
+//   DELETE /providers/:pid   —— 删（引用方下一 run 回落平台默认，在飞快照不变）
 //
 // 错误映射（#336 + #319 §1.3 + #881）：校验失败（含保留 id 抢注/未知预设）→ 90002 字段级 ·
 // provider 不存在/越权 → 40040（同码防探测）· provider_id 冲突 → 40041 · 试连失败 → 90003
@@ -121,6 +121,11 @@ export function createModelsRouter(deps: ModelsRouterDeps = {}): Router {
   router.post('/providers', async (req: Request, res: Response) => {
     const input = parseBody(req)
     ok(res, await service(req).create(ownerId(req), input))
+  })
+
+  // GET /providers/:pid/impact —— 本人端点删除影响面；归属门同详情读面。
+  router.get('/providers/:pid/impact', async (req: Request, res: Response) => {
+    ok(res, await service(req).impact(ownerId(req), req.params.pid as string))
   })
 
   // GET /providers/:pid —— 回读单条；不存在/越权 → 40040（同码防探测）。
