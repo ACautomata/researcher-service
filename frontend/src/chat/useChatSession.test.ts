@@ -325,10 +325,18 @@ describe('SSE 事件分派', () => {
     expect(conn.lastRunError.value).toEqual({ kind: 'llm_error', label: '模型请求失败' })
     src.emit('run.failed', { type: 'run.failed', sessionId: 'sess-1', runId: 'r3', payload: { errorKind: 'unknown_kind' } })
     await flushPromises()
-    expect(conn.lastRunError.value).toEqual({ kind: 'unknown_kind', label: '运行失败' })
+    expect(conn.lastRunError.value).toEqual({ kind: 'unknown_kind', label: '运行失败', detail: undefined })
     src.emit('run.started', { type: 'run.started', sessionId: 'sess-1', runId: 'r4', payload: {} })
     await flushPromises()
     expect(conn.lastRunError.value).toBeNull()
+  })
+
+  it('run.failed{message} → lastRunError.detail 携带根因（诊断面）', async () => {
+    const conn = await mounted()
+    const src = FakeEventSource.last()!
+    src.emit('run.failed', { type: 'run.failed', sessionId: 'sess-1', runId: 'r1', payload: { errorKind: 'infra', message: 'sqlite corrupted' } })
+    await flushPromises()
+    expect(conn.lastRunError.value).toEqual({ kind: 'infra', label: '运行环境异常', detail: 'sqlite corrupted' })
   })
 
   it('session.updated {session} → 列表 upsert（story 5 自动标题经事件到达）；{projectionChanged} → 投影重拉', async () => {

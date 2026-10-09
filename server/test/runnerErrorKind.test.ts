@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { GraphRecursionError } from '@langchain/langgraph'
-import { classifyRunError } from '../src/runner/runtime/errorKind'
+import { classifyRunError, describeRunError } from '../src/runner/runtime/errorKind'
 import { fail } from '../src/envelope'
 import { CODE } from '../src/codes'
 
@@ -49,5 +49,24 @@ describe('classifyRunError（错误三分类，story 10）', () => {
     expect(classifyRunError(new Error('docker daemon down'))).toBe('infra')
     expect(classifyRunError('raw string')).toBe('infra')
     expect(classifyRunError(undefined)).toBe('infra')
+  })
+})
+
+// describeRunError（诊断盲区修复）：run.failed{message} 的提取面——错误对象 → 一行可读根因。
+describe('describeRunError（run.failed{message} 提取）', () => {
+  it('Error 实例 → message', () => {
+    expect(describeRunError(new Error('sqlite corrupted'))).toBe('sqlite corrupted')
+  })
+
+  it('非 Error（裸字符串/undefined）→ String() 兜底', () => {
+    expect(describeRunError('raw string')).toBe('raw string')
+    expect(describeRunError(undefined)).toBe('undefined')
+  })
+
+  it('超长消息截断到 500 字符（防 SSE 帧/横幅被堆栈撑爆；全量由服务端日志留痕）', () => {
+    const long = 'x'.repeat(600)
+    const out = describeRunError(new Error(long))
+    expect(out).toHaveLength(501)
+    expect(out.endsWith('…')).toBe(true)
   })
 })

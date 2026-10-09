@@ -18,6 +18,17 @@ import { CAUSE_CHAIN_MAX_DEPTH } from './values'
 
 export type RunErrorKind = 'llm_error' | 'recursion_limit' | 'infra'
 
+// run.failed{message} 的截断上限：够用户/管理员识别根因，又不让超长 docker/堆栈
+// 消息撑爆 SSE 帧与前端横幅。全量错误（含 stack）由 runService 的 console.error 留痕。
+const RUN_ERROR_MESSAGE_MAX_LEN = 500
+
+// run.failed{message} 的提取面（诊断盲区修复）：错误对象 → 人类可读的一行根因。
+// 不剥 cause 链——外层消息已是具体故障（dockerode/prisma 直抛），内层反而更泛。
+export function describeRunError(err: unknown): string {
+  const raw = err instanceof Error ? err.message : String(err)
+  return raw.length > RUN_ERROR_MESSAGE_MAX_LEN ? `${raw.slice(0, RUN_ERROR_MESSAGE_MAX_LEN)}…` : raw
+}
+
 // models 域信封码 → llm_error 的白名单（运行时 LLM 配置/凭证面——providerRegistry
 // 抛出的全部 code）。会话/run 域码（5xxxx）不在 run 执行体内抛，不收。
 // PROVIDER_ENDPOINT_NOT_ALLOWED（40042）随 #881 白名单链退役出白名单（常量保留、语义退役）：

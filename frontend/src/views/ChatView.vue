@@ -465,6 +465,7 @@ defineExpose({
       <div v-if="conn.lastRunError.value" class="connection-banner danger run-error" role="alert" data-test="run-error">
         <span class="connection-label">运行失败（{{ conn.lastRunError.value.kind }}）</span>
         <span class="connection-detail">{{ conn.lastRunError.value.label }}</span>
+        <span v-if="conn.lastRunError.value.detail" class="connection-detail" data-test="run-error-detail">{{ conn.lastRunError.value.detail }}</span>
       </div>
       <div v-if="executionStatus" class="execution-status" role="status" aria-live="polite" data-test="execution-status">
         <span>{{ executionStatus }}</span>

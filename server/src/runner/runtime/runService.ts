@@ -72,7 +72,7 @@ import type { ConcurrencyGate } from '../concurrency'
 import { createUsageCallbackHandler } from '../usage'
 import { buildStreamEventsInvocation } from '../../events/bridge'
 import { RunProjector } from './projector'
-import { classifyRunError, type RunErrorKind } from './errorKind'
+import { classifyRunError, describeRunError, type RunErrorKind } from './errorKind'
 import { buildLeaderAgent, interruptPolicyKey, type DeepAgentLike, type InterruptPolicy, type LeaderAgentParams } from './graphFactory'
 import { COMPACT_KEEP, COMPACT_SUMMARY_PROMPT, DEFAULT_RECURSION_LIMIT, DEFAULT_RESUME_DECISIONS, GRAPH_CACHE_MAX_INSTANCES, LEADER_SYSTEM_PROMPT, TOOL_DETAILS_MAX_BYTES, TOOL_INPUT_MAX_BYTES, TRUNCATED_FLAG } from './values'
 import { truncateUtf8 } from './projector'
@@ -623,7 +623,8 @@ export class RunService {
       if (snap?.state === 'queued' && snap.runId === cmd.runId) this.runs.delete(cmd.sessionId)
       const code = e instanceof EnvelopeError ? e.code : null
       if (code === null || !PRESTART_REST_FEEDBACK_CODES.has(code)) {
-        this.publish(cmd.ownerId, { type: 'run.failed', payload: { errorKind: classifyRunError(e) } }, cmd)
+        console.error(`[runner] pre-start run failed: run=${cmd.runId} session=${cmd.sessionId}:`, e)
+        this.publish(cmd.ownerId, { type: 'run.failed', payload: { errorKind: classifyRunError(e), message: describeRunError(e) } }, cmd)
       }
       // teammate 归位（顺带修卡 running 幽灵）：startTeammate 在 dispatch 前已置 running，
       // pre-start 失败时 executeRun 的 finally 状态归位不跑——此处推 failed 与 executeRun
@@ -1125,8 +1126,9 @@ export class RunService {
         this.publish(cmd.ownerId, { type: 'run.aborted', payload: { by: abortEntry.by } }, cmd)
       } else {
         const kind = classifyRunError(e)
+        console.error(`[runner] run failed: run=${cmd.runId} session=${cmd.sessionId} kind=${kind}:`, e)
         this.runs.set(cmd.sessionId, { runId: cmd.runId, state: 'failed', errorKind: kind })
-        this.publish(cmd.ownerId, { type: 'run.failed', payload: { errorKind: kind } }, cmd)
+        this.publish(cmd.ownerId, { type: 'run.failed', payload: { errorKind: kind, message: describeRunError(e) } }, cmd)
       }
     } finally {
       if (this.attachmentIngestions.get(cmd.sessionId)?.runId === cmd.runId) this.attachmentIngestions.delete(cmd.sessionId)
