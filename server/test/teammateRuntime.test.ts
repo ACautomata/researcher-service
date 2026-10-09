@@ -50,10 +50,9 @@ async function harness(replies: Record<string, Reply[]>, judge?: ApprovalFunnelD
   const prisma = createPrismaClient(`file:${dbPath}`)
   const owner = await seedUser(prisma, 'team-runtime-user', 'team-runtime-password')
   await prisma.modelProvider.create({ data: {
-    ownerId: owner.id, providerId: 'team-provider', lcProvider: 'openai', baseUrl: 'https://llm.example.edu/v1',
-    credentialEnvId: 'LLM_API_KEY', authHeader: true, modelsJson: JSON.stringify([{ id: 'model-x' }]),
+    ownerId: owner.id, providerId: 'team-provider', presetId: 'openai',
+    modelsJson: JSON.stringify([{ id: 'model-x' }]),
   } })
-  await prisma.providerEndpoint.create({ data: { scheme: 'https', host: 'llm.example.edu', port: null, createdBy: 'seed' } })
   const hub = new StreamHub()
   const events: CatalogEvent[] = []
   hub.register(owner.id, { send: frame => {

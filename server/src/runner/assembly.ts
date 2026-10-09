@@ -10,7 +10,7 @@ import type { RunServiceDeps } from './runtime/runService'
 import { DockerPrimitives } from './backend/dockerPrimitives'
 import { PrismaCheckpointSaver } from './persistence/prismaCheckpointSaver'
 import { ProviderRegistry } from './providerRegistry'
-import { assertLlmApiKey } from './providerDefaults'
+import { assertLlmApiKey } from './llmEnv'
 import { ConcurrencyGate } from './concurrency'
 import { RunService } from './runtime/runService'
 import { BullMqRunQueue } from './bullmqRunQueue'
@@ -252,7 +252,7 @@ export async function assembleRunner(opts: {
 }
 
 // judge 客户端（部署级独立小模型；729 §2.5）：initChatModel 构造 + 共享 LLM_API_KEY。
-// 出口不走 provider_endpoints 白名单——env 是 admin 信任面（config.runner.judge 注释同源）。
+// env 直派地址（部署方信任面；预设制下无白名单链——六预设固定 origin 与 judge 出口互不干涉）。
 function createJudgeClient(): InstanceType<typeof ToolCallJudgeClient> {
   const { model, baseUrl, lcProvider } = config.runner.judge
   return new ToolCallJudgeClient(
@@ -264,7 +264,7 @@ function createJudgeClient(): InstanceType<typeof ToolCallJudgeClient> {
         // 重试一次 + fail-closed 兑现（同语义，跨端点可移植）。
         const m = await initChatModel(model, {
           modelProvider: lcProvider,
-          apiKey: config.runner.llmApiKey,
+          apiKey: config.llm.apiKey,
           temperature: 0,
           ...(lcProvider === 'openai'
             ? { baseUrl, configuration: { fetch: globalThis.fetch } }

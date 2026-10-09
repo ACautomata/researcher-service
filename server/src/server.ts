@@ -132,9 +132,8 @@ async function main(): Promise<void> {
         start: async (params) => wikiUpdateRuns.start(params),
       },
     },
-    // models（#336；#775 事务简化）：事务 = DB mutation + config_meta version bump（热生效
-    // 信号）——写盘链（configWriter/configBuilder）已随 T0 #801 物理删除；models/providerEndpoints
-    // 路由无条件挂载，装配层无注入。
+    // models（#336；#881 预设制换形）：事务 = DB mutation + config_meta version bump（热生效
+    // 信号）；预设目录/平台端点视图/BYOK CRUD 路由无条件挂载，装配层无注入。
     // files（T0 #801 只读化；#858 起 files 自持 archive 装配）：root=lab 沙箱只读 GET 面（经
     // Docker getArchive）。
     files: { archive: filesArchive },

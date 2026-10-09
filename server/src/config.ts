@@ -5,6 +5,7 @@ import { isFloatingImageRef } from './containers/imageRef'
 import { DEFAULT_RECURSION_LIMIT } from './runner/runtime/values'
 import { APPROVAL_TIMEOUT_MS } from './runner/approval/values'
 import { DEFAULT_WRITE_LOCK_TIMEOUT_MS } from './runner/writelock/registry'
+import { PRESET_IDS } from './models/presets'
 
 // 控制面配置：全部来自环境变量，带 dev 友好默认。生产缺关键项时 fail-fast。
 // 规格 §A：JWT 密钥 = HS256 对称（平移现状 SECRET_KEY 语义）；access/refresh 寿命平移 simplejwt 默认。
@@ -183,26 +184,44 @@ function readSandboxImage(): string {
   return readPinnedImage('SANDBOX_IMAGE', 'busybox:1.36')
 }
 
-// ALLOW_PRIVATE_PROVIDER_ENDPOINTS（#775，731 §5.1）：CRUD 层 DNS 私网/环回拒绝的逃生开关。
-// 默认 false —— 用户配 baseUrl 时解析到私网/环回/链路本地一律拒（防借白名单条目做内网探测 +
-// prompt injection 外送 key）；自建私网端点（dev vLLM 等）显式 true 放行。生产 fail-fast 禁开
-// （对齐根决策「生产仅 https + 公网端点」；dev/test 容忍 true）。
-function readAllowPrivateProviderEndpoints(): boolean {
-  const v = process.env.ALLOW_PRIVATE_PROVIDER_ENDPOINTS
-  if (v === undefined) return false
-  if (v === 'true') {
-    if (process.env.NODE_ENV === 'production') {
-      throw new Error('ALLOW_PRIVATE_PROVIDER_ENDPOINTS 生产禁开（端点白名单 DNS 私网校验的逃生开关仅限 dev）')
-    }
-    return true
+// LLM_PRESET（#881）：平台默认端点预设（六选一，缺省 minimax）——非法值 fail-fast
+//（错值静默走缺省 = 平台端点指向与部署方预期不符的服务商）。空串/纯空白 = 未设置
+//（对齐 readOptionalEnv 语义）：cd.yml 对未配置的 secret 渲染 `LLM_PRESET=` 空行，经 compose
+// env_file 注入空串——`??` 只挡 undefined，不挡空串。
+function readLlmPreset(): string {
+  const raw = process.env.LLM_PRESET
+  const v = typeof raw === 'string' && raw.trim() !== '' ? raw.trim() : 'minimax'
+  if (!PRESET_IDS.includes(v)) {
+    throw new Error(
+      `LLM_PRESET 非法: ${JSON.stringify(v)}，须为六预设之一（${PRESET_IDS.join(' | ')}）`,
+    )
   }
-  if (v === 'false') return false
-  throw new Error(
-    `ALLOW_PRIVATE_PROVIDER_ENDPOINTS 非法: ${JSON.stringify(v)}，须为 true 或 false（私网端点放行开关，默认关）`,
-  )
+  return v
 }
 
-// LLM_API_KEY 单一读取点：runner.llmApiKey（#775 runner 侧 credentialEnvId 解析面）唯一消费。
+// LLM_CREDENTIAL_SECRET（#881）：BYOK 凭证 AES-256-GCM 加密密钥。显式提供即用（dev 任意
+// 非空）；生产须 ≥32 字符（对齐 JWT_SECRET 生产强度惯例——它是全部用户 BYOK key 的解密根，
+// 弱值即凭证面失守）；未提供时生产 fail-fast、dev 弱默认 + warn（本地调试零配置）。
+function readLlmCredentialSecret(): string {
+  const v = process.env.LLM_CREDENTIAL_SECRET
+  if (v !== undefined && v !== '') {
+    if (process.env.NODE_ENV === 'production' && v.length < 32) {
+      throw new Error(
+        `LLM_CREDENTIAL_SECRET 过弱: ${v.length} 字符 < 32，生产须提供 ≥32 字符强随机密钥`,
+      )
+    }
+    return v
+  }
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error('LLM_CREDENTIAL_SECRET 必须在生产环境显式提供（BYOK 凭证加密密钥）')
+  }
+  // eslint-disable-next-line no-console
+  console.warn('[config] LLM_CREDENTIAL_SECRET 未设置，使用 dev 不安全默认。切勿用于生产。')
+  return 'dev-insecure-credential-secret'
+}
+
+// LLM_API_KEY 单一读取点：平台默认端点共享 key（#775 runner 侧解析；#881 起消费面 =
+// 平台虚拟条目 + credentialCipher=NULL 的 BYOK 行）。
 //（#858 fleet.llmApiKey 容器 env 注入面随 fleet 编排退役。）
 const LLM_API_KEY_RAW = process.env.LLM_API_KEY ?? ''
 
@@ -271,16 +290,11 @@ export const config = {
       maxConcurrentRuns: readRunnerMaxConcurrentRuns(),
       // 图深度护栏（GraphRecursionError → run.failed{recursion_limit}；默认 500 = PoC 实测值）
       recursionLimit: readRunnerRecursionLimit(),
-      // CRUD 层 DNS 私网校验逃生开关（默认关；生产禁开）
-      allowPrivateProviderEndpoints: readAllowPrivateProviderEndpoints(),
-      // 共享 LLM key 解析源：credentialEnvId='LLM_API_KEY' 的 provider 行经此取值
-      //（单一读取点 LLM_API_KEY_RAW——#731 §1.3「runner 直接持有凭证」；#858 起 runner 侧唯一消费）
-      llmApiKey: LLM_API_KEY_RAW,
       // 审批三层漏斗 judge 模型（#783 · 729 §2.5「独立小模型，与主模型解耦」）：部署级配置
       //（RUNNER_JUDGE_MODEL + RUNNER_JUDGE_BASE_URL，key 复用 LLM_API_KEY；lcProvider 二值，
       // 默认 openai 兼容面）。二者任缺 → judge 未启用（灰区一律升级人工——fail-closed，
-      // 729 §2.3 校验再败同语义）。judge 出口不走 provider_endpoints 白名单：env 是 admin
-      // 信任面（与 LLM_API_KEY 同级），白名单治理的是用户可配的 provider 面。
+      // 729 §2.3 校验再败同语义）。judge 端点归属链（用户指派 → 默认链 → 平台）归 #884——
+      // RUNNER_JUDGE_* 退役随该票。
       judge: {
         model: readOptionalEnv('RUNNER_JUDGE_MODEL'),
         baseUrl: readOptionalEnv('RUNNER_JUDGE_BASE_URL'),
@@ -299,6 +313,20 @@ export const config = {
       },
       // #785 写锁有界等待（默认 10s；装配层注入 RunService；env RUNNER_WRITE_LOCK_TIMEOUT_MS）
       writeLockTimeoutMs: readWriteLockTimeoutMs(),
+    }
+  })(),
+  // ---- LLM 端点域（#881）：平台默认端点 env 派生 + BYOK 凭证加密密钥 ----
+  llm: (() => {
+    return {
+      // 平台共享 key（平台虚拟条目 / cipher=NULL 的 BYOK 行解析源；生产必填 fail-fast 归
+      // runner/assembly 的 assertLlmApiKey——listen 前崩溃，健康门拦截）
+      apiKey: LLM_API_KEY_RAW,
+      // 平台默认端点预设（六选一；缺省 minimax）
+      preset: readLlmPreset(),
+      // 平台默认端点单模型覆盖（缺省 = 预设 defaultModels 全集）
+      model: readOptionalEnv('LLM_MODEL'),
+      // BYOK 凭证 AES-256-GCM 加密密钥（生产必填 ≥32 字符；dev 弱默认 + warn）
+      credentialSecret: readLlmCredentialSecret(),
     }
   })(),
   // ---- OpenAPI 文档面（#761）----

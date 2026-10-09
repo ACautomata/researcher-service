@@ -98,15 +98,9 @@ describe('审批三层漏斗（S1，#783 · 729 规格）', () => {
       data: {
         ownerId: user.id,
         providerId: 'prov-1',
-        lcProvider: 'openai',
-        baseUrl: 'https://llm.example.edu/v1',
-        credentialEnvId: 'LLM_API_KEY',
-        authHeader: true,
+        presetId: 'openai',
         modelsJson: JSON.stringify([{ id: 'model-x' }]),
       },
-    })
-    await prisma.providerEndpoint.create({
-      data: { scheme: 'https', host: 'llm.example.edu', port: null, createdBy: 'seed' },
     })
     hub = new CollectingHub()
   }, 30_000)

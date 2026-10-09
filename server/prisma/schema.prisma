@@ -59,6 +59,7 @@ model User {
   modelProviders   ModelProvider[] // 归属上移：provider 配置挂用户（731 §3.2）
   attachments      Attachment[]
   pluginEnablements PluginEnablement[]
+  pluginLlmAssignments PluginLlmAssignment[]
 
   @@map("users")
 }
@@ -130,37 +131,24 @@ model RefreshToken {
 }
 
 // ---------------------------------------------------------------------------
-// LcProvider —— LangChain provider 二值白名单（#771 / 731 §2.1）：
-// 与旧 wire 枚举 1:1（openai-completions→openai / anthropic-messages→anthropic，映射收敛于
-// models/values.ts）；OpenAI 兼容端点（vLLM/MiniMax 等）统一走 openai + baseUrl。
-// ---------------------------------------------------------------------------
-enum LcProvider {
-  openai
-  anthropic
-}
-
-// ---------------------------------------------------------------------------
-// ModelProvider —— 一个用户的一个 model provider 行（#771 改造，731 §3.2 逐字段 DDL）。
+// ModelProvider —— 一个用户的一个 LLM 端点（BYOK）行（#881 v16 换形）。
 //
-// 归属上移：containerId → ownerId（#731 §1.3——新架构「用户」才是配置主体，多容器共享同
-// 一 LLM 配置面）；唯一键随之 (ownerId, providerId)。旧 wire 枚举 api（openai-completions /
-// anthropic-messages）由 lcProvider 二值取代（731 §3.2「二选一保留」取新列，wire 契约经
-// values.ts 映射保持不变）；apiKeyEnvId → credentialEnvId（过渡期引用 LLM_API_KEY），
-// credentialCipher 预留 P1 per-user key（AES 密文）。
-// T0 #801：存量库中的旧形状 model_providers 行（containerId/api/apiKeyEnvId 列）由
-// apply-schema 检测即 DROP 重建（#732 零迁移前提——产品未上线，旧行不迁移）。
+// 预设制：presetId ∈ 端点预设清单（models/presets.ts 六预设单一来源）——协议（wire 二值
+// anthropic-messages|openai-completions）/ baseUrl / 凭证头策略全部随预设派生，无自由地址列
+//（SSRF 构造性消灭；lcProvider/baseUrl/credentialEnvId/authHeader 旧列随 v16 退役）。
+// credentialCipher 激活：AES-256-GCM v1 信封（models/cipher.ts，密钥 LLM_CREDENTIAL_SECRET）；
+// NULL = 用平台共享 key（LLM_API_KEY）。明文 key 单向流：只在写请求出现，落库即密文。
+// T0 #801 / v16 #881：旧形状行（containerId/api/apiKeyEnvId / v15 自由地址形状）由收敛段
+// 检测即 copy-rebuild 或 DROP（#732 零迁移前提；v15→v16 见 incremental-schema v16 段）。
 // ---------------------------------------------------------------------------
 model ModelProvider {
   id          String    @id @default(cuid())
   owner       User      @relation(fields: [ownerId], references: [id], onDelete: Cascade)
   ownerId     String // users.id（归属上移，731 §3.2）
 
-  providerId  String // provider map key；DNS-label（应用层校验）
-  lcProvider  LcProvider // LangChain provider 二值白名单（openai/anthropic）
-  baseUrl     String // 完整 URL；origin 须命中 provider_endpoints 白名单（40042）
-  credentialEnvId   String?  // 过渡期：引用 LLM_API_KEY（对齐旧 apiKeyEnvId；P1 后退役）
-  credentialCipher  String?  // P1 扩展：per-user key，AES 密文（预留，本期不读写）
-  authHeader  Boolean   @default(true)
+  providerId  String // 端点稳定 id；DNS-label（应用层校验）；保留域 'platform'（平台虚拟条目）写侧拒绝
+  presetId    String // 端点预设清单 id（六预设；应用层校验成员资格）
+  credentialCipher  String?  // BYOK key 密文（AES-256-GCM v1 信封）；NULL = 平台共享 key
   modelsJson  String // 模型条目数组 JSON 文本（id/name/reasoning/input/cost/contextWindow/maxTokens）
 
   createdAt DateTime @default(now())
@@ -474,22 +462,21 @@ model ToolApprovalLog {
 }
 
 // ---------------------------------------------------------------------------
-// ProviderEndpoint —— 端点白名单（731 §3.1 逐字段 DDL，admin 管理，面板级）：
-// origin 精确匹配（scheme+host+port 唯一），禁路径/子域通配（防 attacker.example.com 绕过）。
-// 注意：SQLite UNIQUE 含 NULL port 不判重（NULL≠NULL）——应用层先查后建兜底（#775）。
-// createdBy 记审计归属（731 DDL 无 FK 约束 → 不加；用户软删不物理删行）。
+// PluginLlmAssignment —— per-user 插件 LLM 指派（#881 T1 建表备用，消费者归 #883）：
+// 复合主键 ownerId+pluginId；pluginId 含保留键 'judge'（审批判定器指派行）。
+// providerId NULL = 跟随默认链 / 'platform' = 钉平台默认端点 / 其余 ∈ 用户端点集；
+// modelId 须属该端点模型集（应用层校验）。mutation 事务内 bump 配置版本（热生效）。
 // ---------------------------------------------------------------------------
-model ProviderEndpoint {
-  id        String   @id @default(cuid())
-  scheme    String // 'https'（生产仅 https；'http' 限 dev）
-  host      String // 精确 host
-  port      Int? // NULL = 默认端口
-  note      String @default("")
-  createdBy String // users.id
-  createdAt DateTime @default(now())
+model PluginLlmAssignment {
+  owner      User    @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  ownerId    String
+  pluginId   String
+  providerId String?
+  modelId    String?
+  updatedAt  DateTime @updatedAt
 
-  @@unique([scheme, host, port])
-  @@map("provider_endpoints")
+  @@id([ownerId, pluginId])
+  @@map("plugin_llm_assignments")
 }
 
 // ---------------------------------------------------------------------------

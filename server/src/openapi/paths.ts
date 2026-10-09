@@ -14,7 +14,6 @@ import {
   modelProviderWriteSchema,
   passwordChangeSchema,
   pluginEnablementSchema,
-  providerEndpointWriteSchema,
   sessionApprovalSchema,
   userCreateSchema,
   userPatchSchema,
@@ -317,27 +316,46 @@ register({
   dataNote: 'data: { nodes, edges }（obsidian 风格；边不 dedup，不可解析 → ghost 节点）。',
 })
 
-// ---- Models /api/v1/models/providers（owner 级，#857 归属门直挂认证身份；#775 事务 =
-//      mutation + config_meta version bump + 白名单第一层校验）----
+// ---- Models /api/v1/models（owner 级，#857 归属门直挂认证身份；#881 预设制换形）----
+
+register({
+  method: 'get',
+  path: '/api/v1/models/presets',
+  tag: 'Models',
+  summary: '端点预设目录（六预设；建 BYOK 端点的唯一取值域，#881）',
+  auth: 'user',
+  errors: `10005（mustChangePassword）。`,
+  dataNote: 'data: [{ id, name, protocol, base_url, default_models }]（协议/地址随预设锁定，无自由 baseURL）。',
+})
+
+register({
+  method: 'get',
+  path: '/api/v1/models/platform',
+  tag: 'Models',
+  summary: '平台默认端点只读视图（env 派生虚拟实体，不落库，#881）',
+  auth: 'user',
+  errors: `10005（mustChangePassword）· 90003（LLM_PRESET 配置非法——config 启动校验兜底）。`,
+  dataNote: 'data: { provider_id, preset_id, protocol, lc_provider, base_url, default_model, key_configured }（永无 key 材料）。',
+})
 
 register({
   method: 'get',
   path: '/api/v1/models/providers',
   tag: 'Models',
-  summary: 'provider 列表（createdAt 升序；owner 直取认证身份，#857）',
+  summary: '本人 BYOK 端点列表（createdAt 升序；key 只出掩码，#881）',
   auth: 'user',
   errors: `10005（mustChangePassword）。`,
-  dataNote: 'data: 本人 provider 列表（service.list 形状）。',
+  dataNote: 'data: [{ id, provider_id, preset_id, protocol, base_url, api_key_masked(null=平台共享或解密失败), key_error, models, created_at }]。',
 })
 
 register({
   method: 'post',
   path: '/api/v1/models/providers',
   tag: 'Models',
-  summary: '新建 provider（唯一(ownerId, providerId)，#771 归属上移）',
+  summary: '建 BYOK 端点（preset_id 锁定协议与地址；api_key 落库即密文；唯一(ownerId, providerId)，#881）',
   auth: 'user',
-  errors: `90002（字段明细含 base_url 白名单未命中/DNS 私网拒绝）· 40041（pid 冲突）· 10005。`,
-  dataNote: 'data: 新建 provider（service.create 形状；事务内 config_meta version bump = 热生效信号）。',
+  errors: `90002（字段明细：保留 id 抢注/未知预设/models 形状）· 40041（pid 冲突）· 10005。`,
+  dataNote: 'data: 新建端点（api_key_masked 掩码；事务内 config_meta version bump = 热生效信号）。',
   body: modelProviderWriteSchema,
 })
 
@@ -345,20 +363,20 @@ register({
   method: 'get',
   path: '/api/v1/models/providers/{pid}',
   tag: 'Models',
-  summary: '回读单条 provider',
+  summary: '回读单条 BYOK 端点',
   auth: 'user',
   errors: `40040（不存在/越权同码防探测）· 10005。`,
-  dataNote: 'data: provider（service.get 形状）。',
+  dataNote: 'data: 端点（api_key_masked 掩码）。',
 })
 
 register({
   method: 'put',
   path: '/api/v1/models/providers/{pid}',
   tag: 'Models',
-  summary: '改 provider（路径 pid 定位，body 可改 provider_id）',
+  summary: '改 BYOK 端点（路径 pid 定位；api_key 留空 = 保持不变，#881）',
   auth: 'user',
-  errors: `90002（含 base_url 白名单未命中）· 40040 · 40041（撞同 owner 既有 pid）· 10005。`,
-  dataNote: 'data: 更新后 provider。',
+  errors: `90002 · 40040 · 40041（撞同 owner 既有 pid）· 10005。`,
+  dataNote: 'data: 更新后端点。',
   body: modelProviderWriteSchema,
 })
 
@@ -366,42 +384,9 @@ register({
   method: 'delete',
   path: '/api/v1/models/providers/{pid}',
   tag: 'Models',
-  summary: '删 provider（version bump 热生效）',
+  summary: '删 BYOK 端点（version bump 热生效；引用方回落语义归 #885）',
   auth: 'user',
   errors: `40040 · 10005。`,
-  nullData: true,
-})
-
-// ---- Provider endpoints /api/v1/provider-endpoints（#775 · 731 §3.1 端点白名单 admin 管理面）----
-
-register({
-  method: 'get',
-  path: '/api/v1/provider-endpoints',
-  tag: 'Models',
-  summary: '端点白名单列表（admin，createdAt 升序）',
-  auth: 'admin',
-  errors: `10001 · 10004（非 admin）· 10005。`,
-  dataNote: 'data: [{ id, scheme, host, port(null=scheme 默认端口), note, created_by, created_at }]。',
-})
-
-register({
-  method: 'post',
-  path: '/api/v1/provider-endpoints',
-  tag: 'Models',
-  summary: '新建白名单端点（origin 精确匹配；事务内 version bump）',
-  auth: 'admin',
-  errors: `10001 · 10004（非 admin）· 10005 · 90002（host 格式/DNS 私网拒绝、http 限开发环境）· 40041（origin 冲突，含 NULL-port 等价语义）。`,
-  dataNote: 'data: 新建端点条目。',
-  body: providerEndpointWriteSchema,
-})
-
-register({
-  method: 'delete',
-  path: '/api/v1/provider-endpoints/{id}',
-  tag: 'Models',
-  summary: '删白名单端点（不级联 provider 行——运行时复验 40042 兜底）',
-  auth: 'admin',
-  errors: `10001 · 10004（非 admin）· 10005 · 40040（不存在）。`,
   nullData: true,
 })
 

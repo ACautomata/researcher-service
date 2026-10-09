@@ -201,7 +201,6 @@ describe('#861 终局闸：全仓 openclaw 叙述仅剩档案级与退役注记'
     /^server\/src\/containers\/lifecycleQueue\.ts$/,
     /^server\/src\/files\/dockerArchive\.ts$/,
     /^server\/src\/models\/service\.ts$/,
-    /^server\/src\/runner\/providerDefaults\.ts$/,
     /^server\/src\/runner\/providerRegistry\.ts$/,
     /^server\/src\/sandboxes\/dockerRuntime\.ts$/,
     /^server\/src\/wiki\/dockerFs\.ts$/,

@@ -140,14 +140,10 @@ describe('#788 插件运行时（S1/S2，#752 §3/§4.2）', () => {
       data: {
         ownerId: user.id,
         providerId: 'prov-1',
-        lcProvider: 'openai',
-        baseUrl: 'https://llm.example.com/v1',
-        credentialEnvId: 'LLM_API_KEY',
-        authHeader: true,
+        presetId: 'openai',
         modelsJson: JSON.stringify([{ id: 'm-1' }]),
       },
     })
-    await prisma.providerEndpoint.create({ data: { scheme: 'https', host: 'llm.example.com', port: null, createdBy: 'seed' } })
     hub = new CollectingHub()
   })
 

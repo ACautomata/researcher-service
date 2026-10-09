@@ -110,15 +110,9 @@ describe('会话 REST 域（S1，#778）', () => {
       data: {
         ownerId: user.id,
         providerId: 'prov-1',
-        lcProvider: 'openai',
-        baseUrl: 'https://llm.example.edu/v1',
-        credentialEnvId: 'LLM_API_KEY',
-        authHeader: true,
+        presetId: 'openai',
         modelsJson: JSON.stringify([{ id: 'model-x' }]),
       },
-    })
-    await prisma.providerEndpoint.create({
-      data: { scheme: 'https', host: 'llm.example.edu', port: null, createdBy: 'seed' },
     })
 
     hub = new StreamHub()
@@ -129,7 +123,12 @@ describe('会话 REST 域（S1，#778）', () => {
 
     const registry = new ProviderRegistry(prisma, {
       llmApiKey: 'test-key',
-      modelFactory: async () => { observedModel = new ScriptedChatModel(currentScript); return observedModel },
+      // #881 平台虚拟条目垫底：factory 对平台 baseUrl 不覆盖 observedModel（断言面只看用户端点实例）
+      modelFactory: async (_m, opts) => {
+        const inst = new ScriptedChatModel(currentScript)
+        if (!opts.baseUrl.includes('minimaxi')) observedModel = inst
+        return inst
+      },
     })
     runService = new RunService({
       prisma,
