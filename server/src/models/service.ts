@@ -180,6 +180,31 @@ export class ModelProviderService {
     }
   }
 
+  async impact(ownerId: string, pid: string): Promise<{ sessions: number; teammates: number; plugins: number; judge: number; total: number }> {
+    await this.requireProvider(ownerId, pid)
+    const [preferences, teammates, assignments] = await Promise.all([
+      this.prisma.session.findMany({
+        where: { ownerId, isTeammate: false, archivedAt: null, preferredModelJson: { not: null } },
+        select: { preferredModelJson: true },
+      }),
+      this.prisma.teammate.count({
+        where: { modelProviderId: pid, archivedAt: null, parentSession: { ownerId, archivedAt: null } },
+      }),
+      this.prisma.pluginLlmAssignment.findMany({ where: { ownerId, providerId: pid }, select: { pluginId: true } }),
+    ])
+    const sessions = preferences.filter((row) => {
+      try {
+        const ref: unknown = JSON.parse(row.preferredModelJson!)
+        return typeof ref === 'object' && ref !== null && 'providerId' in ref && ref.providerId === pid
+      } catch {
+        return false
+      }
+    }).length
+    const judge = assignments.filter((row) => row.pluginId === 'judge').length
+    const plugins = assignments.length - judge
+    return { sessions, teammates, plugins, judge, total: sessions + teammates + plugins + judge }
+  }
+
   async remove(ownerId: string, pid: string): Promise<void> {
     try {
       await this.prisma.$transaction(async (tx) => {

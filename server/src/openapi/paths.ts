@@ -388,6 +388,16 @@ register({
 })
 
 register({
+  method: 'get',
+  path: '/api/v1/models/providers/{pid}/impact',
+  tag: 'Models',
+  summary: 'BYOK 端点删除影响计数',
+  auth: 'user',
+  errors: '40040（不存在/越权同码防探测）· 10005。',
+  dataNote: 'data: { sessions, plugins, judge, teammates, total }；仅本人未归档引用，teammate 内部会话不重复计入 sessions。',
+})
+
+register({
   method: 'put',
   path: '/api/v1/models/providers/{pid}',
   tag: 'Models',
@@ -402,7 +412,7 @@ register({
   method: 'delete',
   path: '/api/v1/models/providers/{pid}',
   tag: 'Models',
-  summary: '删 BYOK 端点（version bump 热生效；引用方回落语义归 #885）',
+  summary: '删 BYOK 端点（下一 run 引用回落平台默认；在飞快照不变）',
   auth: 'user',
   errors: `40040 · 10005。`,
   nullData: true,

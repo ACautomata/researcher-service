@@ -9,6 +9,7 @@ import { ApiError } from '@/api/client'
 import {
   createProvider,
   getPlatformEndpoint,
+  getProviderImpact,
   listPresets,
   listProviders,
   removeProvider,
@@ -202,9 +203,17 @@ async function runProbe(): Promise<void> {
 }
 
 async function confirmRemove(pid: string): Promise<void> {
+  let impact
+  try {
+    impact = await getProviderImpact(pid)
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 401) return
+    ElMessage.error((e as Error).message)
+    return
+  }
   try {
     await ElMessageBox.confirm(
-      `确认删除端点 ${pid}？引用它的会话偏好将失效——相关会话需重新选模后方可继续发消息。`,
+      `确认删除端点 ${pid}？${impact.total} 项将回落平台默认端点（会话偏好 ${impact.sessions}、插件指派 ${impact.plugins}、judge 指派 ${impact.judge}、teammate 模型钉 ${impact.teammates}）。在飞 run 将使用旧快照完成，下一 run 生效。`,
       '删除端点',
       { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
     )
@@ -214,7 +223,7 @@ async function confirmRemove(pid: string): Promise<void> {
   try {
     await removeProvider(pid)
     await loadAll()
-    ElMessage.success('已删除，热加载即时生效')
+    ElMessage.success('已删除，引用将在下一 run 回落平台默认端点')
   } catch (e) {
     if (e instanceof ApiError && e.status === 401) return
     ElMessage.error((e as Error).message)

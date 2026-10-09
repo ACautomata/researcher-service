@@ -10,6 +10,7 @@ import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest
 import { setupTestApp, type TestContext } from './setup'
 import { seedUser } from './helpers'
 import { ProviderRegistry, resolveModelRef, withChainBindTools, type ChatModelFactory } from '../src/runner/providerRegistry'
+import { ModelProviderService } from '../src/models/service'
 import { encryptCredential } from '../src/models/cipher'
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models'
 import type { Runnable } from '@langchain/core/runnables'
@@ -243,7 +244,7 @@ describe('ProviderRegistry（#881 预设制：平台虚拟条目 + BYOK 凭证�
     expect(chain.fallbacks.map((f) => f.stubModel)).toEqual(['m-1', 'MiniMax-M3'])
   })
 
-  it('悬挂会话偏好（端点已删/模型已移出列表）：warn + 回落默认链，run 不中断（#880 story 11）', async () => {
+  it('悬挂会话偏好（端点已删/模型已移出列表）：warn + 回落平台默认，run 不中断（#880 story 11）', async () => {
     const u = await seedUser(ctx.prisma, 'rg-dangling', 'pw-rg-dangling-secure')
     await seedByok(ctx, u.id, 'mine', 'openai', ['m-1'], { apiKey: 'sk-m' })
     const { factory } = makeFakeFactory()
@@ -254,18 +255,11 @@ describe('ProviderRegistry（#881 预设制：平台虚拟条目 + BYOK 凭证�
     })
     const snap = await reg.getSnapshot(u.id)
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
-    // 端点整行已删（偏好指向不存在的 provider）→ 回落默认链（用户序 + 平台垫底）
-    const ghostChain = (await reg.getDefaultModel(snap, { providerId: 'ghost', modelId: 'm' })) as unknown as {
-      stubChain: string
-      fallbacks: Array<{ stubModel: string }>
-    }
-    expect(ghostChain.stubChain).toBe('m-1')
-    expect(ghostChain.fallbacks.map((f) => f.stubModel)).toEqual(['MiniMax-M3'])
-    // 端点在、模型已从列表移除 → 同样回落
-    const removedChain = (await reg.getDefaultModel(snap, { providerId: 'mine', modelId: 'm-gone' })) as unknown as {
-      stubChain: string
-    }
-    expect(removedChain.stubChain).toBe('m-1')
+    // 端点整行已删（偏好指向不存在的 provider）→ 回落平台默认
+    const ghostModel = await reg.getDefaultModel(snap, { providerId: 'ghost', modelId: 'm' })
+    expect(await ghostModel.invoke([])).toEqual({ content: 'fake:MiniMax-M3' })
+    const removedModel = await reg.getDefaultModel(snap, { providerId: 'mine', modelId: 'm-gone' })
+    expect(await removedModel.invoke([])).toEqual({ content: 'fake:MiniMax-M3' })
     expect(warnSpy).toHaveBeenCalledTimes(2)
   })
 
@@ -325,7 +319,7 @@ describe('ProviderRegistry（#881 预设制：平台虚拟条目 + BYOK 凭证�
     expect(calls.some((c) => c.model === 'new-model')).toBe(false)
   })
 
-  it('getModel：未知 providerId → 40040（含悬挂 teammate 钉语义不变）', async () => {
+  it('getModel：未知 providerId → 40040（显式选值仍拒绝）', async () => {
     const u = await seedUser(ctx.prisma, 'rg-ghost', 'pw-rg-ghost-secure')
     const reg = new ProviderRegistry(ctx.prisma, { llmApiKey: 'sk-platform' })
     const snap = await reg.getSnapshot(u.id)
@@ -508,4 +502,21 @@ describe('ProviderRegistry（#881 预设制：平台虚拟条目 + BYOK 凭证�
     expect(second.pluginAssignments.get('autofigure')).toEqual({ providerId: 'ep-1', modelId: 'gpt-x' })
     expect(first.pluginAssignments.size).toBe(0) // 旧快照对象不可变
   })
+  it('端点删除后：旧快照继续供 teammate 使用，新快照会话与 teammate 都回落平台默认', async () => {
+    const u = await seedUser(ctx.prisma, 'rg-delete', 'pw-rg-delete-secure')
+    await seedByok(ctx, u.id, 'deleted', 'openai', ['old-model'], { apiKey: 'sk-old' })
+    await seedByok(ctx, u.id, 'remaining', 'openai', ['other-model'], { apiKey: 'sk-other' })
+    const factory: ChatModelFactory = async (model) => new ScriptedChatModel([new AIMessage(model)], { loop: true })
+    const reg = new ProviderRegistry(ctx.prisma, { llmApiKey: 'sk-platform', credentialSecret: TEST_SECRET, modelFactory: factory })
+    const old = await reg.getSnapshot(u.id)
+    await new ModelProviderService(ctx.prisma, TEST_SECRET).remove(u.id, 'deleted')
+    const next = await reg.getSnapshot(u.id)
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    expect((await (await reg.getTeammateModel(old, 'deleted')).invoke([])).content).toBe('old-model')
+    expect((await (await reg.getTeammateModel(next, 'deleted')).invoke([])).content).toBe('MiniMax-M3')
+    expect((await (await reg.getDefaultModel(next, { providerId: 'deleted', modelId: 'old-model' })).invoke([])).content).toBe('MiniMax-M3')
+    expect(warn).toHaveBeenCalledTimes(2)
+  })
+
+
 })

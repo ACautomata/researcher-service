@@ -1,3 +1,4 @@
+import { PLATFORM_PROVIDER_ID } from '../../models/presets'
 import { resolveModelRef, type ModelRef } from '../providerRegistry'
 import { teammateDelegation } from '../teammates/delegation'
 import { snapshotRunCapabilities, type RunCapabilities } from '../capabilities'
@@ -710,7 +711,7 @@ export class RunService {
       : undefined
     const preferred: ModelRef | undefined = session.preferredModelJson ? JSON.parse(session.preferredModelJson) : undefined
     const model = actor?.modelProviderId
-      ? await this.deps.registry.getModel(snapshot, actor.modelProviderId)
+      ? await this.deps.registry.getTeammateModel(snapshot, actor.modelProviderId)
       : await this.deps.registry.getDefaultModel(snapshot, preferred)
     const policy = this.deps.interruptPolicyFor?.(cmd.sessionId)
     const tools = this.deps.teammates
@@ -816,7 +817,9 @@ export class RunService {
     // usage 身份：默认链主 provider（snapshot.providers[0] 首模型）。fallback 链切换后的
     // per-call 身份不追踪（#775 usage.ts 声明的 #777 接线局限；采数不 fail run）。
     const providerId = actor?.modelProviderId ?? preferred?.providerId
-    const identity = providerId ? snapshot.providers.find(provider => provider.providerId === providerId) : snapshot.providers[0]
+    const requested = providerId ? snapshot.providers.find(provider => provider.providerId === providerId) : snapshot.providers[0]
+    const dangling = providerId !== undefined && (!requested || (!actor?.modelProviderId && preferred && !requested.models.some(entry => entry.id === preferred.modelId)))
+    const identity = dangling ? snapshot.providers.find(provider => provider.providerId === PLATFORM_PROVIDER_ID) : requested
     const usageHandler = createUsageCallbackHandler(
       {
         prisma: this.deps.prisma,
@@ -828,7 +831,7 @@ export class RunService {
       {
         providerId: identity?.providerId ?? '',
         lcProvider: identity?.lcProvider ?? '',
-        model: (actor?.modelProviderId ? undefined : preferred?.modelId) ?? String(identity?.models[0]?.id ?? ''),
+        model: (actor?.modelProviderId || dangling ? undefined : preferred?.modelId) ?? String(identity?.models[0]?.id ?? ''),
       },
     )
 

@@ -19,6 +19,7 @@ vi.mock('@/api/models', () => ({
   createProvider: vi.fn(),
   updateProvider: vi.fn(),
   removeProvider: vi.fn(),
+  getProviderImpact: vi.fn(),
   testConnection: vi.fn(),
 }))
 vi.mock('element-plus', async (importOriginal) => {
@@ -38,6 +39,7 @@ import {
   listPresets,
   listProviders,
   removeProvider,
+  getProviderImpact,
   testConnection,
   updateProvider,
   type EndpointPresetDTO,
@@ -111,6 +113,7 @@ describe('ModelView（#881 预设制配置面）', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
     vi.clearAllMocks()
+    ;(getProviderImpact as ReturnType<typeof vi.fn>).mockResolvedValue({ sessions: 2, teammates: 1, plugins: 3, judge: 1, total: 7 })
     ;(listProviders as ReturnType<typeof vi.fn>).mockResolvedValue([])
     ;(listPresets as ReturnType<typeof vi.fn>).mockResolvedValue(PRESETS)
     ;(getPlatformEndpoint as ReturnType<typeof vi.fn>).mockResolvedValue(PLATFORM)
@@ -253,7 +256,20 @@ describe('ModelView（#881 预设制配置面）', () => {
     await flushPromises()
     await (wrapper.vm as unknown as { confirmRemove: (pid: string) => Promise<void> }).confirmRemove('my-openai')
     await flushPromises()
+    expect(ElMessageBox.confirm).toHaveBeenCalledWith(expect.stringContaining('7 项将回落平台默认端点'), '删除端点', expect.any(Object))
+    expect(ElMessageBox.confirm).toHaveBeenCalledWith(expect.stringContaining('会话偏好 2、插件指派 3、judge 指派 1、teammate 模型钉 1'), '删除端点', expect.any(Object))
     expect(removeProvider).toHaveBeenCalledWith('my-openai')
+  })
+
+  it('影响计数读取失败时提示错误，停止删除', async () => {
+    const { ElMessageBox, ElMessage } = await import('element-plus')
+    vi.mocked(getProviderImpact).mockRejectedValueOnce(new Error('影响计数读取失败'))
+    const wrapper = mount(ModelView, { global: { plugins: [createPinia()], stubs } })
+    await flushPromises()
+    await (wrapper.vm as unknown as { confirmRemove: (pid: string) => Promise<void> }).confirmRemove('my-openai')
+    expect(ElMessage.error).toHaveBeenCalledWith('影响计数读取失败')
+    expect(ElMessageBox.confirm).not.toHaveBeenCalled()
+    expect(removeProvider).not.toHaveBeenCalled()
   })
 
   it('does not remove when user cancels confirmation', async () => {

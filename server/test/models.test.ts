@@ -70,6 +70,24 @@ describe('models REST（#881 预设制 + BYOK 凭证单向流）', () => {
     await ctx.cleanup()
   })
 
+  it('删除影响面按本人归属统计四类引用；删除不拒绝悬挂引用', async () => {
+    const user = await ctx.prisma.user.findUniqueOrThrow({ where: { username: 'user1' } })
+    const other = await ctx.prisma.user.findUniqueOrThrow({ where: { username: 'user2' } })
+    await ctx.request.post(PROVIDERS_PATH).set(bearer(userAccess)).send({ ...VALID, provider_id: 'impact' })
+    const parent = await ctx.prisma.session.create({ data: { containerId: 'impact-sandbox', ownerId: user.id, preferredModelJson: JSON.stringify({ modelId: 'gpt-5.1', providerId: 'impact' }) } })
+    const thread = await ctx.prisma.session.create({ data: { containerId: 'impact-thread', ownerId: user.id, isTeammate: true, preferredModelJson: parent.preferredModelJson } })
+    await ctx.prisma.teammate.create({ data: { parentSessionId: parent.id, threadId: thread.id, name: 'worker', task: 'task', modelProviderId: 'impact' } })
+    await ctx.prisma.session.create({ data: { containerId: 'other-sandbox', ownerId: other.id, preferredModelJson: parent.preferredModelJson } })
+    await ctx.prisma.session.create({ data: { containerId: 'impact-sandbox', ownerId: user.id, preferredModelJson: '{broken' } })
+    for (const pluginId of ['autofigure', 'judge']) await ctx.prisma.pluginLlmAssignment.create({ data: { ownerId: user.id, pluginId, providerId: 'impact', modelId: 'gpt-5.1' } })
+    const path = `${providerOf('impact')}/impact`
+    const res = await ctx.request.get(path).set(bearer(userAccess))
+    expect(res.body).toMatchObject({ code: 0, data: { sessions: 1, teammates: 1, plugins: 1, judge: 1, total: 4 } })
+    expect((await ctx.request.get(path).set(bearer(otherAccess))).body.code).toBe(40040)
+    expect((await ctx.request.delete(providerOf('impact')).set(bearer(userAccess))).body.code).toBe(0)
+    expect((await ctx.request.get(path).set(bearer(userAccess))).body.code).toBe(40040)
+  })
+
   // ---------------------------- 认证（公共前置）----------------------------
 
   it('未认证 → 10001（presets / platform / providers 三面同守）', async () => {
