@@ -9,6 +9,7 @@ import {
   listPresets,
   listProviders,
   removeProvider,
+  testConnection,
   updateProvider,
 } from '@/api/models'
 
@@ -102,5 +103,22 @@ describe('models api URLs（#857 owner 级 + #881 预设制）', () => {
     await removeProvider('a b/c')
     const [path] = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0]
     expect(path).toBe('/api/v1/models/providers/a%20b%2Fc')
+  })
+
+  it('testConnection POSTs the form state to /models/test（#882 试连）', async () => {
+    ;(globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(mockResp({ ok: true, latency_ms: 1234 }))
+    const result = await testConnection({ preset_id: 'openai', api_key: 'sk-plain', model: 'gpt-5.1' })
+    const [path, init] = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0]
+    expect(path).toBe('/api/v1/models/test')
+    expect(init.method).toBe('POST')
+    expect(JSON.parse(init.body)).toEqual({ preset_id: 'openai', api_key: 'sk-plain', model: 'gpt-5.1' })
+    expect(result).toEqual({ ok: true, latency_ms: 1234 })
+  })
+
+  it('testConnection throws ApiError(90003) on probe failure（净化错误文本）', async () => {
+    ;(globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+      mockResp({ code: 90003, message: 'Error 401: Incorrect API key [REDACTED]', data: null }),
+    )
+    await expect(testConnection({ preset_id: 'openai', model: 'gpt-5.1' })).rejects.toMatchObject({ code: 90003 })
   })
 })

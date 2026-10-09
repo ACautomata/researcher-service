@@ -16,6 +16,9 @@
   论断 evidence + 页级漂移 fresh|drifted|null；页缺失 30040、旁车缺失 200+空 claims）。
 - `/api/v1/models/providers[/<pid>]` — model provider CRUD（#857 归属门改挂 ownerId 零容器行查询；
   #775：事务 = mutation + config_meta version bump 热生效；白名单第一层校验未命中 → 90002 字段级 base_url）。
+- `/api/v1/models/test` — 端点试连（#882：按表单态[预设+key+模型]发起最小代价真实试连——不入库、
+  不产生 provider 行、不写日志；1-token 级探测、10s 超时；失败 90003 + 净化错误文本防 key 回显；
+  V1 不限流[ADR 记录接受面]）。
 - `/api/v1/provider-endpoints[/<id>]` — 端点白名单 admin CRUD（#775 · 731 §3.1，origin 精确匹配；
   GET/POST/DELETE，非 admin → 10004）。
 - `/api/v1/approval-logs` — 审批全量审计检索 admin REST（#783 · ADR 0015；过滤

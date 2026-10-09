@@ -12,6 +12,7 @@ import {
   listPresets,
   listProviders,
   removeProvider,
+  testConnection,
   updateProvider,
   type EndpointPresetDTO,
   type ModelEntryDTO,
@@ -35,6 +36,12 @@ const providerId = ref('')
 const presetId = ref('')
 const apiKey = ref('') // 留空 = 新建用平台共享 key / 编辑保持不变（单向流：永回显明文）
 const models = ref<ModelEntryDTO[]>([])
+
+// 端点试连（#882）：按当前表单态（预设 + key + 首条模型）发起；结果就地展示（成功=延迟，
+// 失败=服务端净化后的错误文本）。key 留空 = 试平台共享 key（与保存语义一致的表单态）。
+const testing = ref(false)
+const probeSuccess = ref<string | null>(null) // '连接成功（1234 ms）'
+const probeError = ref<string | null>(null)
 
 const selectedPreset = computed<EndpointPresetDTO | null>(
   () => presets.value.find((p) => p.id === presetId.value) ?? null,
@@ -75,6 +82,8 @@ function resetForm(): void {
   presetId.value = presets.value[0]?.id ?? ''
   apiKey.value = ''
   models.value = []
+  probeSuccess.value = null
+  probeError.value = null
   const def = selectedPreset.value?.default_models ?? []
   if (def.length) models.value = [{ ...def[0] }]
   else models.value = [{ id: '', name: '' }]
@@ -93,6 +102,8 @@ function openEdit(p: ModelProviderDTO): void {
   apiKey.value = '' // 单向流：不回显明文；留空提交 = 保持不变
   models.value = (p.models ?? []).map((m) => ({ ...m }))
   if (!models.value.length) models.value = [{ id: '', name: '' }]
+  probeSuccess.value = null
+  probeError.value = null
   dialogVisible.value = true
 }
 
@@ -155,6 +166,31 @@ async function submitForm(): Promise<void> {
   })
 }
 
+async function runProbe(): Promise<void> {
+  probeSuccess.value = null
+  probeError.value = null
+  const model = models.value[0]?.id.trim() ?? ''
+  if (!model) {
+    ElMessage.warning('请先填写 model id 再测试连接')
+    return
+  }
+  testing.value = true
+  try {
+    const payload: { preset_id: string; api_key?: string; model: string } = {
+      preset_id: presetId.value,
+      model,
+    }
+    if (apiKey.value.trim() !== '') payload.api_key = apiKey.value
+    const r = await testConnection(payload)
+    probeSuccess.value = `连接成功（${r.latency_ms} ms）`
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 401) return
+    probeError.value = (e as Error).message
+  } finally {
+    testing.value = false
+  }
+}
+
 async function confirmRemove(pid: string): Promise<void> {
   try {
     await ElMessageBox.confirm(
@@ -186,7 +222,7 @@ onMounted(() => {
 })
 
 // 暴露动作供测试（el-table row slot / el-form 在 stub 下不便点击，expose 动作经 VM 驱动）
-defineExpose({ openCreate, openEdit, save, confirmRemove, loadAll, onPresetChange })
+defineExpose({ openCreate, openEdit, save, confirmRemove, loadAll, onPresetChange, runProbe })
 </script>
 
 <template>
@@ -298,6 +334,14 @@ defineExpose({ openCreate, openEdit, save, confirmRemove, loadAll, onPresetChang
             <el-button size="small" data-test="add-model" @click="addModel">添加 model</el-button>
           </div>
         </el-form-item>
+        <el-form-item label="测试连接">
+          <div class="probe-row">
+            <el-button :loading="testing" data-test="run-probe" @click="runProbe">测试连接</el-button>
+            <span class="probe-hint">按当前表单态试连（key 留空 = 平台共享 key；取首条模型）</span>
+          </div>
+          <div v-if="probeSuccess" class="probe-result probe-success" data-test="probe-success">{{ probeSuccess }}</div>
+          <div v-if="probeError" class="probe-result probe-error" data-test="probe-error">{{ probeError }}</div>
+        </el-form-item>
       </el-form>
       <template #footer>
         <el-button data-test="cancel-save" @click="dialogVisible = false">取消</el-button>
@@ -349,6 +393,28 @@ defineExpose({ openCreate, openEdit, save, confirmRemove, loadAll, onPresetChang
 }
 .models-editor {
   width: 100%;
+}
+.probe-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.probe-hint {
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+}
+.probe-result {
+  width: 100%;
+  font-size: 13px;
+}
+.probe-success {
+  color: var(--el-color-success);
+  font-size: 13px;
+}
+.probe-error {
+  color: var(--el-color-danger);
+  font-size: 13px;
 }
 .model-row {
   display: flex;

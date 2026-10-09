@@ -1,9 +1,10 @@
-// models 域路由（#336 · #857 归属门改挂 ownerId；#881 预设制换形）。
+// models 域路由（#336 · #857 归属门改挂 ownerId；#881 预设制换形；#882 端点试连）。
 //
 // /api/v1/models（owner 级，对齐 sessions 扁平挂用户先例；ownerId 直取认证身份 req.user.id
 // ——不接收任何客户端 userId 作为授权覆写面）：
 //   GET  /presets            —— 端点预设目录（六预设；建端点下拉的单一取值域）
 //   GET  /platform           —— 平台默认端点只读视图（env 派生虚拟实体，不落库；永无 key 材料）
+//   POST /test               —— 端点试连（#882：不入库、1-token 级、10s 超时、错误文本净化防 key 回显）
 //   GET  /providers          —— 本人 BYOK 端点列表（key 只出掩码）
 //   POST /providers          —— 建 BYOK 端点（preset_id 锁定协议与地址；api_key 缺省 = 平台共享 key）
 //   GET  /providers/:pid     —— 回读单条；不存在/越权 → 40040（同码防探测）
@@ -11,7 +12,8 @@
 //   DELETE /providers/:pid   —— 删（引用方回落语义归 #885；本票行为 = 直接删除 + 热生效）
 //
 // 错误映射（#336 + #319 §1.3 + #881）：校验失败（含保留 id 抢注/未知预设）→ 90002 字段级 ·
-// provider 不存在/越权 → 40040（同码防探测）· provider_id 冲突 → 40041。
+// provider 不存在/越权 → 40040（同码防探测）· provider_id 冲突 → 40041 · 试连失败 → 90003
+//（净化错误文本）。
 
 import { Router, type Request, type Response } from 'express'
 import type { z } from 'zod'
@@ -19,13 +21,17 @@ import { fail, ok } from '../envelope'
 import { CODE } from '../codes'
 import { requireAuth } from '../middleware/auth'
 import { mustChangePasswordGate } from '../middleware/mustChangePasswordGate'
-import { modelProviderWriteSchema } from '../validation/schemas'
+import { endpointTestSchema, modelProviderWriteSchema } from '../validation/schemas'
 import { config } from '../config'
 import { ENDPOINT_PRESETS, presetById, protocolToLcProvider, PLATFORM_PROVIDER_ID } from './presets'
 import {
   ModelProviderService,
   type ModelProviderWriteInput,
 } from './service'
+import { EndpointProbeService, type EndpointProbeDeps } from './probe'
+
+// 试连带注入缝（测试 fake 工厂 / 短超时；生产缺省 = initChatModel 真工厂 + 10s）
+export type ModelsRouterDeps = EndpointProbeDeps
 
 function toInput(body: z.infer<typeof modelProviderWriteSchema>): ModelProviderWriteInput {
   return {
@@ -47,13 +53,14 @@ function parseBody(req: Request): ModelProviderWriteInput {
   return toInput(result.data)
 }
 
-export function createModelsRouter(): Router {
+export function createModelsRouter(deps: ModelsRouterDeps = {}): Router {
   const router = Router()
   router.use(requireAuth, mustChangePasswordGate)
 
   // owner 直取认证身份（#857）：requireAuth 已保证 req.user 非空。
   const ownerId = (req: Request): string => req.user!.id
   const service = (req: Request): ModelProviderService => new ModelProviderService(req.prisma)
+  const probe = new EndpointProbeService(deps)
 
   // GET /presets —— 端点预设目录（六预设；协议/地址/默认模型；无敏感面，认证用户可读）。
   router.get('/presets', (_req: Request, res: Response) => {
@@ -87,6 +94,22 @@ export function createModelsRouter(): Router {
       default_model: defaultModel,
       key_configured: config.llm.apiKey !== '',
     })
+  })
+
+  // POST /test —— 端点试连（#882）：按表单态真实试连（不入库、不写日志）；成功回延迟。
+  // 失败（key 错/端点错/超时）→ 90003 + 净化错误文本（净化在 probe service 内）。
+  router.post('/test', async (req: Request, res: Response) => {
+    const result = endpointTestSchema.safeParse(req.body)
+    if (!result.success) {
+      const fieldErrors = result.error.flatten().fieldErrors as Record<string, string[]>
+      throw fail(CODE.VALIDATION_FAILED, undefined, fieldErrors)
+    }
+    const r = await probe.probe({
+      presetId: result.data.preset_id,
+      apiKey: result.data.api_key,
+      model: result.data.model,
+    })
+    ok(res, { ok: true, latency_ms: r.latencyMs })
   })
 
   // GET /providers —— 列表（按 createdAt 升序；key 只出掩码）。
