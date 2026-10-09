@@ -1,7 +1,12 @@
 // wiki path 请求层校验（#335 · #315 §4 第①层，平移 backend/wiki/serializers.py RelPathField）。
 // 这是双保险的第一层：拒绝对路径/反斜杠/`..` 穿越/非 .md，归一化重 join。
-// 第二层在 NodeWikiFileSystem._resolve（managed 黑名单 + realpath 落 root 内）。
+// 第二层在 DockerWikiFileSystem（managed 黑名单 SKIP_DIRS 段 / SKIP_FILES 末段 →
+// WikiInvalidPath）；realpath 锚定无 Docker 等价物也无必要（getArchive 以容器为视角，
+// symlink 逃逸不到控制面——安全模型差异见 dockerFs.ts 头注）。
 // 返回 Result（不抛），调用方统一转 90002 + data.path。
+//
+// 写体校验（parseWikiWriteBody）已随 REST 写面退役（#758 Q3，wiki 写面收归 agent）删除——
+// 读面只剩 query path 校验（requireRelPath）。
 
 import { fail } from '../envelope'
 import { CODE } from '../codes'
@@ -30,34 +35,7 @@ export function normalizeRelPath(raw: unknown): RelPathResult {
   return { ok: true, path: norm }
 }
 
-// POST/PUT page body 校验（Django WikiPageWriteSerializer）：{path, content}。
-// content allow_blank=True、trim_whitespace=False（逐字保留首尾空白/尾换行）。收集双字段错误
-// 一次性转 90002（对齐 DRF 聚合 field errors）。
-//
-// 未配对 surrogate（如 JSON 里的 "\ud800"）：JS 字符串可携带，但 Node 的 UTF-8 编码器写盘时静默替换为
-// U+FFFD——PUT 报告成功、后续 GET 返回不同内容，破坏 byte-exact 编辑契约。迁移的 DRF CharField 在文件
-// 系统访问前即拒绝，这里校验并返回 90002（codex 第六轮 P2）。合法 surrogate 对（emoji 等）放行。
-const UNPAIRED_SURROGATE_RE =
-  /(?:[\uD800-\uDBFF](?![\uDC00-\uDFFF]))|(?:(?<![\uD800-\uDBFF])[\uDC00-\uDFFF])/
-
-export function parseWikiWriteBody(body: unknown): { path: string; content: string } {
-  const b = (body ?? {}) as Record<string, unknown>
-  const contentError =
-    typeof b.content !== 'string'
-      ? ['content 不能为空']
-      : UNPAIRED_SURROGATE_RE.test(b.content)
-        ? ['content 含未配对代理字符']
-        : undefined
-  const pathRes = normalizeRelPath(b.path)
-  if (!pathRes.ok) {
-    // 对齐 DRF：path 与 content 双字段错误一次性收集进 data。
-    throw fail(CODE.VALIDATION_FAILED, undefined, contentError ? { path: pathRes.errors, content: contentError } : { path: pathRes.errors })
-  }
-  if (contentError) throw fail(CODE.VALIDATION_FAILED, undefined, { content: contentError })
-  return { path: pathRes.path, content: b.content as string }
-}
-
-// query path 校验（GET/DELETE page）：非法 → 抛 90002 + data.path（normalizeRelPath 的抛形态）。
+// query path 校验（GET page/claims）：非法 → 抛 90002 + data.path（normalizeRelPath 的抛形态）。
 export function requireRelPath(raw: unknown): string {
   const res = normalizeRelPath(raw)
   if (!res.ok) throw fail(CODE.VALIDATION_FAILED, undefined, { path: res.errors })

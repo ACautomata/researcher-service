@@ -1,5 +1,6 @@
-// wiki 6 路由 7 方法（#335 · #315 逐字节迁移；#784 存储面换轨新 wiki 容器；#856 归属门改挂
-// ownerId）—— 挂 /api/v1/wiki（owner 级，对齐 #857 models / sessions 扁平挂用户先例）。
+// wiki 路由（#335 · #315 逐字节迁移；#784 存储面换轨新 wiki 容器；#856 归属门改挂
+// ownerId；#758 Q3 写面退役——只剩读面 tree/page/graph/claims + wiki 更新 run 触发）——
+// 挂 /api/v1/wiki（owner 级，对齐 #857 models / sessions 扁平挂用户先例）。
 //
 // #856（退役①）：归属门从容器行解析（getInstanceForUser）改为认证身份直派生，wiki 域与
 // 容器行完全脱钩（容器行删除后 wiki 功能无损运行，为③容器消费面退役清障）。随之移除：
@@ -14,7 +15,11 @@
 // 「归属先于 ensure」由派生封闭兑现。
 // compile 触发（#315 §6）已随 #859 退役：busybox 级 wiki 容器无 openclaw 运行时，索引生成
 // 归 OpenWiki 工具形态（#737，G 节 wiki 三通道）。
-// 错误映射：path 非法/穿越/managed → 90002(data.path) · 页不存在 → 30040 · 页已存在 → 30041。
+// 写面退役（#758 Q3）：PUT/POST/DELETE /wiki/page 与写体校验（parseWikiWriteBody）随 REST 写面
+// 下线；service/适配器写方法（writePage/createPage/deletePage）后因零生产调用随写面整域退役
+// 物理删除——agent 写路径 = runner/wikigen mirror pushBack（putArchive + diff rm）+
+// FilesystemBackend，不经 WikiService。REST 只剩读面。
+// 错误映射：path 非法/穿越/managed → 90002(data.path) · 页不存在 → 30040。
 
 import { Router, type Request, type Response } from 'express'
 import { fail, ok } from '../envelope'
@@ -24,9 +29,8 @@ import { mustChangePasswordGate } from '../middleware/mustChangePasswordGate'
 import { wikiContainerName } from '../wikiContainers/runtime'
 import { DockerWikiFileSystem } from './dockerFs'
 import { WikiService } from './service'
-import { WikiInvalidPath, WikiPageExists, WikiPageNotFound } from './errors'
-import { parseWikiWriteBody, requireRelPath } from './paths'
-
+import { WikiInvalidPath, WikiPageNotFound } from './errors'
+import { requireRelPath } from './paths'
 // wiki 容器生命周期 ensure 面（kind=wiki 支路，#784）：结构子集注入（生产 = WikiContainerLifecycle）。
 // 返回 void：快照无消费面（ensure 是 create/health 合一面，成功即容器 running）。
 export interface WikiContainersEnsurePort {
@@ -94,39 +98,8 @@ export function createWikiRouter(deps: WikiRouterDeps = {}): Router {
     }
   })
 
-  // PUT /wiki/page —— 覆写已存在页（byte-exact 保留空白）。
-  router.put('/page', async (req: Request, res: Response) => {
-    const body = parseWikiWriteBody(req.body) // 非法 → 90002；先于 ensure（非法请求不触碰编排面）
-    try {
-      await serviceFor(await ownerWithEnsure(req)).writePage(body.path, body.content)
-    } catch (err) {
-      assertPageOpError(err)
-    }
-    ok(res, { path: body.path })
-  })
-
-  // POST /wiki/page —— 新建页。
-  router.post('/page', async (req: Request, res: Response) => {
-    const body = parseWikiWriteBody(req.body)
-    try {
-      await serviceFor(await ownerWithEnsure(req)).createPage(body.path, body.content)
-    } catch (err) {
-      if (err instanceof WikiPageExists) throw fail(CODE.WIKI_PAGE_EXISTS)
-      assertPageOpError(err)
-    }
-    ok(res, { path: body.path })
-  })
-
-  // DELETE /wiki/page?path= —— 删页。
-  router.delete('/page', async (req: Request, res: Response) => {
-    const relPath = requireRelPath(req.query.path)
-    try {
-      await serviceFor(await ownerWithEnsure(req)).deletePage(relPath)
-    } catch (err) {
-      assertPageOpError(err)
-    }
-    ok(res, null)
-  })
+  // 写面退役（#758 Q3：wiki 只剩读面，写面整体收归 agent——页写删经 OpenWiki 工具/wiki 更新
+  // run，不经 REST）：PUT/POST/DELETE /wiki/page 已下线（→ 全局 90005 信封兜底）。
 
   // GET /wiki/graph —— 全库图谱（nodes + edges；边不 dedup、不可解析 → ghost 节点）。
   router.get('/graph', async (req: Request, res: Response) => {

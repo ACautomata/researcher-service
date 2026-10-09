@@ -1,14 +1,14 @@
 // FileArchive Port（#589 · ADR 0012 文件操作经 Docker 原语；T0 #801 只读化收缩）。
-// 业务层只依赖本接口；docker 接触面在 dockerArchive.ts（getArchive/putArchive/exec），
+// 业务层只依赖本接口；docker 接触面在 dockerArchive.ts（getArchive 读通道），
 // 测试注入内存 fake（接缝 #2）。所有方法抛 files 域异常（errors.ts）：
-// 不存在 → FileNotFound、已存在（create）→ FileExists、路径语义非法 → FileInvalidPath。
+// 不存在 → FileNotFound、路径语义非法 → FileInvalidPath。
 //
-// 现役消费面（T0 #801 + #858 后）：
+// 现役消费面（T0 #801 + #858 后，只读）：
 //   - files 域 = root=lab 沙箱只读 GET 面（readLab/readLabBytes，经 files/routes.ts）；
-//   - 附件下载字节通道（readLabBytes，#780 AttachmentsService 复用同一 archive 实例）；
-//   - wiki 域 REST 写面（#784 显式容器名三方法，经 wiki/dockerFs.ts）。
-// legacy fleet 文件树 read/write/create/delete、files/raw 媒体字节通道与 seedWorkspace 灌卷
-//（#858 fleet create 流程退役）先后随清退删除。
+//   - 附件下载字节通道（readLabBytes，#780 AttachmentsService 复用同一 archive 实例）。
+// legacy fleet 文件树 read/write/create/delete、files/raw 媒体字节通道、seedWorkspace 灌卷
+//（#858 fleet create 流程退役）先后随清退删除；wiki 域显式容器名写/建/删三方法（#784
+// InContainer 系）随 #758 Q3 wiki 写面整域退役删除（最后调用方 wiki/dockerFs 写面已移除）。
 
 export interface FileEntry {
   // 相对 root 的完整相对路径（无尾斜杠；目录经 type 区分）
@@ -51,9 +51,4 @@ export interface FileArchive {
   // 图片/音视频字节透传）。dockerName = 沙箱容器 docker 名原文；树根固定 /lab。超大（>
   // MAX_FILE_READ_BYTES）/ 非文件条目 → FileInvalidPath。
   readLabBytes(dockerName: string, relPath: string): Promise<Buffer>
-  // ---- 显式容器名写面（#784）：wiki 域 REST 挂 wiki 容器（researcher-wiki-<ownerId>，树根 /wiki）
-  // ——不套前缀、树根直给。语义：probe 守卫 / mkdir -p / rm -f 只删文件 ----
-  writeInContainer(dockerName: string, absRoot: string, relPath: string, content: string): Promise<void>
-  createInContainer(dockerName: string, absRoot: string, relPath: string, content: string): Promise<void>
-  deleteInContainer(dockerName: string, absRoot: string, relPath: string): Promise<void>
 }

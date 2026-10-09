@@ -10,7 +10,7 @@ import { encodeFrame } from './logic'
 // 扩展点：session/run/approval 域事件经 publish 扇出——run 域自 #777 起由 RunService 直接
 // publish（投影面 = runner/runtime/projector.ts，消费 v3 protocol events）；terminate 由
 // logout（auth 路由注入）与心跳存活检查（路由层 isActive 复查，#726「用户被吊销 →
-// session.terminated」）触发。
+// session.terminated」）触发；连接域 error 经 publishError（无自动触发点，见其注记）。
 
 // 连接写出口（Port）：send 返回 false 表示连接已不可写（扇出方据此注销）。
 export interface StreamSink {
@@ -82,5 +82,18 @@ export class StreamHub {
     if (!set) return
     for (const sink of [...set]) sink.close()
     this.conns.delete(userId)
+  }
+
+  // 连接域 error 事件（#747 C 节定稿目录连接域第三成员；字段准据 #726 resolution
+  // 「error{5xxxx}」——payload 仅 5xxxx 数值码，复用 REST 5xxxx 码段，码表见 codes.ts；
+  // hub 不 import codes 保持扇出层与码表解耦）。流级服务端错误的带内通知：不关连接
+  // （区别 terminate 的停重连语义），帧占一个 seq（游标对客户端连续）。
+  // 现架构无自动触发点（规格开放）——发射函数 + 契约测试（eventsHub.test.ts）即边界，
+  // 触发场景出现时由调用方显式发射（#747 R1 Spec②）。
+  publishError(userId: string, code: number): void {
+    this.fanOut(userId, this.nextSeq(userId), {
+      type: 'error',
+      payload: { code },
+    })
   }
 }

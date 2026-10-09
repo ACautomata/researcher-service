@@ -1,11 +1,13 @@
 // WikiService 聚合逻辑单测（#335 · 对 fake WikiFileSystem 直测，不碰磁盘/DB）。
 // 契约锚点 = backend/wiki/tests/test_service_fake_fs.py + test_graph_api.py。
-// 验证：CRUD 域错误映射、buildGraph 节点/边/ghost/不 dedup。
+// 验证：读面域错误映射、buildGraph 节点/边/ghost/不 dedup。
+// 写面三方法（writePage/createPage/deletePage）用例随 #758 Q3 写面整域退役删除
+// （零生产调用——agent 写路径 = runner/wikigen mirror pushBack + FilesystemBackend）。
 // fake 自 #621 起共享于 ./fakes（REST 契约测试 wiki.test.ts 同用）。
 
 import { createHash } from 'node:crypto'
 import { describe, it, expect } from 'vitest'
-import { WikiInvalidPath, WikiPageExists, WikiPageNotFound } from '../src/wiki/errors'
+import { WikiInvalidPath, WikiPageNotFound } from '../src/wiki/errors'
 import { WikiService } from '../src/wiki/service'
 import { FakeWikiFileSystem } from './fakes'
 
@@ -18,7 +20,7 @@ function fixtureFs(): FakeWikiFileSystem {
   })
 }
 
-describe('WikiService CRUD（fake FS）', () => {
+describe('WikiService 读面（fake FS）', () => {
   it('build_tree：按页面真实顶层目录分组，未知目录也成组；无页目录不成组', async () => {
     const svc = new WikiService(fixtureFs())
     const tree = await svc.buildTree()
@@ -43,38 +45,12 @@ describe('WikiService CRUD（fake FS）', () => {
     await expect(new WikiService(fixtureFs()).readPage('concepts/nope.md')).rejects.toBeInstanceOf(WikiPageNotFound)
   })
 
-  it('write_page 覆写；缺失 → WikiPageNotFound', async () => {
-    const svc = new WikiService(fixtureFs())
-    await svc.writePage('concepts/attention.md', '# 已编辑\n')
-    expect((await svc.readPage('concepts/attention.md')).content).toBe('# 已编辑\n')
-    await expect(svc.writePage('concepts/nope.md', 'x')).rejects.toBeInstanceOf(WikiPageNotFound)
-  })
-
-  it('create_page 新建；已存在 → WikiPageExists', async () => {
-    const svc = new WikiService(fixtureFs())
-    await svc.createPage('concepts/new.md', '# New\n')
-    expect((await svc.readPage('concepts/new.md')).content).toBe('# New\n')
-    await expect(svc.createPage('concepts/attention.md', 'x')).rejects.toBeInstanceOf(WikiPageExists)
-  })
-
-  it('delete_page 删除；缺失 → WikiPageNotFound', async () => {
-    const svc = new WikiService(fixtureFs())
-    await svc.deletePage('concepts/attention.md')
-    await expect(svc.readPage('concepts/attention.md')).rejects.toBeInstanceOf(WikiPageNotFound)
-    await expect(svc.deletePage('concepts/nope.md')).rejects.toBeInstanceOf(WikiPageNotFound)
-  })
-
-  it('路径越权（穿越/managed 目录/managed 文件）在 CRUD 全路径上抛 WikiInvalidPath', async () => {
+  it('路径越权（穿越/managed 目录/managed 文件）在读面路径上抛 WikiInvalidPath', async () => {
     const svc = new WikiService(fixtureFs())
     const cases: Array<() => Promise<unknown>> = [
       () => svc.readPage('../../evil.md'),
       () => svc.readPage('_attachments/evil.md'),
       () => svc.readPage('concepts/index.md'),
-      () => svc.writePage('../../evil.md', 'x'),
-      () => svc.createPage('_attachments/evil.md', 'x'),
-      () => svc.createPage('concepts/index.md', 'x'),
-      () => svc.deletePage('../../evil.md', ),
-      () => svc.deletePage('_attachments/evil.md'),
     ]
     for (const fn of cases) {
       await expect(fn()).rejects.toBeInstanceOf(WikiInvalidPath)
@@ -185,7 +161,7 @@ describe('WikiService buildGraph markdown 相对链接边（#789 story 43）', (
 })
 
 describe('SKIP 集扩充（#789：log.md/INSTRUCTIONS.md/.claims）', () => {
-  it('SKIP 文件与 .claims 不进树；写侧拒绝（managed 黑名单）', async () => {
+  it('SKIP 文件与 .claims 不进树；读侧拒绝（managed 黑名单）', async () => {
     const fs = new FakeWikiFileSystem({
       'log.md': '# Log\n',
       'INSTRUCTIONS.md': '# How\n',
@@ -196,8 +172,8 @@ describe('SKIP 集扩充（#789：log.md/INSTRUCTIONS.md/.claims）', () => {
     const tree = await svc.buildTree()
     const paths = tree.groups.flatMap((g) => g.pages.map((p) => p.path))
     expect(paths).toEqual(['concepts/a.md'])
-    await expect(svc.writePage('log.md', 'x')).rejects.toBeInstanceOf(WikiInvalidPath)
-    await expect(svc.createPage('INSTRUCTIONS.md', 'x')).rejects.toBeInstanceOf(WikiInvalidPath)
+    await expect(svc.readPage('log.md')).rejects.toBeInstanceOf(WikiInvalidPath)
+    await expect(svc.readPage('INSTRUCTIONS.md')).rejects.toBeInstanceOf(WikiInvalidPath)
   })
 })
 
@@ -247,7 +223,7 @@ describe('WikiService okf 徽章与 claims 只读面（#789 story 41/42 数据�
     expect(claims.drift).toBe('fresh')
     expect(claims.claims[0]!.evidence[0]!.resource).toBe('repo://x.ts#L1-L2')
 
-    await svc.writePage('concepts/attention.md', OKF_PAGE + '\n追加。')
+    fs.pages.set('concepts/attention.md', OKF_PAGE + '\n追加。')
     const drifted = await svc.readClaims('concepts/attention.md')
     expect(drifted.drift).toBe('drifted')
   })

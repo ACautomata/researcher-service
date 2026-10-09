@@ -54,9 +54,9 @@ export interface AppDeps {
 // createApp 工厂：PrismaClient 经依赖注入，测试可传 test DB（接缝 #2）。
 export function createApp({ prisma, wiki, files, docs, events, sessions, attachments, plugins, models }: AppDeps): Application {
   const app = express()
-  // wiki 内容契约无大小上限（codex PR#346）：挂载路径内请求先走 5mb limit，其余端点仍 256kb。
-  // 须先于全局 parser —— body-parser 对已解析 body（req._body）会跳过，故 wiki 命中后不二次解析。
-  app.use('/api/v1/wiki', express.json({ limit: '5mb' }))
+  // wiki 5mb json 特例已随写面整域退役删除（#758 Q3——codex PR#346 的大 body 契约随
+  // PUT/POST/DELETE /wiki/page 下线失效）：现存读面 GET 无 body，POST /wiki/update 触发面
+  // 不读 body（路由内无 zod schema），回全局 256kb。
   app.use(express.json({ limit: '256kb' }))
   app.use(cookieParser())
   app.use((req: Request, _res: Response, next: NextFunction) => {

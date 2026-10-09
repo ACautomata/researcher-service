@@ -9,46 +9,33 @@
 //     不合 wiki 契约（readPage content 恒 string、tree title 需 frontmatter）。snapshot() 经
 //     getArchive 拉全库 tar + parseTar 收集内容，buildTree 在快照上跑与
 //     NodeFs 等价的过滤/分组/title 语义；readPage 单文件 probe（无字节上限，对齐 NodeFs 全读）。
-//   - 写侧委托 FileArchive 显式容器名三方法（writeInContainer/createInContainer/deleteInContainer，
-//     #784）：write/create/delete 的原语序列（幂等 start → exec mkdir → putArchive / exec rm）
-//     与错误语义现成；异常经映射膜转 wiki 族。**写面前置 = 路由层 ensure**（wiki 容器 running，
-//     exec 可用——routes.ts resolveInstance 内 ensure，本层不再自 start 兜底）。
-//   - managed 黑名单（SKIP_DIRS 段 / SKIP_FILES 末段 → WikiInvalidPath）在本层前置——
-//     FileArchive 不知 wiki 的 SKIP 集合（对齐 NodeFs assertNotManaged，请求层 paths.ts 不做）。
+//   - 写面已随 #758 Q3 写面整域退役物理删除（writePage/createPage/deletePage 及其委托的
+//     FileArchive 显式容器名三方法窄接口 WikiContainerArchive、异常映射膜、createPage 父链
+//     守卫）——零生产调用：agent 写路径 = runner/wikigen mirror pushBack（putArchive + diff rm）
+//     + FilesystemBackend，不经 WikiService。本适配器只剩读侧。
+//   - managed 黑名单（SKIP_DIRS 段 / SKIP_FILES 末段 → WikiInvalidPath）在本层前置——读面
+//     页请求逐路径拒 managed（对齐 NodeFs assertNotManaged，请求层 paths.ts 不做）。
 //
 // 与 NodeFs 的安全模型差异（有意，注释即契约）：
-//   - symlink/TOCTOU 锚定防护无 Docker 等价物也无必要：getArchive/putArchive 以容器为视角，
+//   - symlink/TOCTOU 锚定防护无 Docker 等价物也无必要：getArchive 以容器为视角，
 //     tar 内容由控制面解析、不落控制面盘，容器内 symlink 逃逸不到控制面文件系统；路径合法性
 //     由请求层 paths.ts（穿越/绝对/反斜杠/NUL）+ 本层 managed 黑名单承载。
-//   - createPage 从 open(wx) 原子独占退化为 probe+putArchive 两步（Docker 原语无 O_EXCL）：
-//     并发 POST 同路径可能后者覆盖前者（原 EEXIST 拒）。面板单用户单容器场景可接受。
 //   - buildGraph（service 层）逐页 readPage → N 次 getArchive 往返：功能正确，性能后续可
 //     加快照缓存优化，本票不动 service 层。
 
 import Docker from 'dockerode'
-import { DockerFileArchive } from '../files/dockerArchive'
-import { FileExists, FileInvalidPath, FileNotFound } from '../files/errors'
 import { parseTar, type TarEntry } from '../files/tar'
 import { MAX_FILE_READ_BYTES, WALK_LIMIT } from '../files/values'
 import { WIKI_ROOT } from '../wikiContainers/values'
 import { claimsSidecarPath, cmp, decodeUtf8Strict, FrontmatterParser, frontmatterTitle } from './logic'
 import { SKIP_DIRS, SKIP_FILES } from './values'
-import { WikiInvalidPath, WikiPageExists, WikiPageNotFound } from './errors'
+import { WikiInvalidPath, WikiPageNotFound } from './errors'
 import type {
   WikiFileSystem,
   WikiPage,
   WikiTree,
   WikiTreePage,
 } from './fsPort'
-
-// 写面窄接口（#784）：files 域 DockerFileArchive 的显式容器名三方法——(name, root) 寻址是
-// legacy fleet 契约（root 词表已随 T0 #801 退役），wiki 容器不走 root 词表寻址也不套 openclaw-gw- 前缀。测试注入 fake
-// 记录调用（wikiDockerFs.test.ts）。
-export interface WikiContainerArchive {
-  writeInContainer(dockerName: string, absRoot: string, relPath: string, content: string): Promise<void>
-  createInContainer(dockerName: string, absRoot: string, relPath: string, content: string): Promise<void>
-  deleteInContainer(dockerName: string, absRoot: string, relPath: string): Promise<void>
-}
 
 // 快照 tar 全量字节上限：正常 wiki 库为几 MB 量级，但 _attachments 等 SKIP 目录的附件字节
 // 也会被 getArchive 一并拉出，故取宽裕值。超限降级「空树/空聚合」（对齐 NodeFs「单目录
@@ -64,11 +51,10 @@ export type WikiProbeResult =
   | { kind: 'link' }
   | null
 
-// 注入接缝：生产全缺省（真 docker）；单测注入 fake snapshot/probeFile/archive 纯逻辑直测，
+// 注入接缝：生产全缺省（真 docker）；单测注入 fake snapshot/probeFile 纯逻辑直测，
 // 缺省实现的 docker 接线由 mock client 测（对齐 dockerFileArchive.test.ts 模式）。
 export interface DockerWikiDeps {
   docker?: () => Docker
-  archive?: WikiContainerArchive
   /** wiki 树根覆盖（缺省 WIKI_ROOT = /wiki；测试可注入异形根） */
   rootPath?: string
   snapshot?: () => Promise<TarEntry[] | null>
@@ -89,7 +75,6 @@ function stemOf(name: string): string {
 
 export class DockerWikiFileSystem implements WikiFileSystem {
   private readonly parser = new FrontmatterParser()
-  private readonly archive: WikiContainerArchive
   private readonly snap: () => Promise<TarEntry[] | null>
   private readonly probeFile: (relPath: string) => Promise<WikiProbeResult>
   // 寻址面只读暴露（测试断言 docker 名/树根派生；运行期只读）
@@ -103,7 +88,6 @@ export class DockerWikiFileSystem implements WikiFileSystem {
     this.dockerName = dockerName
     this.rootPath = deps.rootPath ?? WIKI_ROOT
     const docker = deps.docker ?? (() => new Docker())
-    this.archive = deps.archive ?? new DockerFileArchive(docker)
     this.snap = deps.snapshot ?? (() => this.defaultSnapshot(docker()))
     this.probeFile = deps.probeFile ?? ((relPath) => this.defaultProbeFile(docker(), relPath))
   }
@@ -143,47 +127,12 @@ export class DockerWikiFileSystem implements WikiFileSystem {
     return { path: relPath, title: frontmatterTitle(frontmatter) ?? stem, content }
   }
 
-  // —— Port: write_page / create_page / delete_page（委托 FileArchive 显式容器名三方法）——
-
-  async writePage(relPath: string, content: string): Promise<{ path: string }> {
-    this.assertNotManaged(relPath)
-    try {
-      await this.archive.writeInContainer(this.dockerName, this.rootPath, relPath, content)
-    } catch (err) {
-      throw this.mapArchiveError(err, relPath)
-    }
-    return { path: relPath }
-  }
-
-  async createPage(relPath: string, content: string): Promise<{ path: string }> {
-    this.assertNotManaged(relPath)
-    await this.assertParentsAreDirs(relPath) // 父段为文件/link → WikiInvalidPath（保 90002，见下）
-    try {
-      // FileArchive.create 语义：已存在 → FileExists；父目录不存在自动 mkdir -p（#621 有意
-      // 放宽——旧 NodeFs 父目录缺失 → 90002，现为「输入合法路径即可建」，消除误导性 90002）。
-      await this.archive.createInContainer(this.dockerName, this.rootPath, relPath, content)
-    } catch (err) {
-      throw this.mapArchiveError(err, relPath)
-    }
-    return { path: relPath }
-  }
-
-  async deletePage(relPath: string): Promise<void> {
-    this.assertNotManaged(relPath)
-    try {
-      await this.archive.deleteInContainer(this.dockerName, this.rootPath, relPath)
-    } catch (err) {
-      throw this.mapArchiveError(err, relPath)
-    }
-    return
-  }
-
   // —— Port: read_claims_file（#789 claims 只读面）——
 
   // 页路径 → .claims 镜像旁车（claimsSidecarPath 单点映射）。调用方（service.readClaims）
   // 已先经 readPage 的 assertNotManaged/probe 校验页本体——旁车是 openwiki 生成物，读侧
-  // 不再过 managed 黑名单（.claims 在 SKIP_DIRS：树/图不收、写侧仍拒；这里是旁车的唯一
-  // 合法读出口）。旁车缺失/非 UTF-8 → null（「无旁车」语义，不放大为读失败）。
+  // 不再过 managed 黑名单（.claims 在 SKIP_DIRS：树/图不收；这里是旁车的唯一合法读出口）。
+  // 旁车缺失/非 UTF-8 → null（「无旁车」语义，不放大为读失败）。
   async readClaimsFile(relPath: string): Promise<string | null> {
     const probed = await this.probeFile(claimsSidecarPath(relPath))
     if (probed === null || probed.kind !== 'file') return null
@@ -230,35 +179,11 @@ export class DockerWikiFileSystem implements WikiFileSystem {
   }
 
   // managed 黑名单（#315 §4 第②层，对齐 NodeFs assertNotManaged）：任一段命中 SKIP_DIRS、
-  // 或末段命中 SKIP_FILES → 拒。三写一读前置（FileArchive 层不知 SKIP 集合）。
+  // 或末段命中 SKIP_FILES → 拒。读面页请求前置。
   private assertNotManaged(relPath: string): void {
     const parts = relPath.split('/')
     if (parts.some((seg) => SKIP_DIRS.has(seg))) throw new WikiInvalidPath(relPath)
     if (SKIP_FILES.has(parts[parts.length - 1])) throw new WikiInvalidPath(relPath)
-  }
-
-  // createPage 父链守卫（保 nodeFs ENOTDIR → 90002 契约）：create 的 mkdir -p 遇父段为普通
-  // 文件（如 notes.md/child.md，notes.md 已是文件）时 exec 退出码非 0 → 抛裸 Error
-  // （不在 files 异常族）→ 路由 90000；nodeFs 旧实现 open(wx) 抛 ENOTDIR → WikiInvalidPath
-  // → 90002。此处 createPage 前置逐段 probe 已存在的父段：file/link → WikiInvalidPath（保
-  // 90002）；null（父段不存在）放行（mkdir -p 创建）；dir 放行。仅 createPage 需要——
-  // writePage 目标须已存在（父链必是目录），deletePage 目标不存在已 30040。
-  private async assertParentsAreDirs(relPath: string): Promise<void> {
-    const parts = relPath.split('/').filter(Boolean)
-    for (let i = 1; i < parts.length; i++) {
-      const parent = parts.slice(0, i).join('/')
-      const probed = await this.probeFile(parent)
-      if (probed === null) continue
-      if (probed.kind !== 'dir') throw new WikiInvalidPath(relPath)
-    }
-  }
-
-  // files 域异常 → wiki 域异常映射膜（路由只认 wiki 族：30040/30041/90002）。
-  private mapArchiveError(err: unknown, relPath: string): Error {
-    if (err instanceof FileNotFound) return new WikiPageNotFound(relPath)
-    if (err instanceof FileExists) return new WikiPageExists(relPath)
-    if (err instanceof FileInvalidPath) return new WikiInvalidPath(relPath)
-    return err as Error
   }
 
   // —— 缺省 docker 实现（生产路径；单测注入 fake 绕过） ——

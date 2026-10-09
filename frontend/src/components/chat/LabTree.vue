@@ -1,12 +1,12 @@
 <script setup lang="ts">
-// WorkspaceTree —— chat/ 页 workspace 递归文件树（#626 T1 / #618 规格 §2，变体 A）。
+// LabTree —— chat/ 页 lab（会话沙箱工作根）递归文件树（#626 T1 / #618 规格 §2，变体 A）。
 // 哑组件：props 接扁平 DirListing（files 是 recursive walk 全量相对路径数组），内部构造嵌套目录树 →
 // 按折叠态拍平渲染（无递归子组件，DFS rows）。点文件 emit open(path)，点目录切换折叠。
-// 空态：truncated 树底提示 / 空 workspace / treeError / null tree。
+// 空态：truncated 树底提示 / 空 lab 目录 / treeError / null tree。
 import { computed, ref } from 'vue'
 import type { DirListing, FileEntry } from '@/api/files'
 
-defineOptions({ name: 'WorkspaceTree' })
+defineOptions({ name: 'LabTree' })
 
 const props = withDefaults(
   defineProps<{
@@ -86,7 +86,7 @@ const isEmpty = computed(() => !!props.tree && props.tree.files.length === 0 && 
 </script>
 
 <template>
-  <div class="ws-tree" data-test="ws-tree">
+  <div class="lab-tree" data-test="lab-tree">
     <div v-if="treeError" class="state" data-test="tree-error">
       <span class="ic">⚠️</span>
       <span>无法读取 lab 文件：{{ treeError }}</span>
@@ -141,7 +141,7 @@ const isEmpty = computed(() => !!props.tree && props.tree.files.length === 0 && 
 </template>
 
 <style scoped>
-.ws-tree { height: 100%; overflow-y: auto; font-size: 13px; user-select: none; padding: 4px 0; }
+.lab-tree { height: 100%; overflow-y: auto; font-size: 13px; user-select: none; padding: 4px 0; }
 .tn { display: flex; align-items: center; }
 .tn-btn { display: flex; align-items: center; gap: 5px; width: 100%; border: none; background: transparent; color: var(--el-text-color-regular); font: inherit; text-align: left; padding: 4px 8px; cursor: pointer; min-width: 0; }
 .tn-btn:hover { background: var(--el-fill-color-light); }

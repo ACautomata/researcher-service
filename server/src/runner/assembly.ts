@@ -91,6 +91,8 @@ export async function assembleRunner(opts: {
   // key 缺失 = 每 run 装配期静默 job failed（「无声挂死」根因之一），生产崩在健康门（可见可告警）
   // 远好于 run 级静默；dev 警告不阻断（AGENTS.md「仅起控制面/登录可跳过」既有语义）。与
   // assertPluginEnv 同在 listen 之前，crashloop 由部署健康门暴露（#877 先例）。
+  // env 直读 = 配置边界豁免（GLOSSARY「配置边界/豁免」）：组合根装配期一次性注入，经参数下传，
+  // runtime 不直读——同 test harness 豁免理由（装配/测试缝），非 runtime 散读。
   assertLlmApiKey({
     env: process.env,
     production: process.env.NODE_ENV === 'production',
@@ -109,6 +111,7 @@ export async function assembleRunner(opts: {
       coreToolNames: [...FILE_TOOLS, ...EXEC_TOOLS, 'task', 'read_official_skill', ...TEAMMATE_TOOL_NAMES],
       reservedCommandNames: [...SYSTEM_COMMANDS, ...snapshotOfficialContent().commands.map((c) => c.name)],
     })
+    // env 直读 = 配置边界豁免（GLOSSARY「配置边界/豁免」）：组合根装配期一次性注入，经参数下传。
     assertPluginEnv(PLUGIN_MANIFESTS, {
       env: process.env,
       production: process.env.NODE_ENV === 'production',
@@ -117,6 +120,7 @@ export async function assembleRunner(opts: {
         console.warn(`[plugins] ${message}`)
       },
     })
+    // env 直读 = 配置边界豁免（GLOSSARY「配置边界/豁免」）：组合根装配期一次性注入，经参数下传。
     return createPluginRuntime({ manifests: PLUGIN_MANIFESTS, config: resolvePluginConfig(PLUGIN_MANIFESTS, process.env) })
   })()
   // #785 per-path 写锁（互斥域 = 沙箱所属 parent session；有界等待超时 → agent 报错含

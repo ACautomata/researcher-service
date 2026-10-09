@@ -1,4 +1,5 @@
 import { officialSkillTools, type OfficialCatalog } from '../../officialContent/runtime'
+import { joinSections } from './promptSections'
 // Leader 单 agent 图工厂（#777 · #747 A 节「基础 leader 单 agent loop」）。
 //
 // createDeepAgent 三扩展点接线（#724 PoC 验证的形态）：
@@ -46,6 +47,11 @@ export function interruptOnFromPolicy(policy: InterruptPolicy | undefined): Inte
   return on
 }
 
+// prompt 段拼接 = runtime 共享小工具 promptSections.joinSections（#747 R1 Standards⑦
+// 提升；四调用点中三处在本文件 buildLeaderAgent——leader systemPrompt / subagent extras /
+// subagent systemPrompt——第四处 wiki-update teammate 在 runService；全清单以
+// promptSections.ts 头注为权威）。
+
 export interface LeaderAgentParams {
   // 宽进 Runnable：ProviderRegistry.getDefaultModel 产出 withFallbacks 组合链（#747 F 节
   // 「fallback 链由 runner 从配置快照派生 .withFallbacks」）。
@@ -71,7 +77,7 @@ export interface LeaderAgentParams {
 // 构建一个 leader agent 图（纯函数；缓存责任在调用方——RunService 按
 // (threadId, 拓扑因子) 缓存实例，版本变更丢缓存重建，见 runService.ts）。
 export function buildLeaderAgent(params: LeaderAgentParams): DeepAgent {
-  const subagentExtras = [params.official?.prompt, params.pluginPrompt].filter(Boolean).join('\n\n')
+  const subagentExtras = joinSections(params.official?.prompt, params.pluginPrompt)
   return createDeepAgent({
     // deepagents model 参数类型面只收 BaseLanguageModel；withFallbacks 产物
     // （RunnableBinding）运行时具备完整调用面（invoke/stream/bindTools 全委派），类型面
@@ -79,12 +85,12 @@ export function buildLeaderAgent(params: LeaderAgentParams): DeepAgent {
     model: params.model as unknown as NonNullable<CreateDeepAgentParams['model']>,
     backend: params.backend,
     checkpointer: params.checkpointer,
-    systemPrompt: [params.systemPrompt, params.official?.prompt, params.pluginPrompt].filter(Boolean).join('\n\n'),
+    systemPrompt: joinSections(params.systemPrompt, params.official?.prompt, params.pluginPrompt),
     ...(params.official || params.pluginPrompt
       ? {
           subagents: [{
             ...GENERAL_PURPOSE_SUBAGENT,
-            systemPrompt: [GENERAL_PURPOSE_SUBAGENT.systemPrompt, subagentExtras].filter(Boolean).join('\n\n'),
+            systemPrompt: joinSections(GENERAL_PURPOSE_SUBAGENT.systemPrompt, subagentExtras),
           }],
         }
       : {}),

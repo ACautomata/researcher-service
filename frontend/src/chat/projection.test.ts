@@ -233,9 +233,9 @@ describe('applyEvent（实时入口）事件语义', () => {
 describe('零差异一致性（硬验收：reduce(全量事件) ≡ 投影行）', () => {
   // server TurnReducer 语义的投影行构造器：与事件序列一一对应（服务端由 TurnReducer.feed + recordTurn
   // 落行——此处按 reducer.ts 逐条语义手工折叠，作为「服务端会写出什么」的镜像）。
-  // 注意：审批拒绝回喂帧（tool.end 带 rejection，runService.publishRejection 直发）**不经**
-  // server TurnReducer（不落行）——带 rejection 的事件序列不在本一致性组覆盖（服务端投影缺口，
-  // 修复归 server 侧票）；归约器对 rejection 的实时渲染语义由上方单测锁定，终态以投影重拉整替为准。
+  // 审批拒绝回喂帧（tool.start + tool.end{error, rejection}，runService.publishRejection）亦经同一
+  // TurnReducer 实例 feed 落行（reducer.ts rejection 聚合 + 双写纪律：先 feed 后 publish）——服务端
+  // 投影无缺口，rejection 序列纳入本组零差异断言（见末位「审批拒绝回喂轮」场景）。
   function rowsFromEvents(events: SessionEvent[], userText: string): ProjectionMessage[] {
     let content = ''
     let thinking: string | undefined
@@ -253,6 +253,11 @@ describe('零差异一致性（硬验收：reduce(全量事件) ≡ 投影行）
         if (typeof e.payload.durationMs === 'number') t.durationMs = e.payload.durationMs
         if (typeof e.payload.details === 'string') t.details = e.payload.details
         if (e.payload.truncated === true) t.truncated = true
+        // 镜像 server reducer rejection 门：仅 blacklist/judge 二值来源 + string reason 进保留位
+        const r = e.payload.rejection as { source?: unknown; reason?: unknown } | null
+        if (r && (r.source === 'blacklist' || r.source === 'judge') && typeof r.reason === 'string') {
+          t.rejection = { source: r.source, reason: r.reason }
+        }
       }
       if (e.type === 'attachment' && typeof e.payload.attachmentId === 'string') media.push({ ...e.payload })
     }
@@ -336,6 +341,16 @@ describe('零差异一致性（硬验收：reduce(全量事件) ≡ 投影行）
         ev('figure_run.progress', { toolCallId: 'f1', stage: 'rendering' }, { runId: 'r1' }),
         ev('tool.end', { toolCallId: 'f1', state: 'success', durationMs: 4200, details: '{"figureId":"fig1","state":"completed","previewReady":true}' }, { runId: 'r1' }),
         ev('text.delta', { delta: '图已生成。' }, { runId: 'r1' }),
+        ev('run.completed', {}, { runId: 'r1' }),
+      ],
+    },
+    {
+      name: '审批拒绝回喂轮（publishRejection 双写落行：rejection 实时/回放零差异）',
+      events: [
+        ev('run.started', {}, { runId: 'r1' }),
+        ev('tool.start', { toolCallId: 't1', name: 'bash', input: '{"command":"rm -rf build"}' }, { runId: 'r1' }),
+        ev('tool.end', { toolCallId: 't1', name: 'bash', state: 'error', durationMs: 0, details: '命中命令黑名单', rejection: { source: 'blacklist', reason: '命中命令黑名单' } }, { runId: 'r1' }),
+        ev('text.delta', { delta: '该命令被审批拒绝，改用只读方式检查。' }, { runId: 'r1' }),
         ev('run.completed', {}, { runId: 'r1' }),
       ],
     },

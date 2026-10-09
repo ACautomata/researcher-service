@@ -4,7 +4,11 @@
 // #856（退役①）：owner 级端点 /api/v1/wiki/{tree,page,graph,claims}，ownerId 直取
 // 认证身份——容器行 20040 归属面随耦合退役，跨用户探测面结构性消失（隔离测试改为：
 // 各用户寻址只达本人 fake 存储，他人页不可见）；path 校验先于 ensure（非法请求不触碰编排面）。
-// 信封（#312）+ 错误映射（90002/30040/30041）。compile 触发面已随 #859 退役。
+// 信封（#312）+ 错误映射（90002/30040）。compile 触发面已随 #859 退役。
+// 写面退役（#758 Q3）：PUT/POST/DELETE /wiki/page 下线（→ 90005），写面收归 agent——
+// 旧写端点用例随端点删除，退役断言见「写面退役」节；service/适配器写方法（writePage/
+// createPage/deletePage）后因零生产调用随写面整域退役物理删除（agent 写路径 =
+// runner/wikigen mirror pushBack + FilesystemBackend，不经 WikiService）。
 
 import { createHash } from 'node:crypto'
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
@@ -141,85 +145,30 @@ describe('wiki REST（接缝 #2 信封 + #335；#856 owner 级）', () => {
     expect(empty.body.code).toBe(90002)
   })
 
-  // ---------------------------- PUT /page ----------------------------
+  // ---------------------------- 写面退役（#758 Q3：wiki 只剩读面，写面收归 agent）----------------------------
 
-  it('PUT：byte-exact 覆写已存在页（首尾空白/尾换行保留）；返回 {path}', async () => {
-    const u = await seedWikiUser('uput')
-    const res = await ctx.request
-      .put(`${BASE}/page`)
-      .set(bearer(u.token))
-      .send({ path: 'concepts/attention.md', content: '  # 已编辑  \n\n' })
-    expect(res.body.code).toBe(0)
-    expect(res.body.data).toEqual({ path: 'concepts/attention.md' })
+  it('PUT/POST/DELETE /wiki/page 已退役：写面收归 agent，三个写方法 → 90005 路由不存在（读面不动）', async () => {
+    const u = await seedWikiUser('uwrite-retired')
+    const put = await ctx.request
+      .put(`${BASE}/page`).set(bearer(u.token)).send({ path: 'concepts/attention.md', content: 'x' })
+    expect(put.status).toBe(200) // #312 信封纪律：错误信号在 body（参照 figuresHistory 退役断言形态）
+    expect(put.body.code).toBe(90005) // ROUTE_NOT_FOUND
+    const post = await ctx.request
+      .post(`${BASE}/page`).set(bearer(u.token)).send({ path: 'concepts/new.md', content: 'x' })
+    expect(post.body.code).toBe(90005)
+    const del = await ctx.request
+      .delete(`${BASE}/page?path=${encodeURIComponent('concepts/attention.md')}`).set(bearer(u.token))
+    expect(del.body.code).toBe(90005)
+    // 读面不受影响：退役只收写面。
     const read = await ctx.request
-      .get(`${BASE}/page?path=${encodeURIComponent('concepts/attention.md')}`)
-      .set(bearer(u.token))
-    expect(read.body.data.content).toBe('  # 已编辑  \n\n')
-  })
-
-  it('PUT 页不存在 → 30040；managed 路径 → 90002', async () => {
-    const u = await seedWikiUser('uput2')
-    const missing = await ctx.request
-      .put(`${BASE}/page`).set(bearer(u.token)).send({ path: 'concepts/nope.md', content: 'x' })
-    expect(missing.body.code).toBe(30040)
-    for (const managed of ['index.md', 'AGENTS.md', 'concepts/index.md', '_attachments/cache/foo.md']) {
-      const res = await ctx.request
-        .put(`${BASE}/page`).set(bearer(u.token)).send({ path: managed, content: 'x' })
-      expect(res.body.code, `managed 路径写入未被拒: ${managed}`).toBe(90002)
-    }
-  })
-
-  // ---------------------------- POST /page ----------------------------
-
-  it('POST：新建页落盘；返回 {path}', async () => {
-    const u = await seedWikiUser('upost')
-    const res = await ctx.request
-      .post(`${BASE}/page`)
-      .set(bearer(u.token))
-      .send({ path: 'concepts/transformer.md', content: '---\ntitle: Transformer\n---\n# T\n' })
-    expect(res.body.code).toBe(0)
-    expect(res.body.data).toEqual({ path: 'concepts/transformer.md' })
-  })
-
-  it('POST 已存在 → 30041；path 注入 / managed → 90002', async () => {
-    const u = await seedWikiUser('upost2')
-    const exists = await ctx.request
-      .post(`${BASE}/page`).set(bearer(u.token)).send({ path: 'concepts/attention.md', content: 'x' })
-    expect(exists.body.code).toBe(30041)
-    const inject = await ctx.request
-      .post(`${BASE}/page`).set(bearer(u.token)).send({ path: '../../evil.md', content: 'x' })
-    expect(inject.body.code).toBe(90002)
-    const managed = await ctx.request
-      .post(`${BASE}/page`).set(bearer(u.token)).send({ path: '_attachments/evil.md', content: 'x' })
-    expect(managed.body.code).toBe(90002)
-  })
-
-  // ---------------------------- DELETE /page ----------------------------
-
-  it('DELETE：删页；成功 data null', async () => {
-    const u = await seedWikiUser('udel')
-    const res = await ctx.request
-      .delete(`${BASE}/page?path=${encodeURIComponent('concepts/attention.md')}`)
-      .set(bearer(u.token))
-    expect(res.body.code).toBe(0)
-    expect(res.body.data).toBeNull()
-  })
-
-  it('DELETE 页不存在 → 30040；path 注入 → 90002', async () => {
-    const u = await seedWikiUser('udel2')
-    const missing = await ctx.request
-      .delete(`${BASE}/page?path=${encodeURIComponent('concepts/nope.md')}`)
-      .set(bearer(u.token))
-    expect(missing.body.code).toBe(30040)
-    const inject = await ctx.request.delete(`${BASE}/page?path=../../secret.md`).set(bearer(u.token))
-    expect(inject.body.code).toBe(90002)
-    const managed = await ctx.request.delete(`${BASE}/page?path=index.md`).set(bearer(u.token))
-    expect(managed.body.code).toBe(90002)
+      .get(`${BASE}/page?path=${encodeURIComponent('concepts/attention.md')}`).set(bearer(u.token))
+    expect(read.body.code).toBe(0)
+    expect(read.body.data.content).toContain('# Attention')
   })
 
   // ---------------------------- NUL / body limit（codex PR#346）----------------------------
 
-  it('path 含 NUL 字节 → 90002 + data.path（GET query 与 POST/PUT body 一致，codex PR#346）', async () => {
+  it('path 含 NUL 字节 → 90002 + data.path（GET query，codex PR#346）', async () => {
     const u = await seedWikiUser('unul')
     const nulPath = 'concepts/a\u0000.md'
     const g = await ctx.request
@@ -227,28 +176,6 @@ describe('wiki REST（接缝 #2 信封 + #335；#856 owner 级）', () => {
       .set(bearer(u.token))
     expect(g.body.code).toBe(90002)
     expect(g.body.data).toHaveProperty('path')
-    const p = await ctx.request
-      .post(`${BASE}/page`).set(bearer(u.token)).send({ path: nulPath, content: 'x' })
-    expect(p.body.code).toBe(90002)
-    expect(p.body.data).toHaveProperty('path')
-    const put = await ctx.request
-      .put(`${BASE}/page`).set(bearer(u.token)).send({ path: nulPath, content: 'x' })
-    expect(put.body.code).toBe(90002)
-    expect(put.body.data).toHaveProperty('path')
-  })
-
-  it('PUT 大页面（>256kb 通用 body limit）保存成功：wiki 走独立大 limit（codex PR#346）', async () => {
-    const u = await seedWikiUser('ubig')
-    const big = `# Big\n\n${'x'.repeat(300_000)}\n`
-    const res = await ctx.request
-      .put(`${BASE}/page`)
-      .set(bearer(u.token))
-      .send({ path: 'concepts/attention.md', content: big })
-    expect(res.body.code).toBe(0)
-    const read = await ctx.request
-      .get(`${BASE}/page?path=${encodeURIComponent('concepts/attention.md')}`)
-      .set(bearer(u.token))
-    expect(read.body.data.content).toHaveLength(big.length)
   })
 
   it('body 超限（非 wiki 端点仍受 256kb）→ 90002，非 90000（entity.too.large 显式映射）', async () => {

@@ -279,7 +279,7 @@ describe('ChatView（REST+SSE 三件套接线）', () => {
     await w.find('[data-test="side-tab-files"]').trigger('click')
     await flushPromises()
     expect(filesApi.listLabTree).toHaveBeenCalledWith('sess-1')
-    // WorkspaceTree 按路径段分节点渲染（notes 目录 + a.md 文件）
+    // LabTree 按路径段分节点渲染（notes 目录 + a.md 文件）
     expect(w.text()).toContain('a.md')
   })
 })

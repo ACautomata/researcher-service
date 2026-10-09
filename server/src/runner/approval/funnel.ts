@@ -191,10 +191,23 @@ export class ApprovalFunnel {
     })
   }
 
-  /** resume 启动：保留计数器与升级 memo（同一逻辑 run 的延续），仅刷新谨慎模式。 */
-  refreshRun(threadId: string, opts: { cautious: boolean }): void {
+  /** resume/recover 启动：内存态在 = 同一逻辑 run 的延续——保留计数器、升级 memo 与审计
+   *  identity（审批归属创建时 run，审计行挂首段 runId——join interrupted 轮 failed trace 行），
+   *  仅刷新谨慎模式。内存态缺失（控制面重启后的 resume/recover）= 以当前命令身份重建槽位
+   *  （identity 由 RunService 从命令上下文推导）——空串兜底使 tool_approval_logs.traceId
+   *  弱关联 join 恒空（ADR 0015 断链面，R3 修复②）。 */
+  refreshRun(threadId: string, opts: { cautious: boolean; identity: FunnelIdentity }): void {
     const state = this.runs.get(threadId)
-    if (!state) return // 重启后 resume：状态缺失由 wrapToolCall 兜底重建（fail-closed 面）
+    if (!state) {
+      this.runs.set(threadId, {
+        cautious: opts.cautious,
+        identity: opts.identity,
+        judgeCalls: 0,
+        rejectCounts: new Map(),
+        escalationMemos: new Map(),
+      })
+      return
+    }
     state.cautious = opts.cautious
   }
 
@@ -227,7 +240,9 @@ export class ApprovalFunnel {
     )
     let state = this.runs.get(threadId)
     if (!state) {
-      // 无运行状态（重启后仅 resume / 装配遗漏）：按谨慎模式兜底（fail-closed 走人工升级）
+      // 无运行状态（装配遗漏面——RunService 的 beginRun/refreshRun 已覆盖 message/resume/
+      // recover 一切命令形态，正常 run 不会到达此处）：按谨慎模式兜底（fail-closed 走人工升级）。
+      // identity 无命令上下文可推导，留空串——RunService 路径已由 refreshRun 重建兜住。
       state = {
         cautious: true,
         identity: { runId: '', userId: '', traceId: '' },

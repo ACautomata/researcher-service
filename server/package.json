@@ -16,6 +16,7 @@
     "prisma:generate": "prisma generate",
     "prisma:validate": "prisma validate",
     "db:apply": "node scripts/apply-schema.mjs",
+    "export:neutral": "tsx scripts/export-neutral.mts",
     "content:build": "node scripts/build-official-content.mjs",
     "predev": "npm run content:build",
     "pretest": "npm run content:build"

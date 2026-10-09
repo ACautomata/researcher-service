@@ -183,6 +183,11 @@ describe('OpenAPI 文档面（#761）', () => {
     )
   })
 
+  it('wiki 写面退役（#758 Q3）：/api/v1/wiki/page 只剩 get，put/post/delete 文档面注册清零', async () => {
+    const doc = await adminDoc()
+    expect(Object.keys(doc.paths['/api/v1/wiki/page']).sort()).toEqual(['get'])
+  })
+
   it('admin 端点注明专属门控语义', async () => {
     const doc = await adminDoc()
     expect(doc.paths['/api/v1/users'].get.description).toContain('admin')

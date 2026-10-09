@@ -4,10 +4,12 @@
 //   - validatePath：拒 `..` / SKIP_DIRS 段 / SKIP_FILES 末段 → WikiInvalidPath（managed 黑名单）；
 //   - buildTree：按顶层目录分组，顶层散落页不收；title = frontmatter → stem（**无 H1**，对齐真实现）；
 //   - readPage：title = frontmatter → stem（**无 H1**）。
+// 只余读面：写面三方法（writePage/createPage/deletePage）随 #758 Q3 写面整域退役删除——
+// 测试播种/改页直接写 pages/claims Map。
 
 import { claimsSidecarPath, FrontmatterParser, frontmatterTitle } from '../src/wiki/logic'
 import { SKIP_DIRS, SKIP_FILES } from '../src/wiki/values'
-import { WikiInvalidPath, WikiPageExists, WikiPageNotFound } from '../src/wiki/errors'
+import { WikiInvalidPath, WikiPageNotFound } from '../src/wiki/errors'
 import type {
   WikiFileSystem,
   WikiTree,
@@ -35,7 +37,7 @@ export class FakeWikiFileSystem implements WikiFileSystem {
   }
 
   // 扫描侧 SKIP 过滤（buildTree 用）：任一段命中 SKIP_DIRS 或末段命中
-  // SKIP_FILES → 跳过（对齐生产适配器 isPageEntry；写侧 CRUD 才是 validatePath 拒绝）。
+  // SKIP_FILES → 跳过（对齐生产适配器 isPageEntry；读侧 readPage 才是 validatePath 拒绝）。
   private isSkipped(relPath: string): boolean {
     const parts = relPath.split('/')
     if (parts.some((p) => SKIP_DIRS.has(p))) return true
@@ -57,7 +59,7 @@ export class FakeWikiFileSystem implements WikiFileSystem {
     const groups = new Map<string, WikiTreeGroup>()
     for (const rel of [...this.pages.keys()].sort()) {
       if (!rel.endsWith('.md')) continue // 只收 .md（对齐生产适配器）
-      if (this.isSkipped(rel)) continue // 扫描侧 SKIP 过滤（写侧才是 validatePath 拒绝）
+      if (this.isSkipped(rel)) continue // 扫描侧 SKIP 过滤（读侧才是 validatePath 拒绝）
       const slash = rel.indexOf('/')
       if (slash < 0) continue // 顶层散落页不收
       const top = rel.slice(0, slash)
@@ -73,26 +75,6 @@ export class FakeWikiFileSystem implements WikiFileSystem {
     const content = this.pages.get(relPath)
     if (content === undefined) throw new WikiPageNotFound(relPath)
     return { path: relPath, title: this.treeTitleOf(content, this.stemOf(relPath)), content }
-  }
-
-  async writePage(relPath: string, content: string): Promise<{ path: string }> {
-    this.validatePath(relPath)
-    if (!this.pages.has(relPath)) throw new WikiPageNotFound(relPath)
-    this.pages.set(relPath, content)
-    return { path: relPath }
-  }
-
-  async createPage(relPath: string, content: string): Promise<{ path: string }> {
-    this.validatePath(relPath)
-    if (this.pages.has(relPath)) throw new WikiPageExists(relPath)
-    this.pages.set(relPath, content)
-    return { path: relPath }
-  }
-
-  async deletePage(relPath: string): Promise<void> {
-    this.validatePath(relPath)
-    if (!this.pages.has(relPath)) throw new WikiPageNotFound(relPath)
-    this.pages.delete(relPath)
   }
 
   async readClaimsFile(relPath: string): Promise<string | null> {

@@ -70,6 +70,69 @@ describe('TurnReducer：run 域事件归约（S3）', () => {
     expect(r.snapshot().tools?.[1]).toMatchObject({ state: 'error', durationMs: 5 })
   })
 
+  it('#783 拒绝红显：tool.end{rejection} 进聚合——短 reason 原样直通，非法形态丢弃', () => {
+    const r = new TurnReducer()
+    r.feed(ev('tool.start', { toolCallId: 'c1', name: 'exec', input: 'curl' }))
+    r.feed(ev('tool.start', { toolCallId: 'c2', name: 'exec', input: 'ls' }))
+    r.feed(
+      ev('tool.end', {
+        toolCallId: 'c1',
+        name: 'exec',
+        state: 'error',
+        durationMs: 0,
+        rejection: { source: 'judge', reason: '数据外送类拒绝' },
+      }),
+    )
+    // source 非二值白名单（blacklist|judge）→ 整个 rejection 丢弃（0 信任）
+    r.feed(
+      ev('tool.end', {
+        toolCallId: 'c2',
+        name: 'exec',
+        state: 'error',
+        rejection: { source: 'human', reason: 'x' },
+      }),
+    )
+    const tools = r.snapshot().tools!
+    expect(tools[0]!.rejection).toEqual({ source: 'judge', reason: '数据外送类拒绝' })
+    expect(tools[0]!.truncated).toBeUndefined()
+    expect(tools[1]!.rejection).toBeUndefined()
+  })
+
+  it('#783 拒绝红显：超长 reason 防御截断 ≤1k（对齐 input 纪律）+ truncated 标记', () => {
+    const r = new TurnReducer()
+    r.feed(ev('tool.start', { toolCallId: 'c1', name: 'exec', input: 'curl' }))
+    r.feed(
+      ev('tool.end', {
+        toolCallId: 'c1',
+        name: 'exec',
+        state: 'error',
+        durationMs: 0,
+        rejection: { source: 'judge', reason: 'x'.repeat(5000) },
+      }),
+    )
+    const line = r.snapshot().tools![0]!
+    expect(line.rejection!.source).toBe('judge')
+    expect(line.rejection!.reason).toBe('x'.repeat(1024))
+    expect(line.truncated).toBe(true)
+  })
+
+  it('#783 拒绝红显：中文 reason 按 UTF-8 字节截断（≤1k 字节、不切残字符、保前缀）', () => {
+    const r = new TurnReducer()
+    r.feed(ev('tool.start', { toolCallId: 'c1', name: 'exec', input: 'x' }))
+    const reason = '拒'.repeat(600) // 600 字 × 3 字节 = 1800 字节 > 1k
+    r.feed(
+      ev('tool.end', {
+        toolCallId: 'c1',
+        name: 'exec',
+        state: 'error',
+        rejection: { source: 'blacklist', reason },
+      }),
+    )
+    const got = r.snapshot().tools![0]!.rejection!.reason
+    expect(Buffer.byteLength(got, 'utf8')).toBeLessThanOrEqual(1024)
+    expect(reason.startsWith(got)).toBe(true)
+  })
+
   it('run 域生命周期事件与未知类型一律忽略（白名单外不进聚合）', () => {
     const r = new TurnReducer()
     r.feed(ev('run.started', {}))

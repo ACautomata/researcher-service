@@ -5,9 +5,6 @@ import { createPinia, setActivePinia } from 'pinia'
 vi.mock('@/api/wiki', () => ({
   getTree: vi.fn(),
   readPage: vi.fn(),
-  updatePage: vi.fn(),
-  createPage: vi.fn(),
-  deletePage: vi.fn(),
   getGraph: vi.fn(),
   getClaims: vi.fn().mockResolvedValue({ drift: null, claims: [] }),
   startWikiUpdate: vi.fn(),

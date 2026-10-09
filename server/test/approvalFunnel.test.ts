@@ -19,10 +19,11 @@ import type { PrismaClient } from '../src/generated/prisma/client'
 import { PrismaCheckpointSaver } from '../src/runner/persistence/prismaCheckpointSaver'
 import { ProviderRegistry } from '../src/runner/providerRegistry'
 import { ConcurrencyGate } from '../src/runner/concurrency'
-import { RunService, type RunCommand } from '../src/runner/runtime/runService'
+import { RunService, type RunCommand, type RecordTurnFn } from '../src/runner/runtime/runService'
 import { ApprovalFunnel, type ApprovalFunnelDeps } from '../src/runner/approval/funnel'
 import { createPrismaApprovalAuditSink } from '../src/runner/approval/audit'
 import type { JudgeOutcome, JudgePolicyClass } from '../src/runner/approval/judge'
+import { serializeAttachments } from '../src/sessions/reducer'
 import { CODE } from '../src/codes'
 import { seedUser } from './helpers'
 import { ScriptedChatModel, fakePrimitives, CollectingHub, toolCallAi, type ScriptEntry } from './runnerFakes'
@@ -123,6 +124,8 @@ describe('审批三层漏斗（S1，#783 · 729 规格）', () => {
       approvalTimeoutMs?: number
       sessionId?: string
       clock?: () => number
+      /** recordTurn 收集器（回放面断言用——#778 落行缝的测试镜像） */
+      recordTurn?: RecordTurnFn
     } = {},
   ): { svc: RunService; fs: ReturnType<typeof fakePrimitives>; judgeCalls: string[] } {
     const script = opts.script ?? []
@@ -150,6 +153,7 @@ describe('审批三层漏斗（S1，#783 · 729 规格）', () => {
       sweepIntervalMs: 0, // 测试手动 sweepSuspensions
       ...(opts.clock ? { clock: opts.clock } : {}),
     })
+    if (opts.recordTurn) svc.setRecordTurn(opts.recordTurn)
     return { svc, fs, judgeCalls: fake.calls }
   }
 
@@ -219,6 +223,43 @@ describe('审批三层漏斗（S1，#783 · 729 规格）', () => {
     expect(row?.toolName).toBe('execute')
     expect(row?.reason).toContain('rm-root-recursive')
     expect(svc.stateOf(sessionId)?.state).toBe('completed') // 黑拒是终态不升级
+  })
+
+  it('拒绝红显回放零差异：拒绝行经双写进 attachmentsJson，投影回放保留整行 + rejection 标记（story 3 / v1 tools 行 rejection 契约）', async () => {
+    // 回归钉（#747 C 节）：publishRejection 只发 SSE 不喂 reducer 时，刷新/回放后拒绝红显
+    // 整行消失。本用例锁回放面——recordTurn 落行（serializeAttachments 唯一序列化）→
+    // 反序列化回放投影（toProjectionMessage 同款组装），tools 行须与 SSE 终态同形状。
+    const turns: Array<Parameters<RecordTurnFn>[0]> = []
+    const { svc } = makeService({
+      script: [
+        toolCallAi('c1', 'execute', { command: 'rm -rf /' }),
+        new AIMessage({ content: '好的，我不删了。' }),
+      ],
+      recordTurn: async (p) => {
+        turns.push(p)
+      },
+    })
+    await svc.execute(cmd())
+    expect(turns).toHaveLength(1)
+    // 实时面（SSE）终态：story 31 已锁 tool.end{state:'error', rejection:{source}}——零差异的
+    // 比对基准。
+    const sseEnd = hub.events.find((e) => e.type === 'tool.end')!
+    expect(sseEnd).toBeDefined()
+    // 回放面：attachmentsJson v1 反序列化 → tools 行。
+    const replayed = JSON.parse(serializeAttachments(turns[0]!.aggregate)) as {
+      v: number
+      tools?: Array<Record<string, unknown>>
+    }
+    expect(replayed.v).toBe(1)
+    expect(replayed.tools).toHaveLength(1)
+    expect(replayed.tools![0]).toMatchObject({
+      toolCallId: 'c1',
+      name: 'execute',
+      state: 'error',
+      details: (sseEnd.payload as { details: unknown }).details,
+      rejection: (sseEnd.payload as { rejection: unknown }).rejection,
+    })
+    expect((replayed.tools![0]!.rejection as { source: string }).source).toBe('blacklist')
   })
 
   it('同 run 多次灰区调用只解析一次 judge，下一 run 重新解析（#884）', async () => {
@@ -698,5 +739,119 @@ describe('审批三层漏斗（S1，#783 · 729 规格）', () => {
       ['judge', 'allow', 'execute'],
     ])
     expect(rows.every((r) => r.userId === owner.id && r.traceId === c.runId)).toBe(true)
+  }, 30_000)
+
+  // 修 2（ADR 0015 弱关联 join 主路径全链）：人工升级 → 审计行 traceId=首段 runId → join 到
+  // interrupted 轮 failed trace 行（修 1 接通面）→ resume 续跑落新行（traceId=resume runId）。
+  // 审批归属创建时 run（in-process resume 不刷 identity）——V1 = runId 占位（schema.prisma
+  // ToolApprovalLog.traceId 注释「#727 双域接缝」）。
+  it('弱关联 join 主路径（ADR 0015）：升级审计行挂首段 runId ↔ interrupted 轮 failed trace 行；resume 新行挂 resume runId', async () => {
+    const sid = 'sess-ap-join'
+    await prisma.session.create({ data: { id: sid, ownerId: owner.id, containerId: LAB, title: '' } })
+    const turns: Array<Parameters<RecordTurnFn>[0]> = []
+    const { svc } = makeService({
+      sessionId: sid,
+      script: [
+        // 白名单先行调用：升级挂起不产生 tool 事件（漏斗 escalate 不调 handler、无红显），
+        // 首调即升级的轮 turn 聚合为空、recordTurn 不落行——先落一笔非空聚合才谈 join。
+        toolCallAi('cJ0', 'write_file', { file_path: '/lab/join/a.txt', content: 'hi' }),
+        toolCallAi('cJ', 'execute', { command: 'echo join' }),
+        new AIMessage({ content: '升级获准，完成。' }),
+      ],
+      judgeScript: ['malformed', 'malformed'], // fail-closed 升级
+      recordTurn: async (p) => {
+        turns.push(p)
+      },
+    })
+    const c = cmd({ sessionId: sid })
+    await svc.execute(c)
+    expect(svc.stateOf(sid)?.state).toBe('interrupted')
+    const requested = hub.events.find((e) => e.type === 'approval.requested')!
+
+    // interrupted 轮的 text_trace 行（recordTurn 载荷 = 行口径源）：锚非空（中断点 checkpoint
+    // 可靠存在——修 4 前提改写），status 必须 failed（半成品不留成功假象）。
+    expect(turns).toHaveLength(1)
+    expect(turns[0]).toMatchObject({ runId: c.runId, status: 'failed' })
+    expect(turns[0]!.anchorCheckpointId).not.toBeNull()
+
+    // 升级段的全部审计行 traceId = 首段 runId → join 命中该 failed 行（非空、非 success 假象）。
+    const auditRows = await prisma.toolApprovalLog.findMany({ where: { runId: c.runId } })
+    expect(auditRows.length).toBeGreaterThan(0)
+    for (const row of auditRows) {
+      expect(row.traceId).toBe(c.runId)
+      const joined = turns.find((t) => t.runId === row.traceId)
+      expect(joined).toBeDefined()
+      expect(joined!.status).toBe('failed')
+    }
+
+    // resume 落定：human 行仍挂首段 runId（identity 延续——审批归属创建时 run），join 不回断；
+    // 续跑完成落第二行（traceId = resume runId，status success）。
+    await svc.resolveApproval({
+      sessionId: sid,
+      ownerId: owner.id,
+      username: owner.username,
+      escalationId: (requested.payload as { escalation: { id: string } }).escalation.id,
+      decision: 'allow',
+    })
+    expect(svc.stateOf(sid)?.state).toBe('completed')
+    expect(turns).toHaveLength(2)
+    expect(turns[1]!.runId).not.toBe(c.runId)
+    expect(turns[1]!.status).toBe('success')
+    const humanRow = await prisma.toolApprovalLog.findFirst({ where: { layer: 'human', decision: 'allow', runId: c.runId, toolName: 'execute' } })
+    expect(humanRow).toMatchObject({ traceId: c.runId, userId: owner.id })
+    // join 语义钉：human 行 join 到的仍是首段 failed 行（审计轨迹挂被中断的 generation）。
+    expect(turns.find((t) => t.runId === humanRow!.traceId)?.status).toBe('failed')
+  }, 30_000)
+
+  // 修 2b（recover/restart 面）：重启后漏斗运行槽缺失，resume 重放重建身份——兜底从空串改为
+  // 当前命令 runId（RunService 从命令上下文推导）。空串 traceId 使 tool_approval_logs 弱关联
+  // join 恒空（ADR 0015 断链）；重建后审计行 join resume 轮的 trace 行。
+  it('重启后 resume：漏斗状态缺失按当前命令重建身份——重放审计行 traceId=resume runId（非空串），join resume 轮行', async () => {
+    const sid = 'sess-ap-rejoin'
+    await prisma.session.create({ data: { id: sid, ownerId: owner.id, containerId: LAB, title: '' } })
+    const first = makeService({
+      sessionId: sid,
+      script: [toolCallAi('cR2', 'execute', { command: 'echo r2' }), new AIMessage({ content: '首段收尾。' })],
+      judgeScript: ['malformed', 'malformed'],
+    })
+    const c = cmd({ sessionId: sid })
+    await first.svc.execute(c)
+    expect(first.svc.stateOf(sid)?.state).toBe('interrupted')
+    first.svc.dispose()
+
+    // 全新栈（仅共享 DB）：内存缺失面。重放时 judge 仍畸形 → 重过漏斗落审计 → 再升级 →
+    // interrupt() 返回 resume 回执 → human 落定行。
+    const rebornTurns: Array<Parameters<RecordTurnFn>[0]> = []
+    const { svc: reborn } = makeService({
+      sessionId: sid,
+      script: [new AIMessage({ content: '续跑回复。' })],
+      judgeScript: ['malformed', 'malformed'],
+      recordTurn: async (p) => {
+        rebornTurns.push(p)
+      },
+    })
+    const requested = hub.events.find((e) => e.type === 'approval.requested')!
+    await reborn.resolveApproval({
+      sessionId: sid,
+      ownerId: owner.id,
+      username: owner.username,
+      escalationId: (requested.payload as { escalation: { id: string } }).escalation.id,
+      decision: 'allow',
+    })
+    expect(reborn.stateOf(sid)?.state).toBe('completed')
+    expect(rebornTurns).toHaveLength(1)
+    expect(rebornTurns[0]!.status).toBe('success')
+
+    // 重放段审计行（judge malformed deny + human allow）：身份从空串兜底改为 resume runId——
+    // 行级自洽（traceId=runId≠''）且 join 命中 resume 轮 trace 行。
+    const replayRows = await prisma.toolApprovalLog.findMany({
+      where: { runId: rebornTurns[0]!.runId },
+    })
+    expect(replayRows.length).toBeGreaterThan(0)
+    for (const row of replayRows) {
+      expect(row.traceId).not.toBe('')
+      expect(row.traceId).toBe(row.runId)
+      expect(rebornTurns.some((t) => t.runId === row.traceId)).toBe(true)
+    }
   }, 30_000)
 })

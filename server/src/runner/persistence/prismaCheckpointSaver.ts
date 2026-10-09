@@ -25,6 +25,8 @@ import type {
   SerializerProtocol,
 } from '@langchain/langgraph-checkpoint'
 import type { PrismaClient } from '../../generated/prisma/client'
+import { config } from '../../config'
+import { ancestorChainOf, loadCheckpointParentOf } from '../../checkpointChain'
 
 // RunnableConfig 本地镜像 —— protocol.ts「同形镜像不引依赖」先例：@langchain/core 归 #777
 // 版本锁定集，本票不提前声明（type-only import 亦不收窄该约定）。官方字段全可选，此处只
@@ -63,9 +65,31 @@ interface CheckpointRow {
   metadataJson: string
 }
 
+// retention 护栏（#747 B 节：单 thread checkpoint 总量 >100MB 清最老非活跃分支）——
+// 驱逐结果报告（evictedBytes = 被逐 checkpoint 的 blob 字节和，含同行 writes 共清）。
+// 私有类型：enforceRetention 收私有（生产唯一调用 = 同类 put() 写路径内嵌触发）后，
+// 报告值不再有外部消费面——驱逐效果经库表行状态观测（测试走公共 put seam）。
+interface CheckpointRetentionReport {
+  readonly evictedCheckpoints: number
+  readonly evictedBytes: number
+}
+
+export interface PrismaCheckpointSaverOptions {
+  /** 单 thread checkpoint 总量护栏（字节）；缺省 config.runner.checkpointRetention.quotaBytes
+   * （100MB 规格值）。测试注入小配额以构造「超限」数据。 */
+  readonly retentionQuotaBytes?: number
+}
+
 export class PrismaCheckpointSaver extends BaseCheckpointSaver {
-  constructor(private readonly prisma: PrismaClient, serde?: SerializerProtocol) {
+  private readonly retentionQuotaBytes: number
+
+  constructor(
+    private readonly prisma: PrismaClient,
+    serde?: SerializerProtocol,
+    opts: PrismaCheckpointSaverOptions = {},
+  ) {
     super(serde)
+    this.retentionQuotaBytes = opts.retentionQuotaBytes ?? config.runner.checkpointRetention.quotaBytes
   }
 
   async getTuple(config: RunnableConfig): Promise<CheckpointTuple | undefined> {
@@ -170,6 +194,9 @@ export class PrismaCheckpointSaver extends BaseCheckpointSaver {
       },
       update: { parentCheckpointId, type, blob: bytes, metadataJson: JSON.stringify(metadata ?? {}) },
     })
+    // retention 护栏（#747 B 节）：单 thread checkpoint 总量超配额 → 清最老非活跃分支。
+    // 写路径自动触发——护栏必须在每次落账时生效（非定时任务的惰性兜底下才可恢复）。
+    await this.enforceRetention(threadId)
     return {
       configurable: { thread_id: threadId, checkpoint_ns: checkpointNs, checkpoint_id: checkpoint.id },
     }
@@ -226,6 +253,108 @@ export class PrismaCheckpointSaver extends BaseCheckpointSaver {
     // checkpoint_writes 对 checkpoint 是 Loose 引用（#771 刻意不建 FK）→ 两表分别清
     await this.prisma.checkpointWrite.deleteMany({ where: { threadId } })
     await this.prisma.checkpoint.deleteMany({ where: { threadId } })
+  }
+
+  // retention 护栏（#747 B 节：「单 thread checkpoint 总量 >100MB 护栏清最老非活跃分支」）。
+  // 私有：生产唯一触发面 = put() 写路径内嵌调用（写时护栏，非定时任务）；无外部调用方。
+  // 语义要点：
+  //   - 总量 = 未归档行 blob 字节和（archivedAt IS NULL）——归档行（#770 软删档：永不物理
+  //     删、无 GC）不计入应清总量；否则归档字节永驻、超配额时驱逐全压到活跃行（R2 修复 a）。
+  //   - 活性 = sessions.activeCheckpointId 指针的祖先链（checkpointChain.ts 单一来源）∪
+  //     指针的未归档后代闭包。在飞维度（R2 修复 b）：rewind 后指针仅 run 终态推进
+  //     （runService），进行中的写入头 = 指针后代、不在祖先链上——缺这一维，put 每 superstep
+  //     触发护栏会把在飞 run 自己的 checkpoint 逐出（resume 落空 = PoC 坑「静默 no-op 假 done」，
+  //     违反 B 节「活跃会话不清」）；interrupted/suspended 的 resume 锚同样落在后代闭包内。
+  //     指针缺失（未 rewind 过）→ 缺省活性 tip = 最新未归档 checkpoint（同 getTuple 缺省寻址
+  //     语义——续跑寻址的行恒在活性链上，护栏永不驱逐「下一个 superstep 要读的行」）。
+  //   - 驱逐序 = checkpointId 升序（LangGraph checkpointId 时间前缀字典序 = 成形时序）：
+  //     最老非活跃行先清，逐行减账至总量 ≤ 配额即止——分支按最老先行整体清出。
+  //   - 活跃链自身超限（无非活跃候选）→ no-op：护栏不牺牲可恢复性换体积（活跃会话不清）。
+  //   - 驱逐连 checkpoint_writes 同行共清（Loose 引用防孤儿）；已 archivedAt 软删行不重复
+  //     处理（#770 归档行的 GC 归 rewind/refcount 机制面，本护栏只清未归档非活跃分支）。
+  private async enforceRetention(threadId: string): Promise<CheckpointRetentionReport> {
+    const totalRows = await this.prisma.$queryRaw<Array<{ total: bigint | number }>>`
+      SELECT COALESCE(SUM(LENGTH(blob)), 0) AS total FROM checkpoints
+      WHERE threadId = ${threadId} AND archivedAt IS NULL
+    `
+    let total = Number(totalRows[0]?.total ?? 0)
+    if (total <= this.retentionQuotaBytes) return { evictedCheckpoints: 0, evictedBytes: 0 }
+
+    const session = await this.prisma.session.findUnique({
+      where: { id: threadId },
+      select: { activeCheckpointId: true },
+    })
+    let activeTip = session?.activeCheckpointId ?? null
+    if (activeTip === null) {
+      const latest = await this.prisma.checkpoint.findFirst({
+        where: { threadId, archivedAt: null },
+        orderBy: { checkpointId: 'desc' },
+        select: { checkpointId: true },
+      })
+      activeTip = latest?.checkpointId ?? null
+    }
+    const parentOf = await loadCheckpointParentOf(this.prisma, threadId)
+    const activeChain =
+      activeTip !== null ? ancestorChainOf((id) => parentOf.get(id) ?? null, activeTip) : new Set<string>()
+
+    const candidates = await this.prisma.$queryRaw<
+      Array<{ checkpointNs: string; checkpointId: string; parentCheckpointId: string | null; size: bigint | number }>
+    >`
+      SELECT checkpointNs, checkpointId, parentCheckpointId, LENGTH(blob) AS size FROM checkpoints
+      WHERE threadId = ${threadId} AND archivedAt IS NULL
+      ORDER BY checkpointId ASC
+    `
+
+    // 在飞维度：活性 = 祖先链 ∪ 指针后代闭包（未归档图内；候选行集自带 parent 链，单查复用）。
+    // 失败 run 残留若仍挂在指针链头之下同属受护后代——保守不清（可恢复性优先），待后续
+    // completed run 推进指针 / 下一次 rewind 差集归档后再成为合法候选。
+    if (activeTip !== null) {
+      const childrenOf = new Map<string, string[]>()
+      for (const row of candidates) {
+        if (row.parentCheckpointId !== null) {
+          const siblings = childrenOf.get(row.parentCheckpointId)
+          if (siblings) siblings.push(row.checkpointId)
+          else childrenOf.set(row.parentCheckpointId, [row.checkpointId])
+        }
+      }
+      // seen 独立于祖先集：activeTip 自身已在祖先集内，但仍须展开其子——否则后代闭包
+      // 从根处断链（栈式遍历 + seen 去重同时兜脏数据成环）。
+      const seen = new Set<string>([activeTip])
+      const queue = [activeTip]
+      while (queue.length > 0) {
+        const id = queue.pop()!
+        activeChain.add(id)
+        for (const child of childrenOf.get(id) ?? []) {
+          if (seen.has(child)) continue
+          seen.add(child)
+          queue.push(child)
+        }
+      }
+    }
+
+    let evictedCheckpoints = 0
+    let evictedBytes = 0
+    for (const row of candidates) {
+      if (total <= this.retentionQuotaBytes) break
+      if (activeChain.has(row.checkpointId)) continue
+      const size = Number(row.size)
+      await this.prisma.checkpointWrite.deleteMany({
+        where: { threadId, checkpointNs: row.checkpointNs, checkpointId: row.checkpointId },
+      })
+      await this.prisma.checkpoint.delete({
+        where: {
+          threadId_checkpointNs_checkpointId: {
+            threadId,
+            checkpointNs: row.checkpointNs,
+            checkpointId: row.checkpointId,
+          },
+        },
+      })
+      total -= size
+      evictedCheckpoints += 1
+      evictedBytes += size
+    }
+    return { evictedCheckpoints, evictedBytes }
   }
 
   // 行 → tuple 组装（getTuple/list 共用；config 显式传入 = 官方「按 checkpoint_id 精确寻址

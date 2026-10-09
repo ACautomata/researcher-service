@@ -1,14 +1,14 @@
-// DockerWikiFileSystem 适配器单测（#621）：注入 fake snapshot/probeFile/archive 纯逻辑直测，
+// DockerWikiFileSystem 适配器单测（#621）：注入 fake snapshot/probeFile 纯逻辑直测，
 // 不碰真 docker（对齐 dockerFileArchive.test.ts 的「fake 适配器依赖」分工——docker 接线由
 // dockerFileArchive.test.ts 已覆盖的 mock client + 真 tar 模式保障，本文件钉 wiki 语义层）。
 // 覆盖：tree 分组/title 兜底链/SKIP 过滤/symlink 跳过/空目录/
-// 快照 null 降级/probeFile 三分支映射/managed 黑名单三写一读/异常映射膜/FileExists。
+// 快照 null 降级/probeFile 三分支映射/managed 黑名单读面前置。
+// 写侧委托/异常映射膜用例随 #758 Q3 写面整域退役删除（FakeArchive/WikiContainerArchive 同删）。
 
 import { describe, it, expect } from 'vitest'
-import { FileExists, FileInvalidPath, FileNotFound } from '../src/files/errors'
 import type { TarEntry } from '../src/files/tar'
-import { DockerWikiFileSystem, type WikiContainerArchive, type WikiProbeResult } from '../src/wiki/dockerFs'
-import { WikiInvalidPath, WikiPageExists, WikiPageNotFound } from '../src/wiki/errors'
+import { DockerWikiFileSystem, type WikiProbeResult } from '../src/wiki/dockerFs'
+import { WikiInvalidPath, WikiPageNotFound } from '../src/wiki/errors'
 
 // 单文件条目（data 默认给空——title/decode 行为由用例按需给）。
 function file(name: string, data: Buffer | null = null): TarEntry {
@@ -21,42 +21,17 @@ function link(name: string): TarEntry {
   return { name, type: 'symlink', size: 0, mtime: 0, data: null }
 }
 
-// 最小 fake 写面（#784 WikiContainerArchive）：只实现 DockerWikiFileSystem 用到的
-// writeInContainer/createInContainer/deleteInContainer。可注入：记录调用、按策略抛 files 域异常。
-type ArchiveMethod = 'write' | 'create' | 'delete'
-class FakeArchive implements WikiContainerArchive {
-  calls: Array<{ method: ArchiveMethod; absRoot: string; relPath: string; content?: string }> = []
-  constructor(private readonly behave: Partial<Record<ArchiveMethod, (relPath: string) => Error | void>> = {}) {}
-  async writeInContainer(_dockerName: string, absRoot: string, relPath: string, content: string): Promise<void> {
-    this.calls.push({ method: 'write', absRoot, relPath, content })
-    const e = this.behave.write?.(relPath)
-    if (e) throw e
-  }
-  async createInContainer(_dockerName: string, absRoot: string, relPath: string, content: string): Promise<void> {
-    this.calls.push({ method: 'create', absRoot, relPath, content })
-    const e = this.behave.create?.(relPath)
-    if (e) throw e
-  }
-  async deleteInContainer(_dockerName: string, absRoot: string, relPath: string): Promise<void> {
-    this.calls.push({ method: 'delete', absRoot, relPath })
-    const e = this.behave.delete?.(relPath)
-    if (e) throw e
-  }
-}
-
 const enc = (s: string) => Buffer.from(s, 'utf8')
 
 function makeDocker(
   opts: {
     snapshot?: () => Promise<TarEntry[] | null>
     probeFile?: (relPath: string) => Promise<WikiProbeResult>
-    archive?: FakeArchive
   } = {},
 ): DockerWikiFileSystem {
   return new DockerWikiFileSystem('demo', {
     snapshot: opts.snapshot,
     probeFile: opts.probeFile,
-    archive: opts.archive ?? new FakeArchive(),
   })
 }
 
@@ -158,64 +133,6 @@ describe('DockerWikiFileSystem.readPage', () => {
   it('坏 UTF-8 → TypeError 上抛（read_page 不降级，对齐 NodeFs decodeUtf8Strict）', async () => {
     const fs = makeDocker({ probeFile: async () => ({ kind: 'file', data: Buffer.from([0xff, 0xfe]) }) })
     await expect(fs.readPage('concepts/bad.md')).rejects.toBeInstanceOf(TypeError)
-  })
-})
-
-describe('DockerWikiFileSystem 写侧（委托 FileArchive 显式容器名方法 + managed + 异常映射）', () => {
-  it('write/create/delete 委托 InContainer 三方法（透传 dockerName/树根 /wiki/rel/content，#784）', async () => {
-    const archive = new FakeArchive()
-    const fs = makeDocker({ archive, probeFile: async () => ({ kind: 'dir' }) }) // createPage 父链放行
-    await fs.writePage('concepts/a.md', '# A\n')
-    await fs.createPage('concepts/new.md', '# N\n')
-    await fs.deletePage('concepts/a.md')
-    expect(archive.calls).toEqual([
-      { method: 'write', absRoot: '/wiki', relPath: 'concepts/a.md', content: '# A\n' },
-      { method: 'create', absRoot: '/wiki', relPath: 'concepts/new.md', content: '# N\n' },
-      { method: 'delete', absRoot: '/wiki', relPath: 'concepts/a.md' },
-    ])
-  })
-
-  it('managed 黑名单在三写方法前置 → WikiInvalidPath（不触达 archive）', async () => {
-    const archive = new FakeArchive()
-    const fs = makeDocker({ archive })
-    await expect(fs.writePage('index.md', 'x')).rejects.toBeInstanceOf(WikiInvalidPath)
-    await expect(fs.createPage('_attachments/x.md', 'x')).rejects.toBeInstanceOf(WikiInvalidPath)
-    await expect(fs.deletePage('index.md')).rejects.toBeInstanceOf(WikiInvalidPath)
-    expect(archive.calls).toEqual([])
-  })
-
-  it('异常映射膜：FileNotFound→WikiPageNotFound / FileExists→WikiPageExists / FileInvalidPath→WikiInvalidPath', async () => {
-    const fs = makeDocker({
-      archive: new FakeArchive({
-        write: () => new FileNotFound(''),
-        create: () => new FileExists(''),
-        delete: () => new FileInvalidPath(''),
-      }),
-      probeFile: async () => ({ kind: 'dir' }), // createPage 父链放行，让 archive.create 抛 FileExists
-    })
-    await expect(fs.writePage('concepts/miss.md', 'x')).rejects.toBeInstanceOf(WikiPageNotFound)
-    await expect(fs.createPage('concepts/a.md', 'x')).rejects.toBeInstanceOf(WikiPageExists)
-    await expect(fs.deletePage('concepts/a.md')).rejects.toBeInstanceOf(WikiInvalidPath)
-  })
-
-  it('create 父目录不存在自动 mkdir（#621 行为变化：不再 90002）', async () => {
-    const archive = new FakeArchive()
-    const fs = makeDocker({ archive, probeFile: async () => null }) // 父链全不存在 → mkdir -p 创建
-    await expect(fs.createPage('newdir/sub/page.md', '# P\n')).resolves.toEqual({ path: 'newdir/sub/page.md' })
-    // FileArchive.create 语义：自动 mkdir -p 父目录（旧 NodeFs 会抛 WikiInvalidPath → 90002）。
-    expect(archive.calls[0]).toMatchObject({ method: 'create', relPath: 'newdir/sub/page.md' })
-  })
-
-  it('createPage 父段是普通文件 → WikiInvalidPath（保 nodeFs ENOTDIR→90002，不退 90000）', async () => {
-    const archive = new FakeArchive()
-    const fs = makeDocker({
-      archive,
-      probeFile: async (rel) => (rel === 'notes.md' ? { kind: 'file', data: Buffer.alloc(0) } : null),
-    })
-    // notes.md 已是文件：DockerFileArchive.create 的 mkdir -p notes.md 会 exec 失败抛裸 Error→90000；
-    // 前置父链守卫（assertParentsAreDirs）保 nodeFs ENOTDIR → WikiInvalidPath → 90002 契约。
-    await expect(fs.createPage('notes.md/child.md', '# C\n')).rejects.toBeInstanceOf(WikiInvalidPath)
-    expect(archive.calls).toEqual([]) // 前置拦截，不触达 archive
   })
 })
 

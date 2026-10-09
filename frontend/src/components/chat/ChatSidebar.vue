@@ -7,7 +7,7 @@
 import type { SessionSummary } from '@/api/sessions'
 import type { DirListing } from '@/api/files'
 import { computed, ref } from 'vue'
-import WorkspaceTree from '@/components/chat/WorkspaceTree.vue'
+import LabTree from '@/components/chat/LabTree.vue'
 
 type SideTab = 'sessions' | 'files'
 
@@ -87,7 +87,7 @@ const groupedSessions = computed(() => {
       <button class="ghost" data-test="new-session" @click="emit('newSession')">＋ 新会话</button>
     </div>
     <div v-show="sidebarTab === 'files'" class="pane pane-files">
-      <WorkspaceTree
+      <LabTree
         :tree="tree ?? null"
         :tree-error="treeError ?? null"
         :active-path="activeFilePath"

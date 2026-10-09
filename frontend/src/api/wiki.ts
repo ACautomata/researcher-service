@@ -1,7 +1,7 @@
-// wiki API —— 每用户（owner 级，#856）wiki tree/page CRUD/graph/claims/update
+// wiki API —— 每用户（owner 级，#856）wiki tree/page 读/graph/claims/update
 // （spec §6 / issue #45）。owner 直取认证身份——调用方不传容器名（wiki 域与容器行脱钩）。
-// path 为相对树根的 posix 相对路径，经 encodeURIComponent 编码进 query。删除幂等：
-// 30040（他人刚删）不报错——错误经 apiJson 对 code!==0 抛，调用方据 toast 提示失败。
+// path 为相对树根的 posix 相对路径，经 encodeURIComponent 编码进 query。
+// 页写面（create/update/delete）已随 server 侧写端点退役清零——本 client 只留读面 + update run 启动。
 import { apiJson } from '@/api/client'
 
 export interface WikiPageDTO {
@@ -50,28 +50,6 @@ export function getTree(): Promise<WikiTreeDTO> {
 
 export function readPage(path: string): Promise<WikiPageContentDTO> {
   return apiJson<WikiPageContentDTO>(`${BASE}/page?path=${encodeURIComponent(path)}`)
-}
-
-export function updatePage(path: string, content: string): Promise<void> {
-  return apiJson<void>(`${BASE}/page`, {
-    method: 'PUT',
-    body: JSON.stringify({ path, content }),
-  })
-}
-
-export function createPage(path: string, content: string): Promise<void> {
-  return apiJson<void>(`${BASE}/page`, {
-    method: 'POST',
-    body: JSON.stringify({ path, content }),
-  })
-}
-
-export async function deletePage(path: string): Promise<void> {
-  // 经 apiJson：后端错误恒 HTTP 200 + 信封 code（旧 apiFetch+resp.ok 把它当成功，
-  // PR #370 第四轮 #9 P0）。apiJson 对 code!==0 抛，调用方据 toast 提示失败。
-  await apiJson<void>(`${BASE}/page?path=${encodeURIComponent(path)}`, {
-    method: 'DELETE',
-  })
 }
 
 export function getGraph(): Promise<WikiGraphDTO> {

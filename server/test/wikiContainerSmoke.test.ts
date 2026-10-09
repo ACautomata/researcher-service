@@ -4,8 +4,9 @@
 //   1. ensure 惰性创建 → 真 inspect 断言 E 节 wiki 列规格（非 root/CapDrop/no-new-priv/
 //      NetworkMode none/Memory/PidsLimit/kind+owner 标签/无端口/unless-stopped/保活 PID 1）
 //   2. 零初始化：空 /wiki 合法初态（tree 空组）→ wiki REST 存储适配器（DockerWikiFileSystem）
-//      create/read/write/delete 全链通（AC「零初始化起容器后 wiki 域 REST 读写通」的存储面证据；
-//      路由接线由 wikiContainerRest.test.ts 信封级覆盖）
+//      读链通（read/tree/graph 读回——写面已随 #758 Q3 退役，种子写入经 runner/backend
+//      DockerPrimitives putArchive 原语，即 agent 写路径本体；路由接线由
+//      wikiContainerRest.test.ts 信封级覆盖）
 //   3. NetworkMode none 验证：NetworkSettings.Networks 为空（无网卡，零出网的最强形态）
 //   4. docker export 全树备份可还原：backup → remove → restore（import → 重建）→ 页面读回
 //   5. 对 fleet 列表隐身：app=openclaw-fleet 过滤不含 wiki 容器
@@ -15,6 +16,9 @@ import Docker from 'dockerode'
 import { WikiContainerLifecycle } from '../src/wikiContainers/lifecycle'
 import { DockerWikiContainerRuntime } from '../src/wikiContainers/dockerRuntime'
 import { wikiContainerName } from '../src/wikiContainers/runtime'
+import { WIKI_ROOT } from '../src/wikiContainers/values'
+import { DockerPrimitives } from '../src/runner/backend/dockerPrimitives'
+import { createTarFile, createTarTree } from '../src/files/tar'
 import { DockerWikiFileSystem } from '../src/wiki/dockerFs'
 import { WikiService } from '../src/wiki/service'
 import { KIND_WIKI, LABEL_KIND_KEY, LABEL_OWNER_KEY } from '../src/containers/constants'
@@ -89,16 +93,20 @@ describe.skipIf(!DOCKER_UP)('wiki 容器生命周期集成 smoke（真 docker da
     expect(tree).toEqual({ groups: [] })
   }, 60_000)
 
-  it('wiki 域存储适配器写读全链：create → read → write → tree/graph → delete', async () => {
-    await wikiFs.createPage('concepts/attention.md', '---\ntitle: Attention\n---\n# Attention\n见 [[self-attention]]。\n')
-    await wikiFs.createPage('concepts/self-attention.md', '# Self Attention\n\n链接 [[attention]]。\n')
+  it('wiki 域存储适配器读链：原语种子写入 → read/tree/graph 读回（写面退役后读面证据）', async () => {
+    // 种子写入经 runner/backend DockerPrimitives putArchive 原语（agent 写路径本体——
+    // wikigen mirror pushBack / DockerArchiveBackend 同通道）——wiki 域写方法已随 #758 Q3
+    // 写面整域退役删除。
+    const primitives = new DockerPrimitives()
+    await primitives.putArchive(dockerName, WIKI_ROOT, createTarTree([
+      { name: 'concepts', type: 'directory', modeOctal: '0000755' },
+      { name: 'concepts/attention.md', type: 'file', content: Buffer.from('---\ntitle: Attention\n---\n# Attention\n见 [[self-attention]]。\n') },
+      { name: 'concepts/self-attention.md', type: 'file', content: Buffer.from('# Self Attention\n\n链接 [[attention]]。\n') },
+    ]))
     // 读回：frontmatter title + 全文
     const page = await wikiFs.readPage('concepts/attention.md')
     expect(page.title).toBe('Attention')
     expect(page.content).toContain('# Attention')
-    // 覆写
-    await wikiFs.writePage('concepts/attention.md', '---\ntitle: Attention v2\n---\n# Attention v2\n')
-    expect((await wikiFs.readPage('concepts/attention.md')).title).toBe('Attention v2')
     // tree 分组（开放目录分组——本页集两组均在 concepts）
     const tree = await wikiFs.buildTree()
     expect(tree.groups.map((g) => g.name)).toEqual(['concepts'])
@@ -122,7 +130,8 @@ describe.skipIf(!DOCKER_UP)('wiki 容器生命周期集成 smoke（真 docker da
     const after = await wikiFs.readPage('concepts/self-attention.md')
     expect(after.content).toBe(before.content)
     expect(after.title).toBe(before.title)
-    await wikiFs.createPage('post-restore.md', '# writable\n')
+    const primitives = new DockerPrimitives()
+    await primitives.putArchive(dockerName, WIKI_ROOT, createTarFile('post-restore.md', Buffer.from('# writable\n')))
     expect((await wikiFs.readPage('post-restore.md')).content).toContain('# writable')
   }, 120_000)
 

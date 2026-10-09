@@ -6,29 +6,6 @@ import { config } from '../config'
 
 export const TRACE_TEXT_MAX = 20000
 
-export interface PendingChatSend {
-  requestId: string
-  sessionKey: string | null
-  inputText: string
-}
-
-export interface ChatRunContext {
-  sessionKey: string | null
-  inputText: string
-}
-
-export interface ChatFinalOutput {
-  runId: string
-  sessionKey: string | null
-  outputText: string
-}
-
-export interface ChatErrorOutput {
-  runId: string
-  sessionKey: string | null
-  message: string
-}
-
 export interface TextTraceInput {
   user: AuthUser
   ipAddress: string
@@ -40,105 +17,11 @@ export interface TextTraceInput {
   status: TextTraceStatus
 }
 
-function asRecord(value: unknown): Record<string, unknown> {
-  return value && typeof value === 'object' ? (value as Record<string, unknown>) : {}
-}
-
-function trimTraceText(text: string): string {
+/** 快照截断 20k（TRACE_TEXT_MAX）——单一实现，跨域消费方（sessions 双域 mapper 等）直引，
+ * 禁复制（共享内核红线）。 */
+export function trimTraceText(text: string): string {
   if (text.length <= TRACE_TEXT_MAX) return text
   return text.slice(0, TRACE_TEXT_MAX)
-}
-
-export function extractMessageText(message: unknown): string {
-  if (!message) return ''
-  if (typeof message === 'string') return message
-  const obj = asRecord(message)
-  const content = obj.content
-  if (typeof content === 'string') return content
-  if (Array.isArray(content)) {
-    return content
-      .map((b) => (asRecord(b).type === 'text' && typeof asRecord(b).text === 'string' ? (asRecord(b).text as string) : ''))
-      .join('')
-  }
-  return ''
-}
-
-function parseJsonFrame(data: string | Buffer): Record<string, unknown> | null {
-  if (Buffer.isBuffer(data)) return null
-  try {
-    const parsed = JSON.parse(data) as unknown
-    return asRecord(parsed)
-  } catch {
-    return null
-  }
-}
-
-export function extractChatSend(data: string | Buffer): PendingChatSend | null {
-  const frame = parseJsonFrame(data)
-  if (!frame || frame.type !== 'req' || frame.method !== 'chat.send') return null
-  const requestId = typeof frame.id === 'string' ? frame.id : ''
-  if (!requestId) return null
-  const params = asRecord(frame.params)
-  const inputText = typeof params.message === 'string' ? params.message : ''
-  if (!inputText) return null
-  return {
-    requestId,
-    sessionKey: typeof params.sessionKey === 'string' ? params.sessionKey : null,
-    inputText: trimTraceText(inputText),
-  }
-}
-
-function extractRunId(value: unknown): string {
-  const rec = asRecord(value)
-  const candidates = [
-    rec.runId,
-    asRecord(rec.payload).runId,
-    asRecord(rec.result).runId,
-    asRecord(rec.data).runId,
-  ]
-  for (const c of candidates) {
-    if (typeof c === 'string' && c) return c
-  }
-  return ''
-}
-
-export function extractChatSendAck(data: string | Buffer): { requestId: string; runId: string } | null {
-  const frame = parseJsonFrame(data)
-  if (!frame || frame.type !== 'res') return null
-  const requestId = typeof frame.id === 'string' ? frame.id : ''
-  const runId = extractRunId(frame)
-  return requestId && runId ? { requestId, runId } : null
-}
-
-export function extractChatFinal(data: string | Buffer): ChatFinalOutput | null {
-  const frame = parseJsonFrame(data)
-  if (!frame || frame.type !== 'event' || frame.event !== 'chat') return null
-  const payload = asRecord(frame.payload)
-  if (payload.state !== 'final') return null
-  const runId = typeof payload.runId === 'string' ? payload.runId : ''
-  if (!runId) return null
-  const outputText = trimTraceText(extractMessageText(payload.message))
-  if (!outputText) return null
-  return {
-    runId,
-    sessionKey: typeof payload.sessionKey === 'string' ? payload.sessionKey : null,
-    outputText,
-  }
-}
-
-export function extractChatError(data: string | Buffer): ChatErrorOutput | null {
-  const frame = parseJsonFrame(data)
-  if (!frame || frame.type !== 'event' || frame.event !== 'chat') return null
-  const payload = asRecord(frame.payload)
-  if (payload.state !== 'error') return null
-  const runId = typeof payload.runId === 'string' ? payload.runId : ''
-  if (!runId) return null
-  const message = String(payload.errorMessage ?? payload.errorKind ?? '')
-  return {
-    runId,
-    sessionKey: typeof payload.sessionKey === 'string' ? payload.sessionKey : null,
-    message: trimTraceText(message),
-  }
 }
 
 export function outputHash(text: string): string {

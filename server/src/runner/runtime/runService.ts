@@ -75,6 +75,7 @@ import { buildStreamEventsInvocation } from '../../events/bridge'
 import { RunProjector } from './projector'
 import { classifyRunError, describeRunError, type RunErrorKind } from './errorKind'
 import { buildLeaderAgent, interruptPolicyKey, type DeepAgentLike, type InterruptPolicy, type LeaderAgentParams } from './graphFactory'
+import { joinSections } from './promptSections'
 import { COMPACT_KEEP, COMPACT_SUMMARY_PROMPT, DEFAULT_RECURSION_LIMIT, DEFAULT_RESUME_DECISIONS, GRAPH_CACHE_MAX_INSTANCES, LEADER_SYSTEM_PROMPT, TOOL_DETAILS_MAX_BYTES, TOOL_INPUT_MAX_BYTES, TRUNCATED_FLAG } from './values'
 import { truncateUtf8 } from './projector'
 import { disableLangsmithTracing } from './tracing'
@@ -273,6 +274,26 @@ interface PendingApproval extends Omit<RunEventContext, 'sessionId'> {
   readonly deadlineAt: number
 }
 
+// getOrBuildGraph 入参（13 位置参数收敛为参数对象；Data Clump 消重）。字段值与收敛前
+// 逐一等价——sandboxSessionId / journalSessionId 两处语义（thread 关联 vs journal backend
+// 归属 session）在调用点构造时显式化，不再靠位置参数暗传两遍。本地接口（调用点唯一、
+// getOrBuildGraph 私有）——不导出。
+interface GraphBuildContext {
+  readonly threadId: string
+  readonly configVersion: number
+  readonly policy: InterruptPolicy | undefined
+  readonly model: LeaderAgentParams['model']
+  readonly ownerId: string
+  readonly sandboxSessionId: string
+  readonly labContainer: string
+  readonly modelKey: string
+  readonly tools: NonNullable<LeaderAgentParams['tools']>
+  readonly capabilities: RunCapabilities
+  readonly journalSessionId: string
+  readonly pluginToolDefs: readonly AnyPluginToolDefinition[]
+  readonly pluginPrompt: string
+}
+
 export class RunService {
   // ---- teammate 状态归位（executeRun finally 与 executeNow pre-start catch 共用）：----
   // startTeammate 在 dispatch 前已置 running，pre-start 失败时 executeRun 的 finally 归位不跑——
@@ -313,6 +334,9 @@ export class RunService {
   private readonly resolvingApprovals = new Set<string>()
   /** 在飞 run 命令（threadId → cmd；拒绝红显事件的归属盖印源） */
   private readonly activeCmds = new Map<string, RunEventContext>()
+  /** 在飞 run 的单 turn 聚合（threadId → reducer；拒绝红显与流循环同源双写进本聚合，
+   *  run 终态经同一 recordTurn 落 attachmentsJson——回放投影红显行零差异） */
+  private readonly activeTurns = new Map<string, TurnReducer>()
   private readonly sessionLeases = new Map<string, { ownerId: string; threads: Set<string>; lease: Promise<Awaited<ReturnType<ConcurrencyGate['acquire']>>> }>()
   private readonly recursionLimit: number
   private readonly approvalTimeoutMs: number
@@ -770,7 +794,23 @@ export class RunService {
           lifecycleTools,
           capabilities,
         })
-      : this.getOrBuildGraph(cmd.sessionId, snapshot.version, policy, model, cmd.ownerId, sandboxSessionId, labContainer, modelKey, tools, capabilities, sandboxSessionId, pluginSurface?.tools ?? [], pluginSurface?.prompt ?? '')
+      : this.getOrBuildGraph({
+          threadId: cmd.sessionId,
+          configVersion: snapshot.version,
+          policy,
+          model,
+          ownerId: cmd.ownerId,
+          sandboxSessionId,
+          labContainer,
+          modelKey,
+          tools,
+          capabilities,
+          // journalSessionId 与 sandboxSessionId 同源（1:1 对应 researcher-sandbox-<id>）：
+          // 原位置参数传两遍的语义在此显式声明，值等价不变。
+          journalSessionId: sandboxSessionId,
+          pluginToolDefs: pluginSurface?.tools ?? [],
+          pluginPrompt: pluginSurface?.prompt ?? '',
+        })
 
     // Mailbox recover has already consumed its interrupt; only a fresh resume must match the wait.
     if (cmd.kind === 'resume' && cmd.mailWaitId) {
@@ -788,6 +828,10 @@ export class RunService {
     // 跟随）；message run 重置计数器 + 落审计身份（runId/ownerId/traceId），resume 延续计数
     // （同一逻辑 run 的 judge 超限/重复拒绝护栏跨 resume 连续）。审计身份归属 session owner
     // （approvalMode 是 owner 的会话级偏好；admin 代跑他人会话时漏斗判定仍记 owner——V1 简化）。
+    // 身份语义（ADR 0015 弱关联 V1 = runId 占位）：审批归属创建时 run——in-process resume
+    // 内存态在，identity 延续（审计行挂首段 runId，join interrupted 轮 failed trace 行）；控制面
+    // 重启后内存缺失（recover/restart 面），identity 由当前命令推导重建——空串兜底使
+    // tool_approval_logs.traceId 弱关联 join 恒空（R3 修复②断链面）。
     if (this.deps.approvals) {
       const ownerRow = await this.deps.prisma.user.findUnique({
         where: { id: session.ownerId },
@@ -800,7 +844,10 @@ export class RunService {
           identity: { runId: cmd.runId, userId: session.ownerId, traceId: cmd.runId, snapshot },
         })
       } else {
-        this.deps.approvals.refreshRun(cmd.sessionId, { cautious })
+        this.deps.approvals.refreshRun(cmd.sessionId, {
+          cautious,
+          identity: { runId: cmd.runId, userId: session.ownerId, traceId: cmd.runId },
+        })
       }
     }
 
@@ -843,6 +890,7 @@ export class RunService {
     // 单 turn 聚合（#778 回放零差异的实时面）：与 publish 同源同序消费投影事件——归约快照即
     // SSE 事件流终态（前端 #730 消费同一目录）。
     const turn = new TurnReducer()
+    this.activeTurns.set(cmd.sessionId, turn) // 与 activeCmds 同生命周期（finally 成对清）
     // rewind time-travel（#781 story 16）：仅 kind=message 且会话指针非空时从锚点 checkpoint
     // 分叉续跑（resume/recover 恒链头——interrupt/recover 点必在锚点链上，getTuple 缺省寻址
     // 即命中；指针非空时从锚点 input 重新起步，旧 checkpoint 走 archivedAt 软删）。
@@ -1103,6 +1151,8 @@ export class RunService {
                   : {}),
               })
               if (meta) {
+                // width/height/durationMs 可选探测字段留白（#747 C 节 attachment 载荷）：
+                // 服务端无媒体探测面，UX 由前端 blob 自派生兜底；探测实现归后续票。
                 const ref = {
                   attachmentId: meta.attachmentId,
                   mime: meta.mimeType,
@@ -1137,6 +1187,7 @@ export class RunService {
       if (this.attachmentIngestions.get(cmd.sessionId)?.runId === cmd.runId) this.attachmentIngestions.delete(cmd.sessionId)
       this.aborts.delete(cmd.runId)
       this.activeCmds.delete(cmd.sessionId)
+      this.activeTurns.delete(cmd.sessionId)
       // #785 持锁者死亡随 task 取消自动释放：本 run 残余持锁释放 + 其排队等待取消（正常路径
       // 锁已由包装层 try/finally 先行释放——此处是 abort/异常路径的兜底；幂等 no-op 无害）
       this.writeLocks.releaseRun(cmd.runId)
@@ -1171,6 +1222,7 @@ export class RunService {
                 sessionId: cmd.sessionId,
                 runId: cmd.runId,
                 anchorCheckpointId: anchor,
+                status: 'success', // 本分支条件即 finalState === 'completed'
                 aggregate,
               })
             }
@@ -1181,10 +1233,14 @@ export class RunService {
         }
       } else if (this.recordTurn && !turn.isEmpty()) {
         try {
+          // status = run 终态语义（completed ⇔ success；interrupted/suspended/aborted/failed →
+          // failed——半成品 provenance 明确标 failed，不留成功假象）。interrupted 轮锚恒非空
+          // （终态推进先于 interrupt 判定），锚有无不蕴含完成——status 不得由锚推论（R3 修复）。
           await this.recordTurn({
             sessionId: cmd.sessionId,
             runId: cmd.runId,
             anchorCheckpointId,
+            status: finalState === 'completed' ? 'success' : 'failed',
             aggregate: turn.snapshot(),
           })
         } catch (err) {
@@ -1435,29 +1491,31 @@ export class RunService {
   }
 
   // ---- 拒绝红显事件（漏斗 onRejection 回调接线）：tool.start + tool.end{error, rejection} ----
+  // 双写纪律与流循环（executeRun 的 projector.feed 消费处）完全一致：同一 TurnReducer 实例
+  // 先 feed 后 publish——拒绝行经同一聚合落 attachmentsJson（recordTurn），刷新/回放后红显
+  // 整行不消失（story 3 零差异 / v1 tools 行 rejection 契约）。
   private publishRejection(notice: RejectionNotice): void {
     const cmd = this.activeCmds.get(notice.threadId)
     if (!cmd) return
-    this.publish(
-      cmd.ownerId,
-      { type: 'tool.start', payload: { toolCallId: notice.toolCallId, name: notice.name, input: notice.argsSummary } },
-      cmd,
-    )
-    this.publish(
-      cmd.ownerId,
-      {
-        type: 'tool.end',
-        payload: {
-          toolCallId: notice.toolCallId,
-          name: notice.name,
-          state: 'error',
-          durationMs: 0,
-          details: notice.reason,
-          rejection: { source: notice.source, reason: notice.reason },
-        },
+    const startEv = { type: 'tool.start', payload: { toolCallId: notice.toolCallId, name: notice.name, input: notice.argsSummary } }
+    const endEv = {
+      type: 'tool.end',
+      payload: {
+        toolCallId: notice.toolCallId,
+        name: notice.name,
+        state: 'error',
+        durationMs: 0,
+        details: notice.reason,
+        rejection: { source: notice.source, reason: notice.reason },
       },
-      cmd,
-    )
+    }
+    const turn = this.activeTurns.get(notice.threadId)
+    if (turn) {
+      turn.feed(startEv)
+      turn.feed(endEv)
+    }
+    this.publish(cmd.ownerId, startEv, cmd)
+    this.publish(cmd.ownerId, endEv, cmd)
   }
 
   // ---- 48h 挂起清扫（#783 story 15）：死线过 → suspended（非终态）+ run.suspended 事件 ----
@@ -1627,21 +1685,8 @@ export class RunService {
   }
 
   // ---- 图实例缓存（拓扑因子全在键内：thread | configVersion | policy | backend 双根）----
-  private getOrBuildGraph(
-    threadId: string,
-    configVersion: number,
-    policy: InterruptPolicy | undefined,
-    model: LeaderAgentParams['model'],
-    ownerId: string,
-    sandboxSessionId: string,
-    labContainer: string,
-    modelKey: string,
-    tools: NonNullable<LeaderAgentParams['tools']>,
-    capabilities: RunCapabilities,
-    journalSessionId: string,
-    pluginToolDefs: readonly AnyPluginToolDefinition[],
-    pluginPrompt: string,
-  ): DeepAgentLike {
+  private getOrBuildGraph(ctx: GraphBuildContext): DeepAgentLike {
+    const { threadId, configVersion, policy, model, ownerId, sandboxSessionId, labContainer, modelKey, tools, capabilities, journalSessionId, pluginToolDefs, pluginPrompt } = ctx
     // 双根入键：docker 实例变更（沙箱 remove/recreate、#784 wiki 容器接管后改名）时缓存图
     // 持旧 backend 会指向已删容器——backend 双根都是拓扑因子。（journaling backend 无新键
     // 成分：journal sessionId 与 labContainer 一一对应——researcher-sandbox-<journalSessionId>。）
@@ -1751,7 +1796,8 @@ export class RunService {
       model: p.model,
       backend,
       checkpointer: this.deps.saver,
-      systemPrompt: [LEADER_SYSTEM_PROMPT, WIKI_UPDATE_TEAMMATE_PROMPT].join('\n\n'),
+      // 两段必填——filter(Boolean) 对本调用点无行为影响（joinSections 收敛，#747 R1 Standards⑦）。
+      systemPrompt: joinSections(LEADER_SYSTEM_PROMPT, WIKI_UPDATE_TEAMMATE_PROMPT),
       official: p.capabilities.official,
       interruptPolicy: p.policy,
       tools: [...wikiTools, ...p.teammateTools, ...p.lifecycleTools],

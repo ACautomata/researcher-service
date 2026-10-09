@@ -299,6 +299,11 @@ export const config = {
         depthLimit: readPositiveEnvInt('FILE_JOURNAL_REPLAY_DEPTH_LIMIT', 1000),
         fenceTimeoutMs: readPositiveEnvInt('FILE_JOURNAL_FENCE_TIMEOUT_MS', 30_000),
       },
+      // checkpoint retention 护栏（#747 B 节）：单 thread checkpoint 总量超配额 → 清最老
+      // 非活跃分支（活跃会话不清；PrismaCheckpointSaver.enforceRetention 消费）。
+      checkpointRetention: {
+        quotaBytes: readPositiveEnvBytes('RUNNER_CHECKPOINT_QUOTA_MB', 100),
+      },
       // #785 写锁有界等待（默认 10s；装配层注入 RunService；env RUNNER_WRITE_LOCK_TIMEOUT_MS）
       writeLockTimeoutMs: readWriteLockTimeoutMs(),
     }
