@@ -35,6 +35,9 @@ export interface PluginRuntime {
   /** 全目录工具 spec（漏斗路由用，§3）。按全目录而非启用集路由：禁用插件的工具根本
    *  不会出现在图内，图内出现即启用态——全目录路由不会放大审批面。 */
   readonly toolSpecByName: ReadonlyMap<string, PluginToolSpec>
+  /** 工具名 → 插件 id 全目录映射（#883 AC）：ctx.llm per-plugin 解析的穿线取值域——
+   *  agent 路径（tools.ts 包装）与命令 {execute} 直达路径都经它派生插件 id。 */
+  readonly toolOwnerByName: ReadonlyMap<string, string>
   /** run 粒度启用集静态过滤（§4.2 纯函数）。 */
   surface(enabledIds: readonly string[]): EnabledPluginSurface
 }
@@ -74,9 +77,11 @@ export function createPluginRuntime(input: {
 }): PluginRuntime {
   const { manifests } = input
   const toolSpecByName = new Map<string, PluginToolSpec>()
+  const toolOwnerByName = new Map<string, string>()
   for (const manifest of manifests) {
     for (const tool of manifest.tools ?? []) {
       toolSpecByName.set(tool.name, { category: tool.category, ...(tool.pathParams !== undefined ? { pathParams: tool.pathParams } : {}) })
+      toolOwnerByName.set(tool.name, manifest.id)
     }
   }
   const prompt = buildPluginPrompt(manifests)
@@ -89,6 +94,7 @@ export function createPluginRuntime(input: {
     catalogVersion: createHash('sha256').update(JSON.stringify(manifests.map((m) => ({ id: m.id, version: m.version })))).digest('hex'),
     toolContext,
     toolSpecByName,
+    toolOwnerByName,
     surface(enabledIds: readonly string[]): EnabledPluginSurface {
       const enabled = new Set(enabledIds)
       const active = manifests.filter((manifest) => enabled.has(manifest.id))

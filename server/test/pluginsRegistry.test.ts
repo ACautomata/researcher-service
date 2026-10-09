@@ -98,3 +98,39 @@ describe('#788 plugin catalog registration-time validation (S3)', () => {
     expect(() => assertPluginEnv(manifests, { env: { DEMO_API_KEY: 'k' }, production: true })).not.toThrow()
   })
 })
+
+describe('#883 manifest llm 声明位 + 保留键（T3）', () => {
+  it("插件 id 撞保留键 'judge' → 启动 fail-fast（judge 指派行归属审批判定器，非插件）", async () => {
+    await expect(assertValidPluginCatalog({
+      manifests: [probeManifest({ id: 'judge' })],
+    })).rejects.toThrow(/reserved/)
+  })
+
+  it('llm 声明合法（description 必填；defaultModel 可选）通过校验', async () => {
+    await expect(assertValidPluginCatalog({
+      manifests: [probeManifest({ llm: { description: 'SVG 模板多模态生成', defaultModel: 'MiniMax-M3' } })],
+    })).resolves.toBeUndefined()
+    await expect(assertValidPluginCatalog({
+      manifests: [probeManifest({ llm: { description: '只声明不带默认模型' } })],
+    })).resolves.toBeUndefined()
+  })
+
+  it('llm 声明 description 空/缺失 → fail-fast；defaultModel 空串 → fail-fast', async () => {
+    await expect(assertValidPluginCatalog({
+      manifests: [probeManifest({ llm: { description: '' } })],
+    })).rejects.toThrow(/llm/)
+    await expect(assertValidPluginCatalog({
+      manifests: [probeManifest({ llm: { description: 'x', defaultModel: '' } })],
+    })).rejects.toThrow(/llm/)
+  })
+
+  it('deprecated env 键设值 → warn 标废弃（不阻断；未设值不告警）', () => {
+    const manifests = [probeManifest({ configSchema: { env: [{ name: 'DEMO_LEGACY_PIN', required: false, deprecated: true }] } })]
+    const warn = vi.fn()
+    expect(() => assertPluginEnv(manifests, { env: { DEMO_LEGACY_PIN: 'm' }, production: true, warn })).not.toThrow()
+    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/DEMO_LEGACY_PIN.*deprecated|deprecated.*DEMO_LEGACY_PIN/))
+    const warn2 = vi.fn()
+    expect(() => assertPluginEnv(manifests, { env: {}, production: true, warn: warn2 })).not.toThrow()
+    expect(warn2).not.toHaveBeenCalled()
+  })
+})

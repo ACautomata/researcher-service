@@ -91,15 +91,13 @@ const USERS_NEW_COLUMNS: Record<string, ColExpect> = {
 }
 
 const MODEL_PROVIDER_NEW_COLUMNS: Record<string, ColExpect> = {
-  // 731 §3.2 逐字段 DDL（归属上移新形状）
+  // #881 v16 预设制换形：presetId 取代自由地址与旧凭证列（协议/地址/头策略随预设派生）；
+  // credentialCipher 激活（BYOK key AES 密文；NULL = 平台共享 key）
   id: { type: 'TEXT', notnull: 1 },
   ownerId: { type: 'TEXT', notnull: 1 },
   providerId: { type: 'TEXT', notnull: 1 },
-  lcProvider: { type: 'TEXT', notnull: 1 },
-  baseUrl: { type: 'TEXT', notnull: 1 },
-  credentialEnvId: { type: 'TEXT', notnull: 0 }, // 过渡期可空
-  credentialCipher: { type: 'TEXT', notnull: 0 }, // P1 per-user key 预留
-  authHeader: { type: 'BOOLEAN', notnull: 1, dflt: 'true' },
+  presetId: { type: 'TEXT', notnull: 1 },
+  credentialCipher: { type: 'TEXT', notnull: 0 },
   modelsJson: { type: 'TEXT', notnull: 1 },
   createdAt: { type: 'DATETIME', notnull: 1 },
 }
@@ -170,15 +168,6 @@ const NEW_TABLE_COLUMNS: Record<string, Record<string, ColExpect>> = {
     latencyMs: { type: 'INTEGER', notnull: 0 },
     judgeTokens: { type: 'INTEGER', notnull: 0 },
   },
-  provider_endpoints: {
-    // 731 §3.1 原文（port NULL = 默认端口；origin 精确匹配唯一）
-    id: { type: 'TEXT', notnull: 1 },
-    scheme: { type: 'TEXT', notnull: 1 },
-    host: { type: 'TEXT', notnull: 1 },
-    port: { type: 'INTEGER', notnull: 0 },
-    note: { type: 'TEXT', notnull: 1, dflt: "''" },
-    createdBy: { type: 'TEXT', notnull: 1 }, // users.id（731 DDL 无 FK 约束 → 不加）
-  },
   config_meta: {
     id: { type: 'INTEGER', notnull: 1 },
     version: { type: 'INTEGER', notnull: 1, dflt: '1' },
@@ -242,7 +231,6 @@ const HAS_CREATED_AT = new Set([
   'session_messages',
   'checkpoints',
   'tool_approval_logs',
-  'provider_endpoints',
   'llm_usage_records',
 ])
 
@@ -342,13 +330,13 @@ describe('#771 Prisma 新表地基（字段契约 / 迁移幂等 / 级联）', (
       expect(foreignKeysOf(sqlite, 'tool_approval_logs')).toEqual([])
     })
 
-    it('provider_endpoints：唯一 (scheme, host, port) —— origin 精确匹配（731 §3.1）', () => {
-      expectColumns(colsOf(sqlite, 'provider_endpoints'), NEW_TABLE_COLUMNS.provider_endpoints)
-      const idx = indexesOf(sqlite, 'provider_endpoints').find(
-        (i) => i.name === 'provider_endpoints_scheme_host_port_key',
-      )
-      expect(idx).toBeDefined()
-      expect(idx!.unique).toBe(1)
+    it('provider_endpoints 已退役（#881 端点白名单表整表退役——预设制下无自由地址）', () => {
+      expect(
+        sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='provider_endpoints'").get(),
+      ).toBeUndefined()
+      expect(
+        sqlite.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='provider_endpoints_scheme_host_port_key'").get(),
+      ).toBeUndefined()
     })
 
     it('config_meta：id INTEGER PK + version DEFAULT 1（单行计数器）', () => {
@@ -418,12 +406,16 @@ describe('#771 Prisma 新表地基（字段契约 / 迁移幂等 / 级联）', (
         ).map((r) => r.name)
         const usersCols = colsOf(d, 'users')
         const meta = d.prepare(`SELECT id, version FROM config_meta`).get() as { id: number; version: number }
-        const endpoint = d
-          .prepare(`SELECT id, scheme, host, port, createdBy FROM provider_endpoints`)
-          .get() as { id: string; scheme: string; host: string; port: null; createdBy: string }
-        const endpointCount = (d.prepare(`SELECT count(*) c FROM provider_endpoints`).get() as { c: number }).c
+        // #881：白名单表退役（fresh 库经增量收敛同样退役）；插件指派备用表就位
+        const endpointTable = d
+          .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='provider_endpoints'`)
+          .get() as { name: string } | undefined
+        const pluginAssign = d
+          .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='plugin_llm_assignments'`)
+          .get() as { name: string } | undefined
+        const seedProviderCount = (d.prepare(`SELECT count(*) c FROM model_providers`).get() as { c: number }).c
         d.close()
-        return { tables, hasRuns: usersCols.has('maxConcurrentRuns'), hasMode: usersCols.has('approvalMode'), meta, endpoint, endpointCount }
+        return { tables, hasRuns: usersCols.has('maxConcurrentRuns'), hasMode: usersCols.has('approvalMode'), meta, endpointTable, pluginAssign, seedProviderCount }
       }
       const first = probe(p)
       runDbScript('apply-schema.mjs', p) // 第二次：全部 skip-if-exists，仍须退出 0、种子不重复
@@ -432,16 +424,18 @@ describe('#771 Prisma 新表地基（字段契约 / 迁移幂等 / 级联）', (
       expect(first.tables).toEqual(
         expect.arrayContaining([
           'sessions', 'session_messages', 'checkpoints', 'checkpoint_writes', 'memory_items',
-          'tool_approval_logs', 'provider_endpoints', 'config_meta', 'plugin_enablements',
+          'tool_approval_logs', 'config_meta', 'plugin_enablements', 'plugin_llm_assignments',
           'attachments', 'file_journal',
         ]),
       )
       expect(first.hasRuns).toBe(true)
       expect(first.hasMode).toBe(true)
       expect(first.meta).toEqual({ id: 1, version: 1 })
-      // 731 §3.1 seed：minimax 端点白名单条目就位；重跑不重复（幂等）
-      expect(first.endpoint).toEqual({ id: 'seed-minimax-endpoint', scheme: 'https', host: 'api.minimaxi.com', port: null, createdBy: '' })
-      expect(first.endpointCount).toBe(1)
+      // #881：白名单表整表退役（无 seed-minimax-endpoint）；per-user minimax 种子不再落行
+      //（零 provider 用户改由虚拟平台条目服务）；插件指派备用表就位
+      expect(first.endpointTable).toBeUndefined()
+      expect(first.seedProviderCount).toBe(0)
+      expect(first.pluginAssign).toEqual({ name: 'plugin_llm_assignments' })
     })
 
     it('upgrade-schema.mjs 对「旧形状库」增量收敛：新表就位 + users 列补齐 + 旧表随 T0 #801 清退重建', () => {
@@ -502,23 +496,29 @@ CREATE TABLE "pairings" (
         const c = colsOf(d2, table).get('createdAt')
         expect(c, `upgrade 路径 ${table}.createdAt`).toMatchObject({ type: 'DATETIME', notnull: 1 })
       }
-      // T0 #801 清退语义反转：旧形状 model_providers DROP 重建为新形状（零迁移前提 #732）——
-      // 旧列（containerId/api/apiKeyEnvId）不残留、新列（ownerId/lcProvider）就位；
+      // T0 #801 清退语义反转：旧形状 model_providers DROP 重建为 #881 v16 预设制形状
+      //（零迁移前提 #732）——旧列（containerId/api/apiKeyEnvId + v15 lcProvider/baseUrl/
+      // credentialEnvId/authHeader）不残留、新列（ownerId/presetId/credentialCipher）就位；
       // pairings 表随配对全链退役 DROP。
       const mpCols = colsOf(d2, 'model_providers')
       expect(mpCols.has('containerId')).toBe(false)
       expect(mpCols.has('api')).toBe(false)
       expect(mpCols.has('apiKeyEnvId')).toBe(false)
+      expect(mpCols.has('lcProvider')).toBe(false)
+      expect(mpCols.has('baseUrl')).toBe(false)
       expect(mpCols.has('ownerId')).toBe(true)
-      expect(mpCols.has('lcProvider')).toBe(true)
+      expect(mpCols.has('presetId')).toBe(true)
+      expect(mpCols.has('credentialCipher')).toBe(true)
       expect(
         (d2.prepare(`SELECT count(*) c FROM sqlite_master WHERE type='table' AND name='pairings'`).get() as { c: number }).c,
       ).toBe(0)
-      // config_meta 种子 + 731 §3.1 白名单 seed（重跑不重复）
+      // config_meta 种子就位；#881：白名单表退役（无 seed-minimax-endpoint）、无 per-user
+      // minimax 种子行（零 provider 用户由虚拟平台条目服务）
       expect(d2.prepare(`SELECT id, version FROM config_meta`).get()).toEqual({ id: 1, version: 1 })
       expect(
-        (d2.prepare(`SELECT count(*) c FROM provider_endpoints WHERE id='seed-minimax-endpoint'`).get() as { c: number }).c,
-      ).toBe(1)
+        (d2.prepare(`SELECT count(*) c FROM sqlite_master WHERE type='table' AND name='provider_endpoints'`).get() as { c: number }).c,
+      ).toBe(0)
+      expect((d2.prepare(`SELECT count(*) c FROM model_providers`).get() as { c: number }).c).toBe(0)
       // #812：runId 索引随增量收敛就位（per-run 对账下钻，三处同源的镜像侧）
       expect(indexesOf(d2, 'llm_usage_records').find((i) => i.name === 'llm_usage_records_runId_idx')).toBeDefined()
       d2.close()

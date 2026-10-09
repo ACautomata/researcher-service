@@ -45,7 +45,7 @@ const RUN_ERROR_LABELS: Record<string, string> = {
   recursion_limit: '运行步数达到上限',
   infra: '运行环境异常',
 }
-export interface RunError { kind: string; label: string }
+export interface RunError { kind: string; label: string; detail?: string }
 
 export interface ChatSessionDeps {
   /** 动作类失败（用户主动发起的发送/中断/审批/删除）→ 瞬时 toast，不进顶部横幅 */
@@ -315,7 +315,8 @@ export function useChatSession(deps: ChatSessionDeps = {}): ChatSession {
     }
     if (e.type === 'run.failed') {
       const kind = typeof e.payload.errorKind === 'string' ? e.payload.errorKind : ''
-      lastRunError.value = { kind, label: RUN_ERROR_LABELS[kind] ?? '运行失败' }
+      const detail = typeof e.payload.message === 'string' ? e.payload.message : undefined
+      lastRunError.value = { kind, label: RUN_ERROR_LABELS[kind] ?? '运行失败', detail }
       pendingToolInputs.clear()
       void refreshProjection()
       return

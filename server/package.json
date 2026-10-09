@@ -6,6 +6,7 @@
   "main": "dist/server/src/server.js",
   "scripts": {
     "dev": "tsx watch src/server.ts",
+    "docs": "node scripts/docs.mjs",
     "prebuild": "npm run content:build && prisma generate",
     "build": "tsc -p tsconfig.build.json && rm -rf dist/server/src/generated && cp -R src/generated dist/server/src/generated",
     "start": "node dist/server/src/server.js",

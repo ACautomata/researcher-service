@@ -2,6 +2,10 @@
 
 > `AGENTS.md` 的披露参考——新增/修改 REST 端点、错误码或信封行为时查阅本清单。
 
+- 交互式接口文档（Swagger UI，TryIt 可直连）与 OpenAPI 3.1 JSON：`/api/docs`（admin-only，
+  网页入口走 admin 子应用「API 文档」页）——使用说明见 `server/README.md`「接口文档」章节；
+  新增端点必须同步登记 `server/src/openapi/paths.ts`（覆盖守卫 `apiDocsCoverage.test.ts` 双向断言）。
+
 - `GET /api/health`（公开）。
 - `/api/v1/auth/*` — 登录/refresh(R1 旋转)/logout/me/password/change + OIDC `oauth/<p>/login|callback`（未配 provider 时 90001）。
 - `/api/v1/users` — admin 账号管理（GET / POST / PATCH / reset-password；码段 1xxxx；
@@ -18,10 +22,24 @@
   30042；updateRunner 缺装配 → 90005）。
 - `/api/v1/wiki/claims?path=` — 页 claims 旁车只读面（#789 story 42 数据面：
   论断 evidence + 页级漂移 fresh|drifted|null；页缺失 30040、旁车缺失 200+空 claims）。
-- `/api/v1/models/providers[/<pid>]` — model provider CRUD（#857 归属门改挂 ownerId 零容器行查询；
-  #775：事务 = mutation + config_meta version bump 热生效；白名单第一层校验未命中 → 90002 字段级 base_url）。
-- `/api/v1/provider-endpoints[/<id>]` — 端点白名单 admin CRUD（#775 · 731 §3.1，origin 精确匹配；
-  GET/POST/DELETE，非 admin → 10004）。
+- `/api/v1/models/{presets,platform,providers[/<pid>[/impact]]}` — LLM 端点域（#857 归属门改挂 ownerId；
+  #881 预设制换形：presets = 六预设目录只读、platform = 平台默认端点只读视图（env 派生虚拟实体，
+  永无 key 材料）、GET providers/<pid>/impact = 删除前四类引用计数（sessions/plugins/judge/teammates + total，本人归属门）；删除不拒悬挂引用，下一 run 回落平台默认 + warn，在飞快照不变。providers = BYOK 端点 CRUD（preset_id 锁定协议与地址无自由 baseURL；api_key
+  单向流——写请求可带明文落库即密文、读只出掩码；事务 = mutation + config_meta version bump
+  热生效；保留 id 'platform' 写侧拒绝 90002；40040 不存在/越权同码防探测、40041 pid 冲突）。
+- `/api/v1/models/test` — 端点试连（#882：按表单态[预设+key+模型]发起最小代价真实试连——不入库、
+  不产生 provider 行、不写日志；1-token 级探测、10s 超时；失败 90003 + 净化错误文本防 key 回显；
+  V1 不限流[ADR 记录接受面]）。
+- `/api/v1/provider-endpoints[/<id>]` — 端点白名单 admin CRUD **已随 #881 预设制整链退役**
+  （表/REST/校验/DNS/逃生 env 全删；40042 常量保留语义退役）。
+- `/api/v1/plugins` — 插件目录 + per-user 启用位（#788 · 8xxxx 段：GET 目录清单（manifest 渲染 +
+  启用位）、PUT `/{id}/enablement` 幂等 upsert、GET `/{id}/commands/{name}/completions` 参数补全）。
+- `/api/v1/plugins/llm-assignments` + `/api/v1/plugins/{id}/llm-assignment` — 插件 LLM 指派
+  （#883 T3 · ADR 0016/0017：GET = targets（声明 llm 的插件 ∪ 保留键 'judge'）+ 本人指派行；
+  PUT = 幂等 upsert {provider_id, model_id} 双可空（provider_id ∈ 本人端点集 ∪ 'platform'，
+  model 须属该端点模型集，90002 字段级；未声明 llm/目录外/非 judge → 80040 同码防探测）；
+  DELETE = 撤指派回默认链（无行幂等不 bump）；事务内 bump 配置版本——下一 run 生效，
+  在飞 run 不受影响）。
 - `/api/v1/approval-logs` — 审批全量审计检索 admin REST（#783 · ADR 0015；过滤
   userId/runId/layer/decision/from/to + 分页；judge 输入只露 hash）。
 - `/api/v1/file-overwrite-logs` — 覆盖审计检索 admin REST（#785；过滤 sessionId/path/from/to
@@ -71,7 +89,7 @@
 连接级认证失败走 **HTTP 401** + 信封体（#726 钉死「不入事件」，EventSource 看不见状态码——REST 刷新链
 死信号让路；其余响应仍 HTTP 200+信封）。码段：`0` 成功 · `1xxxx` 通用/鉴权 ·
 `2xxxx` 容器（20040–20046 全组 [退役保留] 随 #858 码段防复用）· `3xxxx` wiki ·
-`4xxxx` models（40042 端点不在白名单[运行时第二层，仅 runner 侧] · 40043 并发配额已满[per-user
+`4xxxx` models（40042 [退役保留，防复用] · 40043 并发配额已满[per-user
 maxConcurrentRuns 或全局 RUNNER_MAX_CONCURRENT_RUNS]）· `5xxxx` 会话/run 域（#747 C 节，
   #776 起 50002 session_not_found；#777 起 50003 审批挂起（#778 补 REST 前置面与码表）；#783 起
   50004 approval_not_found 同码防探测；#778 增（50004 让位 #783，顺移起）50005 run 进行中禁输入·

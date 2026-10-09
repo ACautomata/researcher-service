@@ -25,16 +25,12 @@ export const CODE = {
   // 「42+ 域专用」锁式（30040/30041 之后续号）。
   WIKI_UPDATE_IN_PROGRESS: 30042, // wiki 全量更新已在进行（独立 run 全局串行，POST /wiki/update 触发面）
   // 4xxxx models（#336 平移 models 域；#319 §1.3 转译码）
-  PROVIDER_NOT_FOUND: 40040, // provider 不存在 / 越权（同码防探测）；#775 起端点白名单管理域
-  // 复用同码（models 配置段「40 不存在」锁式）：provider_endpoint 不存在（DELETE）。
-  PROVIDER_ID_CONFLICT: 40041, // 同 owner provider_id 冲突（POST/PUT，unique(ownerId, providerId) 约束；#771 归属上移）；
-  // #775 起端点白名单管理域复用同码（models 配置段「41 冲突」锁式）：provider_endpoint origin 冲突
-  //（POST，含 NULL-port 等价语义查重——SQLite UNIQUE NULL 不判重）。
-  // #775（731 §5.1/§5.3 + #747 C 节错误码新增）：40042 运行时白名单未命中（实例构造复验 / fetch
-  // wrapper 验最终请求 origin / redirect 禁随）；40043 并发配额已满（per-user maxConcurrentRuns
-  // 或全局 RUNNER_MAX_CONCURRENT_RUNS）。注意 40042 仅运行时层——CRUD 层白名单未命中是 90002
-  // 字段级（731 §5.1 第一层），两层的错误面刻意不同。
-  PROVIDER_ENDPOINT_NOT_ALLOWED: 40042, // 端点不在白名单（运行时双层校验第二层）
+  PROVIDER_NOT_FOUND: 40040, // provider 不存在 / 越权（同码防探测）
+  PROVIDER_ID_CONFLICT: 40041, // 同 owner provider_id 冲突（POST/PUT，unique(ownerId, providerId) 约束；#771 归属上移）
+  // #881 端点预设制：白名单双层校验链随票退役（CRUD 层 origin 匹配 + 运行时 fetch 复验 +
+  // DNS 私网拒绝 + 逃生 env）——40042 语义退役，常量保留防复用（对齐 90004 先例）。
+  // 40043 并发配额已满（per-user maxConcurrentRuns 或全局 RUNNER_MAX_CONCURRENT_RUNS）现役。
+  PROVIDER_ENDPOINT_NOT_ALLOWED: 40042, // [退役保留] 曾为端点白名单运行时未命中（预设制下白名单整链退役）
   CONCURRENCY_QUOTA_EXCEEDED: 40043, // 并发配额已满（per-user 或全局在飞 run 上限）
   // 6xxxx files（#589 统一文件 CRUD；6xxxx 段为 319 §1.1 未分配段，按「40 不存在 / 41 冲突」锁式）
   FILE_NOT_FOUND: 60040, // 文件不存在（GET）
@@ -79,7 +75,7 @@ export const CODE = {
   // 9xxxx 系统 / 校验
   OAUTH_NOT_CONFIGURED: 90001, // OAuth provider 未配置（原 501）
   VALIDATION_FAILED: 90002, // 参数校验失败（字段明细进 data）；曾为 figures 幂等中间件特例 data=null（该中间件随 #791 创建端点退役）
-  LLM_NOT_CONFIGURED: 90003, // LLM 凭证/模型配置类总码（#775 起多义：credentialEnvId 非法、无可用 provider；#792 起 figure llm 回退链全败/无 provider 同码）
+  LLM_NOT_CONFIGURED: 90003, // LLM 凭证/模型配置类总码（#881：平台 key 缺失、BYOK 凭证解密失败、无可用模型；#792 起 figure llm 回退链全败/无 provider 同码；#882 端点试连失败/超时——message 携净化错误文本）
   PORT_POOL_EXHAUSTED: 90004, // [退役保留] 曾为端口池耗尽（T0 #801 端口池废除），码段保留防复用
   ROUTE_NOT_FOUND: 90005, // 路由不存在（404 信封兜底）
   INTERNAL: 90000, // 未知错误兜底
@@ -121,7 +117,7 @@ export const DEFAULT_MESSAGE: Record<number, string> = {
   [CODE.WIKI_UPDATE_IN_PROGRESS]: 'wiki 全量更新正在进行中，请等待完成后再试',
   [CODE.PROVIDER_NOT_FOUND]: 'model provider 不存在',
   [CODE.PROVIDER_ID_CONFLICT]: '该用户下 provider_id 已存在',
-  [CODE.PROVIDER_ENDPOINT_NOT_ALLOWED]: '端点不在白名单内，请求被拒绝',
+  [CODE.PROVIDER_ENDPOINT_NOT_ALLOWED]: '端点请求被拒绝', // [退役保留] 兜底文案保留防复用
   [CODE.CONCURRENCY_QUOTA_EXCEEDED]: '并发配额已满，请稍后再试',
   [CODE.FILE_NOT_FOUND]: '文件不存在',
   [CODE.FILE_EXISTS]: '文件已存在',

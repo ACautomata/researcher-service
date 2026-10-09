@@ -55,15 +55,9 @@ describe('#779 断线补偿 + 重启恢复（RunService 级）', () => {
       data: {
         ownerId: user.id,
         providerId: 'prov-1',
-        lcProvider: 'openai',
-        baseUrl: 'https://llm.example.edu/v1',
-        credentialEnvId: 'LLM_API_KEY',
-        authHeader: true,
+        presetId: 'openai',
         modelsJson: JSON.stringify([{ id: 'model-x' }]),
       },
-    })
-    await prisma.providerEndpoint.create({
-      data: { scheme: 'https', host: 'llm.example.edu', port: null, createdBy: 'seed' },
     })
     hub = new CollectingHub()
   }, 30_000)
@@ -89,7 +83,21 @@ describe('#779 断线补偿 + 重启恢复（RunService 级）', () => {
   }): RunService {
     const registry = new ProviderRegistry(prisma, {
       llmApiKey: 'rec-key',
-      modelFactory: async () => new ScriptedChatModel(opts.script ?? []),
+      // #881 平台虚拟条目垫底：本文件以「脚本/构造失败 = 确定性注入」为断言前提——平台
+      // fallback 实例给即刻失败桩（脚本耗尽/构造异常不得再退一轮平台模型执行）
+      modelFactory: async (_m, o) =>
+        o.baseUrl.includes('minimaxi')
+          ? ({
+              // 即刻失败桩（脚本/构造失败 = 确定性注入面）：bindTools 返回自身——
+              // 默认链成员 duck 面（可绑工具）与真实模型一致
+              invoke: async () => {
+                throw new Error('platform fallback disabled in test')
+              },
+              bindTools() {
+                return this
+              },
+            } as never)
+          : new ScriptedChatModel(opts.script ?? []),
     })
     const svc = new RunService({
       prisma,

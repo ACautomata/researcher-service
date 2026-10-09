@@ -12,7 +12,9 @@ import type { PluginAuditPort, PluginFiguresPort, PluginLlmPort, PluginRunIdenti
 export interface PluginRunFrame {
   readonly run: PluginRunIdentity
   readonly figures: PluginFiguresPort
-  readonly llm: PluginLlmPort
+  /** per-plugin ctx.llm 工厂（#883 T3）：插件 id → 解析器端口。端口内绑定 run 启动捕获的
+   *  配置快照（frame 构造期）——指派变更下一 run 生效，在飞 run 不受影响。 */
+  readonly llmFor: (pluginId: string) => PluginLlmPort
   readonly audit: PluginAuditPort
   /** 阶段/部分结果上报（runner 翻译面：progress SSE + stage_transitions TextTrace 双面） */
   readonly onUpdate: (toolCallId: string, partial: unknown) => void
@@ -30,15 +32,24 @@ export function currentPluginRunFrame(): PluginRunFrame | undefined {
 
 // frame → execute exec 面件（ctx 四件展开 + onUpdate 单参包装）——agent 路径（tools.ts
 // ALS 解析）与 {execute} 直达路径（RunService 显式构造）的单一共享实现。frame 缺省 =
-// ctx 最小面（config/logger）+ 无 onUpdate，域工具自校验明确报错。
+// ctx 最小面（config/logger）+ 无 onUpdate，域工具自校验明确报错。pluginId 缺失（目录外
+// 工具名，防御面）→ llm 缺省——per-plugin 解析无键可用，宁缺不误。
 export function execPartsFromFrame(
   ctx: PluginToolContext,
   frame: PluginRunFrame | undefined,
   toolCallId: string,
+  pluginId?: string,
 ): { readonly ctx: PluginToolContext; readonly onUpdate?: (partial: unknown) => void } {
   if (!frame) return { ctx }
+  const llm = pluginId !== undefined ? frame.llmFor(pluginId) : undefined
   return {
-    ctx: { ...ctx, run: frame.run, figures: frame.figures, llm: frame.llm, audit: frame.audit },
+    ctx: {
+      ...ctx,
+      run: frame.run,
+      figures: frame.figures,
+      ...(llm !== undefined ? { llm } : {}),
+      audit: frame.audit,
+    },
     onUpdate: (partial: unknown) => frame.onUpdate(toolCallId, partial),
   }
 }

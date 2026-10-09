@@ -26,7 +26,7 @@ export function contentToText(content: readonly PluginToolContentBlock[]): strin
     .join('\n')
 }
 
-export function toLangChainTool(def: AnyPluginToolDefinition, ctx: PluginToolContext) {
+export function toLangChainTool(def: AnyPluginToolDefinition, ctx: PluginToolContext, pluginId?: string) {
   return tool(
     // func 签名（input, runtime)：runtime = RunnableConfig 扩展——signal 在 config 顶层或
     // configurable 两处随版本漂移，双处 best-effort 提取，缺省 never-abort。
@@ -39,7 +39,9 @@ export function toLangChainTool(def: AnyPluginToolDefinition, ctx: PluginToolCon
           : new AbortController().signal
       const result = await def.execute(toolCallId, params as never, {
         signal,
-        ...execPartsFromFrame(ctx, currentPluginRunFrame(), toolCallId),
+        // pluginId（#883）：调用方经运行时目录 toolOwnerByName 派生——ctx.llm per-plugin
+        // 解析键。缺失（防御面）→ ctx.llm 缺省，域工具自校验。
+        ...execPartsFromFrame(ctx, currentPluginRunFrame(), toolCallId, pluginId),
       })
       const text = contentToText(result.content)
       // responseFormat='content_and_artifact'：二元组 [content, artifact]——content = 模型面，
@@ -51,6 +53,10 @@ export function toLangChainTool(def: AnyPluginToolDefinition, ctx: PluginToolCon
   )
 }
 
-export function toLangChainTools(defs: readonly AnyPluginToolDefinition[], ctx: PluginToolContext): ReturnType<typeof toLangChainTool>[] {
-  return defs.map((def) => toLangChainTool(def, ctx))
+export function toLangChainTools(
+  defs: readonly AnyPluginToolDefinition[],
+  ctx: PluginToolContext,
+  pluginIdOf?: (name: string) => string | undefined,
+): ReturnType<typeof toLangChainTool>[] {
+  return defs.map((def) => toLangChainTool(def, ctx, pluginIdOf?.(def.name)))
 }

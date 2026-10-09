@@ -13,12 +13,6 @@ export const adminRoutes: RouteRecordRaw[] = [
     meta: { requiresAuth: true, requiresAdmin: true },
   },
   {
-    path: '/endpoints',
-    name: 'admin-endpoints',
-    component: () => import('@/admin/views/ProviderEndpointsView.vue'),
-    meta: { requiresAuth: true, requiresAdmin: true },
-  },
-  {
     path: '/audit',
     name: 'admin-audit',
     component: () => import('@/admin/views/AuditLogsView.vue'),

@@ -2,9 +2,10 @@
 // details 通道（R5 双面契约）。
 import { describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
-import { definePlugin, type AnyPluginToolDefinition, type PluginManifest } from '../src/plugins/api'
+import { definePlugin, type AnyPluginToolDefinition, type PluginManifest, type PluginToolContext } from '../src/plugins/api'
 import { createPluginRuntime } from '../src/plugins/surface'
 import { contentToText, toLangChainTool } from '../src/plugins/tools'
+import { runWithPluginRunFrame } from '../src/plugins/runContext'
 import { RunProjector } from '../src/runner/runtime/projector'
 
 function tool(name: string, overrides: Partial<AnyPluginToolDefinition> = {}): AnyPluginToolDefinition {
@@ -56,6 +57,18 @@ describe('#788 plugin surface assembly (S3, #752 §4.2)', () => {
     const big = tool('loud_tool', { promptSnippet: 'x'.repeat(5000) })
     expect(() => createPluginRuntime({ manifests: [manifest('alpha', [big])], config: {} })).toThrow('4KB')
   })
+
+  it('toolOwnerByName：工具名 → 插件 id 全目录映射（#883 AC——ctx.llm per-plugin 穿线取值域）', () => {
+    const manifests = [
+      manifest('alpha', [tool('alpha_tool'), tool('shared_name')]),
+      manifest('beta', [tool('beta_tool')]),
+    ]
+    const runtime = createPluginRuntime({ manifests, config: {} })
+    expect(runtime.toolOwnerByName.get('alpha_tool')).toBe('alpha')
+    expect(runtime.toolOwnerByName.get('beta_tool')).toBe('beta')
+    expect(runtime.toolOwnerByName.get('shared_name')).toBe('alpha')
+    expect(runtime.toolOwnerByName.has('unknown_tool')).toBe(false)
+  })
 })
 
 describe('#788 plugin tool LangChain adapter (S3)', () => {
@@ -76,6 +89,38 @@ describe('#788 plugin tool LangChain adapter (S3)', () => {
 
   it('image blocks degrade to placeholder lines in the text face', () => {
     expect(contentToText([{ type: 'image_url', image_url: { url: 'u' } }])).toBe('[image: u]')
+  })
+
+  it('pluginId 穿线（#883 AC）：tool 携带插件 id → frame.llmFor(pluginId) 产 per-plugin ctx.llm', async () => {
+    const fakeLlmPort = { generateMultimodal: async () => ({ text: 'llm-ok' }) }
+    const llmFor = vi.fn((pluginId: string) => (pluginId === 'autofigure' ? fakeLlmPort : undefined))
+    const frame = {
+      run: { ownerId: 'o', sessionId: 's', runId: 'r' },
+      figures: {},
+      llmFor,
+      audit: {},
+      onUpdate: () => {},
+    }
+    const seen: Array<{ plugin: string | undefined; text?: string }> = []
+    const execute = async (_id: string, _p: unknown, exec: { ctx: PluginToolContext }) => {
+      if (exec.ctx.llm) {
+        seen.push({ plugin: 'autofigure', text: (await exec.ctx.llm.generateMultimodal({ contents: ['ping'], model: '', maxTokens: 64, temperature: 0 })).text })
+      } else {
+        seen.push({ plugin: undefined })
+      }
+      return { content: [{ type: 'text' as const, text: 'done' }] }
+    }
+    const ctx = { config: {}, logger: { info: () => {}, warn: () => {} } }
+    // 有 frame + pluginId：ctx.llm = frame.llmFor(pluginId)（per-plugin 端口）
+    const withFrame = toLangChainTool(tool('t_frame', { execute }) as AnyPluginToolDefinition, ctx, 'autofigure')
+    await runWithPluginRunFrame(frame as never, () => withFrame.invoke({ input: 'x' }))
+    expect(llmFor).toHaveBeenCalledWith('autofigure')
+    expect(seen[0]).toEqual({ plugin: 'autofigure', text: 'llm-ok' })
+    // pluginId 缺失（目录外工具名）：ctx.llm 缺省（域工具自校验语义不变）
+    const noPlugin = toLangChainTool(tool('t_nop', { execute }) as AnyPluginToolDefinition, ctx, undefined)
+    await runWithPluginRunFrame(frame as never, () => noPlugin.invoke({ input: 'x' }))
+    expect(llmFor).toHaveBeenCalledTimes(1)
+    expect(seen[1]).toEqual({ plugin: undefined })
   })
 })
 

@@ -61,10 +61,9 @@ describe('#788 插件命令运行时（S1，{inject}/{execute}）', () => {
     const prisma = createPrismaClient(`file:${dbPath}`)
     const owner = await seedUser(prisma, 'plugins-cmd-user', 'plugins-cmd-password')
     await prisma.modelProvider.create({ data: {
-      ownerId: owner.id, providerId: 'cmd-provider', lcProvider: 'openai', baseUrl: 'https://llm.example.edu/v1',
-      credentialEnvId: 'LLM_API_KEY', authHeader: true, modelsJson: JSON.stringify([{ id: 'model-x' }]),
+      ownerId: owner.id, providerId: 'cmd-provider', presetId: 'openai',
+      modelsJson: JSON.stringify([{ id: 'model-x' }]),
     } })
-    await prisma.providerEndpoint.create({ data: { scheme: 'https', host: 'llm.example.edu', port: null, createdBy: 'seed' } })
     const hub = new StreamHub()
     const events: CatalogEvent[] = []
     hub.register(owner.id, { send: frame => {
@@ -124,6 +123,19 @@ describe('#788 插件命令运行时（S1，{inject}/{execute}）', () => {
     expect(assistant.tools?.[0]).toMatchObject({ name: 'fixture_echo', state: 'success' })
   }, 15_000)
 
+  it('{execute} ctx.llm 穿线（#883 AC）：直达路径 frame.llmFor(插件 id) 可用且走指派快照', async () => {
+    const h = await harness()
+    await h.prisma.pluginEnablement.create({ data: { ownerId: h.owner.id, pluginId: 'fixture', enabled: true, enabledAt: new Date() } })
+    await h.prisma.pluginLlmAssignment.create({ data: { ownerId: h.owner.id, pluginId: 'fixture', providerId: 'cmd-provider', modelId: 'model-x' } })
+    expect((await h.send('/llm-cmd', 'd'.repeat(32))).body.code).toBe(0)
+    await h.settle()
+    const end = h.events.find(event => event.type === 'tool.end' && (event.payload as { name?: string }).name === 'fixture_llm')
+    expect(end).toMatchObject({ payload: { state: 'success' } })
+    // ctx.llm 应答经 registry fake 模型返回（'ack'）——端口存在且解析链走通（指派单目标 =
+    // cmd-provider/model-x，fake 模型统一应答；解析目标面由 llmToolPort 单测钉）。
+    expect(JSON.parse((end!.payload as { details: string }).details)).toEqual({ llmText: 'ack' })
+  }, 15_000)
+
   it('禁用插件的命令按原文直入模型（无插件语义）', async () => {
     const h = await harness()
     expect((await h.send('/say not enabled', 'c'.repeat(32))).body.code).toBe(0)
@@ -149,9 +161,24 @@ const fixtureManifest = definePlugin({
         details: { echo: (params as { input: string }).input },
       }),
     } as AnyPluginToolDefinition,
+    {
+      name: 'fixture_llm',
+      description: 'ctx.llm threading probe',
+      category: 'domain' as const,
+      parameters: z.object({}),
+      execute: async (_toolCallId, _params, exec) => {
+        if (!exec.ctx.llm) throw new Error('ctx.llm not threaded')
+        const r = await exec.ctx.llm.generateMultimodal({ contents: ['ping'], model: '', maxTokens: 64, temperature: 0 })
+        return {
+          content: [{ type: 'text' as const, text: `llm:${r.text}` }],
+          details: { llmText: r.text },
+        }
+      },
+    } as AnyPluginToolDefinition,
   ],
   commands: [
     { name: 'say', handler: async (args: string) => ({ inject: `Say this: ${args}` }) },
     { name: 'echo-cmd', handler: async (args: string) => ({ execute: { tool: 'fixture_echo', args: { input: args } } }) },
+    { name: 'llm-cmd', handler: async () => ({ execute: { tool: 'fixture_llm', args: {} } }) },
   ],
 })

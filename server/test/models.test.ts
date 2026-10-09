@@ -1,50 +1,56 @@
-// models REST 契约测试（#336 · 接缝 #2 信封 + 归属前置；#775 事务简化 + 白名单第一层；
-// #857 归属门改挂 ownerId：端点 /api/v1/models/providers[/<pid>]，owner 直取认证身份，
-// 路由层零容器行查询——容器不存在/越权 20040 与 creating/removing 拒写 20043 随耦合移除）。
-// snake_case wire（平移 Django + 前端）。
+// models REST 契约测试（#336 · #857 owner 级；#881 预设制换形 + BYOK 凭证单向流）。
 //
-// #775 后事务语义：DB mutation + config_meta version bump（热生效信号）——写盘/reconcile/
-// 写盘回滚（90003）整面退役（LLM 消费方换轨 runner，写盘链已随 T0 #801 清退）。
-// 白名单第一层（731 §5.1）：origin 精确匹配 provider_endpoints + DNS 私网拒绝 →
-// 90002 字段级 base_url；lookup 经 deps 注入 fake（零网络）。
+// #881 后形状：端点 = presetId（六预设锁定协议/地址，无自由 baseURL——SSRF 构造性消灭）+
+// credentialCipher（AES-256-GCM v1 信封）。白名单双层校验链整链退役（表/REST/校验/fetch
+// 复验/DNS/逃生 env）——原 90002 base_url / 40042 运行时面不复存在。
 //
-// 验收映射：#336 —— 信封 + provider_id 撞 40041 / 越权与不存在同码 40040 /
-// 凭证零落盘 / api_key_env_id 非法 90002；#775 —— CRUD 同事务 version bump /
-// 白名单未命中与 DNS 私网 90002 字段级 / allowPrivate 逃生门；#857 —— owner 级路由
-// （跨用户 pid 探测同码 40040 防探测）/ admin 亦只操作本人配置面。
+// 凭证单向流验收（#881 AC）：写请求可带明文，落库即密文；列表/详情只出掩码；
+// **响应体整 JSON 断言无明文无密文**；解密失败读不炸（key_error 标记）；
+// 编辑 key 留空 = 保持不变；保留 id（'platform'）抢注写侧拒绝。
+// 凭证 AES 真实 round-trip（#880 Testing Decisions：主接缝①）。
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { setupTestApp, type TestContext } from './setup'
 import { seedAdmin, seedUser, login, bearer } from './helpers'
-import { ModelProviderService, type ModelProviderWriteInput } from '../src/models/service'
+import { config } from '../src/config'
+import { decryptCredential } from '../src/models/cipher'
 
-// fake DNS：默认全部解析到公网地址；可切换为私网以测拒绝（零网络）。
-const publicLookup = async () => [{ address: '203.0.113.10', family: 4 }] as const
-const privateLookup = async () => [{ address: '10.6.6.6', family: 4 }] as const
-
-// owner 级集合面（#857；三个 describe 共用一份，免逐块重定义）
 const PROVIDERS_PATH = '/api/v1/models/providers'
+const PRESETS_PATH = '/api/v1/models/presets'
+const PLATFORM_PATH = '/api/v1/models/platform'
+
+// 测试密钥 = config dev 弱默认（NODE_ENV=test 走 dev 分支）；AES round-trip 同源验证。
+const TEST_SECRET = config.llm.credentialSecret
 
 const VALID = {
-  provider_id: 'my-openai',
-  api: 'openai-completions',
-  base_url: 'https://open.bigmodel.cn/api/paas/v4',
-  api_key_env_id: 'LLM_API_KEY',
-  auth_header: true,
+  provider_id: 'my-gpt',
+  preset_id: 'openai',
+  api_key: 'sk-test-plain-key-0123456789',
   models: [
     {
-      id: 'glm-4-plus',
-      name: 'GLM-4 Plus',
-      reasoning: false,
+      id: 'gpt-5.1',
+      name: 'GPT-5.1',
+      reasoning: true,
       input: ['text'],
-      contextWindow: 131072,
-      maxTokens: 8192,
+      contextWindow: 400000,
+      maxTokens: 128000,
     },
   ],
 }
 
-describe('models REST（接缝 #2 + #336 + #775 新事务 + #857 owner 级路由）', () => {
+// 整响应体断言：任何字段不含明文 key 与密文信封（v1: 前缀）。
+function assertNoKeyMaterial(body: unknown, plaintext: string): void {
+  const raw = JSON.stringify(body)
+  expect(raw).not.toContain(plaintext)
+  expect(raw).not.toContain('v1:')
+  expect(raw).not.toContain('api_key":')
+}
+
+describe('models REST（#881 预设制 + BYOK 凭证单向流）', () => {
   let ctx: TestContext
+  let adminAccess: string
+  let userAccess: string
+  let otherAccess: string
   const providerOf = (pid: string): string => `${PROVIDERS_PATH}/${pid}`
   const configVersion = async (): Promise<number | null> => {
     const row = await ctx.prisma.configMeta.findUnique({ where: { id: 1 } })
@@ -52,417 +58,301 @@ describe('models REST（接缝 #2 + #336 + #775 新事务 + #857 owner 级路由
   }
 
   beforeAll(async () => {
-    ctx = await setupTestApp({ models: { lookup: publicLookup as never } })
-    // 白名单种子（测试库走 init.sql-only，无 #803 增量 seed——自种两条）
-    await ctx.prisma.providerEndpoint.create({
-      data: { id: 'ep-bigmodel', scheme: 'https', host: 'open.bigmodel.cn', port: null, note: 'test', createdBy: 'test' },
-    })
-    await ctx.prisma.providerEndpoint.create({
-      data: { id: 'ep-minimax', scheme: 'https', host: 'api.minimaxi.com', port: null, note: 'test', createdBy: 'test' },
-    })
+    ctx = await setupTestApp()
+    const admin = await seedAdmin(ctx.prisma)
+    const user = await seedUser(ctx.prisma)
+    const other = await seedUser(ctx.prisma, 'user2', 'pw-user2-secure')
+    adminAccess = (await login(ctx.request, admin.username, 'pw-admin1-secure')).access!
+    userAccess = (await login(ctx.request, user.username, 'pw-user1-secure')).access!
+    otherAccess = (await login(ctx.request, other.username, 'pw-user2-secure')).access!
   })
   afterAll(async () => {
     await ctx.cleanup()
   })
 
-  // ---------------------------- 认证 / owner 级归属（#857 公共前置）----------------------------
-
-  it('未认证 → 10001', async () => {
-    const res = await ctx.request.get(PROVIDERS_PATH)
-    expect(res.body.code).toBe(10001)
+  it('删除影响面按本人归属统计四类引用；删除不拒绝悬挂引用', async () => {
+    const user = await ctx.prisma.user.findUniqueOrThrow({ where: { username: 'user1' } })
+    const other = await ctx.prisma.user.findUniqueOrThrow({ where: { username: 'user2' } })
+    await ctx.request.post(PROVIDERS_PATH).set(bearer(userAccess)).send({ ...VALID, provider_id: 'impact' })
+    const parent = await ctx.prisma.session.create({ data: { containerId: 'impact-sandbox', ownerId: user.id, preferredModelJson: JSON.stringify({ modelId: 'gpt-5.1', providerId: 'impact' }) } })
+    const thread = await ctx.prisma.session.create({ data: { containerId: 'impact-thread', ownerId: user.id, isTeammate: true, preferredModelJson: parent.preferredModelJson } })
+    await ctx.prisma.teammate.create({ data: { parentSessionId: parent.id, threadId: thread.id, name: 'worker', task: 'task', modelProviderId: 'impact' } })
+    await ctx.prisma.session.create({ data: { containerId: 'other-sandbox', ownerId: other.id, preferredModelJson: parent.preferredModelJson } })
+    await ctx.prisma.session.create({ data: { containerId: 'impact-sandbox', ownerId: user.id, preferredModelJson: '{broken' } })
+    for (const pluginId of ['autofigure', 'judge']) await ctx.prisma.pluginLlmAssignment.create({ data: { ownerId: user.id, pluginId, providerId: 'impact', modelId: 'gpt-5.1' } })
+    const path = `${providerOf('impact')}/impact`
+    const res = await ctx.request.get(path).set(bearer(userAccess))
+    expect(res.body).toMatchObject({ code: 0, data: { sessions: 1, teammates: 1, plugins: 1, judge: 1, total: 4 } })
+    expect((await ctx.request.get(path).set(bearer(otherAccess))).body.code).toBe(40040)
+    expect((await ctx.request.delete(providerOf('impact')).set(bearer(userAccess))).body.code).toBe(0)
+    expect((await ctx.request.get(path).set(bearer(userAccess))).body.code).toBe(40040)
   })
 
-  it('旧容器前缀路径 → 90005（路由下线，#857）', async () => {
-    await seedUser(ctx.prisma, 'mleg', 'pw-mleg-secure')
-    const l = await login(ctx.request, 'mleg', 'pw-mleg-secure')
-    const res = await ctx.request.get('/api/v1/containers/legacy/models/providers').set(bearer(l.access))
-    expect(res.body.code).toBe(90005)
-  })
+  // ---------------------------- 认证（公共前置）----------------------------
 
-  it('list 恒为本人的配置面（owner 直取认证身份）：他人 provider 不可见', async () => {
-    await seedUser(ctx.prisma, 'mown', 'pw-mown-secure')
-    await seedUser(ctx.prisma, 'mother', 'pw-mother-secure')
-    const la = await login(ctx.request, 'mown', 'pw-mown-secure')
-    await ctx.request.post(PROVIDERS_PATH).set(bearer(la.access)).send(VALID)
-    const lb = await login(ctx.request, 'mother', 'pw-mother-secure')
-    const res = await ctx.request.get(PROVIDERS_PATH).set(bearer(lb.access))
-    expect(res.body.code).toBe(0)
-    expect(res.body.data).toEqual([])
-  })
-
-  it('admin 亦只操作本人配置面（owner 级无跨用户覆写面；对齐 sessions 先例）', async () => {
-    await seedUser(ctx.prisma, 'madmt', 'pw-madmt-secure')
-    const lu = await login(ctx.request, 'madmt', 'pw-madmt-secure')
-    await ctx.request.post(PROVIDERS_PATH).set(bearer(lu.access)).send(VALID)
-    await seedAdmin(ctx.prisma, 'madmx', 'pw-madmx-secure')
-    const la = await login(ctx.request, 'madmx', 'pw-madmx-secure')
-    const res = await ctx.request.get(PROVIDERS_PATH).set(bearer(la.access))
-    expect(res.body.code).toBe(0)
-    expect(res.body.data).toEqual([])
-    // admin 跨用户探测他人 pid → 40040（同码防探测）
-    const r2 = await ctx.request.get(providerOf('my-openai')).set(bearer(la.access))
-    expect(r2.body).toEqual({ code: 40040, message: expect.any(String), data: null })
-  })
-
-  it('越权探测他人 pid：get/put/delete 同码 40040（不存在 vs 越权防探测不弱化，#857）', async () => {
-    await seedUser(ctx.prisma, 'mord', 'pw-mord-secure')
-    await seedUser(ctx.prisma, 'mordv', 'pw-mordv-secure')
-    const la = await login(ctx.request, 'mord', 'pw-mord-secure')
-    await ctx.request.post(PROVIDERS_PATH).set(bearer(la.access)).send(VALID)
-    const lv = await login(ctx.request, 'mordv', 'pw-mordv-secure')
-    const r1 = await ctx.request.get(providerOf('my-openai')).set(bearer(lv.access))
-    expect(r1.body).toEqual({ code: 40040, message: expect.any(String), data: null })
-    const r2 = await ctx.request.put(providerOf('my-openai')).set(bearer(lv.access)).send(VALID)
-    expect(r2.body.code).toBe(40040)
-    const r3 = await ctx.request.delete(providerOf('my-openai')).set(bearer(lv.access))
-    expect(r3.body.code).toBe(40040)
-    // 越权者建同行 pid 不冲突（owner 隔离）：其名下独立配置面
-    const r4 = await ctx.request.post(PROVIDERS_PATH).set(bearer(lv.access)).send(VALID)
-    expect(r4.body.code).toBe(0)
-  })
-
-  it('service 直调面：ownerId 即操作主体（#857 服务签名 ownerId 标量化）', async () => {
-    const u = await seedUser(ctx.prisma, 'msvc', 'pw-msvc-secure')
-    const svc = new ModelProviderService(ctx.prisma)
-    const input: ModelProviderWriteInput = {
-      providerId: 'svc-openai',
-      api: 'openai-completions',
-      baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
-      apiKeyEnvId: 'LLM_API_KEY',
-      authHeader: true,
-      models: VALID.models,
+  it('未认证 → 10001（presets / platform / providers 三面同守）', async () => {
+    for (const path of [PRESETS_PATH, PLATFORM_PATH, PROVIDERS_PATH]) {
+      const res = await ctx.request.get(path)
+      expect(res.status).toBe(200)
+      expect(res.body.code).toBe(10001)
     }
-    const created = await svc.create(u.id, input)
-    expect(created.provider_id).toBe('svc-openai')
-    // 他人 ownerId 读不到该行 → 40040
-    await expect(svc.get('no-such-owner', 'svc-openai')).rejects.toMatchObject({ code: 40040 })
   })
 
-  // ---------------------------- CRUD wire 契约（#336 保留面）----------------------------
+  // ---------------------------- 预设目录 + 平台默认端点视图 ----------------------------
 
-  it('create 返回 provider（snake_case wire）', async () => {
-    await seedUser(ctx.prisma, mcName('wire'), 'pw-wire-secure')
-    const l = await login(ctx.request, mcName('wire'), 'pw-wire-secure')
-    const res = await ctx.request.post(PROVIDERS_PATH).set(bearer(l.access)).send(VALID)
+  it('GET /presets：六预设下发（id/protocol/base_url/default_models；无敏感面）', async () => {
+    const res = await ctx.request.get(PRESETS_PATH).set(bearer(userAccess))
     expect(res.body.code).toBe(0)
-    expect(res.body.data).toMatchObject({
-      provider_id: 'my-openai',
-      api: 'openai-completions',
-      base_url: 'https://open.bigmodel.cn/api/paas/v4',
-      api_key_env_id: 'LLM_API_KEY',
-      auth_header: true,
-      models: [expect.objectContaining({ id: 'glm-4-plus' })],
-    })
-    expect(res.body.data.created_at).toEqual(expect.any(String))
+    const presets = res.body.data as Array<Record<string, unknown>>
+    expect(presets.map((p) => p.id)).toEqual(['minimax', 'anthropic', 'openai', 'deepseek', 'kimi', 'zhipu'])
+    const openai = presets.find((p) => p.id === 'openai')!
+    expect(openai.protocol).toBe('openai-completions')
+    expect(openai.base_url).toBe('https://api.openai.com/v1')
+    expect((openai.default_models as Array<{ id: string }>).length).toBeGreaterThanOrEqual(1)
+    // kimi 带尾斜杠、zhipu 不带（URL 逐字锁定经 wire 下发）
+    expect(presets.find((p) => p.id === 'kimi')!.base_url).toBe('https://api.moonshot.cn/v1/')
+    expect(presets.find((p) => p.id === 'zhipu')!.base_url).toBe('https://open.bigmodel.cn/api/paas/v4')
   })
 
-  it('list 显示已建 provider（owner 级单一配置面，#857：同 owner 不随容器维度分裂）', async () => {
-    await seedUser(ctx.prisma, mcName('list'), 'pw-list-secure')
-    const l = await login(ctx.request, mcName('list'), 'pw-list-secure')
-    await ctx.request.post(PROVIDERS_PATH).set(bearer(l.access)).send(VALID)
-    const r1 = await ctx.request.get(PROVIDERS_PATH).set(bearer(l.access))
-    expect(r1.body.data).toHaveLength(1)
-    expect(r1.body.data[0].provider_id).toBe('my-openai')
-  })
-
-  it('create 非法 body → 90002 + 字段明细（zod URL 形态门含在 base_url）', async () => {
-    await seedUser(ctx.prisma, mcName('badb'), 'pw-badb-secure')
-    const l = await login(ctx.request, mcName('badb'), 'pw-badb-secure')
-    const res = await ctx.request
-      .post(PROVIDERS_PATH)
-      .set(bearer(l.access))
-      .send({ ...VALID, provider_id: 'Bad_Format' })
-    expect(res.body.code).toBe(90002)
-    expect(res.body.data).toHaveProperty('provider_id')
-    // URL 形态门（#775，731 §5.1 第一层①）：非 http(s)://host 起头直接拒
-    const r2 = await ctx.request
-      .post(PROVIDERS_PATH)
-      .set(bearer(l.access))
-      .send({ ...VALID, provider_id: 'url-x', base_url: 'ftp://open.bigmodel.cn/v4' })
-    expect(r2.body.code).toBe(90002)
-    expect(r2.body.data.base_url[0]).toContain('http(s)')
-    const r3 = await ctx.request
-      .post(PROVIDERS_PATH)
-      .set(bearer(l.access))
-      .send({ ...VALID, provider_id: 'url-y', base_url: 'not a url' })
-    expect(r3.body.code).toBe(90002)
-    expect(r3.body.data).toHaveProperty('base_url')
-    // #812：形态门复用 parseHttpOrigin 后端口域越界（>65535）zod 阶段即拒
-    //（旧本地正则 \d{1,5} 放行 :99999 —— 两份 URL 定义的漂移面回归）
-    const r4 = await ctx.request
-      .post(PROVIDERS_PATH)
-      .set(bearer(l.access))
-      .send({ ...VALID, provider_id: 'url-z', base_url: 'https://open.bigmodel.cn:99999/v4' })
-    expect(r4.body.code).toBe(90002)
-    expect(r4.body.data).toHaveProperty('base_url')
-  })
-
-  it('api_key_env_id 非法格式 / 未注入 env → 90002 + data.api_key_env_id', async () => {
-    await seedUser(ctx.prisma, mcName('env'), 'pw-env-secure')
-    const l = await login(ctx.request, mcName('env'), 'pw-env-secure')
-    const r1 = await ctx.request
-      .post(PROVIDERS_PATH)
-      .set(bearer(l.access))
-      .send({ ...VALID, api_key_env_id: 'bad-id' })
-    expect(r1.body.code).toBe(90002)
-    expect(r1.body.data).toHaveProperty('api_key_env_id')
-    const r2 = await ctx.request
-      .post(PROVIDERS_PATH)
-      .set(bearer(l.access))
-      .send({ ...VALID, api_key_env_id: 'SOME_OTHER_KEY' })
-    expect(r2.body.code).toBe(90002)
-    expect(r2.body.data).toHaveProperty('api_key_env_id')
-  })
-
-  it('model 条目字段类型非法（name 为对象）→ 90002', async () => {
-    await seedUser(ctx.prisma, mcName('mmsh'), 'pw-mmsh-secure')
-    const l = await login(ctx.request, mcName('mmsh'), 'pw-mmsh-secure')
-    const res = await ctx.request
-      .post(PROVIDERS_PATH)
-      .set(bearer(l.access))
-      .send({ ...VALID, models: [{ id: 'm', name: { bad: 1 } }] })
-    expect(res.body.code).toBe(90002)
-  })
-
-  it('create 撞同 owner provider_id → 40041（unique 约束）', async () => {
-    await seedUser(ctx.prisma, mcName('conf'), 'pw-conf-secure')
-    const l = await login(ctx.request, mcName('conf'), 'pw-conf-secure')
-    await ctx.request.post(PROVIDERS_PATH).set(bearer(l.access)).send(VALID)
-    const res = await ctx.request.post(PROVIDERS_PATH).set(bearer(l.access)).send(VALID)
-    expect(res.body.code).toBe(40041)
-  })
-
-  it('get 单条 provider / get 未知 → 40040（同码防探测，data null）', async () => {
-    await seedUser(ctx.prisma, mcName('get1'), 'pw-get1-secure')
-    const l = await login(ctx.request, mcName('get1'), 'pw-get1-secure')
-    await ctx.request.post(PROVIDERS_PATH).set(bearer(l.access)).send(VALID)
-    const r1 = await ctx.request.get(providerOf('my-openai')).set(bearer(l.access))
-    expect(r1.body.code).toBe(0)
-    expect(r1.body.data.provider_id).toBe('my-openai')
-    const r2 = await ctx.request.get(providerOf('nope')).set(bearer(l.access))
-    expect(r2.body).toEqual({ code: 40040, message: expect.any(String), data: null })
-  })
-
-  it('put 改 base_url + models / put 未知 → 40040 / put 改 provider_id / 撞既有 → 40041', async () => {
-    await seedUser(ctx.prisma, mcName('put1'), 'pw-put1-secure')
-    const l = await login(ctx.request, mcName('put1'), 'pw-put1-secure')
-    await ctx.request.post(PROVIDERS_PATH).set(bearer(l.access)).send(VALID)
-    const r1 = await ctx.request
-      .put(providerOf('my-openai'))
-      .set(bearer(l.access))
-      .send({ ...VALID, models: [{ id: 'glm-5', name: 'GLM 5' }] })
-    expect(r1.body.code).toBe(0)
-    expect(r1.body.data.models[0].id).toBe('glm-5')
-    const r2 = await ctx.request.put(providerOf('nope')).set(bearer(l.access)).send(VALID)
-    expect(r2.body.code).toBe(40040)
-    // 改 provider_id
-    const r3 = await ctx.request
-      .put(providerOf('my-openai'))
-      .set(bearer(l.access))
-      .send({ ...VALID, provider_id: 'renamed' })
-    expect(r3.body.code).toBe(0)
-    expect(r3.body.data.provider_id).toBe('renamed')
-    // 建第二行后，把 'renamed' 改回撞名 → 40041（unique(ownerId, providerId)）
-    await ctx.request
-      .post(PROVIDERS_PATH)
-      .set(bearer(l.access))
-      .send({ ...VALID, provider_id: 'second', base_url: 'https://api.minimaxi.com/anthropic' })
-    const r4 = await ctx.request
-      .put(providerOf('renamed'))
-      .set(bearer(l.access))
-      .send({ ...VALID, provider_id: 'second' })
-    expect(r4.body.code).toBe(40041)
-  })
-
-  it('delete 删 provider → 列表清空；delete 未知 → 40040', async () => {
-    await seedUser(ctx.prisma, mcName('del1'), 'pw-del1-secure')
-    const l = await login(ctx.request, mcName('del1'), 'pw-del1-secure')
-    await ctx.request.post(PROVIDERS_PATH).set(bearer(l.access)).send(VALID)
-    const r1 = await ctx.request.delete(providerOf('my-openai')).set(bearer(l.access))
-    expect(r1.body.code).toBe(0)
-    const r2 = await ctx.request.get(PROVIDERS_PATH).set(bearer(l.access))
-    expect(r2.body.data).toEqual([])
-    const r3 = await ctx.request.delete(providerOf('my-openai')).set(bearer(l.access))
-    expect(r3.body.code).toBe(40040)
-  })
-
-  it('凭证零落盘：响应体无 apiKey 明文（仅 env marker）', async () => {
-    const u = await seedUser(ctx.prisma, mcName('cred'), 'pw-cred-secure')
-    const l = await login(ctx.request, mcName('cred'), 'pw-cred-secure')
-    await ctx.request.post(PROVIDERS_PATH).set(bearer(l.access)).send(VALID)
-    const rows = await ctx.prisma.modelProvider.findMany({ where: { ownerId: u.id } })
-    expect(rows).toHaveLength(1)
-    expect(JSON.stringify(rows[0])).not.toMatch(/sk-|secret|password/i)
-    expect(rows[0].credentialEnvId).toBe('LLM_API_KEY')
-  })
-
-  it('两 provider 顺序按 createdAt（primary 先建、fallbacks 后建语义，列表序即派生序）', async () => {
-    await seedUser(ctx.prisma, mcName('ordr'), 'pw-ordr-secure')
-    const l = await login(ctx.request, mcName('ordr'), 'pw-ordr-secure')
-    await ctx.request.post(PROVIDERS_PATH).set(bearer(l.access)).send(VALID)
-    await ctx.request
-      .post(PROVIDERS_PATH)
-      .set(bearer(l.access))
-      .send({ ...VALID, provider_id: 'second', base_url: 'https://api.minimaxi.com/anthropic' })
-    const res = await ctx.request.get(PROVIDERS_PATH).set(bearer(l.access))
-    expect(res.body.data.map((p: { provider_id: string }) => p.provider_id)).toEqual(['my-openai', 'second'])
-  })
-
-  // ---------------------------- #775 新事务：热生效 version bump ----------------------------
-
-  it('create / update / delete 各同事务 bump config_meta.version（+1/次）', async () => {
-    await seedUser(ctx.prisma, mcName('vrsn'), 'pw-vrsn-secure')
-    const l = await login(ctx.request, mcName('vrsn'), 'pw-vrsn-secure')
-
-    const before = await configVersion()
-    await ctx.request.post(PROVIDERS_PATH).set(bearer(l.access)).send(VALID)
-    const v1 = await configVersion()
-    // 种子行缺失（前序未触写路径的库）→ bump 落 create（version=2：本事务已变更）；
-    // 已有种子行（前序 CRUD 已建）→ 常规 increment。两者断言统一为「+1 或 2 起步」。
-    expect(v1).toBe(before === null ? 2 : before + 1)
-
-    await ctx.request
-      .put(providerOf('my-openai'))
-      .set(bearer(l.access))
-      .send({ ...VALID, provider_id: 'my-openai', auth_header: false })
-    expect(await configVersion()).toBe(v1! + 1)
-
-    await ctx.request.delete(providerOf('my-openai')).set(bearer(l.access))
-    expect(await configVersion()).toBe(v1! + 2)
-
-    await ctx.request.post(PROVIDERS_PATH).set(bearer(l.access)).send(VALID)
-    expect(await configVersion()).toBe(v1! + 3)
-  })
-
-  it('读操作不 bump version（GET/list 零写）', async () => {
-    await seedUser(ctx.prisma, mcName('vrd'), 'pw-vrd-secure')
-    const l = await login(ctx.request, mcName('vrd'), 'pw-vrd-secure')
-    await ctx.request.post(PROVIDERS_PATH).set(bearer(l.access)).send(VALID)
-    const before = await configVersion()
-    await ctx.request.get(PROVIDERS_PATH).set(bearer(l.access))
-    await ctx.request.get(providerOf('my-openai')).set(bearer(l.access))
-    expect(await configVersion()).toBe(before)
-  })
-
-  // ---------------------------- #775 白名单第一层（731 §5.1）----------------------------
-
-  it('白名单未命中 → 90002 字段级 base_url（不泄露白名单内容）', async () => {
-    const u = await seedUser(ctx.prisma, mcName('wlmi'), 'pw-wlmi-secure')
-    const l = await login(ctx.request, mcName('wlmi'), 'pw-wlmi-secure')
-    const res = await ctx.request
-      .post(PROVIDERS_PATH)
-      .set(bearer(l.access))
-      .send({ ...VALID, base_url: 'https://evil.example.com/v1' })
-    expect(res.body.code).toBe(90002)
-    expect(res.body.data.base_url[0]).toContain('白名单')
-    expect(JSON.stringify(res.body)).not.toContain('bigmodel')
-    // DB 无行落下
-    expect(await ctx.prisma.modelProvider.count({ where: { ownerId: u.id } })).toBe(0)
-  })
-
-  it('子域/端口变体不匹配（精确匹配语义）：prefix 域名与非标端口同拒', async () => {
-    await seedUser(ctx.prisma, mcName('wlvr'), 'pw-wlvr-secure')
-    const l = await login(ctx.request, mcName('wlvr'), 'pw-wlvr-secure')
-    const r1 = await ctx.request
-      .post(PROVIDERS_PATH)
-      .set(bearer(l.access))
-      .send({ ...VALID, provider_id: 'sub1', base_url: 'https://api.open.bigmodel.cn/v1' })
-    expect(r1.body.code).toBe(90002)
-    const r2 = await ctx.request
-      .post(PROVIDERS_PATH)
-      .set(bearer(l.access))
-      .send({ ...VALID, provider_id: 'sub2', base_url: 'https://open.bigmodel.cn:8443/v1' })
-    expect(r2.body.code).toBe(90002)
-  })
-
-  it('条目显式端口匹配：8443 条目只放行 8443 origin', async () => {
-    await seedUser(ctx.prisma, mcName('wlpt'), 'pw-wlpt-secure')
-    await ctx.prisma.providerEndpoint.create({
-      data: { scheme: 'https', host: 'port.example.com', port: 8443, note: '', createdBy: 't' },
-    })
-    const l = await login(ctx.request, mcName('wlpt'), 'pw-wlpt-secure')
-    const ok1 = await ctx.request
-      .post(PROVIDERS_PATH)
-      .set(bearer(l.access))
-      .send({ ...VALID, provider_id: 'pt-ok', base_url: 'https://port.example.com:8443/v1' })
-    expect(ok1.body.code).toBe(0)
-    const bad = await ctx.request
-      .post(PROVIDERS_PATH)
-      .set(bearer(l.access))
-      .send({ ...VALID, provider_id: 'pt-bad', base_url: 'https://port.example.com/v1' })
-    expect(bad.body.code).toBe(90002)
-  })
-
-  it('put 同样过白名单（改 base_url 到未命中端点 → 90002，DB 原值不变）', async () => {
-    const u = await seedUser(ctx.prisma, mcName('wlpu'), 'pw-wlpu-secure')
-    const l = await login(ctx.request, mcName('wlpu'), 'pw-wlpu-secure')
-    await ctx.request.post(PROVIDERS_PATH).set(bearer(l.access)).send(VALID)
-    const res = await ctx.request
-      .put(providerOf('my-openai'))
-      .set(bearer(l.access))
-      .send({ ...VALID, base_url: 'https://evil.example.com/v1' })
-    expect(res.body.code).toBe(90002)
-    expect(res.body.data).toHaveProperty('base_url')
-    const row = await ctx.prisma.modelProvider.findFirst({ where: { ownerId: u.id, providerId: 'my-openai' } })
-    expect(row!.baseUrl).toBe('https://open.bigmodel.cn/api/paas/v4')
-  })
-
-  // DNS 私网拒绝面经独立 describe（app 级注入 privateLookup）
-})
-
-// 私网解析 + allowPrivate 逃生门（731 §5.1 ③）：独立 app（独立注入），免与主 describe 的
-// publicLookup 串台。
-describe('models REST 白名单 DNS 私网面（#775）', () => {
-  let ctx: TestContext
-
-  beforeAll(async () => {
-    ctx = await setupTestApp({ models: { lookup: privateLookup as never } })
-    await ctx.prisma.providerEndpoint.create({
-      data: { scheme: 'https', host: 'api.minimaxi.com', port: null, note: 'test', createdBy: 'test' },
-    })
-  })
-  afterAll(async () => {
-    await ctx.cleanup()
-  })
-
-  it('白名单命中但 DNS 解析私网 → 90002 字段级（防借白名单条目名做内网探测）', async () => {
-    await seedUser(ctx.prisma, mcName('pv'), 'pw-pv-secure')
-    const l = await login(ctx.request, mcName('pv'), 'pw-pv-secure')
-    const res = await ctx.request
-      .post(PROVIDERS_PATH)
-      .set(bearer(l.access))
-      .send({ ...VALID, base_url: 'https://api.minimaxi.com/anthropic' })
-    expect(res.body.code).toBe(90002)
-    expect(res.body.data.base_url[0]).toContain('10.6.6.6')
-  })
-})
-
-// allowPrivate 逃生门（dev 自建 vLLM）：同样私网解析，开关开 → 放行。
-describe('models REST allowPrivate 逃生门（#775）', () => {
-  let ctx: TestContext
-
-  beforeAll(async () => {
-    ctx = await setupTestApp({ models: { lookup: privateLookup as never, allowPrivate: true } })
-    await ctx.prisma.providerEndpoint.create({
-      data: { scheme: 'https', host: 'api.minimaxi.com', port: null, note: 'test', createdBy: 'test' },
-    })
-  })
-  afterAll(async () => {
-    await ctx.cleanup()
-  })
-
-  it('allowPrivate=true → 私网解析端点放行（白名单命中即可）', async () => {
-    await seedUser(ctx.prisma, mcName('apv'), 'pw-apv-secure')
-    const l = await login(ctx.request, mcName('apv'), 'pw-apv-secure')
-    const res = await ctx.request
-      .post(PROVIDERS_PATH)
-      .set(bearer(l.access))
-      .send({ ...VALID, provider_id: 'mm', base_url: 'https://api.minimaxi.com/anthropic' })
+  it('GET /platform：平台默认端点只读卡（协议/地址/默认模型/key 配置状态；整响应无 key 材料）', async () => {
+    const res = await ctx.request.get(PLATFORM_PATH).set(bearer(userAccess))
     expect(res.body.code).toBe(0)
+    const card = res.body.data as Record<string, unknown>
+    expect(card.provider_id).toBe('platform')
+    expect(card.preset_id).toBe(config.llm.preset)
+    expect(card.protocol).toBe('anthropic-messages')
+    expect(card.base_url).toBe('https://api.minimaxi.com/anthropic')
+    // default_model = LLM_MODEL 覆盖 ?? 预设首模型；key_configured = 平台 key 已配置布尔
+    const expectedModel = config.llm.model !== '' ? config.llm.model : 'MiniMax-M3'
+    expect(card.default_model).toBe(expectedModel)
+    expect(card.key_configured).toBe(config.llm.apiKey !== '')
+    assertNoKeyMaterial(res.body, config.llm.apiKey || 'sk-nothing')
+  })
+
+  // ---------------------------- POST：建 BYOK 端点 ----------------------------
+
+  it('POST：建端点成功——响应只出掩码；DB 落密文；整响应 JSON 无明文无密文；AES round-trip 可解', async () => {
+    const before = (await configVersion()) ?? 1 // 无行按基线 1（bumpConfigVersion 首建 = 2）
+    const res = await ctx.request.post(PROVIDERS_PATH).set(bearer(userAccess)).send(VALID)
+    expect(res.body.code).toBe(0)
+    const view = res.body.data as Record<string, unknown>
+    expect(view.provider_id).toBe('my-gpt')
+    expect(view.preset_id).toBe('openai')
+    expect(view.protocol).toBe('openai-completions')
+    expect(view.base_url).toBe('https://api.openai.com/v1') // 预设派生只读
+    expect(view.api_key_masked).toBe('sk-••••6789')
+    expect(view.key_error).toBe(false)
+    assertNoKeyMaterial(res.body, VALID.api_key)
+
+    // DB 直读：落库即密文（无明文列）；AES 真实 round-trip
+    const row = await ctx.prisma.modelProvider.findFirst({ where: { ownerId: { not: '' }, providerId: 'my-gpt' } })
+    expect(row).not.toBeNull()
+    expect(row!.credentialCipher).not.toBeNull()
+    expect(row!.credentialCipher).not.toContain(VALID.api_key)
+    expect(decryptCredential(row!.credentialCipher!, TEST_SECRET)).toBe(VALID.api_key)
+
+    // 事务内 version bump（热生效信号）
+    expect(await configVersion()).toBe((before ?? 0) + 1)
+  })
+
+  it('POST：无 api_key → cipher NULL（平台共享 key），掩码 null', async () => {
+    const res = await ctx.request.post(PROVIDERS_PATH).set(bearer(userAccess)).send({
+      provider_id: 'no-key',
+      preset_id: 'deepseek',
+      models: [{ id: 'deepseek-v4-flash' }],
+    })
+    expect(res.body.code).toBe(0)
+    expect(res.body.data.api_key_masked).toBeNull()
+    const row = await ctx.prisma.modelProvider.findFirst({ where: { providerId: 'no-key' } })
+    expect(row!.credentialCipher).toBeNull()
+  })
+
+  it('POST：未知 preset_id → 90002 字段级；保留 id "platform" 抢注 → 90002', async () => {
+    const badPreset = await ctx.request.post(PROVIDERS_PATH).set(bearer(userAccess)).send({
+      ...VALID,
+      provider_id: 'bad-preset',
+      preset_id: 'vllm',
+    })
+    expect(badPreset.body.code).toBe(90002)
+    expect(badPreset.body.data.preset_id).toBeDefined()
+
+    const reserved = await ctx.request.post(PROVIDERS_PATH).set(bearer(userAccess)).send({
+      ...VALID,
+      provider_id: 'platform',
+    })
+    expect(reserved.body.code).toBe(90002)
+    expect(reserved.body.data.provider_id).toBeDefined()
+    expect(await ctx.prisma.modelProvider.count({ where: { providerId: 'platform' } })).toBe(0)
+  })
+
+  it('POST：provider_id 格式非法（DNS-label 外）→ 90002 字段级', async () => {
+    const res = await ctx.request.post(PROVIDERS_PATH).set(bearer(userAccess)).send({
+      ...VALID,
+      provider_id: 'bad id!',
+    })
+    expect(res.body.code).toBe(90002)
+    expect(res.body.data.provider_id).toBeDefined()
+    expect(await ctx.prisma.modelProvider.count({ where: { providerId: 'bad id!' } })).toBe(0)
+  })
+
+  it('POST：自由 base_url 字段传入被剥离（zod strict 未知 key 丢弃；端点按预设建）', async () => {
+    const res = await ctx.request.post(PROVIDERS_PATH).set(bearer(userAccess)).send({
+      ...VALID,
+      provider_id: 'with-url',
+      base_url: 'https://attacker.example.com/v1',
+    })
+    // zod strict 语义：未知 key 剥离（passthrough 未开）——base_url 不入库，端点按预设建
+    expect(res.body.code).toBe(0)
+    expect(res.body.data.base_url).toBe('https://api.openai.com/v1')
+  })
+
+  it('POST：同 owner pid 冲突 → 40041；models 空 → 90002', async () => {
+    const conflict = await ctx.request.post(PROVIDERS_PATH).set(bearer(userAccess)).send(VALID)
+    expect(conflict.body.code).toBe(40041)
+    const noModels = await ctx.request.post(PROVIDERS_PATH).set(bearer(userAccess)).send({
+      provider_id: 'empty-models',
+      preset_id: 'openai',
+      models: [],
+    })
+    expect(noModels.body.code).toBe(90002)
+  })
+
+  // ---------------------------- GET：列表 / 单条（掩码 + key_error）----------------------------
+
+  it('GET 列表与单条：掩码回显、无明文无密文；跨用户探测同码 40040（防探测）', async () => {
+    const list = await ctx.request.get(PROVIDERS_PATH).set(bearer(userAccess))
+    expect(list.body.code).toBe(0)
+    const mine = (list.body.data as Array<Record<string, unknown>>).find((p) => p.provider_id === 'my-gpt')!
+    expect(mine.api_key_masked).toBe('sk-••••6789')
+    assertNoKeyMaterial(list.body, VALID.api_key)
+
+    const detail = await ctx.request.get(providerOf('my-gpt')).set(bearer(userAccess))
+    expect(detail.body.code).toBe(0)
+    assertNoKeyMaterial(detail.body, VALID.api_key)
+
+    // 跨用户探测：other 用户取 user 的 pid → 40040 同码（不存在对外不可区分）
+    const probe = await ctx.request.get(providerOf('my-gpt')).set(bearer(otherAccess))
+    expect(probe.body.code).toBe(40040)
+    const missing = await ctx.request.get(providerOf('never-existed')).set(bearer(otherAccess))
+    expect(missing.body.code).toBe(40040)
+  })
+
+  it('坏密文行：读不炸 200 + key_error=true + 掩码 null（解密失败标记）', async () => {
+    await ctx.prisma.modelProvider.create({
+      data: {
+        ownerId: (await ctx.prisma.user.findFirst({ where: { username: 'user1' } }))!.id,
+        providerId: 'broken-cipher',
+        presetId: 'anthropic',
+        credentialCipher: 'v1:AAAA:BBBB:CCCC',
+        modelsJson: JSON.stringify([{ id: 'claude-sonnet-5-5' }]),
+      },
+    })
+    const res = await ctx.request.get(providerOf('broken-cipher')).set(bearer(userAccess))
+    expect(res.status).toBe(200)
+    expect(res.body.code).toBe(0)
+    expect(res.body.data.key_error).toBe(true)
+    expect(res.body.data.api_key_masked).toBeNull()
+    assertNoKeyMaterial(res.body, 'v1:AAAA:BBBB:CCCC')
+  })
+
+  // ---------------------------- PUT：key 留空保持不变 ----------------------------
+
+  it('PUT：key 留空 → 凭证保持（DB 密文不变）；提供新 key → 密文更新且可解', async () => {
+    const rowBefore = await ctx.prisma.modelProvider.findFirst({ where: { providerId: 'my-gpt' } })
+    const cipherBefore = rowBefore!.credentialCipher
+
+    const keep = await ctx.request.put(providerOf('my-gpt')).set(bearer(userAccess)).send({
+      provider_id: 'my-gpt',
+      preset_id: 'openai',
+      models: [{ id: 'gpt-5.1' }],
+    })
+    expect(keep.body.code).toBe(0)
+    expect(keep.body.data.api_key_masked).toBe('sk-••••6789') // 掩码不变 = 凭证保持
+    const rowKeep = await ctx.prisma.modelProvider.findFirst({ where: { providerId: 'my-gpt' } })
+    expect(rowKeep!.credentialCipher).toBe(cipherBefore) // 密文逐字节不变
+
+    const rotated = 'sk-rotated-key-9876543210'
+    const replace = await ctx.request.put(providerOf('my-gpt')).set(bearer(userAccess)).send({
+      provider_id: 'my-gpt',
+      preset_id: 'openai',
+      api_key: rotated,
+      models: [{ id: 'gpt-5.1' }],
+    })
+    expect(replace.body.code).toBe(0)
+    expect(replace.body.data.api_key_masked).toBe('sk-••••3210')
+    assertNoKeyMaterial(replace.body, rotated)
+    const rowNew = await ctx.prisma.modelProvider.findFirst({ where: { providerId: 'my-gpt' } })
+    expect(rowNew!.credentialCipher).not.toBe(cipherBefore)
+    expect(decryptCredential(rowNew!.credentialCipher!, TEST_SECRET)).toBe(rotated)
+  })
+
+  it('纯空白 api_key 归一为「留空」语义：PUT trim 后空 → 凭证逐字节保持（不落坏密文）；POST trim 后空 → 平台共享（cipher NULL）', async () => {
+    const rowBefore = await ctx.prisma.modelProvider.findFirst({ where: { providerId: 'my-gpt' } })
+    const cipherBefore = rowBefore!.credentialCipher
+
+    const keep = await ctx.request.put(providerOf('my-gpt')).set(bearer(userAccess)).send({
+      provider_id: 'my-gpt',
+      preset_id: 'openai',
+      api_key: '   ',
+      models: [{ id: 'gpt-5.1' }],
+    })
+    expect(keep.body.code).toBe(0)
+    const rowKeep = await ctx.prisma.modelProvider.findFirst({ where: { providerId: 'my-gpt' } })
+    expect(rowKeep!.credentialCipher).toBe(cipherBefore) // trim 后空 = 保持不变（绝非 cipher=NULL 清成平台共享）
+
+    const blank = await ctx.request.post(PROVIDERS_PATH).set(bearer(userAccess)).send({
+      provider_id: 'blank-key',
+      preset_id: 'deepseek',
+      api_key: '   ',
+      models: [{ id: 'deepseek-chat' }],
+    })
+    expect(blank.body.code).toBe(0)
+    expect(blank.body.data.api_key_masked).toBeNull() // trim 后空 = 平台共享 key 语义
+    const rowBlank = await ctx.prisma.modelProvider.findFirst({ where: { providerId: 'blank-key' } })
+    expect(rowBlank!.credentialCipher).toBeNull()
+  })
+
+  it('PUT：撞同 owner 既有 pid → 40041；不存在 → 40040', async () => {
+    await ctx.request.post(PROVIDERS_PATH).set(bearer(userAccess)).send({
+      provider_id: 'second-ep',
+      preset_id: 'kimi',
+      models: [{ id: 'kimi-k2' }],
+    })
+    const conflict = await ctx.request.put(providerOf('my-gpt')).set(bearer(userAccess)).send({
+      provider_id: 'second-ep',
+      preset_id: 'kimi',
+      models: [{ id: 'kimi-k2' }],
+    })
+    expect(conflict.body.code).toBe(40041)
+    const missing = await ctx.request.put(providerOf('never-existed')).set(bearer(userAccess)).send({
+      provider_id: 'never-existed',
+      preset_id: 'kimi',
+      models: [{ id: 'kimi-k2' }],
+    })
+    expect(missing.body.code).toBe(40040)
+  })
+
+  // ---------------------------- DELETE ----------------------------
+
+  it('DELETE：删除 + 热生效 bump；不存在/越权 → 40040 同码', async () => {
+    const before = (await configVersion()) ?? 1
+    const res = await ctx.request.delete(providerOf('second-ep')).set(bearer(userAccess))
+    expect(res.body.code).toBe(0)
+    expect(await configVersion()).toBe((before ?? 0) + 1)
+    expect(
+      await ctx.prisma.modelProvider.count({ where: { providerId: 'second-ep' } }),
+    ).toBe(0)
+
+    const gone = await ctx.request.delete(providerOf('second-ep')).set(bearer(userAccess))
+    expect(gone.body.code).toBe(40040)
+    // 跨用户删除他人端点：同码 40040（防探测）
+    const foreign = await ctx.request.delete(providerOf('my-gpt')).set(bearer(otherAccess))
+    expect(foreign.body.code).toBe(40040)
+    expect(await ctx.prisma.modelProvider.count({ where: { providerId: 'my-gpt' } })).toBe(1)
+  })
+
+  it('admin 亦只操作本人配置面（owner 级无跨用户覆写面）', async () => {
+    const res = await ctx.request.get(providerOf('my-gpt')).set(bearer(adminAccess))
+    expect(res.body.code).toBe(40040)
   })
 })
-
-// 测试用户名取值域 3–30（helpers USERNAME 约束）；集中生成防撞名。
-function mcName(tag: string): string {
-  return `m${tag}`.slice(0, 30)
-}

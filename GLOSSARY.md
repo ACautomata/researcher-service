@@ -6,6 +6,26 @@
 
 ## Language
 
+**LLM 端点 (LLM endpoint)**:
+用户配置的模型服务入口，关联一个可信服务商预设、凭证与模型列表；会话、teammate 与插件可选择其中的模型。
+_Avoid_: 端口、自由地址 provider。
+
+**平台默认端点 (platform default endpoint)**:
+部署方提供的只读模型服务入口，是零配置用户的起点与用户默认链的兜底。
+_Avoid_: 用户种子端点、可编辑平台 provider。
+
+**端点预设清单 (endpoint preset catalog)**:
+平台随版本维护的可信服务商目录，每个预设固定协议与地址，用户只能从中选择。
+_Avoid_: 动态端点放行表、自定义 baseURL。
+
+**BYOK 凭证 (BYOK credential)**:
+用户自带的模型服务 API key，使用费用归用户自己的服务商账户；面板仅显示配置状态与掩码，支持替换。
+_Avoid_: 平台共享 key、可回显密钥。
+
+**插件 LLM 指派 (plugin LLM assignment)**:
+用户为声明 LLM 需求的插件或 judge 选择的端点与模型；未指定时跟随默认链。
+_Avoid_: 插件凭证下发、会话模型偏好。
+
 **OpenClaw 容器 (OpenClaw container)**:
 **（历史注：#858 OpenClaw 退役③起 fleet 整体退役——现役容器 = 会话沙箱 `researcher-sandbox-<sessionId>` + wiki 容器 `researcher-wiki-<userId>` 二 kind，本条保留为决策历史。）**
 面板编排的单位。每个容器内跑一个 `main` agent、一个 gateway（WS，容器内 18789）、以及独立的 home / wiki / openclaw.json。它是本系统唯一的外部 bounded context。
@@ -113,11 +133,11 @@ _Avoid_: 「审批消息」——审批卡是权限事件，不进 messages 转�
 _Avoid_: 「审批流」——掩盖三层各自的可替换性；「自动审批」单称——人工通道是其必要组成，不是例外。
 
 **规则层 (rule layer)**:
-漏斗第一层，确定性规则判定，零 LLM 成本。路径白名单（文件类工具字面参数，`wiki|lab|/tmp` 前缀，复用 `normalizeFilePath` 语义；exec 内路径由沙箱只读根兜底，不做字面扫描）+ 命令黑名单（shell 词法解析递归拆简单命令，V1 系统破坏类四条）+ provider 端点白名单（引述 #731，运行时复验在 LLM 调用出口）。名单 V1 硬编码 + 测试锁定，admin 可配为显式非目标。
+漏斗第一层，确定性规则判定，零 LLM 成本。路径白名单（文件类工具字面参数，`wiki|lab|/tmp` 前缀，复用 `normalizeFilePath` 语义；exec 内路径由沙箱只读根兜底，不做字面扫描）+ 命令黑名单（shell 词法解析递归拆简单命令，V1 系统破坏类四条）。名单 V1 硬编码 + 测试锁定，admin 可配为显式非目标。
 _Avoid_: 「静态审批」——规则不是只读配置，是三分判定的一支（黑名单拒/白名单放/灰区移交 judge）；把 exec 内路径纳入匹配——做不到可靠，是刻意的范围裁决。
 
 **judge (LLM 判定器)**:
-漏斗第二层，独立小模型（haiku 4.5 级）对灰区工具调用做 approve/reject 判定。输入固定为「用户输入 + 之前工具调用及结果 + 当前调用」（≤8k tokens，不喂历史判定防锚定，**不含模型自身推理输出**——主 agent 的 thinking 不在输入面）；政策**列拒四类**（系统破坏/数据外送/持久化后门/凭证访问），之外默认 approve；reject 以 ToolMessage 回喂主 agent，理由 ≤100 字。per-run 调用上限 20 次，超限升级人工。
+漏斗第二层，按用户插件 LLM 指派选择的判定模型（未指派时跟随用户默认端点，再由平台默认端点兜底）对灰区工具调用做 approve/reject 判定。输入固定为「用户输入 + 之前工具调用及结果 + 当前调用」（≤8k tokens，不喂历史判定防锚定，**不含模型自身推理输出**——主 agent 的 thinking 不在输入面）；政策**列拒四类**（系统破坏/数据外送/持久化后门/凭证访问），之外默认 approve；reject 以 ToolMessage 回喂主 agent，理由 ≤100 字。per-run 调用上限 20 次，超限或端点故障升级人工（fail-closed）。
 _Avoid_: 「内容审查器」——judge 只判工具调用的政策符合性，不审生成内容（那是 TextTrace 域）；「第二意见」——judge 是安全闸门，不是建议器，其 reject 有阻断力。
 
 **升级通道 (escalation)**:
@@ -285,7 +305,7 @@ _Avoid_: 会话级开关——启用是用户维状态，不随会话生灭；�
 _Avoid_: 「插件收编 commands/skills」——插件不取代官方内容目录；把 skills 归入插件——技能是内容级扩展（目录注入），无代码，不是插件的特例；per-user 自定义命令/技能与任何在线写面（admin CRUD / agent 自改自存）——已退役（#758），官方内容只经 git 发版维护。
 
 **双面板 (two-panel split)**:
-（#758 方向修订定稿，#800 落地——admin 子应用 `/admin/` MPA）产品面按「跨用户运营 vs 本人工作」切割为两个面板：用户面板 = 本人工作面（对话、wiki 只读视图、lab 文件、models 自有 provider、插件目录启用位、本人容器）；admin 面板 = 跨用户运营面（用户管理/配额、provider_endpoints 白名单、全局审计检索、usage 核算）。产物级隔离——同仓库双入口 MPA（独立 `admin.html`/路由/bundle，共享组件库与 api client），用户面板 bundle 不含 admin 代码；同一控制面、同一 JWT，role claim 区分，登录按角色落点，后端 REST 面不变只换前端承载。
+用户面板是本人科研工作面：对话、wiki、lab 文件、LLM 端点与插件 LLM 指派、插件启用；admin 面板是跨用户运营面：用户管理与配额、审计检索、用量核算、官方内容与 API 文档。两者共享身份认证，各有独立入口。
 _Avoid_: 单面板角色门控混入——「摘出来」是产物级隔离，不是隐藏入口；为 admin 另起服务/认证体系——隔离只发生在前端产物与路由层。
 
 **产品显示名 (product display name)**:
@@ -307,3 +327,7 @@ _Avoid_: 与 researcher 谓词/编排 skill 混淆——那是源仓库的提示
 **实验方案人审 (plan review)**:
 （目标架构，wayfinder #846 定稿，未实施）W4 实验流程的**流程内置无条件门禁**：design/spec 产出后必停等用户审批（与 users.approvalMode 无关），方案全文经审批卡呈现（PlanApprovalCard，escalation source 第五值 `'experiment-plan'` + plan {title, summary, text, round} 全文内联）；approve（可选附言）→ 主 agent 续执行段；deny（必填理由 ≤2000）→ 回 design 修订模式，上限 3 轮，超限 = `plan_review_exhausted` 结构化终局（run completed，非 failed）。机制 = 工具内 interrupt + spec 落盘 lab 幂等短路（resume 重放跳过 design LLM 直达 interrupt 点）。
 _Avoid_: 与「升级通道」混淆——升级是审批三层漏斗的罕用人工层（触发源驱动），plan review 是流程承诺的无条件门禁，两者别钉；「方案批准豁免执行段漏斗」——两层正交：方案审科学内容（「做什么」），漏斗审系统安全（「怎么做」）。
+
+**文档面 (API docs surface)**:
+控制面的 OpenAPI/Swagger 接口文档域（#761）：zod 生成式 spec（请求体单一来源 = `validation/schemas.ts`，零漂移）+ Swagger UI，挂 `/api/docs` 整树 **requireAuth + requireAdmin**（#758 Q14），env 开关 `API_DOCS_ENABLED`（默认开，关 → 装配层不注入 → 整树 90005）。网页交互入口 = 前端 admin 子应用内嵌视图（前端带认证链拉 spec、TryIt 注入 token）——浏览器地址栏直开 `/api/docs` 不可达（Bearer 门控，导航请求带不上 header）。SSE 事件流端点不在覆盖面（流式语义超出请求/响应文档模型）。
+_Avoid_: 手写 openapi.yaml 第二来源（破坏零漂移；新增端点登记 `openapi/paths.ts`，由 `apiDocsCoverage.test.ts` 路由栈反射双向守卫）；把 `/api/docs` 当公开文档站挂公网——它是 admin 运营工具面，生产可用 `API_DOCS_ENABLED=false` 整体关闭。

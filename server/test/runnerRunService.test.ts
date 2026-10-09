@@ -66,15 +66,9 @@ describe('RunService：发消息 → run 终态事件序列（S1，#747 C 节目
       data: {
         ownerId: user.id,
         providerId: 'prov-1',
-        lcProvider: 'openai',
-        baseUrl: 'https://llm.example.edu/v1',
-        credentialEnvId: 'LLM_API_KEY',
-        authHeader: true,
+        presetId: 'openai',
         modelsJson: JSON.stringify([{ id: 'model-x' }]),
       },
-    })
-    await prisma.providerEndpoint.create({
-      data: { scheme: 'https', host: 'llm.example.edu', port: null, createdBy: 'seed' },
     })
     hub = new CollectingHub()
   }, 30_000)
@@ -377,6 +371,22 @@ describe('RunService：发消息 → run 终态事件序列（S1，#747 C 节目
     expect((last.payload as { errorKind: string }).errorKind).toBe('infra')
   })
 
+  it('infra：具体错误消息随 run.failed 留痕（诊断面——「运行环境异常」横幅须可追根因）', async () => {
+    class BrokenSaver extends PrismaCheckpointSaver {
+      async put(): Promise<never> {
+        throw new Error('sqlite corrupted')
+      }
+    }
+    const svc = makeService({
+      saver: new BrokenSaver(prisma),
+      script: [new AIMessage({ content: 'hi' })],
+    })
+    await svc.execute(cmd())
+    const last = hub.events[hub.events.length - 1]!
+    expect(last.type).toBe('run.failed')
+    expect((last.payload as { errorKind: string; message?: string }).message).toContain('sqlite corrupted')
+  })
+
   it('abort：执行中中断 → run.aborted{by:user}（story 8）', async () => {
     const fs = fakePrimitives({
       execBehavior: async () => {
@@ -456,6 +466,7 @@ describe('RunService：发消息 → run 终态事件序列（S1，#747 C 节目
     const failed = hub.events.find((e) => e.type === 'run.failed')
     expect(failed).toBeDefined()
     expect((failed as { payload: { errorKind: string } }).payload.errorKind).toBe('infra')
+    expect((failed as { payload: { message?: string } }).payload.message).toBe('simulated wiki ensure failure')
     expect((failed as { runId: string }).runId).toBe(c.runId)
     // 占位已回滚——不残留 queued 观测态（事件驱动的 refreshProjection 不会读回 inFlight 幽灵）。
     expect(svc.stateOf(sessionId)).toBeUndefined()
@@ -477,6 +488,7 @@ describe('RunService：发消息 → run 终态事件序列（S1，#747 C 节目
     const failed = hub.events.find((e) => e.type === 'run.failed')
     expect(failed).toBeDefined()
     expect((failed as { payload: { errorKind: string } }).payload.errorKind).toBe('infra')
+    expect((failed as { payload: { message?: string } }).payload.message).toBe('simulated sandbox ensure failure')
   })
 
   it('LLM key 缺失（90003 装配失败）→ pre-start + run.failed{llm_error}（classifyRunError 白名单）', async () => {

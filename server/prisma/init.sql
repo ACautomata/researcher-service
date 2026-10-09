@@ -51,11 +51,8 @@ CREATE TABLE "model_providers" (
     "id" TEXT NOT NULL PRIMARY KEY,
     "ownerId" TEXT NOT NULL,
     "providerId" TEXT NOT NULL,
-    "lcProvider" TEXT NOT NULL,
-    "baseUrl" TEXT NOT NULL,
-    "credentialEnvId" TEXT,
+    "presetId" TEXT NOT NULL,
     "credentialCipher" TEXT,
-    "authHeader" BOOLEAN NOT NULL DEFAULT true,
     "modelsJson" TEXT NOT NULL,
     "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT "model_providers_ownerId_fkey" FOREIGN KEY ("ownerId") REFERENCES "users" ("id") ON DELETE CASCADE ON UPDATE CASCADE
@@ -215,14 +212,15 @@ CREATE TABLE "tool_approval_logs" (
 );
 
 -- CreateTable
-CREATE TABLE "provider_endpoints" (
-    "id" TEXT NOT NULL PRIMARY KEY,
-    "scheme" TEXT NOT NULL,
-    "host" TEXT NOT NULL,
-    "port" INTEGER,
-    "note" TEXT NOT NULL DEFAULT '',
-    "createdBy" TEXT NOT NULL,
-    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+CREATE TABLE "plugin_llm_assignments" (
+    "ownerId" TEXT NOT NULL,
+    "pluginId" TEXT NOT NULL,
+    "providerId" TEXT,
+    "modelId" TEXT,
+    "updatedAt" DATETIME NOT NULL,
+
+    PRIMARY KEY ("ownerId", "pluginId"),
+    CONSTRAINT "plugin_llm_assignments_ownerId_fkey" FOREIGN KEY ("ownerId") REFERENCES "users" ("id") ON DELETE CASCADE ON UPDATE CASCADE
 );
 
 -- CreateTable
@@ -384,9 +382,6 @@ CREATE INDEX "tool_approval_logs_traceId_idx" ON "tool_approval_logs"("traceId")
 
 -- CreateIndex
 CREATE INDEX "tool_approval_logs_userId_createdAt_idx" ON "tool_approval_logs"("userId", "createdAt");
-
--- CreateIndex
-CREATE UNIQUE INDEX "provider_endpoints_scheme_host_port_key" ON "provider_endpoints"("scheme", "host", "port");
 
 -- CreateIndex
 CREATE INDEX "llm_usage_records_userId_createdAt_idx" ON "llm_usage_records"("userId", "createdAt");

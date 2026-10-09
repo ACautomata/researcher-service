@@ -223,6 +223,23 @@ describe('ChatView（REST+SSE 三件套接线）', () => {
     expect(w.find('[data-test="run-error"]').exists()).toBe(false)
   })
 
+  it('infra 根因详情：run.failed{message} → 横幅附带 detail 行（诊断面）', async () => {
+    const w = await mountChat()
+    const src = FakeEventSource.last()!
+    src.emit('run.failed', { type: 'run.failed', sessionId: 'sess-1', runId: 'r1', payload: { errorKind: 'infra', message: 'sqlite corrupted' } })
+    await flushPromises()
+    const banner = w.get('[data-test="run-error"]')
+    expect(banner.get('[data-test="run-error-detail"]').text()).toBe('sqlite corrupted')
+  })
+
+  it('run.failed 无 message → 横幅无 detail 行（旧服务端形态兼容）', async () => {
+    const w = await mountChat()
+    const src = FakeEventSource.last()!
+    src.emit('run.failed', { type: 'run.failed', sessionId: 'sess-1', runId: 'r1', payload: { errorKind: 'infra' } })
+    await flushPromises()
+    expect(w.get('[data-test="run-error"]').find('[data-test="run-error-detail"]').exists()).toBe(false)
+  })
+
   it('断线：横幅 + 排队；重连（stream.opened）自动注入待发', async () => {
     const w = await mountChat()
     const src = FakeEventSource.last()!

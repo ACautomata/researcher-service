@@ -101,6 +101,10 @@ describe('JWT secret strength env (slice config)', () => {
     if (secret === undefined) delete process.env.JWT_SECRET
     else vi.stubEnv('JWT_SECRET', secret)
     vi.stubEnv('NODE_ENV', env)
+    if (env === 'production') {
+      // 隔离 jwt 变量：提供其余生产必填（同 loadDataRoot 模式）。
+      vi.stubEnv('LLM_CREDENTIAL_SECRET', 'c'.repeat(32))
+    }
     try {
       const { config } = await import('../src/config')
       return config.jwtSecret
@@ -218,6 +222,7 @@ describe('production data root (slice config, #858)', () => {
     if (env === 'production') {
       // 隔离 dataRoot 变量：提供其余生产必填，否则放行用例被误判 THREW（同 loadSecret 模式）。
       vi.stubEnv('JWT_SECRET', 's'.repeat(32))
+      vi.stubEnv('LLM_CREDENTIAL_SECRET', 'c'.repeat(32))
     }
     if (root === undefined) delete process.env.DATA_ROOT
     else vi.stubEnv('DATA_ROOT', root)
@@ -278,6 +283,7 @@ describe('sandbox image pinning env (#776)', () => {
     if (env === 'production') {
       // 隔离 sandbox 变量：提供其余生产必填（同 loadDataRoot 模式；#858 起 CREDENTIAL_ENCRYPTION_KEYS 非必填）。
       vi.stubEnv('JWT_SECRET', 's'.repeat(32))
+      vi.stubEnv('LLM_CREDENTIAL_SECRET', 'c'.repeat(32))
     }
     if (image === undefined) delete process.env.SANDBOX_IMAGE
     else vi.stubEnv('SANDBOX_IMAGE', image)
@@ -326,6 +332,7 @@ describe('wiki image pinning env (#784)', () => {
     if (env === 'production') {
       // 隔离 wiki 变量：提供其余生产必填（同 loadDataRoot 模式）。
       vi.stubEnv('JWT_SECRET', 's'.repeat(32))
+      vi.stubEnv('LLM_CREDENTIAL_SECRET', 'c'.repeat(32))
     }
     if (image === undefined) delete process.env.WIKI_IMAGE
     else vi.stubEnv('WIKI_IMAGE', image)
@@ -362,7 +369,7 @@ describe('wiki image pinning env (#784)', () => {
   })
 })
 
-// ---- #775 runner 配置组：RUNNER_MAX_CONCURRENT_RUNS / ALLOW_PRIVATE_PROVIDER_ENDPOINTS ----
+// ---- #775 runner 配置组：RUNNER_MAX_CONCURRENT_RUNS ----
 
 describe('runner max concurrent runs env (#775)', () => {
   async function loadMax(env: string | undefined): Promise<number | 'THREW'> {
@@ -399,17 +406,16 @@ describe('runner max concurrent runs env (#775)', () => {
   })
 })
 
-describe('allow private provider endpoints env (#775)', () => {
-  async function loadFlag(opts: { env?: string; flag?: string }): Promise<boolean | 'THREW'> {
-    const { env, flag } = opts
-    vi.resetModules() // 清 config 模块缓存，让动态 import 重新快照 env
-    if (env === undefined) delete process.env.NODE_ENV
-    else vi.stubEnv('NODE_ENV', env)
-    if (flag === undefined) delete process.env.ALLOW_PRIVATE_PROVIDER_ENDPOINTS
-    else vi.stubEnv('ALLOW_PRIVATE_PROVIDER_ENDPOINTS', flag)
+// ---- #881 LLM 端点域新 env：LLM_PRESET（六选一）/ LLM_CREDENTIAL_SECRET（生产必填 ≥32）/
+// LLM_MODEL（可选单模型覆盖，坏值容忍——模型名无结构约束，config 层只透传）。----
+describe('llm preset env (#881)', () => {
+  async function loadPreset(env: string | undefined): Promise<string | 'THREW'> {
+    vi.resetModules()
+    if (env === undefined) delete process.env.LLM_PRESET
+    else vi.stubEnv('LLM_PRESET', env)
     try {
       const { config } = await import('../src/config')
-      return config.runner.allowPrivateProviderEndpoints
+      return config.llm.preset
     } catch {
       return 'THREW'
     } finally {
@@ -417,26 +423,78 @@ describe('allow private provider endpoints env (#775)', () => {
     }
   }
 
-  it('未设置 → 默认 false（私网端点一律拒）', async () => {
-    expect(await loadFlag({})).toBe(false)
+  it('未设置 → 默认 minimax（平台默认端点开箱即用）', async () => {
+    expect(await loadPreset(undefined)).toBe('minimax')
   })
 
-  it('显式 false → false', async () => {
-    expect(await loadFlag({ flag: 'false' })).toBe(false)
+  it('空串/纯空白 = 未设置 → 默认 minimax（cd.yml 未配 secret 渲染空行经 env_file 注入空串，?? 挡不住）', async () => {
+    expect(await loadPreset('')).toBe('minimax')
+    expect(await loadPreset('   ')).toBe('minimax')
   })
 
-  it('dev/test 显式 true → true（自建 vLLM 逃生门）', async () => {
-    expect(await loadFlag({ env: 'test', flag: 'true' })).toBe(true)
-    expect(await loadFlag({ env: 'development', flag: 'true' })).toBe(true)
+  it('六预设逐一合法', async () => {
+    for (const p of ['minimax', 'anthropic', 'openai', 'deepseek', 'kimi', 'zhipu']) {
+      expect(await loadPreset(p), p).toBe(p)
+    }
   })
 
-  it('生产 true → fail-fast（逃生门仅限 dev）', async () => {
-    expect(await loadFlag({ env: 'production', flag: 'true' })).toBe('THREW')
+  it('未知值 → fail-fast（错值静默走缺省 = 端点指向与部署方预期不符）', async () => {
+    expect(await loadPreset('vllm')).toBe('THREW')
+    expect(await loadPreset('MINIMAX')).toBe('THREW')
+  })
+})
+
+describe('llm credential secret env (#881)', () => {
+  async function loadSecret(opts: { env?: string; nodeEnv?: string }): Promise<string | 'THREW'> {
+    vi.resetModules()
+    if (opts.nodeEnv === undefined) delete process.env.NODE_ENV
+    else vi.stubEnv('NODE_ENV', opts.nodeEnv)
+    if (opts.nodeEnv === 'production') {
+      // 隔离 secret 变量：提供其余生产必填（同 loadDataRoot 模式）。
+      vi.stubEnv('JWT_SECRET', 's'.repeat(32))
+    }
+    if (opts.env === undefined) delete process.env.LLM_CREDENTIAL_SECRET
+    else vi.stubEnv('LLM_CREDENTIAL_SECRET', opts.env)
+    try {
+      const { config } = await import('../src/config')
+      return config.llm.credentialSecret
+    } catch {
+      return 'THREW'
+    } finally {
+      vi.unstubAllEnvs()
+    }
+  }
+
+  it('dev 未设置 → 弱默认可用（本地调试零配置）', async () => {
+    expect(await loadSecret({ nodeEnv: 'test' })).not.toBe('THREW')
   })
 
-  it('非法值 TRUE/1 → fail-fast（白名单开关模式）', async () => {
-    for (const bad of ['TRUE', '1', 'yes']) {
-      expect(await loadFlag({ flag: bad }), bad).toBe('THREW')
+  it('dev 短值 → 接受（≥1 即用）', async () => {
+    expect(await loadSecret({ nodeEnv: 'test', env: 'short' })).toBe('short')
+  })
+
+  it('生产未设置 → fail-fast（BYOK 凭证加密根缺失即凭证面失守）', async () => {
+    expect(await loadSecret({ nodeEnv: 'production' })).toBe('THREW')
+  })
+
+  it('生产 <32 字符 → fail-fast（对齐 JWT_SECRET 生产强度惯例）', async () => {
+    expect(await loadSecret({ nodeEnv: 'production', env: 'a'.repeat(31) })).toBe('THREW')
+  })
+
+  it('生产 ≥32 字符 → 接受', async () => {
+    expect(await loadSecret({ nodeEnv: 'production', env: 'a'.repeat(32) })).toBe('a'.repeat(32))
+  })
+})
+
+describe('llm model env (#881)', () => {
+  it('未设置 → 空串（平台端点用预设 defaultModels 全集）', async () => {
+    vi.resetModules()
+    delete process.env.LLM_MODEL
+    try {
+      const { config } = await import('../src/config')
+      expect(config.llm.model).toBe('')
+    } finally {
+      vi.unstubAllEnvs()
     }
   })
 })

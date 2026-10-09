@@ -9,10 +9,6 @@ import { approvalLogsRouter, fileOverwriteLogsRouter } from './runner/auditRoute
 import { usageRouter } from './runner/usageRoutes'
 import { createWikiRouter, type WikiRouterDeps } from './wiki/routes'
 import { createModelsRouter, type ModelsRouterDeps } from './models/routes'
-import {
-  createProviderEndpointsRouter,
-  type ProviderEndpointsRouterDeps,
-} from './models/endpoints'
 import { createFilesRouter, type FilesRouterDeps } from './files/routes'
 import { createFiguresRouter } from './figures/routes'
 import { createDocsRouter, type DocsRouterDeps } from './openapi/routes'
@@ -28,11 +24,6 @@ export interface AppDeps {
   // wiki 接缝（#335 → #784 换轨）：wikiContainers ensure + #790 updateRunner（compile 触发
   // 面已随 #859 退役）。缺省 = 测试装配（无 ensure）。
   wiki?: WikiRouterDeps
-  // models 接缝（#336；#775 写盘链退役后仅剩白名单校验注入缝——lookup 测试注 fake 免真 DNS，
-  // allowPrivate 覆盖 env 开关）。路由无条件挂载（零外部资源依赖）。
-  models?: ModelsRouterDeps
-  // provider_endpoints 接缝（#775，731 §3.1）：端点白名单 admin 管理面，同款注入缝。
-  providerEndpoints?: ProviderEndpointsRouterDeps
   // files（#589 · T0 #801 只读化）：FileArchive Port 必填（缺 archive 属装配错误——静默禁用
   // 不安全），由下方条件挂载（models/files 条件挂载先例）。
   files?: FilesRouterDeps
@@ -55,10 +46,13 @@ export interface AppDeps {
   // plugins 接缝（#788，#752 §4.3 R8）：目录清单 + per-user 启用位（8xxxx 段）。注入即挂载
   //（条件挂载先例）——生产 server.ts 注入编译期目录 PLUGIN_MANIFESTS；缺省 = 不挂。
   plugins?: PluginsRouterDeps
+  // models 试连带（#882 端点试连）：模型工厂/超时预算注入缝——测试注入 fake 工厂覆盖
+  // 成功/失败两态；生产缺省 = initChatModel 真工厂 + 10s 超时（server.ts 不注入）。
+  models?: ModelsRouterDeps
 }
 
 // createApp 工厂：PrismaClient 经依赖注入，测试可传 test DB（接缝 #2）。
-export function createApp({ prisma, wiki, models, providerEndpoints, files, docs, events, sessions, attachments, plugins }: AppDeps): Application {
+export function createApp({ prisma, wiki, files, docs, events, sessions, attachments, plugins, models }: AppDeps): Application {
   const app = express()
   // wiki 5mb json 特例已随写面整域退役删除（#758 Q3——codex PR#346 的大 body 契约随
   // PUT/POST/DELETE /wiki/page 下线失效）：现存读面 GET 无 body，POST /wiki/update 触发面
@@ -87,14 +81,10 @@ export function createApp({ prisma, wiki, models, providerEndpoints, files, docs
   // （对齐 #857 models / sessions 扁平挂用户先例），零容器行查询；存储面 = 每用户 wiki 容器
   // （ensure 经 wikiContainers 注入）；compile 触发面已随 #859 退役。
   app.use('/api/v1/wiki', createWikiRouter(wiki ?? {}))
-  // models（#336；#775 写盘链退役；#857 归属门改挂 ownerId）：owner 级路由
-  // /api/v1/models/providers[/<pid>]（对齐 sessions 扁平挂用户先例），零容器行查询；
-  // 零外部资源依赖（事务 = DB mutation + config_meta bump），无条件挂载；deps 仅剩白名单
-  // 校验注入缝（测试注 fake lookup 免真 DNS）。
+  // models（#336；#857 归属门改挂 ownerId；#881 预设制换形）：owner 级路由
+  // /api/v1/models/{presets,platform,providers[/<pid>]}（对齐 sessions 扁平挂用户先例），
+  // 零容器行查询、零外部资源依赖（事务 = DB mutation + config_meta bump），无条件挂载。
   app.use('/api/v1/models', createModelsRouter(models ?? {}))
-  // provider_endpoints（#775，731 §3.1）：端点白名单 admin 管理面，无条件挂载（requireAdmin
-  // 在路由内；deps 同为白名单校验注入缝）。
-  app.use('/api/v1', createProviderEndpointsRouter(providerEndpoints ?? {}))
   // files（T0 #801 只读化；#858 容器 CRUD 退役后本路由是 /api/v1/containers 挂载的唯一残余
   // ——URL 契约保留（root=lab 会话沙箱只读 GET，<name> = sessionId），FileArchive 必填，
   // 仅在有注入时挂载（条件挂载先例）。

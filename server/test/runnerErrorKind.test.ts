@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { GraphRecursionError } from '@langchain/langgraph'
-import { classifyRunError } from '../src/runner/runtime/errorKind'
+import { classifyRunError, describeRunError } from '../src/runner/runtime/errorKind'
 import { fail } from '../src/envelope'
 import { CODE } from '../src/codes'
 
@@ -13,10 +13,13 @@ describe('classifyRunError（错误三分类，story 10）', () => {
     expect(classifyRunError(new GraphRecursionError('too deep'))).toBe('recursion_limit')
   })
 
-  it('LLM 信封码白名单（凭证缺失/provider 不存在/白名单拒绝）→ llm_error', () => {
+  it('LLM 信封码白名单（凭证缺失/provider 不存在）→ llm_error', () => {
     expect(classifyRunError(fail(CODE.LLM_NOT_CONFIGURED))).toBe('llm_error')
     expect(classifyRunError(fail(CODE.PROVIDER_NOT_FOUND))).toBe('llm_error')
-    expect(classifyRunError(fail(CODE.PROVIDER_ENDPOINT_NOT_ALLOWED))).toBe('llm_error')
+  })
+
+  it('40042（白名单拒绝）退役：语义随 #881 白名单链移除——常量保留但出 llm_error 白名单 → infra 兜底', () => {
+    expect(classifyRunError(fail(CODE.PROVIDER_ENDPOINT_NOT_ALLOWED))).toBe('infra')
   })
 
   it('provider SDK 的 HTTP status 故障形态（数字 status 属性）→ llm_error', () => {
@@ -46,5 +49,24 @@ describe('classifyRunError（错误三分类，story 10）', () => {
     expect(classifyRunError(new Error('docker daemon down'))).toBe('infra')
     expect(classifyRunError('raw string')).toBe('infra')
     expect(classifyRunError(undefined)).toBe('infra')
+  })
+})
+
+// describeRunError（诊断盲区修复）：run.failed{message} 的提取面——错误对象 → 一行可读根因。
+describe('describeRunError（run.failed{message} 提取）', () => {
+  it('Error 实例 → message', () => {
+    expect(describeRunError(new Error('sqlite corrupted'))).toBe('sqlite corrupted')
+  })
+
+  it('非 Error（裸字符串/undefined）→ String() 兜底', () => {
+    expect(describeRunError('raw string')).toBe('raw string')
+    expect(describeRunError(undefined)).toBe('undefined')
+  })
+
+  it('超长消息截断到 500 字符（防 SSE 帧/横幅被堆栈撑爆；全量由服务端日志留痕）', () => {
+    const long = 'x'.repeat(600)
+    const out = describeRunError(new Error(long))
+    expect(out).toHaveLength(501)
+    expect(out.endsWith('…')).toBe(true)
   })
 })

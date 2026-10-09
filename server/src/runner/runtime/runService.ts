@@ -1,3 +1,4 @@
+import { PLATFORM_PROVIDER_ID } from '../../models/presets'
 import { resolveModelRef, type ModelRef } from '../providerRegistry'
 import { teammateDelegation } from '../teammates/delegation'
 import { snapshotRunCapabilities, type RunCapabilities } from '../capabilities'
@@ -72,7 +73,7 @@ import type { ConcurrencyGate } from '../concurrency'
 import { createUsageCallbackHandler } from '../usage'
 import { buildStreamEventsInvocation } from '../../events/bridge'
 import { RunProjector } from './projector'
-import { classifyRunError, type RunErrorKind } from './errorKind'
+import { classifyRunError, describeRunError, type RunErrorKind } from './errorKind'
 import { buildLeaderAgent, interruptPolicyKey, type DeepAgentLike, type InterruptPolicy, type LeaderAgentParams } from './graphFactory'
 import { joinSections } from './promptSections'
 import { COMPACT_KEEP, COMPACT_SUMMARY_PROMPT, DEFAULT_RECURSION_LIMIT, DEFAULT_RESUME_DECISIONS, GRAPH_CACHE_MAX_INSTANCES, LEADER_SYSTEM_PROMPT, TOOL_DETAILS_MAX_BYTES, TOOL_INPUT_MAX_BYTES, TRUNCATED_FLAG } from './values'
@@ -647,7 +648,8 @@ export class RunService {
       if (snap?.state === 'queued' && snap.runId === cmd.runId) this.runs.delete(cmd.sessionId)
       const code = e instanceof EnvelopeError ? e.code : null
       if (code === null || !PRESTART_REST_FEEDBACK_CODES.has(code)) {
-        this.publish(cmd.ownerId, { type: 'run.failed', payload: { errorKind: classifyRunError(e) } }, cmd)
+        console.error(`[runner] pre-start run failed: run=${cmd.runId} session=${cmd.sessionId}:`, e)
+        this.publish(cmd.ownerId, { type: 'run.failed', payload: { errorKind: classifyRunError(e), message: describeRunError(e) } }, cmd)
       }
       // teammate 归位（顺带修卡 running 幽灵）：startTeammate 在 dispatch 前已置 running，
       // pre-start 失败时 executeRun 的 finally 状态归位不跑——此处推 failed 与 executeRun
@@ -733,7 +735,7 @@ export class RunService {
       : undefined
     const preferred: ModelRef | undefined = session.preferredModelJson ? JSON.parse(session.preferredModelJson) : undefined
     const model = actor?.modelProviderId
-      ? await this.deps.registry.getModel(snapshot, actor.modelProviderId)
+      ? await this.deps.registry.getTeammateModel(snapshot, actor.modelProviderId)
       : await this.deps.registry.getDefaultModel(snapshot, preferred)
     const policy = this.deps.interruptPolicyFor?.(cmd.sessionId)
     const tools = this.deps.teammates
@@ -839,7 +841,7 @@ export class RunService {
       if (cmd.kind === 'message') {
         this.deps.approvals.beginRun(cmd.sessionId, {
           cautious,
-          identity: { runId: cmd.runId, userId: session.ownerId, traceId: cmd.runId },
+          identity: { runId: cmd.runId, userId: session.ownerId, traceId: cmd.runId, snapshot },
         })
       } else {
         this.deps.approvals.refreshRun(cmd.sessionId, {
@@ -862,7 +864,9 @@ export class RunService {
     // usage 身份：默认链主 provider（snapshot.providers[0] 首模型）。fallback 链切换后的
     // per-call 身份不追踪（#775 usage.ts 声明的 #777 接线局限；采数不 fail run）。
     const providerId = actor?.modelProviderId ?? preferred?.providerId
-    const identity = providerId ? snapshot.providers.find(provider => provider.providerId === providerId) : snapshot.providers[0]
+    const requested = providerId ? snapshot.providers.find(provider => provider.providerId === providerId) : snapshot.providers[0]
+    const dangling = providerId !== undefined && (!requested || (!actor?.modelProviderId && preferred && !requested.models.some(entry => entry.id === preferred.modelId)))
+    const identity = dangling ? snapshot.providers.find(provider => provider.providerId === PLATFORM_PROVIDER_ID) : requested
     const usageHandler = createUsageCallbackHandler(
       {
         prisma: this.deps.prisma,
@@ -874,7 +878,7 @@ export class RunService {
       {
         providerId: identity?.providerId ?? '',
         lcProvider: identity?.lcProvider ?? '',
-        model: (actor?.modelProviderId ? undefined : preferred?.modelId) ?? String(identity?.models[0]?.id ?? ''),
+        model: (actor?.modelProviderId || dangling ? undefined : preferred?.modelId) ?? String(identity?.models[0]?.id ?? ''),
       },
     )
 
@@ -1035,7 +1039,7 @@ export class RunService {
         // #782 run 上下文（ALS 外层）：journal 行 runId 盖印源（checkpointId 终态回填键）——
         // 覆盖流创建与消费全程（backend 打点在流内发生）。#792 插件 run frame（嵌套 ALS）：
         // ctx 四件解析源——图实例跨 run 复用，run 身份只能运行期读取（runContext.ts 头注）。
-        const pluginFrame = this.buildPluginRunFrame(cmd)
+        const pluginFrame = await this.buildPluginRunFrame(cmd, snapshot)
         await runWithRunContext(cmd.runId, async () => {
           await runWithPluginRunFrame(pluginFrame, async () => {
             const stream = await agent.streamEvents(input, {
@@ -1175,8 +1179,9 @@ export class RunService {
         this.publish(cmd.ownerId, { type: 'run.aborted', payload: { by: abortEntry.by } }, cmd)
       } else {
         const kind = classifyRunError(e)
+        console.error(`[runner] run failed: run=${cmd.runId} session=${cmd.sessionId} kind=${kind}:`, e)
         this.runs.set(cmd.sessionId, { runId: cmd.runId, state: 'failed', errorKind: kind })
-        this.publish(cmd.ownerId, { type: 'run.failed', payload: { errorKind: kind } }, cmd)
+        this.publish(cmd.ownerId, { type: 'run.failed', payload: { errorKind: kind, message: describeRunError(e) } }, cmd)
       }
     } finally {
       if (this.attachmentIngestions.get(cmd.sessionId)?.runId === cmd.runId) this.attachmentIngestions.delete(cmd.sessionId)
@@ -1302,7 +1307,7 @@ export class RunService {
   // 弱关联盖印）；onUpdate 闭包 per-run（per-toolCall 上次 stage 记忆随 frame GC）。
   private readonly figureDedupe = new Map<string, Promise<{ readonly figureId: string }>>()
 
-  private buildPluginRunFrame(cmd: RunEventContext & { username: string }): PluginRunFrame | undefined {
+  private async buildPluginRunFrame(cmd: RunEventContext & { username: string }, runSnapshot?: ProviderConfigSnapshot): Promise<PluginRunFrame | undefined> {
     if (!this.deps.plugins) return undefined
     const sessionId = cmd.parentSessionId ?? cmd.sessionId
     const audit = createPrismaFigureRunAuditSink(this.deps.prisma, {
@@ -1312,10 +1317,15 @@ export class RunService {
       runId: cmd.runId,
     })
     const stageTrace = new Map<string, string>()
+    // 配置快照 run 启动捕获一次（#883 T3）：ctx.llm per-plugin 解析全部走本快照——
+    // 指派/端点变更 bump 版本后下一 run 重建快照，在飞 run 不受影响（与主模型
+    // getDefaultModel 同语义；主模型路径传入同一对象，直达执行路径独立捕获）。
+    const snapshot = runSnapshot ?? await this.deps.registry.getSnapshot(cmd.ownerId)
     return {
       run: { ownerId: cmd.ownerId, sessionId, runId: cmd.runId },
       figures: createFiguresToolPort({ prisma: this.deps.prisma, dedupe: this.figureDedupe }, cmd.ownerId),
-      llm: createLlmToolPort(this.deps.registry, cmd.ownerId),
+      // per-plugin ctx.llm 工厂（#883）：插件 id → 解析器端口（env pin > 用户指派 > 默认链）。
+      llmFor: (pluginId: string) => createLlmToolPort({ registry: this.deps.registry, ownerId: cmd.ownerId, pluginId, snapshot }),
       audit,
       // 双面翻译链（#744 §11.2）：onUpdate 上报一次 → runner 同时发 figure_run.progress
       //（SSE 用户面）与落 figure_run.stage_transitions（TextTrace 审计面）；白名单外丢弃。
@@ -1378,13 +1388,15 @@ export class RunService {
     const startedAt = this.clock()
     // ctx 四件 + onUpdate（#792 · #744 §11.1）：直达路径显式构造 frame 面件；toolCallId
     // ALS 盖印 = figures 去重身份（toolPort 同源）+ 插件 execute 收到的同一 id。
-    const frame = this.buildPluginRunFrame(cmd)
+    const frame = await this.buildPluginRunFrame(cmd)
     const pluginCtx = this.deps.plugins!.toolContext
+    // pluginId（#883）：运行时目录派生——ctx.llm per-plugin 解析键（命令直跑路径穿线）。
+    const pluginId = this.deps.plugins!.toolOwnerByName.get(def.name)
     try {
       const result = await runWithToolCallContext({ toolCallId, threadId: cmd.sessionId }, () =>
         def.execute(toolCallId, parsed.data as never, {
           signal,
-          ...execPartsFromFrame(pluginCtx, frame, toolCallId),
+          ...execPartsFromFrame(pluginCtx, frame, toolCallId, pluginId),
         }),
       )
       const durationMs = Math.max(0, this.clock() - startedAt)
@@ -1721,7 +1733,15 @@ export class RunService {
       // 插件工具进图（#788）：LangChain 适配（zod → StructuredTool）；prompt 段并入
       // system prompt 与 teammate subagent 继承（graphFactory 内拼接）。
       ...(pluginToolDefs.length > 0 && this.deps.plugins
-        ? { pluginTools: toLangChainTools(pluginToolDefs, this.deps.plugins.toolContext) }
+        ? {
+            // pluginIdOf（#883）：运行时目录派生工具名→插件 id——ctx.llm per-plugin 解析键
+            //（agent 自动调用路径穿线）。
+            pluginTools: toLangChainTools(
+              pluginToolDefs,
+              this.deps.plugins.toolContext,
+              (name) => this.deps.plugins!.toolOwnerByName.get(name),
+            ),
+          }
         : {}),
       ...(pluginPrompt !== '' ? { pluginPrompt } : {}),
       // 中间件（运行期行为非拓扑因子——不入缓存键，见 runtimeMiddleware()）。

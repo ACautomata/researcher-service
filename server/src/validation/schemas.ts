@@ -1,12 +1,9 @@
 import { z } from 'zod'
 import {
-  API_CHOICES,
-  API_KEY_ENV_ID_REGEX,
-  ALLOWED_API_KEY_ENV_IDS,
   MODEL_INPUT_MODALITIES,
   PROVIDER_ID_REGEX,
 } from '../models/values'
-import { parseHttpOrigin } from '../runner/allowlist'
+import { PRESET_IDS, RESERVED_PROVIDER_IDS } from '../models/presets'
 import { MESSAGE_CONTENT_MAX, REWIND_SCOPES, TITLE_MAX } from '../sessions/values'
 
 // 请求体 schema（zod）。校验失败 → 90002 + flatten().fieldErrors（{field:[errors]}）。
@@ -53,49 +50,22 @@ export const userPatchSchema = z.object({
 // 容器 CRUD 退役删除。
 export const CONTAINER_NAME_REGEX = /^[a-z][a-z0-9-]{2,29}$/
 
-// base_url URL 形态门（#775，731 §5.1 第一层 ①）：.refine 复用 runner/allowlist parseHttpOrigin
-// 权威解析（scheme/凭证/端口域全量校验与 service 层同源，#812 打捞）——消除 zod 阶段与
-// service 阶段两份 URL 定义漂移面（本地正则曾放行 :99999 端口越界，service 层 parse 才拒）。
-// 同 schema 内 api_key_env_id / models 已有 .refine 先例，openapi 生成面无增量影响。
-const httpUrlShape = (v: string): boolean => {
-  try {
-    parseHttpOrigin(v)
-    return true
-  } catch {
-    return false
-  }
-}
-
-// 建/改 model provider（models POST/PUT，#336）：snake_case wire（平移 Django
-// ModelProviderWriteSerializer）。provider_id / api_key_env_id 经格式 + 成员校验（r28 §1），
-// api 限两值（r28 §1.3），models 至少一条且每条含非空 id（无 model 无法派生默认模型引用）。
-// models 条目形状校验（#366 codex 三轮 P2）：已知字段类型严格校验（name/reasoning/input/cost/
-// contextWindow/maxTokens，对齐前端 ModelEntryDTO），未知扩展字段 passthrough 透传（前端表单
-// 收集的其余字段原样保留）。原来 `z.record(z.string(), z.unknown())` 让 {id:'m', name:{}} 这种
-// 非法形状入库——name 对象被原样当作 alias/model 名（应为 string）→ 消费端拒绝、运行时落后
-// DB。入站校验拒绝，落库形状才可能合法。
-// base_url trim 后校验（#366 codex P2）：zod min(1) 不 trim，纯空格 '   ' 语义为空仍通过——
-// 对齐 Django CharField 默认 trim_whitespace，防纯空格 baseUrl 入库静默生效。
-// 校验失败 → 90002 + 各字段明细（api_key_env_id 非法格式/未注入 env 同入 data.api_key_env_id）。
+// 建/改 LLM 端点（BYOK，#881 预设制）：preset_id 锁定协议与地址（无自由 baseURL 输入），
+// api_key 明文只在写请求出现（POST 缺省/空 = 平台共享 key；PUT 缺省/空 = 保持不变），
+// models 至少一条且每条含非空 id。models 条目形状校验（#366 先例）：已知字段类型严格校验
+//（name/reasoning/input/cost/contextWindow/maxTokens），未知扩展字段 passthrough 透传。
+// provider_id 保留域（'platform'）写侧拒绝——防与平台虚拟条目同 id 歧义。
+// 校验失败 → 90002 + 各字段明细。
 export const modelProviderWriteSchema = z.object({
   provider_id: z
     .string()
-    .regex(PROVIDER_ID_REGEX, 'provider_id 须以小写字母开头，1–64 位，仅含小写字母、数字、连字符'),
-  api: z.enum(API_CHOICES),
-  base_url: z
-    .string()
-    .trim()
-    .min(1, 'base_url 不能为空')
-    .max(512, 'base_url 过长')
-    .refine(httpUrlShape, 'base_url 须为 http(s)://<host>[:<port>][/<path>] 完整 URL'),
-  api_key_env_id: z
-    .string()
-    .regex(API_KEY_ENV_ID_REGEX, 'api_key_env_id 须大写字母开头，仅含大写字母、数字、下划线（1–128 位）')
-    .refine(
-      (v) => ALLOWED_API_KEY_ENV_IDS.has(v),
-      'api_key_env_id 须为容器已注入的 env（当前仅：LLM_API_KEY）',
-    ),
-  auth_header: z.boolean().default(true),
+    .regex(PROVIDER_ID_REGEX, 'provider_id 须以小写字母开头，1–64 位，仅含小写字母、数字、连字符')
+    .refine((v) => !RESERVED_PROVIDER_IDS.has(v), 'provider_id 为保留 id，不可使用'),
+  preset_id: z.enum(PRESET_IDS as [string, ...string[]], {
+    errorMap: () => ({ message: `preset_id 须为端点预设之一（${PRESET_IDS.join(' | ')}）` }),
+  }),
+  // 明文 key 单向流：写请求可带，落库即密文；空串/缺省语义按 POST/PUT 区分（service 层）。
+  api_key: z.string().max(4096, 'api_key 过长').optional(),
   models: z
     .array(
       z
@@ -103,9 +73,6 @@ export const modelProviderWriteSchema = z.object({
           id: z.string().min(1, '每条 model 须含非空 id'),
           name: z.string().optional(),
           reasoning: z.boolean().optional(),
-          // #366 codex 四轮 P2：input 限 r28 §1.2 枚举（text/image/audio/video/pdf）——非法取值
-          // （如 "bogus"）原样落盘会被下游运行时校验拒绝，DB 却已提交报成功（历史：该闸曾由
-          // OpenClaw 热加载校验承担，链已随 T0 #801 退役；校验前置的理由仍成立）。
           input: z.array(z.enum(MODEL_INPUT_MODALITIES)).optional(),
           cost: z
             .object({
@@ -121,47 +88,20 @@ export const modelProviderWriteSchema = z.object({
         .passthrough(), // 未知扩展字段透传（前端表单收集的其余字段原样保留）
     )
     .min(1, '须至少一条 model（用于派生默认模型引用）')
-    // #366 codex 五轮 P2：同 provider 内 model id 须唯一。重复 id 让消费端生成相同
-    // <pid>/<mid> 模型引用 —— primary 自指进 fallbacks + aliases 键覆盖，运行时配置歧义、
-    // DB 却报成功（与 input 枚举同根：入站拒，落库形状才可能合法）。path 落 models → 90002 明细。
     .refine(
       (models) => new Set(models.map((m) => String(m.id))).size === models.length,
       { message: '同 provider 内 model id 须唯一', path: ['models'] },
     ),
 })
 
-// ---------------------------------------------------------------------------
-// provider_endpoints admin CRUD（#775，731 §3.1——端点白名单，admin 管理，面板级）。
-// wire snake_case 对齐 models 域：scheme/host/port/note。匹配语义 = origin 精确匹配
-// （scheme+host+port；port 缺省/NULL = scheme 默认端口），禁路径/子域通配——host 只收精确
-// hostname（点分标签，小写；全数字标签天然覆盖 IPv4 字面量，IPv6 字面量 V1 不收）。
-// 'http' 限 dev 的生产门在 service 层（zod 保持纯净不读 env）。校验失败 → 90002 字段级。
-// ---------------------------------------------------------------------------
-
-// 精确 hostname：点分标签（每段字母/数字/连字符、首尾非连字符）——zod .toLowerCase()
-// 归一化（大写输入折叠为小写，防 'API.Example.com' 与 'api.example.com' 两行同义白名单；
-// 归一化后重复建 → 40041，测试见 providerEndpoints.test.ts「大写输入归一化为小写」）。
-export const ENDPOINT_HOST_REGEX = /^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*$/
-
-export const providerEndpointWriteSchema = z.object({
-  scheme: z.enum(['https', 'http'], {
-    errorMap: () => ({ message: "scheme 仅支持 'https' 或 'http'（http 限开发环境）" }),
+// 端点试连（#882）：按表单态（预设 + key + 模型）真实试连，不入库。api_key 缺省/空 =
+// 用平台共享 key；模型取表单首条（试连载体）。校验失败 → 90002 字段明细。
+export const endpointTestSchema = z.object({
+  preset_id: z.enum(PRESET_IDS as [string, ...string[]], {
+    errorMap: () => ({ message: `preset_id 须为端点预设之一（${PRESET_IDS.join(' | ')}）` }),
   }),
-  host: z
-    .string()
-    .trim()
-    .toLowerCase()
-    .min(1, 'host 不能为空')
-    .max(253, 'host 过长（≤253 字符）')
-    .regex(ENDPOINT_HOST_REGEX, 'host 须为精确域名（点分小写标签，禁通配符/路径/端口混入）'),
-  port: z
-    .number()
-    .int('port 须为整数')
-    .min(1, 'port 须为 [1, 65535]')
-    .max(65535, 'port 须为 [1, 65535]')
-    .nullable()
-    .optional(),
-  note: z.string().max(200, 'note 过长（≤200 字符）').optional(),
+  api_key: z.string().max(4096, 'api_key 过长').optional(),
+  model: z.string().trim().min(1, 'model 不能为空').max(256, 'model 过长'),
 })
 
 // ---------------------------------------------------------------------------
@@ -228,4 +168,13 @@ export const pluginEnablementSchema = z.object({
 
 export const pluginCommandCompletionQuerySchema = z.object({
   prefix: z.string().max(1000).default(''),
+})
+
+// 插件 LLM 指派写侧（#883 T3）：{provider_id, model_id} 双可空——provider_id null = 跟随
+// 默认链；'platform' = 钉平台默认端点；其余须为本人 BYOK 端点 id。model_id null = 该端点
+// 默认（首条）模型。语义校验（端点存在性/模型成员资格/含保留键 'judge' 的可指派性）归
+// plugins/assignments 服务层（需查库与目录，schema 只锁形状）。
+export const pluginLlmAssignmentWriteSchema = z.object({
+  provider_id: z.string().min(1).max(64).nullable().default(null),
+  model_id: z.string().min(1).max(200).nullable().default(null),
 })
