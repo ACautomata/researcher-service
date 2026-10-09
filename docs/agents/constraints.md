@@ -15,7 +15,8 @@
   GATEWAY_TOKEN 落盘面退役。
 - **docker.sock 安全**：控制面挂 `/var/run/docker.sock` = 等价 root（spec §5.4 明示风险）。本地/可信
   部署可接受；生产应限制控制面网络面或改用 rootless / 远程 TLS daemon。
-- **凭证**：LLM key 全面板共享（`LLM_API_KEY`，runner 侧 provider 凭证解析消费，#731 §1.3）。
+- **凭证**：平台默认端点用 `LLM_API_KEY`；BYOK 凭证用 `LLM_CREDENTIAL_SECRET` 加密（生产两项必填）。写请求经 zod 校验，读响应不含明文或密文；插件只消费 ctx.llm，不接触凭证。预设固定协议与地址，不接受自由 baseURL。
+- **端点配置**：mutation 与配置版本 bump 同事务，下一 run 生效；会话/teammate/插件/judge 悬挂引用回平台默认并告警。在飞 run 共用启动快照。judge 故障 fail-closed 升级人工；token 仍计入审批审计。试连 V1 无专用限流，接受面见 ADR 0017。
 - **生产部署**：`deploy/docker-compose.deploy.yml`（frontend nginx + server + redis 三服务），
   CD 经 GitHub Actions 构建 `server`/`frontend` 镜像推 GHCR 并部署宝塔宿主（见 `deploy/DEPLOY.md`）。
 - **测试**：

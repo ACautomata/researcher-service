@@ -203,9 +203,18 @@ CREATE TABLE plugin_enablements (
 
 ## 5. 配置面
 
-- **V1 只面板级**（根决策 Q13）：管理员经 env 配置，沿 #744 `AUTOFIGURE_*` 形态（env 注入、不落盘、不入日志、不进事件载荷），全部经 `server/src/config.ts` 单一来源。
-- **configSchema 声明位**：manifest 声明所需 env 键（名/必填/说明）。V1 语义 = 启动校验依据 + 文档；V2 预留 per-user 插件配置的 schema 载体（随第二个需要它的插件启动，map fog）。
+- **V1 面板级服务配置**（根决策 Q13，LLM 指派例外见下）：管理员经 env 配置，沿 #744 `AUTOFIGURE_*` 形态（env 注入、不落盘、不入日志、不进事件载荷），全部经 `server/src/config.ts` 单一来源。
+- **configSchema 声明位**：manifest 声明所需 env 键（名/必填/说明）。V1 语义 = 启动校验依据 + 文档；一般 per-user 插件配置仍为 V2；LLM 指派已按 #880/#883 提前，使用独立 llm 声明与指派面（ADR 0016/0017）。
 - **启动期校验（R7）**：registry 装配时对**全部目录插件**按 configSchema 断言 env 完备性（不看启用位——任何用户随时可启用 = 面板必须永远备好）；生产缺 env → fail-fast（对齐 config.ts 现行纪律），dev 缺 env → 警告照常收录。
+
+
+### #886 amend：插件 LLM 指派（#880 / #883）
+
+manifest 可声明 `llm: { description, defaultModel? }`，声明即进入模型配置页的指派目标集；`defaultModel` 是目录元数据，不覆盖用户指派或默认链。`judge` 为核心保留目标，插件 id 撞键启动 fail-fast。未声明 LLM 的插件不可写指派。
+
+指派按 owner + plugin 持久化：providerId 为 null 跟随默认链、`platform` 钉平台、其余必须属本人端点；modelId 必须属于对应端点模型集。写操作与配置版本 bump 同事务，下一 run 生效。在飞 run 共用启动快照，删除端点后的悬挂引用回平台默认并告警。
+
+核心按插件构造 `ctx.llm`，凭证永不下发插件。优先级为兼容 env pin > 用户插件 LLM 指派 > 默认链（用户端点序 + 平台垫底）；显式目标或 pin 调用失败明确报错，不悄悄换模型。AutoFigure 生图与 fal 凭证仍由平台提供。一般 per-user 配置、事件钩子与动态激活继续留 V2。
 
 ## 6. V2 roadmap 与不迁移面
 
@@ -252,6 +261,6 @@ CREATE TABLE plugin_enablements (
 
 1. `ctx` 服务句柄形状（ProviderRegistry 等）——随 #753 首个消费者校准。
 2. 域 run 事件族（figure_run.* 类）形状——归 #753（wiki_run 先例）。
-3. per-user 插件配置 schema 载体语义——V2，随第二个需要它的插件启动。
+3. 一般 per-user 插件配置 schema 载体语义仍为 V2；LLM 指派已按 §5 修订提前。
 4. 事件钩子最小集定义——V2 启动前对 #751 映射表复审（map fog）。
 5. 目录页产品细则（UX/文案）——实施拉动（map fog）。

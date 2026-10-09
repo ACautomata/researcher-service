@@ -7,7 +7,7 @@
 # （#341 M9：backend 服务退役 Django，切换为 server 服务跑 Express 控制面。
 #   #859 OpenClaw 退役④：OpenClaw 编排内核与 GATEWAY_TOKEN 凭证链整链退役。）
 #
-# 运行时敏感值（JWT_SECRET / LLM_API_KEY /
+# 运行时敏感值（JWT_SECRET / LLM_API_KEY / LLM_CREDENTIAL_SECRET /
 # AUTOFIGURE_IMAGE_API_KEY / FAL_KEY）经同目录 .env（env_file）注入，不落盘进 git；
 # 非敏感固定项（REDIS_URL/DATA_ROOT/端口/AUTOFIGURE_IMAGE_MODEL）直接写在本文件
 # 或 .env。AutoFigure 键清单见 server env 段注释（#792 起）。
@@ -58,8 +58,9 @@ services:
       #   AUTOFIGURE_IMAGE_MODEL        生图模型名（如 image-01）
       #   AUTOFIGURE_IMAGE_API_KEY      生图 API key（敏感，只走 .env）
       #   FAL_KEY                       fal 云计算 key（敏感，只走 .env）
-      # 可选键：AUTOFIGURE_IMAGE_BASE_URL（缺省国际区）、AUTOFIGURE_SVG_MODEL（缺省 owner
-      # 默认链 primary）。键声明单源 = plugins/autofigure/manifest.ts configSchema。
+      # 可选键：AUTOFIGURE_IMAGE_BASE_URL（缺省国际区）。
+      # AUTOFIGURE_SVG_MODEL 为废弃兼容 pin（设值告警、优先于指派、失败不降级）；
+      # 清除此键后，在模型配置页设置插件 LLM 指派或跟随默认链。键声明单源 = plugins/autofigure/manifest.ts configSchema。
     volumes:
       # 唯一宿主数据挂载（ADR 0013 豁免）：控制面等价 root，经 docker.sock 编排面板自管容器
       # （spec §5.4 已明示风险）。其余数据（SQLite）走 named volume。

@@ -159,3 +159,13 @@ docker logs panel-frontend
 curl -v http://127.0.0.1:18080/api/health   # 应用层（Express 不校验 Host，无需 -H）
 curl -v https://researcher.acautomata.top/api/health  # 经宝塔 TLS 全链路
 ```
+
+## LLM 端点升级与配置（#880 / ADR 0017）
+
+生产先配置并备份 `LLM_CREDENTIAL_SECRET`（与 JWT secret 分开生成），再部署；密钥丢失或更换会使现存 BYOK 凭证不可解密，列表显示 key_error，用户需重新提供 key。V1 没有密钥轮换脚本。`LLM_API_KEY` 是平台兜底凭证，BYOK 费用记用户自己的服务商账户。
+
+v15→v16 自动按旧地址域名归一预设，未知域名行丢弃并逐行告警；旧行改用平台 key，用户需重新保存 BYOK 凭证。升级前备份 SQLite 卷，降级需同时恢复旧镜像与数据库备份。零端点用户不创建种子行。
+
+judge 在模型配置页指派，未指派使用用户默认端点再兜平台；删除端点后的引用下一 run 回平台默认。在飞 run 保持启动快照。部署级判定模型配置不再生效。
+
+`AUTOFIGURE_SVG_MODEL` 保留为废弃兼容 pin，设值启动告警且优先于指派；请清除后改用 AutoFigure 插件 LLM 指派，后续独立版本再物理删除。生图与 fal key 继续由平台提供。端点试连 V1 无专用限流，可能消耗用户或平台额度；10s 超时与 1-token 级输出限制不等于配额防护。

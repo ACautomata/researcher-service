@@ -58,7 +58,8 @@ services:
       LLM_CREDENTIAL_SECRET: ${LLM_CREDENTIAL_SECRET:-}
       # AutoFigure（#792 插件化收口起回归，同 prod 三必填键）：shell 可选注入，空串安全 =
       # assertPluginEnv dev 警告不阻断（dev 缺键时 figure 工具调用期明确报错）。可选键
-      # AUTOFIGURE_IMAGE_BASE_URL / AUTOFIGURE_SVG_MODEL 同机制，缺省即行为正确，不显式列。
+      # AUTOFIGURE_IMAGE_BASE_URL 同机制；AUTOFIGURE_SVG_MODEL 为废弃兼容 pin，
+      # 设值告警，建议在模型配置页改用插件 LLM 指派。
       AUTOFIGURE_IMAGE_MODEL: ${AUTOFIGURE_IMAGE_MODEL:-}
       AUTOFIGURE_IMAGE_API_KEY: ${AUTOFIGURE_IMAGE_API_KEY:-}
       FAL_KEY: ${FAL_KEY:-}
