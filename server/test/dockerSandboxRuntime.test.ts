@@ -4,6 +4,8 @@
 // 无宿主端口 / 无 env / kind 标签（对 fleet 隐身）。
 
 import { describe, it, expect } from 'vitest'
+import { Readable } from 'node:stream'
+import type Docker from 'dockerode'
 import { DockerSandboxRuntime } from '../src/sandboxes/dockerRuntime'
 import { sandboxContainerName, sandboxNetworkName } from '../src/sandboxes/runtime'
 import { SANDBOX_LIMITS } from '../src/sandboxes/values'
@@ -75,5 +77,53 @@ describe('buildSandboxCreateOptions（#747 E 节沙箱列投影）', () => {
     })
     expect(small.HostConfig?.Memory).toBe(256 * 1024 * 1024)
     expect(small.HostConfig?.PidsLimit).toBe(64)
+  })
+})
+
+// 回归：低核 host 上 create 被 daemon 400 拒收（"Range of CPUs is from 0.01 to 2.00, as there
+// are only 2 CPUs available"）。规格初值 4 核必须按 daemon info().NCPU 钳制。
+describe('NanoCpus host 钳制（低核 host 400 回归）', () => {
+  function mockClient(ncpu: number, calls: { kind: string; opts?: Docker.ContainerCreateOptions }[]) {
+    const docker = {
+      info: async () => ({ NCPU: ncpu }),
+      getImage: () => ({ inspect: async () => ({}) }),
+      createContainer: async (o: Docker.ContainerCreateOptions) => {
+        calls.push({ kind: 'createContainer', opts: o })
+        return { putArchive: async () => {} }
+      },
+      // fork 前置：源容器 inspect 存在 + export 流 + importImage 空实现
+      getContainer: () => ({
+        inspect: async () => ({}),
+        export: async () => Readable.from([Buffer.alloc(0)]),
+      }),
+      importImage: async () => {},
+    }
+    return docker as unknown as Docker
+  }
+
+  it('host 2 核：spec 4 核被钳到 2e9 再 create（不触 daemon 400）', async () => {
+    const calls: { kind: string; opts?: Docker.ContainerCreateOptions }[] = []
+    const rt = new DockerSandboxRuntime(() => mockClient(2, calls))
+    await rt.createSandbox(SPEC)
+    expect(calls).toHaveLength(1)
+    expect(calls[0].opts?.HostConfig?.NanoCpus).toBe(2_000_000_000)
+    // 钳制只动 CPU：内存/Pids 原样
+    expect(calls[0].opts?.HostConfig?.Memory).toBe(4 * 1024 * 1024 * 1024)
+    expect(calls[0].opts?.HostConfig?.PidsLimit).toBe(512)
+  })
+
+  it('host 8 核：spec 4 核不抬升（钳制是上限语义，不做放大）', async () => {
+    const calls: { kind: string; opts?: Docker.ContainerCreateOptions }[] = []
+    const rt = new DockerSandboxRuntime(() => mockClient(8, calls))
+    await rt.createSandbox(SPEC)
+    expect(calls[0].opts?.HostConfig?.NanoCpus).toBe(4_000_000_000)
+  })
+
+  it('fork 路径（createSandboxFromSource）同钳制', async () => {
+    const calls: { kind: string; opts?: Docker.ContainerCreateOptions }[] = []
+    const rt = new DockerSandboxRuntime(() => mockClient(2, calls))
+    await rt.createSandboxFromSource({ sessionId: 'csession0002', sourceSessionId: 'csession0001', limits: SANDBOX_LIMITS })
+    expect(calls).toHaveLength(1)
+    expect(calls[0].opts?.HostConfig?.NanoCpus).toBe(2_000_000_000)
   })
 })

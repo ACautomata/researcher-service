@@ -44,3 +44,10 @@ export const SANDBOX_LIMITS: SandboxLimits = {
   nanoCpus: 4_000_000_000,
   pidsLimit: 512,
 }
+
+// host 核数钳制：daemon 拒收 NanoCpus > NCPU×1e9 的 create（400 "Range of CPUs is from 0.01
+// to X.00..."，沙箱直接建不起来）。limit 是上限而非预留——低核部署机（2 核办公机/CI）上
+// 规格初值必须让位。纯函数：dockerRuntime 创建路径套用，hostNanoCpus 由调用方查 info() 供给。
+export function clampSandboxLimits(limits: SandboxLimits, hostNanoCpus: number): SandboxLimits {
+  return limits.nanoCpus <= hostNanoCpus ? limits : { ...limits, nanoCpus: hostNanoCpus }
+}
