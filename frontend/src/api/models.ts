@@ -58,6 +58,24 @@ export interface ModelProviderWriteDTO {
   models: ModelEntryDTO[]
 }
 
+// 端点试连（#882）：按表单态真实试连（不入库）；成功回延迟 ms，失败经信封 code 90003
+// + 净化错误文本（apiJson 抛 ApiError）。
+export interface EndpointTestResultDTO {
+  ok: true
+  latency_ms: number
+}
+
+export function testConnection(payload: {
+  preset_id: string
+  api_key?: string
+  model: string
+}): Promise<EndpointTestResultDTO> {
+  return apiJson<EndpointTestResultDTO>(`${BASE}/test`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
 const BASE = '/api/v1/models'
 const COLLECTION = `${BASE}/providers`
 

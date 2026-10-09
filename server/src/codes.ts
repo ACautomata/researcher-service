@@ -75,7 +75,7 @@ export const CODE = {
   // 9xxxx 系统 / 校验
   OAUTH_NOT_CONFIGURED: 90001, // OAuth provider 未配置（原 501）
   VALIDATION_FAILED: 90002, // 参数校验失败（字段明细进 data）；曾为 figures 幂等中间件特例 data=null（该中间件随 #791 创建端点退役）
-  LLM_NOT_CONFIGURED: 90003, // LLM 凭证/模型配置类总码（#881：平台 key 缺失、BYOK 凭证解密失败、无可用模型；#792 起 figure llm 回退链全败/无 provider 同码）
+  LLM_NOT_CONFIGURED: 90003, // LLM 凭证/模型配置类总码（#881：平台 key 缺失、BYOK 凭证解密失败、无可用模型；#792 起 figure llm 回退链全败/无 provider 同码；#882 端点试连失败/超时——message 携净化错误文本）
   PORT_POOL_EXHAUSTED: 90004, // [退役保留] 曾为端口池耗尽（T0 #801 端口池废除），码段保留防复用
   ROUTE_NOT_FOUND: 90005, // 路由不存在（404 信封兜底）
   INTERNAL: 90000, // 未知错误兜底

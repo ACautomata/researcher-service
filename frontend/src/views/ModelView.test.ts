@@ -19,6 +19,7 @@ vi.mock('@/api/models', () => ({
   createProvider: vi.fn(),
   updateProvider: vi.fn(),
   removeProvider: vi.fn(),
+  testConnection: vi.fn(),
 }))
 vi.mock('element-plus', async (importOriginal) => {
   const actual = (await importOriginal()) as Record<string, unknown>
@@ -37,6 +38,7 @@ import {
   listPresets,
   listProviders,
   removeProvider,
+  testConnection,
   updateProvider,
   type EndpointPresetDTO,
   type ModelProviderDTO,
@@ -273,6 +275,51 @@ describe('ModelView（#881 预设制配置面）', () => {
     const { ElMessage } = await import('element-plus')
     expect(ElMessage.warning).toHaveBeenCalled()
     expect(createProvider).not.toHaveBeenCalled()
+  })
+
+  it('runProbe 按表单态试连：成功展示延迟（key 留空不发送）', async () => {
+    ;(testConnection as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: true, latency_ms: 1234 })
+    const wrapper = mount(ModelView, { global: { plugins: [createPinia()], stubs } })
+    await flushPromises()
+    await (wrapper.vm as unknown as { openCreate: () => void }).openCreate()
+    // openCreate 预填 minimax 默认首条模型
+    await (wrapper.vm as unknown as { runProbe: () => Promise<void> }).runProbe()
+    await flushPromises()
+    const call = (testConnection as ReturnType<typeof vi.fn>).mock.calls[0][0] as Record<string, unknown>
+    expect(call.preset_id).toBe('minimax')
+    expect(call.model).toBe('MiniMax-M3')
+    expect('api_key' in call).toBe(false) // key 留空 = 试平台共享 key
+    expect(wrapper.find('[data-test="probe-success"]').exists()).toBe(true)
+    expect(wrapper.find('[data-test="probe-success"]').text()).toContain('1234')
+  })
+
+  it('runProbe 失败：展示净化错误文本（不含 key），成功标记不出现', async () => {
+    const { ApiError } = await import('@/api/client')
+    ;(testConnection as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new ApiError(200, 'Error 401: Incorrect API key [REDACTED]', 90003),
+    )
+    const wrapper = mount(ModelView, { global: { plugins: [createPinia()], stubs } })
+    await flushPromises()
+    await (wrapper.vm as unknown as { openCreate: () => void }).openCreate()
+    await (wrapper.vm as unknown as { runProbe: () => Promise<void> }).runProbe()
+    await flushPromises()
+    expect(wrapper.find('[data-test="probe-success"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="probe-error"]').exists()).toBe(true)
+    expect(wrapper.find('[data-test="probe-error"]').text()).toContain('REDACTED')
+  })
+
+  it('runProbe：model 为空 → warning 且不发请求', async () => {
+    const wrapper = mount(ModelView, { global: { plugins: [createPinia()], stubs } })
+    await flushPromises()
+    await (wrapper.vm as unknown as { openCreate: () => void }).openCreate()
+    const vm = wrapper.vm as unknown as { runProbe: () => Promise<void>; _: { setupState: Record<string, unknown> } }
+    const models = vm._.setupState.models as { value: Array<{ id: string }> } | Array<{ id: string }>
+    const list = Array.isArray(models) ? models : models.value
+    list[0]!.id = ''
+    await vm.runProbe()
+    const { ElMessage } = await import('element-plus')
+    expect(ElMessage.warning).toHaveBeenCalled()
+    expect(testConnection).not.toHaveBeenCalled()
   })
 })
 

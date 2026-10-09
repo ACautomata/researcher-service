@@ -19,6 +19,9 @@
   永无 key 材料）、providers = BYOK 端点 CRUD（preset_id 锁定协议与地址无自由 baseURL；api_key
   单向流——写请求可带明文落库即密文、读只出掩码；事务 = mutation + config_meta version bump
   热生效；保留 id 'platform' 写侧拒绝 90002；40040 不存在/越权同码防探测、40041 pid 冲突）。
+- `/api/v1/models/test` — 端点试连（#882：按表单态[预设+key+模型]发起最小代价真实试连——不入库、
+  不产生 provider 行、不写日志；1-token 级探测、10s 超时；失败 90003 + 净化错误文本防 key 回显；
+  V1 不限流[ADR 记录接受面]）。
 - `/api/v1/provider-endpoints[/<id>]` — 端点白名单 admin CRUD **已随 #881 预设制整链退役**
   （表/REST/校验/DNS/逃生 env 全删；40042 常量保留语义退役）。
 - `/api/v1/plugins` — 插件目录 + per-user 启用位（#788 · 8xxxx 段：GET 目录清单（manifest 渲染 +

@@ -94,6 +94,16 @@ export const modelProviderWriteSchema = z.object({
     ),
 })
 
+// 端点试连（#882）：按表单态（预设 + key + 模型）真实试连，不入库。api_key 缺省/空 =
+// 用平台共享 key；模型取表单首条（试连载体）。校验失败 → 90002 字段明细。
+export const endpointTestSchema = z.object({
+  preset_id: z.enum(PRESET_IDS as [string, ...string[]], {
+    errorMap: () => ({ message: `preset_id 须为端点预设之一（${PRESET_IDS.join(' | ')}）` }),
+  }),
+  api_key: z.string().max(4096, 'api_key 过长').optional(),
+  model: z.string().trim().min(1, 'model 不能为空').max(256, 'model 过长'),
+})
+
 // ---------------------------------------------------------------------------
 // 会话域（#778 · #747 C 节会话 REST 全件）。幂等 key 的 32-hex 形态校验在路由中间件
 // requireMessageKey（header 面）；此处只管 body。

@@ -8,7 +8,7 @@ import { traceLogsRouter } from './routes/traceLogs'
 import { approvalLogsRouter, fileOverwriteLogsRouter } from './runner/auditRoutes'
 import { usageRouter } from './runner/usageRoutes'
 import { createWikiRouter, type WikiRouterDeps } from './wiki/routes'
-import { createModelsRouter } from './models/routes'
+import { createModelsRouter, type ModelsRouterDeps } from './models/routes'
 import { createFilesRouter, type FilesRouterDeps } from './files/routes'
 import { createFiguresRouter } from './figures/routes'
 import { createDocsRouter, type DocsRouterDeps } from './openapi/routes'
@@ -46,10 +46,13 @@ export interface AppDeps {
   // plugins 接缝（#788，#752 §4.3 R8）：目录清单 + per-user 启用位（8xxxx 段）。注入即挂载
   //（条件挂载先例）——生产 server.ts 注入编译期目录 PLUGIN_MANIFESTS；缺省 = 不挂。
   plugins?: PluginsRouterDeps
+  // models 试连带（#882 端点试连）：模型工厂/超时预算注入缝——测试注入 fake 工厂覆盖
+  // 成功/失败两态；生产缺省 = initChatModel 真工厂 + 10s 超时（server.ts 不注入）。
+  models?: ModelsRouterDeps
 }
 
 // createApp 工厂：PrismaClient 经依赖注入，测试可传 test DB（接缝 #2）。
-export function createApp({ prisma, wiki, files, docs, events, sessions, attachments, plugins }: AppDeps): Application {
+export function createApp({ prisma, wiki, files, docs, events, sessions, attachments, plugins, models }: AppDeps): Application {
   const app = express()
   // wiki 内容契约无大小上限（codex PR#346）：挂载路径内请求先走 5mb limit，其余端点仍 256kb。
   // 须先于全局 parser —— body-parser 对已解析 body（req._body）会跳过，故 wiki 命中后不二次解析。
@@ -81,7 +84,7 @@ export function createApp({ prisma, wiki, files, docs, events, sessions, attachm
   // models（#336；#857 归属门改挂 ownerId；#881 预设制换形）：owner 级路由
   // /api/v1/models/{presets,platform,providers[/<pid>]}（对齐 sessions 扁平挂用户先例），
   // 零容器行查询、零外部资源依赖（事务 = DB mutation + config_meta bump），无条件挂载。
-  app.use('/api/v1/models', createModelsRouter())
+  app.use('/api/v1/models', createModelsRouter(models ?? {}))
   // files（T0 #801 只读化；#858 容器 CRUD 退役后本路由是 /api/v1/containers 挂载的唯一残余
   // ——URL 契约保留（root=lab 会话沙箱只读 GET，<name> = sessionId），FileArchive 必填，
   // 仅在有注入时挂载（条件挂载先例）。

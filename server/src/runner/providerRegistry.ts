@@ -18,13 +18,12 @@
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models'
 import type { Runnable } from '@langchain/core/runnables'
 import { RunnableBinding } from '@langchain/core/runnables'
-import { initChatModel } from 'langchain/chat_models/universal'
-import { Anthropic } from '@anthropic-ai/sdk'
 import type { PrismaClient } from '../generated/prisma/client'
 import { CODE } from '../codes'
 import { fail } from '../envelope'
 import { config } from '../config'
 import { decryptCredential } from '../models/cipher'
+import { defaultFactory, type ChatModelFactory } from '../models/chatFactory'
 import {
   PLATFORM_PROVIDER_ID,
   platformModelIds,
@@ -70,49 +69,10 @@ export interface ProviderConfigSnapshot {
 }
 
 // ---------------------------------------------------------------------------
-// 模型工厂接缝
+// 模型工厂接缝（#882 下沉至 models/chatFactory.ts；类型自彼处 re-export 保持既有 import 面）
 // ---------------------------------------------------------------------------
 
-export interface ModelFactoryOptions {
-  readonly lcProvider: 'openai' | 'anthropic'
-  readonly baseUrl: string
-  readonly apiKey: string
-  /** fetch 注入缝（测试 spy；生产 = globalThis.fetch） */
-  readonly fetch: typeof fetch
-  /** 凭证头策略（预设派生）：true = 强制 Authorization: Bearer（MiniMax/DeepSeek anthropic
-   * 兼容面通行 Bearer——repo 调研文档锁）；false = SDK 原生头策略（anthropic=x-api-key） */
-  readonly authHeader: boolean
-}
-
-export type ChatModelFactory = (model: string, opts: ModelFactoryOptions) => Promise<BaseChatModel>
-
-// 默认工厂：initChatModel 构造（provider 二值；OpenAI 兼容端点统一 openai + baseUrl——731 §2.1）。
-// fetch 注入面（实测锁定）：openai → configuration.fetch（透传 OpenAI client 构造器）；
-// anthropic → clientOptions.{baseURL, fetch}（透传 Anthropic SDK client，源码 spread 次序保证
-// 显式 clientOptions.baseURL 覆盖 ANTHROPIC_BASE_URL 等环境变量）。
-// authHeader=true（anthropic）：经 createClient 覆盖把 SDK 的 apiKey（X-Api-Key 头）置 null、
-// authToken（Authorization: Bearer 头）置 key——Bearer-only（双头并存会被部分网关拒）。
-const defaultFactory: ChatModelFactory = async (model, opts) => {
-  if (opts.lcProvider === 'openai') {
-    return (await initChatModel(model, {
-      modelProvider: 'openai',
-      apiKey: opts.apiKey,
-      baseUrl: opts.baseUrl, // initChatModel 映射 → ChatOpenAI baseURL（实测验证）
-      configuration: { fetch: opts.fetch },
-    })) as unknown as BaseChatModel
-  }
-  return (await initChatModel(model, {
-    modelProvider: 'anthropic',
-    apiKey: opts.apiKey,
-    clientOptions: { baseURL: opts.baseUrl, fetch: opts.fetch },
-    ...(opts.authHeader
-      ? {
-          createClient: (options: ConstructorParameters<typeof Anthropic>[0]) =>
-            new Anthropic({ ...options, apiKey: null, authToken: opts.apiKey }),
-        }
-      : {}),
-  })) as unknown as BaseChatModel
-}
+export type { ChatModelFactory, ModelFactoryOptions } from '../models/chatFactory'
 
 // ---------------------------------------------------------------------------
 // Registry
