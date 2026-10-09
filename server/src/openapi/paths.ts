@@ -10,6 +10,7 @@
 import { z } from 'zod'
 import { registry, okEnvelope, LooseData, NullData, ErrorEnvelope, bearerAuth } from './components'
 import {
+  endpointTestSchema,
   loginSchema,
   modelProviderWriteSchema,
   passwordChangeSchema,
@@ -336,6 +337,17 @@ register({
   auth: 'user',
   errors: `10005（mustChangePassword）· 90003（LLM_PRESET 配置非法——config 启动校验兜底）。`,
   dataNote: 'data: { provider_id, preset_id, protocol, lc_provider, base_url, default_model, key_configured }（永无 key 材料）。',
+})
+
+register({
+  method: 'post',
+  path: '/api/v1/models/test',
+  tag: 'Models',
+  summary: '端点试连（#882：按表单态[预设+key+模型]最小代价真实试连——不入库、不写日志、1-token 级、10s 超时）',
+  auth: 'user',
+  errors: `90002（字段明细）· 90003（试连失败——净化错误文本，不含 key；超时同码）· 10005。`,
+  dataNote: 'data: { ok: true, latency_ms }（延迟毫秒）。',
+  body: endpointTestSchema,
 })
 
 register({
