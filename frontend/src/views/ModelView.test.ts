@@ -356,6 +356,8 @@ describe('ModelView 插件 LLM 指派区（#883 T3）', () => {
     // stub 不展开（本文件 seam 纪律：断言止于 stub 可渲染面）
     expect(wrapper.text()).toContain('autofigure')
     expect(wrapper.text()).toContain('judge')
+    expect(wrapper.find('[data-test="assignment-table"]').text()).toBe('judge,autofigure')
+    expect(wrapper.text()).toContain('默认链 primary（首端点首模型）')
   })
 
   it('指派动作：选端点+模型 → PUT {provider_id, model_id}；空端点 = 跟随默认链（null 行）', async () => {

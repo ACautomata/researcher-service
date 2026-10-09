@@ -14,6 +14,7 @@
 //   - 中间件拒绝（不调 handler）的调用不产生 v3 tools/* 流事件——红显由 onRejection 回调
 //     直接发 tool.start + tool.end{state:'error', rejection} 事件对（RunService 接线）。
 
+import type { ProviderConfigSnapshot } from '../providerRegistry'
 import { randomUUID } from 'node:crypto'
 import { ToolMessage } from '@langchain/core/messages'
 import type { Command as LangGraphCommand } from '@langchain/langgraph'
@@ -115,11 +116,13 @@ export interface FunnelIdentity {
   readonly userId: string
   /** 弱关联 text_trace_logs.traceId（#727 接缝）；V1 = runId 占位 */
   readonly traceId: string
+  readonly snapshot?: ProviderConfigSnapshot
 }
 
 interface FunnelRunState {
   cautious: boolean
   identity: FunnelIdentity
+  judgeClient?: Promise<ApprovalFunnelDeps['judge']>
   judgeCalls: number
   rejectCounts: Map<string, number>
   /** toolCallId → 升级载荷（resume 重放幂等面 + escalation id 稳定面） */
@@ -143,6 +146,7 @@ export interface RejectionNotice {
 export interface ApprovalFunnelDeps {
   /** judge 客户端；未配置 = 灰区一律升级人工（fail-closed，判定不可得即 judge 层失守） */
   readonly judge?: { run(input: { rendered: string; inputHash: string }): Promise<JudgeOutcome> }
+  readonly judgeFor?: (identity: FunnelIdentity) => Promise<ApprovalFunnelDeps['judge']>
   readonly audit: ApprovalAuditSink
   /** 拒绝即时红显回调（RunService 接线为 tool.start + tool.end 事件对发布） */
   readonly onRejection?: (notice: RejectionNotice) => void
@@ -288,12 +292,16 @@ export class ApprovalFunnel {
     if (state.judgeCalls >= JUDGE_MAX_CALLS_PER_RUN) {
       return this.escalate(state, request, handler, toolCallJson, { source: 'judge-limit' })
     }
-    if (!this.deps.judge) {
+    state.judgeClient ??= Promise.resolve().then(() =>
+      this.deps.judgeFor ? this.deps.judgeFor(state!.identity) : this.deps.judge,
+    ).catch(() => undefined)
+    const judge = await state.judgeClient
+    if (!judge) {
       // judge 未配置：判定不可得 → fail-closed 升级人工（source 枚举为 729 §3.1 锁定四值，
-      // 部署缺失经 judgeReason 区分，不与「输出畸形」静默混淆）
+      // 端点缺失经 judgeReason 区分，不与「输出畸形」静默混淆）
       return this.escalate(state, request, handler, toolCallJson, {
         source: 'judge-malformed',
-        judgeReason: 'judge 未配置（部署面缺 RUNNER_JUDGE_*），fail-closed 升级',
+        judgeReason: 'judge 端点不可用或未指派，fail-closed 升级人工',
       })
     }
 
@@ -305,7 +313,15 @@ export class ApprovalFunnel {
       priorCalls: ctx.priorCalls,
       currentCall: { tool: name, args },
     })
-    const outcome = await this.deps.judge.run(input)
+    let outcome: JudgeOutcome
+    try {
+      outcome = await judge.run(input)
+    } catch {
+      return this.escalate(state, request, handler, toolCallJson, {
+        source: 'judge-malformed',
+        judgeReason: 'judge 端点不可用，fail-closed 升级人工',
+      })
+    }
 
     if (outcome.kind === 'malformed') {
       // 畸形判定按 deny 落审计（fail-closed 语义），决策真值由后续 human 行承接
@@ -319,7 +335,7 @@ export class ApprovalFunnel {
         latencyMs: outcome.latencyMs,
         judgeTokens: outcome.tokens,
       })
-      return this.escalate(state, request, handler, toolCallJson, { source: 'judge-malformed' })
+      return this.escalate(state, request, handler, toolCallJson, { source: 'judge-malformed', judgeReason: 'judge 端点不可用或输出畸形，fail-closed 升级人工' })
     }
     if (outcome.verdict.decision === 'approve') {
       const ok = await this.writeAudit(state, {

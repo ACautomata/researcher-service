@@ -20,7 +20,7 @@ import { PrismaCheckpointSaver } from '../src/runner/persistence/prismaCheckpoin
 import { ProviderRegistry } from '../src/runner/providerRegistry'
 import { ConcurrencyGate } from '../src/runner/concurrency'
 import { RunService, type RunCommand } from '../src/runner/runtime/runService'
-import { ApprovalFunnel } from '../src/runner/approval/funnel'
+import { ApprovalFunnel, type ApprovalFunnelDeps } from '../src/runner/approval/funnel'
 import { createPrismaApprovalAuditSink } from '../src/runner/approval/audit'
 import type { JudgeOutcome, JudgePolicyClass } from '../src/runner/approval/judge'
 import { CODE } from '../src/codes'
@@ -118,6 +118,7 @@ describe('审批三层漏斗（S1，#783 · 729 规格）', () => {
     opts: {
       script?: ScriptEntry[]
       scriptLoop?: boolean
+      judgeFor?: ApprovalFunnelDeps['judgeFor']
       judgeScript?: Parameters<typeof fakeJudge>[0]
       approvalTimeoutMs?: number
       sessionId?: string
@@ -133,6 +134,7 @@ describe('审批三层漏斗（S1，#783 · 729 规格）', () => {
     const fs = fakePrimitives()
     const funnel = new ApprovalFunnel({
       judge: fake.judge,
+      judgeFor: opts.judgeFor,
       audit: createPrismaApprovalAuditSink(prisma),
     })
     const svc = new RunService({
@@ -217,6 +219,42 @@ describe('审批三层漏斗（S1，#783 · 729 规格）', () => {
     expect(row?.toolName).toBe('execute')
     expect(row?.reason).toContain('rm-root-recursive')
     expect(svc.stateOf(sessionId)?.state).toBe('completed') // 黑拒是终态不升级
+  })
+
+  it('同 run 多次灰区调用只解析一次 judge，下一 run 重新解析（#884）', async () => {
+    let resolutions = 0
+    const fake = fakeJudge([{ decision: 'approve' }])
+    const { svc } = makeService({
+      judgeFor: async (identity) => {
+        resolutions += 1
+        expect(identity.userId).toBe(owner.id)
+        expect(identity.snapshot?.ownerId).toBe(owner.id)
+        return fake.judge
+      },
+      script: [toolCallAi('memo1', 'execute', { command: 'echo one' }), toolCallAi('memo2', 'execute', { command: 'echo two' }), new AIMessage('done'), toolCallAi('memo3', 'execute', { command: 'echo three' }), new AIMessage('done')],
+    })
+    await svc.execute(cmd())
+    expect(fake.calls).toHaveLength(2)
+    expect(resolutions).toBe(1)
+    await svc.execute(cmd())
+    expect(resolutions).toBe(2)
+  })
+
+  it.each(['resolve', 'invoke'])('judge %s 故障升级人工，绝不执行工具（#884）', async (failure) => {
+    const { svc, fs } = makeService({
+      judgeFor: async () => {
+        if (failure === 'resolve') throw new Error('unavailable')
+        return { run: async () => { throw new Error('unavailable') } }
+      },
+      script: [toolCallAi('unavailable', 'execute', { command: 'echo unsafe' })],
+    })
+    await svc.execute(cmd())
+    expect(fs.execCalls).toHaveLength(0)
+    expect(svc.stateOf(sessionId)?.state).toBe('interrupted')
+    expect(JSON.stringify(hub.events.find((e) => e.type === 'approval.requested')?.payload)).toContain('judge 端点不可用')
+    const requested = hub.events.find((e) => e.type === 'approval.requested')!
+    await svc.resolveApproval({ sessionId, ownerId: owner.id, username: owner.username,
+      escalationId: (requested.payload as { escalation: { id: string } }).escalation.id, decision: 'allow' })
   })
 
   it('judge approve：灰区放行 + 审计含 judgeInputHash/latency/tokens（story 32）', async () => {

@@ -290,18 +290,6 @@ export const config = {
       maxConcurrentRuns: readRunnerMaxConcurrentRuns(),
       // 图深度护栏（GraphRecursionError → run.failed{recursion_limit}；默认 500 = PoC 实测值）
       recursionLimit: readRunnerRecursionLimit(),
-      // 审批三层漏斗 judge 模型（#783 · 729 §2.5「独立小模型，与主模型解耦」）：部署级配置
-      //（RUNNER_JUDGE_MODEL + RUNNER_JUDGE_BASE_URL，key 复用 LLM_API_KEY；lcProvider 二值，
-      // 默认 openai 兼容面）。二者任缺 → judge 未启用（灰区一律升级人工——fail-closed，
-      // 729 §2.3 校验再败同语义）。judge 端点归属链（用户指派 → 默认链 → 平台）归 #884——
-      // RUNNER_JUDGE_* 退役随该票。
-      judge: {
-        model: readOptionalEnv('RUNNER_JUDGE_MODEL'),
-        baseUrl: readOptionalEnv('RUNNER_JUDGE_BASE_URL'),
-        lcProvider: (readOptionalEnv('RUNNER_JUDGE_LC_PROVIDER') === 'anthropic'
-          ? 'anthropic'
-          : 'openai') as 'openai' | 'anthropic',
-      },
       // 审批升级超时（729 §3.3 默认 48h；装配层注入 RunService）
       approvalTimeoutMs: readApprovalTimeoutMs(),
       // 文件 rewind 机制（#782 · #766 D8）：attic per-session 配额（对称 100MB checkpoint
