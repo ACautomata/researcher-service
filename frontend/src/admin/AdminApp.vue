@@ -61,6 +61,12 @@ async function handleLogout(): Promise<void> {
   min-height: 0;
   overflow: hidden;
 }
+.admin-content {
+  /* 壳固定 100svh + overflow hidden——滚动必须由内容区承接，缺这三行超长页（API 文档）被裁且无滚动条 */
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
 .admin-nav {
   display: flex;
   flex: none;

@@ -87,6 +87,40 @@ npm run dev                    # tsx watch，http://localhost:8001；首启 log 
 > 仅适合纯逻辑调试（摸不到 named volume）。会话沙箱/wiki 容器惰性创建需 docker daemon 可达；
 > REST 认证/账号端点不依赖。
 
+## 接口文档（OpenAPI / Swagger UI，#761）
+
+文档面 = **zod 生成式** OpenAPI 3.1（`src/openapi/`：`paths.ts` 逐端点声明 + 请求体引用
+`validation/schemas.ts` 单一来源——零漂移，不手写 openapi.yaml）+ swagger-ui-express UI。
+整树 `/api/docs` **requireAuth + requireAdmin**（#758 Q14）。
+
+**网页交互（Swagger UI）**：前端 admin 子应用 → http://localhost:5173/admin/ 登录 admin →
+「API 文档」页（前端带认证链拉 spec，TryIt 请求自动注入 token）。浏览器地址栏**直开不了**
+`/api/docs`——门控是 `Authorization: Bearer`，导航请求带不上 header（→ 10001）；admin SPA
+的内嵌视图就是为此存在（`frontend/src/admin/views/ApiDocsView.vue`）。
+
+```bash
+cd server
+npm run docs        # = npm run dev，启动前打印文档入口 banner（控制面 :8001）
+```
+
+**TryIt 认证**：Swagger UI 右上角 Authorize 粘贴 access token（JWT HS256，默认 5m 过期）：
+
+```bash
+curl -s -X POST http://localhost:8001/api/v1/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"<admin>","password":"<密码>"}' | jq -r .data.access
+```
+
+**程序化消费**：`GET /api/docs/openapi.json`（Bearer admin）——裸 JSON，不包 #312 信封。
+
+- **开关**：`API_DOCS_ENABLED`（默认 true；false → 装配层不注入 docs deps → `/api/docs` 整树 90005）。
+- **SSE 不在覆盖面**：`GET /api/v1/events` 是 SSE 流（panel_stream cookie 认证，#773）——流式
+  语义超出请求/响应文档模型（`document.ts` description 明文载此决策）。
+- **字节例外**：figures png/svg 与附件 download 成功路径直发原生字节（豁免 #312 信封；错误面仍信封）。
+- **覆盖守卫**：`test/apiDocsCoverage.test.ts` 对 `createApp` 全量装配做 Express 5 路由栈反射，
+  与实际挂载端点**双向**断言（漏登记/幻影登记同红）——新增 REST 端点必须同步登记
+  `src/openapi/paths.ts`，否则 CI 红。
+
 ### schema 变更
 
 Prisma 7 的 `db push` / `migrate dev` 带 AI 破坏性操作守卫（交互式 consent）。本仓库改用

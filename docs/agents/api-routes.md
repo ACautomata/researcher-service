@@ -2,6 +2,10 @@
 
 > `AGENTS.md` 的披露参考——新增/修改 REST 端点、错误码或信封行为时查阅本清单。
 
+- 交互式接口文档（Swagger UI，TryIt 可直连）与 OpenAPI 3.1 JSON：`/api/docs`（admin-only，
+  网页入口走 admin 子应用「API 文档」页）——使用说明见 `server/README.md`「接口文档」章节；
+  新增端点必须同步登记 `server/src/openapi/paths.ts`（覆盖守卫 `apiDocsCoverage.test.ts` 双向断言）。
+
 - `GET /api/health`（公开）。
 - `/api/v1/auth/*` — 登录/refresh(R1 旋转)/logout/me/password/change + OIDC `oauth/<p>/login|callback`（未配 provider 时 90001）。
 - `/api/v1/users` — admin 账号管理（GET / POST / PATCH / reset-password；码段 1xxxx；
