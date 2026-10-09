@@ -11,7 +11,8 @@
 //
 // 凭证单向流：写请求可带明文 api_key，落库即 AES-256-GCM 密文（cipher.ts，密钥
 // LLM_CREDENTIAL_SECRET）；任何读路径只出掩码，响应体永无明文无密文。POST 空/缺省 = 用平台
-// 共享 key（cipher NULL）；PUT 空/缺省 = 保持既有凭证不变。解密失败读不炸（key_error 标记，
+// 共享 key（cipher NULL）——**仅限平台预设端点**（非平台预设新建拒 90002：防平台 key 外发
+// 第三方地址）；PUT 空/缺省 = 保持既有凭证不变。解密失败读不炸（key_error 标记，
 // 掩码置 null）——错钥（轮换缺失）只降级展示与运行时（运行时报 LLM 未配置），管理面可用。
 //
 // #857（退役②）：ownerId 由路由层从认证身份直派生传入。provider 级「不存在 vs 越权」同码
@@ -23,6 +24,7 @@ import { CODE } from '../codes'
 import { config } from '../config'
 import { bumpConfigVersion } from './configVersion'
 import { decryptCredential, encryptCredential, isCredentialEnvelope } from './cipher'
+import { parseModelsJson } from './modelsJson'
 import { ENDPOINT_PRESETS, RESERVED_PROVIDER_IDS, presetById } from './presets'
 
 // 写侧输入（路由层已把 snake_case body 经 zod 校验后映射为 camelCase domain shape）
@@ -50,16 +52,6 @@ export interface ModelProviderView {
   key_error: boolean
   models: Array<Record<string, unknown>>
   created_at: Date
-}
-
-function decodeModels(raw: string): Array<Record<string, unknown>> {
-  try {
-    const v: unknown = JSON.parse(raw)
-    if (Array.isArray(v)) return v as Array<Record<string, unknown>>
-  } catch {
-    // 坏 JSON → 回退 []
-  }
-  return []
 }
 
 // 掩码：保留前 3 + 末 4，其余以 •••• 收敛；隐藏位 < 4（≤10 位短串）全掩码——
@@ -96,7 +88,7 @@ function toView(row: ModelProvider, credentialSecret: string): ModelProviderView
     base_url: baseUrl,
     api_key_masked: masked,
     key_error: keyError,
-    models: decodeModels(row.modelsJson),
+    models: parseModelsJson(row.modelsJson),
     created_at: row.createdAt,
   }
 }
@@ -122,6 +114,7 @@ export class ModelProviderService {
   async create(ownerId: string, input: ModelProviderWriteInput): Promise<ModelProviderView> {
     this.assertReserved(input.providerId)
     this.assertPreset(input.presetId)
+    this.assertOwnKeyOnCreate(input)
     try {
       const row = await this.prisma.$transaction(async (tx) => {
         const created = await tx.modelProvider.create({
@@ -235,6 +228,17 @@ export class ModelProviderService {
     if (!presetById(presetId)) {
       throw fail(CODE.VALIDATION_FAILED, undefined, {
         preset_id: [`preset_id 须为端点预设之一（${ENDPOINT_PRESETS.map((p) => p.id).join(' | ')}）`],
+      })
+    }
+  }
+
+  // cipher NULL（平台共享 key）限平台预设：非平台预设 BYOK 行若无自有 key，运行时会把
+  // 平台 key 发往第三方服务商地址（#880 review 收敛——写侧构造性阻断）。存量迁移行
+  // （v16 统一 cipher NULL）不受影响：运行时悬挂回落语义照旧，用户设 key 即收敛。
+  private assertOwnKeyOnCreate(input: ModelProviderWriteInput): void {
+    if ((input.apiKey === undefined || input.apiKey.trim() === '') && input.presetId !== config.llm.preset) {
+      throw fail(CODE.VALIDATION_FAILED, undefined, {
+        api_key: ['非平台预设端点须自带 API key（平台共享 key 仅适用平台预设端点）'],
       })
     }
   }

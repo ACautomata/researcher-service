@@ -8,6 +8,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 
 vi.mock('@/api/plugins', () => ({
+  JUDGE_PLUGIN_ID: 'judge',
+  PLATFORM_PROVIDER_ID: 'platform',
   listLlmAssignments: vi.fn(),
   setLlmAssignment: vi.fn(),
   clearLlmAssignment: vi.fn(),
@@ -54,6 +56,7 @@ const PLATFORM: PlatformEndpointDTO = {
   lc_provider: 'anthropic',
   base_url: 'https://api.minimaxi.com/anthropic',
   default_model: 'MiniMax-M3',
+  models: [{ id: 'MiniMax-M3', name: 'MiniMax M3' }],
   key_configured: true,
 }
 
@@ -194,21 +197,44 @@ describe('ModelView（#881 预设制配置面）', () => {
     expect(wrapper.find('[data-test="provider-dialog"]').exists()).toBe(true)
   })
 
-  it('save in create mode sends preset-shaped payload (no base_url); empty key omitted', async () => {
+  it('save in create mode sends preset-shaped payload (no base_url); platform 预设空 key 省略', async () => {
     ;(createProvider as ReturnType<typeof vi.fn>).mockResolvedValue(PROVIDER)
+    const wrapper = mount(ModelView, { global: { plugins: [createPinia()], stubs } })
+    await flushPromises()
+    await (wrapper.vm as unknown as {
+      save: (p: { provider_id: string; preset_id: string; api_key?: string; models: Array<{ id: string }> }) => Promise<void>
+    }).save({ provider_id: 'my-minimax', preset_id: 'minimax', models: [{ id: 'MiniMax-M3' }] })
+    await flushPromises()
+    const call = (createProvider as ReturnType<typeof vi.fn>).mock.calls[0][0] as Record<string, unknown>
+    expect(call.preset_id).toBe('minimax')
+    expect('base_url' in call).toBe(false) // 无自由 baseURL 输入
+    expect('api_key' in call).toBe(false) // 平台预设留空 = 平台共享 key
+    const { ElMessage } = await import('element-plus')
+    const toast = (ElMessage.success as ReturnType<typeof vi.fn>).mock.calls[0][0]
+    expect(String(toast)).toMatch(/热加载/)
+  })
+
+  it('save in create mode：非平台预设空 key → warning 拦截（BYOK 语义，不发请求）', async () => {
     const wrapper = mount(ModelView, { global: { plugins: [createPinia()], stubs } })
     await flushPromises()
     await (wrapper.vm as unknown as {
       save: (p: { provider_id: string; preset_id: string; api_key?: string; models: Array<{ id: string }> }) => Promise<void>
     }).save({ provider_id: 'my-openai', preset_id: 'openai', models: [{ id: 'gpt-5.1' }] })
     await flushPromises()
-    const call = (createProvider as ReturnType<typeof vi.fn>).mock.calls[0][0] as Record<string, unknown>
-    expect(call.preset_id).toBe('openai')
-    expect('base_url' in call).toBe(false) // 无自由 baseURL 输入
-    expect('api_key' in call).toBe(false) // 留空 = 平台共享 key
     const { ElMessage } = await import('element-plus')
-    const toast = (ElMessage.success as ReturnType<typeof vi.fn>).mock.calls[0][0]
-    expect(String(toast)).toMatch(/热加载/)
+    expect(ElMessage.warning).toHaveBeenCalledWith(expect.stringContaining('API key'))
+    expect(createProvider).not.toHaveBeenCalled()
+    // 编辑态不受此限：留空 = 保持不变
+    ;(updateProvider as ReturnType<typeof vi.fn>).mockResolvedValue(PROVIDER)
+    ;(listProviders as ReturnType<typeof vi.fn>).mockResolvedValue([PROVIDER])
+    const vm = wrapper.vm as unknown as { openEdit: (p: ModelProviderDTO) => void }
+    vm.openEdit(PROVIDER)
+    await (wrapper.vm as unknown as {
+      save: (p: { provider_id: string; preset_id: string; api_key?: string; models: Array<{ id: string }> }) => Promise<void>
+    }).save({ provider_id: 'my-openai', preset_id: 'openai', models: [{ id: 'gpt-5.1' }] })
+    await flushPromises()
+    expect(ElMessage.warning).toHaveBeenCalledTimes(1)
+    expect(updateProvider).toHaveBeenCalled()
   })
 
   it('save with plain key passes it through (单向流：只在写请求出现)', async () => {

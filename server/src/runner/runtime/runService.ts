@@ -1325,7 +1325,21 @@ export class RunService {
       run: { ownerId: cmd.ownerId, sessionId, runId: cmd.runId },
       figures: createFiguresToolPort({ prisma: this.deps.prisma, dedupe: this.figureDedupe }, cmd.ownerId),
       // per-plugin ctx.llm 工厂（#883）：插件 id → 解析器端口（env pin > 用户指派 > 默认链）。
-      llmFor: (pluginId: string) => createLlmToolPort({ registry: this.deps.registry, ownerId: cmd.ownerId, pluginId, snapshot }),
+      // usage 上下文（#880 US23）：插件 LLM 流量按解析命中的 providerId 落 llm_usage_records。
+      llmFor: (pluginId: string) =>
+        createLlmToolPort({
+          registry: this.deps.registry,
+          ownerId: cmd.ownerId,
+          pluginId,
+          snapshot,
+          usage: {
+            prisma: this.deps.prisma,
+            userId: cmd.ownerId,
+            username: cmd.username,
+            runId: cmd.runId,
+            sessionId,
+          },
+        }),
       audit,
       // 双面翻译链（#744 §11.2）：onUpdate 上报一次 → runner 同时发 figure_run.progress
       //（SSE 用户面）与落 figure_run.stage_transitions（TextTrace 审计面）；白名单外丢弃。

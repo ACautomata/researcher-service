@@ -108,18 +108,30 @@ describe('端点试连 POST /api/v1/models/test（#882）', () => {
     expect(String(res.body.message)).toContain('REDACTED')
   })
 
-  it('api_key 缺省 → 工厂收到平台共享 key（注入的 PLATFORM_KEY）', async () => {
+  it('api_key 缺省 + 平台预设端点 → 工厂收到平台共享 key（注入的 PLATFORM_KEY）', async () => {
+    factoryCalls = []
+    factoryBehavior = async () => {}
+    const res = await ctx.request
+      .post(TEST_PATH)
+      .set(bearer(access))
+      .send({ preset_id: 'minimax', model: 'MiniMax-M3' })
+    expect(res.body.code).toBe(0)
+    expect(factoryCalls[0]!.opts.apiKey).toBe(PLATFORM_KEY)
+    // 平台预设 anthropic 兼容面：lcProvider=anthropic + Bearer 策略随预设派生
+    expect(factoryCalls[0]!.opts.lcProvider).toBe('anthropic')
+    expect(factoryCalls[0]!.opts.authHeader).toBe(true)
+  })
+
+  it('api_key 缺省 + 非平台预设 → 90003 拒绝（平台 key 只对平台预设地址有效，防凭证外发），不经工厂', async () => {
     factoryCalls = []
     factoryBehavior = async () => {}
     const res = await ctx.request
       .post(TEST_PATH)
       .set(bearer(access))
       .send({ preset_id: 'anthropic', model: 'claude-sonnet-5-5' })
-    expect(res.body.code).toBe(0)
-    expect(factoryCalls[0]!.opts.apiKey).toBe(PLATFORM_KEY)
-    // anthropic 原生面：authHeader=false + x-api-key 策略随预设（SDK 原生，工厂侧处理）
-    expect(factoryCalls[0]!.opts.lcProvider).toBe('anthropic')
-    expect(factoryCalls[0]!.opts.authHeader).toBe(false)
+    expect(res.body.code).toBe(90003)
+    expect(String(res.body.message)).toContain('填写 API key')
+    expect(factoryCalls).toHaveLength(0)
   })
 
   it('不入库：试连后 modelProvider 行数不变、config_meta version 不 bump', async () => {
@@ -166,7 +178,7 @@ describe('端点试连 POST /api/v1/models/test（#882）', () => {
     expect(factoryCalls).toHaveLength(0)
   })
 
-  it('平台共享 key 未配置（LLM_API_KEY 空 + api_key 缺省）→ 90003，不经工厂', async () => {
+  it('平台共享 key 未配置（LLM_API_KEY 空 + api_key 缺省 + 平台预设）→ 90003，不经工厂', async () => {
     const original = config.llm.apiKey
     try {
       ;(config.llm as { apiKey: string }).apiKey = ''
@@ -179,7 +191,7 @@ describe('端点试连 POST /api/v1/models/test（#882）', () => {
       const res = await emptyCtx.request
         .post(TEST_PATH)
         .set(bearer(userAccess))
-        .send({ preset_id: 'openai', model: 'gpt-5.1' })
+        .send({ preset_id: 'minimax', model: 'MiniMax-M3' })
       expect(res.body.code).toBe(90003)
       expect(factoryCalls).toHaveLength(0)
       await emptyCtx.cleanup()

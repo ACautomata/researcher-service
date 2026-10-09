@@ -530,7 +530,7 @@ register({
   summary: '平台默认端点只读视图（env 派生虚拟实体，不落库，#881）',
   auth: 'user',
   errors: `10005（mustChangePassword）· 90003（LLM_PRESET 配置非法——config 启动校验兜底）。`,
-  dataNote: 'data: { provider_id, preset_id, protocol, lc_provider, base_url, default_model, key_configured }（永无 key 材料）。',
+  dataNote: 'data: { provider_id, preset_id, protocol, lc_provider, base_url, default_model, models（指派可选项域——platformModels 派生，与写侧校验同源）, key_configured }（永无 key 材料）。',
 })
 
 register({
@@ -539,7 +539,7 @@ register({
   tag: 'Models',
   summary: '端点试连（#882：按表单态[预设+key+模型]最小代价真实试连——不入库、不写日志、1-token 级、10s 超时）',
   auth: 'user',
-  errors: `90002（字段明细）· 90003（试连失败——净化错误文本，不含 key；超时同码）· 10005。`,
+  errors: `90002（字段明细）· 90003（试连失败——净化错误文本，不含 key；api_key 留空仅平台预设可试，其余预设同码拒；超时同码）· 10005。`,
   dataNote: 'data: { ok: true, latency_ms }（延迟毫秒）。',
   body: endpointTestSchema,
 })
@@ -560,7 +560,7 @@ register({
   tag: 'Models',
   summary: '建 BYOK 端点（preset_id 锁定协议与地址；api_key 落库即密文；唯一(ownerId, providerId)，#881）',
   auth: 'user',
-  errors: `90002（字段明细：保留 id 抢注/未知预设/models 形状）· 40041（pid 冲突）· 10005。`,
+  errors: `90002（字段明细：保留 id 抢注/未知预设/models 形状/非平台预设无自有 key）· 40041（pid 冲突）· 10005。`,
   dataNote: 'data: 新建端点（api_key_masked 掩码；事务内 config_meta version bump = 热生效信号）。',
   body: modelProviderWriteSchema,
 })

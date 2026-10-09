@@ -114,7 +114,7 @@ describe('models REST（#881 预设制 + BYOK 凭证单向流）', () => {
     expect(presets.find((p) => p.id === 'zhipu')!.base_url).toBe('https://open.bigmodel.cn/api/paas/v4')
   })
 
-  it('GET /platform：平台默认端点只读卡（协议/地址/默认模型/key 配置状态；整响应无 key 材料）', async () => {
+  it('GET /platform：平台默认端点只读卡（协议/地址/默认模型/指派可选项域/key 配置状态；整响应无 key 材料）', async () => {
     const res = await ctx.request.get(PLATFORM_PATH).set(bearer(userAccess))
     expect(res.body.code).toBe(0)
     const card = res.body.data as Record<string, unknown>
@@ -126,6 +126,9 @@ describe('models REST（#881 预设制 + BYOK 凭证单向流）', () => {
     const expectedModel = config.llm.model !== '' ? config.llm.model : 'MiniMax-M3'
     expect(card.default_model).toBe(expectedModel)
     expect(card.key_configured).toBe(config.llm.apiKey !== '')
+    // models = 指派可选项域（platformModels 派生，与写侧校验同源；LLM_MODEL 覆盖时单条）
+    const expectedModels = config.llm.model !== '' ? [config.llm.model] : ['MiniMax-M3']
+    expect((card.models as Array<{ id: string }>).map((m) => m.id)).toEqual(expectedModels)
     assertNoKeyMaterial(res.body, config.llm.apiKey || 'sk-nothing')
   })
 
@@ -155,16 +158,27 @@ describe('models REST（#881 预设制 + BYOK 凭证单向流）', () => {
     expect(await configVersion()).toBe((before ?? 0) + 1)
   })
 
-  it('POST：无 api_key → cipher NULL（平台共享 key），掩码 null', async () => {
+  it('POST：无 api_key → cipher NULL（平台共享 key），掩码 null——仅平台预设端点', async () => {
     const res = await ctx.request.post(PROVIDERS_PATH).set(bearer(userAccess)).send({
       provider_id: 'no-key',
-      preset_id: 'deepseek',
-      models: [{ id: 'deepseek-v4-flash' }],
+      preset_id: 'minimax',
+      models: [{ id: 'MiniMax-M3' }],
     })
     expect(res.body.code).toBe(0)
     expect(res.body.data.api_key_masked).toBeNull()
     const row = await ctx.prisma.modelProvider.findFirst({ where: { providerId: 'no-key' } })
     expect(row!.credentialCipher).toBeNull()
+  })
+
+  it('POST：非平台预设无自有 api_key → 90002（cipher NULL 限平台预设，防平台 key 外发第三方地址）', async () => {
+    const res = await ctx.request.post(PROVIDERS_PATH).set(bearer(userAccess)).send({
+      provider_id: 'no-key-deepseek',
+      preset_id: 'deepseek',
+      models: [{ id: 'deepseek-v4-flash' }],
+    })
+    expect(res.body.code).toBe(90002)
+    expect(res.body.data.api_key).toBeDefined()
+    expect(await ctx.prisma.modelProvider.count({ where: { providerId: 'no-key-deepseek' } })).toBe(0)
   })
 
   it('POST：未知 preset_id → 90002 字段级；保留 id "platform" 抢注 → 90002', async () => {
@@ -286,7 +300,7 @@ describe('models REST（#881 预设制 + BYOK 凭证单向流）', () => {
     expect(decryptCredential(rowNew!.credentialCipher!, TEST_SECRET)).toBe(rotated)
   })
 
-  it('纯空白 api_key 归一为「留空」语义：PUT trim 后空 → 凭证逐字节保持（不落坏密文）；POST trim 后空 → 平台共享（cipher NULL）', async () => {
+  it('纯空白 api_key 归一为「留空」语义：PUT trim 后空 → 凭证逐字节保持（不落坏密文）；POST trim 后空 → 平台共享仅限平台预设', async () => {
     const rowBefore = await ctx.prisma.modelProvider.findFirst({ where: { providerId: 'my-gpt' } })
     const cipherBefore = rowBefore!.credentialCipher
 
@@ -300,22 +314,32 @@ describe('models REST（#881 预设制 + BYOK 凭证单向流）', () => {
     const rowKeep = await ctx.prisma.modelProvider.findFirst({ where: { providerId: 'my-gpt' } })
     expect(rowKeep!.credentialCipher).toBe(cipherBefore) // trim 后空 = 保持不变（绝非 cipher=NULL 清成平台共享）
 
-    const blank = await ctx.request.post(PROVIDERS_PATH).set(bearer(userAccess)).send({
-      provider_id: 'blank-key',
+    const platformBlank = await ctx.request.post(PROVIDERS_PATH).set(bearer(userAccess)).send({
+      provider_id: 'blank-key-platform',
+      preset_id: 'minimax',
+      api_key: '   ',
+      models: [{ id: 'MiniMax-M3' }],
+    })
+    expect(platformBlank.body.code).toBe(0)
+    expect(platformBlank.body.data.api_key_masked).toBeNull() // trim 后空 = 平台共享 key 语义（平台预设）
+    const rowBlank = await ctx.prisma.modelProvider.findFirst({ where: { providerId: 'blank-key-platform' } })
+    expect(rowBlank!.credentialCipher).toBeNull()
+
+    const nonPlatformBlank = await ctx.request.post(PROVIDERS_PATH).set(bearer(userAccess)).send({
+      provider_id: 'blank-key-deepseek',
       preset_id: 'deepseek',
       api_key: '   ',
       models: [{ id: 'deepseek-chat' }],
     })
-    expect(blank.body.code).toBe(0)
-    expect(blank.body.data.api_key_masked).toBeNull() // trim 后空 = 平台共享 key 语义
-    const rowBlank = await ctx.prisma.modelProvider.findFirst({ where: { providerId: 'blank-key' } })
-    expect(rowBlank!.credentialCipher).toBeNull()
+    expect(nonPlatformBlank.body.code).toBe(90002) // 非平台预设 trim 后空 = 90002（防平台 key 外发）
+    expect(nonPlatformBlank.body.data.api_key).toBeDefined()
   })
 
   it('PUT：撞同 owner 既有 pid → 40041；不存在 → 40040', async () => {
     await ctx.request.post(PROVIDERS_PATH).set(bearer(userAccess)).send({
       provider_id: 'second-ep',
       preset_id: 'kimi',
+      api_key: 'sk-second-ep-key-0123456789',
       models: [{ id: 'kimi-k2' }],
     })
     const conflict = await ctx.request.put(providerOf('my-gpt')).set(bearer(userAccess)).send({

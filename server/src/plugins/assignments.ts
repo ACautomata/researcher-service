@@ -15,6 +15,7 @@ import { fail } from '../envelope'
 import { CODE } from '../codes'
 import { config } from '../config'
 import { bumpConfigVersion } from '../models/configVersion'
+import { modelIdsFromJson } from '../models/modelsJson'
 import { PLATFORM_PROVIDER_ID, platformModelIds } from '../models/presets'
 import { PROVIDER_ID_REGEX } from '../models/values'
 import { JUDGE_PLUGIN_ID } from './registry'
@@ -112,52 +113,39 @@ export class PluginLlmAssignmentService {
   // 返回 null = 全过；返回字段错误表 = 90002。
   private async validateRefs(ownerId: string, input: AssignmentWriteInput): Promise<Record<string, string[]> | null> {
     const errors: Record<string, string[]> = {}
+    const settle = (): Record<string, string[]> | null => (Object.keys(errors).length > 0 ? errors : null)
     if (input.provider_id === null) {
       if (input.model_id !== null) errors.model_id = ['model_id 须为 null（provider_id 为空 = 跟随默认链，无端点可挂模型）']
-      return Object.keys(errors).length > 0 ? errors : null
+      return settle()
     }
     if (input.provider_id === PLATFORM_PROVIDER_ID) {
       const models = platformModelIds(config.llm.model, config.llm.preset)
       if (input.model_id !== null && !models.includes(input.model_id)) {
         errors.model_id = [`model_id 不在平台默认端点模型集内（${models.join(' | ')}）`]
       }
-      return Object.keys(errors).length > 0 ? errors : null
+      return settle()
     }
     if (!PROVIDER_ID_REGEX.test(input.provider_id)) {
       errors.provider_id = ['provider_id 须为平台默认端点（platform）或本人端点 id（小写字母开头，1–64 位）']
-      return errors
+      return settle()
     }
     const row = await this.deps.prisma.modelProvider.findUnique({
       where: { ownerId_providerId: { ownerId, providerId: input.provider_id } },
     })
     if (!row) {
       errors.provider_id = ['provider_id 不在本人端点集中']
-      return errors
+      return settle()
     }
     if (input.model_id !== null) {
-      const models = decodeModelIds(row.modelsJson)
+      const models = modelIdsFromJson(row.modelsJson)
       if (!models.includes(input.model_id)) {
         errors.model_id = [`model_id 不在端点 ${input.provider_id} 的模型集内`]
       }
     }
-    return Object.keys(errors).length > 0 ? errors : null
+    return settle()
   }
 
   private toView(pluginId: string, providerId: string | null, modelId: string | null, updatedAt: Date): AssignmentView {
     return { plugin_id: pluginId, provider_id: providerId, model_id: modelId, updated_at: updatedAt }
   }
-}
-
-function decodeModelIds(modelsJson: string): string[] {
-  try {
-    const v: unknown = JSON.parse(modelsJson)
-    if (Array.isArray(v)) {
-      return v
-        .filter((m): m is { id: string } => !!m && typeof m === 'object' && typeof (m as { id?: unknown }).id === 'string')
-        .map((m) => m.id)
-    }
-  } catch {
-    // 坏 JSON → 空集（模型校验全拒；端点行本身已存在，管理面可修）
-  }
-  return []
 }

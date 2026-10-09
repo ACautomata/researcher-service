@@ -234,6 +234,14 @@ export class ApprovalFunnel {
     return undefined
   }
 
+  // judge 客户端 per-run 单例（runFunnel 里 memo 到 state.judgeClient）；解析失败置
+  // undefined = judge 未配置 → 灰区 fail-closed 升级人工（不重试，升级通道即安全面）。
+  private resolveJudgeClient(state: FunnelRunState): Promise<ApprovalFunnelDeps['judge']> {
+    return Promise.resolve(
+      this.deps.judgeFor ? this.deps.judgeFor(state.identity) : this.deps.judge,
+    ).catch(() => undefined)
+  }
+
   private async runFunnel(request: FunnelRequest, handler: FunnelHandler): Promise<ToolMessage | LangGraphCommand> {
     const threadId = String(
       (request.runtime as { configurable?: { thread_id?: unknown } } | undefined)?.configurable?.thread_id ?? '',
@@ -307,9 +315,9 @@ export class ApprovalFunnel {
     if (state.judgeCalls >= JUDGE_MAX_CALLS_PER_RUN) {
       return this.escalate(state, request, handler, toolCallJson, { source: 'judge-limit' })
     }
-    state.judgeClient ??= Promise.resolve().then(() =>
-      this.deps.judgeFor ? this.deps.judgeFor(state!.identity) : this.deps.judge,
-    ).catch(() => undefined)
+    if (state.judgeClient === undefined) {
+      state.judgeClient = this.resolveJudgeClient(state)
+    }
     const judge = await state.judgeClient
     if (!judge) {
       // judge 未配置：判定不可得 → fail-closed 升级人工（source 枚举为 729 §3.1 锁定四值，
