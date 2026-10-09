@@ -369,7 +369,7 @@ describe('wiki image pinning env (#784)', () => {
   })
 })
 
-// ---- #775 runner 配置组：RUNNER_MAX_CONCURRENT_RUNS / ALLOW_PRIVATE_PROVIDER_ENDPOINTS ----
+// ---- #775 runner 配置组：RUNNER_MAX_CONCURRENT_RUNS ----
 
 describe('runner max concurrent runs env (#775)', () => {
   async function loadMax(env: string | undefined): Promise<number | 'THREW'> {
