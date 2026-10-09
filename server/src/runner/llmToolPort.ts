@@ -22,11 +22,13 @@ import { CODE } from '../codes'
 import { fail } from '../envelope'
 import { PLATFORM_PROVIDER_ID } from '../models/presets'
 import type { PluginLlmContent, PluginLlmPort, PluginLlmResult, PluginToolUsage } from '../plugins/api'
+import { extractUsageMetadata, recordLlmUsage, type UsageCollectorContext } from './usage'
 import { pngToDataUri } from '../figures/dataUri'
 
 // 平台默认端点条目 + 首模型（悬挂回落目标，#883）。平台条目快照恒垫底（#881）；无可用
 // 模型 = 面板预设无默认模型（防御面，正常配置不触达）→ 明确配置错误。
-function platformEntry(snapshot: ProviderConfigSnapshot) {
+//（命名区分 providerRegistry 的平台条目构造面：此处是快照检索 + 回落专用投影。）
+function platformFallbackEntry(snapshot: ProviderConfigSnapshot) {
   const platform = snapshot.providers.find((p) => p.providerId === PLATFORM_PROVIDER_ID)
   const modelId = platform?.models[0]?.id
   if (!platform || modelId === undefined) {
@@ -71,6 +73,34 @@ function textOf(message: unknown): string {
   return ''
 }
 
+// 用量分账（#880 US23）：ctx.llm 每次成功调用按解析命中的 providerId/modelId 落
+// llm_usage_records 一行——插件流量（BYOK 端点或平台 key）与主对话同面核算。
+// 采数不 fail run（usage.ts callback 同纪律）；无 usage ctx（探针面）跳过。
+async function recordUsage(
+  ctx: UsageCollectorContext | undefined,
+  ref: { provider: ProviderConfigSnapshot['providers'][number]; modelId: string },
+  message: unknown,
+): Promise<void> {
+  if (!ctx) return
+  const tokens = extractUsageMetadata(message)
+  if (!tokens) return
+  try {
+    await recordLlmUsage(ctx.prisma, {
+      runId: ctx.runId,
+      sessionId: ctx.sessionId,
+      userId: ctx.userId,
+      username: ctx.username,
+      providerId: ref.provider.providerId,
+      lcProvider: ref.provider.lcProvider,
+      model: ref.modelId,
+      usage: tokens,
+    })
+  } catch (e) {
+    // eslint-disable-next-line no-console
+    console.warn(`[usage] 插件 ctx.llm 采数落库失败（不 fail run）: ${(e as Error).message}`)
+  }
+}
+
 export interface LlmToolPortInput {
   readonly registry: ProviderRegistry
   readonly ownerId: string
@@ -78,6 +108,9 @@ export interface LlmToolPortInput {
   readonly pluginId: string
   /** run 启动捕获的配置快照（frame 构造期——在飞 run 不受指派/端点变更影响） */
   readonly snapshot: ProviderConfigSnapshot
+  /** 用量分账上下文（#880 US23：ctx.llm 流量按 providerId 落 llm_usage_records；
+   *  缺省不记账——注册期探针等无 run 身份的调用面） */
+  readonly usage?: UsageCollectorContext
 }
 
 export function createLlmToolPort(input: LlmToolPortInput): PluginLlmPort {
@@ -112,7 +145,7 @@ export function createLlmToolPort(input: LlmToolPortInput): PluginLlmPort {
           if (!entry || modelId === null || (assignment.modelId !== null && !entry.models.some((m) => m.id === assignment.modelId))) {
             // 悬挂回落（#880 story 11「服务不中断」同族）：指派引用已删端点/已移出模型是
             // 配置变更后的常态数据 → warn + 回落平台默认（首模型），不拒载不报错。
-            const fallback = platformEntry(snapshot)
+            const fallback = platformFallbackEntry(snapshot)
             refs = [{ provider: fallback.provider, modelId: fallback.modelId }]
             // eslint-disable-next-line no-console
             console.warn(`[plugins] 插件 LLM 指派悬挂，回落平台默认：plugin=${pluginId} providerId=${assignment.providerId} modelId=${assignment.modelId ?? '<端点默认>'}`)
@@ -137,6 +170,7 @@ export function createLlmToolPort(input: LlmToolPortInput): PluginLlmPort {
           const text = textOf(message)
           if (!text) throw new Error('empty LLM response')
           const usage = usageOf(message)
+          await recordUsage(input.usage, ref, message)
           return { text, ...(usage !== undefined ? { usage } : {}) }
         } catch (e) {
           lastError = e

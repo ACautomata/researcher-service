@@ -25,6 +25,8 @@ import {
   clearLlmAssignment,
   listLlmAssignments,
   setLlmAssignment,
+  JUDGE_PLUGIN_ID,
+  PLATFORM_PROVIDER_ID,
   type PluginLlmAssignmentDTO,
   type PluginLlmTargetDTO,
 } from '@/api/plugins'
@@ -42,11 +44,12 @@ const editingPid = ref<string | null>(null)   // null = 新建；非空 = 编辑
 const saving = ref(false)
 const providerId = ref('')
 const presetId = ref('')
-const apiKey = ref('') // 留空 = 新建用平台共享 key / 编辑保持不变（单向流：永回显明文）
+const apiKey = ref('') // 留空 = 新建用平台共享 key（仅平台预设）/ 编辑保持不变（单向流：永回显明文）
 const models = ref<ModelEntryDTO[]>([])
 
 // 端点试连（#882）：按当前表单态（预设 + key + 首条模型）发起；结果就地展示（成功=延迟，
-// 失败=服务端净化后的错误文本）。key 留空 = 试平台共享 key（与保存语义一致的表单态）。
+// 失败=服务端净化后的错误文本）。key 留空 = 试平台共享 key（仅平台预设端点——防平台 key
+// 外发第三方地址，与保存语义一致）。
 const testing = ref(false)
 const probeSuccess = ref<string | null>(null) // '连接成功（1234 ms）'
 const probeError = ref<string | null>(null)
@@ -73,7 +76,9 @@ async function loadAll(): Promise<void> {
       platform.value = nextPlatform
       presets.value = nextPresets
       providers.value = nextProviders
-      llmTargets.value = [...nextAssignments.targets].sort((a, b) => Number(b.plugin_id === 'judge') - Number(a.plugin_id === 'judge'))
+      llmTargets.value = [...nextAssignments.targets].sort(
+        (a, b) => Number(b.plugin_id === JUDGE_PLUGIN_ID) - Number(a.plugin_id === JUDGE_PLUGIN_ID),
+      )
       llmAssignments.value = nextAssignments.assignments
     }
   } catch (e) {
@@ -125,7 +130,8 @@ function onPresetChange(): void {
 }
 
 function keyPlaceholder(): string {
-  return editingPid.value ? '留空表示保持现有 key 不变' : '留空使用平台共享 key'
+  if (editingPid.value) return '留空表示保持现有 key 不变'
+  return presetId.value === platform.value?.preset_id ? '留空使用平台共享 key' : '填写服务商 API key（BYOK）'
 }
 
 function addModel(): void {
@@ -137,7 +143,8 @@ function removeModel(idx: number): void {
 }
 
 async function save(payload: ModelProviderWriteDTO): Promise<void> {
-  // 零信任：前端也校验必填（key 可空——平台共享/保持不变语义）
+  // 零信任：前端也校验必填；BYOK 语义——非平台预设新建须自带 key（服务端同规则 90002；
+  // 编辑留空 = 保持不变，不受此限）
   if (!payload.provider_id.trim()) {
     ElMessage.warning('provider_id 不能为空')
     return
@@ -148,6 +155,10 @@ async function save(payload: ModelProviderWriteDTO): Promise<void> {
   }
   if (!payload.models.length || !payload.models[0].id.trim()) {
     ElMessage.warning('至少一条 model 且需含 id')
+    return
+  }
+  if (!editingPid.value && (payload.api_key === undefined || payload.api_key.trim() === '') && payload.preset_id !== platform.value?.preset_id) {
+    ElMessage.warning('该预设须自带 API key（平台共享 key 仅适用平台预设端点）')
     return
   }
   saving.value = true
@@ -183,6 +194,11 @@ async function runProbe(): Promise<void> {
   const model = models.value[0]?.id.trim() ?? ''
   if (!model) {
     ElMessage.warning('请先填写 model id 再测试连接')
+    return
+  }
+  // 平台 key 只对平台预设地址有效：其余预设留空试连被服务端拒（90003）——前端同规则前置
+  if (apiKey.value.trim() === '' && presetId.value !== platform.value?.preset_id) {
+    ElMessage.warning('试连须填写 API key（平台共享 key 仅适用平台预设端点）')
     return
   }
   testing.value = true
@@ -242,14 +258,14 @@ const llmAssignments = ref<PluginLlmAssignmentDTO[]>([])
 const assignDialogVisible = ref(false)
 const assigningTarget = ref<PluginLlmTargetDTO | null>(null)
 const assignSaving = ref(false)
-// '' = 跟随默认链（provider_id null）；platform 模型面 = 平台默认模型单条
+// '' = 跟随默认链（provider_id null）；platform = 钉平台默认端点
 const assignEndpoint = ref('')
 const assignModel = ref('')
 
 function assignmentDisplay(t: PluginLlmTargetDTO): string {
   const a = llmAssignments.value.find((row) => row.plugin_id === t.plugin_id)
   if (!a || a.provider_id === null) return '跟随默认链'
-  if (a.provider_id === 'platform') {
+  if (a.provider_id === PLATFORM_PROVIDER_ID) {
     return `平台默认端点${a.model_id ? ` · ${a.model_id}` : ''}`
   }
   const provider = providers.value.find((p) => p.provider_id === a.provider_id)
@@ -258,17 +274,15 @@ function assignmentDisplay(t: PluginLlmTargetDTO): string {
 
 // 指派对话框的端点选项：平台默认端点 + 本人 BYOK 端点
 const assignEndpointOptions = computed<Array<{ value: string; label: string }>>(() => [
-  { value: 'platform', label: `平台默认端点（${platform.value?.default_model ?? '默认模型'}）` },
+  { value: PLATFORM_PROVIDER_ID, label: `平台默认端点（${platform.value?.default_model ?? '默认模型'}）` },
   ...providers.value.map((p) => ({ value: p.provider_id, label: `${p.provider_id}（${presetLabel(p.preset_id)}）` })),
 ])
 
-// 所选端点的模型选项：platform = 平台预设 default_models 全集（与写侧校验域一致，#883
-// review 收敛——只出 default_model 会窄于 API 接受面）；BYOK = 该端点 models 列表
+// 所选端点的模型选项：platform = 平台端点视图下发的 models（服务端 platformModels 派生，
+// 与指派写侧校验域同源——LLM_MODEL 覆盖时单条，#880 review 收敛）；BYOK = 该端点 models 列表
 const assignModelOptions = computed<ModelEntryDTO[]>(() => {
-  if (assignEndpoint.value === 'platform') {
-    const presetModels = presets.value.find((p) => p.id === platform.value?.preset_id)?.default_models ?? []
-    if (presetModels.length > 0) return presetModels
-    return platform.value?.default_model ? [{ id: platform.value.default_model, name: '平台默认模型' }] : []
+  if (assignEndpoint.value === PLATFORM_PROVIDER_ID) {
+    return platform.value?.models ?? []
   }
   return providers.value.find((p) => p.provider_id === assignEndpoint.value)?.models ?? []
 })
@@ -309,14 +323,14 @@ async function submitAssign(): Promise<void> {
     )
     return
   }
-  if (assignEndpoint.value !== 'platform' && !assignModelOptions.value.some((m) => m.id === assignModel.value)) {
+  if (assignEndpoint.value !== PLATFORM_PROVIDER_ID && !assignModelOptions.value.some((m) => m.id === assignModel.value)) {
     ElMessage.warning('请选择该端点下的模型')
     return
   }
   await runAssignmentAction(
     () => setLlmAssignment(target.plugin_id, {
       provider_id: assignEndpoint.value,
-      model_id: assignEndpoint.value === 'platform' ? assignModel.value || null : assignModel.value,
+      model_id: assignEndpoint.value === PLATFORM_PROVIDER_ID ? assignModel.value || null : assignModel.value,
     }).then(() => undefined),
     '已保存指派，下一 run 生效（在飞 run 不受影响）',
   )

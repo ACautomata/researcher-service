@@ -33,10 +33,15 @@ export async function getPluginArgumentCompletions(pluginId: string, name: strin
 
 // ---------------------------------------------------------------------------
 // 插件 LLM 指派（#883 T3）：per-user per-plugin 端点/模型指派（Model 页插件指派区）。
-// targets = 声明 llm 的插件 ∪ 保留键 'judge'（审批判定器）——后端目录派生，前端零硬编码；
+// targets = 声明 llm 的插件 ∪ 保留键 'judge'（审批判定器）——后端目录派生；
 // provider_id null = 跟随默认链；'platform' = 钉平台默认端点。写后服务端事务内 bump
 // 配置版本（热生效——下一 run 生效，在飞 run 不受影响）。
 // ---------------------------------------------------------------------------
+
+// 保留键常量（#880 review 收敛：指派面保留键单一来源，视图层不再散落字面量——与
+// server 侧 plugins/registry.ts、models/presets.ts 同值）。
+export const JUDGE_PLUGIN_ID = 'judge'
+export const PLATFORM_PROVIDER_ID = 'platform'
 
 export interface PluginLlmTargetDTO {
   plugin_id: string

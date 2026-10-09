@@ -6,7 +6,8 @@
 //   GET  /platform           —— 平台默认端点只读视图（env 派生虚拟实体，不落库；永无 key 材料）
 //   POST /test               —— 端点试连（#882：不入库、1-token 级、10s 超时、错误文本净化防 key 回显）
 //   GET  /providers          —— 本人 BYOK 端点列表（key 只出掩码）
-//   POST /providers          —— 建 BYOK 端点（preset_id 锁定协议与地址；api_key 缺省 = 平台共享 key）
+//   POST /providers          —— 建 BYOK 端点（preset_id 锁定协议与地址；api_key 缺省 = 平台共享
+//                               key，仅限平台预设端点——非平台预设 90002，防平台 key 外发）
 //   GET  /providers/:pid     —— 回读单条；不存在/越权 → 40040（同码防探测）
 //   PUT  /providers/:pid     —— 改（api_key 留空 = 保持不变；撞同 owner 既有 pid → 40041）
 //   DELETE /providers/:pid   —— 删（引用方下一 run 回落平台默认，在飞快照不变）
@@ -21,9 +22,10 @@ import { fail, ok } from '../envelope'
 import { CODE } from '../codes'
 import { requireAuth } from '../middleware/auth'
 import { mustChangePasswordGate } from '../middleware/mustChangePasswordGate'
+import { validateBody } from '../middleware/validate'
 import { endpointTestSchema, modelProviderWriteSchema } from '../validation/schemas'
 import { config } from '../config'
-import { ENDPOINT_PRESETS, presetById, protocolToLcProvider, PLATFORM_PROVIDER_ID } from './presets'
+import { ENDPOINT_PRESETS, presetById, protocolToLcProvider, PLATFORM_PROVIDER_ID, platformModels } from './presets'
 import {
   ModelProviderService,
   type ModelProviderWriteInput,
@@ -33,6 +35,7 @@ import { EndpointProbeService, type EndpointProbeDeps } from './probe'
 // 试连带注入缝（测试 fake 工厂 / 短超时；生产缺省 = initChatModel 真工厂 + 10s）
 export type ModelsRouterDeps = EndpointProbeDeps
 
+// zod 已解析的 snake_case body → camelCase domain shape（validateBody 中间件前置）。
 function toInput(body: z.infer<typeof modelProviderWriteSchema>): ModelProviderWriteInput {
   return {
     providerId: body.provider_id,
@@ -40,17 +43,6 @@ function toInput(body: z.infer<typeof modelProviderWriteSchema>): ModelProviderW
     apiKey: body.api_key,
     models: body.models,
   }
-}
-
-// body 校验（90002 + 字段明细）。parseBody 在 handler 入口直接跑（路由层无存在性探测面，
-// provider 级防探测在 service 内 40040 同码）。
-function parseBody(req: Request): ModelProviderWriteInput {
-  const result = modelProviderWriteSchema.safeParse(req.body)
-  if (!result.success) {
-    const fieldErrors = result.error.flatten().fieldErrors as Record<string, string[]>
-    throw fail(CODE.VALIDATION_FAILED, undefined, fieldErrors)
-  }
-  return toInput(result.data)
 }
 
 export function createModelsRouter(deps: ModelsRouterDeps = {}): Router {
@@ -92,22 +84,20 @@ export function createModelsRouter(deps: ModelsRouterDeps = {}): Router {
       lc_provider: protocolToLcProvider(preset.protocol),
       base_url: preset.baseUrl,
       default_model: defaultModel,
+      // 指派可选项域 = 写侧同源（platformModels 派生；LLM_MODEL 覆盖时单条）——前端指派
+      // 下拉直接消费本字段，不再从预设目录二次推导（#880 review 收敛：域一致 by construction）。
+      models: platformModels(config.llm.model, config.llm.preset),
       key_configured: config.llm.apiKey !== '',
     })
   })
 
   // POST /test —— 端点试连（#882）：按表单态真实试连（不入库、不写日志）；成功回延迟。
   // 失败（key 错/端点错/超时）→ 90003 + 净化错误文本（净化在 probe service 内）。
-  router.post('/test', async (req: Request, res: Response) => {
-    const result = endpointTestSchema.safeParse(req.body)
-    if (!result.success) {
-      const fieldErrors = result.error.flatten().fieldErrors as Record<string, string[]>
-      throw fail(CODE.VALIDATION_FAILED, undefined, fieldErrors)
-    }
+  router.post('/test', validateBody(endpointTestSchema), async (req: Request, res: Response) => {
     const r = await probe.probe({
-      presetId: result.data.preset_id,
-      apiKey: result.data.api_key,
-      model: result.data.model,
+      presetId: req.body.preset_id,
+      apiKey: req.body.api_key,
+      model: req.body.model,
     })
     ok(res, { ok: true, latency_ms: r.latencyMs })
   })
@@ -117,10 +107,10 @@ export function createModelsRouter(deps: ModelsRouterDeps = {}): Router {
     ok(res, await service(req).list(ownerId(req)))
   })
 
-  // POST /providers —— 新建；唯一(ownerId, providerId) 冲突 → 40041；保留 id/未知预设 → 90002。
-  router.post('/providers', async (req: Request, res: Response) => {
-    const input = parseBody(req)
-    ok(res, await service(req).create(ownerId(req), input))
+  // POST /providers —— 新建；唯一(ownerId, providerId) 冲突 → 40041；保留 id/未知预设/
+  // 非平台预设无自有 key → 90002。
+  router.post('/providers', validateBody(modelProviderWriteSchema), async (req: Request, res: Response) => {
+    ok(res, await service(req).create(ownerId(req), toInput(req.body)))
   })
 
   // GET /providers/:pid/impact —— 本人端点删除影响面；归属门同详情读面。
@@ -135,9 +125,8 @@ export function createModelsRouter(deps: ModelsRouterDeps = {}): Router {
 
   // PUT /providers/:pid —— 改（路径 pid 定位，body 可改 provider_id；api_key 留空 = 保持不变）；
   // 撞同 owner 既有 pid → 40041。
-  router.put('/providers/:pid', async (req: Request, res: Response) => {
-    const input = parseBody(req)
-    ok(res, await service(req).update(ownerId(req), req.params.pid as string, input))
+  router.put('/providers/:pid', validateBody(modelProviderWriteSchema), async (req: Request, res: Response) => {
+    ok(res, await service(req).update(ownerId(req), req.params.pid as string, toInput(req.body)))
   })
 
   // DELETE /providers/:pid —— 删；不存在/越权 → 40040。

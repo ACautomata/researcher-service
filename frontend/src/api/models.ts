@@ -27,7 +27,8 @@ export interface EndpointPresetDTO {
   default_models: ModelEntryDTO[]
 }
 
-// 平台默认端点只读卡（永无 key 材料——key_configured 布尔即全部凭证信息面）
+// 平台默认端点只读卡（永无 key 材料——key_configured 布尔即全部凭证信息面）。
+// models = 指派可选项域（服务端 platformModels 派生，与写侧校验同源；LLM_MODEL 覆盖时单条）。
 export interface PlatformEndpointDTO {
   provider_id: string
   preset_id: string
@@ -35,6 +36,7 @@ export interface PlatformEndpointDTO {
   lc_provider: 'openai' | 'anthropic'
   base_url: string
   default_model: string | null
+  models: ModelEntryDTO[]
   key_configured: boolean
 }
 

@@ -288,3 +288,85 @@ describe('createLlmToolPort（#883 per-plugin 解析器：指派 > 默认链）'
     expect(reg.invoked.at(-1)!.modelId).toBe('m-1') // 默认链 primary
   })
 })
+
+describe('createLlmToolPort（#880 US23 用量分账：ctx.llm 流量落 llm_usage_records）', () => {
+  const opts = { maxTokens: 50000, temperature: 0.7 } as const
+
+  function fakePrisma(rows: Record<string, unknown>[], failCreate = false) {
+    return {
+      llmUsageRecord: {
+        create: async ({ data }: { data: Record<string, unknown> }) => {
+          if (failCreate) throw new Error('db down')
+          rows.push(data)
+        },
+      },
+    }
+  }
+
+  async function portWithUsage(reg: ProviderRegistryLike, prisma: unknown, pluginId = 'autofigure') {
+    const snapshot = await (reg as unknown as { getSnapshot: () => Promise<unknown> }).getSnapshot()
+    return createLlmToolPort({
+      registry: reg as never,
+      ownerId: 'u1',
+      pluginId,
+      snapshot: snapshot as never,
+      usage: { prisma: prisma as never, userId: 'u1', username: 'alice', runId: 'r1', sessionId: 's1' },
+    })
+  }
+
+  it('成功调用按解析命中的 providerId/modelId 落一行（BYOK 指派面）', async () => {
+    const rows: Record<string, unknown>[] = []
+    const reg = fakeRegistry({
+      providers: [
+        { providerId: 'p1', modelIds: ['m-1', 'm-2'] },
+        { providerId: 'platform', modelIds: ['MiniMax-M3'] },
+      ],
+      pluginAssignments: { autofigure: { providerId: 'p1', modelId: 'm-2' } },
+    })
+    const port = await portWithUsage(reg, fakePrisma(rows))
+    const r = await port.generateMultimodal({ contents: ['hi'], model: '', ...opts })
+    expect(r.text).toBe('ok')
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({
+      providerId: 'p1',
+      lcProvider: 'openai',
+      model: 'm-2',
+      runId: 'r1',
+      sessionId: 's1',
+      userId: 'u1',
+      username: 'alice',
+      inputTokens: 3,
+      outputTokens: 5,
+    })
+  })
+
+  it('悬挂回落平台：分账记回落后的实际调用面（providerId=platform）', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const rows: Record<string, unknown>[] = []
+    const reg = fakeRegistry({
+      providers: [
+        { providerId: 'p1', modelIds: ['m-1'] },
+        { providerId: 'platform', modelIds: ['MiniMax-M3'] },
+      ],
+      pluginAssignments: { autofigure: { providerId: 'ghost-ep', modelId: 'm' } },
+    })
+    const port = await portWithUsage(reg, fakePrisma(rows))
+    await port.generateMultimodal({ contents: ['hi'], model: '', ...opts })
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({ providerId: 'platform', model: 'MiniMax-M3' })
+    warnSpy.mockRestore()
+  })
+
+  it('落库失败不 fail run（采数纪律）；无 usage ctx（探针面）不记账', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const rows: Record<string, unknown>[] = []
+    const reg = fakeRegistry({ providers: [{ providerId: 'p1', modelIds: ['m-1'] }] })
+    const port = await portWithUsage(reg, fakePrisma(rows, true))
+    await expect(port.generateMultimodal({ contents: ['hi'], model: '', ...opts })).resolves.toMatchObject({ text: 'ok' })
+    expect(rows).toHaveLength(0)
+    // 无 usage ctx：调用成功且不触任何 prisma
+    const bare = await portOf(reg)
+    await expect(bare.generateMultimodal({ contents: ['hi'], model: '', ...opts })).resolves.toMatchObject({ text: 'ok' })
+    warnSpy.mockRestore()
+  })
+})

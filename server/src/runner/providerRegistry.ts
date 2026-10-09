@@ -23,10 +23,11 @@ import { CODE } from '../codes'
 import { fail } from '../envelope'
 import { config } from '../config'
 import { decryptCredential } from '../models/cipher'
+import { parseModelsJson } from '../models/modelsJson'
 import { defaultFactory, type ChatModelFactory } from '../models/chatFactory'
 import {
   PLATFORM_PROVIDER_ID,
-  platformModelIds,
+  platformModels,
   presetById,
   protocolToLcProvider,
 } from '../models/presets'
@@ -91,16 +92,6 @@ export interface ProviderRegistryDeps {
   readonly fetchImpl?: typeof fetch
   /** 模型工厂注入缝（测试 fake；缺省 initChatModel 真工厂） */
   readonly modelFactory?: ChatModelFactory
-}
-
-function decodeModels(raw: string): ModelEntryLike[] {
-  try {
-    const v: unknown = JSON.parse(raw)
-    if (Array.isArray(v)) return v.filter((m): m is ModelEntryLike => !!m && typeof m === 'object')
-  } catch {
-    // 坏 JSON → 空模型列表（getModel 时按「无可用模型」拒）
-  }
-  return []
 }
 
 export class ProviderRegistry {
@@ -190,7 +181,7 @@ export class ProviderRegistry {
       baseUrl: preset.baseUrl,
       authHeader: preset.authHeader,
       credentialCipher: r.credentialCipher,
-      models: decodeModels(r.modelsJson),
+      models: parseModelsJson(r.modelsJson) as ModelEntryLike[],
     }
   }
 
@@ -200,20 +191,15 @@ export class ProviderRegistry {
   // （config import 即 throw），且平台条目无用户凭证（cipher 恒 NULL，平台共享 key）。
   private platformEntry(): ProviderSnapshotEntry {
     const preset = presetById(this.llmPreset) ?? presetById('minimax')!
-    // 模型集派生单一来源 = platformModelIds（presets.ts；插件指派写侧校验同源，#883）：
-    // LLM_MODEL 覆盖单模型（条目只带 id），否则预设 defaultModels 全集原样。
-    const models: readonly ModelEntryLike[] = platformModelIds(this.llmModel, this.llmPreset).map((id) =>
-      this.llmModel !== ''
-        ? { id } as ModelEntryLike
-        : preset.defaultModels.find((m) => m.id === id) as ModelEntryLike,
-    )
+    // 模型集派生单一来源 = platformModels（presets.ts；REST /platform 下发与插件指派写侧
+    // 校验同源，#883/#880 review 收敛）。
     return {
       providerId: PLATFORM_PROVIDER_ID,
       lcProvider: protocolToLcProvider(preset.protocol),
       baseUrl: preset.baseUrl,
       authHeader: preset.authHeader,
       credentialCipher: null, // 平台共享 key
-      models,
+      models: platformModels(this.llmModel, this.llmPreset) as readonly ModelEntryLike[],
     }
   }
 

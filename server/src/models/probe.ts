@@ -22,7 +22,7 @@ import {
 
 export interface EndpointProbeInput {
   presetId: string
-  /** 明文 key：undefined/'' = 用平台共享 key */
+  /** 明文 key：undefined/'' = 用平台共享 key（仅平台预设端点；其余预设拒——防平台 key 外发） */
   apiKey?: string
   model: string
 }
@@ -74,8 +74,14 @@ export class EndpointProbeService {
   async probe(input: EndpointProbeInput): Promise<{ ok: true; latencyMs: number }> {
     const preset = presetById(input.presetId)
     if (!preset) throw fail(CODE.VALIDATION_FAILED, undefined, { preset_id: ['未知端点预设'] })
-    const apiKey =
-      input.apiKey !== undefined && input.apiKey.trim() !== '' ? input.apiKey.trim() : this.platformApiKey
+    // 平台 key 只对平台预设的地址有效：其余预设留空试连 = 把平台 key 发往第三方地址，
+    // 拒绝（#880 review 收敛；编辑端点「留空 = 保持不变」时试连须重填 key）。
+    const provided =
+      input.apiKey !== undefined && input.apiKey.trim() !== '' ? input.apiKey.trim() : undefined
+    if (provided === undefined && preset.id !== config.llm.preset) {
+      throw fail(CODE.LLM_NOT_CONFIGURED, '试连须填写 API key（平台共享 key 仅适用平台预设端点，防凭证外发）')
+    }
+    const apiKey = provided ?? this.platformApiKey
     if (apiKey === '') {
       throw fail(CODE.LLM_NOT_CONFIGURED, '平台共享 key 未配置（LLM_API_KEY），请自带 API key 后再试连')
     }
