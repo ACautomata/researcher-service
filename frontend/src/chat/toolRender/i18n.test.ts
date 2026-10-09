@@ -6,9 +6,9 @@ import { t } from './i18n'
 
 describe('t', () => {
   it('interpolates {count} and {names} params', () => {
-    expect(t('chat.toolCards.group.commandsMany', { count: '13' })).toBe('ran 13 commands')
+    expect(t('chat.toolCards.group.commandsMany', { count: '13' })).toBe('执行 13 条命令')
     expect(t('chat.toolCards.group.namedToolRepeated', { names: 'foo, bar', count: '3' })).toBe(
-      'used foo, bar ×3',
+      '调用 foo, bar ×3',
     )
   })
 
@@ -17,7 +17,7 @@ describe('t', () => {
   })
 
   it('serves the full summary phrase set used by summarizeToolGroup', () => {
-    expect(t('chat.toolCards.group.emptyMany', { count: '0' })).toBe('Ran 0 tool calls')
-    expect(t('chat.toolCards.group.failedMany', { count: '2' })).toBe('2 failed')
+    expect(t('chat.toolCards.group.emptyMany', { count: '0' })).toBe('执行 0 次工具调用')
+    expect(t('chat.toolCards.group.failedMany', { count: '2' })).toBe('2 次失败')
   })
 })

@@ -1,4 +1,10 @@
 import { describe, it, expect, vi } from 'vitest'
+import { createDeepAgent } from 'deepagents'
+import { tool } from '@langchain/core/tools'
+import { AIMessage } from '@langchain/core/messages'
+import { z } from 'zod'
+import { RunProjector } from '../src/runner/runtime/projector'
+import { ScriptedChatModel, toolCallAi } from './runnerFakes'
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models'
 import type { ProviderConfigSnapshot } from '../src/runner/providerRegistry'
 import { defaultFactory } from '../src/models/chatFactory'
@@ -57,4 +63,37 @@ describe('judge 用户端点链（#884）', () => {
     expect(body).toMatchObject({ model: 'other', temperature: 0 })
   })
 
+})
+
+// S1：真 LangGraph v3 流 + 真 judge 客户端；仅模型响应脚本化。
+// 审批在工具调用的异步上下文内执行，覆盖生产隐式回调继承路径。
+it('judge 判定不进入会话正文或会话用量，判定 token 仍返回审批审计', async () => {
+  const verdict = '{"decision":"approve","policy_class":null,"reason":""}'
+  const judgeModel = new ScriptedChatModel([new AIMessage({
+    content: verdict, usage_metadata: { input_tokens: 2, output_tokens: 1, total_tokens: 3 },
+  })])
+  const judge = await createUserJudgeClient({ getModel: async () => judgeModel }, snapshot())
+  let outcome: Awaited<ReturnType<typeof judge.run>> | undefined
+  const checkedTool = tool(async () => {
+    outcome = await judge.run({ rendered: 'checked call', inputHash: 'hash' })
+    return 'tool succeeded'
+  }, { name: 'checked_tool', description: 'test approval boundary', schema: z.object({}) })
+  const agent = createDeepAgent({
+    model: new ScriptedChatModel([toolCallAi('call', 'checked_tool', {}), new AIMessage('文件测试完成')]),
+    tools: [checkedTool],
+  })
+  const usage = vi.fn()
+  const stream = await agent.streamEvents({ messages: [{ role: 'user', content: 'test' }] }, {
+    version: 'v3', callbacks: [{ handleLLMEnd: usage }],
+  })
+  const projector = new RunProjector()
+  let text = ''
+  for await (const raw of stream) {
+    for (const event of projector.feed(raw, 0)) {
+      if (event.type === 'text.delta') text += String((event.payload as { delta: string }).delta)
+    }
+  }
+  expect(text).toBe('文件测试完成')
+  expect(usage).toHaveBeenCalledTimes(2)
+  expect(outcome).toMatchObject({ kind: 'verdict', verdict: { decision: 'approve' }, tokens: 3 })
 })

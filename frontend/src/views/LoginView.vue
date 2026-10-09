@@ -23,6 +23,10 @@ const submitting = ref(false)
 async function onSubmit(): Promise<void> {
   if (submitting.value) return // 防重复提交（loading 禁用之外的双保险）
   errorMsg.value = ''
+  if (!form.username.trim() || !form.password) {
+    errorMsg.value = !form.username.trim() ? '请填写用户名' : '请填写密码'
+    return
+  }
   submitting.value = true
   try {
     await auth.login(form.username, form.password)

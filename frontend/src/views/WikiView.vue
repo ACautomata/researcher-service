@@ -1,7 +1,7 @@
 <script setup lang="ts">
 // Read-only wiki: tree/graph navigation, OKF reader, independent update progress.
 // #856：owner 级——每用户仅本人 wiki，无容器切换面（listInstances 选容器随耦合下线）。
-import { nextTick, onMounted, ref } from 'vue'
+import { computed, nextTick, onActivated, onMounted, ref } from 'vue'
 import { storeToRefs } from 'pinia'
 import { ElMessage } from 'element-plus'
 import { getGraph } from '@/api/wiki'
@@ -87,6 +87,15 @@ function wikiErrorMessage(e: unknown, fallback: string): string {
   return e instanceof ApiError && e.message ? e.message : fallback
 }
 
+const initializing = ref(true)
+const treeFailed = ref(false)
+const emptyMessage = computed(() => {
+  if (initializing.value || loading.value) return '正在加载…'
+  if (treeFailed.value) return 'Wiki 加载失败，请刷新重试'
+  if (activePath.value) return '页面加载失败，请重新选择'
+  if (groups.value.some(group => group.pages.length > 0)) return '从左侧选择一个页面阅读'
+  return '知识库暂无页面。请在对话中提供研究资料并让助手整理到 Wiki，再点击更新 wiki。'
+})
 const graph = ref<WikiGraphDTO>({ nodes: [], edges: [] })
 const graphOpen = ref(true)
 let graphRequestSeq = 0
@@ -106,11 +115,18 @@ async function refreshGraph(): Promise<void> {
 }
 
 const preview = ref<InstanceType<typeof WikiPreview>>()
-const update = useWikiUpdate(async () => {
-  await store.loadTree()
+async function refreshWiki(): Promise<void> {
+  try {
+    await store.loadTree()
+    treeFailed.value = false
+  } catch (e) {
+    treeFailed.value = true
+    throw e
+  }
   await refreshGraph()
   if (activePath.value) await store.openPage(activePath.value)
-})
+}
+const update = useWikiUpdate(refreshWiki)
 const { busy: updating, message: updateMessage, detail: updateDetail, connected: updateConnected } = update
 async function onUpdate() {
   try { await update.start() }
@@ -127,12 +143,26 @@ async function onOpen(path: string, anchor = ''): Promise<void> {
   }
 }
 
+// KeepAlive 保持更新订阅；返回页面时仍重读资料，避免对话中的 Wiki 写入留下旧视图。
+let activatedOnce = false
+onActivated(() => {
+  if (!activatedOnce) { activatedOnce = true; return }
+  void refreshWiki().catch((e) => {
+    ElMessage.error(wikiErrorMessage(e, 'Wiki 刷新失败，请重试'))
+  })
+})
+
 onMounted(async () => {
   try {
+    initializing.value = true
+    treeFailed.value = false
     await store.reset()
     await refreshGraph()
   } catch (e) {
+    treeFailed.value = true
     ElMessage.error(wikiErrorMessage(e, 'Wiki 加载失败，请重试'))
+  } finally {
+    initializing.value = false
   }
 })
 </script>
@@ -179,7 +209,7 @@ onMounted(async () => {
 
       <main class="center">
         <WikiPreview v-if="page" ref="preview" :page="page" :claims="claims" :claims-error="claimsError" :graph="graph" @open="onOpen" />
-        <div v-else class="empty" data-test="empty">{{ loading ? '正在加载…' : activePath ? '页面加载失败，请重新选择' : '从左侧选择一个页面阅读' }}</div>
+        <div v-else class="empty" data-test="empty">{{ emptyMessage }}</div>
       </main>
 
       <!-- #670：图谱接入三态包装。graphOpen=false 时连包装一起不渲染（无幽灵手柄）。

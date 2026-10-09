@@ -9,9 +9,8 @@ import { PRODUCT_NAME } from '@/product'
 const auth = useAuthStore()
 const router = useRouter()
 const isAdmin = computed(() => auth.role === 'admin')
-// 退出登录后立即从 KeepAlive 缓存中剔除 ChatView；路由切到登录页时组件按正常卸载路径
-// dispose 网关连接，避免已登出的浏览器仍保留对话 WS 与内存中的会话内容。
-const cachedViews = computed(() => auth.isAuthenticated ? ['ChatView'] : [])
+// 切页保留对话与 Wiki 更新订阅；退出登录时销毁缓存，关闭 SSE 并释放账号内容。
+const cachedViews = computed(() => auth.isAuthenticated ? ['ChatView', 'WikiView'] : [])
 const loggingOut = ref(false)
 
 async function handleLogout(): Promise<void> {

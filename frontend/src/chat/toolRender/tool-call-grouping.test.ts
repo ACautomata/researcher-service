@@ -7,7 +7,7 @@ import { summarizeToolGroup } from './tool-call-grouping'
 describe('summarizeToolGroup', () => {
   it('aggregates commands with count', () => {
     const cards = Array.from({ length: 13 }, () => ({ name: 'bash', args: { command: 'x' } }))
-    expect(summarizeToolGroup(cards)).toBe('Ran 13 commands')
+    expect(summarizeToolGroup(cards)).toBe('执行 13 条命令')
   })
 
   it('joins segments in fixed order commands → reads → edits → writes → searches → fetches → others', () => {
@@ -17,7 +17,7 @@ describe('summarizeToolGroup', () => {
       { name: 'grep', args: { pattern: 'TODO' } },
       { name: 'write', args: { path: '/b.md' } },
     ])
-    expect(label).toBe('Ran a command, read a file, created a file, ran a search')
+    expect(label).toBe('执行 1 条命令, 读取 1 个文件, 创建 1 个文件, 搜索 1 次')
   })
 
   it('deduplicates repeated reads of the same file into one file count', () => {
@@ -25,7 +25,7 @@ describe('summarizeToolGroup', () => {
       { name: 'read', args: { path: '/a.ts' } },
       { name: 'read', args: { path: '/a.ts' } },
     ])
-    expect(label).toBe('Read a file')
+    expect(label).toBe('读取 1 个文件')
   })
 
   it('counts distinct files across paths (read 2 files)', () => {
@@ -33,7 +33,7 @@ describe('summarizeToolGroup', () => {
       { name: 'read', args: { path: '/a.ts' } },
       { name: 'read', args: { path: '/b.ts' } },
     ])
-    expect(label).toBe('Read 2 files')
+    expect(label).toBe('读取 2 个文件')
   })
 
   it('appends · N failed when any call failed', () => {
@@ -42,33 +42,33 @@ describe('summarizeToolGroup', () => {
       { name: 'bash', args: { command: 'bad' }, isError: true },
       { name: 'read', args: { path: '/a.ts' }, isError: true },
     ])
-    expect(label).toBe('Ran 2 commands, read a file · 2 failed')
+    expect(label).toBe('执行 2 条命令, 读取 1 个文件 · 2 次失败')
   })
 
   it('uses named-tool labels for ≤2 distinct unknown tools', () => {
-    expect(summarizeToolGroup([{ name: 'foo' }])).toBe('Used foo')
+    expect(summarizeToolGroup([{ name: 'foo' }])).toBe('调用 foo')
     expect(
       summarizeToolGroup([
         { name: 'foo' },
         { name: 'foo' },
         { name: 'bar' },
       ]),
-    ).toBe('Used foo, bar ×3')
+    ).toBe('调用 foo, bar ×3')
   })
 
   it('falls back to "used N tools" for 3+ distinct unknown tools', () => {
     expect(
       summarizeToolGroup([{ name: 'foo' }, { name: 'bar' }, { name: 'baz' }]),
-    ).toBe('Used 3 tools')
+    ).toBe('调用 3 个工具')
   })
 
   it('falls back to the empty label when the batch is empty', () => {
-    expect(summarizeToolGroup([])).toBe('Ran 0 tool calls')
+    expect(summarizeToolGroup([])).toBe('执行 0 次工具调用')
   })
 
   it('singular counts read naturally (commandsOne/readsOne…)', () => {
-    expect(summarizeToolGroup([{ name: 'bash', args: { command: 'x' } }])).toBe('Ran a command')
-    expect(summarizeToolGroup([{ name: 'edit', args: { file_path: '/a.ts' } }])).toBe('Edited a file')
-    expect(summarizeToolGroup([{ name: 'web_fetch', args: { url: 'https://x' } }])).toBe('Fetched a page')
+    expect(summarizeToolGroup([{ name: 'bash', args: { command: 'x' } }])).toBe('执行 1 条命令')
+    expect(summarizeToolGroup([{ name: 'edit', args: { file_path: '/a.ts' } }])).toBe('编辑 1 个文件')
+    expect(summarizeToolGroup([{ name: 'web_fetch', args: { url: 'https://x' } }])).toBe('获取 1 个页面')
   })
 })

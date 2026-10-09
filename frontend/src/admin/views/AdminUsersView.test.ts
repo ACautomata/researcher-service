@@ -1,11 +1,11 @@
 // seam: AdminUsersView —— admin 账号管理页（#328 / #340-D）。
 // 覆盖：列表渲染、新建用户、禁用二次确认、自禁被拒（10044 提示）、重置密码一次性明文 modal、
-// 配额 inline 编辑保存。Element Plus 组件用 stub（expose 动作经 VM 驱动模式）；行内动作经
+// 并发配额 inline 编辑保存。Element Plus 组件用 stub（expose 动作经 VM 驱动模式）；行内动作经
 // defineExpose 暴露的方法级 seam 触发（el-table row scoped slot 在 stub 下渲染脆弱）。
 import { flushPromises } from '@vue/test-utils'
 import { mount } from '@vue/test-utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { nextTick } from 'vue'
+import { computed, defineComponent, inject, nextTick, provide } from 'vue'
 import { createPinia, setActivePinia } from 'pinia'
 
 vi.mock('@/api/users', () => ({
@@ -35,8 +35,7 @@ const USERS = [
     email: 'alice@example.com',
     role: 'user',
     isActive: true,
-    containerCount: 2,
-    quota: { used: 2, limit: 5 },
+    maxContainers: 5,
     maxConcurrentRuns: 2,
     mustChangePassword: false,
     createdAt: '2026-08-01T00:00:00Z',
@@ -47,8 +46,7 @@ const USERS = [
     email: null,
     role: 'user',
     isActive: false,
-    containerCount: 0,
-    quota: { used: 0, limit: 3 },
+    maxContainers: 3,
     maxConcurrentRuns: 4,
     mustChangePassword: true,
     createdAt: '2026-08-02T00:00:00Z',
@@ -60,11 +58,16 @@ const stubs = {
     props: ['type', 'loading', 'size'],
     template: '<button @click="$emit(\'click\')"><slot /></button>',
   },
-  ElTable: {
+  ElTable: defineComponent({
     props: { data: { type: Array, default: () => [] } },
-    template: '<div data-test="users-table">{{ (data || []).map((r) => r.username).join(",") }}</div>',
+    setup(props) { provide('test-table-rows', computed(() => props.data)) },
+    template: '<div data-test="users-table"><slot /></div>',
+  }),
+  ElTableColumn: {
+    props: ['prop', 'label'],
+    setup() { return { rows: inject('test-table-rows') } },
+    template: '<section><span>{{ label }}</span><div v-for="row in rows" :key="row.id"><slot :row="row">{{ row[prop] }}</slot></div></section>',
   },
-  ElTableColumn: { template: '<span />' },
   ElTag: { props: ['type', 'size'], template: '<span class="el-tag"><slot /></span>' },
   ElDialog: {
     props: ['modelValue', 'title', 'width'],
@@ -100,10 +103,6 @@ function vm(wrapper: ReturnType<typeof mount>) {
     toggleActive: (u: (typeof USERS)[0]) => Promise<void>
     openReset: (u: (typeof USERS)[0]) => Promise<void>
     resettingUserId: string
-    beginQuotaEdit: (u: (typeof USERS)[0]) => void
-    isQuotaEditing: (userId: string) => boolean
-    saveQuota: (u: (typeof USERS)[0]) => Promise<void>
-    quotaEditing: Record<string, string>
     beginRunsEdit: (u: (typeof USERS)[0]) => void
     isRunsEditing: (userId: string) => boolean
     saveRuns: (u: (typeof USERS)[0]) => Promise<void>
@@ -131,17 +130,20 @@ describe('AdminUsersView', () => {
     vi.restoreAllMocks()
   })
 
-  it('渲染用户列表（用户名/配额 used-limit）', async () => {
+  it('渲染用户列表，退役容器配额没有展示或编辑入口', async () => {
     const w = await mountView()
     expect(listUsers).toHaveBeenCalled()
     const text = w.text()
     expect(text).toContain('alice')
     expect(text).toContain('bob')
+    expect(w.find('[data-test="quota-view"]').exists()).toBe(false)
+    expect(w.find('[data-test="edit-quota-alice"]').exists()).toBe(false)
   })
 
-  it('新建用户：填用户名/密码/配额 → createUser + 刷新列表', async () => {
+  it('新建用户：填用户名/密码 → createUser + 刷新列表', async () => {
     const w = await mountView()
     await w.find('[data-test="open-create-user"]').trigger('click')
+    expect(w.find('[data-test="new-quota"]').exists()).toBe(false)
     const inputs = w.findAll('input')
     await inputs[0].setValue('carol')
     await inputs[1].setValue('pass-1234')
@@ -198,39 +200,6 @@ describe('AdminUsersView', () => {
     await flushPromises()
     expect(vm(w).resettingUserId).toBe('')
     expect(w.find('[data-test="reset-password-plaintext"]').text()).toContain('only-valid-password')
-  })
-
-  it('配额 inline 编辑：保存合法值 → patchUser(maxContainers) + 刷新', async () => {
-    const w = await mountView()
-    vm(w).beginQuotaEdit(USERS[0])
-    await nextTick()
-    ;(vm(w).quotaEditing as Record<string, string>)[USERS[0].id] = '10'
-    await nextTick()
-    await vm(w).saveQuota(USERS[0])
-    await flushPromises()
-    expect(patchUser).toHaveBeenCalledWith('u1', { maxContainers: 10 })
-  })
-
-  it('配额 inline 编辑：清空输入后仍保持编辑态', async () => {
-    const w = await mountView()
-    vm(w).beginQuotaEdit(USERS[0])
-    ;(vm(w).quotaEditing as Record<string, string>)[USERS[0].id] = ''
-    await nextTick()
-
-    expect(vm(w).isQuotaEditing(USERS[0].id)).toBe(true)
-    expect(vm(w).isQuotaEditing(USERS[1].id)).toBe(false)
-  })
-
-  it('配额 inline 编辑：非法值（负数）→ 本地提示，不调 API', async () => {
-    const w = await mountView()
-    vm(w).beginQuotaEdit(USERS[0])
-    await nextTick()
-    ;(vm(w).quotaEditing as Record<string, string>)[USERS[0].id] = '-1'
-    await nextTick()
-    await vm(w).saveQuota(USERS[0])
-    await flushPromises()
-    expect(patchUser).not.toHaveBeenCalled()
-    expect(ElMessage.warning).toHaveBeenCalled()
   })
 
   // #800：在飞 run 并发配额（maxConcurrentRuns）inline 编辑
