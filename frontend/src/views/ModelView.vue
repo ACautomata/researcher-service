@@ -72,7 +72,7 @@ async function loadAll(): Promise<void> {
       platform.value = nextPlatform
       presets.value = nextPresets
       providers.value = nextProviders
-      llmTargets.value = nextAssignments.targets
+      llmTargets.value = [...nextAssignments.targets].sort((a, b) => Number(b.plugin_id === 'judge') - Number(a.plugin_id === 'judge'))
       llmAssignments.value = nextAssignments.assignments
     }
   } catch (e) {
@@ -394,7 +394,7 @@ defineExpose({
     </el-table>
 
     <h2 class="section-title">插件 LLM 指派</h2>
-    <p class="hint">为声明了 LLM 需求的插件单独指派端点与模型；缺省跟随默认链（你的端点序 + 平台垫底）。指派后下一 run 生效，进行中 run 不受影响。</p>
+    <p class="hint">为声明了 LLM 需求的插件单独指派端点与模型；缺省跟随默认链（你的端点序 + 平台垫底）。judge 审批判定器：显式指派 → 默认链 primary（首端点首模型）→ 平台默认；端点故障升级人工审批。指派后下一 run 生效，进行中 run 不受影响。</p>
     <el-table :data="llmTargets" data-test="assignment-table">
       <el-table-column prop="plugin_id" label="插件" width="160" />
       <el-table-column prop="description" label="用途" />

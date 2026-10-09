@@ -22,9 +22,8 @@ import { wikiContainerName } from '../wikiContainers/runtime'
 import { sandboxContainerName } from '../sandboxes/runtime'
 import { createDownloadNode } from './runtime/downloadNode'
 import { createPrismaApprovalAuditSink } from './approval/audit'
-import { ToolCallJudgeClient } from './approval/judge'
+import { createUserJudgeClient } from './approval/userJudge'
 import { ApprovalFunnel, type ApprovalFunnelDeps } from './approval/funnel'
-import { JUDGE_POLICY_MARKDOWN } from './approval/values'
 import { WriteLockRegistry } from './writelock/registry'
 import { withLockedPuts } from './writelock/lockedBackend'
 import { TeammateService } from './teammates/service'
@@ -60,7 +59,7 @@ export async function assembleRunner(opts: {
   sandboxes?: NonNullable<RunServiceDeps['sandboxes']>
   /** wiki 容器生命周期（#784 契约「run 前 ensure」；server.ts 注入 WikiContainerLifecycle 子集） */
   wikis?: NonNullable<RunServiceDeps['wikis']>
-  /** 审批漏斗 judge 模型（测试注入 fake；缺省按 config.runner.judge 构造，未配置 = 无 judge） */
+  /** 审批漏斗 judge 模型（测试注入 fake；缺省按用户指派链构造） */
   judge?: NonNullable<ApprovalFunnelDeps['judge']>
   /** #780 附件 ingestion（片 2：run 首步物化到沙箱 + 图片内联；server.ts 注入 AttachmentsService） */
   attachments?: NonNullable<RunServiceDeps['attachments']>
@@ -187,15 +186,11 @@ export async function assembleRunner(opts: {
       })
     : undefined
 
-  // 审批三层漏斗（#783）：judge 按部署配置构造（独立小模型，与用户主模型解耦）；审计三层
-  // 全量同步写 tool_approval_logs（ADR 0015）。judge 未配置 → 灰区一律升级人工（fail-closed）。
-  const judge =
-    opts.judge ??
-    (config.runner.judge.model !== '' && config.runner.judge.baseUrl !== ''
-      ? createJudgeClient()
-      : undefined)
+  // judge 使用用户 run 快照，解析失败由漏斗升级人工。
   const funnel = new ApprovalFunnel({
-    judge,
+    judgeFor: async (identity) => opts.judge ?? createUserJudgeClient(
+      registry, identity.snapshot ?? await registry.getSnapshot(identity.userId),
+    ),
     audit: createPrismaApprovalAuditSink(opts.prisma),
     // 插件 category 路由（#788 · §3）：domain 短路不进漏斗；file 类以声明 pathParams 过
     // 路径白名单；exec 类过命令黑名单——与核心工具同一闸门，无平行审批路径。
@@ -249,30 +244,4 @@ export async function assembleRunner(opts: {
       await queue.close()
     },
   }
-}
-
-// judge 客户端（部署级独立小模型；729 §2.5）：initChatModel 构造 + 共享 LLM_API_KEY。
-// env 直派地址（部署方信任面；预设制下无白名单链——六预设固定 origin 与 judge 出口互不干涉）。
-function createJudgeClient(): InstanceType<typeof ToolCallJudgeClient> {
-  const { model, baseUrl, lcProvider } = config.runner.judge
-  return new ToolCallJudgeClient(
-    {
-      async invoke(messages: unknown[]) {
-        const { initChatModel } = await import('langchain/chat_models/universal')
-        // temperature 0（729 §2.3：判定确定性面）；JSON mode 不依赖 provider response_format
-        //（MiniMax/DeepSeek 兼容面支持参差）——输出契约由 ToolCallJudgeClient 的 zod 校验 +
-        // 重试一次 + fail-closed 兑现（同语义，跨端点可移植）。
-        const m = await initChatModel(model, {
-          modelProvider: lcProvider,
-          apiKey: config.llm.apiKey,
-          temperature: 0,
-          ...(lcProvider === 'openai'
-            ? { baseUrl, configuration: { fetch: globalThis.fetch } }
-            : { clientOptions: { baseURL: baseUrl, fetch: globalThis.fetch } }),
-        })
-        return m.invoke(messages as never)
-      },
-    },
-    { policy: JUDGE_POLICY_MARKDOWN },
-  )
 }

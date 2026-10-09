@@ -796,7 +796,7 @@ export class RunService {
       if (cmd.kind === 'message') {
         this.deps.approvals.beginRun(cmd.sessionId, {
           cautious,
-          identity: { runId: cmd.runId, userId: session.ownerId, traceId: cmd.runId },
+          identity: { runId: cmd.runId, userId: session.ownerId, traceId: cmd.runId, snapshot },
         })
       } else {
         this.deps.approvals.refreshRun(cmd.sessionId, { cautious })
