@@ -19,6 +19,13 @@ import {
   type ModelProviderWriteDTO,
   type PlatformEndpointDTO,
 } from '@/api/models'
+import {
+  clearLlmAssignment,
+  listLlmAssignments,
+  setLlmAssignment,
+  type PluginLlmAssignmentDTO,
+  type PluginLlmTargetDTO,
+} from '@/api/plugins'
 
 const platform = ref<PlatformEndpointDTO | null>(null)
 const presets = ref<EndpointPresetDTO[]>([])
@@ -48,15 +55,18 @@ async function loadAll(): Promise<void> {
   providers.value = []
   errorMsg.value = ''
   try {
-    const [nextPlatform, nextPresets, nextProviders] = await Promise.all([
+    const [nextPlatform, nextPresets, nextProviders, nextAssignments] = await Promise.all([
       getPlatformEndpoint(),
       listPresets(),
       listProviders(),
+      listLlmAssignments(),
     ])
     if (requestSeq === providerRequestSeq) {
       platform.value = nextPlatform
       presets.value = nextPresets
       providers.value = nextProviders
+      llmTargets.value = nextAssignments.targets
+      llmAssignments.value = nextAssignments.assignments
     }
   } catch (e) {
     if (requestSeq === providerRequestSeq) {
@@ -181,12 +191,105 @@ function keyDisplay(p: ModelProviderDTO): string {
   return '平台共享 key'
 }
 
+// ---- 插件 LLM 指派区（#883 T3）：targets = 声明 llm 的插件 ∪ judge（后端目录派生）----
+const llmTargets = ref<PluginLlmTargetDTO[]>([])
+const llmAssignments = ref<PluginLlmAssignmentDTO[]>([])
+const assignDialogVisible = ref(false)
+const assigningTarget = ref<PluginLlmTargetDTO | null>(null)
+const assignSaving = ref(false)
+// '' = 跟随默认链（provider_id null）；platform 模型面 = 平台默认模型单条
+const assignEndpoint = ref('')
+const assignModel = ref('')
+
+function assignmentDisplay(t: PluginLlmTargetDTO): string {
+  const a = llmAssignments.value.find((row) => row.plugin_id === t.plugin_id)
+  if (!a || a.provider_id === null) return '跟随默认链'
+  if (a.provider_id === 'platform') {
+    return `平台默认端点${a.model_id ? ` · ${a.model_id}` : ''}`
+  }
+  const provider = providers.value.find((p) => p.provider_id === a.provider_id)
+  return `${provider?.provider_id ?? a.provider_id}${a.model_id ? ` · ${a.model_id}` : ' · 端点默认'}`
+}
+
+// 指派对话框的端点选项：平台默认端点 + 本人 BYOK 端点
+const assignEndpointOptions = computed<Array<{ value: string; label: string }>>(() => [
+  { value: 'platform', label: `平台默认端点（${platform.value?.default_model ?? '默认模型'}）` },
+  ...providers.value.map((p) => ({ value: p.provider_id, label: `${p.provider_id}（${presetLabel(p.preset_id)}）` })),
+])
+
+// 所选端点的模型选项：platform = 平台预设 default_models 全集（与写侧校验域一致，#883
+// review 收敛——只出 default_model 会窄于 API 接受面）；BYOK = 该端点 models 列表
+const assignModelOptions = computed<ModelEntryDTO[]>(() => {
+  if (assignEndpoint.value === 'platform') {
+    const presetModels = presets.value.find((p) => p.id === platform.value?.preset_id)?.default_models ?? []
+    if (presetModels.length > 0) return presetModels
+    return platform.value?.default_model ? [{ id: platform.value.default_model, name: '平台默认模型' }] : []
+  }
+  return providers.value.find((p) => p.provider_id === assignEndpoint.value)?.models ?? []
+})
+
+function openAssign(t: PluginLlmTargetDTO): void {
+  assigningTarget.value = t
+  const current = llmAssignments.value.find((row) => row.plugin_id === t.plugin_id)
+  assignEndpoint.value = current?.provider_id ?? ''
+  assignModel.value = current?.model_id ?? ''
+  assignDialogVisible.value = true
+}
+
+// 指派写动作统一包装：saving 态 + 401 静默（登出跳转面）+ 错误 toast + 成功刷新（与
+// provider 保存面同纪律；三处写动作单一实现）。
+async function runAssignmentAction(action: () => Promise<void>, successMessage: string): Promise<void> {
+  assignSaving.value = true
+  try {
+    await action()
+    assignDialogVisible.value = false
+    await loadAll()
+    ElMessage.success(successMessage)
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 401) return
+    ElMessage.error((e as Error).message)
+  } finally {
+    assignSaving.value = false
+  }
+}
+
+async function submitAssign(): Promise<void> {
+  const target = assigningTarget.value
+  if (!target) return
+  if (assignEndpoint.value === '') {
+    // 跟随默认链 = 显式空指派行
+    await runAssignmentAction(
+      () => setLlmAssignment(target.plugin_id, { provider_id: null, model_id: null }).then(() => undefined),
+      '已设为跟随默认链，下一 run 生效',
+    )
+    return
+  }
+  if (assignEndpoint.value !== 'platform' && !assignModelOptions.value.some((m) => m.id === assignModel.value)) {
+    ElMessage.warning('请选择该端点下的模型')
+    return
+  }
+  await runAssignmentAction(
+    () => setLlmAssignment(target.plugin_id, {
+      provider_id: assignEndpoint.value,
+      model_id: assignEndpoint.value === 'platform' ? assignModel.value || null : assignModel.value,
+    }).then(() => undefined),
+    '已保存指派，下一 run 生效（在飞 run 不受影响）',
+  )
+}
+
+async function confirmClearAssign(t: PluginLlmTargetDTO): Promise<void> {
+  await runAssignmentAction(() => clearLlmAssignment(t.plugin_id), '已撤回指派（跟随默认链）')
+}
+
 onMounted(() => {
   void loadAll()
 })
 
 // 暴露动作供测试（el-table row slot / el-form 在 stub 下不便点击，expose 动作经 VM 驱动）
-defineExpose({ openCreate, openEdit, save, confirmRemove, loadAll, onPresetChange })
+defineExpose({
+  openCreate, openEdit, save, confirmRemove, loadAll, onPresetChange,
+  openAssign, submitAssign, confirmClearAssign,
+})
 </script>
 
 <template>
@@ -253,6 +356,64 @@ defineExpose({ openCreate, openEdit, save, confirmRemove, loadAll, onPresetChang
         </template>
       </el-table-column>
     </el-table>
+
+    <h2 class="section-title">插件 LLM 指派</h2>
+    <p class="hint">为声明了 LLM 需求的插件单独指派端点与模型；缺省跟随默认链（你的端点序 + 平台垫底）。指派后下一 run 生效，进行中 run 不受影响。</p>
+    <el-table :data="llmTargets" data-test="assignment-table">
+      <el-table-column prop="plugin_id" label="插件" width="160" />
+      <el-table-column prop="description" label="用途" />
+      <el-table-column label="当前指派" width="240">
+        <template #default="{ row }">
+          <span :data-test="`assignment-${row.plugin_id}`">{{ assignmentDisplay(row) }}</span>
+        </template>
+      </el-table-column>
+      <el-table-column label="操作" width="200">
+        <template #default="{ row }">
+          <el-button size="small" :data-test="`assign-${row.plugin_id}`" @click="openAssign(row)">指派</el-button>
+          <el-button
+            v-if="llmAssignments.some((a) => a.plugin_id === row.plugin_id && a.provider_id !== null)"
+            size="small"
+            type="danger"
+            :data-test="`clear-assign-${row.plugin_id}`"
+            @click="confirmClearAssign(row)"
+          >撤回</el-button>
+        </template>
+      </el-table-column>
+    </el-table>
+
+    <el-dialog
+      v-model="assignDialogVisible"
+      :title="assigningTarget ? `指派 LLM：${assigningTarget.plugin_id}` : '指派 LLM'"
+      data-test="assignment-dialog"
+      width="480px"
+    >
+      <el-form>
+        <el-form-item label="端点">
+          <el-select v-model="assignEndpoint" data-test="assign-endpoint" placeholder="跟随默认链">
+            <el-option
+              v-for="opt in assignEndpointOptions"
+              :key="opt.value"
+              :label="opt.label"
+              :value="opt.value"
+            />
+          </el-select>
+        </el-form-item>
+        <el-form-item v-if="assignEndpoint !== ''" label="模型">
+          <el-select v-model="assignModel" data-test="assign-model" placeholder="端点默认（首条）模型">
+            <el-option
+              v-for="m in assignModelOptions"
+              :key="m.id"
+              :label="m.name ? `${m.name}（${m.id}）` : m.id"
+              :value="m.id"
+            />
+          </el-select>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button data-test="assign-cancel" @click="assignDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="assignSaving" data-test="assign-submit" @click="submitAssign">保存</el-button>
+      </template>
+    </el-dialog>
 
     <el-dialog
       v-model="dialogVisible"
@@ -339,6 +500,10 @@ defineExpose({ openCreate, openEdit, save, confirmRemove, loadAll, onPresetChang
   flex-wrap: wrap;
   font-size: 13px;
   color: var(--el-text-color-regular);
+}
+.section-title {
+  margin: 24px 0 8px;
+  font-size: 16px;
 }
 .key-error {
   color: var(--el-color-danger);

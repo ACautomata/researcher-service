@@ -159,3 +159,12 @@ export const pluginEnablementSchema = z.object({
 export const pluginCommandCompletionQuerySchema = z.object({
   prefix: z.string().max(1000).default(''),
 })
+
+// 插件 LLM 指派写侧（#883 T3）：{provider_id, model_id} 双可空——provider_id null = 跟随
+// 默认链；'platform' = 钉平台默认端点；其余须为本人 BYOK 端点 id。model_id null = 该端点
+// 默认（首条）模型。语义校验（端点存在性/模型成员资格/含保留键 'judge' 的可指派性）归
+// plugins/assignments 服务层（需查库与目录，schema 只锁形状）。
+export const pluginLlmAssignmentWriteSchema = z.object({
+  provider_id: z.string().min(1).max(64).nullable().default(null),
+  model_id: z.string().min(1).max(200).nullable().default(null),
+})

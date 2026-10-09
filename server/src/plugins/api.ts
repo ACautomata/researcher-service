@@ -181,6 +181,18 @@ export interface PluginEnvKey {
   /** 缺省可选；required 缺失 = 启动期 prod fail-fast / dev 警告的判定依据（R7）。 */
   readonly required?: boolean
   readonly description?: string
+  /** 废弃标记（#883）：设值时启动期 warn（键仍生效——退役由后续票收口）。 */
+  readonly deprecated?: boolean
+}
+
+// LLM 需求声明位（#883 T3 · #752 §5 V2 per-user 配置提前）：声明即出现在 ModelView
+// 插件指派区，用户可 per-user 指派「端点 + 模型」（缺省跟随默认链）。声明是纯目录
+// 元数据——运行时解析链在核心 ctx.llm resolver（runner/llmToolPort），本位不承载行为。
+export interface PluginLlmDeclaration {
+  /** 指派 UI 的用途描述（一行）。 */
+  readonly description: string
+  /** 可选默认模型建议（指派 UI 预填参考；非运行时解析面）。 */
+  readonly defaultModel?: string
 }
 
 export interface PluginManifest {
@@ -193,6 +205,8 @@ export interface PluginManifest {
   readonly commands?: readonly PluginCommandDefinition[]
   /** V1 语义 = 启动校验依据 + 文档（§5）；ctx.config 按声明键注入解析值。 */
   readonly configSchema?: { readonly env: readonly PluginEnvKey[] }
+  /** LLM 需求声明位（#883）：声明 = 可被 per-user 指派端点与模型；未声明插件的指派写侧拒绝。 */
+  readonly llm?: PluginLlmDeclaration
 }
 
 export function definePlugin(manifest: PluginManifest): PluginManifest {

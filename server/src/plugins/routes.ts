@@ -9,8 +9,9 @@ import { CODE } from '../codes'
 import { requireAuth } from '../middleware/auth'
 import { mustChangePasswordGate } from '../middleware/mustChangePasswordGate'
 import { validateBody } from '../middleware/validate'
-import { PLUGIN_ID_REGEX, pluginEnablementSchema, pluginCommandCompletionQuerySchema } from '../validation/schemas'
+import { PLUGIN_ID_REGEX, pluginEnablementSchema, pluginCommandCompletionQuerySchema, pluginLlmAssignmentWriteSchema } from '../validation/schemas'
 import type { PluginManifest } from './api'
+import { PluginLlmAssignmentService } from './assignments'
 
 export interface PluginsRouterDeps {
   readonly prisma: PluginsRouterPrisma
@@ -38,6 +39,11 @@ export function createPluginsRouter(deps: PluginsRouterDeps): Router {
   const router = Router()
   router.use(requireAuth, mustChangePasswordGate)
 
+  // 插件 LLM 指派服务（#883 T3）：目录（manifests）注入即取值域——声明 llm 插件 ∪ 'judge'；
+  // prisma 按 req 注入（对齐本路由 pluginEnablement 面）。
+  const assignmentService = (req: Request): PluginLlmAssignmentService =>
+    new PluginLlmAssignmentService({ prisma: req.prisma, manifests: deps.manifests })
+
   // GET /api/v1/plugins —— 目录清单 + 当前用户启用位（§4.3 表）
   router.get('/', async (req: Request, res: Response) => {
     const rows = await deps.prisma.pluginEnablement.findMany({ where: { ownerId: req.user!.id } })
@@ -55,6 +61,34 @@ export function createPluginsRouter(deps: PluginsRouterDeps): Router {
         enabled: enabledById.get(manifest.id) === true,
       })),
     })
+  })
+
+  // ---- 插件 LLM 指派（#883 T3）：挂 /llm-assignments 与 /:id/llm-assignment ----
+  // GET：targets（声明 llm 插件 ∪ judge）+ 本人现行指派——指派区一屏的单读面。
+  // 注意注册序：字面路径 /llm-assignments 须先于任何 GET /:id/... 形（本路由 GET /:id 无
+  // 短形式，无吞噬面；显式前置防未来路由漂移）。
+  router.get('/llm-assignments', async (req: Request, res: Response) => {
+    ok(res, await assignmentService(req).list(req.user!.id))
+  })
+
+  // PUT：幂等 upsert（body {provider_id, model_id} 双可空）；未声明插件/目录外 → 80040；
+  // 引用校验（端点 ∈ 本人端点集 ∪ platform、模型属端点模型集）→ 90002 字段级；
+  // 事务内 bump 配置版本（热生效——下一 run 重建快照）。
+  router.put('/:id/llm-assignment', validateBody(pluginLlmAssignmentWriteSchema), async (req: Request, res: Response) => {
+    const pluginId = pathId(req)
+    if (!PLUGIN_ID_REGEX.test(pluginId)) throw fail(CODE.PLUGIN_NOT_FOUND)
+    ok(res, await assignmentService(req).upsert(req.user!.id, pluginId, {
+      provider_id: req.body.provider_id,
+      model_id: req.body.model_id,
+    }))
+  })
+
+  // DELETE：撤指派回默认链（删行 + bump；无行幂等不 bump）。
+  router.delete('/:id/llm-assignment', async (req: Request, res: Response) => {
+    const pluginId = pathId(req)
+    if (!PLUGIN_ID_REGEX.test(pluginId)) throw fail(CODE.PLUGIN_NOT_FOUND)
+    await assignmentService(req).remove(req.user!.id, pluginId)
+    ok(res, null)
   })
 
   // #797：只读参数补全，启用位与当前用户同源；不执行 command handler。

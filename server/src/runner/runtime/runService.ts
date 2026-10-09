@@ -987,7 +987,7 @@ export class RunService {
         // #782 run 上下文（ALS 外层）：journal 行 runId 盖印源（checkpointId 终态回填键）——
         // 覆盖流创建与消费全程（backend 打点在流内发生）。#792 插件 run frame（嵌套 ALS）：
         // ctx 四件解析源——图实例跨 run 复用，run 身份只能运行期读取（runContext.ts 头注）。
-        const pluginFrame = this.buildPluginRunFrame(cmd)
+        const pluginFrame = await this.buildPluginRunFrame(cmd)
         await runWithRunContext(cmd.runId, async () => {
           await runWithPluginRunFrame(pluginFrame, async () => {
             const stream = await agent.streamEvents(input, {
@@ -1246,7 +1246,7 @@ export class RunService {
   // 弱关联盖印）；onUpdate 闭包 per-run（per-toolCall 上次 stage 记忆随 frame GC）。
   private readonly figureDedupe = new Map<string, Promise<{ readonly figureId: string }>>()
 
-  private buildPluginRunFrame(cmd: RunEventContext & { username: string }): PluginRunFrame | undefined {
+  private async buildPluginRunFrame(cmd: RunEventContext & { username: string }): Promise<PluginRunFrame | undefined> {
     if (!this.deps.plugins) return undefined
     const sessionId = cmd.parentSessionId ?? cmd.sessionId
     const audit = createPrismaFigureRunAuditSink(this.deps.prisma, {
@@ -1256,10 +1256,15 @@ export class RunService {
       runId: cmd.runId,
     })
     const stageTrace = new Map<string, string>()
+    // 配置快照 run 启动捕获一次（#883 T3）：ctx.llm per-plugin 解析全部走本快照——
+    // 指派/端点变更 bump 版本后下一 run 重建快照，在飞 run 不受影响（与主模型
+    // getDefaultModel 同语义；快照已被同 run 主模型路径缓存，此处命中零额外读）。
+    const snapshot = await this.deps.registry.getSnapshot(cmd.ownerId)
     return {
       run: { ownerId: cmd.ownerId, sessionId, runId: cmd.runId },
       figures: createFiguresToolPort({ prisma: this.deps.prisma, dedupe: this.figureDedupe }, cmd.ownerId),
-      llm: createLlmToolPort(this.deps.registry, cmd.ownerId),
+      // per-plugin ctx.llm 工厂（#883）：插件 id → 解析器端口（env pin > 用户指派 > 默认链）。
+      llmFor: (pluginId: string) => createLlmToolPort({ registry: this.deps.registry, ownerId: cmd.ownerId, pluginId, snapshot }),
       audit,
       // 双面翻译链（#744 §11.2）：onUpdate 上报一次 → runner 同时发 figure_run.progress
       //（SSE 用户面）与落 figure_run.stage_transitions（TextTrace 审计面）；白名单外丢弃。
@@ -1322,13 +1327,15 @@ export class RunService {
     const startedAt = this.clock()
     // ctx 四件 + onUpdate（#792 · #744 §11.1）：直达路径显式构造 frame 面件；toolCallId
     // ALS 盖印 = figures 去重身份（toolPort 同源）+ 插件 execute 收到的同一 id。
-    const frame = this.buildPluginRunFrame(cmd)
+    const frame = await this.buildPluginRunFrame(cmd)
     const pluginCtx = this.deps.plugins!.toolContext
+    // pluginId（#883）：运行时目录派生——ctx.llm per-plugin 解析键（命令直跑路径穿线）。
+    const pluginId = this.deps.plugins!.toolOwnerByName.get(def.name)
     try {
       const result = await runWithToolCallContext({ toolCallId, threadId: cmd.sessionId }, () =>
         def.execute(toolCallId, parsed.data as never, {
           signal,
-          ...execPartsFromFrame(pluginCtx, frame, toolCallId),
+          ...execPartsFromFrame(pluginCtx, frame, toolCallId, pluginId),
         }),
       )
       const durationMs = Math.max(0, this.clock() - startedAt)
@@ -1676,7 +1683,15 @@ export class RunService {
       // 插件工具进图（#788）：LangChain 适配（zod → StructuredTool）；prompt 段并入
       // system prompt 与 teammate subagent 继承（graphFactory 内拼接）。
       ...(pluginToolDefs.length > 0 && this.deps.plugins
-        ? { pluginTools: toLangChainTools(pluginToolDefs, this.deps.plugins.toolContext) }
+        ? {
+            // pluginIdOf（#883）：运行时目录派生工具名→插件 id——ctx.llm per-plugin 解析键
+            //（agent 自动调用路径穿线）。
+            pluginTools: toLangChainTools(
+              pluginToolDefs,
+              this.deps.plugins.toolContext,
+              (name) => this.deps.plugins!.toolOwnerByName.get(name),
+            ),
+          }
         : {}),
       ...(pluginPrompt !== '' ? { pluginPrompt } : {}),
       // 中间件（运行期行为非拓扑因子——不入缓存键，见 runtimeMiddleware()）。

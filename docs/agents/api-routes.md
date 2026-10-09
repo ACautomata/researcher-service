@@ -14,10 +14,21 @@
   未授权/非法探测不建容器）。
 - `/api/v1/wiki/claims?path=` — 页 claims 旁车只读面（#789 story 42 数据面：
   论断 evidence + 页级漂移 fresh|drifted|null；页缺失 30040、旁车缺失 200+空 claims）。
-- `/api/v1/models/providers[/<pid>]` — model provider CRUD（#857 归属门改挂 ownerId 零容器行查询；
-  #775：事务 = mutation + config_meta version bump 热生效；白名单第一层校验未命中 → 90002 字段级 base_url）。
-- `/api/v1/provider-endpoints[/<id>]` — 端点白名单 admin CRUD（#775 · 731 §3.1，origin 精确匹配；
-  GET/POST/DELETE，非 admin → 10004）。
+- `/api/v1/models/{presets,platform,providers[/<pid>]}` — LLM 端点域（#857 归属门改挂 ownerId；
+  #881 预设制换形：presets = 六预设目录只读、platform = 平台默认端点只读视图（env 派生虚拟实体，
+  永无 key 材料）、providers = BYOK 端点 CRUD（preset_id 锁定协议与地址无自由 baseURL；api_key
+  单向流——写请求可带明文落库即密文、读只出掩码；事务 = mutation + config_meta version bump
+  热生效；保留 id 'platform' 写侧拒绝 90002；40040 不存在/越权同码防探测、40041 pid 冲突）。
+- `/api/v1/provider-endpoints[/<id>]` — 端点白名单 admin CRUD **已随 #881 预设制整链退役**
+  （表/REST/校验/DNS/逃生 env 全删；40042 常量保留语义退役）。
+- `/api/v1/plugins` — 插件目录 + per-user 启用位（#788 · 8xxxx 段：GET 目录清单（manifest 渲染 +
+  启用位）、PUT `/{id}/enablement` 幂等 upsert、GET `/{id}/commands/{name}/completions` 参数补全）。
+- `/api/v1/plugins/llm-assignments` + `/api/v1/plugins/{id}/llm-assignment` — 插件 LLM 指派
+  （#883 T3 · ADR 0016：GET = targets（声明 llm 的插件 ∪ 保留键 'judge'）+ 本人指派行；
+  PUT = 幂等 upsert {provider_id, model_id} 双可空（provider_id ∈ 本人端点集 ∪ 'platform'，
+  model 须属该端点模型集，90002 字段级；未声明 llm/目录外/非 judge → 80040 同码防探测）；
+  DELETE = 撤指派回默认链（无行幂等不 bump）；事务内 bump 配置版本——下一 run 生效，
+  在飞 run 不受影响）。
 - `/api/v1/approval-logs` — 审批全量审计检索 admin REST（#783 · ADR 0015；过滤
   userId/runId/layer/decision/from/to + 分页；judge 输入只露 hash）。
 - `/api/v1/file-overwrite-logs` — 覆盖审计检索 admin REST（#785；过滤 sessionId/path/from/to

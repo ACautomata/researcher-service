@@ -15,6 +15,11 @@ export const PLUGIN_ID_REGEX = /^[a-z][a-z0-9-]*$/
 export const PLUGIN_COMMAND_NAME_REGEX = /^[a-z][a-z0-9-]*$/
 export const PLUGIN_ENV_KEY_REGEX = /^[A-Z][A-Z0-9_]*$/
 
+// 保留插件 id（#883 T3）：'judge' = 审批判定器指派行键（plugin_llm_assignments 收 judge 行，
+// 执行面归后票）——非插件目录位，撞键 = 启动 fail-fast。
+export const JUDGE_PLUGIN_ID = 'judge'
+export const RESERVED_PLUGIN_IDS: ReadonlySet<string> = new Set([JUDGE_PLUGIN_ID])
+
 export const TOOL_CATEGORIES: readonly PluginToolCategory[] = ['file', 'exec', 'domain']
 
 export interface PluginCatalogValidationInput {
@@ -39,15 +44,30 @@ export async function assertValidPluginCatalog(input: PluginCatalogValidationInp
   const seenToolNames = new Set<string>(input.coreToolNames ?? [])
   const seenCommandNames = new Set<string>(input.reservedCommandNames ?? [])
   for (const manifest of input.manifests) {
+    if (RESERVED_PLUGIN_IDS.has(manifest.id)) throw new Error(`Plugin id is reserved: ${manifest.id}`)
     if (!PLUGIN_ID_REGEX.test(manifest.id)) throw new Error(`Plugin id must be kebab-case: ${manifest.id}`)
     if (seenIds.has(manifest.id)) throw new Error(`Plugin id duplicate: ${manifest.id}`)
     seenIds.add(manifest.id)
     if (typeof manifest.name !== 'string' || manifest.name.trim() === '') throw new Error(`Plugin name required: ${manifest.id}`)
     if (typeof manifest.description !== 'string' || manifest.description.trim() === '') throw new Error(`Plugin description required: ${manifest.id}`)
     if (typeof manifest.version !== 'string' || manifest.version.trim() === '') throw new Error(`Plugin version required: ${manifest.id}`)
+    assertLlmDeclarationValid(manifest)
     assertToolsValid(manifest, seenToolNames)
     await assertCommandsValid(manifest, seenCommandNames)
     assertConfigSchemaValid(manifest)
+  }
+}
+
+// llm 声明位校验（#883）：description 必填单行非空；defaultModel 可选非空单行（UI 预填
+// 参考，非运行时解析面）。
+function assertLlmDeclarationValid(manifest: PluginManifest): void {
+  const llm = manifest.llm
+  if (llm === undefined) return
+  if (typeof llm.description !== 'string' || llm.description.trim() === '' || !singleLine(llm.description)) {
+    throw new Error(`plugin ${manifest.id}: llm.description must be a non-empty single line`)
+  }
+  if (llm.defaultModel !== undefined && (typeof llm.defaultModel !== 'string' || llm.defaultModel.trim() === '' || !singleLine(llm.defaultModel))) {
+    throw new Error(`plugin ${manifest.id}: llm.defaultModel must be a non-empty single line when provided`)
   }
 }
 
@@ -135,7 +155,13 @@ export function assertPluginEnv(
   for (const manifest of manifests) {
     for (const key of manifest.configSchema?.env ?? []) {
       const present = opts.env[key.name] !== undefined && opts.env[key.name] !== ''
-      if (present) continue
+      if (present) {
+        // 废弃键设值告警（#883）：键仍生效（解析链兼容面），退役由后续票收口。
+        if (key.deprecated === true) {
+          opts.warn?.(`Plugin ${manifest.id} env ${key.name} is deprecated and will be retired; prefer per-user plugin LLM assignment (model page)`)
+        }
+        continue
+      }
       const message = `Plugin ${manifest.id} env ${key.name} is not set${key.required === false ? '' : ' (required)'}`
       if (key.required === false) continue
       if (opts.production) throw new Error(`Missing required plugin env: ${message}`)

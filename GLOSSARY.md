@@ -280,6 +280,10 @@ _Avoid_: per-user `command_defs`/`skill_defs` 表——已退役；admin 在线 
 （插件系统 #788 + #799 落地——per-user 启用位，V1 仅 AutoFigure）per-user、跨会话持久的启用位（区别于管理员经面板级配置管的能力开关）。teammate 默认继承 owner 的启用集（与技能继承同语义）；禁用 = 新 run 不再见该插件的工具/命令，进行中 run 不中断、历史回放不受影响。
 _Avoid_: 会话级开关——启用是用户维状态，不随会话生灭；面板级配置——那是管理员面（生图模型、云 API key 等），与用户启用位是两回事。
 
+**插件 LLM 指派 (plugin LLM assignment)**:
+（#883 T3 落地——per-user per-plugin 端点/模型指派）用户在 Model 配置页为**声明了 `llm` 需求的插件**（manifest 声明位：description + 可选 defaultModel）单独指派 LLM 端点与模型，缺省「跟随默认链」（用户端点序 + 平台垫底）。解析优先级 = 面板级 env pin（AUTOFIGURE_SVG_MODEL，**已标废弃**、设值启动告警）> 用户指派 > 默认链；指派悬挂（端点已删/模型已移出）回落平台默认 + 告警；指派变更事务内 bump 配置版本——下一 run 生效，在飞 run 不受影响。凭证永不下发插件——ctx.llm 是 per-plugin 解析器（工具名→插件 id 经运行时目录派生），插件只见解析结果不见凭证。保留键 `judge`（审批判定器）同表收指派行，执行面归审批域后票。
+_Avoid_: 「端口指派/端点白名单」——端点术语已统一（见 LLM 端点）；给插件下发 API key——凭证单向流红线，指派只是 id 引用；插件内自解析模型——解析链封装在核心 ctx.llm，插件不碰 registry 查询逻辑。
+
 **能力实现层与用户交互层 (capability layer vs interaction layer)**:
 （插件系统 #788 + #758 方向修订，已落地）插件与 commands/skills 的分层关系：插件是**能力实现层**（工具/命令/渲染背后的代码实现），commands/skills 是**用户交互层**（用户触发与引导这些能力的统一交互面）。交互层内容**全部官方维护**：插件贡献的（有代码 backing，如 `/figure` 命令背后是 figure 工具执行）+ 官方静态目录（编译期打包、always-on、无启用位，#758 方向修订 supersede #749 Q7+Q10 的 per-user 自定义面）同形并存——用户视角一个命令模型，实现层两源、内容源零用户自建。
 _Avoid_: 「插件收编 commands/skills」——插件不取代官方内容目录；把 skills 归入插件——技能是内容级扩展（目录注入），无代码，不是插件的特例；per-user 自定义命令/技能与任何在线写面（admin CRUD / agent 自改自存）——已退役（#758），官方内容只经 git 发版维护。
