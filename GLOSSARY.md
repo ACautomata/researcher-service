@@ -231,9 +231,9 @@ _Avoid_: workspace——遗产字眼全面退役（files API root 参数随之�
 _Avoid_: 用镜像名推断规格——判定必须走 label；「三值」旧叙述——`legacy` 随 #858 fleet 退役。
 
 **fork 文件语义 (fork file semantics)**:
-（#728 定稿，#778/#782 落地）fork 建新 session 时**拷贝源沙箱 `/lab`**（docker export 流式导出→导入新沙箱；源已删则空起步 + 系统消息告知 agent）；**rewind 不回滚文件**——只回滚对话指针，`/lab` 保持「未来状态」，agent 重跑工具时自行面对（与 OpenClaw 时代现状语义一致，该比对为决策历史）。
-_Avoid_: rewind 恢复文件快照——文件系统无版本，回滚只在对话域。
-**（runtime 演进注，wayfinder #766 / #747 修订——已随 #782 落地）**：「rewind 不回滚文件」**supersede**（翻案经产品决策程序）——rewind/branch-switch 按文件日志逆放恢复 `/lab` 至锚点时刻；fork 拷贝源沙箱**剔除墓碑目录**，新会话文件日志全新起步（rewind 深度上限从新会话起算）。
+（#728 定稿——旧语义层，决策历史）fork 建新 session 时**拷贝源沙箱 `/lab`**（docker export 流式导出→导入新沙箱；源已删则空起步 + 系统消息告知 agent）；**rewind 不回滚文件**——只回滚对话指针，`/lab` 保持「未来状态」，agent 重跑工具时自行面对（与 OpenClaw 时代现状语义一致，该比对为决策历史）。旧层附 _Avoid_（已被演进注①翻案）：rewind 恢复文件快照——文件系统无版本，回滚只在对话域。
+**（runtime 演进注①，wayfinder #766 / #747 修订——#782 落地）**：「rewind 不回滚文件」**supersede**（翻案经产品决策程序）——rewind/branch-switch 按文件日志逆放恢复 `/lab` 至锚点时刻；fork 拷贝源沙箱剔除墓碑目录，新会话文件日志全新起步（rewind 深度上限从新会话起算）。
+**（runtime 演进注②，#781 · #768 D7 修订——现役口径，以代码为准）**：演进注①的 fork 半句**supersede**——fork = 沙箱整容器字面复制（docker export→import）**含墓碑目录**（`sandboxes/runtime.ts` `createSandboxFromSource`：「整容器字面文件系统复制，含墓碑目录」——墓碑随整 FS 过继，rewind 逆放的前提在新会话成立）+ **file_journal 切点截断继承**（锚点祖先链行复制、seq 保留原值、后续写入从 max(seq)+1 接续——`sessions/service.ts` `forkSession`）：文件日志继承延续，非全新起步。
 
 **文件日志 (file journal)**:
 （wayfinder #766 定稿，#782 落地——`FileJournal` 表 + D8 rewind 水位）会话级**全局全序**的文件操作日志：文件工具与 ingestion 上传的每个字节级破坏性 op（覆写/删除）记一行（锚 checkpointId + 全局 seq + 前后 sha256 + 墓碑键 + toolCallId 幂等键 + applied 标记），墓碑字节由 daemon 侧以 root 写容器内 0700 隐藏目录（agent 结构性不可读写删）。rewind/branch-switch = 按全局序逆放逆操作；重放期间全会话文件写围栏，checkpoint 剪枝 GC 尊重 replay lease；超「文件 rewind 深度上限」降级为只回对话。exec 副作用不入日志（显式降级）。

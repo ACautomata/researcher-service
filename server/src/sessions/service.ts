@@ -34,6 +34,7 @@ import {
   resolveRewindAnchor,
 } from './rewind'
 import { TITLE_AUTO_MAX, TITLE_MAX, type RewindScope } from './values'
+import { outputHash, trimTraceText } from '../traceLogs/service'
 import type { TeammateStatus } from '../runner/teammates/service'
 import type { ApprovalInterruptPayload } from '../runner/approval/funnel'
 import type { RewindPreview as FileRewindPreview } from '../runner/filejournal/preview'
@@ -633,7 +634,9 @@ export class SessionService {
   // autoTitle 的主触发已移到 sendMessage（REST 面 dispatch ack，见 sendMessage 注记）；此处保留
   // 为幂等兜底（title !== '' early-return）——REST 面吞错后的补漏 + resume/recover 路径。
   // attachmentsJson 走 serializeAttachments（唯一序列化实现——单一来源），字段序稳定
-  //（回放零差异断言的前提）。----
+  //（回放零差异断言的前提）。
+  // #747 B 节双域（R2 修复②）：同路径补 text_trace_logs 写——「mapper 写两份、代码不共享」，
+  // TextTrace 行构造见 recordTextTraceForTurn（与上方 session_messages 行构造零共享）。----
   async recordTurn(p: RecordTurnPayload): Promise<void> {
     await insertWithNextTurn(this.deps.prisma, p.sessionId, {
       role: 'assistant',
@@ -641,10 +644,66 @@ export class SessionService {
       anchorCheckpointId: p.anchorCheckpointId,
       attachmentsJson: serializeAttachments(p.aggregate),
     })
+    await this.recordTextTraceForTurn(p)
     await this.autoTitle(p.sessionId)
     const child = await this.deps.prisma.teammate.findUnique({ where: { threadId: p.sessionId }, select: { parentSessionId: true } })
     const parent = await this.deps.prisma.session.findUnique({ where: { id: child?.parentSessionId ?? p.sessionId }, select: { ownerId: true } })
     if (parent) this.publishSessionEvent(parent.ownerId, 'session.updated', { projectionChanged: true }, child?.parentSessionId ?? p.sessionId)
+  }
+
+  // ---- TextTrace 审计域 mapper（#747 B 节双域的第二份写；与 session_messages 行构造零共享
+  // ——两域字段口径独立演进，禁抽公共行构造）。行口径：
+  //   - traceId = runId：漏斗 identity.traceId 的 V1 占位落实（runService 装配 identity 即
+  //     runId）——tool_approval_logs.traceId ← text_trace_logs.traceId 弱关联 join 面接通
+  //     （schema ToolApprovalLog.traceId 注释「#727 双域接缝」+ ADR 0015）。
+  //   - 快照截断 20k（TRACE_TEXT_MAX，traceLogs 域单一常量）；outputHash 同域单一口径。
+  //   - inputText = 触发本轮的最新未归档 user 行（teammate thread 无 user 行 → 空串）。
+  //   - ipAddress = 'internal'（服务端写面先例：file-journal 审计 / teammate-mail）；
+  //     containerName = null（沙箱维度对审计域无意义）；sessionKey = sessionId（同先例）。
+  //   - status = p.status（run 终态语义由 runService 唯一判定随载荷携带：completed → success；
+  //     interrupted/suspended/aborted/failed → failed）。锚有无不蕴含完成——interrupted 轮
+  //     （审批升级）锚恒非空（终态推进先于 interrupt 判定），半成品行必须标 failed 不留
+  //     成功假象（schema「Each completed assistant generation」口径）。
+  // 写失败 best-effort warn 不放大（产品读源已先行落库；审计行不阻断投影面——对齐 filejournal
+  // 观测面「静默失败不可接受」的 warn 留痕纪律）。----
+  private async recordTextTraceForTurn(p: RecordTurnPayload): Promise<void> {
+    try {
+      const session = await this.deps.prisma.session.findUnique({
+        where: { id: p.sessionId },
+        select: { ownerId: true },
+      })
+      if (!session) return
+      const owner = await this.deps.prisma.user.findUnique({
+        where: { id: session.ownerId },
+        select: { username: true },
+      })
+      if (!owner) return
+      const trigger = await this.deps.prisma.sessionMessage.findFirst({
+        where: { sessionId: p.sessionId, role: 'user', archivedAt: null },
+        orderBy: [{ turn: 'desc' }, { createdAt: 'desc' }],
+        select: { content: true },
+      })
+      const inputText = trimTraceText(trigger?.content ?? '')
+      const outputText = trimTraceText(p.aggregate.content)
+      await this.deps.prisma.textTraceLog.create({
+        data: {
+          traceId: p.runId,
+          userId: session.ownerId,
+          username: owner.username,
+          ipAddress: 'internal',
+          containerName: null,
+          sessionKey: p.sessionId,
+          runId: p.runId,
+          inputText,
+          outputText,
+          outputHash: outputHash(outputText),
+          status: p.status,
+        },
+      })
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn(`[sessions] text_trace_logs turn 落行失败: session=${p.sessionId} run=${p.runId}: ${(err as Error).message}`)
+    }
   }
 
   // 自动标题（story 5 · 语义翻案）：title 仍空 → 首条 user 消息截断派生 + session.updated。

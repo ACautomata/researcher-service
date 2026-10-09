@@ -1,7 +1,10 @@
-// WikiService（#335 · 平移 backend/wiki/service.py）：单容器 wiki/main 直读/直写组合根。
-// 构造注入 WikiFileSystem Port（生产 NodeWikiFileSystem、测试 fake），组合 FrontmatterParser /
-// WikilinkResolver。CRUD 直接委托 Port（域异常透传）；buildGraph 是本层聚合逻辑（纯逻辑，
+// WikiService（#335 · 平移 backend/wiki/service.py）：wiki 树读面组合根（每用户 wiki 容器 /wiki）。
+// 构造注入 WikiFileSystem Port（生产 DockerWikiFileSystem、测试 fake），组合 FrontmatterParser /
+// WikilinkResolver。读方法直接委托 Port（域异常透传）；buildGraph 是本层聚合逻辑（纯逻辑，
 // 对 fake FS 可直测）。
+// 写面三方法（writePage/createPage/deletePage）已随 #758 Q3 写面整域退役物理删除——零生产
+// 调用：agent 写路径 = runner/wikigen mirror pushBack（putArchive + diff rm）+ FilesystemBackend，
+// 不经 WikiService；REST 写端点同期下线（routes.ts 头注）。
 
 import {
   claimsDrift,
@@ -40,18 +43,6 @@ export class WikiService {
     const page = await this.fs.readPage(relPath)
     const badge = okfBadge(page.content)
     return badge === undefined ? page : { ...page, okf: badge }
-  }
-
-  writePage(relPath: string, content: string): Promise<{ path: string }> {
-    return this.fs.writePage(relPath, content)
-  }
-
-  createPage(relPath: string, content: string): Promise<{ path: string }> {
-    return this.fs.createPage(relPath, content)
-  }
-
-  deletePage(relPath: string): Promise<void> {
-    return this.fs.deletePage(relPath)
   }
 
   // claims 只读面（#789 story 42 数据面）：页存在性先于旁车读取（页缺失 → WikiPageNotFound

@@ -121,4 +121,33 @@ describe('StreamHub（事件扇出注册表）', () => {
     hub.publish('u', evt('error', { code: 50002 }))
     expect(a.frames[0]).toBe(encodeFrame(1, evt('error', { code: 50002 })))
   })
+
+  // 连接域 error 事件契约（#747 C 节定稿目录连接域第三成员；字段准据 #726 resolution
+  // 「error{5xxxx}」——payload 仅 5xxxx 码，复用 REST 5xxxx 码段见 codes.ts）。
+  // 现架构无自动触发点（规格开放）——本契约测试 + 发射函数即边界（#747 R1 Spec②）。
+  it('publishError：发射 error{5xxxx} 帧——payload 仅 code 字段，形态与规格 C 节逐一对应', () => {
+    const hub = new StreamHub()
+    const a = fakeSink()
+    const b = fakeSink()
+    const other = fakeSink()
+    hub.register('user-1', a.sink)
+    hub.register('user-1', b.sink)
+    hub.register('user-2', other.sink)
+    hub.publishError('user-1', 50002)
+    for (const f of a.frames) {
+      const parsed = parseSseFrame(f)
+      expect(parsed.event).toBe('error')
+      expect(parsed.data).toEqual({ type: 'error', payload: { code: 50002 } })
+    }
+    expect(b.frames).toEqual(a.frames) // 多端广播同帧同 seq
+    expect(other.frames).toHaveLength(0) // 只扇出目标 user
+    expect(a.isClosed()).toBe(false) // error 不关连接（区别 terminate 的停重连语义）
+    expect(hub.currentSeq('user-1')).toBe(1) // 帧占一个 seq（游标对客户端连续）
+  })
+
+  it('publishError：未注册 user 无连接 → 静默成功且游标推进（与 publish 同语义，gap 检测靠它）', () => {
+    const hub = new StreamHub()
+    expect(() => hub.publishError('nobody', 50001)).not.toThrow()
+    expect(hub.currentSeq('nobody')).toBe(1)
+  })
 })

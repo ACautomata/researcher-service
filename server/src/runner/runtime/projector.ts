@@ -9,8 +9,8 @@
 //
 // 其余 method（lifecycle/tasks/updates/values/checkpoints）与未命中白名单的子事件一律丢弃
 // ——「多出的字段一律不进投影输出」（#773 bridge 纪律；LC 事件形态随版本漂移，透传即腐化）。
-// v2 经典形态（on_chat_model_stream）的翻译保留在 events/bridge.ts（骨架期已锁定），本投影
-// 只认运行时真实主路径 v3。
+// v2 经典形态（on_chat_model_stream）翻译已自 events/bridge.ts 物理删除（#747 R1
+// Standards④），本投影只认运行时真实主路径 v3。
 //
 // 有状态面（单 run 内）：tool.start → tool.end 的 durationMs 计时（tool_call_id → 起始时刻，
 // clock 由 feed 入参注入保证确定性测试）；未见 start 的 finish（理论不可达）durationMs 记 0。

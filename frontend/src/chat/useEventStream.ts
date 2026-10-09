@@ -1,11 +1,15 @@
 // useEventStream —— SSE 事件流薄封装（#730 §4.1 M1 核心 / #726 事件模型）。
 // 原生 EventSource + `panel_stream` cookie（HttpOnly/SameSite=Strict，login/refresh Set-Cookie
-// 滑动续期）；EventSource 断线自带重连（白送），本层只补三件事：
+// 滑动续期）；EventSource 断线自带重连（白送），本层只补四件事：
 //   1. gap 检测：serverSeq（Last-Event-ID）只检测不重放——服务端从不上行重放（#773 StreamHub
 //      fire-and-forget），断线补偿 = 投影重拉，onGap 交编排层决定；
 //   2. 401 关流：EventSource 看不见 HTTP 状态码（#726 钉死）——onerror 后经共享 REST 刷新链
 //      探测 /auth/me，刷新链死（refreshExhausted）→ 主动 close 停重连；
 //   3. session.terminated 停重连：per-user 广播（reason logout/revoked，无 sessionId）→ close。
+//   4. error 不停重连（连接域第三成员，#747 C 节定稿目录）：带内错误帧 = 流级服务端错误通知，
+//      服务端 publishError 不关连接（区别 terminate 的停重连），帧占一个 seq 保游标连续
+//      （payload {code:5xxxx}，准据 #726 resolution）——本层落 console.warn 提示（最保守
+//      既有路径，不造新 UI），帧照常透传 onEvent。
 // 纯传输面：不解析业务事件（SessionEvent 透传）、不持会话状态——归投影归约器/编排 composable。
 import { ref, type Ref } from 'vue'
 import { apiJson } from '@/api/client'
@@ -24,8 +28,10 @@ export interface SessionEvent {
 export type EventStreamStatus = 'connecting' | 'open' | 'disconnected' | 'closed'
 
 // 订阅目录（server 事件全集；teammate.archived 服务端当前不发，保留向前兼容）。
+// 'error' 与 EventSource 原生连接错误事件同名：named 帧（MessageEvent 带 data JSON）走
+// 目录分派；原生断线错误（plain Event 无 data）被坏帧守卫丢弃，断线语义仍归 onerror。
 const EVENT_NAMES = [
-  'stream.opened', 'session.created', 'session.updated', 'session.invalidated',
+  'stream.opened', 'error', 'session.created', 'session.updated', 'session.invalidated',
   'session.terminated', 'run.started', 'run.resumed', 'run.completed', 'run.failed',
   'run.aborted', 'run.suspended', 'text.delta', 'thinking.delta', 'tool.start', 'tool.end',
   'attachment', 'figure_run.progress', 'approval.requested', 'approval.resolved',
@@ -95,6 +101,14 @@ export function useEventStream(handlers: EventStreamHandlers): EventStream {
         if (event.type === 'session.terminated' && !event.sessionId) {
           close()
           return
+        }
+        // error 是连接域第三成员（#747 C 节，连接域事件不带 sessionId）——服务端带内
+        // 错误信号（hub.publishError，payload {code:5xxxx}）：契约语义不关连接（区别
+        // terminate 的停重连），帧占一个 seq 保游标连续。本层落 console.warn 提示
+        // （最保守既有路径，不造新 UI）后不 return——帧照常透传 onEvent（连接域帧不带
+        // sessionId，编排层分派自行忽略），连接继续、后续帧仍可收。
+        if (event.type === 'error') {
+          console.warn('[event-stream] 服务端错误帧, code =', event.payload.code)
         }
         handlers.onEvent(event)
       })

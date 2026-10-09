@@ -1,10 +1,10 @@
-// seam: WorkspaceTree 组件 —— chat/ 页 workspace 递归文件树（#626 T1 / #618 规格 §2、变体 A）。
+// seam: LabTree 组件 —— chat/ 页 lab（会话沙箱工作根）递归文件树（#626 T1 / #618 规格 §2、变体 A）。
 // 哑组件 props-in/emits-out（对齐 FileTree.vue 接缝）。DirListing.files 是扁平相对路径数组（recursive
 // walk 全量），组件内部构造嵌套 → 按折叠态拍平渲染。覆盖：嵌套渲染、点文件 emit open、目录折叠/展开、
-// truncated 树底提示、空 workspace 空态、treeError 错误空态、active 文件高亮。
+// truncated 树底提示、空 lab 目录空态、treeError 错误空态、active 文件高亮。
 import { mount } from '@vue/test-utils'
 import { describe, expect, it } from 'vitest'
-import WorkspaceTree from '@/components/chat/WorkspaceTree.vue'
+import LabTree from '@/components/chat/LabTree.vue'
 import type { DirListing, FileEntry } from '@/api/files'
 
 function fe(path: string, type: 'file' | 'directory' = 'file'): FileEntry {
@@ -23,9 +23,9 @@ const TREE: DirListing = {
   truncated: false,
 }
 
-describe('WorkspaceTree', () => {
+describe('LabTree', () => {
   it('renders nested files (flat paths → indented tree), dirs first then files', () => {
-    const w = mount(WorkspaceTree, { props: { tree: TREE, activePath: '' } })
+    const w = mount(LabTree, { props: { tree: TREE, activePath: '' } })
     // 目录优先（notes/src 在 README.md 前），各自字母序
     expect(w.find('[data-test="dir-notes"]').exists()).toBe(true)
     expect(w.find('[data-test="dir-src"]').exists()).toBe(true)
@@ -43,13 +43,13 @@ describe('WorkspaceTree', () => {
   })
 
   it('emits open with full path when a file node is clicked', async () => {
-    const w = mount(WorkspaceTree, { props: { tree: TREE, activePath: '' } })
+    const w = mount(LabTree, { props: { tree: TREE, activePath: '' } })
     await w.find('[data-test="node-notes/plan.md"]').trigger('click')
     expect(w.emitted('open')).toEqual([['notes/plan.md']])
   })
 
   it('collapses/expands a directory on click (kids hide then reappear)', async () => {
-    const w = mount(WorkspaceTree, { props: { tree: TREE, activePath: '' } })
+    const w = mount(LabTree, { props: { tree: TREE, activePath: '' } })
     expect(w.find('[data-test="node-notes/plan.md"]').exists()).toBe(true)
     await w.find('[data-test="dir-notes"]').trigger('click') // 折叠
     expect(w.find('[data-test="node-notes/plan.md"]').exists()).toBe(false)
@@ -59,27 +59,27 @@ describe('WorkspaceTree', () => {
   })
 
   it('marks the active file node', () => {
-    const w = mount(WorkspaceTree, { props: { tree: TREE, activePath: 'src/index.ts' } })
+    const w = mount(LabTree, { props: { tree: TREE, activePath: 'src/index.ts' } })
     expect(w.find('[data-test="node-src/index.ts"]').classes()).toContain('active')
   })
 
   it('shows truncated notice when listing.truncated is true', () => {
-    const w = mount(WorkspaceTree, {
+    const w = mount(LabTree, {
       props: { tree: { ...TREE, truncated: true }, activePath: '' },
     })
     expect(w.find('[data-test="tree-truncated"]').exists()).toBe(true)
     expect(w.text()).toContain('10000')
   })
 
-  it('shows empty-state text when workspace has no files (and not truncated)', () => {
-    const w = mount(WorkspaceTree, {
+  it('shows empty-state text when lab has no files (and not truncated)', () => {
+    const w = mount(LabTree, {
       props: { tree: { kind: 'dir', path: '', files: [], truncated: false }, activePath: '' },
     })
     expect(w.find('[data-test="tree-empty"]').exists()).toBe(true)
   })
 
   it('shows error-state text when treeError is set (tree fetch failed)', () => {
-    const w = mount(WorkspaceTree, {
+    const w = mount(LabTree, {
       props: { tree: null, treeError: '读取失败', activePath: '' },
     })
     expect(w.find('[data-test="tree-error"]').exists()).toBe(true)

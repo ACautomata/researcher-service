@@ -13,6 +13,10 @@
 
 // 事件目录事件（#747 C 节）：传输层只认这一形状，不关心具体域。
 // sessionId/runId 仅会话域/run 域事件携带，连接域事件缺省。
+// #747 实施期增补：teammate.started/completed/failed/suspended 四族——具名折叠区需求
+// 背书（#742），C 节定稿目录外增补；发射点 = runner/runtime/runService.ts（startTeammate
+// 的 started + settleTeammateStatus 的 completed/failed/suspended），前端具名折叠区消费。
+// 登记在案，不回删。
 export interface CatalogEvent {
   readonly type: string
   readonly sessionId?: string

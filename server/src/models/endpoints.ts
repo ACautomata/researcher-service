@@ -77,8 +77,9 @@ export class ProviderEndpointService {
     input: z.infer<typeof providerEndpointWriteSchema>,
     createdBy: string,
   ): Promise<ProviderEndpointView> {
-    // 'http' 限 dev（731 §3.1：生产仅 https）——生产收到 http → 90002 字段级。
-    if (input.scheme === 'http' && process.env.NODE_ENV === 'production') {
+    // 'http' 限 dev（731 §3.1：生产仅 https）——门禁关时收到 http → 90002 字段级。
+    // 判定经 config.runner.allowHttpProviderEndpoints（配置边界：本文件不直读 process.env）。
+    if (input.scheme === 'http' && !config.runner.allowHttpProviderEndpoints) {
       throw fail(CODE.VALIDATION_FAILED, undefined, {
         scheme: ['生产环境仅允许 https 端点（http 限开发环境）'],
       })

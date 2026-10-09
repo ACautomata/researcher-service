@@ -1,5 +1,3 @@
-import type { CatalogEvent } from './logic'
-
 // 事件桥（接缝 S3，issue #773；#747 C 节 / #726「薄投影」决策——上游事件不透传，
 // 只在白名单内翻译为自有 SSE 目录）。
 //
@@ -7,85 +5,9 @@ import type { CatalogEvent } from './logic'
 // **v3** protocol events 产出（{method,params} 形态），消费面 = runner/runtime/projector.ts
 //（RunProjector）——本文件的 buildStreamEventsInvocation 是 v3 调用参数基座（PoC 坑 2
 // 同参对象约束）。
-//
-// projectStreamEvent（v2 经典 on_* 形态翻译）为 #773 骨架期产物：#777 实测 v3 后生产
-// **零消费**（v2 事件对 v3 投影全部不可见）。按 models 写盘链退役先例保留注释在案，
-// 物理删除归 T0 #801；三包升级若上游回退 v2 形态，此处是现成翻译面。
-
-// LangChain streamEvents 事件的最小结构子集（v2）。
-export interface StreamEventLike {
-  readonly event: string
-  readonly run_id?: string
-  readonly data?: unknown
-}
-
-// 投影上下文：run 域事件挂在会话上（LangGraph thread_id = sessionId，#727）。
-export interface ProjectionContext {
-  readonly sessionId?: string
-}
-
-// AIMessageChunk content 块的最小结构子集——白名单只认 text / thinking / reasoning 块，
-// 其余块（tool_call、image 等）跳过不进目录。
-interface ContentBlockLike {
-  readonly type?: unknown
-  readonly text?: unknown
-  readonly thinking?: unknown
-  readonly reasoning?: unknown
-}
-
-// 单块投影：text 块 → text.delta；thinking/reasoning 块 → thinking.delta（与 text 分轨，
-// #747 C 节目录）；未命中白名单 → null。
-function projectBlock(
-  block: ContentBlockLike,
-  ctx: ProjectionContext,
-  runId: string | undefined,
-): CatalogEvent | null {
-  if (block.type === 'text' && typeof block.text === 'string' && block.text !== '') {
-    return { type: 'text.delta', sessionId: ctx.sessionId, runId, payload: { delta: block.text } }
-  }
-  if (block.type === 'thinking' || block.type === 'reasoning') {
-    // 块内容字段随版本漂移：新形态 thinking，旧形态 reasoning——两者都收。
-    const delta =
-      typeof block.thinking === 'string' ? block.thinking
-      : typeof block.reasoning === 'string' ? block.reasoning
-      : null
-    if (delta !== null && delta !== '') {
-      return { type: 'thinking.delta', sessionId: ctx.sessionId, runId, payload: { delta } }
-    }
-  }
-  return null
-}
-
-// 白名单翻译：on_chat_model_stream 的 AIMessageChunk → 自有目录事件数组（一 chunk 可含
-// 多块，逐块翻译）。真实上游两种 content 形态：
-//   string  —— 纯文本 token 直出 → text.delta；
-//   Block[] —— reasoning/thinking 模型的块数组（注意 chunk.type 恒为消息类型 'ai'，
-//              块类型在**块**上——按 chunk.type 判 reasoning 对真实上游永不命中）。
-// 未命中白名单 → 空数组（订阅者跳过，绝不透传上游事件）。
-export function projectStreamEvent(
-  raw: StreamEventLike,
-  ctx: ProjectionContext = {},
-): CatalogEvent[] {
-  if (raw.event !== 'on_chat_model_stream') return []
-  const chunk = (raw.data as { chunk?: { content?: unknown } } | null)?.chunk
-  if (!chunk || chunk.content === undefined || chunk.content === null) return []
-  const content = chunk.content
-  if (typeof content === 'string') {
-    return content === ''
-      ? []
-      : [{ type: 'text.delta', sessionId: ctx.sessionId, runId: raw.run_id, payload: { delta: content } }]
-  }
-  if (Array.isArray(content)) {
-    const out: CatalogEvent[] = []
-    for (const block of content as ContentBlockLike[]) {
-      if (!block || typeof block !== 'object') continue
-      const projected = projectBlock(block, ctx, raw.run_id)
-      if (projected) out.push(projected)
-    }
-    return out
-  }
-  return []
-}
+// v2 经典 on_* 形态翻译面（#773 骨架期产物）已物理删除（#747 R1 Standards④：#777 实测
+// v3 后生产零消费仅自测，原「删除归 T0 #801」注记指向的退役票已落地）；三包升级若上游
+// 回退 v2 形态，按 projector.ts 白名单纪律重建翻译面。
 
 // streamEvents 调用参数（PoC 坑 2 锁定，#747 A 节生产硬约束）：version + configurable
 // 必须同一参数对象——resume 时参数不同会静默 no-op 假 done。构造一次、首次调用与 resume

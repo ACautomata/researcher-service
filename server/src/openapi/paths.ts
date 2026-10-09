@@ -2,9 +2,8 @@
 //
 // 漂移防线：
 // - 请求体 zod schema 一律 import 自 validation/schemas.ts（运行时校验的单一来源），本文件零复制。
-// - wiki 写体是手工校验（parseWikiWriteBody，非 zod），不给伪精确 schema ——
-//   宽松 object + 描述指向源码；其校验规则的单一来源是 wiki/paths.ts。
-//   （files 写面已随 T0 #801 退役，无写体声明。）
+// - wiki 写面已随 #758 Q3 退役（PUT/POST/DELETE /wiki/page 下线，写面收归 agent）——无 wiki
+//   写体声明；files 写面已随 T0 #801 退役，同无写体声明。
 // - 错误码逐端点照录源码注释；响应 data 为宽松载荷 + 文字描述（响应无 zod 来源可引用）。
 
 import { z } from 'zod'
@@ -82,9 +81,6 @@ function register(spec: EndpointSpec): void {
     },
   })
 }
-
-const USER_WRITE_BODY_NOTE =
-  'JSON 对象；字段校验为服务端手写（单一来源 wiki/paths.ts），非法 → 90002 + data 字段明细。'
 
 register({ method: 'post', path: '/api/v1/sessions/{id}/approvals/{escalationId}', tag: 'Sessions', summary: 'Resolve a leader or teammate approval', auth: 'user', body: sessionApprovalSchema, nullData: true, errors: '50002 session_not_found; 50004 approval_not_found; 50001 already_resumed; 40043 quota exceeded; 90002 validation', dataNote: 'Acknowledges queued resume; only the checkpoint thread owning this escalation resumes.' })
 
@@ -251,7 +247,7 @@ register({
   dataNote: 'data: { password } 一次性明文（仅此一次回显）；目标 mustChangePassword=true。',
 })
 
-// ---- Wiki /api/v1/wiki（owner 级，#856 归属门直挂认证身份；页不存在 30040；页已存在 30041）----
+// ---- Wiki /api/v1/wiki（owner 级，#856 归属门直挂认证身份；页不存在 30040；写面已随 #758 Q3 退役）----
 
 register({
   method: 'get',
@@ -274,38 +270,8 @@ register({
   query: z.object({ path: z.string().describe('wiki 内相对路径') }),
 })
 
-register({
-  method: 'put',
-  path: '/api/v1/wiki/page',
-  tag: 'Wiki',
-  summary: '覆写已存在页（byte-exact 保留空白）',
-  auth: 'user',
-  errors: `90002（data.path|data.content 明细）· 30040 · 10005。`,
-  dataNote: 'data: { path }。',
-  bodyNote: `${USER_WRITE_BODY_NOTE}字段：path（相对路径，穿越/managed 拒）、content（string，含未配对代理字符拒）。`,
-})
-
-register({
-  method: 'post',
-  path: '/api/v1/wiki/page',
-  tag: 'Wiki',
-  summary: '新建页',
-  auth: 'user',
-  errors: `90002（字段明细）· 30041（已存在）· 10005。`,
-  dataNote: 'data: { path }。',
-  bodyNote: `${USER_WRITE_BODY_NOTE}字段：path、content（同 PUT）。`,
-})
-
-register({
-  method: 'delete',
-  path: '/api/v1/wiki/page',
-  tag: 'Wiki',
-  summary: '删页',
-  auth: 'user',
-  errors: `90002（data.path）· 30040 · 10005。`,
-  nullData: true,
-  query: z.object({ path: z.string().describe('wiki 内相对路径') }),
-})
+// 写面退役（#758 Q3）：PUT/POST/DELETE /api/v1/wiki/page 文档面注册随端点一并下线
+//（wiki 只剩读面，写面收归 agent——参照 figuresHistory 创建端点退役先例）。
 
 register({
   method: 'get',

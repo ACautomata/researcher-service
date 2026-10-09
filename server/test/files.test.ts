@@ -13,7 +13,7 @@ import type { DirListing, FileArchive, FileReading } from '../src/files/fsPort'
 import { sandboxContainerName } from '../src/sandboxes/runtime'
 
 // 内存 fake FileArchive：lab 读面独立树（dockerName → relPath → 内容），镜像「沙箱按 docker
-// 名寻址」语义；InContainer 三方法按 T0 收缩保留（wiki 域写面，本套件不触达——抛错兜底）。
+// 名寻址」语义。
 class FakeFileArchive implements FileArchive {
   // #776 lab 树：docker 名 →（relPath → 内容；含 \u0000 视为二进制）
   readonly labTrees = new Map<string, Map<string, string>>()
@@ -66,17 +66,6 @@ class FakeFileArchive implements FileArchive {
     const raw = tree.get(relPath)
     if (raw === undefined) throw new FileNotFound(relPath)
     return Buffer.from(raw, 'utf8')
-  }
-
-  // InContainer 写面（wiki 域消费）：本套件不触达（#858 seedWorkspace 随 fleet create 退役）。
-  async writeInContainer(): Promise<never> {
-    throw new Error('not used in files REST tests')
-  }
-  async createInContainer(): Promise<never> {
-    throw new Error('not used in files REST tests')
-  }
-  async deleteInContainer(): Promise<never> {
-    throw new Error('not used in files REST tests')
   }
 }
 

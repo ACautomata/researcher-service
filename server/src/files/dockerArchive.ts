@@ -1,21 +1,21 @@
 // DockerFileArchive —— FileArchive 的 dockerode 适配层（#589 · ADR 0012；T0 #801 只读化收缩）。
-// 读（readLab/readLabBytes）经 getArchive（以容器为视角打 tar 流，穿过挂载点读卷数据）、写经
-// putArchive、删经容器内 exec rm。容器存在即可读（stopped 的 getArchive 由 daemon 处理，
-// 不需进程）；写/删先幂等 start（保 exec mkdir / rm 可用，对齐 ADR「stopped 删除需先 start」）。
+// 只读：readLab/readLabBytes 经 getArchive（以容器为视角打 tar 流，穿过挂载点读卷数据）——
+// 容器存在即可读（stopped 的 getArchive 由 daemon 处理，不需进程）。
 // client 延迟注入（默认 new Docker() 挂 docker.sock）——构造时不连 daemon（对齐 DockerRuntime）。
 // legacy fleet 文件树读写删（root=wiki/workspace）与 openclaw.json config 写读链随 T0 清退删除；
-// seedWorkspace 模板灌卷随 fleet create 流程退役（#858）。
+// seedWorkspace 模板灌卷随 fleet create 流程退役（#858）；wiki 域显式容器名写/建/删三方法
+//（#784 InContainer 系）随 #758 Q3 wiki 写面整域退役删除——最后生产调用方 wiki/dockerFs 写面
+// 已物理移除（agent 写路径 = runner wikigen pushBack / DockerArchiveBackend，不经本类）。
 //
 // 内存防护（#586 US8「接口不会被大二进制拖垮」）：probe 流式读第一个业务头，文件超
 // MAX_FILE_READ_BYTES 时只保留头元数据（size/mtime）、排干剩余流不驻留字节——超大文件读请求
 // 不把文件内容拉进控制面内存。
 
 import Docker from 'dockerode'
-import { Readable } from 'node:stream'
-import { FileExists, FileInvalidPath, FileNotFound } from './errors'
+import { FileInvalidPath, FileNotFound } from './errors'
 import type { DirListing, FileArchive, FileEntry, FileReading } from './fsPort'
 import { LAB_ROOT_ABS, MAX_FILE_READ_BYTES, WALK_LIMIT } from './values'
-import { alignTo, createTarFile, mtimeIso, normalizeTarName, parseNumeric, parseTar, type TarEntry } from './tar'
+import { alignTo, mtimeIso, normalizeTarName, parseNumeric, parseTar, type TarEntry } from './tar'
 
 function toEntry(t: TarEntry): FileEntry {
   return {
@@ -51,35 +51,9 @@ export class DockerFileArchive implements FileArchive {
     return this.cached
   }
 
-  // 树根 + 相对路径 → 容器内绝对路径（join 单一来源；absPath 与 InContainer 写面共用）
+  // 树根 + 相对路径 → 容器内绝对路径（join 单一来源）
   private static joinRoot(base: string, relPath: string): string {
     return relPath === '' ? base : `${base}/${relPath}`
-  }
-
-  // ---- docker 原语封装（404 语义与 exec 模式对齐 DockerRuntime） ----
-
-  // 幂等 start（已 running → docker 返 304 幂等成功；容器消失 404 幂等成功，后续 exec 再暴露）。
-  // dockerName 原文直用——wiki 容器面传 researcher-wiki-<ownerId>（#784），lab 面不经此。
-  private async start(dockerName: string): Promise<void> {
-    try {
-      await this.client().getContainer(dockerName).start()
-    } catch (e) {
-      const sc = (e as { statusCode?: number }).statusCode
-      if (sc === 404 || sc === 304) return
-      throw e
-    }
-  }
-
-  // 同步等命令完成；退出码非 0 → 抛错（mkdir/rm 失败须让 caller 走错误路径）
-  private async execSync(dockerName: string, cmd: string[]): Promise<void> {
-    const container = this.client().getContainer(dockerName)
-    const exec = await container.exec({ Cmd: cmd, AttachStdout: true, AttachStderr: true })
-    const stream = await exec.start({ Detach: false })
-    await drainStream(stream[Symbol.asyncIterator]()) // 排干（非 TTY 流含 demux 头，仅作结束信号）
-    const info = await exec.inspect()
-    if (info.ExitCode !== 0) {
-      throw new Error(`exec failed in ${dockerName}: exit_code=${info.ExitCode} cmd=${JSON.stringify(cmd)}`)
-    }
   }
 
   // 流式 probe：读第一个业务头（容忍前置 GNU 'L' / PAX 'x' 元头）→ 超大文件只留元数据；
@@ -139,16 +113,6 @@ export class DockerFileArchive implements FileArchive {
       if (!root) return null
       return { kind: 'ok', buf, entries, root }
     }
-  }
-
-  // 写/建共用后段：幂等 start → mkdir -p 父目录 → putArchive 单文件 tar
-  private async ensureParentAndPut(dockerName: string, absPath: string, content: Buffer): Promise<void> {
-    await this.start(dockerName)
-    await this.execSync(dockerName, ['mkdir', '-p', absPath.slice(0, absPath.lastIndexOf('/'))])
-    const container = this.client().getContainer(dockerName)
-    const basename = absPath.split('/').pop() ?? 'file'
-    const dir = absPath.slice(0, absPath.lastIndexOf('/'))
-    await container.putArchive(Readable.from([createTarFile(basename, content)]), { path: dir })
   }
 
   // ---- FileArchive 实现 ----
@@ -242,32 +206,5 @@ export class DockerFileArchive implements FileArchive {
     }
 
     throw new FileInvalidPath(relPath) // symlink / 特殊类型：不支持读
-  }
-
-  // ---- 显式容器名写面（#784）：wiki 域 REST 挂 wiki 容器（researcher-wiki-<ownerId>，
-  // 树根 /wiki）——写/建/删三方法以 docker 名 + 绝对树根直给。
-
-  async writeInContainer(dockerName: string, absRoot: string, relPath: string, content: string): Promise<void> {
-    const absPath = DockerFileArchive.joinRoot(absRoot, relPath)
-    const probed = await this.probe(dockerName, absPath)
-    if (probed === null) throw new FileNotFound(relPath)
-    if (probed.kind === 'ok' && probed.root.type !== 'file') throw new FileInvalidPath(relPath) // 目录/链接不可覆写
-    await this.ensureParentAndPut(dockerName, absPath, Buffer.from(content, 'utf8'))
-  }
-
-  async createInContainer(dockerName: string, absRoot: string, relPath: string, content: string): Promise<void> {
-    const absPath = DockerFileArchive.joinRoot(absRoot, relPath)
-    const probed = await this.probe(dockerName, absPath)
-    if (probed !== null) throw new FileExists(relPath)
-    await this.ensureParentAndPut(dockerName, absPath, Buffer.from(content, 'utf8'))
-  }
-
-  async deleteInContainer(dockerName: string, absRoot: string, relPath: string): Promise<void> {
-    const absPath = DockerFileArchive.joinRoot(absRoot, relPath)
-    const probed = await this.probe(dockerName, absPath)
-    if (probed === null) throw new FileNotFound(relPath)
-    if (probed.kind === 'ok' && probed.root.type === 'directory') throw new FileInvalidPath(relPath) // 只支持删文件
-    await this.start(dockerName)
-    await this.execSync(dockerName, ['rm', '-f', '--', absPath])
   }
 }

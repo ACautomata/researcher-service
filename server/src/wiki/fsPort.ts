@@ -1,7 +1,8 @@
 // WikiFileSystem Port（#335 · 平移 backend/integration/openclaw/ports.py 路径2）。
-// 业务层只依赖本接口；Node 适配器在 nodeFs.ts（node:fs/promises），测试注入 fake（接缝）。
-// 所有方法抛 wiki 域异常（errors.ts）：越权/穿越 → WikiInvalidPath、不存在 → WikiPageNotFound、
-// 已存在（create）→ WikiPageExists。
+// 业务层只依赖本接口；生产适配器 = dockerFs.ts（DockerWikiFileSystem，#784），测试注入 fake（接缝）。
+// 读面方法抛 wiki 域异常（errors.ts）：越权/穿越/managed → WikiInvalidPath、不存在 → WikiPageNotFound。
+// 写面成员（writePage/createPage/deletePage）已随 #758 Q3 写面整域退役物理删除——零生产调用
+//（agent 写路径 = runner/wikigen mirror pushBack + FilesystemBackend，不经 WikiService）。
 
 import type { OkfBadge, ParsedClaimsSidecar } from './logic'
 
@@ -53,9 +54,6 @@ export interface WikiGraph {
 export interface WikiFileSystem {
   buildTree(): Promise<WikiTree>
   readPage(relPath: string): Promise<WikiPage>
-  writePage(relPath: string, content: string): Promise<{ path: string }>
-  createPage(relPath: string, content: string): Promise<{ path: string }>
-  deletePage(relPath: string): Promise<void>
   // claims 旁车原文（#789 story 42 数据面）：页路径入参，适配器映射 .claims 镜像同名 .json；
   // 旁车缺失/不可解码 → null（不抛——「无旁车」对消费方同义）。
   readClaimsFile(relPath: string): Promise<string | null>

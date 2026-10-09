@@ -71,15 +71,15 @@ describe('wiki REST 存储换轨新 wiki 容器（#784 · S1 信封级；#856 ow
     expect(ensureCalls.length).toBe(callsBefore)
   })
 
-  it('写面同接线：POST page 前置 ensure（每操作一次，create/health 合一面）', async () => {
+  it('写面退役（#758 Q3）：POST /wiki/page → 90005 路由不存在，且不触达 ensure（编排面无副作用）', async () => {
     const callsBefore = ensureCalls.length
     const res = await ctx.request
       .post('/api/v1/wiki/page')
       .set(bearer(userToken))
       .send({ path: 'notes/a.md', content: '# A\n' })
     expect(res.status).toBe(200)
-    expect(res.body.code).toBe(0)
-    expect(ensureCalls.slice(callsBefore)).toEqual([userId])
+    expect(res.body.code).toBe(90005) // 路由不存在（写面收归 agent，不经 REST）
+    expect(ensureCalls.length).toBe(callsBefore) // 未路由到的请求不建容器
   })
 
   it('admin 亦只操作本人 wiki（owner 级无跨用户覆写面）：ensure adminId 而非他人', async () => {

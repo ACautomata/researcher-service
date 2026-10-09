@@ -1,6 +1,7 @@
 // seam: useEventStream 传输面薄封装（#726 事件模型 / #730 §4.1）。
 // 覆盖：named-event 订阅 + 坏帧丢弃、serverSeq 去重与 gap 检测（Last-Event-ID 只检测不重放）、
 // stream.opened 状态迁移、session.terminated（per-user 广播无 sessionId）停重连、
+// error（连接域第三成员，payload {code:5xxxx}）不关连接不停重连——console 提示落 + 帧透传、
 // 401（EventSource 不可见）经 REST 刷新链探测：活 → 手动重开（原生重连放弃时）/ 死 → close 终态。
 // stub 全局 EventSource（贴 useChatSession.test.ts 同款工具）；apiJson 经 vi.mock 注入。
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -122,6 +123,41 @@ describe('useEventStream', () => {
     const src = FakeEventSource.last()!
     src.emit('session.terminated', { type: 'session.terminated', sessionId: 's1', payload: { reason: 'x' } })
     expect(stream.status.value).not.toBe('closed')
+  })
+
+  it('error（连接域第三成员，#747 C 节）不关连接不停重连：console 提示落 + 帧透传，后续帧仍可收', () => {
+    const seen: SessionEvent[] = []
+    const gaps = vi.fn()
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const stream = useEventStream({ onEvent: (e) => seen.push(e), onGap: gaps })
+      const src = FakeEventSource.last()!
+      src.emit('stream.opened', STREAM_OPENED)
+      // payload 与服务端契约同形（hub.publishError → {code:5xxxx}，#726 resolution），帧占一个 seq
+      src.emit('error', { type: 'error', payload: { code: 50002 } }, '1')
+      expect(stream.status.value).toBe('open')
+      expect(src.closed).toBe(false)
+      expect(warn).toHaveBeenCalledTimes(1)
+      // 帧透传 onEvent（传输面不吞；连接域帧不带 sessionId，编排层分派自行忽略）。
+      // seen[0] = stream.opened（透传同款），seen[1] = error 帧
+      expect(seen).toHaveLength(2)
+      expect(seen[1]).toMatchObject({ type: 'error', payload: { code: 50002 } })
+      // 游标连续：error 帧占了 seq 1，后续帧 seq 2 照常收、不触 gap
+      src.emit('text.delta', { type: 'text.delta', sessionId: 's1', payload: { delta: 'after' } }, '2')
+      expect(seen).toHaveLength(3)
+      expect(seen[2]).toMatchObject({ type: 'text.delta', payload: { delta: 'after' } })
+      expect(gaps).not.toHaveBeenCalled()
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it('原生连接错误事件（plain Event 无 data，与 named error 帧同名）不误触终态关流', () => {
+    const stream = useEventStream({ onEvent: () => {} })
+    const src = FakeEventSource.last()!
+    src.emit('stream.opened', STREAM_OPENED)
+    src.dispatchEvent(new Event('error'))
+    expect(stream.status.value).toBe('open')
   })
 
   it('401 探测：REST 刷新链活（/auth/me 成功）且 EventSource 已彻底 CLOSED → 手动重开新连接', async () => {

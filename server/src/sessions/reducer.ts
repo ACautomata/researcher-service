@@ -11,13 +11,16 @@ import { TOOL_DETAILS_MAX_BYTES, TOOL_INPUT_MAX_BYTES } from '../runner/runtime/
 import { truncateUtf8 } from '../runner/runtime/projector'
 // type-only 环引：service 反向 import 本模块的 serializeAttachments（运行时无环，类型单向）
 import type { SystemCommandResult } from './service'
+// type-only：RejectionSource（#747 C 节 rejection.source 目录定稿二值）单一声明于漏斗审计面。
+import type { RejectionSource } from '../runner/approval/audit'
 
 // attachmentsJson v1 的 tools 行（#747 C 节：toolCallId/name/input≤1k/result≤1k/state/durationMs/
 // details?≤4KB + 截断标记）。截断纪律：RunProjector 事件侧已按同常量截（1k/4KB），本归约器
 // 再截是防御面——幂等（已截文本再截不变），且归约器是纯逻辑接缝、可被非 projector 事件源
 // 直灌（测试/前端同构），不信任单一上游。C 节 result 概念由 details 承载（#777 事件目录
-// tool.end 无独立 result 字段）；rejection（工具被拒）归 #783 审批漏斗——本票无审批面，
-// 事件目录无来源故不设保留位。
+// tool.end 无独立 result 字段）；rejection?（#783 审批漏斗拒绝红显——tool.end{rejection:
+// {source, reason}} 目录载荷的保留位，实时 SSE 与回放投影零差异的依据，刷新后红显整行不消失；
+// reason 同 input 纪律 ≤1k 防御截断，截断置行级 truncated 标记）。
 export interface ToolLine {
   readonly toolCallId: string
   readonly name: string
@@ -26,6 +29,7 @@ export interface ToolLine {
   durationMs?: number
   details?: string
   truncated?: boolean
+  rejection?: { source: RejectionSource; reason: string }
 }
 
 // #780 D9 媒体引用（attachmentsJson v1 可选 media 数组 + `attachment` 事件载荷，同一形状——
@@ -36,6 +40,7 @@ export interface MediaRef {
   readonly mime: string
   readonly size: number
   readonly fileName: string
+  // width/height/durationMs 可选探测字段留白：服务端无媒体探测面，UX 由前端 blob 自派生兜底；探测实现归后续票。
   readonly width?: number
   readonly height?: number
   readonly durationMs?: number
@@ -56,6 +61,11 @@ export interface RecordTurnPayload {
   readonly runId: string
   readonly anchorCheckpointId: string | null
   readonly aggregate: TurnSnapshot
+  /** text_trace_logs.status（#747 B 节双域第二份写的行口径）：run 终态语义——该轮 assistant
+   *  generation completed → success；interrupted/suspended/aborted/failed（半成品 provenance，
+   *  不留成功假象）→ failed。由 runService 在终态唯一判定并随载荷携带——锚有无不蕴含完成
+   *  （interrupted 轮锚恒非空：终态推进先于 interrupt 判定），status 不得由锚推论。 */
+  readonly status: 'success' | 'failed'
 }
 
 interface DeltaPayload {
@@ -74,6 +84,7 @@ interface ToolEndPayload {
   readonly state?: unknown
   readonly durationMs?: unknown
   readonly details?: unknown
+  readonly rejection?: unknown
 }
 
 const MAX = {
@@ -181,6 +192,16 @@ export class TurnReducer {
       if (typeof p.details === 'string') {
         const { text, truncated } = truncateUtf8(p.details, MAX.details)
         line.details = text
+        if (truncated) line.truncated = true
+      }
+      // #783 拒绝红显：tool.end{rejection:{source, reason}} 进聚合（0 信任——形态不合法
+      // 一律丢弃，不炸归约；仅黑名单/judge 二值来源进保留位，与目录定稿同值集）。reason
+      // 防御截断 ≤1k 对齐 input（上游 publishRejection/漏斗 notice.reason 无截断面——
+      // 归约器不信任单一上游，同函数 input/details 二次防御纪律）；截断置 truncated 标记。
+      const r = p.rejection as { source?: unknown; reason?: unknown } | null
+      if (r && (r.source === 'blacklist' || r.source === 'judge') && typeof r.reason === 'string') {
+        const { text, truncated } = truncateUtf8(r.reason, MAX.input)
+        line.rejection = { source: r.source, reason: text }
         if (truncated) line.truncated = true
       }
     }

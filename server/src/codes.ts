@@ -20,10 +20,10 @@ export const CODE = {
   CANNOT_DISABLE_SELF: 10044, // 不可禁用自己
   // 3xxxx wiki（#335 平移 wiki 域；#319 §1.3 转译码）
   WIKI_PAGE_NOT_FOUND: 30040, // 页不存在 / 越权（同码防探测）
-  WIKI_PAGE_EXISTS: 30041, // 新建页已存在（POST 409 转译）
+  WIKI_PAGE_EXISTS: 30041, // [退役保留] 曾为新建页已存在（POST 409 转译）——wiki 写面随 #758 Q3 整域退役，码段保留防复用
   // #790（#747·20 · G 节 wiki 三通道③）：wiki 全量更新独立 run 在飞互斥——对齐 20043 busy
   // 「42+ 域专用」锁式（30040/30041 之后续号）。
-  WIKI_UPDATE_IN_PROGRESS: 30042, // wiki 全量更新已在进行（独立 run 全局串行，PUT 触发面）
+  WIKI_UPDATE_IN_PROGRESS: 30042, // wiki 全量更新已在进行（独立 run 全局串行，POST /wiki/update 触发面）
   // 4xxxx models（#336 平移 models 域；#319 §1.3 转译码）
   PROVIDER_NOT_FOUND: 40040, // provider 不存在 / 越权（同码防探测）；#775 起端点白名单管理域
   // 复用同码（models 配置段「40 不存在」锁式）：provider_endpoint 不存在（DELETE）。

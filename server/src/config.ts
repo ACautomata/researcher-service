@@ -273,6 +273,10 @@ export const config = {
       recursionLimit: readRunnerRecursionLimit(),
       // CRUD 层 DNS 私网校验逃生开关（默认关；生产禁开）
       allowPrivateProviderEndpoints: readAllowPrivateProviderEndpoints(),
+      // http scheme 端点门（731 §3.1「生产仅 https」）：false → http 端点拒建（90002 字段级）。
+      // 默认 = 非生产放行（现状语义平移）。models/endpoints.ts 判定的唯一配置来源——
+      // 配置边界（GLOSSARY / ADR 0005）：runtime 域不直读 process.env.NODE_ENV。
+      allowHttpProviderEndpoints: process.env.NODE_ENV !== 'production',
       // 共享 LLM key 解析源：credentialEnvId='LLM_API_KEY' 的 provider 行经此取值
       //（单一读取点 LLM_API_KEY_RAW——#731 §1.3「runner 直接持有凭证」；#858 起 runner 侧唯一消费）
       llmApiKey: LLM_API_KEY_RAW,
@@ -296,6 +300,11 @@ export const config = {
         quotaBytes: readPositiveEnvBytes('FILE_JOURNAL_ATTIC_QUOTA_MB', 100),
         depthLimit: readPositiveEnvInt('FILE_JOURNAL_REPLAY_DEPTH_LIMIT', 1000),
         fenceTimeoutMs: readPositiveEnvInt('FILE_JOURNAL_FENCE_TIMEOUT_MS', 30_000),
+      },
+      // checkpoint retention 护栏（#747 B 节）：单 thread checkpoint 总量超配额 → 清最老
+      // 非活跃分支（活跃会话不清；PrismaCheckpointSaver.enforceRetention 消费）。
+      checkpointRetention: {
+        quotaBytes: readPositiveEnvBytes('RUNNER_CHECKPOINT_QUOTA_MB', 100),
       },
       // #785 写锁有界等待（默认 10s；装配层注入 RunService；env RUNNER_WRITE_LOCK_TIMEOUT_MS）
       writeLockTimeoutMs: readWriteLockTimeoutMs(),

@@ -480,3 +480,332 @@ describe('PrismaCheckpointSaver（#774 · S3 · 真 SQLite）', () => {
     expect(history.foo.seed).toBe('seed')
   })
 })
+
+// #747 B 节 retention：「单 thread checkpoint 总量 >100MB 护栏清最老非活跃分支」。
+// seam = saver 公共 API（构造器注入小配额代替 100MB 规格值——测试可构造「超限」数据）；
+// 驱逐经 put 自动触发（护栏必须在写路径生效）。活性判据 = sessions.activeCheckpointId 指针
+// 的祖先链（checkpointChain.ts 单一来源）；指针缺失 → 缺省活性 tip = 最新未归档 checkpoint。
+describe('PrismaCheckpointSaver retention 护栏（#747 B 节 · 100MB/thread）', () => {
+  let dbDir: string
+  let prisma: PrismaClient
+  let saver: PrismaCheckpointSaver
+  /** 单个 filler 10_000 字符 checkpoint 的落库 blob 字节数（beforeAll 实测校准——JSON 头部
+   * 开销计入 B，配额/尺寸断言全以 B 为锚，serde 实现细节变化不影响测试） */
+  let B: number
+  const S = 10_000
+
+  beforeAll(async () => {
+    dbDir = mkdtempSync(path.join(tmpdir(), 'ckpt-retention-test-'))
+    const dbPath = path.join(dbDir, 'test.db')
+    runDbScript('apply-schema.mjs', dbPath)
+    prisma = createPrismaClient(`file:${dbPath}`)
+    // 校准 saver：配额拉满防校准 put 自身触发驱逐
+    const calSaver = new PrismaCheckpointSaver(prisma, undefined, {
+      retentionQuotaBytes: Number.MAX_SAFE_INTEGER,
+    })
+    await prisma.user.upsert({
+      where: { id: OWNER },
+      update: {},
+      create: { id: OWNER, username: 'saver-owner' },
+    })
+    await prisma.session.upsert({
+      where: { id: 't-retention-cal' },
+      update: {},
+      create: { id: 't-retention-cal', ownerId: OWNER, containerId: 'sandbox-cal' },
+    })
+    const filler = new Uint8Array(S).fill(0x78) // 'x' × S —— 字符串 filler 无转义膨胀
+    await calSaver.put(
+      { configurable: { thread_id: 't-retention-cal' } },
+      makeCheckpoint('20261000-000000-CAL', { channel_values: { payload: new TextDecoder().decode(filler) } }),
+      makeMetadata(),
+      {},
+    )
+    const calRow = await prisma.checkpoint.findUnique({
+      where: {
+        threadId_checkpointNs_checkpointId: {
+          threadId: 't-retention-cal',
+          checkpointNs: '',
+          checkpointId: '20261000-000000-CAL',
+        },
+      },
+    })
+    B = calRow!.blob.length
+    // 配额 = 4.5B：4 个 B 尺寸 put 不触发（4B ≤ 4.5B），第 5 个触发并恰驱逐 1 行
+    saver = new PrismaCheckpointSaver(prisma, undefined, { retentionQuotaBytes: Math.floor(4.5 * B) })
+  })
+
+  beforeEach(async () => {
+    await prisma.checkpointWrite.deleteMany({})
+    await prisma.checkpoint.deleteMany({})
+  })
+
+  afterAll(async () => {
+    await prisma.$disconnect()
+    rmSync(dbDir, { recursive: true, force: true })
+  })
+
+  async function seedThread(id: string): Promise<void> {
+    await prisma.session.upsert({
+      where: { id },
+      update: {},
+      create: { id, ownerId: OWNER, containerId: `sandbox-${id}` },
+    })
+  }
+
+  /** 造一个 blob 尺寸 ≈ size 字节的 checkpoint（'x' 重复 size——JSON 串无转义，落库 ≈ B 锚） */
+  async function putSized(
+    threadId: string,
+    id: string,
+    parentId: string | undefined,
+    size: number,
+  ): Promise<void> {
+    await saver.put(
+      {
+        configurable: {
+          thread_id: threadId,
+          ...(parentId !== undefined ? { checkpoint_id: parentId } : {}),
+        },
+      },
+      makeCheckpoint(id, { channel_values: { payload: 'x'.repeat(size) } }),
+      makeMetadata(),
+      {},
+    )
+  }
+
+  const ckptCount = (threadId: string): Promise<number> =>
+    prisma.checkpoint.count({ where: { threadId } })
+
+  it('总量超配额 → put 自动驱逐最老非活跃分支（活跃链与较新非活跃分支保留）', async () => {
+    const threadId = 't-retention-evict'
+    await seedThread(threadId)
+    // 拓扑：M1 根；活跃主线 M1→M2（M2 最新 = 缺省活性 tip）；O 分支 M1→O1→O2（最老）；
+    // N1 较新分支 M1→N1。5×B > 4.5B 于 M2 put 触发；驱逐最老非活跃 O1 后 4B ≤ 配额即止。
+    await putSized(threadId, '20261001-000001-M1', undefined, S)
+    await putSized(threadId, '20261001-000002-O1', '20261001-000001-M1', S)
+    await putSized(threadId, '20261001-000003-O2', '20261001-000002-O1', S)
+    await putSized(threadId, '20261001-000004-N1', '20261001-000001-M1', S)
+    // 被驱逐候选挂 pending writes——驱逐须连 writes 一并清（Loose 引用防孤儿）
+    await saver.putWrites(
+      { configurable: { thread_id: threadId, checkpoint_id: '20261001-000002-O1' } },
+      [['ch', 'orphan-guard']],
+      'task-ret',
+    )
+    await putSized(threadId, '20261001-000005-M2', '20261001-000001-M1', S)
+
+    const remaining = await prisma.checkpoint.findMany({
+      where: { threadId },
+      select: { checkpointId: true },
+    })
+    const ids = remaining.map((r) => r.checkpointId).sort()
+    // 最老非活跃分支 O1 被驱逐；O2（同分支较新行）、N1（较新分支）、活跃链 M1/M2 保留
+    expect(ids).toEqual([
+      '20261001-000001-M1',
+      '20261001-000003-O2',
+      '20261001-000004-N1',
+      '20261001-000005-M2',
+    ])
+    expect(await prisma.checkpointWrite.count({ where: { threadId } })).toBe(0)
+  })
+
+  it('activeCheckpointId 指针（rewind 场景）→ 指针祖先链整体保留，最老非活跃行被驱逐', async () => {
+    const threadId = 't-retention-pointer'
+    await seedThread(threadId)
+    // A1→A2 主线；B1 从 A1 分叉（rewind 锚点）。指针 = B1 后活性链 = {B1, A1}，A2 变最老非活跃。
+    await putSized(threadId, '20261002-000001-A1', undefined, S)
+    await putSized(threadId, '20261002-000002-A2', '20261002-000001-A1', S)
+    await putSized(threadId, '20261002-000003-B1', '20261002-000001-A1', S)
+    await prisma.session.update({
+      where: { id: threadId },
+      data: { activeCheckpointId: '20261002-000003-B1' },
+    })
+    // C1（2B 尺寸）从 B1 续跑：3B + 2B > 4.5B → 驱逐 A2 后 3B + B ≤ 4.5B 止。
+    // C1 虽在指针链外（非锚）且最新，但「最老先行」只清到 A2 即降回配额内。
+    await putSized(threadId, '20261002-000004-C1', '20261002-000003-B1', 2 * S)
+
+    const remaining = await prisma.checkpoint.findMany({
+      where: { threadId },
+      select: { checkpointId: true },
+    })
+    const ids = remaining.map((r) => r.checkpointId).sort()
+    expect(ids).toEqual([
+      '20261002-000001-A1',
+      '20261002-000003-B1',
+      '20261002-000004-C1',
+    ])
+  })
+
+  it('归档行不计入总量（#770 软删行永不物理删、无 GC——只有未归档总量可驱动驱逐）', async () => {
+    const threadId = 't-retention-archived'
+    await seedThread(threadId)
+    // 活跃主线 r1→m1（+触发 put t1）；非活跃分支 r1→d1（d1 较老 = 合法驱逐候选）。
+    // a1/a2（各 2B）随后置 archivedAt（rewind 被放弃路线软删档——永不物理删、无 GC）。
+    // t1 put 后裸总量 = 未归档 4B + 归档 4B = 8B > 4.5B；未归档总量 = 4B ≤ 4.5B。
+    // 旧缺陷：归档计入总量 → 超配额触发驱逐、唯一非活跃候选 d1 被逐（语义错：B 节 retention
+    // 是「总量超配额清最老非活跃分支」的应清总量口径，归档行不计入）；修正：零驱逐。
+    const bigSaver = new PrismaCheckpointSaver(prisma, undefined, {
+      retentionQuotaBytes: Number.MAX_SAFE_INTEGER,
+    })
+    const bigPut = (id: string, parent: string | undefined, size: number): Promise<unknown> =>
+      bigSaver.put(
+        {
+          configurable: {
+            thread_id: threadId,
+            ...(parent !== undefined ? { checkpoint_id: parent } : {}),
+          },
+        },
+        makeCheckpoint(id, { channel_values: { payload: 'x'.repeat(size) } }),
+        makeMetadata(),
+        {},
+      )
+    await bigPut('20261007-000000-r1', undefined, S)
+    await bigPut('20261007-000001-d1', '20261007-000000-r1', S)
+    await bigPut('20261007-000002-m1', '20261007-000000-r1', S)
+    await bigPut('20261007-000003-a1', undefined, 2 * S)
+    await bigPut('20261007-000004-a2', undefined, 2 * S)
+    await prisma.checkpoint.updateMany({
+      where: { threadId, checkpointId: { in: ['20261007-000003-a1', '20261007-000004-a2'] } },
+      data: { archivedAt: new Date() },
+    })
+    // t1（B，m1 之子）put 触发写路径护栏：修正后未归档 4B ≤ 4.5B → 零驱逐。
+    // 旧实现裸总量 8B > 配额会把 d1（唯一非活跃候选）逐出——本断言在旧实现下红。
+    await putSized(threadId, '20261007-000005-t1', '20261007-000002-m1', S)
+    const remaining = await prisma.checkpoint.findMany({ where: { threadId } })
+    const byId = new Map(remaining.map((r) => [r.checkpointId, r]))
+    // 全量 6 行保留（含非活跃分支 d1——未归档总量未超配额，驱逐不触发）；归档行原样保留
+    expect(remaining.length).toBe(6)
+    expect(byId.get('20261007-000001-d1')!.archivedAt).toBeNull()
+    expect(byId.get('20261007-000005-t1')!.archivedAt).toBeNull()
+    expect(byId.get('20261007-000003-a1')!.archivedAt).not.toBeNull()
+    expect(byId.get('20261007-000004-a2')!.archivedAt).not.toBeNull()
+  })
+
+  it('rewind 后 run 进行中：指针后代（在飞写入头）不在祖先链上但不可驱逐', async () => {
+    const threadId = 't-retention-inflight'
+    await seedThread(threadId)
+    // A1 根 → A2 旧主线。rewind 到 A1（生产面：rewindSession 差集归档 A2 + 指针 = A1，
+    // 此处直接置位模拟终态）；在飞 run 从 A1 续跑写 C1→C2→C3→C4（指针仅 run 终态推进——
+    // 进行中 C1..C4 全在指针后代、不在祖先链）。非归档总量 A1+C1..C4 = 5B > 4.5B 于
+    // C4 put 触发护栏。旧活性（祖先链）下 C1/C2 是最老非活跃候选会被逐出（在飞 run 自身
+    // checkpoint 被运行中删除 → resume 落空 = PoC 坑「静默 no-op 假 done」）——本断言旧实现下红。
+    const bigSaver = new PrismaCheckpointSaver(prisma, undefined, {
+      retentionQuotaBytes: Number.MAX_SAFE_INTEGER,
+    })
+    await bigSaver.put(
+      { configurable: { thread_id: threadId } },
+      makeCheckpoint('20261008-000001-A1', { channel_values: { payload: 'x'.repeat(S) } }),
+      makeMetadata(),
+      {},
+    )
+    await bigSaver.put(
+      { configurable: { thread_id: threadId, checkpoint_id: '20261008-000001-A1' } },
+      makeCheckpoint('20261008-000002-A2', { channel_values: { payload: 'x'.repeat(S) } }),
+      makeMetadata(),
+      {},
+    )
+    await prisma.session.update({
+      where: { id: threadId },
+      data: { activeCheckpointId: '20261008-000001-A1' },
+    })
+    await prisma.checkpoint.updateMany({
+      where: { threadId, checkpointId: '20261008-000002-A2' },
+      data: { archivedAt: new Date() },
+    })
+    await putSized(threadId, '20261008-000003-C1', '20261008-000001-A1', S)
+    await putSized(threadId, '20261008-000004-C2', '20261008-000003-C1', S)
+    await putSized(threadId, '20261008-000005-C3', '20261008-000004-C2', S)
+    await putSized(threadId, '20261008-000006-C4', '20261008-000005-C3', S)
+
+    const remaining = await prisma.checkpoint.findMany({
+      where: { threadId },
+      select: { checkpointId: true },
+    })
+    // 在飞后代（含最老的 C1）+ 指针祖先 A1 全保留；被放弃 A2 维持归档态不被触碰
+    expect(remaining.map((r) => r.checkpointId).sort()).toEqual([
+      '20261008-000001-A1',
+      '20261008-000002-A2',
+      '20261008-000003-C1',
+      '20261008-000004-C2',
+      '20261008-000005-C3',
+      '20261008-000006-C4',
+    ])
+    const a2 = await prisma.checkpoint.findFirstOrThrow({
+      where: { threadId, checkpointId: '20261008-000002-A2' },
+      select: { archivedAt: true },
+    })
+    expect(a2.archivedAt).not.toBeNull()
+  })
+
+  it('总量 ≤ 配额 → 零驱逐（护栏不碰任何行）', async () => {
+    const threadId = 't-retention-under'
+    await seedThread(threadId)
+    await putSized(threadId, '20261003-000001-a', undefined, S)
+    await putSized(threadId, '20261003-000002-b', '20261003-000001-a', S)
+    expect(await ckptCount(threadId)).toBe(2)
+    expect(await prisma.checkpointWrite.count({ where: { threadId } })).toBe(0)
+  })
+
+  it('活跃链自身超限（无非活跃候选）→ 活跃分支保留、驱逐 no-op', async () => {
+    const threadId = 't-retention-active-only'
+    await seedThread(threadId)
+    // 单链 4 行 × 2B 尺寸：第 3 put 起超限（3B+B > 4.5B），但无非活跃行可驱逐 → 全保留
+    await putSized(threadId, '20261004-000001-a', undefined, 2 * S)
+    await putSized(threadId, '20261004-000002-b', '20261004-000001-a', 2 * S)
+    await putSized(threadId, '20261004-000003-c', '20261004-000002-b', 2 * S)
+    await putSized(threadId, '20261004-000004-d', '20261004-000003-c', 2 * S)
+    expect(await ckptCount(threadId)).toBe(4)
+  })
+
+  it('配额内总量 → put 写路径护栏零驱逐（零驱逐锚：全部行原样保留）', async () => {
+    const threadId = 't-retention-report'
+    await seedThread(threadId)
+    await putSized(threadId, '20261005-000001-a', undefined, S)
+    await putSized(threadId, '20261005-000002-b', '20261005-000001-a', S)
+    // 2B ≤ 4.5B：两次 put 各自内嵌触发护栏检查，零驱逐（行全保留 = 零报告的可观测面）
+    const remaining = await prisma.checkpoint.findMany({
+      where: { threadId },
+      select: { checkpointId: true },
+    })
+    expect(remaining.map((r) => r.checkpointId).sort()).toEqual([
+      '20261005-000001-a',
+      '20261005-000002-b',
+    ])
+  })
+
+  it('超额 → put 写路径护栏多行驱逐至配额内（驱逐行数与字节数的可观测锚）', async () => {
+    const threadId = 't-retention-report-over'
+    await seedThread(threadId)
+    // 拓扑：r1 根；r2/r3/r4 全从 r1 分叉——活性 tip = 最新 r4，活性链 {r4, r1}，
+    // 非活跃候选 r2、r3（升序）。前 3 行经 MAX 配额 saver seed（不触发自动驱逐），
+    // 第 4 行经配额 saver put——写路径内嵌护栏自动触发：4×2B > 4.5B → 逐行驱逐
+    // r2、r3 → 4B ≤ 4.5B 止。
+    const bigSaver = new PrismaCheckpointSaver(prisma, undefined, {
+      retentionQuotaBytes: Number.MAX_SAFE_INTEGER,
+    })
+    for (const [i, id] of ['rr1', 'rr2', 'rr3'].entries()) {
+      await bigSaver.put(
+        {
+          configurable: {
+            thread_id: threadId,
+            ...(i > 0 ? { checkpoint_id: '20261006-000001-rr1' } : {}),
+          },
+        },
+        makeCheckpoint(`20261006-00000${i + 1}-${id}`, {
+          channel_values: { payload: 'x'.repeat(2 * S) },
+        }),
+        makeMetadata(),
+        {},
+      )
+    }
+    await putSized(threadId, '20261006-000004-rr4', '20261006-000001-rr1', 2 * S)
+
+    const remaining = await prisma.checkpoint.findMany({ where: { threadId } })
+    expect(remaining.map((r) => r.checkpointId).sort()).toEqual([
+      '20261006-000001-rr1',
+      '20261006-000004-rr4',
+    ])
+    // 驱逐量锚（对齐原报告断言口径，经行状态观测）：4 行 → 逐出 2 行；
+    // 每行 blob = 2S + δ（δ = B − S）→ 剩余 2 行字节和 = 2×(2S+δ)。
+    expect(4 - remaining.length).toBe(2)
+    expect(remaining.reduce((n, r) => n + r.blob.length, 0)).toBe(2 * (2 * S + (B - S)))
+  })
+})

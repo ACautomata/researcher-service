@@ -2,11 +2,13 @@
 //
 // 覆盖：认证/admin 门（10001/10004）· CRUD wire · origin 唯一（含 NULL-port 等价语义应用层
 // 查重 40041）· host 校验（大写/通配/URL 混入 90002）· DNS 私网拒绝（fake lookup）·
-// allowPrivate 逃生门 · CRUD 同事务 config_meta bump · http scheme 生产门（NODE_ENV 翻转）。
+// allowPrivate 逃生门 · CRUD 同事务 config_meta bump · http scheme 门禁
+//（config.runner.allowHttpProviderEndpoints 驱动——配置边界：判定不依赖 process.env）。
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { setupTestApp, type TestContext } from './setup'
 import { seedAdmin, seedUser, login, bearer } from './helpers'
+import { config } from '../src/config'
 
 const privateLookup = async (host: string) =>
   (host === 'vllm.internal.example.com'
@@ -142,10 +144,11 @@ describe('provider_endpoints admin REST（#775）', () => {
     expect(res.body.data).toHaveProperty('scheme')
   })
 
-  it('POST http scheme 在生产门外（NODE_ENV=production）→ 90002；test 环境放行', async () => {
+  it('POST http scheme 门禁（config.runner.allowHttpProviderEndpoints=false → 90002；true → 放行）', async () => {
     const l = await login(ctx.request, 'peadmin', 'pw-peadmin-secure')
-    const prev = process.env.NODE_ENV
-    process.env.NODE_ENV = 'production'
+    // 配置边界（GLOSSARY）：判定经 config 驱动——测试改 config 而非翻 process.env。
+    const prev = config.runner.allowHttpProviderEndpoints
+    config.runner.allowHttpProviderEndpoints = false
     try {
       const res = await ctx.request
         .post(base)
@@ -154,13 +157,18 @@ describe('provider_endpoints admin REST（#775）', () => {
       expect(res.body.code).toBe(90002)
       expect(res.body.data.scheme[0]).toContain('https')
     } finally {
-      process.env.NODE_ENV = prev
+      config.runner.allowHttpProviderEndpoints = prev
     }
-    const ok = await ctx.request
-      .post(base)
-      .set(bearer(l.access))
-      .send({ scheme: 'http', host: 'dev-vllm.example.com', port: 8000 })
-    expect(ok.body.code).toBe(0)
+    config.runner.allowHttpProviderEndpoints = true
+    try {
+      const ok = await ctx.request
+        .post(base)
+        .set(bearer(l.access))
+        .send({ scheme: 'http', host: 'dev-vllm.example.com', port: 8000 })
+      expect(ok.body.code).toBe(0)
+    } finally {
+      config.runner.allowHttpProviderEndpoints = prev
+    }
   })
 
   it('DELETE 存在 → 0 + bump；DELETE 不存在 → 40040；GET 读零 bump', async () => {
