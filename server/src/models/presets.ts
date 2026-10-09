@@ -124,3 +124,11 @@ export const PLATFORM_PROVIDER_ID = 'platform'
 
 // BYOK 端点 providerId 保留域：用户行不得抢注平台 id（写侧拒绝）。
 export const RESERVED_PROVIDER_IDS: ReadonlySet<string> = new Set([PLATFORM_PROVIDER_ID])
+
+// 平台默认端点模型 id 集（#883：env 派生——LLM_MODEL 覆盖单模型，否则预设 defaultModels
+// 全集）。指派写侧「模型须属该端点模型集」的平台侧取值域；与 providerRegistry.platformEntry
+// 的条目派生同源同规则（清单收缩兜底 minimax 仅测试注入非法值面）。
+export function platformModelIds(llmModel: string, llmPreset: string): string[] {
+  const preset = presetById(llmPreset) ?? presetById('minimax')!
+  return llmModel !== '' ? [llmModel] : preset.defaultModels.map((m) => m.id)
+}

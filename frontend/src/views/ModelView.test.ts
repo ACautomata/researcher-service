@@ -7,6 +7,11 @@ import { mount } from '@vue/test-utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 
+vi.mock('@/api/plugins', () => ({
+  listLlmAssignments: vi.fn(),
+  setLlmAssignment: vi.fn(),
+  clearLlmAssignment: vi.fn(),
+}))
 vi.mock('@/api/models', () => ({
   listPresets: vi.fn(),
   getPlatformEndpoint: vi.fn(),
@@ -26,6 +31,7 @@ vi.mock('element-plus', async (importOriginal) => {
 })
 
 import ModelView from '@/views/ModelView.vue'
+import { clearLlmAssignment, listLlmAssignments, setLlmAssignment } from '@/api/plugins'
 import {
   createProvider,
   getPlatformEndpoint,
@@ -68,8 +74,9 @@ const stubs = {
   },
   ElTable: {
     props: { data: { type: Array, default: () => [] } },
+    // 行标识列：端点表 provider_id / 指派表 plugin_id 双形兼容（stub 双表共用）
     template:
-      '<div data-test="provider-table">{{ (data||[]).map((r) => r.provider_id).join(",") }}</div>',
+      '<div data-test="provider-table">{{ (data||[]).map((r) => r.provider_id ?? r.plugin_id).join(",") }}</div>',
   },
   ElTableColumn: { template: '<span />' },
   ElCard: { template: '<div data-test="platform-card"><slot name="header" /><slot /></div>' },
@@ -107,6 +114,9 @@ describe('ModelView（#881 预设制配置面）', () => {
     ;(listProviders as ReturnType<typeof vi.fn>).mockResolvedValue([])
     ;(listPresets as ReturnType<typeof vi.fn>).mockResolvedValue(PRESETS)
     ;(getPlatformEndpoint as ReturnType<typeof vi.fn>).mockResolvedValue(PLATFORM)
+    ;(listLlmAssignments as ReturnType<typeof vi.fn>).mockResolvedValue({ targets: [], assignments: [] })
+    ;(setLlmAssignment as ReturnType<typeof vi.fn>).mockResolvedValue({})
+    ;(clearLlmAssignment as ReturnType<typeof vi.fn>).mockResolvedValue(undefined)
   })
 
   afterEach(() => {
@@ -310,5 +320,72 @@ describe('ModelView（#881 预设制配置面）', () => {
     const { ElMessage } = await import('element-plus')
     expect(ElMessage.warning).toHaveBeenCalled()
     expect(testConnection).not.toHaveBeenCalled()
+  })
+})
+
+describe('ModelView 插件 LLM 指派区（#883 T3）', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.clearAllMocks()
+    ;(listProviders as ReturnType<typeof vi.fn>).mockResolvedValue([PROVIDER])
+    ;(listPresets as ReturnType<typeof vi.fn>).mockResolvedValue(PRESETS)
+    ;(getPlatformEndpoint as ReturnType<typeof vi.fn>).mockResolvedValue(PLATFORM)
+    ;(setLlmAssignment as ReturnType<typeof vi.fn>).mockResolvedValue({})
+    ;(clearLlmAssignment as ReturnType<typeof vi.fn>).mockResolvedValue(undefined)
+  })
+
+  const vm = (wrapper: { vm: unknown }) =>
+    wrapper.vm as unknown as {
+      openAssign: (t: { plugin_id: string; description: string }) => Promise<void>
+      submitAssign: () => Promise<void>
+      confirmClearAssign: (t: { plugin_id: string; description: string }) => Promise<void>
+    }
+
+  it('指派区渲染 targets（声明插件 ∪ judge）与当前指派显示', async () => {
+    ;(listLlmAssignments as ReturnType<typeof vi.fn>).mockResolvedValue({
+      targets: [
+        { plugin_id: 'autofigure', description: 'SVG 模板多模态生成', default_model: 'MiniMax-M3' },
+        { plugin_id: 'judge', description: '审批判定器（审批灰区调用的 LLM 模型）' },
+      ],
+      assignments: [{ plugin_id: 'autofigure', provider_id: 'my-openai', model_id: 'gpt-5.1', updated_at: '2026-10-01T00:00:00Z' }],
+    })
+    const wrapper = mount(ModelView, { global: { plugins: [createPinia()], stubs } })
+    await flushPromises()
+    expect(wrapper.find('[data-test="assignment-table"]').exists()).toBe(true)
+    // ElTable stub 行体渲染行标识（provider_id ?? plugin_id）——指派显示串在 row slot 内，
+    // stub 不展开（本文件 seam 纪律：断言止于 stub 可渲染面）
+    expect(wrapper.text()).toContain('autofigure')
+    expect(wrapper.text()).toContain('judge')
+  })
+
+  it('指派动作：选端点+模型 → PUT {provider_id, model_id}；空端点 = 跟随默认链（null 行）', async () => {
+    ;(listLlmAssignments as ReturnType<typeof vi.fn>).mockResolvedValue({
+      targets: [{ plugin_id: 'autofigure', description: 'SVG' }],
+      assignments: [],
+    })
+    const wrapper = mount(ModelView, { global: { plugins: [createPinia()], stubs } })
+    await flushPromises()
+    const actions = vm(wrapper)
+    await actions.openAssign({ plugin_id: 'autofigure', description: 'SVG' })
+    // 端点/模型状态经 VM 直写（el-select stub 双向绑定脆弱，expose 动作既定做法）
+    ;(wrapper.vm as unknown as { assignEndpoint: string }).assignEndpoint = 'my-openai'
+    ;(wrapper.vm as unknown as { assignModel: string }).assignModel = 'gpt-5.1'
+    await actions.submitAssign()
+    expect(setLlmAssignment).toHaveBeenCalledWith('autofigure', { provider_id: 'my-openai', model_id: 'gpt-5.1' })
+    ;(wrapper.vm as unknown as { assignEndpoint: string }).assignEndpoint = ''
+    ;(wrapper.vm as unknown as { assignModel: string }).assignModel = ''
+    await actions.submitAssign()
+    expect(setLlmAssignment).toHaveBeenLastCalledWith('autofigure', { provider_id: null, model_id: null })
+  })
+
+  it('撤回指派 → DELETE 回默认链', async () => {
+    ;(listLlmAssignments as ReturnType<typeof vi.fn>).mockResolvedValue({
+      targets: [{ plugin_id: 'judge', description: '审批判定器' }],
+      assignments: [{ plugin_id: 'judge', provider_id: 'platform', model_id: 'MiniMax-M3', updated_at: 'x' }],
+    })
+    const wrapper = mount(ModelView, { global: { plugins: [createPinia()], stubs } })
+    await flushPromises()
+    await vm(wrapper).confirmClearAssign({ plugin_id: 'judge', description: '审批判定器' })
+    expect(clearLlmAssignment).toHaveBeenCalledWith('judge')
   })
 })

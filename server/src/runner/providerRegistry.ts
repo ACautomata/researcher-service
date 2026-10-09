@@ -26,9 +26,9 @@ import { decryptCredential } from '../models/cipher'
 import { defaultFactory, type ChatModelFactory } from '../models/chatFactory'
 import {
   PLATFORM_PROVIDER_ID,
+  platformModelIds,
   presetById,
   protocolToLcProvider,
-  type PresetModelEntry,
 } from '../models/presets'
 
 // ---------------------------------------------------------------------------
@@ -52,11 +52,20 @@ export interface ProviderSnapshotEntry {
   readonly models: readonly ModelEntryLike[]
 }
 
+// 插件 LLM 指派引用（#883 T3）：pluginId → 端点/模型。providerId null = 跟随默认链；
+// 'platform' = 钉平台默认端点；悬挂判定归解析面（llmToolPort 回落平台默认 + 告警），
+// 载入面不校验引用（配置变更后的悬挂行是常态数据，不拒载）。
+export interface PluginAssignmentRef {
+  readonly providerId: string | null
+  readonly modelId: string | null
+}
+
 // run 粒度配置快照（run 启动取一次，run 期间只读）。
 export interface ProviderConfigSnapshot {
   readonly ownerId: string
   readonly version: number // config_meta.version（快照时点）
   readonly providers: readonly ProviderSnapshotEntry[] // 用户行 createdAt asc + 平台垫底
+  readonly pluginAssignments: ReadonlyMap<string, PluginAssignmentRef> // 插件 LLM 指派（#883）
 }
 
 // ---------------------------------------------------------------------------
@@ -139,10 +148,15 @@ export class ProviderRegistry {
   }
 
   private async loadSnapshot(ownerId: string, version: number): Promise<ProviderConfigSnapshot> {
-    const rows = await this.prisma.modelProvider.findMany({
-      where: { ownerId },
-      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-    })
+    const [rows, assignmentRows] = await Promise.all([
+      this.prisma.modelProvider.findMany({
+        where: { ownerId },
+        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      }),
+      // 插件 LLM 指派（#883）：与端点行同快照——mutation 侧同事务 bump version，快照
+      // 粒度天然满足「指派变更下一 run 生效；在飞 run 持旧快照不受影响」。
+      this.prisma.pluginLlmAssignment.findMany({ where: { ownerId } }),
+    ])
     const entries = rows
       .map((r) => this.rowToEntry(r))
       .filter((e): e is ProviderSnapshotEntry => e !== null)
@@ -150,6 +164,7 @@ export class ProviderRegistry {
       ownerId,
       version,
       providers: [...entries, this.platformEntry()],
+      pluginAssignments: new Map(assignmentRows.map((a) => [a.pluginId, { providerId: a.providerId, modelId: a.modelId }])),
     }
   }
 
@@ -185,10 +200,13 @@ export class ProviderRegistry {
   // （config import 即 throw），且平台条目无用户凭证（cipher 恒 NULL，平台共享 key）。
   private platformEntry(): ProviderSnapshotEntry {
     const preset = presetById(this.llmPreset) ?? presetById('minimax')!
-    const models: readonly ModelEntryLike[] =
+    // 模型集派生单一来源 = platformModelIds（presets.ts；插件指派写侧校验同源，#883）：
+    // LLM_MODEL 覆盖单模型（条目只带 id），否则预设 defaultModels 全集原样。
+    const models: readonly ModelEntryLike[] = platformModelIds(this.llmModel, this.llmPreset).map((id) =>
       this.llmModel !== ''
-        ? [{ id: this.llmModel } as ModelEntryLike]
-        : (preset.defaultModels as readonly PresetModelEntry[] as readonly ModelEntryLike[])
+        ? { id } as ModelEntryLike
+        : preset.defaultModels.find((m) => m.id === id) as ModelEntryLike,
+    )
     return {
       providerId: PLATFORM_PROVIDER_ID,
       lcProvider: protocolToLcProvider(preset.protocol),

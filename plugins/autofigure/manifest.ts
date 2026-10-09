@@ -19,6 +19,12 @@ export default definePlugin({
   name: 'AutoFigure',
   description: '方法示意图生成（AutoFigure-Edit 流水线：生图 → SAM3 分割 → SVG 模板 → 组装 → 预览）',
   version: '1.0.0',
+  // LLM 需求声明位（#883 T3）：声明即入 Model 页插件指派区——用户可为本插件的 SVG 模板
+  // 多模态调用单独指派端点与模型。defaultModel 省略：合理缺省 = 用户默认链 primary
+  //（#744 §6 既有语义），部署相关不硬编码模型 id。
+  llm: {
+    description: 'SVG 模板多模态生成（方法图管线的 LLM 调用段）',
+  },
   tools: [
     {
       name: FIGURE_TOOL_NAME,
@@ -54,7 +60,9 @@ export default definePlugin({
       { name: 'AUTOFIGURE_IMAGE_API_KEY', description: '生图 API key（面板级服务端凭证）' },
       { name: 'AUTOFIGURE_IMAGE_BASE_URL', required: false, description: '生图 API base URL（缺省 https://api.minimax.io）' },
       { name: 'FAL_KEY', description: 'fal key（SAM3 分割 / RMBG 去背景云 API）' },
-      { name: 'AUTOFIGURE_SVG_MODEL', required: false, description: 'SVG 模板多模态模型 id（缺省 = owner 默认链 primary 模型）' },
+      // 废弃标记（#883）：面板级 env pin 优先级仍最高（兼容面），退役随插件 LLM 指派票收口——
+      // 用户应在 Model 配置页为插件指派端点与模型（缺省跟随默认链）。
+      { name: 'AUTOFIGURE_SVG_MODEL', required: false, deprecated: true, description: 'SVG 模板多模态模型 id（废弃；改用 Model 页插件 LLM 指派，缺省 = owner 默认链 primary 模型）' },
     ],
   },
 })

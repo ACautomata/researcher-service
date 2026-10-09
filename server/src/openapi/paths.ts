@@ -15,6 +15,7 @@ import {
   modelProviderWriteSchema,
   passwordChangeSchema,
   pluginEnablementSchema,
+  pluginLlmAssignmentWriteSchema,
   sessionApprovalSchema,
   userCreateSchema,
   userPatchSchema,
@@ -91,6 +92,11 @@ register({ method: 'post', path: '/api/v1/sessions/{id}/approvals/{escalationId}
 // plugins（#788 · #752 §4.3 R8）：目录清单 + per-user 启用位（8xxxx 段）。
 register({ method: 'get', path: '/api/v1/plugins', tag: 'Plugins', summary: 'List plugin catalog with the caller enablement bits', auth: 'user', errors: '90002 validation', dataNote: '{plugins:[{id,name,description,version,enabled}]} —— 目录 = 编译期静态清单；enabled 无行 = false（默认未启用）。' })
 register({ method: 'put', path: '/api/v1/plugins/{id}/enablement', tag: 'Plugins', summary: 'Enable or disable a plugin for the caller', auth: 'user', body: pluginEnablementSchema, nullData: false, errors: '80040 plugin_not_found（目录外 id，同码防探测）; 90002 validation', dataNote: '{id, enabled} —— 幂等 upsert（plugin_enablements per-user 行）。' })
+
+// 插件 LLM 指派（#883 T3）：per-user per-plugin 端点/模型指派（Model 页插件指派区数据源）。
+register({ method: 'get', path: '/api/v1/plugins/llm-assignments', tag: 'Plugins', summary: 'List assignable plugin LLM targets and the caller assignments', auth: 'user', errors: '90002 validation', dataNote: '{targets:[{plugin_id, description, default_model?}]}（声明 llm 的插件 ∪ 保留键 judge）, {assignments:[{plugin_id, provider_id(null=跟随默认链), model_id(null=端点默认), updated_at}]}。' })
+register({ method: 'put', path: '/api/v1/plugins/{id}/llm-assignment', tag: 'Plugins', summary: 'Assign an endpoint and model to a plugin for the caller', auth: 'user', body: pluginLlmAssignmentWriteSchema, nullData: false, errors: '80040 plugin_not_found（未声明 llm / 目录外 / 非 judge，同码防探测）; 90002 validation（端点 ∈ 本人端点集 ∪ platform；模型属该端点模型集）', dataNote: '{plugin_id, provider_id, model_id, updated_at} —— 幂等 upsert；事务内 bump 配置版本（下一 run 生效，在飞 run 不受影响）。' })
+register({ method: 'delete', path: '/api/v1/plugins/{id}/llm-assignment', tag: 'Plugins', summary: 'Clear a plugin LLM assignment (back to default chain)', auth: 'user', nullData: true, errors: '80040 plugin_not_found（同码防探测）', dataNote: 'null —— 删行回默认链；无行幂等（不 bump 版本）。' })
 
 // ---- 系统 ----
 

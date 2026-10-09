@@ -29,6 +29,7 @@ const LAB = 'researcher-sandbox-pg'
 
 // fixture 插件：domain 类 echo（带 details artifact）+ file 类 lab 读（声明 pathParams）。
 const execCalls: Array<{ name: string; params: unknown }> = []
+let llmThreaded = false // fixture 工具执行时 ctx.llm 是否已被 frame 穿线（#883 AC 观测面）
 function fixtureTool(name: string, overrides: Partial<AnyPluginToolDefinition>): AnyPluginToolDefinition {
   return {
     name,
@@ -50,8 +51,9 @@ const fixtureManifest = definePlugin({
   tools: [
     fixtureTool('fixture_echo', {
       promptSnippet: 'echo input back for tests',
-      execute: async (_toolCallId, params) => {
+      execute: async (_toolCallId, params, exec) => {
         execCalls.push({ name: 'fixture_echo', params })
+        llmThreaded = exec.ctx.llm !== undefined
         return {
           content: [{ type: 'text', text: `echo:${(params as { input?: string }).input ?? ''}` }],
           details: { echo: (params as { input?: string }).input ?? '' },
@@ -173,6 +175,8 @@ describe('#788 插件运行时（S1/S2，#752 §3/§4.2）', () => {
     await svc.execute(cmd('sess-pg-2'))
     expect(hub.types()[hub.types().length - 1]).toBe('run.completed')
     expect(execCalls).toEqual([{ name: 'fixture_echo', params: { input: 'hi' } }])
+    // ctx.llm 穿线（#883 AC）：agent 自动调用路径 frame.llmFor(工具名→插件 id) 注入
+    expect(llmThreaded).toBe(true)
     expect(modelCalls.at(-1)!.system).toContain('Enabled plugin tools')
     expect(modelCalls.at(-1)!.system).toContain('fixture_echo: echo input back for tests')
     const end = hub.events.find((e) => e.type === 'tool.end')

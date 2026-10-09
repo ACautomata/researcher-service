@@ -457,4 +457,55 @@ describe('ProviderRegistry（#881 预设制：平台虚拟条目 + BYOK 凭证�
       'function',
     )
   })
+
+  // ---------------- 插件 LLM 指派入快照（#883 T3）----------------
+
+  it('快照携带 pluginAssignments（pluginId → {providerId, modelId}；含 null 行）', async () => {
+    const u = await seedUser(ctx.prisma, 'rg-assign', 'pw-rg-assign-secure')
+    await seedByok(ctx, u.id, 'ep-1', 'openai', ['gpt-x'])
+    await ctx.prisma.pluginLlmAssignment.createMany({ data: [
+      { ownerId: u.id, pluginId: 'autofigure', providerId: 'ep-1', modelId: 'gpt-x' },
+      { ownerId: u.id, pluginId: 'judge', providerId: 'platform', modelId: null },
+      { ownerId: u.id, pluginId: 'follow-default', providerId: null, modelId: null },
+    ] })
+    const { factory } = makeFakeFactory()
+    const reg = new ProviderRegistry(ctx.prisma, { llmApiKey: 'sk-platform', credentialSecret: TEST_SECRET, modelFactory: factory })
+    const snap = await reg.getSnapshot(u.id)
+    expect(snap.pluginAssignments.get('autofigure')).toEqual({ providerId: 'ep-1', modelId: 'gpt-x' })
+    expect(snap.pluginAssignments.get('judge')).toEqual({ providerId: 'platform', modelId: null })
+    expect(snap.pluginAssignments.get('follow-default')).toEqual({ providerId: null, modelId: null })
+  })
+
+  it('无指派用户：pluginAssignments 空表（默认链语义不受影响）', async () => {
+    const u = await seedUser(ctx.prisma, 'rg-noassign', 'pw-rg-noassign-secure')
+    const { factory } = makeFakeFactory()
+    const reg = new ProviderRegistry(ctx.prisma, { llmApiKey: 'sk-platform', credentialSecret: TEST_SECRET, modelFactory: factory })
+    const snap = await reg.getSnapshot(u.id)
+    expect(snap.pluginAssignments.size).toBe(0)
+  })
+
+  it('指派行悬挂（引用已删端点）照常入快照——悬挂判定归解析面（llmToolPort 回落），不拒载', async () => {
+    const u = await seedUser(ctx.prisma, 'rg-assign-dangle', 'pw-rg-assign-dangle-secure')
+    await ctx.prisma.pluginLlmAssignment.create({ data: {
+      ownerId: u.id, pluginId: 'autofigure', providerId: 'deleted-ep', modelId: 'm',
+    } })
+    const { factory } = makeFakeFactory()
+    const reg = new ProviderRegistry(ctx.prisma, { llmApiKey: 'sk-platform', credentialSecret: TEST_SECRET, modelFactory: factory })
+    const snap = await reg.getSnapshot(u.id)
+    expect(snap.pluginAssignments.get('autofigure')).toEqual({ providerId: 'deleted-ep', modelId: 'm' })
+  })
+
+  it('指派变更 bump 版本 → 快照重载拾取新行（热生效；旧快照对象不变——在飞 run 不受影响）', async () => {
+    const u = await seedUser(ctx.prisma, 'rg-assign-hot', 'pw-rg-assign-hot-secure')
+    await seedByok(ctx, u.id, 'ep-1', 'openai', ['gpt-x'])
+    const { factory } = makeFakeFactory()
+    const reg = new ProviderRegistry(ctx.prisma, { llmApiKey: 'sk-platform', credentialSecret: TEST_SECRET, modelFactory: factory })
+    const first = await reg.getSnapshot(u.id)
+    expect(first.pluginAssignments.size).toBe(0)
+    await ctx.prisma.pluginLlmAssignment.create({ data: { ownerId: u.id, pluginId: 'autofigure', providerId: 'ep-1', modelId: 'gpt-x' } })
+    await bump(ctx) // 指派事务内的 bump（REST 面行为；此处直写模拟）
+    const second = await reg.getSnapshot(u.id)
+    expect(second.pluginAssignments.get('autofigure')).toEqual({ providerId: 'ep-1', modelId: 'gpt-x' })
+    expect(first.pluginAssignments.size).toBe(0) // 旧快照对象不可变
+  })
 })
