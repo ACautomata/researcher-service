@@ -7,8 +7,7 @@
 - `admin/` — admin 子应用（#800 双面板 MPA）：`main.ts`（组合根 2，复用 @/api/@/stores/ElementPlus）
   /`router.ts`（base `/admin/` 独立路由表 + `decideAdminGuard` 纯函数守卫：未认证确认失效 →
   跨应用跳 /login；瞬态放行交 401 刷新链；非 admin → 回 `/`）/`AdminApp.vue`（运营 nav +
-  用户面板回链）/`views/`（账号管理/端点白名单/审计检索/Usage 核算/内容消息/API 文档——
-  账号管理/内容消息/API 文档三页系既有页随迁本目录，端点白名单/审计检索/Usage 核算本 issue 新写）。
+  用户面板回链）/`views/`（账号管理/审计检索/Usage 核算/内容消息/API 文档）。
   产物级隔离：vite 双入口（index.html + admin.html）按 /admin/ 分流（nginx try_files →
   admin.html；dev/preview 由 vite 插件 rewrite），`scripts/verify-admin-split.mjs` 挂入 build
   验证用户 bundle 不含 admin 代码；登录角色落点 admin → `/admin/`（LoginView）。
@@ -29,3 +28,5 @@
   ChatView 哑组件族（props-in/emits-out，零协议 import：`ChatSidebar`（会话扁平列表 + lab 文件树）/
   `ChatHeader`/`ChatStream`/`ChatComposer`/`ChatMessageItem`/`ThinkingCard`/`ToolLine`（#799 起展开区接插件渲染注册表——命中交插件组件消费 details，未注册默认输入/输出详情）/`ApprovalCard`/`ApprovalDock`（#796 审批卡具名徽标 teammateName）
   + `TeamFolds`（#796 teammate 具名折叠区——状态八值徽标/审批局部冻结/归档终态/展开轨迹同形状行 + mailbox 追问广播呈现））。
+
+- 模型配置页统一管理平台默认端点只读卡片、六预设 BYOK 表单、模型列表、保存前试连、删除影响面与插件 LLM 指派（含 judge）。API key 编辑留空保持原值；响应只显示掩码或 key_error，不回填明文。

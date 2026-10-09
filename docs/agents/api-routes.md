@@ -27,7 +27,7 @@
 - `/api/v1/plugins` — 插件目录 + per-user 启用位（#788 · 8xxxx 段：GET 目录清单（manifest 渲染 +
   启用位）、PUT `/{id}/enablement` 幂等 upsert、GET `/{id}/commands/{name}/completions` 参数补全）。
 - `/api/v1/plugins/llm-assignments` + `/api/v1/plugins/{id}/llm-assignment` — 插件 LLM 指派
-  （#883 T3 · ADR 0016：GET = targets（声明 llm 的插件 ∪ 保留键 'judge'）+ 本人指派行；
+  （#883 T3 · ADR 0016/0017：GET = targets（声明 llm 的插件 ∪ 保留键 'judge'）+ 本人指派行；
   PUT = 幂等 upsert {provider_id, model_id} 双可空（provider_id ∈ 本人端点集 ∪ 'platform'，
   model 须属该端点模型集，90002 字段级；未声明 llm/目录外/非 judge → 80040 同码防探测）；
   DELETE = 撤指派回默认链（无行幂等不 bump）；事务内 bump 配置版本——下一 run 生效，
@@ -62,7 +62,7 @@
 连接级认证失败走 **HTTP 401** + 信封体（#726 钉死「不入事件」，EventSource 看不见状态码——REST 刷新链
 死信号让路；其余响应仍 HTTP 200+信封）。码段：`0` 成功 · `1xxxx` 通用/鉴权 ·
 `2xxxx` 容器（20040–20046 全组 [退役保留] 随 #858 码段防复用）· `3xxxx` wiki ·
-`4xxxx` models（40042 端点不在白名单[运行时第二层，仅 runner 侧] · 40043 并发配额已满[per-user
+`4xxxx` models（40042 [退役保留，防复用] · 40043 并发配额已满[per-user
 maxConcurrentRuns 或全局 RUNNER_MAX_CONCURRENT_RUNS]）· `5xxxx` 会话/run 域（#747 C 节，
   #776 起 50002 session_not_found；#777 起 50003 审批挂起（#778 补 REST 前置面与码表）；#783 起
   50004 approval_not_found 同码防探测；#778 增（50004 让位 #783，顺移起）50005 run 进行中禁输入·

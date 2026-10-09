@@ -6,6 +6,26 @@
 
 ## Language
 
+**LLM 端点 (LLM endpoint)**:
+用户配置的模型服务入口，关联一个可信服务商预设、凭证与模型列表；会话、teammate 与插件可选择其中的模型。
+_Avoid_: 端口、自由地址 provider。
+
+**平台默认端点 (platform default endpoint)**:
+部署方提供的只读模型服务入口，是零配置用户的起点与用户默认链的兜底。
+_Avoid_: 用户种子端点、可编辑平台 provider。
+
+**端点预设清单 (endpoint preset catalog)**:
+平台随版本维护的可信服务商目录，每个预设固定协议与地址，用户只能从中选择。
+_Avoid_: 动态端点放行表、自定义 baseURL。
+
+**BYOK 凭证 (BYOK credential)**:
+用户自带的模型服务 API key，使用费用归用户自己的服务商账户；面板仅显示配置状态与掩码，支持替换。
+_Avoid_: 平台共享 key、可回显密钥。
+
+**插件 LLM 指派 (plugin LLM assignment)**:
+用户为声明 LLM 需求的插件或 judge 选择的端点与模型；未指定时跟随默认链。
+_Avoid_: 插件凭证下发、会话模型偏好。
+
 **OpenClaw 容器 (OpenClaw container)**:
 **（历史注：#858 OpenClaw 退役③起 fleet 整体退役——现役容器 = 会话沙箱 `researcher-sandbox-<sessionId>` + wiki 容器 `researcher-wiki-<userId>` 二 kind，本条保留为决策历史。）**
 面板编排的单位。每个容器内跑一个 `main` agent、一个 gateway（WS，容器内 18789）、以及独立的 home / wiki / openclaw.json。它是本系统唯一的外部 bounded context。
@@ -113,11 +133,11 @@ _Avoid_: 「审批消息」——审批卡是权限事件，不进 messages 转�
 _Avoid_: 「审批流」——掩盖三层各自的可替换性；「自动审批」单称——人工通道是其必要组成，不是例外。
 
 **规则层 (rule layer)**:
-漏斗第一层，确定性规则判定，零 LLM 成本。路径白名单（文件类工具字面参数，`wiki|lab|/tmp` 前缀，复用 `normalizeFilePath` 语义；exec 内路径由沙箱只读根兜底，不做字面扫描）+ 命令黑名单（shell 词法解析递归拆简单命令，V1 系统破坏类四条）+ provider 端点白名单（引述 #731，运行时复验在 LLM 调用出口）。名单 V1 硬编码 + 测试锁定，admin 可配为显式非目标。
+漏斗第一层，确定性规则判定，零 LLM 成本。路径白名单（文件类工具字面参数，`wiki|lab|/tmp` 前缀，复用 `normalizeFilePath` 语义；exec 内路径由沙箱只读根兜底，不做字面扫描）+ 命令黑名单（shell 词法解析递归拆简单命令，V1 系统破坏类四条）。名单 V1 硬编码 + 测试锁定，admin 可配为显式非目标。
 _Avoid_: 「静态审批」——规则不是只读配置，是三分判定的一支（黑名单拒/白名单放/灰区移交 judge）；把 exec 内路径纳入匹配——做不到可靠，是刻意的范围裁决。
 
 **judge (LLM 判定器)**:
-漏斗第二层，独立小模型（haiku 4.5 级）对灰区工具调用做 approve/reject 判定。输入固定为「用户输入 + 之前工具调用及结果 + 当前调用」（≤8k tokens，不喂历史判定防锚定，**不含模型自身推理输出**——主 agent 的 thinking 不在输入面）；政策**列拒四类**（系统破坏/数据外送/持久化后门/凭证访问），之外默认 approve；reject 以 ToolMessage 回喂主 agent，理由 ≤100 字。per-run 调用上限 20 次，超限升级人工。
+漏斗第二层，按用户插件 LLM 指派选择的判定模型（未指派时跟随用户默认端点，再由平台默认端点兜底）对灰区工具调用做 approve/reject 判定。输入固定为「用户输入 + 之前工具调用及结果 + 当前调用」（≤8k tokens，不喂历史判定防锚定，**不含模型自身推理输出**——主 agent 的 thinking 不在输入面）；政策**列拒四类**（系统破坏/数据外送/持久化后门/凭证访问），之外默认 approve；reject 以 ToolMessage 回喂主 agent，理由 ≤100 字。per-run 调用上限 20 次，超限或端点故障升级人工（fail-closed）。
 _Avoid_: 「内容审查器」——judge 只判工具调用的政策符合性，不审生成内容（那是 TextTrace 域）；「第二意见」——judge 是安全闸门，不是建议器，其 reject 有阻断力。
 
 **升级通道 (escalation)**:
@@ -280,16 +300,12 @@ _Avoid_: per-user `command_defs`/`skill_defs` 表——已退役；admin 在线 
 （插件系统 #788 + #799 落地——per-user 启用位，V1 仅 AutoFigure）per-user、跨会话持久的启用位（区别于管理员经面板级配置管的能力开关）。teammate 默认继承 owner 的启用集（与技能继承同语义）；禁用 = 新 run 不再见该插件的工具/命令，进行中 run 不中断、历史回放不受影响。
 _Avoid_: 会话级开关——启用是用户维状态，不随会话生灭；面板级配置——那是管理员面（生图模型、云 API key 等），与用户启用位是两回事。
 
-**插件 LLM 指派 (plugin LLM assignment)**:
-（#883 T3 落地——per-user per-plugin 端点/模型指派）用户在 Model 配置页为**声明了 `llm` 需求的插件**（manifest 声明位：description + 可选 defaultModel）单独指派 LLM 端点与模型，缺省「跟随默认链」（用户端点序 + 平台垫底）。解析优先级 = 面板级 env pin（AUTOFIGURE_SVG_MODEL，**已标废弃**、设值启动告警）> 用户指派 > 默认链；指派悬挂（端点已删/模型已移出）回落平台默认 + 告警；指派变更事务内 bump 配置版本——下一 run 生效，在飞 run 不受影响。凭证永不下发插件——ctx.llm 是 per-plugin 解析器（工具名→插件 id 经运行时目录派生），插件只见解析结果不见凭证。保留键 `judge`（审批判定器）同表收指派行，执行面归审批域后票。
-_Avoid_: 「端口指派/端点白名单」——端点术语已统一（见 LLM 端点）；给插件下发 API key——凭证单向流红线，指派只是 id 引用；插件内自解析模型——解析链封装在核心 ctx.llm，插件不碰 registry 查询逻辑。
-
 **能力实现层与用户交互层 (capability layer vs interaction layer)**:
 （插件系统 #788 + #758 方向修订，已落地）插件与 commands/skills 的分层关系：插件是**能力实现层**（工具/命令/渲染背后的代码实现），commands/skills 是**用户交互层**（用户触发与引导这些能力的统一交互面）。交互层内容**全部官方维护**：插件贡献的（有代码 backing，如 `/figure` 命令背后是 figure 工具执行）+ 官方静态目录（编译期打包、always-on、无启用位，#758 方向修订 supersede #749 Q7+Q10 的 per-user 自定义面）同形并存——用户视角一个命令模型，实现层两源、内容源零用户自建。
 _Avoid_: 「插件收编 commands/skills」——插件不取代官方内容目录；把 skills 归入插件——技能是内容级扩展（目录注入），无代码，不是插件的特例；per-user 自定义命令/技能与任何在线写面（admin CRUD / agent 自改自存）——已退役（#758），官方内容只经 git 发版维护。
 
 **双面板 (two-panel split)**:
-（#758 方向修订定稿，#800 落地——admin 子应用 `/admin/` MPA）产品面按「跨用户运营 vs 本人工作」切割为两个面板：用户面板 = 本人工作面（对话、wiki 只读视图、lab 文件、models 自有 provider、插件目录启用位、本人容器）；admin 面板 = 跨用户运营面（用户管理/配额、provider_endpoints 白名单、全局审计检索、usage 核算）。产物级隔离——同仓库双入口 MPA（独立 `admin.html`/路由/bundle，共享组件库与 api client），用户面板 bundle 不含 admin 代码；同一控制面、同一 JWT，role claim 区分，登录按角色落点，后端 REST 面不变只换前端承载。
+用户面板是本人科研工作面：对话、wiki、lab 文件、LLM 端点与插件 LLM 指派、插件启用；admin 面板是跨用户运营面：用户管理与配额、审计检索、用量核算、官方内容与 API 文档。两者共享身份认证，各有独立入口。
 _Avoid_: 单面板角色门控混入——「摘出来」是产物级隔离，不是隐藏入口；为 admin 另起服务/认证体系——隔离只发生在前端产物与路由层。
 
 **产品显示名 (product display name)**:

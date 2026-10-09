@@ -92,7 +92,7 @@ figure 生成 = server 进程内插件管线（#792 起）。键声明单源 =
 | `AUTOFIGURE_IMAGE_API_KEY` | 是 | 生图 API key（服务端凭证） |
 | `FAL_KEY` | 是 | fal 云计算 key（SAM3/RMBG） |
 | `AUTOFIGURE_IMAGE_BASE_URL` | 否 | 生图 API base URL（缺省国际区 `https://api.minimax.io`） |
-| `AUTOFIGURE_SVG_MODEL` | 否 | SVG 生成模型 id（缺省 owner 默认链 primary） |
+| `AUTOFIGURE_SVG_MODEL` | 否 | 废弃兼容 pin：优先于用户指派，设值告警；清除后使用插件 LLM 指派/默认链 |
 
 - **生产**：三必填键写入同目录 `.env`（env_file 注入，与 `LLM_API_KEY` 同机制）——缺键 =
   server 启动期 fail-fast throw，不做静默降级。
