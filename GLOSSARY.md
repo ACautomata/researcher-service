@@ -327,3 +327,7 @@ _Avoid_: 与 researcher 谓词/编排 skill 混淆——那是源仓库的提示
 **实验方案人审 (plan review)**:
 （目标架构，wayfinder #846 定稿，未实施）W4 实验流程的**流程内置无条件门禁**：design/spec 产出后必停等用户审批（与 users.approvalMode 无关），方案全文经审批卡呈现（PlanApprovalCard，escalation source 第五值 `'experiment-plan'` + plan {title, summary, text, round} 全文内联）；approve（可选附言）→ 主 agent 续执行段；deny（必填理由 ≤2000）→ 回 design 修订模式，上限 3 轮，超限 = `plan_review_exhausted` 结构化终局（run completed，非 failed）。机制 = 工具内 interrupt + spec 落盘 lab 幂等短路（resume 重放跳过 design LLM 直达 interrupt 点）。
 _Avoid_: 与「升级通道」混淆——升级是审批三层漏斗的罕用人工层（触发源驱动），plan review 是流程承诺的无条件门禁，两者别钉；「方案批准豁免执行段漏斗」——两层正交：方案审科学内容（「做什么」），漏斗审系统安全（「怎么做」）。
+
+**文档面 (API docs surface)**:
+控制面的 OpenAPI/Swagger 接口文档域（#761）：zod 生成式 spec（请求体单一来源 = `validation/schemas.ts`，零漂移）+ Swagger UI，挂 `/api/docs` 整树 **requireAuth + requireAdmin**（#758 Q14），env 开关 `API_DOCS_ENABLED`（默认开，关 → 装配层不注入 → 整树 90005）。网页交互入口 = 前端 admin 子应用内嵌视图（前端带认证链拉 spec、TryIt 注入 token）——浏览器地址栏直开 `/api/docs` 不可达（Bearer 门控，导航请求带不上 header）。SSE 事件流端点不在覆盖面（流式语义超出请求/响应文档模型）。
+_Avoid_: 手写 openapi.yaml 第二来源（破坏零漂移；新增端点登记 `openapi/paths.ts`，由 `apiDocsCoverage.test.ts` 路由栈反射双向守卫）；把 `/api/docs` 当公开文档站挂公网——它是 admin 运营工具面，生产可用 `API_DOCS_ENABLED=false` 整体关闭。
