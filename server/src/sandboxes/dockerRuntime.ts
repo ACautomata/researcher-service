@@ -12,7 +12,7 @@ import { Readable } from 'node:stream'
 import { ensureImagePulled } from '../containers/dockerImage'
 import { KIND_SANDBOX, LABEL_KIND_KEY, LABEL_SESSION_KEY } from '../containers/constants'
 import { createTarTree } from '../files/tar'
-import { SANDBOX_KEEPALIVE_CMD, SANDBOX_LAB_ROOT, SANDBOX_USER } from './values'
+import { SANDBOX_KEEPALIVE_CMD, SANDBOX_LAB_ROOT, SANDBOX_USER, clampSandboxLimits } from './values'
 import {
   sandboxContainerName,
   sandboxNetworkName,
@@ -35,12 +35,21 @@ function statusCodeOf(e: unknown): number | undefined {
 
 export class DockerSandboxRuntime implements SandboxRuntime {
   private cached: Docker | null = null
+  // daemon NCPU 缓存（info() 每实例一次；核数冷配置，daemon 重启外不变，缓存不损正确性）
+  private cachedHostNanoCpus: number | null = null
 
   constructor(private readonly clientFactory: () => Docker = () => new Docker()) {}
 
   private client(): Docker {
     if (this.cached === null) this.cached = this.clientFactory()
     return this.cached
+  }
+
+  private async hostNanoCpus(): Promise<number> {
+    if (this.cachedHostNanoCpus === null) {
+      this.cachedHostNanoCpus = (await this.client().info()).NCPU * 1_000_000_000
+    }
+    return this.cachedHostNanoCpus
   }
 
   // 构造沙箱 create 参数（纯逻辑，可单测）。#747 E 节沙箱列的完整投影：
@@ -117,9 +126,12 @@ export class DockerSandboxRuntime implements SandboxRuntime {
 
   // 创建（不启动）：ensureImage → createContainer → putArchive 预置 /lab 属主。
   // 网络创建是业务编排（lifecycle.ensure 显式先行），不在本原语内。
+  // NanoCpus 按 daemon NCPU 钳制：规格初值 4 核在低核 host 上会被 daemon 400 拒收
+  //（"Range of CPUs is from 0.01 to X.00..."）——limit 是上限，让位 host 实有核数。
   async createSandbox(spec: SandboxSpec): Promise<string> {
     await this.ensureImage(spec.image)
-    const container = await this.client().createContainer(this.buildSandboxCreateOptions(spec))
+    const limits = clampSandboxLimits(spec.limits, await this.hostNanoCpus())
+    const container = await this.client().createContainer(this.buildSandboxCreateOptions({ ...spec, limits }))
     // /lab 目录条目名由树根常量派生（'lab'），防路径字面量手写漂移
     await container.putArchive(
       Readable.from([
@@ -146,7 +158,8 @@ export class DockerSandboxRuntime implements SandboxRuntime {
     const fsImage = sandboxFsImageName(spec.sessionId)
     const stream = await this.client().getContainer(sandboxContainerName(spec.sourceSessionId)).export()
     await this.client().importImage(stream, { repo: fsImage, tag: 'latest' })
-    await this.client().createContainer(this.buildSandboxCreateOptions({ ...spec, image: fsImage }))
+    const limits = clampSandboxLimits(spec.limits, await this.hostNanoCpus())
+    await this.client().createContainer(this.buildSandboxCreateOptions({ ...spec, image: fsImage, limits }))
     return 'copied'
   }
 
