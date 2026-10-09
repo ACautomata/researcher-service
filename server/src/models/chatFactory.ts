@@ -34,6 +34,7 @@ export const defaultFactory: ChatModelFactory = async (model, opts) => {
   if (opts.lcProvider === 'openai') {
     return (await initChatModel(model, {
       modelProvider: 'openai',
+      configurableFields: ['model', 'modelProvider', 'temperature'],
       apiKey: opts.apiKey,
       baseUrl: opts.baseUrl, // initChatModel 映射 → ChatOpenAI baseURL（实测验证）
       configuration: { fetch: opts.fetch },
@@ -41,6 +42,7 @@ export const defaultFactory: ChatModelFactory = async (model, opts) => {
   }
   return (await initChatModel(model, {
     modelProvider: 'anthropic',
+    configurableFields: ['model', 'modelProvider', 'temperature'],
     apiKey: opts.apiKey,
     clientOptions: { baseURL: opts.baseUrl, fetch: opts.fetch },
     ...(opts.authHeader
