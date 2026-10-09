@@ -991,7 +991,7 @@ export class RunService {
         // #782 run 上下文（ALS 外层）：journal 行 runId 盖印源（checkpointId 终态回填键）——
         // 覆盖流创建与消费全程（backend 打点在流内发生）。#792 插件 run frame（嵌套 ALS）：
         // ctx 四件解析源——图实例跨 run 复用，run 身份只能运行期读取（runContext.ts 头注）。
-        const pluginFrame = await this.buildPluginRunFrame(cmd)
+        const pluginFrame = await this.buildPluginRunFrame(cmd, snapshot)
         await runWithRunContext(cmd.runId, async () => {
           await runWithPluginRunFrame(pluginFrame, async () => {
             const stream = await agent.streamEvents(input, {
@@ -1251,7 +1251,7 @@ export class RunService {
   // 弱关联盖印）；onUpdate 闭包 per-run（per-toolCall 上次 stage 记忆随 frame GC）。
   private readonly figureDedupe = new Map<string, Promise<{ readonly figureId: string }>>()
 
-  private async buildPluginRunFrame(cmd: RunEventContext & { username: string }): Promise<PluginRunFrame | undefined> {
+  private async buildPluginRunFrame(cmd: RunEventContext & { username: string }, runSnapshot?: ProviderConfigSnapshot): Promise<PluginRunFrame | undefined> {
     if (!this.deps.plugins) return undefined
     const sessionId = cmd.parentSessionId ?? cmd.sessionId
     const audit = createPrismaFigureRunAuditSink(this.deps.prisma, {
@@ -1263,8 +1263,8 @@ export class RunService {
     const stageTrace = new Map<string, string>()
     // 配置快照 run 启动捕获一次（#883 T3）：ctx.llm per-plugin 解析全部走本快照——
     // 指派/端点变更 bump 版本后下一 run 重建快照，在飞 run 不受影响（与主模型
-    // getDefaultModel 同语义；快照已被同 run 主模型路径缓存，此处命中零额外读）。
-    const snapshot = await this.deps.registry.getSnapshot(cmd.ownerId)
+    // getDefaultModel 同语义；主模型路径传入同一对象，直达执行路径独立捕获）。
+    const snapshot = runSnapshot ?? await this.deps.registry.getSnapshot(cmd.ownerId)
     return {
       run: { ownerId: cmd.ownerId, sessionId, runId: cmd.runId },
       figures: createFiguresToolPort({ prisma: this.deps.prisma, dedupe: this.figureDedupe }, cmd.ownerId),
