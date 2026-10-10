@@ -7,7 +7,7 @@
 > 蓝本：[752 插件契约](./752-plugin-system.md) · [744 AutoFigure 插件先例](./744-autofigure-langgraph.md) · [729 审批三层漏斗](./729-approval-funnel.md) · [723 LangGraph runtime](./723-langgraphjs-deepagents-runtime.md) · [725 OpenWiki/OKF](./725-openwiki-embedding-okf.md)。
 > 路由图验证骨架：[routing-skeleton/](./routing-skeleton/)（#847，已 squash 入 master e7f8976）。
 > **修订**（2026-10-10）：[wayfinder map #899](https://github.com/ACautomata/researcher-service/issues/899)（四流程节点 agent loop 化修订）定案落盘——证据链 [#900](https://github.com/ACautomata/researcher-service/issues/900) 节点盘点 / [#901](https://github.com/ACautomata/researcher-service/issues/901) 形态调研 / [#902](https://github.com/ACautomata/researcher-service/issues/902) 实测拍板 / [#903](https://github.com/ACautomata/researcher-service/issues/903) 对照实测 / [#904](https://github.com/ACautomata/researcher-service/issues/904) 定案；受动四处 = §4.3 口径注记 / §7.1 `PAGE_GENERATE_MAX_RETRIES` 触发面扩展 / §10 新增宽口径否决条目 / GLOSSARY 两词条（单发节点 · 节点内 agent 循环）。**#899 图决议并入本规格上游票链**——凡冲突处，以上游票（#846 图 + #899 图）为准；§10 否决记录只增不删。
-> 状态：**定稿**（2026-10-08 评审通过；解读点 A/C/D 按文拍板，B 两候选形态经评审认可、选择归实现票首项）。**2026-10-10 修订**（#899 图 [#905](https://github.com/ACautomata/researcher-service/issues/905) 落盘，修订评审中）：四处受动见上修订记录。
+> 状态：**定稿**（2026-10-08 评审通过；解读点 A/C/D 按文拍板，B 两候选形态经评审认可、选择归实现票首项）。**2026-10-10 修订**（#899 图 [#905](https://github.com/ACautomata/researcher-service/issues/905) 落盘，修订评审通过）：四处受动见上修订记录。
 
 ## 0. 目标形态总览
 
