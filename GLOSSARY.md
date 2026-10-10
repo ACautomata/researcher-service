@@ -328,6 +328,14 @@ _Avoid_: 与 researcher 谓词/编排 skill 混淆——那是源仓库的提示
 （目标架构，wayfinder #846 定稿，未实施）W4 实验流程的**流程内置无条件门禁**：design/spec 产出后必停等用户审批（与 users.approvalMode 无关），方案全文经审批卡呈现（PlanApprovalCard，escalation source 第五值 `'experiment-plan'` + plan {title, summary, text, round} 全文内联）；approve（可选附言）→ 主 agent 续执行段；deny（必填理由 ≤2000）→ 回 design 修订模式，上限 3 轮，超限 = `plan_review_exhausted` 结构化终局（run completed，非 failed）。机制 = 工具内 interrupt + spec 落盘 lab 幂等短路（resume 重放跳过 design LLM 直达 interrupt 点）。
 _Avoid_: 与「升级通道」混淆——升级是审批三层漏斗的罕用人工层（触发源驱动），plan review 是流程承诺的无条件门禁，两者别钉；「方案批准豁免执行段漏斗」——两层正交：方案审科学内容（「做什么」），漏斗审系统安全（「怎么做」）。
 
+**单发节点 (single-shot node)**:
+（目标架构，wayfinder #899 图定稿〔证据链 #900–#904〕，未实施）research 插件四流程图中 LLM 中间节点的执行形态：节点对图一次输入 → 一次输出，节点内部经**单次前向**（一次 `ctx.llm.generateStructured`）产出，无工具调用面、无循环、无 LLM 自由裁量。定案 = 四流程中间节点**全部维持单发**（#904 零转换；#903 对照实测：critic 盲评 56% 落平局规则、design 三判据全败，loop 臂 9/9 零工具——证据已在输入内则不激活检索）。兜底重试（截断/解析/validate 失败附诊断回喂）**不改单发语义**——只纠格式、K≤2 有界、输入不变。
+_Avoid_: one-shot——撞历史词条「一次性临时容器 (one-shot container)」的英文；一次性生成——撞「轮次 (turn)」词条「一次发送一拍」的循环义，且掩盖「节点」才是执行形态的单位。
+
+**节点内 agent 循环 (node-internal agent loop)**:
+（目标架构，wayfinder #899 图定稿，**已否决**——防重开档 853 §10 宽口径否决条目）单发节点的候选替代形态：节点对图的输入/输出契约与拓扑位置不变，节点内部由单次前向换成一个小型 agent loop——节点内 agent 可获取、调用框架基本工具，循环执行直至产出节点输出。2026-10-10 #904 定案否决入图（零转换、全图不设条件改路径）；实测依据与重开条件（驳实测 / 「输入边静态、内容动态」新节点类型 / 模型换代重测）见 853 §10。
+_Avoid_: agent loop 裸用——撞「轮次 (turn)」词条内主 agent 每轮循环义（853 §1.1「命令路径无 agent loop」即此义）；循环节点——暗示图拓扑含环（路由图拓扑必须可由持久化状态推导）。
+
 **文档面 (API docs surface)**:
 控制面的 OpenAPI/Swagger 接口文档域（#761）：zod 生成式 spec（请求体单一来源 = `validation/schemas.ts`，零漂移）+ Swagger UI，挂 `/api/docs` 整树 **requireAuth + requireAdmin**（#758 Q14），env 开关 `API_DOCS_ENABLED`（默认开，关 → 装配层不注入 → 整树 90005）。网页交互入口 = 前端 admin 子应用内嵌视图（前端带认证链拉 spec、TryIt 注入 token）——浏览器地址栏直开 `/api/docs` 不可达（Bearer 门控，导航请求带不上 header）。SSE 事件流端点不在覆盖面（流式语义超出请求/响应文档模型）。
 _Avoid_: 手写 openapi.yaml 第二来源（破坏零漂移；新增端点登记 `openapi/paths.ts`，由 `apiDocsCoverage.test.ts` 路由栈反射双向守卫）；把 `/api/docs` 当公开文档站挂公网——它是 admin 运营工具面，生产可用 `API_DOCS_ENABLED=false` 整体关闭。

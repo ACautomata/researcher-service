@@ -3,10 +3,11 @@
 > Wayfinder 票 [#853](https://github.com/ACautomata/researcher-service/issues/853)，map：[#846 researcher skills → LangGraph 单入口意图路由四流程插件（交接规格）](https://github.com/ACautomata/researcher-service/issues/846)。
 > 本文档把 map 下 10 张已决票的决议汇编成一份**可直接交接给实现 effort** 的规格。
 > 本规格**零新决策**：所有形状均以上游票决议原文为最终准据；凡冲突处，以上游票为准。汇编面需口径归一的解读点与票间缺口在 §11.3 显式列出，定稿评审时拍板。
-> 术语以 GLOSSARY.md 为准（**意图识别 / 路由 / workflow 流程 / 实验方案人审 (plan review)** 为本规格随附新增词条）。「researcher 谓词/编排 skill」专指源仓库提示词工作流资产（`/Users/junran/Documents/researcher`，只读参考、禁改动），**区别于** #787 官方内容目录 skills。
+> 术语以 GLOSSARY.md 为准（**意图识别 / 路由 / workflow 流程 / 实验方案人审 (plan review)** 为 #846 图随附新增词条；**单发节点 (single-shot node) / 节点内 agent 循环 (node-internal agent loop)** 为 #899 图修订随附新增词条）。「researcher 谓词/编排 skill」专指源仓库提示词工作流资产（`/Users/junran/Documents/researcher`，只读参考、禁改动），**区别于** #787 官方内容目录 skills。
 > 蓝本：[752 插件契约](./752-plugin-system.md) · [744 AutoFigure 插件先例](./744-autofigure-langgraph.md) · [729 审批三层漏斗](./729-approval-funnel.md) · [723 LangGraph runtime](./723-langgraphjs-deepagents-runtime.md) · [725 OpenWiki/OKF](./725-openwiki-embedding-okf.md)。
 > 路由图验证骨架：[routing-skeleton/](./routing-skeleton/)（#847，已 squash 入 master e7f8976）。
-> 状态：**定稿**（2026-10-08 评审通过；解读点 A/C/D 按文拍板，B 两候选形态经评审认可、选择归实现票首项）。
+> **修订**（2026-10-10）：[wayfinder map #899](https://github.com/ACautomata/researcher-service/issues/899)（四流程节点 agent loop 化修订）定案落盘——证据链 [#900](https://github.com/ACautomata/researcher-service/issues/900) 节点盘点 / [#901](https://github.com/ACautomata/researcher-service/issues/901) 形态调研 / [#902](https://github.com/ACautomata/researcher-service/issues/902) 实测拍板 / [#903](https://github.com/ACautomata/researcher-service/issues/903) 对照实测 / [#904](https://github.com/ACautomata/researcher-service/issues/904) 定案；受动四处 = §4.3 口径注记 / §7.1 `PAGE_GENERATE_MAX_RETRIES` 触发面扩展 / §10 新增宽口径否决条目 / GLOSSARY 两词条（单发节点 · 节点内 agent 循环）。**#899 图决议并入本规格上游票链**——凡冲突处，以上游票（#846 图 + #899 图）为准；§10 否决记录只增不删。
+> 状态：**定稿**（2026-10-08 评审通过；解读点 A/C/D 按文拍板，B 两候选形态经评审认可、选择归实现票首项）。**2026-10-10 修订**（#899 图 [#905](https://github.com/ACautomata/researcher-service/issues/905) 落盘，修订评审中）：四处受动见上修订记录。
 
 ## 0. 目标形态总览
 
@@ -213,7 +214,7 @@ resolveInputs → contextPack ──→⌗ Send[]×5 → bucket×N → dedup →
 | validate | validate_idea_cards.py → **TS/zod 全规则迁移**（#848 §3.3）：14 必填、evidence_chain 空须 low-confidence、anchor_sources 1–4 个 + 泛化锚黑名单（GENERIC_ANCHOR_TERMS/FRAGMENTS + CONCRETE_ANCHOR_MARKERS 判据）、target_problem ≥30 字符 + 痛点具体度 marker、wiki 源锚须 wiki_writeback、minimum_experiment <20 字符 warning |
 | persist | survived 整批先生成再逐页写；**非原子风险 V1 明示接受**（幂等哨兵使重跑可续）；无 survived 时不写 wiki、回复全部淘汰原因 |
 
-- **W3 调用上界**：classify 1 + 桶 ≤8 + challenge 逐卡 ≤24 + summary ≈ **≤35 次 LLM/run**（固定拓扑天然有界，#869 D4）。
+- **W3 调用上界**：classify 1 + 桶 ≤8 + challenge 逐卡 ≤24 + summary ≈ **≤35 次 LLM/run**（固定拓扑天然有界，#869 D4）。口径注记（#899 图 #904 澄清，非变更）：**≤35 = 固定拓扑节点调用数**——`PAGE_GENERATE_MAX_RETRIES` 兜底重试不改变拓扑计数口径（#869 本就是节点数推导；且 W3 的 LLM 节点不在长页生成五节点重试覆盖面〔§7.1〕内，触发面扩展对 W3 调用数零影响）。
 - prompt 资产（#848 §3）：Brief 模板 10 字段、Idea Card 15 字段（idea_id/title/one_sentence_hypothesis/anchor_sources/target_problem/mechanism/paper_insight_or_limitation/evidence_chain/minimum_experiment/expected_metric_change/implementation_scope/risks/confidence/recommendation_reason/wiki_writeback——锚含 wiki 源时必填）、7 种生成策略（按桶注入对应策略段）、质量检查清单（output-spec）。完整填写规则以 #848 §3 为单一来源。
 
 ### 4.4 W4 experiment 实验自主设计与执行（三调用两段式）
@@ -307,7 +308,7 @@ resolveInputs → contextPack ──→⌗ Send[]×5 → bucket×N → dedup →
 | `MIN_CONFIDENCE` | 0.60 | 意图分类放行阈值（#866 实测定标，§1.2） |
 | `CONTEXT_PACK_BUDGET_TOKENS` | 16000 | W3 contextPack 预算，构建时裁一次（2 chars/token 口径 ≈32k 中文字符；judge 8k 的 2 倍——多页引用场景） |
 | `PAGE_OUTPUT_MAX_TOKENS` | 32000 | 长页输出单次生成上限，盖五节点：W1 create / W2 extract+critic / W4 design+spec；经 generateStructured 既有 maxTokens 参数传入。否决对齐 autofigure 50k（超多数 provider output cap）；否决两过式分段生成 |
-| `PAGE_GENERATE_MAX_RETRIES` | 1 | 截断兜底：确定性 validate 宰住截断产物 → 回生成节点重试 1 次，重试 prompt 附截断诊断（finish_reason=length 检出） |
+| `PAGE_GENERATE_MAX_RETRIES` | 1 | 生成兜底重试（#899 图 #904 修订：触发面扩展，值与覆盖面不动）：**截断 ∨ 结构化解析/validate 失败**（finish_reason=length 检出 / generateStructured zod 解析不过 / 确定性校验拒）→ 回生成节点重试 1 次，重试 prompt 附对应诊断回喂；覆盖面维持长页生成五节点（W1 create / W2 extract+critic / W4 design+spec）。边界：无工具面、无 LLM 自由裁量、K≤2 有界（初次生成 + 至多一次修复）、输入不变无检索——只纠格式不改生成语义（#850「一次性生成语义足够」不被触及），系既有截断重试先例的触发面泛化、非新形态（critic gate 56%→100% 实测归因 =「单发 + 至多一次协议修复」，#903/#904） |
 | `BUCKETS_MAX` | 8 | W3 扇出 cap（参数缺省 5 固定 + 3 opt-in） |
 | `PDF_EXTRACT_MAX_CHARS` | 待定稿拍板（量级 ~1M chars，#851 D10） | extractPdfText 字符上限，超限报错不静默截断 |
 | `PLAN_REVIEW_MAX_ROUNDS` | 3 | W4 方案人审修订上限（#852） |
@@ -379,7 +380,14 @@ resolveInputs → contextPack ──→⌗ Send[]×5 → bucket×N → dedup →
 9. URL PDF 来源（W1 capture，#850 D7 明示降级）。
 10. 图内跨会话 wiki 互斥（与 writelock registry 同边界，#851 D7）。
 
-**已否决决策**（防重开索引）：子图组合（ns 寻址冲突，#847）/ deepagents teammate 路由与委派（LLM 自由裁量违拓扑硬约束，#847）/ 会话主图改造（#849 D1 否决 A）/ teammate 式独立 run（#849 D1 否决 C）/ 第 5 入口命令 /research（#849 D4）/ NL 确认审批形态（#852）/ .claims 直写与 lifecycle submit_page 同步调用（#850 D3，V2 重评）/ 图内 exec 节点（双违反 #752 已钉）/ 逐命令第二插件工具（白名单防漂移不敌探索现实）/ 执行段自行 clone / 自由 text input（#850 D2）/ 插件 content 内嵌 frontmatter（#851 D11）/ `plugin_run.*` 泛化事件名（#851 D2）/ 前端 stage 白名单镜像（#851 D8）/ workflow 前缀化 stage 值（#851 D5）/ FigureCard 式阶段条（#867 D1）/ 图内限并发与插件独立配额域（#869 D1）/ run 级 token 硬顶与调用计数硬上限（#869 D4）/ exec timeout 延长档（#869 D6）/ 两过式分段生成（#869 D5）/ 多意图必 clarify 与多标签 schema（#850 D17）/ idea card 输入豁免映射校验（#868 D3）/ 机读 validates 单值字段（#868 D2）。
+**已否决决策**（防重开索引）：子图组合（ns 寻址冲突，#847）/ deepagents teammate 路由与委派（LLM 自由裁量违拓扑硬约束，#847）/ 会话主图改造（#849 D1 否决 A）/ teammate 式独立 run（#849 D1 否决 C）/ 第 5 入口命令 /research（#849 D4）/ NL 确认审批形态（#852）/ .claims 直写与 lifecycle submit_page 同步调用（#850 D3，V2 重评）/ 图内 exec 节点（双违反 #752 已钉）/ 逐命令第二插件工具（白名单防漂移不敌探索现实）/ 执行段自行 clone / 自由 text input（#850 D2）/ 插件 content 内嵌 frontmatter（#851 D11）/ `plugin_run.*` 泛化事件名（#851 D2）/ 前端 stage 白名单镜像（#851 D8）/ workflow 前缀化 stage 值（#851 D5）/ FigureCard 式阶段条（#867 D1）/ 图内限并发与插件独立配额域（#869 D1）/ run 级 token 硬顶与调用计数硬上限（#869 D4）/ exec timeout 延长档（#869 D6）/ 两过式分段生成（#869 D5）/ 多意图必 clarify 与多标签 schema（#850 D17）/ idea card 输入豁免映射校验（#868 D3）/ 机读 validates 单值字段（#868 D2）/ 四流程中间节点 agent loop 化（宽口径否决·带重开条件，见下条目，#899 图 #904）。
+
+**宽口径否决条目（带重开条件；[#899](https://github.com/ACautomata/researcher-service/issues/899) 图定案 [#904](https://github.com/ACautomata/researcher-service/issues/904)，2026-10-10）——四流程中间节点 agent loop 化（节点内 agent 循环）**：
+
+- **否决内容**：四流程中间节点由单发形态改为节点内小型 agent loop（节点对图的输入/输出契约与拓扑位置不变，节点内 agent 可获取、调用框架基本工具，循环执行直至产出节点输出）。**定案 = 零转换**：四流程中间节点全部维持单发，全图不设任何条件改路径；其余中间节点的排除理由档 [#900](https://github.com/ACautomata/researcher-service/issues/900)（盘点分级）/ [#902](https://github.com/ACautomata/researcher-service/issues/902)（audit 排除入档）。
+- **实测依据**：[#903](https://github.com/ACautomata/researcher-service/issues/903) 对照实测（36 run = critic/design × oneshot/loop × 3 论文 × 3 重复，同输入同 wiki 快照 A/B、MiniMax-M3 pin）+ 用户盲评 18 对——critic 盲评 56%（<60% 平局规则，loop 臂 9/9 零工具调用：证据已在输入内则不激活检索）；design 三判据全败（盲评 33% / gate 33% vs 基线 44% 退步 / 7/9 token 超线峰值 14.83×，检索行为真实但零 gate 收益）。
+- **重开条件**（仅此三条）：① 驳 #903 实测数据或协议本身；③ 出现「输入边静态、内容动态」缝隙的新节点类型；④ RESEARCH_MODEL 换代后重测（本次 pin MiniMax-M3 单模型 + 3 论文语料的代差局限）。（候选条件②「新判据」已弃——太软，易成万能钥匙。）
+- **与本规格其他条目的关系**：`PAGE_GENERATE_MAX_RETRIES` 触发面扩展（§7.1）系本定案唯一入稿项——「单发 + 至多一次协议修复」形态（无工具面、无 LLM 自由裁量），不属本否决条目的重开面；W3 ≤35 口径注记见 §4.3。
 
 ## 11. 开放点
 
