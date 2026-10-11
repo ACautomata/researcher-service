@@ -8,24 +8,31 @@
 //   - 存在性校验：pdftotext 前先 `test -f`——文件缺失给 not_found 明确报错（不触发提取、
 //     不把 pdftotext 的 "Couldn't open file" 语义当提取失败混传）。
 //   - 核心固定命令（沙箱内执行）：pdftotext <path> -（stdout 输出，天然按 \f 分页——
-//     按页数组返回，PDF 全文不进主上下文）；超时 = EXEC_DEFAULT_TIMEOUT_MS 全局口径。
+//     按页数组返回，PDF 全文不进主上下文）；两段 exec（存在性探针 + 提取）同带
+//     EXEC_DEFAULT_TIMEOUT_MS 全局口径超时（纪律一致性——原语缺省无超时，端口显式传）。
 //   - 字符上限 PDF_EXTRACT_MAX_CHARS（plugins/research/values，853 §7.1）：超限明确报错不
 //     静默截断——截断致 extract 缺节 → validate 拒 → 重试循环浪费 token。判定发生在提取
 //     全文回流之后（exec stdout 全量收集是 Docker 原语固定形态）——「不进主上下文」指 LLM
-//     上下文；控制面内存峰值 ≈ 2×PDF 文本字节（1M chars 上限 ≈ 2MB，可接受）。
+//     上下文；上限不构成控制面内存界：峰值 ≈ 2×提取全文字节，超限 PDF 的提取全文可远大于
+//     上限（如 50MB 文本 → 峰值 ~100MB），极端值依赖 daemon 侧输出不失控这一运维前提。
+//   - 容器/daemon 级故障归类：exec 原生抛错（labContainer 陈旧值容器已删、daemon 断连等
+//     infra 面）→ sandbox_unavailable，不裸冒泡（超时经原语归一 exitCode 124，走
+//     extract_failed 不入本码）；PluginDocsPortError 直通。
 //   - 沙箱镜像含 poppler 是镜像验收项（#908）：exit 127（pdftotext 不在镜像）报错文案明示
 //     poppler-utils 缺位，引导部署设 SANDBOX_IMAGE 指向 poppler 镜像。
 
 import { PDF_EXTRACT_MAX_CHARS } from '../../../plugins/research/values'
+import { PATH_MAX } from '../wiki/paths'
 import { EXEC_DEFAULT_TIMEOUT_MS } from './backend/values'
 import type { SandboxFilePrimitives } from './backend/primitives'
 import type { PluginDocsPort } from '../plugins/api'
 
 export type PluginDocsPortErrorCode =
-  | 'invalid_path' // 非 /lab/ 前缀 / 穿越 / 反斜杠 / 空字节
+  | 'invalid_path' // 非 /lab/ 前缀 / 穿越 / 反斜杠 / 空字节 / 超长（PATH_MAX 同族）
   | 'not_found' // 存在性校验失败
-  | 'extract_failed' // pdftotext 非零退出（含镜像缺 poppler 的 127）
+  | 'extract_failed' // pdftotext 非零退出（含镜像缺 poppler 的 127 与超时归一的 124）
   | 'too_large' // 提取全文超 PDF_EXTRACT_MAX_CHARS（不静默截断）
+  | 'sandbox_unavailable' // labContainer exec 不可达（容器不存在/daemon 断连等 infra 面归类）
 
 export class PluginDocsPortError extends Error {
   constructor(
@@ -52,7 +59,10 @@ export function normalizeLabPath(raw: string): string {
   const parts = v.split('/').filter((p) => p !== '' && p !== '.')
   if (parts[0] !== 'lab' || parts.length < 2) invalid()
   if (parts.some((p) => p === '..')) invalid()
-  return `/${parts.join('/')}`
+  const norm = `/${parts.join('/')}`
+  // 长度上限（wiki/paths.ts PATH_MAX 同族——normalizeRelPath 相对路径版逐 code-point 同纪律）
+  if (Array.from(norm).length > PATH_MAX) invalid()
+  return norm
 }
 
 // pdftotext stdout 按页切分：\f（form feed）天然分页；尾部 form-feed artifact（pdftotext
@@ -81,11 +91,24 @@ export function createPluginDocsPort(deps: PluginDocsToolPortDeps): PluginDocsPo
   return {
     async extractPdfText({ sandboxPath }) {
       const path = normalizeLabPath(sandboxPath)
-      const probe = await deps.primitives.exec(deps.container, ['test', '-f', path])
+      // 异常转译膜：infra 面原生抛错归类 sandbox_unavailable（labContainer 陈旧值等不裸冒泡）；
+      // PluginDocsPortError（invalid_path 等）直通；超时经原语归一 exitCode 124 不入本膜。
+      const exec = async (cmd: string[]) => {
+        try {
+          return await deps.primitives.exec(deps.container, cmd, { timeoutMs })
+        } catch (e) {
+          if (e instanceof PluginDocsPortError) throw e
+          throw new PluginDocsPortError(
+            'sandbox_unavailable',
+            `沙箱容器 exec 不可达 (${deps.container}): ${e instanceof Error ? e.message : String(e)}`,
+          )
+        }
+      }
+      const probe = await exec(['test', '-f', path])
       if (probe.exitCode !== 0) {
         throw new PluginDocsPortError('not_found', `文件不存在或不可读: ${path}`)
       }
-      const out = await deps.primitives.exec(deps.container, ['pdftotext', path, '-'], { timeoutMs })
+      const out = await exec(['pdftotext', path, '-'])
       if (out.exitCode !== 0) {
         const stderr = out.stderr.trim()
         const suffix = stderr === '' ? '' : `: ${stderr}`

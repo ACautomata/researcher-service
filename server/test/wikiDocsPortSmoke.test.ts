@@ -71,6 +71,7 @@ describe.skipIf(!DOCKER_UP)('wiki/docs port 集成 smoke（真 docker daemon · 
   let docker: Docker
   let lifecycle: WikiContainerLifecycle
   let primitives: DockerPrimitives
+  let builtPopplerImage = false // 仅本轮实际构建才删——复用已存在镜像不作废缓存、不误删手工镜像
   const createdContainers: string[] = []
 
   function popplerImagePresent(): Promise<boolean> {
@@ -93,6 +94,7 @@ describe.skipIf(!DOCKER_UP)('wiki/docs port 集成 smoke（真 docker daemon · 
         cwd: ROOT,
         stdio: ['ignore', 'pipe', 'pipe'],
       })
+      builtPopplerImage = true
     }
     lifecycle = new WikiContainerLifecycle(new DockerWikiContainerRuntime(), { image: WIKI_IMAGE, limits: SMOKE_LIMITS })
   }, 600_000)
@@ -103,7 +105,7 @@ describe.skipIf(!DOCKER_UP)('wiki/docs port 集成 smoke（真 docker daemon · 
       await docker.getContainer(name).remove({ force: true }).catch(() => {})
     }
     await new DockerWikiContainerRuntime().removeWiki(OWNER).catch(() => {})
-    await docker.getImage(POPPLER_TAG).remove({ force: true }).catch(() => {})
+    if (builtPopplerImage) await docker.getImage(POPPLER_TAG).remove({ force: true }).catch(() => {})
   })
 
   it('createPage 幂等哨兵 + 并发同路径竞态窗关闭（真 wiki 容器，落树读回）', async () => {

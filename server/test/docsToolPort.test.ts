@@ -42,6 +42,11 @@ describe('normalizeLabPath：/lab/ 前缀白名单 + 穿越拒止（approval 同
       expect(codeOf(() => normalizeLabPath(bad))).toBe('invalid_path')
     }
   })
+
+  it('超长路径拒绝（PATH_MAX 512——wiki/paths.ts / approval/rules.ts 同族纪律）', () => {
+    expect(normalizeLabPath(`/lab/${'a'.repeat(500)}.pdf`)).toBe(`/lab/${'a'.repeat(500)}.pdf`)
+    expect(codeOf(() => normalizeLabPath(`/lab/${'a'.repeat(512)}.pdf`))).toBe('invalid_path')
+  })
 })
 
 describe('splitPdfPages：pdftotext 输出按页数组', () => {
@@ -141,9 +146,25 @@ describe('extractPdfText：port 行为（fake exec 原语）', () => {
     }
     const port = createPluginDocsPort({ container: CONTAINER, primitives: spy, timeoutMs: 42_000 })
     await port.extractPdfText({ sandboxPath: '/lab/a.pdf' })
-    // 存在性探针 = 固定轻量 argv 不传超时（primitives 注记同口径）；pdftotext 带注入超时
+    // 两段 exec（存在性探针 + 提取）同带核心固定 timeoutMs——纪律一致性，探针不走裸调
+    const probe = seen.find((s) => s.cmd[0] === 'test')
+    expect(probe?.opts?.timeoutMs).toBe(42_000)
     const pdf = seen.find((s) => s.cmd[0] === 'pdftotext')
     expect(pdf?.opts?.timeoutMs).toBe(42_000)
+  })
+
+  it('容器级故障归类：exec 原生抛错（容器不存在/daemon 断连）→ sandbox_unavailable，不裸冒泡', async () => {
+    const mem = fakePrimitives()
+    const boom: typeof mem.primitives = {
+      ...mem.primitives,
+      exec: async () => {
+        throw new Error('container not found')
+      },
+    }
+    const port = createPluginDocsPort({ container: CONTAINER, primitives: boom })
+    await expect(port.extractPdfText({ sandboxPath: '/lab/a.pdf' })).rejects.toMatchObject({
+      name: 'PluginDocsPortError', code: 'sandbox_unavailable',
+    })
   })
 })
 

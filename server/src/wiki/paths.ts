@@ -13,7 +13,9 @@ import { CODE } from '../codes'
 
 export type RelPathResult = { ok: true; path: string } | { ok: false; errors: string[] }
 
-const PATH_MAX = 512 // Django CharField max_length=512
+// 长度上限三处同族（同值同纪律）：本处 normalizeRelPath（相对路径，逐 code-point 计长）、
+// approval/rules.ts 路径面、runner/docsToolPort.ts normalizeLabPath（绝对路径版）。
+export const PATH_MAX = 512 // Django CharField max_length=512
 
 export function normalizeRelPath(raw: unknown): RelPathResult {
   if (typeof raw !== 'string' || raw.trim() === '') return { ok: false, errors: ['path 不能为空'] }

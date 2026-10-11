@@ -1040,7 +1040,7 @@ export class RunService {
 
         // #782 run 上下文（ALS 外层）：journal 行 runId 盖印源（checkpointId 终态回填键）——
         // 覆盖流创建与消费全程（backend 打点在流内发生）。#792 插件 run frame（嵌套 ALS）：
-        // ctx 四件解析源——图实例跨 run 复用，run 身份只能运行期读取（runContext.ts 头注）。
+        // ctx 六件解析源——图实例跨 run 复用，run 身份只能运行期读取（runContext.ts 头注）。
         const pluginFrame = await this.buildPluginRunFrame(cmd, labContainer, snapshot, controller.signal)
         await runWithRunContext(cmd.runId, async () => {
           await runWithPluginRunFrame(pluginFrame, async () => {
@@ -1303,7 +1303,7 @@ export class RunService {
   }
 
   // ---- 插件 run frame（#792 · #744 §11.1「run 装配注入」 · #853 §3.2#4/#5/#6 泛化）----
-  // ctx 四件（run 身份/figures/llm/audit）的 per-run 构造面：agent 自动调用路径经 ALS
+  // ctx 六件（run 身份/figures/llm/audit/wiki/docs）的 per-run 构造面：agent 自动调用路径经 ALS
   // frame（executeRun streamEvents 外层置位）、{execute} 直达路径显式构造。figures 去重表
   // RunService 单例持有（跨 run 共享事务性重试窗口防护）；audit sink per-run（session/run
   // 弱关联盖印）；onUpdate 闭包 per-run（per-toolCall 上次 stage 记忆随 frame GC）。
@@ -1462,7 +1462,7 @@ export class RunService {
     turn.feed(start)
     this.publish(cmd.ownerId, start, cmd)
     const startedAt = this.clock()
-    // ctx 四件 + onUpdate（#792 · #744 §11.1）：直达路径显式构造 frame 面件；toolCallId
+    // ctx 六件 + onUpdate（#792 · #744 §11.1）：直达路径显式构造 frame 面件；toolCallId
     // ALS 盖印 = figures 去重身份（toolPort 同源）+ 插件 execute 收到的同一 id。
     // signal（#853 §3.2#4）+ noteToolCall 注册（#853 §3.2#6 翻译面查表第一跳）。
     const frame = await this.buildPluginRunFrame(cmd, labContainer, undefined, signal)

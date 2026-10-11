@@ -18,10 +18,12 @@
 
 FROM debian:bookworm-slim
 
-# poppler-utils 提供 pdftotext（PDF 文本提取 CLI）——apt 索引同层清掉不残留。
+# poppler-utils 提供 pdftotext（PDF 文本提取 CLI）；poppler-data = predefined CMap 运行时
+# 数据（Adobe-GB1/CNS1 等，仅 libpoppler 的 Recommends——--no-install-recommends 会跳过，
+# 缺它 CJK 等 CMap 编码 PDF 的提取静默返回空文本）。apt 索引同层清掉不残留。
 # 构建期双断言：command -v（安装路径在位）+ pdftotext -v（可执行面真实）——任一缺失构建失败。
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends poppler-utils \
+    && apt-get install -y --no-install-recommends poppler-utils poppler-data \
     && rm -rf /var/lib/apt/lists/* \
     && command -v pdftotext \
     && pdftotext -v

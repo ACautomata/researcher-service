@@ -35,7 +35,7 @@ import {
 import { ClaimsError, ClaimsPageMissingError } from 'openwiki/dist/claims/core/errors.js'
 import { WikiWorkspaceError } from 'openwiki/dist/linking/wiki-workspaces.js'
 import { normalizeTarName, parseTar } from '../files/tar'
-import { SKIP_DIRS, SKIP_FILES } from '../wiki/values'
+import { isManagedRelPath } from '../wiki/logic'
 import { WIKI_ROOT } from '../wikiContainers/values'
 import { MAX_COLLECT_BYTES } from './backend/values'
 import type { SandboxFilePrimitives } from './backend/primitives'
@@ -95,10 +95,10 @@ export async function pullWikiMirror(
       if (stripped === '') continue
       const rel = mirrorSafeRel(stripped)
       if (rel === null) continue
-      // SKIP 集过滤（wiki/values 单一来源）：镜像 = 面板 tree 同语义的知识页视图，
-      // openwiki 检索不应看到 log.md/INSTRUCTIONS.md/.claims 等运行文件。
-      if (rel.split('/').some((seg) => SKIP_DIRS.has(seg))) continue
-      if (SKIP_FILES.has(rel.split('/').pop() ?? '')) continue
+      // SKIP 集过滤（isManagedRelPath 单源——wiki/logic 读写双侧同判定，mirrorSafeRel 已先拒
+      // '.' 段故行为不变）：镜像 = 面板 tree 同语义的知识页视图，openwiki 检索不应看到
+      // log.md/INSTRUCTIONS.md/.claims 等运行文件。
+      if (isManagedRelPath(rel)) continue
       const dest = join(wikiDir, ...rel.split('/'))
       await mkdir(dirname(dest), { recursive: true })
       await writeFile(dest, t.data)

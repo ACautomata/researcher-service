@@ -10,23 +10,50 @@
 // wiki/logic okfBadge 的徽章面直接有数据由 wikiPluginPage.test.ts 往返锁定。
 
 import { z } from 'zod'
-import { PLUGIN_PAGE_TYPES, type PluginClaimDraft, type PluginPageDraft } from '../plugins/api'
+import {
+  PLUGIN_PAGE_TYPES,
+  type PluginClaimDraft,
+  type PluginPageDraft,
+  type PluginPageProvenance,
+} from '../plugins/api'
 
 // 生成页陈旧地平线（stale_after = 生成时刻 + 180 天）：规格未定数值的平台策略值——
 // 生成页进治理检索面，徽章面过期标记由此驱动；校准归治理/规格后续票。
 export const GENERATED_STALE_AFTER_MS = 180 * 24 * 60 * 60 * 1000
 
+// PageDraft DTO 尺寸占位上限（失控值护栏——与 PDF_EXTRACT_MAX_CHARS 纪律对称）：853 §7.1
+// 未定数值，追认后归口迁 plugins/research/values.ts（其头注清单注记）——改值须连
+// wikiPluginPage.test.ts 尺寸边界断言一并改。
+const PAGE_DRAFT_MAX = {
+  pathChars: 512, // wiki/paths.ts PATH_MAX 同族（port 侧 normalizeRelPath 逐 code-point 复核）
+  titleChars: 512,
+  contentChars: 2_000_000,
+  claims: 100,
+  evidencePerClaim: 20,
+} as const
+
+// 四流程名形态（W1–W4 枚举 #909 定稿前先锁小写 kebab/snake，防 frontmatter 垃圾值）。
+const WORKFLOW_SHAPE = /^[a-z][a-z0-9_-]{0,31}$/
+
 export const PluginClaimDraftSchema: z.ZodType<PluginClaimDraft> = z.object({
   statement: z.string().min(1),
-  evidence: z.array(z.string().min(1)),
+  evidence: z.array(z.string().min(1)).max(PAGE_DRAFT_MAX.evidencePerClaim),
 })
 
 export const PluginPageDraftSchema: z.ZodType<PluginPageDraft> = z.object({
-  path: z.string().min(1),
-  title: z.string().min(1),
+  path: z.string().min(1).max(PAGE_DRAFT_MAX.pathChars),
+  title: z.string().min(1).max(PAGE_DRAFT_MAX.titleChars),
   type: z.enum(PLUGIN_PAGE_TYPES),
-  content: z.string().min(1),
-  claims: z.array(PluginClaimDraftSchema).optional(),
+  content: z.string().min(1).max(PAGE_DRAFT_MAX.contentChars),
+  claims: z.array(PluginClaimDraftSchema).max(PAGE_DRAFT_MAX.claims).optional(),
+})
+
+// createPage 溯源面 zod（port 边界校验，非法 → PluginWikiPortError('invalid_draft')）——
+// workflow 形态单点在此，组装层信任已验输入不再重复判（插件页错误通道归 runner/wikiToolPort，
+// wiki 域纯逻辑不反向依赖）。
+export const PluginPageProvenanceSchema: z.ZodType<PluginPageProvenance> = z.object({
+  workflow: z.string().regex(WORKFLOW_SHAPE).optional(),
+  relatedPages: z.array(z.string().min(1)).optional(),
 })
 
 export interface AssembledPageInput {
@@ -35,7 +62,7 @@ export interface AssembledPageInput {
   readonly source: string
   /** 调用方 run 的真实 tool_call_id（filejournal ALS）；缺省省略字段。 */
   readonly toolCallId?: string
-  /** 四流程名（W1–W4；#909 骨架票定稿枚举前先锁小写 kebab/snake 形态防 frontmatter 垃圾值）。 */
+  /** 四流程名（W1–W4；形态由 PluginPageProvenanceSchema 在 port 边界锁定，本组装信任已验输入）。 */
   readonly workflow?: string
   readonly relatedPages?: readonly string[]
   /** ms 时间戳（注入时钟——RunService deps.clock 穿线，测试步进钟锁定徽章值）。 */
@@ -60,12 +87,7 @@ export function assemblePageMarkdown(input: AssembledPageInput): string {
     `source: ${JSON.stringify(input.source)}`,
   ]
   if (input.toolCallId !== undefined) fm.push(`toolCallId: ${JSON.stringify(input.toolCallId)}`)
-  if (input.workflow !== undefined) {
-    if (!/^[a-z][a-z0-9_-]{0,31}$/.test(input.workflow)) {
-      throw new Error(`workflow 须为小写 kebab/snake 形态（≤32 字符）: ${JSON.stringify(input.workflow)}`)
-    }
-    fm.push(`workflow: ${JSON.stringify(input.workflow)}`)
-  }
+  if (input.workflow !== undefined) fm.push(`workflow: ${JSON.stringify(input.workflow)}`)
   if (input.relatedPages !== undefined && input.relatedPages.length > 0) {
     fm.push(`related_pages: [${input.relatedPages.map((p) => JSON.stringify(p)).join(', ')}]`)
   }
@@ -74,14 +96,17 @@ export function assemblePageMarkdown(input: AssembledPageInput): string {
 }
 
 // ClaimDraft[] → 页内 Atomic Claims md 块（V1 人读面 + 检索面可溯源：evidence 引用串
-// 是溯源锚）。statement 主 bullet、evidence 子 bullet（反引号代码_span_）；空数组 → 空串
+// 是溯源锚）。statement 主 bullet、evidence 子 bullet（反引号代码 span）；空数组 → 空串
 // （页内无此节——「无 claims」与「claims 空表」同形，防空节噪声）。
+// 渲染面消毒（格式唯一产出点单点承担，zod 不 ban 合法内容）：statement 折叠换行为空格
+// （换行可伪造 `##` 节/重复本节/bullet——md 结构注入）；evidence 另剥反引号（code span 断裂面）。
 export function renderAtomicClaimsBlock(claims: readonly PluginClaimDraft[]): string {
   if (claims.length === 0) return ''
+  const flat = (s: string): string => s.replace(/\r?\n/g, ' ')
   const lines: string[] = ['## Atomic Claims', '']
   for (const c of claims) {
-    lines.push(`- ${c.statement}`)
-    for (const ev of c.evidence) lines.push(`  - Evidence: \`${ev}\``)
+    lines.push(`- ${flat(c.statement)}`)
+    for (const ev of c.evidence) lines.push(`  - Evidence: \`${flat(ev).replaceAll('`', '')}\``)
   }
   return lines.join('\n')
 }

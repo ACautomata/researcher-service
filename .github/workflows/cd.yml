@@ -3,7 +3,9 @@
 # 触发：CI 在 master 上成功完成后（workflow_run），保证「不部署红码」。
 # 镜像：server（TS/Express 控制面，替代退役的 Django backend，#341 M9）+ frontend（Vue/Vite→nginx）
 # + wiki（wiki 容器镜像，#784：busybox 级，Dockerfile FROM 基线行单源提取版本 tag）
-# 三镜像，tag `:latest` + `:<CI head_sha>`（head_sha 取自通过的 CI run，使 latest/sha 精确对应该
+# + sandbox（沙箱镜像 poppler 支路，#908：debian:bookworm-slim + poppler-utils——
+# extractPdfText 镜像前提，部署以 SANDBOX_IMAGE 显式指向启用）
+# 四镜像，tag `:latest` + `:<CI head_sha>`（head_sha 取自通过的 CI run，使 latest/sha 精确对应该
 # commit，便于 :sha 回滚）。wiki 镜像另推**版本 tag**。
 # #858 OpenClaw 退役③：fleet 编排退役——构建期 home 模板注入与运行时
 # OPENCLAW_IMAGE 拉取面随之退役；多 context 现仅 official/ + plugins/。

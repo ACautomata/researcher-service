@@ -11,6 +11,7 @@ import {
   GENERATED_STALE_AFTER_MS,
   PluginPageDraftSchema,
   PluginClaimDraftSchema,
+  PluginPageProvenanceSchema,
 } from '../src/wiki/pluginPage'
 import { FrontmatterParser, okfBadge } from '../src/wiki/logic'
 
@@ -61,6 +62,10 @@ describe('frontmatter 核心组装（853 §3.3 · §11.3C 字段集）', () => {
       now: NOW,
     })
     const { frontmatter } = new FrontmatterParser().parse(md)
+    // 字段集闭断言（AC「字段集与 §11.3C 一致」的双向语义）：解析面恰为九键——多落/漏落都是格式漂移
+    expect(Object.keys(frontmatter).sort()).toEqual(
+      ['generated', 'related_pages', 'source', 'stale_after', 'status', 'title', 'toolCallId', 'type', 'workflow'],
+    )
     expect(frontmatter['title']).toBe('Attention 综述研读')
     expect(frontmatter['type']).toBe('paper')
     expect(frontmatter['related_pages']).toEqual(['papers/a.md'])
@@ -76,12 +81,14 @@ describe('frontmatter 核心组装（853 §3.3 · §11.3C 字段集）', () => {
     expect(badge?.staleAfter).toBe('2027-04-09T08:00:00.000Z')
   })
 
-  it('可选溯源缺省省略：toolCallId/workflow/related_pages 不传则字段不落', () => {
+  it('可选溯源缺省省略：toolCallId/workflow/related_pages 不传则字段不落（字段集闭断言 = 六键）', () => {
     const md = assemblePageMarkdown({ draft: DRAFT, source: 'research', now: NOW })
     expect(md).not.toContain('toolCallId:')
     expect(md).not.toContain('workflow:')
     expect(md).not.toContain('related_pages:')
     expect(md).toContain('source: "research"')
+    const { frontmatter } = new FrontmatterParser().parse(md)
+    expect(Object.keys(frontmatter).sort()).toEqual(['generated', 'source', 'stale_after', 'status', 'title', 'type'])
   })
 
   it('source 盖章 = 调用方插件 id（frontmatter source 与 generated.by 同源）', () => {
@@ -119,13 +126,26 @@ describe('页内 Atomic Claims md 块渲染（表示归 wiki 域 · V1 人读面
     expect(claimsIdx).toBeGreaterThan(bodyIdx)
   })
 
-  it('workflow 形态校验：小写 kebab/snake 放行，大写/越界字符拒（frontmatter 垃圾值防线）', () => {
+  it('md 结构注入防线：statement 换行折叠为空格（防伪造 ## 节/bullet）、evidence 剥反引号（防断 code span）', () => {
+    expect(
+      renderAtomicClaimsBlock([
+        { statement: '第一行\n## 伪造节标题\n- 伪造 bullet', evidence: ['re`po://x', 'a\nb'] },
+      ]),
+    ).toBe(
+      ['## Atomic Claims', '', '- 第一行 ## 伪造节标题 - 伪造 bullet', '  - Evidence: `repo://x`', '  - Evidence: `a b`'].join('\n'),
+    )
+  })
+
+  it('workflow 形态校验（provenance zod 边界——port 转 invalid_draft）：小写 kebab/snake 放行，大写/越界字符拒', () => {
     for (const ok of ['ingest', 'discover', 'hypothesize', 'experiment', 'idea-card', 'w4_report']) {
-      expect(() => assemblePageMarkdown({ draft: DRAFT, source: 'research', workflow: ok, now: NOW })).not.toThrow()
+      expect(PluginPageProvenanceSchema.safeParse({ workflow: ok }).success).toBe(true)
     }
     for (const bad of ['Ingest', 'INGEST', 'a'.repeat(33), 'has space', 'x:y']) {
-      expect(() => assemblePageMarkdown({ draft: DRAFT, source: 'research', workflow: bad, now: NOW })).toThrow(/workflow/)
+      expect(PluginPageProvenanceSchema.safeParse({ workflow: bad }).success).toBe(false)
     }
+    // relatedPages 元素最小形态面（frontmatter 直落前唯一防线）
+    expect(PluginPageProvenanceSchema.safeParse({ relatedPages: ['papers/a.md'] }).success).toBe(true)
+    expect(PluginPageProvenanceSchema.safeParse({ relatedPages: [''] }).success).toBe(false)
   })
 })
 
@@ -148,6 +168,20 @@ describe('PageDraft/ClaimDraft zod DTO（853 §3.2 · 图内校验与 port 边�
     expect(PluginPageDraftSchema.safeParse({ ...DRAFT, claims: [{ statement: '', evidence: [] }] }).success).toBe(false)
     expect(PluginPageDraftSchema.safeParse({ ...DRAFT, claims: [{ statement: 'x', evidence: [''] }] }).success).toBe(false)
     expect(PluginClaimDraftSchema.safeParse({ statement: 'x', evidence: [] }).success).toBe(true)
+  })
+
+  it('尺寸占位上限：content/claims/evidence/path/title 失控值拒（853 §7.1 未定数值的护栏值——改值须连测试 consciously 改）', () => {
+    expect(PluginPageDraftSchema.safeParse({ ...DRAFT, content: 'x'.repeat(2_000_000) }).success).toBe(true)
+    expect(PluginPageDraftSchema.safeParse({ ...DRAFT, content: 'x'.repeat(2_000_001) }).success).toBe(false)
+    const n = (k: number) => Array.from({ length: k }, () => ({ statement: 'x', evidence: [] as string[] }))
+    expect(PluginPageDraftSchema.safeParse({ ...DRAFT, claims: n(100) }).success).toBe(true)
+    expect(PluginPageDraftSchema.safeParse({ ...DRAFT, claims: n(101) }).success).toBe(false)
+    expect(PluginPageDraftSchema.safeParse({ ...DRAFT, claims: [{ statement: 'x', evidence: Array.from({ length: 20 }, () => 'e') }] }).success).toBe(true)
+    expect(PluginPageDraftSchema.safeParse({ ...DRAFT, claims: [{ statement: 'x', evidence: Array.from({ length: 21 }, () => 'e') }] }).success).toBe(false)
+    expect(PluginPageDraftSchema.safeParse({ ...DRAFT, title: 'x'.repeat(512) }).success).toBe(true)
+    expect(PluginPageDraftSchema.safeParse({ ...DRAFT, title: 'x'.repeat(513) }).success).toBe(false)
+    expect(PluginPageDraftSchema.safeParse({ ...DRAFT, path: `${'a'.repeat(509)}.md` }).success).toBe(true)
+    expect(PluginPageDraftSchema.safeParse({ ...DRAFT, path: `${'a'.repeat(510)}.md` }).success).toBe(false)
   })
 })
 

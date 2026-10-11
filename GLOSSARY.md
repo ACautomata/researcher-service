@@ -237,6 +237,7 @@ _Avoid_: 双管线各自渲染再对齐——一致性靠「同一归约器 + �
 **沙箱 (sandbox)**:
 （#728 定稿，#776 落地）绑定单个 LangGraph session（thread）的执行环境容器：agent 的 bash/read/write/update 工具在其中执行，1 session : 1 沙箱，首个执行工具调用时**惰性创建**，闲置 30 分钟自动 stop（文件保留在容器可写层），删 session 级联删除。完整工具链镜像（bash/git/Python/Node/rg/poppler/Chromium headless），每沙箱独立 bridge network（NAT 出网、容器间零互通），V1 网络默认放行 + 审计。对容器列表**隐身**——用户从 session 页进入，不感知沙箱存在。
 _Avoid_: 临时容器——混用会把生命周期完全不同的容器（随 session 生灭、闲置 stop 保留文件的沙箱 vs 跑完即弃的一次性任务）混为一谈。
+（工具链演进注：#776 现役缺省 `SANDBOX_IMAGE` = busybox 级钉版（sh/核心 applet，**不含** pdftotext/git/Python）——上列完整工具链是升级目标形态，非缺省现状；#908 起完整工具链（含 poppler）以 `deploy/sandbox-image` 支路镜像交付，部署以 `SANDBOX_IMAGE` 显式指向即启用（extractPdfText 镜像前提），缺省翻转归 #776 沙箱镜像升级票。）
 
 **wiki 容器 (wiki container)**:
 （#728 定稿，#784 落地）用户 wiki 树的**永久**文件仓库：跨 session 存活，每用户一个。busybox 级极小镜像（仅 sh/mkdir/rm/cat，无 Node/Python/运行时），`NetworkMode=none` 零出网，根只读 + 可写层承载 `/wiki`，**无具名卷**（数据与容器同生命周期，备份 = docker export 全树 tar；删除路径必须带确认门）。wiki 树**零初始化**——OpenWiki 工具按需自行生成，骨架不烤进镜像。
@@ -342,7 +343,10 @@ _Avoid_: 抛错防重——幂等跳过是正常返回非错误；updatePage/del
 
 **Atomic Claims 块 (atomic claims block)**:
 （目标架构，853 §3.2 DTO 注，#908 落地——`wiki/pluginPage.ts` renderAtomicClaimsBlock）插件建页时核心把 ClaimDraft[] 渲染为页内 md 节（`## Atomic Claims`：statement 主 bullet + evidence 反引号子 bullet）——人读面 + 检索面可溯源的 V1 表示；表示归 wiki 域，**插件不知道 .claims 旁车存在**（防腐钉界，机器 `.claims` JSON 是核心内部演进）。四流程建页格式单源：frontmatter 同由核心组装（§11.3C 字段集），插件零格式知识。
-_Avoid_: 插件自拼 frontmatter/claims 文本——格式漂移面（853 §3.3 否决）；把本块当 .claims 旁车——旁车是 openwiki 治理面生成物，两表示并存不互译（V1）。
+_Avoid_: 插件自拼 frontmatter/claims 文本——格式漂移面（853 §3.3 否决）；把本块与 .claims 旁车的归属/相互作用语义当已定案——两表示并存的语义待实证（853 §11.1 明列；#908 复审回退提前定案措辞）。
+
+**.claims 旁车 (.claims sidecar)**:
+openwiki 生成的页级证据 JSON 旁车（#789 数据面——`wiki/logic.ts` claimsSidecarPath 镜像页目录 `.claims/<dir>/<stem>.json`，parseClaimsSidecar 只读解析）。SKIP_DIRS 托管：树/图不收、插件写面拒（isManagedRelPath 单源）；读侧唯一合法出口 = service.readClaims 专用通道。与页内 Atomic Claims 块（V1 人读面）两表示并存——归属/相互作用语义待实证（853 §11.1）。
 
 **文档面 (API docs surface)**:
 控制面的 OpenAPI/Swagger 接口文档域（#761）：zod 生成式 spec（请求体单一来源 = `validation/schemas.ts`，零漂移）+ Swagger UI，挂 `/api/docs` 整树 **requireAuth + requireAdmin**（#758 Q14），env 开关 `API_DOCS_ENABLED`（默认开，关 → 装配层不注入 → 整树 90005）。网页交互入口 = 前端 admin 子应用内嵌视图（前端带认证链拉 spec、TryIt 注入 token）——浏览器地址栏直开 `/api/docs` 不可达（Bearer 门控，导航请求带不上 header）。SSE 事件流端点不在覆盖面（流式语义超出请求/响应文档模型）。

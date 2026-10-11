@@ -21,9 +21,9 @@ describe('沙箱镜像 poppler 支路（#908 · extractPdfText 镜像前提）',
     expect(fromRef).toMatch(/^debian:bookworm-slim$/)
   })
 
-  it('poppler-utils 安装 + 构建期 pdftotext 双断言（command -v + -v 版本面）', () => {
+  it('poppler-utils + poppler-data 安装 + 构建期 pdftotext 双断言（command -v + -v 版本面）', () => {
     const df = readDockerfile()
-    expect(df).toContain('apt-get install -y --no-install-recommends poppler-utils')
+    expect(df).toContain('apt-get install -y --no-install-recommends poppler-utils poppler-data')
     expect(df).toContain('command -v pdftotext')
     expect(df).toContain('pdftotext -v')
     // apt 索引不残留镜像层（bookworm-slim 卫生面）

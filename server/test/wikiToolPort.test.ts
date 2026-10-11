@@ -149,6 +149,9 @@ describe('createPage 幂等哨兵与写面纪律', () => {
     const { port } = makePort(mem)
     await expect(port.createPage({ ...DRAFT, title: '' })).rejects.toMatchObject({ code: 'invalid_draft' })
     await expect(port.createPage({ ...DRAFT, type: 'blog' as never })).rejects.toMatchObject({ code: 'invalid_draft' })
+    // provenance 面同码：workflow 形态非法（zod 边界单点，组装层不再裸 throw）
+    await expect(port.createPage(DRAFT, { workflow: 'Ingest' })).rejects.toMatchObject({ code: 'invalid_draft' })
+    await expect(port.createPage(DRAFT, { relatedPages: [''] })).rejects.toMatchObject({ code: 'invalid_draft' })
   })
 })
 
@@ -177,6 +180,23 @@ describe('owner 级进程内锁：并发同路径 probe→put 竞态窗关闭', 
     ])
     expect([r1.created, r2.created].sort()).toEqual([false, true])
     expect(putCalls).toBe(1)
+  })
+
+  it('锁异常路径：锁内任务失败后同 key 后续任务放行（prev.then(fn, fn)——失败不传播不断链）', async () => {
+    const mem = fakePrimitives()
+    const { port } = makePort(mem)
+    const base = mem.primitives.getArchive.bind(mem.primitives)
+    let failProbe = true
+    mem.primitives.getArchive = async (...args: Parameters<typeof base>) => {
+      if (failProbe) throw new Error('daemon 闪断')
+      return base(...args)
+    }
+    // 第一发：锁内 probe 失败（容器故障原生冒泡——分类归口见 B4 拍板）
+    await expect(port.createPage(DRAFT)).rejects.toThrow('daemon 闪断')
+    failProbe = false
+    // 第二发：同 key 正常执行（若锁把前任失败传播给后任，这里会连带失败）
+    await expect(port.createPage(DRAFT)).resolves.toEqual({ created: true })
+    expect(mem.trees.get(CONTAINER)?.get(`${WIKI_ROOT}/papers/attention.md`)).toBeDefined()
   })
 
   it('锁 key 含 ownerId：不同 owner 同路径互不阻塞（put 区间重叠）', async () => {

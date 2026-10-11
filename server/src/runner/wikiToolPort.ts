@@ -20,7 +20,7 @@ import { readWikiSections, searchWiki } from 'openwiki/dist/retrieval/wiki.js'
 import { parseTar, createTarTree, type TarTreeEntry } from '../files/tar'
 import { isManagedRelPath } from '../wiki/logic'
 import { normalizeRelPath } from '../wiki/paths'
-import { assemblePageMarkdown, PluginPageDraftSchema } from '../wiki/pluginPage'
+import { assemblePageMarkdown, PluginPageDraftSchema, PluginPageProvenanceSchema } from '../wiki/pluginPage'
 import { WIKI_ROOT } from '../wikiContainers/values'
 import { currentToolCallContext } from './filejournal/context'
 import { pullWikiMirror } from './wikisearch'
@@ -38,7 +38,7 @@ export type PluginWikiPortErrorCode =
   | 'invalid_path' // 路径形态非法（normalizeRelPath：绝对/穿越/反斜杠/非 .md/超长）
   | 'managed_path' // SKIP 集托管路径（.claims/ _attachments/ log.md…）拒写
   | 'path_occupied' // 目录/特殊文件占位页路径（不静默跳过）
-  | 'mirror_unavailable' // wiki 容器树暂不可用（ensure 后仍拉不到——容器故障面）
+  | 'mirror_unavailable' // 检索返回 workspace 歧义面（单 wiki 镜像不可能——库/镜像行为漂移 loud fail；容器/镜像拉取故障不经本码，原生冒泡）
 
 export class PluginWikiPortError extends Error {
   constructor(
@@ -164,6 +164,19 @@ export function createPluginWikiPort(deps: PluginWikiToolPortDeps): PluginWikiPo
           `PageDraft 校验失败: ${issue ? `${issue.path.join('.')} ${issue.message}` : 'unknown'}`,
         )
       }
+      // provenance zod 边界（workflow 形态/relatedPages 元素单点）——非法同归 invalid_draft
+      let prov = provenance
+      if (prov !== undefined) {
+        const parsedProv = PluginPageProvenanceSchema.safeParse(prov)
+        if (!parsedProv.success) {
+          const issue = parsedProv.error.issues[0]
+          throw new PluginWikiPortError(
+            'invalid_draft',
+            `Provenance 校验失败: ${issue ? `${issue.path.join('.')} ${issue.message}` : 'unknown'}`,
+          )
+        }
+        prov = parsedProv.data
+      }
       const rel = normalizeRelPath(draft.path)
       if (!rel.ok) throw new PluginWikiPortError('invalid_path', rel.errors.join('；'))
       if (isManagedRelPath(rel.path)) {
@@ -181,8 +194,8 @@ export function createPluginWikiPort(deps: PluginWikiToolPortDeps): PluginWikiPo
           draft: parsed.data,
           source: deps.source,
           ...(toolCallId !== undefined ? { toolCallId } : {}),
-          ...(provenance?.workflow !== undefined ? { workflow: provenance.workflow } : {}),
-          ...(provenance?.relatedPages !== undefined ? { relatedPages: provenance.relatedPages } : {}),
+          ...(prov?.workflow !== undefined ? { workflow: prov.workflow } : {}),
+          ...(prov?.relatedPages !== undefined ? { relatedPages: prov.relatedPages } : {}),
           now: (deps.now ?? Date.now)(),
         })
         await deps.primitives.putArchive(deps.container, rootPath, pageTar(rel.path, Buffer.from(md, 'utf8')))

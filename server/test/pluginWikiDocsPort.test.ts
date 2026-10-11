@@ -51,6 +51,8 @@ const wikidocsLike = definePlugin({
       progressStages: ['capture'],
       execute: async (toolCallId, params: { mode: string; path?: string }, exec): Promise<PluginToolResult> => {
         const ctx = exec.ctx
+        // 观察真实注入面（figureRun.test.ts 先例——不硬编码，断言才对 ctx 缺失敏感）
+        const observed = { hasWiki: ctx.wiki !== undefined, hasDocs: ctx.docs !== undefined }
         if (!ctx.wiki || !ctx.docs) throw new Error('ctx.wiki/ctx.docs 缺失')
         let probe: string
         if (params.mode === 'create') {
@@ -69,7 +71,7 @@ const wikidocsLike = definePlugin({
           const r = await ctx.docs.extractPdfText({ sandboxPath: params.path ?? '/lab/a.pdf' })
           probe = `pages=${r.pages.length}`
         }
-        captured.push({ toolCallId, hasWiki: true, hasDocs: true, probe })
+        captured.push({ toolCallId, ...observed, probe })
         return { content: [{ type: 'text', text: probe }] }
       },
     },
