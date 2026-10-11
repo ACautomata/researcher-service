@@ -14,6 +14,14 @@ import type { AnyPluginToolDefinition, PluginManifest, PluginToolCategory } from
 export const PLUGIN_ID_REGEX = /^[a-z][a-z0-9-]*$/
 export const PLUGIN_COMMAND_NAME_REGEX = /^[a-z][a-z0-9-]*$/
 export const PLUGIN_ENV_KEY_REGEX = /^[A-Z][A-Z0-9_]*$/
+// run.kind 形态（#853 §3.1）：kebab（小写字母开头，仅小写字母/数字/连字符）——SSE 事件族
+// 名派生源（`${kind}_run.progress`），钉 kebab 保事件名分段安全。
+export const PLUGIN_RUN_KIND_REGEX = /^[a-z][a-z0-9-]*$/
+// progressStages 值形态（#853 §3.1「kebab/snake 形态」）：小写系标识符兼容 camel——853
+// §6.1 白名单事实值集含 camelCase 节点名（resolveInputs/evidenceGate/contextPack），以
+// §6.1 白名单为节点名准据，形态校验取「kebab/snake/camel 小写系」宽容口径（意图 = 事件/
+// 日志面安全标识符：无空白、无大写开头、无符号）。
+export const PLUGIN_PROGRESS_STAGE_REGEX = /^[a-z][a-zA-Z0-9_-]*$/
 
 // 保留插件 id（#883 T3）：'judge' = 审批判定器指派行键（plugin_llm_assignments 收 judge 行，
 // 执行面归后票）——非插件目录位，撞键 = 启动 fail-fast。
@@ -41,6 +49,7 @@ function singleLine(value: string): boolean {
 
 export async function assertValidPluginCatalog(input: PluginCatalogValidationInput): Promise<void> {
   const seenIds = new Set<string>()
+  const seenRunKinds = new Set<string>()
   const seenToolNames = new Set<string>(input.coreToolNames ?? [])
   const seenCommandNames = new Set<string>(input.reservedCommandNames ?? [])
   for (const manifest of input.manifests) {
@@ -51,11 +60,24 @@ export async function assertValidPluginCatalog(input: PluginCatalogValidationInp
     if (typeof manifest.name !== 'string' || manifest.name.trim() === '') throw new Error(`Plugin name required: ${manifest.id}`)
     if (typeof manifest.description !== 'string' || manifest.description.trim() === '') throw new Error(`Plugin description required: ${manifest.id}`)
     if (typeof manifest.version !== 'string' || manifest.version.trim() === '') throw new Error(`Plugin version required: ${manifest.id}`)
+    assertRunKindValid(manifest, seenRunKinds)
     assertLlmDeclarationValid(manifest)
     assertToolsValid(manifest, seenToolNames)
     await assertCommandsValid(manifest, seenCommandNames)
     assertConfigSchemaValid(manifest)
   }
+}
+
+// run.kind 校验（#853 §3.1）：可选声明，提供时 kebab 形态 + 目录内唯一（SSE 事件族名
+// 派生源——撞 kind = 两插件共用 `<kind>_run.*` 族，静默串事件）。
+function assertRunKindValid(manifest: PluginManifest, seenRunKinds: Set<string>): void {
+  const kind = manifest.run?.kind
+  if (kind === undefined) return
+  if (typeof kind !== 'string' || !PLUGIN_RUN_KIND_REGEX.test(kind)) {
+    throw new Error(`plugin ${manifest.id}: run.kind must be kebab-case when provided`)
+  }
+  if (seenRunKinds.has(kind)) throw new Error(`plugin ${manifest.id}: run.kind duplicate: ${kind}`)
+  seenRunKinds.add(kind)
 }
 
 // llm 声明位校验（#883）：description 必填单行非空；defaultModel 可选非空单行（UI 预填
@@ -96,6 +118,24 @@ function assertToolValid(manifest: PluginManifest, tool: AnyPluginToolDefinition
   if (tool.promptGuidelines !== undefined) {
     if (!Array.isArray(tool.promptGuidelines) || tool.promptGuidelines.some((g) => typeof g !== 'string' || !singleLine(g))) {
       throw new Error(`${where}: promptGuidelines must be single-line strings`)
+    }
+  }
+  // progressStages（#853 §3.1「插件声明、核心校验」）：非空数组、值唯一、小写系标识符形态；
+  // 声明工具 ⇒ manifest 必须声明 run.kind（SSE 事件族名派生源，缺派生键 = fail-fast）。
+  if (tool.progressStages !== undefined) {
+    if (!Array.isArray(tool.progressStages) || tool.progressStages.length === 0) {
+      throw new Error(`${where}: progressStages must be a non-empty array when provided`)
+    }
+    const seenStages = new Set<string>()
+    for (const stage of tool.progressStages) {
+      if (typeof stage !== 'string' || !PLUGIN_PROGRESS_STAGE_REGEX.test(stage)) {
+        throw new Error(`${where}: progressStages values must be lowercase-initial identifiers (kebab/snake/camel): ${String(stage)}`)
+      }
+      if (seenStages.has(stage)) throw new Error(`${where}: progressStages values must be unique: ${stage}`)
+      seenStages.add(stage)
+    }
+    if (!PLUGIN_RUN_KIND_REGEX.test(manifest.run?.kind ?? '')) {
+      throw new Error(`${where}: tools declaring progressStages require manifest run.kind (SSE event family derivation source)`)
     }
   }
   if (typeof tool.execute !== 'function') throw new Error(`${where}: execute must be a function`)

@@ -62,23 +62,51 @@ export interface PluginLlmPort {
     readonly contents: readonly PluginLlmContent[]
     readonly model: string // provider 集合内模型 id；空串 = 默认链 primary 不绑模型
   } & PluginLlmCallOptions) => Promise<PluginLlmResult>
+  // 结构化生成（#853 §3.2#3）：withStructuredOutput 语义封装在核心——owner 回退链（pin >
+  // 指派 > 默认链，与 generateMultimodal 同一解析）+ 配置集合第二层复验 + 文本 JSON 提取
+  // + zod 校验，返回校验产物。解析/校验失败抛 PluginLlmStructuredError（诊断面透出——
+  // 853 §7.1 节点层重试 prompt 附诊断回喂）。签名不出现 signal：run abort 经 frame 闭包
+  // 捕获自动透传（#853 §3.2#4，插件零感知）。
+  readonly generateStructured: <T>(opts: {
+    readonly schema: z.ZodType<T>
+    readonly contents: readonly PluginLlmContent[]
+    readonly model?: string // 缺省 = 默认链 primary；非空 = pin 语义（同 generateMultimodal）
+    readonly maxTokens?: number
+    readonly temperature?: number // 缺省 0（结构化判定的确定性优先，judge 温度 0 先例）
+  }) => Promise<T>
 }
 
-// figure_run 审计事件（#744 §11.2 形状定稿——TextTrace 弱关联，traceId 关联会话 run）。
-// created/stage_transitions/completed/failed/aborted 五类落审计域；progress 的 SSE 面
-// 归 runner onUpdate 翻译链（同一阶段变化事实双面，onUpdate 上报一次 runner 落两面）。
-// detail 为域载荷（stage/figureId/reason/by/iterations/durationMs…）——stage 白名单
-// 校验归 runner 面，端口不锁 figure 域类型。
-export type FigureRunAuditKind = 'created' | 'stage_transitions' | 'completed' | 'failed' | 'aborted'
+// generateStructured 解析/校验失败（#853 §3.2#3 · #906 修订①）：diagnostics = zod issues
+// 或 JSON 提取失败的诊断文本，供节点层重试 prompt 回喂（PAGE_GENERATE_MAX_RETRIES 触发面
+// = 截断 ∨ 结构化解析/validate 失败）；raw = 原始模型文本（截断保留，供调用方诊断日志）。
+export class PluginLlmStructuredError extends Error {
+  constructor(
+    message: string,
+    readonly diagnostics: string,
+    readonly raw?: string,
+  ) {
+    super(message)
+    this.name = 'PluginLlmStructuredError'
+  }
+}
 
-export interface FigureRunAuditEvent {
-  readonly event: FigureRunAuditKind
+// 插件 run 审计事件（#744 §11.2 形状定稿 · #853 §3.2#5 泛化——TextTrace 弱关联，traceId
+// 关联会话 run）。created/stage_transitions/completed/failed/aborted 五类同构保留落审计域；
+// progress 的 SSE 面归 runner onUpdate 翻译链（同一阶段变化事实双面，onUpdate 上报一次
+// runner 落两面）。detail 为域载荷（stage/figureId/reason/by/iterations/durationMs…）——
+// stage 白名单校验归 runner 面，端口不锁域类型。runKind 由核心按工具名反查盖章（插件不传；
+// 落 TextTrace 带 runKind 列——figure 事件族为历史先例，kind 隐含 'figure'、事件面冻结
+// 不落列，#853 §3.2#5）。
+export type PluginRunAuditKind = 'created' | 'stage_transitions' | 'completed' | 'failed' | 'aborted'
+
+export interface PluginRunAuditEvent {
+  readonly event: PluginRunAuditKind
   readonly toolCallId: string
   readonly detail: Readonly<Record<string, unknown>>
 }
 
 export interface PluginAuditPort {
-  readonly emitFigureRun: (event: FigureRunAuditEvent) => void
+  readonly emitPluginRun: (event: PluginRunAuditEvent) => void
 }
 
 // 插件工具运行上下文（§2.2 ctx 最小面）：config = configSchema 声明键的解析值（启动期
@@ -138,6 +166,11 @@ export interface PluginToolDefinition<TParams = unknown, TDetails = unknown> {
   readonly promptSnippet?: string
   /** 工具激活时追加进 prompt Guidelines 段的 bullet。 */
   readonly promptGuidelines?: readonly string[]
+  /** 进度 stage 白名单声明（#853 §3.1/§3.2#6「插件声明、核心校验」）：onUpdate 上报经
+   *  runner 翻译面按本白名单放行（命中才落 SSE progress + stage_transitions 双面，白名单
+   *  外丢弃不放大）。声明值 = 流程节点名（kebab/snake/camel 小写系形态，注册期校验非空/
+   *  唯一/形态）；工具声明本项 ⇒ manifest 必须声明 run.kind（SSE 事件族名派生源，fail-fast）。 */
+  readonly progressStages?: readonly string[]
   readonly execute: (toolCallId: string, params: TParams, exec: PluginToolExec) => Promise<PluginToolResult<TDetails>>
 }
 
@@ -203,6 +236,11 @@ export interface PluginManifest {
   readonly version: string
   readonly tools?: readonly AnyPluginToolDefinition[]
   readonly commands?: readonly PluginCommandDefinition[]
+  /** run 域标识（#853 §3.1）：kind → 插件 run 事件族名按声明派生（如 'research' →
+   *  `research_run.progress`）；声明 progressStages 的工具所属 manifest 必须声明（注册期
+   *  fail-fast）。TextTrace 审计面 runKind 盖章同源（figure 事件族为历史先例、事件面冻结
+   *  不落 runKind 列——#853 §3.2#5）。 */
+  readonly run?: { readonly kind: string }
   /** V1 语义 = 启动校验依据 + 文档（§5）；ctx.config 按声明键注入解析值。 */
   readonly configSchema?: { readonly env: readonly PluginEnvKey[] }
   /** LLM 需求声明位（#883）：声明 = 可被 per-user 指派端点与模型；未声明插件的指派写侧拒绝。 */

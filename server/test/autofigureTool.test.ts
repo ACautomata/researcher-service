@@ -11,7 +11,7 @@ import {
   ctxLlmAdapter,
   FIGURE_TOOL_NAME,
 } from '../../plugins/autofigure/server'
-import type { PluginToolContext, PluginToolResult, FigureRunAuditEvent } from '../src/plugins/api'
+import type { PluginToolContext, PluginToolResult, PluginRunAuditEvent } from '../src/plugins/api'
 import { makeFakePorts } from './autofigureFakePorts'
 
 const PANEL_CONFIG: Record<string, string> = {
@@ -21,10 +21,10 @@ const PANEL_CONFIG: Record<string, string> = {
   AUTOFIGURE_SVG_MODEL: '',
 }
 
-type FakeCtx = PluginToolContext & { auditEvents: FigureRunAuditEvent[]; created: unknown[]; llmReply?: string }
+type FakeCtx = PluginToolContext & { auditEvents: PluginRunAuditEvent[]; created: unknown[]; llmReply?: string }
 
 function fakeCtx(overrides: Partial<FakeCtx> = {}): FakeCtx {
-  const auditEvents: FigureRunAuditEvent[] = []
+  const auditEvents: PluginRunAuditEvent[] = []
   const created: unknown[] = []
   const self: FakeCtx = {
     auditEvents,
@@ -43,8 +43,9 @@ function fakeCtx(overrides: Partial<FakeCtx> = {}): FakeCtx {
         void opts
         return { text: self.llmReply ?? 'ok', usage: { inputTokens: 1, outputTokens: 2, totalTokens: 3 } }
       },
+      generateStructured: async <T>(opts: { schema: { parse: (v: unknown) => T } }) => opts.schema.parse({}),
     },
-    audit: { emitFigureRun: (e) => auditEvents.push(e) },
+    audit: { emitPluginRun: (e) => auditEvents.push(e) },
     ...overrides,
   }
   return self

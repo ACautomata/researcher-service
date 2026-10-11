@@ -8,6 +8,7 @@
 import { createHash } from 'node:crypto'
 import { z } from 'zod'
 import { AIMessage, HumanMessage, SystemMessage } from '@langchain/core/messages'
+import { truncateToTokenBudget } from '../../utils/tokenBudget'
 import {
   APPROVAL_REJECTION_CONTENT_PREFIX,
   APPROVAL_REASON_MAX_CHARS,
@@ -44,12 +45,8 @@ const JudgeVerdictSchema = z.object({
   reason: z.string(),
 })
 
-// token 预算 → 字符截断（换算因子单一来源 JUDGE_CHARS_PER_TOKEN；CJK 保守取 2 chars/token）。
-export function truncateToTokenBudget(text: string, tokens: number): string {
-  const max = Math.max(0, tokens) * JUDGE_CHARS_PER_TOKEN
-  if (text.length <= max) return text
-  return text.slice(0, max)
-}
+// token 预算 → 字符截断已迁共享 util（#853 §7.2 交接项——utils/tokenBudget.ts；re-export
+// 见 values.ts，本文件自彼处 import）。
 
 // 按 Unicode code points 截断（Django max_length 同语义；reason/摘要的唯一截断实现）。
 export function truncateChars(text: string, max: number): string {

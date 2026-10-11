@@ -133,4 +133,47 @@ describe('#883 manifest llm 声明位 + 保留键（T3）', () => {
     expect(() => assertPluginEnv(manifests, { env: {}, production: true, warn: warn2 })).not.toThrow()
     expect(warn2).not.toHaveBeenCalled()
   })
+
+  // ---------------- progressStages + run.kind（#853 §3.1「插件声明、核心校验」）----------------
+
+  it('progressStages 合法声明（非空、唯一、kebab/snake/camel 小写系）通过校验', async () => {
+    await expect(assertValidPluginCatalog({
+      manifests: [probeManifest({
+        run: { kind: 'research' },
+        tools: [tool({ name: 'wf', progressStages: ['capture', 'resolve_inputs', 'contextPack', 'plan-review'] })],
+      })],
+    })).resolves.toBeUndefined()
+  })
+
+  it('progressStages 空 / 值重复 / 非小写系形态 / 非字符串 → fail-fast', async () => {
+    const manifestWith = (progressStages: unknown) =>
+      probeManifest({ run: { kind: 'x' }, tools: [tool({ name: 'wf', progressStages: progressStages as string[] })] })
+    await expect(assertValidPluginCatalog({ manifests: [manifestWith([])] })).rejects.toThrow(/progressStages/)
+    await expect(assertValidPluginCatalog({ manifests: [manifestWith(['validate', 'validate'])] })).rejects.toThrow(/unique/)
+    await expect(assertValidPluginCatalog({ manifests: [manifestWith(['Valid-Stage'])] })).rejects.toThrow(/lowercase/)
+    await expect(assertValidPluginCatalog({ manifests: [manifestWith(['has space'])] })).rejects.toThrow(/lowercase/)
+    await expect(assertValidPluginCatalog({ manifests: [manifestWith([42 as unknown as string])] })).rejects.toThrow(/lowercase/)
+  })
+
+  it('run.kind 缺失时声明 progressStages 的工具 → fail-fast（SSE 事件族名派生源缺失）', async () => {
+    await expect(assertValidPluginCatalog({
+      manifests: [probeManifest({ tools: [tool({ name: 'wf', progressStages: ['a'] })] })],
+    })).rejects.toThrow(/run\.kind/)
+  })
+
+  it('run.kind 非 kebab（大写/下划线开头/空串）→ fail-fast；未声明 run 完全合法', async () => {
+    await expect(assertValidPluginCatalog({ manifests: [probeManifest({ run: { kind: 'Research' } })] })).rejects.toThrow(/run\.kind/)
+    await expect(assertValidPluginCatalog({ manifests: [probeManifest({ run: { kind: '_research' } })] })).rejects.toThrow(/run\.kind/)
+    await expect(assertValidPluginCatalog({ manifests: [probeManifest({ run: { kind: '' } })] })).rejects.toThrow(/run\.kind/)
+    await expect(assertValidPluginCatalog({ manifests: [probeManifest({})] })).resolves.toBeUndefined()
+  })
+
+  it('run.kind 目录内唯一（SSE 事件族派生源——撞 kind = 两插件共用事件族）→ fail-fast', async () => {
+    await expect(assertValidPluginCatalog({
+      manifests: [
+        probeManifest({ id: 'one', run: { kind: 'shared' } }),
+        probeManifest({ id: 'two', run: { kind: 'shared' } }),
+      ],
+    })).rejects.toThrow(/run\.kind duplicate/)
+  })
 })

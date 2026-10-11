@@ -180,7 +180,7 @@ export async function executeFigureGenerate(
   const ctx = assertFigureContext(exec.ctx)
   const methodText = params.method_text
   // 受理即 created（#744 §11.2 figure_run 创建事实）；其后配置/执行失败落 failed——审计轨迹完整。
-  ctx.audit.emitFigureRun({ event: 'created', toolCallId, detail: { methodText: truncateAuditMethodText(methodText) } })
+  ctx.audit.emitPluginRun({ event: 'created', toolCallId, detail: { methodText: truncateAuditMethodText(methodText) } })
   const usageRef: PluginToolUsage[] = []
   const startedAt = Date.now()
   try {
@@ -201,7 +201,7 @@ export async function executeFigureGenerate(
       sessionId: ctx.run.sessionId,
     })
     const durationMs = Math.max(0, Date.now() - startedAt)
-    ctx.audit.emitFigureRun({
+    ctx.audit.emitPluginRun({
       event: 'completed',
       toolCallId,
       detail: { figureId, iterations: result.meta.fixAttempts + result.meta.optimizeCompleted, durationMs },
@@ -222,9 +222,9 @@ export async function executeFigureGenerate(
   } catch (e) {
     if (exec.signal.aborted) {
       // 会话 run aborted 联动（#744 §4.1）：无半产物落 Figure 成功态（figures.create 未达即无行）
-      ctx.audit.emitFigureRun({ event: 'aborted', toolCallId, detail: { by: 'user' } })
+      ctx.audit.emitPluginRun({ event: 'aborted', toolCallId, detail: { by: 'user' } })
     } else {
-      ctx.audit.emitFigureRun({ event: 'failed', toolCallId, detail: { reason: stableReason(e) } })
+      ctx.audit.emitPluginRun({ event: 'failed', toolCallId, detail: { reason: stableReason(e) } })
     }
     throw e
   }

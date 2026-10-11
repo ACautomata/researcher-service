@@ -17,6 +17,7 @@ import type { PrismaClient } from '../generated/prisma/client'
 // ---------------------------------------------------------------------------
 
 // LangChain usage_metadata 的结构子集（AIMessage.usage_metadata，snake_case）。
+// inputTokens = 全输入口径（input_tokens + cache_read，#906 修订②——见提取器头注）；
 // input_token_details.cache_read = 提示缓存命中；cache_creation = 缓存写入（Anthropic 语义）。
 export interface UsageTokens {
   readonly inputTokens: number
@@ -35,20 +36,27 @@ function num(v: unknown): number {
 
 // 从 LLM 响应消息（AIMessage / AIMessageChunk / 任意结构子集）提取 usage。
 // 无 usage_metadata / 形状异常 → null（调用方跳过该次采数，不落行不抛错）。
+//
+// inputTokens 口径（#906 修订②）：MiniMax 网关（anthropic 兼容面）usage 的 input_tokens
+// 只计未命中前缀缓存部分，全输入 = input_tokens + cache_read_input_tokens（#903 harness
+// 实测事实）——inputTokens 落库修正为全输入口径；cacheReadTokens 独立列保留缓存命中量
+//（分析面，inputTokens 的子集）。无 input_token_details 的 provider（openai 面等）与原
+// 口径恒等。历史行（修正前落库）口径为未含 cache_read——对账按行时间分段注记。
 export function extractUsageMetadata(message: unknown): UsageTokens | null {
   const msg = asRecord(message)
   if (!msg) return null
   const meta = asRecord(msg.usage_metadata)
   if (!meta) return null
-  const input = num(meta.input_tokens)
+  const details = asRecord(meta.input_token_details)
+  const cacheRead = details ? num(details.cache_read) : 0
+  const input = num(meta.input_tokens) + cacheRead
   const output = num(meta.output_tokens)
   // 全零不落行（空 usage 的占位块，非真实调用）
   if (input === 0 && output === 0) return null
-  const details = asRecord(meta.input_token_details)
   return {
     inputTokens: input,
     outputTokens: output,
-    cacheReadTokens: details ? num(details.cache_read) : 0,
+    cacheReadTokens: cacheRead,
     cacheWriteTokens: details ? num(details.cache_creation) : 0,
   }
 }

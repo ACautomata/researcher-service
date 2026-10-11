@@ -37,11 +37,15 @@ export function toLangChainTool(def: AnyPluginToolDefinition, ctx: PluginToolCon
         : runtime?.configurable?.signal instanceof AbortSignal
           ? runtime.configurable.signal
           : new AbortController().signal
+      const frame = currentPluginRunFrame()
+      // 翻译面注册（#853 §3.2#6）：onUpdate 白名单查表「toolCallId→工具名→所属插件」的
+      // 第一跳——注册面缺失（旧形状 frame）时 stage 上报按白名单外丢弃语义自然落空。
+      frame?.noteToolCall?.(toolCallId, def.name)
       const result = await def.execute(toolCallId, params as never, {
         signal,
         // pluginId（#883）：调用方经运行时目录 toolOwnerByName 派生——ctx.llm per-plugin
         // 解析键。缺失（防御面）→ ctx.llm 缺省，域工具自校验。
-        ...execPartsFromFrame(ctx, currentPluginRunFrame(), toolCallId, pluginId),
+        ...execPartsFromFrame(ctx, frame, toolCallId, pluginId),
       })
       const text = contentToText(result.content)
       // responseFormat='content_and_artifact'：二元组 [content, artifact]——content = 模型面，

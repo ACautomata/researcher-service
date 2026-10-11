@@ -9,7 +9,7 @@
 import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest'
 import { setupTestApp, type TestContext } from './setup'
 import { seedUser } from './helpers'
-import { ProviderRegistry, resolveModelRef, withChainBindTools, type ChatModelFactory } from '../src/runner/providerRegistry'
+import { ProviderRegistry, resolveModelRef, withChainBindTools, isTransientTransportError, type ChatModelFactory } from '../src/runner/providerRegistry'
 import { ModelProviderService } from '../src/models/service'
 import { encryptCredential } from '../src/models/cipher'
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models'
@@ -17,6 +17,7 @@ import type { Runnable } from '@langchain/core/runnables'
 import { RunnableLambda } from '@langchain/core/runnables'
 import { AIMessage, HumanMessage } from '@langchain/core/messages'
 import { ScriptedChatModel } from './runnerFakes'
+import { EnvelopeError } from '../src/envelope'
 
 const TEST_SECRET = 'registry-test-credential-secret-32chars!'
 
@@ -516,6 +517,92 @@ describe('ProviderRegistry（#881 预设制：平台虚拟条目 + BYOK 凭证�
     expect((await (await reg.getTeammateModel(next, 'deleted')).invoke([])).content).toBe('MiniMax-M3')
     expect((await (await reg.getDefaultModel(next, { providerId: 'deleted', modelId: 'old-model' })).invoke([])).content).toBe('MiniMax-M3')
     expect(warn).toHaveBeenCalledTimes(2)
+  })
+
+  // ---------------- 传输层瞬态重试（#906 修订③：无状态码异常）----------------
+
+  it('isTransientTransportError：无状态码 Error 可重试；HTTP status / 信封 / abort 家族不重试', async () => {
+    const u = await seedUser(ctx.prisma, 'rg-retry-cls', 'pw-rg-retry-cls-secure')
+    // 无状态码异常（模拟传输层掐断 terminated）→ 首次抛错，重试后成功
+    let calls = 0
+    const flaky: ChatModelFactory = async () => {
+      const stub = {
+        invoke: async () => {
+          calls += 1
+          if (calls === 1) throw new TypeError('terminated')
+          return { content: 'recovered' }
+        },
+      }
+      return stub as unknown as BaseChatModel
+    }
+    const reg = new ProviderRegistry(ctx.prisma, { llmApiKey: 'sk-platform', modelFactory: flaky })
+    const snap = await reg.getSnapshot(u.id)
+    const model = await reg.getModel(snap, 'platform')
+    const res = (await model.invoke([new HumanMessage('hi')] as never)) as { content: string }
+    expect(calls).toBe(2)
+    expect(res.content).toBe('recovered')
+    // 判定器直接断言（S3 面）
+    expect(isTransientTransportError(new TypeError('terminated'))).toBe(true)
+    expect(isTransientTransportError(Object.assign(new Error('x'), { status: 429 }))).toBe(false)
+    expect(isTransientTransportError(new EnvelopeError(90003, 'llm not configured'))).toBe(false)
+    expect(isTransientTransportError(Object.assign(new Error('a'), { name: 'AbortError' }))).toBe(false)
+    expect(isTransientTransportError(Object.assign(new Error('a'), { code: 'ABORT_ERR' }))).toBe(false)
+    expect(isTransientTransportError('not an error')).toBe(false)
+  })
+
+  it('传输层重试有界：连续无状态码失败 → 2 次后抛出；abort 在飞不重试（abort 语义优先）', async () => {
+    const u = await seedUser(ctx.prisma, 'rg-retry-bound', 'pw-rg-retry-bound-secure')
+    let calls = 0
+    const exploding: ChatModelFactory = async () => {
+      const stub = {
+        invoke: async () => {
+          calls += 1
+          throw new Error('socket hang up')
+        },
+      }
+      return stub as unknown as BaseChatModel
+    }
+    const reg = new ProviderRegistry(ctx.prisma, { llmApiKey: 'sk-platform', modelFactory: exploding })
+    const snap = await reg.getSnapshot(u.id)
+    const model = await reg.getModel(snap, 'platform')
+    await expect(model.invoke([new HumanMessage('hi')] as never)).rejects.toThrow(/socket hang up/)
+    expect(calls).toBe(2) // 初次 + 重试一次（TRANSPORT_RETRY_MAX_ATTEMPTS=2）
+    // abort 面：options.signal 已中止 → 立即抛不重试
+    calls = 0
+    const controller = new AbortController()
+    controller.abort()
+    await expect(
+      model.invoke([new HumanMessage('hi')] as never, { signal: controller.signal } as never),
+    ).rejects.toThrow(/socket hang up/)
+    expect(calls).toBe(1)
+  })
+
+  it('withConfig 绑定（非首模型通道）委托链底层仍命中重试包装', async () => {
+    const u = await seedUser(ctx.prisma, 'rg-retry-bind', 'pw-rg-retry-bind-secure')
+    await seedByok(ctx, u.id, 'byok', 'openai', ['m-a', 'm-b'], { apiKey: 'sk-byok' })
+    let calls = 0
+    const factory: ChatModelFactory = async (model) => {
+      const stub = {
+        stubModel: model,
+        invoke: async () => {
+          calls += 1
+          if (calls === 1) throw new Error('ECONNRESET')
+          return { content: `ok:${model}` }
+        },
+        // withConfig spread this（RunnableBinding 委托 bound.invoke 的 fake 等价——
+        // 包装对象 own invoke = 重试版随之复制）
+        withConfig(cfg?: { configurable?: { model?: string } }) {
+          return { ...this, stubModel: cfg?.configurable?.model ?? model }
+        },
+      }
+      return stub as unknown as BaseChatModel
+    }
+    const reg = new ProviderRegistry(ctx.prisma, { llmApiKey: 'sk-platform', credentialSecret: TEST_SECRET, modelFactory: factory })
+    const snap = await reg.getSnapshot(u.id)
+    const bound = (await reg.getModel(snap, 'byok')).withConfig({ configurable: { model: 'm-b' } })
+    const res = (await bound.invoke([new HumanMessage('hi')] as never)) as { content: string }
+    expect(calls).toBe(2)
+    expect(res.content).toContain('ok:')
   })
 
 
