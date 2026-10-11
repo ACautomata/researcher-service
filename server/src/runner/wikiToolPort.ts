@@ -69,7 +69,7 @@ function classifyWikiError(e: unknown): { ok: false; error: { code: PluginWikiPo
   }
   if (e instanceof WikiWorkspaceError) return wikiError('invalid_state', e.message)
   if (e instanceof WikiMirrorUnavailableError) {
-    return wikiError('mirror_unavailable', 'The wiki tree is currently unavailable.')
+    return wikiError('mirror_unavailable', 'The wiki tree is currently unavailable.', 'Retry later.')
   }
   return wikiError('internal', e instanceof Error ? e.message : String(e))
 }
