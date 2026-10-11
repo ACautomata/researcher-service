@@ -14,6 +14,7 @@ import {
   PluginPageProvenanceSchema,
 } from '../src/wiki/pluginPage'
 import { FrontmatterParser, okfBadge } from '../src/wiki/logic'
+import { validateOkfFrontmatter } from 'openwiki/dist/okf/frontmatter.js'
 
 const NOW = Date.parse('2026-10-11T08:00:00Z')
 
@@ -41,7 +42,7 @@ describe('frontmatter 核心组装（853 §3.3 · §11.3C 字段集）', () => {
     // 逐行字面断言（独立真源 = 规格字段集，不自造渲染器对拍）
     expect(md).toContain('type: paper')
     expect(md).toContain('title: "Attention 综述研读"')
-    expect(md).toContain('status: generated')
+    expect(md).toContain('status: draft')
     expect(md).toMatch(/stale_after: "\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z"/)
     expect(md).toMatch(/generated: \{by: "research", at: "\d{4}-\d{2}-\d{2}T[^"]+"\}/)
     expect(md).toContain('source: "research"')
@@ -70,9 +71,25 @@ describe('frontmatter 核心组装（853 §3.3 · §11.3C 字段集）', () => {
     expect(frontmatter['type']).toBe('paper')
     expect(frontmatter['related_pages']).toEqual(['papers/a.md'])
     const badge = okfBadge(md)
-    expect(badge?.status).toBe('generated')
+    expect(badge?.status).toBe('draft')
     expect(badge?.staleAfter).toBe(new Date(NOW + GENERATED_STALE_AFTER_MS).toISOString())
     expect(badge?.generatedAt).toBe(new Date(NOW).toISOString())
+  })
+
+  it('openwiki validateOkfFrontmatter 直调过验（B1 拍板——status 落合法值集，治理 validate/repair 不摘徽章）', () => {
+    for (const md of [
+      assemblePageMarkdown({
+        draft: DRAFT,
+        source: 'research',
+        toolCallId: 'tc-1',
+        workflow: 'ingest',
+        relatedPages: ['papers/a.md'],
+        now: NOW,
+      }),
+      assemblePageMarkdown({ draft: DRAFT, source: 'research', now: NOW }), // 可选溯源缺省变体
+    ]) {
+      expect(validateOkfFrontmatter(md)).toEqual({ valid: true })
+    }
   })
 
   it('stale_after = 生成时刻 + 180 天（显式 UTC 偏移 Z 形态，openwiki 日历校验可过）', () => {
@@ -170,7 +187,7 @@ describe('PageDraft/ClaimDraft zod DTO（853 §3.2 · 图内校验与 port 边�
     expect(PluginClaimDraftSchema.safeParse({ statement: 'x', evidence: [] }).success).toBe(true)
   })
 
-  it('尺寸占位上限：content/claims/evidence/path/title 失控值拒（853 §7.1 未定数值的护栏值——改值须连测试 consciously 改）', () => {
+  it('尺寸上限（853 §7.1 拍板追认）：content/claims/evidence/path/title 失控值拒——改值须连测试一并改', () => {
     expect(PluginPageDraftSchema.safeParse({ ...DRAFT, content: 'x'.repeat(2_000_000) }).success).toBe(true)
     expect(PluginPageDraftSchema.safeParse({ ...DRAFT, content: 'x'.repeat(2_000_001) }).success).toBe(false)
     const n = (k: number) => Array.from({ length: k }, () => ({ statement: 'x', evidence: [] as string[] }))

@@ -166,21 +166,55 @@ export interface PluginWikiReadResponse {
   readonly sections: readonly PluginWikiReadSection[]
 }
 
+// —— 插件 port 错误通道（853 §3.2 · B4 拍板：对齐主 agent「永不 throw 的 Result」形态）——
+// 两 port 方法恒返回 Result 信封；插件节点按 error.code 判定重试/回喂（#909 消费面）。
+// 码表 = 插件面领域码 + 读面分类码（invalid_input/invalid_state/internal 与主 agent
+// wikisearch classifyError 同义同源）。
+
+export type PluginWikiPortErrorCode =
+  | 'invalid_draft' // PageDraft/Provenance zod 校验失败
+  | 'invalid_path' // 路径形态非法（normalizeRelPath：绝对/穿越/反斜杠/非 .md/超长）
+  | 'managed_path' // SKIP 集托管路径（.claims/ _attachments/ log.md…）拒写
+  | 'path_occupied' // 目录/特殊文件占位页路径
+  | 'not_found' // readPage 页不存在（hint 引向 search refs）
+  | 'invalid_input' // 检索面参数被 openwiki 拒（WikiRetrievalError，与主 agent 同转译）
+  | 'invalid_state' // wiki 暂不可安全读（ClaimsError/WikiWorkspaceError——可重试）
+  | 'mirror_unavailable' // wiki 容器/镜像面不可用（拉取失败/容器故障/检索 workspace 歧义 loud fail）
+  | 'internal' // 未知异常兜底
+
+export type PluginWikiResult<T> =
+  | { ok: true; data: T }
+  | { ok: false; error: { code: PluginWikiPortErrorCode; message: string; hint?: string } }
+
 // PluginWikiPort（853 §3.2#1）：search/readPage 读面与主 agent 同一套检索；createPage 幂等哨兵
-// （页已存在 → {created:false} 不抛错，重放窗口常态路径不进 error 通道）+ port 内 owner 级
+// （页已存在 → {ok:true, data:{created:false}}，重放窗口常态路径）+ port 内 owner 级
 // 进程内锁（key=(ownerId, relPath)，probe+put+渲染整体在锁内）+ ensure 容器前置 + SKIP 集
 // assertNotManaged + claims 渲染与 frontmatter 组装。V1 无 updatePage/deletePage（§3.2 钉）。
 export interface PluginWikiPort {
   readonly search: (
     query: string,
     opts?: { readonly paths?: readonly string[]; readonly limit?: number },
-  ) => Promise<PluginWikiSearchResponse>
-  readonly readPage: (page: string, sections: readonly string[]) => Promise<PluginWikiReadResponse>
+  ) => Promise<PluginWikiResult<PluginWikiSearchResponse>>
+  readonly readPage: (
+    page: string,
+    sections: readonly string[],
+  ) => Promise<PluginWikiResult<PluginWikiReadResponse>>
   readonly createPage: (
     draft: PluginPageDraft,
     provenance?: PluginPageProvenance,
-  ) => Promise<{ readonly created: boolean }>
+  ) => Promise<PluginWikiResult<{ readonly created: boolean }>>
 }
+
+export type PluginDocsPortErrorCode =
+  | 'invalid_path' // 非 /lab/ 前缀 / 穿越 / 反斜杠 / 空字节 / 超长（PATH_MAX 同族）
+  | 'not_found' // 存在性校验失败
+  | 'extract_failed' // pdftotext 非零退出（含镜像缺 poppler 的 127 与超时归一的 124）
+  | 'too_large' // 提取全文超 PDF_EXTRACT_MAX_CHARS（不静默截断）
+  | 'sandbox_unavailable' // labContainer exec 不可达（容器不存在/daemon 断连等 infra 面归类）
+
+export type PluginDocsResult<T> =
+  | { ok: true; data: T }
+  | { ok: false; error: { code: PluginDocsPortErrorCode; message: string } }
 
 // PluginDocsPort（853 §3.2#2）：extractPdfText 窄域端口——sandboxPath 强制 /lab/ 前缀白名单
 // + 存在性校验（approval 同款纪律）；沙箱内 pdftotext 按页数组返回（\f 分页，PDF 全文不进
@@ -189,7 +223,7 @@ export interface PluginWikiPort {
 export interface PluginDocsPort {
   readonly extractPdfText: (input: {
     readonly sandboxPath: string
-  }) => Promise<{ readonly pages: readonly string[] }>
+  }) => Promise<PluginDocsResult<{ readonly pages: readonly string[] }>>
 }
 
 // 插件工具运行上下文（§2.2 ctx 最小面）：config = configSchema 声明键的解析值（启动期

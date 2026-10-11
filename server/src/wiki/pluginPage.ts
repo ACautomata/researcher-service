@@ -3,11 +3,15 @@
 // Atomic Claims md 块渲染）+ PageDraft/ClaimDraft zod DTO。页格式单源——四流程建页格式一致
 // （防四套模板四个样），插件零格式知识；claims 表示归 wiki 域（插件不知道 .claims 旁车存在）。
 //
-// frontmatter 字段集（§11.3C）：type/title + OKF 徽章三件（status=generated / stale_after /
-// generated{by,at} 时间戳）+ 溯源（source=调用插件 id / toolCallId / workflow）+ related_pages。
+// frontmatter 字段集（§11.3C · B1 拍板修订）：type/title + OKF 徽章三件（status=draft /
+// stale_after / generated{by,at} 时间戳）+ 溯源（source=调用插件 id / toolCallId / workflow）+
+// related_pages。status 取 openwiki 合法值集（OKF_STATUS_VALUES=[draft,stable,deprecated]）
+// 的 'draft'——生成页进治理 validate/repair 不被摘 status 件（'generated' 非法值会触发
+// invalid_status）；「插件生成」语义由 generated{by,at} + source 承载。
 // 徽章值形态对齐 openwiki 校验面（okf/frontmatter.ts）：ISO 8601 显式 UTC 偏移（Z），
 // generated 单行 flow mapping（JSON-quoted 成员，openwiki setGeneratedEvent 同形）——
-// wiki/logic okfBadge 的徽章面直接有数据由 wikiPluginPage.test.ts 往返锁定。
+// wiki/logic okfBadge 的徽章面直接有数据由 wikiPluginPage.test.ts 往返锁定，openwiki
+// validateOkfFrontmatter 直调过验同测锁定。
 
 import { z } from 'zod'
 import {
@@ -18,13 +22,12 @@ import {
 } from '../plugins/api'
 import { PATH_MAX } from './paths'
 
-// 生成页陈旧地平线（stale_after = 生成时刻 + 180 天）：规格未定数值的平台策略值——
-// 生成页进治理检索面，徽章面过期标记由此驱动；校准归治理/规格后续票。
+// 生成页陈旧地平线（stale_after = 生成时刻 + 180 天）：853 §7.1 拍板追认（#908 复审 B3）——
+// 生成页进治理检索面，徽章面过期标记由此驱动；#909 归口迁 plugins/research/values.ts。
 export const GENERATED_STALE_AFTER_MS = 180 * 24 * 60 * 60 * 1000
 
-// PageDraft DTO 尺寸占位上限（失控值护栏——与 PDF_EXTRACT_MAX_CHARS 纪律对称）：853 §7.1
-// 未定数值，追认后归口迁 plugins/research/values.ts（其头注清单注记）——改值须连
-// wikiPluginPage.test.ts 尺寸边界断言一并改。
+// PageDraft DTO 尺寸上限（853 §7.1 拍板追认，#908 复审 B5）：zod 边界防失控值——
+// #909 归口迁 plugins/research/values.ts。改值须连 wikiPluginPage.test.ts 尺寸边界断言一并改。
 const PAGE_DRAFT_MAX = {
   pathChars: PATH_MAX, // wiki/paths.ts 单源（port 侧 normalizeRelPath 逐 code-point 复核）
   titleChars: 512,
@@ -49,7 +52,7 @@ export const PluginPageDraftSchema: z.ZodType<PluginPageDraft> = z.object({
   claims: z.array(PluginClaimDraftSchema).max(PAGE_DRAFT_MAX.claims).optional(),
 })
 
-// createPage 溯源面 zod（port 边界校验，非法 → PluginWikiPortError('invalid_draft')）——
+// createPage 溯源面 zod（port 边界校验，非法 → Result error.code='invalid_draft'）——
 // workflow 形态单点在此，组装层信任已验输入不再重复判（插件页错误通道归 runner/wikiToolPort，
 // wiki 域纯逻辑不反向依赖）。
 export const PluginPageProvenanceSchema: z.ZodType<PluginPageProvenance> = z.object({
@@ -79,7 +82,9 @@ export function assemblePageMarkdown(input: AssembledPageInput): string {
   const fm: string[] = [
     `type: ${draft.type}`,
     `title: ${JSON.stringify(draft.title)}`,
-    'status: generated',
+    // B1 拍板：status 用 openwiki 合法值集的 'draft'——'generated' 不在 OKF_STATUS_VALUES，
+    // 治理 validate 必摘（invalid_status）；生成溯源由 generated{by,at} + source 承载。
+    'status: draft',
     `stale_after: ${JSON.stringify(staleAfter)}`,
     `generated: {by: ${JSON.stringify(input.source)}, at: ${JSON.stringify(generatedAt)}}`,
     // source 同 generated.by 引号化（JSON.stringify）——不依赖注册期 kebab 校验这层外的

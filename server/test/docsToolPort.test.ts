@@ -9,10 +9,23 @@ import {
   normalizeLabPath,
   splitPdfPages,
 } from '../src/runner/docsToolPort'
+import type { PluginDocsResult } from '../src/plugins/api'
 import { PDF_EXTRACT_MAX_CHARS } from '../../plugins/research/values'
 import { fakePrimitives } from './runnerFakes'
 
 const CONTAINER = 'researcher-sandbox-s1'
+
+// Result 拆包助手（B4：port 恒返回 Result 信封，永不 throw）
+async function dataOf<T>(p: Promise<PluginDocsResult<T>>): Promise<T> {
+  const r = await p
+  if (!r.ok) throw new Error(`期望 ok:true，得 ${r.error.code}: ${r.error.message}`)
+  return r.data
+}
+async function errorOf<T>(p: Promise<PluginDocsResult<T>>): Promise<{ code: string; message: string }> {
+  const r = await p
+  if (r.ok) throw new Error('期望 ok:false，得 ok:true')
+  return r.error
+}
 
 describe('normalizeLabPath：/lab/ 前缀白名单 + 穿越拒止（approval 同款纪律）', () => {
   const codeOf = (fn: () => unknown): string | undefined => {
@@ -76,8 +89,8 @@ describe('extractPdfText：port 行为（fake exec 原语）', () => {
       },
     }
     const port = createPluginDocsPort({ container: CONTAINER, primitives: spy })
-    const r = await port.extractPdfText({ sandboxPath: '/lab/papers/a.pdf' })
-    expect(r.pages).toEqual(['第一页', '第二页'])
+    const { pages } = await dataOf(port.extractPdfText({ sandboxPath: '/lab/papers/a.pdf' }))
+    expect(pages).toEqual(['第一页', '第二页'])
     expect(execCalls[0]).toEqual({ container: CONTAINER, cmd: ['test', '-f', '/lab/papers/a.pdf'] })
     expect(execCalls[1]!.cmd).toEqual(['pdftotext', '/lab/papers/a.pdf', '-'])
   })
@@ -98,9 +111,7 @@ describe('extractPdfText：port 行为（fake exec 原语）', () => {
       },
     }
     const port = createPluginDocsPort({ container: CONTAINER, primitives: spy })
-    await expect(port.extractPdfText({ sandboxPath: '/lab/missing.pdf' })).rejects.toMatchObject({
-      name: 'PluginDocsPortError', code: 'not_found',
-    })
+    expect((await errorOf(port.extractPdfText({ sandboxPath: '/lab/missing.pdf' }))).code).toBe('not_found')
     expect(pdfs).toEqual([])
   })
 
@@ -113,10 +124,9 @@ describe('extractPdfText：port 行为（fake exec 原语）', () => {
       },
     })
     const port = createPluginDocsPort({ container: CONTAINER, primitives: mem.primitives, maxChars: 100 })
-    await expect(port.extractPdfText({ sandboxPath: '/lab/big.pdf' })).rejects.toMatchObject({
-      code: 'too_large',
-      message: expect.stringContaining('500'),
-    })
+    const e = await errorOf(port.extractPdfText({ sandboxPath: '/lab/big.pdf' }))
+    expect(e.code).toBe('too_large')
+    expect(e.message).toContain('500')
   })
 
   it('pdftotext 失败（含镜像缺 poppler 的 127）：extract_failed 带 stderr 透出', async () => {
@@ -128,10 +138,9 @@ describe('extractPdfText：port 行为（fake exec 原语）', () => {
       },
     })
     const port = createPluginDocsPort({ container: CONTAINER, primitives: mem.primitives })
-    await expect(port.extractPdfText({ sandboxPath: '/lab/a.pdf' })).rejects.toMatchObject({
-      code: 'extract_failed',
-      message: expect.stringContaining('poppler'),
-    })
+    const e = await errorOf(port.extractPdfText({ sandboxPath: '/lab/a.pdf' }))
+    expect(e.code).toBe('extract_failed')
+    expect(e.message).toContain('poppler')
   })
 
   it('超时透传：pdftotext 调用带核心固定 timeoutMs（缺省 EXEC_DEFAULT_TIMEOUT_MS，可注入）', async () => {
@@ -145,7 +154,7 @@ describe('extractPdfText：port 行为（fake exec 原语）', () => {
       },
     }
     const port = createPluginDocsPort({ container: CONTAINER, primitives: spy, timeoutMs: 42_000 })
-    await port.extractPdfText({ sandboxPath: '/lab/a.pdf' })
+    await dataOf(port.extractPdfText({ sandboxPath: '/lab/a.pdf' }))
     // 两段 exec（存在性探针 + 提取）同带核心固定 timeoutMs——纪律一致性，探针不走裸调
     const probe = seen.find((s) => s.cmd[0] === 'test')
     expect(probe?.opts?.timeoutMs).toBe(42_000)
@@ -153,7 +162,7 @@ describe('extractPdfText：port 行为（fake exec 原语）', () => {
     expect(pdf?.opts?.timeoutMs).toBe(42_000)
   })
 
-  it('容器级故障归类：exec 原生抛错（容器不存在/daemon 断连）→ sandbox_unavailable，不裸冒泡', async () => {
+  it('容器级故障归类：exec 原生抛错（容器不存在/daemon 断连）→ sandbox_unavailable，不裸冒泡（B4）', async () => {
     const mem = fakePrimitives()
     const boom: typeof mem.primitives = {
       ...mem.primitives,
@@ -162,9 +171,9 @@ describe('extractPdfText：port 行为（fake exec 原语）', () => {
       },
     }
     const port = createPluginDocsPort({ container: CONTAINER, primitives: boom })
-    await expect(port.extractPdfText({ sandboxPath: '/lab/a.pdf' })).rejects.toMatchObject({
-      name: 'PluginDocsPortError', code: 'sandbox_unavailable',
-    })
+    const e = await errorOf(port.extractPdfText({ sandboxPath: '/lab/a.pdf' }))
+    expect(e.code).toBe('sandbox_unavailable')
+    expect(e.message).toContain('container not found')
   })
 })
 

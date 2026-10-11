@@ -24,8 +24,9 @@
   启动 fail-fast（机器强制，准据 `isFloatingImageRef`，`readPinnedImage` 共用内核）。
   dev/test 不拦（本地调试可覆盖）。
 - `WIKI_IMAGE` 见下节；`SANDBOX_IMAGE` 默认 busybox 钉版（#776）。科研工作流（research 插件）
-  的 `extractPdfText` 需要 poppler——部署以 `SANDBOX_IMAGE` 指向 `sandbox-image/` 构建产物
-  （GHCR `…/sandbox:<sha>`）启用；完整工具链镜像换缺省归沙箱镜像升级票（config.ts 注记同口径）。
+  的 `extractPdfText` 需要 poppler——CD 渲染 `.env` 已注入 `SANDBOX_IMAGE=…/sandbox:<CI head_sha>`
+  （#908 B2 拍板：CD 全托管，手工钉宿主 `.env` 会被 scp overwrite 抹掉；钉版引用按 sha tag，
+  生产禁浮动 tag 同上）；完整工具链镜像换缺省归沙箱镜像升级票（config.ts 注记同口径）。
 
 ## wiki 容器镜像（#784）
 

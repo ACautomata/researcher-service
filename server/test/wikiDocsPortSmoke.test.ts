@@ -123,18 +123,20 @@ describe.skipIf(!DOCKER_UP)('wiki/docs port 集成 smoke（真 docker daemon · 
       type: 'paper' as const,
       content: '# Smoke\n\n并发建页竞态探针。',
     }
-    // 并发同路径：锁内 probe→put 串行化 → 恰好一个 created:true
+    // 并发同路径：锁内 probe→put 串行化 → 恰好一个 created:true（B4：Result 信封）
     const [r1, r2] = await Promise.all([port.createPage(draft), port.createPage(draft)])
-    expect([r1.created, r2.created].sort()).toEqual([false, true])
-    // 重放窗口：再调 created:false（幂等跳过常态路径，不抛错不覆盖）
-    await expect(port.createPage(draft)).resolves.toEqual({ created: false })
+    expect(r1.ok && r2.ok).toBe(true)
+    if (!r1.ok || !r2.ok) return
+    expect([r1.data.created, r2.data.created].sort()).toEqual([false, true])
+    // 重放窗口：再调 created:false（幂等跳过常态路径，不覆盖）
+    await expect(port.createPage(draft)).resolves.toMatchObject({ ok: true, data: { created: false } })
     // 落树产物经 wiki 域存储适配器读回（frontmatter 组装 + 正文 + 幂等不覆盖）
     const page = await new DockerWikiFileSystem(WIKI_CONTAINER).readPage('papers/smoke.md')
     expect(page.title).toBe('Smoke 页')
     expect(page.content).toContain('type: paper')
     expect(page.content).toContain('source: "research"')
     expect(page.content).toContain('# Smoke\n\n并发建页竞态探针。')
-    expect(page.content).toContain('status: generated')
+    expect(page.content).toContain('status: draft')
   }, 120_000)
 
   it('extractPdfText 真 poppler：按页数组 + 超限报错 + 白名单拒止', async () => {
@@ -151,23 +153,27 @@ describe.skipIf(!DOCKER_UP)('wiki/docs port 集成 smoke（真 docker daemon · 
 
     const port = createPluginDocsPort({ container: PDF_CONTAINER, primitives })
     const r = await port.extractPdfText({ sandboxPath: '/lab/sample.pdf' })
-    expect(r.pages).toHaveLength(2)
-    expect(r.pages[0]).toContain('SMOKE_TOKEN_ALPHA')
-    expect(r.pages[1]).toContain('SMOKE_TOKEN_BRAVO')
+    expect(r.ok).toBe(true)
+    if (!r.ok) return
+    expect(r.data.pages).toHaveLength(2)
+    expect(r.data.pages[0]).toContain('SMOKE_TOKEN_ALPHA')
+    expect(r.data.pages[1]).toContain('SMOKE_TOKEN_BRAVO')
 
     // 超限明确报错不静默截断（小上限注入——1M 字面锁定归单测，smoke 验行为）
     const tiny = createPluginDocsPort({ container: PDF_CONTAINER, primitives, maxChars: 10 })
-    await expect(tiny.extractPdfText({ sandboxPath: '/lab/sample.pdf' })).rejects.toMatchObject({
-      name: 'PluginDocsPortError',
-      code: 'too_large',
+    await expect(tiny.extractPdfText({ sandboxPath: '/lab/sample.pdf' })).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'too_large' },
     })
     // /lab 白名单拒止（approval 同款纪律）
-    await expect(port.extractPdfText({ sandboxPath: '/wiki/sample.pdf' })).rejects.toMatchObject({
-      code: 'invalid_path',
+    await expect(port.extractPdfText({ sandboxPath: '/wiki/sample.pdf' })).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'invalid_path' },
     })
     // 存在性校验
-    await expect(port.extractPdfText({ sandboxPath: '/lab/missing.pdf' })).rejects.toMatchObject({
-      code: 'not_found',
+    await expect(port.extractPdfText({ sandboxPath: '/lab/missing.pdf' })).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'not_found' },
     })
   }, 120_000)
 })

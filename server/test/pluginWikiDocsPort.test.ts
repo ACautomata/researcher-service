@@ -60,16 +60,16 @@ const wikidocsLike = definePlugin({
             { path: params.path ?? 'papers/x.md', title: 'X', type: 'paper', content: '# X\n\n正文。' },
             { workflow: 'ingest' },
           )
-          probe = `created=${r.created}`
+          probe = r.ok ? `created=${r.data.created}` : `err=${r.error.code}`
         } else if (params.mode === 'search') {
           const r = await ctx.wiki.search('attention 机制')
-          probe = `hits=${r.results.length}`
+          probe = r.ok ? `hits=${r.data.results.length}` : `err=${r.error.code}`
         } else if (params.mode === 'read') {
           const r = await ctx.wiki.readPage('openwiki/concepts/attention.md', ['attention'])
-          probe = `sections=${r.sections.length}`
+          probe = r.ok ? `sections=${r.data.sections.length}` : `err=${r.error.code}`
         } else {
           const r = await ctx.docs.extractPdfText({ sandboxPath: params.path ?? '/lab/a.pdf' })
-          probe = `pages=${r.pages.length}`
+          probe = r.ok ? `pages=${r.data.pages.length}` : `err=${r.error.code}`
         }
         captured.push({ toolCallId, ...observed, probe })
         return { content: [{ type: 'text', text: probe }] }

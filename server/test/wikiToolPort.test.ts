@@ -1,12 +1,14 @@
 // #908 S3 + port 行为（零新缝——fake 原语外部行为，沿 #873 已确认测试缝）：
 // PluginWikiPort 读面（与主 agent wikisearch 同封装同行为）+ createPage 幂等哨兵 +
 // SKIP 集 assertNotManaged + 路径校验 + owner 级进程内锁（并发 probe→put 竞态窗关闭）+
-// ensure 前置 + source/toolCallId 盖章。fakePrimitives MemFs = S2 既有接缝，不新造。
+// ensure 前置 + source/toolCallId 盖章 + openwiki 异常族归类（B4 拍板：port 恒返回 Result
+// 信封永不 throw）。fakePrimitives MemFs = S2 既有接缝，不新造。
 
 import { describe, it, expect } from 'vitest'
 import { createTarTree } from '../src/files/tar'
 import { WIKI_ROOT } from '../src/wikiContainers/values'
-import { createPluginWikiPort, PluginWikiPortError } from '../src/runner/wikiToolPort'
+import { createPluginWikiPort } from '../src/runner/wikiToolPort'
+import type { PluginWikiResult } from '../src/plugins/api'
 import { runWithToolCallContext } from '../src/runner/filejournal/context'
 import { fakePrimitives } from './runnerFakes'
 
@@ -19,6 +21,18 @@ const DRAFT = {
   title: 'Attention',
   type: 'paper' as const,
   content: '# Attention\n\n正文。',
+}
+
+// Result 拆包助手：ok:false 即 fail（码与文案进断言差异面），ok:true 返 data
+async function dataOf<T>(p: Promise<PluginWikiResult<T>>): Promise<T> {
+  const r = await p
+  if (!r.ok) throw new Error(`期望 ok:true，得 ${r.error.code}: ${r.error.message}`)
+  return r.data
+}
+async function errorOf<T>(p: Promise<PluginWikiResult<T>>): Promise<{ code: string; message: string; hint?: string }> {
+  const r = await p
+  if (r.ok) throw new Error('期望 ok:false，得 ok:true')
+  return r.error
 }
 
 function makePort(mem: ReturnType<typeof fakePrimitives>, extra: Record<string, unknown> = {}) {
@@ -58,11 +72,11 @@ describe('读面：与主 agent wikisearch 同一套检索（SKIP 集过滤镜�
     const mem = fakePrimitives()
     await seed(mem)
     const { port } = makePort(mem)
-    const found = await port.search('attention 机制')
+    const found = await dataOf(port.search('attention 机制'))
     expect(found.results.length).toBeGreaterThan(0)
     const refs = found.results.flatMap((r) => r.ref)
     expect(refs.some((r) => r.startsWith('openwiki/concepts/attention.md'))).toBe(true)
-    const leak = await port.search('SECRETTERM')
+    const leak = await dataOf(port.search('SECRETTERM'))
     expect(leak.results).toEqual([])
   })
 
@@ -70,10 +84,21 @@ describe('读面：与主 agent wikisearch 同一套检索（SKIP 集过滤镜�
     const mem = fakePrimitives()
     await seed(mem)
     const { port } = makePort(mem)
-    const res = await port.readPage('openwiki/concepts/attention.md', ['attention'])
+    const res = await dataOf(port.readPage('openwiki/concepts/attention.md', ['attention']))
     expect(res.page).toContain('concepts/attention.md')
     expect(res.sections.length).toBeGreaterThan(0)
     expect(res.sections[0]!.content).toContain('Scaled dot-product attention')
+  })
+
+  it('openwiki 异常族归类（B4 永不 throw）：页缺失 → not_found+hint、非 openwiki 页路径 → invalid_input', async () => {
+    const mem = fakePrimitives()
+    await seed(mem)
+    const { port } = makePort(mem)
+    const missing = await errorOf(port.readPage('openwiki/concepts/missing.md', ['x']))
+    expect(missing.code).toBe('not_found')
+    expect(missing.hint).toContain('search refs')
+    const badPath = await errorOf(port.readPage('concepts/attention.md', ['attention']))
+    expect(badPath.code).toBe('invalid_input')
   })
 })
 
@@ -81,8 +106,10 @@ describe('createPage 幂等哨兵与写面纪律', () => {
   it('新页：ensure 前置 → put 落树 → created:true；frontmatter 组装产物可读回', async () => {
     const mem = fakePrimitives()
     const { port, ensured } = makePort(mem)
-    const r = await runWithToolCallContext({ toolCallId: 'tc-wiki-1', threadId: 's1' }, () =>
-      port.createPage(DRAFT, { workflow: 'ingest', relatedPages: ['concepts/attention.md'] }),
+    const r = await dataOf(
+      runWithToolCallContext({ toolCallId: 'tc-wiki-1', threadId: 's1' }, () =>
+        port.createPage(DRAFT, { workflow: 'ingest', relatedPages: ['concepts/attention.md'] }),
+      ),
     )
     expect(r).toEqual({ created: true })
     expect(ensured).toEqual(['ensure'])
@@ -97,7 +124,7 @@ describe('createPage 幂等哨兵与写面纪律', () => {
     expect(md).toContain('# Attention\n\n正文。')
   })
 
-  it('页已存在：created:false 不抛错、不覆盖、不再 put（重放窗口常态路径）', async () => {
+  it('页已存在：created:false 不覆盖、不再 put（重放窗口常态路径，ok:true 信封）', async () => {
     const mem = fakePrimitives()
     await seed(mem)
     const { port } = makePort(mem)
@@ -107,7 +134,7 @@ describe('createPage 幂等哨兵与写面纪律', () => {
       puts += 1
       return put(...args)
     }
-    const r = await port.createPage({ ...DRAFT, path: 'concepts/attention.md', content: '# 覆盖' })
+    const r = await dataOf(port.createPage({ ...DRAFT, path: 'concepts/attention.md', content: '# 覆盖' }))
     expect(r).toEqual({ created: false })
     expect(puts).toBe(0)
     expect(mem.trees.get(CONTAINER)?.get(`${WIKI_ROOT}/concepts/attention.md`)?.toString()).toContain('Scaled dot-product')
@@ -117,9 +144,7 @@ describe('createPage 幂等哨兵与写面纪律', () => {
     const mem = fakePrimitives()
     const { port } = makePort(mem)
     for (const bad of ['.claims/x.md', 'papers/.claims/x.md', '_attachments/a.md', 'log.md', 'concepts/index.md', 'INSTRUCTIONS.md']) {
-      await expect(port.createPage({ ...DRAFT, path: bad })).rejects.toMatchObject({
-        name: 'PluginWikiPortError', code: 'managed_path',
-      })
+      expect((await errorOf(port.createPage({ ...DRAFT, path: bad }))).code).toBe('managed_path')
     }
   })
 
@@ -127,7 +152,7 @@ describe('createPage 幂等哨兵与写面纪律', () => {
     const mem = fakePrimitives()
     const { port } = makePort(mem)
     for (const bad of ['/abs.md', '../up.md', 'a/../b.md', 'a\\b.md', 'notes.txt', 'a/b.md/c']) {
-      await expect(port.createPage({ ...DRAFT, path: bad })).rejects.toMatchObject({ code: 'invalid_path' })
+      expect((await errorOf(port.createPage({ ...DRAFT, path: bad }))).code).toBe('invalid_path')
     }
   })
 
@@ -135,23 +160,23 @@ describe('createPage 幂等哨兵与写面纪律', () => {
     const mem = fakePrimitives()
     await seed(mem)
     const { port } = makePort(mem)
-    await expect(port.createPage({ ...DRAFT, path: 'concepts' })).rejects.toMatchObject({ code: 'invalid_path' })
+    expect((await errorOf(port.createPage({ ...DRAFT, path: 'concepts' }))).code).toBe('invalid_path')
     // 目录形态占位（.md 名但实为目录）→ occupied
     await mem.primitives.putArchive(CONTAINER, WIKI_ROOT, createTarTree([
       { name: 'papers', type: 'directory', modeOctal: '0000755' },
       { name: 'papers/dir.md', type: 'directory', modeOctal: '0000755' },
     ]))
-    await expect(port.createPage({ ...DRAFT, path: 'papers/dir.md' })).rejects.toMatchObject({ code: 'path_occupied' })
+    expect((await errorOf(port.createPage({ ...DRAFT, path: 'papers/dir.md' }))).code).toBe('path_occupied')
   })
 
   it('DTO 畸形输入（空 title/type 越集）：invalid_draft 明确报错', async () => {
     const mem = fakePrimitives()
     const { port } = makePort(mem)
-    await expect(port.createPage({ ...DRAFT, title: '' })).rejects.toMatchObject({ code: 'invalid_draft' })
-    await expect(port.createPage({ ...DRAFT, type: 'blog' as never })).rejects.toMatchObject({ code: 'invalid_draft' })
+    expect((await errorOf(port.createPage({ ...DRAFT, title: '' }))).code).toBe('invalid_draft')
+    expect((await errorOf(port.createPage({ ...DRAFT, type: 'blog' as never }))).code).toBe('invalid_draft')
     // provenance 面同码：workflow 形态非法（zod 边界单点，组装层不再裸 throw）
-    await expect(port.createPage(DRAFT, { workflow: 'Ingest' })).rejects.toMatchObject({ code: 'invalid_draft' })
-    await expect(port.createPage(DRAFT, { relatedPages: [''] })).rejects.toMatchObject({ code: 'invalid_draft' })
+    expect((await errorOf(port.createPage(DRAFT, { workflow: 'Ingest' }))).code).toBe('invalid_draft')
+    expect((await errorOf(port.createPage(DRAFT, { relatedPages: [''] }))).code).toBe('invalid_draft')
   })
 })
 
@@ -174,15 +199,12 @@ describe('owner 级进程内锁：并发同路径 probe→put 竞态窗关闭', 
       },
     }
     const { port } = makePort({ ...mem, primitives: delayed })
-    const [r1, r2] = await Promise.all([
-      port.createPage(DRAFT),
-      port.createPage({ ...DRAFT, content: '# 另一个' }),
-    ])
+    const [r1, r2] = await Promise.all([dataOf(port.createPage(DRAFT)), dataOf(port.createPage({ ...DRAFT, content: '# 另一个' }))])
     expect([r1.created, r2.created].sort()).toEqual([false, true])
     expect(putCalls).toBe(1)
   })
 
-  it('锁异常路径：锁内任务失败后同 key 后续任务放行（prev.then(fn, fn)——失败不传播不断链）', async () => {
+  it('锁异常路径：锁内容器故障归 mirror_unavailable（B4 不裸冒泡），后续同 key 任务放行', async () => {
     const mem = fakePrimitives()
     const { port } = makePort(mem)
     const base = mem.primitives.getArchive.bind(mem.primitives)
@@ -191,11 +213,13 @@ describe('owner 级进程内锁：并发同路径 probe→put 竞态窗关闭', 
       if (failProbe) throw new Error('daemon 闪断')
       return base(...args)
     }
-    // 第一发：锁内 probe 失败（容器故障原生冒泡——分类归口见 B4 拍板）
-    await expect(port.createPage(DRAFT)).rejects.toThrow('daemon 闪断')
+    // 第一发：锁内 probe 失败 → mirror_unavailable（daemon 闪断文案透传）
+    const e = await errorOf(port.createPage(DRAFT))
+    expect(e.code).toBe('mirror_unavailable')
+    expect(e.message).toContain('daemon 闪断')
     failProbe = false
     // 第二发：同 key 正常执行（若锁把前任失败传播给后任，这里会连带失败）
-    await expect(port.createPage(DRAFT)).resolves.toEqual({ created: true })
+    expect(await dataOf(port.createPage(DRAFT))).toEqual({ created: true })
     expect(mem.trees.get(CONTAINER)?.get(`${WIKI_ROOT}/papers/attention.md`)).toBeDefined()
   })
 
@@ -214,16 +238,8 @@ describe('owner 级进程内锁：并发同路径 probe→put 竞态窗关闭', 
     }
     const mk = (owner: string, container: string) =>
       createPluginWikiPort({ ownerId: owner, container, primitives: delayed, source: 'research', now: () => NOW })
-    await Promise.all([mk('u1', 'researcher-wiki-u1').createPage(DRAFT), mk('u2', 'researcher-wiki-u2').createPage(DRAFT)])
+    await Promise.all([dataOf(mk('u1', 'researcher-wiki-u1').createPage(DRAFT)), dataOf(mk('u2', 'researcher-wiki-u2').createPage(DRAFT))])
     // per-owner 锁：两次 put 区间重叠（start,start,end,end）；全局锁则 start,end,start,end
     expect(events).toEqual(['start', 'start', 'end', 'end'])
-  })
-})
-
-describe('错误面', () => {
-  it('PluginWikiPortError 携带稳定 code', () => {
-    const e = new PluginWikiPortError('managed_path', 'x')
-    expect(e.code).toBe('managed_path')
-    expect(e).toBeInstanceOf(Error)
   })
 })

@@ -338,7 +338,7 @@ _Avoid_: one-shot——撞历史词条「一次性临时容器 (one-shot contain
 _Avoid_: agent loop 裸用——撞「轮次 (turn)」词条内主 agent 每轮循环义（853 §1.1「命令路径无 agent loop」即此义）；循环节点——暗示图拓扑含环（路由图拓扑必须可由持久化状态推导）。
 
 **幂等哨兵 (idempotent sentinel)**:
-（目标架构，853 §3.2#1，#908 落地——`runner/wikiToolPort.ts`）插件经 ctx.wiki 建页的幂等形态：目标页已存在 → 返回 `{created:false}` **不抛错、不覆盖、不再 put**——LangGraph 重放窗口（同图重执行）防重复建页的常态路径，幂等跳过不进 error 通道。并发面由 port 内 owner 级进程内锁（key=(ownerId, relPath)，probe→put 整体锁内）关闭竞态窗。与 figures.create 的 toolCallId 去重不同源：哨兵判据是**落树实况**（getArchive probe），跨进程重放天然成立。
+（目标架构，853 §3.2#1，#908 落地——`runner/wikiToolPort.ts`）插件经 ctx.wiki 建页的幂等形态：目标页已存在 → 返回 `{ok:true, data:{created:false}}` **不覆盖、不再 put**——LangGraph 重放窗口（同图重执行）防重复建页的常态路径（B4 拍板：插件 port 恒返回 Result 信封永不 throw，幂等跳过是正常数据非错误）。并发面由 port 内 owner 级进程内锁（key=(ownerId, relPath)，probe→put 整体锁内）关闭竞态窗。与 figures.create 的 toolCallId 去重不同源：哨兵判据是**落树实况**（getArchive probe），跨进程重放天然成立。
 _Avoid_: 抛错防重——幂等跳过是正常返回非错误；updatePage/deletePage——V1 不留口（编辑已存在页 = 越权改用户/治理产物，853 §3.2 钉）。
 
 **Atomic Claims 块 (atomic claims block)**:

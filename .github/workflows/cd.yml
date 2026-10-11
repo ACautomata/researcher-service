@@ -208,6 +208,10 @@ jobs:
             echo "FAL_KEY=${{ secrets.FAL_KEY }}"
             echo "PANEL_SERVER_IMAGE=${{ env.SERVER_IMAGE }}:latest"
             echo "PANEL_FRONTEND_IMAGE=${{ env.FRONTEND_IMAGE }}:latest"
+            # 沙箱镜像 poppler 支路（#908 B2 拍板：CD 渲染白名单加键——运维手工钉宿主 .env
+            # 会被 scp overwrite 抹掉，改由 CD 全托管）：钉 CI head sha tag（生产禁浮动 tag，
+            # server isFloatingImageRef fail-fast 准据）；server 读本键即启用 extractPdfText。
+            echo "SANDBOX_IMAGE=${{ env.SANDBOX_IMAGE }}:${{ env.IMAGE_TAG }}"
           } > _deploy/.env
           chmod 600 _deploy/.env
 
