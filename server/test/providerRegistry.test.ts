@@ -577,22 +577,69 @@ describe('ProviderRegistry（#881 预设制：平台虚拟条目 + BYOK 凭证�
     expect(calls).toBe(1)
   })
 
+  it('getModel 缓存命中路径同享重试（#906 修订③：modelCache 跨 run 存续，生产稳态 = hit 路径）', async () => {
+    const u = await seedUser(ctx.prisma, 'rg-retry-hit', 'pw-rg-retry-hit-secure')
+    let calls = 0
+    const flaky: ChatModelFactory = async () => {
+      const stub = {
+        invoke: async () => {
+          calls += 1
+          if (calls === 1) throw new TypeError('terminated')
+          return { content: 'recovered-on-retry' }
+        },
+      }
+      return stub as unknown as BaseChatModel
+    }
+    const reg = new ProviderRegistry(ctx.prisma, { llmApiKey: 'sk-platform', modelFactory: flaky })
+    const snap = await reg.getSnapshot(u.id)
+    await reg.getModel(snap, 'platform') // miss：构造 + 缓存（不 invoke）
+    const model = await reg.getModel(snap, 'platform') // hit：返回缓存实例
+    const res = (await model.invoke([new HumanMessage('hi')] as never)) as { content: string }
+    expect(calls).toBe(2) // hit 路径同样重试一次
+    expect(res.content).toBe('recovered-on-retry')
+  })
+
+  it('backoff 窗口内 abort → attempt 2 不发起（abort 语义覆盖退避等待）', async () => {
+    const u = await seedUser(ctx.prisma, 'rg-retry-abortbackoff', 'pw-rg-retry-abortbackoff-secure')
+    let calls = 0
+    const factory: ChatModelFactory = async () => {
+      const stub = {
+        invoke: async () => {
+          calls += 1
+          throw new TypeError('terminated') // 恒失败 → 必入 backoff
+        },
+      }
+      return stub as unknown as BaseChatModel
+    }
+    const reg = new ProviderRegistry(ctx.prisma, { llmApiKey: 'sk-platform', modelFactory: factory })
+    const snap = await reg.getSnapshot(u.id)
+    const model = await reg.getModel(snap, 'platform')
+    const controller = new AbortController()
+    const pending = model.invoke([new HumanMessage('hi')] as never, { signal: controller.signal } as never)
+    setTimeout(() => controller.abort(), 100) // 首次失败后 500ms 退避窗口内中止
+    await expect(pending).rejects.toThrow(/terminated/)
+    expect(calls).toBe(1) // 退避醒来后不发起 attempt 2
+  })
+
   it('withConfig 绑定（非首模型通道）委托链底层仍命中重试包装', async () => {
     const u = await seedUser(ctx.prisma, 'rg-retry-bind', 'pw-rg-retry-bind-secure')
     await seedByok(ctx, u.id, 'byok', 'openai', ['m-a', 'm-b'], { apiKey: 'sk-byok' })
     let calls = 0
+    const bareInvoke = async () => {
+      calls += 1
+      if (calls === 1) throw new Error('ECONNRESET')
+      return { content: 'ok:bound' }
+    }
     const factory: ChatModelFactory = async (model) => {
       const stub = {
         stubModel: model,
-        invoke: async () => {
-          calls += 1
-          if (calls === 1) throw new Error('ECONNRESET')
-          return { content: `ok:${model}` }
-        },
-        // withConfig spread this（RunnableBinding 委托 bound.invoke 的 fake 等价——
-        // 包装对象 own invoke = 重试版随之复制）
-        withConfig(cfg?: { configurable?: { model?: string } }) {
-          return { ...this, stubModel: cfg?.configurable?.model ?? model }
+        invoke: bareInvoke,
+        // 真 ConfigurableModel.prototype.withConfig 语义建模（langchain universal.js:277
+        // 实锤）：返回 RunnableBinding 形态 {bound: 全新裸实例}——bound 不继承原 own props
+        //（wrapped 的重试 invoke 不随行；此前 spread-this fake 建模的是 Runnable 基类语义，
+        // 掩盖了 judge/非首模型面全量无重试的回归，#914 review H2/H3）。
+        withConfig(_cfg?: { configurable?: { model?: string } }) {
+          return { bound: { invoke: bareInvoke }, invoke() { return (this as { bound: { invoke: () => Promise<unknown> } }).bound.invoke() } }
         },
       }
       return stub as unknown as BaseChatModel
@@ -601,8 +648,48 @@ describe('ProviderRegistry（#881 预设制：平台虚拟条目 + BYOK 凭证�
     const snap = await reg.getSnapshot(u.id)
     const bound = (await reg.getModel(snap, 'byok')).withConfig({ configurable: { model: 'm-b' } })
     const res = (await bound.invoke([new HumanMessage('hi')] as never)) as { content: string }
-    expect(calls).toBe(2)
+    expect(calls).toBe(2) // withConfig 重组后重试仍命中（binding 层再包装）
     expect(res.content).toContain('ok:')
+  })
+
+  it('真 ConfigurableModel prototype 语义：withConfig 覆写在真类行为下仍带重试（装配保真锁）', async () => {
+    const u = await seedUser(ctx.prisma, 'rg-retry-cm', 'pw-rg-retry-cm-secure')
+    const { ConfigurableModel } = await import('langchain/chat_models/universal')
+    const stub = Object.create(ConfigurableModel.prototype) as BaseChatModel & {
+      _defaultConfig: Record<string, unknown>
+      _configurableFields: string[]
+      _configPrefix: string
+      _queuedMethodOperations: Map<unknown, unknown>
+    }
+    // withConfig（真 prototype 方法）内部读这四个实例字段（universal.js:277）——
+    // Object.create 绕过构造器需手工齐备；bound = 全新裸 CM 实例（own props 不随行），
+    // 其 invoke 走 prototype → _getModelInstance，不触达下方 stub，故行为面只锁 wrapped 直调。
+    stub._defaultConfig = {}
+    stub._configurableFields = ['model', 'temperature']
+    stub._configPrefix = ''
+    stub._queuedMethodOperations = new Map()
+    let calls = 0
+    Object.defineProperty(stub, 'invoke', {
+      value: async () => {
+        calls += 1
+        if (calls === 1) throw new Error('terminated')
+        return { content: 'cm-recovered' }
+      },
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    })
+    const factory: ChatModelFactory = async () => stub
+    const reg = new ProviderRegistry(ctx.prisma, { llmApiKey: 'sk-platform', credentialSecret: TEST_SECRET, modelFactory: factory })
+    const snap = await reg.getSnapshot(u.id)
+    const model = await reg.getModel(snap, 'platform')
+    const res = (await model.invoke([new HumanMessage('hi')] as never)) as { content: string }
+    expect(calls).toBe(2) // 行为面：出口包装重试生效
+    expect(res.content).toBe('cm-recovered')
+    // 结构面：真 withConfig（bound = 全新裸 CM，重试不随行）产物上必须自带重试包装
+    //（own invoke = 覆盖层）；裸 RunnableBinding 无 own invoke（prototype 直通）。
+    const bound = model.withConfig({ configurable: { model: 'm2' } })
+    expect(Object.prototype.hasOwnProperty.call(bound, 'invoke')).toBe(true)
   })
 
 

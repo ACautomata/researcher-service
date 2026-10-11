@@ -87,7 +87,7 @@ const researchLike = definePlugin({
       progressStages: ['capture', 'contextPack', 'summary'],
       execute: async (toolCallId, params: { topic: string }, exec): Promise<PluginToolResult> => {
         researchCaptured.push(toolCallId)
-        exec.onUpdate?.({ stage: 'capture', workflow: 'ingest' })
+        exec.onUpdate?.({ stage: 'capture', workflow: 'ingest', toolCallId: 'evil' }) // 保留键——runner 锚定不可改写
         exec.onUpdate?.({ stage: 'design' }) // rknow 白名单外（figure 族值）——丢弃
         exec.onUpdate?.({ stage: 'contextPack', workflow: 'ingest' })
         return { content: [{ type: 'text', text: `done:${params.topic}` }] }
@@ -136,8 +136,8 @@ describe('#792 figure 工具两条触发面一条执行面（S1）', () => {
     hub = new CollectingHub()
     // 收录校验（fixtures 目录）：figlike 与真 autofigure 同族（run.kind='figure'）——run.kind
     // 目录唯一性校验（#853 事件族派生源不撞车）下 fixtures 不与 PLUGIN_MANIFESTS 混装校验；
-    // autofigure 全目录收录校验由 app 装配面测试（setupTestApp）覆盖。runtime 面仍装全量
-    //（翻译面查表含真插件无妨）。
+    // 真插件全目录收录校验由 pluginsRegistry.test「真 PLUGIN_MANIFESTS 全目录」测试覆盖
+    //（与 runner/assembly.ts 装配面同参）。runtime 面仍装全量（翻译面查表含真插件无妨）。
     await assertValidPluginCatalog({
       manifests: [figureLike, researchLike],
       coreToolNames: ['task', 'read_official_skill'],
@@ -256,6 +256,8 @@ describe('#792 figure 工具两条触发面一条执行面（S1）', () => {
     expect(progress.every((e) => (e.payload as { workflow?: string }).workflow === 'ingest')).toBe(true)
     // figure 族事件零串扰：rknow 的上报不进 figure_run.progress
     expect(hub.events.some((e) => e.type === 'figure_run.progress')).toBe(false)
+    // SSE 载荷保留键锚定：插件上报同名键（toolCallId:'evil'）不可改写身份
+    expect(progress.every((e) => typeof (e.payload as { toolCallId: string }).toolCallId === 'string' && (e.payload as { toolCallId: string }).toolCallId !== 'evil')).toBe(true)
     // TextTrace：stage_transitions×2 落 rknow 族，runKind 反查盖章 = 'rknow'
     const rows = await prisma.textTraceLog.findMany({ where: { sessionKey: 'sess-fr-1' }, orderBy: { id: 'desc' }, take: 10 })
     const transitions = rows.map((r) => JSON.parse(r.outputText) as Record<string, unknown>).filter((p) => p.event === 'stage_transitions' && p.runKind === 'rknow')

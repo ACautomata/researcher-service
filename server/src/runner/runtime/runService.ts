@@ -1381,9 +1381,11 @@ export class RunService {
         if (!parsed) return
         const from = stageTrace.get(toolCallId)
         stageTrace.set(toolCallId, parsed.stage)
+        // 保留键后置锚定（extra-first）：插件上报同名键不可改写 SSE 载荷身份（parse 层
+        // 已排除 stage/toolCallId，组装面双保险——spread 顺序即契约）。
         this.publish(
           cmd.ownerId,
-          { type: pluginRunProgressEventName(declared.kind), payload: { toolCallId, stage: parsed.stage, ...parsed.extra } },
+          { type: pluginRunProgressEventName(declared.kind), payload: { ...parsed.extra, toolCallId, stage: parsed.stage } },
           cmd,
         )
         audit.emitPluginRun({
@@ -1391,7 +1393,7 @@ export class RunService {
           toolCallId,
           // 双面完整（#853 §6.1「同一事实两面」）：extra 域字段（workflow——四流程重名
           // stage 的语境面）随审计面落载；figure 族 extra 恒空 → 载荷形状零变化。
-          detail: { ...(from !== undefined ? { from } : {}), to: parsed.stage, at: this.clock(), ...parsed.extra },
+          detail: { ...parsed.extra, ...(from !== undefined ? { from } : {}), to: parsed.stage, at: this.clock() },
         })
       },
     }

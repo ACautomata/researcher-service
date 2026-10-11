@@ -37,6 +37,7 @@ import {
 } from '../plugins/api'
 import { extractUsageMetadata, recordLlmUsage, type UsageCollectorContext } from './usage'
 import { pngToDataUri } from '../figures/dataUri'
+import { extractJsonObject } from '../utils/jsonExtraction'
 
 // 平台默认端点条目 + 首模型（悬挂回落目标，#883）。平台条目快照恒垫底（#881）；无可用
 // 模型 = 面板预设无默认模型（防御面，正常配置不触达）→ 明确配置错误。
@@ -100,22 +101,16 @@ function textOf(message: unknown): string {
 const STRUCTURED_RAW_MAX_CHARS = 4000
 
 export function parseStructuredOutput<T>(raw: string, schema: z.ZodType<T>): T {
-  let text = String(raw ?? '').trim()
-  const fence = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/)
-  if (fence) text = fence[1]!.trim()
-  // JSON 对象定位（{}）：消费者 schema 面 = zod 对象 schema（853 §3.2#3 判定/产物均为
-  // z.object 形态）；顶层数组 schema 不在此支持面内。
-  const start = text.indexOf('{')
-  const end = text.lastIndexOf('}')
-  if (start < 0 || end <= start) {
-    throw new PluginLlmStructuredError('结构化输出解析失败：响应中无 JSON 对象', '响应中无 JSON 对象', raw.slice(0, STRUCTURED_RAW_MAX_CHARS))
-  }
-  const slice = text.slice(start, end + 1)
+  // 容错提取共享实现（utils/jsonExtraction，#914 review L2）：Error=无 JSON 对象 /
+  // SyntaxError=语法，按类型包装诊断——文案与原直写逐字一致。
   let parsedJson: unknown
   try {
-    parsedJson = JSON.parse(slice)
+    parsedJson = extractJsonObject(raw)
   } catch (e) {
-    throw new PluginLlmStructuredError('结构化输出解析失败：JSON 语法错误', `JSON 语法错误: ${(e as Error).message}`, raw.slice(0, STRUCTURED_RAW_MAX_CHARS))
+    if (e instanceof SyntaxError) {
+      throw new PluginLlmStructuredError('结构化输出解析失败：JSON 语法错误', `JSON 语法错误: ${(e as Error).message}`, raw.slice(0, STRUCTURED_RAW_MAX_CHARS))
+    }
+    throw new PluginLlmStructuredError('结构化输出解析失败：响应中无 JSON 对象', '响应中无 JSON 对象', raw.slice(0, STRUCTURED_RAW_MAX_CHARS))
   }
   const result = schema.safeParse(parsedJson)
   if (!result.success) {
@@ -186,7 +181,7 @@ export function createLlmToolPort(input: LlmToolPortInput): PluginLlmPort {
     // 「检查 model 配置」。
     if (pinnedModel !== undefined) {
       const owner = snapshot.providers.find((p) => p.models.some((m) => m.id === pinnedModel))
-      if (!owner) throw fail(CODE.PROVIDER_NOT_FOUND, `模型 ${pinnedModel} 不在 provider 配置集合内（AUTOFIGURE_SVG_MODEL 配置错误）`)
+      if (!owner) throw fail(CODE.PROVIDER_NOT_FOUND, `模型 ${pinnedModel} 不在 provider 配置集合内（插件模型 pin 配置错误）`)
       refs = [{ provider: owner, modelId: pinnedModel }]
       single = true
     } else {
@@ -254,7 +249,7 @@ export function createLlmToolPort(input: LlmToolPortInput): PluginLlmPort {
       const pinned = opts.model.trim() !== '' ? opts.model : undefined
       const { refs, single } = resolveRefs(pinned)
       if (refs.length === 0) {
-        throw fail(CODE.LLM_NOT_CONFIGURED, '无可用模型（figure 生成需要 owner 或面板默认 provider）')
+        throw fail(CODE.LLM_NOT_CONFIGURED, '无可用模型（多模态生成需要 owner 或面板默认 provider）')
       }
       let lastError: unknown
       for (const ref of refs) {

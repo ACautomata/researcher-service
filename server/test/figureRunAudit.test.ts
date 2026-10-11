@@ -46,6 +46,13 @@ describe('parsePluginRunProgress（白名单校验，#853 §3.2#6 泛化签名�
     expect(parsePluginRunProgress({ stage: 'bucket' }, new Set(['bucket']))!.extra).toEqual({})
   })
 
+  it('extra 不收保留键 toolCallId（SSE 载荷身份由 runner 锚定，插件上报不可改写）', () => {
+    expect(parsePluginRunProgress({ stage: 'bucket', toolCallId: 'evil', workflow: 'x' }, new Set(['bucket']))).toEqual({
+      stage: 'bucket',
+      extra: { workflow: 'x' },
+    })
+  })
+
   it('事件名派生：kind → `<kind>_run.progress`；figure 派生与既有常量逐字一致（零变锁定）', () => {
     expect(pluginRunProgressEventName('research')).toBe('research_run.progress')
     expect(pluginRunProgressEventName('figure')).toBe(FIGURE_RUN_PROGRESS)
@@ -142,6 +149,18 @@ describe('createPrismaPluginRunAuditSink（TextTrace 五类审计 + runKind 盖�
     const payloads = new Map(rows.map((r) => [(JSON.parse(r.outputText) as Record<string, unknown>).toolCallId as string, JSON.parse(r.outputText) as Record<string, unknown>]))
     expect(payloads.get('tc-research')!.runKind).toBe('research')
     expect('runKind' in payloads.get('tc-figure')!).toBe(false)
+  })
+
+  it('保留键锚定：detail 携带 event/toolCallId/runKind 同名键不可覆盖载荷身份（审计检索按 outputText 过滤——身份可伪造即误检）', async () => {
+    const s = sink((toolCallId) => (toolCallId === 'tc-real' ? 'rknow' : undefined))
+    s.emitPluginRun({ event: 'stage_transitions', toolCallId: 'tc-real', detail: { to: 'bucket', event: 'completed', toolCallId: 'evil', runKind: 'ghost', workflow: 'ingest' } })
+    await drain()
+    const rows = await prisma.textTraceLog.findMany({ where: { runId: 'run-1' }, orderBy: { id: 'desc' }, take: 1 })
+    const payload = JSON.parse(rows[0]!.outputText) as Record<string, unknown>
+    expect(payload.event).toBe('stage_transitions')
+    expect(payload.toolCallId).toBe('tc-real')
+    expect(payload.runKind).toBe('rknow')
+    expect(payload.workflow).toBe('ingest') // 域字段照常落载
   })
 
   it('审计落库失败 fail-soft（不放大为调用方异常）', () => {

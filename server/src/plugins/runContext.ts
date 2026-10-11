@@ -16,9 +16,12 @@ export interface PluginRunFrame {
    *  配置快照（frame 构造期）——指派变更下一 run 生效，在飞 run 不受影响。 */
   readonly llmFor: (pluginId: string) => PluginLlmPort
   readonly audit: PluginAuditPort
-  /** run abort 传播链（#853 §3.2#4）：ctx.llm 实现闭包捕获自动传底层 invoke——
-   *  generateMultimodal/generateStructured 签名不出现 signal（插件零感知、结构性防忘传；
-   *  顺带修 autofigure abort 后照跑照计费缺口）。与 PluginToolExec.signal 同源。 */
+  /** run abort 传播（#853 §3.2#4）：frame 持有的 run signal——形状契约面（spec 点名
+   *  frame 携带，供未来消费面读取）。abort 到 LLM invoke 的实际传导不走本字段直读：
+   *  buildPluginRunFrame 构造期把同一 signal 闭包捕获进 llmFor 的 createLlmToolPort
+   *  （构造入参——invoke options 自动透传，generateMultimodal/generateStructured 签名
+   *  不出现 signal，插件零感知、结构性防忘传；顺带修 autofigure abort 后照跑照计费
+   *  缺口）。与 PluginToolExec.signal 同一 signal 实例。 */
   readonly signal: AbortSignal
   /** 翻译面注册（#853 §3.2#6）：toolCallId → 工具名——onUpdate 白名单查表「toolCallId→
    *  工具名→所属插件」的第一跳。可选：注册面缺失（旧形状 frame/探针）时 stage 上报按

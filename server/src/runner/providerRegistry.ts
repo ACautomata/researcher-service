@@ -87,8 +87,10 @@ export type { ChatModelFactory, ModelFactoryOptions } from '../models/chatFactor
 // 覆盖面（刻意钉界）：invoke 调用面（插件 ctx.llm 非流式长生成 = #903 场景 + judge 非流式
 // 判定）；主 agent 流式面（streamEvents → _streamResponseChunks）不包装——流中途断的重试
 // 需已 yield chunk 重放，语义另票。包装经 Object.create 原型继承（withChainBindTools 先例
-// 同款）：bindTools/withConfig 等调用面透传，RunnableBinding 委托链底层 invoke 保持被包装
-// 语义（bindModelId/withFallbacks 重组后仍命中）。
+// 同款），两个传播点保证覆盖闭合：① getModel 缓存存包装后实例——hit 路径（生产稳态）与
+// miss 同享重试；② wrapped 覆写 withConfig——重组产物（RunnableBinding{bound: 全新裸
+// ConfigurableModel}，真类行为 own 重试不随行）再包一层，bindModelId / userJudge /
+// getDefaultModel preferred 等重组面全部命中。
 export const TRANSPORT_RETRY_MAX_ATTEMPTS = 2
 const TRANSPORT_RETRY_BACKOFF_MS = 500
 
@@ -124,16 +126,31 @@ function withTransportRetry(model: BaseChatModel): BaseChatModel {
         return await model.invoke(messages as never, options as never)
       } catch (e) {
         lastError = e
-        // abort（含 options.signal 在调用期间被中止）不重试——abort 语义优先于瞬态重试。
+        // abort（含 options.signal 在 backoff 窗口内被中止）不重试——abort 语义优先于
+        // 瞬态重试。退避睡醒复查一次：窗口内 abort → attempt 2 不发起（抛底层错误，
+        // 不自造 abort 错误——abort 先于 invoke 时底层错误语义保留）。
         const optSignal = (options as { signal?: AbortSignal } | undefined)?.signal
         if (optSignal?.aborted || !isTransientTransportError(e) || attempt >= TRANSPORT_RETRY_MAX_ATTEMPTS) throw e
         await new Promise((resolve) => setTimeout(resolve, TRANSPORT_RETRY_BACKOFF_MS))
+        if (optSignal?.aborted) throw e
       }
     }
     throw lastError // 不可达面（循环内必 return/throw）
   }
   Object.defineProperty(wrapped, 'invoke', {
     value: retriedInvoke,
+    writable: true,
+    enumerable: true,
+    configurable: true,
+  })
+  // withConfig 重组面（真 ConfigurableModel.prototype.withConfig，langchain universal.js:
+  // 277 实锤）返回 new RunnableBinding({bound: 全新裸 ConfigurableModel})——原 own 重试
+  // invoke 不随行（judge/userJudge、bindModelId 非首模型、getDefaultModel preferred 面全走
+  // 此路）。返回值再包一层重试：retriedInvoke 委托 binding.invoke（内部委托裸 bound），
+  // 重试在 binding 层生效。
+  Object.defineProperty(wrapped, 'withConfig', {
+    value: (...args: unknown[]) =>
+      withTransportRetry((model as { withConfig: (...a: unknown[]) => unknown }).withConfig(...args) as BaseChatModel),
     writable: true,
     enumerable: true,
     configurable: true,
@@ -284,16 +301,17 @@ export class ProviderRegistry {
     const cached = this.modelCache.get(key)
     if (cached) return cached
 
-    const constructing = this.constructModel(entry, defaultModel)
-    this.modelCache.set(key, constructing)
-    try {
-      // 传输层瞬态重试包装（#906 修订③）——缓存面包装单次（同实例复用，重试闭包不叠加）。
-      return withTransportRetry(await constructing)
-    } catch (e) {
-      // 构造失败（凭证缺失/解密失败 90003 / 工厂异常）不留坏缓存
-      this.modelCache.delete(key)
-      throw e
-    }
+    // 缓存存包装后的 promise（#906 修订③）：hit/miss 同一 wrapped 实例——hit 路径
+    // （生产稳态，modelCache 跨 run 存续）与 miss 一样带传输层重试；包装单次（同一
+    // wrapped 复用，重试闭包不叠加）。构造失败不留坏缓存。
+    const wrapped = this.constructModel(entry, defaultModel)
+      .then((m) => withTransportRetry(m))
+      .catch((e: unknown) => {
+        this.modelCache.delete(key)
+        throw e
+      })
+    this.modelCache.set(key, wrapped)
+    return wrapped
   }
 
   private async constructModel(entry: ProviderSnapshotEntry, model: string): Promise<BaseChatModel> {

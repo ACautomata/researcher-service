@@ -9,6 +9,7 @@ import { createHash } from 'node:crypto'
 import { z } from 'zod'
 import { AIMessage, HumanMessage, SystemMessage } from '@langchain/core/messages'
 import { truncateToTokenBudget } from '../../utils/tokenBudget'
+import { extractJsonObject } from '../../utils/jsonExtraction'
 import {
   APPROVAL_REJECTION_CONTENT_PREFIX,
   APPROVAL_REASON_MAX_CHARS,
@@ -178,13 +179,10 @@ export function buildJudgeInput(parts: {
 // ---------------------------------------------------------------------------
 
 export function parseJudgeOutput(raw: string): JudgeVerdict {
-  let text = String(raw ?? '').trim()
-  const fence = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/)
-  if (fence) text = fence[1]!.trim()
-  const start = text.indexOf('{')
-  const end = text.lastIndexOf('}')
-  if (start < 0 || end <= start) throw new Error('输出中无 JSON 对象')
-  const parsed = JudgeVerdictSchema.parse(JSON.parse(text.slice(start, end + 1)))
+  // 容错提取共享实现（utils/jsonExtraction，#914 review L2）：错误面与原直写一致
+  //（无对象 → Error('输出中无 JSON 对象')；语法 → SyntaxError 原样）——judge client
+  // 捕获任意 Error 重试再败 → malformed，行为零变化。
+  const parsed = JudgeVerdictSchema.parse(extractJsonObject(raw))
   if (parsed.decision === 'approve') {
     return { decision: 'approve', policy_class: null, reason: '' }
   }

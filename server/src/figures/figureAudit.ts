@@ -47,9 +47,12 @@ export type FigureStage = (typeof FIGURE_RUN_STAGES)[number]
 // onUpdate partial 的白名单校验（runner 翻译面入口）：形状 {stage: 白名单值之一}——白名单
 // 外（未知形状/未知 stage）一律丢弃不放大。其余可枚举自有属性作为 extra 透传（#853 §6.1：
 // research_run.progress 载荷 {toolCallId, stage, workflow}——workflow 等域字段随 partial
-// 进 SSE 载荷；TextTrace stage_transitions detail 保持 {from?,to,at} 不收 extra）。
+// 进 SSE 载荷与 TextTrace stage_transitions detail（双面同一事实））。保留键（stage/
+// toolCallId）不入 extra——载荷身份由 runner 锚定，插件上报同名键不可改写（SSE 载荷与
+// 审计检索按 outputText 过滤的身份面）。
 // extra 防放大护栏：序列化超限丢弃（对齐 projector 截断纪律——受信插件面，护栏防御性）。
-const PROGRESS_EXTRA_MAX_BYTES = 512
+// 量纲为 UTF-16 码元数（JSON.stringify().length），命名 _CHARS 如实。
+const PROGRESS_EXTRA_MAX_CHARS = 512
 
 export function parsePluginRunProgress(
   partial: unknown,
@@ -60,10 +63,10 @@ export function parsePluginRunProgress(
   if (typeof stage !== 'string' || !stages.has(stage)) return null
   const extra: Record<string, unknown> = {}
   for (const [key, value] of Object.entries(partial as Record<string, unknown>)) {
-    if (key !== 'stage') extra[key] = value
+    if (key !== 'stage' && key !== 'toolCallId') extra[key] = value
   }
   try {
-    if ((JSON.stringify(extra) ?? '').length > PROGRESS_EXTRA_MAX_BYTES) return { stage, extra: {} }
+    if (JSON.stringify(extra).length > PROGRESS_EXTRA_MAX_CHARS) return { stage, extra: {} }
   } catch {
     return { stage, extra: {} } // 循环引用等不可序列化 extra——只落 stage
   }
@@ -104,11 +107,14 @@ export function createPrismaPluginRunAuditSink(
   return {
     emitPluginRun(event: PluginRunAuditEvent): void {
       const runKind = opts.runKindOf?.(event.toolCallId)
+      // 保留键后置锚定（extra-first）：detail 域字段先铺（workflow 等），身份键
+      //（event/toolCallId/runKind）恒以 runner 侧值为准——插件面携带同名键不可改写
+      //（审计检索按 outputText 过滤，身份可伪造即误检）。
       const outputText = JSON.stringify({
+        ...event.detail,
         ...(runKind !== undefined ? { runKind } : {}),
         event: event.event,
         toolCallId: event.toolCallId,
-        ...event.detail,
       })
       const methodText = event.event === 'created' ? truncateAuditMethodText(event.detail.methodText) : ''
       const status = event.event === 'failed' || event.event === 'aborted' ? 'failed' : 'success'

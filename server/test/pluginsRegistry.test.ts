@@ -4,6 +4,11 @@ import { describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
 import { definePlugin, type AnyPluginToolDefinition, type PluginManifest } from '../src/plugins/api'
 import { assertPluginEnv, assertValidPluginCatalog } from '../src/plugins/registry'
+import { PLUGIN_MANIFESTS } from '../../plugins/index'
+import { FILE_TOOLS, EXEC_TOOLS } from '../src/runner/approval/values'
+import { TEAMMATE_TOOL_NAMES } from '../src/runner/teammates/tools'
+import { SYSTEM_COMMANDS } from '../src/officialContent/catalog'
+import { snapshotOfficialContent } from '../src/officialContent/runtime'
 
 function tool(overrides: Partial<AnyPluginToolDefinition> & { name: string }): AnyPluginToolDefinition {
   return {
@@ -175,5 +180,21 @@ describe('#883 manifest llm 声明位 + 保留键（T3）', () => {
         probeManifest({ id: 'two', run: { kind: 'shared' } }),
       ],
     })).rejects.toThrow(/run\.kind duplicate/)
+  })
+
+  it('run.kind 撞核心保留族名 wiki（wikigen 非插件域 wiki_run.* 五类事件，无 kind 目录占用可拦）→ fail-fast', async () => {
+    await expect(assertValidPluginCatalog({
+      manifests: [probeManifest({ run: { kind: 'wiki' } })],
+    })).rejects.toThrow(/reserved/)
+  })
+
+  // ---------------- 真目录收录校验（#914 review M3：装配保真锁）----------------
+
+  it('真 PLUGIN_MANIFESTS 全目录过收录校验（与 runner/assembly.ts 装配面同参——此前该面仅真启动可达，测试覆盖为零）', async () => {
+    await expect(assertValidPluginCatalog({
+      manifests: PLUGIN_MANIFESTS,
+      coreToolNames: [...FILE_TOOLS, ...EXEC_TOOLS, 'task', 'read_official_skill', ...TEAMMATE_TOOL_NAMES],
+      reservedCommandNames: [...SYSTEM_COMMANDS, ...snapshotOfficialContent().commands.map((c) => c.name)],
+    })).resolves.toBeUndefined()
   })
 })

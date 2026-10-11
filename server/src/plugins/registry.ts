@@ -28,6 +28,12 @@ export const PLUGIN_PROGRESS_STAGE_REGEX = /^[a-z][a-zA-Z0-9_-]*$/
 export const JUDGE_PLUGIN_ID = 'judge'
 export const RESERVED_PLUGIN_IDS: ReadonlySet<string> = new Set([JUDGE_PLUGIN_ID])
 
+// 保留 run.kind（#853 §3.1 族名派生源防撞）：'wiki' = wikigen 非插件域既有 `wiki_run.*`
+// 五类事件族（progress/text/tool_start/tool_end/finished），核心域不占 kind 目录、目录
+// 唯一性拦不住 → 此处显式保留。figure 族不经此集：autofigure（真插件）恒占 kind='figure'，
+// 目录唯一性即保护链（若其退役，FROZEN_RUN_KIND 冻结族的处置另议，非本面静默放行）。
+export const RESERVED_RUN_KINDS: ReadonlySet<string> = new Set(['wiki'])
+
 export const TOOL_CATEGORIES: readonly PluginToolCategory[] = ['file', 'exec', 'domain']
 
 export interface PluginCatalogValidationInput {
@@ -68,14 +74,15 @@ export async function assertValidPluginCatalog(input: PluginCatalogValidationInp
   }
 }
 
-// run.kind 校验（#853 §3.1）：可选声明，提供时 kebab 形态 + 目录内唯一（SSE 事件族名
-// 派生源——撞 kind = 两插件共用 `<kind>_run.*` 族，静默串事件）。
+// run.kind 校验（#853 §3.1）：可选声明，提供时 kebab 形态 + 不撞核心保留族名 + 目录内
+// 唯一（SSE 事件族名派生源——撞 kind = 两插件共用 `<kind>_run.*` 族，静默串事件）。
 function assertRunKindValid(manifest: PluginManifest, seenRunKinds: Set<string>): void {
   const kind = manifest.run?.kind
   if (kind === undefined) return
   if (typeof kind !== 'string' || !PLUGIN_RUN_KIND_REGEX.test(kind)) {
     throw new Error(`plugin ${manifest.id}: run.kind must be kebab-case when provided`)
   }
+  if (RESERVED_RUN_KINDS.has(kind)) throw new Error(`plugin ${manifest.id}: run.kind is reserved: ${kind}`)
   if (seenRunKinds.has(kind)) throw new Error(`plugin ${manifest.id}: run.kind duplicate: ${kind}`)
   seenRunKinds.add(kind)
 }
