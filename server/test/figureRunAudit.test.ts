@@ -163,6 +163,14 @@ describe('createPrismaPluginRunAuditSink（TextTrace 五类审计 + runKind 盖�
     expect(payload.workflow).toBe('ingest') // 域字段照常落载
   })
 
+  it('冻结面假键清除：无 runKindOf（figure 冻结族）时 detail 携带 runKind 同名键 → 载荷仍无 runKind 列', async () => {
+    const s = sink() // runKindOf 缺省 = figure 冻结装配面
+    s.emitPluginRun({ event: 'created', toolCallId: 'tc-frozen', detail: { methodText: 'x', runKind: 'ghost' } })
+    await drain()
+    const rows = await prisma.textTraceLog.findMany({ where: { runId: 'run-1' }, orderBy: { id: 'desc' }, take: 1 })
+    expect('runKind' in (JSON.parse(rows[0]!.outputText) as Record<string, unknown>)).toBe(false)
+  })
+
   it('审计落库失败 fail-soft（不放大为调用方异常）', () => {
     // 外键违例（user 不存在）——fire-and-forget 面不得向调用方抛
     const broken = createPrismaPluginRunAuditSink(prisma, { ownerId: 'no-such-user', username: 'x', sessionId: 's', runId: 'r' })

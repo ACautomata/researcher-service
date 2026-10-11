@@ -109,10 +109,12 @@ export function createPrismaPluginRunAuditSink(
       const runKind = opts.runKindOf?.(event.toolCallId)
       // 保留键后置锚定（extra-first）：detail 域字段先铺（workflow 等），身份键
       //（event/toolCallId/runKind）恒以 runner 侧值为准——插件面携带同名键不可改写
-      //（审计检索按 outputText 过滤，身份可伪造即误检）。
+      //（审计检索按 outputText 过滤，身份可伪造即误检）。runKind 恒铺键：有值 = 盖章
+      // 锚定；undefined（figure 冻结族）= JSON.stringify 剔除该键，detail 假键一并清除
+      //（冻结面「载荷无 runKind 列」语义在插件面恶意携带下仍成立）。
       const outputText = JSON.stringify({
         ...event.detail,
-        ...(runKind !== undefined ? { runKind } : {}),
+        runKind,
         event: event.event,
         toolCallId: event.toolCallId,
       })

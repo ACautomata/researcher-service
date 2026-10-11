@@ -634,7 +634,7 @@ describe('ProviderRegistry（#881 预设制：平台虚拟条目 + BYOK 凭证�
       const stub = {
         stubModel: model,
         invoke: bareInvoke,
-        // 真 ConfigurableModel.prototype.withConfig 语义建模（langchain universal.js:277
+        // 真 ConfigurableModel.prototype.withConfig 语义建模（langchain universal.js
         // 实锤）：返回 RunnableBinding 形态 {bound: 全新裸实例}——bound 不继承原 own props
         //（wrapped 的重试 invoke 不随行；此前 spread-this fake 建模的是 Runnable 基类语义，
         // 掩盖了 judge/非首模型面全量无重试的回归，#914 review H2/H3）。
@@ -661,7 +661,7 @@ describe('ProviderRegistry（#881 预设制：平台虚拟条目 + BYOK 凭证�
       _configPrefix: string
       _queuedMethodOperations: Map<unknown, unknown>
     }
-    // withConfig（真 prototype 方法）内部读这四个实例字段（universal.js:277）——
+    // withConfig（真 prototype 方法）内部读这四个实例字段（universal.js withConfig）——
     // Object.create 绕过构造器需手工齐备；bound = 全新裸 CM 实例（own props 不随行），
     // 其 invoke 走 prototype → _getModelInstance，不触达下方 stub，故行为面只锁 wrapped 直调。
     stub._defaultConfig = {}

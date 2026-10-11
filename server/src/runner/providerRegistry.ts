@@ -143,8 +143,8 @@ function withTransportRetry(model: BaseChatModel): BaseChatModel {
     enumerable: true,
     configurable: true,
   })
-  // withConfig 重组面（真 ConfigurableModel.prototype.withConfig，langchain universal.js:
-  // 277 实锤）返回 new RunnableBinding({bound: 全新裸 ConfigurableModel})——原 own 重试
+  // withConfig 重组面（真 ConfigurableModel.prototype.withConfig，langchain universal.js
+  // 实锤）返回 new RunnableBinding({bound: 全新裸 ConfigurableModel})——原 own 重试
   // invoke 不随行（judge/userJudge、bindModelId 非首模型、getDefaultModel preferred 面全走
   // 此路）。返回值再包一层重试：retriedInvoke 委托 binding.invoke（内部委托裸 bound），
   // 重试在 binding 层生效。
