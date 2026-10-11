@@ -27,7 +27,7 @@ import Docker from 'dockerode'
 import { parseTar, type TarEntry } from '../files/tar'
 import { MAX_FILE_READ_BYTES, WALK_LIMIT } from '../files/values'
 import { WIKI_ROOT } from '../wikiContainers/values'
-import { claimsSidecarPath, cmp, decodeUtf8Strict, FrontmatterParser, frontmatterTitle } from './logic'
+import { claimsSidecarPath, cmp, decodeUtf8Strict, FrontmatterParser, frontmatterTitle, isManagedRelPath } from './logic'
 import { SKIP_DIRS, SKIP_FILES } from './values'
 import { WikiInvalidPath, WikiPageNotFound } from './errors'
 import type {
@@ -178,12 +178,10 @@ export class DockerWikiFileSystem implements WikiFileSystem {
     }
   }
 
-  // managed 黑名单（#315 §4 第②层，对齐 NodeFs assertNotManaged）：任一段命中 SKIP_DIRS、
-  // 或末段命中 SKIP_FILES → 拒。读面页请求前置。
+  // managed 黑名单（#315 §4 第②层）：读面页请求前置——判定本体单源在 wiki/logic
+  // isManagedRelPath（SKIP 集读写双侧共用；#908 插件写面同判定）。
   private assertNotManaged(relPath: string): void {
-    const parts = relPath.split('/')
-    if (parts.some((seg) => SKIP_DIRS.has(seg))) throw new WikiInvalidPath(relPath)
-    if (SKIP_FILES.has(parts[parts.length - 1])) throw new WikiInvalidPath(relPath)
+    if (isManagedRelPath(relPath)) throw new WikiInvalidPath(relPath)
   }
 
   // —— 缺省 docker 实现（生产路径；单测注入 fake 绕过） ——

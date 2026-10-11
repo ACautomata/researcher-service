@@ -8,6 +8,10 @@
 - `.env.example` —— 生产栈环境变量模板（`LLM_API_KEY` / `LLM_CREDENTIAL_SECRET` / `JWT_SECRET` 等；真实 `.env` 经 CD 渲染，
   不进版本库）。
 - `wiki-image/` —— wiki 容器镜像构建源（#784，busybox 级 + 零初始化）。
+- `sandbox-image/` —— 沙箱镜像 poppler 支路（#908 · 853 §3.2#2 镜像验收项：debian:bookworm-slim
+  + poppler-utils，ctx.docs.extractPdfText 的 pdftotext 前提）。**非缺省**——`SANDBOX_IMAGE`
+  指向本镜像构建产物才启用 PDF 提取；缺省 busybox（#776）不含 pdftotext，extractPdfText 明确报错
+  引导。CD 推 `:latest` + `:<sha>`（移动基线不适用 wiki 镜像不可动版本 tag 约定，钉版按 sha tag）。
 
 > **#858 OpenClaw 退役③**：openclaw-gw fleet 编排整链退役（容器 REST/管理页/容器行表、home 模板
 > provisioning、`GATEWAY_TOKEN` 凭证加密、`OPENCLAW_*` 配置面）。T0 #801 已退役的
@@ -19,7 +23,10 @@
 - **生产禁浮动 tag**：`SANDBOX_IMAGE` / `WIKI_IMAGE` 为浮动引用（无 tag 或 `:latest`）→ server
   启动 fail-fast（机器强制，准据 `isFloatingImageRef`，`readPinnedImage` 共用内核）。
   dev/test 不拦（本地调试可覆盖）。
-- `WIKI_IMAGE` 见下节；`SANDBOX_IMAGE` 默认 busybox 钉版（#776）。
+- `WIKI_IMAGE` 见下节；`SANDBOX_IMAGE` 默认 busybox 钉版（#776）。科研工作流（research 插件）
+  的 `extractPdfText` 需要 poppler——CD 渲染 `.env` 已注入 `SANDBOX_IMAGE=…/sandbox:<CI head_sha>`
+  （#908 B2 拍板：CD 全托管，手工钉宿主 `.env` 会被 scp overwrite 抹掉；钉版引用按 sha tag，
+  生产禁浮动 tag 同上）；完整工具链镜像换缺省归沙箱镜像升级票（config.ts 注记同口径）。
 
 ## wiki 容器镜像（#784）
 

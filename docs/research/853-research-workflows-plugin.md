@@ -127,8 +127,8 @@ definePlugin({
 
 | # | 增量 | 形状与语义 |
 |---|---|---|
-| 1 | **`ctx.wiki`（PluginWikiPort）** | `search(query)` / `readPage(path)`——读面复用通道① wikisearch 同款封装（openwiki searchWiki/readWikiSections 直调，SKIP 集过滤），插件与主 agent 同一套检索。`createPage(draft: PageDraft) → Promise<{created: boolean}>`——**幂等哨兵**：目标页已存在返回 `{created:false}` 不抛错（重放窗口防重复建页，幂等跳过是常态路径不进 error 通道）。**port 内 owner 级进程内锁**：key=(ownerId, relPath)，createPage 整体（probe+put+claims 渲染）在锁内，关闭并发 probe→put 竞态窗口（Docker 无 O_EXCL）；**不动 writelock registry**（#785 互斥域=沙箱 parent session，语义不贴）。**V1 无 updatePage/deletePage**（编辑已存在页=越权改用户/治理产物，语义未定不留口）。核心内组装：ensure(ownerId) 容器前置 + SKIP 集 assertNotManaged + 页内 Atomic Claims md 块核心渲染 + frontmatter 组装（§3.3）。与在飞治理 run（通道②③）共存 = base-hash 乐观并发不变——任何 wiki 写都可能使治理 run 弃回 + 冲突信箱（接受，写进规格） |
-| 2 | **`ctx.docs.extractPdfText`（PluginDocsPort）** | `extractPdfText({sandboxPath}) → Promise<{pages: readonly string[]}>`。sandboxPath 强制 /lab/ 前缀白名单 + 存在性校验（approval 同款纪律）；**按页数组**返回（pdftotext 天然分页），PDF 全文不进主上下文。字符上限常量（§7 表，数值待定稿拍板）**超限明确报错不静默截断**——截断致 extract 缺节 → validate 拒 → 重试循环浪费 token。实现前提 = 沙箱镜像含 poppler-utils（核心固定 pdftotext 命令、沙箱内执行；GLOSSARY 沙箱词条工具链已列 poppler，实施列为镜像验收项）。**仅此窄域端口，无通用 exec/fs 透传**（#752 已钉） |
+| 1 | **`ctx.wiki`（PluginWikiPort）** | `search(query)` / `readPage(path)`——读面复用通道① wikisearch 同款封装（openwiki searchWiki/readWikiSections 直调，SKIP 集过滤），插件与主 agent 同一套检索。`createPage(draft: PageDraft) → Promise<Result<{created: boolean}>>`——**幂等哨兵**：目标页已存在返回 `{ok:true, data:{created:false}}` 不覆盖（重放窗口防重复建页，幂等跳过是常态路径）。**port 内 owner 级进程内锁**：key=(ownerId, relPath)，createPage 整体（probe+put+claims 渲染）在锁内，关闭并发 probe→put 竞态窗口（Docker 无 O_EXCL）；**不动 writelock registry**（#785 互斥域=沙箱 parent session，语义不贴）。**V1 无 updatePage/deletePage**（编辑已存在页=越权改用户/治理产物，语义未定不留口）。核心内组装：ensure(ownerId) 容器前置 + SKIP 集 assertNotManaged + 页内 Atomic Claims md 块核心渲染 + frontmatter 组装（§3.3）。与在飞治理 run（通道②③）共存 = base-hash 乐观并发不变——任何 wiki 写都可能使治理 run 弃回 + 冲突信箱（接受，写进规格） |
+| 2 | **`ctx.docs.extractPdfText`（PluginDocsPort）** | `extractPdfText({sandboxPath}) → Promise<Result<{pages: readonly string[]}>>`。sandboxPath 强制 /lab/ 前缀白名单 + 存在性校验（approval 同款纪律）；**按页数组**返回（pdftotext 天然分页），PDF 全文不进主上下文。字符上限常量（§7.1，数值已落定）**超限明确报错不静默截断**——截断致 extract 缺节 → validate 拒 → 重试循环浪费 token。实现前提 = 沙箱镜像含 poppler-utils（核心固定 pdftotext 命令、沙箱内执行；GLOSSARY 沙箱词条工具链已列 poppler，实施列为镜像验收项）。**仅此窄域端口，无通用 exec/fs 透传**（#752 已钉） |
 | 3 | **`ctx.llm.generateStructured`** | `({schema, contents, model?, maxTokens?, temperature?}) → zod 校验产物`。withStructuredOutput 语义封装在核心、走 owner 回退链 + 白名单第二层复验（#792「llm 回退链封装在核心」延伸）；IntentClassifier 端口构造其上；四流程内部节点（challenge/critic/audit 判定 schema）同受益。否决：插件直用 ProviderRegistry；generateMultimodal 出 JSON 自行解析 |
 | 4 | **`PluginRunFrame.signal`** | frame 增 `signal: AbortSignal`（RunService 构造 frame 时放入，源 = run abort 传播链）；核心 llm port 实现闭包捕获自动传给底层 invoke。`generateMultimodal`/`generateStructured` **签名不出现 signal**——插件零感知、结构性防忘传（W3 扇出下「忘传 = abort 后继续烧钱」代价放大 5–8 倍）。**顺带修复 autofigure 现状缺口**（abort 后照跑照计费）。per-call 定制 signal 组合留 V2 |
 | 5 | **`ctx.audit.emitPluginRun` 泛化** | `emitFigureRun` → 中性 `emitPluginRun({event, toolCallId, detail})`，五类枚举 created/stage_transitions/completed/failed/aborted 同构保留；**runKind 由核心按工具名反查盖章**（翻译面已查所属插件，插件不传），落 TextTrace 带 runKind 列。figure 现状事件面零改动（其 kind 隐含 'figure'，迁移不做）。否决 `plugin_run.*` 泛化统一事件名（破坏双先例） |
@@ -144,10 +144,11 @@ interface ClaimDraft { statement: string; evidence: string[] }
 - **claims 结构化提交、表示归 wiki 域**：图内 zod 校验 ClaimDraft[] → port 提交 → 核心 V1 渲染为页内 Atomic Claims md 块（人读面 + 检索面可溯源）；机器 `.claims` 旁车 = 核心内部演进，**插件不知道 .claims 存在**（防腐钉界）。
 - 治理再生（通道②③）保持异步，workflow 不同步调用（否决 .claims 直写与 lifecycle submit_page 同步调用，V2 重评）。
 - `PageType` 枚举值集见 §11.3 待拍板项 B。
+- **插件错误通道**（#908 复审 B4 拍板追认）：两 port 方法恒返回 Result 信封 `{ok:true, data} | {ok:false, error:{code, message, hint?}}` **永不 throw**——对齐主 agent 检索工具「永不 throw 的 Result」形态；`error.code` ∈ 码表（wiki 面 invalid_draft/invalid_path/managed_path/path_occupied/not_found/invalid_input/invalid_state/mirror_unavailable/internal，docs 面 invalid_path/not_found/extract_failed/too_large/sandbox_unavailable；读面分类码与主 agent classifyError 同义同源），插件节点按码判重试/回喂（#909 四流程消费面）。
 
 ### 3.3 frontmatter = 核心组装产出（#851 D11 · #868 D2）
 
-- 插件只给 PageDraft 元数据（path/title/type），**frontmatter 由核心组装时拼装**：title/type + OKF 徽章（status=generated / stale_after / generated 时间戳，#789 徽章面直接有数据）+ 溯源字段（source=research / toolCallId / workflow）+ **`related_pages`**（W4 报告页记输入页集：论文页/critic 页/idea card 页，#868 D2）。建议字段集见 §11.3 待拍板项 C。
+- 插件只给 PageDraft 元数据（path/title/type），**frontmatter 由核心组装时拼装**：title/type + OKF 徽章（status=draft / stale_after / generated 时间戳——**B1 拍板修订**：原拍板 `status=generated` 不在 openwiki `OKF_STATUS_VALUES=[draft,stable,deprecated]`，治理 validate 必摘（invalid_status）；改取合法值 `draft`，「插件生成」语义由 `generated{by,at}` + `source` 承载，#789 徽章面直接有数据）+ 溯源字段（source=research / toolCallId / workflow）+ **`related_pages`**（W4 报告页记输入页集：论文页/critic 页/idea card 页，#868 D2）。建议字段集见 §11.3 待拍板项 C。
 - 页格式单源：四流程建页格式一致（防四套模板四个样），插件零格式知识。否决插件 content 内嵌 frontmatter（格式漂移面）；否决 V1 裸 md（#789 徽章面缺位）。
 
 ## 4. 四条 workflow 图内设计（#850 · #848 · #868 修订）
@@ -310,7 +311,9 @@ resolveInputs → contextPack ──→⌗ Send[]×5 → bucket×N → dedup →
 | `PAGE_OUTPUT_MAX_TOKENS` | 32000 | 长页输出单次生成上限，盖五节点：W1 create / W2 extract+critic / W4 design+spec；经 generateStructured 既有 maxTokens 参数传入。否决对齐 autofigure 50k（超多数 provider output cap）；否决两过式分段生成 |
 | `PAGE_GENERATE_MAX_RETRIES` | 1 | 生成兜底重试（#899 图 #904 修订：触发面扩展，值与覆盖面不动）：**截断 ∨ 结构化解析/validate 失败**（finish_reason=length 检出 / generateStructured zod 解析不过 / 确定性校验拒）→ 回生成节点重试 1 次，重试 prompt 附对应诊断回喂；覆盖面维持长页生成五节点（W1 create / W2 extract+critic / W4 design+spec）。边界：无工具面、无 LLM 自由裁量、K≤2 有界（初次生成 + 至多一次修复）、输入不变无检索——只纠格式不改生成语义（#850「一次性生成语义足够」不被触及），系既有截断重试先例的触发面泛化、非新形态（critic gate 56%→100% 实测归因 =「单发 + 至多一次协议修复」，#903/#904） |
 | `BUCKETS_MAX` | 8 | W3 扇出 cap（参数缺省 5 固定 + 3 opt-in） |
-| `PDF_EXTRACT_MAX_CHARS` | 待定稿拍板（量级 ~1M chars，#851 D10） | extractPdfText 字符上限，超限报错不静默截断 |
+| `PDF_EXTRACT_MAX_CHARS` | 1_000_000（#908 落定，#851 D10 量级 ~1M 拍板） | extractPdfText 字符上限，超限报错不静默截断（已落 `plugins/research/values.ts`） |
+| `GENERATED_STALE_AFTER_MS` | 180×24×3600×1000（+180 天，#908 复审 B3 拍板追认） | 插件生成页 stale_after = 生成时刻 + 180 天（暂落 `server/src/wiki/pluginPage.ts`，#909 归口迁本表） |
+| `PAGE_DRAFT_MAX` | content ≤ 2_000_000 chars / claims ≤ 100 条 / evidence ≤ 20 条每 claim / title ≤ 512 chars（#908 复审 B5 拍板追认） | PageDraft DTO 尺寸上限（zod 边界，防失控值；暂落 `server/src/wiki/pluginPage.ts`，#909 归口迁本表） |
 | `PLAN_REVIEW_MAX_ROUNDS` | 3 | W4 方案人审修订上限（#852） |
 
 测试锁定对标 approval 先例两层：纯逻辑导入常量断言（contextPack 裁剪顺序/Brief 保全/maxTokens 传递）+ 字面数字行为锁定（拓扑上界断言、validate 重试边界）。
@@ -406,5 +409,5 @@ resolveInputs → contextPack ──→⌗ Send[]×5 → bucket×N → dedup →
 
 - **A. classify 的分类输入**（§1.2）：#849 D4 钉「input 由主 agent 组织」，#850 D2 否决自由 text input 改结构化槽位——本文取「分类输入 = 结构化请求槽位（topic/question）的文本序列化」为两票交集解读；若实现期发现分类质量劣化（#866 评估集是裸文本输入），回退点 = 工具增 `request_text` 只读分类槽（不落任何执行面）。
 - **B. spec 落盘 lab 的写入面**（§5.1 短路点依赖）：#852 钉「spec 落盘 lab」为幂等短路点 + 调用② 消费 + 超限终局 spec 停留 lab，但 #851 ctx 增量未列 lab 写口（ctx.wiki 写 wiki 容器、ctx.docs 只读 PDF）。**缺口**：需为插件补一个 lab 写面。候选形态：① ctx.docs 扩窄域 `writeSpec({path, content})`（/lab/ 前缀白名单，与 extractPdfText 对称）；② ctx 增 `ctx.lab.write` 窄口（/lab/specs/ 固定前缀）。两候选经定稿评审认可，形态选择归实现票首项。
-- **C. 票内预约参数落定**（各票明确留给规格定稿）：`PDF_EXTRACT_MAX_CHARS` 数值（#851 D10，量级 ~1M）/ `PageType` 枚举值集（#851 D11 附带：候选 论文页 / critic 页 / idea-card / 实验报告）/ frontmatter 建议字段集（#851 D11：title/type + OKF 徽章三件 + source/toolCallId/workflow/related_pages）。
+- **C. 票内预约参数落定**（各票明确留给规格定稿）：`PDF_EXTRACT_MAX_CHARS` 数值（#851 D10——**已落定 1_000_000，§7.1**）/ `PageType` 枚举值集（#851 D11 附带：候选 论文页 / critic 页 / idea-card / 实验报告——**已落定，§3.2 DTO**）/ frontmatter 建议字段集（#851 D11：title/type + OKF 徽章三件 + source/toolCallId/workflow/related_pages——**已落定，徽章 status 值经 #908 复审 B1 拍板修订为 `draft`（§3.3）**）。
 - **D. W4 stage 序列与白名单口径**（§6.1）：#852 钉流程序列 design→plan-review→executing→collecting，#851 D5 钉白名单 = 节点名并集——本文取「plan-review 进白名单（人审挂起期 stage 停该值）；executing/collecting 为流程级描述不进白名单（调用②非插件工具、调用③走 collect 段节点名）」；#867 D6 的两态呈现与该口径一致。

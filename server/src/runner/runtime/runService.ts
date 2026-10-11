@@ -8,6 +8,8 @@ import type { AnyPluginToolDefinition } from '../../plugins/api'
 import { runWithPluginRunFrame, execPartsFromFrame, type PluginRunFrame } from '../../plugins/runContext'
 import { createFiguresToolPort } from '../../figures/toolPort'
 import { createLlmToolPort } from '../llmToolPort'
+import { createPluginDocsPort } from '../docsToolPort'
+import { createPluginWikiPort } from '../wikiToolPort'
 import { createPrismaPluginRunAuditSink, FROZEN_RUN_KIND, parsePluginRunProgress, pluginRunProgressEventName } from '../../figures/figureAudit'
 import { runWithToolCallContext, createToolCallContextMiddleware, runWithRunContext } from '../filejournal/context'
 // RunService —— 集中式 runner 内核（#777 · #747 A 节「runner 编排」）。
@@ -943,7 +945,7 @@ export class RunService {
         //（两条触发面一条执行面，/figure 先例 #744）。标准 tool.start/tool.end 事件 + TurnReducer
         // 聚合入会话（单管线渲染，实时 ≡ 回放）。无 agent loop → 无 checkpoint（锚点 null，
         // 挂靠语义同无终态轮）；占用户 run 额度（#747 F 节「figure 随会话 run 占额度」同语义）。
-        await this.executePluginToolRun(cmd, capabilities, controller.signal, turn)
+        await this.executePluginToolRun(cmd, capabilities, controller.signal, turn, labContainer)
         this.runs.set(cmd.sessionId, { runId: cmd.runId, state: 'completed' })
         this.publish(cmd.ownerId, { type: 'run.completed', payload: {} }, cmd)
       } else {
@@ -1038,8 +1040,8 @@ export class RunService {
 
         // #782 run 上下文（ALS 外层）：journal 行 runId 盖印源（checkpointId 终态回填键）——
         // 覆盖流创建与消费全程（backend 打点在流内发生）。#792 插件 run frame（嵌套 ALS）：
-        // ctx 四件解析源——图实例跨 run 复用，run 身份只能运行期读取（runContext.ts 头注）。
-        const pluginFrame = await this.buildPluginRunFrame(cmd, snapshot, controller.signal)
+        // ctx 六件解析源——图实例跨 run 复用，run 身份只能运行期读取（runContext.ts 头注）。
+        const pluginFrame = await this.buildPluginRunFrame(cmd, labContainer, snapshot, controller.signal)
         await runWithRunContext(cmd.runId, async () => {
           await runWithPluginRunFrame(pluginFrame, async () => {
             const stream = await agent.streamEvents(input, {
@@ -1301,14 +1303,21 @@ export class RunService {
   }
 
   // ---- 插件 run frame（#792 · #744 §11.1「run 装配注入」 · #853 §3.2#4/#5/#6 泛化）----
-  // ctx 四件（run 身份/figures/llm/audit）的 per-run 构造面：agent 自动调用路径经 ALS
+  // ctx 六件（run 身份/figures/llm/audit/wiki/docs）的 per-run 构造面：agent 自动调用路径经 ALS
   // frame（executeRun streamEvents 外层置位）、{execute} 直达路径显式构造。figures 去重表
   // RunService 单例持有（跨 run 共享事务性重试窗口防护）；audit sink per-run（session/run
   // 弱关联盖印）；onUpdate 闭包 per-run（per-toolCall 上次 stage 记忆随 frame GC）。
   // signal（#853 §3.2#4）：frame 持 run abort 传播链——ctx.llm 闭包捕获自动透传 invoke。
   private readonly figureDedupe = new Map<string, Promise<{ readonly figureId: string }>>()
 
-  private async buildPluginRunFrame(cmd: RunEventContext & { username: string }, runSnapshot?: ProviderConfigSnapshot, signal?: AbortSignal): Promise<PluginRunFrame | undefined> {
+  // labContainer = run 的沙箱容器（/lab 工具根；沙箱 ensure 后的实况，session.containerId
+  // 陈旧值回退）——ctx.docs 的 exec 目标。wiki/docs 双口（#908）随 frame 构造注入。
+  private async buildPluginRunFrame(
+    cmd: RunEventContext & { username: string },
+    labContainer: string,
+    runSnapshot?: ProviderConfigSnapshot,
+    signal?: AbortSignal,
+  ): Promise<PluginRunFrame | undefined> {
     if (!this.deps.plugins) return undefined
     const sessionId = cmd.parentSessionId ?? cmd.sessionId
     // 翻译面查表（#853 §3.2#5/#6）：单循环建两张工具名查表——progressByTool（manifest 声明
@@ -1365,6 +1374,21 @@ export class RunService {
           },
         }),
       audit,
+      // ctx.wiki / ctx.docs（#908 · 853 §3.2#1/#2）：wiki 经 per-plugin 工厂（source 盖章），
+      // docs run 级单例。owner 锁/ensure/时钟全端口内封装；写面不动 writelock registry。
+      wikiFor: (pluginId: string) =>
+        createPluginWikiPort({
+          ownerId: cmd.ownerId,
+          container: this.deps.resolveWikiContainer(cmd.ownerId),
+          primitives: this.deps.primitives,
+          ...(this.deps.wikis !== undefined ? { ensure: () => this.deps.wikis!.ensure(cmd.ownerId) } : {}),
+          source: pluginId,
+          now: () => this.clock(),
+        }),
+      docs: createPluginDocsPort({
+        container: labContainer,
+        primitives: this.deps.primitives,
+      }),
       signal: signal ?? new AbortController().signal,
       noteToolCall: (toolCallId, toolName) => {
         toolNameByCall.set(toolCallId, toolName)
@@ -1416,6 +1440,7 @@ export class RunService {
     capabilities: RunCapabilities,
     signal: AbortSignal,
     turn: TurnReducer,
+    labContainer: string,
   ): Promise<void> {
     const surface = this.deps.plugins?.surface(capabilities.enabledPluginIds)
     const def = surface?.tools.find((tool) => tool.name === cmd.pluginTool)
@@ -1437,10 +1462,10 @@ export class RunService {
     turn.feed(start)
     this.publish(cmd.ownerId, start, cmd)
     const startedAt = this.clock()
-    // ctx 四件 + onUpdate（#792 · #744 §11.1）：直达路径显式构造 frame 面件；toolCallId
+    // ctx 六件 + onUpdate（#792 · #744 §11.1）：直达路径显式构造 frame 面件；toolCallId
     // ALS 盖印 = figures 去重身份（toolPort 同源）+ 插件 execute 收到的同一 id。
     // signal（#853 §3.2#4）+ noteToolCall 注册（#853 §3.2#6 翻译面查表第一跳）。
-    const frame = await this.buildPluginRunFrame(cmd, undefined, signal)
+    const frame = await this.buildPluginRunFrame(cmd, labContainer, undefined, signal)
     frame?.noteToolCall?.(toolCallId, def.name)
     const pluginCtx = this.deps.plugins!.toolContext
     // pluginId（#883）：运行时目录派生——ctx.llm per-plugin 解析键（命令直跑路径穿线）。
