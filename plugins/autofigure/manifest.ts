@@ -5,6 +5,7 @@
 
 import { definePlugin } from '../../server/src/plugins/api'
 import { z } from '../../server/src/plugins/autofigureDeps'
+import { FIGURE_RUN_STAGES } from '../../server/src/figures/figureAudit'
 import {
   FIGURE_COMMAND_NAME,
   FIGURE_TOOL_NAME,
@@ -19,6 +20,11 @@ export default definePlugin({
   name: 'AutoFigure',
   description: '方法示意图生成（AutoFigure-Edit 流水线：生图 → SAM3 分割 → SVG 模板 → 组装 → 预览）',
   version: '1.0.0',
+  // run 域标识 + 进度 stage 白名单声明（#853 §3.1/§3.2#6「插件声明、核心校验」）：figure
+  // 既有六值白名单自核心硬编码改由本 manifest 承载（枚举单源 FIGURE_RUN_STAGES 不变），
+  // 翻译面行为零变（事件名派生 `figure_run.progress`、TextTrace 载荷形状冻结——#853
+  // §3.2#5「kind 隐含 'figure'，迁移不做」）。
+  run: { kind: 'figure' },
   // LLM 需求声明位（#883 T3）：声明即入 Model 页插件指派区——用户可为本插件的 SVG 模板
   // 多模态调用单独指派端点与模型。defaultModel 省略：合理缺省 = 用户默认链 primary
   //（#744 §6 既有语义），部署相关不硬编码模型 id。
@@ -42,6 +48,7 @@ export default definePlugin({
         `Call ${FIGURE_TOOL_NAME} with method_text describing the figure to generate; the result carries a figureId referencing the stored SVG (render/preview via GET /api/v1/figures/<figureId>/svg).`,
         'The generation runs a fixed pipeline (image generation, segmentation, SVG templating) and may take a while; do not call it repeatedly for the same request.',
       ],
+      progressStages: FIGURE_RUN_STAGES,
       execute: executeFigureGenerate,
     },
   ],

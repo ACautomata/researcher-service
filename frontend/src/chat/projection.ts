@@ -40,7 +40,7 @@ export interface ToolRow {
 }
 
 // figure run 六 stage 白名单（#744 §5.5，镜像 server figures/figureAudit.ts 单源顺序——
-// FigureCard 阶段条呈现序同源）。白名单外 stage 帧丢弃不放大（对齐 server parseFigureRunProgress）。
+// FigureCard 阶段条呈现序同源）。白名单外 stage 帧丢弃不放大（对齐 server parsePluginRunProgress）。
 export const FIGURE_RUN_STAGES = [
   'generating',
   'segmenting',
@@ -403,7 +403,7 @@ export function applyEvent(prev: Msg[], event: SessionEvent): Msg[] {
       overlay.tools[tIdx] = row
     } else if (type === 'figure_run.progress') {
       // 域 run 进行态（#799 story 50）：stage 白名单外/无 toolCallId/无匹配工具行/无变化帧
-      // 一律原样返回（镜像 server parseFigureRunProgress「白名单外丢弃不放大」纪律）。
+      // 一律原样返回（镜像 server parsePluginRunProgress「白名单外丢弃不放大」纪律）。
       const toolCallId = asString(event.payload.toolCallId)
       const stage = event.payload.stage
       if (!toolCallId || typeof stage !== 'string') return prev

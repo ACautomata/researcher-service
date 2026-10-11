@@ -160,7 +160,7 @@ describe('applyEvent（实时入口）事件语义', () => {
     expect(vm[0].tools[0].stage).toBe('rendering')
   })
 
-  it('figure_run.progress 白名单外/无落点帧忽略（镜像 server parseFigureRunProgress 丢弃纪律）', () => {
+  it('figure_run.progress 白名单外/无落点帧忽略（镜像 server parsePluginRunProgress 丢弃纪律）', () => {
     let vm = applyEvent([], ev('run.started', {}, { runId: 'r1' }))
     vm = applyEvent(vm, ev('tool.start', { toolCallId: 'f1', name: 'figure_generate', input: '{}' }, { runId: 'r1' }))
     const before = vm[0].tools[0]

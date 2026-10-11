@@ -8,7 +8,7 @@ import type { AnyPluginToolDefinition } from '../../plugins/api'
 import { runWithPluginRunFrame, execPartsFromFrame, type PluginRunFrame } from '../../plugins/runContext'
 import { createFiguresToolPort } from '../../figures/toolPort'
 import { createLlmToolPort } from '../llmToolPort'
-import { createPrismaFigureRunAuditSink, FIGURE_RUN_PROGRESS, parseFigureRunProgress } from '../../figures/figureAudit'
+import { createPrismaPluginRunAuditSink, FROZEN_RUN_KIND, parsePluginRunProgress, pluginRunProgressEventName } from '../../figures/figureAudit'
 import { runWithToolCallContext, createToolCallContextMiddleware, runWithRunContext } from '../filejournal/context'
 // RunService —— 集中式 runner 内核（#777 · #747 A 节「runner 编排」）。
 //
@@ -1039,7 +1039,7 @@ export class RunService {
         // #782 run 上下文（ALS 外层）：journal 行 runId 盖印源（checkpointId 终态回填键）——
         // 覆盖流创建与消费全程（backend 打点在流内发生）。#792 插件 run frame（嵌套 ALS）：
         // ctx 四件解析源——图实例跨 run 复用，run 身份只能运行期读取（runContext.ts 头注）。
-        const pluginFrame = await this.buildPluginRunFrame(cmd, snapshot)
+        const pluginFrame = await this.buildPluginRunFrame(cmd, snapshot, controller.signal)
         await runWithRunContext(cmd.runId, async () => {
           await runWithPluginRunFrame(pluginFrame, async () => {
             const stream = await agent.streamEvents(input, {
@@ -1300,22 +1300,44 @@ export class RunService {
     return ancestorChainOf((id) => parentOf.get(id) ?? null, from).has(target)
   }
 
-  // ---- 插件 run frame（#792 · #744 §11.1「run 装配注入」）----
+  // ---- 插件 run frame（#792 · #744 §11.1「run 装配注入」 · #853 §3.2#4/#5/#6 泛化）----
   // ctx 四件（run 身份/figures/llm/audit）的 per-run 构造面：agent 自动调用路径经 ALS
   // frame（executeRun streamEvents 外层置位）、{execute} 直达路径显式构造。figures 去重表
   // RunService 单例持有（跨 run 共享事务性重试窗口防护）；audit sink per-run（session/run
   // 弱关联盖印）；onUpdate 闭包 per-run（per-toolCall 上次 stage 记忆随 frame GC）。
+  // signal（#853 §3.2#4）：frame 持 run abort 传播链——ctx.llm 闭包捕获自动透传 invoke。
   private readonly figureDedupe = new Map<string, Promise<{ readonly figureId: string }>>()
 
-  private async buildPluginRunFrame(cmd: RunEventContext & { username: string }, runSnapshot?: ProviderConfigSnapshot): Promise<PluginRunFrame | undefined> {
+  private async buildPluginRunFrame(cmd: RunEventContext & { username: string }, runSnapshot?: ProviderConfigSnapshot, signal?: AbortSignal): Promise<PluginRunFrame | undefined> {
     if (!this.deps.plugins) return undefined
     const sessionId = cmd.parentSessionId ?? cmd.sessionId
-    const audit = createPrismaFigureRunAuditSink(this.deps.prisma, {
+    // 翻译面查表（#853 §3.2#5/#6）：单循环建两张工具名查表——progressByTool（manifest 声明
+    // 的 progressStages 白名单 + run.kind，SSE 事件族名派生源）与 runKindByTool（审计盖章
+    // 反查；figure 冻结族为 undefined）。注册期已 fail-fast「声明 stages ⇒ 声明 kind」。
+    const progressByTool = new Map<string, { kind: string; stages: ReadonlySet<string> }>()
+    const runKindByTool = new Map<string, string | undefined>()
+    for (const manifest of this.deps.plugins.manifests) {
+      const kind = manifest.run?.kind
+      const auditKind = kind !== undefined && kind !== FROZEN_RUN_KIND ? kind : undefined
+      for (const tool of manifest.tools ?? []) {
+        runKindByTool.set(tool.name, auditKind)
+        if (kind !== undefined && tool.progressStages !== undefined) {
+          progressByTool.set(tool.name, { kind, stages: new Set(tool.progressStages) })
+        }
+      }
+    }
+    const toolNameByCall = new Map<string, string>()
+    // runKind 反查盖章（#853 §3.2#5）：toolCallId → 工具名 → runKindByTool。
+    const runKindOf = (toolCallId: string): string | undefined => {
+      const toolName = toolNameByCall.get(toolCallId)
+      return toolName !== undefined ? runKindByTool.get(toolName) : undefined
+    }
+    const audit = createPrismaPluginRunAuditSink(this.deps.prisma, {
       ownerId: cmd.ownerId,
       username: cmd.username,
       sessionId,
       runId: cmd.runId,
-    })
+    }, { runKindOf })
     const stageTrace = new Map<string, string>()
     // 配置快照 run 启动捕获一次（#883 T3）：ctx.llm per-plugin 解析全部走本快照——
     // 指派/端点变更 bump 版本后下一 run 重建快照，在飞 run 不受影响（与主模型
@@ -1326,12 +1348,14 @@ export class RunService {
       figures: createFiguresToolPort({ prisma: this.deps.prisma, dedupe: this.figureDedupe }, cmd.ownerId),
       // per-plugin ctx.llm 工厂（#883）：插件 id → 解析器端口（env pin > 用户指派 > 默认链）。
       // usage 上下文（#880 US23）：插件 LLM 流量按解析命中的 providerId 落 llm_usage_records。
+      // signal 闭包捕获（#853 §3.2#4）：invoke 自动透传，插件签名零感知。
       llmFor: (pluginId: string) =>
         createLlmToolPort({
           registry: this.deps.registry,
           ownerId: cmd.ownerId,
           pluginId,
           snapshot,
+          ...(signal !== undefined ? { signal } : {}),
           usage: {
             prisma: this.deps.prisma,
             userId: cmd.ownerId,
@@ -1341,22 +1365,35 @@ export class RunService {
           },
         }),
       audit,
-      // 双面翻译链（#744 §11.2）：onUpdate 上报一次 → runner 同时发 figure_run.progress
-      //（SSE 用户面）与落 figure_run.stage_transitions（TextTrace 审计面）；白名单外丢弃。
+      signal: signal ?? new AbortController().signal,
+      noteToolCall: (toolCallId, toolName) => {
+        toolNameByCall.set(toolCallId, toolName)
+      },
+      // 双面翻译链（#744 §11.2 · #853 §3.2#6 泛化）：onUpdate 上报一次 → 查「toolCallId→
+      // 工具名→manifest 声明 progressStages 白名单」，命中才发 `<kind>_run.progress`
+      //（SSE 用户面，extra 域字段随 partial 透传——research 的 workflow 面）与落
+      // stage_transitions（TextTrace 审计面）；白名单外/无注册丢弃不放大。
       onUpdate: (toolCallId, partial) => {
-        const parsed = parseFigureRunProgress(partial)
+        const toolName = toolNameByCall.get(toolCallId)
+        const declared = toolName !== undefined ? progressByTool.get(toolName) : undefined
+        if (!declared) return
+        const parsed = parsePluginRunProgress(partial, declared.stages)
         if (!parsed) return
         const from = stageTrace.get(toolCallId)
         stageTrace.set(toolCallId, parsed.stage)
+        // 保留键后置锚定（extra-first）：插件上报同名键不可改写 SSE 载荷身份（parse 层
+        // 已排除 stage/toolCallId，组装面双保险——spread 顺序即契约）。
         this.publish(
           cmd.ownerId,
-          { type: FIGURE_RUN_PROGRESS, payload: { toolCallId, stage: parsed.stage } },
+          { type: pluginRunProgressEventName(declared.kind), payload: { ...parsed.extra, toolCallId, stage: parsed.stage } },
           cmd,
         )
-        audit.emitFigureRun({
+        audit.emitPluginRun({
           event: 'stage_transitions',
           toolCallId,
-          detail: { ...(from !== undefined ? { from } : {}), to: parsed.stage, at: this.clock() },
+          // 双面完整（#853 §6.1「同一事实两面」）：extra 域字段（workflow——四流程重名
+          // stage 的语境面）随审计面落载；figure 族 extra 恒空 → 载荷形状零变化。
+          detail: { ...parsed.extra, ...(from !== undefined ? { from } : {}), to: parsed.stage, at: this.clock() },
         })
       },
     }
@@ -1402,7 +1439,9 @@ export class RunService {
     const startedAt = this.clock()
     // ctx 四件 + onUpdate（#792 · #744 §11.1）：直达路径显式构造 frame 面件；toolCallId
     // ALS 盖印 = figures 去重身份（toolPort 同源）+ 插件 execute 收到的同一 id。
-    const frame = await this.buildPluginRunFrame(cmd)
+    // signal（#853 §3.2#4）+ noteToolCall 注册（#853 §3.2#6 翻译面查表第一跳）。
+    const frame = await this.buildPluginRunFrame(cmd, undefined, signal)
+    frame?.noteToolCall?.(toolCallId, def.name)
     const pluginCtx = this.deps.plugins!.toolContext
     // pluginId（#883）：运行时目录派生——ctx.llm per-plugin 解析键（命令直跑路径穿线）。
     const pluginId = this.deps.plugins!.toolOwnerByName.get(def.name)

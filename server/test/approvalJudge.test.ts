@@ -6,11 +6,12 @@ import { AIMessage, HumanMessage, SystemMessage, ToolMessage } from '@langchain/
 import {
   buildJudgeInput,
   parseJudgeOutput,
-  truncateToTokenBudget,
   extractJudgeContext,
   ToolCallJudgeClient,
   type JudgeModelLike,
 } from '../src/runner/approval/judge'
+// truncateToTokenBudget 已迁共享 util（#853 §7.2 交接项）——测试随迁 import 面。
+import { truncateToTokenBudget } from '../src/utils/tokenBudget'
 import {
   JUDGE_POLICY_MARKDOWN,
   JUDGE_POLICY_VERSION,

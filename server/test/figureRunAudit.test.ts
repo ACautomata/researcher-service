@@ -1,40 +1,76 @@
-// figure_run 事件族（#792 · #744 §11.2 · S3 纯逻辑）：progress 白名单校验 + TextTrace
-// 审计 sink 落库形状。验收「figure_run.progress 六 stage 落 SSE、其余五类落 TextTrace，
-// 一次上报双面一致」的核心面在此锁定。
+// 插件 run 事件族（#792 · #744 §11.2 · #853 §3.2#5/#6 泛化 · S3 纯逻辑）：progress 白名单
+// 校验 + TextTrace 审计 sink 落库形状。验收「`<kind>_run.progress` 白名单 stage 落 SSE、
+// 其余五类落 TextTrace，一次上报双面一致」的核心面在此锁定——figure 族行为零变（声明
+// 迁移后）+ runKind 盖章契约。
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import Database from 'better-sqlite3'
-import { parseFigureRunProgress, createPrismaFigureRunAuditSink, FIGURE_RUN_STAGES, FIGURE_RUN_PROGRESS } from '../src/figures/figureAudit'
+import {
+  parsePluginRunProgress,
+  createPrismaPluginRunAuditSink,
+  pluginRunProgressEventName,
+  FROZEN_RUN_KIND,
+  FIGURE_RUN_STAGES,
+  FIGURE_RUN_PROGRESS,
+} from '../src/figures/figureAudit'
 import { createPrismaClient } from '../src/prisma'
 import { seedUser } from './helpers'
 import type { PrismaClient } from '../src/generated/prisma/client'
 
-describe('parseFigureRunProgress（白名单校验）', () => {
-  it('六 stage 逐一通过', () => {
+describe('parsePluginRunProgress（白名单校验，#853 §3.2#6 泛化签名）', () => {
+  const stages = new Set<string>(FIGURE_RUN_STAGES)
+
+  it('figure 六 stage 逐一通过（声明迁移后行为零变）', () => {
     for (const stage of FIGURE_RUN_STAGES) {
-      expect(parseFigureRunProgress({ stage })).toEqual({ stage })
+      expect(parsePluginRunProgress({ stage }, stages)).toMatchObject({ stage })
     }
   })
 
-  it('非六值 stage / 非对象 / 无 stage 一律丢弃（null）', () => {
-    expect(parseFigureRunProgress({ stage: 'fabricating' })).toBeNull()
-    expect(parseFigureRunProgress({ stage: 42 })).toBeNull()
-    expect(parseFigureRunProgress({})).toBeNull()
-    expect(parseFigureRunProgress('generating')).toBeNull()
-    expect(parseFigureRunProgress(null)).toBeNull()
-    expect(parseFigureRunProgress(undefined)).toBeNull()
+  it('白名单外 stage / 非对象 / 无 stage 一律丢弃（null）', () => {
+    expect(parsePluginRunProgress({ stage: 'fabricating' }, stages)).toBeNull()
+    expect(parsePluginRunProgress({ stage: 42 }, stages)).toBeNull()
+    expect(parsePluginRunProgress({}, stages)).toBeNull()
+    expect(parsePluginRunProgress('generating', stages)).toBeNull()
+    expect(parsePluginRunProgress(null, stages)).toBeNull()
+    expect(parsePluginRunProgress(undefined, stages)).toBeNull()
   })
 
-  it('事件名常量与 stage 枚举单源（核心定义、插件 re-export 消费）', () => {
+  it('extra 域字段透传（research 的 workflow 面）；stage 键不重复出现', () => {
+    expect(parsePluginRunProgress({ stage: 'bucket', workflow: 'hypothesize' }, new Set(['bucket']))).toEqual({
+      stage: 'bucket',
+      extra: { workflow: 'hypothesize' },
+    })
+    expect(parsePluginRunProgress({ stage: 'bucket' }, new Set(['bucket']))!.extra).toEqual({})
+  })
+
+  it('extra 不收保留键 toolCallId（SSE 载荷身份由 runner 锚定，插件上报不可改写）', () => {
+    expect(parsePluginRunProgress({ stage: 'bucket', toolCallId: 'evil', workflow: 'x' }, new Set(['bucket']))).toEqual({
+      stage: 'bucket',
+      extra: { workflow: 'x' },
+    })
+  })
+
+  it('事件名派生：kind → `<kind>_run.progress`；figure 派生与既有常量逐字一致（零变锁定）', () => {
+    expect(pluginRunProgressEventName('research')).toBe('research_run.progress')
+    expect(pluginRunProgressEventName('figure')).toBe(FIGURE_RUN_PROGRESS)
     expect(FIGURE_RUN_PROGRESS).toBe('figure_run.progress')
+    expect(FROZEN_RUN_KIND).toBe('figure')
+    // stage 枚举单源不变（autofigure manifest progressStages 声明的消费源）
     expect(FIGURE_RUN_STAGES).toEqual(['generating', 'segmenting', 'preparing', 'templating', 'assembling', 'rendering'])
+  })
+
+  it('autofigure 真插件声明承载锁定：run.kind=figure + progressStages 与核心枚举逐字一致（#853 §3.2#6 迁移零变准据）', async () => {
+    const { default: autofigureManifest } = await import('../../plugins/autofigure/manifest')
+    expect(autofigureManifest.run).toEqual({ kind: 'figure' })
+    const tool = autofigureManifest.tools?.find((t) => t.name === 'figure_generate')
+    expect(tool?.progressStages).toEqual([...FIGURE_RUN_STAGES])
   })
 })
 
-describe('createPrismaFigureRunAuditSink（TextTrace 五类审计）', () => {
+describe('createPrismaPluginRunAuditSink（TextTrace 五类审计 + runKind 盖章）', () => {
   let prisma: PrismaClient
   let dir: string
   let ownerId: string
@@ -55,8 +91,12 @@ describe('createPrismaFigureRunAuditSink（TextTrace 五类审计）', () => {
     rmSync(dir, { recursive: true, force: true })
   })
 
-  function sink() {
-    return createPrismaFigureRunAuditSink(prisma, { ownerId, username: 'alice', sessionId: 'sess-1', runId: 'run-1' })
+  function sink(runKindOf?: (toolCallId: string) => string | undefined) {
+    return createPrismaPluginRunAuditSink(
+      prisma,
+      { ownerId, username: 'alice', sessionId: 'sess-1', runId: 'run-1' },
+      ...(runKindOf !== undefined ? [{ runKindOf }] : []),
+    )
   }
 
   async function drain(): Promise<void> {
@@ -65,7 +105,7 @@ describe('createPrismaFigureRunAuditSink（TextTrace 五类审计）', () => {
   }
 
   it('created：inputText = methodText 截断，outputText 载荷含 event/toolCallId，status=success', async () => {
-    sink().emitFigureRun({ event: 'created', toolCallId: 'tc1', detail: { methodText: '蛋白质折叠示意图' } })
+    sink().emitPluginRun({ event: 'created', toolCallId: 'tc1', detail: { methodText: '蛋白质折叠示意图' } })
     await drain()
     const row = await prisma.textTraceLog.findFirstOrThrow({ where: { runId: 'run-1' } })
     expect(row.sessionKey).toBe('sess-1')
@@ -76,15 +116,17 @@ describe('createPrismaFigureRunAuditSink（TextTrace 五类审计）', () => {
     const payload = JSON.parse(row.outputText) as Record<string, unknown>
     expect(payload.event).toBe('created')
     expect(payload.toolCallId).toBe('tc1')
+    // runKindOf 未提供（figure 事件面冻结先例）→ 载荷无 runKind 列（#853 §3.2#5 零改动）
+    expect('runKind' in payload).toBe(false)
     expect(row.traceId).not.toBe('')
   })
 
   it('stage_transitions / completed 落 success；failed / aborted 落 failed', async () => {
     const s = sink()
-    s.emitFigureRun({ event: 'stage_transitions', toolCallId: 'tc1', detail: { to: 'generating' } })
-    s.emitFigureRun({ event: 'completed', toolCallId: 'tc1', detail: { figureId: 'f1', iterations: 2, durationMs: 100 } })
-    s.emitFigureRun({ event: 'failed', toolCallId: 'tc2', detail: { reason: 'fal API HTTP 500' } })
-    s.emitFigureRun({ event: 'aborted', toolCallId: 'tc3', detail: { by: 'user' } })
+    s.emitPluginRun({ event: 'stage_transitions', toolCallId: 'tc1', detail: { to: 'generating' } })
+    s.emitPluginRun({ event: 'completed', toolCallId: 'tc1', detail: { figureId: 'f1', iterations: 2, durationMs: 100 } })
+    s.emitPluginRun({ event: 'failed', toolCallId: 'tc2', detail: { reason: 'fal API HTTP 500' } })
+    s.emitPluginRun({ event: 'aborted', toolCallId: 'tc3', detail: { by: 'user' } })
     await drain()
     const rows = await prisma.textTraceLog.findMany({ where: { runId: 'run-1' }, orderBy: { createdAt: 'asc' } })
     const byEvent = new Map(rows.map((r) => [(JSON.parse(r.outputText) as Record<string, unknown>).event as string, r]))
@@ -97,9 +139,41 @@ describe('createPrismaFigureRunAuditSink（TextTrace 五类审计）', () => {
     expect(byEvent.get('completed')!.inputText).toBe('')
   })
 
+  it('runKind 盖章：反查非空并入载荷；figure 冻结族（装配面返回 undefined）不落列', async () => {
+    // 装配面语义模拟：tc-research → 'research'（落列）；tc-figure → undefined（冻结不落）
+    const s = sink((toolCallId) => (toolCallId === 'tc-research' ? 'research' : undefined))
+    s.emitPluginRun({ event: 'stage_transitions', toolCallId: 'tc-research', detail: { to: 'bucket' } })
+    s.emitPluginRun({ event: 'created', toolCallId: 'tc-figure', detail: {} })
+    await drain()
+    const rows = await prisma.textTraceLog.findMany({ where: { runId: 'run-1' }, orderBy: { id: 'desc' }, take: 2 })
+    const payloads = new Map(rows.map((r) => [(JSON.parse(r.outputText) as Record<string, unknown>).toolCallId as string, JSON.parse(r.outputText) as Record<string, unknown>]))
+    expect(payloads.get('tc-research')!.runKind).toBe('research')
+    expect('runKind' in payloads.get('tc-figure')!).toBe(false)
+  })
+
+  it('保留键锚定：detail 携带 event/toolCallId/runKind 同名键不可覆盖载荷身份（审计检索按 outputText 过滤——身份可伪造即误检）', async () => {
+    const s = sink((toolCallId) => (toolCallId === 'tc-real' ? 'rknow' : undefined))
+    s.emitPluginRun({ event: 'stage_transitions', toolCallId: 'tc-real', detail: { to: 'bucket', event: 'completed', toolCallId: 'evil', runKind: 'ghost', workflow: 'ingest' } })
+    await drain()
+    const rows = await prisma.textTraceLog.findMany({ where: { runId: 'run-1' }, orderBy: { id: 'desc' }, take: 1 })
+    const payload = JSON.parse(rows[0]!.outputText) as Record<string, unknown>
+    expect(payload.event).toBe('stage_transitions')
+    expect(payload.toolCallId).toBe('tc-real')
+    expect(payload.runKind).toBe('rknow')
+    expect(payload.workflow).toBe('ingest') // 域字段照常落载
+  })
+
+  it('冻结面假键清除：无 runKindOf（figure 冻结族）时 detail 携带 runKind 同名键 → 载荷仍无 runKind 列', async () => {
+    const s = sink() // runKindOf 缺省 = figure 冻结装配面
+    s.emitPluginRun({ event: 'created', toolCallId: 'tc-frozen', detail: { methodText: 'x', runKind: 'ghost' } })
+    await drain()
+    const rows = await prisma.textTraceLog.findMany({ where: { runId: 'run-1' }, orderBy: { id: 'desc' }, take: 1 })
+    expect('runKind' in (JSON.parse(rows[0]!.outputText) as Record<string, unknown>)).toBe(false)
+  })
+
   it('审计落库失败 fail-soft（不放大为调用方异常）', () => {
     // 外键违例（user 不存在）——fire-and-forget 面不得向调用方抛
-    const broken = createPrismaFigureRunAuditSink(prisma, { ownerId: 'no-such-user', username: 'x', sessionId: 's', runId: 'r' })
-    expect(() => broken.emitFigureRun({ event: 'created', toolCallId: 'tcX', detail: {} })).not.toThrow()
+    const broken = createPrismaPluginRunAuditSink(prisma, { ownerId: 'no-such-user', username: 'x', sessionId: 's', runId: 'r' })
+    expect(() => broken.emitPluginRun({ event: 'created', toolCallId: 'tcX', detail: {} })).not.toThrow()
   })
 })

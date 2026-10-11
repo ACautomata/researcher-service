@@ -14,8 +14,9 @@ export const JUDGE_USER_INPUT_BUDGET_TOKENS = 2000
 export const JUDGE_PRIOR_CALL_BUDGET_TOKENS = 1000
 export const JUDGE_CURRENT_CALL_BUDGET_TOKENS = 1000
 export const JUDGE_INPUT_TOTAL_BUDGET_TOKENS = 8000
-/** token → 字符换算因子（judge 输入截断面唯一换算处）。 */
-export const JUDGE_CHARS_PER_TOKEN = 2
+// token → 字符换算因子已迁共享 util（#853 §7.2 交接项：research contextPack 为第二消费者）；
+// 此处 re-export 保持既有 import 面（judge.ts 与测试自本域 import 不破）。
+export { JUDGE_CHARS_PER_TOKEN } from '../../utils/tokenBudget'
 
 // 之前工具调用回喂条数（729 §2.2：最近 N=10 条按时间序）。
 export const JUDGE_PRIOR_CALLS_MAX = 10

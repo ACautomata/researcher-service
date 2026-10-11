@@ -13,7 +13,7 @@ import {
 } from '../src/runner/usage'
 
 describe('extractUsageMetadata（S3 纯逻辑）', () => {
-  it('完整形状：input/output + cache details 提取', () => {
+  it('完整形状：全输入口径（input_tokens + cache_read）+ cache details 提取（#906 修订②）', () => {
     expect(
       extractUsageMetadata({
         usage_metadata: {
@@ -24,10 +24,22 @@ describe('extractUsageMetadata（S3 纯逻辑）', () => {
           output_token_details: { reasoning: 50 },
         },
       }),
-    ).toEqual({ inputTokens: 1000, outputTokens: 200, cacheReadTokens: 500, cacheWriteTokens: 100 })
+    ).toEqual({ inputTokens: 1500, outputTokens: 200, cacheReadTokens: 500, cacheWriteTokens: 100 })
   })
 
-  it('无 cache details → 两 cache 字段 0', () => {
+  it('MiniMax 网关口径：input_tokens 只计未命中前缀缓存，全输入 = + cache_read（#903 实测）', () => {
+    expect(
+      extractUsageMetadata({
+        usage_metadata: {
+          input_tokens: 234,
+          output_tokens: 9,
+          input_token_details: { cache_read: 10000 },
+        },
+      }),
+    ).toEqual({ inputTokens: 10234, outputTokens: 9, cacheReadTokens: 10000, cacheWriteTokens: 0 })
+  })
+
+  it('无 cache details → 两 cache 字段 0（inputTokens 与原口径恒等）', () => {
     expect(extractUsageMetadata({ usage_metadata: { input_tokens: 10, output_tokens: 5 } })).toEqual({
       inputTokens: 10,
       outputTokens: 5,
@@ -89,7 +101,7 @@ describe('usage 采数落审计域（临时库集成）', () => {
       providerId: 'minimax',
       lcProvider: 'anthropic',
       model: 'MiniMax-M3',
-      inputTokens: 100,
+      inputTokens: 160, // 全输入口径：input_tokens 100 + cache_read 60（#906 修订②）
       outputTokens: 40,
       cacheReadTokens: 60,
       cacheWriteTokens: 0,
@@ -140,7 +152,7 @@ describe('usage 采数落审计域（临时库集成）', () => {
       providerId: 'minimax',
       lcProvider: 'anthropic',
       calls: 3, // 前 2（handler）+ 本 describe 新 1
-      inputTokens: 1107, // 100 + 7 + 1000
+      inputTokens: 1167, // 全输入口径（#906 修订②）：160 + 7 + 1000
       outputTokens: 243, // 40 + 3 + 200
       cacheReadTokens: 60,
     })

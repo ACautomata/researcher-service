@@ -29,6 +29,8 @@ const WIKI = 'researcher-wiki-pg'
 const LAB = 'researcher-sandbox-pg'
 
 // fixture：捕获面（execute 收到的 ctx 与 toolCallId）+ stage 上报（含白名单外丢弃项）。
+// #853 §3.2#6 声明迁移：figure-like 插件的 stage 白名单由 manifest progressStages 承载
+// （run.kind='figure' → 事件名派生 figure_run.progress 零变）。
 const captured: Array<{ toolCallId: string; run?: { ownerId: string; sessionId: string; runId: string } }> = []
 
 const figureLike = definePlugin({
@@ -36,21 +38,23 @@ const figureLike = definePlugin({
   name: 'FigLike',
   description: 'figure-like fixture',
   version: '1.0.0',
+  run: { kind: 'figure' },
   tools: [
     {
       name: 'figlike_generate',
       description: 'generate a fixture figure',
       category: 'domain',
       parameters: z.object({ method_text: z.string().min(1) }),
+      progressStages: ['generating', 'segmenting', 'rendering'],
       execute: async (toolCallId, params: { method_text: string }, exec): Promise<PluginToolResult<{ figureId: string; state: string; previewReady: boolean }>> => {
         const ctx = exec.ctx
         captured.push({ toolCallId, run: ctx.run ? { ...ctx.run } : undefined })
-        ctx.audit!.emitFigureRun({ event: 'created', toolCallId, detail: { methodText: params.method_text } })
+        ctx.audit!.emitPluginRun({ event: 'created', toolCallId, detail: { methodText: params.method_text } })
         exec.onUpdate?.({ stage: 'generating' })
         exec.onUpdate?.({ stage: 'segmenting' })
         exec.onUpdate?.({ stage: 'bogus' }) // 白名单外——runner 面丢弃
         const { figureId } = await ctx.figures!.create({ prompt: params.method_text, svg: '<svg/>', meta: { v: 1 }, sessionId: ctx.run!.sessionId })
-        ctx.audit!.emitFigureRun({ event: 'completed', toolCallId, detail: { figureId } })
+        ctx.audit!.emitPluginRun({ event: 'completed', toolCallId, detail: { figureId } })
         return {
           content: [{ type: 'text', text: `figureId=${figureId} state=completed previewReady=false` }],
           details: { figureId, state: 'completed', previewReady: false },
@@ -60,6 +64,35 @@ const figureLike = definePlugin({
   ],
   commands: [
     { name: 'fl', handler: async () => ({ execute: { tool: 'figlike_generate', args: { method_text: '示意' } } }) },
+  ],
+})
+
+// fixture：research-like 插件（#853 §3.2#6 泛化验收）——独立 progressStages + run.kind，
+// 同一 run 内与 figure-like 共存：事件族名按声明派生互不串扰、runKind 反查盖章、extra
+// 域字段（workflow）透传 SSE 载荷。
+const researchCaptured: string[] = []
+
+const researchLike = definePlugin({
+  id: 'rknow',
+  name: 'RkNow',
+  description: 'research-like fixture',
+  version: '1.0.0',
+  run: { kind: 'rknow' },
+  tools: [
+    {
+      name: 'rknow_workflow',
+      description: 'fixture research workflow',
+      category: 'domain',
+      parameters: z.object({ topic: z.string().min(1) }),
+      progressStages: ['capture', 'contextPack', 'summary'],
+      execute: async (toolCallId, params: { topic: string }, exec): Promise<PluginToolResult> => {
+        researchCaptured.push(toolCallId)
+        exec.onUpdate?.({ stage: 'capture', workflow: 'ingest', toolCallId: 'evil' }) // 保留键——runner 锚定不可改写
+        exec.onUpdate?.({ stage: 'design' }) // rknow 白名单外（figure 族值）——丢弃
+        exec.onUpdate?.({ stage: 'contextPack', workflow: 'ingest' })
+        return { content: [{ type: 'text', text: `done:${params.topic}` }] }
+      },
+    },
   ],
 })
 
@@ -101,9 +134,12 @@ describe('#792 figure 工具两条触发面一条执行面（S1）', () => {
       },
     })
     hub = new CollectingHub()
-    // 收录校验（目录含 autofigure + fixture——/figure 不撞系统保留名、figure_generate 不撞核心工具面）
+    // 收录校验（fixtures 目录）：figlike 与真 autofigure 同族（run.kind='figure'）——run.kind
+    // 目录唯一性校验（#853 事件族派生源不撞车）下 fixtures 不与 PLUGIN_MANIFESTS 混装校验；
+    // 真插件全目录收录校验由 pluginsRegistry.test「真 PLUGIN_MANIFESTS 全目录」测试覆盖
+    //（与 runner/assembly.ts 装配面同参）。runtime 面仍装全量（翻译面查表含真插件无妨）。
     await assertValidPluginCatalog({
-      manifests: [...PLUGIN_MANIFESTS, figureLike],
+      manifests: [figureLike, researchLike],
       coreToolNames: ['task', 'read_official_skill'],
       reservedCommandNames: ['new', 'compact', 'model'],
     })
@@ -123,10 +159,11 @@ describe('#792 figure 工具两条触发面一条执行面（S1）', () => {
       primitives: fakePrimitives().primitives,
       resolveWikiContainer: () => WIKI,
       sweepIntervalMs: 0,
-      plugins: createPluginRuntime({ manifests: [...PLUGIN_MANIFESTS, figureLike], config: {} }),
+      plugins: createPluginRuntime({ manifests: [...PLUGIN_MANIFESTS, figureLike, researchLike], config: {} }),
     })
     await prisma.pluginEnablement.create({ data: { ownerId: user.id, pluginId: 'figlike', enabled: true, enabledAt: new Date() } })
     await prisma.pluginEnablement.create({ data: { ownerId: user.id, pluginId: 'autofigure', enabled: true, enabledAt: new Date() } })
+    await prisma.pluginEnablement.create({ data: { ownerId: user.id, pluginId: 'rknow', enabled: true, enabledAt: new Date() } })
   })
 
   afterAll(async () => {
@@ -204,5 +241,44 @@ describe('#792 figure 工具两条触发面一条执行面（S1）', () => {
     // agent 路径 progress 双面同样落 SSE
     const progress = hub.events.filter((e) => e.type === 'figure_run.progress')
     expect(progress.map((e) => (e.payload as { stage: string }).stage)).toEqual(['generating', 'segmenting'])
+  })
+
+  // ---------------- #853 §3.2#6 翻译面泛化 + §3.2#5 runKind 盖章 ----------------
+
+  it('泛化翻译面：声明插件事件族按 run.kind 派生（rknow_run.progress），白名单跨插件独立，extra 域字段透传', async () => {
+    researchCaptured.length = 0
+    hub.events.length = 0
+    await svc.execute(cmd({ operation: 'plugin-execute', pluginTool: 'rknow_workflow', pluginArgs: { topic: '蛋白质' } }))
+    // 事件族名按声明派生；白名单命中 2 帧（design 是 figure 族值、rknow 白名单外 → 丢弃）
+    const progress = hub.events.filter((e) => e.type === 'rknow_run.progress')
+    expect(progress.map((e) => (e.payload as { stage: string }).stage)).toEqual(['capture', 'contextPack'])
+    // extra 域字段（workflow）透传 SSE 载荷（#853 §6.1 research_run.progress {toolCallId, stage, workflow} 面）
+    expect(progress.every((e) => (e.payload as { workflow?: string }).workflow === 'ingest')).toBe(true)
+    // figure 族事件零串扰：rknow 的上报不进 figure_run.progress
+    expect(hub.events.some((e) => e.type === 'figure_run.progress')).toBe(false)
+    // SSE 载荷保留键锚定：插件上报同名键（toolCallId:'evil'）不可改写身份
+    expect(progress.every((e) => typeof (e.payload as { toolCallId: string }).toolCallId === 'string' && (e.payload as { toolCallId: string }).toolCallId !== 'evil')).toBe(true)
+    // TextTrace：stage_transitions×2 落 rknow 族，runKind 反查盖章 = 'rknow'
+    const rows = await prisma.textTraceLog.findMany({ where: { sessionKey: 'sess-fr-1' }, orderBy: { id: 'desc' }, take: 10 })
+    const transitions = rows.map((r) => JSON.parse(r.outputText) as Record<string, unknown>).filter((p) => p.event === 'stage_transitions' && p.runKind === 'rknow')
+    expect(transitions).toHaveLength(2)
+    expect(transitions.map((p) => p.to)).toEqual(['contextPack', 'capture']) // id desc 序
+    // 双面完整（#853 §6.1「同一事实两面」）：extra 域字段（workflow）随审计面落载
+    expect(transitions.every((p) => p.workflow === 'ingest')).toBe(true)
+  })
+
+  it('figure 事件面冻结：声明迁移后 stage_transitions 载荷无 runKind 列（零改动锁定）', async () => {
+    captured.length = 0
+    hub.events.length = 0
+    await svc.execute(cmd({ operation: 'plugin-execute', pluginTool: 'figlike_generate', pluginArgs: { method_text: '冻结面' } }))
+    const progress = hub.events.filter((e) => e.type === 'figure_run.progress')
+    expect(progress.map((e) => (e.payload as { stage: string }).stage)).toEqual(['generating', 'segmenting'])
+    const rows = await prisma.textTraceLog.findMany({ where: { sessionKey: 'sess-fr-1' }, orderBy: { id: 'desc' }, take: 10 })
+    const transitions = rows
+      .map((r) => JSON.parse(r.outputText) as Record<string, unknown>)
+      .filter((p) => p.event === 'stage_transitions' && !('runKind' in p))
+    expect(transitions.length).toBeGreaterThanOrEqual(2)
+    // figure 族（kind 隐含 'figure'，#853 §3.2#5 迁移不做）——载荷无 runKind 列
+    expect(transitions.every((p) => !('runKind' in p))).toBe(true)
   })
 })

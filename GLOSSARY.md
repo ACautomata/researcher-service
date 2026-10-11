@@ -277,7 +277,7 @@ _Avoid_: 消息总线——广播语义；信箱是点对点寻址 + 持久收�
 _Avoid_: AutoFigure 工具——生成链路已换轨为 AutoFigure-Edit 流水线的控制面 TS 重实现（LangGraph 固定 graph），vendored「AutoFigure」代码全部退役；用「插件」指代工具——插件是能力单元（工具+命令+渲染的集合），figure 工具只是它贡献的一个面。
 
 **figure run（图生成运行）**:
-（#744 定稿，#791/#792 落地）一次图生成流水线（生图→分割→图标准备→模板生成〔fix/optimize 循环〕→组装→预览）的执行记录：随调用方会话 run 执行（占 per-user 并发名额，不开第二套配额）。用户可见进度由会话 run 的工具调用事件承载；`figure_run.*` 事件族是机器面/审计（对齐 wiki_run 不落 SSE 用户面）。
+（#744 定稿，#791/#792 落地；#853 §3.2 泛化）一次图生成流水线（生图→分割→图标准备→模板生成〔fix/optimize 循环〕→组装→预览）的执行记录：随调用方会话 run 执行（占 per-user 并发名额，不开第二套配额）。`figure_run.progress` 落 SSE 用户面（六 stage 白名单）、其余四类 + stage_transitions 落 TextTrace 审计域——同 wiki_run 双面形态。#853 §3.2 起事件族形状泛化为**插件 run 事件族**：SSE 事件名 `<kind>_run.progress` 按 manifest `run.kind` 声明派生（figure = 'figure' 先例、事件面冻结），stage 白名单由插件 manifest `progressStages` 声明承载（注册期核心校验），审计面 runKind 由核心按工具名反查盖章（figure 族不落列）。
 _Avoid_: 生成任务/GenerationJob——旧 REST job 状态机实体随换轨退役（状态机/超时/reconcile 由 run 域统一机制承载），勿沿用其语义。
 
 **Figure（图产物聚合）**:
