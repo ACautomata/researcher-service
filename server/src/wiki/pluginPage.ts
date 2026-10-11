@@ -16,6 +16,7 @@ import {
   type PluginPageDraft,
   type PluginPageProvenance,
 } from '../plugins/api'
+import { PATH_MAX } from './paths'
 
 // 生成页陈旧地平线（stale_after = 生成时刻 + 180 天）：规格未定数值的平台策略值——
 // 生成页进治理检索面，徽章面过期标记由此驱动；校准归治理/规格后续票。
@@ -25,7 +26,7 @@ export const GENERATED_STALE_AFTER_MS = 180 * 24 * 60 * 60 * 1000
 // 未定数值，追认后归口迁 plugins/research/values.ts（其头注清单注记）——改值须连
 // wikiPluginPage.test.ts 尺寸边界断言一并改。
 const PAGE_DRAFT_MAX = {
-  pathChars: 512, // wiki/paths.ts PATH_MAX 同族（port 侧 normalizeRelPath 逐 code-point 复核）
+  pathChars: PATH_MAX, // wiki/paths.ts 单源（port 侧 normalizeRelPath 逐 code-point 复核）
   titleChars: 512,
   contentChars: 2_000_000,
   claims: 100,
@@ -102,11 +103,11 @@ export function assemblePageMarkdown(input: AssembledPageInput): string {
 // （换行可伪造 `##` 节/重复本节/bullet——md 结构注入）；evidence 另剥反引号（code span 断裂面）。
 export function renderAtomicClaimsBlock(claims: readonly PluginClaimDraft[]): string {
   if (claims.length === 0) return ''
-  const flat = (s: string): string => s.replace(/\r?\n/g, ' ')
+  const collapseNewlines = (s: string): string => s.replace(/\r?\n/g, ' ')
   const lines: string[] = ['## Atomic Claims', '']
   for (const c of claims) {
-    lines.push(`- ${flat(c.statement)}`)
-    for (const ev of c.evidence) lines.push(`  - Evidence: \`${flat(ev).replaceAll('`', '')}\``)
+    lines.push(`- ${collapseNewlines(c.statement)}`)
+    for (const ev of c.evidence) lines.push(`  - Evidence: \`${collapseNewlines(ev).replaceAll('`', '')}\``)
   }
   return lines.join('\n')
 }

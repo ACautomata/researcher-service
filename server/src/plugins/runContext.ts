@@ -3,7 +3,7 @@
 // 不能构造期绑定 run 身份——ALS 运行期读取是唯一非侵入通道（approval funnel / journaling
 // 的 runtime 读取面同一纪律）。
 //
-// {execute} 直达路径不经 ALS：RunService 显式构造四件后直接传入 exec（同一 frame 构造面）。
+// {execute} 直达路径不经 ALS：RunService 显式构造六件后直接传入 exec（同一 frame 构造面）。
 // frame 缺失（注册期探针/无 runner 上下文）→ ctx 六件 undefined，域工具执行时自校验。
 
 import { AsyncLocalStorage } from 'node:async_hooks'

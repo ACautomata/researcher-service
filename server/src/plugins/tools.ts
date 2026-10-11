@@ -10,7 +10,7 @@
 //   - toolCallId = 真实 tool_call_id（journal-tool-call-context 中间件 ALS 盖印——agent loop
 //     内所有工具执行外层已置位；#744 §5.3 幂等去重身份同源）。ALS 缺失（非 agent 路径）
 //     降级随机 id（占位满足签名，正确性无损）。
-//   - ctx 四件 / onUpdate 从 plugin run frame（ALS）解析——图实例跨 run 复用，run 身份
+//   - ctx 六件 / onUpdate 从 plugin run frame（ALS）解析——图实例跨 run 复用，run 身份
 //     只能运行期读取（runContext.ts 头注）。frame 缺失 = ctx 最小面（config/logger），
 //     域工具自校验明确报错。
 
