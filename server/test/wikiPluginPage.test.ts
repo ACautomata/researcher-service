@@ -8,11 +8,12 @@ import { describe, it, expect } from 'vitest'
 import {
   assemblePageMarkdown,
   renderAtomicClaimsBlock,
-  GENERATED_STALE_AFTER_MS,
   PluginPageDraftSchema,
   PluginClaimDraftSchema,
   PluginPageProvenanceSchema,
 } from '../src/wiki/pluginPage'
+// GENERATED_STALE_AFTER_MS 归口迁 plugins/research/values（#909 · 853 §7.1）——测试从源头锁。
+import { GENERATED_STALE_AFTER_MS } from '../../plugins/research/values'
 import { FrontmatterParser, okfBadge } from '../src/wiki/logic'
 import { validateOkfFrontmatter } from 'openwiki/dist/okf/frontmatter.js'
 
