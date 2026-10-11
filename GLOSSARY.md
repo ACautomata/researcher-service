@@ -336,6 +336,14 @@ _Avoid_: one-shot——撞历史词条「一次性临时容器 (one-shot contain
 （目标架构，wayfinder #899 图定稿，**已否决**——防重开档 853 §10 宽口径否决条目）单发节点的候选替代形态：节点对图的输入/输出契约与拓扑位置不变，节点内部由单次前向换成一个小型 agent loop——节点内 agent 可获取、调用框架基本工具，循环执行直至产出节点输出。2026-10-10 #904 定案否决入图（零转换、全图不设条件改路径）；实测依据与重开条件（驳实测 / 「输入边静态、内容动态」新节点类型 / 模型换代重测）见 853 §10。
 _Avoid_: agent loop 裸用——撞「轮次 (turn)」词条内主 agent 每轮循环义（853 §1.1「命令路径无 agent loop」即此义）；循环节点——暗示图拓扑含环（路由图拓扑必须可由持久化状态推导）。
 
+**幂等哨兵 (idempotent sentinel)**:
+（目标架构，853 §3.2#1，#908 落地——`runner/wikiToolPort.ts`）插件经 ctx.wiki 建页的幂等形态：目标页已存在 → 返回 `{created:false}` **不抛错、不覆盖、不再 put**——LangGraph 重放窗口（同图重执行）防重复建页的常态路径，幂等跳过不进 error 通道。并发面由 port 内 owner 级进程内锁（key=(ownerId, relPath)，probe→put 整体锁内）关闭竞态窗。与 figures.create 的 toolCallId 去重不同源：哨兵判据是**落树实况**（getArchive probe），跨进程重放天然成立。
+_Avoid_: 抛错防重——幂等跳过是正常返回非错误；updatePage/deletePage——V1 不留口（编辑已存在页 = 越权改用户/治理产物，853 §3.2 钉）。
+
+**Atomic Claims 块 (atomic claims block)**:
+（目标架构，853 §3.2 DTO 注，#908 落地——`wiki/pluginPage.ts` renderAtomicClaimsBlock）插件建页时核心把 ClaimDraft[] 渲染为页内 md 节（`## Atomic Claims`：statement 主 bullet + evidence 反引号子 bullet）——人读面 + 检索面可溯源的 V1 表示；表示归 wiki 域，**插件不知道 .claims 旁车存在**（防腐钉界，机器 `.claims` JSON 是核心内部演进）。四流程建页格式单源：frontmatter 同由核心组装（§11.3C 字段集），插件零格式知识。
+_Avoid_: 插件自拼 frontmatter/claims 文本——格式漂移面（853 §3.3 否决）；把本块当 .claims 旁车——旁车是 openwiki 治理面生成物，两表示并存不互译（V1）。
+
 **文档面 (API docs surface)**:
 控制面的 OpenAPI/Swagger 接口文档域（#761）：zod 生成式 spec（请求体单一来源 = `validation/schemas.ts`，零漂移）+ Swagger UI，挂 `/api/docs` 整树 **requireAuth + requireAdmin**（#758 Q14），env 开关 `API_DOCS_ENABLED`（默认开，关 → 装配层不注入 → 整树 90005）。网页交互入口 = 前端 admin 子应用内嵌视图（前端带认证链拉 spec、TryIt 注入 token）——浏览器地址栏直开 `/api/docs` 不可达（Bearer 门控，导航请求带不上 header）。SSE 事件流端点不在覆盖面（流式语义超出请求/响应文档模型）。
 _Avoid_: 手写 openapi.yaml 第二来源（破坏零漂移；新增端点登记 `openapi/paths.ts`，由 `apiDocsCoverage.test.ts` 路由栈反射双向守卫）；把 `/api/docs` 当公开文档站挂公网——它是 admin 运营工具面，生产可用 `API_DOCS_ENABLED=false` 整体关闭。

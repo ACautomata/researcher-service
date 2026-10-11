@@ -180,6 +180,9 @@ function readPositiveEnvBytes(name: string, fallbackMb: number): number {
 //（无 tag 或 :latest）→ fail-fast（readPinnedImage 共用内核：沙箱同样要可复现/可 review）；
 // 资源 limit 与闲置阈值是规格常数（#747 开放点 8 待实测校准），不走 env——防部署配置漂移
 // 出一万个规格分叉（校准是代码变更，须随版锁定）。
+// #908：extractPdfText（research 插件 ctx.docs）需 poppler——deploy/sandbox-image 为 poppler
+// 支路（debian + poppler-utils，非缺省），部署以 SANDBOX_IMAGE 指向其构建产物启用；缺省
+// busybox 不含 pdftotext 时端口明确报错引导（不翻缺省，完整工具链镜像归升级票）。
 function readSandboxImage(): string {
   return readPinnedImage('SANDBOX_IMAGE', 'busybox:1.36')
 }

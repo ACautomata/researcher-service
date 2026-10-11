@@ -7,7 +7,7 @@
 // frame 缺失（注册期探针/无 runner 上下文）→ ctx 四件 undefined，域工具执行时自校验。
 
 import { AsyncLocalStorage } from 'node:async_hooks'
-import type { PluginAuditPort, PluginFiguresPort, PluginLlmPort, PluginRunIdentity, PluginToolContext } from './api'
+import type { PluginAuditPort, PluginDocsPort, PluginFiguresPort, PluginLlmPort, PluginRunIdentity, PluginToolContext, PluginWikiPort } from './api'
 
 export interface PluginRunFrame {
   readonly run: PluginRunIdentity
@@ -16,6 +16,14 @@ export interface PluginRunFrame {
    *  配置快照（frame 构造期）——指派变更下一 run 生效，在飞 run 不受影响。 */
   readonly llmFor: (pluginId: string) => PluginLlmPort
   readonly audit: PluginAuditPort
+  /** per-plugin ctx.wiki 工厂（#908 · 853 §3.2#1）：插件 id → PluginWikiPort。per-plugin
+   *  的理由 = frontmatter 溯源 source 盖章（assemblePageMarkdown 的 source = 调用插件 id，
+   *  与 generated.by 同源）——盖章要插件身份，显式工厂优于 toolCallId 反查魔法（镜像 llmFor
+   *  先例）。ownerId/run 身份/原语/ensure 绑定 run，frame 构造期注入。 */
+  readonly wikiFor: (pluginId: string) => PluginWikiPort
+  /** run 级 ctx.docs（#908 · 853 §3.2#2）：extractPdfText 无 per-plugin 面——沙箱容器 +
+   *  固定 pdftotext 命令 + /lab 白名单，全 run 常量，单例直挂。 */
+  readonly docs: PluginDocsPort
   /** run abort 传播（#853 §3.2#4）：frame 持有的 run signal——形状契约面（spec 点名
    *  frame 携带，供未来消费面读取）。abort 到 LLM invoke 的实际传导不走本字段直读：
    *  buildPluginRunFrame 构造期把同一 signal 闭包捕获进 llmFor 的 createLlmToolPort
@@ -53,6 +61,7 @@ export function execPartsFromFrame(
 ): { readonly ctx: PluginToolContext; readonly onUpdate?: (partial: unknown) => void } {
   if (!frame) return { ctx }
   const llm = pluginId !== undefined ? frame.llmFor(pluginId) : undefined
+  const wiki = pluginId !== undefined ? frame.wikiFor(pluginId) : undefined
   return {
     ctx: {
       ...ctx,
@@ -60,6 +69,10 @@ export function execPartsFromFrame(
       figures: frame.figures,
       ...(llm !== undefined ? { llm } : {}),
       audit: frame.audit,
+      // wiki per-plugin 解析（source 盖章）；docs run 级直挂。pluginId 缺失（目录外工具名
+      // 防御面）→ wiki 缺省（docs 仍在——无 per-plugin 面，宁缺不误只适用于有键依赖的件）。
+      ...(wiki !== undefined ? { wiki } : {}),
+      docs: frame.docs,
     },
     onUpdate: (partial: unknown) => frame.onUpdate(toolCallId, partial),
   }

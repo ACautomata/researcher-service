@@ -109,10 +109,91 @@ export interface PluginAuditPort {
   readonly emitPluginRun: (event: PluginRunAuditEvent) => void
 }
 
+// ---------------------------------------------------------------------------
+// ctx.wiki / ctx.docs（#853 §3.2#1/#2 · #908）——插件与主 agent 同通道的 wiki 检索读写口
+// 与窄域 PDF 文本提取口。类型面住此；实现在 runner/wikiToolPort.ts + runner/docsToolPort.ts
+//（组装纯逻辑在 wiki/pluginPage.ts）；DTO zod 在 wiki/pluginPage.ts（图内校验与 port
+// 边界同构复用，单一来源）。
+// ---------------------------------------------------------------------------
+
+// PageType 枚举值集（853 §11.3C 拍板）：论文页 / critic 页 / idea-card / 实验报告。
+export const PLUGIN_PAGE_TYPES = ['paper', 'critic', 'idea-card', 'experiment-report'] as const
+export type PluginPageType = (typeof PLUGIN_PAGE_TYPES)[number]
+
+// ClaimDraft：claims 结构化提交单元（#850 D3）。evidence = 资源引用串（repo:// 锚形态，
+// 语义重定义见 853 §11.1）——表示归 wiki 域，插件不知道 .claims 旁车存在（防腐钉界）。
+export interface PluginClaimDraft {
+  readonly statement: string
+  readonly evidence: readonly string[]
+}
+
+// PageDraft（#851 D6）：插件只给元数据 + 正文；frontmatter 由核心组装（853 §3.3 页格式单源），
+// 插件 content 内嵌 frontmatter 已否决（格式漂移面）。
+export interface PluginPageDraft {
+  readonly path: string // wiki 相对路径（<group>/<page>.md）
+  readonly title: string
+  readonly type: PluginPageType
+  readonly content: string
+  readonly claims?: readonly PluginClaimDraft[]
+}
+
+// createPage 溯源补充面：workflow（四流程名）与 relatedPages（W4 报告页输入页集，#868 D2）。
+// source/toolCallId 不由插件传——source = 核心按调用插件 id 盖章，toolCallId = 调用方 run 的
+// 真实 tool_call_id（filejournal ALS，figures 去重身份同源），frontmatter 字段集见 853 §11.3C。
+export interface PluginPageProvenance {
+  readonly workflow?: string
+  readonly relatedPages?: readonly string[]
+}
+
+// 检索读面与主 agent wikisearch 同封装（openwiki searchWiki/readWikiSections 直调，
+// SKIP 集过滤镜像）——形状对齐 openwiki WikiSearchResults/WikiReadResponse 的结构子集。
+export interface PluginWikiSearchHit {
+  readonly kind: string
+  readonly ref: readonly string[]
+  readonly content: string
+}
+export interface PluginWikiSearchResponse {
+  readonly results: readonly PluginWikiSearchHit[]
+}
+export interface PluginWikiReadSection {
+  readonly section: string
+  readonly content: string
+}
+export interface PluginWikiReadResponse {
+  readonly page: string
+  readonly sections: readonly PluginWikiReadSection[]
+}
+
+// PluginWikiPort（853 §3.2#1）：search/readPage 读面与主 agent 同一套检索；createPage 幂等哨兵
+// （页已存在 → {created:false} 不抛错，重放窗口常态路径不进 error 通道）+ port 内 owner 级
+// 进程内锁（key=(ownerId, relPath)，probe+put+渲染整体在锁内）+ ensure 容器前置 + SKIP 集
+// assertNotManaged + claims 渲染与 frontmatter 组装。V1 无 updatePage/deletePage（§3.2 钉）。
+export interface PluginWikiPort {
+  readonly search: (
+    query: string,
+    opts?: { readonly paths?: readonly string[]; readonly limit?: number },
+  ) => Promise<PluginWikiSearchResponse>
+  readonly readPage: (page: string, sections: readonly string[]) => Promise<PluginWikiReadResponse>
+  readonly createPage: (
+    draft: PluginPageDraft,
+    provenance?: PluginPageProvenance,
+  ) => Promise<{ readonly created: boolean }>
+}
+
+// PluginDocsPort（853 §3.2#2）：extractPdfText 窄域端口——sandboxPath 强制 /lab/ 前缀白名单
+// + 存在性校验（approval 同款纪律）；沙箱内 pdftotext 按页数组返回（\f 分页，PDF 全文不进
+// 主上下文）；字符上限 PDF_EXTRACT_MAX_CHARS 超限明确报错不静默截断。仅此窄域端口，
+// 无通用 exec/fs 透传（#752 已钉）。
+export interface PluginDocsPort {
+  readonly extractPdfText: (input: {
+    readonly sandboxPath: string
+  }) => Promise<{ readonly pages: readonly string[] }>
+}
+
 // 插件工具运行上下文（§2.2 ctx 最小面）：config = configSchema 声明键的解析值（启动期
 // 校验后注入）；logger = 面板统一日志面。不给直连口：fsPort / 沙箱 exec / 凭证面。
-// 四件（run/figures/llm/audit）= run 装配面注入——agent 路径经 run frame ALS、直达路径
-// 显式构造；frame 缺失（注册期探针/无 runner 上下文）为 undefined，域工具执行时自校验。
+// 六件（run/figures/llm/audit/wiki/docs）= run 装配面注入——agent 路径经 run frame ALS、
+// 直达路径显式构造；frame 缺失（注册期探针/无 runner 上下文）为 undefined，域工具执行时自校验。
 export interface PluginToolContext {
   readonly config: Readonly<Record<string, string>>
   readonly logger: { readonly info: (message: string) => void; readonly warn: (message: string) => void }
@@ -120,6 +201,8 @@ export interface PluginToolContext {
   readonly figures?: PluginFiguresPort
   readonly llm?: PluginLlmPort
   readonly audit?: PluginAuditPort
+  readonly wiki?: PluginWikiPort
+  readonly docs?: PluginDocsPort
 }
 
 // 给模型/审计的内容块（#751 双面：content 是结论性事实唯一来源——R6 事实同源不变量）。

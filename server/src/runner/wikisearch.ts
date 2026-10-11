@@ -73,7 +73,7 @@ function mirrorSafeRel(rel: string): string | null {
 }
 
 export async function pullWikiMirror(
-  primitives: SandboxFilePrimitives,
+  primitives: Pick<SandboxFilePrimitives, 'getArchive'>,
   container: string,
 ): Promise<WikiMirror> {
   const buf = await primitives.getArchive(container, WIKI_ROOT)

@@ -5,7 +5,7 @@
 
 import { createHash } from 'node:crypto'
 
-import { WIKILINK_RE } from './values'
+import { SKIP_DIRS, SKIP_FILES, WIKILINK_RE } from './values'
 
 // 字典序比较（对齐 Python 的 Unicode code-point 序）。
 // JS 的 `a < b` 按 UTF-16 code-unit 序：非 BMP 字符（emoji 等代理对 [D800–DFFF]）会排在高 BMP
@@ -110,6 +110,15 @@ export function wikilinkTargets(body: string): string[] {
     out.push(m[1].split('|')[0].trim())
   }
   return out
+}
+
+// managed（SKIP 集）路径判定（#315 §4 第②层）：任一路径段命中 SKIP_DIRS、或末段命中
+// SKIP_FILES → true。读写双侧共用单源——dockerFs.assertNotManaged（读面前置）与
+// runner/wikiToolPort createPage（插件写面，#908）同一判定，防双实现漂移。
+export function isManagedRelPath(relPath: string): boolean {
+  const parts = relPath.split('/')
+  if (parts.some((seg) => SKIP_DIRS.has(seg))) return true
+  return SKIP_FILES.has(parts[parts.length - 1] ?? '')
 }
 
 // OKF 页间关系是 markdown 相对链接 `[text](../dir/page.md)`，不是 `[[wikilink]]`（#725 §三：

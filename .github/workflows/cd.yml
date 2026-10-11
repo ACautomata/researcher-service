@@ -67,6 +67,10 @@ jobs:
           # wiki 容器镜像（#784）：server config.ts WIKI_IMAGE 默认值指向它的版本 tag（版本源
           # deploy/wiki-image/Dockerfile FROM 基线，wikiImage.test.ts 交叉断言锁死）
           echo "WIKI_IMAGE=ghcr.io/${IMAGE_REPO}/wiki" >> "$GITHUB_ENV"
+          # 沙箱镜像 poppler 支路（#908）：extractPdfText 镜像前提——SANDBOX_IMAGE 部署指向
+          # 启用（缺省 busybox 不翻，归沙箱镜像升级票）；只推 :latest + :<sha>（bookworm-slim
+          # 移动基线，不适用 wiki 镜像不可动版本 tag 约定，钉版引用按 sha tag）
+          echo "SANDBOX_IMAGE=ghcr.io/${IMAGE_REPO}/sandbox" >> "$GITHUB_ENV"
 
       - name: Resolve wiki image version tag (Dockerfile FROM 单源, #784)
         # wiki 容器镜像的版本单源 = deploy/wiki-image/Dockerfile 的 FROM 基线行（对齐 openclaw
@@ -155,6 +159,23 @@ jobs:
             ${{ env.WIKI_IMAGE }}:${{ env.WIKI_VERSION_TAG }}
           cache-from: type=gha,scope=wiki-image
           cache-to: type=gha,mode=max,scope=wiki-image
+
+      - name: Build & push sandbox container image (#908)
+        # 沙箱镜像 poppler 支路（853 §3.2#2 镜像验收项）：debian:bookworm-slim + poppler-utils
+        # （ctx.docs.extractPdfText 的 pdftotext 前提）。构建期断言在 Dockerfile RUN 内
+        # （pdftotext 双断言 + busybox 缺省 applet 集），任一失败即构建失败 → CD 红。
+        # 与 wiki 镜像差异：bookworm-slim 是移动基线 tag，不推不可动版本 tag——只推 :latest +
+        # :<sha>，部署钉版引用按 sha tag（deploy/sandbox-image/Dockerfile 头注同口径）。
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7.4.0
+        with:
+          context: deploy/sandbox-image
+          file: deploy/sandbox-image/Dockerfile
+          push: true
+          tags: |
+            ${{ env.SANDBOX_IMAGE }}:latest
+            ${{ env.SANDBOX_IMAGE }}:${{ env.IMAGE_TAG }}
+          cache-from: type=gha,scope=sandbox-image
+          cache-to: type=gha,mode=max,scope=sandbox-image
 
       - name: Stage deploy artifacts (compose + rendered .env)
         # 运行时敏感值渲染为 .env（compose env_file 读取）；.env 不进 git，仅经 scp 落到宿主。

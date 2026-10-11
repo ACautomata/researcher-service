@@ -94,10 +94,14 @@ describe('#788 plugin tool LangChain adapter (S3)', () => {
   it('pluginId 穿线（#883 AC）：tool 携带插件 id → frame.llmFor(pluginId) 产 per-plugin ctx.llm', async () => {
     const fakeLlmPort = { generateMultimodal: async () => ({ text: 'llm-ok' }) }
     const llmFor = vi.fn((pluginId: string) => (pluginId === 'autofigure' ? fakeLlmPort : undefined))
+    // frame 字面量随 #908 扩形补 wikiFor/docs 桩——本用例只锁 llm 穿线，双口走
+    // pluginWikiDocsPort.test.ts 的 RunService 真装配覆盖。
     const frame = {
       run: { ownerId: 'o', sessionId: 's', runId: 'r' },
       figures: {},
       llmFor,
+      wikiFor: () => ({}),
+      docs: {},
       audit: {},
       onUpdate: () => {},
     }
