@@ -20,36 +20,27 @@ import {
   type PluginPageDraft,
   type PluginPageProvenance,
 } from '../plugins/api'
+import { GENERATED_STALE_AFTER_MS, PAGE_DRAFT_MAX } from '../../../plugins/research/values'
 import { PATH_MAX } from './paths'
 
-// 生成页陈旧地平线（stale_after = 生成时刻 + 180 天）：853 §7.1 拍板追认（#908 复审 B3）——
-// 生成页进治理检索面，徽章面过期标记由此驱动；#909 归口迁 plugins/research/values.ts。
-export const GENERATED_STALE_AFTER_MS = 180 * 24 * 60 * 60 * 1000
-
-// PageDraft DTO 尺寸上限（853 §7.1 拍板追认，#908 复审 B5）：zod 边界防失控值——
-// #909 归口迁 plugins/research/values.ts。改值须连 wikiPluginPage.test.ts 尺寸边界断言一并改。
-const PAGE_DRAFT_MAX = {
-  pathChars: PATH_MAX, // wiki/paths.ts 单源（port 侧 normalizeRelPath 逐 code-point 复核）
-  titleChars: 512,
-  contentChars: 2_000_000,
-  claims: 100,
-  evidencePerClaim: 20,
-} as const
+// PageDraft DTO 尺寸上限的 path 件：values 表不辖 path（wiki 域单源 PATH_MAX），
+// 组合进本域 PAGE_DRAFT_MAX 消费形态。
+const DRAFT_MAX = { ...PAGE_DRAFT_MAX, pathChars: PATH_MAX } as const
 
 // 四流程名形态（W1–W4 枚举 #909 定稿前先锁小写 kebab/snake，防 frontmatter 垃圾值）。
 const WORKFLOW_SHAPE = /^[a-z][a-z0-9_-]{0,31}$/
 
 export const PluginClaimDraftSchema: z.ZodType<PluginClaimDraft> = z.object({
   statement: z.string().min(1),
-  evidence: z.array(z.string().min(1)).max(PAGE_DRAFT_MAX.evidencePerClaim),
+  evidence: z.array(z.string().min(1)).max(DRAFT_MAX.evidencePerClaim),
 })
 
 export const PluginPageDraftSchema: z.ZodType<PluginPageDraft> = z.object({
-  path: z.string().min(1).max(PAGE_DRAFT_MAX.pathChars),
-  title: z.string().min(1).max(PAGE_DRAFT_MAX.titleChars),
+  path: z.string().min(1).max(DRAFT_MAX.pathChars),
+  title: z.string().min(1).max(DRAFT_MAX.titleChars),
   type: z.enum(PLUGIN_PAGE_TYPES),
-  content: z.string().min(1).max(PAGE_DRAFT_MAX.contentChars),
-  claims: z.array(PluginClaimDraftSchema).max(PAGE_DRAFT_MAX.claims).optional(),
+  content: z.string().min(1).max(DRAFT_MAX.contentChars),
+  claims: z.array(PluginClaimDraftSchema).max(DRAFT_MAX.claims).optional(),
 })
 
 // createPage 溯源面 zod（port 边界校验，非法 → Result error.code='invalid_draft'）——

@@ -1,13 +1,57 @@
-// 科研工作流插件（research）常量表归口（853 §7.1 · #908 建此文件）。
+// 科研工作流插件（research）常量表归口（853 §7.1 · #908 建此文件 · #909 落齐七件）。
 // 对齐 plugins/autofigure/pipeline/values.ts 先例：纯常量零 import（插件包铁律——plugins/ 树
-// 禁裸包名 import），消费方 = 核心 docs port（runner/docsToolPort.ts 字符上限缺省）与
-// 后续骨架票（[#873·3]）的图内逻辑。常量表其余六件（MIN_CONFIDENCE/CONTEXT_PACK_BUDGET_TOKENS/
-// PAGE_OUTPUT_MAX_TOKENS/PAGE_GENERATE_MAX_RETRIES/BUCKETS_MAX/PLAN_REVIEW_MAX_ROUNDS）随
-// 骨架票落齐——本票只落 PDF_EXTRACT_MAX_CHARS 一件（853 §3.2#2 点名归口）。
-// 另：PageDraft DTO 尺寸上限（PAGE_DRAFT_MAX）与 GENERATED_STALE_AFTER_MS 已随 #908 复审
-// B5/B3 拍板落 853 §7.1 表——现落 `server/src/wiki/pluginPage.ts` 本地常量，#909 归口迁本表。
+// 禁裸包名 import）。字面值由 server/test/researchValues.test.ts 两层锁定（approval values
+// 先例：纯逻辑导入断言 + 字面数字行为锁定），改值须连测试一并改、随发版走；其中
+// GENERATED_STALE_AFTER_MS 另有 wikiPluginPage.test.ts 消费面双锁（两处测试同步改）。
+// 归口注记：GENERATED_STALE_AFTER_MS 与 PAGE_DRAFT_MAX 已自 server/src/wiki/pluginPage.ts
+// 迁入本表（#908 复审 B3/B5 拍板、853 §7.1 点名归口）——pluginPage.ts 反向 import 本表，
+// server → plugins/research/values 引用先例 = runner/docsToolPort.ts。
+
+// 意图分类放行阈值（853 §1.2 · #866 实测定标）：confidence < 本值 → clarify 兜底。40 条中文
+// 科研 bad case × 3 轮 MiniMax M3 实测——τ≤0.55 出现坏放行、τ≥0.60 坏放行归零且正确误拦最小化；
+// 多意图条目置信天然 0.55–0.65，恰由兜底接住。
+export const MIN_CONFIDENCE = 0.6
+
+// W3 contextPack 检索预算（853 §4.3）：构建时裁一次（2 chars/token 口径 ≈32k 中文字符；
+// judge 8k 的 2 倍——多页引用场景）。evidence 按证据等级降序 + 页级节选 + Brief 恒保全。
+export const CONTEXT_PACK_BUDGET_TOKENS = 16_000
+
+// 长页输出单次生成上限（853 §7.1）：盖五节点——W1 create / W2 extract+critic / W4 design+spec，
+// 经 generateStructured maxTokens 传入。否决对齐 autofigure 50k（超多数 provider output cap）、
+// 否决两过式分段生成。
+export const PAGE_OUTPUT_MAX_TOKENS = 32_000
+
+// 生成兜底重试次数（853 §7.1 · #906 修订触发面，值与覆盖面不动）：**截断 ∨ 结构化解析/validate
+// 失败**（finish_reason=length 检出 / generateStructured zod 解析不过 / 确定性校验拒）→ 回生成
+// 节点重试 1 次附对应诊断回喂。覆盖面 = 长页生成五节点（W1 create / W2 extract+critic /
+// W4 design+spec）。边界：无工具面、无 LLM 自由裁量、K≤2 有界（初次生成 + 至多一次修复）、
+// 输入不变无检索——只纠格式不改生成语义（#850「一次性生成语义足够」不被触及），系「单发 +
+// 至多一次协议修复」形态（#899 图 #904 拍板；critic gate 56%→100% 实测归因）。classify 与
+// W3 扇出不在覆盖面（#904 口径注记：拓扑调用数推导不含重试）。
+export const PAGE_GENERATE_MAX_RETRIES = 1
+
+// W3 扇出 cap（853 §4.3 · #869 D7）：5 固定桶（gap/contradiction/failure/transfer/constraint）
+// + 3 opt-in（ablation/metric/assumption-challenge，仅经参数显式追加——非 LLM 自由裁量）。
+export const BUCKETS_MAX = 8
+
+// W4 方案人审修订上限（853 §5.1 · #852）：deny → 回 design 修订模式，第 3 轮 deny →
+// plan_review_exhausted 终局（run completed 非 failed）。卡显轮次，第 2/3 轮「最后一轮」提示。
+export const PLAN_REVIEW_MAX_ROUNDS = 3
 
 // extractPdfText 字符上限（853 §7.1 拍板 1_000_000 · #851 D10）：PDF 提取全文上限，超限明确
-// 报错不静默截断——截断致 extract 缺节 → validate 拒 → 重试循环浪费 token（§3.2#2 原文）。字面值由
-// server/test/docsToolPort.test.ts 两层锁定。
+// 报错不静默截断——截断致 extract 缺节 → validate 拒 → 重试循环浪费 token（§3.2#2 原文）。
+// 消费面 = 核心 docs port（runner/docsToolPort.ts 缺省引用本表）。
 export const PDF_EXTRACT_MAX_CHARS = 1_000_000
+
+// 生成页陈旧地平线（853 §7.1 · #908 复审 B3 拍板追认）：stale_after = 生成时刻 + 180 天——
+// 生成页进治理检索面，徽章面过期标记由此驱动（wiki/pluginPage.ts frontmatter 组装消费）。
+export const GENERATED_STALE_AFTER_MS = 180 * 24 * 60 * 60 * 1000
+
+// PageDraft DTO 尺寸上限（853 §7.1 拍板追认，#908 复审 B5）：zod 边界防失控值。
+// path 上限不在本表——wiki/paths.ts PATH_MAX 是 wiki 域单源（pluginPage 组合消费）。
+export const PAGE_DRAFT_MAX = {
+  titleChars: 512,
+  contentChars: 2_000_000,
+  claims: 100,
+  evidencePerClaim: 20,
+} as const

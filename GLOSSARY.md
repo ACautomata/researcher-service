@@ -314,11 +314,11 @@ _Avoid_: 单面板角色门控混入——「摘出来」是产物级隔离，�
 _Avoid_: 用户可见文案出现 `researcher-service` 自称——那是内部仓库/模块标识，不是产品名；改名连带改仓库名/npm 包名/镜像名——改名只动显示层，内部标识零改动；动法律文案里的备案算法名（「天研文本图像生成合成算法」）——那是算法备案身份，与面板产品名不同层。
 
 **意图识别 (intent classification)**:
-（目标架构，wayfinder #846 定稿，未实施）research 插件入口图把用户请求分派到 workflow 流程前的两级判定：显式 slash 命令（`/ingest` `/discover` `/hypothesize` `/experiment`）经 `{execute}` 直达**seed 免分类**；自然语言路径由主 agent 组织 input 调用 `research_workflow`，图内 classify 节点结构化分类——5 值标签（ingest/discover/hypothesize/experiment/none）+ confidence∈[0,1]，`MIN_CONFIDENCE=0.60` 代码常量（#866 40 条中文 bad case × 3 轮实测定标）；`none` 或低于阈值 → clarify Result 回喂主 agent 反问（零新 interrupt 机制）。
+（已实施 #909 入口面，wayfinder #846 定稿）research 插件入口图把用户请求分派到 workflow 流程前的两级判定：显式 slash 命令（`/ingest` `/discover` `/hypothesize` `/experiment`）经 `{execute}` 直达**seed 免分类**；自然语言路径由主 agent 组织 input 调用 `research_workflow`，图内 classify 节点结构化分类——5 值标签（ingest/discover/hypothesize/experiment/none）+ confidence∈[0,1]，`MIN_CONFIDENCE=0.60` 代码常量（#866 40 条中文 bad case × 3 轮实测定标）；`none` 或低于阈值 → clarify Result 回喂主 agent 反问（零新 interrupt 机制）。
 _Avoid_: 意图识别写进会话主图——否决形态（每条消息付一次分类调用、误路由敞口大、核心大改，#849）；把 `none` 当第五个流程——它是显式拒识出口，不是流程；「分类兜底再猜一次」——低置信走 clarify 反问，不硬选。
 
 **路由 (routing)**:
-（目标架构，wayfinder #846 定稿，未实施）`research_workflow` 工具内嵌套路由图的分发机制：单 StateGraph + addConditionalEdges **互斥条件边**——恰一 workflow 流程分支在跑，无公共归并节点；classify 对已 seed workflow 透传不调分类器（保「同参数必同拓扑」硬约束）。图在插件工具 execute 内构造执行，不进 RunService 图实例缓存（figure 先例同构）。
+（已实施 #909，wayfinder #846 定稿）`research_workflow` 工具内嵌套路由图的分发机制：单 StateGraph + addConditionalEdges **互斥条件边**——恰一 workflow 流程分支在跑，无公共归并节点；classify 对已 seed workflow 透传不调分类器（保「同参数必同拓扑」硬约束）。图在插件工具 execute 内构造执行，不进 RunService 图实例缓存（figure 先例同构）。
 _Avoid_: 子图组合——checkpoint ns 寻址与 PrismaCheckpointSaver 缺省寻址/rewind/recover 语义冲突（#847 否决）；deepagents teammate 委派路由——LLM 自由裁量违反「图拓扑必须可由持久化状态推导」；「流程编排」——路由只管入口分派，分支内时序归各 workflow 流程设计。
 
 **workflow 流程 (workflow)**:

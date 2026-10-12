@@ -3,8 +3,10 @@
 // frontend/src/plugins/index.ts）。不用 glob 自动发现——显式收录行是收录评审的动作面
 //（名字冲突、类别正确性、env 需求在 diff 上可见，§1）。
 //
-// V1 目录仅 AutoFigure（#752 §4.1 目录首成员；#744 §10 票 4 工具包装收口，#792）。
+// V1 目录仅 AutoFigure（#752 §4.1 目录首成员；#744 §10 票 4 工具包装收口，#792）；
+// #909 收录 research（科研工作流，853 §3.1 · [#873·3] 骨架票）。
 import type { PluginManifest } from '../server/src/plugins/api'
 import autofigureManifest from './autofigure/manifest'
+import researchManifest from './research/manifest'
 
-export const PLUGIN_MANIFESTS: readonly PluginManifest[] = [autofigureManifest]
+export const PLUGIN_MANIFESTS: readonly PluginManifest[] = [autofigureManifest, researchManifest]
