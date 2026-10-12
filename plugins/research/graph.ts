@@ -180,8 +180,9 @@ export function createResearchRoutingGraph(ports: ResearchRoutingPorts): Researc
         throw new Error('research routing graph finished without branch result')
       }
       // 多意图高置信尾注（853 §1.3 · #850 D17）：选首路由后 summary 尾注引导继续发起；
-      // clarify/seed/无次选路径零尾注。
-      const secondary = state.intent?.secondaryIntent
+      // clarify/seed/无次选路径零尾注。同值次选（自指，secondaryIntent = 主选）视为无次选。
+      const intent = state.intent
+      const secondary = intent?.secondaryIntent !== intent?.label ? intent?.secondaryIntent : undefined
       const summary =
         secondary !== undefined
           ? `${state.summary}\n\n检测到后续意图 ${secondary}，可继续发起。`

@@ -124,7 +124,9 @@ export async function executeResearchWorkflow(
 ): Promise<PluginToolResult<ResearchRunDetails>> {
   const ctx = assertResearchContext(exec.ctx)
   const request: ResearchWorkflowRequest = params
-  // 受理即 created（figure 先例）；分类输入同一序列化单源截断落审计（topic/question 面）。
+  // 受理即 created（figure 先例）；分类输入同一序列化单源截断落审计（topic/question 面）；
+  // source_paths 落 detail JSON 面（methodText 不含数据槽位——ingest 受理文件清单经
+  // outputText 全量 detail 可检索）。
   const classificationInput = serializeClassifyInput(request)
   ctx.audit.emitPluginRun({
     event: 'created',
@@ -132,6 +134,7 @@ export async function executeResearchWorkflow(
     detail: {
       ...(request.workflow !== undefined ? { workflow: request.workflow } : {}),
       ...(request.phase !== undefined ? { phase: request.phase } : {}),
+      ...(request.source_paths !== undefined ? { source_paths: request.source_paths } : {}),
       methodText: truncateAuditMethodText(classificationInput),
     },
   })

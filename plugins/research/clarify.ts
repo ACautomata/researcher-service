@@ -44,7 +44,8 @@ export interface IntentVerdict {
   readonly label: IntentLabel
   readonly confidence: number
   /** 分类器的次可能标签（853 §1.3 Top-2 的第二名 · #850 D17 多意图后续面）：低置信 =
-   *  clarify Top-2 候选第二名；高置信 = 多意图尾注信号。省略 = 目录中非主选首项兜底。 */
+   *  clarify Top-2 候选第二名；高置信 = 多意图尾注信号。省略（或与主选同值）= 无明确
+   *  次可能，消费面如实降级——Top-1 单候选 / 零尾注，不硬凑。 */
   readonly secondaryIntent?: WorkflowLabel
 }
 
@@ -64,8 +65,9 @@ export function buildClarifyResult(verdict: IntentVerdict): ClarifyResult {
     return { status: 'clarify', candidates: [], question: CLARIFY_QUESTION_NONE }
   }
   const primary = catalogOf(verdict.label)
-  const candidates =
-    verdict.secondaryIntent !== undefined ? [primary, catalogOf(verdict.secondaryIntent)] : [primary]
+  // 同值次选（模型自报 secondaryIntent = 主选）视为无次选——不产出重复候选。
+  const secondary = verdict.secondaryIntent !== verdict.label ? verdict.secondaryIntent : undefined
+  const candidates = secondary !== undefined ? [primary, catalogOf(secondary)] : [primary]
   return { status: 'clarify', candidates, question: CLARIFY_QUESTION_LOW_CONFIDENCE }
 }
 

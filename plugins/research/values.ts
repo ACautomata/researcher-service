@@ -1,7 +1,8 @@
 // 科研工作流插件（research）常量表归口（853 §7.1 · #908 建此文件 · #909 落齐七件）。
 // 对齐 plugins/autofigure/pipeline/values.ts 先例：纯常量零 import（插件包铁律——plugins/ 树
 // 禁裸包名 import）。字面值由 server/test/researchValues.test.ts 两层锁定（approval values
-// 先例：纯逻辑导入断言 + 字面数字行为锁定），改值须连测试一并改、随发版走。
+// 先例：纯逻辑导入断言 + 字面数字行为锁定），改值须连测试一并改、随发版走；其中
+// GENERATED_STALE_AFTER_MS 另有 wikiPluginPage.test.ts 消费面双锁（两处测试同步改）。
 // 归口注记：GENERATED_STALE_AFTER_MS 与 PAGE_DRAFT_MAX 已自 server/src/wiki/pluginPage.ts
 // 迁入本表（#908 复审 B3/B5 拍板、853 §7.1 点名归口）——pluginPage.ts 反向 import 本表，
 // server → plugins/research/values 引用先例 = runner/docsToolPort.ts。

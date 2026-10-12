@@ -73,5 +73,5 @@ export function createIntentClassifier(llm: PluginLlmPort, pinnedModel?: string)
   }
 }
 
-// IntentVerdict/WorkflowLabel 类型再出口（graph/server 消费面单点）。
+// IntentLabel/WorkflowLabel 类型再出口（server.ts 消费面；graph 直引 ./clarify 不经此）。
 export type { IntentLabel, WorkflowLabel }

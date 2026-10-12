@@ -42,7 +42,7 @@ flowchart TD
     G -->|"自然语言（无 workflow）"| C["classify 意图分类<br/>5 值标签 + 置信度"]
 
     C -->|"高置信 ≥ 0.60"| R["互斥分发<br/>（恰一流程在跑）"]
-    C -->|"低置信 < 0.60"| CL["clarify 反问<br/>列出置信 Top-2 候选流程"]
+    C -->|"低置信 < 0.60"| CL["clarify 反问<br/>列出最可能的候选流程"]
     C -->|"不属于科研诉求（none）"| CLN["clarify 如实拒识<br/>请改述需求"]
 
     CL --> U
@@ -85,7 +85,7 @@ flowchart TD
 
 | 环境变量 | 必填 | 说明 |
 |---|---|---|
-| `RESEARCH_MODEL` | 否 | 意图分类与流程节点的 LLM 模型 id（面板级 pin；缺省跟随 owner 默认链 primary）。也可在 Model 配置页为本插件指派端点与模型。 |
+| `RESEARCH_MODEL` | 否 | 意图分类与流程节点的 LLM 模型 id（面板级 pin；缺省跟随 owner 默认链 primary）。 |
 
 其余阈值（意图置信阈值 0.60、生成重试、扇出上限等）为代码常量，随版本发布走，不做配置面。
 
