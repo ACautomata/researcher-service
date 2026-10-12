@@ -15,6 +15,7 @@
 
 import { z } from '../../server/src/plugins/autofigureDeps'
 import type {
+  PluginLlmPort,
   PluginToolContentBlock,
   PluginToolContext,
   PluginToolExec,
@@ -24,8 +25,10 @@ import { fail } from '../../server/src/envelope'
 import { CODE } from '../../server/src/codes'
 import { truncateAuditMethodText } from '../../server/src/figures/figureAudit'
 import { createResearchRoutingGraph } from './graph'
-import type { ResearchWorkflowRequest, ResearchRoutingPorts } from './graph'
+import type { ResearchWorkflowRequest, ResearchRoutingPorts, WorkflowOutcome } from './graph'
 import { createIntentClassifier, serializeClassifyInput, type WorkflowLabel } from './classifier'
+import { createIngestGraph } from './ingest'
+import { createDiscoverGraph } from './discover'
 import { WORKFLOW_CATALOG } from './clarify'
 import type { ClarifyResult } from './clarify'
 
@@ -62,7 +65,7 @@ export interface ResearchRunDetails {
 
 // ---------------------------------------------------------------------------
 // ctx 校验（autofigure assertFigureContext 同款）：缺件 = 无 runner 装配的调用面——
-// 明确报错不静默降级。本票消费 llm/audit/run 三件（占位分支零 wiki/docs 面）。
+// 明确报错不静默降级。本票起六件全消费（W1/W2 图取 llm/wiki/docs；run/audit 审计面）。
 // ---------------------------------------------------------------------------
 
 interface ResearchToolContext {
@@ -70,6 +73,8 @@ interface ResearchToolContext {
   readonly run: NonNullable<PluginToolContext['run']>
   readonly llm: NonNullable<PluginToolContext['llm']>
   readonly audit: NonNullable<PluginToolContext['audit']>
+  readonly wiki: NonNullable<PluginToolContext['wiki']>
+  readonly docs: NonNullable<PluginToolContext['docs']>
   readonly logger: PluginToolContext['logger']
 }
 
@@ -78,6 +83,8 @@ export function assertResearchContext(ctx: PluginToolContext): ResearchToolConte
     ...(ctx.run ? [] : ['run']),
     ...(ctx.llm ? [] : ['llm']),
     ...(ctx.audit ? [] : ['audit']),
+    ...(ctx.wiki ? [] : ['wiki']),
+    ...(ctx.docs ? [] : ['docs']),
   ]
   if (missing.length > 0) {
     throw new Error(`research tool requires runner-assembled plugin context; missing: ${missing.join(', ')}`)
@@ -86,8 +93,9 @@ export function assertResearchContext(ctx: PluginToolContext): ResearchToolConte
 }
 
 // ---------------------------------------------------------------------------
-// 占位分支注入（#909）：四流程真实节点链归 [#873·4–6] 三票替换 runWorkflow 端口实现，
-// 图拓扑零改动（graph.ts 端口面已钉）。占位产出说明形态供 S2 互斥分发测试与端到端冒烟。
+// 分支分派（#910）：ingest/discover = 真实流程图（853 §4.1–§4.2）；hypothesize/experiment
+// 保持占位（[#873·5–6] 票替换）。RESEARCH_MODEL 面板级可选 pin（853 §3.1）统一包装进
+// 流程图 llm 面（分类器已单独 pin）——图内 generateStructured 零 pin 知识。
 // ---------------------------------------------------------------------------
 
 // 四流程中文名自 clarify 目录派生（单一来源——WORKFLOW_CATALOG.name，防双表漂移）。
@@ -95,16 +103,37 @@ const WORKFLOW_DISPLAY: Record<WorkflowLabel, string> = Object.fromEntries(
   WORKFLOW_CATALOG.map((c) => [c.label, c.name]),
 ) as Record<WorkflowLabel, string>
 
-function placeholderRunWorkflow(workflow: WorkflowLabel): Promise<string> {
-  return Promise.resolve(
-    `已受理 ${WORKFLOW_DISPLAY[workflow]}（${workflow}）流程。插件骨架已就绪，该流程的节点链将在后续版本接入；本次运行不产出 wiki 页面。`,
-  )
+function placeholderRunWorkflow(workflow: WorkflowLabel): Promise<WorkflowOutcome> {
+  return Promise.resolve({
+    status: 'completed',
+    summary: `已受理 ${WORKFLOW_DISPLAY[workflow]}（${workflow}）流程。插件骨架已就绪，该流程的节点链将在后续版本接入；本次运行不产出 wiki 页面。`,
+    artifactPages: [],
+  })
+}
+
+// pin 包装（空 = owner 默认链 primary 原样透传；非空 = 每次调用带 model pin 语义）。
+function pinLlm(llm: PluginLlmPort, pinnedModel: string | undefined): PluginLlmPort {
+  const pin = pinnedModel !== undefined && pinnedModel.trim() !== '' ? pinnedModel : undefined
+  if (pin === undefined) return llm
+  return {
+    generateMultimodal: (opts) => llm.generateMultimodal({ ...opts, model: pin }),
+    generateStructured: (opts) => llm.generateStructured({ ...opts, model: pin }),
+  }
 }
 
 function buildRoutingPorts(ctx: ResearchToolContext): ResearchRoutingPorts {
-  // RESEARCH_MODEL 面板级可选 pin（853 §3.1 configSchema 单键）：空 = owner 默认链 primary。
   const classifier = createIntentClassifier(ctx.llm, ctx.config.RESEARCH_MODEL)
-  return { classifier, runWorkflow: (workflow) => placeholderRunWorkflow(workflow) }
+  const llm = pinLlm(ctx.llm, ctx.config.RESEARCH_MODEL)
+  const runWorkflow: ResearchRoutingPorts['runWorkflow'] = async (workflow, request, onStage) => {
+    if (workflow === 'ingest') {
+      return createIngestGraph({ docs: ctx.docs, llm, wiki: ctx.wiki }).invoke({ request }, { onStage })
+    }
+    if (workflow === 'discover') {
+      return createDiscoverGraph({ llm, wiki: ctx.wiki }).invoke({ request }, { onStage })
+    }
+    return placeholderRunWorkflow(workflow)
+  }
+  return { classifier, runWorkflow }
 }
 
 // 失败原因稳定非敏感（#744 §11.2 failed{reason} 同款：错误消息截断，不落凭证/响应体）。
@@ -142,13 +171,17 @@ export async function executeResearchWorkflow(
     const graph = createResearchRoutingGraph(buildRoutingPorts(ctx))
     const result = await graph.invoke(
       { request },
-      // stage 上报（853 §6.1：SSE 载荷 {toolCallId, stage, workflow}）——workflow 域字段
-      // 待三票 runWorkflow 端口冒泡时附加（占位期分支名即流程名，无重名消歧需求）。
-      { signal: exec.signal, onStage: (stage) => exec.onUpdate?.({ stage }) },
+      // stage 上报（853 §6.1：SSE 载荷 {toolCallId, stage, workflow}）——入口面两值
+      //（classify/分支名）无域字段；流程内节点冒泡时附加 workflow 域字段（跨流程重名
+      // stage 的语境面），runner 翻译面作 extra 透传 SSE + stage_transitions 双面。
+      {
+        signal: exec.signal,
+        onStage: (stage, workflow) => exec.onUpdate?.({ stage, ...(workflow !== undefined ? { workflow } : {}) }),
+      },
     )
     if (result.status === 'clarify') {
-      // clarify 回喂（853 §1.3）：content = clarify Result JSON（主 agent 可解析、自然语言
-      // 反问）；details.status=clarify（前端卡纯展示归第 7 票）。工具正常 completed 终态。
+      // 入口级 clarify 回喂（853 §1.3）：content = clarify Result JSON（主 agent 可解析、
+      // 自然语言反问）；details.status=clarify（前端卡纯展示归第 7 票）。工具正常 completed 终态。
       ctx.audit.emitPluginRun({ event: 'completed', toolCallId, detail: { status: 'clarify' } })
       const content: PluginToolContentBlock[] = [{ type: 'text', text: JSON.stringify(result.clarify) }]
       return {
@@ -156,19 +189,43 @@ export async function executeResearchWorkflow(
         details: { workflow: undefined, status: 'clarify', artifactPages: [], clarify: result.clarify },
       }
     }
+    const outcome = result.outcome!
+    if (outcome.status === 'clarify') {
+      // 分支级 clarify 出口（#910 · 853 §4.2 产物串联）：W2 论文页缺失 → 提示先 ingest。
+      // 同入口级形态回喂（零新机制），details 带 workflow 语境。
+      ctx.audit.emitPluginRun({
+        event: 'completed',
+        toolCallId,
+        detail: { status: 'clarify', ...(result.workflow !== undefined ? { workflow: result.workflow } : {}) },
+      })
+      const content: PluginToolContentBlock[] = [{ type: 'text', text: JSON.stringify(outcome.clarify) }]
+      return {
+        content,
+        details: {
+          workflow: result.workflow,
+          status: 'clarify',
+          artifactPages: [],
+          ...(outcome.clarify !== undefined ? { clarify: outcome.clarify } : {}),
+        },
+      }
+    }
     ctx.audit.emitPluginRun({
       event: 'completed',
       toolCallId,
-      detail: { workflow: result.workflow, methodText: truncateAuditMethodText(result.summary ?? '') },
+      detail: {
+        workflow: result.workflow,
+        ...(outcome.artifactPages.length > 0 ? { artifactPages: outcome.artifactPages } : {}),
+        methodText: truncateAuditMethodText(outcome.summary),
+      },
     })
-    const content: PluginToolContentBlock[] = [{ type: 'text', text: result.summary ?? '' }]
+    const content: PluginToolContentBlock[] = [{ type: 'text', text: outcome.summary }]
     return {
       content,
       details: {
         workflow: result.workflow,
         status: 'completed',
-        artifactPages: [],
-        ...(result.summary !== undefined ? { summary: result.summary } : {}),
+        artifactPages: outcome.artifactPages,
+        summary: outcome.summary,
       },
     }
   } catch (e) {

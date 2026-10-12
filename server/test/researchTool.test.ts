@@ -1,6 +1,7 @@
 // #909 S3：research_workflow 工具 execute + 4 命令 handler（{execute} outcome 直达面，
-// figure 先例同构）。图内行为（分类/路由/clarify）已在 researchGraph.test 锁——本文件锁
-// 工具边界：命令参数映射、ctx 六件校验、audit 三态、content/details 形状、RESEARCH_MODEL pin。
+// figure 先例同构）。图内行为（分类/路由/clarify）已在 researchGraph.test 锁，流程图行为
+// 在 researchIngest/researchDiscover.test 锁——本文件锁工具边界：命令参数映射、ctx 六件
+// 校验、audit 三态、content/details 形状、RESEARCH_MODEL pin、分支级 clarify 出口。
 import { describe, expect, it, vi } from 'vitest'
 import {
   RESEARCH_TOOL_NAME,
@@ -15,16 +16,46 @@ import {
 } from '../../plugins/research/server'
 import type { PluginAuditPort, PluginLlmPort, PluginToolContext, PluginToolExec } from '../src/plugins/api'
 import { PluginLlmStructuredError } from '../src/plugins/api'
+import { PAPER_PAGE_SECTIONS, CRITIC_SECTIONS, EXTRACT_SECTIONS } from '../../plugins/research/prompts'
 
-const baseCtx = (llm: PluginToolContext['llm'], config: Readonly<Record<string, string>> = {}) => {
+const PAPER_PATH = 'papers/debug-paper.md'
+
+// discover 端到端最小 fake 产物（走通全链的最小合法形状）。
+const discoverFixtures = () => ({
+  extract: { content: EXTRACT_SECTIONS.map((s, i) => `## ${i} ${s}\n\n论文报告：结果 95.12%。`).join('\n\n') },
+  critic: {
+    content: ['# t', '', '`category: critic`', '', ...CRITIC_SECTIONS.map((s, i) => `## ${i} ${s}\n\nq`)].join('\n'),
+    candidates: [
+      { question: 'Q1', priority: 'high' as const, evidence: [`${PAPER_PATH}#1 Citation`] },
+      { question: 'Q2', priority: 'low' as const, evidence: [] },
+    ],
+  },
+})
+
+const baseCtx = (
+  llm: PluginToolContext['llm'],
+  config: Readonly<Record<string, string>> = {},
+  extra: { wiki?: PluginToolContext['wiki']; docs?: PluginToolContext['docs'] } = {},
+) => {
   const events: Array<{ event: string; detail: Record<string, unknown> }> = []
   const audit: PluginAuditPort = { emitPluginRun: (e) => events.push({ event: e.event, detail: e.detail as Record<string, unknown> }) }
+  // 缺省 stub wiki/docs（ctx 六件校验要求装配完整；不消费的用例不触达内部方法）。
+  const stubWiki: PluginToolContext['wiki'] = extra.wiki ?? {
+    search: vi.fn(async () => ({ ok: true, data: { results: [] } })),
+    readPage: vi.fn(async () => ({ ok: false, error: { code: 'not_found', message: 'stub' } })),
+    createPage: vi.fn(async () => ({ ok: true, data: { created: true } })),
+  } as unknown as PluginToolContext['wiki']
+  const stubDocs: PluginToolContext['docs'] = extra.docs ?? {
+    extractPdfText: vi.fn(async () => ({ ok: true, data: { pages: [] } })),
+  } as unknown as PluginToolContext['docs']
   const ctx: PluginToolContext = {
     config,
     logger: { info: () => {}, warn: () => {} },
     run: { ownerId: 'o1', sessionId: 's1', runId: 'r1' },
     llm,
     audit,
+    wiki: stubWiki,
+    docs: stubDocs,
   }
   return { ctx, events }
 }
@@ -40,6 +71,28 @@ const verdictLlm = (verdict: unknown): PluginLlmPort =>
     generateMultimodal: vi.fn(async () => ({ text: '' })),
     generateStructured: vi.fn(async () => verdict),
   }) as unknown as PluginLlmPort
+
+// discover 端到端 fake ctx（四件 ctx + 分类器 fake——AC「图 invoke 面 fake ctx 测试」的
+// 工具边界形态）：seed discover → 真图全链（fake wiki/llm）→ completed。
+const discoverCtxLlm = (): PluginLlmPort => {
+  const fixtures = discoverFixtures()
+  return {
+    generateMultimodal: vi.fn(async () => ({ text: '' })),
+    generateStructured: vi.fn(async (opts: { schema: { parse: (v: unknown) => unknown; shape?: Record<string, unknown> } }) =>
+      opts.schema.parse(opts.schema.shape?.candidates !== undefined ? fixtures.critic : fixtures.extract),
+    ),
+  } as unknown as PluginLlmPort
+}
+
+const discoverWiki = (): PluginToolContext['wiki'] =>
+  ({
+    search: vi.fn(async () => ({ ok: true, data: { results: [{ kind: 'section', ref: [`${PAPER_PATH}#1 citation`], content: '…' }] } })),
+    readPage: vi.fn(async (page: string, sections: readonly string[]) => ({
+      ok: true,
+      data: { page, sections: sections.map((s, i) => ({ section: s, content: `## ${i + 1} ${PAPER_PAGE_SECTIONS[i]}\n\n内容` })) },
+    })),
+    createPage: vi.fn(async () => ({ ok: true, data: { created: true } })),
+  }) as unknown as PluginToolContext['wiki']
 
 describe('4 命令 handler（853 §1.1：{execute} 直达，input 槽位 + workflow 显式值）', () => {
   it('/ingest：空格分隔路径 → source_paths 数组 + workflow=ingest', async () => {
@@ -77,25 +130,43 @@ describe('4 命令 handler（853 §1.1：{execute} 直达，input 槽位 + workf
 })
 
 describe('research_workflow execute（工具边界）', () => {
-  it('ctx 缺 llm/audit/run 任一件 → 明确报错不静默降级', async () => {
+  it('ctx 缺 llm/audit/run/wiki/docs 任一件 → 明确报错不静默降级', async () => {
     const partial = { config: {}, logger: { info: () => {}, warn: () => {} } } as PluginToolContext
     await expect(executeResearchWorkflow('t1', { question: 'x' }, execOf(partial))).rejects.toThrow(/runner-assembled|missing/)
   })
 
-  it('branch 面：content = summary；details = {workflow, status, artifactPages}；audit created→completed', async () => {
-    const { ctx, events } = baseCtx(verdictLlm({ label: 'discover', confidence: 0.9 }))
-    const result = await executeResearchWorkflow('t2', { question: '找问题' }, execOf(ctx))
+  it('branch 面（占位流程 hypothesize）：content = summary；details = {workflow, status, artifactPages:[]}；audit created→completed', async () => {
+    const { ctx, events } = baseCtx(verdictLlm({ label: 'hypothesize', confidence: 0.9 }))
+    const result = await executeResearchWorkflow('t2', { topic: '想法' }, execOf(ctx))
 
     expect(result.content[0]?.type).toBe('text')
-    expect(String((result.content[0] as { text: string }).text)).toContain('discover')
+    expect(String((result.content[0] as { text: string }).text)).toContain('hypothesize')
     const details = result.details as ResearchRunDetails
     expect(details.status).toBe('completed')
-    expect(details.workflow).toBe('discover')
+    expect(details.workflow).toBe('hypothesize')
     expect(details.artifactPages).toEqual([])
     expect(events.map((e) => e.event)).toEqual(['created', 'completed'])
   })
 
-  it('clarify 面：content = clarify Result JSON；details.status=clarify；audit completed', async () => {
+  it('branch 面（discover 真图端到端，四件 ctx fake）：artifactPages = critic 页；流程节点 llm 零分类调用', async () => {
+    const { ctx, events } = baseCtx(discoverCtxLlm(), {}, { wiki: discoverWiki() })
+    const result = await executeResearchWorkflow(
+      't2b',
+      { workflow: 'discover', question: '找问题', source_paths: [PAPER_PATH] },
+      execOf(ctx),
+    )
+
+    const details = result.details as ResearchRunDetails
+    expect(details.status).toBe('completed')
+    expect(details.workflow).toBe('discover')
+    expect(details.artifactPages).toEqual([{ path: 'critics/debug-paper.md', title: 't' }])
+    expect(String(result.content[0] as { text: string }).length).toBeGreaterThan(0)
+    expect(events.map((e) => e.event)).toEqual(['created', 'completed'])
+    // completed 审计带 artifactPages（outputText 可检索产物清单）
+    expect(events[1]!.detail.artifactPages).toEqual(details.artifactPages)
+  })
+
+  it('clarify 面（none 拒识）：content = clarify Result JSON；details.status=clarify；audit completed', async () => {
     const { ctx, events } = baseCtx(verdictLlm({ label: 'none', confidence: 0.9 }))
     const result = await executeResearchWorkflow('t3', { question: '今天天气' }, execOf(ctx))
 
@@ -110,17 +181,29 @@ describe('research_workflow execute（工具边界）', () => {
     expect(events.map((e) => e.event)).toEqual(['created', 'completed'])
   })
 
-  it('seed 透传：命令面带 workflow → 分类器零调用（generateStructured 零调用）', async () => {
-    const llm = verdictLlm({ label: 'ingest', confidence: 0.9 })
-    const { ctx } = baseCtx(llm)
-    await executeResearchWorkflow('t4', { workflow: 'ingest', source_paths: ['/lab/uploads/a.pdf'] }, execOf(ctx))
+  it('分支级 clarify（W2 论文页缺失 → 提示先 ingest）：details.status=clarify 带 workflow 语境', async () => {
+    const { ctx } = baseCtx(discoverCtxLlm(), {}, { wiki: { search: async () => ({ ok: true, data: { results: [] } }) } as unknown as PluginToolContext['wiki'] })
+    const result = await executeResearchWorkflow('t3b', { workflow: 'discover', question: '找不到的论文' }, execOf(ctx))
+
+    const details = result.details as ResearchRunDetails
+    expect(details.status).toBe('clarify')
+    expect(details.workflow).toBe('discover')
+    expect(details.clarify?.question).toContain('ingest')
+    expect(details.artifactPages).toEqual([])
+  })
+
+  it('seed 透传：命令面带 workflow → 分类器零调用（generateStructured 不做分类）', async () => {
+    const llm = discoverCtxLlm()
+    const { ctx } = baseCtx(llm, {}, { wiki: discoverWiki() })
+    await executeResearchWorkflow('t4', { workflow: 'hypothesize', topic: 'x' }, execOf(ctx))
+    // hypothesize 占位零 llm 消费——generateStructured 零调用即分类器未跑
     expect(llm.generateStructured).not.toHaveBeenCalled()
   })
 
-  it('RESEARCH_MODEL pin：config 非空 → generateStructured model 参数', async () => {
-    const llm = verdictLlm({ label: 'ingest', confidence: 0.9 })
-    const { ctx } = baseCtx(llm, { RESEARCH_MODEL: 'MiniMax-M3' })
-    await executeResearchWorkflow('t5', { question: 'x' }, execOf(ctx))
+  it('RESEARCH_MODEL pin：流程节点 generateStructured 带 model（discover 端到端断言）', async () => {
+    const llm = discoverCtxLlm()
+    const { ctx } = baseCtx(llm, { RESEARCH_MODEL: 'MiniMax-M3' }, { wiki: discoverWiki() })
+    await executeResearchWorkflow('t5b', { workflow: 'discover', question: 'q', source_paths: [PAPER_PATH] }, execOf(ctx))
     expect(llm.generateStructured).toHaveBeenCalledWith(expect.objectContaining({ model: 'MiniMax-M3' }))
   })
 
@@ -149,11 +232,19 @@ describe('research_workflow execute（工具边界）', () => {
     expect(events.map((e) => e.event)).toEqual(['created', 'aborted'])
   })
 
-  it('stage 上报经 onUpdate（SSE 翻译面入口）', async () => {
-    const { ctx } = baseCtx(verdictLlm({ label: 'ingest', confidence: 0.9 }))
+  it('stage 上报经 onUpdate（SSE 翻译面入口）：入口面无域字段', async () => {
+    const { ctx } = baseCtx(verdictLlm({ label: 'hypothesize', confidence: 0.9 }))
     const exec = execOf(ctx)
-    await executeResearchWorkflow('t8', { question: 'x' }, exec)
+    await executeResearchWorkflow('t8', { topic: 'x' }, exec)
     expect(exec.onUpdate).toHaveBeenCalledWith({ stage: 'classify' })
-    expect(exec.onUpdate).toHaveBeenCalledWith({ stage: 'ingest' })
+    expect(exec.onUpdate).toHaveBeenCalledWith({ stage: 'hypothesize' })
+  })
+
+  it('stage 上报：流程内节点冒泡带 workflow 域字段（discover 端到端）', async () => {
+    const { ctx } = baseCtx(discoverCtxLlm(), {}, { wiki: discoverWiki() })
+    const exec = execOf(ctx)
+    await executeResearchWorkflow('t9', { workflow: 'discover', question: 'q', source_paths: [PAPER_PATH] }, exec)
+    expect(exec.onUpdate).toHaveBeenCalledWith({ stage: 'load', workflow: 'discover' })
+    expect(exec.onUpdate).toHaveBeenCalledWith({ stage: 'critic', workflow: 'discover' })
   })
 })

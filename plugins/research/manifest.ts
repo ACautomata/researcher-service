@@ -7,7 +7,7 @@
 // 进行中 run、历史回放不受影响。前端面（ResearchRunCard/投影归约）归 [#873·7] 前端票。
 
 import { definePlugin } from '../../server/src/plugins/api'
-import { RESEARCH_ENTRY_STAGES } from './graph'
+import { RESEARCH_PROGRESS_STAGES } from './graph'
 import {
   RESEARCH_TOOL_NAME,
   INPUT_TEXT_MAX,
@@ -42,8 +42,9 @@ export default definePlugin({
         'Pass workflow explicitly only when the user picks a command-like flow or replies to a clarify question; source_paths must be /lab/ paths the user referenced.',
         'A clarify result ({status:"clarify", candidates, question}) means the request was ambiguous: relay the candidates to the user in natural language, then re-call with the chosen workflow.',
       ],
-      // 入口面 stage 白名单（图拓扑节点名并集；四流程 22 值随三票节点落地补齐，853 §6.1）。
-      progressStages: RESEARCH_ENTRY_STAGES,
+      // progressStages 白名单（853 §6.1 四流程节点名并集，逐实现票扩展）：#910 落
+      // 入口面 5 值 + W1/W2 流程节点 11 值（去重并集 16 值）；W3/W4 随 [#873·5–6] 补齐。
+      progressStages: RESEARCH_PROGRESS_STAGES,
       execute: executeResearchWorkflow,
     },
   ],

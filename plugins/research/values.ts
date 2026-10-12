@@ -30,6 +30,10 @@ export const PAGE_OUTPUT_MAX_TOKENS = 32_000
 // W3 扇出不在覆盖面（#904 口径注记：拓扑调用数推导不含重试）。
 export const PAGE_GENERATE_MAX_RETRIES = 1
 
+// 生成节点进入次数上界 = 初次 + PAGE_GENERATE_MAX_RETRIES 次协议修复（K≤2 有界，
+// 853 §7.1）。ingest/discover 生成节点共享的进入判定常数（重试耗尽 = 明确失败落点）。
+export const PAGE_GENERATE_MAX_ATTEMPTS = 1 + PAGE_GENERATE_MAX_RETRIES
+
 // W3 扇出 cap（853 §4.3 · #869 D7）：5 固定桶（gap/contradiction/failure/transfer/constraint）
 // + 3 opt-in（ablation/metric/assumption-challenge，仅经参数显式追加——非 LLM 自由裁量）。
 export const BUCKETS_MAX = 8

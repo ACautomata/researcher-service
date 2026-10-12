@@ -9,10 +9,16 @@ import {
   RESEARCH_WORKFLOW_NAMES,
   RESEARCH_ENTRY_STAGES,
 } from '../../plugins/research/graph'
-import type { ResearchRoutingPorts } from '../../plugins/research/graph'
+import type { ResearchRoutingPorts, WorkflowOutcome } from '../../plugins/research/graph'
 import { WORKFLOW_CATALOG } from '../../plugins/research/clarify'
 import type { IntentClassifier } from '../../plugins/research/classifier'
 import { MIN_CONFIDENCE } from '../../plugins/research/values'
+
+const placeholderOutcome = (workflow: string): WorkflowOutcome => ({
+  status: 'completed',
+  summary: `${workflow} 占位产出`,
+  artifactPages: [],
+})
 
 const makePorts = (classifier: IntentClassifier = async () => ({ label: 'discover', confidence: 0.9 })) => {
   const calls = { classifierCalls: [] as string[], branchCalls: [] as string[] }
@@ -22,9 +28,10 @@ const makePorts = (classifier: IntentClassifier = async () => ({ label: 'discove
       ports.classifierCalls.push(text)
       return classifier(text)
     },
-    runWorkflow: async (workflow) => {
+    runWorkflow: async (workflow, _request, onStage) => {
       ports.branchCalls.push(workflow)
-      return `${workflow} 占位产出`
+      onStage?.('resolveInputs') // 冒泡形态探针（真实流程图内节点上报面）
+      return placeholderOutcome(workflow)
     },
   }
   return ports
@@ -130,18 +137,29 @@ describe('入口图 invoke（S2 端口注入 fake）', () => {
     expect(result.summary).not.toContain('检测到后续意图')
   })
 
-  it('stage 上报：branch 路径 = classify + 分支名；clarify 路径只报 classify', async () => {
+  it('stage 上报：branch 路径 = classify + 分支名 + 流程内节点冒泡（域字段 = 分支 workflow）；clarify 路径只报 classify', async () => {
     const ports = makePorts()
-    const stages: string[] = []
+    const reported: Array<{ stage: string; workflow?: string }> = []
     const graph = createResearchRoutingGraph(ports)
-    await graph.invoke({ request: { topic: 'x' } }, { onStage: (stage) => stages.push(stage) })
-    expect(stages).toEqual(['classify', 'discover'])
+    await graph.invoke({ request: { topic: 'x' } }, { onStage: (stage, workflow) => reported.push({ stage, workflow }) })
+    expect(reported).toEqual([
+      { stage: 'classify', workflow: undefined },
+      { stage: 'discover', workflow: undefined },
+      { stage: 'resolveInputs', workflow: 'discover' },
+    ])
 
     const clarifyStages: string[] = []
     const clarifyPorts = makePorts(async () => ({ label: 'none', confidence: 0.9 }))
     const clarifyGraph = createResearchRoutingGraph(clarifyPorts)
     await clarifyGraph.invoke({ request: { question: 'y' } }, { onStage: (stage) => clarifyStages.push(stage) })
     expect(clarifyStages).toEqual(['classify'])
+  })
+
+  it('branch 结果携带 outcome（summary/artifactPages 面，#910 端口扩展）', async () => {
+    const ports = makePorts()
+    const graph = createResearchRoutingGraph(ports)
+    const result = await graph.invoke({ request: { topic: 'x' } })
+    expect(result.outcome).toEqual(placeholderOutcome('discover'))
   })
 
   it('分类输入 = topic/question 序列化文本（解读点 A：source_paths 不进分类面）', async () => {

@@ -27,10 +27,29 @@ import type { IntentClassifier } from './classifier'
 // 四流程名（分支节点名 = 流程名，1:1；与 clarify.ts 目录同源）。
 export const RESEARCH_WORKFLOW_NAMES = WORKFLOW_CATALOG.map((c) => c.label) as readonly WorkflowLabel[]
 
-// 入口面 stage 白名单（manifest progressStages 声明准据）：classify + 四分支名。四流程节点
-// 名并集 22 值（853 §6.1）随三票节点落地补齐——占位期分支名即白名单值（占位节点经 onStage
-// 上报分支名，SSE research_run.progress 可见）。
+// 入口面 stage 白名单（classify + 四分支名）。
 export const RESEARCH_ENTRY_STAGES = ['classify', ...RESEARCH_WORKFLOW_NAMES] as const
+
+// 流程内节点 stage（W1/W2 本票落地；W3/W4 随实现票补齐，853 §6.1 四流程并集逐票扩展）。
+// 跨流程重名（extract/validate/persist/summary）在 SSE 载荷 workflow 域字段语境下无歧义。
+export const RESEARCH_FLOW_STAGES = [
+  // W1 ingest 七节点链
+  'capture',
+  'extract',
+  'create',
+  'validate',
+  'persist',
+  'verify',
+  'summary',
+  // W2 discover 增量节点（resolveInputs/load/critic/evidenceGate；extract/validate/persist/summary 与 W1 重名已含）
+  'resolveInputs',
+  'load',
+  'critic',
+  'evidenceGate',
+] as const
+
+// progressStages 声明值（manifest 单源）：入口面 + 已落地流程节点并集。
+export const RESEARCH_PROGRESS_STAGES = [...RESEARCH_ENTRY_STAGES, ...RESEARCH_FLOW_STAGES] as const
 
 // 结构化请求面（research_workflow 工具参数 zod 产物的图内同形——单一来源在 server.ts schema，
 // 图内消费只读）。
@@ -42,11 +61,30 @@ export interface ResearchWorkflowRequest {
   readonly phase?: 'collect'
 }
 
+// 流程产物引用（details.artifactPages 面——引用形态不内联页内容，R6 事实同源不变量）。
+export interface WorkflowArtifactPage {
+  readonly path: string
+  readonly title: string
+}
+
+// 流程图终态（#910 端口面扩展）：completed 带 summary + 产物页清单；clarify = 分支内
+// 兜底出口（W2 论文页缺失 → 提示先 ingest——产物串联，853 §4.2）。
+export interface WorkflowOutcome {
+  readonly status: 'completed' | 'clarify'
+  readonly summary: string
+  readonly artifactPages: readonly WorkflowArtifactPage[]
+  readonly clarify?: ClarifyResult
+}
+
 // 端口面（Strategy 注入——S2 fake 面）。
 export interface ResearchRoutingPorts {
   readonly classifier: IntentClassifier
-  /** 分支执行（占位注入面；后续三票替换为真实流程图调用）。返回 summary 文本。 */
-  readonly runWorkflow: (workflow: WorkflowLabel, request: ResearchWorkflowRequest) => Promise<string>
+  /** 分支执行（占位/真实流程图调用；onStage 冒泡流程内裸节点名）。 */
+  readonly runWorkflow: (
+    workflow: WorkflowLabel,
+    request: ResearchWorkflowRequest,
+    onStage?: (stage: string) => void,
+  ) => Promise<WorkflowOutcome>
 }
 
 // ---------------------------------------------------------------------------
@@ -58,7 +96,7 @@ interface RoutingState {
   intent: IntentVerdict | undefined
   workflow: WorkflowLabel | undefined
   clarify: ClarifyResult | undefined
-  summary: string | undefined
+  outcome: WorkflowOutcome | undefined
 }
 
 const RoutingAnnotation = {
@@ -66,7 +104,7 @@ const RoutingAnnotation = {
   intent: Annotation<IntentVerdict | undefined>,
   workflow: Annotation<WorkflowLabel | undefined>,
   clarify: Annotation<ClarifyResult | undefined>,
-  summary: Annotation<string | undefined>,
+  outcome: Annotation<WorkflowOutcome | undefined>,
 }
 
 // 条件边 path 纯状态派生（S3 单测锁）：workflow 已落 → 同名分支；clarify 已落（低置信/
@@ -89,8 +127,9 @@ export function routeByIntent(state: RoutingRouteState): WorkflowLabel | 'end' {
 export interface ResearchRoutingInvokeOptions {
   readonly signal?: AbortSignal
   /** 阶段进度上报（autofigure onStage 先例）→ 翻译面落 research_run.progress（SSE 载荷
-   *  {toolCallId, stage, workflow}——workflow 域字段由 server.ts onUpdate 上报层附加）。 */
-  readonly onStage?: (stage: string) => void
+   *  {toolCallId, stage, workflow}——workflow 域字段在分支内节点上报时附加，入口面
+   *  classify/分支名两值无域字段）。 */
+  readonly onStage?: (stage: string, workflow?: WorkflowLabel) => void
 }
 
 export interface ResearchRoutingResult {
@@ -99,21 +138,31 @@ export interface ResearchRoutingResult {
   readonly workflow: WorkflowLabel | undefined
   /** 分类产物（seed 透传不调分类器 → undefined）。 */
   readonly intent: IntentVerdict | undefined
-  /** branch：占位/真实流程产出（多意图高置信时附尾注）；clarify 时 undefined。 */
+  /** branch：流程产出 summary（多意图高置信时附尾注）；clarify 时 undefined。 */
   readonly summary: string | undefined
   /** clarify 两形态（853 §1.3）：低置信 Top-2 候选 / none 空候选拒识。 */
   readonly clarify: ClarifyResult | undefined
+  /** branch：流程终态（summary/artifactPages；分支内 clarify 时 status='clarify'）。 */
+  readonly outcome: WorkflowOutcome | undefined
 }
 
 export interface ResearchRoutingGraph {
   invoke(init: { request: ResearchWorkflowRequest }, options?: ResearchRoutingInvokeOptions): Promise<ResearchRoutingResult>
 }
 
-export function createResearchRoutingGraph(ports: ResearchRoutingPorts): ResearchRoutingGraph {
-  function stage(config: LangGraphRunnableConfig | undefined, name: string): void {
-    const onStage = config?.configurable?.onStage as ((stage: string) => void) | undefined
-    onStage?.(name)
+// stage 上报 helper（图内节点统一走此——LangGraphRunnableConfig.configurable.onStage 取
+// 用的单点 cast；ingest/discover 流程图节点同款复用，853 §6.1 progress 上报唯一通道）。
+export function stageReporterOf(
+  config: LangGraphRunnableConfig | undefined,
+): (stage: string, workflow?: WorkflowLabel) => void {
+  return (stage, workflow) => {
+    const onStage = config?.configurable?.onStage as ((stage: string, wf?: WorkflowLabel) => void) | undefined
+    onStage?.(stage, workflow)
   }
+}
+
+export function createResearchRoutingGraph(ports: ResearchRoutingPorts): ResearchRoutingGraph {
+  const stage = (config: LangGraphRunnableConfig | undefined, name: string): void => stageReporterOf(config)(name)
 
   // 节点 classify（单一入口）：seed 已带 → 透传不调分类器（命令直达/显式传/W4 collect；
   // 命令路径恒带 workflow 永不触发兜底，853 §1.3）；缺省 → 分类器（结构化槽位序列化输入，
@@ -132,15 +181,17 @@ export function createResearchRoutingGraph(ports: ResearchRoutingPorts): Researc
     return { intent, workflow: intent.label }
   }
 
-  // 四分支占位节点（真实节点链归三票替换 runWorkflow 注入）。
+  // 四分支节点：入口上报分支名（进入流程信号）→ runWorkflow 端口（真实流程图经第三参数
+  // 冒泡流程内裸节点名，域字段 = 本分支 workflow）。
   function makeBranchNode(workflow: WorkflowLabel) {
     return async function branchNode(
       state: RoutingState,
       config: LangGraphRunnableConfig | undefined,
     ): Promise<Partial<RoutingState>> {
       stage(config, workflow)
-      const summary = await ports.runWorkflow(workflow, state.request)
-      return { summary }
+      const report = stageReporterOf(config)
+      const outcome = await ports.runWorkflow(workflow, state.request, (s) => report(s, workflow))
+      return { outcome }
     }
   }
 
@@ -172,10 +223,10 @@ export function createResearchRoutingGraph(ports: ResearchRoutingPorts): Researc
         },
       )
       if (state.clarify !== undefined) {
-        return { status: 'clarify', workflow: undefined, intent: state.intent, summary: undefined, clarify: state.clarify }
+        return { status: 'clarify', workflow: undefined, intent: state.intent, summary: undefined, clarify: state.clarify, outcome: undefined }
       }
-      if (state.workflow === undefined || state.summary === undefined) {
-        // 拓扑终局必有 workflow + summary（clarify 已上分支；分支节点必写 summary）——
+      if (state.workflow === undefined || state.outcome === undefined) {
+        // 拓扑终局必有 workflow + outcome（clarify 已上分支；分支节点必写 outcome）——
         // 理论不可达的防御面（autofigure「finished without final SVG」同款）。
         throw new Error('research routing graph finished without branch result')
       }
@@ -185,9 +236,16 @@ export function createResearchRoutingGraph(ports: ResearchRoutingPorts): Researc
       const secondary = intent?.secondaryIntent !== intent?.label ? intent?.secondaryIntent : undefined
       const summary =
         secondary !== undefined
-          ? `${state.summary}\n\n检测到后续意图 ${secondary}，可继续发起。`
-          : state.summary
-      return { status: 'branch', workflow: state.workflow, intent: state.intent, summary, clarify: undefined }
+          ? `${state.outcome.summary}\n\n检测到后续意图 ${secondary}，可继续发起。`
+          : state.outcome.summary
+      return {
+        status: 'branch',
+        workflow: state.workflow,
+        intent: state.intent,
+        summary,
+        clarify: undefined,
+        outcome: secondary !== undefined ? { ...state.outcome, summary } : state.outcome,
+      }
     },
   }
 }
