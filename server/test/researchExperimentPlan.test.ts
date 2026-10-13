@@ -72,6 +72,16 @@ describe('W4 planHash / escalation 载荷（#852 契约增量：source=experimen
     expect(round3.escalation.plan?.round).toBe(3)
   })
 
+  it('text 超 PLAN_TEXT_MAX_CHARS → 截断 + 注记尾行（卡面可辨，不静默——完整全文归 specRef）', () => {
+    const long = { content: `# 沙箱执行规格\n\n${'长'.repeat(PLAN_TEXT_MAX_CHARS + 100)}` }
+    const plan = buildExperimentPlan(REQUEST, long)
+    expect(plan.text).toContain('长'.repeat(50)) // 正文头部在
+    expect(plan.text).toContain('卡面展示已截断') // 注记尾行（P1-7：勿静默截断）
+    expect(plan.text).toContain(plan.specRef)
+    // 注记尾行使 text 可略超上限——正文主体仍受 PLAN_TEXT_MAX_CHARS 界。
+    expect(plan.text.indexOf('长'.repeat(50))).toBeLessThan(PLAN_TEXT_MAX_CHARS)
+  })
+
   it('escalation.id 确定性：同 toolCallId+planHash+round 同 id（resume 重放幂等——resolveApproval 按 id 校验）', () => {
     const spec = validSpecDoc()
     const plan = buildExperimentPlan(REQUEST, spec)

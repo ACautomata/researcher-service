@@ -420,6 +420,17 @@ describe('W4 experiment 工具边界（#912 · interrupt 载荷边界断言）',
     expect(calls.indexOf('summary')).toBeLessThan(calls.indexOf('plan-review'))
   })
 
+  it('stage 语义（853 §6.2 修订轮不发新 stage）：deny→approve 两轮 plan-review 上报仅首轮 1 次', async () => {
+    const { ctx } = w4Ctx()
+    let n = 0
+    const exec = execOf(ctx, new AbortController().signal, () => ({
+      decisions: [{ type: n++ === 0 ? 'reject' : 'approve' }],
+    }))
+    await executeResearchWorkflow('w4-9', { ...W4_REQUEST }, exec)
+    const calls = (exec.onUpdate as ReturnType<typeof vi.fn>).mock.calls.map((c) => (c[0] as { stage: string }).stage)
+    expect(calls.filter((s) => s === 'plan-review')).toHaveLength(1)
+  })
+
   it('spec 落盘短路：resume 重放（同 execute 再调）零 LLM 重调直达 interrupt', async () => {
     const { ctx, llm } = w4Ctx()
     // 首轮 approve（spec 落盘）→ 第二次 execute 模拟 resume 重放：短路直达 interrupt。

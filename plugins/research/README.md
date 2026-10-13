@@ -170,7 +170,7 @@ flowchart TD
     EX -->|"执行完成 · phase=collect"| CO["collect（确定性对账）<br/>读回 spec + 旁车交付物声明<br/>逐件 lab.read 存在性对账（缺件进 summary）"]
     CO --> SU["summarize（LLM）<br/>实验报告页（对账 + 结果 + 结论）"]
     SU --> VA2["validate（形状档）"]
-    VA2 --> PP["persist<br/>experiment-reports/&lt;slug&gt;.md 落 wiki<br/>related_pages = 输入页集 + 「关联页面」节<br/>= #789 graph 派生边（WikiGraph 可见）"]
+    VA2 --> PP["persist<br/>experiment-reports/&lt;slug&gt;-&lt;round&gt;.md 落 wiki<br/>related_pages = 输入页集 + 「关联页面」节<br/>= #789 graph 派生边（WikiGraph 可见）"]
     PP --> SM2["summary<br/>报告页路径 + 对账结果（缺件不静默）"]
 ```
 
@@ -180,12 +180,9 @@ flowchart TD
 - **无条件人审**：方案必停审批卡（`experiment-plan` 源，`plan{title, summary, text, round}`
   内联载荷）；approve 附言随结果传达主 agent 作执行注意事项；deny 必填理由 → 回 design
   修订模式（零新图节点）；3 轮未通过 = `plan_review_exhausted` 结构化终局（非错误）。
-- **幂等短路点**：spec 落盘 `/lab/specs/<slug>/r<N>/`（round 键控——每轮产物互不覆盖，重放读回用户当轮所审原文）后，interrupt 的 resume 重放跳 design/spec/audit 全部 LLM 直达挂审点；修订历史 = LangGraph resume 队列（零额外持久化）+ 历史轮审计跳过——「3 轮修订 = 3 行 round 关联」在多轮重放不破；审批审计落 `tool_approval_logs`（`toolName='experiment_plan'`，引用快照 `{planTitle, planHash, planRef, round}` 不存全文）。
-  audit 全部 LLM 直达挂审点（修订历史 = LangGraph resume 队列，零额外持久化）；审批审计
-  落 `tool_approval_logs`（`toolName='experiment_plan'`，引用快照 `{planTitle, planHash,
-  planRef, round}` 不存全文，3 轮 = 3 行 round 关联）。
-- **产物**：spec/design/audit 中间产物落 lab；实验报告页 `experiment-reports/<slug>.md` 落 wiki
-  （`category: experiment-report` + frontmatter `related_pages` + 正文「关联页面」相对链接）。
+- **幂等短路点**：spec 落盘 `/lab/specs/<slug>/r<N>/`（round 键控——每轮产物互不覆盖，重放读回用户当轮所审原文）后，interrupt 的 resume 重放跳 design/spec/audit 全部 LLM 直达挂审点；修订历史 = LangGraph resume 队列（零额外持久化）+ 历史轮审计跳过——「3 轮修订 = 3 行 round 关联」在多轮重放不破；审批审计落 `tool_approval_logs`（`toolName='experiment_plan'`，引用快照 `{planTitle, planHash, planRef, round}` 不存全文，3 轮 = 3 行 round 关联）。
+- **产物**：spec/design/audit 中间产物落 lab；实验报告页 `experiment-reports/<slug>-<round>.md` 落 wiki
+  （round 键控——每轮人审各得其报告页；`category: experiment-report` + frontmatter `related_pages` + 正文「关联页面」相对链接）。
 
 ## 产物与进度
 

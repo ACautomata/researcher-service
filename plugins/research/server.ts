@@ -160,15 +160,18 @@ async function runExperimentWithReview(input: {
   }
   const graph = createExperimentPlanGraph({ llm, wiki: ctx.wiki, lab: ctx.lab })
   const buildPlan = async (revisionReason: string | undefined, round: number) => {
+    // 修订轮不发新 stage（853 §6.2）：非首轮/修订轮的图执行与挂审上报静默——进度语义
+    // 归审批卡 round 面（escalation.plan.round），SSE 面不重放/续发 stage 序列。
+    const report = round === 1 && revisionReason === undefined ? onStage : undefined
     const r = await graph.invoke(
       { request, round, ...(revisionReason !== undefined ? { revisionReason } : {}) },
-      { onStage },
+      { onStage: report },
     )
     if (r.status === 'clarify') return r.clarify!
     if (r.experiment === undefined) throw new Error('experiment plan graph finished without plan payload')
     // 挂起期 stage 停 plan-review（853 §6.1：白名单内唯一非节点名值）——图跑完后、
-    // interrupt 前上报（挂起即末态 stage；修订轮不发新 stage，轮次语义归审批卡 round 面）。
-    onStage?.('plan-review')
+    // interrupt 前上报（挂起即末态 stage）。
+    report?.('plan-review')
     return buildExperimentPlan(request, { content: r.experiment.specContent }, round)
   }
   const recordApproval = async (row: {
