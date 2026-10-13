@@ -1,8 +1,11 @@
 <script setup lang="ts">
 // #547：待处理权限请求独立于可滚动消息流，固定显示在 composer 上方。
 // 卡片本身仍复用 ApprovalCard，审批状态机与事件协议保持不变。
+// #920 §1（853 §6.2）：source==='experiment-plan' 分流 PlanApprovalCard（W4 方案人审卡，
+// resolve 两值契约同形）；其余四 source 仍 ApprovalCard 原样。
 import type { ApprovalItem } from '@/stores/chat'
 import ApprovalCard from '@/components/chat/ApprovalCard.vue'
+import PlanApprovalCard from '@/components/chat/PlanApprovalCard.vue'
 
 defineProps<{
   approvals: ApprovalItem[]
@@ -30,15 +33,22 @@ const emit = defineEmits<{
         <span v-if="approvals.length > 1" class="dock-count">{{ approvals.length }} 项</span>
       </div>
       <div class="approval-list">
-        <ApprovalCard
-          v-for="approval in approvals"
-          :key="approval.id"
-          :approval="approval"
-          :disconnected="disconnected"
-          :teammate-name="approval.teammateId ? teammateNames?.[approval.teammateId] : undefined"
-          @resolve="(a, decision) => emit('resolve', a, decision)"
-          @toggle-detail="(a) => emit('toggleDetail', a)"
-        />
+        <template v-for="approval in approvals" :key="approval.id">
+          <PlanApprovalCard
+            v-if="approval.source === 'experiment-plan'"
+            :approval="approval"
+            :disconnected="disconnected"
+            @resolve="(a, decision) => emit('resolve', a, decision)"
+          />
+          <ApprovalCard
+            v-else
+            :approval="approval"
+            :disconnected="disconnected"
+            :teammate-name="approval.teammateId ? teammateNames?.[approval.teammateId] : undefined"
+            @resolve="(a, decision) => emit('resolve', a, decision)"
+            @toggle-detail="(a) => emit('toggleDetail', a)"
+          />
+        </template>
       </div>
     </div>
   </section>

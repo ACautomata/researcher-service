@@ -14,6 +14,7 @@ import ChatMessageItem from '@/components/chat/ChatMessageItem.vue'
 import TraceFold from '@/components/chat/TraceFold.vue'
 import ApprovalCard from '@/components/chat/ApprovalCard.vue'
 import ApprovalDock from '@/components/chat/ApprovalDock.vue'
+import PlanApprovalCard from '@/components/chat/PlanApprovalCard.vue'
 import ChatStream from '@/components/chat/ChatStream.vue'
 import AnchorRail from '@/components/chat/AnchorRail.vue'
 
@@ -612,6 +613,81 @@ describe('ApprovalCard', () => {
   })
 })
 
+// PlanApprovalCard（#920 §1 · 853 §5.1/§6.2 卡内容契约）：experiment-plan 审批专用卡。
+const planCard: ApprovalItem = {
+  ...card,
+  source: 'experiment-plan',
+  toolName: 'experiment_plan',
+  toolCallSummary: '实验方案：验证 Y（第 1/3 轮）',
+  plan: { title: '实验方案：验证 Y', summary: '用 Z 方法验证 Y 假设', text: '# 沙箱执行规格\n\n## 1 任务背景\n\n验证 Y。', round: 1 },
+}
+
+describe('PlanApprovalCard', () => {
+  it('卡内容契约：标题 + 轮次徽标 + plan.title/summary；方案全文折叠区默认收起', () => {
+    const w = mount(PlanApprovalCard, { props: { approval: planCard, disconnected: false } })
+    expect(w.text()).toContain('实验方案待审批')
+    expect(w.get('[data-test="plan-round"]').text()).toContain('第 1/3 轮')
+    expect(w.text()).toContain('实验方案：验证 Y')
+    expect(w.text()).toContain('用 Z 方法验证 Y 假设')
+    // 默认收起：折叠区不渲染全文（盲批窗口修复面——展开即读）
+    expect(w.find('[data-test="plan-text"]').exists()).toBe(false)
+  })
+
+  it('展开折叠区 → plan.text 经 MarkdownRenderer 渲染', async () => {
+    const w = mount(PlanApprovalCard, { props: { approval: planCard, disconnected: false } })
+    await w.get('[data-test="plan-fold"]').trigger('click')
+    const text = w.get('[data-test="plan-text"]')
+    expect(text.text()).toContain('沙箱执行规格')
+    expect(text.text()).toContain('验证 Y。')
+  })
+
+  it('第 2/3 轮 → 「最后一轮」提示；第 1 轮无', () => {
+    const r1 = mount(PlanApprovalCard, { props: { approval: planCard, disconnected: false } })
+    expect(r1.text()).not.toContain('最后一轮')
+    const r2 = mount(PlanApprovalCard, {
+      props: { approval: { ...planCard, plan: { ...planCard.plan!, round: 2 } }, disconnected: false },
+    })
+    expect(r2.get('[data-test="plan-round"]').text()).toContain('第 2/3 轮')
+    expect(r2.text()).toContain('最后一轮')
+  })
+
+  it('批准/拒绝 emit resolve 两值 + 断线禁用（与 ApprovalCard 同契约）', async () => {
+    const w = mount(PlanApprovalCard, { props: { approval: planCard, disconnected: false } })
+    await w.find('[data-test="approve-a1"]').trigger('click')
+    expect(w.emitted('resolve')?.[0]).toEqual([planCard, 'allow'])
+    await w.find('[data-test="deny-a1"]').trigger('click')
+    expect(w.emitted('resolve')?.[1]).toEqual([planCard, 'deny'])
+    const dw = mount(PlanApprovalCard, { props: { approval: planCard, disconnected: true } })
+    expect(dw.find('[data-test="approve-a1"]').attributes('disabled')).toBeDefined()
+    expect(dw.find('[data-test="deny-a1"]').attributes('disabled')).toBeDefined()
+  })
+
+  it('失效态：按钮消失 + 「已失效」标签（终态不可回覆，ADR 0014 同族）', () => {
+    const w = mount(PlanApprovalCard, {
+      props: { approval: { ...planCard, status: 'expired' }, disconnected: false },
+    })
+    expect(w.find('[data-test="approve-a1"]').exists()).toBe(false)
+    expect(w.find('[data-test="deny-a1"]').exists()).toBe(false)
+    expect(w.get('[data-test="approval-expired"]').text()).toContain('已失效')
+  })
+
+  it('plan 块缺失（畸形 fail-soft）→ 回退 toolCallSummary 展示，卡不停摆', () => {
+    const w = mount(PlanApprovalCard, {
+      props: { approval: { ...planCard, plan: undefined }, disconnected: false },
+    })
+    expect(w.text()).toContain('实验方案：验证 Y（第 1/3 轮）')
+    expect(w.find('[data-test="plan-fold"]').exists()).toBe(false)
+    expect(w.find('[data-test="approve-a1"]').exists()).toBe(true)
+  })
+
+  it('plan.text 空串（畸形但形状合法）→ 不出折叠入口，不展开空白面', () => {
+    const w = mount(PlanApprovalCard, {
+      props: { approval: { ...planCard, plan: { ...planCard.plan!, text: '' } }, disconnected: false },
+    })
+    expect(w.find('[data-test="plan-fold"]').exists()).toBe(false)
+  })
+})
+
 describe('ApprovalDock', () => {
   it('固定渲染在独立审批区并转发批准、拒绝和详情事件', async () => {
     const approval = { ...card }
@@ -641,6 +717,27 @@ describe('ApprovalDock', () => {
     })
     expect(w.find('.dock-count').text()).toBe('2 项')
     expect(w.findAll('.approval-list .approval')).toHaveLength(2)
+  })
+
+  // #920 §1：experiment-plan 分流 PlanApprovalCard（853 §6.2——其余四 source 仍 ApprovalCard 原样）
+  it('source=experiment-plan → PlanApprovalCard；其余 source → ApprovalCard', async () => {
+    const planApproval: ApprovalItem = {
+      ...card,
+      source: 'experiment-plan',
+      toolName: 'experiment_plan',
+      plan: { title: '实验方案：验证 Y', summary: '摘要', text: '# 沙箱执行规格', round: 1 },
+    }
+    const w = mount(ApprovalDock, { props: { approvals: [planApproval], disconnected: false } })
+    expect(w.text()).toContain('实验方案待审批')
+    expect(w.text()).not.toContain('请求提升权限')
+    await w.get('[data-test="approve-a1"]').trigger('click')
+    expect(w.emitted('resolve')?.[0]).toEqual([planApproval, 'allow'])
+
+    const funnel = mount(ApprovalDock, {
+      props: { approvals: [{ ...card, source: 'judge-limit' }], disconnected: false },
+    })
+    expect(funnel.text()).toContain('请求提升权限')
+    expect(funnel.text()).not.toContain('实验方案待审批')
   })
 })
 
