@@ -7,13 +7,16 @@
 // 进行中 run、历史回放不受影响。前端面（ResearchRunCard/投影归约）归 [#873·7] 前端票。
 
 import { definePlugin } from '../../server/src/plugins/api'
-import { RESEARCH_ENTRY_STAGES } from './graph'
+import { RESEARCH_PROGRESS_STAGES } from './graph'
 import {
   RESEARCH_TOOL_NAME,
   INPUT_TEXT_MAX,
-  SOURCE_PATHS_MAX,
   researchToolParameters,
   executeResearchWorkflow,
+  INGEST_USAGE,
+  DISCOVER_USAGE,
+  HYPOTHESIZE_USAGE,
+  EXPERIMENT_USAGE,
   ingestCommandHandler,
   discoverCommandHandler,
   hypothesizeCommandHandler,
@@ -42,16 +45,18 @@ export default definePlugin({
         'Pass workflow explicitly only when the user picks a command-like flow or replies to a clarify question; source_paths must be /lab/ paths the user referenced.',
         'A clarify result ({status:"clarify", candidates, question}) means the request was ambiguous: relay the candidates to the user in natural language, then re-call with the chosen workflow.',
       ],
-      // 入口面 stage 白名单（图拓扑节点名并集；四流程 22 值随三票节点落地补齐，853 §6.1）。
-      progressStages: RESEARCH_ENTRY_STAGES,
+      // progressStages 白名单（853 §6.1 四流程节点名并集，逐实现票扩展）：#910 落
+      // 入口面 5 值 + W1/W2 流程节点 11 值（去重并集 16 值）；W3/W4 随 [#873·5–6] 补齐。
+      progressStages: RESEARCH_PROGRESS_STAGES,
       execute: executeResearchWorkflow,
     },
   ],
   commands: [
-    { name: 'ingest', description: `知识库深度构建：把 PDF 精读整理入库 wiki（用法：/ingest <文件路径...>，≤${SOURCE_PATHS_MAX} 个）`, handler: ingestCommandHandler },
-    { name: 'discover', description: `科学问题可信发现：从一篇论文审稿式找出问题与研究缺口（用法：/discover <研究问题或论文主题>，≤${INPUT_TEXT_MAX} 字符）`, handler: discoverCommandHandler },
-    { name: 'hypothesize', description: `科学假说自主生成：生成新的研究想法、方向与假说（用法：/hypothesize <研究主题>）`, handler: hypothesizeCommandHandler },
-    { name: 'experiment', description: `实验自主设计与执行：设计验证实验并真实执行（用法：/experiment <要验证的问题或想法>）`, handler: experimentCommandHandler },
+    // 用法片段引 server.ts 用法常量单源（PR #917 review r1 S 新4：与命令面 failUsage 双写归一）。
+    { name: 'ingest', description: `知识库深度构建：把 PDF 精读整理入库 wiki（用法：${INGEST_USAGE}）`, handler: ingestCommandHandler },
+    { name: 'discover', description: `科学问题可信发现：从一篇论文审稿式找出问题与研究缺口（用法：${DISCOVER_USAGE}，正文 ≤${INPUT_TEXT_MAX} 字符）`, handler: discoverCommandHandler },
+    { name: 'hypothesize', description: `科学假说自主生成：生成新的研究想法、方向与假说（用法：${HYPOTHESIZE_USAGE}）`, handler: hypothesizeCommandHandler },
+    { name: 'experiment', description: `实验自主设计与执行：设计验证实验并真实执行（用法：${EXPERIMENT_USAGE}）`, handler: experimentCommandHandler },
   ],
   configSchema: {
     env: [

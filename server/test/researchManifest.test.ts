@@ -14,7 +14,7 @@ import { createApp } from '../src/app'
 import { seedUser, login, bearer } from './helpers'
 import { PLUGIN_MANIFESTS } from '../../plugins/index'
 import researchManifest from '../../plugins/research/manifest'
-import { RESEARCH_ENTRY_STAGES } from '../../plugins/research/graph'
+import { RESEARCH_PROGRESS_STAGES, RESEARCH_ENTRY_STAGES } from '../../plugins/research/graph'
 import { RESEARCH_TOOL_NAME } from '../../plugins/research/server'
 
 describe('research manifest（853 §3.1 定形）', () => {
@@ -24,13 +24,18 @@ describe('research manifest（853 §3.1 定形）', () => {
     expect(researchManifest.name).toBe('科研工作流')
   })
 
-  it('单工具 research_workflow：category=domain + progressStages = 图拓扑节点名并集', () => {
+  it('单工具 research_workflow：category=domain + progressStages = 入口面 + W1/W2 节点并集（#910）', () => {
     expect(researchManifest.tools).toHaveLength(1)
     const tool = researchManifest.tools![0]!
     expect(tool.name).toBe(RESEARCH_TOOL_NAME)
     expect(tool.category).toBe('domain')
-    expect(tool.progressStages).toEqual(RESEARCH_ENTRY_STAGES)
-    expect(RESEARCH_ENTRY_STAGES).toContain('classify')
+    expect(tool.progressStages).toEqual(RESEARCH_PROGRESS_STAGES)
+    expect(RESEARCH_PROGRESS_STAGES).toEqual([
+      'classify', 'ingest', 'discover', 'hypothesize', 'experiment',
+      'capture', 'extract', 'create', 'validate', 'persist', 'verify', 'summary',
+      'resolveInputs', 'load', 'critic', 'evidenceGate',
+    ])
+    expect(RESEARCH_ENTRY_STAGES).toEqual(RESEARCH_PROGRESS_STAGES.slice(0, 5))
   })
 
   it('configSchema 单键 RESEARCH_MODEL（可选——零其余 env 键：阈值=代码常量、凭证走 owner 面）', () => {

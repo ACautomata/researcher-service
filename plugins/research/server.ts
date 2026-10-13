@@ -15,6 +15,7 @@
 
 import { z } from '../../server/src/plugins/autofigureDeps'
 import type {
+  PluginLlmPort,
   PluginToolContentBlock,
   PluginToolContext,
   PluginToolExec,
@@ -24,16 +25,23 @@ import { fail } from '../../server/src/envelope'
 import { CODE } from '../../server/src/codes'
 import { truncateAuditMethodText } from '../../server/src/figures/figureAudit'
 import { createResearchRoutingGraph } from './graph'
-import type { ResearchWorkflowRequest, ResearchRoutingPorts } from './graph'
-import { createIntentClassifier, serializeClassifyInput, type WorkflowLabel } from './classifier'
+import type { ResearchWorkflowRequest, ResearchRoutingPorts, WorkflowOutcome } from './graph'
+import { toWikiRelPath } from './graph'
+import { createIntentClassifier, pinnedModelOf, serializeClassifyInput, type WorkflowLabel } from './classifier'
+import { createIngestGraph } from './ingest'
+import { createDiscoverGraph } from './discover'
+import { SOURCE_PATHS_V1_MAX } from './values'
 import { WORKFLOW_CATALOG } from './clarify'
 import type { ClarifyResult } from './clarify'
 
 export const RESEARCH_TOOL_NAME = 'research_workflow'
 
-// 输入边界（zod 0 信任红线）：文本槽位上限与 figure METHOD_TEXT_MAX 同族（4000 UTF-16
-// 单元；分类输入天然短，853 §7.2）；source_paths 数组上限防失控值。
-export const INPUT_TEXT_MAX = 4000
+// 输入边界（zod 0 信任红线）：文本槽位上限 = openwiki 检索 queryCharacters 面（2000，
+// wiki.d.ts WIKI_RETRIEVAL_LIMITS——W2 resolveInputs 把 question 直传 search，超限落
+// invalid_input 误导性 clarify，故在入口即收紧，PR #917 review Spec#19；分类输入天然短，
+// 853 §7.2）；source_paths 数组上限为传输面（W3/W4 预留），流程级 V1 单篇约束在
+// values.SOURCE_PATHS_V1_MAX（PR #917 review S8 分层）。
+export const INPUT_TEXT_MAX = 2000
 export const SOURCE_PATHS_MAX = 32
 
 const WORKFLOW_ENUM = ['ingest', 'discover', 'hypothesize', 'experiment'] as const
@@ -62,7 +70,7 @@ export interface ResearchRunDetails {
 
 // ---------------------------------------------------------------------------
 // ctx 校验（autofigure assertFigureContext 同款）：缺件 = 无 runner 装配的调用面——
-// 明确报错不静默降级。本票消费 llm/audit/run 三件（占位分支零 wiki/docs 面）。
+// 明确报错不静默降级。本票起六件全消费（W1/W2 图取 llm/wiki/docs；run/audit 审计面）。
 // ---------------------------------------------------------------------------
 
 interface ResearchToolContext {
@@ -70,6 +78,8 @@ interface ResearchToolContext {
   readonly run: NonNullable<PluginToolContext['run']>
   readonly llm: NonNullable<PluginToolContext['llm']>
   readonly audit: NonNullable<PluginToolContext['audit']>
+  readonly wiki: NonNullable<PluginToolContext['wiki']>
+  readonly docs: NonNullable<PluginToolContext['docs']>
   readonly logger: PluginToolContext['logger']
 }
 
@@ -78,6 +88,8 @@ export function assertResearchContext(ctx: PluginToolContext): ResearchToolConte
     ...(ctx.run ? [] : ['run']),
     ...(ctx.llm ? [] : ['llm']),
     ...(ctx.audit ? [] : ['audit']),
+    ...(ctx.wiki ? [] : ['wiki']),
+    ...(ctx.docs ? [] : ['docs']),
   ]
   if (missing.length > 0) {
     throw new Error(`research tool requires runner-assembled plugin context; missing: ${missing.join(', ')}`)
@@ -86,8 +98,9 @@ export function assertResearchContext(ctx: PluginToolContext): ResearchToolConte
 }
 
 // ---------------------------------------------------------------------------
-// 占位分支注入（#909）：四流程真实节点链归 [#873·4–6] 三票替换 runWorkflow 端口实现，
-// 图拓扑零改动（graph.ts 端口面已钉）。占位产出说明形态供 S2 互斥分发测试与端到端冒烟。
+// 分支分派（#910）：ingest/discover = 真实流程图（853 §4.1–§4.2）；hypothesize/experiment
+// 保持占位（[#873·5–6] 票替换）。RESEARCH_MODEL 面板级可选 pin（853 §3.1）统一包装进
+// 流程图 llm 面（分类器已单独 pin）——图内 generateStructured 零 pin 知识。
 // ---------------------------------------------------------------------------
 
 // 四流程中文名自 clarify 目录派生（单一来源——WORKFLOW_CATALOG.name，防双表漂移）。
@@ -95,16 +108,37 @@ const WORKFLOW_DISPLAY: Record<WorkflowLabel, string> = Object.fromEntries(
   WORKFLOW_CATALOG.map((c) => [c.label, c.name]),
 ) as Record<WorkflowLabel, string>
 
-function placeholderRunWorkflow(workflow: WorkflowLabel): Promise<string> {
-  return Promise.resolve(
-    `已受理 ${WORKFLOW_DISPLAY[workflow]}（${workflow}）流程。插件骨架已就绪，该流程的节点链将在后续版本接入；本次运行不产出 wiki 页面。`,
-  )
+function placeholderRunWorkflow(workflow: WorkflowLabel): Promise<WorkflowOutcome> {
+  return Promise.resolve({
+    status: 'completed',
+    summary: `已受理 ${WORKFLOW_DISPLAY[workflow]}（${workflow}）流程。插件骨架已就绪，该流程的节点链将在后续版本接入；本次运行不产出 wiki 页面。`,
+    artifactPages: [],
+  })
+}
+
+// pin 包装（空 = owner 默认链 primary 原样透传；非空 = 每次调用带 model pin 语义）。
+function pinLlm(llm: PluginLlmPort, pinnedModel: string | undefined): PluginLlmPort {
+  const pin = pinnedModelOf(pinnedModel)
+  if (pin === undefined) return llm
+  return {
+    generateMultimodal: (opts) => llm.generateMultimodal({ ...opts, model: pin }),
+    generateStructured: (opts) => llm.generateStructured({ ...opts, model: pin }),
+  }
 }
 
 function buildRoutingPorts(ctx: ResearchToolContext): ResearchRoutingPorts {
-  // RESEARCH_MODEL 面板级可选 pin（853 §3.1 configSchema 单键）：空 = owner 默认链 primary。
   const classifier = createIntentClassifier(ctx.llm, ctx.config.RESEARCH_MODEL)
-  return { classifier, runWorkflow: (workflow) => placeholderRunWorkflow(workflow) }
+  const llm = pinLlm(ctx.llm, ctx.config.RESEARCH_MODEL)
+  const runWorkflow: ResearchRoutingPorts['runWorkflow'] = async (workflow, request, onStage) => {
+    if (workflow === 'ingest') {
+      return createIngestGraph({ docs: ctx.docs, llm, wiki: ctx.wiki }).invoke({ request }, { onStage })
+    }
+    if (workflow === 'discover') {
+      return createDiscoverGraph({ llm, wiki: ctx.wiki }).invoke({ request }, { onStage })
+    }
+    return placeholderRunWorkflow(workflow)
+  }
+  return { classifier, runWorkflow }
 }
 
 // 失败原因稳定非敏感（#744 §11.2 failed{reason} 同款：错误消息截断，不落凭证/响应体）。
@@ -142,33 +176,52 @@ export async function executeResearchWorkflow(
     const graph = createResearchRoutingGraph(buildRoutingPorts(ctx))
     const result = await graph.invoke(
       { request },
-      // stage 上报（853 §6.1：SSE 载荷 {toolCallId, stage, workflow}）——workflow 域字段
-      // 待三票 runWorkflow 端口冒泡时附加（占位期分支名即流程名，无重名消歧需求）。
-      { signal: exec.signal, onStage: (stage) => exec.onUpdate?.({ stage }) },
+      // stage 上报（853 §6.1：SSE 载荷 {toolCallId, stage, workflow}）——入口面两值
+      //（classify/分支名）无域字段；流程内节点冒泡时附加 workflow 域字段（跨流程重名
+      // stage 的语境面），runner 翻译面作 extra 透传 SSE + stage_transitions 双面。
+      {
+        signal: exec.signal,
+        onStage: (stage, workflow) => exec.onUpdate?.({ stage, ...(workflow !== undefined ? { workflow } : {}) }),
+      },
     )
-    if (result.status === 'clarify') {
-      // clarify 回喂（853 §1.3）：content = clarify Result JSON（主 agent 可解析、自然语言
-      // 反问）；details.status=clarify（前端卡纯展示归第 7 票）。工具正常 completed 终态。
-      ctx.audit.emitPluginRun({ event: 'completed', toolCallId, detail: { status: 'clarify' } })
-      const content: PluginToolContentBlock[] = [{ type: 'text', text: JSON.stringify(result.clarify) }]
+    // clarify 统一回喂（853 §1.3 入口级 + #910 分支级同形态，PR #917 review S22 块级
+    // 重复归口）：content = clarify Result JSON（主 agent 可解析、自然语言反问）；
+    // details.status=clarify（前端卡纯展示归第 7 票）。工具正常 completed 终态。
+    const clarify = result.status === 'clarify' ? result.clarify : result.outcome?.clarify
+    if (clarify !== undefined) {
+      ctx.audit.emitPluginRun({
+        event: 'completed',
+        toolCallId,
+        detail: { status: 'clarify', ...(result.workflow !== undefined ? { workflow: result.workflow } : {}) },
+      })
       return {
-        content,
-        details: { workflow: undefined, status: 'clarify', artifactPages: [], clarify: result.clarify },
+        content: [{ type: 'text', text: JSON.stringify(clarify) }],
+        details: {
+          workflow: result.workflow,
+          status: 'clarify',
+          artifactPages: [],
+          clarify,
+        },
       }
     }
+    const outcome = result.outcome!
     ctx.audit.emitPluginRun({
       event: 'completed',
       toolCallId,
-      detail: { workflow: result.workflow, methodText: truncateAuditMethodText(result.summary ?? '') },
+      detail: {
+        workflow: result.workflow,
+        ...(outcome.artifactPages.length > 0 ? { artifactPages: outcome.artifactPages } : {}),
+        methodText: truncateAuditMethodText(outcome.summary),
+      },
     })
-    const content: PluginToolContentBlock[] = [{ type: 'text', text: result.summary ?? '' }]
+    const content: PluginToolContentBlock[] = [{ type: 'text', text: outcome.summary }]
     return {
       content,
       details: {
         workflow: result.workflow,
         status: 'completed',
-        artifactPages: [],
-        ...(result.summary !== undefined ? { summary: result.summary } : {}),
+        artifactPages: outcome.artifactPages,
+        summary: outcome.summary,
       },
     }
   } catch (e) {
@@ -189,7 +242,16 @@ export async function executeResearchWorkflow(
 // 内核面双写有意——figure 先例：此处 = 80001 信封直达用户，zod = 内核执行面契约）。
 // ---------------------------------------------------------------------------
 
-const INGEST_USAGE = '/ingest <文件路径...>（/lab/uploads 下的 PDF，空格分隔）'
+// 命令用法文案单源（PR #917 review r1 S 新4：manifest description 与 failUsage 拒绝面
+// 共引本组常量——双写归一；import 方向 manifest → server 不成环）。
+export const INGEST_USAGE = '/ingest <PDF 路径>（/lab/uploads 下；V1 单篇——一次一篇）'
+export const DISCOVER_USAGE = '/discover <研究问题或论文主题> [papers/<slug>.md]'
+export const HYPOTHESIZE_USAGE = '/hypothesize <研究主题>'
+export const EXPERIMENT_USAGE = '/experiment <要验证的问题或想法>'
+
+// /discover 可选论文页路径 token（PR #917 review Spec#26：W2 钉定输入的命令面槽位——
+// 命中 tokens 从问题文本剥离为 source_paths，余量拼回 question）。
+const WIKI_PAGE_TOKEN = /^(?:openwiki\/)?papers\/\S+\.md$/i
 
 // 命令 handler 统一返回形（{execute} 直达 research_workflow——PluginCommandOutcome 的
 // research 收窄面；args 槽位随命令各异，共享 tool 锚定 + workflow 显式值形状）。
@@ -214,27 +276,45 @@ export async function ingestCommandHandler(
   args: string,
 ): Promise<ResearchCommandOutcome<{ readonly source_paths: readonly string[]; readonly workflow: 'ingest' }>> {
   const source_paths = textSlot(args, INGEST_USAGE).split(/\s+/).filter((p) => p !== '')
-  if (source_paths.length === 0) failUsage(INGEST_USAGE)
-  if (source_paths.length > SOURCE_PATHS_MAX) {
-    throw fail(CODE.PLUGINS_VALIDATION_FAILED, `文件数超上限（${SOURCE_PATHS_MAX}）`)
+  if (source_paths.length > SOURCE_PATHS_V1_MAX) {
+    throw fail(CODE.PLUGINS_VALIDATION_FAILED, `ingest V1 单篇：一次一篇（收到 ${source_paths.length} 个路径），请逐篇发起`)
   }
   return { execute: { tool: RESEARCH_TOOL_NAME, args: { source_paths, workflow: 'ingest' } } }
 }
 
 export async function discoverCommandHandler(
   args: string,
-): Promise<ResearchCommandOutcome<{ readonly question: string; readonly workflow: 'discover' }>> {
-  return { execute: { tool: RESEARCH_TOOL_NAME, args: { question: textSlot(args, '/discover <研究问题或论文主题>'), workflow: 'discover' } } }
+): Promise<
+  ResearchCommandOutcome<{
+    readonly question?: string
+    readonly source_paths?: readonly string[]
+    readonly workflow: 'discover'
+  }>
+> {
+  const tokens = textSlot(args, DISCOVER_USAGE).split(/\s+/)
+  const source_paths = tokens.filter((t) => WIKI_PAGE_TOKEN.test(t)).map(toWikiRelPath)
+  const question = tokens.filter((t) => !WIKI_PAGE_TOKEN.test(t)).join(' ')
+  if (question === '' && source_paths.length === 0) failUsage(DISCOVER_USAGE)
+  return {
+    execute: {
+      tool: RESEARCH_TOOL_NAME,
+      args: {
+        ...(question !== '' ? { question } : {}),
+        ...(source_paths.length > 0 ? { source_paths } : {}),
+        workflow: 'discover' as const,
+      },
+    },
+  }
 }
 
 export async function hypothesizeCommandHandler(
   args: string,
 ): Promise<ResearchCommandOutcome<{ readonly topic: string; readonly workflow: 'hypothesize' }>> {
-  return { execute: { tool: RESEARCH_TOOL_NAME, args: { topic: textSlot(args, '/hypothesize <研究主题>'), workflow: 'hypothesize' } } }
+  return { execute: { tool: RESEARCH_TOOL_NAME, args: { topic: textSlot(args, HYPOTHESIZE_USAGE), workflow: 'hypothesize' } } }
 }
 
 export async function experimentCommandHandler(
   args: string,
 ): Promise<ResearchCommandOutcome<{ readonly question: string; readonly workflow: 'experiment' }>> {
-  return { execute: { tool: RESEARCH_TOOL_NAME, args: { question: textSlot(args, '/experiment <要验证的问题或想法>'), workflow: 'experiment' } } }
+  return { execute: { tool: RESEARCH_TOOL_NAME, args: { question: textSlot(args, EXPERIMENT_USAGE), workflow: 'experiment' } } }
 }

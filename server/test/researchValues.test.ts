@@ -11,6 +11,13 @@ import {
   PDF_EXTRACT_MAX_CHARS,
   GENERATED_STALE_AFTER_MS,
   PAGE_DRAFT_MAX,
+  SOURCE_PATHS_V1_MAX,
+  SUMMARY_MAX_CHARS,
+  CRITIC_CANDIDATES_MIN,
+  CRITIC_CANDIDATES_MAX,
+  CRITIC_CANDIDATES_SCHEMA_MAX,
+  RESOLVE_INPUTS_SEARCH_LIMIT,
+  PAPER_PAGE_MIN_LINES,
 } from '../../plugins/research/values'
 
 describe('research values 常量表（853 §7.1 · #909）', () => {
@@ -22,6 +29,16 @@ describe('research values 常量表（853 §7.1 · #909）', () => {
     expect(BUCKETS_MAX).toBe(8)
     expect(PLAN_REVIEW_MAX_ROUNDS).toBe(3)
     expect(PDF_EXTRACT_MAX_CHARS).toBe(1_000_000)
+  })
+
+  it('PR #917 review 归口常量字面值锁定（单源/阈值/过滤面）', () => {
+    expect(SOURCE_PATHS_V1_MAX).toBe(1)
+    expect(SUMMARY_MAX_CHARS).toBe(1000)
+    expect(CRITIC_CANDIDATES_MIN).toBe(2)
+    expect(CRITIC_CANDIDATES_MAX).toBe(4)
+    expect(CRITIC_CANDIDATES_SCHEMA_MAX).toBe(10)
+    expect(RESOLVE_INPUTS_SEARCH_LIMIT).toBe(5)
+    expect(PAPER_PAGE_MIN_LINES).toBe(100)
   })
 
   it('MIN_CONFIDENCE 阈值行为锚点（#866 定标：0.60 恰放行，0.55 坏放行档拒入）', () => {

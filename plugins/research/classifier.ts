@@ -62,12 +62,19 @@ export function serializeClassifyInput(request: { readonly topic?: string; reado
 // 传入（generateStructured pin 语义；空 = owner 默认链 primary，853 §3.1）。
 export type IntentClassifier = (classificationText: string) => Promise<IntentVerdict>
 
+// RESEARCH_MODEL 面板 pin 判定单源（空串/空白 = 未 pin）——分类器与 server.ts pinLlm 共享
+//（PR #917 review S11 双写归口）。
+export function pinnedModelOf(configValue: string | undefined): string | undefined {
+  return configValue !== undefined && configValue.trim() !== '' ? configValue : undefined
+}
+
 export function createIntentClassifier(llm: PluginLlmPort, pinnedModel?: string): IntentClassifier {
+  const pin = pinnedModelOf(pinnedModel)
   return async (classificationText: string): Promise<IntentVerdict> => {
     const output: IntentOutput = await llm.generateStructured({
       schema: INTENT_SCHEMA,
       contents: [classificationText],
-      ...(pinnedModel !== undefined && pinnedModel.trim() !== '' ? { model: pinnedModel } : {}),
+      ...(pin !== undefined ? { model: pin } : {}),
     })
     return output
   }
