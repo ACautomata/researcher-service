@@ -12,7 +12,15 @@ import {
   buildCreatePaperPagePrompt,
   buildExtractPrompt,
   buildCriticPrompt,
+  IDEA_CARD_FIELDS,
+  BUCKET_STRATEGIES,
+  IDEA_QUALITY_CHECKS,
+  buildBriefPrompt,
+  buildBucketPrompt,
+  buildChallengePrompt,
 } from '../../plugins/research/prompts'
+import { BRIEF_FIELDS } from '../../plugins/research/contextPack'
+import { BUCKETS_ALL } from '../../plugins/research/values'
 
 describe('W1 create prompt（11 节论文页模板 · #848 §1）', () => {
   it('11 节标题行全部在模板正文中逐字出现', () => {
@@ -134,5 +142,76 @@ describe('W2 critic prompt（§0–§7 模板 + 9 类质疑 + 证据三档 · #8
     expect(p).toContain('PAPER-BODY')
     expect(p).toContain('EXTRACT-BODY')
     expect(p).toContain('候选不足 2 个')
+  })
+})
+
+describe('W3 brief prompt（Brief 10 字段模板 · #848 §3 brief-template）', () => {
+  it('10 字段键名全部在模板正文中', () => {
+    const p = buildBriefPrompt('OOD 检测', '证据节选')
+    for (const f of BRIEF_FIELDS) expect(p).toContain(f)
+    expect(BRIEF_FIELDS).toHaveLength(10)
+  })
+
+  it('主题与证据节选注入；字段缺失不阻塞语义（下游 ASSUMPTION 填充）与 risk 档在模板中', () => {
+    const p = buildBriefPrompt('OOD 检测', 'EVIDENCE-EXCERPT')
+    expect(p).toContain('OOD 检测')
+    expect(p).toContain('EVIDENCE-EXCERPT')
+    expect(p).toContain('ASSUMPTION')
+    expect(p).toContain('low-risk / medium-risk / exploratory')
+    expect(p).toContain('禁止输出 JSON 之外')
+  })
+})
+
+describe('W3 bucket prompt（策略段按桶注入 · #848 §3 generation-strategies + output-spec）', () => {
+  it('8 桶策略段齐全（5 固定 + 3 opt-in），每桶段落非空', () => {
+    expect(BUCKETS_ALL).toEqual([
+      'gap', 'contradiction', 'failure', 'transfer', 'constraint', 'ablation', 'metric', 'assumption-challenge',
+    ])
+    for (const bucket of BUCKETS_ALL) {
+      const strategy = BUCKET_STRATEGIES[bucket]
+      expect(strategy).toBeTruthy()
+      expect(strategy!.length).toBeGreaterThan(10)
+    }
+  })
+
+  it('每桶 prompt 含：本桶策略段 + 15 字段全量 + 质量检查清单 + 1–3 张候选钉面 + Context Pack 注入', () => {
+    const pack = 'PACK-BODY'
+    const p = buildBucketPrompt('gap', pack)
+    expect(p).toContain(BUCKET_STRATEGIES.gap)
+    for (const f of IDEA_CARD_FIELDS) expect(p).toContain(f)
+    expect(IDEA_CARD_FIELDS).toHaveLength(15)
+    for (const check of IDEA_QUALITY_CHECKS) expect(p).toContain(check)
+    expect(p).toContain('1–3')
+    expect(p).toContain(pack)
+    expect(p).toContain('禁止输出 JSON 之外')
+    // opt-in 桶策略段同样注入（assumption-challenge 为自撰段——brainstorm 反驳视角生成桶）
+    expect(buildBucketPrompt('assumption-challenge', pack)).toContain(BUCKET_STRATEGIES['assumption-challenge'])
+  })
+
+  it('泛化锚禁令与 low-confidence 义务（output-spec 质量清单 + validate 黑名单同源语义）在模板中', () => {
+    const p = buildBucketPrompt('metric', 'PACK')
+    expect(p).toContain('related work')
+    expect(p).toContain('low-confidence')
+  })
+})
+
+describe('W3 challenge prompt（反驳判据边界 · 853 §4.3「笼统不确定性不是反驳」）', () => {
+  it('verdict 枚举 + rejected 判据全类型 + 笼统不确定性拒识语义在模板中', () => {
+    const p = buildChallengePrompt('PACK-BODY', '{"title": "X"}', ['卡A', '卡B'])
+    expect(p).toContain('"verdict": "rejected|survived"')
+    expect(p).toContain('无来源支撑')
+    expect(p).toContain('已有工作已覆盖')
+    expect(p).toContain('硬约束')
+    expect(p).toContain('不能区分竞争解释')
+    expect(p).toContain('不可检验')
+    expect(p).toContain('笼统的不确定性不是反驳')
+  })
+
+  it('Context Pack / 待反驳卡 JSON / 本批次其他候选（语义去重面）三注入', () => {
+    const p = buildChallengePrompt('PACK-BODY', '{"title": "X"}', ['卡A', '卡B'])
+    expect(p).toContain('PACK-BODY')
+    expect(p).toContain('{"title": "X"}')
+    expect(p).toContain('卡A')
+    expect(p).toContain('语义去重')
   })
 })

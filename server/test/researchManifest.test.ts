@@ -24,7 +24,7 @@ describe('research manifest（853 §3.1 定形）', () => {
     expect(researchManifest.name).toBe('科研工作流')
   })
 
-  it('单工具 research_workflow：category=domain + progressStages = 入口面 + W1/W2 节点并集（#910）', () => {
+  it('单工具 research_workflow：category=domain + progressStages = 入口面 + W1/W2/W3 节点并集（#910/#911）', () => {
     expect(researchManifest.tools).toHaveLength(1)
     const tool = researchManifest.tools![0]!
     expect(tool.name).toBe(RESEARCH_TOOL_NAME)
@@ -34,6 +34,7 @@ describe('research manifest（853 §3.1 定形）', () => {
       'classify', 'ingest', 'discover', 'hypothesize', 'experiment',
       'capture', 'extract', 'create', 'validate', 'persist', 'verify', 'summary',
       'resolveInputs', 'load', 'critic', 'evidenceGate',
+      'contextPack', 'bucket', 'dedup', 'challenge',
     ])
     expect(RESEARCH_ENTRY_STAGES).toEqual(RESEARCH_PROGRESS_STAGES.slice(0, 5))
   })

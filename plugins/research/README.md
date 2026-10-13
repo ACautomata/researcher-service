@@ -70,8 +70,9 @@ flowchart TD
 
 ## 流程详情
 
-> 已上线：**W1 ingest**（知识库深度构建）与 **W2 discover**（科学问题可信发现）。
-> **W3 hypothesize** / **W4 experiment** 节点链仍在按计划接入——此阶段发起会收到占位说明。
+> 已上线：**W1 ingest**（知识库深度构建）、**W2 discover**（科学问题可信发现）与
+> **W3 hypothesize**（科学假说自主生成）。**W4 experiment** 节点链仍在按计划接入——
+> 此阶段发起会收到占位说明。
 
 ### W1 `/ingest` 知识库深度构建（七节点链，V1 单篇）
 
@@ -115,11 +116,41 @@ flowchart TD
   逐一回查，不可溯源的引用被剔除——剔除清单完整进 summary，本身就是溯源信息。
 - 两个校验节点检查对象不同（extract 12 节 vs critic §0–§7 + H1/机读标签位置），分别把关各自生成质量。
 
+### W3 `/hypothesize` 科学假说自主生成（八节点链 + Send[] 桶扇出）
+
+```mermaid
+flowchart TD
+    S(["/hypothesize 研究主题<br/>[papers/论文页.md …]（可多篇，跨论文）"]) --> RI["resolveInputs<br/>papers/ 前缀白名单 + 存在性回查"]
+    RI -->|"论文页缺失 / 形态不符"| CL1["clarify 出口<br/>提示先 /ingest（产物串联）"]
+    RI --> CP["contextPack<br/>集中检索 + Brief 10 字段<br/>（缺失字段写 ASSUMPTION 继续）<br/>16k token 预算构建时裁一次：<br/>证据按等级降序 + 页级节选 + Brief 恒保全"]
+    CP -->|"裁剪后零证据条目"| CL2["clarify 出口（证据不足）<br/>不生成泛化 idea"]
+    CP -->|"证据充足"| FAN{{"Send[] 桶扇出（图内并行）<br/>5 固定桶：gap / contradiction / failure /<br/>transfer / constraint<br/>+ opt-in 桶：ablation / metric /<br/>assumption-challenge（仅经参数显式追加，总上限 8）"}}
+    FAN --> B["bucket ×N（并行生成）<br/>每桶 LLM 产 1–3 张候选卡<br/>单桶失败 → 记录降级<br/>不阻断其余桶"]
+    B --> DD["dedup（纯函数）<br/>键 = norm(标题, 机制, 最小实验)<br/>同键保留证据链最长者"]
+    DD --> CH["challenge（顺序逐卡 LLM）<br/>只有使核心假设 / 可行性 / 可检验性<br/>不成立的具体反驳才 rejected<br/>（笼统的不确定性不是反驳）"]
+    CH -->|"反驳成立"| OUT["淘汰池<br/>理由全量进 summary"]
+    CH -->|"survived"| VA["validate（确定性规则全集）<br/>14 必填 / 泛化锚黑名单 /<br/>痛点具体度 / wiki 源锚须回写承诺<br/>（validate_idea_cards 全规则 TS 化）"]
+    VA -->|"规则不过"| OUT
+    VA -->|"通过"| P["persist<br/>幸存卡整批渲染 → 逐页写 wiki<br/>（幂等哨兵，重跑可续）"]
+    P --> SM["summary<br/>候选 → 合并 → 幸存计数链<br/>+ 桶失败记录 + 全部淘汰原因（不静默）"]
+    SM --> ZERO(["零幸存 = 不写 wiki<br/>回复全部淘汰原因"])
+    OUT --> SM
+```
+
+- 产物：`idea-cards/<kebab-case 标题>.md` 假说卡页（15 字段 + `category: idea` 机读标签 +
+  一句假说进 Atomic Claims），逐页写入、幂等可续。
+- **对抗筛选**：候选卡先经机制去重（dedup 纯函数），再逐卡对抗反驳（challenge）——只有具体
+  致命反驳才淘汰；幸存卡再过确定性规则校验（validate），规则与校验同源自 `validate_idea_cards`
+  全量迁移。
+- **证据不足不动笔**：Context Pack 在 16k token 预算内裁剪后若零证据条目，直接 clarify 反问
+  补充材料，不生成泛化 idea。
+- **失败可观测**：单桶生成失败只降级不阻断，失败记录与全部淘汰原因完整进 summary。
+
 ## 产物与进度
 
-> **当前版本说明**：W1（ingest）与 W2（discover）节点链已全链可用（见上方流程详情）；
-> W3 / W4 的节点链正按计划接入——此阶段发起会收到「已受理 + 流程待接入」的占位说明。
-> 下述人审能力随 W4 实现票生效。
+> **当前版本说明**：W1（ingest）、W2（discover）与 W3（hypothesize）节点链已全链可用
+> （见上方流程详情）；W4 的节点链正按计划接入——此阶段发起会收到「已受理 + 流程待接入」
+> 的占位说明。下述人审能力随 W4 实现票生效。
 
 - 发现、假说与实验报告落 **wiki**（页面 + Atomic Claims 溯源块），中间产物落 **lab**；
   页面带 frontmatter 溯源（来源插件 / 工具调用 / 流程名 / 生成时间 / 180 天陈旧标记）。

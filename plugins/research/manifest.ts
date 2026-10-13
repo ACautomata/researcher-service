@@ -24,7 +24,7 @@ import {
 } from './server'
 
 export const researchToolDescription =
-  '科研工作流单入口：intent routing over four fixed research workflows. Slots: workflow (explicit: ingest|discover|hypothesize|experiment — omit to let the graph classify intent), topic (research topic), question (research question), source_paths (lab file paths), phase (experiment collect call only). Low-confidence or off-scope requests return a clarify result asking the user to pick a workflow.'
+  '科研工作流单入口：intent routing over four fixed research workflows. Slots: workflow (explicit: ingest|discover|hypothesize|experiment — omit to let the graph classify intent), topic (research topic), question (research question), source_paths (lab file paths), buckets (hypothesize opt-in generation buckets: ablation|metric|assumption-challenge — only pass when the user explicitly asks for these extra angles), phase (experiment collect call only). Low-confidence or off-scope requests return a clarify result asking the user to pick a workflow.'
 
 export default definePlugin({
   id: 'research',
@@ -44,9 +44,11 @@ export default definePlugin({
         `When the user expresses a research request (paper intake, finding questions, research ideas, experiment design), call ${RESEARCH_TOOL_NAME} with topic/question slots organized from the user's request; omit workflow to let the entry graph classify the intent.`,
         'Pass workflow explicitly only when the user picks a command-like flow or replies to a clarify question; source_paths must be /lab/ paths the user referenced.',
         'A clarify result ({status:"clarify", candidates, question}) means the request was ambiguous: relay the candidates to the user in natural language, then re-call with the chosen workflow.',
+        'For hypothesize, pass the buckets slot ONLY when the user explicitly requests extra generation angles (ablation/metric/assumption-challenge); never invent bucket values on your own.',
       ],
-      // progressStages 白名单（853 §6.1 四流程节点名并集，逐实现票扩展）：#910 落
-      // 入口面 5 值 + W1/W2 流程节点 11 值（去重并集 16 值）；W3/W4 随 [#873·5–6] 补齐。
+      // progressStages 白名单（853 §6.1 四流程节点名并集，逐实现票扩展）：#910 落入口面
+      // 5 值 + W1/W2 流程节点 11 值、#911 增 W3 节点 4 值（去重并集 20 值）；W4 随
+      // [#873·6] 补齐。
       progressStages: RESEARCH_PROGRESS_STAGES,
       execute: executeResearchWorkflow,
     },

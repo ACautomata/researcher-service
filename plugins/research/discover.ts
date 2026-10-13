@@ -30,7 +30,7 @@ import {
 import type { CriticCandidate, CriticDoc } from './pageValidate'
 import { buildCriticPrompt, buildExtractPrompt, headingAnchor, PAPER_PAGE_ANCHORS } from './prompts'
 import { generateWithBoundedRetry } from './generate'
-import { compiledInvokeOptions, stageReporterOf, toWikiRelPath, wikiReadPathOf } from './graph'
+import { compiledInvokeOptions, stageReporterOf, toWikiRelPath, wikiReadPathOf, WIKI_PAGE_PROBE_ANCHOR } from './graph'
 import type { FlowGraphInvokeOptions, ResearchWorkflowRequest, WorkflowOutcome, WorkflowArtifactPage } from './graph'
 import type { ClarifyResult } from './clarify'
 
@@ -75,11 +75,6 @@ function criticTitleOf(content: string, fallback: string): string {
 function sectionHeadingLine(doc: string, headingText: string): boolean {
   return new RegExp(`^##\\s*${escapeRegExp(headingText)}\\s*$`, 'm').test(doc)
 }
-
-// 裸页引用（无节锚）存在性回查哨兵锚（PR #917 review Spec#8）：openwiki readPage 需
-// ≥1 节锚（空锚即拒）——用「合法且理论必不存在」的锚探页存在性：not_found = 页不存在；
-// Unknown sections（invalid_input）= 页存在、哨兵节缺失 → 放行。
-const BARE_PAGE_PROBE_ANCHOR = 'evidence-gate-page-existence-probe'
 
 // ---------------------------------------------------------------------------
 // 状态面
@@ -297,7 +292,7 @@ export function createDiscoverGraph(ports: DiscoverPorts): {
               reason = sec.error.code === 'not_found' ? '引用的 wiki 页不存在' : '引用的 wiki 页中不存在该节'
             }
           } else {
-            const probe = await ports.wiki.readPage(wikiReadPathOf(rel), [BARE_PAGE_PROBE_ANCHOR])
+            const probe = await ports.wiki.readPage(wikiReadPathOf(rel), [WIKI_PAGE_PROBE_ANCHOR])
             if (!probe.ok && probe.error.code === 'not_found') {
               alive = false
               reason = '引用的 wiki 页不存在'

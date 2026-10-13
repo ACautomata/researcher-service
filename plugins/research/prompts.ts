@@ -9,7 +9,9 @@
 //
 // 语言约定（#848 §0）：wiki 正文中文；论文元数据（标题/作者/DOI/arXiv/代码链接）保留原文。
 
-import { CRITIC_CANDIDATES_MAX, CRITIC_CANDIDATES_MIN, PAPER_PAGE_MIN_LINES } from './values'
+import { CRITIC_CANDIDATES_MAX, CRITIC_CANDIDATES_MIN, IDEA_CANDIDATES_MAX, IDEA_CANDIDATES_MIN, PAPER_PAGE_MIN_LINES } from './values'
+import type { BucketName } from './values'
+import { BRIEF_FIELDS } from './contextPack'
 
 // ---------------------------------------------------------------------------
 // 节结构清单（校验 ↔ 模板单源）
@@ -252,4 +254,165 @@ ${paperPageContent}
 <extract-doc>
 ${extractDoc}
 </extract-doc>${diagnosticsBlock(diagnostics)}`
+}
+
+// ---------------------------------------------------------------------------
+// W3 hypothesize prompt 资产（#911 · 853 §4.3 · 单一来源 = #848 §3）：
+// Brief 模板 10 字段 / Idea Card 15 字段 / 7+1 生成策略（按桶注入）/ 质量检查清单
+// （output-spec「Required Quality Checks」）/ challenge 反驳判据（brainstorm main 反驳门禁）。
+// ---------------------------------------------------------------------------
+
+// Idea Card 15 字段（#848 §3 idea-card-template.md 全量——wiki_writeback 为条件必填：
+// 锚含 wiki 源时必填，validate 规则 6 联动）。
+export const IDEA_CARD_FIELDS = [
+  'idea_id',
+  'title',
+  'one_sentence_hypothesis',
+  'anchor_sources',
+  'target_problem',
+  'mechanism',
+  'paper_insight_or_limitation',
+  'evidence_chain',
+  'minimum_experiment',
+  'expected_metric_change',
+  'implementation_scope',
+  'risks',
+  'confidence',
+  'recommendation_reason',
+  'wiki_writeback',
+] as const
+
+// idea card 页机读标签（#848 §0 约定——同 critic 页 category 标签先例；页渲染由
+// ideaCards.renderIdeaCardPage 确定性写入，LLM 不操持格式）。
+export const IDEA_CATEGORY_TAG = '`category: idea`'
+
+// 生成策略（#848 §3 generation-strategies.md 七段全量 + assumption-challenge 自撰段——
+// brainstorm 固定桶档位，策略按桶注入对应段）。assumption-challenge 源 skill 无独立策略
+// 文档，语义取自 brainstorm 反驳门禁（挑战核心前提 → 可区分假设的最小实验）。
+export const BUCKET_STRATEGIES: Record<BucketName, string> = {
+  gap: 'Gap-driven（缺口驱动）：从来源材料中显式声明的局限、未来工作信号与开放问题生成想法——每个想法必须锚定材料中可指认的缺口表述。',
+  contradiction:
+    'Contradiction-driven（矛盾驱动）：从跨论文/跨实验的矛盾结论、不一致数字或相互冲突的 claim 生成想法——想法须指出矛盾双方，并给出可检验的调和/裁决实验。',
+  failure:
+    'Failure-driven（失败驱动）：从已知失败实验、负结果与薄弱现象生成想法——诊断「缺了什么」，想法须说明补哪一环、为何这次能成。',
+  transfer:
+    'Transfer-driven（迁移驱动）：把相近任务、模态或 benchmark 上的方法机制迁移到当前任务——须指明源域方法与本任务设定的不匹配点及适配假设。',
+  ablation:
+    'Ablation-driven（消融驱动）：从当前 baseline 的可控变化生成想法——每次只动一个组件/超参/流程环节，想法须预测该变化的定向效应。',
+  metric:
+    'Metric-driven（指标驱动）：从当前指标弱点、失败区间或权衡（如 AUROC 高但 FPR95 差）生成想法——想法须点名要改善的 metric 与可观测的改善判据。',
+  constraint:
+    'Constraint-driven（约束驱动）：在 Brief 的数据/算力/实现/时间约束内生成想法——约束不是脚注，是想法的构造条件；超约束想法直接不合格。',
+  'assumption-challenge':
+    'Assumption-challenge（假设挑战）：挑战来源材料方法依赖的核心前提——提出使该前提不成立或必须重新验证的替代机制/数据分布/评测设定，想法须包含能区分原假设与替代假设的最小实验。',
+}
+
+// 质量检查清单（#848 §3 output-spec.md「Required Quality Checks」迁移面——bucket prompt
+// 输出前自检段；validate_idea_cards.py 是同一清单的确定性执行，双表同源语义）。
+export const IDEA_QUALITY_CHECKS = [
+  'anchor_sources 点名具体论文/wiki 页（1 个或同型集群 2–4 个），禁泛化领域标签（如 "related work"）',
+  '弱支撑（evidence_chain 为空）必须标 low-confidence',
+  '每卡一个 minimum_experiment（可执行的最小验证，非「进一步研究」式空话）',
+  '每卡至少一个预期指标（expected_metric_change 点名具体 metric 与方向）',
+  '尊重 Brief 的数据/代码/算力/时间/风险约束（hard_constraints 与 desired_risk_level）',
+  'open question 不默默填死——confidence 与 risks 如实反映证据强度',
+] as const
+
+// W3 contextPack brief：10 字段归一化（缺失字段下游确定性填 ASSUMPTION，LLM 留空即可）。
+export function buildBriefPrompt(requestText: string, evidenceText: string): string {
+  return `你是科研工作流的研究背景归一化器。基于用户请求与检索到的证据材料，归一化出 Idea Generation Brief。
+
+## Brief 字段（10 字段，JSON 键名逐字如下）
+
+${BRIEF_FIELDS.map((f) => `- ${f}`).join('\n')}
+
+## 填写规则
+
+- 字段值从用户请求与证据材料提取；证据未覆盖的字段留空（下游确定性填 ASSUMPTION: 未提供——缺失不阻塞，不要编造）。
+- research_topic 必填（用户研究主题原文）。
+- desired_risk_level ∈ low-risk / medium-risk / exploratory。
+
+输出格式约束：输出必须是且仅是一个 JSON 对象 {"research_topic": "...", ..., "desired_risk_level": "..."}（10 键，允许空串值）。禁止输出 JSON 之外的任何文本或 markdown 围栏。
+
+用户请求：
+<request>
+${requestText}
+</request>
+
+证据材料（页级节选）：
+<evidence>
+${evidenceText}
+</evidence>`
+}
+
+// W3 bucket：每桶扇出生成（策略段按桶注入 + 质量清单自检 + Context Pack 全量——
+// 不分桶裁剪，#869 D3）。候选数量钉 1–3 张（ideate candidate_only 同款面）。
+export function buildBucketPrompt(bucket: BucketName, packText: string): string {
+  return `你是科研假说生成器，负责一个机会桶的候选 Idea Card 生成。
+
+## 你的机会桶：${bucket}
+
+${BUCKET_STRATEGIES[bucket]}
+
+## Idea Card 15 字段（每卡全字段填写，JSON 键名逐字如下）
+
+${IDEA_CARD_FIELDS.map((f) => `- ${f}`).join('\n')}
+
+- anchor_sources：具体论文/wiki 页（1 个或同型集群 2–4 个）；锚含 wiki 源时 wiki_writeback 必填（回写内容建议）。
+- evidence_chain：支撑该想法的证据引用（页路径/节锚/论文位置），至少 2 条为宜；确无则留空并把 confidence 标 low-confidence。
+
+## 质量检查清单（输出前逐条自检，确定性校验会逐条执行）
+
+${IDEA_QUALITY_CHECKS.map((c, i) => `${i + 1}. ${c}`).join('\n')}
+
+## 候选数量
+
+本桶产出 ${IDEA_CANDIDATES_MIN}–${IDEA_CANDIDATES_MAX} 张高信号候选卡（宁少勿滥，弱卡不出）。
+
+输出格式约束：输出必须是且仅是一个 JSON 对象 {"cards": [{...15 字段...}, ...]}。禁止输出 JSON 之外的任何文本或 markdown 围栏。
+
+## Context Pack（Brief + 证据节选——全部卡的唯一生成依据，不得引用包外材料）
+
+<context-pack>
+${packText}
+</context-pack>`
+}
+
+// W3 challenge：顺序逐卡反驳（brainstorm main 反驳门禁语义——只有使核心假设/可行性/
+// 可检验性不成立的具体反驳才是 rejected；笼统不确定性不是）。语义去重并入本节点：
+// 「已有工作已覆盖」判据含本批次其他候选（实质重复归并）。
+export function buildChallengePrompt(packText: string, cardJson: string, peerTitles: readonly string[]): string {
+  return `你是假说反驳者。基于 Context Pack 对给定 Idea Card 尝试提出致命反驳。
+
+## verdict 判据（唯一依据）
+
+只有使核心假设、可行性或可检验性不成立的具体反驳才是 rejected，有效反驳类型：
+- 核心 claim 无来源支撑；
+- 已有工作已覆盖（含与本批次其他候选实质重复——语义去重在此裁决）；
+- 违反 Brief 硬约束（数据/代码/算力/边界）；
+- minimum_experiment 不能区分竞争解释，或 expected_metric_change 不可检验；
+- risks 使关键假设不可执行。
+笼统的不确定性不是反驳——「仍需验证」「可能不work」类表述不构成 rejected，该给 survived。
+
+## 输出（JSON）
+
+{"challenge": "<具体反驳；未找到则写「未找到基于现有证据和约束的致命反驳」>", "verdict": "rejected|survived", "verdict_reason": "<反驳成立/未成立的理由>"}
+
+## Context Pack
+
+<context-pack>
+${packText}
+</context-pack>
+
+## 本批次其他候选标题（语义去重面）
+
+<peers>
+${peerTitles.join('\n')}
+</peers>
+
+## 待反驳卡
+
+<card>
+${cardJson}
+</card>`
 }

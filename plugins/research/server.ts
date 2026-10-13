@@ -30,7 +30,8 @@ import { toWikiRelPath } from './graph'
 import { createIntentClassifier, pinnedModelOf, serializeClassifyInput, type WorkflowLabel } from './classifier'
 import { createIngestGraph } from './ingest'
 import { createDiscoverGraph } from './discover'
-import { SOURCE_PATHS_V1_MAX } from './values'
+import { createHypothesizeGraph } from './hypothesize'
+import { BUCKETS_OPT_IN, SOURCE_PATHS_V1_MAX } from './values'
 import { WORKFLOW_CATALOG } from './clarify'
 import type { ClarifyResult } from './clarify'
 
@@ -39,8 +40,9 @@ export const RESEARCH_TOOL_NAME = 'research_workflow'
 // 输入边界（zod 0 信任红线）：文本槽位上限 = openwiki 检索 queryCharacters 面（2000，
 // wiki.d.ts WIKI_RETRIEVAL_LIMITS——W2 resolveInputs 把 question 直传 search，超限落
 // invalid_input 误导性 clarify，故在入口即收紧，PR #917 review Spec#19；分类输入天然短，
-// 853 §7.2）；source_paths 数组上限为传输面（W3/W4 预留），流程级 V1 单篇约束在
-// values.SOURCE_PATHS_V1_MAX（PR #917 review S8 分层）。
+// 853 §7.2）；source_paths 数组上限为传输面（W3/W4 共用），流程级 V1 单篇约束在
+// values.SOURCE_PATHS_V1_MAX（PR #917 review S8 分层）；buckets = W3 opt-in 桶（853 §4.3
+// 仅经参数显式追加——枚举锁三值，LLM 无自由裁量）。
 export const INPUT_TEXT_MAX = 2000
 export const SOURCE_PATHS_MAX = 32
 
@@ -53,6 +55,7 @@ export const researchToolParameters = z
     question: z.string().min(1).max(INPUT_TEXT_MAX).optional(),
     source_paths: z.array(z.string().min(1)).max(SOURCE_PATHS_MAX).optional(),
     phase: z.literal('collect').optional(), // W4 调用③ 专用槽位（853 §1.1 · #850 D2）
+    buckets: z.array(z.enum(BUCKETS_OPT_IN)).max(BUCKETS_OPT_IN.length).optional(),
   })
   .strict()
 
@@ -98,9 +101,9 @@ export function assertResearchContext(ctx: PluginToolContext): ResearchToolConte
 }
 
 // ---------------------------------------------------------------------------
-// 分支分派（#910）：ingest/discover = 真实流程图（853 §4.1–§4.2）；hypothesize/experiment
-// 保持占位（[#873·5–6] 票替换）。RESEARCH_MODEL 面板级可选 pin（853 §3.1）统一包装进
-// 流程图 llm 面（分类器已单独 pin）——图内 generateStructured 零 pin 知识。
+// 分支分派（#910/#911）：ingest/discover/hypothesize = 真实流程图（853 §4.1–§4.3）；
+// experiment 保持占位（[#873·6] 票替换）。RESEARCH_MODEL 面板级可选 pin（853 §3.1）统一
+// 包装进流程图 llm 面（分类器已单独 pin）——图内 generateStructured 零 pin 知识。
 // ---------------------------------------------------------------------------
 
 // 四流程中文名自 clarify 目录派生（单一来源——WORKFLOW_CATALOG.name，防双表漂移）。
@@ -136,6 +139,9 @@ function buildRoutingPorts(ctx: ResearchToolContext): ResearchRoutingPorts {
     if (workflow === 'discover') {
       return createDiscoverGraph({ llm, wiki: ctx.wiki }).invoke({ request }, { onStage })
     }
+    if (workflow === 'hypothesize') {
+      return createHypothesizeGraph({ llm, wiki: ctx.wiki }).invoke({ request }, { onStage })
+    }
     return placeholderRunWorkflow(workflow)
   }
   return { classifier, runWorkflow }
@@ -169,6 +175,7 @@ export async function executeResearchWorkflow(
       ...(request.workflow !== undefined ? { workflow: request.workflow } : {}),
       ...(request.phase !== undefined ? { phase: request.phase } : {}),
       ...(request.source_paths !== undefined ? { source_paths: request.source_paths } : {}),
+      ...(request.buckets !== undefined ? { buckets: request.buckets } : {}),
       methodText: truncateAuditMethodText(classificationInput),
     },
   })
