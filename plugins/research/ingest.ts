@@ -18,9 +18,9 @@ import { END, START, StateGraph, Annotation, z } from '../../server/src/plugins/
 import type { LangGraphRunnableConfig } from '../../server/src/plugins/autofigureDeps'
 import type { PluginClaimDraft, PluginDocsPort, PluginLlmPort, PluginWikiPort } from '../../server/src/plugins/api'
 import { PAGE_DRAFT_MAX, SOURCE_PATHS_V1_MAX, SUMMARY_MAX_CHARS } from './values'
-import { paperPageSlug, validatePaperPage } from './pageValidate'
+import { paperPageSlug, validatePaperPage, escapeRegExp } from './pageValidate'
 import { generateWithBoundedRetry } from './generate'
-import { buildCreatePaperPagePrompt, PAPER_PAGE_ANCHORS } from './prompts'
+import { buildCreatePaperPagePrompt, PAPER_PAGE_ANCHORS, PAPER_PAGE_SECTIONS } from './prompts'
 import { compiledInvokeOptions, stageReporterOf, wikiReadPathOf } from './graph'
 import type { FlowGraphInvokeOptions, ResearchWorkflowRequest, WorkflowOutcome } from './graph'
 
@@ -68,6 +68,15 @@ function fnv1aHex(text: string): string {
 // 追加）与 openwiki section 切分的空白差异，保留正文字符层面的全量比对强度。
 function normalizeForHash(text: string): string {
   return text.replace(/[\s#]+/g, '')
+}
+
+// 对账域归一（PR #917 review r1 Spec 新2）：openwiki section 切分自首个锚 heading 行起、
+// 其前导（H1 标题/导语）不属任何锚节、回读拼接天然不含——draft 侧切到同一域后再哈希，
+// LLM 在首节前输出导语不再误杀对账；首节行缺失（validate 已拦的理论面）全文比对兜底
+//（fail-closed）。
+function draftSectionDomain(content: string): string {
+  const m = new RegExp(`^##\\s*1\\s+${escapeRegExp(PAPER_PAGE_SECTIONS[0])}\\s*$`, 'm').exec(content)
+  return m === null ? content : content.slice(m.index)
 }
 
 // 论文页产物路径（wiki-conventions：论文页 slug 匹配标题不带日期，papers/ 组固定——
@@ -210,7 +219,7 @@ export function createIngestGraph(ports: IngestPorts): {
     }
     const r = await ports.wiki.readPage(wikiReadPathOf(state.pagePath!), PAPER_PAGE_ANCHORS)
     if (!r.ok) throw new Error(`论文页回读失败（${r.error.code}）：${r.error.message}`)
-    const fingerprint = fnv1aHex(normalizeForHash(state.draft!.content))
+    const fingerprint = fnv1aHex(normalizeForHash(draftSectionDomain(state.draft!.content)))
     const readback = fnv1aHex(normalizeForHash(r.data.sections.map((s) => s.content).join('\n')))
     if (fingerprint !== readback) {
       throw new Error(`回读哈希对账失败：页 ${state.pagePath} 写入指纹 ${fingerprint} ≠ 回读指纹 ${readback}——写入面与读面不一致`)

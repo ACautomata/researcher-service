@@ -218,6 +218,15 @@ describe('W1 ingest 图 invoke（S2 端口注入 fake）', () => {
     await expect(createIngestGraph(ports).invoke({ request })).rejects.toThrow(/哈希对账/)
   })
 
+  it('verify 对账域归一：draft 首节前有 H1/导语 → 仍对账通过不误杀（openwiki 切分丢前导，r1 Spec 新2）', async () => {
+    const page = validPaperPage()
+    const ports = makePorts({
+      page: () => ({ ...page, content: `# ${page.title}\n\n本文为精读笔记导语，节结构自下节起。\n\n${page.content}` }),
+    })
+    const result = await createIngestGraph(ports).invoke({ request })
+    expect(result.status).toBe('completed')
+  })
+
   it('stage 序列：capture → extract → create → validate → persist → verify → summary', async () => {
     const ports = makePorts()
     const stages: string[] = []

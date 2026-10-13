@@ -35,8 +35,10 @@ export async function generateWithBoundedRetry<T>(input: {
 }): Promise<BoundedGenerateOutcome<T>> {
   const attempts = input.attemptsSoFar + 1
   if (attempts > PAGE_GENERATE_MAX_ATTEMPTS) {
+    // 超界 throw 只发生在回边重入（attemptsSoFar ≥ 1），而回边路由前提 = 非空诊断
+    //（图不变量）——无 `??` 兜底位（PR #917 review r1 S 修半2）。
     throw new Error(
-      `${input.nodeLabel}生成重试耗尽（${PAGE_GENERATE_MAX_ATTEMPTS} 次）仍未通过校验：${input.diagnostics ?? '无诊断'}`,
+      `${input.nodeLabel}生成重试耗尽（${PAGE_GENERATE_MAX_ATTEMPTS} 次）仍未通过校验：${input.diagnostics!}`,
     )
   }
   try {

@@ -13,6 +13,10 @@ import {
   INPUT_TEXT_MAX,
   researchToolParameters,
   executeResearchWorkflow,
+  INGEST_USAGE,
+  DISCOVER_USAGE,
+  HYPOTHESIZE_USAGE,
+  EXPERIMENT_USAGE,
   ingestCommandHandler,
   discoverCommandHandler,
   hypothesizeCommandHandler,
@@ -48,10 +52,11 @@ export default definePlugin({
     },
   ],
   commands: [
-    { name: 'ingest', description: `知识库深度构建：把 PDF 精读整理入库 wiki（用法：/ingest <PDF 路径>；V1 单篇——一次一篇）`, handler: ingestCommandHandler },
-    { name: 'discover', description: `科学问题可信发现：从一篇论文审稿式找出问题与研究缺口（用法：/discover <研究问题或论文主题> [papers/<slug>.md]，正文 ≤${INPUT_TEXT_MAX} 字符）`, handler: discoverCommandHandler },
-    { name: 'hypothesize', description: `科学假说自主生成：生成新的研究想法、方向与假说（用法：/hypothesize <研究主题>）`, handler: hypothesizeCommandHandler },
-    { name: 'experiment', description: `实验自主设计与执行：设计验证实验并真实执行（用法：/experiment <要验证的问题或想法>）`, handler: experimentCommandHandler },
+    // 用法片段引 server.ts 用法常量单源（PR #917 review r1 S 新4：与命令面 failUsage 双写归一）。
+    { name: 'ingest', description: `知识库深度构建：把 PDF 精读整理入库 wiki（用法：${INGEST_USAGE}）`, handler: ingestCommandHandler },
+    { name: 'discover', description: `科学问题可信发现：从一篇论文审稿式找出问题与研究缺口（用法：${DISCOVER_USAGE}，正文 ≤${INPUT_TEXT_MAX} 字符）`, handler: discoverCommandHandler },
+    { name: 'hypothesize', description: `科学假说自主生成：生成新的研究想法、方向与假说（用法：${HYPOTHESIZE_USAGE}）`, handler: hypothesizeCommandHandler },
+    { name: 'experiment', description: `实验自主设计与执行：设计验证实验并真实执行（用法：${EXPERIMENT_USAGE}）`, handler: experimentCommandHandler },
   ],
   configSchema: {
     env: [

@@ -242,9 +242,12 @@ export async function executeResearchWorkflow(
 // 内核面双写有意——figure 先例：此处 = 80001 信封直达用户，zod = 内核执行面契约）。
 // ---------------------------------------------------------------------------
 
-// /ingest V1 单篇（values.SOURCE_PATHS_V1_MAX）——命令面即时反馈与 capture 图内判定同口径
-//（PR #917 review S8/#24：用法文案不再宣传 ≤32 多篇）。
-const INGEST_USAGE = '/ingest <PDF 路径>（/lab/uploads 下；V1 单篇——一次一篇）'
+// 命令用法文案单源（PR #917 review r1 S 新4：manifest description 与 failUsage 拒绝面
+// 共引本组常量——双写归一；import 方向 manifest → server 不成环）。
+export const INGEST_USAGE = '/ingest <PDF 路径>（/lab/uploads 下；V1 单篇——一次一篇）'
+export const DISCOVER_USAGE = '/discover <研究问题或论文主题> [papers/<slug>.md]'
+export const HYPOTHESIZE_USAGE = '/hypothesize <研究主题>'
+export const EXPERIMENT_USAGE = '/experiment <要验证的问题或想法>'
 
 // /discover 可选论文页路径 token（PR #917 review Spec#26：W2 钉定输入的命令面槽位——
 // 命中 tokens 从问题文本剥离为 source_paths，余量拼回 question）。
@@ -288,11 +291,10 @@ export async function discoverCommandHandler(
     readonly workflow: 'discover'
   }>
 > {
-  const usage = '/discover <研究问题或论文主题> [papers/<slug>.md]'
-  const tokens = textSlot(args, usage).split(/\s+/)
+  const tokens = textSlot(args, DISCOVER_USAGE).split(/\s+/)
   const source_paths = tokens.filter((t) => WIKI_PAGE_TOKEN.test(t)).map(toWikiRelPath)
   const question = tokens.filter((t) => !WIKI_PAGE_TOKEN.test(t)).join(' ')
-  if (question === '' && source_paths.length === 0) failUsage(usage)
+  if (question === '' && source_paths.length === 0) failUsage(DISCOVER_USAGE)
   return {
     execute: {
       tool: RESEARCH_TOOL_NAME,
@@ -308,11 +310,11 @@ export async function discoverCommandHandler(
 export async function hypothesizeCommandHandler(
   args: string,
 ): Promise<ResearchCommandOutcome<{ readonly topic: string; readonly workflow: 'hypothesize' }>> {
-  return { execute: { tool: RESEARCH_TOOL_NAME, args: { topic: textSlot(args, '/hypothesize <研究主题>'), workflow: 'hypothesize' } } }
+  return { execute: { tool: RESEARCH_TOOL_NAME, args: { topic: textSlot(args, HYPOTHESIZE_USAGE), workflow: 'hypothesize' } } }
 }
 
 export async function experimentCommandHandler(
   args: string,
 ): Promise<ResearchCommandOutcome<{ readonly question: string; readonly workflow: 'experiment' }>> {
-  return { execute: { tool: RESEARCH_TOOL_NAME, args: { question: textSlot(args, '/experiment <要验证的问题或想法>'), workflow: 'experiment' } } }
+  return { execute: { tool: RESEARCH_TOOL_NAME, args: { question: textSlot(args, EXPERIMENT_USAGE), workflow: 'experiment' } } }
 }

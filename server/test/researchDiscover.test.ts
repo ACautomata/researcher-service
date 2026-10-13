@@ -96,6 +96,13 @@ describe('W2 discover 图 invoke（S2 端口注入 fake）', () => {
     expect(result.clarify?.question).toContain('.md')
   })
 
+  it('resolveInputs：`..` 穿越段路径 → 形态不符 clarify（白名单与 evidenceGate 段检查对称，r1 S 新3）', async () => {
+    const ports = makePorts()
+    const result = await invoke(ports, { workflow: 'discover', question: 'q', source_paths: ['papers/../../etc/secret.md'] })
+    expect(result.status).toBe('clarify')
+    expect(result.clarify?.question).toContain('papers/')
+  })
+
   it('resolveInputs：多篇 source_paths → 单论文链明确失败（与 W1 单篇同口径）', async () => {
     const ports = makePorts()
     await expect(
@@ -209,6 +216,32 @@ describe('W2 discover 图 invoke（S2 端口注入 fake）', () => {
     expect(survived).toContain('他页裸页引用')
     expect(survived).not.toContain('他页整页不存在')
     expect(survived).not.toContain('他页节锚缺失')
+  })
+
+  it('evidenceGate：他页带锚回查遇临时故障（mirror_unavailable）→ fail-open 放行不误剔（r1 Spec 新1）', async () => {
+    const ports = makePorts({
+      pages: { [PAPER_PATH]: paperPageBody(), 'papers/other-paper.md': otherPaperBody() },
+      critic: () =>
+        validCriticDoc([
+          { question: '他页节锚', priority: 'high', evidence: ['papers/other-paper.md#2 方法概述'] },
+          { question: '本页节锚', priority: 'medium', evidence: [`${PAPER_PATH}#4 Method`] },
+        ]),
+    })
+    // 他页路径注入临时故障（本页 load 不受影响）——剔除断言不得建立在检索面临时故障上。
+    const base = ports.fake.readPage.getMockImplementation()!
+    ports.fake.readPage.mockImplementation(async (path: string, sections: readonly string[]) => {
+      if (String(path).includes('other-paper')) {
+        return { ok: false, error: { code: 'mirror_unavailable', message: '检索镜像暂不可用' } }
+      }
+      return base(path, sections)
+    })
+    const result = await invoke(ports, { workflow: 'discover', question: 'q', source_paths: [PAPER_PATH] })
+
+    expect(result.status).toBe('completed')
+    expect(result.summary).not.toContain('剔除')
+    const [draft] = ports.fake.createPage.mock.calls[0] as unknown as [{ claims: { statement: string; evidence: string[] }[] }]
+    expect(draft.claims[0]!.evidence).toEqual(['papers/other-paper.md#2 方法概述'])
+    expect(draft.claims).toHaveLength(2)
   })
 
   it('evidenceGate：上传件非 .pdf 形态剔除；extract 文档引用归描述性放行（Spec#14 收敛三类钉面）', async () => {

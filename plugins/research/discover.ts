@@ -18,7 +18,7 @@
 import { END, START, StateGraph, Annotation, z } from '../../server/src/plugins/autofigureDeps'
 import type { LangGraphRunnableConfig } from '../../server/src/plugins/autofigureDeps'
 import type { PluginLlmPort, PluginWikiPort } from '../../server/src/plugins/api'
-import { RESOLVE_INPUTS_SEARCH_LIMIT } from './values'
+import { RESOLVE_INPUTS_SEARCH_LIMIT, SOURCE_PATHS_V1_MAX } from './values'
 import {
   EXTRACT_DOC_SCHEMA,
   CRITIC_DOC_SCHEMA,
@@ -40,9 +40,9 @@ export interface DiscoverPorts {
   readonly wiki: Pick<PluginWikiPort, 'search' | 'readPage' | 'createPage'>
 }
 
-// discover 单论文钉界（853 §4.2）——与 W1 V1 单篇同口径（values.SOURCE_PATHS_V1_MAX 同值语义，
-// 此处按 W2 输入是论文页非上传件另立名，防止语义漂移）。
-const SOURCE_PATHS_DISCOVER_MAX = 1
+// discover 单论文钉界（853 §4.2）——与 W1 V1 单篇同口径（同值派生自 values.SOURCE_PATHS_V1_MAX
+// 防双表漂移，PR #917 review r1 S 新1；按 W2 输入是论文页非上传件另立名防语义混用）。
+const SOURCE_PATHS_DISCOVER_MAX = SOURCE_PATHS_V1_MAX
 
 // extract/critic 两条重试链各自独立计数（K≤2 有界面见 values.PAGE_GENERATE_MAX_ATTEMPTS，
 // 生成骨架共享面见 generate.ts）。
@@ -134,7 +134,13 @@ export function createDiscoverGraph(ports: DiscoverPorts): {
         throw new Error(`discover 单论文链（V1 单篇）：一次调用只处理一篇论文页（收到 ${given.length} 个路径），请逐篇发起`)
       }
       const p = toWikiRelPath(given[0]!)
-      if (!(p.startsWith('papers/') && p.endsWith('.md'))) {
+      // 段检查与 evidenceGate 同款（`..`/`.` 穿越形态拒）——白名单防御对称，PR #917
+      // review r1 S 新3。
+      const malformed =
+        !p.startsWith('papers/') ||
+        !p.endsWith('.md') ||
+        p.split('/').some((seg) => seg === '.' || seg === '..')
+      if (malformed) {
         return {
           clarify: {
             status: 'clarify',
@@ -171,7 +177,9 @@ export function createDiscoverGraph(ports: DiscoverPorts): {
   async function loadNode(state: DiscoverState, config: LangGraphRunnableConfig | undefined): Promise<Partial<DiscoverState>> {
     stageReporterOf(config)('load')
     const r = await ports.wiki.readPage(wikiReadPathOf(state.paperPath!), PAPER_PAGE_ANCHORS)
-    if (!r.ok || r.data.sections.length < PAPER_PAGE_ANCHORS.length) {
+    // openwiki readWikiSections 缺锚即 throw（ok:true 时 sections 与锚恒等长）——无长度
+    // 防御位（PR #917 review r1 S 新2：不可达防御移除，与 ingest verifyNode 同形）。
+    if (!r.ok) {
       return { clarify: notIngestedClarify() }
     }
     return { paperContent: r.data.sections.map((s) => s.content).join('\n\n') }
@@ -279,8 +287,12 @@ export function createDiscoverGraph(ports: DiscoverPorts): {
             }
           } else if (parsed.section !== undefined) {
             const sec = await ports.wiki.readPage(wikiReadPathOf(rel), [headingAnchor(parsed.section)])
-            if (!sec.ok) {
+            if (!sec.ok && (sec.error.code === 'not_found' || sec.error.code === 'invalid_input')) {
               alive = false
+              // not_found = 页不存在；invalid_input = 页存在但该节缺失（openwiki Unknown
+              // sections 契约）。其余错误码（mirror_unavailable/internal 等临时故障）fail-open
+              // 放行——剔除断言不能建立在检索面临时故障上，与裸页探针同方向（PR #917
+              // review r1 Spec 新1）。
               reason = sec.error.code === 'not_found' ? '引用的 wiki 页不存在' : '引用的 wiki 页中不存在该节'
             }
           } else {
@@ -380,12 +392,17 @@ export function createDiscoverGraph(ports: DiscoverPorts): {
       if (state.clarify !== undefined) {
         return { status: 'clarify', summary: '', artifactPages: [], clarify: state.clarify }
       }
-      if (state.summaryText === undefined || state.criticPagePath === undefined || state.criticDoc === undefined) {
+      if (
+        state.summaryText === undefined ||
+        state.criticPagePath === undefined ||
+        state.criticPageTitle === undefined ||
+        state.criticDoc === undefined
+      ) {
         throw new Error('discover graph finished without summary')
       }
       const artifactPage: WorkflowArtifactPage = {
         path: state.criticPagePath,
-        title: state.criticPageTitle ?? criticTitleOf(state.criticDoc.content, `论文评审：${paperSlugOf(state.paperPath!)}`),
+        title: state.criticPageTitle,
       }
       return { status: 'completed', summary: state.summaryText, artifactPages: [artifactPage] }
     },

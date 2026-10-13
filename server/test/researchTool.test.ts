@@ -15,7 +15,6 @@ import {
 } from '../../plugins/research/server'
 import type { PluginAuditPort, PluginLlmPort, PluginToolContext, PluginToolExec } from '../src/plugins/api'
 import { PluginLlmStructuredError } from '../src/plugins/api'
-import { SOURCE_PATHS_V1_MAX } from '../../plugins/research/values'
 import { createSlotLlm, createWikiFake, paperPageBody, PAPER_PATH, validCriticDoc, validExtractDoc } from './researchFixtures'
 
 // discover 端到端最小 fake 产物（走通全链的最小合法形状——H1/机读标签/候选面齐备）。
@@ -86,7 +85,6 @@ describe('4 命令 handler（853 §1.1：{execute} 直达，input 槽位 + workf
 
   it('/ingest：多篇 → V1 单篇即时 fail（命令面与 capture 同口径，S8/#24）', async () => {
     await expect(ingestCommandHandler('/lab/uploads/a.pdf /lab/uploads/b.pdf')).rejects.toThrow(/单篇/)
-    expect(SOURCE_PATHS_V1_MAX).toBe(1)
   })
 
   it('/discover：纯问题 → question 槽位；含 papers/*.md token → 剥离为 source_paths（Spec#26）', async () => {
