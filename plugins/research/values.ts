@@ -38,6 +38,41 @@ export const PAGE_GENERATE_MAX_ATTEMPTS = 1 + PAGE_GENERATE_MAX_RETRIES
 // + 3 opt-in（ablation/metric/assumption-challenge，仅经参数显式追加——非 LLM 自由裁量）。
 export const BUCKETS_MAX = 8
 
+// W3 桶档位（853 §4.3 · brainstorm 五固定桶 + 三 opt-in 桶）：固定桶每跑必在；opt-in 桶
+// 仅经 research_workflow 参数显式追加（工具 schema 枚举锁定三值，LLM 无自由裁量面）。
+export const BUCKETS_FIXED = ['gap', 'contradiction', 'failure', 'transfer', 'constraint'] as const
+export const BUCKETS_OPT_IN = ['ablation', 'metric', 'assumption-challenge'] as const
+export type BucketName = (typeof BUCKETS_FIXED)[number] | (typeof BUCKETS_OPT_IN)[number]
+// 全桶并集（固定 + opt-in 序——扇出序与策略表遍历序单源）。
+export const BUCKETS_ALL = [...BUCKETS_FIXED, ...BUCKETS_OPT_IN] as const
+
+// W3 每桶候选卡数量面（853 §4.3「每桶 LLM 生成 1–3 张候选卡」· ideate candidate_only 同款
+// 1–3 钉面）：schema 层宽容上限 = 5（LLM 给 4–5 张不直拒——多卡非质差，挑战阶段自然筛选；
+// 消费面 = ideaCards.IDEA_CARDS_SCHEMA）。
+export const IDEA_CANDIDATES_MIN = 1
+export const IDEA_CANDIDATES_MAX = 3
+export const IDEA_CANDIDATES_SCHEMA_MAX = 5
+
+// W3 challenge 逐卡上界（853 §4.3 ≤35 次 LLM/run 口径面：classify 1 + brief 1 + 桶 ≤8 +
+// challenge ≤24 ≈ 34）——消费面 = hypothesize.dedupNode 截断（schema 宽容上限下 8 桶×5 卡
+// 可越界：上界靠拓扑 + 本截断成立，截断数进 summary 不静默）。
+export const CHALLENGE_CARDS_MAX = BUCKETS_MAX * IDEA_CANDIDATES_MAX
+
+// W3 contextPack 集中检索条数（853 §4.3「集中检索」）：单次 search 拉取上限——evidence
+// 池主源（source_paths 钉定论文页 + 检索命中），按证据等级降序入裁剪。
+export const CONTEXT_PACK_SEARCH_LIMIT = 10
+
+// W3 证据条目页级节选上限（853 §4.3「页级节选（非全文）」）：每条 evidence excerpt 的
+// 确定性字符 cap——节选先行，再做预算裁剪（两层序：先节选定条目尺寸，再按预算整条目取舍）。
+export const EVIDENCE_EXCERPT_MAX_CHARS = 4_000
+
+// W3 idea card validate 阈值（validate_idea_cards.py 字面迁移，853 §4.3 / #848 §3.3）：
+// target_problem 痛点具体度（≥30 字符 + CONCRETE_PROBLEM_MARKERS 命中）/ minimum_experiment
+// 过短 warning（非 error）/ anchor_sources 同型集群 2–4 上限。
+export const TARGET_PROBLEM_MIN_CHARS = 30
+export const MIN_EXPERIMENT_WARN_CHARS = 20
+export const IDEA_ANCHORS_MAX = 4
+
 // W4 方案人审修订上限（853 §5.1 · #852）：deny → 回 design 修订模式，第 3 轮 deny →
 // plan_review_exhausted 终局（run completed 非 failed）。卡显轮次，第 2/3 轮「最后一轮」提示。
 export const PLAN_REVIEW_MAX_ROUNDS = 3

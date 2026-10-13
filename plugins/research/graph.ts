@@ -30,8 +30,9 @@ export const RESEARCH_WORKFLOW_NAMES = WORKFLOW_CATALOG.map((c) => c.label) as r
 // 入口面 stage 白名单（classify + 四分支名）。
 export const RESEARCH_ENTRY_STAGES = ['classify', ...RESEARCH_WORKFLOW_NAMES] as const
 
-// 流程内节点 stage（W1/W2 本票落地；W3/W4 随实现票补齐，853 §6.1 四流程并集逐票扩展）。
-// 跨流程重名（extract/validate/persist/summary）在 SSE 载荷 workflow 域字段语境下无歧义。
+// 流程内节点 stage（W1/W2/W3 已落地；W4 随实现票补齐，853 §6.1 四流程并集逐票扩展）。
+// 跨流程重名（extract/validate/persist/summary/resolveInputs）在 SSE 载荷 workflow 域字段
+// 语境下无歧义。
 export const RESEARCH_FLOW_STAGES = [
   // W1 ingest 七节点链
   'capture',
@@ -46,19 +47,26 @@ export const RESEARCH_FLOW_STAGES = [
   'load',
   'critic',
   'evidenceGate',
+  // W3 hypothesize 增量节点（contextPack/bucket/dedup/challenge；resolveInputs/validate/persist/summary 重名已含）
+  'contextPack',
+  'bucket',
+  'dedup',
+  'challenge',
 ] as const
 
 // progressStages 声明值（manifest 单源）：入口面 + 已落地流程节点并集。
 export const RESEARCH_PROGRESS_STAGES = [...RESEARCH_ENTRY_STAGES, ...RESEARCH_FLOW_STAGES] as const
 
 // 结构化请求面（research_workflow 工具参数 zod 产物的图内同形——单一来源在 server.ts schema，
-// 图内消费只读）。
+// 图内消费只读）。buckets = W3 opt-in 桶档位（853 §4.3：仅经参数显式追加——非 LLM 自由裁量；
+// 传输面 zod 枚举锁定三值，BucketName 与 values.ts BUCKETS_OPT_IN 单源）。
 export interface ResearchWorkflowRequest {
   readonly workflow?: WorkflowLabel
   readonly topic?: string
   readonly question?: string
   readonly source_paths?: readonly string[]
   readonly phase?: 'collect'
+  readonly buckets?: readonly ('ablation' | 'metric' | 'assumption-challenge')[]
 }
 
 // 流程产物引用（details.artifactPages 面——引用形态不内联页内容，R6 事实同源不变量）。
@@ -102,6 +110,11 @@ export const wikiReadPathOf = (relPath: string): string => `openwiki/${relPath}`
 export function toWikiRelPath(p: string): string {
   return p.replace(/^\/+/, '').replace(/^openwiki\//, '')
 }
+
+// 裸页引用存在性回查哨兵锚（PR #917 review Spec#8 · W2 evidenceGate / W3 resolveInputs 共享）：
+// openwiki readPage 需 ≥1 节锚（空锚即拒）——用「合法且理论必不存在」的锚探页存在性：
+// not_found = 页不存在；Unknown sections（invalid_input）= 页存在、哨兵节缺失 → 放行。
+export const WIKI_PAGE_PROBE_ANCHOR = 'evidence-gate-page-existence-probe'
 
 // ---------------------------------------------------------------------------
 // 状态面

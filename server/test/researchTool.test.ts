@@ -15,7 +15,7 @@ import {
 } from '../../plugins/research/server'
 import type { PluginAuditPort, PluginLlmPort, PluginToolContext, PluginToolExec } from '../src/plugins/api'
 import { PluginLlmStructuredError } from '../src/plugins/api'
-import { createSlotLlm, createWikiFake, paperPageBody, PAPER_PATH, validCriticDoc, validExtractDoc } from './researchFixtures'
+import { createSlotLlm, createWikiFake, paperPageBody, PAPER_PATH, validCriticDoc, validExtractDoc, validIdeaCard } from './researchFixtures'
 
 // discover 端到端最小 fake 产物（走通全链的最小合法形状——H1/机读标签/候选面齐备）。
 const discoverFixtures = () => ({
@@ -124,15 +124,35 @@ describe('research_workflow execute（工具边界）', () => {
     await expect(executeResearchWorkflow('t1', { question: 'x' }, execOf(partial))).rejects.toThrow(/runner-assembled|missing/)
   })
 
-  it('branch 面（占位流程 hypothesize）：content = summary；details = {workflow, status, artifactPages:[]}；audit created→completed', async () => {
-    const { ctx, events } = baseCtx(verdictLlm({ label: 'hypothesize', confidence: 0.9 }))
-    const result = await executeResearchWorkflow('t2', { topic: '想法' }, execOf(ctx))
+  it('branch 面（hypothesize 真图端到端，#911）：idea-card artifactPages + audit created→completed', async () => {
+    const llm = createSlotLlm({ bucket: (prompt) => ({ cards: /你的机会桶：gap/.test(prompt) ? [validIdeaCard()] : [] }) })
+    const { ctx, events } = baseCtx(llm, {}, { wiki: createWikiFake({ [PAPER_PATH]: paperPageBody() }).wiki })
+    const result = await executeResearchWorkflow(
+      't2',
+      { workflow: 'hypothesize', topic: 'OOD 检测的新假说', source_paths: [PAPER_PATH], buckets: ['metric'] },
+      execOf(ctx),
+    )
 
-    expect(result.content[0]?.type).toBe('text')
-    expect((result.content[0] as { text: string }).text).toContain('hypothesize')
     const details = result.details as ResearchRunDetails
     expect(details.status).toBe('completed')
     expect(details.workflow).toBe('hypothesize')
+    expect(details.artifactPages).toEqual([{ path: 'idea-cards/基于能量分数的-ood-判据改进.md', title: '基于能量分数的 OOD 判据改进' }])
+    expect((result.content[0] as { text: string }).text).toContain('idea-cards/')
+    expect(events.map((e) => e.event)).toEqual(['created', 'completed'])
+    // 数据槽位落 created 审计 detail（source_paths + opt-in buckets 档位）。
+    expect(events[0]!.detail.source_paths).toEqual([PAPER_PATH])
+    expect(events[0]!.detail.buckets).toEqual(['metric'])
+  })
+
+  it('branch 面（experiment 占位）：content = summary；details = {workflow, status, artifactPages:[]}', async () => {
+    const { ctx, events } = baseCtx(verdictLlm({ label: 'experiment', confidence: 0.9 }))
+    const result = await executeResearchWorkflow('t2c', { question: '想法' }, execOf(ctx))
+
+    expect(result.content[0]?.type).toBe('text')
+    expect((result.content[0] as { text: string }).text).toContain('experiment')
+    const details = result.details as ResearchRunDetails
+    expect(details.status).toBe('completed')
+    expect(details.workflow).toBe('experiment')
     expect(details.artifactPages).toEqual([])
     expect(events.map((e) => e.event)).toEqual(['created', 'completed'])
   })
@@ -181,11 +201,22 @@ describe('research_workflow execute（工具边界）', () => {
     expect(details.artifactPages).toEqual([])
   })
 
-  it('seed 透传：命令面带 workflow → 分类器零调用（generateStructured 不做分类）', async () => {
+  it('分支级 clarify（W3 证据不足 → 不生成泛化 idea，#911）：details 带 workflow 语境', async () => {
+    const { ctx } = baseCtx(createSlotLlm({})) // 零 LLM 消耗路径——stub wiki 检索零命中
+    const result = await executeResearchWorkflow('t3c', { workflow: 'hypothesize', topic: '完全没有材料的主题' }, execOf(ctx))
+
+    const details = result.details as ResearchRunDetails
+    expect(details.status).toBe('clarify')
+    expect(details.workflow).toBe('hypothesize')
+    expect(details.clarify?.question).toContain('证据不足')
+    expect(details.artifactPages).toEqual([])
+  })
+
+  it('seed 透传：命令面带 workflow → 分类器零调用（W3 证据不足路径 brief/bucket 零 LLM 消耗）', async () => {
     const llm = discoverCtxLlm()
-    const { ctx } = baseCtx(llm, {}, { wiki: discoverWiki() })
+    // 零命中检索 stub：证据不足先于 brief 的 clarify——generateStructured 零调用即分类器未跑。
+    const { ctx } = baseCtx(llm, {}, { wiki: { search: async () => ({ ok: true, data: { results: [] } }) } as unknown as PluginToolContext['wiki'] })
     await executeResearchWorkflow('t4', { workflow: 'hypothesize', topic: 'x' }, execOf(ctx))
-    // hypothesize 占位零 llm 消费——generateStructured 零调用即分类器未跑
     expect(llm.generateStructured).not.toHaveBeenCalled()
   })
 
@@ -229,11 +260,24 @@ describe('research_workflow execute（工具边界）', () => {
     expect(exec.onUpdate).toHaveBeenCalledWith({ stage: 'hypothesize' })
   })
 
-  it('stage 上报：流程内节点冒泡带 workflow 域字段（discover 端到端）', async () => {
+  it('stage 上报：流程内节点冒泡带 workflow 域字段（discover + hypothesize 端到端）', async () => {
     const { ctx } = baseCtx(discoverCtxLlm(), {}, { wiki: discoverWiki() })
     const exec = execOf(ctx)
     await executeResearchWorkflow('t9', { workflow: 'discover', question: 'q', source_paths: [PAPER_PATH] }, exec)
     expect(exec.onUpdate).toHaveBeenCalledWith({ stage: 'load', workflow: 'discover' })
     expect(exec.onUpdate).toHaveBeenCalledWith({ stage: 'critic', workflow: 'discover' })
+
+    const hypoLlm = createSlotLlm({ bucket: (prompt) => ({ cards: /你的机会桶：gap/.test(prompt) ? [validIdeaCard()] : [] }) })
+    const { ctx: hypoCtx } = baseCtx(hypoLlm, {}, { wiki: createWikiFake({ [PAPER_PATH]: paperPageBody() }).wiki })
+    const hypoExec = execOf(hypoCtx)
+    await executeResearchWorkflow(
+      't9b',
+      { workflow: 'hypothesize', topic: 'OOD 检测的新假说', source_paths: [PAPER_PATH] },
+      hypoExec,
+    )
+    expect(hypoExec.onUpdate).toHaveBeenCalledWith({ stage: 'contextPack', workflow: 'hypothesize' })
+    expect(hypoExec.onUpdate).toHaveBeenCalledWith({ stage: 'bucket', workflow: 'hypothesize' })
+    expect(hypoExec.onUpdate).toHaveBeenCalledWith({ stage: 'dedup', workflow: 'hypothesize' })
+    expect(hypoExec.onUpdate).toHaveBeenCalledWith({ stage: 'challenge', workflow: 'hypothesize' })
   })
 })

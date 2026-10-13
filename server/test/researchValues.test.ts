@@ -18,6 +18,17 @@ import {
   CRITIC_CANDIDATES_SCHEMA_MAX,
   RESOLVE_INPUTS_SEARCH_LIMIT,
   PAPER_PAGE_MIN_LINES,
+  BUCKETS_FIXED,
+  BUCKETS_OPT_IN,
+  IDEA_CANDIDATES_MIN,
+  IDEA_CANDIDATES_MAX,
+  IDEA_CANDIDATES_SCHEMA_MAX,
+  CHALLENGE_CARDS_MAX,
+  CONTEXT_PACK_SEARCH_LIMIT,
+  EVIDENCE_EXCERPT_MAX_CHARS,
+  TARGET_PROBLEM_MIN_CHARS,
+  MIN_EXPERIMENT_WARN_CHARS,
+  IDEA_ANCHORS_MAX,
 } from '../../plugins/research/values'
 
 describe('research values 常量表（853 §7.1 · #909）', () => {
@@ -57,5 +68,23 @@ describe('research values 常量表（853 §7.1 · #909）', () => {
     expect(PAGE_DRAFT_MAX.contentChars).toBe(2_000_000)
     expect(PAGE_DRAFT_MAX.claims).toBe(100)
     expect(PAGE_DRAFT_MAX.evidencePerClaim).toBe(20)
+  })
+
+  it('W3 常量表字面值锁定（#911 · 853 §4.3）：桶档位 / 候选数 / 挑战上界 / 检索与节选 / 校验阈值', () => {
+    expect(BUCKETS_FIXED).toEqual(['gap', 'contradiction', 'failure', 'transfer', 'constraint'])
+    expect(BUCKETS_OPT_IN).toEqual(['ablation', 'metric', 'assumption-challenge'])
+    // 固定 5 + opt-in 3 = BUCKETS_MAX（853 §4.3 桶档位钉面）
+    expect(BUCKETS_FIXED.length + BUCKETS_OPT_IN.length).toBe(BUCKETS_MAX)
+    expect(IDEA_CANDIDATES_MIN).toBe(1)
+    expect(IDEA_CANDIDATES_MAX).toBe(3)
+    expect(IDEA_CANDIDATES_SCHEMA_MAX).toBe(5)
+    // challenge 逐卡上界 = 桶 ≤8 × 每桶 ≤3 = 24（853 §4.3 ≤35 口径面：classify 1 + brief 1 + 桶 8 + challenge 24 ≈ 34）
+    expect(CHALLENGE_CARDS_MAX).toBe(BUCKETS_MAX * IDEA_CANDIDATES_MAX)
+    expect(CONTEXT_PACK_SEARCH_LIMIT).toBe(10)
+    expect(EVIDENCE_EXCERPT_MAX_CHARS).toBe(4_000)
+    // validate_idea_cards.py 字面迁移阈值（#848 §3.3）
+    expect(TARGET_PROBLEM_MIN_CHARS).toBe(30)
+    expect(MIN_EXPERIMENT_WARN_CHARS).toBe(20)
+    expect(IDEA_ANCHORS_MAX).toBe(4)
   })
 })

@@ -84,22 +84,47 @@ export function createWikiFake(initial: Record<string, string> = {}): WikiFake {
 
 // ---------------------------------------------------------------------------
 // llm fake（extract/critic slot 按 schema 形状判定——CRITIC_DOC_SCHEMA 有 candidates 键，
-// 对重试链正确）
+// 对重试链正确；#911 增 brief/bucket/challenge 三 slot：research_topic / cards / verdict 键）
 // ---------------------------------------------------------------------------
 
-export type SlotName = 'extract' | 'critic'
+export type SlotName = 'extract' | 'critic' | 'brief' | 'bucket' | 'challenge'
 export interface SlotLlm extends PluginLlmPort {
   readonly calls: { slot: SlotName; prompt: string }[]
 }
 
-export function createSlotLlm(handlers: { extract?: () => unknown; critic?: () => unknown }): SlotLlm {
+const slotOf = (shape: Record<string, unknown> | undefined): SlotName => {
+  if (shape?.verdict !== undefined) return 'challenge'
+  if (shape?.cards !== undefined) return 'bucket'
+  if (shape?.research_topic !== undefined) return 'brief'
+  return shape?.candidates !== undefined ? 'critic' : 'extract'
+}
+
+export function createSlotLlm(handlers: {
+  extract?: () => unknown
+  critic?: () => unknown
+  brief?: () => unknown
+  /** bucket 名可从 prompt 的「你的机会桶：<bucket>」行提取（per-bucket 行为用例）。 */
+  bucket?: (prompt: string) => unknown
+  /** 待反驳卡 JSON 在 prompt 的 <card> 块内。 */
+  challenge?: (prompt: string) => unknown
+}): SlotLlm {
   const calls: { slot: SlotName; prompt: string }[] = []
   const generateMultimodal = vi.fn(async () => ({ text: '' }))
   const generateStructured = vi.fn(
     async (opts: { schema: { parse: (v: unknown) => unknown; shape?: Record<string, unknown> }; contents: readonly unknown[] }) => {
-      const slot: SlotName = opts.schema.shape?.candidates !== undefined ? 'critic' : 'extract'
-      calls.push({ slot, prompt: String(opts.contents[0]) })
-      const value = slot === 'critic' ? (handlers.critic?.() ?? validCriticDoc()) : (handlers.extract?.() ?? validExtractDoc())
+      const slot = slotOf(opts.schema.shape)
+      const prompt = String(opts.contents[0])
+      calls.push({ slot, prompt })
+      const value =
+        slot === 'challenge'
+          ? (handlers.challenge?.(prompt) ?? { challenge: '未找到基于现有证据和约束的致命反驳', verdict: 'survived', verdict_reason: '核心假设可检验且证据可追溯。' })
+          : slot === 'bucket'
+            ? (handlers.bucket?.(prompt) ?? { cards: [] })
+            : slot === 'brief'
+              ? (handlers.brief?.() ?? validBrief())
+              : slot === 'critic'
+                ? (handlers.critic?.() ?? validCriticDoc())
+                : (handlers.extract?.() ?? validExtractDoc())
       return opts.schema.parse(value)
     },
   )
@@ -144,4 +169,41 @@ export const validCriticDoc = (
 ) => ({
   content: ['# 某论文审稿式问题分析', '', '`category: critic`', '', ...CRITIC_SECTIONS.map((s, i) => `## ${i} ${s}\n\n已有较强证据支持：具体质疑。`)].join('\n'),
   candidates,
+})
+
+// ---------------------------------------------------------------------------
+// W3 合法产物 fixture（#911）：Brief 10 字段（全填，免 ASSUMPTION 面噪声）+ idea card
+// 全字段合法卡（每 validate 规则恰好通过的边界形，同 researchIdeaCards.test 口径）。
+// ---------------------------------------------------------------------------
+
+export const validBrief = () => ({
+  research_topic: '分布外检测（OOD detection）',
+  target_task: '图像分类的 OOD 检测',
+  current_baseline: 'MCM',
+  available_data: 'CIFAR-10/100，ImageNet-200',
+  available_code: 'baseline 官方实现可改推理侧',
+  available_compute: '单卡 A100，24h 预算',
+  preferred_metrics: 'AUROC / FPR95',
+  hard_constraints: '不动训练流程',
+  known_failures: '温度缩放在 OOD 样本上失效',
+  desired_risk_level: 'medium-risk',
+})
+
+export const validIdeaCard = (over: Record<string, unknown> = {}) => ({
+  idea_id: 'P01-G1',
+  title: '基于能量分数的 OOD 判据改进',
+  one_sentence_hypothesis: '用能量分数替代 softmax 置信度可提升 OOD 检测的 AUROC。',
+  anchor_sources: ['papers/robust-out-of-distribution-detection.md#7 Limitations'],
+  target_problem: '现有方法的置信度校准机制在分布外样本上显著失效，导致误判率升高',
+  mechanism: '引入能量函数重新打分并校准阈值。',
+  paper_insight_or_limitation: '论文指出温度缩放对 OOD 样本不适用。',
+  evidence_chain: ['papers/robust-out-of-distribution-detection.md#7 Limitations', '论文 §6 Table 2'],
+  minimum_experiment: '在 CIFAR-100 上复现 baseline 并替换打分函数，对比 AUROC/FPR95。',
+  expected_metric_change: 'AUROC +2.0，FPR95 −1.5。',
+  implementation_scope: '仅改推理打分与阈值选择，不动训练。',
+  risks: '能量分数对超参敏感，可能需要重新调温。',
+  confidence: 'medium',
+  recommendation_reason: '动机直接来自论文 limitation，实验改动小。',
+  wiki_writeback: 'papers/robust-out-of-distribution-detection.md#7 Limitations 可补记该改进方向。',
+  ...over,
 })
