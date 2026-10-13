@@ -35,10 +35,11 @@ export function contentToText(content: readonly PluginToolContentBlock[]): strin
 // 挂起（checkpoint 落库）；resume 重放时同闭包返回历史 resume 值。
 //
 // 返回面 = {value, historical}（#912 review 修复）：historical = 本次消费的是 resume 队列
-// 的历史值（callIdx < scratchpad.resume.length——LangGraph 队列语义：每次重放消费历史值
-// 至队列末位前，末位对应新挂起点）——历史轮跳过审计落行，保「3 轮修订 = 3 行」于多轮
-// 重放。callIdx 为包装实例的调用计数（每次 resume 重放 = 新工具执行 = 新实例，从 1 起）。
-const graphInterruptOf = (runtime: unknown): ((value: unknown) => { value: unknown; historical: boolean }) | undefined => {
+// 的历史值（callIdx <= scratchpad.resume.length——LangGraph 队列语义：interruptCounter 0 基
+// 递增，历史消费条件 idx < resume.length，idx = callIdx - 1；每次重放消费历史值至队列末位
+// 前，末位对应新挂起点）——历史轮跳过审计落行，保「3 轮修订 = 3 行」于多轮重放。
+// callIdx 为包装实例的调用计数（每次 resume 重放 = 新工具执行 = 新实例，从 1 起）。
+export const graphInterruptOf = (runtime: unknown): ((value: unknown) => { value: unknown; historical: boolean }) | undefined => {
   const configurable = (runtime as { configurable?: Record<string, unknown> } | null | undefined)?.configurable
   if (configurable === undefined || !('__pregel_checkpointer' in configurable)) return undefined
   let callIdx = 0
@@ -47,7 +48,7 @@ const graphInterruptOf = (runtime: unknown): ((value: unknown) => { value: unkno
     const scratchpad = (configurable as { __pregel_scratchpad?: { resume?: unknown[] } }).__pregel_scratchpad
     const resumeLen = Array.isArray(scratchpad?.resume) ? scratchpad.resume.length : 0
     const result = AsyncLocalStorageProviderSingleton.runWithConfig(runtime, () => interrupt(value))
-    return { value: result, historical: callIdx < resumeLen }
+    return { value: result, historical: callIdx <= resumeLen }
   }
 }
 

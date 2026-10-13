@@ -137,18 +137,21 @@ describe('historical 判别（#912 review 修复：多轮 resume 重放「3 轮 
   it('历史轮（historical=true）跳过审计；当前轮落行', async () => {
     const auditRows: unknown[] = []
     const payloads: PlanInterruptPayload[] = []
-    // 模拟重放：第 1 次 interrupt 消费历史值（historical=true），第 2 次当前轮。
-    const seq: boolean[] = [true, false]
-    let n = 0
+    // fake 按 LangGraph 队列口径推导 historical（tools.ts graphInterruptOf 同式）：1 个
+    // 已持久化历史值 + 1 个待消费新值——callIdx（1 基）<= 历史值数 = 历史消费（重放形态：
+    // 第 1 次 interrupt 消费历史 deny，第 2 次消费当前 approve）。
+    const historyLen = 1
+    let callIdx = 0
     const result = await runPlanReviewLoop({
       toolCallId: 'tc-h',
       buildPlan: async () => buildExperimentPlan({ question: 'Q' }, validSpecDoc()),
       hooks: {
         interrupt: (payload) => {
           payloads.push(payload)
+          callIdx += 1
           return {
-            value: { decisions: [{ type: n === 0 ? 'reject' : 'approve', message: `d${n}` }] },
-            historical: seq[n++]!,
+            value: { decisions: [{ type: callIdx <= historyLen ? 'reject' : 'approve', message: `d${callIdx}` }] },
+            historical: callIdx <= historyLen,
           }
         },
         recordAudit: (row) => {
@@ -157,7 +160,7 @@ describe('historical 判别（#912 review 修复：多轮 resume 重放「3 轮 
       },
     })
     expect(result.outcome).toBe('approved')
-    // 历史轮（deny d0）跳过；当前轮（approve）落 1 行——重放不重复写历史审计。
+    // 历史轮（deny d1）跳过；当前轮（approve）落 1 行——重放不重复写历史审计。
     expect(auditRows).toHaveLength(1)
     expect((auditRows[0] as { decision: string }).decision).toBe('allow')
   })

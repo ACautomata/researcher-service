@@ -501,3 +501,72 @@ describe('W4 experiment 工具边界（#912 · interrupt 载荷边界断言）',
     await expect(executeResearchWorkflow('w4-7', { ...W4_REQUEST }, exec)).rejects.toThrow(/fail-closed/)
   })
 })
+
+
+// ---------------------------------------------------------------------------
+// graphInterruptOf 直测（#912 review 修复 P0-1）：historical 判别按 LangGraph 真实队列
+// 语义锁定——真实 interrupt() 跑三分支（历史消费 / nullResume 新值消费 / 挂起 throw），
+// scratchpad 形状按 langgraph 1.4.18（interruptCounter -1 起 0 基递增 / resume = 已持久化
+// 历史值 / nullResume 待消费新值，消费时 push 进 resume）。历史消费条件 idx < resume.length
+// ⇔ 1 基 callIdx <= resume.length——deny→deny→approve 三轮重放下终局恰 3 行审计的判别根。
+// ---------------------------------------------------------------------------
+import { graphInterruptOf } from '../src/plugins/tools'
+import { GraphInterrupt } from '@langchain/langgraph'
+
+const makeScratchpadRuntime = (resume: unknown[], nullResume?: unknown) => {
+  const scratchpad: {
+    interruptCounter: number
+    resume: unknown[]
+    nullResume: unknown
+    consumeNullResume: () => unknown
+  } = {
+    interruptCounter: -1,
+    resume: [...resume],
+    nullResume: nullResume as unknown,
+    consumeNullResume: () => {
+      const v = scratchpad.nullResume
+      scratchpad.nullResume = undefined
+      return v
+    },
+  }
+  return {
+    runtime: { configurable: { __pregel_checkpointer: {}, __pregel_scratchpad: scratchpad } } as unknown,
+    scratchpad,
+  }
+}
+
+const resumeDecision = (label: string) => ({ decisions: [{ type: 'approve', message: label }] })
+
+describe('graphInterruptOf：historical 判别 = LangGraph 队列语义（P0-1）', () => {
+  it('无 checkpointer（configurable 缺 __pregel_checkpointer）→ undefined（命令直达不可挂起）', () => {
+    expect(graphInterruptOf({ configurable: {} })).toBeUndefined()
+    expect(graphInterruptOf(undefined)).toBeUndefined()
+  })
+
+  it('0 历史值：首调消费 nullResume（historical=false）；次调挂起 throw GraphInterrupt', () => {
+    const { runtime } = makeScratchpadRuntime([], resumeDecision('v0'))
+    const fn = graphInterruptOf(runtime)!
+    expect(fn(resumeDecision('p0'))).toEqual({ value: resumeDecision('v0'), historical: false })
+    expect(() => fn(resumeDecision('p1'))).toThrow(GraphInterrupt)
+  })
+
+  it('2 历史值：前两调 historical=true 依次返回历史值；第三调消费 nullResume（false）；第四调挂起', () => {
+    const { runtime, scratchpad } = makeScratchpadRuntime([resumeDecision('h0'), resumeDecision('h1')], resumeDecision('v2'))
+    const fn = graphInterruptOf(runtime)!
+    expect(fn(resumeDecision('p0'))).toEqual({ value: resumeDecision('h0'), historical: true })
+    expect(fn(resumeDecision('p1'))).toEqual({ value: resumeDecision('h1'), historical: true })
+    expect(fn(resumeDecision('p2'))).toEqual({ value: resumeDecision('v2'), historical: false })
+    expect(() => fn(resumeDecision('p3'))).toThrow(GraphInterrupt)
+    // 新值消费时 push 进 resume 队列（历史值持久化面——下次重放本值即历史）。
+    expect(scratchpad.resume).toHaveLength(3)
+  })
+
+  it('3 历史值无 nullResume：三轮 historical=true 后挂起（deny→deny→deny 终局轮重放形态）', () => {
+    const { runtime } = makeScratchpadRuntime([resumeDecision('h0'), resumeDecision('h1'), resumeDecision('h2')])
+    const fn = graphInterruptOf(runtime)!
+    expect(fn(resumeDecision('p0'))!.historical).toBe(true)
+    expect(fn(resumeDecision('p1'))!.historical).toBe(true)
+    expect(fn(resumeDecision('p2'))!.historical).toBe(true)
+    expect(() => fn(resumeDecision('p3'))).toThrow(GraphInterrupt)
+  })
+})
