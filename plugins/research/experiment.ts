@@ -428,6 +428,9 @@ export function createExperimentPlanGraph(ports: ExperimentPlanPorts): {
   // persist（lab 落盘 · 幂等短路点写面）：三件产物 + collect 对账旁车同目录写——spec.md =
   // 哨兵（重放检测），deliverables.json = collect 确定性对账的结构化消费面（markdown 正文
   // 无法可靠恢复结构化面）。修订轮覆盖（同路径再写 = 内容替换）。
+  // 写序（#912 review 修复 P0-2）：spec **最后写**——哨兵 = 全链完成信号：中途失败
+  // （容器瞬断）残留 design/audit 无害（planEntry 只认 spec.md，重跑不短路重新生成自愈）；
+  // 反序（spec 先写）残留 spec → 下次调用短路直达人审且 audit/deliverables 缺失无自愈面。
   async function persistNode(
     state: ExperimentState,
     config: LangGraphRunnableConfig | undefined,
@@ -439,9 +442,9 @@ export function createExperimentPlanGraph(ports: ExperimentPlanPorts): {
     })
     const writes: ReadonlyArray<readonly [string, string]> = [
       [designPathOf(state.request, state.round), state.designDoc!.content],
-      [specPathOf(state.request, state.round), state.specDoc!.content],
       [auditPathOf(state.request, state.round), state.auditReport ?? ''],
       [deliverablesPathOf(state.request, state.round), sidecar],
+      [specPathOf(state.request, state.round), state.specDoc!.content],
     ]
     for (const [path, content] of writes) {
       const r = await ports.lab.write({ path, content })

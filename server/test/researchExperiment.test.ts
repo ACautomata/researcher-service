@@ -246,6 +246,27 @@ describe('W4 调用① 方案设计图（S2 fake ports）', () => {
     await expect(invoke(ports, REQUEST)).rejects.toThrow('## 6 最值得优先执行的 3 个实验')
   })
 
+  it('persist 写序：spec 哨兵最后写——中途失败残留态不短路（重跑自愈，P0-2）', async () => {
+    const ports = makePorts()
+    // audit.md 写失败（容器瞬断形态）→ persist throw。
+    const failingLab = {
+      ...ports.lab,
+      write: async (input: { path: string; content: string }) =>
+        input.path.endsWith('/audit.md')
+          ? { ok: false as const, error: { code: 'sandbox_unavailable' as const, message: '容器瞬断' } }
+          : ports.lab.write(input),
+    }
+    await expect(
+      createExperimentPlanGraph({ llm: ports.llm, wiki: ports.wiki, lab: failingLab }).invoke({ request: REQUEST as never }),
+    ).rejects.toThrow('方案产物落盘失败')
+    // spec 哨兵未落盘（全链完成信号）——残留 design.md 无害，planEntry 只认 spec.md。
+    expect([...ports.labFake.files.keys()].filter((k) => k.endsWith('/spec.md'))).toHaveLength(0)
+    // lab 恢复后重跑：不短路（重新生成），全链完成落盘四件。
+    const recovered = await invoke(ports, REQUEST)
+    expect(recovered.status).toBe('completed')
+    expect([...ports.labFake.files.keys()].filter((k) => k.endsWith('/spec.md'))).toHaveLength(1)
+  })
+
   it('stage 序列：resolveInputs/preflight/design/validate/spec/audit/persist/summary 冒泡', async () => {
     const ports = makePorts()
     const stages: string[] = []
