@@ -18,7 +18,7 @@ import { END, START, StateGraph, Annotation, z } from '../../server/src/plugins/
 import type { LangGraphRunnableConfig } from '../../server/src/plugins/autofigureDeps'
 import type { PluginClaimDraft, PluginDocsPort, PluginLlmPort, PluginWikiPort } from '../../server/src/plugins/api'
 import { PAGE_DRAFT_MAX, SOURCE_PATHS_V1_MAX, SUMMARY_MAX_CHARS } from './values'
-import { paperPageSlug, validatePaperPage, escapeRegExp } from './pageValidate'
+import { paperPageSlug, validatePaperPage, sectionLineRegex } from './pageValidate'
 import { generateWithBoundedRetry } from './generate'
 import { buildCreatePaperPagePrompt, PAPER_PAGE_ANCHORS, PAPER_PAGE_SECTIONS } from './prompts'
 import { compiledInvokeOptions, stageReporterOf, wikiReadPathOf } from './graph'
@@ -73,9 +73,9 @@ function normalizeForHash(text: string): string {
 // 对账域归一（PR #917 review r1 Spec 新2）：openwiki section 切分自首个锚 heading 行起、
 // 其前导（H1 标题/导语）不属任何锚节、回读拼接天然不含——draft 侧切到同一域后再哈希，
 // LLM 在首节前输出导语不再误杀对账；首节行缺失（validate 已拦的理论面）全文比对兜底
-//（fail-closed）。
+//（fail-closed）。切片正则复用 pageValidate.sectionLineRegex（r2 S 新1：与 validate 同形单源）。
 function draftSectionDomain(content: string): string {
-  const m = new RegExp(`^##\\s*1\\s+${escapeRegExp(PAPER_PAGE_SECTIONS[0])}\\s*$`, 'm').exec(content)
+  const m = sectionLineRegex(1, PAPER_PAGE_SECTIONS[0]).exec(content)
   return m === null ? content : content.slice(m.index)
 }
 

@@ -38,7 +38,8 @@ const failWith = (issues: readonly string[]): ValidateResult => ({ ok: false, is
 export const escapeRegExp = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
 // 节标题行匹配（钉死形态 `## <n> <title>`，宽松空白；标题逐字对齐节结构清单）。
-const sectionLineRegex = (n: number, title: string): RegExp =>
+// export（PR #917 review r2 S 新1）：verify 对账域切片与 gate 节锚回查同形复用。
+export const sectionLineRegex = (n: number, title: string): RegExp =>
   new RegExp(`^##\\s*${n}\\s+${escapeRegExp(title)}\\s*$`, 'm')
 
 const missingSectionIssues = (sections: readonly string[], content: string, start: number, label: string): string[] =>

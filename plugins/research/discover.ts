@@ -70,9 +70,10 @@ function criticTitleOf(content: string, fallback: string): string {
   return h1 ? h1[1]!.trim() : fallback
 }
 
-// 节标题行精确匹配（`^## <text>` 行级——includes 子串弱匹配会误放正文对节名的提及）。
+// 节标题行匹配（`^## <text>$` 行级，行尾锚对齐 pageValidate.sectionLineRegex 形态——
+// includes 子串弱匹配会误放正文对节名的提及；r2 S 新2 名实对齐）。
 function sectionHeadingLine(doc: string, headingText: string): boolean {
-  return new RegExp(`^##\\s*${escapeRegExp(headingText)}`, 'm').test(doc)
+  return new RegExp(`^##\\s*${escapeRegExp(headingText)}\\s*$`, 'm').test(doc)
 }
 
 // 裸页引用（无节锚）存在性回查哨兵锚（PR #917 review Spec#8）：openwiki readPage 需
