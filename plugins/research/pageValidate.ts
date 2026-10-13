@@ -38,7 +38,8 @@ const failWith = (issues: readonly string[]): ValidateResult => ({ ok: false, is
 export const escapeRegExp = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
 // 节标题行匹配（钉死形态 `## <n> <title>`，宽松空白；标题逐字对齐节结构清单）。
-// export（PR #917 review r2 S 新1）：verify 对账域切片与 gate 节锚回查同形复用。
+// export（PR #917 review r2 S 新1）：ingest verify 对账域切片复用本函数；discover
+// evidenceGate 的 sectionHeadingLine 为形态对齐（`^## <text>$` 单参自由文本，不同签名）。
 export const sectionLineRegex = (n: number, title: string): RegExp =>
   new RegExp(`^##\\s*${n}\\s+${escapeRegExp(title)}\\s*$`, 'm')
 
