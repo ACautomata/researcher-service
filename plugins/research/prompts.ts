@@ -423,7 +423,6 @@ export const OPEN_PLACEHOLDERS = [
   '此处应填写训练入口文件路径',
   '请根据仓库结构自行定位',
 ] as const
-export const ALL_PLACEHOLDERS = [...INFERABLE_PLACEHOLDERS, ...OPEN_PLACEHOLDERS] as const
 
 // design 实验条目结构化面（validate¹ 映射校验泛化的消费面；##3+##4 合流——
 // 「每实验必须服务一个明确的验证目标（critic 问题或假说）」）。
@@ -443,7 +442,8 @@ export interface SpecDeliverableSpec {
 // W3 challenge：顺序逐卡反驳（brainstorm main 反驳门禁语义——只有使核心假设/可行性/
 // 可检验性不成立的具体反驳才是 rejected；笼统不确定性不是）。语义去重并入本节点：
 // 「已有工作已覆盖」判据含本批次其他候选（实质重复归并）。
-export function buildChallengePrompt(packText: string, cardJson: string, peerTitles: readonly string[]): string {  return `你是假说反驳者。基于 Context Pack 对给定 Idea Card 尝试提出致命反驳。
+export function buildChallengePrompt(packText: string, cardJson: string, peerTitles: readonly string[]): string {
+  return `你是假说反驳者。基于 Context Pack 对给定 Idea Card 尝试提出致命反驳。
 
 ## verdict 判据（唯一依据）
 
@@ -708,7 +708,7 @@ export function buildCollectSummaryPrompt(input: {
   const reckoningText = input.reckonings
     .map((r) => {
       const head = r.present ? `已就位：${r.path}` : `缺失：${r.path}`
-      const body = r.present && r.content !== undefined ? `\n内容：\n\`\`\`\n${r.content.slice(0, 4000)}\n\`\`\`` : ''
+      const body = r.present && r.content !== undefined ? `\n内容：\n\`\`\`\n${r.content}\n\`\`\`` : ''
       return `${head}\n成功判据：${r.success_criterion}${body}`
     })
     .join('\n\n')

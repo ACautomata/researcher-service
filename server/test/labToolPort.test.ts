@@ -115,6 +115,17 @@ describe('createPluginLabPort（S2 fake 原语）', () => {
     if (!r.ok) expect(r.error.code).toBe('sandbox_unavailable')
   })
 
+  it('read：test -f 通过但归档内无目标文件（探针后竞态/daemon 返回面异常）→ not_found（与 too_large 分开归因，P1-7）', async () => {
+    const primitives = {
+      exec: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
+      getArchive: async () => createTarTree([]),
+    } as unknown as SandboxFilePrimitives
+    const port = createPluginLabPort({ container: 'x', primitives })
+    const r = await port.read({ path: '/lab/results/gone.json' })
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.error.code).toBe('not_found')
+  })
+
   it('二进制嗅探：NUL 字节 → 拒（collect 对账交付物是文本 JSON/CSV/md 面）', async () => {
     const { files, port } = labFake()
     files.set('/lab/results/bin.json', 'a\u0000b')

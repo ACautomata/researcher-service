@@ -15,18 +15,18 @@
 import { END, START, StateGraph, Annotation, z } from '../../server/src/plugins/autofigureDeps'
 import type { LangGraphRunnableConfig } from '../../server/src/plugins/autofigureDeps'
 import type { PluginLabPort, PluginLlmPort, PluginWikiPort } from '../../server/src/plugins/api'
-import { PAGE_DRAFT_MAX, SPEC_DELIVERABLES_MAX } from './values'
+import { PAGE_DRAFT_MAX, RECKONING_EXCERPT_MAX_CHARS, SPEC_DELIVERABLES_MAX } from './values'
 import { buildCollectSummaryPrompt, EXPERIMENT_REPORT_CATEGORY_TAG } from './prompts'
 import type { SpecSidecar } from './experimentPlan'
 import { compiledInvokeOptions, stageReporterOf } from './graph'
 import type { FlowGraphInvokeOptions, ResearchWorkflowRequest, WorkflowArtifactPage, WorkflowOutcome } from './graph'
 import type { ClarifyResult } from './clarify'
 
-// W4 collect 计算端口（wiki 建页 + lab 读写；llm pin 由装配层包装）。
+// W4 collect 计算端口（wiki 建页 + lab 读面；llm pin 由装配层包装）。
 export interface ExperimentCollectPorts {
   readonly llm: PluginLlmPort
   readonly wiki: Pick<PluginWikiPort, 'createPage'>
-  readonly lab: Pick<PluginLabPort, 'read' | 'write'>
+  readonly lab: Pick<PluginLabPort, 'read'>
 }
 
 // collect 段 spec 路径面：request.source_paths[0]（/lab/specs/<slug>/spec.md——主 agent
@@ -51,7 +51,8 @@ export const SPEC_SIDECAR_SCHEMA = z
 
 const sidecarPathOf = (specPath: string): string => `${specPath.slice(0, specPath.lastIndexOf('/'))}/deliverables.json`
 
-// 对账单件结果（summarize 输入面 + summary 不静默面）。
+// 对账单件结果（summarize 输入面 + summary 不静默面）。content = 就位件的 excerpt
+//（RECKONING_EXCERPT_MAX_CHARS 截断——20 件 ×16MiB 全文驻留的内存放大面，#912 review P1）。
 export interface DeliverableReckoning {
   readonly path: string
   readonly success_criterion: string
@@ -73,7 +74,7 @@ type ExperimentReport = z.infer<typeof EXPERIMENT_REPORT_SCHEMA>
 const COLLECT_CLARIFY_BAD_SPEC_PATH = (raw: string): ClarifyResult => ({
   status: 'clarify',
   candidates: [],
-  question: `collect（结果对账）需要 spec 路径（/lab/specs/<slug>/spec.md 形态——实验方案批准后工具返回的引用）；收到 ${raw}。请先完成实验方案设计与审批，再发起 collect。`,
+  question: `collect（结果对账）需要 spec 路径（/lab/specs/<slug>/r<N>/spec.md 形态——实验方案批准后工具返回的引用）；收到 ${raw}。请先完成实验方案设计与审批，再发起 collect。`,
 })
 
 const COLLECT_CLARIFY_SPEC_MISSING = (specPath: string): ClarifyResult => ({
@@ -161,7 +162,7 @@ export function createExperimentCollectGraph(ports: ExperimentCollectPorts): {
         path: d.path,
         success_criterion: d.success_criterion,
         present: r.ok,
-        content: r.ok ? r.data.content : undefined,
+        content: r.ok ? r.data.content.slice(0, RECKONING_EXCERPT_MAX_CHARS) : undefined,
       })
     }
     return { specPath: raw, specContent: spec.data.content, sidecar: parsed.data, reckonings }

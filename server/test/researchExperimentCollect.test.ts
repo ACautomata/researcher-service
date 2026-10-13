@@ -70,7 +70,7 @@ describe('W4 调用③ collect 结果对账图（S2 fake ports）', () => {
     expect(provenance).toEqual({ workflow: 'experiment', relatedPages: [CRITIC_PATH] })
   })
 
-  it('collect：spec 路径形态白名单 → clarify（非 /lab/specs/<slug>/spec.md 拒）', async () => {
+  it('collect：spec 路径形态白名单 → clarify（非 /lab/specs/<slug>/r<N>/spec.md 拒，文案示例含 round 键控段）', async () => {
     const ports = makePorts(postPlanLab())
     const graph = createExperimentCollectGraph({ llm: ports.llm, wiki: ports.wiki, lab: ports.lab })
     for (const bad of ['/lab/results/spec.md', '/lab/specs/spec.md', 'lab/specs/ab12/spec.md']) {
@@ -78,7 +78,29 @@ describe('W4 调用③ collect 结果对账图（S2 fake ports）', () => {
       expect(r.status).toBe('clarify')
       expect(r.clarify?.question).toContain('collect')
     }
+    const clarifyQ = (await graph.invoke({ request: { ...collectRequest, source_paths: ['/lab/specs/spec.md'] } as never })).clarify!
+      .question
+    expect(clarifyQ).toContain('/r<N>/') // round 键控路径形（P1-3：文案与 SPEC_PATH_RE 同口径）
     expect(ports.calls.filter((c) => c.slot === 'report')).toHaveLength(0)
+  })
+
+  it('对账内容截断面：交付物全文超上限 → 对账面存 excerpt（prompt 面上限截断，不全文驻留状态）', async () => {
+    const tail = 'END-OF-FULL-CONTENT'
+    const big = `${'x'.repeat(5000)}${tail}`
+    const lab = createLabFake({
+      [SPEC_PATH]: validSpecDoc().content,
+      [deliverablesPathOf(REQUEST)]: JSON.stringify({
+        deliverables: [{ path: '/lab/results/ablation.json', success_criterion: 'c' }],
+        inputPages: [],
+      } satisfies SpecSidecar),
+      '/lab/results/ablation.json': big,
+    })
+    const ports = makePorts(lab)
+    const graph = createExperimentCollectGraph({ llm: ports.llm, wiki: ports.wiki, lab: ports.lab })
+    await graph.invoke({ request: collectRequest as never })
+    const summaryPrompt = ports.calls.find((c) => c.slot === 'report')!.prompt
+    expect(summaryPrompt).toContain('x'.repeat(100)) // 头部在
+    expect(summaryPrompt).not.toContain(tail) // 全文未驻留（截断面在 collect 侧）
   })
 
   it('collect：spec 缺失（not_found）→ clarify 提示先完成方案设计审批', async () => {

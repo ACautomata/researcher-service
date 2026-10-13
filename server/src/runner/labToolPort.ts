@@ -95,8 +95,12 @@ export function createPluginLabPort(deps: PluginLabToolPortDeps): PluginLabPort 
         const entries = parseTar(tar, { collectData: true, maxDataBytes: MAX_FILE_READ_BYTES })
         const base = baseNameOf(path)
         const entry = entries.find((x) => x.type === 'file' && x.name === base)
-        if (entry === undefined || entry.data === null) {
-          // data=null 只可能是 maxDataBytes 截断（collectData 且单文件护栏）→ 超大明确报错。
+        // 归因分开（#912 review P1）：归档内无目标文件 = 探针后竞态/daemon 返回面异常 →
+        // not_found；data=null 只可能是 maxDataBytes 截断（collectData 且单文件护栏）→ 超大。
+        if (entry === undefined) {
+          throw new PluginLabPortError('not_found', `归档内无目标文件（探针后竞态或 daemon 返回面异常）: ${path}`)
+        }
+        if (entry.data === null) {
           throw new PluginLabPortError('too_large', `文件超 ${MAX_FILE_READ_BYTES} 字节护栏（collect 对账输入面，不静默截断）: ${path}`)
         }
         const content = entry.data.toString('utf8')

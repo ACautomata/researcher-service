@@ -15,6 +15,8 @@ import type { AuthUser } from '../types'
 import type { PrismaClient } from '../generated/prisma/client'
 import type { PluginAuditPort, PluginRunAuditEvent } from '../plugins/api'
 import { TRACE_TEXT_MAX, recordTextTrace } from '../traceLogs/service'
+import { truncateChars } from '../runner/approval/judge'
+import { APPROVAL_REASON_MAX_CHARS } from '../runner/approval/values'
 
 // SSE 用户面事件名派生（#853 §3.1：SSE 事件族名按 manifest run.kind 声明派生）。
 // 'figure' → 'figure_run.progress' 与既有事件名逐字一致（声明迁移后行为零变）。
@@ -161,7 +163,11 @@ export function createPrismaPluginRunAuditSink(
             decision: row.decision,
             toolName: row.toolName,
             toolCall: row.toolCall,
-            ...(row.reason != null && row.reason !== '' ? { reason: row.reason } : {}),
+            // reason 截断与 funnel 落库同口径（APPROVAL_REASON_MAX_CHARS——ADR 0018 §5
+            // 「funnel writeAudit 同款」的兑现，#912 review P1-2）。
+            ...(row.reason != null && row.reason !== ''
+              ? { reason: truncateChars(row.reason, APPROVAL_REASON_MAX_CHARS) }
+              : {}),
           },
         })
         return true
