@@ -145,8 +145,10 @@ export const sendSessionMessage = (id: string, content: string, key: string, att
 export const abortSession = (id: string) => apiJson<{ runId: string }>(`${path(id)}/abort`, { method: 'POST' })
 
 // 审批回覆（#783：decision allow=放行一次 / deny=拒绝；allow-always 已砍）。
-export const resolveSessionApproval = (id: string, escalationId: string, decision: 'allow' | 'deny') =>
-  apiJson<null>(`${path(id)}/approvals/${encodeURIComponent(escalationId)}`, { method: 'POST', body: JSON.stringify({ decision }) })
+// #913：reason 可选随行（W4 方案卡拒绝必填/批准附言，server sessionApprovalSchema reason
+// ≤2000 已支持；漏斗卡两键不传）。
+export const resolveSessionApproval = (id: string, escalationId: string, decision: 'allow' | 'deny', reason?: string) =>
+  apiJson<null>(`${path(id)}/approvals/${encodeURIComponent(escalationId)}`, { method: 'POST', body: JSON.stringify({ decision, ...(reason !== undefined ? { reason } : {}) }) })
 
 // 附件上传（multipart，单文件字段 file；REST 不直写沙箱——物化归图内 ingestion 节点 #780）。
 // 入参 Blob + 名称/mime（图片在前端降采样，文件保留原始 Blob；

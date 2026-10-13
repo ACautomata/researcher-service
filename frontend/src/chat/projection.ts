@@ -37,6 +37,7 @@ export interface ToolRow {
   rejection?: { source: string; reason: string }
   stage?: string // 域 run 进行态阶段（figure_run.progress，#799 story 50）——进行态装饰，
   // tool.end 与 run 终态剥落（回放行不构造，零差异不被污染；isPartial 同语义 #752 §2.4）
+  workflow?: string // research 双段徽标语境面（research_run.progress 透传，853 §6.2）——剥落同 stage
 }
 
 // figure run 六 stage 白名单（#744 §5.5，镜像 server figures/figureAudit.ts 单源顺序——
@@ -297,10 +298,10 @@ function isEmptyMsg(m: Msg): boolean {
 function finalizeOverlay(m: Msg): Msg | null {
   m.streaming = false
   m.thinkingOpen = false
-  if (m.tools.some((t) => t.stage !== undefined)) {
+  if (m.tools.some((t) => t.stage !== undefined || t.workflow !== undefined)) {
     m.tools = m.tools.map((t) => {
-      if (t.stage === undefined) return t
-      const { stage: _drop, ...rest } = t
+      if (t.stage === undefined && t.workflow === undefined) return t
+      const { stage: _drop, workflow: _dropWf, ...rest } = t
       return rest
     })
   }
@@ -334,7 +335,7 @@ export function applyEvent(prev: Msg[], event: SessionEvent): Msg[] {
     return next
   }
 
-  if (type === 'text.delta' || type === 'thinking.delta' || type === 'tool.start' || type === 'tool.end' || type === 'figure_run.progress' || type === 'attachment') {
+  if (type === 'text.delta' || type === 'thinking.delta' || type === 'tool.start' || type === 'tool.end' || type === 'figure_run.progress' || type === 'research_run.progress' || type === 'attachment') {
     const idx = overlayIndex(prev, event.runId)
     // 无 overlay（事件先于 run.started 的乱序源/foreign run）：text/thinking 建行承载，
     // tool/figure progress/attachment 无落点丢弃——镜像服务端「tool.end 无先前行忽略」的宽容度。
@@ -393,6 +394,7 @@ export function applyEvent(prev: Msg[], event: SessionEvent): Msg[] {
       if (typeof event.payload.details === 'string') row.result = coerceJsonish(event.payload.details)
       if (event.payload.truncated === true) row.truncated = true
       delete row.stage // 终态行剥进行态装饰（回放行不构造，零差异不被污染）
+      delete row.workflow // research 双段徽标语境面同剥（853 §6.2）
       const rejection = event.payload.rejection
       if (rejection && typeof rejection === 'object') {
         const r = rejection as { source?: unknown; reason?: unknown }
@@ -411,6 +413,20 @@ export function applyEvent(prev: Msg[], event: SessionEvent): Msg[] {
       const tIdx = overlay.tools.findIndex((t) => t.id === toolCallId)
       if (tIdx < 0 || overlay.tools[tIdx].stage === stage) return prev
       overlay.tools[tIdx] = { ...overlay.tools[tIdx], stage }
+    } else if (type === 'research_run.progress') {
+      // 域 run 进行态（853 §6.2）：透传纪律——stage 不设前端白名单（server manifest
+      // progressStages 声明已是唯一关卡），workflow 域字段随帧透传（双段徽标语境面）。
+      // 无 toolCallId/无匹配工具行/无变化帧一律原样返回；回放路径不构造本事件
+      //（research_run.progress 即焚不落投影），tool.end 与 run 终态剥落同 stage 语义。
+      const toolCallId = asString(event.payload.toolCallId)
+      const stage = event.payload.stage
+      if (!toolCallId || typeof stage !== 'string') return prev
+      const tIdx = overlay.tools.findIndex((t) => t.id === toolCallId)
+      if (tIdx < 0) return prev
+      const row = overlay.tools[tIdx]
+      const workflow = event.payload.workflow
+      if (row.stage === stage && row.workflow === workflow) return prev
+      overlay.tools[tIdx] = { ...row, stage, ...(typeof workflow === 'string' ? { workflow } : {}) }
     } else {
       // attachment：#780 D9 媒体引用直推（校验门镜像 server reducer.ts 的接受面）。
       const p = event.payload as Partial<MediaRef> | null

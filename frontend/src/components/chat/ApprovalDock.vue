@@ -3,6 +3,7 @@
 // 卡片本身仍复用 ApprovalCard，审批状态机与事件协议保持不变。
 // #920 §1（853 §6.2）：source==='experiment-plan' 分流 PlanApprovalCard（W4 方案人审卡，
 // resolve 两值契约同形）；其余四 source 仍 ApprovalCard 原样。
+// #913：resolve 透传可选第三参 reason（方案卡拒绝必填理由/批准附言；漏斗卡两键不传）。
 import type { ApprovalItem } from '@/stores/chat'
 import ApprovalCard from '@/components/chat/ApprovalCard.vue'
 import PlanApprovalCard from '@/components/chat/PlanApprovalCard.vue'
@@ -14,7 +15,7 @@ defineProps<{
 }>()
 
 const emit = defineEmits<{
-  resolve: [approval: ApprovalItem, decision: 'allow' | 'deny']
+  resolve: [approval: ApprovalItem, decision: 'allow' | 'deny', reason?: string]
   toggleDetail: [approval: ApprovalItem]
 }>()
 </script>
@@ -38,7 +39,7 @@ const emit = defineEmits<{
             v-if="approval.source === 'experiment-plan'"
             :approval="approval"
             :disconnected="disconnected"
-            @resolve="(a, decision) => emit('resolve', a, decision)"
+            @resolve="(a, decision, reason) => emit('resolve', a, decision, reason)"
           />
           <ApprovalCard
             v-else

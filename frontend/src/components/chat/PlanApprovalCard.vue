@@ -1,31 +1,53 @@
 <script setup lang="ts">
-// W4 实验方案审批卡（#920 §1 · 853 §5.1/§6.2 卡内容契约）：ApprovalDock 按
-// source==='experiment-plan' 分流的专用子组件（其余四 source 仍 ApprovalCard）。
-// 标题 + 轮次徽标（第 N/3 轮，第 2/3 轮「最后一轮」提示）+ plan.title/summary + ▾ 方案全文
-// 折叠区（plan.text 经 MarkdownRenderer 渲染——spec 9 段结构化文档 plain pre 不可读）。
-// 盲批窗口修复面：方案全文已内联 escalation.plan.text，卡面必须可读后才允许审批。
-// props-in/emits-out 哑组件（#316：#340 拆分边界）；resolve 两值契约与 ApprovalCard 同形
-//（deny 理由输入与 reason 传递链归 #913，后端 bare deny 落「未说明理由」语义闭环）。
-// 方案块缺失（畸形 fail-soft）→ 回退 toolCallSummary 展示，卡不停摆。
+// W4 实验方案审批卡（#920 §1 展示面 + #913 reason 交互面 · 853 §5.1/§6.2 卡内容契约）：
+// ApprovalDock 按 source==='experiment-plan' 分流的专用子组件（其余四 source 仍 ApprovalCard）。
+// 展示面（#920 §1）：标题 + 轮次徽标（第 N/3 轮，第 2/3 轮「最后一轮」提示）+ plan.title/summary
+// + ▾ 方案全文折叠区（plan.text 经 MarkdownRenderer 渲染——spec 9 段结构化文档 plain pre 不可读）。
+// reason 交互面（#913）：[批准并执行] 直点（可选附言经「添加附言」展开输入）/ [拒绝] 点击滑出
+// 必填理由框 ≤2000 字（空理由禁提交）+ [确认拒绝][返回]——理由/附言输入仅限方案卡（漏斗卡
+// deny 理由无消费面不回喂 agent，保持两键）。props-in/emits-out 哑组件（#316：#340 拆分边界）；
+// resolve 契约两值 + 可选第三参 reason（server sessionApprovalSchema reason ≤2000 已支持）。
+// 方案块缺失（畸形 fail-soft，#920 §1）→ 回退 toolCallSummary 展示，卡不停摆。
 // 无 #796 teammate 徽标面：experiment-plan 由插件 research_workflow 工具产生（853 §5.1
 // 流程内置门禁），恒主会话 escalation，teammateId 恒 null。
 import { ref } from 'vue'
 import type { ApprovalItem } from '@/stores/chat'
 import MarkdownRenderer from '@/components/chat/MarkdownRenderer.vue'
 
-defineProps<{
+const props = defineProps<{
   approval: ApprovalItem
   disconnected: boolean
 }>()
 
 const emit = defineEmits<{
-  resolve: [approval: ApprovalItem, decision: 'allow' | 'deny']
+  resolve: [approval: ApprovalItem, decision: 'allow' | 'deny', reason?: string]
 }>()
 
 // 轮次上限显示面（853 §5.1：上限 3 轮；真源 plugins/research/values.ts，前端不引插件代码）。
 const PLAN_REVIEW_MAX_ROUNDS = 3
 
 const planOpen = ref(false)
+// 附言（approve 可选——落审计、随 resume 值作为执行注意事项传达）与拒绝理由框均为
+// 局部视图态（#913）。
+const noteOpen = ref(false)
+const note = ref('')
+const denyOpen = ref(false)
+const denyReason = ref('')
+
+const actionDisabled = () => props.approval.status !== 'pending' || props.disconnected
+
+function approve(): void {
+  emit('resolve', props.approval, 'allow', note.value.trim() || undefined)
+}
+function confirmDeny(): void {
+  const reason = denyReason.value.trim()
+  if (reason === '') return
+  emit('resolve', props.approval, 'deny', reason)
+}
+function backFromDeny(): void {
+  denyOpen.value = false
+  denyReason.value = ''
+}
 </script>
 
 <template>
@@ -51,20 +73,46 @@ const planOpen = ref(false)
     </template>
     <div v-else class="a-cmd" :title="approval.toolCallSummary">{{ approval.toolCallSummary }}</div>
     <div v-if="approval.status !== 'expired'" class="a-actions">
-      <button
-        class="btn-approve"
-        :disabled="approval.status !== 'pending' || disconnected"
-        :title="disconnected ? '连接已断开，请重新连接后操作' : '批准后流程自动续跑执行段'"
-        :data-test="`approve-${approval.id}`"
-        @click="emit('resolve', approval, 'allow')"
-      >{{ approval.status === 'resolving' ? '处理中…' : '批准并执行' }}</button>
-      <button
-        class="btn-deny"
-        :disabled="approval.status !== 'pending' || disconnected"
-        :title="disconnected ? '连接已断开，请重新连接后操作' : '拒绝本方案'"
-        :data-test="`deny-${approval.id}`"
-        @click="emit('resolve', approval, 'deny')"
-      >拒绝</button>
+      <template v-if="!denyOpen">
+        <button
+          class="btn-approve"
+          :disabled="actionDisabled()"
+          :title="disconnected ? '连接已断开，请重新连接后操作' : '批准后流程自动续跑执行段'"
+          :data-test="`approve-${approval.id}`"
+          @click="approve()"
+        >{{ approval.status === 'resolving' ? '处理中…' : '批准并执行' }}</button>
+        <button
+          class="btn-ghost note-toggle"
+          :disabled="actionDisabled()"
+          :data-test="`note-toggle-${approval.id}`"
+          @click="noteOpen = !noteOpen"
+        >{{ noteOpen ? '收起附言' : '添加附言' }}</button>
+        <textarea
+          v-if="noteOpen" v-model="note" class="note-input" rows="2" maxlength="2000"
+          :data-test="`note-input-${approval.id}`" placeholder="附言（可选，≤2000 字）：将作为执行注意事项传达"
+        />
+        <button
+          class="btn-deny"
+          :disabled="actionDisabled()"
+          :title="disconnected ? '连接已断开，请重新连接后操作' : '拒绝本方案并说明理由（回喂修订下一轮）'"
+          :data-test="`deny-${approval.id}`"
+          @click="denyOpen = true"
+        >拒绝</button>
+      </template>
+      <template v-else>
+        <textarea
+          v-model="denyReason" class="note-input deny-input" rows="3" maxlength="2000"
+          :data-test="`deny-input-${approval.id}`"
+          placeholder="拒绝理由（必填，≤2000 字）：将回喂修订下一轮方案"
+        />
+        <button
+          class="btn-deny"
+          :disabled="denyReason.trim() === '' || actionDisabled()"
+          :data-test="`deny-confirm-${approval.id}`"
+          @click="confirmDeny()"
+        >确认拒绝</button>
+        <button class="btn-ghost" :data-test="`deny-back-${approval.id}`" @click="backFromDeny()">返回</button>
+      </template>
     </div>
   </div>
 </template>
@@ -80,9 +128,11 @@ const planOpen = ref(false)
 .approval .plan-fold { background: transparent; border: none; color: var(--el-color-primary); cursor: pointer; font-size: 12.5px; padding: 6px 0 0; }
 .approval .plan-text { background: var(--el-bg-color); border: 1px solid var(--el-border-color-lighter); border-radius: 7px; padding: 4px 12px; margin-top: 6px; max-height: 40vh; overflow-y: auto; font-size: 13px; }
 .approval .a-cmd { font-family: ui-monospace, monospace; background: var(--el-fill-color-darker); border: 1px solid var(--el-border-color); border-radius: 7px; padding: 8px 10px; margin: 8px 0; font-size: 12.5px; white-space: pre-wrap; word-break: break-all; }
-.approval .a-actions { display: flex; gap: 9px; margin-top: 8px; }
+.approval .a-actions { display: flex; gap: 9px; margin-top: 8px; flex-wrap: wrap; align-items: flex-start; }
 .approval .a-actions button { border: none; border-radius: 7px; padding: 6px 14px; cursor: pointer; font-size: 13px; }
 .approval .a-actions button:disabled { cursor: not-allowed; opacity: .5; }
 .approval .btn-approve { background: var(--el-color-success); color: #fff; }
 .approval .btn-deny { background: transparent; border: 1px solid var(--el-color-danger); color: var(--el-color-danger); }
+.approval .btn-ghost { background: transparent; border: 1px solid var(--el-border-color); color: var(--el-text-color-secondary); }
+.approval .note-input { flex-basis: 100%; min-width: 0; border: 1px solid var(--el-border-color); border-radius: 7px; padding: 6px 10px; font-size: 12.5px; font-family: inherit; resize: vertical; background: var(--el-bg-color); }
 </style>

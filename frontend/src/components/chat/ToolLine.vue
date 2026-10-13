@@ -94,7 +94,8 @@ function diffSig(kind: DiffLineKind): string {
         </div>
       </div>
       <!-- #788 插件渲染卡：注册表命中组件消费 details；未注册保持默认输入/输出详情。
-           isPartial/stage = 进行态装饰（#752 §2.4 / #799：state==='running' 派生，终态恒缺省） -->
+           isPartial/stage = 进行态装饰（#752 §2.4 / #799：state==='running' 派生，终态恒缺省）；
+           workflow = research 双段徽标语境面（#913 · 853 §6.2，research_run.progress 归约产物） -->
       <component
         :is="pluginComponent"
         v-if="pluginComponent"
@@ -104,6 +105,7 @@ function diffSig(kind: DiffLineKind): string {
         :expanded="true"
         :is-partial="tool.state === 'running'"
         :stage="tool.stage"
+        :workflow="tool.workflow"
         :tool-call-id="tool.id ?? ''"
       />
       <template v-else>

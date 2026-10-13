@@ -84,7 +84,7 @@ export interface ChatSession {
   /** 发送（含乐观回显/幂等/断线排队）；attachments 为已上传附件引用。返回是否受理 */
   send(attachments?: SentAttachment[], onSettled?: (accepted: boolean) => void): boolean
   abort(): Promise<void>
-  resolveApproval(a: ApprovalItem, decision: 'allow' | 'deny'): Promise<void>
+  resolveApproval(a: ApprovalItem, decision: 'allow' | 'deny', reason?: string): Promise<void>
   slashQuery: Ref<string | null>
   slashMatches: Ref<SlashOption[]>
   slashOpen: Ref<boolean>
@@ -360,12 +360,13 @@ export function useChatSession(deps: ChatSessionDeps = {}): ChatSession {
     if (id) chat.removeApproval(id)
   }
 
-  async function resolveApproval(a: ApprovalItem, decision: 'allow' | 'deny'): Promise<void> {
+  async function resolveApproval(a: ApprovalItem, decision: 'allow' | 'deny', reason?: string): Promise<void> {
     const id = chat.selectedSession
     if (!id || disconnected.value) return
     chat.markApproval(a.id, 'resolving')
     try {
-      await resolveSessionApproval(id, a.id, decision)
+      // reason 随行（#913：W4 方案卡拒绝必填 / 批准附言；漏斗卡两键不传 → undefined 不落 body）
+      await resolveSessionApproval(id, a.id, decision, reason)
       chat.removeApproval(a.id) // resolved 卡不留痕（ADR 0014）；SSE resolved 事件幂等
     } catch (e) {
       if (e instanceof ApiError && e.code === 50004) {

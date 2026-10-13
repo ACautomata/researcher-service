@@ -651,12 +651,15 @@ describe('PlanApprovalCard', () => {
     expect(r2.text()).toContain('最后一轮')
   })
 
-  it('批准/拒绝 emit resolve 两值 + 断线禁用（与 ApprovalCard 同契约）', async () => {
+  it('批准直点 / 拒绝滑出必填理由框（#913 行为面——规格 853 §6.2 正典）+ 断线禁用（与 ApprovalCard 同契约）', async () => {
     const w = mount(PlanApprovalCard, { props: { approval: planCard, disconnected: false } })
     await w.find('[data-test="approve-a1"]').trigger('click')
-    expect(w.emitted('resolve')?.[0]).toEqual([planCard, 'allow'])
+    expect(w.emitted('resolve')?.[0]).toEqual([planCard, 'allow', undefined])
     await w.find('[data-test="deny-a1"]').trigger('click')
-    expect(w.emitted('resolve')?.[1]).toEqual([planCard, 'deny'])
+    expect(w.find('[data-test="deny-input-a1"]').exists()).toBe(true) // 滑出理由框，不直接 emit
+    await w.find('[data-test="deny-input-a1"]').setValue('样本量不足')
+    await w.find('[data-test="deny-confirm-a1"]').trigger('click')
+    expect(w.emitted('resolve')?.[1]).toEqual([planCard, 'deny', '样本量不足'])
     const dw = mount(PlanApprovalCard, { props: { approval: planCard, disconnected: true } })
     expect(dw.find('[data-test="approve-a1"]').attributes('disabled')).toBeDefined()
     expect(dw.find('[data-test="deny-a1"]').attributes('disabled')).toBeDefined()
@@ -731,7 +734,7 @@ describe('ApprovalDock', () => {
     expect(w.text()).toContain('实验方案待审批')
     expect(w.text()).not.toContain('请求提升权限')
     await w.get('[data-test="approve-a1"]').trigger('click')
-    expect(w.emitted('resolve')?.[0]).toEqual([planApproval, 'allow'])
+    expect(w.emitted('resolve')?.[0]).toEqual([planApproval, 'allow', undefined])
 
     const funnel = mount(ApprovalDock, {
       props: { approvals: [{ ...card, source: 'judge-limit' }], disconnected: false },
