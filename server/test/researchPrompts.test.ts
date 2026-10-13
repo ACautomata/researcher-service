@@ -22,18 +22,28 @@ describe('W1 create prompt（11 节论文页模板 · #848 §1）', () => {
     }
   })
 
-  it('含 Experiments/Results 最低标准与确定性校验硬性要求', () => {
+  it('含 Experiments/Results 最低标准（#848 §1.2 全量规则）与确定性校验硬性要求', () => {
     const p = buildCreatePaperPagePrompt(['PAGE1'])
     expect(p).toContain('100 行')
     expect(p).toContain('具体数字')
     expect(p).toContain('原文未报告')
+    expect(p).toContain('backbone')
+    expect(p).toContain('mean±std over N runs')
+    expect(p).toContain('测了什么变体')
+    expect(p).toContain('最佳方法/最强 baseline/差距')
   })
 
-  it('含 JSON 输出约束与 claims 结构说明', () => {
+  it('含 JSON 输出约束（闭合形态）与 claims 结构说明', () => {
     const p = buildCreatePaperPagePrompt(['PAGE1'])
     expect(p).toContain('{"title"')
-    expect(p).toContain('"claims"')
+    expect(p).toContain('"claims": [{"statement": "...", "evidence": ["..."]}]}')
     expect(p).toContain('禁止输出 JSON 之外')
+  })
+
+  it('wiki 约定（#848 §1.3 链接/矛盾迁移面）在模板中', () => {
+    const p = buildCreatePaperPagePrompt(['PAGE1'])
+    expect(p).toContain('相对 markdown 链接')
+    expect(p).toContain('不得省略或抹平')
   })
 
   it('论文页文本注入 prompt；diagnostics 非空 → 注入诊断回喂块', () => {
@@ -66,6 +76,16 @@ describe('W2 extract prompt（12 节模板 + 三态规则 · #848 §2.1）', () 
     expect(p).toContain('不提新方法')
   })
 
+  it('领域特定关注 6 项（#848 §2.1：增量学习/持续学习等场景）在模板中', () => {
+    const p = buildExtractPrompt('PAPER')
+    expect(p).toContain('阶段间性能变化')
+    expect(p).toContain('新旧知识保持与适应')
+    expect(p).toContain('任务顺序与结构变化强度')
+    expect(p).toContain('memory budget 敏感性')
+    expect(p).toContain('特定数据集退化')
+    expect(p).toContain('性能提升代价')
+  })
+
   it('diagnostics 非空 → 注入诊断回喂块', () => {
     expect(buildExtractPrompt('PAPER', '禁语「可能是」')).toContain('禁语「可能是」')
   })
@@ -73,14 +93,14 @@ describe('W2 extract prompt（12 节模板 + 三态规则 · #848 §2.1）', () 
 
 describe('W2 critic prompt（§0–§7 模板 + 9 类质疑 + 证据三档 · #848 §2.2）', () => {
   it('8 节标题行全部在模板正文中逐字出现', () => {
-    const p = buildCriticPrompt('PAPER', 'EXTRACT')
+    const p = buildCriticPrompt('PAPER', 'EXTRACT', 'papers/robust-detection.md')
     for (let i = 0; i < CRITIC_SECTIONS.length; i++) {
       expect(p).toContain(`## ${i} ${CRITIC_SECTIONS[i]}`)
     }
   })
 
   it('含机读标签、证据强度三档、质疑 9 类型、候选 2–4 约束', () => {
-    const p = buildCriticPrompt('PAPER', 'EXTRACT')
+    const p = buildCriticPrompt('PAPER', 'EXTRACT', 'papers/robust-detection.md')
     expect(p).toContain(CRITIC_CATEGORY_TAG)
     expect(p).toContain('已有较强证据支持')
     expect(p).toContain('实验间接暗示')
@@ -90,14 +110,27 @@ describe('W2 critic prompt（§0–§7 模板 + 9 类质疑 + 证据三档 · #8
     expect(p).toContain('2–4')
   })
 
+  it('第一行 H1 槽位 + 正文中文约定（#848 §0/§2.2 · Spec#16/#18）在模板中', () => {
+    const p = buildCriticPrompt('PAPER', 'EXTRACT', 'papers/robust-detection.md')
+    expect(p).toContain('# <分析标题>')
+    expect(p).toContain('正文中文')
+  })
+
   it('candidates 边上传输 schema 说明（question/priority/evidence）在模板中', () => {
-    const p = buildCriticPrompt('PAPER', 'EXTRACT')
+    const p = buildCriticPrompt('PAPER', 'EXTRACT', 'papers/robust-detection.md')
     expect(p).toContain('"priority": "high|medium|low"')
     expect(p).toContain('"evidence"')
   })
 
+  it('evidence 引用指引注入真实论文页路径（Spec#4——evidenceGate 回查锚）', () => {
+    const p = buildCriticPrompt('PAPER', 'EXTRACT', 'papers/robust-detection.md')
+    expect(p).toContain('papers/robust-detection.md#<节标题>')
+    expect(p).toContain('papers/robust-detection.md#6 Results')
+    expect(p).toContain('不得虚构节标题')
+  })
+
   it('两份输入材料（论文页 + extract）均注入；diagnostics 非空 → 注入诊断回喂块', () => {
-    const p = buildCriticPrompt('PAPER-BODY', 'EXTRACT-BODY', '候选不足 2 个')
+    const p = buildCriticPrompt('PAPER-BODY', 'EXTRACT-BODY', 'papers/x.md', '候选不足 2 个')
     expect(p).toContain('PAPER-BODY')
     expect(p).toContain('EXTRACT-BODY')
     expect(p).toContain('候选不足 2 个')

@@ -6,7 +6,6 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   RESEARCH_TOOL_NAME,
   INPUT_TEXT_MAX,
-  SOURCE_PATHS_MAX,
   ingestCommandHandler,
   discoverCommandHandler,
   hypothesizeCommandHandler,
@@ -16,20 +15,16 @@ import {
 } from '../../plugins/research/server'
 import type { PluginAuditPort, PluginLlmPort, PluginToolContext, PluginToolExec } from '../src/plugins/api'
 import { PluginLlmStructuredError } from '../src/plugins/api'
-import { PAPER_PAGE_SECTIONS, CRITIC_SECTIONS, EXTRACT_SECTIONS } from '../../plugins/research/prompts'
+import { SOURCE_PATHS_V1_MAX } from '../../plugins/research/values'
+import { createSlotLlm, createWikiFake, paperPageBody, PAPER_PATH, validCriticDoc, validExtractDoc } from './researchFixtures'
 
-const PAPER_PATH = 'papers/debug-paper.md'
-
-// discover 端到端最小 fake 产物（走通全链的最小合法形状）。
+// discover 端到端最小 fake 产物（走通全链的最小合法形状——H1/机读标签/候选面齐备）。
 const discoverFixtures = () => ({
-  extract: { content: EXTRACT_SECTIONS.map((s, i) => `## ${i} ${s}\n\n论文报告：结果 95.12%。`).join('\n\n') },
-  critic: {
-    content: ['# t', '', '`category: critic`', '', ...CRITIC_SECTIONS.map((s, i) => `## ${i} ${s}\n\nq`)].join('\n'),
-    candidates: [
-      { question: 'Q1', priority: 'high' as const, evidence: [`${PAPER_PATH}#1 Citation`] },
-      { question: 'Q2', priority: 'low' as const, evidence: [] },
-    ],
-  },
+  extract: validExtractDoc(),
+  critic: validCriticDoc([
+    { question: 'Q1', priority: 'high' as const, evidence: [`${PAPER_PATH}#1 Citation`] },
+    { question: 'Q2', priority: 'low' as const, evidence: [] },
+  ]),
 })
 
 const baseCtx = (
@@ -72,40 +67,41 @@ const verdictLlm = (verdict: unknown): PluginLlmPort =>
     generateStructured: vi.fn(async () => verdict),
   }) as unknown as PluginLlmPort
 
-// discover 端到端 fake ctx（四件 ctx + 分类器 fake——AC「图 invoke 面 fake ctx 测试」的
-// 工具边界形态）：seed discover → 真图全链（fake wiki/llm）→ completed。
+// discover 端到端 fake ctx（四件 ctx + slot 判定 llm fake——AC「图 invoke 面 fake ctx 测试」
+// 的工具边界形态）：seed discover → 真图全链（openwiki 保真 wiki fake）→ completed。
 const discoverCtxLlm = (): PluginLlmPort => {
   const fixtures = discoverFixtures()
-  return {
-    generateMultimodal: vi.fn(async () => ({ text: '' })),
-    generateStructured: vi.fn(async (opts: { schema: { parse: (v: unknown) => unknown; shape?: Record<string, unknown> } }) =>
-      opts.schema.parse(opts.schema.shape?.candidates !== undefined ? fixtures.critic : fixtures.extract),
-    ),
-  } as unknown as PluginLlmPort
+  return createSlotLlm({ extract: () => fixtures.extract, critic: () => fixtures.critic })
 }
 
-const discoverWiki = (): PluginToolContext['wiki'] =>
-  ({
-    search: vi.fn(async () => ({ ok: true, data: { results: [{ kind: 'section', ref: [`${PAPER_PATH}#1 citation`], content: '…' }] } })),
-    readPage: vi.fn(async (page: string, sections: readonly string[]) => ({
-      ok: true,
-      data: { page, sections: sections.map((s, i) => ({ section: s, content: `## ${i + 1} ${PAPER_PAGE_SECTIONS[i]}\n\n内容` })) },
-    })),
-    createPage: vi.fn(async () => ({ ok: true, data: { created: true } })),
-  }) as unknown as PluginToolContext['wiki']
+const discoverWiki = (): PluginToolContext['wiki'] => createWikiFake({ [PAPER_PATH]: paperPageBody() }).wiki as unknown as PluginToolContext['wiki']
 
 describe('4 命令 handler（853 §1.1：{execute} 直达，input 槽位 + workflow 显式值）', () => {
-  it('/ingest：空格分隔路径 → source_paths 数组 + workflow=ingest', async () => {
-    const outcome = await ingestCommandHandler('/lab/uploads/a.pdf /lab/uploads/b.pdf')
+  it('/ingest：单篇路径 → source_paths 数组 + workflow=ingest', async () => {
+    const outcome = await ingestCommandHandler('/lab/uploads/a.pdf')
     expect(outcome).toEqual({
-      execute: { tool: RESEARCH_TOOL_NAME, args: { source_paths: ['/lab/uploads/a.pdf', '/lab/uploads/b.pdf'], workflow: 'ingest' } },
+      execute: { tool: RESEARCH_TOOL_NAME, args: { source_paths: ['/lab/uploads/a.pdf'], workflow: 'ingest' } },
     })
   })
 
-  it('/discover /hypothesize /experiment：文本 → question/topic 槽位 + workflow', async () => {
+  it('/ingest：多篇 → V1 单篇即时 fail（命令面与 capture 同口径，S8/#24）', async () => {
+    await expect(ingestCommandHandler('/lab/uploads/a.pdf /lab/uploads/b.pdf')).rejects.toThrow(/单篇/)
+    expect(SOURCE_PATHS_V1_MAX).toBe(1)
+  })
+
+  it('/discover：纯问题 → question 槽位；含 papers/*.md token → 剥离为 source_paths（Spec#26）', async () => {
     expect(await discoverCommandHandler('这篇论文有哪些弱点')).toEqual({
       execute: { tool: RESEARCH_TOOL_NAME, args: { question: '这篇论文有哪些弱点', workflow: 'discover' } },
     })
+    expect(await discoverCommandHandler('找问题 papers/robust.md')).toEqual({
+      execute: { tool: RESEARCH_TOOL_NAME, args: { question: '找问题', source_paths: ['papers/robust.md'], workflow: 'discover' } },
+    })
+    expect(await discoverCommandHandler('papers/robust.md')).toEqual({
+      execute: { tool: RESEARCH_TOOL_NAME, args: { source_paths: ['papers/robust.md'], workflow: 'discover' } },
+    })
+  })
+
+  it('/hypothesize /experiment：文本 → topic/question 槽位 + workflow', async () => {
     expect(await hypothesizeCommandHandler('扩散模型加速')).toEqual({
       execute: { tool: RESEARCH_TOOL_NAME, args: { topic: '扩散模型加速', workflow: 'hypothesize' } },
     })
@@ -115,17 +111,12 @@ describe('4 命令 handler（853 §1.1：{execute} 直达，input 槽位 + workf
   })
 
   it('空 args → 用法提示 fail（REST 面即时反馈，figure 先例双写形态）', async () => {
-    await expect(ingestCommandHandler('')).rejects.toThrow()
-    await expect(discoverCommandHandler('  ')).rejects.toThrow()
+    await expect(ingestCommandHandler('')).rejects.toThrow(/用法/)
+    await expect(discoverCommandHandler('  ')).rejects.toThrow(/用法/)
   })
 
   it('超长 args → fail', async () => {
-    await expect(discoverCommandHandler('x'.repeat(INPUT_TEXT_MAX + 1))).rejects.toThrow()
-  })
-
-  it('/ingest 路径数超上限 → fail', async () => {
-    const paths = Array.from({ length: SOURCE_PATHS_MAX + 1 }, (_, i) => `/lab/uploads/f${i}.pdf`).join(' ')
-    await expect(ingestCommandHandler(paths)).rejects.toThrow()
+    await expect(discoverCommandHandler('x'.repeat(INPUT_TEXT_MAX + 1))).rejects.toThrow(/超长/)
   })
 })
 
@@ -140,7 +131,7 @@ describe('research_workflow execute（工具边界）', () => {
     const result = await executeResearchWorkflow('t2', { topic: '想法' }, execOf(ctx))
 
     expect(result.content[0]?.type).toBe('text')
-    expect(String((result.content[0] as { text: string }).text)).toContain('hypothesize')
+    expect((result.content[0] as { text: string }).text).toContain('hypothesize')
     const details = result.details as ResearchRunDetails
     expect(details.status).toBe('completed')
     expect(details.workflow).toBe('hypothesize')
@@ -159,8 +150,8 @@ describe('research_workflow execute（工具边界）', () => {
     const details = result.details as ResearchRunDetails
     expect(details.status).toBe('completed')
     expect(details.workflow).toBe('discover')
-    expect(details.artifactPages).toEqual([{ path: 'critics/debug-paper.md', title: 't' }])
-    expect(String(result.content[0] as { text: string }).length).toBeGreaterThan(0)
+    expect(details.artifactPages).toEqual([{ path: 'critics/robust-out-of-distribution-detection.md', title: '某论文审稿式问题分析' }])
+    expect((result.content[0] as { text: string }).text.length).toBeGreaterThan(0)
     expect(events.map((e) => e.event)).toEqual(['created', 'completed'])
     // completed 审计带 artifactPages（outputText 可检索产物清单）
     expect(events[1]!.detail.artifactPages).toEqual(details.artifactPages)
@@ -170,7 +161,7 @@ describe('research_workflow execute（工具边界）', () => {
     const { ctx, events } = baseCtx(verdictLlm({ label: 'none', confidence: 0.9 }))
     const result = await executeResearchWorkflow('t3', { question: '今天天气' }, execOf(ctx))
 
-    const text = String((result.content[0] as { text: string }).text)
+    const text = (result.content[0] as { text: string }).text
     const parsed = JSON.parse(text) as { status: string; candidates: unknown[]; question: string }
     expect(parsed.status).toBe('clarify')
     expect(parsed.candidates).toEqual([])
@@ -228,7 +219,7 @@ describe('research_workflow execute（工具边界）', () => {
       }),
     } as unknown as PluginLlmPort
     const { ctx, events } = baseCtx(llm)
-    await expect(executeResearchWorkflow('t7', { question: 'x' }, execOf(ctx, controller.signal))).rejects.toThrow()
+    await expect(executeResearchWorkflow('t7', { question: 'x' }, execOf(ctx, controller.signal))).rejects.toThrow(/aborted/)
     expect(events.map((e) => e.event)).toEqual(['created', 'aborted'])
   })
 

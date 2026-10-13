@@ -1,0 +1,147 @@
+// research 测试共享件（PR #917 review S14/S26 归口）：合法产物 fixture + openwiki 保真
+// wiki fake + schema 形状判定 llm fake。
+//
+// wiki fake 锁真实检索契约（openwiki 0.6.1 语义，PR #917 review P0 fake 保真度修复）：
+// - readPage 路径域强制 openwiki/ 前缀 + .md 后缀（否则 invalid_input——normalizeWikiPagePath）；
+// - 页缺失 → not_found（ClaimsPageMissingError 映射）；缺节锚 → invalid_input（Unknown sections）；
+// - 空 sections 数组 → invalid_input（Provide at least one section anchor）；
+// - section content = 自 heading 行起的 raw 切片；createPage 吃写面 rel 路径直存（页已存在
+//   → created:false 幂等哨兵）；search ref 带 openwiki/ 虚拟前缀。
+import { vi } from 'vitest'
+import { headingAnchor, PAPER_PAGE_SECTIONS, EXTRACT_SECTIONS, CRITIC_SECTIONS } from '../../plugins/research/prompts'
+import type { PluginLlmPort, PluginWikiPort } from '../src/plugins/api'
+
+// ---------------------------------------------------------------------------
+// wiki fake（openwiki 保真）
+// ---------------------------------------------------------------------------
+
+// markdown 正文 → H2 节锚表（headingSections GitHub slug 同语义简化：`## <标题>` 行起至
+// 下一 heading 行，锚 = headingAnchor(标题文本)；H1 行只作边界不作节）。
+export function sectionsOf(body: string): Map<string, string> {
+  const lines = body.split('\n')
+  const heads = lines.map((l, i) => (l.startsWith('#') ? i : -1)).filter((i) => i >= 0)
+  const sections = new Map<string, string>()
+  heads.forEach((start, k) => {
+    if (!lines[start]!.startsWith('## ')) return
+    const heading = lines[start]!.replace(/^##\s*/, '')
+    const end = k + 1 < heads.length ? heads[k + 1]! : lines.length
+    sections.set(headingAnchor(heading), lines.slice(start, end).join('\n'))
+  })
+  return sections
+}
+
+export interface WikiFake {
+  readonly wiki: PluginWikiPort
+  /** 写面 rel 路径 → 正文（createPage 直存 draft.content）；测试预置页面/断言写入两用。 */
+  readonly pages: Map<string, string>
+  readonly createPage: ReturnType<typeof vi.fn>
+  readonly readPage: ReturnType<typeof vi.fn>
+  readonly search: ReturnType<typeof vi.fn>
+}
+
+export function createWikiFake(initial: Record<string, string> = {}): WikiFake {
+  const pages = new Map(Object.entries(initial))
+  const search = vi.fn(async (_query: string, _opts?: { limit?: number; paths?: readonly string[] }) => ({
+    ok: true as const,
+    data: {
+      results: [...pages.entries()].map(([rel, body]) => {
+        const [anchor, raw] = [...sectionsOf(body).entries()][0] ?? ['', '']
+        return { kind: 'section' as const, ref: [`openwiki/${rel}#${anchor}`], content: raw.slice(0, 200) }
+      }),
+    },
+  }))
+  const readPage = vi.fn(async (page: string, sections: readonly string[]) => {
+    if (!page.startsWith('openwiki/') || !page.endsWith('.md')) {
+      return {
+        ok: false as const,
+        error: { code: 'invalid_input' as const, message: 'Page must be a non-structural Markdown path below openwiki/.' },
+      }
+    }
+    const body = pages.get(page.slice('openwiki/'.length))
+    if (body === undefined) {
+      return { ok: false as const, error: { code: 'not_found' as const, message: 'The requested wiki page does not exist.' } }
+    }
+    if (sections.length === 0) {
+      return { ok: false as const, error: { code: 'invalid_input' as const, message: 'Provide at least one section anchor.' } }
+    }
+    const available = sectionsOf(body)
+    const missing = sections.filter((s) => !available.has(s))
+    if (missing.length > 0) {
+      return { ok: false as const, error: { code: 'invalid_input' as const, message: `Unknown sections: ${missing.join(', ')}` } }
+    }
+    return {
+      ok: true as const,
+      data: { page, sections: sections.map((s) => ({ section: s, content: available.get(s)! })) },
+    }
+  })
+  const createPage = vi.fn(async (draft: { path: string; content: string }) => {
+    if (pages.has(draft.path)) return { ok: true as const, data: { created: false } }
+    pages.set(draft.path, draft.content)
+    return { ok: true as const, data: { created: true } }
+  })
+  return { wiki: { search, readPage, createPage } as unknown as PluginWikiPort, pages, createPage, readPage, search }
+}
+
+// ---------------------------------------------------------------------------
+// llm fake（extract/critic slot 按 schema 形状判定——CRITIC_DOC_SCHEMA 有 candidates 键，
+// 对重试链正确）
+// ---------------------------------------------------------------------------
+
+export type SlotName = 'extract' | 'critic'
+export interface SlotLlm extends PluginLlmPort {
+  readonly calls: { slot: SlotName; prompt: string }[]
+}
+
+export function createSlotLlm(handlers: { extract?: () => unknown; critic?: () => unknown }): SlotLlm {
+  const calls: { slot: SlotName; prompt: string }[] = []
+  const generateMultimodal = vi.fn(async () => ({ text: '' }))
+  const generateStructured = vi.fn(
+    async (opts: { schema: { parse: (v: unknown) => unknown; shape?: Record<string, unknown> }; contents: readonly unknown[] }) => {
+      const slot: SlotName = opts.schema.shape?.candidates !== undefined ? 'critic' : 'extract'
+      calls.push({ slot, prompt: String(opts.contents[0]) })
+      const value = slot === 'critic' ? (handlers.critic?.() ?? validCriticDoc()) : (handlers.extract?.() ?? validExtractDoc())
+      return opts.schema.parse(value)
+    },
+  )
+  return { generateMultimodal, generateStructured, calls } as unknown as SlotLlm
+}
+
+// ---------------------------------------------------------------------------
+// 合法产物 fixture（跨测试文件单源，PR #917 review S26）
+// ---------------------------------------------------------------------------
+
+export const PAPER_PATH = 'papers/robust-out-of-distribution-detection.md'
+
+// 11 节论文页正文（无行数门禁压力的骨架形——load/verify 消费面）。
+export const paperPageBody = (): string =>
+  PAPER_PAGE_SECTIONS.map((s, i) => `## ${i + 1} ${s}\n\n第 ${i + 1} 节。AUROC 95.12% vs. MCM 86.05%，FPR95 8.56。`).join('\n\n')
+
+// ≥100 行合法论文页（validate 门禁通过形）。
+export const validPaperPage = (): {
+  title: string
+  content: string
+  claims: { statement: string; evidence: string[] }[]
+} => ({
+  title: 'Robust Out-of-Distribution Detection',
+  content: [
+    ...PAPER_PAGE_SECTIONS.map((s, i) => `## ${i + 1} ${s}\n\n第 ${i + 1} 节。AUROC 95.12% vs. MCM 86.05%，FPR95 8.56。`),
+    ...Array.from({ length: 100 }, (_, i) => `填充行 ${i}：实验设置与结论细节。`),
+  ].join('\n\n'),
+  claims: [{ statement: '该方法在 CIFAR-100 上 AUROC 达 95.12%', evidence: ['论文 §6 Table 2'] }],
+})
+
+export const validExtractDoc = (): { content: string } => ({
+  content: EXTRACT_SECTIONS.map((s, i) => `## ${i} ${s}\n\n论文报告：主结果 AUROC 95.12%。论文中未明确说明处如实标注。`).join('\n\n'),
+})
+
+export const defaultCriticCandidates = (paperPath: string = PAPER_PATH) => [
+  { question: '消融是否覆盖核心组件？', priority: 'high' as const, evidence: [`${paperPath}#6 Results`] },
+  { question: '跨模态泛化证据是否充分？', priority: 'medium' as const, evidence: [`${paperPath}#7 Limitations`] },
+]
+
+export const validCriticDoc = (
+  candidates: { question: string; priority: 'high' | 'medium' | 'low'; evidence?: string[] }[] = defaultCriticCandidates(),
+) => ({
+  content: ['# 某论文审稿式问题分析', '', '`category: critic`', '', ...CRITIC_SECTIONS.map((s, i) => `## ${i} ${s}\n\n已有较强证据支持：具体质疑。`)].join('\n'),
+  candidates,
+})

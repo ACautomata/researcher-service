@@ -9,6 +9,8 @@
 //
 // 语言约定（#848 §0）：wiki 正文中文；论文元数据（标题/作者/DOI/arXiv/代码链接）保留原文。
 
+import { CRITIC_CANDIDATES_MAX, CRITIC_CANDIDATES_MIN, PAPER_PAGE_MIN_LINES } from './values'
+
 // ---------------------------------------------------------------------------
 // 节结构清单（校验 ↔ 模板单源）
 // ---------------------------------------------------------------------------
@@ -77,6 +79,10 @@ export const CRITIC_CHALLENGE_TYPES = [
   '可复现性',
 ] as const
 
+// Results 反模式锚句（#848 §1.2「禁『显著优于 baseline』类定性表述」——prompt 模板与
+// validatePaperPage 诊断共用单源，PR #917 review S7 归口）。
+export const QUALITATIVE_CLAIM_ANTIPATTERN = '显著优于 baseline'
+
 // 机读标签（#848 §0：`# Title` 下空一行 inline code）。
 export const CRITIC_CATEGORY_TAG = '`category: critic`'
 
@@ -120,22 +126,27 @@ ${sectionLines(PAPER_PAGE_SECTIONS, 1)}
 - **2 One-Sentence Contribution**：一句话概括核心贡献。
 - **3 Problem Setting**：问题设定、输入输出、与已有设定的差异。
 - **4 Method**：方法机制，忠实原文，不推测。
-- **5 Experiments**：最低标准——每个数据集含规模与 train/test split；每个 baseline 名称；训练设置（架构、优化器、lr、batch size、epoch、硬件）；评估协议；消融（消融了什么/揭示了什么）。缺失信息标「原文未报告」。
-- **6 Results**：★ 每个 main claim 至少 1 个具体数字（如「AUROC 95.12% vs. MCM 86.05%」）；有表格捕获关键行；消融捕获完整性能差值。禁「显著优于 baseline」类无数字定性表述。
+- **5 Experiments**：最低标准——每个数据集含大小与 train/test split；每个 baseline 名称；训练设置（架构、backbone、优化器、lr、batch size、epoch、硬件）；评估协议（指标、聚合方式 mean±std over N runs）；消融（消融了什么/测了什么变体/揭示了什么）。缺失信息标「原文未报告」。
+- **6 Results**：★ 每个 main claim 至少 1 个具体数字（如「AUROC 95.12% vs. MCM 86.05%」）；有表格时捕获关键行（最佳方法/最强 baseline/差距）；有消融时捕获完整性能差值（如「移除 L_reg 后 FPR95 从 8.56 升至 10.73」）；仅读到场次信息有限时注明已有最佳数字与缺失内容。反模式：不命名对比方法的差距表述、不列 benchmark 数字的「多个 benchmark 优越」、列数据集不说对比对象、空 Results——禁「${QUALITATIVE_CLAIM_ANTIPATTERN}」类无数字定性表述。
 - **7 Limitations**：原文声明的局限 + 你观察到的局限（区分标注）。
 - **8 Reusable Claims**：可复用的可证伪陈述清单（后续结构化提交）。
-- **9 Connections**：与已知方法/数据集/任务的关系（仅基于论文内容）。
+- **9 Connections**：与已知方法/数据集/任务的关系（仅基于论文内容）；引用 wiki 已有页时用相对 markdown 链接（如 [标题](papers/<slug>.md)），不写绝对路径。
 - **10 Open Questions**：论文留下的开放问题。
 - **11 Provenance**：本页信息来源说明（哪些页/节支撑了哪些论断）。
+
+## wiki 约定（#848 §1.3 迁移面）
+
+- 命名：页面 slug 由标题派生（小写 kebab-case，不带日期），由写入面确定性处理，无需在正文操作。
+- 矛盾：与论文内部或已知知识的矛盾之处不得省略或抹平——用 Limitations / Open Questions 节显式记录，保留双方陈述。
 
 ## 硬性要求（确定性校验，不满足将被打回）
 
 1. 11 节标题齐全且按上述形态逐字出现，顺序不变。
-2. 整页正文不少于 100 行。
+2. 整页正文不少于 ${PAPER_PAGE_MIN_LINES} 行。
 3. Results 节内必须出现具体数字。
 4. 不批判、不提出论文之外的新方法（阶段边界：ingest 只做忠实整理）。
 
-输出格式约束：输出必须是且仅是一个 JSON 对象 {"title": "...", "content": "...", "claims": [{"statement": "...", "evidence": ["..."]]}。title = 论文标题原文；content = 完整 11 节 markdown 正文；claims = 从 Reusable Claims 节提取的可证伪陈述数组（statement 一句话陈述，evidence = 支撑来源描述，如「论文 §5 Table 2」，可为空数组）。禁止输出 JSON 之外的任何文本或 markdown 围栏。
+输出格式约束：输出必须是且仅是一个 JSON 对象 {"title": "...", "content": "...", "claims": [{"statement": "...", "evidence": ["..."]}]}。title = 论文标题原文；content = 完整 11 节 markdown 正文；claims = 从 Reusable Claims 节提取的可证伪陈述数组（statement 一句话陈述，evidence = 支撑来源描述，如「论文 §5 Table 2」，可为空数组）。禁止输出 JSON 之外的任何文本或 markdown 围栏。
 
 论文全文（按页）：
 <paper>
@@ -168,11 +179,15 @@ ${sectionLines(EXTRACT_SECTIONS, 0)}
 - **## 10 对后续问题发现最有价值的实验信息**。
 - **## 11 一段简短总结**：100–150 字。
 
+## 领域特定关注（#848 §2.1：增量学习/持续学习/动态图/节点分类场景）
+
+若论文涉及上述场景，额外关注并如实提取：阶段间性能变化；新旧知识保持与适应；任务顺序与结构变化强度；memory budget 敏感性；特定数据集退化；性能提升代价。不涉及则整段省略，不得硬凑。
+
 ## 三态标注规则（可信度的证据底座，确定性扫描）
 
 每条提取信息须区分三态：**${EXTRACT_EVIDENCE_TERMS}**。论文未提供的信息一律写「${EXTRACT_UNSTATED_PHRASE}」，不得编造。
 
-禁语：正文中禁止出现「可能是」「应该是」「推测为」——提取文档只陈述论文说了什么，不做推测。需要表达不确定时使用规范用语「${EXTRACT_UNSTATED_PHRASE}」。
+禁语：正文中禁止出现${EXTRACT_BANNED_PHRASES.map((p) => `「${p}」`).join('')}——提取文档只陈述论文说了什么，不做推测。需要表达不确定时使用规范用语「${EXTRACT_UNSTATED_PHRASE}」。
 
 输出格式约束：输出必须是且仅是一个 JSON 对象 {"content": "..."}。content = 完整 12 节 markdown 正文。禁止输出 JSON 之外的任何文本或 markdown 围栏。
 
@@ -186,14 +201,21 @@ ${paperPageContent}
 // W2 critic：审稿式问题分析（853 §4.2 · #848 §2.2）
 // ---------------------------------------------------------------------------
 
-export function buildCriticPrompt(paperPageContent: string, extractDoc: string, diagnostics?: string): string {
+// paperPath 注入（PR #917 review Spec#4）：evidenceGate 引用回查以真实论文页路径为锚——
+// 不注入则 LLM 只能虚构引用路径，自页节锚回查结构性不可达。
+export function buildCriticPrompt(
+  paperPageContent: string,
+  extractDoc: string,
+  paperPath: string,
+  diagnostics?: string,
+): string {
   return `你是审稿式问题分析师。基于论文 wiki 页与实验提取文档，产出审稿式问题分析。
 
 工作原则：围绕「贡献 claim → 方法机制 → 实验现象 → 审稿式质疑 → 潜在研究空缺」展开；质疑必须具体（对象、依据、可能影响）；优先保留「具体、重要、紧迫、可验证」的问题；证据强度三档（${CRITIC_STRENGTH_TIERS}），结论强度与证据强度匹配，不强推断；推测标明「合理推测，仍需验证」，材料不足标明「现有材料不足以确认，但值得后续验证」。
 
 质疑 9 类型（供 §2/§3 组织视角）：${CRITIC_CHALLENGE_TYPES.join('、')}。
 
-## 输出结构（8 节，节标题逐字使用以下形态）
+## 输出结构（正文中文；第一行 = 「# <分析标题>」唯一 H1，之下空一行写机读标签，再接 §0–§7 八节，节标题逐字使用以下形态）
 
 ${sectionLines(CRITIC_SECTIONS, 0)}
 
@@ -203,15 +225,23 @@ ${sectionLines(CRITIC_SECTIONS, 0)}
 - **## 1 方法机制、实验支撑与关键前提**：1.1 方法与实验的整体对应关系 / 1.2 方法可能依赖的关键前提。
 - **## 2 核心贡献声明与审稿式质疑**：3–5 个 claim，每个 claim 附质疑与依据。
 - **## 3 潜在问题分析**：按重要性/紧迫性/可验证性排序。
-- **## 4 验证候选问题与优先级**：筛选 2–4 个最值得优先验证的候选问题（与结构化 candidates 字段一致）。
+- **## 4 验证候选问题与优先级**：筛选 ${CRITIC_CANDIDATES_MIN}–${CRITIC_CANDIDATES_MAX} 个最值得优先验证的候选问题（与结构化 candidates 字段一致）。
 - **## 5–## 6**：研究空缺方向 / 新增来源与 wiki 回写建议。
 - **## 7 简短结论**：150–200 字。
 
 ## 机读标签（确定性校验）
 
-文档第一行（标题行之下空一行）必须包含 inline code 标签：${CRITIC_CATEGORY_TAG}
+第一行 H1 标题之下空一行，独占一行写 inline code 标签：${CRITIC_CATEGORY_TAG}
 
-输出格式约束：输出必须是且仅是一个 JSON 对象 {"content": "...", "candidates": [{"question": "...", "priority": "high|medium|low", "evidence": ["..."]}]}。content = 完整 8 节 markdown 正文（含机读标签行）；candidates = §4 的候选问题结构化面（2–4 个；question 具体可验证；priority 为验证优先级；evidence = 支撑该问题的证据引用，如「papers/xxx.md#6 Results」或「extract §3」，可为空数组）。禁止输出 JSON 之外的任何文本或 markdown 围栏。
+## evidence 引用指引（evidenceGate 逐条存在性回查，不可溯源即剔除）
+
+candidates 的 evidence 引用须可溯源，形态：
+- 本论文页节锚（首选）：\`${paperPath}#<节标题>\`——节标题用页内真实标题（如 \`${paperPath}#6 Results\`）。
+- lab 上传件：/lab/uploads/<文件名>.pdf。
+- 描述性引用（如「论文 §5 Table 2」）无可回查锚，放行但证据力弱——关键质疑优先用页节锚。
+禁止引用不存在的 wiki 页路径、不得虚构节标题。
+
+输出格式约束：输出必须是且仅是一个 JSON 对象 {"content": "...", "candidates": [{"question": "...", "priority": "high|medium|low", "evidence": ["..."]}]}。content = 完整 markdown 正文（第一行 H1 标题 + 机读标签行 + §0–§7 八节）；candidates = §4 的候选问题结构化面（${CRITIC_CANDIDATES_MIN}–${CRITIC_CANDIDATES_MAX} 个；question 具体可验证；priority 为验证优先级；evidence = 支撑该问题的证据引用，可为空数组）。禁止输出 JSON 之外的任何文本或 markdown 围栏。
 
 论文 wiki 页内容：
 <paper-page>

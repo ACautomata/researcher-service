@@ -11,7 +11,6 @@ import { RESEARCH_PROGRESS_STAGES } from './graph'
 import {
   RESEARCH_TOOL_NAME,
   INPUT_TEXT_MAX,
-  SOURCE_PATHS_MAX,
   researchToolParameters,
   executeResearchWorkflow,
   ingestCommandHandler,
@@ -49,8 +48,8 @@ export default definePlugin({
     },
   ],
   commands: [
-    { name: 'ingest', description: `知识库深度构建：把 PDF 精读整理入库 wiki（用法：/ingest <文件路径...>，≤${SOURCE_PATHS_MAX} 个）`, handler: ingestCommandHandler },
-    { name: 'discover', description: `科学问题可信发现：从一篇论文审稿式找出问题与研究缺口（用法：/discover <研究问题或论文主题>，≤${INPUT_TEXT_MAX} 字符）`, handler: discoverCommandHandler },
+    { name: 'ingest', description: `知识库深度构建：把 PDF 精读整理入库 wiki（用法：/ingest <PDF 路径>；V1 单篇——一次一篇）`, handler: ingestCommandHandler },
+    { name: 'discover', description: `科学问题可信发现：从一篇论文审稿式找出问题与研究缺口（用法：/discover <研究问题或论文主题> [papers/<slug>.md]，正文 ≤${INPUT_TEXT_MAX} 字符）`, handler: discoverCommandHandler },
     { name: 'hypothesize', description: `科学假说自主生成：生成新的研究想法、方向与假说（用法：/hypothesize <研究主题>）`, handler: hypothesizeCommandHandler },
     { name: 'experiment', description: `实验自主设计与执行：设计验证实验并真实执行（用法：/experiment <要验证的问题或想法>）`, handler: experimentCommandHandler },
   ],

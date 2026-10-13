@@ -77,14 +77,14 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    S(["/ingest /lab/uploads/论文.pdf"]) --> C["capture<br/>路径前缀 + 单篇校验<br/>（确定性）"]
+    S(["/ingest /lab/uploads/论文.pdf"]) --> C["capture<br/>路径前缀 + PDF 形态 + 单篇校验<br/>（确定性）"]
     C -->|"非 /lab/uploads 前缀<br/>URL 来源暂不支持"| F1["明确失败<br/>（诊断回喂）"]
     C --> E["extract<br/>PDF 按页提取文本<br/>（超限明确报错）"]
     E --> CR["create<br/>LLM 生成 11 节论文页<br/>+ claims 结构化提交"]
     CR --> V["validate<br/>11 节标题齐全 / ≥100 行<br/>Results 含具体数字（确定性）"]
     V -->|"不过 → 附诊断<br/>回 create 重试 1 次"| CR
     V -->|"通过"| P["persist<br/>幂等哨兵写入 wiki<br/>（页已存在 = 跳过不覆盖）"]
-    P --> VF["verify<br/>回读 11 节对账 + 产物指纹<br/>（确定性）"]
+    P --> VF["verify<br/>回读 11 节哈希对账 + 产物指纹<br/>（幂等跳过路径免对账）"]
     VF --> SM["summary<br/>≤1k + 产物路径"]
 ```
 
@@ -96,24 +96,24 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    S(["/discover 研究问题"]) --> RI["resolveInputs<br/>定位论文页<br/>（确定性）"]
+    S(["/discover 研究问题<br/>[papers/论文页.md]"]) --> RI["resolveInputs<br/>定位论文页（检索 / 路径钉定）<br/>papers/ 前缀白名单"]
     RI -->|"论文页不存在"| CL["clarify 出口<br/>提示先 /ingest（产物串联）"]
     RI --> L["load<br/>按 11 节锚回读论文页"]
     L --> EX["extract<br/>LLM 12 节实验深度提取"]
     EX --> V1["validate¹<br/>12 节 checklist<br/>+ 三态标注禁语扫描"]
     V1 -->|"不过 → 附诊断<br/>回 extract 重试 1 次"| EX
     V1 --> CR["critic<br/>LLM §0–§7 审稿式分析<br/>+ 候选问题 2–4 带优先级"]
-    CR --> V2["validate²<br/>节齐全 + category 标签<br/>+ 候选 2–4（确定性）"]
+    CR --> V2["validate²<br/>H1 + category 标签位置<br/>+ 候选 2–4（确定性）"]
     V2 -->|"不过 → 附诊断<br/>回 critic 重试 1 次"| CR
     V2 --> EG["evidenceGate<br/>证据引用存在性回查<br/>（确定性）"]
     EG --> P["persist<br/>critic 页 + 候选问题 claims"]
-    P --> SM["summary<br/>≤1k + 产物路径<br/>+ 剔除清单（不静默）"]
+    P --> SM["summary<br/>产物路径 + 候选存活<br/>+ 剔除清单（不静默，不截断）"]
 ```
 
 - 产物：`critics/<slug>.md` critic 页（§0–§7 + `category: critic` 机读标签 + 验证候选问题进 Atomic Claims）。
-- **证据可溯源**：候选问题的每条证据引用（论文页章节 / extract 节 / 上传件）逐一回查，
-  不可溯源的引用被剔除——剔除清单进 summary，本身就是溯源信息。
-- 两个校验节点检查对象不同（extract 12 节 vs critic §0–§7），分别把关各自生成质量。
+- **证据可溯源**：候选问题的每条证据引用（本论文页节锚 / 其他 wiki 页 / 上传件 / 描述性引用）
+  逐一回查，不可溯源的引用被剔除——剔除清单完整进 summary，本身就是溯源信息。
+- 两个校验节点检查对象不同（extract 12 节 vs critic §0–§7 + H1/机读标签位置），分别把关各自生成质量。
 
 ## 产物与进度
 

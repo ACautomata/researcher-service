@@ -62,7 +62,7 @@ describe('入口图 invoke（S2 端口注入 fake）', () => {
     expect(ports.branchCalls).toEqual(['discover']) // 恰一分支在跑（互斥）
     expect(result.status).toBe('branch')
     expect(result.workflow).toBe('discover')
-    expect(result.summary).toContain('discover 占位产出')
+    expect(result.outcome?.summary).toContain('discover 占位产出')
     expect(result.clarify).toBeUndefined()
   })
 
@@ -116,7 +116,7 @@ describe('入口图 invoke（S2 端口注入 fake）', () => {
 
     expect(result.status).toBe('branch')
     expect(result.workflow).toBe('discover')
-    expect(result.summary).toContain('检测到后续意图 experiment')
+    expect(result.outcome?.summary).toContain('检测到后续意图 experiment')
   })
 
   it('无次选高置信：summary 无尾注', async () => {
@@ -124,7 +124,7 @@ describe('入口图 invoke（S2 端口注入 fake）', () => {
     const graph = createResearchRoutingGraph(ports)
     const result = await graph.invoke({ request: { question: 'x' } })
 
-    expect(result.summary).not.toContain('检测到后续意图')
+    expect(result.outcome?.summary).not.toContain('检测到后续意图')
   })
 
   it('同值次选（自指）：secondaryIntent = 主选视为无次选，summary 无尾注', async () => {
@@ -134,7 +134,7 @@ describe('入口图 invoke（S2 端口注入 fake）', () => {
 
     expect(result.status).toBe('branch')
     expect(result.workflow).toBe('discover')
-    expect(result.summary).not.toContain('检测到后续意图')
+    expect(result.outcome?.summary).not.toContain('检测到后续意图')
   })
 
   it('stage 上报：branch 路径 = classify + 分支名 + 流程内节点冒泡（域字段 = 分支 workflow）；clarify 路径只报 classify', async () => {

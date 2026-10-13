@@ -26,17 +26,22 @@ import { CODE } from '../../server/src/codes'
 import { truncateAuditMethodText } from '../../server/src/figures/figureAudit'
 import { createResearchRoutingGraph } from './graph'
 import type { ResearchWorkflowRequest, ResearchRoutingPorts, WorkflowOutcome } from './graph'
-import { createIntentClassifier, serializeClassifyInput, type WorkflowLabel } from './classifier'
+import { toWikiRelPath } from './graph'
+import { createIntentClassifier, pinnedModelOf, serializeClassifyInput, type WorkflowLabel } from './classifier'
 import { createIngestGraph } from './ingest'
 import { createDiscoverGraph } from './discover'
+import { SOURCE_PATHS_V1_MAX } from './values'
 import { WORKFLOW_CATALOG } from './clarify'
 import type { ClarifyResult } from './clarify'
 
 export const RESEARCH_TOOL_NAME = 'research_workflow'
 
-// 输入边界（zod 0 信任红线）：文本槽位上限与 figure METHOD_TEXT_MAX 同族（4000 UTF-16
-// 单元；分类输入天然短，853 §7.2）；source_paths 数组上限防失控值。
-export const INPUT_TEXT_MAX = 4000
+// 输入边界（zod 0 信任红线）：文本槽位上限 = openwiki 检索 queryCharacters 面（2000，
+// wiki.d.ts WIKI_RETRIEVAL_LIMITS——W2 resolveInputs 把 question 直传 search，超限落
+// invalid_input 误导性 clarify，故在入口即收紧，PR #917 review Spec#19；分类输入天然短，
+// 853 §7.2）；source_paths 数组上限为传输面（W3/W4 预留），流程级 V1 单篇约束在
+// values.SOURCE_PATHS_V1_MAX（PR #917 review S8 分层）。
+export const INPUT_TEXT_MAX = 2000
 export const SOURCE_PATHS_MAX = 32
 
 const WORKFLOW_ENUM = ['ingest', 'discover', 'hypothesize', 'experiment'] as const
@@ -113,7 +118,7 @@ function placeholderRunWorkflow(workflow: WorkflowLabel): Promise<WorkflowOutcom
 
 // pin 包装（空 = owner 默认链 primary 原样透传；非空 = 每次调用带 model pin 语义）。
 function pinLlm(llm: PluginLlmPort, pinnedModel: string | undefined): PluginLlmPort {
-  const pin = pinnedModel !== undefined && pinnedModel.trim() !== '' ? pinnedModel : undefined
+  const pin = pinnedModelOf(pinnedModel)
   if (pin === undefined) return llm
   return {
     generateMultimodal: (opts) => llm.generateMultimodal({ ...opts, model: pin }),
@@ -179,36 +184,27 @@ export async function executeResearchWorkflow(
         onStage: (stage, workflow) => exec.onUpdate?.({ stage, ...(workflow !== undefined ? { workflow } : {}) }),
       },
     )
-    if (result.status === 'clarify') {
-      // 入口级 clarify 回喂（853 §1.3）：content = clarify Result JSON（主 agent 可解析、
-      // 自然语言反问）；details.status=clarify（前端卡纯展示归第 7 票）。工具正常 completed 终态。
-      ctx.audit.emitPluginRun({ event: 'completed', toolCallId, detail: { status: 'clarify' } })
-      const content: PluginToolContentBlock[] = [{ type: 'text', text: JSON.stringify(result.clarify) }]
-      return {
-        content,
-        details: { workflow: undefined, status: 'clarify', artifactPages: [], clarify: result.clarify },
-      }
-    }
-    const outcome = result.outcome!
-    if (outcome.status === 'clarify') {
-      // 分支级 clarify 出口（#910 · 853 §4.2 产物串联）：W2 论文页缺失 → 提示先 ingest。
-      // 同入口级形态回喂（零新机制），details 带 workflow 语境。
+    // clarify 统一回喂（853 §1.3 入口级 + #910 分支级同形态，PR #917 review S22 块级
+    // 重复归口）：content = clarify Result JSON（主 agent 可解析、自然语言反问）；
+    // details.status=clarify（前端卡纯展示归第 7 票）。工具正常 completed 终态。
+    const clarify = result.status === 'clarify' ? result.clarify : result.outcome?.clarify
+    if (clarify !== undefined) {
       ctx.audit.emitPluginRun({
         event: 'completed',
         toolCallId,
         detail: { status: 'clarify', ...(result.workflow !== undefined ? { workflow: result.workflow } : {}) },
       })
-      const content: PluginToolContentBlock[] = [{ type: 'text', text: JSON.stringify(outcome.clarify) }]
       return {
-        content,
+        content: [{ type: 'text', text: JSON.stringify(clarify) }],
         details: {
           workflow: result.workflow,
           status: 'clarify',
           artifactPages: [],
-          ...(outcome.clarify !== undefined ? { clarify: outcome.clarify } : {}),
+          clarify,
         },
       }
     }
+    const outcome = result.outcome!
     ctx.audit.emitPluginRun({
       event: 'completed',
       toolCallId,
@@ -246,7 +242,13 @@ export async function executeResearchWorkflow(
 // 内核面双写有意——figure 先例：此处 = 80001 信封直达用户，zod = 内核执行面契约）。
 // ---------------------------------------------------------------------------
 
-const INGEST_USAGE = '/ingest <文件路径...>（/lab/uploads 下的 PDF，空格分隔）'
+// /ingest V1 单篇（values.SOURCE_PATHS_V1_MAX）——命令面即时反馈与 capture 图内判定同口径
+//（PR #917 review S8/#24：用法文案不再宣传 ≤32 多篇）。
+const INGEST_USAGE = '/ingest <PDF 路径>（/lab/uploads 下；V1 单篇——一次一篇）'
+
+// /discover 可选论文页路径 token（PR #917 review Spec#26：W2 钉定输入的命令面槽位——
+// 命中 tokens 从问题文本剥离为 source_paths，余量拼回 question）。
+const WIKI_PAGE_TOKEN = /^(?:openwiki\/)?papers\/\S+\.md$/i
 
 // 命令 handler 统一返回形（{execute} 直达 research_workflow——PluginCommandOutcome 的
 // research 收窄面；args 槽位随命令各异，共享 tool 锚定 + workflow 显式值形状）。
@@ -271,17 +273,36 @@ export async function ingestCommandHandler(
   args: string,
 ): Promise<ResearchCommandOutcome<{ readonly source_paths: readonly string[]; readonly workflow: 'ingest' }>> {
   const source_paths = textSlot(args, INGEST_USAGE).split(/\s+/).filter((p) => p !== '')
-  if (source_paths.length === 0) failUsage(INGEST_USAGE)
-  if (source_paths.length > SOURCE_PATHS_MAX) {
-    throw fail(CODE.PLUGINS_VALIDATION_FAILED, `文件数超上限（${SOURCE_PATHS_MAX}）`)
+  if (source_paths.length > SOURCE_PATHS_V1_MAX) {
+    throw fail(CODE.PLUGINS_VALIDATION_FAILED, `ingest V1 单篇：一次一篇（收到 ${source_paths.length} 个路径），请逐篇发起`)
   }
   return { execute: { tool: RESEARCH_TOOL_NAME, args: { source_paths, workflow: 'ingest' } } }
 }
 
 export async function discoverCommandHandler(
   args: string,
-): Promise<ResearchCommandOutcome<{ readonly question: string; readonly workflow: 'discover' }>> {
-  return { execute: { tool: RESEARCH_TOOL_NAME, args: { question: textSlot(args, '/discover <研究问题或论文主题>'), workflow: 'discover' } } }
+): Promise<
+  ResearchCommandOutcome<{
+    readonly question?: string
+    readonly source_paths?: readonly string[]
+    readonly workflow: 'discover'
+  }>
+> {
+  const usage = '/discover <研究问题或论文主题> [papers/<slug>.md]'
+  const tokens = textSlot(args, usage).split(/\s+/)
+  const source_paths = tokens.filter((t) => WIKI_PAGE_TOKEN.test(t)).map(toWikiRelPath)
+  const question = tokens.filter((t) => !WIKI_PAGE_TOKEN.test(t)).join(' ')
+  if (question === '' && source_paths.length === 0) failUsage(usage)
+  return {
+    execute: {
+      tool: RESEARCH_TOOL_NAME,
+      args: {
+        ...(question !== '' ? { question } : {}),
+        ...(source_paths.length > 0 ? { source_paths } : {}),
+        workflow: 'discover' as const,
+      },
+    },
+  }
 }
 
 export async function hypothesizeCommandHandler(

@@ -1,100 +1,77 @@
 // #910 S2：W2 discover 九节点图 invoke 返回值面（Agreements「零新缝」——图 invoke + fake
-// ports）。覆盖（853 §4.2 / issue AC）：happy path / resolveInputs 检索定位与缺失 clarify
-//（产物串联出口）/ load 论文页缺失 clarify / validate¹ 禁语拒 → 重试附诊断 / validate² 候选
-// 数拒 → 重试 → 再拒明确失败 / evidenceGate 引用回查剔除（清单进 summary 不静默）/ stage 序列。
-import { describe, expect, it, vi } from 'vitest'
-import { createDiscoverGraph, CRITIC_DOC_SCHEMA, EXTRACT_DOC_SCHEMA } from '../../plugins/research/discover'
-import type { DiscoverPorts } from '../../plugins/research/discover'
-import type { PluginLlmPort } from '../../server/src/plugins/api'
-import { PAPER_PAGE_SECTIONS, CRITIC_SECTIONS, EXTRACT_SECTIONS } from '../../plugins/research/prompts'
+// ports）。覆盖（853 §4.2 / issue AC）：happy path / resolveInputs 检索定位（papers/ 过滤 +
+// 读面路径域换算）与缺失 clarify（产物串联出口）/ 输入形态白名单与单篇约束 / load 论文页
+// 缺失 clarify / validate¹ 禁语拒 → 重试附诊断 / validate² 候选数拒 → 重试 → 再拒明确失败 /
+// evidenceGate 引用回查（三类钉面：本页节锚 / 他页 readPage 存在性 / 上传件形态；剔除清单
+// 进 summary 不静默）/ stage 序列。
+import { describe, expect, it } from 'vitest'
+import { createDiscoverGraph } from '../../plugins/research/discover'
+import { CRITIC_DOC_SCHEMA, EXTRACT_DOC_SCHEMA } from '../../plugins/research/pageValidate'
+import { createSlotLlm, createWikiFake, paperPageBody, PAPER_PATH, validCriticDoc, validExtractDoc } from './researchFixtures'
 
-const PAPER_PATH = 'papers/robust-out-of-distribution-detection.md'
+const otherPaperBody = (): string =>
+  ['# 其他论文分析页', '', '## 1 背景与动机', '', '背景内容。', '', '## 2 方法概述', '', '方法内容。'].join('\n')
 
-const validExtract = (): { content: string } => ({
-  content: EXTRACT_SECTIONS.map((s, i) => `## ${i} ${s}\n\n论文报告：主结果 AUROC 95.12%。论文中未明确说明处如实标注。`).join('\n\n'),
-})
-
-const validCritic = (candidates: { question: string; priority: 'high' | 'medium' | 'low'; evidence?: string[] }[] = [
-  { question: '消融是否覆盖核心组件？', priority: 'high', evidence: [`${PAPER_PATH}#6 Results`, 'extract §3'] },
-  { question: '跨模态泛化证据是否充分？', priority: 'medium', evidence: ['extract §7'] },
-]) => ({
-  content: ['# 某论文审稿式问题分析', '', '`category: critic`', '', ...CRITIC_SECTIONS.map((s, i) => `## ${i} ${s}\n\n已有较强证据支持：具体质疑。`)].join('\n'),
-  candidates,
-})
-
-type DiscoverFakePorts = DiscoverPorts & {
-  llmCalls: { slot: 'extract' | 'critic'; prompt: string }[]
-  wiki: { createPage: ReturnType<typeof vi.fn>; readPage: ReturnType<typeof vi.fn>; search: ReturnType<typeof vi.fn> }
+const makePorts = (
+  overrides: {
+    extract?: () => unknown
+    critic?: () => unknown
+    pages?: Record<string, string>
+  } = {},
+) => {
+  const llm = createSlotLlm({ extract: overrides.extract, critic: overrides.critic })
+  const fake = createWikiFake(overrides.pages ?? { [PAPER_PATH]: paperPageBody() })
+  return { llm, wiki: fake.wiki, calls: llm.calls, fake }
 }
 
-const makePorts = (overrides: {
-  extract?: () => unknown
-  critic?: () => unknown
-  readPageOk?: boolean
-  searchResults?: () => { ok: true; data: { results: { kind: string; ref: string[]; content: string }[] } }
-} = {}): DiscoverFakePorts => {
-  const llmCalls: { slot: 'extract' | 'critic'; prompt: string }[] = []
-  const llm: PluginLlmPort = {
-    generateMultimodal: vi.fn(async () => ({ text: '' })),
-    generateStructured: vi.fn(async (opts: { schema: { parse: (v: unknown) => unknown; shape?: Record<string, unknown> }; contents: readonly unknown[] }) => {
-      // slot 按 schema 形状判定（CRITIC_DOC_SCHEMA 有 candidates 键）——对重试链正确。
-      const slot = opts.schema.shape?.candidates !== undefined ? ('critic' as const) : ('extract' as const)
-      llmCalls.push({ slot, prompt: String(opts.contents[0]) })
-      const value = slot === 'extract' ? (overrides.extract?.() ?? validExtract()) : (overrides.critic?.() ?? validCritic())
-      return opts.schema.parse(value)
-    }),
-  } as unknown as PluginLlmPort
-  const wiki = {
-    search: vi.fn(async () => overrides.searchResults?.() ?? { ok: true as const, data: { results: [{ kind: 'section', ref: [`${PAPER_PATH}#1 citation`], content: '…' }] } }),
-    readPage: vi.fn(async (page: string, sections: readonly string[]) => {
-      if (overrides.readPageOk === false) {
-        return { ok: false as const, error: { code: 'not_found', message: 'The requested wiki page does not exist.' } }
-      }
-      return { ok: true as const, data: { page, sections: sections.map((s, i) => ({ section: s, content: `## ${i + 1} ${PAPER_PAGE_SECTIONS[i]}\n\n内容` })) } }
-    }),
-    createPage: vi.fn(async () => ({ ok: true as const, data: { created: true } })),
-  }
-  return { llm, wiki, llmCalls } as unknown as DiscoverFakePorts
-}
+const invoke = (ports: ReturnType<typeof makePorts>, request: Record<string, unknown>) =>
+  createDiscoverGraph({ llm: ports.llm, wiki: ports.wiki }).invoke({ request: request as never })
 
 describe('W2 discover 图 invoke（S2 端口注入 fake）', () => {
   it('happy path（source_paths 钉定论文页）→ completed + critic 页 artifactPages + claims/provenance 组装', async () => {
     const ports = makePorts()
-    const result = await createDiscoverGraph(ports).invoke({
-      request: { workflow: 'discover', question: '这篇论文有哪些问题', source_paths: [PAPER_PATH] },
-    })
+    const result = await invoke(ports, { workflow: 'discover', question: '这篇论文有哪些问题', source_paths: [PAPER_PATH] })
 
     expect(result.status).toBe('completed')
     expect(result.clarify).toBeUndefined()
     expect(result.artifactPages).toEqual([{ path: 'critics/robust-out-of-distribution-detection.md', title: '某论文审稿式问题分析' }])
     expect(result.summary).toContain('critics/robust-out-of-distribution-detection.md')
-    expect(result.summary.length).toBeLessThanOrEqual(1000)
 
-    const [draft, provenance] = (ports.wiki.createPage as ReturnType<typeof vi.fn>).mock.calls[0] as unknown as [
+    const [draft, provenance] = ports.fake.createPage.mock.calls[0] as unknown as [
       { path: string; title: string; type: string; content: string; claims: { statement: string; evidence: string[] }[] },
-      { workflow: string; relatedPages: string[] },
+      Record<string, unknown>,
     ]
     expect(draft.path).toBe('critics/robust-out-of-distribution-detection.md')
     expect(draft.type).toBe('critic')
     expect(draft.claims).toHaveLength(2)
-    expect(draft.claims[0]!.evidence).toEqual([`${PAPER_PATH}#6 Results`, 'extract §3'])
-    expect(provenance.workflow).toBe('discover')
-    expect(provenance.relatedPages).toEqual([PAPER_PATH])
+    expect(draft.claims[0]!.evidence).toEqual([`${PAPER_PATH}#6 Results`])
+    // related_pages 钉给 W4（853 §3.3）——W2 provenance 仅 workflow（Spec#20）。
+    expect(provenance).toEqual({ workflow: 'discover' })
   })
 
-  it('resolveInputs：无 source_paths → search 定位论文页（ref split #）', async () => {
+  it('resolveInputs：无 source_paths → search 定位论文页（papers/ 过滤 + openwiki/ 前缀 ref 归一）', async () => {
     const ports = makePorts()
-    const result = await createDiscoverGraph(ports).invoke({ request: { workflow: 'discover', question: '找 robust detection 的问题' } })
+    const result = await invoke(ports, { workflow: 'discover', question: '找 robust detection 的问题' })
 
-    expect(ports.wiki.search).toHaveBeenCalled()
+    expect(ports.fake.search).toHaveBeenCalled()
     expect(result.status).toBe('completed')
-    const readPagePage = (ports.wiki.readPage as ReturnType<typeof vi.fn>).mock.calls[0]![0]
-    expect(readPagePage).toBe(PAPER_PATH)
+    // load 读面路径域换算锁定（P0#1/#2）：readPage 收 openwiki/ 前缀形态。
+    expect(ports.fake.readPage).toHaveBeenCalledWith(`openwiki/${PAPER_PATH}`, expect.anything())
+  })
+
+  it('resolveInputs：search 命中非 papers 页（critic 页混入）→ papers/ 过滤后 clarify（不跑错论文）', async () => {
+    const ports = makePorts({ pages: { 'critics/some-critic.md': '# 某分析\n\n## 1 概述\n\n内容' } })
+    const result = await invoke(ports, { workflow: 'discover', question: 'q' })
+
+    expect(ports.fake.search).toHaveBeenCalled()
+    expect(result.status).toBe('clarify')
+    expect(result.clarify?.question).toContain('ingest')
   })
 
   it('resolveInputs：search 无命中 → clarify 出口（提示先 ingest，产物串联）', async () => {
-    const ports = makePorts({ searchResults: () => ({ ok: true, data: { results: [] } }) })
-    const result = await createDiscoverGraph(ports).invoke({ request: { workflow: 'discover', question: '找不到的论文' } })
+    const ports = makePorts()
+    ports.fake.search.mockResolvedValue({ ok: true, data: { results: [] } })
+    const result = await invoke(ports, { workflow: 'discover', question: '找不到的论文' })
 
     expect(result.status).toBe('clarify')
     expect(result.summary).toBe('')
@@ -104,22 +81,26 @@ describe('W2 discover 图 invoke（S2 端口注入 fake）', () => {
   })
 
   it('load：论文页不存在（readPage not_found）→ clarify 出口（提示先 ingest）', async () => {
-    const ports = makePorts({ readPageOk: false })
-    const result = await createDiscoverGraph(ports).invoke({
-      request: { workflow: 'discover', question: 'q', source_paths: [PAPER_PATH] },
-    })
+    const ports = makePorts({ pages: {} })
+    const result = await invoke(ports, { workflow: 'discover', question: 'q', source_paths: [PAPER_PATH] })
 
     expect(result.status).toBe('clarify')
     expect(result.clarify?.question).toContain('ingest')
   })
 
-  it('resolveInputs：source_paths 非 .md 论文页形态 → clarify（形态诊断）', async () => {
+  it('resolveInputs：source_paths 非 papers/*.md 论文页形态 → clarify（路径前缀白名单，853 §4 横切）', async () => {
     const ports = makePorts()
-    const result = await createDiscoverGraph(ports).invoke({
-      request: { workflow: 'discover', question: 'q', source_paths: ['/lab/uploads/a.pdf'] },
-    })
+    const result = await invoke(ports, { workflow: 'discover', question: 'q', source_paths: ['/lab/uploads/a.pdf'] })
     expect(result.status).toBe('clarify')
+    expect(result.clarify?.question).toContain('papers/')
     expect(result.clarify?.question).toContain('.md')
+  })
+
+  it('resolveInputs：多篇 source_paths → 单论文链明确失败（与 W1 单篇同口径）', async () => {
+    const ports = makePorts()
+    await expect(
+      invoke(ports, { workflow: 'discover', question: 'q', source_paths: [PAPER_PATH, 'papers/other.md'] }),
+    ).rejects.toThrow(/单篇/)
   })
 
   it('validate¹ 拒（三态禁语）→ 回 extract 重试附诊断；重试过 → completed', async () => {
@@ -127,18 +108,17 @@ describe('W2 discover 图 invoke（S2 端口注入 fake）', () => {
     const ports = makePorts({
       extract: () => {
         n += 1
-        return n === 1 ? { content: `${validExtract().content}\n\n这一现象可能是过拟合。` } : validExtract()
+        return n === 1 ? { content: `${validExtractDoc().content}\n\n这一现象可能是过拟合。` } : validExtractDoc()
       },
     })
-    const result = await createDiscoverGraph(ports).invoke({
-      request: { workflow: 'discover', question: 'q', source_paths: [PAPER_PATH] },
-    })
+    const result = await invoke(ports, { workflow: 'discover', question: 'q', source_paths: [PAPER_PATH] })
 
     expect(result.status).toBe('completed')
-    const extractCalls = ports.llmCalls.filter((c) => c.slot === 'extract')
+    const extractCalls = ports.calls.filter((c) => c.slot === 'extract')
     expect(extractCalls).toHaveLength(2)
     expect(extractCalls[1]!.prompt).toContain('上一轮产出未通过校验')
-    expect(extractCalls[1]!.prompt).toContain('可能是')
+    // 断言诊断特有子串——「可能是」在模板禁语清单恒在，不作判据（PR #917 review S3）。
+    expect(extractCalls[1]!.prompt).toContain('出现禁语「可能是」')
   })
 
   it('validate² 拒（候选 1 个 < 2）→ 回 critic 重试附诊断；重试过 → completed', async () => {
@@ -146,74 +126,112 @@ describe('W2 discover 图 invoke（S2 端口注入 fake）', () => {
     const ports = makePorts({
       critic: () => {
         n += 1
-        return n === 1 ? validCritic([{ question: '仅一个', priority: 'high' }]) : validCritic()
+        return n === 1 ? validCriticDoc([{ question: '仅一个', priority: 'high' }]) : validCriticDoc()
       },
     })
-    const result = await createDiscoverGraph(ports).invoke({
-      request: { workflow: 'discover', question: 'q', source_paths: [PAPER_PATH] },
-    })
+    const result = await invoke(ports, { workflow: 'discover', question: 'q', source_paths: [PAPER_PATH] })
 
     expect(result.status).toBe('completed')
-    const criticCalls = ports.llmCalls.filter((c) => c.slot === 'critic')
+    const criticCalls = ports.calls.filter((c) => c.slot === 'critic')
     expect(criticCalls).toHaveLength(2)
     expect(criticCalls[1]!.prompt).toContain('上一轮产出未通过校验')
-    expect(criticCalls[1]!.prompt).toContain('2–4')
+    // 断言诊断特有子串——「2–4」在模板恒在，「（当前 1 个）」是校验 issue 特有（S3）。
+    expect(criticCalls[1]!.prompt).toContain('须为 2–4 个（当前 1 个）')
   })
 
   it('validate² 再拒 → 明确失败（critic 恰 2 次，K≤2 有界）', async () => {
-    const ports = makePorts({ critic: () => validCritic([]) })
-    await expect(
-      createDiscoverGraph(ports).invoke({ request: { workflow: 'discover', question: 'q', source_paths: [PAPER_PATH] } }),
-    ).rejects.toThrow()
-    expect(ports.llmCalls.filter((c) => c.slot === 'critic')).toHaveLength(2)
+    const ports = makePorts({ critic: () => validCriticDoc([]) })
+    await expect(invoke(ports, { workflow: 'discover', question: 'q', source_paths: [PAPER_PATH] })).rejects.toThrow(/重试耗尽/)
+    expect(ports.calls.filter((c) => c.slot === 'critic')).toHaveLength(2)
   })
 
-  it('evidenceGate：引用不存在的 extract 节 → 剔除该 evidence；剔除清单进 summary 不静默', async () => {
+  it('critic prompt 注入真实论文页路径（evidence 引用指引锚，Spec#4）', async () => {
+    const ports = makePorts()
+    await invoke(ports, { workflow: 'discover', question: 'q', source_paths: [PAPER_PATH] })
+    expect(ports.calls[0]!.slot).toBe('extract')
+    const criticPrompt = ports.calls.find((c) => c.slot === 'critic')!.prompt
+    expect(criticPrompt).toContain(`${PAPER_PATH}#<节标题>`)
+  })
+
+  it('evidenceGate：本页节锚存在性回查——坏节锚剔除、清单进 summary 不静默', async () => {
     const ports = makePorts({
       critic: () =>
-        validCritic([
-          { question: '消融是否充分？', priority: 'high', evidence: ['extract §3', 'extract §99'] },
+        validCriticDoc([
+          { question: '消融是否充分？', priority: 'high', evidence: [`${PAPER_PATH}#6 Results`, `${PAPER_PATH}#99 无此节`] },
           { question: '泛化证据？', priority: 'medium', evidence: [PAPER_PATH] },
         ]),
     })
-    const result = await createDiscoverGraph(ports).invoke({
-      request: { workflow: 'discover', question: 'q', source_paths: [PAPER_PATH] },
-    })
+    const result = await invoke(ports, { workflow: 'discover', question: 'q', source_paths: [PAPER_PATH] })
 
     expect(result.status).toBe('completed')
     expect(result.summary).toContain('剔除')
-    expect(result.summary).toContain('extract §99')
-    const [draft] = (ports.wiki.createPage as ReturnType<typeof vi.fn>).mock.calls[0] as unknown as [
-      { claims: { statement: string; evidence: string[] }[] },
-    ]
-    expect(draft.claims[0]!.evidence).toEqual(['extract §3'])
+    expect(result.summary).toContain('#99 无此节')
+    const [draft] = ports.fake.createPage.mock.calls[0] as unknown as [{ claims: { statement: string; evidence: string[] }[] }]
+    expect(draft.claims[0]!.evidence).toEqual([`${PAPER_PATH}#6 Results`])
   })
 
   it('evidenceGate：evidence 全部剔除 → 整条 claim 不进 persist（claims 提交面）', async () => {
     const ports = makePorts({
       critic: () =>
-        validCritic([
-          { question: '证据全缺的候选', priority: 'high', evidence: ['extract §99'] },
-          { question: '正常候选', priority: 'medium', evidence: ['extract §3'] },
+        validCriticDoc([
+          { question: '证据全缺的候选', priority: 'high', evidence: [`${PAPER_PATH}#99 无此节`] },
+          { question: '正常候选', priority: 'medium', evidence: [`${PAPER_PATH}#4 Method`] },
         ]),
     })
-    const result = await createDiscoverGraph(ports).invoke({
-      request: { workflow: 'discover', question: 'q', source_paths: [PAPER_PATH] },
-    })
+    const result = await invoke(ports, { workflow: 'discover', question: 'q', source_paths: [PAPER_PATH] })
 
     expect(result.status).toBe('completed')
     expect(result.summary).toContain('整条剔除')
-    const [draft] = (ports.wiki.createPage as ReturnType<typeof vi.fn>).mock.calls[0] as unknown as [
-      { claims: { statement: string; evidence: string[] }[] },
-    ]
+    const [draft] = ports.fake.createPage.mock.calls[0] as unknown as [{ claims: { statement: string; evidence: string[] }[] }]
     expect(draft.claims.map((c) => c.statement)).toEqual(['正常候选'])
+  })
+
+  it('evidenceGate：他页引用 readPage 存在性回查（Spec#8）——页缺失/节缺失剔、裸页哨兵探锚放行', async () => {
+    const ports = makePorts({
+      pages: { [PAPER_PATH]: paperPageBody(), 'papers/other-paper.md': otherPaperBody() },
+      critic: () =>
+        validCriticDoc([
+          { question: '他页节锚存在', priority: 'high', evidence: ['papers/other-paper.md#2 方法概述'] },
+          { question: '他页整页不存在', priority: 'high', evidence: ['papers/missing-page.md#1 Citation'] },
+          { question: '他页裸页引用', priority: 'medium', evidence: ['papers/other-paper.md'] },
+          { question: '他页节锚缺失', priority: 'low', evidence: ['papers/other-paper.md#99 无此节'] },
+        ]),
+    })
+    const result = await invoke(ports, { workflow: 'discover', question: 'q', source_paths: [PAPER_PATH] })
+
+    expect(result.status).toBe('completed')
+    expect(result.summary).toContain('papers/missing-page.md#1 Citation')
+    expect(result.summary).toContain('引用的 wiki 页不存在')
+    expect(result.summary).toContain('#99 无此节')
+    const [draft] = ports.fake.createPage.mock.calls[0] as unknown as [{ claims: { statement: string; evidence: string[] }[] }]
+    const survived = draft.claims.map((c) => c.statement)
+    expect(survived).toContain('他页节锚存在')
+    expect(survived).toContain('他页裸页引用')
+    expect(survived).not.toContain('他页整页不存在')
+    expect(survived).not.toContain('他页节锚缺失')
+  })
+
+  it('evidenceGate：上传件非 .pdf 形态剔除；extract 文档引用归描述性放行（Spec#14 收敛三类钉面）', async () => {
+    const ports = makePorts({
+      critic: () =>
+        validCriticDoc([
+          { question: 'txt 上传件', priority: 'high', evidence: ['/lab/uploads/notes.txt'] },
+          { question: '描述性引用', priority: 'medium', evidence: ['extract 文档 §4 消融现象'] },
+        ]),
+    })
+    const result = await invoke(ports, { workflow: 'discover', question: 'q', source_paths: [PAPER_PATH] })
+
+    expect(result.status).toBe('completed')
+    expect(result.summary).toContain('/lab/uploads/notes.txt')
+    const [draft] = ports.fake.createPage.mock.calls[0] as unknown as [{ claims: { statement: string; evidence: string[] }[] }]
+    expect(draft.claims.map((c) => c.statement)).toEqual(['描述性引用'])
   })
 
   it('stage 序列：resolveInputs → load → extract → validate → critic → validate → evidenceGate → persist → summary', async () => {
     const ports = makePorts()
     const stages: string[] = []
-    await createDiscoverGraph(ports).invoke(
-      { request: { workflow: 'discover', question: 'q', source_paths: [PAPER_PATH] } },
+    await createDiscoverGraph({ llm: ports.llm, wiki: ports.wiki }).invoke(
+      { request: { workflow: 'discover', question: 'q', source_paths: [PAPER_PATH] } as never },
       { onStage: (s) => stages.push(s) },
     )
     expect(stages).toEqual(['resolveInputs', 'load', 'extract', 'validate', 'critic', 'validate', 'evidenceGate', 'persist', 'summary'])

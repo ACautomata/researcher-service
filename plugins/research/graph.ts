@@ -88,6 +88,22 @@ export interface ResearchRoutingPorts {
 }
 
 // ---------------------------------------------------------------------------
+// wiki 路径域换算（PR #917 review P0#1）：写面与读面路径域不对称——createPage 经
+// normalizeRelPath 吃写面 rel（papers/x.md）；readPage 直透 openwiki readWikiSections，
+// 其 normalizeWikiPagePath 强制归一化后以 /openwiki/ 开头否则 invalid_input；检索镜像
+// 的 search ref 亦带 openwiki/ 前缀。约定：图内状态一律持有写面 rel 域（artifactPages/
+// provenance/用户面路径同域），仅在 readPage 调用点经 wikiReadPathOf 换算。
+// ---------------------------------------------------------------------------
+
+/** 写面 rel 路径 → 检索读面虚拟前缀形态（papers/x.md → openwiki/papers/x.md）。 */
+export const wikiReadPathOf = (relPath: string): string => `openwiki/${relPath}`
+
+/** 检索 ref / 用户输入 → 写面 rel 路径（剥首斜杠与 openwiki/ 虚拟前缀）。 */
+export function toWikiRelPath(p: string): string {
+  return p.replace(/^\/+/, '').replace(/^openwiki\//, '')
+}
+
+// ---------------------------------------------------------------------------
 // 状态面
 // ---------------------------------------------------------------------------
 
@@ -132,17 +148,35 @@ export interface ResearchRoutingInvokeOptions {
   readonly onStage?: (stage: string, workflow?: WorkflowLabel) => void
 }
 
+// 流程图 invoke 选项共享形（W1 ingest / W2 discover 同构，PR #917 review S13 接口双写归口；
+// onStage 裸节点名——workflow 域字段由入口图分支节点附加）。
+export interface FlowGraphInvokeOptions {
+  readonly onStage?: (stage: string) => void
+  readonly signal?: AbortSignal
+}
+
+// LangGraph compiled.invoke 第二参组装（onStage 走 configurable 通道，signal 直传）——
+// 两图 invoke 尾部重复块归口（PR #917 review S13）。
+export function compiledInvokeOptions(options: FlowGraphInvokeOptions | undefined): {
+  signal?: AbortSignal
+  configurable: { onStage?: (stage: string) => void }
+} {
+  return {
+    ...(options?.signal ? { signal: options.signal } : {}),
+    configurable: { onStage: options?.onStage },
+  }
+}
+
 export interface ResearchRoutingResult {
   readonly status: 'branch' | 'clarify'
   /** 分支路径 = 路由到的流程（seed 值或分类标签）；clarify 路径 undefined。 */
   readonly workflow: WorkflowLabel | undefined
   /** 分类产物（seed 透传不调分类器 → undefined）。 */
   readonly intent: IntentVerdict | undefined
-  /** branch：流程产出 summary（多意图高置信时附尾注）；clarify 时 undefined。 */
-  readonly summary: string | undefined
   /** clarify 两形态（853 §1.3）：低置信 Top-2 候选 / none 空候选拒识。 */
   readonly clarify: ClarifyResult | undefined
-  /** branch：流程终态（summary/artifactPages；分支内 clarify 时 status='clarify'）。 */
+  /** branch：流程终态（summary/artifactPages；分支内 clarify 时 status='clarify'）。
+   *  summary 只在 outcome 一处（含多意图尾注）——不设顶层冗余字段（PR #917 review S18）。 */
   readonly outcome: WorkflowOutcome | undefined
 }
 
@@ -162,8 +196,6 @@ export function stageReporterOf(
 }
 
 export function createResearchRoutingGraph(ports: ResearchRoutingPorts): ResearchRoutingGraph {
-  const stage = (config: LangGraphRunnableConfig | undefined, name: string): void => stageReporterOf(config)(name)
-
   // 节点 classify（单一入口）：seed 已带 → 透传不调分类器（命令直达/显式传/W4 collect；
   // 命令路径恒带 workflow 永不触发兜底，853 §1.3）；缺省 → 分类器（结构化槽位序列化输入，
   // 解读点 A）→ 阈值判定（isAccepted：none 或 conf < MIN_CONFIDENCE）落 clarify 或 workflow。
@@ -171,7 +203,7 @@ export function createResearchRoutingGraph(ports: ResearchRoutingPorts): Researc
     state: RoutingState,
     config: LangGraphRunnableConfig | undefined,
   ): Promise<Partial<RoutingState>> {
-    stage(config, 'classify')
+    stageReporterOf(config)('classify')
     const seed = state.request.workflow
     if (seed !== undefined) return { workflow: seed }
     const intent = await ports.classifier(serializeClassifyInput(state.request))
@@ -188,7 +220,7 @@ export function createResearchRoutingGraph(ports: ResearchRoutingPorts): Researc
       state: RoutingState,
       config: LangGraphRunnableConfig | undefined,
     ): Promise<Partial<RoutingState>> {
-      stage(config, workflow)
+      stageReporterOf(config)(workflow)
       const report = stageReporterOf(config)
       const outcome = await ports.runWorkflow(workflow, state.request, (s) => report(s, workflow))
       return { outcome }
@@ -223,7 +255,7 @@ export function createResearchRoutingGraph(ports: ResearchRoutingPorts): Researc
         },
       )
       if (state.clarify !== undefined) {
-        return { status: 'clarify', workflow: undefined, intent: state.intent, summary: undefined, clarify: state.clarify, outcome: undefined }
+        return { status: 'clarify', workflow: undefined, intent: state.intent, clarify: state.clarify, outcome: undefined }
       }
       if (state.workflow === undefined || state.outcome === undefined) {
         // 拓扑终局必有 workflow + outcome（clarify 已上分支；分支节点必写 outcome）——
@@ -242,7 +274,6 @@ export function createResearchRoutingGraph(ports: ResearchRoutingPorts): Researc
         status: 'branch',
         workflow: state.workflow,
         intent: state.intent,
-        summary,
         clarify: undefined,
         outcome: secondary !== undefined ? { ...state.outcome, summary } : state.outcome,
       }

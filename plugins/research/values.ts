@@ -51,6 +51,29 @@ export const PDF_EXTRACT_MAX_CHARS = 1_000_000
 // 生成页进治理检索面，徽章面过期标记由此驱动（wiki/pluginPage.ts frontmatter 组装消费）。
 export const GENERATED_STALE_AFTER_MS = 180 * 24 * 60 * 60 * 1000
 
+// W1/W2 V1 单篇约束（853 §4.1「一次调用一篇」）：capture/resolveInputs 共享判定常数。
+// 与 server.ts SOURCE_PATHS_MAX（传输面数组上限，W3/W4 预留）分属两层——V1 流程语义在
+// 本值，传输上限在 server.ts（名近义分层，PR #917 review S8/#22 归口）。
+export const SOURCE_PATHS_V1_MAX = 1
+
+// W1 summary 截断上限（853 §4.1 summary「≤1k」钉面，只钉 W1）。W2 无此钉——「剔除清单
+// 必进 summary 不静默」（853 §4 横切）优先于截断，W2 不截断（PR #917 review Spec#9）。
+export const SUMMARY_MAX_CHARS = 1000
+
+// W2 validate² 候选问题数量面：确定性钉 2–4（853 §4.2 / #848 §2.2）；schema 层另设宽容
+// 硬上限（LLM 给超量时 zod 不直拒——校验层出「须为 2–4」诊断重试可修）。
+export const CRITIC_CANDIDATES_MIN = 2
+export const CRITIC_CANDIDATES_MAX = 4
+export const CRITIC_CANDIDATES_SCHEMA_MAX = 10
+
+// W2 resolveInputs 检索定位拉取条数（按 papers/ 前缀过滤后取首条；拉 5 弃 4 容忍 critic
+// 页/杂页混入排前——FTS OR 匹配无页型过滤，PR #917 review Spec#6）。
+export const RESOLVE_INPUTS_SEARCH_LIMIT = 5
+
+// W1 validate 论文页行数门禁（853 §4.1 / #848 §1.2 完成门禁「≥100 行」——完整精读笔记
+// 而非摘要；prompt 模板与校验清单同源渲染，PR #917 review S4 归口）。
+export const PAPER_PAGE_MIN_LINES = 100
+
 // PageDraft DTO 尺寸上限（853 §7.1 拍板追认，#908 复审 B5）：zod 边界防失控值。
 // path 上限不在本表——wiki/paths.ts PATH_MAX 是 wiki 域单源（pluginPage 组合消费）。
 export const PAGE_DRAFT_MAX = {

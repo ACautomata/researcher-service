@@ -17,13 +17,12 @@
 import { END, START, StateGraph, Annotation, z } from '../../server/src/plugins/autofigureDeps'
 import type { LangGraphRunnableConfig } from '../../server/src/plugins/autofigureDeps'
 import type { PluginClaimDraft, PluginDocsPort, PluginLlmPort, PluginWikiPort } from '../../server/src/plugins/api'
-import { PAGE_DRAFT_MAX } from './values'
+import { PAGE_DRAFT_MAX, SOURCE_PATHS_V1_MAX, SUMMARY_MAX_CHARS } from './values'
 import { paperPageSlug, validatePaperPage } from './pageValidate'
 import { generateWithBoundedRetry } from './generate'
-import type { ValidateResult } from './pageValidate'
 import { buildCreatePaperPagePrompt, PAPER_PAGE_ANCHORS } from './prompts'
-import { stageReporterOf } from './graph'
-import type { ResearchWorkflowRequest, WorkflowOutcome } from './graph'
+import { compiledInvokeOptions, stageReporterOf, wikiReadPathOf } from './graph'
+import type { FlowGraphInvokeOptions, ResearchWorkflowRequest, WorkflowOutcome } from './graph'
 
 // 论文页 LLM 产出 schema（11 节正文 + 页 title + claims 结构化提交面）。claims 宽容缺省
 //（LLM 不给 = 空——claims 由 persist 经 port 组装 OKF 块，缺 claims 合法；.optional() 而非
@@ -54,9 +53,6 @@ export interface IngestPorts {
   readonly wiki: Pick<PluginWikiPort, 'createPage' | 'readPage'>
 }
 
-// V1 单篇约束（853 §4.1「一次调用一篇」）。
-const SOURCE_PATHS_V1_MAX = 1
-
 // 产物指纹（FNV-1a 32 位 hex——确定性对账指纹落 summary 溯源，非密码学用途；plugins 树
 // 零 npm 依赖约束下不引 node:crypto）。
 function fnv1aHex(text: string): string {
@@ -76,7 +72,7 @@ function normalizeForHash(text: string): string {
 
 // 论文页产物路径（wiki-conventions：论文页 slug 匹配标题不带日期，papers/ 组固定——
 // slug 由 title 确定性派生，kebab-case 确定性检查 = 派生函数本体）。
-export function paperPagePath(title: string): string {
+function paperPagePath(title: string): string {
   return `papers/${paperPageSlug(title)}.md`
 }
 
@@ -91,7 +87,6 @@ interface IngestState {
   draft: PaperPageDraft | undefined
   diagnostics: string | undefined
   createAttempts: number
-  validation: ValidateResult | undefined
   pagePath: string | undefined
   persistedCreated: boolean | undefined
   fingerprint: string | undefined
@@ -105,7 +100,6 @@ const IngestAnnotation = {
   draft: Annotation<PaperPageDraft | undefined>,
   diagnostics: Annotation<string | undefined>,
   createAttempts: Annotation<number>,
-  validation: Annotation<ValidateResult | undefined>,
   pagePath: Annotation<string | undefined>,
   persistedCreated: Annotation<boolean | undefined>,
   fingerprint: Annotation<string | undefined>,
@@ -116,17 +110,14 @@ const IngestAnnotation = {
 // 图工厂（纯函数——同 ports 必同拓扑）
 // ---------------------------------------------------------------------------
 
-export interface IngestGraphInvokeOptions {
-  /** 阶段进度上报（裸节点名 = stage 白名单值；workflow 域字段由入口图分支节点附加）。 */
-  readonly onStage?: (stage: string) => void
-  readonly signal?: AbortSignal
-}
-
 export function createIngestGraph(ports: IngestPorts): {
-  invoke(init: { request: ResearchWorkflowRequest }, options?: IngestGraphInvokeOptions): Promise<WorkflowOutcome>
+  invoke(init: { request: ResearchWorkflowRequest }, options?: FlowGraphInvokeOptions): Promise<WorkflowOutcome>
 } {
-  // capture（确定性）：PDF ∈ /lab/uploads 前缀 + V1 单篇。URL 来源 V1 不收（明示降级，
-  // 853 §4.1）——非前缀一律拒，幻觉路径确定性拒绝回喂（诊断附用法）。
+  // capture（确定性）：PDF ∈ /lab/uploads 前缀 + .pdf 形态 + V1 单篇。URL 来源 V1 不收
+  //（明示降级，853 §4.1）——非前缀一律拒，幻觉路径确定性拒绝回喂（诊断附用法）。错误
+  // 信息不列 /lab/uploads 现有文件：插件 docs 口无目录列举面（#752 窄域钉，853 §1.3 该项
+  // V1 明示降级为引导用户自查）。存在性与 .. 穿越校验由下游承载：extract 的 docs port
+  // not_found（normalizeLabPath 兜底）——stage 归因偏移为 V1 已接受边界。
   function captureNode(state: IngestState, config: LangGraphRunnableConfig | undefined): Partial<IngestState> {
     stageReporterOf(config)('capture')
     const paths = state.request.source_paths ?? []
@@ -136,7 +127,10 @@ export function createIngestGraph(ports: IngestPorts): {
     }
     const p = paths[0]!
     if (!p.startsWith('/lab/uploads/')) {
-      throw new Error(`PDF 路径必须在 /lab/uploads/ 前缀下（收到 ${p}）；请把文件上传到 /lab/uploads 后重试。URL 来源暂不支持`)
+      throw new Error(`PDF 路径必须在 /lab/uploads/ 前缀下（收到 ${p}）；请把文件上传到 /lab/uploads 后重试（插件无法列出该目录，请与用户确认确切文件名）。URL 来源暂不支持`)
+    }
+    if (!p.toLowerCase().endsWith('.pdf')) {
+      throw new Error(`ingest 只收 PDF（收到 ${p}）——请提供 /lab/uploads 下的 .pdf 文件`)
     }
     return { sourcePath: p }
   }
@@ -165,28 +159,27 @@ export function createIngestGraph(ports: IngestPorts): {
       nodeLabel: '论文页',
     })
     if (r.value === undefined) {
-      return { createAttempts: r.attempts, diagnostics: r.diagnostics, draft: undefined, validation: undefined }
+      return { createAttempts: r.attempts, diagnostics: r.diagnostics, draft: undefined }
     }
     return { createAttempts: r.attempts, draft: r.value, diagnostics: undefined }
   }
 
   // validate（确定性）：11 节标题齐全 / title 非空（frontmatter 必填面）/ ≥100 行 /
-  // Results 含具体数字。draft 缺失（上轮解析失败）→ 失败面 = 解析诊断（条件边据此回 create）。
+  // Results 含具体数字。draft 缺失（上轮解析失败）→ 诊断面 = create 失败诊断（该路径
+  // diagnostics 必已定义——图不变量；条件边据此回 create）。
   function validateNode(state: IngestState, config: LangGraphRunnableConfig | undefined): Partial<IngestState> {
     stageReporterOf(config)('validate')
     if (state.draft === undefined) {
-      return { validation: { ok: false, issues: [state.diagnostics ?? '上一轮产出缺失'] } }
+      return { diagnostics: state.diagnostics! }
     }
     const validation = validatePaperPage(state.draft)
-    return {
-      validation,
-      diagnostics: validation.ok ? undefined : validation.issues.join('；'),
-    }
+    return { diagnostics: validation.ok ? undefined : validation.issues.join('；') }
   }
 
-  // 条件边：validation 过 → persist；不过 → create（create 进入时 attempts 超界即明确失败）。
+  // 条件边：诊断清空（校验过）→ persist；诊断在 → create（create 进入时 attempts 超界即
+  // 明确失败）。与 discover 路由同风格（diagnostics 单锚，PR #917 review S21 归一）。
   function routeAfterValidate(state: IngestState): 'persist' | 'create' {
-    return state.validation?.ok ? 'persist' : 'create'
+    return state.diagnostics === undefined ? 'persist' : 'create'
   }
 
   // persist：经 wiki 写 port（幂等哨兵——created:false = 重放窗口防重复建页，常态路径）。
@@ -207,9 +200,15 @@ export function createIngestGraph(ports: IngestPorts): {
   //（剥空白与 heading # 标记——核心组装面在页首尾追加 frontmatter/claims 块，逐字比对
   // 恒不等；规范化哈希消除组装面与 section 切分的空白/标记差异，正文字符层面全量比对）
   // FNV-1a 对账，不等 = 明确失败；指纹落 summary 溯源（审计面可对账）。
+  // 读面路径域换算（wikiReadPathOf——openwiki normalizeWikiPagePath 强制 /openwiki/ 前缀，
+  // PR #917 review P0#1）。幂等跳过（created:false = 库中旧页非本次草稿）→ 对账无意义，
+  // 跳过 verify（旧页可读性已由 createPage probe 确认，PR #917 review Spec#5）。
   async function verifyNode(state: IngestState, config: LangGraphRunnableConfig | undefined): Promise<Partial<IngestState>> {
     stageReporterOf(config)('verify')
-    const r = await ports.wiki.readPage(state.pagePath!, PAPER_PAGE_ANCHORS)
+    if (state.persistedCreated === false) {
+      return {}
+    }
+    const r = await ports.wiki.readPage(wikiReadPathOf(state.pagePath!), PAPER_PAGE_ANCHORS)
     if (!r.ok) throw new Error(`论文页回读失败（${r.error.code}）：${r.error.message}`)
     const fingerprint = fnv1aHex(normalizeForHash(state.draft!.content))
     const readback = fnv1aHex(normalizeForHash(r.data.sections.map((s) => s.content).join('\n')))
@@ -219,18 +218,18 @@ export function createIngestGraph(ports: IngestPorts): {
     return { fingerprint }
   }
 
-  // summary：≤1k + 产物路径（853 §4.1 summary 节点钉面）。
+  // summary：≤1k（SUMMARY_MAX_CHARS）+ 产物路径（853 §4.1 summary 节点钉面）。
   function summaryNode(state: IngestState, config: LangGraphRunnableConfig | undefined): Partial<IngestState> {
     stageReporterOf(config)('summary')
     const created = state.persistedCreated === true
     const claimsCount = state.draft?.claims?.length ?? 0
     const lines = [
       `论文已入库：${state.pagePath}（${created ? '新建页面' : '页面已存在，幂等跳过'}）。`,
-      `正文 ${state.draft!.content.split('\n').length} 行 · claims ${claimsCount} 条 · 产物指纹 ${state.fingerprint}。`,
+      `正文 ${state.draft!.content.split('\n').length} 行 · claims ${claimsCount} 条${state.fingerprint !== undefined ? ` · 产物指纹 ${state.fingerprint}` : ''}。`,
       `来源：${state.sourcePath}`,
     ]
     const summary = lines.join('\n')
-    return { summaryText: summary.length <= 1000 ? summary : `${summary.slice(0, 999)}…` }
+    return { summaryText: summary.length <= SUMMARY_MAX_CHARS ? summary : `${summary.slice(0, SUMMARY_MAX_CHARS - 1)}…` }
   }
 
   const graph = new StateGraph({ stateSchema: Annotation.Root(IngestAnnotation) })
@@ -254,13 +253,7 @@ export function createIngestGraph(ports: IngestPorts): {
 
   return {
     async invoke(init, options) {
-      const state = await compiled.invoke(
-        { request: init.request, createAttempts: 0 },
-        {
-          ...(options?.signal ? { signal: options.signal } : {}),
-          configurable: { onStage: options?.onStage },
-        },
-      )
+      const state = await compiled.invoke({ request: init.request, createAttempts: 0 }, compiledInvokeOptions(options))
       if (state.summaryText === undefined || state.pagePath === undefined || state.draft === undefined) {
         // 拓扑终局必有三分量（失败路径全部 throw 出图）——理论不可达的防御面。
         throw new Error('ingest graph finished without summary')
