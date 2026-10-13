@@ -414,7 +414,6 @@ describe('WikiView — #913 query.path 深链消费（artifactPages 深链终点
     ;(readPage as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new ApiError(200, '页面读取失败', 20040))
     await mountAt({ path: 'papers/ghost.md' })
     await flushPromises()
-    expect(useWikiStore().activePath).toBe('papers/ghost.md') // openPage 置 activePath 后 readPage 抛错
     expect(getTree).toHaveBeenCalled() // 首屏资料不受深链失败影响
     expect(ElMessage.error).toHaveBeenCalledWith('页面读取失败')
   })

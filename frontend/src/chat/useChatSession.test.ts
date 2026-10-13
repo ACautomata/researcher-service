@@ -397,7 +397,7 @@ describe('审批（#783 升级通道前端面）', () => {
     chat.addApproval({ id: 'e1', source: 'cautious-mode', toolName: 'bash', toolCallSummary: 'x', teammateId: null })
     vi.mocked(api.resolveSessionApproval).mockResolvedValueOnce(null)
     await conn.resolveApproval(chat.approvals[0], 'allow')
-    expect(api.resolveSessionApproval).toHaveBeenCalledWith('sess-1', 'e1', 'allow', undefined)
+    expect(vi.mocked(api.resolveSessionApproval).mock.calls[0]).toStrictEqual(['sess-1', 'e1', 'allow', undefined])
     expect(chat.approvals).toHaveLength(0)
 
     chat.addApproval({ id: 'e2', source: 'judge-limit', toolName: 'bash', toolCallSummary: 'x', teammateId: null })
@@ -423,7 +423,7 @@ describe('审批（#783 升级通道前端面）', () => {
     chat.addApproval({ id: 'e2', source: 'cautious-mode', toolName: 'bash', toolCallSummary: 'x', teammateId: null })
     vi.mocked(api.resolveSessionApproval).mockResolvedValueOnce(null)
     await conn.resolveApproval(chat.approvals[0], 'allow')
-    expect(api.resolveSessionApproval).toHaveBeenCalledWith('sess-1', 'e2', 'allow', undefined)
+    expect(vi.mocked(api.resolveSessionApproval).mock.calls[1]).toStrictEqual(['sess-1', 'e2', 'allow', undefined])
   })
 })
 

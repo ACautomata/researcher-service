@@ -47,12 +47,13 @@ describe('ResearchRunCard 进行态（双段徽标，853 §6.2）', () => {
     const wrapper = mountCard({ stage: '尚未存在的节点', workflow: 'hypothesize' })
     expect(wrapper.find('[data-test="research-badge"]').text()).toBe('假说生成 · 尚未存在的节点中…')
     const wrapper2 = mountCard({ stage: 'bucket', workflow: 'future-flow' })
-    expect(wrapper2.find('[data-test="research-badge"]').text()).toBe('future-flow · 分桶生成中…')
+    // 嵌套字典（853「workflow→{stage→中文}」）：bucket 仅属 hypothesize 域，未知 workflow 不命中 → 双段皆裸名
+    expect(wrapper2.find('[data-test="research-badge"]').text()).toBe('future-flow · bucket中…')
   })
 
-  it('入口面帧无 workflow → 单段徽标（classify=意图分类）', () => {
+  it('入口面帧无 workflow → 单段徽标（classify=意图识别，GLOSSARY 正典）', () => {
     const wrapper = mountCard({ stage: 'classify' })
-    expect(wrapper.find('[data-test="research-badge"]').text()).toBe('意图分类中…')
+    expect(wrapper.find('[data-test="research-badge"]').text()).toBe('意图识别中…')
     const wrapper2 = mountCard({ stage: 'hypothesize' })
     expect(wrapper2.find('[data-test="research-badge"]').text()).toBe('假说生成中…')
   })
@@ -64,9 +65,9 @@ describe('ResearchRunCard 进行态（双段徽标，853 §6.2）', () => {
     expect(wrapper.find('[data-test="research-badge-hint"]').text()).toContain('审批卡')
   })
 
-  it('W4 collect 调用③：input.phase=collect → 徽标「实验 · 结果对账」（phase 优先于 stage）', () => {
+  it('W4 collect 调用③：input.phase=collect → 徽标「结果对账」（853 字面无前缀，phase 优先于 stage）', () => {
     const wrapper = mountCard({ stage: 'collect', workflow: 'experiment', input: '{"workflow":"experiment","phase":"collect","spec_path":"/lab/specs/x.md"}' })
-    expect(wrapper.find('[data-test="research-badge"]').text()).toBe('实验 · 结果对账')
+    expect(wrapper.find('[data-test="research-badge"]').text()).toBe('结果对账')
   })
 
   it('progress 未到（无 stage）→ 通用文案「工作流运行中…」，不渲染徽标', () => {

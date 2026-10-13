@@ -10,6 +10,7 @@
 // vue 运行时 API 经 @/plugins/deps 桥（plugins 树禁裸包名 import 铁律，#791 对称面）。
 import { computed, onBeforeUnmount, ref, watch } from '@/plugins/deps'
 import { FIGURE_RUN_STAGES } from '@/chat/projection'
+import { parseObjectish } from '@/plugins/api'
 import { getFigurePngBlob, getFigureSvgBlob } from '@/api/figures'
 
 // props 契约 = @/plugins/api PluginToolRenderProps 同形（内联声明是实测结论：vue-tsc 可解析
@@ -39,25 +40,13 @@ const stages = FIGURE_RUN_STAGES.map((s) => ({ key: s, label: STAGE_LABELS[s] })
 const stageIndex = computed(() => (props.stage ? stages.findIndex((s) => s.key === props.stage) : -1))
 
 // details 容错解析：ToolLine 已 JSON.parse 过对象为主；字符串（异形源/直接挂载）再试一次，
-// 失败 → null（走兜底）。
+// 失败 → null（走兜底）。共用 parseObjectish（@/plugins/api，ResearchRunCard 同款 0 信任形状）。
 interface FigureDetails {
   figureId?: unknown
   state?: unknown
   previewReady?: unknown
 }
-const parsed = computed<FigureDetails | null>(() => {
-  const raw = props.details
-  if (raw !== null && typeof raw === 'object') return raw as FigureDetails
-  if (typeof raw === 'string' && raw !== '') {
-    try {
-      const v: unknown = JSON.parse(raw)
-      return v !== null && typeof v === 'object' ? (v as FigureDetails) : null
-    } catch {
-      return null
-    }
-  }
-  return null
-})
+const parsed = computed<FigureDetails | null>(() => parseObjectish(props.details) as FigureDetails | null)
 const figureId = computed(() => {
   const id = parsed.value?.figureId
   return typeof id === 'string' && id !== '' ? id : ''

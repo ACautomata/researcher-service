@@ -21,7 +21,7 @@ export interface ApprovalItem {
   toolName: string
   toolCallSummary: string // 规范化参数 JSON 摘要（≤1KB）
   judgeReason?: string // judge 理由（repeat-reject / judge-malformed 附带）
-  plan?: ApprovalPlanBlock // experiment-plan 审批的方案块（形状单一来源在 api/sessions.ts 镜像）)
+  plan?: ApprovalPlanBlock // experiment-plan 审批的方案块（形状单一来源在 api/sessions.ts 镜像）
   teammateId: string | null // 队友审批来源标识；null = 主会话审批
   status: 'pending' | 'resolving' | 'expired' // pending 待处理 / resolving 已点击等回执 / expired 已失效终态
   decision: '' | 'allow' | 'deny'

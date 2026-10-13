@@ -27,8 +27,8 @@ const emit = defineEmits<{
 const PLAN_REVIEW_MAX_ROUNDS = 3
 
 const planOpen = ref(false)
-// 附言（approve 可选——落审计、随 resume 值作为执行注意事项传达）与拒绝理由框均为
-// 局部视图态（#913）。
+// 附言（approve 可选——落审计、随 resume 值作为执行注意事项传达）与拒绝理由框均为局部
+// 视图态（#913）；收起即清值（C2 拍板）——重试/再展开不带滞留输入。
 const noteOpen = ref(false)
 const note = ref('')
 const denyOpen = ref(false)
@@ -36,6 +36,10 @@ const denyReason = ref('')
 
 const actionDisabled = () => props.approval.status !== 'pending' || props.disconnected
 
+function toggleNote(): void {
+  if (noteOpen.value) note.value = ''
+  noteOpen.value = !noteOpen.value
+}
 function approve(): void {
   emit('resolve', props.approval, 'allow', note.value.trim() || undefined)
 }
@@ -82,36 +86,39 @@ function backFromDeny(): void {
           @click="approve()"
         >{{ approval.status === 'resolving' ? '处理中…' : '批准并执行' }}</button>
         <button
-          class="btn-ghost note-toggle"
+          class="btn-ghost"
           :disabled="actionDisabled()"
+          title="附言随批准提交（可选，≤2000 字）"
           :data-test="`note-toggle-${approval.id}`"
-          @click="noteOpen = !noteOpen"
+          @click="toggleNote()"
         >{{ noteOpen ? '收起附言' : '添加附言' }}</button>
         <textarea
           v-if="noteOpen" v-model="note" class="note-input" rows="2" maxlength="2000"
-          :data-test="`note-input-${approval.id}`" placeholder="附言（可选，≤2000 字）：将作为执行注意事项传达"
+          :data-test="`note-input-${approval.id}`" aria-label="批准附言（可选，≤2000 字）"
+          placeholder="附言（可选，≤2000 字）：将作为执行注意事项传达"
         />
         <button
           class="btn-deny"
           :disabled="actionDisabled()"
-          :title="disconnected ? '连接已断开，请重新连接后操作' : '拒绝本方案并说明理由（回喂修订下一轮）'"
+          :title="disconnected ? '连接已断开，请重新连接后操作' : '拒绝后按理由修订下一轮方案'"
           :data-test="`deny-${approval.id}`"
           @click="denyOpen = true"
-        >拒绝</button>
+        >拒绝并说明理由</button>
       </template>
       <template v-else>
         <textarea
-          v-model="denyReason" class="note-input deny-input" rows="3" maxlength="2000"
-          :data-test="`deny-input-${approval.id}`"
+          v-model="denyReason" class="note-input" rows="3" maxlength="2000"
+          :data-test="`deny-input-${approval.id}`" aria-label="拒绝理由（必填，≤2000 字）"
           placeholder="拒绝理由（必填，≤2000 字）：将回喂修订下一轮方案"
         />
         <button
           class="btn-deny"
           :disabled="denyReason.trim() === '' || actionDisabled()"
+          title="确认拒绝：理由将回喂修订下一轮方案"
           :data-test="`deny-confirm-${approval.id}`"
           @click="confirmDeny()"
         >确认拒绝</button>
-        <button class="btn-ghost" :data-test="`deny-back-${approval.id}`" @click="backFromDeny()">返回</button>
+        <button class="btn-ghost" title="返回批准/拒绝选择" :data-test="`deny-back-${approval.id}`" @click="backFromDeny()">返回</button>
       </template>
     </div>
   </div>

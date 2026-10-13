@@ -31,3 +31,19 @@ export interface PluginWebDefinition {
 export function definePluginWeb(definition: PluginWebDefinition): PluginWebDefinition {
   return definition
 }
+
+// details/input 容错解析（插件卡共用呈现面助手，FigureCard/ResearchRunCard 同款 0 信任形状）：
+// 对象引用直取（ToolLine 已 JSON.parse 过为主）；字符串试 JSON.parse 成对象；
+// 截断（切坏 JSON）/纯文本/解析失败 → null（组件走原文兜底，fail-soft 不停摆）。
+export function parseObjectish(raw: unknown): Record<string, unknown> | null {
+  if (raw !== null && typeof raw === 'object') return raw as Record<string, unknown>
+  if (typeof raw === 'string' && raw !== '') {
+    try {
+      const v: unknown = JSON.parse(raw)
+      return v !== null && typeof v === 'object' ? (v as Record<string, unknown>) : null
+    } catch {
+      return null
+    }
+  }
+  return null
+}

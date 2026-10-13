@@ -7,6 +7,7 @@
 // progressStages 已是唯一关卡，853 §6.2）——未知值 fallback 裸名。
 // vue 运行时 API 经 @/plugins/deps 桥（plugins 树禁裸包名 import 铁律，#791 对称面）。
 import { computed } from '@/plugins/deps'
+import { parseObjectish } from '@/plugins/api'
 import MarkdownRenderer from '@/components/chat/MarkdownRenderer.vue'
 
 // props 契约 = @/plugins/api PluginToolRenderProps + workflow（853 §6.2 双段徽标语境面，
@@ -24,52 +25,61 @@ const props = defineProps<{
   workflow?: string
 }>()
 
-// 呈现字典（不持拓扑序列——组件只做查表）。宽键 Record：透传纪律下字典是呈现面非校验面，
-// 新 stage 值忘配中文 → fallback 裸名不炸（853 §6.2「未知 stage 值 fallback 裸名」）。
+// 呈现字典（不持拓扑序列——组件只做查表）。嵌套形状 = 853 §6.2「workflow→{stage→中文}」。
+// 宽键 Record：透传纪律下字典是呈现面非校验面，新 stage 值忘配中文 → fallback 裸名不炸
+// （853 §6.2「未知 stage 值 fallback 裸名」）。'_entry' 伪 workflow：入口帧尚无 workflow
+// 语境时的 stage 中文（classify + 分支名帧——分支名与 workflow 同名，双段重复合并单段呈现）。
 const WORKFLOW_LABELS: Record<string, string> = {
   ingest: '知识库构建',
   discover: '科学问题发现',
   hypothesize: '假说生成',
   experiment: '实验',
 }
-const STAGE_LABELS: Record<string, string> = {
-  classify: '意图分类',
-  // 入口分支名（进入流程信号）——中文名与 workflow 同名，双段重复合并单段呈现
-  ingest: '知识库构建',
-  discover: '科学问题发现',
-  hypothesize: '假说生成',
-  experiment: '实验',
-  // W1 ingest
-  capture: '资料捕获',
-  extract: '内容解析',
-  create: '页面生成',
-  validate: '结构校验',
-  persist: '写入 wiki',
-  verify: '入库验证',
-  summary: '结果汇总',
-  // W2 discover
-  resolveInputs: '解析输入',
-  load: '加载论文',
-  critic: '审读评估',
-  evidenceGate: '证据闸门',
-  // W3 hypothesize
-  contextPack: '上下文打包',
-  bucket: '分桶生成',
-  dedup: '去重合并',
-  challenge: '挑战评审',
-  // W4 experiment
-  preflight: '执行预检',
-  design: '方案设计',
-  spec: '方案落盘',
-  audit: '方案自审',
-  'plan-review': '方案待审批',
-  collect: '结果对账',
-  summarize: '对账汇总',
+const WORKFLOW_STAGES: Record<string, Record<string, string>> = {
+  _entry: {
+    classify: '意图识别', // GLOSSARY 正典（intent classification）
+    ingest: '知识库构建',
+    discover: '科学问题发现',
+    hypothesize: '假说生成',
+    experiment: '实验',
+  },
+  ingest: {
+    capture: '资料捕获',
+    extract: '内容解析',
+    create: '页面生成',
+    validate: '结构校验',
+    persist: '写入 wiki',
+    verify: '入库验证',
+    summary: '结果汇总',
+  },
+  discover: {
+    resolveInputs: '解析输入',
+    load: '加载论文',
+    critic: '审读评估',
+    evidenceGate: '证据闸门',
+  },
+  hypothesize: {
+    contextPack: '上下文打包',
+    bucket: '分桶生成',
+    dedup: '去重合并',
+    challenge: '挑战评审',
+  },
+  experiment: {
+    preflight: '执行预检',
+    design: '方案设计',
+    spec: '方案落盘',
+    audit: '方案自审',
+    'plan-review': '方案待审批',
+    collect: '结果对账',
+    summarize: '对账汇总',
+  },
 }
 
 const stageLabel = computed(() => {
   if (props.stage === undefined) return undefined
-  return STAGE_LABELS[props.stage] ?? props.stage
+  const wf = props.workflow
+  const nested = wf !== undefined ? WORKFLOW_STAGES[wf]?.[props.stage] : undefined
+  return nested ?? WORKFLOW_STAGES._entry[props.stage] ?? props.stage
 })
 const workflowLabel = computed(() => {
   if (props.workflow === undefined) return undefined
@@ -77,18 +87,12 @@ const workflowLabel = computed(() => {
 })
 
 // W4 调用③识别：phase 槽位从 tool.start input 推（853 §6.2「collect 调用③ = phase 徽标」）。
-const isCollectPhase = computed(() => {
-  let v: unknown = props.input
-  if (typeof v === 'string' && v !== '') {
-    try { v = JSON.parse(v) as unknown } catch { return false }
-  }
-  return v !== null && typeof v === 'object' && (v as Record<string, unknown>).phase === 'collect'
-})
+const isCollectPhase = computed(() => parseObjectish(props.input)?.phase === 'collect')
 
 // 进行态徽标（running 专属；plan-review = W4 awaiting_review 唯一带引导提示条的两态之一）。
 const badge = computed(() => {
   if (props.state !== 'running') return null
-  if (isCollectPhase.value) return { text: '实验 · 结果对账', hint: false }
+  if (isCollectPhase.value) return { text: '结果对账', hint: false } // 853 字面（无 workflow 前缀）
   if (props.stage === 'plan-review') return { text: `${workflowLabel.value ?? '实验'} · 方案待审批`, hint: true }
   if (stageLabel.value === undefined) return null
   if (workflowLabel.value === undefined || workflowLabel.value === stageLabel.value) {
@@ -106,19 +110,7 @@ interface ResearchDetails {
   summary?: unknown
   clarify?: unknown
 }
-const parsed = computed<ResearchDetails | null>(() => {
-  const raw = props.details
-  if (raw !== null && typeof raw === 'object') return raw as ResearchDetails
-  if (typeof raw === 'string' && raw !== '') {
-    try {
-      const v: unknown = JSON.parse(raw)
-      return v !== null && typeof v === 'object' ? (v as ResearchDetails) : null
-    } catch {
-      return null
-    }
-  }
-  return null
-})
+const parsed = computed<ResearchDetails | null>(() => parseObjectish(props.details) as ResearchDetails | null)
 const status = computed(() => {
   const s = parsed.value?.status
   return typeof s === 'string' && (STATUSES as readonly string[]).includes(s) ? s : null
