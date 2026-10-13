@@ -146,6 +146,44 @@ flowchart TD
   补充材料，不生成泛化 idea。
 - **失败可观测**：单桶生成失败只降级不阻断，失败记录与全部淘汰原因完整进 summary。
 
+### W4 `/experiment` 实验自主设计与执行（三调用两段式 + 方案人审）
+
+```mermaid
+flowchart TD
+    S(["NL 自然语言（实验意图 + critic 页 / idea card 页）<br/>/experiment 命令直达不可挂起<br/>→ 引导 NL 路径（无条件人审不破）"]) --> RI["resolveInputs<br/>critics/ 或 idea-cards/ 前缀白名单<br/>+ 存在性回查 + 实验意图必填"]
+    RI -->|"输入页缺失 / 形态不符 / 意图缺失"| CL1["clarify 出口<br/>列缺失清单（先 /discover 或 /hypothesize）"]
+    RI --> PF["preflight（材料清单）<br/>critic 页提取 §4 候选问题 / idea card 提取 minimum_experiment<br/>→ 映射池（双输入 = 并集池）"]
+    PF --> PE{"planEntry<br/>spec 已落盘？"}
+    PE -->|"已落盘（非修订轮）<br/>resume 重放短路：零 LLM 重调"| SM["summary<br/>spec 路径 + awaiting_review"]
+    PE -->|"首次 / 修订轮"| DS["design（LLM · 重试三源 K≤2）<br/>10 节 + 实验↔验证目标映射<br/>修订模式 = 上轮 spec + 用户理由"]
+    DS --> V1["validate¹（确定性 · 映射校验泛化）<br/>每实验至少映射候选池一条<br/>不过 → 回 design 重试附诊断"]
+    V1 --> SP["spec（LLM · 重试三源 K≤2）<br/>9 段「沙箱执行规格」+ 交付物声明结构化面<br/>（文件路径清单 + 每件成功判据）"]
+    SP --> V2["validate²（确定性 · 占位符未填充检查）<br/>可推断占位符（论文 Wiki 标识）出现即拒<br/>不过 → 回 spec 重试"]
+    V2 --> AU["audit（①②④ 确定性 + ③⑤⑥ LLM）<br/>必须修复项非空 → 该调用 fail（不进人审）"]
+    AU --> PS["persist（lab 落盘 · 幂等短路点）<br/>/lab/specs/&lt;slug&gt;/r&lt;N&gt;/（round 键控）<br/>design.md + spec.md + audit.md + deliverables.json"]
+    PS --> SM
+
+    SM -->|"工具内 interrupt 挂起<br/>stage 停 plan-review + 审批卡"| GATE{"人审闸门（无条件门禁<br/>与 approvalMode 无关）<br/>第 N/3 轮"}
+    GATE -->|"approve（可选附言）<br/>审计行 allow（tool_approval_logs）<br/>spec 短路保证重放零 LLM"| EX["调用② 执行段（非图 · 主 agent）<br/>按规格沙箱执行：exec 漏斗逐命令<br/>长命令 nohup 后台 + 轮询哨兵（120s 全局）<br/>方案批「做什么」不豁免漏斗审「怎么做」"]
+    GATE -->|"deny（必填理由 ≤2000）<br/>审计行 deny + round 关联"| DS
+    GATE -->|"第 3 轮 deny"| EXH["plan_review_exhausted 终局<br/>run completed 非 failed<br/>spec 停留 lab + lastReason"]
+    EX -->|"执行完成 · phase=collect"| CO["collect（确定性对账）<br/>读回 spec + 旁车交付物声明<br/>逐件 lab.read 存在性对账（缺件进 summary）"]
+    CO --> SU["summarize（LLM）<br/>实验报告页（对账 + 结果 + 结论）"]
+    SU --> VA2["validate（形状档）"]
+    VA2 --> PP["persist<br/>experiment-reports/&lt;slug&gt;-&lt;round&gt;.md 落 wiki<br/>related_pages = 输入页集 + 「关联页面」节<br/>= #789 graph 派生边（WikiGraph 可见）"]
+    PP --> SM2["summary<br/>报告页路径 + 对账结果（缺件不静默）"]
+```
+
+- **三调用两段式**：调用①（图）产出方案落 lab 并必停等人审；调用②（非图）= 主 agent 按规格在
+  沙箱真实执行——逐命令照常过审批漏斗，层级正交（方案审「做什么」，漏斗审「怎么做」）；
+  调用③（`phase='collect'` 图）按交付物声明确定性对账、产出实验报告页落 wiki。
+- **无条件人审**：方案必停审批卡（`experiment-plan` 源，`plan{title, summary, text, round}`
+  内联载荷）；approve 附言随结果传达主 agent 作执行注意事项；deny 必填理由 → 回 design
+  修订模式（零新图节点）；3 轮未通过 = `plan_review_exhausted` 结构化终局（非错误）。
+- **幂等短路点**：spec 落盘 `/lab/specs/<slug>/r<N>/`（round 键控——每轮产物互不覆盖，重放读回用户当轮所审原文）后，interrupt 的 resume 重放跳 design/spec/audit 全部 LLM 直达挂审点；修订历史 = LangGraph resume 队列（零额外持久化）+ 历史轮审计跳过——「3 轮修订 = 3 行 round 关联」在多轮重放不破；审批审计落 `tool_approval_logs`（`toolName='experiment_plan'`，引用快照 `{planTitle, planHash, planRef, round}` 不存全文，3 轮 = 3 行 round 关联）。
+- **产物**：spec/design/audit 中间产物落 lab；实验报告页 `experiment-reports/<slug>-<round>.md` 落 wiki
+  （round 键控——每轮人审各得其报告页；`category: experiment-report` + frontmatter `related_pages` + 正文「关联页面」相对链接）。
+
 ## 产物与进度
 
 > **当前版本说明**：W1（ingest）、W2（discover）与 W3（hypothesize）节点链已全链可用

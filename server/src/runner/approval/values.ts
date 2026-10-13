@@ -123,8 +123,11 @@ export const DEVICE_WRITE_COMMANDS: readonly string[] = ['fdisk', 'sfdisk', 'par
 // 升级通道（729 §3）
 // ---------------------------------------------------------------------------
 
-// 升级触发源（EscalationItem.source，729 §3.4 四值）。
-export type EscalationSource = 'cautious-mode' | 'judge-limit' | 'repeat-reject' | 'judge-malformed'
+// 升级触发源（EscalationItem.source，729 §3.4 四值 + #852 第五值 experiment-plan）：
+// experiment-plan = W4 实验方案人审（流程内置无条件门禁——research_workflow 工具内
+// interrupt，载荷由插件侧构造；funnel 自身不产生该源）。枚举扩值全链零改动消费
+// （resolveApproval 只按 escalation.id 路由；卡面按 source 分流）。
+export type EscalationSource = 'cautious-mode' | 'judge-limit' | 'repeat-reject' | 'judge-malformed' | 'experiment-plan'
 
 // 升级事件/interrupt 载荷的判别标记：RunService 据此把「审批升级 interrupt」与 deepagents
 // 内建 interruptOn（V1 测试注入面，载荷形状不同）区分开——只有本漏斗的 interrupt 触发

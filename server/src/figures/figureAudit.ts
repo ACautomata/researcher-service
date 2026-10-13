@@ -15,6 +15,8 @@ import type { AuthUser } from '../types'
 import type { PrismaClient } from '../generated/prisma/client'
 import type { PluginAuditPort, PluginRunAuditEvent } from '../plugins/api'
 import { TRACE_TEXT_MAX, recordTextTrace } from '../traceLogs/service'
+import { truncateChars } from '../runner/approval/judge'
+import { APPROVAL_REASON_MAX_CHARS } from '../runner/approval/values'
 
 // SSE 用户面事件名派生（#853 §3.1：SSE 事件族名按 manifest run.kind 声明派生）。
 // 'figure' → 'figure_run.progress' 与既有事件名逐字一致（声明迁移后行为零变）。
@@ -144,6 +146,36 @@ export function createPrismaPluginRunAuditSink(
         // eslint-disable-next-line no-console
         console.warn(`[plugins] 插件 run 审计落库失败: run=${identity.runId}: ${String(err)}`)
       })
+    },
+
+    // 方案级人审审计行（#912 · 853 §5.2）：落 tool_approval_logs——traceId/runId/userId
+    // 由本 sink 的 run 身份自动补（funnel writeAudit 同款口径）；失败返 false（调用方
+    // fail-closed——审批是安全路径，审计不能丢）。
+    async recordToolApproval(row) {
+      try {
+        await prisma.toolApprovalLog.create({
+          data: {
+            // 弱关联 traceId 口径与 funnel 一致（V1 = runId 占位，R3 修复②断链面）。
+            traceId: identity.runId,
+            runId: identity.runId,
+            userId: identity.ownerId,
+            layer: 'human',
+            decision: row.decision,
+            toolName: row.toolName,
+            toolCall: row.toolCall,
+            // reason 截断与 funnel 落库同口径（APPROVAL_REASON_MAX_CHARS——ADR 0018 §5
+            // 「funnel writeAudit 同款」的兑现，#912 review P1-2）。
+            ...(row.reason != null && row.reason !== ''
+              ? { reason: truncateChars(row.reason, APPROVAL_REASON_MAX_CHARS) }
+              : {}),
+          },
+        })
+        return true
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.error(`[approval] 方案人审审计写入失败: run=${identity.runId}: ${String(err)}`)
+        return false
+      }
     },
   }
 }

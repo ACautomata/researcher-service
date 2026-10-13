@@ -16,6 +16,8 @@
 
 import { randomUUID } from 'node:crypto'
 import { tool } from '@langchain/core/tools'
+import { interrupt } from '@langchain/langgraph'
+import { AsyncLocalStorageProviderSingleton } from '@langchain/core/singletons'
 import type { AnyPluginToolDefinition, PluginToolContentBlock, PluginToolContext } from './api'
 import { currentPluginRunFrame, execPartsFromFrame } from './runContext'
 import { currentToolCallContext } from '../runner/filejournal/context'
@@ -24,6 +26,30 @@ export function contentToText(content: readonly PluginToolContentBlock[]): strin
   return content
     .map((block) => (block.type === 'text' ? block.text : `[image: ${block.image_url.url}]`))
     .join('\n')
+}
+
+// agent 图执行上下文检测（#912 · 853 §5.1）：工具 runtime 即主 agent 图 pregel config——
+// configurable 带 __pregel_checkpointer = 图内可挂起（interrupt 可恢复）；{execute} 命令
+// 直达不经图（runtime 无 checkpointer）= 不可挂起。interrupt 经 runWithConfig 恢复主图
+// ALS 后调顶层 interrupt——GraphInterrupt 从工具栈穿透嵌套路由图 invoke 冒泡主 agent 图
+// 挂起（checkpoint 落库）；resume 重放时同闭包返回历史 resume 值。
+//
+// 返回面 = {value, historical}（#912 review 修复）：historical = 本次消费的是 resume 队列
+// 的历史值（callIdx <= scratchpad.resume.length——LangGraph 队列语义：interruptCounter 0 基
+// 递增，历史消费条件 idx < resume.length，idx = callIdx - 1；每次重放消费历史值至队列末位
+// 前，末位对应新挂起点）——历史轮跳过审计落行，保「3 轮修订 = 3 行」于多轮重放。
+// callIdx 为包装实例的调用计数（每次 resume 重放 = 新工具执行 = 新实例，从 1 起）。
+export const graphInterruptOf = (runtime: unknown): ((value: unknown) => { value: unknown; historical: boolean }) | undefined => {
+  const configurable = (runtime as { configurable?: Record<string, unknown> } | null | undefined)?.configurable
+  if (configurable === undefined || !('__pregel_checkpointer' in configurable)) return undefined
+  let callIdx = 0
+  return (value: unknown) => {
+    callIdx += 1
+    const scratchpad = (configurable as { __pregel_scratchpad?: { resume?: unknown[] } }).__pregel_scratchpad
+    const resumeLen = Array.isArray(scratchpad?.resume) ? scratchpad.resume.length : 0
+    const result = AsyncLocalStorageProviderSingleton.runWithConfig(runtime, () => interrupt(value))
+    return { value: result, historical: callIdx <= resumeLen }
+  }
 }
 
 export function toLangChainTool(def: AnyPluginToolDefinition, ctx: PluginToolContext, pluginId?: string) {
@@ -41,8 +67,12 @@ export function toLangChainTool(def: AnyPluginToolDefinition, ctx: PluginToolCon
       // 翻译面注册（#853 §3.2#6）：onUpdate 白名单查表「toolCallId→工具名→所属插件」的
       // 第一跳——注册面缺失（旧形状 frame）时 stage 上报按白名单外丢弃语义自然落空。
       frame?.noteToolCall?.(toolCallId, def.name)
+      const graphInterrupt = graphInterruptOf(runtime)
       const result = await def.execute(toolCallId, params as never, {
         signal,
+        // W4 方案人审挂起点（#912）：仅 agent 图内可挂起；命令直达 undefined（W4 返回
+        // clarify 引导 NL——无条件人审不破）。
+        ...(graphInterrupt !== undefined ? { interrupt: graphInterrupt } : {}),
         // pluginId（#883）：调用方经运行时目录 toolOwnerByName 派生——ctx.llm per-plugin
         // 解析键。缺失（防御面）→ ctx.llm 缺省，域工具自校验。
         ...execPartsFromFrame(ctx, frame, toolCallId, pluginId),

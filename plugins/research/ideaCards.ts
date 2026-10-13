@@ -297,6 +297,9 @@ export const ideaCardSlug = (title: string): string => paperPageSlug(title)
 
 // 卡 → wiki 页正文（15 字段模板渲染；首行 H1 = 卡标题，之下空一行机读标签——#848 §0
 // 「`category: idea` 独占一行」约定，同 critic 页 category 标签先例）。
+// 字段区包 `## Idea Card Fields` H2 节（#912 补钉——openwiki 读面契约：页须 ≥1 节锚
+// 才可 readPage 读内容；无节页消费断链（W4 preflight 提取 minimum_experiment 入映射池、
+// design/spec prompt 输入材料）。W3 页形断言（H1 开头/标签位置）不受影响。
 export function renderIdeaCardPage(card: IdeaCard): string {
   const field = (name: string, v: unknown): string => {
     if (Array.isArray(v)) return `${name}:\n${v.map((x) => `  - ${x}`).join('\n')}`
@@ -306,6 +309,8 @@ export function renderIdeaCardPage(card: IdeaCard): string {
     `# ${card.title ?? '未命名假说'}`,
     '',
     IDEA_CATEGORY_TAG,
+    '',
+    '## Idea Card Fields',
     '',
     field('idea_id', card.idea_id),
     field('one_sentence_hypothesis', card.one_sentence_hypothesis),

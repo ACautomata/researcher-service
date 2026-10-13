@@ -29,6 +29,8 @@ import {
   TARGET_PROBLEM_MIN_CHARS,
   MIN_EXPERIMENT_WARN_CHARS,
   IDEA_ANCHORS_MAX,
+  PLAN_TEXT_MAX_CHARS,
+  SPEC_DELIVERABLES_MAX,
 } from '../../plugins/research/values'
 
 describe('research values 常量表（853 §7.1 · #909）', () => {
@@ -86,5 +88,9 @@ describe('research values 常量表（853 §7.1 · #909）', () => {
     expect(TARGET_PROBLEM_MIN_CHARS).toBe(30)
     expect(MIN_EXPERIMENT_WARN_CHARS).toBe(20)
     expect(IDEA_ANCHORS_MAX).toBe(4)
+    // W4（#912）：plan.text 内联「几 KB 载荷」面（16k chars ≈ 8k tokens——审批卡渲染可承受）；
+    // 交付物声明件数硬上限（对账逐件处理防失控值）。
+    expect(PLAN_TEXT_MAX_CHARS).toBe(16_000)
+    expect(SPEC_DELIVERABLES_MAX).toBe(20)
   })
 })

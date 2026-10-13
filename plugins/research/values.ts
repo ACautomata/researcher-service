@@ -74,8 +74,21 @@ export const MIN_EXPERIMENT_WARN_CHARS = 20
 export const IDEA_ANCHORS_MAX = 4
 
 // W4 方案人审修订上限（853 §5.1 · #852）：deny → 回 design 修订模式，第 3 轮 deny →
-// plan_review_exhausted 终局（run completed 非 failed）。卡显轮次，第 2/3 轮「最后一轮」提示。
+// plan_review_exhausted 终局（run completed 非 failed）。轮次随 escalation.plan.round 透传；
+// 卡面轮次显示与第 2/3 轮「最后一轮」提示归 [#873·7]（#913）前端 PlanApprovalCard 渲染。
 export const PLAN_REVIEW_MAX_ROUNDS = 3
+
+// W4 方案人审载荷上限（853 §5.1：escalation.plan 全文内联「几 KB 载荷」——审批卡
+// MarkdownRenderer 渲染面，超truncate 由 buildExperimentPlan 截断面执行；单卡无独立拉取面）。
+export const PLAN_TEXT_MAX_CHARS = 16_000
+
+// W4 spec 交付物声明件数上限（schema 层宽容硬上限——LLM 多给不直拒；对账面逐件处理，
+// 上限防失控值。消费面 = experiment.ts SPEC_DOC_SCHEMA）。
+export const SPEC_DELIVERABLES_MAX = 20
+
+// W4 collect 对账条目内容 excerpt 上限（#912 review P1：对账面存节选不全文驻留——20 件
+// ×16MiB 理论峰值的内存放大面；报告生成只需内容头部证据，消费面 = buildCollectSummaryPrompt）。
+export const RECKONING_EXCERPT_MAX_CHARS = 4_000
 
 // extractPdfText 字符上限（853 §7.1 拍板 1_000_000 · #851 D10）：PDF 提取全文上限，超限明确
 // 报错不静默截断——截断致 extract 缺节 → validate 拒 → 重试循环浪费 token（§3.2#2 原文）。

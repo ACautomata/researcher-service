@@ -8,7 +8,7 @@
 // - section content = 自 heading 行起的 raw 切片；createPage 吃写面 rel 路径直存（页已存在
 //   → created:false 幂等哨兵）；search ref 带 openwiki/ 虚拟前缀。
 import { vi } from 'vitest'
-import { headingAnchor, PAPER_PAGE_SECTIONS, EXTRACT_SECTIONS, CRITIC_SECTIONS } from '../../plugins/research/prompts'
+import { headingAnchor, PAPER_PAGE_SECTIONS, EXTRACT_SECTIONS, CRITIC_SECTIONS, DESIGN_SECTIONS, SPEC_SECTIONS } from '../../plugins/research/prompts'
 import type { PluginLlmPort, PluginWikiPort } from '../src/plugins/api'
 
 // ---------------------------------------------------------------------------
@@ -87,7 +87,7 @@ export function createWikiFake(initial: Record<string, string> = {}): WikiFake {
 // 对重试链正确；#911 增 brief/bucket/challenge 三 slot：research_topic / cards / verdict 键）
 // ---------------------------------------------------------------------------
 
-export type SlotName = 'extract' | 'critic' | 'brief' | 'bucket' | 'challenge'
+export type SlotName = 'extract' | 'critic' | 'brief' | 'bucket' | 'challenge' | 'design' | 'spec' | 'audit' | 'report'
 export interface SlotLlm extends PluginLlmPort {
   readonly calls: { slot: SlotName; prompt: string }[]
 }
@@ -96,6 +96,10 @@ const slotOf = (shape: Record<string, unknown> | undefined): SlotName => {
   if (shape?.verdict !== undefined) return 'challenge'
   if (shape?.cards !== undefined) return 'bucket'
   if (shape?.research_topic !== undefined) return 'brief'
+  if (shape?.report !== undefined) return 'audit'
+  if (shape?.deliverables !== undefined) return 'spec'
+  if (shape?.experiments !== undefined) return 'design'
+  if (shape?.title !== undefined && shape?.content !== undefined) return 'report'
   return shape?.candidates !== undefined ? 'critic' : 'extract'
 }
 
@@ -107,6 +111,12 @@ export function createSlotLlm(handlers: {
   bucket?: (prompt: string) => unknown
   /** 待反驳卡 JSON 在 prompt 的 <card> 块内。 */
   challenge?: (prompt: string) => unknown
+  /** W4 design：修订模式输入在 <revision> 块（上轮 spec + 用户理由）。 */
+  design?: (prompt: string) => unknown
+  spec?: (prompt: string) => unknown
+  audit?: (prompt: string) => unknown
+  /** W4 collect 报告页：{title, content} 形状。 */
+  report?: (prompt: string) => unknown
 }): SlotLlm {
   const calls: { slot: SlotName; prompt: string }[] = []
   const generateMultimodal = vi.fn(async () => ({ text: '' }))
@@ -122,9 +132,17 @@ export function createSlotLlm(handlers: {
             ? (handlers.bucket?.(prompt) ?? { cards: [] })
             : slot === 'brief'
               ? (handlers.brief?.() ?? validBrief())
-              : slot === 'critic'
-                ? (handlers.critic?.() ?? validCriticDoc())
-                : (handlers.extract?.() ?? validExtractDoc())
+              : slot === 'audit'
+                ? (handlers.audit?.(prompt) ?? validAuditVerdict())
+                : slot === 'report'
+                  ? (handlers.report?.(prompt) ?? validExperimentReport())
+                  : slot === 'spec'
+                  ? (handlers.spec?.(prompt) ?? validSpecDoc())
+                  : slot === 'design'
+                    ? (handlers.design?.(prompt) ?? validDesignDoc())
+                    : slot === 'critic'
+                      ? (handlers.critic?.() ?? validCriticDoc())
+                      : (handlers.extract?.() ?? validExtractDoc())
       return opts.schema.parse(value)
     },
   )
@@ -207,3 +225,143 @@ export const validIdeaCard = (over: Record<string, unknown> = {}) => ({
   wiki_writeback: 'papers/robust-out-of-distribution-detection.md#7 Limitations 可补记该改进方向。',
   ...over,
 })
+
+// ---------------------------------------------------------------------------
+// W4 合法产物 fixture（#912）：design 10 节 + spec 9 段边界形（校验清单恰好通过的
+// 骨架——节标题逐字、字段非空、无禁语、无可推断占位符）。
+// ---------------------------------------------------------------------------
+
+export const DESIGN_EXPERIMENTS = [
+  { name: '消融覆盖审计', validation_target: '消融是否覆盖核心组件？', expected_outcome: '定位核心组件贡献。' },
+  { name: '跨模态验证', validation_target: '跨模态泛化证据是否充分？', expected_outcome: '获得跨模态 AUROC。' },
+]
+
+export const SPEC_DELIVERABLES = [
+  { path: '/lab/results/ablation.json', success_criterion: '含各组件消融 AUROC 数字' },
+  { path: '/lab/results/cross-modal.csv', success_criterion: '每行一个模态的评估结果' },
+]
+
+const designSectionsBody = () =>
+  [
+    ...DESIGN_SECTIONS.map((s, i) => `## ${i} ${s}\n\n实验设计内容，服务明确的验证目标。`),
+  ].join('\n')
+
+const specSectionsBody = () =>
+  [
+    ...SPEC_SECTIONS.map((s, i) => `## ${i + 1} ${s}\n\n规格内容，工程化可执行。`),
+  ].join('\n')
+
+export const validDesignDoc = (): { content: string; experiments: typeof DESIGN_EXPERIMENTS } => ({
+  content: designSectionsBody(),
+  experiments: DESIGN_EXPERIMENTS,
+})
+
+export const validSpecDoc = (): { content: string; deliverables: typeof SPEC_DELIVERABLES } => ({
+  content: specSectionsBody(),
+  deliverables: SPEC_DELIVERABLES,
+})
+
+// W4 audit LLM 三维（③边界遵守/⑤证据分级/⑥跨阶段一致性）合法产出——blocking 空
+// （必须修复项非空 → 该调用 fail 不进人审的反向面）。
+export const validAuditVerdict = (over: Record<string, unknown> = {}) => ({
+  report: ['# 方案审计报告', '', ...['评估元信息', '总览', '逐阶段详细评估', '跨阶段一致性问题', '必须修复项', '建议改进项', '总体评估'].map((s, i) => `## ${i} ${s}\n\n评估内容。`)].join('\n'),
+  blocking: [] as string[],
+  suggestions: [] as string[],
+  ...over,
+})
+
+// ---------------------------------------------------------------------------
+// W4 输入页 fixture（#912）：critic 页（## 节形态——preflight 提取 §4 候选问题入映射池）
+// 与 idea card 页（## Idea Card Fields 节——提取 minimum_experiment 行）。
+// ---------------------------------------------------------------------------
+
+export const CRITIC_PATH = 'critics/robust-out-of-distribution-detection.md'
+export const IDEA_CARD_PATH = 'idea-cards/energy-score-ood.md'
+
+export const validCriticPage = (over: Record<string, unknown> = {}) =>
+  renderCriticPage({ candidates: defaultCriticCandidates(), ...over })
+
+// critic 页正文 = H1 + 机读标签 + §0–§7 节（§4 候选问题列表——W4 映射池消费面）。
+function renderCriticPage(input: { candidates: { question: string; priority: string; evidence: string[] }[] }): string {
+  const sec4 = [
+    '## 4 验证候选问题与优先级',
+    '',
+    ...input.candidates.map((c, i) => `${i + 1}. **${c.question}**（优先级：${c.priority}）——依据：${c.evidence.join('、') || '见前文分析'}`),
+  ].join('\n')
+  return [
+    '# 某论文审稿式问题分析',
+    '',
+    '`category: critic`',
+    '',
+    ...CRITIC_SECTIONS.map((s, i) => (i === 4 ? sec4 : `## ${i} ${s}\n\n具体分析内容。`)),
+  ].join('\n\n')
+}
+
+// idea card 页正文（renderIdeaCardPage 同款渲染的最小合法形——fields 节 + minimum_experiment 行）。
+export const validIdeaCardPage = (): string =>
+  [
+    '# 基于能量分数的 OOD 判据改进',
+    '',
+    '`category: idea`',
+    '',
+    '## Idea Card Fields',
+    '',
+    'idea_id: P01-G1',
+    'minimum_experiment: 在 CIFAR-100 上复现 baseline 并替换打分函数，对比 AUROC/FPR95。',
+    'confidence: medium',
+    '',
+  ].join('\n')
+
+// W4 collect 段合法产出（#912）：实验报告页 {title, content}（content 从 ## 实验目标
+// 开始——H1/机读标签归 persist 面确定性组装）。
+export const validExperimentReport = (over: Record<string, unknown> = {}) => ({
+  title: '实验报告：验证能量分数判据',
+  content: [
+    '## 实验目标',
+    '',
+    '验证能量分数判据对 OOD 检测 AUROC 的提升。',
+    '## 执行摘要',
+    '',
+    '复现 baseline 并替换打分函数。',
+    '## 交付物对账',
+    '',
+    '逐件对账记录。',
+    '## 结果与观察',
+    '',
+    'AUROC 95.12 → 96.83。',
+    '## 结论与建议',
+    '',
+    '验证目标成立，建议扩大样本。',
+  ].join('\n'),
+  ...over,
+})
+
+// lab port fake（W4 短路点/落盘/persist 消费面）：files = 沙箱绝对路径表；
+export interface LabFake {
+  readonly lab: import('../src/plugins/api').PluginLabPort
+  readonly files: Map<string, string>
+  readonly write: ReturnType<typeof vi.fn>
+  readonly read: ReturnType<typeof vi.fn>
+}
+
+export function createLabFake(initial: Record<string, string> = {}): LabFake {
+  const files = new Map(Object.entries(initial))
+  const write = vi.fn(async (input: { path: string; content: string }) => {
+    if (!input.path.startsWith('/lab/specs/')) {
+      return { ok: false as const, error: { code: 'invalid_path' as const, message: 'lab write 仅允许 /lab/specs/ 前缀路径' } }
+    }
+    files.set(input.path, input.content)
+    return { ok: true as const, data: { written: true as const } }
+  })
+  const read = vi.fn(async (input: { path: string }) => {
+    if (!input.path.startsWith('/lab/')) {
+      return { ok: false as const, error: { code: 'invalid_path' as const, message: '须为 /lab/ 前缀路径' } }
+    }
+    const content = files.get(input.path)
+    if (content === undefined) {
+      return { ok: false as const, error: { code: 'not_found' as const, message: `文件不存在: ${input.path}` } }
+    }
+    return { ok: true as const, data: { content } }
+  })
+  return { lab: { read, write } as unknown as import('../src/plugins/api').PluginLabPort, files, write, read }
+}

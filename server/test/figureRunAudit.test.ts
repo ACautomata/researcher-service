@@ -176,4 +176,22 @@ describe('createPrismaPluginRunAuditSink（TextTrace 五类审计 + runKind 盖�
     const broken = createPrismaPluginRunAuditSink(prisma, { ownerId: 'no-such-user', username: 'x', sessionId: 's', runId: 'r' })
     expect(() => broken.emitPluginRun({ event: 'created', toolCallId: 'tcX', detail: {} })).not.toThrow()
   })
+
+  it('recordToolApproval：tool_approval_logs 落行（traceId/runId/userId 自动补）+ reason 截断 funnel 同口径（P1-2）', async () => {
+    const s = sink()
+    const ok = await s.recordToolApproval!({
+      layer: 'human',
+      decision: 'allow',
+      toolName: 'experiment_plan',
+      toolCall: '{"round":1}',
+      reason: '理'.repeat(150),
+    })
+    expect(ok).toBe(true)
+    const row = await prisma.toolApprovalLog.findFirstOrThrow({ where: { runId: 'run-1', toolName: 'experiment_plan' } })
+    expect(row.layer).toBe('human')
+    expect(row.decision).toBe('allow')
+    expect(row.userId).toBe(ownerId)
+    expect(row.traceId).toBe('run-1')
+    expect(Array.from(row.reason ?? '')).toHaveLength(100) // APPROVAL_REASON_MAX_CHARS——funnel 落库同口径
+  })
 })
