@@ -6,7 +6,7 @@
 // 渲染状态与编排解耦：本 store 只做纯 mutation；SSE 路由 × 幂等发送 × 断线补偿的非响应式簇
 // 归 useChatSession 同宿主（#340 关键约束延续）。
 import { defineStore } from 'pinia'
-import type { SessionApproval, SessionSummary } from '@/api/sessions'
+import type { ApprovalPlanBlock, SessionApproval, SessionSummary } from '@/api/sessions'
 import type { Msg, TeamFold } from '@/chat/projection'
 
 // 视图模型单一来源在投影归约器（纯函数可测）——组件经由本 store 再导出保持 import 面不变。
@@ -17,10 +17,11 @@ export { hasTrace, newMsg, shouldFoldTrace } from '@/chat/projection'
 // （审查 #5），随会话切换清空。decision 两值（allow-always 已砍，#729）。
 export interface ApprovalItem {
   id: string // escalation.id（审批回覆 REST 的定位参数）
-  source: string // 升级来源：cautious-mode | judge-limit | repeat-reject | judge-malformed
+  source: string // 升级来源：cautious-mode | judge-limit | repeat-reject | judge-malformed | experiment-plan
   toolName: string
   toolCallSummary: string // 规范化参数 JSON 摘要（≤1KB）
   judgeReason?: string // judge 理由（repeat-reject / judge-malformed 附带）
+  plan?: ApprovalPlanBlock // experiment-plan 审批的方案块（形状单一来源在 api/sessions.ts 镜像）
   teammateId: string | null // 队友审批来源标识；null = 主会话审批
   status: 'pending' | 'resolving' | 'expired' // pending 待处理 / resolving 已点击等回执 / expired 已失效终态
   decision: '' | 'allow' | 'deny'
@@ -30,6 +31,16 @@ export interface ApprovalItem {
 
 // 审批卡构造单一来源（0 信任逐字段走查）：SSE approval.requested 载荷与投影 approvals[] 双路
 // 同形（escalation + teammateId）——两个生产方共用一个构造器，形状漂移单点修复。
+// plan 块 0 信任解析（#920 §1）：四字段形状走查，任一非预期 → 整块丢弃（fail-soft——
+// 卡面回退 toolCallSummary 展示，不阻断 resolve 链；round 须正整数——轮次面显示前提）。
+function planBlockOf(raw: unknown): ApprovalPlanBlock | undefined {
+  if (!raw || typeof raw !== 'object') return undefined
+  const p = raw as Record<string, unknown>
+  if (typeof p.title !== 'string' || typeof p.summary !== 'string' || typeof p.text !== 'string') return undefined
+  if (typeof p.round !== 'number' || !Number.isInteger(p.round) || p.round < 1) return undefined
+  return { title: p.title, summary: p.summary, text: p.text, round: p.round }
+}
+
 export function approvalCardFields(
   escalation: unknown,
   teammateId: unknown,
@@ -39,12 +50,14 @@ export function approvalCardFields(
   const id = typeof esc.id === 'string' ? esc.id : ''
   const toolName = typeof esc.toolName === 'string' ? esc.toolName : ''
   if (!id || !toolName) return null
+  const plan = planBlockOf(esc.plan)
   return {
     id,
     source: typeof esc.source === 'string' ? esc.source : '',
     toolName,
     toolCallSummary: typeof esc.toolCallSummary === 'string' ? esc.toolCallSummary : '',
     ...(typeof esc.judgeReason === 'string' ? { judgeReason: esc.judgeReason } : {}),
+    ...(plan ? { plan } : {}),
     teammateId: typeof teammateId === 'string' && teammateId ? teammateId : null,
   }
 }

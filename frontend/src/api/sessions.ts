@@ -54,14 +54,18 @@ export interface TeamMember {
   mailbox: Array<{ id: string; senderTeammateId: string | null; recipientTeammateId: string | null; kind: string; content: string; createdAt: string }>
 }
 
-// 审批中断负载（server runner/approval/values.ts + funnel.ts 镜像）。
+// 审批中断负载（server runner/approval/values.ts + funnel.ts + plugins/research/experimentPlan.ts
+// 镜像）。#920 §1：source 五值含 experiment-plan（W4 方案人审，853 §5.1）；plan 可选块仅
+// experiment-plan 携带（方案全文内联几 KB，无独立拉取面）。
+export interface ApprovalPlanBlock { title: string; summary: string; text: string; round: number }
 export interface ApprovalEscalation {
   id: string
-  source: 'cautious-mode' | 'judge-limit' | 'repeat-reject' | 'judge-malformed'
+  source: 'cautious-mode' | 'judge-limit' | 'repeat-reject' | 'judge-malformed' | 'experiment-plan'
   toolCallId: string
   toolName: string
   toolCallSummary: string
   judgeReason?: string
+  plan?: ApprovalPlanBlock
 }
 export interface ApprovalInterruptPayload {
   v?: number
