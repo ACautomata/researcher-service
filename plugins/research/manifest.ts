@@ -48,9 +48,9 @@ export default definePlugin({
         'For experiment, source_paths must be a critic page (critics/<slug>.md) or idea card page (idea-cards/<slug>.md) at least one. The plan is always human-reviewed via an approval card (up to 3 revision rounds) before execution; on approval, immediately execute the spec in the sandbox (long commands via nohup + log polling, single-command 120s limit), write result files to the declared /lab/ deliverable paths, then call again with phase=\'collect\' and the spec path to reconcile and produce the experiment report page.',
       ],
       // progressStages 白名单（853 §6.1 四流程节点名并集）：#910 落入口面 5 值 + W1/W2
-      // 流程节点 11 值、#911 增 W3 节点 4 值、#912 增 W4 节点 5 值（preflight/design/
-      // plan-review/collect/summarize——resolveInputs/validate/spec/audit/persist/summary
-      // 重名已含；plan-review = 白名单内唯一非节点名值，853 §6.1 解读点 D）。
+      // 流程节点 11 值、#911 增 W3 节点 4 值、#912 增 W4 节点 7 值（preflight/design/
+      // spec/audit/plan-review/collect/summarize——其余重名已含；plan-review = 白名单内
+      // 唯一非节点名值，853 §6.1 解读点 D）。
       progressStages: RESEARCH_PROGRESS_STAGES,
       execute: executeResearchWorkflow,
     },

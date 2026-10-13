@@ -35,7 +35,8 @@ export function fnv1aHex(input: string): string {
   return hash.toString(16).padStart(16, '0')
 }
 
-const uuidOf = (hex16: string): string =>
+// 确定性 uuid 形派生器（16 hex 填 uuid v4 位型——非随机 uuid；escalation.id 重放必须稳定）。
+const uuidShapedIdOf = (hex16: string): string =>
   `${hex16.slice(0, 8)}-${hex16.slice(8, 12)}-4${hex16.slice(13, 16)}-8${hex16.slice(15, 16)}${hex16.slice(0, 3)}-${hex16.slice(3)}${hex16}`.slice(0, 36)
 
 // ---------------------------------------------------------------------------
@@ -125,10 +126,16 @@ export function buildExperimentPlan(
   const bgLine = bgBody.split('\n').map((l) => l.trim()).find((l) => l !== '') ?? ''
   const summarySrc = bgLine !== '' ? bgLine : intent
   const summary = (summarySrc === '' ? '沙箱执行规格方案' : summarySrc).slice(0, PLAN_SUMMARY_MAX_CHARS)
+  // text 截断显式（P1-7）：超限截断 + 注记尾行（审批卡面可辨非全文；完整全文 = specRef
+  // 的 spec.md——审批卡 MarkdownRenderer 渲染面）。
+  const truncated = spec.content.length > PLAN_TEXT_MAX_CHARS
+  const text = truncated
+    ? `${spec.content.slice(0, PLAN_TEXT_MAX_CHARS)}\n\n> 注：spec 全文超 ${PLAN_TEXT_MAX_CHARS} 字符，卡面展示已截断；完整全文见 ${specPathOf(request, round)}。`
+    : spec.content
   return {
     title,
     summary,
-    text: spec.content.slice(0, PLAN_TEXT_MAX_CHARS),
+    text,
     round,
     specRef: specPathOf(request, round),
     planHash: planHashOf(spec.content),
@@ -166,7 +173,7 @@ export function buildPlanEscalationPayload(toolCallId: string, plan: ExperimentP
     escalation: {
       // 确定性 id（resolveApproval 按 id 校验 pending——resume 重放必须产出同 id；
       // round 入参使第 N 轮审批与第 N-1 轮不撞）。
-      id: uuidOf(fnv1aHex(`${toolCallId}|${plan.planHash}|${round}`)),
+      id: uuidShapedIdOf(fnv1aHex(`${toolCallId}|${plan.planHash}|${round}`)),
       source: 'experiment-plan',
       toolCallId,
       toolName: EXPERIMENT_PLAN_TOOL_NAME,
