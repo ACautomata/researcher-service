@@ -45,10 +45,12 @@ export default definePlugin({
         'Pass workflow explicitly only when the user picks a command-like flow or replies to a clarify question; source_paths must be /lab/ paths the user referenced.',
         'A clarify result ({status:"clarify", candidates, question}) means the request was ambiguous: relay the candidates to the user in natural language, then re-call with the chosen workflow.',
         'For hypothesize, pass the buckets slot ONLY when the user explicitly requests extra generation angles (ablation/metric/assumption-challenge); never invent bucket values on your own.',
+        'For experiment, source_paths must be a critic page (critics/<slug>.md) or idea card page (idea-cards/<slug>.md) at least one. The plan is always human-reviewed via an approval card (up to 3 revision rounds) before execution; on approval, immediately execute the spec in the sandbox (long commands via nohup + log polling, single-command 120s limit), write result files to the declared /lab/ deliverable paths, then call again with phase=\'collect\' and the spec path to reconcile and produce the experiment report page.',
       ],
-      // progressStages 白名单（853 §6.1 四流程节点名并集，逐实现票扩展）：#910 落入口面
-      // 5 值 + W1/W2 流程节点 11 值、#911 增 W3 节点 4 值（去重并集 20 值）；W4 随
-      // [#873·6] 补齐。
+      // progressStages 白名单（853 §6.1 四流程节点名并集）：#910 落入口面 5 值 + W1/W2
+      // 流程节点 11 值、#911 增 W3 节点 4 值、#912 增 W4 节点 5 值（preflight/design/
+      // plan-review/collect/summarize——resolveInputs/validate/spec/audit/persist/summary
+      // 重名已含；plan-review = 白名单内唯一非节点名值，853 §6.1 解读点 D）。
       progressStages: RESEARCH_PROGRESS_STAGES,
       execute: executeResearchWorkflow,
     },

@@ -7,8 +7,11 @@
 // completed / toolCallId 幂等形态（figcmd-<runId> 先例），占用户 run 名额（853 §1.1）。
 //
 // ctx 消费：run 身份 / llm（generateStructured 封装 IntentClassifier——owner 回退链 +
-// 文本退化双保险②在核心）/ audit（created/completed/failed/aborted 四态）。本票占位分支
-// 零 wiki/docs 消费（真实节点链三票接入后由 runWorkflow 端口取用）。
+// 文本退化双保险②在核心）/ audit（created/completed/failed/aborted 四态 + #912 方案人审
+// recordToolApproval 落 tool_approval_logs）/ wiki/docs（W1/W2/W3）/ lab（#912 W4 spec
+// 落盘窄口）。W4 人审闸门（853 §5.1）：agent 路径（图执行上下文）工具内 interrupt 挂起
+// 等审批；{execute} 命令直达无图上下文 → clarify 引导 NL（无条件人审不破——命令路径
+// 不进方案生成）。
 //
 // 审计分工（#744 §11.2）：stage 变化只经 onUpdate 上报一次（SSE research_run.progress 与
 // TextTrace stage_transitions 双面由 runner 翻译面落——manifest progressStages 白名单放行）。
@@ -31,8 +34,11 @@ import { createIntentClassifier, pinnedModelOf, serializeClassifyInput, type Wor
 import { createIngestGraph } from './ingest'
 import { createDiscoverGraph } from './discover'
 import { createHypothesizeGraph } from './hypothesize'
-import { BUCKETS_OPT_IN, SOURCE_PATHS_V1_MAX } from './values'
-import { WORKFLOW_CATALOG } from './clarify'
+import { createExperimentPlanGraph } from './experiment'
+import { createExperimentCollectGraph } from './collect'
+import { runPlanReviewLoop } from './planReview'
+import { buildExperimentPlan, specPathOf } from './experimentPlan'
+import { BUCKETS_OPT_IN, PLAN_REVIEW_MAX_ROUNDS, SOURCE_PATHS_V1_MAX } from './values'
 import type { ClarifyResult } from './clarify'
 
 export const RESEARCH_TOOL_NAME = 'research_workflow'
@@ -62,10 +68,12 @@ export const researchToolParameters = z
 export type ResearchWorkflowParams = z.infer<typeof researchToolParameters>
 
 // details 形状（853 §6.2 #851 D12 契约面；前端 ResearchRunCard 消费归第 7 票）：
-// 引用形态不内联页内容（R6 事实同源不变量）。占位期 artifactPages 恒空。
+// 引用形态不内联页内容（R6 事实同源不变量）。status 四值面（853 §6.2）：completed /
+// clarify / approved（W4 调用①批准——spec 路径由 summary 文本承载）/ plan_review_exhausted
+// （3 轮未通过终局，run completed 非错误面）。
 export interface ResearchRunDetails {
   readonly workflow: WorkflowLabel | undefined
-  readonly status: 'completed' | 'clarify'
+  readonly status: 'completed' | 'clarify' | 'approved' | 'plan_review_exhausted'
   readonly artifactPages: readonly { path: string; title: string }[]
   readonly summary?: string
   readonly clarify?: ClarifyResult
@@ -83,6 +91,7 @@ interface ResearchToolContext {
   readonly audit: NonNullable<PluginToolContext['audit']>
   readonly wiki: NonNullable<PluginToolContext['wiki']>
   readonly docs: NonNullable<PluginToolContext['docs']>
+  readonly lab: NonNullable<PluginToolContext['lab']>
   readonly logger: PluginToolContext['logger']
 }
 
@@ -93,6 +102,7 @@ export function assertResearchContext(ctx: PluginToolContext): ResearchToolConte
     ...(ctx.audit ? [] : ['audit']),
     ...(ctx.wiki ? [] : ['wiki']),
     ...(ctx.docs ? [] : ['docs']),
+    ...(ctx.lab ? [] : ['lab']),
   ]
   if (missing.length > 0) {
     throw new Error(`research tool requires runner-assembled plugin context; missing: ${missing.join(', ')}`)
@@ -101,23 +111,11 @@ export function assertResearchContext(ctx: PluginToolContext): ResearchToolConte
 }
 
 // ---------------------------------------------------------------------------
-// 分支分派（#910/#911）：ingest/discover/hypothesize = 真实流程图（853 §4.1–§4.3）；
-// experiment 保持占位（[#873·6] 票替换）。RESEARCH_MODEL 面板级可选 pin（853 §3.1）统一
-// 包装进流程图 llm 面（分类器已单独 pin）——图内 generateStructured 零 pin 知识。
+// 分支分派（#910/#911/#912）：ingest/discover/hypothesize = 真实流程图（853 §4.1–§4.3）；
+// experiment = W4 三调用两段式（调用①方案设计图 + 工具内人审循环；调用③ collect 图——
+// phase='collect' 槽位分派）。RESEARCH_MODEL 面板级可选 pin（853 §3.1）统一包装进流程图
+// llm 面（分类器已单独 pin）——图内 generateStructured 零 pin 知识。
 // ---------------------------------------------------------------------------
-
-// 四流程中文名自 clarify 目录派生（单一来源——WORKFLOW_CATALOG.name，防双表漂移）。
-const WORKFLOW_DISPLAY: Record<WorkflowLabel, string> = Object.fromEntries(
-  WORKFLOW_CATALOG.map((c) => [c.label, c.name]),
-) as Record<WorkflowLabel, string>
-
-function placeholderRunWorkflow(workflow: WorkflowLabel): Promise<WorkflowOutcome> {
-  return Promise.resolve({
-    status: 'completed',
-    summary: `已受理 ${WORKFLOW_DISPLAY[workflow]}（${workflow}）流程。插件骨架已就绪，该流程的节点链将在后续版本接入；本次运行不产出 wiki 页面。`,
-    artifactPages: [],
-  })
-}
 
 // pin 包装（空 = owner 默认链 primary 原样透传；非空 = 每次调用带 model pin 语义）。
 function pinLlm(llm: PluginLlmPort, pinnedModel: string | undefined): PluginLlmPort {
@@ -129,7 +127,92 @@ function pinLlm(llm: PluginLlmPort, pinnedModel: string | undefined): PluginLlmP
   }
 }
 
-function buildRoutingPorts(ctx: ResearchToolContext): ResearchRoutingPorts {
+// ---------------------------------------------------------------------------
+// W4 人审闸门（853 §5.1 · #852）——工具内 interrupt 循环（planReview.ts）接线：
+//   agent 路径（exec.interrupt 可挂起）→ 方案循环：buildPlan（图 invoke——spec 短路点保
+//   resume 重放零 LLM 重调）→ interrupt 挂审 → approve 续执行段 / deny 回修订（≤3 轮）→
+//   exhausted 终局（run completed 非 failed）。
+//   {execute} 命令直达（exec.interrupt undefined——无图上下文不可恢复挂起）→ clarify
+//   引导 NL 路径（无条件人审不破：命令路径不进方案生成）。
+// 审计：approve/deny 逐轮落 tool_approval_logs（ctx.audit.recordToolApproval——audit sink
+// 自动补 traceId/runId/userId；写失败 fail-closed throw）。
+// ---------------------------------------------------------------------------
+
+const EXPERIMENT_DIRECT_CLARIFY: ClarifyResult = {
+  status: 'clarify',
+  candidates: [],
+  question:
+    '实验流程的方案人审闸门需要对话式会话支撑（审批卡挂起/恢复/修订）——/experiment 命令直达路径不可挂起。请直接用自然语言描述实验需求（如「帮我设计实验验证 X，输入是 critic 页 …」），系统将走完整设计 + 人审 + 执行段流程。',
+}
+
+async function runExperimentWithReview(input: {
+  readonly ctx: ResearchToolContext
+  readonly llm: PluginLlmPort
+  readonly exec: PluginToolExec
+  readonly toolCallId: string
+  readonly request: ResearchWorkflowRequest
+  readonly onStage?: (stage: string) => void
+}): Promise<WorkflowOutcome> {
+  const { ctx, llm, exec, toolCallId, request, onStage } = input
+  // 命令直达：无图上下文 → 人审不可用 → clarify 引导（工具正常 completed 终态）。
+  if (exec.interrupt === undefined) {
+    return { status: 'clarify', summary: '', artifactPages: [], clarify: EXPERIMENT_DIRECT_CLARIFY }
+  }
+  const graph = createExperimentPlanGraph({ llm, wiki: ctx.wiki, lab: ctx.lab })
+  const buildPlan = async (revisionReason: string | undefined, round: number) => {
+    const r = await graph.invoke(
+      { request, round, ...(revisionReason !== undefined ? { revisionReason } : {}) },
+      { onStage },
+    )
+    if (r.status === 'clarify') return r.clarify!
+    if (r.experiment === undefined) throw new Error('experiment plan graph finished without plan payload')
+    // 挂起期 stage 停 plan-review（853 §6.1：白名单内唯一非节点名值）——图跑完后、
+    // interrupt 前上报（挂起即末态 stage；修订轮不发新 stage，轮次语义归审批卡 round 面）。
+    onStage?.('plan-review')
+    return buildExperimentPlan(request, { content: r.experiment.specContent }, round)
+  }
+  const recordApproval = async (row: {
+    readonly layer: 'human'
+    readonly decision: 'allow' | 'deny'
+    readonly toolName: string
+    readonly toolCall: string
+    readonly reason?: string
+  }) => {
+    if (ctx.audit.recordToolApproval === undefined) {
+      throw new Error('方案人审审计面不可用（audit.recordToolApproval 缺省）——审批是安全路径，fail-closed')
+    }
+    const ok = await ctx.audit.recordToolApproval(row)
+    if (!ok) throw new Error('方案人审审计写入失败——审批是安全路径，fail-closed')
+  }
+  const result = await runPlanReviewLoop({
+    toolCallId,
+    buildPlan,
+    hooks: { interrupt: exec.interrupt, recordAudit: recordApproval },
+  })
+  if (result.outcome === 'clarify') {
+    return { status: 'clarify', summary: '', artifactPages: [], clarify: result.clarify }
+  }
+  if (result.outcome === 'approved') {
+    // 批准后续执行段（853 §5.1：promptSnippet 约定「批准后立即执行」——content 经主
+    // agent 组织：附言 = 执行注意事项；spec 引用 = collect 的输入面）。
+    const note = result.note !== undefined ? `\n执行注意事项（审批附言）：${result.note}` : ''
+    return {
+      status: 'completed',
+      summary: `实验方案已批准（spec：${result.plan.specRef}）。请立即按规格在沙箱执行：长命令 nohup 后台化，结果文件写入 spec 交付物声明的 /lab/ 路径；执行完成后发起 phase='collect' 对账产出实验报告页。${note}`,
+      artifactPages: [],
+      plan: { planRef: result.plan.specRef, note: result.note, lastReason: undefined },
+    }
+  }
+  // exhausted：终局文案（主 agent 向用户说明；spec 停留 lab，run completed 非 failed）。
+  return {
+    status: 'plan_review_exhausted',
+    summary: `实验方案 3 轮审批未通过，流程终止（spec 保留在 ${result.planRef ?? specPathOf(request, PLAN_REVIEW_MAX_ROUNDS)} 供参考）。最后一轮拒绝理由：${result.lastReason}`,
+    artifactPages: [],
+    plan: { planRef: result.planRef ?? '', note: undefined, lastReason: result.lastReason },
+  }
+}
+
+function buildRoutingPorts(ctx: ResearchToolContext, exec: PluginToolExec, toolCallId: string): ResearchRoutingPorts {
   const classifier = createIntentClassifier(ctx.llm, ctx.config.RESEARCH_MODEL)
   const llm = pinLlm(ctx.llm, ctx.config.RESEARCH_MODEL)
   const runWorkflow: ResearchRoutingPorts['runWorkflow'] = async (workflow, request, onStage) => {
@@ -142,7 +225,11 @@ function buildRoutingPorts(ctx: ResearchToolContext): ResearchRoutingPorts {
     if (workflow === 'hypothesize') {
       return createHypothesizeGraph({ llm, wiki: ctx.wiki }).invoke({ request }, { onStage })
     }
-    return placeholderRunWorkflow(workflow)
+    // W4 experiment（#912）：collect 相位 → 调用③对账图；否则调用① + 人审闸门。
+    if (request.phase === 'collect') {
+      return createExperimentCollectGraph({ llm, wiki: ctx.wiki, lab: ctx.lab }).invoke({ request }, { onStage })
+    }
+    return runExperimentWithReview({ ctx, llm, exec, toolCallId, request, onStage })
   }
   return { classifier, runWorkflow }
 }
@@ -180,7 +267,7 @@ export async function executeResearchWorkflow(
     },
   })
   try {
-    const graph = createResearchRoutingGraph(buildRoutingPorts(ctx))
+    const graph = createResearchRoutingGraph(buildRoutingPorts(ctx, exec, toolCallId))
     const result = await graph.invoke(
       { request },
       // stage 上报（853 §6.1：SSE 载荷 {toolCallId, stage, workflow}）——入口面两值
@@ -218,15 +305,24 @@ export async function executeResearchWorkflow(
       detail: {
         workflow: result.workflow,
         ...(outcome.artifactPages.length > 0 ? { artifactPages: outcome.artifactPages } : {}),
+        ...(outcome.plan !== undefined ? { planRef: outcome.plan.planRef } : {}),
         methodText: truncateAuditMethodText(outcome.summary),
       },
     })
     const content: PluginToolContentBlock[] = [{ type: 'text', text: outcome.summary }]
+    // W4 终态映射（853 §6.2）：approved = 调用①批准（spec 引用 + 附言由 summary 承载）；
+    // plan_review_exhausted = 3 轮未通过终局（run completed 非错误面）。其余 completed。
+    const detailsStatus =
+      outcome.plan !== undefined
+        ? outcome.status === 'plan_review_exhausted'
+          ? 'plan_review_exhausted'
+          : 'approved'
+        : 'completed'
     return {
       content,
       details: {
         workflow: result.workflow,
-        status: 'completed',
+        status: detailsStatus,
         artifactPages: outcome.artifactPages,
         summary: outcome.summary,
       },

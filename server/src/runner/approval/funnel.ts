@@ -59,6 +59,15 @@ export interface ApprovalEscalation {
   readonly toolCallSummary: string
   /** judge 理由（repeat-reject / judge-malformed 附带） */
   readonly judgeReason?: string
+  /** W4 实验方案人审载荷（#852 · source='experiment-plan' 时存在）——全文内联几 KB；
+   *  round 为 #867 钉的唯一新增契约面（3 轮修订的卡显轮次）。插件侧（research）构造，
+   *  funnel 只透传落 checkpoint/事件面。 */
+  readonly plan?: {
+    readonly title: string
+    readonly summary: string
+    readonly text: string
+    readonly round: number
+  }
 }
 
 export interface ApprovalActionRequest {

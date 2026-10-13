@@ -7,7 +7,7 @@
 // frame 缺失（注册期探针/无 runner 上下文）→ ctx 六件 undefined，域工具执行时自校验。
 
 import { AsyncLocalStorage } from 'node:async_hooks'
-import type { PluginAuditPort, PluginDocsPort, PluginFiguresPort, PluginLlmPort, PluginRunIdentity, PluginToolContext, PluginWikiPort } from './api'
+import type { PluginAuditPort, PluginDocsPort, PluginFiguresPort, PluginLabPort, PluginLlmPort, PluginRunIdentity, PluginToolContext, PluginWikiPort } from './api'
 
 export interface PluginRunFrame {
   readonly run: PluginRunIdentity
@@ -24,6 +24,9 @@ export interface PluginRunFrame {
   /** run 级 ctx.docs（#908 · 853 §3.2#2）：extractPdfText 无 per-plugin 面——沙箱容器 +
    *  固定 pdftotext 命令 + /lab 白名单，全 run 常量，单例直挂。 */
   readonly docs: PluginDocsPort
+  /** run 级 ctx.lab（#912 · 853 §11.3B）：W4 spec 落盘窄口——写面 /lab/specs/ 固定前缀 +
+   *  读面 /lab/ 白名单，沙箱容器绑定 run，单例直挂（同 docs 先例）。 */
+  readonly lab: PluginLabPort
   /** run abort 传播（#853 §3.2#4）：frame 持有的 run signal——形状契约面（spec 点名
    *  frame 携带，供未来消费面读取）。abort 到 LLM invoke 的实际传导不走本字段直读：
    *  buildPluginRunFrame 构造期把同一 signal 闭包捕获进 llmFor 的 createLlmToolPort
@@ -69,10 +72,11 @@ export function execPartsFromFrame(
       figures: frame.figures,
       ...(llm !== undefined ? { llm } : {}),
       audit: frame.audit,
-      // wiki per-plugin 解析（source 盖章）；docs run 级直挂。pluginId 缺失（目录外工具名
-      // 防御面）→ wiki 缺省（docs 仍在——无 per-plugin 面，宁缺不误只适用于有键依赖的件）。
+      // wiki per-plugin 解析（source 盖章）；docs/lab run 级直挂。pluginId 缺失（目录外工具名
+      // 防御面）→ wiki 缺省（docs/lab 仍在——无 per-plugin 面，宁缺不误只适用于有键依赖的件）。
       ...(wiki !== undefined ? { wiki } : {}),
       docs: frame.docs,
+      lab: frame.lab,
     },
     onUpdate: (partial: unknown) => frame.onUpdate(toolCallId, partial),
   }

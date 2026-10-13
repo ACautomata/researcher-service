@@ -18,6 +18,19 @@ import {
   buildBriefPrompt,
   buildBucketPrompt,
   buildChallengePrompt,
+  DESIGN_SECTIONS,
+  SPEC_SECTIONS,
+  INFERABLE_PLACEHOLDERS,
+  OPEN_PLACEHOLDERS,
+  DESIGN_EXPERIMENT_TYPES,
+  DESIGN_EXPERIMENT_REQUIREMENTS,
+  AUDIT_REPORT_SECTIONS,
+  STAGE_BOUNDARY_RULES,
+  EXPERIMENT_REPORT_CATEGORY_TAG,
+  buildDesignPrompt,
+  buildSpecPrompt,
+  buildAuditPrompt,
+  buildCollectSummaryPrompt,
 } from '../../plugins/research/prompts'
 import { BRIEF_FIELDS } from '../../plugins/research/contextPack'
 import { BUCKETS_ALL } from '../../plugins/research/values'
@@ -213,5 +226,81 @@ describe('W3 challenge prompt（反驳判据边界 · 853 §4.3「笼统不确�
     expect(p).toContain('{"title": "X"}')
     expect(p).toContain('卡A')
     expect(p).toContain('语义去重')
+  })
+})
+
+
+describe('W4 prompt 节结构 checklist（853 §9——模板与确定性校验同源，#848 §4 单一来源）', () => {
+  it('design 10 节 + spec 9 段 + audit 报告 7 节：节标题逐字在模板中渲染', () => {
+    const design = buildDesignPrompt({ intent: 'I', pageBodies: ['P'], mappingTargets: ['T'] })
+    for (const [i, s] of DESIGN_SECTIONS.entries()) expect(design).toContain(`## ${i} ${s}`)
+    const spec = buildSpecPrompt({ intent: 'I', pageBodies: ['P'], designContent: 'D', wikiIdentity: 'critics/x.md' })
+    for (const [i, s] of SPEC_SECTIONS.entries()) expect(spec).toContain(`## ${i + 1} ${s}`)
+    const audit = buildAuditPrompt({ designContent: 'D', specContent: 'S', deterministicIssues: [] })
+    for (const [i, s] of AUDIT_REPORT_SECTIONS.entries()) expect(audit).toContain(`## ${i} ${s}`)
+  })
+
+  it('design：11 类推荐实验类型 + 每实验必须明确清单 + 映射池注入（#848 §4.1）', () => {
+    const p = buildDesignPrompt({ intent: 'I', pageBodies: ['P1', 'P2'], mappingTargets: ['靶A', '靶B'] })
+    for (const t of DESIGN_EXPERIMENT_TYPES) expect(p).toContain(t)
+    for (const r of DESIGN_EXPERIMENT_REQUIREMENTS) expect(p).toContain(r)
+    expect(p).toContain('靶A')
+    expect(p).toContain('靶B')
+    expect(p).toContain('不下最终结论')
+  })
+
+  it('design 修订模式：上轮 spec + 用户理由注入（853 §5.1 修订输入契约）', () => {
+    const p = buildDesignPrompt({
+      intent: 'I',
+      pageBodies: ['P'],
+      mappingTargets: ['T'],
+      revision: { priorSpec: '上轮 SPEC 正文', reason: '样本量不足' },
+    })
+    expect(p).toContain('修订模式')
+    expect(p).toContain('上轮 SPEC 正文')
+    expect(p).toContain('样本量不足')
+  })
+
+  it('spec：标题「沙箱执行规格」（DROP 外发语义）+ 占位符纪律 + nohup 执行指引', () => {
+    const p = buildSpecPrompt({ intent: 'I', pageBodies: ['P'], designContent: 'D', wikiIdentity: 'critics/x.md' })
+    expect(p).toContain('# 沙箱执行规格')
+    expect(p).not.toContain('发给 claude-code')
+    expect(p).toContain('critics/x.md')
+    expect(p).toContain(OPEN_PLACEHOLDERS[0])
+    for (const ph of INFERABLE_PLACEHOLDERS) expect(p).toContain(ph)
+    expect(p).toContain('nohup')
+    expect(p).toContain('120s')
+    expect(p).toContain('deliverables')
+  })
+
+  it('spec 诊断回喂块（重试触发面三源——确定性校验拒的诊断面）', () => {
+    const p = buildSpecPrompt({ intent: 'I', pageBodies: ['P'], designContent: 'D', wikiIdentity: 'W', diagnostics: 'DIAG-占位符未填' })
+    expect(p).toContain('上一轮产出未通过校验')
+    expect(p).toContain('DIAG-占位符未填')
+  })
+
+  it('audit：③⑤⑥ 维度 + 阶段边界清单 + 确定性问题注入 + blocking 非空 fail 语义', () => {
+    const p = buildAuditPrompt({ designContent: 'D', specContent: 'S', deterministicIssues: ['ISSUE-缺节'] })
+    expect(p).toContain('阶段边界遵守')
+    expect(p).toContain('证据强度分级')
+    expect(p).toContain('跨阶段一致性')
+    for (const r of STAGE_BOUNDARY_RULES) expect(p).toContain(r.split(' ')[0])
+    expect(p).toContain('ISSUE-缺节')
+    expect(p).toContain('blocking 非空时本调用将失败不进人审')
+  })
+
+  it('collect 报告 prompt：机读标签归写入面（LLM 契约不含）+ 对账结果注入', () => {
+    const p = buildCollectSummaryPrompt({
+      specContent: 'SPEC-BODY',
+      reckonings: [
+        { path: '/lab/results/a.json', success_criterion: '含数字', present: true, content: '{"auroc": 95}' },
+        { path: '/lab/results/b.csv', success_criterion: '每行有值', present: false, content: undefined },
+      ],
+    })
+    expect(p).toContain('SPEC-BODY')
+    expect(p).toContain('已就位：/lab/results/a.json')
+    expect(p).toContain('缺失：/lab/results/b.csv')
+    expect(p).toContain('如实记录不得编造')
+    expect(p).not.toContain(EXPERIMENT_REPORT_CATEGORY_TAG)
   })
 })

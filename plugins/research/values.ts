@@ -77,6 +77,14 @@ export const IDEA_ANCHORS_MAX = 4
 // plan_review_exhausted 终局（run completed 非 failed）。卡显轮次，第 2/3 轮「最后一轮」提示。
 export const PLAN_REVIEW_MAX_ROUNDS = 3
 
+// W4 方案人审载荷上限（853 §5.1：escalation.plan 全文内联「几 KB 载荷」——审批卡
+// MarkdownRenderer 渲染面，超truncate 由 buildExperimentPlan 截断面执行；单卡无独立拉取面）。
+export const PLAN_TEXT_MAX_CHARS = 16_000
+
+// W4 spec 交付物声明件数上限（schema 层宽容硬上限——LLM 多给不直拒；对账面逐件处理，
+// 上限防失控值。消费面 = experiment.ts SPEC_DOC_SCHEMA）。
+export const SPEC_DELIVERABLES_MAX = 20
+
 // extractPdfText 字符上限（853 §7.1 拍板 1_000_000 · #851 D10）：PDF 提取全文上限，超限明确
 // 报错不静默截断——截断致 extract 缺节 → validate 拒 → 重试循环浪费 token（§3.2#2 原文）。
 // 消费面 = 核心 docs port（runner/docsToolPort.ts 缺省引用本表）。

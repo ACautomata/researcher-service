@@ -378,11 +378,72 @@ ${packText}
 </context-pack>`
 }
 
+// ---------------------------------------------------------------------------
+// W4 experiment prompt 资产（#912 · 853 §4.4–§5 · 单一来源 = #848 §4）：
+// design 10 节模板 + spec 9 段 + 占位符清单 + audit 6 维（①②④ 确定性化清单，
+// ③⑤⑥ LLM）。节结构清单与确定性校验（experimentValidate.ts）同源渲染。
+// ---------------------------------------------------------------------------
+
+// design 10 节（#848 §4.1 逐节标题——##0–##9 钉面；##1 3–6 条 / ##3 3–6 个 / ##4 2–4 个 /
+// ##6 top-3 为生成约束，prompt 面钉）。
+export const DESIGN_SECTIONS = [
+  '文档定位',
+  '验证目标总览',
+  '实验设计原则',
+  '核心验证实验设计',
+  '可选补充实验',
+  '实验优先级排序',
+  '最值得优先执行的 3 个实验',
+  '这些实验可能支撑的后续研究方向',
+  '简短总结',
+  '输出要求说明',
+] as const
+
+// spec 9 段（#848 §4.2 逐段标题——##1–##9 钉面；标题「发给 claude-code」再语义化为
+// 「沙箱执行规格」（853 §4.4 D15），汇报格式段 = collect 输入约定）。
+export const SPEC_SECTIONS = [
+  '任务背景',
+  '可用输入材料',
+  '当前论文方法与验证目标',
+  '优先实现的验证实验',
+  '总体实现要求',
+  '建议优先查看的代码位置',
+  '交付内容',
+  '完成标准',
+  '汇报格式',
+] as const
+
+// spec 占位符清单（#848 §4.2 原文四件，W4 再语义化 853 §4.4 D15）。
+// 可推断 = 输入材料已知面（论文基础 Wiki 标识 = 输入 critic/idea 页）——spec 出现即拒
+// （validate² 确定性检查 + 重试回喂正确值）；开放 = 确实缺失面（自主执行无人可问，
+// 按「显式占位而非编造」约定放行，缺失提示进 summary）。
+export const INFERABLE_PLACEHOLDERS = ['此处应填写论文基础 Wiki 标识'] as const
+export const OPEN_PLACEHOLDERS = [
+  '此处应填写代码仓库路径',
+  '此处应填写训练入口文件路径',
+  '请根据仓库结构自行定位',
+] as const
+export const ALL_PLACEHOLDERS = [...INFERABLE_PLACEHOLDERS, ...OPEN_PLACEHOLDERS] as const
+
+// design 实验条目结构化面（validate¹ 映射校验泛化的消费面；##3+##4 合流——
+// 「每实验必须服务一个明确的验证目标（critic 问题或假说）」）。
+export interface DesignExperimentSpec {
+  readonly name: string
+  readonly validation_target: string
+  readonly expected_outcome: string
+}
+
+// spec 交付物声明条目（#850 D15 结构化交付物 = 文件路径清单 + 每件成功判据——
+// collect 确定性对账的消费面）。
+export interface SpecDeliverableSpec {
+  readonly path: string
+  readonly success_criterion: string
+}
+
 // W3 challenge：顺序逐卡反驳（brainstorm main 反驳门禁语义——只有使核心假设/可行性/
 // 可检验性不成立的具体反驳才是 rejected；笼统不确定性不是）。语义去重并入本节点：
 // 「已有工作已覆盖」判据含本批次其他候选（实质重复归并）。
-export function buildChallengePrompt(packText: string, cardJson: string, peerTitles: readonly string[]): string {
-  return `你是假说反驳者。基于 Context Pack 对给定 Idea Card 尝试提出致命反驳。
+export function buildChallengePrompt(packText: string, cardJson: string, peerTitles: readonly string[]): string {  return `你是假说反驳者。基于 Context Pack 对给定 Idea Card 尝试提出致命反驳。
 
 ## verdict 判据（唯一依据）
 
@@ -415,4 +476,263 @@ ${peerTitles.join('\n')}
 <card>
 ${cardJson}
 </card>`
+}
+
+// ---------------------------------------------------------------------------
+// W4 design：验证实验设计（853 §4.4 · #848 §4.1）
+// ---------------------------------------------------------------------------
+
+// 11 类推荐实验类型（#848 §4.1「推荐实验类型」原文清单——prompt 面注入）。
+export const DESIGN_EXPERIMENT_TYPES = [
+  '小规模对照',
+  '消融',
+  '替换式',
+  '参数扫描',
+  '数据划分变化',
+  'memory budget 变化',
+  '任务顺序变化',
+  '图结构变化',
+  '异质度变化',
+  '训练策略控制',
+  '评测协议对照',
+] as const
+
+// 「每个实验必须明确」清单（#848 §4.1 原文——映射校验与 LLM 生成的共同锚）。
+export const DESIGN_EXPERIMENT_REQUIREMENTS = [
+  '验证哪个问题',
+  '为什么值得验证',
+  '问题类型',
+  '自变量和控制变量',
+  '如何操作与比较',
+  '观察哪些指标',
+  '问题成立/不成立分别可能出现什么现象',
+  '结果分别意味着什么',
+  '实验成本（低/中/高）',
+  '是否适合第一批',
+] as const
+
+// design 生成（#848 §4.1：10 节 + 实验设计准则 + 每实验必须明确清单 + 映射面）。
+// 修订模式（853 §5.1：deny → 回 design 修订，输入 = 上轮 spec + 用户理由）经
+// revision 块注入——复用 design 节点零新图节点。
+export function buildDesignPrompt(input: {
+  readonly intent: string
+  readonly pageBodies: readonly string[]
+  readonly mappingTargets: readonly string[]
+  readonly revision?: { readonly priorSpec: string; readonly reason: string }
+  readonly diagnostics?: string
+}): string {
+  const revisionBlock =
+    input.revision === undefined
+      ? ''
+      : `\n\n---\n**修订模式**：用户拒绝了上一版方案，理由如下。请基于上轮 spec 与拒绝理由修订实验设计（保留合理部分，针对理由调整），重新输出完整 10 节文档。\n用户拒绝理由：${input.revision.reason}\n\n上轮 spec：\n<prior-spec>\n${input.revision.priorSpec}\n</prior-spec>\n---\n`
+  return `你是验证实验设计者。基于给定的输入材料（critic 问题分析 / idea card 假说），设计一组验证实验。
+
+阶段边界：当前阶段是「验证实验设计」——不下最终结论、不提新方法；前序分析推断写明「当前属于合理怀疑，需实验确认」。
+
+实验设计准则：每个实验必须服务一个明确的验证目标（critic 问题或假说）；优先低成本、小规模、单变量/少变量控制；优先复用原论文框架、数据集、baseline、设定。
+
+推荐实验类型（供选择组织）：${DESIGN_EXPERIMENT_TYPES.join('、')}。
+
+## 输出结构（10 节，节标题逐字使用以下形态）
+
+${DESIGN_SECTIONS.map((s, i) => `## ${i} ${s}`).join('\n')}
+
+## 逐节填写规则
+
+- **## 0 文档定位**：输入材料与本设计角色。
+- **## 1 验证目标总览**：3–6 条。
+- **## 2 实验设计原则**：成本/变量控制/复用原则。
+- **## 3 核心验证实验设计**：3–6 个。
+- **## 4 可选补充实验**：2–4 个。
+- **## 5 实验优先级排序**。
+- **## 6 最值得优先执行的 3 个实验**：与 spec 优先实验段对齐。
+- **## 7 这些实验可能支撑的后续研究方向**。
+- **## 8 简短总结**：100–150 字。
+- **## 9 输出要求说明**。
+
+## 每个实验必须明确
+
+${DESIGN_EXPERIMENT_REQUIREMENTS.map((r) => `- ${r}`).join('\n')}
+
+## 验证目标映射（确定性校验会逐条执行）
+
+experiments 数组每个实验的 validation_target 必须逐字引用下方候选池中的一条（critic §4 候选问题或 idea card minimum_experiment）——这是「每个实验服务一个明确的验证目标」的结构化锚。
+
+候选池：
+<mapping-targets>
+${input.mappingTargets.map((t) => `- ${t}`).join('\n')}
+</mapping-targets>
+
+输出格式约束：输出必须是且仅是一个 JSON 对象 {"content": "...", "experiments": [{"name": "...", "validation_target": "...", "expected_outcome": "..."}]}。content = 完整 10 节 markdown 正文；experiments = ##3 与 ##4 全部实验的结构化面（validation_target 逐字引用候选池条目；expected_outcome = 预期观察到的现象/指标变化）。禁止输出 JSON 之外的任何文本或 markdown 围栏。${diagnosticsBlock(input.diagnostics)}${revisionBlock}
+
+实验意图：
+<intent>
+${input.intent}
+</intent>
+
+输入材料（critic 问题分析 / idea card 假说页）：
+<pages>
+${input.pageBodies.join('\n\n---\n\n')}
+</pages>`
+}
+
+// ---------------------------------------------------------------------------
+// W4 spec：沙箱执行规格（853 §4.4 · #848 §4.2 再语义化——DROP 外发 claude-code 语义，
+// 标题改「沙箱执行规格」；汇报格式段 = collect 输入约定）
+// ---------------------------------------------------------------------------
+
+// spec 生成：9 段 + 交付物声明（#850 D15 结构化交付物 = collect 对账消费面）+
+// 可推断占位符正确值注入（论文基础 Wiki 标识 = 输入页——validate² 出现即拒的回喂锚）+
+// 执行指引（853 §7.2：长命令必须 nohup 后台 + 轮询日志/文件哨兵——单命令 120s 全局口径）。
+export function buildSpecPrompt(input: {
+  readonly intent: string
+  readonly pageBodies: readonly string[]
+  readonly designContent: string
+  readonly wikiIdentity: string
+  readonly diagnostics?: string
+}): string {
+  return `你是沙箱执行规格撰写者。基于实验设计文档，产出「沙箱执行规格」——实验在沙箱内由 agent 真实执行，spec 是执行前最后一份结构化 artifact（供人审与执行参考，不外发任何外部工具）。
+
+标题：第一行 H1 必须为「# 沙箱执行规格」。
+
+## 输出结构（9 段，段标题逐字使用以下形态）
+
+${SPEC_SECTIONS.map((s, i) => `## ${i + 1} ${s}`).join('\n')}
+
+## 逐段填写规则
+
+- **## 1 任务背景**：研究目标一句话 + 验证什么。
+- **## 2 可用输入材料**：输入页（wiki 相对路径）+ 沙箱内可用文件。
+- **## 3 当前论文方法与验证目标**：从输入材料提取的方法概述与验证目标（对齐 design ##1）。
+- **## 4 优先实现的验证实验**：至少 3 个，对齐 design ##6 的 top-3。
+- **## 5 总体实现要求**：最小侵入（只做验证所需最小改动、优先复用现有代码结构、配置化控制变量、结果可保存）。
+- **## 6 建议优先查看的代码位置**：可确实缺失时用占位符「${OPEN_PLACEHOLDERS[0]}」「${OPEN_PLACEHOLDERS[1]}」或「${OPEN_PLACEHOLDERS[2]}」，禁臆造路径。
+- **## 7 交付内容**：实验结果文件清单（每件 = /lab/ 路径 + 成功判据——collect 会按此确定性对账）。
+- **## 8 完成标准**：可判定完成的最小条件。
+- **## 9 汇报格式**：执行指引——结果文件写入 ##7 声明的 /lab/ 路径（collect 输入约定——对账消费面）；长命令必须 nohup 后台化 + 轮询日志/文件哨兵（单命令 120s 超时，直跑长命令会 exit 124）。
+
+## 占位符纪律
+
+论文基础 Wiki 标识 = 「${input.wikiIdentity}」（已知值，直接引用，不得出现「${INFERABLE_PLACEHOLDERS[0]}」）；缺失信息显式占位而非编造（自主执行无人可问）。
+
+输出格式约束：输出必须是且仅是一个 JSON 对象 {"content": "...", "deliverables": [{"path": "...", "success_criterion": "..."}]}。content = 完整 9 段 markdown 正文（H1 = 沙箱执行规格）；deliverables = ##7 交付物声明结构化面（path = /lab/ 前缀路径，success_criterion = 该文件满足什么条件算成功——collect 对账与报告面消费）。禁止输出 JSON 之外的任何文本或 markdown 围栏。${diagnosticsBlock(input.diagnostics)}
+
+实验意图：
+<intent>
+${input.intent}
+</intent>
+
+输入材料：
+<pages>
+${input.pageBodies.join('\n\n---\n\n')}
+</pages>
+
+实验设计文档：
+<design>
+${input.designContent}
+</design>`
+}
+
+// ---------------------------------------------------------------------------
+// W4 audit：方案质量门（853 §4.4 · #848 §4.4——六维中 ③⑤⑥ 归本节点 LLM；①②④ 已由
+// experimentValidate 确定性化，blocking 并集 = 必须修复项）
+// ---------------------------------------------------------------------------
+
+// audit 报告 7 节（#848 §4.4 审计报告结构原文）。
+export const AUDIT_REPORT_SECTIONS = [
+  '评估元信息',
+  '总览',
+  '逐阶段详细评估',
+  '跨阶段一致性问题',
+  '必须修复项',
+  '建议改进项',
+  '总体评估',
+] as const
+
+// 阶段边界检查项（#848 §4.4——各节点 prompt 负约束的审计面；③ 维度消费）。
+export const STAGE_BOUNDARY_RULES = [
+  'design 禁最终实验结论 / 新方法提出',
+  'spec 禁臆造代码路径（缺失必须占位符）',
+  'spec 禁论文总结正文（面向执行，语言直接工程化）',
+] as const
+
+export function buildAuditPrompt(input: {
+  readonly designContent: string
+  readonly specContent: string
+  readonly deterministicIssues: readonly string[]
+}): string {
+  return `你是方案审计员（只评估不修改原文档）。对 design 与 spec 做结构化审计——结构完整性/字段覆盖/缺失信息标注三维度已确定性完成（问题清单见下，直接并入必须修复项），你只评估剩余三维度：
+
+- **③ 阶段边界遵守**：${STAGE_BOUNDARY_RULES.join('；')}。
+- **⑤ 证据强度分级**：验证目标的证据引用与输入材料一致，结论强度与证据强度匹配（不强推断）。
+- **⑥ 跨阶段一致性**：数值、引用、优先级传递一致——design ##6 top-3 ↔ spec ##4 优先实验；design 实验 ↔ spec 交付物对得上。
+
+工作原则：每条扣分有具体位置和原因；区分「必须修复」（阻塞下游）与「建议改进」（不阻塞但建议优化）；不确定处标「建议人工复核」。
+
+确定性维度已发现问题（并入必须修复项）：
+<deterministic-issues>
+${input.deterministicIssues.length === 0 ? '（无）' : input.deterministicIssues.map((i) => `- ${i}`).join('\n')}
+</deterministic-issues>
+
+## 输出结构
+
+审计报告 7 节（## 0–## 6）：
+${AUDIT_REPORT_SECTIONS.map((s, i) => `## ${i} ${s}`).join('\n')}
+
+输出格式约束：输出必须是且仅是一个 JSON 对象 {"report": "...", "blocking": [...], "suggestions": [...]}。report = 完整 7 节 markdown 审计报告；blocking = 必须修复项数组（你评估的三维度发现 + 确定性问题一并列入，每项带位置与修复方向；无则空数组）；suggestions = 建议改进项数组。blocking 非空时本调用将失败不进人审。禁止输出 JSON 之外的任何文本或 markdown 围栏。
+
+design 文档：
+<design>
+${input.designContent}
+</design>
+
+spec 文档：
+<spec>
+${input.specContent}
+</spec>`
+}
+
+// ---------------------------------------------------------------------------
+// W4 collect 段：实验报告页生成（853 §4.4 调用③——LLM 实验报告页）
+// ---------------------------------------------------------------------------
+
+// 实验报告页机读标签（critic/idea 页 category 标签同族——persist 面确定性写入，LLM 不操持）。
+export const EXPERIMENT_REPORT_CATEGORY_TAG = '`category: experiment-report`'
+
+// 报告页生成：spec + 交付物对账结果 → 实验报告页正文（目标/执行摘要/逐件对账/结果观察/
+// 结论建议——「关联页面」节归 collect.ts persist 前确定性追加，LLM 契约不含谱系格式）。
+export function buildCollectSummaryPrompt(input: {
+  readonly specContent: string
+  readonly reckonings: readonly { readonly path: string; readonly success_criterion: string; readonly present: boolean; readonly content: string | undefined }[]
+}): string {
+  const reckoningText = input.reckonings
+    .map((r) => {
+      const head = r.present ? `已就位：${r.path}` : `缺失：${r.path}`
+      const body = r.present && r.content !== undefined ? `\n内容：\n\`\`\`\n${r.content.slice(0, 4000)}\n\`\`\`` : ''
+      return `${head}\n成功判据：${r.success_criterion}${body}`
+    })
+    .join('\n\n')
+  return `你是实验报告撰写者。基于沙箱执行规格与交付物对账结果，产出实验报告页（wiki 正文 markdown）。
+
+如实原则：缺失交付物如实记录不得编造内容；结果与判据不吻合要指出；结论强度与证据匹配。
+
+## 输出结构（正文节）
+
+- ## 实验目标：一段话（来自 spec）。
+- ## 执行摘要：做了什么、怎么做的。
+- ## 交付物对账：逐件（路径/判据/是否满足/关键内容摘要）。
+- ## 结果与观察：数据与现象。
+- ## 结论与建议：验证目标成立/不成立/部分成立 + 下一步建议。
+
+输出格式约束：输出必须是且仅是一个 JSON 对象 {"title": "...", "content": "..."}。title = 报告页标题（如「实验报告：<验证目标>」）；content = 报告正文（## 实验目标 … ## 结论与建议——首行不要 H1（写入面统一加标题与机读标签），从 ## 实验目标 开始）。禁止输出 JSON 之外的任何文本或 markdown 围栏。
+
+沙箱执行规格：
+<spec>
+${input.specContent}
+</spec>
+
+交付物对账结果：
+<reckonings>
+${reckoningText}
+</reckonings>`
 }

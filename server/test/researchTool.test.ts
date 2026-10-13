@@ -15,7 +15,18 @@ import {
 } from '../../plugins/research/server'
 import type { PluginAuditPort, PluginLlmPort, PluginToolContext, PluginToolExec } from '../src/plugins/api'
 import { PluginLlmStructuredError } from '../src/plugins/api'
-import { createSlotLlm, createWikiFake, paperPageBody, PAPER_PATH, validCriticDoc, validExtractDoc, validIdeaCard } from './researchFixtures'
+import {
+  createLabFake,
+  createSlotLlm,
+  createWikiFake,
+  paperPageBody,
+  PAPER_PATH,
+  CRITIC_PATH,
+  validCriticDoc,
+  validCriticPage,
+  validExtractDoc,
+  validIdeaCard,
+} from './researchFixtures'
 
 // discover 端到端最小 fake 产物（走通全链的最小合法形状——H1/机读标签/候选面齐备）。
 const discoverFixtures = () => ({
@@ -29,11 +40,18 @@ const discoverFixtures = () => ({
 const baseCtx = (
   llm: PluginToolContext['llm'],
   config: Readonly<Record<string, string>> = {},
-  extra: { wiki?: PluginToolContext['wiki']; docs?: PluginToolContext['docs'] } = {},
+  extra: { wiki?: PluginToolContext['wiki']; docs?: PluginToolContext['docs']; lab?: PluginToolContext['lab'] } = {},
 ) => {
   const events: Array<{ event: string; detail: Record<string, unknown> }> = []
-  const audit: PluginAuditPort = { emitPluginRun: (e) => events.push({ event: e.event, detail: e.detail as Record<string, unknown> }) }
-  // 缺省 stub wiki/docs（ctx 六件校验要求装配完整；不消费的用例不触达内部方法）。
+  const approvalRows: unknown[] = []
+  const audit: PluginAuditPort = {
+    emitPluginRun: (e) => events.push({ event: e.event, detail: e.detail as Record<string, unknown> }),
+    recordToolApproval: async (row) => {
+      approvalRows.push(row)
+      return true
+    },
+  }
+  // 缺省 stub wiki/docs/lab（ctx 七件校验要求装配完整；不消费的用例不触达内部方法）。
   const stubWiki: PluginToolContext['wiki'] = extra.wiki ?? {
     search: vi.fn(async () => ({ ok: true, data: { results: [] } })),
     readPage: vi.fn(async () => ({ ok: false, error: { code: 'not_found', message: 'stub' } })),
@@ -42,6 +60,10 @@ const baseCtx = (
   const stubDocs: PluginToolContext['docs'] = extra.docs ?? {
     extractPdfText: vi.fn(async () => ({ ok: true, data: { pages: [] } })),
   } as unknown as PluginToolContext['docs']
+  const stubLab: PluginToolContext['lab'] = extra.lab ?? {
+    read: vi.fn(async () => ({ ok: false as const, error: { code: 'not_found' as const, message: 'stub' } })),
+    write: vi.fn(async () => ({ ok: true as const, data: { written: true as const } })),
+  } as unknown as PluginToolContext['lab']
   const ctx: PluginToolContext = {
     config,
     logger: { info: () => {}, warn: () => {} },
@@ -50,13 +72,20 @@ const baseCtx = (
     audit,
     wiki: stubWiki,
     docs: stubDocs,
+    lab: stubLab,
   }
-  return { ctx, events }
+  return { ctx, events, approvalRows, audit }
 }
 
-const execOf = (ctx: PluginToolContext, signal = new AbortController().signal): PluginToolExec => ({
+const execOf = (
+  ctx: PluginToolContext,
+  signal = new AbortController().signal,
+  interrupt?: (value: unknown) => unknown,
+): PluginToolExec => ({
   signal,
   onUpdate: vi.fn(),
+  // fake 全当前轮（historical=false）——历史轮语义归 researchPlanReview.test 专锁。
+  ...(interrupt !== undefined ? { interrupt: (v: unknown) => ({ value: interrupt(v), historical: false }) } : {}),
   ctx,
 })
 
@@ -144,14 +173,16 @@ describe('research_workflow execute（工具边界）', () => {
     expect(events[0]!.detail.buckets).toEqual(['metric'])
   })
 
-  it('branch 面（experiment 占位）：content = summary；details = {workflow, status, artifactPages:[]}', async () => {
+  it('branch 面（experiment 命令直达 → clarify 引导 NL，#912）：details = {workflow, status:clarify}', async () => {
     const { ctx, events } = baseCtx(verdictLlm({ label: 'experiment', confidence: 0.9 }))
+    // execOf 不注入 interrupt（无图上下文——{execute} 命令直达形态）→ W4 人审不可用的
+    // clarify 引导（无条件人审不破：命令路径不进方案生成）。
     const result = await executeResearchWorkflow('t2c', { question: '想法' }, execOf(ctx))
 
     expect(result.content[0]?.type).toBe('text')
-    expect((result.content[0] as { text: string }).text).toContain('experiment')
+    expect((result.content[0] as { text: string }).text).toContain('自然语言')
     const details = result.details as ResearchRunDetails
-    expect(details.status).toBe('completed')
+    expect(details.status).toBe('clarify')
     expect(details.workflow).toBe('experiment')
     expect(details.artifactPages).toEqual([])
     expect(events.map((e) => e.event)).toEqual(['created', 'completed'])
@@ -279,5 +310,194 @@ describe('research_workflow execute（工具边界）', () => {
     expect(hypoExec.onUpdate).toHaveBeenCalledWith({ stage: 'bucket', workflow: 'hypothesize' })
     expect(hypoExec.onUpdate).toHaveBeenCalledWith({ stage: 'dedup', workflow: 'hypothesize' })
     expect(hypoExec.onUpdate).toHaveBeenCalledWith({ stage: 'challenge', workflow: 'hypothesize' })
+  })
+})
+
+
+// ---------------------------------------------------------------------------
+// W4 experiment 工具边界（#912 · 853 §5.1——interrupt 载荷边界断言：source/plan 形状/round /
+// spec 落盘短路；批准续执行段 / 3 轮终局 / 审计行；collect 相位分派）。
+// ---------------------------------------------------------------------------
+
+const W4_REQUEST: { workflow: 'experiment'; question: string; source_paths: string[] } = { workflow: 'experiment', question: '验证能量分数判据', source_paths: [CRITIC_PATH] }
+
+// agent 路径 fake：interrupt 队列消费 resume 值（exec.interrupt 注入面——不起真图）。
+const w4Ctx = (handlers: Parameters<typeof createSlotLlm>[0] = {}) => {
+  const llm = createSlotLlm(handlers)
+  const wiki = createWikiFake({ [CRITIC_PATH]: validCriticPage() })
+  const lab = createLabFake()
+  return { ...baseCtx(llm, {}, { wiki: wiki.wiki, lab: lab.lab }), llm, wiki, lab }
+}
+
+describe('W4 experiment 工具边界（#912 · interrupt 载荷边界断言）', () => {
+  it('approve：details.status=approved——payload source=experiment-plan + plan{title,summary,text,round=1}；审计 allow 行；content 指引执行段', async () => {
+    const { ctx, lab, approvalRows } = w4Ctx()
+    const payloads: unknown[] = []
+    const exec = execOf(ctx, new AbortController().signal, (value: unknown) => {
+      payloads.push(value)
+      return { decisions: [{ type: 'approve', message: '注意 GPU 预算' }] }
+    })
+    const result = await executeResearchWorkflow('w4-1', { ...W4_REQUEST }, exec)
+
+    expect(result.details?.status).toBe('approved')
+    const text = (result.content[0] as { text: string }).text
+    expect(text).toContain('已批准')
+    expect(text).toContain('注意 GPU 预算')
+
+    // 载荷边界（#852 契约增量）：kind=tool-approval / source=experiment-plan / plan 块 / actionRequests 空。
+    const payload = payloads[0] as { kind: string; escalation: Record<string, unknown>; actionRequests: unknown[] }
+    expect(payload.kind).toBe('tool-approval')
+    expect(payload.escalation.source).toBe('experiment-plan')
+    expect(payload.actionRequests).toEqual([])
+    const plan = payload.escalation.plan as { title: string; summary: string; text: string; round: number }
+    expect(plan.round).toBe(1)
+    expect(plan.title).toContain('实验方案')
+    expect(plan.text).toContain('## 1 任务背景') // spec 全文内联
+
+    // 审计行：layer=human / decision=allow / toolName=experiment_plan / round 快照。
+    expect(approvalRows).toHaveLength(1)
+    const row = approvalRows[0] as { layer: string; decision: string; toolName: string; toolCall: string; reason: string }
+    expect(row.layer).toBe('human')
+    expect(row.decision).toBe('allow')
+    expect(row.toolName).toBe('experiment_plan')
+    expect(row.reason).toBe('注意 GPU 预算')
+    expect(JSON.parse(row.toolCall).round).toBe(1)
+
+    // spec 落盘短路哨兵在（批准后续 collect 的输入面）。
+    expect([...lab.files.keys()].some((k) => k.endsWith('/spec.md'))).toBe(true)
+  })
+
+  it('3 连 deny → details.status=plan_review_exhausted：3 行审计 round 1/2/3 关联；payload round 序列 1/2/3', async () => {
+    const { ctx, approvalRows } = w4Ctx()
+    const rounds: number[] = []
+    const reasons = ['r1', 'r2', 'r3 样本量不足']
+    let n = 0
+    const exec = execOf(ctx, new AbortController().signal, (value: unknown) => {
+      const p = value as { escalation: { plan: { round: number } } }
+      rounds.push(p.escalation.plan.round)
+      return { decisions: [{ type: 'reject', message: reasons[n++] }] }
+    })
+    const result = await executeResearchWorkflow('w4-2', { ...W4_REQUEST }, exec)
+
+    expect(result.details?.status).toBe('plan_review_exhausted')
+    expect(rounds).toEqual([1, 2, 3])
+    expect((result.content[0] as { text: string }).text).toContain('r3 样本量不足')
+    expect(approvalRows.map((r) => JSON.parse((r as { toolCall: string }).toolCall).round)).toEqual([1, 2, 3])
+    expect(approvalRows.map((r) => (r as { decision: string }).decision)).toEqual(['deny', 'deny', 'deny'])
+
+    // 修订轮 LLM 重生成（deny → 回 design 修订）：design 调用 3 次（初次 + 2 轮修订）。
+    // （calls 在 w4Ctx 未透出，借 approvalRows 行数与 rounds 序列即可锁定轮次语义。）
+  })
+
+  it('deny → 修订 prompt 带上轮 spec + 用户理由（复用 design 节点零新图节点）', async () => {
+    const revisionPrompts: string[] = []
+    const llm = createSlotLlm({
+      design: (prompt) => {
+        revisionPrompts.push(prompt)
+        return undefined // 走默认合法 design
+      },
+    })
+    const wiki = createWikiFake({ [CRITIC_PATH]: validCriticPage() })
+    const lab = createLabFake()
+    const { ctx } = baseCtx(llm, {}, { wiki: wiki.wiki, lab: lab.lab })
+    let n = 0
+    const exec = execOf(ctx, new AbortController().signal, () => ({
+      decisions: [{ type: n++ === 0 ? 'reject' : 'approve', message: '补大样本对照' }],
+    }))
+    await executeResearchWorkflow('w4-3', { ...W4_REQUEST }, exec)
+    expect(revisionPrompts.length).toBe(2) // 初次 + 修订轮
+    expect(revisionPrompts[1]).toContain('修订模式')
+    expect(revisionPrompts[1]).toContain('补大样本对照')
+  })
+
+  it('stage 上报：plan-review 在 summary 后（挂起即末态 stage 停 plan-review——853 §6.1）', async () => {
+    const { ctx } = w4Ctx()
+    const exec = execOf(ctx, new AbortController().signal, () => ({ decisions: [{ type: 'approve' }] }))
+    await executeResearchWorkflow('w4-4', { ...W4_REQUEST }, exec)
+    const calls = (exec.onUpdate as ReturnType<typeof vi.fn>).mock.calls.map((c) => (c[0] as { stage: string }).stage)
+    expect(calls[calls.length - 1]).toBe('plan-review')
+    expect(calls).toContain('summary')
+    expect(calls.indexOf('summary')).toBeLessThan(calls.indexOf('plan-review'))
+  })
+
+  it('spec 落盘短路：resume 重放（同 execute 再调）零 LLM 重调直达 interrupt', async () => {
+    const { ctx, llm } = w4Ctx()
+    // 首轮 approve（spec 落盘）→ 第二次 execute 模拟 resume 重放：短路直达 interrupt。
+    const exec1 = execOf(ctx, new AbortController().signal, () => ({ decisions: [{ type: 'approve' }] }))
+    await executeResearchWorkflow('w4-5a', { ...W4_REQUEST }, exec1)
+    const callsAfterFirst = llm.calls.length
+
+    const payloads: unknown[] = []
+    const exec2 = execOf(ctx, new AbortController().signal, (value: unknown) => {
+      payloads.push(value)
+      return { decisions: [{ type: 'approve' }] }
+    })
+    const result = await executeResearchWorkflow('w4-5b', { ...W4_REQUEST }, exec2)
+    expect(result.details?.status).toBe('approved')
+    expect(llm.calls.length).toBe(callsAfterFirst) // 零 LLM 重调
+    expect(payloads).toHaveLength(1) // 直达 interrupt 点
+  })
+
+  it('collect 相位（phase=collect）：调用③ 对账图分派——artifactPages = 实验报告页', async () => {
+    const { ctx, lab } = w4Ctx()
+    // 先落 spec + 旁车（调用① 的产出面）。
+    const exec1 = execOf(ctx, new AbortController().signal, () => ({ decisions: [{ type: 'approve' }] }))
+    await executeResearchWorkflow('w4-6a', { ...W4_REQUEST }, exec1)
+    const specPath = [...lab.files.keys()].find((k) => k.endsWith('/spec.md'))!
+    lab.files.set(`${specPath.slice(0, specPath.lastIndexOf('/'))}/deliverables.json`, JSON.stringify({ deliverables: [], inputPages: [CRITIC_PATH] }))
+    lab.files.set('/lab/results/r.json', '{}')
+
+    const llm2 = createSlotLlm({})
+    const wiki2 = createWikiFake({ [CRITIC_PATH]: validCriticPage() })
+    const lab2 = createLabFake(Object.fromEntries(lab.files))
+    const { ctx: ctx2 } = baseCtx(llm2, {}, { wiki: wiki2.wiki, lab: lab2.lab })
+    const result = await executeResearchWorkflow('w4-6b', { workflow: 'experiment', phase: 'collect', source_paths: [specPath] }, execOf(ctx2))
+
+    expect(result.details?.status).toBe('completed')
+    expect(result.details?.artifactPages[0]?.path).toMatch(/^experiment-reports\//)
+    expect((result.content[0] as { text: string }).text).toContain('实验报告已落 wiki')
+  })
+
+  it('多轮 resume 重放（deny→deny→approve）：每轮一次真生成（重放全短路零 LLM 重调）+ 审计 3 行 round 关联（#912 review 修复）', async () => {
+    const { ctx, llm, approvalRows, lab } = w4Ctx()
+    // 首轮：LLM 生成 r1 → 挂审（interrupt 抛——fake 返消费值模拟 resume）。
+    const decisions = [
+      { type: 'reject', message: 'r1 理由' },
+      { type: 'reject', message: 'r2 理由' },
+      { type: 'approve', message: '可以了' },
+    ]
+    let n = 0
+    const payloads: { escalation: { plan: { round: number } } }[] = []
+    const exec = execOf(ctx, new AbortController().signal, (value: unknown) => {
+      payloads.push(value as never)
+      return { decisions: [{ type: decisions[n]!.type, message: decisions[n++]!.message }] }
+    })
+    const result = await executeResearchWorkflow('w4-8', { ...W4_REQUEST }, exec)
+
+    expect(result.details?.status).toBe('approved')
+    // 3 轮各一次 interrupt（round 1/2/3），修订轮（round 2/3）的 buildPlan 经短路零 LLM——
+    // 全部 LLM 调用 = design 3（每轮一次真生成）+ spec 3 + audit 3；重放不再追加。
+    expect(payloads.map((p) => p.escalation.plan.round)).toEqual([1, 2, 3])
+    expect(llm.calls.filter((c) => c.slot === 'design')).toHaveLength(3)
+    expect(llm.calls.filter((c) => c.slot === 'spec')).toHaveLength(3)
+    expect(llm.calls.filter((c) => c.slot === 'audit')).toHaveLength(3)
+    // 3 行审计（deny/deny/allow），round 关联 1/2/3——重放不重复落行。
+    expect(approvalRows).toHaveLength(3)
+    expect(approvalRows.map((r) => (r as { decision: string }).decision)).toEqual(['deny', 'deny', 'allow'])
+    expect(approvalRows.map((r) => JSON.parse((r as { toolCall: string }).toolCall).round)).toEqual([1, 2, 3])
+    // 每轮 spec 落各自 round 目录（r1/r2/r3 互不覆盖——round 键控内容一致性面）。
+    const specKeys = [...lab.files.keys()].filter((k) => k.endsWith('/spec.md')).sort()
+    expect(specKeys.map((k) => k.match(/\/r[0-9]\//)?.[0])).toEqual(['/r1/', '/r2/', '/r3/'])
+    // 修订轮 design prompt 注入的是上轮 spec（r1 内容进第 2 轮修订 prompt——首轮 spec 文本仍原文可读）。
+  })
+
+  it('audit 审计面缺省（recordToolApproval undefined）→ fail-closed throw', async () => {
+    const llm = createSlotLlm({})
+    const wiki = createWikiFake({ [CRITIC_PATH]: validCriticPage() })
+    const lab = createLabFake()
+    const { ctx } = baseCtx(llm, {}, { wiki: wiki.wiki, lab: lab.lab })
+    const ctxNoApproval = { ...ctx, audit: { emitPluginRun: ctx.audit!.emitPluginRun!.bind(ctx.audit) } as PluginAuditPort }
+    const exec = execOf(ctxNoApproval, new AbortController().signal, () => ({ decisions: [{ type: 'approve' }] }))
+    await expect(executeResearchWorkflow('w4-7', { ...W4_REQUEST }, exec)).rejects.toThrow(/fail-closed/)
   })
 })

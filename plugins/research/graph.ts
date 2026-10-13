@@ -52,6 +52,18 @@ export const RESEARCH_FLOW_STAGES = [
   'bucket',
   'dedup',
   'challenge',
+  // W4 experiment 增量节点（#912：preflight/design/spec/audit/plan-review + collect 段
+  // collect/summarize；resolveInputs/validate/persist/summary 重名已含——spec/audit 为
+  // W4 独有节点名不重名，漏报即最长 LLM 节点 stage 静默丢弃，review 修复补齐）。
+  // plan-review = 白名单内唯一非节点名值（人审挂起期 stage，853 §6.1 解读点 D）；
+  // executing/collecting 为流程级描述不进白名单。
+  'preflight',
+  'design',
+  'spec',
+  'audit',
+  'plan-review',
+  'collect',
+  'summarize',
 ] as const
 
 // progressStages 声明值（manifest 单源）：入口面 + 已落地流程节点并集。
@@ -76,12 +88,19 @@ export interface WorkflowArtifactPage {
 }
 
 // 流程图终态（#910 端口面扩展）：completed 带 summary + 产物页清单；clarify = 分支内
-// 兜底出口（W2 论文页缺失 → 提示先 ingest——产物串联，853 §4.2）。
+// 兜底出口（W2 论文页缺失 → 提示先 ingest——产物串联，853 §4.2）；plan_review_exhausted =
+// W4 人审 3 轮未通过终局（run completed 非 failed 语义，853 §5.1）。plan 面 = W4 批准/
+// 终局的方案引用（planRef = spec 落盘路径；note = 批准附言；lastReason = 终局拒绝理由）。
 export interface WorkflowOutcome {
-  readonly status: 'completed' | 'clarify'
+  readonly status: 'completed' | 'clarify' | 'plan_review_exhausted'
   readonly summary: string
   readonly artifactPages: readonly WorkflowArtifactPage[]
   readonly clarify?: ClarifyResult
+  readonly plan?: {
+    readonly planRef: string
+    readonly note: string | undefined
+    readonly lastReason: string | undefined
+  }
 }
 
 // 端口面（Strategy 注入——S2 fake 面）。

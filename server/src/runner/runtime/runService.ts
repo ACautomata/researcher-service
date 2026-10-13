@@ -9,6 +9,7 @@ import { runWithPluginRunFrame, execPartsFromFrame, type PluginRunFrame } from '
 import { createFiguresToolPort } from '../../figures/toolPort'
 import { createLlmToolPort } from '../llmToolPort'
 import { createPluginDocsPort } from '../docsToolPort'
+import { createPluginLabPort } from '../labToolPort'
 import { createPluginWikiPort } from '../wikiToolPort'
 import { createPrismaPluginRunAuditSink, FROZEN_RUN_KIND, parsePluginRunProgress, pluginRunProgressEventName } from '../../figures/figureAudit'
 import { runWithToolCallContext, createToolCallContextMiddleware, runWithRunContext } from '../filejournal/context'
@@ -1386,6 +1387,12 @@ export class RunService {
           now: () => this.clock(),
         }),
       docs: createPluginDocsPort({
+        container: labContainer,
+        primitives: this.deps.primitives,
+      }),
+      // ctx.lab（#912 · 853 §11.3B）：W4 spec 落盘窄口——run 级直挂（同 docs 先例；
+      // 写面 /lab/specs/ 固定前缀 + 读面 /lab/ 白名单，端口内归一化）。
+      lab: createPluginLabPort({
         container: labContainer,
         primitives: this.deps.primitives,
       }),

@@ -109,6 +109,19 @@ export interface PluginRunAuditEvent {
 
 export interface PluginAuditPort {
   readonly emitPluginRun: (event: PluginRunAuditEvent) => void
+  /**
+   * 方案级人审审计行（#912 · 853 §5.2）——落 tool_approval_logs（layer=human、decision 二值、
+   * toolName 专值由调用方传、toolCall = 引用快照 JSON 不存全文）。traceId/runId/userId 由
+   * 核心 sink 按 run 身份自动补（funnel writeAudit 同款）；返回 false = 审计写失败
+   * （审批是安全路径——调用方 fail-closed）。可选面：frame 缺省/absent 时方案人审不可用。
+   */
+  readonly recordToolApproval?: (row: {
+    readonly layer: 'human'
+    readonly decision: 'allow' | 'deny'
+    readonly toolName: string
+    readonly toolCall: string
+    readonly reason?: string
+  }) => Promise<boolean>
 }
 
 // ---------------------------------------------------------------------------
@@ -226,9 +239,38 @@ export interface PluginDocsPort {
   }) => Promise<PluginDocsResult<{ readonly pages: readonly string[] }>>
 }
 
+// ---------------------------------------------------------------------------
+// ctx.lab（#912 · 853 §11.3B 拍板形态②）——W4 spec 落盘窄口：写面 /lab/specs/ 固定前缀
+// （W4 调用①三件产物 design/spec/audit 落盘 + 修订覆盖——幂等短路点哨兵）；读面 /lab/
+// 前缀白名单（collect 对账交付物 + 短路点读回 spec——853 §7.2 读面走既有
+// MAX_FILE_READ_BYTES=16MiB 护栏口径）。仅此窄域两口，无通用 exec/fs 透传（#752 同钉）。
+// 实现 runner/labToolPort.ts。
+// ---------------------------------------------------------------------------
+
+export type PluginLabPortErrorCode =
+  | 'invalid_path' // 非 /lab/ 前缀 / 写面非 /lab/specs/ 前缀 / 穿越 / 反斜杠 / 空字节 / 超长
+  | 'not_found' // 存在性校验失败（read；write 的父目录自动创建不触发）
+  | 'binary' // NUL 嗅探命中——lab read 是文本对账面（JSON/CSV/md），二进制拒读
+  | 'too_large' // 读面超 MAX_FILE_READ_BYTES 护栏（不静默截断）
+  | 'sandbox_unavailable' // labContainer exec/archive 不可达（容器不存在/daemon 断连等 infra 面归类，含未知异常兜底）
+
+export type PluginLabResult<T> =
+  | { ok: true; data: T }
+  | { ok: false; error: { code: PluginLabPortErrorCode; message: string } }
+
+export interface PluginLabPort {
+  readonly write: (input: {
+    readonly path: string
+    readonly content: string
+  }) => Promise<PluginLabResult<{ readonly written: true }>>
+  readonly read: (input: {
+    readonly path: string
+  }) => Promise<PluginLabResult<{ readonly content: string }>>
+}
+
 // 插件工具运行上下文（§2.2 ctx 最小面）：config = configSchema 声明键的解析值（启动期
 // 校验后注入）；logger = 面板统一日志面。不给直连口：fsPort / 沙箱 exec / 凭证面。
-// 六件（run/figures/llm/audit/wiki/docs）= run 装配面注入——agent 路径经 run frame ALS、
+// 七件（run/figures/llm/audit/wiki/docs/lab）= run 装配面注入——agent 路径经 run frame ALS、
 // 直达路径显式构造；frame 缺失（注册期探针/无 runner 上下文）为 undefined，域工具执行时自校验。
 export interface PluginToolContext {
   readonly config: Readonly<Record<string, string>>
@@ -239,6 +281,7 @@ export interface PluginToolContext {
   readonly audit?: PluginAuditPort
   readonly wiki?: PluginWikiPort
   readonly docs?: PluginDocsPort
+  readonly lab?: PluginLabPort
 }
 
 // 给模型/审计的内容块（#751 双面：content 是结论性事实唯一来源——R6 事实同源不变量）。
@@ -267,6 +310,16 @@ export interface PluginToolExec {
   readonly signal: AbortSignal
   /** 部分结果上报（onUpdate 收录进签名；通用 SSE 进度事件 = V2，§6）。 */
   readonly onUpdate?: (partial: unknown) => void
+  /**
+   * 人审挂起点（#912 · 853 §5.1——W4 实验方案人审的工具内 interrupt 面）：LangGraph
+   * interrupt 语义——首次调用抛 GraphInterrupt 挂起主 agent 图（checkpoint 落库，等
+   * 审批 resume 重放），resume 重放时返回历史 resume 值。返回面 = {value, historical}
+   * （historical = 本次消费 resume 队列历史值——重放的历史轮；W4 据其跳过审计重复落行）。
+   * 装配：agent 路径由 toLangChainTool 检测 runtime.configurable.__pregel_checkpointer
+   * 注入；{execute} 命令直达路径无图上下文 = undefined（W4 人审不可用，工具返回 clarify
+   * 引导 NL 路径）。其余工具不消费。
+   */
+  readonly interrupt?: (value: unknown) => { value: unknown; historical: boolean }
   readonly ctx: PluginToolContext
 }
 
