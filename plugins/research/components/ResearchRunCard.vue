@@ -52,26 +52,41 @@ const WORKFLOW_STAGES: Record<string, Record<string, string>> = {
     verify: '入库验证',
     summary: '结果汇总',
   },
+  // W2 discover：extract/validate/persist/summary 与 W1 重名已含（853 §6.1 跨流程重名清单）
   discover: {
+    extract: '内容解析',
     resolveInputs: '解析输入',
     load: '加载论文',
+    validate: '结构校验',
     critic: '审读评估',
     evidenceGate: '证据闸门',
+    persist: '写入 wiki',
+    summary: '结果汇总',
   },
+  // W3 hypothesize：resolveInputs/validate/persist/summary 重名已含
   hypothesize: {
+    resolveInputs: '解析输入',
     contextPack: '上下文打包',
     bucket: '分桶生成',
+    validate: '结构校验',
     dedup: '去重合并',
     challenge: '挑战评审',
+    persist: '写入 wiki',
+    summary: '结果汇总',
   },
+  // W4 experiment：resolveInputs/validate/persist/summary 重名已含（verify 为 W1 独有）
   experiment: {
+    resolveInputs: '解析输入',
     preflight: '执行预检',
     design: '方案设计',
+    validate: '结构校验',
     spec: '方案落盘',
     audit: '方案自审',
     'plan-review': '方案待审批',
     collect: '结果对账',
+    persist: '写入 wiki',
     summarize: '对账汇总',
+    summary: '结果汇总',
   },
 }
 

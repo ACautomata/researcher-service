@@ -70,6 +70,14 @@ describe('ResearchRunCard 进行态（双段徽标，853 §6.2）', () => {
     expect(wrapper.find('[data-test="research-badge"]').text()).toBe('结果对账')
   })
 
+  it('跨流程重名 stage 各 workflow 域内命中（853 §6.1：extract/validate/persist/summary/resolveInputs 重名已含）', () => {
+    expect(mountCard({ stage: 'extract', workflow: 'discover' }).find('[data-test="research-badge"]').text()).toBe('科学问题发现 · 内容解析中…')
+    expect(mountCard({ stage: 'validate', workflow: 'hypothesize' }).find('[data-test="research-badge"]').text()).toBe('假说生成 · 结构校验中…')
+    expect(mountCard({ stage: 'persist', workflow: 'experiment' }).find('[data-test="research-badge"]').text()).toBe('实验 · 写入 wiki中…')
+    expect(mountCard({ stage: 'summary', workflow: 'discover' }).find('[data-test="research-badge"]').text()).toBe('科学问题发现 · 结果汇总中…')
+    expect(mountCard({ stage: 'resolveInputs', workflow: 'experiment' }).find('[data-test="research-badge"]').text()).toBe('实验 · 解析输入中…')
+  })
+
   it('progress 未到（无 stage）→ 通用文案「工作流运行中…」，不渲染徽标', () => {
     const wrapper = mountCard()
     expect(wrapper.find('[data-test="research-badge"]').exists()).toBe(false)

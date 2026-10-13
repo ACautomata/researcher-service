@@ -3,8 +3,8 @@
 // ApprovalDock 按 source==='experiment-plan' 分流的专用子组件（其余四 source 仍 ApprovalCard）。
 // 展示面（#920 §1）：标题 + 轮次徽标（第 N/3 轮，第 2/3 轮「最后一轮」提示）+ plan.title/summary
 // + ▾ 方案全文折叠区（plan.text 经 MarkdownRenderer 渲染——spec 9 段结构化文档 plain pre 不可读）。
-// reason 交互面（#913）：[批准并执行] 直点（可选附言经「添加附言」展开输入）/ [拒绝] 点击滑出
-// 必填理由框 ≤2000 字（空理由禁提交）+ [确认拒绝][返回]——理由/附言输入仅限方案卡（漏斗卡
+// reason 交互面（#913）：[批准并执行] 直点（可选附言经「添加附言」展开输入）/ 「拒绝并说明理由」
+// 点击滑出必填理由框 ≤2000 字（空理由禁提交）+ [确认拒绝][返回]——理由/附言输入仅限方案卡（漏斗卡
 // deny 理由无消费面不回喂 agent，保持两键）。props-in/emits-out 哑组件（#316：#340 拆分边界）；
 // resolve 契约两值 + 可选第三参 reason（server sessionApprovalSchema reason ≤2000 已支持）。
 // 方案块缺失（畸形 fail-soft，#920 §1）→ 回退 toolCallSummary 展示，卡不停摆。

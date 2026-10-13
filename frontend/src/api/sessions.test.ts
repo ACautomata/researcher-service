@@ -21,7 +21,7 @@ describe('sessions api client — resolveSessionApproval（#913 reason 线缝）
     vi.stubGlobal('fetch', vi.fn())
   })
 
-  function lastCall(): [string, RequestInit] {
+  function theCall(): [string, RequestInit] {
     const m = globalThis.fetch as ReturnType<typeof vi.fn>
     return [m.mock.calls[0][0] as string, (m.mock.calls[0][1] ?? {}) as RequestInit]
   }
@@ -29,14 +29,14 @@ describe('sessions api client — resolveSessionApproval（#913 reason 线缝）
   it('deny 带 reason → POST approvals/:escId，body 恰为 {decision, reason}', async () => {
     ;(globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(mockResp({ code: 0, data: null }))
     await resolveSessionApproval('sess-1', 'e1', 'deny', '样本量不足')
-    expect(lastCall()[0]).toBe('/api/v1/sessions/sess-1/approvals/e1')
-    expect(lastCall()[1].method).toBe('POST')
-    expect(JSON.parse(lastCall()[1].body as string)).toStrictEqual({ decision: 'deny', reason: '样本量不足' })
+    expect(theCall()[0]).toBe('/api/v1/sessions/sess-1/approvals/e1')
+    expect(theCall()[1].method).toBe('POST')
+    expect(JSON.parse(theCall()[1].body as string)).toStrictEqual({ decision: 'deny', reason: '样本量不足' })
   })
 
   it('两键调用（无 reason）→ body 仅 {decision}，无 reason 键', async () => {
     ;(globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(mockResp({ code: 0, data: null }))
     await resolveSessionApproval('sess-1', 'e1', 'allow')
-    expect(JSON.parse(lastCall()[1].body as string)).toStrictEqual({ decision: 'allow' })
+    expect(JSON.parse(theCall()[1].body as string)).toStrictEqual({ decision: 'allow' })
   })
 })
