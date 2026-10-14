@@ -36,6 +36,11 @@ export const JOURNAL_AUDIT_TRACE_PREFIX = 'file-journal'
 // 逆放摘要给前端的路径采样上限（不做全树 diff——D8；仅摘要面）。
 export const PREVIEW_PATH_SAMPLE_MAX = 20
 
+// 轮次产物卡片（#951 D3 · 施工票 #960）截断上限：单轮 >N 条只列前 N + 「等 M 个文件」计数行，
+// Attachment 物化同步截断（列出的即 = 可下载的）。可调参数 = 本常量集中声明（对齐 ≤4KB
+// 截断纪律——截断值不走 config env，同 TOOL_*_MAX_BYTES 惯例）。
+export const TURN_FILES_MAX_ROWS = 20
+
 // journal 行的 attic sha 引用（before/after/墓碑三列——GC refcount 与 replay lease 共用
 // 收集面；引用列变更单点改）。
 export function shaRefsOf(

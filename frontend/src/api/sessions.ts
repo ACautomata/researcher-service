@@ -46,6 +46,9 @@ export interface TurnContent {
   tools?: ToolLine[]
   media?: MediaRef[]
   files?: TurnFileRow[]
+  // #960 截断计数（server TurnSnapshot.filesTotal 镜像）：files 为截断后列出面，filesTotal =
+  // 截断前行数——「等 N 个文件」计数行数据源；files 缺省即无卡，filesTotal 不落键。
+  filesTotal?: number
 }
 
 // 投影行：attachmentsJson v1 展开进行内（assistant 行 thinking/tools/media；command 面读侧

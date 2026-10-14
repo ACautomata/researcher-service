@@ -857,4 +857,117 @@ describe('RunService：发消息 → run 终态事件序列（S1，#747 C 节目
     expect(hub.types().at(-1)).toBe('run.failed')
     expect(hub.types()).not.toContain('turn.files')
   })
+
+  // ---- #960 轮次产物卡片 T2：非 delete 行物化回填 + >20 截断（物化同步截断）----
+
+  // 物化计数 mock：按 declaredPath 生成确定性 attachmentId，记录调用入参供断言。
+  function makeMaterializeSpy(failPaths: string[] = []) {
+    const calls: Array<{ declaredPath: string; container: string }> = []
+    let n = 0
+    return {
+      calls,
+      deps: {
+        ingestAttachments: async () => [],
+        readTempBytes: async () => Buffer.from(''),
+        materializeAgentMedia: async (p: { declaredPath: string; container: string }) => {
+          calls.push({ declaredPath: p.declaredPath, container: p.container })
+          n += 1
+          if (failPaths.includes(p.declaredPath)) return null
+          return {
+            attachmentId: `att-${n}`,
+            fileName: p.declaredPath.split('/').pop() ?? 'file',
+            mimeType: 'application/octet-stream',
+            size: 5,
+          }
+        },
+      } satisfies RunServiceDeps['attachments'],
+    }
+  }
+
+  it('#960 物化回填：非 delete 行 attachmentId/fileName/size 三面一致（事件 ≡ recordTurn 回放）；delete 行无 attachmentId', async () => {
+    const runId = 'run-files-t2'
+    await seedJournalRows(runId, 400)
+    const turns: Array<Parameters<RecordTurnFn>[0]> = []
+    const spy = makeMaterializeSpy()
+    const svc = makeService({
+      script: [new AIMessage({ content: '改好了。' })],
+      attachments: spy.deps,
+      recordTurn: async (turn) => { turns.push(turn) },
+    })
+    await svc.execute(cmd({ runId }))
+    // 物化只发生在非 delete 行，declaredPath = /lab 绝对路径（journal 行 path 为相对）
+    expect(spy.calls).toEqual([
+      { declaredPath: '/lab/notes/new.md', container: LAB },
+      { declaredPath: '/lab/notes/edited.md', container: LAB },
+    ])
+    const filesEvent = hub.events.find((e) => e.type === 'turn.files')!
+    const filesPayload = filesEvent.payload as {
+      files: Array<Record<string, unknown>>
+      total: number
+    }
+    expect(filesPayload.files).toEqual([
+      { path: 'notes/new.md', op: 'created', attachmentId: 'att-1', fileName: 'new.md', size: 5 },
+      { path: 'notes/edited.md', op: 'modified', attachmentId: 'att-2', fileName: 'edited.md', size: 5 },
+      // delete 行：attachmentId 留空（无字节——恢复语义归 rewind 不归卡片）
+      { path: 'notes/gone.md', op: 'deleted' },
+    ])
+    expect(filesPayload.total).toBe(3)
+    // 回放面同形状：recordTurn 聚合快照 files ≡ 事件 payload（实时 ≡ 回放零差异——server 侧）
+    expect(turns[0]?.aggregate.files).toEqual(filesPayload.files)
+  })
+
+  it('#960 物化失败降级：行保留无 attachmentId（不 fail run，卡面不放大物化故障）', async () => {
+    const runId = 'run-files-t2-fail'
+    await seedJournalRows(runId, 500)
+    const spy = makeMaterializeSpy(['/lab/notes/new.md'])
+    const svc = makeService({
+      script: [new AIMessage({ content: '改好了。' })],
+      attachments: spy.deps,
+    })
+    await svc.execute(cmd({ runId }))
+    expect(hub.types().at(-1)).toBe('run.completed')
+    const filesPayload = hub.events.find((e) => e.type === 'turn.files')!.payload as {
+      files: Array<Record<string, unknown>>
+    }
+    // 物化失败的行保留（历史陈述）但无 attachmentId——「下载」不出链接
+    expect(filesPayload.files[0]).toEqual({ path: 'notes/new.md', op: 'created' })
+    expect(filesPayload.files[1]).toMatchObject({ attachmentId: 'att-2' })
+  })
+
+  it('#960 截断一致性：>20 条只列前 20 + total 计数；物化同步截断（列出数 = 物化数 = 上限）', async () => {
+    const runId = 'run-files-t2-trunc'
+    // 25 行全 created（独立 seq 段位防唯一键碰撞）
+    await prisma.fileJournal.createMany({
+      data: Array.from({ length: 25 }, (_, i) => ({
+        sessionId,
+        checkpointId: '',
+        seq: 600 + i,
+        op: 'write',
+        path: `bulk/f${i}.md`,
+        beforeSha256: null,
+        toolCallId: `${runId}-b${i}`,
+        runId,
+      })),
+    })
+    const turns: Array<Parameters<RecordTurnFn>[0]> = []
+    const spy = makeMaterializeSpy()
+    const svc = makeService({
+      script: [new AIMessage({ content: '批量完成。' })],
+      attachments: spy.deps,
+      recordTurn: async (turn) => { turns.push(turn) },
+    })
+    await svc.execute(cmd({ runId }))
+    const filesPayload = hub.events.find((e) => e.type === 'turn.files')!.payload as {
+      files: Array<Record<string, unknown>>
+      total: number
+    }
+    expect(filesPayload.files).toHaveLength(20)
+    expect(filesPayload.total).toBe(25)
+    expect(filesPayload.files[0]).toMatchObject({ path: 'bulk/f0.md', op: 'created', attachmentId: 'att-1' })
+    expect(filesPayload.files.at(-1)).toMatchObject({ path: 'bulk/f19.md', attachmentId: 'att-20' })
+    // 物化同步截断：恰 20 次调用（列出的即 = 可下载的——Attachment 物化不超出列出面）
+    expect(spy.calls).toHaveLength(20)
+    // 回放面同步截断：recordTurn 聚合 ≡ 事件（刷新后列出面不放大）
+    expect(turns[0]?.aggregate.files).toEqual(filesPayload.files)
+  })
 })

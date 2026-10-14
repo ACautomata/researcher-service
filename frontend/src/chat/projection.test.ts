@@ -36,6 +36,7 @@ function normalize(m: Msg) {
     tools: m.tools.map((t) => ({ id: t.id, name: t.name, state: t.state, title: t.title, input: t.input, result: t.result, durationMs: t.durationMs, truncated: t.truncated, rejection: t.rejection, stage: t.stage })),
     media: m.media,
     files: m.files,
+    filesTotal: m.filesTotal,
   }
 }
 
@@ -267,6 +268,31 @@ describe('applyEvent（实时入口）事件语义', () => {
     expect(vm).toHaveLength(0)
   })
 
+  it('#960 turn.files total：filesTotal 进 Msg（截断计数行数据源），非法 total 缺省 = 行数', () => {
+    let vm = applyEvent([], ev('run.started', {}, { runId: 'r1' }))
+    vm = applyEvent(vm, ev('turn.files', { files: [{ path: 'a.md', op: 'created' }], total: 25 }, { runId: 'r1' }))
+    expect(vm[0].filesTotal).toBe(25)
+    // 缺省/非法 → 行数（无截断即无计数行；与回放面 filesTotal ?? files.length 同缺省纪律）
+    vm = applyEvent(vm, ev('turn.files', { files: [{ path: 'a.md', op: 'created' }] }, { runId: 'r1' }))
+    expect(vm[0].filesTotal).toBe(1)
+    vm = applyEvent(vm, ev('turn.files', { files: [{ path: 'a.md', op: 'created' }], total: '25' }, { runId: 'r1' }))
+    expect(vm[0].filesTotal).toBe(1)
+    vm = applyEvent(vm, ev('turn.files', { files: [{ path: 'a.md', op: 'created' }], total: 0 }, { runId: 'r1' }))
+    expect(vm[0].filesTotal).toBe(1)
+  })
+
+  it('#960 回放面 filesTotal：投影行 files/filesTotal → Msg（零差异的数据源半边）', () => {
+    const vm = fromProjection({
+      sessionId: 's1', title: 'T',
+      messages: [assistantRow({
+        files: [{ path: 'bulk/f0.md', op: 'created', attachmentId: 'att-0', fileName: 'f0.md', size: 5 }],
+        filesTotal: 25,
+      })],
+    })
+    expect(vm[0].files).toEqual([{ path: 'bulk/f0.md', op: 'created', attachmentId: 'att-0', fileName: 'f0.md', size: 5 }])
+    expect(vm[0].filesTotal).toBe(25)
+  })
+
   it('#959 files-only 轮终态不剥落 + 不折叠（产物非轨迹——卡片恒在折叠条外）', () => {
     let vm = applyEvent([], ev('run.started', {}, { runId: 'r1' }))
     vm = applyEvent(vm, ev('turn.files', { files: [{ path: 'a.md', op: 'created' }] }, { runId: 'r1' }))
@@ -333,6 +359,7 @@ describe('零差异一致性（硬验收：reduce(全量事件) ≡ 投影行）
     const tools = new Map<string, ToolLine>()
     const media: Array<Record<string, unknown>> = []
     const files: Array<Record<string, unknown>> = []
+    let filesTotal: number | undefined = undefined
     for (const e of events) {
       if (e.type === 'text.delta' && typeof e.payload.delta === 'string') content += e.payload.delta
       if (e.type === 'thinking.delta' && typeof e.payload.delta === 'string') thinking = (thinking ?? '') + e.payload.delta
@@ -353,8 +380,16 @@ describe('零差异一致性（硬验收：reduce(全量事件) ≡ 投影行）
       }
       if (e.type === 'attachment' && typeof e.payload.attachmentId === 'string') media.push({ ...e.payload })
       // 镜像 server reducer turn.files 门：合法行入聚合（服务端 completed 时隙聚合 journal 行后
-      // feed——「服务端会写出什么」的镜像，files 进 attachmentsJson 聚合面）
-      if (e.type === 'turn.files' && Array.isArray(e.payload.files)) files.push(...(e.payload.files as Array<Record<string, unknown>>).filter((f) => typeof f.path === 'string' && f.path !== '' && (f.op === 'created' || f.op === 'modified' || f.op === 'deleted')))
+      // feed——「服务端会写出什么」的镜像，files 进 attachmentsJson 聚合面）；#960 filesTotal
+      // 同镜像：帧 total 校验（number ≥ 本帧行数，缺省 = 行数）
+      if (e.type === 'turn.files' && Array.isArray(e.payload.files)) {
+        const valid = (e.payload.files as Array<Record<string, unknown>>).filter((f) => typeof f.path === 'string' && f.path !== '' && (f.op === 'created' || f.op === 'modified' || f.op === 'deleted'))
+        if (valid.length > 0) {
+          files.push(...valid)
+          const total = e.payload.total
+          filesTotal = typeof total === 'number' && Number.isFinite(total) && total >= valid.length ? total : valid.length
+        }
+      }
     }
     const rows: ProjectionMessage[] = [userRow({ id: 'm1', content: userText })]
     const aggregate: Record<string, unknown> = {}
@@ -362,6 +397,7 @@ describe('零差异一致性（硬验收：reduce(全量事件) ≡ 投影行）
     if (tools.size > 0) aggregate.tools = [...tools.values()]
     if (media.length > 0) aggregate.media = media
     if (files.length > 0) aggregate.files = files
+    if (filesTotal !== undefined) aggregate.filesTotal = filesTotal
     rows.push(assistantRow({ id: 'm2', content, ...aggregate }))
     return rows
   }
@@ -461,6 +497,17 @@ describe('零差异一致性（硬验收：reduce(全量事件) ≡ 投影行）
         ev('research_run.progress', { toolCallId: 'rw1', stage: 'challenge', workflow: 'hypothesize' }, { runId: 'r1' }),
         ev('tool.end', { toolCallId: 'rw1', state: 'success', durationMs: 88000, details: '{"workflow":"hypothesize","status":"completed","artifactPages":[{"path":"idea-cards/dig.md","title":"想法卡"}],"summary":"生成 5 个假说。"}' }, { runId: 'r1' }),
         ev('text.delta', { delta: '假说已生成。' }, { runId: 'r1' }),
+        ev('run.completed', {}, { runId: 'r1' }),
+      ],
+    },
+    {
+      name: '产物轮 >20 截断（#960：files=20 截断面 + total=25 计数——回放后「等 N 个文件」不丢）',
+      events: [
+        ev('run.started', {}, { runId: 'r1' }),
+        ev('turn.files', {
+          files: Array.from({ length: 20 }, (_, i) => ({ path: `bulk/f${i}.md`, op: 'created', attachmentId: `att-${i}`, fileName: `f${i}.md`, size: 5 })),
+          total: 25,
+        }, { runId: 'r1' }),
         ev('run.completed', {}, { runId: 'r1' }),
       ],
     },

@@ -159,12 +159,15 @@ describe('#780 附件域 S1（上传/下载/消息链接）', () => {
     // 预置沙箱字节（readLabBytes 按 relPath 返回）
     archive.readLabBytes.mockResolvedValue(Buffer.from('download-me'))
 
-    // owner → 200 原生字节 + Content-Type
+    // owner → 200 原生字节 + Content-Type（成功豁免 #312 信封：非 {code,message,data} JSON——
+    // 逐字节断言原始体 + 无信封头；#960 回归口径显式化）
     const lo = await login(request, 'dl-owner', 'pw-att-secure')
     const own = await request.get(`/api/v1/attachments/${id}/download`).set(bearer(lo.access))
     expect(own.status).toBe(200)
     expect(own.text).toBe('download-me')
     expect(own.headers['content-type']).toContain('text/plain')
+    expect(own.headers['content-disposition']).toContain(`filename=`)
+    expect(() => JSON.parse(own.text)).toThrow() // 原生字节绝非信封 JSON
     // 沙箱容器名 = researcher-sandbox-<sessionId>（真实 session id，非 username 派生值）
     expect(archive.readLabBytes).toHaveBeenCalledWith(`researcher-sandbox-${sessionId}`, `uploads/${id}/a.txt`)
 

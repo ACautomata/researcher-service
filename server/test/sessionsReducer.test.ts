@@ -209,6 +209,54 @@ describe('TurnReducer：run 域事件归约（S3）', () => {
     expect(serializeAttachments(r.snapshot())).toBe(serializeAttachments(r.snapshot()))
   })
 
+  it('#960 filesTotal：截断帧 total 入快照与 v1 JSON（回放面「等 N 个文件」数据源）', () => {
+    const r = new TurnReducer()
+    r.feed(ev('turn.files', { files: [{ path: 'a.md', op: 'created' }], total: 25 }))
+    expect(r.snapshot().filesTotal).toBe(25)
+    const json = JSON.parse(serializeAttachments(r.snapshot())) as Record<string, unknown>
+    expect(json.filesTotal).toBe(25)
+    // 字段序稳定（files 后 filesTotal）
+    expect(serializeAttachments(r.snapshot())).toBe(serializeAttachments(r.snapshot()))
+  })
+
+  it('#960 物化行形状三面同构：事件帧（attachmentId/fileName/size）→ 快照 → v1 JSON 往返一致', () => {
+    const r = new TurnReducer()
+    const frame = {
+      files: [
+        { path: 'notes/new.md', op: 'created', attachmentId: 'att-1', fileName: 'new.md', size: 5 },
+        { path: 'notes/gone.md', op: 'deleted' },
+      ],
+      total: 2,
+    }
+    r.feed(ev('turn.files', frame))
+    // 快照 ≡ 事件帧（回放面 recordTurn 落行即此快照）
+    expect(r.snapshot().files).toEqual(frame.files)
+    expect(r.snapshot().filesTotal).toBe(2)
+    // 投影面：serializeAttachments 往返（attachmentsJson → toProjectionMessage rest 透传）
+    const json = JSON.parse(serializeAttachments(r.snapshot())) as { v?: number; files?: unknown[]; filesTotal?: number }
+    expect(json.files).toEqual(frame.files)
+    expect(json.filesTotal).toBe(2)
+    const { v: _v, ...aggregate } = json
+    expect(aggregate).toEqual({ files: frame.files, filesTotal: 2 })
+  })
+
+  it('#960 filesTotal 校验门：缺省 = files.length；非 number / 小于列出数 → 丢弃用缺省（0 信任）', () => {
+    const r1 = new TurnReducer()
+    r1.feed(ev('turn.files', { files: [{ path: 'a.md', op: 'created' }] }))
+    expect(r1.snapshot().filesTotal).toBe(1)
+    const r2 = new TurnReducer()
+    r2.feed(ev('turn.files', { files: [{ path: 'a.md', op: 'created' }], total: '25' }))
+    expect(r2.snapshot().filesTotal).toBe(1)
+    const r3 = new TurnReducer()
+    r3.feed(ev('turn.files', { files: [{ path: 'a.md', op: 'created' }], total: 0 }))
+    expect(r3.snapshot().filesTotal).toBe(1)
+    // files 空 → 无 filesTotal（无卡面即无计数行）
+    const r4 = new TurnReducer()
+    r4.feed(ev('turn.files', { files: [], total: 30 }))
+    expect(r4.snapshot().files).toBeUndefined()
+    expect(r4.snapshot().filesTotal).toBeUndefined()
+  })
+
   it('snapshot 与 attachmentsJson 反序列化同构（投影行 = content 列 + JSON 聚合面组装）', () => {
     const r = new TurnReducer()
     r.feed(ev('text.delta', { delta: '答案' }))

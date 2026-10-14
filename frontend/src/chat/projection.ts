@@ -62,6 +62,7 @@ export interface Msg {
   tools: ToolRow[]
   media: MediaRef[] // #780 D9 媒体引用（attachmentsJson v1 / attachment 事件同形状）
   files: TurnFileRow[] // #959 轮次产物卡片行（turn.files 事件 / attachmentsJson files 键同形状；产物非轨迹——恒在折叠条外）
+  filesTotal?: number // #960 截断计数（files 非空时 = 截断前行数，缺省 files.length；files 空不落键）
   traceFolded?: boolean // 轮次折叠（#664）：assistant 有轨迹终态默认收起（两入口同判据）
   turnDurationMs?: number // #665 执行时长——新事件面无统一墙钟信号，两入口均不落值（TraceFold 回退计数文案；恢复挂 #794/#796 从行时间戳推导）
   id?: string // 消息行 id（已持久化有值；乐观 echo 由 POST 响应回填）——消息级操作入口定位参数
@@ -130,6 +131,7 @@ export function toolRowFromServer(t: ToolLine): ToolRow {
 
 // 投影行 → Msg（user/assistant 同构；assistant 有轨迹默认收起——#664 T3 历史折叠语义）。
 function msgFromRow(row: ProjectionMessage): Msg {
+  const files = row.files ?? []
   const m: Msg = {
     role: row.role === 'user' ? 'user' : 'assistant',
     raw: row.content,
@@ -139,7 +141,8 @@ function msgFromRow(row: ProjectionMessage): Msg {
     streaming: false,
     tools: (row.tools ?? []).map(toolRowFromServer),
     media: [...(row.media ?? [])],
-    files: [...(row.files ?? [])],
+    files: [...files],
+    ...(files.length > 0 ? { filesTotal: row.filesTotal ?? files.length } : {}),
     ...(row.id ? { id: row.id } : {}),
   }
   if (shouldFoldTrace(m)) m.traceFolded = true
@@ -149,6 +152,7 @@ function msgFromRow(row: ProjectionMessage): Msg {
 // 在飞投影（#779 story 11：inFlight 从 checkpoint blob 重建）→ 流式 overlay（进行态装饰唯一
 // 回放入口——刷新时在飞 run 的画面与断线前同构，#730 §1.3）。
 function overlayFromInFlight(inf: LiveTurn): Msg {
+  const files = inf.turn.files ?? []
   const m: Msg = {
     role: 'assistant',
     raw: inf.turn.content ?? '',
@@ -158,7 +162,8 @@ function overlayFromInFlight(inf: LiveTurn): Msg {
     streaming: true,
     tools: (inf.turn.tools ?? []).map(toolRowFromServer),
     media: [...(inf.turn.media ?? [])],
-    files: [...(inf.turn.files ?? [])],
+    files: [...files],
+    ...(files.length > 0 ? { filesTotal: inf.turn.filesTotal ?? files.length } : {}),
     ...(inf.runId ? { runId: inf.runId } : {}),
   }
   return m
@@ -437,8 +442,9 @@ export function applyEvent(prev: Msg[], event: SessionEvent): Msg[] {
       // #959 轮次产物卡片：completed 时隙 server 聚合 journal 行后整帧发布（必先于
       // run.completed——晚于终态 overlay 已 finalized，overlayIndex 找不到落点即丢帧）。
       // 整帧替换语义（服务端每 run 恰一帧，重复帧幂等）；行级校验门镜像 server reducer
-      // TurnReducer：非法行丢弃，全非法 / 非数组整帧原样返回。
-      const p = event.payload as { files?: unknown } | null
+      // TurnReducer：非法行丢弃，全非法 / 非数组整帧原样返回。#960 filesTotal 同门——帧
+      // total 须 number 且 ≥ 列出数（缺省 = 行数，无截断即无计数行）；空帧整替同步清计数。
+      const p = event.payload as { files?: unknown; total?: unknown } | null
       if (!p || !Array.isArray(p.files)) return prev
       const rows: TurnFileRow[] = []
       for (const raw of p.files) {
@@ -455,6 +461,14 @@ export function applyEvent(prev: Msg[], event: SessionEvent): Msg[] {
       }
       if (rows.length === 0 && overlay.files.length === 0) return prev
       overlay.files = rows
+      // filesTotal 与回放面同缺省纪律：files 非空时恒有值（total 校验，缺省 = 行数——对齐
+      // msgFromRow 的 filesTotal ?? files.length 与 server snapshot 缺省）。
+      overlay.filesTotal =
+        rows.length === 0
+          ? undefined
+          : typeof p.total === 'number' && Number.isFinite(p.total) && p.total >= rows.length
+            ? p.total
+            : rows.length
     } else {
       // attachment：#780 D9 媒体引用直推（校验门镜像 server reducer.ts 的接受面）。
       const p = event.payload as Partial<MediaRef> | null
