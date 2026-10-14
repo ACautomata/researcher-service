@@ -670,6 +670,67 @@ export class RunService {
     }
   }
 
+  // #959 轮次产物卡片（T1；#972·R1 review B 裁决）：段级时隙聚合本轮 journal 行 → turn.files
+  // 事件（turn.feed + publish 双写——实时 ≡ 回放零差异，attachment 事件同形先例）。completed 与
+  // interrupted 两时隙共用（spec Agreements 条 2「interrupt 分段按段多卡」落地：每段各自时隙
+  // 各出各段卡，与分段气泡/分段落行现状同构；裁决字面代价：审批升级 suspended / resume-abort
+  // 链上前段卡已发——本段文件写已持久（锚已回填，resume 不回滚），卡是历史陈述）。aborted/
+  // failed 不调（被放弃段锚 pending 恒逆放，不出卡）。completed 时硬约束：必先于 run.completed
+  // 发布——前端归约器收到终态即 finalizeOverlay，晚于终态落不进 overlay。无行即无卡（journaling
+  // 缺省/无文件修改段静默跳过）。查询 fail-soft：聚合故障不放大 run 故障（卡片缺失只 warn）。
+  // recover run 的回放聚合取 checkpoint 快照（files 不在其中）——「断点前内容只在 blob」同款
+  // 已知边界（finally recordTurn 注）。
+  private async aggregateTurnFiles(
+    cmd: RunCommand,
+    sandboxSessionId: string,
+    turn: TurnReducer,
+    materializeForRun:
+      | ((declaredPath: string, mime: string) => Promise<{ attachmentId: string; fileName: string; size: number } | null>)
+      | null,
+  ): Promise<void> {
+    try {
+      const journalRows = await this.deps.prisma.fileJournal.findMany({
+        where: { sessionId: sandboxSessionId, runId: cmd.runId, archivedAt: null },
+        orderBy: { seq: 'asc' },
+      })
+      const all = turnFileRowsFromJournal(journalRows)
+      if (all.length > 0) {
+        // #960 T2：截断（D3——列出的即 = 可下载的，物化同步截断）+ 逐非 delete 行物化
+        // Attachment 回填（materializeForRun 同形；declaredPath = /lab 绝对路径——journal
+        // 行 path 为相对，labAbsOf 单一转换点）。物化失败降级：行保留（历史陈述）无
+        // attachmentId（fail-soft 同 D9 媒体物化，不 fail run）；delete 行无字节不物化。
+        // 单帧不变量（T1 注）：回填必须发生在发帧前——发帧后第二帧两入口即分叉。
+        const listed = all.slice(0, TURN_FILES_MAX_ROWS)
+        if (materializeForRun) {
+          for (const row of listed) {
+            if (row.op === 'deleted') continue
+            const meta = await materializeForRun(labAbsOf(row.path), 'application/octet-stream')
+            if (meta) {
+              row.attachmentId = meta.attachmentId
+              row.fileName = meta.fileName
+              row.size = meta.size
+            } else {
+              console.warn(`[runner] turn.files 物化降级（行无下载链接）: run=${cmd.runId} path=${row.path}`)
+            }
+          }
+        }
+        // #961 exec 提示行：对本段工具轨迹（TurnReducer 聚合面——经 tool.start 事件的 tools）
+        // 做 EXEC_TOOLS 白名单同形判定，标记随帧携带（实时 ≡ 回放零差异；单帧不变量——
+        // 判定在发帧前完成，只断言「有调用」不断言「有写入」，D6）。无行即无卡无帧，
+        // 「含 exec 但无文件修改」段天然无提示行（卡不存在）。
+        const hasExec = turnHasExecCall(turn.snapshot().tools)
+        const filesEvent = {
+          type: 'turn.files',
+          payload: { files: listed, total: all.length, ...(hasExec ? { hasExec: true } : {}) },
+        } as const
+        turn.feed(filesEvent)
+        this.publish(cmd.ownerId, filesEvent, cmd)
+      }
+    } catch (err) {
+      console.warn(`[runner] turn.files 聚合失败（卡片跳过）: run=${cmd.runId}: ${String(err)}`)
+    }
+  }
+
   private async executeRun(cmd: RunCommand): Promise<void> {
     // resume 互斥权威判定：先到者已把 state 推离 interrupted（串行链保证本检查原子于
     // 同 thread 的其它命令），后到者 50001。message 命令不做此检查（queued 态可覆盖）。
@@ -1078,12 +1139,48 @@ export class RunService {
             console.warn(`[runner] journal checkpointId 回填失败: run=${cmd.runId}: ${String(err)}`)
           }
         }
+        // #780 D9 / #960 物化调用组装（completed/interrupted 两时隙共用——#972·R1 B 裁决：
+        // 分段按段出卡，interrupted 段也聚合。journalWrite 直盖终态锚的前置（本 run 的
+        // checkpointId 回填 updateMany 在 stream 结束处已执行完、先于本次物化 insert——不直盖
+        // 则物化行恒 pending 恒逆放）两时隙同样成立。abort 落定分支不物化不聚合（被放弃段
+        // 无产物面），组装仅为闭包创建、无副作用。
+        const attachments = this.deps.attachments
+        const materializeForRun = attachments
+          ? (declaredPath: string, mime: string) =>
+              attachments.materializeAgentMedia({
+                sessionId: sandboxSessionId,
+                ownerId: session.ownerId,
+                declaredPath,
+                mime,
+                container: labContainer,
+                primitives: runPrimitives,
+                ...(this.deps.fileJournal
+                  ? {
+                      journalWrite: async (jw: { attachmentId: string; fileName: string }, bytes: Buffer) => {
+                        await this.deps.fileJournal!.journalMaterialize({
+                          sessionId: sandboxSessionId,
+                          container: labContainer,
+                          path: `uploads/${jw.attachmentId}/${jw.fileName}`,
+                          bytes,
+                          toolCallId: `${IDEMPOTENCY_MEDIA_PREFIX}${jw.attachmentId}`,
+                          runId: cmd.runId,
+                          ...(anchorCheckpointId !== null ? { checkpointId: anchorCheckpointId } : {}),
+                        })
+                      },
+                    }
+                  : {}),
+              })
+          : null
         const interrupted =
           (state.next?.length ?? 0) > 0 || (state.tasks?.some((t) => (t.interrupts?.length ?? 0) > 0) ?? false)
         if (interrupted) {
           this.runs.set(cmd.sessionId, { runId: cmd.runId, state: 'interrupted' })
           // interrupted 不发终态事件（#777 契约「interrupted 态无终态事件」，S4 锁；恢复面 =
-          // run.resumed 起新轮）
+          // run.resumed 起新轮）。
+          // #959 B 裁决：本段聚合出卡（先于审批升级事件——事件序无耦合，取「产物先于流程
+          // 事件」保守序）。卡随本段 finally recordTurn 落 attachmentsJson（回放面自动成立，
+          // 前端零改动）；resume 后终段 completed 只聚终段行（增量卡）。
+          await this.aggregateTurnFiles(cmd, sandboxSessionId, turn, materializeForRun)
           // 审批升级检出（#783）：漏斗 interrupt → approval.requested 事件 + 48h 死线落表；
           // deepagents 内建 interruptOn（V1 测试面）载荷无 kind 标记，不触发审批事件。
           const escalations = this.extractApprovalInterrupts(state)
@@ -1113,40 +1210,6 @@ export class RunService {
           this.runs.set(cmd.sessionId, { runId: cmd.runId, state: 'aborted', by: 'user' })
           this.publish(cmd.ownerId, { type: 'run.aborted', payload: { by: 'user' } }, cmd)
         } else {
-          // #780 D9 / #960 物化调用组装（两处共用同形态——差异仅 declaredPath/mime）：
-          // D9 媒体块（block.declaredPath + 声明 mime）与 turn.files 行（labAbsOf(row.path)
-          // + octet-stream）各自调用。journalWrite 落 journal 行（uploads/<id>/<file> +
-          // media- 前缀 toolCallId——turnFileRowsFromJournal 天然过滤，物化行不自现于卡片）；
-          // 有 fileJournal 时 journal-first，无则 primitives 直写。直盖终态锚：本 run 的
-          // checkpointId 回填 updateMany（stream 结束处）已执行完、先于本次物化 insert——
-          // 不直盖则物化行恒 pending 恒逆放。
-          const attachments = this.deps.attachments
-          const materializeForRun = attachments
-            ? (declaredPath: string, mime: string) =>
-                attachments.materializeAgentMedia({
-                  sessionId: sandboxSessionId,
-                  ownerId: session.ownerId,
-                  declaredPath,
-                  mime,
-                  container: labContainer,
-                  primitives: runPrimitives,
-                  ...(this.deps.fileJournal
-                    ? {
-                        journalWrite: async (jw: { attachmentId: string; fileName: string }, bytes: Buffer) => {
-                          await this.deps.fileJournal!.journalMaterialize({
-                            sessionId: sandboxSessionId,
-                            container: labContainer,
-                            path: `uploads/${jw.attachmentId}/${jw.fileName}`,
-                            bytes,
-                            toolCallId: `${IDEMPOTENCY_MEDIA_PREFIX}${jw.attachmentId}`,
-                            runId: cmd.runId,
-                            ...(anchorCheckpointId !== null ? { checkpointId: anchorCheckpointId } : {}),
-                          })
-                        },
-                      }
-                    : {}),
-                })
-            : null
           // #780 D9 媒体块归约（片 3）：run 完成前扫描终态 assistant 回复的媒体块 → 校验（存在性/
           // mime 白名单）/拷进 /lab/uploads/ 物化/建 Attachment 行 → `attachment` 事件（实时面）+
           // turn.feed（回放同形状——attachmentsJson media 数组，单管线渲染零差异）。校验失败块
@@ -1180,55 +1243,9 @@ export class RunService {
             }
             for (const d of scan.degraded) degrade(d.declaredPath, d.reason)
           }
-          // #959 轮次产物卡片（T1）：媒体扫描之后、终态发布之前聚合本轮 journal 行 → turn.files
-          // 事件（turn.feed + publish 双写——实时 ≡ 回放零差异，attachment 事件同形先例）。硬约束：
-          // 必须先于 run.completed 发布——前端归约器收到终态即 finalizeOverlay，晚于终态落不进
-          // overlay。无行即无卡（journaling 缺省/无文件修改轮静默跳过）；aborted/failed/suspended
-          // 不走本分支天然不聚合。查询 fail-soft：终态聚合故障不放大 run 故障（卡片缺失只 warn）。
-          // recover run 的回放聚合取 checkpoint 快照（files 不在其中）——「断点前内容只在 blob」
-          // 同款已知边界（finally recordTurn 注）。
-          try {
-            const journalRows = await this.deps.prisma.fileJournal.findMany({
-              where: { sessionId: sandboxSessionId, runId: cmd.runId, archivedAt: null },
-              orderBy: { seq: 'asc' },
-            })
-            const all = turnFileRowsFromJournal(journalRows)
-            if (all.length > 0) {
-              // #960 T2：截断（D3——列出的即 = 可下载的，物化同步截断）+ 逐非 delete 行物化
-              // Attachment 回填（materializeForRun 同形；declaredPath = /lab 绝对路径——journal
-              // 行 path 为相对，labAbsOf 单一转换点）。物化失败降级：行保留（历史陈述）无
-              // attachmentId（fail-soft 同 D9 媒体物化，不 fail run）；delete 行无字节不物化。
-              // 单帧不变量（T1 注）：回填必须发生在发帧前——发帧后第二帧两入口即分叉。
-              const listed = all.slice(0, TURN_FILES_MAX_ROWS)
-              if (materializeForRun) {
-                for (const row of listed) {
-                  if (row.op === 'deleted') continue
-                  const meta = await materializeForRun(labAbsOf(row.path), 'application/octet-stream')
-                  if (meta) {
-                    row.attachmentId = meta.attachmentId
-                    row.fileName = meta.fileName
-                    row.size = meta.size
-                  } else {
-                    console.warn(`[runner] turn.files 物化降级（行无下载链接）: run=${cmd.runId} path=${row.path}`)
-                  }
-                }
-              }
-              // #961 exec 提示行：completed 时隙对本轮工具轨迹（TurnReducer 聚合面——经
-              // tool.start 事件的 tools 与 rewind preview 的 attachmentsJson.tools 同形）做
-              // EXEC_TOOLS 白名单同形判定，标记随帧携带（实时 ≡ 回放零差异；单帧不变量——
-              // 判定在发帧前完成，只断言「有调用」不断言「有写入」，D6）。无行即无卡无帧，
-              // 「含 exec 但无文件修改」轮天然无提示行（卡不存在）。
-              const hasExec = turnHasExecCall(turn.snapshot().tools)
-              const filesEvent = {
-                type: 'turn.files',
-                payload: { files: listed, total: all.length, ...(hasExec ? { hasExec: true } : {}) },
-              } as const
-              turn.feed(filesEvent)
-              this.publish(cmd.ownerId, filesEvent, cmd)
-            }
-          } catch (err) {
-            console.warn(`[runner] turn.files 聚合失败（卡片跳过）: run=${cmd.runId}: ${String(err)}`)
-          }
+          // #959 轮次产物卡片：媒体扫描之后、终态发布之前聚合本段 journal 行（completed/
+          // interrupted 两时隙共用实现，注释见 aggregateTurnFiles 方法头）。
+          await this.aggregateTurnFiles(cmd, sandboxSessionId, turn, materializeForRun)
           this.runs.set(cmd.sessionId, { runId: cmd.runId, state: 'completed' })
           this.publish(cmd.ownerId, { type: 'run.completed', payload: {} }, cmd)
         }

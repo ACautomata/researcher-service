@@ -416,7 +416,7 @@ describe('零差异一致性（硬验收：reduce(全量事件) ≡ 投影行）
         }
       }
       if (e.type === 'attachment' && typeof e.payload.attachmentId === 'string') media.push({ ...e.payload })
-      // 镜像 server reducer turn.files 门：合法行入聚合（服务端 completed 时隙聚合 journal 行后
+      // 镜像 server reducer turn.files 门：合法行入聚合（服务端段级时隙聚合 journal 行后
       // feed——「服务端会写出什么」的镜像，files 进 attachmentsJson 聚合面）；#960 filesTotal
       // 同镜像：帧 total 校验（number ≥ 本帧行数，缺省 = 行数）
       if (e.type === 'turn.files' && Array.isArray(e.payload.files)) {

@@ -9,6 +9,7 @@ import { computed } from 'vue'
 import { ElMessage } from 'element-plus'
 import type { TurnFileRow } from '@/api/sessions'
 import { readAttachmentBlob } from '@/api/attachments'
+import { formatBytes } from './format'
 
 const props = defineProps<{ files: TurnFileRow[]; filesTotal?: number; hasExec?: boolean }>()
 
@@ -45,12 +46,6 @@ const groups = computed(() => {
 function splitPath(path: string): { dir: string; name: string } {
   const idx = path.lastIndexOf('/')
   return idx < 0 ? { dir: '', name: path } : { dir: path.slice(0, idx), name: path.slice(idx + 1) }
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
 }
 
 function titleOf(row: TurnFileRow): string {

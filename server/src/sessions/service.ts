@@ -233,7 +233,8 @@ async function insertWithNextTurn(
 
 // 投影行组装：content 独立列 + attachmentsJson 聚合面（v 版本字段不外露）；assistant 行
 // thinking/tools 仅在有内容时出现（与 TurnReducer.snapshot 缺省纪律一致）。聚合面键集显式
-// 列全（media/files 与 thinking/tools 同款）——回放半边不靠 rest 透传侥幸成立。
+// 列全（media/files 与 thinking/tools 同款）——未知键不外露（写面 serializeAttachments 是
+// 键集唯一权威，读侧挑取为防御纵深），command 面不在此展开（replayOrConflict 单独提取）。
 function toProjectionMessage(row: SessionMessage): ProjectionMessage {
   let aggregate: {
     thinking?: string
@@ -254,8 +255,14 @@ function toProjectionMessage(row: SessionMessage): ProjectionMessage {
         filesTotal?: number
         hasExec?: boolean
       }
-      const { v: _v, ...rest } = parsed
-      aggregate = rest
+      aggregate = {
+        ...(parsed.thinking !== undefined ? { thinking: parsed.thinking } : {}),
+        ...(parsed.tools !== undefined ? { tools: parsed.tools } : {}),
+        ...(parsed.media !== undefined ? { media: parsed.media } : {}),
+        ...(parsed.files !== undefined ? { files: parsed.files } : {}),
+        ...(parsed.filesTotal !== undefined ? { filesTotal: parsed.filesTotal } : {}),
+        ...(parsed.hasExec !== undefined ? { hasExec: parsed.hasExec } : {}),
+      }
     } catch {
       aggregate = {} // 坏 JSON 不炸读路径（写面恒经 serializeAttachments，防御面）
     }
