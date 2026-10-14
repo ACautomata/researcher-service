@@ -135,6 +135,38 @@ describe('ChatMessageItem', () => {
     expect(w.emitted('regenerate')?.[0]).toEqual(['question'])
   })
 
+  it('#959: 产物卡片挂媒体列表之后、AI 提示条之前；无 files 不渲染', () => {
+    const m = newMsg('assistant', '改好了。'); m.streaming = false
+    m.media.push({ attachmentId: 'att-1', mime: 'image/png', size: 1, fileName: 'shot.png' })
+    m.files.push({ path: 'notes/new.md', op: 'created' })
+    const w = mount(ChatMessageItem, { props: { msg: m } })
+    const bubble = w.get('.bubble')
+    const children = bubble.element.children
+    const mediaIdx = Array.from(children).findIndex((el) => el.matches('[data-test="media-list"]'))
+    const filesIdx = Array.from(children).findIndex((el) => el.matches('[data-test="turn-files"]'))
+    const noticeIdx = Array.from(children).findIndex((el) => el.matches('[data-test="ai-notice"]'))
+    expect(filesIdx).toBeGreaterThan(mediaIdx)
+    expect(filesIdx).toBeLessThan(noticeIdx)
+    expect(w.findAll('[data-test="turn-file-row"]')).toHaveLength(1)
+    expect(w.find('[data-test="turn-files"]').text()).toContain('notes/new.md')
+
+    const bare = newMsg('assistant', '无产物'); bare.streaming = false
+    const w2 = mount(ChatMessageItem, { props: { msg: bare } })
+    expect(w2.find('[data-test="turn-files"]').exists()).toBe(false)
+  })
+
+  it('#959: 产物恒在折叠条外——折叠态照常渲染，开合不影响卡片', async () => {
+    const m = newMsg('assistant', '改好了。'); m.streaming = false
+    m.thinking = '想一想'
+    m.files.push({ path: 'notes/new.md', op: 'created' })
+    m.traceFolded = true
+    const w = mount(ChatMessageItem, { props: { msg: m } })
+    expect(w.find('[data-test="turn-files"]').exists()).toBe(true)
+    await w.get('[data-test="trace-fold"]').trigger('click')
+    expect(w.emitted('toggleTraceFold')).toHaveLength(1)
+    expect(w.find('[data-test="turn-files"]').exists()).toBe(true)
+  })
+
   it('#515: 含附件的用户消息不显示误导性的重新生成入口', () => {
     const user = newMsg('user', '请分析附件')
     user.media.push({ attachmentId: 'att-u', mime: 'image/png', size: 1, fileName: 'u.png' })

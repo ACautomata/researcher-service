@@ -167,6 +167,48 @@ describe('TurnReducer：run 域事件归约（S3）', () => {
     expect(serializeAttachments(r.snapshot())).toBe(serializeAttachments(r.snapshot()))
   })
 
+  it('#959 turn.files 事件进聚合：合法行入快照，非法行（缺 path / op 白名单外）丢弃', () => {
+    const r = new TurnReducer()
+    r.feed(ev('turn.files', {
+      files: [
+        { path: 'new.md', op: 'created' },
+        { path: '', op: 'created' }, // 空 path 丢弃
+        { path: 'x.md', op: 'renamed' }, // op 白名单外丢弃
+        { path: 'ok.md', op: 'modified' },
+      ],
+    }))
+    expect(r.snapshot().files).toEqual([
+      { path: 'new.md', op: 'created' },
+      { path: 'ok.md', op: 'modified' },
+    ])
+  })
+
+  it('#959 turn.files 校验门：payload 缺 files 数组 / 全非法行 → 不设 files 键', () => {
+    const r = new TurnReducer()
+    r.feed(ev('turn.files', { nonsense: true }))
+    r.feed(ev('turn.files', { files: 'not-an-array' }))
+    r.feed(ev('turn.files', { files: [{ path: 'x.md', op: 'renamed' }, { op: 'created' }] }))
+    r.feed(ev('turn.files', null))
+    expect(r.snapshot().files).toBeUndefined()
+    expect(r.isEmpty()).toBe(true)
+  })
+
+  it('#959 空聚合判据：仅 files 非空即非空（纯产物轮不落行会丢卡——回放零差异前提）', () => {
+    const r = new TurnReducer()
+    r.feed(ev('turn.files', { files: [{ path: 'a.md', op: 'created' }] }))
+    expect(r.isEmpty()).toBe(false)
+    expect(r.snapshot().content).toBe('')
+  })
+
+  it('#959 serializeAttachments：files 键入 v1 JSON（media 后 command 前——字段序稳定）', () => {
+    const r = new TurnReducer()
+    r.feed(ev('turn.files', { files: [{ path: 'a.md', op: 'created' }] }))
+    const json = JSON.parse(serializeAttachments(r.snapshot())) as Record<string, unknown>
+    expect(json.files).toEqual([{ path: 'a.md', op: 'created' }])
+    expect(json.media).toBeUndefined()
+    expect(serializeAttachments(r.snapshot())).toBe(serializeAttachments(r.snapshot()))
+  })
+
   it('snapshot 与 attachmentsJson 反序列化同构（投影行 = content 列 + JSON 聚合面组装）', () => {
     const r = new TurnReducer()
     r.feed(ev('text.delta', { delta: '答案' }))

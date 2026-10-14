@@ -56,6 +56,8 @@ export interface ProjectionMessage {
   readonly content: string
   readonly thinking?: string
   readonly tools?: unknown[]
+  readonly media?: unknown[]
+  readonly files?: unknown[]
   readonly anchorCheckpointId: string | null
   readonly createdAt: string
 }
@@ -230,12 +232,19 @@ async function insertWithNextTurn(
 }
 
 // 投影行组装：content 独立列 + attachmentsJson 聚合面（v 版本字段不外露）；assistant 行
-// thinking/tools 仅在有内容时出现（与 TurnReducer.snapshot 缺省纪律一致）。
+// thinking/tools 仅在有内容时出现（与 TurnReducer.snapshot 缺省纪律一致）。聚合面键集显式
+// 列全（media/files 与 thinking/tools 同款）——回放半边不靠 rest 透传侥幸成立。
 function toProjectionMessage(row: SessionMessage): ProjectionMessage {
-  let aggregate: { thinking?: string; tools?: unknown[] } = {}
+  let aggregate: { thinking?: string; tools?: unknown[]; media?: unknown[]; files?: unknown[] } = {}
   if (row.role === 'assistant') {
     try {
-      const parsed = JSON.parse(row.attachmentsJson) as { v?: number; thinking?: string; tools?: unknown[] }
+      const parsed = JSON.parse(row.attachmentsJson) as {
+        v?: number
+        thinking?: string
+        tools?: unknown[]
+        media?: unknown[]
+        files?: unknown[]
+      }
       const { v: _v, ...rest } = parsed
       aggregate = rest
     } catch {

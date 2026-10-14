@@ -13,6 +13,8 @@ import { truncateUtf8 } from '../runner/runtime/projector'
 import type { SystemCommandResult } from './service'
 // type-only：RejectionSource（#747 C 节 rejection.source 目录定稿二值）单一声明于漏斗审计面。
 import type { RejectionSource } from '../runner/approval/audit'
+// type-only：#959 轮次产物卡片行契约单一声明于 filejournal/turnFiles（聚合映射同址）。
+import type { TurnFileRow } from '../runner/filejournal/turnFiles'
 
 // attachmentsJson v1 的 tools 行（#747 C 节：toolCallId/name/input≤1k/result≤1k/state/durationMs/
 // details?≤4KB + 截断标记）。截断纪律：RunProjector 事件侧已按同常量截（1k/4KB），本归约器
@@ -51,6 +53,9 @@ export interface TurnSnapshot {
   readonly thinking?: string
   readonly tools?: ToolLine[]
   readonly media?: MediaRef[]
+  // #959 轮次产物卡片：completed 时隙 fileJournal 本 run 行聚合（turn.files 事件同形状——
+  // 实时事件 ≡ 回放投影零差异）。行契约见 filejournal/turnFiles.ts TurnFileRow。
+  readonly files?: TurnFileRow[]
 }
 
 // RunService recordTurn 注入缝的载荷（run 终态的单 turn 聚合 + 终态 checkpoint 锚点）。
@@ -107,6 +112,7 @@ export function serializeAttachments(snap: Partial<TurnSnapshot> & { command?: S
     ...(snap.thinking !== undefined ? { thinking: snap.thinking } : {}),
     ...(snap.tools !== undefined ? { tools: snap.tools } : {}),
     ...(snap.media !== undefined && snap.media.length > 0 ? { media: snap.media } : {}),
+    ...(snap.files !== undefined && snap.files.length > 0 ? { files: snap.files } : {}),
     ...(snap.command !== undefined ? { command: snap.command } : {}),
   })
 }
@@ -118,7 +124,8 @@ export function isEmptyTurnSnapshot(snap: TurnSnapshot): boolean {
     snap.content === '' &&
     (snap.thinking === undefined || snap.thinking === '') &&
     (snap.tools === undefined || snap.tools.length === 0) &&
-    (snap.media === undefined || snap.media.length === 0)
+    (snap.media === undefined || snap.media.length === 0) &&
+    (snap.files === undefined || snap.files.length === 0)
   )
 }
 
@@ -127,6 +134,7 @@ export class TurnReducer {
   private think = ''
   private readonly tools = new Map<string, ToolLine>()
   private readonly media: MediaRef[] = []
+  private readonly files: TurnFileRow[] = []
 
   // 消费一条 run 域目录事件；白名单外（run.* / session.* / 未知）一律忽略，绝不抛。
   feed(event: { type: string; payload: unknown }): void {
@@ -159,6 +167,27 @@ export class TurnReducer {
           ...(typeof p.width === 'number' ? { width: p.width } : {}),
           ...(typeof p.height === 'number' ? { height: p.height } : {}),
           ...(typeof p.durationMs === 'number' ? { durationMs: p.durationMs } : {}),
+        })
+      }
+      return
+    }
+    if (event.type === 'turn.files') {
+      // #959 轮次产物卡片：completed 时隙 runService 聚合产物整帧入聚合（回放同形状；同一
+      // 事件经 hub 发实时面）。行级校验门 0 信任——非法行丢弃不放大，整帧非数组忽略。
+      // 单帧不变量：每 run 恰一帧（前端 applyEvent 按「整帧替换」消费——本处 append 在单帧
+      // 下与之等价；T2（#960）物化回填若引入第二帧，两入口即分叉，回填必须发生在发帧前）。
+      const p = payload as { files?: unknown } | null
+      if (!p || !Array.isArray(p.files)) return
+      for (const raw of p.files) {
+        const f = raw as Partial<TurnFileRow> | null
+        if (!f || typeof f.path !== 'string' || f.path === '') continue
+        if (f.op !== 'created' && f.op !== 'modified' && f.op !== 'deleted') continue
+        this.files.push({
+          path: f.path,
+          op: f.op,
+          ...(typeof f.attachmentId === 'string' && f.attachmentId !== '' ? { attachmentId: f.attachmentId } : {}),
+          ...(typeof f.fileName === 'string' && f.fileName !== '' ? { fileName: f.fileName } : {}),
+          ...(typeof f.size === 'number' ? { size: f.size } : {}),
         })
       }
       return
@@ -219,6 +248,7 @@ export class TurnReducer {
       ...(this.think !== '' ? { thinking: this.think } : {}),
       ...(this.tools.size > 0 ? { tools: [...this.tools.values()] } : {}),
       ...(this.media.length > 0 ? { media: [...this.media] } : {}),
+      ...(this.files.length > 0 ? { files: [...this.files] } : {}),
     }
   }
 }

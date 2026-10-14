@@ -10,6 +10,7 @@ import { summarizeToolGroup } from '@/chat/toolRender/tool-call-grouping'
 import { toolRowToGroupInput } from '@/chat/toolRender/adapt'
 import { computed, ref } from 'vue'
 import MediaAttachment from './MediaAttachmentHost.vue'
+import TurnFilesCard from './TurnFilesCard.vue'
 import ThinkingCard from '@/components/chat/ThinkingCard.vue'
 import ToolLine from '@/components/chat/ToolLine.vue'
 import TraceFold from '@/components/chat/TraceFold.vue'
@@ -198,6 +199,9 @@ const copyState = ref<'idle' | 'copied' | 'failed'>('idle')
       <div v-if="msg.media.length" class="media-list" data-test="media-list">
         <MediaAttachment v-for="m in msg.media" :key="m.attachmentId" :media="m" :readiness="mediaReadiness" />
       </div>
+      <!-- #959 轮次产物卡片：槽位 = 媒体列表之后、AI 提示条之前（D4 恒在折叠条外——轨迹模板
+           之外，折叠开合不影响）。T1 朴素面，视觉定稿归 T4。 -->
+      <TurnFilesCard v-if="msg.files.length" :files="msg.files" />
       <div v-if="msg.role === 'assistant' && !msg.streaming" class="ai-notice" data-test="ai-notice">
         <span>内容由 AI 生成，仅供参考</span>
         <span class="ai-actions">

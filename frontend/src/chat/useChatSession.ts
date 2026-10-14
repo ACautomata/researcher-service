@@ -295,7 +295,7 @@ export function useChatSession(deps: ChatSessionDeps = {}): ChatSession {
       chat.setMessages(applyEvent(chat.messages, e))
       return
     }
-    if (e.type === 'text.delta' || e.type === 'thinking.delta' || e.type === 'attachment') {
+    if (e.type === 'text.delta' || e.type === 'thinking.delta' || e.type === 'attachment' || e.type === 'turn.files') {
       chat.setMessages(applyEvent(chat.messages, e))
       return
     }
@@ -500,6 +500,7 @@ export function useChatSession(deps: ChatSessionDeps = {}): ChatSession {
       streaming: false,
       tools: [],
       media: attachments ? [...attachments] : [],
+      files: [],
       ...(key ? { sendKey: key } : {}),
     })
   }
