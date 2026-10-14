@@ -8,6 +8,7 @@
 // （落地副本执行模型）与③面板「更新 wiki」独立 run（runNativeRepositoryGeneration 完整边界）。
 
 import { OPEN_WIKI_DIR } from 'openwiki/dist/config/constants.js'
+import { WIKI_CATEGORIES, WIKI_UNCATEGORIZED } from '../../wiki/values'
 
 // openwiki 子目录名（deep-import 单一来源——openwiki 布局常量，不自造字符串）
 export { OPEN_WIKI_DIR as WIKI_OPENWIKI_DIR }
@@ -36,8 +37,14 @@ export const WIKI_MIRROR_SOURCES_DIR = 'sources'
 // next_page→原生 fs 写页→submit_page 循环→finish 收尾的纪律 + 「写面=治理副本、finish 才落
 // 容器、冲突会中止」语义告知。没有它，task 全凭模型自由发挥，产品可用性无着落。
 //
-// 路径映射语义（模型必须知道）：生命周期计划页路径形如 openwiki/concepts/x.md；fs 写工具
-// 以 /wiki/concepts/x.md 寻址同一文件（/wiki 根即 openwiki 子树内容——#789 检索镜像同布局）。
+// #955 T4·A 轨生成侧（规格 §4.1/§4.5）：category 中文值域枚举（引 wiki 域单源 WIKI_CATEGORIES，
+// 与读面归组同源防漂移）+ 「正文零分类输出」禁令（分类只活在前置 metadata）+ 新页 pages/
+// 平铺（目录不承载分类语义——按 category 派生目录名已否决）+ 内容中文结构豁免（frontmatter
+// 键名/节标题锚点/type 枚举保持形态，论文页 title 英文豁免）。
+//
+// 路径映射语义（模型必须知道）：生命周期计划页路径形如 openwiki/pages/x.md（新页 pages/
+// 平铺）；fs 写工具以 /wiki/pages/x.md 寻址同一文件（/wiki 根即 openwiki 子树内容——
+// #789 检索镜像同布局）。
 export const WIKI_UPDATE_TEAMMATE_PROMPT = [
   'You are a wiki-update teammate: your task is to update the user\'s knowledge wiki using the OpenWiki lifecycle tools.',
   '',
@@ -45,10 +52,13 @@ export const WIKI_UPDATE_TEAMMATE_PROMPT = [
   '1. Call openwiki_begin with mode "update" first; use the returned runId in every later lifecycle call.',
   '2. Call openwiki_submit_plan with the pages that need work, then openwiki_next_page to fetch page jobs one at a time.',
   '3. For each page job: write or edit the page with the file tools, then call openwiki_submit_page with the job id.',
-  '   A plan page path "openwiki/<group>/<name>.md" is addressed by the file tools as "/wiki/<group>/<name>.md" — they are the same file.',
-  '   Write valid OKF frontmatter (type/title/description/tags) and keep prose in the wiki\'s language.',
+  `   A plan page path "openwiki/pages/<name>.md" is addressed by the file tools as "/wiki/pages/<name>.md" — they are the same file.`,
+  '   New pages must be flat under "pages/" — do not plan new pages into subdirectories; directory names carry no classification meaning.',
+  `   Write valid OKF frontmatter (type/title/description/tags) and set "category" to exactly one of: ${WIKI_CATEGORIES.join(' / ')} (wiki-domain value set); omit it only when no category fits — the UI groups such pages as ${WIKI_UNCATEGORIZED}.`,
+  '   Classification lives only in the frontmatter "category" value: never write category names or classification wording into the page body.',
+  '   Content language: page body, tags values, description and title are written in Chinese; frontmatter key names, section-title anchors and the type enum (paper/critique/hypothesis/report) keep their canonical form, and paper page titles may keep the original English title.',
   '   openwiki_submit_page requires at least one material Claim for new or substantively revised pages.',
-  '   Claim evidence must reference an existing snapshot file under "sources/" (e.g. repo://sources/<group>/<name>.md — the pre-update copy of a wiki page).',
+  '   Claim evidence must reference an existing snapshot file under "sources/" (e.g. repo://sources/<group>/<name>.md — the pre-update copy of a wiki page; existing pages keep their current directories, only new pages are flat under "pages/").',
   '4. When every page job is complete, call openwiki_finish exactly once. finish performs base-change detection and publishes your work to the real wiki.',
   '5. If the real wiki changed while you were working, finish reports a conflict result and nothing is written — report that outcome to the leader instead of retrying.',
   '',

@@ -217,6 +217,21 @@ describe('#790 wiki-update teammate 全链（S1 · 验收①③）', () => {
     expect(h.modelCalls.filter((call) => call.task === 'update the wiki').length).toBeGreaterThan(0)
     expect(h.modelCalls.filter((call) => call.task === 'update the wiki').every((call) => call.system.includes('wiki-update teammate'))).toBe(true)
 
+    // #955 T4·A 轨生成侧（规格 §4.1/§4.5）：category 中文值域枚举 + 正文零分类禁令 +
+    // pages/ 平铺 + 内容中文结构豁免全进 system prompt（值域引 wiki 域单源，断言四值 + 缺省面）。
+    // call.system 是 JSON 序列化 content（引号转义）——断言一律用无引号子串。
+    const systems = h.modelCalls.filter((call) => call.task === 'update the wiki').map((call) => call.system)
+    for (const system of systems) {
+      expect(system).toContain('exactly one of')
+      for (const category of ['论文', '科学问题', '假说', '实验报告']) expect(system).toContain(category)
+      expect(system).toContain('未分类')
+      expect(system).toContain('never write category names')
+      expect(system).toContain('openwiki/pages/<name>.md')
+      expect(system).toContain('do not plan new pages into subdirectories')
+      expect(system).toContain('written in Chinese')
+      expect(system).toContain('paper/critique/hypothesis/report')
+    }
+
     // 副本执行观察：write_file 落盘时容器树还没有该页（写面 = 治理副本，非直打容器）
     expect(containerHadPageDuringRun).toBe(false)
 

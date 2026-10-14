@@ -3,7 +3,7 @@
 // W1 validate：11 节标题齐全 / ≥100 行 / Results 含具体数字 / title 非空（frontmatter 必填面）。
 // W2 validate¹：extract 12 节节标题 checklist + 三态标注禁语扫描（禁「可能是/应该是/推测为」，
 //   强制「论文中未明确说明」类规范用语——audit 维度 4 同款黑名单）。
-// W2 validate²：critic §0–§7 节齐全 + `category: critic` 机读标签 + 候选问题 2–4（与 validate¹
+// W2 validate²：critic §0–§7 节齐全 + `type: critique` 机读标签 + 候选问题 2–4（与 validate¹
 //   检查对象不同，分列不共享 schema 名——853 §4.2 钉）。
 // slug 派生：wiki-conventions kebab-case 确定性（论文页 slug 匹配标题不带日期；CJK 标题
 // 保留——纯中文标题坍缩 fallback 会撞路径，PR #917 review Spec#7）。
@@ -118,7 +118,7 @@ describe('W2 validate² validateCriticDoc（确定性逐清单）', () => {
     [
       '# 某论文审稿式问题分析',
       '',
-      '`category: critic`',
+      '`type: critique`',
       '',
       ...CRITIC_SECTIONS.map((s, i) => `## ${i} ${s}\n\n已有较强证据支持：具体质疑与依据。`),
     ].join('\n')
@@ -145,11 +145,11 @@ describe('W2 validate² validateCriticDoc（确定性逐清单）', () => {
     if (!r.ok) expect(r.issues.join('\n')).toContain('## 5')
   })
 
-  it('缺 `category: critic` 机读标签 → 拒', () => {
-    const content = validCritic().replace('`category: critic`', '')
+  it('缺 `type: critique` 机读标签 → 拒', () => {
+    const content = validCritic().replace('`type: critique`', '')
     const r = validateCriticDoc({ content, candidates: twoCandidates() })
     expect(r.ok).toBe(false)
-    if (!r.ok) expect(r.issues.join('\n')).toContain('category: critic')
+    if (!r.ok) expect(r.issues.join('\n')).toContain('type: critique')
   })
 
   it('第一行非 H1（# 标题）→ 拒（页标题提取锚，Spec#16）', () => {
@@ -160,7 +160,7 @@ describe('W2 validate² validateCriticDoc（确定性逐清单）', () => {
   })
 
   it('机读标签不在标题行下（埋进正文）→ 拒（位置校验而非 includes，Spec#16）', () => {
-    const content = validCritic().replace('`category: critic`', '').replace('## 7 简短结论', '`category: critic`\n\n## 7 简短结论')
+    const content = validCritic().replace('`type: critique`', '').replace('## 7 简短结论', '`type: critique`\n\n## 7 简短结论')
     const r = validateCriticDoc({ content, candidates: twoCandidates() })
     expect(r.ok).toBe(false)
     if (!r.ok) expect(r.issues.join('\n')).toContain('前 5 行')

@@ -9,14 +9,14 @@
 // 旁车恢复（experiment.ts persist 面落——markdown 正文无法可靠恢复结构化面）；对账 = 逐件
 // lab.read 存在性（缺件清单必进 summary 不静默）；报告页 frontmatter related_pages 记输入
 // 页集 + 正文「关联页面」节相对链接 = #789 graph 派生边（WikiGraph 可见；idea card 页自身
-// V1 不动，边单向从报告页指出）。实验报告页机读标签 category: experiment-report
-// （critic/idea 页 category 标签同族先例）。
+// V1 不动，边单向从报告页指出）。实验报告页机读标签 type: report
+// （critic/idea 页机读标签同族先例）。
 
 import { END, START, StateGraph, Annotation, z } from '../../server/src/plugins/autofigureDeps'
 import type { LangGraphRunnableConfig } from '../../server/src/plugins/autofigureDeps'
 import type { PluginLabPort, PluginLabPortErrorCode, PluginLlmPort, PluginWikiPort } from '../../server/src/plugins/api'
 import { PAGE_DRAFT_MAX, RECKONING_EXCERPT_MAX_CHARS, SPEC_DELIVERABLES_MAX } from './values'
-import { buildCollectSummaryPrompt, EXPERIMENT_REPORT_CATEGORY_TAG } from './prompts'
+import { buildCollectSummaryPrompt, EXPERIMENT_REPORT_TYPE_TAG } from './prompts'
 import type { SpecSidecar } from './experimentPlan'
 import { compiledInvokeOptions, stageReporterOf } from './graph'
 import type { FlowGraphInvokeOptions, ResearchWorkflowRequest, WorkflowArtifactPage, WorkflowOutcome } from './graph'
@@ -252,7 +252,7 @@ export function createExperimentCollectGraph(ports: ExperimentCollectPorts): {
         path,
         title: state.report!.title,
         type: 'report',
-        content: `# ${state.report!.title}\n\n${EXPERIMENT_REPORT_CATEGORY_TAG}\n\n${state.report!.content}${relatedSection}`,
+        content: `# ${state.report!.title}\n\n${EXPERIMENT_REPORT_TYPE_TAG}\n\n${state.report!.content}${relatedSection}`,
       },
       { workflow: 'experiment', ...(inputPages.length > 0 ? { relatedPages: inputPages } : {}) },
     )

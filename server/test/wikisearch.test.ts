@@ -73,6 +73,13 @@ describe('pullWikiMirror（#789 落地镜像）', () => {
 })
 
 describe('openwiki_search / openwiki_read 常驻工具（#789 S2 真实检索）', () => {
+  it('read 模型面 schema 示例路径 = pages/ 平铺形态（#955 T4·S11 目录习惯软引导面，旧目录示例零残留）', () => {
+    const [, read] = createWikiRetrievalTools({ primitives: seededPrimitives().primitives, wikiContainer: WIKI })
+    const shape = (read!.schema as unknown as { shape: Record<string, { description?: string }> }).shape
+    expect(shape.page!.description).toContain('openwiki/pages/')
+    expect(shape.page!.description).not.toContain('concepts/')
+  })
+
   it('search：真实检索 wiki 容器内容，ref 带 # 锚；命中 H2 分节', async () => {
     const [search] = createWikiRetrievalTools({ primitives: seededPrimitives().primitives, wikiContainer: WIKI })
     const raw = await search.invoke({ query: '自注意力 复杂度' })

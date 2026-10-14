@@ -235,7 +235,7 @@ export function createDiscoverGraph(ports: DiscoverPorts): {
     return { criticAttempts: r.attempts, criticDoc: r.value, diagnostics: undefined }
   }
 
-  // validate²（确定性）：critic §0–§7 节齐全 + `category: critic` 机读标签（H1 下独占行）
+  // validate²（确定性）：critic §0–§7 节齐全 + `type: critique` 机读标签（H1 下独占行）
   // + 候选 2–4。
   function validate2Node(state: DiscoverState, config: LangGraphRunnableConfig | undefined): Partial<DiscoverState> {
     stageReporterOf(config)('validate')

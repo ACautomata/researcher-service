@@ -7,12 +7,14 @@ import {
   PAPER_PAGE_SECTIONS,
   EXTRACT_SECTIONS,
   CRITIC_SECTIONS,
-  CRITIC_CATEGORY_TAG,
+  CRITIC_TYPE_TAG,
+  CONTENT_LANGUAGE_RULE,
   EXTRACT_BANNED_PHRASES,
   buildCreatePaperPagePrompt,
   buildExtractPrompt,
   buildCriticPrompt,
   IDEA_CARD_FIELDS,
+  IDEA_TYPE_TAG,
   BUCKET_STRATEGIES,
   IDEA_QUALITY_CHECKS,
   buildBriefPrompt,
@@ -26,7 +28,7 @@ import {
   DESIGN_EXPERIMENT_REQUIREMENTS,
   AUDIT_REPORT_SECTIONS,
   STAGE_BOUNDARY_RULES,
-  EXPERIMENT_REPORT_CATEGORY_TAG,
+  EXPERIMENT_REPORT_TYPE_TAG,
   buildDesignPrompt,
   buildSpecPrompt,
   buildAuditPrompt,
@@ -34,6 +36,57 @@ import {
 } from '../../plugins/research/prompts'
 import { BRIEF_FIELDS } from '../../plugins/research/contextPack'
 import { BUCKETS_ALL } from '../../plugins/research/values'
+
+// 机读标签词形钉（#949 A 轨 · 规格 §1.2 撞名修正）：category 键保持中文值域不被英文值
+// 污染——`category: <英文>` 全改 `type: <新词形>`（type 枚举 paper/critique/hypothesis/report）。
+// 字面量为规格准据独立锚定（非常量自比），防词形漂移。
+describe('机读标签词形（#949 A 轨 · category 键中文值域不被污染）', () => {
+  it('三标签全部新词形：critic→type: critique / idea→type: hypothesis / experiment-report→type: report', () => {
+    expect(CRITIC_TYPE_TAG).toBe('`type: critique`')
+    expect(IDEA_TYPE_TAG).toBe('`type: hypothesis`')
+    expect(EXPERIMENT_REPORT_TYPE_TAG).toBe('`type: report`')
+  })
+})
+
+// 语言约束（#949 A 轨「中文保证」· 规格 §4.5「内容中文、结构豁免」）：正文 / tags 值 /
+// description / title 全中文 + 结构豁免条款（节标题锚点 / frontmatter 键名 / type 枚举 /
+// 论文页 title 英文豁免）——注入全部正文生成节点，brief/challenge 纯结构化 JSON 不注。
+describe('语言约束 CONTENT_LANGUAGE_RULE（内容中文、结构豁免 · #949 A 轨）', () => {
+  it('约束含全中文面与全部结构豁免条款（节标题锚点 / frontmatter 键名 / type 枚举 / 论文页 title）', () => {
+    expect(CONTENT_LANGUAGE_RULE).toContain('正文')
+    expect(CONTENT_LANGUAGE_RULE).toContain('tags 值')
+    expect(CONTENT_LANGUAGE_RULE).toContain('description')
+    expect(CONTENT_LANGUAGE_RULE).toContain('title')
+    expect(CONTENT_LANGUAGE_RULE).toContain('节标题锚点')
+    expect(CONTENT_LANGUAGE_RULE).toContain('frontmatter 键名')
+    expect(CONTENT_LANGUAGE_RULE).toContain('type 枚举')
+    expect(CONTENT_LANGUAGE_RULE).toContain('论文页 title')
+    // type 枚举值字面量钉（plugins 树禁裸 import server 域——PLUGIN_PAGE_TYPES 单源不可达，
+    // 字面量改值时此断言变红防静默漂移；通道② prompt 同字面量由 wikigenTeammate 断言钉）。
+    expect(CONTENT_LANGUAGE_RULE).toContain('paper/critique/hypothesis/report')
+  })
+
+  it('注入全部正文生成节点（create/extract/critic/bucket/design/spec/audit/collect）', () => {
+    expect(buildCreatePaperPagePrompt(['P'])).toContain(CONTENT_LANGUAGE_RULE)
+    expect(buildExtractPrompt('P')).toContain(CONTENT_LANGUAGE_RULE)
+    expect(buildCriticPrompt('P', 'E', 'papers/x.md')).toContain(CONTENT_LANGUAGE_RULE)
+    expect(buildBucketPrompt('gap', 'PACK')).toContain(CONTENT_LANGUAGE_RULE)
+    expect(buildDesignPrompt({ intent: 'I', pageBodies: ['P'], mappingTargets: ['T'] })).toContain(CONTENT_LANGUAGE_RULE)
+    expect(buildSpecPrompt({ intent: 'I', pageBodies: ['P'], designContent: 'D', wikiIdentity: 'critics/x.md' })).toContain(CONTENT_LANGUAGE_RULE)
+    expect(buildAuditPrompt({ designContent: 'D', specContent: 'S', deterministicIssues: [] })).toContain(CONTENT_LANGUAGE_RULE)
+    expect(
+      buildCollectSummaryPrompt({
+        specContent: 'S',
+        reckonings: [{ path: '/lab/r.json', success_criterion: '含数字', present: true, content: '{}' }],
+      }),
+    ).toContain(CONTENT_LANGUAGE_RULE)
+  })
+
+  it('brief/challenge 纯结构化 JSON 输出不注入', () => {
+    expect(buildBriefPrompt('主题', '证据')).not.toContain(CONTENT_LANGUAGE_RULE)
+    expect(buildChallengePrompt('PACK', '{"title": "X"}', [])).not.toContain(CONTENT_LANGUAGE_RULE)
+  })
+})
 
 describe('W1 create prompt（11 节论文页模板 · #848 §1）', () => {
   it('11 节标题行全部在模板正文中逐字出现', () => {
@@ -122,7 +175,7 @@ describe('W2 critic prompt（§0–§7 模板 + 9 类质疑 + 证据三档 · #8
 
   it('含机读标签、证据强度三档、质疑 9 类型、候选 2–4 约束', () => {
     const p = buildCriticPrompt('PAPER', 'EXTRACT', 'papers/robust-detection.md')
-    expect(p).toContain(CRITIC_CATEGORY_TAG)
+    expect(p).toContain(CRITIC_TYPE_TAG)
     expect(p).toContain('已有较强证据支持')
     expect(p).toContain('实验间接暗示')
     expect(p).toContain('仍需后续验证')
@@ -301,6 +354,6 @@ describe('W4 prompt 节结构 checklist（853 §9——模板与确定性校验�
     expect(p).toContain('已就位：/lab/results/a.json')
     expect(p).toContain('缺失：/lab/results/b.csv')
     expect(p).toContain('如实记录不得编造')
-    expect(p).not.toContain(EXPERIMENT_REPORT_CATEGORY_TAG)
+    expect(p).not.toContain(EXPERIMENT_REPORT_TYPE_TAG)
   })
 })

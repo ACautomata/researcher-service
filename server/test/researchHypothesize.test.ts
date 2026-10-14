@@ -47,7 +47,7 @@ describe('W3 hypothesize 图 invoke（S2 端口注入 fake）', () => {
     expect(draft.type).toBe('hypothesis')
     expect(provenance).toEqual({ workflow: 'hypothesize' })
     expect(draft.content.startsWith('# 基于能量分数的 OOD 判据改进')).toBe(true)
-    expect(draft.content).toContain('`category: idea`')
+    expect(draft.content).toContain('`type: hypothesis`')
     expect(draft.claims).toEqual([
       { statement: '用能量分数替代 softmax 置信度可提升 OOD 检测的 AUROC。', evidence: validIdeaCard().evidence_chain },
     ])
