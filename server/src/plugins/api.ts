@@ -357,7 +357,7 @@ export type AnyPluginToolDefinition = PluginToolDefinition<any, any>
 // 命令注册（§2.3）
 // ---------------------------------------------------------------------------
 
-// 两类 outcome（R9）：inject = 以 user message 注入会话（#742 官方命令同形，agent 可追问）；
+// 两类 outcome（R9）：inject = 以 user message 注入会话（#742 命令注入同形，agent 可追问）；
 // execute = 直达本插件工具执行面（不经 agent 自由裁量——两条触发面一条执行面，#744）。
 export type PluginCommandOutcome = { readonly inject: string } | { readonly execute: { readonly tool: string; readonly args: unknown } }
 
@@ -371,7 +371,7 @@ export interface AutocompleteItem {
 }
 
 export interface PluginCommandDefinition {
-  /** 不含斜杠；保留字命名空间（R4：系统含官方目录 > 插件，无遮蔽）。 */
+  /** 不含斜杠；保留字命名空间（不撞系统命令保留名，R4 无遮蔽）。 */
   readonly name: string
   readonly description?: string
   /** 参数级补全（#751 收录）：经 REST 按需调用（debounce）。 */

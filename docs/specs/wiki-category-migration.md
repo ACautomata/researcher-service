@@ -137,7 +137,7 @@
 
 ### 5.3 防复活（验收口径之一，细则 §9-2）
 
-rg 六模式零命中：`officialContent` / `official-content` / `read_official_skill` / `officialCommands` / `OFFICIAL_COMMANDS|OFFICIAL_SOURCES` / `official=`；`prodDeploy.test.ts:92-94` 与 `devDeploy.test.ts:93-94` 断言翻**否定式**（不含 official——防复活比防漏删更有价值，漏删在现行断言下立即红）。
+rg 六模式零命中（扫描面 = 运行面：`server/src` `server/test` `frontend/src` `deploy/` `.github/`、`plugins/`（插件 manifest/prompt 加载面）、`server/package.json`、`server/Dockerfile`；`docs/research/` findings 与本文档自身为决策档案豁免，GLOSSARY 历史注照 :5 先例不含字面量）：`officialContent` / `official-content` / `read_official_skill` / `officialCommands` / `OFFICIAL_COMMANDS|OFFICIAL_SOURCES` / `official=`；`prodDeploy.test.ts:92-94` 与 `devDeploy.test.ts:93-94` 断言翻**否定式**（不含 official——防复活比防漏删更有价值，漏删在现行断言下立即红）。
 
 ## 6. 执行骨架·部署面（B 轨，细节引用 939 §2.3）
 
