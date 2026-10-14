@@ -14,7 +14,7 @@
 
 import { END, START, StateGraph, Annotation, z } from '../../server/src/plugins/autofigureDeps'
 import type { LangGraphRunnableConfig } from '../../server/src/plugins/autofigureDeps'
-import type { PluginLabPort, PluginLlmPort, PluginWikiPort } from '../../server/src/plugins/api'
+import type { PluginLabPort, PluginLabPortErrorCode, PluginLlmPort, PluginWikiPort } from '../../server/src/plugins/api'
 import { PAGE_DRAFT_MAX, RECKONING_EXCERPT_MAX_CHARS, SPEC_DELIVERABLES_MAX } from './values'
 import { buildCollectSummaryPrompt, EXPERIMENT_REPORT_CATEGORY_TAG } from './prompts'
 import type { SpecSidecar } from './experimentPlan'
@@ -52,11 +52,19 @@ export const SPEC_SIDECAR_SCHEMA = z
 const sidecarPathOf = (specPath: string): string => `${specPath.slice(0, specPath.lastIndexOf('/'))}/deliverables.json`
 
 // 对账单件结果（summarize 输入面 + summary 不静默面）。content = 就位件的 excerpt
-//（RECKONING_EXCERPT_MAX_CHARS 截断——20 件 ×16MiB 全文驻留的内存放大面，#912 review P1）。
+//（RECKONING_EXCERPT_MAX_CHARS 截断——已读取内容的驻留面，#912 review P1）。
+// 四态语义（R0 review P1-1 + R1 review P2-1 细化）：
+//   true  = 就位（含 unread 就位未读取——too_large/binary：文件系统层判定过存在）；
+//   false = 确认缺失（not_found——引导补跑）；
+//   undefined = 无法核验（invalid_path/sandbox_unavailable——存在性不可知：非法路径引导
+//               补跑无意义、容器不可达时存在性断言无效，不计就位也不判缺失）。
 export interface DeliverableReckoning {
   readonly path: string
   readonly success_criterion: string
-  readonly present: boolean
+  readonly present: boolean | undefined
+  /** 非缺失误读的原因码（present=true 且 content=undefined = 就位未读取；present=undefined
+   *  = 无法核验）。 */
+  readonly unread?: PluginLabPortErrorCode
   readonly content: string | undefined
 }
 
@@ -96,6 +104,7 @@ interface CollectState {
   report: ExperimentReport | undefined
   clarify: ClarifyResult | undefined
   reportPage: WorkflowArtifactPage | undefined
+  reportPagePreexisting: boolean | undefined
   summaryText: string | undefined
 }
 
@@ -108,6 +117,7 @@ const CollectAnnotation = {
   report: Annotation<ExperimentReport | undefined>,
   clarify: Annotation<ClarifyResult | undefined>,
   reportPage: Annotation<WorkflowArtifactPage | undefined>,
+  reportPagePreexisting: Annotation<boolean | undefined>,
   summaryText: Annotation<string | undefined>,
 }
 
@@ -158,12 +168,30 @@ export function createExperimentCollectGraph(ports: ExperimentCollectPorts): {
     const reckonings: DeliverableReckoning[] = []
     for (const d of deliverables) {
       const r = await ports.lab.read({ path: d.path })
-      reckonings.push({
-        path: d.path,
-        success_criterion: d.success_criterion,
-        present: r.ok,
-        content: r.ok ? r.data.content.slice(0, RECKONING_EXCERPT_MAX_CHARS) : undefined,
-      })
+      if (r.ok) {
+        reckonings.push({
+          path: d.path,
+          success_criterion: d.success_criterion,
+          present: true,
+          content: r.data.content.slice(0, RECKONING_EXCERPT_MAX_CHARS),
+        })
+      } else if (r.error.code === 'not_found') {
+        reckonings.push({ path: d.path, success_criterion: d.success_criterion, present: false, content: undefined })
+      } else if (r.error.code === 'invalid_path' || r.error.code === 'sandbox_unavailable') {
+        // 无法核验（R1 review P2-1）：存在性不可知——非法路径（spec LLM 偶发声明非 /lab/
+        // 前缀路径，无确定性校验面）引导补跑无意义，容器瞬态时「就位」断言无效。
+        reckonings.push({ path: d.path, success_criterion: d.success_criterion, present: undefined, unread: r.error.code, content: undefined })
+      } else {
+        // 就位但读不回（too_large 16MiB 护栏 / binary——文件系统层判定过存在，R0 review
+        // P1-1：20MB 实验产物是真交付物，误报「缺失请补跑」会误导重跑）。
+        reckonings.push({
+          path: d.path,
+          success_criterion: d.success_criterion,
+          present: true,
+          unread: r.error.code,
+          content: undefined,
+        })
+      }
     }
     return { specPath: raw, specContent: spec.data.content, sidecar: parsed.data, reckonings }
   }
@@ -229,19 +257,33 @@ export function createExperimentCollectGraph(ports: ExperimentCollectPorts): {
       { workflow: 'experiment', ...(inputPages.length > 0 ? { relatedPages: inputPages } : {}) },
     )
     if (!r.ok) throw new Error(`实验报告页写入失败（${r.error.code}）：${r.error.message}`)
-    return { reportPage: { path, title: state.report!.title } }
+    return { reportPage: { path, title: state.report!.title }, reportPagePreexisting: !r.data.created }
   }
 
-  // summary：报告页路径 + 对账结果（缺件清单必进不静默）。
+  // summary：报告页路径 + 对账结果（缺件清单必进不静默；无法核验与幂等跳过如实标注）。
   function summaryNode(state: CollectState, config: LangGraphRunnableConfig | undefined): Partial<CollectState> {
     stageReporterOf(config)('summary')
-    const missing = state.reckonings.filter((r) => !r.present)
+    const missing = state.reckonings.filter((r) => r.present === false)
+    const unread = state.reckonings.filter((r) => r.present === true && r.unread !== undefined)
+    const unverifiable = state.reckonings.filter((r) => r.present === undefined)
     const lines = [
-      `实验报告已落 wiki：${state.reportPage!.path}。`,
-      `交付物对账：${state.reckonings.length - missing.length}/${state.reckonings.length} 件就位。`,
+      `实验报告已落 wiki：${state.reportPage!.path}${state.reportPagePreexisting ? '（页面已存在，幂等跳过——现有内容未覆盖）' : ''}。`,
+      `交付物对账：${state.reckonings.length - missing.length - unverifiable.length}/${state.reckonings.length} 件就位。`,
     ]
+    if (unread.length > 0) {
+      lines.push(
+        `其中 ${unread.length} 件就位但内容未能读取（${unread.map((r) => `${r.path}：${r.unread}`).join('；')}），报告页如实记录、未读取不视为缺失。`,
+      )
+    }
+    if (unverifiable.length > 0) {
+      lines.push(
+        `其中 ${unverifiable.length} 件无法核验（${unverifiable.map((r) => `${r.path}：${r.unread}`).join('；')}）——不计入就位也不判缺失，请检查 spec 交付物声明路径与沙箱可用性。`,
+      )
+    }
     if (missing.length > 0) {
-      lines.push(`缺失交付物 ${missing.length} 件（报告页已如实记录，请补跑执行段后重新 collect）：`)
+      lines.push(
+        `缺失交付物 ${missing.length} 件（报告页已如实记录；请补跑执行段后重新 collect——报告页为幂等不覆盖，重 collect 后最新对账以本次 summary 为准）：`,
+      )
       for (const m of missing) lines.push(`- ${m.path}（成功判据：${m.success_criterion}）`)
     }
     return { summaryText: lines.join('\n') }

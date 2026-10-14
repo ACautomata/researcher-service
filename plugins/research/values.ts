@@ -86,8 +86,9 @@ export const PLAN_TEXT_MAX_CHARS = 16_000
 // 上限防失控值。消费面 = experiment.ts SPEC_DOC_SCHEMA）。
 export const SPEC_DELIVERABLES_MAX = 20
 
-// W4 collect 对账条目内容 excerpt 上限（#912 review P1：对账面存节选不全文驻留——20 件
-// ×16MiB 理论峰值的内存放大面；报告生成只需内容头部证据，消费面 = buildCollectSummaryPrompt）。
+// W4 collect 对账条目内容 excerpt 上限（#912 review P1：对账面存节选不全文驻留——内存
+// 放大面实际由 lab read 的 16MiB 护栏兜底（too_large 拒读，R0 review P1-1 后超限件不进
+// 内容面、标 unread 如实记录）；本截断面作用于已读取内容。消费面 = buildCollectSummaryPrompt）。
 export const RECKONING_EXCERPT_MAX_CHARS = 4_000
 
 // extractPdfText 字符上限（853 §7.1 拍板 1_000_000 · #851 D10）：PDF 提取全文上限，超限明确

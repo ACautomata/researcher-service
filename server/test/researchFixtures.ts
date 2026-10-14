@@ -344,7 +344,10 @@ export interface LabFake {
   readonly read: ReturnType<typeof vi.fn>
 }
 
-export function createLabFake(initial: Record<string, string> = {}): LabFake {
+export function createLabFake(
+  initial: Record<string, string> = {},
+  errors: Record<string, import('../src/plugins/api').PluginLabPortErrorCode> = {},
+): LabFake {
   const files = new Map(Object.entries(initial))
   const write = vi.fn(async (input: { path: string; content: string }) => {
     if (!input.path.startsWith('/lab/specs/')) {
@@ -356,6 +359,13 @@ export function createLabFake(initial: Record<string, string> = {}): LabFake {
   const read = vi.fn(async (input: { path: string }) => {
     if (!input.path.startsWith('/lab/')) {
       return { ok: false as const, error: { code: 'invalid_path' as const, message: '须为 /lab/ 前缀路径' } }
+    }
+    // 错误注入面（R0 review P1-1：真 port 的 too_large/binary 行为——fake 全文返回掩盖
+    // 真护栏行为的测试脱节面，此处显式注入 Result 错误码模拟真 port 读失败形态；
+    // 类型锁 PluginLabPortErrorCode 枚举——typo 码编译期即报错）。
+    const errCode = errors[input.path]
+    if (errCode !== undefined) {
+      return { ok: false as const, error: { code: errCode, message: `注入错误（测试面）: ${input.path}` } }
     }
     const content = files.get(input.path)
     if (content === undefined) {

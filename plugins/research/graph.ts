@@ -17,7 +17,8 @@
 // 占位分支：四分支节点 = runWorkflow 端口调用（本票注入占位实现保拓扑可编译 + 互斥分发
 // 可测；真实节点链由 [#873·4–6] 三票替换端口注入实现，图拓扑零改动）。
 
-import { END, START, StateGraph, Annotation } from '../../server/src/plugins/autofigureDeps'
+import { END, START, StateGraph, Annotation, GraphInterrupt } from '../../server/src/plugins/autofigureDeps'
+import type { Interrupt } from '../../server/src/plugins/autofigureDeps'
 import type { LangGraphRunnableConfig } from '../../server/src/plugins/autofigureDeps'
 import { buildClarifyResult, isAccepted, WORKFLOW_CATALOG } from './clarify'
 import type { ClarifyResult, IntentVerdict, WorkflowLabel } from './clarify'
@@ -286,6 +287,15 @@ export function createResearchRoutingGraph(ports: ResearchRoutingPorts): Researc
           configurable: { onStage: options?.onStage },
         },
       )
+      // 真中断穿透（R1 review P1 + R2 P3 加固）：W4 人审挂起经工具栈冒泡——LangGraph 无
+      // checkpointer 嵌套图 invoke 对 GraphInterrupt 有两种形态（1.4.18 实测）：真 interrupt()
+      // 形态 = reject（payload 保留在 error 上，本检测不触发）；fake/版本漂移形态 = 折叠为
+      // __interrupt__ state resolve（workflow 已置/outcome 未置）——此分支恢复抛出并携带
+      // 原 payload，不丢 escalation 数据，否则撞尾部防御误报（挂起被改写为错误）。
+      const interrupts = (state as { __interrupt__?: Interrupt[] }).__interrupt__
+      if (interrupts !== undefined) {
+        throw new GraphInterrupt(interrupts)
+      }
       if (state.clarify !== undefined) {
         return { status: 'clarify', workflow: undefined, intent: state.intent, clarify: state.clarify, outcome: undefined }
       }

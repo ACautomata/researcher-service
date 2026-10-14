@@ -131,6 +131,9 @@ interface HypothesizeState {
   survived: IdeaCard[]
   warnings: string[]
   artifactPages: WorkflowArtifactPage[]
+  // persist 幂等哨兵命中数（created:false——页已存在跳过未覆盖；summary 如实标注，
+  // R0 review P2-6：与 W1/W2 幂等标注一致性）。
+  persistSkipped: number
   summaryText: string | undefined
 }
 
@@ -151,6 +154,7 @@ const HypothesizeAnnotation = {
   survived: Annotation<IdeaCard[]>,
   warnings: Annotation<string[]>,
   artifactPages: Annotation<WorkflowArtifactPage[]>,
+  persistSkipped: Annotation<number>,
   summaryText: Annotation<string | undefined>,
 }
 
@@ -378,15 +382,17 @@ export function createHypothesizeGraph(ports: HypothesizePorts): {
       }
     })
     const artifactPages: WorkflowArtifactPage[] = []
+    let persistSkipped = 0
     for (const d of drafts) {
       const r = await ports.wiki.createPage(
         { path: d.path, title: d.title, type: 'idea-card', content: d.content, claims: d.claims },
         { workflow: 'hypothesize' },
       )
       if (!r.ok) throw new Error(`idea card 页写入失败（${r.error.code}）：${r.error.message}`)
+      if (!r.data.created) persistSkipped += 1
       artifactPages.push({ path: d.path, title: d.title })
     }
-    return { artifactPages }
+    return { artifactPages, persistSkipped }
   }
 
   // summary：计数链（候选 → dedup 合并 → 幸存）+ 产物路径 / 无幸存明示 + 桶失败记录 +
@@ -399,7 +405,11 @@ export function createHypothesizeGraph(ports: HypothesizePorts): {
       lines.push(`challenge 卡数上界截断 ${state.cappedCount} 张（CHALLENGE_CARDS_MAX=${CHALLENGE_CARDS_MAX}，853 §4.3 ≤35 次 LLM/run 口径面）。`)
     }
     if (state.survived.length > 0) {
-      lines.push(`假说生成完成：幸存 ${state.survived.length} 张假说卡已落 wiki（idea card 页 + claims）：`)
+      lines.push(
+        state.persistSkipped > 0
+          ? `假说生成完成：幸存 ${state.survived.length} 张假说卡已落 wiki（idea card 页 + claims；其中 ${state.persistSkipped} 张页面已存在，幂等跳过——wiki 现有内容未覆盖）：`
+          : `假说生成完成：幸存 ${state.survived.length} 张假说卡已落 wiki（idea card 页 + claims）：`,
+      )
       state.artifactPages.forEach((p, i) => lines.push(`${i + 1}. ${p.path}`))
     } else {
       lines.push('无幸存假说卡：未写入 wiki。全部淘汰原因如下：')
@@ -445,7 +455,7 @@ export function createHypothesizeGraph(ports: HypothesizePorts): {
   return {
     async invoke(init, options) {
       const state = await compiled.invoke(
-        { request: init.request, bucketCards: [], bucketFailures: [] },
+        { request: init.request, bucketCards: [], bucketFailures: [], persistSkipped: 0 },
         compiledInvokeOptions(options),
       )
       if (state.clarify !== undefined) {
