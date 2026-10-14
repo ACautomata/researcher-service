@@ -316,7 +316,7 @@ export function createDiscoverGraph(ports: DiscoverPorts): {
     return { culled, criticDoc: { ...state.criticDoc!, candidates: survivors } }
   }
 
-  // persist：critic 页（type='critic'）+ claims（候选问题结构化面 → port 组装 OKF 块）。
+  // persist：critic 页（type='critique'）+ claims（候选问题结构化面 → port 组装 OKF 块）。
   // provenance 仅 workflow——related_pages 钉给 W4 报告页（853 §3.3/#868 D2，PR #917
   // review Spec#20 收敛）。
   async function persistNode(state: DiscoverState, config: LangGraphRunnableConfig | undefined): Promise<Partial<DiscoverState>> {
@@ -330,7 +330,7 @@ export function createDiscoverGraph(ports: DiscoverPorts): {
       {
         path,
         title,
-        type: 'critic',
+        type: 'critique',
         content: doc.content,
         claims,
       },

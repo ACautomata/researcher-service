@@ -27,14 +27,13 @@ import Docker from 'dockerode'
 import { parseTar, type TarEntry } from '../files/tar'
 import { MAX_FILE_READ_BYTES, WALK_LIMIT } from '../files/values'
 import { WIKI_ROOT } from '../wikiContainers/values'
-import { claimsSidecarPath, cmp, decodeUtf8Strict, FrontmatterParser, frontmatterTitle, isManagedRelPath } from './logic'
-import { SKIP_DIRS, SKIP_FILES } from './values'
+import { claimsSidecarPath, decodeUtf8Strict, FrontmatterParser, frontmatterCategory, frontmatterTitle, groupByCategory, isManagedRelPath } from './logic'
+import { SKIP_DIRS, SKIP_FILES, WIKI_UNCATEGORIZED } from './values'
 import { WikiInvalidPath, WikiPageNotFound } from './errors'
 import type {
   WikiFileSystem,
   WikiPage,
   WikiTree,
-  WikiTreePage,
 } from './fsPort'
 
 // 快照 tar 全量字节上限：正常 wiki 库为几 MB 量级，但 _attachments 等 SKIP 目录的附件字节
@@ -97,20 +96,13 @@ export class DockerWikiFileSystem implements WikiFileSystem {
   async buildTree(): Promise<WikiTree> {
     const entries = await this.snap()
     if (entries === null) return { groups: [] } // 根不可用（容器/wiki 目录缺失/快照超限）→ 空树降级
-    const groups = new Map<string, WikiTreePage[]>()
+    const pages: { path: string; title: string; category: string }[] = []
     for (const t of entries) {
       const page = this.treePage(t)
-      if (page === null) continue
-      const top = t.name.split('/')[0]
-      const pages = groups.get(top)
-      if (pages) pages.push(page)
-      else groups.set(top, [page])
+      if (page !== null) pages.push(page)
     }
-    return {
-      groups: [...groups.entries()]
-        .sort(([a], [b]) => cmp(a, b))
-        .map(([kind, pages]) => ({ kind, name: kind, pages: pages.sort((x, y) => cmp(x.path, y.path)) })),
-    }
+    // 分组键 = 页 frontmatter category（中文值域 + 未分类沉底；分组排序纯逻辑单源在 logic）。
+    return { groups: groupByCategory(pages) }
   }
 
   // —— Port: read_page ——
@@ -145,14 +137,16 @@ export class DockerWikiFileSystem implements WikiFileSystem {
 
   // —— internal ——
 
-  // tree 页条目：过滤后返回 {path,title}；非页（目录/symlink/非 .md/SKIP/顶层散落）→ null。
-  private treePage(t: TarEntry): WikiTreePage | null {
+  // 页条目 → 树页行：过滤后提取 {title,category}。目录/symlink/非 .md/SKIP → 不成行；
+  // 顶层散落页入树（category 世界无「无目录 = 不可见」语义——pages/ 平铺 + 不迁移兼容读下
+  // 大量散落页必须可见；放开同时使 buildGraph 节点集变大，行为锚在 wikiDockerFs/wikiService 测试）。
+  private treePage(t: TarEntry): { path: string; title: string; category: string } | null {
     if (!this.isPageEntry(t)) return null
-    if (!t.name.includes('/')) return null // 顶层散落页不收（对齐 NodeFs buildTree）
     const stem = stemOf(t.name.slice(t.name.lastIndexOf('/') + 1))
-    // title = frontmatter（全文 parse；frontmatter 在文件头，与 NodeFs 读前缀等价）→ stem。
-    // 无 H1 fallback（对齐 NodeFs buildTree 的 pageTitle 语义）；超大/解码失败 → stem。
-    return { path: t.name, title: this.titleFromEntry(t) ?? stem }
+    // title = frontmatter（全文 parse；frontmatter 在文件头）→ stem；无 H1 fallback。
+    // 超大/解码失败 → stem + 未分类（对齐 NodeFs pageTitle 读失败 → 文件名 fallback）。
+    const { title, category } = this.entryMeta(t)
+    return { path: t.name, title: title ?? stem, category }
   }
 
   // 页条目判定：regular file + .md + 无 SKIP_DIRS 段 + 非 SKIP_FILES 末段。
@@ -166,15 +160,16 @@ export class DockerWikiFileSystem implements WikiFileSystem {
     return true
   }
 
-  // 从快照条目解析 title：frontmatter ?? undefined（调用方补 stem/H1 兜底）；data 未收集
-  // （超大）或解码失败 → undefined（对齐 NodeFs pageTitle 读失败 → 文件名 fallback）。
-  private titleFromEntry(t: TarEntry): string | undefined {
-    if (t.data === null) return undefined
+  // 从快照条目同 pass 提取 title + category（一次 parse，无额外 IO）：title = frontmatter ??
+  // undefined（调用方补 stem 兜底）；category = frontmatterCategory（值域外归未分类）。
+  // data 未收集（超大）或解码失败 → title undefined + 未分类（对齐读失败 fallback 语义）。
+  private entryMeta(t: TarEntry): { title: string | undefined; category: string } {
+    if (t.data === null) return { title: undefined, category: WIKI_UNCATEGORIZED }
     try {
       const { frontmatter } = this.parser.parse(decodeUtf8Strict(t.data))
-      return frontmatterTitle(frontmatter)
+      return { title: frontmatterTitle(frontmatter), category: frontmatterCategory(frontmatter) }
     } catch {
-      return undefined
+      return { title: undefined, category: WIKI_UNCATEGORIZED }
     }
   }
 

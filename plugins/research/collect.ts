@@ -251,7 +251,7 @@ export function createExperimentCollectGraph(ports: ExperimentCollectPorts): {
       {
         path,
         title: state.report!.title,
-        type: 'experiment-report',
+        type: 'report',
         content: `# ${state.report!.title}\n\n${EXPERIMENT_REPORT_CATEGORY_TAG}\n\n${state.report!.content}${relatedSection}`,
       },
       { workflow: 'experiment', ...(inputPages.length > 0 ? { relatedPages: inputPages } : {}) },

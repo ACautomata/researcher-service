@@ -63,7 +63,7 @@ describe('W4 调用③ collect 结果对账图（S2 fake ports）', () => {
       Record<string, unknown>,
     ]
     expect(draft.path).toBe(experimentReportPathOf(SPEC_PATH))
-    expect(draft.type).toBe('experiment-report')
+    expect(draft.type).toBe('report')
     expect(draft.content).toContain('`category: experiment-report`')
     expect(draft.content).toContain('## 关联页面')
     expect(draft.content).toContain(`[${CRITIC_PATH}](${CRITIC_PATH})`)

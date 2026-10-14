@@ -83,7 +83,7 @@ export function createWikiRouter(deps: WikiRouterDeps = {}): Router {
     return owner
   }
 
-  // GET /wiki/tree —— 文件树（开放目录分组；不收顶层散落页）。
+  // GET /wiki/tree —— 文件树（按页 frontmatter category 分组：中文值域 + 未分类沉底；顶层散落页入树）。
   router.get('/tree', async (req: Request, res: Response) => {
     ok(res, await serviceFor(await ownerWithEnsure(req)).buildTree())
   })

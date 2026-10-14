@@ -31,7 +31,7 @@ const DRAFT = {
 }
 
 describe('frontmatter 核心组装（853 §3.3 · §11.3C 字段集）', () => {
-  it('字段集齐全：type/title + OKF 徽章三件 + source/toolCallId/workflow/related_pages', () => {
+  it('字段集齐全：type/category/title + OKF 徽章三件 + source/toolCallId/workflow/related_pages', () => {
     const md = assemblePageMarkdown({
       draft: DRAFT,
       source: 'research',
@@ -42,6 +42,7 @@ describe('frontmatter 核心组装（853 §3.3 · §11.3C 字段集）', () => {
     })
     // 逐行字面断言（独立真源 = 规格字段集，不自造渲染器对拍）
     expect(md).toContain('type: paper')
+    expect(md).toContain('category: 论文') // 按 type 单点映射写入（插件零格式知识）
     expect(md).toContain('title: "Attention 综述研读"')
     expect(md).toContain('status: draft')
     expect(md).toMatch(/stale_after: "\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z"/)
@@ -54,6 +55,19 @@ describe('frontmatter 核心组装（853 §3.3 · §11.3C 字段集）', () => {
     expect(md).toContain('# 正文\n\n插件给出的正文。')
   })
 
+  it('category 按 type 一一映射（paper→论文 / critique→科学问题 / hypothesis→假说 / report→实验报告）', () => {
+    for (const [type, category] of [
+      ['paper', '论文'],
+      ['critique', '科学问题'],
+      ['hypothesis', '假说'],
+      ['report', '实验报告'],
+    ] as const) {
+      const md = assemblePageMarkdown({ draft: { ...DRAFT, type }, source: 'research', now: NOW })
+      expect(md).toContain(`type: ${type}`)
+      expect(md).toContain(`category: ${category}`)
+    }
+  })
+
   it('wiki 消费面往返：FrontmatterParser 读出 title/related_pages，okfBadge 读出徽章三件', () => {
     const md = assemblePageMarkdown({
       draft: DRAFT,
@@ -64,12 +78,13 @@ describe('frontmatter 核心组装（853 §3.3 · §11.3C 字段集）', () => {
       now: NOW,
     })
     const { frontmatter } = new FrontmatterParser().parse(md)
-    // 字段集闭断言（AC「字段集与 §11.3C 一致」的双向语义）：解析面恰为九键——多落/漏落都是格式漂移
+    // 字段集闭断言（AC「字段集与 §11.3C 一致」的双向语义）：解析面恰为十键——多落/漏落都是格式漂移
     expect(Object.keys(frontmatter).sort()).toEqual(
-      ['generated', 'related_pages', 'source', 'stale_after', 'status', 'title', 'toolCallId', 'type', 'workflow'],
+      ['category', 'generated', 'related_pages', 'source', 'stale_after', 'status', 'title', 'toolCallId', 'type', 'workflow'],
     )
     expect(frontmatter['title']).toBe('Attention 综述研读')
     expect(frontmatter['type']).toBe('paper')
+    expect(frontmatter['category']).toBe('论文')
     expect(frontmatter['related_pages']).toEqual(['papers/a.md'])
     const badge = okfBadge(md)
     expect(badge?.status).toBe('draft')
@@ -99,14 +114,14 @@ describe('frontmatter 核心组装（853 §3.3 · §11.3C 字段集）', () => {
     expect(badge?.staleAfter).toBe('2027-04-09T08:00:00.000Z')
   })
 
-  it('可选溯源缺省省略：toolCallId/workflow/related_pages 不传则字段不落（字段集闭断言 = 六键）', () => {
+  it('可选溯源缺省省略：toolCallId/workflow/related_pages 不传则字段不落（字段集闭断言 = 七键）', () => {
     const md = assemblePageMarkdown({ draft: DRAFT, source: 'research', now: NOW })
     expect(md).not.toContain('toolCallId:')
     expect(md).not.toContain('workflow:')
     expect(md).not.toContain('related_pages:')
     expect(md).toContain('source: "research"')
     const { frontmatter } = new FrontmatterParser().parse(md)
-    expect(Object.keys(frontmatter).sort()).toEqual(['generated', 'source', 'stale_after', 'status', 'title', 'type'])
+    expect(Object.keys(frontmatter).sort()).toEqual(['category', 'generated', 'source', 'stale_after', 'status', 'title', 'type'])
   })
 
   it('source 盖章 = 调用方插件 id（frontmatter source 与 generated.by 同源）', () => {
@@ -168,11 +183,12 @@ describe('页内 Atomic Claims md 块渲染（表示归 wiki 域 · V1 人读面
 })
 
 describe('PageDraft/ClaimDraft zod DTO（853 §3.2 · 图内校验与 port 边界同构）', () => {
-  it('PageType 枚举值集 = 论文页/ critic 页/ idea-card/ 实验报告（§11.3C）', () => {
-    for (const t of ['paper', 'critic', 'idea-card', 'experiment-report']) {
+  it('PageType 枚举值集 = 论文/ 科学问题/ 假说/ 实验报告（词形三规则新词形）', () => {
+    for (const t of ['paper', 'critique', 'hypothesis', 'report']) {
       expect(PluginPageDraftSchema.safeParse({ ...DRAFT, type: t }).success).toBe(true)
     }
-    for (const bad of ['Paper', 'experiment_report', 'report', '']) {
+    // 存量旧词形不迁移、新写入拒（枚举收敛只在写面）；越界词形拒。
+    for (const bad of ['critic', 'idea-card', 'experiment-report', 'Paper', 'experiment_report', '']) {
       expect(PluginPageDraftSchema.safeParse({ ...DRAFT, type: bad }).success).toBe(false)
     }
   })

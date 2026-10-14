@@ -385,7 +385,7 @@ export function createHypothesizeGraph(ports: HypothesizePorts): {
     let persistSkipped = 0
     for (const d of drafts) {
       const r = await ports.wiki.createPage(
-        { path: d.path, title: d.title, type: 'idea-card', content: d.content, claims: d.claims },
+        { path: d.path, title: d.title, type: 'hypothesis', content: d.content, claims: d.claims },
         { workflow: 'hypothesize' },
       )
       if (!r.ok) throw new Error(`idea card 页写入失败（${r.error.code}）：${r.error.message}`)

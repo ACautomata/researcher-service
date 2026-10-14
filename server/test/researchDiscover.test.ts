@@ -42,7 +42,7 @@ describe('W2 discover 图 invoke（S2 端口注入 fake）', () => {
       Record<string, unknown>,
     ]
     expect(draft.path).toBe('critics/robust-out-of-distribution-detection.md')
-    expect(draft.type).toBe('critic')
+    expect(draft.type).toBe('critique')
     expect(draft.claims).toHaveLength(2)
     expect(draft.claims[0]!.evidence).toEqual([`${PAPER_PATH}#6 Results`])
     // related_pages 钉给 W4（853 §3.3）——W2 provenance 仅 workflow（Spec#20）。
