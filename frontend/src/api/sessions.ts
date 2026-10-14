@@ -30,7 +30,8 @@ export interface MediaRef {
 }
 
 // #959 轮次产物卡片行（server runner/filejournal/turnFiles.ts TurnFileRow 逐字段镜像）。
-// attachmentId/fileName/size 由 T2（#960）物化回填；delete 行恒无 attachmentId。
+// attachmentId/fileName/size 三键由 server 段级时隙（completed/interrupted——#972·R1 B 裁决）
+// 物化回填；delete 行恒无 attachmentId。
 export type TurnFileOp = 'created' | 'modified' | 'deleted'
 export interface TurnFileRow {
   path: string

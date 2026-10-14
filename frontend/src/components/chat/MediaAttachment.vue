@@ -1,6 +1,7 @@
 <script setup lang="ts">
 // 纯展示：媒体状态由读取宿主注入，用户操作上抛。
 import type { MediaRef } from '@/api/sessions'
+import { formatBytes } from './format'
 withDefaults(defineProps<{
   media: MediaRef
   readiness?: 'pending' | 'ready' | 'error'
@@ -10,11 +11,6 @@ withDefaults(defineProps<{
   kind?: 'image' | 'audio' | 'video' | 'file'
 }>(), { readiness: 'ready', url: '', error: '', loading: false, kind: 'file' })
 const emit = defineEmits<{ download: []; load: []; previewError: [] }>()
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
-}
 function formatDuration(ms: number): string {
   const seconds = Math.max(0, Math.round(ms / 1000))
   return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`
