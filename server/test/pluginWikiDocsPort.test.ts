@@ -118,7 +118,7 @@ describe('#908 ctx.wiki/ctx.docs 经 run frame 注入（S1）', () => {
     })
     await assertValidPluginCatalog({
       manifests: [wikidocsLike],
-      coreToolNames: ['task', 'read_official_skill'],
+      coreToolNames: ['task', 'read_file'],
       reservedCommandNames: ['new', 'compact', 'model'],
     })
     mem = fakePrimitives()

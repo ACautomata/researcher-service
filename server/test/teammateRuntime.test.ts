@@ -156,14 +156,16 @@ describe('#786 teammate runtime acceptance (S1/S2)', () => {
         await h.prisma.pluginEnablement.update({ where: { ownerId_pluginId: { ownerId: h.owner.id, pluginId: 'autofigure' } }, data: { enabled: false } })
         return new AIMessage({ content: 'Leader done' })
       }],
-      'worker-task': [toolCallAi('skill', 'read_official_skill', { name: 'research' }), new AIMessage({ content: 'Worker done' })],
+      'worker-task': [toolCallAi('wiki-search', 'openwiki_search', { query: 'research' }), new AIMessage({ content: 'Worker done' })],
       next: [new AIMessage({ content: 'Next run done' })],
     })
     await h.prisma.pluginEnablement.create({ data: { ownerId: h.owner.id, pluginId: 'autofigure', enabled: true, enabledAt: new Date() } })
     expect((await h.send('leader')).body.code).toBe(0)
     await h.settle()
     for (const call of h.modelCalls) expect(call.metadata.ownerPluginIds).toEqual(['autofigure'])
-    expect(h.modelCalls.filter(call => call.task === 'worker-task').every(call => call.system.includes('research'))).toBe(true)
+    // per-run 能力继承的 prompt 面断言随 #787 官方内容目录退役移除（capabilities 不再携带
+    // prompt 载荷；本 harness 无 plugins dep，插件 prompt 维度不可达）——继承面由 metadata
+    // 维度（上行）+ 禁用后新 run（下行）锁定。
     const session = (await h.request.post('/api/v1/sessions').set(h.auth).send({})).body.data.id as string
     expect((await h.request.post(`/api/v1/sessions/${session}/messages`).set(h.auth).set('Idempotency-Key', 'b'.repeat(32)).send({ content: 'next' })).body.code).toBe(0)
     await h.settle()

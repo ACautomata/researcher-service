@@ -203,7 +203,7 @@ describe('RunService：发消息 → run 终态事件序列（S1，#747 C 节目
     const gate = new ConcurrencyGate({ globalLimit: 1, loadUserLimit: async () => 1 })
     const svc = makeService({
       script: [
-        () => { expect(gate.inFlight(owner.id)).toBe(1); return toolCallAi('team-skill', 'read_official_skill', { name: 'research' }) },
+        () => { expect(gate.inFlight(owner.id)).toBe(1); return toolCallAi('team-search', 'openwiki_search', { query: '调研' }) },
         toolCallAi('team-list', 'list_teammates', {}),
         new AIMessage({ content: 'Teammate result' }),
       ],
@@ -222,7 +222,7 @@ describe('RunService：发消息 → run 终态事件序列（S1，#747 C 节目
     expect(teammateDeltas.length).toBeGreaterThan(0)
     expect(teammateDeltas.every((event) => event.sessionId === sessionId && event.teammateId === teammateId)).toBe(true)
     expect(hub.events.filter((event) => event.type === 'tool.end').map((event) => event.payload)).toEqual([
-      expect.objectContaining({ name: 'read_official_skill', state: 'success', details: expect.stringContaining('调研') }),
+      expect.objectContaining({ name: 'openwiki_search', state: 'success', details: expect.stringContaining('unavailable') }),
       expect.objectContaining({ name: 'list_teammates', state: 'success', details: expect.stringContaining('review') }),
     ])
     expect(hub.events.at(-1)).toMatchObject({ type: 'teammate.completed', sessionId, teammateId })

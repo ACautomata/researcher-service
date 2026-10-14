@@ -423,21 +423,19 @@ describe('会话 REST 域（S1，#778）', () => {
     expect(badBody.body.data).toMatchObject({ content: expect.any(Array) })
   })
 
-  it('official /research template reaches the runner as a user message; skill body is progressively disclosed', async () => {
-    currentScript = [toolCallAi('read-skill', 'read_official_skill', { name: 'research' }), new AIMessage('research done')]
+  it('普通输入原样到达 runner；落行存原文，同键同文重放恒幂等（replay）', async () => {
+    currentScript = [new AIMessage('收到')]
     const sid = (await request.post('/api/v1/sessions').set(bearer(access)).send({})).body.data.id as string
-    const sent = await request.post(`/api/v1/sessions/${sid}/messages`).set(bearer(access)).set('Idempotency-Key', hexKey(0x787)).send({ content: '/research 电池寿命' })
+    const content = '帮我整理电池寿命调研结论'
+    const sent = await request.post(`/api/v1/sessions/${sid}/messages`).set(bearer(access)).set('Idempotency-Key', hexKey(0x787)).send({ content })
     expect(sent.body.code).toBe(CODE.OK)
     await waitFor(() => frameEvents(sinkA.frames).some(e => e.sessionId === sid && e.type === 'run.completed'))
     const inputs = observedModel!.receivedMessages as { content: string; getType(): string }[][]
     expect(inputs[0]!.find(m => m.getType() === 'human')!.content).toContain('电池寿命')
-    expect(inputs[0]!.find(m => m.getType() === 'human')!.content).toContain('先读取技能正文')
-    expect(inputs[0]!.find(m => m.getType() === 'system')!.content).not.toContain('完成标准：核心问题')
-    expect(inputs[1]!.find(m => m.getType() === 'tool')!.content).toContain('完成标准：核心问题')
     const projection = await request.get(`/api/v1/sessions/${sid}/messages`).set(bearer(access))
-    // 落行存原始输入（/命令原文）——展开只发生在命令构造点，模板发版改文不破幂等 replay
-    expect(projection.body.data.messages[0].content).toContain('/research 电池寿命')
-    const replay = await request.post(`/api/v1/sessions/${sid}/messages`).set(bearer(access)).set('Idempotency-Key', hexKey(0x787)).send({ content: '/research 电池寿命' })
+    // 落行存原始输入——同 key 重发恒 replay，内容不被任何命令构造改写（#778 story 7）
+    expect(projection.body.data.messages[0].content).toContain(content)
+    const replay = await request.post(`/api/v1/sessions/${sid}/messages`).set(bearer(access)).set('Idempotency-Key', hexKey(0x787)).send({ content })
     expect(replay.body.data.replay).toBe(true)
   })
 

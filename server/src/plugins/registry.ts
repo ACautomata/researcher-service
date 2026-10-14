@@ -5,7 +5,7 @@
 //   - manifest id kebab-case + 全局唯一；name/description/version 非空
 //   - 工具：category ∈ file|exec|domain 必填；file 类 pathParams 必填非空；工具名全局唯一
 //     （核心 + 跨插件）；parameters 为 zod schema（safeParse 鸭子判定）；promptSnippet 单行
-//   - 命令：名 regex + 不撞保留字（系统含官方目录，R4）+ 跨插件唯一；execute 引用合法
+//   - 命令：名 regex + 不撞保留字（系统命令）+ 跨插件唯一；execute 引用合法
 //    （只能引用本 manifest 已注册工具，注册期静态校验）
 //   - configSchema.env 键名大写蛇形
 
@@ -38,10 +38,10 @@ export const TOOL_CATEGORIES: readonly PluginToolCategory[] = ['file', 'exec', '
 
 export interface PluginCatalogValidationInput {
   readonly manifests: readonly PluginManifest[]
-  /** 核心工具名集（deepagents 内建 + official read_official_skill + teammate 工具面）——
+  /** 核心工具名集（deepagents 内建 + teammate 工具面）——
    *  工具名全局唯一的「核心」侧；装配层从真实工具面收集传入，不在此硬编码。 */
   readonly coreToolNames?: readonly string[]
-  /** 保留命令名（系统命令 + 官方目录命令名，R4 两源无遮蔽的前提）。 */
+  /** 保留命令名（系统命令——插件命令撞名注册期拒绝的前提）。 */
   readonly reservedCommandNames?: readonly string[]
 }
 

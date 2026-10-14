@@ -1,4 +1,3 @@
-import { officialSkillTools, type OfficialCatalog } from '../../officialContent/runtime'
 import { joinSections } from './promptSections'
 // Leader 单 agent 图工厂（#777 · #747 A 节「基础 leader 单 agent loop」）。
 //
@@ -59,7 +58,6 @@ export interface LeaderAgentParams {
   readonly backend: DeepAgentsBackendV2
   readonly checkpointer: BaseCheckpointSaver
   readonly systemPrompt: string
-  readonly official?: OfficialCatalog
   readonly interruptPolicy?: InterruptPolicy
   // 审批漏斗中间件（#783；AnyAgentMiddleware 宽进——langchain 中间件类型随版本泛型漂移，
   // 结构面由 runFunnel 的 WrapToolCallHook 推导钉死）。middleware 是运行期行为非拓扑因子，
@@ -77,7 +75,7 @@ export interface LeaderAgentParams {
 // 构建一个 leader agent 图（纯函数；缓存责任在调用方——RunService 按
 // (threadId, 拓扑因子) 缓存实例，版本变更丢缓存重建，见 runService.ts）。
 export function buildLeaderAgent(params: LeaderAgentParams): DeepAgent {
-  const subagentExtras = joinSections(params.official?.prompt, params.pluginPrompt)
+  const subagentExtras = joinSections(params.pluginPrompt)
   return createDeepAgent({
     // deepagents model 参数类型面只收 BaseLanguageModel；withFallbacks 产物
     // （RunnableBinding）运行时具备完整调用面（invoke/stream/bindTools 全委派），类型面
@@ -85,8 +83,8 @@ export function buildLeaderAgent(params: LeaderAgentParams): DeepAgent {
     model: params.model as unknown as NonNullable<CreateDeepAgentParams['model']>,
     backend: params.backend,
     checkpointer: params.checkpointer,
-    systemPrompt: joinSections(params.systemPrompt, params.official?.prompt, params.pluginPrompt),
-    ...(params.official || params.pluginPrompt
+    systemPrompt: joinSections(params.systemPrompt, params.pluginPrompt),
+    ...(params.pluginPrompt
       ? {
           subagents: [{
             ...GENERAL_PURPOSE_SUBAGENT,
@@ -96,7 +94,6 @@ export function buildLeaderAgent(params: LeaderAgentParams): DeepAgent {
       : {}),
     interruptOn: interruptOnFromPolicy(params.interruptPolicy),
     tools: [
-      ...(params.official ? officialSkillTools(params.official) : []),
       ...(params.tools ?? []),
       ...(params.pluginTools ?? []),
     ],

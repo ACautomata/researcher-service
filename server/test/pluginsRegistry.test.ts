@@ -8,7 +8,6 @@ import { PLUGIN_MANIFESTS } from '../../plugins/index'
 import { FILE_TOOLS, EXEC_TOOLS } from '../src/runner/approval/values'
 import { TEAMMATE_TOOL_NAMES } from '../src/runner/teammates/tools'
 import { SYSTEM_COMMANDS } from '../src/plugins/slash'
-import { snapshotOfficialContent } from '../src/officialContent/runtime'
 
 function tool(overrides: Partial<AnyPluginToolDefinition> & { name: string }): AnyPluginToolDefinition {
   return {
@@ -70,7 +69,7 @@ describe('#788 plugin catalog registration-time validation (S3)', () => {
     })).rejects.toThrow('zod schema')
   })
 
-  it('rejects commands colliding with reserved names (system incl. official, R4)', async () => {
+  it('rejects commands colliding with reserved names (system, R4)', async () => {
     await expect(assertValidPluginCatalog({
       manifests: [probeManifest({ commands: [{ name: 'model', handler: async () => ({ inject: 'x' }) }] })],
       reservedCommandNames: ['new', 'compact', 'model'],
@@ -193,8 +192,8 @@ describe('#883 manifest llm 声明位 + 保留键（T3）', () => {
   it('真 PLUGIN_MANIFESTS 全目录过收录校验（与 runner/assembly.ts 装配面同参——此前该面仅真启动可达，测试覆盖为零）', async () => {
     await expect(assertValidPluginCatalog({
       manifests: PLUGIN_MANIFESTS,
-      coreToolNames: [...FILE_TOOLS, ...EXEC_TOOLS, 'task', 'read_official_skill', ...TEAMMATE_TOOL_NAMES],
-      reservedCommandNames: [...SYSTEM_COMMANDS, ...snapshotOfficialContent().commands.map((c) => c.name)],
+      coreToolNames: [...FILE_TOOLS, ...EXEC_TOOLS, 'task', ...TEAMMATE_TOOL_NAMES],
+      reservedCommandNames: [...SYSTEM_COMMANDS],
     })).resolves.toBeUndefined()
   })
 })
