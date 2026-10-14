@@ -970,4 +970,50 @@ describe('RunService：发消息 → run 终态事件序列（S1，#747 C 节目
     // 回放面同步截断：recordTurn 聚合 ≡ 事件（刷新后列出面不放大）
     expect(turns[0]?.aggregate.files).toEqual(filesPayload.files)
   })
+
+  // ---- #961 轮次产物卡片 T3：exec 副作用动态提示行（帧携 hasExec 标记）----
+
+  it('#961 含 execute 调用轮：turn.files 帧携 hasExec，事件 ≡ recordTurn 回放聚合（三面一致的 server 半边）', async () => {
+    const runId = 'run-files-t3-exec'
+    await seedJournalRows(runId, 700)
+    const turns: Array<Parameters<RecordTurnFn>[0]> = []
+    const svc = makeService({
+      script: [toolCallAi('cE1', 'execute', { command: 'ls /lab' }), new AIMessage({ content: '看完了。' })],
+      recordTurn: async (turn) => { turns.push(turn) },
+    })
+    await svc.execute(cmd({ runId }))
+    const filesPayload = hub.events.find((e) => e.type === 'turn.files')!.payload as { hasExec?: boolean }
+    expect(filesPayload.hasExec).toBe(true)
+    // 回放面：recordTurn 聚合快照 hasExec ≡ 事件帧（实时 ≡ 回放零差异——server 侧）
+    expect(turns[0]?.aggregate.hasExec).toBe(true)
+  })
+
+  it('#961 纯文件修改轮（无 execute 调用）：帧无 hasExec 标记（提示行不出现的判定面）', async () => {
+    const runId = 'run-files-t3-noexec'
+    await seedJournalRows(runId, 800)
+    const turns: Array<Parameters<RecordTurnFn>[0]> = []
+    const svc = makeService({
+      script: [new AIMessage({ content: '改好了。' })],
+      recordTurn: async (turn) => { turns.push(turn) },
+    })
+    await svc.execute(cmd({ runId }))
+    const filesPayload = hub.events.find((e) => e.type === 'turn.files')!.payload as { hasExec?: boolean }
+    expect(filesPayload.hasExec).toBeUndefined()
+    expect(turns[0]?.aggregate.hasExec).toBeUndefined()
+  })
+
+  it('#961 非 exec 工具轮（write_file 调用）：帧无 hasExec——EXEC_TOOLS 白名单过滤，文件工具不误标', async () => {
+    const runId = 'run-files-t3-write'
+    await seedJournalRows(runId, 900)
+    const svc = makeService({
+      script: [
+        toolCallAi('cW1', 'write_file', { path: '/lab/notes/scratch.md', content: 'x' }),
+        new AIMessage({ content: '写好了。' }),
+      ],
+    })
+    await svc.execute(cmd({ runId }))
+    expect(hub.types().at(-1)).toBe('run.completed')
+    const filesPayload = hub.events.find((e) => e.type === 'turn.files')!.payload as { hasExec?: boolean }
+    expect(filesPayload.hasExec).toBeUndefined()
+  })
 })

@@ -89,7 +89,7 @@ import { TeammateService, type TeammateSummary } from '../teammates/service'
 import { createTeammateTools } from '../teammates/tools'
 import type { FileJournalService } from '../filejournal/service'
 import { IDEMPOTENCY_INGEST_PREFIX, IDEMPOTENCY_MEDIA_PREFIX, TURN_FILES_MAX_ROWS, labAbsOf } from '../filejournal/values'
-import { turnFileRowsFromJournal } from '../filejournal/turnFiles'
+import { turnFileRowsFromJournal, turnHasExecCall } from '../filejournal/turnFiles'
 import { createWikiRetrievalTools } from '../wikisearch'
 import {
   pullWikiGenerationMirror,
@@ -1213,7 +1213,16 @@ export class RunService {
                   }
                 }
               }
-              const filesEvent = { type: 'turn.files', payload: { files: listed, total: all.length } } as const
+              // #961 exec 提示行：completed 时隙对本轮工具轨迹（TurnReducer 聚合面——经
+              // tool.start 事件的 tools 与 rewind preview 的 attachmentsJson.tools 同形）做
+              // EXEC_TOOLS 白名单同形判定，标记随帧携带（实时 ≡ 回放零差异；单帧不变量——
+              // 判定在发帧前完成，只断言「有调用」不断言「有写入」，D6）。无行即无卡无帧，
+              // 「含 exec 但无文件修改」轮天然无提示行（卡不存在）。
+              const hasExec = turnHasExecCall(turn.snapshot().tools)
+              const filesEvent = {
+                type: 'turn.files',
+                payload: { files: listed, total: all.length, ...(hasExec ? { hasExec: true } : {}) },
+              } as const
               turn.feed(filesEvent)
               this.publish(cmd.ownerId, filesEvent, cmd)
             }

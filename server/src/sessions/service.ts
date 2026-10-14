@@ -58,6 +58,8 @@ export interface ProjectionMessage {
   readonly tools?: unknown[]
   readonly media?: unknown[]
   readonly files?: unknown[]
+  // #961 exec 提示行标记（attachmentsJson files 块内随帧携带——true 才落键；缺省即无标记）。
+  readonly hasExec?: boolean
   readonly anchorCheckpointId: string | null
   readonly createdAt: string
 }
@@ -241,6 +243,7 @@ function toProjectionMessage(row: SessionMessage): ProjectionMessage {
     media?: unknown[]
     files?: unknown[]
     filesTotal?: number
+    hasExec?: boolean
   } = {}
   if (row.role === 'assistant') {
     try {
@@ -251,6 +254,7 @@ function toProjectionMessage(row: SessionMessage): ProjectionMessage {
         media?: unknown[]
         files?: unknown[]
         filesTotal?: number
+        hasExec?: boolean
       }
       const { v: _v, ...rest } = parsed
       aggregate = rest

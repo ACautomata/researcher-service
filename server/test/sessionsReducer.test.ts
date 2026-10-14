@@ -257,6 +257,33 @@ describe('TurnReducer：run 域事件归约（S3）', () => {
     expect(r4.snapshot().filesTotal).toBeUndefined()
   })
 
+  it('#961 hasExec：帧标记 true 入快照与 v1 JSON（files 块内，字段序 files → filesTotal → hasExec）', () => {
+    const r = new TurnReducer()
+    r.feed(ev('turn.files', { files: [{ path: 'a.md', op: 'created' }], total: 1, hasExec: true }))
+    expect(r.snapshot().hasExec).toBe(true)
+    const json = JSON.parse(serializeAttachments(r.snapshot())) as Record<string, unknown>
+    expect(json.hasExec).toBe(true)
+    expect(Object.keys(json)).toEqual(['v', 'files', 'filesTotal', 'hasExec'])
+    // 回放面往返：attachmentsJson → 投影行聚合面同形状（toProjectionMessage 透传面）
+    const { v: _v, ...aggregate } = json
+    expect(aggregate).toEqual({ files: [{ path: 'a.md', op: 'created' }], filesTotal: 1, hasExec: true })
+  })
+
+  it('#961 hasExec 校验门：帧无标记 / 非 true（0 信任）不落键——「不含 execute 轮无标记」回放面', () => {
+    const r1 = new TurnReducer()
+    r1.feed(ev('turn.files', { files: [{ path: 'a.md', op: 'created' }] }))
+    expect(r1.snapshot().hasExec).toBeUndefined()
+    const r2 = new TurnReducer()
+    r2.feed(ev('turn.files', { files: [{ path: 'a.md', op: 'created' }], hasExec: 'yes' }))
+    expect(r2.snapshot().hasExec).toBeUndefined()
+    const r3 = new TurnReducer()
+    r3.feed(ev('turn.files', { files: [{ path: 'a.md', op: 'created' }], hasExec: 1 }))
+    expect(r3.snapshot().hasExec).toBeUndefined()
+    // 键缺省：v1 JSON 不落 hasExec（与 filesTotal 不落键同纪律）
+    const json = JSON.parse(serializeAttachments(r1.snapshot())) as Record<string, unknown>
+    expect(json.hasExec).toBeUndefined()
+  })
+
   it('snapshot 与 attachmentsJson 反序列化同构（投影行 = content 列 + JSON 聚合面组装）', () => {
     const r = new TurnReducer()
     r.feed(ev('text.delta', { delta: '答案' }))

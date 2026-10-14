@@ -3,6 +3,7 @@
 // 声明处——sessions/reducer.ts（TurnSnapshot.files）type-only 引用，前端 api/sessions.ts
 // 逐字段镜像。
 import type { FileJournal } from '../../generated/prisma/client'
+import { extractExecCrossed } from './preview'
 import { IDEMPOTENCY_INGEST_PREFIX, IDEMPOTENCY_MEDIA_PREFIX, JOURNAL_OPS } from './values'
 
 // D8 行形状契约 `{ path, op, attachmentId?, fileName, size? }`。T1（#959）只产 { path, op }
@@ -37,4 +38,12 @@ export function turnFileRowsFromJournal(
     out.push({ path: r.path, op: r.op === 'write' && r.beforeSha256 === null ? 'created' : 'modified' })
   }
   return out
+}
+
+// #961 exec 提示行判定：本轮工具轨迹（TurnReducer ToolLine[] 面，与 rewind preview 的
+// attachmentsJson.tools 同形）含 EXEC_TOOLS 白名单成员即 true——「本轮含 Shell 调用，其文件
+// 副作用不在此列」提示行的数据源。判定复用 preview.ts extractExecCrossed 纯函数（清单非空
+// ≡ 有调用——只断言「有调用」，不断言「有写入」，D6），不第二处实现 EXEC_TOOLS 过滤。
+export function turnHasExecCall(tools: unknown): boolean {
+  return extractExecCrossed(tools).length > 0
 }

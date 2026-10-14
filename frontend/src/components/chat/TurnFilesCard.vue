@@ -9,7 +9,7 @@ import { ElMessage } from 'element-plus'
 import type { TurnFileRow } from '@/api/sessions'
 import { readAttachmentBlob } from '@/api/attachments'
 
-const props = defineProps<{ files: TurnFileRow[]; filesTotal?: number }>()
+const props = defineProps<{ files: TurnFileRow[]; filesTotal?: number; hasExec?: boolean }>()
 
 const OP_LABEL: Record<TurnFileRow['op'], string> = { created: '新建', modified: '修改', deleted: '删除' }
 
@@ -53,6 +53,9 @@ async function download(row: TurnFileRow): Promise<void> {
       <span v-else-if="f.op === 'deleted'" class="tf-deleted" data-test="turn-file-deleted">已删除</span>
     </div>
     <div v-if="restCount > 0" class="tf-more" data-test="turn-files-more">等 {{ restCount }} 个文件</div>
+    <!-- #961 exec 副作用动态提示（D6）：本轮含 EXEC_TOOLS 调用时卡底一行——只断言「有调用」
+         不断言「有写入」；样式朴素面，虚线定稿归 T4/#962。 -->
+    <div v-if="hasExec" class="tf-exec" data-test="turn-files-exec">本轮含 Shell 调用，其文件副作用不在此列</div>
   </div>
 </template>
 
@@ -95,6 +98,11 @@ async function download(row: TurnFileRow): Promise<void> {
 .tf-more {
   padding: 3px 0;
   text-align: center;
+  color: var(--el-text-color-placeholder);
+  font-size: 12px;
+}
+.tf-exec {
+  padding: 3px 0;
   color: var(--el-text-color-placeholder);
   font-size: 12px;
 }
