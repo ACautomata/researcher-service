@@ -35,6 +35,7 @@ function normalize(m: Msg) {
     streaming: m.streaming, traceFolded: m.traceFolded,
     tools: m.tools.map((t) => ({ id: t.id, name: t.name, state: t.state, title: t.title, input: t.input, result: t.result, durationMs: t.durationMs, truncated: t.truncated, rejection: t.rejection, stage: t.stage })),
     media: m.media,
+    files: m.files,
   }
 }
 
@@ -242,6 +243,40 @@ describe('applyEvent（实时入口）事件语义', () => {
     expect(vm[0].media).toEqual([{ attachmentId: 'a1', mime: 'image/png', size: 3, fileName: 'x.png', width: 2 }])
   })
 
+  it('#959 turn.files 进 overlay.files：整帧替换语义（重复帧幂等），非法行丢弃', () => {
+    let vm = applyEvent([], ev('run.started', {}, { runId: 'r1' }))
+    vm = applyEvent(vm, ev('turn.files', { files: [{ path: 'a.md', op: 'created' }, { path: '', op: 'created' }, { op: 'modified' }, { path: 'x.md', op: 'renamed' }] }, { runId: 'r1' }))
+    expect(vm[0].files).toEqual([{ path: 'a.md', op: 'created' }])
+    // 重复帧（重连重放漏网）整替不追加
+    vm = applyEvent(vm, ev('turn.files', { files: [{ path: 'a.md', op: 'created' }] }, { runId: 'r1' }))
+    expect(vm[0].files).toEqual([{ path: 'a.md', op: 'created' }])
+  })
+
+  it('#959 turn.files 校验门：payload 缺 files 数组 / 全非法 → 原样返回', () => {
+    let vm = applyEvent([], ev('run.started', {}, { runId: 'r1' }))
+    const before = vm
+    vm = applyEvent(vm, ev('turn.files', { nonsense: true }, { runId: 'r1' }))
+    vm = applyEvent(vm, ev('turn.files', { files: 'not-array' }, { runId: 'r1' }))
+    vm = applyEvent(vm, ev('turn.files', { files: [{ op: 'created' }] }, { runId: 'r1' }))
+    expect(vm).toBe(before)
+    expect(vm[0].files).toEqual([])
+  })
+
+  it('#959 turn.files 无 overlay 落点丢弃（镜像 tool/attachment 丢弃纪律，不建行）', () => {
+    const vm = applyEvent([], ev('turn.files', { files: [{ path: 'a.md', op: 'created' }] }, { runId: 'r1' }))
+    expect(vm).toHaveLength(0)
+  })
+
+  it('#959 files-only 轮终态不剥落 + 不折叠（产物非轨迹——卡片恒在折叠条外）', () => {
+    let vm = applyEvent([], ev('run.started', {}, { runId: 'r1' }))
+    vm = applyEvent(vm, ev('turn.files', { files: [{ path: 'a.md', op: 'created' }] }, { runId: 'r1' }))
+    vm = applyEvent(vm, ev('run.completed', {}, { runId: 'r1' }))
+    expect(vm).toHaveLength(1)
+    expect(vm[0].traceFolded).toBeUndefined()
+    expect(vm[0].streaming).toBe(false)
+    expect(hasTrace(vm[0])).toBe(false)
+  })
+
   it('终态（completed）剥进行态装饰 + 有轨迹默认折叠；空 run 终态整行剥落（镜像 isEmpty 不落行）', () => {
     let vm = applyEvent([], ev('run.started', {}, { runId: 'r1' }))
     vm = applyEvent(vm, ev('text.delta', { delta: '答' }, { runId: 'r1' }))
@@ -297,6 +332,7 @@ describe('零差异一致性（硬验收：reduce(全量事件) ≡ 投影行）
     let thinking: string | undefined
     const tools = new Map<string, ToolLine>()
     const media: Array<Record<string, unknown>> = []
+    const files: Array<Record<string, unknown>> = []
     for (const e of events) {
       if (e.type === 'text.delta' && typeof e.payload.delta === 'string') content += e.payload.delta
       if (e.type === 'thinking.delta' && typeof e.payload.delta === 'string') thinking = (thinking ?? '') + e.payload.delta
@@ -316,19 +352,23 @@ describe('零差异一致性（硬验收：reduce(全量事件) ≡ 投影行）
         }
       }
       if (e.type === 'attachment' && typeof e.payload.attachmentId === 'string') media.push({ ...e.payload })
+      // 镜像 server reducer turn.files 门：合法行入聚合（服务端 completed 时隙聚合 journal 行后
+      // feed——「服务端会写出什么」的镜像，files 进 attachmentsJson 聚合面）
+      if (e.type === 'turn.files' && Array.isArray(e.payload.files)) files.push(...(e.payload.files as Array<Record<string, unknown>>).filter((f) => typeof f.path === 'string' && f.path !== '' && (f.op === 'created' || f.op === 'modified' || f.op === 'deleted')))
     }
     const rows: ProjectionMessage[] = [userRow({ id: 'm1', content: userText })]
     const aggregate: Record<string, unknown> = {}
     if (thinking !== undefined) aggregate.thinking = thinking
     if (tools.size > 0) aggregate.tools = [...tools.values()]
     if (media.length > 0) aggregate.media = media
+    if (files.length > 0) aggregate.files = files
     rows.push(assistantRow({ id: 'm2', content, ...aggregate }))
     return rows
   }
 
   const LIVE_USER: Msg = {
     role: 'user', raw: '帮我看看', text: '帮我看看', thinking: '', thinkingOpen: false,
-    streaming: false, tools: [], media: [], id: 'm1',
+    streaming: false, tools: [], media: [], files: [], id: 'm1',
   }
 
   const SCENARIOS: Array<{ name: string; events: SessionEvent[] }> = [
@@ -421,6 +461,23 @@ describe('零差异一致性（硬验收：reduce(全量事件) ≡ 投影行）
         ev('research_run.progress', { toolCallId: 'rw1', stage: 'challenge', workflow: 'hypothesize' }, { runId: 'r1' }),
         ev('tool.end', { toolCallId: 'rw1', state: 'success', durationMs: 88000, details: '{"workflow":"hypothesize","status":"completed","artifactPages":[{"path":"idea-cards/dig.md","title":"想法卡"}],"summary":"生成 5 个假说。"}' }, { runId: 'r1' }),
         ev('text.delta', { delta: '假说已生成。' }, { runId: 'r1' }),
+        ev('run.completed', {}, { runId: 'r1' }),
+      ],
+    },
+    {
+      name: '媒体 + 文件产物轮（#959 turn.files 先于终态——刷新/回放后卡片不消失）',
+      events: [
+        ev('run.started', {}, { runId: 'r1' }),
+        ev('tool.start', { toolCallId: 'w1', name: 'write_file', input: '{"path":"/lab/notes/new.md"}' }, { runId: 'r1' }),
+        ev('tool.end', { toolCallId: 'w1', state: 'success', details: 'ok' }, { runId: 'r1' }),
+        ev('attachment', { attachmentId: 'a1', mime: 'image/png', size: 8, fileName: 'shot.png' }, { runId: 'r1' }),
+        ev('text.delta', { delta: '写好了。' }, { runId: 'r1' }),
+        // 顺序硬约束镜像：turn.files 在 run.completed 之前到达
+        ev('turn.files', { files: [
+          { path: 'notes/new.md', op: 'created' },
+          { path: 'notes/edited.md', op: 'modified' },
+          { path: 'notes/gone.md', op: 'deleted' },
+        ] }, { runId: 'r1' }),
         ev('run.completed', {}, { runId: 'r1' }),
       ],
     },

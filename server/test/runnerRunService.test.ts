@@ -767,4 +767,94 @@ describe('RunService：发消息 → run 终态事件序列（S1，#747 C 节目
       delete process.env.LANGCHAIN_TRACING_V2
     }
   })
+
+  // ---- #959 轮次产物卡片 T1：completed 时隙 journal 聚合 → turn.files 事件 ----
+
+  // 本 run 段 journal 行 seed（唯一键 (sessionId,seq)/(sessionId,toolCallId)——seq 段位防跨用例碰撞）
+  async function seedJournalRows(runId: string, seqBase: number): Promise<void> {
+    await prisma.fileJournal.createMany({
+      data: [
+        { sessionId, checkpointId: '', seq: seqBase, op: 'write', path: 'notes/new.md', beforeSha256: null, toolCallId: `${runId}-t1`, runId },
+        { sessionId, checkpointId: '', seq: seqBase + 1, op: 'edit', path: 'notes/edited.md', beforeSha256: 'bbb', toolCallId: `${runId}-t2`, runId },
+        { sessionId, checkpointId: '', seq: seqBase + 2, op: 'delete', path: 'notes/gone.md', beforeSha256: 'ccc', toolCallId: `${runId}-t3`, runId },
+        // 物化旁路行（上传 ingest- / D9 媒体 media-）——不进卡；前缀在首位 + runId 作用域防唯一键碰撞
+        { sessionId, checkpointId: '', seq: seqBase + 3, op: 'write', path: 'uploads/att-1/doc.pdf', beforeSha256: null, toolCallId: `ingest-${runId}-att-1`, runId },
+        { sessionId, checkpointId: '', seq: seqBase + 4, op: 'write', path: 'uploads/att-2/shot.png', beforeSha256: null, toolCallId: `media-${runId}-att-2`, runId },
+      ],
+    })
+  }
+
+  it('#959 completed 聚合：journal 行 → turn.files 事件（先于 run.completed）+ recordTurn 落 files', async () => {
+    const runId = 'run-files-ok'
+    await seedJournalRows(runId, 100)
+    const turns: Array<Parameters<RecordTurnFn>[0]> = []
+    const svc = makeService({
+      script: [new AIMessage({ content: '改好了。' })],
+      recordTurn: async (turn) => { turns.push(turn) },
+    })
+    await svc.execute(cmd({ runId }))
+    const types = hub.types()
+    // 顺序硬约束：turn.files 先于 run.completed（前端终态即 finalizeOverlay，晚于终态落不进 overlay）
+    expect(types).toContain('turn.files')
+    expect(types.indexOf('turn.files')).toBeLessThan(types.lastIndexOf('run.completed'))
+    // 过滤 + op 映射：旁路行剔除、created/modified/deleted 正确
+    const filesEvent = hub.events.find((e) => e.type === 'turn.files')!
+    const filesPayload = filesEvent.payload as { files: Array<{ path: string; op: string }> }
+    expect(filesPayload.files).toEqual([
+      { path: 'notes/new.md', op: 'created' },
+      { path: 'notes/edited.md', op: 'modified' },
+      { path: 'notes/gone.md', op: 'deleted' },
+    ])
+    expect(filesEvent.runId).toBe(runId)
+    expect(filesEvent.sessionId).toBe(sessionId)
+    // 回放面同形状：recordTurn 聚合快照 files ≡ 事件 payload（实时 ≡ 回放零差异——server 侧）
+    expect(turns[0]?.aggregate.files).toEqual(filesPayload.files)
+    expect(turns[0]?.aggregate.content).toBe('改好了。')
+  })
+
+  it('#959 无行无卡：journal 无行不发 turn.files（journaling 缺省同形——静默跳过）', async () => {
+    const svc = makeService({ script: [new AIMessage({ content: '纯文本。' })] })
+    await svc.execute(cmd({ runId: 'run-no-rows' }))
+    expect(hub.types()).not.toContain('turn.files')
+    expect(hub.types().at(-1)).toBe('run.completed')
+  })
+
+  it('#959 异常轮次不出卡：aborted 路径不聚合', async () => {
+    const runId = 'run-files-aborted'
+    await seedJournalRows(runId, 200)
+    const fs = fakePrimitives({
+      execBehavior: async () => {
+        await new Promise((r) => setTimeout(r, 200))
+        return { exitCode: 0, stdout: 'slow', stderr: '' }
+      },
+    })
+    const svc = makeService({
+      primitives: fs,
+      script: [toolCallAi('cA2', 'execute', { command: 'slow' }), new AIMessage({ content: 'done' })],
+    })
+    const c = cmd({ runId })
+    const running = svc.execute(c)
+    for (let i = 0; i < 100 && !hub.types().includes('run.started'); i++) {
+      await new Promise((r) => setTimeout(r, 5))
+    }
+    expect(svc.abort(c.runId, 'user')).toBe(true)
+    await running
+    expect(hub.types().at(-1)).toBe('run.aborted')
+    expect(hub.types()).not.toContain('turn.files')
+  }, 15_000)
+
+  it('#959 异常轮次不出卡：failed 路径不聚合（suspended 不经 completed 分支同不聚合）', async () => {
+    const runId = 'run-files-failed'
+    await seedJournalRows(runId, 300)
+    const svc = makeService({
+      script: [
+        () => {
+          throw Object.assign(new Error('502 from provider'), { status: 502 })
+        },
+      ],
+    })
+    await svc.execute(cmd({ runId }))
+    expect(hub.types().at(-1)).toBe('run.failed')
+    expect(hub.types()).not.toContain('turn.files')
+  })
 })

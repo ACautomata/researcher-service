@@ -20,6 +20,7 @@ import type {
   ProjectionMessage,
   SessionProjection,
   ToolLine,
+  TurnFileRow,
 } from '@/api/sessions'
 import type { SessionEvent } from './useEventStream'
 
@@ -60,6 +61,7 @@ export interface Msg {
   streaming: boolean // 在飞 overlay 标记（进行态装饰；投影行恒 false）
   tools: ToolRow[]
   media: MediaRef[] // #780 D9 媒体引用（attachmentsJson v1 / attachment 事件同形状）
+  files: TurnFileRow[] // #959 轮次产物卡片行（turn.files 事件 / attachmentsJson files 键同形状；产物非轨迹——恒在折叠条外）
   traceFolded?: boolean // 轮次折叠（#664）：assistant 有轨迹终态默认收起（两入口同判据）
   turnDurationMs?: number // #665 执行时长——新事件面无统一墙钟信号，两入口均不落值（TraceFold 回退计数文案；恢复挂 #794/#796 从行时间戳推导）
   id?: string // 消息行 id（已持久化有值；乐观 echo 由 POST 响应回填）——消息级操作入口定位参数
@@ -77,11 +79,12 @@ export function newMsg(role: 'user' | 'assistant', text = ''): Msg {
     streaming: role === 'assistant',
     tools: [],
     media: [],
+    files: [],
   }
 }
 
-// 轨迹判定（#664）：思考非空或工具行非空即有轨迹；正文与媒体不算轨迹。归约器（终态折叠
-// 判据）与渲染层（折叠条渲染门）共用此单一实现。
+// 轨迹判定（#664）：思考非空或工具行非空即有轨迹；正文、媒体与产物卡不算轨迹（#959 产物
+// 非轨迹——卡片恒在折叠条外）。归约器（终态折叠判据）与渲染层（折叠条渲染门）共用此单一实现。
 export function hasTrace(m: Msg): boolean {
   return m.thinking !== '' || m.tools.length > 0
 }
@@ -136,6 +139,7 @@ function msgFromRow(row: ProjectionMessage): Msg {
     streaming: false,
     tools: (row.tools ?? []).map(toolRowFromServer),
     media: [...(row.media ?? [])],
+    files: [...(row.files ?? [])],
     ...(row.id ? { id: row.id } : {}),
   }
   if (shouldFoldTrace(m)) m.traceFolded = true
@@ -154,6 +158,7 @@ function overlayFromInFlight(inf: LiveTurn): Msg {
     streaming: true,
     tools: (inf.turn.tools ?? []).map(toolRowFromServer),
     media: [...(inf.turn.media ?? [])],
+    files: [...(inf.turn.files ?? [])],
     ...(inf.runId ? { runId: inf.runId } : {}),
   }
   return m
@@ -285,12 +290,13 @@ function overlayIndex(vm: Msg[], runId: string | undefined): number {
 }
 
 function cloneOverlay(m: Msg): Msg {
-  return { ...m, tools: [...m.tools], media: [...m.media] }
+  return { ...m, tools: [...m.tools], media: [...m.media], files: [...m.files] }
 }
 
-// 空聚合判据（镜像 server reducer.ts isEmpty——终态空 run 不落行，前端同步剥落空 overlay）。
+// 空聚合判据（镜像 server reducer.ts isEmpty——终态空 run 不落行，前端同步剥落空 overlay；
+// #959 files 非空即非空——纯产物轮不剥落，卡片是回放面的一部分）。
 function isEmptyMsg(m: Msg): boolean {
-  return m.text === '' && m.thinking === '' && m.tools.length === 0 && m.media.length === 0
+  return m.text === '' && m.thinking === '' && m.tools.length === 0 && m.media.length === 0 && m.files.length === 0
 }
 
 // 终态收尾（run.completed/failed/aborted/suspended 共用）：剥进行态装饰 + 轨迹默认收起 +
@@ -335,7 +341,7 @@ export function applyEvent(prev: Msg[], event: SessionEvent): Msg[] {
     return next
   }
 
-  if (type === 'text.delta' || type === 'thinking.delta' || type === 'tool.start' || type === 'tool.end' || type === 'figure_run.progress' || type === 'research_run.progress' || type === 'attachment') {
+  if (type === 'text.delta' || type === 'thinking.delta' || type === 'tool.start' || type === 'tool.end' || type === 'figure_run.progress' || type === 'research_run.progress' || type === 'attachment' || type === 'turn.files') {
     const idx = overlayIndex(prev, event.runId)
     // 无 overlay（事件先于 run.started 的乱序源/foreign run）：text/thinking 建行承载，
     // tool/figure progress/attachment 无落点丢弃——镜像服务端「tool.end 无先前行忽略」的宽容度。
@@ -427,6 +433,28 @@ export function applyEvent(prev: Msg[], event: SessionEvent): Msg[] {
       const workflow = event.payload.workflow
       if (row.stage === stage && row.workflow === workflow) return prev
       overlay.tools[tIdx] = { ...row, stage, ...(typeof workflow === 'string' ? { workflow } : {}) }
+    } else if (type === 'turn.files') {
+      // #959 轮次产物卡片：completed 时隙 server 聚合 journal 行后整帧发布（必先于
+      // run.completed——晚于终态 overlay 已 finalized，overlayIndex 找不到落点即丢帧）。
+      // 整帧替换语义（服务端每 run 恰一帧，重复帧幂等）；行级校验门镜像 server reducer
+      // TurnReducer：非法行丢弃，全非法 / 非数组整帧原样返回。
+      const p = event.payload as { files?: unknown } | null
+      if (!p || !Array.isArray(p.files)) return prev
+      const rows: TurnFileRow[] = []
+      for (const raw of p.files) {
+        const f = raw as Partial<TurnFileRow> | null
+        if (!f || typeof f.path !== 'string' || f.path === '') continue
+        if (f.op !== 'created' && f.op !== 'modified' && f.op !== 'deleted') continue
+        rows.push({
+          path: f.path,
+          op: f.op,
+          ...(typeof f.attachmentId === 'string' && f.attachmentId !== '' ? { attachmentId: f.attachmentId } : {}),
+          ...(typeof f.fileName === 'string' && f.fileName !== '' ? { fileName: f.fileName } : {}),
+          ...(typeof f.size === 'number' ? { size: f.size } : {}),
+        })
+      }
+      if (rows.length === 0 && overlay.files.length === 0) return prev
+      overlay.files = rows
     } else {
       // attachment：#780 D9 媒体引用直推（校验门镜像 server reducer.ts 的接受面）。
       const p = event.payload as Partial<MediaRef> | null

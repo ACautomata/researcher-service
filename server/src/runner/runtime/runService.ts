@@ -89,6 +89,7 @@ import { TeammateService, type TeammateSummary } from '../teammates/service'
 import { createTeammateTools } from '../teammates/tools'
 import type { FileJournalService } from '../filejournal/service'
 import { IDEMPOTENCY_INGEST_PREFIX, IDEMPOTENCY_MEDIA_PREFIX } from '../filejournal/values'
+import { turnFileRowsFromJournal } from '../filejournal/turnFiles'
 import { createWikiRetrievalTools } from '../wikisearch'
 import {
   pullWikiGenerationMirror,
@@ -1169,6 +1170,27 @@ export class RunService {
               }
             }
             for (const d of scan.degraded) degrade(d.declaredPath, d.reason)
+          }
+          // #959 轮次产物卡片（T1）：媒体扫描之后、终态发布之前聚合本轮 journal 行 → turn.files
+          // 事件（turn.feed + publish 双写——实时 ≡ 回放零差异，attachment 事件同形先例）。硬约束：
+          // 必须先于 run.completed 发布——前端归约器收到终态即 finalizeOverlay，晚于终态落不进
+          // overlay。无行即无卡（journaling 缺省/无文件修改轮静默跳过）；aborted/failed/suspended
+          // 不走本分支天然不聚合。查询 fail-soft：终态聚合故障不放大 run 故障（卡片缺失只 warn）。
+          // recover run 的回放聚合取 checkpoint 快照（files 不在其中）——「断点前内容只在 blob」
+          // 同款已知边界（finally recordTurn 注）。
+          try {
+            const journalRows = await this.deps.prisma.fileJournal.findMany({
+              where: { sessionId: sandboxSessionId, runId: cmd.runId, archivedAt: null },
+              orderBy: { seq: 'asc' },
+            })
+            const files = turnFileRowsFromJournal(journalRows)
+            if (files.length > 0) {
+              const filesEvent = { type: 'turn.files', payload: { files } } as const
+              turn.feed(filesEvent)
+              this.publish(cmd.ownerId, filesEvent, cmd)
+            }
+          } catch (err) {
+            console.warn(`[runner] turn.files 聚合失败（卡片跳过）: run=${cmd.runId}: ${String(err)}`)
           }
           this.runs.set(cmd.sessionId, { runId: cmd.runId, state: 'completed' })
           this.publish(cmd.ownerId, { type: 'run.completed', payload: {} }, cmd)

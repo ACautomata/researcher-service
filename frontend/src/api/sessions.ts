@@ -29,11 +29,23 @@ export interface MediaRef {
   durationMs?: number
 }
 
+// #959 轮次产物卡片行（server runner/filejournal/turnFiles.ts TurnFileRow 逐字段镜像）。
+// attachmentId/fileName/size 由 T2（#960）物化回填；delete 行恒无 attachmentId。
+export type TurnFileOp = 'created' | 'modified' | 'deleted'
+export interface TurnFileRow {
+  path: string
+  op: TurnFileOp
+  attachmentId?: string
+  fileName?: string
+  size?: number
+}
+
 export interface TurnContent {
   content: string
   thinking?: string
   tools?: ToolLine[]
   media?: MediaRef[]
+  files?: TurnFileRow[]
 }
 
 // 投影行：attachmentsJson v1 展开进行内（assistant 行 thinking/tools/media；command 面读侧

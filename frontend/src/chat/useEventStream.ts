@@ -35,7 +35,7 @@ const EVENT_NAMES = [
   'session.terminated', 'run.started', 'run.resumed', 'run.completed', 'run.failed',
   'run.aborted', 'run.suspended', 'text.delta', 'thinking.delta', 'tool.start', 'tool.end',
   'attachment', 'figure_run.progress', 'research_run.progress', 'approval.requested',
-  'approval.resolved',
+  'approval.resolved', 'turn.files',
   'teammate.started', 'teammate.completed', 'teammate.failed', 'teammate.suspended',
   'teammate.archived', 'wiki_run.progress', 'wiki_run.text', 'wiki_run.tool_start',
   'wiki_run.tool_end', 'wiki_run.finished',

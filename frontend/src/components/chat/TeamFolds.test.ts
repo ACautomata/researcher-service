@@ -13,6 +13,7 @@ const fold = (over: Partial<TeamFold> = {}): TeamFold => ({
     streaming: false,
     tools: [{ id: 't1', name: 'read', state: 'done', title: null, input: { file_path: 'a.md' }, result: 'ok' }],
     media: [],
+    files: [],
   }],
   mailbox: [{ id: 'mail1', senderTeammateId: 'tm1', recipientTeammateId: null, kind: 'message', content: '已完成整理', displayContent: '已完成整理', createdAt: '2026-10-06T01:00:00Z' }],
   ...over,
@@ -147,8 +148,8 @@ describe('并发多 teammate 不串区（#796 验收）', () => {
   it('两折叠区各自 data-teammate-id 隔离；开合互不影响；内容不混', async () => {
     const w = mountFolds({
       teams: [
-        fold({ id: 'tmA', name: '文献员', msgs: [{ role: 'assistant', raw: '甲线产出', text: '甲线产出', thinking: '', thinkingOpen: false, streaming: false, tools: [], media: [] }] }),
-        fold({ id: 'tmB', name: '写作员', msgs: [{ role: 'assistant', raw: '乙线产出', text: '乙线产出', thinking: '', thinkingOpen: false, streaming: false, tools: [], media: [] }] }),
+        fold({ id: 'tmA', name: '文献员', msgs: [{ role: 'assistant', raw: '甲线产出', text: '甲线产出', thinking: '', thinkingOpen: false, streaming: false, tools: [], media: [], files: [] }] }),
+        fold({ id: 'tmB', name: '写作员', msgs: [{ role: 'assistant', raw: '乙线产出', text: '乙线产出', thinking: '', thinkingOpen: false, streaming: false, tools: [], media: [], files: [] }] }),
       ],
       expanded: { tmA: true },
     })
