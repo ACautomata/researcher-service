@@ -30,6 +30,6 @@
 - `components/` — `FileTree` / `WikiGraph`（obsidian 风格图谱）/
   ChatView 哑组件族（props-in/emits-out，零协议 import：`ChatSidebar`（会话扁平列表 + lab 文件树）/
   `ChatHeader`/`ChatStream`/`ChatComposer`/`ChatMessageItem`/`ThinkingCard`/`ToolLine`（#799 起展开区接插件渲染注册表——命中交插件组件消费 details，未注册默认输入/输出详情）/`ApprovalCard`/`ApprovalDock`（#796 审批卡具名徽标 teammateName；#920 起 Dock 按 source==='experiment-plan' 分流 `PlanApprovalCard`——W4 实验方案人审卡，plan.text 经 MarkdownRenderer 渲染）
-  + `TeamFolds`（#796 teammate 具名折叠区——状态八值徽标/审批局部冻结/归档终态/展开轨迹同形状行 + mailbox 追问广播呈现）+ `TurnFilesCard`（#959/#960 轮次产物卡片——挂 ChatMessageItem 媒体列表之后/ai-notice 之前，恒在折叠条外；#960 T2 起：非 delete 行「下载」文字链走 readAttachmentBlob 认证字节通道（blob URL + a[download]），deleted 行「已删除」无链接，filesTotal > 列出数时行尾「等 N 个文件」计数行；视觉定稿归 #962 T4））。
+  + `TeamFolds`（#796 teammate 具名折叠区——状态八值徽标/审批局部冻结/归档终态/展开轨迹同形状行 + mailbox 追问广播呈现）+ `TurnFilesCard`（#959/#960/#961 轮次产物卡片——挂 ChatMessageItem 媒体列表之后/ai-notice 之前，恒在折叠条外；#960 T2 起：非 delete 行「下载」文字链走 readAttachmentBlob 认证字节通道（blob URL + a[download]），deleted 行「已删除」无链接，filesTotal > 列出数时行尾「等 N 个文件」计数行；#961 T3 起：hasExec 标记（turn.files 帧随带，true 才落键）时卡底一行「本轮含 Shell 调用，其文件副作用不在此列」——D6 动态提示只断言「有调用」；视觉定稿归 #962 T4））。
 
 - 模型配置页统一管理平台默认端点只读卡片、六预设 BYOK 表单、模型列表、保存前试连、删除影响面与插件 LLM 指派（含 judge）。API key 编辑留空保持原值；响应只显示掩码或 key_error，不回填明文。

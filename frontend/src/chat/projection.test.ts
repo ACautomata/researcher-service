@@ -37,6 +37,7 @@ function normalize(m: Msg) {
     media: m.media,
     files: m.files,
     filesTotal: m.filesTotal,
+    hasExec: m.hasExec,
   }
 }
 
@@ -293,6 +294,41 @@ describe('applyEvent（实时入口）事件语义', () => {
     expect(vm[0].filesTotal).toBe(25)
   })
 
+  it('#961 turn.files hasExec：标记进 Msg（实时面——exec 提示行数据源）', () => {
+    let vm = applyEvent([], ev('run.started', {}, { runId: 'r1' }))
+    vm = applyEvent(vm, ev('tool.start', { toolCallId: 'c1', name: 'execute', input: 'ls' }, { runId: 'r1' }))
+    vm = applyEvent(vm, ev('tool.end', { toolCallId: 'c1', state: 'success' }, { runId: 'r1' }))
+    vm = applyEvent(vm, ev('turn.files', { files: [{ path: 'a.md', op: 'created' }], total: 1, hasExec: true }, { runId: 'r1' }))
+    expect(vm[0].hasExec).toBe(true)
+    // 整帧替换：第二帧无标记 → 标记清除（幂等重复帧同帧无碍）
+    vm = applyEvent(vm, ev('turn.files', { files: [{ path: 'a.md', op: 'created' }], total: 1 }, { runId: 'r1' }))
+    expect(vm[0].hasExec).toBeUndefined()
+  })
+
+  it('#961 hasExec 校验门：非 true（0 信任）不落标记——「不含 execute 轮无提示行」实时面', () => {
+    let vm = applyEvent([], ev('run.started', {}, { runId: 'r1' }))
+    vm = applyEvent(vm, ev('turn.files', { files: [{ path: 'a.md', op: 'created' }] }, { runId: 'r1' }))
+    expect(vm[0].hasExec).toBeUndefined()
+    vm = applyEvent(vm, ev('turn.files', { files: [{ path: 'a.md', op: 'created' }], hasExec: 'yes' }, { runId: 'r1' }))
+    expect(vm[0].hasExec).toBeUndefined()
+    vm = applyEvent(vm, ev('turn.files', { files: [{ path: 'a.md', op: 'created' }], hasExec: 1 }, { runId: 'r1' }))
+    expect(vm[0].hasExec).toBeUndefined()
+  })
+
+  it('#961 回放面 hasExec：投影行标记 → Msg（实时 ≡ 回放——刷新后提示行不丢）', () => {
+    const vm = fromProjection({
+      sessionId: 's1', title: 'T',
+      messages: [assistantRow({ files: [{ path: 'a.md', op: 'created' }], hasExec: true })],
+    })
+    expect(vm[0].hasExec).toBe(true)
+    // 无标记行 → 不落键（纯文件修改轮回放无提示行）
+    const vm2 = fromProjection({
+      sessionId: 's1', title: 'T',
+      messages: [assistantRow({ files: [{ path: 'a.md', op: 'created' }] })],
+    })
+    expect(vm2[0].hasExec).toBeUndefined()
+  })
+
   it('#959 files-only 轮终态不剥落 + 不折叠（产物非轨迹——卡片恒在折叠条外）', () => {
     let vm = applyEvent([], ev('run.started', {}, { runId: 'r1' }))
     vm = applyEvent(vm, ev('turn.files', { files: [{ path: 'a.md', op: 'created' }] }, { runId: 'r1' }))
@@ -360,6 +396,7 @@ describe('零差异一致性（硬验收：reduce(全量事件) ≡ 投影行）
     const media: Array<Record<string, unknown>> = []
     const files: Array<Record<string, unknown>> = []
     let filesTotal: number | undefined = undefined
+    let hasExec = false
     for (const e of events) {
       if (e.type === 'text.delta' && typeof e.payload.delta === 'string') content += e.payload.delta
       if (e.type === 'thinking.delta' && typeof e.payload.delta === 'string') thinking = (thinking ?? '') + e.payload.delta
@@ -388,6 +425,8 @@ describe('零差异一致性（硬验收：reduce(全量事件) ≡ 投影行）
           files.push(...valid)
           const total = e.payload.total
           filesTotal = typeof total === 'number' && Number.isFinite(total) && total >= valid.length ? total : valid.length
+          // #961 hasExec 镜像：帧 hasExec === true 置位（server reducer 同门——仅 true，非 true 不落键）
+          if (e.payload.hasExec === true) hasExec = true
         }
       }
     }
@@ -398,6 +437,7 @@ describe('零差异一致性（硬验收：reduce(全量事件) ≡ 投影行）
     if (media.length > 0) aggregate.media = media
     if (files.length > 0) aggregate.files = files
     if (filesTotal !== undefined) aggregate.filesTotal = filesTotal
+    if (hasExec) aggregate.hasExec = true
     rows.push(assistantRow({ id: 'm2', content, ...aggregate }))
     return rows
   }
@@ -525,6 +565,17 @@ describe('零差异一致性（硬验收：reduce(全量事件) ≡ 投影行）
           { path: 'notes/edited.md', op: 'modified' },
           { path: 'notes/gone.md', op: 'deleted' },
         ] }, { runId: 'r1' }),
+        ev('run.completed', {}, { runId: 'r1' }),
+      ],
+    },
+    {
+      name: 'exec + 文件产物轮（#961 hasExec 随帧——回放后卡底 exec 提示行不丢）',
+      events: [
+        ev('run.started', {}, { runId: 'r1' }),
+        ev('tool.start', { toolCallId: 'e1', name: 'execute', input: '{"command":"python gen.py"}' }, { runId: 'r1' }),
+        ev('tool.end', { toolCallId: 'e1', state: 'success', details: 'ok' }, { runId: 'r1' }),
+        ev('text.delta', { delta: '跑完了。' }, { runId: 'r1' }),
+        ev('turn.files', { files: [{ path: 'out/result.csv', op: 'created' }], total: 1, hasExec: true }, { runId: 'r1' }),
         ev('run.completed', {}, { runId: 'r1' }),
       ],
     },

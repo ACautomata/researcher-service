@@ -103,3 +103,16 @@ describe('TurnFilesCard（#960 下载与截断）', () => {
     expect(click).toHaveBeenCalled()
   })
 })
+
+describe('TurnFilesCard（#961 exec 提示行——D6 动态提示）', () => {
+  it('hasExec → 卡底渲染一行「本轮含 Shell 调用，其文件副作用不在此列」（D6 定稿文案）', () => {
+    const w = mount(TurnFilesCard, { props: { files: rows, hasExec: true } })
+    const hint = w.get('[data-test="turn-files-exec"]')
+    expect(hint.text()).toBe('本轮含 Shell 调用，其文件副作用不在此列')
+  })
+
+  it('无标记（缺省）→ 无提示行（不含 execute 轮卡底干净）', () => {
+    const w = mount(TurnFilesCard, { props: { files: rows } })
+    expect(w.find('[data-test="turn-files-exec"]').exists()).toBe(false)
+  })
+})

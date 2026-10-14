@@ -59,6 +59,9 @@ export interface TurnSnapshot {
   // #960 截断计数：files 为截断后列出面（≤TURN_FILES_MAX_ROWS），filesTotal = 截断前行数
   // （payload.total——「等 N 个文件」计数行的回放面数据源；files 缺省即无卡，恒不落键）。
   readonly filesTotal?: number
+  // #961 exec 提示行标记：本轮含 EXEC_TOOLS 调用（payload.hasExec === true 才置位——「有调用」
+  // 非「有写入」，D6）；依附 files 块（无卡轮无帧即无标记），恒不落 false。
+  readonly hasExec?: boolean
 }
 
 // RunService recordTurn 注入缝的载荷（run 终态的单 turn 聚合 + 终态 checkpoint 锚点）。
@@ -116,14 +119,19 @@ export function serializeAttachments(snap: Partial<TurnSnapshot> & { command?: S
     ...(snap.tools !== undefined ? { tools: snap.tools } : {}),
     ...(snap.media !== undefined && snap.media.length > 0 ? { media: snap.media } : {}),
     ...(snap.files !== undefined && snap.files.length > 0
-      ? { files: snap.files, ...(snap.filesTotal !== undefined ? { filesTotal: snap.filesTotal } : {}) }
+      ? {
+          files: snap.files,
+          ...(snap.filesTotal !== undefined ? { filesTotal: snap.filesTotal } : {}),
+          ...(snap.hasExec ? { hasExec: true } : {}),
+        }
       : {}),
     ...(snap.command !== undefined ? { command: snap.command } : {}),
   })
 }
 
 // 空聚合判据（TurnSnapshot 接受面纯函数——TurnReducer.isEmpty 与 #779 checkpointTurn 产物
-// 共用单一实现，「TurnSnapshot 增字段即静默漂移」的防漂移面）。
+// 共用单一实现，「TurnSnapshot 增字段即静默漂移」的防漂移面）。hasExec 不列：依附 files 块
+// （恒 true⇒files 非空，files 已列——无 files 的 hasExec 不会被写出），列入反而双计。
 export function isEmptyTurnSnapshot(snap: TurnSnapshot): boolean {
   return (
     snap.content === '' &&
@@ -141,6 +149,7 @@ export class TurnReducer {
   private readonly media: MediaRef[] = []
   private readonly files: TurnFileRow[] = []
   private filesTotal: number | undefined = undefined
+  private hasExec = false
 
   // 消费一条 run 域目录事件；白名单外（run.* / session.* / 未知）一律忽略，绝不抛。
   feed(event: { type: string; payload: unknown }): void {
@@ -182,7 +191,7 @@ export class TurnReducer {
       // 事件经 hub 发实时面）。行级校验门 0 信任——非法行丢弃不放大，整帧非数组忽略。
       // 单帧不变量：每 run 恰一帧（前端 applyEvent 按「整帧替换」消费——本处 append 在单帧
       // 下与之等价）；#960 物化回填发生在 runService 发帧前（回填第二帧两入口即分叉）。
-      const p = payload as { files?: unknown; total?: unknown } | null
+      const p = payload as { files?: unknown; total?: unknown; hasExec?: unknown } | null
       if (!p || !Array.isArray(p.files)) return
       const rows: TurnFileRow[] = []
       for (const raw of p.files) {
@@ -203,6 +212,9 @@ export class TurnReducer {
       // 非法值丢弃用缺省 = 列出数，不截断即无计数行）。
       this.filesTotal =
         typeof p.total === 'number' && Number.isFinite(p.total) && p.total >= rows.length ? p.total : rows.length
+      // #961 exec 提示行标记：仅 true 置位（0 信任——非 true 一律不落键；单帧不变量同 files：
+      // 每 run 恰一帧，整帧替换语义下重复帧幂等）。
+      if (p.hasExec === true) this.hasExec = true
       return
     }
     if (event.type === 'tool.start') {
@@ -262,7 +274,7 @@ export class TurnReducer {
       ...(this.tools.size > 0 ? { tools: [...this.tools.values()] } : {}),
       ...(this.media.length > 0 ? { media: [...this.media] } : {}),
       ...(this.files.length > 0
-        ? { files: [...this.files], filesTotal: this.filesTotal ?? this.files.length }
+        ? { files: [...this.files], filesTotal: this.filesTotal ?? this.files.length, ...(this.hasExec ? { hasExec: true } : {}) }
         : {}),
     }
   }

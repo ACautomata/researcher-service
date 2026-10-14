@@ -49,6 +49,9 @@ export interface TurnContent {
   // #960 截断计数（server TurnSnapshot.filesTotal 镜像）：files 为截断后列出面，filesTotal =
   // 截断前行数——「等 N 个文件」计数行数据源；files 缺省即无卡，filesTotal 不落键。
   filesTotal?: number
+  // #961 exec 提示行标记（server TurnSnapshot.hasExec 镜像）：本轮含 EXEC_TOOLS（Shell）调用
+  // ——卡底「本轮含 Shell 调用，其文件副作用不在此列」提示行数据源；true 才落键，缺省无标记。
+  hasExec?: boolean
 }
 
 // 投影行：attachmentsJson v1 展开进行内（assistant 行 thinking/tools/media；command 面读侧

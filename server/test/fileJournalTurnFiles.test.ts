@@ -6,7 +6,7 @@
 
 import { describe, it, expect } from 'vitest'
 import type { FileJournal } from '../src/generated/prisma/client'
-import { turnFileRowsFromJournal } from '../src/runner/filejournal/turnFiles'
+import { turnFileRowsFromJournal, turnHasExecCall } from '../src/runner/filejournal/turnFiles'
 
 type JournalRow = Pick<FileJournal, 'op' | 'path' | 'beforeSha256' | 'toolCallId'>
 
@@ -59,5 +59,34 @@ describe('turnFileRowsFromJournal（#959 聚合纯函数）', () => {
   it('全旁路行 / 空输入 → 空数组（无行即无卡的调用方判空前提）', () => {
     expect(turnFileRowsFromJournal([])).toEqual([])
     expect(turnFileRowsFromJournal([row({ toolCallId: 'ingest-x' })])).toEqual([])
+  })
+})
+
+// #961 exec 提示行判定：复用 rewind preview（#782）「工具行按 EXEC_TOOLS 过滤」纯函数范式
+// （preview.ts extractExecCrossed——同一 ToolLine[] 接受面，判定 = 清单非空）。
+describe('turnHasExecCall（#961 exec 提示行判定纯函数）', () => {
+  it('含 execute 调用 → true（EXEC_TOOLS 白名单成员）', () => {
+    expect(turnHasExecCall([{ toolCallId: 'c1', name: 'execute', input: 'ls' }])).toBe(true)
+    expect(
+      turnHasExecCall([
+        { toolCallId: 'c1', name: 'write_file', input: '{}' },
+        { toolCallId: 'c2', name: 'execute', input: 'ls' },
+      ]),
+    ).toBe(true)
+  })
+
+  it('不含 execute 轮（纯文本 / 非 exec 工具）→ false——提示行不出现的判定面', () => {
+    expect(turnHasExecCall([])).toBe(false)
+    expect(turnHasExecCall([{ toolCallId: 'c1', name: 'write_file', input: '{}' }])).toBe(false)
+    expect(turnHasExecCall([{ toolCallId: 'c1', name: 'read_file', input: '{}' }])).toBe(false)
+  })
+
+  it('0 信任：非数组 / 坏行（缺 name / 非字符串 name）不炸，一律 false', () => {
+    expect(turnHasExecCall(undefined)).toBe(false)
+    expect(turnHasExecCall(null)).toBe(false)
+    expect(turnHasExecCall('execute')).toBe(false)
+    expect(turnHasExecCall([null, undefined, 42, { toolCallId: 'c1' }, { name: 7 }])).toBe(false)
+    // 坏行与真调用混排：真调用仍判出（坏行静默跳过）
+    expect(turnHasExecCall([{ name: 7 }, { toolCallId: 'c1', name: 'execute', input: '' }])).toBe(true)
   })
 })
