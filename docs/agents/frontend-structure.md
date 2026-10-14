@@ -23,6 +23,9 @@
   `useEventStream.ts`（SSE 薄封装——原生重连 + seq gap 检测 + 401 经刷新链关流 + session.terminated 停重连；#799/#913 订阅目录增 figure_run.progress / research_run.progress）/
   `restOutbox.ts`（#779 story 12 断线排队：sessionStorage 落盘、50 上限丢最旧、按序幂等 flush）/
   `attachments.ts`（采集/校验纯函数，发送经 multipart 上传换 attachmentIds）。
+- `wiki/` — wiki 阅读域纯逻辑：`reader.ts`（OKF frontmatter 解析——type/title/description/category/tags，
+  category 读面归「未分类」收敛；wiki 相对链解析）+ `values.ts`（显示层常量单源——category 值域/
+  「未分类」/status 中文徽标映射，契约对齐 server/wiki/values.ts）+ `useWikiUpdate.ts`（更新 run 进度订阅）。
 - `views/` — 用户面板视图：`LoginView` / `ChatView`（REST+SSE 编排壳；#796 起 teammate 具名折叠区随消息流渲染）/ `WikiView` / `ModelView` / `PluginsView`（#799 插件目录页——能力可见性唯一入口 + per-user 启用位开关）/ `LegalDocumentView` / `NotFoundView`（admin 页已随迁 `admin/views/`，#800）。FigureEditorView / CategoriesView / MdEditor 已随 #747 回归退役；ContainersView 已随 #858 退役。
 - `components/` — `FileTree` / `WikiGraph`（obsidian 风格图谱）/
   ChatView 哑组件族（props-in/emits-out，零协议 import：`ChatSidebar`（会话扁平列表 + lab 文件树）/

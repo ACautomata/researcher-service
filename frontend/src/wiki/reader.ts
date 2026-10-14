@@ -1,4 +1,5 @@
 import { parse } from 'yaml'
+import { WIKI_CATEGORIES, WIKI_UNCATEGORIZED } from './values'
 
 /** Official visualize reader shape; provenance stays out of the preview. */
 export function parseWikiDocument(content: string, fallbackTitle: string) {
@@ -11,9 +12,12 @@ export function parseWikiDocument(content: string, fallbackTitle: string) {
     } catch { /* Invalid metadata must not hide readable markdown. */ }
   }
   const text = (key: string) => typeof fields[key] === 'string' ? fields[key] as string : ''
+  // category 读面归组（#954，对齐服务端 frontmatterCategory）：值域外/畸形一律「未分类」，不回写文件。
+  const rawCategory = text('category')
   return {
     type: text('type'), title: text('title') || fallbackTitle,
     description: text('description'),
+    category: (WIKI_CATEGORIES as readonly string[]).includes(rawCategory) ? rawCategory : WIKI_UNCATEGORIZED,
     tags: Array.isArray(fields.tags) ? fields.tags.filter((tag): tag is string => typeof tag === 'string') : [],
     body: match ? content.slice(match[0].length) : content,
   }
