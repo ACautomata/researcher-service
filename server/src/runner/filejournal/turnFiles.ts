@@ -6,15 +6,15 @@ import type { FileJournal } from '../../generated/prisma/client'
 import { IDEMPOTENCY_INGEST_PREFIX, IDEMPOTENCY_MEDIA_PREFIX, JOURNAL_OPS } from './values'
 
 // D8 行形状契约 `{ path, op, attachmentId?, fileName, size? }`。T1（#959）只产 { path, op }
-// ——attachmentId/fileName/size 由 T2（#960）物化回填；delete 行恒无 attachmentId（无字节
-// ——恢复语义归 rewind 不归卡片）。
+// ——attachmentId/fileName/size 由 T2（#960）物化回填（故这三键非 readonly——回填是契约内写
+// 位）；delete 行恒无 attachmentId（无字节——恢复语义归 rewind 不归卡片）。
 export type TurnFileOp = 'created' | 'modified' | 'deleted'
 export interface TurnFileRow {
   readonly path: string
   readonly op: TurnFileOp
-  readonly attachmentId?: string
-  readonly fileName?: string
-  readonly size?: number
+  attachmentId?: string
+  fileName?: string
+  size?: number
 }
 
 // op 映射（#951 实现位口径）：write∧前像空 = 新建；write/edit∧前像非空 = 修改；delete = 删除。

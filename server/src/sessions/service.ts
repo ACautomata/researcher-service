@@ -235,7 +235,13 @@ async function insertWithNextTurn(
 // thinking/tools 仅在有内容时出现（与 TurnReducer.snapshot 缺省纪律一致）。聚合面键集显式
 // 列全（media/files 与 thinking/tools 同款）——回放半边不靠 rest 透传侥幸成立。
 function toProjectionMessage(row: SessionMessage): ProjectionMessage {
-  let aggregate: { thinking?: string; tools?: unknown[]; media?: unknown[]; files?: unknown[] } = {}
+  let aggregate: {
+    thinking?: string
+    tools?: unknown[]
+    media?: unknown[]
+    files?: unknown[]
+    filesTotal?: number
+  } = {}
   if (row.role === 'assistant') {
     try {
       const parsed = JSON.parse(row.attachmentsJson) as {
@@ -244,6 +250,7 @@ function toProjectionMessage(row: SessionMessage): ProjectionMessage {
         tools?: unknown[]
         media?: unknown[]
         files?: unknown[]
+        filesTotal?: number
       }
       const { v: _v, ...rest } = parsed
       aggregate = rest

@@ -56,6 +56,9 @@ export interface TurnSnapshot {
   // #959 轮次产物卡片：completed 时隙 fileJournal 本 run 行聚合（turn.files 事件同形状——
   // 实时事件 ≡ 回放投影零差异）。行契约见 filejournal/turnFiles.ts TurnFileRow。
   readonly files?: TurnFileRow[]
+  // #960 截断计数：files 为截断后列出面（≤TURN_FILES_MAX_ROWS），filesTotal = 截断前行数
+  // （payload.total——「等 N 个文件」计数行的回放面数据源；files 缺省即无卡，恒不落键）。
+  readonly filesTotal?: number
 }
 
 // RunService recordTurn 注入缝的载荷（run 终态的单 turn 聚合 + 终态 checkpoint 锚点）。
@@ -112,7 +115,9 @@ export function serializeAttachments(snap: Partial<TurnSnapshot> & { command?: S
     ...(snap.thinking !== undefined ? { thinking: snap.thinking } : {}),
     ...(snap.tools !== undefined ? { tools: snap.tools } : {}),
     ...(snap.media !== undefined && snap.media.length > 0 ? { media: snap.media } : {}),
-    ...(snap.files !== undefined && snap.files.length > 0 ? { files: snap.files } : {}),
+    ...(snap.files !== undefined && snap.files.length > 0
+      ? { files: snap.files, ...(snap.filesTotal !== undefined ? { filesTotal: snap.filesTotal } : {}) }
+      : {}),
     ...(snap.command !== undefined ? { command: snap.command } : {}),
   })
 }
@@ -135,6 +140,7 @@ export class TurnReducer {
   private readonly tools = new Map<string, ToolLine>()
   private readonly media: MediaRef[] = []
   private readonly files: TurnFileRow[] = []
+  private filesTotal: number | undefined = undefined
 
   // 消费一条 run 域目录事件；白名单外（run.* / session.* / 未知）一律忽略，绝不抛。
   feed(event: { type: string; payload: unknown }): void {
@@ -175,14 +181,15 @@ export class TurnReducer {
       // #959 轮次产物卡片：completed 时隙 runService 聚合产物整帧入聚合（回放同形状；同一
       // 事件经 hub 发实时面）。行级校验门 0 信任——非法行丢弃不放大，整帧非数组忽略。
       // 单帧不变量：每 run 恰一帧（前端 applyEvent 按「整帧替换」消费——本处 append 在单帧
-      // 下与之等价；T2（#960）物化回填若引入第二帧，两入口即分叉，回填必须发生在发帧前）。
-      const p = payload as { files?: unknown } | null
+      // 下与之等价）；#960 物化回填发生在 runService 发帧前（回填第二帧两入口即分叉）。
+      const p = payload as { files?: unknown; total?: unknown } | null
       if (!p || !Array.isArray(p.files)) return
+      const rows: TurnFileRow[] = []
       for (const raw of p.files) {
         const f = raw as Partial<TurnFileRow> | null
         if (!f || typeof f.path !== 'string' || f.path === '') continue
         if (f.op !== 'created' && f.op !== 'modified' && f.op !== 'deleted') continue
-        this.files.push({
+        rows.push({
           path: f.path,
           op: f.op,
           ...(typeof f.attachmentId === 'string' && f.attachmentId !== '' ? { attachmentId: f.attachmentId } : {}),
@@ -190,6 +197,12 @@ export class TurnReducer {
           ...(typeof f.size === 'number' ? { size: f.size } : {}),
         })
       }
+      if (rows.length === 0) return
+      this.files.push(...rows)
+      // #960 截断计数：total 须 number 且 ≥ 列出数（截断前行数不可能小于列出面——0 信任
+      // 非法值丢弃用缺省 = 列出数，不截断即无计数行）。
+      this.filesTotal =
+        typeof p.total === 'number' && Number.isFinite(p.total) && p.total >= rows.length ? p.total : rows.length
       return
     }
     if (event.type === 'tool.start') {
@@ -248,7 +261,9 @@ export class TurnReducer {
       ...(this.think !== '' ? { thinking: this.think } : {}),
       ...(this.tools.size > 0 ? { tools: [...this.tools.values()] } : {}),
       ...(this.media.length > 0 ? { media: [...this.media] } : {}),
-      ...(this.files.length > 0 ? { files: [...this.files] } : {}),
+      ...(this.files.length > 0
+        ? { files: [...this.files], filesTotal: this.filesTotal ?? this.files.length }
+        : {}),
     }
   }
 }

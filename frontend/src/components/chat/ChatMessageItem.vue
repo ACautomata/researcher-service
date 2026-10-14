@@ -200,8 +200,8 @@ const copyState = ref<'idle' | 'copied' | 'failed'>('idle')
         <MediaAttachment v-for="m in msg.media" :key="m.attachmentId" :media="m" :readiness="mediaReadiness" />
       </div>
       <!-- #959 轮次产物卡片：槽位 = 媒体列表之后、AI 提示条之前（D4 恒在折叠条外——轨迹模板
-           之外，折叠开合不影响）。T1 朴素面，视觉定稿归 T4。 -->
-      <TurnFilesCard v-if="msg.files.length" :files="msg.files" />
+           之外，折叠开合不影响）。T1 朴素面，视觉定稿归 T4。filesTotal = #960 截断计数。 -->
+      <TurnFilesCard v-if="msg.files.length" :files="msg.files" :files-total="msg.filesTotal" />
       <div v-if="msg.role === 'assistant' && !msg.streaming" class="ai-notice" data-test="ai-notice">
         <span>内容由 AI 生成，仅供参考</span>
         <span class="ai-actions">

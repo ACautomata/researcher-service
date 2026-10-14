@@ -88,7 +88,7 @@ import { TurnReducer, isEmptyTurnSnapshot, type RecordTurnPayload, type TurnSnap
 import { TeammateService, type TeammateSummary } from '../teammates/service'
 import { createTeammateTools } from '../teammates/tools'
 import type { FileJournalService } from '../filejournal/service'
-import { IDEMPOTENCY_INGEST_PREFIX, IDEMPOTENCY_MEDIA_PREFIX } from '../filejournal/values'
+import { IDEMPOTENCY_INGEST_PREFIX, IDEMPOTENCY_MEDIA_PREFIX, TURN_FILES_MAX_ROWS, labAbsOf } from '../filejournal/values'
 import { turnFileRowsFromJournal } from '../filejournal/turnFiles'
 import { createWikiRetrievalTools } from '../wikisearch'
 import {
@@ -1113,12 +1113,46 @@ export class RunService {
           this.runs.set(cmd.sessionId, { runId: cmd.runId, state: 'aborted', by: 'user' })
           this.publish(cmd.ownerId, { type: 'run.aborted', payload: { by: 'user' } }, cmd)
         } else {
+          // #780 D9 / #960 物化调用组装（两处共用同形态——差异仅 declaredPath/mime）：
+          // D9 媒体块（block.declaredPath + 声明 mime）与 turn.files 行（labAbsOf(row.path)
+          // + octet-stream）各自调用。journalWrite 落 journal 行（uploads/<id>/<file> +
+          // media- 前缀 toolCallId——turnFileRowsFromJournal 天然过滤，物化行不自现于卡片）；
+          // 有 fileJournal 时 journal-first，无则 primitives 直写。直盖终态锚：本 run 的
+          // checkpointId 回填 updateMany（stream 结束处）已执行完、先于本次物化 insert——
+          // 不直盖则物化行恒 pending 恒逆放。
+          const attachments = this.deps.attachments
+          const materializeForRun = attachments
+            ? (declaredPath: string, mime: string) =>
+                attachments.materializeAgentMedia({
+                  sessionId: sandboxSessionId,
+                  ownerId: session.ownerId,
+                  declaredPath,
+                  mime,
+                  container: labContainer,
+                  primitives: runPrimitives,
+                  ...(this.deps.fileJournal
+                    ? {
+                        journalWrite: async (jw: { attachmentId: string; fileName: string }, bytes: Buffer) => {
+                          await this.deps.fileJournal!.journalMaterialize({
+                            sessionId: sandboxSessionId,
+                            container: labContainer,
+                            path: `uploads/${jw.attachmentId}/${jw.fileName}`,
+                            bytes,
+                            toolCallId: `${IDEMPOTENCY_MEDIA_PREFIX}${jw.attachmentId}`,
+                            runId: cmd.runId,
+                            ...(anchorCheckpointId !== null ? { checkpointId: anchorCheckpointId } : {}),
+                          })
+                        },
+                      }
+                    : {}),
+                })
+            : null
           // #780 D9 媒体块归约（片 3）：run 完成前扫描终态 assistant 回复的媒体块 → 校验（存在性/
           // mime 白名单）/拷进 /lab/uploads/ 物化/建 Attachment 行 → `attachment` 事件（实时面）+
           // turn.feed（回放同形状——attachmentsJson media 数组，单管线渲染零差异）。校验失败块
           // 降级文本占位（占位进事件流与回放聚合）+ 审计计数 warn（不 fail run）。仅 completed
           // 路径扫（interrupted/aborted 的回复未终稿，不做产物面）。
-          if (this.deps.attachments) {
+          if (materializeForRun) {
             const scan = scanMediaBlocks(lastMessage(state.values?.messages ?? []))
             const degrade = (declaredPath: string, reason: string): void => {
               const placeholder = `[媒体产物不可用：${declaredPath}]`
@@ -1128,32 +1162,7 @@ export class RunService {
               console.warn(`[runner] media block degraded: session=${cmd.sessionId} path=${declaredPath} reason=${reason}`)
             }
             for (const block of scan.materializable) {
-              const fj = this.deps.fileJournal
-              const meta = await this.deps.attachments.materializeAgentMedia({
-                sessionId: sandboxSessionId,
-                ownerId: session.ownerId,
-                declaredPath: block.declaredPath,
-                mime: block.mime,
-                container: labContainer,
-                primitives: runPrimitives,
-                ...(fj
-                  ? {
-                      journalWrite: async (row: { attachmentId: string; fileName: string }, bytes: Buffer) => {
-                        await fj.journalMaterialize({
-                          sessionId: sandboxSessionId,
-                          container: labContainer,
-                          path: `uploads/${row.attachmentId}/${row.fileName}`,
-                          bytes,
-                          toolCallId: `${IDEMPOTENCY_MEDIA_PREFIX}${row.attachmentId}`,
-                          runId: cmd.runId,
-                          // 直盖终态锚：本 run 的 checkpointId 回填 updateMany（stream 结束处）
-                          // 已执行完、先于本次物化 insert——不直盖则 media 行恒 pending 恒逆放
-                          ...(anchorCheckpointId !== null ? { checkpointId: anchorCheckpointId } : {}),
-                        })
-                      },
-                    }
-                  : {}),
-              })
+              const meta = await materializeForRun(block.declaredPath, block.mime)
               if (meta) {
                 // width/height/durationMs 可选探测字段留白（#747 C 节 attachment 载荷）：
                 // 服务端无媒体探测面，UX 由前端 blob 自派生兜底；探测实现归后续票。
@@ -1183,9 +1192,28 @@ export class RunService {
               where: { sessionId: sandboxSessionId, runId: cmd.runId, archivedAt: null },
               orderBy: { seq: 'asc' },
             })
-            const files = turnFileRowsFromJournal(journalRows)
-            if (files.length > 0) {
-              const filesEvent = { type: 'turn.files', payload: { files } } as const
+            const all = turnFileRowsFromJournal(journalRows)
+            if (all.length > 0) {
+              // #960 T2：截断（D3——列出的即 = 可下载的，物化同步截断）+ 逐非 delete 行物化
+              // Attachment 回填（materializeForRun 同形；declaredPath = /lab 绝对路径——journal
+              // 行 path 为相对，labAbsOf 单一转换点）。物化失败降级：行保留（历史陈述）无
+              // attachmentId（fail-soft 同 D9 媒体物化，不 fail run）；delete 行无字节不物化。
+              // 单帧不变量（T1 注）：回填必须发生在发帧前——发帧后第二帧两入口即分叉。
+              const listed = all.slice(0, TURN_FILES_MAX_ROWS)
+              if (materializeForRun) {
+                for (const row of listed) {
+                  if (row.op === 'deleted') continue
+                  const meta = await materializeForRun(labAbsOf(row.path), 'application/octet-stream')
+                  if (meta) {
+                    row.attachmentId = meta.attachmentId
+                    row.fileName = meta.fileName
+                    row.size = meta.size
+                  } else {
+                    console.warn(`[runner] turn.files 物化降级（行无下载链接）: run=${cmd.runId} path=${row.path}`)
+                  }
+                }
+              }
+              const filesEvent = { type: 'turn.files', payload: { files: listed, total: all.length } } as const
               turn.feed(filesEvent)
               this.publish(cmd.ownerId, filesEvent, cmd)
             }
