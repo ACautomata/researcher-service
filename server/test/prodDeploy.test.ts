@@ -89,9 +89,9 @@ describe('server 镜像构建（#858 后：无模板注入）', () => {
 describe('CD 工作流（issue #593，ADR 0013；#858 后无模板注入）', () => {
   const cd = readRepoFile('.github/workflows/cd.yml')
 
-  it('server 构建多 context 仅 official/ + plugins/（#858：template context 随 fleet provisioning 退役）', () => {
+  it('server 构建 context 无 official（#787 官方内容目录退役，防复活否定式）且 plugins 在位（#788）', () => {
     expect(cd).toMatch(/build-contexts:/)
-    expect(cd).toMatch(/official=\$\{\{ github\.workspace \}\}\/official/)
+    expect(cd).not.toMatch(/official/)
     expect(cd).toMatch(/plugins=\$\{\{ github\.workspace \}\}\/plugins/)
     expect(cd).not.toMatch(/template=/)
     expect(cd).not.toMatch(/deploy=\$\{\{ github\.workspace \}\}\/deploy/)
