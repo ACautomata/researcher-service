@@ -768,7 +768,7 @@ describe('RunService：发消息 → run 终态事件序列（S1，#747 C 节目
     }
   })
 
-  // ---- #959 轮次产物卡片 T1：completed 时隙 journal 聚合 → turn.files 事件 ----
+  // ---- #959 轮次产物卡片 T1：completed/interrupted 两时隙 journal 聚合 → turn.files 事件 ----
 
   // 本 run 段 journal 行 seed（唯一键 (sessionId,seq)/(sessionId,toolCallId)——seq 段位防跨用例碰撞）
   async function seedJournalRows(runId: string, seqBase: number): Promise<void> {
@@ -843,7 +843,7 @@ describe('RunService：发消息 → run 终态事件序列（S1，#747 C 节目
     expect(hub.types()).not.toContain('turn.files')
   }, 15_000)
 
-  it('#959 异常轮次不出卡：failed 路径不聚合（suspended 不经 completed 分支同不聚合）', async () => {
+  it('#959 异常轮次不出卡：failed 路径不聚合（aborted/failed 锚 pending 不出卡；suspended 升级链前段卡已发——#972·R1 B 裁决明示字面代价）', async () => {
     const runId = 'run-files-failed'
     await seedJournalRows(runId, 300)
     const svc = makeService({
@@ -857,6 +857,68 @@ describe('RunService：发消息 → run 终态事件序列（S1，#747 C 节目
     expect(hub.types().at(-1)).toBe('run.failed')
     expect(hub.types()).not.toContain('turn.files')
   })
+
+  // ---- #972·R1 B 裁决：interrupt 分段按段多卡（spec Agreements 条 2 落地——每段各自时隙
+  // 各出各段卡；aborted/failed 仍不聚合，suspended 升级链前段卡已发为裁决明示字面代价）----
+
+  it('#959 B 裁决：interrupt 段聚合出卡（段1 turn.files + recordTurn 落 files）；resume 终段只聚终段行（增量卡）', async () => {
+    // 独立 thread：本用例把线程推进到 completed，不毒化共享 sess-1（interrupt 用例惯例）
+    await prisma.session.create({
+      data: { id: 'sess-i3', ownerId: owner.id, containerId: LAB, title: '' },
+    })
+    const runId1 = 'run-files-int1'
+    await prisma.fileJournal.createMany({
+      data: [
+        { sessionId: 'sess-i3', checkpointId: '', seq: 500, op: 'write', path: 'notes/seg1.md', beforeSha256: null, toolCallId: `${runId1}-t1`, runId: runId1 },
+      ],
+    })
+    const turns: Array<Parameters<RecordTurnFn>[0]> = []
+    const svc = makeService({
+      interruptPolicyFor: () => ({ tools: ['execute'] }),
+      script: [
+        toolCallAi('cB1', 'execute', { command: 'x' }),
+        new AIMessage({ content: '段1完成。' }),
+        new AIMessage({ content: '段2完成。' }),
+      ],
+      recordTurn: async (turn) => { turns.push(turn) },
+    })
+    await svc.execute(cmd({ sessionId: 'sess-i3', runId: runId1 }))
+    // 段1：interrupted 无终态事件，但 turn.files 已发（分段按段出卡，与分段气泡同构）
+    expect(svc.stateOf('sess-i3')?.state).toBe('interrupted')
+    expect(hub.types()).not.toContain('run.completed')
+    const seg1 = hub.events.find((e) => e.type === 'turn.files')
+    expect(seg1).toBeDefined()
+    expect(seg1!.runId).toBe(runId1)
+    expect((seg1!.payload as { files: Array<{ path: string; op: string }> }).files).toEqual([
+      { path: 'notes/seg1.md', op: 'created' },
+    ])
+    // 回放面：段1 recordTurn 落行含 files（刷新回放卡不消失——实时 ≡ 回放零差异 server 半边）；
+    // 半成品 provenance status=failed 同既有纪律
+    expect(turns[0]?.aggregate.files).toEqual([{ path: 'notes/seg1.md', op: 'created' }])
+    expect(turns[0]?.status).toBe('failed')
+
+    // 段2：resume → completed，聚合只含段2 行（runId 过滤 = 增量卡，段1 不重发）
+    const rc = svc.buildResumeCommand({
+      sessionId: 'sess-i3',
+      ownerId: owner.id,
+      username: owner.username,
+      decisions: { decisions: [{ type: 'approve' }] },
+    })
+    await prisma.fileJournal.createMany({
+      data: [
+        { sessionId: 'sess-i3', checkpointId: '', seq: 501, op: 'edit', path: 'notes/seg2.md', beforeSha256: 'aaa', toolCallId: `${rc.runId}-t1`, runId: rc.runId },
+      ],
+    })
+    await svc.execute(rc)
+    expect(svc.stateOf('sess-i3')?.state).toBe('completed')
+    const seg2 = hub.events.filter((e) => e.type === 'turn.files' && e.runId === rc.runId)
+    expect(seg2).toHaveLength(1)
+    expect((seg2[0]!.payload as { files: Array<{ path: string; op: string }> }).files).toEqual([
+      { path: 'notes/seg2.md', op: 'modified' },
+    ])
+    expect(turns[1]?.aggregate.files).toEqual([{ path: 'notes/seg2.md', op: 'modified' }])
+    expect(turns[1]?.status).toBe('success')
+  }, 30_000)
 
   // ---- #960 轮次产物卡片 T2：非 delete 行物化回填 + >20 截断（物化同步截断）----
 

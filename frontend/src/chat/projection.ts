@@ -442,10 +442,13 @@ export function applyEvent(prev: Msg[], event: SessionEvent): Msg[] {
       if (row.stage === stage && row.workflow === workflow) return prev
       overlay.tools[tIdx] = { ...row, stage, ...(typeof workflow === 'string' ? { workflow } : {}) }
     } else if (type === 'turn.files') {
-      // #959 轮次产物卡片：completed 时隙 server 聚合 journal 行后整帧发布（必先于
-      // run.completed——晚于终态 overlay 已 finalized，overlayIndex 找不到落点即丢帧）。
-      // 整帧替换语义（服务端每 run 恰一帧，重复帧幂等）；行级校验门镜像 server reducer
-      // TurnReducer：非法行丢弃，全非法 / 非数组整帧原样返回。#960 filesTotal 同门——帧
+      // #959 轮次产物卡片：段级时隙（completed/interrupted——#972·R1 B 裁决分段按段出卡）
+      // server 聚合 journal 行后整帧发布（completed 时必先于 run.completed——晚于终态
+      // overlay 已 finalized，overlayIndex 找不到落点即丢帧；interrupted 时 overlay 保持
+      // streaming，帧落本段气泡）。整帧替换语义（服务端每 run 恰一帧，重复帧幂等）；行级校验门镜像 server reducer
+      // TurnReducer：非法行丢弃，非数组整帧原样返回。全非法帧 = 空整替（清 files/计数/标记）——
+      // 单帧不变量下 overlay.files 必空、与「原样返回」等价；持有 files 后的清空仅在不变量
+      // 破坏场景出现（整替语义的自然延伸）。#960 filesTotal 同门——帧
       // total 须 number 且 ≥ 列出数（缺省 = 行数，无截断即无计数行）；空帧整替同步清计数。
       const p = event.payload as { files?: unknown; total?: unknown; hasExec?: unknown } | null
       if (!p || !Array.isArray(p.files)) return prev

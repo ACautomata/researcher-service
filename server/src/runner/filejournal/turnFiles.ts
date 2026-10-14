@@ -1,7 +1,7 @@
-// 轮次产物卡片（#951 D8 · 施工票 #959）行契约与聚合映射：runService completed 时隙按
-// (sessionId, runId) 查 fileJournal 行后经本函数过滤/映射为 turn.files 卡片行。类型单一
-// 声明处——sessions/reducer.ts（TurnSnapshot.files）type-only 引用，前端 api/sessions.ts
-// 逐字段镜像。
+// 轮次产物卡片（#951 D8 · 施工票 #959）行契约与聚合映射：runService 段级时隙（completed/
+// interrupted——#972·R1 B 裁决分段按段出卡）按 (sessionId, runId) 查 fileJournal 行后经本函数
+// 过滤/映射为 turn.files 卡片行。类型单一声明处——sessions/reducer.ts（TurnSnapshot.files）
+// type-only 引用，前端 api/sessions.ts 逐字段镜像。
 import type { FileJournal } from '../../generated/prisma/client'
 import { extractExecCrossed } from './preview'
 import { IDEMPOTENCY_INGEST_PREFIX, IDEMPOTENCY_MEDIA_PREFIX, JOURNAL_OPS } from './values'

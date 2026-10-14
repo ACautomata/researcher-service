@@ -53,8 +53,8 @@ export interface TurnSnapshot {
   readonly thinking?: string
   readonly tools?: ToolLine[]
   readonly media?: MediaRef[]
-  // #959 轮次产物卡片：completed 时隙 fileJournal 本 run 行聚合（turn.files 事件同形状——
-  // 实时事件 ≡ 回放投影零差异）。行契约见 filejournal/turnFiles.ts TurnFileRow。
+  // #959 轮次产物卡片：段级时隙（completed/interrupted）fileJournal 本 run 行聚合（turn.files
+  // 事件同形状——实时事件 ≡ 回放投影零差异）。行契约见 filejournal/turnFiles.ts TurnFileRow。
   readonly files?: TurnFileRow[]
   // #960 截断计数：files 为截断后列出面（≤TURN_FILES_MAX_ROWS），filesTotal = 截断前行数
   // （payload.total——「等 N 个文件」计数行的回放面数据源；files 缺省即无卡，恒不落键）。
@@ -187,8 +187,8 @@ export class TurnReducer {
       return
     }
     if (event.type === 'turn.files') {
-      // #959 轮次产物卡片：completed 时隙 runService 聚合产物整帧入聚合（回放同形状；同一
-      // 事件经 hub 发实时面）。行级校验门 0 信任——非法行丢弃不放大，整帧非数组忽略。
+      // #959 轮次产物卡片：段级时隙（completed/interrupted——#972·R1 B 裁决分段按段出卡）
+      // runService 聚合产物整帧入聚合（回放同形状；同一事件经 hub 发实时面）。行级校验门 0 信任——非法行丢弃不放大，整帧非数组忽略。
       // 单帧不变量：每 run 恰一帧（前端 applyEvent 按「整帧替换」消费——本处 append 在单帧
       // 下与之等价）；#960 物化回填发生在 runService 发帧前（回填第二帧两入口即分叉）。
       const p = payload as { files?: unknown; total?: unknown; hasExec?: unknown } | null
