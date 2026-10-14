@@ -90,8 +90,8 @@ describe('dev 寻址与 prod 同形态（issue #594，ADR 0013）', () => {
     expect(compose).toMatch(/redis:7-alpine/)
   })
 
-  it('build 多 context 仅 official/ + plugins/（#858：template context 随 fleet provisioning 退役）', () => {
-    expect(compose).toMatch(/official: \.\.\/official/)
+  it('build context 无 official（#787 官方内容目录退役，防复活否定式）且 plugins 在位（#788）', () => {
+    expect(compose).not.toMatch(/official/)
     expect(compose).toMatch(/plugins: \.\.\/plugins/)
     expect(compose).not.toMatch(/template:/)
     expect(compose).not.toMatch(/RESEARCHER_DIR/)

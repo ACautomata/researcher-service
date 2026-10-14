@@ -9,8 +9,7 @@ FROM node:lts-slim AS build
 
 # 构建布局必须复刻仓库兄弟目录形态（hotfix #788 CD）：plugins/index.ts 经跨包相对导入
 # '../server/src/plugins/api' 引契约类型（#752 R1 双面直引的固有形态，#753 的插件 manifest
-# 同理），content:build 亦按 '../official' 兄弟解析——故 server 根 = /server，official/plugins
-# 两个 named context 分别挂 /official、/plugins（与 WORKDIR 成兄弟）。
+# 同理）——故 server 根 = /server，plugins named context 挂 /plugins（与 WORKDIR 成兄弟）。
 WORKDIR /server
 # better-sqlite3 原生模块（node-gyp）在 build 阶段 npm ci 的 postinstall 编译工具链。
 RUN apt-get update \
@@ -25,7 +24,6 @@ COPY tsconfig.json tsconfig.build.json ./
 COPY src ./src
 COPY prisma ./prisma
 COPY scripts ./scripts
-COPY --from=official / /official
 # 插件目录（#788 · #752 R1 根级 plugins/ 源直引）：server src 编译期 import，
 # 经 buildx named context 注入（dev compose additional_contexts / cd.yml build-contexts 同名）。
 COPY --from=plugins / /plugins
@@ -63,7 +61,7 @@ COPY --from=build /server/scripts ./scripts
 
 # #858 OpenClaw 退役③：home 模板构建期注入（ADR 0013 template context）随 fleet
 # provisioning 退役——生产不再有任何模板注入（唯一宿主数据挂载豁免仍为 docker.sock）。
-# 构建多 context 现仅 official/ + plugins/ 两个（named context 注入，见 build 阶段 COPY）。
+# 构建 named context 现仅 plugins/ 一个（named context 注入，见 build 阶段 COPY）。
 
 COPY docker-entrypoint.sh /usr/local/bin/panel-entrypoint
 RUN chmod +x /usr/local/bin/panel-entrypoint

@@ -601,21 +601,21 @@ describe('中断 / 标题 / 删除 / slash', () => {
 
 
 describe('#797 slash 键盘与参数提示', () => {
-  it('启动加载插件目录；选择官方命令提示参数，发送仍保留 /命令原文', async () => {
+  it('启动加载插件目录；选择系统命令提示参数，发送仍保留 /命令原文', async () => {
     vi.mocked(listPlugins).mockResolvedValue([{ id: 'fig', name: 'Fig', description: '', version: '1', enabled: true, commands: [{ name: 'figure', description: '绘图' }] }])
     const conn = await mounted()
     conn.chat.setInput('/')
     expect(conn.slashMatches.value.map(c => c.alias)).toContain('/figure')
-    conn.chat.setInput('/r')
+    conn.chat.setInput('/m')
     conn.onComposerInput()
     conn.onComposerKeydown(new KeyboardEvent('keydown', { key: 'Tab' }))
-    expect(conn.chat.input).toBe('/research ')
-    expect(conn.slashArgumentHint.value).toContain('$ARGUMENTS')
-    conn.chat.setInput('/research 电池材料')
+    expect(conn.chat.input).toBe('/model ')
+    expect(conn.slashArgumentHint.value).toContain('下一轮')
+    conn.chat.setInput('/model p/m')
     expect(conn.send()).toBe(true)
-    expect(conn.chat.messages.at(-1)?.text).toBe('/research 电池材料')
+    expect(conn.chat.messages.at(-1)?.text).toBe('/model p/m')
     await flushPromises()
-    expect(api.sendSessionMessage).toHaveBeenCalledWith('sess-1', '/research 电池材料', expect.any(String), undefined)
+    expect(api.sendSessionMessage).toHaveBeenCalledWith('sess-1', '/model p/m', expect.any(String), undefined)
     conn.dispose()
   })
 
@@ -669,11 +669,11 @@ describe('#797 插件启用刷新与命令重发', () => {
     conn.dispose()
   })
 
-  it('插件目录请求失败仍可选择官方命令，并给出重试提示', async () => {
+  it('插件目录请求失败仍可选择系统命令，并给出重试提示', async () => {
     vi.mocked(listPlugins).mockRejectedValue(new Error('offline'))
     const conn = await mounted()
-    conn.chat.setInput('/r')
-    expect(conn.slashMatches.value.map(c => c.alias)).toEqual(['/research'])
+    conn.chat.setInput('/m')
+    expect(conn.slashMatches.value.map(c => c.alias)).toEqual(['/model'])
     expect(actionsErr).toHaveBeenCalledWith(expect.stringContaining('重新输入 /'))
     conn.dispose()
   })

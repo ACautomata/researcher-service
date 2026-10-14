@@ -357,18 +357,18 @@ function opened(): void {
 
 
 describe('#797 slash 命令呈现', () => {
-  it('官方命令的参数提示在输入区可见，参数原文保留在 user 消息中', async () => {
+  it('系统命令的参数提示在输入区可见，参数原文保留在 user 消息中', async () => {
     const w = await mountChat()
     const input = w.get('[data-test="input"]')
-    await input.setValue('/r')
-    expect(w.get('[data-test="slash-menu"]').text()).toContain('/research')
+    await input.setValue('/m')
+    expect(w.get('[data-test="slash-menu"]').text()).toContain('/model')
     await input.trigger('keydown', { key: 'Tab' })
-    expect(w.get('[data-test="slash-argument-hint"]').text()).toContain('$ARGUMENTS')
-    await input.setValue('/research 新型电池')
+    expect(w.get('[data-test="slash-argument-hint"]').text()).toContain('下一轮')
+    await input.setValue('/model p/m')
     await input.trigger('keydown', { key: 'Enter' })
     await flushPromises()
-    expect(w.text()).toContain('/research 新型电池')
-    expect(api.sendSessionMessage).toHaveBeenCalledWith('sess-1', '/research 新型电池', expect.any(String), undefined)
+    expect(w.text()).toContain('/model p/m')
+    expect(api.sendSessionMessage).toHaveBeenCalledWith('sess-1', '/model p/m', expect.any(String), undefined)
     w.unmount()
   })
 

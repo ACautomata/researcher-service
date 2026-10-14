@@ -42,9 +42,8 @@ panel-frontend 容器（nginx，唯一对宿主暴露，loopback:18080）
 每次 CI 在 `master` 上成功后自动：
 
 1. 构建 + 推送 `server`、`frontend`、`wiki`（#784）三镜像到 GHCR（`:latest` 与 `:<CI head_sha>`）；
-   `wiki` 另推版本 tag（版本从 wiki Dockerfile 的 `FROM` 行单源提取）。server 镜像构建多 context =
-   `official/`（#787 官方内容）+ `plugins/`（#788 插件包），#858 起无 home 模板注入（fleet
-   provisioning 退役），CD 只分发 compose。
+   `wiki` 另推版本 tag（版本从 wiki Dockerfile 的 `FROM` 行单源提取）。server 镜像构建 named
+   context = `plugins/`（#788 插件包）单 context，CD 只分发 compose。
 2. 渲染运行时 `.env`（敏感值来自 secrets，不进 git）。
 3. scp `docker-compose.deploy.yml` + `.env` → 宿主 `/www/panel/`。
 4. SSH 远端：`docker login ghcr.io`（持久）→ `pull` → `up -d --remove-orphans` → `image prune` →

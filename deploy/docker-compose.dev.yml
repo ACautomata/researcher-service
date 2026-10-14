@@ -28,10 +28,9 @@ services:
   server:
     build:
       context: ../server
-      # prod Dockerfile 的构建多 context：official/plugins 兄弟目录（#788 hotfix 布局）；
+      # prod Dockerfile 的构建 named context：plugins 兄弟目录（#788 hotfix 布局）；
       # 路径基准 = 本目录 deploy/。
       additional_contexts:
-        official: ../official
         plugins: ../plugins                          # #788 插件目录（#752 R1 根级源直引入镜像）
 
     image: panel-server:dev

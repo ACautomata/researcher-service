@@ -8,7 +8,7 @@
 # 四镜像，tag `:latest` + `:<CI head_sha>`（head_sha 取自通过的 CI run，使 latest/sha 精确对应该
 # commit，便于 :sha 回滚）。wiki 镜像另推**版本 tag**。
 # #858 OpenClaw 退役③：fleet 编排退役——构建期 home 模板注入与运行时
-# OPENCLAW_IMAGE 拉取面随之退役；多 context 现仅 official/ + plugins/。
+# OPENCLAW_IMAGE 拉取面随之退役；named context 现仅 plugins/。
 # 部署：appleboy/scp-action 推 compose + 渲染 .env → /www/panel；appleboy/ssh-action 远端
 # docker login（持久，供运行时拉面板镜像复用宿主 daemon 凭证）→ pull → up -d → prune → /api/health 健康门。
 #
@@ -114,11 +114,10 @@ jobs:
         with:
           context: server
           file: server/Dockerfile
-          # 多 context（buildx named context，Dockerfile 以 COPY --from=<name> 消费）：
-          # official（#787 官方内容目录）+ plugins（#788 插件包，#752 R1 根级源直引入镜像）。
-          # （template context 随 #858 fleet provisioning 退役。）
+          # named context（buildx，Dockerfile 以 COPY --from=<name> 消费）：plugins（#788
+          # 插件包，#752 R1 根级源直引入镜像）；#787 官方内容目录与
+          # #858 fleet 模板注入均已退役，无其他 context。
           build-contexts: |
-            official=${{ github.workspace }}/official
             plugins=${{ github.workspace }}/plugins
           push: true
           tags: |
