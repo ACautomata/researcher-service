@@ -294,6 +294,7 @@ _Avoid_: 扩展 (extension)——Pi-agent 术语，掩盖安全模型差异（pi
 _Avoid_: 插件市场/插件生态——暗示第三方开放与运行时加载，均已出局；第三方插件——目录只收官方内置。
 
 **官方内容目录 (official content catalog)**:
+（**退役决定注**：wayfinder #926 C2 #936 拍板**完全退役**——根级 `official/` 源目录、`build-official-content.mjs`、`officialContent/` 模块、`read_official_skill` 工具、前端 `officialCommands.generated.ts` 与 cd.yml 构建上下文整链删除；`/research` 斜杠命令与技能随之退场，不搬家。施工随 #787 退役规格；下述为现役机制叙述，落地后转决策历史。）
 （#758 方向修订定稿，#787 落地——`officialContent/` generated.ts 提交入库）面板自带的官方 commands/skills 静态目录——markdown 源文件随面板发版编译期打包（根级源目录直引，同 #752 R1 插件目录先例），always-on、无启用位、无 DB 表。commands 经模板插值注入 user message，skills 经目录注入 + 正文渐进披露（沿用 #742 机制，存储从 per-user 表换家为静态目录）；autocomplete 清单 = 前端常量 + 静态 import + 启用插件命令合并。
 _Avoid_: per-user `command_defs`/`skill_defs` 表——已退役；admin 在线 CRUD 官方内容——官方内容只经 git 发版评审维护，在线写面与「无运行时自改」信任模型冲突；给官方目录开启用位——无代码 backing 的内容开关，徒增机制面。
 
@@ -347,6 +348,14 @@ _Avoid_: 插件自拼 frontmatter/claims 文本——格式漂移面（853 §3.3
 
 **.claims 旁车 (.claims sidecar)**:
 openwiki 生成的页级证据 JSON 旁车（#789 数据面——`wiki/logic.ts` claimsSidecarPath 镜像页目录 `.claims/<dir>/<stem>.json`，parseClaimsSidecar 只读解析）。SKIP_DIRS 托管：树/图不收、插件写面拒（isManagedRelPath 单源）；读侧唯一合法出口 = service.readClaims 专用通道。与页内 Atomic Claims 块（V1 人读面）两表示并存——归属/相互作用语义待实证（853 §11.1）。
+
+**category（主题分类）**:
+（wayfinder #926 C2 #936 拍板，未施工）wiki 页面的**主题分类**标签：frontmatter `category` 键、中文单值、值域固定四类（论文 / 科学问题 / 假说 / 实验报告，与页面体裁一一映射）+ 缺省「未分类」（值缺失/越界/通道③自建页一律落入）。是前端目录树**分组唯一来源**——顶层目录前缀分组（`official/` 等运行时自由生长目录，非任何在库约定）随之退役，目录名不再进用户界面；存量页不迁移（无 category 页全落「未分类」，文件零移动，保 `.claims` 旁车与页间目录相对链接不断）。生成侧：通道② prompt 约束新页落 `pages/` 平铺 + 写 category；通道③（openwiki planning）无注入面，划界为软引导。
+_Avoid_: 复用 type/tags 充当分类——type 是英文体裁枚举（代码消费面），tags 是自由检索标签（折进检索标识符），category 是独立键；多值 category——一页一组，分组语义不挂多标签；开放词表——值域固定枚举，新类目走发版决策；回填/移动存量文件——相对链接与旁车断链风险，不迁移兼容读已拍板。
+
+**页面体裁 (page type)**:
+（853 §11.3C 拍板四类型；#936 拍板词形重写，未施工）wiki 页面的**体裁**枚举：frontmatter 必填 `type` 键（OpenWiki 校验面：自由字符串必填），标识页面由哪条生成机制产出——四值对应四流程产物：论文页 / 审稿页 / 假说卡片 / 实验报告。#936 定词形三规则：无连字符、单个名词、动词形态取过去分词——英文枚举重写为 `paper / critique / hypothesis / report`（映射旧值 `paper / critic / idea-card / experiment-report`，连字符词形随重写退役）；存量页旧枚举值不迁移、读面宽松接受，新写入由插件建页组装单点收敛（插件零格式知识钉界不变）。
+_Avoid_: critic——是「评审者（人）」，体裁词用 critique（评审文）；中文写 type 值——体裁枚举英文（代码消费），中文展示由 category 承担；type 与 category 混为一谈——体裁是生成机制视角，分类是用户浏览视角，两键并存不合并。
 
 **文档面 (API docs surface)**:
 控制面的 OpenAPI/Swagger 接口文档域（#761）：zod 生成式 spec（请求体单一来源 = `validation/schemas.ts`，零漂移）+ Swagger UI，挂 `/api/docs` 整树 **requireAuth + requireAdmin**（#758 Q14），env 开关 `API_DOCS_ENABLED`（默认开，关 → 装配层不注入 → 整树 90005）。网页交互入口 = 前端 admin 子应用内嵌视图（前端带认证链拉 spec、TryIt 注入 token）——浏览器地址栏直开 `/api/docs` 不可达（Bearer 门控，导航请求带不上 header）。SSE 事件流端点不在覆盖面（流式语义超出请求/响应文档模型）。
