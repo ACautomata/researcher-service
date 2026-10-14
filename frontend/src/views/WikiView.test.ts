@@ -27,10 +27,10 @@ import { ElMessage } from 'element-plus'
 
 const TREE = {
   groups: [
-    { kind: 'concept', name: 'concepts', pages: [{ path: 'concepts/a.md', title: 'A' }] },
+    { kind: '论文', name: '论文', pages: [{ path: 'pages/a.md', title: 'A' }] },
   ],
 }
-const GRAPH = { nodes: [{ id: 'concepts/a.md', title: 'A' }], edges: [] }
+const GRAPH = { nodes: [{ id: 'pages/a.md', title: 'A' }], edges: [] }
 
 const stubs = {
   FileTree: {
@@ -60,7 +60,7 @@ describe('WikiView（#856 owner 级）', () => {
     ;(getTree as ReturnType<typeof vi.fn>).mockResolvedValue(TREE)
     ;(getGraph as ReturnType<typeof vi.fn>).mockResolvedValue(GRAPH)
     ;(readPage as ReturnType<typeof vi.fn>).mockResolvedValue({
-      path: 'concepts/a.md', title: 'A', content: '# A',
+      path: 'pages/a.md', title: 'A', content: '# A',
     })
   })
 
@@ -80,18 +80,18 @@ describe('WikiView（#856 owner 级）', () => {
   it('opens a page when file tree emits open', async () => {
     const wrapper = mountView()
     await flushPromises()
-    await wrapper.findComponent({ name: 'FileTree' }).vm.$emit('open', 'concepts/a.md')
+    await wrapper.findComponent({ name: 'FileTree' }).vm.$emit('open', 'pages/a.md')
     await flushPromises()
-    expect(readPage).toHaveBeenCalledWith('concepts/a.md')
-    expect(useWikiStore().activePath).toBe('concepts/a.md')
+    expect(readPage).toHaveBeenCalledWith('pages/a.md')
+    expect(useWikiStore().activePath).toBe('pages/a.md')
   })
 
   it('opens a page when graph emits open', async () => {
     const wrapper = mountView()
     await flushPromises()
-    await wrapper.findComponent({ name: 'WikiGraph' }).vm.$emit('open', 'concepts/a.md')
+    await wrapper.findComponent({ name: 'WikiGraph' }).vm.$emit('open', 'pages/a.md')
     await flushPromises()
-    expect(useWikiStore().activePath).toBe('concepts/a.md')
+    expect(useWikiStore().activePath).toBe('pages/a.md')
   })
 
   it('shows an error when opening a page fails', async () => {
@@ -100,7 +100,7 @@ describe('WikiView（#856 owner 级）', () => {
     // 真实业务失败经 apiJson 抛 ApiError（client.ts #312 信封），其 message 逐字透传。
     const { ApiError } = await import('@/api/errors')
     ;(readPage as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new ApiError(200, '页面读取失败', 20040))
-    await wrapper.findComponent({ name: 'FileTree' }).vm.$emit('open', 'concepts/a.md')
+    await wrapper.findComponent({ name: 'FileTree' }).vm.$emit('open', 'pages/a.md')
     await flushPromises()
     expect(ElMessage.error).toHaveBeenCalledWith('页面读取失败')
   })
@@ -108,7 +108,7 @@ describe('WikiView（#856 owner 级）', () => {
   it('opens a read-only preview with no editor', async () => {
     const wrapper = mountView()
     await flushPromises()
-    await wrapper.findComponent({ name: 'FileTree' }).vm.$emit('open', 'concepts/a.md')
+    await wrapper.findComponent({ name: 'FileTree' }).vm.$emit('open', 'pages/a.md')
     await flushPromises()
     expect(wrapper.find('[data-test="wiki-preview"]').exists()).toBe(true)
     expect(wrapper.find('[data-test="md-editor"]').exists()).toBe(false)
@@ -161,7 +161,7 @@ describe('WikiView — #668 面板三态接线（wiki 文件树）', () => {
     ;(getTree as ReturnType<typeof vi.fn>).mockResolvedValue(TREE)
     ;(getGraph as ReturnType<typeof vi.fn>).mockResolvedValue(GRAPH)
     ;(readPage as ReturnType<typeof vi.fn>).mockResolvedValue({
-      path: 'concepts/a.md', title: 'A', content: '# A',
+      path: 'pages/a.md', title: 'A', content: '# A',
     })
     globalThis.localStorage.clear()
   })
@@ -208,7 +208,7 @@ describe('WikiView — #670 面板三态接线（wiki 图谱 + 同页互斥）',
     ;(getTree as ReturnType<typeof vi.fn>).mockResolvedValue(TREE)
     ;(getGraph as ReturnType<typeof vi.fn>).mockResolvedValue(GRAPH)
     ;(readPage as ReturnType<typeof vi.fn>).mockResolvedValue({
-      path: 'concepts/a.md', title: 'A', content: '# A',
+      path: 'pages/a.md', title: 'A', content: '# A',
     })
     globalThis.localStorage.clear()
   })
@@ -383,16 +383,16 @@ describe('WikiView — #913 query.path 深链消费（artifactPages 深链终点
     ;(getTree as ReturnType<typeof vi.fn>).mockResolvedValue(TREE)
     ;(getGraph as ReturnType<typeof vi.fn>).mockResolvedValue(GRAPH)
     ;(readPage as ReturnType<typeof vi.fn>).mockResolvedValue({
-      path: 'concepts/a.md', title: 'A', content: '# A',
+      path: 'pages/a.md', title: 'A', content: '# A',
     })
     ;(readPage as ReturnType<typeof vi.fn>).mockClear() // 「未调 openPage」断言不受前例累积污染
   })
 
   it('query.path 存在 → 首屏 reset/refreshGraph 后直达对应页（openPage + claims）', async () => {
-    await mountAt({ path: 'concepts/a.md' })
+    await mountAt({ path: 'pages/a.md' })
     await flushPromises()
-    expect(readPage).toHaveBeenCalledWith('concepts/a.md')
-    expect(useWikiStore().activePath).toBe('concepts/a.md')
+    expect(readPage).toHaveBeenCalledWith('pages/a.md')
+    expect(useWikiStore().activePath).toBe('pages/a.md')
     expect(getTree).toHaveBeenCalledWith() // 首屏资料先就绪
   })
 

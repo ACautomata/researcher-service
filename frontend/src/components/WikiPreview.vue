@@ -3,10 +3,16 @@ import { computed, nextTick, ref } from 'vue'
 import type { WikiPageContentDTO, WikiClaimsDTO, WikiGraphDTO } from '@/api/wiki'
 import MarkdownRenderer from '@/components/chat/MarkdownRenderer.vue'
 import { parseWikiDocument, resolveWikiLink } from '@/wiki/reader'
+import { WIKI_STATUS_LABELS, WIKI_UNCATEGORIZED } from '@/wiki/values'
 const props = defineProps<{ page: WikiPageContentDTO; claims: WikiClaimsDTO | null; claimsError: boolean; graph: WikiGraphDTO }>()
 const emit = defineEmits<{ open: [path: string, anchor?: string] }>()
 const root = ref<HTMLElement>()
 const doc = computed(() => parseWikiDocument(props.page.content, props.page.title))
+// status 显示层中文化（#954，规格 §1.4）：数据层英文值不可动，仅徽标映射；未知值原样显示。
+const statusLabel = computed(() => {
+  const status = props.page.okf?.status
+  return status ? WIKI_STATUS_LABELS[status] ?? status : ''
+})
 const backlinks = computed(() => props.graph.nodes.filter(node =>
   !node.ghost && props.graph.edges.some(edge => edge.to === props.page.path && edge.from === node.id),
 ))
@@ -37,12 +43,18 @@ defineExpose({ scrollToAnchor })
   <div ref="root" class="wiki-preview" data-test="wiki-preview">
     <article>
       <header class="document-header">
-        <div v-if="doc.type" class="eyebrow">{{ doc.type }}</div>
-        <h1>{{ doc.title }}</h1>
+        <!-- category 由 reader 读面归组（恒非空：值域值或「未分类」），无需 v-if -->
+        <div class="eyebrow" :class="{ muted: doc.category === WIKI_UNCATEGORIZED }">{{ doc.category }}</div>
+        <h1>
+          <span class="title">{{ doc.title }}</span>
+          <el-tag v-if="statusLabel" round plain class="status-badge" data-test="status-badge">{{ statusLabel }}</el-tag>
+        </h1>
         <p v-if="doc.description" class="description">{{ doc.description }}</p>
-        <div class="tags"><span v-for="tag in doc.tags" :key="tag" class="chip">{{ tag }}</span></div>
-        <div v-if="page.okf" class="badges" data-test="okf-badges">
-          <span v-if="page.okf.status" class="chip">状态：{{ page.okf.status }}</span>
+        <div class="tags">
+          <span v-if="doc.type" class="chip type-chip" data-test="type-chip">{{ doc.type }}</span>
+          <span v-for="tag in doc.tags" :key="tag" class="chip">{{ tag }}</span>
+        </div>
+        <div v-if="page.okf && (page.okf.staleAfter || page.okf.generatedAt)" class="badges" data-test="okf-badges">
           <span v-if="page.okf.staleAfter" class="chip">保鲜期限：{{ page.okf.staleAfter }}</span>
           <span v-if="page.okf.generatedAt" class="chip">生成：{{ page.okf.generatedAt }}</span>
         </div>
@@ -75,12 +87,16 @@ defineExpose({ scrollToAnchor })
 .wiki-preview { display: flex; gap: 24px; line-height: 1.65; overflow-wrap: anywhere; }
 article { flex: 1; min-width: 0; }
 .document-header { border-bottom: 1px solid var(--el-border-color); padding-bottom: 20px; margin-bottom: 24px; }
-h1 { margin: 6px 0; font-size: 28px; }
+h1 { display: flex; align-items: center; gap: 10px; margin: 6px 0; font-size: 28px; }
 h2 { font-size: 15px; }
-.eyebrow { color: var(--el-color-primary); text-transform: uppercase; font-size: 12px; letter-spacing: .12em; }
+.eyebrow { color: var(--el-color-primary); font-size: 12px; letter-spacing: .12em; }
+.eyebrow.muted { color: var(--el-text-color-placeholder); }
 .description { color: var(--el-text-color-secondary); }
 .tags, .badges { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
 .chip { background: var(--el-fill-color-light); color: var(--el-text-color-regular); padding: 2px 9px; border-radius: 12px; border: 1px solid var(--el-border-color-lighter); font-size: 12px; }
+/* #954：type 体裁 chip 描边（透明底），与实心 tags chips 视觉分级；旧词形原样显示 */
+.chip.type-chip { background: transparent; border-color: var(--el-border-color); color: var(--el-text-color-secondary); }
+.status-badge { flex: none; }
 button.chip { cursor: pointer; margin-right: 6px; }
 .backlinks { margin-top: 32px; border-top: 1px solid var(--el-border-color); }
 .claims { flex: 0 0 240px; border-left: 1px solid var(--el-border-color); padding-left: 16px; font-size: 13px; }
