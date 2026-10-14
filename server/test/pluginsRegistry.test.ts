@@ -7,7 +7,7 @@ import { assertPluginEnv, assertValidPluginCatalog } from '../src/plugins/regist
 import { PLUGIN_MANIFESTS } from '../../plugins/index'
 import { FILE_TOOLS, EXEC_TOOLS } from '../src/runner/approval/values'
 import { TEAMMATE_TOOL_NAMES } from '../src/runner/teammates/tools'
-import { SYSTEM_COMMANDS } from '../src/officialContent/catalog'
+import { SYSTEM_COMMANDS } from '../src/plugins/slash'
 import { snapshotOfficialContent } from '../src/officialContent/runtime'
 
 function tool(overrides: Partial<AnyPluginToolDefinition> & { name: string }): AnyPluginToolDefinition {

@@ -1,12 +1,8 @@
 import { createHash } from 'node:crypto'
+import { parseSlash, SYSTEM_COMMANDS } from '../plugins/slash'
 
 export interface ContentEntry { readonly name: string; readonly description: string; readonly body: string }
 export interface OfficialSources { readonly commands: readonly ContentEntry[]; readonly skills: readonly ContentEntry[] }
-export const SYSTEM_COMMANDS = ['new', 'compact', 'model'] as const
-export function parseSlash(text: string): { name: string; args: string } | undefined {
-  const match = /^\/([a-z][a-z0-9-]*)(?:\s+([\s\S]*))?$/.exec(text.trim())
-  return match ? { name: match[1]!, args: (match[2] ?? '').trim() } : undefined
-}
 
 /** run 粒度不可变快照（#787 story 46）：构造期完成全部护栏校验，正文不进 system prompt——
  * 目录行（name: description）经 prompt 字段注入，正文只经 readSkill 渐进披露。 */

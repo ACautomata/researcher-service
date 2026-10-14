@@ -1,4 +1,4 @@
-import { parseSlash, SYSTEM_COMMANDS } from '../officialContent/catalog'
+import { parseSlash, SYSTEM_COMMANDS } from '../plugins/slash'
 import type { ModelRef } from '../runner/providerRegistry'
 import { snapshotRunCapabilities } from '../runner/capabilities'
 import { mergeCommandDirectories } from '../plugins/commandResolution'

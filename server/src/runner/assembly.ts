@@ -33,7 +33,7 @@ import { FILE_TOOLS, EXEC_TOOLS } from './approval/values'
 import { PLUGIN_MANIFESTS } from '../../../plugins/index'
 import { assertPluginEnv, assertValidPluginCatalog } from '../plugins/registry'
 import { createPluginRuntime, resolvePluginConfig, type PluginRuntime } from '../plugins/surface'
-import { SYSTEM_COMMANDS } from '../officialContent/catalog'
+import { SYSTEM_COMMANDS } from '../plugins/slash'
 import { snapshotOfficialContent } from '../officialContent/runtime'
 
 export interface RunnerAssembly {
