@@ -116,3 +116,65 @@ describe('TurnFilesCard（#961 exec 提示行——D6 动态提示）', () => {
     expect(w.find('[data-test="turn-files-exec"]').exists()).toBe(false)
   })
 })
+
+describe('TurnFilesCard（#962 视觉定稿——A3 变体 B 分组卡）', () => {
+  // 独立真源 = #951 D9 视觉规格 / A3 #929 实物定稿：按 op 三节分组（空缺节跳过），
+  // 节标签「新建 · N」；行 = 药丸徽标 + 目录 rtl-ellipsis 弱化 + 文件名 mono + 下载链。
+  it('按 op 分组三节：节标签「新建 · N」，行序 = 组序（created→modified→deleted）× 组内原序', () => {
+    const mixed: TurnFileRow[] = [
+      { path: 'a/m1.md', op: 'modified', attachmentId: 'att-m1', fileName: 'm1.md', size: 1 },
+      { path: 'a/c1.md', op: 'created', attachmentId: 'att-c1', fileName: 'c1.md', size: 1 },
+      { path: 'b/c2.md', op: 'created', attachmentId: 'att-c2', fileName: 'c2.md', size: 1 },
+      { path: 'b/d1.md', op: 'deleted' },
+      { path: 'a/m2.md', op: 'modified', attachmentId: 'att-m2', fileName: 'm2.md', size: 1 },
+    ]
+    const w = mount(TurnFilesCard, { props: { files: mixed } })
+    const groups = w.findAll('[data-test="turn-files-group"]')
+    expect(groups.map((g) => g.attributes('data-op'))).toEqual(['created', 'modified', 'deleted'])
+    const labels = w.findAll('[data-test="turn-files-glabel"]')
+    expect(labels.map((l) => l.text())).toEqual(['新建 · 2', '修改 · 2', '删除 · 1'])
+    // 行序 = 组序 × 组内原序（created 保持 c1→c2，modified 保持 m1→m2）
+    const lines = w.findAll('[data-test="turn-file-row"]')
+    expect(lines.map((l) => l.attributes('data-path'))).toEqual([
+      'a/c1.md', 'b/c2.md', 'a/m1.md', 'a/m2.md', 'b/d1.md',
+    ])
+  })
+
+  it('空缺节跳过：只有 modified 时不出 created/deleted 节', () => {
+    const w = mount(TurnFilesCard, {
+      props: { files: [{ path: 'a/m1.md', op: 'modified', attachmentId: 'att-m1', fileName: 'm1.md', size: 1 }] },
+    })
+    const groups = w.findAll('[data-test="turn-files-group"]')
+    expect(groups).toHaveLength(1)
+    expect(groups[0]!.attributes('data-op')).toBe('modified')
+    expect(groups[0]!.get('[data-test="turn-files-glabel"]').text()).toBe('修改 · 1')
+  })
+
+  it('行 = 药丸徽标（op 文案）+ 目录弱化 + 文件名 mono 主文本', () => {
+    const w = mount(TurnFilesCard, { props: { files: materialized } })
+    const line = w.get('[data-test="turn-file-row"][data-op="created"]')
+    expect(line.get('[data-test="turn-file-badge"]').text()).toBe('新建')
+    expect(line.get('[data-test="turn-file-dir"]').text()).toBe('notes')
+    expect(line.get('[data-test="turn-file-name"]').text()).toBe('new.md')
+    // 目录与文件名拼回完整路径（既有断言行 text 含全路径的兼容基础）
+    expect(line.text()).toContain('notes/new.md')
+  })
+
+  it('无目录文件：只渲染文件名，不出目录段', () => {
+    const w = mount(TurnFilesCard, {
+      props: { files: [{ path: 'README.md', op: 'created', attachmentId: 'att-r', fileName: 'README.md', size: 1 }] },
+    })
+    const line = w.get('[data-test="turn-file-row"]')
+    expect(line.find('[data-test="turn-file-dir"]').exists()).toBe(false)
+    expect(line.get('[data-test="turn-file-name"]').text()).toBe('README.md')
+  })
+
+  it('路径 title 提示：有 size → 「path · N B」；无 size → path', () => {
+    const w = mount(TurnFilesCard, { props: { files: materialized } })
+    expect(w.get('[data-test="turn-file-row"][data-path="notes/new.md"] [data-test="turn-file-path"]').attributes('title')).toBe('notes/new.md · 5 B')
+    const noSize = mount(TurnFilesCard, {
+      props: { files: [{ path: 'x.md', op: 'created', attachmentId: 'att-x', fileName: 'x.md' }] },
+    })
+    expect(noSize.get('[data-test="turn-file-path"]').attributes('title')).toBe('x.md')
+  })
+})
