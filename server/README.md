@@ -60,7 +60,6 @@ src/
   figures/               AutoFigure 读面 + ctx.figures 句柄 + figure_run 审计（#791 / #792）
   attachments/           附件上传（#780：临时区落 DATA_ROOT，run 首步 ingestion 进沙箱）
   plugins/               插件系统骨架（#788：api / registry / surface / tools / runContext）
-  officialContent/       官方内容目录（#787：commands / skills，always-on，generated.ts 提交入库）
   openapi/               OpenAPI 文档面（#761：zod 生成式，admin-only）
   traceLogs/             TextTrace 落库查询面（审计/运行轨迹检索）
 test/                    vitest 全量（接缝：wiki Port / 信封 REST / hostDeps / files Port / 部署契约

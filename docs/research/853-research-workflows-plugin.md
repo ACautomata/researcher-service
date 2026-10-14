@@ -7,8 +7,9 @@
 > 蓝本：[752 插件契约](./752-plugin-system.md) · [744 AutoFigure 插件先例](./744-autofigure-langgraph.md) · [729 审批三层漏斗](./729-approval-funnel.md) · [723 LangGraph runtime](./723-langgraphjs-deepagents-runtime.md) · [725 OpenWiki/OKF](./725-openwiki-embedding-okf.md)。
 > 路由图验证骨架：[routing-skeleton/](./routing-skeleton/)（#847，已 squash 入 master e7f8976）。
 > **修订**（2026-10-14）：#873 实现双轴 review（R0/R1）规格收口——§1.1/§1.3「resolveInputs 错误信息列 /lab/uploads 现有文件」随实现降级修订为「确定性诊断 + 用法引导自纠」（插件 ctx 无目录列举面；列文件随补全面留 V2）。其余 review 发现属实现面修复，不改规格形状：collect 对账非缺失误读细化四态（就位 / 缺失 / 就位未读取 / 无法核验）、W4 人审挂起 GraphInterrupt 穿透不落 failed 审计、W3/collect 幂等跳过 summary 标注、prompt 不可信数据域防护声明。
+> **修订**（2026-10-14，#958 T7 docs 回写）：#949 A/B 两轨落地随附——§3.2 DTO `PageType` 值集落定新词形 `paper / critique / hypothesis / report`（§11.3 项 C 同步）；§3.3 frontmatter 组装增 `category` 键（核心按 type 一一映射单点写入）；§4.1 create 节点 prompt 注入描述去官方内容目录化改自描述；§4.2 `category: critic` 机读标签改 `type: critique`（validate² + prompt 资产段）；§11.3C 追加词形消歧行；§0-3 斜杠命令接缝指针随 #956 退役换现役模块。
 > **修订**（2026-10-10）：[wayfinder map #899](https://github.com/ACautomata/researcher-service/issues/899)（四流程节点 agent loop 化修订）定案落盘——证据链 [#900](https://github.com/ACautomata/researcher-service/issues/900) 节点盘点 / [#901](https://github.com/ACautomata/researcher-service/issues/901) 形态调研 / [#902](https://github.com/ACautomata/researcher-service/issues/902) 实测拍板 / [#903](https://github.com/ACautomata/researcher-service/issues/903) 对照实测 / [#904](https://github.com/ACautomata/researcher-service/issues/904) 定案；受动四处 = §4.3 口径注记 / §7.1 `PAGE_GENERATE_MAX_RETRIES` 触发面扩展 / §10 新增宽口径否决条目 / GLOSSARY 两词条（单发节点 · 节点内 agent 循环）。**#899 图决议并入本规格上游票链**——凡冲突处，以上游票（#846 图 + #899 图）为准；§10 否决记录只增不删。
-> 状态：**定稿**（2026-10-08 评审通过；解读点 A/C/D 按文拍板，B 两候选形态经评审认可、选择归实现票首项）。**2026-10-10 修订**（#899 图 [#905](https://github.com/ACautomata/researcher-service/issues/905) 落盘，修订评审通过）：四处受动见上修订记录。**2026-10-14 修订**（#873 双轴 review R0 收口）：§1.1/§1.3 两处受动见上修订记录。
+> 状态：**定稿**（2026-10-08 评审通过；解读点 A/C/D 按文拍板，B 两候选形态经评审认可、选择归实现票首项）。**2026-10-10 修订**（#899 图 [#905](https://github.com/ACautomata/researcher-service/issues/905) 落盘，修订评审通过）：四处受动见上修订记录。**2026-10-14 修订**（#873 双轴 review R0 收口）：§1.1/§1.3 两处受动见上修订记录。**2026-10-14 修订**（#958 T7 docs 回写）：六处受动见上修订记录。
 
 ## 0. 目标形态总览
 
@@ -18,7 +19,7 @@
 
 1. 目的地 = 交接规格（实现另行开票）。
 2. 路由互斥 + 产物串联（单请求单流程；后段经 wiki/lab 产物读前段产物）。
-3. 显式 slash 命令优先 + LLM 分类兜底（复用 #787 commandResolution 接缝）。
+3. 显式 slash 命令优先 + LLM 分类兜底（复用 #787 斜杠命令接缝——现役 `plugins/slash.ts` 的 parseSlash/保留名校验面）。
 4. 实验 = 沙箱真实执行 + 方案整体人审（升级通道）。
 5. 入口 = chat 会话内（自然语言/命令触发，轨迹走会话投影 + SSE）。
 6. 可信 = 证据可溯源（衔接 #789 OKF claims：论断 + evidence + fresh|drifted）。
@@ -144,12 +145,12 @@ interface ClaimDraft { statement: string; evidence: string[] }
 
 - **claims 结构化提交、表示归 wiki 域**：图内 zod 校验 ClaimDraft[] → port 提交 → 核心 V1 渲染为页内 Atomic Claims md 块（人读面 + 检索面可溯源）；机器 `.claims` 旁车 = 核心内部演进，**插件不知道 .claims 存在**（防腐钉界）。
 - 治理再生（通道②③）保持异步，workflow 不同步调用（否决 .claims 直写与 lifecycle submit_page 同步调用，V2 重评）。
-- `PageType` 枚举值集见 §11.3 待拍板项 B。
+- **`PageType` 枚举值集 = `paper / critique / hypothesis / report`**（#936 词形三规则重写——无连字符、单个名词、动词形态取过去分词；映射旧值 paper/critic/idea-card/experiment-report，存量旧值不迁移、读面宽松接受；详见 §11.3 项 C 与 #949 规格 §1.2）。
 - **插件错误通道**（#908 复审 B4 拍板追认）：两 port 方法恒返回 Result 信封 `{ok:true, data} | {ok:false, error:{code, message, hint?}}` **永不 throw**——对齐主 agent 检索工具「永不 throw 的 Result」形态；`error.code` ∈ 码表（wiki 面 invalid_draft/invalid_path/managed_path/path_occupied/not_found/invalid_input/invalid_state/mirror_unavailable/internal，docs 面 invalid_path/not_found/extract_failed/too_large/sandbox_unavailable；读面分类码与主 agent classifyError 同义同源），插件节点按码判重试/回喂（#909 四流程消费面）。
 
 ### 3.3 frontmatter = 核心组装产出（#851 D11 · #868 D2）
 
-- 插件只给 PageDraft 元数据（path/title/type），**frontmatter 由核心组装时拼装**：title/type + OKF 徽章（status=draft / stale_after / generated 时间戳——**B1 拍板修订**：原拍板 `status=generated` 不在 openwiki `OKF_STATUS_VALUES=[draft,stable,deprecated]`，治理 validate 必摘（invalid_status）；改取合法值 `draft`，「插件生成」语义由 `generated{by,at}` + `source` 承载，#789 徽章面直接有数据）+ 溯源字段（source=research / toolCallId / workflow）+ **`related_pages`**（W4 报告页记输入页集：论文页/critic 页/idea card 页，#868 D2）。建议字段集见 §11.3 待拍板项 C。
+- 插件只给 PageDraft 元数据（path/title/type），**frontmatter 由核心组装时拼装**：title/type + **`category`**（主题分类中文单值，核心按 type 一一映射单点写入——paper→论文 / critique→科学问题 / hypothesis→假说 / report→实验报告，#949 规格 §2.2 R2；插件零格式知识钉界不变）+ OKF 徽章（status=draft / stale_after / generated 时间戳——**B1 拍板修订**：原拍板 `status=generated` 不在 openwiki `OKF_STATUS_VALUES=[draft,stable,deprecated]`，治理 validate 必摘（invalid_status）；改取合法值 `draft`，「插件生成」语义由 `generated{by,at}` + `source` 承载，#789 徽章面直接有数据）+ 溯源字段（source=research / toolCallId / workflow）+ **`related_pages`**（W4 报告页记输入页集：论文页/critic 页/idea card 页，#868 D2）。建议字段集见 §11.3 项 C。
 - 页格式单源：四流程建页格式一致（防四套模板四个样），插件零格式知识。否决插件 content 内嵌 frontmatter（格式漂移面）；否决 V1 裸 md（#789 徽章面缺位）。
 
 ## 4. 四条 workflow 图内设计（#850 · #848 · #868 修订）
@@ -172,7 +173,7 @@ capture → extract → create → validate ─┐ 不过→回 create 重试 1 
 |---|---|---|
 | capture | PDF ∈ /lab/uploads 前缀 + 存在性 | **URL 来源 V1 不收（明示降级）** |
 | extract | ctx.docs.extractPdfText 取页数组 | 超限报错（§3.2） |
-| create | 11 节论文页 LLM 生成 | prompt 注入对标 officialContent 两段式 |
+| create | 11 节论文页 LLM 生成 | prompt 两段式注入（段一 = 资产目录行内嵌 prompt 模板，段二 = 资产正文按名取用注入） |
 | validate | 确定性校验 | 11 节标题齐全 / frontmatter 必填 / ≥100 行 / Results 含具体数字；不过 → 回 create 重试 1 次（附诊断） |
 | persist | 经 wiki 写 port | 幂等哨兵（FileExists = 重放窗口防重复建页） |
 | verify | 回读哈希对账 | 确定性 |
@@ -192,9 +193,9 @@ resolveInputs → load → extract → validate¹ → critic → validate² → 
   缺→clarify 提示先 ingest——产物串联)    节checklist)        category标签)  回查)
 ```
 
-- **两个 validate 检查对象不同，分列不共享 schema 名**：validate¹ 针对 extract 12 节（节标题 checklist + 三态标注禁语扫描——禁「可能是/应该是/推测为」，强制「论文中未明确说明」类规范用语）；validate² 针对 critic §0–§7（节齐全 + `category: critic` 机读标签 + 候选问题 2–4 个）。
+- **两个 validate 检查对象不同，分列不共享 schema 名**：validate¹ 针对 extract 12 节（节标题 checklist + 三态标注禁语扫描——禁「可能是/应该是/推测为」，强制「论文中未明确说明」类规范用语）；validate² 针对 critic §0–§7（节齐全 + `type: critique` 机读标签 + 候选问题 2–4 个）。
 - evidenceGate：evidence 引用的 wiki 页/章节/上传件路径存在性回查；剔除条目清单必进 summary。
-- prompt 资产（#848 §2）：extract 12 节模板 + 三态标注规则（「论文报告/间接观察/未提供」——问题发现可信度的证据底座）；critic §0–§7 模板 + 审稿式质疑 9 类型 + 证据强度三档（较强证据/间接暗示/仍需验证）+ `category: critic` 机读标签。节结构：extract = ##0 定位/##1 实验目标/##2 实验设置总览[2.1–2.5]/##3 主结果/##4 消融/##5 参数敏感性/##6 效率复杂度/##7 鲁棒性泛化/##8 实验现象 3–6/##9 证据充分性/##10 后续问题价值/##11 总结；critic = §0 定位/§1 方法机制与前提/§2 贡献声明与质疑[3–5 claim]/§3 问题分析/§4 验证候选问题 2–4/§5 研究空缺/§6 回写建议/§7 结论。完整填写规则以 #848 §2 为单一来源。**critic §4 候选问题列表 = critic→design 的边上传输 schema（带优先级）**。
+- prompt 资产（#848 §2）：extract 12 节模板 + 三态标注规则（「论文报告/间接观察/未提供」——问题发现可信度的证据底座）；critic §0–§7 模板 + 审稿式质疑 9 类型 + 证据强度三档（较强证据/间接暗示/仍需验证）+ `type: critique` 机读标签。节结构：extract = ##0 定位/##1 实验目标/##2 实验设置总览[2.1–2.5]/##3 主结果/##4 消融/##5 参数敏感性/##6 效率复杂度/##7 鲁棒性泛化/##8 实验现象 3–6/##9 证据充分性/##10 后续问题价值/##11 总结；critic = §0 定位/§1 方法机制与前提/§2 贡献声明与质疑[3–5 claim]/§3 问题分析/§4 验证候选问题 2–4/§5 研究空缺/§6 回写建议/§7 结论。完整填写规则以 #848 §2 为单一来源。**critic §4 候选问题列表 = critic→design 的边上传输 schema（带优先级）**。
 
 ### 4.3 W3 hypothesize 科学假说自主生成（Send[] 扇出）
 
@@ -410,5 +411,6 @@ resolveInputs → contextPack ──→⌗ Send[]×5 → bucket×N → dedup →
 
 - **A. classify 的分类输入**（§1.2）：#849 D4 钉「input 由主 agent 组织」，#850 D2 否决自由 text input 改结构化槽位——本文取「分类输入 = 结构化请求槽位（topic/question）的文本序列化」为两票交集解读；若实现期发现分类质量劣化（#866 评估集是裸文本输入），回退点 = 工具增 `request_text` 只读分类槽（不落任何执行面）。
 - **B. spec 落盘 lab 的写入面**（§5.1 短路点依赖）：#852 钉「spec 落盘 lab」为幂等短路点 + 调用② 消费 + 超限终局 spec 停留 lab，但 #851 ctx 增量未列 lab 写口（ctx.wiki 写 wiki 容器、ctx.docs 只读 PDF）。**缺口**：需为插件补一个 lab 写面。候选形态：① ctx.docs 扩窄域 `writeSpec({path, content})`（/lab/ 前缀白名单，与 extractPdfText 对称）；② ctx 增 `ctx.lab.write` 窄口（/lab/specs/ 固定前缀）。两候选经定稿评审认可，形态选择归实现票首项。
-- **C. 票内预约参数落定**（各票明确留给规格定稿）：`PDF_EXTRACT_MAX_CHARS` 数值（#851 D10——**已落定 1_000_000，§7.1**）/ `PageType` 枚举值集（#851 D11 附带：候选 论文页 / critic 页 / idea-card / 实验报告——**已落定，§3.2 DTO**）/ frontmatter 建议字段集（#851 D11：title/type + OKF 徽章三件 + source/toolCallId/workflow/related_pages——**已落定，徽章 status 值经 #908 复审 B1 拍板修订为 `draft`（§3.3）**）。
+- **C. 票内预约参数落定**（各票明确留给规格定稿）：`PDF_EXTRACT_MAX_CHARS` 数值（#851 D10——**已落定 1_000_000，§7.1**）/ `PageType` 枚举值集（#851 D11 附带：候选 论文页 / critic 页 / idea-card / 实验报告——**已落定新词形 `paper / critique / hypothesis / report`（#936 词形三规则，#953 落地），§3.2 DTO**）/ frontmatter 建议字段集（#851 D11：title/type + OKF 徽章三件 + source/toolCallId/workflow/related_pages——**已落定，徽章 status 值经 #908 复审 B1 拍板修订为 `draft`（§3.3）；`category` 键随 #949 A 轨增列，核心按 type 一一映射单点写入（§3.3，#953 落地）**）。
+- **C-词形消歧**（#949 规格 §8-7）：叙事词 critic 页 / idea card 页 = 体裁 critique / hypothesis 的中文指称（叙事面保留不回改）；机读字面量 = paper / critique / hypothesis / report。
 - **D. W4 stage 序列与白名单口径**（§6.1）：#852 钉流程序列 design→plan-review→executing→collecting，#851 D5 钉白名单 = 节点名并集——本文取「plan-review 进白名单（人审挂起期 stage 停该值）；executing/collecting 为流程级描述不进白名单（调用②非插件工具、调用③走 collect 段节点名）」；#867 D6 的两态呈现与该口径一致。
