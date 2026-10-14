@@ -298,20 +298,20 @@ _Avoid_: 扩展 (extension)——Pi-agent 术语，掩盖安全模型差异（pi
 _Avoid_: 插件市场/插件生态——暗示第三方开放与运行时加载，均已出局；第三方插件——目录只收官方内置。
 
 **官方内容目录 (official content catalog)**:
-（**退役决定注**：wayfinder #926 C2 #936 拍板**完全退役**——根级 `official/` 源目录、`build-official-content.mjs`、`officialContent/` 模块、`read_official_skill` 工具、前端 `officialCommands.generated.ts` 与 cd.yml 构建上下文整链删除；`/research` 斜杠命令与技能随之退场，不搬家。施工随 #787 退役规格；下述为现役机制叙述，落地后转决策历史。）
-（#758 方向修订定稿，#787 落地——`officialContent/` generated.ts 提交入库）面板自带的官方 commands/skills 静态目录——markdown 源文件随面板发版编译期打包（根级源目录直引，同 #752 R1 插件目录先例），always-on、无启用位、无 DB 表。commands 经模板插值注入 user message，skills 经目录注入 + 正文渐进披露（沿用 #742 机制，存储从 per-user 表换家为静态目录）；autocomplete 清单 = 前端常量 + 静态 import + 启用插件命令合并。
-_Avoid_: per-user `command_defs`/`skill_defs` 表——已退役；admin 在线 CRUD 官方内容——官方内容只经 git 发版评审维护，在线写面与「无运行时自改」信任模型冲突；给官方目录开启用位——无代码 backing 的内容开关，徒增机制面。
+**（历史注：wayfinder #926 C2 #936 拍板完全退役，随 #949 施工票链（T1–T7）整链物理删除——根级 `official/` 源目录、`build-official-content.mjs`、`officialContent/` 模块、`read_official_skill` 工具、前端 `officialCommands.generated.ts` 与 cd.yml/dev compose 构建上下文；`/research` 斜杠命令与技能随之退场，不搬家。命令模型收敛为「系统命令 + 启用插件」二源，本条保留为决策历史。）**
+（#758 方向修订定稿，#787 曾落地——`officialContent/` generated.ts 提交入库）面板自带的官方 commands/skills 静态目录——markdown 源文件随面板发版编译期打包（根级源目录直引，同 #752 R1 插件目录先例），always-on、无启用位、无 DB 表。commands 经模板插值注入 user message，skills 经目录注入 + 正文渐进披露（沿用 #742 机制，存储从 per-user 表换家为静态目录）；autocomplete 清单 = 前端常量 + 静态 import + 启用插件命令合并。
+_Avoid_: per-user `command_defs`/`skill_defs` 表——已退役；admin 在线 CRUD 官方内容——官方内容只经 git 发版评审维护，在线写面与「无运行时自改」信任模型冲突；给官方目录开启用位——无代码 backing 的内容开关，徒增机制面。（上列机制随官方内容目录退役整体失效，保留为决策历史。）
 
 **插件启用 (plugin enablement)**:
 （插件系统 #788 + #799 落地——per-user 启用位，V1 仅 AutoFigure）per-user、跨会话持久的启用位（区别于管理员经面板级配置管的能力开关）。teammate 默认继承 owner 的启用集（与技能继承同语义）；禁用 = 新 run 不再见该插件的工具/命令，进行中 run 不中断、历史回放不受影响。
 _Avoid_: 会话级开关——启用是用户维状态，不随会话生灭；面板级配置——那是管理员面（生图模型、云 API key 等），与用户启用位是两回事。
 
 **能力实现层与用户交互层 (capability layer vs interaction layer)**:
-（插件系统 #788 + #758 方向修订，已落地）插件与 commands/skills 的分层关系：插件是**能力实现层**（工具/命令/渲染背后的代码实现），commands/skills 是**用户交互层**（用户触发与引导这些能力的统一交互面）。交互层内容**全部官方维护**：插件贡献的（有代码 backing，如 `/figure` 命令背后是 figure 工具执行）+ 官方静态目录（编译期打包、always-on、无启用位，#758 方向修订 supersede #749 Q7+Q10 的 per-user 自定义面）同形并存——用户视角一个命令模型，实现层两源、内容源零用户自建。
-_Avoid_: 「插件收编 commands/skills」——插件不取代官方内容目录；把 skills 归入插件——技能是内容级扩展（目录注入），无代码，不是插件的特例；per-user 自定义命令/技能与任何在线写面（admin CRUD / agent 自改自存）——已退役（#758），官方内容只经 git 发版维护。
+（插件系统 #788 + #758 方向修订，已落地；#956/#957 连锁修订——官方内容目录退役后交互层收敛插件单源）插件与命令的分层关系：插件是**能力实现层**（工具/命令/渲染背后的代码实现），命令是**用户交互层**（用户触发与引导这些能力的统一交互面）。交互层内容 = 插件贡献的命令（有代码 backing，如 `/figure` 命令背后是 figure 工具执行）+ 系统命令（/new /compact /model，核心设施非插件贡献面）——用户视角一个命令模型，实现层插件单源、内容源零用户自建。
+_Avoid_: 「插件收编系统命令」——系统命令是核心设施，不随插件目录增减；per-user 自定义命令与任何在线写面（admin CRUD / agent 自改自存）——已退役（#758），命令内容只经发版评审维护。
 
 **双面板 (two-panel split)**:
-用户面板是本人科研工作面：对话、wiki、lab 文件、LLM 端点与插件 LLM 指派、插件启用；admin 面板是跨用户运营面：用户管理与配额、审计检索、用量核算、官方内容与 API 文档。两者共享身份认证，各有独立入口。
+用户面板是本人科研工作面：对话、wiki、lab 文件、LLM 端点与插件 LLM 指派、插件启用；admin 面板是跨用户运营面：用户管理与配额、审计检索、用量核算、API 文档。两者共享身份认证，各有独立入口。
 _Avoid_: 单面板角色门控混入——「摘出来」是产物级隔离，不是隐藏入口；为 admin 另起服务/认证体系——隔离只发生在前端产物与路由层。
 
 **产品显示名 (product display name)**:
@@ -354,11 +354,11 @@ _Avoid_: 插件自拼 frontmatter/claims 文本——格式漂移面（853 §3.3
 openwiki 生成的页级证据 JSON 旁车（#789 数据面——`wiki/logic.ts` claimsSidecarPath 镜像页目录 `.claims/<dir>/<stem>.json`，parseClaimsSidecar 只读解析）。SKIP_DIRS 托管：树/图不收、插件写面拒（isManagedRelPath 单源）；读侧唯一合法出口 = service.readClaims 专用通道。与页内 Atomic Claims 块（V1 人读面）两表示并存——归属/相互作用语义待实证（853 §11.1）。
 
 **category（主题分类）**:
-（wayfinder #926 C2 #936 拍板，未施工）wiki 页面的**主题分类**标签：frontmatter `category` 键、中文单值、值域固定四类（论文 / 科学问题 / 假说 / 实验报告，与页面体裁一一映射）+ 缺省「未分类」（值缺失/越界/通道③自建页一律落入）。是前端目录树**分组唯一来源**——顶层目录前缀分组（`official/` 等运行时自由生长目录，非任何在库约定）随之退役，目录名不再进用户界面；存量页不迁移（无 category 页全落「未分类」，文件零移动，保 `.claims` 旁车与页间目录相对链接不断）。生成侧：通道② prompt 约束新页落 `pages/` 平铺 + 写 category；通道③（openwiki planning）无注入面，划界为软引导。
+（wayfinder #926 C2 #936 拍板，#953/#954/#955 已施工落地）wiki 页面的**主题分类**标签：frontmatter `category` 键、中文单值、值域固定四类（论文 / 科学问题 / 假说 / 实验报告，与页面体裁一一映射）+ 缺省「未分类」（值缺失/越界/通道③自建页一律落入）。是前端目录树**分组唯一来源**——顶层目录前缀分组（`official/` 等运行时自由生长目录，非任何在库约定）随之退役，目录名不再进用户界面；存量页不迁移（无 category 页全落「未分类」，文件零移动，保 `.claims` 旁车与页间目录相对链接不断）。生成侧：通道② prompt 约束新页落 `pages/` 平铺 + 写 category；通道③（openwiki planning）无注入面，划界为软引导。
 _Avoid_: 复用 type/tags 充当分类——type 是英文体裁枚举（代码消费面），tags 是自由检索标签（折进检索标识符），category 是独立键；多值 category——一页一组，分组语义不挂多标签；开放词表——值域固定枚举，新类目走发版决策；回填/移动存量文件——相对链接与旁车断链风险，不迁移兼容读已拍板。
 
 **页面体裁 (page type)**:
-（853 §11.3C 拍板四类型；#936 拍板词形重写，未施工）wiki 页面的**体裁**枚举：frontmatter 必填 `type` 键（OpenWiki 校验面：自由字符串必填），标识页面由哪条生成机制产出——四值对应四流程产物：论文页 / 审稿页 / 假说卡片 / 实验报告。#936 定词形三规则：无连字符、单个名词、动词形态取过去分词——英文枚举重写为 `paper / critique / hypothesis / report`（映射旧值 `paper / critic / idea-card / experiment-report`，连字符词形随重写退役）；存量页旧枚举值不迁移、读面宽松接受，新写入由插件建页组装单点收敛（插件零格式知识钉界不变）。
+（853 §11.3C 拍板四类型；#936 拍板词形重写，#953 已施工落地）wiki 页面的**体裁**枚举：frontmatter 必填 `type` 键（OpenWiki 校验面：自由字符串必填），标识页面由哪条生成机制产出——四值对应四流程产物：论文页 / 审稿页 / 假说卡片 / 实验报告。#936 定词形三规则：无连字符、单个名词、动词形态取过去分词——英文枚举重写为 `paper / critique / hypothesis / report`（映射旧值 `paper / critic / idea-card / experiment-report`，连字符词形随重写退役）；存量页旧枚举值不迁移、读面宽松接受，新写入由插件建页组装单点收敛（插件零格式知识钉界不变）。
 _Avoid_: critic——是「评审者（人）」，体裁词用 critique（评审文）；中文写 type 值——体裁枚举英文（代码消费），中文展示由 category 承担；type 与 category 混为一谈——体裁是生成机制视角，分类是用户浏览视角，两键并存不合并。
 
 **文档面 (API docs surface)**:
