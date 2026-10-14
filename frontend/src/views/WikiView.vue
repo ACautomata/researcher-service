@@ -3,6 +3,7 @@
 // #856：owner 级——每用户仅本人 wiki，无容器切换面（listInstances 选容器随耦合下线）。
 import { computed, nextTick, onActivated, onMounted, ref } from 'vue'
 import { storeToRefs } from 'pinia'
+import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { getGraph } from '@/api/wiki'
 import type { WikiGraphDTO } from '@/api/wiki'
@@ -20,6 +21,9 @@ import PanelTriState from '@/components/PanelTriState.vue'
 
 const store = useWikiStore()
 const { groups, activePath, page, claims, claimsError, loading } = storeToRefs(store)
+// #913 深链消费：插件卡 artifactPages 深链 /wiki?path=<enc> 新标签打开本页 → onMounted
+// 首屏资料就绪后直达对应页（owner 级单 wiki 无容器参数，#856）。
+const route = useRoute()
 
 // #668：文件树三态（inline 拖宽 160–560px / collapsed 窄条 / popped 浮层）。
 // 宽度按用户+页面+面板落 localStorage，collapsed/popped 态不持久化。
@@ -158,6 +162,9 @@ onMounted(async () => {
     treeFailed.value = false
     await store.reset()
     await refreshGraph()
+    // #913 深链直达：onOpen 自带错误 toast（页不存在等），不破坏首屏。
+    const target = route.query.path
+    if (typeof target === 'string' && target !== '') await onOpen(target)
   } catch (e) {
     treeFailed.value = true
     ElMessage.error(wikiErrorMessage(e, 'Wiki 加载失败，请重试'))

@@ -179,6 +179,62 @@ describe('applyEvent（实时入口）事件语义', () => {
     expect(vm[0].tools[0].stage).toBeUndefined()
   })
 
+  it('research_run.progress 透传 stage+workflow 写入匹配工具行（853 §6.2：stage 不设前端白名单）', () => {
+    let vm = applyEvent([], ev('run.started', {}, { runId: 'r1' }))
+    vm = applyEvent(vm, ev('tool.start', { toolCallId: 'rw1', name: 'research_workflow', input: '{}' }, { runId: 'r1' }))
+    vm = applyEvent(vm, ev('research_run.progress', { toolCallId: 'rw1', stage: 'bucket', workflow: 'hypothesize' }, { runId: 'r1' }))
+    expect(vm[0].tools[0]).toMatchObject({ id: 'rw1', state: 'running', stage: 'bucket', workflow: 'hypothesize' })
+    vm = applyEvent(vm, ev('research_run.progress', { toolCallId: 'rw1', stage: 'challenge', workflow: 'hypothesize' }, { runId: 'r1' }))
+    expect(vm[0].tools[0]).toMatchObject({ stage: 'challenge', workflow: 'hypothesize' })
+  })
+
+  it('research_run.progress 白名单外 stage 仍透传（server manifest progressStages 已是唯一关卡）', () => {
+    let vm = applyEvent([], ev('run.started', {}, { runId: 'r1' }))
+    vm = applyEvent(vm, ev('tool.start', { toolCallId: 'rw1', name: 'research_workflow', input: '{}' }, { runId: 'r1' }))
+    vm = applyEvent(vm, ev('research_run.progress', { toolCallId: 'rw1', stage: '尚未存在的节点', workflow: 'ingest' }, { runId: 'r1' }))
+    expect(vm[0].tools[0]).toMatchObject({ stage: '尚未存在的节点', workflow: 'ingest' })
+  })
+
+  it('research_run.progress 无 toolCallId/无匹配行/无变化帧丢弃；入口面缺 workflow 帧不清既有值', () => {
+    let vm = applyEvent([], ev('run.started', {}, { runId: 'r1' }))
+    vm = applyEvent(vm, ev('tool.start', { toolCallId: 'rw1', name: 'research_workflow', input: '{}' }, { runId: 'r1' }))
+    vm = applyEvent(vm, ev('research_run.progress', { toolCallId: 'rw1', stage: 'design', workflow: 'experiment' }, { runId: 'r1' }))
+    const marked = vm[0].tools[0]
+    vm = applyEvent(vm, ev('research_run.progress', { stage: 'design' }, { runId: 'r1' })) // 缺 toolCallId
+    vm = applyEvent(vm, ev('research_run.progress', { toolCallId: 'ghost', stage: 'design' }, { runId: 'r1' })) // 无匹配行
+    vm = applyEvent(vm, ev('research_run.progress', { toolCallId: 'rw1', stage: 'design', workflow: 'experiment' }, { runId: 'r1' })) // 无变化
+    expect(vm[0].tools[0]).toBe(marked) // 原引用返回（copy-on-write 零噪声）
+    vm = applyEvent(vm, ev('research_run.progress', { toolCallId: 'rw1', stage: 'spec' }, { runId: 'r1' })) // 入口面/缺域字段帧
+    expect(vm[0].tools[0]).toMatchObject({ stage: 'spec', workflow: 'experiment' })
+  })
+
+  it('research_run.progress workflow 非 string 异常值不落域字段（stage 照常透传）', () => {
+    let vm = applyEvent([], ev('run.started', {}, { runId: 'r1' }))
+    vm = applyEvent(vm, ev('tool.start', { toolCallId: 'rw1', name: 'research_workflow', input: '{}' }, { runId: 'r1' }))
+    vm = applyEvent(vm, ev('research_run.progress', { toolCallId: 'rw1', stage: 'classify', workflow: 42 }, { runId: 'r1' }))
+    expect(vm[0].tools[0]).toMatchObject({ stage: 'classify' })
+    expect(vm[0].tools[0].workflow).toBeUndefined()
+  })
+
+  it('research stage+workflow 随 tool.end 剥落（终态行回放无此装饰——零差异不被污染）', () => {
+    let vm = applyEvent([], ev('run.started', {}, { runId: 'r1' }))
+    vm = applyEvent(vm, ev('tool.start', { toolCallId: 'rw1', name: 'research_workflow', input: '{"workflow":"discover"}' }, { runId: 'r1' }))
+    vm = applyEvent(vm, ev('research_run.progress', { toolCallId: 'rw1', stage: 'critic', workflow: 'discover' }, { runId: 'r1' }))
+    vm = applyEvent(vm, ev('tool.end', { toolCallId: 'rw1', state: 'success', durationMs: 9000, details: '{"workflow":"discover","status":"completed","artifactPages":[]}' }, { runId: 'r1' }))
+    expect(vm[0].tools[0]).toMatchObject({ state: 'done', result: { status: 'completed' } })
+    expect(vm[0].tools[0].stage).toBeUndefined()
+    expect(vm[0].tools[0].workflow).toBeUndefined()
+  })
+
+  it('research workflow 随 run 终态剥落（finalizeOverlay 同 stage 语义——挂起 run 丢弃残留装饰）', () => {
+    let vm = applyEvent([], ev('run.started', {}, { runId: 'r1' }))
+    vm = applyEvent(vm, ev('tool.start', { toolCallId: 'rw1', name: 'research_workflow', input: '{}' }, { runId: 'r1' }))
+    vm = applyEvent(vm, ev('research_run.progress', { toolCallId: 'rw1', stage: 'plan-review', workflow: 'experiment' }, { runId: 'r1' }))
+    vm = applyEvent(vm, ev('run.aborted', { by: 'user' }, { runId: 'r1' }))
+    expect(vm[0].tools[0].stage).toBeUndefined()
+    expect(vm[0].tools[0].workflow).toBeUndefined()
+  })
+
   it('attachment 引用进 media（校验门镜像 server：缺字段整帧忽略）', () => {
     let vm = applyEvent([], ev('run.started', {}, { runId: 'r1' }))
     vm = applyEvent(vm, ev('attachment', { attachmentId: 'a1', mime: 'image/png', size: 3, fileName: 'x.png', width: 2 }, { runId: 'r1' }))
@@ -351,6 +407,20 @@ describe('零差异一致性（硬验收：reduce(全量事件) ≡ 投影行）
         ev('tool.start', { toolCallId: 't1', name: 'bash', input: '{"command":"rm -rf build"}' }, { runId: 'r1' }),
         ev('tool.end', { toolCallId: 't1', name: 'bash', state: 'error', durationMs: 0, details: '命中命令黑名单', rejection: { source: 'blacklist', reason: '命中命令黑名单' } }, { runId: 'r1' }),
         ev('text.delta', { delta: '该命令被审批拒绝，改用只读方式检查。' }, { runId: 'r1' }),
+        ev('run.completed', {}, { runId: 'r1' }),
+      ],
+    },
+    {
+      name: 'research 工具全生命周期（progress 透传 + 终态 details——progress 即焚，终态 ≡ 回放）',
+      events: [
+        ev('run.started', {}, { runId: 'r1' }),
+        ev('tool.start', { toolCallId: 'rw1', name: 'research_workflow', input: '{"topic":"钙钛矿"}' }, { runId: 'r1' }),
+        ev('research_run.progress', { toolCallId: 'rw1', stage: 'classify' }, { runId: 'r1' }),
+        ev('research_run.progress', { toolCallId: 'rw1', stage: 'hypothesize' }, { runId: 'r1' }),
+        ev('research_run.progress', { toolCallId: 'rw1', stage: 'bucket', workflow: 'hypothesize' }, { runId: 'r1' }),
+        ev('research_run.progress', { toolCallId: 'rw1', stage: 'challenge', workflow: 'hypothesize' }, { runId: 'r1' }),
+        ev('tool.end', { toolCallId: 'rw1', state: 'success', durationMs: 88000, details: '{"workflow":"hypothesize","status":"completed","artifactPages":[{"path":"idea-cards/dig.md","title":"想法卡"}],"summary":"生成 5 个假说。"}' }, { runId: 'r1' }),
+        ev('text.delta', { delta: '假说已生成。' }, { runId: 'r1' }),
         ev('run.completed', {}, { runId: 'r1' }),
       ],
     },

@@ -1,6 +1,7 @@
 import { flushPromises, mount } from '@vue/test-utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
+import { createMemoryHistory, createRouter } from 'vue-router'
 
 vi.mock('@/api/wiki', () => ({
   getTree: vi.fn(),
@@ -46,8 +47,11 @@ const stubs = {
   },
 }
 
+// #913：WikiView 消费 useRoute()（query.path 深链）——测试挂载必须装 router plugin，
+// 否则 useRoute() 无 injection 返回 undefined。
 function mountView() {
-  return mount(WikiView, { global: { stubs } })
+  const router = createRouter({ history: createMemoryHistory(), routes: [{ path: '/wiki', component: WikiView }] })
+  return mount(WikiView, { global: { plugins: [router], stubs } })
 }
 
 describe('WikiView（#856 owner 级）', () => {
@@ -364,3 +368,53 @@ describe('WikiView — #670 面板三态接线（wiki 图谱 + 同页互斥）',
   })
 })
 
+describe('WikiView — #913 query.path 深链消费（artifactPages 深链终点，853 §6.2）', () => {
+  // ResearchRunCard 产物页深链 /wiki?path=<enc> 新标签打开本页 → 首屏资料就绪后直达对应页
+  //（owner 级单 wiki 无容器参数，#856）。
+  function mountAt(query: Record<string, string | string[]>) {
+    const router = createRouter({ history: createMemoryHistory(), routes: [{ path: '/wiki', component: WikiView }] })
+    return router.push({ path: '/wiki', query }).then(() => router.isReady()).then(() =>
+      mount(WikiView, { global: { plugins: [router], stubs } }),
+    )
+  }
+
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    ;(getTree as ReturnType<typeof vi.fn>).mockResolvedValue(TREE)
+    ;(getGraph as ReturnType<typeof vi.fn>).mockResolvedValue(GRAPH)
+    ;(readPage as ReturnType<typeof vi.fn>).mockResolvedValue({
+      path: 'concepts/a.md', title: 'A', content: '# A',
+    })
+    ;(readPage as ReturnType<typeof vi.fn>).mockClear() // 「未调 openPage」断言不受前例累积污染
+  })
+
+  it('query.path 存在 → 首屏 reset/refreshGraph 后直达对应页（openPage + claims）', async () => {
+    await mountAt({ path: 'concepts/a.md' })
+    await flushPromises()
+    expect(readPage).toHaveBeenCalledWith('concepts/a.md')
+    expect(useWikiStore().activePath).toBe('concepts/a.md')
+    expect(getTree).toHaveBeenCalledWith() // 首屏资料先就绪
+  })
+
+  it('无 query.path → 维持空态（不调 openPage）', async () => {
+    await mountAt({})
+    await flushPromises()
+    expect(readPage).not.toHaveBeenCalled()
+    expect(useWikiStore().activePath).toBe('')
+  })
+
+  it('query.path 畸形（多值数组 ?path=a&path=b）→ 忽略不调 openPage', async () => {
+    await mountAt({ path: ['a', 'b'] })
+    await flushPromises()
+    expect(readPage).not.toHaveBeenCalled()
+  })
+
+  it('深链页不存在 → openPage 失败走错误 toast，不破坏首屏（树照常加载）', async () => {
+    const { ApiError } = await import('@/api/errors')
+    ;(readPage as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new ApiError(200, '页面读取失败', 20040))
+    await mountAt({ path: 'papers/ghost.md' })
+    await flushPromises()
+    expect(getTree).toHaveBeenCalled() // 首屏资料不受深链失败影响
+    expect(ElMessage.error).toHaveBeenCalledWith('页面读取失败')
+  })
+})

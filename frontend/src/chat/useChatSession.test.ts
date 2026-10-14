@@ -397,7 +397,7 @@ describe('审批（#783 升级通道前端面）', () => {
     chat.addApproval({ id: 'e1', source: 'cautious-mode', toolName: 'bash', toolCallSummary: 'x', teammateId: null })
     vi.mocked(api.resolveSessionApproval).mockResolvedValueOnce(null)
     await conn.resolveApproval(chat.approvals[0], 'allow')
-    expect(api.resolveSessionApproval).toHaveBeenCalledWith('sess-1', 'e1', 'allow')
+    expect(vi.mocked(api.resolveSessionApproval).mock.calls[0]).toStrictEqual(['sess-1', 'e1', 'allow', undefined])
     expect(chat.approvals).toHaveLength(0)
 
     chat.addApproval({ id: 'e2', source: 'judge-limit', toolName: 'bash', toolCallSummary: 'x', teammateId: null })
@@ -410,6 +410,20 @@ describe('审批（#783 升级通道前端面）', () => {
     vi.mocked(api.resolveSessionApproval).mockRejectedValueOnce(new TypeError('网络'))
     await conn.resolveApproval(chat.approvals[0], 'deny')
     expect(chat.approvals[0].status).toBe('pending') // 可重试
+  })
+
+  it('resolveApproval reason 随行（#913：W4 方案卡拒绝必填/批准附言）；两键调用不落 reason', async () => {
+    const conn = await mounted()
+    const chat = conn.chat
+    chat.addApproval({ id: 'e1', source: 'experiment-plan', toolName: 'experiment_plan', toolCallSummary: 'x', teammateId: null })
+    vi.mocked(api.resolveSessionApproval).mockResolvedValueOnce(null)
+    await conn.resolveApproval(chat.approvals[0], 'deny', '样本量不足')
+    expect(api.resolveSessionApproval).toHaveBeenCalledWith('sess-1', 'e1', 'deny', '样本量不足')
+
+    chat.addApproval({ id: 'e2', source: 'cautious-mode', toolName: 'bash', toolCallSummary: 'x', teammateId: null })
+    vi.mocked(api.resolveSessionApproval).mockResolvedValueOnce(null)
+    await conn.resolveApproval(chat.approvals[0], 'allow')
+    expect(vi.mocked(api.resolveSessionApproval).mock.calls[1]).toStrictEqual(['sess-1', 'e2', 'allow', undefined])
   })
 })
 
