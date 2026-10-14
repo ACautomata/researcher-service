@@ -167,7 +167,7 @@ rg 六模式零命中：`officialContent` / `official-content` / `read_official_
 | 6 | 853 规格 | §4.2 prompt 资产段 | 同改：`category: critic` → `type: critique` |
 | 7 | 853 规格 | §11.3C | 词形落定行同步；追加消歧行——「叙事词 critic 页 / idea card 页 = 体裁 critique / hypothesis 的中文指称；机读字面量 = paper / critique / hypothesis / report」 |
 | 8 | 模块地图 | `docs/agents/server-modules.md:21` | PluginPageType 词形同步；`:22` officialContent 整行删除（= D61） |
-| 9 | GLOSSARY | 三词条（D55–D57） | 官方内容目录转带注记历史词条（照 :5 OpenClaw 总注先例）；能力实现层与用户交互层连锁修订（两源 → 插件单源、失义 Avoid 两条修订）；双面板删「官方内容与」枚举项。另：category 词条「未施工」状态随落地更新（D60 下游衔接） |
+| 9 | GLOSSARY | 三词条（D55–D57） | 官方内容目录转带注记历史词条（照 GLOSSARY :5 退役总注先例）；能力实现层与用户交互层连锁修订（两源 → 插件单源、失义 Avoid 两条修订）；双面板删「官方内容与」枚举项。另：category 词条「未施工」状态随落地更新（D60 下游衔接） |
 | 10 | server 目录树 | `server/README.md:63` | officialContent 树行删除（D62） |
 | 11 | 部署文档 | `deploy/DEPLOY.md:46` | 多 context → 单 context（= D48，与 §6 同点） |
 
