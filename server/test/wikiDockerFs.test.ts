@@ -49,26 +49,95 @@ describe('DockerWikiFileSystem 寻址面（#784 挂新 wiki 容器）', () => {
 })
 
 describe('DockerWikiFileSystem.buildTree', () => {
+  it('按页 frontmatter category 分组（中文值域）；无 category 页落「未分类」', async () => {
+    const fs = makeDocker({
+      snapshot: async () => [
+        file('concepts/attention.md', enc('---\ntitle: Attention\ncategory: 论文\n---\n# ignored\n')),
+        file('thoughts/idea.md', enc('# First Idea\n')), // 无 frontmatter → 未分类 + stem（无 H1 兜底）
+        file('domains/cv/papers/resnet.md', enc('---\npaper:\n  title: ResNet\n---\n# R\n')),
+        file('critiques/q.md', enc('---\ntitle: Q\ncategory: 科学问题\n---\n')),
+      ],
+    })
+    const tree = await fs.buildTree()
+    expect(tree.groups.map((g) => g.kind)).toEqual(['科学问题', '论文', '未分类'])
+    const paper = tree.groups[1]
+    expect(paper.name).toBe('论文')
+    expect(paper.pages).toEqual([{ path: 'concepts/attention.md', title: 'Attention' }])
+    const uncategorized = tree.groups[2]
+    expect(uncategorized.pages.map((p) => p.path)).toEqual(['domains/cv/papers/resnet.md', 'thoughts/idea.md'])
+  })
+
+  it('越界/畸形 category 归「未分类」；旧词形 type 页原样入组不报错', async () => {
+    const fs = makeDocker({
+      snapshot: async () => [
+        file('official/legacy.md', enc('---\ntype: critic\ntitle: 旧词形评审页\n---\n')), // 存量旧词形 type，无 category
+        file('a/越界.md', enc('---\ncategory: 官方\n---\n')), // 「官方」不入值域
+        file('b/畸形.md', enc('---\ncategory: [论文, 假说]\n---\n')), // 多值 → 非单值语义，归未分类
+        file('c/自建.md', enc('# 自建页\n')), // 通道③自建页（无 frontmatter）
+      ],
+    })
+    const tree = await fs.buildTree()
+    expect(tree.groups.map((g) => g.kind)).toEqual(['未分类'])
+    const paths = tree.groups[0].pages.map((p) => p.path)
+    expect(paths).toEqual(['a/越界.md', 'b/畸形.md', 'c/自建.md', 'official/legacy.md'])
+    const legacy = tree.groups[0].pages.find((p) => p.path === 'official/legacy.md')!
+    expect(legacy.title).toBe('旧词形评审页')
+  })
+
+  it('顶层散落页入树（pages/ 平铺 + 不迁移兼容读；散落页与子目录页同组按 category）', async () => {
+    const fs = makeDocker({
+      snapshot: async () => [
+        file('top.md', enc('---\ntitle: Top\ncategory: 假说\n---\n')),
+        file('pages/flat.md', enc('---\ncategory: 假说\n---\n')),
+        file('nested/deep.md', enc('---\ncategory: 报告越界值\n---\n')),
+        file('loose.md', enc('# Loose\n')),
+      ],
+    })
+    const tree = await fs.buildTree()
+    expect(tree.groups.map((g) => g.kind)).toEqual(['假说', '未分类'])
+    const hyp = tree.groups[0]
+    expect(hyp.pages.map((p) => p.path)).toEqual(['pages/flat.md', 'top.md'])
+    const uncategorized = tree.groups[1]
+    expect(uncategorized.pages.map((p) => p.path)).toEqual(['loose.md', 'nested/deep.md'])
+  })
+
+  it('「未分类」组沉底（值域四类在前、组序 cmp）', async () => {
+    const fs = makeDocker({
+      snapshot: async () => [
+        file('u/none.md', enc('# N\n')),
+        file('p/paper.md', enc('---\ncategory: 论文\n---\n')),
+        file('h/hyp.md', enc('---\ncategory: 假说\n---\n')),
+        file('r/report.md', enc('---\ncategory: 实验报告\n---\n')),
+        file('q/q.md', enc('---\ncategory: 科学问题\n---\n')),
+      ],
+    })
+    const tree = await fs.buildTree()
+    expect(tree.groups.map((g) => g.kind)).toEqual(['假说', '实验报告', '科学问题', '论文', '未分类'])
+  })
+
   it('snapshot 为 null（容器/wiki 目录不存在/超限）→ 空树降级', async () => {
     const fs = makeDocker({ snapshot: async () => null })
     expect(await fs.buildTree()).toEqual({ groups: [] })
   })
 
-  it('按首段目录成组；组序与组内按 cmp 排序；顶层散落页不收', async () => {
+  it('目录名不再分组（旧目录页落「未分类」）；title 链 frontmatter → stem 不变', async () => {
     const fs = makeDocker({
       snapshot: async () => [
         file('concepts/attention.md', enc('---\ntitle: Attention\n---\n# ignored\n')),
         file('thoughts/idea.md', enc('# First Idea\n')), // 无 frontmatter → stem（无 H1 兜底）
         file('domains/cv/papers/resnet.md', enc('---\npaper:\n  title: ResNet\n---\n# R\n')),
-        file('top.md', enc('# Top\n')), // 顶层散落页不收
       ],
     })
     const tree = await fs.buildTree()
-    expect(tree.groups.map((g) => g.kind)).toEqual(['concepts', 'domains', 'thoughts'])
-    const concepts = tree.groups[0]
-    expect(concepts.pages).toEqual([{ path: 'concepts/attention.md', title: 'Attention' }])
-    const thoughts = tree.groups.find((g) => g.kind === 'thoughts')!
-    expect(thoughts.pages[0].title).toBe('idea') // frontmatter 无 → stem（H1 不兜底，对齐 NodeFs buildTree）
+    expect(tree.groups.map((g) => g.kind)).toEqual(['未分类'])
+    const uncategorized = tree.groups[0]
+    expect(uncategorized.pages.map((p) => p.path)).toEqual([
+      'concepts/attention.md',
+      'domains/cv/papers/resnet.md',
+      'thoughts/idea.md',
+    ])
+    expect(uncategorized.pages.find((p) => p.path === 'concepts/attention.md')!.title).toBe('Attention')
+    expect(uncategorized.pages.find((p) => p.path === 'thoughts/idea.md')!.title).toBe('idea')
   })
 
   it('symlink / 非 .md / SKIP_DIRS 段 / SKIP_FILES 末段 一律跳过', async () => {
@@ -102,7 +171,7 @@ describe('DockerWikiFileSystem.buildTree', () => {
       snapshot: async () => [dir('empty'), dir('concepts'), file('concepts/a.md', enc('---\ntitle: A\n---\n'))],
     })
     const tree = await fs.buildTree()
-    expect(tree.groups.map((g) => g.kind)).toEqual(['concepts'])
+    expect(tree.groups.map((g) => g.kind)).toEqual(['未分类'])
   })
 })
 

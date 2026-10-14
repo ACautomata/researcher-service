@@ -131,8 +131,11 @@ export interface PluginAuditPort {
 // 边界同构复用，单一来源）。
 // ---------------------------------------------------------------------------
 
-// PageType 枚举值集（853 §11.3C 拍板）：论文页 / critic 页 / idea-card / 实验报告。
-export const PLUGIN_PAGE_TYPES = ['paper', 'critic', 'idea-card', 'experiment-report'] as const
+// PageType 枚举值集（#949 spec §1.2 词形三规则：无连字符、单个名词、动词形态取过去分词）：
+// 论文 / 科学问题（critique）/ 假说 / 实验报告。critic→critique 顺修正（critic = 评审者（人），
+// critique = 评审文）。与 wiki category 一一映射（wiki/pluginPage 组装单点写 category 行）。
+// 只约束新写入；存量旧词形（paper/critic/idea-card/experiment-report）不迁移、读面宽松接受。
+export const PLUGIN_PAGE_TYPES = ['paper', 'critique', 'hypothesis', 'report'] as const
 export type PluginPageType = (typeof PLUGIN_PAGE_TYPES)[number]
 
 // ClaimDraft：claims 结构化提交单元（#850 D3）。evidence = 资源引用串（repo:// 锚形态，

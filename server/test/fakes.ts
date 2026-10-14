@@ -2,20 +2,15 @@
 // 供 wiki.test.ts（REST 契约，经 serviceFor 注入）与 wikiService.test.ts（service 聚合逻辑）共用。
 // 行为语义对齐生产适配器（DockerWikiFileSystem / 退役的 NodeWikiFileSystem）：
 //   - validatePath：拒 `..` / SKIP_DIRS 段 / SKIP_FILES 末段 → WikiInvalidPath（managed 黑名单）；
-//   - buildTree：按顶层目录分组，顶层散落页不收；title = frontmatter → stem（**无 H1**，对齐真实现）；
+//   - buildTree：按页 frontmatter category 分组（未分类沉底），顶层散落页入树；title = frontmatter → stem（**无 H1**，对齐真实现）；
 //   - readPage：title = frontmatter → stem（**无 H1**）。
 // 只余读面：写面三方法（writePage/createPage/deletePage）随 #758 Q3 写面整域退役删除——
 // 测试播种/改页直接写 pages/claims Map。
 
-import { claimsSidecarPath, FrontmatterParser, frontmatterTitle } from '../src/wiki/logic'
+import { claimsSidecarPath, FrontmatterParser, frontmatterCategory, frontmatterTitle, groupByCategory } from '../src/wiki/logic'
 import { SKIP_DIRS, SKIP_FILES } from '../src/wiki/values'
 import { WikiInvalidPath, WikiPageNotFound } from '../src/wiki/errors'
-import type {
-  WikiFileSystem,
-  WikiTree,
-  WikiTreeGroup,
-  WikiTreePage,
-} from '../src/wiki/fsPort'
+import type { WikiFileSystem, WikiTree } from '../src/wiki/fsPort'
 
 export class FakeWikiFileSystem implements WikiFileSystem {
   pages = new Map<string, string>()
@@ -56,18 +51,20 @@ export class FakeWikiFileSystem implements WikiFileSystem {
   }
 
   async buildTree(): Promise<WikiTree> {
-    const groups = new Map<string, WikiTreeGroup>()
+    const pages: { path: string; title: string; category: string }[] = []
     for (const rel of [...this.pages.keys()].sort()) {
       if (!rel.endsWith('.md')) continue // 只收 .md（对齐生产适配器）
       if (this.isSkipped(rel)) continue // 扫描侧 SKIP 过滤（读侧才是 validatePath 拒绝）
-      const slash = rel.indexOf('/')
-      if (slash < 0) continue // 顶层散落页不收
-      const top = rel.slice(0, slash)
-      const item: WikiTreePage = { path: rel, title: this.treeTitleOf(this.pages.get(rel)!, this.stemOf(rel)) }
-      if (!groups.has(top)) groups.set(top, { kind: top, name: top, pages: [] })
-      groups.get(top)!.pages.push(item)
+      const { frontmatter } = new FrontmatterParser().parse(this.pages.get(rel)!)
+      pages.push({
+        path: rel,
+        title: frontmatterTitle(frontmatter) ?? this.stemOf(rel),
+        category: frontmatterCategory(frontmatter),
+      })
     }
-    return { groups: [...groups.values()].map((g) => ({ kind: g.kind, name: g.name, pages: g.pages })) }
+    // 分组键 = category、顶层散落页入树、「未分类」沉底——分组纯逻辑与生产适配器同源
+    //（logic.groupByCategory 单源，防 fake 与 dockerFs 漂移）。
+    return { groups: groupByCategory(pages) }
   }
 
   async readPage(relPath: string): Promise<{ path: string; title: string; content: string }> {

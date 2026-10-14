@@ -107,9 +107,9 @@ describe.skipIf(!DOCKER_UP)('wiki 容器生命周期集成 smoke（真 docker da
     const page = await wikiFs.readPage('concepts/attention.md')
     expect(page.title).toBe('Attention')
     expect(page.content).toContain('# Attention')
-    // tree 分组（开放目录分组——本页集两组均在 concepts）
+    // tree 分组（分组键 = frontmatter category——种子页无 category 全落「未分类」单组）
     const tree = await wikiFs.buildTree()
-    expect(tree.groups.map((g) => g.name)).toEqual(['concepts'])
+    expect(tree.groups.map((g) => g.name)).toEqual(['未分类'])
     // graph：wikilink 边 + ghost 节点机制
     const graph = await wikiSvc.buildGraph()
     expect(graph.edges.length).toBeGreaterThanOrEqual(1)

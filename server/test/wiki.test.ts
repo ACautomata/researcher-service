@@ -21,9 +21,9 @@ import { WikiService } from '../src/wiki/service'
 // 「空目录不成组」由 entities 下无页自然成立）。
 function wikiFixture(): Record<string, string> {
   return {
-    'concepts/attention.md': '---\ntitle: Attention\n---\n# Attention\n见 [[self-attention]]。\n',
-    'domains/cv/papers/resnet.md': '---\npaper:\n  title: ResNet\nrelated_pages: [attention]\n---\n# ResNet\n',
-    'experiments/trial-1.md': '---\ntitle: Trial 1\n---\n# Trial 1\n',
+    'concepts/attention.md': '---\ntitle: Attention\ncategory: 论文\n---\n# Attention\n见 [[self-attention]]。\n',
+    'domains/cv/papers/resnet.md': '---\npaper:\n  title: ResNet\nrelated_pages: [attention]\ncategory: 论文\n---\n# ResNet\n',
+    'experiments/trial-1.md': '---\ntitle: Trial 1\ncategory: 实验报告\n---\n# Trial 1\n',
     'thoughts/idea-1.md': '# First Idea\n\nIdea 摘录。\n',
     '_attachments/cache.md': 'x',
     'index.md': '# INDEX',
@@ -90,22 +90,22 @@ describe('wiki REST（接缝 #2 信封 + #335；#856 owner 级）', () => {
 
   // ---------------------------- GET /tree ----------------------------
 
-  it('tree：真实子目录分组、未知目录成组、空目录不成组、跳过插件私有/占位/非 .md、title 走 frontmatter', async () => {
+  it('tree：category 分组（四类 + 未分类沉底）、空目录不成组、跳过插件私有/占位/非 .md、散落页入树、title 走 frontmatter', async () => {
     const u = await seedWikiUser('utree')
     const res = await ctx.request.get(`${BASE}/tree`).set(bearer(u.token))
     expect(res.body.code).toBe(0)
     const groups = res.body.data.groups as Array<{ kind: string; name: string; pages: Array<{ path: string; title: string }> }>
-    const kinds = new Set(groups.map((g) => g.kind))
-    expect(kinds).toEqual(expect.objectContaining(new Set(['concepts', 'domains', 'experiments', 'thoughts'])))
-    expect(kinds).not.toContain('entities') // 空目录不成组
-    expect(kinds).not.toContain('_attachments')
+    expect(groups.map((g) => g.kind)).toEqual(['实验报告', '论文', '未分类'])
+    expect(groups.map((g) => g.name)).toEqual(groups.map((g) => g.kind)) // kind/name 同值 = category 值
     const all = groups.flatMap((g) => g.pages)
     expect(all.some((p) => p.path.includes('_attachments'))).toBe(false)
     expect(all.some((p) => p.path === 'index.md')).toBe(false)
-    expect(all.some((p) => p.path === 'root-note.md')).toBe(false) // 顶层散落页不收
-    const concepts = groups.find((g) => g.kind === 'concepts')!
-    const att = concepts.pages.find((p) => p.path === 'concepts/attention.md')!
+    expect(all.some((p) => p.path === 'root-note.md')).toBe(true) // 顶层散落页入树（落「未分类」）
+    const papers = groups.find((g) => g.kind === '论文')!
+    const att = papers.pages.find((p) => p.path === 'concepts/attention.md')!
     expect(att.title).toBe('Attention')
+    const uncategorized = groups.find((g) => g.kind === '未分类')!
+    expect(uncategorized.pages.map((p) => p.path)).toEqual(['root-note.md', 'thoughts/idea-1.md'])
   })
 
   it('tree：未注册 wiki 的账号 → 空树合法初态（零初始化）', async () => {

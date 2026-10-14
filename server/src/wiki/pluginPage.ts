@@ -19,9 +19,11 @@ import {
   type PluginClaimDraft,
   type PluginPageDraft,
   type PluginPageProvenance,
+  type PluginPageType,
 } from '../plugins/api'
 import { GENERATED_STALE_AFTER_MS, PAGE_DRAFT_MAX } from '../../../plugins/research/values'
 import { PATH_MAX } from './paths'
+import { WIKI_CATEGORIES } from './values'
 
 // PageDraft DTO 尺寸上限的 path 件：values 表不辖 path（wiki 域单源 PATH_MAX），
 // 组合进本域 PAGE_DRAFT_MAX 消费形态。
@@ -29,6 +31,17 @@ const DRAFT_MAX = { ...PAGE_DRAFT_MAX, pathChars: PATH_MAX } as const
 
 // 四流程名形态（W1–W4 枚举 #909 定稿前先锁小写 kebab/snake，防 frontmatter 垃圾值）。
 const WORKFLOW_SHAPE = /^[a-z][a-z0-9_-]{0,31}$/
+
+// type → category 一一映射（#949 spec §1.2：paper→论文 / critique→科学问题 / hypothesis→假说 /
+// report→实验报告）。核心组装单点写入（口径归一 R2）——四流程建页格式单源、插件零格式知识
+//（853 §3.3「插件只给 PageDraft 元数据」不被触及）；Record<PluginPageType, ...> 使枚举扩值时
+// 漏映射 typecheck 即红。
+const TYPE_CATEGORY: Record<PluginPageType, (typeof WIKI_CATEGORIES)[number]> = {
+  paper: '论文',
+  critique: '科学问题',
+  hypothesis: '假说',
+  report: '实验报告',
+}
 
 export const PluginClaimDraftSchema: z.ZodType<PluginClaimDraft> = z.object({
   statement: z.string().min(1),
@@ -72,6 +85,8 @@ export function assemblePageMarkdown(input: AssembledPageInput): string {
   const staleAfter = new Date(input.now + GENERATED_STALE_AFTER_MS).toISOString()
   const fm: string[] = [
     `type: ${draft.type}`,
+    // category 按 type 单点映射（中文值域枚举态裸值，与 type/status/source 同款保人读面）。
+    `category: ${TYPE_CATEGORY[draft.type]}`,
     `title: ${JSON.stringify(draft.title)}`,
     // B1 拍板：status 用 openwiki 合法值集的 'draft'——'generated' 不在 OKF_STATUS_VALUES，
     // 治理 validate 必摘（invalid_status）；生成溯源由 generated{by,at} + source 承载。

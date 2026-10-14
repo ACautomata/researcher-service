@@ -44,7 +44,7 @@ describe('W3 hypothesize 图 invoke（S2 端口注入 fake）', () => {
       { path: string; title: string; type: string; content: string; claims: { statement: string; evidence: string[] }[] },
       Record<string, unknown>,
     ]
-    expect(draft.type).toBe('idea-card')
+    expect(draft.type).toBe('hypothesis')
     expect(provenance).toEqual({ workflow: 'hypothesize' })
     expect(draft.content.startsWith('# 基于能量分数的 OOD 判据改进')).toBe(true)
     expect(draft.content).toContain('`category: idea`')

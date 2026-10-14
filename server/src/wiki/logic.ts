@@ -5,7 +5,7 @@
 
 import { createHash } from 'node:crypto'
 
-import { SKIP_DIRS, SKIP_FILES, WIKILINK_RE } from './values'
+import { SKIP_DIRS, SKIP_FILES, WIKILINK_RE, WIKI_CATEGORIES, WIKI_UNCATEGORIZED } from './values'
 
 // 字典序比较（对齐 Python 的 Unicode code-point 序）。
 // JS 的 `a < b` 按 UTF-16 code-unit 序：非 BMP 字符（emoji 等代理对 [D800–DFFF]）会排在高 BMP
@@ -272,6 +272,37 @@ export function frontmatterTitle(frontmatter: Frontmatter): string | undefined {
     if (Array.isArray(v) && v.length > 0) return v.join('')
   }
   return undefined
+}
+
+// 页面主题分类读面归组（GLOSSARY「category（主题分类）」）：frontmatter `category` 键值在
+// 值域内照用，缺失/越界/畸形（数组等非 string）一律归「未分类」——归组不回写文件。
+export function frontmatterCategory(frontmatter: Frontmatter): string {
+  const v = frontmatter['category']
+  if (typeof v === 'string' && (WIKI_CATEGORIES as readonly string[]).includes(v)) return v
+  return WIKI_UNCATEGORIZED
+}
+
+// 树分组纯逻辑（buildTree 分组键 = category 的单源实现，生产适配器与测试 fake 共用——
+// 防双份漂移）：组序「未分类」沉底、其余按 cmp；组内按 cmp(path)。
+// 返回形状内联（不 import fsPort——logic 被 fsPort 引用，反向 import 成环），
+// 结构与 WikiTreeGroup 兼容（kind/name 同值 = category 值，口径归一 R1）。
+export function groupByCategory(
+  pages: readonly { path: string; title: string; category: string }[],
+): { kind: string; name: string; pages: { path: string; title: string }[] }[] {
+  const groups = new Map<string, { path: string; title: string }[]>()
+  for (const p of pages) {
+    const bucket = groups.get(p.category)
+    if (bucket) bucket.push({ path: p.path, title: p.title })
+    else groups.set(p.category, [{ path: p.path, title: p.title }])
+  }
+  return [...groups.entries()]
+    .sort(([a], [b]) => {
+      const aUnc = a === WIKI_UNCATEGORIZED
+      const bUnc = b === WIKI_UNCATEGORIZED
+      if (aUnc !== bUnc) return aUnc ? 1 : -1
+      return cmp(a, b)
+    })
+    .map(([kind, bucket]) => ({ kind, name: kind, pages: bucket.sort((x, y) => cmp(x.path, y.path)) }))
 }
 
 // UTF-8 严格解码：非法字节抛 TypeError（对齐 Python read_text(encoding='utf-8') 的

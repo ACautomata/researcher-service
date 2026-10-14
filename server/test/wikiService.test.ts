@@ -13,24 +13,24 @@ import { FakeWikiFileSystem } from './fakes'
 
 function fixtureFs(): FakeWikiFileSystem {
   return new FakeWikiFileSystem({
-    'concepts/attention.md': '---\ntitle: Attention\n---\n# Attention\n见 [[self-attention]]。\n',
-    'concepts/transformer.md': '---\ntitle: Transformer\n---\n# T\n',
+    'concepts/attention.md': '---\ntitle: Attention\ncategory: 论文\n---\n# Attention\n见 [[self-attention]]。\n',
+    'concepts/transformer.md': '---\ntitle: Transformer\ncategory: 论文\n---\n# T\n',
     'domains/cv/papers/resnet.md': '---\npaper:\n  title: ResNet\nrelated_pages: [attention]\n---\n# ResNet\n',
-    'experiments/trial-1.md': '---\ntitle: Trial 1\n---\n# Trial 1\n',
+    'experiments/trial-1.md': '---\ntitle: Trial 1\ncategory: 实验报告\n---\n# Trial 1\n',
   })
 }
 
 describe('WikiService 读面（fake FS）', () => {
-  it('build_tree：按页面真实顶层目录分组，未知目录也成组；无页目录不成组', async () => {
+  it('build_tree：按页 frontmatter category 分组；无 category 页落「未分类」', async () => {
     const svc = new WikiService(fixtureFs())
     const tree = await svc.buildTree()
-    const kinds = tree.groups.map((g) => g.kind)
-    expect(kinds).toEqual(expect.arrayContaining(['concepts', 'domains', 'experiments']))
-    expect(kinds).not.toContain('concept')
-    expect(kinds).not.toContain('entities')
-    const experiments = tree.groups.find((g) => g.kind === 'experiments')!
-    expect(experiments.name).toBe('experiments')
-    expect(experiments.pages.map((p) => p.path)).toEqual(['experiments/trial-1.md'])
+    expect(tree.groups.map((g) => g.kind)).toEqual(['实验报告', '论文', '未分类'])
+    const papers = tree.groups.find((g) => g.kind === '论文')!
+    expect(papers.name).toBe('论文')
+    expect(papers.pages.map((p) => p.path)).toEqual(['concepts/attention.md', 'concepts/transformer.md'])
+    expect(tree.groups.find((g) => g.kind === '未分类')!.pages.map((p) => p.path)).toEqual([
+      'domains/cv/papers/resnet.md',
+    ])
   })
 
   it('read_page：原文 + frontmatter title', async () => {
@@ -59,6 +59,21 @@ describe('WikiService 读面（fake FS）', () => {
 })
 
 describe('WikiService buildGraph（fake FS）', () => {
+  it('节点集 = 树页集全等（S6 显式锚：顶层散落页放开后节点集显式变大，防静默漂移）', async () => {
+    const fs = new FakeWikiFileSystem({
+      'concepts/attention.md': '---\ntitle: Attention\n---\n# A\n',
+      'top.md': '# Top\n', // 顶层散落页（无目录段）
+      'pages/flat.md': '# Flat\n', // pages/ 平铺页
+    })
+    const svc = new WikiService(fs)
+    const tree = await svc.buildTree()
+    const graph = await svc.buildGraph()
+    const treePagePaths = tree.groups.flatMap((g) => g.pages.map((p) => p.path)).sort()
+    const realNodeIds = graph.nodes.filter((n) => !n.ghost).map((n) => n.id).sort()
+    expect(realNodeIds).toEqual(treePagePaths)
+    expect(treePagePaths).toContain('top.md') // 散落页在树 → 在图（S2→S6 放开的行为锚）
+  })
+
   it('节点 = tree 全部页；wikilink 不可解析 → ghost 节点', async () => {
     const graph = await new WikiService(fixtureFs()).buildGraph()
     const nodeIds = graph.nodes.map((n) => n.id)

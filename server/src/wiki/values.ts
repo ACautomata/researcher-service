@@ -10,6 +10,12 @@
 export const SKIP_DIRS = new Set(['_attachments', '_views', '.claims'])
 export const SKIP_FILES = new Set(['index.md', 'AGENTS.md', 'WIKI.md', 'inbox.md', 'log.md', 'INSTRUCTIONS.md'])
 
+// category 值域（#926 C2 拍板 · GLOSSARY「category（主题分类）」）：frontmatter `category` 键、
+// 中文单值四类 + 缺省「未分类」。读面归组：值缺失/越界/畸形一律归「未分类」，不回写文件；
+// 树分组唯一来源（目录前缀分组退役），「未分类」组沉底（分组排序在 logic.groupByCategory）。
+export const WIKI_CATEGORIES = ['论文', '科学问题', '假说', '实验报告'] as const
+export const WIKI_UNCATEGORIZED = '未分类'
+
 // obsidian 风格双链 [[target]] 或 [[target|别名]]（WIKILINK_RE）
 export const WIKILINK_RE = /\[\[([^\]]+)\]\]/g
 
