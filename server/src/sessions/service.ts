@@ -1,9 +1,7 @@
 import { parseSlash, SYSTEM_COMMANDS } from '../plugins/slash'
 import type { ModelRef } from '../runner/providerRegistry'
 import { snapshotRunCapabilities } from '../runner/capabilities'
-import { mergeCommandDirectories } from '../plugins/commandResolution'
 import type { PluginRuntime } from '../plugins/surface'
-import { snapshotOfficialContent } from '../officialContent/runtime'
 // 会话域业务服务（#778 · #747 C 节会话 REST 全件）：扁平挂用户（容器维度退役）、创建/列表/
 // 改标题（story 5 自动生成+可改）、发消息（story 7 32-hex 幂等）、abort（story 8 by:user）、
 // resume、历史投影 GET、删会话级联删沙箱（#776 契约「消费方 = #778」）。
@@ -370,10 +368,9 @@ export class SessionService {
     // 归属门（50002 同码防探测）先行；此后本体不再消费入口快照（残留清理在函数内重读指针——
     // 入口快照可能落后于上一轮 completed 的指针推进，R 评审）。
     await getSessionForUser(this.deps.prisma, user, sessionId)
-    // 斜杠识别/幂等/门禁全部作用于**原始输入**：落行存用户所发原文，官方模板展开只在命令
-    // 构造点进行——模板发版改文不改变已存内容，同 key 重发恒 replay（#778 story 7；50007 只对
-    // 真正异 content 的输入触发）。系统命令（/new /compact /model）为保留名（catalog 构造期
-    // 拒绝同名官方命令），恒以原文穿过 expand。
+    // 斜杠识别/幂等/门禁全部作用于**原始输入**：落行存用户所发原文，同 key 重发恒 replay
+    //（#778 story 7；50007 只对真正异 content 的输入触发）。系统命令（/new /compact /model）
+    // 为保留名（插件命令撞名注册期已拒），恒以原文穿过命令构造点。
     const slash = parseSlash(p.content)
     const existing = await this.deps.prisma.sessionMessage.findUnique({
       where: { sessionId_clientKey: { sessionId, clientKey: p.clientKey } },
@@ -398,25 +395,19 @@ export class SessionService {
 
     // 命令构造先于落行：构造失败（caller 缺失/50002 面）不落行——幂等键只在「run 确已被
     // 接受」后锁定（失败请求锁死幂等键 = story 7 语义反转：重发恒 replay 而消息从未被处理）。
-    // 官方命令展开在此处（唯一消费方 = run）：/research x → 模板正文 $ARGUMENTS 插值；非官方
-    // 输入恒等返回。落行 content 列仍存原始输入（见 sendMessage 头注）。
-    // 插件命令（#788 · #752 §2.3 R4/R9）：两源合并序 = 系统含官方 > 插件（无遮蔽——注册期
-    // 校验保证不撞名）。slash 命中启用集内插件命令 → handler 产出 outcome：{inject} 以
-    // user message 注入（官方命令同形）；{execute} 直达本插件工具执行面（operation=
-    // plugin-execute，不经 agent）。启用集 per-command 现读快照（禁用即下个命令不生效）。
-    let runContent = snapshotOfficialContent().expand(p.content)
+    // 插件命令（#788 · #752 §2.3 R4/R9）：注册期校验保证插件命令名不撞系统保留名——命中
+    // 启用集内插件命令 → handler 产出 outcome：{inject} 以 user message 注入；{execute} 直达
+    // 本插件工具执行面（operation=plugin-execute，不经 agent）。未命中（含已退役的 /research
+    // 等未知命令）以原文直入 run。启用集 per-command 现读快照（禁用即下个命令不生效）。
+    let runContent = p.content
     let pluginExecute: { tool: string; args: unknown } | undefined
     if (slash && !(SYSTEM_COMMANDS as readonly string[]).includes(slash.name) && this.deps.plugins) {
       const enabled = await snapshotRunCapabilities(this.deps.prisma, user.id)
-      const commandDirectory = mergeCommandDirectories({
-        official: snapshotOfficialContent().commands,
-        plugin: this.deps.plugins.surface([...enabled.enabledPluginIds]).commands,
-      })
-      const resolved = slash ? commandDirectory.get(slash.name) : undefined
-      // 官方命中 → runContent 已是展开产物（上方 expand）；插件命中 → handler outcome 覆盖
-      //（{inject} 以 user message 注入；{execute} 直达本插件工具执行面，不经 agent）。
-      if (resolved?.source === 'plugin') {
-        const outcome = await resolved.entry.command.handler(slash.args, { logger: { info: () => {}, warn: () => {} } })
+      const pluginCommand = this.deps.plugins
+        .surface([...enabled.enabledPluginIds])
+        .commands.find((entry) => entry.command.name === slash.name)
+      if (pluginCommand) {
+        const outcome = await pluginCommand.command.handler(slash.args, { logger: { info: () => {}, warn: () => {} } })
         if ('inject' in outcome) runContent = outcome.inject
         else pluginExecute = outcome.execute
       }

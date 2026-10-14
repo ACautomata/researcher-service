@@ -1,4 +1,4 @@
-// #952 T1·prefactor：系统命令设施（SYSTEM_COMMANDS/parseSlash）自 officialContent/catalog
+// #952 T1·prefactor：系统命令设施（SYSTEM_COMMANDS/parseSlash）自原官方内容目录模块
 // 迁出至 plugins/slash.ts（#938 Q3 拍板落点）后的公共接口规格——搬家语义零变化（D51 硬约束）。
 import { describe, expect, it } from 'vitest'
 import { parseSlash, SYSTEM_COMMANDS } from '../src/plugins/slash'

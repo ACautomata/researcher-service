@@ -42,7 +42,7 @@ export interface PluginRuntime {
   surface(enabledIds: readonly string[]): EnabledPluginSurface
 }
 
-// 系统 prompt 插件段（目录行形态对齐 officialContent catalog.prompt 先例）。
+// 系统 prompt 插件段（目录行形态：`- name: promptSnippet` + 缩进 guideline 行）。
 export function buildPluginPrompt(manifests: readonly PluginManifest[]): string {
   const lines: string[] = []
   for (const manifest of manifests) {

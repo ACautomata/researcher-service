@@ -1,4 +1,5 @@
-// #788 S3/S1：命令两源合并（#752 §2.3 R4）+ 插件命令 {inject}/{execute} 运行时（R9）。
+// #788 S1：插件命令 {inject}/{execute} 运行时（#752 §2.3 R9）。两源合并函数随 #787 官方内容
+// 目录退役（#956）内联塌缩进会话服务消费点，其纯函数用例随模块删除。
 import { afterEach, describe, expect, it } from 'vitest'
 import { mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -17,7 +18,6 @@ import { ProviderRegistry } from '../src/runner/providerRegistry'
 import { ConcurrencyGate } from '../src/runner/concurrency'
 import { PrismaCheckpointSaver } from '../src/runner/persistence/prismaCheckpointSaver'
 import { SessionService } from '../src/sessions/service'
-import { mergeCommandDirectories } from '../src/plugins/commandResolution'
 import { createPluginRuntime } from '../src/plugins/surface'
 import { definePlugin, type AnyPluginToolDefinition } from '../src/plugins/api'
 import { ScriptedChatModel } from './runnerFakes'
@@ -25,21 +25,6 @@ import { seedUser } from './helpers'
 
 const cleanups: Array<() => Promise<void>> = []
 afterEach(async () => { for (const cleanup of cleanups.splice(0)) await cleanup() })
-
-describe('#788 命令两源合并（S3，#752 §2.3 R4）', () => {
-  it('官方优先于插件（防御序）；未撞名插件命令入目录', () => {
-    const dir = mergeCommandDirectories({
-      official: [{ name: 'research', description: 'official template' }],
-      plugin: [
-        { manifestId: 'p', command: { name: 'research', handler: async () => ({ inject: 'x' }) } },
-        { manifestId: 'p', command: { name: 'p-only', handler: async () => ({ inject: 'y' }) } },
-      ],
-    })
-    expect(dir.get('research')).toMatchObject({ source: 'official' })
-    expect(dir.get('p-only')).toMatchObject({ source: 'plugin' })
-    expect(dir.get('p-only')).toMatchObject({ entry: expect.objectContaining({ manifestId: 'p' }) })
-  })
-})
 
 // 捕获模型输入的脚本模型（inject/原文判别的观测面）
 class CapturingModel extends ScriptedChatModel {

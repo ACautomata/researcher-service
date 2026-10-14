@@ -140,7 +140,7 @@ describe('#792 figure 工具两条触发面一条执行面（S1）', () => {
     //（与 runner/assembly.ts 装配面同参）。runtime 面仍装全量（翻译面查表含真插件无妨）。
     await assertValidPluginCatalog({
       manifests: [figureLike, researchLike],
-      coreToolNames: ['task', 'read_official_skill'],
+      coreToolNames: ['task', 'read_file'],
       reservedCommandNames: ['new', 'compact', 'model'],
     })
     const registry = new ProviderRegistry(prisma, {

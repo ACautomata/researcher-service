@@ -1051,7 +1051,7 @@ export class RunService {
               recursionLimit: this.recursionLimit,
               signal: controller.signal,
               callbacks: [usageHandler],
-              metadata: { ownerId: capabilities.ownerId, ownerPluginIds: [...capabilities.enabledPluginIds], officialContentVersion: capabilities.official.version },
+              metadata: { ownerId: capabilities.ownerId, ownerPluginIds: [...capabilities.enabledPluginIds] },
             })
             for await (const raw of stream) {
               // 工具/推理活动刷新沙箱闲置计时（#776 真 activity 源——长 run 中途不被 sweep stop）
@@ -1825,7 +1825,6 @@ export class RunService {
     // 双根入键：docker 实例变更（沙箱 remove/recreate、#784 wiki 容器接管后改名）时缓存图
     // 持旧 backend 会指向已删容器——backend 双根都是拓扑因子。（journaling backend 无新键
     // 成分：journal sessionId 与 labContainer 一一对应——researcher-sandbox-<journalSessionId>。）
-    const official = capabilities.official
     const wikiContainer = this.deps.resolveWikiContainer(ownerId)
     // 插件目录版本入键（#788）：启用集（capabilities.key）管「哪些插件开」，目录版本管
     // 「开着的插件长什么样」——任一变更都触发图重建（拓扑因子 = 工具面 + prompt 面）。
@@ -1862,7 +1861,6 @@ export class RunService {
       backend,
       checkpointer: this.deps.saver,
       systemPrompt: LEADER_SYSTEM_PROMPT,
-      official,
       interruptPolicy: policy,
       tools: [...wikiTools, ...tools],
       // 插件工具进图（#788）：LangChain 适配（zod → StructuredTool）；prompt 段并入
@@ -1933,7 +1931,6 @@ export class RunService {
       checkpointer: this.deps.saver,
       // 两段必填——filter(Boolean) 对本调用点无行为影响（joinSections 收敛，#747 R1 Standards⑦）。
       systemPrompt: joinSections(LEADER_SYSTEM_PROMPT, WIKI_UPDATE_TEAMMATE_PROMPT),
-      official: p.capabilities.official,
       interruptPolicy: p.policy,
       tools: [...wikiTools, ...p.teammateTools, ...p.lifecycleTools],
       ...(middleware.length > 0 ? { middleware } : {}),

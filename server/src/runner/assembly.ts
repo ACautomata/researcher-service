@@ -34,7 +34,6 @@ import { PLUGIN_MANIFESTS } from '../../../plugins/index'
 import { assertPluginEnv, assertValidPluginCatalog } from '../plugins/registry'
 import { createPluginRuntime, resolvePluginConfig, type PluginRuntime } from '../plugins/surface'
 import { SYSTEM_COMMANDS } from '../plugins/slash'
-import { snapshotOfficialContent } from '../officialContent/runtime'
 
 export interface RunnerAssembly {
   readonly service: RunService
@@ -108,8 +107,8 @@ export async function assembleRunner(opts: {
   const plugins = opts.plugins ?? await (async () => {
     await assertValidPluginCatalog({
       manifests: PLUGIN_MANIFESTS,
-      coreToolNames: [...FILE_TOOLS, ...EXEC_TOOLS, 'task', 'read_official_skill', ...TEAMMATE_TOOL_NAMES],
-      reservedCommandNames: [...SYSTEM_COMMANDS, ...snapshotOfficialContent().commands.map((c) => c.name)],
+      coreToolNames: [...FILE_TOOLS, ...EXEC_TOOLS, 'task', ...TEAMMATE_TOOL_NAMES],
+      reservedCommandNames: [...SYSTEM_COMMANDS],
     })
     // env 直读 = 配置边界豁免（GLOSSARY「配置边界/豁免」）：组合根装配期一次性注入，经参数下传。
     assertPluginEnv(PLUGIN_MANIFESTS, {
