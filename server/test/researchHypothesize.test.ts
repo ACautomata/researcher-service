@@ -242,6 +242,15 @@ describe('W3 hypothesize 图 invoke（S2 端口注入 fake）', () => {
     expect(paths).toEqual(['idea-cards/基于能量分数的-ood-判据改进.md', 'idea-cards/温度缩放的对数适配.md'])
   })
 
+  it('幂等跳过标注（R0 review P2-6）：重跑命中已存在页 → summary 明示「幂等跳过未覆盖」（与 W1/W2 一致，旧卡不静默顶替）', async () => {
+    const ports = makePorts()
+    await invoke(ports, requestWithPaper)
+    const again = await invoke(ports, requestWithPaper)
+    expect(again.status).toBe('completed')
+    expect(again.summary).toContain('页面已存在，幂等跳过')
+    expect(again.summary).toContain('现有内容未覆盖')
+  })
+
   it('stage 序列：resolveInputs → contextPack → bucket×5 → dedup → challenge → validate → persist → summary', async () => {
     const ports = makePorts()
     const stages: string[] = []

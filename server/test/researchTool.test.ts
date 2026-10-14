@@ -449,6 +449,30 @@ describe('W4 experiment 工具边界（#912 · interrupt 载荷边界断言）',
     expect(payloads).toHaveLength(1) // 直达 interrupt 点
   })
 
+  it('resume 重放 stage 静默（R0 review P1-2）：短路重入零流程内 stage 帧——SSE 面不重放序列，前端徽标不回跳', async () => {
+    const { ctx } = w4Ctx()
+    const exec1 = execOf(ctx, new AbortController().signal, () => ({ decisions: [{ type: 'approve' }] }))
+    await executeResearchWorkflow('w4-10a', { ...W4_REQUEST }, exec1)
+
+    // 第二次 execute 模拟 resume 重放：r1 spec 已落盘 → 探针判短路重入 → 静默。
+    const exec2 = execOf(ctx, new AbortController().signal, () => ({ decisions: [{ type: 'approve' }] }))
+    await executeResearchWorkflow('w4-10b', { ...W4_REQUEST }, exec2)
+    const calls = (exec2.onUpdate as ReturnType<typeof vi.fn>).mock.calls.map((c) => (c[0] as { stage: string }).stage)
+    // 入口帧照发（classify + 分支名）；流程内节点帧与挂审 plan-review 帧零重发。
+    expect(calls).toEqual(['classify', 'experiment'])
+  })
+
+  it('人审挂起穿透（R1 review P1）：interrupt 抛 GraphInterrupt → 原样透传且 audit 不落 failed（挂起 ≠ 失败，#744 §11.2 四态纪律）', async () => {
+    const { ctx, events } = w4Ctx()
+    // 真 interrupt() 的挂起形态（tools.ts 顶层中断抛 GraphInterrupt 穿嵌套路由图 invoke）——
+    // R0 盲区：全 fake interrupt 返值形态测试掩盖了 catch 落假 failed 行。
+    const exec = execOf(ctx, new AbortController().signal, () => {
+      throw new GraphInterrupt()
+    })
+    await expect(executeResearchWorkflow('w4-11', { ...W4_REQUEST }, exec)).rejects.toThrow(GraphInterrupt)
+    expect(events.map((e) => e.event)).toEqual(['created']) // created 已受理；挂起零 failed/aborted 假行
+  })
+
   it('collect 相位（phase=collect）：调用③ 对账图分派——artifactPages = 实验报告页', async () => {
     const { ctx, lab } = w4Ctx()
     // 先落 spec + 旁车（调用① 的产出面）。

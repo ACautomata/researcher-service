@@ -6,8 +6,9 @@
 > 术语以 GLOSSARY.md 为准（**意图识别 / 路由 / workflow 流程 / 实验方案人审 (plan review)** 为 #846 图随附新增词条；**单发节点 (single-shot node) / 节点内 agent 循环 (node-internal agent loop)** 为 #899 图修订随附新增词条）。「researcher 谓词/编排 skill」专指源仓库提示词工作流资产（`/Users/junran/Documents/researcher`，只读参考、禁改动），**区别于** #787 官方内容目录 skills。
 > 蓝本：[752 插件契约](./752-plugin-system.md) · [744 AutoFigure 插件先例](./744-autofigure-langgraph.md) · [729 审批三层漏斗](./729-approval-funnel.md) · [723 LangGraph runtime](./723-langgraphjs-deepagents-runtime.md) · [725 OpenWiki/OKF](./725-openwiki-embedding-okf.md)。
 > 路由图验证骨架：[routing-skeleton/](./routing-skeleton/)（#847，已 squash 入 master e7f8976）。
+> **修订**（2026-10-14）：#873 实现双轴 review（R0/R1）规格收口——§1.1/§1.3「resolveInputs 错误信息列 /lab/uploads 现有文件」随实现降级修订为「确定性诊断 + 用法引导自纠」（插件 ctx 无目录列举面；列文件随补全面留 V2）。其余 review 发现属实现面修复，不改规格形状：collect 对账非缺失误读细化四态（就位 / 缺失 / 就位未读取 / 无法核验）、W4 人审挂起 GraphInterrupt 穿透不落 failed 审计、W3/collect 幂等跳过 summary 标注、prompt 不可信数据域防护声明。
 > **修订**（2026-10-10）：[wayfinder map #899](https://github.com/ACautomata/researcher-service/issues/899)（四流程节点 agent loop 化修订）定案落盘——证据链 [#900](https://github.com/ACautomata/researcher-service/issues/900) 节点盘点 / [#901](https://github.com/ACautomata/researcher-service/issues/901) 形态调研 / [#902](https://github.com/ACautomata/researcher-service/issues/902) 实测拍板 / [#903](https://github.com/ACautomata/researcher-service/issues/903) 对照实测 / [#904](https://github.com/ACautomata/researcher-service/issues/904) 定案；受动四处 = §4.3 口径注记 / §7.1 `PAGE_GENERATE_MAX_RETRIES` 触发面扩展 / §10 新增宽口径否决条目 / GLOSSARY 两词条（单发节点 · 节点内 agent 循环）。**#899 图决议并入本规格上游票链**——凡冲突处，以上游票（#846 图 + #899 图）为准；§10 否决记录只增不删。
-> 状态：**定稿**（2026-10-08 评审通过；解读点 A/C/D 按文拍板，B 两候选形态经评审认可、选择归实现票首项）。**2026-10-10 修订**（#899 图 [#905](https://github.com/ACautomata/researcher-service/issues/905) 落盘，修订评审通过）：四处受动见上修订记录。
+> 状态：**定稿**（2026-10-08 评审通过；解读点 A/C/D 按文拍板，B 两候选形态经评审认可、选择归实现票首项）。**2026-10-10 修订**（#899 图 [#905](https://github.com/ACautomata/researcher-service/issues/905) 落盘，修订评审通过）：四处受动见上修订记录。**2026-10-14 修订**（#873 双轴 review R0 收口）：§1.1/§1.3 两处受动见上修订记录。
 
 ## 0. 目标形态总览
 
@@ -47,7 +48,7 @@ chat 会话（deepagents 主 agent，run = 轮次）
 - **单入口工具** `research_workflow`，参数 = 结构化 schema `{workflow?, topic?, question?, source_paths[]?, phase?}`（#850 D2 钉定，否决自由 text input；`phase` 为 W4 调用③ `phase='collect'` 专用槽位，#850 调用③）。category=domain 不进三层漏斗（#752 §3；一条执行面 = 一处审计/事件族/配额）。
 - **4 命令 `/ingest` `/discover` `/hypothesize` `/experiment`**：handler 返 `{execute:{tool:'research_workflow', args:{input 槽位 + workflow:'<显式值>'}}}`——`{execute}` 直达执行面（#752 R9，两条触发面一条执行面；runService.ts:832-839 既有面原样：无 agent loop / 无 checkpoint / 终态 completed / toolCallId 幂等形态沿 figcmd-\<runId\> 先例）。
 - **不加第 5 个 NL 入口命令**（/research 出局，#849 D4）：命令路径无 agent loop，分类后低置信只能落拒绝文案，半残入口与「NL 直接说话」有心智歧义。
-- **命令参数补全 V1 不提供**（#851 D9）：PluginCommandContext 无容器访问面列不出 /lab/uploads 文件名；体验兜底 = resolveInputs 存在性回查的错误信息列现有文件供自纠；补全面扩 ctx 留 V2。
+- **命令参数补全 V1 不提供**（#851 D9）：PluginCommandContext 无容器访问面列不出 /lab/uploads 文件名；体验兜底 = resolveInputs 存在性回查的确定性诊断 + 用法引导自纠（**2026-10-14 收口**：插件 ctx docs/lab 口无目录列举面，V1 不列现有文件——列文件随补全面一并留 V2，#873 双轴 review）；补全面扩 ctx 留 V2。
 - NL 路径 = 主 agent 经 promptSnippet/promptGuidelines 引导调用（一级自由裁量）→ 图内 classify 结构化分类（二级，§2）。input 由主 agent 组织（用户原话 + promptGuidelines 引导的上下文，#849 D4）。
 
 ### 1.2 classify 节点
@@ -66,7 +67,7 @@ chat 会话（deepagents 主 agent，run = 轮次）
   - none（显式拒识退化形态）：`candidates = []`；`question` =「用户的请求不属于科研工作流工具支持的四个流程（知识库深度构建 / 科学问题可信发现 / 科学假说自主生成 / 实验自主设计与执行）。请如实告知用户这一点，请其改述需求，或直接在对话中回答其问题。」
 - 命令路径恒带 workflow 永不触发兜底（嵌套图无 checkpointer 的限制在命令路径无影响，自洽）。
 - **多意图输入**（#850 D17）：高置信选首个路由，summary 尾注「检测到后续意图 X，可继续发起」；否决多意图必 clarify（打断流）与多标签 schema（超范围）。
-- **命令直达参数不全**（#850 D17）：resolveInputs 确定性诊断回喂（同 clarify 通道形态），错误信息列 /lab/uploads 现有文件。
+- **命令直达参数不全**（#850 D17）：resolveInputs 确定性诊断回喂（同 clarify 通道形态）——形态诊断（前缀/单篇约束）+ not_found 明确报错与用法引导；**不列 /lab/uploads 现有文件**（插件 ctx 无目录列举面，V1 降级引导自查——#873 双轴 review 收口；列文件随 ctx 扩面留 V2）。
 
 ## 2. 路由图架构（#847 · #849 D1–D2）
 

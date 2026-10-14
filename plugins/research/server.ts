@@ -16,7 +16,7 @@
 // 审计分工（#744 §11.2）：stage 变化只经 onUpdate 上报一次（SSE research_run.progress 与
 // TextTrace stage_transitions 双面由 runner 翻译面落——manifest progressStages 白名单放行）。
 
-import { z } from '../../server/src/plugins/autofigureDeps'
+import { z, GraphInterrupt } from '../../server/src/plugins/autofigureDeps'
 import type {
   PluginLlmPort,
   PluginToolContentBlock,
@@ -162,10 +162,17 @@ async function runExperimentWithReview(input: {
   const buildPlan = async (revisionReason: string | undefined, round: number) => {
     // 修订轮不发新 stage（853 §6.2）：非首轮/修订轮的图执行与挂审上报静默——进度语义
     // 归审批卡 round 面（escalation.plan.round），SSE 面不重放/续发 stage 序列。
-    const report = round === 1 && revisionReason === undefined ? onStage : undefined
+    // round=1 的短路重入（resume 重放/同请求重发——r1 spec 落盘哨兵即证据）同静默：
+    // 图执行经 planEntry 短路瞬时完成，重发 stage 序列只会让前端徽标回跳闪跳（R0 review
+    // P1-2；探针读面与图内短路判定同源 specPathOf，读失败保守按真首轮上报）。
+    let report: ((stage: string) => void) | undefined
+    if (round === 1 && revisionReason === undefined) {
+      const sentinel = await ctx.lab.read({ path: specPathOf(request, 1) })
+      if (!sentinel.ok) report = onStage
+    }
     const r = await graph.invoke(
       { request, round, ...(revisionReason !== undefined ? { revisionReason } : {}) },
-      { onStage: report },
+      { onStage: report, signal: exec.signal },
     )
     if (r.status === 'clarify') return r.clarify!
     if (r.experiment === undefined) throw new Error('experiment plan graph finished without plan payload')
@@ -219,18 +226,20 @@ function buildRoutingPorts(ctx: ResearchToolContext, exec: PluginToolExec, toolC
   const classifier = createIntentClassifier(ctx.llm, ctx.config.RESEARCH_MODEL)
   const llm = pinLlm(ctx.llm, ctx.config.RESEARCH_MODEL)
   const runWorkflow: ResearchRoutingPorts['runWorkflow'] = async (workflow, request, onStage) => {
+    // signal 透传（R0 review P2-8：FlowGraphInvokeOptions.signal 死参数归零）——abort 对
+    // 非 LLM 长阶段（PDF 提取/wiki 写读/对账逐件）即时生效，不再拖到下一 LLM 调用才中止。
     if (workflow === 'ingest') {
-      return createIngestGraph({ docs: ctx.docs, llm, wiki: ctx.wiki }).invoke({ request }, { onStage })
+      return createIngestGraph({ docs: ctx.docs, llm, wiki: ctx.wiki }).invoke({ request }, { onStage, signal: exec.signal })
     }
     if (workflow === 'discover') {
-      return createDiscoverGraph({ llm, wiki: ctx.wiki }).invoke({ request }, { onStage })
+      return createDiscoverGraph({ llm, wiki: ctx.wiki }).invoke({ request }, { onStage, signal: exec.signal })
     }
     if (workflow === 'hypothesize') {
-      return createHypothesizeGraph({ llm, wiki: ctx.wiki }).invoke({ request }, { onStage })
+      return createHypothesizeGraph({ llm, wiki: ctx.wiki }).invoke({ request }, { onStage, signal: exec.signal })
     }
     // W4 experiment（#912）：collect 相位 → 调用③对账图；否则调用① + 人审闸门。
     if (request.phase === 'collect') {
-      return createExperimentCollectGraph({ llm, wiki: ctx.wiki, lab: ctx.lab }).invoke({ request }, { onStage })
+      return createExperimentCollectGraph({ llm, wiki: ctx.wiki, lab: ctx.lab }).invoke({ request }, { onStage, signal: exec.signal })
     }
     return runExperimentWithReview({ ctx, llm, exec, toolCallId, request, onStage })
   }
@@ -331,6 +340,12 @@ export async function executeResearchWorkflow(
       },
     }
   } catch (e) {
+    if (e instanceof GraphInterrupt) {
+      // W4 人审挂起穿透（R1 review P1）：顶层 interrupt() 抛 GraphInterrupt 是「挂起等
+      // 审批」不是失败——原样 rethrow 让主 agent 图挂起，不落 failed 审计（#744 §11.2
+      // 四态纪律；生产 agent 路径每次挂起必现，fake interrupt 测试形态掩盖的盲区）。
+      throw e
+    }
     if (exec.signal.aborted) {
       // 会话 run aborted 联动（figure 先例）。
       ctx.audit.emitPluginRun({ event: 'aborted', toolCallId, detail: { by: 'user' } })

@@ -84,7 +84,7 @@ describe('W4 调用③ collect 结果对账图（S2 fake ports）', () => {
     expect(ports.calls.filter((c) => c.slot === 'report')).toHaveLength(0)
   })
 
-  it('对账内容截断面：交付物全文超上限 → 对账面存 excerpt（prompt 面上限截断，不全文驻留状态）', async () => {
+  it('对账内容截断面：交付物全文超上限 → 对账面存 excerpt（prompt 面上限截断，不全文驻留状态）——fake 全文可读，本用例锁 collect 侧截断面；真 port 16MiB 护栏拒读行为由下用例三态覆盖', async () => {
     const tail = 'END-OF-FULL-CONTENT'
     const big = `${'x'.repeat(5000)}${tail}`
     const lab = createLabFake({
@@ -101,6 +101,54 @@ describe('W4 调用③ collect 结果对账图（S2 fake ports）', () => {
     const summaryPrompt = ports.calls.find((c) => c.slot === 'report')!.prompt
     expect(summaryPrompt).toContain('x'.repeat(100)) // 头部在
     expect(summaryPrompt).not.toContain(tail) // 全文未驻留（截断面在 collect 侧）
+  })
+
+  it('对账四态（R0 review P1-1 + R1 P2-1）：too_large/binary 就位未读取、invalid_path 无法核验、仅 not_found 判缺失', async () => {
+    const lab = createLabFake(
+      {
+        [SPEC_PATH]: validSpecDoc().content,
+        [deliverablesPathOf(REQUEST)]: JSON.stringify({
+          deliverables: [
+            { path: '/lab/results/ablation.json', success_criterion: 'c1' },
+            { path: '/lab/results/huge.bin', success_criterion: 'c2' },
+            { path: '/lab/results/scan.pdf', success_criterion: 'c3' },
+            { path: '/var/log/outside-lab.json', success_criterion: 'c4' },
+            { path: '/lab/results/missing.csv', success_criterion: 'c5' },
+          ],
+          inputPages: [],
+        } satisfies SpecSidecar),
+        '/lab/results/ablation.json': '{"auroc": 96.83}',
+      },
+      { '/lab/results/huge.bin': 'too_large', '/lab/results/scan.pdf': 'binary', '/var/log/outside-lab.json': 'invalid_path' },
+    )
+    const ports = makePorts(lab)
+    const graph = createExperimentCollectGraph({ llm: ports.llm, wiki: ports.wiki, lab: ports.lab })
+    const r = await graph.invoke({ request: collectRequest as never })
+
+    expect(r.status).toBe('completed')
+    expect(r.summary).toContain('3/5 件就位') // ok + too_large + binary 算就位；invalid_path 不算
+    expect(r.summary).toContain('就位但内容未能读取')
+    expect(r.summary).toContain('too_large')
+    expect(r.summary).toContain('binary')
+    expect(r.summary).toContain('无法核验（/var/log/outside-lab.json：invalid_path）')
+    expect(r.summary).toContain('不计入就位也不判缺失')
+    expect(r.summary).toContain('/lab/results/missing.csv') // 真缺失不静默
+    // prompt 面：unread/无法核验件如实标注，既不冒充已就位内容也不算缺失。
+    const summaryPrompt = ports.calls.find((c) => c.slot === 'report')!.prompt
+    expect(summaryPrompt).toContain('就位但内容未能读取（too_large）：/lab/results/huge.bin')
+    expect(summaryPrompt).toContain('就位但内容未能读取（binary）：/lab/results/scan.pdf')
+    expect(summaryPrompt).toContain('无法核验（invalid_path）：/var/log/outside-lab.json')
+    expect(summaryPrompt).toContain('缺失：/lab/results/missing.csv')
+  })
+
+  it('collect 重放：报告页已存在 → 幂等跳过标注（summary 明示未覆盖，R0 review P2-6 与 W1/W2 一致）', async () => {
+    const ports = makePorts(postPlanLab())
+    const graph = createExperimentCollectGraph({ llm: ports.llm, wiki: ports.wiki, lab: ports.lab })
+    await graph.invoke({ request: collectRequest as never })
+    const again = await graph.invoke({ request: collectRequest as never })
+    expect(again.status).toBe('completed')
+    expect(again.summary).toContain('页面已存在，幂等跳过')
+    expect(again.summary).toContain('现有内容未覆盖')
   })
 
   it('collect：spec 缺失（not_found）→ clarify 提示先完成方案设计审批', async () => {
