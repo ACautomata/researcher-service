@@ -298,8 +298,8 @@ _Avoid_: 扩展 (extension)——Pi-agent 术语，掩盖安全模型差异（pi
 _Avoid_: 插件市场/插件生态——暗示第三方开放与运行时加载，均已出局；第三方插件——目录只收官方内置。
 
 **官方内容目录 (official content catalog)**:
-**（历史注：wayfinder #926 C2 #936 拍板完全退役，随 #949 施工票链（T1–T7）整链物理删除——根级 `official/` 源目录、`build-official-content.mjs`、`officialContent/` 模块、`read_official_skill` 工具、前端 `officialCommands.generated.ts` 与 cd.yml/dev compose 构建上下文；`/research` 斜杠命令与技能随之退场，不搬家。命令模型收敛为「系统命令 + 启用插件」二源，本条保留为决策历史。）**
-（#758 方向修订定稿，#787 曾落地——`officialContent/` generated.ts 提交入库）面板自带的官方 commands/skills 静态目录——markdown 源文件随面板发版编译期打包（根级源目录直引，同 #752 R1 插件目录先例），always-on、无启用位、无 DB 表。commands 经模板插值注入 user message，skills 经目录注入 + 正文渐进披露（沿用 #742 机制，存储从 per-user 表换家为静态目录）；autocomplete 清单 = 前端常量 + 静态 import + 启用插件命令合并。
+**（历史注：wayfinder #926 C2 #936 拍板完全退役，随 #949 施工票链（T1–T7）整链物理删除——根级官方源目录、内容构建脚本、server 侧官方内容模块、专属只读工具、前端官方命令生成产物与 cd.yml/dev compose 构建上下文；`/research` 斜杠命令与技能随之退场，不搬家。命令模型收敛为「系统命令 + 启用插件」二源，本条保留为决策历史；被删物逐件清单见交接规格 §7 与 939 findings。）**
+（#758 方向修订定稿，#787 曾落地——官方命令生成产物提交入库）面板自带的官方 commands/skills 静态目录——markdown 源文件随面板发版编译期打包（根级源目录直引，同 #752 R1 插件目录先例），always-on、无启用位、无 DB 表。commands 经模板插值注入 user message，skills 经目录注入 + 正文渐进披露（沿用 #742 机制，存储从 per-user 表换家为静态目录）；autocomplete 清单 = 前端常量 + 静态 import + 启用插件命令合并。
 _Avoid_: per-user `command_defs`/`skill_defs` 表——已退役；admin 在线 CRUD 官方内容——官方内容只经 git 发版评审维护，在线写面与「无运行时自改」信任模型冲突；给官方目录开启用位——无代码 backing 的内容开关，徒增机制面。（上列机制随官方内容目录退役整体失效，保留为决策历史。）
 
 **插件启用 (plugin enablement)**:

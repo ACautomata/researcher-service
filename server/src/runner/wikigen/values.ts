@@ -8,6 +8,7 @@
 // （落地副本执行模型）与③面板「更新 wiki」独立 run（runNativeRepositoryGeneration 完整边界）。
 
 import { OPEN_WIKI_DIR } from 'openwiki/dist/config/constants.js'
+import { PLUGIN_PAGE_TYPES } from '../../plugins/api'
 import { WIKI_CATEGORIES, WIKI_UNCATEGORIZED } from '../../wiki/values'
 
 // openwiki 子目录名（deep-import 单一来源——openwiki 布局常量，不自造字符串）
@@ -56,7 +57,7 @@ export const WIKI_UPDATE_TEAMMATE_PROMPT = [
   '   New pages must be flat under "pages/" — do not plan new pages into subdirectories; directory names carry no classification meaning.',
   `   Write valid OKF frontmatter (type/title/description/tags) and set "category" to exactly one of: ${WIKI_CATEGORIES.join(' / ')} (wiki-domain value set); omit it only when no category fits — the UI groups such pages as ${WIKI_UNCATEGORIZED}.`,
   '   Classification lives only in the frontmatter "category" value: never write category names or classification wording into the page body.',
-  '   Content language: page body, tags values, description and title are written in Chinese; frontmatter key names, section-title anchors and the type enum (paper/critique/hypothesis/report) keep their canonical form, and paper page titles may keep the original English title.',
+  `   Content language: page body, tags values, description and title are written in Chinese; frontmatter key names, section-title anchors and the type enum (${PLUGIN_PAGE_TYPES.join('/')}) keep their canonical form, and paper page titles may keep the original English title.`,
   '   openwiki_submit_page requires at least one material Claim for new or substantively revised pages.',
   '   Claim evidence must reference an existing snapshot file under "sources/" (e.g. repo://sources/<group>/<name>.md — the pre-update copy of a wiki page; existing pages keep their current directories, only new pages are flat under "pages/").',
   '4. When every page job is complete, call openwiki_finish exactly once. finish performs base-change detection and publishes your work to the real wiki.',
