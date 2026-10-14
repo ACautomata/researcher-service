@@ -57,7 +57,7 @@ const RunModelSchema = z.object({
 })
 
 const PlanPageModelSchema = z.object({
-  path: z.string().describe('Canonical wiki page path, e.g. "openwiki/concepts/demo.md".'),
+  path: z.string().describe('Canonical wiki page path, e.g. "openwiki/pages/demo.md" (new pages live flat under pages/).'),
   title: z.string(),
   purpose: z.string(),
   seedPaths: z.array(z.string()).optional(),

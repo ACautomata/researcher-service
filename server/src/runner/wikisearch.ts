@@ -122,7 +122,7 @@ const SearchSchema = z.object({
 })
 
 const ReadSchema = z.object({
-  page: z.string().describe('Wiki page from a search ref, e.g. "openwiki/concepts/attention.md".'),
+  page: z.string().describe('Wiki page from a search ref, e.g. "openwiki/pages/attention.md".'),
   sections: z
     .array(z.string())
     .min(1)

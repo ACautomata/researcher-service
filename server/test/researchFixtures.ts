@@ -185,7 +185,7 @@ export const defaultCriticCandidates = (paperPath: string = PAPER_PATH) => [
 export const validCriticDoc = (
   candidates: { question: string; priority: 'high' | 'medium' | 'low'; evidence?: string[] }[] = defaultCriticCandidates(),
 ) => ({
-  content: ['# 某论文审稿式问题分析', '', '`category: critic`', '', ...CRITIC_SECTIONS.map((s, i) => `## ${i} ${s}\n\n已有较强证据支持：具体质疑。`)].join('\n'),
+  content: ['# 某论文审稿式问题分析', '', '`type: critique`', '', ...CRITIC_SECTIONS.map((s, i) => `## ${i} ${s}\n\n已有较强证据支持：具体质疑。`)].join('\n'),
   candidates,
 })
 
@@ -291,7 +291,7 @@ function renderCriticPage(input: { candidates: { question: string; priority: str
   return [
     '# 某论文审稿式问题分析',
     '',
-    '`category: critic`',
+    '`type: critique`',
     '',
     ...CRITIC_SECTIONS.map((s, i) => (i === 4 ? sec4 : `## ${i} ${s}\n\n具体分析内容。`)),
   ].join('\n\n')
@@ -302,7 +302,7 @@ export const validIdeaCardPage = (): string =>
   [
     '# 基于能量分数的 OOD 判据改进',
     '',
-    '`category: idea`',
+    '`type: hypothesis`',
     '',
     '## Idea Card Fields',
     '',

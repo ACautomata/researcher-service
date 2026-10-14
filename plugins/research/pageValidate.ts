@@ -15,7 +15,7 @@ import {
   EXTRACT_BANNED_PHRASES,
   EXTRACT_EVIDENCE_TERMS,
   EXTRACT_UNSTATED_PHRASE,
-  CRITIC_CATEGORY_TAG,
+  CRITIC_TYPE_TAG,
   QUALITATIVE_CLAIM_ANTIPATTERN,
 } from './prompts'
 import {
@@ -132,7 +132,7 @@ export function validateExtractDoc(content: string): ValidateResult {
 }
 
 // ---------------------------------------------------------------------------
-// W2 validate²（853 §4.2：critic §0–§7 节齐全 + `category: critic` 机读标签 + 候选 2–4。
+// W2 validate²（853 §4.2：critic §0–§7 节齐全 + `type: critique` 机读标签 + 候选 2–4。
 // 与 validate¹ 检查对象不同，分列不共享 schema 名。）
 // ---------------------------------------------------------------------------
 
@@ -150,8 +150,8 @@ export function validateCriticDoc(doc: {
     issues.push('critic 文档第一行须为「# <分析标题>」H1 行（页标题与机读标签定位锚）')
   }
   const headLines = doc.content.split('\n', CRITIC_TAG_MAX_HEAD_LINES)
-  if (!headLines.some((l) => l.trim() === CRITIC_CATEGORY_TAG)) {
-    issues.push(`critic 文档机读标签 ${CRITIC_CATEGORY_TAG} 须独占一行且在标题行之下（前 ${CRITIC_TAG_MAX_HEAD_LINES} 行内）`)
+  if (!headLines.some((l) => l.trim() === CRITIC_TYPE_TAG)) {
+    issues.push(`critic 文档机读标签 ${CRITIC_TYPE_TAG} 须独占一行且在标题行之下（前 ${CRITIC_TAG_MAX_HEAD_LINES} 行内）`)
   }
   if (doc.candidates.length < CRITIC_CANDIDATES_MIN || doc.candidates.length > CRITIC_CANDIDATES_MAX) {
     issues.push(`验证候选问题须为 ${CRITIC_CANDIDATES_MIN}–${CRITIC_CANDIDATES_MAX} 个（当前 ${doc.candidates.length} 个）`)

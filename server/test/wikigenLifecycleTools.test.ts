@@ -74,6 +74,19 @@ describe('createWikiLifecycleTools（#790 生命周期工具包装）', () => {
     ])
   })
 
+  it('submit_plan pages.path 模型面示例路径 = pages/ 平铺形态（#955 T4·S12 planner 目录习惯实际杠杆）', () => {
+    const { manager } = fakeManager({})
+    const wrapped = createWikiLifecycleTools({ manager, mirrorRoot: '/tmp/m', onFinished: async () => ({ ok: true, data: {} }) })
+    const plan = wrapped.find((t) => t.name === 'openwiki_submit_plan')!
+    const shape = (
+      plan.schema as unknown as {
+        shape: { pages: { element: { shape: Record<string, { description?: string }> } } }
+      }
+    ).shape
+    expect(shape.pages.element.shape.path!.description).toContain('openwiki/pages/')
+    expect(shape.pages.element.shape.path!.description).not.toContain('concepts/')
+  })
+
   it('begin 模型面 schema 键集 = [force, language, mode]（root 已注入裁掉）；handle 收到注入的镜像根', async () => {
     const { manager, calls } = fakeManager({})
     const [begin] = createWikiLifecycleTools({ manager, mirrorRoot: '/tmp/mirror-x', onFinished: async () => ({ ok: true, data: {} }) })

@@ -104,14 +104,14 @@ flowchart TD
     EX --> V1["validate¹<br/>12 节 checklist<br/>+ 三态标注禁语扫描"]
     V1 -->|"不过 → 附诊断<br/>回 extract 重试 1 次"| EX
     V1 --> CR["critic<br/>LLM §0–§7 审稿式分析<br/>+ 候选问题 2–4 带优先级"]
-    CR --> V2["validate²<br/>H1 + category 标签位置<br/>+ 候选 2–4（确定性）"]
+    CR --> V2["validate²<br/>H1 + 机读标签位置<br/>+ 候选 2–4（确定性）"]
     V2 -->|"不过 → 附诊断<br/>回 critic 重试 1 次"| CR
     V2 --> EG["evidenceGate<br/>证据引用存在性回查<br/>（确定性）"]
     EG --> P["persist<br/>critic 页 + 候选问题 claims"]
     P --> SM["summary<br/>产物路径 + 候选存活<br/>+ 剔除清单（不静默，不截断）"]
 ```
 
-- 产物：`critics/<slug>.md` critic 页（§0–§7 + `category: critic` 机读标签 + 验证候选问题进 Atomic Claims）。
+- 产物：`critics/<slug>.md` critic 页（§0–§7 + `type: critique` 机读标签 + 验证候选问题进 Atomic Claims）。
 - **证据可溯源**：候选问题的每条证据引用（本论文页节锚 / 其他 wiki 页 / 上传件 / 描述性引用）
   逐一回查，不可溯源的引用被剔除——剔除清单完整进 summary，本身就是溯源信息。
 - 两个校验节点检查对象不同（extract 12 节 vs critic §0–§7 + H1/机读标签位置），分别把关各自生成质量。
@@ -137,7 +137,7 @@ flowchart TD
     OUT --> SM
 ```
 
-- 产物：`idea-cards/<kebab-case 标题>.md` 假说卡页（15 字段 + `category: idea` 机读标签 +
+- 产物：`idea-cards/<kebab-case 标题>.md` 假说卡页（15 字段 + `type: hypothesis` 机读标签 +
   一句假说进 Atomic Claims），逐页写入、幂等可续。
 - **对抗筛选**：候选卡先经机制去重（dedup 纯函数），再逐卡对抗反驳（challenge）——只有具体
   致命反驳才淘汰；幸存卡再过确定性规则校验（validate），规则与校验同源自 `validate_idea_cards`
@@ -182,7 +182,7 @@ flowchart TD
   修订模式（零新图节点）；3 轮未通过 = `plan_review_exhausted` 结构化终局（非错误）。
 - **幂等短路点**：spec 落盘 `/lab/specs/<slug>/r<N>/`（round 键控——每轮产物互不覆盖，重放读回用户当轮所审原文）后，interrupt 的 resume 重放跳 design/spec/audit 全部 LLM 直达挂审点；修订历史 = LangGraph resume 队列（零额外持久化）+ 历史轮审计跳过——「3 轮修订 = 3 行 round 关联」在多轮重放不破；审批审计落 `tool_approval_logs`（`toolName='experiment_plan'`，引用快照 `{planTitle, planHash, planRef, round}` 不存全文，3 轮 = 3 行 round 关联）。
 - **产物**：spec/design/audit 中间产物落 lab；实验报告页 `experiment-reports/<slug>-<round>.md` 落 wiki
-  （round 键控——每轮人审各得其报告页；`category: experiment-report` + frontmatter `related_pages` + 正文「关联页面」相对链接）。
+  （round 键控——每轮人审各得其报告页；`type: report` + frontmatter `related_pages` + 正文「关联页面」相对链接）。
 
 ## 产物与进度
 
