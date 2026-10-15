@@ -193,8 +193,12 @@ export function effortCapabilityOf(modelId: string): EffortCapabilityMeta {
 // ---------------------------------------------------------------------------
 
 // 规范三档存储词汇（与 validation/schemas.ts EFFORT_VALUES 同值域——彼处 zod 写侧单源，
-// 此处运行层类型镜像；宽松读的存量行/手写脏值由 effortBindingOf 兜底为零注入）。
+// 此处运行层类型镜像；等值由 test/effortBinding.test.ts 漂移守卫钉住。宽松读的存量行/
+// 手写脏值由 effortBindingOf 兜底为零注入）。
 export type EffortTier = 'low' | 'high' | 'max'
+
+// EffortTier 的值清单形态（EFFORT_TIERS 集合的派生源；漂移守卫与 schemas.EFFORT_VALUES 比对）。
+export const EFFORT_TIER_VALUES: readonly EffortTier[] = ['low', 'high', 'max']
 
 // 注入绑定面：ConfigurableModel withConfig({configurable}) 的合并 bag（模型实例缓存 key
 // 刻意不含 effort——per-request 绑定语义不变，#979）。键 = 底层 ChatModel 一级字段名
@@ -220,15 +224,20 @@ const THINKING_TWO_STATE: Readonly<Record<EffortTier, { readonly type: 'disabled
   max: Object.freeze({ type: 'enabled' }),
 })
 
-const EFFORT_TIERS: ReadonlySet<string> = new Set<string>(['low', 'high', 'max'])
+const EFFORT_TIERS: ReadonlySet<string> = new Set<string>(EFFORT_TIER_VALUES)
 
 // effort 规范档 → 绑定参数面（唯一运行层入口；undefined = 零注入）：
 //   - effort 缺省（存量无 effort 行）/ 越界（手写行脏值）→ undefined——运行层零注入，
 //     装配产物与今日逐字节等价（ADR 0019「存量宽松接受」的运行半边）。
 //   - 能力 none（kimi-k2）→ undefined——结构性零注入（#978 写侧 90002 已拦，运行层双保险）。
-//   - 未命中元数据（BYOK 第三方 / 平台 LLM_MODEL 覆盖裸 id）→ 缺省 native：modelKwargs
-//     reasoning_effort 直传（多数 openai 兼容推理模型；调用报错由用户回退滑块自愈）。
-export function effortBindingOf(modelId: string, effort: EffortTier | undefined): EffortBinding | undefined {
+//   - 未命中元数据（BYOK 第三方 / 平台 LLM_MODEL 覆盖裸 id）→ 缺省 native，通道随协议面
+//     face：openai 兼容面 modelKwargs reasoning_effort 直传（多数 openai 兼容推理模型）；
+//     anthropic 面 outputConfig.effort（该面唯一 effort 通道——ChatAnthropic 无 modelKwargs
+//     字段，发 modelKwargs 会在 ConfigurableField 白名单过滤层静默丢弃 = 假注入；不支持的
+//     兼容端点报错由用户回退滑块自愈，ADR 0020 决策 2「调用报错自愈」语义）。
+// face 必填（无缺省值）：已知六预设的 face 由映射表 case 面自身决定，此处参数只服务缺省
+// native 分支——显式传入防「忘传即在 openai 语义上注入 anthropic 端点」的静默错配复发。
+export function effortBindingOf(modelId: string, effort: EffortTier | undefined, face: 'openai' | 'anthropic'): EffortBinding | undefined {
   if (effort === undefined || !EFFORT_TIERS.has(effort)) return undefined
   if (effortCapabilityOf(modelId).capability === 'none') return undefined
   switch (modelId) {
@@ -249,6 +258,8 @@ export function effortBindingOf(modelId: string, effort: EffortTier | undefined)
       // zhipu OpenAI 兼容面 body 参数 thinking 两态（ChatOpenAI 无此一级字段 → modelKwargs）
       return { configurable: { modelKwargs: { thinking: THINKING_TWO_STATE[effort] } } }
     default:
-      return { configurable: { modelKwargs: { reasoning_effort: effort } } }
+      return face === 'anthropic'
+        ? { configurable: { outputConfig: { effort: ANTHROPIC_EFFORT_NEAREST[effort] } } }
+        : { configurable: { modelKwargs: { reasoning_effort: effort } } }
   }
 }

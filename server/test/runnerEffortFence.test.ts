@@ -93,6 +93,7 @@ describe('推理强度生效语义（#979）：图缓存失效 + fence 锁 + 在
   afterEach(async () => {
     hub.reset()
     await prisma.session.update({ where: { id: sessionId }, data: { preferredModelJson: null } })
+    await prisma.pluginLlmAssignment.deleteMany({ where: { ownerId: owner.id } })
   })
 
   function makeService(opts: { wikis?: { ensure: (ownerId: string) => Promise<void> } } = {}): RunService {
@@ -189,9 +190,13 @@ describe('推理强度生效语义（#979）：图缓存失效 + fence 锁 + 在
     })
   })
 
-  it('fence 锁：preferredModelJson（含 effort）变更前后 ctx.llm 装配产物逐字段不变', async () => {
-    // ctx.llm 解析链（默认链 = providers × 首模型）不读 session 行——覆盖写/清零两态下，
+  it('fence 锁：preferredModelJson（含 effort）变更前后 ctx.llm 装配产物逐字段不变（默认链 / env pin / 插件指派三支全锁）', async () => {
+    // ctx.llm 解析链三支（env pin > 用户指派 > 默认链）均不读 session 行——覆盖写/清零两态下，
     // 工厂调用参数与解析产物（裸实例、零 withConfig）逐字段一致（llmToolPort 结构性 fence）。
+    // 指派行先落库再取快照（快照携带 pluginAssignments——llmToolPort 解析源）。
+    await prisma.pluginLlmAssignment.create({
+      data: { ownerId: owner.id, pluginId: 'fence-probe', providerId: 'prov-eff', modelId: 'deepseek-v4-flash' },
+    })
     const withConfigCalls: Array<Record<string, unknown> | undefined> = []
     const factoryCalls: Array<{ model: string; opts: unknown }> = []
     const factory: ChatModelFactory = async (model, opts) => {
@@ -207,27 +212,34 @@ describe('推理强度生效语义（#979）：图缓存失效 + fence 锁 + 在
     }
     const registry = new ProviderRegistry(prisma, { llmApiKey: 'test-key', modelFactory: factory })
     const snapshot = await registry.getSnapshot(owner.id)
-    const invokePort = async (): Promise<string> => {
-      const port = createLlmToolPort({ registry, ownerId: owner.id, pluginId: 'fence-probe', snapshot })
+    const invokePort = async (opts: { pluginId: string; model?: string }): Promise<string> => {
+      const port = createLlmToolPort({ registry, ownerId: owner.id, pluginId: opts.pluginId, snapshot })
       const res = await port.generateMultimodal({
         contents: ['hi'],
-        model: '',
+        model: opts.model ?? '',
         maxTokens: 256,
         temperature: 0,
       })
       return res.text
     }
+    // 三支：默认链（无指派 pluginId）/ env pin（model 指名）/ 用户指派（fence-probe 行）
+    const variants = [
+      { pluginId: 'no-assignment-plugin' },
+      { pluginId: 'no-assignment-plugin', model: 'deepseek-v4-flash' },
+      { pluginId: 'fence-probe' },
+    ] as const
 
     await prisma.session.update({ where: { id: sessionId }, data: { preferredModelJson: COVERAGE('deepseek-v4-flash', 'max') } })
-    const coveredText = await invokePort()
+    const coveredTexts = await Promise.all(variants.map((v) => invokePort(v)))
     const afterCoveredCalls = factoryCalls.length
 
     await prisma.session.update({ where: { id: sessionId }, data: { preferredModelJson: null } })
-    const clearedText = await invokePort()
+    const clearedTexts = await Promise.all(variants.map((v) => invokePort(v)))
 
-    expect(coveredText).toBe(clearedText)
-    // 覆盖变更前后工厂调用参数逐字段一致（清空覆盖后零新增调用 = 解析走同一缓存实例）
+    expect(coveredTexts).toEqual(['fake:deepseek-v4-flash', 'fake:deepseek-v4-flash', 'fake:deepseek-v4-flash'])
+    expect(coveredTexts).toEqual(clearedTexts) // 覆盖变更前后解析产物逐字段一致
+    // 清空覆盖后零新增工厂调用 = 三支解析走同一缓存实例（绑定面零变化）
     expect(factoryCalls.slice(afterCoveredCalls)).toEqual([])
-    expect(withConfigCalls).toEqual([]) // ctx.llm 默认链首模型 = 裸实例，永不携带 effort 绑定
+    expect(withConfigCalls).toEqual([]) // ctx.llm 全支 = 裸实例，永不携带 effort 绑定
   })
 })

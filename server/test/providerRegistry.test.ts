@@ -683,6 +683,9 @@ describe('ProviderRegistry（#881 预设制：平台虚拟条目 + BYOK 凭证�
     ['mm', 'minimax', ['MiniMax-M3'], 'MiniMax-M3', 'max', { thinking: { type: 'enabled' } }],
     ['zm', 'zhipu', ['glm-4.6'], 'glm-4.6', 'low', { modelKwargs: { thinking: { type: 'disabled' } } }],
     ['by', 'openai', ['my-compat-reasoner'], 'my-compat-reasoner', 'low', { modelKwargs: { reasoning_effort: 'low' } }],
+    // BYOK anthropic 面 + 自定义模型（能力表未命中 → 缺省 native 随面走 outputConfig——
+    // modelKwargs 在该面会被 ConfigurableField 白名单过滤静默丢弃，review 收敛钉面）
+    ['ba', 'minimax', ['my-m3-compat'], 'my-m3-compat', 'high', { outputConfig: { effort: 'high' } }],
   ])('effort 绑定参数面（%s）：getDefaultModel preferred 带 effort → withConfig 合并映射 bag', async (tag, presetId, models, modelId, effort, binding) => {
     const u = await seedUser(ctx.prisma, `rg-effort-${tag}`, `pw-rg-effort-${tag}-secure`)
     await seedByok(ctx, u.id, `ep-${tag}`, presetId, models, { apiKey: `sk-${tag}` })

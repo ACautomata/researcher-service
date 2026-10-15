@@ -397,8 +397,12 @@ export class ProviderRegistry {
     }
     const [primary, ...rest] = refs
     // effort 映射 bag（#979）：preferred 存在时 primary 即其本体（上方重排前置）——
-    // effortBindingOf 内聚零注入三面（无 effort / 越界档 / 能力 none → undefined）。
-    const effortBinding = pinned ? effortBindingOf(primary.modelId, pinned.effort) : undefined
+    // effortBindingOf 内聚零注入三面（无 effort / 越界档 / 能力 none → undefined）；face
+    // 随 primary 端点协议面（缺省 native 的 BYOK 未命中分支按面选通道，见 presets.ts）。
+    const primaryEntry = snapshot.providers.find((p) => p.providerId === primary.providerId)
+    const effortBinding = pinned
+      ? effortBindingOf(primary.modelId, pinned.effort, primaryEntry?.lcProvider ?? 'openai')
+      : undefined
     const primaryModel = await this.getModel(snapshot, primary.providerId)
     const primaryBound =
       primary.modelId === firstModelOf(primary.providerId) && !effortBinding
