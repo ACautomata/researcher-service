@@ -3,7 +3,7 @@ import {
   MODEL_INPUT_MODALITIES,
   PROVIDER_ID_REGEX,
 } from '../models/values'
-import { PRESET_IDS, RESERVED_PROVIDER_IDS } from '../models/presets'
+import { PRESET_IDS, RESERVED_PROVIDER_IDS, effortCapabilityOf } from '../models/presets'
 import { MESSAGE_CONTENT_MAX, REWIND_SCOPES, TITLE_MAX } from '../sessions/values'
 
 // 请求体 schema（zod）。校验失败 → 90002 + flatten().fieldErrors（{field:[errors]}）。
@@ -112,9 +112,48 @@ export const sessionCreateSchema = z.object({
   title: z.string().trim().max(TITLE_MAX, `title 过长（≤${TITLE_MAX} 字符）`).optional(),
 })
 
-export const sessionPatchSchema = z.object({
-  title: z.string().trim().min(1, 'title 不能为空').max(TITLE_MAX, `title 过长（≤${TITLE_MAX} 字符）`),
-})
+// ---------------------------------------------------------------------------
+// 会话模型覆盖（ADR 0019/0020 · #978）：`{providerId, modelId, effort?}`，null = 清空覆盖
+//（与 /model default 同语义）。PATCH body 与 /model 斜杠解析共用本 schema（单源收编，原
+// 斜杠校验内联在 runService.resolveModelSelection）；effort 存规范档 low|high|max（注入层
+// 按 presets 映射表翻译——票②，本票仅存储不注入）。super-refine：能力 none 的模型带
+// effort 写侧拒（90002，能力表按 presets 单源——UI 置灰产不出，写侧校验双保险）。
+// ---------------------------------------------------------------------------
+export const EFFORT_VALUES = ['low', 'high', 'max'] as const
+
+export const preferredModelSchema = z
+  .object({
+    providerId: z.string().min(1, 'providerId 不能为空').max(64, 'providerId 过长（≤64 字符）'),
+    modelId: z.string().min(1, 'modelId 不能为空').max(200, 'modelId 过长（≤200 字符）'),
+    effort: z.enum(EFFORT_VALUES).optional(),
+  })
+  .superRefine((v, ctx) => {
+    if (v.effort !== undefined && effortCapabilityOf(v.modelId).capability === 'none') {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['effort'],
+        message: `模型 ${v.modelId} 无推理强度通道，不可携带 effort`,
+      })
+    }
+  })
+
+// 存量无 effort 旧行宽松接受（读面宽松解析，不走本 schema）；新写入恒经此处。
+export type PreferredModelOverride = z.infer<typeof preferredModelSchema>
+
+export const sessionPatchSchema = z
+  .object({
+    title: z
+      .string()
+      .trim()
+      .min(1, 'title 不能为空')
+      .max(TITLE_MAX, `title 过长（≤${TITLE_MAX} 字符）`)
+      .optional(),
+    preferredModel: preferredModelSchema.nullable().optional(),
+  })
+  .refine((v) => v.title !== undefined || v.preferredModel !== undefined, {
+    message: 'title 与 preferredModel 至少提供一项',
+    path: ['title'],
+  })
 
 export const messageSendSchema = z.object({
   content: z

@@ -25,7 +25,7 @@ import { config } from '../config'
 import { bumpConfigVersion } from './configVersion'
 import { decryptCredential, encryptCredential, isCredentialEnvelope } from './cipher'
 import { parseModelsJson } from './modelsJson'
-import { ENDPOINT_PRESETS, RESERVED_PROVIDER_IDS, presetById } from './presets'
+import { ENDPOINT_PRESETS, PLATFORM_PROVIDER_ID, RESERVED_PROVIDER_IDS, effortCapabilityOf, platformModels, presetById, type EffortCapability } from './presets'
 
 // 写侧输入（路由层已把 snake_case body 经 zod 校验后映射为 camelCase domain shape）
 export interface ModelProviderWriteInput {
@@ -59,6 +59,17 @@ export interface ModelProviderView {
 export function maskApiKey(plaintext: string): string {
   if (plaintext.length - 7 < 4) return '••••'
   return `${plaintext.slice(0, 3)}••••${plaintext.slice(-4)}`
+}
+
+// 可选模型条目（GET /models/available 行，#978 · ADR 0019 接口面）：camelCase 与会话覆盖
+// 写面 {providerId, modelId, effort?} 同形同命名。capability/effortNote 由 presets 能力表
+// 单源派生（effortCapabilityOf）——前端零映射表副本（防漂移）。
+export interface AvailableModelView {
+  providerId: string
+  modelId: string
+  name: string
+  capability: EffortCapability
+  effortNote: string
 }
 
 function toView(row: ModelProvider, credentialSecret: string): ModelProviderView {
@@ -105,6 +116,48 @@ export class ModelProviderService {
       orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
     })
     return rows.map((r) => toView(r, this.credentialSecret))
+  }
+
+  // 可选模型清单（GET /models/available，#978 · ADR 0019 接口面）：会话模型覆盖的取值域 =
+  // 本人 BYOK 端点（createdAt asc）+ 平台默认端点虚拟条目垫底——与运行时快照 providers
+  //（providerRegistry.loadSnapshot / platformEntry）同序同域，零 key 材料。capability/effortNote
+  // 按 modelId 查 presets 能力表（effortCapabilityOf 单源，ADR 0020 per-model 映射表；查表
+  // 未命中 = BYOK 第三方模型 / LLM_MODEL 裸覆盖 id → 缺省 native + modelKwargs 注记，能力是
+  // 模型属性与端点无关）。未知预设行 fail-closed 跳过（与 providerRegistry.rowToEntry 同判定
+  // ——运行时不可解析的端点不进可选域，warn 留痕对齐「静默不可接受」纪律）。
+  async available(ownerId: string): Promise<AvailableModelView[]> {
+    const rows = await this.prisma.modelProvider.findMany({
+      where: { ownerId },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+    })
+    const entries: Array<{ providerId: string; models: Array<Record<string, unknown>> }> = []
+    for (const r of rows) {
+      if (!presetById(r.presetId)) {
+        // eslint-disable-next-line no-console
+        console.warn(`[models] available 跳过未知预设行：ownerId=${ownerId} providerId=${r.providerId} presetId=${r.presetId}`)
+        continue
+      }
+      entries.push({ providerId: r.providerId, models: parseModelsJson(r.modelsJson) })
+    }
+    entries.push({
+      providerId: PLATFORM_PROVIDER_ID,
+      // spread 落成匿名对象类型（interface → Record<string, unknown> 的索引签名兼容面）
+      models: platformModels(config.llm.model, config.llm.preset).map((m) => ({ ...m })),
+    })
+    return entries.flatMap((e) =>
+      e.models.flatMap((m) => {
+        const modelId = m.id
+        if (typeof modelId !== 'string' || modelId === '') return []
+        const meta = effortCapabilityOf(modelId)
+        return [{
+          providerId: e.providerId,
+          modelId,
+          name: typeof m.name === 'string' && m.name !== '' ? m.name : modelId,
+          capability: meta.capability,
+          effortNote: meta.effortNote,
+        }]
+      }),
+    )
   }
 
   async get(ownerId: string, pid: string): Promise<ModelProviderView> {

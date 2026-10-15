@@ -10,6 +10,7 @@ import {
   PRESET_HOST_TO_ID,
   PLATFORM_PROVIDER_ID,
   RESERVED_PROVIDER_IDS,
+  effortCapabilityOf,
   type EndpointPreset,
 } from '../src/models/presets'
 
@@ -77,5 +78,31 @@ describe('端点预设清单（#881）', () => {
     const first: EndpointPreset = ENDPOINT_PRESETS[0]!
     expect(Object.isFrozen(first)).toBe(true)
     expect(Object.isFrozen(ENDPOINT_PRESETS)).toBe(true)
+  })
+
+  // ---- 推理强度能力表（ADR 0020 · #978）：effortCapabilityOf / GET /models/available 的单源 ----
+
+  it('六预设 defaultModels 逐条声明 effortCapability + effortNote（派生源完备，#978 补齐 deepseek）', () => {
+    for (const p of ENDPOINT_PRESETS) {
+      for (const m of p.defaultModels) {
+        expect(m.effortCapability, `${p.id}/${m.id}`).toBeDefined()
+        expect(['native', 'thinking-only', 'none']).toContain(m.effortCapability)
+        expect(m.effortNote?.length ?? 0, `${p.id}/${m.id}`).toBeGreaterThan(0)
+      }
+    }
+  })
+
+  it('能力表摊平：声明条目 modelId 跨预设唯一 + 查表语义（kimi none / minimax·glm thinking-only / 其余 native）+ 未命中缺省 native + modelKwargs 注记', () => {
+    const declared = ENDPOINT_PRESETS.flatMap((p) => p.defaultModels.map((m) => m.id))
+    expect(new Set(declared).size).toBe(declared.length) // Map 后写覆盖是静默面——唯一性在此钉死
+    expect(effortCapabilityOf('kimi-k2').capability).toBe('none')
+    expect(effortCapabilityOf('MiniMax-M3').capability).toBe('thinking-only')
+    expect(effortCapabilityOf('glm-4.6').capability).toBe('thinking-only')
+    expect(effortCapabilityOf('deepseek-v4-flash')).toMatchObject({ capability: 'native', effortNote: '三档 1:1 直传' })
+    expect(effortCapabilityOf('claude-sonnet-5-5').capability).toBe('native')
+    expect(effortCapabilityOf('gpt-5.1').capability).toBe('native')
+    const fallback = effortCapabilityOf('no-such-model')
+    expect(fallback.capability).toBe('native')
+    expect(fallback.effortNote).toContain('modelKwargs')
   })
 })

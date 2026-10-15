@@ -125,17 +125,17 @@ register({
   summary: '本人会话列表（updatedAt DESC）',
   auth: 'user',
   errors: '10005。',
-  dataNote: 'data: 会话行列表。',
+  dataNote: 'data: 会话行列表（行含解析后 preferredModel——#978 会话模型覆盖，对象或 null；composer 恢复态读面）。',
 })
 
 register({
   method: 'patch',
   path: '/api/v1/sessions/{id}',
   tag: 'Sessions',
-  summary: '改标题',
+  summary: '改会话（标题 / 会话模型覆盖——#978：preferredModel 对象写入，null = 清空覆盖（同 /model default）；capability none 模型带 effort 拒 90002）',
   auth: 'user',
-  errors: '50002 · 90002 · 10005。',
-  dataNote: 'data: 更新后会话行；session.updated 经 SSE 扇出。',
+  errors: '50002 · 90002（字段明细：title/preferredModel 形状、能力 none 带 effort、双字段全缺）· 10005。',
+  dataNote: 'data: 更新后会话行（含解析后 preferredModel，对象或 null）；session.updated 经 SSE 扇出（标题变更 {session: summary}、覆盖变更 {sessionId, model, appliesTo:"next-run"} 两款既有形状，零新增事件类型）。',
   body: sessionPatchSchema,
 })
 
@@ -192,7 +192,7 @@ register({
   summary: '历史投影（回放面；与实时流终态零差异）',
   auth: 'user',
   errors: '50002 · 10005。',
-  dataNote: 'data: 会话消息投影（reducer 投影）。',
+  dataNote: 'data: { sessionId, title, preferredModel（#978 会话模型覆盖，对象或 null）, messages, inFlight?, teammates?, approvals? }。',
 })
 
 register({
@@ -531,6 +531,16 @@ register({
   auth: 'user',
   errors: `10005（mustChangePassword）· 90003（LLM_PRESET 配置非法——config 启动校验兜底）。`,
   dataNote: 'data: { provider_id, preset_id, protocol, lc_provider, base_url, default_model, models（指派可选项域——platformModels 派生，与写侧校验同源）, key_configured }（永无 key 材料）。',
+})
+
+register({
+  method: 'get',
+  path: '/api/v1/models/available',
+  tag: 'Models',
+  summary: '可选模型清单（#978 · ADR 0019：会话模型覆盖取值域 = 本人 BYOK 端点 + 平台虚拟条目垫底；推理强度能力注记 presets 能力表单源派生，前端零映射表副本）',
+  auth: 'user',
+  errors: `10005（mustChangePassword）。`,
+  dataNote: 'data: [{ providerId, modelId, name, capability, effortNote }]；capability ∈ native | thinking-only | none（native=三档原生生、thinking-only=仅思考开关、none=无通道写侧拒 effort）；未命中能力表（BYOK 第三方模型/LLM_MODEL 裸覆盖 id）默认 native + modelKwargs 注记。camelCase 与覆盖写面 {providerId, modelId, effort?} 同形。',
 })
 
 register({

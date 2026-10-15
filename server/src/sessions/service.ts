@@ -32,18 +32,22 @@ import {
   resolveRewindAnchor,
 } from './rewind'
 import { TITLE_AUTO_MAX, TITLE_MAX, type RewindScope } from './values'
+import type { PreferredModelOverride } from '../validation/schemas'
 import { outputHash, trimTraceText } from '../traceLogs/service'
 import type { TeammateStatus } from '../runner/teammates/service'
 import type { ApprovalInterruptPayload } from '../runner/approval/funnel'
 import type { RewindPreview as FileRewindPreview } from '../runner/filejournal/preview'
 
 // 会话摘要（session.created/updated 载荷 + 列表行 + 创建/PATCH 返回——同一形状）。
+// preferredModel（#978 · ADR 0019）：解析后的会话模型覆盖（对象或 null）——composer 恢复
+// chip/滑块态的读面；字段加法随 summary 波及 session.created/updated 事件面（多标签同步借道）。
 export interface SessionSummary {
   readonly id: string
   readonly title: string
   readonly createdAt: string
   readonly updatedAt: string
   readonly parentSessionKey?: string
+  readonly preferredModel: PreferredModelOverride | null
 }
 
 // 投影消息行（GET /messages 输出；前端单管线渲染的输入形状——实时事件归约同构）。
@@ -65,6 +69,8 @@ export interface ProjectionMessage {
 export interface SessionProjection {
   readonly sessionId: string
   readonly title: string
+  /** 解析后的会话模型覆盖（#978 · ADR 0019；对象或 null = 跟随默认链）——composer 恢复态读面 */
+  readonly preferredModel: PreferredModelOverride | null
   readonly messages: ProjectionMessage[]
   /** in-flight 投影（story 11 · #779）：有进行中 run 时带出（从 checkpoint blob 反序列化重建，
    *  即焚 token 事件的补偿真相源）；无在飞 = 字段缺省。多端重拉同帧（同一内存态）。 */
@@ -200,8 +206,46 @@ export interface RewindResult {
 
 // RunService recordTurn 注入缝的载荷（RecordTurnPayload）单一声明于 './reducer'。
 
+// preferredModelJson 读侧宽松解析（#978「存量兼容」）：无 effort 旧行原样接受；坏 JSON /
+// 形状不符（防御面，写侧恒经 zod）→ null（= 跟随默认链，不炸读路径）。effort 仅在取值
+// 合法时保留（规范档 low|high|max；schema 是写面权威，此处只做读面收敛）。
+function parsePreferredModelOverride(json: string | null): PreferredModelOverride | null {
+  if (json === null || json === '') return null
+  try {
+    const raw = JSON.parse(json) as { providerId?: unknown; modelId?: unknown; effort?: unknown }
+    if (typeof raw?.providerId !== 'string' || raw.providerId === '' || typeof raw?.modelId !== 'string' || raw.modelId === '') {
+      return null
+    }
+    const effort = (raw.effort === 'low' || raw.effort === 'high' || raw.effort === 'max' ? raw.effort : undefined)
+    return { providerId: raw.providerId, modelId: raw.modelId, ...(effort !== undefined ? { effort } : {}) }
+  } catch {
+    return null
+  }
+}
+
+// 会话模型覆盖写路径单点（ADR 0019 决策 2）：斜杠命令与 PATCH 同点落库——preferredModelJson
+// 的唯一写形态（null = 清空覆盖）。必须运行在 sessions 事务内（tx 客户端），与同事务的
+// 幂等查/落行保持原子。
+async function writePreferredModel(
+  tx: Pick<PrismaClient, 'session'>,
+  sessionId: string,
+  model: PreferredModelOverride | null,
+): Promise<void> {
+  await tx.session.update({
+    where: { id: sessionId },
+    data: { preferredModelJson: model ? JSON.stringify(model) : null },
+  })
+}
+
 function summary(s: Session): SessionSummary {
-  return { id: s.id, title: s.title, createdAt: s.createdAt.toISOString(), updatedAt: s.updatedAt.toISOString(), ...(s.parentSessionKey ? { parentSessionKey: s.parentSessionKey } : {}) }
+  return {
+    id: s.id,
+    title: s.title,
+    createdAt: s.createdAt.toISOString(),
+    updatedAt: s.updatedAt.toISOString(),
+    ...(s.parentSessionKey ? { parentSessionKey: s.parentSessionKey } : {}),
+    preferredModel: parsePreferredModelOverride(s.preferredModelJson),
+  }
 }
 
 // turn 序号分配 + 落行打包进 interactive transaction：read-then-write 在 SQLite 单连接事务内
@@ -308,11 +352,37 @@ export class SessionService {
     return { sessions: rows.map(summary) }
   }
 
-  // ---- 改标题（story 5 可改面；归属门同码 50002）+ session.updated 广播 ----
-  async renameSession(user: Pick<AuthUser, 'id' | 'role'>, sessionId: string, title: string): Promise<SessionSummary> {
+  // ---- 改会话（story 5 改标题 + #978 会话模型覆盖；归属门同码 50002）。
+  // 覆盖写经 writePreferredModel 单点（斜杠命令同 helper，ADR 0019 决策 2）；写后广播沿用
+  // 既有 session.updated 两款形状、零新增事件类型：标题变更 → {session: summary}（PATCH 返回
+  // 同形）；覆盖变更 → {sessionId, model, appliesTo:'next-run'}（/model 斜杠现状同款，model
+  // 含 effort）——多标签/斜杠互通经同一形状订阅。同请求双变更则两款载荷各发一条。----
+  async updateSession(
+    user: Pick<AuthUser, 'id' | 'role'>,
+    sessionId: string,
+    patch: { title?: string; preferredModel?: PreferredModelOverride | null },
+  ): Promise<SessionSummary> {
     await getSessionForUser(this.deps.prisma, user, sessionId)
-    const fresh = await this.deps.prisma.session.update({ where: { id: sessionId }, data: { title } })
-    this.publishSessionEvent(user.id, 'session.updated', { session: summary(fresh) }, sessionId)
+    const fresh = await this.deps.prisma.$transaction(async (tx) => {
+      if (patch.preferredModel !== undefined) {
+        await writePreferredModel(tx, sessionId, patch.preferredModel)
+      }
+      // 覆盖写已发生时整行重读（含新 preferredModel）；无覆盖写才走 title update
+      return patch.title !== undefined
+        ? tx.session.update({ where: { id: sessionId }, data: { title: patch.title } })
+        : tx.session.findUniqueOrThrow({ where: { id: sessionId } })
+    })
+    if (patch.title !== undefined) {
+      this.publishSessionEvent(user.id, 'session.updated', { session: summary(fresh) }, sessionId)
+    }
+    if (patch.preferredModel !== undefined) {
+      this.publishSessionEvent(
+        user.id,
+        'session.updated',
+        { sessionId, model: parsePreferredModelOverride(fresh.preferredModelJson), appliesTo: 'next-run' },
+        sessionId,
+      )
+    }
     return summary(fresh)
   }
 
@@ -533,7 +603,9 @@ export class SessionService {
         created = await tx.session.update({ where: { id: fresh.id }, data: { containerId: `${SANDBOX_CONTAINER_PREFIX}${fresh.id}` } })
         command = { name: 'new', sessionId: created.id }
       } else {
-        if (selection && 'model' in selection) await tx.session.update({ where: { id: sessionId }, data: { preferredModelJson: selection.model ? JSON.stringify(selection.model) : null } })
+        // 覆盖写单点（ADR 0019 决策 2）：与 PATCH updateSession 同 helper——斜杠 v1 无 effort
+        // 入口，selection.model 为裸 ModelRef，落库字节与既往逐字一致。
+        if (selection && 'model' in selection) await writePreferredModel(tx, sessionId, selection.model ?? null)
         command = { name: 'model', ...selection }
       }
       // turn 分配与幂等查同处一个 interactive transaction：better-sqlite3 单连接下事务体
@@ -634,6 +706,7 @@ export class SessionService {
     return {
       sessionId,
       title: session.title,
+      preferredModel: parsePreferredModelOverride(session.preferredModelJson),
       messages: rows.map(toProjectionMessage),
       ...(inFlight !== undefined ? { inFlight } : {}),
       ...(teammates.length > 0 ? { teammates } : {}),
