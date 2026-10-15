@@ -376,7 +376,7 @@ export class ProviderRegistry {
         resolveModelRef(snapshot, pinned)
       } catch {
         // eslint-disable-next-line no-console
-        console.warn(`[runner] 会话模型偏好悬挂，回落平台默认：providerId=${pinned!.providerId} modelId=${pinned!.modelId}`)
+        console.warn(`[runner] 会话模型覆盖悬挂，回落平台默认：providerId=${pinned!.providerId} modelId=${pinned!.modelId}`)
         return this.getModel(snapshot, PLATFORM_PROVIDER_ID)
       }
     }

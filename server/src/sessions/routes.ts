@@ -58,10 +58,12 @@ export function createSessionsRouter(deps: SessionsRouterDeps): Router {
     ok(res, await deps.service.listSessions(req.user!))
   })
 
-  // PATCH /:id —— 改标题（story 5）+ session.updated 广播。
+  // PATCH /:id —— 改会话（story 5 改标题 + #978 会话模型覆盖：preferredModel 对象/null 清空，
+  // 与 /model 斜杠同真源；body 经 sessionPatchSchema 校验——至少一项 + 能力 none 带 effort 拒）
+  // + session.updated 广播（两款既有形状）。
   router.patch('/:id', validateBody(sessionPatchSchema), async (req: Request, res: Response) => {
-    const { title } = req.body as z.infer<typeof sessionPatchSchema>
-    ok(res, await deps.service.renameSession(req.user!, pathId(req), title))
+    const { title, preferredModel } = req.body as z.infer<typeof sessionPatchSchema>
+    ok(res, await deps.service.updateSession(req.user!, pathId(req), { title, preferredModel }))
   })
 
   // DELETE /:id —— 删会话（级联删沙箱容器+网络；DB 行级联清 messages/checkpoints/attachments）。

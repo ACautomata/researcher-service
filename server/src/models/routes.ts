@@ -4,6 +4,8 @@
 // ——不接收任何客户端 userId 作为授权覆写面）：
 //   GET  /presets            —— 端点预设目录（六预设；建端点下拉的单一取值域）
 //   GET  /platform           —— 平台默认端点只读视图（env 派生虚拟实体，不落库；永无 key 材料）
+//   GET  /available          —— 可选模型清单（#978：会话模型覆盖取值域 + 推理强度能力注记，
+//                               presets 能力表单源派生）
 //   POST /test               —— 端点试连（#882：不入库、1-token 级、10s 超时、错误文本净化防 key 回显）
 //   GET  /providers          —— 本人 BYOK 端点列表（key 只出掩码）
 //   POST /providers          —— 建 BYOK 端点（preset_id 锁定协议与地址；api_key 缺省 = 平台共享
@@ -100,6 +102,13 @@ export function createModelsRouter(deps: ModelsRouterDeps = {}): Router {
       model: req.body.model,
     })
     ok(res, { ok: true, latency_ms: r.latencyMs })
+  })
+
+  // GET /available —— 可选模型清单（#978 · ADR 0019）：会话模型覆盖取值域（本人 BYOK 端点
+  // + 平台虚拟条目垫底）+ 推理强度能力注记（presets 能力表单源派生，前端零映射表副本）。
+  // 无 key 材料。复用 GET /providers 已否决（BYOK 管理面语义、缺平台虚拟条目，取值域不对）。
+  router.get('/available', async (req: Request, res: Response) => {
+    ok(res, await service(req).available(ownerId(req)))
   })
 
   // GET /providers —— 列表（按 createdAt 升序；key 只出掩码）。

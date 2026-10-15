@@ -1,4 +1,5 @@
 import { PLATFORM_PROVIDER_ID } from '../../models/presets'
+import { preferredModelSchema } from '../../validation/schemas'
 import { resolveModelRef, type ModelRef } from '../providerRegistry'
 import { teammateDelegation } from '../teammates/delegation'
 import { snapshotRunCapabilities, type RunCapabilities } from '../capabilities'
@@ -441,7 +442,14 @@ export class RunService {
     if (args === 'default') return { model: null, appliesTo: 'next-run' }
     const match = /^([^\s/]+)\/(\S+)$/.exec(args)
     if (!match) throw fail(CODE.VALIDATION_FAILED, '用法：/model providerId/modelId，或 /model default')
-    return { model: resolveModelRef(snapshot, { providerId: match[1]!, modelId: match[2]! }), appliesTo: 'next-run' }
+    // 形状校验收编 preferredModel schema 单源（#978 · ADR 0019 决策 2：与 PATCH body 同一份
+    // zod——斜杠 v1 无 effort 入口，能力 none 的 super-refine 在此不触发）；成员资格仍归
+    // resolveModelRef（集合外 40040，机制面照旧）。
+    const parsed = preferredModelSchema.safeParse({ providerId: match[1], modelId: match[2] })
+    if (!parsed.success) {
+      throw fail(CODE.VALIDATION_FAILED, undefined, parsed.error.flatten().fieldErrors as Record<string, string[]>)
+    }
+    return { model: resolveModelRef(snapshot, parsed.data), appliesTo: 'next-run' }
   }
 
   // ---- resume 命令构造：interrupted 态预检（权威互斥判定在 executeRun）----
