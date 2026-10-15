@@ -24,7 +24,19 @@ _Avoid_: 平台共享 key、可回显密钥。
 
 **插件 LLM 指派 (plugin LLM assignment)**:
 用户为声明 LLM 需求的插件或 judge 选择的端点与模型；未指定时跟随默认链。
-_Avoid_: 插件凭证下发、会话模型偏好。
+_Avoid_: 插件凭证下发；会话模型覆盖——指派是插件维度，会话维度的模型选择见「会话模型覆盖」，两条解析链结构性异源。
+
+**会话模型覆盖 (session model override)**:
+（wayfinder #925 图定稿，[ADR 0019](./docs/adr/0019-session-model-override.md)）用户对**单个会话** leader 模型的持久覆盖：`Session.preferredModelJson = {providerId, modelId, effort?}`。`/model` 斜杠命令与 composer 模型菜单双入口同真源读写（同一 zod schema + service 写路径单点）；run 启动快照、下一 run 生效、在飞 run 持旧快照不受影响；空值 = 跟随默认链。唯一消费点在 leader 图装配，workflow 域结构性隔离（fence）。
+_Avoid_: per-message / 每轮覆盖——两级生效制已否决（图模型构造期绑定 + 缓存抖动）；「会话模型偏好」旧称——统一「会话模型覆盖」；与「插件 LLM 指派」混称——见上条。
+
+**推理强度档位 (reasoning effort tiers)**:
+（wayfinder #925 图定稿，[ADR 0020](./docs/adr/0020-reasoning-effort-tiers.md)）会话模型覆盖的 effort 维度：统一三档规范词汇「简洁 / 标准 / 深思」（存储 `low | high | max`），per-model 映射表落 presets.ts 单源——deepseek 1:1 直传、anthropic/OpenAI 就近映射、MiniMax/GLM thinking-only 降两档（简洁=思考关）、kimi-k2 无通道置灰；BYOK 第三方默认 native、经 modelKwargs 注入。
+_Avoid_: 五档 / 连续档滑块——对三档 provider 是假精度（已否决）；per-model 自造档位名——规范词汇唯一，翻译只在注入层；「思考开关」当独立档位——thinking-only 是映射后的能力态，档位词汇仍三档。
+
+**默认链 (default chain)**:
+（#881 预设制既有机制，#925 图 B2 命名定稿）零覆盖时的模型来源：用户端点（createdAt 序）+ 平台默认端点垫底、各取首模型，`withFallbacks` 组合——primary 随用户端点配置浮动。插件 LLM 指派空值与会话模型覆盖空值都落到它；workflow 域「钉默认链」是 fence 基准（ADR 0019）。
+_Avoid_: 兜底链 / 降级链——fallbacks 是多端点容错组合，不是失败降级；平台默认模型——平台虚拟条目只是链上垫底成员，不是整条链。
 
 **OpenClaw 容器 (OpenClaw container)**:
 **（历史注：#858 OpenClaw 退役③起 fleet 整体退役——现役容器 = 会话沙箱 `researcher-sandbox-<sessionId>` + wiki 容器 `researcher-wiki-<userId>` 二 kind，本条保留为决策历史。）**
