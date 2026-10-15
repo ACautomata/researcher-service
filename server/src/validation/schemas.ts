@@ -138,6 +138,11 @@ export const preferredModelSchema = z
   })
 
 // 存量无 effort 旧行宽松接受（读面宽松解析，不走本 schema）；新写入恒经此处。
+// 校验面分工（双入口有意不对称）：形状 + 能力 none 拒 effort 归本 schema（写侧 90002）；
+// 成员资格（providerId/modelId ∈ 取值域）斜杠路径归 resolveModelRef（集合外 40040 机制面），
+// PATCH 只锁形状——悬挂覆盖（端点已删/手写错值）是运行时常态数据（ADR 0019 悬挂回落语义：
+// getDefaultModel warn + 回落平台默认），composer 只从 GET /models/available 取值，写侧
+// 不查库不复刻快照判定。
 export type PreferredModelOverride = z.infer<typeof preferredModelSchema>
 
 export const sessionPatchSchema = z

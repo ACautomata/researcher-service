@@ -30,6 +30,11 @@
 - `/api/v1/models/test` — 端点试连（#882：按表单态[预设+key+模型]发起最小代价真实试连——不入库、
   不产生 provider 行、不写日志；1-token 级探测、10s 超时；api_key 留空仅平台预设可试[其余 90003]；
   失败 90003 + 净化错误文本防 key 回显；V1 不限流[ADR 记录接受面]）。
+- `GET /api/v1/models/available` — 可选模型清单（#978 · ADR 0019：会话模型覆盖取值域 =
+  本人 BYOK 端点[createdAt asc]+ 平台虚拟条目垫底；行 `{providerId, modelId, name, capability,
+  effortNote}`[camelCase 与覆盖写面同形]，capability ∈ native|thinking-only|none 与 effortNote
+  由 presets 能力表单源派生[ADR 0020 per-model 映射表；查表未命中缺省 native + modelKwargs
+  注记]；未知预设行 fail-closed 跳过同运行时；永无 key 材料）。
 - `/api/v1/provider-endpoints[/<id>]` — 端点白名单 admin CRUD **已随 #881 预设制整链退役**
   （表/REST/校验/DNS/逃生 env 全删；40042 常量保留语义退役）。
 - `/api/v1/plugins` — 插件目录 + per-user 启用位（#788 · 8xxxx 段：GET 目录清单（manifest 渲染 +
@@ -51,8 +56,12 @@
   保留：<name> 为 sessionId，50002 同码防探测，无容器行查询）；root=wiki/workspace（含缺省）→ 60042
   退役码（#858 起无容器行归属前置，name 形状校验后即拒）；写面 PUT/POST/DELETE → 90005；
   binary/oversized 不返回内容）。
-- `/api/v1/sessions[/<id>]` — 会话 REST 域（#778：POST 创建/GET 列表/PATCH 改标题/DELETE（级联删
-  沙箱）；`/<id>/messages` POST 发消息（`Idempotency-Key` 32-hex header 幂等，重发 replay）+
+- `/api/v1/sessions[/<id>]` — 会话 REST 域（#778：POST 创建/GET 列表/PATCH 改会话/DELETE（级联删
+  沙箱）；#978 PATCH body 扩 `preferredModel`（会话模型覆盖 {providerId, modelId, effort?} |
+  null 清空同 `/model default`；zod 单源 + 能力 none 带 effort 拒 90002；写后广播
+  `session.updated {model, appliesTo:'next-run'}` 同款形状）——列表行/历史投影/summary 事件面
+  均携带解析后 `preferredModel`；
+  `/<id>/messages` POST 发消息（`Idempotency-Key` 32-hex header 幂等，重发 replay）+
   GET 历史投影（回放零差异面；#781 起 archivedAt 过滤——被放弃路线行不可读）；`/<id>/abort`、
   `/<id>/resume`、#783 审批决策 `POST /<id>/approvals/:escalationId`（resolve 面，escalationId
   不存在/已落定 → 50004 同码防探测）；#781 增 `/<id>/rewind`（换 activeCheckpointId 指针重开 + 被放弃路线软删 +
