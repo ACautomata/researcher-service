@@ -293,23 +293,39 @@ export class FileJournalService {
 
   // ---- 启动面 ----
 
-  // 启动 reconcile（server.ts 装配后异步调）：逐 session 围栏 + lease 包 reconcileSession——
-  // 与并发 rewind/agent 写互斥（同一 fence）；blob 读防 GC 剪枝（归档未处置行的 sha 不在
-  // gc refcount 内，lease 是唯一防剪面）。单 session 基建故障不中断全批（warn 留痕——静默
-  // 不可接受）。续放 chain = activeCheckpointId 指针重建（指针即上次 rewind 落盘的锚——
-  // 与 restore 路同形；boot 串行遍历期间新 run 可完成落账，不过滤则锚链内新写被误撤）。
+  // boot 链解析（NULL 指针 ≡ 链头）：指针有值走指针；指针 NULL（从未 rewind——生产常态，
+// runService 终态推进对 NULL 指针不写）缺省活性 tip = 最新未归档 checkpoint（同
+// prismaCheckpointSaver retention 寻址语义）。恒不返回 null：resumeRevert 对 null 不过滤 =
+// 全量逆放（boot 误撤产物根因）。无 checkpoint 退空集（journal 行必出自 run——常态不达；
+// 达到时 ∉ 链恒撤，与旧 null 面同向）。
+private async bootChainOf(sessionId: string): Promise<ReadonlySet<string>> {
+  const sess = await this.deps.prisma.session.findUnique({
+    where: { id: sessionId },
+    select: { activeCheckpointId: true },
+  })
+  let tip: string | null = sess?.activeCheckpointId ?? null
+  if (tip === null) {
+    const latest = await this.deps.prisma.checkpoint.findFirst({
+      where: { threadId: sessionId, archivedAt: null },
+      orderBy: { checkpointId: 'desc' }, // langgraph checkpointId 时间前缀字典序 = 成形时序
+      select: { checkpointId: true },
+    })
+    tip = latest?.checkpointId ?? null
+  }
+  return tip !== null ? this.chainOf(sessionId, tip) : new Set<string>()
+}
+
+// 启动 reconcile（server.ts 装配后异步调）：逐 session 围栏 + lease 包 reconcileSession——
+// 与并发 rewind/agent 写互斥（同一 fence）；blob 读防 GC 剪枝（归档未处置行的 sha 不在
+// gc refcount 内，lease 是唯一防剪面）。单 session 基建故障不中断全批（warn 留痕——静默
+// 不可接受）。续放 chain = bootChainOf（指针 / NULL≡链头 缺省 tip——见上）。
   async reconcileOnBoot(): Promise<Map<string, ReconcileOutcome>> {
     const out = new Map<string, ReconcileOutcome>()
     for (const sessionId of await this.reconciler.sessionsNeedingReconcile()) {
       let outcome: ReconcileOutcome
       try {
         outcome = await this.fence.runExclusive(sessionId, { holder: 'boot-reconcile', timeoutMs: 0 }, async () => {
-          // 指针缺失（罕见组合：水位非 null 而指针 null）→ chain=null 保守不滤（boot 现状面）
-          const sess = await this.deps.prisma.session.findUnique({
-            where: { id: sessionId },
-            select: { activeCheckpointId: true },
-          })
-          const chain = sess?.activeCheckpointId ? await this.chainOf(sessionId, sess.activeCheckpointId) : null
+          const chain = await this.bootChainOf(sessionId)
           const rows = await this.deps.prisma.fileJournal.findMany({ where: { sessionId, fileRevertedAt: null } })
           this.gc.acquireLease(sessionId, leaseShasOf(rows))
           try {

@@ -12,6 +12,7 @@ import { ok, fail } from '../envelope'
 import { CODE } from '../codes'
 import { requireAuth } from '../middleware/auth'
 import { mustChangePasswordGate } from '../middleware/mustChangePasswordGate'
+import { FileNotFound } from '../files/errors'
 import type { AttachmentsService } from './service'
 import { ATTACHMENT_MAX_BYTES, sanitizeFileName } from './values'
 
@@ -68,10 +69,18 @@ export function createAttachmentsRouter(deps: AttachmentsRouterDeps): Router {
 
   // GET /attachments/:id/download —— 仅 owner/admin、成功豁免信封：原生字节 + Content-Type 透传
   //（附件的 mimeType 来自上传时声明）。错误面信封：不存在/越权 → 50002（同码防枚举探测，仿
-  // figures PNG 的 70040 先例——附件域无独立码段，归会话域 5xxxx）。
+  // figures PNG 的 70040 先例——附件域无独立码段，归会话域 5xxxx）；行在但沙箱侧字节缺失
+  //（FileNotFound——沙箱回收/journal 逆放）→ 60040（files 域同码，防 unhandled 500）。
   router.get('/attachments/:id/download', async (req: Request, res: Response) => {
     const id = pathId(req)
-    const { meta, buf } = await deps.service.download(req.user!, id)
+    let meta
+    let buf
+    try {
+      ;({ meta, buf } = await deps.service.download(req.user!, id))
+    } catch (err) {
+      if (err instanceof FileNotFound) throw fail(CODE.FILE_NOT_FOUND, '附件文件不存在')
+      throw err
+    }
     res.set('Content-Type', meta.mimeType)
     res.set('Content-Disposition', `inline; filename="${encodeURIComponent(meta.fileName)}"`)
     res.send(buf)

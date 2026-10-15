@@ -465,6 +465,37 @@ describe('FileJournalService（#782）', () => {
     expect(fs.trees.get(CONTAINER)!.get('/lab/normal.txt')?.toString()).toBe('keep')
   })
 
+  it('boot NULL 指针 ≡ 链头：从未 rewind 会话（activeCheckpointId=null）链内 completed 行不被误撤', async () => {
+    // 生产常态：从未 rewind → 指针恒 NULL（runService 终态推进「NULL ≡ 链头」不写）。
+    // 回归背景（产物卡下载 404）：boot 曾把 NULL 读成 chain=null（resumeRevert 不过滤）
+    // → 残集 = 全部未处置行 → 物化 uploads 产物被 rm -rf，attachments 行/卡片留存成悬空下载。
+    await seedSession() // activeCheckpointId = null
+    // checkpoint 表种子（tip 解析面）：ckA(root) ← ckB，最新未归档 = ckB
+    await prisma.checkpoint.createMany({
+      data: [
+        { threadId: SESSION, checkpointId: 'ckA', parentCheckpointId: 'root', type: '1', blob: Buffer.alloc(0) },
+        { threadId: SESSION, checkpointId: 'ckB', parentCheckpointId: 'ckA', type: '1', blob: Buffer.alloc(0) },
+      ],
+    })
+    const b = backend()
+    // completed run 的 media 物化行（锚点 ckA ∈ chain(ckB)）+ pending '' 行（保守逆放面）
+    expect((await b.write('/lab/artifact.txt', 'keep')).error).toBeUndefined()
+    await prisma.fileJournal.update({
+      where: { sessionId_seq: { sessionId: SESSION, seq: 1 } },
+      data: { checkpointId: 'ckA' },
+    })
+    expect((await b.write('/lab/pending.txt', 'drop')).error).toBeUndefined()
+
+    const outcomes = await svc.reconcileOnBoot()
+    const keepRow = await prisma.fileJournal.findFirstOrThrow({ where: { sessionId: SESSION, path: 'artifact.txt' } })
+    const dropRow = await prisma.fileJournal.findFirstOrThrow({ where: { sessionId: SESSION, path: 'pending.txt' } })
+    expect(keepRow.fileRevertedAt).toBeNull()
+    expect(fs.trees.get(CONTAINER)!.get('/lab/artifact.txt')?.toString()).toBe('keep')
+    expect(dropRow.fileRevertedAt).not.toBeNull()
+    expect(labSnapshot(fs)).toEqual({ 'artifact.txt': 'keep' })
+    expect(outcomes.get(SESSION)).toMatchObject({ resumedReverted: 1, containerMissing: false })
+  })
+
   it('boot 续放深度护栏：残集超限跳过式处置（resumedDegraded——boot 面对齐 planRevert 降级语义）', async () => {
     await seedSession()
     const tiny = new FileJournalService({
