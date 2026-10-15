@@ -30,11 +30,22 @@ export interface ModelFactoryOptions {
 
 export type ChatModelFactory = (model: string, opts: ModelFactoryOptions) => Promise<BaseChatModel>
 
+// ConfigurableModel 可配置字段集（initChatModel configurableFields——withConfig({configurable})
+// 通道的白名单，langchain universal.js _modelParams 按此过滤）。既有 model/modelProvider/
+// temperature 之外，#979 effort 注入通道扩四键：openai 面 reasoning（gpt-5* 前缀门内一级
+// 字段 → wire reasoning_effort）与 modelKwargs（兼容面请求体直传，绕 isReasoningModel
+// 前缀门——B1 硬坑①）；anthropic 面 outputConfig（→ wire output_config.effort 五档）与
+// thinking（两态开关，仅显式设置才入 payload——零注入基线字节等价的根由）。按协议面取
+// 必要集（跨面塞未知字段 = 构造器静默忽略面，不引入）。映射表→通道键的接线漂移由
+// test/effortBinding.test.ts 守卫。
+export const OPENAI_CONFIGURABLE_FIELDS: readonly string[] = ['model', 'modelProvider', 'temperature', 'reasoning', 'modelKwargs']
+export const ANTHROPIC_CONFIGURABLE_FIELDS: readonly string[] = ['model', 'modelProvider', 'temperature', 'outputConfig', 'thinking']
+
 export const defaultFactory: ChatModelFactory = async (model, opts) => {
   if (opts.lcProvider === 'openai') {
     return (await initChatModel(model, {
       modelProvider: 'openai',
-      configurableFields: ['model', 'modelProvider', 'temperature'],
+      configurableFields: [...OPENAI_CONFIGURABLE_FIELDS],
       apiKey: opts.apiKey,
       baseUrl: opts.baseUrl, // initChatModel 映射 → ChatOpenAI baseURL（实测验证）
       configuration: { fetch: opts.fetch },
@@ -42,7 +53,7 @@ export const defaultFactory: ChatModelFactory = async (model, opts) => {
   }
   return (await initChatModel(model, {
     modelProvider: 'anthropic',
-    configurableFields: ['model', 'modelProvider', 'temperature'],
+    configurableFields: [...ANTHROPIC_CONFIGURABLE_FIELDS],
     apiKey: opts.apiKey,
     clientOptions: { baseURL: opts.baseUrl, fetch: opts.fetch },
     ...(opts.authHeader

@@ -27,9 +27,11 @@ import { parseModelsJson } from '../models/modelsJson'
 import { defaultFactory, type ChatModelFactory } from '../models/chatFactory'
 import {
   PLATFORM_PROVIDER_ID,
+  effortBindingOf,
   platformModels,
   presetById,
   protocolToLcProvider,
+  type EffortTier,
 } from '../models/presets'
 
 // ---------------------------------------------------------------------------
@@ -358,7 +360,13 @@ export class ProviderRegistry {
   // 链 = 自己端点在前、平台兜底——「单端点配额耗尽也有退路」）。换模型经 withConfig 绑定
   //（ConfigurableModel 的 configurable 通道，实测请求体正确换 model）——同端点多模型共享
   // 缓存实例，仅绑定点不同。集合外 model 值须先过 resolveModelRef（731 §5.2 机制面）。
-  async getDefaultModel(snapshot: ProviderConfigSnapshot, preferred?: ModelRef): Promise<Runnable> {
+  //
+  // effort 注入（#979 · ADR 0020）：preferred.effort 经映射表（presets.effortBindingOf 单源）
+  // 翻译进 ConfigurableModel withConfig 通道，只绑 primary（= 重排后的 preferred 本体）；
+  // 兜底成员不绑（fallback = 可用性救济，effort 归用户选择面）。零覆盖 / 无 effort 存量行 /
+  // 能力 none（kimi-k2）→ binding undefined → 装配产物与今日逐字节等价（零注入）。模型实例
+  // 缓存 key 刻意不含 model/effort——effort 走 per-request 绑定，实例跨档共享。
+  async getDefaultModel(snapshot: ProviderConfigSnapshot, preferred?: PreferredModelRef): Promise<Runnable> {
     const firstModelOf = (providerId: string): string | undefined =>
       snapshot.providers.find((p) => p.providerId === providerId)?.models[0]?.id
     const refs = snapshot.providers.flatMap((p) =>
@@ -388,11 +396,20 @@ export class ProviderRegistry {
       refs.unshift(...refs.splice(index, 1))
     }
     const [primary, ...rest] = refs
+    // effort 映射 bag（#979）：preferred 存在时 primary 即其本体（上方重排前置）——
+    // effortBindingOf 内聚零注入三面（无 effort / 越界档 / 能力 none → undefined）；face
+    // 随 primary 端点协议面（缺省 native 的 BYOK 未命中分支按面选通道，见 presets.ts）。
+    const primaryEntry = snapshot.providers.find((p) => p.providerId === primary.providerId)
+    const effortBinding = pinned
+      ? effortBindingOf(primary.modelId, pinned.effort, primaryEntry?.lcProvider ?? 'openai')
+      : undefined
     const primaryModel = await this.getModel(snapshot, primary.providerId)
     const primaryBound =
-      primary.modelId === firstModelOf(primary.providerId)
+      primary.modelId === firstModelOf(primary.providerId) && !effortBinding
         ? primaryModel
-        : primaryModel.withConfig({ configurable: { model: primary.modelId } })
+        : primaryModel.withConfig({
+            configurable: { model: primary.modelId, ...effortBinding?.configurable },
+          })
     if (rest.length === 0) return primaryBound
     // 兜底成员逐个构造、失败跳过：构造期失败（凭证解密失败/平台 key 缺失 90003/工厂异常）
     // 发生在 withFallbacks 组合之前，fallback 语义救不了——尾置条目坏掉 = 没有兜底，不是
@@ -488,6 +505,11 @@ export interface ModelRef {
   readonly providerId: string
   readonly modelId: string
 }
+
+// 会话模型覆盖引用（ADR 0019/0020 · #979）：ModelRef + 可选 effort 规范档。运行层宽松读
+//（preferredModelJson JSON.parse 原样透传）——非法档/缺失档的零注入兜底在 effortBindingOf。
+// agent 每轮选模型仍用纯 ModelRef（effort 是会话级选择，不进 per-turn 选值面）。
+export type PreferredModelRef = ModelRef & { readonly effort?: EffortTier }
 
 // 选值域校验：agent 每轮选模型（wrapModelCall）的合法值集 = 配置快照内 modelsJson 的 id
 // 集合（含平台虚拟条目）——集合外值在此拒绝（§5.2 原文「判定为编程错误而非白名单攻击，因为

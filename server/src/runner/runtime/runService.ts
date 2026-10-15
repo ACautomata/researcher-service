@@ -1,6 +1,6 @@
 import { PLATFORM_PROVIDER_ID } from '../../models/presets'
 import { preferredModelSchema } from '../../validation/schemas'
-import { resolveModelRef, type ModelRef } from '../providerRegistry'
+import { resolveModelRef, type ModelRef, type PreferredModelRef } from '../providerRegistry'
 import { teammateDelegation } from '../teammates/delegation'
 import { snapshotRunCapabilities, type RunCapabilities } from '../capabilities'
 import type { PluginRuntime } from '../../plugins/surface'
@@ -806,7 +806,10 @@ export class RunService {
     const actor = cmd.teammateId
       ? await this.deps.teammates?.get(cmd.parentSessionId ?? cmd.sessionId, cmd.teammateId)
       : undefined
-    const preferred: ModelRef | undefined = session.preferredModelJson ? JSON.parse(session.preferredModelJson) : undefined
+    // 会话模型覆盖（ADR 0019）：run 启动读行 = 快照——在飞 run 不感知后续覆盖变更
+    //（值快照语义，ADR 0016 热生效同机制）。宽松读（存量无 effort 行 / 手写行原样透传）；
+    // effort 零注入兜底在 effortBindingOf（providerRegistry 装配缝内聚）。
+    const preferred: PreferredModelRef | undefined = session.preferredModelJson ? JSON.parse(session.preferredModelJson) : undefined
     const model = actor?.modelProviderId
       ? await this.deps.registry.getTeammateModel(snapshot, actor.modelProviderId)
       : await this.deps.registry.getDefaultModel(snapshot, preferred)
@@ -848,7 +851,17 @@ export class RunService {
           })
         : []
 
-    const modelKey = actor?.modelProviderId ? `provider:${actor.modelProviderId}` : session.preferredModelJson ?? 'default'
+    // 图缓存失效（B1 硬坑② · ADR 0019 决策 1）：modelKey 并入 effort——同 session 换档
+    // 不命中旧图（下一 run 重建，改动触发图重建语义；在飞 run 已持旧图/旧快照跑完）。
+    // leader 分支原为 preferredModelJson 原始 JSON 串——effort 虽随 #978 存储形态隐式入串，
+    // 但键形状依赖序列化（同覆盖不同键序假性分裂缓存、effort 在键上不可读），收敛为解析值
+    // 规范键。teammate 钉端点分支 provider:<id> 结构性无 effort（getTeammateModel 不绑
+    // effort——fence 不扩大至钉定 teammate 通道），保持原形。
+    const modelKey = actor?.modelProviderId
+      ? `provider:${actor.modelProviderId}`
+      : preferred
+        ? `model:${preferred.providerId}|${preferred.modelId}|effort:${preferred.effort ?? '-'}`
+        : 'default'
     // 插件工具/prompt（#788 §4.2）：run 粒度启用集静态过滤——禁用 = 新 run 装配不纳入；
     // 进行中 run 不中断（工具集已随本次装配入图）。wiki-update 治理 run 不接插件面
     //（治理通道计划自拟 + 生命周期工具面，与「治理通道自我防护」同口径；且其图跳缓存
