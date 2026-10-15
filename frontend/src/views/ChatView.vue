@@ -25,7 +25,9 @@ import RewindDialog from '@/components/chat/RewindDialog.vue'
 import ChatSidebar from '@/components/chat/ChatSidebar.vue'
 import ChatHeader from '@/components/chat/ChatHeader.vue'
 import ChatStream from '@/components/chat/ChatStream.vue'
-import ChatComposer from '@/components/chat/ChatComposer.vue'
+// B3 原型（#933）：一次性换壳——契约与 ChatComposer 一致；非 dev 或未带 ?variant= 时
+// 原样直出原版 ChatComposer，?variant=A/B/C 渲染三结构变体 + 浮动切换条（纯 mock 只读）。
+import ChatComposer from '@/components/chat/b3Prototype/B3ComposerPrototypes.vue'
 import ApprovalDock from '@/components/chat/ApprovalDock.vue'
 import TeamFolds from '@/components/chat/TeamFolds.vue'
 import FileTabsPanel from '@/components/chat/FileTabsPanel.vue'
