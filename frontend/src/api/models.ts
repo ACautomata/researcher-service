@@ -97,6 +97,21 @@ export function listProviders(): Promise<ModelProviderDTO[]> {
   return apiJson<ModelProviderDTO[]>(COLLECTION)
 }
 
+// 可选模型清单（GET /models/available，#978 · ADR 0019 接口面；composer 上拉菜单取值域 #980）：
+// capability ∈ native | thinking-only | none + effortNote 映射注记全部服务端单源下发，
+// 前端零映射表副本（ADR 0020 防漂移红线）。camelCase 与会话覆盖写面 {providerId, modelId, effort?} 同形。
+export interface AvailableModelDTO {
+  providerId: string
+  modelId: string
+  name: string
+  capability: 'native' | 'thinking-only' | 'none'
+  effortNote: string
+}
+
+export function listAvailableModels(): Promise<AvailableModelDTO[]> {
+  return apiJson<AvailableModelDTO[]>(`${BASE}/available`)
+}
+
 export function createProvider(payload: ModelProviderWriteDTO): Promise<ModelProviderDTO> {
   return apiJson<ModelProviderDTO>(COLLECTION, {
     method: 'POST',

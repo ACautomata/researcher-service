@@ -787,3 +787,57 @@ it('#794 重连权威投影尚未返回时禁止历史操作', async () => {
   expect(conn.historyAvailable.value).toBe(true)
   conn.dispose()
 })
+
+// ---- #980 会话模型覆盖同步（composer chip/滑块的恢复源与事件跟随面）----
+describe('#980 会话模型覆盖同步', () => {
+  it('投影 preferredModel → chat.preferredModel 恢复 + 滑块档跟随；缺省投影清为默认态', async () => {
+    vi.mocked(api.getSessionProjection).mockResolvedValue(
+      projectionOf({ preferredModel: { providerId: 'p', modelId: 'm', effort: 'max' } }),
+    )
+    const conn = await mounted()
+    expect(conn.chat.preferredModel).toEqual({ providerId: 'p', modelId: 'm', effort: 'max' })
+    expect(conn.chat.effortTier).toBe(2)
+    conn.dispose()
+  })
+
+  it('session.updated {model} → 选中会话跟随（null 清空）；他端会话不串', async () => {
+    const conn = await mounted()
+    const src = FakeEventSource.last()!
+    src.emit('session.updated', { type: 'session.updated', sessionId: 'sess-1', payload: { model: { providerId: 'p', modelId: 'm', effort: 'low' }, appliesTo: 'next-run' } })
+    await flushPromises()
+    expect(conn.chat.preferredModel).toEqual({ providerId: 'p', modelId: 'm', effort: 'low' })
+    expect(conn.chat.effortTier).toBe(0)
+    src.emit('session.updated', { type: 'session.updated', sessionId: 'sess-2', payload: { model: { providerId: 'x', modelId: 'y' }, appliesTo: 'next-run' } })
+    await flushPromises()
+    expect(conn.chat.preferredModel).toEqual({ providerId: 'p', modelId: 'm', effort: 'low' }) // 他端不串
+    src.emit('session.updated', { type: 'session.updated', sessionId: 'sess-1', payload: { model: null, appliesTo: 'next-run' } })
+    await flushPromises()
+    expect(conn.chat.preferredModel).toBeNull()
+    // 「默认」清空不改滑块会话值（B4：切模型不改滑块值；清空后由初值语义呈现标准）
+    expect(conn.chat.effortTier).toBe(0)
+    conn.dispose()
+  })
+
+  it('session.updated {session} 携带 preferredModel → 选中会话随行同步；切会话清态归位', async () => {
+    const conn = await mounted()
+    const src = FakeEventSource.last()!
+    src.emit('session.updated', { type: 'session.updated', sessionId: 'sess-1', payload: { session: { ...S1, preferredModel: { providerId: 'p2', modelId: 'm2', effort: 'high' } } } })
+    await flushPromises()
+    expect(conn.chat.preferredModel).toEqual({ providerId: 'p2', modelId: 'm2', effort: 'high' })
+    expect(conn.chat.effortTier).toBe(1)
+    conn.selectSession('sess-2')
+    await flushPromises()
+    expect(conn.chat.preferredModel).toBeNull() // 切会话清态，等新会话投影恢复
+    expect(conn.chat.effortTier).toBe(1)
+    conn.dispose()
+  })
+
+  it('事件载荷 0 信任：形状不符的 model 不进状态（fail-soft 回默认态）', async () => {
+    const conn = await mounted()
+    const src = FakeEventSource.last()!
+    src.emit('session.updated', { type: 'session.updated', sessionId: 'sess-1', payload: { model: { providerId: '', modelId: 'm' }, appliesTo: 'next-run' } })
+    await flushPromises()
+    expect(conn.chat.preferredModel).toBeNull()
+    conn.dispose()
+  })
+})

@@ -26,6 +26,7 @@ import {
   resolveSessionApproval,
   sendSessionMessage,
   type MediaRef,
+  type PreferredModelRef,
   type SessionSummary,
   type SystemCommandResult,
 } from '@/api/sessions'
@@ -163,6 +164,7 @@ export function useChatSession(deps: ChatSessionDeps = {}): ChatSession {
       chat.setMessages(fromProjection(p))
       chat.setTeams(teamFoldsFromProjection(p))
       chat.setApprovalsFromProjection(p.approvals)
+      chat.setPreferredModel(p.preferredModel ?? null) // composer chip/滑块从投影恢复（#980）
       projectionReady.value = true
       deps.onClearError?.()
     } catch (e) {
@@ -246,7 +248,17 @@ export function useChatSession(deps: ChatSessionDeps = {}): ChatSession {
       const s = readSummary(e.payload.session)
       if (s) {
         chat.upsertSession(s)
+        // 标题变更款载荷的 summary 现携带 preferredModel（#980）——选中会话随行同步 chip/滑块
+        //（他端改名事件同样携带该端覆盖态，双向跟随）。
+        if (e.sessionId === chat.selectedSession && s.preferredModel !== undefined) {
+          chat.setPreferredModel(s.preferredModel)
+        }
         return
+      }
+      // 覆盖变更款载荷 {sessionId, model, appliesTo:'next-run'}（/model 斜杠与 composer PATCH
+      // 共用广播，零新增事件类型）：多标签/斜杠互通的跟随刷新点（#980）。model 可为 null（清空）。
+      if ('model' in e.payload && e.sessionId === chat.selectedSession) {
+        chat.setPreferredModel(readPreferredModel(e.payload.model))
       }
       if (e.payload.projectionChanged === true && e.sessionId === chat.selectedSession) {
         void refreshProjection()
@@ -390,7 +402,18 @@ export function useChatSession(deps: ChatSessionDeps = {}): ChatSession {
       createdAt: typeof r.createdAt === 'string' ? r.createdAt : '',
       updatedAt: typeof r.updatedAt === 'string' ? r.updatedAt : '',
       ...(typeof r.parentSessionKey === 'string' ? { parentSessionKey: r.parentSessionKey } : {}),
+      ...(r.preferredModel !== undefined ? { preferredModel: readPreferredModel(r.preferredModel) } : {}),
     }
+  }
+
+  // 覆盖载荷 0 信任解析（session.updated {model} 广播 + summary 内嵌同用）：形状不符 → null
+  //（跟随默认链，不炸事件路径）；effort 仅在规范档内保留（写面权威在 server zod，此处读面收敛）。
+  function readPreferredModel(v: unknown): PreferredModelRef | null {
+    if (!v || typeof v !== 'object') return null
+    const r = v as Record<string, unknown>
+    if (typeof r.providerId !== 'string' || r.providerId === '' || typeof r.modelId !== 'string' || r.modelId === '') return null
+    const effort = r.effort === 'low' || r.effort === 'high' || r.effort === 'max' ? r.effort : undefined
+    return { providerId: r.providerId, modelId: r.modelId, ...(effort !== undefined ? { effort } : {}) }
   }
 
   function selectSession(id: string): void {
