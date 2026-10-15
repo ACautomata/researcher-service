@@ -187,6 +187,18 @@ describe('#780 附件域 S1（上传/下载/消息链接）', () => {
     expect(admin.status).toBe(200)
   })
 
+  it('下载：行在但沙箱侧字节缺失（FileNotFound）→ 60040 信封（防 unhandled 500）', async () => {
+    const { sessionId } = await seedUserAndSession('dl-gone')
+    const { res } = await uploadOne('dl-gone', sessionId, 'gone')
+    const id = res.body.data.attachmentId
+    const { FileNotFound } = await import('../src/files/errors')
+    archive.readLabBytes.mockRejectedValueOnce(new FileNotFound(`uploads/${id}/a.txt`))
+    const l = await login(request, 'dl-gone', 'pw-att-secure')
+    const gone = await request.get(`/api/v1/attachments/${id}/download`).set(bearer(l.access))
+    expect(gone.body.code).toBe(CODE.FILE_NOT_FOUND)
+    expect(gone.body.message).toContain('附件文件不存在')
+  })
+
   it('消息发送带 attachmentIds → 附件行挂 messageId；≤4 件超限 90002；跨会话/他人附件 50002', async () => {
     const { sessionId } = await seedUserAndSession('msg-owner')
     const l = await login(request, 'msg-owner', 'pw-att-secure')
