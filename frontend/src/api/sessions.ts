@@ -5,7 +5,20 @@
 // content 得 replay（runId null / replay true），同 key 异 content → 50007。
 import { apiJson } from './client'
 
-export interface SessionSummary { id: string; title: string; createdAt: string; updatedAt: string; parentSessionKey?: string }
+// 会话模型覆盖（ADR 0019/0020 · #978/#980）：{providerId, modelId, effort?}，null = 清空覆盖
+//（与 /model default 同语义）。effort 规范档 low|high|max——per-model 映射翻译在服务端注入层，
+// 前端零映射表副本。写面 PATCH /sessions/:id（composer 菜单/滑块与 /model 斜杠同真源双入口）。
+export interface PreferredModelRef { providerId: string; modelId: string; effort?: 'low' | 'high' | 'max' }
+
+export interface SessionSummary {
+  id: string
+  title: string
+  createdAt: string
+  updatedAt: string
+  parentSessionKey?: string
+  // 解析后的会话模型覆盖（对象或 null）——composer 恢复 chip/滑块态的恢复源（#980）。
+  preferredModel?: PreferredModelRef | null
+}
 
 // ---- attachmentsJson v1 聚合面（server sessions/reducer.ts ToolLine/MediaRef 逐字段镜像）----
 export interface ToolLine {
@@ -97,6 +110,8 @@ export interface SessionApproval extends ApprovalInterruptPayload { teammateId?:
 export interface SessionProjection {
   sessionId: string
   title: string
+  // 会话模型覆盖（#980：composer 从投影恢复 chip/滑块；server parsePreferredModelOverride 解析面）
+  preferredModel?: PreferredModelRef | null
   messages: ProjectionMessage[]
   teammates?: TeamMember[]
   inFlight?: LiveTurn
@@ -148,6 +163,11 @@ export const getSessionProjection = (id: string) => apiJson<SessionProjection>(`
 // 改标题（story 5 可改；首轮自动生成经 session.updated 事件到达，无前端触发面）。
 export const renameSession = (id: string, title: string) =>
   apiJson<SessionSummary>(path(id), { method: 'PATCH', body: JSON.stringify({ title }) })
+
+// 会话模型覆盖写面（#980 composer 菜单/滑块；与 /model 斜杠同点落库，ADR 0019 决策 2）：
+// model null = 清空覆盖。返回整行 summary（preferredModel 为权威解析面，回写 store 单向同步）。
+export const setSessionPreferredModel = (id: string, model: PreferredModelRef | null) =>
+  apiJson<SessionSummary>(path(id), { method: 'PATCH', body: JSON.stringify({ preferredModel: model }) })
 
 // 删除：非终态 run 或存活 teammate 在跑 → 50005（级联删沙箱由服务端负责）。
 export const deleteSession = (id: string) => apiJson<null>(path(id), { method: 'DELETE' })

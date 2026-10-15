@@ -6,7 +6,8 @@
 // 渲染状态与编排解耦：本 store 只做纯 mutation；SSE 路由 × 幂等发送 × 断线补偿的非响应式簇
 // 归 useChatSession 同宿主（#340 关键约束延续）。
 import { defineStore } from 'pinia'
-import type { ApprovalPlanBlock, SessionApproval, SessionSummary } from '@/api/sessions'
+import type { ApprovalPlanBlock, PreferredModelRef, SessionApproval, SessionSummary } from '@/api/sessions'
+import { DEFAULT_EFFORT_TIER, tierOfWire, type EffortTier } from '@/chat/effort'
 import type { Msg, TeamFold } from '@/chat/projection'
 
 // 视图模型单一来源在投影归约器（纯函数可测）——组件经由本 store 再导出保持 import 面不变。
@@ -81,6 +82,12 @@ export const useChatStore = defineStore('chat', {
     // T07 斜杠命令补全：菜单选中项 + Esc 关闭态
     slashIndex: 0 as number,
     slashDismissed: false as boolean,
+    // 会话模型覆盖（ADR 0019/0020 · #980）：composer chip/滑块的恢复源与跟随面——投影重拉、
+    // session.updated {model} 广播（多标签/斜杠互通）与本页乐观写三路共用同一 mutation。
+    preferredModel: null as PreferredModelRef | null,
+    // 推理强度滑块会话内值（B4「选模型即带档」：初值 = 标准；切模型不改滑块值；随覆盖 effort
+    // 回放/事件跟随，无 effort 存量行保持会话值=标准显示）。会话切换随 resetForSession 归位。
+    effortTier: DEFAULT_EFFORT_TIER as EffortTier,
   }),
   getters: {
     // 审批卡列表（编排层只灌当前会话的卡：SSE 按 sessionId 分派 + 投影重拉按选中会话整替）。
@@ -148,6 +155,14 @@ export const useChatStore = defineStore('chat', {
     setInput(v: string): void {
       this.input = v
     },
+    // 会话模型覆盖写/恢复单点（#980）：null = 清空覆盖（滑块随之置灰，tier 保持会话内当前值
+    // ——「初值 = 标准」只在会话/切会话起点生效，清空不回拨，下次选模型即带该值，B4「切模型
+    // 不改滑块值」同语义）；带 effort 的行同步滑块 tier（投影恢复 + 事件跟随 + 本页乐观写三路
+    // 同效）；无 effort 的存量行不改 tier（新会话由初值兜出「标准」显示）。
+    setPreferredModel(m: PreferredModelRef | null): void {
+      this.preferredModel = m
+      if (m?.effort) this.effortTier = tierOfWire(m.effort)
+    },
     // T1 轮次折叠（#664）手动开合：折叠条 emit 回父层落 store（自动折叠在归约器终态收敛）。
     toggleTraceFold(m: Msg): void {
       m.traceFolded = !m.traceFolded
@@ -203,6 +218,8 @@ export const useChatStore = defineStore('chat', {
       this.input = ''
       this.slashDismissed = false
       this.slashIndex = 0
+      this.preferredModel = null
+      this.effortTier = DEFAULT_EFFORT_TIER
     },
   },
 })

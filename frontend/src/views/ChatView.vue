@@ -7,10 +7,12 @@ defineOptions({ name: 'ChatView' })
 // props-in/emits-out 哑组件，6 slot 全开（msg-item/thinking/tool-line/empty/slash-menu/banner），
 // 表现父注入、逻辑留宿主。容器维度退役（#730 §4.7）：无容器切换器/升级编排——侧栏 = 会话列表
 //（扁平挂用户，story 4）+ 沙箱 lab 文件树（story 61）。
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, toRaw, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { previewSessionRewind, uploadSessionAttachment } from '@/api/sessions'
-import type { ModelRef, SystemCommandResult, RewindPreview, RewindScope } from '@/api/sessions'
+import { previewSessionRewind, setSessionPreferredModel, uploadSessionAttachment } from '@/api/sessions'
+import type { ModelRef, PreferredModelRef, SystemCommandResult, RewindPreview, RewindScope } from '@/api/sessions'
+import { listAvailableModels, type AvailableModelDTO } from '@/api/models'
+import { wireOfTier, type EffortTier } from '@/chat/effort'
 import { useChatStore, type Msg } from '@/stores/chat'
 import { useFileTabsStore } from '@/stores/fileTabs'
 import { useAuthStore, tokenOwner } from '@/stores/auth'
@@ -25,9 +27,8 @@ import RewindDialog from '@/components/chat/RewindDialog.vue'
 import ChatSidebar from '@/components/chat/ChatSidebar.vue'
 import ChatHeader from '@/components/chat/ChatHeader.vue'
 import ChatStream from '@/components/chat/ChatStream.vue'
-// B3 原型（#933）：一次性换壳——契约与 ChatComposer 一致；非 dev 或未带 ?variant= 时
-// 原样直出原版 ChatComposer，?variant=A/B/C 渲染三结构变体 + 浮动切换条（纯 mock 只读）。
-import ChatComposer from '@/components/chat/b3Prototype/B3ComposerPrototypes.vue'
+// #980 全内嵌舱 composer 定稿（B3 变体 C 施工）——原型换壳层退役回直连（b3Prototype 仅留档参考）。
+import ChatComposer from '@/components/chat/ChatComposer.vue'
 import ApprovalDock from '@/components/chat/ApprovalDock.vue'
 import TeamFolds from '@/components/chat/TeamFolds.vue'
 import FileTabsPanel from '@/components/chat/FileTabsPanel.vue'
@@ -402,8 +403,55 @@ async function regenerate(text: string): Promise<void> {
   await sendMessage()
 }
 
+// ---- #980 composer 选择器（会话模型覆盖写面：菜单选模型 + 滑块换档）----
+// 可选模型清单（GET /models/available，owner 级与会话无关）：boot 拉一次，fail-soft 空清单
+// （菜单只剩「默认」项仍可清空覆盖）。能力/映射注记全取自服务端行，前端零映射表副本。
+const modelOptions = ref<AvailableModelDTO[]>([])
+async function loadModelOptions(): Promise<void> {
+  try {
+    const rows = await listAvailableModels()
+    modelOptions.value = Array.isArray(rows) ? rows : []
+  } catch (e) {
+    modelOptions.value = []
+    ElMessage.error(e instanceof Error ? e.message : '可用模型加载失败')
+  }
+}
+
+// 选模型即带档（B4 裁定）：菜单选中即写当前滑块值（能力 none 裁剪 omit effort）；切模型不改
+// 滑块值；「默认」= null 清空覆盖（与 /model default 同语义）。乐观写 store（chip/滑块即显；
+// PATCH 回执与 session.updated 广播同值幂等），失败回退 + toast。
+function selectModel(option: AvailableModelDTO | null): void {
+  const sessionId = chat.selectedSession
+  if (!sessionId) return
+  const effort = option && option.capability !== 'none' ? wireOfTier(chat.effortTier) : undefined
+  const next = option
+    ? { providerId: option.providerId, modelId: option.modelId, ...(effort ? { effort } : {}) }
+    : null
+  void applyPreferredModel(sessionId, next)
+}
+function setEffortTier(tier: EffortTier): void {
+  const sessionId = chat.selectedSession
+  const current = chat.preferredModel
+  if (!sessionId || !current) return // 默认态无推理强度通道（composer 段控件已置灰，双保险）
+  void applyPreferredModel(sessionId, { ...current, effort: wireOfTier(tier) })
+}
+async function applyPreferredModel(sessionId: string, next: PreferredModelRef | null): Promise<void> {
+  const prev = chat.preferredModel
+  chat.setPreferredModel(next)
+  try {
+    const s = await setSessionPreferredModel(sessionId, next)
+    if (chat.selectedSession === sessionId) chat.setPreferredModel(s.preferredModel ?? null)
+  } catch (e) {
+    // 仅回退仍归属本页乐观写的值（期间已被 SSE/其他写更新的不动，权威面自然收敛）；
+    // Pinia 读回是 reactive 代理，归属判定走 toRaw 比对原始引用。
+    if (chat.selectedSession === sessionId && toRaw(chat.preferredModel) === next) chat.setPreferredModel(prev)
+    ElMessage.error(e instanceof Error ? e.message : '模型选择保存失败')
+  }
+}
+
 onMounted(() => {
   void conn.boot()
+  void loadModelOptions()
 })
 onBeforeUnmount(() => {
   conn.dispose()
@@ -542,12 +590,17 @@ defineExpose({
         :pending-attachments="pendingAttachments"
         :attachment-busy="attachmentBusy"
         :attachment-status="attachmentStatus"
+        :preferred-model="chat.preferredModel"
+        :model-options="modelOptions"
+        :effort-tier="chat.effortTier"
         @input="conn.onComposerInput"
         @keydown="conn.onComposerKeydown"
         @send="sendMessage"
         @pick-slash="conn.pickSlash"
         @add-files="addFiles"
         @remove-attachment="removeAttachment"
+        @select-model="selectModel"
+        @set-effort="setEffortTier"
       >
         <!-- T07 斜杠补全菜单表现（父注入，逻辑留宿主 useChatSession） -->
         <template #slash-menu="{ matches, slashIndex }">

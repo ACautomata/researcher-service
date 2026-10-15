@@ -22,14 +22,19 @@
   `useChatSession.ts`（会话编排 composable——发送幂等/门控/断线补偿/审批/slash 系统命令；#796 起 SSE 事件按顶层 teammateId 分流进折叠区，主时间线只挂 leader 发言与产物，teammate run 失败不落 leader 错误横幅）/
   `useEventStream.ts`（SSE 薄封装——原生重连 + seq gap 检测 + 401 经刷新链关流 + session.terminated 停重连；#799/#913 订阅目录增 figure_run.progress / research_run.progress）/
   `restOutbox.ts`（#779 story 12 断线排队：sessionStorage 落盘、50 上限丢最旧、按序幂等 flush）/
-  `attachments.ts`（采集/校验纯函数，发送经 multipart 上传换 attachmentIds）。
+  `attachments.ts`（采集/校验纯函数，发送经 multipart 上传换 attachmentIds）/
+  `effort.ts`（#980 推理强度三档词汇（ADR 0020）——「简洁/标准/深思」↔ `low|high|max` 单源：
+  composer 滑块档序与 PATCH 写面共用；capability/effortNote 仍由 GET /models/available 服务端
+  单源下发，此处**非** per-model 映射表）。
 - `wiki/` — wiki 阅读域纯逻辑：`reader.ts`（OKF frontmatter 解析——type/title/description/category/tags，
   category 读面归「未分类」收敛；wiki 相对链解析）+ `values.ts`（显示层常量单源——category 值域/
   「未分类」/status 中文徽标映射，契约对齐 server/wiki/values.ts）+ `useWikiUpdate.ts`（更新 run 进度订阅）。
 - `views/` — 用户面板视图：`LoginView` / `ChatView`（REST+SSE 编排壳；#796 起 teammate 具名折叠区随消息流渲染）/ `WikiView` / `ModelView` / `PluginsView`（#799 插件目录页——能力可见性唯一入口 + per-user 启用位开关）/ `LegalDocumentView` / `NotFoundView`（admin 页已随迁 `admin/views/`，#800）。FigureEditorView / CategoriesView / MdEditor 已随 #747 回归退役；ContainersView 已随 #858 退役。
 - `components/` — `FileTree` / `WikiGraph`（obsidian 风格图谱）/
   ChatView 哑组件族（props-in/emits-out，零协议 import：`ChatSidebar`（会话扁平列表 + lab 文件树）/
-  `ChatHeader`/`ChatStream`/`ChatComposer`/`ChatMessageItem`/`ThinkingCard`/`ToolLine`（#799 起展开区接插件渲染注册表——命中交插件组件消费 details，未注册默认输入/输出详情）/`ApprovalCard`/`ApprovalDock`（#796 审批卡具名徽标 teammateName；#920 起 Dock 按 source==='experiment-plan' 分流 `PlanApprovalCard`——W4 实验方案人审卡，plan.text 经 MarkdownRenderer 渲染）
+  `ChatHeader`/`ChatStream`/`ChatComposer`（#980 全内嵌舱——单胶囊体框外零控件：舱内底排
+  📎/推理强度三段滑块/模型 chip 上拉菜单/圆形发送键，预览条内移第一排；选择器面 props-in/emits-out，
+  模型清单与能力注记全部 props 注入，写面上抛宿主）/`ChatMessageItem`/`ThinkingCard`/`ToolLine`（#799 起展开区接插件渲染注册表——命中交插件组件消费 details，未注册默认输入/输出详情）/`ApprovalCard`/`ApprovalDock`（#796 审批卡具名徽标 teammateName；#920 起 Dock 按 source==='experiment-plan' 分流 `PlanApprovalCard`——W4 实验方案人审卡，plan.text 经 MarkdownRenderer 渲染）
   + `TeamFolds`（#796 teammate 具名折叠区——状态八值徽标/审批局部冻结/归档终态/展开轨迹同形状行 + mailbox 追问广播呈现）+ `TurnFilesCard`（#959/#960/#961 轮次产物卡片——挂 ChatMessageItem 媒体列表之后/ai-notice 之前，恒在折叠条外；#960 T2 起：非 delete 行「下载」文字链走 readAttachmentBlob 认证字节通道（blob URL + a[download]），deleted 行「已删除」无链接，filesTotal > 列出数时行尾「等 N 个文件」计数行；#961 T3 起：hasExec 标记（turn.files 帧随带，true 才落键）时卡底一行「本轮含 Shell 调用，其文件副作用不在此列」——D6 动态提示只断言「有调用」；#962 T4 视觉定稿（A3 变体 B「分组卡」）：按 op 三节分组（空缺节跳过，行序 = 组序 × 组内原序）+ 药丸徽标（created 绿 success / modified 蓝 primary / deleted 灰 secondary）+ 目录 rtl-ellipsis 弱化 / 文件名 mono 主文本））。
 
 - 模型配置页统一管理平台默认端点只读卡片、六预设 BYOK 表单、模型列表、保存前试连、删除影响面与插件 LLM 指派（含 judge）。API key 编辑留空保持原值；响应只显示掩码或 key_error，不回填明文。

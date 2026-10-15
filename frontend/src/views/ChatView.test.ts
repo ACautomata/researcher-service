@@ -21,6 +21,10 @@ vi.mock('@/api/sessions', () => ({
   abortSession: vi.fn(),
   resolveSessionApproval: vi.fn(),
   uploadSessionAttachment: vi.fn(),
+  setSessionPreferredModel: vi.fn(),
+}))
+vi.mock('@/api/models', () => ({
+  listAvailableModels: vi.fn(),
 }))
 vi.mock('@/api/files', () => ({
   listLabTree: vi.fn(),
@@ -47,6 +51,7 @@ vi.mock('element-plus', () => ({
 }))
 
 import * as api from '@/api/sessions'
+import * as modelsApi from '@/api/models'
 import * as filesApi from '@/api/files'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useChatStore } from '@/stores/chat'
@@ -116,6 +121,12 @@ beforeEach(() => {
   vi.mocked(api.renameSession).mockResolvedValue({ ...S1, title: '改名后标题' })
   vi.mocked(api.createSession).mockResolvedValue({ id: 'sess-new', title: '', createdAt: '', updatedAt: '' })
   vi.mocked(filesApi.listLabTree).mockResolvedValue({ kind: 'dir', path: '', files: [{ path: 'notes/a.md', type: 'file', size: 3, modified: '' }], truncated: false })
+  vi.mocked(modelsApi.listAvailableModels).mockResolvedValue([
+    { providerId: 'anthropic', modelId: 'claude-sonnet-5-5', name: 'Claude Sonnet 5.5', capability: 'native', effortNote: '三档就近映射 Anthropic effort 五档' },
+    { providerId: 'deepseek', modelId: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash', capability: 'native', effortNote: '三档 1:1 直传' },
+    { providerId: 'kimi', modelId: 'kimi-k2', name: 'Kimi K2', capability: 'none', effortNote: '该模型无推理强度通道' },
+  ])
+  vi.mocked(api.setSessionPreferredModel).mockImplementation(async (_id, model) => ({ ...S1, preferredModel: model }))
 })
 afterEach(() => {
   vi.unstubAllGlobals()
@@ -433,4 +444,102 @@ it('#794 文件分段收到他端恢复后自动刷新树', async () => {
   await flushPromises()
   expect(filesApi.listLabTree).toHaveBeenCalledTimes(2)
   w.unmount()
+})
+
+// ---- #980 composer 全内嵌舱（会话模型覆盖写面：菜单/滑块 → PATCH；投影恢复；事件跟随）----
+describe('#980 composer 选择器宿主接线', () => {
+  // jsdom 的 PointerEvent clientX 是只读 getter（test-utils trigger 赋值即抛）——原生派发 +
+  // defineProperty 注入坐标（贴 ChatComposerSelectors.test.ts 同款 helper）。
+  function firePointer(el: Element, type: string, clientX: number): void {
+    const ev = new Event(type, { bubbles: true, cancelable: true })
+    Object.defineProperty(ev, 'clientX', { value: clientX })
+    Object.defineProperty(ev, 'pointerId', { value: 1 })
+    el.dispatchEvent(ev)
+  }
+
+  // 菜单行序：[默认, anthropic, deepseek, kimi]
+  async function pickModel(w: Awaited<ReturnType<typeof mountChat>>, index: number): Promise<void> {
+    await w.get('[data-test="model-chip"]').trigger('click')
+    const items = w.findAll('[data-test="model-item"], [data-test="model-item-default"]')
+    await items[index].trigger('click')
+    await flushPromises()
+  }
+
+  it('选模型即带档：PATCH effort=当前滑块档（初值标准）；换档即写；切模型不改滑块值', async () => {
+    const w = await mountChat()
+    await pickModel(w, 1) // anthropic（native）
+    expect(api.setSessionPreferredModel).toHaveBeenCalledWith('sess-1', { providerId: 'anthropic', modelId: 'claude-sonnet-5-5', effort: 'high' })
+    // 滑块拖到段 2（三等分 240px 取段）→ 立即写深思
+    const segs = w.get('[data-test="effort-segs"]')
+    segs.element.getBoundingClientRect = () => ({ left: 0, width: 240, top: 0 } as DOMRect)
+    firePointer(segs.element, 'pointerdown', 200)
+    await flushPromises()
+    expect(api.setSessionPreferredModel).toHaveBeenLastCalledWith('sess-1', { providerId: 'anthropic', modelId: 'claude-sonnet-5-5', effort: 'max' })
+    // 切模型不改滑块值（B4 裁定）：仍写 max
+    await pickModel(w, 2)
+    expect(api.setSessionPreferredModel).toHaveBeenLastCalledWith('sess-1', { providerId: 'deepseek', modelId: 'deepseek-v4-flash', effort: 'max' })
+    w.unmount()
+  })
+
+  it('能力 none：kimi 选中 omit effort；滑块置灰为「该模型无推理强度通道」', async () => {
+    const w = await mountChat()
+    await pickModel(w, 3) // kimi
+    expect(api.setSessionPreferredModel).toHaveBeenLastCalledWith('sess-1', { providerId: 'kimi', modelId: 'kimi-k2' })
+    expect(w.get('[data-test="effort-off"]').attributes('title')).toBe('该模型无推理强度通道')
+    w.unmount()
+  })
+
+  it('「默认」置顶项 = null 清空覆盖（与 /model default 同语义），chip 回「默认」', async () => {
+    const w = await mountChat()
+    await pickModel(w, 1)
+    await pickModel(w, 0)
+    expect(api.setSessionPreferredModel).toHaveBeenLastCalledWith('sess-1', null)
+    expect(w.get('[data-test="model-chip"]').text()).toContain('默认')
+    w.unmount()
+  })
+
+  it('刷新/切回恢复：投影 preferredModel → chip + 滑块档；无 effort 存量行显示标准', async () => {
+    vi.mocked(api.getSessionProjection).mockResolvedValue({
+      ...PROJECTION,
+      preferredModel: { providerId: 'anthropic', modelId: 'claude-sonnet-5-5', effort: 'max' },
+    })
+    const w = await mountChat()
+    expect(w.get('[data-test="model-chip"]').text()).toContain('Claude Sonnet 5.5')
+    expect(w.get('[data-test="effort-segs"]').attributes('aria-valuenow')).toBe('2')
+    w.unmount()
+
+    vi.mocked(api.getSessionProjection).mockResolvedValue({
+      ...PROJECTION,
+      preferredModel: { providerId: 'deepseek', modelId: 'deepseek-v4-flash' }, // 存量无 effort 行
+    })
+    const w2 = await mountChat()
+    expect(w2.get('[data-test="model-chip"]').text()).toContain('DeepSeek V4 Flash')
+    expect(w2.get('[data-test="effort-segs"]').attributes('aria-valuenow')).toBe('1')
+    w2.unmount()
+  })
+
+  it('多标签/斜杠互通：session.updated {model} 跟随刷新 chip/滑块；null 清空；他端会话不串', async () => {
+    const w = await mountChat()
+    const src = FakeEventSource.last()!
+    src.emit('session.updated', { type: 'session.updated', sessionId: 'sess-1', payload: { model: { providerId: 'deepseek', modelId: 'deepseek-v4-flash', effort: 'low' }, appliesTo: 'next-run' } })
+    await flushPromises()
+    expect(w.get('[data-test="model-chip"]').text()).toContain('DeepSeek V4 Flash')
+    expect(w.get('[data-test="effort-segs"]').attributes('aria-valuenow')).toBe('0')
+    src.emit('session.updated', { type: 'session.updated', sessionId: 'sess-1', payload: { model: null, appliesTo: 'next-run' } })
+    await flushPromises()
+    expect(w.get('[data-test="model-chip"]').text()).toContain('默认')
+    src.emit('session.updated', { type: 'session.updated', sessionId: 'sess-2', payload: { model: { providerId: 'kimi', modelId: 'kimi-k2' }, appliesTo: 'next-run' } })
+    await flushPromises()
+    expect(w.get('[data-test="model-chip"]').text()).toContain('默认') // 仍空
+    w.unmount()
+  })
+
+  it('覆盖写失败：乐观值回退 + toast（不悬空在未落库的选择上）', async () => {
+    vi.mocked(api.setSessionPreferredModel).mockRejectedValueOnce(new Error('保存失败'))
+    const w = await mountChat()
+    await pickModel(w, 1)
+    expect(ElMessage.error).toHaveBeenCalledWith('保存失败')
+    expect(w.get('[data-test="model-chip"]').text()).toContain('默认')
+    w.unmount()
+  })
 })
