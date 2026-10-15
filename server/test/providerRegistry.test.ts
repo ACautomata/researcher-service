@@ -652,6 +652,129 @@ describe('ProviderRegistry（#881 预设制：平台虚拟条目 + BYOK 凭证�
     expect(res.content).toContain('ok:')
   })
 
+  // ---------------- 推理强度注入（#979 · ADR 0020）：getDefaultModel 装配缝 ----------------
+
+  // withConfig 间谍 fake：记录每次 withConfig 收到的 configurable 全量（绑定参数面断言）。
+  function makeSpyFactory() {
+    const withConfigCalls: Array<{ model: string; configurable: Record<string, unknown> | undefined }> = []
+    const factoryCalls: string[] = []
+    const factory: ChatModelFactory = async (model) => {
+      factoryCalls.push(model)
+      const stub = {
+        stubModel: model,
+        invoke: async () => ({ content: `fake:${model}` }),
+        withConfig(cfg?: { configurable?: Record<string, unknown> }) {
+          withConfigCalls.push({ model, configurable: cfg?.configurable })
+          return { ...this, stubModel: cfg?.configurable?.model ?? model }
+        },
+        withFallbacks: vi.fn(function (this: { stubModel?: string }, o: { fallbacks: unknown[] }) {
+          return { stubChain: this.stubModel, primary: this, fallbacks: o.fallbacks }
+        }),
+      }
+      return stub as unknown as BaseChatModel
+    }
+    return { factory, withConfigCalls, factoryCalls }
+  }
+
+  it.each([
+    ['ds', 'deepseek', ['deepseek-v4-flash'], 'deepseek-v4-flash', 'max', { modelKwargs: { reasoning_effort: 'max' } }],
+    ['ant', 'anthropic', ['claude-sonnet-5-5'], 'claude-sonnet-5-5', 'high', { outputConfig: { effort: 'high' } }],
+    ['oai', 'openai', ['gpt-5.1'], 'gpt-5.1', 'high', { reasoning: { effort: 'high' } }],
+    ['mm', 'minimax', ['MiniMax-M3'], 'MiniMax-M3', 'max', { thinking: { type: 'enabled' } }],
+    ['zm', 'zhipu', ['glm-4.6'], 'glm-4.6', 'low', { modelKwargs: { thinking: { type: 'disabled' } } }],
+    ['by', 'openai', ['my-compat-reasoner'], 'my-compat-reasoner', 'low', { modelKwargs: { reasoning_effort: 'low' } }],
+  ])('effort 绑定参数面（%s）：getDefaultModel preferred 带 effort → withConfig 合并映射 bag', async (tag, presetId, models, modelId, effort, binding) => {
+    const u = await seedUser(ctx.prisma, `rg-effort-${tag}`, `pw-rg-effort-${tag}-secure`)
+    await seedByok(ctx, u.id, `ep-${tag}`, presetId, models, { apiKey: `sk-${tag}` })
+    const { factory, withConfigCalls, factoryCalls } = makeSpyFactory()
+    const reg = new ProviderRegistry(ctx.prisma, {
+      llmApiKey: 'sk-platform',
+      credentialSecret: TEST_SECRET,
+      modelFactory: factory,
+    })
+    const snap = await reg.getSnapshot(u.id)
+    const chain = await reg.getDefaultModel(snap, { providerId: `ep-${tag}`, modelId, effort: effort as 'low' | 'high' | 'max' })
+    // 单绑定面：withConfig 恰一次（primary）——平台垫底首模型裸实例不进 withConfig
+    expect(withConfigCalls).toEqual([{ model: modelId, configurable: { model: modelId, ...binding } }])
+    expect(chain).toBeDefined()
+    // 模型实例缓存 key 刻意不含 model/effort：factory 每 provider 恰一次构造（用户行 + 平台垫底）
+    expect(factoryCalls).toEqual([modelId, 'MiniMax-M3'])
+  })
+
+  it('effort 零注入面：存量无 effort 行为与今日逐字节等价（首模型裸实例、非首模型仅绑 model）', async () => {
+    const u = await seedUser(ctx.prisma, 'rg-effort-legacy', 'pw-rg-effort-legacy-secure')
+    await seedByok(ctx, u.id, 'ep-legacy', 'openai', ['m-first', 'm-second'], { apiKey: 'sk-legacy' })
+    const { factory, withConfigCalls } = makeSpyFactory()
+    const reg = new ProviderRegistry(ctx.prisma, {
+      llmApiKey: 'sk-platform',
+      credentialSecret: TEST_SECRET,
+      modelFactory: factory,
+    })
+    const snap = await reg.getSnapshot(u.id)
+    // 首模型无 effort：primary 裸实例直返（不进 withConfig——今日同款；多成员链经
+    // withFallbacks 包装，stubChain 即 primary 的 stubModel）。withConfig 恰一条 = fallback
+    // 链 m-second 成员的既有 model 绑定（同 provider 非首模型 fallback 成员——今日同款），
+    // 零 effort 残余键 = 字节等价面。
+    const first = await reg.getDefaultModel(snap, { providerId: 'ep-legacy', modelId: 'm-first' })
+    expect((first as unknown as { stubChain?: string }).stubChain).toBe('m-first')
+    expect(withConfigCalls).toEqual([{ model: 'm-first', configurable: { model: 'm-second' } }])
+    // 非首模型 preferred：primary 自身进 withConfig，仍只绑 model（fallback m-first 首模型裸）
+    await reg.getDefaultModel(snap, { providerId: 'ep-legacy', modelId: 'm-second' })
+    expect(withConfigCalls).toEqual([
+      { model: 'm-first', configurable: { model: 'm-second' } },
+      { model: 'm-first', configurable: { model: 'm-second' } },
+    ])
+  })
+
+  it('kimi-k2（能力 none）带 effort：结构性零注入——首模型裸实例直返（运行层双保险，#978 写侧 90002 之外）', async () => {
+    const u = await seedUser(ctx.prisma, 'rg-effort-kimi', 'pw-rg-effort-kimi-secure')
+    await seedByok(ctx, u.id, 'ep-kimi', 'kimi', ['kimi-k2'], { apiKey: 'sk-kimi' })
+    const { factory, withConfigCalls } = makeSpyFactory()
+    const reg = new ProviderRegistry(ctx.prisma, {
+      llmApiKey: 'sk-platform',
+      credentialSecret: TEST_SECRET,
+      modelFactory: factory,
+    })
+    const snap = await reg.getSnapshot(u.id)
+    const model = await reg.getDefaultModel(snap, { providerId: 'ep-kimi', modelId: 'kimi-k2', effort: 'max' })
+    expect((model as unknown as { stubChain?: string }).stubChain).toBe('kimi-k2')
+    expect(withConfigCalls).toEqual([]) // 零注入 = 裸实例，连 withConfig 都不进
+  })
+
+  it('effort 不入模型实例缓存 key：同 provider 换档 → 工厂零重构造（per-request 绑定语义不变）', async () => {
+    const u = await seedUser(ctx.prisma, 'rg-effort-cache', 'pw-rg-effort-cache-secure')
+    await seedByok(ctx, u.id, 'ep-cache', 'deepseek', ['deepseek-v4-flash'], { apiKey: 'sk-cache' })
+    const { factory, factoryCalls, withConfigCalls } = makeSpyFactory()
+    const reg = new ProviderRegistry(ctx.prisma, {
+      llmApiKey: 'sk-platform',
+      credentialSecret: TEST_SECRET,
+      modelFactory: factory,
+    })
+    const snap = await reg.getSnapshot(u.id)
+    await reg.getDefaultModel(snap, { providerId: 'ep-cache', modelId: 'deepseek-v4-flash', effort: 'low' })
+    await reg.getDefaultModel(snap, { providerId: 'ep-cache', modelId: 'deepseek-v4-flash', effort: 'max' })
+    expect(factoryCalls).toEqual(['deepseek-v4-flash', 'MiniMax-M3']) // 每 provider 一实例，换档零重构造
+    expect(withConfigCalls.map((c) => c.configurable)).toEqual([
+      { model: 'deepseek-v4-flash', modelKwargs: { reasoning_effort: 'low' } },
+      { model: 'deepseek-v4-flash', modelKwargs: { reasoning_effort: 'max' } },
+    ])
+    expect(reg.cachedModelCount()).toBe(2) // 用户行实例 + 平台垫底实例（key 刻意不含 model/effort）
+  })
+
+  it('默认链（零覆盖）：不接 effort 通道——全部成员按今日形态装配（ADR 0020 默认态不注入）', async () => {
+    const u = await seedUser(ctx.prisma, 'rg-effort-chain', 'pw-rg-effort-chain-secure')
+    await seedByok(ctx, u.id, 'ep-chain', 'deepseek', ['deepseek-v4-flash'], { apiKey: 'sk-chain' })
+    const { factory, withConfigCalls } = makeSpyFactory()
+    const reg = new ProviderRegistry(ctx.prisma, {
+      llmApiKey: 'sk-platform',
+      credentialSecret: TEST_SECRET,
+      modelFactory: factory,
+    })
+    const snap = await reg.getSnapshot(u.id)
+    await reg.getDefaultModel(snap) // 无 preferred
+    expect(withConfigCalls).toEqual([]) // 首 provider 首模型 = 裸实例；平台垫底首模型 = 裸实例
+  })
+
   it('真 ConfigurableModel prototype 语义：withConfig 覆写在真类行为下仍带重试（装配保真锁）', async () => {
     const u = await seedUser(ctx.prisma, 'rg-retry-cm', 'pw-rg-retry-cm-secure')
     const { ConfigurableModel } = await import('langchain/chat_models/universal')

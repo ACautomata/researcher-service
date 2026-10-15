@@ -185,3 +185,70 @@ export const EFFORT_CAPABILITY_BY_MODEL_ID: ReadonlyMap<string, EffortCapability
 export function effortCapabilityOf(modelId: string): EffortCapabilityMeta {
   return EFFORT_CAPABILITY_BY_MODEL_ID.get(modelId) ?? DEFAULT_EFFORT_CAPABILITY
 }
+
+// ---------------------------------------------------------------------------
+// 推理强度注入映射（ADR 0020 · #979 票②）：effort 规范档 → 各家绑定参数面。
+// 映射单点本文件（ADR 0020 决策 2「映射单点在 presets.ts，随端点预设同版评审」）；
+// 装配缝消费见 providerRegistry.getDefaultModel，通道接线见 models/chatFactory.ts。
+// ---------------------------------------------------------------------------
+
+// 规范三档存储词汇（与 validation/schemas.ts EFFORT_VALUES 同值域——彼处 zod 写侧单源，
+// 此处运行层类型镜像；宽松读的存量行/手写脏值由 effortBindingOf 兜底为零注入）。
+export type EffortTier = 'low' | 'high' | 'max'
+
+// 注入绑定面：ConfigurableModel withConfig({configurable}) 的合并 bag（模型实例缓存 key
+// 刻意不含 effort——per-request 绑定语义不变，#979）。键 = 底层 ChatModel 一级字段名
+//（openai：reasoning / modelKwargs；anthropic：outputConfig / thinking——chatFactory
+// *_CONFIGURABLE_FIELDS 常量钉住可配置集，测试面漂移即红）。
+export interface EffortBinding {
+  readonly configurable: Readonly<Record<string, unknown>>
+}
+
+// 就近映射目标枚举（SDK 类型面锁定：@anthropic-ai/sdk OutputConfig.effort 五档 /
+// openai ReasoningEffort 七值）。规范三档在两枚举中均有精确同名词 → 映射为自身；
+// 显式表而非恒等函数——枚举收缩时漂移即红（ADR 0020「就近映射」的具象化）。
+type AnthropicEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+type OpenAIEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+const ANTHROPIC_EFFORT_NEAREST: Readonly<Record<EffortTier, AnthropicEffort>> = Object.freeze({ low: 'low', high: 'high', max: 'max' })
+const OPENAI_EFFORT_NEAREST: Readonly<Record<EffortTier, OpenAIEffort>> = Object.freeze({ low: 'low', high: 'high', max: 'max' })
+
+// thinking-only 两态（ADR 0020 决策 2 降两档：简洁=思考关、标准/深思=思考开）。无
+// budget_tokens——MiniMax-M3 anthropic 兼容面思考自适应（外部实测：手动预算契约不存在）。
+const THINKING_TWO_STATE: Readonly<Record<EffortTier, { readonly type: 'disabled' | 'enabled' }>> = Object.freeze({
+  low: Object.freeze({ type: 'disabled' }),
+  high: Object.freeze({ type: 'enabled' }),
+  max: Object.freeze({ type: 'enabled' }),
+})
+
+const EFFORT_TIERS: ReadonlySet<string> = new Set<string>(['low', 'high', 'max'])
+
+// effort 规范档 → 绑定参数面（唯一运行层入口；undefined = 零注入）：
+//   - effort 缺省（存量无 effort 行）/ 越界（手写行脏值）→ undefined——运行层零注入，
+//     装配产物与今日逐字节等价（ADR 0019「存量宽松接受」的运行半边）。
+//   - 能力 none（kimi-k2）→ undefined——结构性零注入（#978 写侧 90002 已拦，运行层双保险）。
+//   - 未命中元数据（BYOK 第三方 / 平台 LLM_MODEL 覆盖裸 id）→ 缺省 native：modelKwargs
+//     reasoning_effort 直传（多数 openai 兼容推理模型；调用报错由用户回退滑块自愈）。
+export function effortBindingOf(modelId: string, effort: EffortTier | undefined): EffortBinding | undefined {
+  if (effort === undefined || !EFFORT_TIERS.has(effort)) return undefined
+  if (effortCapabilityOf(modelId).capability === 'none') return undefined
+  switch (modelId) {
+    case 'deepseek-v4-flash':
+      // 三档 1:1 直传。isReasoningModel 前缀门只认 o*/gpt-5*/gpt-6*——一级 reasoning 通道
+      // 被挡（B1 硬坑①），经 modelKwargs 直入请求体（wire 同形 reasoning_effort）。
+      return { configurable: { modelKwargs: { reasoning_effort: effort } } }
+    case 'claude-sonnet-5-5':
+      // ChatAnthropic 一级 outputConfig 通道（→ wire output_config.effort，五档就近映射）
+      return { configurable: { outputConfig: { effort: ANTHROPIC_EFFORT_NEAREST[effort] } } }
+    case 'gpt-5.1':
+      // gpt-5* 命中前缀门 → ChatOpenAI 一级 reasoning 通道（→ wire reasoning_effort，七值就近映射）
+      return { configurable: { reasoning: { effort: OPENAI_EFFORT_NEAREST[effort] } } }
+    case 'MiniMax-M3':
+      // ChatAnthropic 一级 thinking 通道——仅显式设置才入 payload（零注入基线字节等价的根由）
+      return { configurable: { thinking: THINKING_TWO_STATE[effort] } }
+    case 'glm-4.6':
+      // zhipu OpenAI 兼容面 body 参数 thinking 两态（ChatOpenAI 无此一级字段 → modelKwargs）
+      return { configurable: { modelKwargs: { thinking: THINKING_TWO_STATE[effort] } } }
+    default:
+      return { configurable: { modelKwargs: { reasoning_effort: effort } } }
+  }
+}
