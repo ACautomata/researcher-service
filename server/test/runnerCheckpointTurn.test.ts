@@ -142,3 +142,12 @@ describe('turnFromCheckpointMessages（S3 · #779 in-flight 重建纯逻辑）',
    expect(turnFromCheckpointMessages([human, new HumanMessage('next')])).toEqual({ content: '' })
    expect(turnFromCheckpointMessages([new HumanMessage({ content: 'bad', additional_kwargs: { researcherAttachmentIngestion: { ...tool, durationMs: -1 } } })])).toEqual({ content: '' })
  })
+
+ it('#780 修正：ingestion details（附件路径回喂）随 checkpoint 重建；缺省形状不变', () => {
+   const tool = { toolCallId: 'ingest-run', name: 'ingest_attachments', state: 'success', input: '{"attachmentIds":["a"]}', durationMs: 12, details: '附件已物化到沙箱：\n- /lab/uploads/a/f.pdf（application/pdf）' }
+   const human = new HumanMessage({ content: 'file', additional_kwargs: { researcherAttachmentIngestion: tool } })
+   expect(turnFromCheckpointMessages([human]).tools?.[0]).toMatchObject({ details: tool.details })
+   // 无 details 的旧 checkpoint 行保持原形状（toEqual 严格面）
+   const legacy = { toolCallId: 'ingest-run', name: 'ingest_attachments', state: 'success', input: '{"attachmentIds":["a"]}', durationMs: 12 }
+   expect(turnFromCheckpointMessages([new HumanMessage({ content: 'file', additional_kwargs: { researcherAttachmentIngestion: legacy } })])).toEqual({ content: '', tools: [legacy] })
+ })

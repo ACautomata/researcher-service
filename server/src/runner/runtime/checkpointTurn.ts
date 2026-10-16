@@ -80,9 +80,14 @@ export function turnFromCheckpointMessages(messages: unknown): TurnSnapshot {
     && typeof ingestion.toolCallId === 'string' && typeof ingestion.input === 'string'
     && typeof ingestion.durationMs === 'number' && Number.isFinite(ingestion.durationMs) && ingestion.durationMs >= 0) {
     const { text, truncated } = truncateUtf8(ingestion.input, TOOL_INPUT_MAX_BYTES)
+    // details（附件路径回喂，#780 修正）随 kwargs 存取——缺省不带（旧 checkpoint 形状不变）
+    const details = typeof ingestion.details === 'string'
+      ? truncateUtf8(ingestion.details, TOOL_DETAILS_MAX_BYTES)
+      : undefined
     tools.set(ingestion.toolCallId, {
       toolCallId: ingestion.toolCallId, name: 'ingest_attachments', state: 'success', input: text,
       durationMs: ingestion.durationMs, ...(truncated ? { truncated: true } : {}),
+      ...(details ? { details: details.text, ...(details.truncated ? { truncated: true } : {}) } : {}),
     })
   }
 

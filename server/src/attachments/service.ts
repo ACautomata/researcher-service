@@ -132,7 +132,8 @@ export class AttachmentsService {
   // 从控制面临时区读字节、重算 sha256 与行校验（不符 = 内容被改/临时区损坏 → 抛错 → run 失败，
   // 不进入 agent loop）；校验通过 → mkdir + putArchive 单文件 tar 落 `/lab/uploads/<attachmentId>/`
   //（ID 子目录结构性防同名碰撞，D1）。putArchive 覆盖写 = 幂等（resume/重投安全）。返回元数据
-  // 供 runner 做图片内联（image mime → 读字节 data URL 多模态 block；文件类由常规 fs 工具自读）。
+  // 供 runner 做图片内联（image mime → 读字节 data URL 多模态 block；文件类由常规 fs 工具自读）
+  // 与路径回喂（fileName/path 随返回值交 runner——agent 输入与 tool.end details 据此告知物化路径）。
   // journalWrite（#782）：注入时物化改由回调承担（journal-first 管线内部 apply——打点先于
   // 字节落盘）；缺省直写（journal 未接线的测试/降级面）。
   async ingestAttachments(p: {
@@ -141,7 +142,7 @@ export class AttachmentsService {
     container: string
     primitives: Pick<SandboxFilePrimitives, 'exec' | 'putArchive'>
     journalWrite?: (row: { id: string; fileName: string; mimeType: string }, bytes: Buffer) => Promise<void>
-  }): Promise<Array<{ attachmentId: string; mimeType: string }>> {
+  }): Promise<Array<{ attachmentId: string; fileName: string; mimeType: string; path: string }>> {
     const rows = await this.deps.prisma.attachment.findMany({
       where: { id: { in: [...p.attachmentIds] }, sessionId: p.sessionId },
     })
@@ -149,7 +150,7 @@ export class AttachmentsService {
     if (rows.length !== new Set(p.attachmentIds).size) {
       throw fail(CODE.SESSION_NOT_FOUND, '附件引用无效（会话内不存在）')
     }
-    const metas: Array<{ attachmentId: string; mimeType: string }> = []
+    const metas: Array<{ attachmentId: string; fileName: string; mimeType: string; path: string }> = []
     for (const row of rows) {
       const tmp = path.join(this.deps.tmpRoot, row.id)
       let buf: Buffer
@@ -167,7 +168,7 @@ export class AttachmentsService {
         await p.primitives.exec(p.container, ['mkdir', '-p', dir])
         await p.primitives.putArchive(p.container, dir, createTarFile(row.fileName, buf))
       }
-      metas.push({ attachmentId: row.id, mimeType: row.mimeType })
+      metas.push({ attachmentId: row.id, fileName: row.fileName, mimeType: row.mimeType, path: row.path })
     }
     return metas
   }
