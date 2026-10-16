@@ -51,3 +51,42 @@
 
 - B1 已推荐 FTS5(trigram)+sqlite-vec 双路 → RRF 管线，与本报告「同库同事务」形态咬合；但 trigram 二字词不中（中文高频二字词）与「纯暴力扫描」的规模上限，需 A2/D1 评测门槛票定量裁决。
 - memory_items 接活与否：Prisma adapter 无法 loadExtension 的事实意味着向量面必须走 better-sqlite3 独立连接（同文件双连接），接活 PrismaMemoryStore 的「单连接」假设需要重新审视——留给 B3 决议在 A2/C1 中消费。
+
+---
+
+# B3 决议（#991 收口）
+
+> 决议部分由 B3 承接代理基于上文调研 findings + 本仓事实核对（deploy/docker-compose.deploy.yml、server/Dockerfile、server/package.json、server/prisma/schema.prisma、server/src/prisma.ts、server/src/sessions/service.ts recordTurn、server/scripts/apply-schema.mjs、server/src/containers/imageRef.ts、地图 #986 Agreements）作出。
+
+## 推荐
+
+**sqlite-vec + SQLite FTS5 同库方案**——向量面与全文面都落在现有 `db.sqlite3` 单文件内（panel-db named volume），与单进程假设、compose 三服务契约、DATA_ROOT 约定零冲突。与 B1 推荐的 FTS5(trigram)+sqlite-vec 双路 → RRF 管线咬合。
+
+**LanceDB 记载为 Plan B**：功能面最全（jieba 中文分词、内建 RRF、mergeInsert upsert），若后续规模或中文召回质量逼迁，走全量 reindex 即换——索引是 session_messages 的可重建派生物，**本选型可逆**，这是选 sqlite-vec 的风险对冲。
+
+## 评分矩阵（票面维度）
+
+| 维度 | sqlite-vec+FTS5（推荐） | LanceDB | Qdrant 容器 | Redis 扩展 |
+|---|---|---|---|---|
+| 单进程 / 三服务契约 / DATA_ROOT 一致性 | **优**：零新进程、零新镜像（钉版红线不触）、零契约变化，索引在现有 named volume 单文件内 | 中：零新进程，但索引为 DATA_ROOT 下目录树（非单文件心智） | 差：第 4 服务 + 钉版镜像（`v1.19.2` 可钉）+ 常驻 RAM + 新卷 | 差：须换 Redis 8/Stack 镜像 + 加卷 + AOF，与 BullMQ 共实例耦合（noeviction/持久化流/阻塞命令） |
+| 增量索引与事务一致性（recordTurn 写入路径） | **优**：同文件专用 better-sqlite3 连接，chunk 行 + vec + fts 三写同一事务原子（唯一「真事务 + 双路召回」形态） | 差：双存储双写，仅应用层补偿（mergeInsert 幂等 upsert 缓解） | 差：跨库跨进程双写无事务（已确认） | 差：双写 + 队列/索引持久化耦合 |
+| 混合查询表达力（向量+过滤+全文） | 中：SQL JOIN + 应用层 RRF（~10 行手写），ownerId 过滤 = 一行 WHERE，vec0 partition key 每用户分片 | **优**：内建 BM25 + RRF + jieba/ICU + SQL-ish where | **优**：服务端 RRF/DBSF + sparse BM25 + payload 过滤（full-text filter 默认 word tokenizer 无 CJK） | 中：FT.HYBRID 服务端融合，但无 CJK 分词 |
+| 运维面 | **优**：单文件备份（`.backup` / wal checkpoint）、零新容器、升级面 = npm 依赖 | 中：停写拷目录、0.x 格式演进面 | 中：snapshot API 备份、新容器升级面 | 差：换镜像 + 加卷 + AOF 策略裁决 |
+| 成熟度风险 | 中：pre-v1（0.1.9）节奏放缓、纯暴力扫描无 ANN（per-user 分区后万级分块毫秒级可承受） | 中：0.x 周更 | 优：v1.19 稳定 | 中：8.x 三许可过渡期、stack 镜像实质废弃 |
+
+中文 BM25 面：V1 用 **FTS5 trigram**（零新依赖，substring 语义），已知边界 = 二字查询不中（≥3 字符门槛）——缓解：C1 查询构造器扩写 query + 短 query 回退 LIKE（trigram 同时加速 LIKE/GLOB）；备选 = 索引时 @node-rs/jieba 预分词列（unicode61 吃空格分词，BM25 语义更好、二字词命中），实施票二选一。
+
+## memory_items：**并存，不接活**
+
+- 历史会话召回索引是**派生数据**（session_messages 分块；跟 session 级联删；可随时全量重建；行数万级、recordTurn 驱动）；memory_items 是 **agent 语义记忆**（BaseStore Item 契约 namespace/key/valueJson；刻意跟 user 不级联 #727；行少写频低；V1 显式拒绝向量 query 是有意设计 prismaMemoryStore.ts:204-210）。生命周期、基数、删除语义、查询路径四者全不同，塞同一张表只会迫使 Item 形状承载派生块。
+- 「接活」的正确含义：PrismaMemoryStore 按 #727 V1 原样后续接线（其五方法纯 Prisma 面，不受 adapter 无法 loadExtension 影响；是否对 agent 暴露 memory 工具面归 C1）；若未来 BaseStore search 要向量，为 memory_items **另建专属 vec0 表**，不与会话 chunk 索引共享。
+- 召回索引的租户隔离靠新锚表 ownerId 冗余列 + vec0 partition key，不借道 namespace。
+
+## 落库 schema 草案要点
+
+1. **锚表 `session_message_chunks`** 进 schema.prisma（Prisma 可建模 → init.sql / incremental-schema 常规管线）：`id` cuid PK；`sessionId` FK→sessions CASCADE；`messageId` FK→session_messages CASCADE；`ownerId` 冗余列（消息行无 userId 列，隔离过滤靠它）+ `@@index([ownerId])`；`turn`/`chunkSeq`；`content`；`contentSha256` 幂等键；`embeddingModel` 漂移标记；`UNIQUE(messageId, chunkSeq)`。保留隐式 rowid（勿 WITHOUT ROWID——FTS5 external content 靠它）。
+2. **向量面 `session_message_chunks_vec`**：vec0 虚拟表，**不进 schema.prisma**（Prisma 不支持虚拟表，prisma/orm#9414），落 incremental-schema.mjs additive 段（apply-schema.mjs 既有机制）；`chunk_id TEXT PRIMARY KEY` + `owner_partition TEXT partition key`（=ownerId） + `embedding float[<钉版维度>]`（维度随 #725 网关 embedding 模型建表时钉死；换模型 = 重建向量表，派生数据可接受）。
+3. **全文面 `session_message_chunks_fts`**：FTS5 external content 虚拟表（同上不进 Prisma）+ AFTER INSERT/UPDATE/DELETE 三触发器同步（官方模式；回填走 'rebuild'）；`tokenize='trigram'`（V1，备选预分词列见上）。
+4. **写入路径**：recordTurn 落 assistant 行（既有缝 sessions/service.ts:731）→ 异步增量索引（BullMQ 复用 runner-runs 还是新队列归 C1 裁决——本票钉死的约束：异步/同步皆安全，因同文件单事务 + contentSha256 幂等 upsert + 启动补索引扫描即崩溃恢复）。专用 better-sqlite3 连接 `sqliteVec.load(db)`，`BEGIN IMMEDIATE` 内三写（chunk 行 upsert → vec → fts 触发器自动）。
+5. **集成前置**：索引连接 `PRAGMA journal_mode=WAL` + `busy_timeout`——现库未显式开 WAL（src 内零 pragma），同文件双连接（Prisma adapter 连接 + 索引连接）的前提；备份面注意 WAL checkpoint（`.backup` 命令保持单文件语义）。
+6. **仓内事实支撑**：server 运行镜像 `node:lts-slim`（Debian/glibc，server/Dockerfile:35-38 明注）→ sqlite-vec linux-x64 glibc 产物直载，alpine 顾虑不存在；`@prisma/adapter-better-sqlite3` ^7.9.1 与 `better-sqlite3` ^12.10.1 均已在 package.json（后者默认编入 FTS5）；compose 三服务 + named volume 现状零改动，redis 保持 `redis:7-alpine` 纯 BullMQ 用途不动。
