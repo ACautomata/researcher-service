@@ -99,7 +99,9 @@ describe('#780 片 2 ingestion（S3 纯逻辑）', () => {
       container: 'researcher-sandbox-ingest',
       primitives,
     })
-    expect(metas).toEqual([{ attachmentId: id, mimeType: 'text/plain' }])
+    expect(metas).toEqual([
+      { attachmentId: id, fileName: 'a.txt', mimeType: 'text/plain', path: `/lab/uploads/${id}/a.txt` },
+    ])
     // mkdir -p /lab/uploads/<id> 先行
     expect(execCalls).toEqual([{ container: 'researcher-sandbox-ingest', cmd: ['mkdir', '-p', `/lab/uploads/${id}`] }])
     // putArchive 到同一 dir；tar 内含单文件 a.txt 且字节 = hello-ingest

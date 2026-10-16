@@ -104,12 +104,18 @@ describe('RunService：发消息 → run 终态事件序列（S1，#747 C 节目
       attachments?: RunServiceDeps['attachments']
       recordTurn?: RecordTurnFn
       teammates?: TeammateService
+      /** 捕获构造的 ScriptedChatModel 实例（断言 agent 输入面 receivedMessages 用） */
+      outModels?: ScriptedChatModel[]
     } = {},
   ): RunService {
     const script = opts.script ?? currentScript
     const registry = new ProviderRegistry(prisma, {
       llmApiKey: opts.llmApiKey ?? 'test-key',
-      modelFactory: async () => new ScriptedChatModel(script, { loop: opts.scriptLoop }),
+      modelFactory: async () => {
+        const model = new ScriptedChatModel(script, { loop: opts.scriptLoop })
+        opts.outModels?.push(model)
+        return model
+      },
     })
     const service = new RunService({
       prisma,
@@ -153,7 +159,7 @@ describe('RunService：发消息 → run 终态事件序列（S1，#747 C 节目
       attachments: {
         ingestAttachments: async () => {
           if (failure) throw new Error('sha256 mismatch')
-          return [{ attachmentId: '123', mimeType: 'text/plain' }]
+          return [{ attachmentId: '123', fileName: 'a.txt', mimeType: 'text/plain', path: '/lab/uploads/123/a.txt' }]
         },
         readTempBytes: async () => Buffer.from('bytes'),
         materializeAgentMedia: async () => null,
@@ -167,6 +173,67 @@ describe('RunService：发消息 → run 终态事件序列（S1，#747 C 节目
     expect(tools[1]?.payload).toMatchObject({ state: failure ? 'error' : 'success' })
     expect(turns[0]?.aggregate.tools?.[0]).toMatchObject({ name: 'ingest_attachments', state: failure ? 'error' : 'success' })
     expect(hub.types().at(-1)).toBe(failure ? 'run.failed' : 'run.completed')
+  })
+
+  // ---- #780 修正：附件物化路径回喂 agent（工具执行后返回沙箱路径，agent 知道去哪读）----
+
+  // receivedMessages 条目 = LangChain messages 数组；提取最后一条 human 消息的文本
+  //（同 thread 跨用例 checkpoint 恢复历史——首条可能是上一轮的）。
+  function humanTextOf(messages: unknown): string {
+    const list = Array.isArray(messages) ? messages : []
+    let human: { content?: unknown } | undefined
+    for (const m of list) {
+      const fn = (m as { _getType?: unknown })._getType
+      if (typeof fn === 'function' && (fn as () => string).call(m) === 'human') human = m as { content?: unknown }
+    }
+    if (!human) return ''
+    if (typeof human.content === 'string') return human.content
+    if (Array.isArray(human.content)) {
+      return human.content
+        .filter((b) => (b as { type?: string }).type === 'text')
+        .map((b) => (b as { text?: string }).text ?? '')
+        .join('')
+    }
+    return ''
+  }
+
+  it('附件路径回喂：ingestion 成功后 agent 输入与 tool.end 返回均含沙箱路径（文件类）', async () => {
+    const models: ScriptedChatModel[] = []
+    const svc = makeService({
+      script: [new AIMessage({ content: '已收到。' })],
+      outModels: models,
+      attachments: {
+        ingestAttachments: async () => [
+          { attachmentId: 'att-1', fileName: 'report.pdf', mimeType: 'application/pdf', path: '/lab/uploads/att-1/report.pdf' },
+        ],
+        readTempBytes: async () => Buffer.from('bytes'),
+        materializeAgentMedia: async () => null,
+      },
+    })
+    await svc.execute(cmd({ content: '帮我分析这个文件', attachmentIds: ['att-1'] }))
+    // agent 输入面：HumanMessage 文本含物化路径（核心——agent 据此 read_file）
+    expect(models.length).toBeGreaterThan(0)
+    expect(humanTextOf(models[0]!.receivedMessages[0])).toContain('/lab/uploads/att-1/report.pdf')
+    // 工具返回面：tool.end details 同路径（前端工具卡展开区「输出」渲染）
+    const end = hub.events.find((e) => e.type === 'tool.end' && (e.payload as { name?: string }).name === 'ingest_attachments')
+    expect((end!.payload as { details?: string }).details).toContain('/lab/uploads/att-1/report.pdf')
+  })
+
+  it('附件路径回喂（图片类）：多模态块形态下 text 块仍含路径', async () => {
+    const models: ScriptedChatModel[] = []
+    const svc = makeService({
+      script: [new AIMessage({ content: '已收到。' })],
+      outModels: models,
+      attachments: {
+        ingestAttachments: async () => [
+          { attachmentId: 'att-2', fileName: 'shot.png', mimeType: 'image/png', path: '/lab/uploads/att-2/shot.png' },
+        ],
+        readTempBytes: async () => Buffer.from('png-bytes'),
+        materializeAgentMedia: async () => null,
+      },
+    })
+    await svc.execute(cmd({ content: '看看这张图', attachmentIds: ['att-2'] }))
+    expect(humanTextOf(models[0]!.receivedMessages[0])).toContain('/lab/uploads/att-2/shot.png')
   })
 
   it('纯文本回复：run.started → text.delta* → run.completed（delta 拼接 == 全文）', async () => {

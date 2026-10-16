@@ -192,7 +192,7 @@ export interface RunServiceDeps {
       attachmentIds: readonly string[]
       container: string // 沙箱容器名（/lab 工具根）
       primitives: Pick<SandboxFilePrimitives, 'exec' | 'putArchive'>
-    }) => Promise<Array<{ attachmentId: string; mimeType: string }>>
+    }) => Promise<Array<{ attachmentId: string; fileName: string; mimeType: string; path: string }>>
     readonly readTempBytes: (attachmentId: string) => Promise<Buffer>
     /** #780 D9 agent→用户媒体物化（片 3）：校验/拷进 uploads/建行；null = 校验失败（降级面） */
     readonly materializeAgentMedia: (p: {
@@ -1042,6 +1042,9 @@ export class RunService {
         // 确定性幂等键 ingest-<attachmentId>）。沙箱惰性创建由该步触发（story 58 语义不变）。
         let imageBlocks: ContentBlock[] = []
         let attachmentIngestion: ToolLine | undefined
+        // 附件路径回喂：物化成功后把沙箱路径告知 agent（HumanMessage 追加）与工具返回面
+        //（tool.end details——前端工具卡展开区「输出」渲染），双面同一清单。
+        let attachmentNote = ''
         if (cmd.kind === 'message' && cmd.attachmentIds && cmd.attachmentIds.length > 0 && this.deps.attachments) {
           // #795：确定性 ingestion 也走标准工具状态面，实时与落行同一聚合。
           const toolCallId = `ingest-${cmd.runId}`
@@ -1080,9 +1083,12 @@ export class RunService {
                 imageBlocks.push({ type: 'image_url', image_url: { url: `data:${m.mimeType};base64,${buf.toString('base64')}` } })
               }
             }
+            const pathLines = metas.map((m) => `- ${m.path}（${m.mimeType}）`).join('\n')
+            attachmentNote = `\n\n[系统提示：本次消息携带 ${metas.length} 个附件，已物化到沙箱，可用 read_file 等工具按以下路径读取：\n${pathLines}]`
             const end = { type: 'tool.end' as const, payload: {
               toolCallId, name: 'ingest_attachments', state: 'success' as const,
               durationMs: Math.max(0, this.clock() - startedAt),
+              details: `附件已物化到沙箱：\n${pathLines}`,
             } }
             attachmentIngestion = { ...start.payload, ...end.payload }
             this.attachmentIngestions.set(cmd.sessionId, { runId: cmd.runId, tool: attachmentIngestion })
@@ -1106,8 +1112,8 @@ export class RunService {
                 messages: [
                   new HumanMessage({
                     ...(imageBlocks.length > 0
-                      ? { content: [{ type: 'text', text: cmd.content ?? '' }, ...imageBlocks] }
-                      : { content: cmd.content ?? '' }),
+                      ? { content: [{ type: 'text', text: `${cmd.content ?? ''}${attachmentNote}` }, ...imageBlocks] }
+                      : { content: `${cmd.content ?? ''}${attachmentNote}` }),
                     id: cmd.runId,
                     ...(attachmentIngestion ? { additional_kwargs: { researcherAttachmentIngestion: attachmentIngestion } } : {}),
                   }),
