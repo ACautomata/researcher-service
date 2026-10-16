@@ -16,7 +16,7 @@
 
 import { randomUUID } from 'node:crypto'
 import { tool } from '@langchain/core/tools'
-import { interrupt } from '@langchain/langgraph'
+import { GraphInterrupt, interrupt } from '@langchain/langgraph'
 import { AsyncLocalStorageProviderSingleton } from '@langchain/core/singletons'
 import type { AnyPluginToolDefinition, PluginToolContentBlock, PluginToolContext } from './api'
 import { currentPluginRunFrame, execPartsFromFrame } from './runContext'
@@ -27,6 +27,10 @@ export function contentToText(content: readonly PluginToolContentBlock[]): strin
     .map((block) => (block.type === 'text' ? block.text : `[image: ${block.image_url.url}]`))
     .join('\n')
 }
+
+// 插件工具错误回喂文本的消息截断上限（describeRunError 同款纪律——防 docker/堆栈级超长
+// 消息撑爆模型上下文；全量错误已由各插件 execute 的 console/审计留痕）。
+const TOOL_ERROR_MESSAGE_MAX_LEN = 500
 
 // agent 图执行上下文检测（#912 · 853 §5.1）：工具 runtime 即主 agent 图 pregel config——
 // configurable 带 __pregel_checkpointer = 图内可挂起（interrupt 可恢复）；{execute} 命令
@@ -68,15 +72,28 @@ export function toLangChainTool(def: AnyPluginToolDefinition, ctx: PluginToolCon
       // 第一跳——注册面缺失（旧形状 frame）时 stage 上报按白名单外丢弃语义自然落空。
       frame?.noteToolCall?.(toolCallId, def.name)
       const graphInterrupt = graphInterruptOf(runtime)
-      const result = await def.execute(toolCallId, params as never, {
-        signal,
-        // W4 方案人审挂起点（#912）：仅 agent 图内可挂起；命令直达 undefined（W4 返回
-        // clarify 引导 NL——无条件人审不破）。
-        ...(graphInterrupt !== undefined ? { interrupt: graphInterrupt } : {}),
-        // pluginId（#883）：调用方经运行时目录 toolOwnerByName 派生——ctx.llm per-plugin
-        // 解析键。缺失（防御面）→ ctx.llm 缺省，域工具自校验。
-        ...execPartsFromFrame(ctx, frame, toolCallId, pluginId),
-      })
+      let result: Awaited<ReturnType<typeof def.execute>>
+      try {
+        result = await def.execute(toolCallId, params as never, {
+          signal,
+          // W4 方案人审挂起点（#912）：仅 agent 图内可挂起；命令直达 undefined（W4 返回
+          // clarify 引导 NL——无条件人审不破）。
+          ...(graphInterrupt !== undefined ? { interrupt: graphInterrupt } : {}),
+          // pluginId（#883）：调用方经运行时目录 toolOwnerByName 派生——ctx.llm per-plugin
+          // 解析键。缺失（防御面）→ ctx.llm 缺省，域工具自校验。
+          ...execPartsFromFrame(ctx, frame, toolCallId, pluginId),
+        })
+      } catch (e) {
+        // 插件工具错误回喂（#737「Result 永不 throw」补齐——wikisearch 先例）：workflow
+        // 图内失败转译为模型可读文本回喂主 agent，agent 自行消化（转告用户/换路径），
+        // run 不因插件内部失败终局。两类控制流异常保持穿透：GraphInterrupt（W4 人审
+        // 挂起——吞掉即审批卡死）；signal.aborted（吞掉则 agent 在中断后继续跑，破坏
+        // run.aborted 语义）。审计 failed 行由各插件 execute 内部落，此处不重复。
+        if (e instanceof GraphInterrupt || signal.aborted) throw e
+        const raw = e instanceof Error ? e.message : String(e)
+        const message = raw.length > TOOL_ERROR_MESSAGE_MAX_LEN ? `${raw.slice(0, TOOL_ERROR_MESSAGE_MAX_LEN)}…` : raw
+        return [`Tool call failed: ${message}`, undefined]
+      }
       const text = contentToText(result.content)
       // responseFormat='content_and_artifact'：二元组 [content, artifact]——content = 模型面，
       // artifact = 渲染面（details）——ToolMessage 据此拆双面，projector tool.end details
