@@ -159,6 +159,7 @@ _Avoid_: 「人工审核队列」——升级是 per-run 阻塞形态（interrup
 **轮次 (turn)**:
 用户一次发送触发的完整 agent loop——一条 user 消息 + 一条 assistant 回复（含轨迹与正文），消息流上恰对应一条 assistant 消息。轮次是折叠、计时与异常判定的天然单位。
 _Avoid_: 回合——暗示多方轮流对局，此处只有 user→agent 一拍。
+**（数据面演进注，A1 #987 实证 / wayfinder #986 图 A2 #988 锚定）**：本词条是产品概念；`session_messages.turn` 列为**每消息单调序号**（user 行与 assistant 行各占一号，`insertWithNextTurn` 逐行 max+1），非问答对号。数据面配对锚 = run 终态 assistant 行 + 其触发 user 行，见「问答对」「召回块」词条。
 
 **轨迹 (trace)**:
 assistant 回复中的中间产物——思考（thinking）与工具调用（tools）。正文与附件不属于轨迹；中间文本与最终正文合并为一条正文存储、不可拆分，故同样不在轨迹之列（折叠收轨迹、正文整段留外的既成边界）。
@@ -376,3 +377,19 @@ _Avoid_: critic——是「评审者（人）」，体裁词用 critique（评�
 **文档面 (API docs surface)**:
 控制面的 OpenAPI/Swagger 接口文档域（#761）：zod 生成式 spec（请求体单一来源 = `validation/schemas.ts`，零漂移）+ Swagger UI，挂 `/api/docs` 整树 **requireAuth + requireAdmin**（#758 Q14），env 开关 `API_DOCS_ENABLED`（默认开，关 → 装配层不注入 → 整树 90005）。网页交互入口 = 前端 admin 子应用内嵌视图（前端带认证链拉 spec、TryIt 注入 token）——浏览器地址栏直开 `/api/docs` 不可达（Bearer 门控，导航请求带不上 header）。SSE 事件流端点不在覆盖面（流式语义超出请求/响应文档模型）。
 _Avoid_: 手写 openapi.yaml 第二来源（破坏零漂移；新增端点登记 `openapi/paths.ts`，由 `apiDocsCoverage.test.ts` 路由栈反射双向守卫）；把 `/api/docs` 当公开文档站挂公网——它是 admin 运营工具面，生产可用 `API_DOCS_ENABLED=false` 整体关闭。
+
+**历史召回 (history recall)**:
+（wayfinder #986 图 A2 #988 定稿，未实施）对用户本人历史会话的检索子系统：在 session_messages 未归档行（teammate 会话排除）上建混合索引（FTS5 trigram + sqlite-vec 双路），检索结果无条件注入 agent loop。隔离恒经 sessions.ownerId；wiki 容器知识不在其列。
+_Avoid_: 会话搜索——掩盖「混合检索 + 注入 agent loop」的管线语义；跨用户检索——隔离红线（ownerId 硬边界）。
+
+**召回块 (recall chunk)**:
+（wayfinder #986 图 A2 #988 定稿，未实施）历史召回索引的最小单位 = run 锚**问答对块**：触发 user 行(s) + run 终态 assistant 行正文拼接（零轨迹），前置规则标头，超长句界子切（子块共享锚 id，rerank 候选按锚去重）。FTS、向量、rerank 三面的共同作用对象；每 run 恰一块，物化于 recordTurn 写入事务；主键 (锚 msgRowId, subIdx)。
+_Avoid_: 「轮次块」——与 turn 列（每消息序号）及产品概念「轮次」双重撞名；消息级叶——user 短行碎片化（SeCom arXiv 2502.05589 turn 级检索证据）；「chunk」裸用——掩埋问答对结构。
+
+**问答对 (Q&A pair)**:
+（wayfinder #986 图 A2 #988 定稿，未实施）召回块的内容单位与配对锚：触发 user 行(s)（run 终态时刻最近未归档 user 行，连发行整体归入）+ run 终态 assistant 行（recordTurn 每 run 终态恰落一行）。是产品概念「轮次」在数据面的锚定形态。同一 user 行可被多个问答对共享（命令重放 1u→多a）；孤儿 user 行（run 未达终态）不入对，单独成块标 unanswered。
+_Avoid_: 「一问一答」——连发/重放/孤儿三形态下不成立（A1 #987 四形态实证）；与 text_trace_logs 语境「问答对」（runId 非空 trace 行，20k 截断副本）混同——同锚不同物。
+
+**召回窗口 (recall window)**:
+（wayfinder #986 图 A2 #988 定稿，未实施）历史召回的注入单元：命中召回块所在位置 ±k 个对块（k 初值 3，D2 POC 校准），永不跨 sessionId。小块精准命中、大窗保上下文（「retrieve small, generate larger」）；虚化不物化，注入期现拼。
+_Avoid_: 「上下文窗口」——撞 LLM 语境；「父块」——对块即索引叶，窗口是注入时展开的邻域，非独立索引层级。
