@@ -272,7 +272,23 @@ jobs:
             # 显式指定 compose 文件：scp 落盘的是 docker-compose.deploy.yml（非默认名
             # compose.yml/docker-compose.yml），缺 -f 会让 pull/up 报
             # "no configuration file provided: not found"。
-            docker compose -f docker-compose.deploy.yml pull
+            # 只拉随发版变化的 ghcr 服务：redis:7-alpine 钉版且宿主已有镜像，每版都绕道
+            # Docker Hub 纯属扩大失败面（2026-10-22 即断在 registry-1.docker.io 的 TLS 握手超时）；
+            # 真缺镜像时 up -d 会自行补拉。
+            # 重试吃掉 registry 瞬时抖动，但不加 --ignore-pull-failures——那会静默部署旧镜像。
+            pull_ok=0
+            for attempt in 1 2 3; do
+              if docker compose -f docker-compose.deploy.yml pull frontend server; then
+                pull_ok=1
+                break
+              fi
+              echo "[deploy] pull attempt $attempt failed, retrying in 10s ..." >&2
+              sleep 10
+            done
+            if [ "$pull_ok" != "1" ]; then
+              echo "[deploy] ERROR: image pull failed after 3 attempts" >&2
+              exit 1
+            fi
             # T0 #801 起 openclaw 镜像不再随发版变化；#858 起 fleet 整体退役，沙箱/wiki 容器
             # 镜像均为公开钉版引用——首次缺缓存时由 server 侧 dockerode 裸 pull（daemon 侧
             # 持久登录凭证）补齐。
