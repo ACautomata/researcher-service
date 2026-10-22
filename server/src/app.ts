@@ -109,6 +109,9 @@ export function createApp({ prisma, wiki, files, docs, events, sessions, attachm
   if (sessions) {
     app.use('/api/v1/sessions', createSessionsRouter(sessions))
   }
+  // OAuth 回调必须先于附件路由的 /api/v1 全域认证中间件；超星受保护端点在域内自行认证。
+  app.use('/api/v1/integrations/chaoxing', createChaoxingRouter(prisma, chaoxing))
+
   // attachments（#780）：上传/下载（挂 /api/v1——POST /sessions/:id/attachments 与
   // GET /attachments/:id/download 共根）。存在即挂载（条件挂载先例）；须在 sessions 之后
   //（/sessions/:id/attachments 不被 sessions 路由吞——session 路由无该子路径，落空即穿透）。
@@ -119,8 +122,6 @@ export function createApp({ prisma, wiki, files, docs, events, sessions, attachm
   if (plugins) {
     app.use('/api/v1/plugins', createPluginsRouter(plugins))
   }
-
-  app.use('/api/v1/integrations/chaoxing', createChaoxingRouter(prisma, chaoxing))
 
   app.use(notFound) // 未匹配路由 → 信封 90005（兑现「所有 REST HTTP 200」）
   app.use(envelopeErrorHandler) // 唯一错误面（必须最后挂载）

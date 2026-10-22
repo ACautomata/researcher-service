@@ -34,9 +34,9 @@ const MOUNTS_IN_ORDER = [
   '/api/docs',
   '/api/v1/events',
   '/api/v1/sessions',
+  '/api/v1/integrations/chaoxing',
   '/api/v1', // attachments（与 sessions 共根，序在 sessions 后——app.ts 注释既定）
   '/api/v1/plugins',
-  '/api/v1/integrations/chaoxing',
 ]
 
 // 路由栈展开：route 层收 method+path；子 router 层按 MOUNTS_IN_ORDER 序配挂载前缀下钻。
