@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { setupTestApp, type TestContext } from './setup'
 import { bearer, login, seedUser } from './helpers'
@@ -16,20 +19,22 @@ const remote: ChaoxingRemote = {
   async learn() { return { resources: [], limitations: ['资料能力未配置'] } },
 }
 
-describe('超星绑定 REST 行为', () => {
+describe('超星绑定 REST 行为（生产附件路由同时挂载）', () => {
+  const attachmentRoot = mkdtempSync(join(tmpdir(), 'chaoxing-callback-'))
   let ctx: TestContext
   let auth: Record<string, string>
   let other: Record<string, string>
   beforeAll(async () => {
-    ctx = await setupTestApp({ chaoxing: { options, remote } })
+    ctx = await setupTestApp({ chaoxing: { options, remote }, attachments: { service: {} as never, tmpRoot: attachmentRoot } })
     await seedUser(ctx.prisma, 'cx-student', 'student-password')
     await seedUser(ctx.prisma, 'cx-other', 'other-password')
     auth = bearer((await login(ctx.request, 'cx-student', 'student-password')).access)
     other = bearer((await login(ctx.request, 'cx-other', 'other-password')).access)
   })
-  afterAll(async () => ctx?.cleanup())
+  afterAll(async () => { await ctx?.cleanup(); rmSync(attachmentRoot, { recursive: true, force: true }) })
 
   it('本人绑定成功，其他用户未绑定，回调不可重放，接口不返回凭证', async () => {
+    expect((await ctx.request.get('/api/v1/integrations/chaoxing')).body.code).toBe(10001)
     const start = await ctx.request.post('/api/v1/integrations/chaoxing/authorize').set(auth).send({})
     expect(start.body.code).toBe(0)
     const url = new URL(start.body.data.url)
