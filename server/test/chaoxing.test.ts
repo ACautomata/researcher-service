@@ -151,3 +151,40 @@ describe('超星令牌自动续期', () => {
     expect(JSON.stringify(result.map(r => r.body))).not.toContain('fresh-access')
   })
 })
+
+describe('重新授权与旧刷新隔离', () => {
+  let ctx: TestContext
+  let auth: Record<string, string>
+  let exchanges = 0
+  let started: (() => void) | undefined
+  let release: (() => void) | undefined
+  const gateway: ChaoxingRemote = {
+    ...remote,
+    async exchange() { exchanges++; return exchanges === 1 ? { access_token: 'expiring', refresh_token: 'refresh-old', token_type: 'Bearer', expires_in: 1 } : { access_token: 'reauthorized', token_type: 'Bearer', expires_in: 3600 } },
+    async refresh() { started?.(); await new Promise<void>(resolve => { release = resolve }); return { access_token: 'stale-refresh', token_type: 'Bearer', expires_in: 3600 } },
+  }
+  async function start() {
+    const result = await ctx.request.post('/api/v1/integrations/chaoxing/authorize').set(auth).send({})
+    return new URL(result.body.data.url).searchParams.get('state')!
+  }
+  async function finish(state: string) {
+    return ctx.request.get('/api/v1/integrations/chaoxing/callback').set('Cookie', `chaoxing_oauth=${state}`).query({ state, code: 'code' })
+  }
+  beforeAll(async () => {
+    ctx = await setupTestApp({ chaoxing: { options, remote: gateway } })
+    await seedUser(ctx.prisma, 'reauth-student', 'student-password')
+    auth = bearer((await login(ctx.request, 'reauth-student', 'student-password')).access)
+    await finish(await start())
+  })
+  afterAll(async () => ctx?.cleanup())
+  it('旧令牌刷新晚于新授权完成，不清除新绑定', async () => {
+    const state = await start()
+    const refreshing = new Promise<void>(resolve => { started = resolve })
+    const query = ctx.request.post('/api/v1/integrations/chaoxing/learn').set(auth).send({ topic: '梯度' }).then(r => r)
+    await refreshing
+    expect((await finish(state)).headers.location).toBe('/settings?chaoxing=connected')
+    release!()
+    await query
+    expect((await ctx.request.get('/api/v1/integrations/chaoxing').set(auth)).body.data.connected).toBe(true)
+  })
+})

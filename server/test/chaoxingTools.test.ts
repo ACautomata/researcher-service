@@ -34,6 +34,9 @@ describe('Agent 超星学习工具', () => {
     const path = '/api/v1/integrations/chaoxing/sessions/scope-session/scope'
     expect((await ctx.request.put(path).set(auth).send({ courseId: 'c' })).body.code).toBe(0)
     expect((await ctx.request.get(path).set(auth)).body.data.courseId).toBe('c')
+    const otherAuth = bearer((await login(ctx.request, 'tool-other', 'student-password')).access)
+    expect((await ctx.request.put(path).set(otherAuth).send({ courseId: null })).body.code).toBe(50002)
+    expect((await ctx.request.get(path).set(auth)).body.data.courseId).toBe('c')
     expect((await ctx.request.put(path).set(auth).send({ courseId: 'not-accessible' })).body.code).not.toBe(0)
     expect((await ctx.request.put(path).set(auth).send({ courseId: null })).body.code).toBe(0)
     expect((await ctx.request.get(path).set(auth)).body.data.courseId).toBeNull()

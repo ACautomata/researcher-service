@@ -46,7 +46,7 @@ export class ChaoxingService {
     if (!user?.isActive || user.mustChangePassword) return false
     try {
       const tokens = tokenSchema.parse(await this.remote.exchange(code, decryptCredential(row.verifierCipher, this.options.credentialSecret)))
-      const result = await this.prisma.chaoxingBinding.updateMany({ where: { ownerId: row.ownerId, generation: row.generation }, data: this.tokenData(tokens) })
+      const result = await this.prisma.chaoxingBinding.updateMany({ where: { ownerId: row.ownerId, generation: row.generation }, data: { ...this.tokenData(tokens), generation: randomUUID() } })
       return result.count === 1
     } catch { return false }
   }
@@ -66,9 +66,9 @@ export class ChaoxingService {
     if (!row?.tokenCipher) throw rebind()
     let tokens: ChaoxingToken
     try { tokens = tokenSchema.parse(JSON.parse(decryptCredential(row.tokenCipher, this.options.credentialSecret))) }
-    catch { await this.invalidate(ownerId, row.generation); throw rebind() }
+    catch { await this.invalidate(ownerId, row.generation, row.tokenCipher); throw rebind() }
     if (!row.expiresAt || row.expiresAt.getTime() > Date.now() + 30_000) return tokens.access_token
-    if (!tokens.refresh_token) { await this.invalidate(ownerId, row.generation); throw rebind() }
+    if (!tokens.refresh_token) { await this.invalidate(ownerId, row.generation, row.tokenCipher); throw rebind() }
     const key = `${ownerId}:${row.generation}`
     const existing = this.refreshing.get(key)
     if (existing) return existing
@@ -79,14 +79,14 @@ export class ChaoxingService {
         const written = await this.prisma.chaoxingBinding.updateMany({ where: { ownerId, generation: row.generation, tokenCipher: row.tokenCipher }, data: this.tokenData(next) })
         if (!written.count) throw rebind()
         return next.access_token
-      } catch { await this.invalidate(ownerId, row.generation); throw rebind() }
+      } catch { await this.invalidate(ownerId, row.generation, row.tokenCipher); throw rebind() }
       finally { this.refreshing.delete(key) }
     })()
     this.refreshing.set(key, operation)
     return operation
   }
-  private async invalidate(ownerId: string, generation: string) {
-    await this.prisma.chaoxingBinding.updateMany({ where: { ownerId, generation }, data: { tokenCipher: null, expiresAt: null, generation: randomUUID() } })
+  private async invalidate(ownerId: string, generation: string, tokenCipher?: string | null) {
+    await this.prisma.chaoxingBinding.updateMany({ where: { ownerId, generation, ...(tokenCipher ? { tokenCipher } : {}) }, data: { tokenCipher: null, expiresAt: null, generation: randomUUID() } })
   }
   private async authorized<T>(ownerId: string, operation: (token: string) => Promise<T>): Promise<T> {
     const token = await this.token(ownerId)
@@ -103,7 +103,7 @@ export class ChaoxingService {
       return JSON.parse(JSON.stringify(result, (_key, value: unknown) => typeof value === 'string' ? secrets.reduce((text, secret) => text.split(secret).join('[REDACTED]'), value) : value)) as T
     } catch (error) {
       const authError = error as { code?: unknown; name?: unknown }
-      if (authError?.code === 401 || authError?.name === 'UnauthorizedError') await this.invalidate(ownerId, binding.generation)
+      if (authError?.code === 401 || authError?.name === 'UnauthorizedError') await this.invalidate(ownerId, binding.generation, binding.tokenCipher)
       throw fail(90003, '超星调用不可用，请检查绑定状态、课程权限和工具映射后重试')
     }
   }
