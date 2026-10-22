@@ -19,6 +19,7 @@ describe('页面路由按需加载', () => {
       'models',
       'not-found',
       'plugins',
+      'settings',
       'wiki',
     ])
     expect(records.every((route) => typeof route.components?.default === 'function')).toBe(true)

@@ -25,6 +25,7 @@ import PanelTriState from '@/components/PanelTriState.vue'
 import { prepareAttachment, validateAttachment, type PendingAttachment } from '@/chat/attachments'
 import RewindDialog from '@/components/chat/RewindDialog.vue'
 import ChatSidebar from '@/components/chat/ChatSidebar.vue'
+import LearningScope from '@/components/chat/LearningScope.vue'
 import ChatHeader from '@/components/chat/ChatHeader.vue'
 import ChatStream from '@/components/chat/ChatStream.vue'
 // #980 全内嵌舱 composer 定稿（B3 变体 C 施工）——原型换壳层退役回直连（b3Prototype 仅留档参考）。
@@ -500,6 +501,7 @@ defineExpose({
       />
     </PanelTriState>
     <main class="main">
+      <LearningScope :session-id="chat.selectedSession" />
       <ChatHeader
         :title="currentSessionTitle"
         :connecting="connecting"

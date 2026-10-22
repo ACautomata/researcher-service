@@ -222,3 +222,12 @@ export const pluginLlmAssignmentWriteSchema = z.object({
   provider_id: z.string().min(1).max(64).nullable().default(null),
   model_id: z.string().min(1).max(200).nullable().default(null),
 })
+
+// 超星写入与工具输入共用验证；身份和凭证始终来自后端。
+export const chaoxingAuthorizeSchema = z.object({}).strict()
+export const chaoxingLearnSchema = z.object({
+  topic: z.string().trim().min(1).max(1000),
+  courseId: z.string().min(1).max(100).optional(),
+}).strict()
+
+export const chaoxingScopeSchema = z.object({ courseId: z.string().min(1).max(100).nullable() }).strict()

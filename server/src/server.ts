@@ -1,3 +1,6 @@
+import { readChaoxingOptions } from './chaoxing/options'
+import { createChaoxingRemote, mcpMappingSchema } from './chaoxing/client'
+import { ChaoxingService } from './chaoxing/service'
 import { createServer } from 'node:http'
 import path from 'node:path'
 import { createApp } from './app'
@@ -44,7 +47,12 @@ async function main(): Promise<void> {
     tmpRoot: attachmentTmpRoot,
     archive: filesArchive,
   })
+  const chaoxingOptions = readChaoxingOptions()
+  const chaoxingMapping = mcpMappingSchema.parse(JSON.parse(process.env.CHAOXING_MCP_MAPPING?.trim() || '{}'))
+  const chaoxingRemote = chaoxingOptions ? createChaoxingRemote(chaoxingOptions, chaoxingMapping) : undefined
+  const chaoxing = new ChaoxingService(prisma, chaoxingOptions, chaoxingRemote)
   const runner = await assembleRunner({
+    chaoxing: chaoxingOptions ? chaoxing : undefined,
     prisma,
     hub: eventHub,
     redisUrl: config.redisUrl,
@@ -119,6 +127,7 @@ async function main(): Promise<void> {
       console.warn(`[filejournal] boot reconcile crashed: ${String(err)}`)
     })
   const app = createApp({
+    chaoxing: { service: chaoxing },
     prisma,
     // wiki（#335 → #784 换轨）：存储面 = 新 wiki 容器（ensure 经 wikiContainers 注入）；
     // compile 触发面已随 #859 退役。#790：全量更新独立 run 触发面（POST /wiki/update）注入。
