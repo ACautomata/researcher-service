@@ -58,6 +58,8 @@ model User {
   sessions         Session[]
   modelProviders   ModelProvider[] // 归属上移：provider 配置挂用户（731 §3.2）
   attachments      Attachment[]
+  chaoxingBinding ChaoxingBinding?
+  chaoxingAuthorizations ChaoxingAuthorization[]
   pluginEnablements PluginEnablement[]
   pluginLlmAssignments PluginLlmAssignment[]
 
@@ -231,6 +233,7 @@ model Session {
 
   // #787: /model is a session preference, applied at the next run snapshot.
   preferredModelJson String?
+  learningCourseId String?
 
   // #770：branch-switch 机制取消后，「先 fork 再回退」的被放弃原路线软删除存档
   // （delete 标记、映射层过滤——产品面不可读、行不物理删，retention/refcount GC 回收对象）。
@@ -627,4 +630,26 @@ model FileOverwriteLog {
   @@index([sessionId, path])
   @@index([createdAt])
   @@map("file_overwrite_logs")
+}
+
+// 超星资源授权独立于平台登录。generation 防止解绑后旧请求恢复授权。
+model ChaoxingBinding {
+  ownerId String @id
+  owner User @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  generation String
+  tokenCipher String?
+  expiresAt DateTime?
+  updatedAt DateTime @updatedAt
+  @@map("chaoxing_bindings")
+}
+
+model ChaoxingAuthorization {
+  stateHash String @id
+  ownerId String
+  owner User @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  generation String
+  verifierCipher String
+  expiresAt DateTime
+  @@index([ownerId])
+  @@map("chaoxing_authorizations")
 }

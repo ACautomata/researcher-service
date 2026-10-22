@@ -1,3 +1,5 @@
+import { createChaoxingTools, CHAOXING_LEARNING_PROMPT } from '../../chaoxing/tools'
+import type { ChaoxingService } from '../../chaoxing/service'
 import { PLATFORM_PROVIDER_ID } from '../../models/presets'
 import { preferredModelSchema } from '../../validation/schemas'
 import { resolveModelRef, type ModelRef, type PreferredModelRef } from '../providerRegistry'
@@ -162,6 +164,7 @@ export interface RunSnapshot {
 export type EventPublisher = Pick<StreamHub, 'publish'>
 
 export interface RunServiceDeps {
+  readonly chaoxing?: ChaoxingService
   readonly prisma: PrismaClient
   readonly registry: ProviderRegistry
   readonly saver: PrismaCheckpointSaver
@@ -1458,6 +1461,7 @@ export class RunService {
     const snapshot = runSnapshot ?? await this.deps.registry.getSnapshot(cmd.ownerId)
     return {
       run: { ownerId: cmd.ownerId, sessionId, runId: cmd.runId },
+      learningCourseId: (await this.deps.prisma.session.findUnique({ where: { id: sessionId }, select: { learningCourseId: true } }))?.learningCourseId ?? undefined,
       figures: createFiguresToolPort({ prisma: this.deps.prisma, dedupe: this.figureDedupe }, cmd.ownerId),
       // per-plugin ctx.llm 工厂（#883）：插件 id → 解析器端口（env pin > 用户指派 > 默认链）。
       // usage 上下文（#880 US23）：插件 LLM 流量按解析命中的 providerId 落 llm_usage_records。
@@ -1913,9 +1917,9 @@ export class RunService {
       model,
       backend,
       checkpointer: this.deps.saver,
-      systemPrompt: LEADER_SYSTEM_PROMPT,
+      systemPrompt: joinSections(LEADER_SYSTEM_PROMPT, this.deps.chaoxing ? CHAOXING_LEARNING_PROMPT : undefined),
       interruptPolicy: policy,
-      tools: [...wikiTools, ...tools],
+      tools: [...wikiTools, ...tools, ...(this.deps.chaoxing ? createChaoxingTools(this.deps.chaoxing, ownerId) : [])],
       // 插件工具进图（#788）：LangChain 适配（zod → StructuredTool）；prompt 段并入
       // system prompt 与 teammate subagent 继承（graphFactory 内拼接）。
       ...(pluginToolDefs.length > 0 && this.deps.plugins

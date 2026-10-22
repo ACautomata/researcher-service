@@ -55,6 +55,13 @@ services:
       #（#881 平台默认端点预设与单模型覆盖）可选，不列走缺省 minimax/预设默认模型。
       LLM_API_KEY: ${LLM_API_KEY:-}
       LLM_CREDENTIAL_SECRET: ${LLM_CREDENTIAL_SECRET:-}
+      CHAOXING_CLIENT_ID: ${CHAOXING_CLIENT_ID:-}
+      CHAOXING_CLIENT_SECRET: ${CHAOXING_CLIENT_SECRET:-}
+      CHAOXING_REDIRECT_URI: ${CHAOXING_REDIRECT_URI:-}
+      CHAOXING_CREDENTIAL_SECRET: ${CHAOXING_CREDENTIAL_SECRET:-}
+      CHAOXING_PKCE: ${CHAOXING_PKCE:-true}
+      CHAOXING_TOKEN_AUTH: ${CHAOXING_TOKEN_AUTH:-body}
+      CHAOXING_MCP_MAPPING: ${CHAOXING_MCP_MAPPING:-}
       # AutoFigure（#792 插件化收口起回归，同 prod 三必填键）：shell 可选注入，空串安全 =
       # assertPluginEnv dev 警告不阻断（dev 缺键时 figure 工具调用期明确报错）。可选键
       # AUTOFIGURE_IMAGE_BASE_URL 同机制；AUTOFIGURE_SVG_MODEL 为废弃兼容 pin，

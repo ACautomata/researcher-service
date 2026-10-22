@@ -31,6 +31,7 @@ async function handleLogout(): Promise<void> {
       <span class="nav-brand" data-test="nav-brand">{{ PRODUCT_NAME }}</span>
       <router-link to="/chat">对话</router-link>
       <router-link to="/wiki">Wiki</router-link>
+      <router-link to="/settings">账号设置</router-link>
       <router-link to="/models">Model 配置</router-link>
       <!-- 插件目录页（#799 · #752 §4）：能力可见性唯一入口。 -->
       <router-link to="/plugins" data-test="nav-plugins">插件</router-link>

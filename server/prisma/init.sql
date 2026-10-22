@@ -83,6 +83,7 @@ CREATE TABLE "sessions" (
     "activeCheckpointId" TEXT,
     "fileJournalAnchorSeq" INTEGER,
     "preferredModelJson" TEXT,
+    "learningCourseId" TEXT,
     "archivedAt" DATETIME,
     "isTeammate" BOOLEAN NOT NULL DEFAULT false,
     "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -413,3 +414,21 @@ CREATE INDEX "file_overwrite_logs_sessionId_path_idx" ON "file_overwrite_logs"("
 -- CreateIndex
 CREATE INDEX "file_overwrite_logs_createdAt_idx" ON "file_overwrite_logs"("createdAt");
 
+
+CREATE TABLE IF NOT EXISTS "chaoxing_bindings" (
+    "ownerId" TEXT NOT NULL PRIMARY KEY,
+    "generation" TEXT NOT NULL,
+    "tokenCipher" TEXT,
+    "expiresAt" DATETIME,
+    "updatedAt" DATETIME NOT NULL,
+    CONSTRAINT "chaoxing_bindings_ownerId_fkey" FOREIGN KEY ("ownerId") REFERENCES "users" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+CREATE TABLE IF NOT EXISTS "chaoxing_authorizations" (
+    "stateHash" TEXT NOT NULL PRIMARY KEY,
+    "ownerId" TEXT NOT NULL,
+    "generation" TEXT NOT NULL,
+    "verifierCipher" TEXT NOT NULL,
+    "expiresAt" DATETIME NOT NULL,
+    CONSTRAINT "chaoxing_authorizations_ownerId_fkey" FOREIGN KEY ("ownerId") REFERENCES "users" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+CREATE INDEX IF NOT EXISTS "chaoxing_authorizations_ownerId_idx" ON "chaoxing_authorizations"("ownerId");

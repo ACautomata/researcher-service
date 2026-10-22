@@ -9,6 +9,9 @@
 import { z } from 'zod'
 import { registry, okEnvelope, LooseData, NullData, ErrorEnvelope, bearerAuth } from './components'
 import {
+  chaoxingAuthorizeSchema,
+  chaoxingLearnSchema,
+  chaoxingScopeSchema,
   endpointTestSchema,
   loginSchema,
   messageSendSchema,
@@ -703,3 +706,16 @@ register({
   bytes: 'application/octet-stream',
   dataNote: '字节体 = 沙箱 /lab/uploads/<attachmentId>/<fileName>；Content-Type 按附件声明 mime 透传（Content-Disposition inline）。',
 })
+
+// 超星浏览器回调的成功响应是 303，不遵循 REST JSON 信封。
+registry.registerPath({ method: 'get', path: '/api/v1/integrations/chaoxing/callback', tags: ['超星学习'], summary: '超星 OAuth 授权回调', request: { query: z.object({ state: z.string(), code: z.string().optional(), error: z.string().optional() }) }, responses: { 303: { description: '返回账号设置，仅携带成功/失败标记；不传递令牌或授权码' } } })
+for (const endpoint of [
+  { method: 'get' as const, suffix: '', summary: '读取本人超星绑定状态' },
+  { method: 'post' as const, suffix: '/authorize', summary: '发起本人超星授权', body: chaoxingAuthorizeSchema },
+  { method: 'delete' as const, suffix: '', summary: '解绑并清除本人授权', body: chaoxingAuthorizeSchema },
+  { method: 'get' as const, suffix: '/capabilities', summary: '检查本人授权的 MCP 工具目录' },
+  { method: 'get' as const, suffix: '/courses', summary: '读取本人获授权课程' },
+  { method: 'get' as const, suffix: '/sessions/{id}/scope', summary: '读取可选会话课程范围' },
+  { method: 'put' as const, suffix: '/sessions/{id}/scope', summary: '限定或解除会话课程范围', body: chaoxingScopeSchema },
+  { method: 'post' as const, suffix: '/learn', summary: '按学习话题检索只读资源', body: chaoxingLearnSchema },
+]) register({ ...endpoint, path: `/api/v1/integrations/chaoxing${endpoint.suffix}`, tag: '超星学习', auth: 'user', errors: '10001/10005 认证与改密门；90001 未配置；90002 校验失败；90003 需要重新绑定或远端能力不可用；50002 会话不存在或不归本人。' })

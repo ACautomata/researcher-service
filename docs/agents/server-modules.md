@@ -24,3 +24,7 @@
 ### #880 终态（ADR 0017）
 
 judge 模型归属链 = 本人显式 judge 指派 → 用户默认链 primary → 平台默认；温度固定 0，故障升级人工。插件 LLM 指派与凭证在 run 启动快照捕获，工具执行共用该快照；用量按 providerId（含 platform）分账，judge token 留审批审计面。AUTOFIGURE_SVG_MODEL 保持兼容优先级、设值告警，迁移到指派后删除部署键。
+
+### 超星学习域
+
+`chaoxing/`：资源授权、一次性回调事务、独立加密根、刷新/解绑、MCP 传输与核验后的只读字段映射。`tools.ts` 通过既有 runner 工具装配进入学习对话；按可信 owner 访问，课程范围从 run frame 读取，不捕获跨 run 可变状态。配置与外部联调限制见 `docs/specs/chaoxing-integration-setup.md`。

@@ -38,3 +38,5 @@
   + `TeamFolds`（#796 teammate 具名折叠区——状态八值徽标/审批局部冻结/归档终态/展开轨迹同形状行 + mailbox 追问广播呈现）+ `TurnFilesCard`（#959/#960/#961 轮次产物卡片——挂 ChatMessageItem 媒体列表之后/ai-notice 之前，恒在折叠条外；#960 T2 起：非 delete 行「下载」文字链走 readAttachmentBlob 认证字节通道（blob URL + a[download]），deleted 行「已删除」无链接，filesTotal > 列出数时行尾「等 N 个文件」计数行；#961 T3 起：hasExec 标记（turn.files 帧随带，true 才落键）时卡底一行「本轮含 Shell 调用，其文件副作用不在此列」——D6 动态提示只断言「有调用」；#962 T4 视觉定稿（A3 变体 B「分组卡」）：按 op 三节分组（空缺节跳过，行序 = 组序 × 组内原序）+ 药丸徽标（created 绿 success / modified 蓝 primary / deleted 灰 secondary）+ 目录 rtl-ellipsis 弱化 / 文件名 mono 主文本））。
 
 - 模型配置页统一管理平台默认端点只读卡片、六预设 BYOK 表单、模型列表、保存前试连、删除影响面与插件 LLM 指派（含 judge）。API key 编辑留空保持原值；响应只显示掩码或 key_error，不回填明文。
+
+- `SettingsView`：账号设置中的超星绑定/重授权/解绑；`LearningScope`：对话中的绑定引导与可选课程范围，默认自动推荐；`api/chaoxing.ts`：认证 API 客户端。

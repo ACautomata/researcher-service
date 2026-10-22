@@ -1,3 +1,4 @@
+import { createChaoxingRouter, type ChaoxingDeps } from './chaoxing/routes'
 import express, { type Application, type Request, type Response, type NextFunction } from 'express'
 import cookieParser from 'cookie-parser'
 import type { PrismaClient } from './generated/prisma/client'
@@ -20,6 +21,7 @@ import { envelopeErrorHandler, notFound } from './middleware/errorHandler'
 import './types' // Express Request 增强（req.user / req.prisma）
 
 export interface AppDeps {
+  chaoxing?: ChaoxingDeps
   prisma: PrismaClient
   // wiki 接缝（#335 → #784 换轨）：wikiContainers ensure + #790 updateRunner（compile 触发
   // 面已随 #859 退役）。缺省 = 测试装配（无 ensure）。
@@ -52,7 +54,7 @@ export interface AppDeps {
 }
 
 // createApp 工厂：PrismaClient 经依赖注入，测试可传 test DB（接缝 #2）。
-export function createApp({ prisma, wiki, files, docs, events, sessions, attachments, plugins, models }: AppDeps): Application {
+export function createApp({ prisma, wiki, files, docs, events, sessions, attachments, plugins, models, chaoxing }: AppDeps): Application {
   const app = express()
   // wiki 5mb json 特例已随写面整域退役删除（#758 Q3——codex PR#346 的大 body 契约随
   // PUT/POST/DELETE /wiki/page 下线失效）：现存读面 GET 无 body，POST /wiki/update 触发面
@@ -117,6 +119,8 @@ export function createApp({ prisma, wiki, files, docs, events, sessions, attachm
   if (plugins) {
     app.use('/api/v1/plugins', createPluginsRouter(plugins))
   }
+
+  app.use('/api/v1/integrations/chaoxing', createChaoxingRouter(prisma, chaoxing))
 
   app.use(notFound) // 未匹配路由 → 信封 90005（兑现「所有 REST HTTP 200」）
   app.use(envelopeErrorHandler) // 唯一错误面（必须最后挂载）

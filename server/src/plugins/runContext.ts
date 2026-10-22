@@ -10,6 +10,7 @@ import { AsyncLocalStorage } from 'node:async_hooks'
 import type { PluginAuditPort, PluginDocsPort, PluginFiguresPort, PluginLabPort, PluginLlmPort, PluginRunIdentity, PluginToolContext, PluginWikiPort } from './api'
 
 export interface PluginRunFrame {
+  readonly learningCourseId?: string
   readonly run: PluginRunIdentity
   readonly figures: PluginFiguresPort
   /** per-plugin ctx.llm 工厂（#883 T3）：插件 id → 解析器端口。端口内绑定 run 启动捕获的

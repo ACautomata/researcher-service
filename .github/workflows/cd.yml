@@ -179,6 +179,14 @@ jobs:
           cache-to: type=gha,mode=max,scope=sandbox-image
 
       - name: Stage deploy artifacts (compose + rendered .env)
+        env:
+          CHAOXING_CLIENT_ID: ${{ secrets.CHAOXING_CLIENT_ID }}
+          CHAOXING_CLIENT_SECRET: ${{ secrets.CHAOXING_CLIENT_SECRET }}
+          CHAOXING_REDIRECT_URI: ${{ secrets.CHAOXING_REDIRECT_URI }}
+          CHAOXING_CREDENTIAL_SECRET: ${{ secrets.CHAOXING_CREDENTIAL_SECRET }}
+          CHAOXING_MCP_MAPPING: ${{ secrets.CHAOXING_MCP_MAPPING }}
+          CHAOXING_PKCE: ${{ vars.CHAOXING_PKCE }}
+          CHAOXING_TOKEN_AUTH: ${{ vars.CHAOXING_TOKEN_AUTH }}
         # 运行时敏感值渲染为 .env（compose env_file 读取）；.env 不进 git，仅经 scp 落到宿主。
         # 两个文件先汇入扁平 staging 目录，scp 以 strip_components=1 整目录平铺到 /www/panel/ 根部，
         # 避免 source 多路径不同深度 + strip_components 的错位问题。
@@ -212,6 +220,21 @@ jobs:
             # server isFloatingImageRef fail-fast 准据）；server 读本键即启用 extractPdfText。
             echo "SANDBOX_IMAGE=${{ env.SANDBOX_IMAGE }}:${{ env.IMAGE_TAG }}"
           } > _deploy/.env
+          python3 - <<'PYENV'
+          import json, os
+          from pathlib import Path
+          names = ["CHAOXING_CLIENT_ID", "CHAOXING_CLIENT_SECRET", "CHAOXING_REDIRECT_URI", "CHAOXING_CREDENTIAL_SECRET", "CHAOXING_MCP_MAPPING", "CHAOXING_PKCE", "CHAOXING_TOKEN_AUTH"]
+          with Path("_deploy/.env").open("a") as output:
+              for name in names:
+                  value = os.environ.get(name, "")
+                  if not value:
+                      continue
+                  if name == "CHAOXING_MCP_MAPPING":
+                      value = json.dumps(json.loads(value), separators=(",", ":"))
+                  if any(c in value for c in "\r\n\x00"):
+                      raise SystemExit("Invalid multiline integration configuration")
+                  output.write(name + "='" + value.replace("'", "\\'") + "'\n")
+          PYENV
           chmod 600 _deploy/.env
 
       - name: Copy compose + .env to host

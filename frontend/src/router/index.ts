@@ -29,6 +29,7 @@ export const routes: RouteRecordRaw[] = [
     component: () => import('@/views/WikiView.vue'),
     meta: { requiresAuth: true },
   },
+  { path: '/settings', name: 'settings', component: () => import('@/views/SettingsView.vue'), meta: { requiresAuth: true } },
   {
     path: '/models',
     name: 'models',

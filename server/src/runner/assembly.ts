@@ -1,3 +1,4 @@
+import { CHAOXING_TOOL_NAME } from '../chaoxing/tools'
 // runner 生产装配（#777 · #747 A 节「集中式 runner」）：
 // PrismaCheckpointSaver + ProviderRegistry + ConcurrencyGate + StreamHub + DockerPrimitives
 // → RunService → BullMqRunQueue（worker 消费）。REST 入队面归 #778 会话域（本票生产接线 =
@@ -49,6 +50,7 @@ export interface RunnerAssembly {
 }
 
 export async function assembleRunner(opts: {
+  chaoxing?: RunServiceDeps['chaoxing']
   prisma: PrismaClient
   hub: StreamHub
   redisUrl: string
@@ -107,7 +109,7 @@ export async function assembleRunner(opts: {
   const plugins = opts.plugins ?? await (async () => {
     await assertValidPluginCatalog({
       manifests: PLUGIN_MANIFESTS,
-      coreToolNames: [...FILE_TOOLS, ...EXEC_TOOLS, 'task', ...TEAMMATE_TOOL_NAMES],
+      coreToolNames: [...FILE_TOOLS, ...EXEC_TOOLS, 'task', CHAOXING_TOOL_NAME, ...TEAMMATE_TOOL_NAMES],
       reservedCommandNames: [...SYSTEM_COMMANDS],
     })
     // env 直读 = 配置边界豁免（GLOSSARY「配置边界/豁免」）：组合根装配期一次性注入，经参数下传。
@@ -201,6 +203,7 @@ export async function assembleRunner(opts: {
   })
 
   const service = new RunService({
+    chaoxing: opts.chaoxing,
     prisma: opts.prisma,
     registry,
     saver,

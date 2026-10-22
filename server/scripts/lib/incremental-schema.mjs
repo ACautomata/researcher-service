@@ -17,9 +17,32 @@
 export const SCHEMA_VERSION = 16
 
 export function runIncrementalSchema(db) {
+  db.exec(`
+CREATE TABLE IF NOT EXISTS "chaoxing_bindings" (
+    "ownerId" TEXT NOT NULL PRIMARY KEY,
+    "generation" TEXT NOT NULL,
+    "tokenCipher" TEXT,
+    "expiresAt" DATETIME,
+    "updatedAt" DATETIME NOT NULL,
+    CONSTRAINT "chaoxing_bindings_ownerId_fkey" FOREIGN KEY ("ownerId") REFERENCES "users" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+CREATE TABLE IF NOT EXISTS "chaoxing_authorizations" (
+    "stateHash" TEXT NOT NULL PRIMARY KEY,
+    "ownerId" TEXT NOT NULL,
+    "generation" TEXT NOT NULL,
+    "verifierCipher" TEXT NOT NULL,
+    "expiresAt" DATETIME NOT NULL,
+    CONSTRAINT "chaoxing_authorizations_ownerId_fkey" FOREIGN KEY ("ownerId") REFERENCES "users" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+CREATE INDEX IF NOT EXISTS "chaoxing_authorizations_ownerId_idx" ON "chaoxing_authorizations"("ownerId");
+`)
+
   const hasSessions = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='sessions'").get()
   if (hasSessions && !db.prepare('PRAGMA table_info("sessions")').all().some(c => c.name === 'preferredModelJson')) {
     db.exec('ALTER TABLE "sessions" ADD COLUMN "preferredModelJson" TEXT')
+  }
+  if (hasSessions && !db.prepare('PRAGMA table_info("sessions")').all().some(c => c.name === 'learningCourseId')) {
+    db.exec('ALTER TABLE "sessions" ADD COLUMN "learningCourseId" TEXT')
   }
   // #782（#747·12）：sessions 水位列（files rewind 的 planRevert 判定下界——scope=chat 保持
   // 现状永久化面）。ADD COLUMN 非幂等，PRAGMA guard 先查再补（对齐 preferredModelJson 模式）。
