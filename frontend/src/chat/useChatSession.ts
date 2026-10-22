@@ -37,6 +37,7 @@ import { createRestOutbox, newClientKey, type RestOutbox } from './restOutbox'
 import { useEventStream, type EventStream, type SessionEvent } from './useEventStream'
 
 import { listPlugins, getPluginArgumentCompletions } from '@/api/plugins'
+import { getChaoxingStatus } from '@/api/chaoxing'
 import { mergeSlashCommands, type SlashOption } from './slashCommands'
 export { SYSTEM_COMMANDS, type SlashOption } from './slashCommands'
 
@@ -562,6 +563,13 @@ export function useChatSession(deps: ChatSessionDeps = {}): ChatSession {
         restoreDraft()
         return false
       }
+      // 命令/配置类拒绝（超星未配置、参数非法、未绑定）是确定性失败——不重试、不排队，
+      // 直接展示后端文案（未绑定提示含 /settings 入口）。
+      if (e instanceof ApiError && (e.code === 90001 || e.code === 90002 || e.code === 90003)) {
+        deps.onActionError?.(e.message)
+        restoreDraft()
+        return false
+      }
       // 网络/未知故障：消息可能已到达（幂等键保不重复）→ 入待发，重连后按序注入（replay 幂等）
       outbox.enqueue(id, content, { clientKey: key, attachments })
       if (chat.selectedSession === id) pushOptimistic(content, key, attachments)
@@ -592,8 +600,15 @@ export function useChatSession(deps: ChatSessionDeps = {}): ChatSession {
   async function refreshSlashCommands(): Promise<void> {
     const gen = ++slashCatalogGen
     try {
-      const plugins = await listPlugins()
-      if (!disposed && gen === slashCatalogGen) slashCommands.value = mergeSlashCommands(plugins)
+      // 超星命令可见性只认部署开关（configured）；未绑定用户仍可发现命令并在提交时得到绑定引导。
+      // 状态探测失败按未配置降级——菜单少两条入口，不影响插件命令目录。
+      const [plugins, chaoxingConfigured] = await Promise.all([
+        listPlugins(),
+        getChaoxingStatus().then((s) => s.configured).catch(() => false),
+      ])
+      if (!disposed && gen === slashCatalogGen) {
+        slashCommands.value = mergeSlashCommands(plugins, { chaoxingConfigured })
+      }
     } catch {
       if (disposed || gen !== slashCatalogGen) return
       slashCommands.value = mergeSlashCommands([])

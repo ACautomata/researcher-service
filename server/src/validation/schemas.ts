@@ -228,6 +228,7 @@ export const chaoxingAuthorizeSchema = z.object({}).strict()
 export const chaoxingLearnSchema = z.object({
   topic: z.string().trim().min(1).max(1000),
   courseId: z.string().min(1).max(100).optional(),
+  target: z.enum(['all', 'resources', 'topics']).default('all'),
 }).strict()
 
 export const chaoxingScopeSchema = z.object({ courseId: z.string().min(1).max(100).nullable() }).strict()

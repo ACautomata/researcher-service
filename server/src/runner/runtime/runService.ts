@@ -1,5 +1,7 @@
 import { createChaoxingTools, CHAOXING_LEARNING_PROMPT } from '../../chaoxing/tools'
 import type { ChaoxingService } from '../../chaoxing/service'
+import { CHAOXING_COMMAND_TOOLS, formatChaoxingCommandResult, type ChaoxingCommandTarget } from '../../chaoxing/commands'
+import { chaoxingLearnSchema } from '../../validation/schemas'
 import { PLATFORM_PROVIDER_ID } from '../../models/presets'
 import { preferredModelSchema } from '../../validation/schemas'
 import { resolveModelRef, type ModelRef, type PreferredModelRef } from '../providerRegistry'
@@ -128,11 +130,15 @@ export interface RunCommand {
   readonly username: string
   readonly kind: 'message' | 'resume' | 'recover'
   /** #787 story 45：kind=message 的系统命令形态（/compact 显式压缩——REST 侧已校验无参）；
-   *  #788：'plugin-execute' = 插件命令 {execute} outcome（直达本插件工具执行面，不经 agent） */
-  readonly operation?: 'compact' | 'plugin-execute'
+   *  #788：'plugin-execute' = 插件命令 {execute} outcome（直达本插件工具执行面，不经 agent）；
+   *  'chaoxing-query' = /course-search、/topic-search 内置命令（直达学习领域服务，不经 agent） */
+  readonly operation?: 'compact' | 'plugin-execute' | 'chaoxing-query'
   /** operation='plugin-execute'：目标插件工具名（启用集内）与 zod 解析前参数 */
   readonly pluginTool?: string
   readonly pluginArgs?: unknown
+  /** operation='chaoxing-query'：固定查询目标与关键词（REST 侧已校验，内核面复用同一 schema） */
+  readonly chaoxingTarget?: ChaoxingCommandTarget
+  readonly chaoxingTopic?: string
   readonly teammateId?: string
   readonly parentSessionId?: string
   readonly mailWaitId?: string
@@ -1035,6 +1041,13 @@ export class RunService {
         await this.executePluginToolRun(cmd, capabilities, controller.signal, turn, labContainer)
         this.runs.set(cmd.sessionId, { runId: cmd.runId, state: 'completed' })
         this.publish(cmd.ownerId, { type: 'run.completed', payload: {} }, cmd)
+      } else if (cmd.kind === 'message' && cmd.operation === 'chaoxing-query') {
+        // 超星内置学习命令（/course-search、/topic-search）：固定查询目标直达学习领域服务，
+        // 不经 agent 自由裁量（spec：手动命令必须直接执行对应查询）。标准 tool.start/tool.end
+        // 事件 + text.delta 结果落同一 TurnReducer → 实时 ≡ 回放；课程范围只读会话已保存值。
+        await this.executeChaoxingQueryRun(cmd, controller.signal, turn)
+        this.runs.set(cmd.sessionId, { runId: cmd.runId, state: 'completed' })
+        this.publish(cmd.ownerId, { type: 'run.completed', payload: {} }, cmd)
       } else {
         // #780 ingestion（片 2）：message 命令带附件 → run 首步确定性物化（runner 调度权，非 agent
         // 工具；LangGraph 图拓扑约束下作 runner 侧幂等预步骤——putArchive 覆盖写 + sha256 校验，
@@ -1615,6 +1628,74 @@ export class RunService {
       const end = {
         type: 'tool.end' as const,
         payload: { toolCallId, name: def.name, state: 'error' as const, durationMs: Math.max(0, this.clock() - startedAt) },
+      }
+      turn.feed(end)
+      this.publish(cmd.ownerId, end, cmd)
+      throw e
+    }
+  }
+
+  // ---- 超星内置学习命令运行体（/course-search、/topic-search）----
+  // 查询目标由命令固定（resources / topics），绝不回退到另一目标伪装成功。参数在 REST 面
+  // 已校验，本处复用同一 schema 作内核权威面（输入 0 信任）。课程范围只读会话已保存的
+  // learningCourseId——命令本身不修改范围；未选课程时在本人授权课程内定位。
+  private async executeChaoxingQueryRun(
+    cmd: RunCommand,
+    signal: AbortSignal,
+    turn: TurnReducer,
+  ): Promise<void> {
+    if (!this.deps.chaoxing) throw fail(90001, '超星尚未配置，请联系管理员')
+    const parsed = chaoxingLearnSchema.safeParse({ topic: cmd.chaoxingTopic, target: cmd.chaoxingTarget })
+    if (!parsed.success || parsed.data.target === 'all') throw fail(CODE.VALIDATION_FAILED, '超星命令参数无效')
+    const target = parsed.data.target
+    const topic = parsed.data.topic
+    const session = await this.deps.prisma.session.findFirst({
+      where: { id: cmd.sessionId, ownerId: cmd.ownerId, archivedAt: null, isTeammate: false },
+      select: { learningCourseId: true },
+    })
+    if (!session) throw fail(CODE.SESSION_NOT_FOUND)
+    const toolCallId = `chaoxing-${cmd.runId}`
+    const name = CHAOXING_COMMAND_TOOLS[target]
+    const { text: inputText, truncated: inputTruncated } = truncateUtf8(
+      JSON.stringify({ topic, target }),
+      TOOL_INPUT_MAX_BYTES,
+    )
+    const start = {
+      type: 'tool.start' as const,
+      payload: { toolCallId, name, input: inputText, ...(inputTruncated ? { [TRUNCATED_FLAG]: true } : {}) },
+    }
+    turn.feed(start)
+    this.publish(cmd.ownerId, start, cmd)
+    const startedAt = this.clock()
+    try {
+      const result = await this.deps.chaoxing.learn(
+        cmd.ownerId,
+        topic,
+        session.learningCourseId ?? undefined,
+        signal,
+        target,
+      )
+      const details = truncateUtf8(JSON.stringify(result), TOOL_DETAILS_MAX_BYTES)
+      const end = {
+        type: 'tool.end' as const,
+        payload: {
+          toolCallId,
+          name,
+          state: 'success' as const,
+          durationMs: Math.max(0, this.clock() - startedAt),
+          ...(details.text !== '' ? { details: details.text } : {}),
+          ...(details.truncated ? { [TRUNCATED_FLAG]: true } : {}),
+        },
+      }
+      turn.feed(end)
+      this.publish(cmd.ownerId, end, cmd)
+      const text = formatChaoxingCommandResult(target, topic, result)
+      turn.feed({ type: 'text.delta', payload: { delta: text } })
+      this.publish(cmd.ownerId, { type: 'text.delta', payload: { delta: text } }, cmd)
+    } catch (e) {
+      const end = {
+        type: 'tool.end' as const,
+        payload: { toolCallId, name, state: 'error' as const, durationMs: Math.max(0, this.clock() - startedAt) },
       }
       turn.feed(end)
       this.publish(cmd.ownerId, end, cmd)

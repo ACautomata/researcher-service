@@ -22,7 +22,9 @@ vi.mock('@/api/sessions', () => ({
 }))
 
 vi.mock('@/api/plugins', () => ({ listPlugins: vi.fn(), getPluginArgumentCompletions: vi.fn() }))
+vi.mock('@/api/chaoxing', () => ({ getChaoxingStatus: vi.fn() }))
 import { listPlugins, getPluginArgumentCompletions } from '@/api/plugins'
+import { getChaoxingStatus } from '@/api/chaoxing'
 import * as api from '@/api/sessions'
 import { ApiError } from '@/api/client'
 
@@ -89,6 +91,7 @@ beforeEach(() => {
   vi.stubGlobal('EventSource', FakeEventSource)
   vi.clearAllMocks()
   vi.mocked(listPlugins).mockResolvedValue([])
+  vi.mocked(getChaoxingStatus).mockResolvedValue({ configured: false, connected: false, expiresAt: null })
   vi.mocked(api.listSessions).mockResolvedValue([S1, S2])
   vi.mocked(api.getSessionProjection).mockResolvedValue(projectionOf())
   vi.mocked(api.sendSessionMessage).mockResolvedValue({ messageId: 'm9', turn: 3, runId: 'r1', replay: false })
@@ -204,6 +207,28 @@ describe('发送（幂等 + 乐观回显 + 门控）', () => {
     await flushPromises()
     expect(actionsErr).toHaveBeenCalledWith('并发配额已满，请稍后再试')
     expect(conn.chat.messages.some((m) => m.text === '配额消息')).toBe(false)
+  })
+
+  it('超星未绑定（90003）→ 展示后端绑定引导，不排队重试、不保留乐观行', async () => {
+    vi.mocked(api.sendSessionMessage).mockRejectedValue(new ApiError(200, '请先在账号设置（/settings）绑定超星账号', 90003))
+    const conn = await mounted()
+    conn.chat.setInput('/course-search 梯度')
+    conn.send()
+    await flushPromises()
+    expect(actionsErr).toHaveBeenCalledWith('请先在账号设置（/settings）绑定超星账号')
+    expect(conn.chat.messages.some((m) => m.text === '/course-search 梯度')).toBe(false)
+    expect(conn.chat.input).toBe('/course-search 梯度')
+    expect(sessionStorage.getItem('chat.restOutbox.v1')).toBeNull()
+  })
+
+  it('超星参数非法（90002）→ 展示用法/校验文案，不排队重试', async () => {
+    vi.mocked(api.sendSessionMessage).mockRejectedValue(new ApiError(200, '用法：/course-search <关键词>', 90002))
+    const conn = await mounted()
+    conn.chat.setInput('/course-search')
+    conn.send()
+    await flushPromises()
+    expect(actionsErr).toHaveBeenCalledWith('用法：/course-search <关键词>')
+    expect(sessionStorage.getItem('chat.restOutbox.v1')).toBeNull()
   })
 
   it('网络故障 → 摘乐观行 + 入待发 + toast（重连后按序注入）', async () => {
@@ -629,6 +654,22 @@ describe('#797 slash 键盘与参数提示', () => {
     conn.onComposerKeydown(new KeyboardEvent('keydown', { key: 'Enter' }))
     expect(onSend).toHaveBeenCalledOnce()
     conn.dispose()
+  })
+
+  it('超星已配置（未绑定也可）时菜单出现两条学习命令；未配置不出现', async () => {
+    vi.mocked(getChaoxingStatus).mockResolvedValue({ configured: true, connected: false, expiresAt: null })
+    const configured = await mounted()
+    configured.chat.setInput('/course')
+    expect(configured.slashMatches.value.map(c => c.alias)).toEqual(['/course-search'])
+    configured.chat.setInput('/')
+    expect(configured.slashMatches.value.map(c => c.alias)).toEqual(expect.arrayContaining(['/course-search', '/topic-search']))
+    configured.dispose()
+
+    vi.mocked(getChaoxingStatus).mockResolvedValue({ configured: false, connected: false, expiresAt: null })
+    const unconfigured = await mounted()
+    unconfigured.chat.setInput('/')
+    expect(unconfigured.slashMatches.value.map(c => c.alias)).not.toContain('/course-search')
+    unconfigured.dispose()
   })
 
   it('菜单中 Shift+Enter 和 IME Enter 保留输入；上下键选择、Esc 关闭、重新输入可打开', async () => {

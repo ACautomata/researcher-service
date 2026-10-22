@@ -45,7 +45,7 @@ export function createChaoxingRouter(prisma: PrismaClient, deps: ChaoxingDeps = 
   router.get('/capabilities', async (req, res) => ok(res, await service.inspect(req.user!.id)))
   router.post('/learn', validateBody(chaoxingLearnSchema), async (req, res) => {
     const body: z.infer<typeof chaoxingLearnSchema> = req.body
-    ok(res, await service.learn(req.user!.id, body.topic, body.courseId))
+    ok(res, await service.learn(req.user!.id, body.topic, body.courseId, undefined, body.target))
   })
   return router
 }

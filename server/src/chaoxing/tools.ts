@@ -12,11 +12,11 @@ export const CHAOXING_LEARNING_PROMPT = `超星学习能力：用户讨论学习
 未绑定时引导用户前往 /settings 绑定本人超星账号，仍可继续一般学习对话。仅查询已有内容，不创建知识点，不尝试用 execute 或 HTTP 绕过只读工具。`
 
 export function createChaoxingTools(service: ChaoxingService, ownerId: string, courseId?: string) {
-  return [tool(async ({ topic, courseId: requestedCourse }, config) => {
+  return [tool(async ({ topic, courseId: requestedCourse, target }, config) => {
     const frame = currentPluginRunFrame()
     if (frame && frame.run.ownerId !== ownerId) return JSON.stringify({ ok: false, error: '超星调用身份不匹配' })
     try {
-      const result = await service.learn(ownerId, topic, courseId ?? frame?.learningCourseId ?? requestedCourse, frame?.signal ?? config.signal)
+      const result = await service.learn(ownerId, topic, courseId ?? frame?.learningCourseId ?? requestedCourse, frame?.signal ?? config.signal, target)
       return JSON.stringify({ ok: true, ...result })
     } catch (error) {
       return JSON.stringify({ ok: false, error: error instanceof EnvelopeError ? error.message : '超星调用失败或已取消', settingsUrl: '/settings' })
