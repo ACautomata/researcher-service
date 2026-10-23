@@ -140,6 +140,8 @@ export interface RunCommand {
   /** operation='chaoxing-query'：固定查询目标与关键词（REST 侧已校验，内核面复用同一 schema） */
   readonly chaoxingTarget?: ChaoxingCommandTarget
   readonly chaoxingTopic?: string
+  readonly chaoxingCourseId?: string
+  readonly chaoxingClassId?: string
   readonly teammateId?: string
   readonly parentSessionId?: string
   readonly mailWaitId?: string
@@ -1644,7 +1646,7 @@ export class RunService {
   // ---- 超星内置学习命令运行体（/course-search、/topic-search）----
   // 查询目标由命令固定（resources / topics），绝不回退到另一目标伪装成功。参数在 REST 面
   // 已校验，本处复用同一 schema 作内核权威面（输入 0 信任）。课程范围只读会话已保存的
-  // learningCourseId——命令本身不修改范围；未选课程时在本人授权课程内定位。
+  // learningCourseId 优先；未选课时可显式传课程/班级，命令不修改会话范围。
   private async executeChaoxingQueryRun(
     cmd: RunCommand,
     signal: AbortSignal,
@@ -1652,14 +1654,15 @@ export class RunService {
     courseId: string | null,
   ): Promise<void> {
     if (!this.deps.chaoxing) throw fail(90001, '超星尚未配置，请联系管理员')
-    const parsed = chaoxingLearnSchema.safeParse({ topic: cmd.chaoxingTopic, target: cmd.chaoxingTarget })
+    const parsed = chaoxingLearnSchema.safeParse({ topic: cmd.chaoxingTopic, target: cmd.chaoxingTarget, courseId: cmd.chaoxingCourseId, classId: cmd.chaoxingClassId })
     if (!parsed.success || parsed.data.target === 'all') throw fail(CODE.VALIDATION_FAILED, '超星命令参数无效')
+    if (courseId && parsed.data.courseId && courseId !== parsed.data.courseId) throw fail(CODE.VALIDATION_FAILED, '命令课程与会话范围不一致，请解除范围或使用新会话')
     const target = parsed.data.target
     const topic = parsed.data.topic
     const toolCallId = `chaoxing-${cmd.runId}`
     const name = CHAOXING_COMMAND_TOOLS[target]
     const { text: inputText, truncated: inputTruncated } = truncateUtf8(
-      JSON.stringify({ topic, target }),
+      JSON.stringify({ topic, target, courseId: courseId ?? parsed.data.courseId, classId: parsed.data.classId }),
       TOOL_INPUT_MAX_BYTES,
     )
     const start = {
@@ -1673,9 +1676,10 @@ export class RunService {
       const result = await this.deps.chaoxing.learn(
         cmd.ownerId,
         topic,
-        courseId ?? undefined,
+        courseId ?? parsed.data.courseId,
         signal,
         target,
+        parsed.data.classId,
       )
       const details = truncateUtf8(JSON.stringify(result), TOOL_DETAILS_MAX_BYTES)
       const end = {

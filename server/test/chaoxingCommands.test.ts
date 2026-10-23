@@ -49,7 +49,7 @@ const options = {
   credentialSecret: 'chaoxing-command-test-secret-at-least-32-chars',
 }
 
-interface Call { token: string; topic: string; courseId?: string; target?: ChaoxingQueryTarget }
+interface Call { token: string; topic: string; courseId?: string; target?: ChaoxingQueryTarget; classId?: string }
 
 function fakeRemote() {
   const calls: Call[] = []
@@ -62,8 +62,8 @@ function fakeRemote() {
     async exchange() { return { access_token: 'exchange-token', token_type: 'Bearer', expires_in: 3600 } },
     async refresh() { return { access_token: 'refreshed-token', token_type: 'Bearer', expires_in: 3600 } },
     async inspect() { return { tools: [], capabilities: [] } },
-    async learn(token, topic, courseId, _signal, target) {
-      calls.push({ token, topic, ...(courseId ? { courseId } : {}), ...(target ? { target } : {}) })
+    async learn(token, topic, courseId, _signal, target, classId) {
+      calls.push({ token, topic, ...(courseId ? { courseId } : {}), ...(target ? { target } : {}), ...(classId ? { classId } : {}) })
       if (error) throw error
       return result
     },
@@ -146,6 +146,28 @@ describe('超星内置手动命令', () => {
     }
     return { prisma, owner, sessionId, events, settle, send, projection, bind, model, calls: fake.calls, fake, service, onStarted(callback: () => void) { onStarted = callback } }
   }
+
+  it('手动命令可显式提供课程和学生班级，不依赖课程发现或模型', async () => {
+    const h = await harness()
+    await h.bind()
+    expect((await h.send('/course-search --course-id 123 --class-id 456 梯度 下降', '21'.repeat(16))).body.code).toBe(0)
+    await h.settle()
+    expect(h.calls).toEqual([{ token: 'owner-token', topic: '梯度 下降', courseId: '123', classId: '456', target: 'resources' }])
+    expect((await h.send('/topic-search --course-id 123 导数', '22'.repeat(16))).body.code).toBe(0)
+    await h.settle()
+    expect(h.calls[1]).toEqual({ token: 'owner-token', topic: '导数', courseId: '123', target: 'topics' })
+    expect(h.model.inputs).toEqual([])
+    expect((await h.prisma.session.findUnique({ where: { id: h.sessionId } }))?.learningCourseId).toBeNull()
+  })
+
+  it('手动命令拒绝无效或重复的课程班级参数，且不创建运行', async () => {
+    const h = await harness()
+    await h.bind()
+    for (const args of ['--course-id bad 梯度', '--class-id 0 梯度', '--course-id 123 --course-id 456 梯度', '--course-id 123']) {
+      expect((await h.send(`/course-search ${args}`, randomUUID())).body.code).toBe(90002)
+    }
+    expect(h.calls).toEqual([])
+  })
 
   it('资料命令固定 resources 目标、复用会话课程范围、零模型调用且结果入历史', async () => {
     const h = await harness()

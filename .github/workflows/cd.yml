@@ -185,6 +185,7 @@ jobs:
           CHAOXING_REDIRECT_URI: ${{ secrets.CHAOXING_REDIRECT_URI }}
           CHAOXING_CREDENTIAL_SECRET: ${{ secrets.CHAOXING_CREDENTIAL_SECRET }}
           CHAOXING_MCP_MAPPING: ${{ secrets.CHAOXING_MCP_MAPPING }}
+          CHAOXING_TRANSPORT: ${{ vars.CHAOXING_TRANSPORT }}
           CHAOXING_PKCE: ${{ vars.CHAOXING_PKCE }}
           CHAOXING_TOKEN_AUTH: ${{ vars.CHAOXING_TOKEN_AUTH }}
         # 运行时敏感值渲染为 .env（compose env_file 读取）；.env 不进 git，仅经 scp 落到宿主。
@@ -223,7 +224,7 @@ jobs:
           python3 - <<'PYENV'
           import json, os
           from pathlib import Path
-          names = ["CHAOXING_CLIENT_ID", "CHAOXING_CLIENT_SECRET", "CHAOXING_REDIRECT_URI", "CHAOXING_CREDENTIAL_SECRET", "CHAOXING_MCP_MAPPING", "CHAOXING_PKCE", "CHAOXING_TOKEN_AUTH"]
+          names = ["CHAOXING_CLIENT_ID", "CHAOXING_CLIENT_SECRET", "CHAOXING_REDIRECT_URI", "CHAOXING_CREDENTIAL_SECRET", "CHAOXING_MCP_MAPPING", "CHAOXING_PKCE", "CHAOXING_TOKEN_AUTH", "CHAOXING_TRANSPORT"]
           with Path("_deploy/.env").open("a") as output:
               for name in names:
                   value = os.environ.get(name, "")

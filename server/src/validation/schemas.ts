@@ -228,6 +228,7 @@ export const chaoxingAuthorizeSchema = z.object({}).strict()
 export const chaoxingLearnSchema = z.object({
   topic: z.string().trim().min(1).max(1000),
   courseId: z.string().min(1).max(100).optional(),
+  classId: z.string().regex(/^[1-9][0-9]{0,29}$/).optional(),
   target: z.enum(['all', 'resources', 'topics']).default('all'),
 }).strict()
 

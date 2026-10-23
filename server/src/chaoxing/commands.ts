@@ -1,3 +1,4 @@
+import { chaoxingLearnSchema } from '../validation/schemas'
 import type { ChaoxingQueryTarget, LearningResult } from './remote'
 
 export type ChaoxingCommandTarget = Extract<ChaoxingQueryTarget, 'resources' | 'topics'>
@@ -6,14 +7,14 @@ export const CHAOXING_COMMANDS = {
   'course-search': {
     target: 'resources',
     description: '查询超星课程资料',
-    argumentHint: '例如：/course-search 梯度下降',
-    usage: '用法：/course-search <关键词>',
+    argumentHint: 'HTTP 模式：/course-search --course-id 课程ID --class-id 班级ID 梯度下降',
+    usage: '用法：/course-search <关键词>；HTTP 模式：/course-search --course-id <课程ID> --class-id <班级ID> <关键词>',
   },
   'topic-search': {
     target: 'topics',
     description: '查询超星已有知识点',
-    argumentHint: '例如：/topic-search 导数',
-    usage: '用法：/topic-search <关键词>',
+    argumentHint: 'HTTP 模式：/topic-search --course-id 课程ID 导数',
+    usage: '用法：/topic-search <关键词>；HTTP 模式：/topic-search --course-id <课程ID> <关键词>',
   },
 } as const satisfies Record<string, { target: ChaoxingCommandTarget; description: string; argumentHint: string; usage: string }>
 
@@ -23,6 +24,22 @@ export const CHAOXING_COMMAND_NAMES = Object.keys(CHAOXING_COMMANDS) as Chaoxing
 export function chaoxingCommand(name: string) {
   if (!Object.hasOwn(CHAOXING_COMMANDS, name)) return undefined
   return (CHAOXING_COMMANDS as Record<string, (typeof CHAOXING_COMMANDS)[ChaoxingCommandName] | undefined>)[name]
+}
+
+/** 仅解析关键词前的显式选择参数；不接受 owner、token 或角色覆盖。 */
+export function parseChaoxingCommandArgs(args: string) {
+  let rest = args.trim()
+  const ids: { courseId?: string; classId?: string } = {}
+  while (rest.startsWith('--')) {
+    const match = /^--(course-id|class-id)\s+([1-9][0-9]{0,29})(?:\s+|$)/.exec(rest)
+    if (!match) return undefined
+    const key = match[1] === 'course-id' ? 'courseId' : 'classId'
+    if (ids[key]) return undefined
+    ids[key] = match[2]
+    rest = rest.slice(match[0].length).trim()
+  }
+  const parsed = chaoxingLearnSchema.safeParse({ topic: rest, ...ids })
+  return parsed.success ? parsed.data : undefined
 }
 
 /** 直跑路径的工具卡名称：与触发命令一一对应。 */

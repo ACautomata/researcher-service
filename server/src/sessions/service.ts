@@ -1,6 +1,5 @@
 import { parseSlash, BUILTIN_COMMANDS } from '../plugins/slash'
-import { chaoxingCommand } from '../chaoxing/commands'
-import { chaoxingLearnSchema } from '../validation/schemas'
+import { chaoxingCommand, parseChaoxingCommandArgs } from '../chaoxing/commands'
 import type { ModelRef } from '../runner/providerRegistry'
 import { snapshotRunCapabilities } from '../runner/capabilities'
 import type { PluginRuntime } from '../plugins/surface'
@@ -468,9 +467,10 @@ export class SessionService {
     // 内置学习命令：参数校验 + 部署/绑定前置检查都在 REST 面完成——未配置/未绑定不产生
     // run，也不把命令原文交给模型自由解释。
     const chaoxing = slash ? chaoxingCommand(slash.name) : undefined
+    const chaoxingArgs = slash && chaoxing ? parseChaoxingCommandArgs(slash.args) : undefined
     if (slash && chaoxing) {
-      if (!chaoxingLearnSchema.safeParse({ topic: slash.args }).success) {
-        throw fail(CODE.VALIDATION_FAILED, slash.args ? '关键词不能超过 1000 个字符' : chaoxing.usage)
+      if (!chaoxingArgs) {
+        throw fail(CODE.VALIDATION_FAILED, slash.args.length > 1000 ? '关键词不能超过 1000 个字符' : chaoxing.usage)
       }
       const status = await this.deps.chaoxing?.status(user.id)
       if (status && !status.configured) throw fail(90001, '超星尚未配置，请联系管理员')
@@ -519,7 +519,7 @@ export class SessionService {
     })
 
     if (slash?.name === 'compact') cmd = { ...cmd, operation: 'compact' }
-    else if (slash && chaoxing) cmd = { ...cmd, operation: 'chaoxing-query', chaoxingTarget: chaoxing.target, chaoxingTopic: slash.args }
+    else if (slash && chaoxing) cmd = { ...cmd, operation: 'chaoxing-query', chaoxingTarget: chaoxing.target, chaoxingTopic: chaoxingArgs!.topic, chaoxingCourseId: chaoxingArgs!.courseId, chaoxingClassId: chaoxingArgs!.classId }
     else if (pluginExecute) cmd = { ...cmd, operation: 'plugin-execute', pluginTool: pluginExecute.tool, pluginArgs: pluginExecute.args }
 
     // rewind 残留清理（#781 story 16）：rewind 态（指针非空）时，锚点之后的残留行归档（#770
