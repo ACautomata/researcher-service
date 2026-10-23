@@ -36,7 +36,7 @@ afterEach(async () => { for (const cleanup of cleanups.splice(0)) await cleanup(
 class CapturingModel extends ScriptedChatModel {
   readonly inputs: string[] = []
   override async _generate(messages: BaseMessage[]) {
-    const input = messages.find(message => message.getType() === 'human')?.content
+    const input = JSON.stringify(messages.map(message => ({type: message.getType(), content: message.content})))
     this.inputs.push(typeof input === 'string' ? input : '')
     return { generations: [{ message: new AIMessage({ content: 'ack' }), text: 'ack' }] }
   }
@@ -91,9 +91,14 @@ describe('超星内置手动命令', () => {
     } })
     const hub = new StreamHub()
     const events: CatalogEvent[] = []
+    let onStarted: (() => void) | undefined
     hub.register(owner.id, { send: frame => {
       const data = /^data: (.+)$/m.exec(frame)?.[1]
-      if (data) events.push(JSON.parse(data) as CatalogEvent)
+      if (data) {
+        const event = JSON.parse(data) as CatalogEvent
+        events.push(event)
+        if (event.type === 'run.started') onStarted?.()
+      }
       return true
     }, close: () => {} })
     const fake = fakeRemote()
@@ -139,7 +144,7 @@ describe('超星内置手动命令', () => {
         expiresAt: new Date(Date.now() + 3_600_000),
       } })
     }
-    return { prisma, owner, sessionId, events, settle, send, projection, bind, model, calls: fake.calls, fake, service }
+    return { prisma, owner, sessionId, events, settle, send, projection, bind, model, calls: fake.calls, fake, service, onStarted(callback: () => void) { onStarted = callback } }
   }
 
   it('资料命令固定 resources 目标、复用会话课程范围、零模型调用且结果入历史', async () => {
@@ -266,5 +271,73 @@ describe('超星内置手动命令', () => {
     const failed = h.events.find(event => event.type === 'run.failed')
     expect((failed!.payload as { message: string }).message).toContain('超星调用不可用')
     expect((failed!.payload as { message: string }).message).not.toContain('owner-token')
+    expect(JSON.stringify(await h.projection())).not.toContain('owner-token')
   }, 20_000)
+  it('手动查询结果进入后续模型上下文且不重复注入', async () => {
+    const h = await harness()
+    await h.bind()
+    await h.send('/course-search 梯度下降', '11'.repeat(16))
+    await h.settle()
+    h.fake.setResult({ resources: [{ id: 't1', name: '导数', kind: 'topic', courseId: 'c1', courseName: '数学', text: '变化率的极限。' }], limitations: [] })
+    await h.send('/topic-search 导数', '18'.repeat(16))
+    await h.settle()
+    expect(h.model.inputs).toEqual([])
+    await h.send('解释一下刚才第一份课件和知识点', '12'.repeat(16))
+    await h.settle()
+    expect(h.model.inputs.at(-1)).toContain('学习率控制迭代步长')
+    expect(h.model.inputs.at(-1)).toContain('变化率的极限')
+    await h.send('再举一个例子', '14'.repeat(16))
+    await h.settle()
+    expect(h.model.inputs.at(-1)!.split('学习率控制迭代步长')).toHaveLength(2)
+  }, 20_000)
+
+  it('失败原因保留在历史结果中', async () => {
+    const h = await harness()
+    await h.bind()
+    h.fake.failWith(new ChaoxingConfigError('知识点查询能力尚未配置'))
+    await h.send('/topic-search 导数', '13'.repeat(16))
+    await h.settle()
+    const historical = (await h.projection()).messages.at(-1)!
+    expect(historical.content).toContain('知识点查询能力尚未配置')
+    expect(historical.tools?.[0]).toMatchObject({ state: 'error', details: '知识点查询能力尚未配置' })
+    const streamed = h.events.filter(e => e.type === 'text.delta').map(e => (e.payload as { delta: string }).delta).join('')
+    expect(streamed).toBe(historical.content)
+  }, 20_000)
+
+  it('运行开始后切换课程仅影响下一轮，当前查询保持启动快照', async () => {
+    const h = await harness()
+    await h.bind()
+    await h.prisma.session.update({ where: { id: h.sessionId }, data: { learningCourseId: 'c1' } })
+    let switched: Promise<unknown> | undefined
+    h.onStarted(() => { switched = h.prisma.session.update({ where: { id: h.sessionId }, data: { learningCourseId: 'c2' } }).then(row => row) })
+    await h.send('/course-search 梯度下降', '16'.repeat(16))
+    await h.settle()
+    await switched
+    expect(h.calls[0]?.courseId).toBe('c1')
+    await h.send('/course-search 梯度下降', '17'.repeat(16))
+    await h.settle()
+    expect(h.calls[1]?.courseId).toBe('c2')
+  }, 20_000)
+
+  it('已经归档的手动查询不进入后续模型上下文', async () => {
+    const h = await harness()
+    await h.bind()
+    await h.send('/course-search 梯度下降', '19'.repeat(16))
+    await h.settle()
+    await h.prisma.sessionMessage.updateMany({ where: { sessionId: h.sessionId }, data: { archivedAt: new Date() } })
+    await h.send('开始一个新话题', '20'.repeat(16))
+    await h.settle()
+    expect(h.model.inputs.at(-1)).not.toContain('学习率控制迭代步长')
+    expect(h.model.inputs.at(-1)).not.toContain('/course-search 梯度下降')
+  }, 20_000)
+
+  it('继承属性名称仍按未知斜杠消息处理，不误执行超星命令', async () => {
+    const h = await harness()
+    await h.send('/constructor hello', '21'.repeat(16))
+    await h.settle()
+    expect(h.calls).toEqual([])
+    expect(h.model.inputs.at(-1)).toContain('/constructor hello')
+    expect(h.events.some(event => event.type === 'run.completed')).toBe(true)
+  }, 20_000)
+
 })

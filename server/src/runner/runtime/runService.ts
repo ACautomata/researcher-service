@@ -1,7 +1,8 @@
 import { createChaoxingTools, CHAOXING_LEARNING_PROMPT } from '../../chaoxing/tools'
 import type { ChaoxingService } from '../../chaoxing/service'
-import { CHAOXING_COMMAND_TOOLS, formatChaoxingCommandResult, type ChaoxingCommandTarget } from '../../chaoxing/commands'
+import { CHAOXING_COMMAND_TOOLS, chaoxingCommand, formatChaoxingCommandResult, type ChaoxingCommandTarget } from '../../chaoxing/commands'
 import { chaoxingLearnSchema } from '../../validation/schemas'
+import { parseSlash } from '../../plugins/slash'
 import { PLATFORM_PROVIDER_ID } from '../../models/presets'
 import { preferredModelSchema } from '../../validation/schemas'
 import { resolveModelRef, type ModelRef, type PreferredModelRef } from '../providerRegistry'
@@ -51,7 +52,7 @@ import { runWithToolCallContext, createToolCallContextMiddleware, runWithRunCont
 // 容器 ensure/registry）补 run.failed{errorKind}——story 10「不无声挂死」语义（executeNow catch）。
 
 import { randomUUID } from 'node:crypto'
-import { HumanMessage, ToolMessage, type BaseMessage, type ContentBlock } from '@langchain/core/messages'
+import { AIMessage, HumanMessage, ToolMessage, type BaseMessage, type ContentBlock } from '@langchain/core/messages'
 import { AsyncLocalStorageProviderSingleton } from '@langchain/core/singletons'
 import type { AnyAgentMiddleware } from 'langchain'
 import { Command, END } from '@langchain/langgraph'
@@ -1045,7 +1046,8 @@ export class RunService {
         // 超星内置学习命令（/course-search、/topic-search）：固定查询目标直达学习领域服务，
         // 不经 agent 自由裁量（spec：手动命令必须直接执行对应查询）。标准 tool.start/tool.end
         // 事件 + text.delta 结果落同一 TurnReducer → 实时 ≡ 回放；课程范围只读会话已保存值。
-        await this.executeChaoxingQueryRun(cmd, controller.signal, turn)
+        if (session.ownerId !== cmd.ownerId || session.archivedAt || session.isTeammate) throw fail(CODE.SESSION_NOT_FOUND)
+        await this.executeChaoxingQueryRun(cmd, controller.signal, turn, session.learningCourseId)
         this.runs.set(cmd.sessionId, { runId: cmd.runId, state: 'completed' })
         this.publish(cmd.ownerId, { type: 'run.completed', payload: {} }, cmd)
       } else {
@@ -1122,10 +1124,14 @@ export class RunService {
         }
         // HumanMessage 显式 id = runId：命令→checkpoint 消息的持久锚（normalizeReplay 重放判据）。
         // kind=recover：input = null —— LangGraph 从 checkpoint 续跑（三形态见 normalizeReplay 注）。
+        const commandHistory = cmd.kind === 'message'
+          ? await this.pendingChaoxingHistory(cmd.sessionId, agent, invocation)
+          : []
         input =
           cmd.kind === 'message'
             ? {
                 messages: [
+                  ...commandHistory,
                   new HumanMessage({
                     ...(imageBlocks.length > 0
                       ? { content: [{ type: 'text', text: `${cmd.content ?? ''}${attachmentNote}` }, ...imageBlocks] }
@@ -1643,17 +1649,13 @@ export class RunService {
     cmd: RunCommand,
     signal: AbortSignal,
     turn: TurnReducer,
+    courseId: string | null,
   ): Promise<void> {
     if (!this.deps.chaoxing) throw fail(90001, '超星尚未配置，请联系管理员')
     const parsed = chaoxingLearnSchema.safeParse({ topic: cmd.chaoxingTopic, target: cmd.chaoxingTarget })
     if (!parsed.success || parsed.data.target === 'all') throw fail(CODE.VALIDATION_FAILED, '超星命令参数无效')
     const target = parsed.data.target
     const topic = parsed.data.topic
-    const session = await this.deps.prisma.session.findFirst({
-      where: { id: cmd.sessionId, ownerId: cmd.ownerId, archivedAt: null, isTeammate: false },
-      select: { learningCourseId: true },
-    })
-    if (!session) throw fail(CODE.SESSION_NOT_FOUND)
     const toolCallId = `chaoxing-${cmd.runId}`
     const name = CHAOXING_COMMAND_TOOLS[target]
     const { text: inputText, truncated: inputTruncated } = truncateUtf8(
@@ -1671,7 +1673,7 @@ export class RunService {
       const result = await this.deps.chaoxing.learn(
         cmd.ownerId,
         topic,
-        session.learningCourseId ?? undefined,
+        courseId ?? undefined,
         signal,
         target,
       )
@@ -1693,14 +1695,50 @@ export class RunService {
       turn.feed({ type: 'text.delta', payload: { delta: text } })
       this.publish(cmd.ownerId, { type: 'text.delta', payload: { delta: text } }, cmd)
     } catch (e) {
+      // 服务层已将外部异常转换成不含凭证的提示；取消独立展示，不记成查询失败。
+      const reason = signal.aborted ? '超星查询已取消' : describeRunError(e)
       const end = {
         type: 'tool.end' as const,
-        payload: { toolCallId, name, state: 'error' as const, durationMs: Math.max(0, this.clock() - startedAt) },
+        payload: { toolCallId, name, state: 'error' as const, durationMs: Math.max(0, this.clock() - startedAt), details: reason },
       }
       turn.feed(end)
       this.publish(cmd.ownerId, end, cmd)
+      const text = { type: 'text.delta' as const, payload: { delta: reason } }
+      turn.feed(text)
+      this.publish(cmd.ownerId, text, cmd)
       throw e
     }
+  }
+
+  /** 直达命令不运行图：下一条普通消息把尚未入图的查询对话带入 checkpoint。
+   * 稳定消息 ID 避免每轮重复追加；归档过滤保持 rewind 后的上下文与可见历史一致。
+   * 只补平台已经展示的文本，不把外部资料提升为 system 指令。 */
+  private async pendingChaoxingHistory(
+    sessionId: string,
+    agent: DeepAgentLike,
+    config: object,
+  ): Promise<BaseMessage[]> {
+    const state = await agent.getState(config) as GraphStateLike
+    const known = new Set((state.values?.messages ?? []).map(message => message.id))
+    const rows = await this.deps.prisma.sessionMessage.findMany({
+      where: { sessionId, archivedAt: null },
+      orderBy: { turn: 'asc' },
+      select: { id: true, role: true, content: true },
+    })
+    const messages: BaseMessage[] = []
+    for (let i = 0; i < rows.length - 1; i++) {
+      const user = rows[i]!
+      const answer = rows[i + 1]!
+      if (user.role !== 'user' || answer.role !== 'assistant') continue
+      const slash = parseSlash(user.content)
+      if (!slash || !chaoxingCommand(slash.name)) continue
+      const userId = `chaoxing-history:${user.id}`
+      const answerId = `chaoxing-history:${answer.id}`
+      if (known.has(answerId)) continue
+      messages.push(new HumanMessage({ id: userId, content: user.content }))
+      messages.push(new AIMessage({ id: answerId, content: answer.content }))
+    }
+    return messages
   }
 
   private async compactThread(

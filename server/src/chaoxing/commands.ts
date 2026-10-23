@@ -21,6 +21,7 @@ export type ChaoxingCommandName = keyof typeof CHAOXING_COMMANDS
 export const CHAOXING_COMMAND_NAMES = Object.keys(CHAOXING_COMMANDS) as ChaoxingCommandName[]
 
 export function chaoxingCommand(name: string) {
+  if (!Object.hasOwn(CHAOXING_COMMANDS, name)) return undefined
   return (CHAOXING_COMMANDS as Record<string, (typeof CHAOXING_COMMANDS)[ChaoxingCommandName] | undefined>)[name]
 }
 
