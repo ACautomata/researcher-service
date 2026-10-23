@@ -47,3 +47,11 @@
 - 后端全量167个测试文件执行：163文件通过、1789项通过、19项跳过；4个真实 Docker smoke 套件均因本机缺少 `/var/run/docker.sock` 在初始化时失败，未将其报告为全绿。
 - 规范/需求双轴审查未发现本次增量的代码阻断项；需求轴明确真实 MCP 验收仍未完成，因此保留 #1009 打开。
 - 以上均为本地代码及外部 HTTP 替身验证，不是超星真实课程/班级/正文/链接的通过证据。
+
+## 进一步排查：不能仅凭403归责
+
+用户要求再次对照桌面原始技能包。确认本平台硬编码 MCP 地址与对方截图一致；SDK 初始化实际为 POST、JSON-RPC initialize、Bearer 个人 access token、Accept: application/json, text/event-stream，无 Origin 头，SDK 初始提出协议2025-11-25。原包使用 mooc2 HTTP 网关及 CHAOXING_API_KEY，不是 MCP 客户端；没有将其凭证混入平台 OAuth 调用。
+
+本机不带凭证或带明确无效测试令牌的同地址请求返回 APISIX 401，线上真实授权请求返回403。两组请求来源 IP 不同，此对照不能单独证明令牌有效或排除 IP 限制。仍缺少对方支持的认证/协议调用示例，不能宣称客户端兼容性已经实测排除。
+
+发现本平台诊断主动丢弃上游正文，原包却明确列出“URL不在白名单中”的403。补充 mcpRejectionReason 固定类别：url_not_allowlisted、insufficient_scope、origin_rejected、unclassified；仅根据前4096字符匹配固定特征，不回显或保存上游正文。未匹配必须保持未知，不能推断为对端问题。只有真实返回命中固定类别后才记录结论。

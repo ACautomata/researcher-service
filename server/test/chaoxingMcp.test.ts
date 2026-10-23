@@ -141,6 +141,33 @@ describe('超星查询目标映射缺失隔离', () => {
     expect(JSON.stringify(result.body)).not.toContain('denied')
     expect(h.called).toEqual([])
   })
+  it('网关明确拒绝 URL 白名单时返回固定原因类别，不回显原始错误', async () => {
+    const h = await context({}, network => async (url, init) => {
+      const body = JSON.parse(String(init?.body ?? '{}'))
+      return body.method === 'initialize'
+        ? new Response(JSON.stringify({ msg: '无效请求：URL不在白名单中', private: 'bound-token secret' }), { status: 403 })
+        : network(url, init)
+    })
+    const result = await h.ctx.request.get('/api/v1/integrations/chaoxing/capabilities').set(h.auth)
+    expect(result.body.data).toMatchObject({ mcpStage: ['initialize'], httpStatus: ['403'], mcpRejectionReason: ['url_not_allowlisted'] })
+    expect(JSON.stringify(result.body)).not.toContain('bound-token')
+    expect(JSON.stringify(result.body)).not.toContain('private')
+  })
+  it.each([
+    ['insufficient_scope bound-token secret', 'insufficient_scope'],
+    ['Invalid CORS request bound-token secret', 'origin_rejected'],
+    ['unknown private error bound-token secret', 'unclassified'],
+  ])('403 响应只提取固定类别 %s', async (text, reason) => {
+    const h = await context({}, network => async (url, init) => {
+      const body = JSON.parse(String(init?.body ?? '{}'))
+      return body.method === 'initialize' ? new Response(text, { status: 403 }) : network(url, init)
+    })
+    const result = await h.ctx.request.get('/api/v1/integrations/chaoxing/capabilities').set(h.auth)
+    expect(result.body.data.mcpRejectionReason).toEqual([reason])
+    expect(JSON.stringify(result.body)).not.toContain('bound-token')
+    expect(JSON.stringify(result.body)).not.toContain('secret')
+    expect(JSON.stringify(result.body)).not.toContain('private')
+  })
   it('工具目录错误与初始化错误可区分，JSON-RPC 原文不回显', async () => {
     const h = await context({}, network => async (url, init) => {
       const body = JSON.parse(String(init?.body ?? '{}'))

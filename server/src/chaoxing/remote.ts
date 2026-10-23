@@ -20,10 +20,11 @@ export interface LearningResult { resources: LearningResource[]; limitations: st
 export type ChaoxingQueryTarget = 'all' | 'resources' | 'topics'
 /** 部署映射缺失等本地配置问题：文案由本模块产生，可安全直出。 */
 export class ChaoxingConfigError extends Error {}
+export type McpRejectionReason = 'url_not_allowlisted' | 'insufficient_scope' | 'origin_rejected' | 'unclassified'
 export type McpStage = 'initialize' | 'tools/list' | 'tools/call'
 /** 仅由传输适配器构造的静态诊断；不携带原异常正文、请求头或令牌。 */
 export class ChaoxingMcpError extends Error {
-  constructor(readonly stage: McpStage, readonly httpStatus?: number, readonly timedOut = false) {
+  constructor(readonly stage: McpStage, readonly httpStatus?: number, readonly timedOut = false, readonly rejectionReason?: McpRejectionReason) {
     const label = { initialize: '初始化', 'tools/list': '工具目录读取', 'tools/call': '只读工具调用' }[stage]
     super(`超星 MCP ${label}${timedOut ? '超时' : '失败'}${httpStatus ? `（HTTP ${httpStatus}）` : ''}`)
   }
