@@ -2,7 +2,7 @@
 
 ## 当前状态
 
-2026-10-23：用户本人已在超星页面用学生账号完成登录与授权，平台设置页显示“已绑定”；生产状态接口返回 `configured=true`、`connected=true`。access token 到期后，生产调用成功续期，`expiresAt` 由 `2026-10-23T07:29:40.553Z` 前移至 `2026-10-23T08:33:35.064Z`，绑定保持 `connected=true`。平台侧授权事务、回调防护、刷新协调、绑定隔离与解绑行为已通过 API + 真实临时 SQLite 回归。平台无法从令牌解析账号角色，学生身份以用户本人确认为准，未记录账号标识。真实课程数据与 MCP 能力仍受 [#1009](chaoxing-mcp-verification.md) 上游初始化 403 阻塞。
+2026-10-23：用户本人已在超星页面用学生账号完成登录与授权，平台设置页显示“已绑定”；生产状态接口返回 `configured=true`、`connected=true`。access token 到期后，生产调用成功续期，`expiresAt` 由 `2026-10-23T07:29:40.553Z` 前移至 `2026-10-23T08:33:35.064Z`，绑定保持 `connected=true`。平台侧授权事务、回调防护、刷新协调、绑定隔离与解绑行为已通过 API + 真实临时 SQLite 回归。平台无法从令牌解析账号角色，学生身份以用户本人确认为准，未记录账号标识。同一学生授权已真实调用资料检索接口成功；知识点查询仍被业务拒绝，课程/班级发现、正文与链接未提供。详见 [#1009](chaoxing-mcp-verification.md)。
 
 本记录不含客户端密钥、授权码、access/refresh token、密码、账号标识或上游响应正文。
 
@@ -35,7 +35,7 @@
 来自 `server/src/chaoxing/service.ts` 与上述回归断言，均为**请求侧**事实，不等于超星已接受：
 
 - 授权端点：`https://api.chaoxing.com/auth/oauth2/authorize`。
-- 参数：`response_type=code`、配置的 `client_id`、登记的回调 `redirect_uri`、`scope=mooc:resource mooc:qbank`、一次性 `state`。
+- 参数：`response_type=code`、配置的 `client_id`、登记的回调 `redirect_uri`、`scope=mooc:resource mooc:qbank`（2026-10-23 曾试换 `statistic:studyai:read`，同入口授权失败后回退，见 [#1009](chaoxing-mcp-verification.md)）、一次性 `state`。
 - `state`：32 字节随机值（base64url，43 字符），数据库只存 SHA-256；有效期 10 分钟；回调成功或失败尝试后即删除。
 - 同浏览器校验：HttpOnly、SameSite=Lax、Secure（HTTPS 回调）、Path 限定在超星集成路由、Max-Age 600 秒的 `chaoxing_oauth` cookie 必须与回调 `state` 相等。
 - PKCE：默认启用 S256，`code_challenge` 为 verifier 的 SHA-256；仅当部署明确配置 `CHAOXING_PKCE=false` 时关闭。
@@ -56,7 +56,7 @@
 - 学生授权后 `GET /api/v1/integrations/chaoxing` 返回：`{ "configured": true, "connected": true, "expiresAt": "2026-10-23T07:29:40.553Z" }`（不含令牌）。`expiresAt` 与本次学生授权时间一致，早于此前教师重新授权的理论到期时间，支持绑定已被学生授权替换；账号身份最终以用户本人确认为准。
 - 该 access token 于 `07:29:40Z` 到期后，在 `07:33:36Z` 调用 `GET /capabilities`：服务端未返回“授权失效/请重新绑定”，而是继续执行 MCP 初始化并返回 `90003 / mcpStage=initialize / HTTP 403`。随后状态接口返回 `connected=true`、`expiresAt=2026-10-23T08:33:35.064Z`，证明真实 refresh token 已被使用且续期成功。
 - 未读取或记录密码、授权码、access/refresh token、账号名、UID 或上游响应正文。平台不解析学生/教师角色，不能独立证明角色。
-- 生产浏览器会话自动同意授权，未能在生产复验“取消/拒绝”分支；该分支由 API + 临时 SQLite 回归覆盖。真实 MCP 能力仍受 #1009 上游 403 阻塞，本票不以 MCP 数据为验收条件。
+- 生产浏览器会话自动同意授权，未能在生产复验“取消/拒绝”分支；该分支由 API + 临时 SQLite 回归覆盖。MCP 初始化 403 是路线变更前的历史观测；#1009 已转为 HTTP 接口核验，本票不以 MCP 数据为验收条件。
 
 ## CI/CD 与发布验证
 
