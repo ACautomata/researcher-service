@@ -227,7 +227,7 @@ describe('授权参数、拒绝与异常 state（#1008）', () => {
     expect(url.searchParams.get('response_type')).toBe('code')
     expect(url.searchParams.get('client_id')).toBe(options.clientId)
     expect(url.searchParams.get('redirect_uri')).toBe(options.redirectUri)
-    expect(url.searchParams.get('scope')).toBe('mooc:resource mooc:qbank')
+    expect(url.searchParams.get('scope')).toBe('statistic:studyai:read')
     expect(url.searchParams.get('code_challenge_method')).toBe('S256')
     expect(url.searchParams.get('code_challenge')).toMatch(/^[A-Za-z0-9_-]{43}$/)
     expect(state).toMatch(/^[A-Za-z0-9_-]{43}$/)
