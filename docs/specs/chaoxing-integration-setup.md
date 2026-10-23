@@ -30,7 +30,7 @@
 
 1. 配置 CHAOXING_CLIENT_ID、CHAOXING_CLIENT_SECRET、CHAOXING_REDIRECT_URI、CHAOXING_CREDENTIAL_SECRET（至少32字符，独立加密根，随数据库备份安全保管；更换后旧授权无法解密，需要重新绑定）。任一授权字段配置时必须完整配置；全未配置时保留原平台功能，学习入口不启用。
 2. 将正式回调地址交超星登记。候选：`https://researcher.acautomata.top/api/v1/integrations/chaoxing/callback`。部署并确认真实域名后再联调。
-3. 按超星 2026-10-23 回复，MCP 授权请求使用 scope `statistic:studyai:read`；S256 PKCE 和 token 客户端认证仍需分别核验。默认 CHAOXING_PKCE=true；只有对方确认不支持时配置 false。CHAOXING_TOKEN_AUTH 可为 body（默认）或 basic。
+3. 恢复使用应用最初标注已申请的 scope `mooc:resource mooc:qbank`；`statistic:studyai:read` 的同应用授权尚未核验，替换后重新授权失败，暂不继续使用；S256 PKCE 和 token 客户端认证仍需分别核验。默认 CHAOXING_PKCE=true；只有对方确认不支持时配置 false。CHAOXING_TOKEN_AUTH 可为 body（默认）或 basic。
 4. scope 更新不会提升既有 token 的权限，刷新 token 也不能视为已取得新 scope。部署后，已绑定用户需在账号设置重新发起绑定并完成授权，再检查 `/capabilities`；不批量清除既有绑定。账号设置发起绑定，由学生在超星登录，授权后返回平台。回调以一次性 state 和同浏览器 HttpOnly/SameSite=Lax cookie 关联，后台不接收学生密码。解绑清除本地授权；尚无已验证的远端撤销协议。
 5. 后端 GET `/api/v1/integrations/chaoxing/capabilities`（平台 Bearer 认证）可查看该学生获授权的 MCP 工具与 schema。工具名和参数不要从猜测填入映射，也不要记录令牌。可在现有管理台 `/admin/docs` 展开“超星学习”→“检查本人授权的 MCP 工具目录”→ Try it out → Execute，使用当前平台会话调用，不必导出 token。调试界面自动生成的 curl 含认证头，不可截图或复制到票面。
 

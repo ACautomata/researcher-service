@@ -35,7 +35,7 @@
 来自 `server/src/chaoxing/service.ts` 与上述回归断言，均为**请求侧**事实，不等于超星已接受：
 
 - 授权端点：`https://api.chaoxing.com/auth/oauth2/authorize`。
-- 参数：`response_type=code`、配置的 `client_id`、登记的回调 `redirect_uri`、`scope=statistic:studyai:read`、一次性 `state`。
+- 参数：`response_type=code`、配置的 `client_id`、登记的回调 `redirect_uri`、`scope=mooc:resource mooc:qbank`、一次性 `state`。
 - `state`：32 字节随机值（base64url，43 字符），数据库只存 SHA-256；有效期 10 分钟；回调成功或失败尝试后即删除。
 - 同浏览器校验：HttpOnly、SameSite=Lax、Secure（HTTPS 回调）、Path 限定在超星集成路由、Max-Age 600 秒的 `chaoxing_oauth` cookie 必须与回调 `state` 相等。
 - PKCE：默认启用 S256，`code_challenge` 为 verifier 的 SHA-256；仅当部署明确配置 `CHAOXING_PKCE=false` 时关闭。
