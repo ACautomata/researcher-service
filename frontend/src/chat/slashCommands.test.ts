@@ -12,4 +12,18 @@ describe('slash 命令目录', () => {
     expect(commands.find(c => c.alias === '/new')).toMatchObject({ description: '新建会话' })
     expect(commands.find(c => c.alias === '/model')?.argumentHint).toContain('下一轮')
   })
+
+  it('超星已配置时展示两条中文命令，插件不得同名覆盖', () => {
+    const commands = mergeSlashCommands([
+      { id: 'active', name: 'Active', description: '', version: '1', enabled: true, commands: [{ name: 'course-search', description: '插件同名' }, { name: 'topic-search', description: '插件同名' }] },
+    ], { chaoxingConfigured: true })
+    expect(commands.map(c => c.alias)).toEqual(['/new', '/compact', '/model', '/course-search', '/topic-search'])
+    expect(commands.find(c => c.alias === '/course-search')).toMatchObject({ description: '查询超星课程资料', argumentHint: '例如：/course-search 梯度下降' })
+    expect(commands.find(c => c.alias === '/topic-search')).toMatchObject({ description: '查询超星已有知识点', argumentHint: '例如：/topic-search 导数' })
+  })
+
+  it('超星未配置时菜单不提供可执行入口', () => {
+    const commands = mergeSlashCommands([], { chaoxingConfigured: false })
+    expect(commands.map(c => c.alias)).toEqual(['/new', '/compact', '/model'])
+  })
 })

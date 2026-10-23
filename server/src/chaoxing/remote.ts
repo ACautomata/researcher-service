@@ -17,10 +17,13 @@ export interface LearningResource {
   kind: 'resource' | 'topic'
 }
 export interface LearningResult { resources: LearningResource[]; limitations: string[] }
+export type ChaoxingQueryTarget = 'all' | 'resources' | 'topics'
+/** 部署映射缺失等本地配置问题：文案由本模块产生，可安全直出。 */
+export class ChaoxingConfigError extends Error {}
 export interface ChaoxingRemote {
   exchange(code: string, verifier: string): Promise<ChaoxingToken>
   refresh(refreshToken: string): Promise<ChaoxingToken>
   courses?(token: string, signal?: AbortSignal): Promise<{ rows: { id: string; name: string; classId?: string }[]; truncated: boolean }>
   inspect(token: string, signal?: AbortSignal): Promise<{ tools: { name: string; description?: string; inputSchema: unknown }[]; capabilities: string[] }>
-  learn(token: string, topic: string, courseId?: string, signal?: AbortSignal): Promise<LearningResult>
+  learn(token: string, topic: string, courseId?: string, signal?: AbortSignal, target?: ChaoxingQueryTarget): Promise<LearningResult>
 }

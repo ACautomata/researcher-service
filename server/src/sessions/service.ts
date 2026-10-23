@@ -1,4 +1,6 @@
-import { parseSlash, SYSTEM_COMMANDS } from '../plugins/slash'
+import { parseSlash, BUILTIN_COMMANDS } from '../plugins/slash'
+import { chaoxingCommand } from '../chaoxing/commands'
+import { chaoxingLearnSchema } from '../validation/schemas'
 import type { ModelRef } from '../runner/providerRegistry'
 import { snapshotRunCapabilities } from '../runner/capabilities'
 import type { PluginRuntime } from '../plugins/surface'
@@ -191,6 +193,10 @@ export interface SessionServiceDeps {
   /** 插件运行时（#788 · #752 §2.3）：插件命令 {inject}/{execute} 在 sendMessage 命令构造点
    *  消费（启用集 per-command 现读快照）。缺省不注 = 无插件命令源（两源合并退化为单源）。 */
   readonly plugins?: PluginRuntime
+  /** 超星内置命令的部署/绑定前置检查（只读 DB，不触远端）。缺省不注 = 跳过前置检查。 */
+  readonly chaoxing?: {
+    readonly status: (ownerId: string) => Promise<{ configured: boolean; connected: boolean }>
+  }
 }
 
 // 恢复菜单三态 REWIND_SCOPES/RewindScope 单点在 ./values（zod schema 同源派生）。
@@ -459,6 +465,17 @@ export class SessionService {
     if (existing) return this.replayOrConflict(existing, p.content)
     if (slash?.name === 'new' || slash?.name === 'model') return this.executeSystemCommand(user, sessionId, p, slash)
     if (slash?.name === 'compact' && slash.args) throw fail(CODE.VALIDATION_FAILED, '/compact 不接受参数')
+    // 内置学习命令：参数校验 + 部署/绑定前置检查都在 REST 面完成——未配置/未绑定不产生
+    // run，也不把命令原文交给模型自由解释。
+    const chaoxing = slash ? chaoxingCommand(slash.name) : undefined
+    if (slash && chaoxing) {
+      if (!chaoxingLearnSchema.safeParse({ topic: slash.args }).success) {
+        throw fail(CODE.VALIDATION_FAILED, slash.args ? '关键词不能超过 1000 个字符' : chaoxing.usage)
+      }
+      const status = await this.deps.chaoxing?.status(user.id)
+      if (status && !status.configured) throw fail(90001, '超星尚未配置，请联系管理员')
+      if (status && !status.connected) throw fail(90003, '请先在账号设置（/settings）绑定超星账号')
+    }
 
     // 多端门禁（#747 C 节）：queued/running → 50005 禁新输入；interrupted → 50003 须先审批
     //（内核面 RunService.execute 同挡，此处 REST 即时反馈——入队前拒绝，不产生 queued 幽灵）。
@@ -482,7 +499,7 @@ export class SessionService {
     // 等未知命令）以原文直入 run。启用集 per-command 现读快照（禁用即下个命令不生效）。
     let runContent = p.content
     let pluginExecute: { tool: string; args: unknown } | undefined
-    if (slash && !(SYSTEM_COMMANDS as readonly string[]).includes(slash.name) && this.deps.plugins) {
+    if (slash && !(BUILTIN_COMMANDS as readonly string[]).includes(slash.name) && this.deps.plugins) {
       const enabled = await snapshotRunCapabilities(this.deps.prisma, user.id)
       const pluginCommand = this.deps.plugins
         .surface([...enabled.enabledPluginIds])
@@ -502,6 +519,7 @@ export class SessionService {
     })
 
     if (slash?.name === 'compact') cmd = { ...cmd, operation: 'compact' }
+    else if (slash && chaoxing) cmd = { ...cmd, operation: 'chaoxing-query', chaoxingTarget: chaoxing.target, chaoxingTopic: slash.args }
     else if (pluginExecute) cmd = { ...cmd, operation: 'plugin-execute', pluginTool: pluginExecute.tool, pluginArgs: pluginExecute.args }
 
     // rewind 残留清理（#781 story 16）：rewind 态（指针非空）时，锚点之后的残留行归档（#770

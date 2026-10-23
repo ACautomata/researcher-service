@@ -34,7 +34,7 @@ import { FILE_TOOLS, EXEC_TOOLS } from './approval/values'
 import { PLUGIN_MANIFESTS } from '../../../plugins/index'
 import { assertPluginEnv, assertValidPluginCatalog } from '../plugins/registry'
 import { createPluginRuntime, resolvePluginConfig, type PluginRuntime } from '../plugins/surface'
-import { SYSTEM_COMMANDS } from '../plugins/slash'
+import { BUILTIN_COMMANDS } from '../plugins/slash'
 
 export interface RunnerAssembly {
   readonly service: RunService
@@ -110,7 +110,7 @@ export async function assembleRunner(opts: {
     await assertValidPluginCatalog({
       manifests: PLUGIN_MANIFESTS,
       coreToolNames: [...FILE_TOOLS, ...EXEC_TOOLS, 'task', CHAOXING_TOOL_NAME, ...TEAMMATE_TOOL_NAMES],
-      reservedCommandNames: [...SYSTEM_COMMANDS],
+      reservedCommandNames: [...BUILTIN_COMMANDS],
     })
     // env 直读 = 配置边界豁免（GLOSSARY「配置边界/豁免」）：组合根装配期一次性注入，经参数下传。
     assertPluginEnv(PLUGIN_MANIFESTS, {

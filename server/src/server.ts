@@ -88,6 +88,7 @@ async function main(): Promise<void> {
     runService: runner.service,
     dispatch: (cmd) => runner.queue.submit(cmd),
     plugins: runner.plugins,
+    chaoxing: { status: (ownerId) => chaoxing.status(ownerId) },
     sandboxes: {
       remove: (id) => sandboxes.lifecycle.remove(id),
       // #781 fork 字面复制（#768 D7）：源容器 export→import（源缺 → 'source-missing' 空起步）

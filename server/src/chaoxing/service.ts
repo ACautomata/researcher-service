@@ -3,7 +3,7 @@ import type { PrismaClient } from '../generated/prisma/client'
 import { encryptCredential, decryptCredential } from '../models/cipher'
 import { fail } from '../envelope'
 import type { ChaoxingOptions } from './options'
-import { tokenSchema, type ChaoxingRemote, type ChaoxingToken } from './remote'
+import { ChaoxingConfigError, tokenSchema, type ChaoxingQueryTarget, type ChaoxingRemote, type ChaoxingToken } from './remote'
 
 const hash = (value: string) => createHash('sha256').update(value).digest('hex')
 const unavailable = () => fail(90001, '超星尚未配置，请联系管理员')
@@ -102,6 +102,7 @@ export class ChaoxingService {
       const secrets = [token, material.refresh_token, this.options!.clientSecret].filter((v): v is string => !!v)
       return JSON.parse(JSON.stringify(result, (_key, value: unknown) => typeof value === 'string' ? secrets.reduce((text, secret) => text.split(secret).join('[REDACTED]'), value) : value)) as T
     } catch (error) {
+      if (error instanceof ChaoxingConfigError) throw fail(90003, error.message)
       const authError = error as { code?: unknown; name?: unknown }
       if (authError?.code === 401 || authError?.name === 'UnauthorizedError') await this.invalidate(ownerId, binding.generation, binding.tokenCipher)
       throw fail(90003, '超星调用不可用，请检查绑定状态、课程权限和工具映射后重试')
@@ -129,8 +130,8 @@ export class ChaoxingService {
   async inspect(ownerId: string) {
     return this.authorized(ownerId, token => this.remote!.inspect(token))
   }
-  async learn(ownerId: string, topic: string, courseId?: string, signal?: AbortSignal) {
+  async learn(ownerId: string, topic: string, courseId?: string, signal?: AbortSignal, target: ChaoxingQueryTarget = 'all') {
     signal?.throwIfAborted()
-    return this.authorized(ownerId, token => this.remote!.learn(token, topic, courseId, signal))
+    return this.authorized(ownerId, token => this.remote!.learn(token, topic, courseId, signal, target))
   }
 }

@@ -1,7 +1,7 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { z } from 'zod'
-import { tokenSchema, type ChaoxingRemote, type LearningResource } from './remote'
+import { ChaoxingConfigError, tokenSchema, type ChaoxingRemote, type LearningResource } from './remote'
 import type { ChaoxingOptions } from './options'
 
 const MCP_URL = 'https://api.chaoxing.com/openai/studyai/data'
@@ -128,21 +128,32 @@ export function createChaoxingRemote(options: ChaoxingOptions, input: McpMapping
     refresh: refreshToken => oauth({ grant_type: 'refresh_token', refresh_token: refreshToken }),
     courses: (token, signal) => session(token, signal, client => courses(client, signal)),
     inspect: (token, signal) => session(token, signal, async client => ({ tools: (await list(client)).map(t => ({ name: t.name, description: t.description, inputSchema: t.inputSchema })), capabilities: Object.entries(config).filter(([, value]) => !!value).map(([key]) => key) })),
-    learn: (token, topic, courseId, signal) => session(token, signal, async client => {
+    learn: (token, topic, courseId, signal, target = 'all') => session(token, signal, async client => {
       const deadline = AbortSignal.any([AbortSignal.timeout(45_000), ...(signal ? [signal] : [])])
+      if (target === 'resources' && !config.search) throw new ChaoxingConfigError('资料检索能力尚未配置')
+      if (target === 'topics' && !config.topics) throw new ChaoxingConfigError('知识点查询能力尚未配置')
+      const needed = target === 'resources'
+        ? [config.courses, config.search, config.read]
+        : target === 'topics' ? [config.courses, config.topics] : Object.values(config)
       const available = await list(client)
-      for (const map of Object.values(config)) if (map && !available.some(t => t.name === map.name)) throw new Error('已配置工具不在当前授权目录')
-      if (!config.courses) return { resources: [], limitations: ['尚未配置并验证课程发现能力，无法自动定位课程资源'] }
+      for (const map of needed) if (map && !available.some(t => t.name === map.name)) throw new ChaoxingConfigError('已配置工具不在当前授权目录')
+      if (!config.courses) {
+        if (target !== 'all') throw new ChaoxingConfigError('课程发现能力未配置')
+        return { resources: [], limitations: ['尚未配置并验证课程发现能力，无法自动定位课程资源'] }
+      }
       const all = await courses(client, deadline)
       const eligible = courseId ? all.rows.filter(c => c.id === courseId) : all.rows
-      if (courseId && !eligible.length) throw new Error('课程无权限或课程列表不完整')
+      if (courseId && !eligible.length) throw new ChaoxingConfigError('课程无权限或课程列表不完整')
       const limitations: string[] = []
       if (eligible.length > 10 || all.truncated) limitations.push('课程较多，本次仅检索前 10 个获授权课程，结果可能不完整；可以指定课程缩小范围')
       const resources: LearningResource[] = []
-      if (!config.search) limitations.push('资料检索能力尚未配置')
-      if (!config.topics) limitations.push('知识点查询能力尚未配置')
+      if (target === 'all' && !config.search) limitations.push('资料检索能力尚未配置')
+      if (target === 'all' && !config.topics) limitations.push('知识点查询能力尚未配置')
+      const kinds = target === 'all'
+        ? [['resource', config.search], ['topic', config.topics]] as const
+        : target === 'resources' ? [['resource', config.search]] as const : [['topic', config.topics]] as const
       for (const course of eligible.slice(0, 10)) {
-        for (const [kind, map] of [['resource', config.search], ['topic', config.topics]] as const) {
+        for (const [kind, map] of kinds) {
           if (!map) continue
           let result = await search(client, map, course, topic, kind, deadline)
           // Reuse the supplied skill's zero-hit retry then full-list verification; only related matches survive fallback.
@@ -157,7 +168,7 @@ export function createChaoxingRemote(options: ChaoxingOptions, input: McpMapping
       }
       const shown = resources.slice(0, 50)
       if (resources.length > 50) limitations.push('资料数量较多，展示上限50个资料')
-      if (config.read) for (const resource of shown.filter(r => r.kind === 'resource' && !r.text).slice(0, 5)) {
+      if (config.read && target !== 'topics') for (const resource of shown.filter(r => r.kind === 'resource' && !r.text).slice(0, 5)) {
         const output = await call(client, config.read, { [config.read.courseArg]: resource.courseId, [config.read.resourceArg]: resource.id }, deadline)
         const text = scalar(at(output, config.read.textField))
         if (text) resource.text = text.slice(0, 12_000)
