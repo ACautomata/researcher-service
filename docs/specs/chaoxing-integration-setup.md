@@ -83,3 +83,9 @@ MCP 内容支持 structuredContent，或含 JSON 的 text 内容块；其他响�
 - 前端全量78文件/945测试通过，构建及 admin 产物隔离检查通过。
 - 后端全量165文件执行：160文件通过，1761测试通过；4个真实 Docker 套件因 /var/run/docker.sock 缺失失败，1项既有退役扫描被本地 .zcode 工作流产物触发。这些文件不属于本功能变更。审查后新增回归测试另行专项通过，未宣称全量全绿。
 - 双轴审查：规范轴发现并修复旧刷新误清新授权竞态；需求轴要求的课程快照及跨用户范围变更补充测试。真实模型推荐质量和超星授权数据验收仍待外部条件完成。
+
+## 跨传输只读诊断
+
+GET `/api/v1/integrations/chaoxing/mcp-capabilities` 在HTTP默认模式下独立检查原固定MCP入口，复用本人绑定、刷新、代次校验、401失效及脱敏规则。只执行初始化和目录读取，无需变更CHAOXING_TRANSPORT，不调用未知业务工具。未配置时90001，未绑定时90003。
+
+HTTP失败的 `data.httpFailureReason` 为固定枚举：http_rejected、business_rejected、response_schema、invalid_json、too_large、transport。仅区分拒绝/结构/解析/大小/传输，不包含上游错误文本或数据值；business_rejected不等于已证明权限原因。

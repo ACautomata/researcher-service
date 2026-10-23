@@ -713,6 +713,7 @@ for (const endpoint of [
   { method: 'get' as const, suffix: '', summary: '读取本人超星绑定状态' },
   { method: 'post' as const, suffix: '/authorize', summary: '发起本人超星授权', body: chaoxingAuthorizeSchema },
   { method: 'delete' as const, suffix: '', summary: '解绑并清除本人授权', body: chaoxingAuthorizeSchema },
+  { method: 'get' as const, suffix: '/mcp-capabilities', summary: '独立核验本人 MCP 初始化与工具目录（不切换查询模式）' },
   { method: 'get' as const, suffix: '/capabilities', summary: '检查超星接入能力与核验状态' },
   { method: 'get' as const, suffix: '/courses', summary: '读取本人获授权课程' },
   { method: 'get' as const, suffix: '/sessions/{id}/scope', summary: '读取可选会话课程范围' },

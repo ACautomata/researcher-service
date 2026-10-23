@@ -84,3 +84,11 @@
 用户要求恢复原scope。线上已部署HTTP默认模式；在现有管理台POST `/authorize` 创建同浏览器授权事务后，仅把返回授权URL的scope替换为 `mooc:resource mooc:qbank`，保留state、PKCE challenge、client及回调地址，浏览器正常完成超星流程。最终回到 `/settings?chaoxing=connected`，页面显示“超星授权成功”“已绑定”。没有导出令牌、授权码或state。
 
 此前 `statistic:studyai:read` 同入口授权失败，原scope对照成功，强烈支持该scope与当前应用授权不兼容；仍不能由成功绑定推出MCP初始化或HTTP业务调用已通过。代码恢复原两个scope，避免后续绑定继续发起未成功验证的scope。当前线上HTTP模式的 `/capabilities` 不会连接MCP，因此不将本次绑定成功写为MCP补测成功。
+
+## 原 scope 绑定后的真实 HTTP 调用（2026-10-23）
+
+用户提供本人学生课程页面，使用当前绑定及该课程/班级参数，通过管理台POST `/learn` 分别验证两个目标，不导出凭证。
+
+- `target=resources`、关键词“可视”：真实 `code=0`，返回多条课程资料目录，含文件名称和ID；未在公开记录写入个人课程ID、班级ID或学生作品名称。该结果验证本次OAuth token可用于资料HTTP入口；没有取得正文或可访问链接的证据。
+- `target=topics`、同一课程及关键词：真实 `code=90003`，`httpOperation=topics`，无HTTP状态。当前适配器对业务拒绝及schema不符返回相同静态错误，因此不能从此结果断定学生无权限、接口故障或知识点为空。补充固定错误类别以便区分，仍不回传上游正文。
+- 当前线上默认HTTP，GET `/capabilities`只报告本地HTTP契约，不调用MCP。为了完成同一绑定下的MCP对照，增加独立GET `/mcp-capabilities`，只初始化并读取完整目录，不执行工具、不切换全站模式；需部署后才能进行新的真实MCP核验。此前403不作为这次新授权的结果。

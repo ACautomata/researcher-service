@@ -11,7 +11,7 @@ const rebind = () => fail(90003, '超星授权已失效，请在账号设置重�
 
 export class ChaoxingService {
   private readonly refreshing = new Map<string, Promise<string>>()
-  constructor(private readonly prisma: PrismaClient, private readonly options?: ChaoxingOptions, private readonly remote?: ChaoxingRemote) {}
+  constructor(private readonly prisma: PrismaClient, private readonly options?: ChaoxingOptions, private readonly remote?: ChaoxingRemote, private readonly mcpRemote?: Pick<ChaoxingRemote, 'inspect'>) {}
 
   async status(ownerId: string) {
     const row = await this.prisma.chaoxingBinding.findUnique({ where: { ownerId } })
@@ -104,7 +104,7 @@ export class ChaoxingService {
     } catch (error) {
       if (error instanceof ChaoxingHttpError) {
         if (error.httpStatus === 401) await this.invalidate(ownerId, binding.generation, binding.tokenCipher)
-        throw fail(90003, error.message, { httpOperation: [error.operation], ...(error.httpStatus ? { httpStatus: [String(error.httpStatus)] } : {}) })
+        throw fail(90003, error.message, { httpOperation: [error.operation], httpFailureReason: [error.reason], ...(error.httpStatus ? { httpStatus: [String(error.httpStatus)] } : {}) })
       }
       if (error instanceof ChaoxingMcpError) {
         if (error.httpStatus === 401) await this.invalidate(ownerId, binding.generation, binding.tokenCipher)
@@ -134,6 +134,10 @@ export class ChaoxingService {
     const changed = await this.prisma.session.updateMany({ where: { id: sessionId, ownerId, archivedAt: null, isTeammate: false }, data: { learningCourseId: courseId } })
     if (!changed.count) throw fail(50002)
     return { courseId }
+  }
+  async inspectMcp(ownerId: string) {
+    if (!this.mcpRemote) throw unavailable()
+    return this.authorized(ownerId, token => this.mcpRemote!.inspect(token))
   }
   async inspect(ownerId: string) {
     return this.authorized(ownerId, token => this.remote!.inspect(token))

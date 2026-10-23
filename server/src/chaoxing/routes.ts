@@ -10,11 +10,11 @@ import type { ChaoxingOptions } from './options'
 import type { ChaoxingRemote } from './remote'
 import { ChaoxingService } from './service'
 
-export interface ChaoxingDeps { options?: ChaoxingOptions; remote?: ChaoxingRemote; service?: ChaoxingService }
+export interface ChaoxingDeps { options?: ChaoxingOptions; remote?: ChaoxingRemote; mcpRemote?: Pick<ChaoxingRemote, 'inspect'>; service?: ChaoxingService }
 const callbackSchema = z.object({ state: z.string().min(1).max(256), code: z.string().min(1).max(4096).optional(), error: z.string().max(1000).optional() })
 export function createChaoxingRouter(prisma: PrismaClient, deps: ChaoxingDeps = {}) {
   const router = Router()
-  const service = deps.service ?? new ChaoxingService(prisma, deps.options, deps.remote)
+  const service = deps.service ?? new ChaoxingService(prisma, deps.options, deps.remote, deps.mcpRemote)
   const cookie = { httpOnly: true, sameSite: 'lax' as const, secure: deps.options ? new URL(deps.options.redirectUri).protocol === 'https:' : process.env.NODE_ENV === 'production', path: '/api/v1/integrations/chaoxing' }
   router.get('/callback', async (req, res) => {
     res.setHeader('Cache-Control', 'no-store')
@@ -42,6 +42,7 @@ export function createChaoxingRouter(prisma: PrismaClient, deps: ChaoxingDeps = 
     const body: z.infer<typeof chaoxingScopeSchema> = req.body
     ok(res, await service.setScope(req.user!.id, String(req.params.id), body.courseId))
   })
+  router.get('/mcp-capabilities', async (req, res) => ok(res, await service.inspectMcp(req.user!.id)))
   router.get('/capabilities', async (req, res) => ok(res, await service.inspect(req.user!.id)))
   router.post('/learn', validateBody(chaoxingLearnSchema), async (req, res) => {
     const body: z.infer<typeof chaoxingLearnSchema> = req.body

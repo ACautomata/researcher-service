@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { ChaoxingMcpError } from '../src/chaoxing/remote'
 import { createChaoxingHttpRemote } from '../src/chaoxing/httpClient'
 import { setupTestApp, type TestContext } from './setup'
 import { seedUser, login, bearer } from './helpers'
@@ -15,6 +16,8 @@ describe('超星 HTTP 只读查询', () => {
   let ctx: TestContext
   let auth: Record<string, string>
   const calls: { url: URL; init?: RequestInit }[] = []
+  const mcpTokens: string[] = []
+  let mcpFailure = false
   let upstream: (url: URL) => Response
   const json = (value: unknown) => new Response(JSON.stringify(value))
   beforeAll(async () => {
@@ -24,7 +27,11 @@ describe('超星 HTTP 只读查询', () => {
       if (url.pathname.endsWith('/token')) return json({ access_token: 'bound-token', token_type: 'Bearer', expires_in: 3600 })
       return upstream(url)
     }
-    ctx = await setupTestApp({ chaoxing: { options, remote: createChaoxingHttpRemote(options, network) } })
+    ctx = await setupTestApp({ chaoxing: { options, remote: createChaoxingHttpRemote(options, network), mcpRemote: { inspect: async token => {
+      mcpTokens.push(token)
+      if (mcpFailure) throw new ChaoxingMcpError('initialize', 403, false, 'unclassified')
+      return { tools: [{ name: 'fixture_read', inputSchema: { type: 'object' } }], capabilities: [] }
+    } } } })
     await seedUser(ctx.prisma, 'http-student', 'student-password')
     auth = bearer((await login(ctx.request, 'http-student', 'student-password')).access)
     const start = await ctx.request.post(`${base}/authorize`).set(auth).send({})
@@ -44,6 +51,22 @@ describe('超星 HTTP 只读查询', () => {
     const courses = await ctx.request.get(`${base}/courses`).set(auth)
     expect(courses.body).toMatchObject({ code: 90003, message: expect.stringContaining('尚未提供课程/班级发现接口') })
     expect(calls).toHaveLength(0)
+  })
+
+  it('独立MCP检查使用本人绑定，HTTP能力报告和查询模式保持不变', async () => {
+    const rejected = await ctx.request.get(`${base}/mcp-capabilities`)
+    expect(rejected.body.code).toBe(10001)
+    const before = calls.length
+    const result = await ctx.request.get(`${base}/mcp-capabilities`).set(auth)
+    expect(result.body.code).toBe(0)
+    expect(result.body.data.tools[0].name).toBe('fixture_read')
+    expect(mcpTokens).toEqual(['bound-token'])
+    expect(calls).toHaveLength(before)
+    mcpFailure = true
+    const failure = await ctx.request.get(`${base}/mcp-capabilities`).set(auth)
+    expect(failure.body).toMatchObject({ code: 90003, data: { mcpStage: ['initialize'], httpStatus: ['403'] } })
+    expect((await ctx.request.get(`${base}/capabilities`).set(auth)).body.data.http.transport).toBe('https-json')
+    expect((await ctx.request.get(base).set(auth)).body.data.connected).toBe(true)
   })
 
   it('缺课程或学生班级时明确提示，拒绝教师身份参数，且不发送请求', async () => {
@@ -106,10 +129,11 @@ describe('超星 HTTP 只读查询', () => {
   })
 
   it('业务拒绝、错误结构和超大正文均脱敏失败，403保留绑定', async () => {
-    for (const response of [json({ status: false, msg: 'bound-token private-client-secret' }), json({ status: true, data: {} }), new Response('x'.repeat(2_000_001)), new Response('bound-token private-client-secret', { status: 403 })]) {
+    for (const [response, reason] of [[json({ status: false, msg: 'bound-token private-client-secret' }), 'business_rejected'], [json({ status: true, data: {} }), 'response_schema'], [new Response('not json'), 'invalid_json'], [new Response('x'.repeat(2_000_001)), 'too_large'], [new Response('bound-token private-client-secret', { status: 403 }), 'http_rejected']] as const) {
       upstream = () => response
       const result = await learn({ courseId: '123', target: 'topics' })
       expect(result.body.code).toBe(90003)
+      expect(result.body.data.httpFailureReason).toEqual([reason])
       expect(JSON.stringify(result.body)).not.toContain('bound-token')
       expect(JSON.stringify(result.body)).not.toContain('private-client-secret')
     }
