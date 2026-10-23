@@ -79,6 +79,12 @@
 
 用户确认没有提供课程ID、学生班级ID或课程列表接口。尝试连接现有浏览器会话时，两次浏览器tab连接超时；原生Chrome可见本人已绑定，但绑定成功不等于接口授权已验证。未导出令牌，未使用猜测ID调用。缺少真实参数和发现接口，尚无法完成正常/空结果/分页及学生权限验收，#1009不能关闭。旧MCP403记录保留为历史，不能拿它判断新HTTP端点是否成功。
 
+## 原 scope 对照：真实绑定恢复成功（2026-10-23）
+
+用户要求恢复原scope。线上已部署HTTP默认模式；在现有管理台POST `/authorize` 创建同浏览器授权事务后，仅把返回授权URL的scope替换为 `mooc:resource mooc:qbank`，保留state、PKCE challenge、client及回调地址，浏览器正常完成超星流程。最终回到 `/settings?chaoxing=connected`，页面显示“超星授权成功”“已绑定”。没有导出令牌、授权码或state。
+
+此前 `statistic:studyai:read` 同入口授权失败，原scope对照成功，强烈支持该scope与当前应用授权不兼容；仍不能由成功绑定推出MCP初始化或HTTP业务调用已通过。代码恢复原两个scope，避免后续绑定继续发起未成功验证的scope。当前线上HTTP模式的 `/capabilities` 不会连接MCP，因此不将本次绑定成功写为MCP补测成功。
+
 ## 原 scope 绑定后的真实 HTTP 调用（2026-10-23）
 
 用户提供本人学生课程页面，使用当前绑定及该课程/班级参数，通过管理台POST `/learn` 分别验证两个目标，不导出凭证。
