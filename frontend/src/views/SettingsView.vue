@@ -35,6 +35,7 @@ onMounted(load)
       <h2 id="chaoxing-heading">超星学习账号</h2>
       <p>绑定本人超星账号后，在对话中学习即可获得相关课程资料和知识点推荐。</p>
       <p>仅查询你有权限的教学数据，不修改课程或创建知识点。超星密码由超星登录页面处理。</p>
+      <p>解绑会立即停止本平台的课程数据访问并清除本地授权；超星侧尚未提供已验证的远端撤销接口，如需撤销应用授权请前往超星账号设置操作。授权过期或失效后，可在此重新绑定。</p>
       <p v-if="notice" role="status">{{ notice }}</p>
       <p v-if="error" role="alert">{{ error }}</p>
       <template v-if="status">

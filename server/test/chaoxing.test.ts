@@ -1,10 +1,11 @@
+import { createHash } from 'node:crypto'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { setupTestApp, type TestContext } from './setup'
 import { bearer, login, seedUser } from './helpers'
-import type { ChaoxingRemote } from '../src/chaoxing/remote'
+import { ChaoxingMcpError, type ChaoxingRemote } from '../src/chaoxing/remote'
 
 const options = {
   clientId: 'test-client', clientSecret: 'test-secret',
@@ -191,5 +192,239 @@ describe('重新授权与旧刷新隔离', () => {
     release!()
     await query
     expect((await ctx.request.get('/api/v1/integrations/chaoxing').set(auth)).body.data.connected).toBe(true)
+  })
+})
+
+// #1008：真实学生授权前的平台侧可复核边界。外部 OAuth/MCP 由受控替身替代，
+// 授权事务、回调归属、令牌持久化与用户隔离走真实临时 SQLite。
+describe('授权参数、拒绝与异常 state（#1008）', () => {
+  let ctx: TestContext
+  let auth: Record<string, string>
+  let exchanges = 0
+  const gateway: ChaoxingRemote = {
+    ...remote,
+    async exchange() { exchanges++; return { access_token: 'should-not-be-issued', token_type: 'Bearer', expires_in: 3600 } },
+  }
+  const hash = (value: string) => createHash('sha256').update(value).digest('hex')
+  async function begin(user = auth) {
+    const response = await ctx.request.post('/api/v1/integrations/chaoxing/authorize').set(user).send({})
+    expect(response.body.code).toBe(0)
+    const url = new URL(response.body.data.url)
+    return { url, state: url.searchParams.get('state')!, response }
+  }
+  const call = (cookieState: string, state: string, extra: Record<string, string> = {}) =>
+    ctx.request.get('/api/v1/integrations/chaoxing/callback').set('Cookie', `chaoxing_oauth=${cookieState}`).query({ state, ...extra })
+  const finish = (state: string, extra: Record<string, string> = {}) => call(state, state, extra)
+  beforeAll(async () => {
+    ctx = await setupTestApp({ chaoxing: { options, remote: gateway } })
+    await seedUser(ctx.prisma, 'cx-state', 'student-password')
+    auth = bearer((await login(ctx.request, 'cx-state', 'student-password')).access)
+  })
+  afterAll(async () => ctx?.cleanup())
+
+  it('授权地址只携带已确认参数和 scope，state cookie 同浏览器限时', async () => {
+    const { url, state, response } = await begin()
+    expect(url.searchParams.get('response_type')).toBe('code')
+    expect(url.searchParams.get('client_id')).toBe(options.clientId)
+    expect(url.searchParams.get('redirect_uri')).toBe(options.redirectUri)
+    expect(url.searchParams.get('scope')).toBe('mooc:resource mooc:qbank')
+    expect(url.searchParams.get('code_challenge_method')).toBe('S256')
+    expect(url.searchParams.get('code_challenge')).toMatch(/^[A-Za-z0-9_-]{43}$/)
+    expect(state).toMatch(/^[A-Za-z0-9_-]{43}$/)
+    expect(url.searchParams.get('client_secret')).toBeNull()
+    expect(url.searchParams.get('access_token')).toBeNull()
+    const setCookie = response.headers['set-cookie'] as unknown as string[] | undefined
+    const cookie = setCookie?.find(value => value.startsWith('chaoxing_oauth=')) ?? ''
+    expect(cookie).toContain(`chaoxing_oauth=${state}`)
+    expect(cookie).toMatch(/HttpOnly/i)
+    expect(cookie).toMatch(/SameSite=Lax/i)
+    expect(cookie).toContain('Path=/api/v1/integrations/chaoxing')
+    expect(cookie).toMatch(/Max-Age=600/i)
+    expect(cookie).toMatch(/Secure/i)
+  })
+
+  it('拒绝授权、伪造 state 与过期 state 都不建立绑定', async () => {
+    const denied = await begin()
+    const deny = await finish(denied.state, { error: 'access_denied' })
+    expect(deny.status).toBe(303)
+    expect(deny.headers.location).toBe('/settings?chaoxing=failed')
+    expect((await ctx.request.get('/api/v1/integrations/chaoxing').set(auth)).body.data.connected).toBe(false)
+    expect((await finish(denied.state, { code: 'denied-code' })).headers.location).toBe('/settings?chaoxing=failed')
+
+    const bogus = 'x'.repeat(43)
+    expect((await finish(bogus, { code: 'code' })).headers.location).toBe('/settings?chaoxing=failed')
+
+    const expired = await begin()
+    await ctx.prisma.chaoxingAuthorization.update({ where: { stateHash: hash(expired.state) }, data: { expiresAt: new Date(Date.now() - 1000) } })
+    expect((await finish(expired.state, { code: 'expired-code' })).headers.location).toBe('/settings?chaoxing=failed')
+    expect(await ctx.prisma.chaoxingAuthorization.count({ where: { stateHash: hash(expired.state) } })).toBe(0)
+    expect((await ctx.request.get('/api/v1/integrations/chaoxing').set(auth)).body.data.connected).toBe(false)
+    expect(exchanges).toBe(0)
+  })
+
+  it('回调只绑定发起 state 的用户，其他平台用户的 cookie 不能完成授权', async () => {
+    await seedUser(ctx.prisma, 'cx-state-other', 'other-password')
+    const otherAuth = bearer((await login(ctx.request, 'cx-state-other', 'other-password')).access)
+    const owner = await begin()
+    const other = await begin(otherAuth)
+
+    expect((await call(other.state, owner.state, { code: 'code' })).headers.location).toBe('/settings?chaoxing=failed')
+    expect((await ctx.request.get('/api/v1/integrations/chaoxing').set(auth)).body.data.connected).toBe(false)
+    expect((await ctx.request.get('/api/v1/integrations/chaoxing').set(otherAuth)).body.data.connected).toBe(false)
+
+    expect((await finish(owner.state, { code: 'code' })).headers.location).toBe('/settings?chaoxing=connected')
+    expect((await ctx.request.get('/api/v1/integrations/chaoxing').set(auth)).body.data.connected).toBe(true)
+    expect((await ctx.request.get('/api/v1/integrations/chaoxing').set(otherAuth)).body.data.connected).toBe(false)
+  })
+
+  it('用户在授权进行中被禁用后，回调不能建立绑定', async () => {
+    const user = await seedUser(ctx.prisma, 'cx-state-disabled', 'student-password')
+    const userAuth = bearer((await login(ctx.request, 'cx-state-disabled', 'student-password')).access)
+    const pending = await begin(userAuth)
+    await ctx.prisma.user.update({ where: { id: user.id }, data: { isActive: false } })
+    expect((await finish(pending.state, { code: 'code' })).headers.location).toBe('/settings?chaoxing=failed')
+    expect((await ctx.prisma.chaoxingBinding.findUnique({ where: { ownerId: user.id } }))?.tokenCipher ?? null).toBeNull()
+    expect((await ctx.request.get('/api/v1/integrations/chaoxing').set(userAuth)).body.code).toBe(10001)
+  })
+})
+
+describe('双用户绑定、禁用与解绑隔离（#1008）', () => {
+  let ctx: TestContext
+  let aAuth: Record<string, string>
+  let bAuth: Record<string, string>
+  let aId = ''
+  let bId = ''
+  let exchanges = 0
+  const calls: string[] = []
+  const gateway: ChaoxingRemote = {
+    ...remote,
+    async exchange(code) {
+      exchanges++
+      return { access_token: `access-${code}`, refresh_token: `refresh-${code}`, token_type: 'Bearer', expires_in: 3600 }
+    },
+    async learn(token, topic) {
+      calls.push(`${token}:${topic}`)
+      return { resources: [], limitations: [] }
+    },
+  }
+  async function bind(user: Record<string, string>, code: string) {
+    const start = await ctx.request.post('/api/v1/integrations/chaoxing/authorize').set(user).send({})
+    const state = new URL(start.body.data.url).searchParams.get('state')!
+    const callback = await ctx.request.get('/api/v1/integrations/chaoxing/callback').set('Cookie', `chaoxing_oauth=${state}`).query({ state, code })
+    expect(callback.headers.location).toBe('/settings?chaoxing=connected')
+  }
+  beforeAll(async () => {
+    ctx = await setupTestApp({ chaoxing: { options, remote: gateway } })
+    aId = (await seedUser(ctx.prisma, 'cx-iso-a', 'a-password')).id
+    bId = (await seedUser(ctx.prisma, 'cx-iso-b', 'b-password')).id
+    aAuth = bearer((await login(ctx.request, 'cx-iso-a', 'a-password')).access)
+    bAuth = bearer((await login(ctx.request, 'cx-iso-b', 'b-password')).access)
+    await bind(aAuth, 'a')
+    await bind(bAuth, 'b')
+  })
+  afterAll(async () => ctx?.cleanup())
+
+  it('两个用户各自使用自己的令牌，解绑一个不影响另一个', async () => {
+    expect((await ctx.request.get('/api/v1/integrations/chaoxing').set(aAuth)).body.data.connected).toBe(true)
+    expect((await ctx.request.get('/api/v1/integrations/chaoxing').set(bAuth)).body.data.connected).toBe(true)
+    const aRun = await ctx.request.post('/api/v1/integrations/chaoxing/learn').set(aAuth).send({ topic: 'a-topic' })
+    const bRun = await ctx.request.post('/api/v1/integrations/chaoxing/learn').set(bAuth).send({ topic: 'b-topic' })
+    expect([aRun.body.code, bRun.body.code]).toEqual([0, 0])
+    expect(calls).toEqual(['access-a:a-topic', 'access-b:b-topic'])
+    expect(JSON.stringify([aRun.body, bRun.body])).not.toMatch(/access-[ab]|refresh-[ab]/)
+
+    const session = await ctx.prisma.session.create({ data: { ownerId: aId, containerId: 'test-container', learningCourseId: 'course-a' } })
+    expect((await ctx.request.delete('/api/v1/integrations/chaoxing').set(aAuth).send({})).body.code).toBe(0)
+    expect(exchanges).toBe(2)
+    expect((await ctx.prisma.session.findUniqueOrThrow({ where: { id: session.id } })).learningCourseId).toBeNull()
+    expect((await ctx.request.get('/api/v1/integrations/chaoxing').set(aAuth)).body.data.connected).toBe(false)
+    expect((await ctx.request.get('/api/v1/integrations/chaoxing').set(bAuth)).body.data.connected).toBe(true)
+    expect((await ctx.request.post('/api/v1/integrations/chaoxing/learn').set(aAuth).send({ topic: 'a-after-unlink' })).body.code).toBe(90003)
+    expect((await ctx.request.post('/api/v1/integrations/chaoxing/learn').set(bAuth).send({ topic: 'b-after-unlink' })).body.code).toBe(0)
+    expect(calls).toEqual(['access-a:a-topic', 'access-b:b-topic', 'access-b:b-after-unlink'])
+  })
+
+  it('绑定后禁用用户立即停止访问，其他用户不受影响', async () => {
+    await ctx.prisma.user.update({ where: { id: bId }, data: { isActive: false } })
+    expect((await ctx.request.get('/api/v1/integrations/chaoxing').set(bAuth)).body.code).toBe(10001)
+    expect((await ctx.request.post('/api/v1/integrations/chaoxing/learn').set(bAuth).send({ topic: 'b-disabled' })).body.code).toBe(10001)
+    expect(calls).toEqual(['access-a:a-topic', 'access-b:b-topic', 'access-b:b-after-unlink'])
+    expect((await ctx.prisma.chaoxingBinding.findUniqueOrThrow({ where: { ownerId: bId } })).tokenCipher).not.toBeNull()
+  })
+})
+
+describe('刷新失败与远端 401 的重新绑定引导（#1008）', () => {
+  let ctx: TestContext
+  let auth: Record<string, string>
+  let refreshes = 0
+  const gateway: ChaoxingRemote = {
+    ...remote,
+    async exchange() { return { access_token: 'expiring-access', refresh_token: 'refresh-private', token_type: 'Bearer', expires_in: 1 } },
+    async refresh() { refreshes++; throw new Error('refresh unavailable') },
+    async learn() { throw new Error('learn must not run after failed refresh') },
+  }
+  beforeAll(async () => {
+    ctx = await setupTestApp({ chaoxing: { options, remote: gateway } })
+    await seedUser(ctx.prisma, 'cx-refresh-fail', 'student-password')
+    auth = bearer((await login(ctx.request, 'cx-refresh-fail', 'student-password')).access)
+    const start = await ctx.request.post('/api/v1/integrations/chaoxing/authorize').set(auth).send({})
+    const state = new URL(start.body.data.url).searchParams.get('state')
+    await ctx.request.get('/api/v1/integrations/chaoxing/callback').set('Cookie', `chaoxing_oauth=${state}`).query({ state, code: 'code' })
+  })
+  afterAll(async () => ctx?.cleanup())
+
+  it('刷新失败清除本地绑定并要求重新绑定，不泄露上游错误', async () => {
+    const first = await ctx.request.post('/api/v1/integrations/chaoxing/learn').set(auth).send({ topic: '梯度' })
+    expect(first.body.code).toBe(90003)
+    expect(first.body.message).toContain('重新绑定')
+    expect(JSON.stringify(first.body)).not.toMatch(/refresh unavailable|expiring-access|refresh-private/)
+    expect((await ctx.request.get('/api/v1/integrations/chaoxing').set(auth)).body.data.connected).toBe(false)
+    expect((await ctx.request.post('/api/v1/integrations/chaoxing/learn').set(auth).send({ topic: '梯度' })).body.code).toBe(90003)
+    expect(refreshes).toBe(1)
+  })
+})
+
+describe('远端 401 清理绑定并可重新授权恢复（#1008）', () => {
+  let ctx: TestContext
+  let auth: Record<string, string>
+  let exchanges = 0
+  let attempts = 0
+  const gateway: ChaoxingRemote = {
+    ...remote,
+    async exchange() {
+      exchanges++
+      return exchanges === 1
+        ? { access_token: 'revoked-access', token_type: 'Bearer', expires_in: 3600 }
+        : { access_token: 'renewed-access', token_type: 'Bearer', expires_in: 3600 }
+    },
+    async learn(token) {
+      attempts++
+      if (token === 'revoked-access') throw new ChaoxingMcpError('tools/call', 401)
+      return { resources: [], limitations: [] }
+    },
+  }
+  async function authorize(user: Record<string, string>) {
+    const start = await ctx.request.post('/api/v1/integrations/chaoxing/authorize').set(user).send({})
+    const state = new URL(start.body.data.url).searchParams.get('state')!
+    return ctx.request.get('/api/v1/integrations/chaoxing/callback').set('Cookie', `chaoxing_oauth=${state}`).query({ state, code: 'code' })
+  }
+  beforeAll(async () => {
+    ctx = await setupTestApp({ chaoxing: { options, remote: gateway } })
+    await seedUser(ctx.prisma, 'cx-revoked', 'student-password')
+    auth = bearer((await login(ctx.request, 'cx-revoked', 'student-password')).access)
+    expect((await authorize(auth)).headers.location).toBe('/settings?chaoxing=connected')
+  })
+  afterAll(async () => ctx?.cleanup())
+
+  it('远端 401 停止访问并清除绑定，重新绑定后恢复', async () => {
+    const rejected = await ctx.request.post('/api/v1/integrations/chaoxing/learn').set(auth).send({ topic: '梯度' })
+    expect(rejected.body.code).toBe(90003)
+    expect(rejected.body.data?.httpStatus).toEqual(['401'])
+    expect((await ctx.request.get('/api/v1/integrations/chaoxing').set(auth)).body.data.connected).toBe(false)
+
+    expect((await authorize(auth)).headers.location).toBe('/settings?chaoxing=connected')
+    const recovered = await ctx.request.post('/api/v1/integrations/chaoxing/learn').set(auth).send({ topic: '梯度' })
+    expect(recovered.body.code).toBe(0)
+    expect(attempts).toBe(2)
   })
 })
