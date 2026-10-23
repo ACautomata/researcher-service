@@ -40,11 +40,19 @@ function adminHtmlFallback(): Plugin {
 export default defineConfig({
   plugins: [vue(), adminHtmlFallback()],
   resolve: {
-    alias: {
-      '@': fileURLToPath(new URL('./src', import.meta.url)),
+    // KaTeX 的 CJS/UMD 产物被依赖预构建时会损坏 tokenRegex 里的代理区范围
+    // （\uD800-\uDBFF 变成 U+FFFD），导致所有 \命令 被拆成普通字符、公式显示为源码。
+    // 强制 katex 解析到 ESM 产物（预构建后转义保持完整）；正则只匹配裸模块名，
+    // 不影响 katex/dist/katex.min.css 等子路径导入。
+    alias: [
+      {
+        find: /^katex$/,
+        replacement: fileURLToPath(new URL('./node_modules/katex/dist/katex.mjs', import.meta.url)),
+      },
+      { find: '@', replacement: fileURLToPath(new URL('./src', import.meta.url)) },
       // 插件目录（#788 · #752 R1）：仓库根级 plugins/<id>/ 源直引（web.ts + Vue 组件）。
-      '@plugins': fileURLToPath(new URL('../plugins', import.meta.url)),
-    },
+      { find: '@plugins', replacement: fileURLToPath(new URL('../plugins', import.meta.url)) },
+    ],
   },
   build: {
     rollupOptions: {

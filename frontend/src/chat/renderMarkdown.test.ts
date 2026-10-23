@@ -110,6 +110,43 @@ describe('renderMarkdown 基本语法', () => {
   })
 })
 
+describe('renderMarkdown LaTeX 定界符兼容与裸公式', () => {
+  it('行内 \\(...\\) 渲染为 KaTeX', () => {
+    const html = renderMarkdown('能量 \\(E=mc^2\\) 守恒')
+    expect(html).toContain('class="katex"')
+    expect(html).not.toContain('\\(E=mc^2\\)')
+  })
+
+  it('独占行的 \\[...\\] 渲染为块级 KaTeX（可跨行）', () => {
+    const html = renderMarkdown('\\[\n\\frac{a}{b}\n\\]')
+    expect(html).toContain('class="katex-display"')
+  })
+
+  it('整段裸 LaTeX 自动按块级公式渲染', () => {
+    const formula = '\\boldsymbol\\theta\\leftarrow\\boldsymbol\\theta - \\alpha\\dot\\nabla_{\\boldsymbol\\theta}J(\\boldsymbol\\theta)'
+    const html = renderMarkdown(formula)
+    expect(html).toContain('class="katex-display"')
+    expect(html).not.toContain('<p>\\boldsymbol\\theta')
+  })
+
+  it('表格单元格内的裸 LaTeX 按行内公式渲染', () => {
+    const html = renderMarkdown('| 符号 | 含义 |\n| - | - |\n| \\boldsymbol\\theta | 参数 |\n| J(\\boldsymbol\\theta) | 损失 |')
+    expect(html).toContain('<td><span class="katex">')
+    expect(html).not.toContain('<td>\\boldsymbol\\theta')
+  })
+
+  it('行内代码与代码块中的 LaTeX 保持源码', () => {
+    expect(renderMarkdown('`\\(x\\)`')).not.toContain('class="katex"')
+    expect(renderMarkdown('```\n\\[x\\]\n```')).not.toContain('class="katex"')
+  })
+
+  it('英文散文、路径与无效命令不误判为公式', () => {
+    expect(renderMarkdown('\\alpha is a coefficient')).not.toContain('class="katex"')
+    expect(renderMarkdown('C:\\Users\\name')).not.toContain('class="katex"')
+    expect(renderMarkdown('\\n')).not.toContain('class="katex"')
+  })
+})
+
 describe('renderMarkdown 半成品容错（流式中间态）', () => {
   it('未闭合代码块 → 渲染为文本不抛错', () => {
     const html = renderMarkdown('```js\nconst x = 1')
