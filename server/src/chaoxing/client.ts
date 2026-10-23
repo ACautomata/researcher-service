@@ -1,8 +1,16 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
+import { StreamableHTTPClientTransport, StreamableHTTPError } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { z } from 'zod'
-import { ChaoxingConfigError, tokenSchema, type ChaoxingRemote, type LearningResource } from './remote'
+import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js'
+import { ChaoxingMcpError, ChaoxingConfigError, tokenSchema, type ChaoxingRemote, type LearningResource, type McpInspection, type McpStage } from './remote'
 import type { ChaoxingOptions } from './options'
+
+const mcpFailure = (stage: McpStage, error: unknown): ChaoxingMcpError => {
+  const status = error instanceof StreamableHTTPError && typeof error.code === 'number' && error.code >= 100 && error.code <= 599 ? error.code
+    : error instanceof Error && error.name === 'UnauthorizedError' ? 401 : undefined
+  const timedOut = error instanceof McpError && error.code === ErrorCode.RequestTimeout || error instanceof Error && error.name === 'TimeoutError'
+  return new ChaoxingMcpError(stage, status, timedOut)
+}
 
 const MCP_URL = 'https://api.chaoxing.com/openai/studyai/data'
 const mapping = z.object({
@@ -34,6 +42,8 @@ const safeLink = (v: unknown): string | undefined => {
 /** Tool names/field mappings are deployment-reviewed contracts, never inferred from names or supplied by a model. */
 export function createChaoxingRemote(options: ChaoxingOptions, input: McpMapping = {}, network: typeof fetch = fetch): ChaoxingRemote {
   const config = mcpMappingSchema.parse(input)
+  // 完整目录只在本次 MCP 连接内复用，绝不跨账号或授权会话缓存。
+  const catalogs = new WeakMap<Client, Awaited<ReturnType<Client['listTools']>>['tools']>()
   const checkedFetch: typeof fetch = (url, init) => network(url, { ...init, redirect: 'error', signal: init?.signal ? AbortSignal.any([init.signal, AbortSignal.timeout(20_000)]) : AbortSignal.timeout(20_000) })
   async function oauth(parameters: Record<string, string>) {
     const body = new URLSearchParams({ ...parameters, client_id: options.clientId })
@@ -44,42 +54,55 @@ export function createChaoxingRemote(options: ChaoxingOptions, input: McpMapping
     if (!response.ok) throw new Error('超星令牌交换失败')
     return tokenSchema.parse(await response.json())
   }
-  async function session<T>(token: string, signal: AbortSignal | undefined, fn: (client: Client) => Promise<T>): Promise<T> {
+  async function session<T>(token: string, signal: AbortSignal | undefined, fn: (client: Client, transport: StreamableHTTPClientTransport) => Promise<T>): Promise<T> {
     const client = new Client({ name: 'researcher-service', version: '0.1.0' })
     const transport = new StreamableHTTPClientTransport(new URL(MCP_URL), { requestInit: { headers: { Authorization: `Bearer ${token}` }, redirect: 'error' }, fetch: (url, init) => checkedFetch(url, { ...init, signal: signal ? AbortSignal.any([signal, ...(init?.signal ? [init.signal] : [])]) : init?.signal }) })
     const abort = () => { void client.close().catch(() => {}) }
     signal?.throwIfAborted()
     signal?.addEventListener('abort', abort, { once: true })
-    try { await client.connect(transport); return await fn(client) }
+    try {
+      try { await client.connect(transport, { timeout: 20_000, signal }) }
+      catch (error) { throw mcpFailure('initialize', error) }
+      return await fn(client, transport)
+    }
     finally { signal?.removeEventListener('abort', abort); await client.close().catch(() => {}) }
   }
-  async function list(client: Client) {
-    const tools: Awaited<ReturnType<Client['listTools']>>['tools'] = []
-    let cursor: string | undefined
-    for (let page = 0; page < 10; page++) {
-      const response = await client.listTools(cursor ? { cursor } : undefined)
-      tools.push(...response.tools)
-      if (!response.nextCursor) return tools
-      if (response.nextCursor === cursor) throw new Error('MCP 工具分页未前进')
-      cursor = response.nextCursor
-    }
-    throw new Error('MCP 工具目录超出检查上限')
+  async function list(client: Client, signal?: AbortSignal) {
+    try {
+      const cached = catalogs.get(client)
+      if (cached) return cached
+      const tools: Awaited<ReturnType<Client['listTools']>>['tools'] = []
+      let cursor: string | undefined
+      for (let page = 0; page < 10; page++) {
+        const response = await client.listTools(cursor ? { cursor } : undefined, { timeout: 20_000, signal })
+        tools.push(...response.tools)
+        if (!response.nextCursor) { catalogs.set(client, tools); return tools }
+        if (response.nextCursor === cursor) throw new Error('MCP 工具分页未前进')
+        cursor = response.nextCursor
+      }
+      throw new Error('MCP 工具目录超出检查上限')
+    } catch (error) { throw mcpFailure('tools/list', error) }
   }
   async function call(client: Client, map: Mapping, args: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
     signal?.throwIfAborted()
-    const result = await client.callTool({ name: map.name, arguments: args }, undefined, { signal, timeout: 20_000 })
-    if (result.isError) throw new Error('超星工具调用失败')
-    let output: unknown = result.structuredContent
-    if (output === undefined) {
-      const blocks = result.content
-      if (!Array.isArray(blocks)) throw new Error('超星工具结果格式错误')
-      const text = blocks.filter(b => record(b).type === 'text').map(b => scalar(record(b).text)).join('\n')
-      if (text.length > 2_000_000) throw new Error('超星工具结果过大')
-      output = JSON.parse(text)
-    }
-    const business = record(output)
-    if (business.status === false || business.status === 'false' || business.result === false) throw new Error('超星拒绝访问')
-    return output
+    const tool = (await list(client, signal)).find(t => t.name === map.name)
+    if (!tool) throw new ChaoxingConfigError('已配置工具不在当前授权目录')
+    if (tool.annotations?.readOnlyHint === false || tool.annotations?.destructiveHint === true) throw new ChaoxingConfigError('已配置工具与只读声明冲突，已阻止调用')
+    try {
+      const result = await client.callTool({ name: map.name, arguments: args }, undefined, { signal, timeout: 20_000 })
+      if (result.isError) throw new Error('超星工具调用失败')
+      let output: unknown = result.structuredContent
+      if (output === undefined) {
+        const blocks = result.content
+        if (!Array.isArray(blocks)) throw new Error('超星工具结果格式错误')
+        const text = blocks.filter(b => record(b).type === 'text').map(b => scalar(record(b).text)).join('\n')
+        if (text.length > 2_000_000) throw new Error('超星工具结果过大')
+        output = JSON.parse(text)
+      }
+      const business = record(output)
+      if (business.status === false || business.status === 'false' || business.result === false) throw new Error('超星拒绝访问')
+      return output
+    } catch (error) { throw mcpFailure('tools/call', error) }
   }
   async function courses(client: Client, signal?: AbortSignal): Promise<{ rows: Course[]; truncated: boolean }> {
     if (!config.courses) throw new Error('课程发现能力未配置')
@@ -127,7 +150,22 @@ export function createChaoxingRemote(options: ChaoxingOptions, input: McpMapping
     exchange: (code, verifier) => oauth({ grant_type: 'authorization_code', code, redirect_uri: options.redirectUri, ...(options.pkce !== false ? { code_verifier: verifier } : {}) }),
     refresh: refreshToken => oauth({ grant_type: 'refresh_token', refresh_token: refreshToken }),
     courses: (token, signal) => session(token, signal, client => courses(client, signal)),
-    inspect: (token, signal) => session(token, signal, async client => ({ tools: (await list(client)).map(t => ({ name: t.name, description: t.description, inputSchema: t.inputSchema })), capabilities: Object.entries(config).filter(([, value]) => !!value).map(([key]) => key) })),
+    inspect: (token, signal) => session(token, signal, async (client, transport): Promise<McpInspection> => {
+      const tools = await list(client, signal)
+      const mappingChecks: NonNullable<McpInspection['mappingChecks']> = (['courses', 'search', 'topics', 'read'] as const).map(capability => {
+        const configured = config[capability]
+        const tool = tools.find(t => t.name === configured?.name)
+        const status = !configured ? 'not-configured' : !tool ? 'tool-missing'
+          : tool.annotations?.readOnlyHint === false || tool.annotations?.destructiveHint === true ? 'not-read-only' : 'listed'
+        return { capability, ...(configured ? { toolName: configured.name } : {}), status, callVerified: false }
+      })
+      return {
+        connection: { initialized: true, transport: 'streamable-http', protocolVersion: transport.protocolVersion!, authentication: 'oauth-bearer', sessionMode: transport.sessionId ? 'stateful' : 'stateless' },
+        tools: tools.map(t => ({ name: t.name, description: t.description, inputSchema: t.inputSchema, ...(t.outputSchema ? { outputSchema: t.outputSchema } : {}), ...(t.annotations ? { annotations: t.annotations } : {}) })),
+        capabilities: mappingChecks.filter(c => c.status === 'listed').map(c => c.capability),
+        mappingChecks,
+      }
+    }),
     learn: (token, topic, courseId, signal, target = 'all') => session(token, signal, async client => {
       const deadline = AbortSignal.any([AbortSignal.timeout(45_000), ...(signal ? [signal] : [])])
       if (target === 'resources' && !config.search) throw new ChaoxingConfigError('资料检索能力尚未配置')
@@ -135,7 +173,7 @@ export function createChaoxingRemote(options: ChaoxingOptions, input: McpMapping
       const needed = target === 'resources'
         ? [config.courses, config.search, config.read]
         : target === 'topics' ? [config.courses, config.topics] : Object.values(config)
-      const available = await list(client)
+      const available = await list(client, deadline)
       for (const map of needed) if (map && !available.some(t => t.name === map.name)) throw new ChaoxingConfigError('已配置工具不在当前授权目录')
       if (!config.courses) {
         if (target !== 'all') throw new ChaoxingConfigError('课程发现能力未配置')

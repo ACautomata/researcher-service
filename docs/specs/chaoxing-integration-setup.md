@@ -4,7 +4,7 @@
 
 平台已提供账号设置绑定/解绑、OAuth 授权码回调、令牌加密、刷新、MCP Streamable HTTP 客户端、只读学习工具、可选会话课程范围及自动推荐提示。
 
-真实超星协议和工具清单尚未授权验证。下面的工具映射是一种部署适配契约，不是对超星实际工具名称或字段的断言。当前不能宣称真实课程、正文与链接已可用；映射为空时允许检查目录，学习工具明确报告缺少课程发现能力。
+真实账号绑定已有用户确认；2026-10-23 通过现有管理台进行了本人授权的真实目录检查，但返回 90003，尚未取得 MCP 工具清单。下面的工具映射是一种部署适配契约，不是对超星实际工具名称或字段的断言。当前不能宣称真实课程、正文与链接已可用；映射为空时允许检查目录，学习工具明确报告缺少课程发现能力。
 
 ## 手动命令
 
@@ -18,11 +18,11 @@
 2. 将正式回调地址交超星登记。候选：`https://researcher.acautomata.top/api/v1/integrations/chaoxing/callback`。部署并确认真实域名后再联调。
 3. 确认对方接受 scope `mooc:resource mooc:qbank`、S256 PKCE 和 token 客户端认证。默认 CHAOXING_PKCE=true；只有对方确认不支持时配置 false。CHAOXING_TOKEN_AUTH 可为 body（默认）或 basic。
 4. 账号设置发起绑定，由学生在超星登录，授权后返回平台。回调以一次性 state 和同浏览器 HttpOnly/SameSite=Lax cookie 关联，后台不接收学生密码。解绑清除本地授权；尚无已验证的远端撤销协议。
-5. 后端 GET `/api/v1/integrations/chaoxing/capabilities`（平台 Bearer 认证）可查看该学生获授权的 MCP 工具与 schema。工具名和参数不要从猜测填入映射，也不要记录令牌。
+5. 后端 GET `/api/v1/integrations/chaoxing/capabilities`（平台 Bearer 认证）可查看该学生获授权的 MCP 工具与 schema。工具名和参数不要从猜测填入映射，也不要记录令牌。可在现有管理台 `/admin/docs` 展开“超星学习”→“检查本人授权的 MCP 工具目录”→ Try it out → Execute，使用当前平台会话调用，不必导出 token。调试界面自动生成的 curl 含认证头，不可截图或复制到票面。
 
 ## MCP 工具映射
 
-CHAOXING_MCP_MAPPING 是 JSON 对象，可配置 courses/search/topics/read 四项。每项包含真实工具名 name 和经人工核验的 readOnlyConfirmed=true。平台只调用这四种已配置能力；MCP 目录里的其他工具不交给模型。
+CHAOXING_MCP_MAPPING 是 JSON 对象，可配置 courses/search/topics/read 四项。每项包含真实工具名 name 和经人工核验的 readOnlyConfirmed=true。每次连接取得完整工具目录后检查实际调用目标；对端明确声明 readOnlyHint=false 或 destructiveHint=true 时拒绝调用，即使本地已确认只读。缺少声明不代表自动确认只读，仍须人工核验业务语义。平台只调用这四种已配置能力；MCP 目录里的其他工具不交给模型。
 
 - courses：发现本人课程。列表由 itemsPath 指定，字段由 idField/nameField/classIdField 指定。
 - search：查询课程资料。参数名用 courseArg/classArg/queryArg/pageArg/sizeArg 映射；列表路径用 itemsPath，条目用 idField/nameField/urlField/textField/typeField 映射。
@@ -32,6 +32,18 @@ CHAOXING_MCP_MAPPING 是 JSON 对象，可配置 courses/search/topics/read 四�
 默认结果列表路径为 items，字段默认为 id/name/classId/url/text/type/subList；参数默认为 courseId/classId/query/pageNumber/pageSize/resourceId。totalPagesPath 默认为 totalPages；缺失时视为单页。路径用点号访问对象字段，空路径表示根列表；不支持通配或数组表达式。若接口提供不同的分页模型或需要额外身份参数，应新增经核验的适配，不能假称当前映射已支持。
 
 MCP 内容支持 structuredContent，或含 JSON 的 text 内容块；其他响应需实际联调后补适配。链接仅接受工具实际返回的 HTTPS 地址。正文单条截断到12000字符；最多读取5份缺正文的命中资料，其他资料明确提示只有目录。单次自动检索最多10门课程、每类每课程50页、展示50项，达到上限明确告知。限制内的正文作为学习证据，不能作为授权或执行指令。
+
+## 核验报告与安全诊断（#1009）
+
+`GET /capabilities` 成功仅说明本次初始化和完整目录读取完成，不执行 `tools/call`，也不代表任何业务查询已经验收：
+
+- `connection`：SDK 实际协商的 `protocolVersion`、`transport=streamable-http`、`authentication=oauth-bearer`，以及 `sessionMode=stateful|stateless`。不返回会话 ID、令牌或请求头。
+- `tools`：完整分页目录中的名称、说明、输入 schema、对端提供的输出 schema 和 annotations。目录可包含写工具，仅用于核验；不把目录直接装配给模型。
+- `mappingChecks`：四种映射各为 `not-configured`、`tool-missing`、`not-read-only` 或 `listed`。`callVerified=false` 明确本接口没有实际调用验证；`capabilities` 只列本次目录中存在且未声明写操作的配置项。
+- 错误仍为 #312 的 90003 信封；`data.mcpStage` 区分 `initialize`、`tools/list`、`tools/call`。上游 HTTP 拒绝时附 `data.httpStatus`；仅返回静态阶段提示，不返回上游正文、原异常或任何认证材料。401 清理对应旧绑定，403/超时不等同于授权撤销。
+- 初始化及单次目录请求上限20秒，目录最多10页；游标停滞或超限直接失败，不将半份目录标成完整。目录缓存只存在于本次 MCP 连接，不能跨用户复用。
+
+真实能力矩阵及后续最小调用步骤见 [#1009 核验记录](chaoxing-mcp-verification.md)。
 
 ## 两个外部技能包的复用
 

@@ -113,4 +113,4 @@ maxConcurrentRuns 或全局 RUNNER_MAX_CONCURRENT_RUNS]）· `5xxxx` 会话/run 
 
 ## 超星学习资源授权与只读工具
 
-`/api/v1/integrations/chaoxing`：GET 绑定状态、DELETE 解绑；POST `/authorize` 发起授权；GET `/callback` 浏览器回调（303 重定向，#312 信封例外，state + 同浏览器 cookie 校验）；GET `/capabilities` 检查 MCP 工具；GET `/courses` 本人课程；GET/PUT `/sessions/:id/scope` 可选会话课程范围；POST `/learn` 学习资料查询。除回调外须本人平台认证及改密门；写入 schema 统一校验。90001 未配置、90002 校验失败、90003 超星调用/授权不可用、50002 会话不存在/越权。凭证不在响应中返回。
+`/api/v1/integrations/chaoxing`：GET 绑定状态、DELETE 解绑；POST `/authorize` 发起授权；GET `/callback` 浏览器回调（303 重定向，#312 信封例外，state + 同浏览器 cookie 校验）；GET `/capabilities` 检查 MCP 协商信息、完整工具 schema 与配置状态（不执行工具，不等于真实调用验收）；GET `/courses` 本人课程；GET/PUT `/sessions/:id/scope` 可选会话课程范围；POST `/learn` 学习资料查询。除回调外须本人平台认证及改密门；写入 schema 统一校验。90001 未配置、90002 校验失败、90003 超星调用/授权不可用、50002 会话不存在/越权。凭证不在响应中返回。

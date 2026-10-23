@@ -22,7 +22,7 @@ function fixtureFetch(methods: string[], called: string[]): typeof fetch {
     if (body.method === 'initialize') result = { protocolVersion: '2025-03-26', serverInfo: { name: 'fixture', version: '1' }, capabilities: { tools: {} } }
     if (body.method === 'tools/list') result = { tools: [
       { name: 'list_courses', inputSchema: { type: 'object' } },
-      { name: 'search_materials', inputSchema: { type: 'object' } },
+      { name: 'search_materials', inputSchema: { type: 'object' }, outputSchema: { type: 'object', properties: { items: { type: 'array' } } }, annotations: { readOnlyHint: true } },
       { name: 'list_topics', inputSchema: { type: 'object' } },
       { name: 'read_material', inputSchema: { type: 'object' } },
       { name: 'create_topic', inputSchema: { type: 'object' } },
@@ -35,7 +35,7 @@ function fixtureFetch(methods: string[], called: string[]): typeof fetch {
       else if (name === 'list_topics') data = { items: [{ id: 't1', name: '梯度知识点', text: '梯度的定义' }] }
       else if (name === 'read_material') data = { text: '完整正文', url: 'https://mooc.chaoxing.com/resource/1' }
       else data = { items: [{ id: 'folder', name: '梯度下降', type: 'afolder' }, { id: 'r1', name: '梯度下降课件', text: '学习率控制迭代步长', url: 'https://mooc.chaoxing.com/resource/1' }] }
-      result = { content: [{ type: 'text', text: JSON.stringify(data) }] }
+      result = { content: [{ type: 'text', text: JSON.stringify(data) }], ...(name === 'search_materials' ? { structuredContent: data } : {}) }
     }
     return new Response(JSON.stringify({ jsonrpc: '2.0', id: body.id, result }), { headers: { 'content-type': 'application/json' } })
   }
@@ -76,6 +76,15 @@ describe('超星 MCP 只读资料链', () => {
     const denied = await ctx.request.post('/api/v1/integrations/chaoxing/learn').set(auth).send({ topic: '梯度下降', courseId: 'unauthorized' })
     expect(denied.body.code).not.toBe(0)
   })
+  it('目录检查提供协商版本、输出 schema 和只读声明，但不执行任何工具', async () => {
+    const before = called.length
+    const result = await ctx.request.get('/api/v1/integrations/chaoxing/capabilities').set(auth)
+    expect(result.body.code).toBe(0)
+    expect(result.body.data.connection).toMatchObject({ initialized: true, transport: 'streamable-http', protocolVersion: '2025-03-26', authentication: 'oauth-bearer', sessionMode: 'stateless' })
+    expect(result.body.data.tools).toContainEqual(expect.objectContaining({ name: 'search_materials', outputSchema: { type: 'object', properties: { items: { type: 'array' } } }, annotations: { readOnlyHint: true } }))
+    expect(result.body.data.mappingChecks).toContainEqual({ capability: 'search', toolName: 'search_materials', status: 'listed', callVerified: false })
+    expect(called).toHaveLength(before)
+  })
   it('target=resources 只调用资料检索链，不调用知识点工具', async () => {
     called.splice(0)
     const result = await ctx.request.post('/api/v1/integrations/chaoxing/learn').set(auth).send({ topic: '梯度下降', target: 'resources' })
@@ -101,12 +110,13 @@ describe('超星查询目标映射缺失隔离', () => {
   let ctx: TestContext | undefined
   afterAll(async () => { await ctx?.cleanup() })
 
-  async function context(mapping: McpMapping) {
+  async function context(mapping: McpMapping, wrap?: (network: typeof fetch) => typeof fetch) {
     await ctx?.cleanup()
     ctx = undefined
     const methods: string[] = []
     const called: string[] = []
-    ctx = await setupTestApp({ chaoxing: { options, remote: createChaoxingRemote(options, mapping, fixtureFetch(methods, called)) } })
+    const network = fixtureFetch(methods, called)
+    ctx = await setupTestApp({ chaoxing: { options, remote: createChaoxingRemote(options, mapping, wrap ? wrap(network) : network) } })
     const owner = await seedUser(ctx.prisma, `mapping-${randomUUID()}`, 'student-password')
     const auth = bearer((await login(ctx.request, owner.username, 'student-password')).access)
     await ctx.prisma.chaoxingBinding.create({ data: {
@@ -118,6 +128,95 @@ describe('超星查询目标映射缺失隔离', () => {
     return { ctx, auth, called }
   }
 
+  it('初始化 HTTP 拒绝只返回阶段和状态，不暴露上游正文或凭证', async () => {
+    const h = await context({}, network => async (url, init) => {
+      const body = JSON.parse(String(init?.body ?? '{}'))
+      return body.method === 'initialize'
+        ? new Response('denied bound-token secret', { status: 403 })
+        : network(url, init)
+    })
+    const result = await h.ctx.request.get('/api/v1/integrations/chaoxing/capabilities').set(h.auth)
+    expect(result.body).toMatchObject({ code: 90003, message: '超星 MCP 初始化失败（HTTP 403）', data: { mcpStage: ['initialize'], httpStatus: ['403'] } })
+    expect(JSON.stringify(result.body)).not.toContain('bound-token')
+    expect(JSON.stringify(result.body)).not.toContain('denied')
+    expect(h.called).toEqual([])
+  })
+  it('工具目录错误与初始化错误可区分，JSON-RPC 原文不回显', async () => {
+    const h = await context({}, network => async (url, init) => {
+      const body = JSON.parse(String(init?.body ?? '{}'))
+      return body.method === 'tools/list'
+        ? new Response(JSON.stringify({ jsonrpc: '2.0', id: body.id, error: { code: -32603, message: 'private bound-token secret' } }), { headers: { 'content-type': 'application/json' } })
+        : network(url, init)
+    })
+    const result = await h.ctx.request.get('/api/v1/integrations/chaoxing/capabilities').set(h.auth)
+    expect(result.body).toMatchObject({ code: 90003, message: '超星 MCP 工具目录读取失败', data: { mcpStage: ['tools/list'] } })
+    expect(JSON.stringify(result.body)).not.toContain('private')
+    expect(JSON.stringify(result.body)).not.toContain('bound-token')
+  })
+
+  it('已配置工具被对端声明为写操作时，报告冲突且任何入口均不调用', async () => {
+    const h = await context({ courses: fullMapping.courses }, network => async (url, init) => {
+      const body = JSON.parse(String(init?.body ?? '{}'))
+      if (body.method !== 'tools/list') return network(url, init)
+      return new Response(JSON.stringify({ jsonrpc: '2.0', id: body.id, result: { tools: [{ name: 'list_courses', inputSchema: { type: 'object' }, annotations: { readOnlyHint: false, destructiveHint: true } }] } }), { headers: { 'content-type': 'application/json' } })
+    })
+    const report = await h.ctx.request.get('/api/v1/integrations/chaoxing/capabilities').set(h.auth)
+    expect(report.body.data.capabilities).toEqual([])
+    expect(report.body.data.mappingChecks).toContainEqual({ capability: 'courses', toolName: 'list_courses', status: 'not-read-only', callVerified: false })
+    const courses = await h.ctx.request.get('/api/v1/integrations/chaoxing/courses').set(h.auth)
+    expect(courses.body.code).toBe(90003)
+    expect(h.called).toEqual([])
+  })
+  it('有状态连接带协商头读取完整分页目录，但不返回会话标识或令牌', async () => {
+    let requestsWithSession = 0
+    const h = await context({}, network => async (url, init) => {
+      if (init?.method === 'GET') return new Response(null, { status: 405 })
+      const body = JSON.parse(String(init?.body ?? '{}'))
+      if (body.method === 'initialize') {
+        const response = await network(url, init)
+        response.headers.set('mcp-session-id', 'private-session-identity')
+        return response
+      }
+      if (body.method === 'tools/list') {
+        const headers = new Headers(init?.headers)
+        if (headers.get('mcp-session-id') === 'private-session-identity' && headers.get('mcp-protocol-version') === '2025-03-26') requestsWithSession++
+        const result = body.params?.cursor
+          ? { tools: [{ name: 'page_two', inputSchema: { type: 'object' } }] }
+          : { tools: [{ name: 'page_one', inputSchema: { type: 'object' } }], nextCursor: 'opaque-page-two' }
+        return new Response(JSON.stringify({ jsonrpc: '2.0', id: body.id, result }), { headers: { 'content-type': 'application/json' } })
+      }
+      return network(url, init)
+    })
+    const result = await h.ctx.request.get('/api/v1/integrations/chaoxing/capabilities').set(h.auth)
+    expect(result.body.code).toBe(0)
+    expect(result.body.data.connection.sessionMode).toBe('stateful')
+    expect(result.body.data.tools.map((t: { name: string }) => t.name)).toEqual(['page_one', 'page_two'])
+    expect(requestsWithSession).toBe(2)
+    expect(JSON.stringify(result.body)).not.toContain('private-session-identity')
+    expect(JSON.stringify(result.body)).not.toContain('bound-token')
+  })
+
+  it('目录游标不前进时不返回半份目录或已验证能力', async () => {
+    const h = await context(fullMapping, network => async (url, init) => {
+      const body = JSON.parse(String(init?.body ?? '{}'))
+      if (body.method !== 'tools/list') return network(url, init)
+      return new Response(JSON.stringify({ jsonrpc: '2.0', id: body.id, result: { tools: [], nextCursor: 'same-cursor' } }), { headers: { 'content-type': 'application/json' } })
+    })
+    const result = await h.ctx.request.get('/api/v1/integrations/chaoxing/capabilities').set(h.auth)
+    expect(result.body).toMatchObject({ code: 90003, message: '超星 MCP 工具目录读取失败', data: { mcpStage: ['tools/list'] } })
+    expect(result.body.data).not.toHaveProperty('capabilities')
+    expect(h.called).toEqual([])
+  })
+
+  it('只读调用被拒绝时保留 tools/call 阶段，目录存在不等于调用成功', async () => {
+    const h = await context(fullMapping, network => async (url, init) => {
+      const body = JSON.parse(String(init?.body ?? '{}'))
+      return body.method === 'tools/call' ? new Response('private bound-token', { status: 403 }) : network(url, init)
+    })
+    const result = await h.ctx.request.get('/api/v1/integrations/chaoxing/courses').set(h.auth)
+    expect(result.body).toMatchObject({ code: 90003, message: '超星 MCP 只读工具调用失败（HTTP 403）', data: { mcpStage: ['tools/call'], httpStatus: ['403'] } })
+    expect(JSON.stringify(result.body)).not.toContain('bound-token')
+  })
   it('仅配置资料能力时，资料目标可运行，知识点目标明确拒绝', async () => {
     const h = await context({ courses: fullMapping.courses, search: fullMapping.search })
     const resources = await h.ctx.request.post('/api/v1/integrations/chaoxing/learn').set(h.auth).send({ topic: '梯度', target: 'resources' })
