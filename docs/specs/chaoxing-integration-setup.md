@@ -2,9 +2,9 @@
 
 ## 当前交付与限制
 
-平台已提供账号设置绑定/解绑、OAuth 授权码回调、令牌加密、刷新、MCP Streamable HTTP 客户端、只读学习工具、可选会话课程范围及自动推荐提示。
+平台已提供账号设置绑定/解绑、OAuth 授权码回调、令牌加密、刷新、固定 HTTP 只读适配（默认）、可选 MCP Streamable HTTP 旁路、只读学习工具、可选会话课程范围及自动推荐提示。
 
-真实账号绑定已有用户确认；2026-10-23 通过现有管理台进行了本人授权的真实目录检查，但返回 90003，尚未取得 MCP 工具清单。下面的工具映射是一种部署适配契约，不是对超星实际工具名称或字段的断言。当前不能宣称真实课程、正文与链接已可用；映射为空时允许检查目录，学习工具明确报告缺少课程发现能力。
+真实账号绑定已有用户确认。2026-10-23 使用本人学生授权真实调用了资料检索接口（成功）和知识点接口（被业务拒绝），详见 [#1009 核验记录](chaoxing-mcp-verification.md)；MCP 目录检查返回 90003 属路线变更前的历史观测。课程/班级发现、正文与可访问链接仍未提供，不能宣称完整学习能力已可用。下文的 MCP 映射只适用于显式 MCP 模式，是部署适配契约，不是对超星实际工具名称或字段的断言。
 
 ## 2026-10-23 HTTP 接口接入更新（#1009）
 
@@ -32,9 +32,9 @@
 2. 将正式回调地址交超星登记。候选：`https://researcher.acautomata.top/api/v1/integrations/chaoxing/callback`。部署并确认真实域名后再联调。
 3. 恢复使用应用最初标注已申请的 scope `mooc:resource mooc:qbank`；`statistic:studyai:read` 的同应用授权尚未核验，替换后重新授权失败，暂不继续使用；S256 PKCE 和 token 客户端认证仍需分别核验。默认 CHAOXING_PKCE=true；只有对方确认不支持时配置 false。CHAOXING_TOKEN_AUTH 可为 body（默认）或 basic。
 4. scope 更新不会提升既有 token 的权限，刷新 token 也不能视为已取得新 scope。部署后，已绑定用户需在账号设置重新发起绑定并完成授权，再检查 `/capabilities`；不批量清除既有绑定。账号设置发起绑定，由学生在超星登录，授权后返回平台。回调以一次性 state 和同浏览器 HttpOnly/SameSite=Lax cookie 关联，后台不接收学生密码。解绑清除本地授权；尚无已验证的远端撤销协议。
-5. 后端 GET `/api/v1/integrations/chaoxing/capabilities`（平台 Bearer 认证）可查看该学生获授权的 MCP 工具与 schema。工具名和参数不要从猜测填入映射，也不要记录令牌。可在现有管理台 `/admin/docs` 展开“超星学习”→“检查本人授权的 MCP 工具目录”→ Try it out → Execute，使用当前平台会话调用，不必导出 token。调试界面自动生成的 curl 含认证头，不可截图或复制到票面。
+5. `GET /api/v1/integrations/chaoxing/capabilities`（平台 Bearer 认证）在默认 HTTP 模式只报告本地固定端点契约与 `callVerified=false`，不连接 MCP。查看 MCP 工具与 schema 用 `GET /mcp-capabilities`（见末尾“跨传输只读诊断”）；工具名和参数不要从猜测填入映射，也不要记录令牌。可在现有管理台 `/admin/docs` 展开“超星学习”调用对应检查接口，不必导出 token。调试界面自动生成的 curl 含认证头，不可截图或复制到票面。
 
-## MCP 工具映射
+## MCP 工具映射（仅显式 MCP 模式）
 
 CHAOXING_MCP_MAPPING 是 JSON 对象，可配置 courses/search/topics/read 四项。每项包含真实工具名 name 和经人工核验的 readOnlyConfirmed=true。每次连接取得完整工具目录后检查实际调用目标；对端明确声明 readOnlyHint=false 或 destructiveHint=true 时拒绝调用，即使本地已确认只读。缺少声明不代表自动确认只读，仍须人工核验业务语义。平台只调用这四种已配置能力；MCP 目录里的其他工具不交给模型。
 
@@ -63,7 +63,7 @@ MCP 内容支持 structuredContent，或含 JSON 的 text 内容块；其他响�
 
 资料检索包：查询参数准备、分页、过滤 afolder、零命中重试和全量核对、50项展示上限已移植到现有 TypeScript 工具链。知识点包：查询和树遍历适配进入 topics，添加分支未移植。原始接口文档保留在 docs/references/chaoxing，作为字段和权限核验材料。
 
-不直接执行 Python，也不恢复 SKILL.md 加载。原包默认教师身份和共享 API Key 不适用于当前学生按人授权方案，不能无条件沿用；当前生产调用使用经映射核验的 MCP，HTTP 脚本若有必要另经授权验证后适配。
+不直接执行 Python，也不恢复 SKILL.md 加载。原包默认教师身份和共享 API Key 不适用于当前学生按人授权方案，不能无条件沿用；当前生产默认使用固定 HTTP 入口，MCP 仅作旁路核验，未完成映射前不用于生产业务调用。
 
 ## 开发、测试与生产配置
 

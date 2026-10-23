@@ -1,5 +1,7 @@
 # 资料检索
 
+> 来源：超星 mooc2 网关技能包（API Key 认证）。平台实际调用 `/openapi/coursedata/searchCourseDataJson`（OAuth 学生 token），此处仅参考参数与返回字段契约，路径与认证不可照搬。
+
 - 权限：访问人需要该课程的资料模块权限；教师端需为该课程教师（角色 result=3 时拒绝），学生端需在指定班级。
 - 接口：GET `/coursedata/searchCourseDataJson`（mooc2 网关），按资料名称关键词分页检索课程资料。
 
