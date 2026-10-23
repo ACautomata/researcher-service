@@ -43,7 +43,7 @@ MCP 内容支持 structuredContent，或含 JSON 的 text 内容块；其他响�
 - 错误仍为 #312 的 90003 信封；`data.mcpStage` 区分 `initialize`、`tools/list`、`tools/call`。上游 HTTP 拒绝时附 `data.httpStatus`；仅返回静态阶段提示，不返回上游正文、原异常或任何认证材料。401 清理对应旧绑定，403/超时不等同于授权撤销。
 - 初始化及单次目录请求上限20秒，目录最多10页；游标停滞或超限直接失败，不将半份目录标成完整。目录缓存只存在于本次 MCP 连接，不能跨用户复用。
 
-真实能力矩阵及后续最小调用步骤见 [#1009 核验记录](chaoxing-mcp-verification.md)。
+真实能力矩阵及后续最小调用步骤见 [#1009 核验记录](chaoxing-mcp-verification.md)。学生授权、拒绝/异常 state、双用户隔离、刷新失败与解绑边界见 [#1008 验收记录](chaoxing-authorization-verification.md)。
 
 ## 两个外部技能包的复用
 
