@@ -78,7 +78,7 @@ npm run test
 npm run build
 ```
 
-- 后端类型检查与构建通过；全量 1800 项通过、19 项跳过。4 个真实 Docker smoke 因本机无可用 Docker socket 失败，OpenClaw 退役扫描被本机忽略目录 `.zcode` 触发；两者均与本变更无关，fresh CI checkout 不受影响。
+- 后端类型检查与构建通过；全量 1800 项通过、19 项跳过。4 个真实 Docker smoke 因本机无可用 Docker socket 失败，退役叙述扫描被本机忽略目录 `.zcode` 触发；两者均与本变更无关，fresh CI checkout 不受影响。
 - 前端 78 文件 / 956 项通过，构建与 admin 产物隔离检查通过。
 
 ## 仍需外部完成
