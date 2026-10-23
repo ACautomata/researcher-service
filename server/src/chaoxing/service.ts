@@ -3,7 +3,7 @@ import type { PrismaClient } from '../generated/prisma/client'
 import { encryptCredential, decryptCredential } from '../models/cipher'
 import { fail } from '../envelope'
 import type { ChaoxingOptions } from './options'
-import { ChaoxingMcpError, ChaoxingConfigError, tokenSchema, type ChaoxingQueryTarget, type ChaoxingRemote, type ChaoxingToken } from './remote'
+import { ChaoxingHttpError, ChaoxingMcpError, ChaoxingConfigError, tokenSchema, type ChaoxingQueryTarget, type ChaoxingRemote, type ChaoxingToken } from './remote'
 
 const hash = (value: string) => createHash('sha256').update(value).digest('hex')
 const unavailable = () => fail(90001, '超星尚未配置，请联系管理员')
@@ -102,6 +102,10 @@ export class ChaoxingService {
       const secrets = [token, material.refresh_token, this.options!.clientSecret].filter((v): v is string => !!v)
       return JSON.parse(JSON.stringify(result, (_key, value: unknown) => typeof value === 'string' ? secrets.reduce((text, secret) => text.split(secret).join('[REDACTED]'), value) : value)) as T
     } catch (error) {
+      if (error instanceof ChaoxingHttpError) {
+        if (error.httpStatus === 401) await this.invalidate(ownerId, binding.generation, binding.tokenCipher)
+        throw fail(90003, error.message, { httpOperation: [error.operation], ...(error.httpStatus ? { httpStatus: [String(error.httpStatus)] } : {}) })
+      }
       if (error instanceof ChaoxingMcpError) {
         if (error.httpStatus === 401) await this.invalidate(ownerId, binding.generation, binding.tokenCipher)
         throw fail(90003, error.message, { mcpStage: [error.stage], ...(error.httpStatus ? { httpStatus: [String(error.httpStatus)] } : {}), ...(error.rejectionReason ? { mcpRejectionReason: [error.rejectionReason] } : {}) })
@@ -134,8 +138,8 @@ export class ChaoxingService {
   async inspect(ownerId: string) {
     return this.authorized(ownerId, token => this.remote!.inspect(token))
   }
-  async learn(ownerId: string, topic: string, courseId?: string, signal?: AbortSignal, target: ChaoxingQueryTarget = 'all') {
+  async learn(ownerId: string, topic: string, courseId?: string, signal?: AbortSignal, target: ChaoxingQueryTarget = 'all', classId?: string) {
     signal?.throwIfAborted()
-    return this.authorized(ownerId, token => this.remote!.learn(token, topic, courseId, signal, target))
+    return this.authorized(ownerId, token => this.remote!.learn(token, topic, courseId, signal, target, classId))
   }
 }

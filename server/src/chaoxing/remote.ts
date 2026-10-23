@@ -29,7 +29,19 @@ export class ChaoxingMcpError extends Error {
     super(`超星 MCP ${label}${timedOut ? '超时' : '失败'}${httpStatus ? `（HTTP ${httpStatus}）` : ''}`)
   }
 }
+export class ChaoxingHttpError extends Error {
+  constructor(readonly operation: 'resources' | 'topics', readonly httpStatus?: number) {
+    super(`超星${operation === 'resources' ? '资料检索' : '知识点查询'}接口调用失败${httpStatus ? `（HTTP ${httpStatus}）` : ''}`)
+  }
+}
 export interface McpInspection {
+  http?: {
+    transport: 'https-json'
+    authentication: 'oauth-bearer'
+    callVerified: false
+    endpoints: { capability: 'resources' | 'topics'; method: 'GET'; url: string }[]
+    limitations: string[]
+  }
   tools: { name: string; description?: string; inputSchema: unknown; outputSchema?: unknown; annotations?: { readOnlyHint?: boolean; destructiveHint?: boolean; idempotentHint?: boolean; openWorldHint?: boolean } }[]
   /** 仅表示已经配置且在当前目录出现，不等于真实调用或业务语义验收通过。 */
   capabilities: string[]
@@ -47,5 +59,5 @@ export interface ChaoxingRemote {
   refresh(refreshToken: string): Promise<ChaoxingToken>
   courses?(token: string, signal?: AbortSignal): Promise<{ rows: { id: string; name: string; classId?: string }[]; truncated: boolean }>
   inspect(token: string, signal?: AbortSignal): Promise<McpInspection>
-  learn(token: string, topic: string, courseId?: string, signal?: AbortSignal, target?: ChaoxingQueryTarget): Promise<LearningResult>
+  learn(token: string, topic: string, courseId?: string, signal?: AbortSignal, target?: ChaoxingQueryTarget, classId?: string): Promise<LearningResult>
 }

@@ -6,6 +6,20 @@
 
 真实账号绑定已有用户确认；2026-10-23 通过现有管理台进行了本人授权的真实目录检查，但返回 90003，尚未取得 MCP 工具清单。下面的工具映射是一种部署适配契约，不是对超星实际工具名称或字段的断言。当前不能宣称真实课程、正文与链接已可用；映射为空时允许检查目录，学习工具明确报告缺少课程发现能力。
 
+## 2026-10-23 HTTP 接口接入更新（#1009）
+
+超星随后明确“不涉及 MCP”，提供 `/openapi/coursedata/searchCourseDataJson` 和 `/openapi/qbank-educlaw/topic-list`。默认 `CHAOXING_TRANSPORT=openapi` 改为直接 GET 这两个固定 HTTPS 地址，沿用平台现有 OAuth 绑定及刷新，不执行桌面 skill，不调用创建知识点接口。`CHAOXING_TRANSPORT=mcp` 仅保留给另行核验的 MCP 部署，只有该模式消费 `CHAOXING_MCP_MAPPING`；默认模式不再尝试 MCP 初始化。生产 CD 支持同名 repository variable。
+
+请求参数和返回字段来自原技能包说明，尚待新网关实测；“其他信息不变”不能代替 OAuth token 与新入口兼容性的证据。没有改用共享 API Key，也没有要求用户公开凭证。
+
+- `GET /capabilities` 在 HTTP 模式只返回本地固定端点、`transport=https-json`、拟用 `authentication=oauth-bearer`、`callVerified=false` 和缺失能力；`tools/capabilities` 为空，不发送探测请求、不证明远端已接受授权。
+- `POST /learn` 需显式 `courseId`。`target=resources|all` 还需 `classId`，固定 `ut=s`，不接受教师身份覆盖。`target=topics` 不需要班级。参数不能猜测；超星尚未提供课程/班级发现接口，`GET /courses` 和设置课程范围明确报告缺失能力。
+- 资料 GET 参数为 courseId、classId、ut、dataName、pageNumber、pageSize；空关键词核对仍显式发送 `dataName=`，最多50页。零命中重试一次后全量核对，并保留相关名称；过滤文件夹。知识点仅 GET topic-list、遍历 subList、过滤分类，不运行“查询不到自动新建”。
+- 每次查询45秒总时限、实际单响应最多2MB、知识点最多5000节点，最多展示50项；达到处理上限明确提示不完整。上游业务拒绝、结构错误均失败，不当成空列表。只保留实际返回的安全 HTTPS url，不拼接下载链接；没有已验证正文接口，结果仅作目录推荐。课程名称未取得时显示课程 ID，不编造名称。
+- 401清理本次旧绑定，403保留绑定。错误仅含静态文案、httpOperation 和 HTTP 状态，不回传上游正文或凭证。
+
+新 HTTP 接口没有课程列表/正文契约，且本轮用户确认未提供测试课程或班级 ID。因此不能把本地回归作为真实学生查询验收，#1009 继续保持未完成。下文 MCP 映射章节仅适用于显式 MCP 模式。
+
 ## 手动命令
 
 用户已要求保留自动推荐并补上手动斜杠入口。现有菜单已登记 `/course-search <关键词>` 和 `/topic-search <关键词>`，后端按命令固定查询目标并直达只读学习服务。

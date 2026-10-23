@@ -2,8 +2,9 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport, StreamableHTTPError } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { z } from 'zod'
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js'
-import { ChaoxingMcpError, ChaoxingConfigError, tokenSchema, type ChaoxingRemote, type LearningResource, type McpInspection, type McpStage, type McpRejectionReason } from './remote'
+import { ChaoxingMcpError, ChaoxingConfigError, type ChaoxingRemote, type LearningResource, type McpInspection, type McpStage, type McpRejectionReason } from './remote'
 import type { ChaoxingOptions } from './options'
+import { createChaoxingOAuth } from './oauth'
 
 const mcpFailure = (stage: McpStage, error: unknown): ChaoxingMcpError => {
   const status = error instanceof StreamableHTTPError && typeof error.code === 'number' && error.code >= 100 && error.code <= 599 ? error.code
@@ -50,18 +51,10 @@ const safeLink = (v: unknown): string | undefined => {
 /** Tool names/field mappings are deployment-reviewed contracts, never inferred from names or supplied by a model. */
 export function createChaoxingRemote(options: ChaoxingOptions, input: McpMapping = {}, network: typeof fetch = fetch): ChaoxingRemote {
   const config = mcpMappingSchema.parse(input)
+  const oauth = createChaoxingOAuth(options, network)
   // 完整目录只在本次 MCP 连接内复用，绝不跨账号或授权会话缓存。
   const catalogs = new WeakMap<Client, Awaited<ReturnType<Client['listTools']>>['tools']>()
   const checkedFetch: typeof fetch = (url, init) => network(url, { ...init, redirect: 'error', signal: init?.signal ? AbortSignal.any([init.signal, AbortSignal.timeout(20_000)]) : AbortSignal.timeout(20_000) })
-  async function oauth(parameters: Record<string, string>) {
-    const body = new URLSearchParams({ ...parameters, client_id: options.clientId })
-    const headers: Record<string, string> = { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' }
-    if (options.tokenAuth === 'basic') headers.Authorization = `Basic ${Buffer.from(`${encodeURIComponent(options.clientId)}:${encodeURIComponent(options.clientSecret)}`).toString('base64')}`
-    else body.set('client_secret', options.clientSecret)
-    const response = await checkedFetch('https://api.chaoxing.com/auth/oauth2/token', { method: 'POST', headers, body: body.toString() })
-    if (!response.ok) throw new Error('超星令牌交换失败')
-    return tokenSchema.parse(await response.json())
-  }
   async function session<T>(token: string, signal: AbortSignal | undefined, fn: (client: Client, transport: StreamableHTTPClientTransport) => Promise<T>): Promise<T> {
     const client = new Client({ name: 'researcher-service', version: '0.1.0' })
     const transport = new StreamableHTTPClientTransport(new URL(MCP_URL), { requestInit: { headers: { Authorization: `Bearer ${token}` }, redirect: 'error' }, fetch: (url, init) => checkedFetch(url, { ...init, signal: signal ? AbortSignal.any([signal, ...(init?.signal ? [init.signal] : [])]) : init?.signal }) })

@@ -1,5 +1,6 @@
 import { readChaoxingOptions } from './chaoxing/options'
 import { createChaoxingRemote, mcpMappingSchema } from './chaoxing/client'
+import { createChaoxingHttpRemote } from './chaoxing/httpClient'
 import { ChaoxingService } from './chaoxing/service'
 import { createServer } from 'node:http'
 import path from 'node:path'
@@ -48,8 +49,9 @@ async function main(): Promise<void> {
     archive: filesArchive,
   })
   const chaoxingOptions = readChaoxingOptions()
-  const chaoxingMapping = mcpMappingSchema.parse(JSON.parse(process.env.CHAOXING_MCP_MAPPING?.trim() || '{}'))
-  const chaoxingRemote = chaoxingOptions ? createChaoxingRemote(chaoxingOptions, chaoxingMapping) : undefined
+  const chaoxingRemote = !chaoxingOptions ? undefined : chaoxingOptions.transport === 'mcp'
+    ? createChaoxingRemote(chaoxingOptions, mcpMappingSchema.parse(JSON.parse(process.env.CHAOXING_MCP_MAPPING?.trim() || '{}')))
+    : createChaoxingHttpRemote(chaoxingOptions)
   const chaoxing = new ChaoxingService(prisma, chaoxingOptions, chaoxingRemote)
   const runner = await assembleRunner({
     chaoxing: chaoxingOptions ? chaoxing : undefined,
