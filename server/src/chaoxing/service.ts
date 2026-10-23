@@ -29,7 +29,7 @@ export class ChaoxingService {
       await tx.chaoxingAuthorization.create({ data: { stateHash: hash(state), ownerId, generation, verifierCipher: encryptCredential(verifier, this.options!.credentialSecret), expiresAt: new Date(Date.now() + 10 * 60_000) } })
     })
     const url = new URL('https://api.chaoxing.com/auth/oauth2/authorize')
-    url.search = new URLSearchParams({ response_type: 'code', client_id: this.options.clientId, redirect_uri: this.options.redirectUri, scope: 'statistic:studyai:read', state }).toString()
+    url.search = new URLSearchParams({ response_type: 'code', client_id: this.options.clientId, redirect_uri: this.options.redirectUri, scope: 'mooc:resource mooc:qbank', state }).toString()
     if (this.options.pkce !== false) {
       url.searchParams.set('code_challenge', createHash('sha256').update(verifier).digest('base64url'))
       url.searchParams.set('code_challenge_method', 'S256')
