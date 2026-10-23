@@ -29,7 +29,7 @@ export function createChaoxingHttpRemote(options: ChaoxingOptions, network: type
       const url = new URL(endpoints[operation])
       url.search = new URLSearchParams(params).toString()
       const response = await network(url, { method: 'GET', headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' }, redirect: 'error', signal })
-      if (!response.ok) { await response.body?.cancel(); throw new ChaoxingHttpError(operation, response.status) }
+      if (!response.ok) { await response.body?.cancel(); throw new ChaoxingHttpError(operation, response.status, 'http_rejected') }
       // 限制实际读取字节；Content-Length 不是可信的大小边界。
       if (!response.body) throw new ChaoxingHttpError(operation)
       const reader = response.body.getReader()
@@ -40,14 +40,18 @@ export function createChaoxingHttpRemote(options: ChaoxingOptions, network: type
           const { done, value } = await reader.read()
           if (done) break
           size += value.byteLength
-          if (size > 2_000_000) throw new ChaoxingHttpError(operation)
+          if (size > 2_000_000) throw new ChaoxingHttpError(operation, undefined, 'too_large')
           chunks.push(value)
         }
       } finally { await reader.cancel().catch(() => {}); reader.releaseLock() }
-      return JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown
+      const data: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8'))
+      if (data && typeof data === 'object' && ('status' in data && (data.status === false || data.status === 'false') || 'result' in data && data.result === false)) {
+        throw new ChaoxingHttpError(operation, undefined, 'business_rejected')
+      }
+      return data
     } catch (error) {
       if (error instanceof ChaoxingHttpError) throw error
-      throw new ChaoxingHttpError(operation)
+      throw new ChaoxingHttpError(operation, undefined, error instanceof SyntaxError ? 'invalid_json' : 'transport')
     }
   }
   return {
@@ -99,7 +103,7 @@ export function createChaoxingHttpRemote(options: ChaoxingOptions, network: type
           }
         } catch (error) {
           if (error instanceof ChaoxingHttpError) throw error
-          throw new ChaoxingHttpError(operation)
+          throw new ChaoxingHttpError(operation, undefined, error instanceof z.ZodError ? 'response_schema' : 'transport')
         }
         return { rows, truncated }
       }

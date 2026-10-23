@@ -52,7 +52,7 @@ async function main(): Promise<void> {
   const chaoxingRemote = !chaoxingOptions ? undefined : chaoxingOptions.transport === 'mcp'
     ? createChaoxingRemote(chaoxingOptions, mcpMappingSchema.parse(JSON.parse(process.env.CHAOXING_MCP_MAPPING?.trim() || '{}')))
     : createChaoxingHttpRemote(chaoxingOptions)
-  const chaoxing = new ChaoxingService(prisma, chaoxingOptions, chaoxingRemote)
+  const chaoxing = new ChaoxingService(prisma, chaoxingOptions, chaoxingRemote, chaoxingOptions ? createChaoxingRemote(chaoxingOptions) : undefined)
   const runner = await assembleRunner({
     chaoxing: chaoxingOptions ? chaoxing : undefined,
     prisma,

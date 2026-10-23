@@ -29,8 +29,9 @@ export class ChaoxingMcpError extends Error {
     super(`超星 MCP ${label}${timedOut ? '超时' : '失败'}${httpStatus ? `（HTTP ${httpStatus}）` : ''}`)
   }
 }
+export type HttpFailureReason = 'http_rejected' | 'business_rejected' | 'response_schema' | 'invalid_json' | 'too_large' | 'transport'
 export class ChaoxingHttpError extends Error {
-  constructor(readonly operation: 'resources' | 'topics', readonly httpStatus?: number) {
+  constructor(readonly operation: 'resources' | 'topics', readonly httpStatus?: number, readonly reason: HttpFailureReason = 'transport') {
     super(`超星${operation === 'resources' ? '资料检索' : '知识点查询'}接口调用失败${httpStatus ? `（HTTP ${httpStatus}）` : ''}`)
   }
 }
