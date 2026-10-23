@@ -13,7 +13,7 @@
 请求参数和返回字段来自原技能包说明，尚待新网关实测；“其他信息不变”不能代替 OAuth token 与新入口兼容性的证据。没有改用共享 API Key，也没有要求用户公开凭证。
 
 - `GET /capabilities` 在 HTTP 模式只返回本地固定端点、`transport=https-json`、拟用 `authentication=oauth-bearer`、`callVerified=false` 和缺失能力；`tools/capabilities` 为空，不发送探测请求、不证明远端已接受授权。
-- `POST /learn` 需显式 `courseId`。`target=resources|all` 还需 `classId`，固定 `ut=s`，不接受教师身份覆盖。`target=topics` 不需要班级。参数不能猜测；超星尚未提供课程/班级发现接口，`GET /courses` 和设置课程范围明确报告缺失能力。
+- `POST /learn` 需显式 `courseId`。`target=resources|all` 还需 `classId`，固定 `ut=s`，不接受教师身份覆盖。`target=topics` 不需要班级。斜杠命令同样支持关键词前的 `--course-id`、`--class-id`，不依赖先设置课程范围；参数不能猜测。超星尚未提供课程/班级发现接口，`GET /courses` 和设置课程范围明确报告缺失能力。
 - 资料 GET 参数为 courseId、classId、ut、dataName、pageNumber、pageSize；空关键词核对仍显式发送 `dataName=`，最多50页。零命中重试一次后全量核对，并保留相关名称；过滤文件夹。知识点仅 GET topic-list、遍历 subList、过滤分类，不运行“查询不到自动新建”。
 - 每次查询45秒总时限、实际单响应最多2MB、知识点最多5000节点，最多展示50项；达到处理上限明确提示不完整。上游业务拒绝、结构错误均失败，不当成空列表。只保留实际返回的安全 HTTPS url，不拼接下载链接；没有已验证正文接口，结果仅作目录推荐。课程名称未取得时显示课程 ID，不编造名称。
 - 401清理本次旧绑定，403保留绑定。错误仅含静态文案、httpOperation 和 HTTP 状态，不回传上游正文或凭证。
