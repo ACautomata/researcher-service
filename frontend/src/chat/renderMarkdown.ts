@@ -6,6 +6,7 @@ import MarkdownIt from 'markdown-it'
 import { full as emojiPlugin } from 'markdown-it-emoji'
 import taskListsPlugin from 'markdown-it-task-lists'
 import katexPluginModule from '@vscode/markdown-it-katex'
+import { mathSyntaxPlugin } from './mathSyntax'
 import 'katex/dist/katex.min.css'
 import createDOMPurify from 'dompurify'
 import hljs from 'highlight.js/lib/core'
@@ -57,7 +58,7 @@ const md = new MarkdownIt({
     return `<pre class="hljs"><code>${md.utils.escapeHtml(str)}</code></pre>`
   },
 })
-md.use(emojiPlugin).use(taskListsPlugin).use(katexPlugin, { throwOnError: false })
+md.use(emojiPlugin).use(taskListsPlugin).use(katexPlugin, { throwOnError: false }).use(mathSyntaxPlugin)
 
 // 宽表格使用局部滚动容器，避免撑破消息气泡或把整个消息流变成横向滚动区。
 // wrapper 由渲染器生成而非组件运行时改 DOM，流式重渲染与消毒出口保持同一路径。
