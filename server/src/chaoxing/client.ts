@@ -2,14 +2,22 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport, StreamableHTTPError } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { z } from 'zod'
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js'
-import { ChaoxingMcpError, ChaoxingConfigError, tokenSchema, type ChaoxingRemote, type LearningResource, type McpInspection, type McpStage } from './remote'
+import { ChaoxingMcpError, ChaoxingConfigError, tokenSchema, type ChaoxingRemote, type LearningResource, type McpInspection, type McpStage, type McpRejectionReason } from './remote'
 import type { ChaoxingOptions } from './options'
 
 const mcpFailure = (stage: McpStage, error: unknown): ChaoxingMcpError => {
   const status = error instanceof StreamableHTTPError && typeof error.code === 'number' && error.code >= 100 && error.code <= 599 ? error.code
     : error instanceof Error && error.name === 'UnauthorizedError' ? 401 : undefined
   const timedOut = error instanceof McpError && error.code === ErrorCode.RequestTimeout || error instanceof Error && error.name === 'TimeoutError'
-  return new ChaoxingMcpError(stage, status, timedOut)
+  // 仅识别固定类别，不返回或保留任何上游正文。未匹配不能推断为对端权限问题。
+  let reason: McpRejectionReason | undefined
+  if (status === 403) {
+    const text = error instanceof Error ? error.message.slice(0, 4096) : ''
+    reason = /URL\s*不在白名单|URL[^\n]{0,40}not (?:in|on) (?:the )?(?:white|allow)list/i.test(text) ? 'url_not_allowlisted'
+      : /insufficient_scope|insufficient scope/i.test(text) ? 'insufficient_scope'
+        : /invalid cors request/i.test(text) ? 'origin_rejected' : 'unclassified'
+  }
+  return new ChaoxingMcpError(stage, status, timedOut, reason)
 }
 
 const MCP_URL = 'https://api.chaoxing.com/openai/studyai/data'

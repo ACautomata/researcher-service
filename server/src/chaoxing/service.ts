@@ -104,7 +104,7 @@ export class ChaoxingService {
     } catch (error) {
       if (error instanceof ChaoxingMcpError) {
         if (error.httpStatus === 401) await this.invalidate(ownerId, binding.generation, binding.tokenCipher)
-        throw fail(90003, error.message, { mcpStage: [error.stage], ...(error.httpStatus ? { httpStatus: [String(error.httpStatus)] } : {}) })
+        throw fail(90003, error.message, { mcpStage: [error.stage], ...(error.httpStatus ? { httpStatus: [String(error.httpStatus)] } : {}), ...(error.rejectionReason ? { mcpRejectionReason: [error.rejectionReason] } : {}) })
       }
       if (error instanceof ChaoxingConfigError) throw fail(90003, error.message)
       const authError = error as { code?: unknown; name?: unknown }
