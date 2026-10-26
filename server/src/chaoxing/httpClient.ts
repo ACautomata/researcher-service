@@ -13,7 +13,7 @@ const resourcePageSchema = z.object({ status: z.literal(true), datalist: z.array
 const topicResponseSchema = z.object({ status: z.literal(true), data: z.object({ list: z.array(z.unknown()).max(5000) }) })
 const topicSchema = z.object({ id, content: z.string().min(1), type: z.number().int(), subList: z.array(z.unknown()).max(5000).optional() })
 const limitations = [
-  '第一版查询本人有权限的课程资料；需要课程 ID 和学生班级 ID，暂不支持全校或跨专业课程发现',
+  '查询本人有权限的课程资料；使用已同步课程清单，暂不支持全校课程发现',
   '资料按名称检索，使用本人超星授权和课程成员权限；课程/班级发现、正文读取尚未提供',
 ]
 const link = (value?: string): string | undefined => {
@@ -57,7 +57,7 @@ export function createChaoxingHttpRemote(options: ChaoxingOptions, network: type
   return {
     exchange: (code, verifier) => oauth({ grant_type: 'authorization_code', code, redirect_uri: options.redirectUri, ...(options.pkce !== false ? { code_verifier: verifier } : {}) }),
     refresh: refreshToken => oauth({ grant_type: 'refresh_token', refresh_token: refreshToken }),
-    courses: async () => { throw new ChaoxingConfigError('超星尚未提供课程/班级发现接口，无法读取或验证课程列表') },
+    courses: async () => ({ rows: [], truncated: false }),
     // 这里只报告本地接入契约，不把 HTTP 请求假装成 MCP 初始化或真实权限验收。
     inspect: async () => ({ tools: [], capabilities: [], http: {
       transport: 'https-json', authentication: 'oauth-bearer', callVerified: false,
@@ -65,7 +65,7 @@ export function createChaoxingHttpRemote(options: ChaoxingOptions, network: type
       limitations,
     } }),
     learn: async (token, query, courseId, signal, target = 'all', classId) => {
-      if (!courseId || !/^[1-9][0-9]{0,29}$/.test(courseId)) throw new ChaoxingConfigError('请提供明确的数字课程 ID；超星尚未提供课程发现接口，无法自动选课')
+      if (!courseId || !/^[1-9][0-9]{0,29}$/.test(courseId)) throw new ChaoxingConfigError('请先在账号设置同步课程清单，或提供明确的数字课程 ID')
       if (target !== 'topics' && (!classId || !/^[1-9][0-9]{0,29}$/.test(classId))) throw new ChaoxingConfigError('学生资料检索还需要该课程的班级 ID，请提供 classId；不能使用教师身份代替')
       const deadline = AbortSignal.any([AbortSignal.timeout(45_000), ...(signal ? [signal] : [])])
       const notes = [...limitations]
@@ -124,7 +124,7 @@ export function createChaoxingHttpRemote(options: ChaoxingOptions, network: type
         resources.push(...result.rows)
       }
       if (resources.length > 50) notes.push('资料数量较多，展示上限50个资料')
-      notes.push('课程名称未取得，当前仅显示课程 ID；所有结果仅作目录推荐，未取得正文，不能推断课程内容')
+      notes.push('所有结果仅作目录推荐，未取得正文，不能推断课程内容；课程名称来自已同步清单，未同步时仅显示课程 ID')
       if (resources.some(row => row.kind === 'resource')) notes.push('前往课程资料：需在当前浏览器登录本人超星账号并具备课程权限；进入后按文件名搜索或文件夹定位，再点击资料预览。该入口不是单份文件直达链接')
       if (resources.some(row => !row.url)) notes.push('部分资源未返回文件直达链接；课程资料页入口与文件直达链接需区分，不应编造下载或预览地址')
       return { resources: resources.slice(0, 50), limitations: notes }

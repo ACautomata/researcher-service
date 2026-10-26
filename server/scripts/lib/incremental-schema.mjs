@@ -13,8 +13,8 @@
 // 10→11 #786 isTeammate；11→12 #785 file_overwrite_logs；12→13 #790 teammates.kind +
 // #791 figures 换轨；13→14 T0 #801 legacy 清退；14→15 #858 OpenClaw 退役③（containers 表 DROP）；
 // 15→16 #881 端点预设制收敛（model_providers copy-rebuild 归一 + provider_endpoints 表退役 +
-// minimax 种子退役 + plugin_llm_assignments 备用表）。
-export const SCHEMA_VERSION = 16
+// minimax 种子退役 + plugin_llm_assignments 备用表）；16→17 超星本人课程清单两列（additive）。
+export const SCHEMA_VERSION = 17
 
 export function runIncrementalSchema(db) {
   db.exec(`
@@ -23,6 +23,8 @@ CREATE TABLE IF NOT EXISTS "chaoxing_bindings" (
     "generation" TEXT NOT NULL,
     "tokenCipher" TEXT,
     "expiresAt" DATETIME,
+    "coursesJson" TEXT,
+    "coursesSyncedAt" DATETIME,
     "updatedAt" DATETIME NOT NULL,
     CONSTRAINT "chaoxing_bindings_ownerId_fkey" FOREIGN KEY ("ownerId") REFERENCES "users" ("id") ON DELETE CASCADE ON UPDATE CASCADE
 );
@@ -36,6 +38,10 @@ CREATE TABLE IF NOT EXISTS "chaoxing_authorizations" (
 );
 CREATE INDEX IF NOT EXISTS "chaoxing_authorizations_ownerId_idx" ON "chaoxing_authorizations"("ownerId");
 `)
+
+  const bindingColumns = db.prepare('PRAGMA table_info("chaoxing_bindings")').all()
+  if (!bindingColumns.some(c => c.name === 'coursesJson')) db.exec('ALTER TABLE "chaoxing_bindings" ADD COLUMN "coursesJson" TEXT')
+  if (!bindingColumns.some(c => c.name === 'coursesSyncedAt')) db.exec('ALTER TABLE "chaoxing_bindings" ADD COLUMN "coursesSyncedAt" DATETIME')
 
   const hasSessions = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='sessions'").get()
   if (hasSessions && !db.prepare('PRAGMA table_info("sessions")').all().some(c => c.name === 'preferredModelJson')) {

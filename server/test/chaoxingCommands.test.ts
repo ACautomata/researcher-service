@@ -169,6 +169,20 @@ describe('超星内置手动命令', () => {
     expect(h.calls).toEqual([])
   })
 
+  it('仅关键词命令使用已保存清单跨课程查询，结果保留课程名称且不调用模型', async () => {
+    const h = await harness()
+    await h.bind()
+    const courses = [{ id: '123', classId: '456', name: '数学' }, { id: '789', classId: '987', name: '物理' }]
+    await h.prisma.chaoxingBinding.update({ where: { ownerId: h.owner.id }, data: { coursesJson: JSON.stringify({ courses }), coursesSyncedAt: new Date() } })
+    expect((await h.send('/course-search 梯度', '24'.repeat(16))).body.code).toBe(0)
+    await h.settle()
+    expect(h.calls.map(call => [call.courseId, call.classId])).toEqual([['123', '456'], ['789', '987']])
+    expect(h.model.inputs).toEqual([])
+    const answer = (await h.projection()).messages.at(-1)!.content
+    expect(answer).toContain('数学')
+    expect(answer).toContain('物理')
+  })
+
   it('资料命令固定 resources 目标、复用会话课程范围、零模型调用且结果入历史', async () => {
     const h = await harness()
     await h.bind()

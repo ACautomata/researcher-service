@@ -50,7 +50,7 @@ describe('超星 HTTP 只读查询', () => {
     expect(result.body.data.connection).toBeUndefined()
     expect(calls).toHaveLength(0)
     const courses = await ctx.request.get(`${base}/courses`).set(auth)
-    expect(courses.body).toMatchObject({ code: 90003, message: expect.stringContaining('尚未提供课程/班级发现接口') })
+    expect(courses.body).toMatchObject({ code: 0, data: { rows: [], truncated: false } })
     expect(calls).toHaveLength(0)
   })
 

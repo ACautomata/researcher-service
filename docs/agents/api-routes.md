@@ -113,4 +113,6 @@ maxConcurrentRuns 或全局 RUNNER_MAX_CONCURRENT_RUNS]）· `5xxxx` 会话/run 
 
 ## 超星学习资源授权与只读工具
 
-`/api/v1/integrations/chaoxing`：GET 绑定状态、DELETE 解绑；POST `/authorize` 发起授权；GET `/callback` 浏览器回调（303 重定向，#312 信封例外，state + 同浏览器 cookie 校验）；GET `/capabilities` 检查当前接入契约（默认 HTTP，报告本地固定端点和未核验状态；显式 MCP 模式才检查协商及目录，不等于真实调用验收）；GET `/mcp-capabilities` 独立核验本人MCP初始化及完整工具目录（不切换默认查询模式，不执行业务工具）；GET `/courses` 本人课程；GET/PUT `/sessions/:id/scope` 可选会话课程范围；POST `/learn` 学习资料查询（HTTP 模式需数字 courseId；资料目标还需学生 classId）。除回调外须本人平台认证及改密门；写入 schema 统一校验。90001 未配置、90002 校验失败、90003 超星调用/授权不可用、50002 会话不存在/越权。凭证不在响应中返回。
+课程同步增量：`PUT /api/v1/integrations/chaoxing/courses` 保存本人网页同步的课程清单（`chaoxingCourseImportSchema`；空列表清除），`GET /courses` 返回清单及同步时间。默认 HTTP 查询可只提交关键词，由后台按已同步课程/班级查询；清单不是授权凭证，仍按本人 OAuth 权限访问上游。完整流程和预算见 `docs/specs/chaoxing-course-sync.md`。
+
+`/api/v1/integrations/chaoxing`：GET 绑定状态、DELETE 解绑；POST `/authorize` 发起授权；GET `/callback` 浏览器回调（303 重定向，#312 信封例外，state + 同浏览器 cookie 校验）；GET `/capabilities` 检查当前接入契约（默认 HTTP，报告本地固定端点和未核验状态；显式 MCP 模式才检查协商及目录，不等于真实调用验收）；GET `/mcp-capabilities` 独立核验本人MCP初始化及完整工具目录（不切换默认查询模式，不执行业务工具）；GET `/courses` 本人课程；GET/PUT `/sessions/:id/scope` 可选会话课程范围；POST `/learn` 学习资料查询（默认 HTTP 模式从本人同步清单取得课程/班级信息，支持仅关键词查询；显式 ID 入口保留兼容）。除回调外须本人平台认证及改密门；写入 schema 统一校验。90001 未配置、90002 校验失败、90003 超星调用/授权不可用、50002 会话不存在/越权。凭证不在响应中返回。

@@ -639,6 +639,8 @@ model ChaoxingBinding {
   generation String
   tokenCipher String?
   expiresAt DateTime?
+  coursesJson String?
+  coursesSyncedAt DateTime?
   updatedAt DateTime @updatedAt
   @@map("chaoxing_bindings")
 }

@@ -2,6 +2,8 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import type { PrismaClient } from '../generated/prisma/client'
 import { encryptCredential, decryptCredential } from '../models/cipher'
 import { fail } from '../envelope'
+import { chaoxingCourseImportSchema } from '../validation/schemas'
+import { searchCourseCatalog } from './catalogSearch'
 import type { ChaoxingOptions } from './options'
 import { ChaoxingHttpError, ChaoxingMcpError, ChaoxingConfigError, tokenSchema, type ChaoxingQueryTarget, type ChaoxingRemote, type ChaoxingToken } from './remote'
 
@@ -46,7 +48,11 @@ export class ChaoxingService {
     if (!user?.isActive || user.mustChangePassword) return false
     try {
       const tokens = tokenSchema.parse(await this.remote.exchange(code, decryptCredential(row.verifierCipher, this.options.credentialSecret)))
-      const result = await this.prisma.chaoxingBinding.updateMany({ where: { ownerId: row.ownerId, generation: row.generation }, data: { ...this.tokenData(tokens), generation: randomUUID() } })
+      const result = await this.prisma.$transaction(async tx => {
+        const updated = await tx.chaoxingBinding.updateMany({ where: { ownerId: row.ownerId, generation: row.generation }, data: { ...this.tokenData(tokens), generation: randomUUID(), coursesJson: null, coursesSyncedAt: null } })
+        if (updated.count) await tx.session.updateMany({ where: { ownerId: row.ownerId }, data: { learningCourseId: null } })
+        return updated
+      })
       return result.count === 1
     } catch { return false }
   }
@@ -57,7 +63,7 @@ export class ChaoxingService {
     await this.prisma.$transaction(async tx => {
       await tx.chaoxingAuthorization.deleteMany({ where: { ownerId } })
       await tx.session.updateMany({ where: { ownerId }, data: { learningCourseId: null } })
-      await tx.chaoxingBinding.updateMany({ where: { ownerId }, data: { tokenCipher: null, expiresAt: null, generation: randomUUID() } })
+      await tx.chaoxingBinding.updateMany({ where: { ownerId }, data: { tokenCipher: null, expiresAt: null, generation: randomUUID(), coursesJson: null, coursesSyncedAt: null } })
     })
   }
   private async token(ownerId: string): Promise<string> {
@@ -86,7 +92,7 @@ export class ChaoxingService {
     return operation
   }
   private async invalidate(ownerId: string, generation: string, tokenCipher?: string | null) {
-    await this.prisma.chaoxingBinding.updateMany({ where: { ownerId, generation, ...(tokenCipher ? { tokenCipher } : {}) }, data: { tokenCipher: null, expiresAt: null, generation: randomUUID() } })
+    await this.prisma.chaoxingBinding.updateMany({ where: { ownerId, generation, ...(tokenCipher ? { tokenCipher } : {}) }, data: { tokenCipher: null, expiresAt: null, generation: randomUUID(), coursesJson: null, coursesSyncedAt: null } })
   }
   private async authorized<T>(ownerId: string, operation: (token: string) => Promise<T>): Promise<T> {
     const token = await this.token(ownerId)
@@ -117,8 +123,26 @@ export class ChaoxingService {
     }
   }
   async courses(ownerId: string) {
-    if (!this.remote?.courses) throw fail(90003, '课程列表能力尚未配置')
-    return this.authorized(ownerId, token => this.remote!.courses!(token))
+    return this.authorized(ownerId, async token => {
+      const row = await this.prisma.chaoxingBinding.findUnique({ where: { ownerId } })
+      if (row?.coursesJson) return { rows: chaoxingCourseImportSchema.parse(JSON.parse(row.coursesJson)).courses, truncated: false, syncedAt: row.coursesSyncedAt?.toISOString() ?? null }
+      if (!this.remote?.courses) throw new ChaoxingConfigError('课程列表能力尚未配置')
+      return { ...await this.remote.courses(token), syncedAt: null }
+    })
+  }
+  async syncCourses(ownerId: string, input: unknown) {
+    const data = chaoxingCourseImportSchema.parse(input)
+    await this.token(ownerId)
+    const binding = await this.prisma.chaoxingBinding.findUnique({ where: { ownerId } })
+    if (!binding?.tokenCipher) throw rebind()
+    const syncedAt = new Date()
+    await this.prisma.$transaction(async tx => {
+      const result = await tx.chaoxingBinding.updateMany({ where: { ownerId, generation: binding.generation, tokenCipher: { not: null } }, data: { coursesJson: JSON.stringify(data), coursesSyncedAt: syncedAt } })
+      if (!result.count) throw rebind()
+      const ids = data.courses.map(course => course.id)
+      await tx.session.updateMany({ where: { ownerId, ...(ids.length ? { learningCourseId: { notIn: ids } } : {}) }, data: { learningCourseId: null } })
+    })
+    return { rows: data.courses, truncated: false, syncedAt: syncedAt.toISOString() }
   }
   private async session(ownerId: string, sessionId: string) {
     const row = await this.prisma.session.findFirst({ where: { id: sessionId, ownerId, archivedAt: null, isTeammate: false } })
@@ -144,6 +168,13 @@ export class ChaoxingService {
   }
   async learn(ownerId: string, topic: string, courseId?: string, signal?: AbortSignal, target: ChaoxingQueryTarget = 'all', classId?: string) {
     signal?.throwIfAborted()
-    return this.authorized(ownerId, token => this.remote!.learn(token, topic, courseId, signal, target, classId))
+    return this.authorized(ownerId, async token => {
+      const row = await this.prisma.chaoxingBinding.findUnique({ where: { ownerId } })
+      if (this.options?.transport !== 'mcp' && row?.coursesJson && !(courseId && classId)) {
+        const catalog = chaoxingCourseImportSchema.parse(JSON.parse(row.coursesJson)).courses
+        return searchCourseCatalog(this.remote!, token, catalog, { topic, courseId, classId, target, signal })
+      }
+      return this.remote!.learn(token, topic, courseId, signal, target, classId)
+    })
   }
 }

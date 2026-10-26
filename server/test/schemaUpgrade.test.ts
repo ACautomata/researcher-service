@@ -51,7 +51,7 @@ function assertUpgraded(dbPath: string): void {
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='containers_ownerId_idx'").get()).toBeUndefined()
     // pairings 表随设备配对全链退役
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='pairings'").get()).toBeUndefined()
-    expect(db.pragma('user_version', { simple: true })).toBe(16) // T0 #801 legacy 清退 13→14；#858 OpenClaw 退役③ 14→15；#881 端点预设制 15→16
+    expect(db.pragma('user_version', { simple: true })).toBe(17) // T0 #801 legacy 清退 13→14；#858 OpenClaw 退役③ 14→15；#881 端点预设制 15→16
     const sessionCols = db.prepare('PRAGMA table_info("sessions")').all() as Array<{ name: string }>
     expect(sessionCols.some((col) => col.name === 'isTeammate')).toBe(true)
     expect(sessionCols.some((col) => col.name === 'preferredModelJson')).toBe(true)
@@ -114,6 +114,24 @@ PRAGMA user_version=1;
 }
 
 describe('schema upgrade script', () => {
+  it('v16 超星绑定加列保留已有凭证，重复升级不改写清单', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'chaoxing-upgrade-'))
+    const dbPath = path.join(dir, 'panel.db')
+    makeBaseDb(dbPath)
+    const db = new Database(dbPath)
+    db.exec(`CREATE TABLE chaoxing_bindings (ownerId TEXT PRIMARY KEY, generation TEXT NOT NULL, tokenCipher TEXT, expiresAt DATETIME, updatedAt DATETIME NOT NULL);
+      INSERT INTO chaoxing_bindings VALUES ('owner', 'generation', 'cipher', NULL, '2026-10-26');`)
+    db.close()
+    runDbScript('upgrade-schema.mjs', dbPath)
+    const upgraded = new Database(dbPath)
+    expect(upgraded.prepare('SELECT tokenCipher, coursesJson, coursesSyncedAt FROM chaoxing_bindings').get()).toEqual({ tokenCipher: 'cipher', coursesJson: null, coursesSyncedAt: null })
+    upgraded.prepare('UPDATE chaoxing_bindings SET coursesJson=?').run('{"courses":[]}')
+    upgraded.close()
+    runDbScript('upgrade-schema.mjs', dbPath)
+    const again = new Database(dbPath)
+    expect(again.prepare('SELECT tokenCipher, coursesJson FROM chaoxing_bindings').get()).toEqual({ tokenCipher: 'cipher', coursesJson: '{"courses":[]}' })
+    again.close()
+  })
   it('adds text trace + AutoFigure tables to an existing base database and is idempotent', () => {
     const dir = mkdtempSync(path.join(tmpdir(), `schema-upgrade-${process.pid}-`))
     const dbPath = path.join(dir, 'panel.db')

@@ -4,7 +4,7 @@ import type { PrismaClient } from '../generated/prisma/client'
 import { requireAuth } from '../middleware/auth'
 import { mustChangePasswordGate } from '../middleware/mustChangePasswordGate'
 import { validateBody } from '../middleware/validate'
-import { chaoxingAuthorizeSchema, chaoxingLearnSchema, chaoxingScopeSchema } from '../validation/schemas'
+import { chaoxingAuthorizeSchema, chaoxingLearnSchema, chaoxingScopeSchema, chaoxingCourseImportSchema } from '../validation/schemas'
 import { ok } from '../envelope'
 import type { ChaoxingOptions } from './options'
 import type { ChaoxingRemote } from './remote'
@@ -37,6 +37,10 @@ export function createChaoxingRouter(prisma: PrismaClient, deps: ChaoxingDeps = 
   })
   router.delete('/', validateBody(chaoxingAuthorizeSchema), async (req, res) => { await service.unlink(req.user!.id); ok(res, null) })
   router.get('/courses', async (req, res) => ok(res, await service.courses(req.user!.id)))
+  router.put('/courses', validateBody(chaoxingCourseImportSchema), async (req, res) => {
+    const body: z.infer<typeof chaoxingCourseImportSchema> = req.body
+    ok(res, await service.syncCourses(req.user!.id, body))
+  })
   router.get('/sessions/:id/scope', async (req, res) => ok(res, await service.scope(req.user!.id, String(req.params.id))))
   router.put('/sessions/:id/scope', validateBody(chaoxingScopeSchema), async (req, res) => {
     const body: z.infer<typeof chaoxingScopeSchema> = req.body

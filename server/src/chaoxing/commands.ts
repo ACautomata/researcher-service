@@ -7,8 +7,8 @@ export const CHAOXING_COMMANDS = {
   'course-search': {
     target: 'resources',
     description: '查询超星课程资料',
-    argumentHint: 'HTTP 模式：/course-search --course-id 课程ID --class-id 班级ID 梯度下降',
-    usage: '用法：/course-search <关键词>；HTTP 模式：/course-search --course-id <课程ID> --class-id <班级ID> <关键词>',
+    argumentHint: '例如：/course-search 可视化（首次请到账号设置同步课程）',
+    usage: '用法：/course-search <关键词>；首次请到账号设置同步课程。也可指定 --course-id <课程ID> --class-id <班级ID>',
   },
   'topic-search': {
     target: 'topics',
