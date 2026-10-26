@@ -10,8 +10,8 @@ export const SYSTEM_COMMANDS: readonly SlashOption[] = [
 
 /** 超星内置能力命令：仅在部署已配置超星接入时进入菜单（不依赖插件启用位）。 */
 export const CHAOXING_COMMANDS: readonly SlashOption[] = [
-  { alias: '/course-search', description: '查询超星课程资料', argumentHint: '例如：/course-search 梯度下降' },
-  { alias: '/topic-search', description: '查询超星已有知识点', argumentHint: '例如：/topic-search 导数' },
+  { alias: '/course-search', description: '查询超星课程资料', argumentHint: '/course-search --course-id 课程ID --class-id 班级ID 关键词（仅查询本人有权限的课程资料）' },
+  { alias: '/topic-search', description: '查询超星已有知识点（首版暂缓）', argumentHint: '知识点权限尚未确认，请先使用 /course-search 查询课程资料' },
 ]
 
 export interface SlashCommandOptions {

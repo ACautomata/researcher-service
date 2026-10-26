@@ -18,8 +18,8 @@ describe('slash 命令目录', () => {
       { id: 'active', name: 'Active', description: '', version: '1', enabled: true, commands: [{ name: 'course-search', description: '插件同名' }, { name: 'topic-search', description: '插件同名' }] },
     ], { chaoxingConfigured: true })
     expect(commands.map(c => c.alias)).toEqual(['/new', '/compact', '/model', '/course-search', '/topic-search'])
-    expect(commands.find(c => c.alias === '/course-search')).toMatchObject({ description: '查询超星课程资料', argumentHint: '例如：/course-search 梯度下降' })
-    expect(commands.find(c => c.alias === '/topic-search')).toMatchObject({ description: '查询超星已有知识点', argumentHint: '例如：/topic-search 导数' })
+    expect(commands.find(c => c.alias === '/course-search')).toMatchObject({ description: '查询超星课程资料', argumentHint: expect.stringContaining('--class-id') })
+    expect(commands.find(c => c.alias === '/topic-search')).toMatchObject({ description: '查询超星已有知识点（首版暂缓）', argumentHint: expect.stringContaining('请先使用 /course-search') })
   })
 
   it('超星未配置时菜单不提供可执行入口', () => {

@@ -194,6 +194,21 @@ describe('超星内置手动命令', () => {
     expect((await h.prisma.session.findUnique({ where: { id: h.sessionId } }))?.learningCourseId).toBe('c1')
   }, 20_000)
 
+  it('没有文件直达链接时，课程资料入口以可点击链接进入实时结果和历史', async () => {
+    const h = await harness()
+    await h.bind()
+    const courseDataUrl = 'https://mooc2-ans.chaoxing.com/mooc2-ans/coursedata/stu-datalist?courseid=123&clazzid=456&ut=s'
+    h.fake.setResult({ resources: [{ id: 'r1', name: '梯度课件.pdf', kind: 'resource', courseId: '123', courseName: '课程 123', courseDataUrl }], limitations: [] })
+    expect((await h.send('/course-search --course-id 123 --class-id 456 梯度', '23'.repeat(16))).body.code).toBe(0)
+    await h.settle()
+    const delta = h.events.filter(event => event.type === 'text.delta').map(event => (event.payload as { delta: string }).delta).join('')
+    expect(delta).toContain(`[前往课程资料](${courseDataUrl})`)
+    expect(delta).toContain('登录本人超星账号后')
+    expect(delta).toContain('未提供文件直达链接')
+    expect(delta).not.toContain('[打开资料]')
+    expect((await h.projection()).messages.at(-1)!.content).toContain(`[前往课程资料](${courseDataUrl})`)
+  })
+
   it('知识点命令固定 topics 目标，只使用知识点工具面', async () => {
     const h = await harness()
     await h.bind()

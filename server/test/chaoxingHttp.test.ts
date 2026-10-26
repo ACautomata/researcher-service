@@ -10,6 +10,7 @@ const options = {
   redirectUri: 'https://panel.example/api/v1/integrations/chaoxing/callback',
 }
 const base = '/api/v1/integrations/chaoxing'
+const courseDataUrl = 'https://mooc2-ans.chaoxing.com/mooc2-ans/coursedata/stu-datalist?courseid=123&clazzid=456&ut=s'
 
 // 既有信封 REST 接缝；替换外部 HTTP，保留绑定、令牌、路由与字段转换的实际链路。
 describe('超星 HTTP 只读查询', () => {
@@ -85,8 +86,8 @@ describe('超星 HTTP 只读查询', () => {
     const result = await learn({ courseId: '123', classId: '456', target: 'resources' })
     expect(result.body.code).toBe(0)
     expect(result.body.data.resources).toEqual([
-      { id: '2', name: '梯度课件', courseId: '123', courseName: '课程 123', kind: 'resource', url: 'https://example.com/2' },
-      { id: '3', name: '梯度例题', courseId: '123', courseName: '课程 123', kind: 'resource' },
+      { id: '2', name: '梯度课件', courseId: '123', courseName: '课程 123', kind: 'resource', url: 'https://example.com/2', courseDataUrl },
+      { id: '3', name: '梯度例题', courseId: '123', courseName: '课程 123', kind: 'resource', courseDataUrl },
     ])
     expect(calls).toHaveLength(2)
     for (const { url, init } of calls) {
@@ -105,6 +106,21 @@ describe('超星 HTTP 只读查询', () => {
     expect(result.body.code).toBe(0)
     expect(result.body.data.resources.map((r: { id: string }) => r.id)).toEqual(['4'])
     expect(calls.map(call => call.url.searchParams.get('dataName'))).toEqual(['梯度', '梯度', ''])
+  })
+
+  it('默认自动推荐只查资料，知识点业务拒绝不阻断成功结果', async () => {
+    calls.length = 0
+    upstream = url => url.pathname.endsWith('/topic-list')
+      ? json({ status: false, msg: '无权限' })
+      : json({ status: true, totalPages: 1, datalist: [{ id: 8, dataName: '梯度课件', objectId: 'file-object' }] })
+    const result = await learn({ courseId: '123', classId: '456' })
+    expect(result.body.code).toBe(0)
+    expect(result.body.data.resources).toEqual([{ id: '8', name: '梯度课件', courseId: '123', courseName: '课程 123', kind: 'resource', courseDataUrl }])
+    expect(result.body.data.resources[0].url).toBeUndefined()
+    expect(calls).toHaveLength(1)
+    expect(calls[0].url.pathname).toBe('/openapi/coursedata/searchCourseDataJson')
+    expect(result.body.data.limitations.join(' ')).toContain('知识点查询暂缓')
+    expect(result.body.data.limitations.join(' ')).toContain('该入口不是单份文件直达链接')
   })
 
   it('知识点递归遍历并过滤分类，不调用资料接口或自动创建', async () => {

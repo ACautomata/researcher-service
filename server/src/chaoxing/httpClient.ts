@@ -13,8 +13,8 @@ const resourcePageSchema = z.object({ status: z.literal(true), datalist: z.array
 const topicResponseSchema = z.object({ status: z.literal(true), data: z.object({ list: z.array(z.unknown()).max(5000) }) })
 const topicSchema = z.object({ id, content: z.string().min(1), type: z.number().int(), subList: z.array(z.unknown()).max(5000).optional() })
 const limitations = [
-  '超星目前只提供资料检索和已有知识点查询接口；课程/班级发现、正文读取尚未提供',
-  '当前使用本人 OAuth access token；新 HTTP 接口的认证兼容性和学生权限仍需真实调用核验',
+  '第一版查询本人有权限的课程资料；需要课程 ID 和学生班级 ID，暂不支持全校或跨专业课程发现',
+  '资料按名称检索，使用本人超星授权和课程成员权限；课程/班级发现、正文读取尚未提供',
 ]
 const link = (value?: string): string | undefined => {
   try { const url = new URL(value ?? ''); return url.protocol === 'https:' && !url.username && !url.password ? url.href : undefined } catch { return undefined }
@@ -69,10 +69,15 @@ export function createChaoxingHttpRemote(options: ChaoxingOptions, network: type
       if (target !== 'topics' && (!classId || !/^[1-9][0-9]{0,29}$/.test(classId))) throw new ChaoxingConfigError('学生资料检索还需要该课程的班级 ID，请提供 classId；不能使用教师身份代替')
       const deadline = AbortSignal.any([AbortSignal.timeout(45_000), ...(signal ? [signal] : [])])
       const notes = [...limitations]
+      if (target === 'all') notes.push('第一版自动推荐仅查询课程资料，知识点查询暂缓，不影响资料结果')
       const resources: LearningResource[] = []
+      // 本人浏览器实测的官方资料页，仅需课程/班级；不复制 cpi、stuenc 或云盘临时签名。
+      const courseDataUrl = new URL('https://mooc2-ans.chaoxing.com/mooc2-ans/coursedata/stu-datalist')
+      courseDataUrl.search = new URLSearchParams({ courseid: courseId, clazzid: classId ?? '', ut: 's' }).toString()
       const convert = (entry: { id: string; name: string; url?: string }, kind: LearningResource['kind']): LearningResource => ({
         id: entry.id, name: entry.name.slice(0, 500), courseId, courseName: `课程 ${courseId}`, kind,
         ...(link(entry.url) ? { url: link(entry.url) } : {}),
+        ...(kind === 'resource' ? { courseDataUrl: courseDataUrl.href } : {}),
       })
       async function search(operation: keyof typeof endpoints, keyword: string) {
         const rows: LearningResource[] = []
@@ -107,7 +112,8 @@ export function createChaoxingHttpRemote(options: ChaoxingOptions, network: type
         }
         return { rows, truncated }
       }
-      for (const operation of target === 'all' ? ['resources', 'topics'] as const : [target]) {
+      // 默认推荐只使用已核验的资料入口；知识点拒绝不能阻断资料推荐。
+      for (const operation of target === 'all' ? ['resources'] as const : [target]) {
         let result = await search(operation, query)
         if (!result.rows.length) result = await search(operation, query)
         if (!result.rows.length) {
@@ -119,7 +125,8 @@ export function createChaoxingHttpRemote(options: ChaoxingOptions, network: type
       }
       if (resources.length > 50) notes.push('资料数量较多，展示上限50个资料')
       notes.push('课程名称未取得，当前仅显示课程 ID；所有结果仅作目录推荐，未取得正文，不能推断课程内容')
-      if (resources.some(row => !row.url)) notes.push('部分资源未返回可访问链接，不应编造链接')
+      if (resources.some(row => row.kind === 'resource')) notes.push('前往课程资料：需在当前浏览器登录本人超星账号并具备课程权限；进入后按文件名搜索或文件夹定位，再点击资料预览。该入口不是单份文件直达链接')
+      if (resources.some(row => !row.url)) notes.push('部分资源未返回文件直达链接；课程资料页入口与文件直达链接需区分，不应编造下载或预览地址')
       return { resources: resources.slice(0, 50), limitations: notes }
     },
   }
