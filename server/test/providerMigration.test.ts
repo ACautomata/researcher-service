@@ -167,7 +167,7 @@ describe('#881 v15→v16 收敛迁移（端点预设制换轨）', () => {
       expect(cols).toEqual(['id', 'ownerId', 'providerId', 'presetId', 'credentialCipher', 'modelsJson', 'createdAt'])
       // 白名单表整表退役（含其种子行）
       expect(db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='provider_endpoints'`).get()).toBeUndefined()
-      expect(db.pragma('user_version', { simple: true })).toBe(16)
+      expect(db.pragma('user_version', { simple: true })).toBe(17)
       // 退役 seed id 'minimax' 引用 remap：无自建行的 owner 改指平台虚拟条目；有自建行不动
       const pref = (id: string): string | null =>
         (db.prepare(`SELECT "preferredModelJson" p FROM "sessions" WHERE id=?`).get(id) as { p: string | null }).p
@@ -221,7 +221,7 @@ describe('#881 v15→v16 收敛迁移（端点预设制换轨）', () => {
     const db2 = new Database(dbPath)
     try {
       expect(rows(db2)).toEqual(before)
-      expect(db2.pragma('user_version', { simple: true })).toBe(16)
+      expect(db2.pragma('user_version', { simple: true })).toBe(17)
     } finally {
       db2.close()
     }
@@ -239,7 +239,7 @@ describe('#881 v15→v16 收敛迁移（端点预设制换轨）', () => {
       const cols = (db.prepare('PRAGMA table_info(model_providers)').all() as Array<{ name: string }>).map((c) => c.name)
       expect(cols).toContain('presetId')
       expect(cols).not.toContain('containerId')
-      expect(db.pragma('user_version', { simple: true })).toBe(16)
+      expect(db.pragma('user_version', { simple: true })).toBe(17)
     } finally {
       db.close()
     }

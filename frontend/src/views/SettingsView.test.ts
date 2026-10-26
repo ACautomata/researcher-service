@@ -1,8 +1,8 @@
 import { flushPromises, mount } from '@vue/test-utils'
 import { describe, expect, it, vi } from 'vitest'
 import SettingsView from './SettingsView.vue'
-const api = vi.hoisted(() => ({ status: vi.fn(), unlink: vi.fn(), authorize: vi.fn() }))
-vi.mock('@/api/chaoxing', () => ({ getChaoxingStatus: api.status, unlinkChaoxing: api.unlink, authorizeChaoxing: api.authorize }))
+const api = vi.hoisted(() => ({ status: vi.fn(), unlink: vi.fn(), authorize: vi.fn(), courses: vi.fn().mockResolvedValue({ rows: [] }), sync: vi.fn() }))
+vi.mock('@/api/chaoxing', () => ({ getChaoxingStatus: api.status, unlinkChaoxing: api.unlink, authorizeChaoxing: api.authorize, listChaoxingCourses: api.courses, syncChaoxingCourses: api.sync }))
 vi.mock('vue-router', () => ({ useRoute: () => ({ query: {} }) }))
 describe('超星账号设置', () => {
   it('展示绑定状态，解绑后恢复绑定入口', async () => {

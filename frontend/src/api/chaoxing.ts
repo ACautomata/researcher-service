@@ -5,6 +5,7 @@ export const getChaoxingStatus = () => apiJson<ChaoxingStatus>(base)
 export const authorizeChaoxing = () => apiJson<{ url: string }>(`${base}/authorize`, { method: 'POST', body: '{}' })
 export const unlinkChaoxing = () => apiJson<null>(base, { method: 'DELETE', body: '{}' })
 export interface LearningCourse { id: string; name: string; classId?: string }
-export const listChaoxingCourses = () => apiJson<{ rows: LearningCourse[]; truncated: boolean }>(`${base}/courses`)
+export const listChaoxingCourses = () => apiJson<{ rows: LearningCourse[]; truncated: boolean; syncedAt?: string | null }>(`${base}/courses`)
+export const syncChaoxingCourses = (courses: { id: string; classId: string; name: string }[]) => apiJson<{ rows: LearningCourse[]; truncated: boolean; syncedAt: string }>(`${base}/courses`, { method: 'PUT', body: JSON.stringify({ courses }) })
 export const getLearningScope = (sessionId: string) => apiJson<{ courseId: string | null }>(`${base}/sessions/${encodeURIComponent(sessionId)}/scope`)
 export const setLearningScope = (sessionId: string, courseId: string | null) => apiJson<{ courseId: string | null }>(`${base}/sessions/${encodeURIComponent(sessionId)}/scope`, { method: 'PUT', body: JSON.stringify({ courseId }) })

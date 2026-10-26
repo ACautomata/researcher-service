@@ -1,0 +1,40 @@
+import { flushPromises, mount } from '@vue/test-utils'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import ChaoxingCourseSync from './ChaoxingCourseSync.vue'
+const api = vi.hoisted(() => ({ list: vi.fn(), sync: vi.fn() }))
+vi.mock('@/api/chaoxing', () => ({ listChaoxingCourses: api.list, syncChaoxingCourses: api.sync }))
+afterEach(() => { window.history.replaceState(null, '', '/'); vi.clearAllMocks() })
+describe('课程同步预览与保存', () => {
+  it('fragment 导入先预览不自动写入，清除地址中的清单后由本人确认保存', async () => {
+    const courses = [{ id: '123', classId: '456', name: '数学' }]
+    api.list.mockResolvedValue({ rows: [], syncedAt: null })
+    api.sync.mockResolvedValue({ rows: courses, syncedAt: '2026-10-26T00:00:00Z' })
+    window.history.replaceState(null, '', '/settings#chaoxing-courses=' + encodeURIComponent(JSON.stringify({ courses })))
+    const wrapper = mount(ChaoxingCourseSync)
+    await flushPromises()
+    expect(window.location.hash).toBe('')
+    expect(wrapper.text()).toContain('待同步 1 个课程/班级')
+    expect(api.sync).not.toHaveBeenCalled()
+    await wrapper.findAll('button').find(button => button.text() === '确认同步')!.trigger('click')
+    await flushPromises()
+    expect(api.sync).toHaveBeenCalledWith(courses)
+    expect(wrapper.text()).toContain('已同步 1 个课程/班级')
+    expect(wrapper.text()).not.toContain('待同步')
+  })
+  it('格式错误不提供保存按钮，失败不丢弃预览', async () => {
+    api.list.mockResolvedValue({ rows: [] })
+    api.sync.mockRejectedValue(new Error('offline'))
+    const wrapper = mount(ChaoxingCourseSync)
+    await flushPromises()
+    await wrapper.get('textarea').setValue('bad json')
+    await wrapper.findAll('button').find(button => button.text() === '预览清单')!.trigger('click')
+    expect(wrapper.text()).toContain('清单无效')
+    expect(wrapper.findAll('button').some(button => button.text() === '确认同步')).toBe(false)
+    await wrapper.get('textarea').setValue(JSON.stringify([{ id: '123', classId: '456', name: '数学' }]))
+    await wrapper.findAll('button').find(button => button.text() === '预览清单')!.trigger('click')
+    await wrapper.findAll('button').find(button => button.text() === '确认同步')!.trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('保存失败')
+    expect(wrapper.text()).toContain('待同步 1')
+  })
+})

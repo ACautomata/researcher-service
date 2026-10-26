@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
+import ChaoxingCourseSync from '@/components/ChaoxingCourseSync.vue'
 import { authorizeChaoxing, getChaoxingStatus, unlinkChaoxing, type ChaoxingStatus } from '@/api/chaoxing'
 const route = useRoute()
 const status = ref<ChaoxingStatus | null>(null)
@@ -33,7 +34,7 @@ onMounted(load)
     <h1>账号设置</h1>
     <section aria-labelledby="chaoxing-heading">
       <h2 id="chaoxing-heading">超星学习账号</h2>
-      <p>绑定本人超星账号后，在对话中学习即可获得相关课程资料和知识点推荐。</p>
+      <p>绑定本人超星账号并同步课程清单后，可在对话中直接按关键词检索课程资料。</p>
       <p>仅查询你有权限的教学数据，不修改课程或创建知识点。超星密码由超星登录页面处理。</p>
       <p>解绑会立即停止本平台的课程数据访问并清除本地授权；超星侧尚未提供已验证的远端撤销接口，如需撤销应用授权请前往超星账号设置操作。授权过期或失效后，可在此重新绑定。</p>
       <p v-if="notice" role="status">{{ notice }}</p>
@@ -44,6 +45,7 @@ onMounted(load)
           <p role="status">{{ status.connected ? '已绑定' : '未绑定' }}</p>
           <button data-test="chaoxing-bind" :disabled="busy" @click="bind">{{ status.connected ? '重新授权' : '绑定超星' }}</button>
           <button v-if="status.connected" data-test="chaoxing-unlink" :disabled="busy" @click="unlink">解绑</button>
+          <ChaoxingCourseSync v-if="status.connected" />
         </template>
       </template>
       <p v-else-if="!error">正在读取绑定状态…</p>

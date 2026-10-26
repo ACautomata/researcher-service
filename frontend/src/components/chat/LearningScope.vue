@@ -60,9 +60,10 @@ async function change(event: Event) {
       <span>{{ courseId ? `课程范围：${courses.find(c => c.id === courseId)?.name ?? courseId}` : '学习资源自动推荐' }}</span>
       <button v-if="!expanded && sessionId" :disabled="disabled" @click="showCourses">{{ courseId ? '调整课程范围' : '限定课程（可选）' }}</button>
       <select v-if="expanded && sessionId" :value="courseId" :disabled="busy || disabled" aria-label="学习课程范围" @change="change">
-        <option value="">自动推荐：本人有权限的课程</option>
+        <option value="">自动推荐：全部已同步课程</option>
         <option v-for="course in courses" :key="`${course.id}:${course.classId ?? ''}`" :value="course.id">{{ course.name }}</option>
       </select>
+      <router-link v-if="expanded && !courses.length" to="/settings">先同步我的超星课程</router-link>
       <span v-if="error" role="status">{{ error }}</span>
     </template>
   </div>

@@ -10,6 +10,7 @@ import { z } from 'zod'
 import { registry, okEnvelope, LooseData, NullData, ErrorEnvelope, bearerAuth } from './components'
 import {
   chaoxingAuthorizeSchema,
+  chaoxingCourseImportSchema,
   chaoxingLearnSchema,
   chaoxingScopeSchema,
   endpointTestSchema,
@@ -716,6 +717,7 @@ for (const endpoint of [
   { method: 'get' as const, suffix: '/mcp-capabilities', summary: '独立核验本人 MCP 初始化与工具目录（不切换查询模式）' },
   { method: 'get' as const, suffix: '/capabilities', summary: '检查超星接入能力与核验状态' },
   { method: 'get' as const, suffix: '/courses', summary: '读取本人获授权课程' },
+  { method: 'put' as const, suffix: '/courses', summary: '保存本人同步的课程清单（空列表清除）', body: chaoxingCourseImportSchema },
   { method: 'get' as const, suffix: '/sessions/{id}/scope', summary: '读取可选会话课程范围' },
   { method: 'put' as const, suffix: '/sessions/{id}/scope', summary: '限定或解除会话课程范围', body: chaoxingScopeSchema },
   { method: 'post' as const, suffix: '/learn', summary: '按学习话题检索只读资源', body: chaoxingLearnSchema },

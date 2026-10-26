@@ -225,6 +225,14 @@ export const pluginLlmAssignmentWriteSchema = z.object({
 
 // 超星写入与工具输入共用验证；身份和凭证始终来自后端。
 export const chaoxingAuthorizeSchema = z.object({}).strict()
+export const chaoxingCourseSchema = z.object({
+  id: z.string().regex(/^[1-9][0-9]{0,29}$/),
+  classId: z.string().regex(/^[1-9][0-9]{0,29}$/),
+  name: z.string().trim().min(1).max(200),
+}).strict()
+export const chaoxingCourseImportSchema = z.object({
+  courses: z.array(chaoxingCourseSchema).max(100).refine(rows => new Set(rows.map(row => `${row.id}:${row.classId}`)).size === rows.length, '课程和班级组合不能重复'),
+}).strict()
 export const chaoxingLearnSchema = z.object({
   topic: z.string().trim().min(1).max(1000),
   courseId: z.string().min(1).max(100).optional(),
