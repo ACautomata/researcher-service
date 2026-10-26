@@ -13,6 +13,8 @@ export interface LearningResource {
   courseId: string
   courseName: string
   url?: string
+  /** 已验证的课程资料列表入口；与单份文件的直达链接区分。 */
+  courseDataUrl?: string
   text?: string
   kind: 'resource' | 'topic'
 }
