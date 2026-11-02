@@ -254,11 +254,13 @@ jobs:
         env:
           GHCR_PULL_USER: ${{ secrets.GHCR_PULL_USER }}
           GHCR_PULL_TOKEN: ${{ secrets.GHCR_PULL_TOKEN }}
+          GHCR_FALLBACK_USER: ${{ github.actor }}
+          GHCR_FALLBACK_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           host: ${{ secrets.REMOTE_HOST }}
           username: ${{ secrets.REMOTE_USER }}
           key: ${{ secrets.DEPLOY_KEY }}
-          envs: GHCR_PULL_USER,GHCR_PULL_TOKEN
+          envs: GHCR_PULL_USER,GHCR_PULL_TOKEN,GHCR_FALLBACK_USER,GHCR_FALLBACK_TOKEN
           script: |
             set -euo pipefail
 
@@ -267,7 +269,19 @@ jobs:
             mkdir -p "$APP_DIR"
 
             # 持久登录 ghcr：面板镜像拉取共用此凭证。
-            echo "$GHCR_PULL_TOKEN" | docker login ghcr.io -u "$GHCR_PULL_USER" --password-stdin
+            # 先尝试长期 PAT（GHCR_PULL_*）；若失效则降级用本次 workflow 的 GITHUB_TOKEN，
+            # 避免因人工维护 PAT 过期导致整条 deploy 中断（本次故障：ghcr denied）。
+            logged_in=0
+            if [ -n "${GHCR_PULL_USER:-}" ] && [ -n "${GHCR_PULL_TOKEN:-}" ]; then
+              if echo "$GHCR_PULL_TOKEN" | docker login ghcr.io -u "$GHCR_PULL_USER" --password-stdin; then
+                logged_in=1
+              else
+                echo "[deploy] WARN: GHCR_PULL_* login failed, fallback to workflow token" >&2
+              fi
+            fi
+            if [ "$logged_in" != "1" ]; then
+              echo "$GHCR_FALLBACK_TOKEN" | docker login ghcr.io -u "$GHCR_FALLBACK_USER" --password-stdin
+            fi
 
             cd "$APP_DIR"
             # 显式指定 compose 文件：scp 落盘的是 docker-compose.deploy.yml（非默认名
