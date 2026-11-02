@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { formatResourceResults } from '../src/publicResourceSearch'
+import { formatResourceResults, searchPublicResources } from '../src/publicResourceSearch'
 import { publicResourceSearchSchema } from '../src/validation/schemas'
 describe('public resource search', () => {
   it('labels known publishers, keeps video candidates and rejects unsafe or duplicate links', () => {
@@ -69,4 +69,10 @@ it('only enabled skills expose tools, commands and learning guidelines', () => {
   expect(enabled.commands.map(command => command.command.name)).toEqual(['resource-search'])
   expect(enabled.prompt).toContain('For concrete learning questions')
   expect(Buffer.byteLength(buildPluginPrompt(PLUGIN_MANIFESTS), 'utf8')).toBeLessThanOrEqual(4096)
+})
+
+it('queries documents and videos, and does not disguise unavailable empty search as no matches', async () => {
+  const transport = vi.fn().mockResolvedValue(new Response(JSON.stringify({ results: [], unresponsive_engines: [['sogou', 'timeout']] })))
+  await expect(searchPublicResources('Vue', { enabled: true, fetch: transport })).rejects.toThrow('搜索服务暂时不可用')
+  expect(String(transport.mock.calls[0]![0])).toContain('categories=general%2Cit%2Cvideos')
 })
