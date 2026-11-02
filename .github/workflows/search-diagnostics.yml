@@ -1,0 +1,28 @@
+name: Search diagnostics
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Inspect internal search availability
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2
+        with:
+          host: ${{ secrets.REMOTE_HOST }}
+          username: ${{ secrets.REMOTE_USER }}
+          key: ${{ secrets.DEPLOY_KEY }}
+          script: |
+            set -eu
+            docker ps --filter name=panel-search --format '{{.Names}} {{.Status}}'
+            docker exec panel-search python -c '
+            import urllib.request, urllib.parse, json
+            for engine in [None, "bing", "baidu", "brave", "duckduckgo", "google", "bilibili"]:
+                query = {"q":"Vue ref reactive", "format":"json", "language":"zh-CN"}
+                if engine: query["engines"] = engine
+                try:
+                    data = json.load(urllib.request.urlopen("http://127.0.0.1:8080/search?"+urllib.parse.urlencode(query), timeout=15))
+                    print(json.dumps({"engine":engine or "default", "results":len(data.get("results",[])), "failures":data.get("unresponsive_engines",[])}, ensure_ascii=False))
+                except Exception as e: print(json.dumps({"engine":engine,"error":str(e)}))
+            '
