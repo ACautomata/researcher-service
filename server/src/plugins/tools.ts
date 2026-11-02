@@ -16,6 +16,7 @@
 
 import { randomUUID } from 'node:crypto'
 import { tool } from '@langchain/core/tools'
+import { ToolMessage } from '@langchain/core/messages'
 import { GraphInterrupt, interrupt } from '@langchain/langgraph'
 import { AsyncLocalStorageProviderSingleton } from '@langchain/core/singletons'
 import type { AnyPluginToolDefinition, PluginToolContentBlock, PluginToolContext } from './api'
@@ -60,7 +61,7 @@ export function toLangChainTool(def: AnyPluginToolDefinition, ctx: PluginToolCon
   return tool(
     // func 签名（input, runtime)：runtime = RunnableConfig 扩展——signal 在 config 顶层或
     // configurable 两处随版本漂移，双处 best-effort 提取，缺省 never-abort。
-    async (params: unknown, runtime: { signal?: AbortSignal; configurable?: { signal?: AbortSignal } }) => {
+    async (params: unknown, runtime: { signal?: AbortSignal; toolCall?: { id?: string }; configurable?: { signal?: AbortSignal } }) => {
       const toolCallId = currentToolCallContext()?.toolCallId || randomUUID()
       const signal = runtime?.signal instanceof AbortSignal
         ? runtime.signal
@@ -92,7 +93,9 @@ export function toLangChainTool(def: AnyPluginToolDefinition, ctx: PluginToolCon
         if (e instanceof GraphInterrupt || signal.aborted) throw e
         const raw = e instanceof Error ? e.message : String(e)
         const message = raw.length > TOOL_ERROR_MESSAGE_MAX_LEN ? `${raw.slice(0, TOOL_ERROR_MESSAGE_MAX_LEN)}…` : raw
-        return [`Tool call failed: ${message}`, undefined]
+        const callId = currentToolCallContext()?.toolCallId || runtime?.toolCall?.id
+        // A text-only fallback would be wrapped as success by LangChain.
+        return [callId ? new ToolMessage({ content: `Tool call failed: ${message}`, name: def.name, tool_call_id: callId, status: 'error' }) : `Tool call failed: ${message}`, undefined]
       }
       const text = contentToText(result.content)
       // responseFormat='content_and_artifact'：二元组 [content, artifact]——content = 模型面，

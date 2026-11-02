@@ -72,6 +72,7 @@ jobs:
           # 沙箱镜像 poppler 支路（#908）：extractPdfText 镜像前提——SANDBOX_IMAGE 部署指向
           # 启用（缺省 busybox 不翻，归沙箱镜像升级票）；只推 :latest + :<sha>（bookworm-slim
           # 移动基线，不适用 wiki 镜像不可动版本 tag 约定，钉版引用按 sha tag）
+          echo "SEARCH_IMAGE=ghcr.io/${IMAGE_REPO}/search" >> "$GITHUB_ENV"
           echo "SANDBOX_IMAGE=ghcr.io/${IMAGE_REPO}/sandbox" >> "$GITHUB_ENV"
 
       - name: Resolve wiki image version tag (Dockerfile FROM 单源, #784)
@@ -143,6 +144,15 @@ jobs:
             ${{ env.FRONTEND_IMAGE }}:${{ env.IMAGE_TAG }}
           cache-from: type=gha,scope=frontend
           cache-to: type=gha,mode=max,scope=frontend
+
+      - name: Build & push internal search image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
+        with:
+          context: deploy/searxng-image
+          push: true
+          tags: ${{ env.SEARCH_IMAGE }}:${{ env.IMAGE_TAG }}
+          cache-from: type=gha,scope=search
+          cache-to: type=gha,mode=max,scope=search
 
       - name: Build & push wiki container image (#784)
         # wiki 容器镜像：busybox 级极简（sh/mkdir/rm/cat，无运行时）+ 零初始化（无骨架 COPY，
@@ -216,6 +226,7 @@ jobs:
             echo "FAL_KEY=${{ secrets.FAL_KEY }}"
             echo "PANEL_SERVER_IMAGE=${{ env.SERVER_IMAGE }}:latest"
             echo "PANEL_FRONTEND_IMAGE=${{ env.FRONTEND_IMAGE }}:latest"
+            echo "PANEL_SEARCH_IMAGE=${{ env.SEARCH_IMAGE }}:${{ env.IMAGE_TAG }}"
             # 沙箱镜像 poppler 支路（#908 B2 拍板：CD 渲染白名单加键——运维手工钉宿主 .env
             # 会被 scp overwrite 抹掉，改由 CD 全托管）：钉 CI head sha tag（生产禁浮动 tag，
             # server isFloatingImageRef fail-fast 准据）；server 读本键即启用 extractPdfText。
@@ -293,7 +304,7 @@ jobs:
             # 重试吃掉 registry 瞬时抖动，但不加 --ignore-pull-failures——那会静默部署旧镜像。
             pull_ok=0
             for attempt in 1 2 3; do
-              if docker compose -f docker-compose.deploy.yml pull frontend server; then
+              if docker compose -f docker-compose.deploy.yml pull frontend server searxng; then
                 pull_ok=1
                 break
               fi
@@ -326,4 +337,19 @@ jobs:
               docker compose -f docker-compose.deploy.yml logs --tail=50 server >&2 || true
               exit 1
             fi
+            echo "[deploy] checking search JSON API from control plane ..."
+            docker compose -f docker-compose.deploy.yml exec -T server node --input-type=module -e '
+              let failure;
+              for (let attempt = 0; attempt < 3; attempt++) {
+                try {
+                  const r = await fetch("http://searxng:8080/search?q=Vue+ref+reactive&format=json&language=zh-CN", {signal: AbortSignal.timeout(12000)});
+                  if (!r.ok) throw new Error("Search HTTP " + r.status);
+                  const data = await r.json();
+                  if (!Array.isArray(data.results) || !data.results.some(x => /^https?:/.test(x.url))) throw new Error("Search returned no usable links");
+                  console.log("[deploy] search links:", data.results.length, "partial:", Boolean(data.unresponsive_engines?.length));
+                  process.exit(0);
+                } catch (e) { failure = e; await new Promise(r => setTimeout(r, 3000)); }
+              }
+              console.error("[deploy] search smoke failed:", failure.message); process.exit(1);
+            '
             echo "[deploy] healthy ✓"
