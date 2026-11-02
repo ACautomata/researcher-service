@@ -179,4 +179,4 @@ judge 在模型配置页指派，未指派使用用户默认端点再兜平台�
 
 配置依据：[SearXNG search settings](https://docs.searxng.org/admin/settings/settings_search.html) 与 [server settings](https://docs.searxng.org/admin/settings/settings_server.html)。免费上游仍可能限流或触发验证码；健康及检索烟测不代表每个中文主题都有权威资料和视频。
 
-生产网络验证（2026-11-02）：默认海外引擎超时、百度通用检索 CAPTCHA；360search、sogou、baidu kaifa、bilibili 与 sogou videos 返回实际结果。搜索镜像仅启用这五个已测来源，控制面请求 general/it/videos 分类。无结果且来源报错时返回不可用，不伪装成正常空命中。后续网络变化仍需重新跑只读诊断。
+生产网络验证（2026-11-02）：默认海外引擎超时、百度通用检索 CAPTCHA；360search、sogou、baidu kaifa、bilibili 与 sogou videos 返回实际结果。进一步核对实际标题发现百度开发者返回无关文章，搜狗视频返回中转页，因此正式启用 360search、sogou、bilibili 三个来源。控制面并行发起两次有界请求：网页使用 360search/sogou，视频使用 bilibili；结果裁剪保留视频名额，防止被网页候选挤掉。无结果且来源报错时返回不可用，不伪装成正常空命中。后续网络变化仍需重新跑只读诊断。

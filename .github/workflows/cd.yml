@@ -342,7 +342,7 @@ jobs:
               let failure;
               for (let attempt = 0; attempt < 3; attempt++) {
                 try {
-                  const r = await fetch("http://searxng:8080/search?q=Vue+ref+reactive&format=json&language=zh-CN&categories=general,it,videos", {signal: AbortSignal.timeout(12000)});
+                  const r = await fetch("http://searxng:8080/search?q=Vue+ref+reactive&format=json&language=zh-CN&categories=general,videos", {signal: AbortSignal.timeout(12000)});
                   if (!r.ok) throw new Error("Search HTTP " + r.status);
                   const data = await r.json();
                   if (!Array.isArray(data.results) || !data.results.some(x => /^https?:/.test(x.url))) throw new Error("Search returned no usable links");
