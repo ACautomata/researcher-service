@@ -18,7 +18,7 @@ jobs:
             docker ps --filter name=panel-search --format '{{.Names}} {{.Status}}'
             docker exec panel-search python -c '
             import urllib.request, urllib.parse, json
-            for engine in [None, "bing", "baidu", "brave", "duckduckgo", "google", "bilibili"]:
+            for engine in ["360search", "sogou", "baidu kaifa", "yahoo", "bilibili", "bing videos", "sogou videos"]:
                 query = {"q":"Vue ref reactive", "format":"json", "language":"zh-CN"}
                 if engine: query["engines"] = engine
                 try:
