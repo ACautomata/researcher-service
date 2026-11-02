@@ -7,5 +7,6 @@
 import type { PluginWebDefinition } from './api'
 import autofigureWeb from '@plugins/autofigure/web'
 import researchWeb from '@plugins/research/web'
+import publicResourcesWeb from '@plugins/public-resources/web'
 
-export const PLUGIN_WEB_DEFINITIONS: readonly PluginWebDefinition[] = [autofigureWeb, researchWeb]
+export const PLUGIN_WEB_DEFINITIONS: readonly PluginWebDefinition[] = [autofigureWeb, researchWeb, publicResourcesWeb]

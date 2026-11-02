@@ -8,5 +8,6 @@
 import type { PluginManifest } from '../server/src/plugins/api'
 import autofigureManifest from './autofigure/manifest'
 import researchManifest from './research/manifest'
+import publicResourcesManifest from './public-resources/manifest'
 
-export const PLUGIN_MANIFESTS: readonly PluginManifest[] = [autofigureManifest, researchManifest]
+export const PLUGIN_MANIFESTS: readonly PluginManifest[] = [autofigureManifest, researchManifest, publicResourcesManifest]

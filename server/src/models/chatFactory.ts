@@ -38,8 +38,8 @@ export type ChatModelFactory = (model: string, opts: ModelFactoryOptions) => Pro
 // thinking（两态开关，仅显式设置才入 payload——零注入基线字节等价的根由）。按协议面取
 // 必要集（跨面塞未知字段 = 构造器静默忽略面，不引入）。映射表→通道键的接线漂移由
 // test/effortBinding.test.ts 守卫。
-export const OPENAI_CONFIGURABLE_FIELDS: readonly string[] = ['model', 'modelProvider', 'temperature', 'reasoning', 'modelKwargs']
-export const ANTHROPIC_CONFIGURABLE_FIELDS: readonly string[] = ['model', 'modelProvider', 'temperature', 'outputConfig', 'thinking']
+export const OPENAI_CONFIGURABLE_FIELDS: readonly string[] = ['model', 'modelProvider', 'temperature', 'maxTokens', 'reasoning', 'modelKwargs']
+export const ANTHROPIC_CONFIGURABLE_FIELDS: readonly string[] = ['model', 'modelProvider', 'temperature', 'maxTokens', 'outputConfig', 'thinking']
 
 export const defaultFactory: ChatModelFactory = async (model, opts) => {
   if (opts.lcProvider === 'openai') {

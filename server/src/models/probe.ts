@@ -129,11 +129,15 @@ export class EndpointProbeService {
     tokenKwargs: Record<string, unknown>,
     signal: AbortSignal,
   ): Promise<void> {
-    const bound = (
-      model as unknown as {
-        bind: (kwargs: Record<string, unknown>) => { invoke: (input: unknown, options?: unknown) => Promise<unknown> }
-      }
-    ).bind(tokenKwargs)
+    // initChatModel returns a ConfigurableModel in current LangChain versions:
+    // it exposes withConfig rather than the older bind method. Preserve the
+    // legacy adapter seam while putting the token limit into model construction.
+    const legacy = model as unknown as { bind?: (kwargs: Record<string, unknown>) => { invoke: (input: unknown, options?: unknown) => Promise<unknown> } }
+    const bound = typeof legacy.bind === 'function'
+      ? legacy.bind(tokenKwargs)
+      : model.withConfig({ configurable: tokenKwargs.max_completion_tokens !== undefined
+          ? { maxTokens: -1, modelKwargs: tokenKwargs }
+          : { maxTokens: tokenKwargs.max_tokens } })
     await bound.invoke(PROBE_INPUT, { signal })
   }
 }

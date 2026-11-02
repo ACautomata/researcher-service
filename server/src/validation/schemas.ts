@@ -241,3 +241,5 @@ export const chaoxingLearnSchema = z.object({
 }).strict()
 
 export const chaoxingScopeSchema = z.object({ courseId: z.string().min(1).max(100).nullable() }).strict()
+
+export const publicResourceSearchSchema = z.object({ query: z.string().trim().min(1, '请输入学习问题').max(200, '学习问题不能超过 200 个字符') }).strict()
