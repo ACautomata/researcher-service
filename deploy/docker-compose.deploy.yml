@@ -1,7 +1,7 @@
 # deploy/docker-compose.deploy.yml —— 面板生产栈（BaoTa 边缘 TLS 之后的应用层）
 #
 # 由 CD（.github/workflows/cd.yml）scp 到宿主 /www/panel/ 并经 `docker compose ... up -d` 启动。
-# 三服务：frontend（唯一对宿主暴露，loopback 18080 供 BaoTa 反代）/ server（内部，TS/Express 控制面，
+# 四服务（含内部 searxng）：frontend（唯一对宿主暴露，loopback 18080 供 BaoTa 反代）/ server（内部，TS/Express 控制面，
 # docker.sock 编排面板自管容器（会话沙箱 + wiki 容器）+ SQLite 卷）/ redis（内部，BullMQ 队列）。
 # 宿主数据挂载唯一豁免：/var/run/docker.sock（ADR 0013，spec §5.4 已接受等价 root）。
 # （#341 M9：backend 服务退役 Django，切换为 server 服务跑 Express 控制面。
@@ -44,6 +44,7 @@ services:
       # 非敏感固定项：config.ts 唯一 env 读取处（server/src/config.ts）。
       NODE_ENV: production
       PORT: "8001"
+      PUBLIC_RESOURCE_SEARCH_ENABLED: "true"
       REDIS_URL: redis://redis:6379/0
       # SQLite 持久化：server 经 DATABASE_URL（Prisma driver adapter）读本 named volume 挂载点，
       # 容器重建数据不丢。必须显式绝对路径——apply-schema.mjs 的 file: 前缀剥离对绝对路径正确。
@@ -79,6 +80,18 @@ services:
     networks:
       - panel-net
 
+  searxng:
+    image: ${PANEL_SEARCH_IMAGE:?CD must provide a pinned search image}
+    container_name: panel-search
+    restart: unless-stopped
+    # Internal HTTP API only; no host ports or host data mounts.
+    networks:
+      - panel-net
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
 
 networks:
   panel-net:

@@ -168,3 +168,13 @@ v15→v16 自动按旧地址域名归一预设，未知域名行丢弃并逐行�
 judge 在模型配置页指派，未指派使用用户默认端点再兜平台；删除端点后的引用下一 run 回平台默认。在飞 run 保持启动快照。部署级判定模型配置不再生效。
 
 `AUTOFIGURE_SVG_MODEL` 保留为废弃兼容 pin，设值启动告警且优先于指派；请清除后改用 AutoFigure 插件 LLM 指派，后续独立版本再物理删除。生图与 fal key 继续由平台提供。端点试连 V1 无专用限流，可能消耗用户或平台额度；10s 超时与 1-token 级输出限制不等于配额防护。
+
+## 内部公开资源检索（#1027）
+
+生产 compose 包含无宿主端口的 `searxng`，与控制面共用内部网络；镜像从固定上游 digest 构建并内置 JSON 配置，CD 推送至 GHCR 后按 CI commit SHA 注入 `PANEL_SEARCH_IMAGE`。实例签名密钥在启动时随机生成，不进入仓库。仅内部使用，未开启公共代理服务。
+
+控制面环境显式设置 `PUBLIC_RESOURCE_SEARCH_ENABLED=true`。账号仍需在插件页启用公开资源检索。CD 从控制面容器实际请求 SearXNG JSON 并检查存在资源链接；失败会使 CD 失败，不能用平台健康替代检索验收。部分上游不可用允许返回现有结果并保留 partial 状态。
+
+排障：检查 `docker compose -f docker-compose.deploy.yml ps searxng` 和搜索日志；不得输出 `.env` 或完整容器环境。紧急关闭时将控制面检索开关改为 false 并重建控制面；恢复则重新开启。CD 重新部署会恢复仓库中的默认启用配置。回退版本应使用此前成功部署的搜索镜像 SHA，避免使用浮动标签。
+
+配置依据：[SearXNG search settings](https://docs.searxng.org/admin/settings/settings_search.html) 与 [server settings](https://docs.searxng.org/admin/settings/settings_server.html)。免费上游仍可能限流或触发验证码；健康及检索烟测不代表每个中文主题都有权威资料和视频。

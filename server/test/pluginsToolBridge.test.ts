@@ -75,3 +75,9 @@ describe('toLangChainTool 错误回喂（插件面 #737 补齐）', () => {
     ).rejects.toThrow(/aborted mid-flight/)
   })
 })
+
+it('agent tool failure carries native error status for live and persisted projections', async () => {
+  const probe = toLangChainTool(defOf(async () => { throw new Error('搜索服务暂时不可用') }), ctxStub)
+  const out = await probe.invoke({ type: 'tool_call', id: 'search-error', name: 'bridge_probe_tool', args: {} })
+  expect(out).toMatchObject({ status: 'error', tool_call_id: 'search-error' })
+})
