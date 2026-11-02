@@ -25,13 +25,14 @@ export async function searchPublicResources(query: string, options: { enabled: b
   if (!options.enabled) throw fail(CODE.INTERNAL, '公开资源搜索尚未配置，请联系管理员')
   const parsedQuery = publicResourceSearchSchema.parse({ query }).query
   const url = new URL('http://searxng:8080/search')
-  url.search = new URLSearchParams({ q: parsedQuery, format: 'json', language: 'zh-CN' }).toString()
+  url.search = new URLSearchParams({ q: parsedQuery, format: 'json', language: 'zh-CN', categories: 'general,it,videos' }).toString()
   const signal = options.signal ? AbortSignal.any([options.signal, AbortSignal.timeout(12000)]) : AbortSignal.timeout(12000)
   try {
     const response = await (options.fetch ?? fetch)(url, { signal, redirect: 'error' })
     if (!response.ok) throw new Error('search unavailable')
     const parsed = responseSchema.safeParse(await response.json())
     if (!parsed.success) throw new Error('invalid search response')
+    if (!parsed.data.results.length && parsed.data.unresponsive_engines?.length) throw new Error('search sources unavailable')
     return formatResourceResults(parsed.data)
   } catch {
     if (options.signal?.aborted) throw fail(CODE.INTERNAL, '公开资源搜索已取消')

@@ -1,4 +1,23 @@
-use_default_settings: true
+# Verified from the production network; overseas defaults time out there.
+use_default_settings:
+  engines:
+    keep_only:
+      - 360search
+      - sogou
+      - baidu kaifa
+      - bilibili
+      - sogou videos
+engines:
+  - name: 360search
+    disabled: false
+  - name: sogou
+    disabled: false
+  - name: baidu kaifa
+    disabled: false
+  - name: bilibili
+    disabled: false
+  - name: sogou videos
+    disabled: false
 general:
   instance_name: "Researcher learning resources"
 search:

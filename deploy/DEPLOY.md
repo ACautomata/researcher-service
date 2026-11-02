@@ -178,3 +178,5 @@ judge 在模型配置页指派，未指派使用用户默认端点再兜平台�
 排障：检查 `docker compose -f docker-compose.deploy.yml ps searxng` 和搜索日志；不得输出 `.env` 或完整容器环境。紧急关闭时将控制面检索开关改为 false 并重建控制面；恢复则重新开启。CD 重新部署会恢复仓库中的默认启用配置。回退版本应使用此前成功部署的搜索镜像 SHA，避免使用浮动标签。
 
 配置依据：[SearXNG search settings](https://docs.searxng.org/admin/settings/settings_search.html) 与 [server settings](https://docs.searxng.org/admin/settings/settings_server.html)。免费上游仍可能限流或触发验证码；健康及检索烟测不代表每个中文主题都有权威资料和视频。
+
+生产网络验证（2026-11-02）：默认海外引擎超时、百度通用检索 CAPTCHA；360search、sogou、baidu kaifa、bilibili 与 sogou videos 返回实际结果。搜索镜像仅启用这五个已测来源，控制面请求 general/it/videos 分类。无结果且来源报错时返回不可用，不伪装成正常空命中。后续网络变化仍需重新跑只读诊断。
