@@ -48,7 +48,7 @@ it('explicit command and agent tool share real search and expose actual links', 
   const agent = toLangChainTool(def, ctx, publicResourcesManifest.id)
   const answer = await agent.invoke({ query: '响应式原理' })
   expect(JSON.parse(String(answer))).toMatchObject({ results: manual.details.results, partial: true, contentVerified: false, popularityVerified: false })
-  expect(transport).toHaveBeenCalledTimes(2)
+  expect(transport).toHaveBeenCalledTimes(4)
   expect(String(transport.mock.calls[0]![0])).toContain('http://searxng:8080/search?')
   expect(manual.details.results.map(item => item.url)).toEqual(['https://cn.vuejs.org/guide/', 'https://www.bilibili.com/video/BV123'])
 })
@@ -74,5 +74,24 @@ it('only enabled skills expose tools, commands and learning guidelines', () => {
 it('queries documents and videos, and does not disguise unavailable empty search as no matches', async () => {
   const transport = vi.fn().mockResolvedValue(new Response(JSON.stringify({ results: [], unresponsive_engines: [['sogou', 'timeout']] })))
   await expect(searchPublicResources('Vue', { enabled: true, fetch: transport })).rejects.toThrow('搜索服务暂时不可用')
-  expect(String(transport.mock.calls[0]![0])).toContain('categories=general%2Cit%2Cvideos')
+  expect(String(transport.mock.calls[0]![0])).toContain('engines=360search%2Csogou')
+  expect(String(transport.mock.calls[1]![0])).toContain('engines=bilibili')
+})
+
+it('retains videos when a web source fills the result budget', () => {
+  const result = formatResourceResults({ results: [
+    ...Array.from({ length: 35 }, (_, i) => ({ title: `资料${i}`, url: `https://example.org/${i}` })),
+    { title: '中文数学视频', url: 'https://www.bilibili.com/video/BV123' },
+  ] })
+  expect(result.results).toHaveLength(30)
+  expect(result.results.some(item => item.kind === 'video')).toBe(true)
+})
+
+it('keeps actual video results if web transport fails and marks partial', async () => {
+  const transport = vi.fn().mockImplementation(async (url: URL) => {
+    if (url.searchParams.get('engines') !== 'bilibili') throw new Error('timeout')
+    return new Response(JSON.stringify({ results: [{ title: '特征值', url: 'https://www.bilibili.com/video/BV123' }] }))
+  })
+  const result = await searchPublicResources('特征值', { enabled: true, fetch: transport })
+  expect(result).toMatchObject({ partial: true, results: [{ kind: 'video' }] })
 })

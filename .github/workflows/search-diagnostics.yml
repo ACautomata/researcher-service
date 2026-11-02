@@ -18,11 +18,11 @@ jobs:
             docker ps --filter name=panel-search --format '{{.Names}} {{.Status}}'
             docker exec panel-search python -c '
             import urllib.request, urllib.parse, json
-            for engine in ["360search", "sogou", "baidu kaifa", "yahoo", "bilibili", "bing videos", "sogou videos"]:
-                query = {"q":"Vue ref reactive", "format":"json", "language":"zh-CN"}
+            for engine in ["360search", "sogou", "bilibili", "sogou videos"]:
+                query = {"q":"线性代数 特征值 特征向量", "format":"json", "language":"zh-CN"}
                 if engine: query["engines"] = engine
                 try:
                     data = json.load(urllib.request.urlopen("http://127.0.0.1:8080/search?"+urllib.parse.urlencode(query), timeout=15))
-                    print(json.dumps({"engine":engine or "default", "results":len(data.get("results",[])), "failures":data.get("unresponsive_engines",[])}, ensure_ascii=False))
+                    print(json.dumps({"engine":engine or "default", "results":len(data.get("results",[])), "samples":[{"title":x.get("title"),"url":x.get("url")} for x in data.get("results",[])[:3]], "failures":data.get("unresponsive_engines",[])}, ensure_ascii=False))
                 except Exception as e: print(json.dumps({"engine":engine,"error":str(e)}))
             '
