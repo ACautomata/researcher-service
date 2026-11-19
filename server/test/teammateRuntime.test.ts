@@ -63,6 +63,7 @@ async function harness(replies: Record<string, Reply[]>, judge?: ApprovalFunnelD
   }, close: () => {} })
   const gate = new ConcurrencyGate({ globalLimit: 1, loadUserLimit: async () => 1 })
   const teammates = new TeammateService(prisma)
+  const suggestionRequests: unknown[] = []
   const modelCalls: Array<{ task: string; metadata: Record<string, unknown>; system: string }> = []
   const service = new RunService({
     prisma, hub, gate, teammates, saver: new PrismaCheckpointSaver(prisma),
@@ -71,7 +72,10 @@ async function harness(replies: Record<string, Reply[]>, judge?: ApprovalFunnelD
       const model = new TeamModel(replies)
       model.callbacks = [{ name: 'FakeLLMTransport', handleChatModelStart: (_model, batches, _run, _parent, _extra, _tags, metadata) => {
         const messages = batches[0] ?? []
-        if (isSuggestionInput(messages)) return
+        if (isSuggestionInput(messages)) {
+          suggestionRequests.push(JSON.parse(String(messages[1].content)))
+          return
+        }
         const human = messages.find(message => message.getType() === 'human')?.content
         modelCalls.push({ task: typeof human === 'string' ? human : '', metadata: metadata ?? {}, system: JSON.stringify(messages.filter(message => message.getType() === 'system').map(message => message.content)) })
       } }]
@@ -97,7 +101,7 @@ async function harness(replies: Record<string, Reply[]>, judge?: ApprovalFunnelD
   const created = await request.post('/api/v1/sessions').set(auth).send({ title: 'Team research' })
   const sessionId = created.body.data.id as string
   cleanups.push(async () => { service.dispose(); await prisma.$disconnect() })
-  return { prisma, owner, teammates, service, gate, hub, events, delayed, request, auth, sessionId, dispatch, modelCalls,
+  return { prisma, owner, teammates, service, gate, hub, events, delayed, request, auth, sessionId, dispatch, modelCalls, suggestionRequests,
     send: async (content: string) => request.post(`/api/v1/sessions/${sessionId}/messages`).set(auth).set('Idempotency-Key', 'a'.repeat(32)).send({ content }),
     settle: async () => { let n = 0; while (n < executions.length) { const current = executions.slice(n); n = executions.length; await Promise.all(current) } },
   }
@@ -279,6 +283,8 @@ describe('#786 teammate runtime acceptance (S1/S2)', () => {
       : { kind: 'verdict', inputHash: input.inputHash, latencyMs: 1, tokens: 1, verdict: { decision: 'approve', policy_class: null, reason: '' } } })
     expect((await h.send('leader')).body.code).toBe(0)
     await h.settle()
+    await waitFor(() => h.suggestionRequests.length === 1)
+    expect(h.suggestionRequests).toEqual([{ user: 'leader', answer: 'Leader done' }])
     const [worker] = await h.teammates.list(h.sessionId)
     expect(h.service.stateOf(h.sessionId)?.state).toBe('completed')
     expect(h.service.stateOf(worker.threadId)?.state).toBe('interrupted')
@@ -292,6 +298,7 @@ describe('#786 teammate runtime acceptance (S1/S2)', () => {
     expect((await h.request.post(`/api/v1/sessions/${h.sessionId}/approvals/${escalationId}`).set(h.auth).send({ decision: 'allow' })).body.code).toBe(0)
     await h.settle()
     expect(h.service.stateOf(worker.threadId)?.state).toBe('completed')
+    expect(h.suggestionRequests).toEqual([{ user: 'leader', answer: 'Leader done' }])
     expect(h.service.stateOf(h.sessionId)?.state).toBe('completed')
   }, 15_000)
 

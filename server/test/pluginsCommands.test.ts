@@ -20,8 +20,8 @@ import { PrismaCheckpointSaver } from '../src/runner/persistence/prismaCheckpoin
 import { SessionService } from '../src/sessions/service'
 import { createPluginRuntime } from '../src/plugins/surface'
 import { definePlugin, type AnyPluginToolDefinition } from '../src/plugins/api'
-import { ScriptedChatModel, isSuggestionInput } from './runnerFakes'
-import { seedUser } from './helpers'
+import { ScriptedChatModel, isSuggestionInput, toolCallAi } from './runnerFakes'
+import { seedUser, waitFor } from './helpers'
 
 const cleanups: Array<() => Promise<void>> = []
 afterEach(async () => { for (const cleanup of cleanups.splice(0)) await cleanup() })
@@ -29,10 +29,20 @@ afterEach(async () => { for (const cleanup of cleanups.splice(0)) await cleanup(
 // 捕获模型输入的脚本模型（inject/原文判别的观测面）
 class CapturingModel extends ScriptedChatModel {
   readonly inputs: string[] = []
+  readonly suggestions: unknown[] = []
   override async _generate(messages: BaseMessage[]) {
-    if (isSuggestionInput(messages)) return { generations: [{ message: new AIMessage(''), text: '' }] }
+    if (isSuggestionInput(messages)) {
+      this.suggestions.push(JSON.parse(String(messages[1].content)))
+      const text = '请复核插件给出的结果'
+      return { generations: [{ message: new AIMessage(text), text }] }
+    }
     const input = messages.find(message => message.getType() === 'human')?.content
     this.inputs.push(typeof input === 'string' ? input : '')
+    if (input === '请调用插件' && !messages.some(message => message.getType() === 'tool')) {
+      const message = toolCallAi('echo-from-agent', 'fixture_echo', { input: 'probe' })
+      message.content = '工具调用前的说明'
+      return { generations: [{ message, text: '工具调用前的说明' }] }
+    }
     return { generations: [{ message: new AIMessage({ content: 'ack' }), text: 'ack' }] }
   }
 }
@@ -100,13 +110,30 @@ describe('#788 插件命令运行时（S1，{inject}/{execute}）', () => {
     expect((await h.send('/echo-cmd hi there', 'b'.repeat(32))).body.code).toBe(0)
     await h.settle()
     expect(h.model.inputs).toEqual([])
+    expect(h.model.suggestions).toEqual([])
     const end = h.events.find(event => event.type === 'tool.end')
     expect(end).toMatchObject({ sessionId: h.sessionId, payload: { name: 'fixture_echo', state: 'success' } })
     expect(JSON.parse((end!.payload as { details: string }).details)).toEqual({ echo: 'hi there' })
     const projection = (await h.request.get(`/api/v1/sessions/${h.sessionId}/messages`).set(h.auth)).body.data
     const assistant = projection.messages.at(-1) as { role: string; tools?: Array<{ name: string; state: string; details?: string }> }
+    expect(projection.nextStepSuggestion).toBeNull()
     expect(assistant.role).toBe('assistant')
     expect(assistant.tools?.[0]).toMatchObject({ name: 'fixture_echo', state: 'success' })
+  }, 15_000)
+
+  it('#1039 主 agent 调用插件后，只用最终答复生成一次提示', async () => {
+    const h = await harness()
+    await h.prisma.pluginEnablement.create({ data: { ownerId: h.owner.id, pluginId: 'fixture', enabled: true, enabledAt: new Date() } })
+    expect((await h.send('请调用插件', 'e'.repeat(32))).body.code).toBe(0)
+    await h.settle()
+    expect(h.events.find(event => event.type === 'tool.end')).toMatchObject({
+      payload: { name: 'fixture_echo', state: 'success' },
+    })
+    await waitFor(async () => {
+      const history = await h.request.get(`/api/v1/sessions/${h.sessionId}/messages`).set(h.auth)
+      return Boolean(history.body.data.nextStepSuggestion)
+    })
+    expect(h.model.suggestions).toEqual([{ user: '请调用插件', answer: 'ack' }])
   }, 15_000)
 
   it('{execute} ctx.llm 穿线（#883 AC）：直达路径 frame.llmFor(插件 id) 可用且走指派快照', async () => {

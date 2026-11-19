@@ -794,6 +794,11 @@ export class RunService {
 
     const session = await this.deps.prisma.session.findUnique({ where: { id: cmd.sessionId } })
     if (!session) throw fail(CODE.SESSION_NOT_FOUND)
+    const isMainAgentTurn = !session.isTeammate && !cmd.teammateId && !cmd.parentSessionId && !cmd.operation
+    const suggestionRequest = isMainAgentTurn && cmd.kind === 'message' && cmd.suggestionVersion !== undefined
+      ? { version: cmd.suggestionVersion, userText: cmd.suggestionUserText ?? cmd.content ?? '' }
+      : undefined
+    let completedMessages: BaseMessage[] | undefined
     if (cmd.teammateId) {
       const teammate = await this.deps.prisma.teammate.findUnique({ where: { id: cmd.teammateId } })
       if (!teammate || teammate.archivedAt || teammate.threadId !== cmd.sessionId || teammate.parentSessionId !== cmd.parentSessionId || session.ownerId !== cmd.ownerId) throw fail(CODE.SESSION_NOT_FOUND)
@@ -1146,7 +1151,10 @@ export class RunService {
                       ? { content: [{ type: 'text', text: `${cmd.content ?? ''}${attachmentNote}` }, ...imageBlocks] }
                       : { content: `${cmd.content ?? ''}${attachmentNote}` }),
                     id: cmd.runId,
-                    ...(attachmentIngestion ? { additional_kwargs: { researcherAttachmentIngestion: attachmentIngestion } } : {}),
+                    additional_kwargs: {
+                      ...(attachmentIngestion ? { researcherAttachmentIngestion: attachmentIngestion } : {}),
+                      ...(suggestionRequest ? { researcherSuggestionRequest: suggestionRequest } : {}),
+                    },
                   }),
                 ],
               }
@@ -1273,8 +1281,9 @@ export class RunService {
           // turn.feed（回放同形状——attachmentsJson media 数组，单管线渲染零差异）。校验失败块
           // 降级文本占位（占位进事件流与回放聚合）+ 审计计数 warn（不 fail run）。仅 completed
           // 路径扫（interrupted/aborted 的回复未终稿，不做产物面）。
+          completedMessages = state.values?.messages
           if (materializeForRun) {
-            const scan = scanMediaBlocks(lastMessage(state.values?.messages ?? []))
+            const scan = scanMediaBlocks(lastMessage(completedMessages ?? []))
             const degrade = (declaredPath: string, reason: string): void => {
               const placeholder = `[媒体产物不可用：${declaredPath}]`
               turn.feed({ type: 'text.delta', payload: { delta: placeholder } })
@@ -1418,12 +1427,25 @@ export class RunService {
           console.warn(`[runner] activeCheckpointId 推进失败: session=${cmd.sessionId}: ${(err as Error).message}`)
         }
       }
-      if (savedReplyId && finalState === 'completed' && cmd.kind === 'message' && !cmd.operation && !cmd.teammateId && cmd.suggestionVersion !== undefined) {
-        this.nextStepSuggestions.enqueue({
-          ownerId: cmd.ownerId, sessionId: cmd.sessionId, runId: cmd.runId, messageId: savedReplyId,
-          version: cmd.suggestionVersion, userText: cmd.suggestionUserText ?? cmd.content ?? '',
-          answerText: turn.snapshot().content, model, callbacks: [usageHandler],
-        })
+      if (savedReplyId && finalState === 'completed' && isMainAgentTurn && completedMessages && !controller.signal.aborted) {
+        try {
+          const answer = completedMessages.at(-1)
+          // 审批续跑使用原请求接纳时的版本，跨进程也从 checkpoint 恢复来源。
+          const request = suggestionRequest ?? (cmd.kind === 'resume'
+            ? [...completedMessages].reverse().find(HumanMessage.isInstance)?.additional_kwargs.researcherSuggestionRequest
+            : undefined)
+          if (request && typeof request === 'object' && 'version' in request && 'userText' in request &&
+            typeof request.version === 'number' && Number.isSafeInteger(request.version) && typeof request.userText === 'string' &&
+            AIMessage.isInstance(answer) && !answer.tool_calls?.length && !answer.invalid_tool_calls?.length) {
+            const answerText = answer.text
+            if (answerText.trim()) this.nextStepSuggestions.enqueue({
+              ownerId: cmd.ownerId, sessionId: cmd.sessionId, runId: cmd.runId, messageId: savedReplyId,
+              version: request.version, userText: request.userText, answerText, model, callbacks: [usageHandler],
+            })
+          }
+        } catch {
+          console.warn('[next-step] source extraction failed', { sessionId: cmd.sessionId, runId: cmd.runId })
+        }
       }
       // 治理镜像 dispose（#790）：completed（finish 已推回）/ interrupted / failed / aborted
       // 全路径作废——「中断 = 作废不推回」（AC③），推回后的副本亦无用。
