@@ -65,6 +65,8 @@ function frameEvents(frames: string[]): DecodedFrame[] {
 }
 
 describe('会话 REST 域（S1，#778）', () => {
+  let dbPath: string
+  let makeRunService: (db: PrismaClient, events: StreamHub) => RunService
   let prisma: PrismaClient
   let request: SuperTest<Test>
   let hub: StreamHub
@@ -94,6 +96,7 @@ describe('会话 REST 域（S1，#778）', () => {
     return release
   }
   let userLimit = 4 // per-user 配额开关（quota 预检 40043 用例；afterEach 复位）
+  let dispatchGate: (() => Promise<void>) | undefined
   let dispatchFail = false // dispatch（submit ack）失败注入——回滚删行用例；afterEach 复位
 
   const hexKey = (n: number) => n.toString(16).padStart(32, '0')
@@ -102,7 +105,7 @@ describe('会话 REST 域（S1，#778）', () => {
     installAbortRejectionGuard()
     const dir = mkdtempSync(path.join(tmpdir(), 'sessions-api-'))
     cleanupDirs.push(dir)
-    const dbPath = path.join(dir, 'test.db')
+    dbPath = path.join(dir, 'test.db')
     const sqlite = new Database(dbPath)
     sqlite.exec(readFileSync(path.join(process.cwd(), 'prisma', 'init.sql'), 'utf8'))
     sqlite.close()
@@ -160,12 +163,12 @@ describe('会话 REST 域（S1，#778）', () => {
         return inst
       },
     })
-    runService = new RunService({
-      prisma,
+    makeRunService = (db, events) => new RunService({
+      prisma: db,
       registry,
-      saver: new PrismaCheckpointSaver(prisma),
+      saver: new PrismaCheckpointSaver(db),
       gate: new ConcurrencyGate({ globalLimit: 8, loadUserLimit: async () => userLimit }),
-      hub,
+      hub: events,
       primitives: fakePrimitives({
         execBehavior: async () => {
           await execGate
@@ -179,16 +182,17 @@ describe('会话 REST 域（S1，#778）', () => {
         return () => (t += 10)
       })(),
     })
+    runService = makeRunService(prisma, hub)
     sessions = new SessionService({
       prisma,
       hub,
       runService,
-      dispatch: (cmd) => {
+      dispatch: async (cmd) => {
         // submit 入队 ack 语义（生产 BullMQ 同形）：立即 resolve = job 已入队，执行体后台跑；
         // dispatchFail 注入 submit 失败（sendMessage 须回滚删行）。
-        if (dispatchFail) return Promise.reject(new Error('queue down'))
+        if (dispatchGate) await dispatchGate()
+        if (dispatchFail) throw new Error('queue down')
         void runService.execute(cmd).catch(() => {})
-        return Promise.resolve()
       },
       sandboxes: {
         remove: async (id) => {
@@ -208,6 +212,7 @@ describe('会话 REST 域（S1，#778）', () => {
   }, 30_000)
 
   afterAll(async () => {
+    runService.dispose()
     await prisma.$disconnect()
   })
 
@@ -224,6 +229,7 @@ describe('会话 REST 域（S1，#778）', () => {
     releaseHeldExec = undefined
     userLimit = 4
     dispatchFail = false
+    dispatchGate = undefined
     // bump config_meta.version → registry 模型缓存 miss → 下一用例换新 ScriptedChatModel
     //（脚本 cursor 状态不跨用例污染——对齐 runnerRunService.test.ts「每用例独立模型实例」；
     // 复用生产热生效机制而非重建 RunService/SessionService/app）。测试库无 seed 行 → upsert。
@@ -253,8 +259,13 @@ describe('会话 REST 域（S1，#778）', () => {
     expect(JSON.stringify(suggestionCalls[0].input)).toContain('假说分析完成')
     expect(suggestionConfigurations).toContainEqual({ maxTokens: 512 })
     expect(suggestionCalls[0].options).not.toHaveProperty('tools')
+    const otherSession = await request.post('/api/v1/sessions').set(bearer(access)).send({ title: '切换目标' })
+    const otherProjection = () => request.get(`/api/v1/sessions/${otherSession.body.data.id}/messages`).set(bearer(access))
+    expect((await otherProjection()).body.data.nextStepSuggestion).toBeNull()
+    expect((suggestionCalls[0].options as { signal: AbortSignal }).signal.aborted).toBe(false)
     release()
     await waitFor(async () => Boolean((await projection()).body.data.nextStepSuggestion))
+    expect((await otherProjection()).body.data.nextStepSuggestion).toBeNull()
     const restored = (await projection()).body.data
     expect(restored.nextStepSuggestion).toEqual({ text: suggestionText, runId: sent.body.data.runId,
       messageId: restored.messages.find((m: { role: string }) => m.role === 'assistant').id, version: restored.suggestionVersion })
@@ -274,7 +285,8 @@ describe('会话 REST 域（S1，#778）', () => {
     let release!: () => void
     suggestionGate = new Promise<void>(resolve => { release = resolve })
     suggestionText = '请验证旧假说'
-    currentScript = [new AIMessage('第一轮回答'), new AIMessage('第二轮回答')]
+    const releaseRun = holdExec()
+    currentScript = [new AIMessage('第一轮回答'), toolCallAi('suggestion-held', 'execute', { command: 'hold' }), new AIMessage('第二轮回答')]
     const created = await request.post('/api/v1/sessions').set(bearer(access)).send({ title: '迟到建议' })
     const id = created.body.data.id as string
     const projection = () => request.get(`/api/v1/sessions/${id}/messages`).set(bearer(access))
@@ -284,9 +296,12 @@ describe('会话 REST 域（S1，#778）', () => {
     const next = await request.post(`/api/v1/sessions/${id}/messages`).set(bearer(access))
       .set('Idempotency-Key', hexKey(2038)).send({ content: '第二个请求' })
     expect(next.body.code).toBe(0)
-    await waitFor(async () => (await projection()).body.data.messages.length === 4)
+    await waitFor(() => runService.stateOf(id)?.state === 'running')
     suggestionText = ''
     release()
+    await waitFor(async () => await prisma.llmUsageRecord.count({ where: { sessionId: id, outputTokens: 5 } }) === 1)
+    expect((await projection()).body.data).toMatchObject({ nextStepSuggestion: null, inFlight: { runId: next.body.data.runId } })
+    releaseRun()
     await waitFor(() => suggestionCalls.length === 2)
     await waitFor(async () => await prisma.llmUsageRecord.count({ where: { sessionId: id, outputTokens: 5 } }) === 2)
     expect((await projection()).body.data.nextStepSuggestion).toBeNull()
@@ -344,6 +359,188 @@ describe('会话 REST 域（S1，#778）', () => {
     expect(after.nextStepSuggestion).toEqual(before.nextStepSuggestion)
     expect(after.suggestionVersion).toBe(before.suggestionVersion)
     expect(after.messages).toEqual(before.messages)
+  })
+
+  it('#1038 文件回退保留提示，对话回退清空同一锚点提示，fork 无提示', async () => {
+    suggestionText = '请分析下一组数据'
+    currentScript = [new AIMessage('已分析')]
+    const created = await request.post('/api/v1/sessions').set(bearer(access)).send({ title: '回退提示' })
+    const id = created.body.data.id as string
+    const url = `/api/v1/sessions/${id}`
+    const projection = () => request.get(`${url}/messages`).set(bearer(access))
+    await request.post(`${url}/messages`).set(bearer(access))
+      .set('Idempotency-Key', hexKey(6037)).send({ content: '分析数据' })
+    await waitFor(async () => Boolean((await projection()).body.data.nextStepSuggestion))
+    const before = (await projection()).body.data
+    const messageId = before.nextStepSuggestion.messageId
+    const fork = await request.post(`${url}/fork`).set(bearer(access)).send({ messageId })
+    expect(fork.body.code).toBe(0)
+    const forked = await request.get(`/api/v1/sessions/${fork.body.data.session.id}/messages`).set(bearer(access))
+    expect(forked.body.data.nextStepSuggestion).toBeNull()
+    const files = await request.post(`${url}/rewind`).set(bearer(access)).send({ messageId, scope: 'files' })
+    expect(files.body.code).toBe(0)
+    expect((await projection()).body.data.nextStepSuggestion).toEqual(before.nextStepSuggestion)
+    const chat = await request.post(`${url}/rewind`).set(bearer(access)).send({ messageId, scope: 'chat' })
+    expect(chat.body.code).toBe(0)
+    const after = (await projection()).body.data
+    expect(after.nextStepSuggestion).toBeNull()
+    expect(after.suggestionVersion).toBe(before.suggestionVersion + 1)
+    expect(suggestionCalls).toHaveLength(1)
+  })
+
+  it('#1038 重发、控制面重建与再次读取复用同一提示，其他用户和删除后均不可读', async () => {
+    suggestionText = '请补一组对照数据'
+    currentScript = [new AIMessage('已完成分析')]
+    const created = await request.post('/api/v1/sessions').set(bearer(access)).send({})
+    const url = `/api/v1/sessions/${created.body.data.id}`
+    const send = () => request.post(`${url}/messages`).set(bearer(access))
+      .set('Idempotency-Key', hexKey(7037)).send({ content: '比较两组数据' })
+    const project = (token: string, client = request) => client.get(`${url}/messages`).set(bearer(token))
+    const sent = await send()
+    await waitFor(async () => Boolean((await project(access)).body.data.nextStepSuggestion))
+    const before = (await project(access)).body.data
+    expect(sent.body.data.suggestionVersion).toBe(before.suggestionVersion)
+    expect((await send()).body.data).toMatchObject({ replay: true, messageId: sent.body.data.messageId })
+    expect((await project(access)).body.data).toEqual(before)
+
+    await seedUser(prisma, 'suggestion-reader', 'pw-suggestion-reader')
+    const other = await login(request, 'suggestion-reader', 'pw-suggestion-reader')
+    const denied = await project(other.access!)
+    expect(denied.body).toMatchObject({ code: CODE.SESSION_NOT_FOUND, data: null })
+
+    const reopened = createPrismaClient(`file:${dbPath}`)
+    const events = new StreamHub()
+    const freshRuns = makeRunService(reopened, events)
+    const freshSessions = new SessionService({ prisma: reopened, hub: events, runService: freshRuns, dispatch: async () => {} })
+    const freshRequest = supertest(createApp({ prisma: reopened, events: { hub: events }, sessions: { service: freshSessions } }))
+    try {
+      expect(freshRuns.stateOf(created.body.data.id)).toBeUndefined()
+      expect((await project(access, freshRequest as unknown as SuperTest<Test>)).body.data).toEqual(before)
+      expect(suggestionCalls).toHaveLength(1)
+      expect((await request.delete(url).set(bearer(access))).body.code).toBe(CODE.OK)
+      expect(frameEvents(sinkA.frames)).toContainEqual(expect.objectContaining({
+        type: 'session.invalidated', sessionId: created.body.data.id, payload: { reason: 'deleted' },
+      }))
+      expect((await project(access)).body).toMatchObject({ code: CODE.SESSION_NOT_FOUND, data: null })
+    } finally {
+      freshRuns.dispose()
+      await reopened.$disconnect()
+    }
+  })
+
+  it.each(['chat', 'all', 'delete'] as const)('#1038 %s 后在途提示无法保存', async action => {
+    let release!: () => void
+    suggestionGate = new Promise<void>(resolve => { release = resolve })
+    suggestionText = '请采用旧路线'
+    currentScript = [new AIMessage('第一条回复'), new AIMessage('后续回复')]
+    const created = await request.post('/api/v1/sessions').set(bearer(access)).send({})
+    const id = created.body.data.id as string
+    const url = `/api/v1/sessions/${id}`
+    const project = () => request.get(`${url}/messages`).set(bearer(access))
+    try {
+      const sent = await request.post(`${url}/messages`).set(bearer(access))
+        .set('Idempotency-Key', hexKey(8037)).send({ content: '原路线' })
+      expect(sent.body.code).toBe(CODE.OK)
+      await waitFor(() => suggestionCalls.length === 1)
+      const before = (await project()).body.data
+      const messageId = before.messages.at(-1).id
+      const changed = await (action === 'delete'
+        ? request.delete(url).set(bearer(access))
+        : request.post(`${url}/rewind`).set(bearer(access)).send({ messageId, scope: action }))
+      expect(changed.body.code).toBe(CODE.OK)
+      const frameCount = sinkA.frames.length
+      // 同一用户的第二个候选开始生成后，前一个候选的保存路径必已结束。
+      const next = await request.post('/api/v1/sessions').set(bearer(access)).send({})
+      suggestionText = ''
+      await request.post(`/api/v1/sessions/${next.body.data.id}/messages`).set(bearer(access))
+        .set('Idempotency-Key', hexKey(8038)).send({ content: '另一会话' })
+      release()
+      await waitFor(() => suggestionCalls.length === 2)
+      const after = (await project()).body
+      if (action === 'delete') expect(after).toMatchObject({ code: CODE.SESSION_NOT_FOUND, data: null })
+      else expect(after.data).toMatchObject({ suggestionVersion: before.suggestionVersion + 1, nextStepSuggestion: null })
+      expect(frameEvents(sinkA.frames.slice(frameCount)).some(e => e.type === 'session.updated' && e.sessionId === id)).toBe(false)
+    } finally { release() }
+  })
+
+  it('#1038 旧回复在新请求接纳后落库，只有新来源能生成提示', async () => {
+    suggestionText = '请验证新的分析'
+    currentScript = [new AIMessage('旧回复正文'), new AIMessage('新回复正文')]
+    const created = await request.post('/api/v1/sessions').set(bearer(access)).send({})
+    const url = `/api/v1/sessions/${created.body.data.id}/messages`
+    const project = () => request.get(url).set(bearer(access))
+    const send = (key: number, content: string) => request.post(url).set(bearer(access))
+      .set('Idempotency-Key', hexKey(key)).send({ content })
+
+    let reachedSave = false
+    let release!: () => void
+    const beforeSave = new Promise<void>(resolve => { release = resolve })
+    runService.setRecordTurn(async payload => {
+      if (payload.aggregate.content === '旧回复正文') {
+        reachedSave = true
+        await beforeSave
+      }
+      return sessions.recordTurn(payload)
+    })
+    try {
+      const old = await send(9037, '旧请求正文')
+      expect(old.body.code).toBe(CODE.OK)
+      await waitFor(() => reachedSave)
+      const current = await send(9038, '新请求正文')
+      expect(current.body.code).toBe(CODE.OK)
+      expect(current.body.data.suggestionVersion).toBe(old.body.data.suggestionVersion + 1)
+      release()
+      await waitFor(async () => Boolean((await project()).body.data.nextStepSuggestion))
+      const result = (await project()).body.data
+      expect(result.nextStepSuggestion).toMatchObject({ runId: current.body.data.runId, version: current.body.data.suggestionVersion })
+      expect(suggestionCalls).toHaveLength(1)
+      expect(JSON.stringify(suggestionCalls[0].input)).toContain('新请求正文')
+      expect(JSON.stringify(suggestionCalls[0].input)).not.toContain('旧回复正文')
+    } finally {
+      release()
+      runService.setRecordTurn(payload => sessions.recordTurn(payload))
+    }
+  })
+
+  it('#1038 入队拒绝与旧轮生成完成交错时保留旧轮的有效提示', async () => {
+    let releaseModel!: () => void
+    suggestionGate = new Promise<void>(resolve => { releaseModel = resolve })
+    suggestionText = '请复核这一轮的依据'
+    currentScript = [new AIMessage('有效回复')]
+    const created = await request.post('/api/v1/sessions').set(bearer(access)).send({})
+    const id = created.body.data.id as string
+    const url = `/api/v1/sessions/${id}/messages`
+    const project = () => request.get(url).set(bearer(access))
+    const send = (key: number, content: string) => request.post(url).set(bearer(access))
+      .set('Idempotency-Key', hexKey(key)).send({ content })
+    const old = await send(10037, '原请求')
+    await waitFor(() => suggestionCalls.length === 1)
+
+    let releaseDispatch!: () => void
+    let waitingForDispatch = false
+    const dispatchSettled = new Promise<void>(resolve => { releaseDispatch = resolve })
+    dispatchGate = () => {
+      waitingForDispatch = true
+      return dispatchSettled
+    }
+    dispatchFail = true
+    const rejected = send(10038, '受到拒绝的请求').then(result => result)
+    try {
+      await waitFor(() => waitingForDispatch)
+      releaseModel()
+      await waitFor(async () => await prisma.llmUsageRecord.count({ where: { sessionId: id, outputTokens: 5 } }) === 1)
+      releaseDispatch()
+      expect((await rejected).body.code).toBe(CODE.INTERNAL)
+      await waitFor(async () => Boolean((await project()).body.data.nextStepSuggestion))
+      const after = (await project()).body.data
+      expect(after.suggestionVersion).toBe(old.body.data.suggestionVersion)
+      expect(after.nextStepSuggestion).toMatchObject({ runId: old.body.data.runId })
+      expect(after.messages.map((message: { content: string }) => message.content)).toEqual(['原请求', '有效回复'])
+    } finally {
+      releaseModel()
+      releaseDispatch()
+      await rejected
+    }
   })
 
   // ---- 基础 CRUD ----
@@ -605,8 +802,9 @@ describe('会话 REST 域（S1，#778）', () => {
     const listed = await send('/model', 0x789)
     expect(listed.body.code).toBe(CODE.OK)
     expect(listed.body.data.command.models).toContainEqual({ providerId: 'prov-1', modelId: 'model-x' })
-    // 列清单是查询不是变更：不广播 session.updated（model:undefined 噪音）
-    expect(frameEvents(sinkA.frames).filter(e => e.sessionId === sid && e.type === 'session.updated')).toHaveLength(0)
+    // 列清单只广播消息投影变更。
+    expect(frameEvents(sinkA.frames).filter(e => e.sessionId === sid && e.type === 'session.updated'))
+      .toMatchObject([{ payload: { projectionChanged: true } }])
     const picked = await send('/model prov-1/model-x', 0x790)
     expect(picked.body.code).toBe(CODE.OK)
     expect(picked.body.data.command).toMatchObject({ name: 'model', model: { providerId: 'prov-1', modelId: 'model-x' }, appliesTo: 'next-run' })
@@ -614,7 +812,12 @@ describe('会话 REST 域（S1，#778）', () => {
     expect((await send('/model default', 0x792)).body.data.command.model).toBeNull()
     expect(picked.body.data.runId).toBeNull()
     // 偏好落定（含 default 重置）恰广播一次
-    expect(frameEvents(sinkA.frames).filter(e => e.sessionId === sid && e.type === 'session.updated')).toHaveLength(2)
+    const modelUpdates = frameEvents(sinkA.frames).filter(e => e.sessionId === sid && e.type === 'session.updated')
+    expect(modelUpdates.map(e => e.payload)).toEqual([
+      { projectionChanged: true },
+      { projectionChanged: true, sessionId: sid, model: { providerId: 'prov-1', modelId: 'model-x' }, appliesTo: 'next-run' },
+      { projectionChanged: true, sessionId: sid, model: null, appliesTo: 'next-run' },
+    ])
   })
 
   it('/compact compacts the thread: pre-cutoff turns leave the model context, summary persists', async () => {

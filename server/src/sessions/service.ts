@@ -34,6 +34,7 @@ import {
 } from './rewind'
 import { TITLE_AUTO_MAX, TITLE_MAX, type RewindScope } from './values'
 import { nextStepSuggestionSchema, type NextStepSuggestion, type PreferredModelOverride } from '../validation/schemas'
+import { isActiveSuggestionReply, suggestionAdmission } from './nextStepSuggestion'
 import { outputHash, trimTraceText } from '../traceLogs/service'
 import type { TeammateStatus } from '../runner/teammates/service'
 import type { ApprovalInterruptPayload } from '../runner/approval/funnel'
@@ -105,6 +106,7 @@ export interface SendMessageResult {
   readonly turn: number
   readonly runId: string | null // 重放（replay=true）时 run 在首次请求已入队，此处 null
   readonly replay: boolean
+  readonly suggestionVersion?: number
 }
 
 // RunService 的结构子集（门禁观测 + 配额预检 + 命令构造 + abort）——测试注入同形 fake/真
@@ -243,6 +245,12 @@ async function writePreferredModel(
     data: { preferredModelJson: model ? JSON.stringify(model) : null },
   })
 }
+
+const invalidateSuggestion = {
+  suggestionVersion: { increment: 1 },
+  nextStepSuggestionJson: null,
+  suggestionSourceRunId: null,
+} as const
 
 function readNextStepSuggestion(json: string | null, version: number): NextStepSuggestion | null {
   try {
@@ -405,7 +413,7 @@ export class SessionService {
   //（在飞工具全失败）+ 行删后 run 域事件成无主引用 + recordTurn FK 失败。先 abort/等终态再
   // 删；stateOf 内存缺失（本进程无该会话 run 记录——worker 同进程模型）= 可删。----
   async deleteSession(user: Pick<AuthUser, 'id' | 'role'>, sessionId: string): Promise<void> {
-    await getSessionForUser(this.deps.prisma, user, sessionId)
+    const session = await getSessionForUser(this.deps.prisma, user, sessionId)
     this.requireTerminal(sessionId)
     const teammates = await this.deps.prisma.teammate.findMany({
       where: { parentSessionId: sessionId },
@@ -432,6 +440,7 @@ export class SessionService {
       }
       await tx.session.delete({ where: { id: sessionId } })
     })
+    this.publishSessionEvent(session.ownerId, 'session.invalidated', { reason: 'deleted' }, sessionId)
   }
 
   // ---- 终态门禁（#778 多端互斥的 rewind/fork/删 共用面）：queued/running/interrupted/suspended
@@ -458,8 +467,16 @@ export class SessionService {
     sessionId: string,
     p: { content: string; clientKey: string; attachmentIds?: readonly string[] },
   ): Promise<SendMessageResult> {
-    // 归属门（50002 同码防探测）先行；此后本体不再消费入口快照（残留清理在函数内重读指针——
-    // 入口快照可能落后于上一轮 completed 的指针推进，R 评审）。
+    await getSessionForUser(this.deps.prisma, user, sessionId)
+    return suggestionAdmission.enqueue(sessionId, () => this.admitMessage(user, sessionId, p))
+  }
+
+  private async admitMessage(
+    user: Pick<AuthUser, 'id' | 'role' | 'username'>,
+    sessionId: string,
+    p: { content: string; clientKey: string; attachmentIds?: readonly string[] },
+  ): Promise<SendMessageResult> {
+    // 排队期间可能删除会话；重验归属后再查幂等键，残留清理单独重读活跃指针。
     await getSessionForUser(this.deps.prisma, user, sessionId)
     // 斜杠识别/幂等/门禁全部作用于**原始输入**：落行存用户所发原文，同 key 重发恒 replay
     //（#778 story 7；50007 只对真正异 content 的输入触发）。系统命令（/new /compact /model）
@@ -537,12 +554,12 @@ export class SessionService {
     // 落行先于 dispatch：dispatch 后 run 域事件（run.started 起）才可见，用户行必已在投影中
     //（刷新窗口无「事件先于消息」跳变）。
     let row: SessionMessage
-    let previousSuggestion: { suggestionVersion: number; nextStepSuggestionJson: string | null; suggestionSourceRunId: string | null } | undefined
+    let previousSuggestion: Pick<Session, 'suggestionVersion' | 'nextStepSuggestionJson' | 'suggestionSourceRunId'>
     try {
       const accepted = await this.deps.prisma.$transaction(async tx => {
         const previous = await tx.session.findUniqueOrThrow({ where: { id: sessionId }, select: { suggestionVersion: true, nextStepSuggestionJson: true, suggestionSourceRunId: true } })
         const message = await insertNextTurn(tx, sessionId, { role: 'user', content: p.content, clientKey: p.clientKey })
-        const updated = await tx.session.update({ where: { id: sessionId }, data: { suggestionVersion: { increment: 1 }, nextStepSuggestionJson: null, suggestionSourceRunId: null } })
+        const updated = await tx.session.update({ where: { id: sessionId }, data: invalidateSuggestion })
         return { message, previous, version: updated.suggestionVersion }
       })
       row = accepted.message
@@ -561,11 +578,13 @@ export class SessionService {
       throw e
     }
 
-    const restoreSuggestion = async (): Promise<void> => {
-      if (!previousSuggestion) return
-      await this.deps.prisma.session.updateMany({
-        where: { id: sessionId, suggestionVersion: cmd.suggestionVersion }, data: previousSuggestion,
-      }).catch(() => {})
+    const rollbackAdmission = async (): Promise<void> => {
+      await this.deps.prisma.$transaction([
+        this.deps.prisma.sessionMessage.deleteMany({ where: { id: row.id } }),
+        this.deps.prisma.session.updateMany({
+          where: { id: sessionId, suggestionVersion: cmd.suggestionVersion }, data: previousSuggestion,
+        }),
+      ]).catch(() => {})
     }
 
     // #780：附件引用链接（≤4 件 + 归属/session 校验在 linkToMessage）。失败 → 消息行回滚
@@ -575,8 +594,7 @@ export class SessionService {
       try {
         await this.deps.attachments.linkToMessage(user, sessionId, row.id, p.attachmentIds)
       } catch (e) {
-        await this.deps.prisma.sessionMessage.delete({ where: { id: row.id } }).catch(() => {})
-        await restoreSuggestion()
+        await rollbackAdmission()
         throw e
       }
     }
@@ -588,8 +606,7 @@ export class SessionService {
     try {
       await this.deps.dispatch(cmd)
     } catch {
-      await this.deps.prisma.sessionMessage.delete({ where: { id: row.id } }).catch(() => {})
-      await restoreSuggestion()
+      await rollbackAdmission()
       if (p.attachmentIds && p.attachmentIds.length > 0) {
         await this.deps.prisma.attachment
           .updateMany({ where: { id: { in: [...p.attachmentIds] }, sessionId }, data: { messageId: null } })
@@ -610,7 +627,7 @@ export class SessionService {
       // eslint-disable-next-line no-console
       console.warn(`[sessions] autoTitle best-effort 失败: session=${sessionId}: ${String(err)}`)
     }
-    return { messageId: row.id, turn: row.turn, runId: cmd.runId, replay: false }
+    return { messageId: row.id, turn: row.turn, runId: cmd.runId, replay: false, suggestionVersion: cmd.suggestionVersion }
   }
 
   private replayOrConflict(existing: SessionMessage, content: string): SendMessageResult {
@@ -652,14 +669,16 @@ export class SessionService {
       // 串行执行（写排队），read-then-write 无交错窗口——无需常规路径的 P2002 兜底重查
       //（该兜底防的是「先查在事务外」的间隙，此处查/写同事务，约束撞不上）。
       const row = await insertNextTurn(tx, sessionId, { role: 'user', content: p.content, clientKey: p.clientKey, attachmentsJson: serializeAttachments({ command }) })
-      return { created, response: { messageId: row.id, turn: row.turn, runId: null, replay: false, command } }
+      const updated = await tx.session.update({ where: { id: sessionId }, data: invalidateSuggestion })
+      return { created, response: { messageId: row.id, turn: row.turn, runId: null, replay: false, command, suggestionVersion: updated.suggestionVersion } }
     })
     if (result.created) this.publishSessionEvent(user.id, 'session.created', { source: 'new', session: summary(result.created) }, result.created.id)
-    // session.updated 只随「偏好真实落定」（含 /model default 重置）广播——/model 无参纯列清单
-    // 不发事件（列清单是查询不是变更，广播 model:undefined 是噪音）。
     const command = result.response.command
-    if (command?.name === 'model' && 'model' in command && !result.response.replay) {
-      this.publishSessionEvent(user.id, 'session.updated', { sessionId, model: command.model, appliesTo: 'next-run' }, sessionId)
+    if (!result.response.replay) {
+      this.publishSessionEvent(user.id, 'session.updated', {
+        projectionChanged: true,
+        ...(command?.name === 'model' && 'model' in command ? { sessionId, model: command.model, appliesTo: 'next-run' } : {}),
+      }, sessionId)
     }
     return result.response
   }
@@ -707,11 +726,20 @@ export class SessionService {
   // archivedAt 过滤（#781 rewind 软删）：被放弃路线行产品面不可读（#770「无恢复入口」——
   // 比较路线 = fork 并存多开）。
   async getProjection(user: Pick<AuthUser, 'id' | 'role'>, sessionId: string): Promise<SessionProjection> {
-    const session = await getSessionForUser(this.deps.prisma, user, sessionId)
-    const rows = await this.deps.prisma.sessionMessage.findMany({
-      where: { sessionId, archivedAt: null },
-      orderBy: [{ turn: 'asc' }, { createdAt: 'asc' }],
-    })
+    await getSessionForUser(this.deps.prisma, user, sessionId)
+    const { session, rows, suggestion } = await suggestionAdmission.enqueue(sessionId, () => this.deps.prisma.$transaction(async tx => {
+      const session = await getSessionForUser(tx, user, sessionId)
+      const rows = await tx.sessionMessage.findMany({
+        where: { sessionId, archivedAt: null },
+        orderBy: [{ turn: 'asc' }, { createdAt: 'asc' }],
+      })
+      const candidate = readNextStepSuggestion(session.nextStepSuggestionJson, session.suggestionVersion)
+      const reply = candidate && rows.find(row => row.id === candidate.messageId && row.role === 'assistant')
+      const suggestion = session.ownerId === user.id && session.archivedAt === null && !session.isTeammate &&
+        candidate?.runId === session.suggestionSourceRunId && reply && await isActiveSuggestionReply(tx, session, reply)
+        ? candidate : null
+      return { session, rows, suggestion }
+    }))
     const inFlight = await this.deps.runService.inFlightProjection(sessionId)
     const peers = await this.deps.prisma.teammate.findMany({
       where: { parentSessionId: sessionId },
@@ -734,18 +762,22 @@ export class SessionService {
         ...(active !== undefined ? { inFlight: active } : {}),
       }
     }))
+    const leaderApprovals = await this.deps.runService.pendingApprovalProjection?.(sessionId) ?? []
     const approvals = this.deps.runService.pendingApprovalProjection ? [
-      ...await this.deps.runService.pendingApprovalProjection(sessionId),
+      ...leaderApprovals,
       ...(await Promise.all(peers.filter(peer => peer.archivedAt === null).map(async peer =>
         (await this.deps.runService.pendingApprovalProjection!(peer.threadId)).map(approval => ({ ...approval, teammateId: peer.id })),
       ))).flat(),
     ] : []
+    const state = this.deps.runService.stateOf(sessionId)?.state
+    const canSuggest = !inFlight && (state === undefined || state === 'completed') &&
+      leaderApprovals.length === 0
     return {
       sessionId,
       title: session.title,
       preferredModel: parsePreferredModelOverride(session.preferredModelJson),
       suggestionVersion: session.suggestionVersion,
-      nextStepSuggestion: readNextStepSuggestion(session.nextStepSuggestionJson, session.suggestionVersion),
+      nextStepSuggestion: canSuggest ? suggestion : null,
       messages: rows.map(toProjectionMessage),
       ...(inFlight !== undefined ? { inFlight } : {}),
       ...(teammates.length > 0 ? { teammates } : {}),
@@ -926,12 +958,16 @@ export class SessionService {
             where: { id: sessionId },
             data: {
               activeCheckpointId: anchor,
+              ...invalidateSuggestion,
               // scope=chat：文件保持现状永久化——水位推进至当前 max(seq)（行不逆放不再拾起）
               ...(scope === 'chat' ? { fileJournalAnchorSeq: maxSeq?.seq ?? 0 } : {}),
             },
           }),
         ]
-        await this.deps.prisma.$transaction(writes)
+        await suggestionAdmission.enqueue(sessionId, async () => {
+          this.requireTerminal(sessionId)
+          await this.deps.prisma.$transaction(writes)
+        })
       }
 
       // teammate 作废面 + 文件逆放（对话面事务已提交——事实已发生）：异常终态补偿统一在此
