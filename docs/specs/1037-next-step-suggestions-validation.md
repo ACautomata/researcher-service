@@ -34,7 +34,7 @@
 
 - `cd server && npm run typecheck`：通过。
 - `cd server && npm test`：执行了全部 173 个文件；发现本次引入的旧模型夹具兼容问题后已修复。四个 Docker smoke suite 和一个既有退役扫描失败的环境原因见下节。
-- 最终服务端复跑：`npm test -- --exclude test/dockerArchiveBackendSmoke.test.ts --exclude test/sandboxSmoke.test.ts --exclude test/wikiContainerSmoke.test.ts --exclude test/wikiDocsPortSmoke.test.ts --exclude test/openclawRetirement.test.ts --poolOptions.forks.maxForks=2 --poolOptions.forks.minForks=2`：168 文件通过，1,834 项通过、3 项按既有条件跳过，耗时 174.88 秒。之前四并发复跑出现一次 `chaoxingTools.test.ts` 的 `ECONNRESET`；该文件单独复跑及最终两并发套件均通过。
+- 最终服务端复跑另排除 #861 退役扫描，其他参数为`npm test -- --exclude test/dockerArchiveBackendSmoke.test.ts --exclude test/sandboxSmoke.test.ts --exclude test/wikiContainerSmoke.test.ts --exclude test/wikiDocsPortSmoke.test.ts --poolOptions.forks.maxForks=2 --poolOptions.forks.minForks=2`：168 文件通过，1,834 项通过、3 项按既有条件跳过，耗时 174.88 秒。之前四并发复跑出现一次 `chaoxingTools.test.ts` 的 `ECONNRESET`；该文件单独复跑及最终两并发套件均通过。
 - `cd frontend && npm test`：82 文件、967 项全部通过。
 - `cd frontend && npm run build`：Vue 类型检查、Vite 构建及 admin 产物隔离检查通过。
 - `git diff --check`：通过。
@@ -50,4 +50,4 @@ Spec 轴：补全 Markdown 包装拒绝，并修复确定性发送拒绝后的�
 - 本次没有把 #1038 的跨会话/乱序投影/回退完整竞态矩阵、#1039 的全部触发范围与负载矩阵、#1040 的快捷键和可访问性完整回归标为完成。
 - 真实浏览器输入法/焦点走查与八场景真实模型质量终验尚未执行，保留给 #1041；jsdom 键盘测试不替代真实浏览器终验。
 - 完整服务端首次执行暴露四个 Docker smoke suite 因 daemon 不可用失败（`ENOENT /var/run/docker.sock`）。本机 `docker info --format` 在连接失败时仍返回退出码 0，使既有探测误判可用；本次未修改不相关的探测器。
-- `openclawRetirement.test.ts` 的全仓叙述扫描命中已有、被忽略的 `.zcode/workflow-drafts/…`、`.zcode/workflow-runs/…`、`.zcode/workflows/…` 和 `server/.zcode/workflow-runs/…` 四个工作流文件。本次未修改这些文件或放宽退役检查。
+- #861 的全仓退役术语扫描命中已有、被忽略的 `.zcode/workflow-drafts/…`、`.zcode/workflow-runs/…`、`.zcode/workflows/…` 和 `server/.zcode/workflow-runs/…` 四个工作流文件。本次未修改这些文件或放宽退役检查。
