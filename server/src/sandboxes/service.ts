@@ -10,7 +10,7 @@ import { CODE } from '../codes'
 
 // 调用方只需 id + role 两字段（结构面收窄——runner 侧无全量 AuthUser 行）。
 export async function getSessionForUser(
-  prisma: PrismaClient,
+  prisma: Pick<PrismaClient, 'session'>,
   user: Pick<AuthUser, 'id' | 'role'>,
   sessionId: string,
 ): Promise<Session> {

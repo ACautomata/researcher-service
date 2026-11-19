@@ -138,6 +138,7 @@ export interface SendMessageResult {
   turn: number
   runId: string | null // replay 时 null
   replay: boolean
+  suggestionVersion?: number
   command?: SystemCommandResult
 }
 

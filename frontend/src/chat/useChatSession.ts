@@ -10,7 +10,7 @@
 //   失败信息（server TurnReducer 不落 run.*），刷新回放自然剥落，两入口零差异不被污染。
 // 历史分页：#730 §4.1 提及「分页」，但 #778 服务端投影 GET /messages 无分页参数（全量返回）——
 // 旧网关锚点分页随协议机退役，ChatStream 分页 props 传常量 false（骨架保留，服务端分页面就绪后接线）。
-import { computed, ref, watch, type Ref } from 'vue'
+import { computed, reactive, ref, watch, type Ref } from 'vue'
 import { ApiError } from '@/api/client'
 import {
   abortSession,
@@ -26,6 +26,7 @@ import {
   resolveSessionApproval,
   sendSessionMessage,
   type MediaRef,
+  type NextStepSuggestion,
   type PreferredModelRef,
   type SessionSummary,
   type SystemCommandResult,
@@ -110,7 +111,9 @@ export function useChatSession(deps: ChatSessionDeps = {}): ChatSession {
   let disposed = false
   const historyBusy = ref(false)
   const projectionReady = ref(false)
-  const nextStepSuggestion = ref<import('@/api/sessions').NextStepSuggestion | null>(null)
+  const nextStepSuggestion = ref<NextStepSuggestion | null>(null)
+  const submitting = reactive(new Map<string, number>())
+  const suggestionVersions = reactive(new Map<string, number>())
   const outboxGenerations = new Map<string, number>()
   function invalidateOutbox(id: string): void {
     outboxGenerations.set(id, (outboxGenerations.get(id) ?? 0) + 1)
@@ -166,7 +169,9 @@ export function useChatSession(deps: ChatSessionDeps = {}): ChatSession {
       const p = await getSessionProjection(id)
       if (disposed || chat.selectedSession !== id || gen !== projectionGen) return
       const suggestion = p.nextStepSuggestion
-      nextStepSuggestion.value = suggestion && suggestion.version === p.suggestionVersion && p.messages.some(m => m.id === suggestion.messageId && m.role === 'assistant') ? suggestion : null
+      if (p.sessionId === id) observeSuggestionVersion(id, p.suggestionVersion)
+      nextStepSuggestion.value = p.sessionId === id && !p.inFlight && suggestion && suggestion.version === p.suggestionVersion &&
+        p.messages.some(m => m.id === suggestion.messageId && m.role === 'assistant') ? suggestion : null
       chat.setMessages(fromProjection(p))
       chat.setTeams(teamFoldsFromProjection(p))
       chat.setApprovalsFromProjection(p.approvals)
@@ -175,6 +180,7 @@ export function useChatSession(deps: ChatSessionDeps = {}): ChatSession {
       deps.onClearError?.()
     } catch (e) {
       if (disposed || chat.selectedSession !== id || gen !== projectionGen) return
+      nextStepSuggestion.value = null
       deps.onError?.(e instanceof Error ? e.message : '加载失败')
     }
   }
@@ -196,10 +202,14 @@ export function useChatSession(deps: ChatSessionDeps = {}): ChatSession {
     try {
       await outbox.flush(id, async (sid, entry) => {
         if (historyBusy.value) throw new Error('历史操作进行中')
-        const result = await (entry.attachments?.length
-          ? sendSessionMessage(sid, entry.content, entry.clientKey, entry.attachments.map((media) => media.attachmentId))
+        const outboxGen = outboxGenerations.get(sid) ?? 0
+        const attachmentIds = entry.attachments?.map(media => media.attachmentId)
+        const result = await submitMessage(sid, () => attachmentIds?.length
+          ? sendSessionMessage(sid, entry.content, entry.clientKey, attachmentIds)
           : sendSessionMessage(sid, entry.content, entry.clientKey))
-        if (!disposed && chat.selectedSession === sid && result.command) deps.onCommand?.(result.command)
+        if (!disposed && chat.selectedSession === sid && outboxGen === (outboxGenerations.get(sid) ?? 0) && result.command) {
+          deps.onCommand?.(result.command)
+        }
       })
     } catch {
       return // 网络/门控拒绝 → 保序停止，条目保留，下次补偿续传
@@ -240,7 +250,10 @@ export function useChatSession(deps: ChatSessionDeps = {}): ChatSession {
   watch(stream.status, (s) => {
     connecting.value = s === 'connecting'
     disconnected.value = s === 'disconnected' || s === 'closed'
-    if (s !== 'open') projectionReady.value = false
+    if (s !== 'open') {
+      projectionGen++
+      projectionReady.value = false
+    }
   })
 
   // ---- SSE 事件分派（业务面）----
@@ -272,6 +285,10 @@ export function useChatSession(deps: ChatSessionDeps = {}): ChatSession {
       return
     }
     if (e.type === 'session.invalidated') {
+      if (e.sessionId && e.payload.reason === 'deleted') {
+        forgetSession(e.sessionId)
+        return
+      }
       if (e.sessionId && e.payload.reason === 'rewind' && e.payload.scope !== 'files') invalidateOutbox(e.sessionId)
       if (e.sessionId === chat.selectedSession) { fileTabs.reset(); void refreshProjection() } // 他端 rewind 同步对话与文件
       return
@@ -309,8 +326,11 @@ export function useChatSession(deps: ChatSessionDeps = {}): ChatSession {
     }
 
     if (e.type === 'run.started' || e.type === 'run.resumed') {
+      nextStepSuggestion.value = null
+      projectionGen++
       lastRunError.value = null
       chat.setMessages(applyEvent(chat.messages, e))
+      if (!projectionReady.value) void refreshProjection()
       return
     }
     if (e.type === 'text.delta' || e.type === 'thinking.delta' || e.type === 'attachment' || e.type === 'turn.files') {
@@ -324,7 +344,12 @@ export function useChatSession(deps: ChatSessionDeps = {}): ChatSession {
     }
     if (e.type === 'approval.requested') {
       const card = approvalCardFromPayload(e)
-      if (card) chat.addApproval(card)
+      if (card) {
+        nextStepSuggestion.value = null
+        projectionGen++
+        chat.addApproval(card)
+        if (!projectionReady.value) void refreshProjection()
+      }
       return
     }
     if (e.type === 'approval.resolved') {
@@ -332,6 +357,7 @@ export function useChatSession(deps: ChatSessionDeps = {}): ChatSession {
       return
     }
     if (e.type === 'run.failed') {
+      nextStepSuggestion.value = null
       const kind = typeof e.payload.errorKind === 'string' ? e.payload.errorKind : ''
       const detail = typeof e.payload.message === 'string' ? e.payload.message : undefined
       lastRunError.value = { kind, label: RUN_ERROR_LABELS[kind] ?? '运行失败', detail }
@@ -340,6 +366,7 @@ export function useChatSession(deps: ChatSessionDeps = {}): ChatSession {
       return
     }
     if (e.type === 'run.completed' || e.type === 'run.aborted' || e.type === 'run.suspended') {
+      if (e.type !== 'run.completed') nextStepSuggestion.value = null
       lastRunError.value = null
       pendingToolInputs.clear()
       void refreshProjection().then(() => tryFlush()) // 终态后补偿注入排队消息
@@ -482,15 +509,15 @@ export function useChatSession(deps: ChatSessionDeps = {}): ChatSession {
     } catch (e) {
       return e instanceof Error ? e.message : '删除失败'
     }
-    chat.removeSession(id)
-    if (chat.selectedSession === id) {
-      projectionGen++
-      chat.resetForSession()
-      chat.setSelectedSession('')
-      fileTabs.reset()
-      lastRunError.value = null
-    }
+    forgetSession(id)
     return true
+  }
+
+  function forgetSession(id: string): void {
+    invalidateOutbox(id)
+    chat.removeSession(id)
+    suggestionVersions.delete(id)
+    if (chat.selectedSession === id) selectSession('')
   }
 
   // ---- 发送（幂等 + 乐观回显 + 门控 + 断线排队）----
@@ -513,8 +540,6 @@ export function useChatSession(deps: ChatSessionDeps = {}): ChatSession {
       chat.setInput('')
       return true
     }
-    nextStepSuggestion.value = null
-    projectionGen++
     const key = newClientKey()
     pushOptimistic(content, key, attachments)
     chat.setInput('')
@@ -537,11 +562,36 @@ export function useChatSession(deps: ChatSessionDeps = {}): ChatSession {
     })
   }
 
+  function observeSuggestionVersion(id: string, version?: number): void {
+    if (version !== undefined && version > (suggestionVersions.get(id) ?? 0)) suggestionVersions.set(id, version)
+  }
+
+  async function submitMessage(
+    id: string,
+    submit: () => ReturnType<typeof sendSessionMessage>,
+  ): ReturnType<typeof sendSessionMessage> {
+    const outboxGen = outboxGenerations.get(id) ?? 0
+    submitting.set(id, (submitting.get(id) ?? 0) + 1)
+    if (chat.selectedSession === id) {
+      nextStepSuggestion.value = null
+      projectionGen++
+    }
+    try {
+      const result = await submit()
+      if (!disposed && outboxGen === (outboxGenerations.get(id) ?? 0)) observeSuggestionVersion(id, result.suggestionVersion)
+      return result
+    } finally {
+      const remaining = (submitting.get(id) ?? 1) - 1
+      if (remaining) submitting.set(id, remaining)
+      else submitting.delete(id)
+    }
+  }
+
   async function dispatchSend(id: string, content: string, key: string, attachments: SentAttachment[] | undefined): Promise<boolean> {
     const outboxGen = outboxGenerations.get(id) ?? 0
     try {
-      const result = await sendSessionMessage(id, content, key, attachments?.map((a) => a.attachmentId))
-      if (disposed || chat.selectedSession !== id) return true
+      const result = await submitMessage(id, () => sendSessionMessage(id, content, key, attachments?.map(a => a.attachmentId)))
+      if (disposed || chat.selectedSession !== id || outboxGen !== (outboxGenerations.get(id) ?? 0)) return true
       if (result.command) deps.onCommand?.(result.command)
       if (result.replay) {
         void refreshProjection() // 重发 replay：以权威行回填（乐观行随整替消失）
@@ -739,7 +789,14 @@ export function useChatSession(deps: ChatSessionDeps = {}): ChatSession {
     stream.close()
   }
 
-  const suggestionText = computed(() => projectionReady.value && !connecting.value && !disconnected.value && !running.value && !historyBusy.value && !chat.leaderApprovalPending && !chat.input ? nextStepSuggestion.value?.text ?? '' : '')
+  const suggestionText = computed(() => {
+    const suggestion = nextStepSuggestion.value
+    const id = chat.selectedSession
+    if (!suggestion || suggestion.version < (suggestionVersions.get(id) ?? 0) ||
+        submitting.has(id) || !projectionReady.value || connecting.value || disconnected.value ||
+        running.value || historyBusy.value || chat.leaderApprovalPending || chat.input) return ''
+    return suggestion.text
+  })
   function acceptSuggestion(): void {
     if (!suggestionText.value) return
     chat.setInput(suggestionText.value)

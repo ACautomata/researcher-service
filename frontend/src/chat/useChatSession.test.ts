@@ -884,7 +884,113 @@ describe('#980 会话模型覆盖同步', () => {
 })
 
 
-describe('#1037 下一步提示投影恢复', () => {
+describe('下一步提示投影恢复', () => {
+  it('发送期间重拉旧投影，提交后也不能重新采用旧提示', async () => {
+    const oldProjection = projectionOf({ suggestionVersion: 1,
+      nextStepSuggestion: { text: '请设计旧实验', runId: 'r0', messageId: 'm2', version: 1 } })
+    vi.mocked(api.getSessionProjection).mockResolvedValue(oldProjection)
+    const conn = await mounted()
+    let acknowledge!: (result: api.SendMessageResult) => void
+    vi.mocked(api.sendSessionMessage).mockReturnValueOnce(new Promise(resolve => { acknowledge = resolve }))
+    conn.chat.setInput('新请求')
+    conn.send()
+    FakeEventSource.last()!.emit('session.updated', { type: 'session.updated', sessionId: 'sess-1', payload: { projectionChanged: true } })
+    await flushPromises()
+    expect(conn.suggestionText.value).toBe('')
+    acknowledge({ messageId: 'm9', turn: 3, runId: 'r1', replay: false, suggestionVersion: 2 })
+    await flushPromises()
+    expect(conn.suggestionText.value).toBe('')
+    conn.acceptSuggestion()
+    expect(conn.chat.input).toBe('')
+    conn.dispose()
+  })
+
+  it('切换后丢弃旧回包并保留当前草稿，切回和断流恢复读取原会话提示', async () => {
+    const first = projectionOf({ suggestionVersion: 1,
+      nextStepSuggestion: { text: '请设计实验 A', runId: 'r0', messageId: 'm2', version: 1 } })
+    const second = projectionOf({ sessionId: 'sess-2', suggestionVersion: 1,
+      nextStepSuggestion: { text: '请设计实验 B', runId: 'rB', messageId: 'm2', version: 1 } })
+    const conn = await mounted()
+    let finishFirst!: (projection: api.SessionProjection) => void
+    vi.mocked(api.getSessionProjection).mockReturnValueOnce(new Promise(resolve => { finishFirst = resolve }))
+    const src = FakeEventSource.last()!
+    const changed = (sessionId: string) => src.emit('session.updated', { type: 'session.updated', sessionId, payload: { projectionChanged: true } })
+    changed('sess-1')
+    vi.mocked(api.getSessionProjection).mockImplementation(async id => id === 'sess-1' ? first : second)
+    conn.selectSession('sess-2')
+    conn.chat.setInput('会话 B 的草稿')
+    await flushPromises()
+    finishFirst(first)
+    changed('sess-1')
+    await flushPromises()
+    expect(conn.chat.input).toBe('会话 B 的草稿')
+    conn.chat.setInput('')
+    expect(conn.suggestionText.value).toBe('请设计实验 B')
+    conn.selectSession('sess-1')
+    await flushPromises()
+    expect(conn.suggestionText.value).toBe('请设计实验 A')
+    src.fail()
+    await flushPromises()
+    expect(conn.suggestionText.value).toBe('')
+    opened()
+    await flushPromises()
+    expect(conn.suggestionText.value).toBe('请设计实验 A')
+    expect(api.sendSessionMessage).not.toHaveBeenCalled()
+    conn.dispose()
+  })
+
+  it('另一端删除当前会话后，旧投影回包和采用均无效', async () => {
+    const projection = projectionOf({ suggestionVersion: 1,
+      nextStepSuggestion: { text: '将随会话删除的提示', runId: 'r0', messageId: 'm2', version: 1 } })
+    vi.mocked(api.getSessionProjection).mockResolvedValue(projection)
+    const conn = await mounted()
+    expect(conn.suggestionText.value).toBe('将随会话删除的提示')
+    const src = FakeEventSource.last()!
+    let finish!: (value: api.SessionProjection) => void
+    vi.mocked(api.getSessionProjection).mockReturnValueOnce(new Promise(resolve => { finish = resolve }))
+    src.emit('session.updated', { type: 'session.updated', sessionId: 'sess-1', payload: { projectionChanged: true } })
+    src.emit('session.invalidated', { type: 'session.invalidated', sessionId: 'sess-1', payload: { reason: 'deleted' } })
+    finish(projection)
+    await flushPromises()
+    expect(conn.chat.selectedSession).toBe('')
+    expect(conn.suggestionText.value).toBe('')
+    conn.acceptSuggestion()
+    expect(conn.chat.input).toBe('')
+    conn.dispose()
+  })
+
+  it.each(['run.failed', 'run.aborted'] as const)('新 run 开始、等待审批及 %s 不会恢复旧提示', async terminal => {
+    const oldProjection = projectionOf({ suggestionVersion: 1,
+      nextStepSuggestion: { text: '旧提示', runId: 'r0', messageId: 'm2', version: 1 } })
+    vi.mocked(api.getSessionProjection).mockResolvedValue(oldProjection)
+    const conn = await mounted()
+    const src = FakeEventSource.last()!
+    conn.selectSession('')
+    let finishOld!: (projection: api.SessionProjection) => void
+    vi.mocked(api.getSessionProjection).mockReturnValueOnce(new Promise(resolve => { finishOld = resolve }))
+    conn.selectSession('sess-1')
+    const run = { sessionId: 'sess-1', runId: 'r1', payload: {} }
+    vi.mocked(api.getSessionProjection).mockResolvedValue(projectionOf({ suggestionVersion: 2, nextStepSuggestion: null,
+      inFlight: { runId: 'r1', state: 'running', turn: { content: '新回答生成中' } },
+    }))
+    src.emit('run.started', { ...run, type: 'run.started' })
+    finishOld(oldProjection)
+    await flushPromises()
+    expect(conn.chat.messages.map(message => message.text)).toEqual(['旧问题', '旧回答', '新回答生成中'])
+    expect(conn.chat.messages.at(-1)?.streaming).toBe(true)
+    expect(conn.suggestionText.value).toBe('')
+    src.emit('approval.requested', { ...run, type: 'approval.requested', payload: {
+      escalation: { id: 'e1', source: 'cautious-mode', toolCallId: 't1', toolName: 'bash', toolCallSummary: '待审批' },
+    } })
+    expect(conn.chat.leaderApprovalPending).toBe(true)
+    expect(conn.suggestionText.value).toBe('')
+    vi.mocked(api.getSessionProjection).mockResolvedValue(projectionOf({ suggestionVersion: 2, nextStepSuggestion: null }))
+    src.emit(terminal, { ...run, type: terminal })
+    await flushPromises()
+    expect(conn.suggestionText.value).toBe('')
+    conn.dispose()
+  })
+
   it('请求被配额拒绝后清空失败草稿，仍可采用当前提示', async () => {
     const suggestion = { text: '请设计实验', runId: 'r0', messageId: 'm2', version: 1 }
     vi.mocked(api.getSessionProjection).mockResolvedValue(projectionOf({ suggestionVersion: 1, nextStepSuggestion: suggestion }))

@@ -57,12 +57,12 @@
   退役码（#858 起无容器行归属前置，name 形状校验后即拒）；写面 PUT/POST/DELETE → 90005；
   binary/oversized 不返回内容）。
 - `/api/v1/sessions[/<id>]` — 会话 REST 域（#778：POST 创建/GET 列表/PATCH 改会话/DELETE（级联删
-  沙箱）；#978 PATCH body 扩 `preferredModel`（会话模型覆盖 {providerId, modelId, effort?} |
+  沙箱并广播 `session.invalidated{reason:deleted}`）；#978 PATCH body 扩 `preferredModel`（会话模型覆盖 {providerId, modelId, effort?} |
   null 清空同 `/model default`；zod 单源 + 能力 none 带 effort 拒 90002；写后广播
   `session.updated {model, appliesTo:'next-run'}` 同款形状）——列表行/历史投影/summary 事件面
   均携带解析后 `preferredModel`；
-  `/<id>/messages` POST 发消息（`Idempotency-Key` 32-hex header 幂等，重发 replay）+
-  GET 历史投影（回放零差异面；#781 起 archivedAt 过滤——被放弃路线行不可读；#1037 增 suggestionVersion 与可空 nextStepSuggestion {text, runId, messageId, version}，正常回复保存后独立生成，保存后复用 session.updated {projectionChanged:true} 重拉；采用仅改本地草稿）；`/<id>/abort`、
+  `/<id>/messages` POST 发消息（`Idempotency-Key` 32-hex header 幂等，重发 replay；首次接纳返回推进后的 suggestionVersion）+
+  GET 历史投影（回放零差异面；#781 起 archivedAt 过滤——被放弃路线行不可读；#1037 增 suggestionVersion 与可空 nextStepSuggestion {text, runId, messageId, version}，正常回复保存后独立生成，保存后复用 session.updated {projectionChanged:true} 重拉；采用仅改本地草稿；对话回退推进版本并清空提示，文件回退保留提示）；`/<id>/abort`、
   `/<id>/resume`、#783 审批决策 `POST /<id>/approvals/:escalationId`（resolve 面，escalationId
   不存在/已落定 → 50004 同码防探测）；#781 增 `/<id>/rewind`（换 activeCheckpointId 指针重开 + 被放弃路线软删 +
   `session.invalidated{reason:rewind}` 事件）、`/<id>/fork`（新会话复制全件 + 沙箱字面复制 +

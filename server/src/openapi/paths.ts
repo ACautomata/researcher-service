@@ -161,7 +161,7 @@ register({
   auth: 'user',
   errors:
     '50002 · 50005（在飞/排队 run——中断或完成后再发）· 50003（interrupt 未决——先审批决策）· 50007（同 Idempotency-Key 不同内容）· 40043（并发配额）· 90002（缺/坏 Idempotency-Key → data 恒 null；body 字段明细）· 10005。',
-  dataNote: 'data: 受理结果（幂等重复 → 原行，零副作用）。',
+  dataNote: 'data: 受理结果（首次接纳含 suggestionVersion；幂等重复返回原行，版本保持不变）。',
   body: messageSendSchema,
   headers: z.object({
     'idempotency-key': z.string().describe('32 位小写 hex（MESSAGE_KEY_REGEX）；缺失/非法 → 90002'),
