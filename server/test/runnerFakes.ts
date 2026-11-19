@@ -9,13 +9,18 @@
 //   - HITL resume payload 形态 = Command({resume: {decisions: [...]}})
 
 import { BaseChatModel } from '@langchain/core/language_models/chat_models'
-import { AIMessage, AIMessageChunk } from '@langchain/core/messages'
+import { AIMessage, AIMessageChunk, type BaseMessage } from '@langchain/core/messages'
 import { ChatGenerationChunk } from '@langchain/core/outputs'
 import { createTarFile, parseTar } from '../src/files/tar'
 import type { SandboxFilePrimitives } from '../src/runner/backend/primitives'
 
 // 脚本条目：AIMessage 或工厂（LazyMessage 可断言构造时点）
 export type ScriptEntry = AIMessage | (() => AIMessage)
+
+// 辅助建议是无工具的独立外部模型请求；主对话夹具默认返回空建议，不消费主回答脚本。
+export function isSuggestionInput(messages: readonly BaseMessage[]): boolean {
+  return messages.some(message => message.getType() === 'system' && typeof message.content === 'string' && message.content.startsWith('你是下一步提示生成器。'))
+}
 
 // 文本分片长度（_stream 切片粒度——多 chunk 验证流式多 delta 路径）
 const STREAM_CHUNK_CHARS = 4
@@ -58,6 +63,7 @@ export class ScriptedChatModel extends BaseChatModel {
     _options: unknown,
     _runManager: unknown,
   ) {
+    if (Array.isArray(_messages) && isSuggestionInput(_messages)) return { generations: [{ message: new AIMessage(''), text: '' }] }
     this.receivedMessages.push(_messages)
     this.invokeCount += 1
     const message = this.nextMessage()

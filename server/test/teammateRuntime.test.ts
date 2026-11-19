@@ -20,7 +20,7 @@ import { SessionService } from '../src/sessions/service'
 import { ApprovalFunnel, type ApprovalFunnelDeps } from '../src/runner/approval/funnel'
 import { createPrismaApprovalAuditSink } from '../src/runner/approval/audit'
 import { listTextTraceLogs } from '../src/traceLogs/service'
-import { ScriptedChatModel, fakePrimitives, toolCallAi } from './runnerFakes'
+import { ScriptedChatModel, fakePrimitives, toolCallAi, isSuggestionInput } from './runnerFakes'
 import { seedUser, waitFor } from './helpers'
 
 type Reply = AIMessage | (() => Promise<AIMessage>)
@@ -28,6 +28,7 @@ class TeamModel extends ScriptedChatModel {
   private positions = new Map<string, number>()
   constructor(private readonly replies: Record<string, Reply[]>) { super([]) }
   override async _generate(messages: BaseMessage[]) {
+    if (isSuggestionInput(messages)) return { generations: [{ message: new AIMessage(''), text: '' }] }
     const input = messages.find(message => message.getType() === 'human')?.content
     const task = typeof input === 'string' ? input : ''
     const position = this.positions.get(task) ?? 0
@@ -70,6 +71,7 @@ async function harness(replies: Record<string, Reply[]>, judge?: ApprovalFunnelD
       const model = new TeamModel(replies)
       model.callbacks = [{ name: 'FakeLLMTransport', handleChatModelStart: (_model, batches, _run, _parent, _extra, _tags, metadata) => {
         const messages = batches[0] ?? []
+        if (isSuggestionInput(messages)) return
         const human = messages.find(message => message.getType() === 'human')?.content
         modelCalls.push({ task: typeof human === 'string' ? human : '', metadata: metadata ?? {}, system: JSON.stringify(messages.filter(message => message.getType() === 'system').map(message => message.content)) })
       } }]

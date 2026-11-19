@@ -579,6 +579,8 @@ defineExpose({
         </ul>
       </div>
       <ChatComposer
+        :next-step-suggestion="conn.suggestionText.value"
+        @accept-suggestion="conn.acceptSuggestion"
         :rewind-busy="restoreBusy"
         :fork-busy="restoreBusy"
         v-model="chat.input"

@@ -33,7 +33,7 @@ import {
   resolveRewindAnchor,
 } from './rewind'
 import { TITLE_AUTO_MAX, TITLE_MAX, type RewindScope } from './values'
-import type { PreferredModelOverride } from '../validation/schemas'
+import { nextStepSuggestionSchema, type NextStepSuggestion, type PreferredModelOverride } from '../validation/schemas'
 import { outputHash, trimTraceText } from '../traceLogs/service'
 import type { TeammateStatus } from '../runner/teammates/service'
 import type { ApprovalInterruptPayload } from '../runner/approval/funnel'
@@ -68,6 +68,8 @@ export interface ProjectionMessage {
 }
 
 export interface SessionProjection {
+  readonly suggestionVersion: number
+  readonly nextStepSuggestion: NextStepSuggestion | null
   readonly sessionId: string
   readonly title: string
   /** 解析后的会话模型覆盖（#978 · ADR 0019；对象或 null = 跟随默认链）——composer 恢复态读面 */
@@ -242,6 +244,13 @@ async function writePreferredModel(
   })
 }
 
+function readNextStepSuggestion(json: string | null, version: number): NextStepSuggestion | null {
+  try {
+    const parsed = nextStepSuggestionSchema.safeParse(JSON.parse(json ?? 'null'))
+    return parsed.success && parsed.data.version === version ? parsed.data : null
+  } catch { return null }
+}
+
 function summary(s: Session): SessionSummary {
   return {
     id: s.id,
@@ -253,12 +262,12 @@ function summary(s: Session): SessionSummary {
   }
 }
 
-// turn 序号分配 + 落行打包进 interactive transaction：read-then-write 在 SQLite 单连接事务内
+// 调用方须在同一 interactive transaction 内分配 turn 并落行：read-then-write 在 SQLite 单连接事务内
 // 原子（并发写排队），消除交错窗口——run 终态 recordTurn 与门禁放行的新 sendMessage 落行
 // 曾可重叠（completed 置位于 finally recordTurn 之前），裸 read-then-write 下产生同 turn 双行，
 // 投影 (turn asc, createdAt asc) 排序下答先于问（R3 评审）。
-async function insertWithNextTurn(
-  prisma: PrismaClient,
+async function insertNextTurn(
+  tx: Pick<PrismaClient, 'sessionMessage'>,
   sessionId: string,
   data: {
     role: string
@@ -268,15 +277,13 @@ async function insertWithNextTurn(
     attachmentsJson?: string
   },
 ): Promise<SessionMessage> {
-  return prisma.$transaction(async (tx) => {
-    const last = await tx.sessionMessage.findFirst({
-      where: { sessionId },
-      orderBy: { turn: 'desc' },
-      select: { turn: true },
-    })
-    return tx.sessionMessage.create({
-      data: { sessionId, turn: (last?.turn ?? 0) + 1, ...data },
-    })
+  const last = await tx.sessionMessage.findFirst({
+    where: { sessionId },
+    orderBy: { turn: 'desc' },
+    select: { turn: true },
+  })
+  return tx.sessionMessage.create({
+    data: { sessionId, turn: (last?.turn ?? 0) + 1, ...data },
   })
 }
 
@@ -530,12 +537,17 @@ export class SessionService {
     // 落行先于 dispatch：dispatch 后 run 域事件（run.started 起）才可见，用户行必已在投影中
     //（刷新窗口无「事件先于消息」跳变）。
     let row: SessionMessage
+    let previousSuggestion: { suggestionVersion: number; nextStepSuggestionJson: string | null; suggestionSourceRunId: string | null } | undefined
     try {
-      row = await insertWithNextTurn(this.deps.prisma, sessionId, {
-        role: 'user',
-        content: p.content,
-        clientKey: p.clientKey,
+      const accepted = await this.deps.prisma.$transaction(async tx => {
+        const previous = await tx.session.findUniqueOrThrow({ where: { id: sessionId }, select: { suggestionVersion: true, nextStepSuggestionJson: true, suggestionSourceRunId: true } })
+        const message = await insertNextTurn(tx, sessionId, { role: 'user', content: p.content, clientKey: p.clientKey })
+        const updated = await tx.session.update({ where: { id: sessionId }, data: { suggestionVersion: { increment: 1 }, nextStepSuggestionJson: null, suggestionSourceRunId: null } })
+        return { message, previous, version: updated.suggestionVersion }
       })
+      row = accepted.message
+      previousSuggestion = accepted.previous
+      cmd = { ...cmd, suggestionVersion: accepted.version, suggestionUserText: p.content }
     } catch (e) {
       if ((e as { code?: string }).code === 'P2002') {
         // 已知毫秒窗口（R4 记录备查）：败方经此分支拿 replay 应答后，若胜方 dispatch ack
@@ -549,6 +561,13 @@ export class SessionService {
       throw e
     }
 
+    const restoreSuggestion = async (): Promise<void> => {
+      if (!previousSuggestion) return
+      await this.deps.prisma.session.updateMany({
+        where: { id: sessionId, suggestionVersion: cmd.suggestionVersion }, data: previousSuggestion,
+      }).catch(() => {})
+    }
+
     // #780：附件引用链接（≤4 件 + 归属/session 校验在 linkToMessage）。失败 → 消息行回滚
     //（引用与消息同生共死——校验失败的消息不应留下无引用的幽灵行）。链接先于 dispatch：
     // worker 拾取 run 时按消息行读附件（片 2 ingestion），引用必须在 run 事件前就位。
@@ -557,6 +576,7 @@ export class SessionService {
         await this.deps.attachments.linkToMessage(user, sessionId, row.id, p.attachmentIds)
       } catch (e) {
         await this.deps.prisma.sessionMessage.delete({ where: { id: row.id } }).catch(() => {})
+        await restoreSuggestion()
         throw e
       }
     }
@@ -569,6 +589,7 @@ export class SessionService {
       await this.deps.dispatch(cmd)
     } catch {
       await this.deps.prisma.sessionMessage.delete({ where: { id: row.id } }).catch(() => {})
+      await restoreSuggestion()
       if (p.attachmentIds && p.attachmentIds.length > 0) {
         await this.deps.prisma.attachment
           .updateMany({ where: { id: { in: [...p.attachmentIds] }, sessionId }, data: { messageId: null } })
@@ -576,8 +597,9 @@ export class SessionService {
       }
       throw fail(CODE.INTERNAL, 'run 入队失败，请稍后重试')
     }
+    this.publishSessionEvent(user.id, 'session.updated', { projectionChanged: true }, sessionId)
     // 自动标题（story 5 · 语义翻案：「首个 run 终态时」→「首条消息被接受（dispatch ack）时」）：
-    // user 消息行在 REST 面已落库（insertWithNextTurn 上方），autoTitle 的数据前提（首条 user
+    // user 消息行在 REST 面已落库（insertNextTurn 上方），autoTitle 的数据前提（首条 user
     // 行）此刻已满足——与 run 生命周期彻底解耦，单点覆盖 pre-start 失败/空聚合 failed/abort/
     // 任何未来失败形态（旧实现只挂「终态聚合非空的 recordTurn」，失败 run 永无标题，#747 回归②
     // 「无标题」根因）。best-effort + try/catch 吞错（此刻消息已入队，REST 报错会诱发 replay；
@@ -629,10 +651,7 @@ export class SessionService {
       // turn 分配与幂等查同处一个 interactive transaction：better-sqlite3 单连接下事务体
       // 串行执行（写排队），read-then-write 无交错窗口——无需常规路径的 P2002 兜底重查
       //（该兜底防的是「先查在事务外」的间隙，此处查/写同事务，约束撞不上）。
-      const last = await tx.sessionMessage.findFirst({ where: { sessionId }, orderBy: { turn: 'desc' }, select: { turn: true } })
-      const row = await tx.sessionMessage.create({
-        data: { sessionId, turn: (last?.turn ?? 0) + 1, role: 'user', content: p.content, clientKey: p.clientKey, attachmentsJson: serializeAttachments({ command }) },
-      })
+      const row = await insertNextTurn(tx, sessionId, { role: 'user', content: p.content, clientKey: p.clientKey, attachmentsJson: serializeAttachments({ command }) })
       return { created, response: { messageId: row.id, turn: row.turn, runId: null, replay: false, command } }
     })
     if (result.created) this.publishSessionEvent(user.id, 'session.created', { source: 'new', session: summary(result.created) }, result.created.id)
@@ -725,6 +744,8 @@ export class SessionService {
       sessionId,
       title: session.title,
       preferredModel: parsePreferredModelOverride(session.preferredModelJson),
+      suggestionVersion: session.suggestionVersion,
+      nextStepSuggestion: readNextStepSuggestion(session.nextStepSuggestionJson, session.suggestionVersion),
       messages: rows.map(toProjectionMessage),
       ...(inFlight !== undefined ? { inFlight } : {}),
       ...(teammates.length > 0 ? { teammates } : {}),
@@ -746,18 +767,19 @@ export class SessionService {
   //（回放零差异断言的前提）。
   // #747 B 节双域（R2 修复②）：同路径补 text_trace_logs 写——「mapper 写两份、代码不共享」，
   // TextTrace 行构造见 recordTextTraceForTurn（与上方 session_messages 行构造零共享）。----
-  async recordTurn(p: RecordTurnPayload): Promise<void> {
-    await insertWithNextTurn(this.deps.prisma, p.sessionId, {
+  async recordTurn(p: RecordTurnPayload): Promise<string> {
+    const saved = await this.deps.prisma.$transaction(tx => insertNextTurn(tx, p.sessionId, {
       role: 'assistant',
       content: p.aggregate.content,
       anchorCheckpointId: p.anchorCheckpointId,
       attachmentsJson: serializeAttachments(p.aggregate),
-    })
+    }))
     await this.recordTextTraceForTurn(p)
     await this.autoTitle(p.sessionId)
     const child = await this.deps.prisma.teammate.findUnique({ where: { threadId: p.sessionId }, select: { parentSessionId: true } })
     const parent = await this.deps.prisma.session.findUnique({ where: { id: child?.parentSessionId ?? p.sessionId }, select: { ownerId: true } })
     if (parent) this.publishSessionEvent(parent.ownerId, 'session.updated', { projectionChanged: true }, child?.parentSessionId ?? p.sessionId)
+    return saved.id
   }
 
   // ---- TextTrace 审计域 mapper（#747 B 节双域的第二份写；与 session_messages 行构造零共享

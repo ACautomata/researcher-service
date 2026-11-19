@@ -107,7 +107,11 @@ export interface ApprovalInterruptPayload {
 }
 export interface SessionApproval extends ApprovalInterruptPayload { teammateId?: string | null }
 
+export interface NextStepSuggestion { text: string; runId: string; messageId: string; version: number }
+
 export interface SessionProjection {
+  suggestionVersion?: number
+  nextStepSuggestion?: NextStepSuggestion | null
   sessionId: string
   title: string
   // 会话模型覆盖（#980：composer 从投影恢复 chip/滑块；server parsePreferredModelOverride 解析面）

@@ -27,7 +27,7 @@ import {
   type ChaoxingRemote,
   type LearningResult,
 } from '../src/chaoxing/remote'
-import { ScriptedChatModel, fakePrimitives } from './runnerFakes'
+import { ScriptedChatModel, fakePrimitives, isSuggestionInput } from './runnerFakes'
 import { seedUser } from './helpers'
 
 const cleanups: Array<() => Promise<void>> = []
@@ -36,6 +36,7 @@ afterEach(async () => { for (const cleanup of cleanups.splice(0)) await cleanup(
 class CapturingModel extends ScriptedChatModel {
   readonly inputs: string[] = []
   override async _generate(messages: BaseMessage[]) {
+    if (isSuggestionInput(messages)) return { generations: [{ message: new AIMessage(''), text: '' }] }
     const input = JSON.stringify(messages.map(message => ({type: message.getType(), content: message.content})))
     this.inputs.push(typeof input === 'string' ? input : '')
     return { generations: [{ message: new AIMessage({ content: 'ack' }), text: 'ack' }] }

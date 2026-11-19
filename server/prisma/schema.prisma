@@ -232,6 +232,9 @@ model Session {
   fileJournalAnchorSeq Int?
 
   // #787: /model is a session preference, applied at the next run snapshot.
+  suggestionVersion Int @default(0)
+  nextStepSuggestionJson String?
+  suggestionSourceRunId String?
   preferredModelJson String?
   learningCourseId String?
 

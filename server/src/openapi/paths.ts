@@ -196,7 +196,7 @@ register({
   summary: '历史投影（回放面；与实时流终态零差异）',
   auth: 'user',
   errors: '50002 · 10005。',
-  dataNote: 'data: { sessionId, title, preferredModel（#978 会话模型覆盖，对象或 null）, messages, inFlight?, teammates?, approvals? }。',
+  dataNote: 'data: { sessionId, title, preferredModel（#978 会话模型覆盖，对象或 null）, messages, suggestionVersion（递增版本）, nextStepSuggestion（null 或 {text, runId, messageId, version}；保存后 session.updated {projectionChanged:true} 通知重拉）, inFlight?, teammates?, approvals? }。',
 })
 
 register({
