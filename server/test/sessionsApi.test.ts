@@ -7,13 +7,13 @@
 // StreamHub（双 sink 收帧断言多端广播一致——生产扇出路径）+ 临时 SQLite。dispatch = Inline
 // fire-and-forget（生产 BullMQ submit 的测试同形面：命令进 execute、错误经 run 域事件表达）。
 
-import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest'
+import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest'
 import { mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import Database from 'better-sqlite3'
 import supertest, { type SuperTest, type Test } from 'supertest'
-import { AIMessage } from '@langchain/core/messages'
+import { AIMessage, type BaseMessage } from '@langchain/core/messages'
 import { createPrismaClient } from '../src/prisma'
 import { createApp } from '../src/app'
 import type { PrismaClient } from '../src/generated/prisma/client'
@@ -26,8 +26,19 @@ import { ConcurrencyGate } from '../src/runner/concurrency'
 import { PrismaCheckpointSaver } from '../src/runner/persistence/prismaCheckpointSaver'
 import { SessionService } from '../src/sessions/service'
 import { TurnReducer, type TurnSnapshot } from '../src/sessions/reducer'
+import { signAccessToken } from '../src/auth/tokens'
 import { CODE } from '../src/codes'
 import { installAbortRejectionGuard } from '../src/runner/runtime/abortGuard'
+
+const realSetTimeout = setTimeout
+
+async function waitWithFakeClock(predicate: () => boolean): Promise<void> {
+  const deadline = Date.now() + 5_000
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error('等待认证会话测试条件超时')
+    await new Promise<void>(resolve => realSetTimeout(resolve, 10))
+  }
+}
 
 const LAB = 'researcher-sandbox-seed'
 
@@ -80,7 +91,8 @@ describe('会话 REST 域（S1，#778）', () => {
   let observedModel: ScriptedChatModel | undefined
   let suggestionGate: Promise<void> | undefined
   let suggestionText = ''
-  let suggestionError = false
+  let suggestionError: Error | undefined
+  let suggestionTransport: ((userText: string, signal: AbortSignal) => Promise<void>) | undefined
   const suggestionConfigurations: unknown[] = []
   const suggestionCalls: Array<{ input: unknown; options: unknown }> = []
   let currentScript: ScriptEntry[]
@@ -145,7 +157,9 @@ describe('会话 REST 域（S1，#778）', () => {
             suggestionCalls.push({ input, options })
             const text = suggestionText
             const signal = (options as { signal?: AbortSignal }).signal
-            await new Promise<void>((resolve, reject) => {
+            const userText = JSON.parse(String((input as BaseMessage[])[1].content)).user as string
+            if (suggestionTransport && signal) await suggestionTransport(userText, signal)
+            else await new Promise<void>((resolve, reject) => {
               const aborted = () => reject(new Error('transport cancelled'))
               signal?.addEventListener('abort', aborted, { once: true })
               void (suggestionGate ?? Promise.resolve()).then(() => {
@@ -153,7 +167,7 @@ describe('会话 REST 域（S1，#778）', () => {
                 resolve()
               })
             })
-            if (suggestionError) throw new Error('sensitive provider failure')
+            if (suggestionError) throw suggestionError
             const message = new AIMessage({ content: text, usage_metadata: { input_tokens: 10, output_tokens: 5, total_tokens: 15 } })
             return { generations: [{ message, text }] }
           }
@@ -217,10 +231,13 @@ describe('会话 REST 域（S1，#778）', () => {
   })
 
   afterEach(async () => {
+    vi.useRealTimers()
+    vi.restoreAllMocks()
     currentScript = []
     suggestionGate = undefined
     suggestionText = ''
-    suggestionError = false
+    suggestionError = undefined
+    suggestionTransport = undefined
     suggestionCalls.length = 0
     suggestionConfigurations.length = 0
     policyTools = undefined
@@ -308,24 +325,203 @@ describe('会话 REST 域（S1，#778）', () => {
     expect((await projection()).body.data.suggestionVersion).toBe(2)
   })
 
-  it('#1037 10秒总预算向模型传输取消，不影响主回答', async () => {
+  it('#1039 生成沿用主回答的模型快照，即使回答期间切换会话模型', async () => {
+    const user = await prisma.user.create({ data: { username: 'snapshot-1039', passwordHash: 'unused', mustChangePassword: false } })
+    await prisma.modelProvider.create({
+      data: {
+        ownerId: user.id, providerId: 'snapshot-provider', presetId: 'openai',
+        modelsJson: JSON.stringify([{ id: 'first-model' }, { id: 'pinned-model' }]),
+      },
+    })
+    const auth = bearer(await signAccessToken(user.id))
+    currentScript = [toolCallAi('snapshot-tool', 'execute', { command: 'hold' }), new AIMessage('正式答复')]
+    const release = holdExec()
+    const created = await request.post('/api/v1/sessions').set(auth).send({})
+    const id = created.body.data.id as string
+    const url = `/api/v1/sessions/${id}`
+    const updateModel = (modelId: string) => request.patch(url).set(auth)
+      .send({ preferredModel: { providerId: 'snapshot-provider', modelId } })
+    try {
+      expect((await updateModel('pinned-model')).body.code).toBe(CODE.OK)
+      const sent = await request.post(`${url}/messages`).set(auth)
+        .set('Idempotency-Key', hexKey(2039)).send({ content: '问题' })
+      expect(sent.body.code).toBe(CODE.OK)
+      await waitFor(() => runService.stateOf(id)?.state === 'running')
+      expect((await updateModel('first-model')).body.code).toBe(CODE.OK)
+      release()
+      await waitFor(() => suggestionCalls.length === 1)
+      expect(suggestionConfigurations).toContainEqual({ maxTokens: 512, model: 'pinned-model' })
+      await waitFor(async () => Boolean(await prisma.llmUsageRecord.findFirst({
+        where: { userId: user.id, sessionId: id, runId: sent.body.data.runId, outputTokens: 5, model: 'pinned-model' },
+      })))
+    } finally {
+      release()
+    }
+  })
+
+  it('#1039 10 秒总预算取消传输且不进入 fallback', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] })
     suggestionGate = new Promise<void>(() => {})
     currentScript = [new AIMessage('已完成的回答')]
     const created = await request.post('/api/v1/sessions').set(bearer(access)).send({ title: '超时建议' })
     const id = created.body.data.id as string
     await request.post(`/api/v1/sessions/${id}/messages`).set(bearer(access))
       .set('Idempotency-Key', hexKey(3037)).send({ content: '问题' })
-    await waitFor(() => suggestionCalls.length === 1)
+    await waitWithFakeClock(() => suggestionCalls.length === 1)
     const signal = (suggestionCalls[0].options as { signal: AbortSignal }).signal
+    await vi.advanceTimersByTimeAsync(9_999)
     expect(signal.aborted).toBe(false)
     expect(runService.stateOf(id)?.state).toBe('completed')
-    await waitFor(() => signal.aborted, 12_000)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(signal.aborted).toBe(true)
+    expect(suggestionCalls).toHaveLength(1)
     const restored = await request.get(`/api/v1/sessions/${id}/messages`).set(bearer(access))
     expect(restored.body.data.nextStepSuggestion).toBeNull()
     expect(restored.body.data.messages.at(-1).content).toBe('已完成的回答')
-  }, 15_000)
+  })
 
-  it.each(['', 'x'.repeat(121), '第一行\n第二行', '**请分析**'])('#1037 空或非法结果不显示且主回复保持原文 (%s)', async text => {
+  it('#1039 fallback 只使用首个端点调用留下的预算', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] })
+    let failPrimary!: () => void
+    suggestionTransport = (_text, signal) => new Promise<void>((_resolve, reject) => {
+      if (suggestionCalls.length === 1) failPrimary = () => reject(Object.assign(new Error('unavailable'), { status: 503 }))
+      else signal.addEventListener('abort', () => reject(new Error('transport cancelled')), { once: true })
+    })
+    currentScript = [new AIMessage('正式答复')]
+    const id = (await request.post('/api/v1/sessions').set(bearer(access)).send({})).body.data.id
+    await request.post(`/api/v1/sessions/${id}/messages`).set(bearer(access))
+      .set('Idempotency-Key', hexKey(3339)).send({ content: '问题' })
+    await waitWithFakeClock(() => Boolean(failPrimary))
+    await vi.advanceTimersByTimeAsync(9_000)
+    failPrimary()
+    await waitWithFakeClock(() => suggestionCalls.length === 2)
+    const signal = (suggestionCalls[1].options as { signal: AbortSignal }).signal
+    await vi.advanceTimersByTimeAsync(999)
+    expect(signal.aborted).toBe(false)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(signal.aborted).toBe(true)
+    expect(suggestionCalls).toHaveLength(2)
+  })
+
+  it.each([429, 500])('#1039 模型故障只记录分类且保留已完成回答 (%s)', async status => {
+    const log = vi.spyOn(console, 'info').mockImplementation(() => {})
+    suggestionError = Object.assign(new Error('sensitive provider failure'), { status })
+    currentScript = [new AIMessage('正式答复')]
+    const id = (await request.post('/api/v1/sessions').set(bearer(access)).send({})).body.data.id
+    const sent = await request.post(`/api/v1/sessions/${id}/messages`).set(bearer(access))
+      .set('Idempotency-Key', hexKey(3939)).send({ content: 'private user text' })
+    const reason = status === 429 ? 'rate_limited' : 'model_error'
+    await waitFor(() => log.mock.calls.some(([, data]) => data?.runId === sent.body.data.runId && data.reason === reason))
+    expect(log).toHaveBeenCalledWith('[next-step]', expect.objectContaining({ sessionId: id, reason, durationMs: expect.any(Number) }))
+    expect(JSON.stringify(log.mock.calls)).not.toMatch(/sensitive provider failure|private user text|正式答复/)
+    for (let i = 0; i < 2; i++) {
+      const history = await request.get(`/api/v1/sessions/${id}/messages`).set(bearer(access))
+      expect(history.body.data.nextStepSuggestion).toBeNull()
+      expect(history.body.data.messages.at(-1).content).toBe('正式答复')
+    }
+    expect(frameEvents(sinkA.frames).filter(event => event.runId === sent.body.data.runId).map(event => event.type))
+      .not.toContain('run.failed')
+    expect(suggestionCalls).toHaveLength(2) // 主端点及既有平台兜底
+  })
+
+  it('#1039 回复写入失败时保持主运行完成，并跳过建议', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    currentScript = [new AIMessage('无法写入的回复')]
+    const id = (await request.post('/api/v1/sessions').set(bearer(access)).send({})).body.data.id
+    const sqlite = new Database(dbPath)
+    sqlite.exec(`CREATE TRIGGER reject_suggestion_test_reply BEFORE INSERT ON session_messages
+      WHEN NEW.role = 'assistant' AND NEW.content = '无法写入的回复'
+      BEGIN SELECT RAISE(ABORT, 'test persistence failure'); END`)
+    try {
+      const sent = await request.post(`/api/v1/sessions/${id}/messages`).set(bearer(access))
+        .set('Idempotency-Key', hexKey(5939)).send({ content: '问题' })
+      expect(sent.body.code).toBe(CODE.OK)
+      await waitFor(() => warn.mock.calls.some(([line]) => String(line).includes(`recordTurn failed: session=${id}`)))
+      const history = await request.get(`/api/v1/sessions/${id}/messages`).set(bearer(access))
+      expect(history.body.data.nextStepSuggestion).toBeNull()
+      expect(history.body.data.messages.map((message: { role: string }) => message.role)).toEqual(['user'])
+      expect(runService.stateOf(id)?.state).toBe('completed')
+      expect(suggestionCalls).toHaveLength(0)
+    } finally {
+      sqlite.exec('DROP TRIGGER reject_suggestion_test_reply')
+      sqlite.close()
+    }
+  })
+
+  it('#1039 认证会话满载时保留每用户最新候选并限制实际在途调用', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] })
+    const log = vi.spyOn(console, 'info').mockImplementation(() => {})
+    const inFlight = new Map<string, () => void>()
+    let peak = 0
+    suggestionTransport = (text, signal) => new Promise<void>((resolve, reject) => {
+      const aborted = () => {
+        inFlight.delete(text)
+        reject(new Error('transport cancelled'))
+      }
+      signal.addEventListener('abort', aborted, { once: true })
+      inFlight.set(text, () => {
+        signal.removeEventListener('abort', aborted)
+        inFlight.delete(text)
+        resolve()
+      })
+      peak = Math.max(peak, inFlight.size)
+    })
+    currentScript = Array.from({ length: 4 }, () => new AIMessage('正式答复'))
+    let key = 10_390
+    const send = async (token: string, content: string) => {
+      const auth = bearer(token)
+      const created = await request.post('/api/v1/sessions').set(auth).send({ title: content })
+      expect(created.body.code).toBe(CODE.OK)
+      const id = created.body.data.id
+      const sent = await request.post(`/api/v1/sessions/${id}/messages`).set(auth)
+        .set('Idempotency-Key', hexKey(key++)).send({ content })
+      expect(sent.body.code).toBe(CODE.OK)
+      await waitWithFakeClock(() => runService.stateOf(id)?.state === 'completed')
+      return { auth, id, runId: sent.body.data.runId as string }
+    }
+    const users = await Promise.all(Array.from({ length: 67 }, async (_, i) => {
+      const user = await prisma.user.create({ data: { username: `load-1039-${i}`, passwordHash: 'unused', mustChangePassword: false } })
+      return signAccessToken(user.id)
+    }))
+    try {
+      await send(access, 'running-owner')
+      await waitWithFakeClock(() => inFlight.has('running-owner'))
+      const replaced = await send(access, 'replaced-owner')
+      await send(access, 'latest-owner')
+      await waitWithFakeClock(() => log.mock.calls.some(([, data]) => data?.runId === replaced.runId && data.reason === 'replaced'))
+      expect([...inFlight.keys()]).toEqual(['running-owner'])
+
+      // 3 个执行槽、63 个等待槽，另一个等待槽已由 latest-owner 占用。
+      for (let i = 0; i < 66; i++) await send(users[i], `load-${i}`)
+      const overflow = await send(users[66], 'overflow')
+      await waitWithFakeClock(() => log.mock.calls.some(([, data]) => data?.runId === overflow.runId && data.reason === 'queue_full'))
+      expect([...inFlight.keys()]).toEqual(['running-owner', 'load-0', 'load-1', 'load-2'])
+      expect(suggestionCalls).toHaveLength(4)
+
+      await vi.advanceTimersByTimeAsync(9_999)
+      inFlight.get('running-owner')!()
+      await waitWithFakeClock(() => inFlight.has('latest-owner'))
+      expect(peak).toBe(4)
+      await vi.advanceTimersByTimeAsync(1)
+      await waitWithFakeClock(() => inFlight.size === 1)
+      expect([...inFlight.keys()]).toEqual(['latest-owner'])
+      expect(log.mock.calls.filter(([, data]) => data?.reason === 'queue_expired')).toHaveLength(63)
+      expect(suggestionCalls).toHaveLength(5)
+      await vi.advanceTimersByTimeAsync(9_998)
+      expect(inFlight.has('latest-owner')).toBe(true)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(inFlight.size).toBe(0)
+
+      const history = await request.get(`/api/v1/sessions/${overflow.id}/messages`).set(overflow.auth)
+      expect(history.body.data.nextStepSuggestion).toBeNull()
+      expect(history.body.data.messages.at(-1).content).toBe('正式答复')
+    } finally {
+      for (const release of inFlight.values()) release()
+      await vi.advanceTimersByTimeAsync(20_000)
+    }
+  }, 30_000)
+
+  it.each(['', 'x'.repeat(121), '第一行\n第二行', '**请分析**', '{"suggestion":"请分析"}', '["请分析"]'])('#1037 空或非法结果不显示且主回复保持原文 (%s)', async text => {
     suggestionText = text
     currentScript = [new AIMessage('正式答复')]
     const created = await request.post('/api/v1/sessions').set(bearer(access)).send({ title: '无建议' })
@@ -425,6 +621,59 @@ describe('会话 REST 域（S1，#778）', () => {
     } finally {
       freshRuns.dispose()
       await reopened.$disconnect()
+    }
+  })
+
+  it('#1039 已完成运行重投时复用回复与已保存提示', async () => {
+    const user = await prisma.user.findUniqueOrThrow({ where: { username: 'sess-user1' } })
+    currentScript = [new AIMessage('正式答复')]
+    suggestionText = '请检查这个答复'
+    const id = (await request.post('/api/v1/sessions').set(bearer(access)).send({})).body.data.id
+    const url = `/api/v1/sessions/${id}/messages`
+    const content = '问题'
+    const sent = await request.post(url).set(bearer(access))
+      .set('Idempotency-Key', hexKey(7139)).send({ content })
+    const project = async () => (await request.get(url).set(bearer(access))).body.data
+    await waitFor(async () => Boolean((await project()).nextStepSuggestion))
+    const before = await project()
+    await runService.execute({
+      kind: 'message', sessionId: id, runId: sent.body.data.runId, ownerId: user.id, username: user.username,
+      content, suggestionVersion: sent.body.data.suggestionVersion, suggestionUserText: content,
+    })
+    expect(await project()).toEqual(before)
+    expect(suggestionCalls).toHaveLength(1)
+  })
+
+  it('#1039 关闭时取消在途建议，控制面重建后读取历史不补跑', async () => {
+    const hub = new StreamHub()
+    const worker = makeRunService(prisma, hub)
+    const service = new SessionService({
+      prisma, hub, runService: worker, dispatch: async cmd => { void worker.execute(cmd).catch(() => {}) },
+    })
+    worker.setRecordTurn(p => service.recordTurn(p))
+    const client = supertest(createApp({ prisma, events: { hub }, sessions: { service } }))
+    const log = vi.spyOn(console, 'info').mockImplementation(() => {})
+    suggestionGate = new Promise<void>(() => {})
+    currentScript = [new AIMessage('关闭前已保存的答复')]
+    const restarted = makeRunService(prisma, hub)
+    const restoredService = new SessionService({ prisma, hub, runService: restarted, dispatch: async () => {} })
+    const restoredClient = supertest(createApp({ prisma, events: { hub }, sessions: { service: restoredService } }))
+    try {
+      const id = (await client.post('/api/v1/sessions').set(bearer(access)).send({})).body.data.id
+      const sent = await client.post(`/api/v1/sessions/${id}/messages`).set(bearer(access))
+        .set('Idempotency-Key', hexKey(7339)).send({ content: '问题' })
+      await waitFor(() => suggestionCalls.length === 1)
+      const signal = (suggestionCalls[0].options as { signal: AbortSignal }).signal
+      worker.dispose()
+      expect(signal.aborted).toBe(true)
+      await waitFor(() => log.mock.calls.some(([, data]) => data?.runId === sent.body.data.runId && data.reason === 'shutdown'))
+      const history = await restoredClient.get(`/api/v1/sessions/${id}/messages`).set(bearer(access))
+      expect(history.body.data.nextStepSuggestion).toBeNull()
+      expect(history.body.data.messages.at(-1).content).toBe('关闭前已保存的答复')
+      expect(suggestionCalls).toHaveLength(1)
+    } finally {
+      worker.dispose()
+      restarted.dispose()
     }
   })
 
@@ -811,6 +1060,7 @@ describe('会话 REST 域（S1，#778）', () => {
     expect((await send('/model prov-1/missing', 0x791)).body.code).toBe(CODE.PROVIDER_NOT_FOUND)
     expect((await send('/model default', 0x792)).body.data.command.model).toBeNull()
     expect(picked.body.data.runId).toBeNull()
+    expect(suggestionCalls).toHaveLength(0)
     // 偏好落定（含 default 重置）恰广播一次
     const modelUpdates = frameEvents(sinkA.frames).filter(e => e.sessionId === sid && e.type === 'session.updated')
     expect(modelUpdates.map(e => e.payload)).toEqual([
@@ -977,6 +1227,8 @@ describe('会话 REST 域（S1，#778）', () => {
       .send({ content: '触发 interrupt' })
     await waitFor(() => runService.stateOf(sid)?.state === 'interrupted')
 
+    expect(suggestionCalls).toHaveLength(0)
+    suggestionText = '请解释审批后得到的结果'
     const pending = await request
       .post(`/api/v1/sessions/${sid}/messages`)
       .set(bearer(access))
@@ -994,6 +1246,13 @@ describe('会话 REST 域（S1，#778）', () => {
 
     const loser = await request.post(`/api/v1/sessions/${sid}/resume`).set(bearer(access)).send({})
     expect(loser.body.code).toBe(CODE.RUN_ALREADY_RESUMED)
+    await waitFor(async () => {
+      const history = await request.get(`/api/v1/sessions/${sid}/messages`).set(bearer(access))
+      return history.body.data.nextStepSuggestion?.text === suggestionText
+    })
+    expect(suggestionCalls).toHaveLength(1)
+    const input = suggestionCalls[0].input as Array<{ content: string }>
+    expect(JSON.parse(input[1].content)).toEqual({ user: '触发 interrupt', answer: '续跑完成。' })
   }, 15_000)
 
   // ---- abort（story 8）----
@@ -1019,6 +1278,7 @@ describe('会话 REST 域（S1，#778）', () => {
 
     const again = await request.post(`/api/v1/sessions/${sid}/abort`).set(bearer(access))
     expect(again.body.code).toBe(CODE.RUN_NOT_ABORTABLE)
+    expect(suggestionCalls).toHaveLength(0)
   }, 15_000)
 
   // ---- 50002 防探测（messages 面同码）----
@@ -1209,6 +1469,8 @@ describe('会话 REST 域（S1，#778）', () => {
     // session.updated{session.title} 广播已出（title 非空即 autoTitle 成功）。
     const updated = frameEvents(sinkA.frames).filter((e) => e.type === 'session.updated' && e.sessionId === sid)
     expect(updated.length).toBeGreaterThan(0)
+    await waitFor(() => runService.stateOf(sid)?.state === 'failed')
+    expect(suggestionCalls).toHaveLength(0)
   })
 
   it('dispatch 失败回滚不留幽灵标题：POST 信封 90000 → DB title 仍空', async () => {

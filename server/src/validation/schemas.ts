@@ -246,8 +246,8 @@ export const publicResourceSearchSchema = z.object({ query: z.string().trim().mi
 
 // #1037：生成输出与持久化/投影共享同一契约；按 Unicode 码点计数，不截短非法输出。
 export const nextStepTextSchema = z.string().trim().refine(text =>
-  Array.from(text).length <= 120 && !/[\r\n\u2028\u2029]/u.test(text) &&
-  !/[`*#<>]/u.test(text) && !/(?:~~|__|(?:^|\s)_[^\r\n]+_(?:$|\s)|!?\[[^\]]*\]\([^)]*\))/u.test(text) && !/^(?:[-+]\s|\d+[.)]\s|下一步(?:建议|提示)?\s*[:：]|["“「])/u.test(text),
+  Array.from(text).length <= 120 && !/[\r\n\u0085\u2028\u2029]/u.test(text) &&
+  !/[`*#<>]/u.test(text) && !/(?:~~|__|(?:^|\s)_[^\r\n]+_(?:$|\s)|!?\[[^\]]*\]\([^)]*\))/u.test(text) && !/^(?:[-+]\s|\d+[.)]\s|[-_]{3,}$|(?:下一步(?:建议|提示)?|建议|提示)\s*[:：]|[\[{"'“‘「『])/u.test(text),
   '下一步提示须为空或不超过120个码点的单行纯文本',
 )
 export const nextStepSuggestionSchema = z.object({

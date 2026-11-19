@@ -32,7 +32,7 @@ import { ConcurrencyGate } from '../src/runner/concurrency'
 import { PrismaCheckpointSaver } from '../src/runner/persistence/prismaCheckpointSaver'
 import { TeammateService } from '../src/runner/teammates/service'
 import { SessionService } from '../src/sessions/service'
-import { fakePrimitives, ScriptedChatModel, toolCallAi } from './runnerFakes'
+import { fakePrimitives, ScriptedChatModel, toolCallAi, isSuggestionInput } from './runnerFakes'
 import { seedUser, waitFor } from './helpers'
 
 const WIKI = 'researcher-wiki-gen-u1'
@@ -75,15 +75,20 @@ class KeyedChatModel extends ScriptedChatModel {
   private positions = new Map<string, number>()
   constructor(
     private readonly replies: Record<string, Reply[]>,
-    private readonly onCall?: (task: string, system: string) => void,
+    private readonly onCall: (task: string, system: string) => void,
+    private readonly suggestions: unknown[],
   ) {
     super([])
   }
   override async _generate(messages: BaseMessage[]) {
+    if (isSuggestionInput(messages)) {
+      this.suggestions.push(JSON.parse(String(messages[1].content)))
+      return { generations: [{ message: new AIMessage(''), text: '' }] }
+    }
     const input = messages.find((m) => m.getType() === 'human')?.content
     const key = typeof input === 'string' ? input : ''
     const system = JSON.stringify(messages.filter((m) => m.getType() === 'system').map((m) => m.content))
-    this.onCall?.(key, system)
+    this.onCall(key, system)
     const position = this.positions.get(key) ?? 0
     this.positions.set(key, position + 1)
     const seq = this.replies[key]
@@ -131,10 +136,11 @@ async function harness(replies: Record<string, Reply[]>, fake: ReturnType<typeof
   }, close: () => {} })
   const gate = new ConcurrencyGate({ globalLimit: 1, loadUserLimit: async () => 1 })
   const teammates = new TeammateService(prisma)
+  const suggestions: unknown[] = []
   const modelCalls: Array<{ task: string; system: string }> = []
   const service = new RunService({
     prisma, hub, gate, teammates, saver: new PrismaCheckpointSaver(prisma),
-    registry: new ProviderRegistry(prisma, { llmApiKey: 'fake', modelFactory: async () => new KeyedChatModel(replies, (task, system) => modelCalls.push({ task, system })) }),
+    registry: new ProviderRegistry(prisma, { llmApiKey: 'fake', modelFactory: async () => new KeyedChatModel(replies, (task, system) => modelCalls.push({ task, system }), suggestions) }),
     primitives: fake.primitives, resolveWikiContainer: () => WIKI,
   })
   const executions: Promise<void>[] = []
@@ -155,7 +161,7 @@ async function harness(replies: Record<string, Reply[]>, fake: ReturnType<typeof
   const created = await request.post('/api/v1/sessions').set(auth).send({ title: 'Wiki gen' })
   const sessionId = created.body.data.id as string
   cleanups.push(async () => { service.dispose(); await prisma.$disconnect() })
-  return { prisma, owner, teammates, service, events, request, auth, sessionId, modelCalls,
+  return { prisma, owner, teammates, service, events, request, auth, sessionId, modelCalls, suggestions,
     settle: async () => { let n = 0; while (n < executions.length) { const current = executions.slice(n); n = executions.length; await Promise.all(current) } } }
 }
 
@@ -210,6 +216,9 @@ describe('#790 wiki-update teammate 全链（S1 · 验收①③）', () => {
     }, fake)
     expect((await h.request.post(`/api/v1/sessions/${h.sessionId}/messages`).set(h.auth).set('Idempotency-Key', 'a'.repeat(32)).send({ content: 'leader' })).body.code).toBe(0)
     await h.settle()
+
+    await waitFor(() => h.suggestions.length === 1)
+    expect(h.suggestions).toEqual([{ user: 'leader', answer: 'Leader done' }])
 
     // kind 持久化 + 治理驱动提示进 teammate 图 system prompt（模型面可见）
     const teammate = (await h.teammates.list(h.sessionId))[0]!

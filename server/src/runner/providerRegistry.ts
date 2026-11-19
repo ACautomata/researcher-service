@@ -19,6 +19,7 @@ import type { BaseChatModel } from '@langchain/core/language_models/chat_models'
 import type { Runnable } from '@langchain/core/runnables'
 import { RunnableBinding } from '@langchain/core/runnables'
 import type { PrismaClient } from '../generated/prisma/client'
+import { trackModelFetch } from './modelTransport'
 import { CODE } from '../codes'
 import { EnvelopeError, fail } from '../envelope'
 import { config } from '../config'
@@ -197,7 +198,7 @@ export class ProviderRegistry {
     this.llmPreset = deps.llmPreset ?? config.llm.preset
     this.llmModel = deps.llmModel ?? config.llm.model
     this.credentialSecret = deps.credentialSecret ?? config.llm.credentialSecret
-    this.fetchImpl = deps.fetchImpl ?? ((...args: Parameters<typeof fetch>) => globalThis.fetch(...args)) as typeof fetch
+    this.fetchImpl = trackModelFetch(deps.fetchImpl ?? ((input, init) => globalThis.fetch(input, init)))
     this.factory = deps.modelFactory ?? defaultFactory
   }
 
